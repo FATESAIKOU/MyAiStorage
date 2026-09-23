@@ -45,7 +45,11 @@ Agora MUST 為每個 Session 提供共通格式的閱讀版，閱讀版 MUST 能
 - **THEN** 原始紀錄回到那個版本，閱讀版隨之重建
 
 ### Requirement: 抹除
-Agora MUST 提供抹除：真正刪除原始紀錄的某一段或整個 Session，連同它的舊版本與衍生物。抹除後 MUST 只留下「誰、何時、為什麼、抹了哪一段」的紀錄，不留任何被抹除的內容。
+Agora MUST 提供抹除：真正刪除原始紀錄的某一段或整個 Session，連同它的舊版本與衍生物。抹除後 MUST 只留下「誰、何時、為什麼、抹了哪一段」的紀錄，不留任何被抹除的內容。抹除 MUST 只能由你本人以管理身分執行；AI 發現不該留存的內容時，只能以改寫遮蔽它（舊版本仍在），並提醒你抹除。
+
+#### Scenario: AI 發現機敏內容
+- **WHEN** 員工在某個 Session 裡發現一把印出來的 token
+- **THEN** 它只能提出改寫把那段遮蔽掉，並提醒你抹除；它沒有能力讓舊版本消失
 
 #### Scenario: 憑證外洩
 - **WHEN** 你發現某個 Session 的工具輸出裡印出了一把 token，並要求抹除那一段
@@ -59,7 +63,7 @@ Agora MUST 預設永久保存所有 Session；抹除是唯一的移除方式，�
 - **THEN** Agora 裡的該 Session 不受影響
 
 ### Requirement: 單一 Session 手動匯入
-Agora MUST 允許把單一個現存的 Session 手動匯入，匯入結果與同步器寫入的 Session 形式相同。
+Agora MUST 允許把單一個現存的 Session 手動匯入，匯入結果與同步器寫入的 Session 形式相同。期 1 的手動匯入 MUST 支援手機 App、opencode 與 Claude Code 三種來源（Claude Code 的自動同步仍屬期 2）。
 
 #### Scenario: 匯入一個舊的 Claude Code Session
 - **WHEN** 你請 AI 把上個月某個 Claude Code Session 匯入 Agora

@@ -77,7 +77,7 @@ Agora 與 Foundry 分成兩個 repo，是依 ADR 0001「要素各自獨立」。
 - **產生者章。** 每個 profile 的收件匣只有它自己寫得進去（D3），所以「項目來自哪個收件匣」就是可信的產生者。寫入者自己填的產生者一律忽略。
 - **改寫與抹除。**
   - 改寫：寫入者把改寫提案放進收件匣，提交流程做成一個新 commit。舊版本留在 git 歷史裡，可以 revert。
-  - 抹除：只有你在 Mac 上用管理憑證執行。步驟是 `git annex drop --force`、`git annex forget`、改寫歷史，然後重新推送 bundle。
+  - 抹除：只有你在 Mac 上用管理憑證執行。步驟是 `git annex drop --force`、`git annex forget`、改寫歷史，然後重新推送 bundle。AI 發現機敏內容時，只能提出改寫把它遮蔽掉，並提醒你抹除。
 - **為什麼放 GitHub Actions：** 它在雲端，跟 AiContainer 無關，符合「不寄居 AiContainer」與「互不為前提」；不用維運常駐機器；而且它是免費方案的一部分。
 
 **替代方案：**
@@ -95,7 +95,8 @@ Agora 與 Foundry 分成兩個 repo，是依 ADR 0001「要素各自獨立」。
 | 提交流程 | 完整的 Drive 權限 | — | Atelier repo 寫入權 |
 | 你（管理） | 你的帳號 | — | 你的帳號 |
 
-- 「MyLinuxPool 證明 profile 歸屬」，實際做法是 **worker 建立時，MyLinuxPool 用 profile 的 `secrets` 注入該 profile 的憑證**。拿到哪組憑證，就等於屬於哪個 profile。刪掉 worker，憑證就跟著消失。profile 本身的憑證可以整組輪替。
+- 「MyLinuxPool 證明 profile 歸屬」，實際做法是 **worker 建立時，MyLinuxPool 用 profile 的 `secrets` 注入該 profile 的憑證**。拿到哪組憑證，就等於屬於哪個 profile。
+- **撤銷的單位是 profile**：刪掉一台 worker，只是拿掉它手上那份憑證；要讓某個 profile 失去存取能力，就整組輪替該 profile 的憑證（spec「MyLinuxPool 證明 profile 歸屬」）。
 - 員工看得到自己的憑證（能跑任意 shell，所以擋不住）。但那組憑證的上限是：在自己的收件匣裡建檔、讀取、觸發提交流程。它碰不到真本，所以毀不掉歷史。
 - 期 1 用長期憑證。改成短效憑證是之後的擴張點。
 
@@ -114,6 +115,8 @@ Agora 與 Foundry 分成兩個 repo，是依 ADR 0001「要素各自獨立」。
   - opencode：在 worker 內定期對有變化的 Session 執行 `opencode export`。worker 刪除前，由 MyLinuxPool 的刪除流程再跑最後一次，並等提交流程完成。
   - 手機 App：由 MyAiEntry 實作，定期上傳變動過的 Session 記錄。上傳時要排除 App 另存的 SSH 私鑰、LLM key、PAT。
 - 上傳重複的內容時，要以內容雜湊判斷為同一份，不產生新 commit（spec「定期同步」）。
+- **Claude Code 轉換器**：期 1 就要做，但只用在單一 Session 手動匯入，Claude Code 的自動同步仍屬期 2。理由是 Claude Code 的 Session 大約 30 天就會被本機自動清除，需要時要能及時救進來。
+- 閱讀版的共通格式要在寫任何轉換器之前先定下來（tasks 2.4），所有轉換器都照同一份格式輸出。
 
 ### D5. 讀取：git 讀者用 clone，手機讀「讀取視圖」
 
@@ -177,4 +180,4 @@ Agora 與 Foundry 分成兩個 repo，是依 ADR 0001「要素各自獨立」。
 ## Open Questions
 
 - 定時提交的頻率，預設每 3 小時。要看實際的 Actions 用量再調，不影響 spec 與任務拆分。
-- 閱讀版的共通格式細節（欄位命名、圖片怎麼表示），在實作轉換器時定，不影響介面。
+- 閱讀版共通格式的細節（欄位命名、圖片怎麼表示）在 tasks 2.4 定案，時間點在寫任何轉換器之前，不影響介面。

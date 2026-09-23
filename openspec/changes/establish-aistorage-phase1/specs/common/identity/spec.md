@@ -12,11 +12,15 @@
 - **THEN** 儲存要素只依該員工所屬的 profile 判斷，職務名稱不影響結果
 
 ### Requirement: MyLinuxPool 證明 profile 歸屬
-執行體屬於哪個 profile MUST 由 MyLinuxPool 的主本證明；儲存要素 MUST NOT 另外維護一份會與 MyLinuxPool 分歧的身分清單。
+執行體屬於哪個 profile MUST 由 MyLinuxPool 證明；儲存要素 MUST NOT 另外維護一份會與 MyLinuxPool 分歧的身分清單。撤銷的單位 SHALL 是 profile：要讓某個 profile 失去存取能力，就整組輪替該 profile 的憑證。
 
 #### Scenario: worker 被刪除
 - **WHEN** 某個 worker 在 MyLinuxPool 被刪除
-- **THEN** 該 worker 先前的身分之後向任何儲存要素認證都會失敗，儲存要素本身不需要做任何額外操作
+- **THEN** 那台 worker 手上的憑證跟著消失；同一個 profile 的其他 worker 不受影響
+
+#### Scenario: 撤銷一個 profile
+- **WHEN** 你懷疑 worker/default 的憑證外洩，輪替了該 profile 的憑證
+- **THEN** 舊憑證向任何儲存要素認證都會失敗，之後新建的 worker 拿到的是新憑證
 
 ### Requirement: 授權由各儲存要素持有
 每個儲存要素 MUST 自行持有「哪個 profile 可以做哪些操作」的授權規則；執行體 MUST 只需要證明自己是誰，不需要知道自己被允許做什麼。

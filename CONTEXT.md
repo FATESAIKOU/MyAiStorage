@@ -4,6 +4,8 @@
 
 ## Language
 
+`_Avoid_` 列的是文件與對話裡不要用的詞。程式、目錄、檔名需要英文識別名時，一律用各詞條「程式識別名」那一行的寫法。
+
 ### 儲存要素
 
 **MyBrain**:
@@ -38,6 +40,8 @@ _Avoid_: index、registry
 **收容產出**:
 沒有自己的家、真本放在 Foundry 儲存實體裡的產出，例如簡報、圖片、影片、一次性報告。
 
+### 共通
+
 **住民**:
 住在某個 AI 應用或 AiContainer 裡、使用 AiStorage 的 AI。手機 App 的住民是秘書，AiContainer 的住民是員工。
 _Avoid_: agent、bot
@@ -64,7 +68,8 @@ _Avoid_: inbox、queue、暫存區
 
 **提交流程**:
 唯一能把收件匣內容寫進 Agora、Foundry、Atelier 真本的角色。它負責驗證、蓋產生者章、轉出閱讀版、跑 judge、更新讀取視圖；同一時間只有一個在跑。
-_Avoid_: committer、ingest job、後端
+_Avoid_: ingest job、後端
+程式識別名：`committer`
 
 **讀取視圖**:
 提交流程每次提交後，以一般檔案發佈的唯讀內容：metadata、閱讀版、產出目錄、搜尋索引。給不能跑 git 的讀者讀，屬於衍生物，可以重建。
@@ -85,7 +90,8 @@ _Avoid_: payload、內文
 
 **職務**:
 Atelier 的組織單位：一組 know / do / judge / dont，加上它的能力需求。秘書交接時指定職務，員工啟動時載入它；多個職務可以共用同一個 profile。比喻上 profile 是部門、職務是部門裡的工作說明。職務不參與授權。
-_Avoid_: 部門、role、agent 定義
+_Avoid_: 部門、agent 定義
+程式識別名：`role`（目錄 `roles/`）
 
 **能力**:
 profile 安裝好、並列在能力清單上的東西，例如某個 MCP server 或瀏覽器。
@@ -114,7 +120,8 @@ _Avoid_: guardrail、權限
 
 **外部副本**:
 不是你寫、或屬於別的系統的 skill，複製進 Atelier 的那一份。它記著出處與版本，定期跟上游比對內容：有落差就提出更新，上游消失就提出汰換。員工只依賴 Atelier，不在執行時去外部取。
-_Avoid_: vendor、fork
+_Avoid_: fork
+程式識別名：`vendor`（目錄 `vendor/`）
 
 ### Session
 
@@ -135,7 +142,7 @@ _Avoid_: raw log、dump
 _Avoid_: 編輯、覆寫
 
 **抹除**:
-真正刪掉原始紀錄的某一段或整個 Session，不留舊內容，只留下誰、何時、為什麼、抹了哪一段的紀錄。用於憑證外洩、私事這類不該留存的內容。
+真正刪掉原始紀錄的某一段或整個 Session，不留舊內容，只留下誰、何時、為什麼、抹了哪一段的紀錄。用於憑證外洩、私事這類不該留存的內容。只有你本人能執行；AI 只能改寫遮蔽並提醒你。
 _Avoid_: 刪除、遮蔽
 
 **閱讀版**:
@@ -154,6 +161,10 @@ Session 的狀態之一：來源應用目前不會再往它追加內容。
 **接續**（Continuation）:
 一種 Session Link：新 Session 從較早 Session 的某個接續點開始承接它的工作。較早的 Session 不受影響，可以照常繼續。
 _Avoid_: handoff、resume、移交
+
+**參考**（Reference）:
+一種 Session Link：新 Session 自己去讀較早 Session 在 Agora 裡的紀錄（或它的摘要）取得資訊；不喚醒任何 AI，也不承接它的工作。
+_Avoid_: 引用、lookup、詢問
 
 **接續點**:
 較早 Session 被接續時所到的位置：持有端發起接續前最後一次同步進 Agora 的位置。新 Session 只承接這個位置之前的內容。
@@ -183,7 +194,3 @@ _Avoid_: project、thread、工作線
 
 **所屬案件**:
 項目 metadata 裡指向某個案件 id 的欄位；不確定時可以空著。
-
-**參考**（Reference）:
-一種 Session Link：新 Session 自己去讀較早 Session 在 Agora 裡的紀錄（或它的摘要）取得資訊；不喚醒任何 AI，也不承接它的工作。
-_Avoid_: 引用、lookup、詢問

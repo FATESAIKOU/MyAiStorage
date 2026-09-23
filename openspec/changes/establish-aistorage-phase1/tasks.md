@@ -10,13 +10,15 @@
 - [ ] 1.6 驗證只有「contents 唯讀＋Actions 寫入」的 fine-grained token：能觸發 workflow_dispatch，不能推 contents，不能修改 workflow 檔案
 - [ ] 1.7 驗證大檔路徑：寫入者上傳以內容雜湊命名的物件、提交流程只登錄雜湊而不轉手內容；同時量測 Actions runner 直接轉手 1 GB 與 3 GB 檔案的耗時與磁碟上限
 - [ ] 1.8 量測一次提交流程的耗時，確認 concurrency group 會讓第二次觸發排隊而不是並行
-- [ ] 1.9 撰寫技術驗證報告（逐項 pass / fail，附證據），交使用者判斷 go / no-go
+- [ ] 1.9 撰寫技術驗證報告（逐項 pass / fail，附證據），並把驗證時建立的實體資源（Drive 資料夾、OAuth client、service account、token、測試 repo，不含秘密的值）記進 `docs/resources.md`，交使用者判斷 go / no-go
 
 ## 2. 共通 schema
 
 - [ ] 2.1 定義共通 metadata 的 JSON Schema：六個必填與可空欄位、擴充欄位的規則；附驗證器與測試（缺少必填欄位時拒絕、不認得的欄位忽略）
 - [ ] 2.2 定義收件匣項目的格式：原始紀錄＋sidecar、改寫提案、Session Link 與交接單、職務修改提案、Foundry 登錄項目；附格式驗證器
 - [ ] 2.3 定義「收件匣 ↔ profile」的對照設定，以及期 1 的三種 profile（worker/default、手機 App、Mac 同步程式）
+- [ ] 2.4 定義閱讀版的共通格式（訊息、工具呼叫、圖片的表示方式），附範例；所有轉換器都照這份格式輸出
+- [ ] 2.5 撰寫跨 repo 介面契約 `docs/contracts/`：給 MyAiEntry 與 MyLinuxPool 的收件匣上傳格式、觸發並等待提交流程的方式（輪詢、逾時、進度）、profile 能力清單的格式、各 profile 要注入的 secrets 名稱；第 8 組工單都以這份為準
 
 ## 3. 提交流程：Agora 路徑
 
@@ -29,7 +31,8 @@
 - [ ] 3.7 處理 Session Link：接續與參考、接續點、交接單；接續 Link 缺少交接單或職務時拒絕
 - [ ] 3.8 更新 Session 狀態（運作中／停止中）
 - [ ] 3.9 處理改寫提案：做成新 commit，並驗證沒有改變任何內容的位置（接續點仍然有效）
-- [ ] 3.10 單一 Session 手動匯入工具：把現存 Session 包成收件匣項目
+- [ ] 3.10 Claude Code 轉換器（只用於手動匯入）：由 Claude Code 的 jsonl 產生閱讀版
+- [ ] 3.11 單一 Session 手動匯入工具：把現存的手機 App、opencode、Claude Code Session 包成收件匣項目
 
 ## 4. 讀取視圖與搜尋
 
@@ -40,9 +43,10 @@
 
 ## 5. 管理操作
 
-- [ ] 5.1 抹除腳本（只限管理憑證），附驗證測試：抹除的內容在目前版本、舊版本、讀取視圖都找不到，並留下抹除紀錄
+- [ ] 5.1 抹除腳本（只限你本人的管理憑證），附驗證測試：抹除的內容在目前版本、舊版本、讀取視圖都找不到，並留下抹除紀錄；確認住民的憑證無法執行抹除
 - [ ] 5.2 回滾腳本：把某個 Session 退回指定版本，閱讀版隨之重建
 - [ ] 5.3 健康檢查：OAuth refresh token 是否有效、Actions 分鐘數用量報告
+- [ ] 5.4 復原手冊與演練：Drive 上的 repo 被刪除時，從任一個 git clone 重建並重新推回 Drive，實際演練一次並記錄步驟
 
 ## 6. Atelier
 
