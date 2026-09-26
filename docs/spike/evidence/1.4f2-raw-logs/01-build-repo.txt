@@ -1,0 +1,14 @@
+git-annex version: 10.20260717-g0c917920c80ab1e8cc3d8f5886537708949e1659
+rclone v1.75.1
+description: [drive]
+type: rclone
+encryption: none
+chunking: none
+=== push 初始版本 ===
+Full remote url: annex::616fdf69-6077-4730-ba09-e7e0553d2f74?encryption=none&type=rclone
+To annex::
+ * [new branch]      main -> main
+=== 摘要 ===
+repo=/work/f2-repo
+prefix=agora-1.4f2/
+url_file=/work/f2-repo.url

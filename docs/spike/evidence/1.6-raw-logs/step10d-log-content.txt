@@ -1,0 +1,12 @@
+== artifact download attempt (no artifacts exist) ==
+no valid artifacts found to download
+artifact_download_rc=0
+== readable log: spike-git-annex run 36230892206 (impl1's) ==
+annex_log_rc=0 bytes=   21781
+== shape scan of downloaded log (counts only) ==
+0
+shape_hits=0
+0
+secret_name_hits=0
+== does log contain file content markers from the repo? (sample counts) ==
+3

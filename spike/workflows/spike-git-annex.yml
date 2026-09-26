@@ -1,0 +1,131 @@
+name: spike-git-annex
+
+# 1.2 的 amd64 runner 半邊與 1.8 的 runner 量測（共用）。
+# - 用與 spike/env/Dockerfile **相同的來源與版本**安裝 git-annex 與 rclone（amd64 分支）。
+# - repo URL 由 repository variable `SPIKE_REPO_URL` 提供（非秘密，內容是 annex:: UUID 與參數）。
+# - rclone conf 由 secret `RCLONE_CONF` 提供，只寫進 runner 的預設路徑，不印出。
+# - workflow_dispatch 只有固定選項輸入，不接受自由字串（不進 shell）。
+on:
+  workflow_dispatch:
+    inputs:
+      op:
+        description: '要做的操作'
+        type: choice
+        options:
+          - clone
+          - commit-push
+        default: clone
+
+concurrency:
+  group: spike-git-annex
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 環境與時間起點
+        run: |
+          echo "RUNNER_ARCH=$(uname -m)"
+          echo "START_UTC=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: 安裝 git-annex（standalone tarball，與 Dockerfile 相同版本與 sha256）
+        run: |
+          set -euo pipefail
+          ARCH=amd64
+          ANNEX_SHA256=a3c9d10ee33a7ace69efeaa8cd6282cfd7444ec797d732cebae12a64efefa18a
+          curl -fsSL "https://downloads.kitenet.net/git-annex/linux/current/git-annex-standalone-${ARCH}.tar.gz" -o /tmp/git-annex.tar.gz
+          echo "${ANNEX_SHA256}  /tmp/git-annex.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/git-annex.tar.gz -C /opt
+          sudo ln -sf /opt/git-annex.linux/git-annex /usr/local/bin/git-annex
+          sudo ln -sf /opt/git-annex.linux/git-annex-shell /usr/local/bin/git-annex-shell
+          sudo ln -sf /opt/git-annex.linux/git-remote-annex /usr/local/bin/git-remote-annex
+          sudo sed -i 's/^GIT_ANNEX_PACKAGE_INSTALL=$/GIT_ANNEX_PACKAGE_INSTALL=1/' /opt/git-annex.linux/runshell
+          sudo grep -qx 'GIT_ANNEX_PACKAGE_INSTALL=1' /opt/git-annex.linux/runshell
+          echo "--- 版本 ---"
+          git annex version | sed -n 1p
+          command -v git-remote-annex
+          git --version
+
+      - name: 安裝 rclone（官方 zip，與 Dockerfile 相同版本與 sha256）
+        run: |
+          set -euo pipefail
+          RCLONE_VERSION=1.75.1
+          RCLONE_SHA256=982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab
+          curl -fsSL "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-amd64.zip" -o /tmp/rclone.zip
+          echo "${RCLONE_SHA256}  /tmp/rclone.zip" | sha256sum -c -
+          unzip -q /tmp/rclone.zip -d /tmp
+          sudo install -m 0755 "/tmp/rclone-v${RCLONE_VERSION}-linux-amd64/rclone" /usr/local/bin/rclone
+          echo "--- 版本 ---"
+          rclone version | sed -n 1p
+
+      - name: 寫入 rclone conf（從 secret，不印出）
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/rclone"
+          umask 077
+          printf '%s' "$RCLONE_CONF" > "$HOME/.config/rclone/rclone.conf"
+          chmod 600 "$HOME/.config/rclone/rclone.conf"
+          echo "conf 已寫入（$HOME/.config/rclone/rclone.conf）；不印內容"
+          rclone lsf gdrive: >/dev/null && echo "rclone 列出 repo 根目錄：ok"
+
+      - name: git 身分
+        run: |
+          git config --global user.email 'spike@aistorage.invalid'
+          git config --global user.name 'aistorage-spike-runner'
+
+      - name: Clone（歷史）與 annex get（內容）分開計時
+        env:
+          SPIKE_REPO_URL: ${{ vars.SPIKE_REPO_URL }}
+        run: |
+          set -euo pipefail
+          [ -n "$SPIKE_REPO_URL" ] || { echo "SPIKE_REPO_URL 未設"; exit 1; }
+          t0=$(date +%s%3N)
+          git clone -b main "$SPIKE_REPO_URL" /tmp/wt
+          t1=$(date +%s%3N)
+          echo "clone（含 git 歷史與 GITBUNDLE 取回）：$((t1 - t0)) ms"
+          echo "clone_ms=$((t1 - t0))" >> "$GITHUB_STEP_SUMMARY"
+          git -C /tmp/wt log --oneline | sed -n 1,3p
+          echo "commit 數：$(git -C /tmp/wt rev-list --all --count)"
+          (cd /tmp/wt && git annex init runner >/dev/null 2>&1 || true)
+          t2=$(date +%s%3N)
+          git -C /tmp/wt annex get . || true
+          t3=$(date +%s%3N)
+          echo "annex get（annex 物件內容）：$((t3 - t2)) ms"
+          echo "annex_get_ms=$((t3 - t2))" >> "$GITHUB_STEP_SUMMARY"
+          echo "工作樹檔案 sha256（前 5 個大檔）："
+          find /tmp/wt -maxdepth 2 -type f -not -path '*/.git/*' -size +100k | head -5 | while read -r f; do
+            sha256sum "$f"
+          done
+
+      - name: Commit + push（量測 push 耗時）
+        if: inputs.op == 'commit-push'
+        env:
+          SPIKE_REPO_URL: ${{ vars.SPIKE_REPO_URL }}
+        run: |
+          set -euo pipefail
+          cd /tmp/wt
+          echo "runner $(date -u +%Y-%m-%dT%H:%M:%SZ) $(git rev-parse --short HEAD)" > runner-push.txt
+          git add runner-push.txt
+          git commit -qm "runner push $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          new_head=$(git rev-parse HEAD)
+          t0=$(date +%s%3N)
+          git push origin main git-annex
+          t1=$(date +%s%3N)
+          echo "push：$((t1 - t0)) ms"
+          echo "push_ms=$((t1 - t0))" >> "$GITHUB_STEP_SUMMARY"
+          # 驗證真的推上去了（防靜默失敗：exit 0 但 remote 沒動）
+          remote_head=$(git ls-remote origin refs/heads/main | cut -f1)
+          echo "local HEAD=$new_head remote main=$remote_head"
+          if [ "$new_head" != "$remote_head" ]; then
+            echo "::error::push 靜默失敗：remote main 沒有前進"
+            exit 1
+          fi
+          git log --oneline | sed -n 1,2p
+
+      - name: 時間終點
+        if: always()
+        run: echo "END_UTC=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" | tee -a "$GITHUB_STEP_SUMMARY"

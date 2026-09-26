@@ -1,0 +1,25 @@
+### SA (profile reader credential) lists SPIKE root and the 1.2 repo folder content
+op=list-children
+target=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj
+http=200
+count=10
+file={"id": "19pKJXiujmoizO2SjQFaX0YhWc-bcFH2z", "mimeType": "application/vnd.google-apps.folder", "name": "agora-attack2"}
+file={"id": "1TiT2Y09Ao9w_9mClg5AfM6hm6-qxRjyd", "mimeType": "application/vnd.google-apps.folder", "name": "agora-attack2"}
+file={"id": "1pZE72v1pyHgnKq3tbmbDb3DFezCqE4Hn", "mimeType": "application/vnd.google-apps.folder", "name": "agora-basic"}
+file={"id": "1aT4CTgDE8gUN62Y5s9G-UT9OZ6laMhP0", "mimeType": "application/vnd.google-apps.folder", "name": "readview"}
+file={"id": "1CF9Is2AjkmoI728gz3gUana9s3xGGjTT", "md5Checksum": "426d77443f235334ff20f2b0249a5e85", "mimeType": "text/plain", "name": "committer-owned.txt", "size": "25"}
+file={"id": "1rq-KFEYNjGI6sa7h8wA4swOLYo4_nJu6", "md5Checksum": "8fd1be067c3a4077751af2cf73ce6cea", "mimeType": "text/plain", "name": "c-provenance-e20985.txt", "size": "19"}
+file={"id": "13Tj__1eJrBAiH9660-XBn_sCQmOE2dZt", "md5Checksum": "ac80f9624f201f8cdd9435e077799e79", "mimeType": "text/plain", "name": "committer-owned.txt", "size": "26"}
+file={"id": "1NS5ezXijgohjzXJv4oQnZCJStRCCiWDa", "mimeType": "application/vnd.google-apps.folder", "name": "c-folder-into-spike"}
+file={"id": "16s0_jlpueOguhCGUcL91TaXJdWQs57OE", "md5Checksum": "17fae4227f97d0c64d8429dd905e8583", "mimeType": "text/plain", "name": "c-into-spike.txt", "size": "12"}
+file={"id": "1Znm_JQhWdZ5riHqPQlXNbYFwb8YRj1ep", "mimeType": "application/vnd.google-apps.folder", "name": "inbox-host"}
+### SA lists agora-basic (repo prefix folder of 1.2) -- sees GITMANIFEST/GITBUNDLE names?
+op=list-children
+target=1uUr1VmWo07xJM58L-hz5GxwEjBsmLnpy
+http=200
+count=0
+### SA reads the real GITMANIFEST (reveals UUID + bundle name)?
+op=list-children
+target=1uUr1VmWo07xJM58L-hz5GxwEjBsmLnpy
+http=200
+count=0

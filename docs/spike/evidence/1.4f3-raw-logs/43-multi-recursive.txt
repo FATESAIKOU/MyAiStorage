@@ -1,0 +1,47 @@
+== M2: snapshot multi repo (inner folder) ==
+snapshot folder=1Su10xF22tniML94RYAVtOlX4hKs7pRJB manifests=2 bundles=2 annex=0 others=0 out=/tmp/impl2-multi-snap.json
+  manifest id=1v5gmfe4xXp4p9tcvt1MssAVQ9QqZKHbO name=GITMANIFEST--7d4f0470-03b5-4f9e-88db-275a83124467.bak sha=b20451b9370359da parsed=True valid=True reasons=[]
+  manifest id=1ARjDlka37JHgHwRc8F4oFF0QZAQVyu2r name=GITMANIFEST--7d4f0470-03b5-4f9e-88db-275a83124467 sha=b20451b9370359da parsed=True valid=True reasons=[]
+== M2: C creates a nested subfolder with a file inside (recursive case) ==
+http=200
+file_id=1JzBcdwtAdiDc_RIEoP3emXy0wqFnj_W0
+== create pin for multi repo ==
+    raise JSONDecodeError("Extra data", s, end)
+json.decoder.JSONDecodeError: Extra data: line 2 column 1 (char 3)
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/impl2-multi-replay.json'
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/impl2-multi-promote.json'
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/impl2-multi-promote.json'
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/impl2-multi-promote.json'
+Traceback (most recent call last):
+  File "/Users/fatesaikou/.herdr/worktrees/MyAiStorage/phase1-spike/spike/probe/f3_pin.py", line 101, in <module>
+    main()
+  File "/Users/fatesaikou/.herdr/worktrees/MyAiStorage/phase1-spike/spike/probe/f3_pin.py", line 85, in main
+    "manifest_bundles": json.loads(args.bundles_json),
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/fatesaikou/.asdf/installs/python/3.12.3/lib/python3.12/json/__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/fatesaikou/.asdf/installs/python/3.12.3/lib/python3.12/json/decoder.py", line 337, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/fatesaikou/.asdf/installs/python/3.12.3/lib/python3.12/json/decoder.py", line 355, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+== M2: recursive clean of multi repo with nested c-nested/ folder ==
+op=clean folder=1Su10xF22tniML94RYAVtOlX4hKs7pRJB trusted_manifest=1 trusted_bundles=2
+kept_count=4 moved_count=1 move_failures=0
+  [KEEP] /GITMANIFEST--7d4f0470-03b5-4f9e-88db-275a83124467.bak id=1v5gmfe4xXp4p9tcvt1MssAVQ9QqZKHbO (manifest-內容相符)
+  [KEEP] /GITMANIFEST--7d4f0470-03b5-4f9e-88db-275a83124467 id=1ARjDlka37JHgHwRc8F4oFF0QZAQVyu2r (manifest-內容相符)
+  [KEEP] /GITBUNDLE-s1284--7d4f0470-03b5-4f9e-88db-275a83124467-b713dfe65595c2b28d613b7932daeb19a3b2954cb97748083b53347e8a81341a id=1bEWbwovyE5SNIiAAn2uT1lS8BbuzLPny (bundle-被引用且雜湊相符)
+  [KEEP] /GITBUNDLE-s400--7d4f0470-03b5-4f9e-88db-275a83124467-a8c65fffa2d97ab534cdf862005658d676ec36daa5c92a541a13ef945a89d8a5 id=1pqoXTFiyYdUNqjRcLi_Acbdv2sN905IF (bundle-被引用且雜湊相符)
+  [moved] /c-nested/ id=1JzBcdwtAdiDc_RIEoP3emXy0wqFnj_W0 (subfolder-非可信結構（含子樹）)
+CLEAN-OK
+clean_rc=0

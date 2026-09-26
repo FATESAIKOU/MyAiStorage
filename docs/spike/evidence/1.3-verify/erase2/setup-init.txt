@@ -1,0 +1,20 @@
+  Detected a filesystem without fifo support.
+  Disabling ssh connection caching.
+initremote drive ok
+(recording state in git...)
+=== 確認 URL 由 --with-url 記進 git config ===
+uuid=47e51bd2-e94b-4782-bdd4-880756200a1c
+=== 確認 remote 參數（不印秘密） ===
+uuid: 47e51bd2-e94b-4782-bdd4-880756200a1c
+description: [drive]
+type: rclone
+encryption: none
+chunking: none
+=== push 初始版本 ===
+Full remote url: annex::47e51bd2-e94b-4782-bdd4-880756200a1c?encryption=none&type=rclone
+To annex::
+ * [new branch]      main -> main
+=== 摘要 ===
+repo=/work/e2
+prefix=agora-erase2
+url_file=/work/e2.url

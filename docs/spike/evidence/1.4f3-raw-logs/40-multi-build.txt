@@ -1,0 +1,8 @@
+== M2: multi-level prefix agora-1.4f3multi/inner/ ==
+repo=/work/multi-repo
+prefix=agora-1.4f3multi/inner/
+url_file=/work/multi-repo.url
+To annex::
+ * [new branch]      git-annex -> git-annex
+HEAD=e33bf93062b9696d0155a03eba396829d3ecbf05
+GITANNEX=4fd60f550a66e360e1453d0efa8d17cfcf4e32c0

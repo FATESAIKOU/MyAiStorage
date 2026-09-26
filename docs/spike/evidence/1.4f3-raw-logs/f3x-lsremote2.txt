@@ -1,0 +1,5 @@
+=== git ls-remote (from inside repo) ===
+5950b3c272e4c0dad2793e0b833e652cecfe27b1	refs/heads/main
+=== git ls-remote drive (the configured remote) ===
+Full remote url: annex::616fdf69-6077-4730-ba09-e7e0553d2f74?encryption=none&type=rclone
+5950b3c272e4c0dad2793e0b833e652cecfe27b1	refs/heads/main

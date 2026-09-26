@@ -1,0 +1,38 @@
+== H1(b): next round prepare (injection present, pending late-recorded) ==
+== parents ==
+level=agora-1.4f3 parent=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj count=1 expected_id=1S7XOdRUH4SAwspZvAZDKl0BodFtoTeaZ
+  [EXPECTED] id=1S7XOdRUH4SAwspZvAZDKl0BodFtoTeaZ
+PARENTS-OK
+== settle pending ==
+settle: 發現 pending（main=ca077e5b3bba1a46df2d0b491e00e138bfb9b9f6）
+snapshot folder=1S7XOdRUH4SAwspZvAZDKl0BodFtoTeaZ manifests=3 bundles=5 annex=1 others=0 out=/Users/fatesaikou/.local/share/aistorage-spike/work/oc14f3/snapshot.json
+  manifest id=1TnNkxoGV3tUylPcMaoGOLpiaBOncXOWN name=GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 sha=0c199d8719464525 parsed=True valid=True reasons=[]
+  manifest id=1aOl0P79HPpdwF1DTRBibaqEr2fc-9WqR name=GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 sha=81aad756d6a47016 parsed=True valid=True reasons=[]
+  manifest id=1vFJFYzOOpZCULbs5IkjpkQzFw5uOLQaV name=GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922.bak sha=81aad756d6a47016 parsed=True valid=True reasons=[]
+candidate id=1TnNkxoGV3tUylPcMaoGOLpiaBOncXOWN name=GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 ok=False refs={"refs/heads/git-annex": "c3df98ae0187f1ca3651e76fb40d3f2a0991ce83", "refs/heads/main": "c41abe73b8b4d15d9fc4f18ec4c43709d9e30456"}
+  problem: 重放 refs 不符：['refs/heads/git-annex', 'refs/heads/main'] != ['refs/heads/git-annex', 'refs/heads/main']
+candidate id=1aOl0P79HPpdwF1DTRBibaqEr2fc-9WqR name=GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 ok=True refs={"refs/heads/git-annex": "a51d0562232911bc9e6283b194fcd4df1f1b82a3", "refs/heads/main": "ca077e5b3bba1a46df2d0b491e00e138bfb9b9f6"}
+candidate id=1vFJFYzOOpZCULbs5IkjpkQzFw5uOLQaV name=GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922.bak skipped (bak)
+passing_count=1 distinct_passing_sha=1
+REPLAY-UNIQUE-PASS
+result_written=/Users/fatesaikou/.local/share/aistorage-spike/work/oc14f3/settle-replay-result.json
+settle: pending 的 refs 可由遠端內容唯一重放 → 轉正（自動恢復）
+pin_promoted=/Users/fatesaikou/.local/share/aistorage-spike/work/oc14f3/pin.json main=ca077e5b3bba1a46df2d0b491e00e138bfb9b9f6 git-annex=a51d0562232911bc9e6283b194fcd4df1f1b82a3 manifest_sha=81aad756d6a47016… bundles=4 annex_objects=1
+== clean ==
+op=clean folder=1S7XOdRUH4SAwspZvAZDKl0BodFtoTeaZ trusted_manifest=2 trusted_bundles=4
+kept_count=7 moved_count=2 move_failures=0
+  [KEEP] /GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922.bak id=1vFJFYzOOpZCULbs5IkjpkQzFw5uOLQaV (manifest-內容相符)
+  [KEEP] /GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 id=1aOl0P79HPpdwF1DTRBibaqEr2fc-9WqR (manifest-內容相符)
+  [KEEP] /GITBUNDLE-s531--c2febd2f-f053-4012-8b0e-fa932e763922-518e6b0b0a88fe28f1e6daaa16ed74c2d3f3f276aeb676d5767a75f39f695090 id=1TeuYw1NS0pCItv-PcQxa-J8HO2m7uwPY (bundle-被引用且雜湊相符)
+  [KEEP] /GITBUNDLE-s521--c2febd2f-f053-4012-8b0e-fa932e763922-e1f9976dc980bae931e7b5b0ff00a1ab9561e01739971420311b5f8af82d4f4b id=1ECIAVBnsax2Db3uAVQkzdnVMJa6PZp6V (bundle-被引用且雜湊相符)
+  [KEEP] /GITBUNDLE-s2679--c2febd2f-f053-4012-8b0e-fa932e763922-fea4a9a31d7b24d5a6ab2a11f501a2300fa05f31e9a05e4ea312a3bbb628a8a6 id=1IXQUQ9-4MN98zzzLeJUtTvvFJTmR3CJm (bundle-被引用且雜湊相符)
+  [KEEP] /SHA256E-s204800--cda04a975f86da471071ffa0587c2177a2e5a99c3196bae13e9c179a0817cfaf.bin id=1cXz9056-pKjMBaBtrN-jeloOhfQiU-LP (annex-object-結構有效)
+  [KEEP] /GITBUNDLE-s389--c2febd2f-f053-4012-8b0e-fa932e763922-1a9eb385d331ee885f24606e14fb42731570bc701a516949c8d78056e9c3d504 id=1LwSZkzKpGBkiROKwUfLHVWHRAa4g1IpV (bundle-被引用且雜湊相符)
+  [moved] /GITBUNDLE-s2289--c2febd2f-f053-4012-8b0e-fa932e763922-c344e4d5ee9e0f9be83882acc461be247c536aafba0a92b7575b32a37736758d id=1Yeqt338U629nC_ngywTb5mFD-HkSN_st (bundle-未被引用或雜湊不符)
+  [moved] /GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 id=1TnNkxoGV3tUylPcMaoGOLpiaBOncXOWN (manifest-內容不符)
+CLEAN-OK
+== verify vs promoted ==
+verify: refs={"refs/heads/git-annex": "a51d0562232911bc9e6283b194fcd4df1f1b82a3", "refs/heads/main": "ca077e5b3bba1a46df2d0b491e00e138bfb9b9f6"}
+verify: manifest_sha256=81aad756d6a47016… bundles=4
+prepare: OK
+prepare_rc=0

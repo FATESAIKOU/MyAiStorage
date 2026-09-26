@@ -1,0 +1,151 @@
+commit	Set up job	﻿2026-09-26T16:47:55.8256881Z Current runner version: '2.337.0'
+commit	Set up job	2026-09-26T16:47:55.8295800Z ##[group]Runner Image Provisioner
+commit	Set up job	2026-09-26T16:47:55.8297390Z Hosted Compute Agent
+commit	Set up job	2026-09-26T16:47:55.8298454Z Version: 20260828.587
+commit	Set up job	2026-09-26T16:47:55.8299511Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+commit	Set up job	2026-09-26T16:47:55.8300845Z Build Date: 2026-08-28T16:44:25Z
+commit	Set up job	2026-09-26T16:47:55.8302085Z Worker ID: {7ade27a0-7b80-4a61-9906-891289e30096}
+commit	Set up job	2026-09-26T16:47:55.8303887Z Azure Region: westcentralus
+commit	Set up job	2026-09-26T16:47:55.8304940Z ##[endgroup]
+commit	Set up job	2026-09-26T16:47:55.8307158Z ##[group]Operating System
+commit	Set up job	2026-09-26T16:47:55.8308354Z Ubuntu
+commit	Set up job	2026-09-26T16:47:55.8309765Z 24.04.5
+commit	Set up job	2026-09-26T16:47:55.8310729Z LTS
+commit	Set up job	2026-09-26T16:47:55.8311756Z ##[endgroup]
+commit	Set up job	2026-09-26T16:47:55.8312867Z ##[group]Runner Image
+commit	Set up job	2026-09-26T16:47:55.8314437Z Image: ubuntu-24.04
+commit	Set up job	2026-09-26T16:47:55.8315610Z Version: 20260920.314.1
+commit	Set up job	2026-09-26T16:47:55.8317335Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260920.314/images/ubuntu/Ubuntu2404-Readme.md
+commit	Set up job	2026-09-26T16:47:55.8320005Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260920.314
+commit	Set up job	2026-09-26T16:47:55.8321654Z ##[endgroup]
+commit	Set up job	2026-09-26T16:47:55.8323950Z ##[group]GITHUB_TOKEN Permissions
+commit	Set up job	2026-09-26T16:47:55.8327227Z Contents: read
+commit	Set up job	2026-09-26T16:47:55.8328275Z Metadata: read
+commit	Set up job	2026-09-26T16:47:55.8329210Z Packages: read
+commit	Set up job	2026-09-26T16:47:55.8330177Z ##[endgroup]
+commit	Set up job	2026-09-26T16:47:55.8333200Z Secret source: Actions
+commit	Set up job	2026-09-26T16:47:55.8335124Z Cache mode: write
+commit	Set up job	2026-09-26T16:47:55.8336937Z Prepare workflow directory
+commit	Set up job	2026-09-26T16:47:55.9521858Z Prepare all required actions
+commit	Set up job	2026-09-26T16:47:55.9676890Z Getting action download info
+commit	Set up job	2026-09-26T16:47:56.2808624Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+commit	Set up job	2026-09-26T16:47:57.5718576Z Complete job name: commit
+commit	Checkout（拿 inbox_probe.py）	﻿2026-09-26T16:47:57.6628731Z ##[group]Run actions/checkout@v4
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6630469Z with:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6631758Z   repository: FATESAIKOU/aistorage-spike
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6642225Z   token: ***
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6643741Z   ssh-strict: true
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6645062Z   ssh-user: git
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6646331Z   persist-credentials: true
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6647701Z   clean: true
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6648937Z   sparse-checkout-cone-mode: true
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6650333Z   fetch-depth: 1
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6651579Z   fetch-tags: false
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6652825Z   show-progress: true
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6654248Z   lfs: false
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6655420Z   submodules: false
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6656771Z   set-safe-directory: true
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6658131Z   allow-unsafe-pr-checkout: false
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.6660262Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.7752782Z Syncing repository: FATESAIKOU/aistorage-spike
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.7758360Z ##[group]Getting Git version info
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.7761178Z Working directory is '/home/runner/work/aistorage-spike/aistorage-spike'
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.7777542Z [command]/usr/bin/git version
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.7844887Z git version 2.55.0
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.7872413Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.7886388Z Temporarily overriding HOME='/home/runner/work/_temp/d20698d8-ad76-447b-9dc4-bf269f0bfb7f' before making global git config changes
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.7891718Z Adding repository directory to the temporary git global config as a safe directory
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.7897913Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/aistorage-spike/aistorage-spike
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.7953230Z Deleting the contents of '/home/runner/work/aistorage-spike/aistorage-spike'
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.7970943Z ##[group]Initializing the repository
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.7975929Z [command]/usr/bin/git init /home/runner/work/aistorage-spike/aistorage-spike
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8107069Z hint: Using 'master' as the name for the initial branch. This default branch name
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8112392Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8116216Z hint: to use in all of your new repositories, which will suppress this warning,
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8119519Z hint: call:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8121097Z hint:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8123068Z hint: 	git config --global init.defaultBranch <name>
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8125396Z hint:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8127491Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8131373Z hint: 'development'. The just-created branch can be renamed via this command:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8134102Z hint:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8135732Z hint: 	git branch -m <name>
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8137510Z hint:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8139796Z hint: Disable this message with "git config set advice.defaultBranchName false"
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8143476Z Initialized empty Git repository in /home/runner/work/aistorage-spike/aistorage-spike/.git/
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8149226Z [command]/usr/bin/git remote add origin https://github.com/FATESAIKOU/aistorage-spike
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8186172Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8189672Z ##[group]Disabling automatic garbage collection
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8192440Z [command]/usr/bin/git config --local gc.auto 0
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8225970Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8228931Z ##[group]Setting up auth
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8231823Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8265289Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8697862Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.8742169Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.9075747Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.9179805Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.9295626Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.9334453Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.9337649Z ##[group]Fetching the repository
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:57.9345704Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +549d85619931c6dd92bbcc78ffada5a9da6e2198:refs/remotes/origin/main
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:58.3405244Z From https://github.com/FATESAIKOU/aistorage-spike
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:58.3409123Z  * [new ref]         549d85619931c6dd92bbcc78ffada5a9da6e2198 -> origin/main
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:58.3419057Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:58.3422268Z ##[group]Determining the checkout info
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:58.3426578Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:58.3428974Z [command]/usr/bin/git sparse-checkout disable
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:58.3473164Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:58.3508505Z ##[group]Checking out the ref
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:58.3511600Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:58.3562336Z Switched to a new branch 'main'
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:58.3571329Z branch 'main' set up to track 'origin/main'.
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:58.3578494Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:58.3622268Z [command]/usr/bin/git log -1 --format=%H
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:47:58.3645179Z 549d85619931c6dd92bbcc78ffada5a9da6e2198
+commit	時間起點	﻿2026-09-26T16:47:58.3904666Z ##[group]Run echo "START_UTC=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" | tee -a "$GITHUB_STEP_SUMMARY"
+commit	時間起點	2026-09-26T16:47:58.3907429Z ^[[36;1mecho "START_UTC=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	時間起點	2026-09-26T16:47:58.4090827Z shell: /usr/bin/bash -e {0}
+commit	時間起點	2026-09-26T16:47:58.4092265Z ##[endgroup]
+commit	時間起點	2026-09-26T16:47:58.4214178Z START_UTC=2026-09-26T16:47:58.420Z
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	﻿2026-09-26T16:47:58.4331518Z ##[group]Run set -euo pipefail
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:47:58.4333716Z ^[[36;1mset -euo pipefail^[[0m
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:47:58.4335187Z ^[[36;1mpython3 spike/inbox_probe.py > /tmp/inbox.txt^[[0m
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:47:58.4336803Z ^[[36;1mcount="$(head -1 /tmp/inbox.txt)"^[[0m
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:47:58.4338363Z ^[[36;1mecho "count=$count" >> "$GITHUB_OUTPUT"^[[0m
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:47:58.4340032Z ^[[36;1mecho "收件匣檔案數：$count" | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:47:58.4341997Z ^[[36;1mtail -n +2 /tmp/inbox.txt | sed 's/^/  - /' | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:47:58.4387620Z shell: /usr/bin/bash -e {0}
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:47:58.4388990Z env:
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:47:58.4398981Z   RCLONE_CONF: ***
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:47:58.4400461Z   INBOX_ID: 173O-NBiv3iFygsV4IDQj7Zjcba5A4_K7
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:47:58.4401948Z ##[endgroup]
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:47:58.8418329Z 收件匣檔案數：0
+commit	空收件匣 → 不裝工具、不 clone（計費到此為止）	﻿2026-09-26T16:47:58.8577612Z ##[group]Run echo "EMPTY: 不 clone、不安裝工具" | tee -a "$GITHUB_STEP_SUMMARY"
+commit	空收件匣 → 不裝工具、不 clone（計費到此為止）	2026-09-26T16:47:58.8578841Z ^[[36;1mecho "EMPTY: 不 clone、不安裝工具" | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	空收件匣 → 不裝工具、不 clone（計費到此為止）	2026-09-26T16:47:58.8579565Z ^[[36;1mecho "EMPTY_UTC=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	空收件匣 → 不裝工具、不 clone（計費到此為止）	2026-09-26T16:47:58.8618750Z shell: /usr/bin/bash -e {0}
+commit	空收件匣 → 不裝工具、不 clone（計費到此為止）	2026-09-26T16:47:58.8619346Z ##[endgroup]
+commit	空收件匣 → 不裝工具、不 clone（計費到此為止）	2026-09-26T16:47:58.8687495Z EMPTY: 不 clone、不安裝工具
+commit	空收件匣 → 不裝工具、不 clone（計費到此為止）	2026-09-26T16:47:58.8704261Z EMPTY_UTC=2026-09-26T16:47:58.870Z
+commit	時間終點與計費參考	﻿2026-09-26T16:47:58.8821413Z ##[group]Run echo "END_UTC=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" | tee -a "$GITHUB_STEP_SUMMARY"
+commit	時間終點與計費參考	2026-09-26T16:47:58.8822233Z ^[[36;1mecho "END_UTC=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	時間終點與計費參考	2026-09-26T16:47:58.8856994Z shell: /usr/bin/bash -e {0}
+commit	時間終點與計費參考	2026-09-26T16:47:58.8857619Z ##[endgroup]
+commit	時間終點與計費參考	2026-09-26T16:47:58.8929251Z END_UTC=2026-09-26T16:47:58.892Z
+commit	Post Checkout（拿 inbox_probe.py）	﻿2026-09-26T16:47:58.9069966Z Post job cleanup.
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:47:58.9965240Z [command]/usr/bin/git version
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:47:59.0003081Z git version 2.55.0
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:47:59.0041278Z Temporarily overriding HOME='/home/runner/work/_temp/eeec1d04-0a85-4d03-82bd-487b4ed25962' before making global git config changes
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:47:59.0043475Z Adding repository directory to the temporary git global config as a safe directory
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:47:59.0045892Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/aistorage-spike/aistorage-spike
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:47:59.0089030Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:47:59.0125884Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:47:59.0325131Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:47:59.0348932Z http.https://github.com/.extraheader
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:47:59.0360365Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:47:59.0397222Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:47:59.0582014Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:47:59.0614983Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+commit	Complete job	﻿2026-09-26T16:47:59.0990718Z Cleaning up orphan processes
+commit	Complete job	2026-09-26T16:47:59.1232645Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

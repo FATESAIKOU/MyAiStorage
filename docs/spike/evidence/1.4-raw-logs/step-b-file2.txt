@@ -1,0 +1,13 @@
+### fresh B file b-own2.txt + b-inbox.txt in inbox-b
+op=create-file
+name=b-own2.txt
+parent=1_F3u9VqO3BEGrwo7-Iw9Hnt2VEUFo1o7
+http=200
+file_id=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+md5=89bbdbb6a1b2e66da9e9b847b92b4f85
+op=create-file
+name=b-inbox.txt
+parent=1DxLZShmbp0oDFMDmf1Ym3ZbZMBIKe8-r
+http=200
+file_id=1MC9NB1N9cp8_Ldgf1NUc_fuE0TGnuGjM
+md5=8c161b01d2e70a58d1f15f72a7a147e6

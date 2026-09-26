@@ -1,0 +1,13 @@
+=== git ls-remote annex:: remote (f2) ===
+git-remote-annex: Not in a git repository.
+
+=== local repo refs ===
+06f9e4d31139ff6bde0e7202264e3932c456341b refs/annex/last-index
+1382c0f4a28ced4385a58f3573b4e5e798eab216 refs/heads/git-annex
+5950b3c272e4c0dad2793e0b833e652cecfe27b1 refs/heads/main
+5950b3c272e4c0dad2793e0b833e652cecfe27b1 refs/namespaces/git-remote-annex/616fdf69-6077-4730-ba09-e7e0553d2f74/refs/heads/main
+5950b3c272e4c0dad2793e0b833e652cecfe27b1 refs/remotes/drive/main
+=== push both refs test ===
+1382c0f update
+8c40d2e update
+no local git-annex branch?

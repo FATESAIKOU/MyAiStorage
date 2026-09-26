@@ -1,0 +1,147 @@
+# 技術驗證：容器環境（tasks 1.2 的前置）
+# 執行時間：2026-09-26T07:22:23Z
+# 平台：macOS 26.6.2 / colima server arch=arm64 / image arch=amd64
+# 注意：image 與 colima server 架構不同（linux/amd64），是 qemu 模擬執行
+
+## 1. 工具版本與 git-remote-annex
+$ docker run --rm aistorage-spike-env:amd64 bash -lc '...'
+工作目錄：/Users/fatesaikou/.cache/aistorage-spike-verify.88IFp1/work/verify-tools -> /work
+啟動容器：verify-tools（image: aistorage-spike-env:amd64，user: 501:20）
+--- git annex version
+rc=139
+error: git-annex died of signal 11
+--- git-remote-annex 位置
+/usr/local/bin/git-remote-annex
+--- rclone version
+rclone v1.75.1
+--- opencode --version
+1.18.32
+--- sqlite3 --version
+3.45.1
+--- jq --version
+jq-1.7
+--- python3 --version
+Python 3.12.3
+--- git --version
+git version 2.43.0
+
+## 2. sqlite FTS5 trigram（中文查詢）
+工作目錄：/Users/fatesaikou/.cache/aistorage-spike-verify.88IFp1/work/verify-fts -> /work
+啟動容器：verify-fts（image: aistorage-spike-env:amd64，user: 501:20）
+人工智慧儲存層
+FTS5 trigram ok (rc=0)
+ENABLE_FTS3
+ENABLE_FTS3_PARENTHESIS
+ENABLE_FTS3_TOKENIZER
+ENABLE_FTS4
+ENABLE_FTS5
+
+## 3. /secrets 白名單（只掛列出的檔）
+$ spike/env/run.sh verify-secrets spike-dummy-a.txt spike-dummy-b.txt
+（spike-dummy-c.txt 存在於秘密目錄 但沒有列在命令列，所以不該進容器：）
+-rw-------@ 1 fatesaikou  staff  12 Sep 26 16:22 /Users/fatesaikou/.cache/aistorage-spike-verify.88IFp1/secrets/spike-dummy-c.txt
+掛載（唯讀）：/Users/fatesaikou/.cache/aistorage-spike-verify.88IFp1/secrets/spike-dummy-a.txt -> /secrets/spike-dummy-a.txt
+掛載（唯讀）：/Users/fatesaikou/.cache/aistorage-spike-verify.88IFp1/secrets/spike-dummy-b.txt -> /secrets/spike-dummy-b.txt
+工作目錄：/Users/fatesaikou/.cache/aistorage-spike-verify.88IFp1/work/verify-secrets -> /work
+啟動容器：verify-secrets（image: aistorage-spike-env:amd64，user: 501:20）
+ls -la /secrets/
+total 16
+drwxr-xr-x 1 root root    4096 Sep 26 07:22 .
+drwxr-xr-x 1 root root    4096 Sep 26 07:22 ..
+-rw------- 1  501 dialout   10 Sep 26 07:22 spike-dummy-a.txt
+-rw------- 1  501 dialout   10 Sep 26 07:22 spike-dummy-b.txt
+--- 未列出的秘密檔（spike-dummy-c.txt）:
+ls: cannot access '/secrets/spike-dummy-c.txt': No such file or directory
+--- 掛載是唯讀的：
+bash: line 6: /secrets/spike-dummy-a.txt: Read-only file system
+
+## 4. 不掛秘密時 /secrets 是空的
+工作目錄：/Users/fatesaikou/.cache/aistorage-spike-verify.88IFp1/work/verify-empty -> /work
+啟動容器：verify-empty（image: aistorage-spike-env:amd64，user: 501:20）
+total 8
+drwxr-xr-x 2 root root 4096 Sep 26 06:47 .
+drwxr-xr-x 1 root root 4096 Sep 26 07:22 ..
+
+## 5. 容器看不到 Mac 的 home 內容
+工作目錄：/Users/fatesaikou/.cache/aistorage-spike-verify.88IFp1/work/verify-isolation -> /work
+啟動容器：verify-isolation（image: aistorage-spike-env:amd64，user: 501:20）
+HOME=/work
+/work
+不存在：/Users
+不存在：/Users/fatesaikou/.ssh
+不存在：/Users/fatesaikou/.config/gh
+不存在：/root/.ssh
+不存在：/root/.config
+--- 容器內 home:
+total 8
+drwx------ 1  501 dialout   64 Sep 26 07:22 .
+drwxr-xr-x 1 root root    4096 Sep 26 07:22 ..
+
+## 6. 每個容器的工作目錄彼此不共用
+$ run.sh verify-work-a / verify-work-b
+工作目錄：/Users/fatesaikou/.cache/aistorage-spike-verify.88IFp1/work/verify-work-a -> /work
+啟動容器：verify-work-a（image: aistorage-spike-env:amd64，user: 501:20）
+marker-a.txt
+工作目錄：/Users/fatesaikou/.cache/aistorage-spike-verify.88IFp1/work/verify-work-b -> /work
+啟動容器：verify-work-b（image: aistorage-spike-env:amd64，user: 501:20）
+b 看不到 a 的檔案
+
+## 7. run.sh 拒絕不在白名單的檔名 / 不合法名稱
+秘密檔名不合法（只能是檔名）：../etc/passwd
+rc=2
+容器名不合法（允許 [A-Za-z0-9_.-]）：bad name
+rc=2
+秘密檔不存在或不是檔案：/Users/fatesaikou/.cache/aistorage-spike-verify.88IFp1/secrets/nonexistent-secret.txt
+rc=1
+
+## 8. git-annex 在 /work（sshfs 掛載）上的 roundtrip（1.2 的前置）
+$ git init / git-annex initremote / push / clone（directory remote 放 /tmp）
+工作目錄：/Users/fatesaikou/.cache/aistorage-spike-verify.88IFp1/work/verify-annex -> /work
+啟動容器：verify-annex（image: aistorage-spike-env:amd64，user: 501:20）
+!! git-annex roundtrip 失敗（rc=139）：這一組是 qemu 模擬執行，可能是模擬問題
+
+## 9. 能力邊界（給 1.7 / 5.1 的前置檢查）
+容器內看不到白名單以外的憑證：env / /proc/mounts / docker.sock / privileged / capabilities
+掛載（唯讀）：/Users/fatesaikou/.cache/aistorage-spike-verify.88IFp1/secrets/spike-dummy-a.txt -> /secrets/spike-dummy-a.txt
+工作目錄：/Users/fatesaikou/.cache/aistorage-spike-verify.88IFp1/work/verify-boundary -> /work
+啟動容器：verify-boundary（image: aistorage-spike-env:amd64，user: 501:20）
+--- env（只看得到我們注入的白名單變數）:
+DEBIAN_FRONTEND=noninteractive
+HOME=/work
+HOSTNAME=1d5feb584371
+LANG=C.UTF-8
+LC_ALL=C.UTF-8
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PWD=/work
+SHLVL=1
+_=/usr/bin/env
+--- /proc/mounts（來源路徑只該有 /secrets/* 與 /work）:
+:/Users/fatesaikou /work fuse.sshfs rw,nosuid,nodev,relatime,user_id=501,group_id=1000,allow_other 0 0
+:/Users/fatesaikou /secrets/spike-dummy-a.txt fuse.sshfs ro,nosuid,nodev,relatime,user_id=501,group_id=1000,allow_other 0 0
+--- docker.sock:
+ls: cannot access '/var/run/docker.sock': No such file or directory
+ls: cannot access '/run/docker.sock': No such file or directory
+--- privileged:
+CapInh:	0000000000000000
+CapPrm:	0000000000000000
+CapEff:	0000000000000000
+CapBnd:	00000000a80425fb
+CapAmb:	0000000000000000
+--- capabilities（capsh 不一定有，改看 CapEff 與裝置）:
+core
+fd
+full
+mqueue
+null
+ptmx
+pts
+random
+shm
+stderr
+stdin
+stdout
+tty
+urandom
+zero
+
+# 完成（roundtrip rc=139）

@@ -1,0 +1,13 @@
+掛載（唯讀）：/Users/fatesaikou/.config/aistorage-spike/rclone-committer.conf -> /secrets/rclone-committer.conf
+工作目錄：/Users/fatesaikou/.local/share/aistorage-spike/work/a12 -> /work
+啟動容器：a12（image: aistorage-spike-env:latest，user: 501:20）
+ebdca4d big files for interrupt test
+aff464c Revert "add small + large"
+c8e4b11 add small + large
+2fabae7607c063e6f076d020875c54488ede914ac51e13dacfc422d7402d4bb5  big-1.bin
+big-1.bin 與原始檔一致
+01f5d8ac9742dadf657d837ebee0b11837b161ebbc348018635b1a5a00f3fc3a  big-2.bin
+big-2.bin 與原始檔一致
+36344abcbcea0c1da3e814e571e396edb7262a30913393e3a7d7c81970d8ee6e  big-3.bin
+big-3.bin 與原始檔一致
+--- 中斷前已 commit 的內容全部在（3/3 一致）---

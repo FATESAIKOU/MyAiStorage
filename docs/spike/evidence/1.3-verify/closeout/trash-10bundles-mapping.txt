@@ -1,0 +1,117 @@
+========================================================================================
+Spike 1.3 Review-1.3f 新 H1 查核：垃圾桶中 10 個 GITBUNDLE（6 個 UUID）之來源歸屬查核
+========================================================================================
+
+一、查核結論
+------------
+垃圾桶中的 10 個 GITBUNDLE（分屬 6 個 repo UUID：7624bd49, 64310e0c, 88c2e342, 376d75df, 3e690dbd, fd82c512）
+經全面清查 Google Drive 垃圾桶 metadata（trash-all.json）、工作目錄紀錄（~/.local/share/aistorage-spike/work/annex12-test/ 等）、
+.git/config、git-annex 分支之 remote.log 與歷史日誌：
+全部 6 個 UUID 均屬於 Spike 1.2（agora-basic）建立與測試過程中的前置與迭代版本（建立時間全數落在 2026-09-26 07:53:08Z ~ 08:03:15Z），
+完全早於 Spike 1.3 抹除測試的開始時間（2026-09-26 08:53 UTC）。
+因此，這 10 個 GITBUNDLE 均不含任何 1.3 的 canary 字串（SPIKE-ERASE-CANARY-eb3qi4z3），與 1.3 抹除無關。
+
+二、10 個 GITBUNDLE 的詳細對應表與佐證
+--------------------------------------
+
+1. UUID: 7624bd49-7771-49cf-8859-98c8cd382b1f
+   歸屬前綴：agora-basic/testprobe（Spike 1.2 testprobe 測試）
+   時間：2026-09-26T07:53:08Z
+   GITBUNDLE (1 筆):
+     - File ID: 1wAZ_Ri1MlwkSknuFevLiJd6nSr_iVn08
+       Name: GITBUNDLE-s396--7624bd49-7771-49cf-8859-98c8cd382b1f-6c2082c00160abe22210ad0bf0971bf04fdfb8ed9c1f08c641cbe519529dd009
+   同 UUID 之 GITMANIFEST (垃圾桶):
+     - File ID: 1hpu9vAn0V6gFcOtje_N-0OmkuNa_DBYm  Name: GITMANIFEST--7624bd49-7771-49cf-8859-98c8cd382b1f (07:53:20Z)
+     - File ID: 10qkAgwIPo-j9c_cnDcW15oaz7grO8jvG  Name: GITMANIFEST--7624bd49-7771-49cf-8859-98c8cd382b1f.bak
+   佐證出處：
+     - ~/.local/share/aistorage-spike/work/annex12-test/basic/.git/config: annex-uuid = 7624bd49-7771-49cf-8859-98c8cd382b1f
+     - ~/.local/share/aistorage-spike/work/annex12-test/basic git-annex:remote.log: rcloneprefix=agora-basic/testprobe
+
+2. UUID: 64310e0c-b4b3-4bf3-85a0-fe0df9c28d99
+   歸屬前綴：agora-basic（Spike 1.2 迭代 1）
+   時間：2026-09-26T07:55:20Z
+   GITBUNDLE (1 筆):
+     - File ID: 1JU4a47JpSAGwbVrHJX10ScpHzFPbDxgA
+       Name: GITBUNDLE-s387--64310e0c-b4b3-4bf3-85a0-fe0df9c28d99-3909a1d5cad02fe0bf60a9d6a8f17237e2b9cdedbbd6e81caa4fc574c6ded260
+   同 UUID 之 GITMANIFEST (垃圾桶):
+     - File ID: 1KWQkRQ_Dhjo2zivv9QY9F44g3s2dXjvw  Name: GITMANIFEST--64310e0c-b4b3-4bf3-85a0-fe0df9c28d99 (07:55:28Z)
+     - File ID: 1EKz_YYL_AMP6eP-fQD5IAR_I7zBHyZue  Name: GITMANIFEST--64310e0c-b4b3-4bf3-85a0-fe0df9c28d99.bak
+   佐證出處：trash-all.json Path: agora-basic/GITMANIFEST--64310e0c-b4b3-4bf3-85a0-fe0df9c28d99
+
+3. UUID: 88c2e342-d0ff-4481-8aa4-07633c1441e0
+   歸屬前綴：agora-basic（Spike 1.2 迭代 2）
+   時間：2026-09-26T07:56:26Z ~ 07:56:53Z
+   GITBUNDLE (2 筆):
+     - File ID: 1vhfR6ULIaafH-iQhm9oS3uNqvUWHn1Wm
+       Name: GITBUNDLE-s386--88c2e342-d0ff-4481-8aa4-07633c1441e0-4d083887d5e1d08065458604a937b749bad369765a4980c7a3fb351ef122a3b3 (07:56:26Z)
+     - File ID: 1ZPnPTp2eI95WTMgWbGqf6ovK4m9ug7Dw
+       Name: GITBUNDLE-s638--88c2e342-d0ff-4481-8aa4-07633c1441e0-c875925cd5452332c93866e76dd824213cf5adcdffae0e3603562ee0b3102f32 (07:56:53Z)
+   同 UUID 之 GITMANIFEST (垃圾桶):
+     - File ID: 1qeOw6sTgUGfhIS19Now3KiBgGO3788bs  Name: GITMANIFEST--88c2e342-d0ff-4481-8aa4-07633c1441e0 (07:56:59Z)
+     - File ID: 1zub0wOZI2Tv9ap_2h39ddiIdDB9_Qq4R  Name: GITMANIFEST--88c2e342-d0ff-4481-8aa4-07633c1441e0.bak
+   佐證出處：trash-all.json Path: agora-basic/GITMANIFEST--88c2e342-d0ff-4481-8aa4-07633c1441e0
+
+4. UUID: 376d75df-e734-4740-bbdc-ed479ecf7928
+   歸屬前綴：agora-basic（Spike 1.2 迭代 3）
+   時間：2026-09-26T07:58:11Z ~ 07:59:00Z
+   GITBUNDLE (2 筆):
+     - File ID: 1BUfL9mZXwUTiLBtahMxeRNXUhZ0G-9qg
+       Name: GITBUNDLE-s387--376d75df-e734-4740-bbdc-ed479ecf7928-c4d8b47026c02a4f50ff48c5f45b8991f24bfe9cd7dc493ba09d60c58cf1483c (07:58:11Z)
+     - File ID: 1bpP5J0gVvrHj5fdN2MJn2kKZU4-4tkV8
+       Name: GITBUNDLE-s638--376d75df-e734-4740-bbdc-ed479ecf7928-97b7b91d134baec9429d0c37b2e77579c2997a4156733356835395c6de4639c3 (07:59:00Z)
+   同 UUID 之 GITMANIFEST (垃圾桶):
+     - File ID: 1MCnVrBll4EKY8wgMOCQvzAf59ki0Fo5t  Name: GITMANIFEST--376d75df-e734-4740-bbdc-ed479ecf7928 (07:59:07Z)
+     - File ID: 1-CtX1-umBxUfUc7MsvnzBJ3uoUn3jQ2R  Name: GITMANIFEST--376d75df-e734-4740-bbdc-ed479ecf7928.bak
+   佐證出處：trash-all.json Path: agora-basic/GITMANIFEST--376d75df-e734-4740-bbdc-ed479ecf7928
+
+5. UUID: 3e690dbd-60b6-4d76-8d21-3ab457b5c615
+   歸屬前綴：agora-basic（Spike 1.2 迭代 4）
+   時間：2026-09-26T08:00:14Z ~ 08:00:58Z
+   GITBUNDLE (2 筆):
+     - File ID: 19MMEc3O49eBdRPiNgp6Kpkr3UDFJFA3J
+       Name: GITBUNDLE-s388--3e690dbd-60b6-4d76-8d21-3ab457b5c615-f259c9fb5b221533471b6eba665dc1756a8950127e10913232ee07ba57b182c4 (08:00:14Z)
+     - File ID: 1GvDgqjXYAWKDc9iU4gIfdLOrLnZzXVry
+       Name: GITBUNDLE-s2848--3e690dbd-60b6-4d76-8d21-3ab457b5c615-66680acf11a893dc4c4f176134b41d372c542083fc238e64c9fb9da4e5375b99 (08:00:58Z)
+   同 UUID 之 GITMANIFEST (垃圾桶):
+     - File ID: 1pGgc_x6KfF4KaY87Vk8wy418rPT_R00E  Name: GITMANIFEST--3e690dbd-60b6-4d76-8d21-3ab457b5c615 (08:01:05Z)
+     - File ID: 114htxFy9qTgusQOCKKwQdv341GhFMvky  Name: GITMANIFEST--3e690dbd-60b6-4d76-8d21-3ab457b5c615.bak
+   佐證出處：trash-all.json Path: agora-basic/GITMANIFEST--3e690dbd-60b6-4d76-8d21-3ab457b5c615
+
+6. UUID: fd82c512-37d7-405f-b516-680a940b5aff
+   歸屬前綴：agora-basic（Spike 1.2 迭代 5）
+   時間：2026-09-26T08:02:16Z ~ 08:03:10Z
+   GITBUNDLE (2 筆):
+     - File ID: 1rEtp3ydDSTkuB0SHUuc8hOUalJ9y30DT
+       Name: GITBUNDLE-s388--fd82c512-37d7-405f-b516-680a940b5aff-6472924cdae0f079ef5ecce25aed05930c0827392fb0a54d24511b7a44200c03 (08:02:16Z)
+     - File ID: 1epzhp5eXpWEpaknVNRk3vUdhGfxJl4gC
+       Name: GITBUNDLE-s2733--fd82c512-37d7-405f-b516-680a940b5aff-983e6a99a6f3d5e9e6e206d1aaf8110793f02f08645172ec21d3d0052a1a07f2 (08:03:10Z)
+   同 UUID 之 GITMANIFEST (垃圾桶):
+     - File ID: 1v5kKILpyze39peg_elfo_b9adiwkUVW_  Name: GITMANIFEST--fd82c512-37d7-405f-b516-680a940b5aff (08:03:15Z)
+     - File ID: 16Y5-XuQJDHoOUGY2es3LrWblZhCfh2FN  Name: GITMANIFEST--fd82c512-37d7-405f-b516-680a940b5aff.bak
+   佐證出處：trash-all.json Path: agora-basic/GITMANIFEST--fd82c512-37d7-405f-b516-680a940b5aff
+
+三、建議永久刪除之 File ID 清單（交 PM 處置）
+--------------------------------------------
+以下 10 個 GITBUNDLE 以及其對應的 12 個 GITMANIFEST/bak（共 22 個 File ID）可於 1.9 清理時永久刪除：
+1wAZ_Ri1MlwkSknuFevLiJd6nSr_iVn08
+1hpu9vAn0V6gFcOtje_N-0OmkuNa_DBYm
+10qkAgwIPo-j9c_cnDcW15oaz7grO8jvG
+1JU4a47JpSAGwbVrHJX10ScpHzFPbDxgA
+1KWQkRQ_Dhjo2zivv9QY9F44g3s2dXjvw
+1EKz_YYL_AMP6eP-fQD5IAR_I7zBHyZue
+1vhfR6ULIaafH-iQhm9oS3uNqvUWHn1Wm
+1ZPnPTp2eI95WTMgWbGqf6ovK4m9ug7Dw
+1qeOw6sTgUGfhIS19Now3KiBgGO3788bs
+1zub0wOZI2Tv9ap_2h39ddiIdDB9_Qq4R
+1BUfL9mZXwUTiLBtahMxeRNXUhZ0G-9qg
+1bpP5J0gVvrHj5fdN2MJn2kKZU4-4tkV8
+1MCnVrBll4EKY8wgMOCQvzAf59ki0Fo5t
+1-CtX1-umBxUfUc7MsvnzBJ3uoUn3jQ2R
+19MMEc3O49eBdRPiNgp6Kpkr3UDFJFA3J
+1GvDgqjXYAWKDc9iU4gIfdLOrLnZzXVry
+1pGgc_x6KfF4KaY87Vk8wy418rPT_R00E
+114htxFy9qTgusQOCKKwQdv341GhFMvky
+1rEtp3ydDSTkuB0SHUuc8hOUalJ9y30DT
+1epzhp5eXpWEpaknVNRk3vUdhGfxJl4gC
+1v5kKILpyze39peg_elfo_b9adiwkUVW_
+16Y5-XuQJDHoOUGY2es3LrWblZhCfh2FN

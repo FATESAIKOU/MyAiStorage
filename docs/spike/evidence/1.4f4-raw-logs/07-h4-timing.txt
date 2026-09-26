@@ -1,0 +1,4 @@
+== H4 timing: full-download snapshot vs metadata-only snapshot on agora-1.4f3 ==
+full_snapshot_seconds=7.92
+meta_snapshot_seconds=2.73
+snapshot(meta) folder=1S7XOdRUH4SAwspZvAZDKl0BodFtoTeaZ manifests=2 bundles=4 annex=2 others=0 media_gets=2 bytes=946

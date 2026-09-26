@@ -1,0 +1,99 @@
+name: sweep-cost-measure
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: sweep-cost-measure
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Python dependencies
+        run: |
+          pip install requests google-auth
+
+      - name: Setup credentials
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.config/aistorage-spike"; umask 077
+          printf '%s' "$RCLONE_CONF" > "$HOME/.config/aistorage-spike/rclone-committer.conf"
+          chmod 600 "$HOME/.config/aistorage-spike/rclone-committer.conf"
+          echo "Credentials written successfully"
+
+      - name: Run 3 rounds of meta sweep (dry-run)
+        env:
+          AGORA_LOAD_FOLDER: "1Zzgv-hia7KzNI-WuXVHPlyRVWlvF89Y2"
+        run: |
+          set -euo pipefail
+          CRED="$HOME/.config/aistorage-spike/rclone-committer.conf"
+          PIN="spike/probe/pin-load.json"
+          WORK=$(mktemp -d)
+
+          echo "=== Starting 3 measurement rounds ==="
+          python3 -c "
+          import sys, os, time, subprocess, json
+
+          CRED = os.path.expanduser('$CRED')
+          PIN = '$PIN'
+          FOLDER = '$AGORA_LOAD_FOLDER'
+          WORK = '$WORK'
+
+          results = []
+          for i in range(1, 4):
+              snap_out = os.path.join(WORK, f'snap-{i}.json')
+              cmd_snap = [
+                  sys.executable, 'spike/probe/f3_meta_snapshot.py',
+                  '--cred', CRED, '--folder', FOLDER, '--out', snap_out, '--pin', PIN
+              ]
+              t0 = time.monotonic()
+              r_snap = subprocess.run(cmd_snap, capture_output=True, text=True)
+              t_snap = time.monotonic() - t0
+
+              snap_data = json.load(open(snap_out))
+              mg = snap_data['media_gets']
+
+              cmd_clean = [
+                  sys.executable, 'spike/probe/f3_meta_clean.py',
+                  '--cred', CRED, '--folder', FOLDER, '--pin', PIN,
+                  '--snapshot', snap_out, '--quarantine', 'DRYRUN'
+              ]
+              t0 = time.monotonic()
+              r_clean = subprocess.run(cmd_clean, capture_output=True, text=True)
+              t_clean = time.monotonic() - t0
+
+              t_total = t_snap + t_clean
+              results.append({
+                  'round': i,
+                  'snap_s': round(t_snap, 2),
+                  'clean_s': round(t_clean, 2),
+                  'total_s': round(t_total, 2),
+                  'media_gets': mg['count'],
+                  'bytes': mg['bytes']
+              })
+              print(f'Round {i}: snap={t_snap:.2f}s clean={t_clean:.2f}s total={t_total:.2f}s media_gets={mg[\"count\"]} bytes={mg[\"bytes\"]}')
+
+          results.sort(key=lambda x: x['total_s'])
+          med = results[1]
+          print('\n=== RUNNER MEASUREMENT SUMMARY ===')
+          print(f'Round |    Snap |   Clean |   Total | MediaGets |    Bytes')
+          print('-'*58)
+          for r in sorted(results, key=lambda x: x['round']):
+              star = ' *' if r['round'] == med['round'] else ''
+              print(f'{r[\"round\"]:>5} | {r[\"snap_s\"]:>6.2f}s | {r[\"clean_s\"]:>6.2f}s | {r[\"total_s\"]:>6.2f}s | {r[\"media_gets\"]:>9} | {r[\"bytes\"]:>8}{star}')
+          print(f'\nMedian: total={med[\"total_s\"]}s (snap={med[\"snap_s\"]}s, clean={med[\"clean_s\"]}s), media_gets={med[\"media_gets\"]}, bytes={med[\"bytes\"]}')
+          "
+
+      - name: Cleanup credentials
+        if: always()
+        run: |
+          rm -rf "$HOME/.config/aistorage-spike"
+          echo "Cleanup complete"

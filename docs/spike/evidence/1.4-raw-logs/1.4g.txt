@@ -1,0 +1,69 @@
+### 1.4g committer confirms manifest.json parents inside readview
+op=find-name
+target=1aT4CTgDE8gUN62Y5s9G-UT9OZ6laMhP0
+http=200
+count=1
+file={"id": "1_-8SpQv7RgCUxv3UcSjF4t5MkMjEmCAX", "md5Checksum": "ab882ef657fd4bd6bb6bd10656ac1f04", "mimeType": "application/json", "name": "manifest.json", "size": "67"}
+### 1.4g C get readview folder
+op=get
+target=1aT4CTgDE8gUN62Y5s9G-UT9OZ6laMhP0
+http=404
+reason=notFound
+message=File not found: 1aT4CTgDE8gUN62Y5s9G-UT9OZ6laMhP0.
+### 1.4g C list readview children
+op=list-children
+target=1aT4CTgDE8gUN62Y5s9G-UT9OZ6laMhP0
+http=200
+count=0
+### 1.4g C create same-name manifest.json in readview
+op=create-file
+name=manifest.json
+parent=1aT4CTgDE8gUN62Y5s9G-UT9OZ6laMhP0
+http=200
+file_id=1dlZO44mpMCu2spnZtVnAQbGtiGydv3gO
+md5=eb397a9319360b05984395c3ac970ed3
+### 1.4g C create c-into-readview.txt
+op=create-file
+name=c-into-readview.txt
+parent=1aT4CTgDE8gUN62Y5s9G-UT9OZ6laMhP0
+http=200
+file_id=1bxfjrxw2OTsBuFpbzZM3OawmrguO-au2
+md5=d9149e2c3621fec456ac8ce710e09107
+### committer sees duplicate manifest.json
+op=find-name
+target=1aT4CTgDE8gUN62Y5s9G-UT9OZ6laMhP0
+http=200
+count=2
+file={"id": "1dlZO44mpMCu2spnZtVnAQbGtiGydv3gO", "md5Checksum": "eb397a9319360b05984395c3ac970ed3", "mimeType": "application/json", "name": "manifest.json", "size": "30"}
+file={"id": "1_-8SpQv7RgCUxv3UcSjF4t5MkMjEmCAX", "md5Checksum": "ab882ef657fd4bd6bb6bd10656ac1f04", "mimeType": "application/json", "name": "manifest.json", "size": "67"}
+### 1.4g SA downloads ORIGINAL manifest by fixed id 1_-8SpQv...
+op=download
+target=1_-8SpQv7RgCUxv3UcSjF4t5MkMjEmCAX
+http=200
+sha256=4d9bec20361b84a826c2ee9d1c46df82aae65e350e87aa6840509af4c61dea83
+bytes=67
+### 1.4g SA downloads FAKE manifest by its id (SA sees it?)
+op=download
+target=1dlZO44mpMCu2spnZtVnAQbGtiGydv3gO
+http=200
+sha256=2d7b61a79d1d6cb1aaffde5ae082864a2d9caa8c8d32ddbfd6786e15bf0f0546
+bytes=30
+### 1.4g SA searches by NAME manifest.json (how many, what order?)
+op=find-name
+target=1aT4CTgDE8gUN62Y5s9G-UT9OZ6laMhP0
+http=200
+count=2
+file={"id": "1dlZO44mpMCu2spnZtVnAQbGtiGydv3gO", "md5Checksum": "eb397a9319360b05984395c3ac970ed3", "mimeType": "application/json", "name": "manifest.json", "size": "30"}
+file={"id": "1_-8SpQv7RgCUxv3UcSjF4t5MkMjEmCAX", "md5Checksum": "ab882ef657fd4bd6bb6bd10656ac1f04", "mimeType": "application/json", "name": "manifest.json", "size": "67"}
+### 1.4g C updates the original manifest by id (attempt to hijack content)
+op=update-content
+target=1_-8SpQv7RgCUxv3UcSjF4t5MkMjEmCAX
+http=404
+reason=notFound
+message=File not found: 1_-8SpQv7RgCUxv3UcSjF4t5MkMjEmCAX.
+### 1.4g SA re-reads original manifest (still correct?)
+op=download
+target=1_-8SpQv7RgCUxv3UcSjF4t5MkMjEmCAX
+http=200
+sha256=4d9bec20361b84a826c2ee9d1c46df82aae65e350e87aa6840509af4c61dea83
+bytes=67

@@ -1,0 +1,228 @@
+measure	Set up job	﻿2026-09-26T22:43:51.5931386Z Current runner version: '2.337.0'
+measure	Set up job	2026-09-26T22:43:51.5952269Z ##[group]Runner Image Provisioner
+measure	Set up job	2026-09-26T22:43:51.5953176Z Hosted Compute Agent
+measure	Set up job	2026-09-26T22:43:51.5953776Z Version: 20260828.587
+measure	Set up job	2026-09-26T22:43:51.5954499Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+measure	Set up job	2026-09-26T22:43:51.5955250Z Build Date: 2026-08-28T16:44:25Z
+measure	Set up job	2026-09-26T22:43:51.5955989Z Worker ID: {4facdb4d-46c3-4a2b-849a-b02f01b80c17}
+measure	Set up job	2026-09-26T22:43:51.5956993Z Azure Region: westus3
+measure	Set up job	2026-09-26T22:43:51.5957650Z ##[endgroup]
+measure	Set up job	2026-09-26T22:43:51.5958971Z ##[group]Operating System
+measure	Set up job	2026-09-26T22:43:51.5959652Z Ubuntu
+measure	Set up job	2026-09-26T22:43:51.5960190Z 24.04.5
+measure	Set up job	2026-09-26T22:43:51.5960761Z LTS
+measure	Set up job	2026-09-26T22:43:51.5961382Z ##[endgroup]
+measure	Set up job	2026-09-26T22:43:51.5962238Z ##[group]Runner Image
+measure	Set up job	2026-09-26T22:43:51.5962847Z Image: ubuntu-24.04
+measure	Set up job	2026-09-26T22:43:51.5963463Z Version: 20260920.314.1
+measure	Set up job	2026-09-26T22:43:51.5964479Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260920.314/images/ubuntu/Ubuntu2404-Readme.md
+measure	Set up job	2026-09-26T22:43:51.5966021Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260920.314
+measure	Set up job	2026-09-26T22:43:51.5967118Z ##[endgroup]
+measure	Set up job	2026-09-26T22:43:51.5968249Z ##[group]GITHUB_TOKEN Permissions
+measure	Set up job	2026-09-26T22:43:51.5970086Z Contents: read
+measure	Set up job	2026-09-26T22:43:51.5970669Z Metadata: read
+measure	Set up job	2026-09-26T22:43:51.5971343Z Packages: read
+measure	Set up job	2026-09-26T22:43:51.5971888Z ##[endgroup]
+measure	Set up job	2026-09-26T22:43:51.5973649Z Secret source: Actions
+measure	Set up job	2026-09-26T22:43:51.5974560Z Cache mode: write
+measure	Set up job	2026-09-26T22:43:51.5975273Z Prepare workflow directory
+measure	Set up job	2026-09-26T22:43:51.6299140Z Prepare all required actions
+measure	Set up job	2026-09-26T22:43:51.6376727Z Getting action download info
+measure	Set up job	2026-09-26T22:43:52.0338730Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+measure	Set up job	2026-09-26T22:43:52.2288943Z Complete job name: measure
+measure	Checkout	﻿2026-09-26T22:43:52.2870239Z ##[group]Run actions/checkout@v4
+measure	Checkout	2026-09-26T22:43:52.2870953Z with:
+measure	Checkout	2026-09-26T22:43:52.2871395Z   repository: FATESAIKOU/aistorage-spike
+measure	Checkout	2026-09-26T22:43:52.2874455Z   token: ***
+measure	Checkout	2026-09-26T22:43:52.2874876Z   ssh-strict: true
+measure	Checkout	2026-09-26T22:43:52.2875307Z   ssh-user: git
+measure	Checkout	2026-09-26T22:43:52.2875729Z   persist-credentials: true
+measure	Checkout	2026-09-26T22:43:52.2876184Z   clean: true
+measure	Checkout	2026-09-26T22:43:52.2876748Z   sparse-checkout-cone-mode: true
+measure	Checkout	2026-09-26T22:43:52.2877234Z   fetch-depth: 1
+measure	Checkout	2026-09-26T22:43:52.2877648Z   fetch-tags: false
+measure	Checkout	2026-09-26T22:43:52.2878066Z   show-progress: true
+measure	Checkout	2026-09-26T22:43:52.2878487Z   lfs: false
+measure	Checkout	2026-09-26T22:43:52.2878887Z   submodules: false
+measure	Checkout	2026-09-26T22:43:52.2879312Z   set-safe-directory: true
+measure	Checkout	2026-09-26T22:43:52.2879776Z   allow-unsafe-pr-checkout: false
+measure	Checkout	2026-09-26T22:43:52.2880470Z ##[endgroup]
+measure	Checkout	2026-09-26T22:43:52.3752499Z Syncing repository: FATESAIKOU/aistorage-spike
+measure	Checkout	2026-09-26T22:43:52.3754815Z ##[group]Getting Git version info
+measure	Checkout	2026-09-26T22:43:52.3755966Z Working directory is '/home/runner/work/aistorage-spike/aistorage-spike'
+measure	Checkout	2026-09-26T22:43:52.3758090Z [command]/usr/bin/git version
+measure	Checkout	2026-09-26T22:43:52.3807590Z git version 2.55.0
+measure	Checkout	2026-09-26T22:43:52.3824616Z ##[endgroup]
+measure	Checkout	2026-09-26T22:43:52.3835918Z Temporarily overriding HOME='/home/runner/work/_temp/69bd5ccc-bb8e-477c-959a-629efa5a43b7' before making global git config changes
+measure	Checkout	2026-09-26T22:43:52.3840516Z Adding repository directory to the temporary git global config as a safe directory
+measure	Checkout	2026-09-26T22:43:52.3842592Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/aistorage-spike/aistorage-spike
+measure	Checkout	2026-09-26T22:43:52.3881310Z Deleting the contents of '/home/runner/work/aistorage-spike/aistorage-spike'
+measure	Checkout	2026-09-26T22:43:52.3885422Z ##[group]Initializing the repository
+measure	Checkout	2026-09-26T22:43:52.3889506Z [command]/usr/bin/git init /home/runner/work/aistorage-spike/aistorage-spike
+measure	Checkout	2026-09-26T22:43:52.3961286Z hint: Using 'master' as the name for the initial branch. This default branch name
+measure	Checkout	2026-09-26T22:43:52.3962883Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+measure	Checkout	2026-09-26T22:43:52.3964344Z hint: to use in all of your new repositories, which will suppress this warning,
+measure	Checkout	2026-09-26T22:43:52.3966109Z hint: call:
+measure	Checkout	2026-09-26T22:43:52.3967354Z hint:
+measure	Checkout	2026-09-26T22:43:52.3968251Z hint: 	git config --global init.defaultBranch <name>
+measure	Checkout	2026-09-26T22:43:52.3969354Z hint:
+measure	Checkout	2026-09-26T22:43:52.3970370Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+measure	Checkout	2026-09-26T22:43:52.3971896Z hint: 'development'. The just-created branch can be renamed via this command:
+measure	Checkout	2026-09-26T22:43:52.3973050Z hint:
+measure	Checkout	2026-09-26T22:43:52.3973871Z hint: 	git branch -m <name>
+measure	Checkout	2026-09-26T22:43:52.3974713Z hint:
+measure	Checkout	2026-09-26T22:43:52.3975825Z hint: Disable this message with "git config set advice.defaultBranchName false"
+measure	Checkout	2026-09-26T22:43:52.3977750Z Initialized empty Git repository in /home/runner/work/aistorage-spike/aistorage-spike/.git/
+measure	Checkout	2026-09-26T22:43:52.3982447Z [command]/usr/bin/git remote add origin https://github.com/FATESAIKOU/aistorage-spike
+measure	Checkout	2026-09-26T22:43:52.4018033Z ##[endgroup]
+measure	Checkout	2026-09-26T22:43:52.4019456Z ##[group]Disabling automatic garbage collection
+measure	Checkout	2026-09-26T22:43:52.4020717Z [command]/usr/bin/git config --local gc.auto 0
+measure	Checkout	2026-09-26T22:43:52.4046751Z ##[endgroup]
+measure	Checkout	2026-09-26T22:43:52.4048078Z ##[group]Setting up auth
+measure	Checkout	2026-09-26T22:43:52.4053160Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+measure	Checkout	2026-09-26T22:43:52.4079940Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+measure	Checkout	2026-09-26T22:43:52.4341409Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+measure	Checkout	2026-09-26T22:43:52.4367989Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+measure	Checkout	2026-09-26T22:43:52.4559931Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+measure	Checkout	2026-09-26T22:43:52.4585740Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+measure	Checkout	2026-09-26T22:43:52.4782402Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+measure	Checkout	2026-09-26T22:43:52.4817915Z ##[endgroup]
+measure	Checkout	2026-09-26T22:43:52.4818827Z ##[group]Fetching the repository
+measure	Checkout	2026-09-26T22:43:52.4824357Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +4285589299861972281b5174c1a678a5faaae6e4:refs/remotes/origin/main
+measure	Checkout	2026-09-26T22:43:53.0251428Z From https://github.com/FATESAIKOU/aistorage-spike
+measure	Checkout	2026-09-26T22:43:53.0253578Z  * [new ref]         4285589299861972281b5174c1a678a5faaae6e4 -> origin/main
+measure	Checkout	2026-09-26T22:43:53.0258967Z ##[endgroup]
+measure	Checkout	2026-09-26T22:43:53.0260250Z ##[group]Determining the checkout info
+measure	Checkout	2026-09-26T22:43:53.0261674Z ##[endgroup]
+measure	Checkout	2026-09-26T22:43:53.0262485Z [command]/usr/bin/git sparse-checkout disable
+measure	Checkout	2026-09-26T22:43:53.0264904Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+measure	Checkout	2026-09-26T22:43:53.0267648Z ##[group]Checking out the ref
+measure	Checkout	2026-09-26T22:43:53.0269536Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+measure	Checkout	2026-09-26T22:43:53.0319603Z Switched to a new branch 'main'
+measure	Checkout	2026-09-26T22:43:53.0325211Z branch 'main' set up to track 'origin/main'.
+measure	Checkout	2026-09-26T22:43:53.0331841Z ##[endgroup]
+measure	Checkout	2026-09-26T22:43:53.0363745Z [command]/usr/bin/git log -1 --format=%H
+measure	Checkout	2026-09-26T22:43:53.0387217Z 4285589299861972281b5174c1a678a5faaae6e4
+measure	Install Python dependencies	﻿2026-09-26T22:43:53.0581768Z ##[group]Run pip install requests google-auth
+measure	Install Python dependencies	2026-09-26T22:43:53.0582516Z ^[[36;1mpip install requests google-auth^[[0m
+measure	Install Python dependencies	2026-09-26T22:43:53.0782606Z shell: /usr/bin/bash -e {0}
+measure	Install Python dependencies	2026-09-26T22:43:53.0783200Z ##[endgroup]
+measure	Install Python dependencies	2026-09-26T22:43:53.4421490Z Defaulting to user installation because normal site-packages is not writeable
+measure	Install Python dependencies	2026-09-26T22:43:53.6860198Z Requirement already satisfied: requests in /usr/lib/python3/dist-packages (2.31.0)
+measure	Install Python dependencies	2026-09-26T22:43:53.9527640Z Collecting google-auth
+measure	Install Python dependencies	2026-09-26T22:43:53.9771357Z   Downloading google_auth-2.58.1-py3-none-any.whl.metadata (6.0 kB)
+measure	Install Python dependencies	2026-09-26T22:43:54.0006962Z Requirement already satisfied: pyasn1-modules>=0.2.1 in /usr/lib/python3/dist-packages (from google-auth) (0.2.8)
+measure	Install Python dependencies	2026-09-26T22:43:54.0018193Z Requirement already satisfied: cryptography>=38.0.3 in /usr/lib/python3/dist-packages (from google-auth) (41.0.7)
+measure	Install Python dependencies	2026-09-26T22:43:54.0125921Z Downloading google_auth-2.58.1-py3-none-any.whl (262 kB)
+measure	Install Python dependencies	2026-09-26T22:43:54.0308164Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 262.5/262.5 kB 15.6 MB/s eta 0:00:00
+measure	Install Python dependencies	2026-09-26T22:43:54.2261242Z Installing collected packages: google-auth
+measure	Install Python dependencies	2026-09-26T22:43:54.3142878Z Successfully installed google-auth-2.58.1
+measure	Setup credentials	﻿2026-09-26T22:43:54.3660098Z ##[group]Run set -euo pipefail
+measure	Setup credentials	2026-09-26T22:43:54.3660446Z ^[[36;1mset -euo pipefail^[[0m
+measure	Setup credentials	2026-09-26T22:43:54.3660801Z ^[[36;1mmkdir -p "$HOME/.config/aistorage-spike"; umask 077^[[0m
+measure	Setup credentials	2026-09-26T22:43:54.3661262Z ^[[36;1mprintf '%s' "$RCLONE_CONF" > "$HOME/.config/aistorage-spike/rclone-committer.conf"^[[0m
+measure	Setup credentials	2026-09-26T22:43:54.3661734Z ^[[36;1mchmod 600 "$HOME/.config/aistorage-spike/rclone-committer.conf"^[[0m
+measure	Setup credentials	2026-09-26T22:43:54.3662107Z ^[[36;1mecho "Credentials written successfully"^[[0m
+measure	Setup credentials	2026-09-26T22:43:54.3717987Z shell: /usr/bin/bash -e {0}
+measure	Setup credentials	2026-09-26T22:43:54.3718238Z env:
+measure	Setup credentials	2026-09-26T22:43:54.3720658Z   RCLONE_CONF: ***
+measure	Setup credentials	2026-09-26T22:43:54.3720877Z ##[endgroup]
+measure	Setup credentials	2026-09-26T22:43:54.3869943Z Credentials written successfully
+measure	Run 3 rounds of meta sweep (dry-run)	﻿2026-09-26T22:43:54.3897751Z ##[group]Run set -euo pipefail
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3898069Z ^[[36;1mset -euo pipefail^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3898374Z ^[[36;1mCRED="$HOME/.config/aistorage-spike/rclone-committer.conf"^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3898706Z ^[[36;1mPIN="spike/probe/pin-load.json"^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3898958Z ^[[36;1mWORK=$(mktemp -d)^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3899169Z ^[[36;1m^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3899390Z ^[[36;1mecho "=== Starting 3 measurement rounds ==="^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3899662Z ^[[36;1mpython3 -c "^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3899907Z ^[[36;1mimport sys, os, time, subprocess, json^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3900169Z ^[[36;1m^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3900374Z ^[[36;1mCRED = os.path.expanduser('$CRED')^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3900624Z ^[[36;1mPIN = '$PIN'^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3900830Z ^[[36;1mFOLDER = '$AGORA_LOAD_FOLDER'^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3901071Z ^[[36;1mWORK = '$WORK'^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3901271Z ^[[36;1m^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3901449Z ^[[36;1mresults = []^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3901659Z ^[[36;1mfor i in range(1, 4):^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3901958Z ^[[36;1m    snap_out = os.path.join(WORK, f'snap-{i}.json')^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3902239Z ^[[36;1m    cmd_snap = [^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3902507Z ^[[36;1m        sys.executable, 'spike/probe/f3_meta_snapshot.py',^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3902888Z ^[[36;1m        '--cred', CRED, '--folder', FOLDER, '--out', snap_out, '--pin', PIN^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3903209Z ^[[36;1m    ]^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3903409Z ^[[36;1m    t0 = time.monotonic()^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3903733Z ^[[36;1m    r_snap = subprocess.run(cmd_snap, capture_output=True, text=True)^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3904074Z ^[[36;1m    t_snap = time.monotonic() - t0^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3904315Z ^[[36;1m^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3904523Z ^[[36;1m    snap_data = json.load(open(snap_out))^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3904794Z ^[[36;1m    mg = snap_data['media_gets']^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3905025Z ^[[36;1m^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3905220Z ^[[36;1m    cmd_clean = [^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3905487Z ^[[36;1m        sys.executable, 'spike/probe/f3_meta_clean.py',^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3905818Z ^[[36;1m        '--cred', CRED, '--folder', FOLDER, '--pin', PIN,^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3906137Z ^[[36;1m        '--snapshot', snap_out, '--quarantine', 'DRYRUN'^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3907088Z ^[[36;1m    ]^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3907309Z ^[[36;1m    t0 = time.monotonic()^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3907626Z ^[[36;1m    r_clean = subprocess.run(cmd_clean, capture_output=True, text=True)^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3907971Z ^[[36;1m    t_clean = time.monotonic() - t0^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3908377Z ^[[36;1m^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3908575Z ^[[36;1m    t_total = t_snap + t_clean^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3908822Z ^[[36;1m    results.append({^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3909054Z ^[[36;1m        'round': i,^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3909291Z ^[[36;1m        'snap_s': round(t_snap, 2),^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3909548Z ^[[36;1m        'clean_s': round(t_clean, 2),^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3909808Z ^[[36;1m        'total_s': round(t_total, 2),^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3910064Z ^[[36;1m        'media_gets': mg['count'],^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3910324Z ^[[36;1m        'bytes': mg['bytes']^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3910554Z ^[[36;1m    })^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3910957Z ^[[36;1m    print(f'Round {i}: snap={t_snap:.2f}s clean={t_clean:.2f}s total={t_total:.2f}s media_gets={mg[\"count\"]} bytes={mg[\"bytes\"]}')^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3911407Z ^[[36;1m^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3911630Z ^[[36;1mresults.sort(key=lambda x: x['total_s'])^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3911902Z ^[[36;1mmed = results[1]^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3912170Z ^[[36;1mprint('\n=== RUNNER MEASUREMENT SUMMARY ===')^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3912535Z ^[[36;1mprint(f'Round |    Snap |   Clean |   Total | MediaGets |    Bytes')^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3912854Z ^[[36;1mprint('-'*58)^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3913107Z ^[[36;1mfor r in sorted(results, key=lambda x: x['round']):^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3913438Z ^[[36;1m    star = ' *' if r['round'] == med['round'] else ''^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3913920Z ^[[36;1m    print(f'{r[\"round\"]:>5} | {r[\"snap_s\"]:>6.2f}s | {r[\"clean_s\"]:>6.2f}s | {r[\"total_s\"]:>6.2f}s | {r[\"media_gets\"]:>9} | {r[\"bytes\"]:>8}{star}')^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3914769Z ^[[36;1mprint(f'\nMedian: total={med[\"total_s\"]}s (snap={med[\"snap_s\"]}s, clean={med[\"clean_s\"]}s), media_gets={med[\"media_gets\"]}, bytes={med[\"bytes\"]}')^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3915251Z ^[[36;1m"^[[0m
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3965196Z shell: /usr/bin/bash -e {0}
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3965442Z env:
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3965693Z   AGORA_LOAD_FOLDER: 1Zzgv-hia7KzNI-WuXVHPlyRVWlvF89Y2
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.3965996Z ##[endgroup]
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:43:54.4043725Z === Starting 3 measurement rounds ===
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:44:04.1614058Z Round 1: snap=2.53s clean=1.14s total=3.67s media_gets=2 bytes=122538
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:44:04.1615176Z Round 2: snap=1.79s clean=1.25s total=3.05s media_gets=2 bytes=122538
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:44:04.1616121Z Round 3: snap=1.76s clean=1.25s total=3.02s media_gets=2 bytes=122538
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:44:04.1616817Z 
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:44:04.1617140Z === RUNNER MEASUREMENT SUMMARY ===
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:44:04.1617736Z Round |    Snap |   Clean |   Total | MediaGets |    Bytes
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:44:04.1618325Z ----------------------------------------------------------
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:44:04.1618914Z     1 |   2.53s |   1.14s |   3.67s |         2 |   122538
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:44:04.1619477Z     2 |   1.79s |   1.25s |   3.05s |         2 |   122538 *
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:44:04.1620032Z     3 |   1.76s |   1.25s |   3.02s |         2 |   122538
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:44:04.1620451Z 
+measure	Run 3 rounds of meta sweep (dry-run)	2026-09-26T22:44:04.1620901Z Median: total=3.05s (snap=1.79s, clean=1.25s), media_gets=2, bytes=122538
+measure	Cleanup credentials	﻿2026-09-26T22:44:04.1697943Z ##[group]Run rm -rf "$HOME/.config/aistorage-spike"
+measure	Cleanup credentials	2026-09-26T22:44:04.1698334Z ^[[36;1mrm -rf "$HOME/.config/aistorage-spike"^[[0m
+measure	Cleanup credentials	2026-09-26T22:44:04.1698614Z ^[[36;1mecho "Cleanup complete"^[[0m
+measure	Cleanup credentials	2026-09-26T22:44:04.1752228Z shell: /usr/bin/bash -e {0}
+measure	Cleanup credentials	2026-09-26T22:44:04.1752497Z ##[endgroup]
+measure	Cleanup credentials	2026-09-26T22:44:04.1828708Z Cleanup complete
+measure	Post Checkout	﻿2026-09-26T22:44:04.1919117Z Post job cleanup.
+measure	Post Checkout	2026-09-26T22:44:04.2610386Z [command]/usr/bin/git version
+measure	Post Checkout	2026-09-26T22:44:04.2643843Z git version 2.55.0
+measure	Post Checkout	2026-09-26T22:44:04.2675509Z Temporarily overriding HOME='/home/runner/work/_temp/d8b60679-f2b4-4dca-a43e-a9eaefd295dc' before making global git config changes
+measure	Post Checkout	2026-09-26T22:44:04.2677387Z Adding repository directory to the temporary git global config as a safe directory
+measure	Post Checkout	2026-09-26T22:44:04.2679116Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/aistorage-spike/aistorage-spike
+measure	Post Checkout	2026-09-26T22:44:04.2712102Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+measure	Post Checkout	2026-09-26T22:44:04.2742780Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+measure	Post Checkout	2026-09-26T22:44:04.2940734Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+measure	Post Checkout	2026-09-26T22:44:04.2967293Z http.https://github.com/.extraheader
+measure	Post Checkout	2026-09-26T22:44:04.2972794Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+measure	Post Checkout	2026-09-26T22:44:04.3003363Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+measure	Post Checkout	2026-09-26T22:44:04.3194714Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+measure	Post Checkout	2026-09-26T22:44:04.3226849Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+measure	Complete job	﻿2026-09-26T22:44:04.3543911Z Cleaning up orphan processes
+measure	Complete job	2026-09-26T22:44:04.3751513Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

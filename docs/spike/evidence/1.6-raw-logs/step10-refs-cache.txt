@@ -1,0 +1,16 @@
+== raw cache API ==
+{"total_count":0}
+== attempt cache delete on a fake key ==
+X Could not find a cache matching nonexistent-key-impl2 in FATESAIKOU/aistorage-spike
+cache_delete_rc=1
+== attempt other-ref trigger (probe-pat does not exist) ==
+could not create workflow dispatch event: HTTP 422: No ref found for: probe-pat (https://api.github.com/repos/FATESAIKOU/aistorage-spike/actions/workflows/367559034/dispatches)
+other_ref_rc=1
+== attempt other-ref trigger (existing main, control) ==
+https://github.com/FATESAIKOU/aistorage-spike/actions/runs/36231178149
+main_ref_rc=0
+== head sha from a run (Actions API) ==
+sha_len=40
+== trigger on a specific commit sha ==
+could not create workflow dispatch event: HTTP 422: No ref found for: 4485bbc30cbb21807dd311578ab51d7001b53b99 (https://api.github.com/repos/FATESAIKOU/aistorage-spike/actions/workflows/367559034/dispatches)
+sha_ref_rc=1

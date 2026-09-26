@@ -1,0 +1,28 @@
+=== GITHUB ACTIONS RUNNER (amd64, ubuntu-latest) MEASUREMENT RESULTS ===
+Repo: FATESAIKOU/aistorage-spike
+Workflow: sweep-cost-measure.yml
+Run ID: 36277211893
+Run URL: https://github.com/FATESAIKOU/aistorage-spike/actions/runs/36277211893
+Job ID: 108502175639
+Trigger: workflow_dispatch
+Status: Completed / Success
+Job duration: 16s
+Billing minutes: 1 minute (Actions per-job ceil to whole minute)
+
+Round 1: snap=2.53s clean=1.14s total=3.67s media_gets=2 bytes=122538
+Round 2: snap=1.79s clean=1.25s total=3.05s media_gets=2 bytes=122538
+Round 3: snap=1.76s clean=1.25s total=3.02s media_gets=2 bytes=122538
+
+=== RUNNER MEASUREMENT SUMMARY ===
+Round |    Snap |   Clean |   Total | MediaGets |    Bytes
+----------------------------------------------------------
+    1 |   2.53s |   1.14s |   3.67s |         2 |   122538
+    2 |   1.79s |   1.25s |   3.05s |         2 |   122538 *
+    3 |   1.76s |   1.25s |   3.02s |         2 |   122538
+
+Median:
+  total: 3.05s
+  snapshot: 1.79s
+  clean: 1.25s
+  media_gets: 2 (manifests only)
+  bytes downloaded: 122,538 bytes (~120 KB)

@@ -1,0 +1,23 @@
+== step5: re-inject consistent forged pair (ORDER B: manifest first, then bundle) ==
+op=create-file
+name=GITMANIFEST--616fdf69-6077-4730-ba09-e7e0553d2f74
+parent=1GAuQqxHfUyNmWUeopWEr89NG_RTJgHEa
+http=200
+file_id=11-wgL0nZa3pcEWe8pdfUKHoJ3h6T2KYR
+md5=75c02a1ceeb773e70e5a28e24ee24749
+op=create-file
+name=GITBUNDLE-s331--616fdf69-6077-4730-ba09-e7e0553d2f74-ab4c0c798c2587263f1d34ad2fcee9bcd174ff8ca024124c539a634cc9f7dd8e
+parent=1GAuQqxHfUyNmWUeopWEr89NG_RTJgHEa
+http=200
+file_id=1xVof80KI-HefflXETv6wHi0Z_xwnkHSz
+md5=b6a4f10c90a18aa4271c9b52cad5cc28
+== committer listing (no cleaning) ==
+op=list-children
+target=1GAuQqxHfUyNmWUeopWEr89NG_RTJgHEa
+http=200
+count=5
+file={"id": "1xVof80KI-HefflXETv6wHi0Z_xwnkHSz", "md5Checksum": "b6a4f10c90a18aa4271c9b52cad5cc28", "mimeType": "application/octet-stream", "name": "GITBUNDLE-s331--616fdf69-6077-4730-ba09-e7e0553d2f74-ab4c0c798c2587263f1d34ad2fcee9bcd174ff8ca024124c539a634cc9f7dd8e", "size": "331"}
+file={"id": "11-wgL0nZa3pcEWe8pdfUKHoJ3h6T2KYR", "md5Checksum": "75c02a1ceeb773e70e5a28e24ee24749", "mimeType": "application/octet-stream", "name": "GITMANIFEST--616fdf69-6077-4730-ba09-e7e0553d2f74", "size": "118"}
+file={"id": "1DbQbD9AoukSPJ3XE8UdBzBb-BKEJKgta", "md5Checksum": "f9059497dc674285b0fd751ab5f228aa", "mimeType": "application/octet-stream", "name": "GITMANIFEST--616fdf69-6077-4730-ba09-e7e0553d2f74", "size": "118"}
+file={"id": "1KgR24y8MQ9sSLbXWN7FOnYQ4TlvBhAa3", "md5Checksum": "f9059497dc674285b0fd751ab5f228aa", "mimeType": "application/x-trash", "name": "GITMANIFEST--616fdf69-6077-4730-ba09-e7e0553d2f74.bak", "size": "118"}
+file={"id": "1rwWwyiVGRuj1ZfD3LfZZjU5-W3qzPjoI", "md5Checksum": "532f61a8000c5705867af6ceec78bf2c", "mimeType": "application/octet-stream", "name": "GITBUNDLE-s390--616fdf69-6077-4730-ba09-e7e0553d2f74-3f9e9bcbf35c1556a5a99d20e025ac2003f3fb95586ec9b8b5eadfdb8eaa257c", "size": "390"}

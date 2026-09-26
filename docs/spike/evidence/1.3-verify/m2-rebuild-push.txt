@@ -1,0 +1,5 @@
+Full remote url: annex::b83f474b-3020-4b4c-8b90-d8c691bfff65?encryption=none&type=rclone
+To annex::
+ * [new branch]      main -> main
+ * [new branch]      git-annex -> git-annex
+rebuild push rc=0

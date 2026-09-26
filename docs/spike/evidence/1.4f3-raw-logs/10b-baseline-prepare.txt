@@ -1,0 +1,12 @@
+op=clean folder=1S7XOdRUH4SAwspZvAZDKl0BodFtoTeaZ trusted_manifest=1 trusted_bundles=2
+kept_count=5 moved_count=0 move_failures=0
+  [KEEP] /GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922.bak id=1wS2Tw09CBPTJXRbSmCKqFhFKqobDsJvi (manifest-內容相符)
+  [KEEP] /GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 id=1ZRDcmKebiTALUk-I8odOf1o3uaE7aaym (manifest-內容相符)
+  [KEEP] /GITBUNDLE-s2679--c2febd2f-f053-4012-8b0e-fa932e763922-fea4a9a31d7b24d5a6ab2a11f501a2300fa05f31e9a05e4ea312a3bbb628a8a6 id=1IXQUQ9-4MN98zzzLeJUtTvvFJTmR3CJm (bundle-被引用且雜湊相符)
+  [KEEP] /SHA256E-s204800--cda04a975f86da471071ffa0587c2177a2e5a99c3196bae13e9c179a0817cfaf.bin id=1cXz9056-pKjMBaBtrN-jeloOhfQiU-LP (annex-object-結構有效)
+  [KEEP] /GITBUNDLE-s389--c2febd2f-f053-4012-8b0e-fa932e763922-1a9eb385d331ee885f24606e14fb42731570bc701a516949c8d78056e9c3d504 id=1LwSZkzKpGBkiROKwUfLHVWHRAa4g1IpV (bundle-被引用且雜湊相符)
+CLEAN-OK
+== verify vs promoted ==
+verify: refs={"refs/heads/git-annex": "a51d0562232911bc9e6283b194fcd4df1f1b82a3", "refs/heads/main": "c41abe73b8b4d15d9fc4f18ec4c43709d9e30456"}
+verify: manifest_sha256=6ae3dd97e7576721… bundles=2
+prepare: OK

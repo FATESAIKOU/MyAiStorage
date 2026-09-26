@@ -1,0 +1,33 @@
+name: h4-sha-guard-test
+
+# H4 補測用：rerun 舊 run 會用「舊的 workflow 定義＋舊 commit」跑。
+# v2b：以 API 讀 main HEAD（帶 GITHUB_TOKEN），github.sha 不一致就立刻失敗。
+# 注意：這個檢查只保護「有帶檢查的版本」之後產生的 run；
+# 修補前產生的舊 run 被 rerun 時仍跑舊的（無檢查的）定義——這正是 H4 的風險。
+# 安全：只有 workflow_dispatch、不接受自由輸入；輸出只有 sha 與布林值；token 不印出。
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: h4-sha-guard-test
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: sha 檢查（v2b）：github.sha 必須等於 main 目前 HEAD
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "workflow_version=v2b-with-guard"
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          main_head="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          echo "main_head=$main_head"
+          if [ "$GITHUB_SHA" != "$main_head" ]; then
+            echo "::error::github.sha($GITHUB_SHA) != main HEAD($main_head)：這個 run 用的不是 main 最新版——立刻結束"
+            exit 1
+          fi
+          echo "SHA 檢查通過：這個 run 跑的是 main 最新版"

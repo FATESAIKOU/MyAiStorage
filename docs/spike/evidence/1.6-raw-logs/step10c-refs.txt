@@ -1,0 +1,12 @@
+== branches (PAT) ==
+{"message":"Resource not accessible by personal access token","documentation_url":"https://docs.github.com/rest/branches/branches#list-branches","status":"403"}gh: Resource not accessible by personal access token (HTTP 403)
+== tags (PAT) ==
+== git-annex workflow runs artifacts (PAT) ==
+== run artifact counts (PAT) ==
+{"artifacts_url":"https://api.github.com/repos/FATESAIKOU/aistorage-spike/actions/runs/36231178149/artifacts","id":36231178149,"name":"spike-empty-check"}
+{"artifacts_url":"https://api.github.com/repos/FATESAIKOU/aistorage-spike/actions/runs/36231131323/artifacts","id":36231131323,"name":"spike-empty-check"}
+{"artifacts_url":"https://api.github.com/repos/FATESAIKOU/aistorage-spike/actions/runs/36231073352/artifacts","id":36231073352,"name":"spike-empty-check"}
+{"artifacts_url":"https://api.github.com/repos/FATESAIKOU/aistorage-spike/actions/runs/36230892206/artifacts","id":36230892206,"name":"spike-git-annex"}
+{"artifacts_url":"https://api.github.com/repos/FATESAIKOU/aistorage-spike/actions/runs/36230774231/artifacts","id":36230774231,"name":"spike-git-annex"}
+== try trigger a workflow that does not exist (authz check) ==
+HTTP 404: workflow nonexistent.yml not found on the default branch (https://api.github.com/repos/FATESAIKOU/aistorage-spike/actions/workflows/nonexistent.yml)

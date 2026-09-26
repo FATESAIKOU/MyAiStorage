@@ -1,0 +1,6 @@
+== step2 final run state (my dispatched runs all on main) ==
+completed	success	spike-empty-check	spike-empty-check	main	workflow_dispatch	36231178149	12s	2026-09-26T08:54:23Z
+completed	success	spike-empty-check	spike-empty-check	main	workflow_dispatch	36231131323	14s	2026-09-26T08:53:38Z
+completed	success	spike-empty-check	spike-empty-check	main	workflow_dispatch	36231073352	10s	2026-09-26T08:52:12Z
+completed	success	spike-empty-check	spike-empty-check	main	workflow_dispatch	36227666548	13s	2026-09-26T07:43:52Z
+completed	failure	spike-empty-check	spike-empty-check	main	workflow_dispatch	36227630906	10s	2026-09-26T07:43:09Z

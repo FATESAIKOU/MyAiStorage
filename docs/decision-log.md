@@ -113,3 +113,11 @@ After an architect review of the re-scoped documents, the user confirmed:
 - The committer's full-Drive credential belongs to a dedicated Google account (family-sharing member, same 5 TB quota), already created by the user, so it cannot touch the user's personal Drive.
 - Terms: 住民 includes the phase-1 opencode; the phase-1 profile is "Mac opencode" (`mac-opencode`); 同步器 is the canonical term (上傳器 avoided); new terms 分裂, 統合, 相互參照, 同步並提交, 寫入機制, 認領.
 - All other review findings adopted: one container per Session in E2E; spike items widened (drive.file folder/same-name behavior, Drive revisions and trash in erase, concurrency cancellation, synthetic-volume timing, opencode session id / stop signal / sub-sessions, annex object reads); admin ops serialized with the committer; stop status only by explicit declaration; per-profile read identities; incremental read-view publishing; reserved role fields; arm64/amd64.
+
+## Spike 1.4f decision (2026-09-26)
+
+Spike 1.4 showed that a `drive.file` client from another project can create files in any folder whose id it knows (including the repo prefix), so same-name GITMANIFEST/GITBUNDLE injection can break clones or substitute forged history. The user decided:
+- One Google account per profile is not feasible. Workers share one GCP project and one OAuth client; the committer uses a separate project.
+- The user accepts the residual risks of countermeasure set A (detection-based, with a content-hash tip pin, a two-phase pin, a full-ref check, recursive sweep and quarantine, and inbox signing): (1) residents can inject files or cancel runs to make commits fail (detectable; no loss or silent tampering); (2) the ability to write into the repo folder still exists — a deliberate exception to "forbidden capabilities must not exist", to be recorded in a new ADR 0008; (3) Drive quota (shared family 5 TB) can be exhausted, caught only by monitoring; (4) workers under the shared client can delete each other's inbox items; the syncer re-uploads anything not committed.
+- Inbox signing with per-profile keys is mandatory (the producer stamp no longer relies on inbox isolation; ADR 0006 to be revised).
+- 1.4f counts as go only after review-1.4f2 H1/H2 are fixed and re-tested within the spike.

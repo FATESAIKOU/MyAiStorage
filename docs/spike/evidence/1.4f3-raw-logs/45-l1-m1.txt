@@ -1,0 +1,9 @@
+== L1: clean with empty pin (no trust) must refuse ==
+CLEAN-REFUSED: 沒有可信集合（例行清掃不得清空；首次初始化請用 --allow-empty-trust）
+empty_trust_rc=2
+== M1: verify with DoS injection (garbage manifest) must exit 2 ==
+http=200
+verify: remote unreadable (fail-closed)
+verify_dos_rc=2
+== cleanup DoS injection ==
+CLEAN-OK

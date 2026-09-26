@@ -1,0 +1,13 @@
+### committer creates committer-owned.txt in SPIKE_FOLDER_ID
+op=create-file
+name=committer-owned.txt
+parent=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj
+http=200
+file_id=13Tj__1eJrBAiH9660-XBn_sCQmOE2dZt
+md5=ac80f9624f201f8cdd9435e077799e79
+### committer creates inbox-host/ folder inside SPIKE_FOLDER_ID
+op=create-folder
+name=inbox-host
+parent=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj
+http=200
+file_id=1Znm_JQhWdZ5riHqPQlXNbYFwb8YRj1ep

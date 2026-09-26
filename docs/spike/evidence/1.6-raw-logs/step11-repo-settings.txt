@@ -1,0 +1,10 @@
+== repo settings: GET actions/permissions ==
+{"message":"Resource not accessible by personal access token","documentation_url":"https://docs.github.com/rest/actions/permissions#get-github-actions-permissions-for-a-repository","status":"403"}gh: Resource not accessible by personal access token (HTTP 403)
+== repo settings: PATCH actions/permissions (disable actions) ==
+{"message":"Resource not accessible by personal access token","documentation_url":"https://docs.github.com/rest/actions/permissions#set-github-actions-permissions-for-a-repository","status":"403"}gh: Resource not accessible by personal access token (HTTP 403)
+== repo settings: PATCH default workflow permissions ==
+{"message":"Resource not accessible by personal access token","documentation_url":"https://docs.github.com/rest/actions/permissions#set-default-workflow-permissions-for-a-repository","status":"403"}gh: Resource not accessible by personal access token (HTTP 403)
+== repo settings: PATCH repo (rename/homepage probe) — expect denied; verify no change ==
+{"message":"Resource not accessible by personal access token","documentation_url":"https://docs.github.com/rest/repos/repos#update-a-repository","status":"403"}gh: Resource not accessible by personal access token (HTTP 403)
+== control: repo name/settings unchanged ==
+FATESAIKOU/aistorage-spike has_wiki=false

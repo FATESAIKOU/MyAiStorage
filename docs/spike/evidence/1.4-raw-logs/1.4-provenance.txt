@@ -1,0 +1,45 @@
+### FRESH PROVENANCE PROOF (rand=e20985)
+--- step 1: C creates c-provenance-e20985.txt in SPIKE_FOLDER_ID (C token only)
+op=create-file
+name=c-provenance-e20985.txt
+parent=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj
+http=200
+file_id=1rq-KFEYNjGI6sa7h8wA4swOLYo4_nJu6
+md5=8fd1be067c3a4077751af2cf73ce6cea
+--- step 2: C files.get on its own new file (drive.file: only creatable/opened files visible)
+op=get
+target=1rq-KFEYNjGI6sa7h8wA4swOLYo4_nJu6
+http=200
+name=c-provenance-e20985.txt
+mime=text/plain
+md5=8fd1be067c3a4077751af2cf73ce6cea
+size=19
+created=2026-09-26T07:49:12.557Z
+modified=2026-09-26T07:49:12.557Z
+head_revision=0BxGkb7nCu1AXbkUwZHpkRVNHc3JBVVVwMEpKd0I0WnNLSHRzPQ
+trashed=False
+canEdit=True canDelete=True
+--- step 3: C files.get on committer-owned.txt (created by committer client) -- control
+op=get
+target=13Tj__1eJrBAiH9660-XBn_sCQmOE2dZt
+http=404
+reason=notFound
+message=File not found: 13Tj__1eJrBAiH9660-XBn_sCQmOE2dZt.
+--- step 4: committer sees c-provenance-e20985.txt in SPIKE_FOLDER_ID
+op=list-children
+target=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj
+http=200
+count=5
+file={"id": "1rq-KFEYNjGI6sa7h8wA4swOLYo4_nJu6", "md5Checksum": "8fd1be067c3a4077751af2cf73ce6cea", "mimeType": "text/plain", "name": "c-provenance-e20985.txt", "size": "19"}
+file={"id": "13Tj__1eJrBAiH9660-XBn_sCQmOE2dZt", "md5Checksum": "ac80f9624f201f8cdd9435e077799e79", "mimeType": "text/plain", "name": "committer-owned.txt", "size": "26"}
+file={"id": "1NS5ezXijgohjzXJv4oQnZCJStRCCiWDa", "mimeType": "application/vnd.google-apps.folder", "name": "c-folder-into-spike"}
+file={"id": "16s0_jlpueOguhCGUcL91TaXJdWQs57OE", "md5Checksum": "17fae4227f97d0c64d8429dd905e8583", "mimeType": "text/plain", "name": "c-into-spike.txt", "size": "12"}
+file={"id": "1Znm_JQhWdZ5riHqPQlXNbYFwb8YRj1ep", "mimeType": "application/vnd.google-apps.folder", "name": "inbox-host"}
+--- step 5: C children listing of SPIKE_FOLDER_ID (only C-created items visible)
+op=list-children
+target=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj
+http=200
+count=3
+file={"id": "1rq-KFEYNjGI6sa7h8wA4swOLYo4_nJu6", "md5Checksum": "8fd1be067c3a4077751af2cf73ce6cea", "mimeType": "text/plain", "name": "c-provenance-e20985.txt", "size": "19"}
+file={"id": "1NS5ezXijgohjzXJv4oQnZCJStRCCiWDa", "mimeType": "application/vnd.google-apps.folder", "name": "c-folder-into-spike"}
+file={"id": "16s0_jlpueOguhCGUcL91TaXJdWQs57OE", "md5Checksum": "17fae4227f97d0c64d8429dd905e8583", "mimeType": "text/plain", "name": "c-into-spike.txt", "size": "12"}

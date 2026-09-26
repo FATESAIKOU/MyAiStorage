@@ -1,0 +1,140 @@
+name: pin-writeback-impl2
+
+# 1.4f4 / M3：兩階段釘選寫回 GitHub 的實測（1.4 補測）。
+# 用 workflow 的 GITHUB_TOKEN（contents: write）把 pending／promoted 寫進專用分支
+# `pin-state`（`.pin/pin.pending.json`、`.pin/pin.json`），住民與 PAT 都寫不了 contents
+# （1.6 已證）。只用於技術驗證。
+#
+# 用法（gh 以本人的身分）：
+#   gh workflow run pin-writeback-impl2.yml --repo FATESAIKOU/aistorage-spike --ref main \
+#     -f op=write-pending -f payload='{"refs":{"refs/heads/main":"…","refs/heads/git-annex":"…"}}'
+#   gh workflow run pin-writeback-impl2.yml ... -f op=promote -f observed='{"refs":{…}}' [-f fail=true]
+on:
+  workflow_dispatch:
+    inputs:
+      op:
+        description: 'write-pending | promote'
+        type: choice
+        options: [write-pending, promote]
+        default: write-pending
+      payload:
+        description: 'pending 的內容（JSON；write-pending 用）'
+        required: false
+        default: '{}'
+      observed:
+        description: '遠端觀察到的內容（JSON；promote 用；等於 pending 才轉正、等於 promoted 就丟棄 pending，其餘中止）'
+        required: false
+        default: '{}'
+      fail:
+        description: 'true = 在寫入 promoted 之前故意失敗（模擬中斷）'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pin-writeback-impl2
+  cancel-in-progress: false
+
+jobs:
+  pin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout（main）
+        uses: actions/checkout@v4
+
+      - name: 取得 pin-state 分支（不存在就從 main 開）
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git fetch origin pin-state 2>/dev/null; then
+            git checkout -B pin-state origin/pin-state
+            echo "existing pin-state branch"
+          else
+            git checkout -B pin-state
+            echo "new pin-state branch from main"
+          fi
+          mkdir -p .pin
+          ls -la .pin || true
+
+      - name: write-pending
+        if: inputs.op == 'write-pending'
+        env:
+          PAYLOAD: ${{ inputs.payload }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$PAYLOAD" > .pin/pin.pending.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('.pin/pin.pending.json'))
+          d['state'] = 'pending'
+          json.dump(d, open('.pin/pin.pending.json','w'), indent=2, sort_keys=True)
+          PY
+          git add .pin/pin.pending.json
+          git commit -m "pin: write pending"
+          git push origin pin-state
+
+      - name: promote
+        if: inputs.op == 'promote'
+        env:
+          OBSERVED: ${{ inputs.observed }}
+          FAIL: ${{ inputs.fail }}
+        run: |
+          set -euo pipefail
+          if [ ! -f .pin/pin.pending.json ]; then
+            echo "no pending on pin-state; nothing to promote"
+            exit 1
+          fi
+          printf '%s' "$OBSERVED" > /tmp/observed.json
+          python3 - <<'PY'
+          import json, sys
+          pending = json.load(open('.pin/pin.pending.json'))
+          observed = json.load(open('/tmp/observed.json'))
+          promoted = None
+          try:
+            promoted = json.load(open('.pin/pin.json'))
+          except FileNotFoundError:
+            pass
+          if observed.get('refs') == pending.get('refs'):
+            print('observed == pending -> promote')
+            sys.exit(0)
+          if promoted and observed.get('refs') == promoted.get('refs'):
+            print('observed == promoted -> drop pending')
+            open('/tmp/drop','w').write('1')
+            sys.exit(0)
+          print('observed 與 pending/promoted 皆不符 -> fail-closed')
+          sys.exit(2)
+          PY
+          if [ "${FAIL}" = "true" ]; then
+            echo "SIMULATED FAILURE: 在寫入 promoted 之前中止（pending 留在分支上）"
+            exit 1
+          fi
+          if [ -f /tmp/drop ]; then
+            rm .pin/pin.pending.json
+            git add -A .pin
+            git commit -m "pin: drop ineffective pending"
+            git push origin pin-state
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json
+          d = json.load(open('.pin/pin.pending.json'))
+          d['state'] = 'promoted'
+          json.dump(d, open('.pin/pin.json','w'), indent=2, sort_keys=True)
+          PY
+          rm .pin/pin.pending.json
+          git add -A .pin
+          git commit -m "pin: promote"
+          git push origin pin-state
+
+      - name: 顯示最終 pin 狀態（非秘密）
+        if: always()
+        run: |
+          echo "--- .pin on $(git rev-parse --abbrev-ref HEAD) ---"
+          ls -la .pin || true
+          for f in .pin/pin.json .pin/pin.pending.json; do
+            if [ -f "$f" ]; then echo "== $f"; cat "$f"; fi
+          done

@@ -1,0 +1,53 @@
+### 1.4c C update-name A's a-visible.txt
+op=update-name
+target=1a7Hc3nP7INdYY0LZGYezLeWp9ZLdZzHC
+new_name=c-renamed-a.txt
+http=403
+reason=appNotAuthorizedToFile
+message=The user has not granted the app <app-id-redacted> write access to the file 1a7Hc3nP7INdYY0LZGYezLeWp9ZLdZzHC.
+### 1.4c C delete A's a-visible.txt
+op=delete
+target=1a7Hc3nP7INdYY0LZGYezLeWp9ZLdZzHC
+http=404
+reason=notFound
+message=File not found: 1a7Hc3nP7INdYY0LZGYezLeWp9ZLdZzHC.
+### 1.4b C update-name A's probe folder
+op=update-name
+target=1kAcj-CER8VRRTWoHG7GAxHMY-vsbsZ1j
+new_name=c-renamed-a-folder
+http=403
+reason=appNotAuthorizedToFile
+message=The user has not granted the app <app-id-redacted> write access to the file 1kAcj-CER8VRRTWoHG7GAxHMY-vsbsZ1j.
+### 1.4b C delete A's probe folder
+op=delete
+target=1kAcj-CER8VRRTWoHG7GAxHMY-vsbsZ1j
+http=404
+reason=notFound
+message=File not found: 1kAcj-CER8VRRTWoHG7GAxHMY-vsbsZ1j.
+### A post-check: file + folder intact
+op=get
+target=1a7Hc3nP7INdYY0LZGYezLeWp9ZLdZzHC
+http=200
+name=a-visible.txt
+mime=text/plain
+md5=c688cdb38fa59b486416db3d4bcff7da
+size=20
+created=2026-09-26T07:38:39.250Z
+modified=2026-09-26T07:38:39.250Z
+head_revision=0BxGkb7nCu1AXNWdlcncxWGhPTTU0U0pHazkxQlRyaGFrRHVvPQ
+trashed=False
+parents=['1kAcj-CER8VRRTWoHG7GAxHMY-vsbsZ1j']
+canEdit=True canDelete=True
+op=get
+target=1kAcj-CER8VRRTWoHG7GAxHMY-vsbsZ1j
+http=200
+name=aistorage-spike-probe-a
+mime=application/vnd.google-apps.folder
+md5=None
+size=None
+created=2026-09-26T07:38:29.171Z
+modified=2026-09-26T07:38:29.171Z
+head_revision=None
+trashed=False
+parents=['0ABGkb7nCu1AXUk9PVA']
+canEdit=True canDelete=True

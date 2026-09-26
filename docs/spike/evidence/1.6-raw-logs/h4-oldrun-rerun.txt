@@ -1,0 +1,4 @@
+check	Checkout（只為了拿到 inbox_probe.py，不 clone Drive repo）	2026-09-26T11:48:51.5219671Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +8c514c50601399eb91991add90d7d266935b7584:refs/remotes/origin/main
+check	Checkout（只為了拿到 inbox_probe.py，不 clone Drive repo）	2026-09-26T11:48:51.9568445Z  * [new ref]         8c514c50601399eb91991add90d7d266935b7584 -> origin/main
+check	Checkout（只為了拿到 inbox_probe.py，不 clone Drive repo）	2026-09-26T11:48:51.9675336Z [command]/usr/bin/git log -1 --format=%H
+check	Checkout（只為了拿到 inbox_probe.py，不 clone Drive repo）	2026-09-26T11:48:51.9696299Z 8c514c50601399eb91991add90d7d266935b7584

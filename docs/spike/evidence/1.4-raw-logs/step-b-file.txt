@@ -1,0 +1,13 @@
+### B creates b-own.txt in its folder
+op=create-file
+name=b-own.txt
+parent=1_F3u9VqO3BEGrwo7-Iw9Hnt2VEUFo1o7
+http=200
+file_id=1DY0LGXEYlr3kpMk5GA6vE3xYjRKbo35h
+md5=436fd61a1c5a3fc6feb092272b80e19e
+### B creates inbox-b/ folder in its space
+op=create-folder
+name=inbox-b
+parent=1_F3u9VqO3BEGrwo7-Iw9Hnt2VEUFo1o7
+http=200
+file_id=1DxLZShmbp0oDFMDmf1Ym3ZbZMBIKe8-r

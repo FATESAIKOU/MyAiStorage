@@ -1,0 +1,12 @@
+== lsf with double slash ==
+GITBUNDLE-s2679--c2febd2f-f053-4012-8b0e-fa932e763922-fea4a9a31d7b24d5a6ab2a11f501a2300fa05f31e9a05e4ea312a3bbb628a8a6
+GITBUNDLE-s389--c2febd2f-f053-4012-8b0e-fa932e763922-1a9eb385d331ee885f24606e14fb42731570bc701a516949c8d78056e9c3d504
+GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922
+== cat with double slash ==
+2026/09/26 14:00:26 NOTICE: Failed to cat: directory not found
+== cat with single slash ==
+GITBUNDLE-s389--c2febd2f-f053-4012-8b0e-fa932e763922-1a9eb385d331ee885f24606e14fb42731570bc701a516949c8d78056e9c3d504
+GITBUNDLE-s2679--c2febd2f-f053-4012-8b0e-fa932e763922-fea4a9a31d7b24d5a6ab2a11f501a2300fa05f31e9a05e4ea312a3bbb628a8a6
+== ls-remote from a scratch repo ==
+a51d0562232911bc9e6283b194fcd4df1f1b82a3	refs/heads/git-annex
+c41abe73b8b4d15d9fc4f18ec4c43709d9e30456	refs/heads/main

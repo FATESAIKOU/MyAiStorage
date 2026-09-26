@@ -1,0 +1,2 @@
+drop session-1-attachment.bin ok
+(recording state in git...)

@@ -1,0 +1,20 @@
+### final listing of agora-attack before disposal (evidence)
+op=list-children
+target=1IP1mlfMuF4lrV53juSyPINrItax9g72I
+http=200
+count=6
+file={"id": "1nFYsQFswX20bmGebeffNj-O-oxmXTgxn", "md5Checksum": "55fbfd3d18ca68036c1996153dcfc930", "mimeType": "application/octet-stream", "name": "GITMANIFEST--4c20f00b-9ec3-4457-b5b3-7f3e0c52d7d6", "size": "118"}
+file={"id": "14SUvZKgdiiLr_vU1GTOe5qyPeNwtA7LD", "md5Checksum": "ae5819a6b9bc9c9cc499f3f3a01d0118", "mimeType": "application/octet-stream", "name": "GITBUNDLE-s331--4c20f00b-9ec3-4457-b5b3-7f3e0c52d7d6-3b4b816e9c3f4e1e23a9c2f6cbdd6e985696d6c3e2185f233ece9ecf275395ae", "size": "331"}
+file={"id": "1OM-aB-WZ6NBG5V5AfKFpmwWooTTMg6ol", "md5Checksum": "01072dba600820a3ca689ec929592328", "mimeType": "text/plain", "name": "c-into-repo.txt", "size": "11"}
+file={"id": "1WJ_5KX3OZMG2qd4SPX1Lp4LYHYkRDrm6", "md5Checksum": "5ca7262727ec48114ca016bc4fa54219", "mimeType": "application/octet-stream", "name": "GITMANIFEST--4c20f00b-9ec3-4457-b5b3-7f3e0c52d7d6", "size": "118"}
+file={"id": "10KfOTfyCQPFKPCOwfXYiDypgOpOw3JWU", "md5Checksum": "5ca7262727ec48114ca016bc4fa54219", "mimeType": "application/x-trash", "name": "GITMANIFEST--4c20f00b-9ec3-4457-b5b3-7f3e0c52d7d6.bak", "size": "118"}
+file={"id": "1_7LHRn80-4HXvQPtlBTGwdXmUQ_6RmMi", "md5Checksum": "3eff25fffc89d57fcd8835fb76429043", "mimeType": "application/octet-stream", "name": "GITBUNDLE-s395--4c20f00b-9ec3-4457-b5b3-7f3e0c52d7d6-93a4e2d836810fe76f6e461a4b4ca6e63e9073c1ee79ae428878150603116c8d", "size": "395"}
+### dispose agora-attack folder (plan: 驗完即丟)
+op=delete
+target=1IP1mlfMuF4lrV53juSyPINrItax9g72I
+http=204
+### verify gone from SPIKE root
+op=find-name
+target=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj
+http=200
+count=0
