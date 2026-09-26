@@ -209,7 +209,9 @@ Agora 與 Foundry 分成兩個 repo，是依 ADR 0001「要素各自獨立」。
   - 讀取介面下載索引到本地查詢：篩選用 metadata 欄位，全文用閱讀版。期 1 資料量小，下載成本低。
   - 之後可以把後端換成語意搜尋或雲端查詢，查詢的形狀不變（spec「搜尋後端可以替換或疊加」）。
 
-**之後**：手機 App（MyAiEntry，Capacitor／TypeScript）也要用同一個讀取介面，所以實作語言的提案要考慮它能不能有 TypeScript 版的用戶端，或共用同一份查詢規格。
+**實作語言**（使用者 2026-09-27 決定）：Python 3.12（提交流程、同步器、讀取介面的函式庫與 CLI、管理腳本）；opencode 的 plugin 用 TypeScript（opencode 的限制）。
+
+**之後**：手機 App（MyAiEntry，Capacitor／TypeScript）也要用同一個讀取介面，所以索引格式與查詢規格要寫成可以獨立實作的規格，之後另寫 TypeScript 版的用戶端（手機的原生 SQLite 版本不一定支援 trigram，要在那時確認）。
 
 ### D6. Atelier：期 1 只做需求設計
 
