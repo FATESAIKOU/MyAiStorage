@@ -121,3 +121,12 @@ Spike 1.4 showed that a `drive.file` client from another project can create file
 - The user accepts the residual risks of countermeasure set A (detection-based, with a content-hash tip pin, a two-phase pin, a full-ref check, recursive sweep and quarantine, and inbox signing): (1) residents can inject files or cancel runs to make commits fail (detectable; no loss or silent tampering); (2) the ability to write into the repo folder still exists — a deliberate exception to "forbidden capabilities must not exist", to be recorded in a new ADR 0008; (3) Drive quota (shared family 5 TB) can be exhausted, caught only by monitoring; (4) workers under the shared client can delete each other's inbox items; the syncer re-uploads anything not committed.
 - Inbox signing with per-profile keys is mandatory (the producer stamp no longer relies on inbox isolation; ADR 0006 to be revised).
 - 1.4f counts as go only after review-1.4f2 H1/H2 are fixed and re-tested within the spike.
+
+## Spike 1.9 go decision (2026-09-27)
+
+After reviewing `docs/spike/report.md`, the user decided:
+- **go-with-design-changes.** The design changes in report section 3 are written back into design, ADRs, and tasks and reviewed before group 2 starts; spike resources are cleaned up at this point.
+- Q2: all workers share one read identity (one service account). Revoking read access means rotating that shared key, which affects every worker.
+- Q3: the syncer decides whether to upload by comparing against Agora (the read view), not only its own local record. It uploads when Agora lacks the Session or has an older version. Items already uploaded but not yet committed count as pending and are not re-uploaded; if they are still missing after the next commit, the syncer uploads them again. This protects against other workers under the shared client deleting inbox items, without adding Actions minutes.
+- Q5: the commit schedule interval is configurable, defaulting to every 6 hours, and the commit pipeline can also be triggered manually. Actions minutes come from the user's GitHub account (2,000/month free, shared with MyLinuxPool); estimated 276–372 minutes/month, so monitor actual usage.
+- 1.7j (clock after sleep/wake) stays open and does not block go; it will be re-tested with the user later.
