@@ -9,8 +9,9 @@ AiStorage 需要 MyLinuxPool 做的事。期 1 沒有相依：期 1 的 profile 
 - AiStorage 的身分模型是「持有哪個 profile 的憑證，就屬於哪個 profile」。憑證要有**唯一的發放來源**，目標是 MyLinuxPool。
 - 需要：建 worker 時，把該 profile 的 AiStorage 憑證注入 worker（目前的機制是 profile `secrets`）；撤銷以 profile 為單位，輪替該 profile 的憑證後，新建的 worker 拿到新憑證。
 - 每個 profile 要注入的憑證（期 1 的 Mac opencode profile 是同一個形狀）：
-  - Drive 收件匣用的 OAuth client 與 refresh token（`drive.file` scope，每個 profile 一個 client）。
-  - 讀取用的 service account 金鑰（每個 profile 各自一個，對讀取視圖資料夾是 reader）。
+  - Drive 收件匣用的 OAuth client 與 refresh token（`drive.file` scope）：**所有 worker 共用同一個 client 與同一份 refresh token**（技術驗證 1.4 之後的決定；每個 worker 各自授權可能碰到 Google 對 refresh token 數量的上限；這一點未實測、出處待補）。以唯讀方式掛在 `/secrets/`。
+  - 讀取用的 service account 金鑰：**所有 worker 共用一個**（使用者決定），對讀取視圖資料夾是 reader。conf 裡的金鑰路徑寫容器內的路徑。
+  - **每個 profile 各自一把簽章金鑰**（新增）：同步器用它對收件匣項目簽章，提交流程驗章；產生者章與以 profile 為單位的撤銷都靠它。需要：發放、輪替、撤銷（撤銷＝通知 AiStorage 不再接受該公開金鑰）。
   - GitHub fine-grained token（MyAiStorage 只有 Actions 寫入權，用來觸發提交流程；員工另有 MyBrain 唯讀）。
   - 另外，worker 裡的 opencode 需要 LLM provider 金鑰；容器裡允許的憑證是一份白名單（AiStorage design D3）。
 - 實際的 secrets 名稱與檔案格式，期 1 實作後補上。

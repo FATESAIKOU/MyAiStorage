@@ -101,4 +101,4 @@
 - 資源清單：`docs/resources.md`（定稿時補上這次新建的：測試 repo 的 `pin-state` 分支、測試用 workflow、各個拋棄式前綴）。
 - **已先處理（2026-09-27）**：測試 repo 裡所有 workflow（`sweep-cost-measure`、`spike-commit-pipeline`、`spike-git-annex`、`pin-writeback-impl2`、`h4-sha-guard-test`、`spike-empty-check`）都已 disable。其中三個帶 `RCLONE_CONF`（專用帳號的完整 Drive 權限，範圍不只測試資料夾）。**正式資料進入專用帳號之前**，必須刪除這些 workflow 與 secret，並輪替 committer token。副本在 `spike/workflows/`。
 - 垃圾桶的清理方式：使用者判定之後，清空整個專用帳號的垃圾桶（它只放 AiStorage 的資料），再以 `trashed=true` 的查詢確認結果是 0；impl4 列的 22 個 id 包含在內，不單獨處理。
-- 清理在使用者判定之後才做，範圍包括：所有 `agora-*` 前綴、隔離資料夾（目前約 29 筆）、`drive.file` 在根目錄建的資料夾與收件匣、**整個帳號的垃圾桶**、測試 repo 的 workflow、分支與 run、各容器工作目錄裡的 `auth.json`、refresh token、PAT、SA 金鑰與兩個 GCP project。
+- **2026-09-27 已完成清理**（使用者決定只清測試資料、保留帳號設定；紀錄 `1.9-cleanup.md`）。原本列的完整範圍如下，其中 GCP project、OAuth client、SA 金鑰、PAT 保留給第 2 組：所有 `agora-*` 前綴、隔離資料夾（目前約 29 筆）、`drive.file` 在根目錄建的資料夾與收件匣、**整個帳號的垃圾桶**、測試 repo 的 workflow、分支與 run、各容器工作目錄裡的 `auth.json`、refresh token、PAT、SA 金鑰與兩個 GCP project。

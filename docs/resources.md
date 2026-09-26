@@ -28,6 +28,8 @@ AiStorage 用到的實體資源都記在這裡：Drive 資料夾、OAuth client�
 | `aistorage-spike-inbox-*`、`aistorage-spike-*` | Drive 資料夾 | 專用帳號「我的雲端硬碟」根目錄（`drive.file` client 建不進 `aistorage-spike`，只能以資料夾 id 追蹤） | 1.4、1.8 的收件匣 | Mac opencode／測試 | 驗證用 |
 | 容器工作目錄 | 本機目錄 | Mac 的 `~/.local/share/aistorage-spike/work/`（含 opencode 產生的明文 `auth.json`） | 各項的一次性容器與 clone | — | 驗證用 |
 
-### 清理
+### 清理（2026-09-27 完成，只清測試資料）
 
-依 `docs/spike/report.md` 第六節，在使用者判定 go／no-go 之後進行：刪除上面所有驗證用資源、清空專用帳號的垃圾桶並以 `trashed=true` 查詢確認為 0、撤銷 refresh token、PAT 與 SA 金鑰、刪除兩個 GCP project、從測試 repo 移除 `RCLONE_CONF`。完成後更新本表，並把紀錄存到 `docs/spike/evidence/1.9-cleanup.md`。
+使用者決定只清測試資料、保留帳號設定，供第 2 組的整合測試使用。已刪除：`aistorage-spike` 資料夾底下的所有子項（各 `agora-*` 前綴、隔離資料夾）、根目錄的 `aistorage-spike-*` 資料夾與收件匣、整個專用帳號的垃圾桶（`trashed=true` 查詢為 0）、測試 repo 的所有 workflow、`RCLONE_CONF` secret、`pin-state` 分支與全部 run、Mac 上的容器工作目錄（含 `auth.json`）。**保留**：專用帳號、兩個 GCP project、四個 OAuth client、`spike-reader` SA、`aistorage-spike` 資料夾本身、測試 repo（只剩 main）、PAT、ollama-cloud key、`~/.config/aistorage-spike/`、docker image `aistorage-spike-env`。紀錄見 `docs/spike/evidence/1.9-cleanup.md`。上表中已刪除的列保留作為紀錄。
+
+提交流程的 client 要搬到獨立的 GCP project（tasks 2.5），完成後舊的 committer client 撤銷，本表隨之更新。

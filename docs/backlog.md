@@ -44,3 +44,11 @@
 - 提交流程的 clone 加速（Actions cache、定期重整 bundle），視技術驗證 1.8 的結果；注意它們會多出抹除要處理的副本。
 - 內容層級的讀取授權：讀取視圖依可見範圍分資料夾（例如 LLMGateway 的隱私 tag）。
 - 跨 repo 介面契約 `docs/contracts/`（收件匣上傳格式、觸發並等待提交流程的方式、能力清單格式、各 profile 的 secrets 名稱），等第一個外部消費者要開工時再寫。
+
+## 技術驗證（2026-09-27）留下的待辦
+
+- 偵測 opencode 的 fork：fork 沒有 parent 欄位、訊息 id 全部重生，用（時間＋內容雜湊）的前綴比對找出母 Session，建議建一條參考或接續 Link（技術驗證 1.7h）。
+- 每個 profile 各自一個 Google 帳號：能從根源擋住注入（profile 的 token 建不進沒被分享的資料夾），做到的話 ADR 0008 可以撤回，偵測機制保留為縱深防禦。需要先補測「別的帳號的 `drive.file` client 建不進未分享的資料夾」。
+- 容器時鐘在睡眠喚醒後的漂移（技術驗證 1.7j），與使用者一起補測。
+- 1.3 誤刪事件的時間點與根本原因補進 `docs/spike/evidence/1.3-erase.md`（推測是 `rclone --drive-trashed-only` 的清單混入 live 資料夾）。
+- 提交流程的釘選值寫回、清掃在 Actions cache 或自架 runner 下的行為（如果之後採用）。

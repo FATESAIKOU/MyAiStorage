@@ -14,15 +14,16 @@ AiStorage 要做的是**外部化狀態**：先問這個 AI 系統應該記住�
 
 ## What Changes
 
-期 1 只建立驗證這三種關係所需的最小集合，並留好擴張點。扮演 AI 的是 **Mac 上的 opencode**（在隔離的容器裡執行，見 design D3）。秘書與員工都不在期 1：worker 目前還不能跑 AI agent，手機 App 的整合排在待辦清單。期 1 之後不再分期規劃，其餘事項一律收在 `docs/backlog.md`。詞彙依 `CONTEXT.md`，架構決定依 `docs/adr/0001〜0007`。
+期 1 只建立驗證這三種關係所需的最小集合，並留好擴張點。扮演 AI 的是 **Mac 上的 opencode**（在隔離的容器裡執行，見 design D3）。秘書與員工都不在期 1：worker 目前還不能跑 AI agent，手機 App 的整合排在待辦清單。期 1 之後不再分期規劃，其餘事項一律收在 `docs/backlog.md`。詞彙依 `CONTEXT.md`，架構決定依 `docs/adr/0001〜0008`。
 
 - **共通約定**：
   - 每個項目都由 metadata 與本體組成。共通 metadata 有六個欄位：id（不變）、型態、產生者、時間、所屬案件、出處。
-  - 身分以 profile 為單位；各要素依 profile 授權，產生者由介面依認證結果蓋章。期 1 的 profile 憑證由你本人手動安裝，「由 MyLinuxPool 證明 profile 歸屬」等 MLP 的 profile 重新設計後再接（工單見 `docs/tickets/mylinuxpool.md`）。
+  - 身分以 profile 為單位；各要素依 profile 授權，產生者由介面依認證結果蓋章。worker 共用存取儲存實體的憑證，profile 由各自的簽章金鑰證明，收件匣項目沒有簽章或驗章失敗一律拒收（技術驗證之後的決定，ADR 0006 修訂）。期 1 的 profile 憑證由你本人手動安裝，「由 MyLinuxPool 證明 profile 歸屬」等 MLP 的 profile 重新設計後再接（工單見 `docs/tickets/mylinuxpool.md`）。
   - **讀寫分離**（ADR 0007）：每個要素的讀取手段只有一個讀取介面，讀的時候可以指定新鮮度；寫入端用來維持新鮮度的機制依成本選擇、之後再追加，期 1 只給最便宜的一種。讀取介面的形狀不隨寫入機制改變。
 - **Agora**：
   - 儲存：原始紀錄是真本，閱讀版可以重建；Session 有狀態（運作中／停止中）。
   - 變更：改寫可回滾，而且不改變位置；另有抹除，只有你本人能執行。
+  - 真本完整性：住民的憑證仍然能在 repo 資料夾建檔（技術驗證 1.4），所以提交流程每一輪以住民碰不到的釘選值核對真本、清掃並隔離注入物、回收舊 bundle，偽造的歷史不會成為真本（ADR 0008）。
   - 關係：Session Link（接續／參考）、接續點；接續經由交接單與認領建立（design D10）；分裂、統合與相互參照都要成立。
   - 同步：opencode 同步器（Mac），平時定期同步；寫交接單前、或想讓別的 Session 讀到進度時，同步並提交一次。停止中由明確宣告，不從閒置推測。
   - 讀取：搜尋（篩選＋全文）、讀取 Session（含兩個方向的 Link）、列出待認領的交接單，都經由同一個讀取介面，每筆結果附快照時間。
@@ -54,7 +55,7 @@ AiStorage 要做的是**外部化狀態**：先問這個 AI 系統應該記住�
 ### New Capabilities
 
 - `common/item-model`：項目＝metadata＋本體、共通 metadata 六欄位、不變的 id、項目之間互相參照的方式，以及 metadata 可以加欄位的擴張點。
-- `common/identity`：身分＝profile、profile 憑證證明歸屬、各要素依 profile 授權、產生者蓋章，以及期 1 的身分種類。
+- `common/identity`：身分＝profile、profile 憑證證明歸屬（共用存取憑證時以簽章金鑰證明）、各要素依 profile 授權、產生者蓋章、禁止能力不存在與它的唯一例外（ADR 0008），以及期 1 的身分種類。
 - `agora/session-record`：原始紀錄與閱讀版、Session 狀態、改寫與抹除、永久保存、單一 Session 手動匯入。
 - `agora/session-sync`：來源應用的同步器、定期同步與接續前同步、寫入端維持新鮮度的機制。
 - `agora/session-link`：接續與參考、接續點、交接單與認領、分裂、統合與相互參照、所屬案件。

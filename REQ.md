@@ -35,7 +35,7 @@
 |---|---|
 | `CONTEXT.md` | 術語表。**所有討論與產出都用這裡的詞，而且只用這裡的詞** |
 | `docs/decision-log.md` | 需求 grill 的 31 個決定、分期、擴張點、外部前提、使用者的限制（英文） |
-| `docs/adr/0001〜0007` | 架構決定與理由 |
+| `docs/adr/0001〜0008` | 架構決定與理由 |
 | `openspec/changes/establish-aistorage-phase1/` | 期 1 的 proposal、8 份 specs、design（D1〜D10）、tasks（9 組） |
 | `docs/backlog.md` | 期 1 之外的待辦清單（手機秘書、worker 與員工、Atelier 實作、MyBrain PR、數 GB 大檔等） |
 | `docs/atelier/` | Atelier 的需求設計（期 1 只做到這一層） |
@@ -112,7 +112,7 @@
 
 ※ **隱私與憑證**：使用者已經同意隊員讀本 repo 的設計文件；但 MyBrain 的內容、真實的 Session 內容，不要交給隊員的外部模型處理。秘密的值不得出現在 prompt、log、repo 或報告裡，隊員只能透過環境變數或檔案路徑引用秘密，也不得把秘密檔案的內容印出來。要在 Google Cloud Console 或 GitHub 設定頁建立的東西，由使用者操作，PM 負責告訴他步驟。整合測試只能用測試專用的 Drive 資料夾與 repo。
 
-※ **能力邊界**：住民（秘書、員工，以及期 1 在 Mac 容器裡的 opencode）不得持有任何能改寫 Agora / Foundry / Atelier 真本的憑證。禁止的能力要做成「根本不存在」，不能靠 AI 遵守文字約定。dont 只是行為約定，不是安全邊界。
+※ **能力邊界**：住民（秘書、員工，以及期 1 在 Mac 容器裡的 opencode）不得持有任何能改寫 Agora / Foundry / Atelier 真本的憑證。禁止的能力要做成「根本不存在」，不能靠 AI 遵守文字約定。dont 只是行為約定，不是安全邊界。**有意識的例外（2026-09-26 使用者接受）**：住民仍然能在 repo 資料夾裡「建檔」（Drive `drive.file` 的限制，技術驗證 1.4），真本的完整性改由提交流程的偵測、隔離、釘選保證（ADR 0008）；改寫與刪除真本的能力仍然不存在。
 
 ※ **抹除只有使用者本人能執行**（使用管理憑證）。AI 發現不該留存的內容時，只能以改寫遮蔽（舊版本仍在），並提醒使用者去抹除。
 
