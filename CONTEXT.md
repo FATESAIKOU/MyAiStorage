@@ -43,7 +43,7 @@ _Avoid_: index、registry
 ### 共通
 
 **住民**:
-住在某個 AI 應用或 AiContainer 裡、使用 AiStorage 的 AI。手機 App 的住民是秘書，AiContainer 的住民是員工。
+住在某個 AI 應用或 AiContainer 裡、使用 AiStorage 的 AI。手機 App 的住民是秘書，AiContainer 的住民是員工；期 1 在 Mac 容器裡執行的 opencode 也是住民。
 _Avoid_: agent、bot
 
 **共通約定**:
@@ -51,11 +51,11 @@ _Avoid_: agent、bot
 _Avoid_: AiStorage API、統一介面
 
 **profile**:
-一類執行體的配置，決定它有哪些能力、能拿到哪些授權；比喻上是部門。AiContainer 的 worker 各屬於一個 profile，手機 App 與同步程式也各算一種 profile。
+一類執行體的配置，決定它有哪些能力、能拿到哪些授權；比喻上是部門。AiContainer 的 worker 各屬於一個 profile，手機 App 與同步程式也各算一種 profile。期 1 唯一實際使用的是 Mac opencode（Mac 容器裡的 opencode 與它的同步器），程式識別名 `mac-opencode`。
 _Avoid_: 機器設定、環境
 
 **身分**:
-一個執行體屬於哪個 profile，由 MyLinuxPool 證明。AI 自己載入的職務不構成身分。
+一個執行體屬於哪個 profile，由它持有的該 profile 憑證證明；憑證只有一個發放來源（目標是 MyLinuxPool，期 1 由你本人手動安裝）。AI 自己載入的職務或自己的宣稱不構成身分。
 _Avoid_: 帳號、user
 
 **授權**:
@@ -63,17 +63,42 @@ _Avoid_: 帳號、user
 _Avoid_: permission、權限設定
 
 **收件匣**:
-每個 profile 專屬的投遞處。寫入者只能把原始紀錄、metadata、改寫提案、職務修改提案放進自己的收件匣，碰不到任何要素的真本。
+每個 profile 專屬的投遞處，由該 profile 自己的 client 建立，以資料夾 id 辨識。寫入者只能把原始紀錄、metadata、交接單、認領、改寫提案、產出登錄（之後還有職務修改提案）放進自己的收件匣，碰不到任何要素的真本。
 _Avoid_: inbox、queue、暫存區
 
 **提交流程**:
-唯一能把收件匣內容寫進 Agora、Foundry、Atelier 真本的角色。它負責驗證、蓋產生者章、轉出閱讀版、跑 judge、更新讀取視圖；同一時間只有一個在跑。
+唯一能把收件匣內容寫進 Agora、Foundry（之後還有 Atelier）真本的角色。它負責驗證、蓋產生者章、轉出閱讀版、處理交接單與認領、更新讀取視圖；同一時間只有一個在跑，管理操作也要跟它錯開。
 _Avoid_: ingest job、後端
 程式識別名：`committer`
 
 **讀取視圖**:
-提交流程每次提交後，以一般檔案發佈的唯讀內容：metadata、閱讀版、產出目錄、搜尋索引。給不能跑 git 的讀者讀，屬於衍生物，可以重建。
+提交流程每次提交後，以一般檔案發佈的唯讀內容：metadata、閱讀版、Session Link 與交接單、快照時間、產出目錄、搜尋索引。讀取介面背後讀的就是它，屬於衍生物，可以重建。
 _Avoid_: read model、快取、鏡像
+
+**讀取介面**:
+一個儲存要素對讀者提供的唯一讀取手段。讀的時候可以指定新鮮度；形狀不隨寫入機制或儲存後端改變。每個要素各有自己的讀取介面，沒有統一的入口。
+_Avoid_: API、read endpoint、查詢服務
+
+**同步器**:
+來源應用這一側，把 Session 的原始紀錄與 metadata 放進自己 profile 收件匣的程式；每個來源應用一個。格式轉換不在這裡，在提交流程的轉換器。
+_Avoid_: 上傳器、uploader、sync client
+程式識別名：`syncer`（目錄 `syncers/`）
+
+**同步並提交**:
+寫入者主動做的一次同步（可以連同交接單、認領等項目一起放進收件匣），接著觸發提交流程，並等到讀取介面看得到這次放進去的每一個項目、或它的拒絕原因為止。接續、認領時一定要做；想讓並行的 Session 讀到進度時也可以做。
+_Avoid_: flush、push、publish
+
+**寫入機制**:
+寫入端用來維持新鮮度的做法，例如同步的頻率、提交流程的觸發方式。依成本選擇、逐步追加，改變寫入機制不改變讀取介面。
+_Avoid_: sync strategy、更新策略
+
+**新鮮度**:
+讀到的內容最多落後來源應用多久，以快照時間衡量。讀者在讀取時指定要求；達不到時照樣拿到內容，附上警告。一個 Session 能維持多新，由寫入端的機制（同步與提交的頻率）決定，讀取不會觸發寫入。
+_Avoid_: freshness、即時性、延遲
+
+**快照時間**:
+同步器擷取某份原始紀錄的時間。每筆讀取結果都附上它；停止中的 Session，只要最新快照在它停止之後，就永遠算最新。
+_Avoid_: timestamp、更新時間
 
 **項目**:
 儲存要素裡的一個單位，例如 MyBrain 的主題檔、Agora 的 Session、Atelier 的職務、Foundry 的產出。每個項目都由 metadata 與本體組成。
@@ -153,28 +178,32 @@ _Avoid_: transcript、摘要
 Session 的狀態之一：來源應用仍可能往它追加內容。
 
 **停止中**:
-Session 的狀態之一：來源應用目前不會再往它追加內容。
+Session 的狀態之一：來源應用目前不會再往它追加內容。由來源應用的可信訊號判定；沒有可信訊號的來源應用（例如 opencode），只能由你或 AI 明確宣告，不從閒置時間推測。停止中的 Session 又被追加內容時，回到運作中，同步器會立刻同步並提交一次。
 
 **Session Link**:
-從一個新 Session 指向一個較早 Session 的有向關係。一個 Session 可以有多條 Session Link，指向多個較早的 Session。
+從一個 Session 指向另一個 Session 的有向關係，類型是接續或參考。接續的目標一定是較早的 Session；參考的目標可以是任何其他 Session，包括仍在並行的 Session。一個 Session 可以有多條 Session Link。
 
 **接續**（Continuation）:
-一種 Session Link：新 Session 從較早 Session 的某個接續點開始承接它的工作。較早的 Session 不受影響，可以照常繼續。
+一種 Session Link：新 Session 從較早 Session 的某個接續點開始承接它的工作。由較早 Session 的持有者發起（同步並寫交接單，一起提交），新 Session 認領那張交接單時才形成這條 Link。較早的 Session 不受影響，可以照常繼續。
 _Avoid_: handoff、resume、移交
 
 **參考**（Reference）:
-一種 Session Link：新 Session 自己去讀較早 Session 在 Agora 裡的紀錄（或它的摘要）取得資訊；不喚醒任何 AI，也不承接它的工作。
+一種 Session Link：一個 Session 自己去讀另一個 Session 在 Agora 裡的紀錄（或它的摘要）取得資訊，並記下讀到的快照時間；不喚醒任何 AI，也不承接它的工作。並行的 Session 可以互相參考。同一對 Session 之間的參考 Link 只保留一條，記最新讀到的快照時間。
 _Avoid_: 引用、lookup、詢問
 
 **接續點**:
-較早 Session 被接續時所到的位置：持有端發起接續前最後一次同步進 Agora 的位置。新 Session 只承接這個位置之前的內容。
+較早 Session 被接續時所到的位置：持有端寫交接單時已經提交、或與交接單同一批放進收件匣的位置，記在交接單上。新 Session 只承接這個位置之前的內容。
 
 **同步**:
-來源應用把 Session 的最新內容送進 Agora。平時定期進行；接續由持有該 Session 的一方發起，發起前先同步一次。參考讀的是 Agora 當下最新的版本，可以比來源應用落後。
+來源應用經由同步器把 Session 的最新內容送進 Agora。平時定期進行；接續由持有該 Session 的一方發起，同步並連同交接單一起提交。參考讀的是 Agora 當下最新已提交的版本，可以比來源應用落後，落後多少看快照時間。
 
 **交接單**:
-發起接續的 AI 寫給接手者的說明，跟著那條接續的 Session Link 一起存進 Agora。接手者先讀交接單，需要時才深入閱讀版。
+被接續 Session 的持有者（發起接續的 AI）寫給接手者的說明。它本身是 Agora 的一個項目（有 id），記著被接續的 Session、接續點與交接內容。還沒有人認領時可以經由讀取介面找到；接手者先讀交接單，需要時才深入閱讀版。
 _Avoid_: ticket、handoff note
+
+**認領**:
+新 Session 宣告由自己接手某張交接單；提交流程收到認領時，才建立從新 Session 指向被接續 Session 的接續 Link。一張交接單只能被認領一次，所以認領之後要同步並提交，等讀取介面確認這條 Link 屬於自己才開工。
+_Avoid_: claim、accept、領取
 
 **摘要**:
 由 AI 為單一 Session 產生、供參考時先讀的精簡內容，屬於可重建的衍生物。
@@ -185,6 +214,18 @@ _Avoid_: summary、交接單
 
 **收斂**:
 開一個 Session 同時接續多個分岔的末端，把它們合回一條。
+
+**分裂**（1→n）:
+刻意造出分岔，把一件工作切給多個 Session 分頭做：持有者同步，為每一份工作各寫一張交接單，一起提交，由多個新 Session 各自認領。對應的工作場景是「切分工作」。
+_Avoid_: split、fan-out、派工
+
+**統合**（n→1）:
+刻意造出收斂，把分頭做完的結果合回來：每個分岔的持有者各自同步、寫一張交接單交出自己的末端並提交，由同一個新 Session 認領全部。對應的工作場景是「聚合成果」。
+_Avoid_: merge、fan-in、合併
+
+**相互參照**（n↔m）:
+並行的 Session 彼此建立參考 Link、讀對方最新已提交的內容，互相支持推進。不承接對方的工作，也不讓對方被鎖住。
+_Avoid_: 互相引用、sync、協作
 
 ### 案件
 

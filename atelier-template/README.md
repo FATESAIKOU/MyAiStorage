@@ -1,3 +1,3 @@
 # atelier-template
 
-Atelier repo 的初始骨架與第一個職務（tasks 6.1〜6.2）。真正的 Atelier 是另一個 GitHub private repo，這裡只放要搬過去的模板。結構：`roles/<職務>/{know,do,judge,dont}/`、`vendor/`。
+Atelier 期 1 只做需求設計（`docs/atelier/`），不建 repo，這個目錄目前不用。之後實作時，這裡放要搬到 Atelier private repo 的初始骨架（見 `docs/backlog.md`）。

@@ -1,3 +1,5 @@
+> 需求設計（原本是 `establish-aistorage-phase1` 的 `specs/atelier/role`，2026-09-26 移出）。Atelier 期 1 只做到需求設計，這份不在期 1 實作；基本設計與實作等 MyLinuxPool 的 profile 重新設計之後再一起考慮（見 `docs/backlog.md`）。
+
 ## Purpose
 
 定義 Atelier 的職務：員工啟動時載入的 know / do / judge / dont 與能力需求，以及職務如何被派到合適的 profile、如何在可驗證、可回滾的前提下被員工修改。

@@ -1,5 +1,7 @@
 # 所有寫入先進收件匣，由單一提交者收進真本
 
+> 2026-09-26 re-scope：決定本身不變。文中的分期（期 1／期 2／期 3）、角色（員工、秘書）與範圍（大檔、Atelier）說法，以 `openspec/changes/establish-aistorage-phase1/proposal.md` 與 `docs/backlog.md` 為準；profile 名稱以 `CONTEXT.md` 為準（期 1 是 Mac opencode）。「接續前要等 1〜2 分鐘」改為至少一次提交流程的耗時（design D10）。
+
 Agora 與 Foundry 的 git repo 放在 Google Drive 上，而 Drive 沒有「同時寫入時只讓一個成功」的機制，兩次同時 push 會有一次悄悄消失。再加上手機跑不了 git，本來就需要有人代它 commit。所以所有寫入者（手機 App、worker、Mac 同步程式）都只能把內容放進 Drive 上自己的收件匣（`drive.file` scope，只碰得到自己建的檔案），再由唯一的提交流程（在 GitHub Actions 上按需或定時執行，同一時間只跑一個）驗證、蓋產生者章、轉出閱讀版，然後 push。Atelier 的修改提案也走同一條路：judge 通過才推進 Atelier repo。住民手上因此沒有任何能改寫真本的憑證：「刪不掉歷史」和「產生者章可信」是靠憑證本身做到的，不靠 AI 守規矩。
 
 ## Considered Options

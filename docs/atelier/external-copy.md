@@ -1,3 +1,5 @@
+> 需求設計（原本是 `establish-aistorage-phase1` 的 `specs/atelier/external-copy`，2026-09-26 移出）。Atelier 期 1 只做到需求設計，這份不在期 1 實作；基本設計與實作等 MyLinuxPool 的 profile 重新設計之後再一起考慮（見 `docs/backlog.md`）。
+
 ## Purpose
 
 定義 Atelier 如何收納不是你寫、或屬於別的系統的 skill：複製成外部副本並記下出處與版本，讓員工只依賴 Atelier，同時用內容比對找出副本與上游的落差。
