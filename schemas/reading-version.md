@@ -127,16 +127,26 @@
 | **opencode** | prune 標記 (`state.time.compacted`) | **忽略** | 內容仍在，按一般訊息轉換。 |
 | **opencode** | 中止標記 (`info.error.name == "MessageAbortedError"`) | `completed: false` | 視為已中止，`in_progress: false`。 |
 | **opencode** | 未知或未支援段落型態 | `type: "text"` | 輸出 `[未支援的段落型態：<type>]`，不靜默丟棄。若訊息段落全數被過濾，補空文字段落。 |
-| **Claude Code** | 樹狀分支 (`uuid` / `parentUuid`) | **沿最新葉節點展開** | 沿最新主幹展開為主流程，其餘分支分支保留並標註 `reverted: true`。 |
+| **Claude Code** | 樹狀分支 (`uuid` / `parentUuid`) | **沿最新葉節點展開** | 沿最新主幹展開為主流程，其餘分支分支保留並標註 `reverted: true`。末梢只在 user／assistant／system 之間挑選；末梢之後若還接著書記性紀錄，往前補進主幹，避免它們被誤判成分支。 |
+| **Claude Code** | 壓縮邊界標記 (`type: "system"` + `subtype: "compact_boundary"`)，`parentUuid` 為 null | **改走 `logicalParentUuid`** | 往上走時遇到這種節點改用 `logicalParentUuid` 接回主幹（該節點必須存在，否則轉換失敗）；照 `parentUuid`（null）停下會讓壓縮之前的全部歷史變成分支。節點本身轉成 `type: "compaction"`、`summary` 空字串，原始紀錄的 `content` 不進閱讀版。 |
+| **Claude Code** | 壓縮後的摘要 (`isCompactSummary: true` 的 user 紀錄) | `type: "compaction"`，角色 `system` | 摘要是機器寫的，不是使用者發言：`summary` 取其文字，角色改為 `system`。 |
+| **Claude Code** | 本機命令說明 (`isMeta: true` 的 user 紀錄) | 角色 `system` | 同樣不是使用者發言，角色改為 `system`，內容照常保留。 |
+| **Claude Code** | 同一個 `message.id` 拆成多筆記錄 | **合併成一則訊息** | 實際檔案會把一個 API 訊息拆成 1〜5 筆（每筆一個區塊）。相鄰且同為主幹或同為分支時合併：`message_id`／`created_at` 取第一筆，段落依序串接，`completed` 以任一筆帶有 `stop_reason` 為準。 |
+| **Claude Code** | 沒有 `uuid` 的中繼資料紀錄（`queue-operation`、`last-prompt`、`mode`、`permission-mode`、`atis-latch`、`agent-name`、`cost-state`、`file-history-snapshot`、`file-history-delta`…） | **略過** | 樹外的中繼資料，不進閱讀版、也不算錯誤；user／assistant／system 缺 `uuid` 才是結構損毀。 |
+| **Claude Code** | 標題來源 | `title` | 依序取最後一筆 `custom-title` → 最後一筆 `ai-title` → 最後一筆 `summary`（相容舊版）；都沒有則為 `null`。 |
+| **Claude Code** | 書記性的 `attachment`：`total_tokens_reminder`、`deferred_tools_*`、`silent_turn_reminder`、`skill_listing`、`environment`、`hook_success` | **丟棄** | 純提醒或 hook 輸出（避免內容外流到讀取視圖）。丟棄時仍留在樹裡維持鏈的連續，只是不輸出成訊息。 |
+| **Claude Code** | 有意義的 `attachment`：`queued_command`、`edited_text_file` | `type: "text"` | 以 `[<型態>] <附件物件的 compact JSON>` 呈現（不猜欄位名，檔名與內容都在裡面），依需要截斷摘要。 |
+| **Claude Code** | 其他 `attachment` 型態 | `type: "text"` | 以 `system` 角色輸出 `[未支援的附件型態：<型態>]`，不靜默丟棄。 |
+| **Claude Code** | 書記性的 `system`：`subtype: "turn_duration"`（沒有 `content`） | **丟棄** | 留下來只會變成空白的 system 訊息。 |
+| **Claude Code** | 最後一行寫到一半（檔案不以換行結尾） | **略過該行，`in_progress: true`** | 生成中的 Session 會有半行 JSON；略過最後一行不算失敗。中間任何一行解析失敗仍然是轉換失敗。 |
 | **Claude Code** | `tool_use` (assistant) + `tool_result` (user) | `type: "tool_call"` | 依 `tool_use_id` 配對合併為單一 `tool_call` 段落，依需要截斷摘要。 |
 | **Claude Code** | `thinking` block | `type: "reasoning"` | 對應為推理段落。 |
-| **Claude Code** | 子代理 (`isSidechain` 或 subagent jsonl) | `child_session_id` | 對應填入子 Session ID。 |
-| **Claude Code** | 壓縮邊界標記 (`type: "system"` + `subtype: "compact_boundary"`) | `type: "compaction"` | 邊界標記本身沒有摘要內容，`summary` 填空字串；原始紀錄的 `content` 不進入閱讀版。 |
+| **Claude Code** | 子代理 (`isSidechain` 或 subagent jsonl) | `child_session_id` | 只採結構化來源（`tool_use` input 的 `sessionId`／`session_id`、`toolUseResult` 的同名欄位、parentUuid 指向該則 assistant 的子代理紀錄之 `sessionId`），不從 `tool_result` 的文字內容推測。 |
 | **Claude Code** | Base64 圖片區塊 | `type: "image"` | 解碼計算小寫 SHA-256 與大小，儲存中繼資料。 |
 | **Claude Code** | Base64 文件區塊 (`document`) | `type: "file"` | 解碼計算小寫 SHA-256 與大小，檔名取 `title`；非 base64 的來源（檔案本體不在匯出中）轉為文字段落 `[附件：… 內容不在匯出中]`，不捏造雜湊。 |
 | **Claude Code** | 子代理紀錄 (`isSidechain: true`) | **不進入本 Session 的閱讀版** | 屬於子 Session 的內容；原始紀錄仍完整保留，只用來認出 `child_session_id`。 |
-| **Claude Code** | 未知的紀錄型態 | `type: "text"` | 以 `system` 角色輸出 `[未支援的紀錄型態：<type>]`，不讓整份閱讀版失敗；此類紀錄不作為主幹末梢。 |
-| **Claude Code** | 訊息識別碼 | `message_id: uuid` | 直接採用 Claude Code 之 `uuid` 作為 `message_id`。 |
+| **Claude Code** | 未知的紀錄型態（有 `uuid`） | `type: "text"` | 以 `system` 角色輸出 `[未支援的紀錄型態：<type>]`，不讓整份閱讀版失敗；此類紀錄不作為主幹末梢候選。 |
+| **Claude Code** | 訊息識別碼 | `message_id: uuid` | 直接採用 Claude Code 之 `uuid` 作為 `message_id`（同一個 `message.id` 合併時取第一筆的 `uuid`）。 |
 
 ---
 

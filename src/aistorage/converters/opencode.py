@@ -86,8 +86,12 @@ class OpencodeConverter(Converter):
 
     source: str = "opencode"
 
-    def facts(self, raw_path: Path) -> SessionFacts:
+    def facts(self, raw_path: Path, *, session_id: str | None = None) -> SessionFacts:
         """自 opencode 原始匯出 JSON 提取 SessionFacts。
+
+        `session_id`（`<source>:<source_session_id>`）由呼叫端傳入，opencode 的
+        子代理 id 直接取自 `state.metadata.sessionId`，不需要知道自己的 id，因此
+        這個參數在此不使用（見 review-g3f L3：呼叫端要明確提供，轉換器不推測）。
 
         M3: last_message_at 取所有訊息的 created 與 completed 之最大毫秒值轉換，避免字串比較誤判。
         """
@@ -176,8 +180,12 @@ class OpencodeConverter(Converter):
             last_message_ms=last_message_ms,
         )
 
-    def child_session_ids(self, raw_path: Path) -> tuple[str, ...]:
-        """自 opencode 原始紀錄中掃描 task 工具調用所產生的子代理 Session ID。"""
+    def child_session_ids(self, raw_path: Path, *, session_id: str | None = None) -> tuple[str, ...]:
+        """自 opencode 原始紀錄中掃描 task 工具調用所產生的子代理 Session ID。
+
+        `session_id` 與 `facts` 同理：opencode 不需要它，保留參數只是讓呼叫端
+        能對兩種來源用同一組呼叫方式。
+        """
         raw_p = Path(raw_path)
         try:
             data = json.loads(raw_p.read_text(encoding="utf-8"))

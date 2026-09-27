@@ -41,6 +41,11 @@ SESSION_ID_PATTERN = re.compile(
 
 VALID_STATUSES = ("running", "stopped")
 
+#: metadata 擴充欄位：轉換器給不出時間、只能退回匯入時間時留下的標記。
+#: `metadata-inbox` 與 `metadata-record` 兩個 schema 都允許擴充欄位，
+#: 提交流程的 `stamp_record` 也只會去掉 producer，其餘欄位原樣帶進真本。
+TIME_SOURCE_IMPORT = "import"
+
 #: sidecar 的位元組格式：排序鍵、縮排 2、結尾換行（與 `AgoraStore.put_json` 相同）。
 JSON_DUMP_KWARGS: dict[str, Any] = {
     "sort_keys": True,
@@ -122,11 +127,9 @@ def _normalize_parent_id(parent_id: str | None, source: str) -> str | None:
     return candidate
 
 
-def _resolve_time(value: str | None, fallback: str, field: str) -> str:
-    """時間欄位缺值時退回快照時間（schema 要求必填，不補假值以外的格式）。"""
-    if value is not None and str(value).strip():
-        return str(value).strip()
-    return fallback
+def _usable_time(value: Any) -> bool:
+    """判斷時間字串是否可用（非空、非純空白）。"""
+    return isinstance(value, str) and bool(value.strip())
 
 
 def build_inbox_item(
@@ -169,12 +172,15 @@ def build_inbox_item(
         status: `running` 或 `stopped`（停止中只能明確宣告，不從閒置時間推測）。
         stopped_at: 停止時間（status=stopped 時必填）。
         case_id: 所屬案件 id，不確定時可為 None。
-        provenance: 出處說明，不適用時可為 None。
+        provenance: 出處說明，不適用時可為 None（手動匯入由呼叫端填固定字串）。
         snapshot_at: 快照時間（擷取原始紀錄的時間），預設為 now。
         now: 本次組裝時間，預設取 clock.now_utc()。
         item_key: 項目識別碼（ULID），預設新產生一個。
         max_raw: 原始紀錄大小上限。
         clock: 時鐘（測試可注入 FixedClock）。
+
+    建立／更新時間取自 `facts`；轉換器給不出來時退回 `now`，並在 metadata 加上
+    擴充欄位 `time_source: "import"`，讓讀者知道這兩個時間是匯入時間而非來源端時間。
     """
     raw_p = Path(raw_path)
     if not raw_p.is_file():
@@ -206,21 +212,31 @@ def build_inbox_item(
         raise InboxBuildError(f"item_key 不是合法的 26 字元 ULID: {key_id_value!r}")
 
     now_value = now or (clock or SystemClock()).now_utc()
-    snapshot_value = _resolve_time(snapshot_at, now_value, "snapshot_at")
+    snapshot_value = snapshot_at.strip() if _usable_time(snapshot_at) else now_value
     raw_sha256, raw_size = _hash_raw(raw_p, max_raw)
+
+    # 建立／更新時間取自轉換器；取不到才退回匯入時間，並留下 time_source 標記。
+    from_source_created = _usable_time(facts.created_at)
+    from_source_updated = _usable_time(facts.updated_at)
+    created_at = facts.created_at.strip() if from_source_created else now_value
+    updated_at = facts.updated_at.strip() if from_source_updated else now_value
+
+    metadata: dict[str, Any] = {
+        "id": item_id,
+        "type": "session",
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "case_id": case_id,
+        "provenance": provenance,
+    }
+    if not (from_source_created and from_source_updated):
+        metadata["time_source"] = TIME_SOURCE_IMPORT
 
     sidecar: dict[str, Any] = {
         "format": SIDECAR_FORMAT,
         "item_key": key_id_value,
         "profile": profile,
-        "metadata": {
-            "id": item_id,
-            "type": "session",
-            "created_at": _resolve_time(facts.created_at, now_value, "created_at"),
-            "updated_at": _resolve_time(facts.updated_at, now_value, "updated_at"),
-            "case_id": case_id,
-            "provenance": provenance,
-        },
+        "metadata": metadata,
         "raw": {
             "sha256": raw_sha256,
             "size": raw_size,
@@ -288,8 +304,10 @@ def detect_source_session_id(source: str, raw_path: Path) -> str:
                     continue
                 try:
                     rec = json.loads(line)
-                except Exception as e:
-                    raise InboxBuildError(f"jsonl 第 {i + 1} 行解析失敗: {e}") from None
+                except Exception:
+                    # 生成中的 Session 最後一行可能寫到一半；這裡只是嗅探 id，
+                    # 真正的解析由轉換器負責（它對寫到一半的容錯更嚴格）。
+                    continue
                 if not isinstance(rec, dict):
                     continue
                 sid = rec.get("sessionId")

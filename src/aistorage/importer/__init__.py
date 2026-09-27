@@ -40,6 +40,9 @@ from aistorage.inbox_builder import (
 #: CLI 支援的來源應用（每個來源應用一個子命令）。
 SUPPORTED_SOURCES = ("opencode", "claude-code")
 
+#: 出處的預設值：手動匯入是本工具唯一的用途，固定字串足以辨識，不必帶本機路徑。
+DEFAULT_PROVENANCE = "manual-import"
+
 #: 預設讀取 rclone 設定檔的環境變數（workflow 只傳路徑）。
 RCLONE_CONF_ENV = "AISTORAGE_RCLONE_CONF"
 
@@ -129,7 +132,7 @@ def import_session(
     status: str = "running",
     stopped_at: str | None = None,
     case_id: str | None = None,
-    provenance: str | None = None,
+    provenance: str | None = DEFAULT_PROVENANCE,
     snapshot_at: str | None = None,
     now: str | None = None,
     item_key: str | None = None,
@@ -142,6 +145,9 @@ def import_session(
 
     重複匯入同一個 Session 會得到同一個項目 id（`<source>:<source_session_id>`），
     內容相同時提交流程判為 ALREADY（3.4），不產生新版本。
+
+    出處預設填 `DEFAULT_PROVENANCE`（`manual-import`）而不是本機路徑：本機路徑會把
+    家目錄名稱寫進 Agora。`--provenance` 可覆寫。
     """
     if source not in SUPPORTED_SOURCES:
         raise InboxBuildError(
@@ -155,8 +161,9 @@ def import_session(
         raise InboxBuildError(f"找不到原始紀錄檔案: {raw_p}")
 
     conv = get_converter(source)
-    facts = conv.facts(raw_p)  # 轉換失敗在此就拋出，不產生半成品
     sid = source_session_id or detect_source_session_id(source, raw_p)
+    # 轉換器要求明確的 session_id（不推測）；轉換失敗在此就拋出，不產生半成品
+    facts = conv.facts(raw_p, session_id=f"{source}:{sid}")
     key = load_private_key(key_path)
 
     sidecar_bytes, sig = build_inbox_item(
@@ -238,7 +245,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         p.add_argument("--stopped-at", help="停止時間（RFC 3339 UTC Z，預設為現在）")
         p.add_argument("--case-id", help="所屬案件 id")
-        p.add_argument("--provenance", help="出處說明")
+        p.add_argument(
+            "--provenance",
+            help=f"出處說明（預設 {DEFAULT_PROVENANCE}；不帶本機路徑）",
+        )
         p.add_argument("--snapshot-at", help="快照時間（RFC 3339 UTC Z，預設為現在）")
         p.add_argument("--item-key", help="項目識別碼 ULID（測試或重試時指定）")
         p.add_argument("--rclone-conf", help=f"rclone 設定檔路徑（或 ${RCLONE_CONF_ENV}）")
@@ -278,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
             status="stopped" if args.stopped else "running",
             stopped_at=stopped_at,
             case_id=args.case_id,
-            provenance=args.provenance,
+            provenance=args.provenance or DEFAULT_PROVENANCE,
             snapshot_at=args.snapshot_at,
             item_key=args.item_key,
             rclone_conf=args.rclone_conf,
@@ -306,6 +316,7 @@ def main(argv: list[str] | None = None) -> int:
 __all__ = [
     "ImportResult",
     "SUPPORTED_SOURCES",
+    "DEFAULT_PROVENANCE",
     "import_session",
     "main",
 ]

@@ -31,6 +31,7 @@ from aistorage.inbox_builder import (
     load_private_key,
     read_item_key,
 )
+from aistorage.schema import validate_inbox_metadata, validate_record_metadata
 
 DATA_DIR = Path(__file__).parent / "data" / "converters"
 OPENCODE_EXPORT = DATA_DIR / "opencode" / "basic.json"
@@ -117,8 +118,54 @@ def test_build_inbox_item_passes_committer_side_checks(tmp_path: Path, keypair):
         "sha256": hashlib.sha256(OPENCODE_EXPORT.read_bytes()).hexdigest(),
         "size": OPENCODE_EXPORT.stat().st_size,
     }
+    # 時間來自來源端時不留 time_source 標記
+    assert "time_source" not in sidecar["metadata"]
     # 寫入者不填產生者（由介面蓋）
     assert "producer" not in sidecar["metadata"]
+
+
+def test_time_source_import_marker_when_facts_have_no_time(tmp_path: Path, keypair):
+    """PM 決定：轉換器給不出時間而退回匯入時間時，metadata 留 time_source: import。"""
+    priv_bytes, _pub, _kp = keypair
+    facts = SessionFacts(None, None, None, (), None, None, False)
+    sidecar_bytes, _sig = build_inbox_item(
+        OPENCODE_EXPORT,
+        source="opencode",
+        source_session_id="ses_1",
+        facts=facts,
+        profile=PROFILE,
+        key=priv_bytes,
+        key_id=KEY_ID,
+        clock=FixedClock(NOW),
+    )
+    sidecar = json.loads(sidecar_bytes.decode("utf-8"))
+    assert sidecar["metadata"]["time_source"] == "import"
+    assert sidecar["metadata"]["created_at"] == NOW
+    assert sidecar["metadata"]["updated_at"] == NOW
+    assert validate_sidecar(sidecar, expected_item_key=sidecar["item_key"]) == []
+    # 擴充欄位必須是收件匣與真本 metadata 規格都允許的形狀（提交流程的 stamp_record
+    # 只會去掉 producer，其餘欄位原樣帶進真本，所以真本這邊也驗得到）
+    assert validate_inbox_metadata(sidecar["metadata"]) == []
+    record = {**sidecar["metadata"], "producer": "profile:mac-opencode"}
+    assert validate_record_metadata(record) == []
+    assert record["time_source"] == "import"
+
+    # 只有一邊缺時間也照樣標記（那一欄才是匯入時間）
+    partial = SessionFacts(None, "2026-09-27T08:00:00Z", None, (), None, None, False)
+    sidecar_bytes2, _sig2 = build_inbox_item(
+        OPENCODE_EXPORT,
+        source="opencode",
+        source_session_id="ses_1",
+        facts=partial,
+        profile=PROFILE,
+        key=priv_bytes,
+        key_id=KEY_ID,
+        clock=FixedClock(NOW),
+    )
+    meta2 = json.loads(sidecar_bytes2.decode("utf-8"))["metadata"]
+    assert meta2["time_source"] == "import"
+    assert meta2["created_at"] == "2026-09-27T08:00:00Z"  # 有來源時間就用來源的
+    assert meta2["updated_at"] == NOW
 
 
 def test_build_inbox_item_status_and_in_progress_rules(tmp_path: Path, keypair):
@@ -272,10 +319,11 @@ def test_detect_source_session_id(tmp_path: Path):
     no_sid.write_text('{"type":"user","uuid":"u1","timestamp":"2026-09-27T08:00:00Z"}\n', encoding="utf-8")
     assert detect_source_session_id("claude-code", no_sid) == "abc123"
 
+    # 壞掉的行只是被略過（嗅探 id 不負責嚴格解析，轉換器才是權威），
+    # 全檔都沒有 sessionId 時退回檔名
     broken = tmp_path / "broken.jsonl"
     broken.write_text("{oops}\n", encoding="utf-8")
-    with pytest.raises(InboxBuildError, match="解析失敗"):
-        detect_source_session_id("claude-code", broken)
+    assert detect_source_session_id("claude-code", broken) == "broken"
 
     with pytest.raises(InboxBuildError, match="不支援的來源應用"):
         detect_source_session_id("other-app", OPENCODE_EXPORT)
@@ -327,6 +375,7 @@ def test_import_opencode_to_out_dir(tmp_path: Path, keypair):
 def test_import_claude_code_to_out_dir(tmp_path: Path, keypair):
     _priv, pub_bytes, key_path = keypair
     out = tmp_path / "out"
+    # 黃金樣本的最後一行寫到一半 → 仍在生成中，不能宣告停止中（見下一個案例）
     result = import_session(
         "claude-code",
         CLAUDE_JSONL,
@@ -334,10 +383,7 @@ def test_import_claude_code_to_out_dir(tmp_path: Path, keypair):
         key_id=KEY_ID,
         profile=PROFILE,
         out_dir=out,
-        status="stopped",
-        stopped_at="2026-09-27T11:59:00Z",
         case_id="case-abc",
-        provenance="mac 手動匯入",
         clock=FixedClock(NOW),
     )
     assert result.item_id == f"claude-code:{PARENT_SESSION}"
@@ -346,13 +392,18 @@ def test_import_claude_code_to_out_dir(tmp_path: Path, keypair):
     sidecar_bytes, sig, _raw = _read_out(out, result.item_key)
     sidecar = json.loads(sidecar_bytes.decode("utf-8"))
     assert sidecar["session"]["source"] == "claude-code"
-    assert sidecar["session"]["status"] == "stopped"
-    assert sidecar["session"]["stopped_at"] == "2026-09-27T11:59:00Z"
+    assert sidecar["session"]["status"] == "running"
+    assert sidecar["session"]["stopped_at"] is None
+    # 仍在生成中（來源端最後一行寫到一半）
+    assert sidecar["session"]["in_progress"] is True
     assert sidecar["metadata"]["case_id"] == "case-abc"
-    assert sidecar["metadata"]["provenance"] == "mac 手動匯入"
+    # PM 決定：出處預設填固定字串，不帶本機路徑
+    assert sidecar["metadata"]["provenance"] == "manual-import"
     assert sidecar["session"]["snapshot_at"] == NOW
     assert validate_sidecar(sidecar, expected_item_key=result.item_key) == []
     assert verify_sidecar_bytes(sidecar_bytes, sig, {KEY_ID: pub_bytes}) == KEY_ID
+    # 來源端有時間 → 不留 time_source 標記
+    assert "time_source" not in sidecar["metadata"]
 
 
 def test_repeated_import_maps_to_same_item_id(tmp_path: Path, keypair):
@@ -458,6 +509,8 @@ def test_cli_opencode_prints_only_public_info(tmp_path: Path, keypair, capsys):
     )
     assert sidecar["session"]["snapshot_at"] == printed.group(1)
     assert "written: 3 個檔案" in captured.out
+    # PM 決定：CLI 未指定 --provenance 時填固定字串 manual-import
+    assert sidecar["metadata"]["provenance"] == "manual-import"
     # 私鑰絕不出現在輸出裡
     assert priv_bytes.hex() not in captured.out
     assert base64.b64encode(priv_bytes).decode() not in captured.out
@@ -475,21 +528,21 @@ def test_cli_claude_code_stopped_and_session_id_override(tmp_path: Path, keypair
         "--key-id", KEY_ID,
         "--profile", PROFILE,
         "--out-dir", str(out),
-        "--stopped",
-        "--stopped-at", "2026-09-27T11:59:00Z",
         "--session-id", "explicit-session",
+        "--provenance", "manual-import-from-laptop",
     ])
     captured = capsys.readouterr()
     assert code == 0
     assert "item_id: claude-code:explicit-session" in captured.out
-    assert "status: stopped" in captured.out
+    assert "status: running" in captured.out
 
     sidecar_bytes, _sig, _raw = _read_out(out, read_item_key(
         next(p for p in out.iterdir() if p.name.endswith(".sidecar.json")).read_bytes()
     ))
     sidecar = json.loads(sidecar_bytes.decode("utf-8"))
     assert sidecar["session"]["source_session_id"] == "explicit-session"
-    assert sidecar["session"]["stopped_at"] == "2026-09-27T11:59:00Z"
+    # --provenance 可覆寫預設值
+    assert sidecar["metadata"]["provenance"] == "manual-import-from-laptop"
 
 
 def test_cli_reports_errors_without_traceback(tmp_path: Path, keypair, capsys):

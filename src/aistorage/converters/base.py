@@ -35,11 +35,17 @@ class SessionFacts:
 
 @runtime_checkable
 class Converter(Protocol):
-    """來源原始紀錄至閱讀版轉換器協定。"""
+    """來源原始紀錄至閱讀版轉換器協定。
+
+    `facts` 與 `child_session_ids` 都接受 keyword-only 的 `session_id`
+    （`<source>:<source_session_id>`）：由呼叫端明確提供，轉換器不推測自己的
+    Session id（review-g3f L3）。Claude Code 轉換器用它做「子代理不得指向自己」
+    的防護；opencode 的子代理 id 直接來自原始紀錄，不使用這個參數。
+    """
 
     source: str                           # 例如 "opencode"、"claude-code"
 
-    def facts(self, raw_path: Path) -> SessionFacts:
+    def facts(self, raw_path: Path, *, session_id: str | None = None) -> SessionFacts:
         """自原始紀錄提取 SessionFacts（純函式，不碰網路與 git）。"""
         ...
 
@@ -59,6 +65,6 @@ class Converter(Protocol):
         """
         ...
 
-    def child_session_ids(self, raw_path: Path) -> tuple[str, ...]:
+    def child_session_ids(self, raw_path: Path, *, session_id: str | None = None) -> tuple[str, ...]:
         """自原始紀錄中提取所有子代理 Session ID 清單。"""
         ...
