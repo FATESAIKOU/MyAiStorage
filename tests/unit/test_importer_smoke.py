@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from aistorage.clock import FixedClock
 from aistorage.converters.base import SessionFacts
-from aistorage.importer import ImportResult, import_session, main
+from aistorage.importer import ImportResult, file_mtime, import_session, main
 from aistorage.inbox import (
     check_raw,
     is_complete,
@@ -349,7 +349,9 @@ def test_import_opencode_to_out_dir(tmp_path: Path, keypair):
     assert result.source_session_id == "ses_opencode_basic_001"
     assert result.destination == f"out-dir:{out}"
     assert result.status == "running"
-    assert result.snapshot_at == NOW
+    # L4：快照時間預設是原始紀錄檔的 mtime（不是匯入的當下）
+    assert result.snapshot_at == file_mtime(OPENCODE_EXPORT)
+    assert result.snapshot_at != NOW
     assert result.raw_sha256 == hashlib.sha256(OPENCODE_EXPORT.read_bytes()).hexdigest()
     assert result.raw_size == OPENCODE_EXPORT.stat().st_size
 
@@ -399,7 +401,7 @@ def test_import_claude_code_to_out_dir(tmp_path: Path, keypair):
     assert sidecar["metadata"]["case_id"] == "case-abc"
     # PM 決定：出處預設填固定字串，不帶本機路徑
     assert sidecar["metadata"]["provenance"] == "manual-import"
-    assert sidecar["session"]["snapshot_at"] == NOW
+    assert sidecar["session"]["snapshot_at"] == file_mtime(CLAUDE_JSONL)
     assert validate_sidecar(sidecar, expected_item_key=result.item_key) == []
     assert verify_sidecar_bytes(sidecar_bytes, sig, {KEY_ID: pub_bytes}) == KEY_ID
     # 來源端有時間 → 不留 time_source 標記
@@ -421,9 +423,9 @@ def test_repeated_import_maps_to_same_item_id(tmp_path: Path, keypair):
     # 同一個 id、同一份內容 → 提交流程會判 ALREADY（3.4）
     assert first.item_id == second.item_id == "opencode:ses_opencode_basic_001"
     assert first.raw_sha256 == second.raw_sha256
-    # 每次匯入是不同的收件匣項目（item_key 與快照時間不同）
+    # 每次匯入是不同的收件匣項目（item_key 不同；快照時間都是同一個檔案的 mtime）
     assert first.item_key != second.item_key
-    assert first.snapshot_at != second.snapshot_at
+    assert first.snapshot_at == second.snapshot_at == file_mtime(OPENCODE_EXPORT)
 
     sidecar1 = json.loads(_read_out(out1, first.item_key)[0].decode("utf-8"))
     sidecar2 = json.loads(_read_out(out2, second.item_key)[0].decode("utf-8"))
@@ -465,18 +467,106 @@ def test_import_session_argument_errors(tmp_path: Path, keypair):
         )
 
 
-def test_import_propagates_conversion_error(tmp_path: Path, keypair):
-    """轉換失敗時不產生任何半成品。"""
+def test_conversion_failure_still_imports_with_conservative_values(tmp_path: Path, keypair):
+    """M10：轉換器讀不到事實時**仍然匯入**（這個 Session 快要被本機清掉了）。
+
+    改用保守值（時間＝檔案 mtime、in_progress=False、無標題），並在 metadata 留
+    time_source=import；提交流程那邊照收原始紀錄，只在閱讀版標記失敗。
+    """
     _priv, _pub, key_path = keypair
     broken = tmp_path / "broken.jsonl"
-    broken.write_text("{not json}\n", encoding="utf-8")
+    broken.write_text('{"type":"user","uuid":"u1","timestamp":"2026-09-27T08:00:00.000Z"'
+                      ',"sessionId":"ses_broken","message":{"role":"user","content":"hi"}}\n'
+                      '{這一行寫到一半\n', encoding="utf-8")
     out = tmp_path / "out"
-    with pytest.raises(Exception):
+    result = import_session(
+        "claude-code", broken, key_path=key_path, key_id=KEY_ID,
+        profile=PROFILE, out_dir=out, clock=FixedClock(NOW),
+    )
+    assert result.facts_error is not None
+    sidecar_bytes, sig, raw = _read_out(out, result.item_key)
+    sidecar = json.loads(sidecar_bytes.decode("utf-8"))
+    mtime = file_mtime(broken)
+    assert sidecar["metadata"]["created_at"] == mtime
+    assert sidecar["metadata"]["updated_at"] == mtime
+    assert sidecar["metadata"]["time_source"] == "import"
+    assert sidecar["session"]["in_progress"] is False
+    assert sidecar["session"]["snapshot_at"] == mtime
+    # 原始紀錄照樣完整送出（提交流程會照收，只是閱讀版失敗）
+    assert raw == broken.read_bytes()
+    assert validate_sidecar(sidecar, expected_item_key=result.item_key) == []
+    assert verify_sidecar_bytes(sidecar_bytes, sig, {KEY_ID: _pub_of(keypair)}) == KEY_ID
+
+    # --strict 維持原本的行為：轉換失敗就拒絕匯入，不產生任何半成品
+    out2 = tmp_path / "out2"
+    with pytest.raises(InboxBuildError, match="strict"):
         import_session(
             "claude-code", broken, key_path=key_path, key_id=KEY_ID,
-            profile=PROFILE, out_dir=out, clock=FixedClock(NOW),
+            profile=PROFILE, out_dir=out2, strict=True, clock=FixedClock(NOW),
         )
-    assert not out.exists()
+    assert not out2.exists()
+
+
+def _pub_of(keypair) -> bytes:
+    return keypair[1]
+
+
+def test_key_id_must_belong_to_profile(tmp_path: Path, keypair):
+    """L2：金鑰識別碼必須是 `<profile>-<8位hex>` 且屬於該 profile，本機先擋。"""
+    _priv, _pub, key_path = keypair
+    out = tmp_path / "out"
+    common = dict(key_path=key_path, profile=PROFILE, out_dir=out,
+                  clock=FixedClock(NOW))
+
+    # 格式不對
+    with pytest.raises(InboxBuildError, match="識別碼不合法"):
+        import_session("opencode", OPENCODE_EXPORT, key_id="no-dash", **common)
+    # 格式對但屬於別的 profile
+    with pytest.raises(InboxBuildError, match="不屬於 profile"):
+        import_session("opencode", OPENCODE_EXPORT, key_id="other-profile-1a2b3c4d", **common)
+    # 正確
+    assert import_session("opencode", OPENCODE_EXPORT, key_id=KEY_ID, **common).item_id
+
+
+def test_parent_id_comes_from_raw_when_not_given(tmp_path: Path, keypair):
+    """L3：opencode 子 Session 匯入時，沒給 --parent-id 就從 info.parentID 帶入。"""
+    _priv, _pub, key_path = keypair
+    out = tmp_path / "out"
+    child = json.loads(OPENCODE_EXPORT.read_text(encoding="utf-8"))
+    child["info"]["id"] = "ses_child_001"
+    child["info"]["parentID"] = "ses_parent_001"
+    child_path = tmp_path / "child.json"
+    child_path.write_text(json.dumps(child), encoding="utf-8")
+
+    result = import_session(
+        "opencode", child_path, key_path=key_path, key_id=KEY_ID,
+        profile=PROFILE, out_dir=out, clock=FixedClock(NOW),
+    )
+    sidecar = json.loads(_read_out(out, result.item_key)[0].decode("utf-8"))
+    assert sidecar["session"]["parent_id"] == "opencode:ses_parent_001"
+
+    # 明確指定且與 raw 一致 → 可以
+    result2 = import_session(
+        "opencode", child_path, key_path=key_path, key_id=KEY_ID,
+        profile=PROFILE, out_dir=out, parent_id="ses_parent_001", clock=FixedClock(NOW),
+    )
+    sidecar2 = json.loads(_read_out(out, result2.item_key)[0].decode("utf-8"))
+    assert sidecar2["session"]["parent_id"] == "opencode:ses_parent_001"
+
+    # 不一致 → 報錯，不要猜
+    with pytest.raises(InboxBuildError, match="不一致"):
+        import_session(
+            "opencode", child_path, key_path=key_path, key_id=KEY_ID,
+            profile=PROFILE, out_dir=out, parent_id="ses_other", clock=FixedClock(NOW),
+        )
+
+    # 頂層 Session（parentID 為 null）→ null
+    result3 = import_session(
+        "opencode", OPENCODE_EXPORT, key_path=key_path, key_id=KEY_ID,
+        profile=PROFILE, out_dir=out, clock=FixedClock(NOW),
+    )
+    sidecar3 = json.loads(_read_out(out, result3.item_key)[0].decode("utf-8"))
+    assert sidecar3["session"]["parent_id"] is None
 
 
 # ------------------------------------------------------------------- CLI
@@ -500,9 +590,12 @@ def test_cli_opencode_prints_only_public_info(tmp_path: Path, keypair, capsys):
     assert code == 0
     assert "item_id: opencode:ses_opencode_basic_001" in captured.out
     assert "item_key:" in captured.out
-    # 快照時間由 CLI 執行當下決定（RFC 3339 UTC Z）
+    # 快照時間＝原始紀錄檔的 mtime（RFC 3339 UTC，可含小數）
     printed = re.search(r"^snapshot_at: (\S+)$", captured.out, re.M)
-    assert printed and re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", printed.group(1))
+    assert printed and re.match(
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$", printed.group(1)
+    )
+    assert printed.group(1) == file_mtime(OPENCODE_EXPORT)
     sidecar = json.loads(
         next(p for p in out.iterdir() if p.name.endswith(".sidecar.json"))
         .read_text(encoding="utf-8")
@@ -543,6 +636,41 @@ def test_cli_claude_code_stopped_and_session_id_override(tmp_path: Path, keypair
     assert sidecar["session"]["source_session_id"] == "explicit-session"
     # --provenance 可覆寫預設值
     assert sidecar["metadata"]["provenance"] == "manual-import-from-laptop"
+
+
+def test_cli_warns_when_facts_fail_but_still_imports(tmp_path: Path, keypair, capsys):
+    """M10：CLI 印出警告到 stderr，原始紀錄仍然匯入。"""
+    _priv, _pub, key_path = keypair
+    broken = tmp_path / "broken.jsonl"
+    broken.write_text('{"type":"user","uuid":"u1","sessionId":"ses_x","'
+                      '"message":{"role":"user","content":"hi"},'
+                      '"timestamp":"2026-09-27T08:00:00.000Z"}\n{"壞掉\n', encoding="utf-8")
+    out = tmp_path / "out"
+    code = main([
+        "claude-code", "--jsonl", str(broken),
+        "--key", str(key_path), "--key-id", KEY_ID, "--profile", PROFILE,
+        "--out-dir", str(out),
+    ])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "警告" in captured.err and "閱讀版" in captured.err
+    assert len(list(out.iterdir())) == 3
+
+
+def test_cli_strict_refuses_when_facts_fail(tmp_path: Path, keypair, capsys):
+    _priv, _pub, key_path = keypair
+    broken = tmp_path / "broken.jsonl"
+    broken.write_text("{壞掉\n", encoding="utf-8")
+    out = tmp_path / "out"
+    code = main([
+        "claude-code", "--jsonl", str(broken),
+        "--key", str(key_path), "--key-id", KEY_ID, "--profile", PROFILE,
+        "--out-dir", str(out), "--strict",
+    ])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "--strict" in captured.err
+    assert not out.exists()
 
 
 def test_cli_reports_errors_without_traceback(tmp_path: Path, keypair, capsys):

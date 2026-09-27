@@ -28,16 +28,17 @@ from aistorage.inbox import (
     sign_sidecar_bytes,
     validate_sidecar,
 )
-from aistorage.schema import generate_ulid, make_session_id
+from aistorage.schema import SESSION_ID_PATTERN, generate_ulid, make_session_id
 
 SIDECAR_FORMAT = "aistorage.inbox/v1"
 
 #: 項目識別碼（ULID）與 profile 名稱的格式。
 ITEM_KEY_PATTERN = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
 PROFILE_PATTERN = re.compile(r"^[a-z][a-z0-9-]*$")
-SESSION_ID_PATTERN = re.compile(
-    r"^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\S+$"
-)
+
+#: 簽章金鑰識別碼必須是 `<profile>-<sha256(公鑰)前8位>`（2.3）。
+#: 在本機先檢查，避免上傳之後才被提交流程拒收成 unauthorized。
+KEY_ID_PREFIX_PATTERN = re.compile(r"^[a-z][a-z0-9-]*-[0-9a-f]{8}$")
 
 VALID_STATUSES = ("running", "stopped")
 
@@ -151,6 +152,7 @@ def build_inbox_item(
     item_key: str | None = None,
     max_raw: int = DEFAULT_MAX_RAW_SIZE,
     clock: Clock | None = None,
+    time_source: str | None = None,
 ) -> tuple[bytes, dict]:
     """把一份來源 Session 的原始紀錄包成收件匣項目的 sidecar 與簽章。
 
@@ -178,6 +180,8 @@ def build_inbox_item(
         item_key: 項目識別碼（ULID），預設新產生一個。
         max_raw: 原始紀錄大小上限。
         clock: 時鐘（測試可注入 FixedClock）。
+        time_source: 強制標記 metadata.time_source（呼叫端知道時間不是從來源端
+            來的時候用，例如匯入工具用檔案 mtime 當保守值）。
 
     建立／更新時間取自 `facts`；轉換器給不出來時退回 `now`，並在 metadata 加上
     擴充欄位 `time_source: "import"`，讓讀者知道這兩個時間是匯入時間而非來源端時間。
@@ -189,6 +193,14 @@ def build_inbox_item(
     if not isinstance(profile, str) or not PROFILE_PATTERN.match(profile):
         raise InboxBuildError(
             f"profile 名稱不合法 ({profile!r})，必須符合 ^[a-z][a-z0-9-]*$"
+        )
+    if not isinstance(key_id, str) or not KEY_ID_PREFIX_PATTERN.match(key_id):
+        raise InboxBuildError(
+            f"簽章金鑰識別碼不合法 ({key_id!r})，必須是 <profile>-<公鑰雜湊前8位小寫hex>"
+        )
+    if not key_id.startswith(f"{profile}-"):
+        raise InboxBuildError(
+            f"簽章金鑰識別碼 '{key_id}' 不屬於 profile '{profile}'（必須以 '<profile>-' 開頭）"
         )
     if status not in VALID_STATUSES:
         raise InboxBuildError(
@@ -229,8 +241,8 @@ def build_inbox_item(
         "case_id": case_id,
         "provenance": provenance,
     }
-    if not (from_source_created and from_source_updated):
-        metadata["time_source"] = TIME_SOURCE_IMPORT
+    if time_source or not (from_source_created and from_source_updated):
+        metadata["time_source"] = time_source or TIME_SOURCE_IMPORT
 
     sidecar: dict[str, Any] = {
         "format": SIDECAR_FORMAT,

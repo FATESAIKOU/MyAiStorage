@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -26,8 +27,9 @@ import shutil
 import sys
 from typing import Any
 
-from aistorage.clock import Clock, SystemClock
+from aistorage.clock import Clock, SystemClock, format_rfc3339
 from aistorage.converters import get_converter
+from aistorage.converters.base import SessionFacts
 from aistorage.inbox_builder import (
     InboxBuildError,
     build_inbox_item,
@@ -61,6 +63,86 @@ class ImportResult:
     status: str
     destination: str
     written: tuple[str, ...]
+    facts_error: str | None = None      # 轉換器讀不到事實時的原因（仍然照匯入）
+
+
+def file_mtime(path: Path) -> str:
+    """原始紀錄檔的 mtime（RFC 3339 UTC，含小數）。
+
+    手動匯入的檔案可能是幾天前匯出的，所以預設的快照時間與「來源端給不出時間
+    時的保守值」都以它為基準（review-g3g L4／M10）。
+    """
+    return format_rfc3339(
+        datetime.fromtimestamp(Path(path).stat().st_mtime, timezone.utc),
+        include_fraction=True,
+    )
+
+
+def _facts_or_conservative(
+    conv: Any, raw_path: Path, session_id: str, mtime: str, strict: bool
+) -> tuple[SessionFacts, str | None]:
+    """取得 SessionFacts；失敗時回傳保守值與原因（`strict=True` 時直接拋出）。"""
+    try:
+        return conv.facts(raw_path, session_id=session_id), None
+    except Exception as e:
+        if strict:
+            raise InboxBuildError(
+                f"讀取 Session 事實失敗（--strict）: {type(e).__name__}: {e}"
+            ) from e
+        return (
+            SessionFacts(
+                title=None,
+                created_at=mtime,
+                updated_at=mtime,
+                message_ids=(),
+                archived_at=None,
+                last_message_at=mtime,
+                in_progress=False,
+            ),
+            f"{type(e).__name__}: {e}",
+        )
+
+
+def _resolve_parent_id(parent_id: str | None, source: str, raw_path: Path) -> str | None:
+    """決定母 Session id：呼叫端指定的優先，否則從原始紀錄帶入。
+
+    opencode 的匯出檔有 `info.parentID`（子代理 Session）；Claude Code 的 jsonl
+    沒有這種欄位，帶入不到就回 None（期 1 不保證取得得到子 Session id）。
+    兩者不一致是輸入問題，直接報錯不要猜。
+    """
+    from_raw = _parent_id_from_raw(source, raw_path)
+    if not parent_id:
+        return from_raw
+    given = str(parent_id).strip()
+    if not given:
+        return from_raw
+    if ":" not in given:
+        given = f"{source}:{given}"
+    if from_raw and from_raw != given:
+        raise InboxBuildError(
+            f"指定的 --parent-id ('{given}') 與原始紀錄中的母 Session ('{from_raw}') 不一致"
+        )
+    return given
+
+
+def _parent_id_from_raw(source: str, raw_path: Path) -> str | None:
+    """從原始紀錄讀出母 Session id（目前只有 opencode 的 `info.parentID`）。"""
+    if source != "opencode":
+        return None
+    try:
+        data = json.loads(Path(raw_path).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    info = data.get("info")
+    if not isinstance(info, dict):
+        return None
+    parent = info.get("parentID")
+    if isinstance(parent, str) and parent.strip() and parent.strip() not in ("null", "None"):
+        value = parent.strip()
+        return value if ":" in value else f"opencode:{value}"
+    return None
 
 
 def _write_local(
@@ -140,6 +222,7 @@ def import_session(
     remote: str = "gdrive",
     drive: Any | None = None,
     clock: Clock | None = None,
+    strict: bool = False,
 ) -> ImportResult:
     """把單一 Session 的原始紀錄包成收件匣項目，輸出到本機目錄或上傳到收件匣。
 
@@ -148,6 +231,20 @@ def import_session(
 
     出處預設填 `DEFAULT_PROVENANCE`（`manual-import`）而不是本機路徑：本機路徑會把
     家目錄名稱寫進 Agora。`--provenance` 可覆寫。
+
+    幾個刻意採取的行為（review-g3g M10、L3、L4）：
+    - **轉換器讀不到事實時仍然匯入**（除非 `strict=True`）：這個工具存在的理由是
+      「Claude Code 的 Session 約 30 天就會被本機清掉，需要時要能及時救進來」，
+      轉換失敗就整個拒絕＝這個 Session 永遠救不回來。改用保守值（時間取檔案的
+      mtime、`in_progress=False`、無標題），並在 metadata 留 `time_source: import`，
+      提交流程那邊會照收原始紀錄、只在閱讀版上標記失敗。
+    - **母 Session 自動帶入**：沒給 `parent_id` 時從原始紀錄取（opencode 的
+      `info.parentID`、Claude Code 的子代理關聯）；兩者不一致就報錯。
+    - **快照時間預設用檔案的 mtime**（可以用 `snapshot_at` 覆寫）：手動匯入的檔案
+      可能是幾天前匯出的，mtime 比「匯入的當下」更接近 D4 的「擷取時間」。
+
+    期 1 的已知限制：Claude Code 的**子代理內容不會被匯入**，也不保證取得得到子
+    Session 的 id（見 reading-version.md 對應表）。母 Session 的內容完整保留。
     """
     if source not in SUPPORTED_SOURCES:
         raise InboxBuildError(
@@ -162,8 +259,14 @@ def import_session(
 
     conv = get_converter(source)
     sid = source_session_id or detect_source_session_id(source, raw_p)
-    # 轉換器要求明確的 session_id（不推測）；轉換失敗在此就拋出，不產生半成品
-    facts = conv.facts(raw_p, session_id=f"{source}:{sid}")
+    raw_session_id = f"{source}:{sid}"
+
+    mtime = file_mtime(raw_p)
+    facts, facts_error = _facts_or_conservative(conv, raw_p, raw_session_id, mtime, strict)
+
+    # 母 Session：呼叫端沒給就從原始紀錄帶入；兩者不一致是輸入問題，報錯不要猜
+    effective_parent = _resolve_parent_id(parent_id, source, raw_p)
+
     key = load_private_key(key_path)
 
     sidecar_bytes, sig = build_inbox_item(
@@ -174,15 +277,17 @@ def import_session(
         profile=profile,
         key=key,
         key_id=key_id,
-        parent_id=parent_id,
+        parent_id=effective_parent,
         status=status,
         stopped_at=stopped_at,
         case_id=case_id,
         provenance=provenance,
-        snapshot_at=snapshot_at,
+        snapshot_at=snapshot_at or mtime,
         now=now,
         item_key=item_key,
         clock=clock or SystemClock(),
+        # 事實是保守值時，時間來自檔案 mtime 而非來源端，明確標記
+        time_source="import" if facts_error else None,
     )
 
     item_key_value = read_item_key(sidecar_bytes)
@@ -217,6 +322,7 @@ def import_session(
         status=session_meta["status"],
         destination=destination,
         written=written,
+        facts_error=facts_error,
     )
 
 
@@ -251,6 +357,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         p.add_argument("--snapshot-at", help="快照時間（RFC 3339 UTC Z，預設為現在）")
         p.add_argument("--item-key", help="項目識別碼 ULID（測試或重試時指定）")
+        p.add_argument(
+            "--strict",
+            action="store_true",
+            help="轉換器讀不到 Session 事實時直接拒絕匯入（預設是照匯入並留下 time_source 標記）",
+        )
         p.add_argument("--rclone-conf", help=f"rclone 設定檔路徑（或 ${RCLONE_CONF_ENV}）")
         p.add_argument("--remote", default="gdrive", help="rclone remote 名稱（預設 gdrive）")
 
@@ -293,10 +404,18 @@ def main(argv: list[str] | None = None) -> int:
             item_key=args.item_key,
             rclone_conf=args.rclone_conf,
             remote=args.remote,
+            strict=args.strict,
         )
     except Exception as e:
         sys.stderr.write(f"匯入失敗: {e}\n")
         return 1
+
+    if result.facts_error:
+        # 原始紀錄已送出，但閱讀版會是失敗狀態：講清楚，不要埋在 log 裡
+        sys.stderr.write(
+            f"警告：讀取 Session 事實失敗（{result.facts_error}）；"
+            "仍已匯入原始紀錄，提交流程會照收並把閱讀版標記為失敗。\n"
+        )
 
     # 只印可公開的資訊：id、雜湊、計數、位置。絕不印私鑰或簽章內容。
     print(f"item_id: {result.item_id}")
