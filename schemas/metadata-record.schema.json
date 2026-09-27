@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aistorage:schema:metadata-record",
+  "title": "AiStorage Record Metadata Schema",
+  "description": "真本項目的共通 metadata（提交流程認證並蓋上產生者章後）",
+  "type": "object",
+  "required": [
+    "id",
+    "type",
+    "producer",
+    "created_at",
+    "updated_at",
+    "case_id",
+    "provenance"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^\\S+$",
+      "description": "項目唯一識別碼（Session 為 <source>:<source_session_id>；其他項目為 <type>:<ULID>）"
+    },
+    "type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z_]*$",
+      "description": "項目型態（真本僅限制小寫英數底線格式，支援讀者未來擴充，型態清單由提交流程檢查）"
+    },
+    "producer": {
+      "type": "string",
+      "minLength": 1,
+      "description": "產生者身分（由提交流程依驗章／認證結果填入之 profile 識別，不得為空）"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+      "description": "項目建立時間（RFC 3339 UTC Z 字串）"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+      "description": "項目內容最後更新時間（RFC 3339 UTC Z 字串）"
+    },
+    "case_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "所屬案件（MyBrain 案件 id，不透明字串；未知或不適用時為 null；真本中鍵名必須存在）"
+    },
+    "provenance": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "出處說明（字串；不適用時為 null；真本中鍵名必須存在）"
+    },
+    "role": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "預留選填：角色識別（期 1 不驗證內容）"
+    },
+    "role_version": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "預留選填：角色版本（期 1 不驗證內容）"
+    }
+  },
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "session"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+          }
+        }
+      }
+
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "handoff"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^handoff:[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "claim"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^claim:[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "reference"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^reference:[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "rewrite"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^rewrite:[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "artifact"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^artifact:[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      }
+    }
+  ]
+}

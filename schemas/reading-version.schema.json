@@ -1,0 +1,278 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aistorage:schema:reading-version",
+  "title": "AiStorage Reading Version Schema",
+  "description": "Agora Session 閱讀版共通格式（從原始紀錄轉換而來，供閱讀、全文檢索與接續使用）",
+  "type": "object",
+  "required": [
+    "format",
+    "session_id",
+    "source",
+    "title",
+    "parent_id",
+    "snapshot_sha256",
+    "in_progress",
+    "messages"
+  ],
+  "properties": {
+    "format": {
+      "type": "string",
+      "const": "aistorage.reading/v1",
+      "description": "閱讀版規格版本識別碼，固定為 aistorage.reading/v1"
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[^:\\s]+:\\S+$",
+      "description": "Session 唯一識別碼，格式為 <source>:<source_session_id>"
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "description": "來源應用識別（例如 opencode, claude_code）"
+    },
+    "title": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "對話標題；未知或未命名時為 null"
+    },
+    "parent_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[^:\\s]+:\\S+$",
+      "description": "母 Session 識別碼；若為子代理 Session 則記錄其母 Session ID，頂層 Session 為 null"
+    },
+    "snapshot_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "轉換來源之原始紀錄快照內容 SHA256 雜湊值（64 字元小寫十六進位）"
+    },
+    "in_progress": {
+      "type": "boolean",
+      "description": "Session 目前是否在生成/執行中"
+    },
+    "messages": {
+      "type": "array",
+      "description": "對話訊息清單，依 index 排序",
+      "items": {
+        "type": "object",
+        "required": [
+          "message_id",
+          "index",
+          "role",
+          "created_at",
+          "completed",
+          "reverted",
+          "parts"
+        ],
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "來源應用自身之訊息 ID，接續點依賴此欄位定位"
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "訊息在閱讀版中之順序索引（從 0 起算）"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "assistant",
+              "system"
+            ],
+            "description": "訊息角色（user、assistant、system）"
+          },
+          "created_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+            "description": "訊息建立時間（RFC 3339 UTC 字串）；來源未提供時為 null"
+          },
+          "completed": {
+            "type": "boolean",
+            "description": "訊息是否已完成（assistant 訊息之生成完成標記）"
+          },
+          "reverted": {
+            "type": "boolean",
+            "description": "訊息是否在來源端已被撤銷（例如 /undo 之後的訊息）；讀者預設不呈現"
+          },
+          "parts": {
+            "type": "array",
+            "description": "訊息內容段落清單",
+            "items": {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "text",
+                    "tool_call",
+                    "image",
+                    "compaction",
+                    "reasoning",
+                    "file"
+                  ],
+                  "description": "內容段落型態"
+                }
+              },
+              "oneOf": [
+                {
+                  "properties": {
+                    "type": {
+                      "const": "text"
+                    },
+                    "text": {
+                      "type": "string",
+                      "description": "文字內容"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "text"
+                  ]
+                },
+                {
+                  "properties": {
+                    "type": {
+                      "const": "tool_call"
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "工具名稱"
+                    },
+                    "input_summary": {
+                      "type": "string",
+                      "description": "工具輸入摘要（上限 4,000 Unicode code point，超過截斷標 …）"
+                    },
+                    "output_summary": {
+                      "type": "string",
+                      "description": "工具輸出摘要（上限 4,000 Unicode code point，超過截斷標 …）"
+                    },
+                    "child_session_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[^:\\s]+:\\S+$",
+                      "description": "若此工具呼叫啟動了子代理，記錄子 Session 識別碼；否則為 null"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "name",
+                    "input_summary",
+                    "output_summary"
+                  ]
+                },
+                {
+                  "properties": {
+                    "type": {
+                      "const": "image"
+                    },
+                    "media_type": {
+                      "type": "string",
+                      "description": "圖片 MIME 類型（例如 image/png, image/jpeg）"
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "圖片內容之 SHA256 雜湊值（小寫 hex，不內嵌 base64）"
+                    },
+                    "size": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "圖片檔案大小（位元組）"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "media_type",
+                    "sha256",
+                    "size"
+                  ]
+                },
+                {
+                  "properties": {
+                    "type": {
+                      "const": "compaction"
+                    },
+                    "summary": {
+                      "type": "string",
+                      "description": "對話壓縮/精簡後的摘要內容"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "summary"
+                  ]
+                },
+                {
+                  "properties": {
+                    "type": {
+                      "const": "reasoning"
+                    },
+                    "text": {
+                      "type": "string",
+                      "description": "思考過程/推理內容（opencode reasoning, Claude Code thinking）"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "text"
+                  ]
+                },
+                {
+                  "properties": {
+                    "type": {
+                      "const": "file"
+                    },
+                    "media_type": {
+                      "type": "string",
+                      "description": "檔案 MIME 類型"
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "description": "檔案內容之 SHA256 雜湊值（小寫 hex）"
+                    },
+                    "size": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "檔案大小（位元組）"
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "原始檔案名稱"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "media_type",
+                    "sha256",
+                    "size",
+                    "name"
+                  ]
+                }
+              ],
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

@@ -2,6 +2,24 @@
 
 AiStorage 用到的實體資源都記在這裡：Drive 資料夾、OAuth client、service account、token、repo。⚠️ **只記名稱、位置、用途、屬於哪個 profile、到期日；不記任何秘密的值。** 秘密放在 GitHub Actions secrets、MyLinuxPool 的 profile secrets，或（技術驗證期間）Mac 的 `~/.config/aistorage-spike/`。
 
+## 期 1 正式身分（tasks 2.5，2026-09-27 建立）
+
+秘密的值放在 Mac 的 `~/.config/aistorage/`（目錄 700、檔案 600）與 GitHub Actions secrets。
+
+| 資源 | 種類 | 位置／識別 | 用途 | profile | 到期／輪替 |
+|---|---|---|---|---|---|
+| `aistorage-spike-1-260926` | GCP project | 專用帳號 | **提交流程專用**（只放 committer 一個 OAuth client，以及讀取用的 SA）；技術驗證時的 `other-project` client 已刪除 | — | 長期 |
+| `aistorage-spike-2-260926` | GCP project | 專用帳號 | **worker 共用**（只放 worker 一個 OAuth client）；技術驗證時的三個 client 已刪除 | — | 長期 |
+| `committer` | OAuth client（電腦版，正式版發布、未驗證） | project 1；`~/.config/aistorage/client-committer.json`、`rclone-committer.conf`（remote `gdrive`，scope `drive`，尚未設 `root_folder_id`） | 提交流程 | 提交流程 | 第 8 天複查 refresh token：2026-10-05 前後 |
+| `worker` | OAuth client（同上） | project 2；`~/.config/aistorage/client-worker.json`、`rclone-worker.conf`（scope `drive.file`） | 所有 worker 共用的收件匣寫入 | 所有 worker | 同上 |
+| `spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com` | service account | project 1；金鑰仍在 `~/.config/aistorage-spike/sa-reader.json` | 所有 worker 共用的讀取身分（正式的讀取視圖資料夾建立後再分享） | 所有 worker | — |
+| `FATESAIKOU/MyAiStorage-pin` | GitHub private repo | github.com | 釘選值（ADR 0008）；不放 workflow | 提交流程 | 長期 |
+| `committer`（deploy key） | SSH deploy key（read-write） | `MyAiStorage-pin`；私鑰 `~/.config/aistorage/pin-deploy-key`，並放在 `FATESAIKOU/MyAiStorage` 的 Actions secret `PIN_DEPLOY_KEY` | 提交流程寫入釘選值 | 提交流程 | 外洩時輪替 |
+
+- 注意：技術驗證的 `aistorage-spike` 資料夾是舊的 committer（當時在 project 2）建的，所以 project 2 的 worker client **看得到也改得到它**。之後的整合測試要由新的 committer 另外建一個測試資料夾，不再用它。
+- `~/.config/aistorage-spike/` 裡 project 2 的三份 rclone conf 與 `other-project` 的 conf 已經失效（client 已刪除）。
+- 還沒做：正式的 Agora／Foundry／讀取視圖資料夾、`RCLONE_CONF` secret、簽章金鑰與 `config/identity.json`（第 3、5 組建立時一起做）。
+
 ## 技術驗證（tasks 1.1〜1.9，2026-09-26 建立）
 
 驗證結束後，標「驗證用」的資源全部撤銷或刪除，不沿用到正式環境。建立步驟見 `docs/spike/setup.md`。
