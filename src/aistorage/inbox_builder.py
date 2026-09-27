@@ -4,6 +4,8 @@
 - docs/impl/group3-modules.md 第 7.4 節（`build_inbox_item` 為手動匯入工具與
   5.2 同步器共用，刻意放在 `aistorage/inbox_builder.py` 而非 importer 套件內，
   讓同步器不必匯入 CLI 套件）
+- docs/impl/group5-7-modules.md 第 0 節（handoff／claim／reference／artifact
+  四種型態與 `upload_item`，**同步器、skill、匯入、Foundry 共用同一份**）
 - schemas/inbox-sidecar.schema.json、schemas/metadata-inbox.schema.json
 - design D2（不可分單位）、D3（簽章與 profile 綁定）、D4（快照時間由寫入端記）
 
@@ -14,11 +16,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Literal
 
 from aistorage.clock import Clock, SystemClock
 from aistorage.converters.base import SessionFacts
@@ -28,7 +31,12 @@ from aistorage.inbox import (
     sign_sidecar_bytes,
     validate_sidecar,
 )
-from aistorage.schema import SESSION_ID_PATTERN, generate_ulid, make_session_id
+from aistorage.schema import (
+    SESSION_ID_PATTERN,
+    generate_ulid,
+    make_item_id,
+    make_session_id,
+)
 
 SIDECAR_FORMAT = "aistorage.inbox/v1"
 
@@ -337,3 +345,448 @@ def detect_source_session_id(source: str, raw_path: Path) -> str:
         return stem
 
     raise InboxBuildError(f"不支援的來源應用: {source!r}")
+
+
+# ---------------------------------------------------------------------------
+# 第 0 節：其他型態（handoff／claim／reference／artifact）與上傳
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BuiltItem:
+    """組好並簽章的收件匣項目（還沒寫出去）。
+
+    `sidecar_bytes` 就是必須**逐位元組**寫出去的內容；重新格式化會讓驗章失敗。
+    `raw_path` 只有 session／rewrite／artifact(contained) 才有，其餘為 None。
+    """
+
+    item_key: str
+    item_id: str
+    sidecar_bytes: bytes
+    sig: dict
+    raw_path: Path | None
+
+    @property
+    def item_type(self) -> str:
+        return str(self.sidecar["metadata"]["type"])
+
+    @property
+    def sidecar(self) -> dict:
+        """已組好的 sidecar 字典（唯讀檢視用；不要重新序列化）。"""
+        return json.loads(self.sidecar_bytes.decode("utf-8"))
+
+    @property
+    def raw_sha256(self) -> str | None:
+        raw = self.sidecar.get("raw")
+        return raw.get("sha256") if isinstance(raw, dict) else None
+
+    @property
+    def raw_size(self) -> int | None:
+        raw = self.sidecar.get("raw")
+        return raw.get("size") if isinstance(raw, dict) else None
+
+    def file_names(self) -> tuple[str, str, str]:
+        """收件匣裡的三個檔名（item_key.raw／.sidecar.json／.sig）。"""
+        return (
+            f"{self.item_key}.raw",
+            f"{self.item_key}.sidecar.json",
+            f"{self.item_key}.sig",
+        )
+
+    def local_files(self) -> tuple[tuple[str, Path], ...]:
+        """寫到本機目錄時的 (檔名, 內容來源)；raw 沒有就只兩個。"""
+        out = [(self.file_names()[1], None), (self.file_names()[2], None)]
+        if self.raw_path is not None:
+            out.insert(0, (self.file_names()[0], self.raw_path))
+        return out
+
+
+def _check_signer(profile: str, key_id: str) -> None:
+    """本機先檢查 profile 與簽章金鑰一致，避免上傳後才被拒收成 unauthorized。"""
+    if not isinstance(profile, str) or not PROFILE_PATTERN.match(profile):
+        raise InboxBuildError(
+            f"profile 名稱不合法 ({profile!r})，必須符合 ^[a-z][a-z0-9-]*$"
+        )
+    if not isinstance(key_id, str) or not KEY_ID_PREFIX_PATTERN.match(key_id):
+        raise InboxBuildError(
+            f"簽章金鑰識別碼不合法 ({key_id!r})，必須是 <profile>-<公鑰雜湊前8位小寫hex>"
+        )
+    if not key_id.startswith(f"{profile}-"):
+        raise InboxBuildError(
+            f"簽章金鑰識別碼 '{key_id}' 不屬於 profile '{profile}'（必須以 '<profile>-' 開頭）"
+        )
+
+
+def _check_item_key(item_key: str | None) -> str:
+    value = item_key or generate_ulid()
+    if not ITEM_KEY_PATTERN.match(value):
+        raise InboxBuildError(f"item_key 不是合法的 26 字元 ULID: {value!r}")
+    return value
+
+
+def _sign_and_check(
+    *,
+    item_type: str,
+    item_id: str,
+    profile: str,
+    key: bytes,
+    key_id: str,
+    body: dict,
+    raw: dict | None,
+    raw_path: Path | None,
+    created_at: str,
+    updated_at: str,
+    case_id: str | None,
+    provenance: str | None,
+    item_key: str | None,
+    max_raw: int,
+) -> BuiltItem:
+    """組出 sidecar、自查（sidecar ＋ raw）、簽章，回傳 BuiltItem。"""
+    _check_signer(profile, key_id)
+    key_value = _check_item_key(item_key)
+    if not isinstance(created_at, str) or not _usable_time(created_at):
+        raise InboxBuildError("created_at 必須是可用的時間字串")
+    if not isinstance(updated_at, str) or not _usable_time(updated_at):
+        raise InboxBuildError("updated_at 必須是可用的時間字串")
+
+    metadata: dict[str, Any] = {
+        "id": item_id,
+        "type": item_type,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "case_id": case_id,
+        "provenance": provenance,
+    }
+    sidecar: dict[str, Any] = {
+        "format": SIDECAR_FORMAT,
+        "item_key": key_value,
+        "profile": profile,
+        "metadata": metadata,
+        "raw": raw,
+        "body": body,
+    }
+
+    errors = validate_sidecar(sidecar, expected_item_key=key_value)
+    if errors:
+        raise InboxBuildError(
+            f"組裝出的 {item_type} sidecar 未通過驗證: "
+            + "; ".join(f"{e.field}: {e.message}" for e in errors)
+        )
+    if raw_path is not None:
+        with open(raw_path, "rb") as raw_fh:
+            raw_errors = check_raw(sidecar, raw_fh, max_size=max_raw)
+        if raw_errors:
+            raise InboxBuildError(
+                "原始紀錄與 sidecar 不一致: "
+                + "; ".join(f"{e.field}: {e.message}" for e in raw_errors)
+            )
+    elif raw is not None:
+        raise InboxBuildError("sidecar 宣告了 raw，但沒有對應的本體檔案")
+
+    sidecar_bytes = serialize_json(sidecar)
+    return BuiltItem(
+        item_key=key_value,
+        item_id=item_id,
+        sidecar_bytes=sidecar_bytes,
+        sig=sign_sidecar_bytes(sidecar_bytes, key, key_id),
+        raw_path=raw_path,
+    )
+
+
+def _now(
+    now: str | None, clock: Clock | None, created_at: str | None, updated_at: str | None
+) -> tuple[str, str]:
+    current = now or (clock or SystemClock()).now_utc()
+    return (created_at or current, updated_at or current)
+
+
+def build_session_item(
+    raw_path: Path,
+    *,
+    source: str,
+    source_session_id: str,
+    facts: SessionFacts,
+    profile: str,
+    key: bytes,
+    key_id: str,
+    **kwargs: Any,
+) -> BuiltItem:
+    """`build_inbox_item` 的 BuiltItem 版本（同步器與 skill 走這裡）。"""
+    sidecar_bytes, sig = build_inbox_item(
+        raw_path,
+        source=source,
+        source_session_id=source_session_id,
+        facts=facts,
+        profile=profile,
+        key=key,
+        key_id=key_id,
+        **kwargs,
+    )
+    sidecar = json.loads(sidecar_bytes.decode("utf-8"))
+    return BuiltItem(
+        item_key=str(sidecar["item_key"]),
+        item_id=str(sidecar["metadata"]["id"]),
+        sidecar_bytes=sidecar_bytes,
+        sig=sig,
+        raw_path=Path(raw_path),
+    )
+
+
+def build_handoff_item(
+    *,
+    target_session_id: str,
+    continuation: dict[str, Any],
+    body: dict[str, Any],
+    profile: str,
+    key: bytes,
+    key_id: str,
+    case_id: str | None = None,
+    provenance: str | None = None,
+    created_at: str | None = None,
+    updated_at: str | None = None,
+    item_key: str | None = None,
+    now: str | None = None,
+    clock: Clock | None = None,
+) -> BuiltItem:
+    """組一張交接單（handoff）。
+
+    body 必須含 `content`（交接說明字串）；其餘鍵（例如 title／summary／
+    next_steps／author_session_id）原樣併入 sidecar 的 body。
+    接續點由 `continuation` 帶（快照雜湊 ＋ message id）；提交流程會驗證它
+    存在於目標 Session 的快照歷史、已完成、未撤銷且是該快照最後一則完成的訊息。
+    """
+    if not isinstance(body, dict):
+        raise InboxBuildError("body 必須是字典")
+    content = body.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise InboxBuildError("handoff 的 body.content 必須是非空字串（交接說明）")
+    if not isinstance(continuation, dict):
+        raise InboxBuildError("continuation 必須是字典")
+    snap = continuation.get("snapshot_sha256")
+    message_id = continuation.get("message_id")
+    if not isinstance(snap, str) or not re.fullmatch(r"[0-9a-f]{64}", snap):
+        raise InboxBuildError("continuation.snapshot_sha256 必須是 64 字元小寫 hex")
+    if not isinstance(message_id, str) or not message_id.strip():
+        raise InboxBuildError("continuation.message_id 必須是非空字串")
+
+    item_key_value = _check_item_key(item_key)
+    created, updated = _now(now, clock, created_at, updated_at)
+    merged: dict[str, Any] = {
+        **{k: v for k, v in body.items() if k != "content"},
+        "target_session_id": target_session_id,
+        "continuation": {"snapshot_sha256": snap, "message_id": message_id},
+        "content": content,
+    }
+    return _sign_and_check(
+        item_type="handoff",
+        item_id=make_item_id("handoff"),
+        profile=profile,
+        key=key,
+        key_id=key_id,
+        body=merged,
+        raw=None,
+        raw_path=None,
+        created_at=created,
+        updated_at=updated,
+        case_id=case_id,
+        provenance=provenance,
+        item_key=item_key_value,
+        max_raw=DEFAULT_MAX_RAW_SIZE,
+    )
+
+
+def build_claim_item(
+    *,
+    handoff_id: str,
+    claimer_session_id: str,
+    profile: str,
+    key: bytes,
+    key_id: str,
+    case_id: str | None = None,
+    provenance: str | None = None,
+    created_at: str | None = None,
+    updated_at: str | None = None,
+    item_key: str | None = None,
+    now: str | None = None,
+    clock: Clock | None = None,
+    extra: dict[str, Any] | None = None,
+) -> BuiltItem:
+    """組一張認領單（claim）。claimer 必須已經在 Agora 裡（所以要先上傳它自己的
+    session，兩者同一批提交，apply 的順序 session 在前）。"""
+    if not re.fullmatch(r"handoff:[0-9A-HJKMNP-TV-Z]{26}", str(handoff_id or "")):
+        raise InboxBuildError(f"handoff_id 必須是 handoff:<ULID>: {handoff_id!r}")
+    created, updated = _now(now, clock, created_at, updated_at)
+    body: dict[str, Any] = {
+        "handoff_id": handoff_id,
+        "claimer_session_id": claimer_session_id,
+    }
+    if extra:
+        body.update(extra)
+    return _sign_and_check(
+        item_type="claim",
+        item_id=make_item_id("claim"),
+        profile=profile,
+        key=key,
+        key_id=key_id,
+        body=body,
+        raw=None,
+        raw_path=None,
+        created_at=created,
+        updated_at=updated,
+        case_id=case_id,
+        provenance=provenance,
+        item_key=_check_item_key(item_key),
+        max_raw=DEFAULT_MAX_RAW_SIZE,
+    )
+
+
+def build_reference_item(
+    *,
+    from_session_id: str,
+    to_session_id: str,
+    read_snapshot_at: str,
+    profile: str,
+    key: bytes,
+    key_id: str,
+    case_id: str | None = None,
+    provenance: str | None = None,
+    created_at: str | None = None,
+    updated_at: str | None = None,
+    item_key: str | None = None,
+    now: str | None = None,
+    clock: Clock | None = None,
+    extra: dict[str, Any] | None = None,
+) -> BuiltItem:
+    """組一筆參考（reference）。`read_snapshot_at` 是剛讀到的對方快照時間，
+    必須與來源端對該 Session 的 `updated_at` 單調（提交流程擋舊值）。"""
+    if not _usable_time(read_snapshot_at):
+        raise InboxBuildError("read_snapshot_at 必須是可用的時間字串")
+    created, updated = _now(now, clock, created_at, updated_at)
+    body: dict[str, Any] = {
+        "from_session_id": from_session_id,
+        "to_session_id": to_session_id,
+        "read_snapshot_at": read_snapshot_at,
+    }
+    if extra:
+        body.update(extra)
+    return _sign_and_check(
+        item_type="reference",
+        item_id=make_item_id("reference"),
+        profile=profile,
+        key=key,
+        key_id=key_id,
+        body=body,
+        raw=None,
+        raw_path=None,
+        created_at=created,
+        updated_at=updated,
+        case_id=case_id,
+        provenance=provenance,
+        item_key=_check_item_key(item_key),
+        max_raw=DEFAULT_MAX_RAW_SIZE,
+    )
+
+
+def build_artifact_item(
+    *,
+    kind: Literal["link", "contained"],
+    produced_by_session_id: str,
+    name: str,
+    profile: str,
+    key: bytes,
+    key_id: str,
+    content_type: str | None = None,
+    link: str | None = None,
+    repo: str | None = None,
+    path: str | None = None,
+    raw_path: Path | None = None,
+    case_id: str | None = None,
+    provenance: str | None = None,
+    created_at: str | None = None,
+    updated_at: str | None = None,
+    item_key: str | None = None,
+    now: str | None = None,
+    clock: Clock | None = None,
+    max_raw: int = DEFAULT_MAX_RAW_SIZE,
+) -> BuiltItem:
+    """組一筆產出登錄（artifact，第 7 組 Foundry）。
+
+    - `link`：本體是對外連結，沒有 raw。
+    - `contained`：本體放在 `<item_key>.raw`，必須給 content_type 與 raw_path。
+    """
+    if kind not in ("link", "contained"):
+        raise InboxBuildError(f"kind 必須是 'link' 或 'contained': {kind!r}")
+    if not _usable_time(name):
+        raise InboxBuildError("產出的檔名（name）必須是非空字串")
+
+    body: dict[str, Any] = {"kind": kind, "produced_by_session_id": produced_by_session_id}
+    raw_meta: dict[str, Any] | None = None
+    if kind == "link":
+        if not _usable_time(link):
+            raise InboxBuildError("kind=link 時必須提供 link（對外連結）")
+        body["link"] = link
+        if content_type:
+            body["content_type"] = content_type
+        if repo is not None:
+            body["repo"] = repo
+        if path is not None:
+            body["path"] = path
+    else:
+        if not _usable_time(content_type):
+            raise InboxBuildError("kind=contained 時必須提供 content_type")
+        if raw_path is None:
+            raise InboxBuildError("kind=contained 時必須提供 raw_path（本體檔案）")
+        raw_p = Path(raw_path)
+        if not raw_p.is_file():
+            raise InboxBuildError(f"找不到產出本體檔案: {raw_p}")
+        sha256, size = _hash_raw(raw_p, max_raw)
+        body["content_type"] = content_type
+        body["link"] = None
+        raw_meta = {"sha256": sha256, "size": size}
+        if repo is not None:
+            body["repo"] = repo
+        if path is not None:
+            body["path"] = path
+
+    created, updated = _now(now, clock, created_at, updated_at)
+    return _sign_and_check(
+        item_type="artifact",
+        item_id=make_item_id("artifact"),
+        profile=profile,
+        key=key,
+        key_id=key_id,
+        body=body,
+        raw=raw_meta,
+        raw_path=Path(raw_path) if raw_path is not None else None,
+        created_at=created,
+        updated_at=updated,
+        case_id=case_id,
+        provenance=provenance,
+        item_key=_check_item_key(item_key),
+        max_raw=max_raw,
+    )
+
+
+def upload_item(
+    drive: Any, inbox_folder_id: str, item: BuiltItem
+) -> tuple[str, ...]:
+    """把一個組好的項目上傳到收件匣資料夾，回傳建立的 file id（依上傳順序）。
+
+    順序固定為 **raw → sidecar → sig**（D2 的不可分單位：提交流程看到 sig
+    就視為完整項目，缺 sig 的半套會被保留到 24 小時後當孤兒清掃）。
+    沒有本體的型態（handoff／claim／reference）只上 sidecar 與 sig。
+    憑證由 drive 物件自帶，這裡不碰任何秘密。
+    """
+    raw_name, sidecar_name, sig_name = item.file_names()
+    payloads: list[tuple[str, Any, str]] = []
+    if item.raw_path is not None:
+        payloads.append((raw_name, item.raw_path, "application/octet-stream"))
+    payloads.append((sidecar_name, item.sidecar_bytes, "application/json"))
+    payloads.append((sig_name, serialize_json(item.sig), "application/json"))
+
+    created: list[str] = []
+    for filename, content, mime in payloads:
+        created.append(
+            drive.create(inbox_folder_id, filename, content, mime_type=mime).id
+        )
+    return tuple(created)
