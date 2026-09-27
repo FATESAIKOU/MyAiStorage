@@ -28,7 +28,7 @@
     "source": {
       "type": "string",
       "minLength": 1,
-      "description": "來源應用識別（例如 opencode, claude_code）"
+      "description": "來源應用識別（例如 opencode, claude-code）"
     },
     "title": {
       "type": [

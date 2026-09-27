@@ -16,7 +16,7 @@
 |---|---|---|
 | `format` | 字串 | 固定為 `"aistorage.reading/v1"`。 |
 | `session_id` | 字串 | Session 唯一識別碼，格式為 `<source>:<source_session_id>`（例如 `opencode:ses_123`），遵循 2.1 Session ID 規範（不得以保留型態為 source）。 |
-| `source` | 字串 | 來源應用識別（例如 `opencode`、`claude_code`）。 |
+| `source` | 字串 | 來源應用識別（例如 `opencode`、`claude-code`）。 |
 | `title` | 字串 或 `null` | 對話標題；若來源端未命名或無標題則為 `null`。**註：標題由 4.2 全文搜尋模組另行獨立索引，不進入各訊息的內文全文索引**。 |
 | `parent_id` | 字串 或 `null` | 若此 Session 為子代理 Session，記錄母 Session 識別碼；頂層 Session 為 `null`。 |
 | `snapshot_sha256` | 字串 | 轉換來源之原始紀錄快照內容的 SHA256 雜湊值（64 字元小寫十六進位 hex）。接續點釘在此快照上。 |
@@ -131,7 +131,11 @@
 | **Claude Code** | `tool_use` (assistant) + `tool_result` (user) | `type: "tool_call"` | 依 `tool_use_id` 配對合併為單一 `tool_call` 段落，依需要截斷摘要。 |
 | **Claude Code** | `thinking` block | `type: "reasoning"` | 對應為推理段落。 |
 | **Claude Code** | 子代理 (`isSidechain` 或 subagent jsonl) | `child_session_id` | 對應填入子 Session ID。 |
+| **Claude Code** | 壓縮邊界標記 (`type: "system"` + `subtype: "compact_boundary"`) | `type: "compaction"` | 邊界標記本身沒有摘要內容，`summary` 填空字串；原始紀錄的 `content` 不進入閱讀版。 |
 | **Claude Code** | Base64 圖片區塊 | `type: "image"` | 解碼計算小寫 SHA-256 與大小，儲存中繼資料。 |
+| **Claude Code** | Base64 文件區塊 (`document`) | `type: "file"` | 解碼計算小寫 SHA-256 與大小，檔名取 `title`；非 base64 的來源（檔案本體不在匯出中）轉為文字段落 `[附件：… 內容不在匯出中]`，不捏造雜湊。 |
+| **Claude Code** | 子代理紀錄 (`isSidechain: true`) | **不進入本 Session 的閱讀版** | 屬於子 Session 的內容；原始紀錄仍完整保留，只用來認出 `child_session_id`。 |
+| **Claude Code** | 未知的紀錄型態 | `type: "text"` | 以 `system` 角色輸出 `[未支援的紀錄型態：<type>]`，不讓整份閱讀版失敗；此類紀錄不作為主幹末梢。 |
 | **Claude Code** | 訊息識別碼 | `message_id: uuid` | 直接採用 Claude Code 之 `uuid` 作為 `message_id`。 |
 
 ---

@@ -4,10 +4,12 @@
 """
 
 from aistorage.converters.base import ConversionError, Converter, SessionFacts
+from aistorage.converters.claude_code import ClaudeCodeConverter
 from aistorage.converters.opencode import OpencodeConverter
 
 CONVERTERS: dict[str, Converter] = {
     "opencode": OpencodeConverter(),
+    "claude-code": ClaudeCodeConverter(),
 }
 
 
@@ -23,6 +25,7 @@ __all__ = [
     "Converter",
     "SessionFacts",
     "OpencodeConverter",
+    "ClaudeCodeConverter",
     "CONVERTERS",
     "get_converter",
 ]
