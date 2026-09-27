@@ -32,6 +32,18 @@ class DriveFile:
         """判定此項目是否為資料夾。"""
         return self.mime_type == GOOGLE_FOLDER_MIME
 
+    @property
+    def created_at(self) -> datetime:
+        """M3: 將 created_time 轉為帶時區之 UTC datetime。"""
+        from aistorage.clock import parse_rfc3339
+        return parse_rfc3339(self.created_time)
+
+    @property
+    def modified_at(self) -> datetime:
+        """M3: 將 modified_time 轉為帶時區之 UTC datetime。"""
+        from aistorage.clock import parse_rfc3339
+        return parse_rfc3339(self.modified_time)
+
 
 @runtime_checkable
 class DriveClient(Protocol):
