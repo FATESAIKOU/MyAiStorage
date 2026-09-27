@@ -1,23 +1,40 @@
 """4.2 搜尋索引的冒煙測試（實作方撰寫；驗收由測試方另寫）。
 
+一半是單元冒煙，一半是黃金測資 runner（TS 用戶端共用同一份測資）。
 範例內容一律自編，不碰真實 Session。
 """
 
+import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 
-from aistorage.search import index as idx_mod
+from aistorage.search import index as index_mod
 from aistorage.search.index import (
-    Hit,
+    HandoffRow,
     IndexEntry,
+    IndexMeta,
     IndexStats,
+    LinkRow,
+    RejectionRow,
     build_index,
+    dump_tables,
+)
+from aistorage.search.query import (
+    Query,
+    get_handoffs,
+    get_links,
+    get_reading_ref,
+    get_rejection,
+    get_session_row,
     search,
 )
 
+GOLDEN_DIR = Path(__file__).parent / "data" / "search" / "golden"
 
-def _meta(session_id: str, **kw) -> dict:
+
+def _mini_meta(session_id: str, **kw) -> dict:
     base = {
         "session_id": session_id,
         "source": "opencode",
@@ -25,134 +42,233 @@ def _meta(session_id: str, **kw) -> dict:
         "producer": "profile:mac-opencode",
         "case_id": None,
         "status": "running",
+        "stopped_at": None,
+        "in_progress": False,
         "created_at": "2026-09-27T08:00:00Z",
         "updated_at": "2026-09-27T08:00:00Z",
         "snapshot_at": "2026-09-27T08:00:00Z",
+        "raw_sha256": "0" * 64,
+        "raw_size": 10,
         "parent_id": None,
+        "reading_status": "ok",
+        "reading_error_code": None,
+        "committed_at": "2026-09-27T08:01:00Z",
     }
     base.update(kw)
     return base
 
 
-def _reading(*texts: str, title: str | None = None) -> dict:
+def _mini_reading(*texts: str) -> dict:
     return {
-        "format": "aistorage.reading/v1",
-        "session_id": "opencode:s1",
-        "source": "opencode",
-        "title": title,
-        "parent_id": None,
-        "snapshot_sha256": "0" * 64,
-        "in_progress": False,
         "messages": [
             {
                 "message_id": f"m{i}",
                 "index": i,
-                "role": "user" if i % 2 == 0 else "assistant",
-                "created_at": "2026-09-27T08:00:00Z",
                 "completed": True,
                 "reverted": False,
                 "parts": [{"type": "text", "text": t}],
             }
             for i, t in enumerate(texts)
-        ],
+        ]
     }
 
 
-def _demo_entries() -> list[IndexEntry]:
-    return [
-        IndexEntry(
-            _meta("opencode:s1", title="接續點設計討論", status="stopped",
-                  updated_at="2026-09-27T09:00:00Z",
-                  snapshot_at="2026-09-27T09:00:00Z"),
-            _reading("我們決定了接續點的格式", "交接單由持有者發起",
-                     title="接續點設計討論"),
-        ),
-        IndexEntry(
-            _meta("opencode:s2", title="引き継ぎメモ", source="claude-code",
-                  producer="profile:other", case_id="case-1",
-                  updated_at="2026-09-26T08:00:00Z",
-                  snapshot_at="2026-09-26T08:00:00Z"),
-            _reading("引き継ぎ内容を確認する", "hello world from Tokyo"),
-        ),
-        IndexEntry(
-            _meta("opencode:s3", title="轉換失敗的 Session"),
-            None,  # 轉換失敗：只有 metadata
-        ),
-    ]
+def _mini_entry(session_id: str, *texts: str, **kw) -> IndexEntry:
+    sha = "a" * 64
+    return IndexEntry(
+        metadata=_mini_meta(session_id, **kw),
+        snapshots=[{
+            "snapshot_sha256": sha,
+            "snapshot_at": kw.get("snapshot_at", "2026-09-27T08:00:00Z"),
+            "committed_at": "2026-09-27T08:01:00Z",
+            "via": "sync",
+            "file_id": f"file-{session_id}",
+            "sha256": sha,
+            "size": 10,
+        }],
+        reading=_mini_reading(*texts),
+        reading_ref={"snapshot_sha256": sha, "file_id": f"file-{session_id}",
+                     "sha256": sha, "size": 10},
+    )
 
 
-def test_build_and_search_cjk_english(tmp_path: Path):
-    p = tmp_path / "view" / "search.sqlite3"
-    stats = build_index(p, _demo_entries())
+def _meta(**kw) -> IndexMeta:
+    base = {"generation": 1, "built_at": "2026-09-27T09:00:00Z",
+            "agora_main_sha": "abc", "converter_versions": {"opencode": "1"}}
+    base.update(kw)
+    return IndexMeta(**base)
+
+
+def test_build_and_query_basics(tmp_path: Path):
+    p = tmp_path / "idx.sqlite3"
+    stats = build_index(
+        p,
+        entries=[
+            _mini_entry("opencode:s1", "接續點格式確定", "交接單處理"),
+            _mini_entry("opencode:s2", "hello world"),
+        ],
+        meta=_meta(),
+    )
     assert isinstance(stats, IndexStats)
-    assert stats.sessions == 3 and not stats.over_threshold
-    assert p.is_file()
+    assert stats.sessions == 2 and not stats.over_threshold
+    assert stats.file_count == 3  # 2 reading＋index 自己
 
-    hits = search(p, text="接續點")
-    assert [h.session_id for h in hits] == ["opencode:s1"]
-    assert all(isinstance(h, Hit) and h.matched_by == "fts" for h in hits)
-    assert hits[0].snapshot_at == "2026-09-27T09:00:00Z"
-    assert hits[0].snippet
+    con = sqlite3.connect(str(p))
+    try:
+        hits, nxt = search(con, Query(text="接續點"))
+        assert [h.session.session_id for h in hits] == ["opencode:s1"]
+        assert [m.message_id for m in hits[0].matches] == ["m0"]
+        assert nxt is None
 
-    assert [h.session_id for h in search(p, text="引き継ぎ")] == ["opencode:s2"]
-    assert [h.session_id for h in search(p, text="hello")] == ["opencode:s2"]
-    assert search(p, text="不存在的詞語串") == []
+        hits, _ = search(con, Query(text="接續"))  # 2 字走 LIKE
+        assert [h.session.session_id for h in hits] == ["opencode:s1"]
 
+        hits, _ = search(con, Query(text="hello", source="opencode"))
+        assert [h.session.session_id for h in hits] == ["opencode:s2"]
 
-def test_short_text_falls_back_to_like(tmp_path: Path):
-    p = tmp_path / "search.sqlite3"
-    build_index(p, _demo_entries())
-    hits = search(p, text="接續")  # 2 字元走 LIKE
-    assert [h.session_id for h in hits] == ["opencode:s1"]
-    assert hits[0].matched_by == "like"
-    assert "接續" in (hits[0].snippet or "")
+        assert search(con, Query(text="不存在的詞語串"))[0] == []
+    finally:
+        con.close()
 
 
-def test_filters_and_combination(tmp_path: Path):
-    p = tmp_path / "search.sqlite3"
-    build_index(p, _demo_entries())
-
-    assert {h.session_id for h in search(p, filters={"source": "claude-code"})} == {"opencode:s2"}
-    assert {h.session_id for h in search(p, filters={"status": "stopped"})} == {"opencode:s1"}
-    assert {h.session_id for h in search(p, filters={"case_id": "case-1"})} == {"opencode:s2"}
-    assert {h.session_id for h in search(p, filters={"producer": "profile:other"})} == {"opencode:s2"}
-    assert {h.session_id for h in search(
-        p, filters={"updated_after": "2026-09-27T00:00:00Z"})} == {"opencode:s1", "opencode:s3"}
-    assert {h.session_id for h in search(
-        p, filters={"updated_before": "2026-09-27T00:00:00Z"})} == {"opencode:s2"}
-
-    # 全文＋篩選組合：有交接單三字但限定來源不符 → 空
-    assert search(p, text="交接單", filters={"source": "claude-code"}) == []
-    assert [h.session_id for h in search(
-        p, text="交接單", filters={"status": "stopped"})] == ["opencode:s1"]
-
-    # 純篩選的 matched_by 與 snippet
-    hits = search(p, filters={"status": "stopped"})
-    assert hits[0].matched_by == "filter" and hits[0].snippet is None
+def test_version_check_rejects_old_sqlite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 33, 0))
+    with pytest.raises(RuntimeError, match="3.34"):
+        build_index(tmp_path / "x.sqlite3", entries=[], meta=_meta())
 
 
-def test_failed_conversion_still_filterable(tmp_path: Path):
-    p = tmp_path / "search.sqlite3"
-    build_index(p, _demo_entries())
-    hits = search(p, filters={"source": "opencode", "status": "running"})
-    assert [h.session_id for h in hits] == ["opencode:s3"]
-    assert hits[0].title == "轉換失敗的 Session"
+def test_dump_tables_deterministic(tmp_path: Path):
+    p1 = tmp_path / "a.sqlite3"
+    p2 = tmp_path / "b.sqlite3"
+    entries = [_mini_entry("opencode:s1", "接續點"), _mini_entry("opencode:s2", "hello")]
+    build_index(p1, entries=entries, meta=_meta())
+    build_index(p2, entries=entries, meta=_meta())
+    assert dump_tables(p1) == dump_tables(p2)
+    assert set(dump_tables(p1)) >= {"meta", "sessions", "message_fts", "links"}
 
 
-def test_rebuild_is_atomic_and_over_threshold_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    p = tmp_path / "search.sqlite3"
-    build_index(p, _demo_entries())
-    first_size = p.stat().st_size
-    stats = build_index(p, _demo_entries()[:1])
-    assert stats.sessions == 1
-    assert [h.session_id for h in search(p, text="接續點")] == ["opencode:s1"]
-    assert not list(tmp_path.glob("*.tmp"))
+def test_get_helpers(tmp_path: Path):
+    p = tmp_path / "idx.sqlite3"
+    build_index(
+        p,
+        entries=[_mini_entry("opencode:s1", "接續點")],
+        links=[LinkRow(kind="reference", from_session_id="opencode:s1",
+                       to_session_id="opencode:s2",
+                       reference_id="reference:X",
+                       read_snapshot_at="2026-09-27T08:00:00Z")],
+        handoffs=[HandoffRow(
+            handoff_id="handoff:X", target_session_id="opencode:s1",
+            snapshot_sha256="a" * 64, message_id="m0",
+            producer="profile:mac-opencode",
+            created_at="2026-09-27T08:00:00Z", updated_at="2026-09-27T08:00:00Z",
+            body_json="{}")],
+        rejections=[RejectionRow(item_key="K", code="orphan",
+                                 at="2026-09-27T08:00:00Z", authenticated=False)],
+        meta=_meta(),
+    )
+    con = sqlite3.connect(str(p))
+    try:
+        row = get_session_row(con, "opencode:s1")
+        assert row is not None and row.title == "標題 opencode:s1"
+        assert get_session_row(con, "opencode:nope") is None
 
-    monkeypatch.setattr(idx_mod, "INDEX_SIZE_THRESHOLD", 10)
-    stats = build_index(p, _demo_entries())
-    assert stats.bytes >= first_size and stats.over_threshold
+        out, inc = get_links(con, "opencode:s1")
+        assert [l.to_session_id for l in out] == ["opencode:s2"]
+        assert inc == []
+        _, inc2 = get_links(con, "opencode:s2")
+        assert [l.from_session_id for l in inc2] == ["opencode:s1"]
+
+        assert [h.handoff_id for h in get_handoffs(con)] == ["handoff:X"]
+        assert get_handoffs(con, open_only=True) != []
+        assert get_handoffs(con, target_session_id="opencode:s2") == []
+
+        ref = get_reading_ref(con, "opencode:s1")
+        assert ref is not None and ref.is_latest and ref.file_id == "file-opencode:s1"
+        assert get_reading_ref(con, "opencode:s1", "f" * 64) is None
+
+        rej = get_rejection(con, "K")
+        assert rej is not None and rej.code == "orphan" and not rej.authenticated
+        assert get_rejection(con, "missing") is None
+    finally:
+        con.close()
 
 
-def test_search_missing_file(tmp_path: Path):
-    with pytest.raises(FileNotFoundError):
-        search(tmp_path / "nope.sqlite3", text="接續點")
+def test_over_threshold_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(index_mod, "INDEX_SIZE_THRESHOLD", 10)
+    stats = build_index(tmp_path / "x.sqlite3",
+                        entries=[_mini_entry("opencode:s1", "x")], meta=_meta())
+    assert stats.over_threshold
+
+
+# ---------------------------------------------------------------------------
+# 黃金測資 runner（TS 用戶端共用 tests/unit/data/search/golden/）
+# ---------------------------------------------------------------------------
+
+def _load_golden() -> tuple[dict, dict]:
+    entries = json.loads((GOLDEN_DIR / "entries.json").read_text(encoding="utf-8"))
+    queries = json.loads((GOLDEN_DIR / "queries.json").read_text(encoding="utf-8"))
+    return entries, queries
+
+
+def _build_golden(tmp_path: Path) -> Path:
+    data, _ = _load_golden()
+    meta = data["meta"]
+    entries = [
+        IndexEntry(metadata=e["metadata"], snapshots=e.get("snapshots", []),
+                   reading=e.get("reading"), reading_ref=e.get("reading_ref"))
+        for e in data["entries"]
+    ]
+    links = [LinkRow(**l) for l in data.get("links", [])]
+    handoffs = [HandoffRow(**h) for h in data.get("handoffs", [])]
+    rejections = [RejectionRow(**r) for r in data.get("rejections", [])]
+    p = tmp_path / "golden.sqlite3"
+    stats = build_index(
+        p, entries=entries, links=links, handoffs=handoffs,
+        rejections=rejections,
+        meta=IndexMeta(generation=meta["generation"], built_at=meta["built_at"],
+                       agora_main_sha=meta["agora_main_sha"],
+                       converter_versions=meta["converter_versions"]),
+    )
+    assert stats.sessions == 3
+    return p
+
+
+def test_golden_build(tmp_path: Path):
+    p = _build_golden(tmp_path)
+    con = sqlite3.connect(str(p))
+    try:
+        assert con.execute("SELECT value FROM meta WHERE key='format'").fetchone() == \
+            ("aistorage.searchindex/v1",)
+        assert con.execute("SELECT COUNT(*) FROM sessions").fetchone() == (3,)
+        assert con.execute("SELECT COUNT(*) FROM message_fts").fetchone() == (5,)
+        assert con.execute("SELECT COUNT(*) FROM links").fetchone() == (3,)
+        assert con.execute("SELECT COUNT(*) FROM handoffs").fetchone() == (2,)
+        assert con.execute("SELECT COUNT(*) FROM rejections").fetchone() == (2,)
+        assert get_reading_ref(con, "opencode:s3") is None  # 轉換失敗無 reading
+        assert [h.handoff_id for h in get_handoffs(con, open_only=True)] == \
+            ["handoff:01ARZ3NDEKTSV4RRFFQ69G5FAZ"]
+    finally:
+        con.close()
+
+
+def test_golden_queries(tmp_path: Path):
+    _, queries = _load_golden()
+    p = _build_golden(tmp_path)
+    con = sqlite3.connect(str(p))
+    try:
+        for case in queries["queries"]:
+            qd = dict(case["query"])
+            if qd.get("cursor") is not None:
+                qd["cursor"] = tuple(qd["cursor"])
+            hits, nxt = search(con, Query(**qd))
+            exp = case["expected"]
+            assert [h.session.session_id for h in hits] == exp["sessions"], case["name"]
+            for h in hits:
+                assert [m.message_id for m in h.matches] == \
+                    exp["matches"].get(h.session.session_id, []), case["name"]
+                for m in h.matches:
+                    assert m.snippet, case["name"]
+            # matched_by 是除錯資訊，不列入跨實作比對（見 searchindex.md）
+            assert (list(nxt) if nxt else None) == exp.get("next_cursor"), case["name"]
+    finally:
+        con.close()
