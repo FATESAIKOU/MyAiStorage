@@ -225,6 +225,8 @@ def search(db: sqlite3.Connection, q: Query) -> tuple[list[Hit], tuple[str, str]
     cursor_sql, cursor_params = _cursor_sql(q.cursor)
 
     # 第一階段：先取命中的 Session 頁（分頁以 Session 為單位）。
+    # text 同時比對訊息文字與標題（PM 決定）：只命中標題的 Session 也回傳，
+    # matches 為空（標題見 session.title）。
     if not words:
         cur = db.execute(
             "SELECT session_id FROM sessions s WHERE 1 = 1"
@@ -235,56 +237,60 @@ def search(db: sqlite3.Connection, q: Query) -> tuple[list[Hit], tuple[str, str]
         )
         page_ids = [r[0] for r in cur.fetchall()]
         match_rows: dict[str, list[tuple[str, int, str]]] = {sid: [] for sid in page_ids}
-    elif use_like:
-        likes = " AND ".join(["m.text LIKE ? ESCAPE '\\'"] * len(words))
-        like_params = [f"%{_escape_like(term)}%" for _, term in words]
-        cur = db.execute(
-            "SELECT DISTINCT s.session_id FROM message_fts m"
-            " JOIN sessions s ON s.session_id = m.session_id"
-            f" WHERE ({likes}){filter_sql}{cursor_sql}"
-            " ORDER BY s.updated_at DESC, s.session_id ASC"
-            f" LIMIT {fetch}",
-            [*like_params, *filter_params, *cursor_params],
-        )
-        page_ids = [r[0] for r in cur.fetchall()]
-        match_rows = {sid: [] for sid in page_ids}
-        if page_ids:
-            placeholders = ",".join("?" * len(page_ids))
-            cur = db.execute(
-                "SELECT session_id, message_id, idx, text FROM message_fts m"
-                f" WHERE session_id IN ({placeholders}) AND ({likes})"
-                " ORDER BY session_id, idx",
-                [*page_ids, *like_params],
-            )
-            needle = words[0][1]
-            for sid, mid, idx, text in cur.fetchall():
-                if sid in match_rows:
-                    match_rows[sid].append(
-                        (mid, idx, _like_snippet(text or "", needle)))
     else:
-        match_expr = " AND ".join(_fts_phrase(term) for _, term in words)
+        title_likes = " AND ".join(["s.title LIKE ? ESCAPE '\\'"] * len(words))
+        title_params = [f"%{_escape_like(term)}%" for _, term in words]
+        if use_like:
+            msg_cond = "(" + " AND ".join(["m.text LIKE ? ESCAPE '\\'"] * len(words)) + ")"
+            msg_params = [f"%{_escape_like(term)}%" for _, term in words]
+        else:
+            msg_cond = "message_fts MATCH ?"
+            msg_params = [" AND ".join(_fts_phrase(term) for _, term in words)]
         cur = db.execute(
-            "SELECT DISTINCT s.session_id FROM message_fts m"
-            " JOIN sessions s ON s.session_id = m.session_id"
-            f" WHERE message_fts MATCH ?{filter_sql}{cursor_sql}"
-            " ORDER BY s.updated_at DESC, s.session_id ASC"
+            "SELECT session_id, updated_at FROM ("
+            " SELECT DISTINCT s.session_id AS session_id, s.updated_at AS updated_at"
+            " FROM message_fts m JOIN sessions s ON s.session_id = m.session_id"
+            f" WHERE {msg_cond}{filter_sql}{cursor_sql}"
+            " UNION"
+            " SELECT s.session_id AS session_id, s.updated_at AS updated_at"
+            " FROM sessions s"
+            f" WHERE ({title_likes}){filter_sql}{cursor_sql}"
+            ") ORDER BY updated_at DESC, session_id ASC"
             f" LIMIT {fetch}",
-            [match_expr, *filter_params, *cursor_params],
+            [*msg_params, *filter_params, *cursor_params,
+             *title_params, *filter_params, *cursor_params],
         )
         page_ids = [r[0] for r in cur.fetchall()]
         match_rows = {sid: [] for sid in page_ids}
+        # 第二階段：取本頁各 Session 的訊息命中（只命中標題者自然為空）。
         if page_ids:
             placeholders = ",".join("?" * len(page_ids))
-            cur = db.execute(
-                "SELECT session_id, message_id, idx,"
-                " snippet(message_fts, 0, '', '', '…', 15) FROM message_fts"
-                f" WHERE session_id IN ({placeholders}) AND message_fts MATCH ?"
-                " ORDER BY session_id, idx",
-                [*page_ids, match_expr],
-            )
-            for sid, mid, idx, snip in cur.fetchall():
-                if sid in match_rows:
-                    match_rows[sid].append((mid, idx, snip or ""))
+            if use_like:
+                likes = " AND ".join(["text LIKE ? ESCAPE '\\'"] * len(words))
+                like_params = [f"%{_escape_like(term)}%" for _, term in words]
+                cur = db.execute(
+                    "SELECT session_id, message_id, idx, text FROM message_fts"
+                    f" WHERE session_id IN ({placeholders}) AND ({likes})"
+                    " ORDER BY session_id, idx",
+                    [*page_ids, *like_params],
+                )
+                needle = words[0][1]
+                for sid, mid, idx, text in cur.fetchall():
+                    if sid in match_rows:
+                        match_rows[sid].append(
+                            (mid, idx, _like_snippet(text or "", needle)))
+            else:
+                match_expr = " AND ".join(_fts_phrase(term) for _, term in words)
+                cur = db.execute(
+                    "SELECT session_id, message_id, idx,"
+                    " snippet(message_fts, 0, '', '', '…', 15) FROM message_fts"
+                    f" WHERE session_id IN ({placeholders}) AND message_fts MATCH ?"
+                    " ORDER BY session_id, idx",
+                    [*page_ids, match_expr],
+                )
+                for sid, mid, idx, snip in cur.fetchall():
+                    if sid in match_rows:
+                        match_rows[sid].append((mid, idx, snip or ""))
 
     has_more = len(page_ids) > limit
     page_ids = page_ids[:limit]
@@ -324,6 +330,20 @@ def get_links(db: sqlite3.Connection, session_id: str
     out.append(tuple(_link_row(r) for r in db.execute(
         f"SELECT * FROM links WHERE to_session_id = ? {order}", (session_id,))))
     return (list(out[0]), list(out[1]))
+
+
+def get_handoff(db: sqlite3.Connection, handoff_id: str) -> HandoffRow | None:
+    ensure_sqlite_version()
+    row = db.execute("SELECT * FROM handoffs WHERE handoff_id = ?",
+                     (handoff_id,)).fetchone()
+    if row is None:
+        return None
+    return HandoffRow(
+        handoff_id=row[0], target_session_id=row[1], snapshot_sha256=row[2],
+        message_id=row[3], producer=row[4], created_at=row[5], updated_at=row[6],
+        case_id=row[7], body_json=row[8], claimed_by_claim_id=row[9],
+        claimed_by_session_id=row[10], claimed_at=row[11],
+    )
 
 
 def get_handoffs(db: sqlite3.Connection, *, target_session_id: str | None = None,

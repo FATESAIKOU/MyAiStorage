@@ -36,8 +36,9 @@ schema 以 `src/aistorage/search/schema.sql` 為準（TS 照抄該檔）。
 - 「命中」的定義：訊息文字**包含** query 字串。**子字串比對，只有 ASCII
   不分大小寫；不做 NFKC 或全形半形的轉換。**這等於 SQLite trigram
   tokenizer 的預設語意，也等於 `LIKE`（ASCII 不分大小寫）的語意。
-- `text` 只比對**訊息文字**，不含標題（標題用 `title_contains` 篩）。
-  只在標題命中的 Session 不會出現在 `text` 結果裡。
+- `text` 同時比對**訊息文字與標題**（子字串，同一 AND 語意；只有 ASCII
+  不分大小寫，不做 NFKC）。只命中標題的 Session 也回傳，`matches` 為空
+  （標題見 `session.title`）。
 - 多個詞以空白分隔，**全部**都要命中（AND，同一則訊息內）；
   支援 `"…"` 引號包住的片語；**不支援** FTS5 的運算子語法
   （query 在程式裡逐字跳脫，全部按字面比對）。

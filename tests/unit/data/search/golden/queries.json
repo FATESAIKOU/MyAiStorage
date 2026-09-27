@@ -117,9 +117,20 @@
       }
     },
     {
-      "name": "只在標題命中的詞查不到全文",
+      "name": "只在標題命中也回傳（matches 為空）",
       "query": {"text": "plain"},
-      "expected": {"sessions": [], "matches": {}}
+      "expected": {
+        "sessions": ["opencode:s3"],
+        "matches": {"opencode:s3": []}
+      }
+    },
+    {
+      "name": "標題命中（LIKE 路徑）",
+      "query": {"text": "メモ"},
+      "expected": {
+        "sessions": ["opencode:s2"],
+        "matches": {"opencode:s2": []}
+      }
     },
     {
       "name": "查無結果",

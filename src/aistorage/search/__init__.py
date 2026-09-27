@@ -22,6 +22,7 @@ from aistorage.search.query import (
     Query,
     ReadingRef,
     SessionRow,
+    get_handoff,
     get_handoffs,
     get_links,
     get_reading_ref,
