@@ -13,7 +13,8 @@ import urllib.parse
 from aistorage.schema import RESERVED_TYPE_NAMES
 
 _ULID_PATTERN = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
-_SOURCE_PATTERN = re.compile(r"^[a-z0-9_-]+$")
+_SOURCE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+_LEDGER_YM_PATTERN = re.compile(r"^\d{4}-\d{2}$")
 
 
 def _validate_ulid(ulid: str, field_name: str = "ULID") -> None:
@@ -24,7 +25,9 @@ def _validate_ulid(ulid: str, field_name: str = "ULID") -> None:
 def enc(s: str) -> str:
     """編碼字串為安全路徑元件。
 
-    M5: 排除小數點以防止 .. 路徑穿越，僅保留字母、數字、連字號與底線 (safe="-_")。
+    依 RFC 3986 未保留字元預設不被 urllib.parse.quote 編碼（包括 '.'、'_'、'-'、'~'）。
+    因此防止路徑穿越（如 '.' 與 '..'）係透過明確檢查拒絕，絕不可移除下列檢查。
+    safe="-_" 指定額外保留連字號與底線。
     若為空或為 '.' / '..' 則拒絕。
     """
     if not s or s in (".", ".."):
@@ -119,11 +122,14 @@ def reference_link_path(from_session_id: str, to_session_id: str) -> str:
 
 def ledger_path(year_month: str) -> str:
     """提交流程處理清冊路徑：_committer/ledger/<YYYY-MM>.jsonl。"""
+    if not isinstance(year_month, str) or not _LEDGER_YM_PATTERN.match(year_month):
+        raise ValueError(f"無效之清冊月份格式: {repr(year_month)}（必須符合 YYYY-MM）")
     return f"_committer/ledger/{year_month}.jsonl"
 
 
 def rejection_path(item_key: str) -> str:
     """提交流程拒收紀錄路徑：_committer/rejections/<item_key>.json。"""
+    _validate_ulid(item_key, "rejection item_key ULID")
     return f"_committer/rejections/{item_key}.json"
 
 

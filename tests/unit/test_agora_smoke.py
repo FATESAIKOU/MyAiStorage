@@ -260,7 +260,8 @@ def test_agora_h3a_multiple_snapshots_committed_per_run(tmp_path: Path):
     subprocess.run(["git", "clone", "-b", "main", str(remote_dir), str(fresh_clone)], check=True, capture_output=True)
 
     fresh_raw_storage = GitRawStorage(fresh_clone)
-    fresh_store = AgoraStore(fresh_clone, fresh_raw_storage, temp_dir=tmp_path / "reader_tmp")
+    fresh_git = SubprocessAnnexGit(fresh_clone)
+    fresh_store = AgoraStore(fresh_clone, fresh_raw_storage, git=fresh_git, temp_dir=tmp_path / "reader_tmp")
 
     # 7. 驗證從全新 clone 之中，兩份快照均能成功取出且內容正確！
     out1 = fresh_store.raw_path_for_snapshot("opencode:ses_multi", raw1_sha)
@@ -280,3 +281,50 @@ def test_git_raw_storage_strict_fail_on_hash_object_error(tmp_path: Path):
 
     with pytest.raises(WriteError):
         storage.store(non_git_dir / "target", src_file)
+
+
+def test_agora_store_r10_git_required_for_git_raw_storage(tmp_path: Path):
+    """R10: raw_storage 為 GitRawStorage 時，git 參數為必填，若為 None 則建構時拋出 ValueError。"""
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    raw_storage = GitRawStorage(worktree)
+
+    with pytest.raises(ValueError, match="必須提供 git"):
+        AgoraStore(worktree, raw_storage, git=None)
+
+
+def test_agora_layout_r11_path_validations():
+    """R11: ledger_path, rejection_path 與 _SOURCE_PATTERN 格式嚴格驗證。"""
+    # 1. rejection_path 必須符合 ULID 格式
+    valid_ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    assert layout.rejection_path(valid_ulid) == f"_committer/rejections/{valid_ulid}.json"
+
+    with pytest.raises(ValueError, match="無效之 rejection item_key ULID"):
+        layout.rejection_path("invalid_short_key")
+
+    with pytest.raises(ValueError, match="無效之 rejection item_key ULID"):
+        layout.rejection_path("01ARZ3NDEKTSV4RRFFQ69G5FA!")
+
+    # 2. ledger_path 必須符合 YYYY-MM
+    assert layout.ledger_path("2026-09") == "_committer/ledger/2026-09.jsonl"
+
+    with pytest.raises(ValueError, match="無效之清冊月份格式"):
+        layout.ledger_path("202609")
+
+    with pytest.raises(ValueError, match="無效之清冊月份格式"):
+        layout.ledger_path("2026-9")
+
+    with pytest.raises(ValueError, match="無效之清冊月份格式"):
+        layout.ledger_path("2026-09-01")
+
+    # 3. _SOURCE_PATTERN 開頭不允許 - 或 _
+    with pytest.raises(ValueError, match="無效之 Session source"):
+        layout.split_session_id("-opencode:ses_123")
+
+    with pytest.raises(ValueError, match="無效之 Session source"):
+        layout.session_dir("_opencode", "ses_123")
+
+    # 合法 source
+    src, sid = layout.split_session_id("opencode:ses_123")
+    assert src == "opencode"
+    assert sid == "ses_123"

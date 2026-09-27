@@ -18,7 +18,7 @@ import tempfile
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from aistorage.agora import layout
-from aistorage.annex.git import AnnexGit
+from aistorage.annex.git import AnnexGit, get_git_env
 from aistorage.errors import MismatchError, WriteError
 from aistorage.schema import validate_record_metadata
 
@@ -224,12 +224,14 @@ class GitRawStorage(RawStorage):
         dest_p.parent.mkdir(parents=True, exist_ok=True)
         dest_p.write_bytes(data)
 
-        # H3-b: 透過 git hash-object -w 寫入物件庫；失敗時嚴格拋出 WriteError，絕不假裝成功
+        # H3-b & R12: 透過 git hash-object -w 寫入物件庫；隔離環境並設定逾時
         proc = subprocess.run(
             ["git", "-C", str(self.git_workdir), "hash-object", "-w", str(Path(src).resolve())],
             capture_output=True,
             text=True,
             check=False,
+            env=get_git_env(),
+            timeout=60.0,
         )
         if proc.returncode != 0:
             raise WriteError(f"git hash-object -w 失敗 (rc={proc.returncode}): {proc.stderr}")
@@ -240,10 +242,13 @@ class GitRawStorage(RawStorage):
     def retrieve(self, ref: str, dest: Path) -> None:
         dest_p = Path(dest)
         dest_p.parent.mkdir(parents=True, exist_ok=True)
+        # R12: 隔離環境並設定逾時
         proc = subprocess.run(
             ["git", "-C", str(self.git_workdir), "cat-file", "-p", ref],
             capture_output=True,
             check=False,
+            env=get_git_env(),
+            timeout=60.0,
         )
         if proc.returncode != 0:
             stderr_msg = (
@@ -266,15 +271,18 @@ class AgoraStore:
         git: AnnexGit | None = None,
         temp_dir: Path | str | None = None,
     ) -> None:
+        # R10: 當 raw_storage 為 GitRawStorage 時，必須提供 git 執行個體以維護 commit 快照可達性
+        if isinstance(raw_storage, GitRawStorage) and git is None:
+            raise ValueError("raw_storage 為 GitRawStorage 時，必須提供 git (AnnexGit) 執行個體以維護快照 commit 歷史")
         self.worktree = Path(worktree).resolve()
         self.raw_storage = raw_storage
         self.git = git
-        # M6: 暫存目錄獨立於工作樹外部，避免 git 誤提交暫存檔
+        # M6 & R12: 暫存目錄獨立於工作樹外部，且預設建立獨立臨時目錄避免本機衝突
         if temp_dir is not None:
             self._temp_dir = Path(temp_dir).resolve()
+            self._temp_dir.mkdir(parents=True, exist_ok=True)
         else:
-            self._temp_dir = Path(tempfile.gettempdir()) / "aistorage_snapshots"
-        self._temp_dir.mkdir(parents=True, exist_ok=True)
+            self._temp_dir = Path(tempfile.mkdtemp(prefix="aistorage_store_"))
         self._changed_paths: list[str] = []
 
     def get_record(self, item_id: str) -> dict[str, Any] | None:

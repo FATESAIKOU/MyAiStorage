@@ -117,14 +117,15 @@
 | **opencode** | `text` part | `type: "text"` | 純文字段落（若 assistant 訊息之 `info.summary is True` 則轉為 `type: "compaction"`）。 |
 | **opencode** | `reasoning` part | `type: "reasoning"` | 思考過程，`plain_text` 預設不納入。 |
 | **opencode** | `tool` call & response | `type: "tool_call"` | 擷取摘要各 ≤ 4,000 code point；若 `state.status == error`，錯誤訊息取自 `state.error`，於 `output_summary` 開頭標示 `[ERROR]`。 |
-| **opencode** | `file` part (`data:` URL, 非圖片) | `type: "file"` | 解碼計算小寫 `sha256` 與 `size`，填入 `media_type`、`name`。 |
-| **opencode** | `file` part (`data:` URL, `mime=image/*`) | `type: "image"` | opencode 圖片亦為 `type: "file"`；解碼計算小寫 `sha256` 與 `size`，轉為 `type: "image"`。 |
-| **opencode** | `file` part (非 `data:` URL) | `type: "text"` | 因原始內容不在匯出中，轉為文字段落 `[附件：<filename> <mime>，內容不在匯出中]`，不捏造雜湊。 |
+| **opencode** | `file` part (`data:` URL, 非圖片) | `type: "file"` | 出處見 `docs/spike/evidence/1.7k-opencode-types.md`。解碼計算小寫 `sha256` 與 `size`，填入 `media_type`、`name`（無檔名時填「（無檔名）」）。 |
+| **opencode** | `file` part (`data:` URL, `mime=image/*`) | `type: "image"` | 出處見 `docs/spike/evidence/1.7k-opencode-types.md`。opencode 圖片亦為 `type: "file"`；解碼計算小寫 `sha256` 與 `size`，轉為 `type: "image"`。 |
+| **opencode** | `file` part (非 `data:` URL) | `type: "text"` | 因原始內容不在匯出中，轉為文字段落 `[附件：<filename 或 （無檔名）> <mime>，內容不在匯出中]`，不捏造雜湊。 |
 | **opencode** | `step-start` / `step-finish` / `snapshot` / `patch` | **丟棄** | 內部步驟與暫存標記，不進入閱讀版。 |
 | **opencode** | user 訊息之 `compaction` part | **丟棄** | 壓縮邊界標記，不進入閱讀版。 |
 | **opencode** | assistant 訊息之 `info.summary is True` | `type: "compaction"` | 壓縮摘要對話，其 text part 轉為 `type: "compaction"`。 |
-| **opencode** | `info.revert` | `reverted: true` | 在 revert 指標之後被回滾的訊息標為 `reverted: true`（若有 `partID` 則該則保留有效，自下一則起標記；若指到不存在訊息拋出 `ConversionError`）。 |
+| **opencode** | `info.revert` | `reverted: true` | 在 revert 指標之後被回滾的訊息標為 `reverted: true`。若有 `partID`，該則訊息自 `partID`（含）起丟棄後續段落，該則本身保留有效不標記 reverted，自下一則起標記 reverted；若指到不存在訊息拋出 `ConversionError`。 |
 | **opencode** | prune 標記 (`state.time.compacted`) | **忽略** | 內容仍在，按一般訊息轉換。 |
+| **opencode** | 中止標記 (`info.error.name == "MessageAbortedError"`) | `completed: false` | 視為已中止，`in_progress: false`。 |
 | **opencode** | 未知或未支援段落型態 | `type: "text"` | 輸出 `[未支援的段落型態：<type>]`，不靜默丟棄。若訊息段落全數被過濾，補空文字段落。 |
 | **Claude Code** | 樹狀分支 (`uuid` / `parentUuid`) | **沿最新葉節點展開** | 沿最新主幹展開為主流程，其餘分支分支保留並標註 `reverted: true`。 |
 | **Claude Code** | `tool_use` (assistant) + `tool_result` (user) | `type: "tool_call"` | 依 `tool_use_id` 配對合併為單一 `tool_call` 段落，依需要截斷摘要。 |

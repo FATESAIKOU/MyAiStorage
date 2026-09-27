@@ -26,9 +26,11 @@ class SessionFacts:
     created_at: str | None
     updated_at: str | None
     message_ids: tuple[str, ...]          # 閱讀版的順序
-    archived_at: str | None               # opencode 的 time.archived（>0 才有值）
-    last_message_at: str | None           # 用於判斷「封存之後是否有新訊息」
+    archived_at: str | None               # opencode 的 time.archived（>0 才有值，僅供顯示）
+    last_message_at: str | None           # 僅供顯示
     in_progress: bool
+    archived_ms: int | None = None        # R3: 毫秒整數時間戳，用於判定「封存之後是否有新訊息」
+    last_message_ms: int | None = None    # R3: 毫秒整數時間戳，取自所有訊息時間的最大值
 
 
 @runtime_checkable
@@ -52,6 +54,7 @@ class Converter(Protocol):
         """將原始紀錄轉換為 aistorage.reading/v1 閱讀版字典。
 
         snapshot_sha256 由轉換器自 raw_path 位元組計算（唯一來源）。
+        參數 snapshot_sha256 僅供測試交叉檢查使用，提交流程中不傳此參數。
         轉換結果必須通過 aistorage.reading.validate_reading 驗證。
         """
         ...

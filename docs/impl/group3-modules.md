@@ -496,8 +496,8 @@ _committer/
   checksums.json                 # sha256Checksum 缺少時的下載驗證結果（file id → sha256）
   schema_version                 # "agora/v1"
 ```
-- `enc()` 用 `urllib.parse.quote(s, safe="-_")`（排除小數點防路徑穿越，拒絕 `.` 與 `..`），保證路徑安全、可逆；**冒號不會出現在路徑裡**。
-- session 的 `meta.json` 額外欄位：`status`、`stopped_at`、`snapshot_at`、`raw_sha256`、`raw_size`、`parent_id`、`in_progress`、`archived_at`、`committed_at`、`last_item_key`、`title`。
+- `enc()` 使用 `urllib.parse.quote(s, safe="-_")`；依 RFC 3986 未保留字元預設不編碼小數點，防止路徑穿越係透過明確檢查拒絕 `.` 與 `..`，保證路徑安全、可逆；**冒號不會出現在路徑裡**。
+- session 的 `meta.json` 額外欄位：`status`、`stopped_at`、`snapshot_at`、`raw_sha256`、`raw_size`、`parent_id`、`in_progress`、`archived_at`、`committed_at`、`last_item_key`、`title`，以及轉換狀態欄位（R9，供 3.7 apply 與第 4 組讀取視圖依循）：`reading_status: "ok" | "failed"`、`reading_error_code: str | None`（例如 `"json_decode_error"`、`"missing_required_field"`、`"schema_violation"`）、`reading_error_message: str | None`（只記錄欄位與位置，不洩漏原始會話內文）。
 - **閱讀版不放在真本**（它是衍生物，design D5）。需要某個舊快照的閱讀版時（接續、第 4 組），用 `snapshots.jsonl` 找到 `git_blob` 或 `annex_key` 取出那一份 raw，再跑轉換器。這也讓「從被釘住的快照讀」（D10）有明確的實作路徑。
 - commit 訊息只寫計數與 item_key（不寫標題或內容，design D2 的 log 規則同樣適用於 git 歷史）。
 
