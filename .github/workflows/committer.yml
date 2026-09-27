@@ -48,20 +48,30 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
 
+      - name: secrets-to-rclone
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+        run: |
+          mkdir -p "$RUNNER_TEMP"
+          echo "$RCLONE_CONF" > "$RUNNER_TEMP/rclone.conf"
+          chmod 600 "$RUNNER_TEMP/rclone.conf"
+
       - name: inbox-prescan
         id: prescan
+        env:
+          AISTORAGE_RCLONE_CONF: ${{ runner.temp }}/rclone.conf
         run: |
-          RESULT=$(uv run python -m aistorage.committer prescan --config config/committer.json || true)
-          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
-          if [ "$RESULT" = "EMPTY" ]; then
-            echo "Inbox is empty, skipping remainder of workflow."
-          fi
+          # 讀不到收件匣必須讓整個 job 失敗（不可 || true），否則錯誤會被掩蓋
+          RESULT=$(uv run python -m aistorage.committer prescan --config config/committer.json)
+          echo "shaped=$RESULT" >> "$GITHUB_OUTPUT"
+          echo "形狀符合的收件匣項目數: $RESULT"
 
       - name: install-tools
-        if: steps.prescan.outputs.result != 'EMPTY'
+        if: steps.prescan.outputs.shaped != '0'
         run: |
           set -eux
           # git-annex (10.20260717 amd64)
+          # 注意：上游 kitenet 僅提供 current/ 目錄，SHA256 鎖定版本 10.20260717；升級時必須同步更新 SHA256 (M7)
           ANNEX_SHA="a3c9d10ee33a7ace69efeaa8cd6282cfd7444ec797d732cebae12a64efefa18a"
           curl -fsSL "https://downloads.kitenet.net/git-annex/linux/current/git-annex-standalone-amd64.tar.gz" -o /tmp/git-annex.tar.gz
           echo "${ANNEX_SHA}  /tmp/git-annex.tar.gz" | sha256sum -c -
@@ -80,23 +90,21 @@ jobs:
           sudo install -m 0755 "/tmp/rclone-v${RCLONE_VERSION}-linux-amd64/rclone" /usr/local/bin/rclone
           rm -rf /tmp/rclone.zip "/tmp/rclone-v${RCLONE_VERSION}-linux-amd64"
 
-      - name: secrets-to-files
-        if: steps.prescan.outputs.result != 'EMPTY'
+      - name: secrets-to-pin-key
+        if: steps.prescan.outputs.shaped != '0'
         env:
-          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
           PIN_DEPLOY_KEY: ${{ secrets.PIN_DEPLOY_KEY }}
         run: |
           mkdir -p "$RUNNER_TEMP"
-          echo "$RCLONE_CONF" > "$RUNNER_TEMP/rclone.conf"
-          chmod 600 "$RUNNER_TEMP/rclone.conf"
           echo "$PIN_DEPLOY_KEY" > "$RUNNER_TEMP/pin_deploy.key"
           chmod 600 "$RUNNER_TEMP/pin_deploy.key"
 
       - name: run
-        if: steps.prescan.outputs.result != 'EMPTY'
+        if: steps.prescan.outputs.shaped != '0'
         env:
           AISTORAGE_RCLONE_CONF: ${{ runner.temp }}/rclone.conf
           AISTORAGE_PIN_KEY: ${{ runner.temp }}/pin_deploy.key
+          AISTORAGE_PIN_KNOWN_HOSTS: config/github_known_hosts
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           uv run python -m aistorage.committer run --config config/committer.json

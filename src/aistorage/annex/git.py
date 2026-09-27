@@ -69,6 +69,10 @@ class AnnexGit(Protocol):
         """查詢在指定 remote_uuid 上已存在的 annex key 集合。"""
         ...
 
+    def local_refs(self, branches: tuple[str, ...] = ("main", "git-annex")) -> dict[str, str]:
+        """查詢本地指定分支之完整 ref 集合（refs/heads/<branch> -> sha）。若缺少任一分支拋出 ReadError。"""
+        ...
+
 
 class SubprocessAnnexGit:
     """以 subprocess 呼叫本機 git / git-annex 之實作。"""
@@ -193,6 +197,25 @@ class SubprocessAnnexGit:
             if k:
                 keys.add(k)
         return frozenset(keys)
+
+    def local_refs(self, branches: tuple[str, ...] = ("main", "git-annex")) -> dict[str, str]:
+        """查詢本地指定分支之完整 ref 集合（refs/heads/<branch> -> sha）。若缺少任一分支拋出 ReadError。"""
+        ref_patterns = [f"refs/heads/{b}" if not b.startswith("refs/") else b for b in branches]
+        cmd = ["git", "for-each-ref", "--format=%(refname) %(objectname)"] + ref_patterns
+        stdout = self._run(cmd, is_write=False)
+        found: dict[str, str] = {}
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(maxsplit=1)
+            if len(parts) == 2:
+                found[parts[0]] = parts[1]
+
+        missing = [p for p in ref_patterns if p not in found]
+        if missing:
+            raise ReadError(f"缺少必要之本地分支: {', '.join(missing)}")
+        return found
 
     @classmethod
     def clone_for_commit(

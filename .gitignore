@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+# 提交流程中止時的 traceback 除錯檔（review-g3g L：不進 Actions log，只寫本機）
+debug/

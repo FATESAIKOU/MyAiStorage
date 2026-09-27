@@ -99,3 +99,17 @@ class FakeAnnexGit(AnnexGit):
     def annex_keys_in(self, remote_uuid: str) -> frozenset[str]:
         self._check_injection("annex_keys_in")
         return self.annex_keys
+
+    def local_refs(self, branches: tuple[str, ...] = ("main", "git-annex")) -> dict[str, str]:
+        self._check_injection("local_refs")
+        combined = dict(self.refs)
+        combined.update(self.pending_refs)
+        res: dict[str, str] = {}
+        for b in branches:
+            full = f"refs/heads/{b}" if not b.startswith("refs/") else b
+            short = b.replace("refs/heads/", "")
+            if full in combined:
+                res[full] = combined[full]
+            elif short in combined:
+                res[full] = combined[short]
+        return res

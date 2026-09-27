@@ -56,12 +56,20 @@ from aistorage.integrity.verify import PushVerification
 from aistorage.schema import generate_ulid
 
 
+@pytest.fixture(autouse=True)
+def _debug_dir(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
+    """中止時的 traceback 寫到暫存目錄，不要在 repo 裡留下 debug/。"""
+    monkeypatch.setenv(
+        "AISTORAGE_DEBUG_DIR", str(tmp_path_factory.mktemp("committer_debug"))
+    )
+
+
 class SimpleTestConverter(Converter):
-    """測試用轉換器。"""
+    """測試用轉換器（簽章與 base.py 的 Converter protocol 一致）。"""
 
     source = "opencode"
 
-    def facts(self, raw_path: Path) -> SessionFacts:
+    def facts(self, raw_path: Path, *, session_id: str | None = None) -> SessionFacts:
         return SessionFacts(
             title="Test Session",
             created_at="2026-09-27T08:00:00Z",
@@ -77,9 +85,15 @@ class SimpleTestConverter(Converter):
         raw_path: Path,
         *,
         session_id: str,
-        snapshot_sha256: str,
+        snapshot_sha256: str | None = None,
         parent_id: str | None = None,
     ) -> dict[str, Any]:
+        # 真實轉換器自行由原始位元組計算快照雜湊，測試用的也要一致，
+        # 否則接續點的 snapshot_sha256 比對會對不上。
+        if snapshot_sha256 is None:
+            snapshot_sha256 = hashlib.sha256(
+                Path(raw_path).read_bytes()
+            ).hexdigest().lower()
         return {
             "session_id": session_id,
             "snapshot_sha256": snapshot_sha256,
@@ -89,7 +103,7 @@ class SimpleTestConverter(Converter):
             ],
         }
 
-    def child_session_ids(self, raw_path: Path) -> tuple[str, ...]:
+    def child_session_ids(self, raw_path: Path, *, session_id: str | None = None) -> tuple[str, ...]:
         return ()
 
 
@@ -192,6 +206,7 @@ def _setup_committer_env(tmp_path: Path) -> tuple[CommitterConfig, Deps, dict[st
         repo_url="drive://agora",
         prefix_folder_id=prefix_folder_id,
         quarantine_folder_id=quarantine_folder_id,
+        identity_registry_path="config/identity.json",
     )
 
     extra_info = {
@@ -214,8 +229,13 @@ def _seed_valid_inbox_session(
     *,
     item_key: str | None = None,
     session_id: str = "ses_smoke_001",
-) -> str:
-    """在收件匣種入合法的 session 項目 (raw, sidecar.json, sig)。"""
+    snapshot_at: str = "2026-09-27T08:00:00Z",
+    created_time: str = "2026-09-27T09:00:00Z",
+) -> tuple[str, str]:
+    """在收件匣種入合法的 session 項目 (raw, sidecar.json, sig)。
+
+    回傳 (item_key, raw_sha256)；交接單的接續點要釘在這個快照上。
+    """
     ulid = item_key or generate_ulid()
     raw_content = b'{"messages": [{"message_id": "m1"}, {"message_id": "m2"}]}'
     raw_sha = hashlib.sha256(raw_content).hexdigest().lower()
@@ -239,7 +259,7 @@ def _seed_valid_inbox_session(
         "session": {
             "source": "opencode",
             "source_session_id": session_id,
-            "snapshot_at": "2026-09-27T08:00:00Z",
+            "snapshot_at": snapshot_at,
             "status": "running",
             "stopped_at": None,
             "in_progress": False,
@@ -251,17 +271,54 @@ def _seed_valid_inbox_session(
     sig_data = sign_sidecar_bytes(sidecar_bytes, priv_bytes, key_id=key_id)
     sig_bytes = json.dumps(sig_data, sort_keys=True).encode("utf-8")
 
-    drive.seed_file(inbox_folder_id, f"{ulid}.raw", raw_content, created_time="2026-09-27T09:00:00Z")
-    drive.seed_file(inbox_folder_id, f"{ulid}.sidecar.json", sidecar_bytes, created_time="2026-09-27T09:00:00Z")
-    drive.seed_file(inbox_folder_id, f"{ulid}.sig", sig_bytes, created_time="2026-09-27T09:00:00Z")
+    drive.seed_file(inbox_folder_id, f"{ulid}.raw", raw_content, created_time=created_time)
+    drive.seed_file(inbox_folder_id, f"{ulid}.sidecar.json", sidecar_bytes, created_time=created_time)
+    drive.seed_file(inbox_folder_id, f"{ulid}.sig", sig_bytes, created_time=created_time)
 
+    return ulid, raw_sha
+
+
+def _seed_valid_inbox_item(
+    drive: FakeDrive,
+    inbox_folder_id: str,
+    priv_bytes: bytes,
+    key_id: str,
+    *,
+    item_id: str,
+    item_type: str,
+    body: dict[str, Any],
+    created_at: str = "2026-09-27T09:00:00Z",
+) -> str:
+    """在收件匣種入不帶 raw 的項目（handoff／claim／reference）。"""
+    ulid = generate_ulid()
+    sidecar_data = {
+        "format": "aistorage.inbox/v1",
+        "item_key": ulid,
+        "profile": "mac-opencode",
+        "metadata": {
+            "id": item_id,
+            "type": item_type,
+            "created_at": created_at,
+            "updated_at": created_at,
+            "case_id": None,
+            "provenance": None,
+        },
+        "raw": None,
+        "body": body,
+    }
+    sidecar_bytes = json.dumps(sidecar_data, sort_keys=True).encode("utf-8")
+    sig_bytes = json.dumps(
+        sign_sidecar_bytes(sidecar_bytes, priv_bytes, key_id=key_id), sort_keys=True
+    ).encode("utf-8")
+    drive.seed_file(inbox_folder_id, f"{ulid}.sidecar.json", sidecar_bytes, created_time=created_at)
+    drive.seed_file(inbox_folder_id, f"{ulid}.sig", sig_bytes, created_time=created_at)
     return ulid
 
 
 def test_full_round_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """測試完整提交流程（13 步 happy path）。"""
     cfg, deps, info = _setup_committer_env(tmp_path)
-    ulid = _seed_valid_inbox_session(
+    _ulid, _raw_sha = _seed_valid_inbox_session(
         deps.drive,
         info["inbox_folder_id"],
         info["priv_bytes"],
@@ -312,7 +369,7 @@ def test_full_round_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert "clean_inbox" in report.durations_ms
 
 
-def test_empty_inbox_early_exit(tmp_path: Path):
+def test_empty_inbox_early_exit(tmp_path: Path, capsys):
     """測試收件匣為空時提早結束，不 clone、不 push、不寫 pin。"""
     cfg, deps, info = _setup_committer_env(tmp_path)
 
@@ -329,14 +386,32 @@ def test_empty_inbox_early_exit(tmp_path: Path):
     assert len(fake_git.commits) == 0
     assert len(fake_git.pushed) == 0
 
-    # prescan CLI 輸出 0
+    # H2：prescan 的 stdout 必須是機器可讀的數字（workflow 以 shaped=<N> 寫進
+    # $GITHUB_OUTPUT，後續步驟用 != '0' 決定要不要繼續），EMPTY 走 stderr。
+    capsys.readouterr()
     assert prescan(cfg, deps) == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "0"
+    assert "EMPTY" in captured.err
+
+
+def test_prescan_stdout_is_machine_readable_when_not_empty(tmp_path: Path, capsys):
+    """H2：有項目時 stdout 只印數字，後續步驟才會繼續。"""
+    cfg, deps, info = _setup_committer_env(tmp_path)
+    _seed_valid_inbox_session(
+        deps.drive, info["inbox_folder_id"], info["priv_bytes"], info["key_id"]
+    )
+    capsys.readouterr()
+    assert prescan(cfg, deps) == 1
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "1"
+    assert "EMPTY" not in captured.err
 
 
 def test_dry_run_zero_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """測試 --dry-run 模式下零寫入（不寫 pin、不移動、不 push、不刪除收件匣檔案）。"""
     cfg, deps, info = _setup_committer_env(tmp_path)
-    ulid = _seed_valid_inbox_session(
+    _ulid, _raw_sha = _seed_valid_inbox_session(
         deps.drive,
         info["inbox_folder_id"],
         info["priv_bytes"],
@@ -354,6 +429,8 @@ def test_dry_run_zero_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # 檢查 FakeAnnexGit 沒有 push
     fake_git: FakeAnnexGit = info["fake_git"]
     assert len(fake_git.pushed) == 0
+    # M1：`git annex copy` 會把物件送上 Drive，dry-run 也不得執行
+    assert len(fake_git.copied) == 0
 
     # 檢查收件匣檔案完整保留，未被刪除
     inbox_children = deps.drive.list_children(info["inbox_folder_id"])
@@ -523,7 +600,7 @@ def test_failure_injection_at_step11_pins_promote(tmp_path: Path, monkeypatch: p
 def test_step13_clean_inbox_safety_precheck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """測試第 13 步清理防呆：若待刪檔案之 parents 不在收件匣中，嚴格中止。"""
     cfg, deps, info = _setup_committer_env(tmp_path)
-    ulid = _seed_valid_inbox_session(
+    _ulid, _raw_sha = _seed_valid_inbox_session(
         deps.drive,
         info["inbox_folder_id"],
         info["priv_bytes"],
@@ -542,7 +619,7 @@ def test_step13_clean_inbox_safety_precheck(tmp_path: Path, monkeypatch: pytest.
     )
 
     # 篡改檔案 parents 為 prefix_folder_id
-    raw_file = deps.drive.find_by_name(info["inbox_folder_id"], f"{ulid}.raw")[0]
+    raw_file = deps.drive.find_by_name(info["inbox_folder_id"], f"{_ulid}.raw")[0]
     monkeypatch.setattr(
         deps.drive,
         "get",
@@ -566,6 +643,103 @@ def test_step13_clean_inbox_safety_precheck(tmp_path: Path, monkeypatch: pytest.
     assert report.code == "MismatchError"
 
 
+def test_round_with_handoff_claim_and_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """review-g3e R1：一輪之內有 session ＋ handoff ＋ claim ＋ reference。
+
+    這是 run.py 呼叫 apply 時少了 clock 參數的守門測試：handoff／claim／reference
+    一起出現時，四個型態的 apply 都必須被呼叫到（缺參數會在這裡 TypeError，
+    並被 run 的 except 轉成 aborted_at=intake.evaluate）。
+    """
+    cfg, deps, info = _setup_committer_env(tmp_path)
+    drive: FakeDrive = deps.drive
+    inbox = info["inbox_folder_id"]
+    priv, key_id = info["priv_bytes"], info["key_id"]
+
+    # 1. 目標 Session（被接續者）與接手 Session（認領者）
+    _s1_ulid, s1_raw_sha = _seed_valid_inbox_session(
+        drive, inbox, priv, key_id, session_id="ses_s1", snapshot_at="2026-09-27T08:00:00Z"
+    )
+    _seed_valid_inbox_session(
+        drive, inbox, priv, key_id, session_id="ses_s2", snapshot_at="2026-09-27T08:10:00Z"
+    )
+
+    # 2. 交接單：接續點釘在 s1 的快照、最後一則已完成的訊息
+    handoff_ulid = generate_ulid()
+    _seed_valid_inbox_item(
+        drive, inbox, priv, key_id,
+        item_id=f"handoff:{handoff_ulid}",
+        item_type="handoff",
+        body={
+            "target_session_id": "opencode:ses_s1",
+            "continuation": {"snapshot_sha256": s1_raw_sha, "message_id": "m2"},
+            "content": "接手資料庫連線池的調查",
+        },
+        created_at="2026-09-27T08:30:00Z",
+    )
+
+    # 3. 認領：s2 認領那張交接單
+    _seed_valid_inbox_item(
+        drive, inbox, priv, key_id,
+        item_id=f"claim:{generate_ulid()}",
+        item_type="claim",
+        body={
+            "handoff_id": f"handoff:{handoff_ulid}",
+            "claimer_session_id": "opencode:ses_s2",
+        },
+        created_at="2026-09-27T08:40:00Z",
+    )
+
+    # 4. 參考：s2 參考 s1
+    _seed_valid_inbox_item(
+        drive, inbox, priv, key_id,
+        item_id=f"reference:{generate_ulid()}",
+        item_type="reference",
+        body={
+            "from_session_id": "opencode:ses_s2",
+            "to_session_id": "opencode:ses_s1",
+            "read_snapshot_at": "2026-09-27T08:45:00Z",
+        },
+        created_at="2026-09-27T08:45:00Z",
+    )
+
+    monkeypatch.setattr(
+        committer_run,
+        "verify_after_push",
+        lambda git, drive_, listing, state, refs, started, workdir: PushVerification(
+            new_manifest_sha256="e" * 64,
+            active=state.active_bundles,
+            removed=frozenset(),
+        ),
+    )
+
+    # 真本工作樹在 run 結束後會被刪掉，先記下寫入的項目與內容
+    written: dict[str, Any] = {}
+    original_put_json = AgoraStore.put_json
+
+    def _spy_put_json(self, relpath, obj):
+        written[relpath] = obj
+        return original_put_json(self, relpath, obj)
+
+    monkeypatch.setattr(AgoraStore, "put_json", _spy_put_json)
+
+    report = run(cfg, deps, dry_run=False)
+
+    assert report.ok is True, f"中止於 {report.aborted_at}:{report.code}"
+    assert report.counts["shaped_items"] == 5
+    assert report.counts["accepted"] == 5
+    assert report.counts["rejected"] == 0
+    # 2 個 session 各 3 個檔，handoff／claim／reference 各 2 個檔 → 全部刪除
+    assert report.counts["inbox_deleted"] == 12
+    assert len(drive.list_children(inbox)) == 0
+
+    # 交接單的認領狀態、接續 Link（s2 → s1）與參考索引都必須寫進真本
+    handoff_rec = written[f"handoffs/{handoff_ulid}.json"]
+    assert handoff_rec["claimed_by"]["session_id"] == "opencode:ses_s2"
+    assert f"links/continuation/opencode%3Ases_s2/{handoff_ulid}.json" in written
+    ref_rec = written["links/reference/opencode%3Ases_s2/opencode%3Ases_s1.json"]
+    assert ref_rec["read_snapshot_at"] == "2026-09-27T08:45:00Z"
+
+
 def test_plan_sweep_cli(tmp_path: Path):
     """測試 plan_sweep_cli 唯讀性與清掃判定。"""
     cfg, deps, info = _setup_committer_env(tmp_path)
@@ -585,19 +759,21 @@ def test_plan_sweep_cli(tmp_path: Path):
 def test_init_pin_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """測試 init_pin_cli 首次釘選（dry-run 與 confirm）。"""
     cfg, deps, info = _setup_committer_env(tmp_path)
+    fake_git: FakeAnnexGit = info["fake_git"]
+    remote_refs = dict(fake_git.refs)
 
-    # 模擬 _download_and_replay 回傳 refs
+    # 模擬 _download_and_replay 回傳 refs（H5：必須與 ls-remote 交叉比對通過）
     monkeypatch.setattr(
         integrity_settle,
         "_download_and_replay",
-        lambda active, repo_uuid, files, drive, workdir: {"refs/heads/main": "init_main_sha"},
+        lambda active, repo_uuid, files, drive, workdir: dict(remote_refs),
     )
 
     # 1. dry-run 模式：不寫入
     empty_pins = MemoryPinStore()
     deps.pins = empty_pins
     state_plan = init_pin_cli(cfg, deps, confirm=False)
-    assert state_plan.refs == {"refs/heads/main": "init_main_sha"}
+    assert state_plan.refs == remote_refs
     with pytest.raises(ReadError):
         empty_pins.load(cfg.repo)
 
@@ -605,7 +781,20 @@ def test_init_pin_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     state_confirmed = init_pin_cli(cfg, deps, confirm=True)
     loaded_state, _ = empty_pins.load(cfg.repo)
     assert loaded_state == state_confirmed
-    assert loaded_state.refs == {"refs/heads/main": "init_main_sha"}
+    assert loaded_state.refs == remote_refs
+
+    # 3. H5：重放出來的 refs 與遠端不符 → 中止，不寫入
+    monkeypatch.setattr(
+        integrity_settle,
+        "_download_and_replay",
+        lambda active, repo_uuid, files, drive, workdir: {"refs/heads/main": "other_sha"},
+    )
+    mismatch_pins = MemoryPinStore()
+    deps.pins = mismatch_pins
+    with pytest.raises(AbortRun, match="ref_mismatch"):
+        init_pin_cli(cfg, deps, confirm=True)
+    with pytest.raises(ReadError):
+        mismatch_pins.load(cfg.repo)
 
 
 def test_logging_never_leaks_secrets():

@@ -12,14 +12,17 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import time
+import traceback
 from typing import Any
+import urllib.error
 import urllib.request
 
 from aistorage.agora import layout
@@ -27,7 +30,6 @@ from aistorage.agora.apply import (
     apply_claim,
     apply_handoff,
     apply_reference,
-    apply_rewrite,
     apply_session,
 )
 from aistorage.agora.store import (
@@ -118,6 +120,7 @@ class RunReport:
     counts: dict[str, int] = field(default_factory=dict)
     durations_ms: dict[str, int] = field(default_factory=dict)
     guard: str = "ok"
+    readview_sweep: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -128,35 +131,54 @@ class RunReport:
         status = "SUCCESS" if self.ok else f"ABORTED({self.aborted_at}:{self.code})"
         counts_str = ", ".join(f"{k}={v}" for k, v in sorted(self.counts.items()))
         durations_str = ", ".join(f"{k}={v}ms" for k, v in sorted(self.durations_ms.items()))
-        return f"[RunReport {self.run_id}] {status} | counts: [{counts_str}] | durations: [{durations_str}]"
+        rv_str = f" | readview_sweep={self.readview_sweep}" if self.readview_sweep else ""
+        return f"[RunReport {self.run_id}] {status} | counts: [{counts_str}] | durations: [{durations_str}]{rv_str}"
 
 
-def _get_local_refs(git: AnnexGit, branches: tuple[str, ...] = ("main", "git-annex")) -> dict[str, str]:
-    """自 AnnexGit 取得本地指定分支之完整 ref 集合。"""
-    if hasattr(git, "local_refs"):
-        return git.local_refs(branches)  # type: ignore[no-any-return]
-    if isinstance(git, FakeAnnexGit):
-        combined = dict(git.refs)
-        combined.update(git.pending_refs)
-        refs: dict[str, str] = {}
-        for b in branches:
-            full = f"refs/heads/{b}"
-            if full in combined:
-                refs[full] = combined[full]
-            elif b in combined:
-                refs[full] = combined[b]
-        return refs
-    if hasattr(git, "_run"):
-        refs = {}
-        for b in branches:
-            try:
-                sha = git._run(["git", "rev-parse", f"refs/heads/{b}"], is_write=False).strip()  # type: ignore[no-untyped-call]
-                if sha:
-                    refs[f"refs/heads/{b}"] = sha
-            except Exception:
-                pass
-        return refs
-    return {}
+def _check_test_kill(step_name: str) -> None:
+    """測試中斷注入檢查（AISTORAGE_TEST_KILL_AFTER）。"""
+    kill_after = os.environ.get("AISTORAGE_TEST_KILL_AFTER")
+    if kill_after and (kill_after == step_name or kill_after == step_name.split(".")[-1]):
+        os._exit(42)
+
+
+#: traceback 除錯檔的輸出目錄（review-g3g L：只寫檔，不進 Actions log）。
+DEBUG_DIR_ENV = "AISTORAGE_DEBUG_DIR"
+DEFAULT_DEBUG_DIR = "debug"
+
+
+def _dump_traceback(run_id: str, step: str, exc: BaseException) -> str | None:
+    """把 traceback 寫到本機除錯檔；Actions log 只印路徑與例外類別名稱。
+
+    traceback 可能含有本機路徑或訊息內容，所以不印到 log（D2 的 log 規則）。
+    """
+    try:
+        debug_dir = Path(os.environ.get(DEBUG_DIR_ENV) or DEFAULT_DEBUG_DIR)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        path = debug_dir / f"run-{run_id}.log"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"\n=== run={run_id} step={step} ===\n")
+            f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+        return str(path)
+    except Exception:
+        return None
+
+
+def _target_source(dec: Decision) -> str:
+    """取出交接單／參考紀錄的目標 Session 所屬來源（`target_session_id` 的前半段）。
+
+    交接單的接續點是以目標 Session 的原始紀錄驗證的，轉換器必須是那個來源的
+    （review-g3e L／review-g3g M4）。取不到時回 `opencode`：evaluate 已用 sidecar
+    schema 驗過 `target_session_id`，走不到這裡代表輸入異常，交由 apply 判為
+    `invalid_format`，不要讓整輪中止。
+    """
+    sidecar = getattr(dec, "sidecar", None)
+    body = sidecar.get("body") if isinstance(sidecar, dict) else None
+    target_id = ""
+    if isinstance(body, dict):
+        target_id = str(body.get("target_session_id") or "")
+    source = target_id.split(":", 1)[0] if ":" in target_id else ""
+    return source or "opencode"
 
 
 def step1_guard(cfg: CommitterConfig, clock: Clock) -> str:
@@ -198,8 +220,10 @@ def step1_guard(cfg: CommitterConfig, clock: Clock) -> str:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             remote_sha = data.get("sha", "")
+    except urllib.error.HTTPError as e:
+        raise AbortRun("guard", "api_error", f"無法自 GitHub API 取得遠端 main HEAD (HTTP {e.code})") from e
     except Exception as e:
-        raise AbortRun("guard", "api_error", f"無法自 GitHub API 取得遠端 main HEAD: {e}") from e
+        raise AbortRun("guard", "api_error", f"無法自 GitHub API 取得遠端 main HEAD ({type(e).__name__})") from e
 
     if not remote_sha or remote_sha != github_sha:
         raise AbortRun(
@@ -214,14 +238,15 @@ def step1_guard(cfg: CommitterConfig, clock: Clock) -> str:
 def prescan(cfg: CommitterConfig, deps: Deps) -> int:
     """提交流程預先掃描（第 2 步專用進入點）。
 
-    形狀符合的收件匣項目數；若為 0 則印出 EMPTY 並回傳 0。
+    stdout 只印形狀符合的收件匣項目數（workflow 以 `shaped=<N>` 寫進
+    $GITHUB_OUTPUT，後續步驟用 `!= '0'` 決定要不要繼續）；空收件匣另外在
+    stderr 印一行 EMPTY 供人閱讀。讀不到收件匣時直接 raise，不可吞掉錯誤。
     """
     scan = scan_inboxes(deps.drive, deps.registry)
     shaped = count_shaped(scan)
     if shaped == 0:
-        print("EMPTY")
-        return 0
-    print(f"{shaped}")
+        print("EMPTY", file=sys.stderr)
+    print(shaped)
     return shaped
 
 
@@ -299,7 +324,7 @@ def init_pin_cli(
         workdir = Path(td)
         from aistorage.integrity.settle import _download_and_replay
 
-        refs = _download_and_replay(
+        replay_refs = _download_and_replay(
             parsed.active,
             cfg.repo_uuid,
             files,
@@ -307,25 +332,52 @@ def init_pin_cli(
             workdir,
         )
 
-    now_iso = format_rfc3339(deps.clock.now())
+        # Clone 並與 ls-remote 比對，同時讀取 annex keys 集合 (H5)
+        git_dir = workdir / "repo"
+        git = deps.git_factory(git_dir)
+        remote_refs = git.ls_remote("origin")
+
+        for b in ("main", "git-annex"):
+            full_ref = f"refs/heads/{b}"
+            if full_ref in replay_refs:
+                if remote_refs.get(full_ref) != replay_refs[full_ref]:
+                    raise AbortRun(
+                        "init-pin",
+                        "ref_mismatch",
+                        f"重放之 {full_ref} ({replay_refs[full_ref]}) 與 ls-remote ({remote_refs.get(full_ref)}) 不符",
+                    )
+
+        annex_keys = (
+            git.annex_keys_in(cfg.repo_uuid)
+            if hasattr(git, "annex_keys_in")
+            else frozenset()
+        )
+
+    now_iso = format_rfc3339(deps.clock.now(), include_fraction=True)
     state = PinState(
         repo=cfg.repo,
         repo_uuid=cfg.repo_uuid,
-        refs=refs,
+        refs=replay_refs,
         manifest_sha256=m_sha,
         prev_manifest_sha256=None,
         active_bundles=parsed.active,
         removed_bundles=parsed.removed,
-        annex_keys=frozenset(),
+        annex_keys=annex_keys,
         promoted_at=now_iso,
         run_id="init-pin",
     )
 
     if confirm:
         deps.pins.promote(state)
-        print(f"INIT_PIN_PROMOTED: repo={state.repo} manifest={m_sha[:8]} active={len(state.active_bundles)}")
+        print(
+            f"INIT_PIN_PROMOTED: repo={state.repo} manifest={m_sha[:8]} "
+            f"active={len(state.active_bundles)} keys={len(state.annex_keys)}"
+        )
     else:
-        print(f"INIT_PIN_PLAN: repo={state.repo} manifest={m_sha[:8]} active={len(state.active_bundles)} (dry-run)")
+        print(
+            f"INIT_PIN_PLAN: repo={state.repo} manifest={m_sha[:8]} "
+            f"active={len(state.active_bundles)} keys={len(state.annex_keys)} (dry-run)"
+        )
 
     return state
 
@@ -449,20 +501,10 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
 
             readview_decisions: list[SweepDecision] = []
             if cfg.readview_folder_id:
-                rv_children = deps.drive.list_children(cfg.readview_folder_id)
-                rv_files = tuple(f for f in rv_children if not f.is_folder)
-                rv_subfolders = tuple(f for f in rv_children if f.is_folder)
-                rv_listing = RepoListing(
-                    prefix_folder_id=cfg.readview_folder_id,
-                    files=rv_files,
-                    subfolders=rv_subfolders,
-                )
-                readview_decisions = plan_readview_sweep(
-                    rv_listing,
-                    set(),  # 第 4 組發佈前先清除非授權檔案
-                    readview_folder_id=cfg.readview_folder_id,
-                )
-
+                # M2：第 4 組定義出可信集合（讀取視圖 manifest 的 file id）之前，
+                # 不執行讀取視圖的清掃。現在 plan_readview_sweep 的可信集合是空集合，
+                # 只要有設定就會把讀取視圖資料夾裡的每一個檔案都隔離。
+                report.readview_sweep = "skipped"
             all_sweep_decisions = parent_decisions + sweep_decisions + readview_decisions
             moved_count = apply_sweep(
                 all_sweep_decisions,
@@ -538,7 +580,7 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
 
             # 依型態順序套用至真本
             applied_accepted: list[Decision] = []
-            now_iso = format_rfc3339(deps.clock.now())
+            now_iso = format_rfc3339(deps.clock.now(), include_fraction=True)
 
             for dec in sorted_accepted:
                 item_type = dec.record_metadata.get("type") if dec.record_metadata else ""
@@ -546,21 +588,24 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
                     source = dec.sidecar["session"]["source"] if dec.sidecar else "opencode"
                     conv = deps.converters.get(source) or get_converter(source)
                     res = apply_session(store, dec, conv, deps.clock)
-                elif item_type == "rewrite":
-                    conv = deps.converters.get("opencode") or get_converter("opencode")
-                    res = apply_rewrite(store, dec, conv)
                 elif item_type == "handoff":
-                    conv = deps.converters.get("opencode") or get_converter("opencode")
-                    res = apply_handoff(store, dec, conv)
+                    # 依目標 Session 的 source 選轉換器（review-g3e L／g3g M4）：
+                    # 目標是 Claude Code 的 Session 時不能拿 opencode 的轉換器去驗接續點。
+                    target_source = _target_source(dec)
+                    conv = deps.converters.get(target_source) or get_converter(target_source)
+                    res = apply_handoff(store, dec, conv, deps.clock)
                 elif item_type == "claim":
-                    res = apply_claim(store, dec)
+                    res = apply_claim(store, dec, deps.clock)
                 elif item_type == "reference":
-                    res = apply_reference(store, dec)
+                    res = apply_reference(store, dec, deps.clock)
                 else:
+                    # 改寫：evaluate 在驗章之後、下載 raw 之前就 REJECT(rewrite_disabled)，
+                    # 走不到這裡（期 1 不提供改寫，見 PM 決定）。留在這裡只是不讓
+                    # 未知的型態被靜默當成已套用。
                     continue
 
                 item_id = dec.record_metadata.get("id", "") if dec.record_metadata else ""
-                raw_sha = dec.sidecar.get("raw", {}).get("sha256") if dec.sidecar else None
+                raw_sha = (dec.sidecar.get("raw") or {}).get("sha256") if dec.sidecar else None
 
                 if not res.ok:
                     # apply 判定失敗轉為 REJECT（拒絕記錄已由 apply 模組寫入）
@@ -585,7 +630,7 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             # 記錄 ALREADY 與經認證的 REJECT 至清冊
             for dec in decisions:
                 item_id = dec.record_metadata.get("id", "") if dec.record_metadata else ""
-                raw_sha = dec.sidecar.get("raw", {}).get("sha256") if dec.sidecar else None
+                raw_sha = (dec.sidecar.get("raw") or {}).get("sha256") if dec.sidecar else None
                 if dec.kind == DecisionKind.ALREADY:
                     ledger.record(
                         dec.item.item_key,
@@ -622,7 +667,9 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             # ---------------------------------------------------------
             current_step = "pins.write_pending"
             t0 = time.monotonic()
-            local_refs = _get_local_refs(git)
+            # H1：refs 與 annex key 集合取自 AnnexGit 自己的公開方法；缺少必要分支
+            # 由 SubprocessAnnexGit.local_refs() raise，不在這裡吞掉例外。
+            local_refs = git.local_refs()
             annex_keys = (
                 git.annex_keys_in(state.repo_uuid)
                 if hasattr(git, "annex_keys_in")
@@ -659,8 +706,9 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
                     f"GITMANIFEST--{state.repo_uuid}",
                     state,
                 )
-                git.copy("origin")
+                # M1：`git annex copy` 會把物件送上 Drive，dry-run 不得執行。
                 if not dry_run:
+                    git.copy("origin")
                     git.push("origin", ("main", "git-annex"))
 
             report.durations_ms["git.push"] = int((time.monotonic() - t0) * 1000)
@@ -798,9 +846,11 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
         except AiStorageError as e:
             report.aborted_at = current_step
             report.code = type(e).__name__
+            _dump_traceback(run_id, current_step, e)
         except Exception as e:
             report.aborted_at = current_step
             report.code = type(e).__name__
+            _dump_traceback(run_id, current_step, e)
 
     print(report.format_log())
     return report

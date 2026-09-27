@@ -31,11 +31,39 @@ from aistorage.committer.run import (
 from aistorage.converters import CONVERTERS
 from aistorage.drive.auth import RcloneConfToken
 from aistorage.drive.http import HttpDriveClient
-from aistorage.identity import Registry
+from aistorage.identity import Registry, load_registry
 from aistorage.integrity.pin import GitPinStore
 
 
-def build_production_deps(cfg: CommitterConfig) -> Deps:
+def build_prescan_deps(cfg: CommitterConfig) -> Deps:
+    """自 CommitterConfig 建立僅供 prescan 使用的輕量相依元件（僅需 Drive 與身分登錄檔，H2）。"""
+    clock = SystemClock()
+
+    if not cfg.rclone_conf_path or not Path(cfg.rclone_conf_path).is_file():
+        raise RuntimeError(
+            f"找不到 rclone.conf 設定檔，請確認環境變數 AISTORAGE_RCLONE_CONF (目前: {cfg.rclone_conf_path})"
+        )
+    token_src = RcloneConfToken(cfg.rclone_conf_path)
+    drive = HttpDriveClient(token_src)
+
+    # H4: 使用 load_registry 並強制 allow_example=False
+    try:
+        registry = load_registry(cfg.identity_registry_path, allow_example=False)
+    except Exception as e:
+        raise RuntimeError(f"載入身分登錄檔失敗 ({cfg.identity_registry_path}): {e}") from e
+
+    return Deps(
+        drive=drive,
+        pins=None,  # type: ignore[arg-type]
+        git_factory=None,  # type: ignore[arg-type]
+        registry=registry,
+        converters=CONVERTERS,
+        publisher=NullPublisher(),
+        clock=clock,
+    )
+
+
+def build_production_deps(cfg: CommitterConfig, *, allow_production: bool = False) -> Deps:
     """自 CommitterConfig 建立生產環境相依元件聚合。"""
     clock = SystemClock()
 
@@ -52,6 +80,7 @@ def build_production_deps(cfg: CommitterConfig) -> Deps:
         workdir=pin_temp,
         key_path=cfg.pin_key_path,
         known_hosts_path=cfg.pin_known_hosts_path,
+        allow_production=allow_production,
     )
 
     git_factory = lambda dest: SubprocessAnnexGit.clone_for_commit(
@@ -60,11 +89,11 @@ def build_production_deps(cfg: CommitterConfig) -> Deps:
         max_git_bundles=cfg.max_git_bundles,
     )
 
-    reg_path = Path(cfg.identity_registry_path)
-    if not reg_path.is_file():
-        raise RuntimeError(f"找不到身分登錄檔: {reg_path}")
-    reg_data = json.loads(reg_path.read_text(encoding="utf-8"))
-    registry = Registry(reg_data)
+    # H4: 使用 load_registry 並強制 allow_example=False
+    try:
+        registry = load_registry(cfg.identity_registry_path, allow_example=False)
+    except Exception as e:
+        raise RuntimeError(f"載入身分登錄檔失敗 ({cfg.identity_registry_path}): {e}") from e
 
     publisher = NullPublisher()
 
@@ -102,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     # init-pin
     p_init = subparsers.add_parser("init-pin", help="初始化正式釘選值")
     p_init.add_argument("--config", "-c", help="設定檔路徑", default=None)
+    p_init.add_argument("--i-am-admin", action="store_true", help="管理者模式，允許在非 CI 環境下存取正式 pin repo")
     init_mode = p_init.add_mutually_exclusive_group()
     init_mode.add_argument("--dry-run", action="store_true", default=True, help="僅列印計畫（預設）")
     init_mode.add_argument("--confirm", action="store_true", help="確定寫入正式釘選值至 pin repo")
@@ -109,20 +139,23 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = CommitterConfig.load(args.config)
-    deps = build_production_deps(cfg)
 
     if args.command == "prescan":
+        deps = build_prescan_deps(cfg)
         prescan(cfg, deps)
         return 0
     elif args.command == "run":
+        deps = build_production_deps(cfg)
         report = run(cfg, deps, dry_run=args.dry_run)
         return 0 if report.ok else 1
     elif args.command == "plan-sweep":
+        deps = build_production_deps(cfg)
         decisions = plan_sweep_cli(cfg, deps)
         for d in decisions:
             print(f"[{d.disposition.value.upper()}] {d.file.name} (id={d.file.id}): {d.reason}")
         return 0
     elif args.command == "init-pin":
+        deps = build_production_deps(cfg, allow_production=args.i_am_admin)
         init_pin_cli(cfg, deps, confirm=args.confirm)
         return 0
 
