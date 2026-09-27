@@ -69,7 +69,7 @@
 
 ## 8. 需求設計與對外工單
 
-- [ ] 8.1 Atelier 需求設計 `docs/atelier/`：需要哪些部門（profile）、需要哪些職能（職務），只到需求層級；與 `docs/atelier/role.md`、`external-copy.md` 保持一致
+- [x] 8.1 Atelier 需求設計 `docs/atelier/`：需要哪些部門（profile）、需要哪些職能（職務），只到需求層級；與 `docs/atelier/role.md`、`external-copy.md` 保持一致
 - [ ] 8.2 MyLinuxPool 工單 `docs/tickets/mylinuxpool.md`：依期 1 實作的結果更新（worker 共用的 Drive 憑證與讀取身分、每個 profile 的簽章金鑰的發放與輪替、`/secrets/` 的掛載形狀、收件匣上傳格式、觸發並等待提交流程的方式、能力清單格式、驗證過的 CPU 架構），經使用者同意後交給 MyLinuxPool 那邊
 
 ## 9. 端到端驗收
