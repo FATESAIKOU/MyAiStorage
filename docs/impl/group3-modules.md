@@ -313,7 +313,7 @@ def apply_sweep(decisions: list[SweepDecision], drive: DriveClient, *, quarantin
     # 逐項使用各自的 from_parent 搬移（M7）；任何一次 WriteError → raise AbortRun（這一輪中止）；回傳移動的數量
 ```
 - **順序保證**：`plan_sweep` 先完整算完，才開始移動；只要計畫階段有任何 `ReadError`，就一個檔都不動。
-- 讀取視圖資料夾也用同一套：讀取視圖的可信集合是「讀取視圖 manifest 列出的 file id」（第 4 組定義），第 3 組先只清掃 repo 資料夾，介面預留 `plan_readview_sweep(listing, readview_manifest)`。
+- 讀取視圖資料夾也用同一套：讀取視圖的可信集合是「讀取視圖 manifest 列出的 file id」（第 4 組定義），第 3 組先只清掃 repo 資料夾，介面預留 `plan_readview_sweep(listing, state)`；提交流程 `run.py` 第 4 步必須同時呼叫 `plan_readview_sweep`（或於 `run_settle_and_sweep` 傳入 `readview_listing`）。
 
 ### 3.5 核對、預檢、push 後驗證（`integrity/verify.py`）
 

@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 from typing import Protocol, runtime_checkable
 
@@ -100,6 +101,26 @@ class MemoryPinStore(PinStore):
         self._pendings.pop(repo, None)
 
 
+_ALLOWED_REMOTE_GITHUB_SSH = re.compile(
+    r"^(?:git@github\.com:[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(?:\.git)?|ssh://git@github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(?:\.git)?)$"
+)
+
+
+def _is_local_path_or_file_url(url: str) -> bool:
+    if url.startswith("file://"):
+        return True
+    if ":" not in url:
+        if url.startswith(("/", "./", "../")):
+            return True
+        p = Path(url)
+        if p.is_absolute() or p.exists():
+            return True
+    p = Path(url)
+    if p.is_absolute() or p.exists():
+        return True
+    return False
+
+
 class GitPinStore(PinStore):
     """透過獨立 Git 儲存庫（pin repo）管理釘選值之實作。
 
@@ -118,6 +139,7 @@ class GitPinStore(PinStore):
         known_hosts_path: Path | str | None = None,
         user_name: str = "AiStorage Committer",
         user_email: str = "committer@aistorage.local",
+        allow_production: bool = False,
     ) -> None:
         self.repo_url = repo_url
         self.workdir = Path(workdir).resolve()
@@ -126,16 +148,22 @@ class GitPinStore(PinStore):
         self.user_name = user_name
         self.user_email = user_email
 
-        self._env = get_git_env()
-        # M2: 使用 SSH 存取時強制要求 key_path 與 known_hosts_path
-        if self.repo_url.startswith(("ssh://", "git@")):
-            if not self.key_path or not self.known_hosts_path:
-                raise ValueError("使用 SSH 存取 pin repo 時，key_path 與 known_hosts_path 為必填 (M2)")
-            if not self.key_path.is_file():
-                raise ValueError(f"找不到 SSH deploy key 檔案: {self.key_path}")
-            if not self.known_hosts_path.is_file():
-                raise ValueError(f"找不到 known_hosts 檔案: {self.known_hosts_path}")
+        # R2: URL 白名單驗證（僅接受本機路徑/file:// 或 GitHub SSH: git@github.com:... / ssh://git@github.com/...）
+        if not _is_local_path_or_file_url(self.repo_url) and not _ALLOWED_REMOTE_GITHUB_SSH.match(self.repo_url):
+            raise ValueError(
+                f"不允許的 pin repo URL 形式: {repr(self.repo_url)}（僅接受本機路徑、file:// 或 GitHub SSH: git@github.com:... / ssh://git@github.com/...）"
+            )
 
+        # R2: 正式 pin repo（MyAiStorage-pin）非 CI 環境禁止寫入
+        if re.search(r"/MyAiStorage-pin(?:\.git)?$", self.repo_url):
+            if os.environ.get("GITHUB_ACTIONS") != "true" and not allow_production:
+                raise PermissionError(
+                    "非 CI 環境 (GITHUB_ACTIONS != 'true') 禁止寫入正式 pin repo (MyAiStorage-pin)！本機測試請使用 MyAiStorage-pin-test。"
+                )
+
+        self._env = get_git_env()
+
+        # R2: 一律設定 GIT_SSH_COMMAND 隔離個人身分，防止退回 ~/.ssh/config 或 ssh-agent
         if self.key_path and self.known_hosts_path:
             ssh_cmd = (
                 f"ssh -F /dev/null -i {self.key_path} -o IdentitiesOnly=yes "
@@ -143,6 +171,17 @@ class GitPinStore(PinStore):
                 f"-o IdentityAgent=none"
             )
             self._env["GIT_SSH_COMMAND"] = ssh_cmd
+        else:
+            self._env["GIT_SSH_COMMAND"] = "ssh -F /dev/null -o IdentityAgent=none -o IdentitiesOnly=yes"
+
+        # 若存取遠端 GitHub SSH 時，強制要求 key_path 與 known_hosts_path 且必須存在
+        if _ALLOWED_REMOTE_GITHUB_SSH.match(self.repo_url):
+            if not self.key_path or not self.known_hosts_path:
+                raise ValueError("使用 SSH 存取遠端 pin repo 時，key_path 與 known_hosts_path 為必填 (M2)")
+            if not self.key_path.is_file():
+                raise ValueError(f"找不到 SSH deploy key 檔案: {self.key_path}")
+            if not self.known_hosts_path.is_file():
+                raise ValueError(f"找不到 known_hosts 檔案: {self.known_hosts_path}")
 
     def _run_git(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
         cmd = ["git"] + args
@@ -208,7 +247,8 @@ class GitPinStore(PinStore):
 
         required_state_keys = {
             "repo", "repo_uuid", "refs", "manifest_sha256",
-            "active_bundles", "removed_bundles", "promoted_at", "run_id"
+            "active_bundles", "removed_bundles", "promoted_at", "run_id",
+            "annex_keys_count", "annex_keys_sha256",
         }
         missing_state_keys = required_state_keys - set(data.keys())
         if missing_state_keys:
@@ -228,12 +268,11 @@ class GitPinStore(PinStore):
             for line in keys_bytes.decode("utf-8").splitlines()
             if line.strip()
         )
-        if "annex_keys_count" in data and len(annex_keys) != data["annex_keys_count"]:
+        if len(annex_keys) != data["annex_keys_count"]:
             raise ReadError(f"annex_keys 數量 ({len(annex_keys)}) 與宣告 ({data['annex_keys_count']}) 不符")
-        if "annex_keys_sha256" in data:
-            calc_keys_sha = hashlib.sha256(keys_bytes).hexdigest().lower()
-            if calc_keys_sha != data["annex_keys_sha256"]:
-                raise ReadError(f"keys 檔案雜湊 ({calc_keys_sha}) 與宣告 ({data['annex_keys_sha256']}) 不符")
+        calc_keys_sha = hashlib.sha256(keys_bytes).hexdigest().lower()
+        if calc_keys_sha != data["annex_keys_sha256"]:
+            raise ReadError(f"keys 檔案雜湊 ({calc_keys_sha}) 與宣告 ({data['annex_keys_sha256']}) 不符")
 
         state = PinState(
             repo=data["repo"],

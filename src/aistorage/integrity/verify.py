@@ -167,7 +167,7 @@ def verify_after_push(
         b_files = drive.find_by_name(listing_before.prefix_folder_id, b_name)
         matched = [
             f for f in b_files
-            if f.sha256 == b_info.sha256 and (f.size is None or f.size == b_info.size)
+            if f.sha256 == b_info.sha256 and f.size == b_info.size
         ]
         if not matched:
             raise MismatchError(f"找不到符合新增 active bundle 宣告與雜湊之檔案: {b_name}")
@@ -192,7 +192,7 @@ def verify_after_push(
                 found = drive.find_by_name(listing_before.prefix_folder_id, b_name)
                 matched = [
                     f for f in found
-                    if f.sha256 == b_info.sha256 and (f.size is None or f.size == b_info.size)
+                    if f.sha256 == b_info.sha256 and f.size == b_info.size
                 ]
                 if not matched:
                     raise MismatchError(f"遠端找不到符合雜湊之 active bundle: {b_name}")

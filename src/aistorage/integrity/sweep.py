@@ -399,9 +399,6 @@ def resolve_content_checks(
             else:
                 calc_sha = cached_val
                 calc_size = f.size if f.size is not None else 0
-        elif fid in cache and isinstance(cache[fid], str):
-            calc_sha = cache[fid]
-            calc_size = f.size if f.size is not None else 0
         else:
             try:
                 data = drive.download_bytes(fid, max_bytes=32 * 1024 * 1024)
@@ -420,7 +417,6 @@ def resolve_content_checks(
                     calc_sha = hasher.hexdigest().lower()
 
             cache[cache_key] = (calc_sha, calc_size)
-            cache[fid] = calc_sha
 
         # 構造帶有完整 sha256 與 size 的 DriveFile
         updated_file = DriveFile(
@@ -501,7 +497,13 @@ def apply_sweep(
         c for c in drive.list_children(quarantine_folder_id)
         if c.is_folder and c.name == folder_name
     ]
-    if matching_folders:
+    if len(matching_folders) > 1:
+        raise AbortRun(
+            "sweep",
+            "multiple_quarantine_folders",
+            f"隔離資料夾中存在多個同名的日期子資料夾: '{folder_name}'",
+        )
+    elif len(matching_folders) == 1:
         target_folder_id = matching_folders[0].id
     else:
         created = drive.create(
@@ -604,6 +606,7 @@ def run_settle_and_sweep(
     clock: Clock | None = None,
     cache: dict[Any, Any] | None = None,
     dry_run: bool = False,
+    readview_listing: RepoListing | None = None,
 ) -> SettleAndSweepResult:
     """第 3〜4 步組合函式（供提交流程與性質測試共用進入點，review-g3c H4）。
 
@@ -641,7 +644,7 @@ def run_settle_and_sweep(
         workdir=workdir,
         clock=clock_obj,
     )
-    if pins is not None and not dry_run:
+    if not dry_run:
         if settle_outcome == SettleOutcome.PROMOTED:
             pins.promote(current_state)
         elif settle_outcome in (SettleOutcome.DROPPED, SettleOutcome.BAK_RECOVERY):
@@ -672,8 +675,13 @@ def run_settle_and_sweep(
         workdir=workdir,
     )
 
+    # 5.5 讀取視圖清掃計畫（若提供 readview_listing）
+    readview_decisions: list[SweepDecision] = []
+    if readview_listing is not None:
+        readview_decisions = plan_readview_sweep(readview_listing, current_state)
+
     # 6. 合併所有決策並套用清掃 (H3, M7)
-    all_decisions = parent_decisions + sweep_decisions
+    all_decisions = parent_decisions + sweep_decisions + readview_decisions
     moved_count = apply_sweep(
         all_decisions,
         drive,

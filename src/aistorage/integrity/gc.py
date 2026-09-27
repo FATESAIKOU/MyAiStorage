@@ -110,7 +110,7 @@ def purge_quarantine(
         if item.is_folder:
             try:
                 folder_date = datetime.strptime(item.name, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                if folder_date < cutoff_dt:
+                if folder_date + timedelta(days=1) <= cutoff_dt:
                     is_expired = True
             except ValueError:
                 if item.created_at < cutoff_dt:
