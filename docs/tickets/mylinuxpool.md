@@ -1,5 +1,7 @@
 # MyLinuxPool 工單（AiStorage 需要的）
 
+> 2026-09-28：已依使用者指示整合成 MyLinuxPool 的 GitHub issue [#5](https://github.com/FATESAIKOU/MyLinuxPool/issues/5)（worker 部門與職能＋本檔內容）。期 1 完成後的實際 secrets 名稱與格式，補在該 issue。
+
 AiStorage 需要 MyLinuxPool 做的事。期 1 沒有相依：期 1 的 profile 憑證由使用者手動安裝在 Mac 上。這些工單等 MyLinuxPool 的 profile 重新設計時一起考慮。期 1 實作完成後，會依實際結果更新本檔（tasks 8.2），再經使用者同意交給 MyLinuxPool 那邊。
 
 詞彙依本 repo 的 `CONTEXT.md`：profile＝一類執行體的配置（部門），身分＝屬於哪個 profile，職務不參與授權。
