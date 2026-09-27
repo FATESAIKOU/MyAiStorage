@@ -15,6 +15,7 @@ AiStorage 用到的實體資源都記在這裡：Drive 資料夾、OAuth client�
 | `spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com` | service account | project 1；金鑰仍在 `~/.config/aistorage-spike/sa-reader.json` | 所有 worker 共用的讀取身分（正式的讀取視圖資料夾建立後再分享） | 所有 worker | — |
 | `aistorage-test` | Drive 資料夾 | 專用帳號的我的雲端硬碟，由新的 committer 建立，id `1_MfiN1QT344hrp2884QbZkB8jJN7zYpa`（`~/.config/aistorage/ids.env`）；`rclone-committer-test.conf` 以它為根 | 第 3 組以後的整合測試（worker client 看不到它） | 提交流程（測試） | 測試用 |
 | `FATESAIKOU/MyAiStorage-pin` | GitHub private repo | github.com | 釘選值（ADR 0008）；不放 workflow | 提交流程 | 長期 |
+| `FATESAIKOU/MyAiStorage-pin-test` | GitHub private repo | github.com；deploy key `committer-test` 的私鑰 `~/.config/aistorage/pin-test.key` | 整合測試用的釘選值 | 提交流程（測試） | 測試用 |
 | `committer`（deploy key） | SSH deploy key（read-write） | `MyAiStorage-pin`；私鑰 `~/.config/aistorage/pin-deploy-key`，並放在 `FATESAIKOU/MyAiStorage` 的 Actions secret `PIN_DEPLOY_KEY` | 提交流程寫入釘選值 | 提交流程 | 外洩時輪替 |
 
 - 注意：技術驗證的 `aistorage-spike` 資料夾是舊的 committer（當時在 project 2）建的，所以 project 2 的 worker client **看得到也改得到它**。之後的整合測試要由新的 committer 另外建一個測試資料夾，不再用它。
