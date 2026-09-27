@@ -95,6 +95,9 @@ render_config() {
   rm -f "$out"
 }
 
+# 模式：serve（預設，完整流程）／render-config（唯讀渲染設定）／其他 → 直接執行該指令
+# （run.sh 傳進來的指令，例如 `bash -c 'opencode --version'` 這種除錯用的一次性命令；
+#  這條路徑刻意不做前置檢查與背景服務，只給除錯與能力邊界錄影用）。
 mode="${1:-serve}"
 case "$mode" in
   render-config)
@@ -103,7 +106,8 @@ case "$mode" in
     exit 0
     ;;
   serve) ;;
-  *) die "未知的模式：${mode}（可用：serve｜render-config）" ;;
+  -*) exec "$@" ;;
+  *) exec "$@" ;;
 esac
 
 model="${AISTORAGE_MODEL:-}"
@@ -113,6 +117,19 @@ provider="${AISTORAGE_PROVIDER:-${model%%/*}}"
 refuse_claude
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR"
+
+# aistorage.schema 執行期會找 schemas/（wheel 裡沒有帶）。容器的 CWD 是 /work，
+# 所以把 image 內 /opt/aistorage/schemas 的 json 複製一份到 /work/schemas；
+# 已存在就不覆寫（使用者若自行放了新的 schema，保留 theirs）。
+SCHEMA_SRC="${AISTORAGE_SCHEMA_SRC:-/opt/aistorage/schemas}"
+if [ -d "$SCHEMA_SRC" ]; then
+  mkdir -p "${WORK:-/work}/schemas"
+  for f in "$SCHEMA_SRC"/*.json; do
+    [ -e "$f" ] || continue
+    dest="${WORK:-/work}/schemas/$(basename "$f")"
+    [ -e "$dest" ] || cp "$f" "$dest"
+  done
+fi
 
 # ── 1. rclone-worker.conf → 可寫的副本（token 要能刷新）───────────────────
 require_file rclone-worker.conf "同步器上傳收件匣用（worker 的 drive.file 憑證）"
@@ -139,20 +156,31 @@ export AISTORAGE_PROFILE="${AISTORAGE_PROFILE:-mac-opencode}"
 "${OPENCODE_BIN}" serve --hostname "$SERVE_HOST" --port "$SERVE_PORT" \
   >"${STATE_DIR}/opencode-serve.log" 2>&1 &
 serve_pid=$!
+ready=0
 for _ in $(seq 1 60); do
-  if curl -fsS "http://${SERVE_HOST}:${SERVE_PORT}/session" >/dev/null 2>&1; then break; fi
+  # 一定要有 --max-time：serve 剛起來時第一次 /session 可能連得上卻不回應，
+  # 沒有逾時的 curl 會把整個 entrypoint 卡住（實測過）。
+  if curl -fsS --connect-timeout 2 --max-time 5 \
+       "http://${SERVE_HOST}:${SERVE_PORT}/session" >/dev/null 2>&1; then ready=1; break; fi
   kill -0 "$serve_pid" 2>/dev/null || die "opencode serve 起動失敗（看 ${STATE_DIR}/opencode-serve.log）"
   sleep 0.5
 done
+[ "$ready" = 1 ] || die "opencode serve 60 秒內沒有就緒（看 ${STATE_DIR}/opencode-serve.log）"
 echo "[entrypoint] opencode serve 已在 http://${SERVE_HOST}:${SERVE_PORT} 服務（pid ${serve_pid}）"
 
 # ── 4. 同步器 daemon（背景；只會在需要時自己同步並提交）────────────────
 python -m aistorage.syncer opencode daemon --interval "$SYNCER_INTERVAL" \
   >"${STATE_DIR}/syncer.log" 2>&1 &
 syncer_pid=$!
+sleep 1
+if ! kill -0 "$syncer_pid" 2>/dev/null; then
+  echo "[entrypoint] 警告：同步器沒有跑起來（${STATE_DIR}/syncer.log）；容器繼續提供 serve" >&2
+  syncer_pid=""
+fi
 
 cleanup() {
-  kill "$syncer_pid" "$serve_pid" 2>/dev/null || true
+  [ -n "$syncer_pid" ] && kill "$syncer_pid" 2>/dev/null || true
+  kill "$serve_pid" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 

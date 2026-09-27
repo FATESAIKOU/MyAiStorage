@@ -31,9 +31,12 @@ ok() { [ "$as_json" = 1 ] || printf '✓ %s\n' "$*"; }
 # ── 1. 環境變數名稱（不印值）───────────────────────────────────────────
 env_names="$(env | sed 's/=.*//' | sort | tr '\n' ' ')"
 # ── 2. 掛載（只留 /secrets 與 /work）───────────────────────────────────
-mounts="$(grep -E ' (/secrets|/work) ' /proc/mounts 2>/dev/null || true)"
-secrets_mount_count="$(printf '%s\n' "$mounts" | grep -c ' /secrets' || true)"
-work_mount_count="$(printf '%s\n' "$mounts" | grep -c ' /work' || true)"
+# 掛載點是 /work 與 /secrets/<檔名>（每個白名單檔案各一個 bind mount）
+mounts="$(awk '$2 == "/work" || $2 ~ "^/secrets/"' /proc/mounts 2>/dev/null || true)"
+secrets_mount_count="$(printf '%s\n' "$mounts" | awk '$2 ~ "^/secrets/"' | wc -l | tr -d ' ')"
+work_mount_count="$(printf '%s\n' "$mounts" | awk '$2 == "/work"' | wc -l | tr -d ' ')"
+# /proc/mounts 的欄位是 source target fstype options（選項在 $4，不是 $3）
+secrets_mounts_rw="$(printf '%s\n' "$mounts" | awk '$2 ~ "^/secrets/" && $4 !~ /(^|,)ro(,|$)/' | wc -l | tr -d ' ')"
 # ── 3. docker.sock ─────────────────────────────────────────────────────
 docker_sock="absent"
 [ -S /var/run/docker.sock ] && docker_sock="PRESENT"
@@ -80,6 +83,7 @@ if [ "$as_json" = 1 ]; then
   "cap_eff": "${cap_eff}",
   "users_visible": "$(printf '%s' "$users_visible" | sed 's/"/\\"/g')",
   "secrets_writable": "${secrets_writable}",
+  "secrets_mounts_not_readonly": ${secrets_mounts_rw:-0},
   "secret_leak_hits": ${leak_total},
   "secret_leak_detail": "${leak_detail}",
   "claude_env": "$(printf '%s' "$claude_env" | sed 's/"/\\"/g')",
@@ -101,6 +105,7 @@ fi
 # ── 判定 ───────────────────────────────────────────────────────────────
 [ "$docker_sock" = "absent" ] || bad "docker.sock 在容器內可達（D3：不可掛）"
 [ "$secrets_writable" = "read-only" ] || bad "/secrets 可寫（D3：憑證只能唯讀）"
+[ "${secrets_mounts_rw:-1}" = "0" ] || bad "有 ${secrets_mounts_rw} 個 /secrets 掛載不是唯讀（rw）"
 [ "$leak_total" -eq 0 ] || bad "秘密的值出現在 /work 裡（命中 ${leak_total} 處）"
 [ -z "$claude_env" ] || bad "存在 Claude 相關環境變數（PM 決定 2：不用 Claude）"
 [ -z "$claude_files" ] || bad "存在 Claude 相關檔案或明文 auth.json"

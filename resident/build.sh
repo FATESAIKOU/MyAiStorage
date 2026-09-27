@@ -30,8 +30,20 @@ mkdir -p "${HERE}/opencode/plugin" "${HERE}/opencode/skills"
 cache_arg=()
 [ "$no_cache" = 1 ] && cache_arg=(--no-cache)
 
+# 架構：colima 預設沒有 buildx（legacy builder 不帶 TARGETARCH），明確傳進去；
+# Dockerfile 內部也會用 uname -m 兜底，所以兩種 builder 都能建。
+# --platform 也要給：本機的 ubuntu:24.04 標籤曾快取成 amd64，會讓 arm64 的
+# opencode 靜態執行檔在容器裡「required file not found」。
+case "$(uname -m)" in
+  arm64) target_arch=arm64; platform=linux/arm64 ;;
+  x86_64) target_arch=amd64; platform=linux/amd64 ;;
+  *) echo "不支援的架構：$(uname -m)" >&2; exit 1 ;;
+esac
+
 echo "[build] docker build：${IMAGE}"
 exec docker build ${cache_arg[@]+"${cache_arg[@]}"} \
+  --build-arg "TARGETARCH=${target_arch}" \
+  --platform "$platform" \
   --file "${HERE}/image/Dockerfile" \
   --tag "$IMAGE" \
   "$REPO_ROOT"

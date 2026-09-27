@@ -222,7 +222,8 @@ fi
 tty_args=()
 if [ "$no_tui" != 1 ] && [ -t 0 ] && [ -t 1 ]; then tty_args=(-it); fi
 
-[ "${#container_cmd[@]}" -gt 0 ] || container_cmd=(bash -l)
+# 預設走 image 的完整流程（serve + 同步器 + TUI）；給了指令就執行那個指令。
+[ "${#container_cmd[@]}" -gt 0 ] || container_cmd=(serve)
 
 exec docker run --rm --init --name "$name" ${tty_args[@]+"${tty_args[@]}"} \
   ${platform_args[@]+"${platform_args[@]}"} \

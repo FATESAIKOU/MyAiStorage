@@ -283,6 +283,43 @@ def test_dockerfile_has_no_claude_and_no_privileges():
     assert "home=/work" in text
 
 
+def test_secrets_dir_is_traversable_but_not_listable():
+    """實測教訓：/secrets 若是 root 的 0700，uid 501 連 stat 都做不到，
+    entrypoint 會誤判「缺少必要檔案」。0711 = 可穿越、不可列目錄。"""
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    assert "chmod 0711 /secrets" in text
+    assert "chmod 0700 /secrets" not in text
+
+
+def test_serve_readiness_probe_has_a_timeout():
+    """實測教訓：serve 剛起來時 /session 可能連得上卻不回應，
+    沒有 --max-time 的 curl 會把 entrypoint 卡死。"""
+    text = ENTRYPOINT.read_text(encoding="utf-8")
+    assert "--max-time" in text and "--connect-timeout" in text
+    assert "沒有就緒" in text
+
+
+def test_missing_syncer_does_not_kill_the_container():
+    """5.2 還沒實作時，同步器失敗只能記警告，不能讓容器退出。"""
+    text = ENTRYPOINT.read_text(encoding="utf-8")
+    assert "同步器沒有跑起來" in text
+    assert "容器繼續提供 serve" in text
+
+
+def test_container_build_pins_a_working_cryptography():
+    """實測教訓：cryptography 47+ 的 aarch64 wheel 在 colima VM 上 SIGILL。"""
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    assert "cryptography>=42,<47" in text
+
+
+def test_build_script_passes_platform_and_targetarch():
+    """colima 沒有 buildx（legacy builder 不帶 TARGETARCH），而且本機的
+    ubuntu:24.04 標籤曾快取成 amd64 → 兩個都要明確傳。"""
+    text = (RESIDENT / "build.sh").read_text(encoding="utf-8")
+    assert "--build-arg" in text and "TARGETARCH" in text
+    assert "--platform" in text
+
+
 def test_verify_boundary_checks_the_required_items():
     text = VERIFY_SH.read_text(encoding="utf-8")
     for needle in ("/proc/mounts", "docker.sock", "CapEff", "/Users",
