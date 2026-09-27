@@ -1,0 +1,610 @@
+"""Smoke and unit tests for intake module (scan, evaluate, ledger)."""
+
+import base64
+import copy
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
+from pathlib import Path
+import pytest
+
+from aistorage.agora.store import AgoraStore, FakeRawStorage
+from aistorage.clock import FixedClock, format_rfc3339
+from aistorage.drive.fake import FakeDrive
+from aistorage.drive.model import DriveFile
+from aistorage.identity import Registry, generate_keypair
+from aistorage.inbox import sign_sidecar_bytes
+from aistorage.intake import (
+    Decision,
+    DecisionKind,
+    InboxItem,
+    Ledger,
+    count_shaped,
+    evaluate,
+    is_actionable,
+    is_item_key_too_old,
+    parse_ulid_timestamp_ms,
+    scan_inboxes,
+    sort_accepted_decisions,
+    stamp_record,
+    strict_json,
+)
+from aistorage.schema import generate_ulid
+
+
+def test_scan_and_shaping_smoke():
+    """測試收件匣掃描分組與 is_actionable / count_shaped 計數。"""
+    drive = FakeDrive()
+    inbox_fid = drive.seed_folder("inbox_worker1")
+
+    ulid1 = generate_ulid()
+    ulid2 = generate_ulid()
+
+    # 1. 完整項目 1：sidecar, sig, raw
+    raw1_bytes = b"hello raw 1"
+    f1_raw = drive.seed_file(inbox_fid, f"{ulid1}.raw", raw1_bytes)
+    f1_sidecar = drive.seed_file(inbox_fid, f"{ulid1}.sidecar.json", b"{}")
+    f1_sig = drive.seed_file(inbox_fid, f"{ulid1}.sig", b"{}")
+
+    # 2. 缺 sig 項目 2：只有 sidecar 與 raw
+    f2_sidecar = drive.seed_file(inbox_fid, f"{ulid2}.sidecar.json", b"{}")
+    f2_raw = drive.seed_file(inbox_fid, f"{ulid2}.raw", b"hello raw 2")
+
+    # 3. 額外雜項檔案
+    f_orphan = drive.seed_file(inbox_fid, "orphan.txt", b"junk")
+
+    registry_data = {
+        "format": "aistorage.registry/v1",
+        "profiles": {
+            "worker-1": {
+                "inbox_folder_ids": [inbox_fid],
+                "allowed_types": ["session"],
+                "signing_keys": [],
+            }
+        },
+    }
+    registry = Registry(registry_data)
+
+    items = scan_inboxes(drive, registry)
+    assert len(items) == 3
+
+    items_by_key = {it.item_key: it for it in items}
+    it1 = items_by_key[ulid1]
+    assert is_actionable(it1) is True
+    assert it1.sidecar is not None and it1.sig is not None and it1.raw is not None
+    assert it1.extras == ()
+
+    it2 = items_by_key[ulid2]
+    assert is_actionable(it2) is False
+    assert it2.sig is None and it2.sidecar is not None and it2.raw is not None
+
+    it_orphan = items_by_key["orphan.txt"]
+    assert is_actionable(it_orphan) is False
+    assert it_orphan.sidecar is None and it_orphan.sig is None and it_orphan.raw is None
+    assert len(it_orphan.extras) == 1
+
+    assert count_shaped(items) == 1
+
+
+def test_ledger_smoke(tmp_path: Path):
+    """測試 Ledger 記錄、查詢與 ULID 過期判定。"""
+    store_dir = tmp_path / "agora_store"
+    store = AgoraStore(store_dir, raw_storage=FakeRawStorage())
+    ledger = Ledger(store)
+
+    ulid = generate_ulid()
+    assert ledger.contains(ulid) is None
+
+    # 寫入記錄
+    ledger.record(
+        ulid,
+        item_id="opencode:ses_001",
+        decision="accept",
+        raw_sha256="abc123sha",
+        at="2026-09-27T08:00:00Z",
+    )
+
+    entry = ledger.contains(ulid)
+    assert entry is not None
+    assert entry.item_key == ulid
+    assert entry.item_id == "opencode:ses_001"
+    assert entry.decision == "accept"
+    assert entry.raw_sha256 == "abc123sha"
+    assert entry.at == "2026-09-27T08:00:00Z"
+
+    # 檢查實體檔案產生
+    ledger_file = store_dir / "_committer" / "ledger" / "2026-09.jsonl"
+    assert ledger_file.is_file()
+
+    # 重新實例化可正確重載
+    ledger2 = Ledger(store)
+    entry2 = ledger2.contains(ulid)
+    assert entry2 == entry
+
+    # ULID 年齡判定
+    now = datetime(2026, 9, 27, 12, 0, 0, tzinfo=timezone.utc)
+    # 建立 100 天前與 10 天前的 ULID
+    now_ms = int(now.timestamp() * 1000)
+    old_ms = now_ms - (100 * 86400 * 1000)
+    recent_ms = now_ms - (10 * 86400 * 1000)
+
+    old_ulid = generate_ulid(old_ms)
+    recent_ulid = generate_ulid(recent_ms)
+
+    assert is_item_key_too_old(old_ulid, now, retention_days=90) is True
+    assert is_item_key_too_old(recent_ulid, now, retention_days=90) is False
+
+
+def test_stamp_record_smoke():
+    """測試 stamp_record 唯一蓋章入口。"""
+    inbox_meta = {
+        "id": "opencode:ses_test",
+        "type": "session",
+        "created_at": "2026-09-27T08:00:00Z",
+        "updated_at": "2026-09-27T08:00:00Z",
+        "producer": "fake_producer",  # 應被剝除
+    }
+
+    stamped = stamp_record(inbox_meta, producer="profile:worker-1")
+    assert stamped["producer"] == "profile:worker-1"
+    assert stamped["case_id"] is None
+    assert stamped["provenance"] is None
+    assert stamped["id"] == "opencode:ses_test"
+
+    # 非法 metadata 拋出 ValueError
+    with pytest.raises(ValueError):
+        stamp_record({"id": "no_type"}, producer="profile:worker-1")
+
+
+def test_strict_json_smoke():
+    """測試 strict_json 拒絕重複鍵名。"""
+    valid_bytes = b'{"a": 1, "b": 2}'
+    assert strict_json(valid_bytes) == {"a": 1, "b": 2}
+
+    dup_bytes = b'{"a": 1, "a": 2}'
+    with pytest.raises(ValueError, match="重複的鍵名"):
+        strict_json(dup_bytes)
+
+
+def _build_test_session_sidecar(
+    item_key: str,
+    raw_content: bytes,
+    *,
+    profile: str = "worker-1",
+    session_id: str = "ses_12345",
+    snapshot_at: str = "2026-09-27T08:00:00Z",
+    created_at: str = "2026-09-27T08:00:00Z",
+    updated_at: str = "2026-09-27T08:00:00Z",
+) -> dict:
+    raw_sha = hashlib.sha256(raw_content).hexdigest().lower()
+    return {
+        "format": "aistorage.inbox/v1",
+        "item_key": item_key,
+        "profile": profile,
+        "metadata": {
+            "id": f"opencode:{session_id}",
+            "type": "session",
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "case_id": None,
+            "provenance": None,
+        },
+        "raw": {
+            "sha256": raw_sha,
+            "size": len(raw_content),
+        },
+        "session": {
+            "source": "opencode",
+            "source_session_id": session_id,
+            "snapshot_at": snapshot_at,
+            "status": "running",
+            "stopped_at": None,
+            "in_progress": False,
+            "parent_id": None,
+        },
+        "body": {},
+    }
+
+
+def test_evaluate_pipeline_smoke(tmp_path: Path):
+    """測試 evaluate 評估流水線：驗章、授權、格式、防重放、dedup、artifact DEFER。"""
+    clock = FixedClock("2026-09-27T10:00:00Z")
+    drive = FakeDrive(clock=clock)
+    inbox_fid = drive.seed_folder("inbox_worker1")
+
+    # 建立簽章金鑰與 Registry
+    priv_bytes, pub_bytes = generate_keypair()
+    pub_fingerprint = hashlib.sha256(pub_bytes).hexdigest().lower()[:8]
+    key_id = f"worker-1-{pub_fingerprint}"
+    pub_b64 = base64.b64encode(pub_bytes).decode("ascii")
+
+    registry_data = {
+        "format": "aistorage.registry/v1",
+        "profiles": {
+            "worker-1": {
+                "inbox_folder_ids": [inbox_fid],
+                "allowed_types": ["session", "artifact", "claim", "reference"],
+                "signing_keys": [
+                    {
+                        "key_id": key_id,
+                        "public_key": pub_b64,
+                        "status": "active",
+                        "created_at": "2026-09-20T00:00:00Z",
+                        "revoked_at": None,
+                    }
+                ],
+            }
+        },
+    }
+    registry = Registry(registry_data)
+
+    store = AgoraStore(tmp_path / "agora", raw_storage=FakeRawStorage())
+    ledger = Ledger(store)
+    workdir = tmp_path / "work"
+
+    # 1. 缺 sig：未滿 24 小時 -> DEFER(orphan)
+    ulid_orphan1 = generate_ulid()
+    f_sidecar_recent = drive.seed_file(
+        inbox_fid,
+        f"{ulid_orphan1}.sidecar.json",
+        b"{}",
+        created_time="2026-09-27T08:00:00Z",  # 2 小時前
+    )
+    item_defer = InboxItem(
+        item_key=ulid_orphan1,
+        inbox_folder_id=inbox_fid,
+        sidecar=drive.get(f_sidecar_recent),
+        sig=None,
+        raw=None,
+    )
+    d_defer = evaluate(item_defer, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d_defer.kind == DecisionKind.DEFER
+    assert d_defer.code == "orphan"
+
+    # 2. 缺 sig：超過 24 小時 -> REJECT(orphan)
+    ulid_orphan2 = generate_ulid()
+    f_sidecar_old = drive.seed_file(
+        inbox_fid,
+        f"{ulid_orphan2}.sidecar.json",
+        b"{}",
+        created_time="2026-09-26T08:00:00Z",  # 26 小時前
+    )
+    item_reject_orphan = InboxItem(
+        item_key=ulid_orphan2,
+        inbox_folder_id=inbox_fid,
+        sidecar=drive.get(f_sidecar_old),
+        sig=None,
+        raw=None,
+    )
+    d_reject = evaluate(item_reject_orphan, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d_reject.kind == DecisionKind.REJECT
+    assert d_reject.code == "orphan"
+
+    # 3. 正常 session 項目
+    ulid_ok = generate_ulid()
+    raw_ok_bytes = b'{"msg": "valid session"}'
+    sidecar_ok = _build_test_session_sidecar(ulid_ok, raw_ok_bytes)
+    sidecar_ok_bytes = json.dumps(sidecar_ok).encode("utf-8")
+    sig_ok = sign_sidecar_bytes(sidecar_ok_bytes, priv_bytes, key_id)
+    sig_ok_bytes = json.dumps(sig_ok).encode("utf-8")
+
+    f_sc_ok = drive.seed_file(inbox_fid, f"{ulid_ok}.sidecar.json", sidecar_ok_bytes, created_time="2026-09-27T08:30:00Z")
+    f_sig_ok = drive.seed_file(inbox_fid, f"{ulid_ok}.sig", sig_ok_bytes, created_time="2026-09-27T08:30:00Z")
+    f_raw_ok = drive.seed_file(inbox_fid, f"{ulid_ok}.raw", raw_ok_bytes, created_time="2026-09-27T08:30:00Z")
+
+    item_ok = InboxItem(
+        item_key=ulid_ok,
+        inbox_folder_id=inbox_fid,
+        sidecar=drive.get(f_sc_ok),
+        sig=drive.get(f_sig_ok),
+        raw=drive.get(f_raw_ok),
+    )
+    d_ok = evaluate(item_ok, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d_ok.kind == DecisionKind.ACCEPT
+    assert d_ok.code == "ok"
+    assert d_ok.producer == "profile:worker-1"
+    assert d_ok.record_metadata is not None
+    assert d_ok.record_metadata["producer"] == "profile:worker-1"
+    assert d_ok.raw_path is not None
+    assert d_ok.raw_path.read_bytes() == raw_ok_bytes
+
+    # 4. 簽章偽造或錯誤 -> REJECT(bad_signature)
+    ulid_bad_sig = generate_ulid()
+    bad_sig_dict = {"alg": "ed25519", "key_id": key_id, "value": "A" * 86 + "=="}
+    f_sc_badsig = drive.seed_file(inbox_fid, f"{ulid_bad_sig}.sidecar.json", sidecar_ok_bytes)
+    f_sig_badsig = drive.seed_file(inbox_fid, f"{ulid_bad_sig}.sig", json.dumps(bad_sig_dict).encode("utf-8"))
+    f_raw_badsig = drive.seed_file(inbox_fid, f"{ulid_bad_sig}.raw", raw_ok_bytes)
+    item_badsig = InboxItem(
+        item_key=ulid_bad_sig,
+        inbox_folder_id=inbox_fid,
+        sidecar=drive.get(f_sc_badsig),
+        sig=drive.get(f_sig_badsig),
+        raw=drive.get(f_raw_badsig),
+    )
+    d_badsig = evaluate(item_badsig, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d_badsig.kind == DecisionKind.REJECT
+    assert d_badsig.code == "bad_signature"
+
+    # 5. artifact 項目 -> 一律 DEFER(foundry_not_enabled)
+    ulid_art = generate_ulid()
+    art_sidecar = {
+        "format": "aistorage.inbox/v1",
+        "item_key": ulid_art,
+        "profile": "worker-1",
+        "metadata": {
+            "id": f"artifact:{ulid_art}",
+            "type": "artifact",
+            "created_at": "2026-09-27T08:00:00Z",
+            "updated_at": "2026-09-27T08:00:00Z",
+            "case_id": None,
+            "provenance": None,
+        },
+        "raw": None,
+        "body": {
+            "kind": "link",
+            "produced_by_session_id": "opencode:ses_12345",
+            "content_type": "application/octet-stream",
+            "link": "annex:SHA256E-s100--abc",
+        },
+    }
+    art_sc_bytes = json.dumps(art_sidecar).encode("utf-8")
+    art_sig = sign_sidecar_bytes(art_sc_bytes, priv_bytes, key_id)
+    f_art_sc = drive.seed_file(inbox_fid, f"{ulid_art}.sidecar.json", art_sc_bytes)
+    f_art_sig = drive.seed_file(inbox_fid, f"{ulid_art}.sig", json.dumps(art_sig).encode("utf-8"))
+    item_art = InboxItem(
+        item_key=ulid_art,
+        inbox_folder_id=inbox_fid,
+        sidecar=drive.get(f_art_sc),
+        sig=drive.get(f_art_sig),
+        raw=None,
+    )
+    d_art = evaluate(item_art, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d_art.kind == DecisionKind.DEFER
+    assert d_art.code == "foundry_not_enabled"
+
+    # 6. 重放檢核（Ledger 已有記錄）：同 raw sha -> ALREADY；不同 raw sha -> REJECT(replayed_item_key)
+    # 記錄剛才的 item_ok
+    raw_sha = hashlib.sha256(raw_ok_bytes).hexdigest().lower()
+    ledger.record(ulid_ok, item_id="opencode:ses_12345", decision="accept", raw_sha256=raw_sha, at="2026-09-27T09:00:00Z")
+    d_replay_same = evaluate(item_ok, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d_replay_same.kind == DecisionKind.ALREADY
+    assert d_replay_same.code == "already"
+
+    # 模擬 ledger 有不同 raw_sha
+    ulid_diff = generate_ulid()
+    ledger.record(ulid_diff, item_id="opencode:ses_12345", decision="accept", raw_sha256="different_sha", at="2026-09-27T09:00:00Z")
+    sidecar_diff = _build_test_session_sidecar(ulid_diff, raw_ok_bytes)
+    diff_bytes = json.dumps(sidecar_diff).encode("utf-8")
+    diff_sig = sign_sidecar_bytes(diff_bytes, priv_bytes, key_id)
+    f_diff_sc = drive.seed_file(inbox_fid, f"{ulid_diff}.sidecar.json", diff_bytes)
+    f_diff_sig = drive.seed_file(inbox_fid, f"{ulid_diff}.sig", json.dumps(diff_sig).encode("utf-8"))
+    f_diff_raw = drive.seed_file(inbox_fid, f"{ulid_diff}.raw", raw_ok_bytes)
+    item_diff = InboxItem(
+        item_key=ulid_diff,
+        inbox_folder_id=inbox_fid,
+        sidecar=drive.get(f_diff_sc),
+        sig=drive.get(f_diff_sig),
+        raw=drive.get(f_diff_raw),
+    )
+    d_replay_diff = evaluate(item_diff, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d_replay_diff.kind == DecisionKind.REJECT
+    assert d_replay_diff.code == "replayed_item_key"
+
+
+def test_sort_accepted_decisions_smoke():
+    """測試 sort_accepted_decisions 排序：session(依時間) -> rewrite -> handoff -> claim -> reference。"""
+    dummy_item = InboxItem(item_key="k", inbox_folder_id="f", sidecar=None, sig=None, raw=None)
+
+    d_ref = Decision(
+        kind=DecisionKind.ACCEPT,
+        item=dummy_item,
+        code="ok",
+        record_metadata={"type": "reference", "updated_at": "2026-09-27T08:00:00Z"},
+    )
+    d_claim = Decision(
+        kind=DecisionKind.ACCEPT,
+        item=dummy_item,
+        code="ok",
+        record_metadata={"type": "claim", "updated_at": "2026-09-27T08:00:00Z"},
+    )
+    d_sess_late = Decision(
+        kind=DecisionKind.ACCEPT,
+        item=dummy_item,
+        code="ok",
+        record_metadata={"type": "session"},
+        sidecar={"session": {"snapshot_at": "2026-09-27T08:30:00Z"}},
+    )
+    d_sess_early = Decision(
+        kind=DecisionKind.ACCEPT,
+        item=dummy_item,
+        code="ok",
+        record_metadata={"type": "session"},
+        sidecar={"session": {"snapshot_at": "2026-09-27T08:10:00Z"}},
+    )
+    d_rewrite = Decision(
+        kind=DecisionKind.ACCEPT,
+        item=dummy_item,
+        code="ok",
+        record_metadata={"type": "rewrite", "updated_at": "2026-09-27T08:00:00Z"},
+    )
+
+    unordered = [d_ref, d_sess_late, d_claim, d_rewrite, d_sess_early]
+    ordered = sort_accepted_decisions(unordered)
+
+    assert ordered == [d_sess_early, d_sess_late, d_rewrite, d_claim, d_ref]
+
+
+def test_evaluate_monotonicity_smoke(tmp_path: Path):
+    """測試 evaluate 之單調性與防重放規則（session, reference, 其他）。"""
+    clock = FixedClock("2026-09-27T10:00:00Z")
+    drive = FakeDrive(clock=clock)
+    inbox_fid = drive.seed_folder("inbox_worker1")
+
+    priv_bytes, pub_bytes = generate_keypair()
+    pub_fingerprint = hashlib.sha256(pub_bytes).hexdigest().lower()[:8]
+    key_id = f"worker-1-{pub_fingerprint}"
+    pub_b64 = base64.b64encode(pub_bytes).decode("ascii")
+
+    registry_data = {
+        "format": "aistorage.registry/v1",
+        "profiles": {
+            "worker-1": {
+                "inbox_folder_ids": [inbox_fid],
+                "allowed_types": ["session", "reference", "claim"],
+                "signing_keys": [
+                    {
+                        "key_id": key_id,
+                        "public_key": pub_b64,
+                        "status": "active",
+                        "created_at": "2026-09-20T00:00:00Z",
+                        "revoked_at": None,
+                    }
+                ],
+            }
+        },
+    }
+    registry = Registry(registry_data)
+
+    store_dir = tmp_path / "agora"
+    store = AgoraStore(store_dir, raw_storage=FakeRawStorage())
+    ledger = Ledger(store)
+    workdir = tmp_path / "work"
+
+    # 1. Session 單調性
+    # 建立真本既有 Session meta.json
+    sess_meta_dir = store_dir / "sessions" / "opencode" / "ses_mono"
+    sess_meta_dir.mkdir(parents=True, exist_ok=True)
+    raw_same = b"same raw"
+    raw_same_sha = hashlib.sha256(raw_same).hexdigest().lower()
+    existing_sess_meta = {
+        "id": "opencode:ses_mono",
+        "type": "session",
+        "producer": "profile:worker-1",
+        "created_at": "2026-09-27T07:00:00Z",
+        "updated_at": "2026-09-27T08:00:00Z",
+        "case_id": None,
+        "provenance": None,
+        "status": "running",
+        "snapshot_at": "2026-09-27T08:00:00Z",
+        "raw_sha256": raw_same_sha,
+        "raw_size": len(raw_same),
+        "committed_at": "2026-09-27T08:05:00Z",
+        "last_item_key": generate_ulid(),
+    }
+    (sess_meta_dir / "meta.json").write_text(json.dumps(existing_sess_meta), encoding="utf-8")
+
+    # (A) 同一個 raw_sha256 -> ALREADY (dedup)
+    ulid_same_sha = generate_ulid()
+    sc_same = _build_test_session_sidecar(
+        ulid_same_sha,
+        raw_same,
+        session_id="ses_mono",
+        snapshot_at="2026-09-27T08:30:00Z",
+    )
+    sc_same["raw"]["sha256"] = raw_same_sha
+    sc_same_bytes = json.dumps(sc_same).encode("utf-8")
+    sig_same = sign_sidecar_bytes(sc_same_bytes, priv_bytes, key_id)
+    f_sc = drive.seed_file(inbox_fid, f"{ulid_same_sha}.sidecar.json", sc_same_bytes)
+    f_sig = drive.seed_file(inbox_fid, f"{ulid_same_sha}.sig", json.dumps(sig_same).encode("utf-8"))
+    f_raw = drive.seed_file(inbox_fid, f"{ulid_same_sha}.raw", raw_same, sha256=raw_same_sha)
+    it_same = InboxItem(item_key=ulid_same_sha, inbox_folder_id=inbox_fid, sidecar=drive.get(f_sc), sig=drive.get(f_sig), raw=drive.get(f_raw))
+    d_same = evaluate(it_same, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d_same.kind == DecisionKind.ALREADY
+
+    # (B) snapshot_at <= 既有 snapshot_at -> REJECT(stale)
+    ulid_stale = generate_ulid()
+    raw_new = b"new raw diff sha"
+    sc_stale = _build_test_session_sidecar(
+        ulid_stale,
+        raw_new,
+        session_id="ses_mono",
+        snapshot_at="2026-09-27T07:30:00Z",  # 比既有 08:00:00 舊
+    )
+    sc_stale_bytes = json.dumps(sc_stale).encode("utf-8")
+    sig_stale = sign_sidecar_bytes(sc_stale_bytes, priv_bytes, key_id)
+    f_sc2 = drive.seed_file(inbox_fid, f"{ulid_stale}.sidecar.json", sc_stale_bytes)
+    f_sig2 = drive.seed_file(inbox_fid, f"{ulid_stale}.sig", json.dumps(sig_stale).encode("utf-8"))
+    f_raw2 = drive.seed_file(inbox_fid, f"{ulid_stale}.raw", raw_new)
+    it_stale = InboxItem(item_key=ulid_stale, inbox_folder_id=inbox_fid, sidecar=drive.get(f_sc2), sig=drive.get(f_sig2), raw=drive.get(f_raw2))
+    d_stale = evaluate(it_stale, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d_stale.kind == DecisionKind.REJECT
+    assert d_stale.code == "stale"
+
+
+def test_evaluate_edge_cases_smoke(tmp_path: Path):
+    """測試 evaluate 異常與邊界條件：過期 ULID、未授權、大小超限、raw 不符。"""
+    clock = FixedClock("2026-09-27T10:00:00Z")
+    drive = FakeDrive(clock=clock)
+    inbox_fid = drive.seed_folder("inbox_worker1")
+
+    priv_bytes, pub_bytes = generate_keypair()
+    pub_fingerprint = hashlib.sha256(pub_bytes).hexdigest().lower()[:8]
+    key_id = f"worker-1-{pub_fingerprint}"
+    pub_b64 = base64.b64encode(pub_bytes).decode("ascii")
+
+    registry_data = {
+        "format": "aistorage.registry/v1",
+        "profiles": {
+            "worker-1": {
+                "inbox_folder_ids": [inbox_fid],
+                "allowed_types": ["session"],
+                "signing_keys": [
+                    {
+                        "key_id": key_id,
+                        "public_key": pub_b64,
+                        "status": "active",
+                        "created_at": "2026-09-20T00:00:00Z",
+                        "revoked_at": None,
+                    }
+                ],
+            }
+        },
+    }
+    registry = Registry(registry_data)
+
+    store = AgoraStore(tmp_path / "agora", raw_storage=FakeRawStorage())
+    ledger = Ledger(store)
+    workdir = tmp_path / "work"
+
+    # 1. 100 天前的 ULID -> REJECT(too_old)
+    old_ms = int((clock.now().timestamp() - 100 * 86400) * 1000)
+    ulid_old = generate_ulid(old_ms)
+    raw_bytes = b"sample raw"
+    sc_old = _build_test_session_sidecar(ulid_old, raw_bytes)
+    sc_bytes = json.dumps(sc_old).encode("utf-8")
+    sig = sign_sidecar_bytes(sc_bytes, priv_bytes, key_id)
+    f_sc = drive.seed_file(inbox_fid, f"{ulid_old}.sidecar.json", sc_bytes)
+    f_sig = drive.seed_file(inbox_fid, f"{ulid_old}.sig", json.dumps(sig).encode("utf-8"))
+    f_raw = drive.seed_file(inbox_fid, f"{ulid_old}.raw", raw_bytes)
+    it_old = InboxItem(item_key=ulid_old, inbox_folder_id=inbox_fid, sidecar=drive.get(f_sc), sig=drive.get(f_sig), raw=drive.get(f_raw))
+    d_old = evaluate(it_old, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d_old.kind == DecisionKind.REJECT
+    assert d_old.code == "too_old"
+
+    # 2. 未授權 profile (sidecar.profile != folder_profile) -> REJECT(unauthorized)
+    ulid_unauth = generate_ulid()
+    sc_unauth = _build_test_session_sidecar(ulid_unauth, raw_bytes, profile="worker-other")
+    sc_unauth_bytes = json.dumps(sc_unauth).encode("utf-8")
+    sig_unauth = sign_sidecar_bytes(sc_unauth_bytes, priv_bytes, key_id)
+    f_sc_u = drive.seed_file(inbox_fid, f"{ulid_unauth}.sidecar.json", sc_unauth_bytes)
+    f_sig_u = drive.seed_file(inbox_fid, f"{ulid_unauth}.sig", json.dumps(sig_unauth).encode("utf-8"))
+    f_raw_u = drive.seed_file(inbox_fid, f"{ulid_unauth}.raw", raw_bytes)
+    it_unauth = InboxItem(item_key=ulid_unauth, inbox_folder_id=inbox_fid, sidecar=drive.get(f_sc_u), sig=drive.get(f_sig_u), raw=drive.get(f_raw_u))
+    d_unauth = evaluate(it_unauth, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d_unauth.kind == DecisionKind.REJECT
+    assert d_unauth.code == "unauthorized"
+
+    # 3. raw 大小超過 max_raw -> REJECT(too_large)
+    ulid_large = generate_ulid()
+    raw_large = b"x" * 200
+    sc_large = _build_test_session_sidecar(ulid_large, raw_large)
+    sc_large_bytes = json.dumps(sc_large).encode("utf-8")
+    sig_large = sign_sidecar_bytes(sc_large_bytes, priv_bytes, key_id)
+    f_sc_l = drive.seed_file(inbox_fid, f"{ulid_large}.sidecar.json", sc_large_bytes)
+    f_sig_l = drive.seed_file(inbox_fid, f"{ulid_large}.sig", json.dumps(sig_large).encode("utf-8"))
+    f_raw_l = drive.seed_file(inbox_fid, f"{ulid_large}.raw", raw_large)
+    it_large = InboxItem(item_key=ulid_large, inbox_folder_id=inbox_fid, sidecar=drive.get(f_sc_l), sig=drive.get(f_sig_l), raw=drive.get(f_raw_l))
+    d_large = evaluate(it_large, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir, max_raw=100)
+    assert d_large.kind == DecisionKind.REJECT
+    assert d_large.code == "too_large"
+
