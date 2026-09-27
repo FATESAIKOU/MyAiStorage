@@ -140,3 +140,10 @@ The user chose **Python 3.12** for the committer, syncers, the read interface (l
 - **Rewrite dropped from phase 1.** The user has no use case for editing Session content inside Agora. Source-side edits (/rewind, /undo) already arrive as new raw versions and keep history; content removal uses erase. Rewrite proposals in the inbox are rejected (`rewrite_not_supported`); the feature is in `docs/backlog.md`.
 - Converters: Claude Code sidechain records stay out of the parent reading (the raw record keeps them); `compact_boundary` maps to a compaction marker; unknown record types become visible text instead of failing the reading. Non-`data:` attachments become text notes; hashes are never fabricated.
 - Manual import: provenance defaults to `manual-import` (no local paths), no `--role` option.
+
+## Overnight run (2026-09-27 night)
+
+- Scope: finish groups 3–9 using test resources only (test Drive folder `aistorage-test`, test pin repo, test GitHub repo). Production deployment (production folders, `RCLONE_CONF` in MyAiStorage, enabling the production workflow) waits for the user's review.
+- The resident AI in E2E containers uses whatever model is available in the teammate priority order, never Claude.
+- Commits stay on `phase1-spike`; no push or merge. After the user's morning review and OK, the PM merges to main and pushes.
+- The MyLinuxPool tickets (8.2) are filed as a GitHub issue in the MyLinuxPool repo for the user to judge.
