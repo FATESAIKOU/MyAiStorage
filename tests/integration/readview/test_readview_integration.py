@@ -214,10 +214,14 @@ def _delete_tree_once(drive: DriveClient, folder_id: str) -> None:
     for child in children:
         if child.is_folder:
             _delete_tree(drive, child.id)
-        else:
-            f = drive.get(child.id)
-            assert folder_id in f.parents, f"檔案 {child.id} 不在預期的資料夾內"
-            drive.delete_permanently(child.id)
+            continue
+        # ADR 0008：「檔案存在於某資料夾」的可信憑證是父資料夾的完整列舉，
+        # 不是單一 get()（Drive 可能回 404／過時的 parents）。所以以列舉結果
+        # 為準，get() 只用來確認檔案還在。
+        if folder_id not in child.parents:
+            pytest.fail(f"列舉結果異常：{child.id} 不在 {folder_id} 底下，不刪")
+        drive.get(child.id)
+        drive.delete_permanently(child.id)
     f = drive.get(folder_id)
     assert f.is_folder
     drive.delete_permanently(folder_id)

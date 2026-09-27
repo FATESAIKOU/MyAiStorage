@@ -18,10 +18,11 @@ schema 以 `src/aistorage/search/schema.sql` 為準（TS 照抄該檔）。
   `read_snapshot_at`）；`links_to` 索引供反向查詢。
 - `handoffs`：`body_json` 是寫入者提供的交接內容（原樣）；
   `claimed_by_*` 是提交流程寫入的狀態；未認領時三者皆為 NULL。
-  `author_session_id` 是寫這張交接單的 Session id（publisher 填入）：
-  真本裡的來源依序為 `body.author_session_id`、metadata 的
-  `author_session_id`（`metadata-record` 允許擴充欄位）。兩者都沒有就是
-  **作者不明 → NULL**，提交流程不猜測、也不以 `target_session_id` 頂替。
+  `author_session_id` 是寫這張交接單的 Session id，**由提交流程（publisher）填成
+  `target_session_id`**：`apply_handoff` 的持有者檢查已保證寫交接單的就是被接續
+  Session 的持有者（D10：接續由被接續 Session 的持有者發起），所以目標即作者。
+  寫入端若在 `body.author_session_id` 或 metadata 明確指定則以它為準（為將來預留，
+  期 1 的同步器不提供）；連目標都缺才會是 NULL。
   讀取端列待認領交接單時只看作者為**主** Session 的（`parent_id` 為空）；
   作者為 NULL、或在 `sessions` 表查無此 id，都視為作者不明而排除
   （fail-closed：寧可少列，不可把子 Session 寫的交接單當成主 Session 寫的）。

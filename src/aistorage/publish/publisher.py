@@ -313,12 +313,12 @@ def collect_links(store: AgoraStore) -> list[LinkRow]:
 def collect_handoffs(store: AgoraStore) -> list[HandoffRow]:
     """真本的交接單（含寫入者提供的交接內容原樣）。
 
-    作者 Session（author_session_id）＝寫這張交接單的那個 Session。
-    真本裡的來源依序為：body.author_session_id、metadata 的
-    author_session_id（metadata-record 允許擴充欄位，apply_handoff 會原樣
-    帶進真本）。兩者都沒有就是**作者不明 → NULL**，由讀取端排除；提交流程
-    不猜測、不以目標 Session 頂替（PM 決定 9 要的是「主 Session 寫的」，
-    不是「目標是主 Session 的」）。
+    作者 Session（author_session_id）＝寫這張交接單的那個 Session，**由提交流程
+    填成 target_session_id**（PM 決定）：apply_handoff 的持有者檢查已經保證寫這張
+    交接單的就是被接續 Session 的持有者（D10：接續由被接續 Session 的持有者發起），
+    所以「目標 Session」即「作者」。寫入端若在 body 或 metadata 明確提供了
+    `author_session_id`，以它為準（為將來預留；期 1 的同步器不提供）。
+    連 target 都缺（真本不完整）時才是 NULL，由讀取端排除。
     """
     rows: list[HandoffRow] = []
     d = store.worktree / "handoffs"
@@ -331,13 +331,16 @@ def collect_handoffs(store: AgoraStore) -> list[HandoffRow]:
         body = data.get("body") or {}
         cont = body.get("continuation") or {}
         claimed = data.get("claimed_by") or {}
+        target = body.get("target_session_id")
         author = body.get("author_session_id")
         if not _is_session_id(author):
             author = data.get("author_session_id")
+        if not _is_session_id(author):
+            author = target
         rows.append(
             HandoffRow(
                 handoff_id=data.get("id"),
-                target_session_id=body.get("target_session_id"),
+                target_session_id=target,
                 snapshot_sha256=cont.get("snapshot_sha256"),
                 message_id=cont.get("message_id"),
                 producer=data.get("producer"),

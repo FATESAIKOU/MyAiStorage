@@ -151,10 +151,19 @@ CREATE TABLE handoffs (handoff_id TEXT PRIMARY KEY, target_session_id TEXT NOT N
   snapshot_sha256 TEXT NOT NULL, message_id TEXT NOT NULL, producer TEXT NOT NULL,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, case_id TEXT,
   body_json TEXT NOT NULL,                           -- 寫入者提供的交接內容（原樣）
-  claimed_by_claim_id TEXT, claimed_by_session_id TEXT, claimed_at TEXT);
+  claimed_by_claim_id TEXT, claimed_by_session_id TEXT, claimed_at TEXT,
+  author_session_id TEXT);                           -- 見下（PM 決定，2026-09-28）
 CREATE TABLE rejections (item_key TEXT PRIMARY KEY, code TEXT NOT NULL, at TEXT NOT NULL,
   item_id TEXT, authenticated INTEGER NOT NULL);     -- 只有代碼，沒有內容
 ```
+
+**`handoffs.author_session_id`（PM 決定 2026-09-28）**：寫這張交接單的那個 Session 的 id，
+**由提交流程（publisher）填成 `target_session_id`**。理由：`apply_handoff` 的持有者檢查
+已經保證寫交接單的就是被接續 Session 的持有者，而 D10 的接續本來就由被接續 Session 的
+持有者發起，所以「目標」即「作者」，不需要寫入端多提供一個欄位。寫入端若在
+`body.author_session_id` 或 metadata 明確指定則以它為準（為將來預留；期 1 的同步器
+不提供）；連目標都缺才會是 NULL，讀取端視為作者不明而排除（第 9 節決定 9：
+列待認領的交接單時只看主 Session 寫的）。語意細節寫在 `schemas/searchindex.md` 第 1 節。
 
 **B. 全文以「訊息」為單位，而不是整個 Session 一筆。** spec 要求「標出命中的位置」，交接與接續也以 message_id 定位。
 
@@ -534,6 +543,56 @@ Python 的測試要跑這三份資料；之後 TS 用戶端也要跑同樣的三
 - 第 12 步：`DriveReadViewPublisher.publish(store, agora_main_sha=<push 後的 main>, run_rejections=collect_rejections(…))`；publish 失敗時 RunReport 標記 `publish_failed`，但**不影響**第 13 步（真本已經轉正，收件匣可以照常清理）。
 - 第 13 步：驗章前拒收的 `deletable_after` 依第 4.4 節修改。
 - `config/committer.json` 新增 `readview_manifest_file_id`、`readview_rebuild_epoch`；`readview_folder_id` 已經有了。
+
+### 實作後的具體介面（4.1／4.5 已完成，供第 3 組接線）
+
+```python
+# ── 第 4 步：可信集合（fail-closed）────────────────────────────
+from aistorage.publish.publisher import load_manifest          # 讀不到／損毀 → MismatchError
+from aistorage.readview.model import trusted_ids
+if not cfg.readview_manifest_file_id:
+    report.readview_sweep = "skipped_no_manifest"             # 管理者還沒初始化 → 跳過
+else:
+    m = load_manifest(deps.drive, cfg.readview_manifest_file_id)
+    if m.is_initial:                                          # generation=0，還沒發佈過
+        report.readview_sweep = "skipped_initial"
+    else:
+        readview_decisions = plan_readview_sweep(
+            rv_listing, trusted_ids(m, cfg.readview_manifest_file_id),
+            readview_folder_id=cfg.readview_folder_id)
+
+# ── 第 12 步：發佈（失敗只標記，不影響第 13 步）──────────────────
+from aistorage.publish.publisher import DriveReadViewPublisher
+from aistorage.publish.rejections import collect_rejections
+
+pub = DriveReadViewPublisher(
+    deps.drive,
+    folder_id=cfg.readview_folder_id,
+    manifest_file_id=cfg.readview_manifest_file_id,
+    converters=deps.converters,        # 轉換器可選帶 version 屬性（預設 "1"）
+    clock=deps.clock,
+    workdir=work_temp,                  # 已存在的暫存目錄即可
+    rebuild_epoch=cfg.readview_rebuild_epoch,   # > manifest.rebuild_epoch → 完整重建
+)
+rep = pub.publish(
+    store,
+    agora_main_sha=local_refs.get("refs/heads/main", ""),   # push 後的 main
+    run_rejections=collect_rejections(store, decisions),
+    dry_run=dry_run,
+)
+report.readview_publish = rep.status      # "skipped" / "published" / "planned"
+# 可記錄：rep.readings_created / readings_kept / len(rep.readings_failed) / rep.file_count
+#          rep.over_threshold（索引 50 MiB 門檻，D5）／rep.index_file_count（5,000 檔門檻）
+```
+
+- `agora_main_sha` 相同且拒收原因相同時 publisher 會回傳 `skipped`（不寫任何東西）。
+- prescan 補發（第 4.5 節 (b)、PM 決定 3）：用 `load_manifest(...)` 讀
+  `manifest.agora_main_sha`，與 pin 的 `refs/heads/main` 不一致就不算空輪。
+- `committer/publish.py` 的協定 `publish(...) -> None`；實作回傳 `PublishReport`，
+  建議把協定的回傳型別放寬成 `Any`，或在 run.py 直接用 `DriveReadViewPublisher`。
+- 4.5 的驗證 CLI 可獨立跑（唯讀）：`python -m aistorage.committer.rebuild --verify --repo <repo>`；
+  要掛成 `python -m aistorage.committer rebuild-readview` 的子指令，由第 3 組在
+  `committer/__main__.py` 加一個 dispatch（轉呼叫 `aistorage.committer.rebuild.main`）。
 
 ---
 

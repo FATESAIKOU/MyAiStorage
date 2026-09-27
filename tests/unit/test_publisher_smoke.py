@@ -161,8 +161,8 @@ def _handoff(
 ) -> str:
     """寫一張釘住某個快照的交接單，回傳 handoff id。
 
-    author_session_id 放進 body（寫入者提供的業務內容）；metadata 也能帶，
-    兩者皆可，body 優先。
+    author_session_id 放進 body（寫入者提供的業務內容）；不給就是沒有明確作者，
+    發佈時由提交流程填成 target_session_id（PM 決定）。
     """
     ulid = generate_ulid()
     handoff_id = f"handoff:{ulid}"
@@ -637,16 +637,21 @@ def test_index_carries_catalog_for_reader(tmp_path: Path):
     assert rejections and rejections[0][1] == "orphan" and rejections[0][2] == 0
 
 
-def test_handoff_author_session_id_is_published_as_given(tmp_path: Path):
-    """作者 Session 照真本記錄填入；沒有記錄就是 NULL（讀取端據此排除）。"""
+def test_handoff_author_session_id_is_the_target_session(tmp_path: Path):
+    """PM 決定：作者由提交流程填成 target_session_id（持有者檢查已保證）。
+
+    寫入端若明確提供 author_session_id（body 或 metadata）則以它為準；
+    目標與明確作者都缺才是 NULL（讀取端據此排除）。
+    """
     clock = FixedClock(T0)
     drive = _drive(tmp_path, clock=clock)
     store = _store(tmp_path)
     sha = _add_session(store, "opencode:ses_1", ("甲",))
     sub = _add_session(store, "opencode:ses_1", ("甲", "乙"), parent_id="opencode:ses_1")
-    # 一張有作者、一張沒有
-    h1 = _handoff(store, "opencode:ses_1", sha, author_session_id="opencode:ses_1")
-    h2 = _handoff(store, "opencode:ses_1", sub)
+    h1 = _handoff(store, "opencode:ses_1", sha)                                  # 預設＝target
+    h2 = _handoff(store, "opencode:ses_1", sub,
+                  author_session_id="opencode:ses_other")                     # 明確作者
+    h3 = _handoff(store, "opencode:ses_1", sub)                                # 明確作者無效格式
     pub = _publisher(drive, tmp_path, clock=clock)
     pub.publish(store, agora_main_sha="main-1")
 
@@ -661,7 +666,11 @@ def test_handoff_author_session_id_is_published_as_given(tmp_path: Path):
         )
     finally:
         con.close()
-    assert rows == {h1: "opencode:ses_1", h2: None}
+    assert rows == {
+        h1: "opencode:ses_1",   # 沒有明確作者 → 填 target（PM 決定）
+        h2: "opencode:ses_other",  # 明確作者優先
+        h3: "opencode:ses_1",   # 明確作者不合法 → 回到 target
+    }
 
 
 def test_handoff_pins_older_snapshot_reading(tmp_path: Path):
