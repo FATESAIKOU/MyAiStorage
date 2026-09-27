@@ -490,6 +490,8 @@ sessions/<source>/<enc(source_session_id)>/
   snapshots.jsonl      # 每次收進的快照一行：{snapshot_sha256, snapshot_at, raw_size, item_key, committed_at,
                        #   git_blob（raw 在 git 時）或 annex_key（raw 在 annex 時）}
 handoffs/<ULID>.json   # 交接單：真本 metadata＋body＋{claimed_by: {claim_id, session_id, at} | null}
+                     # claimed_by 是提交流程寫入的狀態（review-g3e L）：寫入者只提供 metadata＋body；
+                     # 第 4 組發佈時區分「寫入者的內容」與「提交流程的狀態」
 references/<ULID>.json # 參考紀錄真本（M5）：完整 metadata＋body，依 id 查找與分類
 links/continuation/<enc(new_session_id)>/<handoff ULID>.json   # 接續 Link：from、to、continuation、handoff_id、claim_id
 links/reference/<enc(from_session_id)>/<enc(to_session_id)>.json  # 參考索引：記錄生效中 reference id 與 read_snapshot_at
@@ -502,7 +504,8 @@ _committer/
   schema_version                 # "agora/v1"
 ```
 - `enc()` 使用 `urllib.parse.quote(s, safe="-_")`；依 RFC 3986 未保留字元預設不編碼小數點，防止路徑穿越係透過明確檢查拒絕 `.` 與 `..`，保證路徑安全、可逆；**冒號不會出現在路徑裡**。
-- session 的 `meta.json` 額外欄位：`status`、`stopped_at`、`snapshot_at`、`raw_sha256`、`raw_size`、`parent_id`、`in_progress`、`archived_at`、`committed_at`、`last_item_key`、`title`，以及轉換狀態欄位（R9，供 3.7 apply 與第 4 組讀取視圖依循）：`reading_status: "ok" | "failed"`、`reading_error_code: str | None`（例如 `"json_decode_error"`、`"missing_required_field"`、`"schema_violation"`）、`reading_error_message: str | None`（只記錄欄位與位置，不洩漏原始會話內文）。
+- session 的 `meta.json` 額外欄位：`status`、`stopped_at`、`snapshot_at`、`raw_sha256`、`raw_size`、`parent_id`、`in_progress`、`archived_at`、`committed_at`、`last_item_key`、`title`，以及轉換狀態欄位（R9，供 3.7 apply 與第 4 組讀取視圖依循）：`reading_status: "ok" | "failed"`、`reading_error_code: str | None`（`"facts_error"`、`"conversion_error"` 二選一）、`reading_error_message` 恆為 null（review-g3e M6：轉換錯誤訊息可能含原始內容，只存代碼；完整訊息只進 run 的除錯檔）。
+- `stopped_at` 的來源（review-g3e L）：新停止時取 sidecar 的 `stopped_at`（同步器觀測），缺省時取提交時鐘；已停止的 Session 再收封存快照時沿用原本的 `stopped_at`。
 - **閱讀版不放在真本**（它是衍生物，design D5）。需要某個舊快照的閱讀版時（接續、第 4 組），用 `snapshots.jsonl` 找到 `git_blob` 或 `annex_key` 取出那一份 raw，再跑轉換器。這也讓「從被釘住的快照讀」（D10）有明確的實作路徑。
 - commit 訊息只寫計數與 item_key（不寫標題或內容，design D2 的 log 規則同樣適用於 git 歷史）。
 
@@ -525,23 +528,45 @@ class RawStorage(Protocol):                     # 2.6 的決定落在這裡
     def retrieve(self, ref: str, dest: Path) -> None: ...
 # GitRawStorage（git add）與 AnnexRawStorage（git annex add，largefiles=anything）兩種實作
 
-# agora/apply.py —— 全部回傳 ApplyResult(ok: bool, code: str, paths: list[str])
+# agora/apply.py —— 全部回傳 ApplyResult(ok, code, paths, rejected_at, deletable_after)。
+# 通則（review-g3e）：
+# - 兩階段（H1）：先完成所有檢查（形狀、單調性、持有者、路徑計算、所需檔案讀取），
+#   確定可套用後才寫入；寫入階段不再有「失敗 → REJECT」分支，錯誤一律往上拋、整輪中止。
+# - clock 一律必填（M4）：committed_at 與拒收記錄的 at 只用提交時鐘，不用寫入者宣告的值。
+# - 真本／I/O 錯誤不轉 REJECT（M3）：raw 取出失敗、索引損毀、put_session 的驗證失敗一律往上拋。
+# - 轉換失敗照收（H2、PM 決定）：facts() 失敗時沿用現有值（無則 running／None／sidecar 的
+#   in_progress）並記 reading_status="failed"、code="facts_error"；convert() 失敗記
+#   code="conversion_error"；raw 一律收進真本。
 def apply_session(store, dec: Decision, conv: Converter, clock: Clock) -> ApplyResult: ...
     # 寫 raw、追加 snapshots.jsonl、更新 meta.json；3.9：
-    #   facts.archived_at 而且 facts.last_message_at ≤ archived_at → status=stopped，stopped_at＝sidecar 的 stopped_at（同步器觀測）
+    #   facts.archived_ms 且 last_message_ms ≤ archived_ms → status=stopped；
+    #   stopped_at：新停止取 sidecar 的 stopped_at（缺省取提交時鐘），已停止沿用原本的值；
     #   否則 running（封存之後又有新訊息 → 回到運作中）
     # 子 Session：meta.json 記 parent_id（來自 sidecar）
-def apply_rewrite(store, dec, conv) -> ApplyResult: ...
-    # base_snapshot_sha256 必須等於目前的 raw_sha256；新 raw 的閱讀版與舊的相比，既有訊息的 message_id 序列與 index 完全相同
-    # （不改變位置）；否則 REJECT(position_changed)。來源端自己的刪改走 apply_session（新版本），不走這裡。
-def apply_handoff(store, dec, conv) -> ApplyResult: ...
-    # continuation.snapshot_sha256 必須在 target 的 snapshots（含這一輪剛收的）裡；取出那份 raw → convert →
-    # reading.check_continuation；不通過 → REJECT(invalid_continuation)
-def apply_claim(store, dec) -> ApplyResult: ...
-    # 交接單存在、claimed_by 是 null、claimer_session_id 在 Agora（或這一輪剛收）→ 寫 claim、設 claimed_by、
-    # 建接續 Link（方向：claimer → target）；否則 REJECT(already_claimed / unknown_handoff / unknown_claimer)
-def apply_reference(store, dec) -> ApplyResult: ...
-    # 同一對只留一個檔；read_snapshot_at 單調（evaluate 已經擋過，這裡再防一次）
+def apply_rewrite(store, dec, conv, clock) -> ApplyResult: ...
+    # 期 1 不提供改寫（PM 決定）：一律 REJECT(rewrite_not_supported)，真本不動。
+    # 來源端自己的刪改走 apply_session（新版本），不走這裡。
+def apply_handoff(store, dec, conv, clock) -> ApplyResult: ...
+    # 只有目標 Session 的持有者能寫（rec.producer == target.producer，否則 not_holder）；
+    # 目標不存在 → unknown_target；
+    # continuation.snapshot_sha256 必須在 target 的 snapshots（含這一輪剛收的）裡；取出那份 raw，
+    # 依 target 的 source 取轉換器（與傳入的不同時向登錄查詢）→ convert →
+    # reading.check_continuation，且必須是該快照最後一則已完成的訊息（M5）；
+    # 不通過 → REJECT(invalid_continuation)
+def apply_claim(store, dec, clock) -> ApplyResult: ...
+    # 交接單存在、claimed_by 是 null（同輪第二人 → already_claimed）、claimer 在 Agora
+    # （或這一輪剛收，否則 unknown_claimer）→ 寫 link、設 claimed_by、寫 claim；
+    # H3：claimer 的持有者須與認領單 producer 相同（否則 not_holder）、須是主 Session
+    # （parent_id 非空 → claim_from_subsession）、不能是交接單的目標本身（→ self_claim）；
+    # 否則 REJECT(unknown_handoff / already_claimed / unknown_claimer /
+    #            not_holder / claim_from_subsession / self_claim)
+    # 建接續 Link（方向：claimer → target）；寫入順序 link → handoff → claim，
+    # 中斷後重跑可補齊（claimed_by 指向自己但 claim 未寫時繼續完成）。
+def apply_reference(store, dec, clock) -> ApplyResult: ...
+    # H3：from 的持有者須與參考單 producer 相同（from 不存在或不符 → not_holder），
+    # to 必須存在於 Agora（否則 unknown_target）；
+    # 同一對只留一個檔；read_snapshot_at 單調（evaluate 已經擋過，這裡再防一次；舊 → stale）。
+    # 寫入順序 reference 檔 → 索引，中斷重跑可補齊；索引損毀 → MismatchError 中止。
 ```
 
 ---
