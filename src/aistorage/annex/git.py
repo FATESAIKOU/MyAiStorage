@@ -1,11 +1,13 @@
 """AiStorage AnnexGit: 包裝 git 與 git-annex subprocess 操作。
 
-依據規格：docs/impl/group3-modules.md 第 1、3.5 節
-- AnnexGit: clone, ls_remote, add, commit, copy, push
+依據規格：
+- docs/impl/group3-modules.md 第 1、3.5 節
+- review-g3a.md M5（clone_for_commit、push 多分支、annex_keys_in、環境隔離與超時）
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 from typing import Protocol, runtime_checkable
@@ -33,8 +35,19 @@ class AnnexGit(Protocol):
         """執行 git annex copy。"""
         ...
 
-    def push(self, remote: str = "origin", branch: str | None = None) -> None:
-        """執行 git push。"""
+    def push(
+        self,
+        remote: str = "origin",
+        branches: tuple[str, ...] | str = ("main", "git-annex"),
+    ) -> None:
+        """執行 git push 推送指定分支至遠端。
+
+        注意：exit 0 不等於成功，成功與否由 verify_after_push 判定（design D2）。
+        """
+        ...
+
+    def annex_keys_in(self, remote_uuid: str) -> frozenset[str]:
+        """查詢在指定 remote_uuid 上已存在的 annex key 集合。"""
         ...
 
 
@@ -44,21 +57,48 @@ class SubprocessAnnexGit:
     def __init__(self, workdir: Path | str) -> None:
         self.workdir = Path(workdir).resolve()
 
-    def _run(self, cmd: list[str], *, is_write: bool = False) -> str:
-        proc = subprocess.run(
-            cmd,
-            cwd=self.workdir,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+    def _get_env(self) -> dict[str, str]:
+        """建立隔離的環境變數，防止終端機互動提示與繼承全域設定。"""
+        env = dict(os.environ)
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        return env
+
+    def _run(
+        self,
+        cmd: list[str],
+        *,
+        is_write: bool = False,
+        timeout: float = 60.0,
+    ) -> str:
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=self.workdir,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                env=self._get_env(),
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as e:
+            err_cls = WriteError if is_write else ReadError
+            raise err_cls(f"Git 命令執行逾時 ({cmd[0]} {cmd[1] if len(cmd) > 1 else ''})") from None
+        except Exception as e:
+            err_cls = WriteError if is_write else ReadError
+            raise err_cls(f"Git 命令呼叫失敗: {cmd[0]}") from None
+
         if proc.returncode != 0:
             err_cls = WriteError if is_write else ReadError
-            raise err_cls(f"Git 命令失敗 ({' '.join(cmd)}): {proc.stderr}")
+            cmd_name = f"{cmd[0]} {cmd[1]}" if len(cmd) > 1 else cmd[0]
+            # 依 D2 規則：不將含工作區敏感路徑之完整 stderr 寫入例外主訊息
+            raise err_cls(f"Git 命令失敗 (rc={proc.returncode}, op={cmd_name})")
         return proc.stdout
 
     def ls_remote(self, remote: str = "origin") -> dict[str, str]:
-        stdout = self._run(["git", "ls-remote", remote])
+        stdout = self._run(["git", "ls-remote", remote], is_write=False)
         refs: dict[str, str] = {}
         for line in stdout.splitlines():
             line = line.strip()
@@ -77,8 +117,19 @@ class SubprocessAnnexGit:
         self._run(["git", "add"] + path_list, is_write=True)
 
     def commit(self, message: str) -> str:
-        self._run(["git", "commit", "-m", message], is_write=True)
-        sha = self._run(["git", "rev-parse", "HEAD"]).strip()
+        # 固定 user.name 與 user.email，避免在 runner 上因缺少身分設定失敗
+        cmd = [
+            "git",
+            "-c",
+            "user.name=AiStorage Committer",
+            "-c",
+            "user.email=committer@aistorage.local",
+            "commit",
+            "-m",
+            message,
+        ]
+        self._run(cmd, is_write=True)
+        sha = self._run(["git", "rev-parse", "HEAD"], is_write=False).strip()
         return sha
 
     def copy(self, remote: str, to_copy: list[str] | None = None) -> None:
@@ -87,22 +138,123 @@ class SubprocessAnnexGit:
             cmd.extend(to_copy)
         self._run(cmd, is_write=True)
 
-    def push(self, remote: str = "origin", branch: str | None = None) -> None:
+    def push(
+        self,
+        remote: str = "origin",
+        branches: tuple[str, ...] | str = ("main", "git-annex"),
+    ) -> None:
         cmd = ["git", "push", remote]
-        if branch:
-            cmd.append(branch)
+        if isinstance(branches, str):
+            cmd.append(branches)
+        else:
+            cmd.extend(branches)
         self._run(cmd, is_write=True)
+
+    def annex_keys_in(self, remote_uuid: str) -> frozenset[str]:
+        """M5: 查詢在指定 remote_uuid 上已存在的 annex key 集合。"""
+        cmd = ["git", "annex", "find", f"--in={remote_uuid}", "--all", "--format=${key}\n"]
+        stdout = self._run(cmd, is_write=False)
+        keys = set()
+        for line in stdout.splitlines():
+            k = line.strip()
+            if k:
+                keys.add(k)
+        return frozenset(keys)
+
+    @classmethod
+    def clone_for_commit(
+        cls,
+        url: str,
+        dest: Path,
+        *,
+        max_git_bundles: int = 20,
+    ) -> SubprocessAnnexGit:
+        """單一入口完成 clone -b main、git annex init 與設定 annex.max-git-bundles。
+
+        同時驗證 clone 後 git-annex 分支存在。
+        """
+        dest_path = Path(dest).resolve()
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        env = {
+            **os.environ,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+
+        # 1. clone -b main
+        proc = subprocess.run(
+            ["git", "clone", "-b", "main", url, str(dest_path)],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env=env,
+            timeout=120.0,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise ReadError(f"Git clone 失敗 (rc={proc.returncode})")
+
+        inst = cls(dest_path)
+
+        # 2. git annex init
+        proc_init = subprocess.run(
+            ["git", "-C", str(dest_path), "annex", "init"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env=env,
+            timeout=60.0,
+            check=False,
+        )
+        if proc_init.returncode != 0:
+            raise ReadError(f"Git annex init 失敗 (rc={proc_init.returncode})")
+
+        # 3. git config annex.max-git-bundles <N>
+        inst._run(
+            ["git", "config", "annex.max-git-bundles", str(max_git_bundles)],
+            is_write=True,
+        )
+
+        # 4. 驗證 git-annex 分支存在
+        chk = subprocess.run(
+            ["git", "-C", str(dest_path), "rev-parse", "--verify", "origin/git-annex"],
+            capture_output=True,
+            check=False,
+        )
+        if chk.returncode != 0:
+            # 亦檢查本地 git-annex
+            chk_local = subprocess.run(
+                ["git", "-C", str(dest_path), "rev-parse", "--verify", "git-annex"],
+                capture_output=True,
+                check=False,
+            )
+            if chk_local.returncode != 0:
+                raise ReadError("遠端倉庫缺少必要之 git-annex 分支")
+
+        return inst
 
     @classmethod
     def clone(cls, url: str, dest: Path) -> SubprocessAnnexGit:
+        """舊相容 clone 方法。"""
         dest_path = Path(dest).resolve()
         dest_path.parent.mkdir(parents=True, exist_ok=True)
+        env = {
+            **os.environ,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
         proc = subprocess.run(
             ["git", "clone", url, str(dest_path)],
             capture_output=True,
             text=True,
+            errors="replace",
+            env=env,
+            timeout=120.0,
             check=False,
         )
         if proc.returncode != 0:
-            raise ReadError(f"Git clone 失敗 ({url}): {proc.stderr}")
+            raise ReadError(f"Git clone 失敗 (rc={proc.returncode})")
         return cls(dest_path)

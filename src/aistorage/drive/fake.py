@@ -1,9 +1,8 @@
 """AiStorage Google Drive 記憶體測試實作（FakeDrive）。
 
-依據規格：docs/impl/group3-modules.md 第 2.3 節
-- FakeDrive: 實作 DriveClient 協定，支援種子資料（seed_folder, seed_file）
-- 錯誤注入（inject: 可針對特定 op 與 file_id 注入 ReadError/WriteError 等）
-- 狀態快照（snapshot: 供測試驗證「未產生任何非預期異動」）
+依據規格：
+- docs/impl/group3-modules.md 第 2.3 節
+- review-g3a.md M6（呼叫紀錄、第 n 次讀取注入、私有 _lookup 避免重複計算、排序支援、嚴格檢查、確定性 ID、set_checksum）
 """
 
 from __future__ import annotations
@@ -11,7 +10,8 @@ from __future__ import annotations
 import copy
 import hashlib
 from pathlib import Path
-import uuid
+import random
+from typing import Any, Literal
 
 from aistorage.clock import Clock, FixedClock
 from aistorage.drive.model import GOOGLE_FOLDER_MIME, DriveClient, DriveFile
@@ -19,17 +19,38 @@ from aistorage.errors import NotFound, ReadError, TooLarge, WriteError
 
 
 class FakeDrive(DriveClient):
-    """記憶體中 Google Drive 實作，供單元測試使用。"""
+    """記憶體中 Google Drive 實作，供單元測試與性質測試使用。"""
 
-    def __init__(self, clock: Clock | None = None) -> None:
+    READ_OPS: frozenset[str] = frozenset(
+        {"list_children", "find_by_name", "get", "download", "download_bytes"}
+    )
+    WRITE_OPS: frozenset[str] = frozenset(
+        {"create", "update_content", "move", "delete_permanently"}
+    )
+
+    def __init__(
+        self,
+        clock: Clock | None = None,
+        *,
+        order: Literal["insertion", "reverse", "shuffle"] = "insertion",
+        seed: int | None = None,
+    ) -> None:
         self._clock: Clock = clock or FixedClock()
+        self._order: Literal["insertion", "reverse", "shuffle"] = order
+        self._rng: random.Random = random.Random(seed) if seed is not None else random.Random(42)
         self._files: dict[str, DriveFile] = {}
         self._contents: dict[str, bytes] = {}
-        self._injections: list[dict] = []
+        self._injections: list[dict[str, Any]] = []
+        self._nth_read_injections: dict[int, type[Exception]] = {}
+        self.calls: list[tuple[str, str | None]] = []
+        self._folder_seq: int = 0
+        self._file_seq: int = 0
+        self._read_count: int = 0
 
     def seed_folder(self, name: str, parent: str | None = None) -> str:
-        """建立種子資料夾並回傳其 folder_id。"""
-        fid = f"folder_{uuid.uuid4().hex[:12]}"
+        """建立種子資料夾並回傳其 folder_id（不計入 DriveClient API calls）。"""
+        self._folder_seq += 1
+        fid = f"folder_{self._folder_seq:04d}"
         now = self._clock.now_utc()
         parents = (parent,) if parent else ()
         df = DriveFile(
@@ -58,14 +79,15 @@ class FakeDrive(DriveClient):
         trashed: bool = False,
         mime_type: str = "application/octet-stream",
     ) -> str:
-        """建立種子檔案並回傳其 file_id。"""
-        fid = f"file_{uuid.uuid4().hex[:12]}"
+        """建立種子檔案並回傳其 file_id（不計入 DriveClient API calls）。"""
+        self._file_seq += 1
+        fid = f"file_{self._file_seq:04d}"
         now = created_time or self._clock.now_utc()
 
         calc_sha256 = (
             hashlib.sha256(content).hexdigest().lower()
             if sha256 == "auto"
-            else sha256
+            else (sha256.lower() if sha256 else None)
         )
         calc_md5 = hashlib.md5(content).hexdigest().lower()
 
@@ -85,6 +107,24 @@ class FakeDrive(DriveClient):
         self._contents[fid] = bytes(content)
         return fid
 
+    def set_checksum(self, file_id: str, sha256: str | None) -> None:
+        """設定指定檔案之 sha256（支援模擬上傳後 sha256 暫時為 None 之情境）。"""
+        if file_id not in self._files:
+            raise NotFound(f"找不到檔案: {file_id}")
+        old_f = self._files[file_id]
+        self._files[file_id] = DriveFile(
+            id=old_f.id,
+            name=old_f.name,
+            mime_type=old_f.mime_type,
+            parents=old_f.parents,
+            size=old_f.size,
+            sha256=sha256.lower() if sha256 else None,
+            md5=old_f.md5,
+            created_time=old_f.created_time,
+            modified_time=old_f.modified_time,
+            trashed=old_f.trashed,
+        )
+
     def inject(
         self,
         op: str,
@@ -93,20 +133,17 @@ class FakeDrive(DriveClient):
         error: type[Exception] = ReadError,
         times: int = 1,
     ) -> None:
-        """注入錯誤。
-
-        Args:
-            op: 操作名稱（例如 'download', 'list_children', 'get', 'move' 等）
-            file_id: 若指定，僅在針對該 file_id 操作時注入
-            error: 拋出之例外類別
-            times: 注入次數
-        """
+        """注入指定操作的錯誤。"""
         self._injections.append({
             "op": op,
             "file_id": file_id,
             "error": error,
             "times": times,
         })
+
+    def inject_nth_read(self, n: int, error: type[Exception] = ReadError) -> None:
+        """設定在第 n 次讀取操作時（0-indexed）拋出指定例外。"""
+        self._nth_read_injections[n] = error
 
     def _check_injections(self, op: str, file_id: str | None = None) -> None:
         for inj in list(self._injections):
@@ -118,7 +155,30 @@ class FakeDrive(DriveClient):
                     err_cls = inj["error"]
                     raise err_cls(f"FakeDrive injected error on {op}({file_id})")
 
-    def snapshot(self) -> dict:
+    def _check_read_injection(self) -> None:
+        idx = self._read_count
+        self._read_count += 1
+        if idx in self._nth_read_injections:
+            err_cls = self._nth_read_injections[idx]
+            raise err_cls(f"FakeDrive injected nth read error at index {idx}")
+
+    def _lookup(self, file_id: str) -> DriveFile:
+        """內部私有查詢：不計入 calls，不觸發 get 注入，供 download 與內部邏輯使用。"""
+        f = self._files.get(file_id)
+        if f is None or f.trashed:
+            raise NotFound(f"找不到檔案: {file_id}")
+        return f
+
+    def _apply_order(self, items: list[DriveFile]) -> list[DriveFile]:
+        if self._order == "reverse":
+            return list(reversed(items))
+        elif self._order == "shuffle":
+            res = list(items)
+            self._rng.shuffle(res)
+            return res
+        return list(items)
+
+    def snapshot(self) -> dict[str, Any]:
         """取得目前所有檔案與內容之快照字典，供比對狀態未受異動。"""
         return {
             "files": copy.deepcopy(self._files),
@@ -130,31 +190,38 @@ class FakeDrive(DriveClient):
     # -----------------------------------------------------------------------
 
     def list_children(self, folder_id: str) -> list[DriveFile]:
+        self.calls.append(("list_children", folder_id))
+        self._check_read_injection()
         self._check_injections("list_children", folder_id)
         result = [
             f for f in self._files.values()
             if not f.trashed and folder_id in f.parents
         ]
-        return result
+        return self._apply_order(result)
 
     def find_by_name(self, parent_id: str, name: str) -> list[DriveFile]:
+        self.calls.append(("find_by_name", parent_id))
+        self._check_read_injection()
         self._check_injections("find_by_name", parent_id)
         result = [
             f for f in self._files.values()
             if not f.trashed and parent_id in f.parents and f.name == name
         ]
-        return result
+        return self._apply_order(result)
 
     def get(self, file_id: str) -> DriveFile:
+        self.calls.append(("get", file_id))
+        self._check_read_injection()
         self._check_injections("get", file_id)
-        f = self._files.get(file_id)
-        if f is None or f.trashed:
-            raise NotFound(f"找不到檔案: {file_id}")
-        return f
+        return self._lookup(file_id)
 
     def download(self, file_id: str, dest: Path, *, max_bytes: int) -> int:
+        self.calls.append(("download", file_id))
+        self._check_read_injection()
         self._check_injections("download", file_id)
-        f = self.get(file_id)
+
+        # M6: 內部使用 _lookup 避免重複計入 get 注入與呼叫
+        self._lookup(file_id)
         content = self._contents.get(file_id, b"")
         if len(content) > max_bytes:
             raise TooLarge(f"檔案大小 {len(content)} 超過上限 {max_bytes}")
@@ -165,8 +232,12 @@ class FakeDrive(DriveClient):
         return len(content)
 
     def download_bytes(self, file_id: str, *, max_bytes: int) -> bytes:
+        self.calls.append(("download_bytes", file_id))
+        self._check_read_injection()
         self._check_injections("download_bytes", file_id)
-        f = self.get(file_id)
+
+        # M6: 內部使用 _lookup
+        self._lookup(file_id)
         content = self._contents.get(file_id, b"")
         if len(content) > max_bytes:
             raise TooLarge(f"檔案大小 {len(content)} 超過上限 {max_bytes}")
@@ -180,10 +251,17 @@ class FakeDrive(DriveClient):
         *,
         mime_type: str = "application/octet-stream",
     ) -> DriveFile:
+        self.calls.append(("create", parent_id))
         self._check_injections("create", parent_id)
+
+        # M6: 檢查父資料夾存在（root 除外）
+        if parent_id != "root" and parent_id not in self._files:
+            raise NotFound(f"找不到父資料夾: {parent_id}")
+
         data = content.read_bytes() if isinstance(content, Path) else bytes(content)
 
-        fid = f"file_{uuid.uuid4().hex[:12]}"
+        self._file_seq += 1
+        fid = f"file_{self._file_seq:04d}"
         now = self._clock.now_utc()
         sha256_val = hashlib.sha256(data).hexdigest().lower()
         md5_val = hashlib.md5(data).hexdigest().lower()
@@ -205,8 +283,13 @@ class FakeDrive(DriveClient):
         return df
 
     def update_content(self, file_id: str, content: bytes | Path) -> DriveFile:
+        self.calls.append(("update_content", file_id))
         self._check_injections("update_content", file_id)
-        old_f = self.get(file_id)
+
+        if file_id not in self._files:
+            raise NotFound(f"找不到欲更新之檔案: {file_id}")
+
+        old_f = self._files[file_id]
         data = content.read_bytes() if isinstance(content, Path) else bytes(content)
 
         now = self._clock.now_utc()
@@ -230,8 +313,20 @@ class FakeDrive(DriveClient):
         return new_f
 
     def move(self, file_id: str, *, from_parent: str, to_parent: str) -> DriveFile:
+        self.calls.append(("move", file_id))
         self._check_injections("move", file_id)
-        old_f = self.get(file_id)
+
+        # M6: 嚴格檢查檔案存在、from_parent 為實際 parent、to_parent 資料夾存在
+        if file_id not in self._files:
+            raise WriteError(f"找不到欲移動之檔案: {file_id}")
+
+        old_f = self._files[file_id]
+        if from_parent not in old_f.parents:
+            raise WriteError(f"'{from_parent}' 不是檔案 '{file_id}' 的父資料夾 (parents={old_f.parents})")
+
+        if to_parent != "root" and to_parent not in self._files:
+            raise WriteError(f"目標父資料夾不存在: {to_parent}")
+
         new_parents = tuple(p for p in old_f.parents if p != from_parent) + (to_parent,)
 
         new_f = DriveFile(
@@ -250,8 +345,13 @@ class FakeDrive(DriveClient):
         return new_f
 
     def delete_permanently(self, file_id: str) -> None:
+        self.calls.append(("delete_permanently", file_id))
         self._check_injections("delete_permanently", file_id)
-        if file_id in self._files:
-            del self._files[file_id]
+
+        # M6: 嚴格檢查，不存在時拋出 NotFound（真實 Drive 回 404）
+        if file_id not in self._files:
+            raise NotFound(f"找不到欲刪除之檔案: {file_id}")
+
+        del self._files[file_id]
         if file_id in self._contents:
             del self._contents[file_id]
