@@ -31,15 +31,21 @@
         },
         {
           "type": "file",
-          "media_type": "application/json",
-          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "size": 1024,
-          "name": "env_config.json"
+          "mime": "application/json",
+          "filename": "env_config.json",
+          "url": "data:application/json;base64,eyJrZXkiOiAidmFsdWUifQ=="
         },
         {
-          "type": "image",
-          "media_type": "image/png",
-          "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFWM0AAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg=="
+          "type": "file",
+          "mime": "image/png",
+          "filename": "pixel.png",
+          "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFWM0AAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg=="
+        },
+        {
+          "type": "file",
+          "mime": "text/plain",
+          "filename": "remote_log.txt",
+          "url": "file:///var/log/remote_log.txt"
         }
       ]
     },
@@ -65,31 +71,31 @@
           "type": "tool",
           "tool": "view_file",
           "state": {
+            "status": "completed",
             "input": {
               "path": "config/app.json"
             },
-            "output": "{\"mode\": \"test\"}",
-            "status": "completed"
+            "output": "{\"mode\": \"test\"}"
           }
         },
         {
           "type": "tool",
           "tool": "run_command",
           "state": {
+            "status": "error",
             "input": "curl http://invalid-host",
-            "output": "connection refused",
-            "status": "error"
+            "error": "connection refused"
           }
         },
         {
           "type": "tool",
           "tool": "task",
           "state": {
+            "status": "completed",
             "input": {
               "prompt": "search config"
             },
             "output": "<task id=\"ses_sub_001\">OK</task>",
-            "status": "completed",
             "metadata": {
               "sessionId": "ses_sub_001"
             }
@@ -109,12 +115,22 @@
         "id": "msg_003",
         "sessionID": "ses_opencode_basic_001",
         "role": "user",
+        "summary": {
+          "diffs": []
+        },
         "time": {
           "created": 1790420200000,
           "completed": 1790420201000
         }
       },
       "parts": [
+        {
+          "type": "compaction",
+          "auto": true,
+          "id": "cmp_001",
+          "messageID": "msg_003",
+          "sessionID": "ses_opencode_basic_001"
+        },
         {
           "type": "text",
           "text": "請立即強制重置所有設定！（此指令隨後被撤銷）"
@@ -126,6 +142,7 @@
         "id": "msg_004",
         "sessionID": "ses_opencode_basic_001",
         "role": "assistant",
+        "summary": true,
         "time": {
           "created": 1790420300000,
           "completed": 1790420305000
@@ -133,12 +150,8 @@
       },
       "parts": [
         {
-          "type": "compaction",
-          "summary": "先前操作摘要：重置指令已取消，維持既有配置。"
-        },
-        {
           "type": "text",
-          "text": "已取消強制重置，恢復原有狀態。"
+          "text": "先前操作摘要：重置指令已取消，維持既有配置。"
         }
       ]
     }

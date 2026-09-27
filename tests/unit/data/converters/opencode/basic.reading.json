@@ -4,7 +4,7 @@
   "source": "opencode",
   "title": "opencode 轉換器黃金測試樣本",
   "parent_id": null,
-  "snapshot_sha256": "4a7d1ed414474e4033ac29ccb8653d9b110e11894d7c0f16599b4f6cf4c93540",
+  "snapshot_sha256": "dc8dae28c9152dc95a794bc770f57cb7ccabb13ac844975f137cca4f2724195f",
   "in_progress": false,
   "messages": [
     {
@@ -22,8 +22,8 @@
         {
           "type": "file",
           "media_type": "application/json",
-          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-          "size": 1024,
+          "sha256": "9724c1e20e6e3e4d7f57ed25f9d4efb006e508590d528c90da597f6a775c13e5",
+          "size": 16,
           "name": "env_config.json"
         },
         {
@@ -31,6 +31,10 @@
           "media_type": "image/png",
           "sha256": "bf6e855b67618763d38f0cd8c2ab5ea9aed7b28f4475939f040e4e3ac016bedc",
           "size": 67
+        },
+        {
+          "type": "text",
+          "text": "[附件：remote_log.txt text/plain，內容不在匯出中]"
         }
       ]
     },
@@ -98,10 +102,6 @@
         {
           "type": "compaction",
           "summary": "先前操作摘要：重置指令已取消，維持既有配置。"
-        },
-        {
-          "type": "text",
-          "text": "已取消強制重置，恢復原有狀態。"
         }
       ]
     }

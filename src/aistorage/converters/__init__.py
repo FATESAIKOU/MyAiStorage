@@ -3,7 +3,7 @@
 依據規格：docs/impl/group3-modules.md 第 5 節
 """
 
-from aistorage.converters.base import Converter, SessionFacts
+from aistorage.converters.base import ConversionError, Converter, SessionFacts
 from aistorage.converters.opencode import OpencodeConverter
 
 CONVERTERS: dict[str, Converter] = {
@@ -19,6 +19,7 @@ def get_converter(source: str) -> Converter:
 
 
 __all__ = [
+    "ConversionError",
     "Converter",
     "SessionFacts",
     "OpencodeConverter",

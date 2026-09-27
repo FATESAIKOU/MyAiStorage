@@ -469,8 +469,9 @@ sessions/<source>/<enc(source_session_id)>/
   snapshots.jsonl      # 每次收進的快照一行：{snapshot_sha256, snapshot_at, raw_size, item_key, committed_at,
                        #   git_blob（raw 在 git 時）或 annex_key（raw 在 annex 時）}
 handoffs/<ULID>.json   # 交接單：真本 metadata＋body＋{claimed_by: {claim_id, session_id, at} | null}
+references/<ULID>.json # 參考紀錄真本（M5）：完整 metadata＋body，依 id 查找與分類
 links/continuation/<enc(new_session_id)>/<handoff ULID>.json   # 接續 Link：from、to、continuation、handoff_id、claim_id
-links/reference/<enc(from_session_id)>/<enc(to_session_id)>.json  # 同一對只有一個檔，覆寫成最新的 read_snapshot_at
+links/reference/<enc(from_session_id)>/<enc(to_session_id)>.json  # 參考索引：記錄生效中 reference id 與 read_snapshot_at
 claims/<ULID>.json     # 認領的真本紀錄（metadata＋body＋結果）
 rewrites/<ULID>.json   # 改寫提案的真本紀錄：metadata＋body＋{applied_snapshot_sha256}
 _committer/
@@ -479,7 +480,7 @@ _committer/
   checksums.json                 # sha256Checksum 缺少時的下載驗證結果（file id → sha256）
   schema_version                 # "agora/v1"
 ```
-- `enc()` 用 `urllib.parse.quote(s, safe="-_.")`，保證路徑安全、可逆；**冒號不會出現在路徑裡**。
+- `enc()` 用 `urllib.parse.quote(s, safe="-_")`（排除小數點防路徑穿越，拒絕 `.` 與 `..`），保證路徑安全、可逆；**冒號不會出現在路徑裡**。
 - session 的 `meta.json` 額外欄位：`status`、`stopped_at`、`snapshot_at`、`raw_sha256`、`raw_size`、`parent_id`、`in_progress`、`archived_at`、`committed_at`、`last_item_key`、`title`。
 - **閱讀版不放在真本**（它是衍生物，design D5）。需要某個舊快照的閱讀版時（接續、第 4 組），用 `snapshots.jsonl` 找到 `git_blob` 或 `annex_key` 取出那一份 raw，再跑轉換器。這也讓「從被釘住的快照讀」（D10）有明確的實作路徑。
 - commit 訊息只寫計數與 item_key（不寫標題或內容，design D2 的 log 規則同樣適用於 git 歷史）。

@@ -1,6 +1,8 @@
 """AiStorage 轉換器基礎協定與資料結構。
 
-依據規格：docs/impl/group3-modules.md 第 5 節
+依據規格：
+- docs/impl/group3-modules.md 第 5 節
+- review-g3b.md H2（定義 ConversionError）、M1（snapshot_sha256 計算）
 - SessionFacts: 來源 Session 關鍵事實資料結構
 - Converter: 轉換器介面協定
 """
@@ -10,6 +12,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+
+class ConversionError(ValueError):
+    """轉換器處理原始紀錄時發現結構不符、角色無效或必要欄位缺失之例外。"""
 
 
 @dataclass(frozen=True)
@@ -40,11 +46,12 @@ class Converter(Protocol):
         raw_path: Path,
         *,
         session_id: str,
-        snapshot_sha256: str,
-        parent_id: str | None,
+        parent_id: str | None = None,
+        snapshot_sha256: str | None = None,
     ) -> dict:
         """將原始紀錄轉換為 aistorage.reading/v1 閱讀版字典。
 
+        snapshot_sha256 由轉換器自 raw_path 位元組計算（唯一來源）。
         轉換結果必須通過 aistorage.reading.validate_reading 驗證。
         """
         ...

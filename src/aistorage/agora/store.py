@@ -1,27 +1,83 @@
-"""Agora 真本資料庫操作模組 (AgoraStore)。
+"""Agora 真本資料存取與寫入管理模組。
 
-依據規格：docs/impl/group3-modules.md 第 6 節
-- SessionRecord / SnapshotEntry 資料模型
-- RawStorage 協定與 FakeRawStorage / GitRawStorage 實作
-- AgoraStore: 在本機 clone 的真本工作樹上讀寫 Session、快照歷史與各型態項目
+依據規格：
+- docs/impl/group3-modules.md 第 6.2 節
+- review-g3b.md H3（快照 commit 可達性保證、hash-object 嚴格失敗、取出與存入雜湊比對）
+- review-g3b.md M6（暫存目錄置於工作樹外部）、M7（RawRef、SnapshotEntry 欄位）、M8（meta 驗證）
 """
 
 from __future__ import annotations
 
 import copy
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 import hashlib
 import json
 from pathlib import Path
 import subprocess
-from typing import Any, Protocol, runtime_checkable
+import tempfile
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from aistorage.agora import layout
+from aistorage.annex.git import AnnexGit
+from aistorage.errors import MismatchError, WriteError
+from aistorage.schema import validate_record_metadata
+
+
+@dataclass(frozen=True)
+class RawRef:
+    """原始紀錄之底層儲存引用標識。"""
+
+    kind: Literal["git", "annex"]
+    ref: str
+
+
+@dataclass(frozen=True)
+class SnapshotEntry:
+    """快照歷史項目（對應 sessions/<source>/<id>/snapshots.jsonl 中的每一行）。"""
+
+    snapshot_sha256: str
+    snapshot_at: str
+    raw_size: int
+    item_key: str
+    committed_at: str
+    git_blob: str | None = None
+    annex_key: str | None = None
+    via: Literal["sync", "rewrite", "import"] = "sync"
+    rewrite_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "snapshot_sha256": self.snapshot_sha256,
+            "snapshot_at": self.snapshot_at,
+            "raw_size": self.raw_size,
+            "item_key": self.item_key,
+            "committed_at": self.committed_at,
+            "git_blob": self.git_blob,
+            "annex_key": self.annex_key,
+            "via": self.via,
+        }
+        if self.rewrite_id is not None:
+            d["rewrite_id"] = self.rewrite_id
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SnapshotEntry:
+        return cls(
+            snapshot_sha256=data["snapshot_sha256"],
+            snapshot_at=data["snapshot_at"],
+            raw_size=int(data["raw_size"]),
+            item_key=data["item_key"],
+            committed_at=data["committed_at"],
+            git_blob=data.get("git_blob"),
+            annex_key=data.get("annex_key"),
+            via=data.get("via", "sync"),
+            rewrite_id=data.get("rewrite_id"),
+        )
 
 
 @dataclass
 class SessionRecord:
-    """真本 Session 記錄（對應 meta.json）。"""
+    """Session 真本 metadata（對應 sessions/<source>/<id>/meta.json）。"""
 
     id: str
     producer: str
@@ -33,6 +89,7 @@ class SessionRecord:
     raw_size: int
     committed_at: str
     last_item_key: str
+
     type: str = "session"
     case_id: str | None = None
     provenance: str | None = None
@@ -104,49 +161,10 @@ class SessionRecord:
             role_version=data.get("role_version"),
             stopped_at=data.get("stopped_at"),
             parent_id=data.get("parent_id"),
-            in_progress=bool(data.get("in_progress", False)),
+            in_progress=data.get("in_progress", False),
             archived_at=data.get("archived_at"),
             title=data.get("title"),
             extra=extra,
-        )
-
-
-@dataclass(frozen=True)
-class SnapshotEntry:
-    """snapshots.jsonl 中的單筆快照歷史項目。"""
-
-    snapshot_sha256: str
-    snapshot_at: str
-    raw_size: int
-    item_key: str
-    committed_at: str
-    git_blob: str | None = None
-    annex_key: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {
-            "snapshot_sha256": self.snapshot_sha256,
-            "snapshot_at": self.snapshot_at,
-            "raw_size": self.raw_size,
-            "item_key": self.item_key,
-            "committed_at": self.committed_at,
-        }
-        if self.git_blob is not None:
-            d["git_blob"] = self.git_blob
-        if self.annex_key is not None:
-            d["annex_key"] = self.annex_key
-        return d
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> SnapshotEntry:
-        return cls(
-            snapshot_sha256=data["snapshot_sha256"],
-            snapshot_at=data["snapshot_at"],
-            raw_size=int(data["raw_size"]),
-            item_key=data["item_key"],
-            committed_at=data["committed_at"],
-            git_blob=data.get("git_blob"),
-            annex_key=data.get("annex_key"),
         )
 
 
@@ -154,8 +172,8 @@ class SnapshotEntry:
 class RawStorage(Protocol):
     """原始紀錄 (raw) 儲存協定。"""
 
-    def store(self, worktree_path: Path, src: Path) -> str:
-        """將 src 內容寫入指定之工作樹路徑，並回傳引用標識 (git_blob 或 annex_key)。"""
+    def store(self, worktree_path: Path, src: Path) -> RawRef:
+        """將 src 內容寫入指定之工作樹路徑，並回傳儲存引用標識 (RawRef)。"""
         ...
 
     def retrieve(self, ref: str, dest: Path) -> None:
@@ -170,7 +188,7 @@ class FakeRawStorage(RawStorage):
         self.use_annex_key = use_annex_key
         self._blobs: dict[str, bytes] = {}
 
-    def store(self, worktree_path: Path, src: Path) -> str:
+    def store(self, worktree_path: Path, src: Path) -> RawRef:
         data = Path(src).read_bytes()
         dest_p = Path(worktree_path)
         dest_p.parent.mkdir(parents=True, exist_ok=True)
@@ -179,11 +197,12 @@ class FakeRawStorage(RawStorage):
         sha = hashlib.sha256(data).hexdigest().lower()
         if self.use_annex_key:
             ref = f"SHA256E-s{len(data)}--{sha}"
+            self._blobs[ref] = data
+            return RawRef(kind="annex", ref=ref)
         else:
             ref = hashlib.sha1(f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
-
-        self._blobs[ref] = data
-        return ref
+            self._blobs[ref] = data
+            return RawRef(kind="git", ref=ref)
 
     def retrieve(self, ref: str, dest: Path) -> None:
         if ref not in self._blobs:
@@ -197,26 +216,26 @@ class GitRawStorage(RawStorage):
     """使用 Git 物件庫之 Raw 儲存實作。"""
 
     def __init__(self, git_workdir: Path | str) -> None:
-        self.git_workdir = Path(git_workdir)
+        self.git_workdir = Path(git_workdir).resolve()
 
-    def store(self, worktree_path: Path, src: Path) -> str:
+    def store(self, worktree_path: Path, src: Path) -> RawRef:
         data = Path(src).read_bytes()
         dest_p = Path(worktree_path)
         dest_p.parent.mkdir(parents=True, exist_ok=True)
         dest_p.write_bytes(data)
 
-        # 透過 git hash-object -w 寫入物件庫
+        # H3-b: 透過 git hash-object -w 寫入物件庫；失敗時嚴格拋出 WriteError，絕不假裝成功
         proc = subprocess.run(
-            ["git", "-C", str(self.git_workdir), "hash-object", "-w", str(src.resolve())],
+            ["git", "-C", str(self.git_workdir), "hash-object", "-w", str(Path(src).resolve())],
             capture_output=True,
             text=True,
             check=False,
         )
         if proc.returncode != 0:
-            # 若無 git 倉庫環境，退回手動計算 SHA-1
-            sha = hashlib.sha1(f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
-            return sha
-        return proc.stdout.strip()
+            raise WriteError(f"git hash-object -w 失敗 (rc={proc.returncode}): {proc.stderr}")
+
+        sha = proc.stdout.strip()
+        return RawRef(kind="git", ref=sha)
 
     def retrieve(self, ref: str, dest: Path) -> None:
         dest_p = Path(dest)
@@ -227,16 +246,35 @@ class GitRawStorage(RawStorage):
             check=False,
         )
         if proc.returncode != 0:
-            raise KeyError(f"無法自 git 物件庫取出 raw ({ref}): {proc.stderr.decode('utf-8', errors='ignore')}")
+            stderr_msg = (
+                proc.stderr.decode("utf-8", errors="replace")
+                if isinstance(proc.stderr, bytes)
+                else str(proc.stderr)
+            )
+            raise KeyError(f"無法自 git 物件庫取出 raw ({ref}): {stderr_msg}")
         dest_p.write_bytes(proc.stdout)
 
 
 class AgoraStore:
     """Agora 真本資料存取與寫入管理。"""
 
-    def __init__(self, worktree: Path | str, raw_storage: RawStorage) -> None:
+    def __init__(
+        self,
+        worktree: Path | str,
+        raw_storage: RawStorage,
+        *,
+        git: AnnexGit | None = None,
+        temp_dir: Path | str | None = None,
+    ) -> None:
         self.worktree = Path(worktree).resolve()
         self.raw_storage = raw_storage
+        self.git = git
+        # M6: 暫存目錄獨立於工作樹外部，避免 git 誤提交暫存檔
+        if temp_dir is not None:
+            self._temp_dir = Path(temp_dir).resolve()
+        else:
+            self._temp_dir = Path(tempfile.gettempdir()) / "aistorage_snapshots"
+        self._temp_dir.mkdir(parents=True, exist_ok=True)
         self._changed_paths: list[str] = []
 
     def get_record(self, item_id: str) -> dict[str, Any] | None:
@@ -250,8 +288,11 @@ class AgoraStore:
         if not p.is_file():
             return None
 
-        with open(p, encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            raise MismatchError(f"真本項目 JSON 損毀: {relpath}") from None
 
     def get_session(self, session_id: str) -> SessionRecord | None:
         """取得指定 Session 的 SessionRecord。若不存在回傳 None。"""
@@ -268,18 +309,20 @@ class AgoraStore:
             return []
 
         entries: list[SnapshotEntry] = []
-        with open(p, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    entries.append(SnapshotEntry.from_dict(json.loads(line)))
+        try:
+            with open(p, encoding="utf-8") as f:
+                for line_num, line in enumerate(f, start=1):
+                    line = line.strip()
+                    if line:
+                        entries.append(SnapshotEntry.from_dict(json.loads(line)))
+        except json.JSONDecodeError as e:
+            raise MismatchError(f"快照歷史 snapshots.jsonl JSON 格式損毀: {relpath}") from None
         return entries
 
     def raw_path_for_snapshot(self, session_id: str, snapshot_sha256: str) -> Path:
         """取出特定快照版本的 raw 原始本體並存至暫存檔，回傳其 Path。
 
-        Raises:
-            KeyError: 找不到對應的快照
+        H3-c: 取出後一律計算 SHA-256 並比對 snapshot_sha256，不符拋出 MismatchError。
         """
         all_snaps = self.snapshots(session_id)
         target: SnapshotEntry | None = None
@@ -299,52 +342,105 @@ class AgoraStore:
                 f"快照 '{snapshot_sha256}' 未記錄 git_blob 或 annex_key"
             )
 
-        dest_dir = self.worktree / "_committer" / "tmp" / "snapshots"
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest_path = dest_dir / f"{snapshot_sha256}.raw"
+        # M6: 暫存目錄在工作樹外部
+        dest_path = self._temp_dir / f"{snapshot_sha256}.raw"
 
         # 若檔案已存在且雜湊吻合則直接回傳
         if dest_path.is_file():
             existing_sha = hashlib.sha256(dest_path.read_bytes()).hexdigest().lower()
-            if existing_sha == snapshot_sha256:
+            if existing_sha == snapshot_sha256.lower():
                 return dest_path
 
         self.raw_storage.retrieve(ref, dest_path)
+
+        # H3-c: 取出後雜湊驗證
+        retrieved_bytes = dest_path.read_bytes()
+        actual_sha = hashlib.sha256(retrieved_bytes).hexdigest().lower()
+        if actual_sha != snapshot_sha256.lower():
+            dest_path.unlink(missing_ok=True)
+            raise MismatchError(
+                f"自 RawStorage 取出之 raw 雜湊 ({actual_sha}) 與預期之 snapshot_sha256 ({snapshot_sha256}) 不符"
+            )
+
         return dest_path
 
     def put_session(self, rec: SessionRecord, raw_src: Path) -> None:
-        """寫入或更新 Session 項目（存入 raw、追加 snapshots.jsonl、寫入 meta.json）。"""
+        """寫入或更新 Session 項目（存入 raw、追加 snapshots.jsonl、寫入 meta.json）。
+
+        H3-a & PM 決定 3: 若配置了 git，寫入每份快照後立即 commit checkpoint，保證物件在 git 歷史中可達。
+        H3-c: 驗證 raw_src 的 SHA-256 與大小必須完全吻合 rec。
+        M8: 寫入前執行 validate_record_metadata 檢查。
+        """
+        raw_p = Path(raw_src)
+        if not raw_p.is_file():
+            raise FileNotFoundError(f"找不到原始紀錄檔案: {raw_p}")
+
+        # H3-c: 嚴格驗證 raw_src 雜湊與大小
+        raw_bytes = raw_p.read_bytes()
+        actual_raw_sha = hashlib.sha256(raw_bytes).hexdigest().lower()
+        actual_raw_size = len(raw_bytes)
+
+        if actual_raw_sha != rec.raw_sha256.lower():
+            raise MismatchError(
+                f"raw_src 之 SHA-256 ({actual_raw_sha}) 與 SessionRecord.raw_sha256 ({rec.raw_sha256}) 不符"
+            )
+        if actual_raw_size != rec.raw_size:
+            raise MismatchError(
+                f"raw_src 之大小 ({actual_raw_size}) 與 SessionRecord.raw_size ({rec.raw_size}) 不符"
+            )
+
+        # M8: 驗證真本 metadata 符合規範
+        meta_dict = rec.to_dict()
+        val_errors = validate_record_metadata(meta_dict)
+        if val_errors:
+            err_msg = "; ".join(f"{e.field}: {e.message}" for e in val_errors)
+            raise ValueError(f"SessionRecord 未通過 record metadata 驗證: {err_msg}")
+
         session_id = rec.id
         raw_relpath = layout.session_raw_path(session_id)
         raw_worktree_path = self.worktree / raw_relpath
 
         # 1. 存入 raw
-        ref = self.raw_storage.store(raw_worktree_path, Path(raw_src))
+        raw_ref = self.raw_storage.store(raw_worktree_path, raw_p)
         self._record_changed(raw_relpath)
 
-        # 2. 追加快照歷史
-        is_annex = ref.startswith("SHA256")
-        snap_entry = SnapshotEntry(
-            snapshot_sha256=rec.raw_sha256,
-            snapshot_at=rec.snapshot_at,
-            raw_size=rec.raw_size,
-            item_key=rec.last_item_key,
-            committed_at=rec.committed_at,
-            git_blob=None if is_annex else ref,
-            annex_key=ref if is_annex else None,
-        )
+        # 2. 追加快照歷史（M7: 避免重複追加同一快照）
+        existing_snaps = self.snapshots(session_id)
+        if not (existing_snaps and existing_snaps[-1].snapshot_sha256 == rec.raw_sha256):
+            snap_entry = SnapshotEntry(
+                snapshot_sha256=rec.raw_sha256,
+                snapshot_at=rec.snapshot_at,
+                raw_size=rec.raw_size,
+                item_key=rec.last_item_key,
+                committed_at=rec.committed_at,
+                git_blob=raw_ref.ref if raw_ref.kind == "git" else None,
+                annex_key=raw_ref.ref if raw_ref.kind == "annex" else None,
+            )
 
-        snapshots_relpath = layout.session_snapshots_path(session_id)
-        snapshots_path = self.worktree / snapshots_relpath
-        snapshots_path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(snap_entry.to_dict(), ensure_ascii=False) + "\n"
-        with open(snapshots_path, "a", encoding="utf-8") as f:
-            f.write(line)
-        self._record_changed(snapshots_relpath)
+            snapshots_relpath = layout.session_snapshots_path(session_id)
+            snapshots_path = self.worktree / snapshots_relpath
+            snapshots_path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(snap_entry.to_dict(), ensure_ascii=False) + "\n"
+            with open(snapshots_path, "a", encoding="utf-8") as f:
+                f.write(line)
+            self._record_changed(snapshots_relpath)
 
         # 3. 寫入 meta.json
         meta_relpath = layout.session_meta_path(session_id)
-        self.put_json(meta_relpath, rec.to_dict())
+        self.put_json(meta_relpath, meta_dict)
+
+        # H3-a / PM 決定 3: 若配置了 git，對每一份收進的快照各 commit 一次
+        if self.git is not None:
+            self.commit_checkpoint(f"snapshot: {rec.last_item_key}")
+
+    def commit_checkpoint(self, message: str) -> str | None:
+        """提交當前變更為一個 commit，確保每份快照在 git 歷史中均有 commit 引用（H3-a）。"""
+        if self.git is not None and self._changed_paths:
+            self.git.add(self._changed_paths)
+            sha = self.git.commit(message)
+            self._changed_paths.clear()
+            return sha
+        return None
 
     def put_json(self, relpath: str, obj: dict[str, Any]) -> None:
         """以固定格式寫入 JSON 檔案（sort_keys=True, indent=2, 結尾換行）。"""
