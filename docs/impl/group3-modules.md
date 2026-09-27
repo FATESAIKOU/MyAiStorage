@@ -658,8 +658,13 @@ python -m aistorage.importer opencode --export <opencode export 的 JSON 檔> --
        --profile mac-opencode (--inbox-folder <id> | --out-dir <本機目錄>)
 python -m aistorage.importer claude-code --jsonl <檔> ...（同上）
 ```
-- 共用一個 `build_inbox_item(raw_path, *, source, source_session_id, facts, profile, key, key_id) -> (sidecar_bytes, sig_obj)`。**同步器（5.2）之後也用這個函式**，匯入與同步產生的收件匣項目形式相同（spec「單一 Session 手動匯入」）。
+- 共用一個 `build_inbox_item(raw_path, *, source, source_session_id, facts, profile, key, key_id) -> (sidecar_bytes, sig_obj)`，放在 `aistorage/inbox_builder.py`（**不在 CLI 套件裡**，同步器 5.2 直接用，不必匯入 argparse 那套）。**同步器之後也用這個函式**，匯入與同步產生的收件匣項目形式相同（spec「單一 Session 手動匯入」）。
 - 重複匯入：id＝`<source>:<source_session_id>`，內容相同 → 提交流程判為 ALREADY（3.4）。
+- **轉換器讀不到事實時仍然匯入**（`--strict` 才拒絕）：這個工具存在的理由是「Claude Code 的 Session 約 30 天就會被本機清掉，要能及時救進來」，轉換失敗就整個拒絕＝永遠救不回來。改用保守值（時間＝原始紀錄檔的 **mtime**、`in_progress=False`、無標題），metadata 留 `time_source: import`，提交流程照收原始紀錄、只在閱讀版標記失敗（PM 決定 1 的精神）。CLI 會在 stderr 印一行警告。
+- **快照時間預設用檔案的 mtime**（`--snapshot-at` 可覆寫）：手動匯入的檔案可能是幾天前匯出的，mtime 比「匯入的當下」更接近 D4 的「擷取時間」。
+- **母 Session 自動帶入**：沒給 `--parent-id` 時從原始紀錄取（opencode 的 `info.parentID`）；兩者不一致就報錯，不要猜。
+- **金鑰識別碼本機先驗**：必須是 `<profile>-<公鑰雜湊前 8 位小寫 hex>` 且屬於該 profile（2.3），避免上傳後才被拒成 `unauthorized`。私鑰只以路徑讀取，權限不是 600 就拒絕。
+- **期 1 的已知限制**：Claude Code 的**子代理內容不會被匯入**，也不保證取得得到子 Session 的 id（新版可能把子代理存成獨立檔案；見 `schemas/reading-version.md` 對應表的最後一列）。母 Session 的原始紀錄完整保留。
 
 ---
 

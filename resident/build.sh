@@ -21,11 +21,12 @@ command -v uv >/dev/null 2>&1 || { echo "找不到 uv（https://docs.astral.sh/u
 echo "[build] 產生 wheel：${REPO_ROOT}/dist"
 ( cd "$REPO_ROOT" && uv build --wheel --out-dir dist )
 
-# 5.4 的 plugin／skill 說明先給一個最小的骨架，之後由 5.4 覆寫。
 mkdir -p "${HERE}/opencode/plugin" "${HERE}/opencode/skills"
 [ -f "${HERE}/opencode/plugin/aistorage.ts" ] || \
-  printf '// 5.4 會放這裡；先留空檔讓 image 內的路徑存在。\nexport default async () => ({})\n' \
+  printf '// 5.4 的 plugin 放在這裡。\nexport default async () => ({})\n' \
     > "${HERE}/opencode/plugin/aistorage.ts"
+[ -d "${HERE}/opencode/skills/aistorage" ] || \
+  echo "[build] 警告：找不到 skills/aistorage（5.4 的 skill 說明），住民不會有工具說明" >&2
 
 cache_arg=()
 [ "$no_cache" = 1 ] && cache_arg=(--no-cache)

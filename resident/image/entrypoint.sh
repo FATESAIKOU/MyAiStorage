@@ -131,6 +131,9 @@ if [ -d "$SCHEMA_SRC" ]; then
   done
 fi
 
+# skill 說明走 `opencode.base.json` 的 `skills.paths`（唯讀的
+# /opt/aistorage/opencode/skills），不在這裡複製到 /work——避免有兩份會漂移的說明。
+
 # ── 1. rclone-worker.conf → 可寫的副本（token 要能刷新）───────────────────
 require_file rclone-worker.conf "同步器上傳收件匣用（worker 的 drive.file 憑證）"
 install -m 0600 "${SECRETS_DIR}/rclone-worker.conf" "$RCLONE_CONF"
