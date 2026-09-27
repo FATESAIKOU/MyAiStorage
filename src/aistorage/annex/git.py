@@ -188,8 +188,17 @@ class SubprocessAnnexGit:
         self._run(cmd, is_write=True, timeout=timeout)
 
     def annex_keys_in(self, remote_uuid: str) -> frozenset[str]:
-        """M5: 查詢在指定 remote_uuid 上已存在的 annex key 集合。"""
-        cmd = ["git", "annex", "find", f"--in={remote_uuid}", "--all", "--format=${key}\n"]
+        """M5: 查詢在指定 remote_uuid 上已存在的 annex key 集合。
+
+        整合測試發現：`git annex find` 沒有 `--all` 選項，原本的寫法必定失敗
+        （Invalid option `--all`，rc=1），所以 init-pin 與 pending 一直拿不到 key 集合。
+        正確的語法是 `git annex find --in=<uuid> --format=${key}`（不帶路徑參數）。
+
+        語意：回傳**目前分支樹狀中、被這個 remote 持有的** key。Agora 的原始紀錄
+        留在樹狀裡且不會被改寫（期 1 不提供改寫），所以實務上等於全部的 key；
+        若之後有「從樹狀移除但仍需保留物件」的情境，這裡要另外用 location log 取。
+        """
+        cmd = ["git", "annex", "find", f"--in={remote_uuid}", "--format=${key}"]
         stdout = self._run(cmd, is_write=False)
         keys = set()
         for line in stdout.splitlines():
