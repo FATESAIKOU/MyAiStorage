@@ -129,7 +129,7 @@ Agora 與 Foundry 分成兩個 repo，是依 ADR 0001「要素各自獨立」。
   - **「同步並提交」的完成**以讀取介面看得到這次放進收件匣的每一個項目、或它的拒絕原因為準（spec「寫入端維持新鮮度」）。
 - **產生者章。** 同一個 client 底下的 worker 能讀、改、刪彼此的收件匣項目，別的 project 的 client 也能把項目放進任何收件匣（技術驗證 1.4），所以收件匣的位置**不能**證明產生者。每個 profile 有一把簽章金鑰，同步器對 sidecar（含原始紀錄的內容雜湊）簽章，提交流程以登錄的公開金鑰驗章，**沒有簽章或驗章失敗一律拒收**。產生者章依驗章通過的金鑰蓋。寫入者自己填的產生者一律忽略（ADR 0006）。
 - **改寫與抹除。**
-  - 改寫：寫入者把改寫提案放進收件匣，提交流程做成一個新 commit。舊版本留在 git 歷史裡，可以 revert。
+  - 改寫：期 1 不提供（使用者 2026-09-27 決定，列在待辦）。來源端的編輯（/rewind、/undo）照常以原始紀錄的新版本收下；收件匣裡的改寫提案一律拒收。
   - 抹除：只有你在 Mac 上用管理憑證執行（不在 opencode 的容器裡），步驟由技術驗證 1.3 定下：
     1. 在本機 clone 裡改寫歷史（filter-repo），刪掉 `refs/annex/last-index` 等 `refs/annex/*`，清掉 `.git/annex/objects` 裡被抹除的物件，把被抹除的 key 標成 dead 並 `forget --drop-dead`，最後 `gc --prune=now`。
     2. 依 file id **永久刪除**遠端全部 GITBUNDLE、GITMANIFEST（含 `.bak`）與被抹除的 annex key（`files.delete`，不經過垃圾桶；`force push` 清不掉舊 bundle，丟進垃圾桶也不算刪除）。其他 annex 物件保留，不必重傳（技術驗證 1.3 的部分抹除）。
@@ -137,7 +137,7 @@ Agora 與 Foundry 分成兩個 repo，是依 ADR 0001「要素各自獨立」。
     4. 後置條件：remote 的 bundle 集合等於 manifest 的 active 集合；垃圾桶裡沒有這個 repo 任何一代 uuid 的 GITBUNDLE（每一代 uuid 都要記錄）。
     5. 範圍一併涵蓋隔離資料夾、收件匣、Actions run log、垃圾桶，以及已知的 clone（管理用的 Mac、復原演練）。
     - 防呆：目標一律以 file id 指定，先 dry-run 列出清單；永久刪除前以 API 確認 `trashed=true`（清垃圾桶時）或 parents 不是任何 live repo 資料夾。`rclone --drive-trashed-only` 的遞迴清單會混進 live 資料夾，不能直接拿來刪。
-    - AI 發現機敏內容時，只能提出改寫把它遮蔽掉，並提醒你抹除。
+    - AI 發現機敏內容時，只能提醒你抹除。
 - **為什麼放 GitHub Actions：** 它在雲端，跟 AiContainer 與 Mac 都無關，符合「不寄居 AiContainer」與「互不為前提」；不用維運常駐機器；而且它是免費方案的一部分。
 
 **替代方案：**

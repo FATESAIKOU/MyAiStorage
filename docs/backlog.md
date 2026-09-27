@@ -53,3 +53,4 @@
 - 1.3 誤刪事件的時間點與根本原因補進 `docs/spike/evidence/1.3-erase.md`（推測是 `rclone --drive-trashed-only` 的清單混入 live 資料夾）。
 - 提交流程的釘選值寫回、清掃在 Actions cache 或自架 runner 下的行為（如果之後採用）。
 - Claude Code 的子代理（jsonl 裡的 isSidechain 紀錄）拆成獨立的 Agora Session（期 1 只保存在母 Session 的原始紀錄裡，閱讀版不含）。
+- 改寫（在 Agora 裡修改 Session 內容，例如遮蔽誤貼的秘密）：期 1 拿掉。要做的話，需要處理「來源端下一次同步會把原內容帶回來」的問題（例如遮蔽規則持續套用到之後的每一份快照）。
