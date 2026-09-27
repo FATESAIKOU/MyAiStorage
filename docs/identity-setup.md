@@ -82,7 +82,7 @@ uv run python -m aistorage.identity keygen \
 ```
 
 ### 欄位說明：
-- `allowed_types`：該 profile 獲授權寫入的項目型態清單（限定 2.1 定義之 `session`, `handoff`, `claim`, `reference`, `rewrite`, `artifact`）。
+- `allowed_types`：該 profile 獲授權寫入的項目型態清單（限定 2.1 定義之 `session`, `handoff`, `claim`, `reference`, `rewrite`, `artifact`）。**注意（review-g3d M5）**：在第 7 組（artifact foundry 啟用）之前，`allowed_types` 請勿包含 `artifact`，避免未啟用的 artifact 每一輪均被計入 shaped 項目而增加每輪提交時間。
 - `signing_keys`：
   - `key_id`：金鑰識別碼，格式為 `<profile>-<公鑰前8hex>`，整份登錄檔中全域唯一。
   - `public_key`：Base64 編碼的 32 位元組 Ed25519 公鑰（正式登錄檔禁止使用全 0 範例公鑰）。

@@ -8,16 +8,20 @@ import json
 from pathlib import Path
 import pytest
 
+from aistorage.agora import layout
 from aistorage.agora.store import AgoraStore, FakeRawStorage
 from aistorage.clock import FixedClock, format_rfc3339
 from aistorage.drive.fake import FakeDrive
 from aistorage.drive.model import DriveFile
-from aistorage.identity import Registry, generate_keypair
+from aistorage.errors import MismatchError, ReadError
+from aistorage.identity import Registry, generate_keypair, validate_registry
 from aistorage.inbox import sign_sidecar_bytes
 from aistorage.intake import (
+    LEDGER_CODES,
     Decision,
     DecisionKind,
     InboxItem,
+    InboxScan,
     Ledger,
     count_shaped,
     evaluate,
@@ -66,7 +70,10 @@ def test_scan_and_shaping_smoke():
     registry = Registry(registry_data)
 
     items = scan_inboxes(drive, registry)
-    assert len(items) == 3
+    assert len(items) == 2
+    assert len(items.items) == 2
+    assert len(items.junk) == 1
+    assert items.junk[0].name == "orphan.txt"
 
     items_by_key = {it.item_key: it for it in items}
     it1 = items_by_key[ulid1]
@@ -77,11 +84,6 @@ def test_scan_and_shaping_smoke():
     it2 = items_by_key[ulid2]
     assert is_actionable(it2) is False
     assert it2.sig is None and it2.sidecar is not None and it2.raw is not None
-
-    it_orphan = items_by_key["orphan.txt"]
-    assert is_actionable(it_orphan) is False
-    assert it_orphan.sidecar is None and it_orphan.sig is None and it_orphan.raw is None
-    assert len(it_orphan.extras) == 1
 
     assert count_shaped(items) == 1
 
@@ -259,7 +261,7 @@ def test_evaluate_pipeline_smoke(tmp_path: Path):
     )
     d_defer = evaluate(item_defer, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
     assert d_defer.kind == DecisionKind.DEFER
-    assert d_defer.code == "orphan"
+    assert d_defer.code == "incomplete"
 
     # 2. 缺 sig：超過 24 小時 -> REJECT(orphan)
     ulid_orphan2 = generate_ulid()
@@ -607,4 +609,532 @@ def test_evaluate_edge_cases_smoke(tmp_path: Path):
     d_large = evaluate(it_large, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir, max_raw=100)
     assert d_large.kind == DecisionKind.REJECT
     assert d_large.code == "too_large"
+
+
+def test_evaluate_sig_read_error_not_reject(tmp_path: Path):
+    """H1: .sig 下載時發生 ReadError 不得被轉成 REJECT(bad_signature)，必須向上拋出。"""
+    clock = FixedClock("2026-09-27T10:00:00Z")
+    drive = FakeDrive(clock=clock)
+    inbox_fid = drive.seed_folder("inbox_worker1")
+
+    priv_bytes, pub_bytes = generate_keypair()
+    pub_fingerprint = hashlib.sha256(pub_bytes).hexdigest().lower()[:8]
+    key_id = f"worker-1-{pub_fingerprint}"
+    pub_b64 = base64.b64encode(pub_bytes).decode("ascii")
+
+    registry_data = {
+        "format": "aistorage.registry/v1",
+        "profiles": {
+            "worker-1": {
+                "inbox_folder_ids": [inbox_fid],
+                "allowed_types": ["session"],
+                "signing_keys": [
+                    {
+                        "key_id": key_id,
+                        "public_key": pub_b64,
+                        "status": "active",
+                        "created_at": "2026-09-20T00:00:00Z",
+                        "revoked_at": None,
+                    }
+                ],
+            }
+        },
+    }
+    registry = Registry(registry_data)
+    store = AgoraStore(tmp_path / "agora", raw_storage=FakeRawStorage())
+    ledger = Ledger(store)
+    workdir = tmp_path / "work"
+
+    ulid = generate_ulid()
+    raw_bytes = b"hello raw"
+    sidecar = _build_test_session_sidecar(ulid, raw_bytes)
+    sc_bytes = json.dumps(sidecar).encode("utf-8")
+    sig = sign_sidecar_bytes(sc_bytes, priv_bytes, key_id)
+    sig_bytes = json.dumps(sig).encode("utf-8")
+
+    f_sc = drive.seed_file(inbox_fid, f"{ulid}.sidecar.json", sc_bytes)
+    f_sig = drive.seed_file(inbox_fid, f"{ulid}.sig", sig_bytes)
+    f_raw = drive.seed_file(inbox_fid, f"{ulid}.raw", raw_bytes)
+
+    # 封裝 drive 使其在下載 sig 時注入 ReadError
+    class FaultyDrive:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def download_bytes(self, file_id, max_bytes=None):
+            if file_id == f_sig:
+                raise ReadError("模擬 Google Drive 503 連線中斷")
+            return self._inner.download_bytes(file_id, max_bytes=max_bytes)
+
+    faulty_drive = FaultyDrive(drive)
+    item = InboxItem(
+        item_key=ulid,
+        inbox_folder_id=inbox_fid,
+        sidecar=drive.get(f_sc),
+        sig=drive.get(f_sig),
+        raw=drive.get(f_raw),
+    )
+
+    with pytest.raises(ReadError, match="503"):
+        evaluate(item, drive=faulty_drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+
+    # 確保 _committer/rejections 沒有該 item_key 的拒收紀錄
+    rej_file = tmp_path / "agora" / "_committer" / "rejections" / f"{ulid}.json"
+    assert not rej_file.is_file()
+
+
+def test_ledger_fail_closed_on_corrupted_data(tmp_path: Path):
+    """H2: 清冊損毀或存在非規格檔案時必須中止（拋出 MismatchError）。"""
+    store_dir = tmp_path / "agora"
+    store = AgoraStore(store_dir, raw_storage=FakeRawStorage())
+    ledger_dir = store_dir / "_committer" / "ledger"
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. 損毀的 jsonl 行
+    corrupted_file = ledger_dir / "2026-09.jsonl"
+    corrupted_file.write_text(
+        '{"item_key": "01ABC", "item_id": "ses_1", "decision": "ok", "at": "2026-09-27T08:00:00Z"}\n{bad json line}\n',
+        encoding="utf-8",
+    )
+
+    ledger = Ledger(store)
+    with pytest.raises(MismatchError, match="2026-09.jsonl 第 2 行解析失敗"):
+        ledger.contains("01ABC")
+
+    # 2. 清冊目錄包含非規格檔名
+    corrupted_file.write_text('{"item_key": "01ABC", "item_id": "ses_1", "decision": "ok", "at": "2026-09-27T08:00:00Z"}\n', encoding="utf-8")
+    extra_bad_file = ledger_dir / "bad_file.txt"
+    extra_bad_file.write_text("junk", encoding="utf-8")
+
+    ledger2 = Ledger(store)
+    with pytest.raises(MismatchError, match="非規格檔案: bad_file.txt"):
+        ledger2.contains("01ABC")
+
+
+def test_evaluate_candidate_sidecars_and_sigs(tmp_path: Path):
+    """M1: 同一 part 多個候選檔案（sidecars × sigs），逐一嘗試直到驗章授權成功。"""
+    clock = FixedClock("2026-09-27T10:00:00Z")
+    drive = FakeDrive(clock=clock)
+    inbox_fid = drive.seed_folder("inbox_worker1")
+
+    priv_bytes, pub_bytes = generate_keypair()
+    pub_fingerprint = hashlib.sha256(pub_bytes).hexdigest().lower()[:8]
+    key_id = f"worker-1-{pub_fingerprint}"
+    pub_b64 = base64.b64encode(pub_bytes).decode("ascii")
+
+    registry_data = {
+        "format": "aistorage.registry/v1",
+        "profiles": {
+            "worker-1": {
+                "inbox_folder_ids": [inbox_fid],
+                "allowed_types": ["session"],
+                "signing_keys": [
+                    {
+                        "key_id": key_id,
+                        "public_key": pub_b64,
+                        "status": "active",
+                        "created_at": "2026-09-20T00:00:00Z",
+                        "revoked_at": None,
+                    }
+                ],
+            }
+        },
+    }
+    registry = Registry(registry_data)
+    store = AgoraStore(tmp_path / "agora", raw_storage=FakeRawStorage())
+    ledger = Ledger(store)
+    workdir = tmp_path / "work"
+
+    ulid = generate_ulid()
+    raw_bytes = b"valid raw bytes"
+    sidecar_ok = _build_test_session_sidecar(ulid, raw_bytes)
+    sc_ok_bytes = json.dumps(sidecar_ok).encode("utf-8")
+    sig_ok = sign_sidecar_bytes(sc_ok_bytes, priv_bytes, key_id)
+    sig_ok_bytes = json.dumps(sig_ok).encode("utf-8")
+
+    # 1st 候選：偽造或損毀之 sidecar 與 sig
+    bad_sc_bytes = b'{"format": "invalid"}'
+    bad_sig_bytes = b'{"alg": "none"}'
+    f_sc_bad = drive.seed_file(inbox_fid, f"{ulid}.sidecar.json", bad_sc_bytes)
+    f_sig_bad = drive.seed_file(inbox_fid, f"{ulid}.sig", bad_sig_bytes)
+
+    # 2nd 候選：合法之 sidecar 與 sig
+    f_sc_ok = drive.seed_file(inbox_fid, f"{ulid}.sidecar.json", sc_ok_bytes)
+    f_sig_ok = drive.seed_file(inbox_fid, f"{ulid}.sig", sig_ok_bytes)
+    f_raw = drive.seed_file(inbox_fid, f"{ulid}.raw", raw_bytes)
+
+    scan_res = scan_inboxes(drive, registry)
+    assert len(scan_res.items) == 1
+    item = scan_res.items[0]
+    assert len(item.sidecars) == 2
+    assert len(item.sigs) == 2
+
+    # 評估時應逐一嘗試並成功匹配合法組合
+    d = evaluate(item, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d.kind == DecisionKind.ACCEPT
+    assert d.code == "ok"
+
+
+def test_ledger_codes_and_rejection_lifecycle(tmp_path: Path):
+    """M1, M2: LEDGER_CODES 定義、清冊命中原 REJECT 沿用、rejections 快取免重複下載。"""
+    assert LEDGER_CODES == frozenset({
+        "ok",
+        "already",
+        "stale",
+        "collision",
+        "raw_mismatch",
+        "too_old",
+        "replayed_item_key",
+        "too_large",
+    })
+    assert "orphan" not in LEDGER_CODES
+    assert "bad_signature" not in LEDGER_CODES
+    assert "invalid_format" not in LEDGER_CODES
+    assert "unauthorized" not in LEDGER_CODES
+
+    clock = FixedClock("2026-09-27T10:00:00Z")
+    drive = FakeDrive(clock=clock)
+    inbox_fid = drive.seed_folder("inbox_worker1")
+
+    priv_bytes, pub_bytes = generate_keypair()
+    pub_fingerprint = hashlib.sha256(pub_bytes).hexdigest().lower()[:8]
+    key_id = f"worker-1-{pub_fingerprint}"
+    pub_b64 = base64.b64encode(pub_bytes).decode("ascii")
+
+    registry_data = {
+        "format": "aistorage.registry/v1",
+        "profiles": {
+            "worker-1": {
+                "inbox_folder_ids": [inbox_fid],
+                "allowed_types": ["session"],
+                "signing_keys": [
+                    {
+                        "key_id": key_id,
+                        "public_key": pub_b64,
+                        "status": "active",
+                        "created_at": "2026-09-20T00:00:00Z",
+                        "revoked_at": None,
+                    }
+                ],
+            }
+        },
+    }
+    registry = Registry(registry_data)
+    store = AgoraStore(tmp_path / "agora", raw_storage=FakeRawStorage())
+    ledger = Ledger(store)
+    workdir = tmp_path / "work"
+
+    ulid = generate_ulid()
+    raw_bytes = b"sample raw"
+    raw_sha = hashlib.sha256(raw_bytes).hexdigest().lower()
+    sidecar = _build_test_session_sidecar(ulid, raw_bytes)
+    sc_bytes = json.dumps(sidecar).encode("utf-8")
+    sig = sign_sidecar_bytes(sc_bytes, priv_bytes, key_id)
+
+    f_sc = drive.seed_file(inbox_fid, f"{ulid}.sidecar.json", sc_bytes)
+    f_sig = drive.seed_file(inbox_fid, f"{ulid}.sig", json.dumps(sig).encode("utf-8"))
+    f_raw = drive.seed_file(inbox_fid, f"{ulid}.raw", raw_bytes)
+
+    item = InboxItem(
+        item_key=ulid,
+        inbox_folder_id=inbox_fid,
+        sidecar=drive.get(f_sc),
+        sig=drive.get(f_sig),
+        raw=drive.get(f_raw),
+    )
+
+    # 1. 在清冊中登記原先為 REJECT (stale)
+    rejected_time = "2026-09-27T08:00:00Z"
+    ledger.record(ulid, item_id="opencode:ses_12345", decision="stale", raw_sha256=raw_sha, at=rejected_time)
+
+    # 當同一項目再次 evaluate 時，應沿用 REJECT("stale") 而非 ALREADY
+    d = evaluate(item, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d.kind == DecisionKind.REJECT
+    assert d.code == "stale"
+    assert d.rejected_at == rejected_time
+    assert d.deletable_after is not None
+
+    # 2. 測試 rejections 快取命中（直接短路回傳，不重新下載）
+    ulid2 = generate_ulid()
+    rej_file = tmp_path / "agora" / "_committer" / "rejections" / f"{ulid2}.json"
+    rej_file.parent.mkdir(parents=True, exist_ok=True)
+    rej_file.write_text(json.dumps({"code": "bad_signature", "at": "2026-09-27T07:00:00Z"}), encoding="utf-8")
+
+    item2 = InboxItem(
+        item_key=ulid2,
+        inbox_folder_id=inbox_fid,
+        sidecar=None,
+        sig=None,
+        raw=None,
+    )
+    d2 = evaluate(item2, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d2.kind == DecisionKind.REJECT
+    assert d2.code == "bad_signature"
+    assert d2.rejected_at == "2026-09-27T07:00:00Z"
+    assert d2.deletable_after == datetime(2026, 9, 28, 7, 0, 0, tzinfo=timezone.utc)
+
+
+def test_evaluate_timestamps_with_subseconds(tmp_path: Path):
+    """M3: 時間一律轉為 datetime 比較，避免同一秒內不同字串長度精度顛倒順序。"""
+    dummy_item = InboxItem(item_key="k", inbox_folder_id="f", sidecar=None, sig=None, raw=None)
+
+    # 測試 sort_accepted_decisions 在同一秒內含毫秒與不含毫秒之排序
+    d_early = Decision(
+        kind=DecisionKind.ACCEPT,
+        item=dummy_item,
+        code="ok",
+        record_metadata={"type": "session"},
+        sidecar={"session": {"snapshot_at": "2026-09-27T08:00:00Z"}},
+    )
+    d_late = Decision(
+        kind=DecisionKind.ACCEPT,
+        item=dummy_item,
+        code="ok",
+        record_metadata={"type": "session"},
+        sidecar={"session": {"snapshot_at": "2026-09-27T08:00:00.123Z"}},
+    )
+
+    # 即使以字串排序 ".123Z" 會排在 "Z" 前面，但轉成 datetime 後 08:00:00Z 必須在 08:00:00.123Z 前面
+    sorted_res = sort_accepted_decisions([d_late, d_early])
+    assert sorted_res == [d_early, d_late]
+
+
+def test_evaluate_reference_link_monotonicity(tmp_path: Path):
+    """M7: reference 單調性依 links/reference/<from>/<to>.json 索引比對。"""
+    clock = FixedClock("2026-09-27T10:00:00Z")
+    drive = FakeDrive(clock=clock)
+    inbox_fid = drive.seed_folder("inbox_worker1")
+
+    priv_bytes, pub_bytes = generate_keypair()
+    pub_fingerprint = hashlib.sha256(pub_bytes).hexdigest().lower()[:8]
+    key_id = f"worker-1-{pub_fingerprint}"
+    pub_b64 = base64.b64encode(pub_bytes).decode("ascii")
+
+    registry_data = {
+        "format": "aistorage.registry/v1",
+        "profiles": {
+            "worker-1": {
+                "inbox_folder_ids": [inbox_fid],
+                "allowed_types": ["reference"],
+                "signing_keys": [
+                    {
+                        "key_id": key_id,
+                        "public_key": pub_b64,
+                        "status": "active",
+                        "created_at": "2026-09-20T00:00:00Z",
+                        "revoked_at": None,
+                    }
+                ],
+            }
+        },
+    }
+    registry = Registry(registry_data)
+    store = AgoraStore(tmp_path / "agora", raw_storage=FakeRawStorage())
+    ledger = Ledger(store)
+    workdir = tmp_path / "work"
+
+    # 建立既有 reference link 索引
+    from_sess = "opencode:ses_from"
+    to_sess = "opencode:ses_to"
+    link_rel = layout.reference_link_path(from_sess, to_sess)
+    existing_link_content = {
+        "reference_id": f"reference:{generate_ulid()}",
+        "read_snapshot_at": "2026-09-27T08:30:00Z",
+    }
+    store.put_json(link_rel, existing_link_content)
+
+    # 建立一筆較舊（例如 08:00:00Z）但具有全新 ULID 的 reference sidecar
+    ulid = generate_ulid()
+    ref_sidecar = {
+        "format": "aistorage.inbox/v1",
+        "item_key": ulid,
+        "profile": "worker-1",
+        "metadata": {
+            "id": f"reference:{ulid}",
+            "type": "reference",
+            "created_at": "2026-09-27T08:00:00Z",
+            "updated_at": "2026-09-27T08:00:00Z",
+            "case_id": None,
+            "provenance": None,
+        },
+        "raw": None,
+        "body": {
+            "from_session_id": from_sess,
+            "to_session_id": to_sess,
+            "read_snapshot_at": "2026-09-27T08:00:00Z",  # 舊於 08:30:00Z
+        },
+    }
+    sc_bytes = json.dumps(ref_sidecar).encode("utf-8")
+    sig = sign_sidecar_bytes(sc_bytes, priv_bytes, key_id)
+
+    f_sc = drive.seed_file(inbox_fid, f"{ulid}.sidecar.json", sc_bytes)
+    f_sig = drive.seed_file(inbox_fid, f"{ulid}.sig", json.dumps(sig).encode("utf-8"))
+
+    item = InboxItem(
+        item_key=ulid,
+        inbox_folder_id=inbox_fid,
+        sidecar=drive.get(f_sc),
+        sig=drive.get(f_sig),
+        raw=None,
+    )
+    d = evaluate(item, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d.kind == DecisionKind.REJECT
+    assert d.code == "stale"
+
+
+def test_registry_rejects_duplicate_inbox_folder_ids():
+    """L: validate_registry 拒絕多個 profile 共用同一個 inbox_folder_id。"""
+    registry_data = {
+        "format": "aistorage.registry/v1",
+        "profiles": {
+            "worker-1": {
+                "inbox_folder_ids": ["shared_folder_id"],
+                "allowed_types": ["session"],
+                "signing_keys": [],
+            },
+            "worker-2": {
+                "inbox_folder_ids": ["shared_folder_id"],
+                "allowed_types": ["session"],
+                "signing_keys": [],
+            },
+        },
+    }
+    errors = validate_registry(registry_data)
+    assert any("重複的 inbox_folder_id" in e.message for e in errors)
+
+
+def test_spoofing_worker_key_into_other_inbox(tmp_path: Path):
+    """spec identity 冒充情境：worker 的金鑰簽的項目放進 mac 的收件匣。"""
+    clock = FixedClock("2026-09-27T10:00:00Z")
+    drive = FakeDrive(clock=clock)
+    inbox_mac = drive.seed_folder("inbox_mac")
+    inbox_worker = drive.seed_folder("inbox_worker")
+
+    priv_worker, pub_worker = generate_keypair()
+    fp_worker = hashlib.sha256(pub_worker).hexdigest().lower()[:8]
+    kid_worker = f"worker-1-{fp_worker}"
+
+    priv_mac, pub_mac = generate_keypair()
+    fp_mac = hashlib.sha256(pub_mac).hexdigest().lower()[:8]
+    kid_mac = f"mac-{fp_mac}"
+
+    registry_data = {
+        "format": "aistorage.registry/v1",
+        "profiles": {
+            "mac": {
+                "inbox_folder_ids": [inbox_mac],
+                "allowed_types": ["session"],
+                "signing_keys": [
+                    {
+                        "key_id": kid_mac,
+                        "public_key": base64.b64encode(pub_mac).decode("ascii"),
+                        "status": "active",
+                        "created_at": "2026-09-20T00:00:00Z",
+                        "revoked_at": None,
+                    }
+                ],
+            },
+            "worker-1": {
+                "inbox_folder_ids": [inbox_worker],
+                "allowed_types": ["session"],
+                "signing_keys": [
+                    {
+                        "key_id": kid_worker,
+                        "public_key": base64.b64encode(pub_worker).decode("ascii"),
+                        "status": "active",
+                        "created_at": "2026-09-20T00:00:00Z",
+                        "revoked_at": None,
+                    }
+                ],
+            },
+        },
+    }
+    registry = Registry(registry_data)
+    store = AgoraStore(tmp_path / "agora", raw_storage=FakeRawStorage())
+    ledger = Ledger(store)
+    workdir = tmp_path / "work"
+
+    ulid = generate_ulid()
+    raw_bytes = b"worker data"
+    # worker 簽名
+    sidecar = _build_test_session_sidecar(ulid, raw_bytes, profile="worker-1")
+    sc_bytes = json.dumps(sidecar).encode("utf-8")
+    sig = sign_sidecar_bytes(sc_bytes, priv_worker, kid_worker)
+
+    # 放入 mac 的收件匣
+    f_sc = drive.seed_file(inbox_mac, f"{ulid}.sidecar.json", sc_bytes)
+    f_sig = drive.seed_file(inbox_mac, f"{ulid}.sig", json.dumps(sig).encode("utf-8"))
+    f_raw = drive.seed_file(inbox_mac, f"{ulid}.raw", raw_bytes)
+
+    item = InboxItem(
+        item_key=ulid,
+        inbox_folder_id=inbox_mac,
+        sidecar=drive.get(f_sc),
+        sig=drive.get(f_sig),
+        raw=drive.get(f_raw),
+    )
+    d = evaluate(item, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d.kind == DecisionKind.REJECT
+    # mac 的收件匣中只認可 mac profile 之公鑰；worker 金鑰無法通過驗章
+    assert d.code in ("bad_signature", "unauthorized")
+
+
+def test_revoked_key_signed_item(tmp_path: Path):
+    """spec identity 撤銷情境：Registry 撤銷之後舊金鑰簽的項目必須拒收。"""
+    clock = FixedClock("2026-09-27T10:00:00Z")
+    drive = FakeDrive(clock=clock)
+    inbox_fid = drive.seed_folder("inbox_worker1")
+
+    priv_bytes, pub_bytes = generate_keypair()
+    pub_fingerprint = hashlib.sha256(pub_bytes).hexdigest().lower()[:8]
+    key_id = f"worker-1-{pub_fingerprint}"
+    pub_b64 = base64.b64encode(pub_bytes).decode("ascii")
+
+    registry_data = {
+        "format": "aistorage.registry/v1",
+        "profiles": {
+            "worker-1": {
+                "inbox_folder_ids": [inbox_fid],
+                "allowed_types": ["session"],
+                "signing_keys": [
+                    {
+                        "key_id": key_id,
+                        "public_key": pub_b64,
+                        "status": "revoked",
+                        "created_at": "2026-09-20T00:00:00Z",
+                        "revoked_at": "2026-09-26T00:00:00Z",
+                    }
+                ],
+            }
+        },
+    }
+    registry = Registry(registry_data)
+    store = AgoraStore(tmp_path / "agora", raw_storage=FakeRawStorage())
+    ledger = Ledger(store)
+    workdir = tmp_path / "work"
+
+    ulid = generate_ulid()
+    raw_bytes = b"sample raw"
+    sidecar = _build_test_session_sidecar(ulid, raw_bytes)
+    sc_bytes = json.dumps(sidecar).encode("utf-8")
+    sig = sign_sidecar_bytes(sc_bytes, priv_bytes, key_id)
+
+    f_sc = drive.seed_file(inbox_fid, f"{ulid}.sidecar.json", sc_bytes)
+    f_sig = drive.seed_file(inbox_fid, f"{ulid}.sig", json.dumps(sig).encode("utf-8"))
+    f_raw = drive.seed_file(inbox_fid, f"{ulid}.raw", raw_bytes)
+
+    item = InboxItem(
+        item_key=ulid,
+        inbox_folder_id=inbox_fid,
+        sidecar=drive.get(f_sc),
+        sig=drive.get(f_sig),
+        raw=drive.get(f_raw),
+    )
+    d = evaluate(item, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert d.kind == DecisionKind.REJECT
+    assert d.code in ("bad_signature", "unauthorized")
+
 

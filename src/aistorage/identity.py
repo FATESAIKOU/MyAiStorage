@@ -113,10 +113,26 @@ def validate_registry(obj: dict, allow_example: bool = False) -> list[FieldError
     profiles = obj.get("profiles")
     if isinstance(profiles, dict):
         seen_key_ids: set[str] = set()
+        seen_inbox_folders: dict[str, str] = {}
 
         for prof_name, prof_data in profiles.items():
             if not isinstance(prof_data, dict):
                 continue
+
+            # inbox_folder_ids 重複檢查（review-g3d L）
+            inbox_folder_ids = prof_data.get("inbox_folder_ids")
+            if isinstance(inbox_folder_ids, list):
+                for f_idx, fid in enumerate(inbox_folder_ids):
+                    if isinstance(fid, str) and fid:
+                        if fid in seen_inbox_folders:
+                            errors.append(
+                                FieldError(
+                                    field=f"profiles.{prof_name}.inbox_folder_ids[{f_idx}]",
+                                    message=f"重複的 inbox_folder_id: '{fid}'（已在 profile '{seen_inbox_folders[fid]}' 出現）",
+                                )
+                            )
+                        else:
+                            seen_inbox_folders[fid] = prof_name
 
             # allowed_types 檢查
             allowed_types = prof_data.get("allowed_types")

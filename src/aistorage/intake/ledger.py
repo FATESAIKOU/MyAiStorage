@@ -3,6 +3,8 @@
 依據規格：
 - docs/impl/group3-modules.md 第 4.3 節
 - design D2、schemas/README.md（清冊格式、留存期 3 個月、防重放、REJECT 亦記錄）
+- review-g3d H2（清冊損毀嚴格中止拋出 MismatchError，非規格檔名亦拒絕）
+- review-g3d L（at 嚴格格式驗證、公開 append_line 寫入）
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ import re
 from typing import Any
 
 from aistorage.agora.store import AgoraStore
+from aistorage.clock import parse_rfc3339
+from aistorage.errors import MismatchError
 
 DEFAULT_RETENTION_MONTHS = 3
 DEFAULT_RETENTION_DAYS = 90
@@ -89,7 +93,8 @@ class Ledger:
     """處理過的 item_key 清冊管理類別。
 
     存放位置：真本 repo 的 _committer/ledger/<YYYY-MM>.jsonl。
-    包含已 ACCEPT 與 REJECT 之項目，避免重複評估與重放。
+    包含已 ACCEPT 與通過驗章之 REJECT 項目，避免重複評估與重放。
+    目前載入所有月份之清冊紀錄；更早的由 is_item_key_too_old 兜底（超過 retention_days 直接拒收）。
     """
 
     def __init__(
@@ -111,20 +116,32 @@ class Ledger:
         if not self.ledger_dir.is_dir():
             return
 
-        for p in sorted(self.ledger_dir.glob("*.jsonl")):
-            m = _LEDGER_FILE_PATTERN.match(p.name)
-            if not m:
+        for p in sorted(self.ledger_dir.iterdir()):
+            if p.name.startswith("."):
                 continue
+            if not p.is_file() or not _LEDGER_FILE_PATTERN.match(p.name):
+                raise MismatchError(
+                    f"清冊目錄包含非規格檔案: {p.name}（必須符合 YYYY-MM.jsonl 格式）"
+                )
+
             try:
                 with open(p, encoding="utf-8") as f:
-                    for line in f:
+                    for line_no, line in enumerate(f, start=1):
                         line = line.strip()
-                        if line:
+                        if not line:
+                            continue
+                        try:
                             data = json.loads(line)
                             entry = LedgerEntry.from_dict(data)
+                        except Exception as e:
+                            raise MismatchError(
+                                f"清冊檔案 {p.name} 第 {line_no} 行解析失敗: {e}"
+                            ) from e
+                        # 若有重複 item_key，保留第一筆以維護不可變性
+                        if entry.item_key not in self._entries:
                             self._entries[entry.item_key] = entry
-            except Exception:
-                pass
+            except (UnicodeDecodeError, OSError) as e:
+                raise MismatchError(f"清冊檔案 {p.name} 讀取失敗: {e}") from e
 
     def contains(self, item_key: str) -> LedgerEntry | None:
         """查詢 item_key 是否曾被處理過。若存在回傳其 LedgerEntry，否則回傳 None。"""
@@ -140,8 +157,21 @@ class Ledger:
         raw_sha256: str | None,
         at: str,
     ) -> None:
-        """將處理結果記錄至清冊。"""
+        """將處理結果記錄至清冊。
+
+        H2 & L: at 必須符合 RFC 3339 格式，否則拋出 ValueError。
+        L: 透過 store.append_line 公開方法寫入。
+        """
         self._ensure_loaded()
+        try:
+            parse_rfc3339(at)
+        except Exception as e:
+            raise ValueError(f"無效之 at 時間格式: {repr(at)}（必須符合 RFC 3339）: {e}") from e
+
+        ym = at[:7]
+        if not re.match(r"^\d{4}-\d{2}$", ym):
+            raise ValueError(f"無效之月份前綴: {repr(ym)}")
+
         entry = LedgerEntry(
             item_key=item_key,
             item_id=item_id,
@@ -151,15 +181,6 @@ class Ledger:
         )
         self._entries[item_key] = entry
 
-        ym = at[:7] if len(at) >= 7 and "-" in at[:7] else datetime.now(timezone.utc).strftime("%Y-%m")
-        self.ledger_dir.mkdir(parents=True, exist_ok=True)
-        target_file = self.ledger_dir / f"{ym}.jsonl"
-
-        line = json.dumps(entry.to_dict(), ensure_ascii=False) + "\n"
-        with open(target_file, "a", encoding="utf-8") as f:
-            f.write(line)
-
-        # 登記至 AgoraStore 變更路徑以供提交流程納入 git add
         rel_path = f"_committer/ledger/{ym}.jsonl"
-        if hasattr(self.store, "_changed_paths") and rel_path not in self.store._changed_paths:
-            self.store._changed_paths.append(rel_path)
+        line = json.dumps(entry.to_dict(), ensure_ascii=False)
+        self.store.append_line(rel_path, line)

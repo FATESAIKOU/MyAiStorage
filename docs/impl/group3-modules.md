@@ -440,8 +440,10 @@ class Ledger:
 ### 4.4 分派順序
 
 同一輪 ACCEPT 的項目依下面的順序套用（design D2「先收原始紀錄、再收交接單與認領」）：
-`session`（依 snapshot_at 由舊到新）→ `rewrite` → `handoff` → `claim` → `reference`。
+`session`（依 snapshot_at 由舊到新，以 datetime 比較）→ `rewrite` → `handoff` → `claim` → `reference`。
 套用失敗（例如交接單的接續點不存在）轉成 REJECT，**不影響同一輪其他項目**；但任何 I/O 錯誤都中止整輪。
+
+**注意（review-g3d M6）**：`evaluate` 僅與真本已提交之狀態比較。同一輪內若包含同一 Session 的多份快照或同一對的參考，均會各自 ACCEPT；`apply_*` 必須以本輪已套用的狀態重新檢查單調性（草案 6.2 再次防護），這是 apply 的責任。
 
 ---
 

@@ -458,6 +458,16 @@ class AgoraStore:
         target.write_text(content, encoding="utf-8")
         self._record_changed(relpath)
 
+    def append_line(self, relpath: str, line: str) -> None:
+        """追加單行字串至指定檔案（若檔案不存在則建立），並登記至變更清單。"""
+        target = self.worktree / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not line.endswith("\n"):
+            line = line + "\n"
+        with open(target, "a", encoding="utf-8") as f:
+            f.write(line)
+        self._record_changed(relpath)
+
     def changed_paths(self) -> list[str]:
         """取得此次所有新增或修改的相對路徑清單。"""
         return list(self._changed_paths)
