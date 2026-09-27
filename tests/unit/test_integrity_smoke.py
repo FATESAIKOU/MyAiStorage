@@ -1,0 +1,879 @@
+"""Smoke and unit tests for integrity module (pin and settle)."""
+
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import pytest
+
+from aistorage.annex.manifest import parse_bundle_name
+from aistorage.clock import FixedClock
+from aistorage.drive.fake import FakeDrive
+from aistorage.drive.model import DriveFile
+from aistorage.errors import AbortRun, MismatchError, NotFound, ReadError, WriteError
+from aistorage.integrity import (
+    Disposition,
+    GitPinStore,
+    MemoryPinStore,
+    PinPending,
+    PinState,
+    PrefixLevel,
+    PushVerification,
+    RepoListing,
+    SettleOutcome,
+    SweepDecision,
+    apply_sweep,
+    check_parents,
+    collect_removed_bundles,
+    gc_removed,
+    plan_sweep,
+    precheck,
+    purge_quarantine,
+    resolve_content_checks,
+    settle,
+    verify_after_push,
+    verify_clone,
+)
+
+
+class DummyAnnexGit:
+    """測試用 AnnexGit，僅實作 verify_clone 與 verify_after_push 所需之 ls_remote。"""
+
+    def __init__(self, refs: dict[str, str]):
+        self._refs = refs
+
+    def ls_remote(self, remote: str = "origin") -> dict[str, str]:
+        return dict(self._refs)
+
+
+
+def _create_test_bundle(repo_dir: Path, out_dir: Path, ref_spec: str, repo_uuid: str) -> Path:
+    b_raw = out_dir / f"temp_{ref_spec.replace('..', '_').replace('/', '_')}.bundle"
+    ns_ref = f"refs/namespaces/git-remote-annex/{repo_uuid}/refs/heads/main"
+    sha = subprocess.check_output(["git", "-C", str(repo_dir), "rev-parse", ref_spec], text=True).strip()
+    subprocess.run(["git", "-C", str(repo_dir), "update-ref", ns_ref, sha], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "bundle", "create", str(b_raw), ns_ref],
+        check=True,
+        capture_output=True,
+    )
+    b_bytes = b_raw.read_bytes()
+    b_size = len(b_bytes)
+    b_sha = hashlib.sha256(b_bytes).hexdigest().lower()
+    bundle_name = f"GITBUNDLE-s{b_size}--{repo_uuid}-{b_sha}"
+    final_path = out_dir / bundle_name
+    b_raw.rename(final_path)
+    return final_path
+
+
+def test_memory_pin_store_smoke():
+    state1 = PinState(
+        repo="agora",
+        repo_uuid="01234567-89ab-cdef-0123-456789abcdef",
+        refs={"refs/heads/main": "a" * 40},
+        manifest_sha256="m" * 64,
+        prev_manifest_sha256=None,
+        active_bundles=("b1",),
+        removed_bundles=frozenset(),
+        annex_keys=frozenset({"k1"}),
+        promoted_at="2026-09-27T08:00:00Z",
+        run_id="run-1",
+    )
+    store = MemoryPinStore(initial_state=state1)
+
+    s, p = store.load("agora")
+    assert s == state1
+    assert p is None
+
+    # 未註冊的 repo load 拋出 ReadError
+    with pytest.raises(ReadError):
+        store.load("unknown_repo")
+
+    # 寫入 pending
+    pending1 = PinPending(
+        repo="agora",
+        base_manifest_sha256="m" * 64,
+        refs={"refs/heads/main": "b" * 40},
+        annex_keys=frozenset({"k1", "k2"}),
+        written_at="2026-09-27T08:05:00Z",
+        run_id="run-2",
+    )
+    store.write_pending(pending1)
+    s2, p2 = store.load("agora")
+    assert s2 == state1
+    assert p2 == pending1
+
+    # drop_pending
+    store.drop_pending("agora")
+    s3, p3 = store.load("agora")
+    assert p3 is None
+
+    # promote
+    state2 = PinState(
+        repo="agora",
+        repo_uuid="01234567-89ab-cdef-0123-456789abcdef",
+        refs={"refs/heads/main": "b" * 40},
+        manifest_sha256="n" * 64,
+        prev_manifest_sha256="m" * 64,
+        active_bundles=("b1", "b2"),
+        removed_bundles=frozenset(),
+        annex_keys=frozenset({"k1", "k2"}),
+        promoted_at="2026-09-27T08:10:00Z",
+        run_id="run-2",
+    )
+    store.write_pending(pending1)
+    store.promote(state2)
+    s4, p4 = store.load("agora")
+    assert s4 == state2
+    assert p4 is None
+
+
+def test_git_pin_store_smoke(tmp_path: Path):
+    """測試 GitPinStore 於本機 bare repo 之讀寫、轉正與丟棄待定流程。"""
+    # 1. 建立裸遠端倉庫 (remote bare repo)
+    remote_bare = tmp_path / "pin_remote.git"
+    remote_bare.mkdir()
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(remote_bare)], check=True, capture_output=True)
+
+    # 2. 建立初始提交 (包含空的 README)
+    init_work = tmp_path / "init_work"
+    subprocess.run(["git", "clone", str(remote_bare), str(init_work)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(init_work), "config", "user.name", "Test Committer"], check=True)
+    subprocess.run(["git", "-C", str(init_work), "config", "user.email", "test@test.com"], check=True)
+    (init_work / "README.md").write_text("# Pin Repo")
+    subprocess.run(["git", "-C", str(init_work), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(init_work), "commit", "-m", "init"], check=True)
+    subprocess.run(["git", "-C", str(init_work), "push", "origin", "main"], check=True)
+
+    # 3. 測試 GitPinStore
+    workdir = tmp_path / "git_pin_work"
+    pin_store = GitPinStore(repo_url=str(remote_bare), workdir=workdir)
+
+    # 尚未有 state 時 load 拋出 ReadError
+    with pytest.raises(ReadError):
+        pin_store.load("agora")
+
+    # 寫入初始 state (promote)
+    state1 = PinState(
+        repo="agora",
+        repo_uuid="01234567-89ab-cdef-0123-456789abcdef",
+        refs={"refs/heads/main": "1" * 40},
+        manifest_sha256="a" * 64,
+        prev_manifest_sha256=None,
+        active_bundles=("b1",),
+        removed_bundles=frozenset({"old_b"}),
+        annex_keys=frozenset({"k1", "k2"}),
+        promoted_at="2026-09-27T08:00:00Z",
+        run_id="run-1",
+    )
+    pin_store.promote(state1)
+
+    # 驗證 load
+    loaded_state, loaded_pending = pin_store.load("agora")
+    assert loaded_state == state1
+    assert loaded_pending is None
+
+    # 寫入 pending
+    pending1 = PinPending(
+        repo="agora",
+        base_manifest_sha256="a" * 64,
+        refs={"refs/heads/main": "2" * 40},
+        annex_keys=frozenset({"k1", "k2", "k3"}),
+        written_at="2026-09-27T08:05:00Z",
+        run_id="run-2",
+    )
+    pin_store.write_pending(pending1)
+    s2, p2 = pin_store.load("agora")
+    assert s2 == state1
+    assert p2 == pending1
+
+    # 另一個獨立 clone 也能讀取到最新狀態
+    other_workdir = tmp_path / "other_pin_work"
+    other_store = GitPinStore(repo_url=str(remote_bare), workdir=other_workdir)
+    os2, op2 = other_store.load("agora")
+    assert os2 == state1
+    assert op2 == pending1
+
+    # drop pending
+    other_store.drop_pending("agora")
+    os3, op3 = other_store.load("agora")
+    assert op3 is None
+
+
+def test_settle_no_pending():
+    """當無待定釘選值時，settle 直接回傳 NO_PENDING 與原 state。"""
+    state = PinState(
+        repo="agora",
+        repo_uuid="uuid-01",
+        refs={"refs/heads/main": "a" * 40},
+        manifest_sha256="m" * 64,
+        prev_manifest_sha256=None,
+        active_bundles=("b1",),
+        removed_bundles=frozenset(),
+        annex_keys=frozenset(),
+        promoted_at="2026-09-27T08:00:00Z",
+        run_id="run-1",
+    )
+    listing = RepoListing(prefix_folder_id="f0", files=(), subfolders=())
+    drive = FakeDrive()
+    clock = FixedClock()
+    outcome, final_state = settle(state, None, listing, drive, workdir=Path("/tmp"), clock=clock)
+    assert outcome == SettleOutcome.NO_PENDING
+    assert final_state == state
+
+
+def test_settle_promoted_and_dropped(tmp_path: Path):
+    """測試 settle 成功判定 PROMOTED（遠端等於待定）與 DROPPED（遠端等於正式）。"""
+    # 建立一個包含 commit 的本機 git repo 以產出真 bundle
+    repo_dir = tmp_path / "src_repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repo_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.email", "test@test.com"], check=True)
+    (repo_dir / "file.txt").write_text("v1")
+    subprocess.run(["git", "-C", str(repo_dir), "add", "file.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo_dir), "commit", "-m", "v1"], check=True)
+    v1_sha = subprocess.check_output(["git", "-C", str(repo_dir), "rev-parse", "HEAD"], text=True).strip()
+
+    uuid1 = "01234567-89ab-cdef-0123-456789abcdef"
+    bundle1 = _create_test_bundle(repo_dir, tmp_path, "refs/heads/main", uuid1)
+    b1_bytes = bundle1.read_bytes()
+    b1_name = bundle1.name
+    b1_info = parse_bundle_name(b1_name)
+    assert b1_info is not None
+
+    # v2 commit
+    (repo_dir / "file.txt").write_text("v2")
+    subprocess.run(["git", "-C", str(repo_dir), "add", "file.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo_dir), "commit", "-m", "v2"], check=True)
+    v2_sha = subprocess.check_output(["git", "-C", str(repo_dir), "rev-parse", "HEAD"], text=True).strip()
+    bundle2 = _create_test_bundle(repo_dir, tmp_path, "refs/heads/main", uuid1)
+    b2_bytes = bundle2.read_bytes()
+    b2_name = bundle2.name
+    b2_info = parse_bundle_name(b2_name)
+    assert b2_info is not None
+
+    # 1. 測試 PROMOTED：遠端 manifest 包含 bundle2 且 refs == v2
+    manifest_v2_bytes = f"{b2_name}\n".encode("utf-8")
+    m_v2_sha = hashlib.sha256(manifest_v2_bytes).hexdigest().lower()
+
+    drive = FakeDrive()
+    prefix_id = drive.seed_folder("repo_folder")
+    m_id = drive.seed_file(prefix_id, f"GITMANIFEST--{uuid1}", manifest_v2_bytes)
+    b2_id = drive.seed_file(prefix_id, b2_name, b2_bytes)
+
+    state = PinState(
+        repo="agora",
+        repo_uuid=uuid1,
+        refs={"refs/heads/main": v1_sha},
+        manifest_sha256="m_v1_sha_dummy",
+        prev_manifest_sha256=None,
+        active_bundles=(b1_name,),
+        removed_bundles=frozenset(),
+        annex_keys=frozenset({"k1"}),
+        promoted_at="2026-09-27T08:00:00Z",
+        run_id="run-1",
+    )
+    pending = PinPending(
+        repo="agora",
+        base_manifest_sha256="m_v1_sha_dummy",
+        refs={"refs/heads/main": v2_sha},
+        annex_keys=frozenset({"k1", "k2"}),
+        written_at="2026-09-27T08:05:00Z",
+        run_id="run-2",
+    )
+
+    listing_files = tuple(drive.list_children(prefix_id))
+    listing = RepoListing(prefix_folder_id=prefix_id, files=listing_files, subfolders=())
+    clock = FixedClock()
+
+    outcome, new_state = settle(
+        state,
+        pending,
+        listing,
+        drive,
+        workdir=tmp_path / "settle_workdir",
+        clock=clock,
+    )
+    assert outcome == SettleOutcome.PROMOTED
+    assert new_state.refs == {"refs/heads/main": v2_sha}
+    assert new_state.manifest_sha256 == m_v2_sha
+    assert new_state.prev_manifest_sha256 == "m_v1_sha_dummy"
+    assert new_state.active_bundles == (b2_name,)
+    assert new_state.annex_keys == frozenset({"k1", "k2"})
+
+    # 2. 測試 DROPPED：遠端 manifest 實際上依然為 v1
+    manifest_v1_bytes = f"{b1_name}\n".encode("utf-8")
+    m_v1_sha = hashlib.sha256(manifest_v1_bytes).hexdigest().lower()
+
+    drive2 = FakeDrive()
+    prefix2_id = drive2.seed_folder("repo2")
+    drive2.seed_file(prefix2_id, f"GITMANIFEST--{uuid1}", manifest_v1_bytes)
+    drive2.seed_file(prefix2_id, b1_name, b1_bytes)
+
+    state_v1 = PinState(
+        repo="agora",
+        repo_uuid=uuid1,
+        refs={"refs/heads/main": v1_sha},
+        manifest_sha256=m_v1_sha,
+        prev_manifest_sha256=None,
+        active_bundles=(b1_name,),
+        removed_bundles=frozenset(),
+        annex_keys=frozenset({"k1"}),
+        promoted_at="2026-09-27T08:00:00Z",
+        run_id="run-1",
+    )
+    listing2_files = tuple(drive2.list_children(prefix2_id))
+    listing2 = RepoListing(prefix_folder_id=prefix2_id, files=listing2_files, subfolders=())
+
+    outcome2, final2 = settle(
+        state_v1,
+        pending,  # pending 指向 v2，但遠端只有 v1
+        listing2,
+        drive2,
+        workdir=tmp_path / "settle_workdir2",
+        clock=clock,
+    )
+    assert outcome2 == SettleOutcome.DROPPED
+    assert final2 == state_v1
+
+
+def test_settle_bak_recovery(tmp_path: Path):
+    """測試主 manifest 缺失但 .bak 內容與重放 refs 均相符時之 BAK_RECOVERY。"""
+    repo_dir = tmp_path / "src_repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repo_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.email", "test@test.com"], check=True)
+    (repo_dir / "file.txt").write_text("bak_content")
+    subprocess.run(["git", "-C", str(repo_dir), "add", "file.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo_dir), "commit", "-m", "bak commit"], check=True)
+    sha = subprocess.check_output(["git", "-C", str(repo_dir), "rev-parse", "HEAD"], text=True).strip()
+
+    uuid1 = "01234567-89ab-cdef-0123-456789abcdef"
+    bundle = _create_test_bundle(repo_dir, tmp_path, "refs/heads/main", uuid1)
+    b_bytes = bundle.read_bytes()
+    b_name = bundle.name
+
+    manifest_bytes = f"{b_name}\n".encode("utf-8")
+    m_sha = hashlib.sha256(manifest_bytes).hexdigest().lower()
+
+    drive = FakeDrive()
+    prefix_id = drive.seed_folder("repo_bak")
+    # 僅有 .bak，無主 manifest
+    drive.seed_file(prefix_id, f"GITMANIFEST--{uuid1}.bak", manifest_bytes)
+    drive.seed_file(prefix_id, b_name, b_bytes)
+
+    state = PinState(
+        repo="agora",
+        repo_uuid=uuid1,
+        refs={"refs/heads/main": sha},
+        manifest_sha256=m_sha,
+        prev_manifest_sha256=None,
+        active_bundles=(b_name,),
+        removed_bundles=frozenset(),
+        annex_keys=frozenset(),
+        promoted_at="2026-09-27T08:00:00Z",
+        run_id="run-1",
+    )
+    pending = PinPending(
+        repo="agora",
+        base_manifest_sha256=m_sha,
+        refs={"refs/heads/main": "different_sha" * 4},
+        annex_keys=frozenset(),
+        written_at="2026-09-27T08:05:00Z",
+        run_id="run-2",
+    )
+
+    listing_files = tuple(drive.list_children(prefix_id))
+    listing = RepoListing(prefix_folder_id=prefix_id, files=listing_files, subfolders=())
+    clock = FixedClock()
+
+    outcome, final_state = settle(
+        state,
+        pending,
+        listing,
+        drive,
+        workdir=tmp_path / "settle_bak_workdir",
+        clock=clock,
+    )
+    assert outcome == SettleOutcome.BAK_RECOVERY
+    assert final_state == state
+
+
+def test_check_parents_smoke():
+    """測試 check_parents 逐層同名資料夾偵測與預期 ID 檢查。"""
+    drive = FakeDrive()
+    root_id = drive.seed_folder("root")
+    p1_id = drive.seed_folder("sub1", parent=root_id)
+    p2_id = drive.seed_folder("sub2", parent=p1_id)
+
+    # 1. 正常情況：各層級均有預期 ID，且無重複資料夾
+    levels = [
+        PrefixLevel(parent_id=root_id, name="sub1", expected_id=p1_id),
+        PrefixLevel(parent_id=p1_id, name="sub2", expected_id=p2_id),
+    ]
+    quarantine = check_parents(levels, drive)
+    assert quarantine == []
+
+    # 2. 發現同名重複資料夾：另一個 sub1 在 root 下
+    p1_dup_id = drive.seed_folder("sub1", parent=root_id)
+    quarantine = check_parents(levels, drive)
+    assert len(quarantine) == 1
+    assert quarantine[0].id == p1_dup_id
+
+    # 3. 預期 ID 不在清單中 -> 拋出 MismatchError
+    bad_levels = [
+        PrefixLevel(parent_id=root_id, name="sub1", expected_id="non_existent_folder_id"),
+    ]
+    with pytest.raises(MismatchError):
+        check_parents(bad_levels, drive)
+
+
+def test_plan_sweep_smoke():
+    """測試 plan_sweep 純函式對各類檔案與資料夾之判定決策。"""
+    uuid = "01234567-89ab-cdef-0123-456789abcdef"
+    m_sha = "1" * 64
+    prev_m_sha = "2" * 64
+    wrong_sha = "3" * 64
+    b_act_sha = "a" * 64
+    b_rem_sha = "b" * 64
+    b_unk_sha = "c" * 64
+    annex1_sha = "d" * 64
+    annex_unk_sha = "e" * 64
+
+    b_act_name = f"GITBUNDLE-s100--{uuid}-{b_act_sha}"
+    b_rem_name = f"GITBUNDLE-s200--{uuid}-{b_rem_sha}"
+    b_unk_name = f"GITBUNDLE-s300--{uuid}-{b_unk_sha}"
+    annex1_name = f"SHA256E-s50--{annex1_sha}"
+    annex_unk_name = f"SHA256E-s60--{annex_unk_sha}"
+
+    state = PinState(
+        repo="agora",
+        repo_uuid=uuid,
+        refs={"refs/heads/main": "1" * 40},
+        manifest_sha256=m_sha,
+        prev_manifest_sha256=prev_m_sha,
+        active_bundles=(b_act_name,),
+        removed_bundles=frozenset({b_rem_name}),
+        annex_keys=frozenset({annex1_name}),
+        promoted_at="2026-09-27T08:00:00Z",
+        run_id="run-1",
+    )
+
+    drive = FakeDrive()
+    p_id = drive.seed_folder("repo_root")
+    sub_id = drive.seed_folder("nested_folder", parent=p_id)
+    subfolder_file = drive.get(sub_id)
+
+    # 1. 正確主 manifest
+    m1_id = drive.seed_file(p_id, f"GITMANIFEST--{uuid}", b"active_bundle\n", sha256=m_sha)
+    # 2. 重複主 manifest
+    m2_id = drive.seed_file(p_id, f"GITMANIFEST--{uuid}", b"active_bundle\n", sha256=m_sha)
+    # 3. 雜湊不符之主 manifest
+    m3_id = drive.seed_file(p_id, f"GITMANIFEST--{uuid}", b"wrong\n", sha256=wrong_sha)
+    # 4. 正確 .bak（符合 prev_manifest_sha256）
+    bak1_id = drive.seed_file(p_id, f"GITMANIFEST--{uuid}.bak", b"prev\n", sha256=prev_m_sha)
+    # 5. 雜湊不符之 .bak
+    bak2_id = drive.seed_file(p_id, f"GITMANIFEST--{uuid}.bak", b"wrong\n", sha256=wrong_sha)
+    # 6. active bundle
+    b1_id = drive.seed_file(
+        p_id,
+        b_act_name,
+        b"x" * 100,
+        sha256=b_act_sha,
+    )
+    # 7. active bundle 重複
+    b1_dup_id = drive.seed_file(
+        p_id,
+        b_act_name,
+        b"x" * 100,
+        sha256=b_act_sha,
+    )
+    # 8. removed bundle
+    b_rem_id = drive.seed_file(
+        p_id,
+        b_rem_name,
+        b"r" * 200,
+        sha256=b_rem_sha,
+    )
+    # 9. unknown bundle
+    b_unk_id = drive.seed_file(
+        p_id,
+        b_unk_name,
+        b"u" * 300,
+        sha256=b_unk_sha,
+    )
+    # 10. 正確 annex 物件
+    annex1_id = drive.seed_file(
+        p_id,
+        annex1_name,
+        b"k" * 50,
+        sha256=annex1_sha,
+    )
+    # 11. 重複 annex 物件
+    annex1_dup_id = drive.seed_file(
+        p_id,
+        annex1_name,
+        b"k" * 50,
+        sha256=annex1_sha,
+    )
+    # 12. 未釘選之 annex 物件
+    annex_unk_id = drive.seed_file(
+        p_id,
+        annex_unk_name,
+        b"z" * 60,
+        sha256=annex_unk_sha,
+    )
+    # 13. 未知檔案
+    junk_id = drive.seed_file(p_id, "random.txt", b"junk", sha256="f" * 64)
+    # 14. 缺少 sha256 之檔案
+    no_sha_id = drive.seed_file(p_id, annex1_name, b"k" * 50, sha256=None)
+
+    files = [
+        drive.get(m1_id),
+        drive.get(m2_id),
+        drive.get(m3_id),
+        drive.get(bak1_id),
+        drive.get(bak2_id),
+        drive.get(b1_id),
+        drive.get(b1_dup_id),
+        drive.get(b_rem_id),
+        drive.get(b_unk_id),
+        drive.get(annex1_id),
+        drive.get(annex1_dup_id),
+        drive.get(annex_unk_id),
+        drive.get(junk_id),
+        drive.get(no_sha_id),
+    ]
+    listing = RepoListing(prefix_folder_id=p_id, files=tuple(files), subfolders=(subfolder_file,))
+
+    decisions = plan_sweep(listing, state, repo_uuid=uuid)
+    dec_by_id = {d.file.id: d for d in decisions}
+
+    assert dec_by_id[sub_id].disposition == Disposition.QUARANTINE
+    assert dec_by_id[m1_id].disposition == Disposition.KEEP
+    assert dec_by_id[m2_id].disposition == Disposition.QUARANTINE
+    assert dec_by_id[m3_id].disposition == Disposition.QUARANTINE
+    assert dec_by_id[bak1_id].disposition == Disposition.KEEP
+    assert dec_by_id[bak2_id].disposition == Disposition.QUARANTINE
+    assert dec_by_id[b1_id].disposition == Disposition.KEEP
+    assert dec_by_id[b1_dup_id].disposition == Disposition.QUARANTINE
+    assert dec_by_id[b_rem_id].disposition == Disposition.GC
+    assert dec_by_id[b_unk_id].disposition == Disposition.QUARANTINE
+    assert dec_by_id[annex1_id].disposition == Disposition.KEEP
+    assert dec_by_id[annex1_dup_id].disposition == Disposition.QUARANTINE
+    assert dec_by_id[annex_unk_id].disposition == Disposition.QUARANTINE
+    assert dec_by_id[junk_id].disposition == Disposition.QUARANTINE
+    assert dec_by_id[no_sha_id].disposition == Disposition.NEED_CONTENT_CHECK
+
+
+def test_resolve_content_checks_smoke():
+    """測試 resolve_content_checks 對缺失雜湊之檔案下載計算並更新判定。"""
+    uuid = "01234567-89ab-cdef-0123-456789abcdef"
+    annex_content = b"my_annex_content"
+    annex_sha = hashlib.sha256(annex_content).hexdigest().lower()
+    annex_name = f"SHA256E-s{len(annex_content)}--{annex_sha}"
+
+    state = PinState(
+        repo="agora",
+        repo_uuid=uuid,
+        refs={"refs/heads/main": "1" * 40},
+        manifest_sha256="m" * 64,
+        prev_manifest_sha256=None,
+        active_bundles=(),
+        removed_bundles=frozenset(),
+        annex_keys=frozenset({annex_name}),
+        promoted_at="2026-09-27T08:00:00Z",
+        run_id="run-1",
+    )
+
+    drive = FakeDrive()
+    p_id = drive.seed_folder("repo_root")
+    fid = drive.seed_file(p_id, annex_name, annex_content, sha256=None)
+    f = drive.get(fid)
+
+    decision = SweepDecision(
+        file=f,
+        disposition=Disposition.NEED_CONTENT_CHECK,
+        reason="缺少 sha256",
+    )
+    cache: dict[str, str] = {}
+    resolved = resolve_content_checks([decision], drive, cache, state, repo_uuid=uuid)
+    assert len(resolved) == 1
+    assert resolved[0].disposition == Disposition.KEEP
+    assert cache[fid] == annex_sha
+
+
+def test_apply_sweep_smoke():
+    """測試 apply_sweep 隔離搬移與 dry_run 行為。"""
+    drive = FakeDrive()
+    p_id = drive.seed_folder("repo_root")
+    q_id = drive.seed_folder("quarantine")
+
+    keep_fid = drive.seed_file(p_id, "keep.txt", b"keep")
+    quar_fid = drive.seed_file(p_id, "quar.txt", b"quar")
+
+    decisions = [
+        SweepDecision(file=drive.get(keep_fid), disposition=Disposition.KEEP, reason="keep"),
+        SweepDecision(file=drive.get(quar_fid), disposition=Disposition.QUARANTINE, reason="quarantine"),
+    ]
+
+    # dry_run: 回傳 1，但不實際移動
+    count = apply_sweep(decisions, drive, prefix_folder_id=p_id, quarantine_folder_id=q_id, dry_run=True)
+    assert count == 1
+    assert p_id in drive.get(quar_fid).parents
+
+    # 實際移動
+    count2 = apply_sweep(decisions, drive, prefix_folder_id=p_id, quarantine_folder_id=q_id, dry_run=False)
+    assert count2 == 1
+    assert q_id in drive.get(quar_fid).parents
+    assert p_id not in drive.get(quar_fid).parents
+
+    # 移動失敗拋出 AbortRun
+    drive.inject("move", error=WriteError)
+    with pytest.raises(AbortRun) as exc_info:
+        apply_sweep(decisions, drive, prefix_folder_id=p_id, quarantine_folder_id=q_id, dry_run=False)
+    assert exc_info.value.step == "sweep"
+    assert exc_info.value.code == "move_failed"
+
+
+def test_verify_clone_and_precheck_smoke():
+    """測試 clone 成果核對與 push 前預檢。"""
+    uuid = "01234567-89ab-cdef-0123-456789abcdef"
+    state = PinState(
+        repo="agora",
+        repo_uuid=uuid,
+        refs={"refs/heads/main": "1" * 40},
+        manifest_sha256="m" * 64,
+        prev_manifest_sha256=None,
+        active_bundles=(),
+        removed_bundles=frozenset(),
+        annex_keys=frozenset(),
+        promoted_at="2026-09-27T08:00:00Z",
+        run_id="run-1",
+    )
+
+    git_ok = DummyAnnexGit({"refs/heads/main": "1" * 40})
+    git_bad = DummyAnnexGit({"refs/heads/main": "2" * 40})
+
+    # 1. verify_clone: refs 相符
+    verify_clone(git_ok, state)
+
+    # 2. refs 不符拋出 MismatchError
+    with pytest.raises(MismatchError):
+        verify_clone(git_bad, state)
+
+    # 3. 搭配 drive 驗證
+    drive = FakeDrive()
+    p_id = drive.seed_folder("repo_root")
+    m_name = f"GITMANIFEST--{uuid}"
+    drive.seed_file(p_id, m_name, b"dummy", sha256="m" * 64)
+
+    # 正常
+    verify_clone(git_ok, state, drive=drive, prefix_folder_id=p_id)
+    precheck(drive, p_id, m_name, state)
+
+    # 4. 遠端主 manifest 數量異常（新增第二個同名）
+    drive.seed_file(p_id, m_name, b"dummy2", sha256="m" * 64)
+    with pytest.raises(MismatchError):
+        verify_clone(git_ok, state, drive=drive, prefix_folder_id=p_id)
+    with pytest.raises(MismatchError):
+        precheck(drive, p_id, m_name, state)
+
+
+def test_verify_after_push_smoke(tmp_path: Path):
+    """測試 push 後遠端驗證 5 條規則與異常防護。"""
+    repo_dir = tmp_path / "src_repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repo_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.email", "test@test.com"], check=True)
+
+    # commit 1
+    (repo_dir / "file.txt").write_text("v1")
+    subprocess.run(["git", "-C", str(repo_dir), "add", "file.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo_dir), "commit", "-m", "v1"], check=True)
+    v1_sha = subprocess.check_output(["git", "-C", str(repo_dir), "rev-parse", "HEAD"], text=True).strip()
+
+    uuid = "01234567-89ab-cdef-0123-456789abcdef"
+    b1_path = _create_test_bundle(repo_dir, tmp_path, "refs/heads/main", uuid)
+    b1_bytes = b1_path.read_bytes()
+    b1_name = b1_path.name
+
+    # commit 2
+    (repo_dir / "file.txt").write_text("v2")
+    subprocess.run(["git", "-C", str(repo_dir), "add", "file.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo_dir), "commit", "-m", "v2"], check=True)
+    v2_sha = subprocess.check_output(["git", "-C", str(repo_dir), "rev-parse", "HEAD"], text=True).strip()
+
+    b2_path = _create_test_bundle(repo_dir, tmp_path, "refs/heads/main", uuid)
+    b2_bytes = b2_path.read_bytes()
+    b2_name = b2_path.name
+
+    # 設定環境
+    drive = FakeDrive()
+    p_id = drive.seed_folder("repo_root")
+    b1_id = drive.seed_file(p_id, b1_name, b1_bytes, created_time="2026-09-27T08:00:00Z")
+    m_old_id = drive.seed_file(p_id, f"GITMANIFEST--{uuid}", f"{b1_name}\n".encode("utf-8"))
+
+    listing_before = RepoListing(
+        prefix_folder_id=p_id,
+        files=(drive.get(b1_id), drive.get(m_old_id)),
+        subfolders=(),
+    )
+
+    state = PinState(
+        repo="agora",
+        repo_uuid=uuid,
+        refs={"refs/heads/main": v1_sha},
+        manifest_sha256="m1" * 32,
+        prev_manifest_sha256=None,
+        active_bundles=(b1_name,),
+        removed_bundles=frozenset(),
+        annex_keys=frozenset(),
+        promoted_at="2026-09-27T08:00:00Z",
+        run_id="run-1",
+    )
+
+    # 模擬 push 發生：上傳 b2，並更新 manifest
+    b2_id = drive.seed_file(p_id, b2_name, b2_bytes, created_time="2026-09-27T08:10:00Z")
+    manifest_v2_bytes = f"{b1_name}\n{b2_name}\n".encode("utf-8")
+    drive.update_content(m_old_id, manifest_v2_bytes)
+
+    local_refs = {"refs/heads/main": v2_sha}
+    git = DummyAnnexGit(local_refs)
+    push_started_at = "2026-09-27T08:05:00Z"
+
+    # 1. 成功驗證
+    res = verify_after_push(
+        git,
+        drive,
+        listing_before,
+        state,
+        local_refs,
+        push_started_at,
+        workdir=tmp_path / "verify_work",
+    )
+    assert res.active == (b1_name, b2_name)
+    assert res.removed == frozenset()
+    assert res.new_manifest_sha256 == hashlib.sha256(manifest_v2_bytes).hexdigest().lower()
+
+    # 2. 失敗情況：ls_remote 不符
+    with pytest.raises(MismatchError):
+        verify_after_push(
+            DummyAnnexGit({"refs/heads/main": "other" * 4}),
+            drive,
+            listing_before,
+            state,
+            local_refs,
+            push_started_at,
+            workdir=tmp_path / "verify_work",
+        )
+
+    # 3. 失敗情況：新增之 bundle created_time 早於 push 開始時間
+    late_push_time = "2026-09-27T08:15:00Z"
+    with pytest.raises(MismatchError):
+        verify_after_push(
+            git,
+            drive,
+            listing_before,
+            state,
+            local_refs,
+            late_push_time,
+            workdir=tmp_path / "verify_work",
+        )
+
+    # 4. 失敗情況：新增之 bundle 已存在於 listing_before
+    listing_before_with_b2 = RepoListing(
+        prefix_folder_id=p_id,
+        files=(drive.get(b1_id), drive.get(b2_id)),
+        subfolders=(),
+    )
+    with pytest.raises(MismatchError):
+        verify_after_push(
+            git,
+            drive,
+            listing_before_with_b2,
+            state,
+            local_refs,
+            push_started_at,
+            workdir=tmp_path / "verify_work",
+        )
+
+
+def test_gc_and_purge_quarantine_smoke():
+    """測試 collect_removed_bundles、gc_removed 與 purge_quarantine。"""
+    uuid = "01234567-89ab-cdef-0123-456789abcdef"
+    state = PinState(
+        repo="agora",
+        repo_uuid=uuid,
+        refs={"refs/heads/main": "1" * 40},
+        manifest_sha256="m" * 64,
+        prev_manifest_sha256=None,
+        active_bundles=("b1",),
+        removed_bundles=frozenset({"rem1", "rem2"}),
+        annex_keys=frozenset(),
+        promoted_at="2026-09-27T08:00:00Z",
+        run_id="run-1",
+    )
+
+    drive = FakeDrive()
+    p_id = drive.seed_folder("repo_root")
+    q_id = drive.seed_folder("quarantine")
+
+    f_active = drive.seed_file(p_id, "b1", b"active")
+    f_rem1 = drive.seed_file(p_id, "rem1", b"rem1")
+    f_rem2 = drive.seed_file(p_id, "rem2", b"rem2")
+
+    listing = RepoListing(
+        prefix_folder_id=p_id,
+        files=(drive.get(f_active), drive.get(f_rem1), drive.get(f_rem2)),
+        subfolders=(),
+    )
+
+    # 1. collect_removed_bundles
+    collected = collect_removed_bundles(listing, state)
+    assert {f.name for f in collected} == {"rem1", "rem2"}
+
+    # 2. gc_removed dry_run
+    gc_count = gc_removed(collected, drive, prefix_folder_id=p_id, state=state, dry_run=True)
+    assert gc_count == 2
+    assert drive.get(f_rem1) is not None
+
+    # 3. max_delete 上限為 1
+    gc_count1 = gc_removed(collected, drive, prefix_folder_id=p_id, state=state, max_delete=1, dry_run=False)
+    assert gc_count1 == 1
+    # rem1 被刪除，rem2 仍在
+    with pytest.raises(NotFound):
+        drive.get(f_rem1)
+    assert drive.get(f_rem2) is not None
+
+    # 4. gc_removed 防呆：檔案名稱不在 state.removed_bundles
+    active_df = drive.get(f_active)
+    with pytest.raises(MismatchError):
+        gc_removed([active_df], drive, prefix_folder_id=p_id, state=state)
+
+    # 5. gc_removed 防呆：parents 不包含 prefix_folder_id
+    orphan_id = drive.seed_file(q_id, "rem2", b"rem2")
+    with pytest.raises(MismatchError):
+        gc_removed([drive.get(orphan_id)], drive, prefix_folder_id=p_id, state=state)
+
+    # 6. purge_quarantine
+    # 建立 10 天前檔案與 1 天前檔案
+    old_fid = drive.seed_file(q_id, "old.txt", b"old", created_time="2026-09-17T00:00:00Z")
+    new_fid = drive.seed_file(q_id, "new.txt", b"new", created_time="2026-09-26T00:00:00Z")
+
+    now = "2026-09-27T12:00:00Z"
+    # dry run
+    p_dry = purge_quarantine(drive, q_id, older_than_days=7, now=now, dry_run=True)
+    assert p_dry == 1
+    assert drive.get(old_fid) is not None
+
+    # 實際 purge
+    p_real = purge_quarantine(drive, q_id, older_than_days=7, now=now, dry_run=False)
+    assert p_real == 1
+    with pytest.raises(NotFound):
+        drive.get(old_fid)
+    assert drive.get(new_fid) is not None
+
