@@ -18,6 +18,14 @@ schema 以 `src/aistorage/search/schema.sql` 為準（TS 照抄該檔）。
   `read_snapshot_at`）；`links_to` 索引供反向查詢。
 - `handoffs`：`body_json` 是寫入者提供的交接內容（原樣）；
   `claimed_by_*` 是提交流程寫入的狀態；未認領時三者皆為 NULL。
+  `author_session_id` 是寫這張交接單的 Session id（publisher 填入）：
+  真本裡的來源依序為 `body.author_session_id`、metadata 的
+  `author_session_id`（`metadata-record` 允許擴充欄位）。兩者都沒有就是
+  **作者不明 → NULL**，提交流程不猜測、也不以 `target_session_id` 頂替。
+  讀取端列待認領交接單時只看作者為**主** Session 的（`parent_id` 為空）；
+  作者為 NULL、或在 `sessions` 表查無此 id，都視為作者不明而排除
+  （fail-closed：寧可少列，不可把子 Session 寫的交接單當成主 Session 寫的）。
+  舊世代 index 若無此欄，讀取端必須報錯而非默默不篩。
 - `rejections`：只有 `item_key`、`code`、`at`、`item_id`，
   `authenticated` 標是否通過驗章；**沒有內容**。
 - `message_fts`／`title_fts`：FTS5（`tokenize='trigram'`），只放**最新快照**
@@ -66,7 +74,6 @@ schema 以 `src/aistorage/search/schema.sql` 為準（TS 照抄該檔）。
   `(updated_at, session_id)`）。`limit` 內筆數不足時 `next_cursor` 為空。
 
 ## 6. 新鮮度規則（4.4 `reader/freshness` 實作，查詢語意的一部分）
-
 - 讀取可指定新鮮度要求（最多落後多久）。每筆結果都附快照時間；
   Session＝`snapshot_at`，交接單與 Link＝該世代的 `published_at`。
 - 沒有指定要求時不產生警告，但一定附上快照時間。
@@ -74,3 +81,10 @@ schema 以 `src/aistorage/search/schema.sql` 為準（TS 照抄該檔）。
   （datetime 比較）→ 視為符合，不論落後多久。
 - 否則以「讀者時鐘 − 快照時間」是否在要求內判定；未達時照樣回傳，
   附警告與實際快照時間。讀取不觸發任何同步或提交流程。
+
+## 7. 讀取介面 find 的輸出形狀（4.3 reader）
+
+- `find_sessions` 回傳每筆各帶自己的 Freshness：
+  `{hit: {session: {...}, matches: [{message_id, index, snippet}]}, freshness: {...}}`，
+  排序與第 5 節相同；清單整體的 freshness 以最舊的一筆為準。
+  TS 實作 reader 時照此形狀輸出，`snippet` 內容與 `matched_by` 不列入比對。
