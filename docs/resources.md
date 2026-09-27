@@ -13,6 +13,7 @@ AiStorage 用到的實體資源都記在這裡：Drive 資料夾、OAuth client�
 | `committer` | OAuth client（電腦版，正式版發布、未驗證） | project 1；`~/.config/aistorage/client-committer.json`、`rclone-committer.conf`（remote `gdrive`，scope `drive`，尚未設 `root_folder_id`） | 提交流程 | 提交流程 | 第 8 天複查 refresh token：2026-10-05 前後 |
 | `worker` | OAuth client（同上） | project 2；`~/.config/aistorage/client-worker.json`、`rclone-worker.conf`（scope `drive.file`） | 所有 worker 共用的收件匣寫入 | 所有 worker | 同上 |
 | `spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com` | service account | project 1；金鑰仍在 `~/.config/aistorage-spike/sa-reader.json` | 所有 worker 共用的讀取身分（正式的讀取視圖資料夾建立後再分享） | 所有 worker | — |
+| `aistorage-test` | Drive 資料夾 | 專用帳號的我的雲端硬碟，由新的 committer 建立，id `1_MfiN1QT344hrp2884QbZkB8jJN7zYpa`（`~/.config/aistorage/ids.env`）；`rclone-committer-test.conf` 以它為根 | 第 3 組以後的整合測試（worker client 看不到它） | 提交流程（測試） | 測試用 |
 | `FATESAIKOU/MyAiStorage-pin` | GitHub private repo | github.com | 釘選值（ADR 0008）；不放 workflow | 提交流程 | 長期 |
 | `committer`（deploy key） | SSH deploy key（read-write） | `MyAiStorage-pin`；私鑰 `~/.config/aistorage/pin-deploy-key`，並放在 `FATESAIKOU/MyAiStorage` 的 Actions secret `PIN_DEPLOY_KEY` | 提交流程寫入釘選值 | 提交流程 | 外洩時輪替 |
 
