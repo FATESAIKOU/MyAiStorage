@@ -136,7 +136,7 @@ def test_interrupted_between_push_and_promote_is_recovered(
     report1 = run(cfg, _deps(pins), dry_run=False)
     assert report1.ok is True, f"第 1 輪中止於 {report1.aborted_at}:{report1.code}"
     assert report1.counts["accepted"] == 1
-    sha_after_round1 = main_sha_of(annex_url, it_settings["rclone_conf"])
+    sha_after_round1 = main_sha_of(annex, it_settings["rclone_conf"])
 
     # ── 第 2 輪：提交第二個 Session，但在 promote 前被中斷 ──────────
     _put_session(real_drive, inbox_id, signer, _raw_for(S2), S2, "2026-09-27T10:10:00Z")
@@ -149,7 +149,7 @@ def test_interrupted_between_push_and_promote_is_recovered(
     # 中斷後的狀態：真本已被推上去，釘選值有 pending，收件匣還留著項目
     state_mid, pending_mid = pins.load("agora")
     assert pending_mid is not None, "中斷後應該留下 pending"
-    sha_pushed = main_sha_of(annex_url, it_settings["rclone_conf"])
+    sha_pushed = main_sha_of(annex, it_settings["rclone_conf"])
     assert sha_pushed != sha_after_round1, "中斷前應該已經 push 出新 commit"
     assert state_mid is not None
     assert real_drive.list_children(inbox_id), "中斷後收件匣不該被清空"
@@ -164,15 +164,15 @@ def test_interrupted_between_push_and_promote_is_recovered(
     # 而且只能往後接：歷史不可改寫。
     new_main = state_after.refs["refs/heads/main"]
     changed = files_changed_between(
-        annex_url, sha_pushed, new_main, tmp_path, it_settings["rclone_conf"]
+        annex_url, sha_pushed, new_main, tmp_path, it_settings["rclone_conf"], annex.workdir
     )
     assert changed, "恢復輪應該至少寫下清冊"
     assert all(name.startswith("_committer/") for name in changed), changed
     assert is_ancestor(
-        annex_url, sha_pushed, new_main, tmp_path, it_settings["rclone_conf"]
+        annex_url, sha_pushed, new_main, tmp_path, it_settings["rclone_conf"], annex.workdir
     ), "恢復不得改寫歷史"
     assert (
-        main_sha_of(annex_url, it_settings["rclone_conf"]) == new_main
+        main_sha_of(annex, it_settings["rclone_conf"]) == new_main
     ), "釘選值與 Drive 上的真本不一致"
     assert real_drive.list_children(inbox_id) == [], "恢復後收件匣應該清空"
     assert report3.counts["accepted"] == 0, "恢復輪不該再接受一次（已經在真本裡）"

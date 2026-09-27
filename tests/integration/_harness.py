@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 from typing import Any, Sequence
@@ -120,9 +119,9 @@ def build_annex_repo(
 
     # rcloneprefix 只能是資料夾「名稱」。傳 file id 進去的話 rclone 會在測試根資料夾
     # 底下另外建一個以 id 命名的資料夾（真本會寫到錯的地方，測試看起來卻像沒建立）。
-    if re.match(r"^[A-Za-z0-9_-]{25,}$", prefix):
+    if not prefix.startswith("it-"):
         raise ValueError(
-            f"prefix 必須是資料夾名稱而不是 Drive file id: {prefix!r}（id 請用 sandbox.create() 的回傳值之外的 name）"
+            f"prefix 必須是以 'it-' 開頭的資料夾名稱（不是 Drive file id）: {prefix!r}"
         )
 
     _run(["git", "init", "-q", "-b", "main", "."], repo, env)
@@ -195,14 +194,21 @@ def annex_git_factory(annex: AnnexSetup):
     return factory
 
 
-def main_sha_of(url: str, rclone_conf: Path) -> str:
-    """用 ls-remote 讀真本在 Drive 上的 refs/heads/main（不 clone，很便宜）。"""
-    out = _run(["git", "ls-remote", url, "refs/heads/main"], None, git_env(rclone_conf))  # noqa: E501
+def main_sha_of(annex: AnnexSetup, rclone_conf: Path) -> str:
+    """讀真本在 Drive 上的 refs/heads/main（不 clone，很便宜）。
+
+    刻意用 seed repo（暫存目錄裡、annex remote 已經配好）當 cwd：
+    `git ls-remote annex::…` 必須在一個 git repo 裡跑，git-annex 的 remote helper
+    才會運作；而整合測試裡任何 git 指令都不該以專案 repo 當 cwd。
+    """
+    out = _run(
+        ["git", "ls-remote", "drive", "refs/heads/main"], annex.workdir, git_env(rclone_conf)
+    )
     return out.split()[0]
 
 
 def files_changed_between(
-    url: str, old_sha: str, new_sha: str, tmp_path: Path, rclone_conf: Path
+    url: str, old_sha: str, new_sha: str, tmp_path: Path, rclone_conf: Path, seed_repo: Path
 ) -> list[str]:
     """真的 clone 一份，回報兩個 commit 之間被改動的檔案（確認某一輪沒動到 Session 內容）。"""
     import subprocess
@@ -211,7 +217,7 @@ def files_changed_between(
     dest = tmp_path / f"inspect-{new_sha[:8]}"
     subprocess.run(
         ["git", "clone", "-b", "main", url, str(dest)],
-        check=True, capture_output=True, text=True, env=env,
+        check=True, capture_output=True, text=True, env=env, cwd=str(seed_repo),
     )
     out = subprocess.run(
         ["git", "diff", "--name-only", old_sha, new_sha],
@@ -220,7 +226,9 @@ def files_changed_between(
     return [line.strip() for line in out.stdout.splitlines() if line.strip()]
 
 
-def is_ancestor(url: str, older_sha: str, newer_sha: str, tmp_path: Path, rclone_conf: Path) -> bool:
+def is_ancestor(
+    url: str, older_sha: str, newer_sha: str, tmp_path: Path, rclone_conf: Path, seed_repo: Path
+) -> bool:
     """確認 older 是 newer 的祖先（恢復不得改寫歷史，只能往前接）。"""
     import subprocess
 
@@ -228,7 +236,7 @@ def is_ancestor(url: str, older_sha: str, newer_sha: str, tmp_path: Path, rclone
     dest = tmp_path / f"anc-{newer_sha[:8]}"
     subprocess.run(
         ["git", "clone", "-b", "main", url, str(dest)],
-        check=True, capture_output=True, text=True, env=env,
+        check=True, capture_output=True, text=True, env=env, cwd=str(seed_repo),
     )
     proc = subprocess.run(
         ["git", "merge-base", "--is-ancestor", older_sha, newer_sha],
@@ -409,6 +417,8 @@ def _raw_for(session_id: str) -> bytes:
 def _reading_for(raw: bytes, session_id: str) -> dict:
     """真的跑一次轉換器，讓接續點的 snapshot_sha256 與訊息 id 來自真實輸出。"""
     import tempfile
+
+    from aistorage.converters import get_converter
 
     with tempfile.TemporaryDirectory() as td:
         p = Path(td) / "raw"

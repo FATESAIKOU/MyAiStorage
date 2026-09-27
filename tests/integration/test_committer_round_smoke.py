@@ -36,6 +36,7 @@ from ._harness import (
     files_changed_between,
     make_signer,
     put_inbox_item,
+    write_registry,
 )
 
 pytestmark = [pytest.mark.integration]
@@ -150,7 +151,7 @@ def test_full_round_with_handoff_and_claim(it_settings, real_drive, sandbox, tmp
     # （refs 仍可能變：`git annex copy` 會寫 location log，H1 之後這是預期行為。）
     changed = files_changed_between(
         annex.url, promoted.refs["refs/heads/main"], promoted2.refs["refs/heads/main"],
-        tmp_path, it_settings["rclone_conf"],
+        tmp_path, it_settings["rclone_conf"], annex.workdir,
     )
     assert changed, "第二輪應該只有清冊被寫入"
     assert all(name.startswith("_committer/") for name in changed), changed
