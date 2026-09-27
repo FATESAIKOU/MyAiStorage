@@ -21,13 +21,13 @@ session（依 snapshot_at 由舊到新）→ rewrite → handoff → claim → r
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
-from aistorage.agora import layout
+from aistorage.agora import layout, rejections
 from aistorage.agora.store import AgoraStore, SessionRecord
 from aistorage.clock import Clock, format_rfc3339, parse_rfc3339
 from aistorage.converters import get_converter
@@ -79,21 +79,41 @@ def _new_paths(store: AgoraStore, before: list[str]) -> list[str]:
 
 def _write_rejection(
     store: AgoraStore,
-    item_key: str,
+    dec: Decision,
     code: str,
     at: str,
     item_id: str | None,
 ) -> str:
     """寫入拒收紀錄（第 4 組發佈到讀取視圖的來源）。回傳相對路徑。
 
+    M3：形狀必須與 evaluate 的 `reject_decision` 完全一致（`inbox_folder_id`、
+    `candidate_ids`、`entries`），否則 evaluate 的拒收快取認不得這一筆，
+    同一個項目會每一輪重新評估、重新拒收。`at` 只在第一次寫入。
+
     item_key 格式錯誤時直接 raise（scan 已驗證 ULID，走到這裡代表程式錯誤）。
     """
-    rel = layout.rejection_path(item_key)
-    obj: dict[str, Any] = {"code": code, "at": at}
-    if item_id:
-        obj["item_id"] = item_id
-    store.put_json(rel, obj)
-    return rel
+    item = getattr(dec, "item", None)
+    sidecars = list(getattr(item, "sidecars", []) or [])
+    sigs = list(getattr(item, "sigs", []) or [])
+    rejections.record_rejection(
+        store,
+        item_key=_item_key(dec),
+        code=code,
+        at=at,
+        item_id=item_id,
+        inbox_folder_id=str(getattr(item, "inbox_folder_id", "") or ""),
+        candidates=rejections.candidate_ids(sidecars, sigs),
+    )
+    return layout.rejection_path(_item_key(dec))
+
+
+def _item_files(dec: Decision) -> list[Any]:
+    """該項目的所有候選檔案（sidecar／sig／raw／extra），提供 created_time 給刪除期限。"""
+    item = getattr(dec, "item", None)
+    out: list[Any] = []
+    for name in ("sidecars", "sigs", "raws", "extras"):
+        out.extend(list(getattr(item, name, []) or []))
+    return out
 
 
 def _fail(
@@ -105,14 +125,16 @@ def _fail(
 ) -> ApplyResult:
     """套用失敗轉 REJECT：寫拒收紀錄，回傳 ok=False。"""
     item_id = _record(dec).get("id")
-    _write_rejection(store, _item_key(dec), code, at,
+    _write_rejection(store, dec, code, at,
                      item_id if isinstance(item_id, str) else None)
     return ApplyResult(
         ok=False,
         code=code,
         paths=_new_paths(store, before),
         rejected_at=at,
-        deletable_after=parse_rfc3339(at) + timedelta(hours=24),
+        # M3／docs 4.4：刪除期限以項目檔案最早的 created_time 為基準，
+        # 不是「當下 + 24h」，否則躺了幾天的壞項目永遠多等一天。
+        deletable_after=rejections.deletable_after_for(_item_files(dec), at),
     )
 
 

@@ -142,6 +142,9 @@ def _check_test_kill(step_name: str) -> None:
         os._exit(42)
 
 
+#: 收件匣裡的 junk（名稱不符合格式的檔案或資料夾）超過這個時間就刪除（D2：24 小時）。
+JUNK_RETENTION = timedelta(hours=24)
+
 #: traceback 除錯檔的輸出目錄（review-g3g L：只寫檔，不進 Actions log）。
 DEBUG_DIR_ENV = "AISTORAGE_DEBUG_DIR"
 DEFAULT_DEBUG_DIR = "debug"
@@ -335,6 +338,14 @@ def init_pin_cli(
         # Clone 並與 ls-remote 比對，同時讀取 annex keys 集合 (H5)
         git_dir = workdir / "repo"
         git = deps.git_factory(git_dir)
+        for op in ("ls_remote", "annex_keys_in", "local_refs"):
+            if not hasattr(git, op):
+                # H5：拿不到就 fail-closed。寫入空集合等同於宣告「遠端沒有任何
+                # annex 物件」，promote 之後第一輪 sweep 就會把它們全部隔離。
+                raise AbortRun(
+                    "init-pin", "unsupported_git",
+                    f"AnnexGit 不支援 {op}()，無法確認釘選值內容；中止",
+                )
         remote_refs = git.ls_remote("origin")
 
         for b in ("main", "git-annex"):
@@ -347,11 +358,8 @@ def init_pin_cli(
                         f"重放之 {full_ref} ({replay_refs[full_ref]}) 與 ls-remote ({remote_refs.get(full_ref)}) 不符",
                     )
 
-        annex_keys = (
-            git.annex_keys_in(cfg.repo_uuid)
-            if hasattr(git, "annex_keys_in")
-            else frozenset()
-        )
+        # annex key 集合一定要讀到；讀不到就是中止，不是空集合
+        annex_keys = git.annex_keys_in(cfg.repo_uuid)
 
     now_iso = format_rfc3339(deps.clock.now(), include_fraction=True)
     state = PinState(
@@ -385,7 +393,8 @@ def init_pin_cli(
 def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport:
     """執行 13 步提交流程主體。
 
-    各步驟：
+    各步驟（review-g3g H1：copy 必須在算 refs／annex keys 之前，所以它獨佔一步，
+    後面的步驟順延；實際執行順序見下方註解）：
     1 guard: ref 與 sha 驗證（Actions 環境）
     2 intake.scan: 掃描收件匣，空則提前結束
     3 integrity.settle: 結算待定釘選值
@@ -393,12 +402,13 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
     5 annex.git.clone + integrity.verify.verify_clone: clone 真本並核對釘選值
     6 annex.git: 準備 git annex 環境
     7 intake.evaluate + agora.apply: 評估決策並套用至真本
-    8 pins.write_pending: 寫入待定釘選值
-    9 verify.precheck + git.copy + git.push: 預檢並推送
-    10 verify.verify_after_push: push 後遠端狀態驗證
-    11 pins.promote + gc.gc_removed: 轉正釘選值與 bundle 回收
-    12 publisher.publish: 發佈讀取視圖
-    13 clean_inbox: 刪除已處理之收件匣項目
+    8 annex.git.copy: 上傳 annex 物件（必須早於計算 refs／keys）
+    9 pins.write_pending: 寫入待定釘選值
+    10 verify.precheck + git.push: 預檢並推送
+    11 verify.verify_after_push: push 後遠端狀態驗證
+    12 pins.promote + gc.gc_removed: 轉正釘選值與 bundle 回收
+    13 publisher.publish: 發佈讀取視圖
+    14 clean_inbox: 刪除已處理之收件匣項目與逾時的 junk
     """
     run_id = generate_ulid()
     report = RunReport(run_id=run_id)
@@ -663,11 +673,30 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             report.durations_ms["intake.evaluate"] = int((time.monotonic() - t0) * 1000)
 
             # ---------------------------------------------------------
-            # 第 8 步：pins.write_pending
+            # 第 8 步：annex.git.copy（先上傳物件）+ 計算 refs／annex keys
+            # ---------------------------------------------------------
+            current_step = "annex.git.copy"
+            t0 = time.monotonic()
+            # H1：`git annex copy` 會改寫本機的 git-annex 分支（location log），
+            # 並讓新的 key 變成「在 remote 上」。所以必須在算 refs 與 key 集合
+            # **之前**執行，否則 pending 記錄的是 copy 之前的狀態：
+            #   1. push 出去的 git-annex ref 與 pending 不符 → verify_after_push 中止；
+            #   2. 下一輪 settle 時遠端既不等於 pending 也不等於正式值 → MismatchError，
+            #      之後每一輪都中止，需要人工重建 pin；
+            #   3. pending 的 annex_keys 少了新上傳的 key → promote 之後下一輪 sweep
+            #      會把新上傳的物件全部隔離。
+            # 中止時這些物件不在釘選值裡，下一輪會被隔離，是安全的方向。
+            # M1：dry-run 不得寫入遠端。
+            if not dry_run:
+                git.copy("origin")
+            report.durations_ms["annex.git.copy"] = int((time.monotonic() - t0) * 1000)
+
+            # ---------------------------------------------------------
+            # 第 9 步：pins.write_pending
             # ---------------------------------------------------------
             current_step = "pins.write_pending"
             t0 = time.monotonic()
-            # H1：refs 與 annex key 集合取自 AnnexGit 自己的公開方法；缺少必要分支
+            # refs 與 annex key 集合取自 AnnexGit 自己的公開方法；缺少必要分支
             # 由 SubprocessAnnexGit.local_refs() raise，不在這裡吞掉例外。
             local_refs = git.local_refs()
             annex_keys = (
@@ -684,7 +713,7 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
                     base_manifest_sha256=state.manifest_sha256,
                     refs=local_refs,
                     annex_keys=annex_keys,
-                    written_at=format_rfc3339(deps.clock.now()),
+                    written_at=format_rfc3339(deps.clock.now(), include_fraction=True),
                     run_id=run_id,
                 )
                 if not dry_run:
@@ -693,7 +722,7 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             report.durations_ms["pins.write_pending"] = int((time.monotonic() - t0) * 1000)
 
             # ---------------------------------------------------------
-            # 第 9 步：verify.precheck + git.copy + git.push
+            # 第 10 步：verify.precheck + git.push
             # ---------------------------------------------------------
             current_step = "git.push"
             t0 = time.monotonic()
@@ -706,15 +735,13 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
                     f"GITMANIFEST--{state.repo_uuid}",
                     state,
                 )
-                # M1：`git annex copy` 會把物件送上 Drive，dry-run 不得執行。
                 if not dry_run:
-                    git.copy("origin")
                     git.push("origin", ("main", "git-annex"))
 
             report.durations_ms["git.push"] = int((time.monotonic() - t0) * 1000)
 
             # ---------------------------------------------------------
-            # 第 10 步：verify.verify_after_push
+            # 第 11 步：verify.verify_after_push
             # ---------------------------------------------------------
             current_step = "verify.verify_after_push"
             t0 = time.monotonic()
@@ -734,7 +761,7 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             report.durations_ms["verify.verify_after_push"] = int((time.monotonic() - t0) * 1000)
 
             # ---------------------------------------------------------
-            # 第 11 步：pins.promote + gc.gc_removed
+            # 第 12 步：pins.promote + gc.gc_removed
             # ---------------------------------------------------------
             current_step = "pins.promote"
             t0 = time.monotonic()
@@ -780,7 +807,7 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             report.durations_ms["pins.promote"] = int((time.monotonic() - t0) * 1000)
 
             # ---------------------------------------------------------
-            # 第 12 步：publisher.publish
+            # 第 13 步：publisher.publish
             # ---------------------------------------------------------
             current_step = "publisher.publish"
             t0 = time.monotonic()
@@ -788,11 +815,12 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             report.durations_ms["publisher.publish"] = int((time.monotonic() - t0) * 1000)
 
             # ---------------------------------------------------------
-            # 第 13 步：clean_inbox 刪除收件匣檔案
+            # 第 14 步：clean_inbox 刪除收件匣檔案
             # ---------------------------------------------------------
             current_step = "clean_inbox"
             t0 = time.monotonic()
             deleted_inbox_count = 0
+            failed_delete_count = 0
             inbox_folders = set(deps.registry.inbox_folders().keys())
             now_dt = deps.clock.now()
 
@@ -833,11 +861,38 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
                                 deps.drive.delete_permanently(df.id)
                                 deleted_inbox_count += 1
                             except Exception:
-                                pass
+                                # M5：刪除失敗不可靜默吞掉，計數回報讓 6.3 的監控看得到
+                                failed_delete_count += 1
                         else:
                             deleted_inbox_count += 1
 
+            # M5：junk（名稱不符合格式的檔案、收件匣裡的資料夾）超過 24 小時
+            # 就刪除並永久刪除（D2／review-g3d M4），從前不會被刪，收件匣因此
+            # 永遠不是空的。刪除前一樣做 parents 防呆檢查。
+            junk_deleted = 0
+            for f in scan.junk:
+                try:
+                    df = deps.drive.get(f.id)
+                except (ReadError, NotFound):
+                    continue
+                if not any(p in inbox_folders for p in df.parents):
+                    raise MismatchError(
+                        f"junk 清理防呆檢查失敗：檔案 {df.id} ({df.name}) 之 parents 不屬於合法收件匣資料夾"
+                    )
+                if (now_dt - df.created_at) < JUNK_RETENTION:
+                    continue  # 還沒滿 24 小時，留到下一輪
+                if not dry_run:
+                    try:
+                        deps.drive.delete_permanently(df.id)
+                        junk_deleted += 1
+                    except Exception:
+                        failed_delete_count += 1
+                else:
+                    junk_deleted += 1
+
             report.counts["inbox_deleted"] = deleted_inbox_count
+            report.counts["inbox_junk_deleted"] = junk_deleted
+            report.counts["inbox_delete_failed"] = failed_delete_count
             report.durations_ms["clean_inbox"] = int((time.monotonic() - t0) * 1000)
 
         except AbortRun as e:

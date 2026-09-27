@@ -589,13 +589,30 @@ jobs:
       - uses: actions/checkout@<pinned sha>
       - name: guard            # github.ref == refs/heads/main 且 github.sha == main HEAD（用 GITHUB_TOKEN 查 API）
       - uses: astral-sh/setup-uv@<pinned sha>     # 只快取依賴，不快取任何內容
-      - name: inbox-prescan    # uv run python -m aistorage.committer prescan → 0 就 exit 0（這時還沒裝 git-annex）
-      - name: install-tools    # git-annex、rclone：固定版本＋sha256（同 spike/env/Dockerfile）
-      - name: secrets-to-files # RCLONE_CONF → $RUNNER_TEMP/rclone.conf（600，可寫的暫存複本）；PIN_DEPLOY_KEY → 600
+      - name: secrets-to-rclone # RCLONE_CONF → $RUNNER_TEMP/rclone.conf（600，可寫的暫存複本）
+      - name: inbox-prescan    # 只需要 Drive 與身分登錄檔（不建立 pin store、不碰 git）；輸出寫成 $GITHUB_OUTPUT 的 shaped=<N>
+      - name: install-tools    # git-annex、rclone：版本＋網址＋sha256 集中在同一個 env 區塊
+      - name: secrets-to-pin-key # PIN_DEPLOY_KEY → 600
       - name: run              # uv run python -m aistorage.committer run --config config/committer.json
 ```
 - 環境變數只傳**路徑**：`AISTORAGE_RCLONE_CONF`、`AISTORAGE_PIN_KEY`、`AISTORAGE_PIN_KNOWN_HOSTS`（repo 內的檔）。
-- log：`RunReport` 只印計數、步驟耗時、中止的步驟與代碼；不印檔名以外的內容（檔名是 ULID）。
+- log：`RunReport` 只印計數、步驟耗時、中止的步驟與代碼；不印檔名以外的內容（檔名是 ULID）。中止時的 traceback 寫到 `AISTORAGE_DEBUG_DIR`（預設 `debug/`），**不進 Actions log**。
+- 步驟順序有相依：`secrets-to-rclone` 必須在 `inbox-prescan` 之前（prescan 要讀得到收件匣），而 prescan 失敗要讓 job 失敗（不可 `|| true`），否則讀不到收件匣時仍會進入完整的一輪，D9 的「空的一輪 1 分鐘」成本模型會失效。
+
+#### 排程頻率怎麼改
+GitHub Actions 的排程**只能寫在 workflow 檔裡**，設定檔（`config/committer.json`）的欄位不會被讀取（`schedule_cron` 已移除，留在那裡只會讓人以為改設定檔就有效）。
+
+- **改頻率＝改 `.github/workflows/committer.yml` 的 `schedule.cron`**，而且**只能在 `main` 上改**：第 1 步的 guard 會擋掉非 main 分支的執行（`github.ref != refs/heads/main` 或 `github.sha != main HEAD` 就中止），在別的分支改 cron 不會生效。
+- 改完照常走 PR 合併；合併後下一次排程即生效。
+- 頻率是 D9 用量估算的輸入：預設 6 小時（276〜372 分鐘／月，以「空的一輪 1 分鐘」估算）。改動前先想過 Actions 用量。
+
+#### 工具升級（git-annex、rclone）
+兩個工具的**版本、網址、SHA256 集中在 `install-tools` 步驟的同一個 `env:` 區塊**，升級時三個一起改，並且走 PR 合併。
+
+- rclone 用 `https://downloads.rclone.org/v<version>/…`，那個路徑帶版本號、內容不可變。
+- git-annex 的 standalone tarball **上游只提供 `current/`**（`downloads.kitenet.net/git-annex/linux/` 下只有 `current/`，沒有帶版本號的目錄；autobuild 只留最新一 build；GitHub release 沒有附檔）。所以網址會跟著上游動，`sha256` 不符就是上游發了新版本。
+- 升級步驟：下載目前 `current/` 的 tarball → `sha256sum` 取值 → 用 `git-annex version`（解壓後執行）確認實際版本 → 更新 `GIT_ANNEX_VERSION`、`GIT_ANNEX_URL`、`GIT_ANNEX_SHA256` → 合併。驗證步驟（3.2 與 9.4 的整合測試）要在升級後重跑。
+- sha256 不符時流程 **fail-closed**：job 在 `install-tools` 就停住，不會動到真本（也不會寫 pin）。log 會印出釘選的版本。
 
 ### 7.2 CLI（`python -m aistorage.committer`）
 
@@ -630,7 +647,9 @@ class RunReport:
 def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport:
     # 每一步是一個小函式；失敗 raise AbortRun(step, code)；run 捕捉後填 RunReport（exit code 非 0）
 ```
-- 13 步與模組的對應：1 `guard`；2 `intake.scan`；3 `integrity.settle`；4 `integrity.sweep`；5 `annex.git.clone`＋`integrity.verify.verify_clone`；6 `annex.git`；7 `intake.evaluate`＋`agora.apply`；8 `pins.write_pending`；9 `verify.precheck`＋`git.copy`＋`git.push`；10 `verify.verify_after_push`；11 `pins.promote`＋`gc.gc_removed`；12 `publisher.publish`（第 3 組是 NullPublisher）；13 刪除 ACCEPT、ALREADY 與逾時 REJECT 的收件匣項目（`drive.delete_permanently`，刪前 `get()` 確認 parents 是收件匣）。
+- 13 步與模組的對應：1 `guard`；2 `intake.scan`；3 `integrity.settle`；4 `integrity.sweep`；5 `annex.git.clone`＋`integrity.verify.verify_clone`；6 `annex.git`；7 `intake.evaluate`＋`agora.apply`；**8 `annex.git.copy`（上傳 annex 物件）**；9 `pins.write_pending`；10 `verify.precheck`＋`git.push`；11 `verify.verify_after_push`；12 `pins.promote`＋`gc.gc_removed`；13 `publisher.publish`（第 3 組是 NullPublisher）；14 刪除 ACCEPT、ALREADY 與逾時 REJECT 的收件匣項目，以及逾時 24 小時的 junk（`drive.delete_permanently`，刪前 `get()` 確認 parents 是收件匣；刪除失敗計入 `inbox_delete_failed`）。
+- **copy 必須在算 refs／annex keys 之前**（review-g3g H1）：`git annex copy` 會寫入 location log（`refs/heads/git-annex` 的 sha 改變）並讓新上傳的 key 變成「在 remote 上」。若先算 pending 再 copy：push 出去的 ref 與 pending 不符（`verify_after_push` 中止）、下一輪 settle 遠端既不等於 pending 也不等於正式值（每輪 MismatchError，要人工重建 pin）、promote 後下一輪 sweep 把新上傳的物件全部隔離。中止時這些物件不在釘選值裡，下一輪會被隔離，是安全的方向。
+- `--dry-run` 不執行 `git annex copy` 也不 push（copy 會寫入 Drive）。
 
 ### 7.4 手動匯入（3.11，`python -m aistorage.importer`）
 

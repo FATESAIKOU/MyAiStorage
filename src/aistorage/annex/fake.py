@@ -25,11 +25,18 @@ class FakeAnnexGit(AnnexGit):
         workdir: Path | None = None,
         annex_keys: frozenset[str] | set[str] | None = None,
         push_effect: Literal["apply", "silent_fail", "error"] = "apply",
+        copy_effect: Literal["noop", "annex_upload"] = "noop",
+        local_keys: frozenset[str] | set[str] | None = None,
     ) -> None:
         self.refs: dict[str, str] = dict(refs or {})
         self.workdir: Path = workdir or Path("/mock/repo")
         self.annex_keys: frozenset[str] = frozenset(annex_keys or ())
         self.push_effect: Literal["apply", "silent_fail", "error"] = push_effect
+        # review-g3g H1：`git annex copy` 會寫入本機 git-annex 分支的 location log
+        # （refs/heads/git-annex 的 sha 改變），並讓本機的 key 變成「在 remote 上」。
+        # copy_effect="annex_upload" 才模擬這個副作用，預設維持 noop 不影響既有測試。
+        self.copy_effect: Literal["noop", "annex_upload"] = copy_effect
+        self.local_keys: frozenset[str] = frozenset(local_keys or ())
         self.added_paths: list[str] = []
         self.commits: list[tuple[str, str]] = []
         self.copied: list[tuple[str, list[str] | None]] = []
@@ -74,6 +81,17 @@ class FakeAnnexGit(AnnexGit):
     ) -> None:
         self._check_injection("copy")
         self.copied.append((remote, to_copy))
+        if self.copy_effect == "annex_upload":
+            # 模擬 `git annex copy`：本機的 key 變成在 remote 上，且 location log
+            # 讓 refs/heads/git-annex 的 sha 前進（review-g3g H1）
+            if self.local_keys:
+                self.annex_keys = frozenset(set(self.annex_keys) | set(self.local_keys))
+            current = self.pending_refs.get(
+                "refs/heads/git-annex", self.refs.get("refs/heads/git-annex", "")
+            )
+            self.pending_refs["refs/heads/git-annex"] = hashlib.sha1(
+                f"annex-location-log-{current}".encode("utf-8")
+            ).hexdigest()
 
     def push(
         self,

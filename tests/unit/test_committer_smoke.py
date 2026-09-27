@@ -107,6 +107,28 @@ class SimpleTestConverter(Converter):
         return ()
 
 
+def _registry_payload(inbox_folder_id: str, key_id: str, pub_b64: str) -> dict[str, Any]:
+    """測試用身分登錄檔內容（mac-opencode 一個 profile、一把 active 金鑰）。"""
+    return {
+        "format": "aistorage.identity/v1",
+        "profiles": {
+            "mac-opencode": {
+                "inbox_folder_ids": [inbox_folder_id],
+                "allowed_types": ["session", "handoff", "claim", "reference", "rewrite", "artifact"],
+                "signing_keys": [
+                    {
+                        "key_id": key_id,
+                        "public_key": pub_b64,
+                        "status": "active",
+                        "added_at": "2026-09-20T00:00:00Z",
+                        "revoked_at": None,
+                    }
+                ],
+            }
+        },
+    }
+
+
 def _setup_committer_env(tmp_path: Path) -> tuple[CommitterConfig, Deps, dict[str, Any]]:
     """建立測試所需之 FakeDrive、MemoryPinStore、FakeAnnexGit 與 Registry。"""
     clock = FixedClock("2026-09-27T10:00:00Z")
@@ -122,25 +144,7 @@ def _setup_committer_env(tmp_path: Path) -> tuple[CommitterConfig, Deps, dict[st
     key_id = f"mac-opencode-{pub_fingerprint}"
     pub_b64 = base64.b64encode(pub_bytes).decode("ascii")
 
-    registry_data = {
-        "format": "aistorage.identity/v1",
-        "profiles": {
-            "mac-opencode": {
-                "inbox_folder_ids": [inbox_folder_id],
-                "allowed_types": ["session", "handoff", "claim", "reference", "rewrite", "artifact"],
-                "signing_keys": [
-                    {
-                        "key_id": key_id,
-                        "public_key": pub_b64,
-                        "status": "active",
-                        "created_at": "2026-09-20T00:00:00Z",
-                        "revoked_at": None,
-                    }
-                ],
-            }
-        },
-    }
-    registry = Registry(registry_data)
+    registry = Registry(_registry_payload(inbox_folder_id, key_id, pub_b64))
 
     repo_uuid = "00000000-0000-0000-0000-000000000001"
     initial_main_sha = "1" * 40
@@ -738,6 +742,205 @@ def test_round_with_handoff_claim_and_reference(tmp_path: Path, monkeypatch: pyt
     assert f"links/continuation/opencode%3Ases_s2/{handoff_ulid}.json" in written
     ref_rec = written["links/reference/opencode%3Ases_s2/opencode%3Ases_s1.json"]
     assert ref_rec["read_snapshot_at"] == "2026-09-27T08:45:00Z"
+
+
+def test_annex_copy_happens_before_refs_and_keys_are_computed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """H1：`git annex copy` 必須在算 refs／annex keys **之前**。
+
+    copy 會寫入 location log（refs/heads/git-annex 改變）並讓新 key 變成在 remote 上。
+    若在 copy 之前就算好 pending：
+      - push 出去的 git-annex ref 與 pending 不符 → verify_after_push 中止；
+      - 下一輪 settle 遠端既不等於 pending 也不等於正式值 → 每輪 MismatchError；
+      - pending 的 annex_keys 少了新 key → promote 後下一輪 sweep 全部隔離。
+    """
+    cfg, deps, info = _setup_committer_env(tmp_path)
+    fake_git: FakeAnnexGit = info["fake_git"]
+    # 模擬這一輪新增了一個 annex 物件：copy 之後才會出現在 remote 上
+    fake_git.copy_effect = "annex_upload"
+    fake_git.local_keys = frozenset({"SHA256E-s101--newkey.tar.gz"})
+
+    _seed_valid_inbox_session(
+        deps.drive, info["inbox_folder_id"], info["priv_bytes"], info["key_id"]
+    )
+    annex_sha_before = fake_git.pending_refs.get(
+        "refs/heads/git-annex", fake_git.refs.get("refs/heads/git-annex")
+    )
+
+    monkeypatch.setattr(
+        committer_run,
+        "verify_after_push",
+        lambda git, drive_, listing, state, refs, started, workdir: PushVerification(
+            new_manifest_sha256="d" * 64,
+            active=state.active_bundles,
+            removed=frozenset(),
+        ),
+    )
+
+    report = run(cfg, deps, dry_run=False)
+    assert report.ok is True, f"中止於 {report.aborted_at}:{report.code}"
+
+    # copy 有被執行，而且早於 push
+    assert len(fake_git.copied) == 1
+    assert len(fake_git.pushed) == 1
+
+    # copy 確實改變了 git-annex ref 與 key 集合
+    annex_sha_after = fake_git.refs.get("refs/heads/git-annex")
+    assert annex_sha_after != annex_sha_before
+    assert "SHA256E-s101--newkey.tar.gz" in fake_git.annex_keys
+
+    # 轉正後的正式釘選值必須反映 copy 之後的狀態（否則下一輪全部隔離）
+    promoted, pending = deps.pins.load(cfg.repo)
+    assert pending is None
+    assert promoted.annex_keys == frozenset({"SHA256E-s101--newkey.tar.gz"})
+    assert promoted.refs["refs/heads/git-annex"] == annex_sha_after
+    assert "annex.git.copy" in report.durations_ms
+
+
+def test_junk_older_than_24h_is_deleted_and_failures_are_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """M5：逾時的 junk 會被刪除；刪除失敗要計數回報，不再靜默吞掉。"""
+    cfg, deps, info = _setup_committer_env(tmp_path)
+    inbox = info["inbox_folder_id"]
+
+    # 兩天前的 junk（名稱不符合 <ULID>.(raw|sidecar.json|sig) 格式）
+    stale = deps.drive.seed_file(
+        inbox, "not-an-item.txt", b"junk", created_time="2026-09-25T10:00:00Z"
+    )
+    # 剛建立的 junk：還沒滿 24 小時，留到下一輪
+    fresh = deps.drive.seed_file(
+        inbox, "also-junk.bin", b"junk", created_time="2026-09-27T09:59:00Z"
+    )
+    # 收件匣裡的資料夾也算 junk（scan 會歸入 junk）
+    deps.drive.seed_folder("stray_folder", parent=inbox)
+
+    _seed_valid_inbox_session(deps.drive, inbox, info["priv_bytes"], info["key_id"])
+
+    monkeypatch.setattr(
+        committer_run,
+        "verify_after_push",
+        lambda git, drive_, listing, state, refs, started, workdir: PushVerification(
+            new_manifest_sha256="c" * 64,
+            active=state.active_bundles,
+            removed=frozenset(),
+        ),
+    )
+
+    # 刪除逾時 junk 時注入失敗，必須被計數（不可靜默吞掉）
+    original_delete = deps.drive.delete_permanently
+    failed: list[str] = []
+
+    def _delete_with_failure(file_id: str):
+        if file_id == stale:
+            failed.append(file_id)
+            raise WriteError("注入的刪除失敗")
+        return original_delete(file_id)
+
+    monkeypatch.setattr(deps.drive, "delete_permanently", _delete_with_failure)
+
+    report = run(cfg, deps, dry_run=False)
+    assert report.ok is True, f"中止於 {report.aborted_at}:{report.code}"
+    assert report.counts["junk_files"] == 3
+    assert report.counts["inbox_junk_deleted"] == 0  # 唯一逾時的那個被注入失敗
+    assert report.counts["inbox_delete_failed"] == 1
+    assert failed == [stale]
+    # 注入失敗 → 檔案還在（下一輪會再試）；未逾時的 junk 與 session 項目照常處理
+    assert [f.name for f in deps.drive.find_by_name(inbox, "not-an-item.txt")] == ["not-an-item.txt"]
+    assert [f.name for f in deps.drive.find_by_name(inbox, "also-junk.bin")] == ["also-junk.bin"]
+    assert report.counts["inbox_deleted"] == 3
+
+
+def test_build_production_deps_requires_all_paths_and_guards_production_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """H3：用正式的 CLI 路徑組裝 deps，缺一個東西就在本機抓得到。
+
+    也驗證 H5 的保護：正式 pin repo（MyAiStorage-pin）在非 CI 環境且沒有
+    明確的 --i-am-admin 時拒絕建立。
+    """
+    from aistorage.committer.__main__ import build_prescan_deps, build_production_deps
+
+    # 假的（無秘密）設定檔：rclone conf、known_hosts、deploy key
+    rclone_conf = tmp_path / "rclone.conf"
+    rclone_conf.write_text(
+        "[gdrive]\ntype = drive\nscope = drive\n"
+        "token = {\"access_token\": \"fake\", \"refresh_token\": \"fake\"}\n"
+        "client_id = fake\nclient_secret = fake\n"
+        "token_refresh_url = https://oauth2.googleapis.com/token\n",
+        encoding="utf-8",
+    )
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.write_text("github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5\n", encoding="utf-8")
+    key = tmp_path / "pin.key"
+    key.write_bytes(b"k" * 32)
+    key.chmod(0o600)
+    identity = tmp_path / "identity.json"
+    # 登錄檔必須通過 load_registry 的驗證（H4）：公鑰要是真的 32 位元組 Ed25519
+    identity_priv, identity_pub = generate_keypair()
+    fingerprint = hashlib.sha256(identity_pub).hexdigest().lower()[:8]
+    identity.write_text(
+        json.dumps(_registry_payload(
+            "inbox-1",
+            f"mac-opencode-{fingerprint}",
+            base64.b64encode(identity_pub).decode("ascii"),
+        )),
+        encoding="utf-8",
+    )
+    cfg_path = tmp_path / "committer.json"
+    cfg_path.write_text(
+        json.dumps({
+            "format": "aistorage.committer/v1",
+            "repo": "agora",
+            "repo_uuid": "uuid-1",
+            "repo_url": "drive://agora",
+            "prefix_folder_id": "folder-prefix",
+            "quarantine_folder_id": "folder-quarantine",
+            "identity_registry_path": str(identity),
+            "pin_repo_url": "git@github.com:FATESAIKOU/MyAiStorage-pin.git",
+        }),
+        encoding="utf-8",
+    )
+
+    base_env = {
+        "AISTORAGE_RCLONE_CONF": str(rclone_conf),
+        "AISTORAGE_PIN_KEY": str(key),
+        "AISTORAGE_PIN_KNOWN_HOSTS": str(known_hosts),
+    }
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    cfg = CommitterConfig.load(cfg_path, env=base_env)
+
+    # prescan 不需要 pin key 與 known_hosts（只要 Drive 與登錄檔）
+    prescan_env = {"AISTORAGE_RCLONE_CONF": str(rclone_conf)}
+    prescan_cfg = CommitterConfig.load(cfg_path, env=prescan_env)
+    prescan_deps = build_prescan_deps(prescan_cfg)
+    assert prescan_deps.drive is not None
+    assert prescan_deps.registry is not None
+
+    # 正式路徑：四個環境變數齊全時可以組出 deps
+    deps = build_production_deps(cfg)
+    assert deps.pins is not None
+    assert deps.git_factory is not None
+
+    # 缺 rclone.conf → 明確錯誤
+    bad = CommitterConfig.load(cfg_path, env={k: v for k, v in base_env.items()
+                                              if k != "AISTORAGE_RCLONE_CONF"})
+    with pytest.raises(RuntimeError, match="rclone"):
+        build_production_deps(bad)
+
+    # 缺 pin key → 明確錯誤
+    bad2 = CommitterConfig.load(cfg_path, env={k: v for k, v in base_env.items()
+                                               if k != "AISTORAGE_PIN_KEY"})
+    with pytest.raises((RuntimeError, ValueError)):
+        build_production_deps(bad2)
+
+    # H5：非 CI 環境 + 正式 pin repo + 沒有 --i-am-admin → 拒絕
+    monkeypatch.setenv("GITHUB_ACTIONS", "false")
+    with pytest.raises(PermissionError, match="正式 pin repo"):
+        build_production_deps(cfg)
+    # 明確宣告管理者身分才允許
+    assert build_production_deps(cfg, allow_production=True).pins is not None
 
 
 def test_plan_sweep_cli(tmp_path: Path):

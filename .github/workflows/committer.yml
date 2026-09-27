@@ -68,24 +68,41 @@ jobs:
 
       - name: install-tools
         if: steps.prescan.outputs.shaped != '0'
+        env:
+          # M7：工具的版本、網址與 SHA256 集中在這裡，升級時三個一起改。
+          # 改版號或改 sha 之前先看 docs/impl/group3-modules.md 第 7.1 節的「工具升級」。
+          GIT_ANNEX_VERSION: "10.20260717"
+          GIT_ANNEX_URL: "https://downloads.kitenet.net/git-annex/linux/current/git-annex-standalone-amd64.tar.gz"
+          GIT_ANNEX_SHA256: "a3c9d10ee33a7ace69efeaa8cd6282cfd7444ec797d732cebae12a64efefa18a"
+          RCLONE_VERSION: "1.75.1"
+          RCLONE_SHA256: "982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab"
         run: |
-          set -eux
-          # git-annex (10.20260717 amd64)
-          # 注意：上游 kitenet 僅提供 current/ 目錄，SHA256 鎖定版本 10.20260717；升級時必須同步更新 SHA256 (M7)
-          ANNEX_SHA="a3c9d10ee33a7ace69efeaa8cd6282cfd7444ec797d732cebae12a64efefa18a"
-          curl -fsSL "https://downloads.kitenet.net/git-annex/linux/current/git-annex-standalone-amd64.tar.gz" -o /tmp/git-annex.tar.gz
-          echo "${ANNEX_SHA}  /tmp/git-annex.tar.gz" | sha256sum -c -
+          set -eu
+          # git-annex（standalone tarball，amd64）
+          # 上游只提供 current/（沒有帶版本號的目錄），所以網址會跟著上游動：
+          #   sha256 不符 = 上游發了新版本。請照下面印出來的版本與
+          #   docs 的升級步驟更新 GIT_ANNEX_VERSION 與 GIT_ANNEX_SHA256 再 push。
+          if ! curl -fsSL "$GIT_ANNEX_URL" -o /tmp/git-annex.tar.gz; then
+            echo "下載 git-annex 失敗: $GIT_ANNEX_URL" >&2
+            exit 1
+          fi
+          if ! echo "${GIT_ANNEX_SHA256}  /tmp/git-annex.tar.gz" | sha256sum -c -; then
+            echo "" >&2
+            echo "git-annex 的 SHA256 不符：上游 current/ 的內容已改變（釘選的版本：${GIT_ANNEX_VERSION}）。" >&2
+            echo "這是 fail-closed，流程停在這裡不會動到真本。升級步驟見 docs/impl/group3-modules.md 第 7.1 節。" >&2
+            exit 1
+          fi
           sudo tar -xzf /tmp/git-annex.tar.gz -C /opt
           rm -f /tmp/git-annex.tar.gz
           sudo ln -sf /opt/git-annex.linux/git-annex /usr/local/bin/git-annex
           sudo ln -sf /opt/git-annex.linux/git-annex-shell /usr/local/bin/git-annex-shell
           sudo ln -sf /opt/git-annex.linux/git-remote-annex /usr/local/bin/git-remote-annex
+          # 記錄實際跑起來的版本，方便下次升級時比對
+          echo "git-annex version: $(git-annex version | head -1)"
 
-          # rclone (1.75.1 amd64)
-          RCLONE_VERSION="1.75.1"
-          RCLONE_SHA="982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab"
+          # rclone（downloads.rclone.org 的 /v<version>/ 是不可變的）
           curl -fsSL "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-amd64.zip" -o /tmp/rclone.zip
-          echo "${RCLONE_SHA}  /tmp/rclone.zip" | sha256sum -c -
+          echo "${RCLONE_SHA256}  /tmp/rclone.zip" | sha256sum -c -
           unzip -q /tmp/rclone.zip -d /tmp
           sudo install -m 0755 "/tmp/rclone-v${RCLONE_VERSION}-linux-amd64/rclone" /usr/local/bin/rclone
           rm -rf /tmp/rclone.zip "/tmp/rclone-v${RCLONE_VERSION}-linux-amd64"
