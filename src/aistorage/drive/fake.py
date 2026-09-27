@@ -76,13 +76,19 @@ class FakeDrive(DriveClient):
         *,
         sha256: str | None = "auto",
         created_time: str | None = None,
+        modified_time: str | None = None,
         trashed: bool = False,
         mime_type: str = "application/octet-stream",
+        file_id: str | None = None,
     ) -> str:
         """建立種子檔案並回傳其 file_id（不計入 DriveClient API calls）。"""
-        self._file_seq += 1
-        fid = f"file_{self._file_seq:04d}"
+        if file_id is not None:
+            fid = file_id
+        else:
+            self._file_seq += 1
+            fid = f"file_{self._file_seq:04d}"
         now = created_time or format_rfc3339(self._clock.now(), include_fraction=True)
+        mtime = modified_time or now
 
         calc_sha256 = (
             hashlib.sha256(content).hexdigest().lower()
@@ -100,7 +106,7 @@ class FakeDrive(DriveClient):
             sha256=calc_sha256,
             md5=calc_md5,
             created_time=now,
-            modified_time=now,
+            modified_time=mtime,
             trashed=trashed,
         )
         self._files[fid] = df
