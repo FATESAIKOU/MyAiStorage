@@ -141,11 +141,11 @@
 | **Claude Code** | 最後一行寫到一半（檔案不以換行結尾） | **略過該行，`in_progress: true`** | 生成中的 Session 會有半行 JSON；略過最後一行不算失敗。中間任何一行解析失敗仍然是轉換失敗。 |
 | **Claude Code** | `tool_use` (assistant) + `tool_result` (user) | `type: "tool_call"` | 依 `tool_use_id` 配對合併為單一 `tool_call` 段落，依需要截斷摘要。 |
 | **Claude Code** | `thinking` block | `type: "reasoning"` | 對應為推理段落。 |
-| **Claude Code** | 子代理 (`isSidechain` 或 subagent jsonl) | `child_session_id` | 只採結構化來源（`tool_use` input 的 `sessionId`／`session_id`、`toolUseResult` 的同名欄位、parentUuid 指向該則 assistant 的子代理紀錄之 `sessionId`），不從 `tool_result` 的文字內容推測。 |
+| **Claude Code** | 子代理 (`isSidechain` 或 subagent jsonl) | `child_session_id` | 只採結構化來源（`tool_use` input 的 `sessionId`／`session_id`、`toolUseResult` 的同名欄位、parentUuid 指向該則 assistant 的子代理紀錄之 `sessionId`），不從 `tool_result` 的文字內容推測。**期 1 不保證取得得到**：目前的 Claude Code 可能把子代理存成獨立的檔案而不留在母 Session 的 jsonl 裡，那時 `child_session_id` 就是 `null`；不要把它當成「沒有子代理」的證據。 |
 | **Claude Code** | Base64 圖片區塊 | `type: "image"` | 解碼計算小寫 SHA-256 與大小，儲存中繼資料。 |
 | **Claude Code** | Base64 文件區塊 (`document`) | `type: "file"` | 解碼計算小寫 SHA-256 與大小，檔名取 `title`；非 base64 的來源（檔案本體不在匯出中）轉為文字段落 `[附件：… 內容不在匯出中]`，不捏造雜湊。 |
 | **Claude Code** | 子代理紀錄 (`isSidechain: true`) | **不進入本 Session 的閱讀版** | 屬於子 Session 的內容；原始紀錄仍完整保留，只用來認出 `child_session_id`。 |
-| **Claude Code** | 未知的紀錄型態（有 `uuid`） | `type: "text"` | 以 `system` 角色輸出 `[未支援的紀錄型態：<type>]`，不讓整份閱讀版失敗；此類紀錄不作為主幹末梢候選。 |
+| **Claude Code** | 未知的紀錄型態（有 `uuid`） | `type: "text"` | 以 `system` 角色輸出 `[未支援的紀錄型態：<type>]`，不讓整份閱讀版失敗。這類紀錄照常參與主幹展開：在主幹上時不標 `reverted`，只有在被捨棄的分支上才標。 |
 | **Claude Code** | 訊息識別碼 | `message_id: uuid` | 直接採用 Claude Code 之 `uuid` 作為 `message_id`（同一個 `message.id` 合併時取第一筆的 `uuid`）。 |
 
 ---

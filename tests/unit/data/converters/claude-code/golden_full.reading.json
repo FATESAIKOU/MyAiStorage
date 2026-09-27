@@ -182,8 +182,22 @@
       ]
     },
     {
-      "message_id": "rec-branch-001",
+      "message_id": "rec-unknown-001",
       "index": 10,
+      "role": "system",
+      "created_at": "2026-09-27T08:00:55Z",
+      "completed": true,
+      "reverted": false,
+      "parts": [
+        {
+          "type": "text",
+          "text": "[未支援的紀錄型態：x-custom-telemetry]"
+        }
+      ]
+    },
+    {
+      "message_id": "rec-branch-001",
+      "index": 11,
       "role": "user",
       "created_at": "2026-09-27T08:00:05Z",
       "completed": true,
@@ -192,20 +206,6 @@
         {
           "type": "text",
           "text": "Nevermind, ignore the previous request."
-        }
-      ]
-    },
-    {
-      "message_id": "rec-unknown-001",
-      "index": 11,
-      "role": "system",
-      "created_at": "2026-09-27T08:00:55Z",
-      "completed": true,
-      "reverted": true,
-      "parts": [
-        {
-          "type": "text",
-          "text": "[未支援的紀錄型態：x-custom-telemetry]"
         }
       ]
     }
