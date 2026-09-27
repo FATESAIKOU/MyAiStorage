@@ -26,7 +26,7 @@ from aistorage.agora import layout
 from aistorage.agora.store import AgoraStore
 from aistorage.clock import Clock, format_rfc3339, parse_rfc3339
 from aistorage.drive.model import DriveClient, DriveFile
-from aistorage.errors import TooLarge
+from aistorage.errors import MismatchError, TooLarge
 from aistorage.identity import Registry
 from aistorage.inbox import (
     DEFAULT_MAX_RAW_SIZE,
@@ -69,11 +69,13 @@ class Decision:
     """單一收件匣項目之評估決策。
 
     M2: 包含 rejected_at 與 deletable_after，標識拒收發佈時間與可自收件匣刪除時間。
+    R2: 包含 authenticated，標識是否通過簽章與授權驗證。
     """
 
     kind: DecisionKind
     item: InboxItem
     code: str
+    authenticated: bool = False
     producer: str | None = None
     record_metadata: dict[str, Any] | None = None
     sidecar: dict[str, Any] | None = None
@@ -129,6 +131,59 @@ def stamp_record(inbox_metadata: dict[str, Any], *, producer: str) -> dict[str, 
     return record
 
 
+def _check_reference_monotonicity(
+    sc_dict: dict[str, Any],
+    store: AgoraStore,
+    reject_decision: Any,
+) -> Decision | None:
+    """檢查 reference 類型的單調性（M7 & R3）。
+
+    規則（R3）：
+    - 輸入不合法（Session id 不合法、read_snapshot_at 解析失敗）→ REJECT(invalid_format)
+    - 索引檔損毀（JSONDecodeError 或時間格式損毀）→ raise MismatchError 中止
+    - 傳入之 read_snapshot_at 早於或等於現有索引之 read_snapshot_at → REJECT(stale)
+    """
+    body = sc_dict.get("body", {})
+    from_sess = body.get("from_session_id")
+    to_sess = body.get("to_session_id")
+    inc_read_snap = body.get("read_snapshot_at")
+    if not (from_sess and to_sess and inc_read_snap):
+        return None
+
+    try:
+        link_rel = layout.reference_link_path(from_sess, to_sess)
+    except ValueError:
+        return reject_decision("invalid_format", authenticated=True)
+
+    try:
+        inc_dt = parse_rfc3339(inc_read_snap)
+    except ValueError:
+        return reject_decision("invalid_format", authenticated=True)
+
+    link_p = store.worktree / link_rel
+    if not link_p.is_file():
+        return None
+
+    try:
+        content = link_p.read_text(encoding="utf-8")
+        link_data = json.loads(content)
+        if not isinstance(link_data, dict):
+            raise MismatchError(f"參考 Link 索引內容非字典: {link_rel}")
+    except Exception as e:
+        raise MismatchError(f"參考 Link 索引檔案損毀: {link_rel}: {e}") from e
+
+    ex_read_snap = link_data.get("read_snapshot_at")
+    if ex_read_snap:
+        try:
+            ex_dt = parse_rfc3339(ex_read_snap)
+        except ValueError as e:
+            raise MismatchError(f"參考 Link 索引檔案時間格式損毀: {link_rel}: {e}") from e
+        if inc_dt <= ex_dt:
+            return reject_decision("stale", authenticated=True)
+
+    return None
+
+
 def evaluate(
     item: InboxItem,
     *,
@@ -166,45 +221,101 @@ def evaluate(
         code: str,
         *,
         rejected_at: str | None = None,
+        authenticated: bool = False,
     ) -> Decision:
         r_at = rejected_at or now_rfc3339
         r_dt = parse_rfc3339(r_at)
         deletable_after = r_dt + timedelta(hours=24)
 
-        # M2: 當輪 REJECT 寫入 _committer/rejections/<item_key>.json 快取（避免後續輪次重複下載評估）
-        try:
+        # R1: 僅驗章通過後的 REJECT 才寫入真本 _committer/rejections 快取
+        # 驗章前之拒收（orphan、bad_signature、invalid_format、unauthorized、sidecar/sig too_large）不寫入真本
+        if authenticated:
+            cand_ids = sorted([f.id for f in item.sidecars] + [f.id for f in item.sigs])
             rej_rel = layout.rejection_path(item.item_key)
             rej_path = store.worktree / rej_rel
-            if not rej_path.is_file():
-                store.put_json(rej_rel, {"code": code, "at": r_at})
-        except Exception:
-            pass
+            entries: list[dict[str, Any]] = []
+            if rej_path.is_file():
+                try:
+                    with open(rej_path, encoding="utf-8") as rf:
+                        existing_data = json.load(rf)
+                    if "entries" in existing_data and isinstance(existing_data["entries"], list):
+                        entries = existing_data["entries"]
+                    elif "inbox_folder_id" in existing_data:
+                        entries = [existing_data]
+                except Exception:
+                    entries = []
+
+            exists = any(
+                e.get("inbox_folder_id") == item.inbox_folder_id and e.get("candidate_ids") == cand_ids
+                for e in entries
+            )
+            if not exists:
+                new_entry = {
+                    "inbox_folder_id": item.inbox_folder_id,
+                    "candidate_ids": cand_ids,
+                    "code": code,
+                    "at": r_at,
+                }
+                entries.append(new_entry)
+                # 寫入真本快取；若失敗則拋出異常（Review L）
+                store.put_json(rej_rel, {
+                    "item_key": item.item_key,
+                    "code": code,
+                    "at": r_at,
+                    "inbox_folder_id": item.inbox_folder_id,
+                    "candidate_ids": cand_ids,
+                    "entries": entries,
+                })
 
         return Decision(
             kind=DecisionKind.REJECT,
             item=item,
             code=code,
+            authenticated=authenticated,
             rejected_at=r_at,
             deletable_after=deletable_after,
         )
 
-    # 0-a. M2: 檢查真本 _committer/rejections 快取（已拒收過者直接回傳，不重複下載或評估）
+    # 0-a. M2 & R1: 檢查真本 _committer/rejections 快取
+    # 只有「同一個收件匣資料夾、完全相同的候選檔案組合 (candidate_ids)」才短路
     try:
         rej_rel = layout.rejection_path(item.item_key)
         rej_file = store.worktree / rej_rel
         if rej_file.is_file():
             with open(rej_file, encoding="utf-8") as rf:
-                cached_rej = json.load(rf)
-            code = cached_rej.get("code", "invalid_format")
-            r_at = cached_rej.get("at", now_rfc3339)
-            r_dt = parse_rfc3339(r_at)
-            return Decision(
-                kind=DecisionKind.REJECT,
-                item=item,
-                code=code,
-                rejected_at=r_at,
-                deletable_after=r_dt + timedelta(hours=24),
-            )
+                cached_data = json.load(rf)
+            entries = []
+            if "entries" in cached_data and isinstance(cached_data["entries"], list):
+                entries = cached_data["entries"]
+            elif "inbox_folder_id" in cached_data:
+                entries = [cached_data]
+            elif "code" in cached_data and not item.sidecars and not item.sigs:
+                entries = [cached_data]
+
+            cand_ids = sorted([f.id for f in item.sidecars] + [f.id for f in item.sigs])
+            matched_entry = None
+            for e in entries:
+                e_folder = e.get("inbox_folder_id")
+                e_cands = e.get("candidate_ids")
+                if e_folder is None and e_cands is None and not cand_ids:
+                    matched_entry = e
+                    break
+                if e_folder == item.inbox_folder_id and e_cands == cand_ids:
+                    matched_entry = e
+                    break
+
+            if matched_entry is not None:
+                code = matched_entry.get("code", "invalid_format")
+                r_at = matched_entry.get("at", now_rfc3339)
+                r_dt = parse_rfc3339(r_at)
+                return Decision(
+                    kind=DecisionKind.REJECT,
+                    item=item,
+                    code=code,
+                    authenticated=True,
+                    rejected_at=r_at,
+                    deletable_after=r_dt + timedelta(hours=24),
+                )
     except Exception:
         pass
 
@@ -219,15 +330,15 @@ def evaluate(
         if ref_file is not None:
             created_dt = ref_file.created_at
             if (now_dt - created_dt) > timedelta(hours=24):
-                return reject_decision("orphan")
+                return reject_decision("orphan", authenticated=False)
             else:
-                return Decision(kind=DecisionKind.DEFER, item=item, code="incomplete")
-        return reject_decision("orphan")
+                return Decision(kind=DecisionKind.DEFER, item=item, code="incomplete", authenticated=False)
+        return reject_decision("orphan", authenticated=False)
 
     # 1. 驗章＋授權（M1: 逐一嘗試 sidecars × sigs 之所有組合）
     folder_profile = registry.inbox_folders().get(item.inbox_folder_id)
     if not folder_profile:
-        return reject_decision("unauthorized")
+        return reject_decision("unauthorized", authenticated=False)
 
     active_keys = registry.active_public_keys(folder_profile)
 
@@ -241,7 +352,7 @@ def evaluate(
         try:
             sc_bytes = drive.download_bytes(sc_file.id, max_bytes=1024 * 1024)
         except TooLarge:
-            last_reject_code = "too_large"
+            last_reject_code = "sidecar_too_large"
             continue
         # H1: 讀取錯誤（ReadError / NotFound）不補捉，直接拋出讓整輪中止
 
@@ -249,7 +360,7 @@ def evaluate(
             try:
                 sig_bytes = drive.download_bytes(sig_file.id, max_bytes=4 * 1024)
             except TooLarge:
-                last_reject_code = "too_large"
+                last_reject_code = "sig_too_large"
                 continue
             # H1: 讀取錯誤（ReadError / NotFound）不補捉，直接拋出讓整輪中止
 
@@ -296,11 +407,11 @@ def evaluate(
             break
 
     if selected_sc_file is None or selected_sc_dict is None or selected_producer is None:
-        return reject_decision(last_reject_code)
+        return reject_decision(last_reject_code, authenticated=False)
 
     # 2. 清冊與防重放檢核
     if is_item_key_too_old(item.item_key, now_dt):
-        return reject_decision("too_old")
+        return reject_decision("too_old", authenticated=True)
 
     entry = ledger.contains(item.item_key)
     if entry is not None:
@@ -312,12 +423,12 @@ def evaluate(
         )
         if entry.decision in ("accept", "ok", "already"):
             if entry.raw_sha256 == sidecar_raw_sha:
-                return Decision(kind=DecisionKind.ALREADY, item=item, code="already")
+                return Decision(kind=DecisionKind.ALREADY, item=item, code="already", authenticated=True)
             else:
-                return reject_decision("replayed_item_key", rejected_at=entry.at)
+                return reject_decision("replayed_item_key", rejected_at=entry.at, authenticated=True)
         else:
             # M2: 原本是 REJECT 則沿用原 decision 與原 rejected_at
-            return reject_decision(entry.decision, rejected_at=entry.at)
+            return reject_decision(entry.decision, rejected_at=entry.at, authenticated=True)
 
     metadata = selected_sc_dict.get("metadata", {})
     item_type = metadata.get("type")
@@ -328,6 +439,7 @@ def evaluate(
             kind=DecisionKind.DEFER,
             item=item,
             code="foundry_not_enabled",
+            authenticated=True,
             producer=selected_producer,
             record_metadata=metadata,
             sidecar=selected_sc_dict,
@@ -340,7 +452,7 @@ def evaluate(
         try:
             claimed_dt = parse_rfc3339(claimed_snap)
         except Exception:
-            return reject_decision("invalid_format")
+            return reject_decision("invalid_format", authenticated=True)
         effective_dt = min(claimed_dt, selected_sc_file.created_at)
         # M3: 統一以 format_rfc3339 寫入真本
         sess_info["snapshot_at"] = format_rfc3339(effective_dt, include_fraction=True)
@@ -352,7 +464,7 @@ def evaluate(
     existing = store.get_record(record["id"])
     cid = classify_id(existing, record)
     if cid == "collision":
-        return reject_decision("collision")
+        return reject_decision("collision", authenticated=True)
 
     # 5. M5: 以 sidecar 宣告之 raw sha256 與快照時間比對單調性（無需下載 raw）
     if existing is not None:
@@ -368,63 +480,36 @@ def evaluate(
                 and incoming_raw_sha
                 and existing_raw_sha.lower() == incoming_raw_sha.lower()
             ):
-                return Decision(kind=DecisionKind.ALREADY, item=item, code="already")
-            existing_snap = existing.get("snapshot_at", "")
-            if existing_snap:
-                inc_snap_dt = parse_rfc3339(selected_sc_dict["session"]["snapshot_at"])
+                return Decision(kind=DecisionKind.ALREADY, item=item, code="already", authenticated=True)
+            existing_snap = existing.get("snapshot_at")
+            if not existing_snap:
+                raise MismatchError(f"真本現有 session 紀錄缺少 snapshot_at: {record.get('id')}")
+            inc_snap_dt = parse_rfc3339(selected_sc_dict["session"]["snapshot_at"])
+            try:
                 ex_snap_dt = parse_rfc3339(existing_snap)
-                if inc_snap_dt <= ex_snap_dt:
-                    return reject_decision("stale")
+            except ValueError as e:
+                raise MismatchError(f"真本現有 session 紀錄 snapshot_at 時間格式損毀: {existing_snap}: {e}") from e
+            if inc_snap_dt <= ex_snap_dt:
+                return reject_decision("stale", authenticated=True)
         elif item_type == "reference":
-            # M7: 參考單調性依同一對 Session 檢查
-            body = selected_sc_dict.get("body", {})
-            from_sess = body.get("from_session_id")
-            to_sess = body.get("to_session_id")
-            inc_read_snap = body.get("read_snapshot_at")
-            if from_sess and to_sess and inc_read_snap:
-                try:
-                    link_rel = layout.reference_link_path(from_sess, to_sess)
-                    link_p = store.worktree / link_rel
-                    if link_p.is_file():
-                        link_data = json.loads(link_p.read_text(encoding="utf-8"))
-                        ex_read_snap = link_data.get("read_snapshot_at")
-                        if ex_read_snap:
-                            inc_dt = parse_rfc3339(inc_read_snap)
-                            ex_dt = parse_rfc3339(ex_read_snap)
-                            if inc_dt <= ex_dt:
-                                return reject_decision("stale")
-                except ValueError:
-                    pass
+            rej = _check_reference_monotonicity(selected_sc_dict, store, reject_decision)
+            if rej is not None:
+                return rej
         else:
             inc_updated = parse_rfc3339(record.get("updated_at", ""))
             ex_updated = parse_rfc3339(existing.get("updated_at", ""))
             if inc_updated < ex_updated:
-                return reject_decision("stale")
+                return reject_decision("stale", authenticated=True)
             elif inc_updated == ex_updated:
                 if selected_sc_dict.get("body") == existing.get("body"):
-                    return Decision(kind=DecisionKind.ALREADY, item=item, code="already")
+                    return Decision(kind=DecisionKind.ALREADY, item=item, code="already", authenticated=True)
                 else:
-                    return reject_decision("stale")
+                    return reject_decision("stale", authenticated=True)
     elif item_type == "reference":
-        # M7: 即使該 ULID reference 尚未提交過，若 links/reference 索引已有較新者仍須擋下
-        body = selected_sc_dict.get("body", {})
-        from_sess = body.get("from_session_id")
-        to_sess = body.get("to_session_id")
-        inc_read_snap = body.get("read_snapshot_at")
-        if from_sess and to_sess and inc_read_snap:
-            try:
-                link_rel = layout.reference_link_path(from_sess, to_sess)
-                link_p = store.worktree / link_rel
-                if link_p.is_file():
-                    link_data = json.loads(link_p.read_text(encoding="utf-8"))
-                    ex_read_snap = link_data.get("read_snapshot_at")
-                    if ex_read_snap:
-                        inc_dt = parse_rfc3339(inc_read_snap)
-                        ex_dt = parse_rfc3339(ex_read_snap)
-                        if inc_dt <= ex_dt:
-                            return reject_decision("stale")
-            except ValueError:
-                pass
+        # M7 & R3: 即使該 ULID reference 尚未提交過，若 links/reference 索引已有較新者仍須擋下
+        rej = _check_reference_monotonicity(selected_sc_dict, store, reject_decision)
+        if rej is not None:
+            return rej
 
     # 6. M5: Raw metadata 檢查
     needs_raw = item_type in ("session", "rewrite")
@@ -433,17 +518,17 @@ def evaluate(
     if needs_raw:
         raw_meta = selected_sc_dict.get("raw")
         if not isinstance(raw_meta, dict):
-            return reject_decision("invalid_format")
+            return reject_decision("invalid_format", authenticated=True)
         decl_size = raw_meta.get("size")
         decl_sha = raw_meta.get("sha256")
         if decl_size is None or not isinstance(decl_size, int) or decl_sha is None:
-            return reject_decision("invalid_format")
+            return reject_decision("invalid_format", authenticated=True)
 
         if decl_size > max_raw:
-            return reject_decision("too_large")
+            return reject_decision("too_large", authenticated=True)
 
         if not item.raws:
-            return reject_decision("raw_mismatch")
+            return reject_decision("raw_mismatch", authenticated=True)
 
         # 比對 Drive metadata（若符合直接選取，不必下載不符合的檔案）
         matched_raw_file: DriveFile | None = None
@@ -456,32 +541,33 @@ def evaluate(
             break
 
         if matched_raw_file is None:
-            return reject_decision("raw_mismatch")
+            return reject_decision("raw_mismatch", authenticated=True)
 
         # 7. 串流下載 raw 並經由 check_raw 驗證
         raw_dest = workdir / f"{item.item_key}.raw"
         try:
             drive.download(matched_raw_file.id, raw_dest, max_bytes=max_raw)
         except TooLarge:
-            return reject_decision("too_large")
+            return reject_decision("too_large", authenticated=True)
 
         with open(raw_dest, "rb") as f_obj:
             raw_errs = check_raw(selected_sc_dict, f_obj, max_size=max_raw)
         if raw_errs:
-            return reject_decision("raw_mismatch")
+            return reject_decision("raw_mismatch", authenticated=True)
         raw_path = raw_dest
     else:
         if bool(item.raws):
-            return reject_decision("raw_mismatch")
+            return reject_decision("raw_mismatch", authenticated=True)
         raw_errs = check_raw(selected_sc_dict, None, max_size=max_raw)
         if raw_errs:
-            return reject_decision("raw_mismatch")
+            return reject_decision("raw_mismatch", authenticated=True)
 
     # 8. 接受 ACCEPT
     return Decision(
         kind=DecisionKind.ACCEPT,
         item=item,
         code="ok",
+        authenticated=True,
         producer=selected_producer,
         record_metadata=record,
         sidecar=selected_sc_dict,

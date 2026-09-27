@@ -159,6 +159,13 @@ class Ledger:
     ) -> None:
         """將處理結果記錄至清冊。
 
+        參數說明：
+        - item_key: 收件匣項目的 ULID。
+        - item_id: 資源完整 ID（例如 'opencode:ses_12345'）。
+        - decision: 決策代碼 code 字串（例如 'ok', 'already', 'stale', 'too_old' 等，非 DecisionKind 列舉名稱）。
+        - raw_sha256: raw 檔案之 sha256 雜湊（若無 raw 則為 None）。
+        - at: 記錄時間（RFC 3339 格式）。
+
         H2 & L: at 必須符合 RFC 3339 格式，否則拋出 ValueError。
         L: 透過 store.append_line 公開方法寫入。
         """
