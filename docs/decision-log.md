@@ -134,3 +134,9 @@ After reviewing `docs/spike/report.md`, the user decided:
 ## Implementation language (2026-09-27)
 
 The user chose **Python 3.12** for the committer, syncers, the read interface (library and CLI), and admin scripts. The opencode plugin (session id, claim, stop declaration) is TypeScript because opencode requires it. The phone client (MyAiEntry) will later get its own TypeScript client that follows the same index format and query spec. Reasons: all four REQ criteria are met (git-annex/rclone via subprocess, preinstalled on Actions runners and available in Ubuntu containers, FTS5 trigram in the standard library with Ubuntu 24.04's SQLite 3.45, arm64 and amd64), and the spike's Drive probe and sweep scripts were already Python.
+
+## Group 3 decisions (2026-09-27)
+
+- **Rewrite dropped from phase 1.** The user has no use case for editing Session content inside Agora. Source-side edits (/rewind, /undo) already arrive as new raw versions and keep history; content removal uses erase. Rewrite proposals in the inbox are rejected (`rewrite_not_supported`); the feature is in `docs/backlog.md`.
+- Converters: Claude Code sidechain records stay out of the parent reading (the raw record keeps them); `compact_boundary` maps to a compaction marker; unknown record types become visible text instead of failing the reading. Non-`data:` attachments become text notes; hashes are never fabricated.
+- Manual import: provenance defaults to `manual-import` (no local paths), no `--role` option.
