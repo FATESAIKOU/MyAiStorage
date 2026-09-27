@@ -20,16 +20,20 @@ from aistorage.integrity import (
     PrefixLevel,
     PushVerification,
     RepoListing,
+    SettleAndSweepResult,
     SettleOutcome,
     SweepDecision,
     apply_sweep,
+    check_manifest_continuity,
     check_parents,
     collect_removed_bundles,
     gc_removed,
+    plan_readview_sweep,
     plan_sweep,
     precheck,
     purge_quarantine,
     resolve_content_checks,
+    run_settle_and_sweep,
     settle,
     verify_after_push,
     verify_clone,
@@ -253,8 +257,8 @@ def test_settle_promoted_and_dropped(tmp_path: Path):
     b2_info = parse_bundle_name(b2_name)
     assert b2_info is not None
 
-    # 1. 測試 PROMOTED：遠端 manifest 包含 bundle2 且 refs == v2
-    manifest_v2_bytes = f"{b2_name}\n".encode("utf-8")
+    # 1. 測試 PROMOTED：遠端 manifest 包含 bundle2 且 refs == v2，consolidate bundle1
+    manifest_v2_bytes = f"{b2_name}\n-{b1_name}\n".encode("utf-8")
     m_v2_sha = hashlib.sha256(manifest_v2_bytes).hexdigest().lower()
 
     drive = FakeDrive()
@@ -300,6 +304,7 @@ def test_settle_promoted_and_dropped(tmp_path: Path):
     assert new_state.manifest_sha256 == m_v2_sha
     assert new_state.prev_manifest_sha256 == "m_v1_sha_dummy"
     assert new_state.active_bundles == (b2_name,)
+    assert new_state.removed_bundles == frozenset({b1_name})
     assert new_state.annex_keys == frozenset({"k1", "k2"})
 
     # 2. 測試 DROPPED：遠端 manifest 實際上依然為 v1
@@ -326,9 +331,18 @@ def test_settle_promoted_and_dropped(tmp_path: Path):
     listing2_files = tuple(drive2.list_children(prefix2_id))
     listing2 = RepoListing(prefix_folder_id=prefix2_id, files=listing2_files, subfolders=())
 
+    pending_v2 = PinPending(
+        repo="agora",
+        base_manifest_sha256=m_v1_sha,
+        refs={"refs/heads/main": v2_sha},
+        annex_keys=frozenset({"k1", "k2"}),
+        written_at="2026-09-27T08:05:00Z",
+        run_id="run-2",
+    )
+
     outcome2, final2 = settle(
         state_v1,
-        pending,  # pending 指向 v2，但遠端只有 v1
+        pending_v2,  # pending 指向 v2，但遠端只有 v1
         listing2,
         drive2,
         workdir=tmp_path / "settle_workdir2",
@@ -627,8 +641,10 @@ def test_apply_sweep_smoke():
     # 實際移動
     count2 = apply_sweep(decisions, drive, prefix_folder_id=p_id, quarantine_folder_id=q_id, dry_run=False)
     assert count2 == 1
-    assert q_id in drive.get(quar_fid).parents
-    assert p_id not in drive.get(quar_fid).parents
+    quar_parents = drive.get(quar_fid).parents
+    assert p_id not in quar_parents
+    quar_parent_folder = drive.get(quar_parents[0])
+    assert q_id in quar_parent_folder.parents
 
     # 移動失敗拋出 AbortRun
     drive.inject("move", error=WriteError)
@@ -657,24 +673,20 @@ def test_verify_clone_and_precheck_smoke():
     git_ok = DummyAnnexGit({"refs/heads/main": "1" * 40})
     git_bad = DummyAnnexGit({"refs/heads/main": "2" * 40})
 
-    # 1. verify_clone: refs 相符
-    verify_clone(git_ok, state)
-
-    # 2. refs 不符拋出 MismatchError
-    with pytest.raises(MismatchError):
-        verify_clone(git_bad, state)
-
-    # 3. 搭配 drive 驗證
     drive = FakeDrive()
     p_id = drive.seed_folder("repo_root")
     m_name = f"GITMANIFEST--{uuid}"
     drive.seed_file(p_id, m_name, b"dummy", sha256="m" * 64)
 
-    # 正常
+    # 1. verify_clone: refs 相符且 manifest 相符
     verify_clone(git_ok, state, drive=drive, prefix_folder_id=p_id)
     precheck(drive, p_id, m_name, state)
 
-    # 4. 遠端主 manifest 數量異常（新增第二個同名）
+    # 2. refs 不符拋出 MismatchError
+    with pytest.raises(MismatchError):
+        verify_clone(git_bad, state, drive=drive, prefix_folder_id=p_id)
+
+    # 3. 遠端主 manifest 數量異常（新增第二個同名）
     drive.seed_file(p_id, m_name, b"dummy2", sha256="m" * 64)
     with pytest.raises(MismatchError):
         verify_clone(git_ok, state, drive=drive, prefix_folder_id=p_id)
@@ -876,4 +888,333 @@ def test_gc_and_purge_quarantine_smoke():
     with pytest.raises(NotFound):
         drive.get(old_fid)
     assert drive.get(new_fid) is not None
+
+
+def test_purge_quarantine_dated_subfolders_smoke():
+    """測試 purge_quarantine 依日期子資料夾（YYYY-MM-DD）判定逾期刪除 (H3)。"""
+    drive = FakeDrive()
+    q_id = drive.seed_folder("quarantine")
+
+    # 12 天前的日期子資料夾
+    old_folder_id = drive.seed_folder("2026-09-15", parent=q_id)
+    drive.seed_file(old_folder_id, "item1.txt", b"item1")
+
+    # 1 天前的日期子資料夾
+    new_folder_id = drive.seed_folder("2026-09-26", parent=q_id)
+    drive.seed_file(new_folder_id, "item2.txt", b"item2")
+
+    now = "2026-09-27T12:00:00Z"
+    # purge 超過 7 天者
+    deleted = purge_quarantine(drive, q_id, older_than_days=7, now=now, dry_run=False)
+    assert deleted == 1
+
+    # 逾期資料夾已被永久刪除
+    with pytest.raises(NotFound):
+        drive.get(old_folder_id)
+
+    # 仍在保留期內的資料夾保留
+    assert drive.get(new_folder_id) is not None
+
+
+def test_resolve_content_checks_replan_duplicate():
+    """測試 resolve_content_checks 全量重跑 plan_sweep 能正確將重複之 manifest 標為 QUARANTINE (M8)。"""
+    uuid = "01234567-89ab-cdef-0123-456789abcdef"
+    main_name = f"GITMANIFEST--{uuid}"
+    manifest_bytes = b"my_manifest_content\n"
+    m_sha = hashlib.sha256(manifest_bytes).hexdigest().lower()
+
+    state = PinState(
+        repo="agora",
+        repo_uuid=uuid,
+        refs={"refs/heads/main": "1" * 40},
+        manifest_sha256=m_sha,
+        prev_manifest_sha256=None,
+        active_bundles=(),
+        removed_bundles=frozenset(),
+        annex_keys=frozenset(),
+        promoted_at="2026-09-27T08:00:00Z",
+        run_id="run-1",
+    )
+
+    drive = FakeDrive()
+    p_id = drive.seed_folder("repo_root")
+    # 兩個內容相同的主 manifest，第一個有 sha256，第二個沒有 sha256
+    fid1 = drive.seed_file(p_id, main_name, manifest_bytes, sha256=m_sha)
+    fid2 = drive.seed_file(p_id, main_name, manifest_bytes, sha256=None)
+
+    listing = RepoListing(
+        prefix_folder_id=p_id,
+        files=(drive.get(fid1), drive.get(fid2)),
+        subfolders=(),
+    )
+
+    initial_decisions = plan_sweep(listing, state, repo_uuid=uuid)
+    assert len(initial_decisions) == 2
+    assert initial_decisions[0].disposition == Disposition.KEEP
+    assert initial_decisions[1].disposition == Disposition.NEED_CONTENT_CHECK
+
+    cache: dict[str, str] = {}
+    resolved = resolve_content_checks(
+        initial_decisions,
+        drive,
+        cache,
+        state,
+        repo_uuid=uuid,
+        listing=listing,
+    )
+    assert len(resolved) == 2
+    # 全量重新 plan_sweep 後：恰好一個 KEEP，重複者被判定為 QUARANTINE
+    assert resolved[0].disposition == Disposition.KEEP
+    assert resolved[1].disposition == Disposition.QUARANTINE
+    assert "重複" in resolved[1].reason
+
+
+def test_plan_readview_sweep_smoke():
+    """測試 plan_readview_sweep 介面 stub (M9)。"""
+    drive = FakeDrive()
+    rv_id = drive.seed_folder("readview_root")
+    sub_id = drive.seed_folder("unauthorized_sub", parent=rv_id)
+    f_trusted = drive.seed_file(rv_id, "trusted.json", b"trusted")
+    f_untrusted = drive.seed_file(rv_id, "untrusted.json", b"untrusted")
+
+    listing = RepoListing(
+        prefix_folder_id=rv_id,
+        files=(drive.get(f_trusted), drive.get(f_untrusted)),
+        subfolders=(drive.get(sub_id),),
+    )
+
+    decisions = plan_readview_sweep(
+        listing,
+        trusted_file_ids={f_trusted},
+        readview_folder_id=rv_id,
+    )
+    assert len(decisions) == 3
+    dec_map = {d.file.id: d for d in decisions}
+    assert dec_map[f_trusted].disposition == Disposition.KEEP
+    assert dec_map[f_untrusted].disposition == Disposition.QUARANTINE
+    assert dec_map[sub_id].disposition == Disposition.QUARANTINE
+    for d in decisions:
+        assert d.from_parent == rv_id
+
+
+def test_run_settle_and_sweep_no_moves_on_any_read_error(tmp_path: Path):
+    """H4 性質測試：在任何 ReadError 之下，絕無任何 WRITE_OPS 發生且不移動任何檔案。"""
+    repo_dir = tmp_path / "src_repo"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(repo_dir)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo_dir), "config", "user.email", "test@test.com"], check=True)
+    (repo_dir / "file.txt").write_text("v1")
+    subprocess.run(["git", "-C", str(repo_dir), "add", "file.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo_dir), "commit", "-m", "v1"], check=True)
+    v1_sha = subprocess.check_output(["git", "-C", str(repo_dir), "rev-parse", "HEAD"], text=True).strip()
+
+    uuid = "01234567-89ab-cdef-0123-456789abcdef"
+    bundle1 = _create_test_bundle(repo_dir, tmp_path, "refs/heads/main", uuid)
+    b1_bytes = bundle1.read_bytes()
+    b1_name = bundle1.name
+
+    m_bytes = f"{b1_name}\n".encode("utf-8")
+    m_sha = hashlib.sha256(m_bytes).hexdigest().lower()
+
+    state = PinState(
+        repo="agora",
+        repo_uuid=uuid,
+        refs={"refs/heads/main": v1_sha},
+        manifest_sha256=m_sha,
+        prev_manifest_sha256=None,
+        active_bundles=(b1_name,),
+        removed_bundles=frozenset(),
+        annex_keys=frozenset(),
+        promoted_at="2026-09-27T08:00:00Z",
+        run_id="run-1",
+    )
+
+    def create_seeded_drive() -> tuple[FakeDrive, str, str, str]:
+        d = FakeDrive()
+        root_id = d.seed_folder("root")
+        p_id = d.seed_folder("repo", parent=root_id)
+        q_id = d.seed_folder("quarantine")
+        # 上層多餘同名資料夾（應被 check_parents 隔離）
+        d.seed_folder("repo", parent=root_id)
+        # 前綴資料夾內之檔案：manifest, bundle, 以及未知檔案（應被 plan_sweep 隔離）
+        d.seed_file(p_id, f"GITMANIFEST--{uuid}", m_bytes)
+        d.seed_file(p_id, b1_name, b1_bytes)
+        d.seed_file(p_id, "unknown_intruder.txt", b"bad_content")
+        return d, root_id, p_id, q_id
+
+    # 1. 基準執行：正常無錯時應隔離 2 個項目（1 個多餘上層資料夾 + 1 個未知檔案）
+    baseline_drive, r_id, pref_id, quar_id = create_seeded_drive()
+    levels = [PrefixLevel(parent_id=r_id, name="repo", expected_id=pref_id)]
+    pins = MemoryPinStore({})
+
+    res = run_settle_and_sweep(
+        state,
+        None,
+        drive=baseline_drive,
+        pins=pins,
+        levels=levels,
+        prefix_folder_id=pref_id,
+        quarantine_folder_id=quar_id,
+        repo_uuid=uuid,
+        workdir=tmp_path / "baseline_work",
+    )
+    assert res.moved_count == 2
+    # 基準確實產生了 WRITE_OPS（move / create）
+    assert any(op in FakeDrive.WRITE_OPS for op, _ in baseline_drive.calls)
+
+    # 計算基準過程中所有的讀取操作次數
+    total_reads = sum(1 for op, _ in baseline_drive.calls if op in FakeDrive.READ_OPS)
+    assert total_reads >= 3, f"預期至少有 3 次讀取，實際為 {total_reads}"
+
+    # 2. 窮舉測試：對每一次讀取依序注入 ReadError，驗證絕無任何 WRITE_OPS
+    for nth in range(total_reads):
+        test_drive, r_id, pref_id, quar_id = create_seeded_drive()
+        test_drive.inject_nth_read(nth, error=ReadError)
+        with pytest.raises(Exception):
+            run_settle_and_sweep(
+                state,
+                None,
+                drive=test_drive,
+                pins=pins,
+                levels=[PrefixLevel(parent_id=r_id, name="repo", expected_id=pref_id)],
+                prefix_folder_id=pref_id,
+                quarantine_folder_id=quar_id,
+                repo_uuid=uuid,
+                workdir=tmp_path / f"work_inject_{nth}",
+            )
+
+        # 核心不變量斷言：calls 內不可有任何 WRITE_OPS
+        writes = [call for call in test_drive.calls if call[0] in FakeDrive.WRITE_OPS]
+        assert writes == [], f"在第 {nth} 次讀取注入 ReadError 時違反保證，發生了寫入操作: {writes}"
+
+
+def _init_bare_pin_repo(bare_path: Path, init_work: Path) -> None:
+    bare_path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(bare_path)], check=True, capture_output=True)
+    subprocess.run(["git", "clone", str(bare_path), str(init_work)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(init_work), "config", "user.name", "Test Committer"], check=True)
+    subprocess.run(["git", "-C", str(init_work), "config", "user.email", "test@test.com"], check=True)
+    (init_work / "README.md").write_text("# Pin Repo")
+    subprocess.run(["git", "-C", str(init_work), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(init_work), "commit", "-m", "init"], check=True)
+    subprocess.run(["git", "-C", str(init_work), "push", "origin", "main"], check=True)
+
+
+def test_git_pin_store_h1_h2_strict_schema(tmp_path: Path):
+    """測試 GitPinStore 嚴格 schema 檢查與防呆 (H1, H2)。"""
+    pin_remote = tmp_path / "pin_remote.git"
+    _init_bare_pin_repo(pin_remote, tmp_path / "init_work1")
+
+    clone_dir = tmp_path / "pin_clone"
+    store = GitPinStore(repo_url=f"file://{pin_remote}", workdir=clone_dir)
+
+    uuid = "01234567-89ab-cdef-0123-456789abcdef"
+    state = PinState(
+        repo="agora",
+        repo_uuid=uuid,
+        refs={"refs/heads/main": "1" * 40},
+        manifest_sha256="m" * 64,
+        prev_manifest_sha256=None,
+        active_bundles=(),
+        removed_bundles=frozenset(),
+        annex_keys=frozenset({"key1"}),
+        promoted_at="2026-09-27T08:00:00Z",
+        run_id="run-1",
+    )
+    store.promote(state)
+    keys_backup = b"key1\n"
+
+    # 1. 成功載入
+    loaded_state, loaded_pending = store.load("agora")
+    assert loaded_state == state
+    assert loaded_pending is None
+
+    init_work = tmp_path / "init_work1"
+    subprocess.run(["git", "-C", str(init_work), "pull"], check=True)
+
+    # 2. H2: 刪除 .keys 檔 -> 拋出 ReadError
+    subprocess.run(["git", "-C", str(init_work), "rm", ".pin/agora.keys"], check=True)
+    subprocess.run(["git", "-C", str(init_work), "commit", "-m", "rm keys"], check=True)
+    subprocess.run(["git", "-C", str(init_work), "push", "origin", "main"], check=True)
+    with pytest.raises(ReadError) as exc_info:
+        store.load("agora")
+    assert "缺少必填之 keys 檔案" in str(exc_info.value)
+
+    # 3. H2: .keys 雜湊與 json 記錄不符 -> 拋出 ReadError
+    (init_work / ".pin" / "agora.keys").write_bytes(b"tampered_keys_data\n")
+    subprocess.run(["git", "-C", str(init_work), "add", ".pin/agora.keys"], check=True)
+    subprocess.run(["git", "-C", str(init_work), "commit", "-m", "tamper keys"], check=True)
+    subprocess.run(["git", "-C", str(init_work), "push", "origin", "main"], check=True)
+    with pytest.raises(ReadError) as exc_info:
+        store.load("agora")
+    assert "不符" in str(exc_info.value)
+
+    # 4. H1: pending.json 格式損毀 -> 拋出 ReadError（絕不視為 None）
+    (init_work / ".pin" / "agora.keys").write_bytes(keys_backup)
+    (init_work / ".pin" / "agora.pending.json").write_text("{corrupted_json_syntax")
+    (init_work / ".pin" / "agora.pending.keys").write_text("")
+    subprocess.run(["git", "-C", str(init_work), "add", ".pin/agora*"], check=True)
+    subprocess.run(["git", "-C", str(init_work), "commit", "-m", "corrupt pending"], check=True)
+    subprocess.run(["git", "-C", str(init_work), "push", "origin", "main"], check=True)
+    with pytest.raises(ReadError) as exc_info:
+        store.load("agora")
+    assert "解析待定釘選值 pending.json 失敗" in str(exc_info.value)
+
+    # 5. H1: pending.json 缺少必要欄位 -> 拋出 ReadError
+    (init_work / ".pin" / "agora.pending.json").write_text(json.dumps({"repo": "agora"}))
+    subprocess.run(["git", "-C", str(init_work), "add", ".pin/agora.pending.json"], check=True)
+    subprocess.run(["git", "-C", str(init_work), "commit", "-m", "incomplete pending"], check=True)
+    subprocess.run(["git", "-C", str(init_work), "push", "origin", "main"], check=True)
+    with pytest.raises(ReadError) as exc_info:
+        store.load("agora")
+    assert "缺少必填欄位" in str(exc_info.value)
+
+
+def test_git_pin_store_non_fast_forward_rejected(tmp_path: Path):
+    """測試 GitPinStore 在非 fast-forward 衝突時拒絕寫入拋出 WriteError (L)。"""
+    pin_remote = tmp_path / "pin_remote.git"
+    _init_bare_pin_repo(pin_remote, tmp_path / "init_work2")
+
+    store1 = GitPinStore(repo_url=f"file://{pin_remote}", workdir=tmp_path / "clone1")
+    store2 = GitPinStore(repo_url=f"file://{pin_remote}", workdir=tmp_path / "clone2")
+
+    uuid = "01234567-89ab-cdef-0123-456789abcdef"
+    state1 = PinState(
+        repo="agora",
+        repo_uuid=uuid,
+        refs={"refs/heads/main": "1" * 40},
+        manifest_sha256="m1" * 32,
+        prev_manifest_sha256=None,
+        active_bundles=(),
+        removed_bundles=frozenset(),
+        annex_keys=frozenset(),
+        promoted_at="2026-09-27T08:00:00Z",
+        run_id="run-1",
+    )
+    store1.promote(state1)
+
+    # store2 同步載入
+    store2.load("agora")
+
+    # store1 先寫入新版本並 push
+    state2 = PinState(
+        repo="agora",
+        repo_uuid=uuid,
+        refs={"refs/heads/main": "2" * 40},
+        manifest_sha256="m2" * 32,
+        prev_manifest_sha256="m1" * 32,
+        active_bundles=(),
+        removed_bundles=frozenset(),
+        annex_keys=frozenset(),
+        promoted_at="2026-09-27T08:01:00Z",
+        run_id="run-2",
+    )
+    store1.promote(state2)
+
+    # 模擬 push 衝突：在 clone2 內部寫入新變更並嘗試 _commit_and_push
+    (tmp_path / "clone2" / ".pin" / "conflict.txt").write_text("conflict")
+    with pytest.raises(WriteError):
+        store2._commit_and_push("conflict")
+
 

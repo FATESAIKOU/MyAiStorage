@@ -13,10 +13,11 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 from pathlib import Path
+import shutil
 import tempfile
 from typing import Any
 
-from aistorage.annex.manifest import parse_bundle_name, parse_manifest
+from aistorage.annex.manifest import BundleName, Manifest, parse_bundle_name, parse_manifest
 from aistorage.annex.replay import replay_refs
 from aistorage.clock import Clock
 from aistorage.drive.model import DriveClient, DriveFile
@@ -40,6 +41,34 @@ class SettleOutcome(Enum):
     PROMOTED = "promoted"              # 遠端已成功落實待定狀態 -> 轉正
     DROPPED = "dropped"                # 遠端仍為正式狀態（push 未發生或已還原）-> 丟棄待定
     BAK_RECOVERY = "bak_recovery"      # 主 manifest 缺失但 .bak 等於正式釘選值 -> 丟棄待定，照常往下
+
+
+def check_manifest_continuity(state: PinState, parsed_manifest: Manifest) -> None:
+    """驗證 manifest 連續性（M3、M5）。
+
+    1. removed ⊇ state.removed_bundles（已移除不可遺失）
+    2. 新增的 removed 必須來自原本的 active（removed - state.removed_bundles ⊆ state.active_bundles）
+    3. 舊的 active 不可憑空消失（state.active_bundles ⊆ new.active ∪ new.removed）
+    """
+    existing_active = set(state.active_bundles)
+    new_active = set(parsed_manifest.active)
+    new_removed = set(parsed_manifest.removed)
+
+    # 1. removed 包含關係
+    if not parsed_manifest.removed.issuperset(state.removed_bundles):
+        missing_removed = state.removed_bundles - parsed_manifest.removed
+        raise MismatchError(f"新 manifest 遺失了既有已移除 bundle 紀錄: {missing_removed}")
+
+    # 2. 新移除者必須來自原本 active
+    newly_removed = parsed_manifest.removed - state.removed_bundles
+    if not newly_removed.issubset(existing_active):
+        invalid_removed = newly_removed - existing_active
+        raise MismatchError(f"新移除之 bundle 以前並非 active bundle: {invalid_removed}")
+
+    # 3. 舊 active 不能憑空消失 (M5)
+    disappeared = existing_active - (new_active | new_removed)
+    if disappeared:
+        raise MismatchError(f"舊 active bundle 憑空消失（既非 active 亦未列入 removed）: {disappeared}")
 
 
 def _download_and_replay(
@@ -80,8 +109,6 @@ def _download_and_replay(
         )
         return replayed
     finally:
-        # 清理暫存 bundle 檔案
-        import shutil
         shutil.rmtree(temp_bundle_dir, ignore_errors=True)
 
 
@@ -100,7 +127,7 @@ def settle(
     1. 候選 manifest：名稱符合 GITMANIFEST--<uuid> 的檔案（可能有多個同名），逐一 download_bytes（上限 1 MiB）。
     2. 對每個候選：parse_manifest -> active 的每個 bundle 下載並 replay_refs。
     3. 判定：
-       - 有候選 refs == pending.refs 且無第二個內容相異但亦相符之候選 -> PROMOTED（產生新 PinState）。
+       - 有候選 refs == pending.refs 且通過連續性檢查，無第二個內容相異但亦相符之候選 -> PROMOTED（產生新 PinState）。
        - 有候選 refs == state.refs 且內容雜湊 == state.manifest_sha256 -> DROPPED。
        - 主 manifest 不在、.bak 內容雜湊 == state.manifest_sha256 且重放 refs == state.refs -> BAK_RECOVERY。
        - 其他情形 -> 拋出 MismatchError（中止）。
@@ -108,6 +135,12 @@ def settle(
     """
     if pending is None:
         return SettleOutcome.NO_PENDING, state
+
+    # M3: 檢查 pending 基準是否與當前正式值一致
+    if pending.base_manifest_sha256 != state.manifest_sha256:
+        raise MismatchError(
+            f"待定基準雜湊 ({pending.base_manifest_sha256}) 與正式釘選值雜湊 ({state.manifest_sha256}) 不符"
+        )
 
     workdir = Path(workdir).resolve()
     workdir.mkdir(parents=True, exist_ok=True)
@@ -156,11 +189,13 @@ def settle(
             # 無效或無法重放之候選
             continue
 
-    # 1. 檢查是否符合 PROMOTED（符合 pending.refs）
-    pending_matches = [
-        c for c in candidate_results
-        if c["refs"] == pending.refs
-    ]
+    # 1. 檢查是否符合 PROMOTED（符合 pending.refs 且通過連續性檢查）
+    pending_matches = []
+    for c in candidate_results:
+        if c["refs"] == pending.refs:
+            check_manifest_continuity(state, c["manifest"])
+            pending_matches.append(c)
+
     if pending_matches:
         distinct_shas = {c["sha256"] for c in pending_matches}
         if len(distinct_shas) > 1:

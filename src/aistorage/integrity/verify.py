@@ -12,28 +12,33 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
+import shutil
 import tempfile
+from typing import TYPE_CHECKING
+from datetime import datetime
 
 from aistorage.annex.git import AnnexGit
 from aistorage.annex.manifest import parse_bundle_name, parse_manifest
 from aistorage.annex.replay import replay_refs
+from aistorage.clock import parse_rfc3339
 from aistorage.drive.model import DriveClient
 from aistorage.errors import MismatchError
 from aistorage.integrity.pin import PinState
-from aistorage.integrity.settle import RepoListing
+from aistorage.integrity.settle import RepoListing, check_manifest_continuity
 
 
 def verify_clone(
     git: AnnexGit,
     state: PinState,
     *,
-    drive: DriveClient | None = None,
-    prefix_folder_id: str | None = None,
+    drive: DriveClient,
+    prefix_folder_id: str,
 ) -> None:
     """提交流程第 5 步：驗證 clone 成果。
 
     - git.ls_remote() 之 ref 集合與值必須完全等於 state.refs。
-    - 若提供 drive 與 prefix_folder_id，遠端主 manifest 必須恰好一個且內容雜湊等於 state.manifest_sha256。
+    - 遠端主 manifest 必須恰好一個且內容雜湊等於 state.manifest_sha256。
+    - 若 Drive 未提供 checksum，拋出 MismatchError 註明 Drive 尚未提供 checksum。
     - 否則拋出 MismatchError。
     """
     remote_refs = git.ls_remote()
@@ -42,15 +47,19 @@ def verify_clone(
             f"clone 後 ls-remote ({remote_refs}) 與正式釘選值 refs ({state.refs}) 不符"
         )
 
-    if drive is not None and prefix_folder_id is not None:
-        manifest_name = f"GITMANIFEST--{state.repo_uuid}"
-        m_files = drive.find_by_name(prefix_folder_id, manifest_name)
-        if len(m_files) != 1:
-            raise MismatchError(f"遠端主 manifest 數量異常: 找到 {len(m_files)} 個 (預期恰好 1 個)")
-        if m_files[0].sha256 != state.manifest_sha256:
-            raise MismatchError(
-                f"遠端主 manifest 雜湊 ({m_files[0].sha256}) 與釘選值 ({state.manifest_sha256}) 不符"
-            )
+    manifest_name = f"GITMANIFEST--{state.repo_uuid}"
+    m_files = drive.find_by_name(prefix_folder_id, manifest_name)
+    if len(m_files) != 1:
+        raise MismatchError(f"遠端主 manifest 數量異常: 找到 {len(m_files)} 個 (預期恰好 1 個)")
+
+    mf = m_files[0]
+    if mf.sha256 is None:
+        raise MismatchError(f"Drive 尚未提供 checksum (sha256 is None): {mf.name}")
+
+    if mf.sha256 != state.manifest_sha256:
+        raise MismatchError(
+            f"遠端主 manifest 雜湊 ({mf.sha256}) 與釘選值 ({state.manifest_sha256}) 不符"
+        )
 
 
 def precheck(
@@ -68,9 +77,14 @@ def precheck(
     files = drive.find_by_name(prefix_folder_id, manifest_name)
     if len(files) != 1:
         raise MismatchError(f"預檢失敗：遠端 manifest 數量異常 ({len(files)} != 1)")
-    if files[0].sha256 != state.manifest_sha256:
+
+    f = files[0]
+    if f.sha256 is None:
+        raise MismatchError(f"Drive 尚未提供 checksum (sha256 is None): {f.name}")
+
+    if f.sha256 != state.manifest_sha256:
         raise MismatchError(
-            f"預檢失敗：遠端 manifest 雜湊 ({files[0].sha256}) 與釘選值 ({state.manifest_sha256}) 不符"
+            f"預檢失敗：遠端 manifest 雜湊 ({f.sha256}) 與釘選值 ({state.manifest_sha256}) 不符"
         )
 
 
@@ -89,26 +103,33 @@ def verify_after_push(
     listing_before: RepoListing,
     state: PinState,
     local_refs: dict[str, str],
-    push_started_at: str,
+    push_started_at: str | datetime,
     *,
     workdir: Path,
 ) -> PushVerification:
     """提交流程第 10 步：push 後遠端狀態驗證。
 
-    規則（review-1.2-1.6 H3、review-1.4f3 M1）：
+    規則（review-1.2-1.6 H3、review-1.4f3 M1、review-g3c M5）：
     1. ls_remote == local_refs（全部 ref 相等）。
     2. 重新列舉，主 manifest 恰好一個，解析出 active 與 removed。
-    3. active 裡不在 state.active_bundles 的新增 bundle：
-       - 其 created_time >= push_started_at。
+    3. 連續性檢查（check_manifest_continuity）：
+       - removed ⊇ state.removed_bundles。
+       - newly_removed ⊆ state.active_bundles。
+       - state.active_bundles ⊆ new_active ∪ new_removed（舊 active 不得憑空消失）。
+    4. active 裡不在 state.active_bundles 的新增 bundle：
+       - 其 created_at >= push_started_at。
        - listing_before 裡沒有同名檔。
-    4. removed 包含關係：
-       - removed 必須為 state.removed_bundles 之超集（removed ⊇ state.removed_bundles）。
-       - 新移除者必須來自原本的 active（removed − state.removed_bundles ⊆ state.active_bundles）。
-    5. 下載新增 bundle，連同既有 active 依序重放，驗證 refs == local_refs。
+       - 篩選比對名稱與雜湊相符之檔案。
+    5. 下載 active bundle（篩選符合雜湊者），連同既有 active 依序重放，驗證 refs == local_refs。
     - 任何一條不符拋出 MismatchError（待定釘選值保留，留待下一輪 settle 結算）。
     """
     workdir = Path(workdir).resolve()
     workdir.mkdir(parents=True, exist_ok=True)
+
+    if isinstance(push_started_at, str):
+        push_dt = parse_rfc3339(push_started_at)
+    else:
+        push_dt = push_started_at
 
     # 1. ls-remote 嚴格比對
     remote_refs = git.ls_remote()
@@ -127,7 +148,10 @@ def verify_after_push(
     new_manifest_sha = hashlib.sha256(m_data).hexdigest().lower()
     parsed_manifest = parse_manifest(m_data, repo_uuid=state.repo_uuid)
 
-    # 3. 檢查新增之 active bundle
+    # 3. 連續性檢查 (M3, M5)
+    check_manifest_continuity(state, parsed_manifest)
+
+    # 4. 檢查新增之 active bundle
     existing_active = set(state.active_bundles)
     listing_before_names = {f.name for f in listing_before.files}
 
@@ -136,25 +160,23 @@ def verify_after_push(
         if b_name in listing_before_names:
             raise MismatchError(f"新增之 active bundle '{b_name}' 已存在於 push 前的 listing 中")
 
+        b_info = parse_bundle_name(b_name)
+        if not b_info or b_info.repo_uuid != state.repo_uuid:
+            raise MismatchError(f"新增之 active bundle 檔名不合法: {b_name}")
+
         b_files = drive.find_by_name(listing_before.prefix_folder_id, b_name)
-        if not b_files:
-            raise MismatchError(f"找不到新增之 active bundle 檔案: {b_name}")
+        matched = [
+            f for f in b_files
+            if f.sha256 == b_info.sha256 and (f.size is None or f.size == b_info.size)
+        ]
+        if not matched:
+            raise MismatchError(f"找不到符合新增 active bundle 宣告與雜湊之檔案: {b_name}")
 
-        bf = b_files[0]
-        if bf.created_time < push_started_at:
+        bf = matched[0]
+        if bf.created_at < push_dt:
             raise MismatchError(
-                f"新增之 bundle '{b_name}' created_time ({bf.created_time}) 早於 push 開始時間 ({push_started_at})"
+                f"新增之 bundle '{b_name}' created_at ({bf.created_time}) 早於 push 開始時間 ({push_started_at})"
             )
-
-    # 4. removed 包含關係檢查
-    if not parsed_manifest.removed.issuperset(state.removed_bundles):
-        missing_removed = state.removed_bundles - parsed_manifest.removed
-        raise MismatchError(f"新 manifest 遺失了既有已移除 bundle 紀錄: {missing_removed}")
-
-    newly_removed = parsed_manifest.removed - state.removed_bundles
-    if not newly_removed.issubset(existing_active):
-        invalid_removed = newly_removed - existing_active
-        raise MismatchError(f"新移除之 bundle 以前並非 active bundle: {invalid_removed}")
 
     # 5. 下載 active bundle 並依序重放
     temp_dir = Path(tempfile.mkdtemp(prefix="aistorage_verify_bundles_", dir=str(workdir)))
@@ -168,9 +190,13 @@ def verify_after_push(
             dest = temp_dir / b_name
             if not dest.is_file():
                 found = drive.find_by_name(listing_before.prefix_folder_id, b_name)
-                if not found:
-                    raise MismatchError(f"遠端找不到 active bundle: {b_name}")
-                drive.download(found[0].id, dest, max_bytes=256 * 1024 * 1024)
+                matched = [
+                    f for f in found
+                    if f.sha256 == b_info.sha256 and (f.size is None or f.size == b_info.size)
+                ]
+                if not matched:
+                    raise MismatchError(f"遠端找不到符合雜湊之 active bundle: {b_name}")
+                drive.download(matched[0].id, dest, max_bytes=256 * 1024 * 1024)
             downloaded_bundles.append(dest)
 
         replayed = replay_refs(
@@ -189,5 +215,4 @@ def verify_after_push(
             removed=parsed_manifest.removed,
         )
     finally:
-        import shutil
         shutil.rmtree(temp_dir, ignore_errors=True)

@@ -290,7 +290,7 @@ class Disposition(Enum):
 
 @dataclass(frozen=True)
 class SweepDecision:
-    file: DriveFile; disposition: Disposition; reason: str
+    file: DriveFile; disposition: Disposition; reason: str; from_parent: str = ""
 
 def plan_sweep(listing: RepoListing, state: PinState, *, repo_uuid: str) -> list[SweepDecision]:
     # 純函式，不碰網路。規則（design D2、review-1.4f3 H2/H3、review-1.4f5 H1）：
@@ -299,17 +299,18 @@ def plan_sweep(listing: RepoListing, state: PinState, *, repo_uuid: str) -> list
     # - GITBUNDLE：名稱 ∈ active 而且 sha256 == 名稱內嵌的雜湊、size 相符 → KEEP（同內容重複的只留一個）
     #             名稱 ∈ removed → GC
     #             其他 → QUARANTINE
-    # - annex 物件（SHA256E-s<N>--<sha>…）：key ∈ state.annex_keys 而且 sha256Checksum 相符 → KEEP；其他 QUARANTINE
-    # - sha256 是 None 的檔 → NEED_CONTENT_CHECK（由 apply 前的步驟下載驗證，再重新判定）
+    # - annex 物件（SHA256E-s<N>--<sha>…）：key ∈ state.annex_keys 而且 sha256Checksum 相符且 size 相符 → KEEP；其他 QUARANTINE
+    # - sha256 或 size 缺失的檔 → NEED_CONTENT_CHECK（由 apply 前的步驟下載驗證，再重新判定）
     # - 子資料夾 → QUARANTINE（整個子樹；layout 是平的）
     # - 其他名稱 → QUARANTINE
 
 def resolve_content_checks(decisions, drive, cache: ChecksumCache) -> list[SweepDecision]: ...
-    # 下載 NEED_CONTENT_CHECK 的檔算 sha256，寫進 cache（存在真本的 _committer/checksums.json），重新判定
+    # 下載 NEED_CONTENT_CHECK 的檔算 sha256，寫進 cache（存在真本的 _committer/checksums.json），替換回完整 listing 重新整份判定
 
-def apply_sweep(decisions: list[SweepDecision], drive: DriveClient, *, prefix_folder_id: str,
-                quarantine_folder_id: str, dry_run: bool) -> int:
-    # 只執行 QUARANTINE 的移動；任何一次 WriteError → raise AbortRun（這一輪中止）；回傳移動的數量
+def apply_sweep(decisions: list[SweepDecision], drive: DriveClient, *, quarantine_folder_id: str,
+                clock: Clock | None = None, prefix_folder_id: str | None = None, dry_run: bool = False) -> int:
+    # 只執行 QUARANTINE 的移動；移至日期子資料夾 quarantine/<YYYY-MM-DD>/（按日分層，保留 7 天救回窗口，review-g3c H3）；
+    # 逐項使用各自的 from_parent 搬移（M7）；任何一次 WriteError → raise AbortRun（這一輪中止）；回傳移動的數量
 ```
 - **順序保證**：`plan_sweep` 先完整算完，才開始移動；只要計畫階段有任何 `ReadError`，就一個檔都不動。
 - 讀取視圖資料夾也用同一套：讀取視圖的可信集合是「讀取視圖 manifest 列出的 file id」（第 4 組定義），第 3 組先只清掃 repo 資料夾，介面預留 `plan_readview_sweep(listing, readview_manifest)`。
@@ -317,7 +318,7 @@ def apply_sweep(decisions: list[SweepDecision], drive: DriveClient, *, prefix_fo
 ### 3.5 核對、預檢、push 後驗證（`integrity/verify.py`）
 
 ```python
-def verify_clone(git: AnnexGit, state: PinState) -> None:
+def verify_clone(git: AnnexGit, state: PinState, *, drive: DriveClient, prefix_folder_id: str) -> None:
     # 第 5 步：git.ls_remote() 的 ref 集合與值 == state.refs；遠端主 manifest（以 find_by_name
     #          找、只允許恰好一個）的 sha256Checksum == state.manifest_sha256；否則 MismatchError
 
@@ -330,11 +331,11 @@ class PushVerification:
 
 def verify_after_push(git: AnnexGit, drive: DriveClient, listing_before: RepoListing,
                       state: PinState, local_refs: dict[str, str], push_started_at: str) -> PushVerification:
-    # 第 10 步（review-1.2-1.6 H3、review-1.4f3 M1）：
+    # 第 10 步（review-1.2-1.6 H3、review-1.4f3 M1、review-g3c M5）：
     # 1. ls_remote == local_refs（全部 ref）
     # 2. 重新列舉，主 manifest 恰好一個；解析
-    # 3. active 裡不在 state.active_bundles 的 bundle，其 created_time ≥ push_started_at，而且 listing_before 裡沒有同名檔
-    # 4. removed ⊇ state.removed_bundles，而且 removed − state.removed_bundles ⊆ state.active_bundles
+    # 3. 連續性檢查（removed ⊇ state.removed, newly_removed ⊆ state.active, 舊 active 不得消失）
+    # 4. active 裡不在 state.active_bundles 的 bundle，其 created_at ≥ push_started_at（時間比較），而且 listing_before 裡沒有同名檔
     # 5. 下載新增的 bundle，連同既有的 active 依序重放，refs == local_refs
     # 任何一條不符 → MismatchError（待定留著，下一輪由 settle 判定）
 ```
@@ -343,9 +344,11 @@ def verify_after_push(git: AnnexGit, drive: DriveClient, listing_before: RepoLis
 
 ```python
 def collect_removed_bundles(listing: RepoListing, state: PinState) -> list[DriveFile]: ...
-def gc_removed(files: list[DriveFile], drive: DriveClient, *, prefix_folder_id: str, dry_run: bool) -> int:
+def gc_removed(files: list[DriveFile], drive: DriveClient, *, prefix_folder_id: str, state: PinState, max_delete: int = 200, dry_run: bool = False) -> int:
     # 第 11 步：永久刪除前，逐一 get() 確認 parents 包含 prefix_folder_id、名稱 ∈ state.removed_bundles（防呆，review-1.3c M1）
-def purge_quarantine(drive: DriveClient, quarantine_folder_id: str, *, older_than_days: int, now: str, dry_run: bool) -> int: ...
+    # 依名稱排序確保確定性；盡力而為捕捉 ReadError/WriteError/NotFound 不中止整輪（M6）
+def purge_quarantine(drive: DriveClient, quarantine_folder_id: str, *, older_than_days: int = 7, now: str | datetime, max_delete: int = 200, dry_run: bool = False) -> int: ...
+    # 依日期子資料夾名稱（YYYY-MM-DD）或 created_at 判定是否超過指定天數，整批刪除；單輪設上限（預設 200）；盡力而為（H3, M6）
 ```
 - 依 design D2「第 11 步回收」：用**新的**正式釘選值的 removed 清單。第一次回收（大量舊 bundle）要設上限，例如每一輪最多刪 200 個，其餘留到下一輪，避免單一輪超時。
 

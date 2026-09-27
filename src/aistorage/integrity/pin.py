@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -126,10 +127,20 @@ class GitPinStore(PinStore):
         self.user_email = user_email
 
         self._env = get_git_env()
+        # M2: 使用 SSH 存取時強制要求 key_path 與 known_hosts_path
+        if self.repo_url.startswith(("ssh://", "git@")):
+            if not self.key_path or not self.known_hosts_path:
+                raise ValueError("使用 SSH 存取 pin repo 時，key_path 與 known_hosts_path 為必填 (M2)")
+            if not self.key_path.is_file():
+                raise ValueError(f"找不到 SSH deploy key 檔案: {self.key_path}")
+            if not self.known_hosts_path.is_file():
+                raise ValueError(f"找不到 known_hosts 檔案: {self.known_hosts_path}")
+
         if self.key_path and self.known_hosts_path:
             ssh_cmd = (
-                f"ssh -i {self.key_path} -o IdentitiesOnly=yes "
-                f"-o StrictHostKeyChecking=yes -o UserKnownHostsFile={self.known_hosts_path}"
+                f"ssh -F /dev/null -i {self.key_path} -o IdentitiesOnly=yes "
+                f"-o StrictHostKeyChecking=yes -o UserKnownHostsFile={self.known_hosts_path} "
+                f"-o IdentityAgent=none"
             )
             self._env["GIT_SSH_COMMAND"] = ssh_cmd
 
@@ -145,7 +156,8 @@ class GitPinStore(PinStore):
             check=False,
         )
         if check and proc.returncode != 0:
-            raise WriteError(f"GitPinStore 指令失敗: {' '.join(cmd)}\nstderr: {proc.stderr}")
+            cmd_name = f"{cmd[0]} {cmd[1]}" if len(cmd) > 1 else cmd[0]
+            raise WriteError(f"GitPinStore 指令 '{cmd_name}' 失敗 (rc={proc.returncode})")
         return proc
 
     def _ensure_cloned_and_updated(self) -> None:
@@ -161,19 +173,19 @@ class GitPinStore(PinStore):
                 check=False,
             )
             if proc.returncode != 0:
-                raise ReadError(f"無法複製 pin repo ({self.repo_url}): {proc.stderr}")
+                raise ReadError(f"無法複製 pin repo (rc={proc.returncode})")
 
             # 設定 committer 身分
             self._run_git(["config", "user.name", self.user_name])
             self._run_git(["config", "user.email", self.user_email])
         else:
-            # fetch 並對齊 origin/main
-            proc = self._run_git(["fetch", "origin"], check=False)
-            if proc.returncode != 0:
-                raise ReadError(f"pin repo fetch 失敗: {proc.stderr}")
+            # M1: fetch 並 hard reset 清理乾淨，防殘留本地未提交或未推送的變更
+            proc_fetch = self._run_git(["fetch", "origin"], check=False)
+            if proc_fetch.returncode != 0:
+                raise ReadError(f"pin repo fetch 失敗 (rc={proc_fetch.returncode})")
 
-            # 嘗試切換至 main 並 reset
-            self._run_git(["checkout", "-B", "main", "origin/main"], check=False)
+            self._run_git(["reset", "--hard", "origin/main"])
+            self._run_git(["clean", "-fdx"])
 
     def load(self, repo: str) -> tuple[PinState, PinPending | None]:
         self._ensure_cloned_and_updated()
@@ -187,52 +199,103 @@ class GitPinStore(PinStore):
         except Exception as e:
             raise ReadError(f"解析正式釘選值 JSON 失敗: {e}") from None
 
+        if not isinstance(data, dict):
+            raise ReadError("正式釘選值 JSON 必須是物件 (dict)")
+
+        # L & H2: 檢查 repo 欄位相符
+        if data.get("repo") != repo:
+            raise ReadError(f"正式釘選值 repo 欄位 ('{data.get('repo')}') 與查詢目標 ('{repo}') 不符")
+
+        required_state_keys = {
+            "repo", "repo_uuid", "refs", "manifest_sha256",
+            "active_bundles", "removed_bundles", "promoted_at", "run_id"
+        }
+        missing_state_keys = required_state_keys - set(data.keys())
+        if missing_state_keys:
+            raise ReadError(f"正式釘選值缺少必填欄位: {missing_state_keys}")
+
+        if not isinstance(data["refs"], dict) or not isinstance(data["active_bundles"], list) or not isinstance(data["removed_bundles"], list):
+            raise ReadError("正式釘選值欄位型別不符")
+
+        # H2: keys 檔必須存在
         keys_file = pin_dir / f"{repo}.keys"
-        annex_keys: frozenset[str] = frozenset()
-        if keys_file.is_file():
-            annex_keys = frozenset(
-                line.strip()
-                for line in keys_file.read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            )
+        if not keys_file.is_file():
+            raise ReadError(f"缺少必填之 keys 檔案: {keys_file}")
+
+        keys_bytes = keys_file.read_bytes()
+        annex_keys = frozenset(
+            line.strip()
+            for line in keys_bytes.decode("utf-8").splitlines()
+            if line.strip()
+        )
+        if "annex_keys_count" in data and len(annex_keys) != data["annex_keys_count"]:
+            raise ReadError(f"annex_keys 數量 ({len(annex_keys)}) 與宣告 ({data['annex_keys_count']}) 不符")
+        if "annex_keys_sha256" in data:
+            calc_keys_sha = hashlib.sha256(keys_bytes).hexdigest().lower()
+            if calc_keys_sha != data["annex_keys_sha256"]:
+                raise ReadError(f"keys 檔案雜湊 ({calc_keys_sha}) 與宣告 ({data['annex_keys_sha256']}) 不符")
 
         state = PinState(
             repo=data["repo"],
             repo_uuid=data["repo_uuid"],
-            refs=dict(data.get("refs", {})),
+            refs=dict(data["refs"]),
             manifest_sha256=data["manifest_sha256"],
             prev_manifest_sha256=data.get("prev_manifest_sha256"),
-            active_bundles=tuple(data.get("active_bundles", [])),
-            removed_bundles=frozenset(data.get("removed_bundles", [])),
+            active_bundles=tuple(data["active_bundles"]),
+            removed_bundles=frozenset(data["removed_bundles"]),
             annex_keys=annex_keys,
             promoted_at=data["promoted_at"],
             run_id=data["run_id"],
         )
 
-        # 檢查是否存在 pending
+        # H1 & H2: 檢查是否存在 pending（檔案存在但損毀時一律 raise ReadError）
         pending_file = pin_dir / f"{repo}.pending.json"
         pending: PinPending | None = None
         if pending_file.is_file():
+            pkeys_file = pin_dir / f"{repo}.pending.keys"
+            if not pkeys_file.is_file():
+                raise ReadError(f"存在 pending.json 但缺少對應之 pending.keys: {pkeys_file}")
+
             try:
                 pdata = json.loads(pending_file.read_text(encoding="utf-8"))
-                pkeys_file = pin_dir / f"{repo}.pending.keys"
-                pending_keys: frozenset[str] = frozenset()
-                if pkeys_file.is_file():
-                    pending_keys = frozenset(
-                        line.strip()
-                        for line in pkeys_file.read_text(encoding="utf-8").splitlines()
-                        if line.strip()
-                    )
-                pending = PinPending(
-                    repo=pdata["repo"],
-                    base_manifest_sha256=pdata["base_manifest_sha256"],
-                    refs=dict(pdata.get("refs", {})),
-                    annex_keys=pending_keys,
-                    written_at=pdata["written_at"],
-                    run_id=pdata["run_id"],
-                )
-            except Exception:
-                pending = None
+            except Exception as e:
+                raise ReadError(f"解析待定釘選值 pending.json 失敗: {e}") from e
+
+            if not isinstance(pdata, dict):
+                raise ReadError("待定釘選值 pending.json 必須是物件 (dict)")
+
+            if pdata.get("repo") != repo:
+                raise ReadError(f"待定釘選值 repo 欄位 ('{pdata.get('repo')}') 與查詢目標 ('{repo}') 不符")
+
+            required_pending_keys = {"repo", "base_manifest_sha256", "refs", "written_at", "run_id"}
+            missing_pending_keys = required_pending_keys - set(pdata.keys())
+            if missing_pending_keys:
+                raise ReadError(f"待定釘選值缺少必填欄位: {missing_pending_keys}")
+
+            if not isinstance(pdata["refs"], dict):
+                raise ReadError("待定釘選值 refs 必須是字典 (dict)")
+
+            pkeys_bytes = pkeys_file.read_bytes()
+            pending_keys = frozenset(
+                line.strip()
+                for line in pkeys_bytes.decode("utf-8").splitlines()
+                if line.strip()
+            )
+            if "annex_keys_count" in pdata and len(pending_keys) != pdata["annex_keys_count"]:
+                raise ReadError(f"pending annex_keys 數量 ({len(pending_keys)}) 與宣告 ({pdata['annex_keys_count']}) 不符")
+            if "annex_keys_sha256" in pdata:
+                calc_pkeys_sha = hashlib.sha256(pkeys_bytes).hexdigest().lower()
+                if calc_pkeys_sha != pdata["annex_keys_sha256"]:
+                    raise ReadError(f"pending.keys 檔案雜湊 ({calc_pkeys_sha}) 與宣告 ({pdata['annex_keys_sha256']}) 不符")
+
+            pending = PinPending(
+                repo=pdata["repo"],
+                base_manifest_sha256=pdata["base_manifest_sha256"],
+                refs=dict(pdata["refs"]),
+                annex_keys=pending_keys,
+                written_at=pdata["written_at"],
+                run_id=pdata["run_id"],
+            )
 
         return state, pending
 
@@ -246,12 +309,18 @@ class GitPinStore(PinStore):
         self._run_git(["commit", "-m", commit_msg])
         proc = self._run_git(["push", "origin", "main"], check=False)
         if proc.returncode != 0:
-            raise WriteError(f"pin repo push 失敗 (可能遭遇衝突或 non-fast-forward): {proc.stderr}")
+            raise WriteError(f"pin repo push 失敗 (可能遭遇衝突或 non-fast-forward, rc={proc.returncode})")
 
     def write_pending(self, pending: PinPending) -> None:
         self._ensure_cloned_and_updated()
         pin_dir = self.workdir / ".pin"
         pin_dir.mkdir(parents=True, exist_ok=True)
+
+        keys_content = "\n".join(sorted(pending.annex_keys))
+        if keys_content:
+            keys_content += "\n"
+        keys_bytes = keys_content.encode("utf-8")
+        (pin_dir / f"{pending.repo}.pending.keys").write_bytes(keys_bytes)
 
         pdata = {
             "repo": pending.repo,
@@ -259,15 +328,13 @@ class GitPinStore(PinStore):
             "refs": {k: pending.refs[k] for k in sorted(pending.refs)},
             "written_at": pending.written_at,
             "run_id": pending.run_id,
+            "annex_keys_count": len(pending.annex_keys),
+            "annex_keys_sha256": hashlib.sha256(keys_bytes).hexdigest().lower(),
         }
         (pin_dir / f"{pending.repo}.pending.json").write_text(
             json.dumps(pdata, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        keys_content = "\n".join(sorted(pending.annex_keys))
-        if keys_content:
-            keys_content += "\n"
-        (pin_dir / f"{pending.repo}.pending.keys").write_text(keys_content, encoding="utf-8")
 
         self._commit_and_push(f"pin({pending.repo}): write pending for run {pending.run_id}")
 
@@ -275,6 +342,12 @@ class GitPinStore(PinStore):
         self._ensure_cloned_and_updated()
         pin_dir = self.workdir / ".pin"
         pin_dir.mkdir(parents=True, exist_ok=True)
+
+        keys_content = "\n".join(sorted(state.annex_keys))
+        if keys_content:
+            keys_content += "\n"
+        keys_bytes = keys_content.encode("utf-8")
+        (pin_dir / f"{state.repo}.keys").write_bytes(keys_bytes)
 
         sdata = {
             "repo": state.repo,
@@ -286,15 +359,13 @@ class GitPinStore(PinStore):
             "removed_bundles": sorted(state.removed_bundles),
             "promoted_at": state.promoted_at,
             "run_id": state.run_id,
+            "annex_keys_count": len(state.annex_keys),
+            "annex_keys_sha256": hashlib.sha256(keys_bytes).hexdigest().lower(),
         }
         (pin_dir / f"{state.repo}.json").write_text(
             json.dumps(sdata, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        keys_content = "\n".join(sorted(state.annex_keys))
-        if keys_content:
-            keys_content += "\n"
-        (pin_dir / f"{state.repo}.keys").write_text(keys_content, encoding="utf-8")
 
         # 移除 pending 檔案
         p_json = pin_dir / f"{state.repo}.pending.json"
