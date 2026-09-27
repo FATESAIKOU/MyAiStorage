@@ -398,8 +398,9 @@ def test_publish_records_failed_readings(tmp_path: Path) -> None:
     drive, folder, store, sid, ctx = _publisher_fixture(tmp_path)
     ctx = {**ctx, "converters": {"opencode": BoomConverter(ctx["converters"]["opencode"])}}
     report = _publish(drive, folder, store, ctx, tmp_path)
-    # NOTE（待 PM 澄清）：文件只說「記下失敗」，實作記的是 session id 而非 snapshot sha。
-    assert set(report.readings_failed) == {sid}
+    # PM 決定：同時記 session id 與 snapshot sha（(session_id, snapshot_sha256) 對）。
+    assert set(report.readings_failed) == {
+        (sid, ctx["shas"]["old"]), (sid, ctx["shas"]["new"])}
     assert _manifest_in_drive(drive).generation == 1
 
 
