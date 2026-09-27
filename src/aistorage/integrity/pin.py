@@ -199,7 +199,7 @@ class GitPinStore(PinStore):
             raise WriteError(f"GitPinStore 指令 '{cmd_name}' 失敗 (rc={proc.returncode})")
         return proc
 
-    def _ensure_cloned_and_updated(self) -> None:
+    def _ensure_cloned(self) -> None:
         self.workdir.parent.mkdir(parents=True, exist_ok=True)
         git_dir = self.workdir / ".git"
         if not git_dir.exists():
@@ -217,14 +217,18 @@ class GitPinStore(PinStore):
             # 設定 committer 身分
             self._run_git(["config", "user.name", self.user_name])
             self._run_git(["config", "user.email", self.user_email])
-        else:
-            # M1: fetch 並 hard reset 清理乾淨，防殘留本地未提交或未推送的變更
-            proc_fetch = self._run_git(["fetch", "origin"], check=False)
-            if proc_fetch.returncode != 0:
-                raise ReadError(f"pin repo fetch 失敗 (rc={proc_fetch.returncode})")
 
+    def _ensure_cloned_and_updated(self) -> None:
+        self._ensure_cloned()
+        # M1: fetch 並 hard reset 清理乾淨，防殘留本地未提交或未推送的變更
+        proc_fetch = self._run_git(["fetch", "origin"], check=False)
+        if proc_fetch.returncode != 0:
+            raise ReadError(f"pin repo fetch 失敗 (rc={proc_fetch.returncode})")
+
+        has_origin_main = self._run_git(["rev-parse", "--verify", "origin/main"], check=False).returncode == 0
+        if has_origin_main:
             self._run_git(["reset", "--hard", "origin/main"])
-            self._run_git(["clean", "-fdx"])
+        self._run_git(["clean", "-fdx"])
 
     def load(self, repo: str) -> tuple[PinState, PinPending | None]:
         self._ensure_cloned_and_updated()
@@ -351,7 +355,7 @@ class GitPinStore(PinStore):
             raise WriteError(f"pin repo push 失敗 (可能遭遇衝突或 non-fast-forward, rc={proc.returncode})")
 
     def write_pending(self, pending: PinPending) -> None:
-        self._ensure_cloned_and_updated()
+        self._ensure_cloned()
         pin_dir = self.workdir / ".pin"
         pin_dir.mkdir(parents=True, exist_ok=True)
 
@@ -378,7 +382,7 @@ class GitPinStore(PinStore):
         self._commit_and_push(f"pin({pending.repo}): write pending for run {pending.run_id}")
 
     def promote(self, state: PinState) -> None:
-        self._ensure_cloned_and_updated()
+        self._ensure_cloned()
         pin_dir = self.workdir / ".pin"
         pin_dir.mkdir(parents=True, exist_ok=True)
 
@@ -417,7 +421,7 @@ class GitPinStore(PinStore):
         self._commit_and_push(f"pin({state.repo}): promote for run {state.run_id}")
 
     def drop_pending(self, repo: str) -> None:
-        self._ensure_cloned_and_updated()
+        self._ensure_cloned()
         pin_dir = self.workdir / ".pin"
         p_json = pin_dir / f"{repo}.pending.json"
         p_keys = pin_dir / f"{repo}.pending.keys"

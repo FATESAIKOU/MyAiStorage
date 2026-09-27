@@ -272,14 +272,26 @@ def plan_sweep(
                         )
                     )
             elif f.name in state.removed_bundles:
-                decisions.append(
-                    SweepDecision(
-                        file=f,
-                        disposition=Disposition.GC,
-                        reason="屬於已移除 (removed) 清單，留待 GC 回收",
-                        from_parent=default_from_parent,
+                size_matches = (f.size is None or f.size == b_info.size)
+                sha_matches = (f_sha == b_info.sha256.lower())
+                if sha_matches and size_matches:
+                    decisions.append(
+                        SweepDecision(
+                            file=f,
+                            disposition=Disposition.GC,
+                            reason="屬於已移除 (removed) 清單，留待 GC 回收",
+                            from_parent=default_from_parent,
+                        )
                     )
-                )
+                else:
+                    decisions.append(
+                        SweepDecision(
+                            file=f,
+                            disposition=Disposition.QUARANTINE,
+                            reason="removed bundle 雜湊或大小與檔名宣告不符",
+                            from_parent=default_from_parent,
+                        )
+                    )
             else:
                 decisions.append(
                     SweepDecision(
