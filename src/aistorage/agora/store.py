@@ -372,16 +372,34 @@ class AgoraStore:
 
         return dest_path
 
-    def put_session(self, rec: SessionRecord, raw_src: Path) -> None:
+    def put_session(
+        self,
+        rec: SessionRecord,
+        raw_src: Path,
+        *,
+        via: str = "sync",
+        rewrite_id: str | None = None,
+    ) -> None:
         """寫入或更新 Session 項目（存入 raw、追加 snapshots.jsonl、寫入 meta.json）。
 
         H3-a & PM 決定 3: 若配置了 git，寫入每份快照後立即 commit checkpoint，保證物件在 git 歷史中可達。
         H3-c: 驗證 raw_src 的 SHA-256 與大小必須完全吻合 rec。
         M8: 寫入前執行 validate_record_metadata 檢查。
+
+        Args:
+            rec: Session 真本 metadata。
+            raw_src: 原始紀錄本體檔案路徑。
+            via: 快照來源（"sync"、"rewrite"、"import"），記入 snapshots.jsonl。
+            rewrite_id: 經由改寫提案寫入時，該 rewrite 項目的 id（via="rewrite" 時必填）。
         """
         raw_p = Path(raw_src)
         if not raw_p.is_file():
             raise FileNotFoundError(f"找不到原始紀錄檔案: {raw_p}")
+
+        if via not in ("sync", "rewrite", "import"):
+            raise ValueError(f"無效之快照來源 via: {repr(via)}")
+        if via == "rewrite" and not rewrite_id:
+            raise ValueError("via='rewrite' 時必須提供 rewrite_id")
 
         # H3-c: 嚴格驗證 raw_src 雜湊與大小
         raw_bytes = raw_p.read_bytes()
@@ -423,6 +441,8 @@ class AgoraStore:
                 committed_at=rec.committed_at,
                 git_blob=raw_ref.ref if raw_ref.kind == "git" else None,
                 annex_key=raw_ref.ref if raw_ref.kind == "annex" else None,
+                via=via,  # type: ignore[arg-type]
+                rewrite_id=rewrite_id,
             )
 
             snapshots_relpath = layout.session_snapshots_path(session_id)
