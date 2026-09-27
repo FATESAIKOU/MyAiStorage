@@ -358,9 +358,14 @@ class TestLoadRegistry:
     """測試 load_registry 載入與解析身分登錄檔。"""
 
     def test_load_example_registry(self, example_identity_path: Path):
-        """成功載入範例登錄檔（自動判斷檔名為 example 放行範例公鑰）並回傳 Registry 實例。"""
-        reg = load_registry(example_identity_path)
+        """成功載入範例登錄檔（明確傳入 allow_example=True 放行範例公鑰）並回傳 Registry 實例。"""
+        reg = load_registry(example_identity_path, allow_example=True)
         assert isinstance(reg, Registry)
+
+    def test_load_example_registry_default_rejected(self, example_identity_path: Path):
+        """預設 allow_example=False 時載入範例登錄檔必須拋出 ValueError。"""
+        with pytest.raises(ValueError, match="禁止使用全 0 範例公鑰"):
+            load_registry(example_identity_path)
 
     def test_load_custom_valid_file(self, tmp_path: Path, real_valid_registry_data: dict):
         """成功載入自訂合法登錄檔。"""

@@ -128,7 +128,7 @@
       "properties": {
         "source": {
           "type": "string",
-          "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session)$)[^:\\s]+$",
+          "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session)$)[a-z0-9][a-z0-9_-]*$",
           "description": "來源應用識別碼（不得為保留名，不得含冒號或空白）"
         },
         "source_session_id": {
@@ -171,7 +171,7 @@
           "oneOf": [
             {
               "type": "string",
-              "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[^:\\s]+:\\S+$"
+              "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
             },
             {
               "type": "null"
@@ -275,7 +275,7 @@
             "properties": {
               "target_session_id": {
                 "type": "string",
-                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[^:\\s]+:\\S+$"
+                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
               },
               "continuation": {
                 "type": "object",
@@ -331,7 +331,7 @@
               },
               "claimer_session_id": {
                 "type": "string",
-                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[^:\\s]+:\\S+$"
+                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
               }
             },
             "additionalProperties": true
@@ -363,11 +363,11 @@
             "properties": {
               "from_session_id": {
                 "type": "string",
-                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[^:\\s]+:\\S+$"
+                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
               },
               "to_session_id": {
                 "type": "string",
-                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[^:\\s]+:\\S+$"
+                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
               },
               "read_snapshot_at": {
                 "type": "string",
@@ -416,7 +416,7 @@
             "properties": {
               "target_session_id": {
                 "type": "string",
-                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[^:\\s]+:\\S+$"
+                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
               },
               "base_snapshot_sha256": {
                 "type": "string",
@@ -498,7 +498,7 @@
               },
               "produced_by_session_id": {
                 "type": "string",
-                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[^:\\s]+:\\S+$"
+                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
               },
               "filename": {
                 "oneOf": [

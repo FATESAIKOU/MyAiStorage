@@ -128,39 +128,6 @@ def verify_sidecar_bytes(
         return None
 
 
-# 相容別名（過渡期相容）
-def canonical_bytes(sidecar: dict) -> bytes:
-    """舊版相容：產生去掉 signature 的正規化 JSON 位元組。"""
-    if not isinstance(sidecar, dict):
-        raise TypeError("sidecar 必須是字典 (dict)")
-    data = {k: v for k, v in sidecar.items() if k != "signature"}
-    return json.dumps(
-        data, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
-
-
-def sign_sidecar(sidecar: dict, private_key: bytes, key_id: str) -> dict:
-    """舊版相容：在 sidecar 內嵌 signature 欄位。"""
-    if not isinstance(sidecar, dict):
-        raise TypeError("sidecar 必須是字典 (dict)")
-    data = canonical_bytes(sidecar)
-    sig = sign_sidecar_bytes(data, private_key, key_id)
-    res = dict(sidecar)
-    res["signature"] = sig
-    return res
-
-
-def verify_sidecar(sidecar: dict, public_keys: dict[str, bytes]) -> str | None:
-    """舊版相容：驗證 sidecar 內嵌之 signature。"""
-    if not isinstance(sidecar, dict):
-        return None
-    sig = sidecar.get("signature")
-    if not isinstance(sig, dict):
-        return None
-    data = canonical_bytes(sidecar)
-    return verify_sidecar_bytes(data, sig, public_keys)
-
-
 
 def validate_sidecar(
     sidecar: dict, expected_item_key: str | None = None
@@ -302,9 +269,12 @@ def check_raw(
     # 串流讀取計算 size 與 sha256
     hasher = hashlib.sha256()
     actual_size = 0
+    exceeded = False
 
     if isinstance(raw, (bytes, bytearray)):
         actual_size = len(raw)
+        if actual_size > max_size:
+            exceeded = True
         hasher.update(raw)
     elif hasattr(raw, "read"):
         chunk_size = 65536
@@ -314,8 +284,19 @@ def check_raw(
                 break
             actual_size += len(chunk)
             hasher.update(chunk)
+            # 累積超過上限立即停止讀取
+            if actual_size > max_size:
+                exceeded = True
+                break
     else:
         errors.append(FieldError(field="raw", message="raw 本體必須是 bytes 或檔案物件 (file-like)"))
+        return errors
+
+    # 超過上限時直接報錯，不再比對 sha256（串流已截斷）
+    if exceeded:
+        msg = f"raw 大小超過 {max_size} 位元組上限（已讀 {actual_size} 位元組後停止）"
+        errors.append(FieldError(field="raw.size", message=msg))
+        errors.append(FieldError(field="size", message=msg))
         return errors
 
     actual_sha256 = hasher.hexdigest().lower()
@@ -334,12 +315,6 @@ def check_raw(
             msg = f"raw sha256 不符：預期 {expected_sha256}，實際 {actual_sha256}"
             errors.append(FieldError(field="raw.sha256", message=msg))
             errors.append(FieldError(field="sha256", message=msg))
-
-    # 檢查上限（session、rewrite、contained artifact 皆受限制）
-    if item_type in ("session", "rewrite", "artifact") and actual_size > max_size:
-        msg = f"raw 大小超過 {max_size} 位元組上限（實際 {actual_size} 位元組）"
-        errors.append(FieldError(field="raw.size", message=msg))
-        errors.append(FieldError(field="size", message=msg))
 
     return errors
 

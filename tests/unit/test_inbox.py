@@ -137,6 +137,22 @@ class TestGoldenVector:
         derived_b64 = base64.b64encode(derived_pub_bytes).decode("ascii")
         assert derived_b64 == data["public_key_b64"]
 
+    def test_golden_negative_no_prefix_fails(self):
+        """負向黃金向量：少了用途前綴的簽章值，verify_sidecar_bytes 必須失敗。"""
+        assert GOLDEN_PATH.is_file()
+        data = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
+
+        pub_bytes = base64.b64decode(data["public_key_b64"], validate=True)
+        sidecar_bytes = data["sidecar_bytes_utf8"].encode("utf-8")
+        neg = data["negative_no_prefix"]
+        neg_sig = neg["sig"]
+        key_id = neg_sig["key_id"]
+
+        result = verify_sidecar_bytes(
+            sidecar_bytes, neg_sig, {key_id: pub_bytes}
+        )
+        assert result is None, "少了用途前綴之簽章不可通過驗證"
+
 
 # ===========================================================================
 # 2. 用途前綴 (Purpose Prefix)
@@ -765,6 +781,14 @@ class TestMaxRawSizeLimits:
         errors = check_raw(sidecar_large, dummy_large)
         assert len(errors) >= 1
         assert any("size" in e.field for e in errors)
+        assert dummy_large.read_so_far <= 104_857_600 + 65536
+
+        # 4. 超大檔案 (10 GiB) 串流：必須在累積超過上限時立刻中斷，不能全部讀完
+        dummy_huge = LargeDummyFile(10 * 1024 * 1024 * 1024)
+        errors_huge = check_raw(sidecar_large, dummy_huge, max_size=104_857_600)
+        assert len(errors_huge) >= 1
+        assert any("size" in e.field for e in errors_huge)
+        assert dummy_huge.read_so_far <= 104_857_600 + 65536
 
 
 # ===========================================================================

@@ -22,7 +22,7 @@
     },
     "session_id": {
       "type": "string",
-      "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[^:\\s]+:\\S+$",
+      "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
       "description": "Session 唯一識別碼，格式為 <source>:<source_session_id>"
     },
     "source": {
@@ -42,7 +42,7 @@
         "string",
         "null"
       ],
-      "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[^:\\s]+:\\S+$",
+      "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
       "description": "母 Session 識別碼；若為子代理 Session 則記錄其母 Session ID，頂層 Session 為 null"
     },
     "snapshot_sha256": {
@@ -165,7 +165,7 @@
                         "string",
                         "null"
                       ],
-                      "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[^:\\s]+:\\S+$",
+                      "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
                       "description": "若此工具呼叫啟動了子代理，記錄子 Session 識別碼；否則為 null"
                     }
                   },

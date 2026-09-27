@@ -275,7 +275,7 @@ class Registry:
 
         Args:
             sidecar: 待處理之收件匣 sidecar 字典。
-            public_keys_verified_key_id: 由 aistorage.inbox.verify_sidecar 驗證出的 key_id（失敗為 None）。
+            public_keys_verified_key_id: 由 aistorage.inbox.verify_sidecar_bytes 驗證出的 key_id（失敗為 None）。
 
         Returns:
             成功時回傳 (producer, None)，其中 producer 為 'profile:<profile名>'；
@@ -332,12 +332,12 @@ class Registry:
         return f"profile:{profile_name}", None
 
 
-def load_registry(path: str | Path, allow_example: bool | None = None) -> Registry:
+def load_registry(path: str | Path, allow_example: bool = False) -> Registry:
     """載入並驗證身分登錄檔。
 
     Args:
         path: identity.json 檔案路徑。
-        allow_example: 是否放行範例公鑰；若為 None 則依檔名是否為 example 決定。
+        allow_example: 是否放行範例公鑰（預設 False；CLI check 範例檔時明確傳 True）。
 
     Returns:
         Registry 物件。
@@ -352,9 +352,6 @@ def load_registry(path: str | Path, allow_example: bool | None = None) -> Regist
 
     with open(p, encoding="utf-8") as f:
         data = json.load(f)
-
-    if allow_example is None:
-        allow_example = p.name == "identity.example.json" or p.name.endswith(".example.json")
 
     errors = validate_registry(data, allow_example=allow_example)
     if errors:
@@ -388,7 +385,15 @@ def _cli_keygen(args: argparse.Namespace) -> int:
     out_dir = out_path.parent
     if not out_dir.exists():
         out_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
-    out_dir.chmod(0o700)
+    else:
+        # 既有目錄：檢查權限是否過寬（只看 owner/group/other 位元）
+        dir_mode = out_dir.stat().st_mode & 0o777
+        if dir_mode & 0o077:
+            sys.stderr.write(
+                f"錯誤: 私鑰目錄 '{out_dir}' 權限過寬 ({oct(dir_mode)})，"
+                f"請先手動執行 chmod 700 '{out_dir}' 再重試\n"
+            )
+            return 1
 
     # 以 0600 權限建立檔案，避免私鑰外洩
     fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

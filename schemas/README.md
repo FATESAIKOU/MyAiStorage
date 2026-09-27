@@ -90,7 +90,7 @@
 
 ### 1. 項目組成與寫入原子性
 一個收件匣項目以一個全域唯一的 `item_key`（ULID）為名，由二或三個實體檔案組成：
-- `<item_key>.raw`：**本體資料（選填／條件必備）**。僅有 `session`、附帶實體檔案的 `artifact`（`kind: contained`）、`rewrite` 包含本體。為來源端匯出的原始位元組，寫入端不作任何格式轉換。單檔大小預設上限為 100 MiB (104,857,600 位元組)。
+- `<item_key>.raw`：**本體資料（選填／條件必備）**。僅有 `session`、附帶實體檔案的 `artifact`（`kind: contained`）、`rewrite` 包含本體。為來源端匯出的原始位元組，寫入端不作任何格式轉換。單檔大小預設上限為 100 MiB (104,857,600 位元組)；schema 定義之 100 MiB 為預設值，實際大小限制以提交流程設定為準。
 - `<item_key>.sidecar.json`：**描述檔**。記載項目型態、快照時間、本體雜湊等資訊（**不含簽章**）。
 - `<item_key>.sig`：**分離式簽章檔（最後寫入）**。JSON 格式：`{"alg": "ed25519", "key_id": "<id>", "value": "<base64>"}`。
 - **不可分單位原則**：寫入端必須嚴格遵循 **`raw`（若有）→ `sidecar.json` → `.sig`** 之順序寫入。**收件匣中必須具備 `<item_key>.sig` 才算完整項目**；若缺少 `.sig` 視為「只看到一半的項目」，提交流程會保留至下一輪處理；若超過 24 小時仍未見完整檔案，視為逾時孤兒項目進行清掃。提交流程對沒有 `.sig` 或驗章失敗的項目一律拒收。
@@ -170,7 +170,7 @@
     "path": "docs/summary.pdf" | null
   }
   ```
-  *註：當 `kind="contained"` 時，`content_type` 必填，本體放置於 `<item_key>.raw`（上限 100 MiB）；當 `kind="link"` 時，`link` 欄位必填、`content_type` 選填且 `raw` 為 `null`，可選填 `repo` 與 `path`。*
+  *註：當 `kind="contained"` 時，`content_type` 必填，本體放置於 `<item_key>.raw`（預設上限 100 MiB，實際大小限制以提交流程設定為準）；當 `kind="link"` 時，`link` 欄位必填、`content_type` 選填且 `raw` 為 `null`，可選填 `repo` 與 `path`。*
 
 ### 4. 簽章範圍與防重放機制
 - **分離式簽章演算法**：**Ed25519**。
