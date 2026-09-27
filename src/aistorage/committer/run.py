@@ -82,7 +82,6 @@ from aistorage.integrity.verify import (
     verify_clone,
 )
 from aistorage.intake.evaluate import (
-    LEDGER_CODES,
     Decision,
     DecisionKind,
     evaluate,
@@ -510,11 +509,32 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             )
 
             readview_decisions: list[SweepDecision] = []
-            if cfg.readview_folder_id:
-                # M2：第 4 組定義出可信集合（讀取視圖 manifest 的 file id）之前，
-                # 不執行讀取視圖的清掃。現在 plan_readview_sweep 的可信集合是空集合，
-                # 只要有設定就會把讀取視圖資料夾裡的每一個檔案都隔離。
-                report.readview_sweep = "skipped"
+            if not cfg.readview_folder_id:
+                report.readview_sweep = "skipped_no_folder"
+            elif not cfg.readview_manifest_file_id:
+                # 管理者還沒初始化讀取視圖發佈：沒有可信集合，動它等於把整個讀取視圖
+                # 隔離掉（g3a M2）。跳過，等有 manifest 再說。
+                report.readview_sweep = "skipped_no_manifest"
+            else:
+                # 可信集合＝讀取視圖 manifest 列出的 file id（4.3）。讀不到或損毀
+                # → MismatchError，fail-closed 讓整輪中止，不猜。
+                rv_manifest = load_manifest(deps.drive, cfg.readview_manifest_file_id)
+                if rv_manifest.is_initial:
+                    # generation=0：還沒發佈過，讀取視圖資料夾裡的東西都還沒被 manifest 記錄
+                    report.readview_sweep = "skipped_initial"
+                else:
+                    rv_children = deps.drive.list_children(cfg.readview_folder_id)
+                    rv_listing = RepoListing(
+                        prefix_folder_id=cfg.readview_folder_id,
+                        files=tuple(f for f in rv_children if not f.is_folder),
+                        subfolders=tuple(f for f in rv_children if f.is_folder),
+                    )
+                    readview_decisions = plan_readview_sweep(
+                        rv_listing,
+                        trusted_ids(rv_manifest, cfg.readview_manifest_file_id),
+                        readview_folder_id=cfg.readview_folder_id,
+                    )
+                    report.readview_sweep = "swept"
             all_sweep_decisions = parent_decisions + sweep_decisions + readview_decisions
             moved_count = apply_sweep(
                 all_sweep_decisions,
@@ -619,7 +639,7 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
 
                 if not res.ok:
                     # apply 判定失敗轉為 REJECT（拒絕記錄已由 apply 模組寫入）
-                    if res.code in LEDGER_CODES:
+                    if dec.authenticated:
                         ledger.record(
                             dec.item.item_key,
                             item_id=item_id,
@@ -650,14 +670,13 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
                         at=now_iso,
                     )
                 elif dec.kind == DecisionKind.REJECT and dec.authenticated:
-                    if dec.code in LEDGER_CODES:
-                        ledger.record(
-                            dec.item.item_key,
-                            item_id=item_id,
-                            decision=dec.code,
-                            raw_sha256=raw_sha,
-                            at=now_iso,
-                        )
+                    ledger.record(
+                        dec.item.item_key,
+                        item_id=item_id,
+                        decision=dec.code,
+                        raw_sha256=raw_sha,
+                        at=now_iso,
+                    )
 
             # Git commit 變更
             changed_paths = store.changed_paths()

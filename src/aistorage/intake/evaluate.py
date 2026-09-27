@@ -433,6 +433,10 @@ def evaluate(
     metadata = selected_sc_dict.get("metadata", {})
     item_type = metadata.get("type")
 
+    # M4: 期 1 不提供改寫功能 → REJECT(rewrite_not_supported)（無需下載 raw）
+    if item_type == "rewrite":
+        return reject_decision("rewrite_not_supported", authenticated=True)
+
     # 3. M5: artifact → DEFER(foundry_not_enabled)（無需下載 raw）
     if item_type == "artifact":
         return Decision(

@@ -21,6 +21,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/aistorage"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"schemas" = "aistorage/schemas"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+addopts = "-m 'not integration'"
+markers = [
+    "integration: marks integration tests requiring Drive and GitHub credentials",
+]

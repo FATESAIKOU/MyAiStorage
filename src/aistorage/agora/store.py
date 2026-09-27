@@ -396,7 +396,7 @@ class AgoraStore:
         if not raw_p.is_file():
             raise FileNotFoundError(f"找不到原始紀錄檔案: {raw_p}")
 
-        if via not in ("sync", "rewrite", "import"):
+        if via not in ("sync", "rewrite", "import", "rollback"):
             raise ValueError(f"無效之快照來源 via: {repr(via)}")
         if via == "rewrite" and not rewrite_id:
             raise ValueError("via='rewrite' 時必須提供 rewrite_id")

@@ -1471,4 +1471,159 @@ def test_evaluate_reference_monotonicity_fail_closed(tmp_path: Path):
     assert d_bad_sess.authenticated is True
 
 
+def test_rejection_cache_isolation_cross_folders(tmp_path: Path):
+    """R1: 測試資料夾 A 放垃圾的 K、資料夾 B 放合法的 K，而且 A 先被評估，B 必須 ACCEPT。"""
+    clock = FixedClock("2026-09-27T10:00:00Z")
+    drive = FakeDrive(clock=clock)
+    inbox_a = drive.seed_folder("inbox_a")
+    inbox_b = drive.seed_folder("inbox_b")
+
+    priv_bytes, pub_bytes = generate_keypair()
+    pub_fingerprint = hashlib.sha256(pub_bytes).hexdigest().lower()[:8]
+    key_id = f"worker-b-{pub_fingerprint}"
+    pub_b64 = base64.b64encode(pub_bytes).decode("ascii")
+
+    registry_data = {
+        "format": "aistorage.registry/v1",
+        "profiles": {
+            "worker-a": {
+                "inbox_folder_ids": [inbox_a],
+                "allowed_types": ["session"],
+                "signing_keys": [],
+            },
+            "worker-b": {
+                "inbox_folder_ids": [inbox_b],
+                "allowed_types": ["session"],
+                "signing_keys": [
+                    {
+                        "key_id": key_id,
+                        "public_key": pub_b64,
+                        "status": "active",
+                        "created_at": "2026-09-20T00:00:00Z",
+                        "revoked_at": None,
+                    }
+                ],
+            },
+        },
+    }
+    registry = Registry(registry_data)
+    store = AgoraStore(tmp_path / "agora", raw_storage=FakeRawStorage())
+    ledger = Ledger(store)
+    workdir = tmp_path / "work"
+
+    target_ulid = generate_ulid()
+
+    # 資料夾 A：放無效簽章的垃圾 K
+    f_junk_sc = drive.seed_file(inbox_a, f"{target_ulid}.sidecar.json", b'{"format":"aistorage.inbox/v1"}')
+    f_junk_sig = drive.seed_file(inbox_a, f"{target_ulid}.sig", b'{"key_id":"unknown","signature":"deadbeef"}')
+    f_junk_raw = drive.seed_file(inbox_a, f"{target_ulid}.raw", b"junk raw")
+    it_a = InboxItem(
+        item_key=target_ulid,
+        inbox_folder_id=inbox_a,
+        sidecars=(drive.get(f_junk_sc),),
+        sigs=(drive.get(f_junk_sig),),
+        raws=(drive.get(f_junk_raw),),
+    )
+
+    # 先評估 A（未通過驗章，回傳 REJECT，且不應污染真本 rejections 快取）
+    dec_a = evaluate(it_a, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert dec_a.kind == DecisionKind.REJECT
+    assert dec_a.authenticated is False
+
+    # 資料夾 B：放合法的 K
+    raw_content = b'{"hello": "world"}'
+    raw_sha = hashlib.sha256(raw_content).hexdigest().lower()
+    sc_b = _build_test_session_sidecar(target_ulid, raw_content, session_id="ses_b", profile="worker-b")
+    sc_b_bytes = json.dumps(sc_b).encode("utf-8")
+    sig_b = sign_sidecar_bytes(sc_b_bytes, priv_bytes, key_id)
+    f_b_sc = drive.seed_file(inbox_b, f"{target_ulid}.sidecar.json", sc_b_bytes)
+    f_b_sig = drive.seed_file(inbox_b, f"{target_ulid}.sig", json.dumps(sig_b).encode("utf-8"))
+    f_b_raw = drive.seed_file(inbox_b, f"{target_ulid}.raw", raw_content, sha256=raw_sha)
+    it_b = InboxItem(
+        item_key=target_ulid,
+        inbox_folder_id=inbox_b,
+        sidecars=(drive.get(f_b_sc),),
+        sigs=(drive.get(f_b_sig),),
+        raws=(drive.get(f_b_raw),),
+    )
+
+    # 評估 B：必須不受 A 的影響，成功 ACCEPT
+    dec_b = evaluate(it_b, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert dec_b.kind == DecisionKind.ACCEPT
+    assert dec_b.authenticated is True
+
+
+def test_rejection_cache_new_candidates_in_same_folder(tmp_path: Path):
+    """R1: 同一個資料夾，垃圾的 K 在上一輪被拒收，這一輪合法的 K 出現了，必須 ACCEPT。"""
+    clock = FixedClock("2026-09-27T10:00:00Z")
+    drive = FakeDrive(clock=clock)
+    inbox_fid = drive.seed_folder("inbox_worker1")
+
+    priv_bytes, pub_bytes = generate_keypair()
+    pub_fingerprint = hashlib.sha256(pub_bytes).hexdigest().lower()[:8]
+    key_id = f"worker-1-{pub_fingerprint}"
+    pub_b64 = base64.b64encode(pub_bytes).decode("ascii")
+
+    registry_data = {
+        "format": "aistorage.registry/v1",
+        "profiles": {
+            "worker-1": {
+                "inbox_folder_ids": [inbox_fid],
+                "allowed_types": ["session"],
+                "signing_keys": [
+                    {
+                        "key_id": key_id,
+                        "public_key": pub_b64,
+                        "status": "active",
+                        "created_at": "2026-09-20T00:00:00Z",
+                        "revoked_at": None,
+                    }
+                ],
+            },
+        },
+    }
+    registry = Registry(registry_data)
+    store = AgoraStore(tmp_path / "agora", raw_storage=FakeRawStorage())
+    ledger = Ledger(store)
+    workdir = tmp_path / "work"
+
+    target_ulid = generate_ulid()
+
+    # 第 1 輪：只有垃圾檔（偽造簽章）
+    f_junk_sc = drive.seed_file(inbox_fid, f"{target_ulid}.sidecar.json", b'{"format":"aistorage.inbox/v1"}')
+    f_junk_sig = drive.seed_file(inbox_fid, f"{target_ulid}.sig", b'{"key_id":"worker-1-bad","signature":"deadbeef"}')
+    it_round1 = InboxItem(
+        item_key=target_ulid,
+        inbox_folder_id=inbox_fid,
+        sidecars=(drive.get(f_junk_sc),),
+        sigs=(drive.get(f_junk_sig),),
+    )
+    dec1 = evaluate(it_round1, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert dec1.kind == DecisionKind.REJECT
+    assert dec1.authenticated is False
+
+    # 第 2 輪：同一個資料夾裡出現了合法的候選檔案（例如合法同名檔案被寫入）
+    raw_content = b'{"hello": "valid"}'
+    raw_sha = hashlib.sha256(raw_content).hexdigest().lower()
+    sc_valid = _build_test_session_sidecar(target_ulid, raw_content, session_id="ses_valid", profile="worker-1")
+    sc_valid_bytes = json.dumps(sc_valid).encode("utf-8")
+    sig_valid = sign_sidecar_bytes(sc_valid_bytes, priv_bytes, key_id)
+
+    f_valid_sc = drive.seed_file(inbox_fid, f"{target_ulid}.sidecar.json", sc_valid_bytes)
+    f_valid_sig = drive.seed_file(inbox_fid, f"{target_ulid}.sig", json.dumps(sig_valid).encode("utf-8"))
+    f_valid_raw = drive.seed_file(inbox_fid, f"{target_ulid}.raw", raw_content, sha256=raw_sha)
+
+    it_round2 = InboxItem(
+        item_key=target_ulid,
+        inbox_folder_id=inbox_fid,
+        sidecars=(drive.get(f_junk_sc), drive.get(f_valid_sc)),
+        sigs=(drive.get(f_junk_sig), drive.get(f_valid_sig)),
+        raws=(drive.get(f_valid_raw),),
+    )
+    dec2 = evaluate(it_round2, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
+    assert dec2.kind == DecisionKind.ACCEPT
+    assert dec2.authenticated is True
+
+
+
 

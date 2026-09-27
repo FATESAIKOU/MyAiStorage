@@ -8,12 +8,65 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
-from typing import Literal
+import subprocess
+import tempfile
+from typing import Any, Literal
+from datetime import datetime, timezone
 
 from aistorage.annex.git import AnnexGit
 from aistorage.annex.manifest import normalize_ls_remote
 from aistorage.errors import WriteError
+
+
+def create_fake_git_bundle(
+    workdir: Path,
+    repo_uuid: str,
+    *,
+    branch: str = "refs/heads/main",
+    content: str = "initial\n",
+) -> tuple[str, bytes, str, str]:
+    """建立符合規格與 git-remote-annex 命名空間之真實可解開 git bundle。
+
+    回傳：(bundle_name, bundle_bytes, main_commit_sha, annex_commit_sha)
+    """
+    workdir.mkdir(parents=True, exist_ok=True)
+    repo = workdir / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_AUTHOR_EMAIL": "test@test",
+        "GIT_COMMITTER_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "test@test",
+        "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+        "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+    }
+    subprocess.run(["git", "init", "-b", "main", "-q", "."], cwd=repo, env=env, check=True)
+    (repo / "f.txt").write_text(content)
+    subprocess.run(["git", "add", "f.txt"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=repo, env=env, check=True)
+    out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, env=env, check=True, capture_output=True, text=True)
+    c_main = out.stdout.strip()
+
+    subprocess.run(["git", "checkout", "-b", "git-annex", "-q"], cwd=repo, env=env, check=True)
+    (repo / "uuid.log").write_text(f"{repo_uuid} agora\n")
+    subprocess.run(["git", "add", "uuid.log"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "commit", "-qm", "annex init"], cwd=repo, env=env, check=True)
+    out_annex = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, env=env, check=True, capture_output=True, text=True)
+    c_annex = out_annex.stdout.strip()
+    subprocess.run(["git", "checkout", "main", "-q"], cwd=repo, env=env, check=True)
+
+    ns_ref_main = f"refs/namespaces/git-remote-annex/{repo_uuid}/refs/heads/main"
+    ns_ref_annex = f"refs/namespaces/git-remote-annex/{repo_uuid}/refs/heads/git-annex"
+    subprocess.run(["git", "update-ref", ns_ref_main, c_main], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "update-ref", ns_ref_annex, c_annex], cwd=repo, env=env, check=True)
+    b_path = workdir / "b1.bundle"
+    subprocess.run(["git", "bundle", "create", str(b_path), ns_ref_main, ns_ref_annex], cwd=repo, env=env, check=True)
+    raw = b_path.read_bytes()
+    name = f"GITBUNDLE-s{len(raw)}--{repo_uuid}-{hashlib.sha256(raw).hexdigest()}"
+    return name, raw, c_main, c_annex
 
 
 class FakeAnnexGit(AnnexGit):
@@ -27,6 +80,11 @@ class FakeAnnexGit(AnnexGit):
         push_effect: Literal["apply", "silent_fail", "error"] = "apply",
         copy_effect: Literal["noop", "annex_upload"] = "noop",
         local_keys: frozenset[str] | set[str] | None = None,
+        *,
+        drive: Any | None = None,
+        prefix_folder_id: str | None = None,
+        repo_uuid: str | None = None,
+        clock: Any | None = None,
     ) -> None:
         self.refs: dict[str, str] = dict(refs or {})
         self.workdir: Path = workdir or Path("/mock/repo")
@@ -37,6 +95,10 @@ class FakeAnnexGit(AnnexGit):
         # copy_effect="annex_upload" 才模擬這個副作用，預設維持 noop 不影響既有測試。
         self.copy_effect: Literal["noop", "annex_upload"] = copy_effect
         self.local_keys: frozenset[str] = frozenset(local_keys or ())
+        self.drive: Any | None = drive
+        self.prefix_folder_id: str | None = prefix_folder_id
+        self.repo_uuid: str | None = repo_uuid
+        self.clock: Any | None = clock
         self.added_paths: list[str] = []
         self.commits: list[tuple[str, str]] = []
         self.copied: list[tuple[str, list[str] | None]] = []
@@ -57,16 +119,92 @@ class FakeAnnexGit(AnnexGit):
         self._check_injection("ls_remote")
         return normalize_ls_remote(self.refs)
 
+    def _ensure_git_repo(self) -> None:
+        if not (self.workdir / ".git").is_dir():
+            self.workdir.mkdir(parents=True, exist_ok=True)
+            env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "committer",
+                "GIT_AUTHOR_EMAIL": "committer@aistorage.local",
+                "GIT_COMMITTER_NAME": "committer",
+                "GIT_COMMITTER_EMAIL": "committer@aistorage.local",
+                "GIT_AUTHOR_DATE": "2026-09-27T10:00:00Z",
+                "GIT_COMMITTER_DATE": "2026-09-27T10:00:00Z",
+            }
+            subprocess.run(["git", "init", "-b", "main", "-q", "."], cwd=self.workdir, env=env, check=True)
+            if self.drive and self.prefix_folder_id and self.repo_uuid:
+                m_name = f"GITMANIFEST--{self.repo_uuid}"
+                m_files = self.drive.find_by_name(self.prefix_folder_id, m_name)
+                if m_files:
+                    m_bytes = self.drive.download_bytes(m_files[0].id, max_bytes=10 * 1024 * 1024)
+                    from aistorage.annex.manifest import parse_manifest
+                    try:
+                        parsed = parse_manifest(m_bytes, repo_uuid=self.repo_uuid)
+                        with tempfile.TemporaryDirectory(prefix="fake_unbundle_") as td:
+                            for b_name in parsed.active:
+                                bf = self.drive.find_by_name(self.prefix_folder_id, b_name)
+                                if bf:
+                                    b_dest = Path(td) / b_name
+                                    self.drive.download(bf[0].id, b_dest, max_bytes=100 * 1024 * 1024)
+                                    subprocess.run(
+                                        ["git", "bundle", "unbundle", str(b_dest)],
+                                        cwd=self.workdir,
+                                        env=env,
+                                        check=False,
+                                    )
+                    except Exception:
+                        pass
+            for ref_name, sha in list(self.refs.items()):
+                short = ref_name.replace("refs/heads/", "")
+                ns_ref = f"refs/namespaces/git-remote-annex/{self.repo_uuid}/{ref_name}" if self.repo_uuid else None
+                chk_ns = subprocess.run(["git", "rev-parse", ns_ref], cwd=self.workdir, capture_output=True, text=True) if ns_ref else None
+                if chk_ns and chk_ns.returncode == 0:
+                    target_sha = chk_ns.stdout.strip()
+                    subprocess.run(["git", "update-ref", f"refs/heads/{short}", target_sha], cwd=self.workdir, env=env, check=False)
+                    self.refs[ref_name] = target_sha
+                elif sha:
+                    chk_sha = subprocess.run(["git", "rev-parse", sha], cwd=self.workdir, capture_output=True)
+                    if chk_sha.returncode == 0:
+                        subprocess.run(["git", "update-ref", f"refs/heads/{short}", sha], cwd=self.workdir, env=env, check=False)
+
+            chk = subprocess.run(["git", "rev-parse", "refs/heads/main"], cwd=self.workdir, capture_output=True)
+            if chk.returncode != 0:
+                (self.workdir / ".gitkeep").write_text("initial\n")
+                subprocess.run(["git", "add", "."], cwd=self.workdir, env=env, check=True)
+                subprocess.run(["git", "commit", "-qm", "initial"], cwd=self.workdir, env=env, check=True)
+                out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.workdir, capture_output=True, text=True, check=True)
+                self.refs["refs/heads/main"] = out.stdout.strip()
+
     def add(self, paths: list[str | Path] | str | Path) -> None:
         self._check_injection("add")
         if isinstance(paths, (str, Path)):
             self.added_paths.append(str(paths))
         else:
             self.added_paths.extend(str(p) for p in paths)
+        if self.drive and self.prefix_folder_id and self.repo_uuid:
+            self._ensure_git_repo()
+            plist = [str(paths)] if isinstance(paths, (str, Path)) else [str(p) for p in paths]
+            subprocess.run(["git", "add", *plist], cwd=self.workdir, check=False)
 
     def commit(self, message: str) -> str:
         self._check_injection("commit")
-        sha = hashlib.sha1(f"{message}-{len(self.commits)}".encode("utf-8")).hexdigest()
+        if self.drive and self.prefix_folder_id and self.repo_uuid:
+            self._ensure_git_repo()
+            env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "committer",
+                "GIT_AUTHOR_EMAIL": "committer@aistorage.local",
+                "GIT_COMMITTER_NAME": "committer",
+                "GIT_COMMITTER_EMAIL": "committer@aistorage.local",
+                "GIT_AUTHOR_DATE": "2026-09-27T10:00:00Z",
+                "GIT_COMMITTER_DATE": "2026-09-27T10:00:00Z",
+            }
+            subprocess.run(["git", "add", "."], cwd=self.workdir, env=env, check=True)
+            subprocess.run(["git", "commit", "-qm", message, "--allow-empty"], cwd=self.workdir, env=env, check=True)
+            out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.workdir, env=env, check=True, capture_output=True, text=True)
+            sha = out.stdout.strip()
+        else:
+            sha = hashlib.sha1(f"{message}-{len(self.commits)}".encode("utf-8")).hexdigest()
         self.commits.append((message, sha))
         # 模擬本地 HEAD 前進
         self.pending_refs["refs/heads/main"] = sha
@@ -86,12 +224,128 @@ class FakeAnnexGit(AnnexGit):
             # 讓 refs/heads/git-annex 的 sha 前進（review-g3g H1）
             if self.local_keys:
                 self.annex_keys = frozenset(set(self.annex_keys) | set(self.local_keys))
-            current = self.pending_refs.get(
-                "refs/heads/git-annex", self.refs.get("refs/heads/git-annex", "")
+            if self.drive and self.prefix_folder_id and self.repo_uuid:
+                self._ensure_git_repo()
+                env = {
+                    **os.environ,
+                    "GIT_AUTHOR_NAME": "committer",
+                    "GIT_AUTHOR_EMAIL": "committer@aistorage.local",
+                    "GIT_COMMITTER_NAME": "committer",
+                    "GIT_COMMITTER_EMAIL": "committer@aistorage.local",
+                    "GIT_AUTHOR_DATE": "2026-09-27T10:00:00Z",
+                    "GIT_COMMITTER_DATE": "2026-09-27T10:00:00Z",
+                }
+                out = subprocess.run(
+                    ["git", "commit-tree", "HEAD^{tree}", "-m", "annex location log update"],
+                    cwd=self.workdir,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                new_annex_sha = out.stdout.strip()
+                subprocess.run(
+                    ["git", "update-ref", "refs/heads/git-annex", new_annex_sha],
+                    cwd=self.workdir,
+                    env=env,
+                    check=True,
+                )
+                self.pending_refs["refs/heads/git-annex"] = new_annex_sha
+            else:
+                current = self.pending_refs.get(
+                    "refs/heads/git-annex", self.refs.get("refs/heads/git-annex", "")
+                )
+                self.pending_refs["refs/heads/git-annex"] = hashlib.sha1(
+                    f"annex-location-log-{current}".encode("utf-8")
+                ).hexdigest()
+
+    def _generate_bundle_and_update_manifest(self) -> None:
+        """為 FakeAnnexGit 產生新 bundle 與更新 manifest（FakeAnnexGit 保真度）。"""
+        self._ensure_git_repo()
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "committer",
+            "GIT_AUTHOR_EMAIL": "committer@aistorage.local",
+            "GIT_COMMITTER_NAME": "committer",
+            "GIT_COMMITTER_EMAIL": "committer@aistorage.local",
+            "GIT_AUTHOR_DATE": "2026-09-27T10:00:00Z",
+            "GIT_COMMITTER_DATE": "2026-09-27T10:00:00Z",
+        }
+        ns_refs: list[str] = []
+        for ref_name, sha in self.refs.items():
+            clean = ref_name if ref_name.startswith("refs/") else f"refs/heads/{ref_name}"
+            ns_ref = f"refs/namespaces/git-remote-annex/{self.repo_uuid}/{clean}"
+            subprocess.run(["git", "update-ref", ns_ref, sha], cwd=self.workdir, env=env, check=True)
+            ns_refs.append(ns_ref)
+
+        if not ns_refs:
+            return
+
+        with tempfile.TemporaryDirectory(prefix="fake_bundle_gen_") as td:
+            b_path = Path(td) / "bundle.pack"
+            subprocess.run(
+                ["git", "bundle", "create", str(b_path), *ns_refs],
+                cwd=self.workdir,
+                env=env,
+                check=True,
+                capture_output=True,
             )
-            self.pending_refs["refs/heads/git-annex"] = hashlib.sha1(
-                f"annex-location-log-{current}".encode("utf-8")
-            ).hexdigest()
+            raw = b_path.read_bytes()
+            b_size = len(raw)
+            b_sha = hashlib.sha256(raw).hexdigest().lower()
+            b_name = f"GITBUNDLE-s{b_size}--{self.repo_uuid}-{b_sha}"
+
+            from aistorage.clock import format_rfc3339
+            now_iso = format_rfc3339(
+                self.clock.now() if self.clock else datetime.now(timezone.utc),
+                include_fraction=True,
+            )
+            if hasattr(self.drive, "seed_file"):
+                self.drive.seed_file(
+                    self.prefix_folder_id,
+                    b_name,
+                    raw,
+                    created_time=now_iso,
+                )
+            else:
+                self.drive.create(
+                    self.prefix_folder_id,
+                    b_name,
+                    raw,
+                )
+
+            # 更新 manifest
+            m_name = f"GITMANIFEST--{self.repo_uuid}"
+            m_files = self.drive.find_by_name(self.prefix_folder_id, m_name)
+            if m_files:
+                old_bytes = self.drive.download_bytes(m_files[0].id, max_bytes=10 * 1024 * 1024)
+                old_text = old_bytes.decode("utf-8").strip()
+                new_manifest_text = f"{old_text}\n{b_name}\n" if old_text else f"{b_name}\n"
+                if hasattr(self.drive, "seed_file"):
+                    self.drive.delete_permanently(m_files[0].id)
+                    self.drive.seed_file(
+                        self.prefix_folder_id,
+                        m_name,
+                        new_manifest_text.encode("utf-8"),
+                        created_time=now_iso,
+                    )
+                else:
+                    self.drive.update_content(m_files[0].id, new_manifest_text.encode("utf-8"))
+            else:
+                new_manifest_text = f"{b_name}\n"
+                if hasattr(self.drive, "seed_file"):
+                    self.drive.seed_file(
+                        self.prefix_folder_id,
+                        m_name,
+                        new_manifest_text.encode("utf-8"),
+                        created_time=now_iso,
+                    )
+                else:
+                    self.drive.create(
+                        self.prefix_folder_id,
+                        m_name,
+                        new_manifest_text.encode("utf-8"),
+                    )
 
     def push(
         self,
@@ -113,6 +367,9 @@ class FakeAnnexGit(AnnexGit):
             # 成功：遠端 refs 更新為 pending_refs
             for k, v in self.pending_refs.items():
                 self.refs[k] = v
+
+            if self.drive is not None and self.prefix_folder_id and self.repo_uuid:
+                self._generate_bundle_and_update_manifest()
 
     def annex_keys_in(self, remote_uuid: str) -> frozenset[str]:
         self._check_injection("annex_keys_in")

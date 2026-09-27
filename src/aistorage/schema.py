@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import datetime
+import importlib.resources
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -86,13 +88,41 @@ def _create_format_checker() -> FormatChecker:
 
 
 def _locate_schema_file(filename: str) -> Path:
-    """定位 schemas/ 目錄下的 JSON Schema 檔案。"""
-    # 1. 優先嘗試相對於目前模組檔案的 repo 根目錄
+    """定位 JSON Schema 檔案。
+
+    尋找順序（review-2.1 L3）：
+    1. 環境變數 AISTORAGE_SCHEMA_DIR 覆寫（若設定則優先採用）
+    2. importlib.resources 讀取套件內 aistorage/schemas
+    3. 開發模式：repo 根目錄之 schemas/
+    4. 工作目錄之 schemas/
+    """
+    # 1. 環境變數覆寫
+    env_dir = os.environ.get("AISTORAGE_SCHEMA_DIR")
+    if env_dir:
+        candidate = Path(env_dir) / filename
+        if candidate.is_file():
+            return candidate
+        raise FileNotFoundError(
+            f"AISTORAGE_SCHEMA_DIR ({env_dir}) 中找不到 JSON Schema 檔案: {filename}"
+        )
+
+    # 2. importlib.resources (支援 wheel 打包)
+    try:
+        res = importlib.resources.files("aistorage").joinpath("schemas", filename)
+        if res.is_file():
+            if isinstance(res, Path):
+                return res
+            with importlib.resources.as_file(res) as p:
+                return Path(p)
+    except Exception:
+        pass
+
+    # 3. 開發環境：相對於目前模組檔案的 repo 根目錄
     candidate = Path(__file__).resolve().parent.parent.parent / "schemas" / filename
     if candidate.is_file():
         return candidate
 
-    # 2. 嘗試工作目錄下的 schemas 目錄
+    # 4. 工作目錄下的 schemas 目錄
     candidate = Path.cwd() / "schemas" / filename
     if candidate.is_file():
         return candidate
@@ -159,6 +189,18 @@ def strip_claimed_producer(obj: dict) -> dict:
 
 
 _SESSION_SOURCE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+#: Session 項目 id 的唯一格式定義（`<source>:<source_session_id>`）。
+#: 與 inbox-sidecar / metadata / reading-version 三個 schema 的 pattern 一致；
+#: 寫入端在本地組裝時直接用這一份，不要各自重寫（review-g3g L）。
+SESSION_ID_PATTERN = re.compile(
+    r"^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\S+$"
+)
+
+
+def is_session_id(value: object) -> bool:
+    """判斷字串是否為合法的 Session 項目 id（見 SESSION_ID_PATTERN）。"""
+    return isinstance(value, str) and bool(SESSION_ID_PATTERN.match(value))
 
 
 def make_session_id(source: str, source_session_id: str) -> str:

@@ -23,7 +23,7 @@ import pytest
 
 from aistorage.agora import layout
 from aistorage.agora.store import AgoraStore, FakeRawStorage
-from aistorage.annex.fake import FakeAnnexGit
+from aistorage.annex.fake import FakeAnnexGit, create_fake_git_bundle
 from aistorage.annex.git import AnnexGit
 from aistorage.clock import FixedClock, format_rfc3339
 from aistorage.committer.config import CommitterConfig
@@ -147,16 +147,13 @@ def _setup_committer_env(tmp_path: Path) -> tuple[CommitterConfig, Deps, dict[st
     registry = Registry(_registry_payload(inbox_folder_id, key_id, pub_b64))
 
     repo_uuid = "00000000-0000-0000-0000-000000000001"
-    initial_main_sha = "1" * 40
-    initial_annex_sha = "2" * 40
+    b1_name, b1_bytes, initial_main_sha, initial_annex_sha = create_fake_git_bundle(tmp_path / "bundle_init", repo_uuid)
     initial_refs = {
         "refs/heads/main": initial_main_sha,
         "refs/heads/git-annex": initial_annex_sha,
     }
 
     # 建立正式 manifest 與初始 bundle
-    b1_name = f"GITBUNDLE-s100--{repo_uuid}-{'a'*64}"
-    b1_bytes = b"git bundle content 1"
     b1_file = drive.seed_file(prefix_folder_id, b1_name, b1_bytes, created_time="2026-09-27T08:00:00Z")
 
     manifest_name = f"GITMANIFEST--{repo_uuid}"
@@ -187,6 +184,10 @@ def _setup_committer_env(tmp_path: Path) -> tuple[CommitterConfig, Deps, dict[st
         refs=dict(initial_refs),
         workdir=tmp_path / "git_workdir",
         annex_keys=frozenset(),
+        drive=drive,
+        prefix_folder_id=prefix_folder_id,
+        repo_uuid=repo_uuid,
+        clock=clock,
     )
 
     converters: dict[str, Converter] = {
@@ -319,7 +320,7 @@ def _seed_valid_inbox_item(
     return ulid
 
 
-def test_full_round_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_full_round_success(tmp_path: Path):
     """測試完整提交流程（13 步 happy path）。"""
     cfg, deps, info = _setup_committer_env(tmp_path)
     _ulid, _raw_sha = _seed_valid_inbox_session(
@@ -327,19 +328,6 @@ def test_full_round_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         info["inbox_folder_id"],
         info["priv_bytes"],
         info["key_id"],
-    )
-
-    # 模擬 verify_after_push 成功並產出新的 manifest 雜湊與 active bundles
-    new_manifest_sha = "f" * 64
-    new_bundle_name = f"GITBUNDLE-s200--{cfg.repo_uuid}-{'b'*64}"
-    monkeypatch.setattr(
-        committer_run,
-        "verify_after_push",
-        lambda git, drive, listing, state, refs, started, workdir: PushVerification(
-            new_manifest_sha256=new_manifest_sha,
-            active=(*state.active_bundles, new_bundle_name),
-            removed=frozenset(),
-        ),
     )
 
     report = run(cfg, deps, dry_run=False)
@@ -354,8 +342,8 @@ def test_full_round_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # 檢查 pin state 轉正
     promoted_state, pending = deps.pins.load(cfg.repo)
     assert pending is None
-    assert promoted_state.manifest_sha256 == new_manifest_sha
-    assert new_bundle_name in promoted_state.active_bundles
+    assert promoted_state.manifest_sha256 != info["initial_state"].manifest_sha256
+    assert len(promoted_state.active_bundles) == 2
 
     # 檢查 FakeAnnexGit 有 push
     fake_git: FakeAnnexGit = info["fake_git"]
@@ -706,15 +694,6 @@ def test_round_with_handoff_claim_and_reference(tmp_path: Path, monkeypatch: pyt
         created_at="2026-09-27T08:45:00Z",
     )
 
-    monkeypatch.setattr(
-        committer_run,
-        "verify_after_push",
-        lambda git, drive_, listing, state, refs, started, workdir: PushVerification(
-            new_manifest_sha256="e" * 64,
-            active=state.active_bundles,
-            removed=frozenset(),
-        ),
-    )
 
     # 真本工作樹在 run 結束後會被刪掉，先記下寫入的項目與內容
     written: dict[str, Any] = {}
@@ -768,15 +747,6 @@ def test_annex_copy_happens_before_refs_and_keys_are_computed(
         "refs/heads/git-annex", fake_git.refs.get("refs/heads/git-annex")
     )
 
-    monkeypatch.setattr(
-        committer_run,
-        "verify_after_push",
-        lambda git, drive_, listing, state, refs, started, workdir: PushVerification(
-            new_manifest_sha256="d" * 64,
-            active=state.active_bundles,
-            removed=frozenset(),
-        ),
-    )
 
     report = run(cfg, deps, dry_run=False)
     assert report.ok is True, f"中止於 {report.aborted_at}:{report.code}"
@@ -818,15 +788,6 @@ def test_junk_older_than_24h_is_deleted_and_failures_are_counted(
 
     _seed_valid_inbox_session(deps.drive, inbox, info["priv_bytes"], info["key_id"])
 
-    monkeypatch.setattr(
-        committer_run,
-        "verify_after_push",
-        lambda git, drive_, listing, state, refs, started, workdir: PushVerification(
-            new_manifest_sha256="c" * 64,
-            active=state.active_bundles,
-            removed=frozenset(),
-        ),
-    )
 
     # 刪除逾時 junk 時注入失敗，必須被計數（不可靜默吞掉）
     original_delete = deps.drive.delete_permanently

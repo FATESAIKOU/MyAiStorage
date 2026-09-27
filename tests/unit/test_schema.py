@@ -688,3 +688,37 @@ class TestClassifyId:
         """L1 & PM 決定：任一方缺少有效 producer 時必須 raise ValueError。"""
         with pytest.raises(ValueError):
             classify_id(bad_existing, bad_incoming)
+
+
+# ===========================================================================
+# 8. Schema 定位與打包載入測試（review-2.1 L3）
+# ===========================================================================
+
+class TestSchemaLocate:
+    """測試 schema 檔案定位機制（importlib.resources 與 AISTORAGE_SCHEMA_DIR）。"""
+
+    def test_locate_schema_file_default_finds_schemas(self):
+        """預設環境下能正確定位 schema 檔案。"""
+        from aistorage.schema import _locate_schema_file
+        path = _locate_schema_file("metadata-inbox.schema.json")
+        assert path.is_file()
+        assert path.name == "metadata-inbox.schema.json"
+
+    def test_locate_schema_file_env_override(self, tmp_path, monkeypatch):
+        """AISTORAGE_SCHEMA_DIR 覆寫時，優先自該目錄載入。"""
+        from aistorage.schema import _locate_schema_file
+        custom_schema = tmp_path / "metadata-inbox.schema.json"
+        custom_schema.write_text('{"title": "custom"}', encoding="utf-8")
+
+        monkeypatch.setenv("AISTORAGE_SCHEMA_DIR", str(tmp_path))
+        path = _locate_schema_file("metadata-inbox.schema.json")
+        assert path == custom_schema
+        assert path.read_text(encoding="utf-8") == '{"title": "custom"}'
+
+    def test_locate_schema_file_env_override_not_found(self, tmp_path, monkeypatch):
+        """AISTORAGE_SCHEMA_DIR 覆寫但檔案不存在時，拋出 FileNotFoundError。"""
+        from aistorage.schema import _locate_schema_file
+        monkeypatch.setenv("AISTORAGE_SCHEMA_DIR", str(tmp_path))
+        with pytest.raises(FileNotFoundError, match="AISTORAGE_SCHEMA_DIR"):
+            _locate_schema_file("metadata-inbox.schema.json")
+
