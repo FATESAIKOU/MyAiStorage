@@ -1,0 +1,298 @@
+"""住民容器（tasks 5.1）的冒煙測試（實作方撰寫；驗收由測試方另寫）。
+
+不啟動 docker、不跑 LLM。只驗三件事：
+1. 白名單：目錄裡有不在白名單的檔名就拒絕；只掛所選 provider 的金鑰。
+2. 產生的 opencode.json：金鑰是 `{file:/secrets/...}` 檔案引用，不是明文。
+3. 邊界腳本與 Dockerfile/run.sh 沒有把不該有的東西帶進容器
+   （docker.sock、--privileged、--cap-add、Claude 憑證）。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+RESIDENT = REPO / "resident"
+RUN_SH = RESIDENT / "run.sh"
+ENTRYPOINT = RESIDENT / "image" / "entrypoint.sh"
+VERIFY_SH = RESIDENT / "verify-boundary.sh"
+DOCKERFILE = RESIDENT / "image" / "Dockerfile"
+BASE_JSON = RESIDENT / "opencode" / "opencode.base.json"
+
+pytestmark = pytest.mark.skipif(
+    shutil.which("bash") is None or shutil.which("jq") is None,
+    reason="需要 bash 與 jq（entrypoint 用 jq 產生設定）",
+)
+
+WHITELIST = {
+    "rclone-worker.conf",
+    "sa-reader.json",
+    "signing.key",
+    "reader.json",
+    "gh-pat-actions.txt",
+    "llm-opencode.key",
+}
+
+
+def _profile_dir(tmp_path: Path, names: set[str] | None = None) -> Path:
+    d = tmp_path / "resident" / "mac-opencode"
+    d.mkdir(parents=True, exist_ok=True)
+    for name in (WHITELIST if names is None else names):
+        p = d / name
+        p.write_text("placeholder-not-a-secret\n")
+        os.chmod(p, 0o600)
+    return d
+
+
+def _plan(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
+    env = dict(
+        os.environ,
+        AISTORAGE_RESIDENT_ROOT=str(tmp_path / "resident"),
+        AISTORAGE_WORK_ROOT=str(tmp_path / "work"),
+    )
+    return subprocess.run(
+        ["bash", str(RUN_SH), *args],
+        capture_output=True, text=True, env=env, check=False,
+    )
+
+
+def _default_plan(tmp_path: Path, name: str = "c1", **kw) -> dict:
+    args = [name, "--profile", "mac-opencode",
+            "--model", "opencode/space-bunny-free", "--print-plan"]
+    for flag, value in kw.items():
+        flag = "--" + flag.replace("_", "-")
+        args += [flag] if value is True else [flag, value]
+    proc = _plan(tmp_path, *args)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+# ── 1. 白名單 ───────────────────────────────────────────────────────────
+
+
+def test_plan_mounts_only_whitelisted_files(tmp_path: Path):
+    _profile_dir(tmp_path)
+    plan = _default_plan(tmp_path)
+    assert set(plan["secrets_mounted"]) <= WHITELIST
+    assert {"rclone-worker.conf", "signing.key", "llm-opencode.key"} <= set(
+        plan["secrets_mounted"])
+    assert plan["home"] == "/work"
+    assert plan["work_dir"].endswith("/work/c1")
+    assert plan["user"] == f"{os.getuid()}:{os.getgid()}"
+    assert plan["docker_sock"] is False and plan["privileged"] is False
+    assert plan["cap_add"] == []
+
+
+def test_non_whitelisted_file_refuses_to_start(tmp_path: Path):
+    """目錄裡有白名單外的檔名 → 拒絕啟動並指名，而不是默默忽略。"""
+    d = _profile_dir(tmp_path)
+    (d / ".env").write_text("SECRET=1\n")
+    os.chmod(d / ".env", 0o600)
+    proc = _plan(tmp_path, "c1", "--profile", "mac-opencode",
+                 "--model", "opencode/space-bunny-free", "--print-plan")
+    assert proc.returncode != 0
+    assert ".env" in proc.stderr
+    assert "白名單" in proc.stderr
+
+
+def test_claude_credentials_are_not_whitelisted(tmp_path: Path):
+    d = _profile_dir(tmp_path)
+    for name in ("anthropic.key", "claude-api-key.txt", ".claude.json"):
+        (d / name).write_text("nope\n")
+        os.chmod(d / name, 0o600)
+    proc = _plan(tmp_path, "c1", "--profile", "mac-opencode",
+                 "--model", "opencode/space-bunny-free", "--print-plan")
+    assert proc.returncode != 0
+    for name in ("anthropic.key", "claude-api-key.txt", ".claude.json"):
+        assert name in proc.stderr
+
+
+def test_only_selected_provider_key_is_mounted(tmp_path: Path):
+    d = _profile_dir(tmp_path)
+    (d / "llm-ollama.key").write_text("placeholder-not-a-secret\n")
+    os.chmod(d / "llm-ollama.key", 0o600)
+    plan = _default_plan(tmp_path)
+    assert "llm-opencode.key" in plan["secrets_mounted"]
+    assert "llm-ollama.key" not in plan["secrets_mounted"]
+
+
+def test_missing_required_file_refuses_to_start(tmp_path: Path):
+    _profile_dir(tmp_path, names=WHITELIST - {"signing.key"})
+    proc = _plan(tmp_path, "c1", "--profile", "mac-opencode",
+                 "--model", "opencode/space-bunny-free", "--print-plan")
+    assert proc.returncode != 0 and "signing.key" in proc.stderr
+
+
+def test_loose_permissions_refuse_to_start(tmp_path: Path):
+    d = _profile_dir(tmp_path)
+    os.chmod(d / "rclone-worker.conf", 0o644)
+    proc = _plan(tmp_path, "c1", "--profile", "mac-opencode",
+                 "--model", "opencode/space-bunny-free", "--print-plan")
+    assert proc.returncode != 0
+    assert "chmod 600" in proc.stderr
+
+
+def test_container_name_and_model_are_validated(tmp_path: Path):
+    _profile_dir(tmp_path)
+    bad_name = _plan(tmp_path, "bad name!", "--profile", "mac-opencode",
+                     "--model", "opencode/space-bunny-free", "--print-plan")
+    assert bad_name.returncode != 0
+    bad_model = _plan(tmp_path, "c1", "--profile", "mac-opencode",
+                      "--model", "space-bunny-free", "--print-plan")
+    assert bad_model.returncode != 0 and "provider" in bad_model.stderr
+
+
+def test_publish_api_is_off_by_default(tmp_path: Path):
+    _profile_dir(tmp_path)
+    assert _default_plan(tmp_path)["publish_api"] is None
+    # 計畫裡是 JSON 數字（埠號）或 null
+    assert _default_plan(tmp_path, name="c2", publish_api="4096")["publish_api"] == 4096
+
+
+# ── 2. opencode.json：檔案引用而非明文 ───────────────────────────────────
+
+
+def _render(tmp_path: Path, provider: str, model: str) -> subprocess.CompletedProcess:
+    secrets = tmp_path / "secrets"
+    secrets.mkdir(exist_ok=True)
+    (secrets / f"llm-{provider}.key").write_text("placeholder-not-a-secret\n")
+    return subprocess.run(
+        ["bash", str(ENTRYPOINT), "render-config", provider, model, str(BASE_JSON)],
+        capture_output=True, text=True, check=False,
+        env=dict(os.environ, AISTORAGE_SECRETS_DIR=str(secrets)),
+    )
+
+
+def test_generated_config_uses_file_reference_for_the_key(tmp_path: Path):
+    proc = _render(tmp_path, "opencode", "opencode/space-bunny-free")
+    assert proc.returncode == 0, proc.stderr
+    cfg = json.loads(proc.stdout)
+    assert cfg["model"] == "opencode/space-bunny-free"
+    assert cfg["provider"]["opencode"]["options"]["apiKey"] == \
+        "{file:/secrets/llm-opencode.key}"
+    # 檔案裡**沒有**金鑰內容，也沒有任何秘密
+    assert "placeholder-not-a-secret" not in proc.stdout
+    # plugin 與 skill 說明來自唯讀的 /opt/aistorage
+    assert cfg["plugin"] == ["/opt/aistorage/opencode/plugin/aistorage.ts"]
+    assert cfg["skills"]["paths"] == ["/opt/aistorage/opencode/skills"]
+    # opencode 不得讀寫 /secrets（工具層的權限）
+    assert cfg["permission"]["external_directory"]["/secrets/**"] == "deny"
+
+
+def test_generated_config_refuses_mismatched_provider(tmp_path: Path):
+    proc = _render(tmp_path, "opencode", "ollama/some-model")
+    assert proc.returncode != 0
+    assert "provider" in proc.stderr
+
+
+def test_base_template_has_no_secret_and_no_claude(tmp_path: Path):
+    raw = BASE_JSON.read_text(encoding="utf-8")
+    cfg = json.loads(raw)
+    assert set(cfg["provider"]) == {"__PROVIDER__"}
+    assert cfg["provider"]["__PROVIDER__"]["options"]["apiKey"] == "__API_KEY_FILE__"
+    assert "__MODEL__" == cfg["model"]
+    for word in ("anthropic", "claude", "sk-"):
+        assert word not in raw.lower()
+
+
+def test_entrypoint_refuses_claude_credentials(tmp_path: Path):
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    (secrets / "llm-opencode.key").write_text("x\n")
+    (secrets / "rclone-worker.conf").write_text("[gdrive]\n")
+    (secrets / "signing.key").write_text("y\n")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".claude.json").write_text("{}")
+    proc = subprocess.run(
+        ["bash", str(ENTRYPOINT), "serve"],
+        capture_output=True, text=True, check=False,
+        env=dict(
+            os.environ,
+            AISTORAGE_SECRETS_DIR=str(secrets),
+            HOME=str(work),
+            AISTORAGE_MODEL="opencode/space-bunny-free",
+            AISTORAGE_RESIDENT_NO_TUI="1",
+        ),
+    )
+    assert proc.returncode != 0
+    assert "拒絕啟動" in proc.stderr
+
+
+def test_entrypoint_refuses_env_auth_json(tmp_path: Path):
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    (secrets / "llm-opencode.key").write_text("x\n")
+    (secrets / "rclone-worker.conf").write_text("[gdrive]\n")
+    (secrets / "signing.key").write_text("y\n")
+    proc = subprocess.run(
+        ["bash", str(ENTRYPOINT), "serve"],
+        capture_output=True, text=True, check=False,
+        env=dict(
+            os.environ,
+            AISTORAGE_SECRETS_DIR=str(secrets),
+            HOME=str(tmp_path),
+            AISTORAGE_MODEL="opencode/space-bunny-free",
+            ANTHROPIC_API_KEY="sk-not-a-real-key",
+        ),
+    )
+    assert proc.returncode != 0
+    assert "ANTHROPIC_API_KEY" in proc.stderr
+
+
+# ── 3. 邊界：腳本與 image 不該帶的東西 ───────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "path", [RUN_SH, ENTRYPOINT, VERIFY_SH, RESIDENT / "build.sh"], ids=lambda p: p.name
+)
+def test_shell_scripts_parse(path: Path):
+    proc = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
+def _code_lines(path: Path) -> str:
+    """去掉註解行，只看真的會被執行的內容（說明文字可以提到 claude）。"""
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        out.append(line.split("  #")[0] if "  #" in line else line)
+    return "\n".join(out)
+
+
+def test_run_script_never_asks_for_extra_privileges():
+    text = _code_lines(RUN_SH)
+    for forbidden in ("--privileged", "--cap-add", "docker.sock", "/var/run/docker"):
+        assert forbidden not in text, f"run.sh 出現不該有的字串：{forbidden}"
+    assert "--user" in text  # 用 Mac 的 uid:gid
+    assert "readonly" in text  # /secrets 一律唯讀
+
+
+def test_dockerfile_has_no_claude_and_no_privileges():
+    text = _code_lines(DOCKERFILE).lower()
+    for forbidden in ("anthropic", "claude", "docker.sock", "privileged"):
+        assert forbidden not in text
+    assert "home=/work" in text
+
+
+def test_verify_boundary_checks_the_required_items():
+    text = VERIFY_SH.read_text(encoding="utf-8")
+    for needle in ("/proc/mounts", "docker.sock", "CapEff", "/Users",
+                   "secrets_writable", "secret_leak_hits", "grep -r -c -F -f",
+                   "ANTHROPIC", "auth.json"):
+        assert needle in text, f"verify-boundary.sh 少了：{needle}"
+
+
+def test_docs_resident_explains_whitelist_and_trust_scope():
+    text = (REPO / "docs" / "resident.md").read_text(encoding="utf-8")
+    for needle in ("rclone-worker.conf", "signing.key", "llm-<provider>.key",
+                   "白名單", "同一個 profile 就是同一個信任範圍", "auth.json"):
+        assert needle in text
