@@ -135,7 +135,8 @@ def _emit_text(command: str, payload: dict) -> None:
     value = payload.get("value")
     freshness = payload.get("freshness", {})
     if command == "find":
-        for hit in value if isinstance(value, list) else []:
+        for found in value if isinstance(value, list) else []:
+            hit = found.get("hit", {})
             session = hit.get("session", {})
             n = len(hit.get("matches", []))
             print(f"{session.get('session_id')}\t{session.get('status')}\t"

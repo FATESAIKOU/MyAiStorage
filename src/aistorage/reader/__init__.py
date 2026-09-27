@@ -40,6 +40,7 @@ __all__ = [
     "StaleManifest",
     "Freshness",
     "Result",
+    "FoundSession",
     "SessionView",
     "SnapshotView",
     "ContinuationView",
@@ -63,6 +64,17 @@ class Freshness:
 @dataclass(frozen=True)
 class Result(Generic[T]):
     value: T
+    freshness: Freshness
+
+
+@dataclass(frozen=True)
+class FoundSession:
+    """find 的一筆結果：Hit＋它自己的 Freshness（spec：每筆都附快照時間）。
+
+    清單整體的 Result.freshness 以最舊的一筆為準。
+    """
+
+    hit: Hit
     freshness: Freshness
 
 
@@ -121,17 +133,35 @@ class AgoraReader:
             return self._fresh(manifest, snapshot_at=None, max_lag=max_lag)
         return self._fresh(manifest, snapshot_at=min(known), max_lag=max_lag)
 
+    def manifest(self) -> dict:
+        """目前讀取視圖的 manifest（世代、published_at、index 定位）。
+
+        寫入端（同步器、skill）需要它判斷「我上傳之後有沒有新的世代發佈」
+        （PM 決定 3 的補傳條件）。純讀取，不觸發任何寫入。
+        """
+        return dict(self._client.manifest())
+
     def find_sessions(self, q: Query, *, max_lag: timedelta | None = None
-                      ) -> Result[list[Hit]]:
+                      ) -> Result[list[FoundSession]]:
         manifest = self._client.manifest()
         db = self._client.index()
         try:
             hits, _ = search(db, q)
         finally:
             db.close()
+        found = [
+            FoundSession(
+                hit=h,
+                freshness=self._fresh(
+                    manifest, snapshot_at=h.session.snapshot_at,
+                    status=h.session.status, stopped_at=h.session.stopped_at,
+                    max_lag=max_lag),
+            )
+            for h in hits
+        ]
         freshness = self._worst(
             manifest, [h.session.snapshot_at for h in hits], max_lag)
-        return Result(value=hits, freshness=freshness)
+        return Result(value=found, freshness=freshness)
 
     def get_session(self, session_id: str, *, max_lag: timedelta | None = None
                     ) -> Result[SessionView]:
@@ -224,15 +254,32 @@ class AgoraReader:
 
     def list_open_handoffs(self, *, case_id: str | None = None
                            ) -> Result[list[HandoffRow]]:
+        """列出待認領的交接單：只看主 Session 寫的（PM 決定 9）。
+
+        依 handoffs.author_session_id 找到作者 Session，parent 非空（子 Session）
+        或作者不明的一律排除。index 若還沒有 author_session_id 欄位
+        （4.1 impl3 補上之前），raise MismatchError 而不是默默不篩。
+        """
         manifest = self._client.manifest()
         db = self._client.index()
         try:
+            columns = [r[1] for r in db.execute("PRAGMA table_info(handoffs)")]
+            if "author_session_id" not in columns:
+                raise MismatchError(
+                    "index 的 handoffs 表缺少 author_session_id 欄位，"
+                    "無法篩選主 Session 寫的交接單")
             rows = get_handoffs(db, open_only=True)
+            kept: list[HandoffRow] = []
+            for h in rows:
+                if case_id is not None and h.case_id != case_id:
+                    continue
+                author = get_session_row(db, h.author_session_id or "")
+                if author is None or author.parent_id is not None:
+                    continue
+                kept.append(h)
         finally:
             db.close()
-        if case_id is not None:
-            rows = [h for h in rows if h.case_id == case_id]
-        return Result(value=rows, freshness=self._fresh(
+        return Result(value=kept, freshness=self._fresh(
             manifest, snapshot_at=manifest["published_at"], max_lag=None))
 
     def get_rejection(self, item_key: str) -> Result[RejectionRow | None]:

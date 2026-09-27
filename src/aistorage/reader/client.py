@@ -3,8 +3,9 @@
 只讀：只使用 DriveClient 的讀取方法（get、download、download_bytes、
 find_by_name 不在此用）。SA 本身也沒有寫入能力（1.5）。
 
-manifest 解析目前是最小實作（格式、世代、index 定位）；完整
-readview/model.py（4.1）落實後以它為準，介面不變。
+manifest 的解析與驗證走 readview/model.py（4.1）——讀取視圖的格式只有一份
+規則（schemas/readview-manifest.schema.json），這裡回傳的仍是字典，
+介面不變。
 """
 
 from __future__ import annotations
@@ -21,9 +22,10 @@ from aistorage.clock import Clock
 from aistorage.errors import AiStorageError, MismatchError, NotFound, ReadError
 from aistorage.reading import validate_reading
 from aistorage.reader.config import ReaderConfig
+from aistorage.readview.model import READVIEW_FORMAT as MANIFEST_FORMAT
+from aistorage.readview.model import parse_manifest
 from aistorage.search.query import ReadingRef
 
-MANIFEST_FORMAT = "aistorage.readview/v1"
 MANIFEST_MAX_BYTES = 4 << 20
 INDEX_MAX_BYTES = 256 << 20
 READING_MAX_BYTES = 128 << 20
@@ -47,26 +49,16 @@ def _is_access_denied(error: Exception) -> bool:
 
 
 def _parse_manifest(data: bytes) -> dict[str, Any]:
-    try:
-        manifest = json.loads(data.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as e:
-        raise MismatchError(f"manifest 不是合法 JSON: {e}") from None
-    if not isinstance(manifest, dict):
-        raise MismatchError("manifest 最外層必須是物件")
-    if manifest.get("format") != MANIFEST_FORMAT:
-        raise MismatchError(f"manifest 格式不符: {manifest.get('format')!r}")
-    generation = manifest.get("generation")
-    if not isinstance(generation, int) or generation < 0:
-        raise MismatchError(f"manifest generation 非法: {generation!r}")
-    index = manifest.get("index")
-    if not isinstance(index, dict):
-        raise MismatchError("manifest 缺少 index 定位")
-    for key in ("id", "sha256", "size"):
-        if index.get(key) is None:
-            raise MismatchError(f"manifest index 缺少 {key}")
-    if not isinstance(manifest.get("published_at"), str):
-        raise MismatchError("manifest 缺少 published_at")
-    return manifest
+    """以 readview/model.py（4.1）驗證 manifest，回傳同樣的字典形狀。
+
+    讀取介面本來就只認 schema 驗證過的 manifest；這裡走同一份規則
+    （schemas/readview-manifest.schema.json），避免兩邊各驗一套。
+    """
+    manifest = parse_manifest(data)
+    out = manifest.to_dict()
+    if out.get("index") is None:
+        raise MismatchError("manifest 尚未有 index（管理者還沒發佈過任何世代）")
+    return out
 
 
 class ReadViewClient:
@@ -124,6 +116,14 @@ class ReadViewClient:
 
     def index(self) -> sqlite3.Connection:
         """依 generation 快取的唯讀連線；第二次呼叫不重新下載。"""
+        return sqlite3.connect(f"file:{self.index_path()}?mode=ro", uri=True)
+
+    def index_path(self) -> Path:
+        """目前世代的索引在本機快取的路徑（必要時先下載並驗證）。
+
+        4.5 重建驗證要拿整個索引檔做逐表比對（dump_tables 需要路徑），所以
+        這個 accessor 是公開的；回傳的是唯讀快取檔，不得就地修改。
+        """
         manifest = self.manifest()
         generation = manifest["generation"]
         ref = manifest["index"]
@@ -133,7 +133,7 @@ class ReadViewClient:
             self._drive.download(ref["id"], tmp, max_bytes=INDEX_MAX_BYTES)
             self._verify_file(tmp, sha256=ref["sha256"], size=int(ref["size"]))
             os.replace(tmp, dest)
-        return sqlite3.connect(f"file:{dest}?mode=ro", uri=True)
+        return dest
 
     def reading(self, ref: ReadingRef) -> dict:
         """依 sha256 快取的閱讀版；下載後驗證 sha256、size，並跑 validate_reading。"""

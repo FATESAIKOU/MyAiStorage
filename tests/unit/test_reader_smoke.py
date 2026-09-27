@@ -117,6 +117,24 @@ def _fixture(tmp_path: Path, drive_cls: type[FakeDrive] = FakeDrive
             reading_ref={"snapshot_sha256": SNAP_C, "file_id": rc["file_id"],
                          "sha256": rc["sha256"], "size": rc["size"]},
         ),
+        IndexEntry(
+            metadata={"session_id": "opencode:s-sub", "source": "opencode",
+                      "title": "子 Session", "producer": "profile:mac-opencode",
+                      "case_id": None, "status": "running", "stopped_at": None,
+                      "in_progress": False, "created_at": "2026-09-26T09:00:00Z",
+                      "updated_at": "2026-09-26T09:00:00Z",
+                      "snapshot_at": "2026-09-26T09:00:00Z",
+                      "raw_sha256": SNAP_C, "raw_size": 10,
+                      "parent_id": "opencode:s1",
+                      "reading_status": "failed", "reading_error_code": "conversion_error",
+                      "committed_at": "2026-09-26T09:01:00Z"},
+            snapshots=[
+                {"snapshot_sha256": SNAP_C, "snapshot_at": "2026-09-26T09:00:00Z",
+                 "committed_at": "2026-09-26T09:01:00.000Z", "via": "sync"},
+            ],
+            reading=None,
+            reading_ref=None,
+        ),
     ]
     index_path = tmp_path / "index.sqlite3"
     build_index(
@@ -131,18 +149,36 @@ def _fixture(tmp_path: Path, drive_cls: type[FakeDrive] = FakeDrive
             created_at="2026-09-27T08:35:00.000Z", updated_at="2026-09-27T08:35:00.000Z",
             case_id="case-1", body_json='{"content":"做"}',
             claimed_by_claim_id="claim:C1", claimed_by_session_id="opencode:s2",
-            claimed_at="2026-09-27T08:45:00.000Z"),
+            claimed_at="2026-09-27T08:45:00.000Z",
+            author_session_id="opencode:s1"),
             HandoffRow(
                 handoff_id="handoff:H2", target_session_id="opencode:s2",
                 snapshot_sha256=SNAP_C, message_id="n1",
                 producer="profile:mac-opencode",
                 created_at="2026-09-26T08:20:00.000Z",
-                updated_at="2026-09-26T08:20:00.000Z", body_json="{}")],
+                updated_at="2026-09-26T08:20:00.000Z", body_json="{}",
+                author_session_id="opencode:s2"),
+            HandoffRow(
+                handoff_id="handoff:H3", target_session_id="opencode:s2",
+                snapshot_sha256=SNAP_C, message_id="n1",
+                producer="profile:mac-opencode",
+                created_at="2026-09-26T08:25:00.000Z",
+                updated_at="2026-09-26T08:25:00.000Z", body_json="{}",
+                author_session_id="opencode:s-sub"),
+            HandoffRow(
+                handoff_id="handoff:H4", target_session_id="opencode:s2",
+                snapshot_sha256=SNAP_C, message_id="n1",
+                producer="profile:mac-opencode",
+                created_at="2026-09-26T08:26:00.000Z",
+                updated_at="2026-09-26T08:26:00.000Z", body_json="{}",
+                author_session_id="opencode:ghost")],
         rejections=[RejectionRow(item_key="K1", code="orphan",
                                  at="2026-09-27T07:00:00.000Z", authenticated=False)],
         meta=IndexMeta(generation=7, built_at="2026-09-27T09:05:00.000Z",
                        agora_main_sha="abc", converter_versions={"opencode": "1"}),
     )
+    # 作者 Session（handoffs.author_session_id 由 schema 提供，直接建表后填值
+    # 由 build_index 經 HandoffRow 寫入）。
     index_raw = index_path.read_bytes()
     manifest = {
         "format": "aistorage.readview/v1",
@@ -191,8 +227,12 @@ def test_reader_happy_paths_are_read_only(tmp_path: Path):
     reader = AgoraReader(ReadViewClient(drive, cfg, clock=clock), clock=clock)
 
     found = reader.find_sessions(Query(text="接續點"))
-    assert [h.session.session_id for h in found.value] == ["opencode:s1"]
+    assert [f.hit.session.session_id for f in found.value] == ["opencode:s1"]
     assert found.freshness.generation == 7
+    # 逐筆 Freshness（PM 決定 1）：每筆都附快照時間
+    assert found.value[0].freshness.snapshot_at == "2026-09-27T09:00:00.000Z"
+    assert found.value[0].freshness.satisfied is None  # 未指定 max_lag
+    assert found.freshness.snapshot_at == "2026-09-27T09:00:00.000Z"
 
     view = reader.get_session("opencode:s1").value
     assert view.session.status == "stopped"
@@ -212,6 +252,7 @@ def test_reader_happy_paths_are_read_only(tmp_path: Path):
     assert cont.sibling_links == ()
 
     assert [h.handoff_id for h in reader.list_open_handoffs().value] == ["handoff:H2"]
+    # H3（子 Session 寫的）、H4（作者不明）被排除
     assert [h.handoff_id for h in
             reader.list_open_handoffs(case_id="case-1").value] == []
     assert reader.get_rejection("K1").value.code == "orphan"
@@ -310,6 +351,46 @@ def test_stale_manifest_rejected(tmp_path: Path):
         client.manifest()
 
 
+def test_open_handoffs_requires_author_column(tmp_path: Path):
+    """PM 決定 2：index 沒有 author_session_id 欄位時 raise，不默默不篩。
+
+    以 DROP COLUMN 模擬舊世代 index（SQLite 3.35+ 支援）。
+    """
+    import sqlite3 as _sqlite3
+    from aistorage.search.index import build_index as _build
+    p = tmp_path / "idx.sqlite3"
+    _build(p, entries=[], meta=IndexMeta(
+        generation=1, built_at="2026-09-27T09:00:00.000Z", agora_main_sha="x",
+        converter_versions={}))
+    _con = _sqlite3.connect(str(p))
+    try:
+        _con.execute("ALTER TABLE handoffs DROP COLUMN author_session_id")
+        _con.commit()
+    finally:
+        _con.close()
+    drive = FakeDrive()
+    folder = drive.seed_folder("readview")
+    raw = p.read_bytes()
+    drive.seed_file(folder, "manifest.json", json.dumps({
+        "format": "aistorage.readview/v1", "element": "agora", "generation": 1,
+        "published_at": "2026-09-27T09:00:00.000Z", "agora_main_sha": "x",
+        "converter_versions": {},
+        "index": {"id": "idx", "sha256": hashlib.sha256(raw).hexdigest(),
+                  "size": len(raw)},
+        "files": ["idx"], "retired": [],
+    }).encode(), file_id="manifest-1")
+    drive.seed_file(folder, "index.sqlite3", raw, file_id="idx")
+    cols = [r[1] for r in _sqlite3.connect(str(p)).execute("PRAGMA table_info(handoffs)")]
+    assert "author_session_id" not in cols
+    cfg = ReaderConfig(manifest_file_id="manifest-1",
+                       sa_key_path=tmp_path / "sa.json",
+                       cache_dir=tmp_path / "cache")
+    reader = AgoraReader(ReadViewClient(drive, cfg, clock=FixedClock(NOW)),
+                         clock=FixedClock(NOW))
+    with pytest.raises(MismatchError):
+        reader.list_open_handoffs()
+
+
 def test_sa_auth_jwt_and_caching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -386,7 +467,8 @@ def test_cli_find_json_and_errors(tmp_path: Path, capsys: pytest.CaptureFixture)
                       "--text-query", "接續點"], drive_factory=factory, clock=clock)
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
-    assert [h["session"]["session_id"] for h in out["value"]] == ["opencode:s1"]
+    assert [h["hit"]["session"]["session_id"] for h in out["value"]] == ["opencode:s1"]
+    assert out["value"][0]["freshness"]["snapshot_at"] == "2026-09-27T09:00:00.000Z"
     assert out["freshness"]["generation"] == 7
 
     rc = reader_main(["--config", str(cfg_path), "find",

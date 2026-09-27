@@ -332,18 +332,23 @@ def get_links(db: sqlite3.Connection, session_id: str
     return (list(out[0]), list(out[1]))
 
 
+def _handoff_row(row: tuple) -> HandoffRow:
+    return HandoffRow(
+        handoff_id=row[0], target_session_id=row[1], snapshot_sha256=row[2],
+        message_id=row[3], producer=row[4], created_at=row[5], updated_at=row[6],
+        case_id=row[7], body_json=row[8], claimed_by_claim_id=row[9],
+        claimed_by_session_id=row[10], claimed_at=row[11],
+        author_session_id=row[12] if len(row) > 12 else None,
+    )
+
+
 def get_handoff(db: sqlite3.Connection, handoff_id: str) -> HandoffRow | None:
     ensure_sqlite_version()
     row = db.execute("SELECT * FROM handoffs WHERE handoff_id = ?",
                      (handoff_id,)).fetchone()
     if row is None:
         return None
-    return HandoffRow(
-        handoff_id=row[0], target_session_id=row[1], snapshot_sha256=row[2],
-        message_id=row[3], producer=row[4], created_at=row[5], updated_at=row[6],
-        case_id=row[7], body_json=row[8], claimed_by_claim_id=row[9],
-        claimed_by_session_id=row[10], claimed_at=row[11],
-    )
+    return _handoff_row(row)
 
 
 def get_handoffs(db: sqlite3.Connection, *, target_session_id: str | None = None,
@@ -357,12 +362,7 @@ def get_handoffs(db: sqlite3.Connection, *, target_session_id: str | None = None
     if open_only:
         clauses.append("claimed_by_claim_id IS NULL")
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-    return [HandoffRow(
-        handoff_id=r[0], target_session_id=r[1], snapshot_sha256=r[2],
-        message_id=r[3], producer=r[4], created_at=r[5], updated_at=r[6],
-        case_id=r[7], body_json=r[8], claimed_by_claim_id=r[9],
-        claimed_by_session_id=r[10], claimed_at=r[11],
-    ) for r in db.execute(
+    return [_handoff_row(r) for r in db.execute(
         f"SELECT * FROM handoffs{where} ORDER BY updated_at DESC, handoff_id ASC",
         params)]
 

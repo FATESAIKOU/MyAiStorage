@@ -74,7 +74,11 @@ CREATE TABLE handoffs (
   body_json TEXT NOT NULL,
   claimed_by_claim_id TEXT,
   claimed_by_session_id TEXT,
-  claimed_at TEXT
+  claimed_at TEXT,
+  -- 作者 Session（寫這張交接單的那個 Session 的 id）。讀取端列出待認領的
+  -- 交接單時只看主 Session 寫的（PM 決定 9）；拿不到作者（舊資料）時為 NULL，
+  -- 視為作者不明而排除。
+  author_session_id TEXT
 );
 
 CREATE TABLE rejections (

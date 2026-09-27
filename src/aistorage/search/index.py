@@ -98,6 +98,9 @@ class HandoffRow:
     claimed_by_claim_id: str | None = None
     claimed_by_session_id: str | None = None
     claimed_at: str | None = None
+    # 作者 Session：寫這張交接單的那個 Session 的 id（讀取端用它只列主 Session
+    # 寫的待認領交接單）。拿不到時為 NULL。
+    author_session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -252,12 +255,13 @@ def build_index(
         )
         for h in handoffs:
             con.execute(
-                "INSERT OR REPLACE INTO handoffs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO handoffs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (h.handoff_id, h.target_session_id, h.snapshot_sha256, h.message_id,
                  h.producer, normalize_time(h.created_at), normalize_time(h.updated_at),
                  h.case_id, h.body_json, h.claimed_by_claim_id,
                  h.claimed_by_session_id,
-                 normalize_time(h.claimed_at) if h.claimed_at else None),
+                 normalize_time(h.claimed_at) if h.claimed_at else None,
+                 h.author_session_id),
             )
         for r in rejections:
             con.execute(
