@@ -13,7 +13,7 @@ from pathlib import Path
 import random
 from typing import Any, Literal
 
-from aistorage.clock import Clock, FixedClock
+from aistorage.clock import Clock, FixedClock, format_rfc3339
 from aistorage.drive.model import GOOGLE_FOLDER_MIME, DriveClient, DriveFile
 from aistorage.errors import NotFound, ReadError, TooLarge, WriteError
 
@@ -51,7 +51,7 @@ class FakeDrive(DriveClient):
         """建立種子資料夾並回傳其 folder_id（不計入 DriveClient API calls）。"""
         self._folder_seq += 1
         fid = f"folder_{self._folder_seq:04d}"
-        now = self._clock.now_utc()
+        now = format_rfc3339(self._clock.now(), include_fraction=True)
         parents = (parent,) if parent else ()
         df = DriveFile(
             id=fid,
@@ -82,7 +82,7 @@ class FakeDrive(DriveClient):
         """建立種子檔案並回傳其 file_id（不計入 DriveClient API calls）。"""
         self._file_seq += 1
         fid = f"file_{self._file_seq:04d}"
-        now = created_time or self._clock.now_utc()
+        now = created_time or format_rfc3339(self._clock.now(), include_fraction=True)
 
         calc_sha256 = (
             hashlib.sha256(content).hexdigest().lower()
@@ -254,15 +254,15 @@ class FakeDrive(DriveClient):
         self.calls.append(("create", parent_id))
         self._check_injections("create", parent_id)
 
-        # M6: 檢查父資料夾存在（root 除外）
+        # M6 & N3: 檢查父資料夾存在（root 除外），寫入操作找不到父資料夾拋出 WriteError
         if parent_id != "root" and parent_id not in self._files:
-            raise NotFound(f"找不到父資料夾: {parent_id}")
+            raise WriteError(f"找不到父資料夾: {parent_id}")
 
         data = content.read_bytes() if isinstance(content, Path) else bytes(content)
 
         self._file_seq += 1
         fid = f"file_{self._file_seq:04d}"
-        now = self._clock.now_utc()
+        now = format_rfc3339(self._clock.now(), include_fraction=True)
         sha256_val = hashlib.sha256(data).hexdigest().lower()
         md5_val = hashlib.md5(data).hexdigest().lower()
 
@@ -286,13 +286,14 @@ class FakeDrive(DriveClient):
         self.calls.append(("update_content", file_id))
         self._check_injections("update_content", file_id)
 
+        # N3: 寫入操作找不到欲更新檔案拋出 WriteError
         if file_id not in self._files:
-            raise NotFound(f"找不到欲更新之檔案: {file_id}")
+            raise WriteError(f"找不到欲更新之檔案: {file_id}")
 
         old_f = self._files[file_id]
         data = content.read_bytes() if isinstance(content, Path) else bytes(content)
 
-        now = self._clock.now_utc()
+        now = format_rfc3339(self._clock.now(), include_fraction=True)
         sha256_val = hashlib.sha256(data).hexdigest().lower()
         md5_val = hashlib.md5(data).hexdigest().lower()
 
@@ -338,7 +339,7 @@ class FakeDrive(DriveClient):
             sha256=old_f.sha256,
             md5=old_f.md5,
             created_time=old_f.created_time,
-            modified_time=self._clock.now_utc(),
+            modified_time=format_rfc3339(self._clock.now(), include_fraction=True),
             trashed=old_f.trashed,
         )
         self._files[file_id] = new_f
@@ -348,10 +349,8 @@ class FakeDrive(DriveClient):
         self.calls.append(("delete_permanently", file_id))
         self._check_injections("delete_permanently", file_id)
 
-        # M6: 嚴格檢查，不存在時拋出 NotFound（真實 Drive 回 404）
-        if file_id not in self._files:
-            raise NotFound(f"找不到欲刪除之檔案: {file_id}")
-
-        del self._files[file_id]
+        # N3: 404 視為成功（檔案已不存在，冪等刪除），記錄在 calls
+        if file_id in self._files:
+            del self._files[file_id]
         if file_id in self._contents:
             del self._contents[file_id]

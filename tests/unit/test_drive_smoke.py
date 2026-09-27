@@ -151,16 +151,20 @@ def test_fake_drive_m6_features():
     assert test_drive.get(tfile).sha256 == "a" * 64
 
     # 4. 嚴格檢查 (Strict checks)
-    with pytest.raises(NotFound):
+    with pytest.raises(WriteError):
         test_drive.create("non_existent_folder", "f.txt", b"xyz")
+    with pytest.raises(WriteError):
+        test_drive.update_content("non_existent_file", b"xyz")
     with pytest.raises(WriteError):
         test_drive.move("non_existent_file", from_parent=tf1, to_parent=tf1)
     with pytest.raises(WriteError):
         test_drive.move(tfile, from_parent="wrong_parent", to_parent=tf1)
     with pytest.raises(WriteError):
         test_drive.move(tfile, from_parent=tf1, to_parent="non_existent_folder")
-    with pytest.raises(NotFound):
-        test_drive.delete_permanently("non_existent_file")
+
+    # N3: delete_permanently 遇不存在之檔案視為成功，並記錄於 calls
+    test_drive.delete_permanently("non_existent_file")
+    assert ("delete_permanently", "non_existent_file") in test_drive.calls
 
     # 5. order 支援
     order_drive = FakeDrive(clock, order="reverse")
@@ -343,4 +347,29 @@ def test_http_drive_client_l_query_escape():
     """L: Drive 查詢字串跳脫測試（先跳脫 \\ 再跳脫 '）。"""
     from aistorage.drive.http import _escape_q
     assert _escape_q(r"folder\name'test") == r"folder\\name\'test"
+
+
+def test_drive_file_n8_type_hints():
+    """N8: 驗證 DriveFile 的型別標註於執行期可成功解析。"""
+    import typing
+    hints = typing.get_type_hints(DriveFile.created_at.fget)
+    assert hints["return"] is datetime
+    hints_mod = typing.get_type_hints(DriveFile.modified_at.fget)
+    assert hints_mod["return"] is datetime
+
+
+def test_fake_drive_n4_fractional_timestamps():
+    """N4: FakeDrive 生成的時間戳包含毫秒/微秒小數部分。"""
+    clock = FixedClock("2026-09-27T08:00:00.123456Z")
+    drive = FakeDrive(clock)
+    fid = drive.seed_folder("f1")
+    folder = drive.get(fid)
+    assert "." in folder.created_time
+    assert folder.created_time.endswith("Z")
+    assert folder.created_at == datetime(2026, 9, 27, 8, 0, 0, 123456, tzinfo=timezone.utc)
+
+    file_id = drive.create(fid, "file.txt", b"abc")
+    f = drive.get(file_id.id)
+    assert "." in f.created_time
+    assert f.created_at == datetime(2026, 9, 27, 8, 0, 0, 123456, tzinfo=timezone.utc)
 

@@ -9,6 +9,8 @@ from aistorage.annex import (
     BundleName,
     FakeAnnexGit,
     Manifest,
+    normalize_bundle_heads,
+    normalize_ls_remote,
     normalize_refs,
     parse_bundle_name,
     parse_manifest,
@@ -30,51 +32,91 @@ def test_parse_bundle_name_smoke():
 
 
 def test_parse_manifest_smoke():
-    b1 = "GITBUNDLE-s100--uuid1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    b2 = "GITBUNDLE-s200--uuid1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    b_rem = "GITBUNDLE-s50--uuid1-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    uuid1 = "01234567-89ab-cdef-0123-456789abcdef"
+    b1 = f"GITBUNDLE-s100--{uuid1}-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    b2 = f"GITBUNDLE-s200--{uuid1}-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    b_rem = f"GITBUNDLE-s50--{uuid1}-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
     manifest_bytes = f"{b1}\n{b2}\n-{b_rem}\n".encode("utf-8")
-    m = parse_manifest(manifest_bytes, repo_uuid="uuid1")
+    m = parse_manifest(manifest_bytes, repo_uuid=uuid1)
     assert m.active == (b1, b2)
     assert m.removed == frozenset({b_rem})
 
     # 空 active
     with pytest.raises(MismatchError):
-        parse_manifest(f"-{b_rem}\n".encode("utf-8"))
+        parse_manifest(f"-{b_rem}\n".encode("utf-8"), repo_uuid="uuid1")
 
     # 非法行
     with pytest.raises(MismatchError):
-        parse_manifest(b"corrupted_line\n")
+        parse_manifest(b"corrupted_line\n", repo_uuid="uuid1")
 
     # M4: 重複 active
     with pytest.raises(MismatchError):
-        parse_manifest(f"{b1}\n{b1}\n".encode("utf-8"))
+        parse_manifest(f"{b1}\n{b1}\n".encode("utf-8"), repo_uuid="uuid1")
 
     # M4: active 與 removed 交集
     with pytest.raises(MismatchError):
-        parse_manifest(f"{b1}\n-{b1}\n".encode("utf-8"))
+        parse_manifest(f"{b1}\n-{b1}\n".encode("utf-8"), repo_uuid="uuid1")
 
 
-def test_normalize_refs():
+def test_normalize_refs_and_bundle_heads_equality():
+    """N1: 驗證同一組 refs 分別造出 ls-remote 形狀與 bundle heads 形狀，正規化後完全相等。"""
     uuid1 = "01234567-89ab-cdef-0123-456789abcdef"
-    raw = {
-        "HEAD": "sha_head",
-        f"refs/namespaces/git-remote-annex/{uuid1}/refs/heads/main": "sha_main",
-        f"refs/namespaces/git-remote-annex/{uuid1}/refs/heads/main^{{}}": "sha_peeled",
-        f"refs/namespaces/git-remote-annex/{uuid1}/refs/heads/git-annex": "sha_annex",
+    clean_refs = {
+        "refs/heads/main": "867947d6002ab62859d28bace760ae8800f11057",
+        "refs/heads/git-annex": "c2c126128c67b6fe8bbb96f18c38e4072505ad79",
     }
-    normalized = normalize_refs(raw, repo_uuid=uuid1)
-    assert "HEAD" not in normalized
-    assert "refs/heads/main^{}" not in normalized
-    assert normalized["refs/heads/main"] == "sha_main"
-    assert normalized["refs/heads/git-annex"] == "sha_annex"
+
+    # 造出真實 bundle heads 形狀（帶 namespace、含 HEAD 與 peeled ref）
+    raw_bundle_heads = {
+        "HEAD": "867947d6002ab62859d28bace760ae8800f11057",
+        f"refs/namespaces/git-remote-annex/{uuid1}/refs/heads/main": "867947d6002ab62859d28bace760ae8800f11057",
+        f"refs/namespaces/git-remote-annex/{uuid1}/refs/heads/main^{{}}": "867947d6002ab62859d28bace760ae8800f11057",
+        f"refs/namespaces/git-remote-annex/{uuid1}/refs/heads/git-annex": "c2c126128c67b6fe8bbb96f18c38e4072505ad79",
+    }
+
+    # 造出真實 ls-remote 形狀（不帶 namespace、含 HEAD）
+    raw_ls_remote = {
+        "HEAD": "867947d6002ab62859d28bace760ae8800f11057",
+        "refs/heads/main": "867947d6002ab62859d28bace760ae8800f11057",
+        "refs/heads/git-annex": "c2c126128c67b6fe8bbb96f18c38e4072505ad79",
+    }
+
+    norm_bundle = normalize_bundle_heads(raw_bundle_heads, repo_uuid=uuid1)
+    norm_ls = normalize_ls_remote(raw_ls_remote)
+
+    # 核心斷言：各自正規化後完全相等
+    assert norm_bundle == norm_ls == clean_refs
+
+    # 負向：bundle heads 缺少 namespace 前綴應 raise
+    with pytest.raises(MismatchError):
+        normalize_bundle_heads(raw_ls_remote, repo_uuid=uuid1)
+
+    # 負向：bundle heads uuid 不符應 raise
+    with pytest.raises(MismatchError):
+        normalize_bundle_heads(raw_bundle_heads, repo_uuid="wrong-uuid-00000000")
+
+    # 負向：ls-remote 包含 namespace 前綴應 raise
+    with pytest.raises(MismatchError):
+        normalize_ls_remote(raw_bundle_heads)
 
 
 def _create_test_bundle(repo_dir: Path, out_dir: Path, ref_spec: str, repo_uuid: str) -> Path:
     b_raw = out_dir / f"temp_{ref_spec.replace('..', '_').replace('/', '_')}.bundle"
+    # 將 ref_spec 對應之 commit 映射至 git-remote-annex namespace
+    ns_ref = f"refs/namespaces/git-remote-annex/{repo_uuid}/refs/heads/main"
+    if ".." in ref_spec:
+        base, head = ref_spec.split("..", 1)
+        sha = subprocess.check_output(["git", "-C", str(repo_dir), "rev-parse", head], text=True).strip()
+        subprocess.run(["git", "-C", str(repo_dir), "update-ref", ns_ref, sha], check=True)
+        bundle_spec = f"{base}..{ns_ref}"
+    else:
+        sha = subprocess.check_output(["git", "-C", str(repo_dir), "rev-parse", ref_spec], text=True).strip()
+        subprocess.run(["git", "-C", str(repo_dir), "update-ref", ns_ref, sha], check=True)
+        bundle_spec = ns_ref
+
     subprocess.run(
-        ["git", "-C", str(repo_dir), "bundle", "create", str(b_raw), ref_spec],
+        ["git", "-C", str(repo_dir), "bundle", "create", str(b_raw), bundle_spec],
         check=True,
         capture_output=True,
     )
@@ -101,7 +143,7 @@ def test_replay_refs_smoke(tmp_path: Path):
     bundle_path = _create_test_bundle(repo_dir, tmp_path, "refs/heads/main", uuid1)
 
     workdir = tmp_path / "replay_workdir"
-    refs = replay_refs([bundle_path], workdir=workdir)
+    refs = replay_refs([bundle_path], workdir=workdir, repo_uuid=uuid1)
     assert "refs/heads/main" in refs
     assert len(refs["refs/heads/main"]) == 40
 
@@ -132,12 +174,12 @@ def test_h2_replay_workdir_reuse_rejection(tmp_path: Path):
     workdir = tmp_path / "shared_workdir"
 
     # 1. 完整重放（base + inc）應成功
-    refs = replay_refs([base_bundle, inc_bundle], workdir=workdir)
+    refs = replay_refs([base_bundle, inc_bundle], workdir=workdir, repo_uuid=uuid1)
     assert "refs/heads/main" in refs
 
     # 2. H2 核心：使用同一個 workdir，但若僅重放缺基底的 inc_bundle，絕不可因物件殘留而判定成功
     with pytest.raises(MismatchError):
-        replay_refs([inc_bundle], workdir=workdir)
+        replay_refs([inc_bundle], workdir=workdir, repo_uuid=uuid1)
 
 
 def test_fake_annex_git_smoke():
@@ -175,3 +217,35 @@ def test_fake_annex_git_smoke():
     fake3.inject("push", WriteError)
     with pytest.raises(WriteError):
         fake3.push("origin", "main")
+
+    # N1: FakeAnnexGit 亦透過 normalize_ls_remote 拒絕 namespace ref
+    fake4 = FakeAnnexGit(refs={"refs/namespaces/git-remote-annex/uuid/refs/heads/main": "sha"})
+    with pytest.raises(MismatchError):
+        fake4.ls_remote()
+
+
+def test_subprocess_annex_git_n5_n6(tmp_path: Path):
+    from aistorage.annex import SubprocessAnnexGit
+    from aistorage.errors import ReadError
+
+    # N5: 舊的 clone 方法已徹底移除
+    assert not hasattr(SubprocessAnnexGit, "clone")
+
+    # 初始化測試 repo
+    subprocess.run(["git", "init", "-b", "main", str(tmp_path)], check=True, capture_output=True)
+    git = SubprocessAnnexGit(tmp_path)
+
+    # N6: 命令失敗時將 stderr 寫至 debug/git-<ts>.log，例外訊息僅包含檔名
+    with pytest.raises(ReadError) as exc_info:
+        git._run(["git", "checkout", "non_existent_branch"], is_write=False)
+
+    msg = str(exc_info.value)
+    assert "Git 命令失敗" in msg
+    assert "log=git-" in msg
+
+    debug_dir = tmp_path / "debug"
+    assert debug_dir.is_dir()
+    log_files = list(debug_dir.glob("git-*.log"))
+    assert len(log_files) >= 1
+    log_content = log_files[0].read_text(encoding="utf-8")
+    assert "non_existent_branch" in log_content

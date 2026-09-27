@@ -15,12 +15,13 @@ def parse_rfc3339(s: str) -> datetime:
     """解析 RFC 3339 時間字串為帶時區之 UTC datetime。
 
     支援 Z、毫秒、微秒、奈秒（超過 6 位小數安全截斷）與時區偏移。
+    若字串缺少時區偏移（例如未帶 'Z' 或 '+00:00'），拋出 ValueError。
     """
     s_clean = s.strip()
     if "." in s_clean:
         base, frac_and_tz = s_clean.split(".", 1)
-        if "Z" in frac_and_tz:
-            frac, _ = frac_and_tz.split("Z", 1)
+        if "Z" in frac_and_tz or "z" in frac_and_tz:
+            frac, _ = frac_and_tz.replace("z", "Z").split("Z", 1)
             tz = "+00:00"
         elif "+" in frac_and_tz:
             frac, rest = frac_and_tz.split("+", 1)
@@ -29,23 +30,33 @@ def parse_rfc3339(s: str) -> datetime:
             frac, rest = frac_and_tz.split("-", 1)
             tz = "-" + rest
         else:
-            frac = frac_and_tz
-            tz = "+00:00"
+            raise ValueError(f"RFC 3339 時間字串缺少時區資訊: '{s}'")
         frac_6 = (frac[:6] + "000000")[:6]
         s_clean = f"{base}.{frac_6}{tz}"
     else:
-        s_clean = s_clean.replace("Z", "+00:00")
+        if "Z" in s_clean or "z" in s_clean:
+            s_clean = s_clean.replace("z", "Z").replace("Z", "+00:00")
+        elif "+" in s_clean:
+            pass
+        elif "-" in s_clean[10:]:  # 避開日期 YYYY-MM-DD
+            pass
+        else:
+            raise ValueError(f"RFC 3339 時間字串缺少時區資訊: '{s}'")
 
-    dt = datetime.fromisoformat(s_clean)
+    try:
+        dt = datetime.fromisoformat(s_clean)
+    except Exception as e:
+        raise ValueError(f"無效的 RFC 3339 時間格式: '{s}': {e}") from e
+
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        raise ValueError(f"RFC 3339 時間字串缺少時區資訊: '{s}'")
     return dt.astimezone(timezone.utc)
 
 
 def format_rfc3339(dt: datetime, *, include_fraction: bool = False) -> str:
     """格式化 datetime 為標準 RFC 3339 UTC 字串。"""
     utc_dt = dt.astimezone(timezone.utc)
-    if include_fraction and utc_dt.microsecond > 0:
+    if include_fraction:
         return utc_dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     return utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 

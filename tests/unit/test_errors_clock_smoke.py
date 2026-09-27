@@ -76,3 +76,22 @@ def test_rfc3339_parsing_and_formatting():
     assert formatted == "2026-09-27T08:00:00Z"
     formatted_frac = format_rfc3339(dt_ms, include_fraction=True)
     assert formatted_frac == "2026-09-27T08:00:00.500000Z"
+
+    # N4: include_fraction=True 即使 microsecond 為 0 亦包含小數
+    formatted_zero_frac = format_rfc3339(dt, include_fraction=True)
+    assert formatted_zero_frac == "2026-09-27T08:00:00.000000Z"
+
+    # N8: 缺少時區偏移字串必須拋出 ValueError
+    with pytest.raises(ValueError):
+        parse_rfc3339("2026-09-27T08:00:00")
+    with pytest.raises(ValueError):
+        parse_rfc3339("2026-09-27T08:00:00.123")
+
+
+def test_write_error_status_code():
+    w = WriteError("write failed", status_code=403)
+    assert w.status_code == 403
+    assert "write failed" in str(w)
+
+    w_none = WriteError("write failed")
+    assert w_none.status_code is None

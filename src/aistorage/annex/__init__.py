@@ -5,6 +5,8 @@ from aistorage.annex.git import AnnexGit, SubprocessAnnexGit
 from aistorage.annex.manifest import (
     BundleName,
     Manifest,
+    normalize_bundle_heads,
+    normalize_ls_remote,
     normalize_refs,
     parse_bundle_name,
     parse_manifest,
@@ -16,6 +18,8 @@ __all__ = [
     "parse_bundle_name",
     "Manifest",
     "parse_manifest",
+    "normalize_bundle_heads",
+    "normalize_ls_remote",
     "normalize_refs",
     "replay_refs",
     "AnnexGit",

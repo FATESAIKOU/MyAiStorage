@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 from aistorage.annex.git import AnnexGit
+from aistorage.annex.manifest import normalize_ls_remote
 from aistorage.errors import WriteError
 
 
@@ -47,7 +48,7 @@ class FakeAnnexGit(AnnexGit):
 
     def ls_remote(self, remote: str = "origin") -> dict[str, str]:
         self._check_injection("ls_remote")
-        return dict(self.refs)
+        return normalize_ls_remote(self.refs)
 
     def add(self, paths: list[str | Path] | str | Path) -> None:
         self._check_injection("add")
@@ -64,7 +65,13 @@ class FakeAnnexGit(AnnexGit):
         self.pending_refs["refs/heads/main"] = sha
         return sha
 
-    def copy(self, remote: str, to_copy: list[str] | None = None) -> None:
+    def copy(
+        self,
+        remote: str,
+        to_copy: list[str] | None = None,
+        *,
+        timeout: float = 900.0,
+    ) -> None:
         self._check_injection("copy")
         self.copied.append((remote, to_copy))
 
@@ -72,6 +79,8 @@ class FakeAnnexGit(AnnexGit):
         self,
         remote: str = "origin",
         branches: tuple[str, ...] | str = ("main", "git-annex"),
+        *,
+        timeout: float = 900.0,
     ) -> None:
         self._check_injection("push")
         branch_tuple = (branches,) if isinstance(branches, str) else tuple(branches)

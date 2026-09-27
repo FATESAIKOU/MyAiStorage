@@ -147,12 +147,15 @@ class FakeDrive(DriveClient):
 ```
 - 同名檔、`sha256` 缺少（`sha256=None`）、垃圾桶狀態都要能模擬。
 - 單元測試**一律用 FakeDrive**；`HttpDriveClient` 只在整合測試用。
+- 時間比較規則（N4）：`now_utc()` 只用於顯示與記錄，比較時間一律用 `now()` 或是 `DriveFile.created_at`。`FakeDrive` 生成的時間戳一律透過 `format_rfc3339(self._clock.now(), include_fraction=True)` 輸出帶有小數部分之 RFC 3339 UTC 字串，以杜絕同秒內建立時間與 push 啟動時間的比對誤差。
 
 ---
 
 ## 3. 完整性機制（3.2）
 
 ### 3.1 manifest 與重放（`aistorage.annex`）
+
+> **實證結果（N1）**：經真實 bundle（`docs/spike/evidence/1.3-verify/current.bundle`）驗證，`git bundle list-heads` 輸出之 heads 必定帶有 `refs/namespaces/git-remote-annex/<uuid>/` 前綴；而透過 `annex::` 之 `git ls-remote` 輸出則為標準 clean ref（例如 `refs/heads/main`）。兩者分別透過 `normalize_bundle_heads` 與 `normalize_ls_remote` 正規化為完全相同之 ref 字典以供 pin 比對。
 
 ```python
 # annex/manifest.py
@@ -165,13 +168,26 @@ def parse_bundle_name(name: str) -> BundleName | None: ...      # GITBUNDLE-s<N>
 class Manifest:
     active: tuple[str, ...]      # 依順序
     removed: frozenset[str]      # '-' 開頭的行（去掉 '-'）
-def parse_manifest(data: bytes) -> Manifest: ...
-    # 每一行只能是 bundle 名稱或 '-'＋bundle 名稱；其他內容 raise MismatchError；空 active 也是 MismatchError
+def parse_manifest(data: bytes, *, repo_uuid: str) -> Manifest: ...
+    # repo_uuid 為必填參數；每一行只能是 bundle 名稱或 '-'＋bundle 名稱；其他內容 raise MismatchError；空 active 也是 MismatchError
+
+def normalize_bundle_heads(raw: dict[str, str], *, repo_uuid: str) -> dict[str, str]: ...
+    # 嚴格剝除 refs/namespaces/git-remote-annex/<repo_uuid>/ 前綴，排除 HEAD 與 peeled ref（^{}）
+
+def normalize_ls_remote(raw: dict[str, str]) -> dict[str, str]: ...
+    # 只接受標準 refs/，若帶有 namespace 前綴直接 raise MismatchError，排除 HEAD 與 peeled ref（^{}）
 
 # annex/replay.py
-def replay_refs(bundle_paths_in_order: list[Path], *, workdir: Path) -> dict[str, str]: ...
-    # 在空 repo 依序 git bundle unbundle；ref 以「最後一個 bundle 宣告的集合」為準（review-1.4f3 L2）；
-    # 去掉 refs/namespaces/git-remote-annex/<uuid>/ 前綴；任何一個解不開 → MismatchError
+def replay_refs(bundle_paths_in_order: list[Path], *, workdir: Path, repo_uuid: str) -> dict[str, str]: ...
+    # 每次在全新暫存 bare repo 依序 git bundle unbundle（結束後銷毀，H2）；
+    # 分塊計算 bundle 檔案 SHA-256 雜湊（N7）；以 git cat-file 驗證 commit 存在性（M4）；
+    # 透過 normalize_bundle_heads 算出 clean refs（N1）；套用環境隔離與逾時（N7）
+
+# annex/git.py
+# SubprocessAnnexGit:
+# - copy 與 push 逾時可設定（預設 900 秒，N2）
+# - clone_for_commit 逾時可設定（預設 600 秒，N2）
+# - 子程序失敗時將 stderr 尾端 4 KiB 寫入 debug/git-<ts>.log，主例外訊息僅附檔名（N6）
 ```
 
 ### 3.2 釘選值與 pin repo（`integrity/pin.py`）
@@ -635,6 +651,7 @@ D（依賴 C）         整合測試（TEST_FOLDER_ID）、中斷注入、bundle
   3. 注入：真 main＋偽造 git-annex、上一版 manifest 冒充、沒被引用的 annex 物件、上層同名資料夾 → 偵測、隔離、下一輪恢復。
   4. **bundle 回收的容忍度**：設小的 `max-git-bundles` 觸發 consolidate，回收 removed 之後 clone、push、再 consolidate 都正常（design D2 明文要求在 3.2 驗證）。
   5. 暫時性錯誤：在 HttpDriveClient 外包一層注入 503 → 中止，沒有任何移動。
+- **CI / workflow 執行安全注意事項（N8）**：執行 pytest 時切勿開啟 `-l`（`--show-locals`）或 rich traceback，以避免本機區域變數（可能含有秘密、token 或未過濾路徑）印出至 GitHub Actions log 或 artifact 中。
 
 ---
 

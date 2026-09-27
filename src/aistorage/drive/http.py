@@ -126,7 +126,7 @@ class HttpDriveClient(DriveClient):
                     if ignore_404:
                         return 204, {}, b""
                     if is_write:
-                        raise WriteError(f"Drive 寫入目標不存在 (HTTP 404): {url}") from None
+                        raise WriteError(f"Drive 寫入目標不存在 (HTTP 404): {url}", status_code=404) from None
                     raise NotFound(f"Drive 資源不存在 (HTTP 404): {url}") from None
 
                 # M2: 401 嘗試強制刷新一次 token
@@ -151,8 +151,9 @@ class HttpDriveClient(DriveClient):
                     attempts += 1
                     continue
 
-                err_cls = WriteError if is_write else ReadError
-                raise err_cls(f"Drive 請求失敗 (HTTP {code}): {url}") from None
+                if is_write:
+                    raise WriteError(f"Drive 請求失敗 (HTTP {code}): {url}", status_code=code) from None
+                raise ReadError(f"Drive 請求失敗 (HTTP {code}): {url}") from None
 
             except (
                 urllib.error.URLError,
@@ -525,9 +526,12 @@ class HttpDriveClient(DriveClient):
                     is_write=True,
                     retry_network_and_5xx=False,  # 由 move 自身掌控冪等重試
                 )
-                resp_json = json.loads(resp_data.decode("utf-8"))
+                try:
+                    resp_json = json.loads(resp_data.decode("utf-8"))
+                except Exception as e:
+                    raise WriteError(f"解析 Drive move 回應失敗: {e}") from None
                 return self._parse_drive_file(resp_json, is_write=True)
-            except WriteError:
+            except WriteError as e:
                 # 檢查是否前次嘗試已成功生效
                 try:
                     cur = self.get(file_id)
@@ -535,6 +539,16 @@ class HttpDriveClient(DriveClient):
                         return cur
                 except Exception:
                     pass
+
+                # N8: 僅對暫時性失敗（網路/連線錯誤 status_code is None、5xx 或 429）重試
+                # 非暫時性錯誤（400、權限 403、404）不進行無意義重試
+                is_transient = (
+                    e.status_code is None
+                    or (500 <= e.status_code < 600)
+                    or e.status_code == 429
+                )
+                if not is_transient:
+                    raise
 
                 if attempts < self._max_retries:
                     time.sleep(self._backoff_base * (2 ** attempts))
@@ -547,7 +561,10 @@ class HttpDriveClient(DriveClient):
     def delete_permanently(self, file_id: str) -> None:
         """永久刪除檔案。
 
-        M1/M2: 遇到 404 視為成功（檔案已不存在，冪等刪除）。
+        M1/M2/N3: 遇到 404 視為成功（檔案已不存在，冪等刪除）。
+        注意：delete 在第一次呼叫就回 404 時亦會視為成功。
+        因此呼叫端（如 gc）執行前必須先透過 get() 嚴格確認其 parents 與元資料，
+        不能單靠 delete 的成功回應作為目標 id 正確無誤的依據。
         """
         url = f"{DRIVE_API_BASE}/files/{file_id}?supportsAllDrives=true"
         self._request(url, method="DELETE", is_write=True, ignore_404=True)

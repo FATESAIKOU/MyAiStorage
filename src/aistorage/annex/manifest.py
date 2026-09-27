@@ -1,8 +1,9 @@
-"""AiStorage git-annex bundle 名稱與 GITMANIFEST 解析模組。
+"""AiStorage GITMANIFEST 與 bundle 檔案格式解析模組。
 
 依據規格：
-- docs/impl/group3-modules.md 第 3.1 節
-- review-g3a.md M4、L（嚴格行檢查、僅限小寫 hex、repo_uuid 檢查、去重、無交集、normalize_refs）
+- docs/impl/group3-modules.md 第 1.1 節
+- review-g3a.md M4（嚴格 hex 小寫、去除空白 CR、repo_uuid 驗證、無重複無交集）
+- review-g3a-recheck.md N1（normalize_bundle_heads、normalize_ls_remote 雙入口；repo_uuid 必填）
 """
 
 from __future__ import annotations
@@ -12,19 +13,17 @@ import re
 
 from aistorage.errors import MismatchError
 
-# L: 嚴格限定 sha256 僅能為小寫 hex
 _BUNDLE_NAME_PATTERN = re.compile(
-    r"^GITBUNDLE-s(\d+)--([a-zA-Z0-9_-]+)-([0-9a-f]{64})$"
+    r"^GITBUNDLE-s(?P<size>\d+)--(?P<repo_uuid>[0-9a-f-]+)-(?P<sha256>[0-9a-f]{64})$"
 )
-
 _NAMESPACE_PREFIX_PATTERN = re.compile(
-    r"^refs/namespaces/git-remote-annex/([^/]+)/(.*)$"
+    r"^refs/namespaces/git-remote-annex/([0-9a-f-]+)/(.*)$"
 )
 
 
 @dataclass(frozen=True)
 class BundleName:
-    """Git annex bundle 檔名解析結構。"""
+    """GITBUNDLE 檔名解析結構。"""
 
     name: str
     size: int
@@ -33,25 +32,15 @@ class BundleName:
 
 
 def parse_bundle_name(name: str) -> BundleName | None:
-    """解析 git-annex bundle 檔名。格式：GITBUNDLE-s<size>--<uuid>-<sha256>（限小寫 hex）。
-
-    若格式不符則回傳 None。
-    """
+    """解析 bundle 檔名。若符合 GITBUNDLE 格式回傳 BundleName，否則回傳 None。"""
     m = _BUNDLE_NAME_PATTERN.match(name)
     if not m:
         return None
-
-    size_str, uuid_str, sha_str = m.groups()
-    try:
-        size = int(size_str)
-    except ValueError:
-        return None
-
     return BundleName(
         name=name,
-        size=size,
-        repo_uuid=uuid_str,
-        sha256=sha_str,
+        size=int(m.group("size")),
+        repo_uuid=m.group("repo_uuid"),
+        sha256=m.group("sha256").lower(),
     )
 
 
@@ -63,13 +52,13 @@ class Manifest:
     removed: frozenset[str]
 
 
-def parse_manifest(data: bytes, *, repo_uuid: str | None = None) -> Manifest:
+def parse_manifest(data: bytes, *, repo_uuid: str) -> Manifest:
     """解析 GITMANIFEST 原始位元組。
 
-    規則（M4 & L）：
-    - 行尾只接受 \\n（或最後一行無 \\n）；前後帶空白視為非法行。
+    規則（M4, L & N1）：
+    - 行尾只接受 \\n（或最後一行無 \\n）；前後帶空白視為非法行，不接受 \\r。
     - 每一行只能是 bundle 名稱或 '-' + bundle 名稱。
-    - 若指定 repo_uuid，所有 bundle 之 repo_uuid 必須相符。
+    - 所有 bundle 之 repo_uuid 必須與傳入之 repo_uuid 完全相符（必填參數）。
     - active 清單若為空、包含重複項目，或與 removed 清單存在交集，均拋出 MismatchError。
 
     Returns:
@@ -90,7 +79,6 @@ def parse_manifest(data: bytes, *, repo_uuid: str | None = None) -> Manifest:
     # 以 \n 切割，嚴格檢查每行格式
     lines = text.split("\n")
     for line_num, line in enumerate(lines, start=1):
-        # 結尾可能有一個空行（標準文字檔），直接略過
         if line_num == len(lines) and line == "":
             continue
         if line == "":
@@ -107,7 +95,7 @@ def parse_manifest(data: bytes, *, repo_uuid: str | None = None) -> Manifest:
                 raise MismatchError(
                     f"manifest 第 {line_num} 行為無效之 removed bundle: '{line}'"
                 )
-            if repo_uuid and parsed.repo_uuid != repo_uuid:
+            if parsed.repo_uuid != repo_uuid:
                 raise MismatchError(
                     f"manifest 第 {line_num} 行 bundle 之 repo_uuid ({parsed.repo_uuid}) 不符預期 ({repo_uuid})"
                 )
@@ -119,7 +107,7 @@ def parse_manifest(data: bytes, *, repo_uuid: str | None = None) -> Manifest:
                 raise MismatchError(
                     f"manifest 第 {line_num} 行為無效之 active bundle: '{line}'"
                 )
-            if repo_uuid and parsed.repo_uuid != repo_uuid:
+            if parsed.repo_uuid != repo_uuid:
                 raise MismatchError(
                     f"manifest 第 {line_num} 行 bundle 之 repo_uuid ({parsed.repo_uuid}) 不符預期 ({repo_uuid})"
                 )
@@ -143,38 +131,32 @@ def parse_manifest(data: bytes, *, repo_uuid: str | None = None) -> Manifest:
     )
 
 
-def normalize_refs(raw: dict[str, str], *, repo_uuid: str | None = None) -> dict[str, str]:
-    """正規化遠端 ls-remote 或 bundle list-heads 宣告之 ref 映射表。
+def normalize_bundle_heads(raw: dict[str, str], *, repo_uuid: str) -> dict[str, str]:
+    """正規化 bundle list-heads 宣告之 ref 映射表。
 
-    規則（M4）：
+    規則（N1）：
     - 一律排除 HEAD 與 peeled ref（以 ^{} 結尾者）。
-    - 若指定 repo_uuid，只接受 refs/namespaces/git-remote-annex/<repo_uuid>/<clean_ref> 開頭者，其餘拋出 MismatchError。
-    - 若未指定 repo_uuid，將 refs/namespaces/git-remote-annex/<任意uuid>/ 前綴剝除。
+    - 嚴格要求每個 ref 均以 refs/namespaces/git-remote-annex/<repo_uuid>/ 開頭。
+    - 剝除該前綴，回傳 clean_ref -> sha 字典。
+    - 若 ref 未包含該前綴或 uuid 不符，拋出 MismatchError。
     - 剝除前綴後若有同名衝突，拋出 MismatchError。
-
-    Returns:
-        clean_ref -> sha 字典。
     """
     normalized: dict[str, str] = {}
 
     for ref_name, sha in raw.items():
-        # 排除 HEAD 與 peeled ref
         if ref_name == "HEAD" or ref_name.endswith("^{}"):
             continue
 
         m = _NAMESPACE_PREFIX_PATTERN.match(ref_name)
-        if m:
-            u, clean_ref = m.group(1), m.group(2)
-            if repo_uuid and u != repo_uuid:
-                raise MismatchError(
-                    f"ref '{ref_name}' 之 namespace uuid ({u}) 不符合預期 ({repo_uuid})"
-                )
-        else:
-            if repo_uuid:
-                raise MismatchError(
-                    f"ref '{ref_name}' 缺少預期之 namespace 前綴 (refs/namespaces/git-remote-annex/{repo_uuid}/)"
-                )
-            clean_ref = ref_name
+        if not m:
+            raise MismatchError(
+                f"bundle head '{ref_name}' 缺少預期之 namespace 前綴 (refs/namespaces/git-remote-annex/{repo_uuid}/)"
+            )
+        u, clean_ref = m.group(1), m.group(2)
+        if u != repo_uuid:
+            raise MismatchError(
+                f"bundle head '{ref_name}' 之 namespace uuid ({u}) 不符合預期 ({repo_uuid})"
+            )
 
         if clean_ref in normalized and normalized[clean_ref] != sha:
             raise MismatchError(
@@ -183,3 +165,44 @@ def normalize_refs(raw: dict[str, str], *, repo_uuid: str | None = None) -> dict
         normalized[clean_ref] = sha
 
     return normalized
+
+
+def normalize_ls_remote(raw: dict[str, str]) -> dict[str, str]:
+    """正規化 git ls-remote 回傳之 ref 映射表。
+
+    規則（N1）：
+    - 一律排除 HEAD 與 peeled ref（以 ^{} 結尾者）。
+    - 嚴格要求 ref 為標準 refs/ 開頭且「不得」包含 namespace 前綴。
+    - 若包含 refs/namespaces/ 拋出 MismatchError。
+    - 若有衝突拋出 MismatchError。
+    """
+    normalized: dict[str, str] = {}
+
+    for ref_name, sha in raw.items():
+        if ref_name == "HEAD" or ref_name.endswith("^{}"):
+            continue
+
+        if ref_name.startswith("refs/namespaces/"):
+            raise MismatchError(
+                f"ls-remote ref 不得包含 namespace 前綴: '{ref_name}'"
+            )
+        if not ref_name.startswith("refs/"):
+            raise MismatchError(f"無效之 ref 格式: '{ref_name}'")
+
+        if ref_name in normalized and normalized[ref_name] != sha:
+            raise MismatchError(
+                f"ref 正規化衝突: '{ref_name}' 同時映射至多個 sha ({normalized[ref_name]}, {sha})"
+            )
+        normalized[ref_name] = sha
+
+    return normalized
+
+
+def normalize_refs(raw: dict[str, str], *, repo_uuid: str | None = None) -> dict[str, str]:
+    """相容性轉接函式：依據是否具備 namespace 前綴自動分流。"""
+    has_ns = any(k.startswith("refs/namespaces/") for k in raw if k != "HEAD" and not k.endswith("^{}"))
+    if has_ns:
+        if not repo_uuid:
+            raise MismatchError("帶有 namespace 之 ref 正規化必須提供 repo_uuid")
+        return normalize_bundle_heads(raw, repo_uuid=repo_uuid)
+    return normalize_ls_remote(raw)

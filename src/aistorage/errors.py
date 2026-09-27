@@ -36,6 +36,10 @@ class ReadError(AiStorageError):
 class WriteError(AiStorageError):
     """寫入操作失敗例外。"""
 
+    def __init__(self, message: str = "", *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class NotFound(ReadError):
     """404 資源不存在例外。
