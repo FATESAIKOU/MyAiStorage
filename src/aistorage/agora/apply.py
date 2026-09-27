@@ -25,7 +25,7 @@ from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aistorage.agora import layout, rejections
 from aistorage.agora.store import AgoraStore, SessionRecord
@@ -33,8 +33,14 @@ from aistorage.clock import Clock, format_rfc3339, parse_rfc3339
 from aistorage.converters import get_converter
 from aistorage.converters.base import ConversionError, Converter
 from aistorage.errors import MismatchError
-from aistorage.intake.evaluate import Decision
 from aistorage.reading import check_continuation
+
+if TYPE_CHECKING:  # pragma: no cover
+    # Decision 只用在型別註解（`from __future__ import annotations` 讓它不需在執行期存在）。
+    # 執行期匯入會形成循環：agora.__init__ → agora.apply → intake.evaluate → agora.store
+    # →（回到）agora.__init__，結果 `import aistorage.intake.evaluate` 直接失敗。
+    # 依賴方向應該是 intake → agora，不是 agora → intake。
+    from aistorage.intake.evaluate import Decision
 
 
 @dataclass(frozen=True)
