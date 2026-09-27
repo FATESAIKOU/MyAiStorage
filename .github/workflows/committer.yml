@@ -1,0 +1,102 @@
+name: committer
+
+on:
+  schedule:
+    - cron: "7 */6 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: committer-agora
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+
+      - name: guard
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "Ref $GITHUB_REF is not refs/heads/main" >&2
+            exit 1
+          fi
+          REMOTE_SHA=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/main" | jq -r .sha)
+          if [ -z "$REMOTE_SHA" ] || [ "$REMOTE_SHA" = "null" ]; then
+            echo "Failed to fetch remote main HEAD" >&2
+            exit 1
+          fi
+          if [ "$GITHUB_SHA" != "$REMOTE_SHA" ]; then
+            echo "Run sha $GITHUB_SHA does not match remote main HEAD $REMOTE_SHA" >&2
+            exit 1
+          fi
+
+      - name: setup-uv
+        uses: astral-sh/setup-uv@16b49045b85040e34c9f13674686b24a3500854d # v5.1.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: inbox-prescan
+        id: prescan
+        run: |
+          RESULT=$(uv run python -m aistorage.committer prescan --config config/committer.json || true)
+          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
+          if [ "$RESULT" = "EMPTY" ]; then
+            echo "Inbox is empty, skipping remainder of workflow."
+          fi
+
+      - name: install-tools
+        if: steps.prescan.outputs.result != 'EMPTY'
+        run: |
+          set -eux
+          # git-annex (10.20260717 amd64)
+          ANNEX_SHA="a3c9d10ee33a7ace69efeaa8cd6282cfd7444ec797d732cebae12a64efefa18a"
+          curl -fsSL "https://downloads.kitenet.net/git-annex/linux/current/git-annex-standalone-amd64.tar.gz" -o /tmp/git-annex.tar.gz
+          echo "${ANNEX_SHA}  /tmp/git-annex.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/git-annex.tar.gz -C /opt
+          rm -f /tmp/git-annex.tar.gz
+          sudo ln -sf /opt/git-annex.linux/git-annex /usr/local/bin/git-annex
+          sudo ln -sf /opt/git-annex.linux/git-annex-shell /usr/local/bin/git-annex-shell
+          sudo ln -sf /opt/git-annex.linux/git-remote-annex /usr/local/bin/git-remote-annex
+
+          # rclone (1.75.1 amd64)
+          RCLONE_VERSION="1.75.1"
+          RCLONE_SHA="982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab"
+          curl -fsSL "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-amd64.zip" -o /tmp/rclone.zip
+          echo "${RCLONE_SHA}  /tmp/rclone.zip" | sha256sum -c -
+          unzip -q /tmp/rclone.zip -d /tmp
+          sudo install -m 0755 "/tmp/rclone-v${RCLONE_VERSION}-linux-amd64/rclone" /usr/local/bin/rclone
+          rm -rf /tmp/rclone.zip "/tmp/rclone-v${RCLONE_VERSION}-linux-amd64"
+
+      - name: secrets-to-files
+        if: steps.prescan.outputs.result != 'EMPTY'
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+          PIN_DEPLOY_KEY: ${{ secrets.PIN_DEPLOY_KEY }}
+        run: |
+          mkdir -p "$RUNNER_TEMP"
+          echo "$RCLONE_CONF" > "$RUNNER_TEMP/rclone.conf"
+          chmod 600 "$RUNNER_TEMP/rclone.conf"
+          echo "$PIN_DEPLOY_KEY" > "$RUNNER_TEMP/pin_deploy.key"
+          chmod 600 "$RUNNER_TEMP/pin_deploy.key"
+
+      - name: run
+        if: steps.prescan.outputs.result != 'EMPTY'
+        env:
+          AISTORAGE_RCLONE_CONF: ${{ runner.temp }}/rclone.conf
+          AISTORAGE_PIN_KEY: ${{ runner.temp }}/pin_deploy.key
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          uv run python -m aistorage.committer run --config config/committer.json

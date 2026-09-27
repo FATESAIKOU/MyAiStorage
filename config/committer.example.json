@@ -1,0 +1,19 @@
+{
+  "format": "aistorage.committer/v1",
+  "repo": "agora",
+  "repo_uuid": "00000000-0000-0000-0000-000000000001",
+  "repo_url": "drive://agora",
+  "prefix_folder_id": "EXAMPLE_PREFIX_FOLDER_ID",
+  "quarantine_folder_id": "EXAMPLE_QUARANTINE_FOLDER_ID",
+  "readview_folder_id": "EXAMPLE_READVIEW_FOLDER_ID",
+  "pin_repo_url": "git@github.com:FATESAIKOU/MyAiStorage-pin.git",
+  "identity_registry_path": "config/identity.example.json",
+  "max_git_bundles": 20,
+  "max_gc_per_run": 200,
+  "max_raw_size": 52428800,
+  "quarantine_retention_days": 7,
+  "ledger_retention_months": 3,
+  "prefix_levels": [],
+  "github_repository": "FATESAIKOU/MyAiStorage",
+  "schedule_cron": "7 */6 * * *"
+}
