@@ -1,6 +1,8 @@
 # Agora 直接建出 session，AI 載入就能開工
 
 > 2026-09-28 本人確認。取代 design D3 中「AI 自己呼叫 claim 工具認領」的部分。
+>
+> 同日更新：指令的名稱與形狀改以 `docs/design/agora-session-operations.md` 為準。`agora checkout` 產出起點包，由各 coding agent 的轉接器 `agora-<名稱>` 載入成原生 session；Agora 本身不依賴任何 coding agent，開 agent 由呼叫者決定（AI 也可以）。下方的 `agora init session` 範例僅為當時的暫定形狀。
 
 分裂（1→n）、統合（n→1）、相互參照（n↔m）是 Agora 要支援的事。原本的做法是：新的 AI session 一開始是空的，由 AI 自己呼叫 `claim` 工具，工具再把前一個 session 到接續點為止的內容當成回覆交給它。本人要的是另一種形狀：由 Agora 依交接單直接**建出**一個 opencode 或 Claude Code 原生格式的 session，AI 一載入就帶著前面的內容，直接接著做。
 
