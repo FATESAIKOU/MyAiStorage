@@ -366,6 +366,28 @@ class AnnexRawStorage(RawStorage):
             return None
         return proc.stdout.strip() or None
 
+    def _assert_key_is_this_content(self, key: str, data: bytes, dest_p: Path) -> None:
+        """確認 annex 物件 `key` 的內容就是剛寫進去的 `data`。
+
+        key 的名稱是內容雜湊，所以兩者必須一致。只有真的 git-annex 環境才檢查
+        （單元測試用的假 git 沒有真的物件庫）。
+        """
+        if self.git is None or isinstance(self.git, FakeAnnexGit):
+            return
+        if not (self.git_workdir / ".git").exists():
+            return
+        local = self._local_object_bytes(key)
+        if local is None:
+            raise WriteError(
+                f"剛寫入的 {dest_p} 對應的 annex 物件 {key} 不在本機物件庫裡："
+                "沒有真的入 annex，拒絕把它記成快照的 key。")
+        if local != data:
+            raise MismatchError(
+                f"annex 物件 {key} 的內容與剛寫入的 raw 不符"
+                f"（物件 {len(local)} bytes／寫入 {len(data)} bytes）："
+                "這個 key 不能代表這一版，拒絕記下。"
+                "（多半是 index 裡這一條還被當成已入 annex，git-annex 跳過了它）")
+
     def store(self, worktree_path: Path, src: Path) -> RawRef:
         """將 src 原始紀錄存為 git-annex 物件並回傳 RawRef（key 由 git-annex 決定）。"""
         src_p = Path(src).resolve()
@@ -376,25 +398,36 @@ class AnnexRawStorage(RawStorage):
 
         dest_p = Path(worktree_path)
         dest_p.parent.mkdir(parents=True, exist_ok=True)
-        # H1（review-cdb4a34，資料完整性）：dest 很可能已經是 git-annex 的
-        # **符號連結**（上一個快照的 raw 還在樹狀裡）。`shutil.copy2` 會沿著
-        # 連結寫進去，而 git-annex 的物件是 hardlink——於是「上一個快照的 key」
-        # 指向的物件被**就地改寫**成新內容：舊快照的 raw 就再也讀不回來了
-        # （key 的名稱是內容雜湊，內容卻變了，連 sweep 都看不出來）。
-        # 所以先移除目標路徑（git 追蹤的是路徑，不是 inode），再寫新的進去。
+        try:
+            rel: str | Path = dest_p.relative_to(self.git_workdir)
+        except ValueError:
+            rel = dest_p
+        # H1（review-cdb4a34，資料遺失）：**必須先把這條路徑從 index 拿掉**。
+        # git-annex 的 largefiles clean filter 看到 index 裡這一條已經是指向
+        # annex 物件的 symlink，就會判定「已經入過 annex」而整條跳過——於是
+        # 同一個 Session 換新版本時：lookupkey 回上一版的 key、新內容從來沒有
+        # 變成 annex 物件、樹狀也還指著舊物件。key 的名稱是舊內容的雜湊，
+        # sweep／key 覆蓋率／隔離區全都抓不到，讀者只會讀到舊版本。
+        if (self.git_workdir / ".git").exists():
+            subprocess.run(
+                ["git", "-C", str(self.git_workdir), "update-index",
+                 "--force-remove", "--", str(rel)],
+                capture_output=True, check=False, env=get_git_env(), timeout=60.0,
+            )
+        # dest 可能是 git-annex 的**符號連結**（core.symlinks=true 的環境）。
+        # `shutil.copy2` 會沿著連結寫進去，而 git-annex 的物件是 hardlink——
+        # 於是「上一個快照的 key」指向的物件被**就地改寫**成新內容：舊快照的
+        # raw 再也讀不回來，連 key 的雜湊都不再對應內容。
+        # git 追蹤的是路徑不是 inode，所以先移除目標路徑再寫新的。
         if dest_p.is_symlink() or dest_p.exists():
             dest_p.unlink()
         shutil.copy2(src_p, dest_p)
 
         if self.git is not None:
-            try:
-                rel = str(dest_p.relative_to(self.git_workdir))
-            except ValueError:
-                rel = str(dest_p)
-            self.git.add([rel])
+            self.git.add([str(rel)])
         elif (self.git_workdir / ".git").exists():
             proc = subprocess.run(
-                ["git", "-C", str(self.git_workdir), "add", str(dest_p)],
+                ["git", "-C", str(self.git_workdir), "add", str(rel)],
                 capture_output=True, check=False, env=get_git_env(), timeout=60.0,
             )
             if proc.returncode != 0:
@@ -408,6 +441,12 @@ class AnnexRawStorage(RawStorage):
                 f"涵蓋不到 {dest_p}）：拒絕把它當成 annex 物件。"
                 "內容會留在 git blob 裡，2.6 的量測效果不會發生。"
             )
+        # H1（review-cdb4a34）：key 的名稱就是**內容雜湊**，所以拿到 key 之後
+        # 一定要確認它指的就是剛剛寫進去的內容。少了這一步，上面那個
+        # 「index 記成已入 annex → filter 跳過」的情況只會靜靜地記下上一版的
+        # key，而這一版的內容從來沒有變成物件：資料遺失，而且 key 的雜湊與
+        # 內容不一致，sweep 與 key 覆蓋率都看不出來。
+        self._assert_key_is_this_content(annex_key, data, dest_p)
 
         self._blobs[annex_key] = data
         self._keys.add(annex_key)

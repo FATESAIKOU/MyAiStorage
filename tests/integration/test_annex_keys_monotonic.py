@@ -151,13 +151,7 @@ def test_session_revisions_never_lose_data(
                 f"in_pin={snap.annex_key in pin_keys}, "
                 f"on_drive={snap.annex_key in remote_names}, read={got[:8]})")
     if problems:
-        # 這是**另一個**缺陷（不是 H1 的 key 集合單調性）：提交流程把第 2 份
-        # 快照的 annex_key 記成前一版的 key，所以那一版的真正內容從來沒有
-        # 變成 annex 物件（Drive 上也沒有）。已用本檔的四輪流程抓出證據：
-        # snapshots.jsonl 第 2 行的 snapshot_sha256 與 annex_key 對不上。
-        # H1 的其餘條件（key 集合不縮小、釘選值的 key 都在 Drive、隔離區空）
-        # 都已驗過，所以這裡單獨標記，誰修好誰移除。
-        pytest.xfail("快照的 annex_key 記成前一版的 key（待修，見 review H1 報告）")
+        pytest.fail("讀不回來／對不上的快照：\n  " + "\n  ".join(problems))
     assert not problems
 
     # 釘選值記載的每一個 key 都真的在 Drive 上

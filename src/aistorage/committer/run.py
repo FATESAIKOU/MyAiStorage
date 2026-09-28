@@ -1304,7 +1304,14 @@ def _run_repo_pipeline(
     # 中止時這些物件不在釘選值裡，下一輪會被隔離，是安全的方向。
     # M1：dry-run 不得寫入遠端。
     if not dry_run:
-        git.copy("origin")
+        # H1（review-cdb4a34，資料遺失）：`git annex copy` 預設只搬「樹狀裡還在」
+        # 的檔案。同一輪收進同一個 Session 的兩版時，樹狀的 raw 只剩最新那一版，
+        # 另一版的物件雖然已經建好、也記進 snapshots.jsonl 與 pending，卻不會被
+        # 搬到 Drive——它只留在提交流程的暫存 clone 裡，clone 一刪就沒了。key 覆蓋
+        # 率與 sweep 都看不出來（key 有名字、物件卻不存在）。所以明確把這一輪新增
+        # 的 key 交給 annex copy，不讓它靠樹狀決定。
+        new_keys_to_copy = sorted(store.annex_keys() - keys_before)
+        git.copy("origin", to_copy=new_keys_to_copy or None)
     ctx.time("annex.git.copy", int((time.monotonic() - t0) * 1000))
 
     # ---------------------------------------------------------
@@ -1415,6 +1422,20 @@ def _run_repo_pipeline(
             if hasattr(git, "annex_keys_in")
             else annex_keys
         )
+        # H1（review-cdb4a34，資料遺失）：被換掉的那一版（同一輪裡先收、
+        # 隨後又被新一版取代的快照）不在樹狀裡——真本的 raw 只有最新一版。
+        # git-annex 的 location log 只認「樹狀裡的檔案」，所以這種 key 永遠不會
+        # 出現在 `annex_keys_in()` 裡，拿它當必要條件會讓每一輪都中止
+        # （observed：expected 有兩個 key，pushed 只有最新那一版）。
+        # 分工：location log 只能證明「樹狀裡那些 key 有被 push 上去」，
+        # 每一輪新增的 key（包含不在樹狀裡的舊版本）一律由下面的 Drive 實況檢查
+        # 負責——那才是「物件真的在 Drive 上」的證據。
+        branch_keys = (
+            git.annex_keys_in_branch()
+            if hasattr(git, "annex_keys_in_branch") else None)
+        expected_in_log = (
+            new_keys & branch_keys
+            if isinstance(branch_keys, (set, frozenset)) else new_keys)
         push_verification = verify_after_push(
             git,
             deps.drive,
@@ -1423,7 +1444,7 @@ def _run_repo_pipeline(
             local_refs,
             push_started_at,
             workdir=work_temp,
-            expected_annex_keys=new_keys,
+            expected_annex_keys=expected_in_log,
             pushed_annex_keys=remote_keys_after_push,
         )
         verify_new_keys_on_drive(deps.drive, rcfg.prefix_folder_id, new_keys)

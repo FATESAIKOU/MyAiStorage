@@ -77,6 +77,15 @@ class AnnexGit(Protocol):
         """查詢在指定 remote_uuid 上已存在的 annex key 集合。"""
         ...
 
+    def annex_keys_in_branch(self) -> frozenset[str]:
+        """查詢**目前分支樹狀裡**的 annex key 集合（不看 remote）。
+
+        H1（review-cdb4a34）：被換掉的舊版本快照不在樹狀裡（真本的 raw 只有
+        最新一版），所以「樹狀裡的 key」必須與「location log 宣稱在遠端的 key」
+        分開查——兩者對那些 key 本來就不會相同。
+        """
+        ...
+
     def origin_url(self) -> str:
         """`git config remote.origin.url`（H1：clone 之後確認真的指向目標 repo）。"""
         ...
@@ -188,6 +197,7 @@ class SubprocessAnnexGit:
         *,
         is_write: bool = False,
         timeout: float = 60.0,
+        input_text: str | None = None,
     ) -> str:
         try:
             proc = subprocess.run(
@@ -199,6 +209,7 @@ class SubprocessAnnexGit:
                 env=self._get_env(),
                 timeout=timeout,
                 check=False,
+                input=input_text,
             )
         except subprocess.TimeoutExpired:
             err_cls = WriteError if is_write else ReadError
@@ -266,10 +277,21 @@ class SubprocessAnnexGit:
         *,
         timeout: float = 900.0,
     ) -> None:
-        cmd = ["git", "annex", "copy", f"--to={remote}"]
+        """把內容搬到遠端。
+
+        `to_copy` 給的是 **annex key**（不是路徑）。必須走 git-annex 明確的
+        `--batch-keys`：把 key 當位置參數丟進去，git-annex 會當成 pathspec，
+        對象不在樹狀裡就整個失敗（`pathspec ... did not match any file(s)
+        known to git`）——而「不在樹狀裡」正是要搬的對象（同一輪換掉的舊版本）。
+        """
         if to_copy:
-            cmd.extend(to_copy)
-        self._run(cmd, is_write=True, timeout=timeout)
+            self._run(
+                ["git", "annex", "copy", f"--to={remote}", "--batch-keys"],
+                is_write=True, timeout=timeout,
+                input_text="".join(f"{k}\n" for k in to_copy),
+            )
+            return
+        self._run(["git", "annex", "copy", f"--to={remote}"], is_write=True, timeout=timeout)
 
     def push(
         self,
@@ -307,6 +329,18 @@ class SubprocessAnnexGit:
             if k:
                 keys.add(k)
         return frozenset(keys)
+
+    def annex_keys_in_branch(self) -> frozenset[str]:
+        """`git annex find --format=${key}\\n`：目前分支樹狀裡的 key。
+
+        H1（review-cdb4a34）：被換掉的舊版本快照不在樹狀裡（真本的 raw 只有
+        最新一版），所以「樹狀裡有哪些 key」必須與「location log 宣稱哪些 key
+        在遠端」分開查——對那些 key 兩者本來就不會相同。`--format` 不會自動
+        換行（見 `annex_keys_in` 的說明），所以要自己帶 `\\n`。
+        """
+        stdout = self._run(
+            ["git", "annex", "find", "--format=${key}\n"], is_write=False)
+        return frozenset(line.strip() for line in stdout.splitlines() if line.strip())
 
     def origin_url(self) -> str:
         """H1（review-25a48a9）：`remote.origin.url`。clone 到錯的 repo 時，
