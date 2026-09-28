@@ -155,6 +155,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_claim)
 
     p = sub.add_parser("find", help="找 Session（一律附上新鮮度）")
+    # plugin 對**每一個**工具都會帶 `--session`（Session id 由 context 帶入，
+    # 不在參數 schema 裡）。所以連用不到它的唯讀指令也要收下這個參數，
+    # 否則 argparse 會以「unrecognized arguments」讓整個工具失敗
+    # （9.1 e2e 實測：`aistorage_find`／`aistorage_list_handoffs` 在容器裡
+    #  100% 失敗，AI 因此拿不到任何清單）。
+    p.add_argument("--session", help="目前的 Session id（plugin 傳入；本指令用不到）")
     p.add_argument("--query", required=True)
     p.add_argument("--case")
     p.add_argument("--max-lag", dest="max_lag")
@@ -175,6 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_reference)
 
     p = sub.add_parser("list-handoffs", help="列出待認領的交接單")
+    p.add_argument("--session", help="目前的 Session id（plugin 傳入；本指令用不到）")
     p.add_argument("--case")
     p.set_defaults(func=cmd_list_handoffs)
 

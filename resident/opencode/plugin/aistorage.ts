@@ -50,10 +50,49 @@ function str(args: ToolArgs, key: string): string | undefined {
 }
 
 function strList(args: ToolArgs, key: string): string[] {
-  const v = args[key]
-  if (Array.isArray(v)) return v.filter((x): x is string => typeof x === "string")
-  if (typeof v === "string") return [v]
-  return []
+  // 小模型很常換名字或換形狀（9.1 e2e 實測：claim 送了 `handoff_id` 單數、
+  // 或 `{"handoffs": {"item": [...]}}`，結果 CLI 收到 0 個 id）。這裡吸收掉
+  // 常見的換法：別的鍵名、單一字串、JSON 字串、只含一個清單的包裝物件。
+  const cands: unknown[] = [args[key]]
+  for (const alt of singular(key) + ["items", "ids"]) {
+    if (alt in args) cands.push(args[alt])
+  }
+  const out: string[] = []
+  const walk = (v: unknown): void => {
+    if (typeof v === "string") {
+      const s = v.trim()
+      if (s.startsWith("[")) {
+        try {
+          walk(JSON.parse(s))
+        } catch {
+          out.push(v)
+        }
+      } else if (s) {
+        out.push(v)
+      }
+      return
+    }
+    if (Array.isArray(v)) {
+      v.forEach(walk)
+      return
+    }
+    if (v && typeof v === "object") {
+      Object.values(v as Record<string, unknown>).forEach(walk)
+    }
+  }
+  cands.forEach(walk)
+  return [...new Set(out)]
+}
+
+function singular(key: string): string[] {
+  // 換名字的各種可能：`handoff_ids` → handoff_id／handoffs／handoff
+  if (key.endsWith("_ids")) {
+    const one = key.slice(0, -1) // handoff_id
+    const word = one.endsWith("_id") ? one.slice(0, -3) : one // handoff
+    return [one, `${word}s`, word]
+  }
+  if (key.endsWith("s")) return [key.slice(0, -1), `${key}s`]
+  return [key + "_ids", key + "s", key]
 }
 
 const TOOLS: Record<string, ToolDef> = {

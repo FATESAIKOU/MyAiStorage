@@ -844,7 +844,7 @@ def run_setup(
 ) -> dict[str, Any]:
     """執行完整 E2E 環境佈建。可重跑且具備冪等性。
 
-    `repo_suffix` 決定 pin repo 裡的名稱（`agora-e2e`／`foundry-e2e`），必須和
+    `repo_suffix` 決定 pin repo 裡的名稱前綴（`agora-e2e-<ulid>`／`foundry-e2e-<ulid>`），必須和
     整合測試用的名稱分開，否則兩邊會互相覆蓋釘選值。
 
     `profile`（預設 `mac-opencode-test`，`AISTORAGE_E2E_PROFILE` 可覆寫）是測試
@@ -934,6 +934,16 @@ def _setup_locked(
             if existing_prefix_id:
                 meta = committer_drive.get(existing_prefix_id)
                 if test_root_id in meta.parents:
+                    missing = _missing_runtime_files(state, secrets_root=secrets_root)
+                    if missing:
+                        # 環境的 Drive 前綴還在，但本機設定檔被刪了 → 補回來，
+                        # 不要假裝一切正常（否則下一場 e2e 只會得到「缺設定檔」）
+                        print(
+                            f"[e2e-setup] 現有 E2E 環境仍然存在且有效: "
+                            f"name={meta.name}, id={existing_prefix_id}"
+                        )
+                        _repair_local_configs(state, secrets_root=secrets_root)
+                        return state
                     print(
                         f"[e2e-setup] 現有 E2E 環境仍然存在且有效: "
                         f"name={meta.name}, id={existing_prefix_id}"
@@ -955,9 +965,15 @@ def _setup_locked(
 
     ulid = generate_ulid()
     prefix_name = prefix_override or f"e2e-{ulid}"
-    # pin repo 裡的名稱：和整合測試分開，否則釘選值會互相覆蓋
-    agora_pin_name = f"agora-{repo_suffix}" if repo_suffix else "agora"
-    foundry_pin_name = f"foundry-{repo_suffix}" if repo_suffix else "foundry"
+    # 釘選值名稱帶上前綴的 ULID：**每一個 e2e 環境都有自己的釘選值**。
+    # 為什麼：pin repo 是共用的，而 `--recreate` 會刪掉舊的 Drive 前綴、換一個
+    # 新的 repo（uuid 不同）。名稱如果共用（`agora-e2e`），新環境會讀到**舊環境
+    # 留下來的釘選值**，而那些物件在新 repo 上根本不存在 → 提交流程每一輪都在
+    # `annex.git.clone` 中止（"clone 後遠端 annex key 集合缺少釘選值記載之物件"），
+    # 怎麼重跑都不會好。整合測試的 `it-<ulid>` 也是這個做法。
+    # `--repo-suffix` 仍負責把 e2e 跟整合測試分開。
+    agora_pin_name = f"agora-{repo_suffix}-{ulid}" if repo_suffix else f"agora-{ulid}"
+    foundry_pin_name = f"foundry-{repo_suffix}-{ulid}" if repo_suffix else f"foundry-{ulid}"
     print(f"[e2e-setup] 開始在 TEST_FOLDER_ID ({test_root_id}) 底下建立前綴: {prefix_name}")
 
     # 1. 在 TEST_FOLDER_ID 底下建立唯一之前綴資料夾
@@ -1052,8 +1068,10 @@ def _setup_locked(
             deps_agora = Deps(
                 drive=committer_drive,
                 pins=pins,
-                git_factory=lambda dest: SubprocessAnnexGit.clone_for_commit(
-                    agora_annex.url, dest, max_git_bundles=10
+                # H1（review-25a48a9）：URL 與 annex 規則取自 target
+                git_factory=lambda dest, target: SubprocessAnnexGit.clone_for_commit(
+                    target.repo_url or agora_annex.url, dest,
+                    max_git_bundles=10, largefiles=target.largefiles_rule,
                 ),
                 registry=None,  # init-pin 不需要 registry
                 converters=CONVERTERS,
@@ -1080,8 +1098,10 @@ def _setup_locked(
             deps_foundry = Deps(
                 drive=committer_drive,
                 pins=pins,
-                git_factory=lambda dest: SubprocessAnnexGit.clone_for_commit(
-                    foundry_annex.url, dest, max_git_bundles=10
+                # H1（review-25a48a9）：URL 與 annex 規則取自 target
+                git_factory=lambda dest, target: SubprocessAnnexGit.clone_for_commit(
+                    target.repo_url or foundry_annex.url, dest,
+                    max_git_bundles=10, largefiles=target.largefiles_rule,
                 ),
                 registry=None,
                 converters=CONVERTERS,
@@ -1132,90 +1152,29 @@ def _setup_locked(
     )
     print(f"[e2e-setup] 身分登錄檔已產生: {IDENTITY_E2E_JSON} (key_id: {key_id})")
 
-    # 9. 產出 config/committer.e2e.json 與 config/committer.foundry.e2e.json
-    committer_cfg_payload = {
-        "format": "aistorage.committer/v1",
-        "repo": agora_pin_name,
-        "repo_uuid": agora_annex.uuid,
-        "repo_url": agora_annex.url,
-        "prefix_folder_id": agora_folder.id,
+    # 9./10. 產出本機設定檔（committer ×2、reader ×2）＋ profile 的 reader.json
+    ids = {
+        "agora_pin_name": agora_pin_name,
+        "agora_repo_uuid": agora_annex.uuid,
+        "agora_repo_url": agora_annex.url,
+        "agora_folder_id": agora_folder.id,
+        "foundry_pin_name": foundry_pin_name,
+        "foundry_repo_uuid": foundry_annex.uuid,
+        "foundry_repo_url": foundry_annex.url,
+        "foundry_folder_id": foundry_folder.id,
         "quarantine_folder_id": quarantine_folder.id,
         "readview_folder_id": readview_folder.id,
         "readview_manifest_file_id": agora_manifest_file.id,
-        "readview_rebuild_epoch": 0,
-        "pin_repo_url": pin_repo_url,
-        "identity_registry_path": str(IDENTITY_E2E_JSON.relative_to(REPO_ROOT)),
-        "max_git_bundles": 10,
-        "max_gc_per_run": 200,
-        "max_raw_size": 52428800,
-        "quarantine_retention_days": 7,
-        "ledger_retention_months": 3,
-        "prefix_levels": [],
-        "github_repository": "FATESAIKOU/MyAiStorage-pin-test",
-        "foundry": {
-            "repo": foundry_pin_name,
-            "repo_uuid": foundry_annex.uuid,
-            "repo_url": foundry_annex.url,
-            "prefix_folder_id": foundry_folder.id,
-            "quarantine_folder_id": quarantine_folder.id,
-            "readview_folder_id": foundry_readview_folder.id,
-            "readview_manifest_file_id": foundry_manifest_file.id,
-            "pin_repo_url": pin_repo_url,
-            "max_git_bundles": 10,
-        },
-    }
-    COMMITTER_E2E_JSON.parent.mkdir(parents=True, exist_ok=True)
-    COMMITTER_E2E_JSON.write_text(
-        json.dumps(committer_cfg_payload, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-
-    foundry_committer_cfg_payload = {
-        "format": "aistorage.committer/v1",
-        "repo": foundry_pin_name,
-        "repo_uuid": foundry_annex.uuid,
-        "repo_url": foundry_annex.url,
-        "prefix_folder_id": foundry_folder.id,
-        "quarantine_folder_id": quarantine_folder.id,
-        "readview_folder_id": foundry_readview_folder.id,
-        "readview_manifest_file_id": foundry_manifest_file.id,
-        "readview_rebuild_epoch": 0,
-        "pin_repo_url": pin_repo_url,
-        "identity_registry_path": str(IDENTITY_E2E_JSON.relative_to(REPO_ROOT)),
-        "max_git_bundles": 10,
-        "max_gc_per_run": 200,
-        "max_raw_size": 104857600,
-        "quarantine_retention_days": 7,
-        "ledger_retention_months": 3,
-        "prefix_levels": [],
-        "github_repository": "FATESAIKOU/MyAiStorage-pin-test",
-    }
-    COMMITTER_FOUNDRY_E2E_JSON.write_text(
-        json.dumps(foundry_committer_cfg_payload, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-
-    # 10. 產出 resident 用的 reader.e2e.json（只有非秘密 id）
-    reader_cfg_payload = {
-        "format": "aistorage.reader/v1",
-        "manifest_file_id": agora_manifest_file.id,
-        "readview_folder_id": readview_folder.id,
-        "inbox_folder_ids": {
-            profile: inbox_folder.id,
-        },
-        "sa_key_path": "~/.config/aistorage/sa-reader.json",
-        "foundry_manifest_file_id": foundry_manifest_file.id,
         "foundry_readview_folder_id": foundry_readview_folder.id,
+        "foundry_manifest_file_id": foundry_manifest_file.id,
+        "inbox_folder_id": inbox_folder.id,
+        "pin_repo_url": pin_repo_url,
+        "profile": profile,
     }
-    READER_E2E_JSON.write_text(
-        json.dumps(reader_cfg_payload, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    READER_CONFIG_E2E_JSON.write_text(
-        json.dumps(reader_cfg_payload, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    reader_cfg_payload = _write_local_configs(ids)
     print(f"[e2e-setup] Reader 設定已產出: {READER_E2E_JSON}")
+    print(f"[e2e-setup] 本機設定檔: {_display_path(COMMITTER_E2E_JSON)}、"
+          f"{_display_path(READER_CONFIG_E2E_JSON)}")
 
     # 10b. 佈置住民容器的秘密目錄（測試 profile 專用；E-P4）
     profile_dir_info = setup_resident_profile_dir(
@@ -1266,6 +1225,7 @@ def _setup_locked(
         ),
         "agora_pin_name": agora_pin_name,
         "foundry_pin_name": foundry_pin_name,
+        "pin_repo_url": pin_repo_url,
         "created_at": now_iso,
     }
     state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1313,6 +1273,231 @@ def run_teardown(
         release_e2e_lock(secrets_root)
 
 
+def _committer_config_payload(ids: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "format": "aistorage.committer/v1",
+        "repo": ids["agora_pin_name"],
+        "repo_uuid": ids["agora_repo_uuid"],
+        "repo_url": ids["agora_repo_url"],
+        "prefix_folder_id": ids["agora_folder_id"],
+        "quarantine_folder_id": ids["quarantine_folder_id"],
+        "readview_folder_id": ids["readview_folder_id"],
+        "readview_manifest_file_id": ids["readview_manifest_file_id"],
+        "readview_rebuild_epoch": 0,
+        "pin_repo_url": ids["pin_repo_url"],
+        "identity_registry_path": str(IDENTITY_E2E_JSON.relative_to(REPO_ROOT)),
+        "max_git_bundles": 10,
+        "max_gc_per_run": 200,
+        "max_raw_size": 52428800,
+        "quarantine_retention_days": 7,
+        "ledger_retention_months": 3,
+        "prefix_levels": [],
+        "github_repository": "FATESAIKOU/MyAiStorage-pin-test",
+        "foundry": {
+            "repo": ids["foundry_pin_name"],
+            "repo_uuid": ids["foundry_repo_uuid"],
+            "repo_url": ids["foundry_repo_url"],
+            "prefix_folder_id": ids["foundry_folder_id"],
+            "quarantine_folder_id": ids["quarantine_folder_id"],
+            "readview_folder_id": ids["foundry_readview_folder_id"],
+            "readview_manifest_file_id": ids["foundry_manifest_file_id"],
+            "pin_repo_url": ids["pin_repo_url"],
+            "max_git_bundles": 10,
+        },
+    }
+
+
+def _foundry_committer_config_payload(ids: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "format": "aistorage.committer/v1",
+        "repo": ids["foundry_pin_name"],
+        "repo_uuid": ids["foundry_repo_uuid"],
+        "repo_url": ids["foundry_repo_url"],
+        "prefix_folder_id": ids["foundry_folder_id"],
+        "quarantine_folder_id": ids["quarantine_folder_id"],
+        "readview_folder_id": ids["foundry_readview_folder_id"],
+        "readview_manifest_file_id": ids["foundry_manifest_file_id"],
+        "readview_rebuild_epoch": 0,
+        "pin_repo_url": ids["pin_repo_url"],
+        "identity_registry_path": str(IDENTITY_E2E_JSON.relative_to(REPO_ROOT)),
+        "max_git_bundles": 10,
+        "max_gc_per_run": 200,
+        "max_raw_size": 104857600,
+        "quarantine_retention_days": 7,
+        "ledger_retention_months": 3,
+        "prefix_levels": [],
+        "github_repository": "FATESAIKOU/MyAiStorage-pin-test",
+    }
+
+
+def _reader_config_payload(ids: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "format": "aistorage.reader/v1",
+        "manifest_file_id": ids["readview_manifest_file_id"],
+        "readview_folder_id": ids["readview_folder_id"],
+        "inbox_folder_ids": {ids["profile"]: ids["inbox_folder_id"]},
+        "sa_key_path": "~/.config/aistorage/sa-reader.json",
+        "foundry_manifest_file_id": ids["foundry_manifest_file_id"],
+        "foundry_readview_folder_id": ids["foundry_readview_folder_id"],
+    }
+
+
+def _write_local_configs(
+    ids: dict[str, Any], *, profile_dir: Path | None = None
+) -> dict[str, Any]:
+    """把四份本機設定檔寫出來，回傳 reader 的 payload（給 profile 目錄用）。
+
+    `ids` 就是狀態檔裡那些 id，所以「setup」與「設定檔不見了要補回來」走的是
+    **同一份**實作，不會兩邊長得不一样。
+    """
+    reader_payload = _reader_config_payload(ids)
+    COMMITTER_E2E_JSON.parent.mkdir(parents=True, exist_ok=True)
+    for path, payload in (
+        (COMMITTER_E2E_JSON, _committer_config_payload(ids)),
+        (COMMITTER_FOUNDRY_E2E_JSON, _foundry_committer_config_payload(ids)),
+        (READER_E2E_JSON, reader_payload),
+        (READER_CONFIG_E2E_JSON, reader_payload),
+    ):
+        path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+    if profile_dir is not None:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        reader_json = profile_dir / "reader.json"
+        reader_json.write_text(
+            json.dumps(reader_payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        try:
+            os.chmod(reader_json, 0o600)
+        except OSError:
+            pass
+    return reader_payload
+
+
+def _local_config_paths_all() -> tuple[Path, ...]:
+    """少了任何一個，環境就是壞的（e2e 會 FAIL）。
+
+    **每次呼叫時**才取模組層的路徑，不要做成常數：測試會把這些路徑
+    monkeypatch 到 tmp，做成常數就會抓到舊值。
+    """
+    return (
+        COMMITTER_E2E_JSON,
+        COMMITTER_FOUNDRY_E2E_JSON,
+        IDENTITY_E2E_JSON,
+        READER_E2E_JSON,
+        READER_CONFIG_E2E_JSON,
+    )
+
+
+def _missing_local_configs(paths: Sequence[Path] | None = None) -> list[Path]:
+    if paths is None:
+        paths = _local_config_paths_all()
+    return [p for p in paths if not p.is_file()]
+
+
+def _missing_runtime_files(
+    state: dict[str, Any], *, secrets_root: Path | None = None
+) -> list[Path]:
+    """環境「跑不起來」的檔案：本機設定 ＋ **測試 profile 的 reader.json**。
+
+    profile 那份要一起看：容器讀的是它（`resident/run.sh` 白名單裡的
+    `reader.json`）。實測踩過：別條線 teardown 刪掉它、repo 的 config 卻還在，
+    於是 `setup` 覺得「一切正常」而略過，接著每一場 e2e 都停在
+    「測試 profile 缺少必要檔案：reader.json」。
+    """
+    missing = _missing_local_configs()
+    root = secrets_root if secrets_root is not None else resolve_secrets_root()
+    profile = state.get("profile") or resolve_e2e_profile()
+    profile_reader = root / profile / "reader.json"
+    if not profile_reader.is_file():
+        missing.append(profile_reader)
+    return missing
+
+
+def _repair_local_configs(state: dict[str, Any], *, secrets_root: Path | None = None) -> int:
+    """用狀態檔裡的 id 補回缺的本機設定檔；回傳補了幾個。
+
+    為什麼需要：狀態檔有效時 `run_setup` 會「略過重複建立」。但設定檔可能被
+    別人（或舊版的 teardown）刪掉，這時環境是壞的卻看起來正常，下一場 e2e
+    只會得到「缺 Committer E2E 設定檔」。狀態檔裡的 id 都還在，直接補回來
+    就行，不必整個重建。
+    """
+    ids = {
+        "agora_pin_name": state["agora_pin_name"],
+        "agora_repo_uuid": state["agora_repo_uuid"],
+        "agora_repo_url": state["agora_repo_url"],
+        "agora_folder_id": state["agora_folder_id"],
+        "foundry_pin_name": state["foundry_pin_name"],
+        "foundry_repo_uuid": state["foundry_repo_uuid"],
+        "foundry_repo_url": state["foundry_repo_url"],
+        "foundry_folder_id": state["foundry_folder_id"],
+        "quarantine_folder_id": state["quarantine_folder_id"],
+        "readview_folder_id": state["readview_folder_id"],
+        "readview_manifest_file_id": state["readview_manifest_file_id"],
+        "foundry_readview_folder_id": state["foundry_readview_folder_id"],
+        "foundry_manifest_file_id": state["foundry_manifest_file_id"],
+        "inbox_folder_id": state["inbox_folder_id"],
+        "pin_repo_url": state.get("pin_repo_url", PIN_REPO_URL),
+        "profile": state.get("profile") or resolve_e2e_profile(),
+    }
+    root = secrets_root if secrets_root is not None else resolve_secrets_root()
+    missing_before = _missing_local_configs()
+    _write_local_configs(ids, profile_dir=root / ids["profile"])
+    repaired = [p for p in missing_before if p.is_file()]
+    for p in repaired:
+        print(f"[e2e-setup] 已補回缺的本機設定檔: {_display_path(p)}")
+    if IDENTITY_E2E_JSON not in repaired and not IDENTITY_E2E_JSON.is_file():
+        print(
+            "[e2e-setup] 警告：身分登錄檔不見了，請用 --recreate 重建整個環境"
+            f"（{_display_path(IDENTITY_E2E_JSON)}）"
+        )
+    return len(repaired)
+
+
+def _display_path(path: Path) -> str:
+    """印本機路徑：repo 內的相對路徑、repo 外的絕對路徑。"""
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _local_config_paths(state_file: Path) -> list[Path]:
+    """teardown 要清的**本機**設定檔：這一組設定檔案（跟著這份狀態檔走）。
+
+    為什麼要這樣收斂：這些路徑是模組層常數，指向 repo 裡的真實位置。任何用
+    **tmp 狀態檔**呼叫 `run_teardown` 的程式（單元測試、臨時腳本）都會順手把
+    真正 e2e 環境的 `config/*.e2e.json` 刪掉——實測踩過：跑完單元測試，下一場
+    e2e 就只剩「缺 Committer E2E 設定檔」。
+
+    規則：狀態檔本身，加上**同一個設定目錄**裡的設定檔；`reader.e2e.json`
+    照現況放在 repo 根（狀態檔在 `config/` 底下），所以當設定目錄叫 `config`
+    時它也算這一組。目錄外的路徑一律不碰。
+    """
+    config_dir = state_file.parent
+    out = [state_file]
+
+    def _in(path: Path, base: Path) -> bool:
+        try:
+            path.resolve().relative_to(base.resolve())
+        except ValueError:
+            return False
+        return True
+
+    for path in (COMMITTER_E2E_JSON, COMMITTER_FOUNDRY_E2E_JSON,
+                 IDENTITY_E2E_JSON, READER_CONFIG_E2E_JSON):
+        if _in(path, config_dir):
+            out.append(path)
+    # `reader.e2e.json` 照現況放在 repo 根（狀態檔在 config/ 底下），所以
+    # 「設定目錄叫 config」時它也算這一組；測試把它擺在設定目錄裡也算。
+    if _in(READER_E2E_JSON, config_dir) or (
+        config_dir.name == "config" and _in(READER_E2E_JSON, config_dir.parent)
+    ):
+        out.append(READER_E2E_JSON)
+    return out
+
+
 def _teardown_locked(
     *,
     state_file: Path,
@@ -1342,20 +1527,13 @@ def _teardown_locked(
     removed_count = destroy_tree(committer_drive, target_id, allowed_parent=test_root_id)
     print(f"[e2e-teardown] 已永久刪除 {removed_count} 個項目。")
 
-    # 清理產出之本機設定檔案
-    files_to_clean = [
-        state_file,
-        COMMITTER_E2E_JSON,
-        COMMITTER_FOUNDRY_E2E_JSON,
-        IDENTITY_E2E_JSON,
-        READER_E2E_JSON,
-        READER_CONFIG_E2E_JSON,
-    ]
-    for p in files_to_clean:
+    # 清理產出之本機設定檔案（**只限這一份狀態檔所在的那個設定目錄**，
+    # 見 `_local_config_paths` 的說明）
+    for p in _local_config_paths(state_file):
         if p.is_file():
             try:
                 p.unlink()
-                print(f"[e2e-teardown] 已移除本機檔案: {p.relative_to(REPO_ROOT)}")
+                print(f"[e2e-teardown] 已移除本機檔案: {_display_path(p)}")
             except Exception as e:
                 print(f"[e2e-teardown] 移除 {p} 失敗: {e}")
 

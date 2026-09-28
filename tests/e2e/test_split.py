@@ -73,10 +73,12 @@ def test_9_1_split_1_to_n(resident_pool, run_committer, e2e_reader: AgoraReader)
     s1_id = c1.create_session()
     c1.send(s1_id, "請只回覆 ACK-1，不要呼叫任何工具。這句是後續的識別碼：" + canary)
     s1_id, _ = c1.prompt_with_commits(
-        "請簡述後端架構與前端架構，"
-        "並使用工具 aistorage_split 分裂成兩項子任務交接單："
-        "1. 後端架構實作 (Backend Implementation)"
-        "2. 前端介面設計 (Frontend Design)。"
+        # 不要假設容器裡有專案：實測 space-bunny-free 會因為「沒有程式碼」
+        # 而拒絕捏造架構，然後整個不呼叫工具。
+        "請呼叫 aistorage_split 把接下來兩件工作分裂成交接單，交給兩個不同的 Session 各做一件："
+        "1. 核對 /work/schemas 底下 6 份 JSON Schema 的欄位，列出跟 readview-manifest.json 不一致的地方。"
+        "2. 為 aistorage skill 的工具各寫一段中文使用說明，說明參數與回傳。"
+        "parts 給一個含兩個物件的清單，每個物件要有 title、summary、next_steps。"
         "完成後請回報交接單摘要。",
         run_committer,
         session_id=s1_id,

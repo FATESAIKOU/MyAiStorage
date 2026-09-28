@@ -413,7 +413,22 @@ def claim(sd: SkillDeps, session_id: str, handoff_ids: Sequence[str], *,
     """
     oc = _require_main_session(sd.api, session_id)
     if not handoff_ids:
-        raise SkillError("至少要給一張交接單的 id")
+        # 9.1 e2e 實測：免費模型常把 id 送成別的鍵名或別的形狀，plugin 吸收不到
+        # 就會走到這裡。錯誤訊息要明確說「要什麼形狀」，模型才改得對。
+        available = ""
+        try:
+            rows = list_handoffs(sd).get("handoffs") or []
+            if rows:
+                available = "；現在等著被認領的是：" + ", ".join(
+                    str(r.get("handoff_id")) for r in rows
+                )
+        except Exception:  # noqa: BLE001 - 只是想多給一點線索，拿不到就算了
+            available = ""
+        raise SkillError(
+            "至少要給一張交接單的 id。handoff_ids 是一個字串清單，"
+            '例如 {"handoff_ids": ["handoff:01ABC…"]}（id 要用 '
+            "aistorage_list_handoffs 回報的那個，不要自己拼）" + available
+        )
     key = _signer_key(sd.deps.signer)
     now = sd.deps.clock.now_utc()
     items = [

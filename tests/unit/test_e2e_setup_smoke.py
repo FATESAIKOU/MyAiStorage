@@ -336,12 +336,46 @@ def test_repo_suffix_separates_e2e_pins_from_integration_tests():
     assert "repo_suffix" in inspect.signature(e2e.run_setup).parameters
     # 名字是算出來的（不寫死），而且 config 產出用的是帶後綴的那個
     src = Path(e2e.__file__).read_text(encoding="utf-8")
-    assert 'f"agora-{repo_suffix}"' in src
-    assert 'f"foundry-{repo_suffix}"' in src
-    assert '"repo": agora_pin_name' in src
-    assert '"repo": foundry_pin_name' in src
+    assert 'f"agora-{repo_suffix}-{ulid}"' in src
+    assert 'f"foundry-{repo_suffix}-{ulid}"' in src
+    # 直接驗產出的 payload（比 grep 原始碼可靠）：repo 名稱必須是算出來的那個
+    ids = {
+        "agora_pin_name": "agora-e2e", "agora_repo_uuid": "u1", "agora_repo_url": "url1",
+        "agora_folder_id": "f1", "foundry_pin_name": "foundry-e2e",
+        "foundry_repo_uuid": "u2", "foundry_repo_url": "url2", "foundry_folder_id": "f2",
+        "quarantine_folder_id": "q", "readview_folder_id": "rv",
+        "readview_manifest_file_id": "m1", "foundry_readview_folder_id": "rv2",
+        "foundry_manifest_file_id": "m2", "inbox_folder_id": "in",
+        "pin_repo_url": "git@example:x.git", "profile": "mac-opencode-test",
+    }
+    main_cfg = e2e._committer_config_payload(ids)
+    assert main_cfg["repo"] == "agora-e2e"
+    assert main_cfg["foundry"]["repo"] == "foundry-e2e"
+    assert e2e._foundry_committer_config_payload(ids)["repo"] == "foundry-e2e"
+    assert e2e._reader_config_payload(ids)["inbox_folder_ids"] == {"mac-opencode-test": "in"}
     assert '"repo": "agora",' not in src
     assert '"repo": "foundry",' not in src
+
+
+def test_each_environment_gets_its_own_pin_name():
+    """每個 e2e 環境的釘選值名稱要帶自己的 ulid。
+
+    實測踩過：名稱共用（`agora-e2e`）時，`--recreate` 換了新的 Drive repo，
+    新環境卻讀到舊環境的釘選值，於是提交流程每一輪都在 `annex.git.clone`
+    中止（"遠端 annex key 集合缺少釘選值記載之物件"），重跑永遠不會好。
+    """
+    import re
+    import scripts.e2e_setup as e2e
+
+    src = Path(e2e.__file__).read_text(encoding="utf-8")
+    # 名稱的形狀：前綴 + ulid（26 碼 ULID）
+    m = re.search(r'agora_pin_name = f"agora-\{repo_suffix\}-\{(\w+)\}"', src)
+    assert m, "agora 的釘選值名稱必須帶 ulid"
+    assert m.group(1) == "ulid", "ulid 變數名要對，否則名字裡是空字串"
+    m2 = re.search(r'foundry_pin_name = f"foundry-\{repo_suffix\}-\{(\w+)\}"', src)
+    assert m2 and m2.group(1) == "ulid"
+    # ulid 是每次 setup 都新產生的（所以兩個環境的名字一定不同）
+    assert e2e.generate_ulid() != e2e.generate_ulid()
 
 
 # ── E-P4：測試 profile 與住民秘密目錄 ───────────────────────────────────
@@ -646,6 +680,13 @@ def dead_pid() -> int:
     return proc.pid
 
 
+def _patch_local_config_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """把 teardown 會刪的本機設定路徑指到 tmp（絕不碰 repo 裡真的那些）。"""
+    for attr in ("COMMITTER_E2E_JSON", "COMMITTER_FOUNDRY_E2E_JSON",
+                 "IDENTITY_E2E_JSON", "READER_E2E_JSON", "READER_CONFIG_E2E_JSON"):
+        monkeypatch.setattr(f"scripts.e2e_setup.{attr}", tmp_path / f"{attr}.json")
+
+
 def _write_lock(root: Path, pid: int, action: str = "setup", host: str | None = None) -> None:
     root.mkdir(parents=True, exist_ok=True)
     e2e_lock_path(root).write_text(
@@ -761,6 +802,7 @@ def test_teardown_refuses_while_locked_before_touching_drive(
     )
     touched: list[str] = []
     monkeypatch.setattr("scripts.e2e_setup.read_test_folder_id", lambda *a, **k: "root_1")
+    _patch_local_config_paths(monkeypatch, tmp_path)
     monkeypatch.setattr("scripts.e2e_setup.RcloneConfToken", lambda *a, **k: object())
     monkeypatch.setattr(
         "scripts.e2e_setup.HttpDriveClient",
@@ -810,6 +852,7 @@ def test_cli_teardown_returns_75_while_locked(
     )
     monkeypatch.setattr("scripts.e2e_setup.read_test_folder_id", lambda *a, **k: "root_1")
     monkeypatch.setattr("scripts.e2e_setup.resolve_secrets_root", lambda *a, **k: tmp_path)
+    _patch_local_config_paths(monkeypatch, tmp_path)
     monkeypatch.setattr("scripts.e2e_setup.RcloneConfToken", lambda *a, **k: object())
     monkeypatch.setattr(
         "scripts.e2e_setup.HttpDriveClient",
@@ -821,3 +864,114 @@ def test_cli_teardown_returns_75_while_locked(
     assert state.is_file()
     # 別人的鎖不該被這次拒絕動到
     assert json.loads(e2e_lock_path(tmp_path).read_text(encoding="utf-8"))["pid"] == other_pid
+
+
+def test_teardown_only_cleans_the_config_dir_of_that_state_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dead_pid: int
+):
+    """迴歸：teardown 只清「這份狀態檔所屬的那一組設定檔」。
+
+    實測踩過：這些本機設定路徑是模組層常數（指向 repo），任何用別處狀態檔
+    呼叫 `run_teardown` 的程式（單元測試、臨時腳本）都會把真正環境的
+    `config/*.e2e.json` 刪光，下一場 e2e 直接「缺 Committer E2E 設定檔」。
+    這裡用一個假的 repo 當現場，不去碰真的。
+    """
+    fake_repo = tmp_path / "repo"
+    (fake_repo / "config").mkdir(parents=True)
+    inside = {
+        "COMMITTER_E2E_JSON": fake_repo / "config" / "committer.e2e.json",
+        "COMMITTER_FOUNDRY_E2E_JSON": fake_repo / "config" / "committer.foundry.e2e.json",
+        "IDENTITY_E2E_JSON": fake_repo / "config" / "identity.e2e.json",
+        "READER_CONFIG_E2E_JSON": fake_repo / "config" / "reader.e2e.json",
+        "READER_E2E_JSON": fake_repo / "reader.e2e.json",   # 照現況在 repo 根
+    }
+    for attr, path in inside.items():
+        path.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(f"scripts.e2e_setup.{attr}", path)
+    monkeypatch.setattr("scripts.e2e_setup.REPO_ROOT", fake_repo)
+    monkeypatch.setattr("scripts.e2e_setup.read_test_folder_id", lambda *a, **k: "root_1")
+    monkeypatch.setattr("scripts.e2e_setup.RcloneConfToken", lambda *a, **k: object())
+    monkeypatch.setattr("scripts.e2e_setup.destroy_tree", lambda *a, **k: 1)
+
+    # 別處的狀態檔（例如某個單元測試的 tmp）→ 不得動到 repo 那一組
+    _write_lock(tmp_path / "other", dead_pid, action="pytest e2e")
+    elsewhere = tmp_path / "other"
+    elsewhere.mkdir(exist_ok=True)
+    elsewhere_state = elsewhere / "state.json"
+    elsewhere_state.write_text(
+        json.dumps({"prefix_folder_id": "fld_x", "prefix_name": "e2e-x"}), encoding="utf-8"
+    )
+    assert run_teardown(state_file=elsewhere_state, secrets_root=elsewhere) == 1
+    for attr, path in inside.items():
+        assert path.is_file(), f"{attr} 不該被別處狀態檔的 teardown 刪掉"
+
+    # 同一組的狀態檔 → 就要清乾淨（這是 teardown 真正的行為）
+    _write_lock(tmp_path, dead_pid, action="pytest e2e")
+    own_state = fake_repo / "config" / "e2e_state.json"
+    own_state.write_text(
+        json.dumps({"prefix_folder_id": "fld_x", "prefix_name": "e2e-x"}), encoding="utf-8"
+    )
+    assert run_teardown(state_file=own_state, secrets_root=tmp_path) == 1
+    assert not own_state.exists()
+    for attr, path in inside.items():
+        assert not path.exists(), f"{attr} 屬於這一組，應該被清掉"
+
+
+def test_repair_local_configs_fills_in_the_missing_ones(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """狀態檔有效、但本機設定檔被刪掉 → setup 要補回來，而不是裝作沒事。
+
+    實測踩過：這種狀況下 `setup` 會「略過重複建立」，接著每一場 e2e 都只得到
+    「缺 Committer E2E 設定檔」，很難看出真正原因是設定檔不見了。
+    """
+    import scripts.e2e_setup as e2e
+
+    fake_repo = tmp_path / "repo"
+    (fake_repo / "config").mkdir(parents=True)
+    monkeypatch.setattr(e2e, "REPO_ROOT", fake_repo)
+    paths = {
+        "COMMITTER_E2E_JSON": fake_repo / "config" / "committer.e2e.json",
+        "COMMITTER_FOUNDRY_E2E_JSON": fake_repo / "config" / "committer.foundry.e2e.json",
+        "IDENTITY_E2E_JSON": fake_repo / "config" / "identity.e2e.json",
+        "READER_E2E_JSON": fake_repo / "reader.e2e.json",
+        "READER_CONFIG_E2E_JSON": fake_repo / "config" / "reader.e2e.json",
+    }
+    for attr, path in paths.items():
+        monkeypatch.setattr(e2e, attr, path)
+    state = {
+        "agora_pin_name": "agora-e2e", "agora_repo_uuid": "u1", "agora_repo_url": "url1",
+        "agora_folder_id": "f1", "foundry_pin_name": "foundry-e2e",
+        "foundry_repo_uuid": "u2", "foundry_repo_url": "url2", "foundry_folder_id": "f2",
+        "quarantine_folder_id": "q", "readview_folder_id": "rv",
+        "readview_manifest_file_id": "m1", "foundry_readview_folder_id": "rv2",
+        "foundry_manifest_file_id": "m2", "inbox_folder_id": "in",
+        "pin_repo_url": "git@example:x.git", "profile": "mac-opencode-test",
+    }
+    secrets_root = tmp_path / "resident-e2e"
+    (secrets_root / "mac-opencode-test").mkdir(parents=True)
+
+    assert len(e2e._missing_local_configs()) == 5
+    # profile 的 reader.json 也要算「環境壞掉」（容器讀的是它）
+    assert [p.name for p in e2e._missing_runtime_files(state, secrets_root=secrets_root)] == [
+        "committer.e2e.json", "committer.foundry.e2e.json", "identity.e2e.json",
+        "reader.e2e.json", "reader.e2e.json", "reader.json",
+    ]
+    # 身分登錄檔需要簽章公鑰，setup 刻意不讀金鑰內容 → 補不回來，只警告
+    # （要拿回來得用 --recreate 重建整個環境）
+    assert e2e._repair_local_configs(state, secrets_root=secrets_root) == 4
+    assert [p.name for p in e2e._missing_local_configs()] == ["identity.e2e.json"]
+    # 補完之後 profile 的 reader.json 也在了
+    assert e2e._missing_runtime_files(state, secrets_root=secrets_root) == [
+        paths["IDENTITY_E2E_JSON"]
+    ]
+
+    paths["IDENTITY_E2E_JSON"].write_text("{}", encoding="utf-8")
+    assert e2e._missing_local_configs() == []
+    reader = json.loads(paths["READER_CONFIG_E2E_JSON"].read_text(encoding="utf-8"))
+    assert reader["inbox_folder_ids"] == {"mac-opencode-test": "in"}
+    # profile 目錄裡那份也要補（容器讀的是它）
+    profile_reader = secrets_root / "mac-opencode-test" / "reader.json"
+    assert json.loads(profile_reader.read_text(encoding="utf-8")) == reader
+    assert stat.S_IMODE(profile_reader.stat().st_mode) == 0o600
+
+    # 再跑一次：全部都在 → 不用補
+    assert e2e._repair_local_configs(state, secrets_root=secrets_root) == 0

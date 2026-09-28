@@ -885,3 +885,64 @@ def test_skill_cli_exit_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, c
     env["api"].set(OcSession(id="ses_1", title="主線", updated_ms=1), _raw())
     assert cli.main(["handoff-end", "--session", "ses_1", "--summary", "做完了"]) == 3
     assert "必須停下" in capsys.readouterr().err
+
+
+def test_every_tool_accepts_the_argv_the_plugin_passes():
+    """plugin 對**每個**工具都會帶 `--session`（Session id 由 context 帶入）。
+
+    9.1 e2e 實測：`aistorage_find` 與 `aistorage_list_handoffs` 的子指令沒有宣告
+    `--session`，argparse 直接以「unrecognized arguments」讓整個工具失敗——這兩個
+    唯讀工具在容器裡 100% 不能用，AI 因此拿不到任何清單，連帶 claim 也失敗。
+    單元測試都直接呼叫 Python API，繞過 argv，所以沒抓到。
+
+    這裡照 plugin 的形狀（`aistorage_x` → `x-…` ＋ 固定帶 `--session`）把每個
+    指令都送進 parser，只驗「argparse 收得下」，不碰後面的邏輯。
+    """
+    from aistorage.skill.__main__ import build_parser
+
+    # (工具名, plugin 會帶的額外參數)
+    calls = [
+        ("aistorage_whoami", []),
+        ("aistorage_split", ["--parts", "p.json"]),
+        ("aistorage_handoff_end", ["--summary", "s"]),
+        ("aistorage_claim", ["--handoff", "handoff:x"]),
+        ("aistorage_find", ["--query", "q"]),
+        ("aistorage_read", []),
+        ("aistorage_reference", ["--to", "opencode:ses_2", "--read-snapshot-at", "t"]),
+        ("aistorage_list_handoffs", []),
+        ("aistorage_register_artifact", ["--kind", "link", "--name", "n", "--link", "https://x"]),
+        ("aistorage_stop", []),
+    ]
+    parser = build_parser()
+    for tool, extra in calls:
+        command = tool.removeprefix("aistorage_").replace("_", "-")
+        argv = [command, "--session", "ses_1", *extra]
+        try:
+            args = parser.parse_args(argv)
+        except SystemExit as e:  # argparse 失敗會 SystemExit(2)
+            pytest.fail(f"{tool} 不接受 plugin 會送的參數 {argv}：{e}")
+        assert args.command == command
+        assert getattr(args, "session", "ses_1") == "ses_1"
+
+
+def test_claim_without_ids_says_what_shape_is_needed_and_lists_open_handoffs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """9.1 e2e 實測：模型把交接單 id 送成別的鍵名，plugin 吸收不到 → 0 個 id。
+
+    原本只回「至少要給一張交接單的 id」，模型重試五次都一樣。現在要明確說出
+    形狀，並把「現在等著被認領的是哪幾張」一併給它。
+    """
+    _run_committer(monkeypatch, _sd(tmp_path)[1])
+    sd, env = _sd(tmp_path)
+    _run_committer(monkeypatch, env)
+    _main_session(sd, env)
+    split(sd, "ses_1", [{"title": "做甲", "summary": "甲的工作"}], timeout=SHORT)
+    # 交接單已進 Agora 讀取視圖（上面那次提交已發佈）
+
+    with pytest.raises(SkillError) as e:
+        claim(sd, "ses_1", [])
+    msg = str(e.value)
+    assert "handoff_ids" in msg
+    assert "aistorage_list_handoffs" in msg
+    assert "handoff:" in msg, "要把清單裡的 id 直接列出來，模型才知道要填什麼"

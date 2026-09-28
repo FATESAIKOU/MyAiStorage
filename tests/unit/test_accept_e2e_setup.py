@@ -366,8 +366,14 @@ def test_written_configs_contain_only_ids_paths_and_format_strings(
     )
 
     committer_cfg = json.loads(out["committer"].read_text(encoding="utf-8"))
-    assert committer_cfg["repo"] == "agora-e2e", "e2e 的釘選值要和整合測試分開"
-    assert committer_cfg["foundry"]["repo"] == "foundry-e2e"
+    # e2e 的釘選值要和整合測試分開，而且**每個環境帶自己的 ulid**：
+    # `--recreate` 會換一個新的 Drive repo（uuid 不同），名稱共用會讓新環境讀到
+    # 舊環境的釘選值，於是提交流程每輪都在 annex.git.clone 中止。
+    assert committer_cfg["repo"].startswith("agora-e2e-"), "e2e 的釘選值要和整合測試分開"
+    assert committer_cfg["repo"] != "agora"
+    assert committer_cfg["foundry"]["repo"].startswith("foundry-e2e-")
+    assert committer_cfg["repo"].endswith(state["ulid"])
+    assert committer_cfg["foundry"]["repo"].endswith(state["ulid"])
     assert committer_cfg["repo_url"].startswith("annex::")
     assert committer_cfg["identity_registry_path"] == "config/identity.e2e.json"
     assert state["prefix_folder_id"] == drive.get(state["prefix_folder_id"]).id

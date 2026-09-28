@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import threading
@@ -88,9 +89,10 @@ REQUIRED_PROFILE_FILES = ("rclone-worker.conf", "sa-reader.json", "signing.key",
 
 #: 模型回覆（含工具呼叫）的等待上限；免費模型可能很慢。
 #:
-#: 300 秒不夠：9.1 實測免費模型思考要 250 秒上下，而 split 工具還要同步一次
-#: 並等讀取介面看得到（提交流程在背景輪詢），整輪常超過 300 秒。
-MESSAGE_TIMEOUT_S = 900.0
+#: 必須**大於工具自己的逾時**（split／claim 內部等讀取視圖 15 分鐘），
+#: 否則 HTTP 先斷，會看到沒有資訊的 socket timeout，而不是工具那句
+#: 「認領還沒被收進去」。9.1 實測：提交流程接連中止時，工具會等滿 15 分鐘。
+MESSAGE_TIMEOUT_S = 1800.0
 #: 容器啟動（colima + opencode serve）的上限。
 CONTAINER_READY_TIMEOUT_S = 180.0
 #: 背景提交流程的輪詢間隔。
@@ -308,6 +310,20 @@ class ModelDidNotComply(RuntimeError):
     """
 
 
+def _report_outcome(report: Any) -> str:
+    """提交流程 run report 最後一行 → 一個可統計的結果字串。
+
+    形如 `[RunReport 01M3…] SUCCESS | counts: …` 或
+    `[RunReport 01M3…] ABORTED(pins.write_pending:WriteError) | counts: …`。
+    """
+    out = getattr(report, "stdout", "") or ""
+    for line in reversed(out.strip().splitlines()):
+        m = re.search(r"\]\s+(SUCCESS|ABORTED\([^)]*\))", line)
+        if m:
+            return m.group(1)
+    return "UNKNOWN"
+
+
 class ResidentContainerHandle:
     """管理個別住民容器的生命週期與互動。
 
@@ -339,6 +355,9 @@ class ResidentContainerHandle:
         self.log_path = log_path
         self.proc: subprocess.Popen | None = None
         self._log_file: Any = None
+        #: 最近一次 prompt_with_commits 期間提交流程的結果統計
+        #: （`{"SUCCESS": 3, "ABORTED(pins.write_pending:WriteError)": 2}`）
+        self.committer_tally: dict[str, int] = {}
 
     @property
     def api_url(self) -> str:
@@ -434,14 +453,20 @@ class ResidentContainerHandle:
         sid = session_id or self.create_session()
         stop = threading.Event()
         errors: list[str] = []
+        tally: dict[str, int] = {}
+
+        def _count(outcome: str) -> None:
+            tally[outcome] = tally.get(outcome, 0) + 1
 
         def _loop() -> None:
             while not stop.is_set():
                 try:
-                    run_committer()
+                    report = run_committer()
                     errors.clear()
+                    _count(_report_outcome(report))
                 except Exception as e:  # noqa: BLE001 - 記錄後繼續重試
                     errors.append(str(e))
+                    _count("raised")
                 stop.wait(COMMITTER_POLL_INTERVAL_S)
 
         thread = threading.Thread(target=_loop, name=f"committer-{self.name}", daemon=True)
@@ -451,6 +476,12 @@ class ResidentContainerHandle:
         finally:
             stop.set()
             thread.join(timeout=60.0)
+        # 提交流程每一輪的結果都留下來：A 線目前有兩種會中止的情況
+        # （verify_after_push 的 MismatchError、write_pending 的 WriteError），
+        # 測試要能回答「這一輪中止了幾次」而不是只看最後有沒有成功。
+        self.committer_tally = dict(tally)
+        print(f"[e2e:{self.name}] 提交流程 {tally or '（沒有跑成）'}"
+              + (f" 例外：{errors[-1][:160]}" if errors else ""))
         return sid, response
 
     def revert(self, session_id: str, message_id: str) -> None:
