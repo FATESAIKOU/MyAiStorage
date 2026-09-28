@@ -12,6 +12,11 @@ from aistorage.agora_cli.checkout import (
     ClaimRejected,
     checkout,
 )
+from aistorage.agora_cli.claims import (
+    ClaimJournal,
+    ClaimJournalError,
+    ClaimRecord,
+)
 from aistorage.agora_cli.package import (
     DEFAULT_MAX_CONTEXT_CHARS,
     ContextLimitExceeded,
@@ -34,6 +39,9 @@ from aistorage.agora_cli.startpoint import (
 __all__ = [
     "CheckoutDeps",
     "CheckoutError",
+    "ClaimJournal",
+    "ClaimJournalError",
+    "ClaimRecord",
     "ClaimRejected",
     "ContextLimitExceeded",
     "ContextPackage",

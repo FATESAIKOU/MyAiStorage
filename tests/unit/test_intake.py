@@ -32,7 +32,7 @@ import pytest
 # Ensure agora is imported first to avoid circular import between agora.apply and intake.evaluate
 import aistorage.agora
 from aistorage.agora import AgoraStore, FakeRawStorage, layout, SessionRecord
-from aistorage.clock import FixedClock
+from aistorage.clock import FixedClock, parse_rfc3339
 from aistorage.drive.fake import FakeDrive
 from aistorage.drive.model import DriveFile
 from aistorage.errors import MismatchError, ReadError
@@ -720,3 +720,139 @@ def test_sort_accepted_decisions_ordering():
     sorted_res = sort_accepted_decisions(unordered)
 
     assert sorted_res == [d_ses_1, d_ses_2, d_rewrite, d_handoff, d_claim, d_ref]
+
+
+# ---------------------------------------------------------------------------
+# 帶預留的 claim（`agora checkout` 認領時自己帶著新 session 的空紀錄）
+# ---------------------------------------------------------------------------
+
+
+def _reserving_claim_sidecar(
+    env: IntakeTestEnv,
+    item_key: str,
+    raw_content: bytes,
+    *,
+    profile: str = "worker-1",
+    claimer: str = "ses_claimer",
+    handoff_id: str = "handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    snapshot_at: str = "2026-09-27T08:00:00Z",
+    created_at: str = "2026-09-27T08:00:00Z",
+) -> dict:
+    """`build_claim_item` 產出的形狀：`session`（預留）＋ `raw`（空匯出檔）。"""
+    return {
+        "format": "aistorage.inbox/v1",
+        "item_key": item_key,
+        "profile": profile,
+        "metadata": {
+            "id": f"claim:{item_key}",
+            "type": "claim",
+            "created_at": created_at,
+            "updated_at": created_at,
+            "case_id": None,
+            "provenance": None,
+        },
+        "raw": {
+            "sha256": hashlib.sha256(raw_content).hexdigest().lower(),
+            "size": len(raw_content),
+        },
+        "session": {
+            "source": "opencode",
+            "source_session_id": claimer,
+            "snapshot_at": snapshot_at,
+            "status": "running",
+            "stopped_at": None,
+            "in_progress": False,
+            "parent_id": None,
+            "reserving": True,
+        },
+        "body": {
+            "handoff_id": handoff_id,
+            "claimer_session_id": f"opencode:{claimer}",
+        },
+    }
+
+
+def _seed_reserving_claim(
+    env: IntakeTestEnv,
+    raw_content: bytes = b'{"messages": []}',
+    *,
+    item_key: str | None = None,
+    snapshot_at: str = "2026-09-27T08:00:00Z",
+    created_time: str = "2026-09-27T08:30:00Z",
+) -> InboxItem:
+    ulid = item_key or generate_ulid()
+    sidecar = _reserving_claim_sidecar(
+        env, ulid, raw_content, snapshot_at=snapshot_at)
+    sidecar_bytes = json.dumps(sidecar).encode("utf-8")
+    sig = json.dumps(
+        sign_sidecar_bytes(sidecar_bytes, env.priv_bytes, env.key_id)
+    ).encode("utf-8")
+
+    f_sc = env.drive.seed_file(
+        env.inbox_fid, f"{ulid}.sidecar.json", sidecar_bytes, created_time=created_time)
+    f_sig = env.drive.seed_file(
+        env.inbox_fid, f"{ulid}.sig", sig, created_time=created_time)
+    f_raw = env.drive.seed_file(
+        env.inbox_fid, f"{ulid}.raw", raw_content, created_time=created_time)
+    return InboxItem(
+        item_key=ulid,
+        inbox_folder_id=env.inbox_fid,
+        sidecar=env.drive.get(f_sc),
+        sig=env.drive.get(f_sig),
+        raw=env.drive.get(f_raw),
+    )
+
+
+def test_reserving_claim_downloads_and_verifies_its_raw(tmp_path: Path):
+    """帶預留的 claim 必須真的下載並核對 raw——那是它預留出去的空紀錄。"""
+    env = IntakeTestEnv(tmp_path, now_str="2026-09-27T10:00:00Z")
+    item = _seed_reserving_claim(env, b'{"messages": []}')
+
+    d = env.evaluate_item(item)
+    assert d.kind == DecisionKind.ACCEPT, d.code
+
+
+def test_reserving_claim_with_a_wrong_raw_is_rejected(tmp_path: Path):
+    """raw 的雜湊對不上就拒收：預留出去的是哪一則訊息，不能搞錯。"""
+    env = IntakeTestEnv(tmp_path, now_str="2026-09-27T10:00:00Z")
+    item = _seed_reserving_claim(env, b'{"messages": []}')
+    # 換掉 raw 的內容，sidecar 裡的 sha256 不再相符
+    tampered = env.drive.seed_file(
+        env.inbox_fid, f"{item.item_key}.raw.tampered",
+        '{"messages": ["偷塞的"]}'.encode("utf-8"),
+        created_time="2026-09-27T08:30:00Z")
+    item = InboxItem(
+        item_key=item.item_key,
+        inbox_folder_id=item.inbox_folder_id,
+        sidecar=item.sidecar,
+        sig=item.sig,
+        raw=env.drive.get(tampered),
+    )
+
+    d = env.evaluate_item(item)
+    assert d.kind == DecisionKind.REJECT
+    assert d.code == "raw_mismatch"
+
+
+def test_reserving_claim_has_its_snapshot_at_capped_to_the_item_time(tmp_path: Path):
+    """預留的 snapshot_at 也要夾在收件匣檔案時間以內（與 session 同一條規則）。"""
+    env = IntakeTestEnv(tmp_path, now_str="2026-09-27T10:00:00Z")
+    # 宣告的快照時間（2026-09-27T23:00Z）晚於 sidecar 檔案本身建立的時間
+    item = _seed_reserving_claim(
+        env, b'{"messages": []}', snapshot_at="2026-09-27T23:00:00Z")
+
+    d = env.evaluate_item(item)
+    assert d.kind == DecisionKind.ACCEPT, d.code
+    capped = d.sidecar["session"]["snapshot_at"]
+    # 不晚於 sidecar 建立時間 2026-09-27T08:30:00Z
+    assert parse_rfc3339(capped) <= parse_rfc3339("2026-09-27T08:30:00Z")
+
+
+def test_reserving_claim_with_an_unparseable_snapshot_at_is_rejected(tmp_path: Path):
+    env = IntakeTestEnv(tmp_path, now_str="2026-09-27T10:00:00Z")
+    item = _seed_reserving_claim(
+        env, b'{"messages": []}', snapshot_at="不是時間")
+
+    d = env.evaluate_item(item)
+    assert d.kind == DecisionKind.REJECT
+    assert d.code == "invalid_format"

@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -30,11 +31,15 @@ def test_cli_health_plist(capsys) -> None:
 
 
 def test_cli_health_data_json(tmp_path: Path, capsys) -> None:
+    # `last_success_at` 要**相對於現在**：health CLI 內部用真的 datetime.now()，
+    # 硬寫一個日期會隨著時間過去而越過 STALE_FAIL_HOURS(=30h)，讓這支測試在
+    # 某天之後無故失敗（`test_admin_health_smoke.py` 傳 now= 才沒有這個問題）。
+    recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     data = tmp_path / "health.json"
     data.write_text(json.dumps({
         "tokens_ok": {"committer": True},
         "workflow_enabled": True,
-        "last_success_at": "2026-09-27T09:00:00.000Z",
+        "last_success_at": recent,
     }))
     rc = main(["health", "--data-json", str(data)])
     assert rc == 0

@@ -444,6 +444,107 @@ def apply_handoff(
     return ApplyResult(ok=True, code="ok", paths=_new_paths(store, before))
 
 
+def _build_reserved_session(
+    store: AgoraStore,
+    dec: Decision,
+    rec: dict,
+    sc: dict,
+    claimer_id: str,
+    clock: Clock,
+) -> SessionRecord | ApplyResult:
+    """從 claim 單裡的預留組出那個**空**的新 Session 紀錄（不寫入）。
+
+    預留是 `agora checkout` 替新 session 準備的第一份快照：**零則訊息**的空匯出檔
+    （review-73dbf2c H2）。它不是來源 session 的副本，所以 Agora 裡不會出現一份
+    掛在新 id 底下、內容與標題全是錯的紀錄；而被拒時這裡根本不會被呼叫到寫入。
+
+    回傳 `ApplyResult` 代表形狀不合法（呼叫端轉成 REJECT）；回傳 `SessionRecord`
+    代表可以寫。**不寫任何東西**——寫入由呼叫端在所有檢查都通過之後才做。
+    """
+    before = list(store.changed_paths())
+    now_str = format_rfc3339(clock.now(), include_fraction=True)
+    sess = sc.get("session")
+    if not isinstance(sess, dict):
+        # 沒有預留、認領者又不存在 → 認領一個不存在的 session
+        return _fail(store, dec, before, "unknown_claimer", now_str)
+
+    def bad(code: str) -> ApplyResult:
+        return _fail(store, dec, before, code, now_str)
+
+    source = sess.get("source")
+    native = sess.get("source_session_id")
+    if not isinstance(source, str) or not isinstance(native, str):
+        return bad("invalid_format")
+    # 預留的 session 必須**就是**那個 claimer：不能挾帶別的 session 的內容
+    if f"{source}:{native}" != claimer_id:
+        return bad("invalid_format")
+    if sess.get("parent_id") is not None:
+        # 接續只能由主 Session 發起；預留也一樣
+        return bad("claim_from_subsession")
+    snapshot_at = sess.get("snapshot_at")
+    if not isinstance(snapshot_at, str) or not snapshot_at:
+        return bad("invalid_format")
+    try:
+        parse_rfc3339(snapshot_at)
+    except ValueError:
+        return bad("invalid_format")
+
+    raw_p = dec.raw_path
+    if raw_p is None:
+        return bad("invalid_format")
+    raw_bytes = Path(raw_p).read_bytes()
+    incoming_sha = hashlib.sha256(raw_bytes).hexdigest().lower()
+    raw_meta = sc.get("raw")
+    if isinstance(raw_meta, dict):
+        decl_sha = raw_meta.get("sha256")
+        decl_size = raw_meta.get("size")
+        if (
+            (isinstance(decl_sha, str) and decl_sha.lower() != incoming_sha)
+            or (isinstance(decl_size, int) and decl_size != len(raw_bytes))
+        ):
+            return bad("raw_mismatch")
+
+    # 預留的匯出檔形狀由 `agora checkout` 保證（零則訊息）；轉換器讀不出來就照
+    # 收（與 `apply_session` 的 H2 同一個立場：raw 才是真本），但記下代碼。
+    title: str | None = None
+    reading_status = "ok"
+    reading_error_code: str | None = None
+    try:
+        facts = get_converter(source).facts(Path(raw_p))
+        title = getattr(facts, "title", None)
+    except Exception:
+        reading_status = "failed"
+        reading_error_code = "facts_error"
+
+    return SessionRecord(
+        id=claimer_id,
+        producer=rec.get("producer", ""),
+        created_at=rec.get("created_at", ""),
+        updated_at=rec.get("updated_at", ""),
+        status="running",
+        snapshot_at=snapshot_at,
+        raw_sha256=incoming_sha,
+        raw_size=len(raw_bytes),
+        committed_at=now_str,
+        last_item_key=_item_key(dec),
+        case_id=rec.get("case_id"),
+        provenance=rec.get("provenance"),
+        role=rec.get("role"),
+        role_version=rec.get("role_version"),
+        stopped_at=None,
+        parent_id=None,
+        in_progress=False,
+        archived_at=None,
+        title=title,
+        extra={
+            "reading_status": reading_status,
+            "reading_error_code": reading_error_code,
+            "reading_error_message": None,
+            "reserved_by": rec.get("id"),
+        },
+    )
+
+
 def apply_claim(store: AgoraStore, dec: Decision, clock: Clock) -> ApplyResult:
     """套用認領：交接單存在且未被認領、認領者 Session 已在 Agora（含本輪剛收），
     寫 claim、標記 claimed_by、建接續 Link（claimer → target，記接續點）。
@@ -452,6 +553,12 @@ def apply_claim(store: AgoraStore, dec: Decision, clock: Clock) -> ApplyResult:
     一個 Session 可認領多張（統合：每張交接單各建一條 Link）。
     H3：認領者必須是自己的持有者（producer 相同）、是主 Session（parent_id 為 None）、
     且不能是交接單的目標本身。
+
+    **預留（review-73dbf2c H2）**：帶 `session` 區塊的 claim **自己帶著**一個空的
+    新 Session 紀錄（`agora checkout` 預留給新 session 的第一份快照）。所以認領者
+    不必是「先存在的 session」，而且**被拒時 Agora 裡不會留下任何東西**——所有檢查
+    都通過之後才寫，順序是預留 → link → handoff → claim。
+
     失敗碼：invalid_format、unknown_handoff、already_claimed、unknown_claimer、
     not_holder、claim_from_subsession、self_claim、stale。
     """
@@ -504,11 +611,21 @@ def apply_claim(store: AgoraStore, dec: Decision, clock: Clock) -> ApplyResult:
             return _fail(store, dec, before, "already_claimed", now_str)
 
     claimer = store.get_session(claimer_id)
+    reserved: SessionRecord | None = None
     if claimer is None:
-        return _fail(store, dec, before, "unknown_claimer", now_str)
-    if not isinstance(rec.get("producer"), str) or rec.get("producer") != claimer.producer:
+        # 預留路徑：claim 自己帶著一個空的新 Session 紀錄（review-73dbf2c H2）
+        built = _build_reserved_session(store, dec, rec, sc, claimer_id, clock)
+        if isinstance(built, ApplyResult):
+            return built  # 預留形狀不合法 → 明確拒收（不寫入任何東西）
+        reserved = built
+        producer = rec.get("producer")
+        parent_id = None
+    else:
+        producer = claimer.producer
+        parent_id = claimer.parent_id
+    if not isinstance(producer, str) or rec.get("producer") != producer:
         return _fail(store, dec, before, "not_holder", now_str)
-    if claimer.parent_id is not None:
+    if parent_id is not None:
         return _fail(store, dec, before, "claim_from_subsession", now_str)
 
     h_body = handoff.get("body", {})
@@ -517,7 +634,13 @@ def apply_claim(store: AgoraStore, dec: Decision, clock: Clock) -> ApplyResult:
     if claimer_id == target_id:
         return _fail(store, dec, before, "self_claim", now_str)
 
-    # ---- 寫入階段（顺序：link → handoff → claim；错误往上抛） ----
+    # ---- 寫入階段（顺序：預留 → link → handoff → claim；错误往上抛） ----
+    if reserved is not None:
+        # 預留只在這裡才寫：前面任何一個檢查失敗都已經回傳了，Agora 裡不會留下
+        # 「已被別人預留、卻沒有接續 Link」的 session。
+        raw_p = Path(dec.raw_path) if dec.raw_path is not None else None
+        assert raw_p is not None  # _build_reserved_session 已驗過
+        store.put_session(reserved, raw_p, via="import")
     store.put_json(
         link_rel,
         {

@@ -51,17 +51,23 @@ size 驗證**，對不上就明確拒絕、不產出起點包。唯讀就夠，�
 agora find [關鍵字] [--case <案件>] [--waiting]      # E：找 session；--waiting 列出等人接的交接單
 agora show <session>                                  # E：看內容與前後關係
 agora read <session>                                  # D：讀最新已提交的內容，並記下一條參考關係
-agora handoff <session> [--at <訊息>] --task "…" [--task "…" …]
-                                                      # B、C：每個 --task 寫一張交接單
-agora checkout <起點>… [--task "…"] -o <目錄>          # A、B、C：產出起點包
+agora handoff <session> [--at <訊息>] (--tasks-file <json> | --task "…" [--task "…" …])
+                                                      # B、C：每個工作一張交接單
+agora checkout <起點>… [--task "…"] [-–resume] -o <目錄>  # A、B、C：產出起點包
 ```
 
 `<起點>` 可以是 `handoff:<id>`（接某張交接單），也可以是 `<session>[@<訊息>]`（直接從任何 session 的任何位置開始）。
 
+`agora handoff` 的工作清單有兩種來源：`--tasks-file` 是一個 JSON 陣列，**每個物件一張交接單**（plugin 走這條，把模型給的 `[{title, summary, next_steps}]` 原樣寫進去）；`--task` 是**每個字串一張**。兩者可以混著給。
+
 `agora checkout` 做的事：
 1. 從讀取介面取得起點與被釘住的快照，把原始紀錄原封不動放進起點包；
-2. 起點是交接單時，登記「由我接手」，等確認沒有人先接走；被拒就不產出；
-3. 多個起點（n→1）時，最長的一段放最前面，並檢查總長度沒有超過目標模型的上限，超過就明確拒絕。
+2. **先把所有本機檢查做完**——輸出目錄可寫且為空、`raw/` 位元組與釘住快照的 sha256 相符、Agora 物件讀得到；
+3. 起點是交接單時才登記「由我接手」，等確認沒有人先接走。那筆認領**自己帶著**預留給新 session 的空紀錄（見下），被拒就不產出起點包，且 Agora 裡連預留都不會有；
+4. 認領通過才寫 `package.json` 並把暫存目錄改名成起點包；
+5. 多個起點（n→1）時，最長的一段放最前面，並檢查總長度沒有超過目標模型的上限，超過就明確拒絕。
+
+**認領卡住怎麼重跑**：認領送出**之前**，`checkout` 就把這次認領用的 claim id 與預留 id 寫進本機記錄（`~/.aistorage/checkout-claims.json`）。逾時或中斷之後重跑要帶 `--resume`，它會沿用同一組 id 重新送出——交接單只能被認領一次，換 id 只會得到 `already_claimed`。被明確拒收時本機記錄會刪掉，可以乾淨地從頭來。
 
 **轉接器（以 opencode 為例）：**
 
@@ -83,3 +89,6 @@ AI 在 session 裡用的是同一組指令，透過 skill 包成工具：`agora_
 `agora_read`、`agora_handoff`、`agora_checkout`（`resident/opencode/plugin/aistorage.ts`
 把它們轉呼叫 `agora` CLI）。**沒有認領工具**——認領由 `agora checkout` 在產出
 起點包時一併登記，被拒就不產出。
+
+轉接器拿到的 `new_session.session_id` 是**預留**的：它在 Agora 裡已經是一個零則訊息的
+空 session，`agora-opencode load` 匯入之後第一則真訊息會接在它後面。

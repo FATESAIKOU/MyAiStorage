@@ -620,6 +620,30 @@ def build_handoff_item(
     )
 
 
+@dataclass(frozen=True)
+class NewSessionReservation:
+    """認領單挾帶的「預留」：一個**空**的新 Session 紀錄。
+
+    為什麼放在認領單裡而不是另外送一個 session 項目（review-73dbf2c H2）：
+    交接單只能被認領一次，所以認領被拒時，Agora 裡**不該留下任何東西**。
+    早先把來源 session 的截斷副本當成新 session 的第一份快照送出去，會讓 Agora
+    裡出現一份掛在新 id 底下、內容與標題全是錯的紀錄；被拒時那份複製還會變成
+    沒有人接手的孤兒。
+
+    `raw_path` 必須是**零則訊息**的匯出檔（`agora checkout` 用
+    `_empty_export_bytes` 造），而且**位元組要由參數唯一決定**：`--resume`
+    重跑時要產生一模一樣的檔案，否則提交流程的清冊會看成換了一個 item
+    （`replayed_item_key`）而拒收。
+    """
+
+    #: 預留給新 session 的完整 id（`<source>:<source_session_id>`）
+    session_id: str
+    #: 空匯出檔（會成為這個 session 的第一份快照）
+    raw_path: Path
+    #: 快照時間（預留的時刻）
+    snapshot_at: str
+
+
 def build_claim_item(
     *,
     handoff_id: str,
@@ -635,11 +659,28 @@ def build_claim_item(
     now: str | None = None,
     clock: Clock | None = None,
     extra: dict[str, Any] | None = None,
+    new_session: NewSessionReservation | None = None,
 ) -> BuiltItem:
-    """組一張認領單（claim）。claimer 必須已經在 Agora 裡（所以要先上傳它自己的
-    session，兩者同一批提交，apply 的順序 session 在前）。"""
+    """組一張認領單（claim）。
+
+    claimer 必須已經在 Agora 裡（所以要先上傳它自己的 session，兩者同一批提交，
+    apply 的順序 session 在前）；**唯一的例外是 `new_session` 預留**：那時
+    claimer 還不存在，這一筆認領就是它的建立者，`apply_claim` 會先把預留寫成
+    session 紀錄再接上 Link。被拒時預留也不會被寫進去。
+
+    `item_key` 與 `now` 由呼叫端決定（`agora checkout --resume` 靠它們讓重跑
+    產生同一個 item）。**給了 `item_key` 時，claim 的 id 就是 `claim:<item_key>`**
+    ——收件匣檔名與項目 id 指向同一個 item，所以重跑沿用 `item_key` 就一定沿用
+    同一個 claim id，提交流程的冪等判斷（`apply_claim` 的 `already`）才認得出來。
+    """
     if not re.fullmatch(r"handoff:[0-9A-HJKMNP-TV-Z]{26}", str(handoff_id or "")):
         raise InboxBuildError(f"handoff_id 必須是 handoff:<ULID>: {handoff_id!r}")
+    if new_session is not None and new_session.session_id != claimer_session_id:
+        raise InboxBuildError(
+            f"預留的 session ({new_session.session_id}) 必須就是 claimer "
+            f"({claimer_session_id})：預留是為了讓這個認領有個對象"
+        )
+    _check_signer(profile, key_id)
     created, updated = _now(now, clock, created_at, updated_at)
     body: dict[str, Any] = {
         "handoff_id": handoff_id,
@@ -647,21 +688,75 @@ def build_claim_item(
     }
     if extra:
         body.update(extra)
-    return _sign_and_check(
-        item_type="claim",
-        item_id=make_item_id("claim"),
-        profile=profile,
-        key=key,
-        key_id=key_id,
-        body=body,
-        raw=None,
-        raw_path=None,
-        created_at=created,
-        updated_at=updated,
-        case_id=case_id,
-        provenance=provenance,
-        item_key=_check_item_key(item_key),
-        max_raw=DEFAULT_MAX_RAW_SIZE,
+
+    raw: dict[str, Any] | None = None
+    raw_path: Path | None = None
+    session: dict[str, Any] | None = None
+    if new_session is not None:
+        raw_path = Path(new_session.raw_path)
+        if not raw_path.is_file():
+            raise InboxBuildError(f"找不到預留的匯出檔: {raw_path}")
+        raw_sha, raw_size = _hash_raw(raw_path, DEFAULT_MAX_RAW_SIZE)
+        raw = {"sha256": raw_sha, "size": raw_size}
+        source, _sep, native = new_session.session_id.partition(":")
+        if not source or not native:
+            raise InboxBuildError(
+                f"預留的 session id 不合法（要 <source>:<source_session_id>）: "
+                f"{new_session.session_id!r}"
+            )
+        session = {
+            "source": source,
+            "source_session_id": native,
+            "snapshot_at": new_session.snapshot_at,
+            "status": "running",
+            "stopped_at": None,
+            "in_progress": False,
+            "parent_id": None,
+            "reserving": True,
+        }
+
+    key_value = _check_item_key(item_key)
+    sidecar: dict[str, Any] = {
+        "format": SIDECAR_FORMAT,
+        "item_key": key_value,
+        "profile": profile,
+        "metadata": {
+            # item_key 決定時 id 也跟著決定（見 docstring 的 --resume 說明）
+            "id": f"claim:{key_value}" if item_key else make_item_id("claim"),
+            "type": "claim",
+            "created_at": created,
+            "updated_at": updated,
+            "case_id": case_id,
+            "provenance": provenance,
+        },
+        "raw": raw,
+        "body": body,
+    }
+    if session is not None:
+        sidecar["session"] = session
+
+    key_value = str(sidecar["item_key"])
+    errors = validate_sidecar(sidecar, expected_item_key=key_value)
+    if errors:
+        raise InboxBuildError(
+            f"組裝出的 claim sidecar 未通過驗證: "
+            + "; ".join(f"{e.field}: {e.message}" for e in errors)
+        )
+    if raw_path is not None:
+        with open(raw_path, "rb") as raw_fh:
+            raw_errors = check_raw(sidecar, raw_fh, max_size=DEFAULT_MAX_RAW_SIZE)
+        if raw_errors:
+            raise InboxBuildError(
+                "預留的匯出檔與 sidecar 不一致: "
+                + "; ".join(f"{e.field}: {e.message}" for e in raw_errors)
+            )
+    sidecar_bytes = serialize_json(sidecar)
+    return BuiltItem(
+        item_key=key_value,
+        item_id=str(sidecar["metadata"]["id"]),
+        sidecar_bytes=sidecar_bytes,
+        sig=sign_sidecar_bytes(sidecar_bytes, key, key_id),
+        raw_path=raw_path,
     )
 
 

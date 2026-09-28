@@ -145,6 +145,28 @@
     "claimer_session_id": "opencode:ses_002"
   }
   ```
+  認領者必須已經在 Agora 裡——**唯一的例外是「預留」**：`agora checkout` 會讓這
+  筆認領**自己帶著** claimer 的第一份快照（一個**零則訊息**的空匯出檔），sidecar
+  多出 `session` 與 `raw`：
+
+  ```json
+  {
+    "raw": { "sha256": "9c1e...", "size": 128 },
+    "session": {
+      "source": "opencode", "source_session_id": "ses_002",
+      "snapshot_at": "2026-09-28T08:00:00.000Z",
+      "status": "running", "in_progress": false, "parent_id": null,
+      "reserving": true
+    },
+    "body": { "handoff_id": "handoff:01ARZ…", "claimer_session_id": "opencode:ses_002" }
+  }
+  ```
+
+  為什麼：交接單只能被認領一次，所以認領被拒時 Agora 裡**不該留下任何東西**。
+  預留在 `apply_claim` 的寫入階段才落進真本（順序：預留 → link → handoff →
+  claim），所以被拒時連那個空紀錄都不會有。`session.reserving` 標記它是預留而不是
+  真的同步；`session.source` + `source_session_id` 必須等於 `claimer_session_id`。
+  帶 `session` 的 claim **必須**有 `raw`（反過來，沒帶預留的 claim 不該有 raw）。
 - **`reference`（參考 Link）**：
   ```json
   {

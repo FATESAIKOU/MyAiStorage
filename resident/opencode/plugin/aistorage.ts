@@ -190,7 +190,13 @@ const TOOLS: Record<string, ToolDef> = {
       const out: string[] = []
       // 位置參數是「要交出的 Session」，由 context 帶入（不給模型填）。
       if (ctx?.sessionID) out.push(ctx.sessionID)
-      for (const title of strList(a, "tasks")) out.push("--task", title)
+      // ★ 每個 task 物件（title／summary／next_steps）**各成一張交接單**
+      //   （review-73dbf2c H3）。以前用 strList 把它們摊平成多個字串，於是
+      //   一個有 title+summary+next_steps 的 task 變成三張交接單，9.1 的
+      //   「剛好兩張」永遠對不上。每個 task 物件在 argv 裡是一個 --
+      //   tasks-file（JSON 清單），由 CLI 端一對一組單。
+      const file = writeTasksFile(a)
+      if (file) out.push("--tasks-file", file)
       return out
     },
   },
@@ -199,7 +205,8 @@ const TOOLS: Record<string, ToolDef> = {
       "產出一個起點包（start point package）：把起點之前的原始紀錄原封不動放進" +
       "一個目錄，交給 agora-opencode load 變成新的 session。" +
       "startpoints: ['handoff:<id>' 或 '<session>[@<訊息>]']（多個＝n→1 統合）。" +
-      "起點是交接單時會一併登記認領，被拒就不產出。",
+      "起點是交接單時會一併登記認領，被拒就不產出；認領逾時要重跑時請帶 resume: true。" +
+      "產出的目錄在回傳的 package 欄位。",
     cli: "agora",
     command: "checkout",
     args: (a, ctx) => {
@@ -207,9 +214,12 @@ const TOOLS: Record<string, ToolDef> = {
       for (const sp of strList(a, "startpoints")) out.push(sp)
       const task = str(a, "task")
       if (task) out.push("--task", task)
-      // 輸出目錄：預設放在 /work 底下（不要寫進 repo 的版本控制裡）
-      const outDir = str(a, "out_dir") ?? "/work/.agora-packages"
+      // 輸出目錄：預設放在 /work 底下（不要寫進 repo 的版本控制裡）。
+      // ★ **每次呼叫都要是新的目錄**（review-73dbf2c H1）：固定目錄會讓第二次
+      //   checkout 直接撞上「目錄已經有東西」——而那時認領可能已經送出去了。
+      const outDir = str(a, "out_dir") ?? uniqueOutDir()
       out.push("-o", outDir)
+      if (isTrue(a, "resume")) out.push("--resume")
       if (ctx?.directory) out.push("--max-lag", "15m")
       return out
     },
@@ -371,6 +381,81 @@ function writeTempParts(parts: unknown): string {
   return file
 }
 
+// 輸出目錄的前綴（底下每次呼叫再補一個唯一子目錄）
+const PACKAGE_DIR = "/work/.agora-packages"
+
+function uniqueOutDir(): string {
+  // ★ 每次呼叫都要是新的目錄（review-73dbf2c H1）。固定成 /work/.agora-packages
+  //   的話，第二次 checkout 一定撞上「目錄已經有東西」；而那時（改了流程之後）
+  //   認領可能已經送出去了，交接單就卡在沒有人接手的狀態。
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  return `${PACKAGE_DIR}/pkg-${stamp}`
+}
+
+function writeTasksFile(a: ToolArgs): string | undefined {
+  // 把模型給的 tasks **原樣**寫成 JSON 檔，CLI 端一個物件一張交接單。
+  // 為什麼走檔案：title／summary／next_steps 是三段不同的內容，攤平到 argv 裡
+  // 就分不出哪個字串屬於哪一張單（review-73dbf2c H3）。
+  const tasks = taskObjects(a)
+  if (!tasks.length) return undefined
+  const dir = (process.env.AISTORAGE_TMP_DIR as string | undefined) || "/tmp/aistorage"
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const file = `${dir}/handoff-tasks-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
+  writeFileSync(file, JSON.stringify(tasks), { mode: 0o600 })
+  return file
+}
+
+function taskObjects(a: ToolArgs): Array<Record<string, unknown>> {
+  // 找出模型給的 task 清單，**保持每個物件一筆**。
+  // 形狀很多（`[{...}]`、`{"item": [...]}`、`{"properties": {...}}`、JSON 字串），
+  // 那些由 CLI 端的 normalize_parts 吸收；這裡只負責把「清單」找出來，
+  // 千萬不要把物件裡的字串值攤平（那正是 H3 的 bug）。
+  const raw = deepFindKey(a, ["tasks", "task", "parts", "items"])
+  const list = asTaskList(raw)
+  if (list) return list
+  const single = deepFindKey(a, ["title"])
+  if (typeof single === "string" && single.trim()) {
+    return [{ title: single.trim() }]
+  }
+  return []
+}
+
+function asTaskList(value: unknown): Array<Record<string, unknown>> | null {
+  if (Array.isArray(value)) {
+    const out: Array<Record<string, unknown>> = []
+    for (const item of value) {
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        out.push(item as Record<string, unknown>)
+      } else if (typeof item === "string" && item.trim()) {
+        out.push({ title: item.trim() })
+      }
+    }
+    return out.length ? out : null
+  }
+  if (typeof value === "string") {
+    const text = value.trim()
+    if (text.startsWith("[")) {
+      try {
+        return asTaskList(JSON.parse(text))
+      } catch {
+        return null
+      }
+    }
+    return text ? [{ title: text }] : null
+  }
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>
+    if (typeof obj.title === "string" || typeof obj.summary === "string") {
+      return [obj]
+    }
+    for (const nested of Object.values(obj)) {
+      const found = asTaskList(nested)
+      if (found) return found
+    }
+  }
+  return null
+}
+
 export const AistoragePlugin = async () => {
   return {
     tool: {
@@ -435,7 +520,16 @@ export const AistoragePlugin = async () => {
                         items: { type: "string" },
                       },
                       task: { type: "string", description: "要交代給接手者的任務" },
-                      out_dir: { type: "string", description: "起點包的輸出目錄" },
+                      out_dir: {
+                        type: "string",
+                        description:
+                          "起點包的輸出目錄（預設每次呼叫一個新的）",
+                      },
+                      resume: {
+                        type: "boolean",
+                        description:
+                          "上一次認領逾時或被中斷：沿用同一個認領重試（不要換新的）",
+                      },
                     }
                   : {}),
                 ...(name === "aistorage_reference"

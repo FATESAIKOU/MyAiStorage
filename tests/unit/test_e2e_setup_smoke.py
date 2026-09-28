@@ -293,7 +293,7 @@ def test_sweep_refuses_when_parents_dont_match(monkeypatch):
         e2e.sweep_orphan_prefixes(drive=drive, test_root_id="root")
 
 
-def test_setup_calls_sweep_before_creating(monkeypatch):
+def test_setup_calls_sweep_before_creating(monkeypatch, tmp_path):
     """setup 一開始就要清孤兒（不然中斷留下的垃圾會一直留著）。"""
     import scripts.e2e_setup as e2e
 
@@ -317,6 +317,10 @@ def test_setup_calls_sweep_before_creating(monkeypatch):
     monkeypatch.setattr(e2e, "read_test_folder_id", lambda p: "root")
     monkeypatch.setattr(e2e, "read_sa_email", lambda p: "reader@example.com")
     monkeypatch.setattr(e2e, "_require_file", lambda p, d: p)
+    # 祕密根目錄一定要換掉：沒給 `secrets_root` 的話 `run_setup` 會走
+    # `resolve_secrets_root()`，那是真的 `~/.config/aistorage/resident-e2e`，
+    # 會去動你正在用的 e2e 環境（測試絕不該碰真的狀態）。
+    monkeypatch.setattr(e2e, "resolve_secrets_root", lambda *a, **k: tmp_path)
     with pytest.raises(Stop):
         e2e.run_setup(state_file=Path("/nonexistent/state.json"))
     # sweep 有被呼叫（即使後面因為假的 drive 停下來）

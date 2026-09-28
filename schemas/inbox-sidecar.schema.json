@@ -336,7 +336,18 @@
             },
             "additionalProperties": true
           }
-        }
+        },
+        "anyOf": [
+          {
+            "not": { "required": ["session"] }
+          },
+          {
+            "required": ["session", "raw"],
+            "properties": {
+              "raw": { "type": "object" }
+            }
+          }
+        ]
       }
     },
     {

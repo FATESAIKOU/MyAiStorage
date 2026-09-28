@@ -147,11 +147,21 @@ def _run_setup(drive: FakeDrive, out: dict[str, Path], **overrides: Any) -> dict
 def _patch_teardown_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, drive: FakeDrive
 ) -> dict[str, Path]:
-    """run_teardown 需要的最小介面：假的 Drive／token、tmp 的本機設定路徑。"""
+    """run_teardown 需要的最小介面：假的 Drive／token、tmp 的本機設定路徑。
+
+    **祕密根目錄一定要一起換掉**：`run_teardown` 會在刪掉 Drive 前綴之後，
+    把 `<secrets_root>/<profile>/reader.json` 刪掉（指向已不存在前綴的舊設定）。
+    `run_teardown` 沒收到 `secrets_root` 就會走 `resolve_secrets_root()`，
+    那是**真的** `~/.config/aistorage/resident-e2e`——單元測試跑到這裡就會
+    刪掉你正在用的 e2e 環境的 reader.json。實測踩過。
+    """
     ids = tmp_path / "ids.env"
     ids.write_text("TEST_FOLDER_ID=root\n", encoding="utf-8")
+    secrets_root = tmp_path / "resident-e2e"
     monkeypatch.setattr(e2e, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(e2e, "IDS_ENV", ids)
+    monkeypatch.setattr(
+        e2e, "resolve_secrets_root", lambda *a, **k: secrets_root)
     monkeypatch.setattr(e2e, "HttpDriveClient", lambda *a, **k: drive)
     monkeypatch.setattr(e2e, "RcloneConfToken", lambda *a, **k: object())
     local: dict[str, Path] = {}
@@ -318,6 +328,49 @@ def test_teardown_without_a_target_is_a_noop(
 
     assert removed == 0
     assert len(drive.snapshot()["files"]) == 1
+
+
+def test_teardown_never_touches_the_real_secrets_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """跑單元測試不得刪掉**真的** e2e 環境的 reader.json。
+
+    `run_teardown` 在刪完 Drive 前綴之後會刪 `<secrets_root>/<profile>/reader.json`
+    （前綴沒了之後它就是指向不存在資料夾的舊設定）。它沒收到 `secrets_root` 時
+    走 `resolve_secrets_root()`，那是 `~/.config/aistorage/resident-e2e`——
+    真的、正在用的那個。實測踩過：別條線沒跑 teardown，reader.json 就不見了。
+
+    這裡直接對真的路徑下「不得被刪」的命令，跑完確認檔案還在。
+    """
+    import scripts.e2e_setup as _e2e
+
+    real_root = _e2e.resolve_secrets_root(
+        {"AISTORAGE_E2E_SECRETS_ROOT": str(
+            _e2e.CONFIG_DIR / "resident-e2e")})
+    real_reader = real_root / _e2e.DEFAULT_E2E_PROFILE / "reader.json"
+    existed = real_reader.is_file()
+
+    drive = FakeDrive()
+    target = drive.seed_folder("e2e-01ARZ3NDEKTSV4RRFFQ69G5FAV", parent="root")
+    _patch_teardown_env(monkeypatch, tmp_path, drive)
+    # 在 tmp 的祕密根目錄底下放一份 reader.json：刪除這一步真的會執行到它
+    tmp_reader = (tmp_path / "resident-e2e" / e2e.DEFAULT_E2E_PROFILE
+                  / "reader.json")
+    tmp_reader.parent.mkdir(parents=True)
+    tmp_reader.write_text("{}", encoding="utf-8")
+
+    state_file = tmp_path / "state.json"
+    state_file.write_text(
+        json.dumps({"prefix_folder_id": target,
+                    "prefix_name": "e2e-01ARZ3NDEKTSV4RRFFQ69G5FAV"}),
+        encoding="utf-8")
+
+    e2e.run_teardown(state_file=state_file)
+
+    assert not tmp_reader.exists(), "刪除 reader.json 這一步應該有執行到 tmp 那份"
+    assert real_reader.is_file() == existed, (
+        f"單元測試刪到了真的 e2e 設定：{real_reader}"
+    )
 
 
 # ---------------------------------------------------------------------------

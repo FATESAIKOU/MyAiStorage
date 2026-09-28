@@ -682,9 +682,9 @@ class ResidentContainerHandle:
     ) -> subprocess.CompletedProcess:
         """跑 `agora checkout`，**同時**在本機反覆執行提交流程。
 
-        checkout 會上傳新 session 的第一份快照與認領，然後等讀取介面確認。
-        e2e 不提供 PAT（不觸發 GitHub），所以提交流程由測試扮演——這正是
-        ADR 0007 的「寫入者以讀取介面判斷完成」。
+        checkout 會放一筆認領進收件匣（那筆認領**自己帶著**預留給新 session 的
+        空紀錄），然後等讀取介面確認。e2e 不提供 PAT（不觸發 GitHub），所以
+        提交流程由測試扮演——這正是 ADR 0007 的「寫入者以讀取介面判斷完成」。
 
         **預設不檢查 exit code**：被拒（`ClaimRejected` rc=6、長度超限 rc=2）
         也要看得到 stdout／stderr，由測試自己斷言。

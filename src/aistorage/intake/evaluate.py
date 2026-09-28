@@ -512,8 +512,11 @@ def evaluate(
         return reject_decision("rewrite_not_supported", authenticated=True)
 
     # 4. Session 調整 snapshot_at 上限（D4）與蓋章 stamp_record + classify
-    if item_type == "session":
-        sess_info = dict(selected_sc_dict.get("session", {}))
+    #    帶預留的 claim 也挾帶一個 session 區塊（`agora checkout` 預留的新
+    #    session），同樣要夾住快照時間上限。
+    if item_type in ("session", "claim") and isinstance(
+            selected_sc_dict.get("session"), dict):
+        sess_info = dict(selected_sc_dict["session"])
         claimed_snap = sess_info.get("snapshot_at", "")
         try:
             claimed_dt = parse_rfc3339(claimed_snap)
@@ -580,7 +583,11 @@ def evaluate(
 
     # 6. M5: Raw metadata 檢查
     effective_max_raw = max_raw
-    needs_raw = item_type in ("session", "rewrite")
+    # 帶預留的 claim 也要它的 raw（那份空匯出檔就是預留給新 session 的第一份
+    # 快照；`--resume` 重跑時位元組必須相同，否則清冊會判成換了一個 item）
+    needs_raw = item_type in ("session", "rewrite") or (
+        item_type == "claim" and isinstance(selected_sc_dict.get("session"), dict)
+    )
 
     raw_path: Path | None = None
     if needs_raw:

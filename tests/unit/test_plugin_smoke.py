@@ -78,21 +78,24 @@ for (const [name, tool] of Object.entries(plugin.tool)) {{
 // 情境 1：主 Session（沒有 parentID）
 process.env.AISTORAGE_ARGV_LOG = '{log_main}'
 const ctxMain = {{ sessionID: "ses_main" }}
+const args = {{
+  query: "接續", summary: "做完了", session_id: "ses_target",
+  startpoints: ["handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+  tasks: {tasks},
+  task: "接手甲的工作", resume: {resume},
+  kind: "link", name: "架構報告", link: "https://example.invalid/report",
+  repo: "org/repo", path: "docs/report.md", case_id: "c1",
+  parts: [{{ title: "甲", summary: "甲的工作" }}],
+}}
 out.errors_main = {{}}
 for (const [name, tool] of Object.entries(plugin.tool)) {{
-    try {{
-      await tool.execute(
-        {{ query: "接續", summary: "做完了", session_id: "ses_target",
-           startpoints: ["handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV"],
-           tasks: [{{ title: "甲", summary: "甲的工作" }}],
-           task: "接手甲的工作",
-           kind: "link", name: "架構報告", link: "https://example.invalid/report",
-           repo: "org/repo", path: "docs/report.md", case_id: "c1",
-           parts: [{{ title: "甲", summary: "甲的工作" }}] }},
-        ctxMain)
-      out.errors_main[name] = null
-    }} catch (e) {{
-      out.errors_main[name] = String(e.message)
+    for (let i = 0; i < {repeats}; i++) {{
+      try {{
+        await tool.execute(args, ctxMain)
+        out.errors_main[name] = null
+      }} catch (e) {{
+        out.errors_main[name] = String(e.message)
+      }}
     }}
   }}
 
@@ -136,7 +139,9 @@ def _fake_python(tmp_path: Path) -> tuple[Path, Path]:
 
 def _harness(tmp_path: Path, child_session: bool = False,
              sessions_status: int = 200, omit_self: bool = False,
-             recover_second_call: bool = False) -> dict:
+             recover_second_call: bool = False, *,
+             tasks: list[dict] | None = None, resume: bool = False,
+             repeats: int = 1) -> dict:
     """跑 node 載入 plugin，呼叫所有工具，回傳工具資訊、錯誤與 argv log。"""
     bin_dir, log = _fake_python(tmp_path)
     script = tmp_path / "harness.mjs"
@@ -166,7 +171,13 @@ def _harness(tmp_path: Path, child_session: bool = False,
           return _ORIG_FETCH(url)
         }}
         """) + HARNESS.format(plugin=str(PLUGIN), log_main=str(log_main),
-                              log_child=str(log_child)),
+                              log_child=str(log_child),
+                              tasks=json.dumps(
+                                  tasks if tasks is not None
+                                  else [{"title": "甲", "summary": "甲的工作"}],
+                                  ensure_ascii=False),
+                              resume="true" if resume else "false",
+                              repeats=int(repeats)),
         encoding="utf-8",
     )
     env = dict(os.environ)
@@ -305,7 +316,72 @@ def test_agora_handoff_passes_the_current_session_as_the_target(tmp_path: Path):
     calls = _argv_calls(Path(out["_log_main"]))
     call = _call_of(calls, "aistorage.agora_cli", "handoff")
     assert call[3] == "ses_main", "要交出的 Session 必須是 context 的 id"
-    assert "--task" in call and call[call.index("--task") + 1] == "甲"
+    assert "--tasks-file" in call
+
+
+def test_agora_handoff_turns_each_task_object_into_one_handoff(tmp_path: Path):
+    """H3：一個 task 物件（title／summary／next_steps）**各成一張交接單**。
+
+    以前 plugin 用 `strList` 把 task 物件攤平成多個字串，於是一個有
+    title+summary+next_steps 的 task 變成三張交接單——9.1 e2e 的「剛好兩張」因此
+    永遠對不上（它會變成六張）。現在每個 task 物件原樣進 `--tasks-file`，
+    由 CLI 端一對一組單。
+    """
+    out = _harness(tmp_path)
+    calls = _argv_calls(Path(out["_log_main"]))
+    call = _call_of(calls, "aistorage.agora_cli", "handoff")
+
+    # 一個 task 物件 → 檔案裡剛好一個物件（三個欄位都在）
+    assert call.count("--tasks-file") == 1
+    tasks_file = Path(call[call.index("--tasks-file") + 1])
+    tasks = json.loads(tasks_file.read_text(encoding="utf-8"))
+    assert tasks == [{"title": "甲", "summary": "甲的工作"}]
+    # **不是**三個 --task（那正是 H3 的 bug）
+    assert "--task" not in call, \
+        f"task 物件不能被攤平成多張交接單: {call}"
+
+
+def test_agora_handoff_keeps_two_task_objects_as_two_handoffs(tmp_path: Path):
+    """兩個 task 物件 → 兩張交接單（各自帶著自己的 title／summary）。"""
+    out = _harness(tmp_path, tasks=[
+        {"title": "甲", "summary": "甲的工作", "next_steps": "先做甲"},
+        {"title": "乙", "summary": "乙的工作", "next_steps": "先做乙"},
+    ])
+    calls = _argv_calls(Path(out["_log_main"]))
+    call = _call_of(calls, "aistorage.agora_cli", "handoff")
+
+    assert call.count("--tasks-file") == 1
+    tasks_file = Path(call[call.index("--tasks-file") + 1])
+    tasks = json.loads(tasks_file.read_text(encoding="utf-8"))
+    assert [t["title"] for t in tasks] == ["甲", "乙"]
+    assert [t["next_steps"] for t in tasks] == ["先做甲", "先做乙"]
+    assert call.count("--task") == 0
+
+
+def test_agora_checkout_uses_a_fresh_output_directory_every_time(tmp_path: Path):
+    """H1：預設輸出目錄**每次呼叫都要不同**。
+
+    固定目錄的話，第二次 checkout 一定撞上「目錄已經有東西」——而那時（改了流程
+    之後）認領可能已經送出去了，交接單就卡在沒有人接手的狀態。
+    """
+    out = _harness(tmp_path, repeats=3)
+    calls = _argv_calls(Path(out["_log_main"]))
+    dirs = [
+        c[c.index("-o") + 1]
+        for c in calls
+        if c[:3] == ["-m", "aistorage.agora_cli", "checkout"]
+    ]
+    assert len(dirs) == 3, f"應該有三次 checkout: {dirs}"
+    assert len(set(dirs)) == 3, f"輸出目錄不能重複: {dirs}"
+    assert all(d.startswith("/work/.agora-packages/pkg-") for d in dirs), dirs
+
+
+def test_agora_checkout_forwards_resume(tmp_path: Path):
+    """認領逾時要重跑時，plugin 傳 `--resume`（沿用同一個認領）。"""
+    out = _harness(tmp_path, resume=True)
+    calls = _argv_calls(Path(out["_log_main"]))
+    call = _call_of(calls, "aistorage.agora_cli", "checkout")
+    assert "--resume" in call
 
 
 def test_plugin_arguments_reach_python_verbatim(tmp_path: Path):

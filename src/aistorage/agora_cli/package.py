@@ -191,11 +191,15 @@ def to_dict(pkg: ContextPackage) -> dict[str, Any]:
     }
 
 
-def write_package(pkg: ContextPackage, out_dir: Path) -> Path:
-    """把起點包寫到 `out_dir`（目錄必須不存在或為空）。
+def stage_package(pkg: ContextPackage, out_dir: Path) -> Path:
+    """把起點包組到 `out_dir` 旁邊的暫存目錄並自我驗證；回傳暫存目錄路徑。
 
-    **先在暫存目錄組好再一次改名**：中途失敗不會留下半套起點包，而
-    `agora checkout` 的承諾是「被拒就不產出」。
+    **組裝與驗證都刻意與「改名」分開**（review-73dbf2c H1）：輸出目錄不可寫、
+    已經有東西、位元組被改動——這些本機問題必須在**登記認領之前**就發現，
+    否則認領會卡死成一張沒有人接的交接單（被認領了卻永遠不產出起點包）。
+
+    這裡只寫 `raw/`（位元組最多的部分）並驗證；`package.json` 留到
+    `commit_staged_package` 寫，因為它要含認領結果（claim id／認領了哪幾張單）。
     """
     out = Path(out_dir)
     if out.exists() and any(out.iterdir()):
@@ -208,8 +212,24 @@ def write_package(pkg: ContextPackage, out_dir: Path) -> Path:
     try:
         (staging / RAW_DIR).mkdir(parents=True, exist_ok=True)
         for segment in pkg.segments:
-            target = staging / RAW_DIR / segment.raw_name
-            target.write_bytes(segment.raw)
+            (staging / RAW_DIR / segment.raw_name).write_bytes(segment.raw)
+        _verify_staging(pkg, staging)
+    except Exception:
+        _rmtree(staging)
+        raise
+    return staging
+
+
+def commit_staged_package(pkg: ContextPackage, staging: Path,
+                          out_dir: Path) -> Path:
+    """把已驗證的暫存目錄寫成 `package.json` 並一次改名成 `out_dir`。
+
+    `package.json` 在**認領確認之後**才寫：它記著 `claim_id` 與
+    `claimed_handoffs`（`new_session` 區塊），那時才有。
+    """
+    out = Path(out_dir)
+    staging = Path(staging)
+    try:
         payload = json.dumps(to_dict(pkg), ensure_ascii=False, sort_keys=True,
                              indent=2) + "\n"
         (staging / PACKAGE_FILE).write_text(payload, encoding="utf-8")
@@ -221,6 +241,17 @@ def write_package(pkg: ContextPackage, out_dir: Path) -> Path:
         _rmtree(staging)
         raise
     return out / PACKAGE_FILE
+
+
+def write_package(pkg: ContextPackage, out_dir: Path) -> Path:
+    """把起點包寫到 `out_dir`（目錄必須不存在或為空）。
+
+    **先在暫存目錄組好再一次改名**：中途失敗不會留下半套起點包，而
+    `agora checkout` 的承諾是「被拒就不產出」。`agora checkout` 自己用
+    `stage_package` ＋ `commit_staged_package`（中間要插認領）；這個函式是
+    兩步的直接組合。
+    """
+    return commit_staged_package(pkg, stage_package(pkg, out_dir), out_dir)
 
 
 def _verify_staging(pkg: ContextPackage, staging: Path) -> None:

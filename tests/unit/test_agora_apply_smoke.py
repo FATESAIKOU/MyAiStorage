@@ -9,6 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+from typing import Sequence
 
 from aistorage.agora import FakeRawStorage, AgoraStore, GitRawStorage
 from aistorage.agora.apply import (
@@ -94,6 +95,33 @@ def _write_raw(tmp_path: Path, name: str, messages: list[dict], **kw) -> tuple[P
 
 def _msg(mid: str, completed: bool = True, reverted: bool = False) -> dict:
     return {"message_id": mid, "completed": completed, "reverted": reverted}
+
+
+def _write_opencode_export(tmp_path: Path, name: str, session_id: str,
+                           title: str, texts: Sequence[str]) -> tuple[Path, str, int]:
+    """寫一份**形狀真實**的 opencode 匯出檔（`agora checkout` 的預留就是這種）。"""
+    native = session_id.split(":", 1)[1]
+    messages = []
+    for i, text in enumerate(texts):
+        role = "user" if i % 2 == 0 else "assistant"
+        time = {"created": 1790420000000 + i * 1000}
+        if role == "assistant":
+            time["completed"] = time["created"] + 500
+        messages.append({
+            "info": {"id": f"msg_{native}_{i}", "sessionID": native,
+                     "role": role, "time": time},
+            "parts": [{"id": f"prt_{native}_{i}", "sessionID": native,
+                       "messageID": f"msg_{native}_{i}", "type": "text",
+                       "text": text}],
+        })
+    payload = {"info": {"id": native, "title": title,
+                        "time": {"created": 1790420000000,
+                                 "updated": 1790420001000}},
+               "messages": messages}
+    data = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    path = tmp_path / name
+    path.write_bytes(data)
+    return path, hashlib.sha256(data).hexdigest().lower(), len(data)
 
 
 def _dec(item_key: str, record: dict, sidecar: dict, raw_path: Path | None = None,
@@ -566,6 +594,165 @@ def test_claim_completes_after_interrupted_round(tmp_path: Path):
     assert r.ok, r.code
     assert store.get_record(f"handoff:{h1}")["claimed_by"]["claim_id"] == f"claim:{c_ulid}"
     assert (store.worktree / f"links/continuation/opencode%3Achild/{h1}.json").is_file()
+
+
+def _reserving_claim_parts(claim_ulid: str, handoff_ulid: str, claimer: str,
+                           raw: tuple[Path, str, int], *,
+                           snapshot_at: str = "2026-09-27T08:40:00Z",
+                           source: str = "opencode",
+                           producer: str = PRODUCER) -> tuple[dict, dict]:
+    """帶**預留**的 claim：自己帶著一個空的新 Session 紀錄（review-73dbf2c H2）。"""
+    record = {"id": f"claim:{claim_ulid}", "type": "claim", "producer": producer,
+              "created_at": snapshot_at, "updated_at": snapshot_at,
+              "case_id": None, "provenance": None}
+    _raw_p, sha, size = raw
+    sidecar = {
+        "body": {"handoff_id": f"handoff:{handoff_ulid}",
+                 "claimer_session_id": claimer},
+        "raw": {"sha256": sha, "size": size},
+        "session": {"source": source, "source_session_id": claimer.split(":", 1)[1],
+                    "snapshot_at": snapshot_at, "status": "running",
+                    "in_progress": False, "parent_id": None, "reserving": True},
+    }
+    return record, sidecar
+
+
+def test_reserving_claim_creates_the_empty_new_session(tmp_path: Path):
+    """H2：帶預留的 claim 被接受時，那個**空**的新 session 與接續 Link 一起進真本。
+
+    這是 `agora checkout` 預留新 session 的路徑：認領者還不存在於任何來源應用，
+    所以它由這一筆認領生出来。預留的內容是**零則訊息**的空匯出檔。
+    """
+    store = _new_store(tmp_path)
+    conv = FakeConverter()
+    clock = FixedClock("2026-09-27T09:00:00Z")
+    sha_t = _apply_session_ok(store, tmp_path, "opencode:s1", [_msg("m1")],
+                              clock=clock, conv=conv)
+    h_ulid = generate_ulid()
+    h_rec, h_sc = _handoff_parts(h_ulid, "opencode:s1", sha_t, "m1")
+    assert apply_handoff(store, _dec(generate_ulid(), h_rec, h_sc), conv, clock).ok
+
+    # 預留用的是**真實形狀**的 opencode 空匯出檔（`agora checkout` 造的那種），
+    # 所以真的轉換器讀得動，標題也會被記下來
+    reserved = _write_opencode_export(
+        tmp_path, "reserved.raw", "opencode:new1", "接手甲的工作", [])
+    c_ulid = generate_ulid()
+    c_rec, c_sc = _reserving_claim_parts(c_ulid, h_ulid, "opencode:new1", reserved)
+    r = apply_claim(store, _dec(generate_ulid(), c_rec, c_sc, reserved[0]), clock)
+
+    assert r.ok, r.code
+    session = store.get_session("opencode:new1")
+    assert session is not None, "預留應該生出一個新 session 紀錄"
+    assert session.raw_sha256 == reserved[1]
+    assert session.producer == PRODUCER
+    assert session.parent_id is None, "預留的是主 Session（接續只能由主 Session 發起）"
+    assert session.title == "接手甲的工作", "標題要來自預留，不是來源 session"
+    assert session.extra.get("reading_status") == "ok"
+    assert session.extra.get("reserved_by") == f"claim:{c_ulid}"
+    # 預留是空的：零則訊息
+    reading = OpencodeConverter().convert(reserved[0], session_id="opencode:new1")
+    assert reading["messages"] == []
+    # 接續 Link 也一併建好
+    assert (store.worktree
+            / f"links/continuation/opencode%3Anew1/{h_ulid}.json").is_file()
+    assert store.get_record(f"handoff:{h_ulid}")["claimed_by"]["session_id"] \
+        == "opencode:new1"
+
+
+def test_rejected_reserving_claim_writes_nothing_but_the_rejection(tmp_path: Path):
+    """H2：被拒時**不能**在 Agora 留下那個預留（否則就是沒有人接手的孤兒）。"""
+    store = _new_store(tmp_path)
+    conv = FakeConverter()
+    clock = FixedClock("2026-09-27T09:00:00Z")
+    sha_t = _apply_session_ok(store, tmp_path, "opencode:s1", [_msg("m1")],
+                              clock=clock, conv=conv)
+    h1 = generate_ulid()
+    h_rec, h_sc = _handoff_parts(h1, "opencode:s1", sha_t, "m1")
+    assert apply_handoff(store, _dec(generate_ulid(), h_rec, h_sc), conv, clock).ok
+    # 另一個 Session 先把它認領走了 → 這一筆必然 already_claimed
+    other = _write_raw(tmp_path, "other.raw", [])
+    o_rec, o_sc = _reserving_claim_parts(generate_ulid(), h1, "opencode:other", other)
+    assert apply_claim(store, _dec(generate_ulid(), o_rec, o_sc, other[0]), clock).ok
+
+    reserved = _write_raw(tmp_path, "reserved2.raw", [])
+    key = generate_ulid()
+    c_rec, c_sc = _reserving_claim_parts(generate_ulid(), h1, "opencode:new2", reserved)
+    before = list(store.changed_paths())
+    r = apply_claim(store, _dec(key, c_rec, c_sc, reserved[0]), clock)
+
+    assert not r.ok and r.code == "already_claimed"
+    assert store.get_session("opencode:new2") is None, \
+        "被拒的認領不能留下預留下來的 session"
+    _only_rejection(store, r, key, before)
+
+
+def test_reserving_claim_without_a_raw_is_rejected(tmp_path: Path):
+    """預留宣稱了 raw 卻沒帶過來 → 明確拒收，不寫入。"""
+    store = _new_store(tmp_path)
+    conv = FakeConverter()
+    clock = FixedClock("2026-09-27T09:00:00Z")
+    sha_t = _apply_session_ok(store, tmp_path, "opencode:s1", [_msg("m1")],
+                              clock=clock, conv=conv)
+    h1 = generate_ulid()
+    h_rec, h_sc = _handoff_parts(h1, "opencode:s1", sha_t, "m1")
+    assert apply_handoff(store, _dec(generate_ulid(), h_rec, h_sc), conv, clock).ok
+
+    reserved = _write_raw(tmp_path, "reserved3.raw", [])
+    key = generate_ulid()
+    c_rec, c_sc = _reserving_claim_parts(generate_ulid(), h1, "opencode:new3", reserved)
+    before = list(store.changed_paths())
+    r = apply_claim(store, _dec(key, c_rec, c_sc, None), clock)
+
+    assert not r.ok and r.code == "invalid_format"
+    assert store.get_session("opencode:new3") is None
+    _only_rejection(store, r, key, before)
+
+
+def test_reserving_claim_must_reserve_the_claimer_itself(tmp_path: Path):
+    """預留的 session 必須**就是**那個 claimer：不能挾帶別的 session 的內容。"""
+    store = _new_store(tmp_path)
+    conv = FakeConverter()
+    clock = FixedClock("2026-09-27T09:00:00Z")
+    sha_t = _apply_session_ok(store, tmp_path, "opencode:s1", [_msg("m1")],
+                              clock=clock, conv=conv)
+    h1 = generate_ulid()
+    h_rec, h_sc = _handoff_parts(h1, "opencode:s1", sha_t, "m1")
+    assert apply_handoff(store, _dec(generate_ulid(), h_rec, h_sc), conv, clock).ok
+
+    reserved = _write_raw(tmp_path, "reserved4.raw", [])
+    key = generate_ulid()
+    c_rec, c_sc = _reserving_claim_parts(generate_ulid(), h1, "opencode:claimer", reserved)
+    # sidecar 說預留的是 opencode:someone_else，body 卻說 claimer 是 opencode:claimer
+    c_sc["session"]["source_session_id"] = "someone_else"
+    before = list(store.changed_paths())
+    r = apply_claim(store, _dec(key, c_rec, c_sc, reserved[0]), clock)
+
+    assert not r.ok and r.code == "invalid_format"
+    assert store.get_session("opencode:someone_else") is None
+    _only_rejection(store, r, key, before)
+
+
+def test_repeated_reserving_claim_is_idempotent(tmp_path: Path):
+    """H1：同一個 claim id 重送（`--resume`）→ 冪等，不會生出第二個 session。"""
+    store = _new_store(tmp_path)
+    conv = FakeConverter()
+    clock = FixedClock("2026-09-27T09:00:00Z")
+    sha_t = _apply_session_ok(store, tmp_path, "opencode:s1", [_msg("m1")],
+                              clock=clock, conv=conv)
+    h1 = generate_ulid()
+    h_rec, h_sc = _handoff_parts(h1, "opencode:s1", sha_t, "m1")
+    assert apply_handoff(store, _dec(generate_ulid(), h_rec, h_sc), conv, clock).ok
+
+    reserved = _write_raw(tmp_path, "reserved5.raw", [])
+    c_ulid = generate_ulid()
+    c_rec, c_sc = _reserving_claim_parts(c_ulid, h1, "opencode:new4", reserved)
+    r1 = apply_claim(store, _dec(generate_ulid(), c_rec, c_sc, reserved[0]), clock)
+    assert r1.ok and r1.code == "ok"
+
+    # --resume：同一個 claim id、同一個 item_key、同一份 raw
+    r2 = apply_claim(store, _dec(generate_ulid(), c_rec, c_sc, reserved[0]), clock)
+    assert r2.ok and r2.code == "already"
+    assert len(store.snapshots("opencode:new4")) == 1, "不該多出第二份快照"
 
 
 # ---------------------------------------------------------------------------

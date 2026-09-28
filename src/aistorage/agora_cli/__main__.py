@@ -93,20 +93,21 @@ def _reader_settings(args: argparse.Namespace) -> tuple[Any, Any, Any]:
 
 
 def _writer_deps(args: argparse.Namespace) -> tuple[CheckoutDeps, Any]:
-    """建立寫入端（簽章金鑰、收件匣、觸發提交流程）。沒有就明說。
+    """建立寫入端（簽章金鑰、收件匣、觸發提交流程、本機認領記錄）。沒有就明說。
 
     `commit_claim` **不上傳任何來源應用的 session**——新 session 這時還不存在
-    於任何來源應用裡，它的第一份快照是我們自己組的項目。所以這裡只把項目放進
-    收件匣、觸發提交流程、然後等認領在讀取介面裡變成 Link。
+    於任何來源應用裡，它的第一份（空的）快照是**認領單自己帶的預留**。所以這裡
+    只把認領放進收件匣、觸發提交流程、然後等認領在讀取介面裡變成 Link。
     """
+    from aistorage.agora_cli.claims import ClaimJournal
     from aistorage.syncer.__main__ import _deps
     from aistorage.syncer.config import SyncerConfig
 
     deps = _deps(SyncerConfig.load())
 
-    def commit(seed: Any, claims: list[Any], *, timeout: timedelta) -> Any:
+    def commit(claims: list[Any], *, timeout: timedelta) -> Any:
         return sync_and_commit(
-            session_ids=(), extra_items=[seed, *claims], deps=deps,
+            session_ids=(), extra_items=list(claims), deps=deps,
             timeout=timeout, progress=lambda _m: None,
         )
 
@@ -115,6 +116,7 @@ def _writer_deps(args: argparse.Namespace) -> tuple[CheckoutDeps, Any]:
             reader=None, clock=deps.clock, signer=deps.signer,
             inbox_folder_id=deps.inbox_folder_id, drive=deps.drive,
             commit_claim=commit,
+            journal=ClaimJournal(getattr(args, "claims_path", None)),
         ),
         deps,
     )
@@ -334,24 +336,28 @@ def _qualify(session_id: str) -> str:
 
 
 def cmd_handoff(args: argparse.Namespace, reader: Any) -> int:
-    """`agora handoff`：為每一份 `--task` 寫一張交接單。
+    """`agora handoff`：為每一份工作各寫一張交接單。
+
+    **每個 task 物件一張交接單**（review-73dbf2c H3）：plugin 把模型給的
+    `[{title, summary, next_steps}]` 原樣寫成一個 JSON 檔（`--tasks-file`），
+    這裡讀進來交給 `split`——一個物件一張單。舊的 `--task` 是**每個字串一張**
+    （給只有一句話的工作用），兩條路都留著。
 
     **只呼叫 skill 既有的 `split`／`handoff_end`**（它們自己會同步自己、算接續點、
     簽章、提交並等可見）。這裡不重寫交接單的組裝與接續點判定——那份邏輯有
     自己的測試與邊界（主 Session 限定、接續點必須是已完成的訊息、匯出檔重取…）。
+
+    輸入的檢查放在**載入設定之前**：給錯參數時要在碰設定檔與狀態之前就講清楚，
+    不要先因為找不到收件匣 folder id 而丟一個不相干的錯。
     """
     from aistorage.skill import tools
     from aistorage.skill.tools import SkillDeps
     from aistorage.syncer.__main__ import _deps
     from aistorage.syncer.config import SyncerConfig
 
-    deps = _deps(SyncerConfig.load())
-    skill_deps = SkillDeps(deps=deps, state=deps.state)
-    session_id = args.session or _main_session_id(deps)
-    parts = [{"title": t, "summary": t, "next_steps": args.next_steps}
-             for t in (args.task or [])]
+    parts = _handoff_parts(args)
     if not parts:
-        raise StartPointError("至少要給一個 --task（每一個 --task 是一張交接單）")
+        raise StartPointError("至少要給一個 task（每一個 task 是一張交接單）")
     if args.at:
         # 接續點由 `split` 依「最後一則已完成的訊息」決定；指定 --at 意味著要
         # 在別的位置交接，期 1 不支援——明確說清楚，不要靜靜忽略。
@@ -360,8 +366,39 @@ def cmd_handoff(args: argparse.Namespace, reader: Any) -> int:
             "（AGENTS.md 的接續點定義）。要從別的位置開始，請用 "
             "`agora checkout <session>@<訊息>` 直接從那裡起一個新 session。"
         )
+    deps = _deps(SyncerConfig.load())
+    skill_deps = SkillDeps(deps=deps, state=deps.state)
+    session_id = args.session or _main_session_id(deps)
     result = tools.split(skill_deps, session_id, parts, timeout=_lag(args.timeout))
     return _emit(result)
+
+
+def _handoff_parts(args: argparse.Namespace) -> list[dict]:
+    """`agora handoff` 的工作清單：`--tasks-file` 的物件一張單、`--task` 一字串一張。
+
+    兩者可以混著給（後者接在後面）。回傳的是**形狀已正規化**的 dict 清單，
+    `tools.split` 會再驗一次 title。
+    """
+    from aistorage.skill.tools import SkillError, normalize_parts
+
+    parts: list[dict] = []
+    path = getattr(args, "tasks_file", None)
+    if path:
+        raw = Path(path).read_text(encoding="utf-8")
+        try:
+            parsed = json.loads(raw)
+        except ValueError as e:
+            raise SkillError(f"--tasks-file 不是合法的 JSON: {e}") from None
+        try:
+            parts.extend(normalize_parts(parsed))
+        except SkillError as e:
+            raise SkillError(f"--tasks-file 的工作清單有問題: {e}") from None
+    for title in (args.task or []):
+        text = str(title).strip()
+        if text:
+            parts.append({"title": text, "summary": text,
+                          "next_steps": args.next_steps})
+    return parts
 
 
 def cmd_checkout(args: argparse.Namespace, reader: Any) -> int:
@@ -394,6 +431,7 @@ def _run_checkout(args: argparse.Namespace, reader: Any,
         max_lag=_lag(args.max_lag),
         max_context_chars=args.max_chars or DEFAULT_MAX_CONTEXT_CHARS,
         claim_timeout=_lag(args.claim_timeout) or timedelta(minutes=15),
+        resume=args.resume,
     )
     return {
         "package": str(Path(args.out) / "package.json"),
@@ -457,11 +495,15 @@ def build_parser() -> argparse.ArgumentParser:
     read.add_argument("--max-lag", dest="max_lag", default=None)
     read.set_defaults(func=cmd_read)
 
-    handoff = sub.add_parser("handoff", help="每個 --task 寫一張交接單並提交")
+    handoff = sub.add_parser("handoff", help="每個 task 一張交接單並提交")
     handoff.add_argument("session", nargs="?", default=None,
                          help="要交出的 Session（預設是本機主 Session）")
     handoff.add_argument("--at", default=None, help="（還沒支援）指定接續的訊息")
-    handoff.add_argument("--task", action="append", help="可重複；每個一張交接單")
+    handoff.add_argument("--task", action="append",
+                         help="一句話的工作；可重複，每個一張交接單")
+    handoff.add_argument("--tasks-file", dest="tasks_file", default=None,
+                         help="[{title, summary, next_steps}] 的 JSON 檔；"
+                              "每個物件一張交接單")
     handoff.add_argument("--next-steps", dest="next_steps", default=None)
     handoff.add_argument("--timeout", default=None)
     handoff.set_defaults(func=cmd_handoff)
@@ -480,6 +522,11 @@ def build_parser() -> argparse.ArgumentParser:
     co.add_argument("--max-lag", dest="max_lag", default=None)
     co.add_argument("--claim-timeout", dest="claim_timeout", default=None,
                     help="等認領被讀取介面確認的時間（預設 15m）")
+    co.add_argument("--resume", action="store_true",
+                    help="沿用本機記錄的同一個認領（認領逾時或行程中斷後重跑）")
+    co.add_argument("--claims-path", dest="claims_path", default=None,
+                    help="本機認領記錄路徑（預設 "
+                         "$AISTORAGE_CHECKOUT_CLAIMS 或 ~/.aistorage/checkout-claims.json）")
     co.set_defaults(func=cmd_checkout)
 
     return parser

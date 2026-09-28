@@ -226,30 +226,40 @@ def _make_signer(profile: str = PROFILE):
 
 
 class FakeCommit:
-    """假的「同步並提交」：記錄放上去的項目，結果由測試決定。"""
+    """假的「同步並提交」：記錄放上去的認領，結果由測試決定。"""
 
     def __init__(self, *, rejected: Sequence[tuple[str, str]] = (),
                  timed_out: bool = False) -> None:
         self.rejected = tuple(rejected)
         self.timed_out = timed_out
-        self.seeds: list[Any] = []
         self.claims: list[Any] = []
+        #: 送出當下每個認領的位元組（預留在 `checkout` 清掉暫存目錄之前要先讀）
+        self.claim_raws: list[bytes] = []
 
-    def __call__(self, seed: Any, claims: list[Any], *, timeout: Any) -> Any:
-        self.seeds.append(seed)
+    def __call__(self, claims: list[Any], *, timeout: Any) -> Any:
         self.claims.extend(claims)
+        for item in claims:
+            if item.raw_path is not None:
+                self.claim_raws.append(item.raw_path.read_bytes())
         return SimpleNamespace(
             rejected=self.rejected, timed_out=self.timed_out,
             summary=lambda: "0／0 有結果")
 
 
+def _journal(tmp_path: Path) -> Any:
+    from aistorage.agora_cli.claims import ClaimJournal
+
+    return ClaimJournal(tmp_path / "checkout-claims.json")
+
+
 def _deps(reader: FakeReader, commit: Any = None, *, profile: str = PROFILE,
-          objects: Any = None) -> CheckoutDeps:
+          objects: Any = None, journal: Any = None) -> CheckoutDeps:
     fetcher = objects if objects is not None else _objects(reader)
     return CheckoutDeps(
         reader=reader, clock=FixedClock(T1), signer=_make_signer(profile),
         inbox_folder_id="inbox-test", drive=None, objects=fetcher,
         commit_claim=commit if commit is not None else FakeCommit(),
+        journal=journal,
     )
 
 
@@ -486,17 +496,45 @@ def test_handoff_startpoint_registers_a_claim_before_producing_the_package(tmp_p
     assert claim_sidecar["body"]["handoff_id"] == HANDOFF
     # 認領者就是這個起點包預留的新 session（提交流程要求它先在 Agora 裡）
     assert claim_sidecar["body"]["claimer_session_id"] == pkg.new_session_id
-    # 新 session 的第一份快照與認領同一批（apply 的順序 session 在前）
-    assert len(commit.seeds) == 1
-    assert commit.seeds[0].sidecar["metadata"]["id"] == pkg.new_session_id
     data, _raws = read_package(out)
     assert data["new_session"]["claimed_handoffs"] == [HANDOFF]
     assert data["segments"][0]["handoff_id"] == HANDOFF
     assert data["segments"][0]["claim_id"] == commit.claims[0].item_id
 
 
+def test_the_new_session_is_reserved_as_an_empty_record_not_a_copy_of_the_source(
+        tmp_path: Path):
+    """H2：認領**預留**的是一個空的新 session，不是來源 session 的副本。
+
+    舊的作法是把來源 raw（截斷或沒截斷）當成新 session 的第一份快照送出去，於是
+    Agora 裡會出現一份掛在新 id 底下、內容與標題全是錯的紀錄；被拒時那份複製還會
+    變成沒有人接手的孤兒。預留現在是**零則訊息**的空匯出檔，而且被拒時不寫進去。
+    """
+    reader = _reader_with_handoff()
+    commit = FakeCommit()
+    out = tmp_path / "pkg"
+
+    pkg = checkout(reader, _deps(reader, commit), [HANDOFF], out)
+
+    claim = commit.claims[0]
+    assert claim.sidecar["session"]["source_session_id"] == \
+        pkg.new_session_id.split(":", 1)[1]
+    assert claim.sidecar["session"]["reserving"] is True
+    reserved = json.loads(commit.claim_raws[0])
+    assert reserved["messages"] == [], "預留必須是空的（不能帶別人的對話）"
+    assert reserved["info"]["id"] == pkg.new_session_id.split(":", 1)[1]
+    # 原始紀錄仍然**原封不動**放在起點包裡（那是開頭位元組相同的前提）
+    _data, raws = read_package(out)
+    assert raws[0] == _handoff_raw(reader), "起點包放的是來源 raw，不是預留"
+
+
+def _handoff_raw(reader: FakeReader) -> bytes:
+    entry = reader.handoffs[HANDOFF]
+    return reader.sessions[entry["target_session_id"]]["raw"]
+
+
 def test_rejected_claim_produces_no_package(tmp_path: Path):
-    """**被拒就不產出**：目錄不該被建立起來。"""
+    """**被拒就不產出**：目錄不該被建立起來（而且 Agora 裡也不該留下預留）。"""
     reader = _reader_with_handoff()
     commit = FakeCommit(rejected=[(SimpleNamespace(kind="claim",
                                                     target="claim:01X"), "already_claimed")])
@@ -508,16 +546,104 @@ def test_rejected_claim_produces_no_package(tmp_path: Path):
     assert "already_claimed" in str(excinfo.value)
     assert "沒有產出起點包" in str(excinfo.value)
     assert not out.exists(), "被拒時目錄不該被建立"
+    assert not out.with_name(f".{out.name}.staging").exists(), \
+        "被拒時暫存目錄要清掉"
 
 
-def test_claim_timeout_produces_no_package(tmp_path: Path):
-    """等不到確認也不產出（寧可不要開工，也不要沒有 Link 的孤兒 session）。"""
+def test_claim_timeout_keeps_the_local_record_so_a_rerun_can_resume(tmp_path: Path):
+    """逾時**不等於被拒**：本機記錄要留著，讓 `--resume` 沿用同一個認領。"""
     reader = _reader_with_handoff()
+    journal = _journal(tmp_path)
     commit = FakeCommit(timed_out=True)
     out = tmp_path / "pkg"
-    with pytest.raises(ClaimRejected):
-        checkout(reader, _deps(reader, commit), [HANDOFF], out)
+
+    with pytest.raises(ClaimRejected) as excinfo:
+        checkout(reader, _deps(reader, commit, journal=journal), [HANDOFF], out)
+
+    assert "--resume" in str(excinfo.value)
     assert not out.exists()
+    record = journal.get(HANDOFF)
+    assert record is not None, "逾時要留記錄，否則重跑認不回來"
+    assert record.claim_id == commit.claims[0].item_id
+
+
+def test_resume_reuses_the_same_claim_and_the_same_new_session(tmp_path: Path):
+    """`--resume`：同一個 claim id、同一個 item_key、同一份預留位元組。
+
+    交接單只能被認領一次，所以重跑若換一個新的認領 id，只會得到 `already_claimed`
+    而那張單永遠沒有 session 接手。提交流程把重複的 claim id 當成完成，所以
+    重送同一個 item 是冪等的。
+    """
+    reader = _reader_with_handoff()
+    journal = _journal(tmp_path)
+    out = tmp_path / "pkg"
+    first_commit = FakeCommit(timed_out=True)
+    with pytest.raises(ClaimRejected):
+        checkout(reader, _deps(reader, first_commit, journal=journal),
+                 [HANDOFF], out, new_session_id=S2)
+
+    second_commit = FakeCommit()
+    pkg = checkout(reader, _deps(reader, second_commit, journal=journal),
+                   [HANDOFF], out, new_session_id=S2, resume=True)
+
+    assert pkg.new_session_id == S2
+    assert second_commit.claims[0].item_id == first_commit.claims[0].item_id
+    assert (second_commit.claims[0].sidecar_bytes
+            == first_commit.claims[0].sidecar_bytes), \
+        "重跑必須產生位元組相同的項目，否則清冊會判成 replayed_item_key"
+
+
+def test_resume_without_a_local_record_is_refused(tmp_path: Path):
+    """`--resume` 找不到記錄就明確拒絕，不要假裝沿用（換 id 只會 already_claimed）。"""
+    reader = _reader_with_handoff()
+    with pytest.raises(CheckoutError) as excinfo:
+        checkout(reader, _deps(reader, journal=_journal(tmp_path)), [HANDOFF],
+                 tmp_path / "pkg", new_session_id=S2, resume=True)
+    assert "--resume" in str(excinfo.value)
+    assert not (tmp_path / "pkg").exists()
+
+
+def test_rejected_claim_forgets_the_local_record(tmp_path: Path):
+    """被明確拒收時刪掉記錄：那張單已經不是這次 checkout 的了。"""
+    reader = _reader_with_handoff()
+    journal = _journal(tmp_path)
+    commit = FakeCommit(rejected=[(SimpleNamespace(kind="claim", target="claim:01X"),
+                                  "already_claimed")])
+    with pytest.raises(ClaimRejected):
+        checkout(reader, _deps(reader, commit, journal=journal), [HANDOFF],
+                 tmp_path / "pkg")
+    assert journal.get(HANDOFF) is None
+
+
+def test_local_checks_happen_before_the_claim_is_registered(tmp_path: Path):
+    """H1：輸出目錄不對時**一個認領都不該送出**（否則交接單卡死）。"""
+    reader = _reader_with_handoff()
+    commit = FakeCommit()
+    out = tmp_path / "pkg"
+    out.mkdir()
+    (out / "keep.txt").write_text("x")
+
+    with pytest.raises(ContextPackageError) as excinfo:
+        checkout(reader, _deps(reader, commit), [HANDOFF], out)
+
+    assert "不會覆蓋" in str(excinfo.value)
+    assert commit.claims == [], "本機檢查沒過就不該動到那張交接單"
+
+
+def test_unreadable_object_is_detected_before_the_claim(tmp_path: Path):
+    """物件讀不到（同 key 但位元組不符）也要在認領之前擋下。"""
+    raw = _handoff_raw(_reader_with_handoff())
+    tampered = bytearray(raw)
+    tampered[-2] = (tampered[-2] + 1) % 256
+    reader = _reader_with_handoff()
+    fetcher = _objects(reader, tamper={annex_key_of(raw): bytes(tampered)})
+    commit = FakeCommit()
+
+    with pytest.raises(CheckoutError):
+        checkout(reader, _deps(reader, commit, objects=fetcher), [HANDOFF],
+                 tmp_path / "pkg")
+
+    assert commit.claims == []
 
 
 def test_handoff_startpoint_without_writer_identity_is_refused(tmp_path: Path):
@@ -538,7 +664,7 @@ def test_plain_session_startpoint_needs_no_claim(tmp_path: Path):
     reader = FakeReader({S1: {"raw": raw, "texts": ["一", "二"]}})
     commit = FakeCommit()
     checkout(reader, _deps(reader, commit), [S1], tmp_path / "pkg")
-    assert commit.claims == [] and commit.seeds == []
+    assert commit.claims == []
 
 
 # ---------------------------------------------------------------------------
@@ -968,3 +1094,118 @@ def test_checkout_and_load_replay_a_byte_identical_prefix(tmp_path: Path):
     # 工具呼叫的 callID 保留原值（重播時位元組相同的原因）
     assert [p.get("callID") for m in export["messages"] for p in m["parts"]
             if p.get("type") == "tool"] == ["call_function_aaa", "call_function_bbb"]
+
+
+# --- `agora handoff` 的工作清單：每個 task 物件一張交接單 -------------------
+# plugin 把模型給的 tasks 原樣寫成一個 JSON 檔再傳 `--tasks-file`
+# （review-73dbf2c H3）。這裡測的是 CLI 端那半邊：一個物件不能被攤平成
+# 好幾張單——那是 H3 的原始病灶。
+
+
+def _handoff_args(**kw: Any) -> SimpleNamespace:
+    base = {
+        "session": None,
+        "task": [],
+        "tasks_file": None,
+        "next_steps": None,
+        "at": None,
+        "timeout": None,
+    }
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def _tasks_file(tmp_path: Path, payload: Any) -> str:
+    path = tmp_path / "tasks.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+def test_handoff_turns_each_task_object_into_one_part(tmp_path: Path) -> None:
+    from aistorage.agora_cli.__main__ import _handoff_parts
+
+    path = _tasks_file(tmp_path, [
+        {"title": "做前端", "summary": "改元件", "next_steps": "跑測試"},
+        {"title": "做後端", "summary": "改 API", "next_steps": "補文件"},
+    ])
+    parts = _handoff_parts(_handoff_args(tasks_file=path))
+    assert [p["title"] for p in parts] == ["做前端", "做後端"]
+    assert [p["summary"] for p in parts] == ["改元件", "改 API"]
+    assert [p["next_steps"] for p in parts] == ["跑測試", "補文件"]
+
+
+def test_handoff_keeps_a_single_task_object_as_a_single_part(tmp_path: Path) -> None:
+    """一個物件只值一張單——H3 的病灶就是把它拆成好幾張。"""
+    from aistorage.agora_cli.__main__ import _handoff_parts
+
+    path = _tasks_file(tmp_path, [
+        {"title": "核對 schema", "summary": "比欄位", "next_steps": "列出落差"},
+    ])
+    assert len(_handoff_parts(_handoff_args(tasks_file=path))) == 1
+
+
+def test_handoff_keeps_every_field_of_the_task_object(tmp_path: Path) -> None:
+    """`next_steps` 帶多行時要原樣保留，不能被 join 或截斷。"""
+    from aistorage.agora_cli.__main__ import _handoff_parts
+
+    steps = "1. 先跑測試\n2. 再看 log"
+    path = _tasks_file(tmp_path, [{"title": "查案", "summary": "看 log", "next_steps": steps}])
+    parts = _handoff_parts(_handoff_args(tasks_file=path))
+    assert parts[0]["next_steps"] == steps
+
+
+def test_handoff_task_string_is_still_one_part_each() -> None:
+    """舊的 `--task` 是每個字串一張，兩條路要能混著給。"""
+    from aistorage.agora_cli.__main__ import _handoff_parts
+
+    parts = _handoff_parts(_handoff_args(
+        task=["做前端", "做後端"], next_steps="跑測試"))
+    assert [p["title"] for p in parts] == ["做前端", "做後端"]
+    assert all(p["summary"] == t for p, t in zip(parts, ["做前端", "做後端"]))
+    assert all(p["next_steps"] == "跑測試" for p in parts)
+
+
+def test_handoff_mixes_tasks_file_and_task_strings(tmp_path: Path) -> None:
+    from aistorage.agora_cli.__main__ import _handoff_parts
+
+    path = _tasks_file(tmp_path, [{"title": "做前端", "summary": "改元件"}])
+    parts = _handoff_parts(_handoff_args(tasks_file=path, task=["做後端"]))
+    assert [p["title"] for p in parts] == ["做前端", "做後端"]
+
+
+def test_handoff_rejects_a_tasks_file_that_is_not_json(tmp_path: Path) -> None:
+    from aistorage.agora_cli.__main__ import _handoff_parts
+    from aistorage.skill.tools import SkillError
+
+    path = tmp_path / "tasks.json"
+    path.write_text("這不是 JSON", encoding="utf-8")
+    with pytest.raises(SkillError, match="不是合法的 JSON"):
+        _handoff_parts(_handoff_args(tasks_file=str(path)))
+
+
+def test_handoff_rejects_a_tasks_file_of_an_unknown_shape(tmp_path: Path) -> None:
+    """形狀看不懂要在這裡擋下，並把是哪個檔案講清楚。"""
+    from aistorage.agora_cli.__main__ import _handoff_parts
+    from aistorage.skill.tools import SkillError
+
+    path = _tasks_file(tmp_path, {"foo": 1})
+    with pytest.raises(SkillError, match="工作清單有問題"):
+        _handoff_parts(_handoff_args(tasks_file=path))
+
+
+def test_handoff_with_nothing_to_do_is_refused() -> None:
+    """沒有工作就別寫出一張空白的交接單。"""
+    from aistorage.agora_cli.__main__ import cmd_handoff
+    from aistorage.agora_cli.startpoint import StartPointError
+
+    with pytest.raises(StartPointError, match="至少要給一個 task"):
+        cmd_handoff(_handoff_args(), reader=None)
+
+
+def test_handoff_still_refuses_an_explicit_at() -> None:
+    """`--at` 還沒支援，但要明確說清楚，不要靜靜忽略。"""
+    from aistorage.agora_cli.__main__ import cmd_handoff
+    from aistorage.agora_cli.startpoint import StartPointError
+
+    with pytest.raises(StartPointError, match="--at"):
+        cmd_handoff(_handoff_args(task=["做前端"], at="msg_1"), reader=None)

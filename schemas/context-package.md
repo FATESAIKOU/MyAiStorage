@@ -4,7 +4,7 @@
 
 ## 它是什麼
 
-一個**目錄**，`agora checkout <起點>… [--task "…"] -o <目錄>` 產出：
+一個**目錄**，`agora checkout <起點>… [--task "…"] [--resume] -o <目錄>` 產出：
 
 ```
 <目錄>/
@@ -52,7 +52,7 @@ thinking 段落。同一個 agent 接續時要的是「新 session 送給模型�
 | `segments[]` | 要帶進新 session 的片段，**陣列順序就是送進模型的順序** |
 | `segments[].message_id` | 接續點：截到哪一則為止（含該則）。`null` 代表不截斷 |
 | `segments[].raw_file` / `raw_size` / `raw_sha256` | 原始紀錄本體的路徑與指紋；`raw_sha256` 必須等於 `snapshot_sha256` |
-| `new_session.session_id` | 為這個起點**預留**的新 Session id |
+| `new_session.session_id` | 為這個起點**預留**的新 Session id（認領單裡帶著它，轉接器必須沿用） |
 | `new_session.claimed_handoffs` | 這次已放進收件匣並被讀取介面確認的認領 |
 | `totals` | 片段數、訊息數、原始紀錄位元組、純文字字元數 |
 | `context_limit` | 上限、計量單位、是否在上限內 |
@@ -78,7 +78,7 @@ n→1（統合）時，呼叫端給的次序不代表什麼，所以 `agora chec
 而且**一定是 true**——留在檔案裡是為了讓載入端不必再猜。ADR 0010 說得很直接：
 期 1 先偵測並明確拒絕，不默默截斷。
 
-### 3. 認領：先認領、後產出
+### 3. 認領：先認領、後產出；重跑要沿用同一個認領
 
 起點是交接單時，`agora checkout` 會把一筆認領放進收件匣，並等讀取介面確認
 （照同步並提交的規則：等每一個項目看得到或有拒收原因）。
@@ -86,10 +86,28 @@ n→1（統合）時，呼叫端給的次序不代表什麼，所以 `agora chec
 **被拒就不產出起點包**，目錄不會被建立。理由：接續 Link 屬於自己之後才開工
 （AGENTS.md 的「認領」），一個沒有 Link 的新 session 是孤兒。
 
-為什麼一個新 session 的認領能被接受：提交流程要求「認領者必須已經在 Agora 裡」，
-所以 `agora checkout` 會把新 session 的第一份快照（`new_session.session_id`
-那一個空 session 的匯出檔）與認領**同一批**提交，`apply` 的順序是 session 在前。
-`new_session.session_id` 必須是轉接器匯入時會用的那個 id，所以轉接器不能自己編。
+為什麼認領會被接受：提交流程要求「認領者必須已經在 Agora 裡」，而新 session 這時
+還不存在於任何來源應用裡。所以**那一筆認領自己帶著新 session 的預留**——一個
+**零則訊息**的空匯出檔：
+
+- **不是**來源 session 的截斷副本。舊的作法是把來源 raw 當成新 session 的第一份
+  快照送出去，於是 Agora 裡會出現一份掛在新 id 底下、內容與標題全是錯的紀錄；被拒
+  時那份複製還會變成沒有人接手的孤兒。
+- 預留在 `apply_claim` 的**寫入階段**才落進真本，所以被拒時 Agora 裡**什麼都沒
+  多**——連那個空紀錄都沒有。
+- 寫入順序是 預留 → link → handoff → claim。
+- `new_session.session_id` 必須是轉接器匯入時會用的那個 id，所以轉接器不能自己編。
+
+**逾時要重跑時請加 `--resume`**。交接單只能被認領一次，所以重跑若換一個新的
+claim id，只會得到 `already_claimed`，而那張單永遠沒有 session 接手。`agora checkout`
+在送出之前就把這次的 claim id、item_key、預留時間與新 session id 寫進**本機認領
+記錄**（`$AISTORAGE_CHECKOUT_CLAIMS` 或 `~/.aistorage/checkout-claims.json`）；`--resume`
+沿用它們，所以提交流程會把重送的那一筆當成同一個 item（冪等）。認領被**明確拒收**
+時記錄會被刪掉（那張單已經不是這次 checkout 的了）。
+
+**所有本機檢查都在登記認領之前完成**：輸出目錄可寫而且是空的、每段 raw 的 SHA-256
+等於快照雜湊、Agora 的物件讀得到。任一項失敗就停下——那時這張交接單還沒被動過。
+反過來說，認領之後只剩下寫 `package.json` 與一次改名。
 
 ## 轉接器要做的（以 opencode 為例）
 
