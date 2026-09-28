@@ -41,6 +41,7 @@ class FoundryStore:
         git: AnnexGit | None = None,
         temp_dir: Path | str | None = None,
         largefiles: str | None = None,
+        configure_annex: bool = True,
     ) -> None:
         self.worktree = Path(worktree).resolve()
         self.git = git
@@ -54,7 +55,11 @@ class FoundryStore:
             self._temp_dir = Path(tempfile.mkdtemp(prefix="aistorage_foundry_temp_"))
         self._changed_paths: list[str] = []
         self._keys: set[str] = set()
-        self._ensure_largefiles_config()
+        # `configure_annex=False`：給單元測試用假 AnnexGit 的情境（沒有真的 git
+        # repo 就不可能設定 annex.largefiles；提交流程在測試時會注入
+        # raw_storage_factory，那時也代表 git 是假的）。
+        if configure_annex:
+            self._ensure_largefiles_config()
 
     def _ensure_largefiles_config(self) -> None:
         """設定 annex.largefiles（F-H2）。
@@ -105,6 +110,14 @@ class FoundryStore:
         """寫入產出目錄紀錄 catalog/<ULID>.json。"""
         relpath = layout.catalog_path(ulid)
         return self.put_json(relpath, data)
+
+    def annex_keys(self) -> frozenset[str]:
+        """真本中所有收容產出的 annex key 集合（與 AgoraStore.annex_keys 同介面）。"""
+        return frozenset(self._keys)
+
+    def changed_paths(self) -> list[str]:
+        """取得此次所有新增或修改的相對路徑（與 AgoraStore 同介面）。"""
+        return list(self._changed_paths)
 
     def get_catalog(self, ulid: str) -> dict[str, Any] | None:
         """讀取特定產出紀錄 catalog/<ULID>.json。"""

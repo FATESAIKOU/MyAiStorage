@@ -87,10 +87,14 @@ class MemoryPinStore(PinStore):
         initial_pending: PinPending | None = None,
         *,
         texts: dict[str, str] | None = None,
+        initial_states_extra: dict[str, PinState] | None = None,
     ) -> None:
         self._states: dict[str, PinState] = {}
         self._pendings: dict[str, PinPending] = {}
         self._texts: dict[str, str] = dict(texts or {})
+        # 多 repo（Agora／Foundry 各一個釘選值條目，group5-7 第 6.1 節）
+        for name, st in (initial_states_extra or {}).items():
+            self._states[name] = st
         if initial_state:
             self._states[initial_state.repo] = initial_state
         if initial_pending:

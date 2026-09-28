@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from aistorage.agora.store import AgoraStore, FakeRawStorage
 from aistorage.annex.fake import FakeAnnexGit, create_fake_git_bundle
 from aistorage.clock import FixedClock
 from aistorage.committer.config import CommitterConfig
@@ -130,6 +131,9 @@ def _env(
         converters={"opencode": SimpleTestConverter()},
         publisher=publisher or NullPublisher(),
         clock=clock,
+        # FakeAnnexGit 做不了 annex 物件庫，單元測試一律注入 FakeRawStorage
+        # （正式預設是 AnnexRawStorage，見 run.py 第 7 步）
+        raw_storage_factory=lambda _w, _g: FakeRawStorage(),
     )
     cfg = CommitterConfig(
         repo="agora",

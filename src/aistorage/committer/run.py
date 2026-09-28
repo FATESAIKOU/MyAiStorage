@@ -43,7 +43,7 @@ from aistorage.annex.fake import FakeAnnexGit
 from aistorage.annex.git import AnnexGit, SubprocessAnnexGit
 from aistorage.annex.manifest import parse_manifest
 from aistorage.clock import Clock, format_rfc3339
-from aistorage.committer.config import CommitterConfig
+from aistorage.committer.config import CommitterConfig, RepoConfig
 from aistorage.committer.publish import NullPublisher, ReadViewPublisher
 from aistorage.converters import CONVERTERS, get_converter
 from aistorage.converters.base import Converter
@@ -89,6 +89,7 @@ from aistorage.intake.evaluate import (
     sort_accepted_decisions,
 )
 from aistorage.intake.ledger import Ledger
+from aistorage.foundry.apply import apply_artifact
 from aistorage.intake.scan import count_shaped, scan_inboxes
 from aistorage.publish.publisher import load_manifest
 from aistorage.publish.rejections import collect_rejections
@@ -130,6 +131,8 @@ class RunReport:
     publish_error: str | None = None
     #: 管理操作進行中：active（有維護旗標）／flag_corrupt（旗標損毀，fail-closed）
     maintenance: str | None = None
+    #: 為什麼沒有處理 Foundry：no_artifacts（收件匣沒有 artifact，依 PM 決定 9 不 clone）
+    foundry_skipped: str | None = None
     #: 維護旗標的原因字串（管理者留下的，會出現在 log，所以只印短字串）
     maintenance_reason: str | None = None
 
@@ -165,6 +168,98 @@ JUNK_RETENTION = timedelta(hours=24)
 #: traceback 除錯檔的輸出目錄（review-g3g L：只寫檔，不進 Actions log）。
 DEBUG_DIR_ENV = "AISTORAGE_DEBUG_DIR"
 DEFAULT_DEBUG_DIR = "debug"
+
+
+def _publish_foundry(
+    target: RepoTarget,
+    deps: Deps,
+    store: Any,
+    state: PinState | None,
+    workdir: Path,
+    dry_run: bool,
+) -> str:
+    """Foundry 讀取視圖發佈（第 13 步的 Foundry 版本，group5-7 第 6.3 節）。
+
+    讀取介面以 **Drive file id** 取收容產出（D5），所以索引裡必須先有
+    `object_file_id`：`resolve_object_file_ids` 以前綴列舉比對 `name == annex_key`，
+    並擋掉不在正式 pin 的 key。對不上（`object_not_found`／`checksum_mismatch`／
+    `size_mismatch`／`key_not_in_pin`）的那幾筆**不發佈**，只回報計數。
+    """
+    from aistorage.foundry.index import (
+        ArtifactRow,
+        FoundryIndexMeta,
+        build_foundry_index,
+        resolve_object_file_ids,
+    )
+
+    if not target.readview_folder_id:
+        return "skipped_no_readview"
+    if store is None:
+        return "skipped_no_store"
+
+    rows: list[ArtifactRow] = []
+    for cat in store.list_catalog():
+        meta = cat.get("metadata") or {}
+        body = cat.get("body") or {}
+        rows.append(
+            ArtifactRow(
+                artifact_id=str(meta.get("id") or ""),
+                kind=str(body.get("kind") or "link"),
+                name=str(body.get("name") or ""),
+                producer=str(meta.get("producer") or ""),
+                produced_by_session_id=str(body.get("produced_by_session_id") or ""),
+                created_at=str(meta.get("created_at") or ""),
+                updated_at=str(meta.get("updated_at") or ""),
+                content_type=body.get("content_type"),
+                case_id=meta.get("case_id"),
+                size=body.get("size"),
+                sha256=body.get("sha256"),
+                annex_key=body.get("object_key"),
+                repo=body.get("repo"),
+                path=body.get("path"),
+                link=body.get("link"),
+            )
+        )
+
+    publishable, issues = resolve_object_file_ids(
+        rows,
+        drive=deps.drive,
+        prefix_folder_id=target.prefix_folder_id,
+        allowed_keys=state.annex_keys if state is not None else None,
+    )
+    generation = int(deps.clock.now().timestamp())
+    index_path = Path(workdir) / "foundry-index.json"
+    build_foundry_index(
+        index_path,
+        artifacts=publishable,
+        rejections=collect_rejections(store, []),
+        meta=FoundryIndexMeta(
+            generation=generation,
+            built_at=format_rfc3339(deps.clock.now()),
+            foundry_main_sha=(state.refs.get("refs/heads/main", "") if state else ""),
+        ),
+    )
+    if dry_run:
+        return "planned"
+    deps.drive.create(
+        target.readview_folder_id,
+        f"foundry-index-{generation}.json",
+        index_path.read_bytes(),
+        mime_type="application/json",
+    )
+    # 對不上的那幾筆不發佈，但要把數量講出來（review F-H3）
+    return "published" if not issues else f"published_partial({len(issues)})"
+
+
+def _pipeline_step(current_step: str, ctx: PipelineContext | None) -> str:
+    """多 repo 時，中止點要標成「哪個 repo 的哪一步」。
+
+    pipeline 內部用 `ctx.step` 記錄進度（RepoPipeline 只能看到自己的 ctx），
+    所以例外發生時以它為準；還沒進 pipeline 就失敗時退回外層的 current_step。
+    """
+    if ctx is not None and ctx.step and ctx.step != "pipeline":
+        return ctx.step if not ctx.prefix else f"{ctx.prefix}{ctx.step}"
+    return current_step
 
 
 def _check_maintenance(cfg: CommitterConfig, deps: Deps, report: RunReport) -> bool:
@@ -470,6 +565,673 @@ def init_pin_cli(
     return state
 
 
+@dataclass(frozen=True)
+class RepoTarget:
+    """一輪要處理的一個真本（Agora／Foundry）。
+
+    欄位名稱刻意與 `CommitterConfig` 相同，讓 pipeline 內部的程式碼不必分叉；
+    差別在 `element`（決定分派與發佈方式）與 `largefiles`（annex 收檔規則）。
+    """
+
+    element: str  # "agora" | "foundry"
+    repo: str
+    repo_uuid: str
+    repo_url: str
+    prefix_folder_id: str
+    quarantine_folder_id: str
+    readview_folder_id: str | None = None
+    readview_manifest_file_id: str | None = None
+    readview_rebuild_epoch: int = 0
+    largefiles: str | None = None
+    # 以下沿用 CommitterConfig 的名稱與預設值
+    max_git_bundles: int = 20
+    max_gc_per_run: int = 200
+    max_raw_size: int = 52428800
+    quarantine_retention_days: int = 7
+    prefix_levels: tuple[PrefixLevel, ...] = ()
+    identity_registry_path: str = ""
+    pin_repo_url: str = ""
+
+    @classmethod
+    def from_config(cls, cfg: CommitterConfig) -> RepoTarget:
+        """Agora：由上層設定檔欄位組出。"""
+        return cls(
+            element="agora",
+            repo=cfg.repo,
+            repo_uuid=cfg.repo_uuid,
+            repo_url=cfg.repo_url,
+            prefix_folder_id=cfg.prefix_folder_id,
+            quarantine_folder_id=cfg.quarantine_folder_id,
+            readview_folder_id=cfg.readview_folder_id,
+            readview_manifest_file_id=cfg.readview_manifest_file_id,
+            readview_rebuild_epoch=cfg.readview_rebuild_epoch,
+            max_git_bundles=cfg.max_git_bundles,
+            max_gc_per_run=cfg.max_gc_per_run,
+            max_raw_size=cfg.max_raw_size,
+            quarantine_retention_days=cfg.quarantine_retention_days,
+            prefix_levels=cfg.prefix_levels,
+            identity_registry_path=cfg.identity_registry_path,
+            pin_repo_url=cfg.pin_repo_url,
+        )
+
+    @classmethod
+    def from_repo_config(cls, cfg: CommitterConfig, rc: RepoConfig) -> RepoTarget:
+        """Foundry（或之後的第三個 repo）：由 `repos` 區塊組出，繼承共用設定。"""
+        return cls(
+            element=rc.name,
+            repo=rc.name,
+            repo_uuid=rc.uuid,
+            repo_url=rc.url,
+            prefix_folder_id=rc.prefix_folder_id,
+            quarantine_folder_id=rc.quarantine_folder_id,
+            readview_folder_id=rc.readview_folder_id,
+            readview_manifest_file_id=rc.readview_manifest_file_id,
+            readview_rebuild_epoch=rc.readview_rebuild_epoch,
+            largefiles=rc.largefiles,
+            max_git_bundles=cfg.max_git_bundles,
+            max_gc_per_run=cfg.max_gc_per_run,
+            max_raw_size=cfg.max_raw_size,
+            quarantine_retention_days=cfg.quarantine_retention_days,
+            prefix_levels=cfg.prefix_levels,
+            identity_registry_path=cfg.identity_registry_path,
+            pin_repo_url=cfg.pin_repo_url,
+        )
+
+
+@dataclass
+class RepoRunResult:
+    """單一 repo 這一輪的結果（第 14 步清收件匣需要）。"""
+
+    target: RepoTarget
+    decisions: list[Decision]
+    applied_accepted: list[Decision]
+    store: Any
+    state: PinState | None = None
+
+
+@dataclass
+class PipelineContext:
+    """一輪共用的輸入與報告累加器（多 repo 時每個 repo 各自呼叫一次 pipeline）。"""
+
+    cfg: CommitterConfig
+    deps: Deps
+    report: RunReport
+    scan: Any
+    run_id: str
+    base_temp: Path
+    dry_run: bool
+    content_cache: dict[Any, Any]
+    step: str = "pipeline"
+    prefix: str = ""  #: 非 agora 的 repo 在計數／耗時的鍵前加前綴，避免互相覆蓋
+
+    def bump(self, key: str, value: int) -> None:
+        name = f"{self.prefix}{key}" if self.prefix else key
+        self.report.counts[name] = self.report.counts.get(name, 0) + int(value)
+
+    def time(self, key: str, ms: int) -> None:
+        name = f"{self.prefix}{key}" if self.prefix else key
+        self.report.durations_ms[name] = self.report.durations_ms.get(name, 0) + int(ms)
+
+    def set_field(self, field: str, value: Any) -> None:
+        name = f"{self.prefix}{field}" if self.prefix else field
+        setattr(self.report, name, value)
+
+    def items_for(self, target: RepoTarget) -> list[Any]:
+        """這個 repo 該評估哪些收件匣項目（依型態分派）。"""
+        out = []
+        for item in self.scan.items:
+            item_type = ""
+            for sc in item.sidecars or ():
+                if sc.name.endswith(".sidecar.json"):
+                    item_type = _item_type_of(sc, self.deps.drive)
+                    break
+            if target.element == "foundry":
+                if item_type == "artifact":
+                    out.append(item)
+            elif item_type != "artifact":
+                out.append(item)
+        return out
+
+
+def _item_type_of(sidecar_file: Any, drive: DriveClient) -> str:
+    """讀 sidecar 的 metadata.type（只為分派；壞掉就當未知，交給 evaluate 處理）。"""
+    try:
+        data = json.loads(
+            drive.download_bytes(sidecar_file.id, max_bytes=1 << 20).decode("utf-8")
+        )
+        return str((data.get("metadata") or {}).get("type") or "")
+    except Exception:
+        return ""
+
+
+def eval_store_for_ledger(store: Any, target: RepoTarget) -> Any:
+    """Ledger 需要 `worktree` 與 `append_line`；FoundryStore 兩者都沒有同名方法。"""
+    return store if target.element == "agora" else _FoundryEvaluateStore(store)
+
+
+class _FoundryEvaluateStore:
+    """給 evaluate 用的最小 store 介面（Foundry 的「既有紀錄」是產出目錄）。
+
+    evaluate 只會讀 `store.get_record()` 與 `store.worktree`，Ledger 會用
+    `store.append_line()`；這裡把 FoundryStore 轉成那幾個方法，避免把 Agora 的
+    紀錄語意硬套到 Foundry 上。
+    """
+
+    def __init__(self, foundry_store: Any) -> None:
+        self._store = foundry_store
+
+    @property
+    def worktree(self) -> Path:
+        return self._store.worktree
+
+    def get_record(self, item_id: str) -> dict[str, Any] | None:
+        ulid = item_id.rsplit(":", 1)[-1]
+        try:
+            return self._store.get_catalog(ulid)
+        except Exception:
+            return None
+
+    def append_line(self, rel_path: str, line: str) -> None:
+        """Ledger 是 jsonl：直接附加到工作樹的檔案，並記為已變更路徑。"""
+        dest = self._store.worktree / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "a", encoding="utf-8") as f:
+            f.write(line if line.endswith("\n") else line + "\n")
+        changed = getattr(self._store, "_changed_paths", None)
+        if isinstance(changed, list):
+            changed.append(rel_path)
+
+    def put_json(self, rel_path: str, obj: Any) -> str:
+        return self._store.put_json(rel_path, obj)
+
+
+def _run_repo_pipeline(
+    ctx: PipelineContext,
+    target: RepoTarget,
+    *,
+    agora_store: Any = None,
+) -> RepoRunResult:
+    """第 3〜13 步：對單一真本跑一輪（settle → sweep → clone → apply → push → 轉正 → 發佈）。
+
+    多 repo 時依序呼叫：Agora 先（Foundry 的 `produced_by_session_id` 檢查要讀 Agora
+    的工作樹），Foundry 後。收件匣是共用的，依型態分派（見 `PipelineContext.items_for`）。
+    """
+    rcfg = target  # 欄位名稱與 CommitterConfig 相同，直接用
+    work_temp = ctx.base_temp / f"work_{target.element}"
+    store_temp = ctx.base_temp / f"store_{target.element}"
+    work_temp.mkdir(parents=True, exist_ok=True)
+    store_temp.mkdir(parents=True, exist_ok=True)
+    git_dir = ctx.base_temp / f"repo_{target.element}"
+    deps = ctx.deps
+    report = ctx.report
+    dry_run = ctx.dry_run
+    run_id = ctx.run_id
+    scan = ctx.scan
+    content_cache = ctx.content_cache
+    content_cache.clear()
+    foundry_store = None
+    # ---------------------------------------------------------
+    # 第 3 步：integrity.settle 結算待定釘選值
+    # ---------------------------------------------------------
+    ctx.step = "integrity.settle"
+    t0 = time.monotonic()
+    children = deps.drive.list_children(rcfg.prefix_folder_id)
+    files = tuple(f for f in children if not f.is_folder)
+    subfolders = tuple(f for f in children if f.is_folder)
+    repo_listing = RepoListing(
+        prefix_folder_id=rcfg.prefix_folder_id,
+        files=files,
+        subfolders=subfolders,
+    )
+
+    state, pending = deps.pins.load(rcfg.repo)
+    settle_outcome, settled_state = settle(
+        state,
+        pending,
+        repo_listing,
+        deps.drive,
+        workdir=work_temp,
+        clock=deps.clock,
+    )
+
+    if not dry_run:
+        if settle_outcome == SettleOutcome.PROMOTED:
+            deps.pins.promote(settled_state)
+        elif settle_outcome in (SettleOutcome.DROPPED, SettleOutcome.BAK_RECOVERY):
+            deps.pins.drop_pending(rcfg.repo)
+
+    state = settled_state
+    ctx.time("integrity.settle", int((time.monotonic() - t0) * 1000))
+
+    # ---------------------------------------------------------
+    # 第 4 步：integrity.sweep 清掃前綴資料夾
+    # ---------------------------------------------------------
+    ctx.step = "integrity.sweep"
+    t0 = time.monotonic()
+    parent_decisions: list[SweepDecision] = []
+    if rcfg.prefix_levels:
+        parent_decisions = check_parents(list(rcfg.prefix_levels), deps.drive)
+
+    sweep_decisions = plan_sweep(
+        repo_listing,
+        state,
+        repo_uuid=rcfg.repo_uuid,
+        prefix_folder_id=rcfg.prefix_folder_id,
+    )
+
+    sweep_decisions = resolve_content_checks(
+        sweep_decisions,
+        deps.drive,
+        content_cache,
+        state,
+        repo_uuid=rcfg.repo_uuid,
+        listing=repo_listing,
+        prefix_folder_id=rcfg.prefix_folder_id,
+        workdir=work_temp,
+    )
+
+    readview_decisions: list[SweepDecision] = []
+    if not rcfg.readview_folder_id:
+        ctx.set_field("readview_sweep", "skipped_no_folder")
+    elif not rcfg.readview_manifest_file_id:
+        # 管理者還沒初始化讀取視圖發佈：沒有可信集合，動它等於把整個讀取視圖
+        # 隔離掉（g3a M2）。跳過，等有 manifest 再說。
+        ctx.set_field("readview_sweep", "skipped_no_manifest")
+    else:
+        # 可信集合＝讀取視圖 manifest 列出的 file id（4.3）。讀不到或損毀
+        # → MismatchError，fail-closed 讓整輪中止，不猜。
+        rv_manifest = load_manifest(deps.drive, rcfg.readview_manifest_file_id)
+        if rv_manifest.is_initial:
+            # generation=0：還沒發佈過，讀取視圖資料夾裡的東西都還沒被 manifest 記錄
+            ctx.set_field("readview_sweep", "skipped_initial")
+        else:
+            rv_children = deps.drive.list_children(rcfg.readview_folder_id)
+            rv_listing = RepoListing(
+                prefix_folder_id=rcfg.readview_folder_id,
+                files=tuple(f for f in rv_children if not f.is_folder),
+                subfolders=tuple(f for f in rv_children if f.is_folder),
+            )
+            readview_decisions = plan_readview_sweep(
+                rv_listing,
+                trusted_ids(rv_manifest, rcfg.readview_manifest_file_id),
+                readview_folder_id=rcfg.readview_folder_id,
+            )
+            ctx.set_field("readview_sweep", "swept")
+    all_sweep_decisions = parent_decisions + sweep_decisions + readview_decisions
+    moved_count = apply_sweep(
+        all_sweep_decisions,
+        deps.drive,
+        quarantine_folder_id=rcfg.quarantine_folder_id,
+        clock=deps.clock,
+        prefix_folder_id=rcfg.prefix_folder_id,
+        dry_run=dry_run,
+    )
+    ctx.bump("quarantined_files", moved_count)
+    ctx.time("integrity.sweep", int((time.monotonic() - t0) * 1000))
+
+    # ---------------------------------------------------------
+    # 第 5 步：annex.git.clone + verify_clone
+    # ---------------------------------------------------------
+    ctx.step = "annex.git.clone"
+    t0 = time.monotonic()
+    git = deps.git_factory(git_dir)
+    # 覆蓋率檢查：clone 出來的遠端必須至少涵蓋釘選值記錄的每一個 key。
+    # 之前這裡沒有傳 expected_annex_keys，verify_annex_coverage 拿到的是空集合，
+    # 檢查形同虛設（review-g7-e2e A-M1）。
+    verify_clone(
+        git,
+        state,
+        drive=deps.drive,
+        prefix_folder_id=rcfg.prefix_folder_id,
+        expected_annex_keys=state.annex_keys,
+    )
+    ctx.time("annex.git.clone", int((time.monotonic() - t0) * 1000))
+
+    # ---------------------------------------------------------
+    # 第 6 步：annex.git 環境確認
+    # ---------------------------------------------------------
+    ctx.step = "annex.git"
+    t0 = time.monotonic()
+    # 若為 SubprocessAnnexGit，已於 clone_for_commit 設定 annex.max-git-bundles
+    ctx.time("annex.git", int((time.monotonic() - t0) * 1000))
+
+    # ---------------------------------------------------------
+    # 第 7 步：intake.evaluate + agora.apply
+    # ---------------------------------------------------------
+    ctx.step = "intake.evaluate"
+    t0 = time.monotonic()
+
+    if target.element == "foundry":
+        # Foundry 有自己的 store（佈局、annex 規則都不同，review F-H2）
+        from aistorage.foundry.store import FoundryStore
+
+        foundry_store = FoundryStore(
+            git_dir,
+            git=git,
+            temp_dir=store_temp,
+            largefiles=target.largefiles,
+            # 測試注入 raw_storage_factory 時 git 是假的，設定不了 annex
+            configure_annex=deps.raw_storage_factory is None,
+        )
+        store = foundry_store
+    else:
+        # 2.6 決策：原始紀錄與閱讀版放 git-annex 物件庫（keys 由 git annex
+        # lookupkey 產生，見 AnnexRawStorage）。測試仍可注入 raw_storage_factory。
+        if deps.raw_storage_factory:
+            raw_storage = deps.raw_storage_factory(git_dir, git)
+        elif isinstance(git, FakeAnnexGit):
+            raw_storage = FakeRawStorage()
+        else:
+            raw_storage = AnnexRawStorage(git_dir, git=git)
+
+        store = AgoraStore(
+            worktree=git_dir,
+            raw_storage=raw_storage,
+            git=git,
+            temp_dir=store_temp,
+        )
+    ledger = Ledger(eval_store_for_ledger(store, target))
+
+    # 評估所有收件匣項目
+    # 收件匣共用、依型態分派：Agora 收 session/handoff/claim/reference，
+    # Foundry 收 artifact（group5-7 第 6.1 節）。
+    # evaluate 對 Foundry 只需要「既有紀錄」的讀取介面
+    eval_store = _FoundryEvaluateStore(store) if target.element != "agora" else store
+    decisions: list[Decision] = []
+    for item in ctx.items_for(target):
+        dec = evaluate(
+            item,
+            drive=deps.drive,
+            registry=deps.registry,
+            store=eval_store,
+            ledger=ledger,
+            clock=deps.clock,
+            workdir=work_temp,
+            max_raw=rcfg.max_raw_size,
+            foundry_enabled=target.element == "foundry",
+            foundry_store=foundry_store,
+        )
+        decisions.append(dec)
+
+    accepted = [d for d in decisions if d.kind == DecisionKind.ACCEPT]
+    sorted_accepted = sort_accepted_decisions(accepted)
+
+    # 依型態順序套用至真本
+    applied_accepted: list[Decision] = []
+    now_iso = format_rfc3339(deps.clock.now(), include_fraction=True)
+
+    for dec in sorted_accepted:
+        item_type = dec.record_metadata.get("type") if dec.record_metadata else ""
+        if item_type == "artifact":
+            if foundry_store is None:
+                # 沒有 Foundry 設定時 evaluate 已 REJECT(foundry_not_enabled)，走不到這裡
+                continue
+            # 產生者檢查要讀 Agora 的工作樹，所以必須傳 agora_store
+            res = apply_artifact(foundry_store, dec, agora_store, deps.clock)
+        elif item_type == "session":
+            source = dec.sidecar["session"]["source"] if dec.sidecar else "opencode"
+            conv = deps.converters.get(source) or get_converter(source)
+            res = apply_session(store, dec, conv, deps.clock)
+        elif item_type == "handoff":
+            # 依目標 Session 的 source 選轉換器（review-g3e L／g3g M4）：
+            # 目標是 Claude Code 的 Session 時不能拿 opencode 的轉換器去驗接續點。
+            target_source = _target_source(dec)
+            conv = deps.converters.get(target_source) or get_converter(target_source)
+            res = apply_handoff(store, dec, conv, deps.clock)
+        elif item_type == "claim":
+            res = apply_claim(store, dec, deps.clock)
+        elif item_type == "reference":
+            res = apply_reference(store, dec, deps.clock)
+        else:
+            # 改寫：evaluate 在驗章之後、下載 raw 之前就 REJECT(rewrite_disabled)，
+            # 走不到這裡（期 1 不提供改寫，見 PM 決定）。留在這裡只是不讓
+            # 未知的型態被靜默當成已套用。
+            continue
+
+        item_id = dec.record_metadata.get("id", "") if dec.record_metadata else ""
+        raw_sha = (dec.sidecar.get("raw") or {}).get("sha256") if dec.sidecar else None
+
+        if not res.ok:
+            # apply 判定失敗轉為 REJECT（拒絕記錄已由 apply 模組寫入）
+            if dec.authenticated:
+                ledger.record(
+                    dec.item.item_key,
+                    item_id=item_id,
+                    decision=res.code,
+                    raw_sha256=raw_sha,
+                    at=now_iso,
+                )
+        else:
+            applied_accepted.append(dec)
+            ledger.record(
+                dec.item.item_key,
+                item_id=item_id,
+                decision="ok",
+                raw_sha256=raw_sha,
+                at=now_iso,
+            )
+
+    # 記錄 ALREADY 與經認證的 REJECT 至清冊
+    for dec in decisions:
+        item_id = dec.record_metadata.get("id", "") if dec.record_metadata else ""
+        raw_sha = (dec.sidecar.get("raw") or {}).get("sha256") if dec.sidecar else None
+        if dec.kind == DecisionKind.ALREADY:
+            ledger.record(
+                dec.item.item_key,
+                item_id=item_id,
+                decision="already",
+                raw_sha256=raw_sha,
+                at=now_iso,
+            )
+        elif dec.kind == DecisionKind.REJECT and dec.authenticated:
+            ledger.record(
+                dec.item.item_key,
+                item_id=item_id,
+                decision=dec.code,
+                raw_sha256=raw_sha,
+                at=now_iso,
+            )
+
+    # Git commit 變更
+    changed_paths = store.changed_paths()
+    if changed_paths:
+        git.add(changed_paths)
+        # D2 規則：commit message 只記錄計數與 run_id，不記錄標題與內容
+        git.commit(f"committer: batch processed ({len(applied_accepted)} accepted, run={run_id})")
+
+    ctx.bump("accepted", len(applied_accepted))
+    ctx.bump("rejected", sum(1 for d in decisions if d.kind == DecisionKind.REJECT))
+    ctx.bump("already", sum(1 for d in decisions if d.kind == DecisionKind.ALREADY))
+    ctx.bump("deferred", sum(1 for d in decisions if d.kind == DecisionKind.DEFER))
+    ctx.time("intake.evaluate", int((time.monotonic() - t0) * 1000))
+
+    # ---------------------------------------------------------
+    # 第 8 步：annex.git.copy（先上傳物件）+ 計算 refs／annex keys
+    # ---------------------------------------------------------
+    ctx.step = "annex.git.copy"
+    t0 = time.monotonic()
+    # H1：`git annex copy` 會改寫本機的 git-annex 分支（location log），
+    # 並讓新的 key 變成「在 remote 上」。所以必須在算 refs 與 key 集合
+    # **之前**執行，否則 pending 記錄的是 copy 之前的狀態：
+    #   1. push 出去的 git-annex ref 與 pending 不符 → verify_after_push 中止；
+    #   2. 下一輪 settle 時遠端既不等於 pending 也不等於正式值 → MismatchError，
+    #      之後每一輪都中止，需要人工重建 pin；
+    #   3. pending 的 annex_keys 少了新上傳的 key → promote 之後下一輪 sweep
+    #      會把新上傳的物件全部隔離。
+    # 中止時這些物件不在釘選值裡，下一輪會被隔離，是安全的方向。
+    # M1：dry-run 不得寫入遠端。
+    if not dry_run:
+        git.copy("origin")
+    ctx.time("annex.git.copy", int((time.monotonic() - t0) * 1000))
+
+    # ---------------------------------------------------------
+    # 第 9 步：pins.write_pending
+    # ---------------------------------------------------------
+    ctx.step = "pins.write_pending"
+    t0 = time.monotonic()
+    # refs 與 annex key 集合取自 AnnexGit 自己的公開方法；缺少必要分支
+    # 由 SubprocessAnnexGit.local_refs() raise，不在這裡吞掉例外。
+    local_refs = git.local_refs()
+    # 遠端此刻「看得見」的 key（`git annex find --in=…`）**還不含**這一輪
+    # 剛 copy 上去的物件：那筆 location log 要等 git-annex 分支被 push
+    # 之後才進得去（實測）。所以要把 store 記錄的 key（全部來自
+    # `git annex lookupkey`）聯集進來——pending 要記的是「這輪 push 之後
+    # 遠端會有什麼」，第 10 步的 verify 才會真的驗到有沒有推上去。
+    # 只靠 find 的話 pending 會少記新 key，下一輪 sweep 就把它們隔離
+    # （H2 的第 3 點）。
+    annex_keys = (
+        git.annex_keys_in(state.repo_uuid)
+        if hasattr(git, "annex_keys_in")
+        else frozenset(state.annex_keys)
+    ) | store.annex_keys()
+
+    has_git_changes = (local_refs != state.refs) or (annex_keys != state.annex_keys)
+
+    if has_git_changes:
+        pending = PinPending(
+            repo=rcfg.repo,
+            base_manifest_sha256=state.manifest_sha256,
+            refs=local_refs,
+            annex_keys=annex_keys,
+            written_at=format_rfc3339(deps.clock.now(), include_fraction=True),
+            run_id=run_id,
+        )
+        if not dry_run:
+            deps.pins.write_pending(pending)
+
+    ctx.time("pins.write_pending", int((time.monotonic() - t0) * 1000))
+
+    # ---------------------------------------------------------
+    # 第 10 步：verify.precheck + git.push
+    # ---------------------------------------------------------
+    ctx.step = "git.push"
+    t0 = time.monotonic()
+    push_started_at = deps.clock.now()
+
+    if has_git_changes:
+        precheck(
+            deps.drive,
+            rcfg.prefix_folder_id,
+            f"GITMANIFEST--{state.repo_uuid}",
+            state,
+        )
+        if not dry_run:
+            git.push("origin", ("main", "git-annex"))
+
+    ctx.time("git.push", int((time.monotonic() - t0) * 1000))
+
+    # ---------------------------------------------------------
+    # 第 11 步：verify.verify_after_push
+    # ---------------------------------------------------------
+    ctx.step = "verify.verify_after_push"
+    t0 = time.monotonic()
+    push_verification = None
+
+    if has_git_changes and not dry_run:
+        # 必要 key＝真本記錄的全部 key（既有 ＋ 這一輪新寫的原始紀錄與閱讀版；
+        # 都來自 `git annex lookupkey`，見 AnnexRawStorage）。
+        push_verification = verify_after_push(
+            git,
+            deps.drive,
+            repo_listing,
+            state,
+            local_refs,
+            push_started_at,
+            workdir=work_temp,
+            expected_annex_keys=store.annex_keys(),
+            # 比較對象＝pending 記的那份 key（push 出去的），不是還沒
+            # promote 的正式釘選值（見 verify_after_push 的說明）。
+            pushed_annex_keys=annex_keys,
+        )
+
+    ctx.time("verify.verify_after_push", int((time.monotonic() - t0) * 1000))
+
+    # ---------------------------------------------------------
+    # 第 12 步：pins.promote + gc.gc_removed
+    # ---------------------------------------------------------
+    ctx.step = "pins.promote"
+    t0 = time.monotonic()
+
+    if has_git_changes and not dry_run and push_verification is not None:
+        new_state = PinState(
+            repo=rcfg.repo,
+            repo_uuid=state.repo_uuid,
+            refs=local_refs,
+            manifest_sha256=push_verification.new_manifest_sha256,
+            prev_manifest_sha256=state.manifest_sha256,
+            active_bundles=push_verification.active,
+            removed_bundles=push_verification.removed,
+            annex_keys=annex_keys,
+            promoted_at=format_rfc3339(deps.clock.now()),
+            run_id=run_id,
+        )
+        deps.pins.promote(new_state)
+        state = new_state
+
+    # 回收 removed bundle
+    removed_candidates = collect_removed_bundles(repo_listing, state)
+    gc_count = gc_removed(
+        removed_candidates,
+        deps.drive,
+        prefix_folder_id=rcfg.prefix_folder_id,
+        state=state,
+        max_delete=rcfg.max_gc_per_run,
+        dry_run=dry_run,
+    )
+    ctx.bump("gc_deleted", gc_count)
+
+    # 清理過期隔離檔案 (7天)
+    purge_count = purge_quarantine(
+        deps.drive,
+        rcfg.quarantine_folder_id,
+        older_than_days=rcfg.quarantine_retention_days,
+        now=deps.clock.now(),
+        max_delete=rcfg.max_gc_per_run,
+        dry_run=dry_run,
+    )
+    ctx.bump("quarantine_purged", purge_count)
+    ctx.time("pins.promote", int((time.monotonic() - t0) * 1000))
+
+    # ---------------------------------------------------------
+    # 第 13 步：publisher.publish（讀取視圖 4.1）
+    # ---------------------------------------------------------
+    # 發佈失敗只標記、不中止：真本已經轉正（第 12 步），收件匣照常清理
+    # （第 14 步）。讀取視圖是衍生物，下一輪補發即可（4.5 prescan）。
+    ctx.step = "publisher.publish"
+    t0 = time.monotonic()
+    try:
+        if target.element == "foundry":
+            ctx.set_field(
+                "readview_publish",
+                _publish_foundry(target, deps, foundry_store, state, work_temp, dry_run),
+            )
+        else:
+            pub = _build_publisher(rcfg, deps, work_temp)
+            if pub is None:
+                ctx.set_field("readview_publish", "skipped_no_readview")
+            else:
+                pub_rep = pub.publish(
+                    store,
+                    agora_main_sha=local_refs.get("refs/heads/main", ""),
+                    run_rejections=collect_rejections(store, decisions),
+                    dry_run=dry_run,
+                )
+                ctx.set_field("readview_publish", getattr(pub_rep, "status", "published"))
+    except Exception as e:  # noqa: BLE001 - 發佈失敗不得影響真本與收件匣
+        ctx.set_field("readview_publish", "publish_failed")
+        ctx.set_field("publish_error", type(e).__name__)
+        _dump_traceback(run_id, "publisher.publish", e)
+    ctx.time("publisher.publish", int((time.monotonic() - t0) * 1000))
+
+    return RepoRunResult(
+        target=target,
+        decisions=decisions,
+        applied_accepted=applied_accepted,
+        store=store,
+        state=state,
+    )
+
+
 def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport:
     """執行 13 步提交流程主體。
 
@@ -503,6 +1265,7 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
         store_temp.mkdir(parents=True, exist_ok=True)
 
         current_step = "guard"
+        ctx: PipelineContext | None = None
         try:
             # ---------------------------------------------------------
             # 第 1 步：guard 檢查
@@ -542,430 +1305,56 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
                 return report
 
             # ---------------------------------------------------------
-            # 第 3 步：integrity.settle 結算待定釘選值
+            # 第 3〜13 步：逐 repo 跑 pipeline（Agora → Foundry）
             # ---------------------------------------------------------
-            current_step = "integrity.settle"
-            t0 = time.monotonic()
-            children = deps.drive.list_children(cfg.prefix_folder_id)
-            files = tuple(f for f in children if not f.is_folder)
-            subfolders = tuple(f for f in children if f.is_folder)
-            repo_listing = RepoListing(
-                prefix_folder_id=cfg.prefix_folder_id,
-                files=files,
-                subfolders=subfolders,
-            )
-
-            state, pending = deps.pins.load(cfg.repo)
-            settle_outcome, settled_state = settle(
-                state,
-                pending,
-                repo_listing,
-                deps.drive,
-                workdir=work_temp,
-                clock=deps.clock,
-            )
-
-            if not dry_run:
-                if settle_outcome == SettleOutcome.PROMOTED:
-                    deps.pins.promote(settled_state)
-                elif settle_outcome in (SettleOutcome.DROPPED, SettleOutcome.BAK_RECOVERY):
-                    deps.pins.drop_pending(cfg.repo)
-
-            state = settled_state
-            report.durations_ms["integrity.settle"] = int((time.monotonic() - t0) * 1000)
-
-            # ---------------------------------------------------------
-            # 第 4 步：integrity.sweep 清掃前綴資料夾
-            # ---------------------------------------------------------
-            current_step = "integrity.sweep"
-            t0 = time.monotonic()
-            parent_decisions: list[SweepDecision] = []
-            if cfg.prefix_levels:
-                parent_decisions = check_parents(list(cfg.prefix_levels), deps.drive)
-
-            sweep_decisions = plan_sweep(
-                repo_listing,
-                state,
-                repo_uuid=cfg.repo_uuid,
-                prefix_folder_id=cfg.prefix_folder_id,
-            )
-
-            sweep_decisions = resolve_content_checks(
-                sweep_decisions,
-                deps.drive,
-                content_cache,
-                state,
-                repo_uuid=cfg.repo_uuid,
-                listing=repo_listing,
-                prefix_folder_id=cfg.prefix_folder_id,
-                workdir=work_temp,
-            )
-
-            readview_decisions: list[SweepDecision] = []
-            if not cfg.readview_folder_id:
-                report.readview_sweep = "skipped_no_folder"
-            elif not cfg.readview_manifest_file_id:
-                # 管理者還沒初始化讀取視圖發佈：沒有可信集合，動它等於把整個讀取視圖
-                # 隔離掉（g3a M2）。跳過，等有 manifest 再說。
-                report.readview_sweep = "skipped_no_manifest"
-            else:
-                # 可信集合＝讀取視圖 manifest 列出的 file id（4.3）。讀不到或損毀
-                # → MismatchError，fail-closed 讓整輪中止，不猜。
-                rv_manifest = load_manifest(deps.drive, cfg.readview_manifest_file_id)
-                if rv_manifest.is_initial:
-                    # generation=0：還沒發佈過，讀取視圖資料夾裡的東西都還沒被 manifest 記錄
-                    report.readview_sweep = "skipped_initial"
+            # PM 決定 9：只有收件匣真的有 artifact 時才 clone Foundry，平常成本不變。
+            targets = [RepoTarget.from_config(cfg)]
+            if cfg.repos:
+                has_artifact = any(
+                    _item_type_of(sc, deps.drive) == "artifact"
+                    for item in scan.items
+                    for sc in (item.sidecars or ())
+                    if sc.name.endswith(".sidecar.json")
+                )
+                if has_artifact:
+                    for rc in cfg.repos:
+                        targets.append(RepoTarget.from_repo_config(cfg, rc))
                 else:
-                    rv_children = deps.drive.list_children(cfg.readview_folder_id)
-                    rv_listing = RepoListing(
-                        prefix_folder_id=cfg.readview_folder_id,
-                        files=tuple(f for f in rv_children if not f.is_folder),
-                        subfolders=tuple(f for f in rv_children if f.is_folder),
-                    )
-                    readview_decisions = plan_readview_sweep(
-                        rv_listing,
-                        trusted_ids(rv_manifest, cfg.readview_manifest_file_id),
-                        readview_folder_id=cfg.readview_folder_id,
-                    )
-                    report.readview_sweep = "swept"
-            all_sweep_decisions = parent_decisions + sweep_decisions + readview_decisions
-            moved_count = apply_sweep(
-                all_sweep_decisions,
-                deps.drive,
-                quarantine_folder_id=cfg.quarantine_folder_id,
-                clock=deps.clock,
-                prefix_folder_id=cfg.prefix_folder_id,
+                    report.foundry_skipped = "no_artifacts"
+
+            ctx = PipelineContext(  # type: ignore[assignment]
+                cfg=cfg,
+                deps=deps,
+                report=report,
+                scan=scan,
+                run_id=run_id,
+                base_temp=base_temp,
                 dry_run=dry_run,
+                content_cache=content_cache,
             )
-            report.counts["quarantined_files"] = moved_count
-            report.durations_ms["integrity.sweep"] = int((time.monotonic() - t0) * 1000)
 
-            # ---------------------------------------------------------
-            # 第 5 步：annex.git.clone + verify_clone
-            # ---------------------------------------------------------
-            current_step = "annex.git.clone"
-            t0 = time.monotonic()
-            git = deps.git_factory(git_dir)
-            # 覆蓋率檢查：clone 出來的遠端必須至少涵蓋釘選值記錄的每一個 key。
-            # 之前這裡沒有傳 expected_annex_keys，verify_annex_coverage 拿到的是空集合，
-            # 檢查形同虛設（review-g7-e2e A-M1）。
-            verify_clone(
-                git,
-                state,
-                drive=deps.drive,
-                prefix_folder_id=cfg.prefix_folder_id,
-                expected_annex_keys=state.annex_keys,
-            )
-            report.durations_ms["annex.git.clone"] = int((time.monotonic() - t0) * 1000)
-
-            # ---------------------------------------------------------
-            # 第 6 步：annex.git 環境確認
-            # ---------------------------------------------------------
-            current_step = "annex.git"
-            t0 = time.monotonic()
-            # 若為 SubprocessAnnexGit，已於 clone_for_commit 設定 annex.max-git-bundles
-            report.durations_ms["annex.git"] = int((time.monotonic() - t0) * 1000)
-
-            # ---------------------------------------------------------
-            # 第 7 步：intake.evaluate + agora.apply
-            # ---------------------------------------------------------
-            current_step = "intake.evaluate"
-            t0 = time.monotonic()
-
-            # 2.6 決策：原始紀錄與閱讀版放 git-annex 物件庫（keys 由 git annex
-            # lookupkey 產生，見 AnnexRawStorage）。測試仍可注入 raw_storage_factory。
-            if deps.raw_storage_factory:
-                raw_storage = deps.raw_storage_factory(git_dir, git)
-            elif isinstance(git, FakeAnnexGit):
-                raw_storage = FakeRawStorage()
-            else:
-                raw_storage = AnnexRawStorage(git_dir, git=git)
-
-            store = AgoraStore(
-                worktree=git_dir,
-                raw_storage=raw_storage,
-                git=git,
-                temp_dir=store_temp,
-            )
-            ledger = Ledger(store)
-
-            # 評估所有收件匣項目
-            decisions: list[Decision] = []
-            for item in scan.items:
-                dec = evaluate(
-                    item,
-                    drive=deps.drive,
-                    registry=deps.registry,
-                    store=store,
-                    ledger=ledger,
-                    clock=deps.clock,
-                    workdir=work_temp,
-                    max_raw=cfg.max_raw_size,
+            results: list[RepoRunResult] = []
+            agora_store = None
+            for target in targets:
+                ctx.prefix = "" if target.element == "agora" else f"{target.element}."
+                result = _run_repo_pipeline(
+                    ctx, target, agora_store=agora_store
                 )
-                decisions.append(dec)
+                results.append(result)
+                if target.element == "agora":
+                    agora_store = result.store
+                current_step = ctx.step
 
-            accepted = [d for d in decisions if d.kind == DecisionKind.ACCEPT]
-            sorted_accepted = sort_accepted_decisions(accepted)
-
-            # 依型態順序套用至真本
-            applied_accepted: list[Decision] = []
-            now_iso = format_rfc3339(deps.clock.now(), include_fraction=True)
-
-            for dec in sorted_accepted:
-                item_type = dec.record_metadata.get("type") if dec.record_metadata else ""
-                if item_type == "session":
-                    source = dec.sidecar["session"]["source"] if dec.sidecar else "opencode"
-                    conv = deps.converters.get(source) or get_converter(source)
-                    res = apply_session(store, dec, conv, deps.clock)
-                elif item_type == "handoff":
-                    # 依目標 Session 的 source 選轉換器（review-g3e L／g3g M4）：
-                    # 目標是 Claude Code 的 Session 時不能拿 opencode 的轉換器去驗接續點。
-                    target_source = _target_source(dec)
-                    conv = deps.converters.get(target_source) or get_converter(target_source)
-                    res = apply_handoff(store, dec, conv, deps.clock)
-                elif item_type == "claim":
-                    res = apply_claim(store, dec, deps.clock)
-                elif item_type == "reference":
-                    res = apply_reference(store, dec, deps.clock)
-                else:
-                    # 改寫：evaluate 在驗章之後、下載 raw 之前就 REJECT(rewrite_disabled)，
-                    # 走不到這裡（期 1 不提供改寫，見 PM 決定）。留在這裡只是不讓
-                    # 未知的型態被靜默當成已套用。
-                    continue
-
-                item_id = dec.record_metadata.get("id", "") if dec.record_metadata else ""
-                raw_sha = (dec.sidecar.get("raw") or {}).get("sha256") if dec.sidecar else None
-
-                if not res.ok:
-                    # apply 判定失敗轉為 REJECT（拒絕記錄已由 apply 模組寫入）
-                    if dec.authenticated:
-                        ledger.record(
-                            dec.item.item_key,
-                            item_id=item_id,
-                            decision=res.code,
-                            raw_sha256=raw_sha,
-                            at=now_iso,
-                        )
-                else:
-                    applied_accepted.append(dec)
-                    ledger.record(
-                        dec.item.item_key,
-                        item_id=item_id,
-                        decision="ok",
-                        raw_sha256=raw_sha,
-                        at=now_iso,
-                    )
-
-            # 記錄 ALREADY 與經認證的 REJECT 至清冊
-            for dec in decisions:
-                item_id = dec.record_metadata.get("id", "") if dec.record_metadata else ""
-                raw_sha = (dec.sidecar.get("raw") or {}).get("sha256") if dec.sidecar else None
-                if dec.kind == DecisionKind.ALREADY:
-                    ledger.record(
-                        dec.item.item_key,
-                        item_id=item_id,
-                        decision="already",
-                        raw_sha256=raw_sha,
-                        at=now_iso,
-                    )
-                elif dec.kind == DecisionKind.REJECT and dec.authenticated:
-                    ledger.record(
-                        dec.item.item_key,
-                        item_id=item_id,
-                        decision=dec.code,
-                        raw_sha256=raw_sha,
-                        at=now_iso,
-                    )
-
-            # Git commit 變更
-            changed_paths = store.changed_paths()
-            if changed_paths:
-                git.add(changed_paths)
-                # D2 規則：commit message 只記錄計數與 run_id，不記錄標題與內容
-                git.commit(f"committer: batch processed ({len(applied_accepted)} accepted, run={run_id})")
-
-            report.counts["accepted"] = len(applied_accepted)
-            report.counts["rejected"] = sum(1 for d in decisions if d.kind == DecisionKind.REJECT)
-            report.counts["already"] = sum(1 for d in decisions if d.kind == DecisionKind.ALREADY)
-            report.counts["deferred"] = sum(1 for d in decisions if d.kind == DecisionKind.DEFER)
-            report.durations_ms["intake.evaluate"] = int((time.monotonic() - t0) * 1000)
-
-            # ---------------------------------------------------------
-            # 第 8 步：annex.git.copy（先上傳物件）+ 計算 refs／annex keys
-            # ---------------------------------------------------------
-            current_step = "annex.git.copy"
-            t0 = time.monotonic()
-            # H1：`git annex copy` 會改寫本機的 git-annex 分支（location log），
-            # 並讓新的 key 變成「在 remote 上」。所以必須在算 refs 與 key 集合
-            # **之前**執行，否則 pending 記錄的是 copy 之前的狀態：
-            #   1. push 出去的 git-annex ref 與 pending 不符 → verify_after_push 中止；
-            #   2. 下一輪 settle 時遠端既不等於 pending 也不等於正式值 → MismatchError，
-            #      之後每一輪都中止，需要人工重建 pin；
-            #   3. pending 的 annex_keys 少了新上傳的 key → promote 之後下一輪 sweep
-            #      會把新上傳的物件全部隔離。
-            # 中止時這些物件不在釘選值裡，下一輪會被隔離，是安全的方向。
-            # M1：dry-run 不得寫入遠端。
-            if not dry_run:
-                git.copy("origin")
-            report.durations_ms["annex.git.copy"] = int((time.monotonic() - t0) * 1000)
-
-            # ---------------------------------------------------------
-            # 第 9 步：pins.write_pending
-            # ---------------------------------------------------------
-            current_step = "pins.write_pending"
-            t0 = time.monotonic()
-            # refs 與 annex key 集合取自 AnnexGit 自己的公開方法；缺少必要分支
-            # 由 SubprocessAnnexGit.local_refs() raise，不在這裡吞掉例外。
-            local_refs = git.local_refs()
-            # 遠端此刻「看得見」的 key（`git annex find --in=…`）**還不含**這一輪
-            # 剛 copy 上去的物件：那筆 location log 要等 git-annex 分支被 push
-            # 之後才進得去（實測）。所以要把 store 記錄的 key（全部來自
-            # `git annex lookupkey`）聯集進來——pending 要記的是「這輪 push 之後
-            # 遠端會有什麼」，第 10 步的 verify 才會真的驗到有沒有推上去。
-            # 只靠 find 的話 pending 會少記新 key，下一輪 sweep 就把它們隔離
-            # （H2 的第 3 點）。
-            annex_keys = (
-                git.annex_keys_in(state.repo_uuid)
-                if hasattr(git, "annex_keys_in")
-                else frozenset(state.annex_keys)
-            ) | store.annex_keys()
-
-            has_git_changes = (local_refs != state.refs) or (annex_keys != state.annex_keys)
-
-            if has_git_changes:
-                pending = PinPending(
-                    repo=cfg.repo,
-                    base_manifest_sha256=state.manifest_sha256,
-                    refs=local_refs,
-                    annex_keys=annex_keys,
-                    written_at=format_rfc3339(deps.clock.now(), include_fraction=True),
-                    run_id=run_id,
-                )
-                if not dry_run:
-                    deps.pins.write_pending(pending)
-
-            report.durations_ms["pins.write_pending"] = int((time.monotonic() - t0) * 1000)
-
-            # ---------------------------------------------------------
-            # 第 10 步：verify.precheck + git.push
-            # ---------------------------------------------------------
-            current_step = "git.push"
-            t0 = time.monotonic()
-            push_started_at = deps.clock.now()
-
-            if has_git_changes:
-                precheck(
-                    deps.drive,
-                    cfg.prefix_folder_id,
-                    f"GITMANIFEST--{state.repo_uuid}",
-                    state,
-                )
-                if not dry_run:
-                    git.push("origin", ("main", "git-annex"))
-
-            report.durations_ms["git.push"] = int((time.monotonic() - t0) * 1000)
-
-            # ---------------------------------------------------------
-            # 第 11 步：verify.verify_after_push
-            # ---------------------------------------------------------
-            current_step = "verify.verify_after_push"
-            t0 = time.monotonic()
-            push_verification = None
-
-            if has_git_changes and not dry_run:
-                # 必要 key＝真本記錄的全部 key（既有 ＋ 這一輪新寫的原始紀錄與閱讀版；
-                # 都來自 `git annex lookupkey`，見 AnnexRawStorage）。
-                push_verification = verify_after_push(
-                    git,
-                    deps.drive,
-                    repo_listing,
-                    state,
-                    local_refs,
-                    push_started_at,
-                    workdir=work_temp,
-                    expected_annex_keys=store.annex_keys(),
-                    # 比較對象＝pending 記的那份 key（push 出去的），不是還沒
-                    # promote 的正式釘選值（見 verify_after_push 的說明）。
-                    pushed_annex_keys=annex_keys,
-                )
-
-            report.durations_ms["verify.verify_after_push"] = int((time.monotonic() - t0) * 1000)
-
-            # ---------------------------------------------------------
-            # 第 12 步：pins.promote + gc.gc_removed
-            # ---------------------------------------------------------
-            current_step = "pins.promote"
-            t0 = time.monotonic()
-
-            if has_git_changes and not dry_run and push_verification is not None:
-                new_state = PinState(
-                    repo=cfg.repo,
-                    repo_uuid=state.repo_uuid,
-                    refs=local_refs,
-                    manifest_sha256=push_verification.new_manifest_sha256,
-                    prev_manifest_sha256=state.manifest_sha256,
-                    active_bundles=push_verification.active,
-                    removed_bundles=push_verification.removed,
-                    annex_keys=annex_keys,
-                    promoted_at=format_rfc3339(deps.clock.now()),
-                    run_id=run_id,
-                )
-                deps.pins.promote(new_state)
-                state = new_state
-
-            # 回收 removed bundle
-            removed_candidates = collect_removed_bundles(repo_listing, state)
-            gc_count = gc_removed(
-                removed_candidates,
-                deps.drive,
-                prefix_folder_id=cfg.prefix_folder_id,
-                state=state,
-                max_delete=cfg.max_gc_per_run,
-                dry_run=dry_run,
-            )
-            report.counts["gc_deleted"] = gc_count
-
-            # 清理過期隔離檔案 (7天)
-            purge_count = purge_quarantine(
-                deps.drive,
-                cfg.quarantine_folder_id,
-                older_than_days=cfg.quarantine_retention_days,
-                now=deps.clock.now(),
-                max_delete=cfg.max_gc_per_run,
-                dry_run=dry_run,
-            )
-            report.counts["quarantine_purged"] = purge_count
-            report.durations_ms["pins.promote"] = int((time.monotonic() - t0) * 1000)
-
-            # ---------------------------------------------------------
-            # 第 13 步：publisher.publish（讀取視圖 4.1）
-            # ---------------------------------------------------------
-            # 發佈失敗只標記、不中止：真本已經轉正（第 12 步），收件匣照常清理
-            # （第 14 步）。讀取視圖是衍生物，下一輪補發即可（4.5 prescan）。
-            current_step = "publisher.publish"
-            t0 = time.monotonic()
-            try:
-                pub = _build_publisher(cfg, deps, work_temp)
-                if pub is None:
-                    report.readview_publish = "skipped_no_readview"
-                else:
-                    pub_rep = pub.publish(
-                        store,
-                        agora_main_sha=local_refs.get("refs/heads/main", ""),
-                        run_rejections=collect_rejections(store, decisions),
-                        dry_run=dry_run,
-                    )
-                    report.readview_publish = getattr(pub_rep, "status", "published")
-            except Exception as e:  # noqa: BLE001 - 發佈失敗不得影響真本與收件匣
-                report.readview_publish = "publish_failed"
-                report.publish_error = type(e).__name__
-                _dump_traceback(run_id, "publisher.publish", e)
-            report.durations_ms["publisher.publish"] = int((time.monotonic() - t0) * 1000)
+            # 第 14 步要用的 decisions／applied 是「所有 repo 的聯集」
+            decisions = [d for r in results for d in r.decisions]
+            applied_accepted = [d for r in results for d in r.applied_accepted]
 
             # ---------------------------------------------------------
             # 第 14 步：clean_inbox 刪除收件匣檔案
             # ---------------------------------------------------------
             current_step = "clean_inbox"
+            if ctx is not None:
+                ctx.step = "clean_inbox"
             t0 = time.monotonic()
             deleted_inbox_count = 0
             failed_delete_count = 0
@@ -1047,13 +1436,15 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             report.aborted_at = e.step
             report.code = e.code
         except AiStorageError as e:
-            report.aborted_at = current_step
+            step = _pipeline_step(current_step, ctx)
+            report.aborted_at = step
             report.code = type(e).__name__
-            _dump_traceback(run_id, current_step, e)
+            _dump_traceback(run_id, step, e)
         except Exception as e:
-            report.aborted_at = current_step
+            step = _pipeline_step(current_step, ctx)
+            report.aborted_at = step
             report.code = type(e).__name__
-            _dump_traceback(run_id, current_step, e)
+            _dump_traceback(run_id, step, e)
 
     print(report.format_log())
     return report
