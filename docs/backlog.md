@@ -21,6 +21,7 @@
 - judge 驗證腳本在哪種執行環境跑、隔離到什麼程度、逾時多久、失敗原因寫在哪裡（原本是 REQ.md 實作語言提案的第四個問題）。
 - 外部副本的上游比對（先手動，之後自動）。
 - 秘書的 harness 移入 Atelier；Mac 本機與 LearnGhAgent 成為 Atelier 的消費者。
+- Atelier 的 GitHub private repo（ADR 0009）。
 
 ## MyBrain
 
@@ -31,9 +32,13 @@
 
 - Mac 本機既有的 Claude Code、opencode、agy、codex Session 的自動同步（需要一個「Mac 同步程式」profile）。
 - 摘要、收斂 AI、語意搜尋。
+- 跨 coding agent 的 checkout（opencode↔Claude Code）與轉接器 `agora-claude-code`：改走共通閱讀版轉換，開頭會改寫，並在 metadata 標記（ADR 0010、`docs/design/agora-session-operations.md`）。
+- n→1 超過目標模型 context 上限時的壓縮策略（期 1 只偵測並明確拒絕，ADR 0010）。
 
 ## Foundry
 
+- 新 Foundry（ADR 0009）：Google Drive 共享資料夾（文件，AI 可以修改）＋GitHub repo（程式碼，AI 經 PR 修改）；出處記在產出本身的 metadata（Drive 用 `appProperties`，GitHub 用 commit 或 PR 裡的 Session id）；最小讀取介面（依出處 metadata 查 Drive 檔案、依 Session id 查 GitHub，不做統一搜尋）。原本的 `foundry/catalog` spec 已從期 1 的 change 移除。
+- 住民專用 Google 帳號（新 Foundry 的隔離用）：共享資料夾留在 AiStorage 的帳號，以「可編輯」分享給這個帳號，住民只拿它的權限；可以加入家庭方案取得空間（ADR 0009）。
 - 數 GB 的收容產出：寫入者直接上傳以內容雜湊命名的物件，提交流程只登錄雜湊（Drive 有 sha256Checksum 可以不下載就驗證）；連同原 tasks 1.7 的技術驗證（雜湊命名路徑、Actions runner 轉手 1 GB 與 3 GB 的耗時與磁碟上限）。
 - 已知產出位置的自動收錄、死連結檢查；重要產出的快照。
 

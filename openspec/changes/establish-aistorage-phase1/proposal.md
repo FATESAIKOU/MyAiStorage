@@ -8,13 +8,13 @@ AiStorage 要做的是**外部化狀態**：先問這個 AI 系統應該記住�
 
 | 關係 | 工作場景 | 詞彙（`CONTEXT.md`） |
 |---|---|---|
-| 分裂（1→n） | 切分工作 | 持有者為每一份工作各寫一張交接單，多個新 Session 各自認領（分岔） |
-| 統合（n→1） | 聚合成果 | 每個分岔各寫一張交接單交出末端，一個新 Session 認領全部（收斂） |
+| 分裂（1→n） | 切分工作 | 持有者為每一份工作各寫一張交接單，Agora 依每張交接單各產出一個起點包，各自載入成新 Session（分岔） |
+| 統合（n→1） | 聚合成果 | 每個分岔各寫一張交接單交出末端，Agora 依全部交接單產出一個起點包，載入成一個新 Session（收斂） |
 | 相互參照（n↔m） | 互相支持推進 | 並行的 Session 彼此建立參考 Link，讀對方最新已提交的內容 |
 
 ## What Changes
 
-期 1 只建立驗證這三種關係所需的最小集合，並留好擴張點。扮演 AI 的是 **Mac 上的 opencode**（在隔離的容器裡執行，見 design D3）。秘書與員工都不在期 1：worker 目前還不能跑 AI agent，手機 App 的整合排在待辦清單。期 1 之後不再分期規劃，其餘事項一律收在 `docs/backlog.md`。詞彙依 `CONTEXT.md`，架構決定依 `docs/adr/0001〜0008`。
+期 1 只建立驗證這三種關係所需的最小集合，並留好擴張點。扮演 AI 的是 **Mac 上的 opencode**（在隔離的容器裡執行，見 design D3）。秘書與員工都不在期 1：worker 目前還不能跑 AI agent，手機 App 的整合排在待辦清單。期 1 之後不再分期規劃，其餘事項一律收在 `docs/backlog.md`。詞彙依 `CONTEXT.md`，架構決定依 `docs/adr/0001〜0010`。
 
 - **共通約定**：
   - 每個項目都由 metadata 與本體組成。共通 metadata 有六個欄位：id（不變）、型態、產生者、時間、所屬案件、出處。
@@ -24,19 +24,24 @@ AiStorage 要做的是**外部化狀態**：先問這個 AI 系統應該記住�
   - 儲存：原始紀錄是真本，閱讀版可以重建；Session 有狀態（運作中／停止中）。
   - 變更：每個版本都保留、可以回滾；來源端的編輯（/rewind 等）就是新版本；另有抹除，只有你本人能執行（在 Agora 裡改寫內容的功能移到待辦）。
   - 真本完整性：住民的憑證仍然能在 repo 資料夾建檔（技術驗證 1.4），所以提交流程每一輪以住民碰不到的釘選值核對真本、清掃並隔離注入物、回收舊 bundle，偽造的歷史不會成為真本（ADR 0008）。
-  - 關係：Session Link（接續／參考）、接續點；接續經由交接單與認領建立（design D10）；分裂、統合與相互參照都要成立。
+  - 關係：Session Link（接續／參考）、接續點；分裂、統合與相互參照都要成立。
+    - 接續經由交接單建立。新 Session 由起點建出：`agora checkout` 產出起點包（原始紀錄原封不動＋任務），再由各 coding agent 的轉接器（期 1 是 `agora-opencode`）載入成原生 session（design D10、ADR 0010、`docs/design/agora-session-operations.md`）。
+    - 起點可以是交接單，也可以是任何 Session 的任何一則訊息。起點是交接單時，checkout 登記認領，確認屬於自己之後才產出起點包。
+    - 同一個 coding agent 之間接續時，新 Session 的開頭與原 Session 位元組相同，讓 prompt cache 命中。
+    - Agora 本身不依賴任何 coding agent。誰開 agent、在哪開，由呼叫者決定，AI 也可以。
   - 同步：opencode 同步器（Mac），平時定期同步；寫交接單前、或想讓別的 Session 讀到進度時，同步並提交一次。停止中由明確宣告，不從閒置推測。
   - 讀取：搜尋（篩選＋全文）、讀取 Session（含兩個方向的 Link）、列出待認領的交接單，都經由同一個讀取介面，每筆結果附快照時間。
   - 其他：單一 Session 手動匯入（opencode 與 Claude Code）、永久保存。
-- **Foundry（最小）**：
-  - 一份產出目錄登錄所有產出，記錄產出它的 Session。
-  - 收容產出的真本放在 Foundry；期 1 只收經提交流程轉手的檔案（上限見 design D7），數 GB 的路徑在待辦清單。
-  - 原處產出由產生它的 AI 明確登錄出處。
+- **Foundry**：期 1 不實作（ADR 0009）。
+  - 方向是 Google Drive 共享資料夾（文件，AI 可以修改）＋GitHub repo（程式碼，AI 經 PR 修改）。
+  - 出處記在產出本身的 metadata，不另外維護中央目錄。
+  - 共享資料夾分享給住民專用帳號來隔離。
+  - 期 1 已做好的 git-annex 版 Foundry 移除，提交流程只處理 Agora。
 - **MyBrain 銜接**：
   - 所屬案件以 MyBrain 案件的 id 表示，AiStorage 一律把它當成不透明的字串。MyBrain 那邊加 id 的 PR 在待辦清單。
 - **Atelier**：
-  - 期 1 只做需求設計：需要哪些部門（profile）、需要哪些職能（職務），寫成 `docs/atelier/`。基本設計與實作等 MyLinuxPool 的 profile 重新設計之後再一起考慮。
-- **不在期 1**：一律收在 `docs/backlog.md`，包括手機秘書的整合、worker 與員工、Atelier 的實作、MyBrain 的 id PR、數 GB 的收容產出、Mac 本機既有 agent 的自動同步、摘要、收斂 AI、語意搜尋、Foundry 自動收錄與死連結檢查、更高新鮮度的寫入機制。更早的歷史 Session 不整批回補。
+  - 期 1 只做需求設計：需要哪些部門（profile）、需要哪些職能（職務），寫成 `docs/atelier/`。儲存方向是 GitHub private repo（ADR 0009）。基本設計與實作等 MyLinuxPool 的 profile 重新設計之後再一起考慮。
+- **不在期 1**：一律收在 `docs/backlog.md`，包括手機秘書的整合、worker 與員工、Atelier 的實作、MyBrain 的 id PR、新 Foundry 與住民專用帳號、跨 coding agent 的 checkout（opencode↔Claude Code）與 `agora-claude-code`、n→1 超過 context 上限時的壓縮、Mac 本機既有 agent 的自動同步、摘要、收斂 AI、語意搜尋、更高新鮮度的寫入機制。更早的歷史 Session 不整批回補。
 
 **期 1 留好的擴張點**：
 
@@ -58,12 +63,11 @@ AiStorage 要做的是**外部化狀態**：先問這個 AI 系統應該記住�
 - `common/identity`：身分＝profile、profile 憑證證明歸屬（共用存取憑證時以簽章金鑰證明）、各要素依 profile 授權、產生者蓋章、禁止能力不存在與它的唯一例外（ADR 0008），以及期 1 的身分種類。
 - `agora/session-record`：原始紀錄與閱讀版、Session 狀態、版本保留與回滾、抹除、永久保存、單一 Session 手動匯入。
 - `agora/session-sync`：來源應用的同步器、定期同步與接續前同步、寫入端維持新鮮度的機制。
-- `agora/session-link`：接續與參考、接續點、交接單與認領、分裂、統合與相互參照、所屬案件。
+- `agora/session-link`：接續與參考、接續點、交接單與認領、由起點建出 Session（checkout 與轉接器）、保留原始開頭、分裂、統合與相互參照、所屬案件。
 - `agora/search`：Agora 的讀取介面：以所屬案件、來源應用、時間、標題、狀態篩選，對閱讀版全文搜尋，讀取 Session（含兩個方向的 Link），列出待認領的交接單；指定新鮮度與快照時間；搜尋後端可以替換或疊加。
-- `foundry/catalog`：產出目錄、原處產出的登錄、收容產出的儲存、依新鮮度規則查詢。
 - `mybrain/case-reference`：以不透明的案件 id 參照 MyBrain 案件、MyBrain 既有寫入流程不變。
 
-Atelier 的兩份需求（職務、外部副本）移到 `docs/atelier/`，作為需求設計的一部分，不在本 change 實作。
+Atelier 的兩份需求（職務、外部副本）移到 `docs/atelier/`，作為需求設計的一部分，不在本 change 實作。原本的 `foundry/catalog` 隨 ADR 0009 移出本 change，改記在待辦清單「新 Foundry」一項。
 
 ### Modified Capabilities
 

@@ -1,16 +1,18 @@
 ## Context
 
-動機見 `proposal.md` 的 Why，要求見各 `specs/`，詞彙見 `CONTEXT.md`，已定案的架構決定見 `docs/adr/0001〜0008`。
+動機見 `proposal.md` 的 Why，要求見各 `specs/`，詞彙見 `CONTEXT.md`，已定案的架構決定見 `docs/adr/0001〜0010`。
 
 **2026-09-26 重定期 1**：期 1 的目標改成驗證 Session 的分裂（1→n）、統合（n→1）、相互參照（n↔m），扮演 AI 的是 Mac 上的 opencode。秘書與員工都不在期 1，Atelier 只做需求設計，期 1 之後的事項收在 `docs/backlog.md`。本檔原本為手機 App、worker、Atelier 所做的設計，不再是期 1 的決定；仍有參考價值的部分寫在各決定的「之後」一段，並列進待辦清單。
+
+**2026-09-28 依 ADR 0009、0010 收斂**：期 1 的範圍收斂成 Agora＋共通約定＋MyBrain 參照。每個實體自己決定儲存與寫入路徑，寫入閘門只屬於 Agora；Foundry 改成 Google Drive 共享資料夾＋GitHub，期 1 不實作（D7）。新 Session 改由 Agora 從起點產出起點包，再由轉接器載入成原生 session，AI 不再自己認領（D10）。
 
 **2026-09-27 技術驗證結果併入**：第 1 組（tasks 1.1〜1.8）的結果與使用者的決定已寫進本檔（報告 `docs/spike/report.md`，決定見 `docs/decision-log.md`「Spike 1.4f decision」「Spike 1.9 go decision」）。影響最大的一項：`drive.file` 的 client 能在任何知道 id 的資料夾建檔（1.4），所以「住民寫不進真本」不再靠 Drive 的權限做到，改成「偵測＋隔離＋釘選」保證真本的完整性（ADR 0008）；產生者章改靠每個 profile 的簽章金鑰（ADR 0006 修訂）。
 
 影響做法的現況與限制如下：
 
 - **使用者的選擇**
-  - Agora 與 Foundry 要用 **git 形式操作**，看重的是版本與回滾、熟悉的指令、跟 MyBrain 一致。
-  - 儲存實體**只放 Google Drive**（消費者 5TB 方案，已經付費），不另外保留第二份副本。AiStorage 用一個**專用的 Google 帳號**（Google One 家庭共用的成員，共用同一份 5TB 配額，已由使用者建立），所以提交流程的完整 Drive 權限碰不到使用者個人的 Drive。
+  - Agora 要用 **git 形式操作**，看重的是版本與回滾、熟悉的指令、跟 MyBrain 一致。
+  - Agora 的儲存實體**只放 Google Drive**（消費者 5TB 方案，已經付費），不另外保留第二份副本。AiStorage 用一個**專用的 Google 帳號**（Google One 家庭共用的成員，共用同一份 5TB 配額，已由使用者建立），所以提交流程的完整 Drive 權限碰不到使用者個人的 Drive。
   - GitHub 維持免費方案。
   - 讀寫分離：讀的手段只有一個，讀的時候指定新鮮度；寫入端的機制依成本選擇、慢慢追加，先給最便宜的做法（ADR 0007）。
 - **Google Drive（研究：`docs/research/drive-and-github.md`）**
@@ -38,7 +40,7 @@
 **Goals:**
 
 - 驗證分裂、統合、相互參照三種關係在這套狀態模型上都成立，而且被接續、被參考的 Session 不受影響。
-- 住民與同步程式在任何情況下都**沒有**能改寫或刪除 Agora / Foundry 真本的憑證，它們的寫入全部經過單一提交者。它們**仍然能在 repo 資料夾裡建檔**（技術驗證 1.4，使用者已接受的例外，ADR 0008），所以真本的完整性由提交流程的「偵測＋隔離＋釘選」保證：注入最多造成偵測得到的提交暫停，不會讓偽造的歷史被當成真本。產生者章靠每個 profile 的簽章金鑰（ADR 0006）。
+- 住民與同步程式在任何情況下都**沒有**能改寫或刪除 Agora 真本的憑證，它們的寫入全部經過單一提交者。它們**仍然能在 repo 資料夾裡建檔**（技術驗證 1.4，使用者已接受的例外，ADR 0008），所以真本的完整性由提交流程的「偵測＋隔離＋釘選」保證：注入最多造成偵測得到的提交暫停，不會讓偽造的歷史被當成真本。產生者章靠每個 profile 的簽章金鑰（ADR 0006）。
 - 讀取端只有一個讀取介面，指定新鮮度，形狀不隨寫入機制改變。
 - 期 1 不新增任何常駐服務：提交流程借 GitHub Actions 按需執行。
 
@@ -51,16 +53,16 @@
 
 ## Decisions
 
-### D1. 儲存實體：Agora、Foundry 以 git-annex 存進 Drive
+### D1. 儲存實體：Agora 以 git-annex 存進 Drive，其他實體各自決定（ADR 0009）
 
 | 要素 | 真本放哪 | git 介面 |
 |---|---|---|
 | MyBrain | 維持現狀（GitHub private repo） | 一般 git |
 | Agora | AiStorage 專用帳號的 Google Drive 上的一個 git-annex repo | `git-remote-annex` 加 rclone special remote：歷史以 git bundle 存、大檔以 annex 物件存，**全部在 Drive** |
-| Foundry | 同一個專用帳號的 Google Drive 上另一個 git-annex repo | 同 Agora |
-| Atelier | 期 1 不建（需求設計見 `docs/atelier/`） | — |
+| Foundry | Google Drive 共享資料夾（文件）＋GitHub repo（程式碼）（ADR 0009，期 1 不實作） | 程式碼走一般 git；文件不經 git |
+| Atelier | GitHub private repo（期 1 不建，需求設計見 `docs/atelier/`） | 一般 git |
 
-Agora 與 Foundry 分成兩個 repo，是依 ADR 0001「要素各自獨立」。兩者共用的只有提交流程（D2）這個實作，沒有共用介面。
+每個實體自己決定儲存實體、寫入方式與頻率，彼此只靠 metadata 裡的 id 互相參照（ADR 0001、0009）。只有 Agora 有寫入閘門，也就是提交流程（D2）。
 
 **部署規則（技術驗證 1.2、1.5）：**
 - special remote 用 `type=rclone`（git-annex 10.20260717 起的語法），`encryption=none`、不開 chunk。所有 rclone conf（提交流程、讀取身分、管理）都設 `root_folder_id` 指向 AiStorage 的根資料夾，`rcloneprefix` 用相對路徑。
@@ -69,19 +71,21 @@ Agora 與 Foundry 分成兩個 repo，是依 ADR 0001「要素各自獨立」。
 
 **替代方案：**
 - AWS S3：保證最直接，但不是 git 形式，而且每月多 1〜3 美元。使用者不採用。
-- GitHub 存 git、Drive 存大檔的混合做法：使用者要求儲存實體只放 Drive，不採用。
+- GitHub 存 git、Drive 存大檔的混合做法：使用者要求儲存實體只放 Drive，不採用。這個「只放 Drive」的要求在 2026-09-28 對 Foundry 與 Atelier 撤回（ADR 0009），對 Agora 仍然有效。
 - Linode：金鑰擋不住刪除舊版本。不採用。
 
-**之後**：Atelier 原本的方向是 GitHub private repo（純文字、小檔、一般 git），留在待辦清單，等 MLP 的 profile 重新設計後一起重新考慮。
+**之後**：Atelier 的方向是 GitHub private repo（純文字、小檔、一般 git，ADR 0009），留在待辦清單，等 MLP 的 profile 重新設計後一起考慮。新 Foundry 也在待辦清單。
 
-### D2. 單一提交者：所有寫入先進收件匣，再由唯一的提交流程收進真本
+### D2. 單一提交者：Agora 的寫入先進收件匣，再由唯一的提交流程收進真本
+
+範圍只有 Agora 的寫入（ADR 0009）。其他實體不經過這個提交流程。
 
 ```
  Mac 容器裡的 opencode ─┐                ┌──────────── 提交流程（GitHub Actions）───────────┐
  （之後：手機 App、worker）┼─ 放進 Drive ──▶│ 1. 驗證收件匣項目（格式、必填 metadata、授權）     │
                         ┘  上自己的收件匣 │ 2. 依來源收件匣蓋產生者章                          │
                                           │ 3. 原始紀錄 → 閱讀版（每個來源應用一個轉換器）       │
-                                          │ 4. 處理交接單與認領、參考、改寫提案、產出登錄         │
+                                          │ 4. 處理交接單與認領、參考、改寫提案                   │
                                           │ 5. git-annex add / commit，push 到 Drive 上的 repo  │
                                           │ 6. 發佈讀取視圖與搜尋索引（D5）                      │
                                           └───────────────────────────────────────────────┘
@@ -102,7 +106,7 @@ Agora 與 Foundry 分成兩個 repo，是依 ADR 0001「要素各自獨立」。
   4. 逐層檢查上層同名資料夾，以內容判定、遞迴清掃 repo 資料夾與讀取視圖資料夾。
   5. `clone -b main`（完整 URL），核對全部 ref 與 manifest 內容雜湊等於正式釘選值。
   6. `git annex init`、設 `annex.max-git-bundles`。
-  7. 處理收件匣：驗章（D3）、驗格式、防重放、依內容雜湊判斷重複；原始紀錄 → 閱讀版；交接單與認領、參考、改寫提案、產出登錄。
+  7. 處理收件匣：驗章（D3）、驗格式、防重放、依內容雜湊判斷重複；原始紀錄 → 閱讀版；交接單與認領、參考、改寫提案。
   8. 寫入「待定」釘選值（新的 refs）。
   9. 預檢：遠端 manifest 的內容雜湊（只查名稱符合 GITMANIFEST 的檔，出錯就中止）仍然等於正式釘選值裡的雜湊，然後 push `main` 與 `git-annex` 兩個 ref。直接跟釘選值比對，第 5 步之後的空窗也在保護範圍內。
   10. 以 `git ls-remote` 確認遠端全部 ref 等於本地，並重新讀 manifest，確認它的 active 清單恰好是「舊的可信集合＋這次新增的」。helper 輸出的 `unexpected status` 一律視為失敗。**push 會靜默失敗**（exit 0、`Everything up-to-date`，但內容沒上 Drive，技術驗證 1.2），所以「成功」只以這一步為準。
@@ -198,11 +202,10 @@ Agora 與 Foundry 分成兩個 repo，是依 ADR 0001「要素各自獨立」。
 
 ### D5. 讀取：每個要素一個讀取介面，背後讀「讀取視圖」
 
-- **讀取介面**是讀者取得內容的唯一手段，形式是函式庫加 CLI，要能在 arm64 與 amd64 上跑。Agora 的讀取介面負責找 Session（篩選、全文）、讀 Session（metadata、閱讀版、兩個方向的 Session Link、交接單）、列出尚未被認領的交接單；Foundry 的讀取介面負責查產出目錄與取得收容產出。兩者各自獨立（ADR 0001），但遵守同一套新鮮度規則（D9）。
-- **背後讀的是讀取視圖**：每次提交後，提交流程把讀取視圖以一般檔案發佈到 Drive 上的另一個資料夾，內容是每個 Session 的 metadata、閱讀版、Session Link（含反向索引）與交接單、各項目的快照時間、拒絕原因、產出目錄、搜尋索引。讀取介面用讀取身分（期 1 的 worker 共用一個 service account）讀取。讀者不需要知道背後是讀取視圖還是 git。
+- **讀取介面**是讀者取得內容的唯一手段，形式是函式庫加 CLI，要能在 arm64 與 amd64 上跑。Agora 的讀取介面負責找 Session（篩選、全文）、讀 Session（metadata、閱讀版、兩個方向的 Session Link、交接單）、列出尚未被認領的交接單。之後其他實體的讀取介面各自獨立（ADR 0001），但遵守同一套新鮮度規則（D9）。
+- **背後讀的是讀取視圖**：每次提交後，提交流程把讀取視圖以一般檔案發佈到 Drive 上的另一個資料夾，內容是每個 Session 的 metadata、閱讀版、Session Link（含反向索引）與交接單、各項目的快照時間、拒絕原因、搜尋索引。讀取介面用讀取身分（期 1 的 worker 共用一個 service account）讀取。讀者不需要知道背後是讀取視圖還是 git。
 - **讀取視圖增量發佈**：只重寫有變動的檔案，另外發佈一份帶世代號的 manifest；讀取介面依世代號快取，沒變就不重新下載。Drive 大約每秒只能處理 2 個檔案，整份重建會讓提交時間隨 Session 數線性成長。
 - **讀取介面以檔案 id 定位**，而且**所有讀者與工具**（包括管理腳本、復原作業、之後的手機用戶端）都遵守：讀取視圖的 manifest 是一個**固定檔案 id、原地更新**的檔案（只用 API 的 `files.update` 寫入，id 不變，技術驗證 1.4i；讀者看到更新的延遲約 2〜5 秒），它的 id 跟著 profile 的讀取設定一起發放；其他檔案以 manifest 裡記的檔案 id 取得。整條讀取路徑都不以名稱搜尋，因為住民能在讀取視圖資料夾裡注入同名檔（Drive 允許同名；所有 client 都以同一個專用帳號授權，owner 欄位分不出是誰建的）。讀取視圖資料夾也在每一輪清掃（D2）。
-- **收容產出的本體**：讀取介面用 service account 依 annex key 直接從 rclone special remote 取物件，路徑規則是 `<rcloneprefix>/<完整 key 檔名>`（不開 chunk，技術驗證 1.5 確認），不另存一份可讀副本；取得後以 key 驗內容雜湊。
 - **門檻**：搜尋索引超過 50 MB、或讀取視圖超過 5,000 個檔案時，「期 1 資料量小、整份下載索引」的前提失效，要改成分片或雲端查詢（健康檢查回報這兩個數字）。
 - **git 歷史**：你（管理）與復原作業可以用 service account 的 reader 權限 `git clone annex::…`，用 `log / diff / show` 看歷史。這不是住民的讀取手段。
 - **搜尋**
@@ -220,12 +223,16 @@ Agora 與 Foundry 分成兩個 repo，是依 ADR 0001「要素各自獨立」。
 - 不做基本設計，也不建 repo。部門的需求會交給 MyLinuxPool 的 profile 重新設計那條線參考。
 - ADR 0003（授權依 profile，職務不參與授權）與 ADR 0004（Atelier 複製外部 skill）仍然有效，作為之後設計的前提。
 
-### D7. Foundry（最小）：產出目錄在 git，收容產出經提交流程轉手
+### D7. Foundry：Google Drive 共享資料夾＋GitHub（ADR 0009，期 1 不實作）
 
-- Foundry repo 內容：產出目錄是每件產出一個 metadata 檔；收容產出的本體以 annex 物件存在 Drive。
-- 原處產出只登錄出處，也就是連結型項目，記錄產出它的 Session。AI 產出後把登錄項目放進收件匣。
-- 期 1 的收容產出一律經提交流程轉手，**單檔上限先訂 100 MB**（簡報、圖片、報告都夠用，也遠低於 Actions runner 的磁碟與時間限制）。超過上限的明確拒收，原因發佈在讀取視圖。
-- 數 GB 的檔案要改走「寫入者直接上傳以內容雜湊命名的物件，提交流程只登錄這個雜湊」的路徑，連同它的技術驗證（原 tasks 1.7）都在待辦清單。
+- Foundry 指的是「一個 Google Drive 共享資料夾＋一組 GitHub repo」，不是管理它們的模組。
+- 文件：AI 直接放進共享資料夾，可以修改，版本只靠 Drive 自己的歷史。不想被改的產出放 GitHub。
+- 程式碼：以 repo 為單位，AI 照一般方式開 PR。
+- 出處（哪個 Session、哪個 profile、所屬案件）記在產出本身的 metadata：Drive 檔案用 `appProperties`，GitHub 用 commit 或 PR 裡的 Session id。不另外維護中央目錄。
+- 沒有寫入閘門，不經過提交流程（D2）。
+- 隔離靠帳號：共享資料夾留在 AiStorage 的帳號，以「可編輯」分享給住民專用帳號；住民只拿那個帳號的權限。
+- 讀取介面最小：依出處 metadata 查 Drive 檔案、依 Session id 查 GitHub，不做統一搜尋。
+- 期 1 已做好的 git-annex 版 Foundry（Foundry repo、多 repo 分派、Foundry 讀取視圖與讀取介面、`admin create-repo`）全部移除（tasks 7.1）。新 Foundry 與住民專用帳號都在待辦清單。
 
 ### D8. MyBrain 銜接
 
@@ -246,14 +253,27 @@ Agora 與 Foundry 分成兩個 repo，是依 ADR 0001「要素各自獨立」。
 - **Actions 分鐘數**（使用者 GitHub 帳號的免費額度，每月 2,000 分鐘，與 MyLinuxPool 共用；AiStorage ≤300 為目標）：空收件匣 1 分鐘，非空提交估計 2〜3 分鐘。每 6 小時排程加上平均每天約 2 次主動觸發，估計 276〜372 分鐘／月（每天 5 次會到 456〜642），可能超過 300，所以 6.3 監控實際用量，連續兩週超過 300 就回頭調整間隔。主動觸發只用在寫交接單、認領確認、明確要發佈進度這些情況；concurrency group 會合併短時間內的連續觸發。
 - **之後追加的寫入機制**（依成本由低到高）：縮短定時間隔、上傳後自動觸發提交、合併多次觸發、自架 runner。追加任何一種都不改變讀取介面。
 
-### D10. 接續經由交接單與認領：分裂與統合
+### D10. 接續：由起點建出新 Session（checkout＋轉接器）
 
-- **交接單是 Agora 的項目**，有自己的 id，記著被接續的 Session、接續點與交接內容。
-- **接續點＝（快照識別，message id）**（技術驗證 1.7c）：opencode 的 message id 在追加、重開、壓縮後都不變，但使用者 /undo 之後重新輸入（很常見）會刪掉後面的訊息。所以接續點釘在交接單所依據的那一份原始紀錄快照（內容雜湊）上，讀取介面「只取接續點之前的內容」一律從**被釘住的快照**讀，不從最新版本讀；來源端之後怎麼編輯，都不影響已經成立的接續。接續點指向**最後一則已完成的訊息**：寫交接單的那一次回覆本身一定還在生成中，不算在內。來源端刪掉訊息，對 Agora 來說是原始紀錄的新版本（舊版本留在歷史裡），不是 spec 所說的「改寫」，不拒收。閱讀版要照 `info.revert` 指標處理：指標之後的訊息在來源端已經被撤銷。接續 Link 在新 Session **認領**交接單時才建立，方向是「新 Session → 被接續的 Session」。理由：分裂的當下，接手的 Session 還不存在、也沒有 id；而且接續只能由持有者發起，才不會出現「讀者觸發別人寫入」（ADR 0007）。
-- **分裂（1→n）**：持有者 S1 同步，為每一份工作各寫一張交接單，一起提交（接續點可以跟交接單同一批進來，只需要一次提交流程）。之後開新的 opencode Session（各自的容器），各自認領一張。
-- **統合（n→1）**：每個分岔的持有者（S2、S3）各自同步、寫一張交接單交出自己的末端並提交；新 Session S4 認領全部。S4 從頭到尾不要求 S2、S3 做任何事，所以同一套語意之後可以延伸到跨裝置（手機的 S2 加 worker 的 S3）。
-- **一張交接單只能被認領一次**；重複的認領由提交流程拒絕，並把原因發佈在讀取視圖。尚未被認領的交接單可以經由讀取介面列出。因為判定是非同步的，認領之後要立刻同步並提交，等讀取介面確認這條 Link 屬於自己才開工；看到拒絕就停下。
-- **認領需要知道自己的 Session id**：plugin tool 的 `context.sessionID`（或 shell.env 注入）可以確定地取得目前的 Session id，`opencode run "<內容>" --format json` 可以用指定內容開新 Session（技術驗證 1.7f、1.7g）。plugin 裝在 image 裡的唯讀路徑，不放 `/work`。**認領與宣告停止只能在主 Session 裡執行**：子代理的子 Session 呼叫時，plugin 看到帶 `parentID` 的 Session 就拒絕。
+指令的形狀以 `docs/design/agora-session-operations.md` 為準，原則見 ADR 0010。
+
+- **交接單是 Agora 的項目**，有自己的 id，記著被接續的 Session、接續點與要交代的任務。只能被接一次，接之前出現在「等人接的工作」清單裡。
+- **接續點＝（快照識別，message id）**（技術驗證 1.7c）：opencode 的 message id 在追加、重開、壓縮後都不變，但使用者 /undo 之後重新輸入（很常見）會刪掉後面的訊息。所以接續點釘在交接單所依據的那一份原始紀錄快照（內容雜湊）上，讀取介面「只取接續點之前的內容」一律從**被釘住的快照**讀，不從最新版本讀；來源端之後怎麼編輯，都不影響已經成立的接續。接續點指向**最後一則已完成的訊息**：寫交接單的那一次回覆本身一定還在生成中，不算在內。來源端刪掉訊息，對 Agora 來說是原始紀錄的新版本（舊版本留在歷史裡），不是 spec 所說的「改寫」，不拒收。閱讀版要照 `info.revert` 指標處理：指標之後的訊息在來源端已經被撤銷。接續 Link 的方向是「新 Session → 被接續的 Session」，在新 Session 被提交流程收進 Agora 時建立。接續只能由持有者寫交接單發起，或由呼叫者從已提交的內容指定起點，不會出現「讀者觸發別人寫入」（ADR 0007）。
+- **指令**（Agora 本身不依賴任何 coding agent）：
+  - `agora find`、`agora show`、`agora read`：找、看、讀（`read` 會記下一條參考 Link）。
+  - `agora handoff <session> [--at <訊息>] --task "…"…`：持有者同步，每個 `--task` 寫一張交接單，一起提交。
+  - `agora checkout <起點>… [--task "…"] -o <目錄>`：產出**起點包**，內含起點之前的原始紀錄（原封不動）、要交代的任務、來源 Session 的 id。
+  - `<起點>` 可以是 `handoff:<id>`，也可以是 `<session>[@<訊息>]`（不指定訊息就是最新已提交的那一則）。兩種都允許。
+- **checkout 的步驟**：
+  1. 從讀取介面取得起點與被釘住的快照，把原始紀錄原封不動放進起點包。
+  2. 起點是交接單時，放一筆簽章過的認領進收件匣、觸發提交流程，等讀取介面確認沒有人先接走。被拒就不產出任何東西。起點不是交接單時不需要認領。
+  3. 多個起點（n→1）時，最長的一段原樣放最前面，其餘接在後面，並檢查總長度沒有超過目標模型的 context 上限。超過就明確拒絕，不默默截斷。
+- **轉接器**：每個 coding agent 一個，命名為 `agora-<名稱>`，和同步器放在一起。期 1 只有 `agora-opencode`：`agora-opencode load <起點包>` 截斷、重編 session／message／part id、在目標專案目錄執行 `opencode import`，印出新 session id。誰開 agent、在哪開，由呼叫者決定；AI 也可以，能不能開由那台機器的權限決定，不歸 Agora 管。
+- **開頭原樣保留**：同一個 coding agent 之間接續時，轉接器直接用起點包裡的原始紀錄，新 Session 送給模型的開頭與原 Session 位元組相同（技術驗證 `docs/spike/session-import.md`）。跨 agent 或需要壓縮時，改走共通閱讀版轉換，開頭會改寫（cache 會斷），並在 metadata 標記。期 1 只做 opencode→opencode。
+- **分裂（1→n）**：S1 用 `agora handoff` 寫 n 張交接單，一起提交。每張各跑一次 `checkout handoff:Hx` 加 `agora-opencode load`，各自在自己的容器裡開 agent。n 個新 Session 的開頭相同，只在接續點之後分岔。
+- **統合（n→1）**：S2、S3 各自同步、寫一張交接單交出末端並提交。`agora checkout handoff:H2 handoff:H3 --task "…"` 產出一個起點包，載入成 S4。S4 從頭到尾不要求 S2、S3 做任何事，所以同一套語意之後可以延伸到跨裝置。
+- **一張交接單只能被接一次**；重複的認領由提交流程拒絕，並把原因發佈在讀取視圖。被拒的一方不產出起點包，也就不會有 session 開工。
+- **AI 在 session 裡用同一組指令**：skill 包成 `agora_find`、`agora_read`、`agora_handoff`、`agora_checkout` 四個工具。AI 不再自己 claim，plugin 也不再提供 claim 工具。新 Session 的 id 在轉接器匯入時取得。**宣告停止與 checkout 只能在主 Session 裡執行**：子代理的子 Session 呼叫時，plugin 看到帶 `parentID` 的 Session 就拒絕。
 - **fork**：opencode 的 fork 沒有 parent 欄位、訊息 id 全部重新產生，Agora 會把它看成一個不相關的新 Session（內容與母 Session 重複）。期 1 的驗收不用 fork；偵測 fork 列在待辦。
 - **預留欄位**：交接單、接續 Link 與 Session metadata 先保留選填的 `role`、`role_version` 擴充欄位（之後 Atelier 要求接續指定職務、Session 記錄職務版本），期 1 不驗證。
 
@@ -287,8 +307,8 @@ Agora 與 Foundry 分成兩個 repo，是依 ADR 0001「要素各自獨立」。
   2. 共通 metadata schema、收件匣格式、閱讀版格式。
   3. 提交流程加 Agora 路徑（opencode、Claude Code 轉換器）。
   4. 讀取視圖與讀取介面（含新鮮度）。
-  5. Mac 容器裡的 opencode：同步器、同步並提交、分裂／統合／參照用的 skill。
-  6. Foundry（最小）。
+  5. Mac 容器裡的 opencode：同步器、同步並提交、`agora` CLI、轉接器 `agora-opencode`、分裂／統合／參照用的 skill。
+  6. 移除 git-annex 版 Foundry，提交流程只處理 Agora（ADR 0009）。
   7. Atelier 需求設計、MyLinuxPool 工單。
   8. 端到端驗收：分裂、統合、相互參照。
 - **回退**：任何一步失敗都只影響 AiStorage 自己。來源應用原本的本機紀錄不受影響，所以停用 AiStorage 不會讓任何既有功能壞掉。
