@@ -330,8 +330,9 @@ def _cmd_rollback(args: argparse.Namespace) -> int:
     else:
         from aistorage.admin.remote import check_repo_dir
 
+        # M4：既有目錄必須是 annex:: 遠端（clone 目的地才不要求）
         clone_dir = check_repo_dir(clone_dir, purpose="rollback 工作目錄")
-        git = SubprocessAnnexGit(clone_dir)
+        git = SubprocessAnnexGit(clone_dir, require_annex_remote=True)
     store = AgoraStore(clone_dir, GitRawStorage(clone_dir), git=git,
                        temp_dir=Path(tempfile.mkdtemp(prefix="admin_rollback_tmp_")))
 
@@ -426,7 +427,8 @@ def _cmd_swap_finish(args: argparse.Namespace) -> int:
                    workflow="commit.yaml", reason="swap-finish"):
         report = swap_remote(
             admin=_admin_deps(cfg, deps, deps.drive), cfg=cfg, deps=deps,
-            git=SubprocessAnnexGit(Path(args.repo_dir)),
+            # M4：swap-finish 操作的是**既有**管理 clone，必須是 annex:: 遠端
+            git=SubprocessAnnexGit(Path(args.repo_dir), require_annex_remote=True),
             repo_dir=Path(args.repo_dir), delete_groups=(),
             force_push=args.force_push, config_path=args.config)
     _emit_json(report.to_dict())

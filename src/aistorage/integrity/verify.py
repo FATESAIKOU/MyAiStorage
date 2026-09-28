@@ -56,10 +56,16 @@ def verify_annex_coverage(
 
 
 def _is_plausible_annex_key(key: str) -> bool:
-    """`SHA256E-s<size>--<sha256>[.<ext>]` 或 `WORM-s<size>--<sha256>`。"""
+    """只接受 `SHA256E-s<size>--<sha256>[.<ext>]`。
+
+    review 的 L 項：WORM key 的形狀其實是 `WORM-s<size>-m<mtime>--<name>`，**沒有
+    雜湊**，而且 WORM 檔不可驗證內容。這個 repo 只會產生 SHA256E（原始紀錄、
+    產出本體），所以 WORM 一律判成不合法——寧可在覆蓋檢查就爆掉，也不要讓
+    一個無法驗證的 key 混進釘選值。
+    """
     import re
 
-    return bool(re.match(r"^(SHA256E|WORM)-s\d+--[0-9a-f]{64}(\.[^/\s]*)?$", key))
+    return bool(re.match(r"^SHA256E-s\d+--[0-9a-f]{64}(\.[^/\s]*)?$", key))
 
 
 def verify_clone(

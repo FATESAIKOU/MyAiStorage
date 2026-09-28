@@ -21,7 +21,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from aistorage.agora import layout
 from aistorage.annex.fake import FakeAnnexGit
-from aistorage.annex.git import AnnexGit, get_git_env
+from aistorage.annex.git import DEFAULT_LARGEFILES, AnnexGit, get_git_env
 from aistorage.errors import MismatchError, ReadError, WriteError
 from aistorage.schema import validate_record_metadata
 
@@ -263,11 +263,12 @@ class GitRawStorage(RawStorage):
         dest_p.write_bytes(proc.stdout)
 
 
-#: 原始紀錄的 annex.largefiles 規則（review A-H1）。
+#: 原始紀錄的 annex.largefiles 規則。**單一來源是 `annex.git.DEFAULT_LARGEFILES`**
+#: （`clone_for_commit` 在 clone 時就設好）；這裡只是同名別名 + 給舊呼叫端用。
 #: 原始紀錄路徑是 `sessions/<source>/<id>/raw`（沒有副檔名），所以不能用
 #: `include=*.json`；實測 `include=sessions/*/*/raw` 會讓 raw 進 annex、
 #: `meta.json`／`snapshots.jsonl` 仍留在 git（只有小檔進 bundle）。
-LARGEFILES_RAW = "include=sessions/*/*/raw"
+LARGEFILES_RAW = DEFAULT_LARGEFILES
 
 
 class AnnexRawStorage(RawStorage):
@@ -311,16 +312,28 @@ class AnnexRawStorage(RawStorage):
         self._ensure_largefiles_config()
 
     def _ensure_largefiles_config(self) -> None:
-        """設定 git 配置 annex.largefiles 包含原始紀錄。
+        """只在**還沒設定**時補上 `annex.largefiles`（M2）。
 
-        A-H1：這個設定對「已經在 index 裡的檔案」無效，所以必須在建構時就設好
-        （早於任何 `store()`）。失敗要 raise：設定沒生效時後面的 lookupkey
-        會全部查不到，錯誤會被誤判成「沒有進 annex」。
+        M2：`clone_for_commit` 已經把最終規則設好了，這裡再覆寫會讓結果取決於
+        建構順序（Foundry 的 store、管理腳本直接開的 clone、FakeAnnexGit 分支都
+        沒有建構 `AnnexRawStorage`，規則就不對）。所以：
+
+        - 已經有設定 → 什麼都不做（尊重呼叫端，Foundry 可以傳自己的規則）；
+        - 沒有設定（自己 `git init` 出來的 repo）→ 補上預設規則，並在失敗時 raise
+          （A-H1：設定沒生效時後面的 lookupkey 會全部查不到，錯誤會被誤判成
+          「沒有進 annex」）。
         """
         git_dir = self.git_workdir / ".git"
         if not git_dir.exists():
             return
 
+        current = subprocess.run(
+            ["git", "-C", str(self.git_workdir), "config", "--get", "annex.largefiles"],
+            capture_output=True, text=True, check=False, env=get_git_env(),
+            timeout=30.0,
+        )
+        if current.returncode == 0 and current.stdout.strip():
+            return
         proc = subprocess.run(
             ["git", "-C", str(self.git_workdir), "config", "annex.largefiles",
              self.largefiles],
@@ -531,44 +544,46 @@ class AgoraStore:
             return False
         return any(head.startswith(prefix) for prefix in self._ANNEX_POINTER_PREFIXES)
 
-    def _annex_key_of(self, relpath: str) -> str | None:
-        """`git annex lookupkey <path>`：工作樹指標對應的 annex key。"""
-        proc = subprocess.run(
-            ["git", "-C", str(self.worktree), "annex", "lookupkey", relpath],
-            capture_output=True,
-            text=True,
-            check=False,
-            env=get_git_env(),
-            timeout=60,
-        )
-        key = proc.stdout.strip()
-        return key or None
+    def _annex_key_from_pointer(self, p: Path) -> str | None:
+        """**直接從指標檔的內容**解析 annex key（M3）。
+
+        git-annex 沒 symlink 支援時，checkout 出來的指標內容形如
+        `/annex/objects/SHA256E-s…`（或 `.git/annex/objects/…`），key 就在文字裡，
+        不需要 `git annex lookupkey`（那個指令對 locked/symlink 模式不一定準）。
+        解析不出來回傳 None（呼叫端要 fail-closed，不要退回下載全部物件）。
+        """
+        try:
+            head = p.read_bytes()[:512]
+        except OSError:
+            return None
+        text = head.decode("utf-8", "replace").strip()
+        for prefix in ("/annex/objects/", ".git/annex/objects/"):
+            if text.startswith(prefix):
+                key = text[len(prefix):].splitlines()[0].strip() if text[len(prefix):] else ""
+                return key or None
+        return None
 
     def _materialize_annexed(self, relpath: str) -> bool:
         """把 annex 指標換成真實內容（`git annex get --key=…`）。成功回傳 True。
 
-        為什麼需要：工作樹是 git-annex clone 時，`.json` 記錄（meta.json、閱讀版）
-        會被 annex 收走。git-annex 若判定這個 repo 沒有 symlink 支援，checkout 出來
-        的就是指標文字（`/annex/objects/…`）而不是內容，而且 clone 之後物件也還沒
-        抓回來。整合測試在真 Drive 上遇到：第二輪讀 `meta.json` 拿到指標文字 →
-        「JSON 損毀」→ 整輪中止。
+        為什麼需要：工作樹是 git-annex clone 時，被 annex 收走的 `.json` 記錄
+        （`read_json_file` 的相容層）會 checkout 成指標文字而不是內容，而且 clone
+        之後物件也還沒抓回來。整合測試在真 Drive 上遇到：第二輪讀 `meta.json`
+        拿到指標文字 →「JSON 損毀」→ 整輪中止。
 
-        注意 git-annex 10.x **沒有** `get --file=`／`cat --file=`（實測：會印出
-        指令清單、rc=1），只能用 `lookupkey` ＋ `get --key=`。
+        M3：**key 直接從指標內容解析**；解析不出來就 raise MismatchError。
+        原本這裡會退回 `git annex get --all`——那會把整個 repo 的所有 annex 物件
+        （= 所有 Session 的全部歷史 raw，2.6 讓遠端大約 4.5 倍）一次下載，
+        足以耗掉 runner 的 20 分鐘與磁碟，而且那一輪的耗時會讓 D9 的分鐘數估算失準。
         """
         if self.git is None:
-            return False
-        key = self._annex_key_of(relpath)
-        if key is None:
-            # 取不到 key 就整批取回（較慢，但比讀到指標文字好）
-            proc = subprocess.run(
-                ["git", "-C", str(self.worktree), "annex", "get", "--all"],
-                capture_output=True,
-                check=False,
-                env=get_git_env(),
-                timeout=900,
-            )
-            return proc.returncode == 0
+            raise MismatchError(
+                f"工作樹的檔案是 annex 指標，但沒有 git 執行個體可取回: {relpath}")
+        p = self.worktree / relpath
+        key = self._annex_key_from_pointer(p)
+        if not key:
+            raise MismatchError(
+                f"annex 指標解析不出 key（不再退回 get --all，見 review M3）: {relpath}")
         proc = subprocess.run(
             ["git", "-C", str(self.worktree), "annex", "get", f"--key={key}", "--from", "origin"],
             capture_output=True,
@@ -576,10 +591,18 @@ class AgoraStore:
             env=get_git_env(),
             timeout=300,
         )
-        return proc.returncode == 0
+        if proc.returncode != 0:
+            # 遠端沒有這個 key（或取回失敗）：fail-closed，不要靜靜續行
+            raise ReadError(
+                f"從遠端取回 annex 物件失敗 (rc={proc.returncode}): {key}（{relpath}）")
+        return True
 
     def read_json_file(self, relpath: str) -> dict[str, Any]:
-        """讀工作樹裡的 JSON 記錄；必要時先讓 git-annex 取回真正的內容。"""
+        """讀工作樹裡的 JSON 記錄；必要時先讓 git-annex 取回真正的內容。
+
+        M3：指標的處理只有一條路徑——解析不出 key 就 raise（不退回 `get --all`）；
+        取回失敗也 raise。成功取回後仍讀不到 JSON 才算「JSON 損毀」。
+        """
         p = self.worktree / relpath
         if self._is_annex_pointer(p):
             self._materialize_annexed(relpath)
@@ -587,13 +610,6 @@ class AgoraStore:
             with open(p, encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            # 可能是指標沒成功換成內容；再試一次 get，然後仍失敗才算損毀
-            if self._is_annex_pointer(p) and self._materialize_annexed(relpath):
-                try:
-                    with open(p, encoding="utf-8") as f:
-                        return json.load(f)
-                except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-                    pass
             raise MismatchError(f"真本項目 JSON 損毀: {relpath}") from None
         except OSError as e:
             raise MismatchError(f"真本項目無法讀取: {relpath} ({type(e).__name__})") from None

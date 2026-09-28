@@ -409,17 +409,26 @@ def _filter_repo(workdir: Path, origin: Sequence[tuple[str, str]],
 def _drop_local_annex_objects(repo_dir: Path, keys: Sequence[str]) -> list[str]:
     """刪掉本機 annex 物件（1.3 發現 #3：留著會在重建時被重新上傳）。
 
+    **物件的路徑是 git-annex 自己算出來的**（`.git/annex/objects/<2>/<2>/<KEY>` 的
+    fan-out 取自 key 的雜湊，不是 key 的字元），所以一律用
+    `git annex contentlocation <key>` 問——用字元去拼路徑會安靜地什麼都沒刪掉。
     annex 物件是 0444 唯讀，直接 rm 會 Permission denied，所以先 chmod。
     """
     removed: list[str] = []
-    objects = repo_dir / ".git" / "annex" / "objects"
     for key in keys:
-        for candidate in (objects / key[:2] / key[2:4] / key,
-                          objects / key[:2] / key[2:4] / f"{key}.tmp"):
-            if candidate.exists():
-                os.chmod(candidate, stat.S_IRUSR | stat.S_IWUSR)
-                candidate.unlink()
-                removed.append(key)
+        proc = subprocess.run(
+            ["git", "-C", str(repo_dir), "annex", "contentlocation", key],
+            capture_output=True, text=True, check=False, timeout=60,
+        )
+        if proc.returncode != 0:
+            continue                      # 本機沒有這個物件
+        for loc in proc.stdout.split():
+            candidate = (repo_dir / loc.strip()).resolve()
+            if not candidate.is_file():
+                continue
+            os.chmod(candidate, stat.S_IRUSR | stat.S_IWUSR)
+            candidate.unlink()
+            removed.append(key)
     return sorted(set(removed))
 
 

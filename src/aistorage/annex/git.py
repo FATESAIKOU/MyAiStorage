@@ -17,6 +17,14 @@ from aistorage.annex.manifest import normalize_ls_remote
 from aistorage.errors import ReadError, WriteError
 
 
+#: `annex.largefiles` 的預設規則（M2：single source of truth）。
+#: Agora 的原始紀錄路徑是 `sessions/<source>/<id>/raw`（沒有副檔名），所以
+#: `include=*.json` 涵蓋不到它——用 *.json 會讓每一則控制記錄（meta.json、
+#: handoffs/*.json、_committer/rejections/*.json）都變成 Drive 上的一個獨立
+#: annex 物件，bundle 與 API 呼叫次數都會膨脹。Foundry 由呼叫端傳自己的規則。
+DEFAULT_LARGEFILES = "include=sessions/*/*/raw"
+
+
 def get_git_env() -> dict[str, str]:
     """建立隔離的環境變數，防止終端機互動提示與繼承全域設定。"""
     env = dict(os.environ)
@@ -136,14 +144,30 @@ class SubprocessAnnexGit:
     """
 
     def __init__(
-        self, workdir: Path | str, *, allow_unsafe_workdir: bool = False
+        self,
+        workdir: Path | str,
+        *,
+        allow_unsafe_workdir: bool = False,
+        require_annex_remote: bool = False,
     ) -> None:
+        """`require_annex_remote=True`：這個目錄必須已經是 git repo 且
+        `remote.origin.url` 是 `annex::` 遠端。
+
+        M4：會改寫**既有目錄**的入口（admin 的 erase／rollback／swap-finish，
+        也就是「拿到一個已經存在的 clone 來改寫它」）都必須開這項——誤指到別的
+        repo（例如 MyBrain 的工作目錄）時，git-annex 指令就會改寫那個 repo。
+        這裡**預設維持 False**：`SubprocessAnnexGit` 也被用在純 git 的工作樹
+        （測試的 seed repo、一般 clone），而 `clone_for_commit` 的目的地當下
+        還不是 repo。admin 的既有目錄呼叫端一律顯式傳 True。
+        """
         from aistorage.safety import assert_safe_workdir
 
         self.workdir = (
             Path(workdir).resolve()
             if allow_unsafe_workdir
-            else assert_safe_workdir(workdir, purpose="git-annex 執行目錄")
+            else assert_safe_workdir(
+                workdir, purpose="git-annex 執行目錄",
+                require_annex_remote=require_annex_remote)
         )
 
     def _get_env(self) -> dict[str, str]:
@@ -334,9 +358,17 @@ class SubprocessAnnexGit:
         dest: Path,
         *,
         max_git_bundles: int = 10,
+        largefiles: str = DEFAULT_LARGEFILES,
         timeout: float = 600.0,
     ) -> SubprocessAnnexGit:
         """單一入口完成 clone -b main、git annex init、設定 annex.max-git-bundles 與 annex.largefiles。
+
+        M2：`annex.largefiles` 在**這裡**就設成最終規則（由呼叫端傳入，預設是
+        Agora 的 `include=sessions/*/*/raw`；Foundry 傳自己的規則），不再設
+        `include=*.json`。之前是「先 *.json、再由 AnnexRawStorage 覆寫」，結果
+        取決於建構順序：在 AnnexRawStorage 之前寫入的 JSON 會被 annex 收走，
+        讀取時要靠 `read_json_file` 的指標相容層才能讀回來（整合測試的
+        「第二輪讀到指標文字」就是這個設定的後遺症）。
 
         同時驗證 clone 後 git-annex 分支存在。
         """
@@ -383,7 +415,7 @@ class SubprocessAnnexGit:
             is_write=True,
         )
         inst._run(
-            ["git", "config", "annex.largefiles", "include=*.json"],
+            ["git", "config", "annex.largefiles", largefiles],
             is_write=True,
         )
 

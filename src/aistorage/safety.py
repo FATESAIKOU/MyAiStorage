@@ -12,10 +12,17 @@
 3. 選用 `require_temp=True` 時，該目錄必須在暫存區底下
    （`TMPDIR` 或傳入的 `temp_roots`）。
 
-`allowed_workdir_env()` 是唯一的逃生門，而且它不是預設開啟的：管理操作在正式環境
+`allowed_workdirs()` 是唯一的逃生門，而且它不是預設開啟的：管理操作在正式環境
 需要指到一個長期存在的 clone 時，必須明確設 `AISTORAGE_ALLOWED_WORKDIR`，
 值是該目錄（多個以 `:` 分隔）。提交流程自己用的是 `tempfile.mkdtemp`，
 所以永遠不需要這個逃生門。
+
+**M4 的兩道限制**（review-b1039a8）：
+- 逃生門**不再排在所有檢查之前**。允許的目錄只是「不比對專案 repo 那一條以外的其他
+  條件」而已；允許目錄**本身**仍然不得位於專案 repo 之內（否則
+  `AISTORAGE_ALLOWED_WORKDIR=<repo>/tools` 就等於把防呆關掉）。
+- 過寬的值直接拒絕：`/`、`$HOME` 與 `$HOME` 的任何祖先都不接受。
+  這類設定等於「允許任何地方」，寧可在這裡就吵起來。
 """
 
 from __future__ import annotations
@@ -72,11 +79,26 @@ def is_within(path: Path, parent: Path) -> bool:
 
 
 def allowed_workdirs() -> list[Path]:
-    """`AISTORAGE_ALLOWED_WORKDIR` 明確允許的工作目錄（多個以 `:` 分隔）。"""
+    """`AISTORAGE_ALLOWED_WORKDIR` 明確允許的工作目錄（多個以 `:` 分隔）。
+
+    過寬的值（`/`、`$HOME`、`$HOME` 的祖先）直接 raise：把它們當成允許清單
+    等於沒有防呆，而這正是 M4 要修的洞。
+    """
     raw = os.environ.get(ALLOWED_WORKDIR_ENV, "").strip()
     if not raw:
         return []
-    return [Path(p).expanduser().resolve() for p in raw.split(os.pathsep) if p.strip()]
+    home = Path.home().resolve()
+    out: list[Path] = []
+    for part in raw.split(os.pathsep):
+        if not part.strip():
+            continue
+        path = Path(part).expanduser().resolve()
+        if path == Path("/") or path == home or is_within(home, path):
+            raise UnsafeWorkdirError(
+                f"{ALLOWED_WORKDIR_ENV}={part} 太寬：拒絕 `/`、$HOME 與 $HOME 的祖先"
+                f"（允許清單等於「允許任何地方」）。請改成真正要用的那個 clone 目錄。")
+        out.append(path)
+    return out
 
 
 def assert_safe_workdir(
@@ -105,17 +127,27 @@ def assert_safe_workdir(
     import tempfile
 
     target = Path(workdir).expanduser().resolve()
-
-    for allowed in allowed_workdirs():
-        if is_within(target, allowed):
-            return target
-
     project = project_repo_toplevel()
+
+    # M4：逃生門只豁免「其他 repo / 暫存區」那兩條，**不豁免專案 repo 那一條**：
+    # 允許目錄本身落在專案 repo 之內時照樣拒絕，否則把
+    # AISTORAGE_ALLOWED_WORKDIR 設成 <repo>/tools 就能關掉整個防呆。
+    for allowed in allowed_workdirs():
+        if not is_within(target, allowed):
+            continue
+        if project is not None and is_within(allowed, project):
+            raise UnsafeWorkdirError(
+                f"{purpose}：{ALLOWED_WORKDIR_ENV} 允許的目錄 {allowed} 本身位於專案 repo"
+                f"（{project}）之內，拒絕。允許清單不能用來豁免專案 repo 的保護。"
+            )
+        return target
+
     if project is not None and is_within(target, project):
         raise UnsafeWorkdirError(
             f"{purpose}：工作目錄 {target} 位於專案 repo（{project}）之內，"
             "絕對不可以（會在專案裡建立 git-annex 分支或改寫專案歷史）。"
-            f"請改用暫存目錄；若確實需要，設定 {ALLOWED_WORKDIR_ENV} 明確指定。"
+            f"請改用暫存目錄；若確實需要，設定 {ALLOWED_WORKDIR_ENV} 明確指定"
+            "（但那個目錄不能位於專案 repo 之內）。"
         )
 
     if require_annex_remote:
