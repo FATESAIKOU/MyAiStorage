@@ -17,6 +17,8 @@ import re
 
 import pytest
 
+from aistorage.schema import generate_ulid
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AISTORAGE_HOME = Path.home() / ".config" / "aistorage"
 IDS_ENV = AISTORAGE_HOME / "ids.env"
@@ -111,10 +113,32 @@ def sandbox(real_drive, test_root_id):
 
     class Sandbox:
         test_root_id = test_root_id
+        pin_names: list[str] = []
+        pin_store = None
 
-        def create(self) -> tuple[str, str, str]:
-            """建立 `it-<ULID>` 前綴與其隔離資料夾，回傳 (name, prefix_id, quarantine_id)。"""
-            name = new_prefix_name()
+        def pin_repo_name(self) -> str:
+            """本次測試專用的釘選值條目名（`CommitterConfig.repo`）。
+
+            pin repo 是所有線的整合測試共用的一個 repo，而釘選值是「一個名稱一個檔案」。
+            大家都用 "agora" 的話兩條線會互相覆蓋對方的釘選值 → 下一輪 settle 拿到
+            別人的 manifest → sweep 把自己的真本全隔離。這裡保證名稱唯一。
+            """
+            name = f"it-{generate_ulid().lower()}"
+            self.pin_names.append(name)
+            return name
+
+        def register_pin_store(self, store) -> None:
+            """登錄本次測試的 PinStore（收尾用來刪掉條目）。"""
+            self.pin_store = store
+
+        def create(self, name_prefix: str = "it-") -> tuple[str, str, str]:
+            """建立 `<name_prefix><ULID>` 前綴與其隔離資料夾，回傳 (name, prefix_id, quarantine_id)。
+
+            `name_prefix` 預設 "it-"（git-annex 的 rcloneprefix 檢查要求以 it- 開頭）；
+            第 6 組的抹除整合測試用 "it-erase-"，好在自己的前綴底下分辨。
+            """
+            name = (new_prefix_name() if name_prefix == "it-"
+                    else f"{name_prefix}{generate_ulid()}")
             prefix_id, quarantine_id = create_prefix(real_drive, test_root_id, name)
             created.extend((prefix_id, quarantine_id))
             _SESSION_CREATED.extend((prefix_id, quarantine_id))
@@ -138,6 +162,13 @@ def sandbox(real_drive, test_root_id):
     try:
         yield box
     finally:
+        # 釘選值條目也要清（pin repo 共用，留著會堆成垃圾）
+        if box.pin_store is not None and box.pin_names:
+            from ._harness import cleanup_pin_entries
+            try:
+                cleanup_pin_entries(box.pin_store, list(box.pin_names))
+            except Exception:
+                pass
         for folder_id in list(created):
             try:
                 destroy_tree(real_drive, folder_id, test_root_id)

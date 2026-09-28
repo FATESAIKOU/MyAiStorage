@@ -357,6 +357,55 @@ def _redact_snapshots(store: AgoraStore, tmpdir: Path, session_id: str,
     return remap, new_refs, old_git_blobs
 
 
+def _origin_config(repo_dir: Path) -> list[tuple[str, str]]:
+    """`remote.origin.*` 的全部設定（URL ＋ git-annex 遠端的 type／uuid／rcloneprefix…）。"""
+    proc = subprocess.run(
+        ["git", "-C", str(repo_dir), "config", "--get-regexp", r"^remote\.origin\."],
+        capture_output=True, text=True, timeout=30, check=False)
+    pairs: list[tuple[str, str]] = []
+    for line in proc.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if key:
+            pairs.append((key, value))
+    return pairs
+
+
+def _restore_origin(repo_dir: Path, config: Sequence[tuple[str, str]]) -> None:
+    """把 filter-repo 刪掉的 `remote.origin.*` 整段還原。
+
+    `git-filter-repo --force` 會移除 origin 遠端（它假設這是乾淨的 clone，避免把
+    改寫後的歷史推回原遠端）。抹除接著要 push 回同一個 annex:: 遠端，所以必須
+    連 annex 遠端的設定（`type`／`annex-uuid`／`rcloneprefix`…）一起還原：只把
+    URL 加回來的話，`git annex copy --to=origin` 會說「no available git remote
+    named origin」，而安全檢查（origin 必須是 annex::）也會擋掉。
+    """
+    if not config:
+        return
+    url = next((v for k, v in config if k == "remote.origin.url"), None)
+    if not url:
+        return
+    current = _origin_config(repo_dir)
+    if not any(k == "remote.origin.url" for k, _ in current):
+        _git(repo_dir, "remote", "add", "origin", url)
+    elif dict(current).get("remote.origin.url") != url:
+        _git(repo_dir, "remote", "set-url", "origin", url)
+    have = {k for k, _ in current}
+    for key, value in config:
+        if key in ("remote.origin.url",) or key in have:
+            continue
+        _git(repo_dir, "config", key, value)
+
+
+def _filter_repo(workdir: Path, origin: Sequence[tuple[str, str]],
+                 *args: str) -> None:
+    proc = subprocess.run(
+        ["git-filter-repo", *args, "--force"],
+        cwd=str(workdir), capture_output=True, text=True, timeout=1800)
+    _restore_origin(workdir, origin)
+    if proc.returncode != 0:
+        raise AdminError(f"filter-repo {' '.join(args)} 失敗 (rc={proc.returncode})")
+
+
 def _drop_local_annex_objects(repo_dir: Path, keys: Sequence[str]) -> list[str]:
     """刪掉本機 annex 物件（1.3 發現 #3：留著會在重建時被重新上傳）。
 
@@ -388,6 +437,7 @@ def rewrite_local(plan: ErasePlan, *, admin: AdminDeps, store: AgoraStore,
     if check:
         _require_filter_repo()
     workdir = check_repo_dir(repo_dir, purpose="抹除改寫工作目錄")
+    origin = _origin_config(workdir)
     now = format_rfc3339(admin.clock.now(), include_fraction=True)
     remap: dict[str, str] = {}
 
@@ -410,11 +460,7 @@ def rewrite_local(plan: ErasePlan, *, admin: AdminDeps, store: AgoraStore,
     for t in session_targets:
         assert t.session_id is not None
         rel = _session_rel(t.session_id)
-        proc = subprocess.run(
-            ["git-filter-repo", "--path", rel, "--invert-paths", "--force"],
-            cwd=str(workdir), capture_output=True, text=True, timeout=1800)
-        if proc.returncode != 0:
-            raise AdminError(f"filter-repo 刪除 {rel} 失敗 (rc={proc.returncode})")
+        _filter_repo(workdir, origin, "--path", rel, "--invert-paths")
 
     # 3. segment：改寫每一份快照的 raw，收集新舊雜湊
     old_blob_ids: list[str] = []
@@ -443,11 +489,7 @@ def rewrite_local(plan: ErasePlan, *, admin: AdminDeps, store: AgoraStore,
     if old_blob_ids:
         ids_file = Path(admin.workdir) / "strip-ids.txt"
         ids_file.write_text("\n".join(sorted(set(old_blob_ids))) + "\n")
-        proc = subprocess.run(
-            ["git-filter-repo", "--strip-blobs-with-ids", str(ids_file), "--force"],
-            cwd=str(workdir), capture_output=True, text=True, timeout=1800)
-        if proc.returncode != 0:
-            raise AdminError(f"filter-repo 清除 blob 失敗 (rc={proc.returncode})")
+        _filter_repo(workdir, origin, "--strip-blobs-with-ids", str(ids_file))
     _git(workdir, "update-ref", "-d", "refs/annex/last-index", check=False)
     _git(workdir, "reflog", "expire", "--expire=now", "--all")
     _git(workdir, "gc", "--prune=now")
