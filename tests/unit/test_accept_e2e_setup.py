@@ -371,9 +371,16 @@ def test_written_configs_contain_only_ids_paths_and_format_strings(
     # 舊環境的釘選值，於是提交流程每輪都在 annex.git.clone 中止。
     assert committer_cfg["repo"].startswith("agora-e2e-"), "e2e 的釘選值要和整合測試分開"
     assert committer_cfg["repo"] != "agora"
-    assert committer_cfg["foundry"]["repo"].startswith("foundry-e2e-")
     assert committer_cfg["repo"].endswith(state["ulid"])
-    assert committer_cfg["foundry"]["repo"].endswith(state["ulid"])
+    # Foundry 走 `repos`（CommitterConfig.repos：只列 Agora 以外的 repo），
+    # 不再用舊的 `foundry:` 欄位；名稱同樣帶自己的 ulid。
+    assert "foundry" not in committer_cfg
+    foundry_cfg = committer_cfg["repos"]["foundry"]
+    assert foundry_cfg["url"].startswith("annex::")
+    assert foundry_cfg["max_raw_size"] == 104857600          # 收容產出 100 MiB
+    # Foundry 的上層資料夾要自己宣告（不能沿用 Agora 的）
+    assert foundry_cfg["prefix_levels"], "Foundry 必須自己宣告 prefix_levels"
+    assert committer_cfg["readview_folder_id_foundry"]
     assert committer_cfg["repo_url"].startswith("annex::")
     assert committer_cfg["identity_registry_path"] == "config/identity.e2e.json"
     assert state["prefix_folder_id"] == drive.get(state["prefix_folder_id"]).id

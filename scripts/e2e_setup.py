@@ -26,6 +26,7 @@ import json
 import os
 from pathlib import Path
 import re
+import re
 import shutil
 import socket
 import stat
@@ -41,6 +42,9 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from aistorage.admin.create_repo import largefiles_for
+from aistorage.agora.layout import session_raw_path
+from aistorage.foundry.layout import object_path
 from aistorage.annex.git import SubprocessAnnexGit
 from aistorage.clock import SystemClock, format_rfc3339
 from aistorage.committer.config import CommitterConfig
@@ -293,6 +297,29 @@ class AnnexSetup:
     max_git_bundles: int
 
 
+def _matches_largefiles(rel_path: str, repo_name: str) -> bool:
+    """這個相對路徑會不會被該 repo 的 `annex.largefiles` 收進 annex。
+
+    `include=<glob>` 是相對於 repo 根的 glob 比對（git-annex largefiles 的語義）。
+    這裡把 glob 轉成 regex：`*` = 一層裡的任何字元（不含 `/`）、`**` = 跨層。
+    不要自己寫另一套規則——規則改了這裡要跟著對。
+    """
+    pattern = largefiles_for(repo_name).removeprefix("include=")
+    parts: list[str] = []
+    i = 0
+    while i < len(pattern):
+        if pattern.startswith("**", i):
+            parts.append(".+")
+            i += 2
+        elif pattern[i] == "*":
+            parts.append("[^/]+")
+            i += 1
+        else:
+            parts.append(re.escape(pattern[i]))
+            i += 1
+    return re.fullmatch("".join(parts), rel_path) is not None
+
+
 def build_annex_repo(
     *,
     repo_name: str,
@@ -300,11 +327,21 @@ def build_annex_repo(
     workdir: Path,
     rclone_conf: Path,
     max_git_bundles: int = 10,
-    seed_payload: bytes,
-    seed_filename: str,
+    seed_payload: bytes | None = None,
+    seed_filename: str | None = None,
     schema_version: str,
 ) -> AnnexSetup:
-    """在暫存目錄建立乾淨之 git-annex repo，配置 largefiles 與 max-git-bundles，推送到 Drive。"""
+    """在暫存目錄建立乾淨之 git-annex repo，配置 largefiles 與 max-git-bundles，推送到 Drive。
+
+    `annex.largefiles` **用產品的單一來源**（`admin.create_repo.largefiles_for`）：
+    Agora 是 `include=sessions/*/*/raw`、Foundry 是 `include=objects/*/*`。
+    原本這裡硬寫 `include=*.json`，raw 與 objects/ 都不會被 annex（實測過），
+    而且 seed 的 JSON 反而會變成 annex 物件。
+
+    `seed_payload`／`seed_filename` 是選用的：給了就在**符合該 repo 規則**的路徑
+    放一個 annex 物件（等於在建 repo 當下就驗一次 annex 這條路走得通）。
+    給的路徑不符合規則就 raise——不要靜靜地變成 git blob。
+    """
     env = git_env(rclone_conf)
     repo = workdir / f"{repo_name}_seed"
     repo.mkdir(parents=True, exist_ok=True)
@@ -322,8 +359,8 @@ def build_annex_repo(
         repo,
         env,
     )
-    # 決策 2.6：annex.largefiles 包含 *.json，max-git-bundles=10
-    _run(["git", "annex", "config", "--set", "annex.largefiles", "include=*.json"], repo, env)
+    largefiles = largefiles_for(repo_name)
+    _run(["git", "annex", "config", "--set", "annex.largefiles", largefiles], repo, env)
     _run(["git", "config", "annex.max-git-bundles", str(max_git_bundles)], repo, env)
     _run(["git", "config", "user.email", f"e2e-{repo_name}@aistorage.local"], repo, env)
     _run(["git", "config", "user.name", f"AiStorage E2E {repo_name.capitalize()}"], repo, env)
@@ -332,23 +369,32 @@ def build_annex_repo(
     (repo / "_committer").mkdir(exist_ok=True)
     (repo / "_committer" / "schema_version").write_text(f"{schema_version}\n", encoding="utf-8")
 
+    # Foundry 的目錄結構：**不放 .gitkeep**。`.gitkeep` 是為了讓空目錄留在 git
+    # 裡，但 Foundry 的 `catalog/`、`objects/` 是由產出登錄／物件寫入時自己
+    # mkdir 出來的（`foundry/store.py` 每次寫都 mkdir parents），預先留一個空
+    # 檔案只會讓真本多一個永遠不會被讀的東西。
+    add_targets = ["README.md", "_committer"]
     if repo_name == "foundry":
         (repo / "catalog").mkdir(exist_ok=True)
         (repo / "objects").mkdir(exist_ok=True)
-        (repo / "catalog" / ".gitkeep").touch()
-        (repo / "objects" / ".gitkeep").touch()
-
-    _run(["git", "add", "README.md", "_committer"], repo, env)
-    if repo_name == "foundry":
-        _run(["git", "add", "catalog", "objects"], repo, env)
+        _run(["git", "add", "--intent-to-add", "catalog", "objects"], repo, env)
+    _run(["git", "add", *add_targets], repo, env)
     _run(["git", "commit", "-qm", f"init: {repo_name} seed layout"], repo, env)
 
-    # 寫入 seed annex payload（匹配 include=*.json，成為 annex 物件）
-    payload_path = repo / seed_filename
-    payload_path.parent.mkdir(parents=True, exist_ok=True)
-    payload_path.write_bytes(seed_payload)
-    _run(["git", "add", str(payload_path.relative_to(repo))], repo, env)
-    _run(["git", "commit", "-qm", f"init: seed annexed payload {seed_filename}"], repo, env)
+    if seed_payload is not None:
+        if not seed_filename:
+            raise RuntimeError(f"{repo_name}: 給了 seed_payload 就一定要給 seed_filename")
+        # seed 必須真的落在 largefiles 規則裡，否則它會變成 git blob 而冒充 annex 物件
+        if not _matches_largefiles(seed_filename, repo_name):
+            raise RuntimeError(
+                f"{repo_name} 的 seed 路徑 {seed_filename!r} 不符合 largefiles 規則 "
+                f"{largefiles_for(repo_name)!r}：它不會變成 annex 物件"
+            )
+        payload_path = repo / seed_filename
+        payload_path.parent.mkdir(parents=True, exist_ok=True)
+        payload_path.write_bytes(seed_payload)
+        _run(["git", "add", seed_filename], repo, env)
+        _run(["git", "commit", "-qm", f"init: seed annexed payload {seed_filename}"], repo, env)
 
     _run(["git", "annex", "copy", "--to", "drive"], repo, env)
     _run(["git", "push", "drive", "main", "git-annex"], repo, env)
@@ -1011,9 +1057,13 @@ def _setup_locked(
         temp_dir = Path(td)
         with safe_workdir_ctx(temp_dir):
             print("[e2e-setup] 正在建立 Agora git-annex 倉庫並推送到 Drive...")
+            # Agora 的 seed 放在**符合規則**的路徑（`sessions/<source>/<id>/raw`
+            # 會被 `include=sessions/*/*/raw` 收進 annex）。用真的版面路徑，
+            # 不要在 repo 根放一個 JSON 假裝是 annex 物件。
             agora_seed_payload = (
                 json.dumps({"format": "aistorage.agora/v1", "seed": True, "ulid": ulid}) + "\n"
             ).encode("utf-8")
+            agora_seed_session = f"e2e-seed:{ulid}"
             agora_annex = build_annex_repo(
                 repo_name="agora",
                 prefix=f"{prefix_name}/agora",
@@ -1021,15 +1071,18 @@ def _setup_locked(
                 rclone_conf=COMMITTER_CONF,
                 max_git_bundles=10,
                 seed_payload=agora_seed_payload,
-                seed_filename="seed-agora.json",
+                seed_filename=session_raw_path(agora_seed_session),
                 schema_version="agora/v1",
             )
             print(f"[e2e-setup] Agora 倉庫就緒: uuid={agora_annex.uuid} main={agora_annex.main_sha[:8]}")
 
             print("[e2e-setup] 正在建立 Foundry git-annex 倉庫並推送到 Drive...")
+            # Foundry 的 seed 是「一件收容產出」：`objects/<ULID>/<檔名>`
+            # （`include=objects/*/*` 收進 annex；catalog 的 JSON 留在 git）
             foundry_seed_payload = (
                 json.dumps({"format": "aistorage.foundry/v1", "seed": True, "ulid": ulid}) + "\n"
             ).encode("utf-8")
+            foundry_seed_path = object_path(ulid, "seed-foundry.json")
             foundry_annex = build_annex_repo(
                 repo_name="foundry",
                 prefix=f"{prefix_name}/foundry",
@@ -1037,7 +1090,7 @@ def _setup_locked(
                 rclone_conf=COMMITTER_CONF,
                 max_git_bundles=10,
                 seed_payload=foundry_seed_payload,
-                seed_filename="objects/seed-foundry.json",
+                seed_filename=foundry_seed_path,
                 schema_version="foundry/v1",
             )
             print(
@@ -1170,6 +1223,18 @@ def _setup_locked(
         "inbox_folder_id": inbox_folder.id,
         "pin_repo_url": pin_repo_url,
         "profile": profile,
+        # 上層同名資料夾的保護（清掃逐層檢查）。e2e 佈局是
+        # TEST_FOLDER_ID / <prefix> / {agora,foundry}，所以每一層都要自己宣告。
+        "prefix_levels": [
+            {"parent_id": test_root_id, "name": prefix_name,
+             "expected_id": prefix_folder_id},
+        ],
+        "foundry_prefix_levels": [
+            {"parent_id": prefix_folder_id, "name": "foundry",
+             "expected_id": foundry_folder.id},
+            {"parent_id": test_root_id, "name": prefix_name,
+             "expected_id": prefix_folder_id},
+        ],
     }
     reader_cfg_payload = _write_local_configs(ids)
     print(f"[e2e-setup] Reader 設定已產出: {READER_E2E_JSON}")
@@ -1226,6 +1291,8 @@ def _setup_locked(
         "agora_pin_name": agora_pin_name,
         "foundry_pin_name": foundry_pin_name,
         "pin_repo_url": pin_repo_url,
+        "prefix_levels": ids["prefix_levels"],
+        "foundry_prefix_levels": ids["foundry_prefix_levels"],
         "created_at": now_iso,
     }
     state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1291,18 +1358,28 @@ def _committer_config_payload(ids: dict[str, Any]) -> dict[str, Any]:
         "max_raw_size": 52428800,
         "quarantine_retention_days": 7,
         "ledger_retention_months": 3,
-        "prefix_levels": [],
+        "prefix_levels": ids["prefix_levels"],
         "github_repository": "FATESAIKOU/MyAiStorage-pin-test",
-        "foundry": {
-            "repo": ids["foundry_pin_name"],
-            "repo_uuid": ids["foundry_repo_uuid"],
-            "repo_url": ids["foundry_repo_url"],
-            "prefix_folder_id": ids["foundry_folder_id"],
-            "quarantine_folder_id": ids["quarantine_folder_id"],
-            "readview_folder_id": ids["foundry_readview_folder_id"],
-            "readview_manifest_file_id": ids["foundry_manifest_file_id"],
-            "pin_repo_url": ids["pin_repo_url"],
-            "max_git_bundles": 10,
+        # Foundry 用 `repos`（`CommitterConfig.repos`：只列 Agora 以外的 repo，
+        # 共用 pin repo、以 repo 名稱分檔）。不要再用舊的 `foundry:` 欄位。
+        "readview_folder_id_foundry": ids["foundry_readview_folder_id"],
+        "readview_manifest_file_id_foundry": ids["foundry_manifest_file_id"],
+        "repos": {
+            "foundry": {
+                "uuid": ids["foundry_repo_uuid"],
+                "url": ids["foundry_repo_url"],
+                "prefix_folder_id": ids["foundry_folder_id"],
+                "quarantine_folder_id": ids["quarantine_folder_id"],
+                # Foundry 自己的讀取視圖資料夾（RepoConfig 的欄位，沒有上層慣例；
+                # manifest id 則走 `readview_manifest_file_id_foundry` 的慣例）
+                "readview_folder_id": ids["foundry_readview_folder_id"],
+                # Foundry 的上層資料夾要自己宣告（M4）：沿用 Agora 的話，Foundry
+                # 的清掃會去檢查 Agora 的上層，而 Foundry 自己完全沒有保護。
+                "prefix_levels": ids["foundry_prefix_levels"],
+                # 收容產出上限 100 MiB（D7／spec 7.3）；沿用 Agora 的 50 MiB
+                # 會讓 50〜100 MB 的產出被拒成 too_large。
+                "max_raw_size": 104857600,
+            },
         },
     }
 
@@ -1325,7 +1402,7 @@ def _foundry_committer_config_payload(ids: dict[str, Any]) -> dict[str, Any]:
         "max_raw_size": 104857600,
         "quarantine_retention_days": 7,
         "ledger_retention_months": 3,
-        "prefix_levels": [],
+        "prefix_levels": ids["prefix_levels"],
         "github_repository": "FATESAIKOU/MyAiStorage-pin-test",
     }
 
@@ -1415,6 +1492,26 @@ def _missing_runtime_files(
     return missing
 
 
+def _fallback_prefix_levels(state: dict[str, Any]) -> list[dict[str, str]]:
+    """狀態檔沒記 prefix_levels 時（舊的狀態檔）從 id 推出上層那一層。"""
+    test_root_id, prefix_name = state.get("test_root_id"), state.get("prefix_name")
+    prefix_id = state.get("prefix_folder_id")
+    if not (test_root_id and prefix_name and prefix_id):
+        return []
+    return [{"parent_id": test_root_id, "name": prefix_name, "expected_id": prefix_id}]
+
+
+def _fallback_foundry_prefix_levels(state: dict[str, Any]) -> list[dict[str, str]]:
+    """Foundry 的上層：前綴資料夾裡的 `foundry`，再加前綴本身那一層。"""
+    prefix_id = state.get("prefix_folder_id")
+    foundry_id = state.get("foundry_folder_id")
+    if not (prefix_id and foundry_id):
+        return []
+    levels = [{"parent_id": prefix_id, "name": "foundry", "expected_id": foundry_id}]
+    levels.extend(_fallback_prefix_levels(state))
+    return levels
+
+
 def _repair_local_configs(state: dict[str, Any], *, secrets_root: Path | None = None) -> int:
     """用狀態檔裡的 id 補回缺的本機設定檔；回傳補了幾個。
 
@@ -1440,6 +1537,10 @@ def _repair_local_configs(state: dict[str, Any], *, secrets_root: Path | None = 
         "inbox_folder_id": state["inbox_folder_id"],
         "pin_repo_url": state.get("pin_repo_url", PIN_REPO_URL),
         "profile": state.get("profile") or resolve_e2e_profile(),
+        "prefix_levels": state.get("prefix_levels") or _fallback_prefix_levels(state),
+        "foundry_prefix_levels": (
+            state.get("foundry_prefix_levels") or _fallback_foundry_prefix_levels(state)
+        ),
     }
     root = secrets_root if secrets_root is not None else resolve_secrets_root()
     missing_before = _missing_local_configs()
