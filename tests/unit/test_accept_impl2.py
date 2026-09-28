@@ -15,8 +15,6 @@ import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from aistorage.converters import get_converter
 from aistorage.identity import generate_keypair
 from aistorage.reading import validate_reading
@@ -493,11 +491,6 @@ def _agora_reader_fixture(tmp_path: Path):
     return AgoraReader(ReadViewClient(drive, cfg, clock=clock), clock=clock)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="未知 kind 的 Link 目前會原樣回傳、沒有被忽略："
-           "get_session 應過濾只剩 continuation／reference（spec session-link）",
-)
 def test_unknown_link_kind_is_ignored(tmp_path: Path):
     """讀者不認得新類型的 Link 就忽略，而不是視為錯誤。
 

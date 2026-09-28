@@ -16,6 +16,7 @@ from aistorage.search.index import (
     normalize_time,
 )
 from aistorage.search.query import (
+    KNOWN_LINK_KINDS,
     MAX_LIMIT,
     Hit,
     MessageMatch,
@@ -38,6 +39,7 @@ __all__ = [
     "MAX_LIMIT",
     "HandoffRow",
     "Hit",
+    "KNOWN_LINK_KINDS",
     "IndexEntry",
     "IndexMeta",
     "IndexStats",

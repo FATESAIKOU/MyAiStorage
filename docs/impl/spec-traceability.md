@@ -124,7 +124,7 @@ Requirement（與它的 Scenario）逐一對到驗證它的測試。測試以檔
 
 ### Requirement: Session Link 的兩種類型
 - Scenario: 一個 Session 有多條接續 Link → 單元 `test_accept_apply.py::test_apply_claim_single_claim_and_consolidation`、`test_agora_apply_smoke.py::test_converge_two_to_one`；e2e `test_consolidation.py::test_9_2_consolidation_n_to_1`
-- 「不認得新類型就忽略」→ 單元 `test_accept_impl2.py::test_unknown_link_kind_is_ignored`（以 `xfail(strict=True)` 鎖住：未知 kind 目前原樣回傳、沒有被忽略；修法見回報程式缺口 G-1；impl2 補）。
+- 「不認得新類型就忽略」→ 單元 `test_accept_impl2.py::test_unknown_link_kind_is_ignored`（未知 kind 不回傳、不報錯；G-1 已修好：`search/query.py::get_links` 以 `KNOWN_LINK_KINDS` 過濾，`reader::get_session` 經它取數故一併正確；索引照存，不過濾寫入）。
 
 ### Requirement: 接續經由交接單與認領建立
 - Scenario: 分裂（切分工作） → 單元 `test_accept_apply.py::test_apply_claim_single_claim_and_consolidation`、`test_agora_apply_smoke.py::test_split_one_to_two`；e2e `test_split.py::test_9_1_split_1_to_n`
@@ -211,19 +211,18 @@ Requirement（與它的 Scenario）逐一對到驗證它的測試。測試以檔
 ## 總結
 
 - Requirement 總數：**42**（Scenario 總數 60）。
-- 有測試覆蓋（所有列出的 Scenario 都對得到測試）：**36**。
-- 部分覆蓋（Requirement 下有一條以上 Scenario 未覆蓋）：**4**。
+- 有測試覆蓋（所有列出的 Scenario 都對得到測試）：**37**。
+- 部分覆蓋（Requirement 下有一條以上 Scenario 未覆蓋）：**3**。
 - 完全未覆蓋：**2**（兩條都是 spec 註明不驗收／設計上成立，不算缺口）。清單如下。
 
 **完全未覆蓋（2，均不算缺口）**
 1. session-sync / 同步不以其他執行體存在為前提 —— spec 已註明「架構保證、第 9 組不另外驗收」，建議不算缺口。
 2. mybrain / MyBrain 既有寫入流程不變 —— AiStorage 沒有提供寫入 MyBrain 的路徑（設計上成立），建議保留說明、不算缺口。
 
-**部分覆蓋（4）**
+**部分覆蓋（3）**
 1. common/identity / 期 1 的身分種類：「新增手機 App profile 不變更模型」為設計性質，未單獨覆蓋（沒有第二個真實 profile 的端到端測試；期 1 外）。
 2. session-record / 抹除：「AI 只能提醒」已補（`test_accept_impl2.py::test_skill_exposes_no_erase_capability`）；worker 憑證抹除的單元層已補（`test_accept_gaps.py`），**整合層的 403 負向案例仍缺**（要真 worker conf，見 e2e README；非測試資源可覆蓋）。
-3. session-link / Session Link 的兩種類型：未知 Link 類型被忽略未覆蓋 → 已寫成 strict xfail（`test_accept_impl2.py::test_unknown_link_kind_is_ignored`，見程式缺口 G-1）。
-4. session-link / 所屬案件：單元層已覆蓋；端到端「依案件列出分裂與統合的 Session」由 e2e 覆蓋（本輪未實際跑 e2e，環境由 impl3 占用）。
+3. session-link / 所屬案件：單元層已覆蓋；端到端「依案件列出分裂與統合的 Session」由 e2e 覆蓋（本輪未實際跑 e2e，環境由 impl3 占用）。
 
 **impl2 本輪補上（`tests/unit/test_accept_impl2.py`，7 綠＋1 strict xfail）**
 1. item-model / id 不變（搬移類比）＋ mybrain / id 指不到案件 → `test_case_id_is_opaque_and_dangling_ids_stay_readable` ✅
@@ -233,7 +232,7 @@ Requirement（與它的 Scenario）逐一對到驗證它的測試。測試以檔
 5. session-record / 抹除（AI 只能提醒）→ `test_skill_exposes_no_erase_capability` ✅
 6. session-record / 永久保存（來源端刪除）→ `test_source_deletion_does_not_touch_agora` ✅
 7. session-sync / 每個來源應用一個同步器（同步器與來源無關）→ `test_syncer_is_source_agnostic_for_a_new_app` ✅
-8. session-link / 未知 Link 類型忽略 → `test_unknown_link_kind_is_ignored`（strict xfail，見 G-1）
+8. session-link / 未知 Link 類型忽略 → `test_unknown_link_kind_is_ignored` ✅（G-1 已修好，不再 xfail）
 
 **F-M1 已修好（由紅轉綠）**
 - `test_accept_gaps.py::test_foundry_freshness_uses_the_generation_published_at` 不再 xfail，直接通過；同契約另有 `test_foundry_reader_74.py::test_snapshot_time_is_published_at` 與整合 `test_foundry_publish.py`（真 Drive 全鏈）覆蓋。追溯表 foundry 條目已更新。
@@ -243,9 +242,9 @@ Requirement（與它的 Scenario）逐一對到驗證它的測試。測試以檔
 2. 用 worker 憑證執行抹除必須 403／404 ✅ 單元層（`test_erase_cli_requires_management_credentials`、`test_worker_credentials_cannot_delete_true_copy_files`、`test_worker_credentials_give_404_on_repo_folders`、`test_erase_plan_refuses_files_outside_the_allowed_parents`）
 3. Foundry 讀取的新鮮度附帶 ✅（`test_foundry_results_attach_a_snapshot_time`、`test_foundry_get_attaches_snapshot_time_and_freshness`；F-M1 修好後時間基準也 ✅，見上）
 
-**程式缺口清單（需改程式才能過，每條附 spec 出處與建議修法）**
+**程式缺口清單**
 
-- **G-1（唯一需改程式的缺口）**：session-link「Session Link 的兩種類型」（`specs/agora/session-link`：「Link 的類型集合 SHALL 可以擴充，不認得新類型的讀取者 MUST 忽略該 Link」）—— `AgoraReader.get_session` 目前把未知 `kind`（如 `endorsement`）原樣回傳，沒有忽略。鎖定測試 `test_accept_impl2.py::test_unknown_link_kind_is_ignored`（strict xfail）。建議修法：在 `reader/__init__.py` 的 `get_session`（與 `get_links` 回傳處）過濾只剩 `continuation`／`reference`，未知 kind 略過（不報錯）；`get_continuation` 的 sibling 篩選已只認 `continuation`，行為一致即可。
+- **G-1（已修好）**：session-link「Session Link 的兩種類型」（`specs/agora/session-link`）—— `search/query.py::get_links` 以 `KNOWN_LINK_KINDS`（`continuation`／`reference`）過濾後回傳，不報錯；`reader::get_session` 與 `get_continuation` 都經它取數，故一併正確。索引寫入不過濾（未知 kind 照存，將來新類型讀者可讀）。鎖定測試 `test_accept_impl2.py::test_unknown_link_kind_is_ignored` 已由紅轉綠（不再 xfail）。呼叫端檢查：syncer（`commit.py::_is_visible` 比對已限定 kind／id，不受影響）、skill `read`（透傳 `links_out`，過濾正是 spec 要的行為）、publisher 寫路徑（只產兩種 kind）。
 - **非缺口（記錄供 archive 判斷）**：
   - session-record／抹除的整合層 worker 403 負向案例：要真 worker conf（見 e2e README），非測試資源可覆蓋；單元層已擋（`test_accept_gaps.py`），e2e 有 `test_9_4_worker_cannot_delete_or_modify_true_store`（由 e2e 覆蓋，本輪未跑）。
   - 9.x e2e 情境（`test_split.py::test_9_1_split_1_to_n`、`test_consolidation.py`、`test_reference.py::test_9_3_mutual_reference_n_to_m`、`test_adversarial.py` 4 項、`test_persistence.py`）：一律標「由 e2e 覆蓋」，本輪未實際跑（環境由 impl3 占用）。其中 `test_persistence.py` 的 task 子 Session 斷言與 `test_consolidation.py::test_9_2_foundry_artifact_registration` 目前是 xfail（修好會 XPASS）。

@@ -319,17 +319,29 @@ def _link_row(row: tuple) -> LinkRow:
                    message_id=row[6], reference_id=row[7], read_snapshot_at=row[8])
 
 
+#: 讀取者認得的 Session Link 類型（specs/agora/session-link）。
+#: 類型集合可以擴充；不認得新類型的讀取者 MUST 忽略該 Link，而不是視為錯誤。
+#: 索引照存（build_index 不過濾），只在讀出時忽略。
+KNOWN_LINK_KINDS = frozenset({"continuation", "reference"})
+
+
 def get_links(db: sqlite3.Connection, session_id: str
               ) -> tuple[list[LinkRow], list[LinkRow]]:
-    """回傳 (出去的 Link, 指向它的 Link)。"""
+    """回傳 (出去的 Link, 指向它的 Link)。
+
+    未知 kind 的 Link 在此忽略（spec session-link「兩種類型」）：
+    不報錯、不回傳。寫入路徑（publisher.collect_links）目前只產出
+    continuation／reference；將來新增類型時舊讀者照常運作。
+    """
     ensure_sqlite_version()
     order = ("ORDER BY from_session_id, to_session_id,"
              " COALESCE(handoff_id,''), COALESCE(reference_id,'')")
-    out = [tuple(_link_row(r) for r in db.execute(
-        f"SELECT * FROM links WHERE from_session_id = ? {order}", (session_id,)))]
-    out.append(tuple(_link_row(r) for r in db.execute(
-        f"SELECT * FROM links WHERE to_session_id = ? {order}", (session_id,))))
-    return (list(out[0]), list(out[1]))
+    out_rows = [_link_row(r) for r in db.execute(
+        f"SELECT * FROM links WHERE from_session_id = ? {order}", (session_id,))]
+    in_rows = [_link_row(r) for r in db.execute(
+        f"SELECT * FROM links WHERE to_session_id = ? {order}", (session_id,))]
+    return ([r for r in out_rows if r.kind in KNOWN_LINK_KINDS],
+            [r for r in in_rows if r.kind in KNOWN_LINK_KINDS])
 
 
 def _handoff_row(row: tuple) -> HandoffRow:
