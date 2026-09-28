@@ -5,6 +5,7 @@
 - design.md D2（第 5 步 clone 驗證、第 9 步預檢、第 10 步 push 後重放驗證）
 - review-1.2-1.6 H3（push 後以 ls-remote 驗證）
 - review-1.4f3 M1（push 後驗證：active 清單比對、created_time、removed 包含關係、重放比對）
+- review-cdb4a34 M3（同名檔：任一檔 checksum＋size 相符就算存在）
 """
 
 from __future__ import annotations
@@ -14,14 +15,14 @@ import hashlib
 from pathlib import Path
 import shutil
 import tempfile
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterable
 from datetime import datetime
 
 from aistorage.annex.git import AnnexGit
 from aistorage.annex.manifest import parse_bundle_name, parse_manifest
 from aistorage.annex.replay import replay_refs
 from aistorage.clock import parse_rfc3339
-from aistorage.drive.model import DriveClient
+from aistorage.drive.model import DriveClient, DriveFile
 from aistorage.errors import MismatchError
 from aistorage.integrity.pin import PinState
 from aistorage.integrity.settle import RepoListing, check_manifest_continuity
@@ -66,6 +67,39 @@ def _is_plausible_annex_key(key: str) -> bool:
     import re
 
     return bool(re.match(r"^SHA256E-s\d+--[0-9a-f]{64}(\.[^/\s]*)?$", key))
+
+
+def _key_size_and_sha(key: str) -> tuple[int, str] | None:
+    """從 annex key 解析出 `(size, sha256)`；形狀不合法回 None。"""
+    size_text, _, sha_text = key.partition("--")
+    try:
+        key_size = int(size_text.split("-s", 1)[1])
+    except (IndexError, ValueError):
+        return None
+    return key_size, sha_text.split(".", 1)[0].lower()
+
+
+def find_annex_file(files: Iterable[DriveFile], key: str) -> DriveFile | None:
+    """在這批檔案裡找「**任一**」checksum 與 size 都和 key 相符的檔案。
+
+    M3（review-cdb4a34）：Drive 允許同一個資料夾裡有多個**同名**檔（1.4i 實測），
+    所以「同名就是它」不成立。舊的寫法用 `{name: file}` 建字典，後者覆蓋前者，
+    於是住民只要在前綴放一個與釘選 key 同名的垃圾檔，就可能正好被選到 → 判定
+    物件不存在 → 整輪中止，而且每一輪重放一次就是零成本的 DoS。
+
+    正確的判斷是「**有任何一個**同名檔的 checksum 與 size 相符就算存在」：
+    真的那份物件一定符合，而假的永遠不符合。
+    """
+    parsed = _key_size_and_sha(key)
+    if parsed is None:
+        return None
+    key_size, key_sha = parsed
+    for f in files:
+        if f.name != key or f.is_folder:
+            continue
+        if f.sha256 is not None and f.sha256.lower() == key_sha and f.size == key_size:
+            return f
+    return None
 
 
 def verify_clone(
@@ -132,31 +166,27 @@ def verify_pin_keys_on_drive(
     清掃第 4 步判定 annex 物件用的是同一套規則）。少一個就是真的不見了 →
     中止（fail-closed，寧可不要靜靜地把真本當成完整的）。
 
-    `repo_listing` 是第 3 步列舉的前綴（此時還沒有本輪的寫入，所以拿來比對
-    釘選值是安全的）。
+    `repo_listing` 必須是**第 4 步 sweep 之後**重新列舉的前綴（M3）：sweep 之前
+    的 listing 還含著被隔離掉的同名注入檔，用它比對會把「真的那份物件明明還在」
+    判成不存在。
     """
     if not state.annex_keys:
         return
     if repo_listing is not None:
-        by_name = {f.name: f for f in repo_listing.files if not f.is_folder}
+        candidates = tuple(repo_listing.files)
     else:
-        by_name = {
-            f.name: f for f in drive.list_children(prefix_folder_id) if not f.is_folder
-        }
+        candidates = tuple(drive.list_children(prefix_folder_id))
     missing: list[str] = []
     unreadable: list[str] = []
     for key in sorted(state.annex_keys):
         if not _is_plausible_annex_key(key):
             unreadable.append(f"{key}（形狀不合法）")
             continue
-        f = by_name.get(key)
-        if f is None:
+        by_name = tuple(f for f in candidates if f.name == key)
+        if not by_name:
             missing.append(key)
             continue
-        size_text, _, sha_text = key.partition("--")
-        key_size = int(size_text.split("-s", 1)[1])
-        key_sha = sha_text.split(".", 1)[0].lower()
-        if f.sha256 is None or f.sha256.lower() != key_sha or f.size != key_size:
+        if find_annex_file(by_name, key) is None:
             unreadable.append(key)
     if missing or unreadable:
         raise MismatchError(
@@ -190,26 +220,19 @@ def verify_new_keys_on_drive(
     """
     if not new_keys:
         return 0
-    by_name = {
-        f.name: f for f in drive.list_children(prefix_folder_id) if not f.is_folder
-    }
+    candidates = tuple(drive.list_children(prefix_folder_id))
     problems: list[str] = []
     for key in sorted(new_keys):
         if not _is_plausible_annex_key(key):
             problems.append(f"{key}（形狀不合法）")
             continue
-        f = by_name.get(key)
-        if f is None:
+        by_name = tuple(f for f in candidates if f.name == key)
+        if not by_name:
             problems.append(f"{key}（Drive 上沒有同名檔案）")
             continue
-        size_text, _, sha_text = key.partition("--")
-        key_size = int(size_text.split("-s", 1)[1])
-        key_sha = sha_text.split(".", 1)[0].lower()
-        if f.sha256 is None or f.sha256.lower() != key_sha:
-            problems.append(f"{key}（Drive checksum 不符或尚未提供）")
-            continue
-        if f.size is not None and f.size != key_size:
-            problems.append(f"{key}（Drive size {f.size} != key 內嵌 {key_size}）")
+        # M3：同名多檔時，只要**任一**檔 checksum 與 size 都相符就算存在。
+        if find_annex_file(by_name, key) is None:
+            problems.append(f"{key}（同名檔的 checksum／size 都不符 key 內嵌值）")
     if problems:
         raise MismatchError(
             f"這一輪新寫的 annex 物件沒有真的在 Drive 上（{len(problems)} 個）："

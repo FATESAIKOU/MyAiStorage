@@ -321,6 +321,7 @@ class AdminLock:
 ```
 
 - **committer 那一側（第 3 組要改一行）**：`pins.load()` 之後，如果 `.pin/<repo>.maintenance` 存在，**立刻以 `maintenance` 結束**（不清掃、不 push、不發佈，也不刪除收件匣）。
+  - 實作時補上三件事（review-cdb4a34 M1／L）：旗標要**讀遠端**（`read_text` 先 `fetch origin main` 再 `git show origin/main:<path>`，fetch 失敗就 raise，否則 pipeline 內的重查讀到的都是第 3 步那時的舊狀態近乎恆真）；推送釘選值時若發現遠端出現 `.maintenance` 就以 `AbortRun("maintenance", "active")` 中止；旗標**讀不到**（`unreadable`）與**有維護中**（`active`）分開報告。
   - 這同時滿足 6.5 的「重建釘選值期間暫停清掃」。
   - 即使住民在管理操作期間重新啟用並觸發 workflow，也不會互相覆蓋。
 - **驗收**（task 6.5）：管理操作期間，(a) 同時觸發提交流程，(b) 用住民的 token 重新啟用並觸發。兩種情況的 run 都必須在 `maintenance` 結束，而且遠端的 refs 不變。

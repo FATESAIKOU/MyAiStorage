@@ -239,7 +239,8 @@ def _init_pin_under_lock(cfg: CommitterConfig, deps: Deps) -> None:
         repo=cfg.repo, pins=pins, gh=gh, workflow=cfg.committer_workflow,
         reason="init-pin", precheck=_precheck,
     ):
-        init_pin_cli(cfg, deps, confirm=True)
+        # 我們在 AdminLock 裡，那把鎖的旗標就是自己放的 → 允許 promote 覆蓋它。
+        init_pin_cli(cfg, deps, confirm=True, maintenance_ok=True)
 
 
 if __name__ == "__main__":

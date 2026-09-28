@@ -1427,11 +1427,15 @@ def test_git_pin_store_non_fast_forward_rejected(tmp_path: Path):
 
 
 def test_git_pin_store_refuses_rebase_when_same_repo_files_changed(tmp_path: Path):
-    """M1（review-b1039a8）：遠端動到**同一個 repo** 的釘選值 → 中止，不 rebase 上去。
+    """M1（review-b1039a8／review-cdb4a34）：遠端動到**同一個 repo** → 中止，不 rebase。
 
     允許 rebase 的唯一情況是遠端新增的檔案全部屬於其他 repo（多條線共用同一個
-    pin repo 時的正常情況）。管理者剛上鎖會寫 `.pin/<repo>.maintenance`，那屬於
-    同一個 repo，必須停下來。
+    pin repo 時的正常情況）。
+
+    管理者剛上鎖會寫 `.pin/<repo>.maintenance`，那屬於同一個 repo：必須停下來，
+    而且要以 `AbortRun("maintenance", "active")` 中止（review-cdb4a34 M1）——
+    語意要讓 `run()` 走「維護中」的路徑（整輪停止、不刪收件匣、報告寫
+    `maintenance=active`），不是一個「不明原因的寫入失敗」。
     """
     pin_remote = tmp_path / "pin_remote_m1.git"
     _init_bare_pin_repo(pin_remote, tmp_path / "init_work_m1")
@@ -1463,9 +1467,11 @@ def test_git_pin_store_refuses_rebase_when_same_repo_files_changed(tmp_path: Pat
     store1._run_git(["commit", "-qm", "maintenance on: agora"])
     store1._run_git(["push", "-q", "origin", "main"])
 
-    # store2 這時寫自己的 agora → 遠端有同 repo 的變更 → 必須中止
-    with pytest.raises(WriteError):
+    # store2 這時寫自己的 agora → 遠端有同 repo 的維護旗標 → AbortRun 中止
+    with pytest.raises(AbortRun) as excinfo:
         store2.promote(_state("agora", "2" * 40, "run-2"))
+    assert excinfo.value.step == "maintenance"
+    assert excinfo.value.code == "active"
 
 
 def test_git_pin_store_recovers_stale_ref_by_rebase(tmp_path: Path):

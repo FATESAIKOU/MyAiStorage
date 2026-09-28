@@ -139,7 +139,9 @@ class RunReport:
     readview_publish: str | None = None
     #: 發佈失敗時的例外類型名（不印內文，避免洩漏路徑或內容）
     publish_error: str | None = None
-    #: 管理操作進行中：active（有維護旗標）／flag_corrupt（旗標損毀，fail-closed）
+    #: 維護旗標的狀態（fail-closed，三者意義不同，別混）：
+    #: active（有維護旗標，管理操作進行中）／unreadable（旗標讀不到，例如 pin repo
+    #: 連不上或 fetch 失敗）／flag_corrupt（旗標內容損毀）。
     maintenance: str | None = None
     #: 維護旗標的原因字串（管理者留下的，會出現在 log，所以只印短字串）
     maintenance_reason: str | None = None
@@ -190,10 +192,17 @@ def _pipeline_step(current_step: str, ctx: PipelineContext | None) -> str:
 
 
 def _check_maintenance(cfg: CommitterConfig, deps: Deps, report: RunReport) -> bool:
-    """檢查 pin repo 的維護旗標；**整輪**不做任何事。
+    """檢查 pin repo 的維護旗標；命中就**整輪**不做任何事。
 
-    回傳 True 表示「因為維護中而結束」。旗標讀不到或損毀時 fail-closed：
-    把它當成維護中（中止），寧可少跑一輪，也不要在管理操作期間動真本。
+    回傳 True 表示「因為旗標而結束」。三種結果寫在 `report.maintenance`：
+
+    - `active`：有維護旗標（管理操作進行中）；
+    - `unreadable`：旗標讀不到（pin repo 連不上／fetch 失敗）→ fail-closed，
+      寧可少跑一輪，也不要在管理操作期間動真本；
+    - `flag_corrupt`：旗標內容損毀 → 同樣 fail-closed，但不猜它的意思。
+
+    三者都會中止這一輪，但**分開報告**（L，review-cdb4a34）：`unreadable` 是要
+    人處理的故障，`active` 是正常的管理窗口。
 
     讀不到 `read_text` 一律 raise `TypeError`——不能默默當成「沒有維護中」。
     """
@@ -211,9 +220,15 @@ def _check_maintenance(cfg: CommitterConfig, deps: Deps, report: RunReport) -> b
     try:
         raw = read_text(maintenance_relpath(cfg.repo))
     except AiStorageError as e:
-        # 讀不到旗標本身（例如 pin repo 連不上）：fail-closed，中止這一輪
+        # 讀不到旗標本身（例如 pin repo 連不上、fetch 失敗）：fail-closed，中止
+        # 這一輪。**與「有維護中」分開報告**（L，review-cdb4a34）：兩者的處理
+        # 完全不同——`active` 是「有人在管理操作，之後會解除」，`unreadable` 是
+        # 「flag repo 壞掉／連不上，要人處理」。混在一起會讓 6.3 的健康檢查把
+        # 連線問題當成正常的維護中。
         report.aborted_at = "maintenance"
         report.code = type(e).__name__
+        report.maintenance = "unreadable"
+        _dump_traceback(report.run_id, "maintenance", e)
         return True
 
     if raw is None:
@@ -245,15 +260,24 @@ def _assert_no_maintenance(
     刪了就永久遺失）。所以：
 
     - 重查點放在 **write_pending 之前**、**push 之前**與 **promote 之前**；
-    - 命中一律 `raise AbortRun("maintenance", "active")`，讓 `run()` 走
-      `except AbortRun`：不執行第 14 步。
+    - 命中一律 `raise AbortRun("maintenance", <旗標狀態>)`，讓 `run()` 走
+      `except AbortRun`：不執行第 14 步（已 push 但未 promote 的項目不能刪，
+      交接單、認領是一次性的，刪了就永久遺失）。
+    - 讀的是**遠端**旗標（M1：`GitPinStore.read_text` 會先 fetch），所以這三個
+      重查看得到「上一次重查之後才上鎖」的情況；`write_pending`／`promote` 推送
+      釘選值時若發現遠端出現 `.maintenance`，也會以 AbortRun 中止。
     """
     probe = _ProbeRunReport()
     if not _check_maintenance(cfg, deps, probe):
         return
-    report.maintenance = probe.maintenance or "active"
+    # L（review-cdb4a34）：把 probe 的結果照實轉記，不要一律寫成 `active`。
+    # `active`（有人在管理操作）／`unreadable`（旗標讀不到，fail-closed）／
+    # `flag_corrupt`（旗標內容損毀）是三種不同的事，報告與健康檢查要分得出來。
+    report.maintenance = probe.maintenance or "unreadable"
     report.maintenance_reason = probe.maintenance_reason
-    raise AbortRun("maintenance", "active", f"{cfg.repo} 正在維護中（{step}）")
+    code = "active" if report.maintenance == "active" else (
+        probe.code or report.maintenance)
+    raise AbortRun("maintenance", code, f"{cfg.repo} 的維護旗標擋下這一輪（{step}）")
 
 
 class _ProbeRunReport:
@@ -443,11 +467,17 @@ def init_pin_cli(
     deps: Deps,
     *,
     confirm: bool = False,
+    maintenance_ok: bool = False,
 ) -> PinState:
     """CLI init-pin: 首次建立正式釘選值（管理者身分，只有 confirm=True 會寫入）。
 
     釘選值只針對 `cfg` 描述的**一個**實體（期 1 是 Agora）。要為別的實體建立，
     就在它自己的設定檔下跑（ADR 0009：閘門是每個實體各一套）。
+
+    `maintenance_ok` 只有一個使用情境：呼叫端**自己在 `AdminLock` 裡**
+    （`admin lock` 的旗標就是它放的，這時旗標存在是預期的），例如
+    `_init_pin_under_lock` 與 `swap_remote` 的 SWAP_PIN。提交流程不呼叫
+    `init_pin_cli`，也不該傳 True。
     """
     children = deps.drive.list_children(cfg.prefix_folder_id)
     files = tuple(f for f in children if not f.is_folder)
@@ -539,7 +569,7 @@ def init_pin_cli(
     )
 
     if confirm:
-        deps.pins.promote(state)
+        deps.pins.promote(state, maintenance_ok=maintenance_ok)
         print(
             f"INIT_PIN_PROMOTED: repo={state.repo} manifest={m_sha[:8]} "
             f"active={len(state.active_bundles)} keys={len(state.annex_keys)}"
@@ -662,6 +692,16 @@ class PipelineContext:
         self.report.durations_ms[key] = self.report.durations_ms.get(key, 0) + int(ms)
 
 
+def _relist_prefix(drive: DriveClient, prefix_folder_id: str) -> RepoListing:
+    """重新列舉前綴（sweep 之後用；見第 4 步的 M3 註解）。"""
+    children = drive.list_children(prefix_folder_id)
+    return RepoListing(
+        prefix_folder_id=prefix_folder_id,
+        files=tuple(f for f in children if not f.is_folder),
+        subfolders=tuple(f for f in children if f.is_folder),
+    )
+
+
 def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
     """第 3〜13 步：settle → sweep → clone → apply → push → 轉正 → 發佈。
 
@@ -779,6 +819,13 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
         dry_run=dry_run,
     )
     ctx.bump("quarantined_files", moved_count)
+    # M3（review-cdb4a34）：第 5 步要問 Drive「釘選值記載的物件還在嗎」，那個
+    # 判斷必須用**sweep 之後**的前綴。sweep 之前的 listing 還含著剛被隔離的同名
+    # 注入檔，而 Drive 允許同名檔存在——用它比對會把「真的那份物件明明還在」
+    # 判成不存在，讓住民能零成本地讓每一輪都中止。
+    # 重新列舉一次（多一次 list_children）換掉整輪後面步驟（5、11、12）看到的
+    # 視圖：被隔離的檔案本來就不該再被拿來比對或回收。
+    repo_listing = _relist_prefix(deps.drive, rcfg.prefix_folder_id)
     ctx.time("integrity.sweep", int((time.monotonic() - t0) * 1000))
 
     # ---------------------------------------------------------
@@ -812,6 +859,8 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
     # 也不會被帳本的形式擺平。
     # location log 仍然拿來算 pending（第 9 步要記「push 之後遠端會有什麼」），
     # 只是不再拿來當這一輪的門檻。
+    # `repo_listing` 是 sweep **之後**重新列舉的（見第 4 步），而且同名檔以
+    # 「任一檔 checksum＋size 相符」為準（verify.find_annex_file，M3）。
     verify_pin_keys_on_drive(
         deps.drive, rcfg.prefix_folder_id, state, repo_listing=repo_listing)
     ctx.bump("annex_keys_checked", len(state.annex_keys))

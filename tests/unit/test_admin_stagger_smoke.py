@@ -505,8 +505,10 @@ def test_init_pin_confirm_takes_the_lock(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(admin_lock, "GitPinFiles", lambda *a, **k: pins)
     monkeypatch.setattr(admin_lock, "GitHubAdmin", lambda *a, **k: gh)
     seen: list[bool] = []
-    monkeypatch.setattr(committer_main, "init_pin_cli",
-                        lambda cfg, deps, *, confirm=False, target=None: seen.append(confirm))
+    # init-pin 走的是 AdminLock 裡的 promote（maintenance_ok=True）
+    monkeypatch.setattr(
+        committer_main, "init_pin_cli",
+        lambda cfg, deps, *, confirm=False, maintenance_ok=False: seen.append(confirm))
 
     cfg = CommitterConfig(
         repo="agora", repo_uuid=UUID, repo_url="drive://agora",

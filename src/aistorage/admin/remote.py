@@ -382,7 +382,9 @@ def swap_remote(*, admin: AdminDeps, cfg: Any, deps: Any, git: Any,
         else:
             from aistorage.committer.run import init_pin_cli
 
-            state = init_pin_cli(cfg, deps, confirm=True)
+            # 呼叫端已在 AdminLock 裡（旗標就是自己放的）→ 允許 promote 覆蓋它；
+            # 這一輪也順便把上一輪被維護旗標擋下而留下的 pending 清掉（L，review-cdb4a34）。
+            state = init_pin_cli(cfg, deps, confirm=True, maintenance_ok=True)
         report.promoted_at = state.promoted_at
         report.steps.append(SwapStep(
             name=SWAP_PIN, status="ok",

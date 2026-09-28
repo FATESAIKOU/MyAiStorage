@@ -322,6 +322,14 @@ def verify_clone(git: AnnexGit, state: PinState, *, drive: DriveClient, prefix_f
     # 第 5 步：git.ls_remote() 的 ref 集合與值 == state.refs；遠端主 manifest（以 find_by_name
     #          找、只允許恰好一個）的 sha256Checksum == state.manifest_sha256；否則 MismatchError
 
+def verify_pin_keys_on_drive(drive, prefix_folder_id, state, *, repo_listing=None) -> None:
+    # 釘選值記載的每個 annex 物件，Drive 上都要有「同名」且 checksum＋size 相符的檔案。
+    # 兩個要點（review-cdb4a34 M3）：
+    #   1. Drive 允許同名檔，所以是「**任一**同名檔的 checksum＋size 相符就算存在」，
+    #      不是「取其中一個」（後者會被同名注入檔打中，讓每一輪都中止）。
+    #   2. `repo_listing` 必須是**第 4 步 sweep 之後**重新列舉的前綴：sweep 之前的
+    #      listing 還含著剛被隔離的同名注入檔。
+
 def precheck(drive: DriveClient, prefix_folder_id: str, manifest_name: str, state: PinState) -> None:
     # 第 9 步：只查名稱符合的檔（find_by_name）；恰好一個、sha256 == state.manifest_sha256；否則中止
 

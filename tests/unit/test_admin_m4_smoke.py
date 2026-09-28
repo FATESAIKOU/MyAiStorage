@@ -232,8 +232,11 @@ def test_m4_init_pin_precheck_uses_the_config_fields(monkeypatch) -> None:
     gh, _state = _gh_fake()
     monkeypatch.setattr(admin_lock, "GitPinFiles", lambda *a, **k: pins)
     monkeypatch.setattr(admin_lock, "GitHubAdmin", lambda *a, **k: gh)
+    # init-pin 走的是 AdminLock 裡的 promote（maintenance_ok=True）
+    seen_flags: list[bool] = []
     monkeypatch.setattr(committer_main, "init_pin_cli",
-                        lambda cfg, deps, *, confirm=False: None)
+                        lambda cfg, deps, *, confirm=False, maintenance_ok=False:
+                        seen_flags.append(maintenance_ok))
 
     seen: dict[str, str] = {}
 
@@ -252,6 +255,7 @@ def test_m4_init_pin_precheck_uses_the_config_fields(monkeypatch) -> None:
         github_repository="owner/repo")
     committer_main._init_pin_under_lock(cfg, FakeDeps(FakeDrive(), None))
     assert seen == {"prefix": "prefix-agora", "uuid": UUID}, seen
+    assert seen_flags == [True], "在自己的鎖裡 promote，旗標是預期的"
     # 旗標也掛在這個 repo 名稱上（管理操作與提交流程講的是同一個 repo）
     assert read_maintenance(pins, "agora") is None
 

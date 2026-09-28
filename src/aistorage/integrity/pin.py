@@ -12,13 +12,13 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 from typing import Protocol, runtime_checkable
 
 from aistorage.annex.git import get_git_env
-from aistorage.errors import ReadError, WriteError
+from aistorage.errors import AbortRun, ReadError, WriteError
 
 
 @dataclass(frozen=True)
@@ -61,8 +61,12 @@ class PinStore(Protocol):
         """寫入待定釘選值。"""
         ...
 
-    def promote(self, state: PinState) -> None:
-        """將釘選值轉為正式並刪除待定。"""
+    def promote(self, state: PinState, *, maintenance_ok: bool = False) -> None:
+        """將釘選值轉為正式並刪除待定。
+
+        `maintenance_ok` 只給管理者在 `AdminLock` 裡執行的 init-pin／swap 用
+        （那把鎖就是它自己放的旗標）；提交流程不得帶著它呼叫。
+        """
         ...
 
     def drop_pending(self, repo: str) -> None:
@@ -106,7 +110,9 @@ class MemoryPinStore(PinStore):
     def write_pending(self, pending: PinPending) -> None:
         self._pendings[pending.repo] = pending
 
-    def promote(self, state: PinState) -> None:
+    def promote(self, state: PinState, *, maintenance_ok: bool = False) -> None:
+        # 記憶體實作沒有 pin repo，也沒有旗標可擋；`maintenance_ok` 只對真的
+        # git pin store 有意義（見 `GitPinStore.promote`）。
         self._states[state.repo] = state
         self._pendings.pop(state.repo, None)
 
@@ -402,6 +408,18 @@ class GitPinStore(PinStore):
         self._fetch()
         incoming = self._incoming_paths()
         repo_stem = repo
+        maintenance_path = f".pin/{repo_stem}.maintenance"
+        if maintenance_path in incoming:
+            # M1（review-cdb4a34）：遠端在我們 fetch 之後出現了這個 repo 的維護
+            # 旗標 —— 管理者正在（或剛剛）做管理操作。這時**不能**以「同一個 repo
+            # 的檔案被遠端改動」這種不明原因中止：語意要說清楚是維護中，而且要讓
+            # run() 走 AbortRun 的路徑（整輪停止、不執行第 14 步、不刪收件匣）。
+            # 這是「上一次重查之後、push 之前」上鎖的最後一道防線。
+            raise AbortRun(
+                "maintenance", "active",
+                f"pin repo 遠端出現 {maintenance_path}：管理操作進行中，"
+                "中止這一輪不推釘選值",
+            )
         foreign = [p for p in incoming if not p.startswith(f".pin/{repo_stem}.")]
         same_repo = [p for p in incoming if p.startswith(f".pin/{repo_stem}.")]
         if same_repo:
@@ -453,8 +471,29 @@ class GitPinStore(PinStore):
             f"pin({pending.repo}): write pending for run {pending.run_id}", repo=pending.repo
         )
 
-    def promote(self, state: PinState) -> None:
-        self._ensure_cloned()
+    def promote(self, state: PinState, *, maintenance_ok: bool = False) -> None:
+        """轉正正式釘選值（並清掉 pending）。
+
+        L（review-cdb4a34）：**先讓本機 clone 對齊遠端**再動檔案。`promote()` 會刪掉
+        pending——如果本機 clone 是舊的（clone 時 pending 還不存在），遠端的 pending
+        就會留著，下一輪 settle 撞上「遠端既不是 pending 也不是正式釘選值」而卡住。
+        這正是管理者的 swap／init-pin（SWAP_PIN）會呼叫的路徑。
+
+        對齊之後就是「遠端有沒有這個 repo 的維護旗標」：有就**不要** rebase 上去
+        （M1，review-b1039a8／cdb4a34）——提交流程的守門是 run.py 第 12 步的旗標
+        重查，store 這一層同樣 fail-closed。
+
+        `maintenance_ok=True` 只有一個使用情境：管理者**自己**在 `AdminLock` 裡
+        執行 init-pin／swap（那把鎖就是它放的旗標，這時旗標存在是預期的）。
+        提交流程永遠不該帶著這個旗標呼叫。
+        """
+        self._ensure_cloned_and_updated()
+        if not maintenance_ok and self._local_maintenance_exists(state.repo):
+            raise AbortRun(
+                "maintenance", "active",
+                f"pin repo 有 {state.repo}.maintenance：管理操作進行中，"
+                "中止轉正釘選值",
+            )
         pin_dir = self.workdir / ".pin"
         pin_dir.mkdir(parents=True, exist_ok=True)
 
@@ -494,27 +533,56 @@ class GitPinStore(PinStore):
             f"pin({state.repo}): promote for run {state.run_id}", repo=state.repo
         )
 
-    def read_text(self, relpath: str) -> str | None:
-        """讀 pin repo 裡的檔案（唯讀）。
+    def _local_maintenance_exists(self, repo: str) -> bool:
+        """**本機**（已對齊遠端）clone 裡有沒有這個 repo 的維護旗標。"""
+        return (self.workdir / ".pin" / f"{repo}.maintenance").is_file()
 
-        **只有檔案確實不存在才回 None**（review-b1039a8 H2）：clone 或讀取失敗
-        一律 raise `ReadError`。吞掉失敗會讓提交流程把「讀不到維護旗標」誤判成
-        「沒有維護中」，於是在管理操作進行中照常 push——正是 H4 要防的情況。
+    def read_text(self, relpath: str) -> str | None:
+        """讀 pin repo **遠端**（`origin/main`）裡的檔案（唯讀）。
+
+        為什麼一定要讀遠端（M1，review-cdb4a34）：維護旗標是提交流程 pipeline
+        內三個重查點的判斷依據，而這三個點都在本輪 clone 之後。若只讀本機 clone，
+        讀到的是**第 3 步 `pins.load` 那時**（fetch＋reset 過）的狀態：
+        clone／sweep／apply 期間（可能幾分鐘）才上鎖完全看不到，write_pending
+        前的重查近乎恆真，promote 前的重查也看不到 push 期間才上的鎖。於是
+        「管理操作進行中不得 push」這條規則在真正危險的時機失效。
+
+        所以：先 `fetch origin main`（失敗一律 raise），再用
+        `git ls-tree` 判斷檔案存在與否、`git show` 讀內容——完全不碰工作樹。
+
+        **只有檔案確實不存在才回 None**（review-b1039a8 H2）：clone／fetch／讀取
+        失敗一律 raise `ReadError`。吞掉失敗會讓提交流程把「讀不到維護旗標」誤判
+        成「沒有維護中」，於是在管理操作進行中照常 push——正是 H4 要防的情況。
         """
         self._ensure_cloned()
-        path = (self.workdir / relpath).resolve()
-        # 防呆：只讀 pin repo 內的檔案，路徑逃逸（../）一律拒絕
-        if not str(path).startswith(str(self.workdir.resolve()) + "/"):
+        # 防呆：只讀 pin repo 內的路徑（`../` 逃逸與絕對路徑一律拒絕）
+        pure = PurePosixPath(relpath)
+        if pure.is_absolute() or ".." in pure.parts or not pure.parts:
             raise ReadError(f"拒絕讀取 pin repo 外的路徑: {relpath}")
-        if not path.is_file():
-            return None
-        try:
-            return path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as e:
-            raise ReadError(f"讀取 pin repo 檔案失敗: {type(e).__name__}") from None
+
+        # M1：先 fetch，讀的必須是遠端的狀態（本機 clone 可能是舊的）
+        self._fetch()
+        ls = self._run_git(
+            ["ls-tree", "--name-only", "origin/main", "--", str(pure)], check=False
+        )
+        if ls.returncode != 0:
+            raise ReadError(
+                f"讀取 pin repo 遠端目錄失敗: {relpath}"
+                f"（rc={ls.returncode}）"
+            )
+        if not ls.stdout.strip():
+            return None  # 遠端確實沒有這個檔案
+        show = self._run_git(["show", f"origin/main:{pure}"], check=False)
+        if show.returncode != 0:
+            raise ReadError(
+                f"讀取 pin repo 遠端檔案失敗: {relpath}"
+                f"（rc={show.returncode}）"
+            )
+        return show.stdout
 
     def drop_pending(self, repo: str) -> None:
-        self._ensure_cloned()
+        # 同 promote：本機 clone 必須先對齊遠端，否則「刪 pending」刪不到遠端那份。
+        self._ensure_cloned_and_updated()
         pin_dir = self.workdir / ".pin"
         p_json = pin_dir / f"{repo}.pending.json"
         p_keys = pin_dir / f"{repo}.pending.keys"
