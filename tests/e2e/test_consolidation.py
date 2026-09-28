@@ -11,9 +11,10 @@ Adheres strictly to:
 - Foundry catalog queryable for S4's artifact and blob content retrievable
 
 Foundry 端到端（收件匣 → 提交流程 → Foundry 真本／讀取視圖）還沒接上：
-提交流程不處理 artifact、發佈端沒寫 `object_file_id`（F-H1〜F-H3）。工具本身
-（`aistorage_register_artifact`）已經有了，所以整個 Foundry 測試函式以
-`xfail(strict=True)` 標住：修好之後會 XPASS → 轉紅，提醒移除標記。
+artifact 收進真本的路徑已有（`apply_artifact`），但 run.py 第 13 步的 foundry
+target 仍走舊 `_publish_foundry`（H5 待接線），讀取視圖世代不會含新產出。
+工具本身（`aistorage_register_artifact`）已經有了，所以整個 Foundry 測試函式以
+`xfail(strict=True)` 標住：impl1 接好之後會 XPASS → 轉紅，提醒移除標記。
 Agora 的統合路徑是另一個函式，沒有標記。
 """
 
@@ -131,8 +132,10 @@ def test_9_2_consolidation_n_to_1(resident_pool, run_committer, e2e_reader: Agor
 @pytest.mark.e2e
 @pytest.mark.xfail(
     strict=True,
-    reason="F-H1〜F-H3：提交流程尚未處理 artifact、發佈端沒寫 object_file_id；"
-    "修好後這個測試會 XPASS，請移除這個標記",
+    reason="待 impl1 接線：run.py 第 13 步 foundry target 仍走舊 _publish_foundry"
+    "（run.py:1475-1483，註明 H5 待接線），未換成 FoundryReadViewPublisher.publish"
+    "（publish/foundry.py:136）＋回報 published_item_keys（H4）；artifact 進真本後"
+    "讀取視圖世代不含它 → find 查不到。接好會 XPASS，請移除這個標記",
 )
 def test_9_2_foundry_artifact_registration(
     resident_pool, run_committer, e2e_reader: AgoraReader, e2e_foundry_reader: FoundryReader

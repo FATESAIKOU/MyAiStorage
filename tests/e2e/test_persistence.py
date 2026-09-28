@@ -69,7 +69,9 @@ def test_9_5_persistence_across_local_destruction(
 
     # 查詢子 Session：必須至少一筆，且 parent_id 指向母 Session
     def _child_hits():
-        hits, _ = e2e_reader.find_sessions(Query(parent_id=root_agora)).value
+        # find_sessions 回 Result[list[FoundSession]]：.value 本來就是清單，
+        # 不是 (hits, cursor)（內層 search() 才是 tuple；舊寫法只有恰好 2 筆才不爆）
+        hits = e2e_reader.find_sessions(Query(parent_id=root_agora)).value
         return hits or None
 
     hits = poll(_child_hits, what="子 Session 出現在 Agora")
@@ -107,7 +109,7 @@ def test_9_5_persistence_across_local_destruction(
     reading_res = e2e_reader.get_reading(root_agora)
     assert "messages" in reading_res.value and reading_res.value["messages"]
 
-    hits_after, _ = e2e_reader.find_sessions(Query(parent_id=root_agora)).value
+    hits_after = e2e_reader.find_sessions(Query(parent_id=root_agora)).value
     assert len(hits_after) >= 1, "刪除本機資料後子 Session 仍必須查得到"
     assert any(h.hit.session.session_id == child_agora for h in hits_after)
 
@@ -115,8 +117,10 @@ def test_9_5_persistence_across_local_destruction(
 @pytest.mark.e2e
 @pytest.mark.xfail(
     strict=True,
-    reason="F-H1/F-H3：Foundry 尚未接進提交流程與發佈（object_file_id 沒人寫），"
-    "修好後會 XPASS，請移除這個標記",
+    reason="待 impl1 接線：run.py 第 13 步 foundry target 仍走舊 _publish_foundry"
+    "（run.py:1475-1483，註明 H5 待接線），未換成 FoundryReadViewPublisher.publish"
+    "（publish/foundry.py:136）＋回報 published_item_keys（H4）；artifact 進真本後"
+    "讀取視圖世代不含它 → find 查不到。接好會 XPASS，請移除這個標記",
 )
 def test_9_5_foundry_persistence(resident_pool, run_committer, e2e_foundry_reader):
     """9.5 的 Foundry 部分：容器與本機資料刪除後，Foundry 產出仍取得到。"""
