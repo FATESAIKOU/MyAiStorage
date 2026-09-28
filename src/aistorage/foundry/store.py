@@ -18,9 +18,17 @@ import tempfile
 from typing import Any
 
 from aistorage.annex.fake import FakeAnnexGit
-from aistorage.annex.git import AnnexGit
-from aistorage.errors import MismatchError
+from aistorage.annex.git import AnnexGit, get_git_env
+from aistorage.errors import MismatchError, WriteError
 from aistorage.foundry import layout
+import subprocess
+
+#: Foundry 的 annex.largefiles 規則（review F-H2）。
+#: 收容產出（PDF、圖片等）要進 annex，catalog 的 JSON 留在 git。
+#: 實測（git-annex 10.20260901）：
+#:   include=objects/*/* → objects/<ULID>/<檔名> 有 key、catalog/*.json 沒有
+#:   anything             → 連 catalog 也進 annex（bundle 會變大，不理想）
+LARGEFILES_OBJECTS = "include=objects/*/*"
 
 
 class FoundryStore:
@@ -32,15 +40,55 @@ class FoundryStore:
         *,
         git: AnnexGit | None = None,
         temp_dir: Path | str | None = None,
+        largefiles: str | None = None,
     ) -> None:
         self.worktree = Path(worktree).resolve()
         self.git = git
+        # F-H2：largefiles 必須涵蓋 objects/**，否則收容產出会變成 git blob
+        # （100 MB 的產出直接進 bundle，正是 annex 要避免的）
+        self.largefiles = largefiles if largefiles is not None else LARGEFILES_OBJECTS
         if temp_dir is not None:
             self._temp_dir = Path(temp_dir).resolve()
             self._temp_dir.mkdir(parents=True, exist_ok=True)
         else:
             self._temp_dir = Path(tempfile.mkdtemp(prefix="aistorage_foundry_temp_"))
         self._changed_paths: list[str] = []
+        self._keys: set[str] = set()
+        self._ensure_largefiles_config()
+
+    def _ensure_largefiles_config(self) -> None:
+        """設定 annex.largefiles（F-H2）。
+
+        對「已在 index 裡的檔案」無效，所以必須在建構時就設好（早於任何
+        put_contained_object）；失敗要 raise，因為後面 lookupkey 會全部查不到。
+        """
+        if not (self.worktree / ".git").exists():
+            return
+        proc = subprocess.run(
+            ["git", "-C", str(self.worktree), "config", "annex.largefiles", self.largefiles],
+            capture_output=True, check=False, env=get_git_env(), timeout=30.0,
+        )
+        if proc.returncode != 0:
+            raise WriteError(
+                f"設定 annex.largefiles 失敗 (rc={proc.returncode}): {self.largefiles}")
+
+    def keys(self) -> set[str]:
+        """本工作樹已知的 annex key（由 put_contained_object 實際向 git-annex 取得）。"""
+        return set(self._keys)
+
+    def _lookup_key(self, relpath: str, dest_p: Path) -> str | None:
+        """F-H2：key 一律用 `git annex lookupkey`（相對於 repo 根），不自己算。"""
+        if self.git is not None:
+            getter = getattr(self.git, "lookupkey", None)
+            if callable(getter):
+                return getter(relpath)
+        proc = subprocess.run(
+            ["git", "-C", str(self.worktree), "annex", "lookupkey", relpath],
+            capture_output=True, text=True, check=False, env=get_git_env(), timeout=60.0,
+        )
+        if proc.returncode != 0:
+            return None
+        return proc.stdout.strip() or None
 
     def put_json(self, relpath: str, obj: Any) -> str:
         """寫入 JSON 檔案並加入 git 暫存。"""
@@ -94,19 +142,13 @@ class FoundryStore:
     def put_contained_object(self, ulid: str, filename: str, src_path: Path) -> str:
         """將實體檔案寫入 objects/<ULID>/<安全檔名> 並加入 git-annex 物件庫。
 
-        回傳產生之 annex key（例如 SHA256E-s<size>--<sha256><ext>）。
+        回傳**實際由 git-annex 產生**的 key（F-H2：自己算的 key 幾乎一定不對——
+        副檔名取自工作樹檔名、沒有副檔名就沒有副檔名、還受 annex.maxextensionlength
+        影響）。檔案沒有進 annex 就 raise，不讓它留在 git blob 裡冒充。
         """
         src = Path(src_path)
         if not src.is_file():
             raise FileNotFoundError(f"找不到產出本體來源檔案: {src}")
-
-        raw_bytes = src.read_bytes()
-        size = len(raw_bytes)
-        sha256 = hashlib.sha256(raw_bytes).hexdigest().lower()
-        ext = src.suffix or Path(filename).suffix
-        if not ext:
-            ext = ".bin"
-        annex_key = f"SHA256E-s{size}--{sha256}{ext}"
 
         relpath = layout.object_path(ulid, filename)
         dest_p = self.worktree / relpath
@@ -115,8 +157,22 @@ class FoundryStore:
 
         if self.git is not None:
             self.git.add([relpath])
-            if isinstance(self.git, FakeAnnexGit):
-                self.git.local_keys = frozenset(set(self.git.local_keys) | {annex_key})
+        elif (self.worktree / ".git").exists():
+            proc = subprocess.run(
+                ["git", "-C", str(self.worktree), "add", str(dest_p)],
+                capture_output=True, check=False, env=get_git_env(), timeout=60.0)
+            if proc.returncode != 0:
+                raise WriteError(f"git add 失敗 (rc={proc.returncode}): {relpath}")
+
+        annex_key = self._lookup_key(relpath, dest_p)
+        if not annex_key:
+            raise WriteError(
+                f"收容產出沒有進 git-annex（annex.largefiles={self.largefiles!r} "
+                f"涵蓋不到 {relpath}）：拒絕把它當成 annex 物件。"
+                "內容會留在 git blob 裡，bundle 會滾雪球。")
+        self._keys.add(annex_key)
+        if isinstance(self.git, FakeAnnexGit):
+            self.git.local_keys = frozenset(set(self.git.local_keys) | {annex_key})
 
         self._changed_paths.append(relpath)
         return annex_key

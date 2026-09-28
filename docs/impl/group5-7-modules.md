@@ -163,9 +163,19 @@ def sync_once(*, api: OpencodeApi, reader: AgoraReader, drive: DriveClient, inbo
      - 有拒收記錄 → 記進 `rejected`，**不自動重傳**（避免無限迴圈）。`status` 子命令會列出來。
    - 其他情況 → 上傳新版本（`build_inbox_item` → `upload_item`）。
 3. `facts = converter.facts(export)`，`in_progress` 來自 facts（build_inbox_item 已經處理）。facts 失敗時照 PM 決定 1 的精神：以保守的值上傳，閱讀版交給提交流程標記失敗。
-4. **停止的判定**（1.7e、D4）：`archived_ms > 0` 而且 `last_message_ms <= archived_ms`，才算停止。
+4. **停止的判定**（1.7e、D4、**review-g5-6 H3**）：`archived_ms > 0` 而且
+   `last_message_created_ms <= archived_ms`，才算停止。**用訊息「被建立」的時間，
+   不是完成的時間**：宣告停止一定發生在 AI 回覆**生成中**（那一則訊息在封存
+   **之前**建立、封存**之後**才完成），用 completed 判會讓它在下一輪自己恢復成
+   running，宣告停止永遠不成立。`agora/apply._is_stopped` 與
+   `syncer/core._is_stopped` 必須是同一個定義。
    - `stopped_at` 取**同步器第一次觀測到的時間**（`stop_observed_at`），不用來源端的值。
    - Agora 已經是 stopped，但本地在封存之後又有新訊息 → 以 running 上傳，並列入 `resumed_after_stop`。daemon 看到這一項，就**立刻**執行 `sync_and_commit(that_session)`（spec「停止後又被恢復」）。
+   - **`resumed_after_stop` 只報一次**（review-g5-6 H3）：恢復的判定以 **Agora 的
+     狀態**為準（Agora 是 stopped、本地算出 running），而且恢復之後要**清掉**
+     `stop_observed_at`。用本機記錄判的話，停止過一次、恢復之後的**每一次上傳**
+     都會被列進去，daemon 就每 10 分鐘觸發一次 workflow，吃掉 D9 的 Actions
+     分鐘預算。
 5. `parent_id` 取 API 的 `parentID`，一路帶進 sidecar（子 Session 也是 Agora 的 Session）。
 6. 超過 raw 上限（100 MiB）→ 不上傳，記進 status，讓 6.3 回報。
 7. daemon：預設每 10 分鐘一次（`--interval`）。一輪失敗時記錄 log（只有 id 與代碼）後繼續，**不會觸發提交流程**（只有第 4 點的例外）。
@@ -409,7 +419,15 @@ def run_health(deps: HealthDeps, *, now: datetime) -> list[Check]: ...
 ### 6.1 7.1 repo 與提交流程的多 repo 支援
 
 - `python -m aistorage.admin create-repo foundry`：
-  - 在 Drive 建立 `foundry/` 前綴資料夾與隔離資料夾，建立 git-annex repo（`type=rclone`、`encryption=none`、不 chunk，與 Agora 相同）；
+  - **Agora 原始紀錄的 `annex.largefiles`（review A-H1 的實測結論，git-annex 10.20260901）**：
+  原始紀錄路徑是 `sessions/<source>/<id>/raw`（**沒有副檔名**），所以
+  `include=*.json` 涵蓋不到它（raw 會留在 git blob 裡，2.6 的量測效果不會發生）。
+  Agora 用 **`include=sessions/*/*/raw`**：`raw` 進 annex、`meta.json`／`snapshots.jsonl`
+  留在 git。規則必須在建構 `AnnexRawStorage` 時就設好（對已在 index 的檔案無效）。
+  annex key 一律用 `git annex lookupkey`（review A-H2），取不到就 raise。
+  註：git-annex 10 只吃**單一** largefiles 規則（多條會全部失效），需要兩種規則時要選
+  一個涵蓋範圍較大的（例如 `include=sessions/*/*/*`）。
+- 在 Drive 建立 `foundry/` 前綴資料夾與隔離資料夾，建立 git-annex repo（`type=rclone`、`encryption=none`、不 chunk，與 Agora 相同）；
   - 在 pin repo 建立 `.pin/foundry.*`（init-pin）；
   - 建立 Foundry 的讀取視圖資料夾與 manifest（`element="foundry"`）。
 - `config/committer.json` 改成 `repos: {agora: {...}, foundry: {...}}`。
@@ -430,11 +448,15 @@ def run_health(deps: HealthDeps, *, now: datetime) -> list[Check]: ...
 
   ```
   catalog/<ULID>.json               # 產出目錄（每件一筆）：metadata＋body＋{object_key?, size?, sha256?}
-  objects/<ULID>/<安全化的檔名>     # contained：以 git annex add 存成 annex 物件（largefiles=anything）
+  objects/<ULID>/<安全化的檔名>     # contained：以 git annex add 存成 annex 物件
   _committer/…                      # 清冊、拒收（與 Agora 相同）
   ```
 
 - `produced_by_session_id` 必須是 Agora 裡已經存在的 Session，而且產生者是它的持有者（比照 g3e 的 H3）。檢查時讀取的是 **Agora 的工作樹**，所以 pipeline 的順序是先處理 Agora，再處理 Foundry。
+- **Foundry 的 `annex.largefiles`（review F-H2 的實測結論，git-annex 10.20260901）**：
+  - `include=objects/*/*`：`objects/<ULID>/<檔名>` 進 annex、`catalog/*.json` 留在 git（bundle 只有小檔）——** Foundry 用這條**。
+  - `anything`：連 catalog 也進 annex，bundle 會變大，不採用。
+  - 收容產出的 key 一律用 `git annex lookupkey <path>` 取，不自己算（副檔名取自工作樹檔名、沒有副檔名就沒有副檔名，還受 `annex.maxextensionlength` 影響）。查不到就是「沒進 annex」，`put_contained_object` 直接 raise。
 
 ### 6.3 7.3 收容產出入庫
 
@@ -443,6 +465,11 @@ def run_health(deps: HealthDeps, *, now: datetime) -> list[Check]: ...
   - contained：`git annex add objects/…` 加上 catalog 檔；
   - link：只有 catalog 檔。
 - Foundry 的 annex key 會進 Foundry 的 pin（g3g 的 H1 修好之後，copy 之後的 key 集合就正確了）。
+- **讀取介面以 Drive file id 取物件（D5）**，所以發佈 Foundry 讀取視圖之前要把 id 寫進索引：
+  `foundry.index.resolve_object_file_ids(rows, drive=…, prefix_folder_id=…, allowed_keys=pin.annex_keys)`
+  以前綴列舉結果比對 `name == annex_key`，並確認 Drive 的 checksum／size 相符；
+  對不上（`object_not_found`／`checksum_mismatch`／`size_mismatch`／`key_not_in_pin`／`missing_annex_key`）
+  就**不發佈那一筆**，並把原因記進 RunReport（review F-H3）。
 
 ### 6.4 7.4 讀取視圖與 Foundry 的讀取介面
 

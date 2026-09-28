@@ -20,7 +20,7 @@ from aistorage.annex.fake import FakeAnnexGit
 from aistorage.annex.git import get_git_env
 from aistorage.drive.fake import FakeDrive
 from aistorage.drive.model import DriveFile
-from aistorage.errors import MismatchError
+from aistorage.errors import MismatchError, WriteError
 from aistorage.integrity import (
     PinState,
     RepoListing,
@@ -29,6 +29,31 @@ from aistorage.integrity import (
     verify_clone,
 )
 from aistorage.schema import generate_ulid
+
+
+def _annex_repo(tmp_path: Path, name: str = "agora") -> Path:
+    """在暫存目錄建立真的 git + git-annex repo（A-H1/A-H2 的前提是有真 git-annex）。
+
+    largefiles 規則由 AnnexRawStorage 建構時設定，所以 repo 只需要先有至少一個
+    commit（`git annex init` 需要一個已存在的分支）。
+    """
+    workdir = tmp_path / name
+    workdir.mkdir(parents=True, exist_ok=True)
+    env = get_git_env()
+    subprocess.run(["git", "init", "-b", "main", "-q"], cwd=workdir, env=env, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=workdir, env=env, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.invalid"], cwd=workdir, env=env, check=True)
+    (workdir / "README.md").write_text("seed\n")
+    subprocess.run(["git", "add", "."], cwd=workdir, env=env, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=workdir, env=env, check=True)
+    subprocess.run(["git", "annex", "init", "aistorage-it"], cwd=workdir, env=env,
+                   check=True, capture_output=True)
+    return workdir
+
+
+def _key(size: int, sha: str, ext: str = "") -> str:
+    """git-annex 對沒有副檔名的檔案產生的 key（沒有副檔名！A-H2）。"""
+    return f"SHA256E-s{size}--{sha}{ext}"
 
 
 def _make_sample_session_record(
@@ -59,18 +84,24 @@ def test_annex_raw_storage_basic_store_and_retrieve(tmp_path: Path):
     src_file = tmp_path / "source_raw.json"
     src_file.write_bytes(raw_content)
 
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
+    worktree = _annex_repo(tmp_path, "worktree")
     storage = AnnexRawStorage(worktree)
 
-    target_path = worktree / "sessions/opencode/s1/raw.json"
+    target_path = worktree / "sessions/opencode/s1/raw"
     raw_ref = storage.store(target_path, src_file)
 
     assert raw_ref.kind == "annex"
     expected_sha = hashlib.sha256(raw_content).hexdigest().lower()
-    expected_key = f"SHA256E-s{len(raw_content)}--{expected_sha}.json"
+    # A-H2：key 由 git-annex 決定；raw 沒有副檔名 → key 也沒有副檔名
+    expected_key = _key(len(raw_content), expected_sha)
     assert raw_ref.ref == expected_key
     assert expected_key in storage.keys()
+    # A-H1：raw 確實是 annex pointer，不是內容
+    proc = subprocess.run(["git", "cat-file", "-p", "HEAD:sessions/opencode/s1/raw"],
+                          cwd=worktree, capture_output=True, text=True, env=get_git_env(),
+                          check=False)
+    if proc.returncode == 0:   # 已經有 commit 才檢查 pointer
+        assert "annex" in proc.stdout
 
     # 取回原始檔案
     dest = tmp_path / "retrieved.raw"
@@ -85,11 +116,10 @@ def test_annex_raw_storage_retrieve_verifies_hash_mismatch(tmp_path: Path):
     src_file = tmp_path / "src.json"
     src_file.write_bytes(raw_content)
 
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
+    worktree = _annex_repo(tmp_path, "worktree")
     storage = AnnexRawStorage(worktree)
 
-    target_path = worktree / "sessions/opencode/s1/raw.json"
+    target_path = worktree / "sessions/opencode/s1/raw"
     raw_ref = storage.store(target_path, src_file)
 
     # 刻意篡改內部內容，維持大小相同但雜湊不同
@@ -108,11 +138,10 @@ def test_annex_raw_storage_retrieve_verifies_size_mismatch(tmp_path: Path):
     src_file = tmp_path / "src.json"
     src_file.write_bytes(raw_content)
 
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
+    worktree = _annex_repo(tmp_path, "worktree")
     storage = AnnexRawStorage(worktree)
 
-    target_path = worktree / "sessions/opencode/s1/raw.json"
+    target_path = worktree / "sessions/opencode/s1/raw"
     raw_ref = storage.store(target_path, src_file)
 
     # 刻意篡改內部內容大小
@@ -125,8 +154,7 @@ def test_annex_raw_storage_retrieve_verifies_size_mismatch(tmp_path: Path):
 
 def test_agora_store_defaults_to_annex_raw_storage(tmp_path: Path):
     """驗證 AgoraStore 預設採用 AnnexRawStorage，且快照歷史中紀錄 annex_key。"""
-    worktree = tmp_path / "agora"
-    worktree.mkdir()
+    worktree = _annex_repo(tmp_path, "agora")
     ext_tmp = tmp_path / "external_temp"
 
     # AgoraStore 不傳入 raw_storage，應預設為 AnnexRawStorage
@@ -145,7 +173,8 @@ def test_agora_store_defaults_to_annex_raw_storage(tmp_path: Path):
     assert len(snaps) == 1
     snap = snaps[0]
     assert snap.annex_key is not None
-    assert snap.annex_key.startswith(f"SHA256E-s{len(raw_data)}--{sha}")
+    # A-H2：沒有自己補副檔名
+    assert snap.annex_key == _key(len(raw_data), sha)
     assert snap.git_blob is None
 
     # 驗證透過 store.raw_path_for_snapshot 取回
@@ -158,7 +187,7 @@ def test_agora_store_defaults_to_annex_raw_storage(tmp_path: Path):
 
 def test_agora_store_annex_keys_and_coverage_verification(tmp_path: Path):
     """驗證 AgoraStore.annex_keys 包含所有 raw 物件，且 verify_annex_coverage 可進行覆蓋核對。"""
-    worktree = tmp_path / "agora"
+    worktree = _annex_repo(tmp_path, "agora")
     store = AgoraStore(worktree, temp_dir=tmp_path / "tmp")
 
     raw1 = b'{"data": "session1"}'
@@ -175,8 +204,8 @@ def test_agora_store_annex_keys_and_coverage_verification(tmp_path: Path):
 
     all_keys = store.annex_keys()
     assert len(all_keys) == 2
-    key1 = f"SHA256E-s{len(raw1)}--{sha1}.json"
-    key2 = f"SHA256E-s{len(raw2)}--{sha2}.json"
+    key1 = _key(len(raw1), sha1)
+    key2 = _key(len(raw2), sha2)
     assert key1 in all_keys
     assert key2 in all_keys
 
@@ -192,8 +221,7 @@ def test_agora_store_annex_keys_and_coverage_verification(tmp_path: Path):
 
 def test_annex_raw_storage_fake_annex_git_integration(tmp_path: Path):
     """驗證 AnnexRawStorage 與 FakeAnnexGit 的 local_keys / annex_upload 整合。"""
-    worktree = tmp_path / "agora"
-    worktree.mkdir()
+    worktree = _annex_repo(tmp_path, "agora")
     fake_git = FakeAnnexGit(workdir=worktree, copy_effect="annex_upload")
 
     store = AgoraStore(worktree, git=fake_git, temp_dir=tmp_path / "tmp")
@@ -206,7 +234,7 @@ def test_annex_raw_storage_fake_annex_git_integration(tmp_path: Path):
 
     store.put_session(rec, f)
 
-    expected_key = f"SHA256E-s{len(raw_data)}--{sha}.json"
+    expected_key = _key(len(raw_data), sha)
     # AnnexRawStorage 寫入時自動登記至 fake_git.local_keys
     assert expected_key in fake_git.local_keys
 
@@ -220,35 +248,38 @@ def test_annex_raw_storage_fake_annex_git_integration(tmp_path: Path):
 
 def test_annex_raw_storage_with_real_git_in_tmp_path(tmp_path: Path):
     """驗證在暫存目錄下的真實 Git 倉庫中，AnnexRawStorage 正確設定 annex.largefiles。"""
-    git_dir = tmp_path / "git_test_repo"
-    git_dir.mkdir()
-
+    git_dir = _annex_repo(tmp_path, "git_test_repo")
     env = get_git_env()
-    subprocess.run(["git", "init", "-b", "main", "-q"], cwd=git_dir, env=env, check=True)
-    subprocess.run(["git", "config", "user.name", "Test Committer"], cwd=git_dir, env=env, check=True)
-    subprocess.run(["git", "config", "user.email", "committer@test.local"], cwd=git_dir, env=env, check=True)
 
     storage = AnnexRawStorage(git_dir)
 
-    # 驗證 git config annex.largefiles 已被配置
+    # A-H1：規則必須是涵蓋 sessions/*/*/raw 的路徑規則（不是 include=*.json）
     proc = subprocess.run(
-        ["git", "config", "annex.largefiles"],
-        cwd=git_dir,
-        capture_output=True,
-        text=True,
-        env=env,
-        check=True,
+        ["git", "config", "annex.largefiles"], cwd=git_dir, capture_output=True,
+        text=True, env=env, check=True,
     )
-    assert proc.stdout.strip() == "include=*.json"
+    assert proc.stdout.strip() == "include=sessions/*/*/raw"
 
     raw_data = b'{"msg": "real git test"}'
     src_f = tmp_path / "in.json"
     src_f.write_bytes(raw_data)
-    dest_path = git_dir / "sessions/opencode/s_git/raw.json"
+    dest_path = git_dir / "sessions/opencode/s_git/raw"
 
     raw_ref = storage.store(dest_path, src_f)
     assert raw_ref.kind == "annex"
     assert dest_path.is_file()
+    # key 由 git-annex 決定，內容雜湊要對得上
+    assert raw_ref.ref.startswith(f"SHA256E-s{len(raw_data)}--{hashlib.sha256(raw_data).hexdigest()}")
+
+    # 沒有進 annex 的路徑必須 raise（不再默默留成 git blob）
+    meta = git_dir / "sessions/opencode/s_git/meta.json"
+    meta.write_text("{}")
+    subprocess.run(["git", "add", str(meta)], cwd=git_dir, env=env, check=True)
+    assert storage._lookup_key(meta) is None
+    other = tmp_path / "other.json"
+    other.write_bytes(b"x")
+    with pytest.raises(WriteError, match="沒有進 git-annex"):
+        storage.store(git_dir / "objects/x/report.pdf", other)
 
     # 讀回取件
     dest_out = tmp_path / "out.raw"

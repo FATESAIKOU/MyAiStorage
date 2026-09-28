@@ -22,7 +22,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 from aistorage.agora import layout
 from aistorage.annex.fake import FakeAnnexGit
 from aistorage.annex.git import AnnexGit, get_git_env
-from aistorage.errors import MismatchError, WriteError
+from aistorage.errors import MismatchError, ReadError, WriteError
 from aistorage.schema import validate_record_metadata
 
 
@@ -263,14 +263,33 @@ class GitRawStorage(RawStorage):
         dest_p.write_bytes(proc.stdout)
 
 
+#: 原始紀錄的 annex.largefiles 規則（review A-H1）。
+#: 原始紀錄路徑是 `sessions/<source>/<id>/raw`（沒有副檔名），所以不能用
+#: `include=*.json`；實測 `include=sessions/*/*/raw` 會讓 raw 進 annex、
+#: `meta.json`／`snapshots.jsonl` 仍留在 git（只有小檔進 bundle）。
+LARGEFILES_RAW = "include=sessions/*/*/raw"
+
+
 class AnnexRawStorage(RawStorage):
     """使用 Git-Annex 物件庫存放原始紀錄之實作。
 
-    依據 tasks 2.6 決策：
-    - 原始紀錄（raw exports）作為 git-annex 外部物件存放。
-    - annex.largefiles 設定為包含原始紀錄（預設 "include=*.json"）。
-    - 取出 (retrieve) 時嚴格比對 annex key 中宣告之 SHA-256 雜湊與大小，
-      不符拋出 MismatchError。
+    依據 tasks 2.6 決策，以及 review-g7-e2e A-H1／A-H2／A-H3：
+
+    - **A-H1（檔名與 largefiles 對不上）**：原始紀錄的路徑是
+      `sessions/<source>/<id>/raw`（`agora/layout.py`，**沒有副檔名**），
+      原本的 `annex.largefiles=include=*.json` 涵蓋不到它，raw 會被存成
+      一般的 git blob（2.6 量到的 push 26 秒／bundle 0.4 MB 效果根本沒發生）。
+      改成**路徑規則** `include=sessions/*/*/raw`（實測：raw 進 annex、
+      `meta.json` 仍留在 git）。注意 largefiles 設定對**已在 index 裡**的檔案
+      不生效，所以規則必須在 `store()` 之前設好（建構時就設）。
+    - **A-H2（key 自己算錯）**：key 一律用 `git annex lookupkey <path>` 取得，
+      這是唯一來源。對沒有副檔名的檔案，git-annex 產生的是
+      `SHA256E-s<size>--<sha>`（**沒有副檔名**），自己補 `.json` 一定對不上。
+      查不到（檔案沒進 annex）就 raise，不讓內容留在 git blob 裡冒充 annex。
+    - **A-H3（全新 clone 取不回舊快照）**：`retrieve` 在本機找不到時，會用
+      `git annex get --key=<k> --from <remote>` 從遠端 special remote 取回；
+      取不到就 raise `ReadError`（不再 `except Exception: pass` 吞掉）。
+    - 取出時嚴格比對 key 宣告的 SHA-256 與大小，不符拋出 MismatchError。
     """
 
     def __init__(
@@ -278,73 +297,102 @@ class AnnexRawStorage(RawStorage):
         git_workdir: Path | str,
         *,
         git: AnnexGit | None = None,
-        largefiles: str = "include=*.json",
+        largefiles: str | None = None,
+        remote: str = "origin",
     ) -> None:
         self.git_workdir = Path(git_workdir).resolve()
         self.git = git
-        self.largefiles = largefiles
+        # A-H1：預設是路徑規則，不是 include=*.json（那個涵蓋不到 `raw`）
+        self.largefiles = largefiles if largefiles is not None else LARGEFILES_RAW
+        self.remote = remote
         self._blobs: dict[str, bytes] = {}
         self._keys: set[str] = set()
 
         self._ensure_largefiles_config()
 
     def _ensure_largefiles_config(self) -> None:
-        """設定 git 配置 annex.largefiles 包含原始紀錄。"""
+        """設定 git 配置 annex.largefiles 包含原始紀錄。
+
+        A-H1：這個設定對「已經在 index 裡的檔案」無效，所以必須在建構時就設好
+        （早於任何 `store()`）。失敗要 raise：設定沒生效時後面的 lookupkey
+        會全部查不到，錯誤會被誤判成「沒有進 annex」。
+        """
         git_dir = self.git_workdir / ".git"
         if not git_dir.exists():
             return
 
+        proc = subprocess.run(
+            ["git", "-C", str(self.git_workdir), "config", "annex.largefiles",
+             self.largefiles],
+            capture_output=True, check=False, env=get_git_env(), timeout=30.0,
+        )
+        if proc.returncode != 0:
+            raise WriteError(
+                f"設定 annex.largefiles 失敗 (rc={proc.returncode}): {self.largefiles}")
+
+    def _lookup_key(self, path: Path) -> str | None:
+        """annex key 的唯一來源：git annex lookupkey（SubprocessAnnexGit 或直接呼叫）。
+
+        路徑要用**相對於 repo 根**的形式：`git annex lookupkey` 對絕對路徑
+        找不到檔案（實測會靜靜回傳空字串），那樣會被誤判成「沒有進 annex」。
+        """
+        target = Path(path)
         try:
-            subprocess.run(
-                ["git", "-C", str(self.git_workdir), "config", "annex.largefiles", self.largefiles],
-                capture_output=True,
-                check=False,
-                env=get_git_env(),
-                timeout=10.0,
-            )
-        except Exception:
-            pass
+            rel: str | Path = target.resolve().relative_to(self.git_workdir)
+        except ValueError:
+            rel = target
+        if self.git is not None:
+            getter = getattr(self.git, "lookupkey", None)
+            if callable(getter):
+                return getter(rel)
+        proc = subprocess.run(
+            ["git", "-C", str(self.git_workdir), "annex", "lookupkey", str(rel)],
+            capture_output=True, text=True, check=False, env=get_git_env(), timeout=60.0,
+        )
+        if proc.returncode != 0:
+            return None
+        return proc.stdout.strip() or None
 
     def store(self, worktree_path: Path, src: Path) -> RawRef:
-        """將 src 原始紀錄存為 git-annex 物件並回傳 RawRef。"""
+        """將 src 原始紀錄存為 git-annex 物件並回傳 RawRef（key 由 git-annex 決定）。"""
         src_p = Path(src).resolve()
         if not src_p.is_file():
             raise FileNotFoundError(f"找不到原始紀錄來源檔案: {src_p}")
 
         data = src_p.read_bytes()
-        size = len(data)
-        sha256 = hashlib.sha256(data).hexdigest().lower()
-        ext = Path(worktree_path).suffix or ".json"
-        annex_key = f"SHA256E-s{size}--{sha256}{ext}"
 
         dest_p = Path(worktree_path)
         dest_p.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_p, dest_p)
-
-        self._blobs[annex_key] = data
-        self._keys.add(annex_key)
 
         if self.git is not None:
             try:
                 rel = str(dest_p.relative_to(self.git_workdir))
             except ValueError:
                 rel = str(dest_p)
-
             self.git.add([rel])
-
-            if isinstance(self.git, FakeAnnexGit):
-                self.git.local_keys = frozenset(set(self.git.local_keys) | {annex_key})
         elif (self.git_workdir / ".git").exists():
-            try:
-                subprocess.run(
-                    ["git", "-C", str(self.git_workdir), "add", str(dest_p)],
-                    capture_output=True,
-                    check=False,
-                    env=get_git_env(),
-                    timeout=30.0,
-                )
-            except Exception:
-                pass
+            proc = subprocess.run(
+                ["git", "-C", str(self.git_workdir), "add", str(dest_p)],
+                capture_output=True, check=False, env=get_git_env(), timeout=60.0,
+            )
+            if proc.returncode != 0:
+                raise WriteError(f"git add 失敗 (rc={proc.returncode}): {dest_p}")
+
+        # A-H2：key 必須問 git-annex；查不到就是「沒有進 annex」，要立刻 raise
+        annex_key = self._lookup_key(dest_p)
+        if not annex_key:
+            raise WriteError(
+                f"原始紀錄沒有進 git-annex（annex.largefiles={self.largefiles!r} "
+                f"涵蓋不到 {dest_p}）：拒絕把它當成 annex 物件。"
+                "內容會留在 git blob 裡，2.6 的量測效果不會發生。"
+            )
+
+        self._blobs[annex_key] = data
+        self._keys.add(annex_key)
+
+        if isinstance(self.git, FakeAnnexGit):
+            self.git.local_keys = frozenset(set(self.git.local_keys) | {annex_key})
 
         return RawRef(kind="annex", ref=annex_key)
 
@@ -357,45 +405,63 @@ class AnnexRawStorage(RawStorage):
         self._verify_annex_key(ref, data)
         dest_p.write_bytes(data)
 
+    def _local_object_bytes(self, ref: str) -> bytes | None:
+        """本機（clone 內）已有的物件內容；沒有就回傳 None。"""
+        if (self.git_workdir / ".git").exists():
+            proc = subprocess.run(
+                ["git", "-C", str(self.git_workdir), "annex", "contentlocation", ref],
+                capture_output=True, text=True, check=False, env=get_git_env(),
+                timeout=30.0,
+            )
+            if proc.returncode == 0:
+                loc = proc.stdout.strip()
+                if loc:
+                    p = (self.git_workdir / loc).resolve()
+                    if p.is_file():
+                        return p.read_bytes()
+
+        annex_objs = self.git_workdir / ".git" / "annex" / "objects"
+        if annex_objs.is_dir():
+            for base in (ref, f"{ref}.tmp"):
+                matches = list(annex_objs.glob(f"**/{base}"))
+                for m in matches:
+                    if m.is_file():
+                        return m.read_bytes()
+        return None
+
     def _read_raw_bytes(self, ref: str) -> bytes:
         if ref in self._blobs:
             return self._blobs[ref]
 
-        if (self.git_workdir / ".git").exists():
-            try:
-                proc = subprocess.run(
-                    ["git", "-C", str(self.git_workdir), "annex", "contentlocation", ref],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    env=get_git_env(),
-                    timeout=15.0,
-                )
-                if proc.returncode == 0:
-                    loc = proc.stdout.strip()
-                    if loc:
-                        p = (self.git_workdir / loc).resolve()
-                        if p.is_file():
-                            return p.read_bytes()
-            except Exception:
-                pass
+        data = self._local_object_bytes(ref)
+        if data is not None:
+            return data
 
-        annex_objs = self.git_workdir / ".git" / "annex" / "objects"
-        if annex_objs.is_dir():
-            matches = list(annex_objs.glob(f"**/{ref}"))
-            if matches and matches[0].is_file():
-                return matches[0].read_bytes()
+        # A-H3：本機沒有就從遠端 special remote 取回（全新 clone 的正常路徑）
+        if self.git is not None and hasattr(self.git, "get_key"):
+            self.git.get_key(ref, from_remote=self.remote)
+            data = self._local_object_bytes(ref)
+            if data is not None:
+                self._blobs[ref] = data
+                return data
 
         parsed = self.parse_annex_key(ref)
         if parsed is not None:
             _, exp_size, exp_sha = parsed
-            for cand in self.git_workdir.glob("sessions/*/*/raw.json"):
-                if cand.is_file() and cand.stat().st_size == exp_size:
-                    b = cand.read_bytes()
-                    if hashlib.sha256(b).hexdigest().lower() == exp_sha:
-                        return b
+            # 工作樹上的 raw（路徑由 layout 決定，沒有副檔名）
+            from aistorage.agora import layout as _layout
 
-        raise KeyError(f"無法自 git-annex 取出原始紀錄: {ref}")
+            for source in ("opencode", "claude-code"):
+                for cand in self.git_workdir.glob(f"sessions/{source}/*/raw*"):
+                    if cand.is_file() and cand.stat().st_size == exp_size:
+                        b = cand.read_bytes()
+                        if hashlib.sha256(b).hexdigest().lower() == exp_sha:
+                            return b
+
+        raise ReadError(
+            f"無法取得 annex 物件 {ref}：本機沒有、遠端 special remote 也取不到"
+            f"（remote={self.remote}）。提交流程每一輪都是全新 clone，"
+            "取不到就代表遠端沒有這個物件或 special remote 設定有問題。")
 
     @staticmethod
     def parse_annex_key(ref: str) -> tuple[str, int, str] | None:

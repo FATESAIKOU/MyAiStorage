@@ -15,6 +15,8 @@ import tempfile
 from typing import Any, Literal
 from datetime import datetime, timezone
 
+from aistorage.errors import ReadError
+
 from aistorage.annex.git import AnnexGit
 from aistorage.annex.manifest import normalize_ls_remote
 from aistorage.errors import WriteError
@@ -100,6 +102,8 @@ class FakeAnnexGit(AnnexGit):
         self.repo_uuid: str | None = repo_uuid
         self.clock: Any | None = clock
         self.added_paths: list[str] = []
+        #: fake annex 物件庫（lookupkey 會填；register_object 可手動登錄「遠端」物件）
+        self._fake_objects: dict[str, bytes] = {}
         self.commits: list[tuple[str, str]] = []
         self.copied: list[tuple[str, list[str] | None]] = []
         self.pushed: list[tuple[str, tuple[str, ...]]] = []
@@ -374,6 +378,44 @@ class FakeAnnexGit(AnnexGit):
     def annex_keys_in(self, remote_uuid: str) -> frozenset[str]:
         self._check_injection("annex_keys_in")
         return self.annex_keys
+
+    def lookupkey(self, path: str | Path) -> str | None:
+        """測試用的 key 查詢：以工作樹上實際的檔案內容按 git-annex 的命名規則推算。
+
+        真實環境的 key 一律由 `git annex lookupkey` 提供（SubprocessAnnexGit）；
+        這裡只是讓不跑真 git-annex 的測試也能走同一條介面。命名規則與 git-annex
+        一致：副檔名取自**工作樹檔名**，沒有副檔名就沒有副檔名。
+        """
+        self._check_injection("lookupkey")
+        target = Path(path)
+        if not target.is_absolute():
+            target = self.workdir / target
+        if not target.is_file():
+            return None
+        data = target.read_bytes()
+        import hashlib as _hashlib
+
+        sha = _hashlib.sha256(data).hexdigest().lower()
+        ext = target.suffix
+        key = f"SHA256E-s{len(data)}--{sha}{ext}"
+        self.local_keys = frozenset(set(self.local_keys) | {key})
+        self._fake_objects[key] = data
+        return key
+
+    def get_key(self, key: str, *, from_remote: str = "origin") -> None:
+        """測試用的取回：只能取回本 fake 曾經看過的物件，取不到就 raise。
+
+        對應真實行為：全新 clone 的本機沒有物件，必須從遠端 special remote 取回；
+        fake 沒有遠端，所以未登錄的 key 一律 fail-closed（ReadError）。
+        """
+        self._check_injection("get_key")
+        if key in self._fake_objects:
+            return
+        raise ReadError(f"fake annex 沒有這個物件（測試要先 store 或 register_object）: {key}")
+
+    def register_object(self, key: str, data: bytes) -> None:
+        """登錄一個「遠端上存在」的物件，讓 get_key 取得得到。"""
+        self._fake_objects[key] = bytes(data)
 
     def local_refs(self, branches: tuple[str, ...] = ("main", "git-annex")) -> dict[str, str]:
         self._check_injection("local_refs")

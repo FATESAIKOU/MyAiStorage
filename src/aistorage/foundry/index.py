@@ -51,6 +51,16 @@ class ArtifactRow:
 
 
 @dataclass(frozen=True)
+class ArtifactIssue:
+    """無法解析 object_file_id 的原因（發佈端要記進 RunReport，review F-H3）。"""
+
+    artifact_id: str
+    code: str          # missing_annex_key / key_not_in_pin / object_not_found /
+                       # checksum_mismatch / size_mismatch
+    detail: str = ""
+
+
+@dataclass(frozen=True)
 class FoundryIndexMeta:
     """Foundry 索引的 metadata。"""
 
@@ -58,6 +68,67 @@ class FoundryIndexMeta:
     built_at: str
     foundry_main_sha: str
     element: str = "foundry"
+
+
+def resolve_object_file_ids(
+    rows: Iterable[ArtifactRow],
+    *,
+    drive: Any,
+    prefix_folder_id: str,
+    allowed_keys: Iterable[str] | None = None,
+) -> tuple[list[ArtifactRow], list[ArtifactIssue]]:
+    """把 contained 產出的 annex key 解析成 Drive 上的 object_file_id（F-H3）。
+
+    讀取介面是「以 id 從 Drive 取物件」（D5），所以發佈端必須在建立索引之前
+    把 file id 寫進來；沒有寫的話 `reader.get()` 每一次都會
+    `MismatchError("未記錄 object_file_id")`。
+
+    解析規則（與 review 建議一致）：
+    - 以前綴資料夾的列舉結果比對 `name == annex_key`（git-remote-annex 以 key 命名）；
+    - Drive 有提供 checksum／size 時必須相符，否則這一筆不發佈；
+    - 可以傳 `allowed_keys`（正式 pin 的 annex_keys）擋掉不在釘選內容裡的 key；
+    - 找不到或對不上就**不發佈這一筆**，並回傳原因給呼叫端記進 RunReport。
+
+    回傳 `(可發佈的 rows, 問題清單)`；callers 不該自行比對檔名。
+    """
+    from dataclasses import replace as _replace
+
+    allowed = frozenset(allowed_keys) if allowed_keys is not None else None
+    by_name: dict[str, Any] = {}
+    for child in drive.list_children(prefix_folder_id):
+        if not child.is_folder:
+            by_name[child.name] = child
+
+    ok: list[ArtifactRow] = []
+    issues: list[ArtifactIssue] = []
+    for row in rows:
+        if not row.annex_key:
+            issues.append(ArtifactIssue(row.artifact_id, "missing_annex_key",
+                                        "catalog 沒有記 annex_key"))
+            continue
+        if allowed is not None and row.annex_key not in allowed:
+            issues.append(ArtifactIssue(
+                row.artifact_id, "key_not_in_pin",
+                f"annex_key 不在正式 pin 的 annex_keys 內: {row.annex_key}"))
+            continue
+        f = by_name.get(row.annex_key)
+        if f is None:
+            issues.append(ArtifactIssue(
+                row.artifact_id, "object_not_found",
+                f"前綴下找不到名為 {row.annex_key} 的檔案"))
+            continue
+        if row.sha256 and f.sha256 and f.sha256.lower() != row.sha256.lower():
+            issues.append(ArtifactIssue(
+                row.artifact_id, "checksum_mismatch",
+                f"Drive checksum {f.sha256} 與 catalog {row.sha256} 不符"))
+            continue
+        if row.size is not None and f.size is not None and int(f.size) != int(row.size):
+            issues.append(ArtifactIssue(
+                row.artifact_id, "size_mismatch",
+                f"Drive size {f.size} 與 catalog {row.size} 不符"))
+            continue
+        ok.append(_replace(row, object_file_id=f.id))
+    return ok, issues
 
 
 def build_foundry_index(

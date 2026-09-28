@@ -707,3 +707,164 @@ def test_apply_artifact_edge_cases(test_setup):
     assert res.ok is False
     assert res.code == "invalid_format"
 
+
+
+# ---------------------------------------------------------------------------
+# review F-H2／F-H3：收容產出真的進 annex、object_file_id 由發佈端解析
+# ---------------------------------------------------------------------------
+
+
+def _foundry_annex_repo(tmp_path: Path) -> tuple[Path, "object"]:
+    """真的 git-annex repo（暫存目錄內）。"""
+    import subprocess
+
+    from aistorage.annex.git import SubprocessAnnexGit, get_git_env
+
+    workdir = tmp_path / "foundry"
+    workdir.mkdir()
+    env = get_git_env()
+    subprocess.run(["git", "init", "-b", "main", "-q"], cwd=workdir, env=env, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=workdir, env=env, check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.invalid"], cwd=workdir, env=env, check=True)
+    (workdir / "README.md").write_text("foundry\n")
+    subprocess.run(["git", "add", "."], cwd=workdir, env=env, check=True)
+    subprocess.run(["git", "commit", "-qm", "seed"], cwd=workdir, env=env, check=True)
+    subprocess.run(["git", "annex", "init", "aistorage-it"], cwd=workdir, env=env,
+                   check=True, capture_output=True)
+    return workdir, SubprocessAnnexGit(workdir)
+
+
+def test_foundry_contained_object_really_goes_into_annex(tmp_path: Path) -> None:
+    """F-H2：收容產出進 annex，key 由 git-annex 決定（不是自己算的）。"""
+    import hashlib
+    import subprocess
+
+    from aistorage.annex.git import get_git_env
+    from aistorage.annex.git import SubprocessAnnexGit
+    from aistorage.errors import WriteError
+    from aistorage.foundry.store import LARGEFILES_OBJECTS, FoundryStore
+
+    workdir, git = _foundry_annex_repo(tmp_path)
+    store = FoundryStore(workdir, git=git, temp_dir=tmp_path / "tmp")
+
+    # largefiles 規則涵蓋 objects/**，但不含 catalog
+    rule = subprocess.run(["git", "-C", str(workdir), "config", "annex.largefiles"],
+                          capture_output=True, text=True, env=get_git_env(), check=True)
+    assert rule.stdout.strip() == LARGEFILES_OBJECTS
+
+    src = tmp_path / "report.pdf"
+    body = b"%PDF-1.4 fake content for annex"
+    src.write_bytes(body)
+    ulid = "01ABCDEF2345GHJKLMNPQRS"
+    key = store.put_contained_object(ulid, "report.pdf", src)
+
+    # key 由 git-annex 產生：大小與 sha256 對得上，副檔名取自工作樹檔名
+    assert key == f"SHA256E-s{len(body)}--{hashlib.sha256(body).hexdigest()}.pdf"
+    assert key in store.keys()
+    assert git.lookupkey(f"objects/{ulid}/report.pdf") == key
+    # catalog 進得去（JSON 仍是 git blob，不進 annex）
+    store.put_catalog(ulid, {"id": f"artifact:{ulid}", "annex_key": key})
+    assert git.lookupkey(f"catalog/{ulid}.json") is None
+
+    # 規則涵蓋不到時必須 raise（不准默默留在 git blob）：另起一個工作樹，
+    # 規則只涵蓋 catalog（largefiles 對已在 index 的檔案無效，不能就地換規則）
+    import subprocess
+
+    from aistorage.annex.git import get_git_env
+
+    other_dir = tmp_path / "foundry-narrow"
+    other_dir.mkdir()
+    env = get_git_env()
+    for cmd in (["init", "-b", "main", "-q"], ["config", "user.name", "t"],
+                ["config", "user.email", "t@t.invalid"]):
+        subprocess.run(["git", "-C", str(other_dir), *cmd], env=env, check=True,
+                       capture_output=True)
+    (other_dir / "README.md").write_text("x\n")
+    subprocess.run(["git", "-C", str(other_dir), "add", "."], env=env, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(other_dir), "commit", "-qm", "seed"], env=env,
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(other_dir), "annex", "init", "aistorage-it"],
+                   env=env, check=True, capture_output=True)
+    narrow = FoundryStore(other_dir, git=SubprocessAnnexGit(other_dir),
+                          largefiles="include=catalog/*", temp_dir=tmp_path / "tmp2")
+    stray = tmp_path / "stray.bin"
+    stray.write_bytes(b"stray")
+    with pytest.raises(WriteError, match="沒有進 git-annex"):
+        narrow.put_contained_object(ulid, "stray.txt", stray)
+
+
+def test_resolve_object_file_ids_matches_drive_by_key() -> None:
+    """F-H3：發佈端把 key 解析成 Drive file id；對不上就不發佈並回報原因。"""
+    from aistorage.drive.fake import FakeDrive
+    from aistorage.foundry.index import ArtifactRow, resolve_object_file_ids
+
+    drive = FakeDrive()
+    prefix = drive.seed_folder("foundry")
+    body = b"payload"
+    key = f"SHA256E-s7--{'a' * 64}.pdf"
+    object_id = drive.seed_file(prefix, key, body)
+    other_key = f"SHA256E-s7--{'b' * 64}.pdf"
+    drive.seed_file(prefix, other_key, body)
+
+    rows = [
+        ArtifactRow(artifact_id="artifact:1", kind="pdf", name="a.pdf",
+                    producer="profile:mac-opencode",
+                    produced_by_session_id="opencode:s1",
+                    created_at="2026-09-27T08:00:00Z",
+                    updated_at="2026-09-27T08:00:00Z",
+                    size=len(body), sha256=None, annex_key=key, repo="foundry",
+                    path=f"objects/1/a.pdf"),
+        ArtifactRow(artifact_id="artifact:2", kind="pdf", name="b.pdf",
+                    producer="profile:mac-opencode",
+                    produced_by_session_id="opencode:s1",
+                    created_at="2026-09-27T08:00:00Z",
+                    updated_at="2026-09-27T08:00:00Z",
+                    size=len(body), sha256=None, annex_key=other_key),
+        ArtifactRow(artifact_id="artifact:3", kind="pdf", name="c.pdf",
+                    producer="profile:mac-opencode",
+                    produced_by_session_id="opencode:s1",
+                    created_at="2026-09-27T08:00:00Z",
+                    updated_at="2026-09-27T08:00:00Z", annex_key="SHA256E-s1--" + "c" * 64),
+        ArtifactRow(artifact_id="artifact:4", kind="pdf", name="d.pdf",
+                    producer="profile:mac-opencode",
+                    produced_by_session_id="opencode:s1",
+                    created_at="2026-09-27T08:00:00Z",
+                    updated_at="2026-09-27T08:00:00Z"),
+    ]
+    ok, issues = resolve_object_file_ids(
+        rows, drive=drive, prefix_folder_id=prefix,
+        allowed_keys=[key, other_key])
+    assert [r.artifact_id for r in ok] == ["artifact:1", "artifact:2"]
+    assert ok[0].object_file_id == object_id
+    codes = {i.artifact_id: i.code for i in issues}
+    # artifact:3 的 key 既不在 pin 也不在 Drive：先被 pin 檢查擋下（fail-closed）
+    assert codes["artifact:3"] == "key_not_in_pin"
+    assert codes["artifact:4"] == "missing_annex_key"
+
+    # 不在 pin 的 key 也要擋掉（fail-closed）
+    ok2, issues2 = resolve_object_file_ids(
+        rows[:1], drive=drive, prefix_folder_id=prefix, allowed_keys=[])
+    assert not ok2
+    assert issues2[0].code == "key_not_in_pin"
+
+
+def test_resolve_object_file_ids_checks_checksum_and_size() -> None:
+    from aistorage.drive.fake import FakeDrive
+    from aistorage.foundry.index import ArtifactRow, resolve_object_file_ids
+
+    drive = FakeDrive()
+    prefix = drive.seed_folder("foundry")
+    body = b"payload"
+    key = f"SHA256E-s7--{'a' * 64}.pdf"
+    drive.seed_file(prefix, key, body)
+    base = dict(kind="pdf", producer="profile:mac-opencode",
+                produced_by_session_id="opencode:s1",
+                created_at="2026-09-27T08:00:00Z",
+                updated_at="2026-09-27T08:00:00Z", annex_key=key, repo="foundry")
+    ok, issues = resolve_object_file_ids(
+        [ArtifactRow(artifact_id="artifact:1", name="a.pdf", sha256="d" * 64,
+                     size=len(body), **base)],
+        drive=drive, prefix_folder_id=prefix)
+    assert not ok
+    assert issues[0].code in ("checksum_mismatch", "size_mismatch")
