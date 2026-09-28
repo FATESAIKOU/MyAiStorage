@@ -1,7 +1,7 @@
 """6.2 回滾（管理者直接操作；PM 決定 6）。
 
 不做簽章的 rollback 收件匣項目：管理者在 AdminLock 內直接把某個舊版本
-恢復成新的快照。旧版本都能取回（snapshots.jsonl＋raw），回滾即追加一份
+恢復成新的快照。舊版本都能取回（snapshots.jsonl＋raw），回滾即追加一份
 內容等於舊版本的新快照（`via="rollback"`）。
 
 注意（PM 決定 6）：運作中的 Session，下一次同步會以來源端的內容成為
@@ -9,22 +9,31 @@
 要永久移除內容請用抹除（6.1），不要用回滾。
 閱讀版在下一次發佈時重建。
 
-需要 agora/store.py  owner 補上 `via="rollback"`
-（put_session 的允許值與 SnapshotEntry 的字面量）；在本行未補之前，
-執行面的測試會失敗，已列給 PM。
+**單調性（重要）**：`rollback_session` 的 `snapshot_at` 取執行時鐘，
+所以回滾之後「現在」一定大於任何舊快照。同步器下一份快照如果帶的
+`snapshot_at` 早於這次回滾（來源端沒注意到回滾、仍以為時間還在原地），
+會被判成 stale 而不採用，於是該次同步不動作；下一次帶較新時間的同步才會
+蓋過回滾。這個行為寫在 `docs/runbooks/rollback.md`。
+
+**不是「直接改寫 Drive」**：本模組只寫真本（clone 內）。呼叫端負責
+AdminLock → clone → commit → push → 驗證 → 重建 pin → 讀取視圖重建世代，
+那一段是 `admin.remote.swap_remote`（與抹除共用），見 `admin/__main__.py`。
 """
 
 from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
 
 from aistorage.admin import AdminError
 from aistorage.agora.store import AgoraStore, SessionRecord
 from aistorage.clock import Clock, format_rfc3339
 from aistorage.schema import generate_ulid
+
+#: 運作中的 Session 下一次同步會蓋過回滾；CLI 與 runbook 都引用這句。
+RUNNING_NOTE = (
+    "運作中的 Session 下一次同步會以來源端內容成為新版本；"
+    "永久移除請用抹除（erase）")
 
 
 @dataclass(frozen=True)
@@ -44,6 +53,8 @@ class RollbackResult:
     to_sha256: str
     committed_at: str
     record_id: str
+    was_running: bool = False
+    note: str = RUNNING_NOTE
 
 
 def list_rollback_points(store: AgoraStore, session_id: str) -> list[RollbackPoint]:
@@ -103,9 +114,8 @@ def rollback_session(*, store: AgoraStore, session_id: str,
         title=session.title,
         extra=dict(session.extra),
     )
-    # via="rollback" 需要 agora/store.py owner 補上允許值（見模組 docstring）。
-    store.put_session(new_rec, raw_path, via="rollback",  # type: ignore[arg-type]
-                      rewrite_id=None)
+    # via="rollback"（agora/store.py 的允許值已含 rollback）
+    store.put_session(new_rec, raw_path, via="rollback", rewrite_id=None)
     record_id = generate_ulid()
     store.put_json(
         f"_admin/rollbacks/{record_id}.json",
@@ -125,4 +135,5 @@ def rollback_session(*, store: AgoraStore, session_id: str,
         to_sha256=new_rec.raw_sha256,
         committed_at=now,
         record_id=record_id,
+        was_running=bool(session.in_progress),
     )

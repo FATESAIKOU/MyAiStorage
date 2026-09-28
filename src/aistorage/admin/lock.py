@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, Protocol
 
 from aistorage.admin import AdminError
 from aistorage.clock import Clock, format_rfc3339
@@ -101,8 +101,12 @@ class GitPinFiles(PinFiles):
                  key_path: Path | str | None = None,
                  user_name: str = "AiStorage Admin",
                  user_email: str = "admin@aistorage.local") -> None:
+        from aistorage.safety import assert_safe_workdir
+
         self._repo_url = repo_url
-        self._workdir = Path(workdir)
+        # M8：pin repo 會被 commit＋push，工作目錄不得位於專案 repo 之內
+        # （與 A 線 GitPinStore 同一道檢查）。
+        self._workdir = assert_safe_workdir(workdir, purpose="pin repo 工作目錄")
         self._key_path = Path(key_path) if key_path is not None else None
         self._user_name = user_name
         self._user_email = user_email
@@ -110,14 +114,10 @@ class GitPinFiles(PinFiles):
         self._ready = False
 
     def _is_local(self) -> bool:
-        url = self._repo_url
-        if url.startswith("file://"):
-            return True
-        if url.startswith(("ssh://", "git@", "http://", "https://")):
-            return False
-        if ":" in url and "@" in url.split(":")[0]:
-            return False
-        return True
+        # L2：與 A 線 GitPinStore 共用同一個 URL 分類（避免 scp 形式被當成本機路徑）
+        from aistorage.integrity.pin import _is_local_path_or_file_url
+
+        return _is_local_path_or_file_url(self._repo_url)
 
     def _build_env(self) -> dict[str, str]:
         import os
@@ -262,7 +262,8 @@ class AdminLock:
                  clock: Clock | None = None,
                  timeout: timedelta = timedelta(minutes=10),
                  poll: timedelta = timedelta(seconds=15),
-                 precheck: Callable[[], None] | None = None) -> None:
+                 precheck: Callable[[], None] | None = None,
+                 notify: Callable[[str], None] | None = None) -> None:
         self._repo = repo
         self._pins = pins
         self._gh = gh
@@ -273,6 +274,7 @@ class AdminLock:
         self._timeout = timeout
         self._poll = poll
         self._precheck = precheck
+        self._notify = notify or (lambda msg: print(msg))
 
     def _now(self) -> datetime:
         if self._clock is not None:
@@ -282,6 +284,17 @@ class AdminLock:
 
     def status(self) -> MaintenanceFlag | None:
         return read_maintenance(self._pins, self._repo)
+
+    def unlock(self) -> MaintenanceFlag | None:
+        """手動解除（管理操作失敗後由人確認再解除；CLI：unlock --confirm）。
+
+        沒有旗標就是已經解除了，視為成功（冪等）。
+        """
+        flag = self.status()
+        if flag is not None:
+            self._pins.delete(maintenance_relpath(self._repo), "maintenance off (admin unlock)")
+        self._gh.set_workflow_enabled(self._workflow, True)
+        return flag
 
     def __enter__(self) -> AdminLock:
         if self.status() is not None:
@@ -295,7 +308,14 @@ class AdminLock:
                        sort_keys=True, ensure_ascii=False) + "\n",
             f"maintenance on: {self._reason}")
         # 2. 停用 workflow（輔助措施；住民可能重新啟用，不當作鎖）
-        self._gh.set_workflow_enabled(self._workflow, False)
+        try:
+            self._gh.set_workflow_enabled(self._workflow, False)
+        except AdminError as e:
+            # L3：旗標留著（安全方向），但要明確告訴人怎麼清掉
+            self._notify(
+                f"維護中止，需要人工處理：已寫入 {relpath} 但停用 workflow 失敗（{e}）。"
+                "確認狀態後用 `python -m aistorage.admin unlock --confirm` 解除。")
+            raise
         try:
             self._wait_quiet(deadline=now + self._timeout)
             # 4. 預檢（例如遠端 manifest 雜湊等於正式 pin）
@@ -322,8 +342,19 @@ class AdminLock:
                 time.sleep(poll_s)
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        # H5：**只在 with 區塊正常結束時**才解除。抹除或回滾做到一半失敗時，
+        # 遠端可能已經不一致（bundle 刪了還沒重推），這時解除鎖會讓提交流程
+        # 回到不一致的遠端上：settle 每輪 MismatchError 中止，沒有 pending 時
+        # 反而會用舊 pin 把新狀態全隔離。與 __enter__ 預檢失敗同一個處理方式。
+        if exc_type is not None:
+            self._notify(
+                "維護中止，需要人工處理：with 區塊內發生例外，已保留 "
+                f"{maintenance_relpath(self._repo)} 旗標並維持 workflow 停用。"
+                "處理完（必要時重推、重建 pin）再用 "
+                "`python -m aistorage.admin unlock --confirm` 解除。")
+            return False
         # pin 的重建或確認由呼叫端（抹除等）在 with 內先完成；
-        # 這裡只刪旗標並重新啟用 workflow（即使 with 內出錯也執行）。
+        # 這裡只刪旗標並重新啟用 workflow。
         try:
             self._pins.delete(
                 maintenance_relpath(self._repo), "maintenance off")

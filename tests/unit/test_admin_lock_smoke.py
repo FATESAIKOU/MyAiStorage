@@ -73,15 +73,69 @@ def test_lock_enter_exit_order() -> None:
 
 
 def test_lock_waits_for_runs_then_times_out() -> None:
+    """逾時屬於「短暫擁塞」：把自己��旗標清掉、workflow 重開。"""
     pins = MemoryPinFiles()
-    runner, _ = _gh_fake(runs=[{"databaseId": 1, "status": "in_progress"}])
+    runner, state = _gh_fake(runs=[{"databaseId": 1, "status": "in_progress"}])
     gh = GitHubAdmin("owner/repo", runner=runner)
     with pytest.raises(AdminError):
         with AdminLock(repo="agora", pins=pins, gh=gh, workflow="committer.yml",
                        reason="x", timeout=timedelta(0), poll=timedelta(0)):
             pass
-    # 旗標照樣清理、workflow 照樣重開（__exit__ 一定執行）
     assert read_maintenance(pins, "agora") is None
+    assert state["enabled"] is True
+
+
+def test_lock_error_in_with_keeps_lock_and_workflow_disabled() -> None:
+    """H5：with 區塊內出錯 → 保留旗標、維持 workflow 停用，並提示人工處理。"""
+    pins = MemoryPinFiles()
+    runner, state = _gh_fake()
+    gh = GitHubAdmin("owner/repo", runner=runner)
+    notices: list[str] = []
+    with pytest.raises(RuntimeError, match="boom"):
+        with AdminLock(repo="agora", pins=pins, gh=gh, workflow="committer.yml",
+                       reason="erase", notify=notices.append):
+            assert read_maintenance(pins, "agora") is not None
+            raise RuntimeError("boom")
+    flag = read_maintenance(pins, "agora")
+    assert flag is not None and flag.reason == "erase"
+    assert state["enabled"] is False
+    assert any("unlock --confirm" in n for n in notices)
+    assert any("維護中止" in n for n in notices)
+    # 手動解除之後才會重開 workflow
+    lock = AdminLock(repo="agora", pins=pins, gh=gh, workflow="committer.yml",
+                     reason="x", notify=notices.append)
+    assert lock.unlock() is not None
+    assert read_maintenance(pins, "agora") is None
+    assert state["enabled"] is True
+
+
+def test_lock_workflow_disable_failure_keeps_flag_with_hint() -> None:
+    """L3：停用 workflow 失敗 → 旗標留著，但訊息要告訴人怎麼解除。"""
+    pins = MemoryPinFiles()
+
+    def runner(cmd: list[str]) -> str:
+        if cmd[1:3] == ["workflow", "disable"]:
+            raise RuntimeError("gh exploded")
+        return ""
+
+    gh = GitHubAdmin("owner/repo", runner=runner)
+    notices: list[str] = []
+    with pytest.raises(AdminError):
+        with AdminLock(repo="agora", pins=pins, gh=gh, workflow="committer.yml",
+                       reason="erase", notify=notices.append):
+            pass
+    assert read_maintenance(pins, "agora") is not None
+    assert any("unlock --confirm" in n for n in notices)
+
+
+def test_unlock_is_idempotent() -> None:
+    pins = MemoryPinFiles()
+    runner, state = _gh_fake()
+    gh = GitHubAdmin("owner/repo", runner=runner)
+    lock = AdminLock(repo="agora", pins=pins, gh=gh, workflow="committer.yml",
+                     reason="x")
+    assert lock.unlock() is None      # 沒有旗標也視為成功（冪等）
+    assert state["enabled"] is True
 
 
 def test_lock_precheck_failure_aborts() -> None:
@@ -143,3 +197,20 @@ def test_git_pin_files_local_roundtrip(tmp_path: Path) -> None:
 def test_git_pin_files_remote_requires_key(tmp_path: Path) -> None:
     with pytest.raises(AdminError, match="key_path"):
         GitPinFiles("git@github.com:o/r.git", tmp_path / "work")
+
+
+def test_git_pin_files_scp_url_is_remote_not_local(tmp_path: Path) -> None:
+    """L2：沒有 key 的 scp 形式 URL 不得被當成本機路徑。"""
+    with pytest.raises(AdminError):
+        GitPinFiles("github-alias:o/pin.git", tmp_path / "work")
+
+
+def test_git_pin_files_rejects_project_workdir() -> None:
+    """M8：pin repo 的工作目錄不得在專案 repo 之內。"""
+    from aistorage.safety import UnsafeWorkdirError, project_repo_toplevel
+
+    project = project_repo_toplevel()
+    if project is None:
+        pytest.skip("判斷不出專案 repo")
+    with pytest.raises(UnsafeWorkdirError):
+        GitPinFiles("file:///tmp/whatever-pin.git", project / "docs")

@@ -1,15 +1,21 @@
 """6.1 抹除（只在 Mac 上、以管理憑證、在 AdminLock 內執行）。
 
-做法照 design D2「改寫與抹除」與技術驗證 1.3：
-- 部分抹除：其他 Session 與 annex 物件保留。
-- 依 file id 永久刪除（刪前 get() 確認 parents）；先 dry-run。
-- 所有指令先 dry-run，只列 id、計數與雜湊；`--confirm <plan-hash>` 才執行。
-- 抹除紀錄只記 id 與雜湊對應，不含任何被抹除的內容。
+做法照 design D2「改寫與抹除」與技術驗證 1.3，分成四段（review H6）：
+
+1. `plan_erase`（唯讀）：列出所有要刪的 file id，並**逐一 `get()` 確認每個
+   類別各自的 parent**（讀取視圖／收件匣／隔離區的檔案不在真本前綴之下，
+   用前綴去檢查必定被拒絕）。
+2. `rewrite_local`：filter-repo 改寫歷史、redact／remap、annex drop、gc、
+   抹除紀錄，並 commit（遠端刪掉之後如果沒有 commit，真本就只剩本機）。
+3. `swap_remote`（在 AdminLock 內）：刪遠端 → `git annex copy` ＋
+   `git push --force` → ls-remote／manifest 驗證 → 以觀測到的遠端狀態重建
+   正式 pin → 讀取視圖 rebuild epoch 加 1。任何一步失敗都保留鎖。
+4. `verify_canary`：後置條件**必須真的執行**（讀不到就判失敗，不略過）。
 
 與草案的差異（實作時確定）：
 - `plan_erase` 除了 `admin` 另取 `store`（讀 snapshots／handoffs／links
   計算沿用與重新對應）與可選的 `index_db`（讀取視圖含目標內容的 reading）。
-- `snapshot_remap` 在 plan 時為空，由 apply 在改寫 raw 之後填入回報與
+- `snapshot_remap` 在 plan 時為空，由 rewrite 在改寫 raw 之後填入回報與
   抹除紀錄（plan 階段無法在不知道新 raw 位元組的情況下預知新雜湊）；
   `plan_hash` 只覆蓋可執行的計畫內容。
 """
@@ -18,14 +24,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from pathlib import Path
 import shutil
 import sqlite3
+import stat
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Literal, Sequence
 
 from aistorage.admin import AdminDeps, AdminError
+from aistorage.admin.remote import (
+    DeleteGroup,
+    RemoteCheck,
+    SwapAborted,
+    SwapReport,
+    check_repo_dir,
+    swap_remote,
+)
 from aistorage.agora.store import AgoraStore
 from aistorage.annex.manifest import parse_bundle_name, parse_manifest
 from aistorage.clock import format_rfc3339
@@ -54,6 +70,7 @@ class ErasePlan:
     snapshot_remap: dict[str, str]
     run_ids_to_delete: tuple[int, ...]
     known_clones: tuple[str, ...]
+    condemned_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -62,6 +79,8 @@ class EraseReport:
     deleted_file_ids: tuple[str, ...]
     snapshot_remap: dict[str, str]
     erasure_record_id: str
+    commit_sha: str | None = None
+    swap: SwapReport | None = None
     verify: tuple[tuple[str, int], ...] = ()
 
 
@@ -77,6 +96,7 @@ def _canonical_plan(plan: ErasePlan) -> str:
         "quarantine_file_ids": sorted(plan.quarantine_file_ids),
         "run_ids_to_delete": sorted(plan.run_ids_to_delete),
         "known_clones": sorted(plan.known_clones),
+        "condemned_keys": sorted(plan.condemned_keys),
     }, sort_keys=True, ensure_ascii=False)
 
 
@@ -109,10 +129,13 @@ def plan_erase(targets: Sequence[EraseTarget], *, admin: AdminDeps,
 
     - repo 檔：前綴子樹下全部 bundle／manifest／.bak（抹除即重建整批歷史，
       A 線的 settle 下一輪會以新 pin 為準；annex key 檔名符合者就是 key 本體）。
-    - segment：沿用 snapshots.jsonl 的快照清單（remap 由 apply 填）。
+    - segment：沿用 snapshots.jsonl 的快照清單（remap 由 rewrite 填）。
     - 讀取視圖：目標 Session 在 index readings 表的全部 file_id（保守：整份 reading）。
     - 收件匣：sidecar 的 metadata.id 指向目標 Session 者。
     - 隔離區：檔名落在刪除清單者。
+
+    計畫階段就逐一 `get()` 確認 parent（review H6）：刪錯資料夾是不可逆的，
+    寧可在計畫就拒絕，也不要刪到一半才失敗。
     """
     targets = tuple(targets)
     if not targets:
@@ -192,7 +215,7 @@ def plan_erase(targets: Sequence[EraseTarget], *, admin: AdminDeps,
             if f.name in condemned_names:
                 quarantine_ids.append(f.id)
 
-    return ErasePlan(
+    plan = ErasePlan(
         targets=targets,
         repo_uuids=tuple(admin.repo_uuids),
         delete_file_ids=tuple(sorted(set(delete_ids))),
@@ -202,7 +225,42 @@ def plan_erase(targets: Sequence[EraseTarget], *, admin: AdminDeps,
         snapshot_remap={},
         run_ids_to_delete=(),
         known_clones=tuple(admin.known_clones),
+        condemned_keys=tuple(sorted(keys)),
     )
+    # H6：計畫階段就確認每個類別各自的 parent；不符就拒絕整個計畫。
+    check_plan_parents(admin.drive, delete_groups_for(plan, admin=admin))
+    return plan
+
+
+def delete_groups_for(plan: ErasePlan, *, admin: AdminDeps) -> tuple[DeleteGroup, ...]:
+    """把計畫的 file id 依類別配給**該類別自己的**合法 parent 根。"""
+    groups: list[DeleteGroup] = []
+    if plan.delete_file_ids:
+        groups.append(DeleteGroup(name="repo", file_ids=plan.delete_file_ids,
+                                  parent_roots=(admin.prefix_folder_id,)))
+    if plan.readview_file_ids:
+        if not admin.readview_folder_id:
+            raise AdminError(
+                "計畫有讀取視圖檔要刪，但沒有設定 readview_folder_id，"
+                "無法確認 parent（拒絕執行）")
+        groups.append(DeleteGroup(name="readview", file_ids=plan.readview_file_ids,
+                                  parent_roots=(admin.readview_folder_id,)))
+    if plan.inbox_file_ids:
+        groups.append(DeleteGroup(name="inbox", file_ids=plan.inbox_file_ids,
+                                  parent_roots=tuple(admin.inbox_folder_ids)))
+    if plan.quarantine_file_ids:
+        groups.append(DeleteGroup(name="quarantine",
+                                  file_ids=plan.quarantine_file_ids,
+                                  parent_roots=(admin.quarantine_folder_id,)))
+    return tuple(groups)
+
+
+def check_plan_parents(drive: DriveClient, groups: Sequence[DeleteGroup]) -> None:
+    """計畫階段就確認每個類別各自的 parent；不符立刻拒絕（不可逆操作）。"""
+    from aistorage.admin.remote import check_delete_group
+
+    for group in groups:
+        check_delete_group(drive, group)
 
 
 # redact 回呼的形狀：依來源格式從 raw 移除指定訊息，回傳新 raw。
@@ -218,24 +276,15 @@ def _require_filter_repo() -> str:
     return path
 
 
-def _git(repo_dir: Path, *args: str) -> str:
+def _git(repo_dir: Path, *args: str, check: bool = True) -> str:
+    from aistorage.annex.git import get_git_env
+
     proc = subprocess.run(
-        ["git", *args], cwd=repo_dir, capture_output=True, text=True, timeout=300)
-    if proc.returncode != 0:
+        ["git", *args], cwd=str(repo_dir), capture_output=True, text=True,
+        env=get_git_env(), timeout=600, check=False)
+    if check and proc.returncode != 0:
         raise AdminError(f"git {' '.join(args)} 失敗 (rc={proc.returncode})")
     return proc.stdout
-
-
-def _delete_drive_id(drive: DriveClient, file_id: str, *,
-                     prefix_folder_id: str) -> None:
-    """依 file id 永久刪除；刪前 get() 確認 parents（1.3 M1 防呆）。"""
-    try:
-        info = drive.get(file_id)
-    except Exception as e:
-        raise AdminError(f"刪除前確認失敗 {file_id}: {e}") from None
-    if prefix_folder_id not in info.parents:
-        raise AdminError(f"拒絕刪除：{file_id} 的 parents 不含預期前綴")
-    drive.delete_permanently(file_id)
 
 
 def _write_erasure_record(store: AgoraStore, *, who: str, at: str, why: str,
@@ -260,8 +309,8 @@ def _write_erasure_record(store: AgoraStore, *, who: str, at: str, why: str,
 
 
 def _redact_snapshots(store: AgoraStore, tmpdir: Path, session_id: str,
-                        message_ids: tuple[str, ...], redact_raw: Any
-                        ) -> tuple[dict[str, str], dict[str, tuple[str, str]], list[str]]:
+                      message_ids: tuple[str, ...], redact_raw: Any
+                      ) -> tuple[dict[str, str], dict[str, tuple[str, str]], list[str]]:
     """改寫某 Session 每一份快照的 raw（不碰 git 歷史）。
 
     回傳 (remap, new_refs, old_git_blobs)：舊 content-sha → 新 content-sha、
@@ -269,6 +318,7 @@ def _redact_snapshots(store: AgoraStore, tmpdir: Path, session_id: str,
     snapshots.jsonl 的對應行同步更新；歷史清除由呼叫端用 filter-repo 做。
     """
     from aistorage.agora import layout as _layout
+
     remap: dict[str, str] = {}
     new_refs: dict[str, tuple[str, str]] = {}
     old_git_blobs: list[str] = []
@@ -307,23 +357,37 @@ def _redact_snapshots(store: AgoraStore, tmpdir: Path, session_id: str,
     return remap, new_refs, old_git_blobs
 
 
-def apply_erase(plan: ErasePlan, *, confirm: str, admin: AdminDeps,
-                store: AgoraStore, repo_dir: Path,
-                redact_raw: Any = None,
-                who: str = "admin", why: str = "") -> EraseReport:
-    """執行抹除（呼叫端負責先進入 AdminLock）。
+def _drop_local_annex_objects(repo_dir: Path, keys: Sequence[str]) -> list[str]:
+    """刪掉本機 annex 物件（1.3 發現 #3：留著會在重建時被重新上傳）。
 
-    - confirm 必須等於 plan_hash(plan)，否則拒絕。
-    - session：filter-repo 刪目錄；annex_key：dead／forget／drop；
-      segment：需 redact_raw(source, raw, message_ids) 回呼改寫 raw，
-      再以 --strip-blobs-with-ids 清除舊 blob。
-    - 改寫交接單與 Link 的 snapshot_sha256（PM 決定 5）；接續點訊息本身
-      被抹除的交接單標 erased。
+    annex 物件是 0444 唯讀，直接 rm 會 Permission denied，所以先 chmod。
     """
-    if confirm != plan_hash(plan):
-        raise AdminError("確認碼與計畫雜湊不符，拒絕執行（計畫可能已被更動）")
-    _require_filter_repo()
-    repo_dir = Path(repo_dir)
+    removed: list[str] = []
+    objects = repo_dir / ".git" / "annex" / "objects"
+    for key in keys:
+        for candidate in (objects / key[:2] / key[2:4] / key,
+                          objects / key[:2] / key[2:4] / f"{key}.tmp"):
+            if candidate.exists():
+                os.chmod(candidate, stat.S_IRUSR | stat.S_IWUSR)
+                candidate.unlink()
+                removed.append(key)
+    return sorted(set(removed))
+
+
+def rewrite_local(plan: ErasePlan, *, admin: AdminDeps, store: AgoraStore,
+                  repo_dir: Path | str, redact_raw: Any = None,
+                  who: str = "admin", why: str = "",
+                  check: bool = True) -> tuple[str, dict[str, str], str]:
+    """本機改寫（不碰遠端）。回傳 (commit sha, remap, 抹除紀錄 id)。
+
+    指令順序照 1.3 實測：`annex drop` → `annex forget --force` →
+    `update-ref -d refs/annex/last-index`（annex 索引會保留舊 blob）→
+    `filter-repo` → 再次 `update-ref -d` → `reflog expire` → `gc --prune=now`
+    （dangling blob 沒 prune 掉的話，本機掃描還是找得到）。
+    """
+    if check:
+        _require_filter_repo()
+    workdir = check_repo_dir(repo_dir, purpose="抹除改寫工作目錄")
     now = format_rfc3339(admin.clock.now(), include_fraction=True)
     remap: dict[str, str] = {}
 
@@ -334,21 +398,25 @@ def apply_erase(plan: ErasePlan, *, confirm: str, admin: AdminDeps,
     if segment_targets and redact_raw is None:
         raise AdminError("segment 抹除需要 redact_raw 回呼（依來源格式移除訊息）")
 
-    # 1. 整個 Session：從全部歷史刪除目錄
+    # 1. 被淘汰的 annex 物件先丟（遠端的 key 依 file id 刪除）
+    for key in plan.condemned_keys:
+        _git(workdir, "annex", "drop", "--force", "--key", key, check=False)
+    if plan.condemned_keys:
+        _git(workdir, "annex", "forget", "--force", check=False)
+    _drop_local_annex_objects(workdir, plan.condemned_keys)
+    _git(workdir, "update-ref", "-d", "refs/annex/last-index", check=False)
+
+    # 2. 整個 Session：從全部歷史刪目錄
     for t in session_targets:
         assert t.session_id is not None
-        from aistorage.agora.layout import session_dir_for_id
-        try:
-            rel = session_dir_for_id(t.session_id)
-        except ValueError as e:
-            raise AdminError(f"無效的 Session id: {t.session_id}: {e}") from None
+        rel = _session_rel(t.session_id)
         proc = subprocess.run(
             ["git-filter-repo", "--path", rel, "--invert-paths", "--force"],
-            cwd=repo_dir, capture_output=True, text=True, timeout=600)
+            cwd=str(workdir), capture_output=True, text=True, timeout=1800)
         if proc.returncode != 0:
             raise AdminError(f"filter-repo 刪除 {rel} 失敗 (rc={proc.returncode})")
 
-    # 2. segment：改寫每一份快照的 raw，收集新舊雜湊
+    # 3. segment：改寫每一份快照的 raw，收集新舊雜湊
     old_blob_ids: list[str] = []
     new_refs: dict[str, tuple[str, str]] = {}
     for t in segment_targets:
@@ -359,30 +427,7 @@ def apply_erase(plan: ErasePlan, *, confirm: str, admin: AdminDeps,
         new_refs.update(sub_refs)
         old_blob_ids.extend(sub_blobs)
 
-    # 3. annex key：dead／forget／drop（git-annex 分支只留 key 名稱供確認攻擊比對）
-    for t in key_targets:
-        assert t.key is not None
-        for args in (["annex", "dead", t.key],
-                     ["annex", "forget", "--drop-dead", "here"],
-                     ["annex", "drop", "--force", "--key", t.key]):
-            proc = subprocess.run(
-                ["git", *args], cwd=repo_dir,
-                capture_output=True, text=True, timeout=300)
-            if proc.returncode != 0:
-                raise AdminError(f"git {' '.join(args)} 失敗 (rc={proc.returncode})")
-
-    # 4. 從歷史清除被取代的 blob
-    if old_blob_ids:
-        ids_file = admin.workdir / "strip-ids.txt"
-        ids_file.write_text("\n".join(sorted(set(old_blob_ids))) + "\n")
-        proc = subprocess.run(
-            ["git-filter-repo", "--strip-blobs-with-ids", str(ids_file), "--force"],
-            cwd=repo_dir, capture_output=True, text=True, timeout=600)
-        if proc.returncode != 0:
-            raise AdminError(f"filter-repo 清除 blob 失敗 (rc={proc.returncode})")
-    _git(repo_dir, "gc", "--prune=now")
-
-    # 5. 同步改寫 snapshots.jsonl、handoffs、links 的雜湊（PM 決定 5）
+    # 4. 同步改寫 snapshots.jsonl、handoffs、links 的雜湊（PM 決定 5）
     if remap:
         erased_by_session: dict[str, set[str]] = {}
         for t in segment_targets:
@@ -390,33 +435,107 @@ def apply_erase(plan: ErasePlan, *, confirm: str, admin: AdminDeps,
             erased_by_session.setdefault(t.session_id, set()).update(t.message_ids)
         _remap_hashes(store, remap, new_refs, erased_by_session)
 
-    # 6. 依 file id 永久刪除遠端檔案（bundle、manifest、.bak、key、讀取視圖舊檔）
-    deleted: list[str] = []
-    for fid in (*plan.delete_file_ids, *plan.readview_file_ids,
-                *plan.inbox_file_ids, *plan.quarantine_file_ids):
-        _delete_drive_id(drive=admin.drive, file_id=fid,
-                         prefix_folder_id=admin.prefix_folder_id)
-        deleted.append(fid)
-
+    # 5. 抹除紀錄（只有 id 與雜湊對應，不含內容）
     record_id = _write_erasure_record(
         store, who=who, at=now, why=why, plan=plan, remap=remap)
-    checks = verify_remote(
-        drive=admin.drive, folder_ids=[admin.prefix_folder_id],
-        repo_dir=repo_dir, repo_uuid=admin.repo_uuid or "",
-        canary="", manifest_text=None,
-        expected_blobs=(), check_canary=False)
+
+    # 6. 清除被取代的 blob，然後 gc
+    if old_blob_ids:
+        ids_file = Path(admin.workdir) / "strip-ids.txt"
+        ids_file.write_text("\n".join(sorted(set(old_blob_ids))) + "\n")
+        proc = subprocess.run(
+            ["git-filter-repo", "--strip-blobs-with-ids", str(ids_file), "--force"],
+            cwd=str(workdir), capture_output=True, text=True, timeout=1800)
+        if proc.returncode != 0:
+            raise AdminError(f"filter-repo 清除 blob 失敗 (rc={proc.returncode})")
+    _git(workdir, "update-ref", "-d", "refs/annex/last-index", check=False)
+    _git(workdir, "reflog", "expire", "--expire=now", "--all")
+    _git(workdir, "gc", "--prune=now")
+
+    # 7. commit（遠端被刪掉之後，這份改寫必須已經在真本裡）
+    _git(workdir, "add", "-A")
+    status = _git(workdir, "status", "--porcelain")
+    if status.strip():
+        _git(workdir, "-c", "user.name=AiStorage Admin",
+             "-c", "user.email=admin@aistorage.local",
+             "commit", "-m", f"admin: erase {record_id}")
+    commit_sha = _git(workdir, "rev-parse", "HEAD").strip()
+    return commit_sha, remap, record_id
+
+
+def _session_rel(session_id: str) -> str:
+    from aistorage.agora.layout import session_dir_for_id
+
+    try:
+        return session_dir_for_id(session_id)
+    except ValueError as e:
+        raise AdminError(f"無效的 Session id: {session_id}: {e}") from None
+
+
+def apply_erase(plan: ErasePlan, *, confirm: str, admin: AdminDeps,
+                store: AgoraStore, repo_dir: Path | str, cfg: Any, deps: Any,
+                git: Any, redact_raw: Any = None, who: str = "admin",
+                why: str = "", canary: str,
+                config_path: Path | str | None = None,
+                readview_folder_id: str | None = None) -> EraseReport:
+    """執行抹除（呼叫端負責先進入 AdminLock）。
+
+    - confirm 必須等於 plan_hash(plan)，否則拒絕。
+    - canary 與 why 必填：後置條件沒有內容可比、或紀錄沒有原因，都等於
+      沒驗／沒紀錄（fail-closed）。
+    - 順序：本機改寫（rewrite_local，含 commit）→ 刪遠端 → push → 驗證 →
+      重建 pin → 讀取視圖重建世代 → 後置條件（verify_canary）。
+    """
+    if confirm != plan_hash(plan):
+        raise AdminError("確認碼與計畫雜湊不符，拒絕執行（計畫可能已被更動）")
+    if not canary.strip():
+        raise AdminError(
+            "抹除必須提供 --canary：一段只存在於要抹除內容裡的字串，"
+            "後置條件要靠它確認真的找不到了")
+    if not why.strip():
+        raise AdminError("抹除必須說明原因（--why）")
+
+    workdir = check_repo_dir(repo_dir, purpose="抹除執行目錄")
+    commit_sha, remap, record_id = rewrite_local(
+        plan, admin=admin, store=store, repo_dir=workdir,
+        redact_raw=redact_raw, who=who, why=why)
+
+    groups = delete_groups_for(plan, admin=admin)
+    try:
+        swap = swap_remote(
+            admin=admin, cfg=cfg, deps=deps, git=git, repo_dir=workdir,
+            delete_groups=groups, force_push=True, config_path=config_path,
+            resume_hint=(f"抹除紀錄 {record_id} 已在真本（commit {commit_sha[:8]}）；"
+                         "遠端尚未一致，保留維護旗標"))
+    except SwapAborted as e:
+        # 記錄已經 commit，所以即使遠端沒.swap 成功，真本也留有紀錄；
+        # 把 swap 進度一併附在例外上，讓 CLI 印出「做到哪一步、下一步是什麼」。
+        raise SwapAborted(e.report, str(e).split("｜")[0], resume_hint=e.resume_hint)
+
+    checks = verify_canary(
+        drive=admin.drive,
+        folder_ids=[admin.prefix_folder_id,
+                    *( [readview_folder_id] if readview_folder_id else []),
+                    *admin.inbox_folder_ids,
+                    *([admin.quarantine_folder_id] if admin.quarantine_folder_id else [])],
+        repo_dir=workdir, repo_uuid=admin.repo_uuid or "", canary=canary,
+        manifest_file_id=swap.manifest_file_id)
+    assert_clean(checks)
+
     return EraseReport(
         plan_hash=plan_hash(plan),
-        deleted_file_ids=tuple(deleted),
+        deleted_file_ids=swap.deleted_file_ids,
         snapshot_remap=remap,
         erasure_record_id=record_id,
+        commit_sha=commit_sha,
+        swap=swap,
         verify=tuple((c.location, c.count) for c in checks),
     )
 
 
 def _remap_hashes(store: AgoraStore, remap: dict[str, str],
-                    new_refs: dict[str, tuple[str, str]],
-                    erased_by_session: dict[str, set[str]]) -> None:
+                  new_refs: dict[str, tuple[str, str]],
+                  erased_by_session: dict[str, set[str]]) -> None:
     """把 snapshots.jsonl、handoffs、links 裡的舊雜湊換成新的。
 
     接續點訊息本身被抹除的交接單標 `erased: true`
@@ -480,10 +599,98 @@ def _remap_hashes(store: AgoraStore, remap: dict[str, str],
                 store.put_json(rel, new_obj)
 
 
-@dataclass(frozen=True)
-class RemoteCheck:
-    location: str
-    count: int
+def verify_canary(*, drive: DriveClient, folder_ids: Sequence[str],
+                  repo_dir: Path | None, repo_uuid: str, canary: str,
+                  manifest_file_id: str | None = None,
+                  max_scan_bytes: int = 256 * 1024 * 1024) -> list[RemoteCheck]:
+    """抹除的後置條件（fail-closed：讀不到就算失敗，不當成 0 命中）。
+
+    - Drive：前綴／讀取視圖／收件匣／隔離區逐檔掃描 canary；下載失敗 → raise。
+    - 遠端 bundle：不在 manifest 裡的 bundle 一律算殘留。
+    - git：`log --all -S`（歷史）、`cat-file --batch-all-objects`（所有物件）、
+      本機 annex 物件。
+    """
+    if not canary.strip():
+        raise AdminError("後置條件需要 canary（沒有可比對的字串就等於沒驗）")
+    needle = canary.encode("utf-8")
+    checks: list[RemoteCheck] = []
+
+    for folder_id in folder_ids:
+        count = 0
+        for f in _walk_files(drive, folder_id):
+            size = f.size if f.size is not None else max_scan_bytes + 1
+            if size > max_scan_bytes:
+                raise AdminError(
+                    f"後置條件無法驗證 {f.id}：檔案 {size} 位元組超過掃描上限 "
+                    f"{max_scan_bytes}（讀不到就當通過是放行漏洞）")
+            try:
+                data = drive.download_bytes(f.id, max_bytes=max_scan_bytes)
+            except Exception as e:
+                raise AdminError(
+                    f"後置條件讀不到 {f.id}（{folder_id}）：{e}；"
+                    "無法確認就當失敗") from None
+            count += data.count(needle)
+        checks.append(RemoteCheck(location=f"drive:{folder_id}", count=count))
+
+    if manifest_file_id is not None:
+        try:
+            data = drive.download_bytes(manifest_file_id, max_bytes=1024 * 1024)
+            manifest = parse_manifest(data, repo_uuid=repo_uuid)
+        except Exception as e:
+            raise AdminError(f"後置條件讀不到 manifest：{e}") from None
+        known = set(manifest.active) | set(manifest.removed)
+        unlisted = 0
+        for folder_id in folder_ids:
+            for f in _walk_files(drive, folder_id):
+                if f.name.startswith("GITBUNDLE-") and f.name not in known:
+                    unlisted += 1
+        checks.append(RemoteCheck(location="unlisted-bundle", count=unlisted))
+
+    if repo_dir is not None:
+        commits = _git(repo_dir, "log", "--all", f"-S{canary}", "--format=%H")
+        checks.append(RemoteCheck(location="git-history",
+                                  count=len([c for c in commits.split() if c])))
+        checks.append(RemoteCheck(
+            location="git-objects",
+            count=_scan_all_git_objects(repo_dir, needle)))
+        checks.append(RemoteCheck(
+            location="annex-objects",
+            count=_scan_annex_objects(repo_dir, needle)))
+    return checks
+
+
+def _scan_all_git_objects(repo_dir: Path, needle: bytes) -> int:
+    """`git cat-file --batch-all-objects --batch` 掃過所有物件內容。"""
+    proc = subprocess.run(
+        ["git", "cat-file", "--batch-all-objects", "--batch"],
+        cwd=str(repo_dir), capture_output=True, timeout=1800, check=False)
+    if proc.returncode != 0:
+        raise AdminError(
+            f"後置條件：git cat-file 掃描失敗 (rc={proc.returncode})；不得略過")
+    return proc.stdout.count(needle)
+
+
+def _scan_annex_objects(repo_dir: Path, needle: bytes) -> int:
+    count = 0
+    objects = repo_dir / ".git" / "annex" / "objects"
+    if not objects.is_dir():
+        return 0
+    for path in objects.rglob("*"):
+        if path.is_file() and path.name != "tmp":
+            try:
+                if needle in path.read_bytes():
+                    count += 1
+            except OSError:
+                continue
+    return count
+
+
+def assert_clean(checks: Sequence[RemoteCheck]) -> None:
+    """後置條件：任何位置計數非零就 raise（附位置清單，不含內容）。"""
+    bad = [(c.location, c.count) for c in checks if c.count != 0]
+    if bad:
+        detail = ", ".join(f"{loc}={n}" for loc, n in bad)
+        raise AdminError(f"後置條件未通過（仍有殘留）：{detail}")
 
 
 def verify_remote(*, drive: DriveClient, folder_ids: Sequence[str],
@@ -492,13 +699,7 @@ def verify_remote(*, drive: DriveClient, folder_ids: Sequence[str],
                   expected_blobs: Sequence[str] = (),
                   check_canary: bool = True,
                   max_scan_bytes: int = 256 * 1024 * 1024) -> list[RemoteCheck]:
-    """抹除／復原的後置條件檢查（修掉 spike 的兩個放行漏洞）。
-
-    - remote 上有不在 manifest 裡的 bundle → location 'unlisted-bundle' 計數（漏洞 1）。
-    - git cat-file 失敗 → 直接 raise，不略過（漏洞 2）。
-    - canary 在各處的出現次數（搜尋只輸出計數）；check_canary=False 時跳過內容掃描。
-    呼叫端用 assert_clean 判定；回傳各位置計數。
-    """
+    """抹除／復原的後置條件檢查（修掉 spike 的兩個放行漏洞）。相容舊呼叫。"""
     checks: list[RemoteCheck] = []
     if check_canary and canary:
         needle = canary.encode("utf-8")
@@ -556,10 +757,3 @@ def verify_remote(*, drive: DriveClient, folder_ids: Sequence[str],
         checks.append(RemoteCheck(location="unlisted-bundle", count=unlisted))
     return checks
 
-
-def assert_clean(checks: Sequence[RemoteCheck]) -> None:
-    """後置條件：任何位置計數非零就 raise（附位置清單，不含內容）。"""
-    bad = [(c.location, c.count) for c in checks if c.count != 0]
-    if bad:
-        detail = ", ".join(f"{loc}={n}" for loc, n in bad)
-        raise AdminError(f"後置條件未通過（仍有殘留）：{detail}")

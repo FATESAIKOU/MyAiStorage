@@ -8,6 +8,10 @@ Drive 上的 repo 被刪除時，從任一個 git clone 重建。全部在 Admin
 - pin repo 的位置、`config/committer.json` 的備份。
 - manifest 的 file id。
 
+> CLI 狀態：`recover` 目前只做**唯讀偵測與列步驟**（`--config config/committer.json
+> --new-prefix <id>`）；實際的「刪檔重建＋重推＋重建 pin」是整合測試與
+> `swap-finish` 的範圍，沒有管理憑證時會報 `not_wired`。
+
 ## 三種模式（`python -m aistorage.admin recover --check …` 先判定）
 
 1. **主 manifest 還在**：不需要復原，先跑健康檢查找真正的原因。

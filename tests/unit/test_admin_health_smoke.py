@@ -94,3 +94,69 @@ def test_launchd_plist_content_not_installed(tmp_path) -> None:
     assert doc["RunAtLoad"] is False
     home = tmp_path / "Library" / "LaunchAgents"
     assert not (home / "local.aistorage.health.plist").exists()
+
+
+def test_unknown_is_warn_not_ok() -> None:
+    """M7：查不到就是 warn（fail-open 修掉）。"""
+    checks = run_health(HealthData(), now=NOW)
+    by_name = {c.name: c.status for c in checks}
+    for name in ("token", "workflow", "schedule", "actions_minutes", "quota",
+                 "readview_size", "readview_lag", "last_success", "prune"):
+        assert by_name[name] == "warn", name
+    assert summarize(checks) == "warn"
+
+
+def test_maintenance_flag_is_reported() -> None:
+    checks = run_health(HealthData(workflow_enabled=False, maintenance=True), now=NOW)
+    by_name = {c.name: c.status for c in checks}
+    assert by_name["maintenance"] == "warn"
+    # 維護中時 workflow 被停用是預期行為
+    assert by_name["workflow"] == "ok"
+    # 沒有旗標卻被停用 → fail
+    checks2 = run_health(HealthData(workflow_enabled=False, maintenance=False),
+                         now=NOW)
+    by2 = {c.name: c.status for c in checks2}
+    assert by2["workflow"] == "fail" and "maintenance" not in by2
+
+
+def test_collect_health_from_fake_sources(tmp_path) -> None:
+    """collect_health 真的去取資料；取不到的留 None。"""
+    from aistorage.admin.health import CollectSources, collect_health
+    from aistorage.clock import FixedClock
+    from aistorage.drive.fake import FakeDrive
+    from aistorage.integrity.pin import MemoryPinStore, PinState
+
+    drive = FakeDrive()
+    readview = drive.seed_folder("readview")
+    drive.seed_file(readview, "index.sqlite", b"x" * 100)
+    quarantine = drive.seed_folder("quarantine")
+    day = drive.seed_folder("2026-09-27", parent=quarantine)
+    drive.seed_file(day, "q1", b"qq")
+
+    class _Pins(MemoryPinStore):
+        def read_text(self, relpath: str) -> str | None:
+            return super().read_text(relpath)
+
+    pins = _Pins(initial_state=PinState(
+        repo="agora", repo_uuid="u", refs={"refs/heads/main": "a" * 40},
+        manifest_sha256="m" * 64, prev_manifest_sha256=None,
+        active_bundles=(), removed_bundles=frozenset(), annex_keys=frozenset(),
+        promoted_at="2026-09-27T09:00:00.000Z", run_id="1"))
+    sources = CollectSources(
+        drive=drive, pins=pins, repo="agora", prefix_folder_id=readview,
+        readview_folder_id=readview, quarantine_folder_id=quarantine,
+        quota_provider=lambda: {"storageQuota": {"limit": 1000, "usage": 100}},
+        tokens={"committer": True})
+    data = collect_health(sources, clock=FixedClock("2026-09-27T10:00:00Z"))
+    assert data.last_success_at == "2026-09-27T09:00:00.000Z"
+    assert data.quota_limit == 1000 and data.quota_usage == 100
+    assert data.readview_files == 1 and data.index_bytes == 100
+    assert (data.quarantine_files, data.quarantine_bytes) == (1, 2)
+    assert data.maintenance is False
+    # pin 讀不到 → None → warn
+    broken = CollectSources(drive=drive, pins=MemoryPinStore(), repo="agora")
+    data2 = collect_health(broken, clock=FixedClock("2026-09-27T10:00:00Z"))
+    assert data2.last_success_at is None
+    by_name = {c.name: c.status for c in run_health(data2, now=NOW)}
+    assert by_name["last_success"] == "warn"
+    assert by_name["quota"] == "warn"

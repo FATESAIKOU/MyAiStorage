@@ -299,7 +299,7 @@ def test_erase_apply_requires_hash_confirmation(tmp_path: Path):
 
     plan = plan_erase([EraseTarget(kind="session", session_id="opencode:s")], admin=admin_deps, store=store)
 
-    # 隨便給錯誤的 confirm hash -> 拒絕
+    # 隨便給錯誤的 confirm hash -> 拒絕（在碰任何東西之前）
     with pytest.raises(AdminError, match="確認碼與計畫雜湊不符"):
         apply_erase(
             plan,
@@ -307,7 +307,22 @@ def test_erase_apply_requires_hash_confirmation(tmp_path: Path):
             admin=admin_deps,
             store=store,
             repo_dir=tmp_path / "agora",
+            cfg=None,
+            deps=None,
+            git=None,
+            why="測試",
+            canary="CANARY_TEST",
         )
+
+    # 沒有 canary / 沒有 why 也拒絕（後置條件與紀錄都要有依據）
+    with pytest.raises(AdminError, match="canary"):
+        apply_erase(plan, confirm=plan_hash(plan), admin=admin_deps, store=store,
+                    repo_dir=tmp_path / "agora", cfg=None, deps=None, git=None,
+                    why="測試", canary="   ")
+    with pytest.raises(AdminError, match="原因"):
+        apply_erase(plan, confirm=plan_hash(plan), admin=admin_deps, store=store,
+                    repo_dir=tmp_path / "agora", cfg=None, deps=None, git=None,
+                    why="  ", canary="CANARY_TEST")
 
 
 # ---------------------------------------------------------------------------
@@ -516,3 +531,137 @@ def test_detect_and_plan_from_drive():
     assert detect_remote_state(drive, prefix, uuid) == (True, True)
     plan_all = plan_recover_from_drive(drive, prefix, uuid)
     assert plan_all.mode == "from-clone"
+
+
+# ---------------------------------------------------------------------------
+# Acceptance Tests: review H5／H6／H7（管理操作失敗時的行為）
+# ---------------------------------------------------------------------------
+
+
+def test_admin_lock_error_in_with_keeps_lock(tmp_path: Path):
+    """H5：with 區塊內出錯時不得解除鎖、不得重新啟用 workflow。
+
+    抹除／回滾做到一半失敗時，遠端可能已經不一致；這時解除鎖會讓提交流程
+    回到不一致的遠端上（settle 每輪中止，或用舊 pin 把新狀態全隔離）。
+    """
+    pins = MemoryPinFiles()
+    runner, gh_state = make_gh_fake(runs=[])
+    gh = GitHubAdmin("owner/repo", runner=runner)
+    notices: list[str] = []
+
+    with pytest.raises(RuntimeError):
+        with AdminLock(repo="agora", pins=pins, gh=gh, workflow="committer.yml",
+                       reason="erase", notify=notices.append):
+            assert read_maintenance(pins, "agora") is not None
+            raise RuntimeError("push 失敗")
+
+    flag = read_maintenance(pins, "agora")
+    assert flag is not None, "失敗後旗標必須保留"
+    assert flag.reason == "erase"
+    assert gh_state["enabled"] is False, "失敗後 workflow 必須維持停用"
+    assert any("unlock --confirm" in n for n in notices)
+
+    # 只有明確的人工解除才會解鎖
+    lock = AdminLock(repo="agora", pins=pins, gh=gh, workflow="committer.yml",
+                     reason="erase")
+    assert lock.unlock() is not None
+    assert read_maintenance(pins, "agora") is None
+    assert gh_state["enabled"] is True
+
+
+def test_swap_order_and_abort_report(tmp_path: Path, monkeypatch):
+    """H6：刪遠端之後必須重推並重建 pin；中途失敗要保留進度與下一步。"""
+    from aistorage.admin.remote import (
+        DeleteGroup, SwapAborted, swap_remote,
+    )
+    from aistorage.drive.fake import FakeDrive
+    from aistorage.integrity.pin import MemoryPinStore, PinState
+
+    class Cfg:
+        repo = "agora"
+        repo_uuid = "11111111-2222-3333-4444-555555555555"
+        prefix_folder_id = ""
+
+    class Git:
+        def __init__(self, fail: bool = False) -> None:
+            self.fail = fail
+            self.calls: list[str] = []
+
+        def copy(self, remote: str) -> None:
+            self.calls.append("copy")
+            if self.fail:
+                raise RuntimeError("annex copy 失敗")
+
+        def push(self, *a, **k) -> None:
+            self.calls.append("push")
+
+        def ls_remote(self, remote: str = "origin") -> dict[str, str]:
+            return {"refs/heads/main": "a" * 40, "refs/heads/git-annex": "b" * 40}
+
+        def local_refs(self, branches=("main", "git-annex")) -> dict[str, str]:
+            return {"refs/heads/main": "a" * 40, "refs/heads/git-annex": "b" * 40}
+
+    class Deps:
+        def __init__(self, drive, pins) -> None:
+            self.drive = drive
+            self.pins = pins
+            self.clock = FixedClock(T1)
+
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    bundle_name = "GITBUNDLE-s10--11111111-2222-3333-4444-555555555555-" + "0" * 64
+    manifest = drive.seed_file(
+        prefix, "GITMANIFEST--11111111-2222-3333-4444-555555555555",
+        (bundle_name + "\n").encode())
+    bundle = drive.seed_file(prefix, bundle_name, b"b")
+    Cfg.prefix_folder_id = prefix
+    pins = MemoryPinStore(initial_state=PinState(
+        repo="agora", repo_uuid=Cfg.repo_uuid, refs={"refs/heads/main": "a" * 40},
+        manifest_sha256="m" * 64, prev_manifest_sha256=None, active_bundles=(),
+        removed_bundles=frozenset(), annex_keys=frozenset(),
+        promoted_at=T0, run_id="1"))
+    deps = Deps(drive, pins)
+    admin = AdminDeps(drive=drive, clock=FixedClock(T1), workdir=tmp_path / "w",
+                      repo="agora", repo_uuid=Cfg.repo_uuid, prefix_folder_id=prefix)
+    repo_dir = tmp_path / "clone"
+    repo_dir.mkdir()
+    monkeypatch.setenv("AISTORAGE_ALLOWED_WORKDIR", str(repo_dir))
+    config = tmp_path / "cfg.json"
+    config.write_text(json.dumps({"readview_rebuild_epoch": 1}))
+
+    def _push_ok(git: Git):
+        def _p() -> dict[str, str]:
+            if git.fail:
+                raise RuntimeError("annex copy 失敗")
+            git.calls += ["copy", "push"]
+            return git.local_refs()
+        return _p
+
+    def _pin_ok():
+        return PinState(repo="agora", repo_uuid=Cfg.repo_uuid,
+                        refs={"refs/heads/main": "a" * 40}, manifest_sha256="m" * 64,
+                        prev_manifest_sha256=None, active_bundles=(),
+                        removed_bundles=frozenset(), annex_keys=frozenset(),
+                        promoted_at=T1, run_id="admin")
+
+    git = Git()
+    report = swap_remote(admin=admin, cfg=Cfg, deps=deps, git=git, repo_dir=repo_dir,
+                         delete_groups=[DeleteGroup("repo", (bundle,), (prefix,))],
+                         force_push=True, config_path=config,
+                         push_fn=_push_ok(git), pin_rebuild_fn=_pin_ok)
+    assert [s.name for s in report.steps] == [
+        "delete-remote", "push", "verify-remote", "rebuild-pin", "readview-epoch"]
+    assert report.promoted_at == T1
+    assert report.rebuild_epoch == 2          # 讀取視圖要完整重建
+    assert set(report.deleted_file_ids) == {bundle}
+
+    # 中途失敗：已完成步驟與下一步都要留給人
+    bundle2 = drive.seed_file(prefix, "GITBUNDLE-s11--" + Cfg.repo_uuid + "-" + "1" * 64, b"b2")
+    bad = Git(fail=True)
+    with pytest.raises(SwapAborted) as excinfo:
+        swap_remote(admin=admin, cfg=Cfg, deps=deps, git=bad, repo_dir=repo_dir,
+                    delete_groups=[DeleteGroup("repo", (bundle2,), (prefix,))],
+                    force_push=True, config_path=None,
+                    push_fn=_push_ok(bad), pin_rebuild_fn=_pin_ok)
+    assert excinfo.value.report.done == ("delete-remote",)
+    assert "下一步" in str(excinfo.value)
