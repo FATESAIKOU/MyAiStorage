@@ -1,7 +1,9 @@
 """住民工具（tasks 5.4）的冒煙測試（實作方撰寫；驗收由測試方另寫）。
 
 用假的 opencode ＋ FakeDrive ＋ 假讀取端跑完工具的分支：主 Session 限定的
-第二層、接續點、分裂／交出末端／認領／參考、拒收就停、讀取附上新鮮度。
+第二層、接續點、分裂／交出末端／參考、拒收就停、讀取附上新鮮度。
+**這裡沒有認領**：接手新 session 走 `agora checkout`（`aistorage.agora_cli`，
+由 `tests/unit/test_agora_cli_smoke.py` 覆蓋），ADR 0010。
 範例資料一律自編。
 """
 
@@ -31,12 +33,10 @@ from aistorage.skill.tools import (
     RejectedItems,
     SkillDeps,
     SkillError,
-    claim,
     handoff_end,
     list_handoffs,
     read,
     reference,
-    register_artifact,
     split,
     stop,
     whoami,
@@ -320,14 +320,11 @@ def test_unknown_session_is_rejected():
         whoami(sd.api, "")
 
 
-def test_claim_and_stop_require_main_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_stop_requires_main_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """plugin 擋一次之外，Python 端再擋一次（宣告停止沒有提交流程那層）。"""
     sd, env = _sd(tmp_path, sessions={"ses_2": OcSession(id="ses_2", parent_id="ses_1",
                                                        updated_ms=1)})
     monkeypatch.setattr("aistorage.syncer.commit.trigger_committer", lambda *a, **k: None)
-    with pytest.raises(MainSessionRequired) as e:
-        claim(sd, "ses_2", ["handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV"])
-    assert "主 Session" in str(e.value)
     with pytest.raises(MainSessionRequired):
         stop(sd, "ses_2")
     # 子 Session 的父代存在時，也不得因為 plugin 傳錯就當主 Session
@@ -432,62 +429,6 @@ def test_handoff_end_writes_exactly_one(tmp_path: Path, monkeypatch: pytest.Monk
     _run_committer(monkeypatch, env)
     out = handoff_end(sd, "ses_1", "做完了", next_steps="下一步是 X", timeout=SHORT)
     assert len(out["handoff_ids"]) == 1
-
-
-# ---------------------------------------------------------------------------
-# 認領
-# ---------------------------------------------------------------------------
-
-
-def test_claim_uploads_session_then_claims_and_returns_handoff(tmp_path: Path,
-                                                               monkeypatch: pytest.MonkeyPatch):
-    sd, env = _sd(tmp_path)
-    _main_session(sd, env)
-    hid = "handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV"
-    _run_committer(monkeypatch, env)
-    env["reader"].continuations[hid] = _Row(
-        handoff=_Row(target_session_id="opencode:ses_0", message_id="m1",
-                     snapshot_sha256=SNAP, body_json='{"content":"接手"}'),
-        messages=[{"message_id": "m1", "index": 0, "text": "之前的內容"}],
-    )
-
-    out = claim(sd, "ses_1", [hid], timeout=SHORT)
-    assert len(out["claim_ids"]) == 1
-    payload = out["handoffs"][0]
-    assert payload["handoff_id"] == hid
-    assert payload["target_session_id"] == "opencode:ses_0"
-    assert payload["message_id"] == "m1"
-    assert payload["reading_before"][0]["message_id"] == "m1"
-
-
-def test_claim_stops_when_an_item_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """任一張被拒收就整個停下（spec 4.2）。"""
-    monkeypatch.setattr("aistorage.syncer.commit.trigger_committer", lambda *a, **k: None)
-    sd, env = _sd(tmp_path)
-    _main_session(sd, env)
-    hid = "handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV"
-
-    original = tools._export_and_sync
-
-    def _patched(sd_, session_id, *, extra=(), timeout=None):
-        # 在提交流程「執行」之後標成拒收
-        for item in extra:
-            env["reader"].rejections[item.item_key] = "stale"
-        return original(sd_, session_id, extra=extra, timeout=timeout)
-
-    monkeypatch.setattr(tools, "_export_and_sync", _patched)
-    with pytest.raises(RejectedItems) as e:
-        claim(sd, "ses_1", [hid], timeout=SHORT)
-    assert e.value.reasons and e.value.reasons[0][1] == "stale"
-    assert "必須停下" not in str(e.value)  # 訊息是「被拒收」；停下由 CLI 指示
-
-
-def test_claim_needs_at_least_one_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr("aistorage.syncer.commit.trigger_committer", lambda *a, **k: None)
-    sd, env = _sd(tmp_path)
-    _main_session(sd, env)
-    with pytest.raises(SkillError):
-        claim(sd, "ses_1", [])
 
 
 # ---------------------------------------------------------------------------
@@ -685,141 +626,6 @@ def test_stop_archives_then_syncs(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
 
 # ---------------------------------------------------------------------------
-# 登錄產出（register_artifact，第 7 組）
-# ---------------------------------------------------------------------------
-
-
-def test_register_artifact_contained_uploads_raw_sidecar_sig(tmp_path: Path):
-    """contained：本體真的上傳成 .raw，sidecar 蓋上 profile 產生者、body 正確。"""
-    sd, env = _sd(tmp_path)
-    _main_session(sd, env)
-    body_file = tmp_path / "report.pdf"
-    body_file.write_bytes(b"%PDF-1.4 fake report")
-
-    out = register_artifact(
-        sd, "ses_1", kind="contained", name="architecture-summary.pdf",
-        content_type="application/pdf", file_path=str(body_file),
-        description="統合報告",
-    )
-
-    assert out["uploaded_only"] is True
-    assert out["kind"] == "contained"
-    assert out["produced_by_session_id"] == "opencode:ses_1"
-    assert out["artifact_id"].startswith("artifact:")
-    assert out["size"] == len(b"%PDF-1.4 fake report")
-
-    files = _inbox_files(env["drive"], env["inbox"])
-    assert f"{out['item_key']}.raw" in files
-    assert f"{out['item_key']}.sidecar.json" in files
-    assert f"{out['item_key']}.sig" in files
-
-    sidecar = next(
-        s for s in _sidecars(env) if s["item_key"] == out["item_key"]
-    )
-    assert sidecar["metadata"]["type"] == "artifact"
-    assert sidecar["profile"] == PROFILE
-    assert sidecar["body"]["kind"] == "contained"
-    assert sidecar["body"]["name"] == "architecture-summary.pdf"
-    assert sidecar["body"]["content_type"] == "application/pdf"
-    assert sidecar["body"]["produced_by_session_id"] == "opencode:ses_1"
-    assert sidecar["body"]["description"] == "統合報告"
-    assert sidecar["raw"]["size"] == len(b"%PDF-1.4 fake report")
-
-
-def test_register_artifact_link_has_no_raw(tmp_path: Path):
-    """link：沒有 raw、body 記對外連結與出處（repo＋path 是補充）。"""
-    sd, env = _sd(tmp_path)
-    _main_session(sd, env)
-
-    out = register_artifact(
-        sd, "ses_1", kind="link", name="PR #42 報告",
-        link="https://github.com/FATESAIKOU/MyAiStorage/pull/42",
-        repo="FATESAIKOU/MyAiStorage", path="docs/report.md",
-    )
-    files = _inbox_files(env["drive"], env["inbox"])
-    assert f"{out['item_key']}.raw" not in files
-
-    sidecar = next(s for s in _sidecars(env) if s["item_key"] == out["item_key"])
-    assert sidecar["body"]["kind"] == "link"
-    assert sidecar["body"]["link"].endswith("/pull/42")
-    assert sidecar["body"]["repo"] == "FATESAIKOU/MyAiStorage"
-    assert sidecar["body"]["path"] == "docs/report.md"
-    assert sidecar["raw"] is None
-
-
-def test_register_artifact_uses_the_context_session_not_the_model(tmp_path: Path):
-    """produced_by_session_id 一定來自 plugin 的 context（--session），模型不能改。"""
-    sd, env = _sd(tmp_path)
-    env["api"].set(OcSession(id="ses_1", title="主線", updated_ms=1), _raw())
-    env["api"].set(OcSession(id="ses_9", title="別的", updated_ms=1), _raw())
-
-    out = register_artifact(
-        sd, "ses_9", kind="link", name="從子 Session 登錄", link="https://example.com",
-    )
-    sidecar = next(s for s in _sidecars(env) if s["item_key"] == out["item_key"])
-    assert sidecar["body"]["produced_by_session_id"] == "opencode:ses_9"
-
-
-def test_register_artifact_rejects_bad_arguments(tmp_path: Path):
-    """缺必填、型態不符、找不到本體檔都要明確拒絕，不上傳任何東西。"""
-    sd, env = _sd(tmp_path)
-    _main_session(sd, env)
-
-    with pytest.raises(SkillError):
-        register_artifact(sd, "ses_1", kind="link", name="x")  # 沒有 link 也沒有 repo/path
-    with pytest.raises(SkillError):
-        register_artifact(sd, "ses_1", kind="contained", name="x",
-                          content_type="text/plain")  # 沒有 file_path
-    with pytest.raises(SkillError):
-        register_artifact(sd, "ses_1", kind="contained", name="x",
-                          file_path=str(tmp_path / "no-such-file"))  # 找不到本體
-    with pytest.raises(SkillError):
-        register_artifact(sd, "ses_1", kind="link", name="x",
-                          link="https://example.com", file_path=str(tmp_path))  # link 不得有本體
-    with pytest.raises(SkillError):
-        register_artifact(sd, "ses_1", kind="bogus", name="x")  # 型態不合法
-    assert _inbox_files(env["drive"], env["inbox"]) == [], "拒絕時不得上傳任何檔案"
-
-
-def test_register_artifact_enforces_the_100mib_limit(tmp_path: Path):
-    """超過 100 MiB 的收容產出直接被拒收（D7），且不留半套項目。"""
-    sd, env = _sd(tmp_path)
-    _main_session(sd, env)
-    big = tmp_path / "big.bin"
-    with open(big, "wb") as f:
-        f.seek(100 * 1024 * 1024)  # 稀疏檔：100 MiB + 1 位元組
-        f.write(b"\0")
-
-    with pytest.raises(SkillError) as excinfo:
-        register_artifact(sd, "ses_1", kind="contained", name="big.bin",
-                          content_type="application/octet-stream", file_path=str(big))
-    assert "超過" in str(excinfo.value)
-    assert _inbox_files(env["drive"], env["inbox"]) == []
-
-
-def test_register_artifact_does_not_trigger_a_commit(tmp_path: Path,
-                                                     monkeypatch: pytest.MonkeyPatch):
-    """只上傳，不觸發提交（與 reference 相同）。"""
-    sd, env = _sd(tmp_path)
-    _main_session(sd, env)
-    monkeypatch.setattr(
-        "aistorage.syncer.commit.trigger_committer",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不該觸發提交流程")),
-    )
-    out = register_artifact(sd, "ses_1", kind="link", name="x",
-                            link="https://example.com")
-    assert out["item_key"]
-
-
-def test_register_artifact_requires_a_known_session(tmp_path: Path):
-    """Session 不在 opencode 裡（plugin 傳錯）→ 明確拒絕，不上傳。"""
-    sd, env = _sd(tmp_path)
-    with pytest.raises(SkillError):
-        register_artifact(sd, "ses_999", kind="link", name="x", link="https://example.com")
-    assert _inbox_files(env["drive"], env["inbox"]) == []
-
-
-# ---------------------------------------------------------------------------
 # CLI 接線
 # ---------------------------------------------------------------------------
 
@@ -829,9 +635,13 @@ def test_skill_cli_exposes_the_documented_commands():
 
     sub = next(a for a in build_parser()._actions if a.dest == "command")
     assert set(sub.choices) == {
-        "whoami", "split", "handoff-end", "claim", "find", "read",
-        "reference", "list-handoffs", "register-artifact", "stop",
+        "whoami", "split", "handoff-end", "find", "read",
+        "reference", "list-handoffs", "stop",
     }
+    # AI 不再自己認領：認領由 `agora checkout` 一併登記（ADR 0010）
+    assert "claim" not in sub.choices
+    # 產出登錄（Foundry）已隨 ADR 0009 移除
+    assert "register-artifact" not in sub.choices
 
 
 def test_skill_cli_whoami_prints_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
@@ -874,8 +684,7 @@ def test_skill_cli_exit_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, c
     env["api"].set(OcSession(id="ses_2", parent_id="ses_1", updated_ms=1), _raw())
     monkeypatch.setattr(cli, "_sd", lambda: sd)
     monkeypatch.setattr("aistorage.syncer.commit.trigger_committer", lambda *a, **k: None)  # 不觸發
-    assert cli.main(["claim", "--session", "ses_2",
-                     "--handoff", "handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV"]) == 4
+    assert cli.main(["stop", "--session", "ses_2"]) == 4
     assert "主 Session" in capsys.readouterr().err
     assert cli.main(["whoami", "--session", "ses_999"]) == 2
 
@@ -907,12 +716,10 @@ def test_every_tool_accepts_the_argv_the_plugin_passes():
         ("aistorage_whoami", []),
         ("aistorage_split", ["--parts", "p.json"]),
         ("aistorage_handoff_end", ["--summary", "s"]),
-        ("aistorage_claim", ["--handoff", "handoff:x"]),
         ("aistorage_find", ["--query", "q"]),
         ("aistorage_read", []),
         ("aistorage_reference", ["--to", "opencode:ses_2", "--read-snapshot-at", "t"]),
         ("aistorage_list_handoffs", []),
-        ("aistorage_register_artifact", ["--kind", "link", "--name", "n", "--link", "https://x"]),
         ("aistorage_stop", []),
     ]
     parser = build_parser()
@@ -925,29 +732,6 @@ def test_every_tool_accepts_the_argv_the_plugin_passes():
             pytest.fail(f"{tool} 不接受 plugin 會送的參數 {argv}：{e}")
         assert args.command == command
         assert getattr(args, "session", "ses_1") == "ses_1"
-
-
-def test_claim_without_ids_says_what_shape_is_needed_and_lists_open_handoffs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """9.1 e2e 實測：模型把交接單 id 送成別的鍵名，plugin 吸收不到 → 0 個 id。
-
-    原本只回「至少要給一張交接單的 id」，模型重試五次都一樣。現在要明確說出
-    形狀，並把「現在等著被認領的是哪幾張」一併給它。
-    """
-    _run_committer(monkeypatch, _sd(tmp_path)[1])
-    sd, env = _sd(tmp_path)
-    _run_committer(monkeypatch, env)
-    _main_session(sd, env)
-    split(sd, "ses_1", [{"title": "做甲", "summary": "甲的工作"}], timeout=SHORT)
-    # 交接單已進 Agora 讀取視圖（上面那次提交已發佈）
-
-    with pytest.raises(SkillError) as e:
-        claim(sd, "ses_1", [])
-    msg = str(e.value)
-    assert "handoff_ids" in msg
-    assert "aistorage_list_handoffs" in msg
-    assert "handoff:" in msg, "要把清單裡的 id 直接列出來，模型才知道要填什麼"
 
 
 def _inbox_sidecar_names(env: dict) -> set[str]:

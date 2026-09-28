@@ -337,6 +337,8 @@ def test_written_configs_contain_only_ids_paths_and_format_strings(
         "format",
         "manifest_file_id",
         "readview_folder_id",
+        # `agora checkout` 依 annex key 去 Agora 真本前綴取原始紀錄本體
+        "agora_folder_id",
         "inbox_folder_ids",
         "sa_key_path",
     }

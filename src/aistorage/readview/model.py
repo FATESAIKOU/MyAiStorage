@@ -104,46 +104,6 @@ class ReadingRef:
 
 
 @dataclass(frozen=True)
-class RawRef:
-    """一份原始紀錄本體的引用（Session × 快照 → 檔案）。
-
-    `sha256` 就是該快照的 `snapshot_sha256`（內容定址），所以讀者下載後可以
-    同時驗「檔案沒被動過」與「這份確實是那個快照」；`agora checkout` 的起點包
-    要靠這個保證「原始紀錄原封不動」（ADR 0010 的 KV cache 要求）。
-    """
-
-    session_id: str
-    snapshot_sha256: str
-    file_id: str
-    size: int
-
-    @property
-    def key(self) -> tuple[str, str]:
-        return (self.session_id, self.snapshot_sha256.lower())
-
-    @property
-    def file_ref(self) -> FileRef:
-        return FileRef(id=self.file_id, sha256=self.snapshot_sha256.lower(), size=self.size)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "session_id": self.session_id,
-            "snapshot_sha256": self.snapshot_sha256,
-            "file_id": self.file_id,
-            "size": self.size,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> RawRef:
-        return cls(
-            session_id=data["session_id"],
-            snapshot_sha256=data["snapshot_sha256"],
-            file_id=data["file_id"],
-            size=int(data["size"]),
-        )
-
-
-@dataclass(frozen=True)
 class Manifest:
     """讀取視圖 manifest（信任錨點，固定 id，原地更新）。"""
 
@@ -158,7 +118,6 @@ class Manifest:
     retired: tuple[tuple[str, int], ...] = ()
     rebuild_epoch: int = 0
     pending: tuple[ReadingRef, ...] = ()
-    pending_raws: tuple[RawRef, ...] = ()
 
     @property
     def is_initial(self) -> bool:
@@ -178,7 +137,6 @@ class Manifest:
             "index": self.index.to_dict() if self.index is not None else None,
             "files": list(self.files),
             "pending": [r.to_dict() for r in self.pending],
-            "pending_raws": [r.to_dict() for r in self.pending_raws],
             "retired": [[fid, gen] for fid, gen in self.retired],
         }
 
@@ -207,7 +165,6 @@ class Manifest:
             retired=tuple((str(pair[0]), int(pair[1])) for pair in data["retired"]),
             rebuild_epoch=int(data.get("rebuild_epoch", 0)),
             pending=tuple(ReadingRef.from_dict(r) for r in data.get("pending", [])),
-            pending_raws=tuple(RawRef.from_dict(r) for r in data.get("pending_raws", [])),
         )
 
 
@@ -234,7 +191,6 @@ def initial_manifest(
         retired=(),
         rebuild_epoch=0,
         pending=(),
-        pending_raws=(),
     )
 
 
@@ -250,17 +206,15 @@ def next_manifest(
     agora_main_sha: str,
     converter_versions: dict[str, str],
     rebuild_epoch: int | None = None,
-    raw_refs: tuple[RawRef, ...] = (),
 ) -> Manifest:
     """由舊 manifest 推出新世代的 manifest（純函式）。
 
     - generation 為 prev + 1（單調遞增）。
     - retired ＝（prev.retired 減去 delete_now）∪（retire_now 配上新世代），
       所以被退役的檔案要再等一個世代才永久刪除。
-    - files 為本世代引用的全部 file id（index ＋全部 reading ＋全部原始紀錄本體）。
+    - files 為本世代引用的全部 file id（index ＋全部 reading）。
     - pending 為已上傳但尚未被本世代引用的 reading（完整重建分批上傳的中間輪次）；
-      pending_raws 是對應的原始紀錄本體。兩者都不在 files 內，但列入 trusted_ids，
-      避免下一輪被清掃隔離。
+      不在 files 內，但列入 trusted_ids，避免下一輪被清掃隔離。
     """
     removed = set(delete_now)
     keep_retired = tuple(
@@ -280,7 +234,6 @@ def next_manifest(
         retired=new_retired,
         rebuild_epoch=epoch,
         pending=reading_refs,
-        pending_raws=tuple(raw_refs),
     )
 
 
@@ -325,6 +278,5 @@ def trusted_ids(m: Manifest, manifest_file_id: str) -> frozenset[str]:
     ids = {manifest_file_id}
     ids.update(m.files)
     ids.update(r.file_id for r in m.pending)
-    ids.update(r.file_id for r in m.pending_raws)
     ids.update(fid for fid, _ in m.retired)
     return frozenset(ids)

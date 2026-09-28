@@ -104,6 +104,32 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest().lower()
 
 
+def annex_key_of(raw: bytes) -> str:
+    """git-annex 的 key 形狀：`SHA256E-s<size>--<sha256>`（內容定址）。"""
+    return f"SHA256E-s{len(raw)}--{_sha(raw)}"
+
+
+def _objects(reader: FakeReader, *, tamper: dict[str, bytes] | None = None) -> Any:
+    """真的 `ObjectFetcher`，掛在 FakeDrive 的物件資料夾上。
+
+    故意用**真的** fetcher（不是假的）：安全性就落在「用 key 內嵌的 sha256 驗證」
+    那一段，用假的等於沒測到。
+    """
+    from aistorage.agora_cli.objects import ObjectFetcher
+    from aistorage.drive.fake import FakeDrive
+
+    drive = FakeDrive()
+    folder = drive.seed_folder("agora-objects")
+    for entry in reader.sessions.values():
+        raw = entry["raw"]
+        drive.seed_file(folder, annex_key_of(raw), raw,
+                        file_id=annex_key_of(raw))
+    for key, payload in (tamper or {}).items():
+        # 塞一份「同名但內容是假的」物件：key 內嵌的 sha256 必須擋下來
+        drive.seed_file(folder, key, payload, file_id=key)
+    return ObjectFetcher(drive, folder)
+
+
 def _message_ids_of(raw: bytes) -> list[str]:
     """匯出檔裡的訊息 id（照原順序）。閱讀版的 id 必須與原始紀錄一致。"""
     return [str(m["info"]["id"]) for m in json.loads(raw)["messages"]]
@@ -163,13 +189,16 @@ class FakeReader:
         }
         return SimpleNamespace(value=payload)
 
-    def get_raw(self, session_id: str, snapshot_sha256: str) -> Any:
+    def get_snapshot(self, session_id: str, snapshot_sha256: str, **kw) -> Any:
+        """讀取視圖只給**位址**（annex key），不給位元組。"""
         self.raw_calls.append((session_id, snapshot_sha256))
         entry = self.sessions.get(session_id)
         if entry is None or _sha(entry["raw"]) != snapshot_sha256.lower():
             raise KeyError(f"{session_id}@{snapshot_sha256[:12]}")
         return SimpleNamespace(value=SimpleNamespace(
-            data=entry["raw"], size=len(entry["raw"]), snapshot_at=T0))
+            session_id=session_id, snapshot_sha256=snapshot_sha256,
+            snapshot_at=T0, via="sync",
+            annex_key=annex_key_of(entry["raw"])))
 
     def get_continuation(self, handoff_id: str) -> Any:
         handoff = self.handoffs.get(handoff_id)
@@ -214,11 +243,12 @@ class FakeCommit:
             summary=lambda: "0／0 有結果")
 
 
-def _deps(reader: FakeReader, commit: Any = None, *, profile: str = PROFILE
-          ) -> CheckoutDeps:
+def _deps(reader: FakeReader, commit: Any = None, *, profile: str = PROFILE,
+          objects: Any = None) -> CheckoutDeps:
+    fetcher = objects if objects is not None else _objects(reader)
     return CheckoutDeps(
         reader=reader, clock=FixedClock(T1), signer=_make_signer(profile),
-        inbox_folder_id="inbox-test", drive=None,
+        inbox_folder_id="inbox-test", drive=None, objects=fetcher,
         commit_claim=commit if commit is not None else FakeCommit(),
     )
 
@@ -494,7 +524,8 @@ def test_handoff_startpoint_without_writer_identity_is_refused(tmp_path: Path):
     """沒有寫入身分就明確拒絕（不能假裝認領了）。"""
     reader = _reader_with_handoff()
     deps = CheckoutDeps(reader=reader, clock=FixedClock(T1), signer=None,
-                        inbox_folder_id="", commit_claim=None)
+                        inbox_folder_id="", commit_claim=None,
+                        objects=_objects(reader))
     with pytest.raises(CheckoutError) as excinfo:
         checkout(reader, deps, [HANDOFF], tmp_path / "pkg")
     assert "沒有可用的寫入身分" in str(excinfo.value)
@@ -746,6 +777,112 @@ def test_load_reports_a_failed_import_without_leaking_content(tmp_path: Path):
 
     with pytest.raises(AdapterError):
         load(out, workdir=tmp_path, runner=runner)
+
+
+# ---------------------------------------------------------------------------
+# 5b. 原始紀錄是依 annex key 去 Agora 物件資料夾取的（用 key 內嵌的 sha256 驗證）
+# ---------------------------------------------------------------------------
+
+
+def test_checkout_reads_the_raw_by_annex_key_from_the_agora_object_folder(tmp_path: Path):
+    """讀取視圖只給**位址**（annex key），位元組自己去 Agora 的物件資料夾取。"""
+    from aistorage.agora_cli.objects import ObjectFetcher
+
+    raw = _raw("ses_aaa", ["一", "二"])
+    reader = FakeReader({S1: {"raw": raw, "texts": ["一", "二"]}})
+    fetcher = _objects(reader)
+    out = tmp_path / "pkg"
+
+    checkout(reader, _deps(reader, objects=fetcher), [S1], out)
+
+    data, raws = read_package(out)
+    assert raws[0] == raw
+    # 讀取介面只被問了 key，沒有被問位元組
+    assert reader.raw_calls == [(S1, _sha(raw))]
+    assert fetcher.folder_id
+    assert isinstance(fetcher, ObjectFetcher)
+
+
+def test_a_fake_object_under_the_right_key_name_is_rejected(tmp_path: Path):
+    """**塞一份同名假檔進去過不了**：key 是內容定址的 sha256。
+
+    這是整個設計的安全關鍵——唯讀身分能看到 Agora 的物件資料夾，所以一定要
+    假設那份資料夾裡的東西可能被動過過。對不上就明確拒絕、**不產出起點包**。
+    """
+    raw = _raw("ses_aaa", ["真的內容"])
+    reader = FakeReader({S1: {"raw": raw, "texts": ["真的內容"]}})
+    # 同一個 key、同樣的名字，**同樣長度**的內容換成別的（大小過得了，只能靠雜湊）
+    swapped = bytearray(raw)
+    swapped[-2] = (swapped[-2] + 1) % 256
+    tampered = bytes(swapped)
+    assert len(tampered) == len(raw)
+    fetcher = _objects(reader, tamper={annex_key_of(raw): tampered})
+    out = tmp_path / "pkg"
+
+    with pytest.raises(CheckoutError) as excinfo:
+        checkout(reader, _deps(reader, objects=fetcher), [S1], out)
+
+    assert "SHA-256 與 key 不符" in str(excinfo.value)
+    assert not out.exists(), "驗不過就完全不產出"
+
+
+def test_a_truncated_object_is_rejected_by_the_size_in_the_key(tmp_path: Path):
+    """key 內嵌的 size 也驗：只掉幾個位元組同樣拒絕。"""
+    raw = _raw("ses_aaa", ["一二三四五六"])
+    reader = FakeReader({S1: {"raw": raw, "texts": ["一二三四五六"]}})
+    fetcher = _objects(reader, tamper={annex_key_of(raw): raw[:-3]})
+    with pytest.raises(CheckoutError) as excinfo:
+        checkout(reader, _deps(reader, objects=fetcher), [S1], tmp_path / "pkg")
+    assert "大小不符" in str(excinfo.value)
+
+
+def test_a_missing_annex_key_is_refused_rather_than_guessed(tmp_path: Path):
+    """讀取介面沒有 annex key → 明確拒絕，不用閱讀版頂替。"""
+    from types import SimpleNamespace as NS
+
+    raw = _raw("ses_aaa", ["一", "二"])
+    reader = FakeReader({S1: {"raw": raw, "texts": ["一", "二"]}})
+
+    def no_key(session_id: str, snapshot_sha256: str, **kw) -> Any:
+        return NS(value=NS(session_id=session_id, snapshot_sha256=snapshot_sha256,
+                           snapshot_at=T0, via="sync", annex_key=None))
+
+    reader.get_snapshot = no_key  # type: ignore[method-assign]
+    with pytest.raises(CheckoutError) as excinfo:
+        checkout(reader, _deps(reader), [S1], tmp_path / "pkg")
+    assert "annex key" in str(excinfo.value)
+    assert not (tmp_path / "pkg").exists()
+
+
+def test_without_the_object_folder_checkout_refuses(tmp_path: Path):
+    """沒有設定 Agora 物件資料夾 → 明確拒絕（讀取視圖不再提供 raw 這條路）。"""
+    reader = FakeReader({S1: {"raw": _raw("ses_aaa", ["一"]), "texts": ["一"]}})
+    deps = CheckoutDeps(reader=reader, clock=FixedClock(T1), signer=None,
+                        inbox_folder_id="", commit_claim=None, objects=None)
+    with pytest.raises(CheckoutError) as excinfo:
+        checkout(reader, deps, [S1], tmp_path / "pkg")
+    assert "agora_folder_id" in str(excinfo.value)
+
+
+def test_unknown_annex_key_is_reported_with_the_key():
+    """key 不在物件資料夾裡 → 明確拒絕（提交流程還沒推上去、或沒走 annex）。"""
+    from aistorage.agora_cli.objects import ObjectError, ObjectFetcher
+    from aistorage.drive.fake import FakeDrive
+
+    drive = FakeDrive()
+    fetcher = ObjectFetcher(drive, drive.seed_folder("agora-objects"))
+    with pytest.raises(ObjectError) as excinfo:
+        fetcher.fetch("SHA256E-s10--" + "a" * 64)
+    assert "沒有這個 key" in str(excinfo.value)
+
+
+def test_an_unparsable_annex_key_is_refused():
+    """key 格式看不懂就明確拒絕，不要猜。"""
+    from aistorage.agora_cli.objects import ObjectError, verify_against_key
+
+    with pytest.raises(ObjectError) as excinfo:
+        verify_against_key("not-a-key", b"x")
+    assert "SHA256E-s" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

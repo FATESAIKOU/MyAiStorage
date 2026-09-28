@@ -23,15 +23,14 @@ from aistorage.search.query import (
     LinkRow,
     MessageMatch,
     Query,
-    RawRef,
     ReadingRef,
     RejectionRow,
     SessionRow,
     get_handoff,
     get_handoffs,
     get_links,
-    get_raw_ref,
     get_reading_ref,
+    get_snapshot,
     get_rejection,
     get_session_row,
     search,
@@ -44,6 +43,7 @@ __all__ = [
     "Result",
     "FoundSession",
     "SessionView",
+    "SnapshotRef",
     "SnapshotView",
     "ContinuationView",
     "CatalogEntry",
@@ -107,14 +107,20 @@ class ContinuationView:
 
 
 @dataclass(frozen=True)
-class RawView:
-    """某個「Session × 快照」的原始紀錄本體。"""
+class SnapshotRef:
+    """某個「Session × 快照」的定位。
+
+    `annex_key` 是該快照原始紀錄的 git-annex key（`SHA256E-s<size>--<sha256>`），
+    也就是內容定址的**位址**。`agora checkout` 拿它去 Agora 的物件資料夾取回
+    原始紀錄——讀取視圖不發佈 raw 的位元組（ADR 0010 的開頭要位元組相同，
+    而閱讀版還原不了）。取回後用 key 內嵌的 sha256 與 size 驗證。
+    """
 
     session_id: str
     snapshot_sha256: str
     snapshot_at: str | None
-    data: bytes
-    size: int
+    via: str | None
+    annex_key: str | None
 
 
 @dataclass(frozen=True)
@@ -241,46 +247,31 @@ class AgoraReader:
             status=row.status if row else None,
             stopped_at=row.stopped_at if row else None, max_lag=max_lag))
 
-    def get_raw(self, session_id: str, snapshot_sha256: str, *,
-                max_lag: timedelta | None = None) -> Result[RawView]:
-        """取某個快照的**原始紀錄本體**（`agora checkout` 的起點包要用）。
+    def get_snapshot(self, session_id: str, snapshot_sha256: str, *,
+                     max_lag: timedelta | None = None) -> Result[SnapshotRef]:
+        """取某個快照的定位（含 annex key）；沒有發佈過回傳 KeyError。
 
-        閱讀版會把工具呼叫的輸入輸出壓成摘要，還原不了位元組相同的開頭；
-        這裡交出去的是真本快照的原始位元組，並以 `snapshot_sha256` 驗過
-        （ADR 0010 的 KV cache 要求）。
-
-        沒有發佈過該快照的 raw（升級前的舊世代、或轉換失敗）→ `KeyError`，
-        呼叫端要明確拒絕，不要退而用閱讀版猜。
+        這是 `agora checkout` 拿到原始紀錄的**唯一**入口：key 是內容定址的位址，
+        讀取端只給位址，位元組由呼叫端自己去 Agora 的物件資料夾取（唯讀身分有
+        分享權限）並用 key 內嵌的 sha256 驗證。
         """
         manifest = self._client.manifest()
         db = self._client.index()
         try:
-            ref = get_raw_ref(db, session_id, snapshot_sha256)
-            row = get_session_row(db, session_id)
-            snap_at = None
-            if ref is not None:
-                found = db.execute(
-                    "SELECT snapshot_at FROM snapshots WHERE session_id = ?"
-                    " AND snapshot_sha256 = ?",
-                    (session_id, ref.snapshot_sha256),
-                ).fetchone()
-                snap_at = str(found[0]) if found is not None and found[0] else None
+            row = get_snapshot(db, session_id, snapshot_sha256)
         finally:
             db.close()
-        if ref is None:
+        if row is None:
             raise KeyError(
-                f"讀取視圖沒有發佈這個快照的原始紀錄: {session_id}"
-                f"@{snapshot_sha256[:12]}"
+                f"讀取視圖沒有這個快照: {session_id}@{snapshot_sha256[:12]}"
             )
-        data = self._client.raw(ref)
-        return Result(value=RawView(
-            session_id=session_id, snapshot_sha256=ref.snapshot_sha256,
-            snapshot_at=snap_at or (row.snapshot_at if row else None),
-            data=data, size=len(data),
-        ), freshness=self._fresh(
-            manifest, snapshot_at=snap_at or (row.snapshot_at if row else None),
-            status=row.status if row else None,
-            stopped_at=row.stopped_at if row else None, max_lag=max_lag))
+        return Result(
+            value=SnapshotRef(
+                session_id=row.session_id, snapshot_sha256=row.snapshot_sha256,
+                snapshot_at=row.snapshot_at, via=row.via, annex_key=row.annex_key,
+            ),
+            freshness=self._fresh(manifest, snapshot_at=row.snapshot_at,
+                                  max_lag=max_lag))
 
     def get_continuation(self, handoff_id: str) -> Result[ContinuationView]:
         manifest = self._client.manifest()

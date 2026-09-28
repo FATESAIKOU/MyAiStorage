@@ -32,7 +32,7 @@ from aistorage.readview.model import (
     serialize_manifest,
     trusted_ids,
 )
-from aistorage.readview.naming import index_name, raw_name, reading_name
+from aistorage.readview.naming import index_name, reading_name
 from aistorage.schema import generate_ulid
 
 T0 = "2026-09-27T08:00:00.000Z"
@@ -246,22 +246,19 @@ def test_first_publish_creates_readings_index_then_updates_manifest(tmp_path: Pa
     assert report.readings_created == 2 and report.readings_failed == ()
 
     ops = [op for op, _ in _write_ops(drive)]
-    # 2 readings ＋ 2 原始紀錄本體（`agora checkout` 的起點包要原封不動取用它）
-    # ＋ index，然後原地更新 manifest
-    assert ops == ["create"] * 5 + ["update_content"]
+    assert ops == ["create", "create", "create", "update_content"]  # 2 readings + index
     assert not [op for op, _ in _write_ops(drive) if op == "delete_permanently"]
 
     m = parse_manifest(drive.download_bytes(MANIFEST_ID, max_bytes=1 << 20))
     assert m.generation == 1 and m.agora_main_sha == "main-1"
     assert m.index is not None
-    assert len(m.files) == 5  # index ＋ 2 readings ＋ 2 raws
+    assert len(m.files) == 3  # index ＋ 2 readings
 
     folder = drive._files[MANIFEST_ID].parents[0]
     children = drive.list_children(folder)
-    assert len(children) == 6  # manifest ＋ 2 readings ＋ 2 raws ＋ index
+    assert len(children) == 4  # manifest ＋ 2 readings ＋ index
     names = sorted(f.name for f in children)
     assert reading_name("opencode:ses_1", s1) in names
-    assert raw_name("opencode:ses_1", s1) in names
     index_sha = hashlib.sha256(drive.download_bytes(m.index.id, max_bytes=1 << 20)).hexdigest()
     assert index_name(1, index_sha) in names
     assert index_name(1, index_sha) == drive.get(m.index.id).name
@@ -337,8 +334,7 @@ def test_changed_session_reuploads_only_that_reading(tmp_path: Path):
     drive.calls.clear()
     report = pub.publish(store, agora_main_sha="main-2")
     assert report.readings_created == 1 and report.readings_kept == 1
-    # reading + 原始紀錄本體 + index
-    assert len([op for op, _ in _write_ops(drive) if op == "create"]) == 3
+    assert len([op for op, _ in _write_ops(drive) if op == "create"]) == 2  # reading + index
 
     second = parse_manifest(drive.download_bytes(MANIFEST_ID, max_bytes=1 << 20))
     assert second.generation == 2
@@ -509,13 +505,9 @@ def test_batched_full_rebuild_keeps_old_index_until_done(tmp_path: Path):
     m1 = parse_manifest(drive.download_bytes(MANIFEST_ID, max_bytes=1 << 20))
     assert m1.generation == 1 and m1.index is None  # 還沒有 index
     assert [r.snapshot_sha256 for r in m1.pending] == [s1]
-    # 原始紀錄本體與 reading 同一組 targets，所以分批時也要一起進 pending，
-    # 否則下一輪的清掃會把它隔離，讀取端就再也拿不到 checkout 要的位元組。
-    assert [r.snapshot_sha256 for r in m1.pending_raws] == [s1]
     folder = drive._files[MANIFEST_ID].parents[0]
     # pending 也在可信集合內，否則下一輪的清掃會把它隔離
-    assert trusted_ids(m1, MANIFEST_ID) == frozenset({
-        MANIFEST_ID, m1.pending[0].file_id, m1.pending_raws[0].file_id})
+    assert trusted_ids(m1, MANIFEST_ID) == frozenset({MANIFEST_ID, m1.pending[0].file_id})
 
     report2 = pub.publish(store, agora_main_sha="main-1")
     assert report2.readings_created == 1 and report2.batch_remaining == 0
@@ -524,8 +516,7 @@ def test_batched_full_rebuild_keeps_old_index_until_done(tmp_path: Path):
     # 第一輪上傳的那份被沿用（沒有第二個同名的 reading 檔案）
     assert m1.pending[0].file_id in m2.files
     assert len(drive.find_by_name(folder, reading_name("opencode:ses_1", s1))) == 1
-    assert len(drive.find_by_name(folder, raw_name("opencode:ses_1", s1))) == 1
-    assert len(m2.files) == 5  # index + 兩份 reading + 兩份 raw
+    assert len(m2.files) == 3  # index + 兩份 reading
 
 
 def test_dry_run_performs_no_write(tmp_path: Path):

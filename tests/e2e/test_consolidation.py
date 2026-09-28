@@ -2,24 +2,41 @@
 
 Adheres strictly to:
 - openspec/changes/establish-aistorage-phase1/tasks.md §9.2
-- Design D10 (Consolidation: one session claiming multiple handoffs)
-- S2 and S3 in independent resident containers yield ends via aistorage_handoff_end
-- Committer runs to commit handoffs to Agora true store
-- S4 in separate resident container claims both handoffs (consolidation)
-- S4 reads continuation contents of both S2 and S3 before their continuation points
+- `docs/design/agora-session-operations.md`：多個起點＝統合，**最長的一段放最前面**，
+  超過 context 上限就明確拒絕、不產出
+- ADR 0010（開頭位元組相同）、CONTEXT.md 的「統合（n→1）」
+
+流程（全部走真實的 CLI）：
+1. S2、S3 在各自的容器裡 `agora handoff` 交出末端（同步 ＋ 寫交接單 ＋ 提交）；
+2. 先用 `--max-chars 1` 跑一次 `agora checkout`：**明確拒絕、目錄不被建立**；
+3. 再 `agora checkout handoff:H2 handoff:H3 --task …` → 起點包 → `agora-opencode
+   load` → S4；
+4. 驗證 S4 的開頭帶著兩者接續點之前的內容（最長的一段在最前面），並有兩條接續
+   Link。
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
+from typing import Any
+
 import pytest
 
+from aistorage.agora_cli.package import read_package
 from aistorage.reader import AgoraReader
 
 from .conftest import (
     agora_session_id,
     assert_tool_called,
+    export_message_ids,
     poll,
+    wire_prefix,
 )
+
+PKG_DIR = "/work/pkg-s4"
+PKG_DIR_TOO_LONG = "/work/pkg-s4-too-long"
 
 
 def _open_handoff_for(reader: AgoraReader, session_id: str):
@@ -27,40 +44,39 @@ def _open_handoff_for(reader: AgoraReader, session_id: str):
     return hits[0] if hits else None
 
 
-def _claimed_ids_from_parts(parts: list[dict]) -> set[str]:
-    """從 claim 工具呼叫的輸入取出它認領了哪些交接單（不信任模型的文字）。"""
-    out: set[str] = set()
-    for part in parts:
-        payload = part.get("input")
-        if not isinstance(payload, dict):
-            continue
-        ids = payload.get("handoff_ids")
-        if isinstance(ids, list):
-            out.update(str(i) for i in ids if isinstance(i, str))
-        elif isinstance(ids, str):
-            out.add(ids)
-    return out
+def _handoff_content(handoff: Any) -> str:
+    body = handoff.body_json or "{}"
+    parsed = json.loads(body) if body.strip() else {}
+    content = parsed.get("content") if isinstance(parsed, dict) else None
+    return str(content or "").strip()
+
+
+def _package_on_host(container, package_dir: str) -> tuple[dict, list[bytes]]:
+    host = Path(str(container.work_dir)) / package_dir.removeprefix("/work/")
+    return read_package(host)
 
 
 @pytest.mark.e2e
 def test_9_2_consolidation_n_to_1(resident_pool, run_committer, e2e_reader: AgoraReader):
-    """驗證 9.2 統合（n→1）：S2、S3 各自交出末端，S4 認領兩張交接單並讀到兩者內容。"""
-    # 1. 啟動 S2 與 S3 兩個工作容器，各自交出末端（handoff_end 內部同步並提交）
+    """驗證 9.2 統合（n→1）：S2、S3 交出末端，checkout 兩個起點建出 S4，開頭帶著兩者內容。"""
+    # 1. S2 與 S3 各自交出末端（agora handoff 內部同步並提交）
     c2 = resident_pool("e2e-s2-worker")
     s2_id, _ = c2.prompt_with_commits(
         "後端實作已完成，包含 RESTful API 與認證模組。"
-        "請使用 aistorage_handoff_end 交出末端，summary 說明後端成果。",
+        "請用 agora_handoff 交出末端（一個 task，summary 說明後端成果），"
+        "完成後回報 handoff_id。",
         run_committer,
     )
-    assert_tool_called(c2, s2_id, "aistorage_handoff_end")
+    assert_tool_called(c2, s2_id, "agora_handoff")
 
     c3 = resident_pool("e2e-s3-worker")
     s3_id, _ = c3.prompt_with_commits(
         "前端設計已完成，包含響應式介面與狀態管理。"
-        "請使用 aistorage_handoff_end 交出末端，summary 說明前端成果。",
+        "請用 agora_handoff 交出末端（一個 task，summary 說明前端成果），"
+        "完成後回報 handoff_id。",
         run_committer,
     )
-    assert_tool_called(c3, s3_id, "aistorage_handoff_end")
+    assert_tool_called(c3, s3_id, "agora_handoff")
 
     s2_agora = agora_session_id(s2_id)
     s3_agora = agora_session_id(s3_id)
@@ -70,43 +86,99 @@ def test_9_2_consolidation_n_to_1(resident_pool, run_committer, e2e_reader: Agor
     h_s3 = poll(lambda: _open_handoff_for(e2e_reader, s3_agora), what="S3 的交接單出現")
     assert h_s2.handoff_id != h_s3.handoff_id
 
-    # 3. 啟動獨立容器 S4 統合：自己透過讀取介面找兩張交接單並全部認領
-    c4 = resident_pool("e2e-s4-consolidator")
-    s4_id, _ = c4.prompt_with_commits(
-        "你是統合 Session S4。請使用 aistorage_list_handoffs 找出目前所有尚未認領的交接單，"
-        "然後用 aistorage_claim 一次認領全部（統合），並讀取兩者的接續內容。",
-        run_committer,
-    )
-    claim_parts = assert_tool_called(c4, s4_id, "aistorage_claim")
-    claimed_ids = _claimed_ids_from_parts(claim_parts)
-    assert {h_s2.handoff_id, h_s3.handoff_id} <= claimed_ids, (
-        f"S4 必須在一次呼叫裡認領兩張交接單（統合），工具輸入：{claimed_ids}"
-    )
-    # 交接單的 id 不是測試餵的：必須來自 S4 自己的 list_handoffs
-    list_parts = assert_tool_called(c4, s4_id, "aistorage_list_handoffs")
-    listed = "\n".join(str(p.get("output") or "") for p in list_parts)
-    for hid in (h_s2.handoff_id, h_s3.handoff_id):
-        assert hid in listed, f"S4 認領的 {hid} 必須出現在它自己的 list_handoffs 輸出裡"
-    s4_agora = agora_session_id(s4_id)
+    cont_s2 = e2e_reader.get_continuation(h_s2.handoff_id).value
+    cont_s3 = e2e_reader.get_continuation(h_s3.handoff_id).value
+    startpoints = [f"handoff:{h_s2.handoff_id}", f"handoff:{h_s3.handoff_id}"]
 
-    # 4. 讀取端驗證 S4 成功統合兩條 Link
+    # 3. 超出 context 上限要**明確拒絕、不產出**（先跑這一條，確認它與後面的
+    #    成功路徑無關：被拒時連認領都還沒送出）
+    c4 = resident_pool("e2e-s4-consolidator")
+    too_long = c4.checkout_with_commits(
+        startpoints, PKG_DIR_TOO_LONG, run_committer,
+        task="整合兩邊的成果", extra_args=["--max-chars", "1"],
+    )
+    assert too_long.returncode == 2, (
+        f"超過上限必須明確拒絕（exit code 2），實際 rc={too_long.returncode}\n"
+        f"STDOUT: {too_long.stdout[-800:]}\nSTDERR: {too_long.stderr[-800:]}"
+    )
+    assert "超過上限" in too_long.stderr, (
+        f"拒絕訊息要說清楚是長度上限：{too_long.stderr[-800:]}"
+    )
+    assert not (c4.work_dir / "pkg-s4-too-long").exists(), (
+        "被拒就不產出起點包（目錄不該被建立）"
+    )
+    # 被拒的那一次沒有送出認領：兩張交接單還是沒人接
+    for hid in (h_s2.handoff_id, h_s3.handoff_id):
+        assert e2e_reader.get_continuation(hid).value.handoff.claimed_by_session_id is None
+
+    # 4. 真的 checkout 兩個起點 → 起點包 → agora-opencode load → S4
+    res = c4.checkout_with_commits(
+        startpoints, PKG_DIR, run_committer,
+        task="把 S2 的後端與 S3 的前端整合成一份可以上線的說明",
+    )
+    assert res.returncode == 0, (
+        f"agora checkout 失敗 (rc={res.returncode})\n"
+        f"STDOUT: {res.stdout[-1500:]}\nSTDERR: {res.stderr[-1500:]}"
+    )
+    s4_id = c4.opencode_load(PKG_DIR)
+    assert s4_id, "agora-opencode load 必須印出新 session id"
+    s4_agora = agora_session_id(s4_id)
+    assert s4_agora not in (s2_agora, s3_agora)
+
+    # 5. 起點包：兩段都在、原料與真本同一個位元組，而且**最長的一段在最前面**
+    pkg, raws = _package_on_host(c4, PKG_DIR)
+    segments = pkg["segments"]
+    assert len(segments) == 2, f"起點包必須有兩段，實際 {len(segments)}"
+    first, second = segments[0], segments[1]
+    assert first["text_chars"] >= second["text_chars"], (
+        f"最長的一段必須放最前面（{first['text_chars']} vs {second['text_chars']}）"
+    )
+    assert {first["source_session_id"], second["source_session_id"]} == {s2_agora, s3_agora}
+    for segment, raw in zip(segments, raws):
+        assert hashlib.sha256(raw).hexdigest().lower() == segment["snapshot_sha256"], (
+            "起點包裡的原料必須與被釘住的快照同一個位元組"
+        )
+    assert pkg["new_session"]["session_id"] == s4_agora
+    assert set(pkg["new_session"]["claimed_handoffs"]) == {
+        h_s2.handoff_id, h_s3.handoff_id
+    }
+    # 每一段在接續點之前都要有內容（不是空殼）
+    assert all(seg["message_count"] > 0 for seg in segments), [
+        s["message_count"] for s in segments
+    ]
+    assert cont_s2.messages and cont_s3.messages, "接續點之前必須有訊息"
+
+    # 6. S4 的開頭：最長那一段的整段內容位元組相同地放在最前面
+    s4_export = c4.export(s4_id)
+    s4_wire = wire_prefix(s4_export)
+    longest_wire = wire_prefix(json.loads(raws[0]), first["message_id"])
+    assert s4_wire.startswith(longest_wire), (
+        "S4 開頭必須先帶著最長那一段在接續點之前的內容（位元組相同）"
+    )
+    # 另一段也有帶進來（n→1 會把後一段的首則手工鏈在前一段的末則之後）
+    second_raw = json.loads(raws[1])
+    second_first_text = "\n".join(
+        p.get("text") or ""
+        for p in (second_raw["messages"][0].get("parts") or [])
+        if p.get("type") == "text"
+    )
+    assert second_first_text, "第二段的第一則必須有文字"
+    assert second_first_text in json.dumps(s4_export, ensure_ascii=False), (
+        "S4 的開頭必須也帶著另一段接續點之前的內容"
+    )
+    assert len(export_message_ids(s4_export)) == first["message_count"] + 1
+
+    # 7. 兩張交接單都被登記成指向 S4 的接續 Link
     def _both_claimed():
-        cont_s2 = e2e_reader.get_continuation(h_s2.handoff_id).value
-        cont_s3 = e2e_reader.get_continuation(h_s3.handoff_id).value
-        if (
-            cont_s2.handoff.claimed_by_session_id == s4_agora
-            and cont_s3.handoff.claimed_by_session_id == s4_agora
-        ):
-            return cont_s2, cont_s3
+        rows = {
+            h: e2e_reader.get_continuation(h).value.handoff
+            for h in (h_s2.handoff_id, h_s3.handoff_id)
+        }
+        if all(r.claimed_by_session_id == s4_agora for r in rows.values()):
+            return rows
         return None
 
-    cont_s2, cont_s3 = poll(_both_claimed, what="S4 認領兩張交接單")
-
-    # 5. S4 讀到 S2、S3 接續點之前的內容（非空）
-    assert cont_s2.messages, "S2 的接續內容不得為空"
-    assert cont_s3.messages, "S3 的接續內容不得為空"
-
-    # S4 的視圖必須有兩條指向 S2、S3 的接續 Link
+    poll(_both_claimed, what="S4 接手兩張交接單")
     s4_view = e2e_reader.get_session(s4_agora).value
     to_sessions = {
         link.to_session_id

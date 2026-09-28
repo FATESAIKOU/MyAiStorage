@@ -23,7 +23,7 @@ description: 用 Agora 的工具接續、參考與交出工作。什麼時候要
 - **`agora_*`：Agora 的指令**（`python -m aistorage.agora_cli`）。找、讀、
   交出工作、產出起點包。
 - **`aistorage_*`：住民工具的其余部分**（`python -m aistorage.skill`）。
-  `whoami`、`stop`、`register_artifact` 與較低階的 `split`／`handoff_end`。
+  `whoami`、`stop` 與較低階的 `split`／`handoff_end`。
 
 ## 我是誰
 
@@ -124,27 +124,6 @@ opencode --session <新 session id>
 
 `agora_checkout` **只產出起點包**，不會替你開 session。要不要開、開幾個，
 由你（或呼叫者）決定。
-
-## 登錄產出（Foundry）
-
-做出一份要能被人與其他 AI 找回來的東西（文件、程式碼、圖片、簡報）時，
-用這個工具把它登錄到 Foundry 產出目錄：
-
-```
-# 收容產出：真本沒有自己的家，本體放進 Foundry
-aistorage_register_artifact(kind: "contained", name: "architecture-summary.pdf",
-    content_type: "application/pdf", file_path: "/work/report.pdf")
-
-# 原處產出：真本留著自己的專案 repo，Foundry 只登錄出處
-aistorage_register_artifact(kind: "link", name: "PR #42 的報告",
-    link: "https://github.com/owner/repo/pull/42")
-```
-
-- `produced_by_session_id` **不用填**：由工具帶入你現在的 Session。
-- `contained` 的本體是**容器內的本機檔**（`file_path`），單檔上限 100 MiB；
-  超過會直接被拒收（訊息會說原因）。不要為了繞過上限而切檔或壓縮。
-- 只上傳，**不觸發提交**：由下一輪提交流程收進去。回報時說「已登錄，會在下一輪
-  收進去」，不要說「目錄裡已經有了」。
 
 ## 不要做的事
 

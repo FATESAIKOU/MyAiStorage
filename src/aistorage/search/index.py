@@ -64,17 +64,17 @@ class IndexEntry:
     reading／reading_ref 描述最新快照；reading 為 None（轉換失敗）時全文為空，
     但 metadata 仍可篩選。reading_ref 形狀：{snapshot_sha256, file_id, sha256, size}。
 
-    `raws` 描述各快照的**原始紀錄本體**（形狀同上 minus is_latest）：
-    `agora checkout` 要用它在起點包裡原封不動地放進被釘住的快照
-    （ADR 0010 的 KV cache 要求）。閱讀版會丟掉工具呼叫的原始輸入輸出，
-    沒有這份就無法重建位元組相同的開頭。
+    `agora checkout` 要的**原始紀錄本體**不在讀取視圖裡：閱讀版會丟掉工具呼叫的
+    原始輸入輸出，還原不了位元組相同的開頭（ADR 0010），而發佈一份等於把
+    真本的位元組複製一份到衍生物裡。它改用快照的 **annex key**（`snapshots`
+    表的 `annex_key`）直接去 Agora 的物件資料夾取——key 是內容定址的位址，
+    取回後用 key 內嵌的 sha256 驗證。
     """
 
     metadata: dict
     snapshots: list[dict] = field(default_factory=list)
     reading: dict | None = None
     reading_ref: dict | None = None
-    raws: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -216,16 +216,16 @@ def build_index(
             sid = m.get("session_id")
             latest_sha = (entry.reading_ref or {}).get("snapshot_sha256")
             seen: set[str] = set()
-            raw_seen: set[str] = set()
             for snap in entry.snapshots:
                 sha = snap.get("snapshot_sha256")
                 if not isinstance(sha, str) or not sha or sha in seen:
                     continue
                 seen.add(sha)
                 con.execute(
-                    "INSERT OR REPLACE INTO snapshots VALUES (?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO snapshots VALUES (?,?,?,?,?,?)",
                     (sid, sha, normalize_time(snap.get("snapshot_at")),
-                     normalize_time(snap.get("committed_at")), snap.get("via")),
+                     normalize_time(snap.get("committed_at")), snap.get("via"),
+                     snap.get("annex_key")),
                 )
                 if snap.get("file_id") is not None:
                     con.execute(
@@ -242,15 +242,6 @@ def build_index(
                      r.get("sha256"), r.get("size"), 1),
                 )
                 n_readings += 1
-            for raw in entry.raws:
-                snap = raw.get("snapshot_sha256")
-                if not isinstance(snap, str) or not snap or snap in raw_seen:
-                    continue
-                raw_seen.add(snap)
-                con.execute(
-                    "INSERT OR REPLACE INTO raws VALUES (?,?,?,?,?)",
-                    (sid, snap, raw.get("file_id"), raw.get("sha256"), raw.get("size")),
-                )
             for mid, idx, text in _message_texts(entry.reading):
                 con.execute(
                     "INSERT INTO message_fts(text, session_id, message_id, idx)"
@@ -312,7 +303,6 @@ _DUMP_TABLES = (
     "sessions",
     "snapshots",
     "readings",
-    "raws",
     "links",
     "handoffs",
     "rejections",
@@ -323,7 +313,6 @@ _DUMP_ORDER = {
     "sessions": "session_id",
     "snapshots": "session_id, snapshot_sha256",
     "readings": "session_id, snapshot_sha256",
-    "raws": "session_id, snapshot_sha256",
     "links": ("from_session_id, to_session_id,"
               " COALESCE(handoff_id,''), COALESCE(reference_id,''),"
               " COALESCE(snapshot_sha256,''), COALESCE(message_id,'')"),

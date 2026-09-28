@@ -59,29 +59,37 @@ def _emit(payload: Any) -> int:
     return 0
 
 
-def _reader_config(args: argparse.Namespace) -> Any:
-    """建立讀取端（SA 身分；金鑰只以路徑引用）。
+def _reader_settings(args: argparse.Namespace) -> tuple[Any, Any, Any]:
+    """建立讀取端：回傳 `(AgoraReader, ReaderConfig, DriveClient)`。
 
-    有 worker 的設定（`SyncerConfig`）時沿用它，否則退回讀者設定檔——讀取
-    不需要寫入身分，所以 `agora find/show/read` 在只有讀取身分的機器上也能跑。
+    **讀取身分（SA）**是唯讀的：金鑰只以路徑引用。`DriveClient` 除了讀取視圖，
+    `agora checkout` 還會用它去 Agora 的物件資料夾取原始紀錄——那個資料夾對讀取
+    身分只有唯讀權限。
+
+    有 worker 的設定（`SyncerConfig`）時沿用它（容器裡是同一份設定檔），否則退回
+    讀者設定檔——讀取不需要寫入身分，所以 `agora find/show/read` 在只有讀取身分的
+    機器上也能跑。
     """
+    from aistorage.drive.http import HttpDriveClient
+    from aistorage.drive.sa_auth import ServiceAccountToken
     from aistorage.reader import AgoraReader
     from aistorage.reader.client import ReadViewClient
     from aistorage.reader.config import ReaderConfig
 
+    cfg: ReaderConfig | None = None
     try:
         from aistorage.syncer.config import SyncerConfig
-        from aistorage.syncer.__main__ import _reader
 
-        return _reader(SyncerConfig.load())
+        syncer_cfg = SyncerConfig.load()
+        cfg = ReaderConfig.load(
+            syncer_cfg.reader_config, env={"AISTORAGE_SA_KEY": syncer_cfg.sa_key})
     except Exception:
         cfg = ReaderConfig.load(getattr(args, "reader_config", None))
-        from aistorage.drive.http import HttpDriveClient
-        from aistorage.drive.sa_auth import ServiceAccountToken
 
-        clock = SystemClock()
-        drive = HttpDriveClient(ServiceAccountToken(cfg.sa_key_path))
-        return AgoraReader(ReadViewClient(drive, cfg, clock=clock), clock=clock)
+    clock = SystemClock()
+    drive = HttpDriveClient(ServiceAccountToken(cfg.sa_key_path))
+    reader = AgoraReader(ReadViewClient(drive, cfg, clock=clock), clock=clock)
+    return reader, cfg, drive
 
 
 def _writer_deps(args: argparse.Namespace) -> tuple[CheckoutDeps, Any]:
@@ -110,6 +118,19 @@ def _writer_deps(args: argparse.Namespace) -> tuple[CheckoutDeps, Any]:
         ),
         deps,
     )
+
+
+def _object_fetcher(cfg: Any, drive: Any) -> Any:
+    """建 `ObjectFetcher`（唯讀身分 ＋ Agora 物件資料夾）。
+
+    讀取視圖不發佈 raw 的位元組，所以 `checkout` 要自己依 annex key 去取並用
+    key 內嵌的 sha256 驗證（見 `agora_cli/objects.py`）。
+    """
+    from aistorage.agora_cli.objects import ObjectFetcher
+
+    if not cfg.agora_folder_id:
+        return None
+    return ObjectFetcher(drive, cfg.agora_folder_id)
 
 
 def _main_session_id(_deps_obj: Any) -> str:
@@ -347,6 +368,21 @@ def cmd_checkout(args: argparse.Namespace, reader: Any) -> int:
     """`agora checkout`：產出起點包。"""
     writer_deps, _syncer = _writer_deps(args)
     writer_deps.reader = reader
+    cfg = getattr(args, "_reader_cfg", None)
+    drive = getattr(args, "_read_drive", None)
+    fetcher = _object_fetcher(cfg, drive) if (cfg is not None and drive is not None) else None
+    writer_deps.objects = fetcher
+    try:
+        pkg = _run_checkout(args, reader, writer_deps)
+    finally:
+        if fetcher is not None:
+            fetcher.close()
+    return _emit(pkg)
+
+
+def _run_checkout(args: argparse.Namespace, reader: Any,
+                  writer_deps: Any) -> dict[str, Any]:
+    """跑 checkout 並回傳給人／給 AI 看的摘要（不是 `ContextPackage`）。"""
     pkg = checkout(
         reader,
         writer_deps,
@@ -359,7 +395,7 @@ def cmd_checkout(args: argparse.Namespace, reader: Any) -> int:
         max_context_chars=args.max_chars or DEFAULT_MAX_CONTEXT_CHARS,
         claim_timeout=_lag(args.claim_timeout) or timedelta(minutes=15),
     )
-    data = {
+    return {
         "package": str(Path(args.out) / "package.json"),
         "new_session_id": pkg.new_session_id,
         "segments": [
@@ -386,7 +422,6 @@ def cmd_checkout(args: argparse.Namespace, reader: Any) -> int:
         "next": "把起點包交給轉接器載入：agora-opencode load "
                 f"{args.out}",
     }
-    return _emit(data)
 
 
 # ---------------------------------------------------------------------------
@@ -454,7 +489,13 @@ def main(argv: Sequence[str] | None = None, *,
          reader_factory: Callable[[argparse.Namespace], Any] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     try:
-        reader = (reader_factory or _reader_config)(args)
+        if reader_factory is not None:
+            reader = reader_factory(args)
+        else:
+            # 讀取設定與 Drive 用戶端一併帶著走：`checkout` 還要用它們去取原始紀錄
+            reader, reader_cfg, read_drive = _reader_settings(args)
+            args._reader_cfg = reader_cfg
+            args._read_drive = read_drive
         return int(args.func(args, reader))
     except ClaimRejected as e:
         print(f"[agora] {e}", file=sys.stderr)

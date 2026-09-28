@@ -5,7 +5,8 @@ Adheres strictly to:
 - Design D2, D3, ADR 0008
 - Resident credentials cannot push, modify, or delete the Agora true store
 - Unsigned or invalidly signed inbox items rejected; self-claimed producer ignored
-- Duplicate claims rejected with already_claimed
+- The same handoff checked out twice: the rejected side produces no start package
+  (already_claimed), and the continuation link stays unique
 - Revoking the test profile's signing key immediately causes rejection of its items
   while other profiles are unaffected
 
@@ -197,17 +198,23 @@ def test_9_4_unsigned_item_rejected(
 
 
 @pytest.mark.e2e
-def test_9_4_duplicate_claim_rejected(
+def test_9_4_duplicate_checkout_produces_no_package(
     resident_pool, run_committer, e2e_reader: AgoraReader
 ):
-    """9.4(c)：重複認領同一張交接單被拒收（already_claimed），Link 只有一條。"""
-    # S1 產生一張交接單
+    """9.4(c)：同一張交接單 checkout 兩次，**被拒的一方不產出起點包**。
+
+    認領由 `agora checkout` 一併登記（ADR 0010，AI 不再自己 claim），所以這裡
+    驗的是 `agora checkout`：第二個接手者必須被拒（`already_claimed`）、目錄不
+    被建立，而且 Link 仍然只有一條、指向先到的那個。
+    """
+    # S1 交出一張交接單
     c1 = resident_pool("e2e-adv-s1")
     s1_id, _ = c1.prompt_with_commits(
-        "請使用 aistorage_handoff_end 交出一張交接單，summary 寫『重複認領測試』。",
+        "請用 agora_handoff 交出一張交接單（只有一個 task，"
+        "summary 寫『重複接手測試』），完成後回報 handoff_id。",
         run_committer,
     )
-    assert_tool_called(c1, s1_id, "aistorage_handoff_end")
+    assert_tool_called(c1, s1_id, "agora_handoff")
     s1_agora = agora_session_id(s1_id)
     handoff = poll(
         lambda: next(
@@ -221,38 +228,45 @@ def test_9_4_duplicate_claim_rejected(
         what="交接單出現",
     )
 
-    # 第一個認領者
-    claimer = resident_pool("e2e-adv-claimer")
-    cs_id, _ = claimer.prompt_with_commits(
-        "請使用 aistorage_list_handoffs 找到尚未認領的交接單，並用 aistorage_claim 認領它。",
-        run_committer,
+    # 第一個接手者：checkout 成功
+    first = resident_pool("e2e-adv-first")
+    ok = first.checkout_with_commits(
+        [f"handoff:{handoff.handoff_id}"], "/work/pkg-first", run_committer,
+        task="第一個接手者",
     )
-    assert_tool_called(claimer, cs_id, "aistorage_claim")
-    cs_agora = agora_session_id(cs_id)
-    poll(
-        lambda: e2e_reader.get_continuation(handoff.handoff_id).value.handoff.claimed_by_session_id
-        == cs_agora,
-        what="第一次認領成功",
+    assert ok.returncode == 0, (
+        f"第一次 checkout 應該成功，實際 rc={ok.returncode}\n"
+        f"STDOUT: {ok.stdout[-1000:]}\nSTDERR: {ok.stderr[-1000:]}"
+    )
+    first_agora = poll(
+        lambda: (
+            e2e_reader.get_continuation(handoff.handoff_id).value.handoff.claimed_by_session_id
+        ),
+        what="第一次 checkout 的認領被讀取介面確認",
     )
 
-    # 第二個認領者：同一張再認領（提交流程必須拒絕）
-    dupe = resident_pool("e2e-adv-dupe")
-    d_id, _ = dupe.prompt_with_commits(
-        "請使用 aistorage_claim 認領交接單 '" + handoff.handoff_id + "'。"
-        "如果工具回報被拒收，請把原因原樣說出來。",
-        run_committer,
+    # 第二個接手者：同一張再 checkout 一次，必須被明確拒絕
+    second = resident_pool("e2e-adv-second")
+    dupe = second.checkout_with_commits(
+        [f"handoff:{handoff.handoff_id}"], "/work/pkg-second", run_committer,
+        task="第二個接手者",
     )
-    claim_parts = assert_tool_called(dupe, d_id, "aistorage_claim", require_ok=False)
-    text = "\n".join(
-        str(p.get("output") or "") + str(p.get("error") or "") for p in claim_parts
+    assert dupe.returncode == 6, (
+        f"重複 checkout 必須明確拒絕（exit code 6），實際 rc={dupe.returncode}\n"
+        f"STDOUT: {dupe.stdout[-1000:]}\nSTDERR: {dupe.stderr[-1000:]}"
     )
-    assert "already_claimed" in text, (
-        f"第二次認領必須回報 already_claimed；工具輸出：{text[-800:]}"
+    text = dupe.stdout + dupe.stderr
+    assert "already_claimed" in text, f"拒絕原因要說 already_claimed：{text[-800:]}"
+    assert "沒有產出起點包" in text, f"要明說沒有產出起點包：{text[-800:]}"
+    assert not (second.work_dir / "pkg-second").exists(), (
+        "被拒就不產出起點包（目錄不該被建立）"
     )
 
     run_committer()
     cont = e2e_reader.get_continuation(handoff.handoff_id).value
-    assert cont.handoff.claimed_by_session_id == cs_agora
+    assert cont.handoff.claimed_by_session_id == first_agora, (
+        "認領者必須仍然是被接受的那一個"
+    )
     links = [
         l
         for l in e2e_reader.get_session(s1_agora).value.links_in

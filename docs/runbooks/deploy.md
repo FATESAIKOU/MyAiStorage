@@ -103,14 +103,56 @@ PY
 
 ---
 
-## 步驟 2｜讀取視圖的讀取權限（由步驟 5 的指令一併處理）
+## 步驟 2｜讀取權限（由步驟 5 的指令與這一步處理）
 
-**誰做**：🛠 PM（步驟 5 的 `init-readview --confirm` 會把資料夾分享給 SA reader）
+**誰做**：🛠 PM
 
-讀取端以 **service account** 讀讀取視圖，Drive ACL 必須有它。`init-readview` 會在建立
-manifest 的同時把**資料夾**（不是 manifest 檔）分享給 `--sa-email`，角色 reader——
-分享資料夾是必要的，因為讀取端要依 id 讀 manifest、index 與各份 reading
-（做法與 1.5 驗證過的 `files.permissions.create` 相同）。
+讀取端以 **service account** 讀，Drive ACL 必須有它。**要分享的是兩個資料夾，
+都只給 `reader`（唯讀）**：
+
+| 資料夾 | 為什麼需要 | 誰分享 |
+|---|---|---|
+| `readview/` | 讀 manifest、index 與各份 reading | 步驟 5 的 `init-readview --confirm` |
+| `agora/`（真本前綴） | **`agora checkout` 依快照的 annex key 取原始紀錄本體** | 這一步 |
+
+分享資料夾而不是個別檔案是必要的：讀取端要依 id 讀 manifest、index 與各份
+reading（做法與 1.5 驗證過的 `files.permissions.create` 相同）。
+
+**為什麼真本前綴也要給唯讀**：`agora checkout` 產出的起點包要放**原始紀錄原封
+不動**（ADR 0010：新 session 送給模型的開頭要與原 session 位元組相同）。閱讀版
+做不到（它把工具呼叫的輸入輸出壓成摘要），而讀取視圖**刻意不發佈** raw 的位元組
+——那等於把真本的位元組複製一份到衍生物裡。所以路徑是「讀取介面只給位址
+（annex key）→ 唯讀身分自己去真本前綴取 → **用 key 內嵌的 sha256 與 size
+驗證**」。key 是內容定址的位址，所以「塞一份同名假檔」過不了那一步；取不到或
+對不上就明確拒絕、不產出起點包。
+
+**所以：唯讀就夠了，不要給 writer／fileOrganizer。** 讀取身分不該能改真本。
+
+```bash
+export AISTORAGE_RCLONE_CONF="$HOME/.config/aistorage/rclone-committer.conf"
+# 把步驟 1 的 agora 前綴 id 唯讀分享給讀取用 SA（冪等：已分享就跳過）
+uv run python - <<'PY'
+import json, os
+from pathlib import Path
+from aistorage.drive import HttpDriveClient, RcloneConfToken
+
+drive = HttpDriveClient(RcloneConfToken(os.environ["AISTORAGE_RCLONE_CONF"]))
+sa = "spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com"
+folder = "<步驟 1 的 agora 前綴 id>"
+listing = f"https://www.googleapis.com/drive/v3/files/{folder}/permissions?fields=permissions(id,role,type,emailAddress)"
+_, _, body = drive._request(listing, method="GET")
+if any(p.get("emailAddress") == sa for p in json.loads(body).get("permissions", [])):
+    print("已經是唯讀共用，跳過")
+else:
+    create = f"https://www.googleapis.com/drive/v3/files/{folder}/permissions?fields=id,role,type,emailAddress"
+    payload = json.dumps({"type": "user", "role": "reader",
+                          "emailAddress": sa}).encode()
+    drive._request(create, method="POST",
+                   headers={"Content-Type": "application/json"},
+                   data=payload, is_write=True)
+    print(f"已用 role=reader 共用 {folder} 給 {sa}")
+PY
+```
 
 **怎麼驗證**（SA 金鑰實際讀一次，🛠 PM）
 
@@ -123,13 +165,16 @@ key = Path.home() / ".config/aistorage-spike/sa-reader.json"   # 只以路徑引
 drive = HttpDriveClient(ServiceAccountToken(key))
 for f in drive.list_children("<readview 資料夾 id>"):          # 換成步驟 1 的 id
     print(f.name, f.id)
+# 真本前綴：應該讀得到（annex 物件是 SHA256E-… 開頭的檔名）
+names = [f.name for f in drive.list_children("<步驟 1 的 agora 前綴 id>")]
+print("annex 物件數:", sum(1 for n in names if n.startswith("SHA256")))
 PY
 ```
-看得到 manifest（此時只有 manifest.json）代表分享成功。
-順便確認 `agora/` 讀不到（應該是 404／403）：讀取身分不該能碰真本。
+讀取視圖看得到 manifest（此時只有 manifest.json），真本前綴看得到 annex 物件，
+就代表兩邊的唯讀權限都到位。
 
-**失敗怎麼退**：SA 金鑰不動；把該協作者從資料夾移除即可（Drive 網頁：共用 → 移除）。
-已經建立的 manifest 要刪掉才會回到「未初始化」，見步驟 5 的退法。
+**失敗怎麼退**：SA 金鑰不動；把該協作者從對應資料夾移除即可（Drive 網頁：
+共用 → 移除）。已經建立的 manifest 要刪掉才會回到「未初始化」，見步驟 5 的退法。
 
 ## 步驟 3｜初始化 Agora 的 git-annex 遠端（產生第一個 manifest）
 
@@ -295,7 +340,8 @@ uv run python -m aistorage.admin init-readview \
 
 - `config/committer.json`：`readview_manifest_file_id`（欄位已存在，預設 `null`）
 - worker／讀取端設定（`~/.config/aistorage/reader.json` 或容器內的 `reader.json`）：
-  `manifest_file_id`、`readview_folder_id`
+  `manifest_file_id`、`readview_folder_id`，以及 **`agora_folder_id`**（Agora 真本
+  前綴 id；`agora checkout` 依 annex key 去那裡取原始紀錄，見步驟 2）
 
 **怎麼驗證**
 
@@ -628,6 +674,7 @@ rm ~/Library/LaunchAgents/local.aistorage.health.plist
 | `aistorage/agora-quarantine/` | | `config/committer.json` `quarantine_folder_id` |
 | `aistorage/readview/` | | `config/committer.json` `readview_folder_id` |
 | 讀取視圖 manifest（`admin init-readview --confirm` 印出） | | `config/committer.json` `readview_manifest_file_id` ＋ `reader.json` `manifest_file_id` |
+| `aistorage/`（Agora 真本前綴，annex 物件） | 唯讀分享給讀取用 SA（步驟 2；`agora checkout` 取原始紀錄用） | `reader.json` `agora_folder_id` |
 | `aistorage-inbox-mac-opencode/`（worker 自建，步驟 9） | | `config/identity.json` `inbox_folder_ids` ＋ `reader.json` `inbox_folder_ids` |
 | Agora annex remote uuid | | `config/committer.json` `repo_uuid`、`repo_url`（`annex::<uuid>?…&rcloneprefix=aistorage/agora`） |
 | `root_folder_id` | | `rclone-committer.conf`（步驟 6） |

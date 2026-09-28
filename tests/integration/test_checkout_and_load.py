@@ -6,6 +6,10 @@
 真的 Drive、真的 git-annex、真的 pin repo。收尾由 `sandbox` 清掉（釘選值條目
 也一併刪掉——pin repo 是所有線共用的，留下會變成垃圾）。
 
+這一輪也驗了「原始紀錄是怎麼讀到的」：讀取視圖**不**發佈 raw 的位元組，
+`checkout` 問讀取介面要該快照的 **annex key**，自己去 Agora 真本前綴取回物件，
+再用 key 內嵌的 sha256 與 size 驗證（見 `agora_cli/objects.py`）。
+
 **只用測試資源**：Session 的原始紀錄是單元測試的 opencode 黃金樣本
 （`tests/unit/data/converters/opencode/basic.json`，形狀真實、內容是測試資料），
 不碰任何真實 Session。
@@ -30,6 +34,7 @@ from typing import Any, Sequence
 import pytest
 
 from aistorage.agora_cli.checkout import CheckoutDeps, checkout
+from aistorage.agora_cli.objects import ObjectFetcher
 from aistorage.agora_cli.package import read_package
 from aistorage.clock import SystemClock
 from aistorage.committer.publish import NullPublisher
@@ -181,10 +186,19 @@ def test_committer_round_then_checkout_and_load_replay_identical_prefix(
     assert report.counts["accepted"] == 1 and report.counts["rejected"] == 0
     assert real_drive.list_children(inbox.id) == []
 
-    # 讀取視圖真的有把**原始紀錄**發佈出去（這是 checkout 能不能用的前提）
+    # 讀取視圖**只**發佈閱讀版——raw 的位元組不進衍生物（那等於把真本的位元組
+    # 複製一份出來）。`agora checkout` 改走 annex key。
     published = {f.name for f in real_drive.list_children(readview_id)}
-    assert any(n.startswith("raw-") for n in published), sorted(published)
     assert any(n.startswith("reading-") for n in published), sorted(published)
+    assert not any(n.startswith("raw-") for n in published), sorted(published)
+    # 但真本前綴裡確實有那個 annex 物件（checkout 要依 key 取它）。
+    # 前綴裡還有 seed repo 的 payload 物件，所以只檢查「這一個在不在」，
+    # 而它的名字必須剛好是「大小 ＋ 內容雜湊」——那正是取回後要驗的東西。
+    on_drive = {f.name for f in real_drive.list_children(prefix_id)
+                if f.name.startswith("SHA256E-")}
+    expected_sha = hashlib.sha256(RAW_S1).hexdigest().lower()
+    annex_key = f"SHA256E-s{len(RAW_S1)}--{expected_sha}"
+    assert annex_key in on_drive, sorted(on_drive)
 
     # ------------------------------------------------------------------
     # agora checkout
@@ -201,15 +215,22 @@ def test_committer_round_then_checkout_and_load_replay_identical_prefix(
     )
     profile = "it-checkout"
     priv, pub = _test_keypair()
+    # 讀取身分對 Agora 物件資料夾只有唯讀權限（分享步驟見 deploy.md 步驟 2）；
+    # 這裡用測試用的 rclone 憑證（它本來就看得到整個前綴），驗的是機制。
+    objects = ObjectFetcher(real_drive, prefix_id)
     deps_out = CheckoutDeps(
         reader=reader, clock=SystemClock(),
         signer=Signer(profile, f"{profile}-{hashlib.sha256(pub).hexdigest()[:8]}",
                       priv),
         inbox_folder_id=inbox.id, drive=real_drive, commit_claim=None,
+        objects=objects,
     )
     pkg_dir = tmp_path / "pkg"
-    pkg = checkout(reader, deps_out, [AGORA_SESSION], pkg_dir,
-                   task="接著把這一段做完")
+    try:
+        pkg = checkout(reader, deps_out, [AGORA_SESSION], pkg_dir,
+                       task="接著把這一段做完")
+    finally:
+        objects.close()
 
     data, raws = read_package(pkg_dir)
     assert raws[0] == RAW_S1, "起點包裡的原始紀錄必須與來源位元組相同"

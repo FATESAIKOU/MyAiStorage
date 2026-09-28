@@ -36,6 +36,12 @@ CREATE TABLE snapshots (
   snapshot_at TEXT,
   committed_at TEXT,
   via TEXT,
+  -- 該快照原始紀錄的 git-annex key（`SHA256E-s<size>--<sha256>`）。
+  -- `agora checkout` 依 key 直接去 Agora 的物件資料夾取物件（唯讀身分有分享
+  -- 權限），用 **key 內嵌的 sha256** 驗證，所以讀取視圖不必另外發佈一份 raw：
+  -- 內容定址的 key 本身就是位址。`via` 不是 sync/rewrite 的路徑（真本用
+  -- git blob 而非 annex）時為 NULL。
+  annex_key TEXT,
   PRIMARY KEY (session_id, snapshot_sha256)
 );
 
@@ -46,20 +52,6 @@ CREATE TABLE readings (
   sha256 TEXT NOT NULL,
   size INTEGER NOT NULL,
   is_latest INTEGER NOT NULL,
-  PRIMARY KEY (session_id, snapshot_sha256)
-);
-
--- 原始紀錄本體（`agora checkout` 的起點包要用它「原封不動」重建開頭，
--- ADR 0010 的 KV cache 要求）。每個已發佈的「Session × 快照」各一份，
--- 內容定址（sha256 == snapshot_sha256）、永不更新。
--- 閱讀版（readings）會丟掉工具呼叫的原始輸入輸出，無法還原，所以這張表是
--- 唯一能把位元組原封不動交給轉接器的來源。
-CREATE TABLE raws (
-  session_id TEXT,
-  snapshot_sha256 TEXT,
-  file_id TEXT NOT NULL,
-  sha256 TEXT NOT NULL,
-  size INTEGER NOT NULL,
   PRIMARY KEY (session_id, snapshot_sha256)
 );
 

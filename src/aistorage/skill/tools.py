@@ -3,9 +3,12 @@
 plugin（TypeScript）只做兩件事：把 `context.sessionID` 傳進來、轉呼叫
 `python -m aistorage.skill <cmd>`。所有邏輯都在這裡，所以可以直接做單元測試。
 
-三層主 Session 限定（plugin → 這裡 → 提交流程的 `apply_claim`）的中間層
-在這裡：`_require_main_session`。宣告停止（stop）沒有提交流程那一層，
-所以這裡的檢查是必要的。
+**這裡沒有認領**：接手新 session 走 `agora checkout`（`aistorage.agora_cli`），
+它在產出起點包時一併登記認領，被拒就不產出（ADR 0010）。`build_claim_item` 仍然
+住在 `aistorage.inbox_builder`——提交流程那一側的 `apply_claim` 需要它。
+
+宣告停止（stop）沒有提交流程那一層主 Session 檢查，所以這裡的
+`_require_main_session` 是必要的。
 """
 
 from __future__ import annotations
@@ -19,12 +22,8 @@ from typing import Any, Callable, Protocol, Sequence
 
 from aistorage.clock import Clock
 from aistorage.errors import AiStorageError
-from aistorage.inbox import DEFAULT_MAX_RAW_SIZE
 from aistorage.inbox_builder import (
     BuiltItem,
-    InboxBuildError,
-    build_artifact_item,
-    build_claim_item,
     build_handoff_item,
     build_reference_item,
     upload_item,
@@ -40,7 +39,6 @@ __all__ = [
     "RejectedItems",
     "SkillDeps",
     "SkillError",
-    "claim",
     "find",
     "handoff_end",
     "list_handoffs",
@@ -52,11 +50,6 @@ __all__ = [
     "stop",
     "whoami",
 ]
-
-#: 收容產出的單檔上限（D7：100 MiB）。與 sidecar schema 的 raw.size 上限、
-#: `foundry.apply.MAX_ARTIFACT_SIZE` 是同一個值，這裡以 inbox 的常數為準。
-ARTIFACT_MAX_BYTES = DEFAULT_MAX_RAW_SIZE
-
 
 class SkillError(RuntimeError):
     """住民工具的錯誤；message 裡不得含秘密或 Session 內文。"""
@@ -437,74 +430,6 @@ def handoff_end(sd: SkillDeps, session_id: str, summary: str, *,
     )
 
 
-def claim(sd: SkillDeps, session_id: str, handoff_ids: Sequence[str], *,
-          timeout: timedelta | None = None) -> dict:
-    """`aistorage_claim`：認領一張或多張交接單（多張＝統合）。
-
-    **只有主 Session 可以做**。等 Link 屬於自己之後，才回傳交接單與接續點
-    之前的閱讀版。任一張被拒收就整個停下（`RejectedItems`）。
-    """
-    oc = _require_main_session(sd.api, session_id)
-    if not handoff_ids:
-        # 9.1 e2e 實測：免費模型常把 id 送成別的鍵名或別的形狀，plugin 吸收不到
-        # 就會走到這裡。錯誤訊息要明確說「要什麼形狀」，模型才改得對。
-        available = ""
-        try:
-            rows = list_handoffs(sd).get("handoffs") or []
-            if rows:
-                available = "；現在等著被認領的是：" + ", ".join(
-                    str(r.get("handoff_id")) for r in rows
-                )
-        except Exception:  # noqa: BLE001 - 只是想多給一點線索，拿不到就算了
-            available = ""
-        raise SkillError(
-            "至少要給一張交接單的 id。handoff_ids 是一個字串清單，"
-            '例如 {"handoff_ids": ["handoff:01ABC…"]}（id 要用 '
-            "aistorage_list_handoffs 回報的那個，不要自己拼）" + available
-        )
-    key = _signer_key(sd.deps.signer)
-    now = sd.deps.clock.now_utc()
-    items = [
-        build_claim_item(
-            handoff_id=hid, claimer_session_id=oc.session_id(),
-            profile=sd.deps.signer.profile, key=key,
-            key_id=sd.deps.signer.key_id, now=now,
-        )
-        for hid in handoff_ids
-    ]
-    result = _export_and_sync(sd, oc.id, extra=items, timeout=timeout)
-    if result.timed_out:
-        raise SkillError("認領還沒被收進去：" + result.summary())
-    return {
-        "session_id": oc.session_id(),
-        "claim_ids": [i.item_id for i in items],
-        "handoffs": _handoff_payloads(sd.reader, handoff_ids),
-    }
-
-
-def _handoff_payloads(reader: Any, handoff_ids: Sequence[str]) -> list[dict]:
-    """讀回交接單內容與接續點之前的閱讀版（Link 屬於自己之後才讀）。"""
-    out: list[dict] = []
-    for hid in handoff_ids:
-        try:
-            view = reader.get_continuation(hid)
-        except Exception as e:
-            out.append({"handoff_id": hid, "error": type(e).__name__})
-            continue
-        value = getattr(view, "value", view)
-        handoff = getattr(value, "handoff", None)
-        messages = getattr(value, "messages", ())
-        out.append({
-            "handoff_id": hid,
-            "target_session_id": getattr(handoff, "target_session_id", None),
-            "message_id": getattr(handoff, "message_id", None),
-            "snapshot_sha256": getattr(handoff, "snapshot_sha256", None),
-            "body": getattr(handoff, "body_json", ""),
-            "reading_before": messages,
-        })
-    return out
-
-
 def reference(sd: SkillDeps, session_id: str, target_session_id: str, *,
               read_snapshot_at: str | None = None,
               upload_only: bool = True) -> dict:
@@ -536,88 +461,6 @@ def reference(sd: SkillDeps, session_id: str, target_session_id: str, *,
         "to_session_id": target_session_id,
         "read_snapshot_at": snapshot_at,
         "uploaded_only": bool(upload_only),
-    }
-
-
-def register_artifact(
-    sd: SkillDeps,
-    session_id: str,
-    *,
-    kind: str,
-    name: str,
-    content_type: str | None = None,
-    link: str | None = None,
-    repo: str | None = None,
-    path: str | None = None,
-    file_path: str | None = None,
-    description: str | None = None,
-    case_id: str | None = None,
-) -> dict:
-    """`aistorage_register_artifact`：把一件產出登錄到 Foundry 產出目錄（7.2）。
-
-    `produced_by_session_id` **由 plugin 的 context 帶入**（session_id），不給模型填：
-    產生者是「哪個 Session 交出它」，模型可能填錯或填別人的（比照 Session id 的規則）。
-
-    - `link`（原處產出）：`link` 是必填的對外連結（sidecar schema 的要求）；
-      `repo`／`path` 是選填的出處補充（原處在哪個 repo 的哪個路徑）。
-      真本留在自己的專案裡，Foundry 只登錄出處。
-    - `contained`（收容產出）：`file_path` 指向容器內的本體檔（單檔上限 100 MiB；
-      超過由 `build_artifact_item` 拒收），`content_type` 必填。
-
-    只上傳，不觸發提交（與 `reference` 相同：由下一輪提交流程收進去）。
-    """
-    oc = resolve_session(sd.api, session_id)
-    if kind not in ("link", "contained"):
-        raise SkillError(f"kind 必須是 'link' 或 'contained': {kind!r}")
-    if not isinstance(name, str) or not name.strip():
-        raise SkillError("name 必填（產出的檔名）")
-    if kind == "link":
-        if not link:
-            raise SkillError(
-                "link 型必須給 link（對外連結；repo 與 path 可選填、補充出處）"
-            )
-        if file_path:
-            raise SkillError("link 型不得提供 file_path（本體留在原處）")
-    else:
-        if not content_type:
-            raise SkillError("contained 型必須給 content_type")
-        if not file_path:
-            raise SkillError("contained 型必須給 file_path（容器內的本體檔）")
-        body_path = Path(file_path)
-        if not body_path.is_file():
-            raise SkillError(f"找不到本體檔案：{file_path}")
-
-    now = sd.deps.clock.now_utc()
-    key = _signer_key(sd.deps.signer)
-    try:
-        item = build_artifact_item(
-            kind=kind,  # type: ignore[arg-type]
-            produced_by_session_id=oc.session_id(),
-            name=name.strip(),
-            profile=sd.deps.signer.profile,
-            key=key, key_id=sd.deps.signer.key_id,
-            content_type=content_type,
-            link=link, repo=repo, path=path,
-            raw_path=Path(file_path) if file_path else None,
-            description=description,
-            case_id=case_id,
-            now=now,
-            max_raw=ARTIFACT_MAX_BYTES,
-        )
-    except InboxBuildError as e:
-        # 大小上限／格式問題：轉成模型的錯誤訊息（不含內容）
-        raise SkillError(f"產出登錄未通過檢查：{e}") from None
-
-    upload_item(sd.deps.drive, sd.deps.inbox_folder_id, item)
-    return {
-        "artifact_id": item.item_id,
-        "item_key": item.item_key,
-        "kind": kind,
-        "name": name.strip(),
-        "content_type": content_type,
-        "size": item.raw_size,
-        "produced_by_session_id": oc.session_id(),
-        "uploaded_only": True,
     }
 
 

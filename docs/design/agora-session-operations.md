@@ -36,9 +36,14 @@ Agora 本身不依賴任何 coding agent：它只管讀、寫交接單、產出�
 | `agora-opencode load` | `src/aistorage/adapters/opencode/`（console script `agora-opencode`） |
 
 起點包格式：`schemas/context-package.schema.json`，取捨說明見
-`schemas/context-package.md`。**讀取視圖除了閱讀版還發佈原始紀錄本體**
-（索引的 `raws` 表、manifest 的 `pending_raws`）——閱讀版會把工具呼叫的輸入輸出
-壓成摘要，還原不了位元組相同的開頭，所以那份本體是 `checkout` 唯一的原料來源。
+`schemas/context-package.md`。
+
+**原始紀錄的讀法**：讀取視圖**只發佈閱讀版**（閱讀版會把工具呼叫的輸入輸出壓成
+摘要，還原不了位元組相同的開頭），而它**不發佈 raw 的位元組**——那等於把真本的
+位元組複製一份到衍生物裡。所以 `checkout` 走「位址 → 位元組」：讀取介面給該快照的
+**annex key**（`snapshots` 表的 `annex_key`，內容定址所以 key 本身就是位址）→
+唯讀身分（對 Agora 真本前綴有唯讀分享）自己去取回 → **用 key 內嵌的 sha256 與
+size 驗證**，對不上就明確拒絕、不產出起點包。唯讀就夠，不需要寫入權限。
 
 ## 指令
 

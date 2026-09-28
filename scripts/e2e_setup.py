@@ -259,7 +259,13 @@ def share_folder_with_reader(
     folder_id: str,
     sa_email: str,
 ) -> None:
-    """將讀取視圖資料夾分享給 SA reader (role=reader, type=user)。"""
+    """把資料夾**唯讀**分享給 SA reader (role=reader, type=user)。
+
+    唯讀是刻意的：`agora checkout` 會依 annex key 去 **Agora 真本前綴**取原始
+    紀錄本體（讀取視圖不發佈 raw 的位元組）。讀取身分對那個資料夾只有讀的權限——
+    取回來還要用 key 內嵌的 sha256 驗證，所以「只有唯讀」是足夠的，也是不該
+    放寬的（見 docs/runbooks/deploy.md 的分享步驟）。
+    """
     # 檢查是否已具備權限（維持冪等）
     list_url = f"{DRIVE_API_BASE}/files/{folder_id}/permissions?fields=permissions(id,role,type,emailAddress)"
     _, _, list_resp = drive._request(list_url, method="GET")
@@ -1111,9 +1117,16 @@ def _setup_locked(
     )
     print(f"[e2e-setup] Agora 讀取視圖 manifest (gen 0) 已建立 (ID: {agora_manifest_file.id})")
 
-    # 7. 分享讀取視圖資料夾給 SA reader
+    # 7. 分享給 SA reader：**兩個**資料夾，都要唯讀
+    #    (a) 讀取視圖（閱讀版、搜尋索引、manifest）
+    #    (b) Agora 真本前綴——`agora checkout` 要依快照的 annex key 去那裡取
+    #        **原始紀錄本體**。讀取視圖不發佈 raw 的位元組（那等於把真本的
+    #        位元組複製一份到衍生物裡），所以唯讀身分需要看得到物件資料夾；
+    #        取回後用 key 內嵌的 sha256 驗證，所以只需要唯讀。
     share_folder_with_reader(committer_drive, readview_folder.id, sa_email)
     print(f"[e2e-setup] 讀取視圖資料夾已分享給 SA reader ({sa_email})")
+    share_folder_with_reader(committer_drive, agora_folder.id, sa_email)
+    print(f"[e2e-setup] Agora 真本前綴（annex 物件）已唯讀分享給 SA reader ({sa_email})")
 
     # 8. 產生測試簽章金鑰並寫出 config/identity.e2e.json
     key_id, pub_b64 = setup_signing_keys(
@@ -1267,6 +1280,9 @@ def _reader_config_payload(ids: dict[str, Any]) -> dict[str, Any]:
         "format": "aistorage.reader/v1",
         "manifest_file_id": ids["readview_manifest_file_id"],
         "readview_folder_id": ids["readview_folder_id"],
+        # Agora 真本前綴（annex 物件資料夾）：`agora checkout` 依快照的 annex key
+        # 去這裡取原始紀錄本體。唯讀身分對它只有唯讀權限（步驟 7 分享的）。
+        "agora_folder_id": ids["agora_folder_id"],
         "inbox_folder_ids": {ids["profile"]: ids["inbox_folder_id"]},
         "sa_key_path": "~/.config/aistorage/sa-reader.json",
     }

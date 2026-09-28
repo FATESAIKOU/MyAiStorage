@@ -48,19 +48,3 @@ def index_name(generation: int, index_sha256: str) -> str:
     if not index_sha256:
         raise ValueError("index_sha256 不得為空")
     return f"index-g{generation}-{index_sha256.lower()[:INDEX_SHA_PREFIX_LEN]}.sqlite"
-
-
-def raw_name(session_id: str, snapshot_sha256: str) -> str:
-    """原始紀錄本體的檔名：raw-<sha256(session_id) 前 16 碼>-<snapshot_sha256 前 16 碼>.
-
-    與 `reading_name` 同一套前綴規則，讓 Drive 上的資料夾看得出這一對是同一個
-    「Session × 快照」。內容定址：同一組輸入永遠算出同一個名稱。
-    """
-    if not session_id:
-        raise ValueError("session_id 不得為空")
-    if not snapshot_sha256:
-        raise ValueError("snapshot_sha256 不得為空")
-    return (
-        f"raw-{_sha256_prefix(session_id, READING_ID_PREFIX_LEN)}"
-        f"-{snapshot_sha256.lower()[:READING_SNAPSHOT_PREFIX_LEN]}"
-    )

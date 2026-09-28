@@ -252,6 +252,12 @@ CLI：`python -m aistorage.syncer sync-and-commit --session <id>… [--items <di
 
 ### 4.2 plugin 的工具（名稱加上 `aistorage_` 前綴）
 
+> **`aistorage_claim` 已被 ADR 0010 與 `docs/design/agora-session-operations.md` 取代
+> （2026-09-28）。** 接手新 session 走 `agora checkout`（`aistorage.agora_cli`）：它在
+> 產出起點包時一併登記認領，被拒就不產出（接著由 `agora-opencode load` 載入成原生
+> session）。所以 `tools.claim` 與 `python -m aistorage.skill claim` 都已移除，
+> 這裡留著看歷史。提交流程那一側的 `apply_claim`／`build_claim_item` 仍在。
+
 | 工具 | 主 Session 限定 | 做什麼 |
 |---|---|---|
 | `aistorage_whoami` | 否 | `{session_id, parent_id, is_main}` |

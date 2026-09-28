@@ -17,6 +17,11 @@ API 路徑（opencode 1.18.32，依 https://opencode.ai/docs/server/ 與 1.7d）
 - 建立 Session：`POST /session`
 - 送訊息（等回覆）：`POST /session/{id}/message`（body 的 parts 是 Part 陣列）
 - 讀回工具呼叫：`docker exec <container> opencode export <session_id>`（1.7a）
+
+**新 Session 一律由 `agora checkout` ＋ `agora-opencode load` 建出**（ADR 0010、
+`docs/design/agora-session-operations.md`）：AI 不再自己 claim。容器端用
+`ResidentContainerHandle.checkout_with_commits()` 與 `opencode_load()` 驅動，
+開頭的位元組相同由 `wire_prefix()`（spike 的 `export_prefix_bytes`）比對。
 """
 
 from __future__ import annotations
@@ -89,9 +94,9 @@ REQUIRED_PROFILE_FILES = ("rclone-worker.conf", "sa-reader.json", "signing.key",
 
 #: 模型回覆（含工具呼叫）的等待上限；免費模型可能很慢。
 #:
-#: 必須**大於工具自己的逾時**（split／claim 內部等讀取視圖 15 分鐘），
-#: 否則 HTTP 先斷，會看到沒有資訊的 socket timeout，而不是工具那句
-#: 「認領還沒被收進去」。9.1 實測：提交流程接連中止時，工具會等滿 15 分鐘。
+#: 必須**大於工具自己的逾時**（`agora_handoff`／`agora checkout` 內部等讀取視圖
+#: 15 分鐘），否則 HTTP 先斷，會看到沒有資訊的 socket timeout，而不是工具那句
+#: 「還沒被收進去」。9.1 實測：提交流程接連中止時，工具會等滿 15 分鐘。
 MESSAGE_TIMEOUT_S = 1800.0
 #: 容器啟動（colima + opencode serve）的上限。
 CONTAINER_READY_TIMEOUT_S = 180.0
@@ -471,9 +476,9 @@ class ResidentContainerHandle:
     ) -> tuple[str, dict]:
         """送訊息，同時在本機反覆執行提交流程（模擬 workflow 被觸發）。
 
-        split／claim 等工具內部會「同步 → 觸發提交 → 等讀取介面看得到」；
-        e2e 不提供 PAT（不觸發 GitHub），所以由測試扮演提交流程，直到工具
-        回覆為止。工具本身逾時（15 分鐘）之前必須讓它看得到。
+        `agora_handoff`／`aistorage_split` 等工具內部會「同步 → 觸發提交 → 等讀取
+        介面看得到」；e2e 不提供 PAT（不觸發 GitHub），所以由測試扮演提交流程，
+        直到工具回覆為止。工具本身逾時（15 分鐘）之前必須讓它看得到。
         """
         sid = session_id or self.create_session()
         stop = threading.Event()
@@ -602,17 +607,13 @@ class ResidentContainerHandle:
                 )
         return out
 
-    def sync_once(
-        self, session_ids: Sequence[str] | None = None
-    ) -> subprocess.CompletedProcess:
-        """在容器內跑一輪同步器（同步器 daemon 每 10 分鐘才跑一次，測試要明確觸發）。
+    def tool_env(self) -> dict[str, str]:
+        """容器內跑 CLI（`agora`、`agora-opencode`、同步器）要帶的環境變數。
 
         環境變數在 entrypoint 才 export，docker exec 拿不到，所以明確帶入；
-        祕密只以容器內路徑引用。
+        祕密只以容器內路徑引用。收件匣 id 由測試端帶（`/secrets/reader.json` 是
+        檔案掛載，被換掉時會變成空目錄）。
         """
-        args = ["python", "-m", "aistorage.syncer", "opencode", "once"]
-        for sid in session_ids or ():
-            args += ["--session", sid]
         env = {
             "AISTORAGE_PROFILE": self.profile,
             "AISTORAGE_SIGNING_KEY": "/secrets/signing.key",
@@ -622,7 +623,115 @@ class ResidentContainerHandle:
         }
         if self.inbox_folder_id:
             env["AISTORAGE_INBOX_FOLDER_ID"] = self.inbox_folder_id
-        return self.exec_in(args, env=env, timeout_s=300.0)
+        return env
+
+    def sync_once(
+        self, session_ids: Sequence[str] | None = None
+    ) -> subprocess.CompletedProcess:
+        """在容器內跑一輪同步器（同步器 daemon 每 10 分鐘才跑一次，測試要明確觸發）。"""
+        args = ["python", "-m", "aistorage.syncer", "opencode", "once"]
+        for sid in session_ids or ():
+            args += ["--session", sid]
+        return self.exec_in(args, env=self.tool_env(), timeout_s=300.0)
+
+    # ── agora CLI（`agora`／`agora-opencode`）──────────────────────────────
+
+    def agora(
+        self,
+        args: Sequence[str],
+        *,
+        check: bool = True,
+        timeout_s: float = 1800.0,
+    ) -> subprocess.CompletedProcess:
+        """在容器內跑 `agora <args>`（設計文件的單一指令入口）。
+
+        逾時上限與 `MESSAGE_TIMEOUT_S` 同值：`agora checkout` 內部會等讀取介面
+        確認（15 分鐘），必須大於它，否則只會看到沒有資訊的 socket timeout。
+        """
+        return self.exec_in(["agora", *args], env=self.tool_env(),
+                            timeout_s=timeout_s, check=check)
+
+    def checkout(
+        self,
+        startpoints: Sequence[str],
+        out_dir: str,
+        *,
+        task: str | None = None,
+        extra_args: Sequence[str] = (),
+        check: bool = True,
+    ) -> subprocess.CompletedProcess:
+        """在容器內跑 `agora checkout <起點>… -o <out_dir>`。
+
+        `out_dir` 要寫成容器內的路徑；`/work` 就是 `self.work_dir`，所以宿主機
+        上讀得到同一份起點包（`read_package` 驗 sha 用）。
+        """
+        args = ["checkout", *startpoints, "-o", out_dir]
+        if task:
+            args += ["--task", task]
+        args += list(extra_args)
+        return self.agora(args, check=check)
+
+    def checkout_with_commits(
+        self,
+        startpoints: Sequence[str],
+        out_dir: str,
+        run_committer: Callable[..., Any],
+        *,
+        task: str | None = None,
+        extra_args: Sequence[str] = (),
+    ) -> subprocess.CompletedProcess:
+        """跑 `agora checkout`，**同時**在本機反覆執行提交流程。
+
+        checkout 會上傳新 session 的第一份快照與認領，然後等讀取介面確認。
+        e2e 不提供 PAT（不觸發 GitHub），所以提交流程由測試扮演——這正是
+        ADR 0007 的「寫入者以讀取介面判斷完成」。
+
+        **預設不檢查 exit code**：被拒（`ClaimRejected` rc=6、長度超限 rc=2）
+        也要看得到 stdout／stderr，由測試自己斷言。
+        """
+        stop = threading.Event()
+        errors: list[str] = []
+        tally: dict[str, int] = {}
+
+        def _loop() -> None:
+            while not stop.is_set():
+                try:
+                    report = run_committer()
+                    errors.clear()
+                    outcome = _report_outcome(report)
+                    tally[outcome] = tally.get(outcome, 0) + 1
+                except Exception as e:  # noqa: BLE001 - 記錄後繼續重試
+                    errors.append(str(e))
+                stop.wait(COMMITTER_POLL_INTERVAL_S)
+
+        thread = threading.Thread(target=_loop, name=f"committer-{self.name}",
+                                  daemon=True)
+        thread.start()
+        try:
+            result = self.checkout(startpoints, out_dir, task=task,
+                                   extra_args=extra_args, check=False)
+        finally:
+            stop.set()
+            thread.join(timeout=60.0)
+        self.committer_tally = dict(tally)
+        print(f"[e2e:{self.name}] checkout 期間提交流程 {tally or '（沒有跑成）'}"
+              + (f" 例外：{errors[-1][:160]}" if errors else ""))
+        return result
+
+    def opencode_load(
+        self, package_dir: str, *, workdir: str = "/work", check: bool = True
+    ) -> str:
+        """`agora-opencode load <起點包>`：回傳新 session id（來源端，不帶前綴）。
+
+        這裡只匯入（`opencode import`）；**開不開 agent 由呼叫者決定**——測試
+        用容器內的 opencode API 在那個新 session 上繼續（等於 `opencode
+        --session <id>`）。
+        """
+        res = self.exec_in(
+            ["agora-opencode", "load", package_dir, "-C", workdir],
+            env=self.tool_env(), timeout_s=600.0, check=check,
+        )
+        return res.stdout.strip().splitlines()[-1] if res.stdout.strip() else ""
 
     # ── 生命週期 ─────────────────────────────────────────────────────────
 
@@ -781,6 +890,42 @@ def assert_tool_called(
 # ---------------------------------------------------------------------------
 # 共用小工具（測試檔一律用這些，不要各自重寫）
 # ---------------------------------------------------------------------------
+
+
+#: spike 的比對工具（`docs/spike/session-import.md`）。把一份 opencode 匯出檔的
+#: 訊息序列重播成「送給模型的 messages 陣列」並序列化——這是「新 session 的
+#: 開頭與原 session 位元組相同」這個量的**決定性來源**。
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "spike"))
+from session_import_compare import export_prefix_bytes as _wire_prefix  # noqa: E402
+
+
+def wire_prefix(export: dict[str, Any], upto_message_id: str | None = None) -> bytes:
+    """送給模型的開頭（bytes）；`upto_message_id` 給就截到那則為止（含）。
+
+    真實的 opencode 匯出檔帶 `callID`，所以用預設的 `tool_call_id_key="id"`：
+    轉接器重編 id 時**不動** `callID`，兩邊算出來才會一樣——那正是位元組相同
+    能成立的原因（spike Q2／Q3 實測）。
+    """
+    messages = list(export.get("messages") or [])
+    if upto_message_id is not None:
+        for position, message in enumerate(messages):
+            if str((message.get("info") or {}).get("id")) == upto_message_id:
+                messages = messages[: position + 1]
+                break
+        else:
+            raise AssertionError(
+                f"匯出裡沒有訊息 {upto_message_id}（實際有 {len(messages)} 則）"
+            )
+    return _wire_prefix({"messages": messages})
+
+
+def export_message_ids(export: dict[str, Any]) -> list[str]:
+    """匯出裡的訊息 id（依出現順序）。"""
+    return [
+        str((m.get("info") or {}).get("id"))
+        for m in (export.get("messages") or [])
+        if isinstance(m, dict)
+    ]
 
 
 def agora_session_id(oc_session_id: str, source: str = "opencode") -> str:

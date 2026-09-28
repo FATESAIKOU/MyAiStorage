@@ -82,14 +82,6 @@
       },
       "description": "已上傳但尚未被任何世代的 index 引用的 reading（完整重建分批上傳的中間輪次）。讀者不引用，但必須留在可信集合內，下一輪才能沿用"
     },
-    "pending_raws": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/rawRef"
-      },
-      "default": [],
-      "description": "與 pending 一對一的原始紀錄本體（`agora checkout` 的起點包要原封不動取用它，ADR 0010）。同樣只在分批上傳的中間輪次出現，必須留在可信集合內"
-    },
     "retired": {
       "type": "array",
       "items": {
@@ -178,38 +170,6 @@
         "is_latest": {
           "type": "boolean",
           "description": "是否為該 Session 的最新快照"
-        }
-      },
-      "additionalProperties": false
-    },
-    "rawRef": {
-      "type": "object",
-      "required": [
-        "session_id",
-        "snapshot_sha256",
-        "file_id",
-        "size"
-      ],
-      "properties": {
-        "session_id": {
-          "type": "string",
-          "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
-          "description": "Session 識別碼（<source>:<source_session_id>）"
-        },
-        "snapshot_sha256": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{64}$",
-          "description": "原始紀錄本體的內容雜湊（內容定址：檔名就是它，永不更新）"
-        },
-        "file_id": {
-          "type": "string",
-          "minLength": 1,
-          "description": "原始紀錄本體檔案的 Drive file id"
-        },
-        "size": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "原始紀錄本體的位元組大小"
         }
       },
       "additionalProperties": false

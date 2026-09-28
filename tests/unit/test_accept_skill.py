@@ -4,6 +4,7 @@ Adheres strictly to:
 - docs/impl/group5-7-modules.md §4, §8.2
 - PM Decision 4: reference default upload_only=True (no commit triggered)
 - 9 tools verification, main session restriction, exit codes
+- No claim tool: taking over a new session is `agora checkout` (ADR 0010)
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ from aistorage.skill import (
     RejectedItems,
     SkillDeps,
     SkillError,
-    claim,
     find,
     handoff_end,
     list_handoffs,
@@ -220,17 +220,6 @@ def test_tool_whoami_identifies_main_and_child(tmp_path: Path):
     assert sub_info["is_main"] is False
 
 
-def test_tool_claim_main_session_restriction(tmp_path: Path):
-    """驗證 aistorage_claim 嚴格限制在主 Session 執行（子 Session 拋出 MainSessionRequired）。"""
-    sd, env = build_skill_env(tmp_path)
-    api: MockOpencodeApi = env["api"]
-
-    api.set_session(OcSession(id="ses_sub", parent_id="ses_main", title="Sub", updated_ms=1000, archived_ms=None), "{}")
-
-    with pytest.raises(MainSessionRequired, match="主 Session"):
-        claim(sd, "ses_sub", ["handoff:01ARZ3NDEKTSV4RRFFQ69G5FA1"])
-
-
 def test_tool_stop_main_session_restriction(tmp_path: Path):
     """驗證 aistorage_stop 嚴格限制在主 Session 執行（子 Session 拋出 MainSessionRequired）。"""
     sd, env = build_skill_env(tmp_path)
@@ -297,29 +286,6 @@ def test_tool_stop_archives_and_commits(tmp_path: Path, monkeypatch: pytest.Monk
     assert res.get("status") in ("stopped", "ok") or "session_id" in res
 
 
-def test_tool_claim_rejected_raises_rejected_items(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """驗證 aistorage_claim 遇到任何一張被拒收時，拋出 RejectedItems。"""
-    sd, env = build_skill_env(tmp_path)
-    api: MockOpencodeApi = env["api"]
-    reader: MockReader = env["reader"]
-
-    raw_json = make_raw_session("ses_main", [
-        {"info": {"id": "m1", "role": "user", "time": {"created": 1000, "completed": 2000}}, "parts": [{"type": "text", "text": "claiming"}]},
-    ])
-    api.set_session(OcSession(id="ses_main", parent_id=None, title="Main", updated_ms=2000, archived_ms=None), raw_json)
-
-    monkeypatch.setattr(aistorage.syncer.commit, "trigger_committer", lambda *args, **kwargs: None)
-
-    # 讓 reader 對收件匣項目回報拒收
-    def mock_get_rejection(item_key: str):
-        return {"code": "claim_already_taken"}
-
-    reader.get_rejection = mock_get_rejection
-
-    with pytest.raises(RejectedItems, match="claim_already_taken"):
-        claim(sd, "ses_main", ["handoff:01ARZ3NDEKTSV4RRFFQ69G5FA1"], timeout=timedelta(seconds=2))
-
-
 def test_tool_find_and_read_includes_freshness(tmp_path: Path):
     """驗證 aistorage_find 與 aistorage_read 一律附上快照時間與新鮮度。"""
     sd, env = build_skill_env(tmp_path)
@@ -383,22 +349,19 @@ def test_cli_exit_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     rc = skill_cli_main(["whoami", "--session", "ses_main"])
     assert rc == 0
 
-    # 2. subsession 呼叫 claim -> exit code 4 (MainSessionRequired)
-    rc_claim = skill_cli_main(["claim", "--session", "ses_sub", "--handoff", "handoff:01ARZ3NDEKTSV4RRFFQ69G5FA1"])
-    assert rc_claim == 4
-
-    # 3. subsession 呼叫 stop -> exit code 4 (MainSessionRequired)
+    # 2. subsession 呼叫 stop -> exit code 4 (MainSessionRequired)
     rc_stop = skill_cli_main(["stop", "--session", "ses_sub"])
     assert rc_stop == 4
 
-    # 4. 拒收項目 -> exit code 3 (RejectedItems)
-    def mock_claim_fail(*args, **kwargs):
-        raise RejectedItems([("h1", "claim rejected by committer")])
-    monkeypatch.setattr("aistorage.skill.tools.claim", mock_claim_fail)
-    rc_rej = skill_cli_main(["claim", "--session", "ses_main", "--handoff", "h1"])
+    # 3. 拒收項目 -> exit code 3 (RejectedItems)
+    def mock_handoff_end_fail(*args, **kwargs):
+        raise RejectedItems([("h1", "handoff rejected by committer")])
+    monkeypatch.setattr("aistorage.skill.tools.handoff_end", mock_handoff_end_fail)
+    rc_rej = skill_cli_main(
+        ["handoff-end", "--session", "ses_main", "--summary", "做完了"])
     assert rc_rej == 3
 
-    # 5. SkillError -> exit code 2
+    # 4. SkillError -> exit code 2
     def mock_split_err(*args, **kwargs):
         raise SkillError("continuation point missing")
     monkeypatch.setattr("aistorage.skill.tools.split", mock_split_err)

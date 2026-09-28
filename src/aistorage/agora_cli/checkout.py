@@ -18,6 +18,7 @@ import shutil
 import tempfile
 from typing import Any, Sequence
 
+from aistorage.agora_cli.objects import ObjectError
 from aistorage.agora_cli.package import (
     DEFAULT_MAX_CONTEXT_CHARS,
     ContextLimitExceeded,
@@ -57,6 +58,9 @@ class CheckoutDeps:
 
     reader: Any
     clock: Any
+    #: 依 annex key 去 Agora 物件資料夾取原始紀錄（`objects.ObjectFetcher`）。
+    #: **沒有它就沒有起點包**——讀取視圖不發佈 raw 的位元組。
+    objects: Any = None
     #: 產生認領用的東西（profile、簽章金鑰、收件匣）。`None` 表示這台機器
     #: 沒有寫入身分 → 起點是交接單時明確拒絕（不能假裝認領了）。
     signer: Any = None
@@ -234,19 +238,25 @@ def checkout(
     """
     if not startpoint_texts:
         raise StartPointError("至少要給一個起點")
+    if deps.objects is None:
+        raise CheckoutError(
+            "沒有設定 Agora 物件資料夾（讀取端設定的 agora_folder_id），"
+            "所以取不到原始紀錄、無法產出起點包。"
+            "讀取身分需要對那個資料夾有唯讀權限（見 docs/runbooks/deploy.md 的分享步驟）。"
+        )
 
     resolved: list[ResolvedStartPoint] = []
     for text in startpoint_texts:
         resolved.append(resolve_startpoint(
             reader, parse_startpoint(text, source=source), max_lag=max_lag))
 
-    # 讀取介面要能交出**原始紀錄**（閱讀版不足以重建位元組相同的開頭）。
+    # 讀取介面只給 key，位元組自己去 Agora 的物件資料夾取並驗證（見 objects.py）。
     stage = Path(stage_dir) if stage_dir is not None else _make_stage_dir()
     stage.mkdir(parents=True, exist_ok=True)
     segments: list[PackageSegment] = []
     try:
         for index, r in enumerate(resolved):
-            raw = _fetch_raw(reader, r)
+            raw = _fetch_raw(reader, r, deps.objects)
             count, chars = _measure(reader, r, raw, max_lag=max_lag)
             segments.append(PackageSegment(
                 resolved=r, raw=raw, message_count=count, text_chars=chars,
@@ -311,23 +321,33 @@ def _profile_of(deps: CheckoutDeps) -> str:
     return str(profile)
 
 
-def _fetch_raw(reader: Any, r: ResolvedStartPoint) -> bytes:
-    """從讀取介面取**原始紀錄**；取不到就明確拒絕（不要用閱讀版頂替）。"""
+def _fetch_raw(reader: Any, r: ResolvedStartPoint, objects: Any) -> bytes:
+    """取**原始紀錄本體**：讀取介面給 key，位元組自己去 Agora 物件資料夾取。
+
+    讀取視圖不發佈 raw（那等於把真本的位元組複製一份到衍生物裡），所以這裡
+    走「位址 → 位元組」：先問讀取介面要 annex key（內容定址的位址），再依 key
+    去唯讀分享的物件資料夾取，取回後由 `ObjectFetcher` 用 key 內嵌的 sha256
+    驗證。取不到就明確拒絕——不要用閱讀版頂替（那樣開頭就不會位元組相同）。
+    """
     try:
-        result = reader.get_raw(r.session_id, r.snapshot_sha256)
+        view = reader.get_snapshot(r.session_id, r.snapshot_sha256)
     except KeyError as e:
         raise CheckoutError(
-            f"讀取介面沒有發佈這個快照的原始紀錄: "
-            f"{r.session_id}@{r.snapshot_sha256[:12]}（{e}）。"
-            "原始紀錄是重建開頭的必要條件（閱讀版不足以位元組相同），"
+            f"讀取介面沒有這個快照: {r.session_id}@{r.snapshot_sha256[:12]}（{e}）。"
             "請等下一輪提交流程發佈後再試。"
         ) from e
-    data = bytes(getattr(getattr(result, "value", result), "data", b""))
-    if not data:
+    ref = getattr(getattr(view, "value", view), "annex_key", None)
+    if not ref:
         raise CheckoutError(
-            f"讀取介面回給 {r.session_id}@{r.snapshot_sha256[:12]} 的原始紀錄是空的"
+            f"讀取介面沒有這個快照的 annex key: "
+            f"{r.session_id}@{r.snapshot_sha256[:12]}。"
+            "原始紀錄是重建位元組相同的開頭的必要條件（閱讀版還原不了，"
+            "讀取視圖也不發佈它的位元組），所以這裡明確拒絕。"
         )
-    return data
+    try:
+        return objects.fetch(str(ref))
+    except ObjectError as e:
+        raise CheckoutError(str(e)) from e
 
 
 def _claim(deps: CheckoutDeps, ordered: list[PackageSegment], pkg: ContextPackage,
@@ -369,5 +389,6 @@ __all__ = [
     "ContextLimitExceeded",
     "ContextPackageError",
     "DEFAULT_CLAIM_TIMEOUT",
+    "ObjectError",
     "checkout",
 ]

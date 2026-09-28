@@ -41,7 +41,6 @@ TOOL_TO_COMMAND = {
     "aistorage_handoff_end": ("aistorage.skill", "handoff-end"),
     "aistorage_reference": ("aistorage.skill", "reference"),
     "aistorage_list_handoffs": ("aistorage.skill", "list-handoffs"),
-    "aistorage_register_artifact": ("aistorage.skill", "register-artifact"),
     "aistorage_stop": ("aistorage.skill", "stop"),
 }
 
@@ -344,23 +343,6 @@ def test_plugin_does_not_lose_arguments_with_quotes_and_newlines(tmp_path: Path)
         assert value == "做完了", f"summary 被改動了：{value!r}"
 
 
-def test_plugin_register_artifact_passes_its_arguments_verbatim(tmp_path: Path):
-    """register-artifact 的位置／旗標對到 CLI，而且 --session 是自己的 id。"""
-    out = _harness(tmp_path)
-    calls = _argv_calls(Path(out["_log_main"]))
-    reg = next(c for c in calls if "register-artifact" in c)
-    assert reg[:3] == ["-m", "aistorage.skill", "register-artifact"]
-    assert reg[reg.index("--session") + 1] == "ses_main"  # 來自 context
-    assert reg[reg.index("--kind") + 1] == "link"
-    assert reg[reg.index("--name") + 1] == "架構報告"
-    assert reg[reg.index("--link") + 1] == "https://example.invalid/report"
-    assert reg[reg.index("--repo") + 1] == "org/repo"
-    assert reg[reg.index("--path") + 1] == "docs/report.md"
-    assert reg[reg.index("--case") + 1] == "c1"
-    # 模型不能指定產生者：沒有 --produced-by 這種旗標
-    assert not any("produced" in flag for flag in reg)
-
-
 def test_plugin_refuses_when_the_session_list_query_fails(tmp_path: Path):
     """查不到 Session 清單 → 拒絕，不放行（review-g5-6 H1）。"""
     out = _harness(tmp_path, sessions_status=503)
@@ -443,7 +425,9 @@ def test_skill_doc_exists_and_names_every_tool():
     assert "快照時間" in text          # 引用讀到的內容時要帶快照時間
     assert "可能不是最新" in text      # 新鮮度警告要明說
     assert "不要為了讀到更新的內容而要求對方同步" in text   # ADR 0007
-    assert "被拒收" in text and "停下" in text             # 拒收就停
+    # 拒收就停：AI 不再自己 claim，所以這條規則落在 `agora_checkout` 上
+    # （被拒 → 不產出起點包 → 回報使用者、不要重試同一批）
+    assert "被拒就不產出" in text and "停下來" in text
     # frontmatter
     assert text.startswith("---\n")
 
@@ -454,8 +438,13 @@ def test_python_side_also_blocks_main_session_only_tools():
 
     src = Path(tools.__file__).read_text(encoding="utf-8")
     assert "def _require_main_session" in src
-    # claim 與 stop 都呼叫它
-    claim_body = src[src.index("def claim("):src.index("def _handoff_payloads(")]
     stop_body = src[src.index("def stop("):]
-    assert "_require_main_session" in claim_body
     assert "_require_main_session" in stop_body
+
+
+def test_skill_cli_has_no_claim_subcommand():
+    """AI 不再自己認領：`aistorage.skill` 沒有 claim 子命令（ADR 0010）。"""
+    from aistorage.skill.__main__ import build_parser
+
+    sub = next(a for a in build_parser()._actions if a.dest == "command")
+    assert "claim" not in sub.choices

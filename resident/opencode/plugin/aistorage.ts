@@ -270,36 +270,6 @@ const TOOLS: Record<string, ToolDef> = {
       return out
     },
   },
-  aistorage_register_artifact: {
-    description:
-      "登錄一件產出到 Foundry 產出目錄（只上傳，下一輪提交流程收進去）。" +
-      "contained：本體是容器內的本機檔案（file_path）；link：原處產出" +
-      "（必填 link，repo 與 path 可選填）。produced_by_session_id 由 plugin 帶入，不要自己填。",
-    cli: "skill",
-    command: "register-artifact",
-    args: (a) => {
-      const out: string[] = []
-      const kind = str(a, "kind")
-      if (kind) out.push("--kind", kind)
-      const n = str(a, "name")
-      if (n) out.push("--name", n)
-      const ct = str(a, "content_type")
-      if (ct) out.push("--content-type", ct)
-      const link = str(a, "link")
-      if (link) out.push("--link", link)
-      const repo = str(a, "repo")
-      if (repo) out.push("--repo", repo)
-      const path = str(a, "path")
-      if (path) out.push("--path", path)
-      const file = str(a, "file_path")
-      if (file) out.push("--file", file)
-      const desc = str(a, "description")
-      if (desc) out.push("--description", desc)
-      const c = str(a, "case_id")
-      if (c) out.push("--case", c)
-      return out
-    },
-  },
   aistorage_stop: {
     description: "宣告這個 Session 停止中（設定 time.archived，然後同步並提交）。",
     mainOnly: true,
@@ -472,19 +442,6 @@ export const AistoragePlugin = async () => {
                   ? { session_id: { type: "string" }, read_snapshot_at: { type: "string" } }
                   : {}),
                 ...(name === "aistorage_list_handoffs" ? { case_id: { type: "string" } } : {}),
-                ...(name === "aistorage_register_artifact"
-                  ? {
-                      kind: { type: "string", enum: ["link", "contained"] },
-                      name: { type: "string" },
-                      content_type: { type: "string" },
-                      link: { type: "string" },
-                      repo: { type: "string" },
-                      path: { type: "string" },
-                      file_path: { type: "string" },
-                      description: { type: "string" },
-                      case_id: { type: "string" },
-                    }
-                  : {}),
                 ...(name === "aistorage_handoff_end"
                   ? { summary: { type: "string" }, next_steps: { type: "string" } }
                   : {}),

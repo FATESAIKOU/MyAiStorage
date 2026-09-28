@@ -55,25 +55,18 @@ class ReadingToPublish:
     snapshot_sha256: str
     is_latest: bool
     existing: FileRef | None  # 舊世代已有 → 沿用，不上傳
-    #: 同一個「Session × 快照」的**原始紀錄本體**在舊世代的定位（None＝要上傳）。
-    #: `agora checkout` 的起點包要原封不動取用它（ADR 0010），所以它與 reading
-    #: 走同一組 targets、同一個分批計畫，但沿用判斷各自獨立（舊世代可能只有
-    #: 其中一半，例如升級前發佈的世代）。
-    raw_existing: FileRef | None = None
 
     @property
     def key(self) -> ReadingKey:
         return (self.session_id, self.snapshot_sha256.lower())
 
     @classmethod
-    def of(cls, t: SnapshotTarget, existing: FileRef | None,
-           raw_existing: FileRef | None = None) -> ReadingToPublish:
+    def of(cls, t: SnapshotTarget, existing: FileRef | None) -> ReadingToPublish:
         return cls(
             session_id=t.session_id,
             snapshot_sha256=t.snapshot_sha256,
             is_latest=t.is_latest,
             existing=existing,
-            raw_existing=raw_existing,
         )
 
 
@@ -107,21 +100,8 @@ class PublishPlan:
 
     @property
     def kept_file_ids(self) -> frozenset[str]:
-        """沿用中的 reading 與原始紀錄本體 file id（新世代仍然引用，故不退役）。"""
-        ids = [r.existing.id for r in self.readings_keep if r.existing is not None]
-        ids += [r.raw_existing.id for r in self.readings_keep if r.raw_existing is not None]
-        return frozenset(ids)
-
-    @property
-    def raws_missing(self) -> tuple[ReadingToPublish, ...]:
-        """reading 已沿用、但原始紀錄本體還沒發佈過的項目（要補上傳 raw）。
-
-        完整重建時 reading 也重傳，所以不會落在這裡；這是為了「舊世代只有
-        reading、沒有 raw」的情況（升級前發佈的世代）。
-        """
-        return tuple(
-            r for r in self.readings_keep if r.raw_existing is None
-        )
+        """沿用中的 reading file id（新世代仍然引用，故不退役）。"""
+        return frozenset(r.existing.id for r in self.readings_keep if r.existing is not None)
 
 
 def _read_json(path: Path) -> Any:
@@ -274,7 +254,6 @@ def plan_publish(
     *,
     force_full: bool = False,
     max_new_readings: int = DEFAULT_MAX_NEW_READINGS,
-    prev_raws: Mapping[ReadingKey, FileRef] | None = None,
 ) -> PublishPlan:
     """由真本狀態＋舊 manifest 算出這一輪的發佈計畫（純函式，不寫任何東西）。
 
@@ -285,8 +264,6 @@ def plan_publish(
         converter_versions: 本輪各來源應用的轉換器版本。
         force_full: 呼叫端要求完整重建（設定遞增 rebuild_epoch、4.5 驗證模式）。
         max_new_readings: 單輪最多上傳幾份 reading，超過則分批，中間輪次不切換 index。
-        prev_raws: 舊世代 index 的 raws 表（原始紀錄本體的定位）。
-            與 prev_readings 同一組鍵；沒有的一律當成要重新上傳。
 
     Returns:
         PublishPlan。
@@ -297,18 +274,16 @@ def plan_publish(
     full_rebuild = bool(force_full) or version_changed
 
     existing_map = normalize_prev_readings(prev_readings)
-    raw_map = normalize_prev_readings(prev_raws)
     targets = collect_snapshot_targets(store)
 
     new_all: list[ReadingToPublish] = []
     keep: list[ReadingToPublish] = []
     for t in targets:
         existing = existing_map.get(t.key)
-        raw_existing = raw_map.get(t.key)
         if existing is not None and not full_rebuild:
-            keep.append(ReadingToPublish.of(t, existing, raw_existing))
+            keep.append(ReadingToPublish.of(t, existing))
         else:
-            new_all.append(ReadingToPublish.of(t, None, None))
+            new_all.append(ReadingToPublish.of(t, None))
 
     retire_now: tuple[str, ...] = ()
     delete_now: tuple[str, ...] = ()

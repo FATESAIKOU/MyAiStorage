@@ -5,15 +5,18 @@ plugin 只把 `context.sessionID` 傳進來，其餘都是這裡決定：
     python -m aistorage.skill whoami     --session <id>
     python -m aistorage.skill split       --session <id> --parts <file.json>
     python -m aistorage.skill handoff-end --session <id> --summary <text> [--next-steps <text>]
-    python -m aistorage.skill claim       --session <id> --handoff <id> [--handoff <id>…]
     python -m aistorage.skill find        --query <text> [--case <id>] [--max-lag 5m]
     python -m aistorage.skill read        --session <id> [--max-lag 5m]
     python -m aistorage.skill reference   --session <id> --to <session_id> [--read-snapshot-at <ts>]
     python -m aistorage.skill list-handoffs [--case <id>]
-    python -m aistorage.skill register-artifact --session <id> --kind link|contained --name <檔名>
-        [--content-type <mime>] [--link <url>] [--repo <repo> --path <path>]
-        [--file <本體檔>] [--description <說明>] [--case <id>]
     python -m aistorage.skill stop        --session <id>
+
+**沒有 claim 子命令**：接手新 session 走 `agora checkout`
+（`python -m aistorage.agora_cli checkout`），它在產出起點包時一併登記認領，
+被拒就不產出（ADR 0010）。
+
+**沒有 register-artifact 子命令**：產出登錄（Foundry）已隨 ADR 0009 的
+entity-owned storage 移除。
 
 輸出是 JSON（給 plugin 回給模型）。錯誤走 stderr 與非零 exit code，
 訊息裡只有 id 與代碼，不含秘密。
@@ -79,11 +82,6 @@ def cmd_handoff_end(args: argparse.Namespace, sd: SkillDeps) -> int:
     ))
 
 
-def cmd_claim(args: argparse.Namespace, sd: SkillDeps) -> int:
-    return _emit(tools.claim(
-        sd, args.session, args.handoff or [], timeout=_lag(args.timeout)))
-
-
 def cmd_find(args: argparse.Namespace, sd: SkillDeps) -> int:
     return _emit(tools.find(
         sd.reader, args.query, max_lag=_lag(args.max_lag),
@@ -103,21 +101,6 @@ def cmd_reference(args: argparse.Namespace, sd: SkillDeps) -> int:
 
 def cmd_list_handoffs(args: argparse.Namespace, sd: SkillDeps) -> int:
     return _emit(tools.list_handoffs(sd, case_id=args.case))
-
-
-def cmd_register_artifact(args: argparse.Namespace, sd: SkillDeps) -> int:
-    return _emit(tools.register_artifact(
-        sd, args.session,
-        kind=args.kind,
-        name=args.name,
-        content_type=args.content_type,
-        link=args.link,
-        repo=args.repo,
-        path=args.path,
-        file_path=args.file,
-        description=args.description,
-        case_id=args.case,
-    ))
 
 
 def cmd_stop(args: argparse.Namespace, sd: SkillDeps) -> int:
@@ -147,12 +130,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--next-steps")
     p.add_argument("--timeout")
     p.set_defaults(func=cmd_handoff_end)
-
-    p = sub.add_parser("claim", help="認領交接單（多張＝統合）")
-    p.add_argument("--session", required=True)
-    p.add_argument("--handoff", action="append", help="可重複")
-    p.add_argument("--timeout")
-    p.set_defaults(func=cmd_claim)
 
     p = sub.add_parser("find", help="找 Session（一律附上新鮮度）")
     # plugin 對**每一個**工具都會帶 `--session`（Session id 由 context 帶入，
@@ -184,19 +161,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--session", help="目前的 Session id（plugin 傳入；本指令用不到）")
     p.add_argument("--case")
     p.set_defaults(func=cmd_list_handoffs)
-
-    p = sub.add_parser("register-artifact", help="登錄產出到 Foundry 產出目錄（只上傳）")
-    p.add_argument("--session", required=True, help="目前的 Session id（plugin 傳入）")
-    p.add_argument("--kind", required=True, choices=("link", "contained"))
-    p.add_argument("--name", required=True, help="產出的檔名（顯示用，也是物件的安全檔名來源）")
-    p.add_argument("--content-type", dest="content_type")
-    p.add_argument("--link", help="link 型：對外連結")
-    p.add_argument("--repo", help="link 型：原處 repo（與 --path 搭配）")
-    p.add_argument("--path", help="link 型：原處路徑（與 --repo 搭配）")
-    p.add_argument("--file", help="contained 型：容器內的本體檔路徑（上限 100 MiB）")
-    p.add_argument("--description")
-    p.add_argument("--case")
-    p.set_defaults(func=cmd_register_artifact)
 
     p = sub.add_parser("stop", help="宣告停止（主 Session 限定）")
     p.add_argument("--session", required=True)

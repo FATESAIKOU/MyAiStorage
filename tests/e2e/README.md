@@ -6,6 +6,13 @@
 唯一的資訊來源是讀取介面（`AgoraReader`）。提交流程由測試在本機以 committer-test
 身分執行（`run_committer`），不觸發 GitHub Actions。
 
+**新 Session 一律由 `agora checkout` ＋ `agora-opencode load` 建出**（ADR 0010、
+`docs/design/agora-session-operations.md`），AI 不再自己 claim：容器端用
+`ResidentContainerHandle.checkout_with_commits()` / `opencode_load()` 驅動真實的
+CLI，`/work` 底下產生的起點包宿主機讀得到（`/work` 就是該容器的工作目錄）。
+開頭的位元組相同由 `conftest.wire_prefix()`（spike 的 `export_prefix_bytes`）比對。
+
+
 ## 前置
 
 1. `scripts/e2e_setup.py`（在 `TEST_FOLDER_ID` 底下建 Agora repo、
@@ -94,7 +101,7 @@ task 9.4 的項目分佈在 e2e 與整合測試；每一項都查得到在哪裡
 |---|---|
 | Mac opencode 的憑證推不了、改不了、刪不了真本與舊版本 | `tests/e2e/test_adversarial.py::test_9_4_worker_cannot_delete_or_modify_true_store`（rclone／file id 兩種）；`tests/integration/test_admin_erase_integration.py`（抹除必須 403） |
 | 沒有簽章或簽章不符的收件匣項目被拒收、自填產生者被忽略 | `tests/e2e/test_adversarial.py::test_9_4_unsigned_item_rejected`；單元：`tests/unit/test_intake.py`、`tests/unit/test_accept_committer.py` |
-| 重複認領被拒絕（already_claimed） | `tests/e2e/test_adversarial.py::test_9_4_duplicate_claim_rejected`；單元：`tests/unit/test_accept_apply.py` |
+| 同一張交接單 checkout 兩次，被拒的一方不產出起點包（already_claimed） | `tests/e2e/test_adversarial.py::test_9_4_duplicate_checkout_produces_no_package`；單元：`tests/unit/test_agora_cli_smoke.py`（`test_rejected_claim_produces_no_package`）、`tests/unit/test_accept_apply.py` |
 | 撤銷簽章金鑰後該 profile 一律被拒收、其他 profile 不受影響 | `tests/e2e/test_adversarial.py::test_9_4_revoked_key_unauthorized`；單元：`tests/unit/test_intake.py::test_evaluate_revoked_key_rejects_as_unauthorized`、`tests/unit/test_identity.py` |
 | 換掉 main、真 main＋偽造 `git-annex` 分支、多餘 ref | `tests/integration/test_committer_injection.py` |
 | 同名 DoS、多層同名資料夾 | `tests/integration/test_committer_injection.py` |
@@ -110,6 +117,10 @@ task 9.4 的項目分佈在 e2e 與整合測試；每一項都查得到在哪裡
 ## 檔案
 
 - `conftest.py`：住民容器 fixture（測試 profile、`AISTORAGE_WORK_ROOT`）、
-  本機提交流程、讀取介面、`assert_tool_called`、輪詢工具。
+  本機提交流程、讀取介面、`assert_tool_called`、輪詢工具，以及容器內的
+  `agora`／`agora-opencode`／`wire_prefix` 輔助。
 - `test_split.py`（9.1）、`test_consolidation.py`（9.2）、`test_reference.py`（9.3）、
   `test_adversarial.py`（9.4）、`test_persistence.py`（9.5）。
+- `test_91_front_half.py`：只驗 9.1 的前半段（S1 交出兩張交接單），不需要 S2／S3。
+- `test_split_helpers.py`：容器匯出失敗的形狀 ＋ `wire_prefix` 的截斷與
+  `callID` 語意（不需要容器）。

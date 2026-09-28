@@ -738,9 +738,12 @@ def build_artifact_item(
     """組一筆產出登錄（artifact，舊 Foundry 的收件匣格式）。
 
     **提交流程不再收這種項目**（ADR 0009：產出登錄改成 Drive 共享資料夾＋GitHub，
-    Agora 的收件匣會明確拒收並回報 `artifact_not_supported`）。這個組裝器留著只是
-    為了讓還在呼叫它的寫入端（skill 的 `aistorage_register_artifact`）不會整個壞掉；
-    新 Foundry 到位時整個函式連同那個工具一起移除。
+    Agora 的收件匣會明確拒收並回報 `artifact_not_supported`）。住民端也沒有對應的
+    工具了（`aistorage_register_artifact` 已移除）。
+
+    留下這個組裝器只有一個理由：**測試要能造出一個簽過章的 artifact 項目**，
+    驗提交流程「明確拒收」與「把拒收原因發佈到讀取視圖」（ADR 0009 的驗收）。
+    沒有寫入端會呼叫它，所以它不在任何 production 寫入路徑上。
 
     - `link`：本體是對外連結，沒有 raw。
     - `contained`：本體放在 `<item_key>.raw`，必須給 content_type 與 raw_path。

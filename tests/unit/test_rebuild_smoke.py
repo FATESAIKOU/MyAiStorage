@@ -190,7 +190,6 @@ def test_rebuild_matches_published_readview(tmp_path: Path):
         "missing_locally": 0,
         "mismatched": 0,
         "body_failures": 0,
-        "raw_failures": 0,
         "index_tables_differing": 0,
         "rebuild_failures": 0,
     }

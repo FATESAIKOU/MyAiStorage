@@ -94,18 +94,16 @@ class ReadingRef:
 
 
 @dataclass(frozen=True)
-class RawRef:
-    """原始紀錄本體的定位（`agora checkout` 的起點包用它原封不動重建開頭）。
-
-    內容定址：`sha256` 就是 `snapshot_sha256` 本身，所以下載後可以同時驗
-    「檔案沒被動過」與「這份確實是該快照」。
-    """
+class SnapshotRow:
+    """一個「Session × 快照」在 `snapshots` 表裡的資料。"""
 
     session_id: str
     snapshot_sha256: str
-    file_id: str
-    sha256: str
-    size: int
+    snapshot_at: str | None
+    committed_at: str | None
+    via: str | None
+    #: 該快照原始紀錄的 git-annex key（沒有走 annex 的路徑是 None）
+    annex_key: str | None = None
 
 
 def _session_row(row: tuple) -> SessionRow:
@@ -412,28 +410,28 @@ def get_reading_ref(db: sqlite3.Connection, session_id: str,
                       sha256=row[3], size=row[4], is_latest=bool(row[5]))
 
 
-def get_raw_ref(db: sqlite3.Connection, session_id: str,
-                snapshot_sha256: str) -> RawRef | None:
-    """取某個快照的原始紀錄本體定位；沒有發佈過回傳 None。
+def _snapshot_row(row: tuple) -> SnapshotRow:
+    return SnapshotRow(
+        session_id=str(row[0]), snapshot_sha256=str(row[1]).lower(),
+        snapshot_at=row[2], committed_at=row[3], via=row[4],
+        annex_key=(str(row[5]) if len(row) > 5 and row[5] else None),
+    )
 
-    舊世代的 index 還沒有 `raws` 表（升級前發佈的）時回傳 None，而不是報錯：
-    那個快照的原始紀錄沒有發佈出去，`agora checkout` 要明確拒絕而不是猜。
+
+def get_snapshot(db: sqlite3.Connection, session_id: str,
+                 snapshot_sha256: str) -> SnapshotRow | None:
+    """取某個快照的資料（含 annex key）；沒有就回傳 None。
+
+    升級前發佈的舊世代 index 沒有 `annex_key` 欄位（`len(row) <= 5`），
+    那時回傳 `annex_key=None` 而不是報錯——`agora checkout` 會明確拒絕要
+    「取原始紀錄但拿不到 key」這件事。
     """
     ensure_sqlite_version()
-    tables = {
-        str(row[0]) for row in db.execute(
-            "SELECT name FROM sqlite_master WHERE type IN ('table','view')")
-    }
-    if "raws" not in tables:
-        return None
     row = db.execute(
-        "SELECT * FROM raws WHERE session_id = ? AND snapshot_sha256 = ?",
+        "SELECT * FROM snapshots WHERE session_id = ? AND snapshot_sha256 = ?",
         (session_id, snapshot_sha256.lower()),
     ).fetchone()
-    if row is None:
-        return None
-    return RawRef(session_id=row[0], snapshot_sha256=row[1], file_id=row[2],
-                  sha256=row[3], size=int(row[4]))
+    return _snapshot_row(row) if row is not None else None
 
 
 def get_rejection(db: sqlite3.Connection, item_key: str) -> RejectionRow | None:
