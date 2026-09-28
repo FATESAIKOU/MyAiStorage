@@ -56,8 +56,21 @@ class ArtifactIssue:
 
     artifact_id: str
     code: str          # missing_annex_key / key_not_in_pin / object_not_found /
-                       # checksum_mismatch / size_mismatch
+                       # checksum_mismatch / checksum_unavailable / size_mismatch
     detail: str = ""
+
+
+import re as _re
+
+#: annex key 的形狀：`SHA256E-s<size>--<64 hex>[.副檔名]`（review F-H2：key 由
+#: git-annex 產生，不自己算；這裡只解析它內嵌的雜湊做比對）。
+_KEY_RE = _re.compile(r"^SHA256E-s\d+--([0-9a-fA-F]{64})(?:\..*)?$")
+
+
+def embedded_sha256(annex_key: str) -> str | None:
+    """取出 annex key 內嵌的 sha256（小寫）；形狀不對回 None。"""
+    m = _KEY_RE.match(annex_key or "")
+    return m.group(1).lower() if m else None
 
 
 @dataclass(frozen=True)
@@ -90,14 +103,20 @@ def resolve_object_file_ids(
     - 找不到或對不上就**不發佈這一筆**，並回傳原因給呼叫端記進 RunReport。
 
     回傳 `(可發佈的 rows, 問題清單)`；callers 不該自行比對檔名。
+
+    嚴格規則（review-25a48a9 L）：
+    - 同名有多個時，只選 `sha256Checksum == key 內嵌雜湊` 的那一個（注入的
+      同名檔拿不到正確的 id）；
+    - Drive 缺少 checksum 時不發佈那一筆（`checksum_unavailable`），不等它補上；
+    - catalog 的 sha256 與 Drive 的比對：任一方缺少就視為對不上（fail-closed）。
     """
     from dataclasses import replace as _replace
 
     allowed = frozenset(allowed_keys) if allowed_keys is not None else None
-    by_name: dict[str, Any] = {}
+    by_name: dict[str, list[Any]] = {}
     for child in drive.list_children(prefix_folder_id):
         if not child.is_folder:
-            by_name[child.name] = child
+            by_name.setdefault(child.name, []).append(child)
 
     ok: list[ArtifactRow] = []
     issues: list[ArtifactIssue] = []
@@ -111,16 +130,31 @@ def resolve_object_file_ids(
                 row.artifact_id, "key_not_in_pin",
                 f"annex_key 不在正式 pin 的 annex_keys 內: {row.annex_key}"))
             continue
-        f = by_name.get(row.annex_key)
-        if f is None:
+        candidates = by_name.get(row.annex_key) or []
+        if not candidates:
             issues.append(ArtifactIssue(
                 row.artifact_id, "object_not_found",
                 f"前綴下找不到名為 {row.annex_key} 的檔案"))
             continue
-        if row.sha256 and f.sha256 and f.sha256.lower() != row.sha256.lower():
+        # 同名多個：只選 checksum 對得上 key 內嵌雜湊的那個（L）。
+        want = (embedded_sha256(row.annex_key) or "")
+        matches = [c for c in candidates
+                   if (c.sha256 or "").lower() == want] if want else []
+        if not matches:
+            if any(c.sha256 is None for c in candidates):
+                issues.append(ArtifactIssue(
+                    row.artifact_id, "checksum_unavailable",
+                    f"名為 {row.annex_key} 的檔案還沒有 checksum，不發佈"))
+            else:
+                issues.append(ArtifactIssue(
+                    row.artifact_id, "checksum_mismatch",
+                    f"前綴下沒有 checksum 等於 key 內嵌雜湊的 {row.annex_key}"))
+            continue
+        f = matches[0]
+        if not row.sha256 or row.sha256.lower() != want:
             issues.append(ArtifactIssue(
                 row.artifact_id, "checksum_mismatch",
-                f"Drive checksum {f.sha256} 與 catalog {row.sha256} 不符"))
+                f"catalog sha256 {row.sha256} 與 key 內嵌雜湊 {want} 不符"))
             continue
         if row.size is not None and f.size is not None and int(f.size) != int(row.size):
             issues.append(ArtifactIssue(

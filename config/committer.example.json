@@ -16,5 +16,26 @@
   "quarantine_retention_days": 7,
   "ledger_retention_months": 3,
   "prefix_levels": [],
-  "github_repository": "FATESAIKOU/MyAiStorage"
+  "github_repository": "FATESAIKOU/MyAiStorage",
+  "committer_workflow": "committer.yml",
+  "repos": {
+    "foundry": {
+      "uuid": "00000000-0000-0000-0000-000000000002",
+      "url": "annex::<foundry-uuid>?encryption=none&type=rclone&rcloneremotename=gdrive&rcloneprefix=aistorage/foundry",
+      "prefix_folder_id": "EXAMPLE_FOUNDRY_PREFIX_FOLDER_ID",
+      "quarantine_folder_id": "EXAMPLE_FOUNDRY_QUARANTINE_FOLDER_ID",
+      "readview_folder_id": "EXAMPLE_FOUNDRY_READVIEW_FOLDER_ID",
+      "readview_manifest_file_id": "EXAMPLE_FOUNDRY_READVIEW_MANIFEST_FILE_ID",
+      "readview_rebuild_epoch": 0,
+      "largefiles": "include=objects/*/*",
+      "prefix_levels": [
+        {
+          "parent_id": "EXAMPLE_ACCOUNT_ROOT_ID",
+          "name": "aistorage",
+          "expected_id": "EXAMPLE_AISTORAGE_ROOT_ID"
+        }
+      ],
+      "max_raw_size": 104857600
+    }
+  }
 }

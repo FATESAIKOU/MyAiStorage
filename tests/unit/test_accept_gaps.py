@@ -464,12 +464,6 @@ def test_foundry_results_attach_a_snapshot_time(tmp_path: Path):
     assert got.value.data == content
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="F-M1：Foundry 目錄不屬於單一 Session，snapshot_at 應為該世代的 "
-           "published_at（與 Agora 的交接單／Link 相同，g4 第 6 節）；"
-           "目前用產出的 created_at，修好後會 XPASS，請移除這個標記",
-)
 def test_foundry_freshness_uses_the_generation_published_at(tmp_path: Path):
     """每筆結果的快照時間是**世代的 published_at**，與產出多舊無關。
 

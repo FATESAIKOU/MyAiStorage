@@ -126,12 +126,16 @@ def plan_init_readview(drive: DriveClient, folder_id: str, *,
 
 
 def init_readview(drive: DriveClient, folder_id: str, *,
-                  sa_email: str | None = None, confirm: bool = False,
-                  clock: Clock | None = None) -> InitReadviewPlan | InitReadviewResult:
+                   sa_email: str | None = None, confirm: bool = False,
+                   clock: Clock | None = None,
+                   element: str = "agora") -> InitReadviewPlan | InitReadviewResult:
     """建立 generation = 0 的空 manifest（必要時一併分享資料夾給 SA）。
 
-    `confirm=False` 時只回傳計畫，不寫入任何東西。
+    `confirm=False` 時只回傳計畫，不寫入任何東西。`element` 決定 manifest
+    屬於哪個要素（tasks 7.1：Foundry 用 `element="foundry"`）。
     """
+    if element not in ("agora", "foundry"):
+        raise AdminError(f"未知的 element {element!r}（只要 'agora' 或 'foundry'）")
     plan = plan_init_readview(drive, folder_id, sa_email=sa_email)
     if not confirm:
         return plan
@@ -146,7 +150,8 @@ def init_readview(drive: DriveClient, folder_id: str, *,
 
     now = clock.now() if clock is not None else datetime.now(timezone.utc)
     body = serialize_manifest(
-        initial_manifest(published_at=format_rfc3339(now, include_fraction=True)))
+        initial_manifest(element=element,
+                         published_at=format_rfc3339(now, include_fraction=True)))
     created = drive.create(folder_id, MANIFEST_NAME, body,
                            mime_type="application/json")
     permission_id = None

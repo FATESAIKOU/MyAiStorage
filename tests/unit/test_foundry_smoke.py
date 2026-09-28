@@ -838,17 +838,26 @@ def test_foundry_contained_object_really_goes_into_annex(tmp_path: Path) -> None
 
 
 def test_resolve_object_file_ids_matches_drive_by_key() -> None:
-    """F-H3：發佈端把 key 解析成 Drive file id；對不上就不發佈並回報原因。"""
+    """F-H3：發佈端把 key 解析成 Drive file id；對不上就不發佈並回報原因。
+
+    嚴格規則（review-25a48a9 L）：檔名等於 key 不夠，Drive 的 checksum 必須
+    等於 key 內嵌的雜湊，catalog 的 sha256 也必須一致，否則不發佈。
+    """
+    import hashlib
+
     from aistorage.drive.fake import FakeDrive
     from aistorage.foundry.index import ArtifactRow, resolve_object_file_ids
 
     drive = FakeDrive()
     prefix = drive.seed_folder("foundry")
-    body = b"payload"
-    key = f"SHA256E-s7--{'a' * 64}.pdf"
-    object_id = drive.seed_file(prefix, key, body)
-    other_key = f"SHA256E-s7--{'b' * 64}.pdf"
-    drive.seed_file(prefix, other_key, body)
+    body1 = b"payload-1"
+    sha1 = hashlib.sha256(body1).hexdigest()
+    key = f"SHA256E-s{len(body1)}--{sha1}.pdf"
+    object_id = drive.seed_file(prefix, key, body1)
+    body2 = b"payload-2"
+    sha2 = hashlib.sha256(body2).hexdigest()
+    other_key = f"SHA256E-s{len(body2)}--{sha2}.pdf"
+    drive.seed_file(prefix, other_key, body2)
 
     rows = [
         ArtifactRow(artifact_id="artifact:1", kind="pdf", name="a.pdf",
@@ -856,14 +865,14 @@ def test_resolve_object_file_ids_matches_drive_by_key() -> None:
                     produced_by_session_id="opencode:s1",
                     created_at="2026-09-27T08:00:00Z",
                     updated_at="2026-09-27T08:00:00Z",
-                    size=len(body), sha256=None, annex_key=key, repo="foundry",
+                    size=len(body1), sha256=sha1, annex_key=key, repo="foundry",
                     path=f"objects/1/a.pdf"),
         ArtifactRow(artifact_id="artifact:2", kind="pdf", name="b.pdf",
                     producer="profile:mac-opencode",
                     produced_by_session_id="opencode:s1",
                     created_at="2026-09-27T08:00:00Z",
                     updated_at="2026-09-27T08:00:00Z",
-                    size=len(body), sha256=None, annex_key=other_key),
+                    size=len(body2), sha256=sha2, annex_key=other_key),
         ArtifactRow(artifact_id="artifact:3", kind="pdf", name="c.pdf",
                     producer="profile:mac-opencode",
                     produced_by_session_id="opencode:s1",
@@ -890,6 +899,48 @@ def test_resolve_object_file_ids_matches_drive_by_key() -> None:
         rows[:1], drive=drive, prefix_folder_id=prefix, allowed_keys=[])
     assert not ok2
     assert issues2[0].code == "key_not_in_pin"
+
+
+def test_resolve_object_file_ids_picks_hash_matched_duplicate() -> None:
+    """L：同名多個時只選 checksum 等於 key 內嵌雜湊的那個；缺 checksum 不發佈。"""
+    import hashlib
+
+    from aistorage.drive.fake import FakeDrive
+    from aistorage.foundry.index import ArtifactRow, resolve_object_file_ids
+
+    drive = FakeDrive()
+    prefix = drive.seed_folder("foundry")
+    good_body = b"genuine payload"
+    good_sha = hashlib.sha256(good_body).hexdigest()
+    key = f"SHA256E-s{len(good_body)}--{good_sha}.bin"
+    # 注入檔先放（同名、內容不同），真檔後放：不能選到注入檔
+    drive.seed_file(prefix, key, b"injected junk junk junk")
+    good_id = drive.seed_file(prefix, key, good_body)
+
+    def _row(aid: str) -> ArtifactRow:
+        return ArtifactRow(
+            artifact_id=aid, kind="bin", name="f.bin",
+            producer="profile:mac-opencode",
+            produced_by_session_id="opencode:s1",
+            created_at="2026-09-27T08:00:00Z",
+            updated_at="2026-09-27T08:00:00Z",
+            size=len(good_body), sha256=good_sha, annex_key=key)
+
+    ok, issues = resolve_object_file_ids(
+        [_row("artifact:good")], drive=drive, prefix_folder_id=prefix)
+    assert [r.artifact_id for r in ok] == ["artifact:good"]
+    assert ok[0].object_file_id == good_id
+    assert issues == []
+
+    # Drive 缺 checksum（上傳後尚未提供）：不發佈，原因明確
+    drive2 = FakeDrive()
+    prefix2 = drive2.seed_folder("foundry")
+    fid = drive2.seed_file(prefix2, key, good_body)
+    drive2.set_checksum(fid, None)
+    ok2, issues2 = resolve_object_file_ids(
+        [_row("artifact:nocksum")], drive=drive2, prefix_folder_id=prefix2)
+    assert ok2 == []
+    assert issues2[0].code == "checksum_unavailable"
 
 
 def test_resolve_object_file_ids_checks_checksum_and_size() -> None:

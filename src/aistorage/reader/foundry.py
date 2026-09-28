@@ -108,9 +108,14 @@ class FoundryReader:
         session_id: str | None = None,
         since: str | None = None,
         until: str | None = None,
+        annex_key: str | None = None,
         max_lag: timedelta | None = None,
     ) -> Result[list[FoundArtifact]]:
-        """依型態、所屬案件、產生者、時間與產出它的 Session 查詢產出登錄。"""
+        """依型態、所屬案件、產生者、時間與產出它的 Session 查詢產出登錄。
+
+        快照時間用世代的 `published_at`（F-M1）：產出目錄不屬於單一 Session，
+        與 Agora 的交接單／Link 相同（schemas/searchindex.md 第 6 節）。
+        """
         manifest = self._client.manifest()
         db = self._client.index()
         try:
@@ -141,6 +146,9 @@ class FoundryReader:
             if until is not None:
                 conditions.append("created_at <= ?")
                 params.append(normalize_time(until))
+            if annex_key is not None:
+                conditions.append("annex_key = ?")
+                params.append(annex_key)
 
             where_sql = (" WHERE " + " AND ".join(conditions)) if conditions else ""
             sql = (
@@ -176,21 +184,24 @@ class FoundryReader:
         finally:
             db.close()
 
+        # F-M1：目錄不是單一 Session 的快照，快照時間是世代的 published_at，
+        # 與產出本身多舊無關（否則舊產出會讓整份目錄被誤判成過期）。
+        published_at = manifest.get("published_at")
         found = [
             FoundArtifact(
                 artifact=a,
                 freshness=self._fresh(
                     manifest,
-                    snapshot_at=a.created_at,
+                    snapshot_at=published_at,
                     max_lag=max_lag,
                 ),
             )
             for a in artifacts
         ]
-        freshness = self._worst(
+        freshness = self._fresh(
             manifest,
-            [a.created_at for a in artifacts],
-            max_lag,
+            snapshot_at=published_at,
+            max_lag=max_lag,
         )
         return Result(value=found, freshness=freshness)
 
@@ -274,7 +285,8 @@ class FoundryReader:
             value=content,
             freshness=self._fresh(
                 manifest,
-                snapshot_at=row.created_at,
+                # F-M1：與 find 相同，用世代的 published_at。
+                snapshot_at=manifest.get("published_at"),
                 max_lag=None,
             ),
         )
