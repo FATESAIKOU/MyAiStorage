@@ -14,11 +14,16 @@
 
 **模型規則**：住民 AI（容器裡的 opencode）使用的模型，依 PM 的隊員順序挑選當下有額度的，**不使用 Claude**。所以模型與 provider 一律是**設定值**，不寫死在 image 裡（第 1.3 節）。
 
+> **第 6 節（Foundry）已被 ADR 0009 取代（2026-09-28），tasks 7.1 已執行。**
+> 產出登錄不再經過 Agora 的收件匣，Foundry 改成 Google Drive 共享資料夾＋GitHub；
+> 第 6 節描述的多 repo 管線、`create-repo`、Foundry 讀取視圖與讀取介面全部移除。
+> 這裡留著看歷史。
+
 ---
 
 ## 0. 共用的前置：`inbox_builder` 補上其他型態
 
-目前 `build_inbox_item` 只會組 session。第 5 組的 skill 與第 7 組都需要其他型態，建議在 `src/aistorage/inbox_builder.py` 補齊，**同步器、skill、匯入、Foundry 共用同一份**：
+目前 `build_inbox_item` 只會組 session。第 5 組的 skill 需要其他型態，建議在 `src/aistorage/inbox_builder.py` 補齊，**同步器、skill、匯入共用同一份**（`build_artifact_item` 是舊 Foundry 的產出登錄格式，收件匣已不再收它）：
 
 ```python
 def build_handoff_item(*, target_session_id: str, continuation: dict, body: dict, profile: str,
@@ -426,7 +431,7 @@ def run_health(deps: HealthDeps, *, now: datetime) -> list[Check]: ...
 
 ---
 
-## 6. 第 7 組：Foundry 最小
+## 6. 第 7 組：Foundry 最小（已被 ADR 0009 取代，留著看歷史）
 
 ### 6.1 7.1 repo 與提交流程的多 repo 支援
 

@@ -49,6 +49,20 @@ CREATE TABLE readings (
   PRIMARY KEY (session_id, snapshot_sha256)
 );
 
+-- 原始紀錄本體（`agora checkout` 的起點包要用它「原封不動」重建開頭，
+-- ADR 0010 的 KV cache 要求）。每個已發佈的「Session × 快照」各一份，
+-- 內容定址（sha256 == snapshot_sha256）、永不更新。
+-- 閱讀版（readings）會丟掉工具呼叫的原始輸入輸出，無法還原，所以這張表是
+-- 唯一能把位元組原封不動交給轉接器的來源。
+CREATE TABLE raws (
+  session_id TEXT,
+  snapshot_sha256 TEXT,
+  file_id TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  PRIMARY KEY (session_id, snapshot_sha256)
+);
+
 CREATE TABLE links (
   kind TEXT NOT NULL,
   from_session_id TEXT NOT NULL,

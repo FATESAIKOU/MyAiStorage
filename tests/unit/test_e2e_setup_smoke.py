@@ -337,37 +337,24 @@ def test_repo_suffix_separates_e2e_pins_from_integration_tests():
     # 名字是算出來的（不寫死），而且 config 產出用的是帶後綴的那個
     src = Path(e2e.__file__).read_text(encoding="utf-8")
     assert 'f"agora-{repo_suffix}-{ulid}"' in src
-    assert 'f"foundry-{repo_suffix}-{ulid}"' in src
     # 直接驗產出的 payload（比 grep 原始碼可靠）：repo 名稱必須是算出來的那個
     ids = {
         "agora_pin_name": "agora-e2e", "agora_repo_uuid": "u1", "agora_repo_url": "url1",
-        "agora_folder_id": "f1", "foundry_pin_name": "foundry-e2e",
-        "foundry_repo_uuid": "u2", "foundry_repo_url": "url2", "foundry_folder_id": "f2",
+        "agora_folder_id": "f1",
         "quarantine_folder_id": "q", "readview_folder_id": "rv",
-        "readview_manifest_file_id": "m1", "foundry_readview_folder_id": "rv2",
-        "foundry_manifest_file_id": "m2", "inbox_folder_id": "in",
+        "readview_manifest_file_id": "m1",
+        "inbox_folder_id": "in",
         "pin_repo_url": "git@example:x.git", "profile": "mac-opencode-test",
         "prefix_levels": [{"parent_id": "root_1", "name": "e2e-x",
                            "expected_id": "pfx"}],
-        "foundry_prefix_levels": [
-            {"parent_id": "pfx", "name": "foundry", "expected_id": "f2"},
-            {"parent_id": "root_1", "name": "e2e-x", "expected_id": "pfx"},
-        ],
     }
     main_cfg = e2e._committer_config_payload(ids)
     assert main_cfg["repo"] == "agora-e2e"
-    # Foundry 走 `repos`（CommitterConfig.repos），不是舊的 `foundry:` 欄位
-    assert "foundry" not in main_cfg
-    foundry = main_cfg["repos"]["foundry"]
-    assert foundry["uuid"] == "u2" and foundry["url"] == "url2"
-    assert foundry["prefix_folder_id"] == "f2"
-    assert foundry["quarantine_folder_id"] == "q"
-    assert foundry["max_raw_size"] == 104857600          # 收容產出 100 MiB
-    assert foundry["prefix_levels"][0]["expected_id"] == "f2"   # Foundry 自己宣告上層
-    assert e2e._foundry_committer_config_payload(ids)["repo"] == "foundry-e2e"
+    # ADR 0009：設定檔只描述一個實體，沒有 `repos` 也沒有 Foundry 的欄位
+    assert "repos" not in main_cfg
+    assert "foundry" not in src, "Foundry 的多 repo 設定已移除"
     assert e2e._reader_config_payload(ids)["inbox_folder_ids"] == {"mac-opencode-test": "in"}
     assert '"repo": "agora",' not in src
-    assert '"repo": "foundry",' not in src
 
 
 def test_each_environment_gets_its_own_pin_name():
@@ -385,8 +372,6 @@ def test_each_environment_gets_its_own_pin_name():
     m = re.search(r'agora_pin_name = f"agora-\{repo_suffix\}-\{(\w+)\}"', src)
     assert m, "agora 的釘選值名稱必須帶 ulid"
     assert m.group(1) == "ulid", "ulid 變數名要對，否則名字裡是空字串"
-    m2 = re.search(r'foundry_pin_name = f"foundry-\{repo_suffix\}-\{(\w+)\}"', src)
-    assert m2 and m2.group(1) == "ulid"
     # ulid 是每次 setup 都新產生的（所以兩個環境的名字一定不同）
     assert e2e.generate_ulid() != e2e.generate_ulid()
 
@@ -695,7 +680,7 @@ def dead_pid() -> int:
 
 def _patch_local_config_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """把 teardown 會刪的本機設定路徑指到 tmp（絕不碰 repo 裡真的那些）。"""
-    for attr in ("COMMITTER_E2E_JSON", "COMMITTER_FOUNDRY_E2E_JSON",
+    for attr in ("COMMITTER_E2E_JSON",
                  "IDENTITY_E2E_JSON", "READER_E2E_JSON", "READER_CONFIG_E2E_JSON"):
         monkeypatch.setattr(f"scripts.e2e_setup.{attr}", tmp_path / f"{attr}.json")
 
@@ -893,7 +878,6 @@ def test_teardown_only_cleans_the_config_dir_of_that_state_file(
     (fake_repo / "config").mkdir(parents=True)
     inside = {
         "COMMITTER_E2E_JSON": fake_repo / "config" / "committer.e2e.json",
-        "COMMITTER_FOUNDRY_E2E_JSON": fake_repo / "config" / "committer.foundry.e2e.json",
         "IDENTITY_E2E_JSON": fake_repo / "config" / "identity.e2e.json",
         "READER_CONFIG_E2E_JSON": fake_repo / "config" / "reader.e2e.json",
         "READER_E2E_JSON": fake_repo / "reader.e2e.json",   # 照現況在 repo 根
@@ -943,7 +927,6 @@ def test_repair_local_configs_fills_in_the_missing_ones(tmp_path: Path, monkeypa
     monkeypatch.setattr(e2e, "REPO_ROOT", fake_repo)
     paths = {
         "COMMITTER_E2E_JSON": fake_repo / "config" / "committer.e2e.json",
-        "COMMITTER_FOUNDRY_E2E_JSON": fake_repo / "config" / "committer.foundry.e2e.json",
         "IDENTITY_E2E_JSON": fake_repo / "config" / "identity.e2e.json",
         "READER_E2E_JSON": fake_repo / "reader.e2e.json",
         "READER_CONFIG_E2E_JSON": fake_repo / "config" / "reader.e2e.json",
@@ -952,25 +935,23 @@ def test_repair_local_configs_fills_in_the_missing_ones(tmp_path: Path, monkeypa
         monkeypatch.setattr(e2e, attr, path)
     state = {
         "agora_pin_name": "agora-e2e", "agora_repo_uuid": "u1", "agora_repo_url": "url1",
-        "agora_folder_id": "f1", "foundry_pin_name": "foundry-e2e",
-        "foundry_repo_uuid": "u2", "foundry_repo_url": "url2", "foundry_folder_id": "f2",
+        "agora_folder_id": "f1",
         "quarantine_folder_id": "q", "readview_folder_id": "rv",
-        "readview_manifest_file_id": "m1", "foundry_readview_folder_id": "rv2",
-        "foundry_manifest_file_id": "m2", "inbox_folder_id": "in",
+        "readview_manifest_file_id": "m1", "inbox_folder_id": "in",
         "pin_repo_url": "git@example:x.git", "profile": "mac-opencode-test",
     }
     secrets_root = tmp_path / "resident-e2e"
     (secrets_root / "mac-opencode-test").mkdir(parents=True)
 
-    assert len(e2e._missing_local_configs()) == 5
+    assert len(e2e._missing_local_configs()) == 4
     # profile 的 reader.json 也要算「環境壞掉」（容器讀的是它）
     assert [p.name for p in e2e._missing_runtime_files(state, secrets_root=secrets_root)] == [
-        "committer.e2e.json", "committer.foundry.e2e.json", "identity.e2e.json",
+        "committer.e2e.json", "identity.e2e.json",
         "reader.e2e.json", "reader.e2e.json", "reader.json",
     ]
     # 身分登錄檔需要簽章公鑰，setup 刻意不讀金鑰內容 → 補不回來，只警告
     # （要拿回來得用 --recreate 重建整個環境）
-    assert e2e._repair_local_configs(state, secrets_root=secrets_root) == 4
+    assert e2e._repair_local_configs(state, secrets_root=secrets_root) == 3
     assert [p.name for p in e2e._missing_local_configs()] == ["identity.e2e.json"]
     # 補完之後 profile 的 reader.json 也在了
     assert e2e._missing_runtime_files(state, secrets_root=secrets_root) == [
@@ -995,8 +976,7 @@ def test_generated_committer_config_loads_through_committer_config(
 ):
     """e2e_setup 產出的設定必須**真的**被 `CommitterConfig` 讀進來。
 
-    形狀漂移（自己加欄位、拼錯鍵）只有真正載入才抓得到——先前 `foundry:` 舊欄位
-    就是這樣留到 e2e 真的跑才爆。
+    形狀漂移（自己加欄位、拼錯鍵）只有真正載入才抓得到。
     """
     import scripts.e2e_setup as e2e
     from aistorage.committer.config import CommitterConfig
@@ -1006,24 +986,14 @@ def test_generated_committer_config_loads_through_committer_config(
         "agora_repo_uuid": "11111111-1111-4111-8111-111111111111",
         "agora_repo_url": "annex::u1?encryption=none&type=rclone",
         "agora_folder_id": "1_FolderAgora",
-        "foundry_pin_name": "foundry-e2e-01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        "foundry_repo_uuid": "22222222-2222-4222-8222-222222222222",
-        "foundry_repo_url": "annex::u2?encryption=none&type=rclone",
-        "foundry_folder_id": "1_FolderFoundry",
         "quarantine_folder_id": "1_Quarantine",
         "readview_folder_id": "1_ReadviewAgora",
         "readview_manifest_file_id": "1_ManifestAgora",
-        "foundry_readview_folder_id": "1_ReadviewFoundry",
-        "foundry_manifest_file_id": "1_ManifestFoundry",
         "inbox_folder_id": "1_Inbox",
         "pin_repo_url": "git@example.com:x/pin.git",
         "profile": "mac-opencode-test",
         "prefix_levels": [{"parent_id": "1_TestRoot", "name": "e2e-x",
                            "expected_id": "1_Prefix"}],
-        "foundry_prefix_levels": [
-            {"parent_id": "1_Prefix", "name": "foundry", "expected_id": "1_FolderFoundry"},
-            {"parent_id": "1_TestRoot", "name": "e2e-x", "expected_id": "1_Prefix"},
-        ],
     }
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir()
@@ -1035,59 +1005,42 @@ def test_generated_committer_config_loads_through_committer_config(
     payload = json.loads((cfg_dir / "COMMITTER_E2E_JSON.json").read_text(encoding="utf-8"))
     loaded = CommitterConfig.load(cfg_dir / "COMMITTER_E2E_JSON.json", env={})
     assert loaded.repo == ids["agora_pin_name"]
-    assert [r.name for r in loaded.repos] == ["foundry"]
-    foundry = loaded.repos[0]
-    assert foundry.uuid == ids["foundry_repo_uuid"]
-    assert foundry.max_raw_size == 104857600
-    assert [lv.expected_id for lv in foundry.prefix_levels] == [
-        "1_FolderFoundry", "1_Prefix"]
-    # 讀取視圖的 id 也要真的落到 Foundry 那一份
-    assert foundry.readview_manifest_file_id == ids["foundry_manifest_file_id"]
-    assert foundry.readview_folder_id == ids["foundry_readview_folder_id"]
-    assert "foundry" not in payload or payload["repos"]["foundry"]["uuid"]
+    assert loaded.repo_uuid == ids["agora_repo_uuid"]
+    assert loaded.prefix_folder_id == ids["agora_folder_id"]
+    assert loaded.quarantine_folder_id == ids["quarantine_folder_id"]
+    assert loaded.readview_folder_id == ids["readview_folder_id"]
+    assert loaded.readview_manifest_file_id == ids["readview_manifest_file_id"]
+    # ADR 0009：payload 只有一個實體的欄位，沒有 `repos`
+    assert "repos" not in payload
 
 
 def test_annex_largefiles_come_from_the_product_constants():
     """e2e 建 repo 用的 annex.largefiles 必須是產品的單一來源。
 
-    原本這裡硬寫 `include=*.json`：Agora 的 `sessions/<source>/<id>/raw` 與
-    Foundry 的 `objects/<ULID>/<檔名>` 都收不到，raw／產出会變成 git blob，
-    反而是 seed 的 JSON 變成 annex 物件。
+    原本這裡硬寫 `include=*.json`：Agora 的 `sessions/<source>/<id>/raw`
+    收不到，raw 會變成 git blob，反而是 seed 的 JSON 變成 annex 物件。
     """
     import scripts.e2e_setup as e2e
-    from aistorage.admin.create_repo import AGORA_LARGEFILES, FOUNDRY_LARGEFILES
+    from aistorage.agora.store import LARGEFILES_RAW
+    from aistorage.annex.git import DEFAULT_LARGEFILES
 
-    assert e2e.largefiles_for("agora") == AGORA_LARGEFILES == "include=sessions/*/*/raw"
-    assert e2e.largefiles_for("foundry") == FOUNDRY_LARGEFILES == "include=objects/*/*"
+    assert DEFAULT_LARGEFILES == "include=sessions/*/*/raw"
+    assert LARGEFILES_RAW == DEFAULT_LARGEFILES, "Agora 的規則就是產品的單一來源"
     # 原始碼不再自己寫一份規則
     src = Path(e2e.__file__).read_text(encoding="utf-8")
     assert "annex.largefiles" in src
     assert '"include=*.json"' not in src, "不要在 e2e_setup 裡再硬寫一份 largefiles"
+    assert "DEFAULT_LARGEFILES" in src, "規則要引用 annex.git 的單一來源"
 
 
 def test_seed_paths_match_their_repo_largefiles_rule():
     """seed 必須落在該 repo 的 largefiles 規則內，否則會變成 git blob 冒充 annex。"""
     import scripts.e2e_setup as e2e
     from aistorage.agora.layout import session_raw_path
-    from aistorage.foundry.layout import object_path
 
     ulid = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
-    assert e2e._matches_largefiles(session_raw_path(f"e2e-seed:{ulid}"), "agora")
-    assert e2e._matches_largefiles(object_path(ulid, "seed-foundry.json"), "foundry")
+    assert e2e._matches_largefiles(session_raw_path(f"e2e-seed:{ulid}"))
     # 舊的路徑已經不符合規則（這就是當初 annex 沒生效的原因）
-    assert not e2e._matches_largefiles("seed-agora.json", "agora")
-    assert not e2e._matches_largefiles("objects/seed-foundry.json", "foundry")
-    # 交叉驗證：Agora 的規則不該收 Foundry 的路徑，反之亦然
-    assert not e2e._matches_largefiles(object_path(ulid, "x"), "agora")
-    assert not e2e._matches_largefiles(session_raw_path("e2e-seed:x"), "foundry")
-
-
-def test_foundry_seed_has_no_gitkeep():
-    """Foundry 的 seed 不放 .gitkeep（catalog／objects 由寫入時自己 mkdir）。"""
-    import scripts.e2e_setup as e2e
-
-    src = Path(e2e.__file__).read_text(encoding="utf-8")
-    # 只允許出現在說明裡，不可以有真的建立 .gitkeep 的程式碼
-    assert ".gitkeep\").touch()" not in src
-    assert "(repo / \"catalog\" / \".gitkeep\")" not in src
-    assert "(repo / \"objects\" / \".gitkeep\")" not in src
+    assert not e2e._matches_largefiles("seed-agora.json")
+    assert not e2e._matches_largefiles("objects/seed.json")
+    assert not e2e._matches_largefiles("sessions/opencode/ses_x/meta.json")

@@ -131,11 +131,12 @@ def init_readview(drive: DriveClient, folder_id: str, *,
                    element: str = "agora") -> InitReadviewPlan | InitReadviewResult:
     """建立 generation = 0 的空 manifest（必要時一併分享資料夾給 SA）。
 
-    `confirm=False` 時只回傳計畫，不寫入任何東西。`element` 決定 manifest
-    屬於哪個要素（tasks 7.1：Foundry 用 `element="foundry"`）。
+    `confirm=False` 時只回傳計畫，不寫入任何東西。`element` 決定 manifest 屬於哪個
+    要素——期 1 只有 Agora 有讀取視圖（ADR 0009：Foundry 的產出登錄不再經過這裡）。
     """
-    if element not in ("agora", "foundry"):
-        raise AdminError(f"未知的 element {element!r}（只要 'agora' 或 'foundry'）")
+    if element != "agora":
+        raise AdminError(
+            f"未知的 element {element!r}：期 1 只有 Agora 有讀取視圖（ADR 0009）")
     plan = plan_init_readview(drive, folder_id, sa_email=sa_email)
     if not confirm:
         return plan

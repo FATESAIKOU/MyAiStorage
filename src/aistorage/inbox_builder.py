@@ -5,7 +5,7 @@
   5.2 同步器共用，刻意放在 `aistorage/inbox_builder.py` 而非 importer 套件內，
   讓同步器不必匯入 CLI 套件）
 - docs/impl/group5-7-modules.md 第 0 節（handoff／claim／reference／artifact
-  四種型態與 `upload_item`，**同步器、skill、匯入、Foundry 共用同一份**）
+  四種型態與 `upload_item`，**同步器、skill、匯入共用同一份**）
 - schemas/inbox-sidecar.schema.json、schemas/metadata-inbox.schema.json
 - design D2（不可分單位）、D3（簽章與 profile 綁定）、D4（快照時間由寫入端記）
 
@@ -735,7 +735,12 @@ def build_artifact_item(
     clock: Clock | None = None,
     max_raw: int = DEFAULT_MAX_RAW_SIZE,
 ) -> BuiltItem:
-    """組一筆產出登錄（artifact，第 7 組 Foundry）。
+    """組一筆產出登錄（artifact，舊 Foundry 的收件匣格式）。
+
+    **提交流程不再收這種項目**（ADR 0009：產出登錄改成 Drive 共享資料夾＋GitHub，
+    Agora 的收件匣會明確拒收並回報 `artifact_not_supported`）。這個組裝器留著只是
+    為了讓還在呼叫它的寫入端（skill 的 `aistorage_register_artifact`）不會整個壞掉；
+    新 Foundry 到位時整個函式連同那個工具一起移除。
 
     - `link`：本體是對外連結，沒有 raw。
     - `contained`：本體放在 `<item_key>.raw`，必須給 content_type 與 raw_path。

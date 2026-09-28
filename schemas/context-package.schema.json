@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aistorage:schema:context-package",
+  "title": "AiStorage Start Point Package Schema",
+  "description": "起點包（`agora checkout` 的產物）：一個目錄，內含起點之前的原始紀錄（原封不動）、要交代的任務，以及來源 Session 的 id。起點包不屬於任何一個 coding agent——由轉接器（`agora-<coding agent 名稱>`）載入成該 agent 的原生 session。本檔只描述 `package.json`；`raw/` 下的原始紀錄位元組不經任何轉換，由 `segments[].raw_sha256` 驗證。",
+  "type": "object",
+  "required": [
+    "format",
+    "created_at",
+    "created_by",
+    "generator",
+    "segments",
+    "new_session",
+    "totals",
+    "context_limit"
+  ],
+  "properties": {
+    "format": {
+      "type": "string",
+      "const": "aistorage.contextpackage/v1",
+      "description": "起點包格式版本標識，固定為 aistorage.contextpackage/v1"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+      "description": "起點包建立時間（RFC 3339 UTC Z）"
+    },
+    "created_by": {
+      "type": "string",
+      "pattern": "^profile:[a-z][a-z0-9-]*$",
+      "description": "建立者的 profile（身分），不是自由文字。收件匣的簽章金鑰所屬的 profile"
+    },
+    "generator": {
+      "type": "object",
+      "required": ["tool", "version"],
+      "properties": {
+        "tool": {
+          "type": "string",
+          "const": "agora",
+          "description": "產生這個起點包的工具。本版本只有 `agora checkout`"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "工具版本（預設為 1）"
+        }
+      },
+      "additionalProperties": false
+    },
+    "task": {
+      "type": ["string", "null"],
+      "description": "要交代給接手者的任務（`agora checkout --task`）。沒有給就是 null。**不是**要送進模型的訊息：轉接器不把它變成訊息，它只是給呼叫者與新 agent 看的說明。起始點本身（下面的 segments）才是送進模型的內容"
+    },
+    "segments": {
+      "type": "array",
+      "minItems": 1,
+      "description": "要帶進新 session 的原始紀錄片段。**順序就是送進模型的順序**：`agora checkout` 對 n→1 會把最長的一段放最前面（ADR 0010），其餘維持呼叫端給的次序。轉接器必須依此順序串接，parent 手工鏈成一串",
+      "items": {
+        "$ref": "#/$defs/segment"
+      }
+    },
+    "new_session": {
+      "type": "object",
+      "required": ["session_id", "source", "claimed_handoffs"],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
+          "description": "為這個起點預留的新 Session id（`<source>:<source_session_id>`）。轉接器沿用它當匯入時的 session id，所以收件匣裡的認領（claimer_session_id）與之後同步上來的 Session 對得上。1→n 時每個起點包各編一套"
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*$",
+          "description": "來源應用（`opencode`、`claude-code`…）。同名或同前綴的原始紀錄才能「原封不動」重建開頭（ADR 0010）；跨來源的片段只能走共通閱讀版，開頭會被改寫"
+        },
+        "claimed_handoffs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^handoff:[0-9A-HJKMNP-TV-Z]{26}$"
+          },
+          "description": "這次 checkout 已經放進收件匣、並被讀取介面確認的認領（n→1 統合時會有多張）。放不進去就不會有起點包，所以這個清單與 segments 裡的 handoff 起點必然等長"
+        }
+      },
+      "additionalProperties": false
+    },
+    "totals": {
+      "type": "object",
+      "required": ["segments", "messages", "raw_bytes", "text_chars"],
+      "properties": {
+        "segments": { "type": "integer", "minimum": 1 },
+        "messages": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "所有片段的訊息總數（起點訊息含在內）"
+        },
+        "raw_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "原始紀錄本體的位元組總和（不是 package.json 的大小）"
+        },
+        "text_chars": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "所有片段在接續點之前的純文字字元數（由閱讀版的 plain_text 算）。context_limit 就是拿這個與上限比"
+        }
+      },
+      "additionalProperties": false
+    },
+    "context_limit": {
+      "type": "object",
+      "required": ["limit", "measured", "within_limit"],
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "目標模型的上限（以 measured 的單位計）。呼叫端可覆寫"
+        },
+        "measured": {
+          "type": "string",
+          "const": "text_chars",
+          "description": "計量單位。期 1 用 `text_chars`（純文字字元數）：不必為了算長度就呼叫模型，而它對 token 數是保守估計"
+        },
+        "within_limit": {
+          "type": "boolean",
+          "description": "是否在上限內。**一定是 true**——超過就明確拒絕、不產出起點包（ADR 0010：期 1 先偵測並明確拒絕，不默默截斷）。留在檔案裡是為了讓載入端不必再猜"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "segment": {
+      "type": "object",
+      "required": [
+        "order",
+        "startpoint",
+        "source_session_id",
+        "source",
+        "snapshot_sha256",
+        "snapshot_at",
+        "message_id",
+        "raw_file",
+        "raw_size",
+        "raw_sha256"
+      ],
+      "properties": {
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "在 segments 裡的次序（0 起算、連續）。與陣列位置相同，寫出來是為了讓載入端不必假設順序"
+        },
+        "startpoint": {
+          "type": "string",
+          "minLength": 1,
+          "description": "呼叫端給的起點字串原樣（`handoff:<ULID>` 或 `<session>[@<訊息>]`）。留著是為了除錯與回報"
+        },
+        "source_session_id": {
+          "type": "string",
+          "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
+          "description": "這一段的來源 Session id（`<source>:<source_session_id>`）"
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*$",
+          "description": "來源應用"
+        },
+        "snapshot_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "被釘住的那份快照（原始紀錄的內容雜湊）。也是 raw_file 的驗證依據"
+        },
+        "snapshot_at": {
+          "type": ["string", "null"],
+          "description": "那一份快照的快照時間（RFC 3339 UTC Z）。讀取視圖查不到時是 null"
+        },
+        "message_id": {
+          "type": ["string", "null"],
+          "description": "接續點：這一段的原始紀錄要截到哪一則訊息為止（含該則）。**null 代表不截斷**，整份都帶進去（`agora checkout <session>` 不給 @訊息時）"
+        },
+        "handoff_id": {
+          "type": ["string", "null"],
+          "pattern": "^handoff:[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "起點是交接單時的交接單 id；否則 null"
+        },
+        "claim_id": {
+          "type": ["string", "null"],
+          "pattern": "^claim:[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "這次放進收件匣的認領項目 id（起點是交接單時必有；被拒就不會有起點包）"
+        },
+        "raw_file": {
+          "type": "string",
+          "pattern": "^raw/[^/]+$",
+          "description": "原始紀錄本體在起點包內的路徑（相對於 package.json 所在的目錄）。**位元組原封不動**，沒有被截斷也沒有被轉換——截斷與重編 id 是轉接器的事"
+        },
+        "raw_size": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "raw_file 的位元組大小"
+        },
+        "raw_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "raw_file 的 SHA-256，必須等於 snapshot_sha256。載入端要自己驗（起點包可能被搬來搬去）"
+        },
+        "message_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "截到接續點之後，這一段實際帶進去幾則訊息"
+        },
+        "text_chars": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "這一段在接續點之前的純文字字元數"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

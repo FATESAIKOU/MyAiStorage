@@ -53,13 +53,14 @@ from aistorage.readview.model import (
     MANIFEST_MAX_BYTES,
     FileRef,
     Manifest,
+    RawRef,
     ReadingRef,
     initial_manifest,
     next_manifest,
     parse_manifest,
     serialize_manifest,
 )
-from aistorage.readview.naming import index_name, reading_name
+from aistorage.readview.naming import index_name, raw_name, reading_name
 from aistorage.search.index import (
     FORMAT as SEARCH_INDEX_FORMAT,
     HandoffRow,
@@ -91,6 +92,7 @@ class PublishReport:
     readings_created: int = 0
     readings_kept: int = 0
     readings_failed: tuple[tuple[str, str], ...] = ()  # (session_id, snapshot_sha256)
+    raws_created: int = 0
     index_file_id: str | None = None
     retired: tuple[str, ...] = ()
     deleted: tuple[str, ...] = ()
@@ -202,26 +204,39 @@ def index_entries(
     latest_by_session: dict[str, SnapshotTarget],
     bodies: dict[ReadingKey, dict],
     refs: dict[ReadingKey, FileRef],
+    raw_refs: dict[ReadingKey, FileRef] | None = None,
 ) -> list[IndexEntry]:
     """組出索引的 sessions 輸入（每個 Session 一筆 IndexEntry）。
 
     metadata 欄位名對應 group4 第 3 節 A 的 sessions 表；reading／reading_ref
     為最新快照（全文只放最新快照）。快照歷史帶上已發佈者的 file_id／sha256／
     size，索引據此產生 readings 表（被接續點釘住的舊快照也在裡面）。
+    `raw_refs` 是同一組鍵的原始紀錄本體定位，產生 raws 表（`agora checkout` 用）。
     """
+    raws = raw_refs or {}
     latest_keys = {t.key for t in latest_by_session.values()}
     entries: list[IndexEntry] = []
     for session_id in iter_session_ids(store):
         smeta = load_session_meta(store, session_id)
         snaps: list[dict[str, Any]] = []
+        raw_rows: list[dict[str, Any]] = []
         for s in store.snapshots(session_id):
             d = s.to_dict()
-            ref = refs.get((session_id, s.snapshot_sha256.lower()))
+            key = (session_id, s.snapshot_sha256.lower())
+            ref = refs.get(key)
             if ref is not None:
                 d["file_id"] = ref.id
                 d["sha256"] = ref.sha256
                 d["size"] = ref.size
             snaps.append(d)
+            raw_ref = raws.get(key)
+            if raw_ref is not None:
+                raw_rows.append({
+                    "snapshot_sha256": key[1],
+                    "file_id": raw_ref.id,
+                    "sha256": raw_ref.sha256,
+                    "size": raw_ref.size,
+                })
 
         key = next((k for k in latest_keys if k[0] == session_id), ("", ""))
         ref = refs.get(key)
@@ -259,6 +274,7 @@ def index_entries(
                 snapshots=snaps,
                 reading=bodies.get(key),
                 reading_ref=reading_ref,
+                raws=raw_rows,
             )
         )
     return entries
@@ -416,8 +432,8 @@ class DriveReadViewPublisher:
         raw_manifest = load_manifest(self._drive, self._manifest_file_id)
         prev = None if raw_manifest.is_initial else raw_manifest
 
-        # ---- 2. 舊 index（prev_readings、舊 meta、舊 rejections）----
-        prev_readings, prev_meta, prev_rejections = self._load_prev_index(prev)
+        # ---- 2. 舊 index（prev_readings、prev_raws、舊 meta、舊 rejections）----
+        prev_readings, prev_raws, prev_meta, prev_rejections = self._load_prev_index(prev)
 
         # ---- 冪等：真本沒動、拒收原因沒動、也不要求重建 → 不發佈 ----
         epoch_bumped = prev is not None and self._rebuild_epoch > prev.rebuild_epoch
@@ -455,6 +471,7 @@ class DriveReadViewPublisher:
             versions,
             force_full=force_full or epoch_bumped,
             max_new_readings=self._max_new_readings,
+            prev_raws=prev_raws,
         )
 
         # ---- 4. 轉換並上傳 readings_new ----
@@ -483,6 +500,23 @@ class DriveReadViewPublisher:
                 ref = FileRef.from_drive(created)
             refs[r.key] = ref
             created_count += 1
+
+        # ---- 4b. 上傳原始紀錄本體（`agora checkout` 的起點包要用）----
+        # 與 reading 同一組 targets，所以只有 reading 轉換成功的那個快照才需要；
+        # 轉換失敗的快照一樣保留 raw（下次轉換器修好還能用），但它不在任何
+        # published target 裡，所以這裡不傳（避免無人引用的孤兒檔）。
+        raw_refs: dict[ReadingKey, FileRef] = {
+            r.key: r.raw_existing for r in plan.readings_keep if r.raw_existing is not None
+        }
+        raws_created = 0
+        for r in plan.targets:
+            if r.key in raw_refs:
+                continue
+            raw = self._publish_raw(store, r.session_id, r.snapshot_sha256, dry_run=dry_run)
+            if raw is None:
+                continue
+            raw_refs[r.key] = raw
+            raws_created += 1
 
         # 沿用的最新快照也要有本體，索引才放得進全文（但 Drive 上不重傳）
         for r in plan.readings_keep:
@@ -514,7 +548,7 @@ class DriveReadViewPublisher:
             index_path = self._workdir / f"index-g{generation}.sqlite"
             stats = self._index_builder(
                 index_path,
-                entries=index_entries(store, latest_by_session, bodies, refs),
+                entries=index_entries(store, latest_by_session, bodies, refs, raw_refs),
                 links=collect_links(store),
                 handoffs=collect_handoffs(store),
                 rejections=list(rejections),
@@ -550,24 +584,50 @@ class DriveReadViewPublisher:
         )
 
         if plan.switch_index:
+            raw_ref_list = [
+                RawRef(
+                    session_id=t.session_id,
+                    snapshot_sha256=t.snapshot_sha256,
+                    file_id=ref.id,
+                    size=ref.size,
+                )
+                for t in plan.targets
+                if (ref := raw_refs.get(t.key)) is not None
+            ]
             files = tuple(
                 dict.fromkeys(
                     ([index_ref.id] if index_ref is not None else [])
                     + [r.file_id for r in reading_refs]
+                    + [r.file_id for r in raw_ref_list]
                 )
             )
             pending: tuple[ReadingRef, ...] = ()
+            pending_raws: tuple[RawRef, ...] = ()
             retire_now = plan.retire_now
             delete_now = plan.delete_now
         else:
             # 分批的中間輪次：不切換 index，舊世代的檔案全部保留，本輪上傳的份數
-            # 記在 pending 讓下一輪沿用（否則會被下一輪的清掃隔離）。
+            # 記在 pending（raw 一起）讓下一輪沿用（否則會被下一輪的清掃隔離）。
             uploaded = {r.key for r in plan.readings_new}
             pending = tuple(
                 r for r in reading_refs if (r.session_id, r.snapshot_sha256) in uploaded
             )
+            pending_raws = tuple(
+                RawRef(
+                    session_id=t.session_id,
+                    snapshot_sha256=t.snapshot_sha256,
+                    file_id=ref.id,
+                    size=ref.size,
+                )
+                for t in plan.targets
+                if t.key in uploaded and (ref := raw_refs.get(t.key)) is not None
+            )
             files = tuple(
-                dict.fromkeys(list(base.files) + [r.file_id for r in pending])
+                dict.fromkeys(
+                    list(base.files)
+                    + [r.file_id for r in pending]
+                    + [r.file_id for r in pending_raws]
+                )
             )
             retire_now = ()
             delete_now = ()
@@ -583,6 +643,7 @@ class DriveReadViewPublisher:
             agora_main_sha=agora_main_sha,
             converter_versions=versions,
             rebuild_epoch=self._rebuild_epoch,
+            raw_refs=pending_raws,
         )
         if not dry_run:
             self._drive.update_content(
@@ -616,6 +677,7 @@ class DriveReadViewPublisher:
             readings_created=created_count,
             readings_kept=len(plan.readings_keep),
             readings_failed=tuple(sorted(set(failed))),
+            raws_created=raws_created,
             index_file_id=index_ref.id if index_ref is not None else None,
             retired=tuple(retire_now),
             deleted=tuple(deleted),
@@ -644,30 +706,62 @@ class DriveReadViewPublisher:
             for source, conv in sorted(self._converters.items())
         }
 
+    def _publish_raw(
+        self, store: AgoraStore, session_id: str, snapshot_sha256: str, *,
+        dry_run: bool,
+    ) -> FileRef | None:
+        """把某個快照的原始紀錄本體上傳到讀取視圖資料夾。
+
+        `agora checkout` 的起點包要「原始紀錄原封不動」（ADR 0010），而閱讀版
+        會把工具呼叫的輸入輸出壓成摘要、還原不了位元組相同的開頭——所以這份
+        本體必須自己發佈一份。取不到 raw 是**真本層級的失敗**（照 4. 的慣例
+        往上拋）；`sha256` 就是 `snapshot_sha256`，所以下載端可以自己驗。
+        """
+        raw_path = store.raw_path_for_snapshot(session_id, snapshot_sha256)
+        digest = _sha256_file(raw_path)
+        if digest != snapshot_sha256.lower():
+            raise MismatchError(
+                f"取出的原始紀錄雜湊 {digest[:12]} 與快照 {snapshot_sha256[:12]} 不符: "
+                f"{session_id}"
+            )
+        if dry_run:
+            return FileRef(id="", sha256=digest, size=raw_path.stat().st_size)
+        created = self._drive.create(
+            self._folder_id,
+            raw_name(session_id, snapshot_sha256),
+            raw_path,
+            mime_type="application/octet-stream",
+        )
+        return FileRef.from_drive(created)
+
     def _load_prev_index(
         self, prev: Manifest | None
     ) -> tuple[
         dict[ReadingKey, FileRef],
+        dict[ReadingKey, FileRef],
         dict[str, str],
         list[tuple[str, str, str, int, str]],
     ]:
-        """下載舊 index，取出 prev_readings、meta 與 rejections（唯讀）。
+        """下載舊 index，取出 prev_readings、prev_raws、meta 與 rejections（唯讀）。
 
         索引雜湊與 manifest 記錄不符 → MismatchError（信任錨點被動過，不可繼續）。
         缺表（例如某個 Session 轉換失敗）視為沒有可沿用的項目。
         """
         readings: dict[ReadingKey, FileRef] = {}
+        raws: dict[ReadingKey, FileRef] = {}
         meta: dict[str, str] = {}
         rejections: list[tuple[str, str, str, int, str]] = []
         if prev is None:
-            return readings, meta, rejections
+            return readings, raws, meta, rejections
 
         # manifest.pending（上一輪分批上傳、尚未被任何 index 引用的份數）也可沿用
         for r in prev.pending:
             readings.setdefault(r.key, r.file_ref)
+        for r in prev.pending_raws:
+            raws.setdefault(r.key, r.file_ref)
 
         if prev.index is None:
-            return readings, meta, rejections
+            return readings, raws, meta, rejections
 
         path = self._workdir / "prev-index.sqlite"
         self._drive.download(prev.index.id, path, max_bytes=INDEX_MAX_BYTES)
@@ -679,6 +773,7 @@ class DriveReadViewPublisher:
             )
 
         readings: dict[ReadingKey, FileRef] = {}
+        raws: dict[ReadingKey, FileRef] = {}
         meta: dict[str, str] = {}
         rejections: list[tuple[str, str, str, int, str]] = []
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -699,6 +794,14 @@ class DriveReadViewPublisher:
                     readings[(str(sid), str(snap).lower())] = FileRef(
                         id=str(fid), sha256=str(sha).lower(), size=int(size)
                     )
+            # 升級前發佈的世代沒有 raws 表：視為全部要重新上傳，不報錯。
+            if "raws" in tables:
+                for sid, snap, fid, sha, size in con.execute(
+                    "SELECT session_id, snapshot_sha256, file_id, sha256, size FROM raws"
+                ):
+                    raws[(str(sid), str(snap).lower())] = FileRef(
+                        id=str(fid), sha256=str(sha).lower(), size=int(size)
+                    )
             if "rejections" in tables:
                 for row in con.execute(
                     "SELECT item_key, code, at, authenticated, item_id FROM rejections"
@@ -709,7 +812,7 @@ class DriveReadViewPublisher:
         finally:
             con.close()
 
-        return readings, meta, rejections
+        return readings, raws, meta, rejections
 
     @staticmethod
     def _rejections_fingerprint(

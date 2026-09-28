@@ -28,6 +28,18 @@
 
 Agora 本身不依賴任何 coding agent：它只管讀、寫交接單、產出起點包。載入與開 agent 是轉接器與呼叫者的事。
 
+**實作**（期 1，2026-09-28）：
+
+| 指令 | 程式 |
+|---|---|
+| `agora find / show / read / handoff / checkout` | `src/aistorage/agora_cli/`（單一入口，`pyproject.toml` 的 console script `agora`） |
+| `agora-opencode load` | `src/aistorage/adapters/opencode/`（console script `agora-opencode`） |
+
+起點包格式：`schemas/context-package.schema.json`，取捨說明見
+`schemas/context-package.md`。**讀取視圖除了閱讀版還發佈原始紀錄本體**
+（索引的 `raws` 表、manifest 的 `pending_raws`）——閱讀版會把工具呼叫的輸入輸出
+壓成摘要，還原不了位元組相同的開頭，所以那份本體是 `checkout` 唯一的原料來源。
+
 ## 指令
 
 ```
@@ -62,4 +74,7 @@ opencode --session <新 session id>      # 誰要開、在哪開，由呼叫者�
 | C 匯總 | `agora checkout handoff:H2 handoff:H3 --task "整合兩邊的成果" -o p/` → `load p/` |
 | D 互相參照 | 工作中的 AI 用 `agora read S3` |
 
-AI 在 session 裡用的是同一組指令，透過 skill 包成工具：`agora_find`、`agora_read`、`agora_handoff`、`agora_checkout`。
+AI 在 session 裡用的是同一組指令，透過 skill 包成工具：`agora_find`、`agora_show`、
+`agora_read`、`agora_handoff`、`agora_checkout`（`resident/opencode/plugin/aistorage.ts`
+把它們轉呼叫 `agora` CLI）。**沒有認領工具**——認領由 `agora checkout` 在產出
+起點包時一併登記，被拒就不產出。

@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -22,9 +22,6 @@ DEFAULT_MAX_GC_PER_RUN = 200
 DEFAULT_MAX_RAW_SIZE = 50 * 1024 * 1024  # 50 MiB
 DEFAULT_QUARANTINE_DAYS = 7
 DEFAULT_LEDGER_MONTHS = 3
-#: 非 Agora 的 repo（Foundry）預設的單檔上限：100 MiB（D7／spec 7.3）。
-#: Agora 的 `DEFAULT_MAX_RAW_SIZE` 是 50 MiB，兩者不可互相沿用（M4）。
-DEFAULT_MAX_REPO_RAW_SIZE = 100 * 1024 * 1024
 #: `.github/workflows/committer.yml`（3.1 建的骨架；錯開要停用的就是它）
 DEFAULT_COMMITTER_WORKFLOW = "committer.yml"
 
@@ -32,88 +29,13 @@ _FOLDER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 @dataclass(frozen=True)
-class RepoConfig:
-    """單一真本 repo 的設定（Agora／Foundry 各一份，group5-7 第 6.1 節）。
-
-    兩者共用同一個 pin repo，釘選值以 repo 名稱分檔（`.pin/<repo>.json`）。
-
-    M4（review-25a48a9）：`prefix_levels` 與 `max_raw_size` 必須是**這個 repo 自己
-    的**，不可沿用 Agora 的：
-    - `prefix_levels`：清掃會逐層檢查上層同名資料夾。沿用 Agora 的話，Foundry 的
-      清掃會去檢查 Agora 的上層資料夾，而 Foundry 自己的上層完全沒有保護
-      （1.4 的「多層同名資料夾」注入）。
-    - `max_raw_size`：Agora 的預設是 50 MiB；Foundry 的收容產出上限是
-      100 MB（D7／spec 7.3），沿用 50 MiB 會讓 50〜100 MB 的產出被拒成
-      `too_large`。
-    """
-
-    name: str
-    uuid: str
-    url: str
-    prefix_folder_id: str
-    quarantine_folder_id: str
-    readview_folder_id: str | None = None
-    readview_manifest_file_id: str | None = None
-    readview_rebuild_epoch: int = 0
-    largefiles: str | None = None
-    prefix_levels: tuple[PrefixLevel, ...] = ()
-    max_raw_size: int = DEFAULT_MAX_REPO_RAW_SIZE
-
-    @classmethod
-    def from_dict(cls, name: str, data: dict, *, defaults: dict | None = None) -> RepoConfig:
-        d = dict(defaults or {})
-        d.update(data)
-        for required in ("uuid", "url", "prefix_folder_id", "quarantine_folder_id"):
-            if not d.get(required):
-                raise ValueError(f"repos.{name} 缺少必填欄位: {required}")
-        for fid_key in ("prefix_folder_id", "quarantine_folder_id", "readview_folder_id"):
-            value = d.get(fid_key)
-            if value and not _FOLDER_ID_PATTERN.match(str(value)):
-                raise ValueError(f"repos.{name} 不合法的 {fid_key}: {value!r}")
-        levels: list[PrefixLevel] = []
-        raw_levels = d.get("prefix_levels") or []
-        if not isinstance(raw_levels, list):
-            raise ValueError(f"repos.{name}.prefix_levels 必須是陣列")
-        for item in raw_levels:
-            if not isinstance(item, dict):
-                raise ValueError(f"repos.{name}.prefix_levels 的每一項必須是物件")
-            for field_name in ("parent_id", "name", "expected_id"):
-                if not item.get(field_name):
-                    raise ValueError(
-                        f"repos.{name}.prefix_levels 的項目缺少 {field_name}"
-                        "（Foundry 的上層資料夾必須自己宣告，不能沿用 Agora 的）")
-            levels.append(PrefixLevel(
-                parent_id=str(item["parent_id"]),
-                name=str(item["name"]),
-                expected_id=str(item["expected_id"]),
-            ))
-        # M4：Foundry 一定要自己給 prefix_levels。少了它，Foundry 的前綴之上
-        # 任何同名資料夾都不會被檢查（1.4 的注入面）。
-        if not levels:
-            raise ValueError(
-                f"repos.{name}.prefix_levels 必須自己提供"
-                "（不能沿用 Agora 的：Foundry 的上層資料夾需要同樣的保護）")
-        max_raw_size = int(d.get("max_raw_size", DEFAULT_MAX_REPO_RAW_SIZE))
-        if max_raw_size <= 0:
-            raise ValueError(f"repos.{name}.max_raw_size 必須是正整數: {max_raw_size!r}")
-        return cls(
-            name=name,
-            uuid=str(d["uuid"]),
-            url=str(d["url"]),
-            prefix_folder_id=str(d["prefix_folder_id"]),
-            quarantine_folder_id=str(d["quarantine_folder_id"]),
-            readview_folder_id=d.get("readview_folder_id"),
-            readview_manifest_file_id=d.get("readview_manifest_file_id"),
-            readview_rebuild_epoch=int(d.get("readview_rebuild_epoch", 0)),
-            largefiles=d.get("largefiles"),
-            prefix_levels=tuple(levels),
-            max_raw_size=max_raw_size,
-        )
-
-
-@dataclass(frozen=True)
 class CommitterConfig:
-    """提交流程全域設定結構。"""
+    """**一個**儲存要素的提交流程設定（期 1 只有 Agora，ADR 0009）。
+
+    ADR 0009：寫入閘門是每個實體各一套。之後別的實體若需要閘門，就用**另一份**
+    設定檔（自己的 repo／uuid／url／前綴／隔離區／讀取視圖）＋另一個 workflow
+    跑同一套程式——不要在一次執行裡分派多個 repo（那正是被移除的多 repo 管線）。
+    """
 
     repo: str
     repo_uuid: str
@@ -141,9 +63,6 @@ class CommitterConfig:
     #: 會直接失敗，於是整個管理操作根本跑不起來，所以它必須由設定檔帶著走，
     #: 不能在程式裡散落硬編碼。
     committer_workflow: str = DEFAULT_COMMITTER_WORKFLOW
-    #: 多 repo 設定（group5-7 第 6.1 節）：只列 Agora 以外的 repo，依序處理
-    #: （PM 決定 9：同一個 job 依序，只有收件匣有 artifact 才 clone Foundry）。
-    repos: tuple[RepoConfig, ...] = ()
 
     # 自環境變數傳入之憑證與金鑰路徑（不包含秘密原文）
     rclone_conf_path: Path | None = None
@@ -260,28 +179,6 @@ class CommitterConfig:
 
         github_repo = current_env.get("GITHUB_REPOSITORY", data.get("github_repository", ""))
 
-        # 多 repo（Foundry）：`repos: {foundry: {...}}`，共用 pin repo
-        repos: list[RepoConfig] = []
-        raw_repos = data.get("repos") or {}
-        if isinstance(raw_repos, dict):
-            for repo_name, repo_data in raw_repos.items():
-                repos.append(
-                    RepoConfig.from_dict(
-                        repo_name,
-                        repo_data,
-                        defaults={
-                            "readview_manifest_file_id": data.get(
-                                f"readview_manifest_file_id_{repo_name}"
-                            ),
-                        },
-                    )
-                )
-        elif raw_repos:
-            raise ValueError("repos 必須是物件（{名稱: {...}}）")
-        # `repos` 只列「額外」的 repo（Agora 由上層欄位描述），順序＝處理順序
-        if any(r.name == repo for r in repos):
-            raise ValueError(f"repos 不該再列出 agora（{repo!r}），它由上層欄位描述")
-
         return cls(
             repo=repo,
             repo_uuid=repo_uuid,
@@ -299,7 +196,6 @@ class CommitterConfig:
             quarantine_retention_days=int(data.get("quarantine_retention_days", DEFAULT_QUARANTINE_DAYS)),
             ledger_retention_months=int(data.get("ledger_retention_months", DEFAULT_LEDGER_MONTHS)),
             prefix_levels=tuple(levels),
-            repos=tuple(repos),
             github_repository=github_repo,
             committer_workflow=committer_workflow,
             rclone_conf_path=rclone_conf_path,

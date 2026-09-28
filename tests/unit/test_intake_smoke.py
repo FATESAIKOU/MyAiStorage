@@ -328,7 +328,7 @@ def test_evaluate_pipeline_smoke(tmp_path: Path):
     assert d_badsig.kind == DecisionKind.REJECT
     assert d_badsig.code == "bad_signature"
 
-    # 5. artifact 項目 -> Foundry 未設定時 REJECT(foundry_not_enabled)
+    # 5. artifact 項目 -> REJECT(artifact_not_supported)（ADR 0009：產出登錄不再進 Agora）
     ulid_art = generate_ulid()
     art_sidecar = {
         "format": "aistorage.inbox/v1",
@@ -362,9 +362,9 @@ def test_evaluate_pipeline_smoke(tmp_path: Path):
         raw=None,
     )
     d_art = evaluate(item_art, drive=drive, registry=registry, store=store, ledger=ledger, clock=clock, workdir=workdir)
-    # Foundry 沒設定 → REJECT（PM 指示）：DEFER 會讓項目永遠留在收件匣裡
+    # 明確拒收：DEFER 會讓項目永遠留在收件匣裡、每一輪都變成非空輪
     assert d_art.kind == DecisionKind.REJECT
-    assert d_art.code == "foundry_not_enabled"
+    assert d_art.code == "artifact_not_supported"
 
     # 6. 重放檢核（Ledger 已有記錄）：同 raw sha -> ALREADY；不同 raw sha -> REJECT(replayed_item_key)
     # 記錄剛才的 item_ok

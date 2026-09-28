@@ -43,7 +43,7 @@ from aistorage.agora.store import AgoraStore, AnnexRawStorage, SessionRecord
 from aistorage.clock import SystemClock
 from aistorage.committer.config import CommitterConfig
 from aistorage.committer.publish import NullPublisher
-from aistorage.committer.run import Deps, RepoTarget, init_pin_cli, run
+from aistorage.committer.run import Deps, init_pin_cli, run
 from aistorage.converters import get_converter
 from aistorage.errors import NotFound, WriteError
 from aistorage.integrity.pin import GitPinStore
@@ -198,7 +198,7 @@ def test_full_erase_scenario_on_drive(it_settings, real_drive, sandbox, tmp_path
     assert state.repo_uuid == annex.uuid
 
     # ---------------- 佈置：兩個 Session ＋ 一個含 canary 的 annex 物件 -------
-    clone = git_factory(tmp_path / "clone", RepoTarget.from_config(cfg))
+    clone = git_factory(tmp_path / "clone", cfg)
     work = clone.workdir
     env = git_env(it_settings["rclone_conf"])
     # review A-H1/A-H2：原始紀錄真的進 annex（key 由 git annex lookupkey 決定）。
@@ -336,7 +336,7 @@ def test_full_erase_scenario_on_drive(it_settings, real_drive, sandbox, tmp_path
 
     # ---------------- 後置條件 a～f ----------------------------------------
     # a. 目前版本 ＋ b. git 歷史 ＋ 物件：全新 clone 掃描
-    fresh = git_factory(tmp_path / "fresh", RepoTarget.from_config(cfg))
+    fresh = git_factory(tmp_path / "fresh", cfg)
     for p in fresh.workdir.rglob("*"):
         rel = str(p.relative_to(fresh.workdir))
         if p.is_file() and not rel.startswith(".git") and p.stat().st_size < (4 << 20):

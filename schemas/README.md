@@ -9,6 +9,10 @@
 - `metadata-inbox.schema.json`：收件匣項目的 metadata（由寫入者提供，**不含產生者 `producer`**；若寫入者自行夾帶將被剝離並忽略）。
 - `metadata-record.schema.json`：真本項目的 metadata（由提交流程驗證簽章／認證身分後，蓋上 `producer` 戳章）。
 - `inbox-sidecar.schema.json`：收件匣項目的 sidecar 規格（格式 `aistorage.inbox/v1`），包含寫入者 Profile、快照資訊、簽章與依型態分支之 Body。
+- `readview-manifest.schema.json`：讀取視圖的 manifest（格式 `aistorage.readview/v1`），讀取介面的信任錨點。
+- `reading-version.schema.json`：閱讀版的共通格式（格式 `aistorage.reading/v1`），跨來源應用共用。
+- `context-package.schema.json`：**起點包**（格式 `aistorage.contextpackage/v1`），`agora checkout` 的產物；說明見 `context-package.md`。
+- `identity-registry.schema.json`：身分登錄檔（簽章金鑰與收件匣的對應）。
 
 ---
 

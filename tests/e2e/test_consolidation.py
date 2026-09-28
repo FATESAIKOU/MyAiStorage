@@ -7,15 +7,6 @@ Adheres strictly to:
 - Committer runs to commit handoffs to Agora true store
 - S4 in separate resident container claims both handoffs (consolidation)
 - S4 reads continuation contents of both S2 and S3 before their continuation points
-- S4 generates a report registered to Foundry
-- Foundry catalog queryable for S4's artifact and blob content retrievable
-
-Foundry 端到端（收件匣 → 提交流程 → Foundry 真本／讀取視圖）還沒接上：
-artifact 收進真本的路徑已有（`apply_artifact`），但 run.py 第 13 步的 foundry
-target 仍走舊 `_publish_foundry`（H5 待接線），讀取視圖世代不會含新產出。
-工具本身（`aistorage_register_artifact`）已經有了，所以整個 Foundry 測試函式以
-`xfail(strict=True)` 標住：impl1 接好之後會 XPASS → 轉紅，提醒移除標記。
-Agora 的統合路徑是另一個函式，沒有標記。
 """
 
 from __future__ import annotations
@@ -23,8 +14,6 @@ from __future__ import annotations
 import pytest
 
 from aistorage.reader import AgoraReader
-from aistorage.reader.foundry import FoundryReader
-from aistorage.schema import generate_ulid
 
 from .conftest import (
     agora_session_id,
@@ -127,53 +116,3 @@ def test_9_2_consolidation_n_to_1(resident_pool, run_committer, e2e_reader: Agor
     assert {s2_agora, s3_agora} <= to_sessions, (
         f"S4 必須有兩條接續 Link 指向 S2、S3，實際 {to_sessions}"
     )
-
-
-@pytest.mark.e2e
-@pytest.mark.xfail(
-    strict=True,
-    reason="待 impl1 接線：run.py 第 13 步 foundry target 仍走舊 _publish_foundry"
-    "（run.py:1475-1483，註明 H5 待接線），未換成 FoundryReadViewPublisher.publish"
-    "（publish/foundry.py:136）＋回報 published_item_keys（H4）；artifact 進真本後"
-    "讀取視圖世代不含它 → find 查不到。接好會 XPASS，請移除這個標記",
-)
-def test_9_2_foundry_artifact_registration(
-    resident_pool, run_committer, e2e_reader: AgoraReader, e2e_foundry_reader: FoundryReader
-):
-    """9.2 的 Foundry 部分：S4 產出報告登錄 Foundry，目錄查得到、記 S4、本體取得到。"""
-    marker = f"FOUNDRY-CANARY-{generate_ulid()}"
-    c4 = resident_pool("e2e-s4-foundry")
-    s4_id = c4.create_session()
-    # 先讓 S4 存在於 Agora（artifact 的 produced_by_session_id 必須已存在）
-    c4.send(s4_id, "你是統合 Session S4，請用一句話確認收到。")
-    c4.sync_once([s4_id])
-    run_committer()
-    s4_agora = agora_session_id(s4_id)
-
-    c4.prompt(
-        "請產生一份報告，內容必須包含這個識別碼：" + marker + "，"
-        "把它寫成容器內的本機檔案 /work/architecture-summary.pdf。"
-        "然後使用工具 aistorage_register_artifact 登錄至 Foundry 產出目錄"
-        "（kind=contained、name=architecture-summary.pdf、"
-        "content_type=application/pdf、file_path=/work/architecture-summary.pdf）。",
-        session_id=s4_id,
-    )
-    assert_tool_called(c4, s4_id, "aistorage_register_artifact")
-    c4.sync_once([s4_id])
-    run_committer()
-
-    artifacts = poll(
-        lambda: [
-            f.artifact
-            for f in e2e_foundry_reader.find(session_id=s4_agora).value
-            if f.artifact.name == "architecture-summary.pdf"
-        ],
-        what="Foundry 目錄出現 S4 的產出",
-    )
-    assert len(artifacts) >= 1
-    artifact = artifacts[0]
-    assert artifact.produced_by_session_id == s4_agora
-    assert artifact.kind == "contained"
-    content = e2e_foundry_reader.get(artifact.artifact_id).value
-    assert content.data, "收容產出的本體必須取得到"
-    assert marker.encode("utf-8") in content.data

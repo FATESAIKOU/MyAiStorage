@@ -8,7 +8,7 @@
 
 ## 前置
 
-1. `scripts/e2e_setup.py`（在 `TEST_FOLDER_ID` 底下建 Agora／Foundry repo、
+1. `scripts/e2e_setup.py`（在 `TEST_FOLDER_ID` 底下建 Agora repo、
    pin-test、讀取視圖、測試收件匣、測試 profile 的金鑰與身分登錄檔），產出
    `config/committer.e2e.json` 與 `config/reader.e2e.json`；
 2. `resident/build.sh` 建好住民 image；
@@ -31,10 +31,9 @@
 - `reader.e2e.json` 的 `inbox_folder_ids` 只放測試 profile 的收件匣 id；
 - 測試用的 LLM 金鑰（`llm-<provider>.key`）由使用者提供，setup 不產生。
 
-Foundry 的端到端（9.2／9.5 的 artifact 部分）另外等提交流程接上 Foundry
-（F-H1〜F-H3）：註冊工具 `aistorage_register_artifact` 已經完成，但收件匣的
-artifact 目前只會被 DEFER、發佈端也還沒寫 `object_file_id`。那兩個測試以
-`xfail(strict=True)` 鎖住，修好會 XPASS 提醒。
+9.2／9.5 原本還有 Foundry 的產出登錄部分，已隨 git-annex 版 Foundry 一起移除
+（ADR 0009、tasks 7.1）：產出登錄改成 Drive 共享資料夾＋GitHub，Agora 的收件匣
+不再收 `artifact`（會被明確拒收成 `artifact_not_supported`）。
 
 設定缺少時一律 FAIL，不用 `pytest.skip` 掩蓋（PM 規範）。
 

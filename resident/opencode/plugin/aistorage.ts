@@ -1,13 +1,14 @@
-// AiStorage 住民 plugin（tasks 5.4；docs/impl/group5-7 第 4 節）。
+// AiStorage 住民 plugin（docs/design/agora-session-operations.md）。
 //
 // 這個檔案刻意**只做兩件事**（opencode 的 plugin API 是 TypeScript，邏輯不好寫，
 // 也不好測）：
-//   1. 從 `context.sessionID` 拿到目前的 Session id（1.7f），並查出它是不是
-//      子 Session（有 parentID）。
-//   2. 把工具呼叫轉成 `python -m aistorage.skill <cmd> --session <ctx.sessionID> …`。
+//   1. 從 `context.sessionID` 拿到目前的 Session id（1.7f）。
+//   2. 把工具呼叫轉成 CLI：
+//        agora_* → `python -m aistorage.agora_cli <cmd>`
+//        aistorage_* → `python -m aistorage.skill <cmd>`
 //
-// 所有邏輯（同步、組項目、同步並提交、讀取、主 Session 的第二道檢查）都在
-// Python 端 `src/aistorage/skill/`，那裡才有單元測試。
+// 所有邏輯都在 Python 端（`src/aistorage/agora_cli/` 與 `src/aistorage/skill/`），
+// 那裡才有單元測試。
 //
 // **Session id 由這裡傳，不接受模型提供的 id**——模型可能填錯或填別人的。
 //
@@ -17,8 +18,8 @@
 import { spawn } from "node:child_process"
 import { mkdirSync, writeFileSync } from "node:fs"
 
-// 主 Session 限定的工具（第三層：提交流程的 apply_claim 還會再擋一次）
-const MAIN_SESSION_ONLY = new Set(["claim", "stop"])
+// 主 Session 限定的工具（宣告停止沒有提交流程那一道防線）
+const MAIN_SESSION_ONLY = new Set(["aistorage_stop"])
 
 // 目前 Session 的 parentID。opencode 的 plugin 在這裡拿得到 context，
 // 所以第一次查之後就記著，不必為每個工具呼叫再問一次 API。
@@ -33,8 +34,12 @@ interface ToolDef {
   description: string
   /** 只在主 Session 可用（plugin 這一層是第一道防線） */
   mainOnly?: boolean
+  /** 呼叫哪一個 CLI：`agora`（單一入口）或 `skill` */
+  cli: "agora" | "skill"
+  /** CLI 的子命令 */
+  command: string
   /** 把模型給的參數轉換成 CLI 的位置／旗標 */
-  args: (args: ToolArgs) => string[]
+  args: (args: ToolArgs, ctx: ToolContext) => string[]
 }
 
 // 參數直接放進 argv。`spawn` **不經過 shell**，所以千萬不要加 shell 引號
@@ -69,6 +74,14 @@ function deepFindKey(value: unknown, names: string[], depth = 0): unknown {
     if (found !== undefined) return found
   }
   return undefined
+}
+
+function isTrue(args: ToolArgs, key: string): boolean {
+  // 開關型參數：模型有時送布林、有時送字串 "true"／"yes"（9.1 e2e 實測）。
+  const v = args[key]
+  if (typeof v === "boolean") return v
+  if (typeof v === "string") return ["true", "yes", "1"].includes(v.trim().toLowerCase())
+  return false
 }
 
 function strList(args: ToolArgs, key: string): string[] {
@@ -122,8 +135,91 @@ function singular(key: string): string[] {
 }
 
 const TOOLS: Record<string, ToolDef> = {
+  // ---------------------------------------------------------------- agora CLI
+  agora_find: {
+    description:
+      "找 Session，或列出等人接的交接單（waiting: true）。" +
+      "回傳附帶快照時間與新鮮度；新鮮度有警告時要照實轉述給使用者。",
+    cli: "agora",
+    command: "find",
+    args: (a) => {
+      const out: string[] = []
+      const query = str(a, "query")
+      if (query) out.push(query)
+      const c = str(a, "case_id")
+      if (c) out.push("--case", c)
+      if (isTrue(a, "waiting")) out.push("--waiting")
+      return out
+    },
+  },
+  agora_show: {
+    description: "看一個 Session 的 metadata、前後 Session Link 與交接單。",
+    cli: "agora",
+    command: "show",
+    args: (a) => {
+      const out: string[] = []
+      const sid = str(a, "session_id")
+      if (sid) out.push(sid)
+      return out
+    },
+  },
+  agora_read: {
+    description:
+      "讀一個 Session 最新已提交的內容（回傳附帶快照時間與新鮮度；警告要明說" +
+      "「可能不是最新的」）。這就是參考別人工作的入口。",
+    cli: "agora",
+    command: "read",
+    args: (a, ctx) => {
+      const out: string[] = []
+      const sid = str(a, "session_id")
+      if (sid) out.push(sid)
+      // 「是誰讀的」由 context 帶入，不給模型填（模型會填錯或填別人的）。
+      // 有了它這次讀取就會留下一條參考 Link。
+      if (ctx?.sessionID) out.push("--from", ctx.sessionID)
+      return out
+    },
+  },
+  agora_handoff: {
+    description:
+      "交出工作：同步自己，為每一個 task 各寫一張交接單，一起提交並等到可見。" +
+      "（1→n 分工用多個 task；n→1 交出末端用一個。）" +
+      "tasks: [{title, summary, next_steps}]。",
+    cli: "agora",
+    command: "handoff",
+    args: (a, ctx) => {
+      const out: string[] = []
+      // 位置參數是「要交出的 Session」，由 context 帶入（不給模型填）。
+      if (ctx?.sessionID) out.push(ctx.sessionID)
+      for (const title of strList(a, "tasks")) out.push("--task", title)
+      return out
+    },
+  },
+  agora_checkout: {
+    description:
+      "產出一個起點包（start point package）：把起點之前的原始紀錄原封不動放進" +
+      "一個目錄，交給 agora-opencode load 變成新的 session。" +
+      "startpoints: ['handoff:<id>' 或 '<session>[@<訊息>]']（多個＝n→1 統合）。" +
+      "起點是交接單時會一併登記認領，被拒就不產出。",
+    cli: "agora",
+    command: "checkout",
+    args: (a, ctx) => {
+      const out: string[] = []
+      for (const sp of strList(a, "startpoints")) out.push(sp)
+      const task = str(a, "task")
+      if (task) out.push("--task", task)
+      // 輸出目錄：預設放在 /work 底下（不要寫進 repo 的版本控制裡）
+      const outDir = str(a, "out_dir") ?? "/work/.agora-packages"
+      out.push("-o", outDir)
+      if (ctx?.directory) out.push("--max-lag", "15m")
+      return out
+    },
+  },
+
+  // -------------------------------------------------------------- skill CLI
   aistorage_whoami: {
     description: "我在哪個 Session：{session_id, parent_id, is_main}。",
+    cli: "skill",
+    command: "whoami",
     args: () => [],
   },
   aistorage_split: {
@@ -131,10 +227,14 @@ const TOOLS: Record<string, ToolDef> = {
       "分裂（1→n）：同步自己，為每一份工作各寫一張交接單，一起提交並等到全部可見。" +
       "parts: [{title, summary, next_steps}]。",
     // parts 交給 CLI 從檔案讀（--parts <file>），避免在 argv 裡塞大段文字
+    cli: "skill",
+    command: "split",
     args: () => [],
   },
   aistorage_handoff_end: {
     description: "交出末端：同步自己，寫一張交接單，提交並等到可見。",
+    cli: "skill",
+    command: "handoff-end",
     args: (a) => {
       const out: string[] = []
       const summary = str(a, "summary")
@@ -144,43 +244,12 @@ const TOOLS: Record<string, ToolDef> = {
       return out
     },
   },
-  aistorage_claim: {
-    description:
-      "認領交接單（多張＝統合）：同步自己與所有認領，一起提交；Link 屬於自己之後" +
-      "才回傳交接單內容。任何一張被拒收就停下並回報原因。",
-    mainOnly: true,
-    args: (a) => {
-      const out: string[] = []
-      for (const id of strList(a, "handoff_ids")) out.push("--handoff", id)
-      return out
-    },
-  },
-  aistorage_find: {
-    description:
-      "找 Session（回傳附帶快照時間與新鮮度；新鮮度有警告時要照實轉述給使用者）。",
-    args: (a) => {
-      const out: string[] = []
-      const query = str(a, "query") ?? ""
-      out.push("--query", query)
-      const c = str(a, "case_id")
-      if (c) out.push("--case", c)
-      return out
-    },
-  },
-  aistorage_read: {
-    description:
-      "讀一個 Session（回傳附帶快照時間與新鮮度；警告要明說「可能不是最新的」）。",
-    args: (a) => {
-      const out: string[] = []
-      const target = str(a, "session_id")
-      if (target) out.push("--target", target)
-      return out
-    },
-  },
   aistorage_reference: {
     description:
-      "留下參考 Link：讀過某個 Session 之後呼叫，記下我參考它。" +
+      "留下參考 Link：已經讀過某個 Session、而且這次的成果有賴於它時呼叫。" +
       "只上傳不觸發提交（下一輪提交流程收進去）。",
+    cli: "skill",
+    command: "reference",
     args: (a) => {
       const out: string[] = []
       const to = str(a, "session_id")
@@ -191,7 +260,9 @@ const TOOLS: Record<string, ToolDef> = {
     },
   },
   aistorage_list_handoffs: {
-    description: "列出還沒被認領的交接單。",
+    description: "列出還沒被認領的交接單（等同 agora_find 的 waiting）。",
+    cli: "skill",
+    command: "list-handoffs",
     args: (a) => {
       const out: string[] = []
       const c = str(a, "case_id")
@@ -204,6 +275,8 @@ const TOOLS: Record<string, ToolDef> = {
       "登錄一件產出到 Foundry 產出目錄（只上傳，下一輪提交流程收進去）。" +
       "contained：本體是容器內的本機檔案（file_path）；link：原處產出" +
       "（必填 link，repo 與 path 可選填）。produced_by_session_id 由 plugin 帶入，不要自己填。",
+    cli: "skill",
+    command: "register-artifact",
     args: (a) => {
       const out: string[] = []
       const kind = str(a, "kind")
@@ -230,6 +303,8 @@ const TOOLS: Record<string, ToolDef> = {
   aistorage_stop: {
     description: "宣告這個 Session 停止中（設定 time.archived，然後同步並提交）。",
     mainOnly: true,
+    cli: "skill",
+    command: "stop",
     args: () => [],
   },
 }
@@ -282,13 +357,17 @@ async function resolveParent(sessionId: string): Promise<string | null> {
 }
 
 function runCli(
+  cli: "agora" | "skill",
   command: string,
   args: string[],
   sessionId: string,
   parts?: unknown,
 ): Promise<string> {
   // parts 走暫存檔（argv 裡不放大段文字；JSON 用檔案傳）
-  const argv = ["-m", "aistorage.skill", command, "--session", sessionId, ...args]
+  // `agora` 沒有 --session：它的位置參數由 args() 從 context 帶進去。
+  const argv = cli === "agora"
+    ? ["-m", "aistorage.agora_cli", command, ...args]
+    : ["-m", "aistorage.skill", command, "--session", sessionId, ...args]
   if (parts !== undefined) {
     argv.push("--parts", writeTempParts(parts))
   }
@@ -304,7 +383,7 @@ function runCli(
     child.on("error", reject)
     child.on("close", (code) => {
       if (code === 0) resolve(out.trim())
-      else reject(new Error(err.trim() || `aistorage.skill ${command} 失敗 (rc=${code})`))
+      else reject(new Error(err.trim() || `${cli === "agora" ? "agora" : "aistorage.skill"} ${command} 失敗 (rc=${code})`))
     })
   })
 }
@@ -353,9 +432,42 @@ export const AistoragePlugin = async () => {
                       },
                     }
                   : {}),
-                ...(name === "aistorage_claim" ? { handoff_ids: { type: "array", items: { type: "string" } } } : {}),
-                ...(name === "aistorage_find" ? { query: { type: "string" }, case_id: { type: "string" } } : {}),
-                ...(name === "aistorage_read" ? { session_id: { type: "string" } } : {}),
+                ...(name === "agora_find"
+                  ? { query: { type: "string" }, case_id: { type: "string" },
+                      waiting: { type: "boolean" } }
+                  : {}),
+                ...(name === "agora_show" || name === "agora_read"
+                  ? { session_id: { type: "string" } }
+                  : {}),
+                ...(name === "agora_handoff"
+                  ? {
+                      tasks: {
+                        type: "array",
+                        description: "要交出去的每一份工作（多個＝分工）",
+                        items: {
+                          type: "object",
+                          properties: {
+                            title: { type: "string" },
+                            summary: { type: "string" },
+                            next_steps: { type: "string" },
+                          },
+                          required: ["title"],
+                        },
+                      },
+                    }
+                  : {}),
+                ...(name === "agora_checkout"
+                  ? {
+                      startpoints: {
+                        type: "array",
+                        description:
+                          "起點：handoff:<交接單 id> 或 <session>[@<訊息>]；多個＝統合",
+                        items: { type: "string" },
+                      },
+                      task: { type: "string", description: "要交代給接手者的任務" },
+                      out_dir: { type: "string", description: "起點包的輸出目錄" },
+                    }
+                  : {}),
                 ...(name === "aistorage_reference"
                   ? { session_id: { type: "string" }, read_snapshot_at: { type: "string" } }
                   : {}),
@@ -379,7 +491,6 @@ export const AistoragePlugin = async () => {
               },
             },
             async execute(args: ToolArgs, ctx: ToolContext) {
-              const command = name.replace(/^aistorage_/, "").replace(/_/g, "-")
               const sessionId = ctx?.sessionID
               if (!sessionId) {
                 throw new Error("拿不到目前的 Session id（plugin 的 context 沒有 sessionID）")
@@ -389,12 +500,18 @@ export const AistoragePlugin = async () => {
                 const parent = await resolveParent(sessionId)
                 if (parent) {
                   throw new Error(
-                    `aistorage_${command} 只能在主 Session 做（目前是子 Session，parent=${parent}）`,
+                    `${name} 只能在主 Session 做（目前是子 Session，parent=${parent}）`,
                   )
                 }
               }
               const parts = (args as ToolArgs).parts
-              return await runCli(command, def.args(args as ToolArgs), sessionId, parts)
+              // `--parts` 只有 `aistorage_split` 吃（它要 `{title, summary,
+              // next_steps}` 的清單）。其他命令沒有這個參數，送過去 argparse
+              // 會讓整個工具失敗。
+              const useParts = name === "aistorage_split" ? parts : undefined
+              return await runCli(
+                def.cli, def.command, def.args(args as ToolArgs, ctx), sessionId, useParts,
+              )
             },
           },
         ]),

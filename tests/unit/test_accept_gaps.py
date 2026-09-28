@@ -1,9 +1,9 @@
-"""第 9 組追溯表的三個優先缺口（驗收測試；只依介面與文件）。
+"""第 9 組追溯表的兩個優先缺口（驗收測試；只依介面與文件）。
 
-對應 `docs/impl/spec-traceability.md` 的「建議優先補的三個」：
+對應 `docs/impl/spec-traceability.md` 的「建議優先補的三個」中的前兩個
+（第三個是 Foundry 讀取的新鮮度，已隨 git-annex 版 Foundry 移除，ADR 0009）：
 
-1. **Foundry 永久保存**（`specs/foundry/catalog`）：GC 只回收 bundle，
-   annex 物件（Agora 的原始紀錄與 Foundry 的收容產出）永遠不被刪。
+1. **永久保存**：GC 只回收 bundle，annex 物件（Agora 的原始紀錄）永遠不被刪。
    驗證方式：把 annex 物件混進清掃的列舉清單，斷言 `plan_sweep` 只給
    KEEP／NEED_CONTENT_CHECK（永不 QUARANTINE／GC），而 `gc_removed`
    只刪 `removed_bundles` 裡的 bundle、不碰 annex 物件。
@@ -13,9 +13,6 @@
    （Drive 對真本檔案回 403／404）。用 FakeDrive 注入 403／404 與
    `WriteError(status_code=403)` 模擬。
 
-3. **Foundry 讀取的每筆結果附快照時間與新鮮度**（`specs/foundry/catalog`）：
-   `find` 的每一筆與 `get` 都要附 `snapshot_at` 與 `freshness`。
-
 規則：FakeDrive 與自編測試資料；不碰真 Drive／GitHub／MyBrain；祕密只以
 路徑引用。
 """
@@ -23,8 +20,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,18 +37,13 @@ from aistorage.annex.fake import FakeAnnexGit
 from aistorage.clock import FixedClock
 from aistorage.drive.fake import FakeDrive
 from aistorage.errors import NotFound, WriteError
-from aistorage.foundry.index import ArtifactRow, FoundryIndexMeta, build_foundry_index
 from aistorage.integrity.gc import collect_removed_bundles, gc_removed
 from aistorage.integrity.pin import PinState
 from aistorage.integrity.settle import RepoListing
 from aistorage.integrity.sweep import Disposition, plan_sweep
-from aistorage.reader.client import ReadViewClient
-from aistorage.reader.config import ReaderConfig
-from aistorage.reader.foundry import FoundryReader
 
 T0 = "2026-09-28T08:00:00.000Z"
 T1 = "2026-09-28T09:00:00.000Z"
-T2 = "2026-09-28T10:00:00.000Z"
 UUID = "11111111-2222-3333-4444-555555555555"
 PROFILE = "mac-worker"
 TEST_PRIV_KEY = b"G" * 32
@@ -93,12 +83,12 @@ def _annex_name(content: bytes, ext: str = "") -> str:
 
 
 # ===========================================================================
-# (1) Foundry 永久保存：GC 只回收 bundle；annex 物件永遠不被刪
+# (1) 永久保存：GC 只回收 bundle；annex 物件永遠不被刪
 # ===========================================================================
 
 
 def test_gc_only_reclaims_bundles_and_never_touches_annex_objects(tmp_path: Path):
-    """提交流程的 GC：annex 物件（Agora raw 與 Foundry 收容產出）不得被回收。
+    """提交流程的 GC：annex 物件（Agora 的原始紀錄）不得被回收。
 
     - `plan_sweep` 對 annex 物件的處置只會是 KEEP（或 NEED_CONTENT_CHECK），
       永遠不會是 GC 或 QUARANTINE。
@@ -109,11 +99,11 @@ def test_gc_only_reclaims_bundles_and_never_touches_annex_objects(tmp_path: Path
     prefix = drive.seed_folder("prefix")
 
     raw_content = b"agora raw snapshot payload"
-    artifact_content = b"foundry contained artifact payload"
+    reading_content = b"agora reading json payload"
     raw_key = _annex_name(raw_content)
-    artifact_key = _annex_name(artifact_content, ".pdf")
+    reading_key = _annex_name(reading_content, ".json")
     raw_file_id = drive.seed_file(prefix, raw_key, raw_content)
-    artifact_file_id = drive.seed_file(prefix, artifact_key, artifact_content)
+    reading_file_id = drive.seed_file(prefix, reading_key, reading_content)
 
     # bundle 檔名內嵌大小與雜湊必須和內容相符，plan_sweep 才會留它
     active_bytes = b"a" * 10
@@ -127,7 +117,7 @@ def test_gc_only_reclaims_bundles_and_never_touches_annex_objects(tmp_path: Path
 
     state = _pin_state(
         active=(active_bundle,), removed=frozenset({removed_bundle}),
-        annex_keys=frozenset({raw_key, artifact_key}),
+        annex_keys=frozenset({raw_key, reading_key}),
     )
     listing = _listing(drive, prefix)
 
@@ -135,12 +125,12 @@ def test_gc_only_reclaims_bundles_and_never_touches_annex_objects(tmp_path: Path
     decisions = {d.file.name: d.disposition for d in plan_sweep(
         listing, state, repo_uuid=UUID)}
     assert decisions[raw_key] == Disposition.KEEP, "Agora 的 annex 原始紀錄必須保留"
-    assert decisions[artifact_key] == Disposition.KEEP, "Foundry 的收容產出必須保留"
+    assert decisions[reading_key] == Disposition.KEEP, "被 annex 收走的閱讀版也必須保留"
     assert decisions[active_bundle] == Disposition.KEEP
     assert decisions[removed_bundle] == Disposition.GC, "只有 removed bundle 才能回收"
-    assert Disposition.GC not in (decisions[raw_key], decisions[artifact_key]), (
+    assert Disposition.GC not in (decisions[raw_key], decisions[reading_key]), (
         "annex 物件絕不能被標成 GC（永久保存）")
-    assert Disposition.QUARANTINE not in (decisions[raw_key], decisions[artifact_key]), (
+    assert Disposition.QUARANTINE not in (decisions[raw_key], decisions[reading_key]), (
         "annex 物件不在 removed 清單裡，不該被隔離")
 
     # 2. GC：只刪 removed bundle；兩個 annex 物件原封不動
@@ -150,7 +140,7 @@ def test_gc_only_reclaims_bundles_and_never_touches_annex_objects(tmp_path: Path
     assert deleted == 1
     with pytest.raises(NotFound):
         drive.get(removed_file_id)
-    for fid in (raw_file_id, artifact_file_id, active_file_id):
+    for fid in (raw_file_id, reading_file_id, active_file_id):
         assert drive.get(fid).id == fid, "annex 物件與 active bundle 都必須還在"
 
     # 3. 誤放 annex 物件進 GC 候選：防呆檢查必須擋下，不能刪
@@ -159,32 +149,30 @@ def test_gc_only_reclaims_bundles_and_never_touches_annex_objects(tmp_path: Path
                    prefix_folder_id=prefix, state=state)
     assert "不在釘選值之已移除清單中" in str(excinfo.value)
     assert drive.get(raw_file_id).id == raw_file_id, "防呆擋下之後 annex 物件必須還在"
-    assert drive.get(artifact_file_id).id == artifact_file_id
+    assert drive.get(reading_file_id).id == reading_file_id
 
 
-def test_foundry_contained_object_survives_committer_gc(tmp_path: Path):
-    """收容產出（Foundry objects/）不會被提交流程的 GC 掃到／刪掉。
+def test_gc_ignores_files_under_subfolders_of_the_prefix(tmp_path: Path):
+    """前綴底下的子目錄不是 GITBUNDLE：GC 不會去碰裡面的東西。
 
-    Foundry 的佈局是 `objects/<ULID>/<檔名>`（子目錄），不是平鋪的 annex key；
-    提交流程第 12 步只回收 GITBUNDLE，不動 objects 子樹。
+    提交流程第 12 步只回收 `removed_bundles` 裡的 GITBUNDLE，Drive 上其他結構
+    （例如日後某個實體放在同一個前綴底下的子樹）不在它的回收範圍。
     """
     drive = FakeDrive()
-    prefix = drive.seed_folder("foundry-prefix")
-    objects = drive.seed_folder("objects", parent=prefix)
-    ulid_dir = drive.seed_folder("01ABCDEF2345GHJKLMNPQRS", parent=objects)
+    prefix = drive.seed_folder("prefix")
+    sub = drive.seed_folder("nested", parent=prefix)
     payload = b"contained report bytes"
-    object_file_id = drive.seed_file(ulid_dir, "report.pdf", payload)
-    catalog_file_id = drive.seed_file(prefix, "catalog.json", b'{"a":1}')
+    object_file_id = drive.seed_file(sub, "report.pdf", payload)
+    other_file_id = drive.seed_file(prefix, "notes.json", b'{"a":1}')
 
     state = _pin_state(active=(), removed=frozenset())
     listing = _listing(drive, prefix)
-    # 提交流程第 12 步的 GC 只認 `removed_bundles`：沒有 removed bundle 時，
-    # 回收清單是空的，收容產出本體不會被回收。
+    # 沒有 removed bundle 時回收清單是空的，子樹與其他檔案都不會被回收
     assert collect_removed_bundles(listing, state) == []
     assert gc_removed([], drive, prefix_folder_id=prefix, state=state) == 0
-    assert drive.get(object_file_id).id == object_file_id, "收容產出本體必須還在"
-    assert drive.get(catalog_file_id).id == catalog_file_id
-    # 即使把 annex 物件誤放進候選，防呆也會擋下（parent 不符或不在 removed 清單）
+    assert drive.get(object_file_id).id == object_file_id
+    assert drive.get(other_file_id).id == other_file_id
+    # 即使把子目錄裡的檔案誤放進候選，防呆也會擋下（parent 不符或不在 removed 清單）
     with pytest.raises(Exception) as excinfo:
         gc_removed([drive.get(object_file_id)], drive,
                    prefix_folder_id=prefix, state=state)
@@ -382,137 +370,3 @@ def test_erase_cli_requires_management_credentials(tmp_path: Path, capsys, monke
     assert '"deleted"' not in combined, "任何情況下都不得回報刪除數"
     assert "not_wired" in combined or "admin_error" in combined
     assert "Traceback" not in combined, "錯誤要收斂成 JSON，不是 traceback"
-
-
-
-# ===========================================================================
-# (3) Foundry 讀取：每筆結果附快照時間與新鮮度
-# ===========================================================================
-
-
-def _foundry_reader(drive: FakeDrive, tmp_path: Path, *, clock: FixedClock,
-                    artifacts: list[ArtifactRow], published_at: str = T1) -> FoundryReader:
-    index_path = tmp_path / "foundry_index.sqlite"
-    build_foundry_index(
-        index_path, artifacts=artifacts,
-        meta=FoundryIndexMeta(generation=1, built_at=T1,
-                              foundry_main_sha="main_sha"))
-    index_file = drive.create("root", "index-g1.sqlite", index_path)
-    manifest = {
-        "format": "aistorage.readview/v1",
-        "element": "foundry",
-        "generation": 1,
-        "published_at": published_at,
-        "agora_main_sha": "main_sha",
-        "converter_versions": {},
-        "rebuild_epoch": 0,
-        "index": {
-            "id": index_file.id,
-            "sha256": hashlib.sha256(index_path.read_bytes()).hexdigest(),
-            "size": index_path.stat().st_size,
-        },
-        "files": [index_file.id],
-        "retired": [],
-    }
-    manifest_file = drive.create("root", "readview-manifest.json",
-                                 (json.dumps(manifest) + "\n").encode("utf-8"))
-    cfg = ReaderConfig(manifest_file_id=manifest_file.id,
-                       sa_key_path=tmp_path / "sa.json",
-                       cache_dir=tmp_path / "cache")
-    return FoundryReader(ReadViewClient(drive, cfg, clock=clock),
-                         drive=drive, clock=clock)
-
-
-def _artifact(*, created_at: str, name: str = "report.pdf",
-              artifact_id: str = "artifact:01ABCDEF2345GHJKLMNPQRS",
-              kind: str = "contained", link: str | None = None,
-              object_file_id: str | None = None, content: bytes = b"payload") -> ArtifactRow:
-    return ArtifactRow(
-        artifact_id=artifact_id, kind=kind, name=name,
-        content_type="application/pdf" if kind == "contained" else "text/markdown",
-        producer="profile:mac-worker", produced_by_session_id="opencode:s1",
-        created_at=created_at, updated_at=created_at,
-        size=len(content) if kind == "contained" else None,
-        sha256=hashlib.sha256(content).hexdigest() if kind == "contained" else None,
-        annex_key=_annex_name(content) if kind == "contained" else None,
-        object_file_id=object_file_id, link=link)
-
-
-def test_foundry_results_attach_a_snapshot_time(tmp_path: Path):
-    """`find`／`get` 的每一筆結果都要附 `freshness`（有 `snapshot_at`）。
-
-    這條只驗「有附」；「附的是哪個時間」由下一條驗（spec 要求與 Agora 相同
-    的新鮮度規則：這一類不是單一 Session 的快照，用世代的 `published_at`）。
-    """
-    drive = FakeDrive()
-    drive.seed_folder("root")
-    content = b"payload"
-    obj = drive.create("root", "obj.bin", content)
-    art = _artifact(created_at=T0, object_file_id=obj.id, content=content)
-    reader = _foundry_reader(drive, tmp_path, clock=FixedClock(T2), artifacts=[art])
-
-    found = reader.find()
-    assert found.value, "find 必須回傳至少一筆"
-    assert found.freshness.snapshot_at, "清單整體必須附快照時間"
-    for f in found.value:
-        assert f.freshness is not None, "每一筆都要有 freshness"
-        assert f.freshness.snapshot_at, "每一筆都要附快照時間"
-        assert f.freshness.generation == 1
-
-    got = reader.get(art.artifact_id)
-    assert got.freshness.snapshot_at, "get 也要附快照時間"
-    assert got.value.data == content
-
-
-def test_foundry_freshness_uses_the_generation_published_at(tmp_path: Path):
-    """每筆結果的快照時間是**世代的 published_at**，與產出多舊無關。
-
-    情境：世代在 T1（09:00）發佈，產出本身是 T0（08:00）的舊東西，讀者時鐘
-    是 T2（10:00）。以 max_lag=90 分鐘讀取時：
-    - 契約：落後 60 分鐘 → 符合、不附警告；舊產出不該讓整份目錄被判成過期。
-    - F-M1 的現況：用 created_at（08:00）→ 落後 120 分鐘 → 誤判為未達新鮮度。
-    """
-    drive = FakeDrive()
-    drive.seed_folder("root")
-    old = _artifact(created_at=T0)
-    reader = _foundry_reader(drive, tmp_path, clock=FixedClock(T2), artifacts=[old])
-
-    result = reader.find(max_lag=timedelta(minutes=90))
-    assert all(f.freshness.snapshot_at == T1 for f in result.value), (
-        "快照時間必須是世代的 published_at（T1），不是產出的 created_at（T0）")
-    assert result.freshness.snapshot_at == T1
-    assert result.value[0].freshness.satisfied is True, (
-        "以 published_at 算只落後 60 分鐘（<= 90），舊產出不該讓它過期")
-    assert result.value[0].freshness.warning is None
-
-    # 收緊 max_lag 到 30 分鐘：落後 60 分鐘 → 未達新鮮度並附警告
-    strict = reader.find(max_lag=timedelta(minutes=30))
-    assert strict.value[0].freshness.satisfied is False
-    assert strict.value[0].freshness.warning, "未達新鮮度必須附警告"
-    assert strict.value[0].freshness.snapshot_at == T1, "警告時仍要附正確的快照時間"
-
-
-def test_foundry_get_attaches_snapshot_time_and_freshness(tmp_path: Path):
-    """`get` 取回本體時也要附快照時間與新鮮度（link 與 contained 都是）。"""
-    drive = FakeDrive()
-    drive.seed_folder("root")
-    content = b"payload-get"
-    obj = drive.create("root", "obj2.bin", content)
-    contained = _artifact(
-        created_at=T1, artifact_id="artifact:01ABCDEF2345GHJKLMNPQRV",
-        name="a.bin", content=content, object_file_id=obj.id)
-    link = _artifact(
-        created_at=T1, artifact_id="artifact:01ABCDEF2345GHJKLMNPQRW",
-        name="b.md", kind="link", link="https://example.invalid/b.md")
-    reader = _foundry_reader(drive, tmp_path, clock=FixedClock(T1),
-                             artifacts=[contained, link])
-
-    got = reader.get(contained.artifact_id)
-    assert got.freshness.snapshot_at, "contained 的 get 要附快照時間"
-    assert got.freshness.satisfied is None, "沒指定 max_lag 時 satisfied 是 None"
-    assert got.value.data == content
-
-    got_link = reader.get(link.artifact_id)
-    assert got_link.freshness.snapshot_at, "link 的 get 也要附快照時間"
-    assert got_link.value.origin["link"] == "https://example.invalid/b.md"
-

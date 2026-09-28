@@ -21,7 +21,7 @@ from aistorage.errors import ReadError, WriteError
 #: Agora 的原始紀錄路徑是 `sessions/<source>/<id>/raw`（沒有副檔名），所以
 #: `include=*.json` 涵蓋不到它——用 *.json 會讓每一則控制記錄（meta.json、
 #: handoffs/*.json、_committer/rejections/*.json）都變成 Drive 上的一個獨立
-#: annex 物件，bundle 與 API 呼叫次數都會膨脹。Foundry 由呼叫端傳自己的規則。
+#: annex 物件，bundle 與 API 呼叫次數都會膨脹。要用別的規則由呼叫端傳入。
 DEFAULT_LARGEFILES = "include=sessions/*/*/raw"
 
 
@@ -423,7 +423,7 @@ class SubprocessAnnexGit:
         """單一入口完成 clone -b main、git annex init、設定 annex.max-git-bundles 與 annex.largefiles。
 
         M2：`annex.largefiles` 在**這裡**就設成最終規則（由呼叫端傳入，預設是
-        Agora 的 `include=sessions/*/*/raw`；Foundry 傳自己的規則），不再設
+        Agora 的 `include=sessions/*/*/raw`；別的實體傳自己的規則），不再設
         `include=*.json`。之前是「先 *.json、再由 AnnexRawStorage 覆寫」，結果
         取決於建構順序：在 AnnexRawStorage 之前寫入的 JSON 會被 annex 收走，
         讀取時要靠 `read_json_file` 的指標相容層才能讀回來（整合測試的

@@ -20,7 +20,7 @@ AiStorage 用到的實體資源都記在這裡：Drive 資料夾、OAuth client�
 
 - 注意：技術驗證的 `aistorage-spike` 資料夾是舊的 committer（當時在 project 2）建的，所以 project 2 的 worker client **看得到也改得到它**。之後的整合測試要由新的 committer 另外建一個測試資料夾，不再用它。
 - `~/.config/aistorage-spike/` 裡 project 2 的三份 rclone conf 與 `other-project` 的 conf 已經失效（client 已刪除）。
-- 還沒做：正式的 Agora／Foundry／讀取視圖資料夾、`RCLONE_CONF` secret、簽章金鑰與 `config/identity.json`（第 3、5 組建立時一起做）。
+- 還沒做：正式的 Agora／讀取視圖資料夾、`RCLONE_CONF` secret、簽章金鑰與 `config/identity.json`（第 3、5 組建立時一起做）。ADR 0009 之後沒有 Foundry 的 repo／讀取視圖要建。
 
 ## 技術驗證（tasks 1.1〜1.9，2026-09-26 建立）
 

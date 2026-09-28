@@ -124,9 +124,7 @@ def test_session_revisions_never_lose_data(
 
     # ---------------- 每一份快照的 raw 都讀得回來 ------------------------
     from aistorage.agora.store import AgoraStore, AnnexRawStorage
-    from aistorage.committer.run import RepoTarget
-
-    git = git_factory(tmp_path / "final-clone", RepoTarget.from_config(cfg))
+    git = git_factory(tmp_path / "final-clone", cfg)
     # 讀回 raw 要用 annex 版的 storage：raw 是 annex 物件（SHA256E key），
     # git 物件庫裡沒有它的 blob。
     store = AgoraStore(git.workdir, AnnexRawStorage(git.workdir, git=git),

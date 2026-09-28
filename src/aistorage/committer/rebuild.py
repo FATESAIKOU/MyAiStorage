@@ -54,12 +54,14 @@ from aistorage.publish.publisher import (
 from aistorage.readview.model import FileRef
 from aistorage.readview.naming import reading_name
 from aistorage.search.index import IndexMeta, dump_tables
-from aistorage.search.query import ReadingRef
+from aistorage.search.query import RawRef, ReadingRef
 
 # 索引比對時要略過的表：generation／built_at 必然不同（本地重建 vs 已發佈世代）
 META_TABLE = "meta"
 
-# readings 表比對時略過的欄位：file_id 是儲存細節，本地重建沒有 Drive id
+#: 索引比對時要略過 file_id 的表（本地重建沒有 Drive id）：readings 與 raws 的
+#: 第三欄都是 file_id。
+TABLES_WITH_FILE_ID = frozenset({"readings", "raws"})
 READINGS_FILE_ID_COLUMN = 2  # readings: session_id, snapshot_sha256, file_id, sha256, size, is_latest
 
 
@@ -114,6 +116,7 @@ class RebuildDiff:
     missing_locally: tuple[tuple[str, str], ...] = ()
     mismatched: tuple[tuple[str, str], ...] = ()
     body_failures: tuple[tuple[str, str, str], ...] = ()
+    raw_failures: tuple[tuple[str, str, str], ...] = ()
     index_tables_differing: tuple[str, ...] = ()
     rebuild_failures: tuple[tuple[str, str], ...] = ()
 
@@ -124,6 +127,7 @@ class RebuildDiff:
             or self.missing_locally
             or self.mismatched
             or self.body_failures
+            or self.raw_failures
             or self.index_tables_differing
         )
 
@@ -134,6 +138,7 @@ class RebuildDiff:
             "missing_locally": len(self.missing_locally),
             "mismatched": len(self.mismatched),
             "body_failures": len(self.body_failures),
+            "raw_failures": len(self.raw_failures),
             "index_tables_differing": len(self.index_tables_differing),
             "rebuild_failures": len(self.rebuild_failures),
         }
@@ -174,8 +179,18 @@ def rebuild_local(
     failures: list[tuple[str, str]] = []
     bodies: dict[ReadingKey, dict] = {}
     refs: dict[ReadingKey, FileRef] = {}
+    #: 原始紀錄本體的定位。file_id 在本地重建時是空的（還沒上傳 Drive），
+    #: sha256 就是 snapshot_sha256（內容定址），所以索引的 raws 表仍能比對。
+    raw_refs: dict[ReadingKey, FileRef] = {}
 
     for t in targets:
+        raw_ref = FileRef(
+            id="",
+            sha256=t.snapshot_sha256.lower(),
+            size=store.raw_path_for_snapshot(
+                t.session_id, t.snapshot_sha256).stat().st_size,
+        )
+        raw_refs[t.key] = raw_ref
         body = convert_reading(store, t.session_id, t.snapshot_sha256, converters, bodies)
         if body is None:
             failures.append((t.session_id, t.snapshot_sha256))
@@ -204,7 +219,7 @@ def rebuild_local(
         index_builder = build_index
     index_builder(
         index_path,
-        entries=index_entries(store, latest_by_session, bodies, refs),
+        entries=index_entries(store, latest_by_session, bodies, refs, raw_refs),
         links=collect_links(store),
         handoffs=collect_handoffs(store),
         rejections=(),
@@ -227,7 +242,7 @@ def rebuild_local(
 
 
 def _project_readings(rows: Sequence[tuple]) -> list[tuple]:
-    """readings 表比對用的投影：去掉 file_id（本地重建沒有 Drive id）。"""
+    """readings／raws 表比對用的投影：去掉 file_id（本地重建沒有 Drive id）。"""
     return [tuple(r[:READINGS_FILE_ID_COLUMN] + r[READINGS_FILE_ID_COLUMN + 1:]) for r in rows]
 
 
@@ -238,7 +253,7 @@ def _index_differs(local: dict[str, list[tuple]], published: dict[str, list[tupl
         if table == META_TABLE:
             continue  # generation／built_at 必然不同，不算差異
         lhs, rhs = local.get(table, []), published.get(table, [])
-        if table == "readings":
+        if table in TABLES_WITH_FILE_ID:
             lhs, rhs = _project_readings(lhs), _project_readings(rhs)
         if lhs != rhs:
             differing.append(table)
@@ -280,6 +295,7 @@ def compare_with_published(
     )
 
     body_failures: list[tuple[str, str, str]] = []
+    raw_failures: list[tuple[str, str, str]] = []
     if verify_bodies:
         for row in published_tables.get("readings", []):
             sid, snap, fid, sha, size, latest = row
@@ -296,6 +312,21 @@ def compare_with_published(
                 client.reading(ref)
             except Exception as e:  # 記代碼，不記內容
                 body_failures.append((key[0], key[1], type(e).__name__))
+        # 原始紀錄本體也要驗：`agora checkout` 靠它保證「原封不動」，壞掉的
+        # 快照在索引裡看不出來，只有實際下載並比對 sha256 才抓得到。
+        for row in published_tables.get("raws", []):
+            sid, snap, fid, sha, size = row
+            ref = RawRef(
+                session_id=str(sid),
+                snapshot_sha256=str(snap).lower(),
+                file_id=str(fid),
+                sha256=str(sha).lower(),
+                size=int(size),
+            )
+            try:
+                client.raw(ref)
+            except Exception as e:  # 記代碼，不記內容
+                raw_failures.append((str(sid), str(snap).lower(), type(e).__name__))
 
     return RebuildDiff(
         published_generation=int(manifest.get("generation", 0)),
@@ -306,6 +337,7 @@ def compare_with_published(
         missing_locally=tuple(missing_locally),
         mismatched=tuple(mismatched),
         body_failures=tuple(body_failures),
+        raw_failures=tuple(raw_failures),
         index_tables_differing=tuple(_index_differs(result.index_tables, published_tables)),
         rebuild_failures=result.failures,
     )
@@ -327,6 +359,8 @@ def format_diff(diff: RebuildDiff) -> str:
         f"  mismatched={len(diff.mismatched)}: {_ids(diff.mismatched)}",
         f"  body_failures={len(diff.body_failures)}: "
         f"{', '.join(f'{sid}@{sha[:12]}:{code}' for sid, sha, code in diff.body_failures) or '-'}",
+        f"  raw_failures={len(diff.raw_failures)}: "
+        f"{', '.join(f'{sid}@{sha[:12]}:{code}' for sid, sha, code in diff.raw_failures) or '-'}",
         f"  index_tables_differing={len(diff.index_tables_differing)}: "
         f"{', '.join(diff.index_tables_differing) or '-'}",
         f"  rebuild_failures={len(diff.rebuild_failures)}: {_ids(diff.rebuild_failures)}",
@@ -470,6 +504,7 @@ def main(argv: list[str] | None = None) -> int:
                             "missing_locally": diff.missing_locally,
                             "mismatched": diff.mismatched,
                             "body_failures": diff.body_failures,
+                            "raw_failures": diff.raw_failures,
                             "index_tables_differing": diff.index_tables_differing,
                             "ok": diff.ok,
                         },

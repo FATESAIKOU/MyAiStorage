@@ -315,10 +315,10 @@ class AnnexRawStorage(RawStorage):
         """只在**還沒設定**時補上 `annex.largefiles`（M2）。
 
         M2：`clone_for_commit` 已經把最終規則設好了，這裡再覆寫會讓結果取決於
-        建構順序（Foundry 的 store、管理腳本直接開的 clone、FakeAnnexGit 分支都
+        建構順序（管理腳本直接開的 clone、FakeAnnexGit 分支都
         沒有建構 `AnnexRawStorage`，規則就不對）。所以：
 
-        - 已經有設定 → 什麼都不做（尊重呼叫端，Foundry 可以傳自己的規則）；
+        - 已經有設定 → 什麼都不做（尊重呼叫端傳進來的規則）；
         - 沒有設定（自己 `git init` 出來的 repo）→ 補上預設規則，並在失敗時 raise
           （A-H1：設定沒生效時後面的 lookupkey 會全部查不到，錯誤會被誤判成
           「沒有進 annex」）。

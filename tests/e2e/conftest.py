@@ -958,35 +958,3 @@ def e2e_inbox_folder_id(e2e_settings) -> str:
             f"'{profile}' 的條目（現有：{sorted(mapping)}）"
         )
     return folder_id
-
-
-@pytest.fixture
-def e2e_foundry_reader(e2e_settings):
-    """Foundry 讀取介面（7.4）：用 foundry manifest id 建立自己的 ReadViewClient。
-
-    Foundry 與 Agora 的讀取視圖分開（ADR 0001／D7）：`reader.e2e.json` 的
-    `foundry_manifest_file_id`／`foundry_readview_folder_id` 由 e2e_setup 寫入。
-    """
-    from aistorage.drive import HttpDriveClient
-    from aistorage.drive.sa_auth import ServiceAccountToken
-    from aistorage.reader.foundry import FoundryReader
-
-    cfg_payload = e2e_settings["reader_config"]
-    manifest_file_id = cfg_payload.get("foundry_manifest_file_id")
-    if not isinstance(manifest_file_id, str) or not manifest_file_id:
-        raise MissingE2ESetting(
-            "reader.e2e.json 缺少 foundry_manifest_file_id（請重跑 scripts/e2e_setup.py）"
-        )
-    clock = SystemClock()
-    reader_cfg = ReaderConfig.load(
-        e2e_settings["reader_config_path"],
-        env={},
-    )
-    foundry_cfg = ReaderConfig(
-        manifest_file_id=manifest_file_id,
-        sa_key_path=reader_cfg.sa_key_path,
-        cache_dir=reader_cfg.cache_dir / "foundry",
-    )
-    drive = HttpDriveClient(ServiceAccountToken(foundry_cfg.sa_key_path))
-    client = ReadViewClient(drive, foundry_cfg, clock=clock)
-    return FoundryReader(client, clock=clock)

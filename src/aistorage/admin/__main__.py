@@ -3,7 +3,6 @@
 子命令：
 
 - `lock-status`／`unlock`：看與手動解除維護旗標（`unlock --confirm`）。
-- `create-repo`：建真本 repo 前綴＋git-annex 遠端（tasks 7.1；預設 dry-run）。
 - `erase`：抹除。**預設 dry-run**，只列 id、計數與雜湊；
   `--confirm <plan-hash>` 才執行（計畫一變就拒絕）。
 - `rollback`：列出可回滾的快照／把某 Session 回滾到舊快照。
@@ -80,8 +79,6 @@ def build_parser() -> argparse.ArgumentParser:
         "init-readview",
         help="初始化讀取視圖（建立 generation 0 的空 manifest、分享給 SA）")
     rv.add_argument("--folder-id", required=True, help="讀取視圖資料夾 id")
-    rv.add_argument("--element", default="agora", choices=("agora", "foundry"),
-                    help="讀取視圖屬於哪個要素（Foundry 用 foundry）")
     rv.add_argument("--config", default="config/committer.json",
                     help="提交流程設定檔（提供管理憑證的路徑）")
     rv.add_argument("--sa-email", default=None,
@@ -113,26 +110,6 @@ def build_parser() -> argparse.ArgumentParser:
     recover.add_argument("--check", action="store_true")
     recover.add_argument("--new-prefix", default=None)
 
-    cr = sub.add_parser(
-        "create-repo",
-        help="建真本 repo 前綴＋git-annex 遠端（tasks 7.1；只建 repo，不做 pin 與讀取視圖）")
-    cr.add_argument("--element", default="foundry", choices=("agora", "foundry"),
-                    help="要建哪個要素的 repo（預設 foundry）")
-    cr.add_argument("--prefix-name", required=True,
-                    help="前綴資料夾名稱（3〜64 字元小寫英文／數字／連字號；rcloneprefix 用它）")
-    cr.add_argument("--test-root-id", required=True,
-                    help="測試資料夾 id（只在它底下建東西）")
-    cr.add_argument("--rclone-conf", required=True,
-                    help="rclone 設定檔路徑（只以路徑引用，不讀內容）")
-    cr.add_argument("--rclone-remote", default="gdrive")
-    cr.add_argument("--max-git-bundles", type=int, default=10)
-    cr.add_argument("--work-parent", default=None,
-                    help="git 工作區的父目錄（省略用暫存目錄；必須不在專案 repo 內）")
-    create_mode = cr.add_mutually_exclusive_group()
-    create_mode.add_argument("--dry-run", action="store_true",
-                             help="只印計畫（預設）")
-    create_mode.add_argument("--confirm", action="store_true",
-                             help="真的建立（前綴已存在會拒絕）")
     return parser
 
 
@@ -168,8 +145,6 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_health(args)
         if args.command == "recover":
             return _cmd_recover(args)
-        if args.command == "create-repo":
-            return _cmd_create_repo(args)
     except AdminError as e:
         payload: dict[str, Any] = {"error": "admin_error", "message": str(e)}
         report = getattr(e, "report", None)
@@ -260,10 +235,10 @@ def _build_deps(cfg: Any, *, allow_production: bool = True):
         known_hosts_path=cfg.pin_known_hosts_path,
         allow_production=allow_production,
     )
-    # H1（review-25a48a9）：factory 收 target，URL 與 annex 規則都從 target 來
-    # （admin 的每一條路徑都只操作 Agora，所以 target 就是 cfg 自己）。
-    def git_factory(dest, target):
-        return _annex_git(target, dest)
+    # H1（review-25a48a9）：factory 收設定，URL 與 annex 規則都從它來
+    # （admin 的每一條路徑都只操作設定檔描述的那一個實體，所以就是 cfg 自己）。
+    def git_factory(dest, cfg):
+        return _annex_git(cfg, dest)
     try:
         registry = load_registry(cfg.identity_registry_path, allow_example=False)
     except Exception:
@@ -272,13 +247,13 @@ def _build_deps(cfg: Any, *, allow_production: bool = True):
                 converters=CONVERTERS, publisher=NullPublisher(), clock=SystemClock())
 
 
-def _annex_git(target: Any, dest: Path):
-    from aistorage.annex.git import SubprocessAnnexGit
+def _annex_git(cfg: Any, dest: Path):
+    from aistorage.annex.git import DEFAULT_LARGEFILES, SubprocessAnnexGit
 
     return SubprocessAnnexGit.clone_for_commit(
-        target.repo_url, dest,
-        max_git_bundles=target.max_git_bundles,
-        largefiles=target.largefiles_rule)
+        cfg.repo_url, dest,
+        max_git_bundles=cfg.max_git_bundles,
+        largefiles=DEFAULT_LARGEFILES)
 
 
 def _admin_deps(cfg: Any, deps: Any, drive: Any):
@@ -350,7 +325,6 @@ def _cmd_erase(args: argparse.Namespace) -> int:
         EraseTarget, apply_erase, plan_erase, plan_hash,
     )
     from aistorage.agora.store import AgoraStore, GitRawStorage
-    from aistorage.committer.run import RepoTarget
 
     targets: list[EraseTarget] = []
     for sid in args.session:
@@ -373,7 +347,7 @@ def _cmd_erase(args: argparse.Namespace) -> int:
         return _not_wired(f"erase（{type(e).__name__}）", "docs/runbooks/erase.md")
 
     clone_dir = Path(tempfile.mkdtemp(prefix="admin_erase_")) / "repo"
-    git = deps.git_factory(clone_dir, RepoTarget.from_config(cfg))
+    git = deps.git_factory(clone_dir, cfg)
     store = AgoraStore(clone_dir, GitRawStorage(clone_dir), git=git,
                        temp_dir=Path(tempfile.mkdtemp(prefix="admin_erase_tmp_")))
     admin = _admin_deps(cfg, deps, deps.drive)
@@ -479,14 +453,12 @@ def _cmd_init_readview(args: argparse.Namespace) -> int:
             f"init-readview（{type(e).__name__}）", "docs/runbooks/deploy.md 步驟 5")
     result = init_readview(
         deps.drive, args.folder_id, sa_email=args.sa_email,
-        confirm=bool(args.confirm), clock=deps.clock,
-        element=args.element)
+        confirm=bool(args.confirm), clock=deps.clock)
     if isinstance(result, InitReadviewPlan):
         payload = result.to_dict()
         payload["dry_run"] = True
         payload["next"] = (
             f"python -m aistorage.admin init-readview --folder-id {args.folder_id}"
-            + (f" --element {args.element}" if args.element != "agora" else "")
             + (f" --sa-email {args.sa_email}" if args.sa_email else "")
             + " --confirm")
         _emit_json(payload)
@@ -594,45 +566,6 @@ def _collect_from_config(config_path: str):
                        readview_manifest_file_id=cfg.readview_manifest_file_id,
                        quarantine_folder_id=cfg.quarantine_folder_id),
         clock=SystemClock())
-
-
-def _cmd_create_repo(args: argparse.Namespace) -> int:
-    """建 repo 前綴（tasks 7.1）。預設 dry-run，只印計畫；--confirm 才真的建。"""
-    from pathlib import Path as _Path
-
-    from aistorage.admin.create_repo import plan_create_repo, run_create_repo
-    from aistorage.drive.auth import RcloneConfToken
-    from aistorage.drive.http import HttpDriveClient
-
-    conf = _Path(args.rclone_conf)
-    if not conf.is_file():
-        raise AdminError(f"找不到 rclone 設定檔（只以路徑引用）: {conf}")
-    drive = HttpDriveClient(RcloneConfToken(conf, remote=args.rclone_remote))
-    plan = plan_create_repo(
-        drive, args.test_root_id, args.prefix_name,
-        element=args.element, max_git_bundles=args.max_git_bundles,
-    )
-    if not args.confirm:
-        payload = plan.to_dict()
-        payload["dry_run"] = True
-        payload["next"] = (
-            f"python -m aistorage.admin create-repo --element {args.element}"
-            f" --prefix-name {args.prefix_name}"
-            f" --test-root-id {args.test_root_id}"
-            f" --rclone-conf {args.rclone_conf} --confirm"
-        )
-        _emit_json(payload)
-        return 1 if plan.already_exists else 0
-    created = run_create_repo(
-        drive, args.test_root_id, args.prefix_name,
-        element=args.element, rclone_conf=conf,
-        rclone_remote=args.rclone_remote,
-        max_git_bundles=args.max_git_bundles,
-        work_parent=_Path(args.work_parent) if args.work_parent else None,
-    )
-    _emit_json({"dry_run": False, **created.to_dict(),
-                "next": "接著跑 committer init-pin（釘選值）與 admin init-readview（讀取視圖）"})
-    return 0
 
 
 def _cmd_recover(args: argparse.Namespace) -> int:

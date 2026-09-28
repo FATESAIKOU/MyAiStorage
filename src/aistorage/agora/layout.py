@@ -148,7 +148,7 @@ def record_path_for_id(item_id: str) -> str:
 
     M5 規則：
     - handoff / claim / rewrite / reference 明確路由至專屬目錄
-    - artifact 屬於 Foundry 不在 Agora，拋出 ValueError
+    - artifact 產出登錄不進 Agora（ADR 0009），拋出 ValueError
     - session 或其他 RESERVED_TYPE_NAMES 不得直接推算檔案路徑
     - 其它符合 <source>:<id> 格式者路由為 session_meta_path
     """

@@ -92,7 +92,7 @@ class FileRef:
 @dataclass(frozen=True)
 class Manifest:
     format: str                   # "aistorage.readview/v1"
-    element: str                  # "agora"（之後 Foundry 用 "foundry"）
+    element: str                  # "agora"（期 1 只有 Agora，ADR 0009）
     generation: int               # 單調遞增，從 1 開始
     published_at: str             # RFC 3339 UTC（到毫秒）
     agora_main_sha: str           # 這個世代對應的真本 main commit（第 12 步用來判斷要不要發佈）

@@ -95,7 +95,6 @@ def _fake_setup_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Fa
     out = {
         "state": tmp_path / "e2e_state.json",
         "committer": cfg_dir / "committer.e2e.json",
-        "foundry": cfg_dir / "committer.foundry.e2e.json",
         "identity": cfg_dir / "identity.e2e.json",
         "reader_root": tmp_path / "reader.e2e.json",
         "reader_cfg": cfg_dir / "reader.e2e.json",
@@ -114,7 +113,6 @@ def _fake_setup_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Fa
     monkeypatch.setattr(e2e, "KNOWN_HOSTS", known_hosts)
     monkeypatch.setattr(e2e, "TEST_KEYS_DIR", out["keys_dir"])
     monkeypatch.setattr(e2e, "COMMITTER_E2E_JSON", out["committer"])
-    monkeypatch.setattr(e2e, "COMMITTER_FOUNDRY_E2E_JSON", out["foundry"])
     monkeypatch.setattr(e2e, "IDENTITY_E2E_JSON", out["identity"])
     monkeypatch.setattr(e2e, "READER_E2E_JSON", out["reader_root"])
     monkeypatch.setattr(e2e, "READER_CONFIG_E2E_JSON", out["reader_cfg"])
@@ -159,7 +157,6 @@ def _patch_teardown_env(
     local: dict[str, Path] = {}
     for attr in (
         "COMMITTER_E2E_JSON",
-        "COMMITTER_FOUNDRY_E2E_JSON",
         "IDENTITY_E2E_JSON",
         "READER_E2E_JSON",
         "READER_CONFIG_E2E_JSON",
@@ -173,7 +170,7 @@ def _patch_teardown_env(
 
 def _config_files(out: dict[str, Path]) -> list[Path]:
     """容器／提交流程讀的設定檔（狀態檔是本機帳本，不算）。"""
-    return [out["committer"], out["foundry"], out["identity"], out["reader_root"], out["reader_cfg"]]
+    return [out["committer"], out["identity"], out["reader_root"], out["reader_cfg"]]
 
 
 def _walk_keys(obj: Any):
@@ -208,7 +205,7 @@ def test_setup_is_idempotent_and_reuses_the_existing_environment(
 
     state1 = _run_setup(drive, out)
     snapshot1 = {fid: f.name for fid, f in drive.snapshot()["files"].items()}
-    assert sorted(calls) == ["agora", "foundry"], "第一次要真的建兩個 repo"
+    assert calls == ["agora"], "第一次要真的建 Agora 的 repo"
 
     calls.clear()
     state2 = _run_setup(drive, out)
@@ -342,18 +339,11 @@ def test_written_configs_contain_only_ids_paths_and_format_strings(
         "readview_folder_id",
         "inbox_folder_ids",
         "sa_key_path",
-        "foundry_manifest_file_id",
-        "foundry_readview_folder_id",
     }
     assert reader_cfg["format"] == "aistorage.reader/v1"
     assert list(reader_cfg["inbox_folder_ids"]) == [PROFILE], "只能有測試 profile"
     # 每個 id 都真的指向 FakeDrive 裡的物件（不是祕密、不是任意字串）
-    for key in (
-        "manifest_file_id",
-        "readview_folder_id",
-        "foundry_manifest_file_id",
-        "foundry_readview_folder_id",
-    ):
+    for key in ("manifest_file_id", "readview_folder_id"):
         drive.get(reader_cfg[key])
     inbox = drive.get(reader_cfg["inbox_folder_ids"][PROFILE])
     assert inbox.is_folder and inbox.name == "inbox"
@@ -372,15 +362,9 @@ def test_written_configs_contain_only_ids_paths_and_format_strings(
     assert committer_cfg["repo"].startswith("agora-e2e-"), "e2e 的釘選值要和整合測試分開"
     assert committer_cfg["repo"] != "agora"
     assert committer_cfg["repo"].endswith(state["ulid"])
-    # Foundry 走 `repos`（CommitterConfig.repos：只列 Agora 以外的 repo），
-    # 不再用舊的 `foundry:` 欄位；名稱同樣帶自己的 ulid。
-    assert "foundry" not in committer_cfg
-    foundry_cfg = committer_cfg["repos"]["foundry"]
-    assert foundry_cfg["url"].startswith("annex::")
-    assert foundry_cfg["max_raw_size"] == 104857600          # 收容產出 100 MiB
-    # Foundry 的上層資料夾要自己宣告（不能沿用 Agora 的）
-    assert foundry_cfg["prefix_levels"], "Foundry 必須自己宣告 prefix_levels"
-    assert committer_cfg["readview_folder_id_foundry"]
+    # ADR 0009：設定檔只描述一個實體，沒有 `repos`、也沒有 Foundry 的欄位
+    assert "repos" not in committer_cfg
+    assert "readview_folder_id_foundry" not in committer_cfg
     assert committer_cfg["repo_url"].startswith("annex::")
     assert committer_cfg["identity_registry_path"] == "config/identity.e2e.json"
     assert state["prefix_folder_id"] == drive.get(state["prefix_folder_id"]).id

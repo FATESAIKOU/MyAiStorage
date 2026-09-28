@@ -72,7 +72,7 @@ def test_layout_record_routing_and_ulid_validation():
     assert layout.record_path_for_id("opencode:ses_12345") == "sessions/opencode/ses_12345/meta.json"
     assert layout.record_path_for_id("opencode:ses/sub:01") == "sessions/opencode/ses%2Fsub%3A01/meta.json"
 
-    # 3. 保留型態拒絕：artifact 屬於 Foundry，session 不能以 ULID 單獨作為 ID
+    # 3. 保留型態拒絕：artifact 不進 Agora、session 不能以 ULID 單獨作為 ID
     with pytest.raises(ValueError):
         layout.record_path_for_id(f"artifact:{valid_ulid}")
 

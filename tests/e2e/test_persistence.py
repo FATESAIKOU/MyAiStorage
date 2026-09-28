@@ -3,7 +3,7 @@
 Adheres strictly to:
 - openspec/changes/establish-aistorage-phase1/tasks.md §9.5
 - Spawns sessions and sub-sessions (tasks)
-- Commits to Agora and Foundry
+- Commits to Agora
 - Completely destroys all resident containers and wipes all local /work directories
 - AgoraReader continues to query and retrieve all sessions, readings, and links
 - Sub-sessions remain queryable with valid parent_id referencing mother session
@@ -13,7 +13,6 @@ Adheres strictly to:
   `assert len(hits) >= 1`，並從 export 確認 `task` 工具真的建立了子 Session。
 - 刪除的是**容器真正的工作目錄**：fixture 設定 `AISTORAGE_WORK_ROOT`，
   刪除後斷言目錄不存在、`docker inspect` 失敗（容器真的沒了）。
-- 補上 Foundry 的持久性（task 9.5 要求 Agora 與 Foundry）。
 """
 
 from __future__ import annotations
@@ -112,55 +111,3 @@ def test_9_5_persistence_across_local_destruction(
     hits_after = e2e_reader.find_sessions(Query(parent_id=root_agora)).value
     assert len(hits_after) >= 1, "刪除本機資料後子 Session 仍必須查得到"
     assert any(h.hit.session.session_id == child_agora for h in hits_after)
-
-
-@pytest.mark.e2e
-@pytest.mark.xfail(
-    strict=True,
-    reason="待 impl1 接線：run.py 第 13 步 foundry target 仍走舊 _publish_foundry"
-    "（run.py:1475-1483，註明 H5 待接線），未換成 FoundryReadViewPublisher.publish"
-    "（publish/foundry.py:136）＋回報 published_item_keys（H4）；artifact 進真本後"
-    "讀取視圖世代不含它 → find 查不到。接好會 XPASS，請移除這個標記",
-)
-def test_9_5_foundry_persistence(resident_pool, run_committer, e2e_foundry_reader):
-    """9.5 的 Foundry 部分：容器與本機資料刪除後，Foundry 產出仍取得到。"""
-    from aistorage.schema import generate_ulid
-
-    marker = f"PERSIST-FOUNDRY-{generate_ulid()}"
-    c = resident_pool("e2e-persist-foundry")
-    s_id = c.create_session()
-    c.send(s_id, "請用一句話確認收到。")
-    c.sync_once([s_id])
-    run_committer()
-    c.prompt(
-        "請產生一份報告，內容包含識別碼 " + marker + "，"
-        "寫成容器內的本機檔案 /work/persist-report.pdf，"
-        "並使用工具 aistorage_register_artifact 登錄至 Foundry"
-        "（kind=contained、name=persist-report.pdf、"
-        "content_type=application/pdf、file_path=/work/persist-report.pdf）。",
-        session_id=s_id,
-    )
-    assert_tool_called(c, s_id, "aistorage_register_artifact")
-    c.sync_once([s_id])
-    run_committer()
-
-    artifacts = poll(
-        lambda: [
-            f.artifact
-            for f in e2e_foundry_reader.find(session_id=agora_session_id(s_id)).value
-        ]
-        or None,
-        what="Foundry 目錄出現產出",
-    )
-    artifact = artifacts[0]
-
-    # 銷毀容器與工作目錄
-    work_dir = c.work_dir
-    c.stop()
-    shutil.rmtree(work_dir, ignore_errors=True)
-
-    # Foundry 的目錄與本體都還在
-    again = [f.artifact for f in e2e_foundry_reader.find(session_id=agora_session_id(s_id)).value]
-    assert any(a.artifact_id == artifact.artifact_id for a in again)
-    content = e2e_foundry_reader.get(artifact.artifact_id).value
-    assert content.data and marker.encode("utf-8") in content.data

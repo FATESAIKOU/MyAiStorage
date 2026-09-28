@@ -14,6 +14,12 @@ dev = [
     "pytest>=8.0.0",
 ]
 
+[project.scripts]
+# Agora 的單一指令入口。轉接器另外一個（`agora-<coding agent 名稱>`），
+# 和同步器一起放在 src/aistorage/adapters/。
+agora = "aistorage.agora_cli.__main__:main"
+agora-opencode = "aistorage.adapters.opencode.__main__:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

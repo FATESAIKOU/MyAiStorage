@@ -93,6 +93,21 @@ class ReadingRef:
     is_latest: bool
 
 
+@dataclass(frozen=True)
+class RawRef:
+    """原始紀錄本體的定位（`agora checkout` 的起點包用它原封不動重建開頭）。
+
+    內容定址：`sha256` 就是 `snapshot_sha256` 本身，所以下載後可以同時驗
+    「檔案沒被動過」與「這份確實是該快照」。
+    """
+
+    session_id: str
+    snapshot_sha256: str
+    file_id: str
+    sha256: str
+    size: int
+
+
 def _session_row(row: tuple) -> SessionRow:
     return SessionRow(
         session_id=row[0], source=row[1], title=row[2], producer=row[3],
@@ -395,6 +410,30 @@ def get_reading_ref(db: sqlite3.Connection, session_id: str,
         return None
     return ReadingRef(session_id=row[0], snapshot_sha256=row[1], file_id=row[2],
                       sha256=row[3], size=row[4], is_latest=bool(row[5]))
+
+
+def get_raw_ref(db: sqlite3.Connection, session_id: str,
+                snapshot_sha256: str) -> RawRef | None:
+    """取某個快照的原始紀錄本體定位；沒有發佈過回傳 None。
+
+    舊世代的 index 還沒有 `raws` 表（升級前發佈的）時回傳 None，而不是報錯：
+    那個快照的原始紀錄沒有發佈出去，`agora checkout` 要明確拒絕而不是猜。
+    """
+    ensure_sqlite_version()
+    tables = {
+        str(row[0]) for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','view')")
+    }
+    if "raws" not in tables:
+        return None
+    row = db.execute(
+        "SELECT * FROM raws WHERE session_id = ? AND snapshot_sha256 = ?",
+        (session_id, snapshot_sha256.lower()),
+    ).fetchone()
+    if row is None:
+        return None
+    return RawRef(session_id=row[0], snapshot_sha256=row[1], file_id=row[2],
+                  sha256=row[3], size=int(row[4]))
 
 
 def get_rejection(db: sqlite3.Connection, item_key: str) -> RejectionRow | None:

@@ -15,7 +15,7 @@ Adheres strictly to:
   - Replay (different raw sha in ledger) -> REJECT(replayed_item_key)
   - ALREADY (same raw sha in ledger or existing session) -> ALREADY(already)
   - Collision -> REJECT(collision)
-  - Artifact -> DEFER(foundry_not_enabled)
+  - Artifact -> REJECT(artifact_not_supported)（ADR 0009：產出登錄不進 Agora）
   - .sig ReadError cannot become REJECT (must bubble up / abort)
   - Ledger corruption aborts (raises MismatchError)
   - Monotonicity checks (stale)
@@ -595,8 +595,13 @@ def test_evaluate_collision_rejects(tmp_path: Path):
     assert d.code == "collision"
 
 
-def test_evaluate_artifact_rejects_as_foundry_not_enabled(tmp_path: Path):
-    """決策表 14: artifact 項目一律 DEFER(foundry_not_enabled)（保留在收件匣，第 7 組處理）。"""
+def test_evaluate_artifact_is_explicitly_rejected(tmp_path: Path):
+    """決策表 14: artifact 項目一律 REJECT(artifact_not_supported)（ADR 0009）。
+
+    產出登錄不再經過 Agora 的收件匣。必須**明確拒收**（不是 DEFER、不是靜默
+    忽略）：DEFER 的項目會永遠留在收件匣裡讓每一輪都變成非空輪，靜默忽略則讓
+    寫入者永遠不知道為什麼被拒。
+    """
     env = IntakeTestEnv(tmp_path)
     ulid = generate_ulid()
 
@@ -635,9 +640,10 @@ def test_evaluate_artifact_rejects_as_foundry_not_enabled(tmp_path: Path):
     )
 
     d = env.evaluate_item(item)
-    # PM 指示：Foundry 沒設定時 REJECT（DEFER 會讓項目永遠留在收件匣裡）
     assert d.kind == DecisionKind.REJECT
-    assert d.code == "foundry_not_enabled"
+    assert d.code == "artifact_not_supported"
+    # 驗章通過的拒收要寫進真本的拒收快取（稽核用，24 小時後才刪得掉）
+    assert d.deletable_after is not None
 
 
 def test_evaluate_sig_read_error_bubbles_up_and_does_not_reject(tmp_path: Path):

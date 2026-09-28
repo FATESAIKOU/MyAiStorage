@@ -43,7 +43,7 @@ def _git_soft(repo: Path, *args: str) -> tuple[int, str]:
 
 
 def _annex_repo(path: Path, *, largefiles: str | None = None) -> tuple[Path, str]:
-    """真的 git-annex repo；largefiles 有給就設（模擬 Foundry 傳自己的規則）。"""
+    """真的 git-annex repo；largefiles 有給就設（呼叫端自備規則）。"""
     from aistorage.annex.git import get_git_env
 
     env = get_git_env()
@@ -93,7 +93,7 @@ def test_clone_for_commit_sets_the_final_rule(tmp_path: Path) -> None:
 
 
 def test_annex_raw_storage_does_not_override_an_existing_rule(tmp_path: Path) -> None:
-    """M2：已經有規則（Foundry 的 `include=objects/*/*`）時不覆寫。"""
+    """M2：已經有規則（例如 `include=objects/*/*`）時不覆寫。"""
     repo, _ = _annex_repo(tmp_path / "foundry", largefiles="include=objects/*/*")
     AnnexRawStorage(repo)          # 預設是 Agora 的規則，但不該覆寫
     assert _git(repo, "config", "--get", "annex.largefiles").strip() == "include=objects/*/*"

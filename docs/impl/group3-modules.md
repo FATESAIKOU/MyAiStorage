@@ -192,7 +192,7 @@ def replay_refs(bundle_paths_in_order: list[Path], *, workdir: Path, repo_uuid: 
 
 ### 3.2 釘選值與 pin repo（`integrity/pin.py`）
 
-pin repo 裡的檔案（每個真本 repo 一組，Foundry 之後照同樣做）：
+pin repo 裡的檔案（**以 repo 名稱分檔**，所以同一個 pin repo 可以放不只一個實體的釘選值）：
 ```
 .pin/agora.json            # 正式
 .pin/agora.pending.json    # 待定（沒有就不存在）
@@ -389,7 +389,7 @@ class DecisionKind(Enum):
 class Decision:
     kind: DecisionKind
     item: InboxItem
-    code: str                        # 例：bad_signature、unauthorized、stale、collision、orphan、raw_mismatch、foundry_not_enabled
+    code: str                        # 例：bad_signature、unauthorized、stale、collision、orphan、raw_mismatch、artifact_not_supported、rewrite_not_supported
     producer: str | None = None
     record_metadata: dict | None = None
     sidecar: dict | None = None
@@ -416,7 +416,8 @@ def evaluate(item: InboxItem, *, drive: DriveClient, registry: Registry, store: 
     #     session：existing 的 raw_sha256 == 這次的 → ALREADY（3.4 dedup）；snapshot_at ≤ existing 的 → REJECT(stale)
     #     reference：read_snapshot_at ≤ existing 的 → REJECT(stale)
     #     其他：updated_at ≤ existing 的，而且內容相同 → ALREADY；更舊 → REJECT(stale)
-    # 11. artifact → DEFER(foundry_not_enabled)（第 7 組之前留在收件匣，不刪也不當孤兒）
+    # 11. artifact → REJECT(artifact_not_supported)（ADR 0009：產出登錄不再經過 Agora 的收件匣；
+    #     明確拒收而不是 DEFER——DEFER 會讓項目永遠留在收件匣裡、每一輪都變成非空輪）
     # 12. 否則 ACCEPT
 
 def stamp_record(inbox_metadata: dict, *, producer: str) -> dict:

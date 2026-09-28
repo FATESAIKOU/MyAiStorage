@@ -60,18 +60,17 @@ class DecisionKind(Enum):
 
     ACCEPT = "accept"    # 接受並納入真本
     REJECT = "reject"    # 拒收（錯誤格式、偽造簽章、重放衝突等）
-    DEFER = "defer"      # 暫緩處理（如缺 sig 未滿 24 小時、artifact 尚未啟用 foundry）
+    DEFER = "defer"      # 暫緩處理（如缺 sig 未滿 24 小時）
     ALREADY = "already"  # 已經收過且內容相同（冪等跳過，收件匣檔案可刪除）
-    #: H2（review-25a48a9）：這個項目不屬於本 pipeline（型態是別的 repo 的）。
-    #: **不進清冊、不寫拒收、不進收件匣的刪除判斷**——由另一個 pipeline 處理。
-    SKIP = "skip"
 
 
-#: 通過驗章的候選，其 `metadata.type` 落在這裡面就歸這個 pipeline（Agora）。
-AGORA_ITEM_TYPES: frozenset[str] = frozenset(
-    {"session", "handoff", "claim", "reference", "rewrite"})
-#: 歸 Foundry 的型態。
-FOUNDRY_ITEM_TYPES: frozenset[str] = frozenset({"artifact"})
+#: 形狀合法、但這個提交流程**不收**的型態 → 拒收原因。
+#:
+#: `artifact`（產出登錄）在 ADR 0009 之後不再經過 Agora 的收件匣：Foundry 改成
+#: Google Drive 共享資料夾＋GitHub，產出的出處記在產出自己的 metadata。住民還在
+#: 放舊格式的產出登錄時要**明確拒收並發佈原因**（寫入者看得到、24 小時後清掉），
+#: 不可只是讓它躺在收件匣裡——沒有人評估的項目會讓收件匣永遠不是空的。
+UNSUPPORTED_ITEM_TYPES: dict[str, str] = {"artifact": "artifact_not_supported"}
 
 
 @dataclass(frozen=True)
@@ -230,15 +229,15 @@ def verify_item_sidecar(
     drive: DriveClient,
     registry: Registry,
 ) -> tuple[VerifiedSidecar | None, str]:
-    """只做「驗章＋授權」，回傳通過的那一個候選（H2 的分派依據）。
+    """只做「驗章＋授權」，回傳通過的那一個候選。
 
     失敗時回傳 `(None, code)`；`code` 的可能值與 `evaluate` 的拒收代碼一致。
-    **不寫任何真本**（不記清冊、不寫拒收快取），所以可以安全地在決定分派之前呼叫。
+    **不寫任何真本**（不記清冊、不寫拒收快取），所以呼叫端可以先問一次再決定要不要
+    深入評估（例如要知道「有沒有通過驗章的 artifact」而不必重下載）。
 
-    為什麼要獨立出來（H2）：分派必須以**通過驗章的候選**的 `metadata.type` 為準。
-    原本的 `items_for` 讀「第一個 sidecar 候選」的 type，而那一步在驗章之前，
-    住民只要在同一個收件匣放一個排在前面的垃圾 sidecar（`type: artifact`）就能
-    把合法的 session 導到 Foundry（或反過來）。
+    為什麼要獨立出來（H2）：判斷必須以**通過驗章的候選**的 `metadata.type` 為準。
+    原本的分派讀「第一個 sidecar 候選」的 type，而那一步在驗章之前，住民只要在同一個
+    收件匣放一個排在前面的垃圾 sidecar 就能改變歸屬。
     """
     folder_profile = registry.inbox_folders().get(item.inbox_folder_id)
     if not folder_profile:
@@ -314,9 +313,6 @@ def evaluate(
     clock: Clock,
     workdir: Path,
     max_raw: int = DEFAULT_MAX_RAW_SIZE,
-    foundry_enabled: bool = False,
-    foundry_store: Any = None,
-    allowed_types: frozenset[str] | None = None,
     preverified: VerifiedSidecar | None = None,
 ) -> Decision:
     """評估單一收件匣項目。
@@ -324,17 +320,14 @@ def evaluate(
     評估流水線順序（review-g3d M5）：
     1. 驗章＋授權（多候選逐一嘗試，通過才往下）
     2. 清冊與防重放檢核（命中 REJECT 沿用代碼，同 raw sha 回傳 ALREADY）
-    3. artifact → Foundry 未設定則 REJECT(foundry_not_enabled)（無需下載 raw）
+    3. 這個提交流程不收的型態（artifact）→ REJECT（無需下載 raw）
     4. Session 快照上限調整與蓋章 stamp_record + classify_id
     5. 單調性防重放檢核（以宣告之 raw sha256 與快照時間比較，無需下載 raw）
     6. Raw metadata 比對（size、sha256Checksum）
     7. Raw 串流下載並經由 check_raw 驗證
     8. 接受 ACCEPT
 
-    H2（review-25a48a9）：`allowed_types` 給定時，型態不在其中的項目回
-    `SKIP(wrong_pipeline)`（不進清冊、不寫拒收）——分派依的是**通過驗章的**
-    候選，這裡是第二道防呆。`preverified` 是分派那一步已驗過的結果，
-    傳進來就不會重複下載。
+    `preverified` 是呼叫端已驗過的結果，傳進來就不會重複下載。
 
     M6 備註：此函式僅比對當前真本已提交之狀態。同輪內多項目套用時，apply_*
     須針對同一 Session 或同一對 reference link 再次確認單調性。
@@ -506,38 +499,17 @@ def evaluate(
     metadata = selected_sc_dict.get("metadata", {})
     item_type = metadata.get("type")
 
-    # H2：型態不屬於這個 pipeline → SKIP。**不寫清冊、不寫拒收快取**，
-    # 由另一個 pipeline 處理。用戶的合法項目不會因為分派錯誤被永久燒掉。
-    if allowed_types is not None and str(item_type or "") not in allowed_types:
-        return Decision(
-            kind=DecisionKind.SKIP,
-            item=item,
-            code="wrong_pipeline",
-            authenticated=True,
-            rejected_at=now_rfc3339,
-            deletable_after=None,
-        )
+    # 3. 這個提交流程不收的型態 → 明確拒收（ADR 0009 之後產出登錄不再進 Agora）。
+    #    為什麼不是 DEFER：DEFER 的項目會一直留在收件匣裡、每一輪都被重新評估，
+    #    永遠不會前進，而且收件匣永遠不是空的。REJECT 會被記錄、發佈拒收原因，
+    #    並在 24 小時後被清掉，寫入者看得到原因。
+    unsupported = UNSUPPORTED_ITEM_TYPES.get(str(item_type or ""))
+    if unsupported is not None:
+        return reject_decision(unsupported, authenticated=True)
 
     # M4: 期 1 不提供改寫功能 → REJECT(rewrite_not_supported)（無需下載 raw）
     if item_type == "rewrite":
         return reject_decision("rewrite_not_supported", authenticated=True)
-
-    # 3. artifact：Foundry 沒設定就 REJECT（PM 指示）。
-    #    為什麼不是 DEFER：DEFER 的項目會一直留在收件匣裡、每一輪都被重新評估，
-    #    永遠不會前進，而且收件匣永遠不是空的（7.3 的 M4 垃圾清理也抓不到它）。
-    #    REJECT 會被記錄、發佈拒收原因，並在 24 小時後被清掉，寫入者看得到原因。
-    if item_type == "artifact":
-        if not foundry_enabled and foundry_store is None:
-            return reject_decision("foundry_not_enabled", authenticated=True)
-        body = selected_sc_dict.get("body", {})
-        art_kind = body.get("kind")
-        if art_kind not in ("link", "contained"):
-            return reject_decision("invalid_format", authenticated=True)
-        if not body.get("produced_by_session_id"):
-            return reject_decision("invalid_format", authenticated=True)
-        if art_kind == "link":
-            if not body.get("link") and not (body.get("repo") and body.get("path")):
-                return reject_decision("invalid_format", authenticated=True)
 
     # 4. Session 調整 snapshot_at 上限（D4）與蓋章 stamp_record + classify
     if item_type == "session":
@@ -556,13 +528,6 @@ def evaluate(
     record = stamp_record(metadata, producer=selected_producer)
 
     existing = store.get_record(record["id"])
-    existing_cat: dict[str, Any] | None = None
-    if item_type == "artifact" and foundry_store is not None:
-        ulid = record["id"].split(":", 1)[1] if ":" in record["id"] else record["id"]
-        existing_cat = foundry_store.get_catalog(ulid)
-        if existing_cat is not None:
-            existing = existing_cat.get("metadata", existing_cat)
-
     cid = classify_id(existing, record)
     if cid == "collision":
         return reject_decision("collision", authenticated=True)
@@ -599,7 +564,7 @@ def evaluate(
         else:
             inc_updated = parse_rfc3339(record.get("updated_at", ""))
             ex_updated = parse_rfc3339(existing.get("updated_at", ""))
-            ex_body = existing_cat.get("body") if existing_cat is not None else existing.get("body")
+            ex_body = existing.get("body")
             if inc_updated < ex_updated:
                 return reject_decision("stale", authenticated=True)
             elif inc_updated == ex_updated:
@@ -614,13 +579,8 @@ def evaluate(
             return rej
 
     # 6. M5: Raw metadata 檢查
-    is_contained_artifact = (
-        item_type == "artifact" and selected_sc_dict.get("body", {}).get("kind") == "contained"
-    )
-    needs_raw = item_type in ("session", "rewrite") or is_contained_artifact
-
-    artifact_max_raw = 100 * 1024 * 1024  # 100 MiB (D7)
-    effective_max_raw = min(max_raw, artifact_max_raw) if item_type == "artifact" else max_raw
+    effective_max_raw = max_raw
+    needs_raw = item_type in ("session", "rewrite")
 
     raw_path: Path | None = None
     if needs_raw:
@@ -689,7 +649,6 @@ _DISPATCH_ORDER = {
     "handoff": 3,
     "claim": 4,
     "reference": 5,
-    "artifact": 6,
 }
 
 

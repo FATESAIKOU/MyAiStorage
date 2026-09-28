@@ -24,11 +24,14 @@ from aistorage.reading import validate_reading
 from aistorage.reader.config import ReaderConfig
 from aistorage.readview.model import READVIEW_FORMAT as MANIFEST_FORMAT
 from aistorage.readview.model import parse_manifest
-from aistorage.search.query import ReadingRef
+from aistorage.search.query import RawRef, ReadingRef
 
 MANIFEST_MAX_BYTES = 4 << 20
 INDEX_MAX_BYTES = 256 << 20
 READING_MAX_BYTES = 128 << 20
+#: 原始紀錄本體的上限。與 inbox 對原始紀錄的 100 MiB 上限一致（DEFAULT_MAX_RAW_SIZE），
+#: 讀取端不因為自己是大檔就放寬。
+RAW_MAX_BYTES = 128 << 20
 
 
 class AccessDenied(AiStorageError):
@@ -188,3 +191,20 @@ class ReadViewClient:
             detail = "; ".join(f"{e.field}: {e.message}" for e in errors[:5])
             raise MismatchError(f"reading 檔未通過格式驗證: {ref.file_id}: {detail}")
         return data
+
+    def raw(self, ref: RawRef) -> bytes:
+        """取某個快照的**原始紀錄本體**（`agora checkout` 的起點包要用）。
+
+        依 `snapshot_sha256` 快取（內容定址，所以不同 Session 的同名快照也安全）。
+        下載後驗 sha256 與 size：`snapshot_sha256` 本身就是內容雜湊，所以這一步
+        同時保證「檔案沒被動過」與「這份確實是那個快照」——`agora checkout` 靠它
+        承諾「原始紀錄原封不動」（ADR 0010 的 KV cache 要求）。
+        """
+        sha = ref.snapshot_sha256.lower()
+        dest = self._dir / f"raw-{sha}"
+        if not dest.is_file():
+            tmp = self._dir / f"raw-{sha}.tmp"
+            self._drive.download(ref.file_id, tmp, max_bytes=RAW_MAX_BYTES)
+            self._verify_file(tmp, sha256=sha, size=int(ref.size))
+            os.replace(tmp, dest)
+        return dest.read_bytes()

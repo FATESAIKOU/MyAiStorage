@@ -216,13 +216,14 @@ def test_m4_active_flag_refuses_reuse_even_for_init_pin() -> None:
     assert read_maintenance(pins, "agora") is None
 
 
-# ----------------------------------- M4-2：init-pin precheck 用 target 的欄位
+# ------------------------------- M4-2：init-pin 的 precheck 用這份設定的欄位
 
 
-def test_m4_init_pin_precheck_uses_target_fields(monkeypatch) -> None:
-    """`--repo foundry` 時，precheck 讀的是 Foundry 的前綴，不是 Agora 的。"""
-    import types
+def test_m4_init_pin_precheck_uses_the_config_fields(monkeypatch) -> None:
+    """`init-pin --confirm` 的 precheck 讀的是**這份設定**的前綴與 uuid。
 
+    ADR 0009：鎖與 precheck 針對的永遠是設定檔描述的那一個實體（期 1 是 Agora）。
+    """
     import aistorage.admin.lock as admin_lock
     import aistorage.admin.remote as admin_remote
     import aistorage.committer.__main__ as committer_main
@@ -232,7 +233,7 @@ def test_m4_init_pin_precheck_uses_target_fields(monkeypatch) -> None:
     monkeypatch.setattr(admin_lock, "GitPinFiles", lambda *a, **k: pins)
     monkeypatch.setattr(admin_lock, "GitHubAdmin", lambda *a, **k: gh)
     monkeypatch.setattr(committer_main, "init_pin_cli",
-                        lambda cfg, deps, *, confirm=False, target=None: None)
+                        lambda cfg, deps, *, confirm=False: None)
 
     seen: dict[str, str] = {}
 
@@ -249,45 +250,10 @@ def test_m4_init_pin_precheck_uses_target_fields(monkeypatch) -> None:
         prefix_folder_id="prefix-agora", quarantine_folder_id="q",
         identity_registry_path="config/identity.json",
         github_repository="owner/repo")
-    target = types.SimpleNamespace(
-        repo="foundry", prefix_folder_id="prefix-foundry",
-        repo_uuid="99999999-2222-3333-4444-555555555555")
-    committer_main._init_pin_under_lock(cfg, FakeDeps(FakeDrive(), None),
-                                        target)
-    assert seen == {"prefix": "prefix-foundry",
-                    "uuid": "99999999-2222-3333-4444-555555555555"}, seen
-
-
-def test_m4_init_pin_precheck_without_target_uses_cfg(monkeypatch) -> None:
-    """沒有 `--repo`（Agora）時，precheck 照樣用 cfg 的前綴。"""
-    import aistorage.admin.lock as admin_lock
-    import aistorage.admin.remote as admin_remote
-    import aistorage.committer.__main__ as committer_main
-
-    pins = MemoryPinFiles()
-    gh, _state = _gh_fake()
-    monkeypatch.setattr(admin_lock, "GitPinFiles", lambda *a, **k: pins)
-    monkeypatch.setattr(admin_lock, "GitHubAdmin", lambda *a, **k: gh)
-    monkeypatch.setattr(committer_main, "init_pin_cli",
-                        lambda cfg, deps, *, confirm=False, target=None: None)
-
-    seen: dict[str, str] = {}
-
-    def _fake_read(drive: Any, prefix_folder_id: str, repo_uuid: str, *,
-                   allow_missing: bool) -> str | None:
-        seen["prefix"] = prefix_folder_id
-        seen["uuid"] = repo_uuid
-        return None
-
-    monkeypatch.setattr(admin_remote, "read_remote_manifest_sha256", _fake_read)
-
-    cfg = CommitterConfig(
-        repo="agora", repo_uuid=UUID, repo_url="drive://agora",
-        prefix_folder_id="prefix-agora", quarantine_folder_id="q",
-        identity_registry_path="config/identity.json",
-        github_repository="owner/repo")
-    committer_main._init_pin_under_lock(cfg, FakeDeps(FakeDrive(), None), None)
+    committer_main._init_pin_under_lock(cfg, FakeDeps(FakeDrive(), None))
     assert seen == {"prefix": "prefix-agora", "uuid": UUID}, seen
+    # 旗標也掛在這個 repo 名稱上（管理操作與提交流程講的是同一個 repo）
+    assert read_maintenance(pins, "agora") is None
 
 
 # --------------------------------- M4-3：有刪檔時重讀必須是 None
@@ -399,4 +365,4 @@ def test_m4_init_pin_requires_github_repository() -> None:
         prefix_folder_id="p", quarantine_folder_id="q",
         identity_registry_path="config/identity.json")
     with pytest.raises(RuntimeError, match="github_repository"):
-        committer_main._init_pin_under_lock(cfg, FakeDeps(FakeDrive(), None), None)
+        committer_main._init_pin_under_lock(cfg, FakeDeps(FakeDrive(), None))

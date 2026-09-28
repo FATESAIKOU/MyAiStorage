@@ -3,7 +3,7 @@
 Adheres strictly to:
 - openspec/changes/establish-aistorage-phase1/tasks.md §9.4
 - Design D2, D3, ADR 0008
-- Resident credentials cannot push, modify, or delete Agora / Foundry true store
+- Resident credentials cannot push, modify, or delete the Agora true store
 - Unsigned or invalidly signed inbox items rejected; self-claimed producer ignored
 - Duplicate claims rejected with already_claimed
 - Revoking the test profile's signing key immediately causes rejection of its items

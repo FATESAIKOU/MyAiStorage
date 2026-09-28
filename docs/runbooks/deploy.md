@@ -37,17 +37,18 @@
 
 **誰做**：🛠 PM（用 committer 的 rclone conf 走 Drive API，不用網頁）
 
-建立一個共同根與其下七個資料夾。共同根之後會設成 `root_folder_id`（步驟 6），
+建立一個共同根與其下三個資料夾。共同根之後會設成 `root_folder_id`（步驟 6），
 把提交流程與 git-annex 的 blast radius 限制在這個根底下。
+
+> ADR 0009：期 1 只有 Agora 有寫入閘門與讀取視圖，所以不需要 Foundry 的前綴、
+> 隔離區與讀取視圖。Foundry 改成 Drive 共享資料夾＋GitHub，不需要 git-annex
+> repo（見 `docs/backlog.md` 的「新 Foundry」）。
 
 ```
 aistorage/                        ← 共同根（root_folder_id）
 ├── agora/                        ← Agora 真本前綴（GITMANIFEST／GITBUNDLE／annex 物件）
 ├── agora-quarantine/             ← 隔離區（與前綴同一層；提交流程的清掃要求「佈局是平的」）
-├── foundry/                      ← Foundry 真本前綴
-├── foundry-quarantine/
-├── readview/                     ← Agora 讀取視圖（SA 讀取）
-└── readview-foundry/             ← Foundry 讀取視圖
+└── readview/                     ← Agora 讀取視圖（SA 讀取）
 ```
 
 > 收件匣**不在這個根底下**：worker 的 `drive.file` 憑證只看得見「自己建立的檔案」，
@@ -75,8 +76,7 @@ print("帳號根 =", account_root)
 
 root = drive.create(account_root, "aistorage", b"", mime_type=GOOGLE_FOLDER_MIME)
 print("aistorage/", root.id)
-for name in ("agora", "agora-quarantine", "foundry", "foundry-quarantine",
-             "readview", "readview-foundry"):
+for name in ("agora", "agora-quarantine", "readview"):
     f = drive.create(root.id, name, b"", mime_type=GOOGLE_FOLDER_MIME)
     print(f"{name:20s} {f.id}")
 PY
@@ -127,16 +127,6 @@ PY
 ```
 看得到 manifest（此時只有 manifest.json）代表分享成功。
 順便確認 `agora/` 讀不到（應該是 404／403）：讀取身分不該能碰真本。
-
-**Foundry 讀取視圖（`readview-foundry/`）**：Foundry pipeline 接上後（第 7 組），
-用同一支指令加 `--element foundry` 對那個資料夾跑一次（步驟 5b 有完整順序）：
-
-```bash
-uv run python -m aistorage.admin init-readview --folder-id <readview-foundry id> \
-  --element foundry \
-  --sa-email spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com \
-  --dry-run      # 先看計畫；確認後把 --dry-run 換成 --confirm
-```
 
 **失敗怎麼退**：SA 金鑰不動；把該協作者從資料夾移除即可（Drive 網頁：共用 → 移除）。
 已經建立的 manifest 要刪掉才會回到「未初始化」，見步驟 5 的退法。
@@ -212,9 +202,6 @@ PY
 
 **失敗怎麼退**：`git push` 失敗多半是 `rcloneprefix` 寫錯（它只能是名稱路徑）。
 把該前綴底下的檔案依 file id 永久刪除，重跑本步驟（用同一個暫存目錄即可）。
-
-> Foundry 前綴的 annex 遠端見步驟 5b（或由 A 線在 RepoPipeline 裡處理）；
-> 在那之前 Foundry 前綴維持空資料夾。
 
 ---
 
@@ -308,8 +295,7 @@ uv run python -m aistorage.admin init-readview \
 
 - `config/committer.json`：`readview_manifest_file_id`（欄位已存在，預設 `null`）
 - worker／讀取端設定（`~/.config/aistorage/reader.json` 或容器內的 `reader.json`）：
-  `manifest_file_id`、`readview_folder_id`；Foundry 的欄位是
-  `foundry_manifest_file_id`、`foundry_readview_folder_id`
+  `manifest_file_id`、`readview_folder_id`
 
 **怎麼驗證**
 
@@ -330,51 +316,6 @@ PY
 **失敗怎麼退**：manifest 還沒發佈過任何世代，所以 `drive.delete_permanently(<id>)`
 之後把兩份設定檔的欄位改回 `null` 即可，沒有孤兒檔案。
 （若已經發佈過世代就不是這樣了：那時要改讀取視圖必須走 recovery，不能刪 manifest。）
-
-## 步驟 5b｜Foundry 的 annex 遠端、釘選值與讀取視圖（第 7 組接上後才做）
-
-**誰做**：🛠 PM（暫存目錄內；**不在專案 repo 裡跑 git**）
-
-前置：Foundry pipeline 已接線（review-25a48a9 的 H1〜H4 修好、`repos.foundry`
-已設定）。**在那之前不要做本步驟**，Foundry 前綴維持空資料夾。
-
-1. 建 annex 遠端（與步驟 3 同一套動作，前綴換成 `aistorage/foundry`，
-   largefiles 換成 Foundry 的規則，schema 換成 `foundry/v1`）：
-
-   ```bash
-   cd "$(mktemp -d)"
-   export RCLONE_CONFIG="$HOME/.config/aistorage/rclone-committer.conf"
-   export FOUNDRY_PREFIX="aistorage/foundry"
-   # 步驟 3 的腳本照抄，把 AGORA_PREFIX 換成 FOUNDRY_PREFIX，
-   # annex.largefiles 換成 include=objects/*/*，
-   # _committer/schema_version 寫 foundry/v1，
-   # 另建空的 catalog/ 與 objects/（git 不追蹤空目錄，不放 .gitkeep 佔位，
-   #  也不放 seed 物件，避免未被 pin 記錄的雜散 key）。
-   # 或用 admin 指令（tasks 7.1 的可重複執行版本，先 dry-run 再 confirm）：
-   cd /path/to/MyAiStorage
-   uv run python -m aistorage.admin create-repo --element foundry \
-     --prefix-name <foundry 前綴名> --test-root-id <正式改用共同根 id> \
-     --rclone-conf "$HOME/.config/aistorage/rclone-committer.conf" --dry-run
-   # 確認計畫（already_exists=false）後把 --dry-run 換成 --confirm
-   ```
-
-   怎麼驗證：與步驟 3 相同（`GITMANIFEST--<uuid>` 與 ≥1 個 `GITBUNDLE-*`；
-   此時還沒有 annex 物件，`annex_keys` 是空集合是正常的）。
-
-2. `init-pin`（步驟 4 的 Foundry 版：`--config` 指向含 `repos.foundry` 的設定，
-   repo 名用 `foundry`，只跑一次）。
-
-3. `init-readview --element foundry`（步驟 2 的 Foundry 版，見該節指令）。
-
-4. 把 `repos.foundry` 的 `prefix_folder_id`、`quarantine_folder_id`、
-   `readview_folder_id`、`readview_manifest_file_id`、`repo_uuid`、`repo_url`
-   填進 `config/committer.json`（形狀見 `config/committer.example.json` 的
-   `repos` 區塊），**commit 並 push 到 `main`**。再把
-   `identity.json` 的 `mac-opencode` 的 `allowed_types` 加上 `artifact`
-   後 commit（上線前不要加：沒接線時開了只會讓每輪變非空輪）。
-
-**失敗怎麼退**：比照步驟 3／4／5 各自的退法；`allowed_types` 加了 `artifact`
-之後要拿掉就再 commit 一次（它是設定，不是真本）。
 
 ## 步驟 6｜在 `rclone-committer.conf` 設 `root_folder_id`
 
@@ -498,8 +439,9 @@ uv run python -m aistorage.identity check config/identity.json
 **不要刪舊金鑰**：`signing_keys` 保留舊筆目並把 `status` 改成 `revoked`、填 `revoked_at`
 （`docs/identity-setup.md` 步驟四）。
 
-> `allowed_types` 目前**不要**放 `artifact`：Foundry 還沒接上（第 7 組），開了會讓
-> artifact 進收件匣卻沒有人套用，每輪都變成非空輪。接上後見步驟 5b 第 4 點。
+> `allowed_types` 目前**不要**放 `artifact`：Agora 的提交流程不收產出登錄項目
+> （ADR 0009），開了只會讓 artifact 進了收件匣卻被明確拒收（原因碼
+> `artifact_not_supported`），而且每一輪都變成非空輪。
 
 ---
 
@@ -684,7 +626,6 @@ rm ~/Library/LaunchAgents/local.aistorage.health.plist
 | `aistorage/`（共同根） | | `docs/resources.md` |
 | `aistorage/agora/` | | `config/committer.json` `prefix_folder_id` |
 | `aistorage/agora-quarantine/` | | `config/committer.json` `quarantine_folder_id` |
-| `aistorage/foundry/`、`foundry-quarantine/` | | Foundry 的設定檔 |
 | `aistorage/readview/` | | `config/committer.json` `readview_folder_id` |
 | 讀取視圖 manifest（`admin init-readview --confirm` 印出） | | `config/committer.json` `readview_manifest_file_id` ＋ `reader.json` `manifest_file_id` |
 | `aistorage-inbox-mac-opencode/`（worker 自建，步驟 9） | | `config/identity.json` `inbox_folder_ids` ＋ `reader.json` `inbox_folder_ids` |

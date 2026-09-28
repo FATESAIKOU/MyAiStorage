@@ -42,7 +42,7 @@ from aistorage.agora.store import AgoraStore, GitRawStorage, SessionRecord
 from aistorage.clock import SystemClock
 from aistorage.committer.config import CommitterConfig
 from aistorage.committer.publish import NullPublisher
-from aistorage.committer.run import Deps, RepoTarget, init_pin_cli, run
+from aistorage.committer.run import Deps, init_pin_cli, run
 from aistorage.converters import get_converter
 from aistorage.identity import load_registry
 from aistorage.integrity.pin import GitPinStore
@@ -205,7 +205,7 @@ def test_admin_operation_and_committer_round_do_not_overwrite_each_other(
 
     # ---------------- 佈置：真本裡有一個有兩份快照的 Session ----------------
     session_id = f"opencode:{SESSION}"
-    clone = git_factory(tmp_path / "admin-clone", RepoTarget.from_config(cfg))
+    clone = git_factory(tmp_path / "admin-clone", cfg)
     work = clone.workdir
     store = AgoraStore(work, GitRawStorage(work), git=clone,
                        temp_dir=tmp_path / "store")

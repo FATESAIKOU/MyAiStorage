@@ -20,7 +20,7 @@ Requirement（與它的 Scenario）逐一對到驗證它的測試。測試以檔
 ## 一、common/item-model（項目由 metadata 與本體組成）
 
 ### Requirement: 項目由 metadata 與本體組成
-- Scenario: 連結型項目 → 單元 `test_accept_foundry.py::test_apply_artifact_link_type_provenance`、`test_inbox_builder_items_smoke.py::test_artifact_link_and_contained`
+- Scenario: 連結型項目 → 單元 `test_inbox_builder_items_smoke.py::test_artifact_link_and_contained`（組裝器仍在，收件匣不再收：見 tasks 7.1）
 - Scenario: 實體型項目 → 單元 `test_agora_smoke.py::test_session_record_serialization_smoke`、`test_accept_importer.py::test_build_inbox_item_opencode_shape`
 
 ### Requirement: 共通 metadata 最小欄位
@@ -88,7 +88,7 @@ Requirement（與它的 Scenario）逐一對到驗證它的測試。測試以檔
 
 ### Requirement: 永久保存
 - Scenario: 來源應用刪除了自己的紀錄 → 單元 `test_syncer_smoke.py::test_unchanged_is_not_reuploaded`、`test_agora::test_agora_store_session_crud_and_deduplication`、`test_accept_impl2.py::test_source_deletion_does_not_touch_agora`（API 清單拿掉 Session 後同步一輪，Agora 真本還在、無上傳無錯誤；impl2 補）。
-- 「GC 只回收 bundle、annex 物件（Agora raw 與 Foundry 收容產出）永遠不被刪」→ 單元 `test_accept_gaps.py::test_gc_only_reclaims_bundles_and_never_touches_annex_objects`、`test_foundry_contained_object_survives_committer_gc`
+- 「GC 只回收 bundle、annex 物件（Agora raw）永遠不被刪」→ 單元 `test_accept_gaps.py::test_gc_only_reclaims_bundles_and_never_touches_annex_objects`、`test_gc_ignores_files_under_subfolders_of_the_prefix`
 
 ### Requirement: 單一 Session 手動匯入
 - Scenario: 匯入一個舊的 Claude Code Session → 單元 `test_accept_importer.py::test_import_session_out_dir_claude_code`、`test_accept_importer.py::test_import_repeat_same_item_key`、`test_importer_smoke.py::test_import_claude_code_to_out_dir`
@@ -177,6 +177,11 @@ Requirement（與它的 Scenario）逐一對到驗證它的測試。測試以檔
 
 ## 七、foundry/catalog（Foundry）
 
+> **已移除（ADR 0009、tasks 7.1）**：`foundry/catalog` spec 已從期 1 的 openspec
+> change 移除，git-annex 版 Foundry 的程式、測試與 e2e 都刪掉了。Foundry 改成
+> Google Drive 共享資料夾＋GitHub，期 1 不實作（待辦見 `docs/backlog.md`）。
+> 下面留著原來的追溯條目看歷史；引用到的測試檔已不存在。
+
 ### Requirement: 產出目錄登錄所有產出
 - Scenario: 從 Session 找產出 → 單元 `test_accept_foundry.py::test_foundry_reader_find_by_type_case_producer_time_and_session`、`test_foundry_smoke.py::test_foundry_index_and_reader`；e2e `test_consolidation.py::test_9_2_foundry_artifact_registration`（xfail）
 
@@ -193,9 +198,7 @@ Requirement（與它的 Scenario）逐一對到驗證它的測試。測試以檔
 - 每筆結果附快照時間與新鮮度 → 單元 `test_accept_gaps.py::test_foundry_results_attach_a_snapshot_time`（有附）、`test_foundry_get_attaches_snapshot_time_and_freshness`（get 的 contained 與 link）、`test_accept_gaps.py::test_foundry_freshness_uses_the_generation_published_at`（F-M1 已修好：快照時間是世代 `published_at`，本輪由紅轉綠，不再 xfail）、`test_foundry_reader_74.py::test_snapshot_time_is_published_at`（同契約的第二組斷言）；整合 `test_foundry_publish.py`（真 Drive 全鏈：查詢快照時間是世代 published_at、取回本體雜湊一致）。
 
 ### Requirement: 永久保存
-- Scenario: 一年前的簡報 → 單元 `test_accept_gaps.py::test_gc_only_reclaims_bundles_and_never_touches_annex_objects`（annex 物件只會 KEEP；GC 只刪 removed bundle；誤放進候選會被防呆擋下）、`test_foundry_contained_object_survives_committer_gc`（Foundry 收容產出不被提交流程 GC 掃到）
-
----
+- Scenario: 一年前的簡報 → 單元 `test_accept_gaps.py::test_gc_only_reclaims_bundles_and_never_touches_annex_objects`（annex 物件只會 KEEP；GC 只刪 removed bundle；誤放進候選會被防呆擋下）。Foundry 那條（`test_foundry_contained_object_survives_committer_gc`）已刪；同一條契約改由 `test_accept_gaps.py::test_gc_ignores_files_under_subfolders_of_the_prefix` 覆蓋（提交流程的 GC 不碰前綴底下的子樹）。
 
 ## 八、mybrain/case-reference（MyBrain 銜接）
 
@@ -236,15 +239,16 @@ Requirement（與它的 Scenario）逐一對到驗證它的測試。測試以檔
 
 **F-M1 已修好（由紅轉綠）**
 - `test_accept_gaps.py::test_foundry_freshness_uses_the_generation_published_at` 不再 xfail，直接通過；同契約另有 `test_foundry_reader_74.py::test_snapshot_time_is_published_at` 與整合 `test_foundry_publish.py`（真 Drive 全鏈）覆蓋。追溯表 foundry 條目已更新。
+- **2026-09-28（tasks 7.1）**：這些 Foundry 測試隨 git-annex 版 Foundry 一起移除；上面的段落留著看歷史。
 
 **前一輪優先補的三個**（`tests/unit/test_accept_gaps.py`，本輪確認仍全綠）
-1. Foundry 永久保存：annex 物件不隨 GC 刪除 ✅（`test_gc_only_reclaims_bundles_and_never_touches_annex_objects`、`test_foundry_contained_object_survives_committer_gc`）
+1. 永久保存：annex 物件不隨 GC 刪除 ✅（`test_gc_only_reclaims_bundles_and_never_touches_annex_objects`、`test_gc_ignores_files_under_subfolders_of_the_prefix`）
 2. 用 worker 憑證執行抹除必須 403／404 ✅ 單元層（`test_erase_cli_requires_management_credentials`、`test_worker_credentials_cannot_delete_true_copy_files`、`test_worker_credentials_give_404_on_repo_folders`、`test_erase_plan_refuses_files_outside_the_allowed_parents`）
-3. Foundry 讀取的新鮮度附帶 ✅（`test_foundry_results_attach_a_snapshot_time`、`test_foundry_get_attaches_snapshot_time_and_freshness`；F-M1 修好後時間基準也 ✅，見上）
+3. Foundry 讀取的新鮮度附帶 ✅（`test_foundry_results_attach_a_snapshot_time`、`test_foundry_get_attaches_snapshot_time_and_freshness`；F-M1 修好後時間基準也 ✅，見上）——已隨 tasks 7.1 移除
 
 **程式缺口清單**
 
 - **G-1（已修好）**：session-link「Session Link 的兩種類型」（`specs/agora/session-link`）—— `search/query.py::get_links` 以 `KNOWN_LINK_KINDS`（`continuation`／`reference`）過濾後回傳，不報錯；`reader::get_session` 與 `get_continuation` 都經它取數，故一併正確。索引寫入不過濾（未知 kind 照存，將來新類型讀者可讀）。鎖定測試 `test_accept_impl2.py::test_unknown_link_kind_is_ignored` 已由紅轉綠（不再 xfail）。呼叫端檢查：syncer（`commit.py::_is_visible` 比對已限定 kind／id，不受影響）、skill `read`（透傳 `links_out`，過濾正是 spec 要的行為）、publisher 寫路徑（只產兩種 kind）。
 - **非缺口（記錄供 archive 判斷）**：
   - session-record／抹除的整合層 worker 403 負向案例：要真 worker conf（見 e2e README），非測試資源可覆蓋；單元層已擋（`test_accept_gaps.py`），e2e 有 `test_9_4_worker_cannot_delete_or_modify_true_store`（由 e2e 覆蓋，本輪未跑）。
-  - 9.x e2e 情境（`test_split.py::test_9_1_split_1_to_n`、`test_consolidation.py`、`test_reference.py::test_9_3_mutual_reference_n_to_m`、`test_adversarial.py` 4 項、`test_persistence.py`）：一律標「由 e2e 覆蓋」，本輪未實際跑（環境由 impl3 占用）。其中 `test_persistence.py` 的 task 子 Session 斷言與 `test_consolidation.py::test_9_2_foundry_artifact_registration` 目前是 xfail（修好會 XPASS）。
+  - 9.x e2e 情境（`test_split.py::test_9_1_split_1_to_n`、`test_consolidation.py`、`test_reference.py::test_9_3_mutual_reference_n_to_m`、`test_adversarial.py` 4 項、`test_persistence.py`）：一律標「由 e2e 覆蓋」，本輪未實際跑（環境由 impl3 占用）。`test_persistence.py` 的 task 子 Session 斷言仍由 e2e 覆蓋；`test_consolidation.py::test_9_2_foundry_artifact_registration` 已隨 tasks 7.1 刪除。
