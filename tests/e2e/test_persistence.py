@@ -124,9 +124,17 @@ def test_9_5_foundry_persistence(resident_pool, run_committer, e2e_foundry_reade
 
     marker = f"PERSIST-FOUNDRY-{generate_ulid()}"
     c = resident_pool("e2e-persist-foundry")
-    s_id, _ = c.prompt(
+    s_id = c.create_session()
+    c.send(s_id, "請用一句話確認收到。")
+    c.sync_once([s_id])
+    run_committer()
+    c.prompt(
         "請產生一份報告，內容包含識別碼 " + marker + "，"
-        "並使用工具 aistorage_register_artifact 登錄至 Foundry（kind=contained）。"
+        "寫成容器內的本機檔案 /work/persist-report.pdf，"
+        "並使用工具 aistorage_register_artifact 登錄至 Foundry"
+        "（kind=contained、name=persist-report.pdf、"
+        "content_type=application/pdf、file_path=/work/persist-report.pdf）。",
+        session_id=s_id,
     )
     assert_tool_called(c, s_id, "aistorage_register_artifact")
     c.sync_once([s_id])

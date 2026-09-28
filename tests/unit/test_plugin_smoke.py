@@ -36,6 +36,7 @@ TOOL_TO_COMMAND = {
     "aistorage_read": "read",
     "aistorage_reference": "reference",
     "aistorage_list_handoffs": "list-handoffs",
+    "aistorage_register_artifact": "register-artifact",
     "aistorage_stop": "stop",
 }
 
@@ -75,17 +76,19 @@ process.env.AISTORAGE_ARGV_LOG = '{log_main}'
 const ctxMain = {{ sessionID: "ses_main" }}
 out.errors_main = {{}}
 for (const [name, tool] of Object.entries(plugin.tool)) {{
-  try {{
-    await tool.execute(
-      {{ query: "接續", summary: "做完了", session_id: "ses_target",
-         handoff_ids: ["handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV"],
-         parts: [{{ title: "甲", summary: "甲的工作" }}] }},
-      ctxMain)
-    out.errors_main[name] = null
-  }} catch (e) {{
-    out.errors_main[name] = String(e.message)
+    try {{
+      await tool.execute(
+        {{ query: "接續", summary: "做完了", session_id: "ses_target",
+           handoff_ids: ["handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+           kind: "link", name: "架構報告", link: "https://example.invalid/report",
+           repo: "org/repo", path: "docs/report.md", case_id: "c1",
+           parts: [{{ title: "甲", summary: "甲的工作" }}] }},
+        ctxMain)
+      out.errors_main[name] = null
+    }} catch (e) {{
+      out.errors_main[name] = String(e.message)
+    }}
   }}
-}}
 
 // 情境 2：子 Session（有 parentID）→ 主 Session 限定的工具必須拒絕
 process.env.AISTORAGE_ARGV_LOG = '{log_child}'
@@ -271,6 +274,23 @@ def test_plugin_does_not_lose_arguments_with_quotes_and_newlines(tmp_path: Path)
     assert summaries, "handoff-end 的 summary 沒有出現在 argv"
     for value in summaries:
         assert value == "做完了", f"summary 被改動了：{value!r}"
+
+
+def test_plugin_register_artifact_passes_its_arguments_verbatim(tmp_path: Path):
+    """register-artifact 的位置／旗標對到 CLI，而且 --session 是自己的 id。"""
+    out = _harness(tmp_path)
+    calls = _argv_calls(Path(out["_log_main"]))
+    reg = next(c for c in calls if "register-artifact" in c)
+    assert reg[:3] == ["-m", "aistorage.skill", "register-artifact"]
+    assert reg[reg.index("--session") + 1] == "ses_main"  # 來自 context
+    assert reg[reg.index("--kind") + 1] == "link"
+    assert reg[reg.index("--name") + 1] == "架構報告"
+    assert reg[reg.index("--link") + 1] == "https://example.invalid/report"
+    assert reg[reg.index("--repo") + 1] == "org/repo"
+    assert reg[reg.index("--path") + 1] == "docs/report.md"
+    assert reg[reg.index("--case") + 1] == "c1"
+    # 模型不能指定產生者：沒有 --produced-by 這種旗標
+    assert not any("produced" in flag for flag in reg)
 
 
 def test_plugin_refuses_when_the_session_list_query_fails(tmp_path: Path):

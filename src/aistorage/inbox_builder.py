@@ -161,6 +161,7 @@ def build_inbox_item(
     max_raw: int = DEFAULT_MAX_RAW_SIZE,
     clock: Clock | None = None,
     time_source: str | None = None,
+    archive_ms: int | None = None,
 ) -> tuple[bytes, dict]:
     """把一份來源 Session 的原始紀錄包成收件匣項目的 sidecar 與簽章。
 
@@ -190,6 +191,10 @@ def build_inbox_item(
         clock: 時鐘（測試可注入 FixedClock）。
         time_source: 強制標記 metadata.time_source（呼叫端知道時間不是從來源端
             來的時候用，例如匯入工具用檔案 mtime 當保守值）。
+        archive_ms: 來源端的封存時間（毫秒）。同步器知道這個值（API 回報的
+            `time.archived`），所以宣告停止的判斷用「封存之後還有沒有訊息被
+            建立」，而不是只看 `in_progress`（review-g5-6 H3）。沒有給就退回
+            保守規則。
 
     建立／更新時間取自 `facts`；轉換器給不出來時退回 `now`，並在 metadata 加上
     擴充欄位 `time_source: "import"`，讓讀者知道這兩個時間是匯入時間而非來源端時間。
@@ -217,10 +222,30 @@ def build_inbox_item(
     if status == "stopped":
         if not stopped_at or not str(stopped_at).strip():
             raise InboxBuildError("status=stopped 時必須提供 stopped_at")
-        if facts.in_progress:
+        # 「封存之後還有訊息被建立」才不能宣告停止（review-g5-6 H3、D10）。
+        # 宣告停止一定發生在 AI 回覆**生成中**（那一則訊息在封存之前建立），
+        # 所以只看 in_progress 會讓 stop 每一次都失敗。
+        # 封存時間優先用呼叫端給的（同步器從 API 拿得到），沒有才用 facts 的。
+        archived_ms = archive_ms
+        if archived_ms is None:
+            archived_ms = getattr(facts, "archived_ms", None)
+        created_ms = getattr(facts, "last_message_created_ms", None)
+        if created_ms is None:
+            created_ms = getattr(facts, "last_message_ms", None)
+        if (
+            archived_ms is not None
+            and created_ms is not None
+            and created_ms > archived_ms
+        ):
             raise InboxBuildError(
-                "來源端仍在生成中（in_progress=true），不能宣告停止中；"
-                "請先讓 Session 產生完畢或以 running 匯入"
+                "封存之後還有訊息被建立（來源端在封存之後又有新訊息），"
+                "不能宣告停止中；請以 running 匯入"
+            )
+        if facts.in_progress and archived_ms is None:
+            # 沒有封存時間就無從判斷，只能用舊的保守規則
+            raise InboxBuildError(
+                "來源端仍在生成中（in_progress=true）且沒有封存紀錄，"
+                "不能宣告停止中；請先讓 Session 產生完畢或以 running 匯入"
             )
     elif stopped_at is not None:
         raise InboxBuildError("status=running 時不得提供 stopped_at")
@@ -700,6 +725,7 @@ def build_artifact_item(
     repo: str | None = None,
     path: str | None = None,
     raw_path: Path | None = None,
+    description: str | None = None,
     case_id: str | None = None,
     provenance: str | None = None,
     created_at: str | None = None,
@@ -719,7 +745,14 @@ def build_artifact_item(
     if not _usable_time(name):
         raise InboxBuildError("產出的檔名（name）必須是非空字串")
 
-    body: dict[str, Any] = {"kind": kind, "produced_by_session_id": produced_by_session_id}
+    body: dict[str, Any] = {
+        "kind": kind,
+        "produced_by_session_id": produced_by_session_id,
+        "name": name,
+        "filename": name,
+    }
+    if description is not None:
+        body["description"] = description
     raw_meta: dict[str, Any] | None = None
     if kind == "link":
         if not _usable_time(link):

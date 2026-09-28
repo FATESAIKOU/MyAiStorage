@@ -276,3 +276,54 @@ def test_uploaded_sig_is_byte_identical(signer):
     assert sidecar_bytes == item.sidecar_bytes
     assert verify_sidecar_bytes(sidecar_bytes, item.sig, {key_id: pub}) is not None
     assert item.sig == sign_sidecar_bytes(item.sidecar_bytes, key, key_id)
+
+
+def test_builder_refuses_stopped_when_a_message_comes_after_the_archive(tmp_path: Path):
+    """同步器之外，builder 自己也要擋「封存之後還有訊息被建立」的 stopped 宣告。
+
+    這是底層的最後一道：就算呼叫端自己猜成 stopped，也不該產出這種項目
+    （review-g5-6 H3）。
+    """
+    from aistorage.converters.base import SessionFacts
+    from aistorage.inbox_builder import InboxBuildError, build_inbox_item
+
+    raw = tmp_path / "raw.json"
+    raw.write_text("{}", encoding="utf-8")
+    key = bytes(range(32))
+    facts = SessionFacts(
+        title="主線", created_at="2026-09-27T08:00:00Z",
+        updated_at="2026-09-27T09:00:00Z", message_ids=("m0",),
+        archived_at="2026-09-27T08:30:00Z", last_message_at="2026-09-27T09:00:00Z",
+        in_progress=True,                       # 回覆還在生成中
+        archived_ms=1788000000000,
+        last_message_ms=1788003600000,          # completed 在封存之後
+        last_message_created_ms=1788001800000,  # created 在封存之後 → 新訊息
+    )
+    with pytest.raises(InboxBuildError) as e:
+        build_inbox_item(
+            raw, source="opencode", source_session_id="ses_1", facts=facts,
+            profile="mac-opencode", key=key, key_id="mac-opencode-abcdef12",
+            status="stopped", stopped_at="2026-09-27T09:00:00Z",
+            snapshot_at="2026-09-27T09:00:00Z", now="2026-09-27T09:00:00Z",
+            archive_ms=1788000000000,
+        )
+    assert "封存之後" in str(e.value)
+
+    # created 在封存**之前**（宣告停止時生成中的那一則回覆）→ 允許 stopped
+    ok = SessionFacts(
+        title="主線", created_at="2026-09-27T08:00:00Z",
+        updated_at="2026-09-27T09:00:00Z", message_ids=("m0",),
+        archived_at="2026-09-27T08:30:00Z", last_message_at="2026-09-27T09:00:00Z",
+        in_progress=True,
+        archived_ms=1788000000000,
+        last_message_ms=1788003600000,          # completed 在封存之後（舊的規則會誤判）
+        last_message_created_ms=1787999000000,  # created 在封存之前
+    )
+    sidecar, _sig = build_inbox_item(
+        raw, source="opencode", source_session_id="ses_1", facts=ok,
+        profile="mac-opencode", key=key, key_id="mac-opencode-abcdef12",
+        status="stopped", stopped_at="2026-09-27T09:00:00Z",
+        snapshot_at="2026-09-27T09:00:00Z", now="2026-09-27T09:00:00Z",
+        archive_ms=1788000000000,
+    )
+    assert json.loads(sidecar.decode("utf-8"))["session"]["status"] == "stopped"

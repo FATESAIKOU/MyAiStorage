@@ -10,10 +10,11 @@ Adheres strictly to:
 - S4 generates a report registered to Foundry
 - Foundry catalog queryable for S4's artifact and blob content retrievable
 
-Foundry 產出登錄（F-H1：提交流程還沒接上 Foundry、plugin 也還沒有
-`aistorage_register_artifact`）目前不可能通過，所以**整個 Foundry 測試函式**
-以 `xfail(strict=True)` 標住：修好之後會 XPASS → 轉紅，提醒移除標記
-（review 建議不要只標輔助函式）。Agora 的統合路徑另外一個函式，沒有標記。
+Foundry 端到端（收件匣 → 提交流程 → Foundry 真本／讀取視圖）還沒接上：
+提交流程不處理 artifact、發佈端沒寫 `object_file_id`（F-H1〜F-H3）。工具本身
+（`aistorage_register_artifact`）已經有了，所以整個 Foundry 測試函式以
+`xfail(strict=True)` 標住：修好之後會 XPASS → 轉紅，提醒移除標記。
+Agora 的統合路徑是另一個函式，沒有標記。
 """
 
 from __future__ import annotations
@@ -130,7 +131,7 @@ def test_9_2_consolidation_n_to_1(resident_pool, run_committer, e2e_reader: Agor
 @pytest.mark.e2e
 @pytest.mark.xfail(
     strict=True,
-    reason="F-H1：Foundry 尚未接進提交流程，plugin 也還沒有 aistorage_register_artifact；"
+    reason="F-H1〜F-H3：提交流程尚未處理 artifact、發佈端沒寫 object_file_id；"
     "修好後這個測試會 XPASS，請移除這個標記",
 )
 def test_9_2_foundry_artifact_registration(
@@ -147,9 +148,11 @@ def test_9_2_foundry_artifact_registration(
     s4_agora = agora_session_id(s4_id)
 
     c4.prompt(
-        "請產生一份報告，內容必須包含這個識別碼：" + marker + "。"
-        "並使用工具 aistorage_register_artifact 把它登錄至 Foundry 產出目錄"
-        "（kind=contained，name=architecture-summary.pdf）。",
+        "請產生一份報告，內容必須包含這個識別碼：" + marker + "，"
+        "把它寫成容器內的本機檔案 /work/architecture-summary.pdf。"
+        "然後使用工具 aistorage_register_artifact 登錄至 Foundry 產出目錄"
+        "（kind=contained、name=architecture-summary.pdf、"
+        "content_type=application/pdf、file_path=/work/architecture-summary.pdf）。",
         session_id=s4_id,
     )
     assert_tool_called(c4, s4_id, "aistorage_register_artifact")

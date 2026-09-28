@@ -10,6 +10,9 @@ plugin 只把 `context.sessionID` 傳進來，其餘都是這裡決定：
     python -m aistorage.skill read        --session <id> [--max-lag 5m]
     python -m aistorage.skill reference   --session <id> --to <session_id> [--read-snapshot-at <ts>]
     python -m aistorage.skill list-handoffs [--case <id>]
+    python -m aistorage.skill register-artifact --session <id> --kind link|contained --name <檔名>
+        [--content-type <mime>] [--link <url>] [--repo <repo> --path <path>]
+        [--file <本體檔>] [--description <說明>] [--case <id>]
     python -m aistorage.skill stop        --session <id>
 
 輸出是 JSON（給 plugin 回給模型）。錯誤走 stderr 與非零 exit code，
@@ -102,6 +105,21 @@ def cmd_list_handoffs(args: argparse.Namespace, sd: SkillDeps) -> int:
     return _emit(tools.list_handoffs(sd, case_id=args.case))
 
 
+def cmd_register_artifact(args: argparse.Namespace, sd: SkillDeps) -> int:
+    return _emit(tools.register_artifact(
+        sd, args.session,
+        kind=args.kind,
+        name=args.name,
+        content_type=args.content_type,
+        link=args.link,
+        repo=args.repo,
+        path=args.path,
+        file_path=args.file,
+        description=args.description,
+        case_id=args.case,
+    ))
+
+
 def cmd_stop(args: argparse.Namespace, sd: SkillDeps) -> int:
     return _emit(tools.stop(sd, args.session, timeout=_lag(args.timeout)))
 
@@ -159,6 +177,19 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("list-handoffs", help="列出待認領的交接單")
     p.add_argument("--case")
     p.set_defaults(func=cmd_list_handoffs)
+
+    p = sub.add_parser("register-artifact", help="登錄產出到 Foundry 產出目錄（只上傳）")
+    p.add_argument("--session", required=True, help="目前的 Session id（plugin 傳入）")
+    p.add_argument("--kind", required=True, choices=("link", "contained"))
+    p.add_argument("--name", required=True, help="產出的檔名（顯示用，也是物件的安全檔名來源）")
+    p.add_argument("--content-type", dest="content_type")
+    p.add_argument("--link", help="link 型：對外連結")
+    p.add_argument("--repo", help="link 型：原處 repo（與 --path 搭配）")
+    p.add_argument("--path", help="link 型：原處路徑（與 --repo 搭配）")
+    p.add_argument("--file", help="contained 型：容器內的本體檔路徑（上限 100 MiB）")
+    p.add_argument("--description")
+    p.add_argument("--case")
+    p.set_defaults(func=cmd_register_artifact)
 
     p = sub.add_parser("stop", help="宣告停止（主 Session 限定）")
     p.add_argument("--session", required=True)

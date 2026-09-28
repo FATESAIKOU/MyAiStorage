@@ -18,8 +18,11 @@ from typing import Any, Callable, Protocol, Sequence
 
 from aistorage.clock import Clock
 from aistorage.errors import AiStorageError
+from aistorage.inbox import DEFAULT_MAX_RAW_SIZE
 from aistorage.inbox_builder import (
     BuiltItem,
+    InboxBuildError,
+    build_artifact_item,
     build_claim_item,
     build_handoff_item,
     build_reference_item,
@@ -30,6 +33,10 @@ from aistorage.syncer.continuation import continuation_point
 from aistorage.syncer.core import Signer, sync_once
 from aistorage.syncer.opencode_api import OpencodeApi
 from aistorage.syncer.state import SyncState
+
+#: 收容產出的單檔上限（D7：100 MiB）。與 sidecar schema 的 raw.size 上限、
+#: `foundry.apply.MAX_ARTIFACT_SIZE` 是同一個值，這裡以 inbox 的常數為準。
+ARTIFACT_MAX_BYTES = DEFAULT_MAX_RAW_SIZE
 
 
 class SkillError(RuntimeError):
@@ -399,6 +406,88 @@ def reference(sd: SkillDeps, session_id: str, target_session_id: str, *,
         "to_session_id": target_session_id,
         "read_snapshot_at": snapshot_at,
         "uploaded_only": bool(upload_only),
+    }
+
+
+def register_artifact(
+    sd: SkillDeps,
+    session_id: str,
+    *,
+    kind: str,
+    name: str,
+    content_type: str | None = None,
+    link: str | None = None,
+    repo: str | None = None,
+    path: str | None = None,
+    file_path: str | None = None,
+    description: str | None = None,
+    case_id: str | None = None,
+) -> dict:
+    """`aistorage_register_artifact`：把一件產出登錄到 Foundry 產出目錄（7.2）。
+
+    `produced_by_session_id` **由 plugin 的 context 帶入**（session_id），不給模型填：
+    產生者是「哪個 Session 交出它」，模型可能填錯或填別人的（比照 Session id 的規則）。
+
+    - `link`（原處產出）：`link` 是必填的對外連結（sidecar schema 的要求）；
+      `repo`／`path` 是選填的出處補充（原處在哪個 repo 的哪個路徑）。
+      真本留在自己的專案裡，Foundry 只登錄出處。
+    - `contained`（收容產出）：`file_path` 指向容器內的本體檔（單檔上限 100 MiB；
+      超過由 `build_artifact_item` 拒收），`content_type` 必填。
+
+    只上傳，不觸發提交（與 `reference` 相同：由下一輪提交流程收進去）。
+    """
+    oc = resolve_session(sd.api, session_id)
+    if kind not in ("link", "contained"):
+        raise SkillError(f"kind 必須是 'link' 或 'contained': {kind!r}")
+    if not isinstance(name, str) or not name.strip():
+        raise SkillError("name 必填（產出的檔名）")
+    if kind == "link":
+        if not link:
+            raise SkillError(
+                "link 型必須給 link（對外連結；repo 與 path 可選填、補充出處）"
+            )
+        if file_path:
+            raise SkillError("link 型不得提供 file_path（本體留在原處）")
+    else:
+        if not content_type:
+            raise SkillError("contained 型必須給 content_type")
+        if not file_path:
+            raise SkillError("contained 型必須給 file_path（容器內的本體檔）")
+        body_path = Path(file_path)
+        if not body_path.is_file():
+            raise SkillError(f"找不到本體檔案：{file_path}")
+
+    now = sd.deps.clock.now_utc()
+    key = _signer_key(sd.deps.signer)
+    try:
+        item = build_artifact_item(
+            kind=kind,  # type: ignore[arg-type]
+            produced_by_session_id=oc.session_id(),
+            name=name.strip(),
+            profile=sd.deps.signer.profile,
+            key=key, key_id=sd.deps.signer.key_id,
+            content_type=content_type,
+            link=link, repo=repo, path=path,
+            raw_path=Path(file_path) if file_path else None,
+            description=description,
+            case_id=case_id,
+            now=now,
+            max_raw=ARTIFACT_MAX_BYTES,
+        )
+    except InboxBuildError as e:
+        # 大小上限／格式問題：轉成模型的錯誤訊息（不含內容）
+        raise SkillError(f"產出登錄未通過檢查：{e}") from None
+
+    upload_item(sd.deps.drive, sd.deps.inbox_folder_id, item)
+    return {
+        "artifact_id": item.item_id,
+        "item_key": item.item_key,
+        "kind": kind,
+        "name": name.strip(),
+        "content_type": content_type,
+        "size": item.raw_size,
+        "produced_by_session_id": oc.session_id(),
+        "uploaded_only": True,
     }
 
 

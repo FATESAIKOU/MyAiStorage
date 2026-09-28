@@ -34,6 +34,7 @@ from aistorage.skill.tools import (
     list_handoffs,
     read,
     reference,
+    register_artifact,
     split,
     stop,
     whoami,
@@ -643,6 +644,141 @@ def test_stop_archives_then_syncs(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
 
 # ---------------------------------------------------------------------------
+# 登錄產出（register_artifact，第 7 組）
+# ---------------------------------------------------------------------------
+
+
+def test_register_artifact_contained_uploads_raw_sidecar_sig(tmp_path: Path):
+    """contained：本體真的上傳成 .raw，sidecar 蓋上 profile 產生者、body 正確。"""
+    sd, env = _sd(tmp_path)
+    _main_session(sd, env)
+    body_file = tmp_path / "report.pdf"
+    body_file.write_bytes(b"%PDF-1.4 fake report")
+
+    out = register_artifact(
+        sd, "ses_1", kind="contained", name="architecture-summary.pdf",
+        content_type="application/pdf", file_path=str(body_file),
+        description="統合報告",
+    )
+
+    assert out["uploaded_only"] is True
+    assert out["kind"] == "contained"
+    assert out["produced_by_session_id"] == "opencode:ses_1"
+    assert out["artifact_id"].startswith("artifact:")
+    assert out["size"] == len(b"%PDF-1.4 fake report")
+
+    files = _inbox_files(env["drive"], env["inbox"])
+    assert f"{out['item_key']}.raw" in files
+    assert f"{out['item_key']}.sidecar.json" in files
+    assert f"{out['item_key']}.sig" in files
+
+    sidecar = next(
+        s for s in _sidecars(env) if s["item_key"] == out["item_key"]
+    )
+    assert sidecar["metadata"]["type"] == "artifact"
+    assert sidecar["profile"] == PROFILE
+    assert sidecar["body"]["kind"] == "contained"
+    assert sidecar["body"]["name"] == "architecture-summary.pdf"
+    assert sidecar["body"]["content_type"] == "application/pdf"
+    assert sidecar["body"]["produced_by_session_id"] == "opencode:ses_1"
+    assert sidecar["body"]["description"] == "統合報告"
+    assert sidecar["raw"]["size"] == len(b"%PDF-1.4 fake report")
+
+
+def test_register_artifact_link_has_no_raw(tmp_path: Path):
+    """link：沒有 raw、body 記對外連結與出處（repo＋path 是補充）。"""
+    sd, env = _sd(tmp_path)
+    _main_session(sd, env)
+
+    out = register_artifact(
+        sd, "ses_1", kind="link", name="PR #42 報告",
+        link="https://github.com/FATESAIKOU/MyAiStorage/pull/42",
+        repo="FATESAIKOU/MyAiStorage", path="docs/report.md",
+    )
+    files = _inbox_files(env["drive"], env["inbox"])
+    assert f"{out['item_key']}.raw" not in files
+
+    sidecar = next(s for s in _sidecars(env) if s["item_key"] == out["item_key"])
+    assert sidecar["body"]["kind"] == "link"
+    assert sidecar["body"]["link"].endswith("/pull/42")
+    assert sidecar["body"]["repo"] == "FATESAIKOU/MyAiStorage"
+    assert sidecar["body"]["path"] == "docs/report.md"
+    assert sidecar["raw"] is None
+
+
+def test_register_artifact_uses_the_context_session_not_the_model(tmp_path: Path):
+    """produced_by_session_id 一定來自 plugin 的 context（--session），模型不能改。"""
+    sd, env = _sd(tmp_path)
+    env["api"].set(OcSession(id="ses_1", title="主線", updated_ms=1), _raw())
+    env["api"].set(OcSession(id="ses_9", title="別的", updated_ms=1), _raw())
+
+    out = register_artifact(
+        sd, "ses_9", kind="link", name="從子 Session 登錄", link="https://example.com",
+    )
+    sidecar = next(s for s in _sidecars(env) if s["item_key"] == out["item_key"])
+    assert sidecar["body"]["produced_by_session_id"] == "opencode:ses_9"
+
+
+def test_register_artifact_rejects_bad_arguments(tmp_path: Path):
+    """缺必填、型態不符、找不到本體檔都要明確拒絕，不上傳任何東西。"""
+    sd, env = _sd(tmp_path)
+    _main_session(sd, env)
+
+    with pytest.raises(SkillError):
+        register_artifact(sd, "ses_1", kind="link", name="x")  # 沒有 link 也沒有 repo/path
+    with pytest.raises(SkillError):
+        register_artifact(sd, "ses_1", kind="contained", name="x",
+                          content_type="text/plain")  # 沒有 file_path
+    with pytest.raises(SkillError):
+        register_artifact(sd, "ses_1", kind="contained", name="x",
+                          file_path=str(tmp_path / "no-such-file"))  # 找不到本體
+    with pytest.raises(SkillError):
+        register_artifact(sd, "ses_1", kind="link", name="x",
+                          link="https://example.com", file_path=str(tmp_path))  # link 不得有本體
+    with pytest.raises(SkillError):
+        register_artifact(sd, "ses_1", kind="bogus", name="x")  # 型態不合法
+    assert _inbox_files(env["drive"], env["inbox"]) == [], "拒絕時不得上傳任何檔案"
+
+
+def test_register_artifact_enforces_the_100mib_limit(tmp_path: Path):
+    """超過 100 MiB 的收容產出直接被拒收（D7），且不留半套項目。"""
+    sd, env = _sd(tmp_path)
+    _main_session(sd, env)
+    big = tmp_path / "big.bin"
+    with open(big, "wb") as f:
+        f.seek(100 * 1024 * 1024)  # 稀疏檔：100 MiB + 1 位元組
+        f.write(b"\0")
+
+    with pytest.raises(SkillError) as excinfo:
+        register_artifact(sd, "ses_1", kind="contained", name="big.bin",
+                          content_type="application/octet-stream", file_path=str(big))
+    assert "超過" in str(excinfo.value)
+    assert _inbox_files(env["drive"], env["inbox"]) == []
+
+
+def test_register_artifact_does_not_trigger_a_commit(tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch):
+    """只上傳，不觸發提交（與 reference 相同）。"""
+    sd, env = _sd(tmp_path)
+    _main_session(sd, env)
+    monkeypatch.setattr(
+        "aistorage.syncer.commit.trigger_committer",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不該觸發提交流程")),
+    )
+    out = register_artifact(sd, "ses_1", kind="link", name="x",
+                            link="https://example.com")
+    assert out["item_key"]
+
+
+def test_register_artifact_requires_a_known_session(tmp_path: Path):
+    """Session 不在 opencode 裡（plugin 傳錯）→ 明確拒絕，不上傳。"""
+    sd, env = _sd(tmp_path)
+    with pytest.raises(SkillError):
+        register_artifact(sd, "ses_999", kind="link", name="x", link="https://example.com")
+    assert _inbox_files(env["drive"], env["inbox"]) == []
+
+
+# ---------------------------------------------------------------------------
 # CLI 接線
 # ---------------------------------------------------------------------------
 
@@ -653,7 +789,7 @@ def test_skill_cli_exposes_the_documented_commands():
     sub = next(a for a in build_parser()._actions if a.dest == "command")
     assert set(sub.choices) == {
         "whoami", "split", "handoff-end", "claim", "find", "read",
-        "reference", "list-handoffs", "stop",
+        "reference", "list-handoffs", "register-artifact", "stop",
     }
 
 

@@ -103,6 +103,32 @@ aistorage_reference(session_id: "opencode:ses_…", read_snapshot_at: "…")
 
 平行中的 Session 可以互相參考；這不會承接對方的工作，也不會把對方鎖住。
 
+## 登錄產出（Foundry）
+
+做出一份要能被人與其他 AI 找回來的東西（文件、程式碼、圖片、簡報）時，
+用這個工具把它登錄到 Foundry 產出目錄：
+
+```
+# 收容產出：真本沒有自己的家，本體放進 Foundry
+aistorage_register_artifact(kind: "contained", name: "architecture-summary.pdf",
+    content_type: "application/pdf", file_path: "/work/report.pdf")
+
+# 原處產出：真本留著自己的專案 repo，Foundry 只登錄出處
+aistorage_register_artifact(kind: "link", name: "PR #42 的報告",
+    link: "https://github.com/owner/repo/pull/42")
+aistorage_register_artifact(kind: "link", name: "模組設計文件",
+    link: "https://github.com/owner/repo/blob/main/docs/design.md",
+    repo: "owner/repo", path: "docs/design.md")
+```
+
+- `produced_by_session_id` **不用填**：由工具帶入你現在的 Session。
+- `contained` 的本體是**容器內的本機檔案**（`file_path`），單檔上限 100 MiB；
+  超過會直接被拒收（訊息會說原因）。不要為了繞過上限而切檔或壓縮。
+- 產出要是你自己做出來的、或真的在你手上的東西；不確定時先用 `aistorage_find`
+  看看是不是已經有人登錄過。
+- 只上傳，**不觸發提交**：跟 `aistorage_reference` 一樣，由下一輪提交流程收進去。
+  回報時說「已登錄，會在下一輪收進去」，不要說「目錄裡已經有了」。
+
 ## 不要做的事
 
 - 不要用 bash 直接跑 `python -m aistorage.skill …` 來取代工具（那會繞過 plugin
