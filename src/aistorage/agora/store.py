@@ -376,6 +376,14 @@ class AnnexRawStorage(RawStorage):
 
         dest_p = Path(worktree_path)
         dest_p.parent.mkdir(parents=True, exist_ok=True)
+        # H1（review-cdb4a34，資料完整性）：dest 很可能已經是 git-annex 的
+        # **符號連結**（上一個快照的 raw 還在樹狀裡）。`shutil.copy2` 會沿著
+        # 連結寫進去，而 git-annex 的物件是 hardlink——於是「上一個快照的 key」
+        # 指向的物件被**就地改寫**成新內容：舊快照的 raw 就再也讀不回來了
+        # （key 的名稱是內容雜湊，內容卻變了，連 sweep 都看不出來）。
+        # 所以先移除目標路徑（git 追蹤的是路徑，不是 inode），再寫新的進去。
+        if dest_p.is_symlink() or dest_p.exists():
+            dest_p.unlink()
         shutil.copy2(src_p, dest_p)
 
         if self.git is not None:

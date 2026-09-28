@@ -785,3 +785,371 @@ def test_admin_entry_points_require_annex_remote() -> None:
     for call in calls:
         assert "require_annex_remote=True" in call, (
             f"admin 入口的 SubprocessAnnexGit 必須傳 require_annex_remote=True: {call}")
+
+
+# ------------------------------------------------ H2：apply 迴圈的型態防呆
+
+
+def test_agora_pipeline_refuses_an_artifact(tmp_path: Path, monkeypatch) -> None:
+    """H2：apply 迴圈的型態防呆——Agora 收到 artifact 必須 raise。
+
+    分派（`items_for` ＋ `evaluate(allowed_types=…)`）已經擋掉了，這裡把兩道都
+    繞過，單獨驗第三道：apply 迴圈看到 artifact 一定 raise，不准呼叫錯誤 store
+    的 apply（FoundryStore 沒有 AgoraStore 的方法時，例外會被誤讀成暫時問題，
+    於是每一輪都重複，變成 DoS）。
+    """
+    import importlib
+
+    from aistorage.intake.evaluate import Decision, DecisionKind
+
+    run_mod = importlib.import_module("aistorage.committer.run")
+    cfg, deps, extra = _with_foundry(tmp_path)
+    drive = deps.drive  # type: ignore[assignment]
+    _seed_artifact(drive, extra)
+    # 第一道：分派。強制把 artifact 也交給 Agora 的 pipeline
+    _force_items_for(monkeypatch, run_mod, "agora", lambda ty: ty == "artifact")
+    real_evaluate = run_mod.evaluate
+
+    def _evaluate(item, **kw):
+        dec = real_evaluate(item, **kw)
+        if dec.kind is DecisionKind.SKIP:
+            # 第二道：evaluate 的 allowed_types。假裝它也沒擋：回一個 ACCEPT 的
+            # artifact，接下來就輪得到 apply 迴圈那道型態防���。
+            return Decision(
+                kind=DecisionKind.ACCEPT, item=item, code="ok", authenticated=True,
+                record_metadata={"id": f"artifact:{item.item_key}", "type": "artifact"},
+                sidecar={"metadata": {"type": "artifact"},
+                         "body": {"kind": "link", "name": "x",
+                                  "produced_by_session_id": "opencode:ses_smoke_001",
+                                  "link": "https://example.com/x"}},
+            )
+        return dec
+
+    monkeypatch.setattr(run_mod, "evaluate", _evaluate)
+    messages = _capture_abort_messages(monkeypatch, run_mod)
+    report = run(cfg, deps, dry_run=False)
+    assert report.ok is False
+    assert any("Agora 的 pipeline 收到了 artifact" in m for m in messages), messages
+
+
+def test_foundry_pipeline_refuses_a_session(tmp_path: Path, monkeypatch) -> None:
+    """H2：Foundry 的 pipeline 只收 artifact；收到 session 一樣要 raise。"""
+    import importlib
+
+    run_mod = importlib.import_module("aistorage.committer.run")
+    cfg, deps, extra = _with_foundry(tmp_path)
+    drive = deps.drive  # type: ignore[assignment]
+    _seed_artifact(drive, extra)   # 讓 foundry target 這一輪真的會跑
+    # 第一道：分派。強制把 session 也交給 Foundry 的 pipeline
+    _force_items_for(monkeypatch, run_mod, "foundry", lambda ty: ty != "artifact")
+    from aistorage.intake.evaluate import Decision, DecisionKind
+
+    real_evaluate = run_mod.evaluate
+
+    def _evaluate(item, **kw):
+        dec = real_evaluate(item, **kw)
+        if dec.kind is DecisionKind.SKIP:
+            return Decision(
+                kind=DecisionKind.ACCEPT, item=item, code="ok", authenticated=True,
+                record_metadata={"id": f"session:{item.item_key}", "type": "session"},
+                sidecar={"metadata": {"type": "session"},
+                         "session": {"source": "opencode",
+                                     "source_session_id": "ses_x"}},
+            )
+        return dec
+
+    monkeypatch.setattr(run_mod, "evaluate", _evaluate)
+    messages = _capture_abort_messages(monkeypatch, run_mod)
+    report = run(cfg, deps, dry_run=False)
+    assert report.ok is False
+    assert any("Foundry 的 pipeline 收到了" in m for m in messages), messages
+    assert report.aborted_at is not None and report.aborted_at.startswith("foundry."), (
+        report.aborted_at)
+
+
+def _force_items_for(monkeypatch, run_mod, element: str, predicate) -> None:
+    """把不符合型態的項目也塞進某個 pipeline 的評估清單（繞過分派）。"""
+    original = run_mod.PipelineContext.items_for
+
+    def _items_for(self, target, *, others_configured):
+        items = original(self, target, others_configured=others_configured)
+        if target.element == element:
+            items = items + [
+                i for i in self.scan.items
+                if self.verified_type(i) not in {id(x) for x in items}
+                and predicate(self.verified_type(i))
+            ]
+        return items
+
+    monkeypatch.setattr(run_mod.PipelineContext, "items_for", _items_for)
+
+
+def _capture_abort_messages(monkeypatch, run_mod) -> list[str]:
+    """攔下 run.py 記到 debug 的例外訊息（RunReport 只存例外型別，訊息在這裡）。"""
+    seen: list[str] = []
+    original = run_mod._dump_traceback
+
+    def _spy(run_id, step, exc):
+        seen.append(f"{step}: {exc}")
+        return None
+
+    monkeypatch.setattr(run_mod, "_dump_traceback", _spy)
+    return seen
+
+
+# --------------------------------- H3：pipeline 內的重查要用「自己那個」旗標
+
+
+def test_pipeline_recheck_uses_the_targets_own_flag(tmp_path: Path) -> None:
+    """H3：Foundry 的 pipeline 重查的是 `foundry.maintenance`，不是 agora 的。"""
+    import importlib
+
+    run_mod = importlib.import_module("aistorage.committer.run")
+    from aistorage.admin.lock import maintenance_relpath
+
+    cfg, deps, extra = _with_foundry(tmp_path)
+    drive = deps.drive  # type: ignore[assignment]
+    _seed_artifact(drive, extra)
+
+    seen: list[tuple[str, str]] = []
+    original = run_mod._assert_no_maintenance
+
+    def _spy(repo, d, report, step):
+        seen.append((repo, step))
+        # 只在 agora 上放旗標：Foundry 那一輪不該被擋
+        if repo == "foundry":
+            return None
+        return original(repo, d, report, step)
+
+    run_mod._assert_no_maintenance = _spy  # type: ignore[assignment]
+    try:
+        report = run(cfg, deps, dry_run=False)
+    finally:
+        run_mod._assert_no_maintenance = original  # type: ignore[assignment]
+
+    assert report.ok is True, f"{report.aborted_at}:{report.code}"
+    assert ("foundry", "pins.write_pending") in seen
+    assert ("foundry", "pins.promote") in seen
+    assert ("agora", "pins.write_pending") in seen
+    # 兩個 repo 的旗標是分開的（`maintenance_relpath` 帶 repo 名稱）
+    assert maintenance_relpath("foundry") != maintenance_relpath("agora")
+
+
+def test_foundry_maintenance_flag_stops_the_foundry_pipeline(tmp_path: Path) -> None:
+    """H3：只對 Foundry 上鎖時，Foundry 那一輪必須以 AbortRun 收場。"""
+    import importlib
+
+    run_mod = importlib.import_module("aistorage.committer".replace("committer", "committer") + ".run")
+    from aistorage.admin.lock import maintenance_relpath
+
+    cfg, deps, extra = _with_foundry(tmp_path)
+    drive = deps.drive  # type: ignore[assignment]
+    _seed_artifact(drive, extra)
+    seen: list[str] = []
+    original = run_mod._assert_no_maintenance
+
+    def _spy(repo, d, report, step):
+        if repo == "foundry":
+            seen.append(step)
+            if step == "pins.write_pending":
+                raise AbortRun("maintenance", "active", "測試：Foundry 維護中")
+        return original(repo, d, report, step)
+
+    run_mod._assert_no_maintenance = _spy  # type: ignore[assignment]
+    try:
+        report = run(cfg, deps, dry_run=False)
+    finally:
+        run_mod._assert_no_maintenance = original  # type: ignore[assignment]
+
+    assert seen == ["pins.write_pending"]
+    # H3：命中一律 AbortRun → **整輪**停止，第 14 步也不跑
+    # （已 push 但未 promote 的項目如果被刪掉，交接單、認領就永久遺失）。
+    assert report.aborted_at == "maintenance" and report.code == "active"
+    assert report.maintenance == "active"
+    assert report.counts.get("inbox_deleted", 0) == 0
+    remaining = {f.name for f in drive.list_children(extra["inbox_folder_id"])}
+    assert any(n.endswith(".sidecar.json") for n in remaining), remaining
+    assert any(n.endswith(".raw") for n in remaining), remaining
+
+
+# ------------------------------------------ H4：真本紀錄 + 逐 repo 的刪除判斷
+
+
+def test_published_rejection_is_recorded_in_the_true_copy(tmp_path: Path) -> None:
+    """H4：驗章後的拒收要寫 `published_generation` 進真本（稽核用）。"""
+    from aistorage.agora import layout as _layout
+    from aistorage.agora.store import FakeRawStorage
+    from aistorage.integrity.pin import PinState
+    from aistorage.publish.rejections import collect_rejections
+    from aistorage.intake.evaluate import Decision, DecisionKind
+
+    worktree = tmp_path / "store"
+    worktree.mkdir(parents=True, exist_ok=True)
+    from aistorage.agora.store import AgoraStore
+
+    store = AgoraStore(worktree, FakeRawStorage(), temp_dir=tmp_path / "st")
+    key = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    store.put_json(_layout.rejection_path(key), {
+        "item_key": key, "code": "too_old", "at": "2026-09-27T09:00:00Z",
+        "inbox_folder_id": "inbox1", "candidate_ids": ["a"], "entries": []})
+
+    class _Item:
+        item_key = key
+
+    dec = Decision(kind=DecisionKind.REJECT, item=_Item(), code="too_old",  # type: ignore[arg-type]
+                   authenticated=True, rejected_at="2026-09-27T09:00:00Z",
+                   deletable_after=None)
+    rows = collect_rejections(store, [dec])
+    assert [r.item_key for r in rows] == [key]
+    assert rows[0].code == "too_old"
+
+
+def test_step_14_uses_per_repo_published_rejections(tmp_path: Path) -> None:
+    """H4：刪除判斷用的是「那個 repo 的」已發佈集合，不是全部。"""
+    import importlib
+
+    run_mod = importlib.import_module("aistorage.committer.run")
+    cfg, deps, extra = _with_foundry(tmp_path)
+    drive = deps.drive  # type: ignore[assignment]
+    _seed_artifact(drive, extra)
+
+    seen: list[tuple[str, frozenset[str]]] = []
+    original = run_mod._published_rejection_keys
+
+    def _spy(store, decisions, status, pub_rep, *, dry_run):
+        out = original(store, decisions, status, pub_rep, dry_run=dry_run)
+        seen.append((status, out))
+        return out
+
+    run_mod._published_rejection_keys = _spy  # type: ignore[assignment]
+    try:
+        report = run(cfg, deps, dry_run=False)
+    finally:
+        run_mod._published_rejection_keys = original  # type: ignore[assignment]
+
+    assert report.ok is True, f"{report.aborted_at}:{report.code}"
+    # Foundry 沒有讀取視圖設定時不算「已發佈」→ 它的拒收不得被刪
+    statuses = [s for s, _ in seen]
+    assert "skipped_no_readview" in statuses, statuses
+    for status, keys in seen:
+        if status == "skipped_no_readview":
+            assert keys == frozenset()
+
+
+# ------------------------------------------------------------- M2：部分成功
+
+
+def test_partial_success_reports_the_failing_repo_step(tmp_path: Path, monkeypatch) -> None:
+    """M2：Foundry 失敗時 `aborted_at` 要指到 Foundry 的步驟，Agora 的計數照常。"""
+    import importlib
+
+    run_mod = importlib.import_module("aistorage.committer.run")
+    cfg, deps, extra = _with_foundry(tmp_path)
+    drive = deps.drive  # type: ignore[assignment]
+    _seed_artifact(drive, extra)
+    original = run_mod._run_repo_pipeline
+
+    def _spy(ctx, target, **kwargs):
+        if target.element == "foundry":
+            ctx.step = "annex.git.clone"
+            raise MismatchError("測試：Foundry clone 失敗")
+        return original(ctx, target, **kwargs)
+
+    monkeypatch.setattr(run_mod, "_run_repo_pipeline", _spy)
+    report = run(cfg, deps, dry_run=False)
+
+    assert report.ok is False
+    assert report.aborted_at == "foundry.annex.git.clone", report.aborted_at
+    assert report.code == "MismatchError"
+    # Agora 的計數照常記錄（沒有被 Foundry 拖掉）
+    assert report.counts.get("accepted", 0) >= 1
+    assert report.counts.get("inbox_deleted", 0) >= 1
+    # Foundry 的項目還在收件匣
+    assert drive.list_children(extra["inbox_folder_id"]) != []
+
+
+def test_agora_failure_still_aborts_the_round(tmp_path: Path, monkeypatch) -> None:
+    """M2：Agora 自己失敗 → 仍然是中止（fail-closed），不是「部分成功」。"""
+    import importlib
+
+    run_mod = importlib.import_module("aistorage.committer.run")
+    cfg, deps, extra = _env(tmp_path)
+    original = run_mod._run_repo_pipeline
+
+    def _spy(ctx, target, **kwargs):
+        ctx.step = "integrity.sweep"
+        raise MismatchError("測試：Agora 失敗")
+
+    monkeypatch.setattr(run_mod, "_run_repo_pipeline", _spy)
+    report = run(cfg, deps, dry_run=False)
+    assert report.ok is False
+    assert report.aborted_at == "integrity.sweep"
+    assert report.counts.get("inbox_deleted", 0) == 0
+    # 收件匣完全沒動
+    assert deps.drive.list_children(extra["inbox_folder_id"]) != []  # type: ignore[attr-defined]
+
+
+# --------------------------------------------- M4：Foundry 自己的 prefix_levels
+
+
+def test_foundry_sweep_checks_its_own_parent_levels(tmp_path: Path, monkeypatch) -> None:
+    """M4：Foundry 的清掃要檢查**它自己**的上層同名資料夾。"""
+    import importlib
+
+    run_mod = importlib.import_module("aistorage.committer.run")
+    cfg, deps, extra = _with_foundry(tmp_path)
+    drive = deps.drive  # type: ignore[assignment]
+    from aistorage.integrity.sweep import PrefixLevel
+
+    foundry_level = PrefixLevel(parent_id="up_foundry", name="foundry", expected_id="E")
+    rc = dataclasses.replace(
+        cfg.repos[0], prefix_levels=(foundry_level,))
+    cfg = dataclasses.replace(cfg, repos=(rc,))
+    drive.seed_folder("foundry")   # 讓 Foundry 的前綴在假 Drive 上有名字
+
+    seen: list[tuple[str, tuple]] = []
+    original = run_mod.check_parents
+
+    def _spy(levels, drive_):
+        seen.append(("called", tuple(levels)))
+        return []
+
+    monkeypatch.setattr(run_mod, "check_parents", _spy)
+    _seed_artifact(drive, extra)
+    run(cfg, deps, dry_run=False)
+    checked = [levels for _, levels in seen]
+    assert (foundry_level,) in checked, f"Foundry 的 prefix_levels 沒被檢查：{checked}"
+
+
+def test_agora_and_foundry_prefix_levels_are_independent(tmp_path: Path) -> None:
+    """M4：Agora 改了 prefix_levels 不會影響 Foundry（反之亦然）。"""
+    from aistorage.integrity.sweep import PrefixLevel
+
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps({
+        "format": "aistorage.committer/v1", "repo": "agora",
+        "repo_uuid": "u-a", "repo_url": "annex::a",
+        "prefix_folder_id": "p-a", "quarantine_folder_id": "q-a",
+        "identity_registry_path": "config/identity.json",
+        "prefix_levels": [
+            {"parent_id": "up-a", "name": "p-a", "expected_id": "EA"},
+            {"parent_id": "up-a2", "name": "p-a2", "expected_id": "EA2"},
+        ],
+        "repos": {"foundry": {
+            "uuid": "u-f", "url": "annex::f", "prefix_folder_id": "p-f",
+            "quarantine_folder_id": "q-f",
+            "prefix_levels": [
+                {"parent_id": "up-f", "name": "p-f", "expected_id": "EF"},
+            ],
+        }},
+    }), encoding="utf-8")
+    cfg = CommitterConfig.load(path, env={})
+    agora = RepoTarget.from_config(cfg)
+    foundry = RepoTarget.from_repo_config(cfg, cfg.repos[0])
+    assert len(agora.prefix_levels) == 2
+    assert len(foundry.prefix_levels) == 1
+    assert foundry.prefix_levels[0].expected_id == "EF"
+    assert agora.prefix_levels[0].expected_id == "EA"
+    # largefiles 也是各自的（Agora 用預設、Foundry 自備）
+    assert foundry.largefiles is None
+    assert foundry.largefiles_rule == "include=sessions/*/*/raw"

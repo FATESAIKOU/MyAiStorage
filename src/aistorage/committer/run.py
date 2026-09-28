@@ -181,85 +181,10 @@ DEBUG_DIR_ENV = "AISTORAGE_DEBUG_DIR"
 DEFAULT_DEBUG_DIR = "debug"
 
 
-def _publish_foundry(
-    target: RepoTarget,
-    deps: Deps,
-    store: Any,
-    state: PinState | None,
-    workdir: Path,
-    dry_run: bool,
-) -> str:
-    """Foundry 讀取視圖發佈（第 13 步的 Foundry 版本，group5-7 第 6.3 節）。
-
-    讀取介面以 **Drive file id** 取收容產出（D5），所以索引裡必須先有
-    `object_file_id`：`resolve_object_file_ids` 以前綴列舉比對 `name == annex_key`，
-    並擋掉不在正式 pin 的 key。對不上（`object_not_found`／`checksum_mismatch`／
-    `size_mismatch`／`key_not_in_pin`）的那幾筆**不發佈**，只回報計數。
-    """
-    from aistorage.foundry.index import (
-        ArtifactRow,
-        FoundryIndexMeta,
-        build_foundry_index,
-        resolve_object_file_ids,
-    )
-
-    if not target.readview_folder_id:
-        return "skipped_no_readview"
-    if store is None:
-        return "skipped_no_store"
-
-    rows: list[ArtifactRow] = []
-    for cat in store.list_catalog():
-        meta = cat.get("metadata") or {}
-        body = cat.get("body") or {}
-        rows.append(
-            ArtifactRow(
-                artifact_id=str(meta.get("id") or ""),
-                kind=str(body.get("kind") or "link"),
-                name=str(body.get("name") or ""),
-                producer=str(meta.get("producer") or ""),
-                produced_by_session_id=str(body.get("produced_by_session_id") or ""),
-                created_at=str(meta.get("created_at") or ""),
-                updated_at=str(meta.get("updated_at") or ""),
-                content_type=body.get("content_type"),
-                case_id=meta.get("case_id"),
-                size=body.get("size"),
-                sha256=body.get("sha256"),
-                annex_key=body.get("object_key"),
-                repo=body.get("repo"),
-                path=body.get("path"),
-                link=body.get("link"),
-            )
-        )
-
-    publishable, issues = resolve_object_file_ids(
-        rows,
-        drive=deps.drive,
-        prefix_folder_id=target.prefix_folder_id,
-        allowed_keys=state.annex_keys if state is not None else None,
-    )
-    generation = int(deps.clock.now().timestamp())
-    index_path = Path(workdir) / "foundry-index.json"
-    build_foundry_index(
-        index_path,
-        artifacts=publishable,
-        rejections=collect_rejections(store, []),
-        meta=FoundryIndexMeta(
-            generation=generation,
-            built_at=format_rfc3339(deps.clock.now()),
-            foundry_main_sha=(state.refs.get("refs/heads/main", "") if state else ""),
-        ),
-    )
-    if dry_run:
-        return "planned"
-    deps.drive.create(
-        target.readview_folder_id,
-        f"foundry-index-{generation}.json",
-        index_path.read_bytes(),
-        mime_type="application/json",
-    )
-    # 對不上的那幾筆不發佈，但要把數量講出來（review F-H3）
-    return "published" if not issues else f"published_partial({len(issues)})"
+# H5：Foundry 的讀取視圖發佈已改用 `aistorage.publish.foundry.FoundryReadViewPublisher`
+# （與 Agora 同一套 manifest 機制、固定 id 原地更新、世代、退役檔輪替）。
+# 舊的 `_publish_foundry` 會每次 `drive.create` 一個新 index 檔、卻不更新 manifest，
+# 而且回報 published 但實際上一件都沒發佈——已刪除。
 
 
 def _pipeline_step(current_step: str, ctx: PipelineContext | None) -> str:
@@ -609,8 +534,24 @@ def init_pin_cli(
                         f"重放之 {full_ref} ({replay_refs[full_ref]}) 與 ls-remote ({remote_refs.get(full_ref)}) 不符",
                     )
 
-        # annex key 集合一定要讀到；讀不到就是中止，不是空集合
-        annex_keys = git.annex_keys_in(cfg.repo_uuid)
+        # H1（review-cdb4a34，會遺失資料）：釘選值的 annex key 集合要涵蓋
+        # **整棵樹狀**。
+        #
+        # 原本只取 `annex_keys_in(uuid)`（location log），而 store 也不知道
+        # reading／meta 這類被 `include=*.json` 規則收進 annex 的檔案。少記的
+        # 後果：promote 之後第一輪 sweep 就把它們隔離，資料沒了。
+        # 所以這裡取聯集：
+        #   - `store.annex_keys()`：樹狀的 snapshots 歷史（真正的鍵值來源是
+        #     `git annex lookupkey`，見 AnnexRawStorage.keys 的說明）；
+        #   - `annex_keys_in(uuid)`：location log 的觀點（涵蓋 store 不知道的
+        #     那一類）。
+        # 並且**每一個** key 都要通過 Drive 實況檢查（verify_pin_keys_on_drive）：
+        # 缺一個就不建立釘選值——寧可不要有，也不要有一份會被隔離的釘選值。
+        store_keys = _store_annex_keys(git_dir, git, target)
+        annex_keys = frozenset(store_keys) | frozenset(
+            git.annex_keys_in(cfg.repo_uuid))
+        _assert_keys_on_drive_for_init_pin(
+            deps.drive, cfg.prefix_folder_id, cfg.repo_uuid, annex_keys)
 
     now_iso = format_rfc3339(deps.clock.now(), include_fraction=True)
     state = PinState(
@@ -746,6 +687,60 @@ class RepoTarget:
             prefix_levels=rc.prefix_levels,
             identity_registry_path=cfg.identity_registry_path,
             pin_repo_url=cfg.pin_repo_url,
+        )
+
+
+def _store_annex_keys(git_dir: Path, git: AnnexGit, target: RepoTarget | None) -> frozenset[str]:
+    """在 clone 上建立**唯讀**的 store，取它的 annex key 集合（init-pin 用）。
+
+    刻意用 `GitRawStorage`：它不會動 `annex.largefiles`（`AnnexRawStorage` 的
+    建構會覆寫那條規則，會把這個 repo 原來的規則——例如 Foundry 的
+    `include=objects/*/*` 或 e2e 的 `include=*.json`——改掉）。
+    `AgoraStore.annex_keys()` 在這種情況下回傳的是 `snapshots.jsonl` 的歷史鍵。
+    """
+    if target is not None and target.element != "agora":
+        from aistorage.foundry.store import FoundryStore
+
+        store = FoundryStore(
+            git_dir, git=git, temp_dir=None, largefiles=target.largefiles,
+            configure_annex=False)
+        return store.annex_keys()
+    store = AgoraStore(git_dir, raw_storage=GitRawStorage(git_dir), git=git)
+    return store.annex_keys()
+
+
+def _assert_keys_on_drive_for_init_pin(
+    drive: DriveClient, prefix_folder_id: str, repo_uuid: str,
+    keys: frozenset[str],
+) -> None:
+    """init-pin 的最後一道：記錄的每一個 annex 物件都必須真的在 Drive 上。
+
+    缺一個就拒絕建立釘選值（`MismatchError`）——有缺口的釘選值會讓第一輪 sweep
+    把那些物件隔離，資料就沒了（review-cdb4a34 H1）。
+    """
+    by_name = {
+        f.name: f for f in drive.list_children(prefix_folder_id) if not f.is_folder
+    }
+    missing: list[str] = []
+    for key in sorted(keys):
+        f = by_name.get(key)
+        if f is None:
+            missing.append(key)
+            continue
+        size_text, _, sha_text = key.partition("--")
+        try:
+            key_size = int(size_text.split("-s", 1)[1])
+        except (IndexError, ValueError):
+            missing.append(f"{key}（形狀不合法）")
+            continue
+        key_sha = sha_text.split(".", 1)[0].lower()
+        if f.sha256 is None or f.sha256.lower() != key_sha or f.size != key_size:
+            missing.append(key)
+    if missing:
+        raise MismatchError(
+            f"拒絕建立釘選值：{len(missing)} 個 annex 物件在 Drive 上不存在或內容不符"
+            f"（{prefix_folder_id}）：{missing[:3]}；先把真本推上去（或用 "
+            "`git annex copy --to=<remote>` 補齊），再重新 init-pin"
         )
 
 
@@ -1324,18 +1319,41 @@ def _run_repo_pipeline(
     # refs 與 annex key 集合取自 AnnexGit 自己的公開方法；缺少必要分支
     # 由 SubprocessAnnexGit.local_refs() raise，不在這裡吞掉例外。
     local_refs = git.local_refs()
-    # 遠端此刻「看得見」的 key（`git annex find --in=…`）**還不含**這一輪
-    # 剛 copy 上去的物件：那筆 location log 要等 git-annex 分支被 push
-    # 之後才進得去（實測）。所以要把 store 記錄的 key（全部來自
-    # `git annex lookupkey`）聯集進來——pending 要記的是「這輪 push 之後
-    # 遠端會有什麼」，第 10 步的 verify 才會真的驗到有沒有推上去。
-    # 只靠 find 的話 pending 會少記新 key，下一輪 sweep 就把它們隔離
-    # （H2 的第 3 點）。
+    # H1（review-cdb4a34，會遺失資料）：釘選值的 annex key 集合必須**單調遞增**。
+    #
+    # 原本這裡是 `annex_keys_in(uuid) | (store.annex_keys() - keys_before)`——
+    # `annex_keys_in` 讀的是 location log（提交流程自己寫的），它**可能漏記**
+    # 某些樹狀裡的物件（e2e 的 `include=*.json` 規則把 reading／meta 也收進
+    # annex，store 不知道它們；consolidate 又會讓 location log 變動）。漏記的
+    # 後果是 promote 之後下一輪 sweep 把那些物件當成「不在釘選值裡」而隔離，
+    # 資料就這麼沒了。
+    #
+    # 所以改成聯集：正式值 ∪ store 現在知道的（樹狀＋snapshots 歷史）∪ 這一輪
+    # 新增的 ∪ location log 的觀點。只有**管理者抹除**（admin/erase.py 重建
+    # 釘選值）可以讓它縮小。
+    #
+    # 為什麼連 `annex_keys_in` 也要留著：它涵蓋 store 不知道的那一類（被
+    # `include=*.json` 收走的 reading／meta 檔——store 不記它們的 key）。
+    # 不記的話，下一輪 sweep 會把它們當成「不在釘選值裡」而隔離。漏記會遺失
+    # 資料，多記只會讓第 5 步的 Drive 檢查去擋（那是對的行為）。
+    store_keys = store.annex_keys()
+    new_keys = store_keys - keys_before
+    location_keys = (
+        git.annex_keys_in(state.repo_uuid) if hasattr(git, "annex_keys_in")
+        else frozenset()
+    )
     annex_keys = (
-        git.annex_keys_in(state.repo_uuid)
-        if hasattr(git, "annex_keys_in")
-        else frozenset(state.annex_keys)
-    ) | (store.annex_keys() - keys_before)
+        frozenset(state.annex_keys) | store_keys | new_keys | location_keys
+    )
+
+    # 單調性斷言（fail-closed）：pending 少了正式值記載的任何一個 key，就代表
+    # 有人在這一輪把它算掉了 → 中止，不要寫出一個會讓下一輪隔離資料的 pending。
+    dropped = set(state.annex_keys) - set(annex_keys)
+    if dropped:
+        raise MismatchError(
+            f"pending 的 annex key 集合不得小於正式釘選值（少了 {len(dropped)} 個："
+            f"{sorted(dropped)[:3]}）；中止，避免下一輪 sweep 把它們隔離"
+        )
 
     has_git_changes = (local_refs != state.refs) or (annex_keys != state.annex_keys)
 
@@ -1476,14 +1494,31 @@ def _run_repo_pipeline(
     pub_rep: Any = None
     try:
         if target.element == "foundry":
-            # H5 是 impl2 的工作：Foundry 的讀取視圖發佈要換成與 Agora 同一套的
-            # publisher（`element="foundry"`）。接線時把 `_publish_foundry(...)`
-            # 換成 `pub.publish(...)`，並且讓它回報 `published_item_keys`
-            # （H4：拒收要「已經進入某個已發佈世代」才刪得掉）。
-            ctx.set_field(
-                "readview_publish",
-                _publish_foundry(target, deps, foundry_store, state, work_temp, dry_run),
-            )
+            # H5：Foundry 改用與 Agora 同一套的發佈器（impl2 提供，
+            # 呼叫方式見 publish/foundry.py 的模組 docstring）。回報的 status 進
+            # RunReport、對不上的筆數記成 `foundry.unpublished`。
+            if not rcfg.readview_folder_id or not rcfg.readview_manifest_file_id:
+                ctx.set_field("readview_publish", "skipped_no_readview")
+            else:
+                from aistorage.publish.foundry import FoundryReadViewPublisher
+
+                fpub = FoundryReadViewPublisher(
+                    deps.drive,
+                    folder_id=rcfg.readview_folder_id,
+                    manifest_file_id=rcfg.readview_manifest_file_id,
+                    prefix_folder_id=rcfg.prefix_folder_id,
+                    clock=deps.clock, workdir=work_temp,
+                )
+                fresult = fpub.publish(
+                    foundry_store,
+                    foundry_main_sha=local_refs.get("refs/heads/main", ""),
+                    run_rejections=collect_rejections(store, decisions),
+                    allowed_keys=state.annex_keys,
+                    dry_run=dry_run,
+                )
+                pub_rep = fresult.report
+                ctx.set_field("readview_publish", pub_rep.status)
+                ctx.set_field("unpublished", len(fresult.unpublished))
         else:
             pub = _build_publisher(rcfg, deps, work_temp)
             if pub is None:
