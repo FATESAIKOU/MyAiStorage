@@ -109,6 +109,10 @@ class CatalogEntry:
     session_id: str
     raw_sha256: str
     snapshot_at: str
+    # 同步器要知道 Agora 那一邊是不是已停止，才能走「停止後恢復只觸發一次」。
+    # 9.1 e2e 實測：這欄原本不存在，同步器拿不到 status，恢復邏輯在真實
+    # 環境永遠走不到（讀取端 index 的 sessions.status 一直都有）。
+    status: str | None = None
 
 
 class AgoraReader:

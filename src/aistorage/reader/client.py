@@ -53,12 +53,37 @@ def _parse_manifest(data: bytes) -> dict[str, Any]:
 
     讀取介面本來就只認 schema 驗證過的 manifest；這裡走同一份規則
     （schemas/readview-manifest.schema.json），避免兩邊各驗一套。
+
+    **generation 0（`index=None`）是合法的初始狀態**，不是錯誤：管理者用
+    `initial_manifest` 建立的空 manifest 就是這樣（`Manifest.is_initial`）。
+    它代表「還沒有任何東西被發佈過」，所以讀取端視為**空的**讀取視圖：
+    catalog 回空、find 回零筆、讀指定 Session 回 KeyError（不存在）。
+
+    這一點是 9.1 e2e 才發現的：原本這裡丟 MismatchError，導致
+    `aistorage_split` 在「等待可見」的迴圈裡第一輪就爆掉——
+    而那時候提交流程根本還沒跑、讀取視圖理應是空的。
     """
     manifest = parse_manifest(data)
     out = manifest.to_dict()
     if out.get("index") is None:
-        raise MismatchError("manifest 尚未有 index（管理者還沒發佈過任何世代）")
+        # 初始世代：視為空讀取視圖（保留 is_initial 供上層判斷）
+        out = {**out, "index": {}, "is_initial": True}
     return out
+
+
+def _build_empty_index(
+    dest: Path, *, generation: int, agora_main_sha: str, built_at: str
+) -> None:
+    """刻一份空的讀取視圖索引（初始世代用；schema 與出版端共用同一份）。"""
+    from aistorage.search.index import IndexMeta, build_index, ensure_sqlite_version
+
+    ensure_sqlite_version()
+    build_index(
+        dest,
+        entries=[], links=[], handoffs=[], rejections=[],
+        meta=IndexMeta(generation=generation, built_at=built_at,
+                       agora_main_sha=agora_main_sha),
+    )
 
 
 class ReadViewClient:
@@ -130,8 +155,19 @@ class ReadViewClient:
         dest = self._dir / f"index-g{generation}.sqlite"
         if not dest.is_file():
             tmp = self._dir / f"index-g{generation}.sqlite.tmp"
-            self._drive.download(ref["id"], tmp, max_bytes=INDEX_MAX_BYTES)
-            self._verify_file(tmp, sha256=ref["sha256"], size=int(ref["size"]))
+            if ref:
+                self._drive.download(ref["id"], tmp, max_bytes=INDEX_MAX_BYTES)
+                self._verify_file(tmp, sha256=ref["sha256"], size=int(ref["size"]))
+            else:
+                # 初始世代（index 為 null）：本機刻一份**空的**索引，
+                # 讓「還沒有任何東西被發佈過」可以用同一條查詢路徑回答。
+                # 用 search.index.build_index 產生，schema 不會與出版端漂移。
+                _build_empty_index(
+                    tmp,
+                    generation=generation,
+                    agora_main_sha=manifest.get("agora_main_sha") or "unborn",
+                    built_at=manifest.get("published_at") or "1970-01-01T00:00:00Z",
+                )
             os.replace(tmp, dest)
         return dest
 

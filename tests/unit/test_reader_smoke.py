@@ -485,3 +485,38 @@ def test_cli_find_json_and_errors(tmp_path: Path, capsys: pytest.CaptureFixture)
                      drive_factory=factory, clock=clock)
     assert rc == 0
     assert json.loads(capsys.readouterr().out)["value"] is True
+
+
+def test_initial_manifest_reads_as_an_empty_view(tmp_path: Path):
+    """generation 0（index=None）是合法的初始狀態，讀取端要視為空視圖。
+
+    9.1 e2e 才發現：原本這裡丟 MismatchError，於是 `aistorage_split` 在
+    「等待可見」的迴圈第一輪就爆掉——而那時提交流程根本還沒跑。
+    """
+    from aistorage.drive.fake import FakeDrive
+    from aistorage.readview.model import initial_manifest, serialize_manifest
+    from aistorage.reader.client import ReadViewClient
+    from aistorage.reader.config import ReaderConfig
+    from aistorage.search.query import Query
+
+    drive = FakeDrive()
+    folder = drive.seed_folder("readview")
+    payload = serialize_manifest(
+        initial_manifest(element="agora", published_at="2026-09-28T00:00:00Z")
+    )
+    drive.seed_file(folder, "manifest.json", payload, file_id="manifest-init")
+    cfg = ReaderConfig(manifest_file_id="manifest-init", sa_key_path=tmp_path / "sa.json",
+                       cache_dir=tmp_path / "cache")
+    client = ReadViewClient(drive, cfg, clock=FixedClock("2026-09-28T01:00:00Z"))
+
+    manifest = client.manifest()
+    assert manifest["generation"] == 0
+    assert manifest["is_initial"] is True
+    assert manifest["index"] == {}
+    # 初始視圖：空。AgoraReader 的高階介面也要能正常回答「沒有東西」
+    reader = AgoraReader(client, clock=FixedClock("2026-09-28T01:00:00Z"))
+    assert reader.catalog(["opencode:s1"]).value == {}
+    assert reader.get_rejection("k1").value is None
+    assert reader.find_sessions(Query(text="任何")).value == []
+    with pytest.raises(KeyError):
+        reader.get_session("opencode:s1")

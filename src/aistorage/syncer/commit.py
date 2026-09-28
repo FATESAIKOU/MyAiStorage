@@ -75,6 +75,9 @@ class CommitWaitResult:
     timed_out: bool = False
     elapsed_s: float = 0.0
     trigger_error: str | None = None
+    #: 這一次有沒有真的嘗試觸發提交流程。`False` = 根本沒有 PAT／repo 可用
+    #: （不是「觸發失敗」）。兩者對「要不要等」的處置不同，見 sync_and_commit。
+    trigger_attempted: bool = True
     sync: SyncOutcome | None = None
     sync_errors: tuple[tuple[str, str], ...] = ()
 
@@ -83,7 +86,7 @@ class CommitWaitResult:
         """全部項目都有結果（看得到或被拒收）且沒有逾時、也沒有同步錯誤。
 
         `trigger_error` 不算在這裡：它只代表「這次沒有即時提交」，
-        排程的提交流程仍然會收進去，所以上傳本身還是成功的。
+        排程或外部的提交流程仍然會收進去，所以上傳本身還是成功的。
         """
         return (
             not self.timed_out
@@ -96,12 +99,18 @@ class CommitWaitResult:
         total = done + len(self.pending)
         head = f"{done}／{total} 有結果，已等 {self.elapsed_s:.0f}s"
         if self.trigger_error:
-            # 沒有觸發就沒有東西會改變，所以不是逾時。上傳是成功的，
-            # 排程的提交流程會在下一輪定時提交時收進去。
             ids = ", ".join(f"{a.kind}:{a.target}" for a in self.pending) or "-"
+            if self.trigger_attempted:
+                # 嘗試過但失敗：等待期間不會有任何變化
+                return (
+                    f"{head}；觸發提交流程失敗（{self.trigger_error}）→ 沒有等待；"
+                    "上傳已成功，排程的提交流程會在下一輪定時提交時收進去；"
+                    f"未提交的 id：{ids}"
+                )
+            # 根本沒有 PAT／repo：排程或外部的提交流程仍可能收進去（ADR 0007）
             return (
-                f"{head}；未觸發提交流程（{self.trigger_error}）→ 沒有等待；"
-                f"上傳已成功，排程的提交流程會在下一輪定時提交時收進去；"
+                f"{head}；未觸發提交流程（{self.trigger_error}）→ 仍等讀取介面"
+                "（排程或外部的提交流程可能會收進去，ADR 0007）；"
                 f"未提交的 id：{ids}"
             )
         if self.timed_out:
@@ -425,8 +434,15 @@ def sync_and_commit(
     for item in extra_items:
         awaited.append(awaited_for_item(item))
 
+    # 「沒有觸發」和「觸發失敗」是兩件事，處置不同：
+    # - 沒有 PAT／repo（e2e、以及不想用 GitHub Actions 的環境）：**照樣等**。
+    #   ADR 0007 的「寫入者以讀取介面判斷完成」就是這種情況——提交流程可能由
+    #   排程、由測試在本機跑。e2e 正是靠這個等待，讓測試端的提交流程把項目收進去。
+    # - 觸發**嘗試過而且失敗**：立刻回報（見下）。等待期間不會有任何變化。
     trigger_error: str | None = None
+    trigger_attempted = False
     if deps.pat_path and deps.repo:
+        trigger_attempted = True
         try:
             trigger_committer(deps.pat_path, deps.repo, deps.workflow)
             progress("已觸發提交流程（workflow_dispatch，ref=main）")
@@ -434,8 +450,11 @@ def sync_and_commit(
             trigger_error = str(e)
             progress(f"觸發提交流程失敗：{trigger_error}")
     else:
-        trigger_error = "缺少 gh-pat-actions.txt 或 repo 設定"
-        progress(f"未觸發提交流程：{trigger_error}")
+        trigger_error = "缺少 gh-pat-actions.txt 或 repo 設定（本次沒有觸發）"
+        progress(
+            f"未觸發提交流程：{trigger_error}；仍然等讀取介面，"
+            "因為排程或外部的提交流程可能會把它收進去（ADR 0007）"
+        )
 
     # 同步階段就失敗的 Session：不可能看得到，明確帶出來（不要靜靜地逾時）
     sync_errors = tuple(outcome.errors) if outcome is not None else ()
@@ -447,9 +466,9 @@ def sync_and_commit(
     # 沒有任何東西會讓讀取視圖改變：排程的提交流程還沒被觸發，乾等 15 分鐘
     # 只會讓呼叫端（AI 的工具）卡住，然後回報一個沒有意義的逾時。
     # 上傳本身是成功的，排程的提交流程仍然會在下一輪把這些項目收進去。
-    if trigger_error:
+    if trigger_error and trigger_attempted:
         progress(
-            f"觸發提交流程失敗，這一輪不等了（沒有東西會改變）；"
+            f"觸發提交流程失敗，這一輪不等了（等待期間不會有任何變化）；"
             "上傳已成功，排程的提交流程會在下一輪定時提交時收進去：{trigger_error}"
         )
         return CommitWaitResult(
@@ -459,6 +478,7 @@ def sync_and_commit(
             timed_out=False,
             elapsed_s=0.0,
             trigger_error=trigger_error,
+            trigger_attempted=trigger_attempted,
             sync=outcome,
             sync_errors=sync_errors,
         )
@@ -480,6 +500,7 @@ def sync_and_commit(
         timed_out=result.timed_out,
         elapsed_s=result.elapsed_s,
         trigger_error=trigger_error,
+        trigger_attempted=trigger_attempted,
         sync=outcome,
         sync_errors=sync_errors,
     )

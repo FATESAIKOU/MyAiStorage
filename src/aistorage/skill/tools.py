@@ -34,6 +34,24 @@ from aistorage.syncer.core import Signer, sync_once
 from aistorage.syncer.opencode_api import OpencodeApi
 from aistorage.syncer.state import SyncState
 
+__all__ = [
+    "MainSessionRequired",
+    "RejectedItems",
+    "SkillDeps",
+    "SkillError",
+    "claim",
+    "find",
+    "handoff_end",
+    "list_handoffs",
+    "normalize_parts",
+    "read",
+    "reference",
+    "resolve_session",
+    "split",
+    "stop",
+    "whoami",
+]
+
 #: 收容產出的單檔上限（D7：100 MiB）。與 sidecar schema 的 raw.size 上限、
 #: `foundry.apply.MAX_ARTIFACT_SIZE` 是同一個值，這裡以 inbox 的常數為準。
 ARTIFACT_MAX_BYTES = DEFAULT_MAX_RAW_SIZE
@@ -213,12 +231,18 @@ def _build_handoffs(
     key = _signer_key(signer)
     now = clock.now_utc()
     items: list[BuiltItem] = []
-    for part in parts:
-        if not isinstance(part, dict):
-            raise SkillError("parts 的每一項都要是 {title, summary, next_steps}")
+    normalized = normalize_parts(parts)
+    for index, part in enumerate(normalized):
         title = str(part.get("title") or "").strip()
         if not title:
-            raise SkillError("每一份工作都要有 title")
+            # 說清楚長什麼樣子：模型看到自己的參數才改得對
+            # （9.1 e2e：space-bunny-free 因為錯誤訊息太模糊，重試四次都一樣）
+            raise SkillError(
+                f"第 {index + 1} 份工作沒有 title。"
+                f"每一份都要 {{title, summary, next_steps}}；"
+                f"這一次的鍵是 {sorted(part)}。請直接給一個清單，"
+                '例如 [{"title": "後端架構實作", "summary": "…"}]'
+            )
         body: dict[str, Any] = {
             "title": title,
             "content": str(part.get("summary") or "").strip() or title,
@@ -234,6 +258,64 @@ def _build_handoffs(
             now=now,
         ))
     return items
+
+
+def normalize_parts(parts: Any) -> list[dict]:
+    """把模型給的 `parts` 正規化成「一張交接單一個 dict」的清單。
+
+    小模型經常把清單包成物件（`{"item": [ {...}, {...} ]}`）、把清單包成
+    JSON 字串、或在清單裡再包一層——那是**模型的形狀問題**，不是要它重試的理由，
+    所以在這裡吸收掉（9.1 e2e 實測：`opencode/space-bunny-free` 送的是
+    `{"item": [...]}`，四次全被回「每一份工作都要有 title」擋下）。
+
+    吸收的都是「同一份內容換一種包法」，不會改動交接單的內容；看不懂就回錯誤。
+    """
+    if isinstance(parts, str):
+        # 模型把整個 JSON 當字串塞進來（9.1 e2e 實測有這種）
+        try:
+            decoded = json.loads(parts)
+        except json.JSONDecodeError:
+            raise SkillError("parts 是字串，但不是合法的 JSON") from None
+        return normalize_parts(decoded)
+    if isinstance(parts, dict):
+        # {"item": [...]}／{"items": [...]}／{"parts": [...]}：取唯一的清單值
+        list_values = [v for v in parts.values() if isinstance(v, list)]
+        if len(parts) == 1 and len(list_values) == 1:
+            return normalize_parts(list_values[0])
+        if any(k in parts for k in ("title", "summary", "next_steps")):
+            return [parts]
+        if not parts:
+            raise SkillError("有一份工作是空的物件：至少要有 title")
+        raise SkillError(
+            f"parts 的形狀看不懂：{sorted(parts)}；"
+            "請給一個清單，每一項是 {title, summary, next_steps}"
+        )
+    if isinstance(parts, list):
+        out: list[dict] = []
+        for item in parts:
+            # 清單裡再包一層（`[{"item": [...]}]`）或塞 JSON 字串：攤平
+            if isinstance(item, (str, dict)) and not (
+                isinstance(item, dict) and any(
+                    k in item for k in ("title", "summary", "next_steps")
+                )
+            ):
+                nested = normalize_parts(item)
+                if len(nested) == 1 and nested[0] is item:
+                    raise SkillError(
+                        f"parts 裡的每一項都要是 {{title, summary, next_steps}}，"
+                        f"得到 {sorted(item)}"
+                    )
+                out.extend(nested)
+                continue
+            if not isinstance(item, dict):
+                raise SkillError(f"parts 裡的每一項都要是物件，得到 {type(item).__name__}")
+            out.append(item)
+        if not out:
+            raise SkillError("parts 是空的：至少要有一份工作")
+        return out
+    raise SkillError(
+        f"parts 要是清單或物件，得到 {type(parts).__name__}"
+    )
 
 
 def _drop_file(path: Path) -> None:

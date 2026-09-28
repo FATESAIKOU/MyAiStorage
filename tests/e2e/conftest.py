@@ -73,7 +73,10 @@ ENV_E2E_WORKER_CONF = "AISTORAGE_E2E_WORKER_CONF"
 REQUIRED_PROFILE_FILES = ("rclone-worker.conf", "sa-reader.json", "signing.key", "reader.json")
 
 #: 模型回覆（含工具呼叫）的等待上限；免費模型可能很慢。
-MESSAGE_TIMEOUT_S = 300.0
+#:
+#: 300 秒不夠：9.1 實測免費模型思考要 250 秒上下，而 split 工具還要同步一次
+#: 並等讀取介面看得到（提交流程在背景輪詢），整輪常超過 300 秒。
+MESSAGE_TIMEOUT_S = 900.0
 #: 容器啟動（colima + opencode serve）的上限。
 CONTAINER_READY_TIMEOUT_S = 180.0
 #: 背景提交流程的輪詢間隔。
@@ -175,7 +178,22 @@ def e2e_settings() -> dict[str, Any]:
         "pin_key": pin_key,
         "known_hosts": known_hosts,
         "worker_conf": worker_conf,
+        # 收件匣 id 直接從 reader.e2e.json 取（conftest 已驗過 profile 對得上）。
+        # 容器裡的 /secrets/reader.json 是 profile 目錄的**檔案掛載**：那個檔案
+        # 一旦被刪（或被別條線重跑 setup 換掉），掛載會變成空目錄，
+        # 同步器就會回「找不到收件匣 folder id」。所以這裡明確帶進去。
+        "inbox_folder_id": _e2e_inbox_folder_id(reader_cfg, profile),
     }
+
+
+def _e2e_inbox_folder_id(reader_cfg: dict[str, Any], profile: str) -> str:
+    mapping = reader_cfg.get("inbox_folder_ids")
+    if not isinstance(mapping, dict) or not mapping.get(profile):
+        raise MissingE2ESetting(
+            "reader.e2e.json 的 inbox_folder_ids 沒有測試 profile "
+            f"{profile!r}（請重跑 scripts/e2e_setup.py）"
+        )
+    return str(mapping[profile])
 
 
 def _committer_env(e2e_settings: dict[str, Any]) -> dict[str, str]:
@@ -270,7 +288,9 @@ class ResidentContainerHandle:
         profile: str,
         model: str,
         log_path: Path,
+        inbox_folder_id: str = "",
     ):
+        self.inbox_folder_id = inbox_folder_id
         self.name = name
         self.port = port
         self.work_dir = work_dir  # run.sh 真正的 /work 來源（AISTORAGE_WORK_ROOT）
@@ -492,6 +512,8 @@ class ResidentContainerHandle:
             "AISTORAGE_SA_KEY": "/secrets/sa-reader.json",
             "AISTORAGE_RCLONE_CONF": "/tmp/aistorage/rclone.conf",
         }
+        if self.inbox_folder_id:
+            env["AISTORAGE_INBOX_FOLDER_ID"] = self.inbox_folder_id
         return self.exec_in(args, env=env, timeout_s=300.0)
 
     # ── 生命週期 ─────────────────────────────────────────────────────────
@@ -537,7 +559,16 @@ def resident_pool(e2e_settings, tmp_path) -> Generator[Callable[..., ResidentCon
     `AISTORAGE_RESIDENT_ROOT` 指向測試用根目錄；正式 profile 一律拒絕。
     """
     active_containers: list[ResidentContainerHandle] = []
-    work_root = tmp_path / "work-root"
+    # **工作目錄必須在 colima 看得見的掛載點底下**。
+    # colima 只把 `$HOME` 與 `/tmp/colima` 掛進 VM（實測：`/private/var/folders/...`
+    # 也就是 pytest 的 tmp_path，bind mount 會直接報
+    # "bind source path does not exist"）。所以 work_root 放在
+    # `~/.local/share/aistorage/work/e2e`；log 留在 tmp_path。
+    # 測試結束時容器會被移除，/work 的內容隨之消失。
+    work_root = Path(
+        os.environ.get("AISTORAGE_E2E_WORK_ROOT",
+                       str(Path.home() / ".local" / "share" / "aistorage" / "work" / "e2e"))
+    )
     work_root.mkdir(parents=True, exist_ok=True)
     log_root = tmp_path / "container-logs"
     log_root.mkdir(parents=True, exist_ok=True)
@@ -578,6 +609,7 @@ def resident_pool(e2e_settings, tmp_path) -> Generator[Callable[..., ResidentCon
             profile=profile,
             model=model,
             log_path=log_path,
+            inbox_folder_id=str(e2e_settings.get("inbox_folder_id") or ""),
         )
         handle.proc = proc
         handle._log_file = log_file

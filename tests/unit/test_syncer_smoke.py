@@ -20,6 +20,7 @@ import pytest
 from aistorage.clock import FixedClock
 from aistorage.drive.fake import FakeDrive
 from aistorage.errors import ReadError
+from aistorage.reader import CatalogEntry
 from aistorage.inbox_builder import build_claim_item, load_private_key
 from aistorage.syncer.commit import (
     STALENESS_HINT,
@@ -87,7 +88,9 @@ class FakeApi:
 class FakeReader:
     """假的讀取端：catalog / get_rejection / manifest / get_session。"""
 
-    def __init__(self, *, generation: int = 1, published_at: str = T0) -> None:
+    def __init__(self, *, generation: int = 1, published_at: str = T0,
+                 catalog_as_dataclass: bool = True) -> None:
+        self.catalog_as_dataclass = catalog_as_dataclass
         self.catalog_data: dict[str, dict] = {}
         self.rejections: dict[str, str] = {}
         self.sessions: dict[str, Any] = {}
@@ -96,8 +99,23 @@ class FakeReader:
         self.catalog_calls = 0
 
     def catalog(self, session_ids: Sequence[str]) -> Any:
+        # 回**真的** CatalogEntry（9.1 e2e 才發現：這裡原本回 dict，於是
+        # 同步器「以為 catalog 回 dict」的錯誤一直沒被抓到，真實環境一有非空
+        # catalog 就 AttributeError）。
         self.catalog_calls += 1
-        return {sid: self.catalog_data[sid] for sid in session_ids if sid in self.catalog_data}
+        out: dict[str, Any] = {}
+        for sid in session_ids:
+            raw = self.catalog_data.get(sid)
+            if raw is None:
+                continue
+            out[sid] = (
+                CatalogEntry(session_id=sid, raw_sha256=raw["raw_sha256"],
+                             snapshot_at=raw.get("snapshot_at", T0),
+                             status=raw.get("status"))
+                if self.catalog_as_dataclass
+                else raw
+            )
+        return out
 
     def get_rejection(self, item_key: str) -> Any:
         code = self.rejections.get(item_key)
@@ -314,6 +332,31 @@ def test_unchanged_is_not_reuploaded(tmp_path: Path):
     assert outcome.uploaded == () and outcome.waiting == ()
     # 匯出仍然做（要知道有沒有變），但不再上傳
     assert env["api"].export_calls == ["ses_1", "ses_1"]
+
+
+def test_catalog_entries_may_be_dataclasses_or_dicts(tmp_path: Path):
+    """9.1 e2e 迴歸：同步器原本只認 dict 的 catalog 欄位。
+
+    真實的 `AgoraReader.catalog()` 回 `CatalogEntry` dataclass，於是
+    「已經在 Agora 裡」與「等待中」兩條路徑在真實環境一有非空 catalog 就
+    `AttributeError`，而且整輪只回一個例外型別名看不出錯在哪。
+    這裡兩種形狀都要能走。
+    """
+    for as_dataclass in (True, False):
+        sub = tmp_path / ("dc" if as_dataclass else "dict")
+        sub.mkdir(parents=True, exist_ok=True)
+        env = _setup(sub)
+        env["reader"].catalog_as_dataclass = as_dataclass
+        raw = _raw("同一版", title="主線")
+        env["api"].set(OcSession(id="ses_1", updated_ms=1), raw)
+        _run(env)
+        sid = "opencode:ses_1"
+
+        # 非空 catalog → 走「已經在 Agora 裡」而不是例外
+        env["reader"].catalog_data[sid] = {"raw_sha256": _sha(raw), "status": "running"}
+        outcome = _run(env)
+        assert outcome.unchanged == (sid,), as_dataclass
+        assert outcome.errors == (), as_dataclass
 
 
 def test_waiting_then_reupload_after_a_new_generation(tmp_path: Path):
@@ -861,11 +904,13 @@ def test_sync_and_commit_uploads_extra_items(tmp_path: Path, monkeypatch: pytest
         timeout=timedelta(milliseconds=200), poll=timedelta(milliseconds=50),
         progress=lambda _m: None,
     )
-    # 沒有 PAT／repo → 明確記下沒觸發，並且**不進入等待**（不是假裝成功）
+    # 沒有 PAT／repo → 明確記下沒觸發。因為「沒有觸發」不等於「觸發失敗」
+    # （排程或測試端的提交流程仍可能收進去，ADR 0007），所以**照樣等**。
     assert result.trigger_error is not None
-    assert result.timed_out is False
+    assert result.trigger_attempted is False
+    assert result.timed_out is True
     assert not result.ok
-    assert "下一輪" in result.summary()
+    assert "ADR 0007" in result.summary()
     names = _inbox_names(env["drive"], env["inbox_folder_id"])
     assert any(n.endswith(".sidecar.json") and n.startswith(handoff.item_key)
                for n in names)
@@ -1217,6 +1262,7 @@ def test_trigger_failure_returns_immediately_without_waiting(tmp_path: Path,
     )
     wall = time.monotonic() - started
     assert result.trigger_error, "觸發失敗要明確回報"
+    assert result.trigger_attempted is True, "這是「嘗試過而且失敗」，不是「沒觸發」"
     assert wall < 1.0, f"真的等了 {wall:.1f}s（應該完全不等待）"
     assert ticker.slept == [], f"不該有真的睡眠：{ticker.slept}"
     assert result.timed_out is False, "不是逾時，是「沒被觸發」"
@@ -1293,3 +1339,33 @@ def test_inbox_builder_guard_matches_the_same_rule():
         archived_ms=2000, last_message_ms=5000, last_message_created_ms=5000,
     )
     assert has_message_created_after_archive(later) is True
+
+
+def test_not_triggered_still_waits_for_the_read_side():
+    """「沒有 PAT」不等於「觸發失敗」：前者要等，後者不等。
+
+    ADR 0007：寫入者以讀取介面判斷完成——提交流程可能來自排程、來自測試在
+    本機跑。e2e 就是靠這個等待，讓測試端的提交流程把項目收進去。
+    """
+    reader = FakeReader()
+    reader.catalog_data["opencode:ses_1"] = {"raw_sha256": SNAP_A}
+    item = build_awaited_session("k1", "ses_1", SNAP_A)
+    ticker = FakeTicker()
+    # 第一輪還看不到，第二輪才看得到（模擬外部的提交流程收進去）
+    state = {"calls": 0}
+    original = reader.catalog
+
+    def _catalog(ids):
+        state["calls"] += 1
+        if state["calls"] >= 2:
+            return original(ids)
+        return {}
+
+    reader.catalog = _catalog  # type: ignore[assignment]
+    result = wait_visible(
+        reader, [item], timeout=timedelta(seconds=5),
+        poll=timedelta(milliseconds=200), progress=lambda _m: None,
+        monotonic=ticker.monotonic, sleeper=ticker.sleep,
+    )
+    assert result.ok, "外部把它收進去之後就算成功"
+    assert result.timed_out is False

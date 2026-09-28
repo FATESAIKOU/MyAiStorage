@@ -633,6 +633,8 @@ class ClaudeCodeConverter(Converter):
         archived_at: str | None = None
         archived_ms: int | None = None
         last_message_ms = int(max(moments).timestamp() * 1000) if moments else None
+        # H3：停止判定用「訊息被建立的時間」；Claude Code 的 moment 就是建立時間
+        last_message_created_ms = last_message_ms
 
         return SessionFacts(
             title=analysis.title,
@@ -644,6 +646,7 @@ class ClaudeCodeConverter(Converter):
             in_progress=self._in_progress(analysis),
             archived_ms=archived_ms,
             last_message_ms=last_message_ms,
+            last_message_created_ms=last_message_created_ms,
         )
 
     def child_session_ids(self, raw_path: Path, *, session_id: str | None = None) -> tuple[str, ...]:

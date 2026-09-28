@@ -1107,9 +1107,13 @@ def run_teardown(
     *,
     state_file: Path = DEFAULT_STATE_FILE,
     prefix_folder_id: str | None = None,
+    profile: str | None = None,
+    secrets_root: Path | None = None,
 ) -> int:
     """依 file id 遞迴永久刪除整棵前綴樹，並清理本機暫存設定檔。"""
     test_root_id = read_test_folder_id(IDS_ENV)
+    profile = profile or resolve_e2e_profile()
+    secrets_root = secrets_root or resolve_secrets_root()
     committer_drive = HttpDriveClient(RcloneConfToken(COMMITTER_CONF, remote=RCLONE_REMOTE))
 
     target_id = prefix_folder_id
@@ -1148,9 +1152,17 @@ def run_teardown(
             except Exception as e:
                 print(f"[e2e-teardown] 移除 {p} 失敗: {e}")
 
+    # profile 目錄裡的 reader.json 是 setup 產出的、指向**這一次**的前綴；
+    # 前綴刪掉之後它就是指向不存在資料夾的舊設定，容器會照著它上傳到錯誤的地方。
+    # 所以刪掉它（其他檔案是使用者自己的憑證／硬連結，保留）。
+    profile_dir = secrets_root / profile
+    stale_reader = profile_dir / "reader.json"
+    if stale_reader.is_file():
+        stale_reader.unlink()
+        print(f"[e2e-teardown] 已移除過期的 profile 設定: {stale_reader}")
     print(
         "[e2e-teardown] 測試 profile 的秘密目錄（resident-e2e/）**保留**："
-        "裡面是硬連結與非秘密的 reader.json（需要金鑰的 provider 才有 LLM 金鑰），"
+        "裡面是硬連結的憑證檔（需要金鑰的 provider 才有 LLM 金鑰），"
         "重新 setup 會冪等重用。"
     )
     print("[e2e-teardown] Teardown 清理完畢！")
@@ -1297,6 +1309,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_teardown(
             state_file=args.state_file,
             prefix_folder_id=args.prefix_id,
+            profile=args.profile,
+            secrets_root=args.secrets_root,
         )
     else:
         run_setup(

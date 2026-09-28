@@ -125,6 +125,7 @@ class OpencodeConverter(Converter):
 
         message_ids: list[str] = []
         max_time_ms: int | None = None
+        max_created_ms: int | None = None
         in_progress = False
 
         for idx, m in enumerate(raw_messages):
@@ -147,8 +148,12 @@ class OpencodeConverter(Converter):
                     if ms is not None:
                         if max_time_ms is None or ms > max_time_ms:
                             max_time_ms = ms
+                # H3：停止判定用「訊息被建立的時間」，不是完成的時間
+                if c_ms is not None and (max_created_ms is None or c_ms > max_created_ms):
+                    max_created_ms = c_ms
 
         last_message_ms = max_time_ms
+        last_message_created_ms = max_created_ms
         last_message_at = _format_time(max_time_ms)
 
         # R6: 判定 in_progress（中止判定以 MessageAbortedError 為依據）
@@ -178,6 +183,7 @@ class OpencodeConverter(Converter):
             in_progress=in_progress,
             archived_ms=archived_ms,
             last_message_ms=last_message_ms,
+            last_message_created_ms=last_message_created_ms,
         )
 
     def child_session_ids(self, raw_path: Path, *, session_id: str | None = None) -> tuple[str, ...]:

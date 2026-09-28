@@ -249,7 +249,11 @@ function writeTempParts(parts: unknown): string {
   const dir = (process.env.AISTORAGE_TMP_DIR as string | undefined) || "/tmp/aistorage"
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   const file = `${dir}/split-parts-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
-  writeFileSync(file, JSON.stringify(Array.isArray(parts) ? parts : [parts]), { mode: 0o600 })
+  // 原樣寫，不要包成 `[parts]`：模型有時把清單包成 `{"item": [...]}`，
+  // 包一層會變成 `[{"item": [...]}]`，正規化就認不出來了
+  // （9.1 e2e 實測：space-bunny-free 每次都這樣送）。
+  // 形狀由 CLI 端的 normalize_parts 吸收。
+  writeFileSync(file, JSON.stringify(parts), { mode: 0o600 })
   return file
 }
 

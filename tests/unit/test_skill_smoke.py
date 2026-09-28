@@ -375,12 +375,51 @@ def test_split_refuses_when_there_is_no_continuation_point(tmp_path: Path, monke
     assert "接續點" in str(e.value)
 
 
+def test_normalize_parts_absorbs_a_sloppy_model():
+    """9.1 e2e 實測：space-bunny-free 把清單包成 `{"item": [...]}`。
+
+    那是模型的形狀問題，不該讓它整個失敗並回「每一份工作都要有 title」。
+    """
+    from aistorage.skill import normalize_parts
+
+    assert normalize_parts({"item": [{"title": "甲"}, {"title": "乙"}]}) == [
+        {"title": "甲"}, {"title": "乙"}]
+    assert normalize_parts({"items": [{"title": "甲"}]}) == [{"title": "甲"}]
+    # 其餘三種 9.1 e2e 實測看過的包法：包兩層、清單裡塞 JSON 字串、整個當字串
+    assert normalize_parts([{"item": [{"title": "甲"}]}]) == [{"title": "甲"}]
+    assert normalize_parts([json.dumps({"title": "甲"})]) == [{"title": "甲"}]
+    assert normalize_parts(json.dumps([{"title": "甲"}])) == [{"title": "甲"}]
+    assert normalize_parts('{"parts": [{"title": "甲"}]}') == [{"title": "甲"}]
+    assert normalize_parts({"title": "甲", "summary": "s"}) == [
+        {"title": "甲", "summary": "s"}]
+    assert normalize_parts([{"title": "甲"}]) == [{"title": "甲"}]
+    for bad in ("nope", 5, {"a": 1}, [1, 2], [], [{}]):
+        with pytest.raises(SkillError):
+            normalize_parts(bad)
+
+
+def test_split_accepts_a_wrapped_parts_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """整條路徑：模型給 `{"item": [...]}` 也要寫出兩張交接單。"""
+    _run_committer(monkeypatch, _sd(tmp_path)[1])
+    sd, env = _sd(tmp_path)
+    _run_committer(monkeypatch, env)
+    _main_session(sd, env)
+    out = split(sd, "ses_1", {"item": [
+        {"title": "做甲", "summary": "甲的工作"},
+        {"title": "做乙", "summary": "乙的工作"},
+    ]}, timeout=SHORT)
+    assert len(out["handoff_ids"]) == 2
+    assert _uploaded_kinds(env).count("handoff") == 2
+
+
 def test_split_requires_title_for_each_part(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("aistorage.syncer.commit.trigger_committer", lambda *a, **k: None)
     sd, env = _sd(tmp_path)
     _main_session(sd, env)
-    with pytest.raises(SkillError):
+    with pytest.raises(SkillError) as e:
         split(sd, "ses_1", [{"summary": "沒有 title"}])
+    # 錯誤訊息要讓模型知道正確形狀（9.1 實測：模糊的訊息讓模型重試四次）
+    assert "title" in str(e.value) and "summary" in str(e.value)
     with pytest.raises(SkillError):
         split(sd, "ses_1", ["不是字典"])
 

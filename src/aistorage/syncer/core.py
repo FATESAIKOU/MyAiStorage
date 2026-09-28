@@ -124,6 +124,23 @@ def _value(result: Any, default: Any = None) -> Any:
     return result
 
 
+def entry_field(entry: Any, name: str, default: Any = None) -> Any:
+    """讀 `reader.catalog()` 回來的一筆，欄位名不分 dict 或 dataclass。
+
+    真實的 `AgoraReader.catalog()` 回的是 `CatalogEntry` dataclass
+    （session_id / raw_sha256 / snapshot_at），不是 dict。9.1 e2e 才發現
+    同步器一直假設是 dict，所以「已經在 Agora 裡 → unchanged」與「等待中 →
+    補傳」兩條路徑在真實環境從來沒執行過：一有非空 catalog 就
+    `AttributeError: 'CatalogEntry' object has no attribute 'get'`。
+    單元測試用 dict 假讀取端，所以沒抓到。
+    """
+    if entry is None:
+        return default
+    if isinstance(entry, dict):
+        return entry.get(name, default)
+    return getattr(entry, name, default)
+
+
 def _manifest_info(reader: ReaderLike) -> tuple[str | None, int | None]:
     """讀取視圖目前世代的 (published_at, generation)；讀不到就 (None, None)。
 
@@ -256,7 +273,7 @@ def sync_once(
             rec.too_large = False
 
             entry = (catalog_in or {}).get(sid)
-            in_agora = bool(entry) and entry.get("raw_sha256") == sha
+            in_agora = bool(entry) and entry_field(entry, "raw_sha256") == sha
 
             if in_agora:
                 # 已經收進 Agora：清掉等待／拒收狀態
@@ -298,7 +315,7 @@ def sync_once(
                     source=source,
                     max_raw=max_raw,
                     generation=generation,
-                    agora_status=entry.get("status") if entry else None,
+                    agora_status=entry_field(entry, "status"),
                     keep_export=keep_exports,
                 )
                 if outcome.error:
@@ -331,7 +348,7 @@ def sync_once(
                 source=source,
                 max_raw=max_raw,
                 generation=generation,
-                agora_status=entry.get("status") if entry else None,
+                agora_status=entry_field(entry, "status"),
                 keep_export=keep_exports,
             )
             if outcome.error:
@@ -350,9 +367,11 @@ def sync_once(
             # 這裡擋全部的 Exception：同步器是背景服務，一個 Session 壞掉不該
             # 讓整輪中斷。KeyboardInterrupt／SystemExit 不在 Exception 之下，
             # 所以 Ctrl-C 與關機訊號仍然會往上拋。
-            code = type(e).__name__
+            # 只有例外型別等於沒說是什麼錯（9.1 e2e 實測：整輪只看到
+            # `rejected/error: opencode:ses_… AttributeError`）。帶上訊息。
+            code = f"{type(e).__name__}: {e}".strip()
             errors.append((sid, code))
-            rec.error_code = code
+            rec.error_code = type(e).__name__
 
     # M1：逐 Session 都攔住了，這裡一定會執行；狀態一定要存下來
     state.save()

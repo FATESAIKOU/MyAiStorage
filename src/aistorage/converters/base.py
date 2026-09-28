@@ -31,6 +31,11 @@ class SessionFacts:
     in_progress: bool
     archived_ms: int | None = None        # R3: 毫秒整數時間戳，用於判定「封存之後是否有新訊息」
     last_message_ms: int | None = None    # R3: 毫秒整數時間戳，取自所有訊息時間的最大值
+    # review-g5-6 H3：「封存之後有沒有**新**訊息」要用訊息的 **created** 判斷，
+    # 不能用 completed。宣告停止是在 AI 回覆**生成中**呼叫的，那一則訊息是在
+    # 封存**之前**建立的、在封存**之後**才完成；用 completed 判會在下一輪把它
+    # 誤認成新訊息而自己恢復成 running。
+    last_message_created_ms: int | None = None
 
 
 @runtime_checkable
