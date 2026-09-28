@@ -41,13 +41,15 @@ refuse_claude() {
       die "拒絕啟動：環境變數 ${var} 存在。住民容器不使用 Claude（PM 決定 2）"
     fi
   done
+  # 全部用 ${HOME}（容器內 HOME=/work，但測試會把 HOME 指到別處；
+  # 寫死 /work 會讓 review-g5-6 L1 的測試誤判）
   local p
   for p in \
-      /work/.claude.json \
-      /work/.config/anthropic \
-      /work/.claude/settings.json \
-      /work/.claude/.credentials.json \
-      /work/.config/opencode/auth.json \
+      "${HOME}/.claude.json" \
+      "${HOME}/.config/anthropic" \
+      "${HOME}/.claude/settings.json" \
+      "${HOME}/.claude/.credentials.json" \
+      "${HOME}/.config/opencode/auth.json" \
       "${HOME}/.local/share/opencode/auth.json" ; do
     if [ -e "$p" ]; then
       die "拒絕啟動：${p} 存在。住民容器的憑證一律以 /secrets 的檔案引用提供，opencode 不該寫出明文 auth.json（1.7a M4）；請刪除該檔再啟動"
@@ -106,8 +108,11 @@ case "$mode" in
     exit 0
     ;;
   serve) ;;
-  -*) exec "$@" ;;
-  *) exec "$@" ;;
+  # 除錯路徑（`bash -c '...'` 這種一次性命令）本來會整個略過前置檢查。
+  # review-g5-6 L1：連這種路徑也要先擋 Claude 的憑證——否則「拒絕 Claude」
+  # 就變成只要走這條路徑就繞得過去。
+  -*) refuse_claude; exec "$@" ;;
+  *) refuse_claude; exec "$@" ;;
 esac
 
 model="${AISTORAGE_MODEL:-}"

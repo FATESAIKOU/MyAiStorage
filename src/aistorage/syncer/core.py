@@ -18,7 +18,7 @@ from typing import Any, Protocol, Sequence, runtime_checkable
 from aistorage.clock import Clock, format_rfc3339
 from aistorage.converters.base import ConversionError, SessionFacts
 from aistorage.drive.model import DriveClient
-from aistorage.errors import ReadError
+from aistorage.errors import AiStorageError, ReadError
 from aistorage.inbox_builder import build_session_item, load_private_key, upload_item
 from aistorage.syncer.opencode_api import OpencodeApi, OcSession
 from aistorage.syncer.state import SyncState
@@ -150,17 +150,22 @@ def _manifest_info(reader: ReaderLike) -> tuple[str | None, int | None]:
     )
 
 
-def _is_stopped(archived_ms: int | None, last_message_ms: int | None) -> bool:
-    """停止的判定（1.7e + D4）：封存時間之後沒有新訊息才算停止。
+def _is_stopped(archived_ms: int | None, last_message_created_ms: int | None) -> bool:
+    """停止的判定（1.7e + D4）：封存時間之後**沒有新訊息被建立**才算停止。
 
-    `archived = 0` 與沒有封存都視為未封存；沒有 last_message（facts 失敗）時
+    `archived = 0` 與沒有封存都視為未封存；拿不到訊息時間（facts 失敗）時
     保守視為**未**停止——寧可多同步一次，也不要把還在用的 Session 標成停止。
+
+    **用 created，不用 completed**（review-g5-6 H3、D10）：宣告停止一定發生在
+    AI 回覆生成中，那一則訊息在封存**之前**建立、封存**之後**才完成。用
+    completed 判，下一輪會自己恢復成 running，宣告停止永遠不成立。
+    這條規則與 `agora/apply._is_stopped` 必須一致。
     """
     if not archived_ms or archived_ms <= 0:
         return False
-    if last_message_ms is None:
+    if last_message_created_ms is None:
         return False
-    return last_message_ms <= archived_ms
+    return last_message_created_ms <= archived_ms
 
 
 def _facts_or_none(converter: ConverterLike, raw: Path, session_id: str) -> SessionFacts | None:
@@ -184,6 +189,7 @@ def sync_once(
     only: Sequence[str] | None = None,
     max_raw: int = MAX_RAW_BYTES,
     source: str = SOURCE,
+    keep_exports: bool = False,
 ) -> SyncOutcome:
     """跑一輪同步：把有新版本的 Session 上傳到收件匣。
 
@@ -204,6 +210,9 @@ def sync_once(
        `resumed_after_stop`（daemon 看到就立刻同步並提交）。
     5. `parent_id` 取 API 的 parentID（子 Session 也是 Agora 的 Session）。
     6. 超過 raw 上限 → 不上傳，標 too_large。
+    7. `keep_exports=True`：上傳之後保留匯出檔（`skill` 算接續點時需要；
+       預設會刪掉，因為匯出檔是原始紀錄的副本，留在 /work 會累積真實對話
+       內容，而且抹除 6.1 不會涵蓋那個目錄——review-g5-6 M5）。
     """
     work = Path(workdir)
     work.mkdir(parents=True, exist_ok=True)
@@ -215,7 +224,7 @@ def sync_once(
         sessions = [s for s in sessions if s.session_id(source) in wanted]
 
     catalog_in = _value(reader.catalog([s.session_id(source) for s in sessions]), {}) or {}
-    published_at, generation = _manifest_info(reader)
+    _published_at, generation = _manifest_info(reader)
 
     uploaded: list[str] = []
     waiting: list[str] = []
@@ -264,8 +273,12 @@ def sync_once(
                     rec.error_code = "rejected"
                     rejected.append((sid, rejection))
                     continue
+                # M2：用「世代」判斷，不比較兩台機器的時間字串
+                # （published_at 是 committer 的時鐘、uploaded_at 是 Mac 的時鐘）。
                 newer_generation = bool(
-                    published_at and rec.uploaded_at and published_at > rec.uploaded_at
+                    generation is not None
+                    and rec.uploaded_generation is not None
+                    and generation > rec.uploaded_generation
                 )
                 if not newer_generation:
                     waiting.append(sid)
@@ -285,6 +298,8 @@ def sync_once(
                     source=source,
                     max_raw=max_raw,
                     generation=generation,
+                    agora_status=entry.get("status") if entry else None,
+                    keep_export=keep_exports,
                 )
                 if outcome.error:
                     errors.append((sid, outcome.error))
@@ -316,6 +331,8 @@ def sync_once(
                 source=source,
                 max_raw=max_raw,
                 generation=generation,
+                agora_status=entry.get("status") if entry else None,
+                keep_export=keep_exports,
             )
             if outcome.error:
                 errors.append((sid, outcome.error))
@@ -324,12 +341,20 @@ def sync_once(
             uploaded.append(sid)
             if outcome.resumed:
                 resumed.append(sid)
-        except (ReadError, OSError, ValueError) as e:
-            # 一個 Session 失敗不影響其他（daemon 記錄 id 與代碼後繼續）
+        except Exception as e:  # noqa: BLE001 - 逐 Session 攔截，daemon 要繼續跑
+            # 一個 Session 失敗不影響其他（daemon 記錄 id 與代碼後繼續）。
+            # M1：原本只擋 (ReadError, OSError, ValueError)，而 `upload_item`
+            # 丟的是 WriteError（AiStorageError 的子類）→ 會中止整輪，連已經
+            # 上傳成功的 Session 都不會存進狀態（下一輪重複上傳，提交流程判
+            # ALREADY，但收件匣會多出一組重複檔案）。
+            # 這裡擋全部的 Exception：同步器是背景服務，一個 Session 壞掉不該
+            # 讓整輪中斷。KeyboardInterrupt／SystemExit 不在 Exception 之下，
+            # 所以 Ctrl-C 與關機訊號仍然會往上拋。
             code = type(e).__name__
             errors.append((sid, code))
             rec.error_code = code
 
+    # M1：逐 Session 都攔住了，這裡一定會執行；狀態一定要存下來
     state.save()
     return SyncOutcome(
         uploaded=tuple(sorted(uploaded)),
@@ -380,6 +405,8 @@ def _upload_one(
     source: str,
     max_raw: int,
     generation: int | None = None,
+    agora_status: str | None = None,
+    keep_export: bool = False,
 ) -> _UploadOutcome:
     """組 item 並上傳（同步器的「唯一寫入點」）。"""
     sid = oc.session_id(source)
@@ -400,8 +427,17 @@ def _upload_one(
     else:
         facts_ok = True
 
-    stopped = _is_stopped(oc.archived_ms, facts.last_message_ms)
-    was_stopped = (rec.stop_observed_at is not None) and not stopped
+    # H3：用「訊息被建立的時間」判斷（宣告停止時那則回覆在封存之前就建立了）
+    stopped = _is_stopped(
+        oc.archived_ms, getattr(facts, "last_message_created_ms", None)
+    )
+    # 恢復的判定以 **Agora 的狀態**為準：Agora 是 stopped、本地卻算出 running，
+    # 才算「停止後被恢復」。本機記錄只用來記停止觀測到的時間，而且在恢復
+    # 之後要**清掉**——否則之後每次上傳都會被列進 resumed_after_stop，
+    # daemon 每 10 分鐘就會觸發一次 workflow（review-g5-6 H3）。
+    was_stopped = agora_status == "stopped" and not stopped
+    if not stopped and rec.stop_observed_at is not None:
+        rec.stop_observed_at = None
     if stopped and rec.stop_observed_at is None:
         # 停止時間取同步器**第一次觀測到**的時間，不信來源端填的值（D4／3.9）
         rec.stop_observed_at = snapshot_at
@@ -422,6 +458,7 @@ def _upload_one(
         snapshot_at=snapshot_at,
         now=snapshot_at,
         max_raw=max_raw,
+        archive_ms=oc.archived_ms,   # H3：宣告停止的判斷依據
     )
     upload_item(drive, inbox_folder_id, item)
 
@@ -430,4 +467,18 @@ def _upload_one(
     rec.uploaded_at = snapshot_at
     rec.uploaded_generation = generation
     rec.error_code = None
+    # M5：匯出檔是原始紀錄的副本，上傳成功後就不留（避免在 /work 累積
+    # 真實對話內容，而且抹除 6.1 不會涵蓋這個目錄）。
+    if not keep_export:
+        _drop_export(item.raw_path)
     return _UploadOutcome(resumed=was_stopped)
+
+
+def _drop_export(path: Path | None) -> None:
+    """刪掉上傳後的匯出副本（刪不到就算了，不影響同步結果）。"""
+    if path is None:
+        return
+    try:
+        Path(path).unlink()
+    except OSError:
+        pass

@@ -169,7 +169,7 @@ resident/verify-boundary.sh --json     # 給存檔比對
 
 | 症狀 | 原因 | 處置 |
 |---|---|---|
-| `docker pull` 說 `no such host` | colima VM 的 systemd-resolved 指向失效的 IPv6 resolver（宿主機的系統 resolver 也壞，但 `8.8.8.8`、`192.168.0.1` 本身是好的） | 只改 **VM 內**：`/etc/systemd/resolved.conf.d/aistorage-dns.conf` 寫 `DNS=8.8.8.8 1.0.0.8` 後 `systemctl restart systemd-resolved`。不用動宿主機，也不用為了別人重啟 colima |
+| `docker pull` 說 `no such host` | colima VM 的 systemd-resolved 指向失效的 IPv6 resolver（宿主機的系統 resolver 也壞，但 `8.8.8.8`、`192.168.0.1` 本身是好的） | **先照既有的原則 `colima restart`**（review-g5-6 L4：這是既有的處置原則）。如果重啟後仍然壞，才改 **VM 內**：`/etc/systemd/resolved.conf.d/aistorage-dns.conf` 寫 `DNS=8.8.8.8 1.0.0.8` 後 `systemctl restart systemd-resolved`。**這個 drop-in 是當時為了先建 image 加的，會留在 VM 裡，請 PM／使用者確認要不要保留**（它只影響 colima VM，不動宿主機） |
 | image build 卡在 `TARGETARCH: parameter not set` | colima **沒有 buildx**，legacy builder 不會自動帶 BuildKit 的 `TARGETARCH` | `build.sh` 用 `--build-arg` 傳；Dockerfile 內部再以 `uname -m` 兜底 |
 | `opencode: required file not found` | 本機 `ubuntu:24.04` 標籤曾快取成 **amd64**，arm64 的靜態執行檔在 amd64 容器裡跑不起來 | `build.sh` 帶 `--platform linux/arm64`（依 `uname -m`） |
 | `cryptography` 匯入時 SIGILL | 47+ 的 aarch64 wheel 用了 colima VM 沒暴露的指令（VM 的 CPU Features 沒有 armv8.2+ 的 LSE/SHA 系列） | image 內固定 `cryptography>=42,<47`（46.0.3 實測可用）。Mac 上的開發環境不受影響 |
@@ -179,7 +179,7 @@ resident/verify-boundary.sh --json     # 給存檔比對
 
 ## 7. 還沒做的
 
-- 5.2 同步器、5.3 同步並提交、5.4 plugin 與 skill 說明（下一段）
-- 第 6 組的管理操作（`src/aistorage/admin/`）
+- 第 6 組的管理操作（`src/aistorage/admin/`；review-g5-6 的 H4〜H7 未修之前
+  **不要對 Agora 的真實資料執行任何管理腳本**）
 - TUI attach 的互動驗證（`opencode attach` 的存在已確認，但還沒有人用真人操作過；
   這一步需要真的開一個對話，屬於 5.4 的驗收）

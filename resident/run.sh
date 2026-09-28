@@ -211,6 +211,7 @@ env_args=(
 publish_args=()
 if [ -n "$publish_port" ]; then
   publish_args=(-p "127.0.0.1:${publish_port}:4096")
+  env_args+=(-e AISTORAGE_OPENCODE_HOST=0.0.0.0)
   echo "發布 API 到宿主機 127.0.0.1:${publish_port}（attach 用的 port）"
 fi
 

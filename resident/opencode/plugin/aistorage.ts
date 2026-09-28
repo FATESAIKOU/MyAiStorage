@@ -37,11 +37,11 @@ interface ToolDef {
   args: (args: ToolArgs) => string[]
 }
 
-function q(value: string): string {
-  // 參數全部經過這裡：用單引號包起來，內部單引號以 '\'' 轉義，
-  // 避免把 AI 寫的文字變成 shell 的結構（包含換行、引號、$、反引號）。
-  return "'" + value.replace(/'/g, "'\\''") + "'"
-}
+// 參數直接放進 argv。`spawn` **不經過 shell**，所以千萬不要加 shell 引號
+// （review-g5-6 H2）：加了單引號，Python 收到的字串會把 `'` 當成內容的一部分，
+// `handoff:01…` 就會變成 `'handoff:01…'` 而查不到交接單。
+// 這裡只擋「不該出現在 argv 裡」的控制字元（NUL 無法存在於 argv；換行可以，
+// 所以不擋換行——AI 寫的多行摘要本來就該原樣傳過去）。
 
 function str(args: ToolArgs, key: string): string | undefined {
   const v = args[key]
@@ -73,9 +73,9 @@ const TOOLS: Record<string, ToolDef> = {
     args: (a) => {
       const out: string[] = []
       const summary = str(a, "summary")
-      if (summary) out.push("--summary", q(summary))
+      if (summary) out.push("--summary", summary)
       const next = str(a, "next_steps")
-      if (next) out.push("--next-steps", q(next))
+      if (next) out.push("--next-steps", next)
       return out
     },
   },
@@ -86,7 +86,7 @@ const TOOLS: Record<string, ToolDef> = {
     mainOnly: true,
     args: (a) => {
       const out: string[] = []
-      for (const id of strList(a, "handoff_ids")) out.push("--handoff", q(id))
+      for (const id of strList(a, "handoff_ids")) out.push("--handoff", id)
       return out
     },
   },
@@ -96,9 +96,9 @@ const TOOLS: Record<string, ToolDef> = {
     args: (a) => {
       const out: string[] = []
       const query = str(a, "query") ?? ""
-      out.push("--query", q(query))
+      out.push("--query", query)
       const c = str(a, "case_id")
-      if (c) out.push("--case", q(c))
+      if (c) out.push("--case", c)
       return out
     },
   },
@@ -108,7 +108,7 @@ const TOOLS: Record<string, ToolDef> = {
     args: (a) => {
       const out: string[] = []
       const target = str(a, "session_id")
-      if (target) out.push("--target", q(target))
+      if (target) out.push("--target", target)
       return out
     },
   },
@@ -119,9 +119,9 @@ const TOOLS: Record<string, ToolDef> = {
     args: (a) => {
       const out: string[] = []
       const to = str(a, "session_id")
-      if (to) out.push("--to", q(to))
+      if (to) out.push("--to", to)
       const at = str(a, "read_snapshot_at")
-      if (at) out.push("--read-snapshot-at", q(at))
+      if (at) out.push("--read-snapshot-at", at)
       return out
     },
   },
@@ -130,7 +130,7 @@ const TOOLS: Record<string, ToolDef> = {
     args: (a) => {
       const out: string[] = []
       const c = str(a, "case_id")
-      if (c) out.push("--case", q(c))
+      if (c) out.push("--case", c)
       return out
     },
   },
@@ -141,32 +141,51 @@ const TOOLS: Record<string, ToolDef> = {
   },
 }
 
-/** 查目前這個 Session 有沒有 parent（有就是子 Session）。 */
-async function resolveParent(
-  ctx: ToolContext,
-  sessionId: string,
-): Promise<string | null> {
-  if (currentSession === sessionId && parentOfCurrent !== undefined) {
+/**
+ * 這個 Session 是不是主 Session。
+ *
+ * **fail-closed（review-g5-6 H1）**：只有「查得到自己、而且自己沒有 parentID」
+ * 才算主 Session。查詢失敗、或清單裡找不到自己，一律 throw 拒絕，
+ * 而且**不把失敗寫進快取**（否則 API 恢復之後仍會用錯的結果）。
+ * 宣告停止沒有提交流程那一道防線，這裡放行就等於沒有檢查。
+ */
+async function resolveParent(sessionId: string): Promise<string | null> {
+  if (currentSession === sessionId && parentOfCurrent !== null) {
     return parentOfCurrent
   }
   const base =
     (process.env.AISTORAGE_OPENCODE_URL as string | undefined) ??
     "http://127.0.0.1:4096"
+  let sessions: Array<Record<string, unknown>>
   try {
     const resp = await fetch(`${base}/session`)
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const sessions = (await resp.json()) as Array<Record<string, unknown>>
-    const me = sessions.find((s) => s?.id === sessionId)
-    const parent = me?.parentID ?? me?.parentId ?? null
-    parentOfCurrent = typeof parent === "string" ? parent : null
-    currentSession = sessionId
-    return parentOfCurrent
-  } catch {
-    // 查不到不算通過：寧可拒絕主 Session 限定的操作，也不要放行
+    if (!resp.ok) {
+      throw new Error(`HTTP ${resp.status}`)
+    }
+    sessions = (await resp.json()) as Array<Record<string, unknown>>
+  } catch (e) {
+    // 不要快取失敗：下一次呼叫要重新問
+    currentSession = null
     parentOfCurrent = null
-    currentSession = sessionId
-    return null
+    throw new Error(
+      `無法確認目前是不是主 Session（問不到 opencode 的 Session 清單：${String(
+        (e as Error)?.message ?? e,
+      )}）。為了安全，拒絕執行。`,
+    )
   }
+  const me = sessions.find((s) => s?.id === sessionId)
+  if (!me) {
+    currentSession = null
+    parentOfCurrent = null
+    throw new Error(
+      "opencode 的 Session 清單裡找不到自己（可能剛被刪除或 id 不對）。" +
+        "為了安全，拒絕執行。",
+    )
+  }
+  const parent = me.parentID ?? me.parentId
+  parentOfCurrent = typeof parent === "string" && parent ? parent : null
+  currentSession = sessionId
+  return parentOfCurrent
 }
 
 function runCli(
@@ -257,7 +276,7 @@ export const AistoragePlugin = async () => {
               }
               // 第一層：主 Session 限定
               if (MAIN_SESSION_ONLY.has(name) || def.mainOnly) {
-                const parent = await resolveParent(ctx, sessionId)
+                const parent = await resolveParent(sessionId)
                 if (parent) {
                   throw new Error(
                     `aistorage_${command} 只能在主 Session 做（目前是子 Session，parent=${parent}）`,

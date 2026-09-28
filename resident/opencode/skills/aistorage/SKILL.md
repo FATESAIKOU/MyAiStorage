@@ -11,8 +11,8 @@ description: 用 AiStorage 的工具接續、參考與交出工作（Agora）。
 
 1. **回報讀到的內容時，一定要帶上快照時間與新鮮度警告。** 每個
    `aistorage_find`／`aistorage_read` 的結果都有 `snapshot_at` 與 `freshness`。
-   當 `freshness.ok` 是 `false`（或 `warning` 不為空），要在回答裡明說
-   「可能不是最新的」，不要假裝它是最新的。
+   當 `freshness.satisfied` 是 `false`，或 `freshness.warning` 不為空，
+   要在回答裡明說「可能不是最新的」，不要假裝它是最新的。
 2. **不要為了讀到更新的內容而要求對方同步。** 需要時，由「寫的一方」自己
    執行同步並提交（ADR 0007）。你這邊讀到的永遠是「對方已提交的版本」。
 
@@ -53,8 +53,14 @@ aistorage_handoff_end(summary: "…", next_steps: "…")
 aistorage_stop()
 ```
 
-設定 `time.archived = now` 然後同步並提交。只在主 Session 可用，而且要等這次
-回覆完成之後才呼叫（還在生成中的回覆不算「已完成」）。
+設定 `time.archived = now` 然後同步並提交。只在主 Session 可用。
+
+呼叫的時候你這次的回覆**正在生成中**，這是正常的：停止的判定看的是「封存之後
+還有沒有**新建立**的訊息」，而你這一則是在封存之前就開始寫的，所以不會被算成
+新訊息。回覆寫完之後，同步器仍然會把它當成停止中。
+
+之後如果你又開新的對話（訊息在封存之後建立），它會自動恢復成運作中，而且只會
+觸發**一次**立刻的同步並提交。
 
 ## 接手工作
 
@@ -84,9 +90,13 @@ aistorage_reference(session_id: "opencode:ses_…", read_snapshot_at: "…")
 
 1. `aistorage_read` 讀對方，記下回傳的 `snapshot_at`。
 2. 回答使用者時引用那個快照時間；有警告就說「可能不是最新的」。
-3. 真的用到對方的內容、而且這次的成果有賴於它時，用
-   `aistorage_reference` 留下參考 Link（把剛讀到的 `snapshot_at` 當
-   `read_snapshot_at` 帶進去）。
+3. 真的用到對方的內容、而且這次的成果有賴於它時，用 `aistorage_reference`
+   留下參考 Link，**一定要把你剛讀到的 `snapshot_at` 當 `read_snapshot_at`
+   帶進去**（它是必填的）。
+
+   為什麼必填：`read_snapshot_at` 記的是「我讀到的時候它的那個版本」。
+   如果留空、由工具自己去抓對方「目前」的時間，等於宣稱你讀到了一個其實
+   沒讀過的版本——那個時間之後別人又改過，你並沒有看過那段。
 
 `aistorage_reference` **只上傳，不觸發提交**（PM 決定 4）：由下一輪提交流程收進去。
 所以回報的時候要說「已留下參考，會在下一輪收進去」，不要說「已經建好 Link 了」。

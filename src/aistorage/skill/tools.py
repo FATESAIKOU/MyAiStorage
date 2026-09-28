@@ -155,15 +155,24 @@ def read(reader: Any, session_id: str, *, max_lag: timedelta | None = None) -> d
 
 
 def _freshness_dict(freshness: Any) -> dict:
+    """把讀取介面的 Freshness 轉成給 AI 看的字典。
+
+    **欄位名稱要和 `reader.Freshness` 一致**（review-g5-6 M3）：原本這裡寫的是
+    `lag_s`／`ok`，但實際欄位是 `satisfied`／`warning`／`stopped_ok`／`generation`／
+    `published_at` → 兩個值永遠是 None，AI 就看不到「未達新鮮度」的判斷。
+    """
     if freshness is None:
         return {}
     if isinstance(freshness, dict):
         return dict(freshness)
     return {
         "snapshot_at": getattr(freshness, "snapshot_at", None),
-        "lag_s": getattr(freshness, "lag_s", None),
-        "ok": getattr(freshness, "ok", None),
+        "generation": getattr(freshness, "generation", None),
+        "published_at": getattr(freshness, "published_at", None),
+        # 讀者有要求 max_lag 時，satisfied 才有意義（沒要求是 None）
+        "satisfied": getattr(freshness, "satisfied", None),
         "warning": getattr(freshness, "warning", None),
+        "stopped_ok": getattr(freshness, "stopped_ok", None),
     }
 
 
@@ -220,6 +229,14 @@ def _build_handoffs(
     return items
 
 
+def _drop_file(path: Path) -> None:
+    """刪掉用完的匯出副本（刪不到就算了，不影響結果）。"""
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 def _opencode_converter() -> Any:
     from aistorage.converters import get_converter
 
@@ -253,20 +270,27 @@ def split(sd: SkillDeps, session_id: str, parts: Sequence[dict], *,
     oc = resolve_session(sd.api, session_id)
     deps = sd.deps
     # 先同步自己（commit 前必須讓快照在 Agora 裡）
+    # keep_exports：接續點要從匯出檔算（review-g5-6 M5：預設上傳後會刪掉匯出檔，
+    # 避免在 /work 累積真實對話內容）
     outcome = sync_once(
         api=deps.api, reader=deps.reader, drive=deps.drive,
         inbox_folder_id=deps.inbox_folder_id, signer=deps.signer,
         state=sd.state, clock=deps.clock, workdir=deps.workdir,
-        converter=deps.converter, only=[oc.id],
+        converter=deps.converter, only=[oc.id], keep_exports=True,
     )
     rec = sd.state.sessions.get(oc.session_id())
     if rec is None or not rec.last_uploaded_sha:
         raise SkillError("同步自己失敗，拿不到快照雜湊")
     raw_path = deps.workdir / "exports" / f"{oc.id}.json"
-    handoffs = _build_handoffs(
-        oc, parts=parts, deps=deps, signer=deps.signer,
-        snapshot_sha256=rec.last_uploaded_sha, raw_path=raw_path, clock=deps.clock,
-    )
+    try:
+        handoffs = _build_handoffs(
+            oc, parts=parts, deps=deps, signer=deps.signer,
+            snapshot_sha256=rec.last_uploaded_sha, raw_path=raw_path,
+            clock=deps.clock,
+        )
+    finally:
+        # 算完接續點就把匯出檔刪掉（M5）
+        _drop_file(raw_path)
     result = _export_and_sync(sd, oc.id, extra=handoffs, timeout=timeout,
                               already_synced=True)
     if result.timed_out:
@@ -350,20 +374,17 @@ def reference(sd: SkillDeps, session_id: str, target_session_id: str, *,
     """`aistorage_reference`：留下參考 Link。
 
     **PM 決定 4**：預設只上傳、不觸發提交，由下一輪提交流程收進去。
+
+    `read_snapshot_at` **必須是呼叫端真的讀到的快照時間**（review-g5-6 L5）：
+    原本沒給就去抓對方「目前」的時間，等於宣稱讀到了一個其實沒讀過的版本。
     """
     oc = resolve_session(sd.api, session_id)
     snapshot_at = read_snapshot_at
-    if snapshot_at is None:
-        # 沒給就用對方現在的快照時間（剛讀到的）
-        try:
-            result = sd.reader.get_session(target_session_id)
-            session = getattr(getattr(result, "value", result), "session", None)
-            snapshot_at = getattr(session, "snapshot_at", None) or (
-                session.get("snapshot_at") if isinstance(session, dict) else None)
-        except Exception:
-            snapshot_at = None
     if not snapshot_at:
-        raise SkillError("拿不到對方的快照時間；請先 read 再帶 read_snapshot_at 過來")
+        raise SkillError(
+            "read_snapshot_at 必填：要填你剛剛 aistorage_read 讀到的 snapshot_at。"
+            "自己抓對方「目前」的時間會讓這筆參考宣稱讀到一個其實沒讀過的版本"
+        )
     key = _signer_key(sd.deps.signer)
     item = build_reference_item(
         from_session_id=oc.session_id(), to_session_id=target_session_id,

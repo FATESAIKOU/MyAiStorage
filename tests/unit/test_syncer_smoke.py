@@ -134,6 +134,8 @@ class FakeConverter:
             last_message_at=info.get("last_message_at"),
             in_progress=bool(info.get("in_progress", False)),
             last_message_ms=info.get("last_message_ms"),
+            last_message_created_ms=info.get("last_message_created_ms",
+                                             info.get("last_message_ms")),
         )
 
 
@@ -410,44 +412,124 @@ def test_stop_detection_uses_archived_and_last_message():
     assert _is_stopped(200, None) is False            # 拿不到訊息時間 → 保守
 
 
-def test_stopped_session_records_first_observation(tmp_path: Path):
+def test_stop_detection_uses_archived_and_message_created():
+    """H3：「封存之後有沒有新訊息」看訊息的 **created**，不是 completed。
+
+    宣告停止一定發生在 AI 回覆**生成中**：那一則訊息在封存**之前**建立、
+    封存**之後**才完成。用 completed 判，宣告停止會在下一輪自己恢復成 running。
+    """
+    # 封存之前建立、封存之後完成 → 仍是停止中
+    assert _is_stopped(2000, 1000) is True
+    # 封存之後才建立的訊息 → 恢復成 running
+    assert _is_stopped(2000, 3000) is False
+    # 沒有封存 / archived=0 → 不是停止
+    assert _is_stopped(0, 100) is False
+    assert _is_stopped(None, 100) is False
+    # 拿不到訊息時間 → 保守視為未停止
+    assert _is_stopped(2000, None) is False
+
+
+def test_stop_declared_while_the_reply_is_streaming_stays_stopped(tmp_path: Path):
+    """完整的宣告停止流程：回覆生成中就宣告停止，回覆完成後仍是 stopped。
+
+    這一則回覆：created=1000（封存之前）、completed=9000（封存之後）、
+    封存=2000 → 停止中。
+    """
     env = _setup(tmp_path)
-    raw = _raw("做完了", title="主線", last_message_ms=1000)
+    raw1 = _raw("做完了", title="主線", last_message_ms=9000,
+                last_message_created_ms=1000, in_progress=True)
+    env["api"].set(OcSession(id="ses_1", updated_ms=1, archived_ms=2000), raw1)
+    _run(env)
+    rec = env["state"].sessions["opencode:ses_1"]
+    sidecar = _sidecar(env["drive"], env["inbox_folder_id"],
+                       f"{rec.last_item_key}.sidecar.json")
+    assert sidecar["session"]["status"] == "stopped", "宣告停止必須成立"
+    assert sidecar["session"]["stopped_at"] is not None
+    assert rec.stop_observed_at is not None
+
+    # 回覆在封存之後完成（completed 變大、created 不變）→ 下一輪仍是 stopped
+    env["clock"].set_time("2026-09-28T09:00:00Z")
+    raw2 = _raw("做完了", title="主線", last_message_ms=9000,
+                last_message_created_ms=1000, in_progress=False)
+    env["api"].set(OcSession(id="ses_1", updated_ms=2, archived_ms=2000), raw2)
+    env["reader"].catalog_data["opencode:ses_1"] = {"raw_sha256": _sha(raw1)}
+    outcome = _run(env)
+    assert outcome.uploaded == ("opencode:ses_1",)
+    rec2 = env["state"].sessions["opencode:ses_1"]
+    sidecar2 = _sidecar(env["drive"], env["inbox_folder_id"],
+                        f"{rec2.last_item_key}.sidecar.json")
+    assert sidecar2["session"]["status"] == "stopped", "不該自己恢復成 running"
+    # 停止觀測到的時間不因為新上傳而刷新
+    assert rec2.stop_observed_at == rec.stop_observed_at
+
+
+def test_stopped_at_is_the_first_observation_not_the_source_value(tmp_path: Path):
+    env = _setup(tmp_path)
+    raw = _raw("做完了", title="主線", last_message_ms=1000,
+               last_message_created_ms=1000)
     env["api"].set(OcSession(id="ses_1", updated_ms=1, archived_ms=2000), raw)
     _run(env)
     rec = env["state"].sessions["opencode:ses_1"]
-    key = rec.last_item_key
-    sidecar = _sidecar(env["drive"], env["inbox_folder_id"], f"{key}.sidecar.json")
+    sidecar = _sidecar(env["drive"], env["inbox_folder_id"],
+                       f"{rec.last_item_key}.sidecar.json")
     assert sidecar["session"]["status"] == "stopped"
-    # stopped_at 是同步器第一次觀測到的時間，不是來源端填的值
     assert sidecar["session"]["stopped_at"].startswith(T1)
-    assert rec.stop_observed_at is not None
-
-    # 再跑一輪：同一個封存時間，stopped_at 不應該被刷新
-    env["clock"].set_time("2026-09-28T09:00:00Z")
-    env["reader"].catalog_data["opencode:ses_1"] = {"raw_sha256": _sha(raw)}
-    _run(env)
-    assert env["state"].sessions["opencode:ses_1"].stop_observed_at == rec.stop_observed_at
 
 
-def test_new_message_after_stop_resumes_and_is_flagged(tmp_path: Path):
+def test_new_message_after_stop_resumes_once_and_then_stops_triggering(tmp_path: Path):
+    """H3 最重要的一段：恢復只被標記**一次**，之後不會每輪都觸發 workflow。
+
+    恢復的判定以 Agora 的狀態為準（Agora 是 stopped、本地是 running），
+    恢復之後要清掉 stop_observed_at。
+    """
     env = _setup(tmp_path)
-    raw1 = _raw("做完了", title="主線", last_message_ms=1000)
+    sid = "opencode:ses_1"
+    raw1 = _raw("做完了", title="主線", last_message_ms=1000,
+                last_message_created_ms=1000)
     env["api"].set(OcSession(id="ses_1", updated_ms=1, archived_ms=2000), raw1)
     _run(env)
-    sid = "opencode:ses_1"
-    env["reader"].catalog_data[sid] = {"raw_sha256": _sha(raw1)}
+    # Agora 已經收成 stopped
+    env["reader"].catalog_data[sid] = {"raw_sha256": _sha(raw1), "status": "stopped"}
 
-    # 封存之後又追加了新訊息
-    raw2 = _raw("又回來了", title="主線", last_message_ms=5000)
+    # 封存之後又追加了新訊息（created 在封存之後）→ 恢復
+    raw2 = _raw("又回來了", title="主線", last_message_ms=5000,
+                last_message_created_ms=5000)
     env["api"].set(OcSession(id="ses_1", updated_ms=2, archived_ms=2000), raw2)
     outcome = _run(env)
     assert outcome.uploaded == (sid,)
-    assert outcome.resumed_after_stop == (sid,)   # daemon 看到就立刻同步並提交
+    assert outcome.resumed_after_stop == (sid,)
     key = env["state"].sessions[sid].last_item_key
     sidecar = _sidecar(env["drive"], env["inbox_folder_id"], f"{key}.sidecar.json")
     assert sidecar["session"]["status"] == "running"
     assert sidecar["session"]["stopped_at"] is None
+    assert env["state"].sessions[sid].stop_observed_at is None, "恢復後要清掉"
+
+    # 之後**再上傳新內容**：Agora 已經是 running → 不該再被標成恢復
+    env["reader"].catalog_data[sid] = {"raw_sha256": _sha(raw2), "status": "running"}
+    raw3 = _raw("再推進", title="主線", last_message_ms=6000,
+                last_message_created_ms=6000)
+    env["api"].set(OcSession(id="ses_1", updated_ms=3, archived_ms=2000), raw3)
+    again = _run(env)
+    assert again.uploaded == (sid,)
+    assert again.resumed_after_stop == (), "恢復只能被標記一次（否則每 10 分鐘觸發 workflow）"
+
+
+def test_resumed_is_not_reported_when_agora_was_never_stopped(tmp_path: Path):
+    """本機曾經觀測到停止，但 Agora 從來不是 stopped → 不算恢復。"""
+    env = _setup(tmp_path)
+    sid = "opencode:ses_1"
+    raw1 = _raw("做完了", title="主線", last_message_ms=1000,
+                last_message_created_ms=1000)
+    env["api"].set(OcSession(id="ses_1", updated_ms=1, archived_ms=2000), raw1)
+    _run(env)
+    assert env["state"].sessions[sid].stop_observed_at is not None
+    # Agora 裡從來沒有 stopped（提交流程還沒跑）
+    raw2 = _raw("又回來了", title="主線", last_message_ms=5000,
+                last_message_created_ms=5000)
+    env["api"].set(OcSession(id="ses_1", updated_ms=2, archived_ms=2000), raw2)
+    outcome = _run(env)
+    assert outcome.uploaded == (sid,)
+    assert outcome.resumed_after_stop == ()
 
 
 def test_only_restricts_to_requested_sessions(tmp_path: Path):
@@ -779,12 +861,14 @@ def test_sync_and_commit_uploads_extra_items(tmp_path: Path, monkeypatch: pytest
         timeout=timedelta(milliseconds=200), poll=timedelta(milliseconds=50),
         progress=lambda _m: None,
     )
-    # 沒有 PAT／repo → 明確記下沒觸發（不是假裝成功）
+    # 沒有 PAT／repo → 明確記下沒觸發，並且**不進入等待**（不是假裝成功）
     assert result.trigger_error is not None
+    assert result.timed_out is False
+    assert not result.ok
+    assert "下一輪" in result.summary()
     names = _inbox_names(env["drive"], env["inbox_folder_id"])
     assert any(n.endswith(".sidecar.json") and n.startswith(handoff.item_key)
                for n in names)
-    assert result.timed_out  # 讀取端沒有真的看到 → 逾時（訊息含健康檢查提示）
 
 
 def test_trigger_committer_requires_pat_file_and_repo(tmp_path: Path):
@@ -966,3 +1050,246 @@ def test_signer_key_id_is_derived_from_the_public_key(tmp_path: Path):
     assert signer.key_id.startswith(f"{PROFILE}-")
     assert len(signer.key_id.split("-")[1]) == 8
     assert "key" not in repr(signer) or "Signer" in repr(signer)
+
+
+# ---------------------------------------------------------------------------
+# M1〜M5
+# ---------------------------------------------------------------------------
+
+
+class FlakyDrive(FakeDrive):
+    """在第 `fail_at` 次 create 時丟 WriteError（模擬 Drive 寫入失敗）。"""
+
+    def __init__(self, fail_at: int) -> None:
+        super().__init__()
+        self._n = 0
+        self._fail_at = fail_at
+
+    def create(self, parent: str, name: str, content, mime_type: str = "application/octet-stream"):
+        self._n += 1
+        if self._n == self._fail_at:
+            from aistorage.errors import WriteError
+
+            raise WriteError("模擬的寫入失敗")
+        return super().create(parent, name, content, mime_type=mime_type)
+
+
+def test_write_error_does_not_abort_the_round_and_state_is_saved(tmp_path: Path):
+    """M1：上傳失敗會中止整輪而且不存狀態 → 下一輪重複上傳、收件匣出現重複檔案。"""
+    from aistorage.errors import WriteError
+
+    class OneBad(FakeDrive):
+        """ses_bad 的第一個檔案上傳失敗，其餘正常（認 sidecar 的內容判斷）。"""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed = False
+
+        def create(self, parent, name, content, mime_type="application/octet-stream"):
+            body = content if isinstance(content, bytes) else str(content).encode()
+            if b"ses_bad" in body and not self.failed:
+                self.failed = True
+                raise WriteError("模擬的寫入失敗")
+            return super().create(parent, name, content, mime_type=mime_type)
+
+    env = _setup(tmp_path)
+    drive = OneBad()
+    env["drive"] = drive
+    inbox = drive.seed_folder("inbox")
+    env["inbox_folder_id"] = inbox
+    env["api"].set(OcSession(id="ses_ok", updated_ms=1), _raw("好", title="好"))
+    env["api"].set(OcSession(id="ses_bad", updated_ms=1), _raw("壞", title="壞"))
+
+    outcome = _run(env)
+    # 一個 Session 失敗不影響另一個
+    assert outcome.uploaded == ("opencode:ses_ok",), outcome.counts()
+    assert [sid for sid, _c in outcome.errors] == ["opencode:ses_bad"]
+    # 成功的那一個**已經存進狀態**（M1 的重點：下一輪不會重複上傳）
+    assert env["state"].sessions["opencode:ses_ok"].last_item_key
+
+
+def test_state_is_saved_even_when_a_session_raises_unexpectedly(tmp_path: Path):
+    """M1：非預期的例外也不能讓整輪中止，狀態一定要存下來。"""
+    env = _setup(tmp_path)
+    # 名字排序：好的先處理，之後才轮到會丟例外的（否則不會留下任何紀錄）
+    env["api"].set(OcSession(id="ses_aaa", updated_ms=1), _raw("好", title="好"))
+    env["api"].set(OcSession(id="ses_zzz", updated_ms=1), _raw("壞", title="壞"))
+    original_export = env["api"].export
+
+    def _export(session_id, dest):
+        if session_id == "ses_zzz":
+            raise RuntimeError("非預期的例外")
+        return original_export(session_id, dest)
+
+    env["api"].export = _export  # type: ignore[assignment]
+
+    outcome = _run(env)
+    assert outcome.uploaded == ("opencode:ses_aaa",), outcome.counts()
+    assert [sid for sid, _c in outcome.errors] == ["opencode:ses_zzz"]
+    # 之前處理成功的 Session 已經存進狀態（M1 的重點）
+    assert env["state"].sessions["opencode:ses_aaa"].last_item_key
+
+
+def test_reupload_uses_generation_not_clock_strings(tmp_path: Path):
+    """M2：published_at（committer 的時鐘）與 uploaded_at（Mac 的時鐘）不能比字串。"""
+    env = _setup(tmp_path)
+    raw = _raw("等待中", title="主線")
+    env["api"].set(OcSession(id="ses_1", updated_ms=1), raw)
+    first = _run(env)
+    assert first.uploaded == ("opencode:ses_1",)
+    rec = env["state"].sessions["opencode:ses_1"]
+    assert rec.uploaded_generation == 1
+
+    # 世代**沒有**變，但 published_at 變成遠晚於上傳時間 → 不該重傳
+    env["reader"].published_at = "2099-01-01T00:00:00.000Z"
+    assert _run(env).waiting == ("opencode:ses_1",)
+    # 世代變了 → 補傳
+    env["reader"].generation = 2
+    assert _run(env).reuploaded == ("opencode:ses_1",)
+    assert env["state"].sessions["opencode:ses_1"].uploaded_generation == 2
+
+
+def test_export_is_deleted_after_upload(tmp_path: Path):
+    """M5：匯出檔是原始紀錄的副本，上傳成功後不留在 /work。"""
+    env = _setup(tmp_path)
+    env["api"].set(OcSession(id="ses_1", updated_ms=1), _raw("內容", title="主線"))
+    _run(env)
+    exports = list((env["workdir"] / "exports").glob("*.json"))
+    assert exports == [], f"匯出檔沒有被清掉：{exports}"
+
+
+def test_keep_exports_leaves_the_file_for_the_caller(tmp_path: Path):
+    """skill 算接續點時需要匯出檔，所以有 keep_exports 這個開關。"""
+    env = _setup(tmp_path)
+    env["api"].set(OcSession(id="ses_1", updated_ms=1), _raw("內容", title="主線"))
+    _run(env, keep_exports=True)
+    exports = list((env["workdir"] / "exports").glob("*.json"))
+    assert len(exports) == 1
+
+
+class FakeTicker:
+    """假時鐘：睡覺時直接跳到 deadline 之前，所以逾時流程**不會真的等**。"""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.slept: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def test_trigger_failure_returns_immediately_without_waiting(tmp_path: Path,
+                                                            monkeypatch: pytest.MonkeyPatch):
+    """觸發提交流程失敗 → **立即**回報，完全不進入等待（review-g5-6 M4）。
+
+    沒有任何東西會讓讀取視圖改變（排程的提交流程根本沒被觸發），乾等 15 分鐘
+    只會讓 AI 的工具卡住，然後回報一個沒有意義的逾時。
+    """
+    env = _setup(tmp_path)
+    raw = _raw("觸發失敗", title="主線")
+    env["api"].set(OcSession(id="ses_1", updated_ms=1), raw)
+    monkeypatch.setattr(
+        "aistorage.syncer.commit.trigger_committer",
+        lambda *a, **k: (_ for _ in ()).throw(ReadError("模擬的觸發失敗")),
+    )
+    (tmp_path / "gh-pat-actions.txt").write_text("ghp_example\n")
+    deps = SyncDeps(
+        api=env["api"], reader=env["reader"], drive=env["drive"],
+        inbox_folder_id=env["inbox_folder_id"], signer=env["signer"],
+        state=env["state"], clock=env["clock"], workdir=env["workdir"],
+        converter=env["converter"], pat_path=tmp_path / "gh-pat-actions.txt",
+        repo="org/repo",
+    )
+    # 假時鐘：就算真的進到等待，也不會真的睡
+    ticker = FakeTicker()
+    notes: list[str] = []
+    started = time.monotonic()
+    result = sync_and_commit(
+        session_ids=["ses_1"], deps=deps,
+        # 逾時給一個短值：這個測試不該依賴預設的 15 分鐘
+        timeout=timedelta(seconds=1), poll=timedelta(milliseconds=200),
+        progress=notes.append,
+        monotonic=ticker.monotonic, sleeper=ticker.sleep,
+    )
+    wall = time.monotonic() - started
+    assert result.trigger_error, "觸發失敗要明確回報"
+    assert wall < 1.0, f"真的等了 {wall:.1f}s（應該完全不等待）"
+    assert ticker.slept == [], f"不該有真的睡眠：{ticker.slept}"
+    assert result.timed_out is False, "不是逾時，是「沒被觸發」"
+    assert result.pending and result.pending[0].target == "ses_1"
+    assert not result.ok, "還沒被收進去，不算成功"
+    assert any("不等了" in n for n in notes), notes
+    assert any("下一輪" in n for n in notes), notes
+    # 上傳本身是成功的（只是沒有即時提交）
+    assert result.sync is not None and result.sync.uploaded == ("opencode:ses_1",)
+    # 摘要要講清楚會被排程的提交流程收進去
+    assert "下一輪" in result.summary()
+
+
+def test_wait_visible_timeout_uses_the_injected_clock(tmp_path: Path):
+    """逾時流程可以用假時鐘走完，單元測試不必真的睡（PM 追加第 1 點）。"""
+    reader = FakeReader()
+    session = build_awaited_session("k1", "ses_1", SNAP_A)
+    ticker = FakeTicker()
+    notes: list[str] = []
+    result = wait_visible(
+        reader, [session], timeout=timedelta(seconds=1),
+        poll=timedelta(milliseconds=200), progress=notes.append,
+        monotonic=ticker.monotonic, sleeper=ticker.sleep,
+    )
+    assert result.timed_out and result.pending == (session,)
+    assert ticker.slept, "應該有輪詢（只是睡的是假時鐘）"
+    # 假時鐘停在 deadline 之後不久，不會跑出 1 秒太多
+    assert sum(ticker.slept) <= 1.5, ticker.slept
+    assert any(STALENESS_HINT in n for n in notes)
+
+
+def test_stopping_rule_is_identical_in_the_committer_and_the_syncer():
+    """H3：停止判定必須只有一份定義。
+
+    同步器算 stopped、提交流程算 running，兩邊就會互相打回——所以這裡直接
+    比較兩個函式在同樣輸入下的結果。
+    """
+    from aistorage.agora.apply import _is_stopped as committer_is_stopped
+    from aistorage.converters.base import SessionFacts
+
+    cases = [
+        # (archived_ms, created, completed, 期望)
+        (2000, 1000, 9000, True),    # 宣告停止時生成中的那一則：停止中
+        (2000, 5000, 5000, False),   # 封存之後新建的訊息：運作中
+        (0, 1000, 1000, False),      # archived=0 視為未封存
+        (None, 1000, 1000, False),   # 沒有封存
+    ]
+    for archived, created, completed, expected in cases:
+        facts = SessionFacts(
+            title=None, created_at=None, updated_at=None, message_ids=(),
+            archived_at=None, last_message_at=None, in_progress=False,
+            archived_ms=archived,
+            last_message_ms=max(created, completed),
+            last_message_created_ms=created,
+        )
+        assert _is_stopped(archived, created) is expected, (archived, created)
+        assert committer_is_stopped(facts) is expected, (archived, created)
+
+
+def test_inbox_builder_guard_matches_the_same_rule():
+    """H3：builder 擋的是「封存之後還有訊息被建立」，不是「生成中」。"""
+    from aistorage.agora.apply import has_message_created_after_archive
+    from aistorage.converters.base import SessionFacts
+
+    in_flight = SessionFacts(
+        title=None, created_at=None, updated_at=None, message_ids=(),
+        archived_at=None, last_message_at=None, in_progress=True,
+        archived_ms=2000, last_message_ms=9000, last_message_created_ms=1000,
+    )
+    assert has_message_created_after_archive(in_flight) is False
+    later = SessionFacts(
+        title=None, created_at=None, updated_at=None, message_ids=(),
+        archived_at=None, last_message_at=None, in_progress=False,
+        archived_ms=2000, last_message_ms=5000, last_message_created_ms=5000,
+    )
+    assert has_message_created_after_archive(later) is True

@@ -73,6 +73,7 @@ for (const [name, tool] of Object.entries(plugin.tool)) {{
 // 情境 1：主 Session（沒有 parentID）
 process.env.AISTORAGE_ARGV_LOG = '{log_main}'
 const ctxMain = {{ sessionID: "ses_main" }}
+out.errors_main = {{}}
 for (const [name, tool] of Object.entries(plugin.tool)) {{
   try {{
     await tool.execute(
@@ -80,14 +81,16 @@ for (const [name, tool] of Object.entries(plugin.tool)) {{
          handoff_ids: ["handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV"],
          parts: [{{ title: "甲", summary: "甲的工作" }}] }},
       ctxMain)
+    out.errors_main[name] = null
   }} catch (e) {{
-    out.errors[name] = String(e.message)
+    out.errors_main[name] = String(e.message)
   }}
 }}
 
 // 情境 2：子 Session（有 parentID）→ 主 Session 限定的工具必須拒絕
 process.env.AISTORAGE_ARGV_LOG = '{log_child}'
 const ctxChild = {{ sessionID: "ses_child" }}
+out.errors = {{}}
 for (const name of Object.keys(plugin.tool)) {{
   const tool = plugin.tool[name]
   try {{
@@ -122,7 +125,9 @@ def _fake_python(tmp_path: Path) -> tuple[Path, Path]:
     return bin_dir, log
 
 
-def _harness(tmp_path: Path, child_session: bool = False) -> dict:
+def _harness(tmp_path: Path, child_session: bool = False,
+             sessions_status: int = 200, omit_self: bool = False,
+             recover_second_call: bool = False) -> dict:
     """跑 node 載入 plugin，呼叫所有工具，回傳工具資訊、錯誤與 argv log。"""
     bin_dir, log = _fake_python(tmp_path)
     script = tmp_path / "harness.mjs"
@@ -130,14 +135,25 @@ def _harness(tmp_path: Path, child_session: bool = False) -> dict:
     log_child = tmp_path / "argv-child.log"
     if child_session:
         sessions = '[{ id: "ses_main" }, { id: "ses_child", parentID: "ses_main" }]'
+    elif omit_self:
+        sessions = '[{ id: "ses_other" }]'
     else:
         sessions = '[{ id: "ses_main" }]'
     script.write_text(
         textwrap.dedent(f"""
         const _ORIG_FETCH = globalThis.fetch
+        let _n = 0
         globalThis.fetch = async (url) => {{
-          if (String(url).endsWith("/session"))
+          if (String(url).endsWith("/session")) {{
+            _n++
+            if ({"true" if recover_second_call else "false"} && _n > 4) {{
+              return {{ ok: true, json: async () => ({sessions}) }}
+            }}
+            if ({int(sessions_status)} !== 200) {{
+              return {{ ok: false, status: {int(sessions_status)} }}
+            }}
             return {{ ok: true, json: async () => ({sessions}) }}
+          }}
           return _ORIG_FETCH(url)
         }}
         """) + HARNESS.format(plugin=str(PLUGIN), log_main=str(log_main),
@@ -202,7 +218,8 @@ def test_plugin_exposes_every_documented_tool(tmp_path: Path):
         assert info["has_execute"], f"{name} 缺少 execute"
         assert TOOL_TO_COMMAND[name] in skill_commands, f"{name} 沒有對應的 Python 子命令"
         # 情境 1（主 Session）不該有任何錯誤
-        assert out["errors"][name] is None, f"{name} 在主 Session 失敗：{out['errors'][name]}"
+        assert out["errors_main"][name] is None, \
+            f"{name} 在主 Session 失敗：{out['errors_main'][name]}"
 
 
 def test_plugin_takes_the_session_id_from_context(tmp_path: Path):
@@ -216,22 +233,75 @@ def test_plugin_takes_the_session_id_from_context(tmp_path: Path):
         assert "--session" in argv
         assert argv[argv.index("--session") + 1] == "ses_main", "自己的 id 必須來自 context"
         session_flags += 1
-        # 模型的 session_id 只能當「目標」，出現在 --target／--to 位置
-        for i, flag in enumerate(argv):
-            if flag in ("--session", "--target", "--to"):
-                assert argv[i + 1] != "ses_target", f"{flag} 竟然用了模型給的 id"
+        # 模型的 session_id 只能當「目標」（--target／--to），絕不能是 --session
+        assert argv[argv.index("--session") + 1] == "ses_main"
+        for flag in ("--target", "--to"):
+            if flag in argv:
+                assert argv[argv.index(flag) + 1] == "ses_target"
     assert session_flags == len(TOOL_TO_COMMAND)
 
 
-def test_plugin_argument_quoting(tmp_path: Path):
-    """AI 寫的文字被單引號包住，不會變成 shell 結構。"""
+def test_plugin_arguments_reach_python_verbatim(tmp_path: Path):
+    """`spawn` 不經過 shell，所以**不能**加 shell 引號（review-g5-6 H2）。
+
+    加了單引號，Python 收到的是 `'handoff:01…'`，格式檢查直接判成找不到。
+    """
     out = _harness(tmp_path)
     calls = _argv_calls(Path(out["_log_main"]))
     queries = [c[c.index("--query") + 1] for c in calls if "--query" in c]
     assert queries, "find 的查詢字串沒有出現在 argv"
-    for query in queries:
-        assert query.startswith("'") and query.endswith("'"), "參數應該被單引號包住"
-    assert "'接續'" in queries
+    assert "接續" in queries, f"查詢字串被改動了：{queries}"
+    for call in calls:
+        for value in call:
+            assert not (value.startswith("'") and value.endswith("'") and len(value) > 1), \
+                f"參數被 shell 引號包起來了：{value}"
+    # handoff id 必須是乾淨的 handoff:<ULID>
+    handoffs = [c[c.index("--handoff") + 1] for c in calls if "--handoff" in c]
+    assert handoffs, "claim 的 handoff id 沒有出現在 argv"
+    import re
+    for hid in handoffs:
+        assert re.fullmatch(r"handoff:[0-9A-HJKMNP-TV-Z]{26}", hid), f"id 被引號汙染：{hid}"
+
+
+def test_plugin_does_not_lose_arguments_with_quotes_and_newlines(tmp_path: Path):
+    """含引號、換行、`$`、反引號的 AI 文字要原樣傳過去（不經 shell 就不會被展開）。"""
+    out = _harness(tmp_path)
+    calls = _argv_calls(Path(out["_log_main"]))
+    summaries = [c[c.index("--summary") + 1] for c in calls if "--summary" in c]
+    assert summaries, "handoff-end 的 summary 沒有出現在 argv"
+    for value in summaries:
+        assert value == "做完了", f"summary 被改動了：{value!r}"
+
+
+def test_plugin_refuses_when_the_session_list_query_fails(tmp_path: Path):
+    """查不到 Session 清單 → 拒絕，不放行（review-g5-6 H1）。"""
+    out = _harness(tmp_path, sessions_status=503)
+    for name in MAIN_ONLY:
+        msg = out["errors"][name] or ""
+        assert "拒絕執行" in msg, f"{name} 在查詢失敗時沒有拒絕：{msg}"
+    calls = [" ".join(c) for c in _argv_calls(Path(out["_log_main"]))]
+    # 只有主 Session 限定的工具受這個檢查保護；它們一個都不該被呼叫
+    for command in ("claim", "stop"):
+        assert not any(command in c for c in calls), \
+            f"{command} 在查詢失敗時仍然呼叫了 CLI"
+
+
+def test_plugin_refuses_when_itself_is_missing_from_the_list(tmp_path: Path):
+    """清單裡找不到自己 → 拒絕（不能當成「沒有 parent 所以是主 Session」）。"""
+    out = _harness(tmp_path, omit_self=True)
+    for name in MAIN_ONLY:
+        msg = out["errors"][name] or ""
+        assert "找不到自己" in msg, f"{name} 應該因為找不到自己而拒絕：{msg}"
+
+
+def test_plugin_recovers_after_a_failed_query(tmp_path: Path):
+    """失敗的查詢**不能被快取**：下一次要重新問，API 恢復後就能用。"""
+    # 第一次查詢失敗（拒絕），第二次清單正常（放行）
+    out = _harness(tmp_path, sessions_status=503, recover_second_call=True)
+    assert out["errors"].get("aistorage_claim"), "第一次應該被拒絕"
+    calls = _argv_calls(Path(out["_log_main"]))
+    assert calls, "第二次查詢恢復之後應該要能呼叫 CLI"
+    assert calls[0][calls[0].index("--session") + 1] == "ses_main"
 
 
 def test_plugin_refuses_main_session_only_tools_in_a_child_session(tmp_path: Path):

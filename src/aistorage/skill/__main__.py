@@ -152,7 +152,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("reference", help="留下參考 Link（PM 決定 4：只上傳不提交）")
     p.add_argument("--session", required=True)
     p.add_argument("--to", required=True, help="被參考的 Session id")
-    p.add_argument("--read-snapshot-at", dest="read_snapshot_at")
+    p.add_argument("--read-snapshot-at", dest="read_snapshot_at",
+                   help="必填：剛剛 aistorage_read 讀到的 snapshot_at")
     p.set_defaults(func=cmd_reference)
 
     p = sub.add_parser("list-handoffs", help="列出待認領的交接單")

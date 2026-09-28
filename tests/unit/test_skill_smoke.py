@@ -76,12 +76,16 @@ class FakeApi:
 
 
 class FakeFreshness:
+    """欄位名稱要和真的 `reader.Freshness` 一致（M3）。"""
+
     def __init__(self, snapshot_at: str = T0, ok: bool = True,
                  warning: str | None = None) -> None:
         self.snapshot_at = snapshot_at
-        self.lag_s = 600
-        self.ok = ok
+        self.generation = 2
+        self.published_at = T0
+        self.satisfied = ok
         self.warning = warning
+        self.stopped_ok = True
 
 
 class FakeResult:
@@ -466,41 +470,83 @@ def test_reference_uploads_only_and_does_not_trigger(tmp_path: Path,
     assert kinds.count("reference") == 1
 
 
-def test_reference_reads_the_target_snapshot_when_not_given(tmp_path: Path,
-                                                            monkeypatch: pytest.MonkeyPatch):
+def test_reference_requires_the_snapshot_time_that_was_actually_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """L5：`read_snapshot_at` 必填。
+
+    自己抓對方「目前」的快照時間，等於宣稱讀到了一個其實沒讀過的版本。
+    """
     monkeypatch.setattr("aistorage.syncer.commit.trigger_committer", lambda *a, **k: None)
     sd, env = _sd(tmp_path)
     _main_session(sd, env)
-    out = reference(sd, "ses_1", "opencode:ses_9")
-    assert out["read_snapshot_at"] == T0     # 從讀取端拿對方的快照時間
-
-
-def test_reference_needs_a_snapshot_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr("aistorage.syncer.commit.trigger_committer", lambda *a, **k: None)
-    sd, env = _sd(tmp_path)
-    _main_session(sd, env)
-
-    def _boom(sid, **kw):
-        raise KeyError("no such session")
-
-    monkeypatch.setattr(env["reader"], "get_session", _boom)
+    # 讀取端就算查得到快照時間，也不代勞
     with pytest.raises(SkillError) as e:
         reference(sd, "ses_1", "opencode:ses_9")
-    assert "快照時間" in str(e.value)
+    assert "read_snapshot_at" in str(e.value)
+    # 有帶就正常
+    out = reference(sd, "ses_1", "opencode:ses_9", read_snapshot_at=T0)
+    assert out["read_snapshot_at"] == T0
 
 
-def test_stop_refuses_while_the_session_is_still_generating(tmp_path: Path,
-                                                           monkeypatch: pytest.MonkeyPatch):
-    """in_progress 時不能宣告停止中（inbox_builder 會擋，錯誤不得被吞掉）。"""
+def test_reference_does_not_call_the_reader_at_all(tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch):
+    """L5：沒有 read_snapshot_at 時**不准**自己去讀（避免記下沒讀過的時間）。"""
+    monkeypatch.setattr("aistorage.syncer.commit.trigger_committer", lambda *a, **k: None)
     sd, env = _sd(tmp_path)
     _main_session(sd, env)
-    env["api"].set(OcSession(id="ses_1", title="主線", updated_ms=1,
-                             archived_ms=1790400009000), _raw(last_incomplete=True))
+
+    def _boom(*a, **k):
+        raise AssertionError("不該為了拿快照時間去讀取端")
+
+    monkeypatch.setattr(env["reader"], "get_session", _boom)
     with pytest.raises(SkillError):
-        stop(sd, "ses_1", timeout=SHORT)
-    # 沒有任何東西被寫進收件匣，錯誤記在狀態裡（不會偽裝成功）
-    assert env["drive"].list_children(env["inbox"]) == []
-    assert sd.state.sessions["opencode:ses_1"].error_code == "InboxBuildError"
+        reference(sd, "ses_1", "opencode:ses_9")
+
+
+def test_stop_works_while_the_reply_is_still_streaming(tmp_path: Path,
+                                                      monkeypatch: pytest.MonkeyPatch):
+    """H3：宣告停止是在回覆**生成中**呼叫的，那一則訊息在封存之前建立。
+
+    所以 stop 必須成立（舊的「in_progress 一律拒絕」會讓它每一次都失敗）。
+    """
+    sd, env = _sd(tmp_path)
+    _run_committer(monkeypatch, env)
+    _main_session(sd, env)
+    # 最後一則 assistant 訊息還在生成（created=1790400009000、沒有 completed）
+    env["api"].set(OcSession(id="ses_1", title="主線", updated_ms=1,
+                             archived_ms=1790400010000),
+                   _raw(last_incomplete=True))
+    out = stop(sd, "ses_1", timeout=SHORT)
+    assert env["api"].archived
+    statuses = [
+        json.loads(env["drive"].download_bytes(f.id, max_bytes=1 << 20))["session"]["status"]
+        for f in env["drive"].list_children(env["inbox"])
+        if f.name.endswith(".sidecar.json")
+    ]
+    assert "stopped" in statuses, f"宣告停止必須成立：{statuses}"
+    assert out["session_id"] == "opencode:ses_1"
+
+
+def test_message_created_after_the_archive_keeps_the_session_running(tmp_path: Path,
+                                                                   monkeypatch: pytest.MonkeyPatch):
+    """封存**之後**才建立的訊息 → 這個 Session 還是 running，不得宣告停止中。
+
+    同步器算出來就是 running，所以不會有 stopped 的 sidecar，也沒有錯誤。
+    """
+    sd, env = _sd(tmp_path)
+    _main_session(sd, env)
+    # archived_ms 比最後一則訊息的 created 早 → 封存之後又有新訊息
+    env["api"].set(OcSession(id="ses_1", title="主線", updated_ms=1,
+                             archived_ms=1), _raw(last_incomplete=False))
+    _run_committer(monkeypatch, env)
+    stop(sd, "ses_1", timeout=SHORT)
+    statuses = [
+        json.loads(env["drive"].download_bytes(f.id, max_bytes=1 << 20))["session"]["status"]
+        for f in env["drive"].list_children(env["inbox"])
+        if f.name.endswith(".sidecar.json")
+    ]
+    assert statuses and "stopped" not in statuses, f"不該宣告停止中：{statuses}"
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +565,11 @@ def test_find_and_read_attach_freshness():
     read_out = read(sd.reader, "opencode:ses_1")
     assert read_out["session"]["session_id"] == "opencode:ses_1"
     assert read_out["freshness"]["snapshot_at"] == T0
-    assert read_out["freshness"]["ok"] is True
+    # M3：用讀取介面真正的欄位名，否則 AI 看不到「未達新鮮度」
+    assert read_out["freshness"]["satisfied"] is True
+    assert read_out["freshness"]["stopped_ok"] is True
+    assert read_out["freshness"]["generation"] == 2
+    assert "ok" not in read_out["freshness"] and "lag_s" not in read_out["freshness"]
 
 
 def test_find_surfaces_the_freshness_warning():
@@ -539,7 +589,7 @@ def test_find_surfaces_the_freshness_warning():
 
     sd, _ = _sd(None, reader=WarningReader())
     out = tools.find(sd.reader, "舊的")
-    assert out["hits"][0]["freshness"]["ok"] is False
+    assert out["hits"][0]["freshness"]["satisfied"] is False
     assert "可能不是最新" in out["hits"][0]["freshness"]["warning"]
     assert "可能不是最新" in out["freshness"]["warning"]
 

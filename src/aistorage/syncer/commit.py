@@ -80,7 +80,11 @@ class CommitWaitResult:
 
     @property
     def ok(self) -> bool:
-        """全部項目都有結果（看得到或被拒收）且沒有逾時、也沒有同步錯誤。"""
+        """全部項目都有結果（看得到或被拒收）且沒有逾時、也沒有同步錯誤。
+
+        `trigger_error` 不算在這裡：它只代表「這次沒有即時提交」，
+        排程的提交流程仍然會收進去，所以上傳本身還是成功的。
+        """
         return (
             not self.timed_out
             and not self.pending
@@ -91,11 +95,18 @@ class CommitWaitResult:
         done = len(self.visible) + len(self.rejected)
         total = done + len(self.pending)
         head = f"{done}／{total} 有結果，已等 {self.elapsed_s:.0f}s"
+        if self.trigger_error:
+            # 沒有觸發就沒有東西會改變，所以不是逾時。上傳是成功的，
+            # 排程的提交流程會在下一輪定時提交時收進去。
+            ids = ", ".join(f"{a.kind}:{a.target}" for a in self.pending) or "-"
+            return (
+                f"{head}；未觸發提交流程（{self.trigger_error}）→ 沒有等待；"
+                f"上傳已成功，排程的提交流程會在下一輪定時提交時收進去；"
+                f"未提交的 id：{ids}"
+            )
         if self.timed_out:
             ids = ", ".join(f"{a.kind}:{a.target}" for a in self.pending) or "-"
             return f"{head}；逾時：{STALENESS_HINT}；還沒看到的 id：{ids}"
-        if self.trigger_error:
-            return f"{head}；觸發提交流程失敗：{self.trigger_error}"
         return head
 
 
@@ -276,12 +287,17 @@ def wait_visible(
     poll: timedelta = DEFAULT_POLL,
     progress: Callable[[str], None] = print,
     clock: Clock | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> CommitWaitResult:
     """輪詢讀取介面，等每個項目看得到或被拒收。
 
     **不以 run id 判斷完成**：只看讀取端看得到什麼。
+
+    `monotonic`／`sleeper` 可注入：單元測試用假時鐘走完整個逾時流程，
+    不用真的睡到逾時（PM 追加第 1 點）。
     """
-    started = time.monotonic()
+    started = monotonic()
     deadline = started + max(0.0, timeout.total_seconds())
     remaining = list(awaited)
     visible: list[Awaited] = []
@@ -301,7 +317,7 @@ def wait_visible(
                 continue
             still.append(item)
         remaining = still
-        elapsed = time.monotonic() - started
+        elapsed = monotonic() - started
         if not remaining:
             return CommitWaitResult(
                 visible=tuple(visible),
@@ -310,7 +326,7 @@ def wait_visible(
                 timed_out=False,
                 elapsed_s=elapsed,
             )
-        if time.monotonic() >= deadline:
+        if monotonic() >= deadline:
             done = len(visible) + len(rejected)
             total = done + len(remaining)
             progress(
@@ -331,8 +347,8 @@ def wait_visible(
             progress(f"{done}／{done + len(remaining)} 有結果，已等 {elapsed:.0f}s")
         # 睡到「再睡就會超過 deadline」為止：逾時時間比輪詢間隔短時也不會
         # 被整個 poll 間隔拖住（否則 --timeout 2s 會變成 20s 才回來）。
-        left = deadline - time.monotonic()
-        time.sleep(max(0.05, min(poll.total_seconds(), left)))
+        left = deadline - monotonic()
+        sleeper(max(0.05, min(poll.total_seconds(), left)))
 
 
 def build_awaited_session(
@@ -361,6 +377,8 @@ def sync_and_commit(
     poll: timedelta = DEFAULT_POLL,
     progress: Callable[[str], None] = print,
     already_synced: bool = False,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> CommitWaitResult:
     """同步並提交：上傳 → 觸發提交流程 → 等讀取介面看得到。
 
@@ -425,6 +443,26 @@ def sync_and_commit(
         for sid, code in sync_errors:
             progress(f"同步 {sid} 失敗：{code}")
 
+    # 觸發失敗就**立即**回報，完全不進入等待（review-g5-6 M4／PM 追加第 1 點）。
+    # 沒有任何東西會讓讀取視圖改變：排程的提交流程還沒被觸發，乾等 15 分鐘
+    # 只會讓呼叫端（AI 的工具）卡住，然後回報一個沒有意義的逾時。
+    # 上傳本身是成功的，排程的提交流程仍然會在下一輪把這些項目收進去。
+    if trigger_error:
+        progress(
+            f"觸發提交流程失敗，這一輪不等了（沒有東西會改變）；"
+            "上傳已成功，排程的提交流程會在下一輪定時提交時收進去：{trigger_error}"
+        )
+        return CommitWaitResult(
+            visible=(),
+            rejected=(),
+            pending=tuple(awaited),
+            timed_out=False,
+            elapsed_s=0.0,
+            trigger_error=trigger_error,
+            sync=outcome,
+            sync_errors=sync_errors,
+        )
+
     result = wait_visible(
         deps.reader,  # type: ignore[arg-type]
         awaited,
@@ -432,6 +470,8 @@ def sync_and_commit(
         poll=poll,
         progress=progress,
         clock=deps.clock,
+        monotonic=monotonic,
+        sleeper=sleeper,
     )
     return CommitWaitResult(
         visible=result.visible,
