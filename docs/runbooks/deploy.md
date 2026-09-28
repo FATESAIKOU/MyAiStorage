@@ -103,16 +103,16 @@ PY
 
 ---
 
-## 步驟 2｜把讀取視圖分享給讀取用 SA
+## 步驟 2｜讀取視圖的讀取權限（由步驟 5 的指令一併處理）
 
-**誰做**：👤 使用者（Google Drive 網頁）
+**誰做**：🛠 PM（步驟 5 的 `init-readview --confirm` 會把資料夾分享給 SA reader）
 
-1. 在Drive 網頁開啟 `aistorage/readview/` 與 `aistorage/readview-foundry/`。
-2. 右鍵 →「共用」→「新增協作者」→ 貼上
-   `spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com` → 角色選**檢視者**。
-3. `inbox/` **不要**分享給 SA（讀取身分不該能寫入收件匣）；`agora/`、`foundry/` 也不要。
+讀取端以 **service account** 讀讀取視圖，Drive ACL 必須有它。`init-readview` 會在建立
+manifest 的同時把**資料夾**（不是 manifest 檔）分享給 `--sa-email`，角色 reader——
+分享資料夾是必要的，因為讀取端要依 id 讀 manifest、index 與各份 reading
+（做法與 1.5 驗證過的 `files.permissions.create` 相同）。
 
-**怎麼驗證**（用 SA 金鑰實際讀一次，🛠 PM）
+**怎麼驗證**（SA 金鑰實際讀一次，🛠 PM）
 
 ```bash
 uv run python - <<'PY'
@@ -125,11 +125,20 @@ for f in drive.list_children("<readview 資料夾 id>"):          # 換成步驟
     print(f.name, f.id)
 PY
 ```
-能列出（此時應為空）代表 SA 有讀取權。順便確認 `agora/` 讀不到（應該是 404／403）。
+看得到 manifest（此時只有 manifest.json）代表分享成功。
+順便確認 `agora/` 讀不到（應該是 404／403）：讀取身分不該能碰真本。
 
-**失敗怎麼退**：把該協��者移除。SA 金鑰本身不動。
+**Foundry 讀取視圖（`readview-foundry/`）** 由於 Foundry pipeline 還沒接上（第 7 組 F-H1），
+現在沒有 manifest 要發佈；等 Foundry 讀取視圖真的啟用時，用同一支指令對那個資料夾跑一次：
 
----
+```bash
+uv run python -m aistorage.admin init-readview --folder-id <readview-foundry id> \
+  --sa-email spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com \
+  --dry-run      # 先看計畫；確認後把 --dry-run 換成 --confirm
+```
+
+**失敗怎麼退**：SA 金鑰不動；把該協作者從資料夾移除即可（Drive 網頁：共用 → 移除）。
+已經建立的 manifest 要刪掉才會回到「未初始化」，見步驟 5 的退法。
 
 ## 步驟 3｜初始化 Agora 的 git-annex 遠端（產生第一個 manifest）
 
@@ -256,40 +265,50 @@ PY
 
 ## 步驟 5｜初始化讀取視圖 manifest（generation = 0）
 
-**誰做**：🛠 PM（用 committer 身分在讀取視圖資料夾建立一次）
+**誰做**：🛠 PM（用提交流程的身分；一次性的管理操作）
 
-讀取介面以 **Drive file id** 定位 manifest（PM 決定 10），所以要先有一個檔案、把 id 記下來。
-之後每一輪由 publisher 以 `update_content` 原地更新（id 不變）。
+讀取介面以 **Drive file id** 定位 manifest（D5／PM 決定 10），所以要先有一個檔案、
+把 id 記下來。之後每一輪由 publisher 以 `update_content` 原地更新（id 不變）。
+`admin init-readview` 一次做完三件事：建立 generation 0 的空 manifest、把資料夾
+分享給讀取用 SA、印出 manifest file id（非秘密）。**已存在就拒絕覆寫**——
+manifest 是讀取端的信任錨點，覆寫它等於改掉信任根。
 
 ```bash
 cd /path/to/MyAiStorage
-uv run python - <<'PY'
-from datetime import datetime, timezone
-from pathlib import Path
-from aistorage.clock import format_rfc3339
-from aistorage.drive import HttpDriveClient, RcloneConfToken
-from aistorage.readview.model import initial_manifest, serialize_manifest
+export AISTORAGE_RCLONE_CONF="$HOME/.config/aistorage/rclone-committer.conf"
 
-drive = HttpDriveClient(RcloneConfToken(
-    Path.home() / ".config/aistorage/rclone-committer.conf", remote="gdrive"))
-readview_folder_id = "<步驟 1 的 readview id>"
-body = serialize_manifest(initial_manifest(
-    published_at=format_rfc3339(datetime.now(timezone.utc), include_fraction=True)))
-f = drive.create(readview_folder_id, "readview-manifest.json", body)
-print("manifest_file_id =", f.id)     # ← 填進兩份設定檔
-PY
+# (a) 先看計畫（不寫入、不分享）
+uv run python -m aistorage.admin init-readview \
+  --folder-id <步驟 1 的 readview id> \
+  --sa-email spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com \
+  --dry-run
+
+# (b) 確認計畫（blocked=false、folder_children 是空的）後才建立
+uv run python -m aistorage.admin init-readview \
+  --folder-id <步驟 1 的 readview id> \
+  --sa-email spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com \
+  --confirm
 ```
 
-接著把 id 寫進兩處：
+輸出（`manifest_file_id` 是非秘密的 id，兩個設定檔都要填）：
+
+```json
+{
+  "dry_run": false,
+  "manifest_file_id": "<Drive file id>",
+  "generation": 0,
+  "folder_id": "<readview 資料夾 id>",
+  "shared_with": "spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com",
+  "permission_id": "<Drive permission id>"
+}
+```
+
+接著把 `manifest_file_id` 寫進兩處：
 
 - `config/committer.json`：`readview_manifest_file_id`（欄位已存在，預設 `null`）
 - worker／讀取端設定（`~/.config/aistorage/reader.json` 或容器內的 `reader.json`）：
   `manifest_file_id`、`readview_folder_id`；Foundry 的欄位是
   `foundry_manifest_file_id`、`foundry_readview_folder_id`
-
-```bash
-uv run python -m aistorage.identity check config/identity.json   # 順手確認登錄檔可讀
-```
 
 **怎麼驗證**
 
@@ -305,11 +324,11 @@ print("generation =", m.generation, "index =", m.index, "agora_main_sha =", m.ag
 PY
 ```
 `generation=0`、`index=None`、`agora_main_sha="unborn"` 是正確的初始狀態。
+再用步驟 2 的 SA 片段讀一次，確認 SA 讀得到。
 
-**失敗怎麼退**：`drive.delete_permanently(<manifest file id>)`，把兩份設定檔的欄位改回 `null`。
-（還沒發佈過任何世代，所以刪掉不會有孤兒檔案。）
-
----
+**失敗怎麼退**：manifest 還沒發佈過任何世代，所以 `drive.delete_permanently(<id>)`
+之後把兩份設定檔的欄位改回 `null` 即可，沒有孤兒檔案。
+（若已經發佈過世代就不是這樣了：那時要改讀取視圖必須走 recovery，不能刪 manifest。）
 
 ## 步驟 6｜在 `rclone-committer.conf` 設 `root_folder_id`
 
@@ -621,7 +640,7 @@ rm ~/Library/LaunchAgents/local.aistorage.health.plist
 | `aistorage/agora-quarantine/` | | `config/committer.json` `quarantine_folder_id` |
 | `aistorage/foundry/`、`foundry-quarantine/` | | Foundry 的設定檔 |
 | `aistorage/readview/` | | `config/committer.json` `readview_folder_id` |
-| 讀取視圖 manifest | | `config/committer.json` `readview_manifest_file_id` ＋ `reader.json` `manifest_file_id` |
+| 讀取視圖 manifest（`admin init-readview --confirm` 印出） | | `config/committer.json` `readview_manifest_file_id` ＋ `reader.json` `manifest_file_id` |
 | `aistorage-inbox-mac-opencode/`（worker 自建，步驟 9） | | `config/identity.json` `inbox_folder_ids` ＋ `reader.json` `inbox_folder_ids` |
 | Agora annex remote uuid | | `config/committer.json` `repo_uuid`、`repo_url`（`annex::<uuid>?…&rcloneprefix=aistorage/agora`） |
 | `root_folder_id` | | `rclone-committer.conf`（步驟 6） |
@@ -637,6 +656,6 @@ rm ~/Library/LaunchAgents/local.aistorage.health.plist
 | `init-pin` push 失敗（non-fast-forward） | pin repo 被別的流程寫過 | `gh api` 刪掉 `.pin/agora.pending.*` 後重跑；`--confirm` 前都還沒正式值 |
 | workflow 每次都 `maintenance` 中止 | pin repo 有殘留旗標 | `python -m aistorage.admin lock-status --pin-repo git@github.com:FATESAIKOU/MyAiStorage-pin.git`；處理完 `unlock --confirm` |
 | 改了 conf 之後憑證失效 | 誤用 `rclone config update`（會重跑 OAuth 授權流程） | 用步驟 6 的備份檔還原 conf；refresh token 真的被換掉才需重新授權 |
-| 讀取端 `AccessDenied`／manifest 404 | 沒分享給 SA，或 id 填錯 | 重做步驟 2、5 |
+| 讀取端 `AccessDenied`／manifest 404 | 沒分享給 SA（`init-readview` 沒帶 `--sa-email`），或 id 填錯 | 用 `init-readview --dry-run` 看計畫；已建立就手動分享資料夾給 SA，再確認 id |
 | 同步器「設定不足」／讀不到收件匣 | worker 環境變數、金鑰沒掛，或收件匣不是 worker 自己建的 | 對照 `resident/run.sh` 的環境變數清單；`python -m aistorage.syncer opencode status --json` 驗證 |
 | 每輪都非空輪 | 收件匣有項目一直不被接受 | 看拒收紀錄（讀取視圖的 `rejections`）；常見是 `allowed_types` 沒開或 key_id 不在 `config/identity.json` |

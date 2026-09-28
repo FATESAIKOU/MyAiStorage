@@ -71,6 +71,20 @@ def build_parser() -> argparse.ArgumentParser:
     rollback.add_argument("--reason", default="")
     rollback.add_argument("--confirm", default=None, help="必須等於 --to")
 
+    rv = sub.add_parser(
+        "init-readview",
+        help="初始化讀取視圖（建立 generation 0 的空 manifest、分享給 SA）")
+    rv.add_argument("--folder-id", required=True, help="讀取視圖資料夾 id")
+    rv.add_argument("--config", default="config/committer.json",
+                    help="提交流程設定檔（提供管理憑證的路徑）")
+    rv.add_argument("--sa-email", default=None,
+                    help="讀取用 service account 的 email；給了才會分享資料夾")
+    init_mode = rv.add_mutually_exclusive_group()
+    init_mode.add_argument("--dry-run", action="store_true",
+                           help="只印計畫（預設）")
+    init_mode.add_argument("--confirm", action="store_true",
+                           help="確定建立（已存在會拒絕覆寫）")
+
     swap = sub.add_parser("swap-finish", help="中途中止後用管理 clone 收尾")
     swap.add_argument("--config", default="config/committer.json")
     swap.add_argument("--repo-dir", required=True)
@@ -116,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_erase(args)
         if args.command == "rollback":
             return _cmd_rollback(args)
+        if args.command == "init-readview":
+            return _cmd_init_readview(args)
         if args.command == "swap-finish":
             return _cmd_swap_finish(args)
         if args.command == "health":
@@ -356,6 +372,41 @@ def _cmd_rollback(args: argparse.Namespace) -> int:
                 "to": result.to_sha256, "record_id": result.record_id,
                 "was_running": result.was_running, "note": result.note,
                 "rebuild_epoch": swap.rebuild_epoch})
+    return 0
+
+
+def _cmd_init_readview(args: argparse.Namespace) -> int:
+    """讀取視圖初始化（部署手冊步驟 5）。"""
+    from aistorage.admin.init_readview import InitReadviewPlan, init_readview
+
+    try:
+        cfg = _load_config(args.config)
+    except AdminError as e:
+        print(json.dumps({"error": "admin_error", "message": str(e)},
+                         ensure_ascii=False), file=sys.stderr)
+        return 1
+    try:
+        deps = _build_deps(cfg)
+    except AdminError:
+        raise
+    except Exception as e:
+        return _not_wired(
+            f"init-readview（{type(e).__name__}）", "docs/runbooks/deploy.md 步驟 5")
+    result = init_readview(
+        deps.drive, args.folder_id, sa_email=args.sa_email,
+        confirm=bool(args.confirm), clock=deps.clock)
+    if isinstance(result, InitReadviewPlan):
+        payload = result.to_dict()
+        payload["dry_run"] = True
+        payload["next"] = (
+            f"python -m aistorage.admin init-readview --folder-id {args.folder_id}"
+            + (f" --sa-email {args.sa_email}" if args.sa_email else "")
+            + " --confirm")
+        _emit_json(payload)
+        return 1 if result.blocked else 0
+    _emit_json({"dry_run": False, **result.to_dict(),
+                "next": "把 manifest_file_id 填進 config/committer.json 的 "
+                        "readview_manifest_file_id 與 reader.json 的 manifest_file_id"})
     return 0
 
 

@@ -558,6 +558,29 @@ class HttpDriveClient(DriveClient):
 
         raise WriteError(f"Drive move 重試次數耗盡: {file_id}")
 
+    def share(
+        self, file_id: str, *, email: str, role: str = "reader"
+    ) -> str:
+        """分享檔案／資料夾給指定 email（Drive API permissions.create）。
+
+        1.5 的驗證就是用這個呼叫把讀取用的 service account 加成檢視者。
+        `permissions.create` 不是冪等操作，所以不重試 5xx（與 create 同一個考量）；
+        4xx／權限不足原樣往上拋（`DriveError`）。
+        """
+        body = json.dumps({
+            "type": "user", "role": role, "emailAddress": email,
+        }).encode("utf-8")
+        url = (f"{DRIVE_API_BASE}/files/{file_id}/permissions"
+               f"?fields=id&supportsAllDrives=true")
+        _status, _headers, data = self._request(
+            url, method="POST", data=body,
+            headers={"Content-Type": "application/json"},
+            is_write=True, retry_network_and_5xx=False)
+        try:
+            return str(json.loads(data.decode("utf-8")).get("id", ""))
+        except (ValueError, AttributeError):
+            return ""
+
     def delete_permanently(self, file_id: str) -> None:
         """永久刪除檔案。
 

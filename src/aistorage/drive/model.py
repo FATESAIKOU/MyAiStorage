@@ -92,3 +92,16 @@ class DriveClient(Protocol):
     def delete_permanently(self, file_id: str) -> None:
         """永久刪除檔案（不移入垃圾桶）。"""
         ...
+
+    def share(
+        self, file_id: str, *, email: str, role: str = "reader"
+    ) -> str:
+        """把檔案或資料夾分享給 `email`，回傳 permission id。
+
+        讀取視圖資料夾要分享給讀取用的 service account（1.5 的做法：
+        Drive API `files.permissions.create`，body 為
+        `{"type": "user", "role": "reader", "emailAddress": ...}`）。
+        分享的單位是**資料夾**：讀取端要依 id 讀 manifest、index 與各份 reading，
+        只分享 manifest 檔本身不夠。
+        """
+        ...

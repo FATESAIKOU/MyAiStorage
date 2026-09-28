@@ -25,7 +25,7 @@ class FakeDrive(DriveClient):
         {"list_children", "find_by_name", "get", "download", "download_bytes"}
     )
     WRITE_OPS: frozenset[str] = frozenset(
-        {"create", "update_content", "move", "delete_permanently"}
+        {"create", "update_content", "move", "delete_permanently", "share"}
     )
 
     def __init__(
@@ -41,10 +41,13 @@ class FakeDrive(DriveClient):
         self._files: dict[str, DriveFile] = {}
         self._contents: dict[str, bytes] = {}
         self._injections: list[dict[str, Any]] = []
+        #: file_id/folder_id -> [(email, role)]（分享紀錄；測試用來驗證有沒有分享）
+        self.shares_by_target: dict[str, list[tuple[str, str]]] = {}
         self._nth_read_injections: dict[int, type[Exception]] = {}
         self.calls: list[tuple[str, str | None]] = []
         self._folder_seq: int = 0
         self._file_seq: int = 0
+        self._permission_seq: int = 0
         self._read_count: int = 0
 
     def seed_folder(self, name: str, parent: str | None = None) -> str:
@@ -350,6 +353,26 @@ class FakeDrive(DriveClient):
         )
         self._files[file_id] = new_f
         return new_f
+
+    def share(
+        self, file_id: str, *, email: str, role: str = "reader"
+    ) -> str:
+        """分享（記錄在 shares_by_target，測試可驗證有沒有分享、分享給誰）。"""
+        self.calls.append(("share", file_id))
+        self._check_injections("share", file_id)
+        if file_id not in self._files:
+            raise NotFound(f"找不到檔案: {file_id}")
+        if role not in ("reader", "commenter", "writer", "owner", "fileOrganizer"):
+            raise ReadError(f"不支援的分享角色: {role}")
+        if "@" not in email:
+            raise ReadError(f"分享對象看起來不是 email: {email!r}")
+        self.shares_by_target.setdefault(file_id, []).append((email, role))
+        self._permission_seq += 1
+        return f"perm_{self._permission_seq:04d}"
+
+    def shares_of(self, file_id: str) -> list[tuple[str, str]]:
+        """某個檔案／資料夾目前的分享名單（測試用）。"""
+        return list(self.shares_by_target.get(file_id, []))
 
     def delete_permanently(self, file_id: str) -> None:
         self.calls.append(("delete_permanently", file_id))
