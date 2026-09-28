@@ -13,11 +13,14 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import tempfile
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from aistorage.agora import layout
+from aistorage.annex.fake import FakeAnnexGit
 from aistorage.annex.git import AnnexGit, get_git_env
 from aistorage.errors import MismatchError, WriteError
 from aistorage.schema import validate_record_metadata
@@ -42,7 +45,7 @@ class SnapshotEntry:
     committed_at: str
     git_blob: str | None = None
     annex_key: str | None = None
-    via: Literal["sync", "rewrite", "import"] = "sync"
+    via: Literal["sync", "rewrite", "import", "rollback"] = "sync"
     rewrite_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -260,21 +263,186 @@ class GitRawStorage(RawStorage):
         dest_p.write_bytes(proc.stdout)
 
 
+class AnnexRawStorage(RawStorage):
+    """使用 Git-Annex 物件庫存放原始紀錄之實作。
+
+    依據 tasks 2.6 決策：
+    - 原始紀錄（raw exports）作為 git-annex 外部物件存放。
+    - annex.largefiles 設定為包含原始紀錄（預設 "include=*.json"）。
+    - 取出 (retrieve) 時嚴格比對 annex key 中宣告之 SHA-256 雜湊與大小，
+      不符拋出 MismatchError。
+    """
+
+    def __init__(
+        self,
+        git_workdir: Path | str,
+        *,
+        git: AnnexGit | None = None,
+        largefiles: str = "include=*.json",
+    ) -> None:
+        self.git_workdir = Path(git_workdir).resolve()
+        self.git = git
+        self.largefiles = largefiles
+        self._blobs: dict[str, bytes] = {}
+        self._keys: set[str] = set()
+
+        self._ensure_largefiles_config()
+
+    def _ensure_largefiles_config(self) -> None:
+        """設定 git 配置 annex.largefiles 包含原始紀錄。"""
+        git_dir = self.git_workdir / ".git"
+        if not git_dir.exists():
+            return
+
+        try:
+            subprocess.run(
+                ["git", "-C", str(self.git_workdir), "config", "annex.largefiles", self.largefiles],
+                capture_output=True,
+                check=False,
+                env=get_git_env(),
+                timeout=10.0,
+            )
+        except Exception:
+            pass
+
+    def store(self, worktree_path: Path, src: Path) -> RawRef:
+        """將 src 原始紀錄存為 git-annex 物件並回傳 RawRef。"""
+        src_p = Path(src).resolve()
+        if not src_p.is_file():
+            raise FileNotFoundError(f"找不到原始紀錄來源檔案: {src_p}")
+
+        data = src_p.read_bytes()
+        size = len(data)
+        sha256 = hashlib.sha256(data).hexdigest().lower()
+        ext = Path(worktree_path).suffix or ".json"
+        annex_key = f"SHA256E-s{size}--{sha256}{ext}"
+
+        dest_p = Path(worktree_path)
+        dest_p.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_p, dest_p)
+
+        self._blobs[annex_key] = data
+        self._keys.add(annex_key)
+
+        if self.git is not None:
+            try:
+                rel = str(dest_p.relative_to(self.git_workdir))
+            except ValueError:
+                rel = str(dest_p)
+
+            self.git.add([rel])
+
+            if isinstance(self.git, FakeAnnexGit):
+                self.git.local_keys = frozenset(set(self.git.local_keys) | {annex_key})
+        elif (self.git_workdir / ".git").exists():
+            try:
+                subprocess.run(
+                    ["git", "-C", str(self.git_workdir), "add", str(dest_p)],
+                    capture_output=True,
+                    check=False,
+                    env=get_git_env(),
+                    timeout=30.0,
+                )
+            except Exception:
+                pass
+
+        return RawRef(kind="annex", ref=annex_key)
+
+    def retrieve(self, ref: str, dest: Path) -> None:
+        """依據 annex key 取出原始紀錄寫入 dest，並驗證其 SHA-256 雜湊與大小。"""
+        dest_p = Path(dest)
+        dest_p.parent.mkdir(parents=True, exist_ok=True)
+
+        data = self._read_raw_bytes(ref)
+        self._verify_annex_key(ref, data)
+        dest_p.write_bytes(data)
+
+    def _read_raw_bytes(self, ref: str) -> bytes:
+        if ref in self._blobs:
+            return self._blobs[ref]
+
+        if (self.git_workdir / ".git").exists():
+            try:
+                proc = subprocess.run(
+                    ["git", "-C", str(self.git_workdir), "annex", "contentlocation", ref],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=get_git_env(),
+                    timeout=15.0,
+                )
+                if proc.returncode == 0:
+                    loc = proc.stdout.strip()
+                    if loc:
+                        p = (self.git_workdir / loc).resolve()
+                        if p.is_file():
+                            return p.read_bytes()
+            except Exception:
+                pass
+
+        annex_objs = self.git_workdir / ".git" / "annex" / "objects"
+        if annex_objs.is_dir():
+            matches = list(annex_objs.glob(f"**/{ref}"))
+            if matches and matches[0].is_file():
+                return matches[0].read_bytes()
+
+        parsed = self.parse_annex_key(ref)
+        if parsed is not None:
+            _, exp_size, exp_sha = parsed
+            for cand in self.git_workdir.glob("sessions/*/*/raw.json"):
+                if cand.is_file() and cand.stat().st_size == exp_size:
+                    b = cand.read_bytes()
+                    if hashlib.sha256(b).hexdigest().lower() == exp_sha:
+                        return b
+
+        raise KeyError(f"無法自 git-annex 取出原始紀錄: {ref}")
+
+    @staticmethod
+    def parse_annex_key(ref: str) -> tuple[str, int, str] | None:
+        """解析 annex key，回傳 (key, size, sha256) 或 None。"""
+        m = re.match(r"^SHA256(?:E)?-s(\d+)--([0-9a-f]{64})(\..*)?$", ref)
+        if not m:
+            return None
+        return ref, int(m.group(1)), m.group(2).lower()
+
+    def _verify_annex_key(self, ref: str, data: bytes) -> None:
+        parsed = self.parse_annex_key(ref)
+        if parsed is None:
+            return
+        _, expected_size, expected_sha = parsed
+        actual_size = len(data)
+        actual_sha = hashlib.sha256(data).hexdigest().lower()
+
+        if actual_size != expected_size:
+            raise MismatchError(
+                f"取出之 annex 物件大小 ({actual_size}) 與 key 宣告 ({expected_size}) 不符: {ref}"
+            )
+        if actual_sha != expected_sha:
+            raise MismatchError(
+                f"取出之 annex 物件 SHA-256 ({actual_sha}) 與 key 宣告 ({expected_sha}) 不符: {ref}"
+            )
+
+    def keys(self) -> frozenset[str]:
+        """回傳目前已存入之 annex key 集合。"""
+        return frozenset(self._keys)
+
+
 class AgoraStore:
     """Agora 真本資料存取與寫入管理。"""
 
     def __init__(
         self,
         worktree: Path | str,
-        raw_storage: RawStorage,
+        raw_storage: RawStorage | None = None,
         *,
         git: AnnexGit | None = None,
         temp_dir: Path | str | None = None,
     ) -> None:
-        # R10: 當 raw_storage 為 GitRawStorage 時，必須提供 git 執行個體以維護 commit 快照可達性
-        if isinstance(raw_storage, GitRawStorage) and git is None:
-            raise ValueError("raw_storage 為 GitRawStorage 時，必須提供 git (AnnexGit) 執行個體以維護快照 commit 歷史")
         self.worktree = Path(worktree).resolve()
+        if raw_storage is None:
+            raw_storage = AnnexRawStorage(self.worktree, git=git)
+        elif isinstance(raw_storage, GitRawStorage) and git is None:
+            raise ValueError("raw_storage 為 GitRawStorage 時，必須提供 git (AnnexGit) 執行個體以維護快照 commit 歷史")
         self.raw_storage = raw_storage
         self.git = git
         # M6 & R12: 暫存目錄獨立於工作樹外部，且預設建立獨立臨時目錄避免本機衝突
@@ -492,7 +660,30 @@ class AgoraStore:
         """取得此次所有新增或修改的相對路徑清單。"""
         return list(self._changed_paths)
 
+    def annex_keys(self) -> frozenset[str]:
+        """取得真本中所有 Session 快照與 RawStorage 所涵蓋之 annex key 集合。"""
+        keys: set[str] = set()
+        if isinstance(self.raw_storage, AnnexRawStorage):
+            keys.update(self.raw_storage.keys())
+        sessions_dir = self.worktree / "sessions"
+        if sessions_dir.is_dir():
+            for p in sessions_dir.glob("*/*/snapshots.jsonl"):
+                if p.is_file():
+                    try:
+                        with open(p, encoding="utf-8") as f:
+                            for line in f:
+                                line = line.strip()
+                                if line:
+                                    entry = json.loads(line)
+                                    ak = entry.get("annex_key")
+                                    if ak:
+                                        keys.add(ak)
+                    except Exception:
+                        pass
+        return frozenset(keys)
+
     def _record_changed(self, relpath: str) -> None:
         clean = relpath.lstrip("/")
         if clean not in self._changed_paths:
             self._changed_paths.append(clean)
+

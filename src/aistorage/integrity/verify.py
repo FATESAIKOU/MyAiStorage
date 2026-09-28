@@ -27,18 +27,35 @@ from aistorage.integrity.pin import PinState
 from aistorage.integrity.settle import RepoListing, check_manifest_continuity
 
 
+def verify_annex_coverage(
+    annex_keys: frozenset[str],
+    required_keys: frozenset[str] | set[str] | list[str],
+) -> None:
+    """驗證 integrity 的 annex key 集合是否涵蓋所有必要的 annex 物件（如原始紀錄、產出本體）。
+
+    若缺少任一必要 key，拋出 MismatchError。
+    """
+    missing = set(required_keys) - set(annex_keys)
+    if missing:
+        raise MismatchError(
+            f"integrity annex_keys 集合缺少必要之物件: {sorted(missing)}"
+        )
+
+
 def verify_clone(
     git: AnnexGit,
     state: PinState,
     *,
     drive: DriveClient,
     prefix_folder_id: str,
+    expected_annex_keys: frozenset[str] | set[str] | None = None,
 ) -> None:
     """提交流程第 5 步：驗證 clone 成果。
 
     - git.ls_remote() 之 ref 集合與值必須完全等於 state.refs。
     - 遠端主 manifest 必須恰好一個且內容雜湊等於 state.manifest_sha256。
     - 若 Drive 未提供 checksum，拋出 MismatchError 註明 Drive 尚未提供 checksum。
+    - 若提供 expected_annex_keys，驗證 state.annex_keys 涵蓋所有預期之 annex 物件。
     - 否則拋出 MismatchError。
     """
     remote_refs = git.ls_remote()
@@ -60,6 +77,9 @@ def verify_clone(
         raise MismatchError(
             f"遠端主 manifest 雜湊 ({mf.sha256}) 與釘選值 ({state.manifest_sha256}) 不符"
         )
+
+    if expected_annex_keys is not None:
+        verify_annex_coverage(state.annex_keys, expected_annex_keys)
 
 
 def precheck(
@@ -106,6 +126,7 @@ def verify_after_push(
     push_started_at: str | datetime,
     *,
     workdir: Path,
+    expected_annex_keys: frozenset[str] | set[str] | None = None,
 ) -> PushVerification:
     """提交流程第 10 步：push 後遠端狀態驗證。
 
@@ -121,10 +142,14 @@ def verify_after_push(
        - listing_before 裡沒有同名檔。
        - 篩選比對名稱與雜湊相符之檔案。
     5. 下載 active bundle（篩選符合雜湊者），連同既有 active 依序重放，驗證 refs == local_refs。
+    6. 若提供 expected_annex_keys，驗證 state.annex_keys 涵蓋所有預期之 annex 物件。
     - 任何一條不符拋出 MismatchError（待定釘選值保留，留待下一輪 settle 結算）。
     """
     workdir = Path(workdir).resolve()
     workdir.mkdir(parents=True, exist_ok=True)
+
+    if expected_annex_keys is not None:
+        verify_annex_coverage(state.annex_keys, expected_annex_keys)
 
     if isinstance(push_started_at, str):
         push_dt = parse_rfc3339(push_started_at)

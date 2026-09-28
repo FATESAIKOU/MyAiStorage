@@ -11,6 +11,7 @@ from aistorage.agora.apply import (
 )
 from aistorage.agora.store import (
     AgoraStore,
+    AnnexRawStorage,
     FakeRawStorage,
     GitRawStorage,
     RawRef,
@@ -26,6 +27,7 @@ __all__ = [
     "SnapshotEntry",
     "RawRef",
     "RawStorage",
+    "AnnexRawStorage",
     "FakeRawStorage",
     "GitRawStorage",
     "ApplyResult",
