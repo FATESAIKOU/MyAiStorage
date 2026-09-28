@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 from typing import Any, Literal, Sequence
 
+from aistorage.admin.lock import DEFAULT_WORKFLOW
 from aistorage.clock import Clock, parse_rfc3339
 from aistorage.drive.model import DriveClient
 
@@ -239,6 +240,8 @@ class CollectSources:
     pins: Any                      # 需有 load(repo) 與 read_text(relpath)
     gh_runs: Any | None = None     # 需有 workflow_enabled／recent_runs／billing_minutes
     repo: str = "agora"
+    #: 提交流程的 workflow 檔名（6.5：錯開會停用它，健康檢查要查同一個）
+    workflow: str = DEFAULT_WORKFLOW
     prefix_folder_id: str = ""
     readview_folder_id: str | None = None
     readview_manifest_file_id: str | None = None
@@ -287,7 +290,7 @@ def collect_health(sources: CollectSources, *, clock: Clock | None = None) -> He
     gh = sources.gh_runs
     if gh is not None:
         try:
-            workflow = bool(gh.workflow_enabled("commit.yaml"))
+            workflow = bool(gh.workflow_enabled(sources.workflow))
         except Exception:
             workflow = None
         try:

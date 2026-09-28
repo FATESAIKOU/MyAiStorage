@@ -82,6 +82,12 @@ class PublishReport:
     manifest_file_id: str
     generation: int
     agora_main_sha: str
+    #: H4（review-25a48a9）：這個世代（或 skipped 時既有的世代）**包含**哪些
+    #: 拒收項目的 item_key。第 14 步刪除收件匣裡的拒收項目，靠的是「這一筆已經
+    #: 進入過某個已發佈的世代」，不是「這一輪有沒有發佈」——被拒收的項目通常在
+    #: 24 小時後那一輪不會產生新內容，publisher 會回 skipped，舊的判斷會讓它
+    #: 永遠刪不掉（收件匣因此永遠不是空的，每一輪都浪費 Actions 分鐘）。
+    published_item_keys: tuple[str, ...] = ()
     readings_created: int = 0
     readings_kept: int = 0
     readings_failed: tuple[tuple[str, str], ...] = ()  # (session_id, snapshot_sha256)
@@ -434,6 +440,11 @@ class DriveReadViewPublisher:
                 index_file_id=prev.index.id if prev.index else None,
                 rejections=len(rejections),
                 file_count=len(prev.files),
+                # H4：skipped 代表「這一輪的拒收與既有世代完全相同」——
+                # 冪等判斷就是比對這一點，所以它們**已經**在已發佈的世代裡。
+                published_item_keys=tuple(
+                    sorted({row.item_key for row in prev_rejections})
+                ),
             )
 
         # ---- 3. 計畫 ----
@@ -599,6 +610,9 @@ class DriveReadViewPublisher:
             manifest_file_id=self._manifest_file_id,
             generation=new_manifest.generation,
             agora_main_sha=agora_main_sha,
+            # H4：這個世代包含了這一輪的全部拒收（驗章前的也在裡面——
+            # `collect_rejections` 會把它們一起收）。
+            published_item_keys=tuple(sorted({row.item_key for row in rejections})),
             readings_created=created_count,
             readings_kept=len(plan.readings_keep),
             readings_failed=tuple(sorted(set(failed))),

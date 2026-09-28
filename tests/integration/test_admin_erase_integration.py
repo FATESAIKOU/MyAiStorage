@@ -43,7 +43,7 @@ from aistorage.agora.store import AgoraStore, AnnexRawStorage, SessionRecord
 from aistorage.clock import SystemClock
 from aistorage.committer.config import CommitterConfig
 from aistorage.committer.publish import NullPublisher
-from aistorage.committer.run import Deps, init_pin_cli, run
+from aistorage.committer.run import Deps, RepoTarget, init_pin_cli, run
 from aistorage.converters import get_converter
 from aistorage.errors import NotFound, WriteError
 from aistorage.integrity.pin import GitPinStore
@@ -198,7 +198,7 @@ def test_full_erase_scenario_on_drive(it_settings, real_drive, sandbox, tmp_path
     assert state.repo_uuid == annex.uuid
 
     # ---------------- 佈置：兩個 Session ＋ 一個含 canary 的 annex 物件 -------
-    clone = git_factory(tmp_path / "clone")
+    clone = git_factory(tmp_path / "clone", RepoTarget.from_config(cfg))
     work = clone.workdir
     env = git_env(it_settings["rclone_conf"])
     # review A-H1/A-H2：原始紀錄真的進 annex（key 由 git annex lookupkey 決定）。
@@ -294,7 +294,7 @@ def test_full_erase_scenario_on_drive(it_settings, real_drive, sandbox, tmp_path
     notices: list[str] = []
     from aistorage.admin.remote import SwapAborted, swap_remote
 
-    with AdminLock(repo=repo_name, pins=pin_files, gh=gh, workflow="commit.yaml",
+    with AdminLock(repo=repo_name, pins=pin_files, gh=gh, workflow="committer.yml",
                    reason="erase-it", notify=notices.append):
         assert read_maintenance(pin_files, repo_name) is not None, "鎖必須在 pin repo 留旗標"
         try:
@@ -328,7 +328,7 @@ def test_full_erase_scenario_on_drive(it_settings, real_drive, sandbox, tmp_path
                             conf=it_settings["rclone_conf"]).strip(),
             swap=swap)
     assert read_maintenance(pin_files, repo_name) is None, "正常結束必須解鎖"
-    assert gh.calls == ["disable commit.yaml", "enable commit.yaml"]
+    assert gh.calls == ["disable committer.yml", "enable committer.yml"]
     assert not notices, notices
     assert report.erasure_record_id and report.commit_sha
     assert report.swap is not None and report.swap.rebuild_epoch == 1
@@ -336,7 +336,7 @@ def test_full_erase_scenario_on_drive(it_settings, real_drive, sandbox, tmp_path
 
     # ---------------- 後置條件 a～f ----------------------------------------
     # a. 目前版本 ＋ b. git 歷史 ＋ 物件：全新 clone 掃描
-    fresh = git_factory(tmp_path / "fresh")
+    fresh = git_factory(tmp_path / "fresh", RepoTarget.from_config(cfg))
     for p in fresh.workdir.rglob("*"):
         rel = str(p.relative_to(fresh.workdir))
         if p.is_file() and not rel.startswith(".git") and p.stat().st_size < (4 << 20):

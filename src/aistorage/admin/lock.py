@@ -8,16 +8,22 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterator, Protocol
 
 from aistorage.admin import AdminError
 from aistorage.clock import Clock, format_rfc3339
+
+#: 提交流程的 workflow 檔名（`.github/workflows/committer.yml`）。
+#: `unlock` 刻意不讀設定檔（設定檔壞掉時仍要能解鎖），所以這裡放一份預設值；
+#: 與 `CommitterConfig.committer_workflow` 的預設值必須一致。
+DEFAULT_WORKFLOW = "committer.yml"
 
 
 def maintenance_relpath(repo: str) -> str:
@@ -361,3 +367,26 @@ class AdminLock:
         finally:
             self._gh.set_workflow_enabled(self._workflow, True)
         return False
+
+
+@contextmanager
+def admin_lock_if_needed(*, repo: str, pins: PinFiles, gh: GitHubAdmin,
+                         workflow: str, reason: str,
+                         precheck: Callable[[], None] | None = None,
+                         notify: Callable[[str], None] | None = None,
+                         **kwargs: Any) -> Iterator[AdminLock | None]:
+    """已經有維護旗標就直接做事，沒有就自己上鎖（6.5）。
+
+    用在「可能被包在管理操作裡、也可能被單獨執行」的指令（`init-pin`）：
+    - 沒有旗標 → 照 AdminLock 的正常流程上鎖（停用 workflow、等沒有執行中的
+      run、預檢），做完解除；
+    - 已經有旗標 → 視為正在中止處理流程中（runbook 讓人先手動 `init-pin --confirm`
+      再 `swap-finish`），這時**不能**再上一次鎖（`AdminLock` 會拒絕重複上鎖），
+      直接在既有的鎖裡做事。既有旗標本身就是提交流程的門擋。
+    """
+    if read_maintenance(pins, repo) is not None:
+        yield None
+        return
+    with AdminLock(repo=repo, pins=pins, gh=gh, workflow=workflow, reason=reason,
+                   precheck=precheck, notify=notify, **kwargs) as lock:
+        yield lock

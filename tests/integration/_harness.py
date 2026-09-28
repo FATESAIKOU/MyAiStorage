@@ -216,15 +216,22 @@ def build_annex_repo(
 def annex_git_factory(annex: AnnexSetup):
     """提交流程用的 git_factory：每次呼叫都真的把真本 clone 進指定目錄。
 
+    H1（review-25a48a9）：簽名是 `(dest, target)`，URL 與 largefiles 都取自
+    target——舊的簽名只給 `dest`，Foundry 的 pipeline 會 clone 到 Agora 的 repo。
+
     `init_pin_cli` 會直接對 factory 產生的物件呼叫 `ls_remote` / `local_refs`，
     所以 factory 必須給一個「已經存在且已 clone」的目錄，不能只是包一層 workdir。
     """
     from aistorage.annex.git import SubprocessAnnexGit
 
-    def factory(dest: Path) -> SubprocessAnnexGit:
-        return SubprocessAnnexGit.clone_for_commit(
-            annex.url, dest, max_git_bundles=annex.max_git_bundles
-        )
+    def factory(dest: Path, target=None) -> SubprocessAnnexGit:
+        kwargs: dict[str, object] = {"max_git_bundles": annex.max_git_bundles}
+        if target is not None:
+            kwargs["url"] = target.repo_url
+            kwargs["largefiles"] = target.largefiles_rule
+        else:
+            kwargs["url"] = annex.url
+        return SubprocessAnnexGit.clone_for_commit(dest=dest, **kwargs)  # type: ignore[arg-type]
 
     return factory
 

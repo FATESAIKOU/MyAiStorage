@@ -312,6 +312,15 @@ class AdminLock:
   - 即使住民在管理操作期間重新啟用並觸發 workflow，也不會互相覆蓋。
 - **驗收**（task 6.5）：管理操作期間，(a) 同時觸發提交流程，(b) 用住民的 token 重新啟用並觸發。兩種情況的 run 都必須在 `maintenance` 結束，而且遠端的 refs 不變。
 
+實作落差（6.5 補齊後，2026-09-28）：
+
+| 事項 | 做法 |
+|------|------|
+| 停用的 workflow 名稱 | 由設定檔 `committer_workflow` 帶（預設 `committer.yml`）。原本 `erase`／`rollback`／`swap-finish`／`unlock`／`health` 散落硬編碼成 `commit.yaml`——repo 裡沒有那個檔，`gh workflow disable` 會直接失敗，整個管理操作起不來。 |
+| 重建釘選值（6.4 的 `init-pin --confirm`） | 也走錯開：沒有維護旗標就自己上鎖；已經有旗標（中途中止的收尾流程）就沿用既有的鎖，不重複上鎖。 |
+| push 前重讀遠端 manifest | `swap_remote` 多一步 `recheck-remote`：swap 開始時記下遠端 manifest 的指紋，push 前再讀一次比對；有人動過遠端就中止（保留鎖），不覆蓋。有刪遠端檔（抹除）時「主 manifest 已由本輪刪掉」是預期結果。 |
+| 預檢（`AdminLock` 的 `precheck`） | `erase`／`rollback` 用嚴格版（遠端 manifest 必須等於正式釘選值）；`swap-finish`／`init-pin` 用寬鬆版（它們的前提就是遠端已經不一致），只擋「多個主 manifest」與「判不出有沒有被動過」。 |
+
 ### 5.2 6.1 抹除
 
 ```python

@@ -650,7 +650,8 @@ def test_swap_order_and_abort_report(tmp_path: Path, monkeypatch):
                          force_push=True, config_path=config,
                          push_fn=_push_ok(git), pin_rebuild_fn=_pin_ok)
     assert [s.name for s in report.steps] == [
-        "delete-remote", "push", "verify-remote", "rebuild-pin", "readview-epoch"]
+        "delete-remote", "recheck-remote", "push", "verify-remote",
+        "rebuild-pin", "readview-epoch"]
     assert report.promoted_at == T1
     assert report.rebuild_epoch == 2          # 讀取視圖要完整重建
     assert set(report.deleted_file_ids) == {bundle}
@@ -663,5 +664,5 @@ def test_swap_order_and_abort_report(tmp_path: Path, monkeypatch):
                     delete_groups=[DeleteGroup("repo", (bundle2,), (prefix,))],
                     force_push=True, config_path=None,
                     push_fn=_push_ok(bad), pin_rebuild_fn=_pin_ok)
-    assert excinfo.value.report.done == ("delete-remote",)
+    assert excinfo.value.report.done == ("delete-remote", "recheck-remote")
     assert "下一步" in str(excinfo.value)

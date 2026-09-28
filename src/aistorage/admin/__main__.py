@@ -3,6 +3,7 @@
 子命令：
 
 - `lock-status`／`unlock`：看與手動解除維護旗標（`unlock --confirm`）。
+- `create-repo`：建真本 repo 前綴＋git-annex 遠端（tasks 7.1；預設 dry-run）。
 - `erase`：抹除。**預設 dry-run**，只列 id、計數與雜湊；
   `--confirm <plan-hash>` 才執行（計畫一變就拒絕）。
 - `rollback`：列出可回滾的快照／把某 Session 回滾到舊快照。
@@ -46,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     unlock.add_argument("--repo", default="agora")
     unlock.add_argument("--workdir", default=None)
     unlock.add_argument("--gh-repo", default="")
-    unlock.add_argument("--workflow", default="commit.yaml")
+    unlock.add_argument("--workflow", default=None)
     unlock.add_argument("--confirm", action="store_true",
                         help="確認已經處理完遠端與 pin 的不一致")
 
@@ -60,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="只存在於要抹除內容裡的字串；後置條件靠它確認")
     erase.add_argument("--why", default="")
     erase.add_argument("--confirm", default=None, help="計畫雜湊，確認執行")
+    erase.add_argument("--workflow", default=None,
+                       help="要停用的提交流程 workflow（預設取設定檔 committer_workflow）")
 
     rollback = sub.add_parser("rollback", help="回滾 Session 到舊快照")
     rollback.add_argument("--config", default="config/committer.json")
@@ -70,11 +73,15 @@ def build_parser() -> argparse.ArgumentParser:
     rollback.add_argument("--to", default=None, help="目標 snapshot_sha256")
     rollback.add_argument("--reason", default="")
     rollback.add_argument("--confirm", default=None, help="必須等於 --to")
+    rollback.add_argument("--workflow", default=None,
+                          help="要停用的提交流程 workflow（預設取設定檔 committer_workflow）")
 
     rv = sub.add_parser(
         "init-readview",
         help="初始化讀取視圖（建立 generation 0 的空 manifest、分享給 SA）")
     rv.add_argument("--folder-id", required=True, help="讀取視圖資料夾 id")
+    rv.add_argument("--element", default="agora", choices=("agora", "foundry"),
+                    help="讀取視圖屬於哪個要素（Foundry 用 foundry）")
     rv.add_argument("--config", default="config/committer.json",
                     help="提交流程設定檔（提供管理憑證的路徑）")
     rv.add_argument("--sa-email", default=None,
@@ -89,6 +96,8 @@ def build_parser() -> argparse.ArgumentParser:
     swap.add_argument("--config", default="config/committer.json")
     swap.add_argument("--repo-dir", required=True)
     swap.add_argument("--force-push", action="store_true")
+    swap.add_argument("--workflow", default=None,
+                      help="要停用的提交流程 workflow（預設取設定檔 committer_workflow）")
 
     health = sub.add_parser("health", help="健康檢查（collect 資料後判定）")
     health.add_argument("--config", default="config/committer.json")
@@ -103,6 +112,27 @@ def build_parser() -> argparse.ArgumentParser:
     recover.add_argument("--config", default="config/committer.json")
     recover.add_argument("--check", action="store_true")
     recover.add_argument("--new-prefix", default=None)
+
+    cr = sub.add_parser(
+        "create-repo",
+        help="建真本 repo 前綴＋git-annex 遠端（tasks 7.1；只建 repo，不做 pin 與讀取視圖）")
+    cr.add_argument("--element", default="foundry", choices=("agora", "foundry"),
+                    help="要建哪個要素的 repo（預設 foundry）")
+    cr.add_argument("--prefix-name", required=True,
+                    help="前綴資料夾名稱（3〜64 字元小寫英文／數字／連字號；rcloneprefix 用它）")
+    cr.add_argument("--test-root-id", required=True,
+                    help="測試資料夾 id（只在它底下建東西）")
+    cr.add_argument("--rclone-conf", required=True,
+                    help="rclone 設定檔路徑（只以路徑引用，不讀內容）")
+    cr.add_argument("--rclone-remote", default="gdrive")
+    cr.add_argument("--max-git-bundles", type=int, default=10)
+    cr.add_argument("--work-parent", default=None,
+                    help="git 工作區的父目錄（省略用暫存目錄；必須不在專案 repo 內）")
+    create_mode = cr.add_mutually_exclusive_group()
+    create_mode.add_argument("--dry-run", action="store_true",
+                             help="只印計畫（預設）")
+    create_mode.add_argument("--confirm", action="store_true",
+                             help="真的建立（前綴已存在會拒絕）")
     return parser
 
 
@@ -138,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_health(args)
         if args.command == "recover":
             return _cmd_recover(args)
+        if args.command == "create-repo":
+            return _cmd_create_repo(args)
     except AdminError as e:
         payload: dict[str, Any] = {"error": "admin_error", "message": str(e)}
         report = getattr(e, "report", None)
@@ -170,7 +202,9 @@ def _cmd_lock_status(args: argparse.Namespace) -> int:
 
 
 def _cmd_unlock(args: argparse.Namespace) -> int:
-    from aistorage.admin.lock import GitHubAdmin, maintenance_relpath
+    from aistorage.admin.lock import (
+        DEFAULT_WORKFLOW, GitHubAdmin, maintenance_relpath,
+    )
 
     if not args.confirm:
         raise AdminError(
@@ -178,12 +212,13 @@ def _cmd_unlock(args: argparse.Namespace) -> int:
             "確定後加 --confirm（見 docs/runbooks/erase.md 的中止處理）")
     gh = GitHubAdmin(args.gh_repo or "FATESAIKOU/MyAiStorage")
     pins = _pin_files(args)
+    workflow = args.workflow or DEFAULT_WORKFLOW
     raw = pins.read_text(maintenance_relpath(args.repo))
     if raw is not None:
         pins.delete(maintenance_relpath(args.repo),
                     "maintenance off (admin unlock --confirm)")
-    gh.set_workflow_enabled(args.workflow, True)
-    _emit_json({"unlocked": True, "repo": args.repo, "workflow": args.workflow,
+    gh.set_workflow_enabled(workflow, True)
+    _emit_json({"unlocked": True, "repo": args.repo, "workflow": workflow,
                 "had_flag": raw is not None})
     return 0
 
@@ -219,7 +254,10 @@ def _build_deps(cfg: Any, *, allow_production: bool = True):
         known_hosts_path=cfg.pin_known_hosts_path,
         allow_production=allow_production,
     )
-    git_factory = lambda dest: _annex_git(cfg, dest)
+    # H1（review-25a48a9）：factory 收 target，URL 與 annex 規則都從 target 來
+    # （admin 的每一條路徑都只操作 Agora，所以 target 就是 cfg 自己）。
+    def git_factory(dest, target):
+        return _annex_git(target, dest)
     try:
         registry = load_registry(cfg.identity_registry_path, allow_example=False)
     except Exception:
@@ -228,11 +266,13 @@ def _build_deps(cfg: Any, *, allow_production: bool = True):
                 converters=CONVERTERS, publisher=NullPublisher(), clock=SystemClock())
 
 
-def _annex_git(cfg: Any, dest: Path):
+def _annex_git(target: Any, dest: Path):
     from aistorage.annex.git import SubprocessAnnexGit
 
     return SubprocessAnnexGit.clone_for_commit(
-        cfg.repo_url, dest, max_git_bundles=cfg.max_git_bundles)
+        target.repo_url, dest,
+        max_git_bundles=target.max_git_bundles,
+        largefiles=target.largefiles_rule)
 
 
 def _admin_deps(cfg: Any, deps: Any, drive: Any):
@@ -249,11 +289,55 @@ def _admin_deps(cfg: Any, deps: Any, drive: Any):
     )
 
 
+def _manifest_precheck(cfg: Any, deps: Any, *, strict: bool) -> Any:
+    """6.5 的預檢：重讀遠端主 manifest，確認它等於正式釘選值（設計 §5.1 步驟 4）。
+
+    `strict=False` 只給 `swap-finish` 用：它的前提本來就是「遠端已經不一致」
+    （前一次操作中途中止留下的狀態），所以不能要求遠端等於釘選值；仍然要擋的是
+    「多個主 manifest」與「判不出有沒有被動過」這兩種狀態不明。
+    """
+    from aistorage.admin.remote import read_remote_manifest_sha256
+
+    def _check() -> None:
+        remote = read_remote_manifest_sha256(
+            deps.drive, cfg.prefix_folder_id, cfg.repo_uuid, allow_missing=not strict)
+        if not strict:
+            return
+        state, _pending = deps.pins.load(cfg.repo)
+        if remote != state.manifest_sha256:
+            raise AdminError(
+                f"預檢失敗：遠端主 manifest 雜湊（{remote}）與正式釘選值"
+                f"（{state.manifest_sha256}）不符；遠端在管理操作之外被動過，"
+                "先查清楚再重來（不要解除維護旗標）")
+
+    return _check
+
+
+def _admin_lock(args: argparse.Namespace, cfg: Any, deps: Any, *, reason: str,
+                strict_precheck: bool) -> Any:
+    """6.5：會改動遠端真本的管理操作一律從這裡上鎖。
+
+    停用的 workflow 名稱取自設定檔（`committer_workflow`），不再散落硬編碼——
+    名字不對時 `gh workflow disable` 會直接失敗，整個管理操作就起不來。
+    """
+    from aistorage.admin.lock import AdminLock, GitHubAdmin, GitPinFiles
+
+    pins = GitPinFiles(cfg.pin_repo_url,
+                       Path(tempfile.mkdtemp(prefix="admin_pin_")),
+                       key_path=cfg.pin_key_path)
+    gh = GitHubAdmin(cfg.github_repository or "FATESAIKOU/MyAiStorage")
+    workflow = getattr(args, "workflow", None) or cfg.committer_workflow
+    return AdminLock(
+        repo=cfg.repo, pins=pins, gh=gh, workflow=workflow, reason=reason,
+        precheck=_manifest_precheck(cfg, deps, strict=strict_precheck))
+
+
 def _cmd_erase(args: argparse.Namespace) -> int:
     from aistorage.admin.erase import (
         EraseTarget, apply_erase, plan_erase, plan_hash,
     )
     from aistorage.agora.store import AgoraStore, GitRawStorage
+    from aistorage.committer.run import RepoTarget
 
     targets: list[EraseTarget] = []
     for sid in args.session:
@@ -276,7 +360,7 @@ def _cmd_erase(args: argparse.Namespace) -> int:
         return _not_wired(f"erase（{type(e).__name__}）", "docs/runbooks/erase.md")
 
     clone_dir = Path(tempfile.mkdtemp(prefix="admin_erase_")) / "repo"
-    git = deps.git_factory(clone_dir)
+    git = deps.git_factory(clone_dir, RepoTarget.from_config(cfg))
     store = AgoraStore(clone_dir, GitRawStorage(clone_dir), git=git,
                        temp_dir=Path(tempfile.mkdtemp(prefix="admin_erase_tmp_")))
     admin = _admin_deps(cfg, deps, deps.drive)
@@ -295,13 +379,7 @@ def _cmd_erase(args: argparse.Namespace) -> int:
     if not args.why.strip():
         raise AdminError("執行抹除必須說明原因（--why）")
 
-    from aistorage.admin.lock import AdminLock, GitHubAdmin, GitPinFiles
-    pins = GitPinFiles(cfg.pin_repo_url,
-                       Path(tempfile.mkdtemp(prefix="admin_pin_")),
-                       key_path=cfg.pin_key_path)
-    gh = GitHubAdmin(cfg.github_repository or "FATESAIKOU/MyAiStorage")
-    with AdminLock(repo=cfg.repo, pins=pins, gh=gh,
-                   workflow="commit.yaml", reason="erase"):
+    with _admin_lock(args, cfg, deps, reason="erase", strict_precheck=True):
         report = apply_erase(
             plan, confirm=ph, admin=admin, cfg=cfg, deps=deps, store=store,
             repo_dir=clone_dir, git=git, why=args.why, canary=args.canary,
@@ -352,14 +430,7 @@ def _cmd_rollback(args: argparse.Namespace) -> int:
     except Exception as e:
         return _not_wired(f"rollback（{type(e).__name__}）", "docs/runbooks/rollback.md")
 
-    from aistorage.admin.lock import AdminLock, GitHubAdmin, GitPinFiles
-
-    pins = GitPinFiles(cfg.pin_repo_url,
-                       Path(tempfile.mkdtemp(prefix="admin_pin_")),
-                       key_path=cfg.pin_key_path)
-    gh = GitHubAdmin(cfg.github_repository or "FATESAIKOU/MyAiStorage")
-    with AdminLock(repo=cfg.repo, pins=pins, gh=gh,
-                   workflow="commit.yaml", reason="rollback"):
+    with _admin_lock(args, cfg, deps, reason="rollback", strict_precheck=True):
         result = rollback_session(
             store=store, session_id=args.session,
             target_snapshot_sha256=args.to, reason=args.reason,
@@ -395,12 +466,14 @@ def _cmd_init_readview(args: argparse.Namespace) -> int:
             f"init-readview（{type(e).__name__}）", "docs/runbooks/deploy.md 步驟 5")
     result = init_readview(
         deps.drive, args.folder_id, sa_email=args.sa_email,
-        confirm=bool(args.confirm), clock=deps.clock)
+        confirm=bool(args.confirm), clock=deps.clock,
+        element=args.element)
     if isinstance(result, InitReadviewPlan):
         payload = result.to_dict()
         payload["dry_run"] = True
         payload["next"] = (
             f"python -m aistorage.admin init-readview --folder-id {args.folder_id}"
+            + (f" --element {args.element}" if args.element != "agora" else "")
             + (f" --sa-email {args.sa_email}" if args.sa_email else "")
             + " --confirm")
         _emit_json(payload)
@@ -416,15 +489,10 @@ def _cmd_swap_finish(args: argparse.Namespace) -> int:
 
     cfg = _load_config(args.config)
     deps = _build_deps(cfg)
-    from aistorage.admin.lock import AdminLock, GitHubAdmin, GitPinFiles
     from aistorage.annex.git import SubprocessAnnexGit
 
-    pins = GitPinFiles(cfg.pin_repo_url,
-                       Path(tempfile.mkdtemp(prefix="admin_pin_")),
-                       key_path=cfg.pin_key_path)
-    gh = GitHubAdmin(cfg.github_repository or "FATESAIKOU/MyAiStorage")
-    with AdminLock(repo=cfg.repo, pins=pins, gh=gh,
-                   workflow="commit.yaml", reason="swap-finish"):
+    # 6.5：swap-finish 也走同一把鎖。預檢是寬鬆版的——它的前提就是遠端已經不一致。
+    with _admin_lock(args, cfg, deps, reason="swap-finish", strict_precheck=False):
         report = swap_remote(
             admin=_admin_deps(cfg, deps, deps.drive), cfg=cfg, deps=deps,
             # M4：swap-finish 操作的是**既有**管理 clone，必須是 annex:: 遠端
@@ -507,11 +575,51 @@ def _collect_from_config(config_path: str):
         return HealthData()
     return collect_health(
         CollectSources(drive=drive, pins=pins, repo=cfg.repo,
+                       workflow=cfg.committer_workflow,
                        prefix_folder_id=cfg.prefix_folder_id,
                        readview_folder_id=cfg.readview_folder_id,
                        readview_manifest_file_id=cfg.readview_manifest_file_id,
                        quarantine_folder_id=cfg.quarantine_folder_id),
         clock=SystemClock())
+
+
+def _cmd_create_repo(args: argparse.Namespace) -> int:
+    """建 repo 前綴（tasks 7.1）。預設 dry-run，只印計畫；--confirm 才真的建。"""
+    from pathlib import Path as _Path
+
+    from aistorage.admin.create_repo import plan_create_repo, run_create_repo
+    from aistorage.drive.auth import RcloneConfToken
+    from aistorage.drive.http import HttpDriveClient
+
+    conf = _Path(args.rclone_conf)
+    if not conf.is_file():
+        raise AdminError(f"找不到 rclone 設定檔（只以路徑引用）: {conf}")
+    drive = HttpDriveClient(RcloneConfToken(conf, remote=args.rclone_remote))
+    plan = plan_create_repo(
+        drive, args.test_root_id, args.prefix_name,
+        element=args.element, max_git_bundles=args.max_git_bundles,
+    )
+    if not args.confirm:
+        payload = plan.to_dict()
+        payload["dry_run"] = True
+        payload["next"] = (
+            f"python -m aistorage.admin create-repo --element {args.element}"
+            f" --prefix-name {args.prefix_name}"
+            f" --test-root-id {args.test_root_id}"
+            f" --rclone-conf {args.rclone_conf} --confirm"
+        )
+        _emit_json(payload)
+        return 1 if plan.already_exists else 0
+    created = run_create_repo(
+        drive, args.test_root_id, args.prefix_name,
+        element=args.element, rclone_conf=conf,
+        rclone_remote=args.rclone_remote,
+        max_git_bundles=args.max_git_bundles,
+        work_parent=_Path(args.work_parent) if args.work_parent else None,
+    )
+    _emit_json({"dry_run": False, **created.to_dict(),
+                "next": "接著跑 committer init-pin（釘選值）與 admin init-readview（讀取視圖）"})
+    return 0
 
 
 def _cmd_recover(args: argparse.Namespace) -> int:

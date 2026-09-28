@@ -20,7 +20,9 @@ Drive 上的 repo 被刪除時，從任一個 git clone 重建。全部在 Admin
    不相符就改走 from-clone。
 3. **主 manifest 與 `.bak` 都不在**：只能 from-clone：
    用任一個 clone 推到新前綴（git push＋上傳 bundle／manifest／annex 物件）；
-   以觀測到的遠端狀態重建正式 pin（`init-pin --confirm`，只在 Mac）；
+   以觀測到的遠端狀態重建正式 pin（`init-pin --confirm`，只在 Mac；它會照
+   6.5 自己上鎖——沒有維護旗標時停用 workflow、等沒有執行中的 run、重讀遠端
+   manifest，已經有旗標時就是沿用中止處理中既有的鎖）；
    更新 `config/committer.json`；`readview_rebuild_epoch` 加 1
    完整重建讀取視圖（等全部上傳完才切換 manifest）；
    跑一輪完整提交流程（含清掃）確認正常，把步驟與耗時記在下面。

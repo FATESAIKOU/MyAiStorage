@@ -40,7 +40,7 @@ from aistorage.agora.store import (
     RawStorage,
 )
 from aistorage.annex.fake import FakeAnnexGit
-from aistorage.annex.git import AnnexGit, SubprocessAnnexGit
+from aistorage.annex.git import DEFAULT_LARGEFILES, AnnexGit, SubprocessAnnexGit
 from aistorage.annex.manifest import parse_manifest
 from aistorage.clock import Clock, format_rfc3339
 from aistorage.committer.config import CommitterConfig, RepoConfig
@@ -81,12 +81,17 @@ from aistorage.integrity.verify import (
     precheck,
     verify_after_push,
     verify_clone,
+    verify_new_keys_on_drive,
+    verify_pin_keys_on_drive,
 )
 from aistorage.intake.evaluate import (
+    FOUNDRY_ITEM_TYPES,
     Decision,
     DecisionKind,
+    VerifiedSidecar,
     evaluate,
     sort_accepted_decisions,
+    verify_item_sidecar,
 )
 from aistorage.intake.ledger import Ledger
 from aistorage.foundry.apply import apply_artifact
@@ -103,7 +108,11 @@ class Deps:
 
     drive: DriveClient
     pins: PinStore
-    git_factory: Callable[[Path], AnnexGit]
+    #: H1（review-25a48a9）：factory **必須**拿到 target。
+    #: 舊簽名只給 `dest`，於是 URL 寫死成 Agora 的——Foundry 的 pipeline 會
+    #: clone 到 Agora 的 repo（第 3、4 步用 Foundry 的 pin，第 5 步卻拿到 Agora
+    #: 的 repo，最壞情況是把 Foundry 的內容寫進 Agora 並 push）。
+    git_factory: Callable[[Path, "RepoTarget"], AnnexGit]
     registry: Registry
     converters: dict[str, Converter]
     publisher: ReadViewPublisher
@@ -133,6 +142,8 @@ class RunReport:
     maintenance: str | None = None
     #: 為什麼沒有處理 Foundry：no_artifacts（收件匣沒有 artifact，依 PM 決定 9 不 clone）
     foundry_skipped: str | None = None
+    #: M2：設定檔有列、但釘選值還沒初始化（= 沒有設定）的 repo 名稱
+    repo_not_enabled: str | None = None
     #: 維護旗標的原因字串（管理者留下的，會出現在 log，所以只印短字串）
     maintenance_reason: str | None = None
 
@@ -262,14 +273,21 @@ def _pipeline_step(current_step: str, ctx: PipelineContext | None) -> str:
     return current_step
 
 
-def _check_maintenance(cfg: CommitterConfig, deps: Deps, report: RunReport) -> bool:
-    """第 1b 步：檢查 pin repo 的維護旗標；有旗標就整輪不做任何事。
+def _check_maintenance(
+    cfg: CommitterConfig | RepoTarget, deps: Deps, report: RunReport
+) -> bool:
+    """檢查 pin repo 的維護旗標；**整輪**不做任何事。
 
     回傳 True 表示「因為維護中而結束」。旗標讀不到或損毀時 fail-closed：
     把它當成維護中（中止），寧可少跑一輪，也不要在管理操作期間動真本。
+
+    H3（review-25a48a9）：參數可以是 `RepoTarget`（pipeline 內的重查，查的是
+    該 target 自己的旗標，例如 `foundry.maintenance`）。讀不到 `read_text` 一律
+    raise `TypeError`——不能默默當成「沒有維護中」。
     """
     from aistorage.admin.lock import maintenance_relpath, parse_maintenance
 
+    repo = cfg.repo
     read_text = getattr(deps.pins, "read_text", None)
     if not callable(read_text):
         # L（review-b1039a8）：PinStore protocol 要求 read_text。舊的 fake 缺這個
@@ -280,7 +298,7 @@ def _check_maintenance(cfg: CommitterConfig, deps: Deps, report: RunReport) -> b
         )
 
     try:
-        raw = read_text(maintenance_relpath(cfg.repo))
+        raw = read_text(maintenance_relpath(repo))
     except AiStorageError as e:
         # 讀不到旗標本身（例如 pin repo 連不上）：fail-closed，中止這一輪
         report.aborted_at = "maintenance"
@@ -302,6 +320,50 @@ def _check_maintenance(cfg: CommitterConfig, deps: Deps, report: RunReport) -> b
     report.maintenance = "active"
     report.maintenance_reason = flag.reason
     return True
+
+
+def _maintenance_repo_names(cfg: CommitterConfig) -> tuple[str, ...]:
+    """這一輪會碰到的所有 repo 名稱（H3：1b 要檢查**每一個** target 的旗標）。"""
+    return (cfg.repo, *(rc.name for rc in cfg.repos))
+
+
+def _assert_no_maintenance(
+    repo_name: str, deps: Deps, report: RunReport, step: str
+) -> None:
+    """pipeline 內的重查（H3）：命中就讓**整輪**停下來。
+
+    H2 指出第 1b 步只查 Agora，Foundry 的 settle／sweep／clone／push 全部照跑；
+    原本 promote 前的重查又在 push 之後，命中之後還會繼續跑第 14 步——那一輪
+    push 出去但還沒 promote 的項目，會被從收件匣刪掉（交接單、認領是一次性的，
+    刪了就永久遺失）。所以：
+
+    - 重查點放在 **write_pending 之前**與 **push 之前**（push 最怕撞上抹除）；
+    - 命中一律 `raise AbortRun("maintenance", "active")`，讓 `run()` 走
+      `except AbortRun`：不處理下一個 repo，也不執行第 14 步。
+    """
+    probe = _ProbeRunReport()
+    if not _check_maintenance(_RepoNameShim(repo_name), deps, probe):  # type: ignore[arg-type]
+        return
+    report.maintenance = probe.maintenance or "active"
+    report.maintenance_reason = probe.maintenance_reason
+    raise AbortRun("maintenance", "active", f"{repo_name} 正在維護中（{step}）")
+
+
+class _RepoNameShim:
+    """只帶 `repo` 的輕量物件（重查只需要 repo 名稱）。"""
+
+    def __init__(self, repo: str) -> None:
+        self.repo = repo
+
+
+class _ProbeRunReport:
+    """重查用的報告殼（只為了不污染這一輪的 RunReport，再由呼叫端轉記）。"""
+
+    run_id: str = "maintenance-probe"
+    aborted_at: str | None = None
+    code: str | None = None
+    maintenance: str | None = None
+    maintenance_reason: str | None = None
 
 
 def _build_publisher(
@@ -481,8 +543,15 @@ def init_pin_cli(
     deps: Deps,
     *,
     confirm: bool = False,
+    target: RepoTarget | None = None,
 ) -> PinState:
-    """CLI init-pin: 首次建立正式釘選值（管理者身分，只有 confirm=True 會寫入）。"""
+    """CLI init-pin: 首次建立正式釘選值（管理者身分，只有 confirm=True 會寫入）。
+
+    `target` 給定時用它取代 cfg 的各欄位（H1：Foundry 的釘選值必須用**自己的**
+    repo_url／uuid 來 clone 與驗證；共用 Agora 的 URL 就是 H1 描述的最壞情況）。
+    """
+    if target is not None:
+        cfg = _target_as_config(cfg, target)
     children = deps.drive.list_children(cfg.prefix_folder_id)
     files = tuple(f for f in children if not f.is_folder)
     subfolders = tuple(f for f in children if f.is_folder)
@@ -516,7 +585,10 @@ def init_pin_cli(
 
         # Clone 並與 ls-remote 比對，同時讀取 annex keys 集合 (H5)
         git_dir = workdir / "repo"
-        git = deps.git_factory(git_dir)
+        # H1：URL 與 largefiles 從 target 來（target=None 時就是 cfg 自己）
+        git = deps.git_factory(git_dir, target or RepoTarget.from_config(cfg))
+        # H1：clone 之後確認身分就是這個 repo（錯了就中止，不要拿錯的 pin 建釘選值）
+        verify_clone_identity(git, target or RepoTarget.from_config(cfg))
         for op in ("ls_remote", "annex_keys_in", "local_refs"):
             if not hasattr(git, op):
                 # H5：拿不到就 fail-closed。寫入空集合等同於宣告「遠端沒有任何
@@ -596,6 +668,35 @@ class RepoTarget:
     identity_registry_path: str = ""
     pin_repo_url: str = ""
 
+    @property
+    def largefiles_rule(self) -> str:
+        """這個 repo 的 `annex.largefiles`（H1/L：clone 時就依 target 設定）。
+
+        Agora 沒有自己的欄位時用 `annex.git.DEFAULT_LARGEFILES`（Agora 的單一來源
+        `agora.store.LARGEFILES_RAW` 就是它）；Foundry 一定要在 `repos` 區塊裡
+        明寫自己的規則。
+        """
+        return self.largefiles or DEFAULT_LARGEFILES
+
+    @property
+    def allowed_item_types(self) -> frozenset[str]:
+        """這個 pipeline 該處理的收件匣項目型態（H2：分派依「驗章通過的」型態）。"""
+        if self.element == "foundry":
+            return frozenset({"artifact"})
+        return frozenset({"session", "handoff", "claim", "reference", "rewrite"})
+
+    def allowed_types_for(self, *, others_configured: bool) -> frozenset[str]:
+        """這一輪實際該收的型態。
+
+        沒有其他 repo 會接手時，Agora 連 artifact 一起收——讓 evaluate 回
+        `REJECT(foundry_not_enabled)`（M2：寫入者看得到原因，24 小時後清掉），
+        否則 artifact 會永遠躺在收件匣裡沒有人評估。
+        """
+        allowed = self.allowed_item_types
+        if self.element != "foundry" and not others_configured:
+            return allowed | FOUNDRY_ITEM_TYPES
+        return allowed
+
     @classmethod
     def from_config(cls, cfg: CommitterConfig) -> RepoTarget:
         """Agora：由上層設定檔欄位組出。"""
@@ -620,7 +721,13 @@ class RepoTarget:
 
     @classmethod
     def from_repo_config(cls, cfg: CommitterConfig, rc: RepoConfig) -> RepoTarget:
-        """Foundry（或之後的第三個 repo）：由 `repos` 區塊組出，繼承共用設定。"""
+        """Foundry（或之後的第三個 repo）：由 `repos` 區塊組出。
+
+        M4（review-25a48a9）：`prefix_levels` 與 `max_raw_size` 必須是**它自己的**
+        ——沿用 Agora 的 prefix_levels 會讓 Foundry 的清掃去檢查 Agora 的上層資料夾
+        （而 Foundry 自己的上層完全沒有保護），沿用 Agora 的 `max_raw_size`（50 MiB）
+        會讓 50〜100 MB 的收容產出被拒收成 `too_large`（D7 是 100 MB）。
+        """
         return cls(
             element=rc.name,
             repo=rc.name,
@@ -634,12 +741,61 @@ class RepoTarget:
             largefiles=rc.largefiles,
             max_git_bundles=cfg.max_git_bundles,
             max_gc_per_run=cfg.max_gc_per_run,
-            max_raw_size=cfg.max_raw_size,
+            max_raw_size=rc.max_raw_size,
             quarantine_retention_days=cfg.quarantine_retention_days,
-            prefix_levels=cfg.prefix_levels,
+            prefix_levels=rc.prefix_levels,
             identity_registry_path=cfg.identity_registry_path,
             pin_repo_url=cfg.pin_repo_url,
         )
+
+
+def _target_as_config(cfg: CommitterConfig, target: RepoTarget) -> CommitterConfig:
+    """把 RepoTarget 覆蓋回 CommitterConfig（`init-pin` 用同一條程式路徑）。"""
+    import dataclasses
+
+    return dataclasses.replace(
+        cfg,
+        repo=target.repo,
+        repo_uuid=target.repo_uuid,
+        repo_url=target.repo_url,
+        prefix_folder_id=target.prefix_folder_id,
+        quarantine_folder_id=target.quarantine_folder_id,
+        readview_folder_id=target.readview_folder_id,
+        readview_manifest_file_id=target.readview_manifest_file_id,
+        readview_rebuild_epoch=target.readview_rebuild_epoch,
+        max_git_bundles=target.max_git_bundles,
+        max_gc_per_run=target.max_gc_per_run,
+        max_raw_size=target.max_raw_size,
+        quarantine_retention_days=target.quarantine_retention_days,
+        prefix_levels=tuple(target.prefix_levels),
+    )
+
+
+def verify_clone_identity(git: AnnexGit, target: RepoTarget) -> None:
+    """H1：clone 之後確認這個 repo **就是**這個 target 的（不符就中止）。
+
+    clone 到錯的 repo 時，第 3、4 步（settle／sweep）用的是 Foundry 的 pin，
+    第 5 步卻拿到 Agora 的 repo，之後 `verify_clone` 拿 Agora 的 `ls-remote` 去比
+    Foundry 的 pin——最壞的情況是整條比對通過，Foundry 的內容被寫進 Agora 並 push。
+    這裡在比對之前就先確認身分：
+    - `remote.origin.url` 必須等於 `target.repo_url`；
+    - annex special remote 的 uuid 必須等於 `target.repo_uuid`。
+    """
+    for op in ("origin_url", "remote_uuid"):
+        if not hasattr(git, op):
+            raise AbortRun(
+                "annex.git.clone", "unsupported_git",
+                f"AnnexGit 不支援 {op}()，無法確認 clone 到的是目標 repo；中止")
+    actual_url = git.origin_url()
+    if actual_url != target.repo_url:
+        raise MismatchError(
+            f"clone 到的 repo 不是 {target.element}：remote.origin.url "
+            f"({actual_url}) 與設定的 repo_url ({target.repo_url}) 不符")
+    actual_uuid = git.remote_uuid("origin")
+    if actual_uuid != target.repo_uuid:
+        raise MismatchError(
+            f"clone 到的 annex 遠端不是 {target.element}：remote uuid "
+            f"({actual_uuid}) 與設定的 repo_uuid ({target.repo_uuid}) 不符")
 
 
 @dataclass
@@ -651,6 +807,11 @@ class RepoRunResult:
     applied_accepted: list[Decision]
     store: Any
     state: PinState | None = None
+    #: 這一輪**完整走完**（可以安全清收件匣）。H3／M2：任何一步中止時為 False，
+    #: 第 14 步就要保留這個 repo 的收件匣項目。
+    complete: bool = True
+    #: 這一筆拒收已經進入過某個已發佈的世代（H4）。只有這���的拒收才可以刪。
+    published_rejections: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -667,6 +828,9 @@ class PipelineContext:
     content_cache: dict[Any, Any]
     step: str = "pipeline"
     prefix: str = ""  #: 非 agora 的 repo 在計數／耗時的鍵前加前綴，避免互相覆蓋
+    #: H2：item_key → 通過驗章的候選（`None` = 驗章沒過或形狀不完整）。
+    #: 分派與「要不要 clone Foundry」都只看它，不再看未驗章的 sidecar。
+    verified: dict[str, VerifiedSidecar | None] = field(default_factory=dict)
 
     def bump(self, key: str, value: int) -> None:
         name = f"{self.prefix}{key}" if self.prefix else key
@@ -680,32 +844,56 @@ class PipelineContext:
         name = f"{self.prefix}{field}" if self.prefix else field
         setattr(self.report, name, value)
 
-    def items_for(self, target: RepoTarget) -> list[Any]:
-        """這個 repo 該評估哪些收件匣項目（依型態分派）。"""
+    def field_name(self, field: str) -> str:
+        """這個 pipeline 的計數／欄位在 RunReport 裡叫什麼（加不加上 repo 前綴）。"""
+        return f"{self.prefix}{field}" if self.prefix else field
+
+    # ------------------------------------------------------------------
+    # H2／M3：先驗章，再依「通過驗章的候選」的型態分派
+    # ------------------------------------------------------------------
+    def verify_all(self) -> None:
+        """對每一個收件匣項目驗章一次，結果放進 `self.verified`。
+
+        只做一次：兩個 pipeline 都會用到（Foundry 的項目在 Agora 那邊是 SKIP）。
+        這一步**不寫任何真本**，所以驗章失敗的項目照舊由 evaluate 記帳。
+        """
+        for item in self.scan.items:
+            if item.item_key in self.verified:
+                continue
+            verified, _code = verify_item_sidecar(
+                item, drive=self.deps.drive, registry=self.deps.registry)
+            self.verified[item.item_key] = verified
+
+    def verified_type(self, item: Any) -> str:
+        """這個項目**通過驗章**的型態（沒有通過就是空字串）。"""
+        verified = self.verified.get(item.item_key)
+        return verified.item_type if verified is not None else ""
+
+    def has_verified_type(self, wanted: str) -> bool:
+        return any(self.verified_type(i) == wanted for i in self.scan.items)
+
+    def items_for(self, target: RepoTarget, *, others_configured: bool) -> list[Any]:
+        """這個 repo 該評估哪些收件匣項目（依**驗章通過的**型態分派）。
+
+        `others_configured`：這一輪有沒有其他 repo 會接手（Foundry 有設定時，
+        artifact 就不歸 Agora，否則歸 Agora 讓它回 REJECT(foundry_not_enabled)，
+        寫入者才看得到原因）。
+        """
+        allowed = target.allowed_types_for(others_configured=others_configured)
         out = []
         for item in self.scan.items:
-            item_type = ""
-            for sc in item.sidecars or ():
-                if sc.name.endswith(".sidecar.json"):
-                    item_type = _item_type_of(sc, self.deps.drive)
-                    break
-            if target.element == "foundry":
-                if item_type == "artifact":
-                    out.append(item)
-            elif item_type != "artifact":
-                out.append(item)
+            item_type = self.verified_type(item)
+            if item_type and item_type not in allowed:
+                # 驗章通過、但型態屬於**另一個** pipeline → 這裡不碰它
+                # （H2：不進清冊、不寫拒收、不影響收件匣的刪除判斷）
+                self.report.counts[
+                    f"{self.prefix}skipped_wrong_pipeline"] = self.report.counts.get(
+                        f"{self.prefix}skipped_wrong_pipeline", 0) + 1
+                continue
+            # item_type == "" = 沒有任何候選通過驗章 → 交給 Agora 照常評估，
+            # 由 evaluate 記帳（bad_signature／orphan／unauthorized…）。
+            out.append(item)
         return out
-
-
-def _item_type_of(sidecar_file: Any, drive: DriveClient) -> str:
-    """讀 sidecar 的 metadata.type（只為分派；壞掉就當未知，交給 evaluate 處理）。"""
-    try:
-        data = json.loads(
-            drive.download_bytes(sidecar_file.id, max_bytes=1 << 20).decode("utf-8")
-        )
-        return str((data.get("metadata") or {}).get("type") or "")
-    except Exception:
-        return ""
 
 
 def eval_store_for_ledger(store: Any, target: RepoTarget) -> Any:
@@ -754,11 +942,16 @@ def _run_repo_pipeline(
     target: RepoTarget,
     *,
     agora_store: Any = None,
+    others_configured: bool = False,
 ) -> RepoRunResult:
     """第 3〜13 步：對單一真本跑一輪（settle → sweep → clone → apply → push → 轉正 → 發佈）。
 
     多 repo 時依序呼叫：Agora 先（Foundry 的 `produced_by_session_id` 檢查要讀 Agora
-    的工作樹），Foundry 後。收件匣是共用的，依型態分派（見 `PipelineContext.items_for`）。
+    的工作樹），Foundry 後。收件匣是共用的，依**驗章通過的**型態分派（見
+    `PipelineContext.items_for`；H2：未驗章的 sidecar 不再決定歸屬）。
+
+    `others_configured`：這一輪有沒有其他 repo 會接手（決定 artifact 是不是也
+    歸這裡，見 `items_for`）。
     """
     rcfg = target  # 欄位名稱與 CommitterConfig 相同，直接用
     work_temp = ctx.base_temp / f"work_{target.element}"
@@ -788,7 +981,22 @@ def _run_repo_pipeline(
         subfolders=subfolders,
     )
 
-    state, pending = deps.pins.load(rcfg.repo)
+    # M2（review-25a48a9）：這個 repo 的釘選值還沒初始化 → 整個 repo 視為
+    # 「沒有設定」，整輪以 `repo_not_enabled` 結束。**不要**讓 `pins.load` 的
+    # ReadError 變成整輪中止：只要收件匣裡有 artifact，Agora 已經 promote 的
+    # 內容就永遠不會被清理，Agora 會被 Foundry 拖住（每一輪都這樣）。
+    try:
+        state, pending = deps.pins.load(rcfg.repo)
+    except AiStorageError as e:
+        if target.element != "agora":
+            ctx.step = "integrity.settle"
+            ctx.set_field("repo_not_enabled", target.element)
+            report.aborted_at = f"{target.prefix}integrity.settle"
+            report.code = "repo_not_enabled"
+            return RepoRunResult(
+                target=target, decisions=[], applied_accepted=[], store=None,
+                state=None, complete=False)
+        raise
     settle_outcome, settled_state = settle(
         state,
         pending,
@@ -878,7 +1086,11 @@ def _run_repo_pipeline(
     # ---------------------------------------------------------
     ctx.step = "annex.git.clone"
     t0 = time.monotonic()
-    git = deps.git_factory(git_dir)
+    # H1：URL 與 annex 規則都從 target 來（舊簽名只給 dest，Foundry 會 clone 到 Agora）
+    git = deps.git_factory(git_dir, rcfg)
+    # H1：clone 之後先確認身分，再做任何比對（clone 到錯的 repo 時，後面的
+    # verify_clone 會拿錯的 ls-remote 去比對，最壞的情況是整條通過）。
+    verify_clone_identity(git, rcfg)
     # 覆蓋率檢查：clone 出來的遠端必須至少涵蓋釘選值記錄的每一個 key。
     # 之前這裡沒有傳 expected_annex_keys，verify_annex_coverage 拿到的是空集合，
     # 檢查形同虛設（review-g7-e2e A-M1）。
@@ -888,19 +1100,21 @@ def _run_repo_pipeline(
         drive=deps.drive,
         prefix_folder_id=rcfg.prefix_folder_id,
     )
-    # H1（review-b1039a8）：第 5 步的覆蓋率要比對**遠端實況**。
-    # 原本傳 `expected_annex_keys=state.annex_keys` 進 verify_clone，而它內部是
-    # `verify_annex_coverage(state.annex_keys, expected)`——拿同一個集合跟自己比，
-    # 恆真。這裡改成直接檢查：遠端的 key 集合（clone 下來的 git-annex location log）
-    # 必須涵蓋釘選值記錄的每一個 key；少一個就代表 pin 與遠端不一致，中止。
-    if hasattr(git, "annex_keys_in"):
-        remote_keys = git.annex_keys_in(state.repo_uuid)
-        missing_remote = set(state.annex_keys) - set(remote_keys)
-        if missing_remote:
-            raise MismatchError(
-                "clone 後遠端 annex key 集合缺少釘選值記載之物件: "
-                f"{sorted(missing_remote)}（pin 與 Drive 的 location log 不一致）"
-            )
+    # 覆蓋率檢查（e2e 修正）：釘選值記載的每一個 annex 物件都必須**在 Drive 上**
+    # （名稱、checksum、size 都對得上）。
+    #
+    # 原本這裡比對的是 `git annex find --in=<uuid>`——那是**本機 location log**，
+    # 也就是提交流程自己寫的帳本。e2e 實測（impl3／9.1）：第一次提交成功之後
+    # **每一輪**都在這裡 MismatchError 中止（「缺少釘選值記載之物件
+    # SHA256E-s19984--…」，18 次），而且不會自己好——釘選值與 Drive 其實是對的，
+    # 錯在拿自己寫的帳本去對帳，而且 consolidate（annex.max-git-bundles）會讓
+    # 那份帳本變動。改問 Drive 之後，這個檢查既更有權威（少了就是真的不見），
+    # 也不會被帳本的形式擺平。
+    # location log 仍然拿來算 pending（第 9 步要記「push 之後遠端會有什麼」），
+    # 只是不再拿來當這一輪的門檻。
+    verify_pin_keys_on_drive(
+        deps.drive, rcfg.prefix_folder_id, state, repo_listing=repo_listing)
+    ctx.bump("annex_keys_checked", len(state.annex_keys))
     ctx.time("annex.git.clone", int((time.monotonic() - t0) * 1000))
 
     # ---------------------------------------------------------
@@ -958,7 +1172,7 @@ def _run_repo_pipeline(
     # evaluate 對 Foundry 只需要「既有紀錄」的讀取介面
     eval_store = _FoundryEvaluateStore(store) if target.element != "agora" else store
     decisions: list[Decision] = []
-    for item in ctx.items_for(target):
+    for item in ctx.items_for(target, others_configured=others_configured):
         dec = evaluate(
             item,
             drive=deps.drive,
@@ -970,6 +1184,9 @@ def _run_repo_pipeline(
             max_raw=rcfg.max_raw_size,
             foundry_enabled=target.element == "foundry",
             foundry_store=foundry_store,
+            # H2：分派已經用驗章後的型態擋過一次；這裡再擋一次是防呆
+            allowed_types=rcfg.allowed_types_for(others_configured=others_configured),
+            preverified=ctx.verified.get(item.item_key),
         )
         decisions.append(dec)
 
@@ -983,25 +1200,36 @@ def _run_repo_pipeline(
     for dec in sorted_accepted:
         item_type = dec.record_metadata.get("type") if dec.record_metadata else ""
         if item_type == "artifact":
-            if foundry_store is None:
-                # 沒有 Foundry 設定時 evaluate 已 REJECT(foundry_not_enabled)，走不到這裡
-                continue
+            if target.element != "foundry":
+                # H2：Agora 的 pipeline 不該拿到 artifact。分派已經用驗章後的型態
+                # 擋過，這裡是第二道防呆——寧可整輪中止，也不要把 artifact 寫進
+                # Agora 的 repo（FoundryStore 沒有 AgoraStore 的方法時，例外會被
+                # 誤讀成「暫時的問題」，於是每一輪都重複，變成 DoS）。
+                raise MismatchError(
+                    f"Agora 的 pipeline 收到了 artifact 項目 {dec.item.item_key}："
+                    "分派（依驗章後的型態）不該把它送來這裡")
             # 產生者檢查要讀 Agora 的工作樹，所以必須傳 agora_store
             res = apply_artifact(foundry_store, dec, agora_store, deps.clock)
-        elif item_type == "session":
-            source = dec.sidecar["session"]["source"] if dec.sidecar else "opencode"
-            conv = deps.converters.get(source) or get_converter(source)
-            res = apply_session(store, dec, conv, deps.clock)
-        elif item_type == "handoff":
-            # 依目標 Session 的 source 選轉換器（review-g3e L／g3g M4）：
-            # 目標是 Claude Code 的 Session 時不能拿 opencode 的轉換器去驗接續點。
-            target_source = _target_source(dec)
-            conv = deps.converters.get(target_source) or get_converter(target_source)
-            res = apply_handoff(store, dec, conv, deps.clock)
-        elif item_type == "claim":
-            res = apply_claim(store, dec, deps.clock)
-        elif item_type == "reference":
-            res = apply_reference(store, dec, deps.clock)
+        elif item_type in ("session", "handoff", "claim", "reference"):
+            if target.element == "foundry":
+                # H2：Foundry 的 pipeline 只收 artifact
+                raise MismatchError(
+                    f"Foundry 的 pipeline 收到了 {item_type} 項目 "
+                    f"{dec.item.item_key}：分派不該把它送來這裡")
+            if item_type == "session":
+                source = dec.sidecar["session"]["source"] if dec.sidecar else "opencode"
+                conv = deps.converters.get(source) or get_converter(source)
+                res = apply_session(store, dec, conv, deps.clock)
+            elif item_type == "handoff":
+                # 依目標 Session 的 source 選轉換器（review-g3e L／g3g M4）：
+                # 目標是 Claude Code 的 Session 時不能拿 opencode 的轉換器去驗接續點。
+                target_source = _target_source(dec)
+                conv = deps.converters.get(target_source) or get_converter(target_source)
+                res = apply_handoff(store, dec, conv, deps.clock)
+            elif item_type == "claim":
+                res = apply_claim(store, dec, deps.clock)
+            else:
+                res = apply_reference(store, dec, deps.clock)
         else:
             # 改寫：evaluate 在驗章之後、下載 raw 之前就 REJECT(rewrite_disabled)，
             # 走不到這裡（期 1 不提供改寫，見 PM 決定）。留在這裡只是不讓
@@ -1089,6 +1317,10 @@ def _run_repo_pipeline(
     # ---------------------------------------------------------
     ctx.step = "pins.write_pending"
     t0 = time.monotonic()
+    # H3：寫 pending **之前**重查一次。管理者可能在我們 clone 之後才上鎖
+    # （第 1b 步那時還沒有旗標）。寫了 pending 再被擋下來，下一輪的 settle 會
+    # 碰到「遠端既不等於 pending 也不等於正式值」，整個 repo 卡住。
+    _assert_no_maintenance(rcfg.repo, deps, report, "pins.write_pending")
     # refs 與 annex key 集合取自 AnnexGit 自己的公開方法；缺少必要分支
     # 由 SubprocessAnnexGit.local_refs() raise，不在這裡吞掉例外。
     local_refs = git.local_refs()
@@ -1129,6 +1361,9 @@ def _run_repo_pipeline(
     push_started_at = deps.clock.now()
 
     if has_git_changes:
+        # H3：push **之前**重查一次。管理操作最怕的正是這一步（抹除是
+        # 「刪遠端 → 重推」）；原本的重查在 push 之後，撞上了也已經推出去。
+        _assert_no_maintenance(rcfg.repo, deps, report, "git.push")
         precheck(
             deps.drive,
             rcfg.prefix_folder_id,
@@ -1151,10 +1386,11 @@ def _run_repo_pipeline(
         # H1（review-b1039a8）：覆蓋率檢查要比對**遠端實況**，不是自己跟自己比。
         #   - 必要 key＝這一輪新寫進去的 key（`store.annex_keys()` 減掉這一輪之前的），
         #     全部來自 `git annex lookupkey`；
-        #   - 比較對象＝push 之後**重新**向遠端查一次 `git annex find --in=<uuid>`，
-        #     因為 location log 是在 push 之後才進得去（實測）。
-        # 這樣「物件沒有真的上到 Drive」會在第 10 步就被擋住，而不是等到某天
-        # 交接單驗證快照時才爆。
+        #   - 比較對象＝**本機 clone 下來的 git-annex location log**
+        #     （`git annex find --in=<uuid>`，clone 已有、push 會更新它）。
+        # M1（review-25a48a9）：location log 是提交流程自己寫的，Drive 上的物件
+        #   真的不在時它仍會宣稱在。所以第 11 步**另外**對新 key 做一次 Drive 實況
+        #   檢查（列舉前綴：name == key、sha256Checksum == key 內嵌雜湊、size 相符）。
         new_keys = store.annex_keys() - keys_before
         remote_keys_after_push = (
             git.annex_keys_in(state.repo_uuid)
@@ -1172,6 +1408,7 @@ def _run_repo_pipeline(
             expected_annex_keys=new_keys,
             pushed_annex_keys=remote_keys_after_push,
         )
+        verify_new_keys_on_drive(deps.drive, rcfg.prefix_folder_id, new_keys)
 
     ctx.time("verify.verify_after_push", int((time.monotonic() - t0) * 1000))
 
@@ -1181,13 +1418,12 @@ def _run_repo_pipeline(
     ctx.step = "pins.promote"
     t0 = time.monotonic()
 
-    # H2（review-b1039a8）：管理者是在這一輪跑到一半才上鎖的情況，也要擋。
-    # 在寫入 pin 之前再查一次：有旗標就中止（pending 留著，下一輪由 settle 結算），
-    # 絕對不要在管理操作進行中 promote。
-    if _check_maintenance(rcfg, deps, report):
-        return RepoRunResult(
-            target=target, decisions=decisions, applied_accepted=applied_accepted, store=store
-        )
+    # H3（review-25a48a9）：管理者是在這一輪跑到一半才上鎖的情況，也要擋。
+    # 在寫入 pin 之前再查一次：命中就讓**整輪**停下來（`AbortRun` 會讓 `run()`
+    # 不處理下一個 repo、也不執行第 14 步）。原本這裡只是 `return`，於是已經
+    # push 但還沒 promote 的項目會被從收件匣刪掉——交接單、認領是一次性的，
+    # 刪了就永久遺失，而且這一輪還被回報成成功。
+    _assert_no_maintenance(rcfg.repo, deps, report, "pins.promote")
 
     if has_git_changes and not dry_run and push_verification is not None:
         new_state = PinState(
@@ -1236,8 +1472,14 @@ def _run_repo_pipeline(
     # （第 14 步）。讀取視圖是衍生物，下一輪補發即可（4.5 prescan）。
     ctx.step = "publisher.publish"
     t0 = time.monotonic()
+    published_rejections: frozenset[str] = frozenset()
+    pub_rep: Any = None
     try:
         if target.element == "foundry":
+            # H5 是 impl2 的工作：Foundry 的讀取視圖發佈要換成與 Agora 同一套的
+            # publisher（`element="foundry"`）。接線時把 `_publish_foundry(...)`
+            # 換成 `pub.publish(...)`，並且讓它回報 `published_item_keys`
+            # （H4：拒收要「已經進入某個已發佈世代」才刪得掉）。
             ctx.set_field(
                 "readview_publish",
                 _publish_foundry(target, deps, foundry_store, state, work_temp, dry_run),
@@ -1254,6 +1496,11 @@ def _run_repo_pipeline(
                     dry_run=dry_run,
                 )
                 ctx.set_field("readview_publish", getattr(pub_rep, "status", "published"))
+        published_rejections = _published_rejection_keys(
+            store, decisions,
+            getattr(report, ctx.field_name("readview_publish"), None),
+            pub_rep,
+            dry_run=dry_run)
     except Exception as e:  # noqa: BLE001 - 發佈失敗不得影響真本與收件匣
         ctx.set_field("readview_publish", "publish_failed")
         ctx.set_field("publish_error", type(e).__name__)
@@ -1266,7 +1513,70 @@ def _run_repo_pipeline(
         applied_accepted=applied_accepted,
         store=store,
         state=state,
+        complete=True,
+        published_rejections=published_rejections,
     )
+
+
+def _published_rejection_keys(
+    store: Any,
+    decisions: list[Decision],
+    publish_status: Any,
+    pub_rep: Any,
+    *,
+    dry_run: bool,
+) -> frozenset[str]:
+    """H4：這一輪（或既有世代）已經包含在讀取視圖裡的拒收 item_key。
+
+    第 14 步刪除拒收項目的條件不是「這一輪有沒有發佈」，而是「這一筆拒收已經進入過
+    某個已發佈的世代」：
+
+    - `published`／`planned`：這一輪的 `run_rejections` 全部進了這個世代；
+    - `skipped`：上一個世代就已經有這一輪完全相同的拒收集合（發佈器的冪等判斷
+      正是比對這一點），所以同樣算「已發佈」；
+    - 沒有發佈器／發佈失敗：一律不算（`empty`），寧可留著。
+
+    同時把世代號寫進真本 `_committer/rejections/<key>.json` 的
+    `published_generation`（稽核用；這一步在 push 之後，所以不會再 commit——
+    真正用來刪除的依據是這裡回傳的集合）。
+    """
+    status = str(publish_status or "")
+    keys_attr = getattr(pub_rep, "published_item_keys", None)
+    if keys_attr is None:
+        # 沒有回報 item_key 的發佈器（Foundry 的舊路徑 `_publish_foundry`、以及
+        # 第三方發佈器）：退回「這一輪的拒收都算已發佈」。impl2 接上 Foundry 的
+        # publisher 之後，它要像 Agora 一樣回 `published_item_keys`，否則 Foundry
+        # 的拒收會永遠留著（H4 的原問題換到 Foundry 而已）。
+        if not (status == "published" or status.startswith("published")
+                or status == "planned"):
+            return frozenset()
+        keys = {dec.item.item_key for dec in decisions if dec.kind == DecisionKind.REJECT}
+    else:
+        keys = set(keys_attr)
+    if not keys or dry_run:
+        return frozenset()
+    generation = getattr(pub_rep, "generation", None)
+    if generation is not None:
+        mark_rejections_published(store, sorted(keys), int(generation))
+    return frozenset(keys)
+
+
+def mark_rejections_published(store: Any, item_keys: list[str], generation: int) -> None:
+    """把 `published_generation` 寫進真本的拒收紀錄（只影響真本副本，不 commit）。"""
+    for item_key in item_keys:
+        rel = layout.rejection_path(item_key)
+        path = store.worktree / rel
+        if not path.is_file():
+            continue  # 驗章前的拒收本來就不寫進真本
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("published_generation") == generation:
+            continue
+        data["published_generation"] = generation
+        store.put_json(rel, data)
 
 
 def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport:
@@ -1313,16 +1623,19 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             report.durations_ms["guard"] = int((time.monotonic() - t0) * 1000)
 
             # ---------------------------------------------------------
-            # 第 1b 步：維護旗標（H4／PM 決定 7）
+            # 第 1b 步：維護旗標（H3／H4／PM 決定 7）
             # ---------------------------------------------------------
             # 管理操作（抹除、回滾）進行中時，提交流程必須**整輪不做任何事**：
             # 不清扫、不 push、不發佈、不刪收件匣。沒有這一步，住民重新啟用
             # workflow 觸發就會和管理操作撞在一起。
             # 旗標內容損毀 → 當成維護中（fail-closed）並中止，不猜。
+            # H3：**每一個** target 的旗標都要查（管理���作可能只對 Foundry 上鎖；
+            # 只查 Agora 的話，Foundry 的 settle／sweep／clone／push 全部照跑）。
             current_step = "maintenance"
-            if _check_maintenance(cfg, deps, report):
-                report.counts["scanned_items"] = 0
-                return report
+            for repo_name in _maintenance_repo_names(cfg):
+                if _check_maintenance(_RepoNameShim(repo_name), deps, report):  # type: ignore[arg-type]
+                    report.counts["scanned_items"] = 0
+                    return report
 
             # ---------------------------------------------------------
             # 第 2 步：intake.scan 掃描收件匣
@@ -1341,24 +1654,6 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
                 print(report.format_log())
                 return report
 
-            # ---------------------------------------------------------
-            # 第 3〜13 步：逐 repo 跑 pipeline（Agora → Foundry）
-            # ---------------------------------------------------------
-            # PM 決定 9：只有收件匣真的有 artifact 時才 clone Foundry，平常成本不變。
-            targets = [RepoTarget.from_config(cfg)]
-            if cfg.repos:
-                has_artifact = any(
-                    _item_type_of(sc, deps.drive) == "artifact"
-                    for item in scan.items
-                    for sc in (item.sidecars or ())
-                    if sc.name.endswith(".sidecar.json")
-                )
-                if has_artifact:
-                    for rc in cfg.repos:
-                        targets.append(RepoTarget.from_repo_config(cfg, rc))
-                else:
-                    report.foundry_skipped = "no_artifacts"
-
             ctx = PipelineContext(  # type: ignore[assignment]
                 cfg=cfg,
                 deps=deps,
@@ -1370,50 +1665,109 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
                 content_cache=content_cache,
             )
 
+            # H2／M3：分派之前先驗章。分派（哪個 repo 收哪些項目）與「要不要
+            # clone Foundry」都只看**通過驗章的候選**的型態——原本看的是
+            # 「第一個 sidecar 候選」，住民放一個排在前面的垃圾 sidecar 就能
+            # 把合法的 session 導到 Foundry（或反過來被永久燒掉）。
+            current_step = "intake.verify"
+            t0 = time.monotonic()
+            ctx.verify_all()
+            report.durations_ms["intake.verify"] = int((time.monotonic() - t0) * 1000)
+
+            # ---------------------------------------------------------
+            # 第 3〜13 步：逐 repo 跑 pipeline（Agora → Foundry）
+            # ---------------------------------------------------------
+            # PM 決定 9：只有收件匣真的有**通過驗章的** artifact 時才 clone
+            # Foundry，平常成本不變。
+            # M2（review-25a48a9）：設定檔有列 Foundry、但它的釘選值還沒初始化
+            # → **整個 Foundry 視為沒有設定**，這一輪不跑它的 pipeline。
+            # 這樣 artifact 會落到 Agora 那一邊，被 evaluate 回
+            # REJECT(foundry_not_enabled)（寫入者看得到原因，24 小時後清掉）；
+            # 否則 `pins.load` 的 ReadError 會讓整輪中止，Agora 已經 promote 的
+            # 內容永遠不會被清理——只要收件匣裡有 artifact，就每一輪都這樣。
+            targets = [RepoTarget.from_config(cfg)]
+            if cfg.repos:
+                if ctx.has_verified_type("artifact"):
+                    for rc in cfg.repos:
+                        try:
+                            deps.pins.load(rc.name)
+                        except AiStorageError:
+                            report.repo_not_enabled = rc.name
+                            report.foundry_skipped = "repo_not_enabled"
+                            continue
+                        targets.append(RepoTarget.from_repo_config(cfg, rc))
+                else:
+                    report.foundry_skipped = "no_artifacts"
+
             results: list[RepoRunResult] = []
             agora_store = None
             for target in targets:
                 ctx.prefix = "" if target.element == "agora" else f"{target.element}."
-                result = _run_repo_pipeline(
-                    ctx, target, agora_store=agora_store
-                )
+                try:
+                    result = _run_repo_pipeline(
+                        ctx, target, agora_store=agora_store,
+                        others_configured=len(targets) > 1,
+                    )
+                except AbortRun:
+                    # H3：維護中 → **整輪**停止：不處理下一個 repo，也不執行第 14 步
+                    # （第 14 步會刪掉已 push 但未 promote 的項目，而交接單、
+                    # 認領是一次性的，刪了就永久遺失）。
+                    raise
+                except Exception as e:  # noqa: BLE001 - M2：逐 repo 隔離
+                    # 這個 repo 失敗（沒有釘選值、clone 失敗、H1 的 URL 錯誤…）
+                    # → 記下步驟與代碼，**不**連帶讓已經走完的 repo 白跑：
+                    # 第 14 步照常清理那些走完的 repo 的項目。
+                    report.aborted_at = f"{ctx.prefix}{ctx.step}"
+                    report.code = type(e).__name__
+                    _dump_traceback(run_id, report.aborted_at, e)
+                    current_step = ctx.step
+                    break
                 results.append(result)
                 if target.element == "agora":
                     agora_store = result.store
                 current_step = ctx.step
 
-            # 第 14 步要用的 decisions／applied 是「所有 repo 的聯集」
-            decisions = [d for r in results for d in r.decisions]
-            applied_accepted = [d for r in results for d in r.applied_accepted]
-
             # ---------------------------------------------------------
             # 第 14 步：clean_inbox 刪除收件匣檔案
             # ---------------------------------------------------------
+            # M2／H3：第 14 步以 **repo 為單位**——走完的 repo 照常清理，
+            # 沒走完的（維護中、未設定、任何一步失敗）整組保留。留下來下一輪
+            # 還有機會，刪掉就可能永久遺失（交接單、認領是一次性的）。
             current_step = "clean_inbox"
             if ctx is not None:
                 ctx.step = "clean_inbox"
             t0 = time.monotonic()
-            # M5：這一輪的讀取視圖有沒有真的發佈？只有真的發佈了，拒收原因才會
-            # 進入某個世代，刪掉才安全（見下面 REJECT 的分支）。
-            publish_succeeded = report.readview_publish == "published"
+            # M2：只清理「完整走完」的 repo 的項目。失敗的 repo 保留（fail-closed：
+            # 留下來下一輪還有機會，刪掉就永久遺失——交接單、認領是一次性的）。
+            complete_repos = {r.target.repo for r in results if r.complete}
+            # H4：拒收能不能刪，看「這一筆已經進入過某個已發佈的世代」，
+            # 不是「這一輪有沒有發佈」。
+            published_rejections: dict[str, frozenset[str]] = {
+                r.target.repo: r.published_rejections for r in results
+            }
             deleted_inbox_count = 0
             failed_delete_count = 0
             inbox_folders = set(deps.registry.inbox_folders().keys())
             now_dt = deps.clock.now()
 
-            # 挑選符合刪除條件的決策項目
-            for dec in decisions:
+            # 挑選符合刪除條件的決策項目（M2／H3：repo 沒走完就整組保留）
+            for result, dec in ((r, d) for r in results for d in r.decisions):
+                if result.target.repo not in complete_repos:
+                    continue
+                published = published_rejections.get(result.target.repo, frozenset())
                 should_delete = False
-                if dec.kind == DecisionKind.ACCEPT and dec in applied_accepted:
+                if dec.kind == DecisionKind.ACCEPT and dec in result.applied_accepted:
                     should_delete = True
                 elif dec.kind == DecisionKind.ALREADY:
                     should_delete = True
                 elif dec.kind == DecisionKind.REJECT:
-                    # M5（review-b1039a8）：拒收原因要等「已經被發佈出去」才可以刪。
-                    # 這一輪的讀取視圖發佈失敗（publish_failed／skipped）時，拒收原因
-                    # 還沒有任何讀者看得到，這時刪掉等於讓寫入者永遠不知道為什麼被拒。
-                    # publish_fail 的輪次一律保留，等下一次真的發佈成功再刪。
-                    if publish_succeeded and dec.deletable_after is not None \
+                    # H4（review-25a48a9）：只有「已進入某個已發佈世代」的拒收可以刪。
+                    # 舊的判斷是「這一輪的發佈狀態是 published」，但被拒收的項目
+                    # 通常在它可以刪的那一輪（24 小時後）不會有新內容 →
+                    # publisher 回 skipped → 永遠不刪 → 收件匣永遠不是空的。
+                    # 這一筆還沒被任何讀者看得到時就刪掉，等於讓寫入者永遠不知道
+                    # 為什麼被拒。
+                    if dec.item.item_key in published and dec.deletable_after is not None \
                             and now_dt >= dec.deletable_after:
                         should_delete = True
 
@@ -1480,6 +1834,9 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
         except AbortRun as e:
             report.aborted_at = e.step
             report.code = e.code
+            if e.step == "maintenance" and e.code == "active":
+                # 報告要說得出「為什麼不動」（不論旗標是被誰 raise 出來的）
+                report.maintenance = report.maintenance or "active"
         except AiStorageError as e:
             step = _pipeline_step(current_step, ctx)
             report.aborted_at = step

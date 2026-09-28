@@ -15,6 +15,9 @@
 2. 開鎖：`AdminLock`（pin 的 `.pin/<repo>.maintenance` 旗標＋停用 workflow＋
    等 run 跑完＋預檢遠端 manifest 等於正式 pin）。
    `python -m aistorage.admin lock-status --pin-repo <url>` 查看旗標。
+   停用的是**設定檔 `committer_workflow` 指的那一個** workflow（預設
+   `.github/workflows/committer.yml`）；名字寫錯時 `gh workflow disable`
+   會直接失敗，所以不要在指令列上另外指定。
 3. 計畫：`erase` 預設 dry-run，只列各類別的檔案數與計畫雜湊，並在**計畫階段**
    就逐一確認每個檔案的 parent 屬於它自己的類別（真本前綴／讀取視圖／
    收件匣／隔離區）——不符就整個拒絕，不會刪到一半才失敗。記下 `--confirm` 值。
@@ -22,7 +25,10 @@
    canary 必填：一段只存在於要抹除內容裡的字串，後置條件靠它確認真的找不到了。
 5. 執行順序（`admin.remote.swap_remote`）：
    本機改寫（filter-repo／redact／annex drop／gc／remap／抹除紀錄 → **commit**）
-   → 依 file id 永久刪除遠端 → `git annex copy` ＋ `git push --force`
+   → 依 file id 永久刪除遠端 → **重讀遠端 manifest**（`recheck-remote`：確認
+   遠端沒有在管理操作期間被別人動過；有刪檔時主 manifest 已由本輪刪掉，
+   「不存在」是預期結果）
+   → `git annex copy` ＋ `git push --force`
    → ls-remote 與 manifest 驗證 → 以觀測到的遠端狀態重建正式 pin
    → `readview_rebuild_epoch` 加 1（下一輪完整重建讀取視圖）
    → 後置條件（Drive／bundle／git 歷史／git 物件／annex 物件掃描 canary）。
@@ -41,6 +47,9 @@
     `git annex copy --to=origin; git push --force origin main git-annex`，
     再 `python -m aistorage.admin swap-finish --repo-dir <clone> --force-push`；
   - 卡在 verify → 先確認遠端 bundle／manifest，再 swap-finish；
+  - 卡在 recheck-remote → 遠端在管理操作期間被動過（可能有另一輪提交流程或
+    另一個管理操作跑過）：先確認遠端現況與釘選值誰才對，必要時重建基準，
+    再 swap-finish；
   - 卡在 pin → 遠端已一致，只是 pin 舊了：
     `python -m aistorage.committer init-pin --confirm`，再 swap-finish。
 - 全部處理完才 `python -m aistorage.admin unlock --confirm`（沒有 `--confirm`

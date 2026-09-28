@@ -126,7 +126,7 @@ def _env(
     deps = Deps(
         drive=drive,
         pins=pins,
-        git_factory=lambda _p: fake_git,
+        git_factory=lambda _p, _target: fake_git,
         registry=registry,
         converters={"opencode": SimpleTestConverter()},
         publisher=publisher or NullPublisher(),
@@ -145,6 +145,8 @@ def _env(
         readview_folder_id=readview_folder_id,
         readview_manifest_file_id=readview_manifest_file_id,
     )
+    # H1（review-25a48a9）：假 git 報出自己的身分，verify_clone_identity 才會過
+    fake_git.repo_url = cfg.repo_url
     extra = {
         "drive": drive,
         "inbox_folder_id": inbox_folder_id,

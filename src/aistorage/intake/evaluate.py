@@ -62,6 +62,30 @@ class DecisionKind(Enum):
     REJECT = "reject"    # 拒收（錯誤格式、偽造簽章、重放衝突等）
     DEFER = "defer"      # 暫緩處理（如缺 sig 未滿 24 小時、artifact 尚未啟用 foundry）
     ALREADY = "already"  # 已經收過且內容相同（冪等跳過，收件匣檔案可刪除）
+    #: H2（review-25a48a9）：這個項目不屬於本 pipeline（型態是別的 repo 的）。
+    #: **不進清冊、不寫拒收、不進收件匣的刪除判斷**——由另一個 pipeline 處理。
+    SKIP = "skip"
+
+
+#: 通過驗章的候選，其 `metadata.type` 落在這裡面就歸這個 pipeline（Agora）。
+AGORA_ITEM_TYPES: frozenset[str] = frozenset(
+    {"session", "handoff", "claim", "reference", "rewrite"})
+#: 歸 Foundry 的型態。
+FOUNDRY_ITEM_TYPES: frozenset[str] = frozenset({"artifact"})
+
+
+@dataclass(frozen=True)
+class VerifiedSidecar:
+    """通過驗章＋授權的那一個候選（分派用；H2）。"""
+
+    sc_file: DriveFile
+    sig_file: DriveFile
+    sc_dict: dict[str, Any]
+    producer: str
+
+    @property
+    def item_type(self) -> str:
+        return str((self.sc_dict.get("metadata") or {}).get("type") or "")
 
 
 @dataclass(frozen=True)
@@ -200,6 +224,86 @@ def _earliest_created_at(item: InboxItem) -> str | None:
     return format_rfc3339(min(times), include_fraction=True)
 
 
+def verify_item_sidecar(
+    item: InboxItem,
+    *,
+    drive: DriveClient,
+    registry: Registry,
+) -> tuple[VerifiedSidecar | None, str]:
+    """只做「驗章＋授權」，回傳通過的那一個候選（H2 的分派依據）。
+
+    失敗時回傳 `(None, code)`；`code` 的可能值與 `evaluate` 的拒收代碼一致。
+    **不寫任何真本**（不記清冊、不寫拒收快取），所以可以安全地在決定分派之前呼叫。
+
+    為什麼要獨立出來（H2）：分派必須以**通過驗章的候選**的 `metadata.type` 為準。
+    原本的 `items_for` 讀「第一個 sidecar 候選」的 type，而那一步在驗章之前，
+    住民只要在同一個收件匣放一個排在前面的垃圾 sidecar（`type: artifact`）就能
+    把合法的 session 導到 Foundry（或反過來）。
+    """
+    folder_profile = registry.inbox_folders().get(item.inbox_folder_id)
+    if not folder_profile:
+        return None, "unauthorized"
+    if not item.sigs or not item.sidecars:
+        return None, "incomplete"
+
+    active_keys = registry.active_public_keys(folder_profile)
+    last_reject_code = "bad_signature"
+
+    for sc_file in item.sidecars:
+        try:
+            sc_bytes = drive.download_bytes(sc_file.id, max_bytes=1024 * 1024)
+        except TooLarge:
+            last_reject_code = "sidecar_too_large"
+            continue
+        # H1: 讀取錯誤（ReadError / NotFound）不補捉，直接拋出讓整輪中止
+
+        for sig_file in item.sigs:
+            try:
+                sig_bytes = drive.download_bytes(sig_file.id, max_bytes=4 * 1024)
+            except TooLarge:
+                last_reject_code = "sig_too_large"
+                continue
+            # H1: 讀取錯誤（ReadError / NotFound）不補捉，直接拋出讓整輪中止
+
+            # L: 簽章檔使用 strict_json 解析，拒絕重複鍵名
+            try:
+                sig_dict = strict_json(sig_bytes)
+            except Exception:
+                last_reject_code = "bad_signature"
+                continue
+
+            verified_key_id = verify_sidecar_bytes(sc_bytes, sig_dict, active_keys)
+            if verified_key_id is None:
+                last_reject_code = "bad_signature"
+                continue
+
+            try:
+                sc_dict = strict_json(sc_bytes)
+            except Exception:
+                last_reject_code = "invalid_format"
+                continue
+
+            errs = validate_sidecar(sc_dict, expected_item_key=item.item_key)
+            if errs:
+                last_reject_code = "invalid_format"
+                continue
+
+            if sc_dict.get("profile") != folder_profile:
+                last_reject_code = "unauthorized"
+                continue
+
+            producer, why = registry.authorize(sc_dict, verified_key_id)
+            if producer is None:
+                last_reject_code = "unauthorized"
+                continue
+
+            return VerifiedSidecar(
+                sc_file=sc_file, sig_file=sig_file, sc_dict=sc_dict,
+                producer=producer), "ok"
+
+    return None, last_reject_code
+
+
 def evaluate(
     item: InboxItem,
     *,
@@ -212,6 +316,8 @@ def evaluate(
     max_raw: int = DEFAULT_MAX_RAW_SIZE,
     foundry_enabled: bool = False,
     foundry_store: Any = None,
+    allowed_types: frozenset[str] | None = None,
+    preverified: VerifiedSidecar | None = None,
 ) -> Decision:
     """評估單一收件匣項目。
 
@@ -224,6 +330,11 @@ def evaluate(
     6. Raw metadata 比對（size、sha256Checksum）
     7. Raw 串流下載並經由 check_raw 驗證
     8. 接受 ACCEPT
+
+    H2（review-25a48a9）：`allowed_types` 給定時，型態不在其中的項目回
+    `SKIP(wrong_pipeline)`（不進清冊、不寫拒收）——分派依的是**通過驗章的**
+    候選，這裡是第二道防呆。`preverified` 是分派那一步已驗過的結果，
+    傳進來就不會重複下載。
 
     M6 備註：此函式僅比對當前真本已提交之狀態。同輪內多項目套用時，apply_*
     須針對同一 Session 或同一對 reference link 再次確認單調性。
@@ -360,78 +471,16 @@ def evaluate(
         return reject_decision("orphan", authenticated=False)
 
     # 1. 驗章＋授權（M1: 逐一嘗試 sidecars × sigs 之所有組合）
-    folder_profile = registry.inbox_folders().get(item.inbox_folder_id)
-    if not folder_profile:
-        return reject_decision("unauthorized", authenticated=False)
-
-    active_keys = registry.active_public_keys(folder_profile)
-
-    selected_sc_file: DriveFile | None = None
-    selected_sig_file: DriveFile | None = None
-    selected_sc_dict: dict[str, Any] | None = None
-    selected_producer: str | None = None
-    last_reject_code = "bad_signature"
-
-    for sc_file in item.sidecars:
-        try:
-            sc_bytes = drive.download_bytes(sc_file.id, max_bytes=1024 * 1024)
-        except TooLarge:
-            last_reject_code = "sidecar_too_large"
-            continue
-        # H1: 讀取錯誤（ReadError / NotFound）不補捉，直接拋出讓整輪中止
-
-        for sig_file in item.sigs:
-            try:
-                sig_bytes = drive.download_bytes(sig_file.id, max_bytes=4 * 1024)
-            except TooLarge:
-                last_reject_code = "sig_too_large"
-                continue
-            # H1: 讀取錯誤（ReadError / NotFound）不補捉，直接拋出讓整輪中止
-
-            # L: 簽章檔使用 strict_json 解析，拒絕重複鍵名
-            try:
-                sig_dict = strict_json(sig_bytes)
-            except Exception:
-                last_reject_code = "bad_signature"
-                continue
-
-            verified_key_id = verify_sidecar_bytes(sc_bytes, sig_dict, active_keys)
-            if verified_key_id is None:
-                last_reject_code = "bad_signature"
-                continue
-
-            try:
-                sc_dict = strict_json(sc_bytes)
-            except Exception:
-                last_reject_code = "invalid_format"
-                continue
-
-            errs = validate_sidecar(sc_dict, expected_item_key=item.item_key)
-            if errs:
-                last_reject_code = "invalid_format"
-                continue
-
-            if sc_dict.get("profile") != folder_profile:
-                last_reject_code = "unauthorized"
-                continue
-
-            producer, why = registry.authorize(sc_dict, verified_key_id)
-            if producer is None:
-                last_reject_code = "unauthorized"
-                continue
-
-            # 成功驗章與授權
-            selected_sc_file = sc_file
-            selected_sig_file = sig_file
-            selected_sc_dict = sc_dict
-            selected_producer = producer
-            break
-
-        if selected_sc_file is not None:
-            break
-
-    if selected_sc_file is None or selected_sc_dict is None or selected_producer is None:
-        return reject_decision(last_reject_code, authenticated=False)
+    # H2：`preverified` 是分派那一步已經驗過的結果（同一輪內不做兩次下載）。
+    if preverified is not None:
+        selected = preverified
+    else:
+        selected, verify_code = verify_item_sidecar(item, drive=drive, registry=registry)
+        if selected is None:
+            return reject_decision(verify_code, authenticated=False)
+    selected_sc_file = selected.sc_file
+    selected_sc_dict = selected.sc_dict
+    selected_producer = selected.producer
 
     # 2. 清冊與防重放檢核
     if is_item_key_too_old(item.item_key, now_dt):
@@ -456,6 +505,18 @@ def evaluate(
 
     metadata = selected_sc_dict.get("metadata", {})
     item_type = metadata.get("type")
+
+    # H2：型態不屬於這個 pipeline → SKIP。**不寫清冊、不寫拒收快取**，
+    # 由另一個 pipeline 處理。用戶的合法項目不會因為分派錯誤被永久燒掉。
+    if allowed_types is not None and str(item_type or "") not in allowed_types:
+        return Decision(
+            kind=DecisionKind.SKIP,
+            item=item,
+            code="wrong_pipeline",
+            authenticated=True,
+            rejected_at=now_rfc3339,
+            deletable_after=None,
+        )
 
     # M4: 期 1 不提供改寫功能 → REJECT(rewrite_not_supported)（無需下載 raw）
     if item_type == "rewrite":

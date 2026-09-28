@@ -77,6 +77,14 @@ class AnnexGit(Protocol):
         """查詢在指定 remote_uuid 上已存在的 annex key 集合。"""
         ...
 
+    def origin_url(self) -> str:
+        """`git config remote.origin.url`（H1：clone 之後確認真的指向目標 repo）。"""
+        ...
+
+    def remote_uuid(self, remote: str = "origin") -> str:
+        """git-annex special remote 的 uuid（H1：確認 clone 到的是目標那一個遠端）。"""
+        ...
+
     def lookupkey(self, path: str | Path) -> str | None:
         try:
             proc = subprocess.run(
@@ -299,6 +307,23 @@ class SubprocessAnnexGit:
             if k:
                 keys.add(k)
         return frozenset(keys)
+
+    def origin_url(self) -> str:
+        """H1（review-25a48a9）：`remote.origin.url`。clone 到錯的 repo 時，
+        `verify_clone_identity` 會靠它擋下來（讀不到就 raise，不猜）。"""
+        return self._run(
+            ["git", "config", "--get", "remote.origin.url"], is_write=False).strip()
+
+    def remote_uuid(self, remote: str = "origin") -> str:
+        """H1：git-annex special remote 的 uuid（`git annex info --fast` 的 uuid 行）。"""
+        stdout = self._run(
+            ["git", "annex", "info", remote, "--fast"], is_write=False)
+        for line in stdout.splitlines():
+            if line.startswith("uuid:"):
+                uuid = line.split(":", 1)[1].strip()
+                if uuid:
+                    return uuid
+        raise ReadError(f"讀不到 annex remote {remote} 的 uuid")
 
     def lookupkey(self, path: str | Path) -> str | None:
         try:

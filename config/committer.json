@@ -16,5 +16,6 @@
   "quarantine_retention_days": 7,
   "ledger_retention_months": 3,
   "prefix_levels": [],
-  "github_repository": "FATESAIKOU/MyAiStorage"
+  "github_repository": "FATESAIKOU/MyAiStorage",
+  "committer_workflow": "committer.yml"
 }

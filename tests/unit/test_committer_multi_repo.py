@@ -70,28 +70,36 @@ def _add_repo(
         initial_state=deps.pins._states["agora"],  # type: ignore[attr-defined]
         initial_states_extra={repo: state},
     )
-    # git_factory 依工作目錄分派：agora 用原本的，foundry 用這邊的假 repo
+    # H1（review-25a48a9）：factory 依 **target** 分派（不是依工作目錄），
+    # 而且回報的 URL／uuid 必須是這個 target 的——`verify_clone_identity` 會擋下
+    # 「拿 Agora 的 repo 當 Foundry 用」的情況。
     original_factory = deps.git_factory
+    repo_url = f"drive://{repo}"
     foundry_factory = _multi_git_factory(
         deps,
         repo_uuid=repo_uuid,
         prefix_id=prefix_id,
+        repo_url=repo_url,
         refs={"refs/heads/main": main_sha, "refs/heads/git-annex": annex_sha},
     )
-    deps.git_factory = lambda dest: (  # type: ignore[assignment]
-        foundry_factory(dest) if f"repo_{repo}" in str(dest) else original_factory(dest)
+    deps.git_factory = lambda dest, target: (  # type: ignore[assignment]
+        foundry_factory(dest) if target.repo == repo else original_factory(dest, target)
     )
     return RepoConfig(
         name=repo,
         uuid=repo_uuid,
-        url=f"drive://{repo}",
+        url=repo_url,
         prefix_folder_id=prefix_id,
         quarantine_folder_id=quarantine_id,
+        # M4：Foundry 一定要自己提供 prefix_levels（設定檔驗證會擋下沒給的；
+        # 這裡直接組物件，所以用空值——掃描上層同名資料夾的行為由 config 的測試覆蓋）
+        prefix_levels=(),
     )
 
 
 def _multi_git_factory(
-    deps: Deps, *, repo_uuid: str, prefix_id: str, refs: dict[str, str]
+    deps: Deps, *, repo_uuid: str, prefix_id: str, repo_url: str,
+    refs: dict[str, str],
 ):
     clock = deps.clock
     drive: FakeDrive = deps.drive  # type: ignore[assignment]
@@ -104,6 +112,7 @@ def _multi_git_factory(
             drive=drive,
             prefix_folder_id=prefix_id,
             repo_uuid=repo_uuid,
+            repo_url=repo_url,
             clock=clock,
         )
 
@@ -134,6 +143,10 @@ def test_repos_config_parsed_and_back_compatible(tmp_path: Path) -> None:
                     "prefix_folder_id": "p-foundry",
                     "quarantine_folder_id": "q-foundry",
                     "largefiles": "include=objects/*/*",
+                    "prefix_levels": [
+                        {"parent_id": "up-foundry", "name": "p-foundry",
+                         "expected_id": "EXPECTED"},
+                    ],
                 }
             },
         }),
@@ -147,7 +160,13 @@ def test_repos_config_parsed_and_back_compatible(tmp_path: Path) -> None:
     path.write_text(
         json.dumps({
             **base,
-            "repos": {"agora": {"uuid": "x", "url": "u", "prefix_folder_id": "p", "quarantine_folder_id": "q"}},
+            "repos": {"agora": {
+                "uuid": "x", "url": "u", "prefix_folder_id": "p",
+                "quarantine_folder_id": "q",
+                "prefix_levels": [
+                    {"parent_id": "up", "name": "p", "expected_id": "E"},
+                ],
+            }},
         }),
         encoding="utf-8",
     )

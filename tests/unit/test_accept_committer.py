@@ -240,8 +240,11 @@ def _run_env(e: Env, tmp_path: Path, *, git=None, pins=None, levels=(),
         repo="agora", repo_uuid=UUID, repo_url="drive://agora",
         prefix_folder_id=e.prefix, quarantine_folder_id=e.quar,
         identity_registry_path=str(e.reg_path), prefix_levels=tuple(levels))
+    # H1：假 git 也要報得出自己的身分，verify_clone_identity 才會過
+    git.repo_url = cfg.repo_url
+    git.repo_uuid = cfg.repo_uuid
     deps = Deps(
-        drive=e.drive, pins=pins, git_factory=lambda path: git,
+        drive=e.drive, pins=pins, git_factory=lambda path, target: git,
         registry=Registry(json.loads(e.reg_path.read_text())),
         converters={"opencode": e.conv}, publisher=publisher or NullPublisher(),
         clock=clock or FixedClock("2026-09-27T10:00:00Z"),
@@ -302,7 +305,7 @@ def test_empty_inbox_no_clone(tmp_path: Path, bundle: dict, capsys) -> None:
         identity_registry_path=str(e.reg_path))
     git = CountingGit(refs={"refs/heads/main": bundle["c1"]})
     deps = Deps(
-        drive=e.drive, pins=MemoryPinStore(), git_factory=lambda path: git,
+        drive=e.drive, pins=MemoryPinStore(), git_factory=lambda path, target: git,
         registry=Registry(json.loads(e.reg_path.read_text())),
         converters={"opencode": e.conv}, publisher=NullPublisher(),
         clock=FixedClock("2026-09-27T10:00:00Z"),

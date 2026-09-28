@@ -22,6 +22,11 @@ DEFAULT_MAX_GC_PER_RUN = 200
 DEFAULT_MAX_RAW_SIZE = 50 * 1024 * 1024  # 50 MiB
 DEFAULT_QUARANTINE_DAYS = 7
 DEFAULT_LEDGER_MONTHS = 3
+#: 非 Agora 的 repo（Foundry）預設的單檔上限：100 MiB（D7／spec 7.3）。
+#: Agora 的 `DEFAULT_MAX_RAW_SIZE` 是 50 MiB，兩者不可互相沿用（M4）。
+DEFAULT_MAX_REPO_RAW_SIZE = 100 * 1024 * 1024
+#: `.github/workflows/committer.yml`（3.1 建的骨架；錯開要停用的就是它）
+DEFAULT_COMMITTER_WORKFLOW = "committer.yml"
 
 _FOLDER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
@@ -31,6 +36,15 @@ class RepoConfig:
     """單一真本 repo 的設定（Agora／Foundry 各一份，group5-7 第 6.1 節）。
 
     兩者共用同一個 pin repo，釘選值以 repo 名稱分檔（`.pin/<repo>.json`）。
+
+    M4（review-25a48a9）：`prefix_levels` 與 `max_raw_size` 必須是**這個 repo 自己
+    的**，不可沿用 Agora 的：
+    - `prefix_levels`：清掃會逐層檢查上層同名資料夾。沿用 Agora 的話，Foundry 的
+      清掃會去檢查 Agora 的上層資料夾，而 Foundry 自己的上層完全沒有保護
+      （1.4 的「多層同名資料夾」注入）。
+    - `max_raw_size`：Agora 的預設是 50 MiB；Foundry 的收容產出上限是
+      100 MB（D7／spec 7.3），沿用 50 MiB 會讓 50〜100 MB 的產出被拒成
+      `too_large`。
     """
 
     name: str
@@ -42,6 +56,8 @@ class RepoConfig:
     readview_manifest_file_id: str | None = None
     readview_rebuild_epoch: int = 0
     largefiles: str | None = None
+    prefix_levels: tuple[PrefixLevel, ...] = ()
+    max_raw_size: int = DEFAULT_MAX_REPO_RAW_SIZE
 
     @classmethod
     def from_dict(cls, name: str, data: dict, *, defaults: dict | None = None) -> RepoConfig:
@@ -54,6 +70,32 @@ class RepoConfig:
             value = d.get(fid_key)
             if value and not _FOLDER_ID_PATTERN.match(str(value)):
                 raise ValueError(f"repos.{name} 不合法的 {fid_key}: {value!r}")
+        levels: list[PrefixLevel] = []
+        raw_levels = d.get("prefix_levels") or []
+        if not isinstance(raw_levels, list):
+            raise ValueError(f"repos.{name}.prefix_levels 必須是陣列")
+        for item in raw_levels:
+            if not isinstance(item, dict):
+                raise ValueError(f"repos.{name}.prefix_levels 的每一項必須是物件")
+            for field_name in ("parent_id", "name", "expected_id"):
+                if not item.get(field_name):
+                    raise ValueError(
+                        f"repos.{name}.prefix_levels 的項目缺少 {field_name}"
+                        "（Foundry 的上層資料夾必須自己宣告，不能沿用 Agora 的）")
+            levels.append(PrefixLevel(
+                parent_id=str(item["parent_id"]),
+                name=str(item["name"]),
+                expected_id=str(item["expected_id"]),
+            ))
+        # M4：Foundry 一定要自己給 prefix_levels。少了它，Foundry 的前綴之上
+        # 任何同名資料夾都不會被檢查（1.4 的注入面）。
+        if not levels:
+            raise ValueError(
+                f"repos.{name}.prefix_levels 必須自己提供"
+                "（不能沿用 Agora 的：Foundry 的上層資料夾需要同樣的保護）")
+        max_raw_size = int(d.get("max_raw_size", DEFAULT_MAX_REPO_RAW_SIZE))
+        if max_raw_size <= 0:
+            raise ValueError(f"repos.{name}.max_raw_size 必須是正整數: {max_raw_size!r}")
         return cls(
             name=name,
             uuid=str(d["uuid"]),
@@ -64,6 +106,8 @@ class RepoConfig:
             readview_manifest_file_id=d.get("readview_manifest_file_id"),
             readview_rebuild_epoch=int(d.get("readview_rebuild_epoch", 0)),
             largefiles=d.get("largefiles"),
+            prefix_levels=tuple(levels),
+            max_raw_size=max_raw_size,
         )
 
 
@@ -92,6 +136,11 @@ class CommitterConfig:
     ledger_retention_months: int = DEFAULT_LEDGER_MONTHS
     prefix_levels: tuple[PrefixLevel, ...] = ()
     github_repository: str = ""
+    #: 提交流程的 workflow 檔名（`.github/workflows/` 底下那個檔）。
+    #: 6.5 的錯開要停用它；名字寫錯（例如指向不存在的檔）時 `gh workflow disable`
+    #: 會直接失敗，於是整個管理操作根本跑不起來，所以它必須由設定檔帶著走，
+    #: 不能在程式裡散落硬編碼。
+    committer_workflow: str = DEFAULT_COMMITTER_WORKFLOW
     #: 多 repo 設定（group5-7 第 6.1 節）：只列 Agora 以外的 repo，依序處理
     #: （PM 決定 9：同一個 job 依序，只有收件匣有 artifact 才 clone Foundry）。
     repos: tuple[RepoConfig, ...] = ()
@@ -175,6 +224,17 @@ class CommitterConfig:
                 f"不合法的 readview_rebuild_epoch: {repr(readview_rebuild_epoch)}（要非負整數）"
             )
 
+        # 6.5：錯開要 `gh workflow disable <name>`，名字必須是 workflow 檔名本身。
+        # 寫成路徑或別的副檔名時 gh 才會在管理操作跑到一半才失敗。
+        committer_workflow = str(
+            data.get("committer_workflow") or DEFAULT_COMMITTER_WORKFLOW)
+        if ("/" in committer_workflow or "\\" in committer_workflow
+                or not committer_workflow.endswith((".yml", ".yaml"))):
+            raise ValueError(
+                f"committer_workflow 必須是 .github/workflows/ 底下的檔名: "
+                f"{repr(committer_workflow)}"
+            )
+
         # 解析 prefix_levels
         raw_levels = data.get("prefix_levels", [])
         levels: list[PrefixLevel] = []
@@ -241,6 +301,7 @@ class CommitterConfig:
             prefix_levels=tuple(levels),
             repos=tuple(repos),
             github_repository=github_repo,
+            committer_workflow=committer_workflow,
             rclone_conf_path=rclone_conf_path,
             pin_key_path=pin_key_path,
             pin_known_hosts_path=pin_known_hosts_path,

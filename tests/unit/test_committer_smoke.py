@@ -197,7 +197,7 @@ def _setup_committer_env(tmp_path: Path) -> tuple[CommitterConfig, Deps, dict[st
     deps = Deps(
         drive=drive,
         pins=pins,
-        git_factory=lambda _p: fake_git,
+        git_factory=lambda _p, _target: fake_git,
         registry=registry,
         converters=converters,
         publisher=NullPublisher(),
@@ -213,6 +213,9 @@ def _setup_committer_env(tmp_path: Path) -> tuple[CommitterConfig, Deps, dict[st
         quarantine_folder_id=quarantine_folder_id,
         identity_registry_path="config/identity.json",
     )
+    # H1（review-25a48a9）：假 git 要報得出自己的身分，
+    # `verify_clone_identity` 才會確認「clone 到的是 Agora」。
+    fake_git.repo_url = cfg.repo_url
 
     extra_info = {
         "priv_bytes": priv_bytes,

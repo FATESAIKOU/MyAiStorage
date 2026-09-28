@@ -1,9 +1,13 @@
-"""管理者的 swap：刪遠端 → push → 驗證 → 重建 pin → 讀取視圖重建世代。
+"""管理者的 swap：刪遠端 → 重讀遠端 manifest → push → 驗證 → 重建 pin → 讀取視圖重建世代。
 
 抹除（6.1 的 `swap_remote`）與回滾（6.2 的 `swap_remote`）共用這一段，
 因為兩者對「遠端變更之後要怎麼讓它重新變成可信狀態」的答案完全一樣：
 先讓遠端與本機一致（push），再用**觀測到的遠端狀態**重建正式 pin，
 並把讀取視圖的 rebuild epoch 加 1，下一輪提交流程會做完整重建。
+
+6.5 的「push 前重讀遠端 manifest」在這裡（`recheck-remote` 步驟）：
+swap 開始時記下遠端 manifest 的指紋，push 前再讀一次；只要兩者不同，
+就是有人在管理操作期間動了遠端，這一輪中止並保留鎖（不要用 force push 蓋過去）。
 
 順序取自 1.3 抹除驗證的實測（docs/spike/evidence/1.3-erase.md）：
 `git push --force` 不會刪掉遠端舊的 GITBUNDLE，所以抹除必須「永久刪除 +
@@ -29,12 +33,13 @@ from aistorage.annex.manifest import parse_bundle_name, parse_manifest
 from aistorage.drive.model import DriveClient
 
 SWAP_DELETE = "delete-remote"
+SWAP_RECHECK = "recheck-remote"
 SWAP_PUSH = "push"
 SWAP_VERIFY = "verify-remote"
 SWAP_PIN = "rebuild-pin"
 SWAP_EPOCH = "readview-epoch"
 
-SWAP_ORDER = (SWAP_DELETE, SWAP_PUSH, SWAP_VERIFY, SWAP_PIN, SWAP_EPOCH)
+SWAP_ORDER = (SWAP_DELETE, SWAP_RECHECK, SWAP_PUSH, SWAP_VERIFY, SWAP_PIN, SWAP_EPOCH)
 
 
 @dataclass(frozen=True)
@@ -77,6 +82,10 @@ class SwapReport:
     promoted_at: str | None = None
     rebuild_epoch: int | None = None
     pushed_refs: dict[str, str] = field(default_factory=dict)
+    #: 重讀遠端 manifest 的兩次結果（6.5：push 前要確認遠端沒有被動過）。
+    #: 第一次是 swap 開始時的現況，第二次是 push 前；`None` 代表當時遠端沒有 manifest。
+    remote_manifest_start: str | None = None
+    remote_manifest_before_push: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -96,6 +105,8 @@ class SwapReport:
             "promoted_at": self.promoted_at,
             "rebuild_epoch": self.rebuild_epoch,
             "pushed_refs": self.pushed_refs,
+            "remote_manifest_start": self.remote_manifest_start,
+            "remote_manifest_before_push": self.remote_manifest_before_push,
         }
 
 
@@ -138,6 +149,40 @@ def _ids_under(drive: DriveClient, roots: Sequence[str]) -> set[str]:
         for f in _list_files(drive, root):
             ids.add(f.id)
     return ids
+
+
+def manifest_name_for(repo_uuid: str) -> str:
+    """主 manifest 在前綴底下的檔名（只認這一個名字，其他檔不查）。"""
+    return f"GITMANIFEST--{repo_uuid}"
+
+
+def read_remote_manifest_sha256(
+    drive: DriveClient, prefix_folder_id: str, repo_uuid: str, *, allow_missing: bool
+) -> str | None:
+    """重讀遠端主 manifest 的內容雜湊（6.5 的「push 前重讀遠端 manifest」）。
+
+    只用 Drive 的 metadata（`sha256Checksum`），不下載整個 manifest——
+    這裡要的只是「有沒有被動過」的指紋。回傳 `None` 代表遠端沒有主 manifest。
+
+    - 找到多個 → 拒絕（狀態已經不明，中止，不要猜）；
+    - 找不到且 `allow_missing=False` → 拒絕；
+    - 檔案沒有 checksum → 拒絕（fail-closed：判斷不出有沒有被動過就不准推）。
+    """
+    name = manifest_name_for(repo_uuid)
+    found = drive.find_by_name(prefix_folder_id, name)
+    if not found:
+        if allow_missing:
+            return None
+        raise AdminError(
+            f"重讀遠端 manifest 失敗：{name} 不存在（這一輪不該不見）")
+    if len(found) > 1:
+        raise AdminError(
+            f"重讀遠端 manifest 失敗：{name} 找到 {len(found)} 個（應為 1）")
+    sha = found[0].sha256
+    if not sha:
+        raise AdminError(
+            f"重讀遠端 manifest 失敗：Drive 尚未提供 checksum（{name}）")
+    return sha.lower()
 
 
 def check_delete_group(drive: DriveClient, group: DeleteGroup) -> None:
@@ -244,7 +289,7 @@ def swap_remote(*, admin: AdminDeps, cfg: Any, deps: Any, git: Any,
                 force_push: bool, config_path: Path | str | None = None,
                 resume_hint: str = "", push_fn: Any | None = None,
                 pin_rebuild_fn: Any | None = None) -> SwapReport:
-    """刪（可選）→ push → 驗證 → 重建 pin → 讀取視圖重建世代。
+    """刪（可選）→ push 前重讀遠端 manifest → push → 驗證 → 重建 pin → 讀取視圖重建世代。
 
     呼叫端必須已經在 AdminLock 內；本函式不碰 workflow，也不解除鎖。
     中途失敗丟 `SwapAborted`（內含已完成步驟與下一步指令），由呼叫端決定
@@ -262,6 +307,15 @@ def swap_remote(*, admin: AdminDeps, cfg: Any, deps: Any, git: Any,
             report, f"swap 在「{step}」中止：{detail}",
             resume_hint=resume_hint or _default_resume_hint(step, cfg))
 
+    # 0. 現況基準（6.5）：先記下 swap 開始時遠端 manifest 的指紋，
+    #    push 前再讀一次比對——中間只要有人動過遠端，這裡就擋下來。
+    #    找不到不算錯：中途中止後接手（swap-finish）時遠端本來就可能沒有 manifest。
+    try:
+        report.remote_manifest_start = read_remote_manifest_sha256(
+            deps.drive, cfg.prefix_folder_id, cfg.repo_uuid, allow_missing=True)
+    except Exception as e:
+        _fail(SWAP_RECHECK, f"{type(e).__name__}: {e}")
+
     # 1. 刪遠端（抹除才有；回滾不刪）
     if delete_groups:
         try:
@@ -274,6 +328,25 @@ def swap_remote(*, admin: AdminDeps, cfg: Any, deps: Any, git: Any,
     else:
         report.steps.append(SwapStep(name=SWAP_DELETE, status="skipped",
                                      detail="無需刪除（保留遠端檔案）"))
+
+    # 1b. push 前重讀遠端 manifest（6.5）。這一輪有刪遠端檔案時，主 manifest
+    #     已經被自己刪掉，「不存在」是預期結果；沒有刪時則必須與現況完全相同。
+    try:
+        current = read_remote_manifest_sha256(
+            deps.drive, cfg.prefix_folder_id, cfg.repo_uuid,
+            allow_missing=bool(delete_groups))
+        report.remote_manifest_before_push = current
+        if not delete_groups and current != report.remote_manifest_start:
+            raise AdminError(
+                "push 前重讀遠端 manifest：與 swap 開始時不同"
+                f"（{report.remote_manifest_start} → {current}），"
+                "遠端在管理操作期間被動過，中止")
+        report.steps.append(SwapStep(
+            name=SWAP_RECHECK, status="ok",
+            detail=(f"遠端 manifest 未被動過 {current[:8]}"
+                    if current else "遠端無主 manifest（已由本輪刪除）")))
+    except Exception as e:
+        _fail(SWAP_RECHECK, f"{type(e).__name__}: {e}")
 
     # 2. push
     try:
@@ -336,6 +409,10 @@ def _default_resume_hint(step: str, cfg: Any) -> str:
                 "在管理 clone 重新 push（git annex copy --to=origin；"
                 "git push --force origin main git-annex），"
                 "再執行 `python -m aistorage.admin swap-finish`")
+    if step == SWAP_RECHECK:
+        return ("遠端在管理操作期間被動過（可能有另一輪提交流程或另一個管理操作跑過）："
+                "先確認遠端現況與釘選值誰才對，必要的話重跑 `init-pin --confirm` "
+                "建立基準，再用 `python -m aistorage.admin swap-finish`")
     if step == SWAP_VERIFY:
         return ("不要解除維護旗標：先確認遠端 bundle／manifest 狀態，"
                 "修正後重跑 push，再用 `python -m aistorage.admin swap-finish`")

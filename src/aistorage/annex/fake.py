@@ -86,6 +86,7 @@ class FakeAnnexGit(AnnexGit):
         drive: Any | None = None,
         prefix_folder_id: str | None = None,
         repo_uuid: str | None = None,
+        repo_url: str | None = None,
         clock: Any | None = None,
     ) -> None:
         self.refs: dict[str, str] = dict(refs or {})
@@ -100,6 +101,8 @@ class FakeAnnexGit(AnnexGit):
         self.drive: Any | None = drive
         self.prefix_folder_id: str | None = prefix_folder_id
         self.repo_uuid: str | None = repo_uuid
+        #: H1：`origin_url()` 回報這個值（clone 到錯的 repo 的測試就是餵不同的值）
+        self.repo_url: str = repo_url or f"annex::{repo_uuid or 'fake'}"
         self.clock: Any | None = clock
         self.added_paths: list[str] = []
         #: fake annex 物件庫（lookupkey 會填；register_object 可手動登錄「遠端」物件）
@@ -378,6 +381,17 @@ class FakeAnnexGit(AnnexGit):
     def annex_keys_in(self, remote_uuid: str) -> frozenset[str]:
         self._check_injection("annex_keys_in")
         return self.annex_keys
+
+    def origin_url(self) -> str:
+        """H1：fake 回報自己被當成哪一個 target clone 出來的。"""
+        self._check_injection("origin_url")
+        return self.repo_url
+
+    def remote_uuid(self, remote: str = "origin") -> str:
+        self._check_injection("remote_uuid")
+        if not self.repo_uuid:
+            raise ReadError("FakeAnnexGit 沒有 repo_uuid，無法確認遠端身分")
+        return self.repo_uuid
 
     def lookupkey(self, path: str | Path) -> str | None:
         """測試用的 key 查詢：以工作樹上實際的檔案內容按 git-annex 的命名規則推算。

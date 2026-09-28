@@ -84,10 +84,15 @@ def build_production_deps(cfg: CommitterConfig, *, allow_production: bool = Fals
         allow_production=allow_production,
     )
 
-    git_factory = lambda dest: SubprocessAnnexGit.clone_for_commit(
-        cfg.repo_url,
+    # H1（review-25a48a9）：URL 與 annex 規則**都從 target 來**。
+    # 舊的 factory 只收 `dest`，URL 寫死成 Agora 的 repo_url，於是 Foundry 的
+    # pipeline 會 clone 到 Agora 的 repo（第 3、4 步用 Foundry 的 pin，第 5 步
+    # 卻拿到 Agora 的 repo，最壞的情況是 Foundry 的內容被寫進 Agora 並 push）。
+    git_factory = lambda dest, target: SubprocessAnnexGit.clone_for_commit(
+        target.repo_url,
         dest,
-        max_git_bundles=cfg.max_git_bundles,
+        max_git_bundles=target.max_git_bundles,
+        largefiles=target.largefiles_rule,
     )
 
     # H4: 使用 load_registry 並強制 allow_example=False
@@ -151,6 +156,10 @@ def main(argv: list[str] | None = None) -> int:
     p_init = subparsers.add_parser("init-pin", help="初始化正式釘選值")
     p_init.add_argument("--config", "-c", help="設定檔路徑", default=None)
     p_init.add_argument("--i-am-admin", action="store_true", help="管理者模式，允許在非 CI 環境下存取正式 pin repo")
+    # H1（review-25a48a9）：要初始化哪一個 repo 的釘選值。省略 = 設定檔上層那個
+    # （Agora）。Foundry 必須明寫，否則會用 Agora 的 URL 建它的釘選值。
+    p_init.add_argument("--repo", default=None,
+                        help="要初始化的 repo 名稱（Agora 省略即可；Foundry 寫 foundry）")
     init_mode = p_init.add_mutually_exclusive_group()
     init_mode.add_argument("--dry-run", action="store_true", default=True, help="僅列印計畫（預設）")
     init_mode.add_argument("--confirm", action="store_true", help="確定寫入正式釘選值至 pin repo")
@@ -193,10 +202,57 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     elif args.command == "init-pin":
         deps = build_production_deps(cfg, allow_production=args.i_am_admin)
-        init_pin_cli(cfg, deps, confirm=args.confirm)
+        target = _init_pin_target(cfg, args.repo)
+        if not args.confirm:
+            init_pin_cli(cfg, deps, confirm=False, target=target)
+            return 0
+        # 6.5：重建釘選值也是會改動真可信狀態的管理操作，照樣要走錯開。
+        # 已經有維護旗標時（中途中止的收尾流程）就直接在既有的鎖裡做，
+        # 沒有旗標就自己上鎖（停用 workflow、等沒有執行中的 run、重讀遠端 manifest）。
+        _init_pin_under_lock(cfg, deps, target)
         return 0
 
     return 0
+
+
+def _init_pin_target(cfg: CommitterConfig, repo: str | None):
+    """`--repo` → RepoTarget（省略 = 設定檔上層那個，也就是 Agora）。"""
+    from aistorage.committer.run import RepoTarget
+
+    if not repo:
+        return None
+    if repo == cfg.repo:
+        return RepoTarget.from_config(cfg)
+    for rc in cfg.repos:
+        if rc.name == repo:
+            return RepoTarget.from_repo_config(cfg, rc)
+    known = ", ".join([cfg.repo, *(rc.name for rc in cfg.repos)])
+    raise SystemExit(
+        f"設定檔裡沒有 repo {repo!r}（可用：{known}）")
+
+
+def _init_pin_under_lock(cfg: CommitterConfig, deps: Deps, target=None) -> None:
+    """`init-pin --confirm` 的錯開外層（6.5）。"""
+    from aistorage.admin.lock import GitHubAdmin, GitPinFiles, admin_lock_if_needed
+    from aistorage.admin.remote import read_remote_manifest_sha256
+
+    repo_name = target.repo if target is not None else cfg.repo
+
+    def _precheck() -> None:
+        # 寬鬆版：首次初始化時 pin repo 還是空的，遠端也可能正是我們要重建的對象；
+        # 這裡只擋「多個主 manifest」與「判不出有沒有被動過」這兩種狀態不明。
+        read_remote_manifest_sha256(
+            deps.drive, cfg.prefix_folder_id, cfg.repo_uuid, allow_missing=True)
+
+    pins = GitPinFiles(
+        cfg.pin_repo_url, Path(tempfile.mkdtemp(prefix="init_pin_lock_")),
+        key_path=cfg.pin_key_path)
+    gh = GitHubAdmin(cfg.github_repository or "FATESAIKOU/MyAiStorage")
+    with admin_lock_if_needed(
+        repo=repo_name, pins=pins, gh=gh, workflow=cfg.committer_workflow,
+        reason="init-pin", precheck=_precheck,
+    ):
+        init_pin_cli(cfg, deps, confirm=True, target=target)
 
 
 if __name__ == "__main__":

@@ -365,7 +365,16 @@ class GitPinStore(PinStore):
         return state, pending
 
     def _fetch(self) -> None:
-        self._run_git(["fetch", "origin", "main"], check=False)
+        """fetch 遠端 main；失敗一律 raise（review-25a48a9 L）。
+
+        原本 `check=False` 且不回頭看回傳碼：fetch 失敗之後 `_incoming_paths()`
+        拿舊的 `origin/main` 算，會得到空清單，最後以「無法確認遠端變更只屬於
+        其他 repo」中止——方向是 fail-closed，但訊息會指向錯的原因。fetch 失敗就
+        直接說 fetch 失敗。
+        """
+        proc = self._run_git(["fetch", "origin", "main"], check=False)
+        if proc.returncode != 0:
+            raise ReadError(f"pin repo fetch 失敗 (rc={proc.returncode})")
 
     def _incoming_paths(self) -> list[str]:
         """遠端比本地多出的檔案（`HEAD..origin/main`），相對於 repo 根。"""

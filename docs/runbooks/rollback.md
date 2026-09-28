@@ -9,7 +9,10 @@
 2. 列出快照選擇：`rollback --config config/committer.json --session <id> --list`
    （沒有 `--repo-dir` 就在暫存目錄新 clone 一個；git／git-annex 一律在暫存目錄）。
 3. 執行：`rollback --session <id> --to <snapshot_sha> --reason "…" --confirm <snapshot_sha>`。
-   流程是 AdminLock → clone → 回滾 → commit → `git annex copy` ＋ `git push`
+   流程是 AdminLock → clone → 回滾 → commit → **重讀遠端 manifest**
+   （`recheck-remote`：回滾不刪遠端檔，所以遠端 manifest 必須與開鎖時完全相同，
+   不同就是有人在管理操作期間動了遠端，中止並保留鎖）
+   → `git annex copy` ＋ `git push`
    → ls-remote／manifest 驗證 → 重建 pin → `readview_rebuild_epoch` 加 1。
    紀錄寫在真本 `_admin/rollbacks/<ULID>.json`（誰、何時、為什麼、session、
    新舊 sha），不含被還原的內容。

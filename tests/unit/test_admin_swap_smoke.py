@@ -162,7 +162,8 @@ def test_swap_runs_all_steps_and_bumps_epoch(tmp_path: Path, monkeypatch) -> Non
                          pin_rebuild_fn=_fake_pin_rebuild())
     assert report.ok
     assert [s.name for s in report.steps] == [
-        "delete-remote", "push", "verify-remote", "rebuild-pin", "readview-epoch"]
+        "delete-remote", "recheck-remote", "push", "verify-remote",
+        "rebuild-pin", "readview-epoch"]
     assert git.calls == ["copy", "push"]
     assert report.manifest_file_id == mid
     assert report.rebuild_epoch == 4
@@ -188,7 +189,7 @@ def test_swap_keeps_progress_when_push_fails(tmp_path: Path, monkeypatch) -> Non
                     push_fn=_fake_push(git),
                     pin_rebuild_fn=_fake_pin_rebuild())
     err = excinfo.value
-    assert err.report.done == ("delete-remote",)
+    assert err.report.done == ("delete-remote", "recheck-remote")
     assert err.resume_hint
     assert "delete-remote" in str(err)
     # 遠端 bundle 已被刪（這就是「遠端不一致」的狀態，要靠提示讓人收尾）

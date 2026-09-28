@@ -35,7 +35,13 @@ def replay_refs(
     - 每次呼叫一律建立全新的暫存 bare repo，結束後立即銷毀，嚴防跨次重放殘留物件。
     - 重放前逐一分塊計算本機 bundle 檔案之 SHA-256，與檔名宣告之雜湊核對。
     - 嚴格比對 bundle 檔名中的 repo_uuid 與必填之 repo_uuid。
-    - 以最後一個 bundle 宣告之 heads 為準，並透過 git cat-file 驗證所有 commit 物件均真實存在於重放後的物件庫中。
+    - **依序套用所有 bundle**（後者覆蓋它宣告到的 ref），再透過 git cat-file 驗證
+      所有 commit 物件均真實存在於重放後的物件庫中。
+      e2e 修正：先前只取**最後一個** bundle 的 heads。git-remote-annex 的每個
+      bundle 只帶自上次 consolidate 以來有變動的分支，所以最後一個 bundle 常常
+      只有 `git-annex`（location log 變了、main 沒變）——只看它會讓
+      `refs/heads/main` 消失，於是 push 後驗證與 settle 永遠比不到 refs，
+      提交流程從此每一輪都中止（impl3／9.1 實測）。
     - 透過 normalize_bundle_heads 進行嚴格的 namespace 與 ref 正規化。
     - 所有 git 子程序執行均套用隔離環境變數與逾時機制。
 
@@ -126,37 +132,49 @@ def replay_refs(
             if proc.returncode != 0:
                 raise MismatchError(f"解開 bundle 失敗 ({b_name.name}): {proc.stderr}")
 
-        # 4. 以最後一個 bundle 宣告的集合為準
-        last_b_name, last_b_path = normalized_bundles[-1]
-        try:
-            proc = subprocess.run(
-                ["git", "bundle", "list-heads", str(last_b_path)],
-                capture_output=True,
-                text=True,
-                env=git_env,
-                timeout=60.0,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            raise MismatchError(f"讀取 bundle list-heads 逾時 ({last_b_name.name})") from None
+        # 4. 依序讀出**每個** bundle 宣告的 heads，累積成最終的 ref 映射
+        #    （e2e 修正：先前只取最後一個 bundle 的 heads。git-remote-annex 的
+        #    每個 bundle 只帶「自上次 consolidate 以來有變動的分支」，所以最後
+        #    一個 bundle 常常只有 `git-annex`（location log 變了、main 沒變），
+        #    只看它會讓 `refs/heads/main` 消失 → push 後驗證與 settle 永遠比不到
+        #    refs，整個提交流程從此每一輪都中止，而且不會自己好。
+        #    語意：後面的 bundle 對它宣告的 ref 覆蓋前面的（後寫的較新），
+        #    沒有宣告到的 ref 沿用前一個——這就是「依序套用所有 bundle」的結果。
+        merged_heads: dict[str, str] = {}
+        for b_name, b_path in normalized_bundles:
+            try:
+                proc = subprocess.run(
+                    ["git", "bundle", "list-heads", str(b_path)],
+                    capture_output=True,
+                    text=True,
+                    env=git_env,
+                    timeout=60.0,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                raise MismatchError(f"讀取 bundle list-heads 逾時 ({b_name.name})") from None
 
-        if proc.returncode != 0:
+            if proc.returncode != 0:
+                raise MismatchError(
+                    f"讀取 bundle list-heads 失敗 ({b_name.name}): {proc.stderr}"
+                )
+
+            for line in proc.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(maxsplit=1)
+                if len(parts) == 2:
+                    sha, ref_name = parts[0], parts[1]
+                    merged_heads[ref_name] = sha
+
+        if not merged_heads:
             raise MismatchError(
-                f"讀取 bundle list-heads 失敗 ({last_b_name.name}): {proc.stderr}"
+                "所有 bundle 都沒有宣告任何 ref（無法算出 refs）"
             )
 
-        raw_heads: dict[str, str] = {}
-        for line in proc.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split(maxsplit=1)
-            if len(parts) == 2:
-                sha, ref_name = parts[0], parts[1]
-                raw_heads[ref_name] = sha
-
-        # 5. M4: 驗證 list-heads 宣告之 commit 物件真實存在於物件庫中
-        for ref_name, sha in raw_heads.items():
+        # 5. M4: 驗證每一個宣告之 commit 物件真實存在於物件庫中
+        for ref_name, sha in merged_heads.items():
             if ref_name == "HEAD" or ref_name.endswith("^{}"):
                 continue
             try:
@@ -172,11 +190,12 @@ def replay_refs(
 
             if check_proc.returncode != 0:
                 raise MismatchError(
-                    f"Bundle '{last_b_name.name}' 宣告之 ref '{ref_name}' 目標 commit '{sha}' 不存在於重放後物件庫中"
+                    f"Bundle 重放後宣告之 ref '{ref_name}' 目標 commit "
+                    f"'{sha}' 不存在於重放後物件庫中"
                 )
 
         # 6. M4 & N1: 正規化 bundle ref 集合
-        return normalize_bundle_heads(raw_heads, repo_uuid=repo_uuid)
+        return normalize_bundle_heads(merged_heads, repo_uuid=repo_uuid)
 
     finally:
         # H2: 銷毀暫存 repo 目錄

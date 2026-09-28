@@ -108,6 +108,115 @@ def verify_clone(
         verify_annex_coverage(state.annex_keys, expected_annex_keys)
 
 
+def verify_pin_keys_on_drive(
+    drive: DriveClient,
+    prefix_folder_id: str,
+    state: PinState,
+    *,
+    repo_listing: RepoListing | None = None,
+) -> None:
+    """第 5 步（e2e 修正）：釘選值記載的 annex 物件，**Drive 上**真的在嗎？
+
+    為什麼不能只信 `git annex find --in=<uuid>`（location log）：
+
+    - location log 是**提交流程自己寫的**（`git annex copy` 寫入、再隨 git-annex
+      分支 push 出去），它宣稱「某個 key 在遠端」不等於遠端真的有該檔案；
+    - 它的內容也會隨 consolidate（`annex.max-git-bundles`）而變動。e2e 實測
+      （impl3／9.1）：**第一次提交成功之後每一輪**都在這裡
+      `MismatchError: clone 後遠端 annex key 集合缺少釘選值記載之物件
+      ['SHA256E-s19984--…']` 中止，而且不會自己好——只能人工重建釘選值。
+      釘選值與 Drive 其實是對的，錯的是拿自己寫的帳本去對帳。
+
+    所以這一檢查改成**問 Drive**：前綴底下必須有 `name == key` 的檔案，
+    而且 Drive 的 `sha256Checksum` 與 `size` 要和 key 內嵌的一致（與
+    清掃第 4 步判定 annex 物件用的是同一套規則）。少一個就是真的不見了 →
+    中止（fail-closed，寧可不要靜靜地把真本當成完整的）。
+
+    `repo_listing` 是第 3 步列舉的前綴（此時還沒有本輪的寫入，所以拿來比對
+    釘選值是安全的）。
+    """
+    if not state.annex_keys:
+        return
+    if repo_listing is not None:
+        by_name = {f.name: f for f in repo_listing.files if not f.is_folder}
+    else:
+        by_name = {
+            f.name: f for f in drive.list_children(prefix_folder_id) if not f.is_folder
+        }
+    missing: list[str] = []
+    unreadable: list[str] = []
+    for key in sorted(state.annex_keys):
+        if not _is_plausible_annex_key(key):
+            unreadable.append(f"{key}（形狀不合法）")
+            continue
+        f = by_name.get(key)
+        if f is None:
+            missing.append(key)
+            continue
+        size_text, _, sha_text = key.partition("--")
+        key_size = int(size_text.split("-s", 1)[1])
+        key_sha = sha_text.split(".", 1)[0].lower()
+        if f.sha256 is None or f.sha256.lower() != key_sha or f.size != key_size:
+            unreadable.append(key)
+    if missing or unreadable:
+        raise MismatchError(
+            f"釘選值記載的 annex 物件在 Drive 上不存在或內容不符"
+            f"（不在 {prefix_folder_id}: {len(missing)} 個、不符: {len(unreadable)} 個）："
+            f"{(missing + unreadable)[:3]}；真本與釘選值已不一致，"
+            "需要管理者確認後重建釘選值（init-pin），不要自己好"
+        )
+
+
+def verify_new_keys_on_drive(
+    drive: DriveClient,
+    prefix_folder_id: str,
+    new_keys: frozenset[str] | set[str],
+) -> int:
+    """M1（review-25a48a9）：這一輪新寫的 annex 物件，**Drive 上**真的在嗎？
+
+    為什麼需要：`annex_keys_in()` 讀的是 clone 下來的 git-annex location log，
+    而那份 location log 是提交流程自己寫的。Drive 上的物件如果實際上不在
+    （被誤隔離後又被 purge、Drive 端遺失……），location log 仍然會宣稱它在，
+    覆蓋率檢查就會通過。所以這裡直接問 Drive：
+
+    - 前綴底下有沒有 `name == key` 的檔案；
+    - `sha256Checksum` 等於 key 內嵌的雜湊；
+    - `size` 等於 key 內嵌的大小。
+
+    缺任何一項都 raise `MismatchError`（中止這一輪，不 promote）。
+
+    **必須在 push 之後呼叫**：第 3 步的 listing 是 push 之前的，拿它來比對會把
+    「這一輪剛推上去的物件」全部判成不存在。
+    """
+    if not new_keys:
+        return 0
+    by_name = {
+        f.name: f for f in drive.list_children(prefix_folder_id) if not f.is_folder
+    }
+    problems: list[str] = []
+    for key in sorted(new_keys):
+        if not _is_plausible_annex_key(key):
+            problems.append(f"{key}（形狀不合法）")
+            continue
+        f = by_name.get(key)
+        if f is None:
+            problems.append(f"{key}（Drive 上沒有同名檔案）")
+            continue
+        size_text, _, sha_text = key.partition("--")
+        key_size = int(size_text.split("-s", 1)[1])
+        key_sha = sha_text.split(".", 1)[0].lower()
+        if f.sha256 is None or f.sha256.lower() != key_sha:
+            problems.append(f"{key}（Drive checksum 不符或尚未提供）")
+            continue
+        if f.size is not None and f.size != key_size:
+            problems.append(f"{key}（Drive size {f.size} != key 內嵌 {key_size}）")
+    if problems:
+        raise MismatchError(
+            f"這一輪新寫的 annex 物件沒有真的在 Drive 上（{len(problems)} 個）："
+            f"{problems[:3]}")
+    return len(new_keys)
+
+
 def precheck(
     drive: DriveClient,
     prefix_folder_id: str,
