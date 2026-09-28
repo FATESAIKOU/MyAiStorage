@@ -158,14 +158,25 @@ def test_publish_api_is_off_by_default(tmp_path: Path):
 # ── 2. opencode.json：檔案引用而非明文 ───────────────────────────────────
 
 
-def _render(tmp_path: Path, provider: str, model: str) -> subprocess.CompletedProcess:
+def _render(
+    tmp_path: Path, provider: str, model: str, *,
+    with_key: bool = True, force_no_key: bool = False,
+) -> subprocess.CompletedProcess:
+    """render-config（唯讀渲染）。
+
+    `force_no_key=True` 用 `AISTORAGE_FORCE_NO_KEY=1` 模擬「沒有金鑰檔」，
+    那是免金鑰路徑唯一可以在主機上測到的入口。
+    """
     secrets = tmp_path / "secrets"
     secrets.mkdir(exist_ok=True)
-    (secrets / f"llm-{provider}.key").write_text("placeholder-not-a-secret\n")
+    if with_key:
+        (secrets / f"llm-{provider}.key").write_text("placeholder-not-a-secret\n")
+    env = dict(os.environ, AISTORAGE_SECRETS_DIR=str(secrets))
+    if force_no_key:
+        env["AISTORAGE_FORCE_NO_KEY"] = "1"
     return subprocess.run(
         ["bash", str(ENTRYPOINT), "render-config", provider, model, str(BASE_JSON)],
-        capture_output=True, text=True, check=False,
-        env=dict(os.environ, AISTORAGE_SECRETS_DIR=str(secrets)),
+        capture_output=True, text=True, check=False, env=env,
     )
 
 
@@ -174,8 +185,9 @@ def test_generated_config_uses_file_reference_for_the_key(tmp_path: Path):
     assert proc.returncode == 0, proc.stderr
     cfg = json.loads(proc.stdout)
     assert cfg["model"] == "opencode/space-bunny-free"
+    # 檔案引用指向 ${SECRETS_DIR}（容器內就是 /secrets）
     assert cfg["provider"]["opencode"]["options"]["apiKey"] == \
-        "{file:/secrets/llm-opencode.key}"
+        f"{{file:{tmp_path}/secrets/llm-opencode.key}}"
     # 檔案裡**沒有**金鑰內容，也沒有任何秘密
     assert "placeholder-not-a-secret" not in proc.stdout
     # plugin 與 skill 說明來自唯讀的 /opt/aistorage
@@ -183,6 +195,61 @@ def test_generated_config_uses_file_reference_for_the_key(tmp_path: Path):
     assert cfg["skills"]["paths"] == ["/opt/aistorage/opencode/skills"]
     # opencode 不得讀寫 /secrets（工具層的權限）
     assert cfg["permission"]["external_directory"]["/secrets/**"] == "deny"
+
+
+def test_keyless_provider_needs_no_key_file(tmp_path: Path):
+    """opencode zen 的免費模型匿名可用，沒有金鑰檔也要能產生設定。
+
+    而且**不能**留下指向不存在檔案的 `{file:}` 參照——實測那樣連
+    `POST /session` 都會 400。
+    """
+    proc = _render(tmp_path, "opencode", "opencode/space-bunny-free",
+                   with_key=False, force_no_key=True)
+    assert proc.returncode == 0, proc.stderr
+    cfg = json.loads(proc.stdout)
+    assert cfg["model"] == "opencode/space-bunny-free"
+    assert "apiKey" not in json.dumps(cfg), "免金鑰時設定裡不該出現 apiKey"
+    assert cfg.get("provider", {}) == {}, "免金鑰時整個 provider 設定要被移除"
+
+
+def test_render_config_is_pure_rendering(tmp_path: Path):
+    """`render-config` 是唯讀渲染：主機上沒有金鑰檔時**不會**改設定。
+
+    否則「渲染出來的設定」和「serve 真正用的設定」會不一致。
+    免金鑰的路徑用 `AISTORAGE_FORCE_NO_KEY=1` 模擬。
+    """
+    proc = _render(tmp_path, "openai", "openai/gpt-4o", with_key=False)
+    assert proc.returncode == 0, proc.stderr
+    cfg = json.loads(proc.stdout)
+    assert cfg["provider"]["openai"]["options"]["apiKey"].startswith("{file:")
+
+
+def test_keyless_provider_still_uses_the_key_when_present(tmp_path: Path):
+    """免金鑰不代表禁止金鑰：有檔案就照樣用（白名單規則不變）。"""
+    proc = _render(tmp_path, "opencode", "opencode/space-bunny-free", with_key=True)
+    cfg = json.loads(proc.stdout)
+    assert cfg["provider"]["opencode"]["options"]["apiKey"].startswith("{file:")
+
+
+def test_other_providers_still_require_a_key_file(tmp_path: Path):
+    """只有清單裡的 provider 免金鑰；別的照舊要金鑰檔。"""
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    (secrets / "rclone-worker.conf").write_text("[gdrive]\n")
+    (secrets / "signing.key").write_text("y" * 32 + "\n")
+    work = tmp_path / "work"
+    work.mkdir()
+    proc = subprocess.run(
+        ["bash", str(ENTRYPOINT), "serve"],
+        capture_output=True, text=True, check=False,
+        env={k: v for k, v in os.environ.items()
+             if not k.startswith(("ANTHROPIC", "CLAUDE"))}
+        | {"AISTORAGE_SECRETS_DIR": str(secrets), "HOME": str(work),
+           "AISTORAGE_MODEL": "ollama-cloud/deepseek",
+           "AISTORAGE_OPENCODE_TEMPLATE": str(BASE_JSON)},
+    )
+    assert proc.returncode != 0
+    assert "缺少 LLM 金鑰" in proc.stderr
 
 
 def test_generated_config_refuses_mismatched_provider(tmp_path: Path):
@@ -244,6 +311,48 @@ def test_entrypoint_refuses_env_auth_json(tmp_path: Path):
     )
     assert proc.returncode != 0
     assert "ANTHROPIC_API_KEY" in proc.stderr
+
+
+def test_entrypoint_refuses_claude_even_on_the_debug_path(tmp_path: Path):
+    """除錯路徑（直接執行指令）也必須擋 Claude 的憑證（review-g5-6 L1）。
+
+    否則「拒絕啟動」只要走 `bash -c '...'` 就繞得過去。
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".claude.json").write_text("{}")
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("ANTHROPIC", "CLAUDE"))}
+    proc = subprocess.run(
+        ["bash", str(ENTRYPOINT), "echo", "不該執行到這裡"],
+        capture_output=True, text=True, check=False,
+        env=dict(env, HOME=str(work),
+                 AISTORAGE_SECRETS_DIR=str(tmp_path / "none")),
+    )
+    assert proc.returncode != 0
+    assert "拒絕啟動" in proc.stderr
+    assert "不該執行到這裡" not in proc.stdout
+
+
+def test_entrypoint_file_checks_follow_home_not_hardcoded_work(tmp_path: Path):
+    """檔案檢查要用 ${HOME}：容器內 HOME=/work，但測試把 HOME 指到別處（review-g5-6 L1）。"""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".config" / "opencode").mkdir(parents=True)
+    (home / ".config" / "opencode" / "auth.json").write_text("{}")
+    # 測試主機的環境變數裡可能就有 Claude 的（跑測試的人自己就在用），
+    # 那會讓環境變數檢查先擋下來，看不到檔案檢查
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("ANTHROPIC", "CLAUDE"))}
+    proc = subprocess.run(
+        ["bash", str(ENTRYPOINT), "serve"],
+        capture_output=True, text=True, check=False,
+        env=dict(env, HOME=str(home),
+                 AISTORAGE_SECRETS_DIR=str(tmp_path / "secrets"),
+                 AISTORAGE_MODEL="opencode/space-bunny-free"),
+    )
+    assert proc.returncode != 0
+    assert "auth.json" in proc.stderr
 
 
 # ── 3. 邊界：腳本與 image 不該帶的東西 ───────────────────────────────────

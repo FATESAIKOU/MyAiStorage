@@ -23,6 +23,8 @@
 # 選項：
 #   --profile <profile>     必填。決定秘密目錄與簽章金鑰所屬 profile。
 #   --model <p/m>           必填。<provider>/<model>；金鑰取 llm-<provider>.key。
+#                           免金鑰的 provider（見 AISTORAGE_KEYLESS_PROVIDERS，
+#                           預設 opencode）沒有金鑰檔也能啟動。
 #                           依 PM 的隊員模型順序挑當下有額度的（不用 Claude）。
 #   --no-tui                只啟動 serve 與同步器，不開互動介面（測試／CI）。
 #   --publish-api [port]    把容器的 4096 埠發布到宿主機的 127.0.0.1（預設不發布），
@@ -46,6 +48,7 @@ usage() {
 }
 
 die() { echo "[run.sh] $*" >&2; exit 1; }
+note() { [ "${AISTORAGE_RESIDENT_QUIET:-0}" = "1" ] || echo "[run.sh] $*" >&2; }
 
 [ "$#" -ge 1 ] || usage
 case "$1" in
@@ -90,6 +93,17 @@ case "$model" in
 esac
 provider="${model%%/*}"
 llm_key="llm-${provider}.key"
+
+# 免金鑰的 provider：opencode zen 的免費模型（opencode/space-bunny-free 等）
+# 匿名可用、依 IP 限流，不需要 apiKey。實測（2026-09-28，容器內、沒有
+# auth.json、沒有任何金鑰檔）：`回覆 OK` 4 秒回完、finish=stop、cost=0。
+# **白名單規則不變**：目錄裡有 llm-<provider>.key 照樣掛載、照樣使用；
+# 只是這個 provider 沒有金鑰也能啟動。
+keyless_providers="${AISTORAGE_KEYLESS_PROVIDERS:-opencode}"
+provider_needs_no_key=0
+for kp in $keyless_providers; do
+  [ "$kp" = "$provider" ] && provider_needs_no_key=1
+done
 
 secrets_root="${AISTORAGE_RESIDENT_ROOT:-${HOME}/.config/aistorage/resident}"
 work_root="${AISTORAGE_WORK_ROOT:-${HOME}/.local/share/aistorage/work}"
@@ -144,7 +158,17 @@ need() {
     [ "$found" = 1 ] || die "缺少必要檔案：${profile_dir}/${n}"
   done
 }
-need rclone-worker.conf signing.key "$llm_key"
+need rclone-worker.conf signing.key
+if [ "$provider_needs_no_key" = "1" ]; then
+  # 免金鑰的 provider：金鑰檔**可有可無**；沒有就在啟動訊息裡說明
+  if [ -f "${profile_dir}/${llm_key}" ]; then
+    note "provider=${provider} 免金鑰，但目錄裡有 ${llm_key} → 照樣掛載使用"
+  else
+    note "provider=${provider} 免金鑰（匿名可用），不需要 ${llm_key}"
+  fi
+else
+  need "$llm_key"
+fi
 
 work_dir="${work_root}/${name}"
 mkdir -p "$work_dir"

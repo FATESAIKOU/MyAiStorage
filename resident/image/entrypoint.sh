@@ -57,12 +57,30 @@ refuse_claude() {
   done
 }
 
+# ── 免金鑰的 provider ──────────────────────────────────────────────────
+# opencode zen 的免費模型（opencode/space-bunny-free 等）匿名可用、依 IP 限流，
+# 不需要 apiKey。實測（2026-09-28，容器內、沒有 auth.json、沒有任何金鑰檔）：
+# `回覆 OK` 4 秒回完、finish=stop、cost=0。
+# 這裡只是「不要求金鑰檔」；白名單規則不變（你還是可以放 llm-<provider>.key，
+# 有的話照樣掛載並使用）。
+KEYLESS_PROVIDERS="${AISTORAGE_KEYLESS_PROVIDERS:-opencode}"
+
+provider_needs_no_key() {
+  local provider="$1" p
+  for p in $KEYLESS_PROVIDERS; do
+    [ "$p" = "$provider" ] && return 0
+  done
+  return 1
+}
+
 # ── 產生 opencode.json（唯讀輸出模式可單獨測試）──────────────────────────
 # 用法：entrypoint.sh render-config <provider> <model> [base.json]
 # require_key=0 時不檢查金鑰檔是否存在（render-config 模式：只驗證範本與替換結果）
 render_config() {
   local provider="$1" model="$2" template="${3:-$OPENCODE_TEMPLATE}" require_key="${4:-1}"
-  local key_file="/secrets/llm-${provider}.key"
+  # 用 ${SECRETS_DIR}（容器內就是 /secrets）而不是寫死 /secrets：
+  # 這樣在主機上測 render-config 時也能真的驗到「有金鑰／沒金鑰」兩條路。
+  local key_file="${SECRETS_DIR}/llm-${provider}.key"
   [ -n "$provider" ] || die "render-config 需要 provider"
   [ -n "$model" ] || die "render-config 需要 model（格式 <provider>/<model>）"
   case "$model" in
@@ -74,8 +92,27 @@ render_config() {
     *) die "model 的 provider（${model%%/*}）與指定的 provider（${provider}）不一致" ;;
   esac
   [ -f "$template" ] || die "找不到 opencode 設定範本：${template}"
-  if [ "$require_key" = "1" ]; then
-    [ -f "$key_file" ] || die "缺少 LLM 金鑰：${key_file}（依 --model 的 provider 選擇）"
+  # 沒有金鑰檔就是「這個 provider 匿名可用」（例如 opencode zen 的免費模型：
+  # 匿名、依 IP 限流）。這種情況**整個移除 provider 設定**，不要留一個指向
+  # 不存在檔案的 {file:} 參照——實測那樣連 POST /session 都會 400。
+  # 有金鑰 → 檔案引用；沒有金鑰 → 要嘛是免金鑰的 provider（移除 provider 區塊），
+  # 要嘛直接拒絕啟動。`render-config`（require_key=0）是**唯讀渲染**模式：主機上
+  # 沒有 /secrets 很正常，所以那個模式不做這個判斷、也不移除 provider 區塊。
+  # AISTORAGE_FORCE_NO_KEY=1 可以在渲染模式下模擬「沒有金鑰檔」，給測試用。
+  have_key=0
+  if [ -f "$key_file" ]; then
+    have_key=1
+  elif [ "${AISTORAGE_FORCE_NO_KEY:-0}" = "1" ]; then
+    have_key=0
+    echo "[entrypoint] AISTORAGE_FORCE_NO_KEY=1：模擬沒有金鑰檔" >&2
+  elif [ "$require_key" = "1" ]; then
+    if provider_needs_no_key "$provider"; then
+      echo "[entrypoint] provider=${provider} 免金鑰（匿名可用），產生的設定不會帶 apiKey" >&2
+    else
+      die "缺少 LLM 金鑰：${key_file}（依 --model 的 provider 選擇）"
+    fi
+  else
+    have_key=1   # 唯讀渲染：維持範本原樣（不因為主機上沒有檔案就改設定）
   fi
 
   local out
@@ -85,6 +122,15 @@ render_config() {
       -e "s|__PROVIDER__|${provider}|g" \
       -e "s|__API_KEY_FILE__|{file:${key_file}}|g" \
       "$template" > "$out"
+  if [ "$have_key" = "0" ]; then
+    local trimmed
+    trimmed="$(mktemp)"
+    if ! jq --arg p "$provider" 'if .provider[$p] then .provider |= del(.[$p]) else . end' \
+         "$out" > "$trimmed"; then
+      rm -f "$out" "$trimmed"; die "移除免金鑰 provider 的設定失敗（範本：${template}）"
+    fi
+    mv "$trimmed" "$out"
+  fi
   if ! jq -e . "$out" >/dev/null; then
     rm -f "$out"; die "產生的 opencode.json 不是合法 JSON（範本：${template}）"
   fi
@@ -104,7 +150,13 @@ mode="${1:-serve}"
 case "$mode" in
   render-config)
     shift
-    render_config "$@" 0   # 唯讀渲染：金鑰檔存在與否由 serve 模式檢查
+    # 第 3 個參數是「範本路徑」，沒有給就留空讓 render_config 用預設。
+    # （直接 `render_config "$@" 0` 會把 require_key 的 0 塞到範本的位置。）
+    case "$#" in
+      3) render_config "$1" "$2" "$3" 0 ;;
+      2) render_config "$1" "$2" "" 0 ;;
+      *) usage ;;
+    esac
     exit 0
     ;;
   serve) ;;

@@ -64,7 +64,7 @@ session，加 `--publish-api 4096`（把容器的 4096 埠發布到宿主機的 
 | `sa-reader.json` | 讀取身分（SA，**沒有**儲存配額、不能建立檔案） | 同步器、skill 的讀取 |
 | `signing.key` | 該 profile 的簽章私鑰（32 bytes Ed25519） | 同步器、skill 組項目 |
 | `reader.json` | 讀取設定（manifest id 等，**不是秘密**） | 同步器、skill |
-| `llm-<provider>.key` | LLM 金鑰（**只掛 `--model` 指定的那個 provider**） | opencode |
+| `llm-<provider>.key` | LLM 金鑰（**只掛 `--model` 指定的那個 provider**）。免金鑰的 provider 可以沒有（見下） | opencode |
 | `gh-pat-actions.txt` | 選用，5.3 觸發提交流程（`workflow_dispatch` 權限） | skill 的 `sync-and-commit` |
 
 目錄裡出現**任何不在白名單的檔名就拒絕啟動**並列出檔名——不是默默忽略。這樣
@@ -81,6 +81,23 @@ provider 都是**設定值**，不寫死在 image 裡。image 裡沒有任何 Cl
 或 `/work` 底下出現 `.claude*`、`~/.config/anthropic`、
 `~/.config/opencode/auth.json`（opencode 自己寫出來的明文憑證）就**拒絕啟動**
 並提示刪除。
+
+### 免金鑰的 provider（`AISTORAGE_KEYLESS_PROVIDERS`）
+
+預設清單是 `opencode`：**opencode zen 的免費模型（`opencode/space-bunny-free`
+等）匿名可用、依 IP 限流，不需要 apiKey**。實測（2026-09-28，容器內、沒有
+`auth.json`、沒有任何金鑰檔）：`回覆 OK` 4 秒回完、`finish=stop`、`cost=0`；
+用 `resident/run.sh` 起完整的測試 profile 容器再問一次，一樣回 `OK`。
+
+- `run.sh`：這個 provider **不要求** `llm-<provider>.key`，啟動訊息會說明；
+  目錄裡**有**這個檔案就照樣掛載、照樣使用（白名單規則不變）。
+- `entrypoint.sh`：沒有金鑰檔時，產生的 `opencode.json` 會**整個移除 provider
+  區塊**，不會留下 `{file:/secrets/llm-<provider>.key}` 這種指向不存在檔案的參照。
+  這一點很重要：實測 `apiKey` 指向佔位值或不存在的檔案時，opencode 連
+  `POST /session` 都會回 **400**，而且訊息不明。**所以不要放佔位值金鑰**。
+
+其他 provider（例如 `ollama-cloud`）照舊要金鑰檔，缺了會明確拒絕啟動。
+要加別的免金鑰 provider：`AISTORAGE_KEYLESS_PROVIDERS="opencode,ollama-cloud"`。
 
 ### 為什麼 LLM 金鑰是「檔案引用」
 

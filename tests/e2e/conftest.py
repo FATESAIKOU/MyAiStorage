@@ -130,7 +130,13 @@ def e2e_settings() -> dict[str, Any]:
         )
     model = os.environ.get("AISTORAGE_E2E_MODEL", DEFAULT_E2E_MODEL)
     provider = model.split("/", 1)[0] if "/" in model else "opencode"
-    required = (*REQUIRED_PROFILE_FILES, f"llm-{provider}.key")
+    # 免金鑰的 provider（opencode zen 的免費模型匿名可用、依 IP 限流）不需要
+    # `llm-<provider>.key`。判斷和 resident/run.sh、resident/image/entrypoint.sh
+    # 、scripts/e2e_setup.py 用同一個環境變數與同一份預設清單。
+    keyless = (os.environ.get("AISTORAGE_KEYLESS_PROVIDERS") or "opencode").split()
+    required = REQUIRED_PROFILE_FILES + (
+        () if provider in keyless else (f"llm-{provider}.key",)
+    )
     missing = [name for name in required if not (profile_dir / name).is_file()]
     if missing:
         raise MissingE2ESetting(

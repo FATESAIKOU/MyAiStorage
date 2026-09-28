@@ -14,10 +14,13 @@
 2. `resident/build.sh` 建好住民 image；
 3. 測試用 profile 的祕密目錄（**與正式目錄分開**）：
    `~/.config/aistorage/resident-e2e/<profile>/` 內有
-   `rclone-worker.conf`、`sa-reader.json`、`signing.key`、`reader.json`
-   與對應 provider 的 `llm-<provider>.key`。
-   profile 名稱預設從 `reader.e2e.json` 的 `inbox_folder_ids` 唯一條目取得；
-   正式的 `resident/` 根目錄一律拒絕（E-P4）。
+   `rclone-worker.conf`、`sa-reader.json`、`signing.key`、`reader.json`。
+   profile 名稱預設從 `reader.e2e.json` 的 `inbox_folder_ids` 唯一條目取得
+   （`scripts/e2e_setup.py` 寫的是 `mac-opencode-test`，`AISTORAGE_E2E_PROFILE`
+   可覆寫）；正式的 `resident/` 根目錄一律拒絕（E-P4）。
+   `llm-<provider>.key` **只在該 provider 需要金鑰時**才需要——預設模型
+   `opencode/space-bunny-free` 屬於免金鑰的 provider（見下一節），所以
+   `setup` 不會放這個檔案，放了反而會讓 opencode 認證失敗。
 
 `scripts/e2e_setup.py` 目前尚未完成的部分（**A 線**，已列給 PM）：
 
@@ -28,7 +31,18 @@
 - `reader.e2e.json` 的 `inbox_folder_ids` 只放測試 profile 的收件匣 id；
 - 測試用的 LLM 金鑰（`llm-<provider>.key`）由使用者提供，setup 不產生。
 
+Foundry 的端到端（9.2／9.5 的 artifact 部分）另外等提交流程接上 Foundry
+（F-H1〜F-H3）：註冊工具 `aistorage_register_artifact` 已經完成，但收件匣的
+artifact 目前只會被 DEFER、發佈端也還沒寫 `object_file_id`。那兩個測試以
+`xfail(strict=True)` 鎖住，修好會 XPASS 提醒。
+
 設定缺少時一律 FAIL，不用 `pytest.skip` 掩蓋（PM 規範）。
+
+### 已實測（2026-09-28）
+
+`resident/run.sh` 起測試 profile 的容器（免金鑰）後，
+`POST /session/{id}/message` 問「回覆 OK」→ 回 `OK`、
+`finish=stop`、`cost=0`。所以第 9 組的容器互動測試**不需要**任何 LLM 金鑰。
 
 ## 已知的範圍限制（E-M1）
 
