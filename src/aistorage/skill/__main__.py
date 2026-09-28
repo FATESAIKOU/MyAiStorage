@@ -26,6 +26,8 @@ import sys
 from typing import Any, Sequence
 
 from aistorage.clock import SystemClock
+from aistorage.errors import AiStorageError
+from aistorage.reader.client import AccessDenied
 from aistorage.syncer.__main__ import _converter, _deps, _reader
 from aistorage.syncer.config import ConfigError, SyncerConfig
 from aistorage.syncer.state import SyncState
@@ -177,9 +179,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     except MainSessionRequired as e:
         print(f"[skill] {e}", file=sys.stderr)
         return 4
+    except AccessDenied as e:
+        # 讀取視圖還沒發佈，或 SA 身分沒有讀取權：講清楚是「讀不到」，
+        # 不要丟 traceback 給 AI（plugin 會把 stderr 原樣回給模型）。
+        print(
+            f"[skill] 讀不到 Agora 的讀取視圖：{e}\n"
+            "[skill] 這是 fail-closed：不能確認內容有沒有進去，就不會寫任何東西。"
+            "請先讓提交流程發佈讀取視圖（6.3 健康檢查）。",
+            file=sys.stderr,
+        )
+        return 5
     except (SkillError, ConfigError) as e:
         print(f"[skill] {type(e).__name__}: {e}", file=sys.stderr)
         return 2
+    except AiStorageError as e:
+        print(f"[skill] {type(e).__name__}: {e}", file=sys.stderr)
+        return 6
 
 
 if __name__ == "__main__":

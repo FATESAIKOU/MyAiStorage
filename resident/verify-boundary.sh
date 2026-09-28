@@ -53,17 +53,49 @@ else
   secrets_writable="read-only"
 fi
 # ── 7. 秘密的值不在 /work 裡 ──────────────────────────────────────────
+# 比對前一定要先把**太短的行**濾掉：`grep -F -f` 會把 pattern 檔裡的每一行
+# 都當成一個字串比對，而 JSON／conf 裡有 `{`、`}`、`},` 這種 1～2 字元的行。
+# 實測：sa-reader.json 有一行是單字元，於是 /work 底下 opencode 裝的
+# node_modules 裡幾千個 JSON 檔全部「命中」，整個檢查變成沒有訊號。
+# 秘密的實質內容（token／私鑰／client_email…）都遠超過這個門檻。
+#
+# **不能用 `${SECRETS_DIR}/*` 列舉**：`/secrets` 是 0711（可穿越、不可列目錄），
+# glob 不會展開，迴圈整個不跑，`secret_leak_hits` 會永遠是 0（假的通過）。
+# 所以照白名單一個一個指名。
+#
+# `reader.json` **不掃**：它是刻意放在 /secrets 的非秘密設定（manifest id、
+# inbox folder id），裡面都是 `  "inbox_folder_ids": {` 這種通用 JSON 鍵，
+# 拿它去比對 /work 底下任何一個 JSON 都會命中（實測會撞到 schemas/*.json），
+# 只會製造假警報。真正的秘密是 rclone-worker.conf／sa-reader.json／
+# signing.key／llm-<provider>.key／gh-pat-actions.txt。
+MIN_PATTERN_LEN=12
+SECRET_NAMES="rclone-worker.conf sa-reader.json signing.key gh-pat-actions.txt"
+# LLM 金鑰的檔名帶 provider，run.sh 只掛 `--model` 指定的那一個。沒有 glob
+# 可用，所以探幾個期 1 可能的 provider（不存在的檔案會被 [ -f ] 跳過），
+# 也可以用 AISTORAGE_LLM_KEY_NAME 指定實際的名稱。
+SECRET_NAMES="$SECRET_NAMES ${AISTORAGE_LLM_KEY_NAME:-llm-opencode.key llm-ollama.key llm-openrouter.key}"
 leak_total=0
 leak_detail=""
-for f in "${SECRETS_DIR}"/*; do
+leak_scanned=0
+for name in $SECRET_NAMES; do
+  f="${SECRETS_DIR}/${name}"
   [ -f "$f" ] || continue
-  # 檔案太小（<8 bytes）容易誤判，跳過
-  size="$(wc -c < "$f" | tr -d ' ')"
-  [ "$size" -ge 8 ] || continue
-  count="$(grep -r -c -F -f "$f" "$WORK_DIR" 2>/dev/null | awk -F: '$NF>0{n++} END{print n+0}')"
+  leak_scanned=$((leak_scanned + 1))
+  # 夠長的行才是 pattern；短行只是格式
+  patterns="$(mktemp)"
+  awk -v n="$MIN_PATTERN_LEN" 'length($0) >= n' "$f" > "$patterns"
+  if [ ! -s "$patterns" ]; then
+    # 全部都是短行（例如只有一行 token 但檔案被換行切爛）：整個檔案當一個 pattern
+    cp "$f" "$patterns"
+  fi
+  # 計數的是「有多少個檔案命中」，不是命中行數（輸出只放計數，不放內容）
+  count="$(grep -r -c -F -f "$patterns" "$WORK_DIR" 2>/dev/null \
+    | awk -F: '$NF>0{n++} END{print n+0}')"
+  rm -f "$patterns"
   leak_total=$((leak_total + count))
-  leak_detail="${leak_detail}$(basename "$f")=${count} "
+  leak_detail="${leak_detail}${name}=${count} "
 done
+note "秘密比對掃過的檔案數：${leak_scanned}"
 # ── 8. Claude 憑證 ─────────────────────────────────────────────────────
 claude_env="$(env | sed 's/=.*//' | grep -E '^(ANTHROPIC|CLAUDE)' | tr '\n' ' ')"
 claude_files=""
@@ -71,6 +103,12 @@ for p in /work/.claude.json /work/.claude /work/.config/anthropic \
          /work/.config/opencode/auth.json /work/.local/share/opencode/auth.json; do
   [ -e "$p" ] && claude_files="${claude_files}${p} "
 done
+
+# 一個秘密檔都沒掃到＝等於沒檢查（/secrets 不可列目錄時 glob 不會展開）
+if [ "$leak_scanned" -eq 0 ]; then
+  fail=1
+  leak_detail="沒有掃到任何秘密檔（檢查無效） "
+fi
 
 if [ "$as_json" = 1 ]; then
   cat <<JSON
@@ -85,6 +123,7 @@ if [ "$as_json" = 1 ]; then
   "secrets_writable": "${secrets_writable}",
   "secrets_mounts_not_readonly": ${secrets_mounts_rw:-0},
   "secret_leak_hits": ${leak_total},
+  "secret_leak_scanned": ${leak_scanned},
   "secret_leak_detail": "${leak_detail}",
   "claude_env": "$(printf '%s' "$claude_env" | sed 's/"/\\"/g')",
   "claude_files": "$(printf '%s' "$claude_files" | sed 's/"/\\"/g')"

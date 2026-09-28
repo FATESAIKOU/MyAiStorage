@@ -328,6 +328,131 @@ def test_verify_boundary_checks_the_required_items():
         assert needle in text, f"verify-boundary.sh 少了：{needle}"
 
 
+def test_leak_scan_ignores_trivially_short_lines(tmp_path: Path):
+    """`grep -F -f` 會把 pattern 檔裡的短行也拿去比對。
+
+    JSON／conf 裡有 `}`、`},` 這種 1～2 字元的行；不濾掉���話，/work 底下
+    opencode 裝的 node_modules 會讓幾千個檔案「命中」，檢查失去訊號。
+    """
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    # 檔名必須在白名單裡（腳本照白名單指名，不用 glob）
+    (secrets / "sa-reader.json").write_text(
+        '{\n  "type": "service_account",\n  "private_key_id": "0123456789abcdef",\n}\n',
+        encoding="utf-8",
+    )
+    (secrets / "signing.key").write_text("x" * 4 + "\n", encoding="utf-8")
+    (secrets / "llm-opencode.key").write_text("sk-placeholder-value-000000\n", encoding="utf-8")
+    work = tmp_path / "work"
+    (work / "node_modules").mkdir(parents=True)
+    # 只有 JSON 標點相同，沒有任何秘密的實質內容
+    (work / "node_modules" / "package.json").write_text(
+        '{\n  "name": "zod",\n}\n', encoding="utf-8"
+    )
+    proc = subprocess.run(
+        ["bash", str(VERIFY_SH), "--json"],
+        capture_output=True, text=True, check=False,
+        env=dict(os.environ, AISTORAGE_SECRETS_DIR=str(secrets),
+                 AISTORAGE_WORK_ROOT=str(work)),
+    )
+    assert proc.returncode is not None
+    data = json.loads(proc.stdout)
+    assert data["secret_leak_scanned"] == 3, proc.stdout
+    assert data["secret_leak_hits"] == 0, proc.stdout
+
+
+def test_leak_scan_skips_reader_json_which_is_not_a_secret(tmp_path: Path):
+    """reader.json 是刻意放在 /secrets 的**非秘密**設定。
+
+    掃它只會假警報：它裡面是 `  "inbox_folder_ids": {` 這種通用 JSON 鍵，
+    會撞到 /work 底下任何一個 JSON（實測撞到 schemas/identity-registry）。
+    """
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    (secrets / "reader.json").write_text(
+        '{\n  "format": "aistorage.reader/v1",\n  "inbox_folder_ids": {\n'
+        '    "mac-opencode": "0AbCdEfGhIjKlMnOpQrStUvWxYz"\n  }\n}\n',
+        encoding="utf-8",
+    )
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "schema.json").write_text(
+        '{\n  "type": "object",\n  "required": [\n    "inbox_folder_ids"\n  ]\n}\n',
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        ["bash", str(VERIFY_SH), "--json"],
+        capture_output=True, text=True, check=False,
+        env=dict(os.environ, AISTORAGE_SECRETS_DIR=str(secrets),
+                 AISTORAGE_WORK_ROOT=str(work)),
+    )
+    data = json.loads(proc.stdout)
+    # 只有 reader.json → 一個秘密都沒掃到 → 檢查無效，必須失敗（不是「0 命中」）
+    assert data["secret_leak_scanned"] == 0, proc.stdout
+    assert proc.returncode != 0
+    assert "檢查無效" in data["secret_leak_detail"]
+
+
+def test_leak_scan_fails_when_no_secret_file_can_be_read(tmp_path: Path):
+    """`/secrets` 是 0711（不可列目錄）→ glob 不會展開。
+
+    那時迴圈一個檔案都沒掃到，`secret_leak_hits` 會是 0（假的通過）。
+    腳本必須自己判定「沒掃到就是沒檢查」並失敗。
+    """
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    (secrets / "signing.key").write_text("y" * 32 + "\n", encoding="utf-8")
+    secrets.chmod(0o711)          # 可穿越、不可列目錄
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "clean.txt").write_text("沒有秘密\n", encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(VERIFY_SH), "--json"],
+        capture_output=True, text=True, check=False,
+        env=dict(os.environ, AISTORAGE_SECRETS_DIR=str(secrets),
+                 AISTORAGE_WORK_ROOT=str(work)),
+    )
+    data = json.loads(proc.stdout)
+    # 目錄不可列，但已知路徑仍讀得到 → 掃到 1 個 → 檢查有效、0 命中
+    assert data["secret_leak_scanned"] == 1, proc.stdout
+    assert data["secret_leak_hits"] == 0
+    secrets.chmod(0o700)
+
+    # 真的什麼都讀不到（檔案不存在）→ 掃過 0 個 → 必須失敗
+    shutil.rmtree(secrets)
+    proc2 = subprocess.run(
+        ["bash", str(VERIFY_SH), "--json"],
+        capture_output=True, text=True, check=False,
+        env=dict(os.environ, AISTORAGE_SECRETS_DIR=str(secrets),
+                 AISTORAGE_WORK_ROOT=str(work)),
+    )
+    data2 = json.loads(proc2.stdout)
+    assert data2["secret_leak_scanned"] == 0, proc2.stdout
+    assert proc2.returncode != 0, "沒掃到秘密檔時不該回報通過"
+
+
+def test_leak_scan_still_catches_a_real_leak(tmp_path: Path):
+    """濾掉短行不能把真正的洩漏也濾掉。"""
+    secrets = tmp_path / "secrets"
+    secrets.mkdir()
+    token = "ya29.a0AfH6SMBexampletokenvalue0123456789"
+    # 檔名必須在白名單裡：腳本不再用 glob（/secrets 不可列目錄）
+    (secrets / "signing.key").write_text(token + "\n", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "leaked.log").write_text(f"Authorization: Bearer {token}\n", encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(VERIFY_SH), "--json"],
+        capture_output=True, text=True, check=False,
+        env=dict(os.environ, AISTORAGE_SECRETS_DIR=str(secrets),
+                 AISTORAGE_WORK_ROOT=str(work)),
+    )
+    data = json.loads(proc.stdout)
+    assert data["secret_leak_scanned"] == 1, proc.stdout
+    assert data["secret_leak_hits"] >= 1, proc.stdout
+    assert proc.returncode != 0, "偵測到洩漏時應該讓腳本失敗"
+
+
 def test_docs_resident_explains_whitelist_and_trust_scope():
     text = (REPO / "docs" / "resident.md").read_text(encoding="utf-8")
     for needle in ("rclone-worker.conf", "signing.key", "llm-<provider>.key",

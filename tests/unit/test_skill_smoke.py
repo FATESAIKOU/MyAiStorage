@@ -618,6 +618,27 @@ def test_skill_cli_whoami_prints_json(tmp_path: Path, monkeypatch: pytest.Monkey
     assert payload == {"session_id": "opencode:ses_1", "parent_id": None, "is_main": True}
 
 
+def test_skill_cli_reports_read_side_fail_closed_cleanly(tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch, capsys):
+    """讀取視圖還沒發佈時要講清楚「讀不到」，不要丟 traceback 給 AI。"""
+    from aistorage.reader.client import AccessDenied
+    from aistorage.skill import __main__ as cli
+
+    sd, env = _sd(tmp_path)
+    _main_session(sd, env)
+    monkeypatch.setattr(cli, "_sd", lambda: sd)
+
+    def _denied(*a, **k):
+        raise AccessDenied("讀取 manifest 被拒（無 Agora 讀取權）: 找不到檔案 (HTTP 404)")
+
+    monkeypatch.setattr(env["reader"], "find_sessions", _denied)
+    assert cli.main(["find", "--query", "任何東西"]) == 5
+    err = capsys.readouterr().err
+    assert "讀不到 Agora 的讀取視圖" in err
+    assert "fail-closed" in err
+    assert "Traceback" not in err, "不該把 traceback 回給模型"
+
+
 def test_skill_cli_exit_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys):
     """3＝被拒收（必須停下）、4＝主 Session 限定、2＝其他 SkillError。"""
     from aistorage.skill import __main__ as cli

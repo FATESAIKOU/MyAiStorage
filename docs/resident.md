@@ -107,8 +107,29 @@ resident/verify-boundary.sh --json     # 給存檔比對
 
 它會檢查並印出：環境變數的**名稱**、`/proc/mounts` 裡的 `/secrets` 與 `/work`、
 有沒有 `docker.sock`、`CapEff`、`/Users` 看不看得到、`/secrets` 是否真的不可寫、
-**秘密的值有沒有出現在 `/work` 裡**（`grep -cFf`，只輸出計數）、以及 Claude 相關
+**秘密的值有沒有出現在 `/work` 裡**（只輸出計數）、以及 Claude 相關
 的環境變數／檔案。任一項不過就以非零碼結束。
+
+### 「秘密沒有出現在 /work」這個檢查的兩個陷阱
+
+這兩點是 5.2 的容器驗收才發現的，5.1 證據裡記的「0 命中」其實是**假通過**：
+
+1. **不能用 `${SECRETS_DIR}/*` 列舉。** `/secrets` 是 `0711`（可穿越、不可列
+   目錄），glob 不會展開 → 迴圈一個檔案都沒掃到 → 命中數永遠是 0。
+   腳本改成照白名單指名，並輸出 `secret_leak_scanned`（實際掃過幾個檔案）；
+   掃過 0 個就算失敗，不准回報通過。
+2. **短行不能當 pattern。** `grep -F -f` 會把 pattern 檔的每一行都拿去比對，
+   而 JSON／conf 裡有 `{`、`}`、`},` 這種 1～2 字元的行。實測 `sa-reader.json`
+   有一行是單字元，於是 `/work` 底下 opencode 裝的 `node_modules` 裡幾千個
+   JSON 全部「命中」。腳本只取長度 ≥ 12 的行當 pattern。
+
+`reader.json` **不參與**這個掃描：它是刻意放在 `/secrets` 的非秘密設定
+（manifest id、inbox folder id），內容都是通用 JSON 鍵，拿它比對會撞到
+`/work/schemas/*.json`，只會製造假警報。真正要掃的是 `rclone-worker.conf`、
+`sa-reader.json`、`signing.key`、`llm-<provider>.key`、`gh-pat-actions.txt`。
+
+反向驗證（把 `signing.key` 複製到 `/work`）：掃描報 `signing.key=1` 並以非零碼
+結束。
 
 固定的邊界（Dockerfile 與 `run.sh` 一起保證）：
 
