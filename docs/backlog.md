@@ -54,3 +54,4 @@
 - 提交流程的釘選值寫回、清掃在 Actions cache 或自架 runner 下的行為（如果之後採用）。
 - Claude Code 的子代理（jsonl 裡的 isSidechain 紀錄）拆成獨立的 Agora Session（期 1 只保存在母 Session 的原始紀錄裡，閱讀版不含）。
 - 改寫（在 Agora 裡修改 Session 內容，例如遮蔽誤貼的秘密）：期 1 拿掉。要做的話，需要處理「來源端下一次同步會把原內容帶回來」的問題（例如遮蔽規則持續套用到之後的每一份快照）。
+- Foundry 的 link 型產出：期 1 的 schema 規定 link 必須有 URL，repo＋path 只是補充的出處；要讓 repo＋path 單獨成立，需要改 schema 與 build_artifact_item。
