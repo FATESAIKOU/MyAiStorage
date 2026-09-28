@@ -25,9 +25,10 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
-from typing import Any, Callable, Generator, Sequence
+from typing import Any, Callable, Generator, Iterator, Sequence
 import urllib.request
 
 import pytest
@@ -39,6 +40,16 @@ from aistorage.reader.config import ReaderConfig
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# e2e 環境鎖住在 scripts/e2e_setup.py（可執行的腳本，但函式可以直接用）
+if str(REPO_ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from e2e_setup import (  # noqa: E402 - 需要先補 sys.path
+    E2EEnvLocked,
+    acquire_e2e_lock,
+    e2e_lock_holder,
+    release_e2e_lock,
+)
 RUN_SH = REPO_ROOT / "resident" / "run.sh"
 
 CONFIG_DIR = REPO_ROOT / "config"
@@ -68,6 +79,9 @@ ENV_E2E_RCLONE_CONF = "AISTORAGE_E2E_RCLONE_CONF"
 ENV_E2E_PIN_KEY = "AISTORAGE_E2E_PIN_KEY"
 ENV_E2E_KNOWN_HOSTS = "AISTORAGE_E2E_KNOWN_HOSTS"
 ENV_E2E_WORKER_CONF = "AISTORAGE_E2E_WORKER_CONF"
+#: 設成 1 就不拿 e2e 環境鎖（只有自己知道在做什麼時才用；CI 上兩份 job 共用
+#: 同一個環境時，其中一份必須這樣，否則第二份會被自己的鎖擋住）
+ENV_E2E_NO_LOCK = "AISTORAGE_E2E_NO_LOCK"
 
 #: 容器內必要檔名（run.sh 的白名單）；缺任何一個 container 起不來。
 REQUIRED_PROFILE_FILES = ("rclone-worker.conf", "sa-reader.json", "signing.key", "reader.json")
@@ -99,8 +113,32 @@ def _require_file(path: Path, what: str, env_override: str | None = None) -> Pat
 
 
 @pytest.fixture(scope="session")
-def e2e_settings() -> dict[str, Any]:
-    """載入端到端驗收測試所需設定；缺檔時立即 FAIL。"""
+def e2e_settings() -> Iterator[dict[str, Any]]:
+    """載入端到端驗收測試所需設定；缺檔時立即 FAIL。
+
+    一開始就取得 e2e 環境鎖：連「設定不完整、驗證就失敗」的情況都要算有人在用，
+    否則別條線會在這場 e2e 剛起步時把環境 teardown 掉。
+    """
+    secrets_root = Path(
+        os.environ.get(ENV_E2E_SECRETS_ROOT, str(DEFAULT_E2E_SECRETS_ROOT))
+    )
+    take_lock = not os.environ.get(ENV_E2E_NO_LOCK)
+    if take_lock:
+        try:
+            acquire_e2e_lock(action="pytest e2e", secrets_root=secrets_root)
+        except E2EEnvLocked as e:
+            raise MissingE2ESetting(
+                f"另一場 e2e 正在用這個環境：{e}\n"
+                "請等它結束再跑（不要用 --force-unlock，除非確定對方已經卡死）。"
+            ) from e
+    try:
+        yield from _e2e_settings_locked(secrets_root)
+    finally:
+        if take_lock:
+            release_e2e_lock(secrets_root)
+
+
+def _e2e_settings_locked(secrets_root: Path) -> Iterator[dict[str, Any]]:
     committer_cfg_path = _require_file(COMMITTER_E2E_CONFIG, "Committer E2E 設定檔", ENV_COMMITTER_E2E)
     reader_cfg_path = _require_file(READER_E2E_CONFIG, "Reader E2E 設定檔", ENV_READER_E2E)
 
@@ -118,7 +156,6 @@ def e2e_settings() -> dict[str, Any]:
             profile = next(iter(mapping))
         else:
             profile = DEFAULT_E2E_PROFILE
-    secrets_root = Path(os.environ.get(ENV_E2E_SECRETS_ROOT, str(DEFAULT_E2E_SECRETS_ROOT)))
     if secrets_root.resolve() == PRODUCTION_SECRETS_ROOT.resolve():
         raise MissingE2ESetting(
             "E2E 禁止使用正式的 profile 秘密根目錄 "
@@ -165,7 +202,7 @@ def e2e_settings() -> dict[str, Any]:
         if not path.is_file():
             raise MissingE2ESetting(f"E2E 需要{what}（路徑: {path}），但不存在。")
 
-    return {
+    settings = {
         "committer_config_path": committer_cfg_path,
         "committer_config": committer_cfg,
         "reader_config_path": reader_cfg_path,
@@ -184,6 +221,8 @@ def e2e_settings() -> dict[str, Any]:
         # 同步器就會回「找不到收件匣 folder id」。所以這裡明確帶進去。
         "inbox_folder_id": _e2e_inbox_folder_id(reader_cfg, profile),
     }
+
+    yield settings
 
 
 def _e2e_inbox_folder_id(reader_cfg: dict[str, Any], profile: str) -> str:

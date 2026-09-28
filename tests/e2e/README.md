@@ -38,6 +38,25 @@ artifact 目前只會被 DEFER、發佈端也還沒寫 `object_file_id`。那兩
 
 設定缺少時一律 FAIL，不用 `pytest.skip` 掩蓋（PM 規範）。
 
+### e2e 環境鎖（單例環境，誰在用誰說話）
+
+e2e 環境是**單例**：Drive 上只有一個前綴、pin repo 只有一份釘選值、本機只有一份
+`config/*.e2e.json`。所以任何一條線跑 `--teardown`／`--recreate` 會直接摧毀另一條
+線正在跑的東西（實測踩過：別條線 teardown 把 profile 的 `reader.json` 刪掉，
+跑中的容器讀不到收件匣 id，`sync_once` 直接 `ConfigError`）。
+
+因此：
+
+- 鎖檔 `~/.config/aistorage/resident-e2e/.e2e-env.lock.json`，記著 **pid**、
+  啟動時間（epoch）、主機名與動作（`setup`／`teardown`／`pytest e2e`）；
+- `setup`、`--teardown`、`--recreate` 與 **pytest e2e 場次**都會持有它；
+- 持有者的 pid 還活著 → `--teardown`／`--recreate` **拒絕**並回 **75**
+  （`EX_TEMPFAIL`：暫時不可用，稍後再試），且在碰 Drive 之前就拒絕；
+- pid 已死（或鎖來自別的主機、鎖檔壞掉）→ 視為過期，可以接手；
+- 確認對方卡死時用 `--force-unlock` 硬拿，鎖檔會留下 `forced_by` 紀錄；
+- `AISTORAGE_E2E_NO_LOCK=1` 讓 pytest 不拿鎖（同一環境上並跑兩份 job 時，
+  第二份才需要，這時要自己確定不會互相摧毀）。
+
 ### 已實測（2026-09-28）
 
 `resident/run.sh` 起測試 profile 的容器（免金鑰）後，

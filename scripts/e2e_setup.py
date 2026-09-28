@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -530,6 +531,144 @@ def resolve_secrets_root(env: dict[str, str] | None = None) -> Path:
     return root
 
 
+# ── e2e 環境鎖 ────────────────────────────────────────────────────────────────
+#: e2e 環境是**單例**：Drive 上只有一個前綴、pin repo 只有一份釘選值、本機只有一份
+#: `config/*.e2e.json`。所以任何一條線跑 `--teardown`／`--recreate` 會直接摧毀另一條
+#: 線正在跑的東西（實測：別條線 teardown 把 profile 的 `reader.json` 刪掉，跑中的
+#: 容器讀不到收件匣 id，`sync_once` 直接 ConfigError）。
+E2E_LOCK_NAME = ".e2e-env.lock.json"
+
+
+class E2EEnvLocked(RuntimeError):
+    """e2e 環境正被別人使用（鎖檔存在且持有者還活著）。"""
+
+
+def e2e_lock_path(secrets_root: Path | None = None, env: dict[str, str] | None = None) -> Path:
+    """鎖檔路徑：``<測試秘密根目錄>/.e2e-env.lock.json``。
+
+    放秘密根目錄而不是 repo：鎖是「這台機器上這個環境有人在用」狀態，
+    跟某個 worktree 无关（多個 worktree 共用同一個 e2e 環境）。
+    """
+    root = secrets_root if secrets_root is not None else resolve_secrets_root(env)
+    return root / E2E_LOCK_NAME
+
+
+def read_e2e_lock(secrets_root: Path | None = None) -> dict[str, Any] | None:
+    """讀鎖檔；不存在或壞掉都當作沒有鎖（回 ``None``）。"""
+    path = e2e_lock_path(secrets_root)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _pid_alive(pid: int) -> bool:
+    """這個 pid 還活著嗎（同一台機器上）。"""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # 別人的行程：存在，但我們沒權限送訊號
+        return True
+    return True
+
+
+def e2e_lock_holder(
+    secrets_root: Path | None = None, *, now: float | None = None
+) -> dict[str, Any] | None:
+    """鎖的**有效**持有者；沒有鎖或鎖已過期就回 ``None``。
+
+    判定：pid 還活著（且是同一台機器）才算有人在用。pid 已死 → 過期，
+    可以接手；別的機器留下的鎖 → 無法驗證，也當過期。
+    """
+    data = read_e2e_lock(secrets_root)
+    if data is None:
+        return None
+    host = str(data.get("host") or "")
+    if host and host != _lock_host():
+        return None
+    try:
+        pid = int(data.get("pid"))
+    except (TypeError, ValueError):
+        return None
+    if not _pid_alive(pid):
+        return None
+    age_s: float | None = None
+    started = data.get("started_at")
+    if now is not None and isinstance(started, (int, float)):
+        age_s = max(0.0, now - float(started))
+    return {"pid": pid, "started_at": started, "action": data.get("action"),
+            "host": host, "age_s": age_s}
+
+
+def _lock_host() -> str:
+    return socket.gethostname()
+
+
+def acquire_e2e_lock(
+    *,
+    action: str,
+    secrets_root: Path | None = None,
+    force: bool = False,
+    now: float | None = None,
+) -> Path:
+    """取得 e2e 環境鎖；有人在用就丟 `E2EEnvLocked`。
+
+    `force=True` 等於 `--force-unlock`：明知有人在用也硬拿（真的要去救一個
+    卡死的環境時才用，而且要留痕在鎖檔的 `forced_by`）。
+    """
+    path = e2e_lock_path(secrets_root)
+    holder = e2e_lock_holder(secrets_root, now=now)
+    if holder is not None and holder["pid"] == os.getpid():
+        # 同一個行程重入（例如 --recreate 內部呼叫 run_teardown）：
+        # 不是「別人在用」，不必也不該 --force-unlock。
+        holder = None
+    if holder and not force:
+        raise E2EEnvLocked(
+            f"e2e 環境正被 pid {holder['pid']} 使用"
+            f"（{holder.get('action') or '未標明動作'}，開始於 {holder.get('started_at')}）。\n"
+            f"teardown／recreate 會摧毀對方正在跑的東西，所以拒絕。\n"
+            f"請等對方結束（鎖檔: {path}），或確認對方已經卡死後加 --force-unlock。"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "pid": os.getpid(),
+        "started_at": time.time() if now is None else now,
+        "host": _lock_host(),
+        "action": action,
+    }
+    if holder and force:
+        payload["forced_by"] = {"prev_pid": holder["pid"], "at": payload["started_at"]}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    if holder and force:
+        print(f"[e2e-lock] --force-unlock：從 pid {holder['pid']} 手上搶過 e2e 環境鎖")
+    return path
+
+
+def release_e2e_lock(secrets_root: Path | None = None, *, pid: int | None = None) -> bool:
+    """放掉鎖；只有自己持有的那份才會被刪掉。回傳是否真的刪了。"""
+    path = e2e_lock_path(secrets_root)
+    data = read_e2e_lock(secrets_root)
+    if data is None:
+        return False
+    owner = pid if pid is not None else os.getpid()
+    if int(data.get("pid") or -1) != owner:
+        return False
+    try:
+        path.unlink()
+    except OSError:
+        return False
+    return True
+
+
 def _place_secret(target: Path, source: Path, *, how: str = "link") -> str:
     """把秘密檔「以檔案本身」放到位（**絕不讀內容**）。
 
@@ -701,6 +840,7 @@ def run_setup(
     llm_key_source: Path | None = None,
     copy_secrets: bool = False,
     secrets_how: str = "link",
+    force_unlock: bool = False,
 ) -> dict[str, Any]:
     """執行完整 E2E 環境佈建。可重跑且具備冪等性。
 
@@ -713,6 +853,40 @@ def run_setup(
     """
     profile = profile or resolve_e2e_profile()
     secrets_root = secrets_root or resolve_secrets_root()
+    # setup 本身也是使用者：別人正在跑 e2e 時不要順手把前綴掃掉
+    acquire_e2e_lock(action="setup", secrets_root=secrets_root, force=force_unlock)
+    try:
+        return _setup_locked(
+            prefix_override=prefix_override,
+            state_file=state_file,
+            recreate=recreate,
+            pin_repo_url=pin_repo_url,
+            repo_suffix=repo_suffix,
+            profile=profile,
+            secrets_root=secrets_root,
+            model=model,
+            llm_key_source=llm_key_source,
+            copy_secrets=copy_secrets,
+            secrets_how=secrets_how,
+        )
+    finally:
+        release_e2e_lock(secrets_root)
+
+
+def _setup_locked(
+    *,
+    prefix_override: str | None,
+    state_file: Path,
+    recreate: bool,
+    pin_repo_url: str,
+    repo_suffix: str,
+    profile: str,
+    secrets_root: Path,
+    model: str | None,
+    llm_key_source: Path | None,
+    copy_secrets: bool,
+    secrets_how: str,
+) -> dict[str, Any]:
     model = model or os.environ.get(ENV_E2E_MODEL) or DEFAULT_E2E_MODEL
     test_root_id = read_test_folder_id(IDS_ENV)
     sa_email = read_sa_email(SA_READER_KEY)
@@ -771,7 +945,13 @@ def run_setup(
 
     if state_file.is_file() and recreate:
         print("[e2e-setup] 偵測到 --recreate，先執行 teardown...")
-        run_teardown(state_file=state_file)
+        # 走 public run_teardown（--recreate 的語意是「先 teardown 再 setup」，
+        # acceptance 測試訂的就是這個接縫）；鎖已由這個行程自己持有，重入不算阻擋
+        run_teardown(
+            state_file=state_file,
+            profile=profile,
+            secrets_root=secrets_root,
+        )
 
     ulid = generate_ulid()
     prefix_name = prefix_override or f"e2e-{ulid}"
@@ -1109,11 +1289,38 @@ def run_teardown(
     prefix_folder_id: str | None = None,
     profile: str | None = None,
     secrets_root: Path | None = None,
+    force_unlock: bool = False,
 ) -> int:
-    """依 file id 遞迴永久刪除整棵前綴樹，並清理本機暫存設定檔。"""
+    """依 file id 遞迴永久刪除整棵前綴樹，並清理本機暫存設定檔。
+
+    別人正在用這個 e2e 環境時**拒絕**（`E2EEnvLocked`）：teardown 會刪掉對方
+    正在跑的 Drive 前綴、pin 釘選值與本機設定檔。鎖已過期（持有者行程已死）
+    就當作沒有人用。
+    """
     test_root_id = read_test_folder_id(IDS_ENV)
     profile = profile or resolve_e2e_profile()
     secrets_root = secrets_root or resolve_secrets_root()
+    # 鎖在真正刪任何東西**之前**就取得：取得之後別人就進不來了
+    acquire_e2e_lock(action="teardown", secrets_root=secrets_root, force=force_unlock)
+    try:
+        return _teardown_locked(
+            state_file=state_file,
+            prefix_folder_id=prefix_folder_id,
+            profile=profile,
+            secrets_root=secrets_root,
+        )
+    finally:
+        release_e2e_lock(secrets_root)
+
+
+def _teardown_locked(
+    *,
+    state_file: Path,
+    prefix_folder_id: str | None,
+    profile: str,
+    secrets_root: Path,
+) -> int:
+    test_root_id = read_test_folder_id(IDS_ENV)
     committer_drive = HttpDriveClient(RcloneConfToken(COMMITTER_CONF, remote=RCLONE_REMOTE))
 
     target_id = prefix_folder_id
@@ -1207,6 +1414,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=str,
         default=None,
         help="手動指定要刪除的 Drive 前綴資料夾 ID（僅在 --teardown 時使用）",
+    )
+    parser.add_argument(
+        "--force-unlock",
+        action="store_true",
+        help=(
+            "明知有人正在用這個 e2e 環境也硬拿鎖（對方行程已死但忘記解鎖時用；"
+            "會在鎖檔留下 forced_by 紀錄）"
+        ),
     )
     parser.add_argument(
         "--state-file",
@@ -1305,26 +1520,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("[e2e-sweep] 沒有需要清除的前綴")
         return 0
 
-    if args.teardown:
-        run_teardown(
-            state_file=args.state_file,
-            prefix_folder_id=args.prefix_id,
-            profile=args.profile,
-            secrets_root=args.secrets_root,
-        )
-    else:
-        run_setup(
-            prefix_override=args.prefix,
-            state_file=args.state_file,
-            recreate=args.recreate,
-            pin_repo_url=args.pin_repo_url,
-            repo_suffix=args.repo_suffix,
-            profile=args.profile,
-            secrets_root=args.secrets_root,
-            llm_key_source=args.llm_key,
-            copy_secrets=args.copy_secrets,
-            secrets_how="symlink" if args.symlink_secrets else "link",
-        )
+    try:
+        if args.teardown:
+            run_teardown(
+                state_file=args.state_file,
+                prefix_folder_id=args.prefix_id,
+                profile=args.profile,
+                secrets_root=args.secrets_root,
+                force_unlock=args.force_unlock,
+            )
+        else:
+            run_setup(
+                force_unlock=args.force_unlock,
+                prefix_override=args.prefix,
+                state_file=args.state_file,
+                recreate=args.recreate,
+                pin_repo_url=args.pin_repo_url,
+                repo_suffix=args.repo_suffix,
+                profile=args.profile,
+                secrets_root=args.secrets_root,
+                llm_key_source=args.llm_key,
+                copy_secrets=args.copy_secrets,
+                secrets_how="symlink" if args.symlink_secrets else "link",
+            )
+    except E2EEnvLocked as e:
+        # 別人在用：講清楚就好，不要丟 traceback（這是預期中的拒絕）
+        print(f"[e2e-lock] 拒絕執行：{e}", file=sys.stderr)
+        return 75  # EX_TEMPFAIL：暫時不可用，稍後再試
 
     return 0
 

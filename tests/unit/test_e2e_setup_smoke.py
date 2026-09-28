@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import pytest
 
@@ -21,10 +23,16 @@ from aistorage.identity import load_registry
 from aistorage.reader.config import ReaderConfig
 from aistorage.syncer.config import SyncerConfig
 from scripts.e2e_setup import (
+    E2EEnvLocked,
+    acquire_e2e_lock,
     destroy_tree,
+    e2e_lock_holder,
+    e2e_lock_path,
     main,
     read_sa_email,
     read_test_folder_id,
+    release_e2e_lock,
+    run_teardown,
     setup_signing_keys,
 )
 
@@ -612,3 +620,204 @@ def test_cli_help(capsys):
     assert "--profile" in out
     assert "--llm-key" in out
     assert "--secrets-root" in out
+
+
+# ── e2e 環境鎖 ────────────────────────────────────────────────────────────────
+# e2e 環境是單例（Drive 前綴、pin 釘選值、本機設定檔都只有一份）。
+# 任何一條線跑 teardown／recreate 都會摧毀另一條線正在跑的東西，所以要鎖。
+
+
+@pytest.fixture
+def other_pid():
+    """一個**別的行程**且確定還活著的 pid（用來模擬「別條線正在用」）。"""
+    proc = subprocess.Popen(["sleep", "60"])
+    try:
+        yield proc.pid
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+@pytest.fixture
+def dead_pid() -> int:
+    """一個確定已經死掉的 pid（開一個行程、拿到 pid、等它結束）。"""
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    return proc.pid
+
+
+def _write_lock(root: Path, pid: int, action: str = "setup", host: str | None = None) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    e2e_lock_path(root).write_text(
+        json.dumps({"pid": pid, "started_at": 1_700_000_000.0,
+                    "host": host if host is not None else os.uname().nodename,
+                    "action": action}),
+        encoding="utf-8",
+    )
+
+
+def test_lock_file_lives_under_the_secrets_root(tmp_path: Path):
+    root = tmp_path / "resident-e2e"
+    root.mkdir()
+    path = e2e_lock_path(root)
+    assert path.parent == root
+    assert path.name.startswith(".")  # 祕密目錄裡不要跟憑證檔混在一起被看到
+
+
+def test_lock_records_pid_and_start_time(tmp_path: Path):
+    acquire_e2e_lock(action="setup", secrets_root=tmp_path, now=1_700_000_000.0)
+    data = json.loads(e2e_lock_path(tmp_path).read_text(encoding="utf-8"))
+    assert data["pid"] == os.getpid()
+    assert data["started_at"] == 1_700_000_000.0
+    assert data["action"] == "setup"
+    assert data["host"]
+
+
+def test_second_holder_is_refused_while_the_first_is_alive(
+    tmp_path: Path, other_pid: int
+):
+    _write_lock(tmp_path, other_pid, action="pytest e2e")
+    holder = e2e_lock_holder(tmp_path)
+    assert holder is not None and holder["pid"] == other_pid
+
+    with pytest.raises(E2EEnvLocked) as e:
+        acquire_e2e_lock(action="teardown", secrets_root=tmp_path)
+    msg = str(e.value)
+    assert str(other_pid) in msg             # 誰在用
+    assert "pytest e2e" in msg               # 對方在做什麼
+    assert "--force-unlock" in msg           # 怎麼強制
+    # 拒絕時不該動到對方的鎖
+    assert json.loads(e2e_lock_path(tmp_path).read_text(encoding="utf-8"))["action"] == "pytest e2e"
+
+
+def test_same_process_may_reenter(tmp_path: Path):
+    """同一個行程重入不算「別人在用」（`--recreate` 內部會再呼叫 run_teardown）。"""
+    acquire_e2e_lock(action="setup", secrets_root=tmp_path)
+    acquire_e2e_lock(action="teardown", secrets_root=tmp_path)  # 不該被擋
+    data = json.loads(e2e_lock_path(tmp_path).read_text(encoding="utf-8"))
+    assert data["pid"] == os.getpid()
+    assert "forced_by" not in data           # 自己重入不算「強制搶過」
+
+
+def test_dead_holder_lock_is_expired_and_can_be_taken_over(
+    tmp_path: Path, dead_pid: int
+):
+    _write_lock(tmp_path, dead_pid, action="setup")
+    assert e2e_lock_holder(tmp_path) is None      # 過期
+    acquire_e2e_lock(action="teardown", secrets_root=tmp_path)  # 可以接手
+    assert json.loads(e2e_lock_path(tmp_path).read_text(encoding="utf-8"))["pid"] == os.getpid()
+
+
+def test_lock_from_another_host_is_treated_as_expired(
+    tmp_path: Path, other_pid: int
+):
+    _write_lock(tmp_path, other_pid, action="teardown", host="some-other-mac")
+    # 別台機器留下的鎖驗證不了，不擋著本機（否則會永久鎖死）
+    assert e2e_lock_holder(tmp_path) is None
+    acquire_e2e_lock(action="setup", secrets_root=tmp_path)
+
+
+def test_corrupt_lock_file_does_not_lock_forever(tmp_path: Path):
+    e2e_lock_path(tmp_path).write_text("{ not json", encoding="utf-8")
+    assert e2e_lock_holder(tmp_path) is None
+    acquire_e2e_lock(action="setup", secrets_root=tmp_path)
+
+
+def test_force_unlock_takes_over_and_records_it(tmp_path: Path, other_pid: int):
+    _write_lock(tmp_path, other_pid, action="pytest e2e")
+    acquire_e2e_lock(action="teardown", secrets_root=tmp_path, force=True)
+    data = json.loads(e2e_lock_path(tmp_path).read_text(encoding="utf-8"))
+    assert data["pid"] == os.getpid()
+    assert data["forced_by"]["prev_pid"] == other_pid  # 留痕
+
+
+def test_release_only_removes_your_own_lock(tmp_path: Path, other_pid: int):
+    # 鎖是別人的 → 我們不該把它刪掉
+    _write_lock(tmp_path, other_pid, action="pytest e2e")
+    assert release_e2e_lock(tmp_path) is False
+    assert e2e_lock_path(tmp_path).is_file()
+
+    # 是自己的 → 刪得掉
+    _write_lock(tmp_path, os.getpid(), action="setup")
+    assert release_e2e_lock(tmp_path) is True
+    assert not e2e_lock_path(tmp_path).exists()
+
+
+def test_release_is_idempotent(tmp_path: Path):
+    assert release_e2e_lock(tmp_path) is False
+    acquire_e2e_lock(action="setup", secrets_root=tmp_path)
+    assert release_e2e_lock(tmp_path) is True
+    assert release_e2e_lock(tmp_path) is False
+
+
+def test_teardown_refuses_while_locked_before_touching_drive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, other_pid: int
+):
+    """真的 `run_teardown`：有人在用就拒絕，而且**在碰 Drive 之前**就拒絕。"""
+    state = tmp_path / "state.json"
+    state.write_text(
+        json.dumps({"prefix_folder_id": "fld_abc", "prefix_name": "e2e-x"}),
+        encoding="utf-8",
+    )
+    touched: list[str] = []
+    monkeypatch.setattr("scripts.e2e_setup.read_test_folder_id", lambda *a, **k: "root_1")
+    monkeypatch.setattr("scripts.e2e_setup.RcloneConfToken", lambda *a, **k: object())
+    monkeypatch.setattr(
+        "scripts.e2e_setup.HttpDriveClient",
+        lambda *a, **k: touched.append("drive") or object(),
+    )
+
+    _write_lock(tmp_path, other_pid, action="pytest e2e")
+    with pytest.raises(E2EEnvLocked):
+        run_teardown(state_file=state, secrets_root=tmp_path)
+
+    assert touched == []            # 沒有連上 Drive、沒有刪任何東西
+    assert state.is_file()          # 本機設定也沒被動
+    # 對方的鎖要原封不動留著（拒絕的人不該替別人解鎖）
+    assert e2e_lock_holder(tmp_path) is not None
+
+
+def test_teardown_takes_over_an_expired_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dead_pid: int
+):
+    """持有者已死 → 鎖過期 → teardown 照跑，並在結束後把鎖清掉。"""
+    state = tmp_path / "state.json"
+    state.write_text(
+        json.dumps({"prefix_folder_id": "fld_abc", "prefix_name": "e2e-x"}),
+        encoding="utf-8",
+    )
+    _write_lock(tmp_path, dead_pid, action="pytest e2e")
+    removed: list[int] = []
+    monkeypatch.setattr("scripts.e2e_setup.read_test_folder_id", lambda *a, **k: "root_1")
+    monkeypatch.setattr("scripts.e2e_setup.RcloneConfToken", lambda *a, **k: object())
+    monkeypatch.setattr("scripts.e2e_setup.destroy_tree",
+                        lambda drive, folder_id, **kw: removed.append(1) or 3)
+
+    assert run_teardown(state_file=state, secrets_root=tmp_path) == 3
+    assert removed == [1]                       # 真的刪了
+    assert not state.is_file()                  # 本機設定清掉
+    assert not e2e_lock_path(tmp_path).exists() # 鎖也清掉
+
+
+def test_cli_teardown_returns_75_while_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, other_pid: int
+):
+    """CLI 層：拒絕時回 75（EX_TEMPFAIL）並印訊息，不要丟 traceback。"""
+    state = tmp_path / "state.json"
+    state.write_text(
+        json.dumps({"prefix_folder_id": "fld_abc", "prefix_name": "e2e-x"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.e2e_setup.read_test_folder_id", lambda *a, **k: "root_1")
+    monkeypatch.setattr("scripts.e2e_setup.resolve_secrets_root", lambda *a, **k: tmp_path)
+    monkeypatch.setattr("scripts.e2e_setup.RcloneConfToken", lambda *a, **k: object())
+    monkeypatch.setattr(
+        "scripts.e2e_setup.HttpDriveClient",
+        lambda *a, **k: pytest.fail("被鎖擋下時不該連上 Drive"),
+    )
+
+    _write_lock(tmp_path, other_pid, action="pytest e2e")
+    assert main(["--teardown", "--state-file", str(state)]) == 75
+    assert state.is_file()
+    # 別人的鎖不該被這次拒絕動到
+    assert json.loads(e2e_lock_path(tmp_path).read_text(encoding="utf-8"))["pid"] == other_pid
