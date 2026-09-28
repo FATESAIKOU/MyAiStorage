@@ -95,3 +95,26 @@ CREATE VIRTUAL TABLE message_fts USING fts5(
   tokenize='trigram');
 CREATE VIRTUAL TABLE title_fts USING fts5(
   title, session_id UNINDEXED, tokenize='trigram');
+
+CREATE TABLE artifacts (
+  artifact_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  content_type TEXT,
+  name TEXT NOT NULL,
+  producer TEXT NOT NULL,
+  case_id TEXT,
+  produced_by_session_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  size INTEGER,
+  sha256 TEXT,
+  annex_key TEXT,
+  repo TEXT,
+  path TEXT,
+  link TEXT,
+  object_file_id TEXT
+);
+CREATE INDEX artifacts_producer ON artifacts(producer);
+CREATE INDEX artifacts_session ON artifacts(produced_by_session_id);
+CREATE INDEX artifacts_case ON artifacts(case_id);
+

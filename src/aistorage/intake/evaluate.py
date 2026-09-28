@@ -184,6 +184,21 @@ def _check_reference_monotonicity(
     return None
 
 
+def _earliest_created_at(item: InboxItem) -> str | None:
+    """項目所有候選檔案中最早的 Drive created_time（RFC 3339）。
+
+    用它當驗章前拒收的 rejected_at（4.4）：這是 Drive 自己記的時間，寫入者控制不了，
+    所以 24 小時的保存期是真的從檔案躺進收件匣那時開始算。
+    """
+    times = [
+        f.created_at
+        for f in (*item.sidecars, *item.sigs, *item.raws, *item.extras)
+    ]
+    if not times:
+        return None
+    return format_rfc3339(min(times), include_fraction=True)
+
+
 def evaluate(
     item: InboxItem,
     *,
@@ -194,6 +209,8 @@ def evaluate(
     clock: Clock,
     workdir: Path,
     max_raw: int = DEFAULT_MAX_RAW_SIZE,
+    foundry_enabled: bool = False,
+    foundry_store: Any = None,
 ) -> Decision:
     """評估單一收件匣項目。
 
@@ -223,6 +240,12 @@ def evaluate(
         rejected_at: str | None = None,
         authenticated: bool = False,
     ) -> Decision:
+        # 4.4（PM 決定 4）：驗章前的拒收每一輪都會重新評估，若 rejected_at  always
+        # 取「當下」，deletable_after 永遠到不了，第 14 步永遠不會刪掉這些檔案。
+        # 改用該項目檔案**最早的 created_time**（Drive 的 metadata，寫入者無法控制），
+        # 「每一輪都發佈、24 小時後刪除」才成立。
+        if rejected_at is None and not authenticated:
+            rejected_at = _earliest_created_at(item)
         r_at = rejected_at or now_rfc3339
         r_dt = parse_rfc3339(r_at)
         deletable_after = r_dt + timedelta(hours=24)
@@ -437,17 +460,27 @@ def evaluate(
     if item_type == "rewrite":
         return reject_decision("rewrite_not_supported", authenticated=True)
 
-    # 3. M5: artifact → DEFER(foundry_not_enabled)（無需下載 raw）
+    # 3. M5: artifact → 若尚未啟用 foundry 則 DEFER(foundry_not_enabled)（無需下載 raw）
     if item_type == "artifact":
-        return Decision(
-            kind=DecisionKind.DEFER,
-            item=item,
-            code="foundry_not_enabled",
-            authenticated=True,
-            producer=selected_producer,
-            record_metadata=metadata,
-            sidecar=selected_sc_dict,
-        )
+        if not foundry_enabled and foundry_store is None:
+            return Decision(
+                kind=DecisionKind.DEFER,
+                item=item,
+                code="foundry_not_enabled",
+                authenticated=True,
+                producer=selected_producer,
+                record_metadata=metadata,
+                sidecar=selected_sc_dict,
+            )
+        body = selected_sc_dict.get("body", {})
+        art_kind = body.get("kind")
+        if art_kind not in ("link", "contained"):
+            return reject_decision("invalid_format", authenticated=True)
+        if not body.get("produced_by_session_id"):
+            return reject_decision("invalid_format", authenticated=True)
+        if art_kind == "link":
+            if not body.get("link") and not (body.get("repo") and body.get("path")):
+                return reject_decision("invalid_format", authenticated=True)
 
     # 4. Session 調整 snapshot_at 上限（D4）與蓋章 stamp_record + classify
     if item_type == "session":
@@ -466,6 +499,13 @@ def evaluate(
     record = stamp_record(metadata, producer=selected_producer)
 
     existing = store.get_record(record["id"])
+    existing_cat: dict[str, Any] | None = None
+    if item_type == "artifact" and foundry_store is not None:
+        ulid = record["id"].split(":", 1)[1] if ":" in record["id"] else record["id"]
+        existing_cat = foundry_store.get_catalog(ulid)
+        if existing_cat is not None:
+            existing = existing_cat.get("metadata", existing_cat)
+
     cid = classify_id(existing, record)
     if cid == "collision":
         return reject_decision("collision", authenticated=True)
@@ -502,10 +542,11 @@ def evaluate(
         else:
             inc_updated = parse_rfc3339(record.get("updated_at", ""))
             ex_updated = parse_rfc3339(existing.get("updated_at", ""))
+            ex_body = existing_cat.get("body") if existing_cat is not None else existing.get("body")
             if inc_updated < ex_updated:
                 return reject_decision("stale", authenticated=True)
             elif inc_updated == ex_updated:
-                if selected_sc_dict.get("body") == existing.get("body"):
+                if selected_sc_dict.get("body") == ex_body:
                     return Decision(kind=DecisionKind.ALREADY, item=item, code="already", authenticated=True)
                 else:
                     return reject_decision("stale", authenticated=True)
@@ -516,7 +557,13 @@ def evaluate(
             return rej
 
     # 6. M5: Raw metadata 檢查
-    needs_raw = item_type in ("session", "rewrite")
+    is_contained_artifact = (
+        item_type == "artifact" and selected_sc_dict.get("body", {}).get("kind") == "contained"
+    )
+    needs_raw = item_type in ("session", "rewrite") or is_contained_artifact
+
+    artifact_max_raw = 100 * 1024 * 1024  # 100 MiB (D7)
+    effective_max_raw = min(max_raw, artifact_max_raw) if item_type == "artifact" else max_raw
 
     raw_path: Path | None = None
     if needs_raw:
@@ -528,7 +575,7 @@ def evaluate(
         if decl_size is None or not isinstance(decl_size, int) or decl_sha is None:
             return reject_decision("invalid_format", authenticated=True)
 
-        if decl_size > max_raw:
+        if decl_size > effective_max_raw:
             return reject_decision("too_large", authenticated=True)
 
         if not item.raws:
@@ -550,19 +597,19 @@ def evaluate(
         # 7. 串流下載 raw 並經由 check_raw 驗證
         raw_dest = workdir / f"{item.item_key}.raw"
         try:
-            drive.download(matched_raw_file.id, raw_dest, max_bytes=max_raw)
+            drive.download(matched_raw_file.id, raw_dest, max_bytes=effective_max_raw)
         except TooLarge:
             return reject_decision("too_large", authenticated=True)
 
         with open(raw_dest, "rb") as f_obj:
-            raw_errs = check_raw(selected_sc_dict, f_obj, max_size=max_raw)
+            raw_errs = check_raw(selected_sc_dict, f_obj, max_size=effective_max_raw)
         if raw_errs:
             return reject_decision("raw_mismatch", authenticated=True)
         raw_path = raw_dest
     else:
         if bool(item.raws):
             return reject_decision("raw_mismatch", authenticated=True)
-        raw_errs = check_raw(selected_sc_dict, None, max_size=max_raw)
+        raw_errs = check_raw(selected_sc_dict, None, max_size=effective_max_raw)
         if raw_errs:
             return reject_decision("raw_mismatch", authenticated=True)
 
@@ -585,6 +632,7 @@ _DISPATCH_ORDER = {
     "handoff": 3,
     "claim": 4,
     "reference": 5,
+    "artifact": 6,
 }
 
 
