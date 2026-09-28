@@ -21,7 +21,7 @@
 - [ ] 2.3 定義身分的設定（design D3）：簽章金鑰 ↔ profile 的登錄（公開金鑰、輪替、撤銷）、收件匣資料夾 id 的登記（收件匣由 worker 的 client 建在專用帳號根目錄；位置不證明產生者）、期 1 的 profile（Mac opencode、測試用 profile）；worker 共用的 Drive 憑證與讀取身分，committer 的獨立 GCP project
 - [ ] 2.4 定義閱讀版的共通格式（訊息、工具呼叫、圖片的表示方式、接續點怎麼指到位置、opencode 的 `info.revert` 之後的訊息怎麼處理、子 Session 的呈現），附範例；所有轉換器都照這份格式輸出
 - [x] 2.5 身分佈置（你在 Console 操作、PM 以 CLI 協助）：建立 pin repo 與它的 deploy key（放進 MyAiStorage 的 Actions secrets）；為提交流程建立獨立的 GCP project 與 OAuth client（正式版、`drive` scope），重做技術驗證 1.1 的核心檢查（smoke test、scope、第 8 天 refresh token 複查）；worker 共用的 OAuth client 與讀取身分；更新 `docs/resources.md`；把舊的 committer client 撤銷
-- [ ] 2.6 原始紀錄放 git 還是 annex：用真實大小的測試 Session 匯出（例如 10 個 Session、每個 200 次同步）模擬一個月，量 consolidate 時的 push 耗時與歷史大小，決定 `annex.largefiles` 與 `annex.max-git-bundles` 的值（design Risks）
+- [x] 2.6 原始紀錄放 git 還是 annex：用真實大小的測試 Session 匯出（例如 10 個 Session、每個 200 次同步）模擬一個月，量 consolidate 時的 push 耗時與歷史大小，決定 `annex.largefiles` 與 `annex.max-git-bundles` 的值（design Risks）
 
 ## 3. 提交流程：Agora 路徑
 

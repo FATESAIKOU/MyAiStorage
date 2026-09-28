@@ -147,3 +147,7 @@ The user chose **Python 3.12** for the committer, syncers, the read interface (l
 - The resident AI in E2E containers uses whatever model is available in the teammate priority order, never Claude.
 - Commits stay on `phase1-spike`; no push or merge. After the user's morning review and OK, the PM merges to main and pushes.
 - The MyLinuxPool tickets (8.2) are filed as a GitHub issue in the MyLinuxPool repo for the user to judge.
+
+## Raw record storage (2026-09-28, tasks 2.6)
+
+The PM chose **raw records as git-annex objects** (`annex.largefiles` includes the raw exports) with `annex.max-git-bundles=10`, per `docs/spike/evidence/2.6-raw-storage.md`: push 26 s vs 39 s, fresh clone 1.3 s vs 14.8 s, active bundles 0.4 MB vs 10 MB. The cost is about 4.5× remote storage (every synced version is a full object), which counts against the shared 5 TB quota and is watched by the health check. Listed for the user's morning review.
