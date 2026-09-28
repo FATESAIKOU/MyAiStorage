@@ -207,14 +207,14 @@ def test_artifact_is_applied_to_foundry_repo(tmp_path: Path) -> None:
     )
     from aistorage.inbox_builder import build_artifact_item
 
-    payload = tmp_path / "out.pdf"
-    payload.write_bytes(b"%PDF-1.4 tiny")
+    # 用 link（原處產出）而不是 contained：link 只寫產出目錄、不產生 annex 物件，
+    # 這樣單元測試不需要真的 git-annex。contained 的 annex 路徑由第 7 組的測試覆蓋。
     built = build_artifact_item(
-        kind="contained",
+        kind="link",
         produced_by_session_id=session_id,
-        name="out.pdf",
-        content_type="application/pdf",
-        raw_path=payload,
+        name="spec.md",
+        content_type="text/markdown",
+        link="https://example.com/spec.md",
         profile="mac-opencode",
         key=extra["priv_bytes"],
         key_id=extra["key_id"],

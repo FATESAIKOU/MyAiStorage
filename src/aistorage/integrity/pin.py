@@ -364,7 +364,19 @@ class GitPinStore(PinStore):
 
         return state, pending
 
-    def _commit_and_push(self, commit_msg: str) -> None:
+    def _fetch(self) -> None:
+        self._run_git(["fetch", "origin", "main"], check=False)
+
+    def _incoming_paths(self) -> list[str]:
+        """遠端比本地多出的檔案（`HEAD..origin/main`），相對於 repo 根。"""
+        proc = self._run_git(
+            ["diff", "--name-only", "HEAD...origin/main"], check=False
+        )
+        if proc.returncode != 0:
+            return []
+        return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+    def _commit_and_push(self, commit_msg: str, *, repo: str) -> None:
         self._run_git(["add", ".pin/"])
         status = self._run_git(["status", "--porcelain"])
         if not status.stdout.strip():
@@ -377,9 +389,23 @@ class GitPinStore(PinStore):
             return
 
         # 遠端在我們 fetch 之後又往前走了（多個工作流／多條線共用同一個 pin repo 時
-        # 會發生）。這種情況不是「有人在改同一個 repo」的內容，而是**別的 repo 條目**
-        # 被寫進來，所以重讀遠端、把我們這個 commit rebase 上去再推一次。
-        # rebase 衝突（真的有同路徑衝突）→ 仍然中止，交人工看。
+        # 會發生）。允許自動 rebase 的**唯一**情況是：遠端新增的檔案全部屬於
+        # **別的 repo** 的條目（review-b1039a8 M1）。只要同一個 repo 的任何檔案
+        # ——包含 `.maintenance`——被動過，就中止不推，保留現況給人工看。
+        self._fetch()
+        incoming = self._incoming_paths()
+        repo_stem = repo
+        foreign = [p for p in incoming if not p.startswith(f".pin/{repo_stem}.")]
+        same_repo = [p for p in incoming if p.startswith(f".pin/{repo_stem}.")]
+        if same_repo:
+            raise WriteError(
+                f"pin repo 同一個 repo ({repo_stem}) 的檔案在遠端已被改動，"
+                f"中止不推（人工確認後再處理）: {sorted(same_repo)}"
+            )
+        if not foreign:
+            raise WriteError(
+                "pin repo push 失敗且無法確認遠端變更只屬於其他 repo，保留現況待人工處理"
+            )
         pull = self._run_git(["pull", "--rebase", "origin", "main"], check=False)
         if pull.returncode != 0:
             raise WriteError(
@@ -416,7 +442,9 @@ class GitPinStore(PinStore):
             encoding="utf-8",
         )
 
-        self._commit_and_push(f"pin({pending.repo}): write pending for run {pending.run_id}")
+        self._commit_and_push(
+            f"pin({pending.repo}): write pending for run {pending.run_id}", repo=pending.repo
+        )
 
     def promote(self, state: PinState) -> None:
         self._ensure_cloned()
@@ -455,14 +483,18 @@ class GitPinStore(PinStore):
         if p_keys.exists():
             p_keys.unlink()
 
-        self._commit_and_push(f"pin({state.repo}): promote for run {state.run_id}")
+        self._commit_and_push(
+            f"pin({state.repo}): promote for run {state.run_id}", repo=state.repo
+        )
 
     def read_text(self, relpath: str) -> str | None:
-        """讀 pin repo 裡的檔案（唯讀）。不存在或讀不到回傳 None。"""
-        try:
-            self._ensure_cloned()
-        except (ReadError, WriteError):
-            return None
+        """讀 pin repo 裡的檔案（唯讀）。
+
+        **只有檔案確實不存在才回 None**（review-b1039a8 H2）：clone 或讀取失敗
+        一律 raise `ReadError`。吞掉失敗會讓提交流程把「讀不到維護旗標」誤判成
+        「沒有維護中」，於是在管理操作進行中照常 push——正是 H4 要防的情況。
+        """
+        self._ensure_cloned()
         path = (self.workdir / relpath).resolve()
         # 防呆：只讀 pin repo 內的檔案，路徑逃逸（../）一律拒絕
         if not str(path).startswith(str(self.workdir.resolve()) + "/"):
@@ -489,4 +521,4 @@ class GitPinStore(PinStore):
             changed = True
 
         if changed:
-            self._commit_and_push(f"pin({repo}): drop pending")
+            self._commit_and_push(f"pin({repo}): drop pending", repo=repo)

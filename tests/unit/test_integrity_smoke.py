@@ -1423,7 +1423,49 @@ def test_git_pin_store_non_fast_forward_rejected(tmp_path: Path):
     # 模擬同一路徑的內容衝突：遠端已改過 agora.json，store2 又改一次 → rebase 失敗
     (tmp_path / "clone2" / ".pin" / "agora.json").write_text('{"repo": "agora", "clobbered": true}')
     with pytest.raises(WriteError):
-        store2._commit_and_push("conflict")
+        store2._commit_and_push("conflict", repo="agora")
+
+
+def test_git_pin_store_refuses_rebase_when_same_repo_files_changed(tmp_path: Path):
+    """M1（review-b1039a8）：遠端動到**同一個 repo** 的釘選值 → 中止，不 rebase 上去。
+
+    允許 rebase 的唯一情況是遠端新增的檔案全部屬於其他 repo（多條線共用同一個
+    pin repo 時的正常情況）。管理者剛上鎖會寫 `.pin/<repo>.maintenance`，那屬於
+    同一個 repo，必須停下來。
+    """
+    pin_remote = tmp_path / "pin_remote_m1.git"
+    _init_bare_pin_repo(pin_remote, tmp_path / "init_work_m1")
+
+    store1 = GitPinStore(repo_url=f"file://{pin_remote}", workdir=tmp_path / "c1_m1")
+    store2 = GitPinStore(repo_url=f"file://{pin_remote}", workdir=tmp_path / "c2_m1")
+
+    uuid = "01234567-89ab-cdef-0123-456789abcdef"
+
+    def _state(repo: str, main_sha: str, run_id: str) -> PinState:
+        return PinState(
+            repo=repo, repo_uuid=uuid,
+            refs={"refs/heads/main": main_sha},
+            manifest_sha256=(main_sha[:4] + "m1" * 31)[:64],
+            prev_manifest_sha256=None, active_bundles=(), removed_bundles=frozenset(),
+            annex_keys=frozenset(), promoted_at="2026-09-27T08:00:00Z", run_id=run_id,
+        )
+
+    store1.promote(_state("agora", "1" * 40, "run-1"))
+    store2.load("agora")
+
+    # 管理者上鎖（寫同一個 repo 的 .maintenance）
+    (tmp_path / "c1_m1" / ".pin").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "c1_m1" / ".pin" / "agora.maintenance").write_text(
+        '{"reason": "erase", "at": "2026-09-27T09:00:00Z", "by": "user"}',
+        encoding="utf-8",
+    )
+    store1._run_git(["add", ".pin/"])
+    store1._run_git(["commit", "-qm", "maintenance on: agora"])
+    store1._run_git(["push", "-q", "origin", "main"])
+
+    # store2 這時寫自己的 agora → 遠端有同 repo 的變更 → 必須中止
+    with pytest.raises(WriteError):
+        store2.promote(_state("agora", "2" * 40, "run-2"))
 
 
 def test_git_pin_store_recovers_stale_ref_by_rebase(tmp_path: Path):

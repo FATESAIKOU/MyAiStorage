@@ -55,3 +55,5 @@
 - Claude Code 的子代理（jsonl 裡的 isSidechain 紀錄）拆成獨立的 Agora Session（期 1 只保存在母 Session 的原始紀錄裡，閱讀版不含）。
 - 改寫（在 Agora 裡修改 Session 內容，例如遮蔽誤貼的秘密）：期 1 拿掉。要做的話，需要處理「來源端下一次同步會把原內容帶回來」的問題（例如遮蔽規則持續套用到之後的每一份快照）。
 - Foundry 的 link 型產出：期 1 的 schema 規定 link 必須有 URL，repo＋path 只是補充的出處；要讓 repo＋path 單獨成立，需要改 schema 與 build_artifact_item。
+- `MyAiStorage-pin-test` 只有一組 `.pin/<repo>.json`，多條線的整合測試共用同一個 repo 名稱（`agora`）會互相覆蓋釘選值 → 下一輪 settle 拿到別人的 manifest，sweep 會把自己的真本全隔離。短期做法是整合測試用唯一的 repo 名稱（`tests/integration` 的 `sandbox.pin_repo_name()`）。長期要嘛每條線一份 pin-test repo（各自 fork，最省事），要嘛 pin store 支援多 repo 的命名空間。
+- 驗章前被拒收的 artifact（Foundry 未設定時的 `foundry_not_enabled`）會把該 `item_key` 寫進清冊而**永久**拒收：Foundry 啟用之後寫入者必須用新的 `item_key` 重傳。在第 7 組開放 artifact 的 `allowed_types` 之前，要在 `docs/identity-setup.md` 或 `docs/resident.md` 寫明這件事。

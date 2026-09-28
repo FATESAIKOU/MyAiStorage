@@ -272,8 +272,12 @@ def _check_maintenance(cfg: CommitterConfig, deps: Deps, report: RunReport) -> b
 
     read_text = getattr(deps.pins, "read_text", None)
     if not callable(read_text):
-        # 還沒實作 read_text 的 PinStore（例如舊的 fake）：不等於維護中
-        return False
+        # L（review-b1039a8）：PinStore protocol 要求 read_text。舊的 fake 缺這個
+        # 方法時要立刻發現（測試會爆），不能默默當成「沒有維護中」。
+        raise TypeError(
+            "PinStore 缺少 read_text(relpath)：維護旗標無法檢查，拒絕執行"
+            f"（{type(deps.pins).__name__}）"
+        )
 
     try:
         raw = read_text(maintenance_relpath(cfg.repo))
@@ -883,8 +887,20 @@ def _run_repo_pipeline(
         state,
         drive=deps.drive,
         prefix_folder_id=rcfg.prefix_folder_id,
-        expected_annex_keys=state.annex_keys,
     )
+    # H1（review-b1039a8）：第 5 步的覆蓋率要比對**遠端實況**。
+    # 原本傳 `expected_annex_keys=state.annex_keys` 進 verify_clone，而它內部是
+    # `verify_annex_coverage(state.annex_keys, expected)`——拿同一個集合跟自己比，
+    # 恆真。這裡改成直接檢查：遠端的 key 集合（clone 下來的 git-annex location log）
+    # 必須涵蓋釘選值記錄的每一個 key；少一個就代表 pin 與遠端不一致，中止。
+    if hasattr(git, "annex_keys_in"):
+        remote_keys = git.annex_keys_in(state.repo_uuid)
+        missing_remote = set(state.annex_keys) - set(remote_keys)
+        if missing_remote:
+            raise MismatchError(
+                "clone 後遠端 annex key 集合缺少釘選值記載之物件: "
+                f"{sorted(missing_remote)}（pin 與 Drive 的 location log 不一致）"
+            )
     ctx.time("annex.git.clone", int((time.monotonic() - t0) * 1000))
 
     # ---------------------------------------------------------
@@ -931,6 +947,10 @@ def _run_repo_pipeline(
             temp_dir=store_temp,
         )
     ledger = Ledger(eval_store_for_ledger(store, target))
+    # 這一輪「之前」真本已經記著的 key（H1：pending 只放 find 的結果 ＋ 這一輪
+    # 新增的 key，不要把 snapshots 的全部歷史 key 聯集進來——那些 key 如果遠端
+    # 真的沒有，本來就是警訊，會被第 10 步的遠端實況比對抓出來）
+    keys_before = store.annex_keys()
 
     # 評估所有收件匣項目
     # 收件匣共用、依型態分派：Agora 收 session/handoff/claim/reference，
@@ -1083,7 +1103,7 @@ def _run_repo_pipeline(
         git.annex_keys_in(state.repo_uuid)
         if hasattr(git, "annex_keys_in")
         else frozenset(state.annex_keys)
-    ) | store.annex_keys()
+    ) | (store.annex_keys() - keys_before)
 
     has_git_changes = (local_refs != state.refs) or (annex_keys != state.annex_keys)
 
@@ -1128,8 +1148,19 @@ def _run_repo_pipeline(
     push_verification = None
 
     if has_git_changes and not dry_run:
-        # 必要 key＝真本記錄的全部 key（既有 ＋ 這一輪新寫的原始紀錄與閱讀版；
-        # 都來自 `git annex lookupkey`，見 AnnexRawStorage）。
+        # H1（review-b1039a8）：覆蓋率檢查要比對**遠端實況**，不是自己跟自己比。
+        #   - 必要 key＝這一輪新寫進去的 key（`store.annex_keys()` 減掉這一輪之前的），
+        #     全部來自 `git annex lookupkey`；
+        #   - 比較對象＝push 之後**重新**向遠端查一次 `git annex find --in=<uuid>`，
+        #     因為 location log 是在 push 之後才進得去（實測）。
+        # 這樣「物件沒有真的上到 Drive」會在第 10 步就被擋住，而不是等到某天
+        # 交接單驗證快照時才爆。
+        new_keys = store.annex_keys() - keys_before
+        remote_keys_after_push = (
+            git.annex_keys_in(state.repo_uuid)
+            if hasattr(git, "annex_keys_in")
+            else annex_keys
+        )
         push_verification = verify_after_push(
             git,
             deps.drive,
@@ -1138,10 +1169,8 @@ def _run_repo_pipeline(
             local_refs,
             push_started_at,
             workdir=work_temp,
-            expected_annex_keys=store.annex_keys(),
-            # 比較對象＝pending 記的那份 key（push 出去的），不是還沒
-            # promote 的正式釘選值（見 verify_after_push 的說明）。
-            pushed_annex_keys=annex_keys,
+            expected_annex_keys=new_keys,
+            pushed_annex_keys=remote_keys_after_push,
         )
 
     ctx.time("verify.verify_after_push", int((time.monotonic() - t0) * 1000))
@@ -1151,6 +1180,14 @@ def _run_repo_pipeline(
     # ---------------------------------------------------------
     ctx.step = "pins.promote"
     t0 = time.monotonic()
+
+    # H2（review-b1039a8）：管理者是在這一輪跑到一半才上鎖的情況，也要擋。
+    # 在寫入 pin 之前再查一次：有旗標就中止（pending 留著，下一輪由 settle 結算），
+    # 絕對不要在管理操作進行中 promote。
+    if _check_maintenance(rcfg, deps, report):
+        return RepoRunResult(
+            target=target, decisions=decisions, applied_accepted=applied_accepted, store=store
+        )
 
     if has_git_changes and not dry_run and push_verification is not None:
         new_state = PinState(
@@ -1356,6 +1393,9 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             if ctx is not None:
                 ctx.step = "clean_inbox"
             t0 = time.monotonic()
+            # M5：這一輪的讀取視圖有沒有真的發佈？只有真的發佈了，拒收原因才會
+            # 進入某個世代，刪掉才安全（見下面 REJECT 的分支）。
+            publish_succeeded = report.readview_publish == "published"
             deleted_inbox_count = 0
             failed_delete_count = 0
             inbox_folders = set(deps.registry.inbox_folders().keys())
@@ -1369,7 +1409,12 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
                 elif dec.kind == DecisionKind.ALREADY:
                     should_delete = True
                 elif dec.kind == DecisionKind.REJECT:
-                    if dec.deletable_after is not None and now_dt >= dec.deletable_after:
+                    # M5（review-b1039a8）：拒收原因要等「已經被發佈出去」才可以刪。
+                    # 這一輪的讀取視圖發佈失敗（publish_failed／skipped）時，拒收原因
+                    # 還沒有任何讀者看得到，這時刪掉等於讓寫入者永遠不知道為什麼被拒。
+                    # publish_fail 的輪次一律保留，等下一次真的發佈成功再刪。
+                    if publish_succeeded and dec.deletable_after is not None \
+                            and now_dt >= dec.deletable_after:
                         should_delete = True
 
                 if should_delete:
