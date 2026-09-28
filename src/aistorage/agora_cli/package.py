@@ -13,9 +13,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 from typing import Any, Sequence
+from uuid import uuid4
 
 from aistorage.agora_cli.startpoint import ResolvedStartPoint
 
@@ -206,9 +208,10 @@ def stage_package(pkg: ContextPackage, out_dir: Path) -> Path:
         raise ContextPackageError(
             f"起點包目錄已經有東西，不會覆蓋: {out}（請給一個空的目錄）"
         )
-    staging = out.parent / f".{out.name}.staging"
-    if staging.exists():
-        _rmtree(staging)
+    # 暫存目錄名稱帶 pid 與隨機後綴（review-7a4ca87 M2）：固定名
+    # `.<name>.staging` 讓同一個 `-o` 的兩次並行執行互相刪掉對方的暫存目錄，
+    # 而那時其中一邊的認領可能已經送出去了。
+    staging = out.parent / f".{out.name}.{os.getpid()}-{uuid4().hex[:8]}.staging"
     try:
         (staging / RAW_DIR).mkdir(parents=True, exist_ok=True)
         for segment in pkg.segments:
@@ -237,9 +240,15 @@ def commit_staged_package(pkg: ContextPackage, staging: Path,
         if out.exists():
             out.rmdir()
         staging.rename(out)
-    except Exception:
+    except Exception as e:
         _rmtree(staging)
-        raise
+        # 這一步在**認領確認之後**才做（`checkout()` 先 `_claim` 才呼叫這裡）。
+        # 所以失敗時交接單已經被接走、Agora 裡已經有一筆預留的 session——不是
+        # 可以「修好再重跑」的錯誤，重跑會撞 already_claimed。換一個講得清楚的
+        # 例外，讓 `checkout()` 把它轉成「認領已經成立」的訊息（review-7a4ca87 M2）。
+        raise ContextPackageError(
+            f"起點包組好了，但產出到 {out} 失敗: {e}"
+        ) from e
     return out / PACKAGE_FILE
 
 
@@ -320,7 +329,16 @@ def read_package(package_dir: Path) -> tuple[dict[str, Any], list[bytes]]:
         raw = path.read_bytes()
         digest = hashlib.sha256(raw).hexdigest().lower()
         declared = str(segment.get("raw_sha256") or "").lower()
-        if declared and digest != declared:
+        # ★ 缺 `raw_sha256` 就**拒絕**，不要略過驗證（impl2-review4 L）。
+        #   略過等於「沒有雜湊的段落照樣能用」——那正是位元組相同這個保證失效的
+        #   入口，而起點包會被搬來搬去，搬運途中被改掉是最自然的事。
+        if not declared:
+            raise ContextPackageError(
+                f"起點包的 segments[{position}] 沒有 raw_sha256，"
+                "無法驗證原始紀錄有沒有被動過：拒絕讀取。"
+                "（沒有雜湊就不要略過驗證——略過等於不驗。）"
+            )
+        if digest != declared:
             raise ContextPackageError(
                 f"起點包裡的原始紀錄已被動過（{rel}：記錄 {declared[:12]}，"
                 f"實際 {digest[:12]}）"

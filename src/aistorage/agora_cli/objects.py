@@ -80,31 +80,61 @@ class ObjectFetcher:
         self._drive = drive
         self._folder_id = folder_id
         self._max_bytes = max_bytes
-        self._by_key: dict[str, str] | None = None
+        self._by_key: dict[str, list[Any]] | None = None
         self._workdir = Path(tempfile.mkdtemp(prefix="agora-objects-"))
 
     @property
     def folder_id(self) -> str:
         return self._folder_id
 
-    def _index(self) -> dict[str, str]:
-        """列出物件資料夾一次，建立 `key → file id`。"""
+    def _index(self) -> dict[str, list[Any]]:
+        """列出物件資料夾一次，建立 `key → [檔案…]`。
+
+        **一個 key 對應一個檔案，不是多個**（annex key 的前 64 碼就是內容雜湊，
+        相同內容一定相同檔名）。但實測得到過同名多檔，所以這裡**保留全部**候選：
+        見 `file_id_for`——只挑 sha256 與 size 都與 key 相符的那一個，猜錯了就
+        寧可明確拒絕，也不要下載一個同名但內容不同的檔案再靠事後雜湊發現。
+        """
         if self._by_key is None:
-            self._by_key = {
-                f.name: f.id
-                for f in self._drive.list_children(self._folder_id)
-                if f.name.startswith("SHA256")
-            }
+            by_key: dict[str, list[Any]] = {}
+            for f in self._drive.list_children(self._folder_id):
+                if f.name.startswith("SHA256"):
+                    by_key.setdefault(f.name, []).append(f)
+            self._by_key = by_key
         return self._by_key
 
     def file_id_for(self, key: str) -> str:
-        try:
-            return self._index()[key]
-        except KeyError:
+        """這個 key 對應的檔案 id；同名多檔時只挑 metadata 相符的那一個。"""
+        candidates = self._index().get(key)
+        if not candidates:
             raise ObjectError(
                 f"Agora 的物件資料夾裡沒有這個 key: {key}"
                 "（提交流程還沒把這個物件推上去，或該快照沒有走 annex）"
-            ) from None
+            )
+        if len(candidates) == 1:
+            return candidates[0].id
+
+        parsed = parse_annex_key(key)
+        if parsed is None:
+            raise ObjectError(
+                f"Agora 的物件資料夾裡有多個檔案叫 {key[:24]}…，"
+                "而且這個 key 格式看不懂，沒辦法分辨哪一個才是要的"
+            )
+        _key, expected_size, expected_sha = parsed
+        matching = [
+            f for f in candidates
+            if f.size == expected_size
+            and isinstance(f.sha256, str)
+            and f.sha256.lower() == expected_sha
+        ]
+        if len(matching) == 1:
+            return matching[0].id
+        raise ObjectError(
+            f"Agora 的物件資料夾裡有 {len(candidates)} 個檔案叫 {key[:24]}…，"
+            f"其中 {len(matching)} 個的 sha256 與 size 都和 key 相符。"
+            "這是物件資料夾的狀態異常（同名就代表相同內容，不該有多個）："
+            "請確認提交流程有沒有在共用同一個 pin／資料夾，並請人處理那些重複檔案。"
+        )
 
     def fetch(self, key: str) -> bytes:
         """依 key 取回位元組並驗證。取不到或對不上就明確拒絕。"""
@@ -114,6 +144,8 @@ class ObjectFetcher:
                 f"annex key 格式看不懂（要 SHA256E-s<size>--<sha256>）: {key!r}"
             )
         _key, expected_size, _sha = parsed
+        # ★ key 的格式與 metadata 的比對都在**下載之前**（impl2-review4 M5）：
+        #   早一步拒絕，就不會為了一個明顯不對的 key 白下載一次。
         file_id = self.file_id_for(key)
         dest = self._workdir / "object.bin"
         try:

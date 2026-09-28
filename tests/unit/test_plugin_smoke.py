@@ -377,11 +377,34 @@ def test_agora_checkout_uses_a_fresh_output_directory_every_time(tmp_path: Path)
 
 
 def test_agora_checkout_forwards_resume(tmp_path: Path):
-    """認領逾時要重跑時，plugin 傳 `--resume`（沿用同一個認領）。"""
+    """帶了 `resume: true` 就傳 `--resume`（CLI 端預設就會自動沿用，這是明示）。"""
     out = _harness(tmp_path, resume=True)
     calls = _argv_calls(Path(out["_log_main"]))
     call = _call_of(calls, "aistorage.agora_cli", "checkout")
     assert "--resume" in call
+
+
+def test_agora_checkout_does_not_send_resume_by_default(tmp_path: Path):
+    """一般呼叫**不該**帶 `--resume`（重跑預設就會沿用本機記錄）。"""
+    out = _harness(tmp_path)
+    calls = _argv_calls(Path(out["_log_main"]))
+    call = _call_of(calls, "aistorage.agora_cli", "checkout")
+    assert "--resume" not in call
+
+
+def test_agora_checkout_tells_ai_to_report_a_timeout_instead_of_rerunning(
+    tmp_path: Path,
+):
+    """逾時要**回報使用者**，不是自己重跑（review-7a4ca87 H1）。
+
+    舊的說明叫 AI 帶 `resume: true` 重試，而那時預設 id 的重跑必定對不上記錄，
+    等於把 AI 帶進死路。工具沒有 `--new-session-id` 可傳，所以它自己救不了。
+    """
+    src = PLUGIN.read_text(encoding="utf-8")
+    checkout_block = src.split("agora_checkout:")[1].split("agora_handoff:")[0]
+    assert "不要自己重跑" in checkout_block
+    assert "回報使用者" in checkout_block
+    assert "逾時請帶 resume" not in checkout_block
 
 
 def test_plugin_arguments_reach_python_verbatim(tmp_path: Path):

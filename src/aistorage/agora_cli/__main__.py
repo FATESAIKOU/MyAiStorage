@@ -40,7 +40,12 @@ from aistorage.clock import SystemClock
 from aistorage.errors import AiStorageError, MismatchError, ReadError
 from aistorage.reader import AccessDenied
 from aistorage.search.query import Query
-from aistorage.syncer.commit import sync_and_commit
+
+# ★ **不要**在模組最上層 import 任何 `aistorage.syncer`／`aistorage.adapters`
+#   （impl2-review4 M2）。`agora` 是一般檔案與 Agora 的命令列介面，它不該因為
+#   寫入路徑需要「觸發提交流程」就綁上某個來源應用的同步器——那會讓
+#   `import aistorage.agora_cli` 反過來依賴 opencode 的匯出流程。
+#   需要時在函式裡 import（見 `_writer_deps`、`cmd_handoff`）。
 
 
 def _lag(value: str | None) -> timedelta | None:
@@ -102,6 +107,7 @@ def _writer_deps(args: argparse.Namespace) -> tuple[CheckoutDeps, Any]:
     from aistorage.agora_cli.claims import ClaimJournal
     from aistorage.syncer.__main__ import _deps
     from aistorage.syncer.config import SyncerConfig
+    from aistorage.syncer.commit import sync_and_commit
 
     deps = _deps(SyncerConfig.load())
 
@@ -526,7 +532,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="沿用本機記錄的同一個認領（認領逾時或行程中斷後重跑）")
     co.add_argument("--claims-path", dest="claims_path", default=None,
                     help="本機認領記錄路徑（預設 "
-                         "$AISTORAGE_CHECKOUT_CLAIMS 或 ~/.aistorage/checkout-claims.json）")
+                         "$AISTORAGE_CHECKOUT_CLAIMS 或 ~/.aistorage/checkout-claims/）")
     co.set_defaults(func=cmd_checkout)
 
     return parser

@@ -31,11 +31,12 @@ from typing import Any
 
 FORMAT = "aistorage.checkout-claims/v1"
 
-#: 預設位置。容器裡 `HOME=/work`，所以與同步器狀態檔（`/work/.aistorage/…`）同層。
+#: 預設位置（**一個目錄**，底下每張交接單一個檔案；見 `ClaimJournal`）。
+#: 容器裡 `HOME=/work`，所以與同步器狀態檔（`/work/.aistorage/…`）同層。
 #: 測試與離線環境用 `AISTORAGE_CHECKOUT_CLAIMS` 覆寫。
 DEFAULT_PATH = Path(
     os.environ.get("AISTORAGE_CHECKOUT_CLAIMS")
-    or (Path.home() / ".aistorage" / "checkout-claims.json")
+    or (Path.home() / ".aistorage" / "checkout-claims")
 )
 
 
@@ -86,78 +87,100 @@ class ClaimRecord:
 
 
 class ClaimJournal:
-    """`handoff_id → ClaimRecord` 的本機檔案（原子寫入、損壞就當空）。
+    """`handoff_id → ClaimRecord` 的本機記錄，**一張交接單一個檔案**。
 
     這是**本機**狀態，不是 Agora 的真本：它只記住「我這次用哪個 claim id 認領了
-    哪張交接單」，讓 `--resume` 能重送同一筆。記錄遺失不會讓任何東西壞掉
-    （只是那次認領認不回來），所以讀不到時從空白開始、不拋錯。
+    哪張交接單」，讓重跑能重送同一筆。
+
+    **為什麼是一張一個檔案**（review-7a4ca87 M1）：1→n 的典型用法是同一個容器裡
+    **並行**跑好幾次 checkout。單一 JSON 檔的「讀→改→寫」沒有鎖，兩個行程同時寫
+    會後蓋先，其中一張交接單的記錄就消失了——那張之後逾時就無從救回。分成一個檔
+    一張單，寫入用 `O_EXCL` 的暫存檔再一次改名，兩條線互不干擾，也不需要鎖。
+
+    **損毀要出聲**（review-7a4ca87 M1）：讀到壞掉的記錄**拋錯**，不要當成沒有。
+    當成「沒有」會讓 `put` 覆蓋掉其他交接單還在用的記錄——那正是最不能靜靜發生的
+    事。錯誤訊息會說明是哪個檔案、請人先看過再決定。
     """
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = Path(path) if path is not None else DEFAULT_PATH
 
-    def _read(self) -> dict[str, ClaimRecord]:
-        if not self.path.is_file():
-            return {}
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            # 記錄檔是衍生狀態：壞了就當沒有，不要讓 checkout 不能跑
-            return {}
-        if not isinstance(data, dict) or data.get("format") != FORMAT:
-            return {}
-        raw = data.get("claims")
-        if not isinstance(raw, dict):
-            return {}
-        out: dict[str, ClaimRecord] = {}
-        for handoff_id, entry in raw.items():
-            if not isinstance(handoff_id, str):
-                continue
-            try:
-                out[handoff_id] = ClaimRecord.from_dict(entry)
-            except ClaimJournalError:
-                continue
-        return out
+    def _file_for(self, handoff_id: str) -> Path:
+        # handoff_id 形如 `handoff:01ARZ…`；`:` 與 `/` 在檔名裡不合法也不好看
+        safe = handoff_id.replace(":", "_").replace("/", "_")
+        return self.path / f"{safe}.json"
 
     def get(self, handoff_id: str) -> ClaimRecord | None:
-        """這張交接單本機記得的認領；沒有就 None。"""
-        return self._read().get(handoff_id)
+        """這張交接單本機記得的認領；沒有（或目錄還在）就 None。"""
+        path = self._file_for(handoff_id)
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise ClaimJournalError(
+                f"認領記錄讀不來（壞掉或不完整）: {path}（{type(e).__name__}）。"
+                "沒有它就沒辦法確認這張交接單上次用哪個認領；"
+                "請先看過那個檔案，壞掉的話刪掉它再重跑，"
+                "不要在這裡直接覆蓋（會連帶弄壞其他交接單的記錄）"
+            ) from None
+        try:
+            return ClaimRecord.from_dict(data)
+        except ClaimJournalError as e:
+            raise ClaimJournalError(f"認領記錄的內容不合法: {path}（{e}）") from None
 
     def put(self, record: ClaimRecord) -> None:
-        """記下（或覆蓋）一次認領。**送出之前**就要寫，行程中斷才救得回來。"""
-        records = self._read()
-        records[record.handoff_id] = record
-        self._write(records)
+        """記下一次認領。**送出之前**就要寫，行程中斷才救得回來。
 
-    def forget(self, handoff_id: str) -> None:
-        """認領被明確拒收時刪掉記錄——那張單已經不是這次 checkout 的了。"""
-        records = self._read()
-        if handoff_id in records:
-            del records[handoff_id]
-            self._write(records)
-
-    def _write(self, records: dict[str, ClaimRecord]) -> None:
-        payload = {
-            "format": FORMAT,
-            "claims": {k: v.to_dict() for k, v in sorted(records.items())},
-        }
-        data = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        已經有同一張單的記錄時**拒絕覆蓋**（review-7a4ca87 H1）：舊記錄對應的是一個
+        可能已經被接受的認領，蓋掉它等於讓那張交接單永遠認不回來。要沿用就用舊的
+        （`get`），不是寫一份新的。
+        """
+        path = self._file_for(record.handoff_id)
+        if path.is_file():
+            existing = self.get(record.handoff_id)
+            raise ClaimJournalError(
+                f"認領記錄已經有 {record.handoff_id} 了（預留 "
+                f"{existing.new_session_id if existing else '?'}，"
+                f"記錄於 {path}）。"
+                "交接單只能被認領一次，這筆認領可能已經被接受；"
+                "覆蓋記錄會讓它認不回來。重跑請帶 --resume 沿用同一個認領。"
+            )
+        data = json.dumps(
+            {"format": FORMAT, **record.to_dict()},
+            ensure_ascii=False, sort_keys=True, indent=2) + "\n"
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            # 先寫暫存檔再一次改名：中斷不會留下半份記錄檔
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # 暫存檔用 O_EXCL 併一次改名：兩個行程同時寫也不會互相覆蓋
             with tempfile.NamedTemporaryFile(
-                "w", encoding="utf-8", dir=str(self.path.parent),
-                prefix=f".{self.path.name}.", suffix=".tmp", delete=False,
+                "w", encoding="utf-8", dir=str(path.parent),
+                prefix=f".{path.name}.", suffix=".tmp", delete=False,
             ) as handle:
                 handle.write(data)
                 temp_path = Path(handle.name)
             os.chmod(temp_path, 0o600)
-            temp_path.replace(self.path)
+            temp_path.replace(path)
         except OSError as e:
             raise ClaimJournalError(
-                f"認領記錄寫不進去: {self.path}（{type(e).__name__}）。"
+                f"認領記錄寫不進去: {path}（{type(e).__name__}）。"
                 "沒有它，這次認領一旦被接受就認不回來；"
                 "請用 AISTORAGE_CHECKOUT_CLAIMS 指到可寫的位置再試"
+            ) from None
+
+    def forget(self, handoff_id: str) -> None:
+        """認領被**明確拒收**時刪掉記錄——那張單已經不是這次 checkout 的了。
+
+        只有「確定不會成功」才呼叫（被拒時）。逾時**不**呼叫：那筆可能下一輪就被
+        接受，記錄是救命的。
+        """
+        path = self._file_for(handoff_id)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            raise ClaimJournalError(
+                f"認領記錄刪不掉: {path}（{type(e).__name__}）。"
+                "留著不影響這次結果（記錄只是重跑時的提示），"
+                "但下次重跑會以為已經認領過。"
             ) from None
 
 

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,7 +25,9 @@ import pytest
 from aistorage.agora_cli.checkout import (
     CheckoutDeps,
     CheckoutError,
+    ClaimAlreadyCommitted,
     ClaimRejected,
+    PartialClaimAccepted,
     checkout,
 )
 from aistorage.agora_cli.package import (
@@ -50,6 +53,7 @@ T1 = "2026-09-28T09:00:00.000Z"
 PROFILE = "mac-opencode"
 S1 = "opencode:ses_aaa"
 S2 = "opencode:ses_bbb"
+S3 = "opencode:ses_ccc"
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +169,8 @@ class FakeReader:
     def get_reading(self, session_id: str, *, snapshot_sha256: str | None = None,
                     max_lag: Any = None) -> Any:
         entry = self.sessions[session_id]
+        # `flags` 讓測試可以把某一則標成未完成／已撤銷（接續點的邊界）
+        flags = entry.get("flags") or {}
         payload = {
             "format": "aistorage.reading/v1",
             "session_id": session_id,
@@ -179,8 +185,8 @@ class FakeReader:
                     "index": i,
                     "role": "user" if i % 2 == 0 else "assistant",
                     "created_at": T0,
-                    "completed": True,
-                    "reverted": False,
+                    "completed": flags.get(mid, {}).get("completed", True),
+                    "reverted": flags.get(mid, {}).get("reverted", False),
                     "parts": [{"type": "text", "text": t}],
                 }
                 for i, (mid, t) in enumerate(
@@ -249,7 +255,8 @@ class FakeCommit:
 def _journal(tmp_path: Path) -> Any:
     from aistorage.agora_cli.claims import ClaimJournal
 
-    return ClaimJournal(tmp_path / "checkout-claims.json")
+    # 記錄現在是**一個目錄**（每張交接單一個檔案，見 review-7a4ca87 M1）
+    return ClaimJournal(tmp_path / "checkout-claims")
 
 
 def _deps(reader: FakeReader, commit: Any = None, *, profile: str = PROFILE,
@@ -470,17 +477,25 @@ def test_package_validates_against_the_published_schema(tmp_path: Path):
 
 
 HANDOFF = "handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV"
+HANDOFF2 = "handoff:01BX5ZZKBKACTAV9WEVGEMMVRZ"
+HANDOFF3 = "handoff:01CX6AABKACTAV9WEVGEMMVRZ"
 
 
-def _reader_with_handoff() -> FakeReader:
+def _reader_with_handoff(*handoff_ids: str) -> FakeReader:
     raw = _raw("ses_aaa", ["一", "二"])
-    return FakeReader(
+    reader = FakeReader(
         {S1: {"raw": raw, "texts": ["一", "二"]}},
         {HANDOFF: {
             "target_session_id": S1, "snapshot_sha256": _sha(raw),
             "message_id": "msg_ses_aaa_1", "content": "接手後續調查",
         }},
     )
+    for handoff_id in handoff_ids:
+        reader.handoffs[handoff_id] = {
+            "target_session_id": S1, "snapshot_sha256": _sha(raw),
+            "message_id": "msg_ses_aaa_1", "content": f"接手 {handoff_id}",
+        }
+    return reader
 
 
 def test_handoff_startpoint_registers_a_claim_before_producing_the_package(tmp_path: Path):
@@ -560,7 +575,8 @@ def test_claim_timeout_keeps_the_local_record_so_a_rerun_can_resume(tmp_path: Pa
     with pytest.raises(ClaimRejected) as excinfo:
         checkout(reader, _deps(reader, commit, journal=journal), [HANDOFF], out)
 
-    assert "--resume" in str(excinfo.value)
+    # 重跑**自動**沿用，不需要任何參數（review-7a4ca87 H1）
+    assert "自動沿用" in str(excinfo.value)
     assert not out.exists()
     record = journal.get(HANDOFF)
     assert record is not None, "逾時要留記錄，否則重跑認不回來"
@@ -607,11 +623,13 @@ def test_rejected_claim_forgets_the_local_record(tmp_path: Path):
     """被明確拒收時刪掉記錄：那張單已經不是這次 checkout 的了。"""
     reader = _reader_with_handoff()
     journal = _journal(tmp_path)
-    commit = FakeCommit(rejected=[(SimpleNamespace(kind="claim", target="claim:01X"),
+    # 拒收回報的 `target` 是**交接單 id**（`apply_claim` 是照交接單對應的）
+    commit = FakeCommit(rejected=[(SimpleNamespace(kind="claim", target=HANDOFF),
                                   "already_claimed")])
-    with pytest.raises(ClaimRejected):
+    with pytest.raises(ClaimRejected) as excinfo:
         checkout(reader, _deps(reader, commit, journal=journal), [HANDOFF],
                  tmp_path / "pkg")
+    assert "already_claimed" in str(excinfo.value)
     assert journal.get(HANDOFF) is None
 
 
@@ -1209,3 +1227,435 @@ def test_handoff_still_refuses_an_explicit_at() -> None:
 
     with pytest.raises(StartPointError, match="--at"):
         cmd_handoff(_handoff_args(task=["做前端"], at="msg_1"), reader=None)
+
+# ---------------------------------------------------------------------------
+# 4. 重跑（review-7a4ca87 H1／H2／M1／M2）
+# ---------------------------------------------------------------------------
+
+
+def test_rerun_after_timeout_reuses_the_recorded_session_id(tmp_path: Path):
+    """H1：**預設 id**（沒給 --new-session-id）逾時之後重跑要成功。
+
+    這是 review 指出的死路：預設流程每次都重新編 session id，所以重跑拿它去對
+    記錄一定對不上。住民 AI 沒有 `--new-session-id` 可傳，那條路等於走不通。
+    改成「記錄有就自動沿用」之後，不需要任何額外參數。
+    """
+    reader = _reader_with_handoff()
+    journal = _journal(tmp_path)
+    first = FakeCommit(timed_out=True)
+    with pytest.raises(ClaimRejected):
+        checkout(reader, _deps(reader, first, journal=journal), [HANDOFF],
+                 tmp_path / "pkg1")
+    reserved = journal.get(HANDOFF)
+    assert reserved is not None
+
+    # 重跑：沒有 --new-session-id，也沒有 --resume
+    second = FakeCommit()
+    pkg = checkout(reader, _deps(reader, second, journal=journal), [HANDOFF],
+                   tmp_path / "pkg2")
+
+    assert pkg.new_session_id == reserved.new_session_id, "必須沿用記錄裡的 id"
+    assert second.claims[0].item_id == reserved.claim_id, "必須是同一個認領"
+    assert second.claim_raws[0] == first.claim_raws[0], "空匯出檔要位元組相同"
+
+
+def test_rerun_never_overwrites_an_existing_record(tmp_path: Path):
+    """H1：**不加** --resume 重跑也不得覆蓋記錄（否則兩筆都沒了）。"""
+    reader = _reader_with_handoff()
+    journal = _journal(tmp_path)
+    with pytest.raises(ClaimRejected):
+        checkout(reader, _deps(reader, FakeCommit(timed_out=True), journal=journal),
+                 [HANDOFF], tmp_path / "pkg1")
+    original = journal.get(HANDOFF)
+    assert original is not None
+
+    checkout(reader, _deps(reader, FakeCommit(), journal=journal), [HANDOFF],
+             tmp_path / "pkg2")
+
+    after = journal.get(HANDOFF)
+    assert after == original, "既有記錄不得被覆蓋"
+
+
+def test_new_session_id_still_wins_when_there_is_no_record(tmp_path: Path):
+    """沒有記錄時照舊可以用 --new-session-id 指定。"""
+    reader = _reader_with_handoff()
+    pkg = checkout(reader, _deps(reader, FakeCommit(), journal=_journal(tmp_path)),
+                   [HANDOFF], tmp_path / "pkg", new_session_id=S2)
+    assert pkg.new_session_id == S2
+
+
+def test_conflicting_records_for_n_to_1_are_refused(tmp_path: Path):
+    """H1：n→1 時各張的記錄預留了不同 id → 明確拒絕，不要猜。"""
+    reader = _reader_with_handoff(HANDOFF2)
+    journal = _journal(tmp_path)
+    # 兩張單各自跑一次（1→n 的兩張），各預留一個不同的 id，然後都逾時
+    for handoff_id, out_name in ((HANDOFF, "pkg1"), (HANDOFF2, "pkg2")):
+        with pytest.raises(ClaimRejected):
+            checkout(reader,
+                     _deps(reader, FakeCommit(timed_out=True), journal=journal),
+                     [handoff_id], tmp_path / out_name)
+    assert (journal.get(HANDOFF).new_session_id
+            != journal.get(HANDOFF2).new_session_id)
+
+    with pytest.raises(CheckoutError) as excinfo:
+        checkout(reader, _deps(reader, FakeCommit(), journal=journal),
+                 [HANDOFF, HANDOFF2], tmp_path / "pkg3")
+    assert "不同的新 session id" in str(excinfo.value)
+    assert not (tmp_path / "pkg3").exists()
+
+
+def test_partial_rejection_keeps_the_accepted_record(tmp_path: Path):
+    """H2：n→1 只有一張被拒時，**被接受那張的記錄要留著**。
+
+    整批刪掉的話，那張交接單就被一個永遠沒有起點包的預留 session 接走了。
+    """
+    reader = _reader_with_handoff(HANDOFF2)
+    journal = _journal(tmp_path)
+    commit = FakeCommit(rejected=[(SimpleNamespace(kind="claim", target=HANDOFF2),
+                                   "already_claimed")])
+
+    with pytest.raises(PartialClaimAccepted) as excinfo:
+        checkout(reader, _deps(reader, commit, journal=journal),
+                 [HANDOFF, HANDOFF2], tmp_path / "pkg")
+
+    assert excinfo.value.accepted == (HANDOFF,)
+    assert excinfo.value.rejected == (HANDOFF2,)
+    # 被接受那張的記錄還在（那是那個預留日後唯一的線索）
+    assert journal.get(HANDOFF) is not None, "被接受那張的記錄不得刪掉"
+    # 被拒那張的刪掉（它已經是別人的了）
+    assert journal.get(HANDOFF2) is None
+    # 訊息要講清楚「哪幾張被接走、預留的 session 是哪個」
+    message = str(excinfo.value)
+    assert HANDOFF in message and "部分被接受" in message
+    assert not (tmp_path / "pkg").exists()
+
+
+def test_partial_rejection_names_the_reserved_session(tmp_path: Path):
+    """H2：部分被接受時要明講預留的 session id（ Agora 裡已經有那筆空紀錄）。"""
+    reader = _reader_with_handoff(HANDOFF2)
+    journal = _journal(tmp_path)
+    commit = FakeCommit(rejected=[(SimpleNamespace(kind="claim", target=HANDOFF2),
+                                   "already_claimed")])
+    with pytest.raises(PartialClaimAccepted) as excinfo:
+        checkout(reader, _deps(reader, commit, journal=journal),
+                 [HANDOFF, HANDOFF2], tmp_path / "pkg")
+    assert excinfo.value.new_session_id == journal.get(HANDOFF).new_session_id
+    assert excinfo.value.new_session_id in str(excinfo.value)
+
+
+def test_unmatched_rejection_target_deletes_nothing(tmp_path: Path):
+    """H2：認不出被拒的是哪幾張時**一張都不刪**（刪錯了不可恢復）。"""
+    reader = _reader_with_handoff(HANDOFF2)
+    journal = _journal(tmp_path)
+    commit = FakeCommit(rejected=[(SimpleNamespace(kind="claim", target="claim:01X"),
+                                   "already_claimed")])
+    with pytest.raises(ClaimRejected):
+        checkout(reader, _deps(reader, commit, journal=journal),
+                 [HANDOFF, HANDOFF2], tmp_path / "pkg")
+    # 寧可留著（下次重跑會被當成已認領，但可恢復），也不要刪錯
+    assert journal.get(HANDOFF) is not None
+    assert journal.get(HANDOFF2) is not None
+
+
+def test_failure_after_the_claim_is_accepted_says_so(tmp_path: Path):
+    """M2：認領成立**之後**才失敗，訊息要說明認領已經成立。
+
+    否則人會去「修好再重跑」，而重跑會撞 already_claimed。
+    """
+    reader = _reader_with_handoff()
+    out = tmp_path / "pkg"
+    # `aistorage.agora_cli.checkout` 這個名字在套件層被 `checkout` 函式蓋掉，
+    # 要拿到模組本身得走 importlib。
+    co = importlib.import_module("aistorage.agora_cli.checkout")
+    original_stage = co.stage_package
+
+    def stage_then_sabotage(pkg, out_dir):
+        """照常擺好暫存目錄，然後把輸出目錄變成非空——
+        這樣最後那個 `out.rmdir()` / 改名會失敗，而認領已經送出去了。"""
+        staging = original_stage(pkg, out_dir)
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        (Path(out_dir) / "sabotage.txt").write_text("x", encoding="utf-8")
+        return staging
+
+    co.stage_package = stage_then_sabotage
+    try:
+        with pytest.raises(ClaimAlreadyCommitted) as excinfo:
+            checkout(reader, _deps(reader, FakeCommit(), journal=_journal(tmp_path)),
+                     [HANDOFF], out)
+    finally:
+        co.stage_package = original_stage
+
+    assert "認領**已經成立**" in str(excinfo.value)
+    assert "不要再送一次認領" in str(excinfo.value)
+    assert excinfo.value.claimed_handoffs == (HANDOFF,)
+    assert excinfo.value.new_session_id
+
+
+def test_staging_dir_name_is_unique_per_run(tmp_path: Path):
+    """M2：暫存目錄名帶隨機後綴，同一個 -o 並行不會互相刪掉。"""
+    import aistorage.agora_cli.package as pkgmod
+
+    names = set()
+    for _ in range(5):
+        out = tmp_path / "same-out"
+        out.mkdir(exist_ok=True)
+        raw = _raw("ses_aaa", ["一", "二"])
+        reader = FakeReader({S1: {"raw": raw, "texts": ["一", "二"]}})
+        pkgobj = _build_pkg_for_staging(reader)
+        staging = pkgmod.stage_package(pkgobj, out)
+        names.add(staging.name)
+        assert staging.parent == out.parent
+    assert len(names) == 5, f"暫存目錄名必須每次不同: {names}"
+
+
+def _build_pkg_for_staging(reader: FakeReader) -> Any:
+    from aistorage.agora_cli.package import ContextPackage, PackageSegment
+
+    raw = _raw("ses_aaa", ["一", "二"])
+    resolved = resolve_startpoint(reader, parse_startpoint(S1))
+    return ContextPackage(
+        segments=(PackageSegment(resolved=resolved, raw=raw,
+                                 message_count=2, text_chars=2, order=0),),
+        task=None, new_session_id=S2, created_at=T1, created_by="profile:mac-opencode",
+    )
+
+
+# --- M1：記錄檔本身 ---
+
+
+def test_journal_refuses_to_overwrite_an_existing_record(tmp_path: Path):
+    """M1：`put` 不得覆蓋既有記錄（覆蓋＝讓那張交接單永遠認不回來）。"""
+    from aistorage.agora_cli.claims import ClaimJournal, ClaimJournalError, ClaimRecord
+
+    journal = ClaimJournal(tmp_path / "claims")
+    first = ClaimRecord(
+        handoff_id=HANDOFF, claim_id="claim:01A", item_key="01A",
+        new_session_id=S2, reserved_at=T1, title="t", profile=PROFILE, created_at=T1)
+    journal.put(first)
+    with pytest.raises(ClaimJournalError, match="已經有"):
+        journal.put(ClaimRecord(
+            handoff_id=HANDOFF, claim_id="claim:01B", item_key="01B",
+            new_session_id=S3, reserved_at=T1, title="t", profile=PROFILE,
+            created_at=T1))
+    assert journal.get(HANDOFF) == first
+
+
+def test_journal_keeps_other_handoffs_when_one_file_is_corrupt(tmp_path: Path):
+    """M1：壞掉要**出聲**且不影響別張——不能當成空的（否則覆蓋掉所有人）。"""
+    from aistorage.agora_cli.claims import ClaimJournal, ClaimJournalError, ClaimRecord
+
+    journal = ClaimJournal(tmp_path / "claims")
+    for handoff_id, item_key in ((HANDOFF, "01A"), (HANDOFF2, "01B")):
+        journal.put(ClaimRecord(
+            handoff_id=handoff_id, claim_id=f"claim:{item_key}", item_key=item_key,
+            new_session_id=S2, reserved_at=T1, title="t", profile=PROFILE,
+            created_at=T1))
+    # 把其中一份弄壞
+    (journal.path / f"{HANDOFF2.replace(':', '_')}.json").write_text("{壞掉",
+                                                                     encoding="utf-8")
+
+    with pytest.raises(ClaimJournalError, match="讀不來"):
+        journal.get(HANDOFF2)
+    # 另一張仍然讀得到
+    assert journal.get(HANDOFF) is not None
+
+
+def test_journal_refuses_to_write_when_a_record_is_corrupt(tmp_path: Path):
+    """M1：壞掉時**拒絕寫入**，不要在壞掉的檔上蓋（會連帶弄壞別張）。"""
+    from aistorage.agora_cli.claims import ClaimJournal, ClaimJournalError, ClaimRecord
+
+    journal = ClaimJournal(tmp_path / "claims")
+    (journal.path).mkdir(parents=True)
+    (journal.path / f"{HANDOFF.replace(':', '_')}.json").write_text("{壞掉",
+                                                                    encoding="utf-8")
+    with pytest.raises(ClaimJournalError):
+        journal.put(ClaimRecord(
+            handoff_id=HANDOFF, claim_id="claim:01A", item_key="01A",
+            new_session_id=S2, reserved_at=T1, title="t", profile=PROFILE,
+            created_at=T1))
+    assert (journal.path / f"{HANDOFF.replace(':', '_')}.json").read_text(
+        encoding="utf-8") == "{壞掉", "不得覆蓋壞掉的記錄"
+
+
+def test_journal_uses_one_file_per_handoff(tmp_path: Path):
+    """M1：每張單一個檔案，並行寫入才不會互相蓋掉。"""
+    from aistorage.agora_cli.claims import ClaimJournal, ClaimRecord
+
+    journal = ClaimJournal(tmp_path / "claims")
+    for handoff_id in (HANDOFF, HANDOFF2, HANDOFF3):
+        journal.put(ClaimRecord(
+            handoff_id=handoff_id, claim_id=f"claim:{handoff_id}",
+            item_key="01A", new_session_id=S2, reserved_at=T1, title="t",
+            profile=PROFILE, created_at=T1))
+    files = sorted(p.name for p in journal.path.glob("*.json"))
+    assert len(files) == 3, files
+
+
+def test_concurrent_journal_writes_do_not_lose_records(tmp_path: Path):
+    """M1：並行寫入（1→n 的典型用法）不得弄丟任何一張的記錄。"""
+    from aistorage.agora_cli.claims import ClaimJournal, ClaimRecord
+
+    journal = ClaimJournal(tmp_path / "claims")
+    handoffs = [f"handoff:01{i:022d}" for i in range(12)]
+    for index, handoff_id in enumerate(handoffs):
+        journal.put(ClaimRecord(
+            handoff_id=handoff_id, claim_id=f"claim:{index:03d}",
+            item_key=f"{index:03d}", new_session_id=S2, reserved_at=T1, title="t",
+            profile=PROFILE, created_at=T1))
+    for index, handoff_id in enumerate(handoffs):
+        assert journal.get(handoff_id) is not None, f"{handoff_id} 的記錄不見了"
+    assert len(list(journal.path.glob("*.json"))) == len(handoffs)
+
+
+def test_agora_cli_imports_without_any_source_app_or_syncer() -> None:
+    """M2：`agora` 是一般介面，**不該**因為寫入路徑就綁上某個來源應用。
+
+    `agora_cli` 只做「起點 → 起點包」與讀 Agora；觸發提交流程時才需要同步器，
+    那個 import 必須在函式裡，否則 `import aistorage.agora_cli` 就會拖進
+    opencode 的匯出流程（impl2-review4 M2）。
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(
+        """
+        import sys
+        class Blocker:
+            def find_module(self, name, path=None):
+                if (name.startswith("aistorage.syncer")
+                        or name.startswith("aistorage.adapters")):
+                    raise ImportError("blocked: " + name)
+                return None
+        sys.meta_path.insert(0, Blocker())
+        import importlib
+        for m in ("aistorage.agora_cli",
+                  "aistorage.agora_cli.__main__",
+                  "aistorage.agora_cli.checkout",
+                  "aistorage.agora_cli.claims",
+                  "aistorage.agora_cli.package",
+                  "aistorage.agora_cli.startpoint",
+                  "aistorage.agora_cli.objects"):
+            importlib.import_module(m)
+        print("ok")
+        """
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "ok" in proc.stdout
+
+
+def _reader_with_flagged_message(message_id: str, **flags: Any) -> FakeReader:
+    raw = _raw("ses_aaa", ["一", "二", "三"])
+    ids = _message_ids_of(raw)
+    return FakeReader({S1: {"raw": raw, "texts": ["一", "二", "三"],
+                           "flags": {message_id: flags}}})
+
+
+def test_startpoint_at_an_unfinished_message_is_refused(tmp_path: Path):
+    """L：`<session>@<msg>` 指到**未完成**的訊息要拒絕。
+
+    接續點的定義是「最後一則**已完成**的訊息」。未完成的訊息還會被改寫，
+    從那裡接續等於把一個不確定的狀態當成起點。
+    """
+    mid = _message_ids_of(_raw("ses_aaa", ["一", "二", "三"]))[1]
+    reader = _reader_with_flagged_message(mid, completed=False)
+    with pytest.raises(StartPointError, match="還沒有完成"):
+        checkout(reader, _deps(reader), [f"{S1}@{mid}"], tmp_path / "pkg")
+    assert not (tmp_path / "pkg").exists()
+
+
+def test_startpoint_at_a_reverted_message_is_refused(tmp_path: Path):
+    """L：指到**已撤銷**的訊息要拒絕（會把撤回的內容帶回來）。"""
+    mid = _message_ids_of(_raw("ses_aaa", ["一", "二", "三"]))[1]
+    reader = _reader_with_flagged_message(mid, reverted=True)
+    with pytest.raises(StartPointError, match="已被撤銷"):
+        checkout(reader, _deps(reader), [f"{S1}@{mid}"], tmp_path / "pkg")
+    assert not (tmp_path / "pkg").exists()
+
+
+def test_startpoint_at_a_completed_message_still_works(tmp_path: Path):
+    """L：正常情況（已完成、未撤銷）不受影響。"""
+    mid = _message_ids_of(_raw("ses_aaa", ["一", "二", "三"]))[1]
+    reader = _reader_with_flagged_message(mid, completed=True, reverted=False)
+    pkg = checkout(reader, _deps(reader), [f"{S1}@{mid}"], tmp_path / "pkg")
+    assert pkg.segments[0].resolved.message_id == mid
+
+
+def test_reading_a_package_without_raw_sha256_is_refused(tmp_path: Path):
+    """L：讀回起點包時**缺 `raw_sha256` 要拒絕**，不要略過驗證。
+
+    略過等於「沒有雜湊的段落照樣能用」——那正是位元組相同這個保證失效的入口。
+    """
+    reader = FakeReader({S1: {"raw": _raw("ses_aaa", ["一", "二"]),
+                             "texts": ["一", "二"]}})
+    out = tmp_path / "pkg"
+    checkout(reader, _deps(reader), [S1], out)
+    data = json.loads((out / "package.json").read_text(encoding="utf-8"))
+    del data["segments"][0]["raw_sha256"]
+    (out / "package.json").write_text(
+        json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(ContextPackageError, match="沒有 raw_sha256"):
+        read_package(out)
+
+
+def test_handoff_task_text_goes_into_the_package(tmp_path: Path):
+    """M3：交接單本身的任務文字要進起點包（`--task` 是額外附加的）。"""
+    reader = _reader_with_handoff()
+    out = tmp_path / "pkg"
+    checkout(reader, _deps(reader), [HANDOFF], out)
+    data = json.loads((out / "package.json").read_text(encoding="utf-8"))
+    assert data["task"] == "接手後續調查"
+
+
+def test_explicit_task_is_added_on_top_of_the_handoff_text(tmp_path: Path):
+    """M3：`--task` 蓋掉交接單的內容（這一次額外交代的才是主要的）。"""
+    reader = _reader_with_handoff()
+    out = tmp_path / "pkg"
+    checkout(reader, _deps(reader), [HANDOFF], out, task="這次先做 A")
+    data = json.loads((out / "package.json").read_text(encoding="utf-8"))
+    assert data["task"] == "這次先做 A"
+
+
+def test_object_index_picks_the_file_whose_metadata_matches(tmp_path: Path):
+    """M5：同名多檔時只挑 sha256 與 size 都相符的那一個。"""
+    from aistorage.agora_cli.objects import ObjectFetcher
+    from aistorage.drive.fake import FakeDrive
+
+    data = _raw("ses_aaa", ["一", "二"])
+    digest = hashlib.sha256(data).hexdigest().lower()
+    key = f"SHA256E-s{len(data)}--{digest}"
+    other = b"x" * len(data)
+
+    drive = FakeDrive()
+    folder = drive.seed_folder("agora-objects")
+    # 同名、但 metadata 對不上（模擬「同名多檔」的異常）
+    drive.seed_file(folder, key, other)
+    drive.seed_file(folder, key, data)
+
+    fetcher = ObjectFetcher(drive, folder)
+    got = fetcher.fetch(key)
+    assert got == data, "必須挑 metadata 相符的那一個"
+
+
+def test_object_index_refuses_when_no_candidate_matches(tmp_path: Path):
+    """M5：同名多檔但沒有任何一個 metadata 相符 → 明確拒絕，不要猜。"""
+    from aistorage.agora_cli.objects import ObjectFetcher, ObjectError
+    from aistorage.drive.fake import FakeDrive
+
+    drive = FakeDrive()
+    folder = drive.seed_folder("agora-objects")
+    data = _raw("ses_aaa", ["一", "二"])
+    digest = hashlib.sha256(data).hexdigest().lower()
+    key = f"SHA256E-s{len(data)}--{digest}"
+    # 兩個同名檔案，metadata 的 sha256 都不符（`seed_file` 會照內容算真 sha，
+    # 這裡用 `sha256=` 明確給錯的值）
+    drive.seed_file(folder, key, b"y" * len(data), sha256="0" * 64)
+    drive.seed_file(folder, key, b"z" * len(data), sha256="1" * 64)
+
+    fetcher = ObjectFetcher(drive, folder)
+    with pytest.raises(ObjectError, match="sha256 與 size 都和 key 相符"):
+        fetcher.file_id_for(key)

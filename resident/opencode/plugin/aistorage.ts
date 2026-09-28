@@ -205,7 +205,10 @@ const TOOLS: Record<string, ToolDef> = {
       "產出一個起點包（start point package）：把起點之前的原始紀錄原封不動放進" +
       "一個目錄，交給 agora-opencode load 變成新的 session。" +
       "startpoints: ['handoff:<id>' 或 '<session>[@<訊息>]']（多個＝n→1 統合）。" +
-      "起點是交接單時會一併登記認領，被拒就不產出；認領逾時要重跑時請帶 resume: true。" +
+      "起點是交接單時會一併登記認領，被拒就不產出。" +
+      "認領逾時或被中斷時**不要自己重跑**：本機留有這次認領的記錄，" +
+      "重跑必須沿用同一個預留的 session id，工具沒有那個參數，請把逾時" +
+      "原樣回報使用者，由使用者決定怎麼接續。" +
       "產出的目錄在回傳的 package 欄位。",
     cli: "agora",
     command: "checkout",
@@ -528,7 +531,9 @@ export const AistoragePlugin = async () => {
                       resume: {
                         type: "boolean",
                         description:
-                          "上一次認領逾時或被中斷：沿用同一個認領重試（不要換新的）",
+                          "沿用本機記錄裡同一個認領重試。**一般情況不要用**：" +
+                          "逾時或中斷後預設就會自動沿用本機記錄；" +
+                          "需要指定時才帶，帶了也請把結果回報使用者。",
                       },
                     }
                   : {}),

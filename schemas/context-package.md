@@ -98,12 +98,25 @@ n→1（統合）時，呼叫端給的次序不代表什麼，所以 `agora chec
 - 寫入順序是 預留 → link → handoff → claim。
 - `new_session.session_id` 必須是轉接器匯入時會用的那個 id，所以轉接器不能自己編。
 
-**逾時要重跑時請加 `--resume`**。交接單只能被認領一次，所以重跑若換一個新的
-claim id，只會得到 `already_claimed`，而那張單永遠沒有 session 接手。`agora checkout`
-在送出之前就把這次的 claim id、item_key、預留時間與新 session id 寫進**本機認領
-記錄**（`$AISTORAGE_CHECKOUT_CLAIMS` 或 `~/.aistorage/checkout-claims.json`）；`--resume`
-沿用它們，所以提交流程會把重送的那一筆當成同一個 item（冪等）。認領被**明確拒收**
-時記錄會被刪掉（那張單已經不是這次 checkout 的了）。
+**逾時或中斷之後重跑會自動沿用同一個認領**（不需要額外參數）。交接單只能被認領一次，
+所以重跑若換一個新的 claim id 或新的預留 session id，只會得到 `already_claimed`，而那張
+單永遠沒有 session 接手。`agora checkout` 在送出之前就把這次的 claim id、item_key、
+預留時間與新 session id 寫進**本機認領記錄**（`$AISTORAGE_CHECKOUT_CLAIMS`，預設是
+`~/.aistorage/checkout-claims/` 底下**一張交接單一個檔案**）；之後只要記錄裡有這張單，
+就自動沿用它們，不論有沒有帶 `--resume`（`--resume` 只是把這個行為寫成明示）。
+提交流程因此會把重送的那一筆當成同一個 item（冪等）。
+
+- 記錄**不得被覆蓋**：`put` 遇到既有記錄會拒絕，因為舊記錄對應的認領可能已經被接受。
+- 認領被**明確拒收**時，**只有被拒的那幾張**的記錄會被刪掉。n→1 時可能只有一張被拒
+  （那張已被別人接走），此時已經被接受的那幾張**要留著記錄**——它們的交接單已被預留
+  的 session 接走，記錄是那個預留日後唯一的線索。這種情形會以
+  `PartialClaimAccepted` 明確報出「哪幾張被接走、預留的 session 是哪個」。
+- 逾時**不刪**記錄：那筆可能下一輪就被接受。
+- 認領**成立之後**才發生的失敗（例如產出目錄被佔）會以 `ClaimAlreadyCommitted`
+  明確報出「認領已經成立」，不要重送新的認領。
+
+**n→1 的預留必須一致**：一次 checkout 的所有起點共用同一個新 session id，所以記錄裡
+各張單預留的 id 若不一致，代表其中某一張已被另一個 checkout 預留走，明確拒絕。
 
 **所有本機檢查都在登記認領之前完成**：輸出目錄可寫而且是空的、每段 raw 的 SHA-256
 等於快照雜湊、Agora 的物件讀得到。任一項失敗就停下——那時這張交接單還沒被動過。

@@ -191,6 +191,26 @@ def resolve_startpoint(reader: Any, sp: StartPoint, *, max_lag: Any = None
                 f"Session {sp.session_id} 的最新快照裡沒有訊息 {sp.message_id}；"
                 f"這個快照有 {len(known)} 則訊息"
             )
+        # ★ 指定位置時必須是**已完成、未撤銷**的那一則（impl2-review4 L）。
+        #   接續點的定義就是「最後一則已完成的訊息」；指向未完成或已撤銷的訊息
+        #   會讓新 session 的開頭停在一個不存在的狀態上（撤回的內容又會回來）。
+        target = next(
+            (m for m in (reading.get("messages") or [])
+             if m.get("message_id") == sp.message_id), {})
+        if target.get("reverted", False):
+            raise StartPointError(
+                f"訊息 {sp.message_id} 已被撤銷（reverted），不能作為接續點："
+                "它的內容已被來源應用丟掉，從這裡接續等於把撤銷的內容帶回來。"
+                "請改用撤銷前的最後一則已完成訊息，或不指定位置"
+                "（用最後一則已完成的訊息）"
+            )
+        if not target.get("completed", False):
+            raise StartPointError(
+                f"訊息 {sp.message_id} 還沒有完成（completed=false），"
+                "不能作為接續點：它可能還會被改寫。"
+                "請等它完成，或改用它的前一則已完成訊息，"
+                "或不指定位置（用最後一則已完成的訊息）"
+            )
         message_id = sp.message_id
 
     return ResolvedStartPoint(
