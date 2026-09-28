@@ -30,7 +30,6 @@ from typing import Any
 import urllib.error
 import urllib.request
 
-from aistorage.agora import layout
 from aistorage.agora.apply import (
     apply_claim,
     apply_handoff,
@@ -1245,8 +1244,7 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
                 dry_run=dry_run,
             )
             ctx.report.readview_publish = getattr(pub_rep, "status", "published")
-        published_rejections = _published_rejection_keys(
-            store, decisions, ctx.report.readview_publish, pub_rep, dry_run=dry_run)
+        published_rejections = _published_rejection_keys(pub_rep, dry_run=dry_run)
     except Exception as e:  # noqa: BLE001 - 發佈失敗不得影響真本與收件匣
         ctx.report.readview_publish = "publish_failed"
         ctx.report.publish_error = type(e).__name__
@@ -1263,76 +1261,43 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
     )
 
 
-def _published_rejection_keys(
-    store: Any,
-    decisions: list[Decision],
-    publish_status: Any,
-    pub_rep: Any,
-    *,
-    dry_run: bool,
-) -> frozenset[str]:
+def _published_rejection_keys(pub_rep: Any, *, dry_run: bool) -> frozenset[str]:
     """H4：這一輪（或既有世代）已經包含在讀取視圖裡的拒收 item_key。
 
     第 14 步刪除拒收項目的條件不是「這一輪有沒有發佈」，而是「這一筆拒收已經進入過
-    某個已發佈的世代」：
+    某個已發佈的世代」。判斷完全交給發佈器回報的 `published_item_keys`：
 
     - `published`／`planned`：這一輪的 `run_rejections` 全部進了這個世代；
     - `skipped`：上一個世代就已經有這一輪完全相同的拒收集合（發佈器的冪等判斷
       正是比對這一點），所以同樣算「已發佈」；
-    - 沒有發佈器／發佈失敗：一律不算（`empty`），寧可留著。
+    - 沒有發佈器、發佈失敗、或發佈器沒有回報 `published_item_keys`：一律**不算**
+      （空的集合），寧可留著。
 
-    同時把世代號寫進真本 `_committer/rejections/<key>.json` 的
-    `published_generation`（稽核用；這一步在 push 之後，所以不會再 commit——
-    真正用來刪除的依據是這裡回傳的集合）。
+    為什麼「發佈器沒回報 item_key」要當成不算：那是唯一能證明「這一筆拒收已經被
+    某個讀者看得到」的證據，缺了它就只能靠 `status` 字串推論，而那正是 fail-open
+    的方向（review-73dbf2c L）。`DriveReadViewPublisher` 兩種狀態都會回報
+    `published_item_keys`；`NullPublisher` 回 `None`，那時本來就不該刪任何東西。
     """
-    status = str(publish_status or "")
-    keys_attr = getattr(pub_rep, "published_item_keys", None)
-    if keys_attr is None:
-        # 沒有回報 item_key 的發佈器（第三方實作）：退回「這一輪的拒收都算已發佈」。
-        # 要拿 H4 的完整保護，發佈器要像 `DriveReadViewPublisher` 一樣回
-        # `published_item_keys`。
-        if not (status == "published" or status.startswith("published")
-                or status == "planned"):
-            return frozenset()
-        keys = {dec.item.item_key for dec in decisions if dec.kind == DecisionKind.REJECT}
-    else:
-        keys = set(keys_attr)
-    if not keys or dry_run:
+    if dry_run:
         return frozenset()
-    generation = getattr(pub_rep, "generation", None)
-    if generation is not None:
-        mark_rejections_published(store, sorted(keys), int(generation))
+    keys = getattr(pub_rep, "published_item_keys", None)
+    if keys is None:
+        return frozenset()
     return frozenset(keys)
 
 
-def mark_rejections_published(store: Any, item_keys: list[str], generation: int) -> None:
-    """把 `published_generation` 寫進真本的拒收紀錄（只影響真本副本，不 commit）。"""
-    for item_key in item_keys:
-        rel = layout.rejection_path(item_key)
-        path = store.worktree / rel
-        if not path.is_file():
-            continue  # 驗章前的拒收本來就不寫進真本
-        try:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict) or data.get("published_generation") == generation:
-            continue
-        data["published_generation"] = generation
-        store.put_json(rel, data)
-
-
 def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport:
-    """執行 13 步提交流程主體。
+    """執行提交流程（D2 的 13 步）＋第 14 步清理收件匣。
 
-    各步驟（review-g3g H1：copy 必須在算 refs／annex keys 之前，所以它獨佔一步，
-    後面的步驟順延；實際執行順序見下方註解）：
+    順序（review-g3g H1：copy 必須在算 refs／annex keys 之前，所以它獨佔一步，
+    後面的步驟順延）：
+
     1 guard: ref 與 sha 驗證（Actions 環境）
+    1b maintenance: 維護旗標（**讀遠端**）→ 有就整輪不做事
     2 intake.scan: 掃描收件匣，空則提前結束
     3 integrity.settle: 結算待定釘選值
-    4 integrity.sweep: 清掃前綴資料夾與上層同名資料夾
-    5 annex.git.clone + integrity.verify.verify_clone: clone 真本並核對釘選值
+    4 integrity.sweep: 清掃前綴資料夾與上層同名資料夾（**之後**重新列舉前綴）
+    5 annex.git.clone + integrity.verify: clone 真本、核對釘選值、確認 annex 物件
     6 annex.git: 準備 git annex 環境
     7 intake.evaluate + agora.apply: 評估決策並套用至真本
     8 annex.git.copy: 上傳 annex 物件（必須早於計算 refs／keys）
@@ -1342,18 +1307,17 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
     12 pins.promote + gc.gc_removed: 轉正釘選值與 bundle 回收
     13 publisher.publish: 發佈讀取視圖
     14 clean_inbox: 刪除已處理之收件匣項目與逾時的 junk
+
+    一輪只處理 `cfg` 描述的那一個實體（ADR 0009）；收件匣項目沒有分派，每一個都
+    交給 `evaluate` 決定收下還是被明確拒收。
     """
     run_id = generate_ulid()
     report = RunReport(run_id=run_id)
     content_cache: dict[Any, Any] = {}
 
     with tempfile.TemporaryDirectory(prefix="aistorage_run_") as temp_dir_str:
+        # pipeline 會在 base_temp 底下自己建立 work/、store_tmp/、repo/
         base_temp = Path(temp_dir_str)
-        git_dir = base_temp / "repo"
-        work_temp = base_temp / "work"
-        store_temp = base_temp / "store_tmp"
-        work_temp.mkdir(parents=True, exist_ok=True)
-        store_temp.mkdir(parents=True, exist_ok=True)
 
         current_step = "guard"
         ctx: PipelineContext | None = None

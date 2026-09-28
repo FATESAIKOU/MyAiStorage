@@ -94,12 +94,12 @@ for f in drive.list_children("<aistorage/ id>"):          # 換成上一步印�
     print(f.name, f.id, "folder" if f.is_folder else "file")
 PY
 ```
-六個子資料夾都在、而且沒有任何檔案（乾淨）。
+三個子資料夾都在、而且沒有任何檔案（乾淨）。
 
 **失敗怎麼退**：逐一 `drive.delete_permanently(<id>)`（Drive API 的刪除是永久的，不進垃圾桶），
 再刪 `aistorage/` 本身。已填進 `docs/resources.md` 的 id 要一併刪掉那一列。
 
-**要填回 `docs/resources.md`**：`aistorage/` 與六個子資料夾的 id。
+**要填回 `docs/resources.md`**：`aistorage/` 與三個子資料夾的 id。
 
 ---
 

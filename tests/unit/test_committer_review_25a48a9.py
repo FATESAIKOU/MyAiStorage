@@ -595,29 +595,6 @@ def test_publish_report_carries_published_item_keys(tmp_path: Path) -> None:
     assert rep.published_item_keys == ("k1",)
 
 
-def test_mark_rejections_published_writes_generation(tmp_path: Path) -> None:
-    """H4：世代號要寫進真本 `_committer/rejections/<key>.json`。"""
-    import json as _json
-
-    from aistorage.agora import layout as _layout
-    from aistorage.agora.store import AgoraStore, FakeRawStorage
-    from aistorage.committer.run import mark_rejections_published
-
-    worktree = tmp_path / "store"
-    worktree.mkdir(parents=True, exist_ok=True)
-    store = AgoraStore(worktree, FakeRawStorage(), temp_dir=tmp_path / "st")
-    rel = _layout.rejection_path("01ARZ3NDEKTSV4RRFFQ69G5FAV")
-    store.put_json(rel, {"item_key": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-                         "code": "bad_signature", "at": "t"})
-
-    mark_rejections_published(store, ["01ARZ3NDEKTSV4RRFFQ69G5FAV"], 3)
-    data = _json.loads((worktree / rel).read_text(encoding="utf-8"))
-    assert data["published_generation"] == 3
-    assert data["code"] == "bad_signature", "不得把其他欄位弄掉"
-    # 沒有紀錄的（驗章前的拒收本來就不寫真本）不會出錯
-    mark_rejections_published(store, ["01ARZ3NDEKTSV4RRFFQ69G5FAW"], 4)
-
-
 def test_published_rejection_is_recorded_in_the_true_copy(tmp_path: Path) -> None:
     """H4：驗章後的拒收要寫進真本（稽核用，publish/rejections 讀得到）。"""
     from aistorage.agora import layout as _layout
@@ -677,27 +654,37 @@ def test_artifact_rejection_code_is_published_as_the_reason(tmp_path: Path) -> N
 # -------------------------------------------------- 設定：只有一個實體
 
 
-def test_committer_config_has_no_multi_repo_field(tmp_path: Path) -> None:
-    """ADR 0009：設定檔描述**一個**實體，`repos` 區塊不再被解析。
+def test_committer_config_refuses_a_stale_multi_repo_block(tmp_path: Path) -> None:
+    """ADR 0009：設定檔只描述一個實體；舊的 `repos` 區塊必須**報錯**。
 
-    舊的設定檔帶著 `repos: {foundry: …}` 時，多餘的欄位會被忽略（不是錯），
-    但它已經沒有任何作用——要跑另一個實體就是換一份設定檔、另一個 workflow。
+    默默忽略的後果是「以為 Foundry 還在跑，其實從期 1 開始就沒有任何東西處理它」，
+    而且沒有任何人會發現（review-73dbf2c L）。
     """
     import json as _json
 
-    payload = {
+    base = {
         "format": "aistorage.committer/v1", "repo": "agora",
         "repo_uuid": "uuid-agora", "repo_url": "annex::agora",
         "prefix_folder_id": "p-agora", "quarantine_folder_id": "q-agora",
         "identity_registry_path": "config/identity.json",
-        "repos": {"foundry": {"uuid": "u-f", "url": "annex::f",
-                              "prefix_folder_id": "p-f",
-                              "quarantine_folder_id": "q-f"}},
     }
-    path = tmp_path / "c.json"
-    path.write_text(_json.dumps(payload), encoding="utf-8")
 
-    cfg = CommitterConfig.load(path, env={})
+    def _load(extra: dict) -> CommitterConfig:
+        path = tmp_path / "c.json"
+        path.write_text(_json.dumps({**base, **extra}), encoding="utf-8")
+        return CommitterConfig.load(path, env={})
 
+    with pytest.raises(ValueError, match="repos"):
+        _load({"repos": {"foundry": {"uuid": "u-f", "url": "annex::f",
+                                     "prefix_folder_id": "p-f",
+                                     "quarantine_folder_id": "q-f"}}})
+    # 空物件一樣是殘留（放著只會讓人以為 Foundry 還有設定）
+    with pytest.raises(ValueError, match="repos"):
+        _load({"repos": {}})
+    with pytest.raises(ValueError, match="_foundry"):
+        _load({"readview_manifest_file_id_foundry": "1_ManifestFoundry"})
+
+    # 只有 Agora 的設定照常載入
+    cfg = _load({"readview_manifest_file_id": "1_ManifestAgora"})
     assert cfg.repo == "agora"
-    assert not hasattr(cfg, "repos"), "多 repo 設定已移除（ADR 0009）"
+    assert not hasattr(cfg, "repos")

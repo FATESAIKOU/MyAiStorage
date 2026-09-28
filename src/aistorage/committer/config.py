@@ -143,6 +143,32 @@ class CommitterConfig:
                 f"不合法的 readview_rebuild_epoch: {repr(readview_rebuild_epoch)}（要非負整數）"
             )
 
+        # ADR 0009：設定檔只描述**一個**實體（期 1 是 Agora）。舊的設定檔帶著
+        # `repos: {foundry: …}`（多 repo 的提交流程）時**必須報錯**，不能默默忽略：
+        # 默默忽略的後果是「以為還在跑的 Foundry 其實從期 1 開始就沒被處理過」，
+        # 而沒有任何人會發現。舊的 `readview_*_foundry` 欄位一起擋。
+        if "repos" in data:
+            # 以「有沒有這個鍵」判斷，不是「值是否為空」：空物件一樣是多 repo 時代
+            # 的殘留，放著只會讓人以為 Foundry 還有設定。
+            stale_repos = data["repos"]
+            listed = (
+                ", ".join(sorted(stale_repos)) if isinstance(stale_repos, dict) and stale_repos
+                else repr(stale_repos)
+            )
+            raise ValueError(
+                f"設定檔還有多 repo 的 `repos` 區塊（{listed}），但提交流程只處理一個"
+                "實體（ADR 0009：Foundry 改成 Drive 共享資料夾＋GitHub，產出登錄不再"
+                "經過 Agora 的收件匣）。請刪掉 `repos`，以及同一個設定檔裡的 "
+                "`readview_folder_id_foundry`／`readview_manifest_file_id_foundry`；"
+                "要為另一個實體跑閘門就用**另一份設定檔**（欄位相同、值不同）。"
+            )
+        stale_foundry_keys = [k for k in data if k.endswith("_foundry")]
+        if stale_foundry_keys:
+            raise ValueError(
+                f"設定檔還有多 repo 時代的欄位（{', '.join(sorted(stale_foundry_keys))}），"
+                "請刪除（ADR 0009：只有 Agora 有讀取視圖）"
+            )
+
         # 6.5：錯開要 `gh workflow disable <name>`，名字必須是 workflow 檔名本身。
         # 寫成路徑或別的副檔名時 gh 才會在管理操作跑到一半才失敗。
         committer_workflow = str(

@@ -454,7 +454,7 @@ def run_health(deps: HealthDeps, *, now: datetime) -> list[Check]: ...
 - 在 Drive 建立 `foundry/` 前綴資料夾與隔離資料夾，建立 git-annex repo（`type=rclone`、`encryption=none`、不 chunk，與 Agora 相同）；
   - 在 pin repo 建立 `.pin/foundry.*`（init-pin）；
   - 建立 Foundry 的讀取視圖資料夾與 manifest（`element="foundry"`）。
-- `config/committer.json` 改成 `repos: {agora: {...}, foundry: {...}}`。
+- ~~`config/committer.json` 改成 `repos: {agora: {...}, foundry: {...}}`~~（已被 ADR 0009 取代：設定檔只描述一個實體；帶著 `repos` 的舊設定檔現在會直接報錯，不再默默忽略）
 - `run.py` 把第 3〜11 步抽成 `RepoPipeline`，在同一個 job 裡依序處理各 repo（D2：單一 job）。**只有收件匣裡有 artifact 時，才 clone Foundry**，所以平常的成本不變（**PM 決定 9**）。
 - 收件匣是共用的，依型態分派：`artifact` 交給 Foundry，其他交給 Agora。evaluate 的 `foundry_not_enabled` DEFER，改成依設定判斷：沒有 foundry 設定才 DEFER。
 
