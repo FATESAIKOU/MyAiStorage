@@ -237,6 +237,25 @@ def _e2e_inbox_folder_id(reader_cfg: dict[str, Any], profile: str) -> str:
     return str(mapping[profile])
 
 
+#: 整場 e2e 的提交流程結果統計：outcome → 次數。outcome 是
+#: `SUCCESS` 或 `ABORTED(step:Code)`。測試結束時印出來（見 pytest_sessionfinish）。
+COMMITTER_OUTCOMES: dict[str, int] = {}
+
+
+def _record_committer_outcome(report_stdout: str) -> str:
+    m = re.search(r"\]\s+(SUCCESS|ABORTED\([^)]*\))", report_stdout or "")
+    outcome = m.group(1) if m else "UNKNOWN"
+    COMMITTER_OUTCOMES[outcome] = COMMITTER_OUTCOMES.get(outcome, 0) + 1
+    return outcome
+
+
+def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001 - pytest  hook
+    """整場 e2e 跑完把提交流程的結果統計印出來（PM 要的「跑了幾輪、中止幾次」）。"""
+    if COMMITTER_OUTCOMES:
+        total = sum(COMMITTER_OUTCOMES.values())
+        print("\n[e2e] 提交流程結果統計（共 %d 輪）: %s" % (total, COMMITTER_OUTCOMES))
+
+
 def _committer_env(e2e_settings: dict[str, Any]) -> dict[str, str]:
     """提交流程在本機執行時需要的環境（秘密只以路徑傳遞）。"""
     env = dict(os.environ)
@@ -271,9 +290,11 @@ def run_committer(e2e_settings) -> Callable[..., subprocess.CompletedProcess]:
         res = subprocess.run(
             cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, env=env, timeout=timeout_s
         )
+        outcome = _record_committer_outcome(res.stdout)
+        print(f"[committer] {outcome}")
         if res.returncode != 0:
             raise RuntimeError(
-                f"Committer 執行失敗 (rc={res.returncode}):\n"
+                f"Committer 執行失敗 (rc={res.returncode}, {outcome}):\n"
                 f"STDOUT: {res.stdout[-2000:]}\nSTDERR: {res.stderr[-2000:]}"
             )
         last_line = res.stdout.strip().splitlines()[-1] if res.stdout.strip() else ""
@@ -301,6 +322,10 @@ def e2e_reader(e2e_settings) -> AgoraReader:
     drive = HttpDriveClient(ServiceAccountToken(reader_cfg.sa_key_path))
     rv_client = ReadViewClient(drive, reader_cfg, clock=clock)
     return AgoraReader(rv_client, clock=clock)
+
+
+class ExportFailed(RuntimeError):
+    """`opencode export` 失敗（截斷、形狀不符…）——與 AiStorage 的行為無關。"""
 
 
 class ModelDidNotComply(RuntimeError):
@@ -455,18 +480,15 @@ class ResidentContainerHandle:
         errors: list[str] = []
         tally: dict[str, int] = {}
 
-        def _count(outcome: str) -> None:
-            tally[outcome] = tally.get(outcome, 0) + 1
-
         def _loop() -> None:
             while not stop.is_set():
                 try:
                     report = run_committer()
                     errors.clear()
-                    _count(_report_outcome(report))
+                    # 這一輪已由 run_committer 記進全域統計
+                    tally[_report_outcome(report)] = tally.get(_report_outcome(report), 0) + 1
                 except Exception as e:  # noqa: BLE001 - 記錄後繼續重試
                     errors.append(str(e))
-                    _count("raised")
                 stop.wait(COMMITTER_POLL_INTERVAL_S)
 
         thread = threading.Thread(target=_loop, name=f"committer-{self.name}", daemon=True)
@@ -532,14 +554,30 @@ class ResidentContainerHandle:
         return res
 
     def export(self, session_id: str) -> dict[str, Any]:
-        """`opencode export <id>` 的原生匯出（1.7a：必須明示 id）。"""
+        """`opencode export <id>` 的原生匯出（1.7a：必須明示 id）。
+
+        匯出失敗要**明確說是匯出失敗**，不要讓它看起來像 AiStorage 的系統錯誤。
+        9.1 e2e 實測：容器裡的對話被免費模型回覆塞到很大時，`opencode export`
+        吐出被截斷的 JSON（`Unterminated string`），而呼叫端（`assert_tool_called`）
+        剛好也在用匯出，於是整場 e2e 看起來像「工具被呼叫了但都失敗」——
+        實際上只是匯出讀不到。
+        """
         res = self.exec_in(["opencode", "export", session_id], timeout_s=180.0)
         try:
             data = json.loads(res.stdout)
         except ValueError as e:
-            raise RuntimeError(f"opencode export 不是合法 JSON: {e}") from None
+            tail = res.stdout[-200:].replace("\n", "\\n")
+            raise ExportFailed(
+                f"匯出這個 Session 失敗（session={session_id}）：{e}\n"
+                f"輸出長度 {len(res.stdout)} bytes，結尾是 …{tail}\n"
+                "這是 opencode 匯出端的問題（常見於對話很長時輸出被截斷），"
+                "不是 AiStorage 的錯誤，也無法據此判斷 AI 有沒有呼叫工具。"
+            ) from None
         if not isinstance(data, dict) or "messages" not in data:
-            raise RuntimeError(f"opencode export 形狀不符（缺 messages）: {type(data)}")
+            raise ExportFailed(
+                f"匯出這個 Session 失敗（session={session_id}）："
+                f"形狀不符（缺 messages，拿到 {type(data).__name__}）"
+            )
         return data
 
     def tool_parts(self, session_id: str) -> list[dict[str, Any]]:
@@ -715,7 +753,12 @@ def assert_tool_called(
     - 有呼叫但全部失敗（state.status == "error"）→ AssertionError（系統錯誤）。
     - `count` 有給時，確認成功次數不少於 count。
     """
-    parts = [p for p in container.tool_parts(session_id) if p.get("tool") == tool]
+    try:
+        parts = [p for p in container.tool_parts(session_id) if p.get("tool") == tool]
+    except ExportFailed as e:
+        # 匯出讀不到 → 無法驗證。這不是「模型沒照做」，也不是「工具失敗」，
+        # 別讓它看起來像 AiStorage 的錯誤。
+        raise AssertionError(f"無法驗證 {tool} 有沒有被呼叫：{e}") from None
     if not parts:
         available = sorted({str(p.get("tool")) for p in container.tool_parts(session_id)})
         raise ModelDidNotComply(

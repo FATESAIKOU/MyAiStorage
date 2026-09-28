@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import timedelta
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
@@ -353,6 +354,37 @@ def _export_and_sync(
     return result
 
 
+def _ensure_export(deps: SyncDeps, oc: Any, *, raw_path: Path,
+                   snapshot_sha256: str) -> Path:
+    """確保接續點要用的匯出檔在，並且**就是剛才提交的那份內容**。
+
+    9.1 e2e 實測的 bug：Session 已經在 Agora 裡、內容又沒變時，`sync_once` 走
+    `unchanged` 分支**不會**產生匯出檔（它只需要比較雜湊），而接續點是從匯出檔
+    算出來的 → `FileNotFoundError`，整個工具帶著 traceback 崩掉。
+
+    所以這裡就地重新匯出，並且比對雜湊：若 Session 在同步之後又有新內容，
+    接續點就會指向**沒被提交**的東西，那要叫模型重試而不是硬算。
+    """
+    if not raw_path.is_file():
+        try:
+            deps.api.export(oc.id, raw_path)
+        except Exception as e:  # noqa: BLE001 - 對模型要講清楚，不要 traceback
+            raise SkillError(
+                f"重新匯出這個 Session 失敗（{type(e).__name__}：{e}）；"
+                "接續點必須綁在已提交的快照上，請稍後再試一次"
+            ) from e
+    try:
+        sha = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+    except OSError as e:
+        raise SkillError(f"讀不到匯出檔（{raw_path}）：{e}") from e
+    if sha != snapshot_sha256:
+        raise SkillError(
+            "這個 Session 在剛才同步之後又有新內容，接續點只能綁在已提交的快照上。"
+            "請再呼叫一次（這次會把新內容一起提交）"
+        )
+    return raw_path
+
+
 def split(sd: SkillDeps, session_id: str, parts: Sequence[dict], *,
           timeout: timedelta | None = None) -> dict:
     """`aistorage_split`：同步自己，為每一份工作各寫一張交接單，一起提交。"""
@@ -370,7 +402,8 @@ def split(sd: SkillDeps, session_id: str, parts: Sequence[dict], *,
     rec = sd.state.sessions.get(oc.session_id())
     if rec is None or not rec.last_uploaded_sha:
         raise SkillError("同步自己失敗，拿不到快照雜湊")
-    raw_path = deps.workdir / "exports" / f"{oc.id}.json"
+    raw_path = _ensure_export(deps, oc, raw_path=deps.workdir / "exports" / f"{oc.id}.json",
+                              snapshot_sha256=rec.last_uploaded_sha)
     try:
         handoffs = _build_handoffs(
             oc, parts=parts, deps=deps, signer=deps.signer,

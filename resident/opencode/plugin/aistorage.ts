@@ -45,15 +45,41 @@ interface ToolDef {
 
 function str(args: ToolArgs, key: string): string | undefined {
   const v = args[key]
-  if (typeof v !== "string") return undefined
-  return v
+  if (typeof v === "string") return v
+  // 9.1 e2e 實測：模型有時把參數包成 `{"properties": {...}}`；單值參數也要找得到
+  // （找不到就會變成「缺 --to」這種 argparse 錯誤）。
+  const deep = deepFindKey(args, [key])
+  return typeof deep === "string" ? deep : undefined
+}
+
+function deepFindKey(value: unknown, names: string[], depth = 0): unknown {
+  // 9.1 e2e 實測：模型把參數包成 `{"properties": {"handoff_ids": {...}}}`
+  // （像在填 JSON Schema），所以只在最外層找鍵會找不到。往下找幾層。
+  if (depth > 4 || !value || typeof value !== "object") return undefined
+  if (!Array.isArray(value)) {
+    for (const name of names) {
+      if (name in (value as Record<string, unknown>)) {
+        return (value as Record<string, unknown>)[name]
+      }
+    }
+  }
+  const children: unknown[] = Array.isArray(value) ? value : Object.values(value)
+  for (const child of children) {
+    const found = deepFindKey(child, names, depth + 1)
+    if (found !== undefined) return found
+  }
+  return undefined
 }
 
 function strList(args: ToolArgs, key: string): string[] {
-  // 小模型很常換名字或換形狀（9.1 e2e 實測：claim 送了 `handoff_id` 單數、
-  // 或 `{"handoffs": {"item": [...]}}`，結果 CLI 收到 0 個 id）。這裡吸收掉
-  // 常見的換法：別的鍵名、單一字串、JSON 字串、只含一個清單的包裝物件。
+  // 小模型很常換名字或換形狀（9.1 e2e 實測：claim 送過 `handoff_id` 單數、
+  // `{"handoffs": {"item": [...]}}`、以及整包 `{"properties": {...}}`，
+  // 結果 CLI 收到 0 個 id）。這裡吸收掉常見的換法：別的鍵名、任何層級的鍵、
+  // 單一字串、JSON 字串、只含一個清單的包裝物件。
+  const names = [key, ...singular(key), "items", "ids"]
   const cands: unknown[] = [args[key]]
+  const deep = deepFindKey(args, names)
+  if (deep !== undefined) cands.push(deep)
   for (const alt of singular(key) + ["items", "ids"]) {
     if (alt in args) cands.push(args[alt])
   }

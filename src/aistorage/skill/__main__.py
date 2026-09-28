@@ -206,6 +206,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _log_traceback(exc: BaseException) -> None:
+    """把完整堆疊寫到容器裡的錯誤日誌（模型看不到這份）。
+
+    plugin 會把這個行程的 stderr 收走再回給模型，所以堆疊不能走 stderr；
+    寫在 state 目錄下（`/tmp/aistorage/skill-errors.log`），要查就
+    `docker exec <容器> cat /tmp/aistorage/skill-errors.log`。
+    """
+    import os
+    import traceback
+    from pathlib import Path
+
+    state_dir = Path(os.environ.get("AISTORAGE_STATE_DIR") or "/tmp/aistorage")
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        with (state_dir / "skill-errors.log").open("a", encoding="utf-8") as fh:
+            fh.write(f"=== {type(exc).__name__}: {exc}\n")
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=fh)
+    except OSError:
+        # 連日誌都寫不了就罷了：stderr 上已經有人話訊息
+        pass
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     try:
@@ -234,6 +256,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     except AiStorageError as e:
         print(f"[skill] {type(e).__name__}: {e}", file=sys.stderr)
         return 6
+    except Exception as e:  # noqa: BLE001 - CLI 的最後一道：不要把 traceback 丟給模型
+        # plugin 會把 stderr **原樣**回給模型。免費模型看到 Python traceback
+        # 只會照著 stack 一行行重試（9.1 e2e 實測：S2 因為一個 FileNotFoundError
+        # 連續呼叫同一個工具、整場卡了 30 分鐘）。所以這裡只給模型一句人話，
+        # 完整堆疊寫進容器裡的錯誤日誌（人要看得到，模型看不到），並明確說
+        # 「這是系統問題，不是你參數寫錯」。
+        print(f"[skill] 內部錯誤（{type(e).__name__}）：{e}", file=sys.stderr)
+        print(
+            "[skill] 這不是你的參數問題，是 AiStorage 這邊的錯誤；"
+            "請把現況原樣回報給使用者，不要重試同一個呼叫。",
+            file=sys.stderr,
+        )
+        _log_traceback(e)
+        return 7
 
 
 if __name__ == "__main__":

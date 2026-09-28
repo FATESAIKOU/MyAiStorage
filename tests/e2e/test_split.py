@@ -47,18 +47,84 @@ def _message_ids(reading: dict) -> list[str]:
     return [str(m.get("message_id")) for m in reading.get("messages", [])]
 
 
+def _strings_under(value: object, depth: int = 0) -> set[str]:
+    """某個值底下的所有字串（清單、巢狀物件、JSON 字串都算）。"""
+    out: set[str] = set()
+    if depth > 5:
+        return out
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return out
+        if text.startswith("["):
+            try:
+                return _strings_under(json.loads(text), depth + 1)
+            except ValueError:
+                pass
+        return {text}
+    if isinstance(value, list):
+        for item in value:
+            out |= _strings_under(item, depth + 1)
+        return out
+    if isinstance(value, dict):
+        for item in value.values():
+            out |= _strings_under(item, depth + 1)
+    return out
+
+
+def _ids_from_value(value: object, names: tuple[str, ...], depth: int = 0) -> set[str]:
+    """在任意層級的 JSON 裡找出這些鍵名底下的字串。
+
+    9.1 e2e 實測：免費模型送出來的參數形狀一次一個樣——`{"handoff_ids": ["x"]}`、
+    `{"handoff_id": "x"}`、`{"handoff_ids": {"item": "x"}}`，甚至整包
+    `{"properties": {"handoff_ids": ...}}`。測試這邊要和 plugin 一樣吸收掉，
+    否則會把「AI 確實有傳 id」誤判成沒傳。
+
+    只收這些鍵底下的字串（不收別的鍵），所以不會把不相關的字串算成 id。
+    """
+    if depth > 5 or not isinstance(value, (dict, list)):
+        return set()
+    out: set[str] = set()
+    if isinstance(value, dict):
+        for name in names:
+            if name in value:
+                out |= _strings_under(value[name])
+        for key, item in value.items():
+            if key not in names:
+                out |= _ids_from_value(item, names, depth + 1)
+    else:
+        for item in value:
+            out |= _ids_from_value(item, names, depth + 1)
+    return out
+
+
 def _claimed_ids_from_parts(parts: list[dict]) -> set[str]:
-    """從 claim 工具呼叫的輸入取出它認領了哪些交接單（不信任模型的文字）。"""
+    """它認領了哪些交接單（不信任模型的文字）。
+
+    以 **CLI 的輸出**（`claim_ids`／`handoffs[].handoff_id`）為準——那是提交流程
+    真正收到並接受的 id；模型送出的參數形狀多變，只當後備。
+    """
+    names = ("handoff_ids", "handoff_id", "handoffs", "handoff")
     out: set[str] = set()
     for part in parts:
-        payload = part.get("input")
-        if not isinstance(payload, dict):
+        raw = part.get("output")
+        payload = None
+        if isinstance(raw, str) and raw.strip().startswith("{"):
+            try:
+                payload = json.loads(raw)
+            except ValueError:
+                payload = None
+        if isinstance(payload, dict):
+            # 只要**交接單**的 id。`claim_ids` 是認領單自己的 item id（不同命名空間），
+            # 混進來會讓「恰好認領一張」這個斷言數到兩個（9.1 e2e 踩過）。
+            if payload.get("handoff_id"):
+                out.add(str(payload["handoff_id"]))
+            for handoff in payload.get("handoffs") or []:
+                if isinstance(handoff, dict) and handoff.get("handoff_id"):
+                    out.add(str(handoff["handoff_id"]))
+        if out:
             continue
-        ids = payload.get("handoff_ids")
-        if isinstance(ids, list):
-            out.update(str(i) for i in ids if isinstance(i, str))
-        elif isinstance(ids, str):
-            out.add(ids)
+        out |= _ids_from_value(part.get("input"), names)
     return out
 
 

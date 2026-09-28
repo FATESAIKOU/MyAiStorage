@@ -15,12 +15,14 @@ from typing import Any, Sequence
 
 import pytest
 
+import hashlib
+
 from aistorage.clock import FixedClock
 from aistorage.converters import get_converter
 from aistorage.drive.fake import FakeDrive
 from aistorage.syncer.commit import SyncDeps
 from aistorage.syncer.config import ConfigError
-from aistorage.syncer.core import Signer
+from aistorage.syncer.core import Signer, sync_once
 from aistorage.syncer.opencode_api import OcSession
 from aistorage.syncer.state import SyncState
 from aistorage.skill import tools
@@ -946,3 +948,157 @@ def test_claim_without_ids_says_what_shape_is_needed_and_lists_open_handoffs(
     assert "handoff_ids" in msg
     assert "aistorage_list_handoffs" in msg
     assert "handoff:" in msg, "要把清單裡的 id 直接列出來，模型才知道要填什麼"
+
+
+def _inbox_sidecar_names(env: dict) -> set[str]:
+    """收件匣裡所有 sidecar 的檔名（用來比對「這一趟多了什麼」）。"""
+    return {f.name for f in env["drive"].list_children(env["inbox"])
+            if f.name.endswith(".sidecar.json")}
+
+
+def _kind_of(env: dict, name: str) -> str:
+    for f in env["drive"].list_children(env["inbox"]):
+        if f.name == name:
+            return json.loads(
+                env["drive"].download_bytes(f.id, max_bytes=1 << 20)
+            )["metadata"]["type"]
+    raise AssertionError(f"收件匣裡找不到 {name}")
+
+
+def _sync_and_commit_self(sd, monkeypatch: pytest.MonkeyPatch, env: dict,
+                          session_id: str = "ses_1") -> None:
+    """同步自己並提交一次（提交流程是假的，見 _run_committer）。"""
+    _run_committer(monkeypatch, env)
+    tools._export_and_sync(sd, session_id, timeout=SHORT)
+
+
+def test_split_recovers_when_the_export_file_disappears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """9.1 e2e 實測的 bug：接續點算到一半，匯出檔不見了 → 整個工具崩掉。
+
+    實際成因：容器裡同步器 daemon 也在同一個 workdir 上跑，而它**不**保留匯出檔
+    （`keep_exports=False`，上傳完就刪）。所以工具剛匯出來的檔案，可能在
+    `sync_once` 返回之後、`continuation_point` 讀它之前被 daemon 刪掉——
+    於是 `FileNotFoundError`，而且 CLI 把整份 traceback 丟給模型，模型就一直
+    重試，整場 e2e 卡死。
+
+    這裡用「sync_once 跑完後把匯出檔刪掉」來重現那個競態。
+    """
+    sd, env = _sd(tmp_path)
+    _main_session(sd, env)
+    env["api"].set(OcSession(id="ses_1", title="主線", updated_ms=1),
+                   _raw("先講一句"))
+
+    real_sync_once = tools.sync_once
+
+    def _sync_then_lose_export(*args, **kwargs):  # noqa: ANN002, ANN003 - 測試替身
+        outcome = real_sync_once(*args, **kwargs)
+        exports = sd.deps.workdir / "exports"
+        for f in exports.glob("*.json"):
+            f.unlink()          # 模擬 daemon 把匯出檔清掉
+        return outcome
+
+    monkeypatch.setattr(tools, "sync_once", _sync_then_lose_export)
+    _run_committer(monkeypatch, env)
+
+    out = split(sd, "ses_1", [{"title": "做甲", "summary": "甲的工作"}], timeout=SHORT)
+    assert len(out["handoff_ids"]) == 1
+    # 接續點綁在已提交的快照上（也就是重新匯出來的那份）
+    committed = env["reader"].catalog_data["opencode:ses_1"]["raw_sha256"]
+    assert committed
+    points = {
+        data["body"]["continuation"]["snapshot_sha256"]
+        for data in _sidecars(env) if data["metadata"]["type"] == "handoff"
+    }
+    assert points == {committed}
+
+
+def test_ensure_export_refuses_a_stale_export_file(tmp_path: Path):
+    """匯出檔是舊的 → 接續點會釘在錯的內容上，必須拒絕而不是硬算。
+
+    寧可叫模型重試，也不要把接續點釘在沒被提交的內容上（D10）。`split` 正常
+    結束時會把匯出檔刪掉，但呼叫中途中斷（逾時、容器被砍）就會留下來。
+    """
+    sd, _env = _sd(tmp_path)
+    committed = "b" * 64
+
+    stale = tmp_path / "work" / "exports" / "ses_1.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text(_raw("很久以前的內容"), encoding="utf-8")
+
+    class _FakeOc:
+        id = "ses_1"
+
+        @staticmethod
+        def session_id(_source: str = "opencode") -> str:
+            return "opencode:ses_1"
+
+    with pytest.raises(SkillError) as e:
+        tools._ensure_export(sd.deps, _FakeOc(), raw_path=stale,
+                             snapshot_sha256=committed)
+    assert "已提交的快照" in str(e.value)
+
+
+def test_ensure_export_re_exports_and_accepts_the_committed_snapshot(tmp_path: Path):
+    """檔案不存在 → 就地重新匯出；雜湊對得上就繼續。"""
+    sd, env = _sd(tmp_path)
+    _main_session(sd, env)
+    env["api"].set(OcSession(id="ses_1", title="主線", updated_ms=1), _raw("一句話"))
+    missing = tmp_path / "work" / "exports" / "ses_1.json"
+    assert not missing.exists()
+    committed = hashlib.sha256(_raw("一句話").encode("utf-8")).hexdigest()
+
+    class _FakeOc:
+        id = "ses_1"
+
+    got = tools._ensure_export(sd.deps, _FakeOc(), raw_path=missing,
+                               snapshot_sha256=committed)
+    assert got == missing and missing.is_file()
+    assert hashlib.sha256(missing.read_bytes()).hexdigest() == committed
+
+
+def test_cli_turns_unexpected_exceptions_into_a_clean_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """非預期例外不能以 traceback 的形式回給模型（9.1 e2e 實測的卡死原因）。
+
+    plugin 會把 stderr 原樣回給模型；免費模型看到 Python traceback 會照著
+    stack 一直重試同一個呼叫。所以 CLI 最後一道要給人話 + 明確說「不是你參數
+    寫錯」，完整堆疊寫到容器裡的日誌。
+    """
+    from aistorage.skill import __main__ as cli
+
+    state_dir = tmp_path / "state"
+
+    def _boom() -> SkillDeps:
+        raise FileNotFoundError(f"{state_dir}/exports/ses_1.json")
+
+    monkeypatch.setattr(cli, "_sd", _boom)
+    monkeypatch.setenv("AISTORAGE_STATE_DIR", str(state_dir))
+    assert cli.main(["whoami", "--session", "ses_1"]) == 7
+
+    err = capsys.readouterr().err
+    assert "Traceback" not in err, "traceback 不可以直接給模型"
+    assert "FileNotFoundError" in err
+    assert "不是你的參數問題" in err
+    # 完整堆疊仍然留給人看
+    log = (state_dir / "skill-errors.log").read_text(encoding="utf-8")
+    assert "FileNotFoundError" in log and "boom" in log
+
+
+def test_cli_still_uses_its_own_exit_codes_for_known_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """已知的錯誤還是要走原本的退出碼（plugin／測試靠它們分辨）。"""
+    from aistorage.skill import __main__ as cli
+
+    sd, _env = _sd(tmp_path)
+
+    def _denied(*_a, **_k):
+        raise ConfigError("找不到收件匣 folder id")
+
+    monkeypatch.setattr(cli, "_sd", lambda: sd)
+    monkeypatch.setattr(cli.tools, "whoami", _denied)
+    assert cli.main(["whoami", "--session", "ses_1"]) == 2
+    assert "ConfigError" in capsys.readouterr().err
