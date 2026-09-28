@@ -329,14 +329,18 @@ def swap_remote(*, admin: AdminDeps, cfg: Any, deps: Any, git: Any,
         report.steps.append(SwapStep(name=SWAP_DELETE, status="skipped",
                                      detail="無需刪除（保留遠端檔案）"))
 
-    # 1b. push 前重讀遠端 manifest（6.5）。這一輪有刪遠端檔案時，主 manifest
-    #     已經被自己刪掉，「不存在」是預期結果；沒有刪時則必須與現況完全相同。
+    # 1b. push 前重讀遠端 manifest（6.5＋M4）。這一輪有刪遠端檔案時（抹除），
+    #     主 manifest 已經被自己刪掉，「不存在」是正常的預期結果；「與開始時
+    #     完全相同」也可以接受（例如只刪了其他類別，本輪沒動 manifest）。
+    #     讀到**新的**主 manifest，就是抹除期間有人 push 過，這一輪中止並保留
+    #     鎖（不要用 force push 蓋過去）。
     try:
         current = read_remote_manifest_sha256(
             deps.drive, cfg.prefix_folder_id, cfg.repo_uuid,
             allow_missing=bool(delete_groups))
         report.remote_manifest_before_push = current
-        if not delete_groups and current != report.remote_manifest_start:
+        if current != report.remote_manifest_start and (
+                not delete_groups or current is not None):
             raise AdminError(
                 "push 前重讀遠端 manifest：與 swap 開始時不同"
                 f"（{report.remote_manifest_start} → {current}），"

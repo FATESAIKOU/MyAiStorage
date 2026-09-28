@@ -210,7 +210,13 @@ def _cmd_unlock(args: argparse.Namespace) -> int:
         raise AdminError(
             "解除維護旗標前要先確認遠端與 pin 已經一致；"
             "確定後加 --confirm（見 docs/runbooks/erase.md 的中止處理）")
-    gh = GitHubAdmin(args.gh_repo or "FATESAIKOU/MyAiStorage")
+    if not args.gh_repo:
+        # M4：不再預設 FATESAIKOU/MyAiStorage——設定檔少了欄位時停用另一個
+        # repo 的 workflow，比不做更糟。缺了就直接講。
+        raise AdminError(
+            "unlock 需要 --gh-repo <owner/repo>：要重新啟用的 workflow 在哪個 "
+            "repo 上必須明確指定，不再預設")
+    gh = GitHubAdmin(args.gh_repo)
     pins = _pin_files(args)
     workflow = args.workflow or DEFAULT_WORKFLOW
     raw = pins.read_text(maintenance_relpath(args.repo))
@@ -325,7 +331,14 @@ def _admin_lock(args: argparse.Namespace, cfg: Any, deps: Any, *, reason: str,
     pins = GitPinFiles(cfg.pin_repo_url,
                        Path(tempfile.mkdtemp(prefix="admin_pin_")),
                        key_path=cfg.pin_key_path)
-    gh = GitHubAdmin(cfg.github_repository or "FATESAIKOU/MyAiStorage")
+    gh_repo = getattr(cfg, "github_repository", "") or ""
+    if not gh_repo:
+        # M4：不再預設 FATESAIKOU/MyAiStorage。名字不對時 `gh workflow disable`
+        # 會停用別的 repo 的 workflow，所以缺了就直接拒絕，不要猜。
+        raise AdminError(
+            "設定檔缺少 github_repository：管理操作要停用的 workflow 在哪個 "
+            "repo 上必須明確設定")
+    gh = GitHubAdmin(gh_repo)
     workflow = getattr(args, "workflow", None) or cfg.committer_workflow
     return AdminLock(
         repo=cfg.repo, pins=pins, gh=gh, workflow=workflow, reason=reason,

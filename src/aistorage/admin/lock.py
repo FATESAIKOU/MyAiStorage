@@ -36,13 +36,27 @@ class MaintenanceFlag:
     reason: str
     at: str
     by: str
+    #: 這一次上鎖的操作 id（每次 `AdminLock.__enter__` 產生一個新的 ULID）。
+    #: 給人查「這個旗標是誰留下的」用，不參與任何判斷。
+    op: str = ""
+    #: 旗標狀態：`active`（有管理操作正在進行）／`aborted`（做到一半失敗，
+    #: 需要按 runbook 做中止處理）。`admin_lock_if_needed` 只允許在
+    #: `aborted` 的既有鎖裡做事，其他狀態一律拒絕（M4）。
+    state: str = "active"
+
+
+#: 中止處理中、允許在既有鎖裡做的旗標狀態（runbook：先手動
+#: `init-pin --confirm`，再 `swap-finish`）。
+ABORTED_STATE = "aborted"
 
 
 def parse_maintenance(data: str) -> MaintenanceFlag:
     try:
         obj = json.loads(data)
-        return MaintenanceFlag(reason=obj["reason"], at=obj["at"], by=obj["by"])
-    except (ValueError, KeyError, TypeError) as e:
+        return MaintenanceFlag(
+            reason=obj["reason"], at=obj["at"], by=obj["by"],
+            op=str(obj.get("op", "")), state=str(obj.get("state", "active")))
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
         raise AdminError(f"維護旗標內容損毀: {e}") from None
 
 
@@ -288,6 +302,43 @@ class AdminLock:
         from datetime import timezone
         return datetime.now(timezone.utc)
 
+    def _new_op(self) -> str:
+        from aistorage.schema import generate_ulid
+
+        return generate_ulid()
+
+    def _flag_payload(self, op: str) -> str:
+        now = self._now()
+        at = format_rfc3339(now, include_fraction=True)
+        return json.dumps(
+            {"reason": self._reason, "at": at, "by": self._by,
+             "op": op, "state": "active"},
+            sort_keys=True, ensure_ascii=False) + "\n"
+
+    def _mark_aborted(self) -> None:
+        """中止處理：把旗標狀態改成 `aborted`（盡力而為）。
+
+        失敗的中途狀態需要人按 runbook 處理（`init-pin --confirm` 再
+        `swap-finish`）；`admin_lock_if_needed` 只放行 `aborted` 的既有鎖。
+        改寫失敗就保留原旗標（還是擋得住提交流程，只是狀態沒更新）。
+        """
+        try:
+            flag = self.status()
+        except AdminError:
+            return
+        if flag is None or flag.state == ABORTED_STATE:
+            return
+        try:
+            self._pins.write_text(
+                maintenance_relpath(self._repo),
+                json.dumps(
+                    {"reason": flag.reason, "at": flag.at, "by": flag.by,
+                     "op": flag.op, "state": ABORTED_STATE},
+                    sort_keys=True, ensure_ascii=False) + "\n",
+                f"maintenance aborted: {flag.reason} (op {flag.op or '?'})")
+        except AdminError:
+            pass
+
     def status(self) -> MaintenanceFlag | None:
         return read_maintenance(self._pins, self._repo)
 
@@ -305,28 +356,33 @@ class AdminLock:
     def __enter__(self) -> AdminLock:
         if self.status() is not None:
             raise AdminError("已經有維護旗標，不重複上鎖")
-        now = self._now()
-        at = format_rfc3339(now, include_fraction=True)
+        op = self._new_op()
         relpath = maintenance_relpath(self._repo)
         self._pins.write_text(
-            relpath,
-            json.dumps({"reason": self._reason, "at": at, "by": self._by},
-                       sort_keys=True, ensure_ascii=False) + "\n",
-            f"maintenance on: {self._reason}")
+            relpath, self._flag_payload(op),
+            f"maintenance on: {self._reason} (op {op})")
         # 2. 停用 workflow（輔助措施；住民可能重新啟用，不當作鎖）
         try:
             self._gh.set_workflow_enabled(self._workflow, False)
         except AdminError as e:
-            # L3：旗標留著（安全方向），但要明確告訴人怎麼清掉
+            # L3：旗標留著（安全方向），標成 aborted 等人按 runbook 查，
+            # 但要明確告訴人怎麼清掉
+            self._mark_aborted()
             self._notify(
                 f"維護中止，需要人工處理：已寫入 {relpath} 但停用 workflow 失敗（{e}）。"
                 "確認狀態後用 `python -m aistorage.admin unlock --confirm` 解除。")
             raise
         try:
-            self._wait_quiet(deadline=now + self._timeout)
+            self._wait_quiet(deadline=self._now() + self._timeout)
             # 4. 預檢（例如遠端 manifest 雜湊等於正式 pin）
             if self._precheck is not None:
-                self._precheck()
+                try:
+                    self._precheck()
+                except Exception:
+                    # 預檢不符（可能真有問題）：保持暫停並標成 aborted，
+                    # 等人按 runbook 查（與 with 區塊內出錯同一個處理方式）。
+                    self._mark_aborted()
+                    raise
         except _BusyTimeout:
             # 逾時（短暫擁塞）才回滾自己的旗標與停用；預檢不符（可能真有問題）
             # 則保持暫停（旗標留著、workflow 保持停用），等人來查。
@@ -353,6 +409,9 @@ class AdminLock:
         # 回到不一致的遠端上：settle 每輪 MismatchError 中止，沒有 pending 時
         # 反而會用舊 pin 把新狀態全隔離。與 __enter__ 預檢失敗同一個處理方式。
         if exc_type is not None:
+            # 標成 aborted：中止處理（init-pin --confirm → swap-finish）才允許
+            # 在這個既有的鎖裡做；其他管理操作看到非 aborted 的旗標一律拒絕。
+            self._mark_aborted()
             self._notify(
                 "維護中止，需要人工處理：with 區塊內發生例外，已保留 "
                 f"{maintenance_relpath(self._repo)} 旗標並維持 workflow 停用。"
@@ -374,17 +433,28 @@ def admin_lock_if_needed(*, repo: str, pins: PinFiles, gh: GitHubAdmin,
                          workflow: str, reason: str,
                          precheck: Callable[[], None] | None = None,
                          notify: Callable[[str], None] | None = None,
+                         expect_state: str = ABORTED_STATE,
                          **kwargs: Any) -> Iterator[AdminLock | None]:
-    """已經有維護旗標就直接做事，沒有就自己上鎖（6.5）。
+    """已經是中止處理狀態才在既有鎖裡做事，沒有旗標就自己上鎖（6.5＋M4）。
 
     用在「可能被包在管理操作裡、也可能被單獨執行」的指令（`init-pin`）：
     - 沒有旗標 → 照 AdminLock 的正常流程上鎖（停用 workflow、等沒有執行中的
       run、預檢），做完解除；
-    - 已經有旗標 → 視為正在中止處理流程中（runbook 讓人先手動 `init-pin --confirm`
-      再 `swap-finish`），這時**不能**再上一次鎖（`AdminLock` 會拒絕重複上鎖），
-      直接在既有的鎖裡做事。既有旗標本身就是提交流程的門擋。
+    - 已經有旗標 → 只有 `state` 符合 runbook 預期（預設 `aborted`：之前的管理
+      操作做到一半失敗，runbook 讓人先手動 `init-pin --confirm` 再
+      `swap-finish`）才直接在既有的鎖裡做事（這時**不能**再上一次鎖，
+      `AdminLock` 會拒絕重複上鎖）。另一位管理者正在進行的操作（`active`）、
+      或狀態不明的舊旗標，一律拒絕，避免兩個管理操作並行。
+      既有旗標本身就是提交流程的門擋。
     """
-    if read_maintenance(pins, repo) is not None:
+    existing = read_maintenance(pins, repo)
+    if existing is not None:
+        if existing.state != expect_state:
+            raise AdminError(
+                f"已有維護旗標（op={existing.op or '?'} state={existing.state} "
+                f"reason={existing.reason}），不是 runbook 預期的"
+                f"「{expect_state}」狀態，拒絕在既有的鎖裡執行；"
+                "等該操作結束或按 runbook 做中止處理後再來")
         yield None
         return
     with AdminLock(repo=repo, pins=pins, gh=gh, workflow=workflow, reason=reason,

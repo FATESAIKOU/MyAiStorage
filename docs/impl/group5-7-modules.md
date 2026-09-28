@@ -298,7 +298,9 @@ docs/runbooks/{erase,rollback,recovery,health}.md
 class AdminLock:
     def __init__(self, *, repo: str, pins_admin: GitPinStore, gh: GitHubAdmin, reason: str): ...
     def __enter__(self) -> AdminLock:
-        # 1. 在 pin repo 寫入 .pin/<repo>.maintenance（{reason, at, by}）→ push
+        # 1. 在 pin repo 寫入 .pin/<repo>.maintenance
+        #   （{reason, at, by, op, state}；op 是這次上鎖的操作 id，
+        #    state=active；失敗時改成 aborted）→ push
         #    住民與 SA 都寫不進 pin repo（1.5、D3）
         # 2. 停用 committer workflow（輔助措施，可能被重新啟用）
         # 3. 等到沒有 in_progress 或 queued 的 run（逾時就中止）
@@ -317,8 +319,9 @@ class AdminLock:
 | 事項 | 做法 |
 |------|------|
 | 停用的 workflow 名稱 | 由設定檔 `committer_workflow` 帶（預設 `committer.yml`）。原本 `erase`／`rollback`／`swap-finish`／`unlock`／`health` 散落硬編碼成 `commit.yaml`——repo 裡沒有那個檔，`gh workflow disable` 會直接失敗，整個管理操作起不來。 |
-| 重建釘選值（6.4 的 `init-pin --confirm`） | 也走錯開：沒有維護旗標就自己上鎖；已經有旗標（中途中止的收尾流程）就沿用既有的鎖，不重複上鎖。 |
-| push 前重讀遠端 manifest | `swap_remote` 多一步 `recheck-remote`：swap 開始時記下遠端 manifest 的指紋，push 前再讀一次比對；有人動過遠端就中止（保留鎖），不覆蓋。有刪遠端檔（抹除）時「主 manifest 已由本輪刪掉」是預期結果。 |
+| 重建釘選值（6.4 的 `init-pin --confirm`） | 也走錯開：沒有維護旗標就自己上鎖；已經有旗標時，只有 `state=aborted`（之前的操作做到一半失敗，正在做中止處理）才沿用既有的鎖，`active` 或狀態不明的舊旗標一律拒絕，避免兩個管理操作並行。precheck 用 `--repo` 指到的 target 自己的前綴與 uuid（M4-2），不再拿 Agora 的。 |
+| push 前重讀遠端 manifest | `swap_remote` 多一步 `recheck-remote`：swap 開始時記下遠端 manifest 的指紋，push 前再讀一次比對；有人動過遠端就中止（保留鎖），不覆蓋。有刪遠端檔（抹除）時「主 manifest 已由本輪刪掉（None）」或「與開始時完全相同」才放行；讀到**新的**主 manifest 就中止（M4-3）。 |
+| GitHub repo 名稱 | 管理操作（`erase`／`rollback`／`swap-finish`／`unlock`／`init-pin`）用的 repo 名稱一律來自設定檔 `github_repository` 或 `--gh-repo`；缺少時直接 raise，不再預設 `FATESAIKOU/MyAiStorage`（M4-4：預設錯 repo 會停用到別人的 workflow）。 |
 | 預檢（`AdminLock` 的 `precheck`） | `erase`／`rollback` 用嚴格版（遠端 manifest 必須等於正式釘選值）；`swap-finish`／`init-pin` 用寬鬆版（它們的前提就是遠端已經不一致），只擋「多個主 manifest」與「判不出有沒有被動過」。 |
 
 ### 5.2 6.1 抹除

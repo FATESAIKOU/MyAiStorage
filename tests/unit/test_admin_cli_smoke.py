@@ -97,9 +97,18 @@ def test_cli_lock_status_and_unlock(tmp_path: Path, capsys) -> None:
     assert rc == 1
     assert "confirm" in capsys.readouterr().err
 
+    # 沒有 --gh-repo 直接拒絕（M4：不再預設 repo），旗標不動
+    rc = main(["unlock", "--pin-repo", url, "--repo", "agora", "--confirm",
+               "--workdir", str(tmp_path / "w2b")])
+    assert rc == 1
+    assert "gh-repo" in capsys.readouterr().err
+    rc = main(["lock-status", "--pin-repo", url, "--repo", "agora",
+               "--workdir", str(tmp_path / "w2c")])
+    assert json.loads(capsys.readouterr().out)["maintenance"] is True
+
     # gh 沒有登入時會失敗，但旗標已清掉（先清旗標是重點）
     rc = main(["unlock", "--pin-repo", url, "--repo", "agora", "--confirm",
-               "--workdir", str(tmp_path / "w3")])
+               "--gh-repo", "owner/repo", "--workdir", str(tmp_path / "w3")])
     out_err = capsys.readouterr().err
     assert rc in (0, 1)
     rc = main(["lock-status", "--pin-repo", url, "--repo", "agora",

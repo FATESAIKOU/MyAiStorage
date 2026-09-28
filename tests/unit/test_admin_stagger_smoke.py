@@ -454,12 +454,34 @@ def test_lock_if_needed_locks_when_no_flag() -> None:
     assert read_maintenance(pins, "agora") is None
 
 
-def test_lock_if_needed_reuses_existing_flag() -> None:
-    """中止處理流程：旗標已經在了就不要再上一次鎖，直接在既有的鎖裡做事。"""
+def test_lock_if_needed_reuses_only_aborted_flag() -> None:
+    """M4：中止處理流程：只有 `aborted` 的旗標才允許在既有的鎖裡做事。
+
+    另一位管理者正在進行的操作（`active`）、或狀態不明的舊旗標（沒有 state
+    欄位，視為 `active`），一律拒絕，避免兩個管理操作並行。
+    """
     pins = MemoryPinFiles()
     gh, _state = _gh_fake()
+    # 進行中的鎖：拒絕
+    pins.write_text(maintenance_relpath("agora"),
+                    json.dumps({"reason": "erase", "at": "t", "by": "admin",
+                                "op": "op-live", "state": "active"}), "m")
+    with pytest.raises(AdminError, match="不是 runbook 預期"):
+        with admin_lock_if_needed(repo="agora", pins=pins, gh=gh,
+                                  workflow=DEFAULT_WORKFLOW, reason="init-pin"):
+            pass
+    # 狀態不明的舊旗標（M4 之前寫的，沒有 state）：視為 active，一樣拒絕
     pins.write_text(maintenance_relpath("agora"),
                     json.dumps({"reason": "erase", "at": "t", "by": "admin"}), "m")
+    with pytest.raises(AdminError, match="不是 runbook 預期"):
+        with admin_lock_if_needed(repo="agora", pins=pins, gh=gh,
+                                  workflow=DEFAULT_WORKFLOW, reason="init-pin"):
+            pass
+    assert gh.calls == [], "拒絕時不得動 workflow"
+    # 中止處理中的鎖：放行，且不得把別人的旗標清掉、不得動 workflow
+    pins.write_text(maintenance_relpath("agora"),
+                    json.dumps({"reason": "erase", "at": "t", "by": "admin",
+                                "op": "op-old", "state": "aborted"}), "m")
     with admin_lock_if_needed(repo="agora", pins=pins, gh=gh,
                               workflow=DEFAULT_WORKFLOW, reason="init-pin") as lock:
         assert lock is None

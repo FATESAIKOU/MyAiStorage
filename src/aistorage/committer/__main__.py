@@ -237,17 +237,27 @@ def _init_pin_under_lock(cfg: CommitterConfig, deps: Deps, target=None) -> None:
     from aistorage.admin.remote import read_remote_manifest_sha256
 
     repo_name = target.repo if target is not None else cfg.repo
+    # M4：precheck 查的是重建對象自己的前綴，不是 Agora 的。`--repo foundry`
+    # 時用 cfg 的 prefix_folder_id／repo_uuid 會去讀錯的前綴（同一類錯 repo 問題）。
+    eff_prefix = target.prefix_folder_id if target is not None else cfg.prefix_folder_id
+    eff_uuid = target.repo_uuid if target is not None else cfg.repo_uuid
 
     def _precheck() -> None:
         # 寬鬆版：首次初始化時 pin repo 還是空的，遠端也可能正是我們要重建的對象；
         # 這裡只擋「多個主 manifest」與「判不出有沒有被動過」這兩種狀態不明。
         read_remote_manifest_sha256(
-            deps.drive, cfg.prefix_folder_id, cfg.repo_uuid, allow_missing=True)
+            deps.drive, eff_prefix, eff_uuid, allow_missing=True)
 
+    gh_repo = cfg.github_repository or ""
+    if not gh_repo:
+        # M4：不再預設 FATESAIKOU/MyAiStorage（見 admin/__main__._admin_lock）。
+        raise RuntimeError(
+            "設定檔缺少 github_repository：重建釘選值要停用的 workflow 在哪個 "
+            "repo 上必須明確設定")
     pins = GitPinFiles(
         cfg.pin_repo_url, Path(tempfile.mkdtemp(prefix="init_pin_lock_")),
         key_path=cfg.pin_key_path)
-    gh = GitHubAdmin(cfg.github_repository or "FATESAIKOU/MyAiStorage")
+    gh = GitHubAdmin(gh_repo)
     with admin_lock_if_needed(
         repo=repo_name, pins=pins, gh=gh, workflow=cfg.committer_workflow,
         reason="init-pin", precheck=_precheck,
