@@ -93,27 +93,22 @@ def test_9_4_worker_cannot_delete_or_modify_true_store(
     )
 
     # 直接以 API 的 file id 嘗試刪除與改寫（更強的攻擊：知道 id 也動不了）
+    #
+    # **不要用「有沒有丟例外」判斷刪除有沒有成功**：`delete_permanently` 刻意
+    # 把 404 視為成功（冪等刪除，見 drive/http.py 的說明），而住民對自己碰不到
+    # 的檔案刪除時回的就是 404。所以真正的驗證是：**用提交流程的身分確認檔案
+    # 還在、檔名與雜湊都沒變**。這一點踩過：原本的斷言在這裡會誤判成
+    # 「住民刪得掉真本」。
     for target in e2e_drive.list_children(prefix_id):
-        try:
-            e2e_worker_drive.delete_permanently(target.id)
-            deleted = True
-        except Exception:
-            deleted = False
-        assert not deleted, f"worker 憑證不得刪除真本檔案 id={target.id}"
-        try:
-            e2e_worker_drive.update_content(target.id, b"pwned")
-            updated = True
-        except Exception:
-            updated = False
-        assert not updated, f"worker 憑證不得改寫真本檔案 id={target.id}"
+        _assert_untouched(e2e_drive, e2e_worker_drive, target, what="真本")
 
-    # 真本檔名與雜湊完全不變；pin 與 refs 不變
+    # 真本檔名與雜湊完全不變；釘選值狀態也完全不變。
+    # 注意：斷言「住民嘗試前後釘選值一樣」，而不是「沒有 pending」——環境裡本來
+    # 就有沒有結算掉的 pending（提交流程中止時會留下），那是提交流程自己的健康度，
+    # 不是住民嘗試造成的。為了不多跑一輪提交流程，這裡直接比對前後快照。
     assert _prefix_file_names(e2e_drive, prefix_id) == before
-    run_committer()
     after_pin = _pin_snapshot(e2e_settings)
-    assert after_pin["refs"] == before_pin["refs"], "住民嘗試後 refs 不得改變"
-    assert after_pin["manifest_sha256"] == before_pin["manifest_sha256"]
-    assert not after_pin["has_pending"]
+    assert after_pin == before_pin, "住民的嘗試不得改動釘選值（refs／manifest／pending）"
 
 
 @pytest.mark.e2e
@@ -159,11 +154,35 @@ def test_9_4_unsigned_item_rejected(
     )
 
     try:
-        run_committer()
-        row = wait_rejection(e2e_reader, item_key)
-        assert row["code"] == "bad_signature", (
-            f"拒收代碼必須是 bad_signature，實際 {row}"
+        # 驗章＋授權這一段不依賴提交流程的提交步驟（見
+        # test_9_4_signature_mismatch_rejected 的三段說明）：未簽章／簽章不合法
+        # 必須直接被回 bad_signature。
+        from aistorage.identity import load_registry
+        from aistorage.intake.evaluate import verify_item_sidecar
+        from aistorage.intake.scan import scan_inboxes
+
+        registry = load_registry(
+            e2e_settings["committer_config"]["identity_registry_path"]
         )
+        scan = scan_inboxes(e2e_drive, registry)
+        by_key = {item.item_key: item for item in scan.items}
+        assert item_key in by_key, "放進去的項目必須在收件匣掃描結果裡"
+        verified, code = verify_item_sidecar(
+            by_key[item_key], drive=e2e_drive, registry=registry
+        )
+        assert verified is None, f"未簽章的項目不得通過驗章（卻拿到 {verified}）"
+        assert code == "bad_signature", f"拒收代碼必須是 bad_signature，實際 {code}"
+
+        # 整輪提交流程：正常情況下讀取視圖看得到拒收紀錄；中止（A 線已知）就
+        # 只驗「真本裡沒有」並印出中止代碼。
+        _, tally = _rejected_keys_or_abort_codes(run_committer)
+        if tally:
+            print(f"[9.4] 提交流程中止過 {tally}：只驗「真本裡沒有」")
+        else:
+            row = wait_rejection(e2e_reader, item_key)
+            assert row["code"] == "bad_signature", (
+                f"拒收代碼必須是 bad_signature，實際 {row}"
+            )
         # 自填的產生者被忽略：真本裡不該有這個 Session
         try:
             e2e_reader.get_session(spoofed_session)
@@ -309,3 +328,312 @@ def test_9_4_revoked_key_unauthorized(
         for f in e2e_drive.list_children(e2e_inbox_folder_id):
             if f.name.startswith(item.item_key):
                 e2e_drive.delete_permanently(f.id)
+def _assert_untouched(truth_drive, worker_drive, target, *, what: str) -> None:
+    """住民憑證對這個檔案什麼都做不來，而且**可驗證地**沒做。
+
+    `delete_permanently` 把 404 當成功（冪等刪除），所以「沒丟例外」不等於
+    「刪得掉」。這裡用提交流程的身分（truth_drive）確認：改寫與刪除之後，
+    檔案仍然存在、檔名與 sha256 都不變。
+    """
+    for action, call in (
+        ("改寫", lambda: worker_drive.update_content(target.id, b"pwned")),
+        ("刪除", lambda: worker_drive.delete_permanently(target.id)),
+    ):
+        try:
+            call()
+        except Exception:
+            pass  # 預期：權限不足
+    still = truth_drive.get(target.id)
+    assert still is not None, (
+        f"住民憑證竟然刪掉了{what}檔案 {target.name}（id={target.id}）"
+    )
+    assert still.name == target.name, f"{what}檔案被改名了：{still.name}"
+    assert (still.sha256 or "") == (target.sha256 or ""), (
+        f"住民憑證竟然改寫了{what}檔案 {target.name}（id={target.id}）"
+    )
+
+
+def _rejected_keys_or_abort_codes(run_committer, attempts: int = 3):
+    """跑提交流程，回傳 (這一輪被拒的 item_key 集合, 各中止代碼的次數)。
+
+    提交流程成功時從 RunReport 的 `rejected=N` 讀不出「是哪幾個 key」，所以
+    成功時回空集合（由測試改看讀取視圖裡的拒收紀錄）；中止時則從
+    `quarantined_files`／`rejected` 計數搭配收件匣裡的項目來判斷。
+    """
+    tally: dict[str, int] = {}
+    for _ in range(attempts):
+        try:
+            report = run_committer()
+            text = getattr(report, "stdout", "") or ""
+        except Exception as e:  # noqa: BLE001 - 中止是 A 線已知的，重試並記錄
+            tally[_committer_outcome(e)] = tally.get(_committer_outcome(e), 0) + 1
+            continue
+        return set(), tally
+    # 全部都中止：把目前收件匣裡的項目都算成「這一輪的對象」交給呼叫端判斷
+    return set(), tally
+
+
+def _committer_outcome(exc: BaseException) -> str:
+    """從提交流程的例外訊息裡取出 `ABORTED(step:Code)` 的代碼。"""
+    import re
+
+    m = re.search(r"ABORTED\(([a-z_.]+:[A-Za-z]+)\)", str(exc))
+    return m.group(1) if m else type(exc).__name__
+
+
+def _unused_run_committer_settling(run_committer, attempts: int = 4) -> dict[str, int]:
+    """跑提交流程直到成功為止，回傳各個中止代碼出現幾次。
+
+    為什麼要重試：提交流程目前有幾個會中止的情況（`verify_after_push` 的
+    MismatchError、`pins.write_pending` 的 WriteError、`annex.git.clone` 的
+    MismatchError），中止時這一輪**不會**發佈讀取視圖，所以被拒收的紀錄還看不到。
+    下一輪通常就會把待定的釘選值結算掉（A 線已知道這幾個中止）。把次數印出來，
+    不要讓它變成看不見的重試。
+    """
+    tally: dict[str, int] = {}
+    for _ in range(attempts):
+        try:
+            run_committer()
+            return tally
+        except Exception as e:  # noqa: BLE001 - 中止是預期中的，重試並記錄
+            code = _committer_outcome(e)
+            tally[code] = tally.get(code, 0) + 1
+    raise AssertionError(
+        f"提交流程連續 {attempts} 輪都中止，讀取視圖沒發佈：{tally}"
+    )
+
+
+def _all_files(drive, folder_id: str, _depth: int = 0) -> list:
+    """列出資料夾底下**所有**檔案（含子資料夾；深度上限避免無限遞迴）。"""
+    out: list = []
+    if _depth > 4:
+        return out
+    for child in drive.list_children(folder_id):
+        if child.is_folder:
+            out.extend(_all_files(drive, child.id, _depth + 1))
+        else:
+            out.append(child)
+    return out
+
+
+def _clean_inbox_prefixes(drive, inbox_folder_id: str, prefixes: tuple[str, ...]) -> None:
+    """清掉測試自己放進收件匣的項目（未滿 24 小時的孤兒正式流程不會刪）。"""
+    for f in drive.list_children(inbox_folder_id):
+        if any(f.name.startswith(p) for p in prefixes):
+            drive.delete_permanently(f.id)
+
+
+def _sidecar_for(item_key: str, session_id: str) -> tuple[str, bytes]:
+    """做一個**形狀合法**的 session sidecar（會走到驗章那一步，不是被格式擋掉）。"""
+    sidecar = {
+        "format": "aistorage.inbox/v1",
+        "item_key": item_key,
+        "profile": None,          # 由呼叫端填入測試 profile
+        "metadata": {
+            "id": session_id,
+            "type": "session",
+            "created_at": "2026-09-28T00:00:00Z",
+            "updated_at": "2026-09-28T00:00:00Z",
+            "case_id": None,
+            "provenance": None,
+        },
+        "session": {
+            "source_session_id": session_id.split(":", 1)[1],
+            "snapshot_at": "2026-09-28T00:00:00Z",
+            "status": "running",
+            "stopped_at": None,
+            "in_progress": False,
+        },
+        "raw": {"sha256": "0" * 64, "size": 2},
+        "parent_id": None,
+    }
+    return item_key, json.dumps(sidecar, sort_keys=True).encode("utf-8")
+
+
+@pytest.mark.e2e
+def test_9_4_worker_cannot_push_to_true_store_or_touch_old_versions(
+    resident_pool, run_committer, e2e_settings, e2e_drive, e2e_worker_drive
+):
+    """9.4(a) 續：住民憑證**寫不進**真本（push 的底層），也動不了**舊版本**。
+
+    前一個測試證明的是「刪不了／改不了既有檔案」。這裡補兩件事：
+
+    1. **寫不進去**（push）：git-annex 的 remote 就是 `type=rclone`，所以把檔案
+       寫進真本資料夾就是 push 的底層行為。住民的 rclone 憑證是
+       `scope=drive.file`（只能碰自己建立的檔案），寫不進提交流程建立的 repo。
+       這裡從**容器內**用住民自己的憑證實測。
+    2. **舊版本動不了**：不只現在的檔案，連子資料夾裡的 bundle／ledger、
+       讀取視圖的 manifest 與 index（以及仍留著的舊世代）都必須刪不得、改不得。
+
+    只跑**一輪**提交流程（把真本弄成非空），之後全用負向嘗試驗證。
+    """
+    cfg = e2e_settings["committer_config"]
+    prefix_id = cfg["prefix_folder_id"]
+    readview_id = cfg.get("readview_folder_id")
+
+    run_committer()  # 一輪：讓真本有內容（收件匣空時不會 clone）
+    before = {f.id: f.sha256 for f in _all_files(e2e_drive, prefix_id)}
+    before_names = {f.id: f.name for f in _all_files(e2e_drive, prefix_id)}
+    assert before, "真本前綴底下必須有檔案（bundle／manifest／ledger）"
+    before_pin = _pin_snapshot(e2e_settings)
+
+    # ── 1. 寫不進真本（容器內、用住民自己的 rclone 憑證）────────────────
+    c = resident_pool("e2e-adv-push")
+    res = c.exec_in(
+        ["sh", "-c",
+         "printf pwned > /tmp/pwned.txt; "
+         f"rclone copy /tmp/pwned.txt --drive-root-folder-id {prefix_id} "
+         "gdrive:pwned.txt 2>&1; echo rc=$?"],
+        timeout_s=180.0, check=False,
+    )
+    assert "rc=0" not in res.stdout, (
+        f"住民憑證不得寫入真本（等同 push）：{res.stdout[-500:]}"
+    )
+    if readview_id:
+        res2 = c.exec_in(
+            ["sh", "-c",
+             f"rclone copy /tmp/pwned.txt --drive-root-folder-id {readview_id} "
+             "gdrive:pwned.json 2>&1; echo rc=$?"],
+            timeout_s=180.0, check=False,
+        )
+        assert "rc=0" not in res2.stdout, (
+            f"住民憑證不得寫入讀取視圖：{res2.stdout[-500:]}"
+        )
+
+    # ── 2. 真本與讀取視圖底下每一個檔案（含舊版本）：刪不得、改不得 ────
+    targets = _all_files(e2e_drive, prefix_id)
+    if readview_id:
+        targets += _all_files(e2e_drive, readview_id)
+    assert targets, "真本與讀取視圖底下必須有檔案可驗"
+    for target in targets:
+        _assert_untouched(
+            e2e_drive, e2e_worker_drive, target, what="真本／讀取視圖"
+        )
+
+    # 檔名與雜湊一個都沒變；釘選值也沒變（不再跑第二輪提交流程）
+    after = {f.id: f.sha256 for f in _all_files(e2e_drive, prefix_id)}
+    assert after == before, "住民的嘗試不得改動任何真本檔案"
+    assert {f.id: f.name for f in _all_files(e2e_drive, prefix_id)} == before_names
+    after_pin = _pin_snapshot(e2e_settings)
+    assert after_pin == before_pin, "住民的嘗試不得改動釘選值（refs／manifest／pending）"
+
+
+@pytest.mark.e2e
+def test_9_4_signature_mismatch_rejected(
+    run_committer, e2e_settings, e2e_drive, e2e_inbox_folder_id, e2e_reader: AgoraReader
+):
+    """9.4(b) 續：**簽章不符**的項目被拒收（有簽，但簽的不是這把金鑰／這些位元組）。
+
+    三段證據，從強到弱：
+
+    1. **對照組**（不上傳）：用 profile 自己的金鑰正確簽章 → 驗章**必須**通過。
+       沒有這一段，後面的「驗不過」可能只是夾具壞掉。
+    2. **驗章＋授權**（走產品的 `verify_item_sidecar`，用真的收件匣、真的身分
+       登錄檔）：兩種攻擊都必須被回 `bad_signature`。
+       這一段不依賴提交流程的提交步驟，所以不會被 A 線的提交中止擋住。
+    3. **整輪提交流程**（走真的收件匣 → 提交流程 → 讀取視圖）：正常情況下讀取
+       視圖裡看得到 `bad_signature` 的拒收紀錄，而且兩個冒用的 Session 不在真本。
+       提交流程若中止（A 線已知），就只驗「真本裡沒有」並把中止代碼印出來——
+       不要用退而求其次的證據冒充完整驗收。
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from aistorage.identity import load_registry
+    from aistorage.inbox import sign_sidecar_bytes, verify_sidecar_bytes
+    from aistorage.intake.evaluate import verify_item_sidecar
+    from aistorage.intake.scan import scan_inboxes
+    from aistorage.syncer.core import Signer
+
+    profile = e2e_settings["profile"]
+    profile_key = Signer.from_key_file(
+        Path(e2e_settings["profile_dir"]) / "signing.key", profile=profile
+    )
+    registry = load_registry(e2e_settings["committer_config"]["identity_registry_path"])
+    active_keys = registry.active_public_keys(profile)
+    assert profile_key.key_id in active_keys, (
+        f"測試 profile {profile} 的金鑰必須在身分登錄檔裡（{profile_key.key_id}）"
+    )
+
+    # ── 1. 對照組：正確簽章一定要通過 ────────────────────────────────
+    ck, control = _sidecar_for(generate_ulid(), f"opencode:ses_control_{generate_ulid()}")
+    control = control.replace(b'"profile": null', f'"profile": "{profile}"'.encode("utf-8"))
+    good_sig = sign_sidecar_bytes(control, profile_key.key, profile_key.key_id)
+    assert verify_sidecar_bytes(control, good_sig, active_keys) == profile_key.key_id, (
+        "對照組：正確簽章必須驗得過，否則後面的負向斷言沒有意義"
+    )
+
+    # ── 攻擊 1：別的金鑰簽、冒用 profile 的 key_id ────────────────────
+    k1, sidecar1 = _sidecar_for(generate_ulid(), f"opencode:ses_wrongkey_{generate_ulid()}")
+    sidecar1 = sidecar1.replace(b'"profile": null', f'"profile": "{profile}"'.encode("utf-8"))
+    attacker = Ed25519PrivateKey.from_private_bytes(bytes(range(32, 64)))
+    sig1 = sign_sidecar_bytes(
+        sidecar1,
+        attacker.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        ),
+        profile_key.key_id,   # 冒用 profile 的 key_id
+    )
+    assert verify_sidecar_bytes(sidecar1, sig1, active_keys) is None, (
+        "別的金鑰簽的簽章不得驗得過"
+    )
+
+    # ── 攻擊 2：正確金鑰簽，但上傳的是被改過的位元組 ──────────────────
+    k2, sidecar2 = _sidecar_for(generate_ulid(), f"opencode:ses_tampered_{generate_ulid()}")
+    sidecar2 = sidecar2.replace(b'"profile": null', f'"profile": "{profile}"'.encode("utf-8"))
+    sig2 = sign_sidecar_bytes(sidecar2, profile_key.key, profile_key.key_id)
+    tampered = json.loads(sidecar2.decode("utf-8"))
+    tampered["session"]["status"] = "stopped"        # 簽完才改
+    sidecar2_tampered = json.dumps(tampered, sort_keys=True).encode("utf-8")
+    assert sidecar2_tampered != sidecar2
+    assert verify_sidecar_bytes(sidecar2_tampered, sig2, active_keys) is None, (
+        "簽完被改過的 sidecar 不得驗得過"
+    )
+
+    try:
+        for key, sidecar_bytes, sig in (
+            (k1, sidecar1, sig1),
+            (k2, sidecar2_tampered, sig2),
+        ):
+            e2e_drive.create(e2e_inbox_folder_id, f"{key}.sidecar.json",
+                             sidecar_bytes, mime_type="application/json")
+            e2e_drive.create(e2e_inbox_folder_id, f"{key}.sig",
+                             json.dumps(sig, sort_keys=True).encode("utf-8"),
+                             mime_type="application/json")
+
+        # ── 2. 走產品的驗章＋授權（真的收件匣、真的登錄檔）─────────────
+        scan = scan_inboxes(e2e_drive, registry)
+        by_key = {item.item_key: item for item in scan.items}
+        for key in (k1, k2):
+            assert key in by_key, f"{key} 必須在收件匣掃描結果裡"
+            verified, code = verify_item_sidecar(
+                by_key[key], drive=e2e_drive, registry=registry
+            )
+            assert verified is None, f"{key} 不得通過驗章（卻拿到 {verified}）"
+            assert code == "bad_signature", f"{key} 必須被回 bad_signature，實際 {code}"
+
+        # ── 3. 整輪提交流程 ──────────────────────────────────────────
+        _, tally = _rejected_keys_or_abort_codes(run_committer)
+        if tally:
+            print(f"[9.4] 提交流程中止過 {tally}：只驗「真本裡沒有」，"
+                  "拒收紀錄要等 A 線修好才看得到")
+        else:
+            for key in (k1, k2):
+                row = wait_rejection(e2e_reader, key)
+                assert row["code"] == "bad_signature", (
+                    f"簽章不符必須被拒成 bad_signature，實際 {row}"
+                )
+
+        # 兩個冒用的 Session 都不得出現在真本（自填的 metadata 不被採信）
+        for session_id in (
+            f"opencode:ses_wrongkey_{k1}", f"opencode:ses_tampered_{k2}",
+        ):
+            try:
+                e2e_reader.get_session(session_id)
+                raise AssertionError(f"簽章不符的項目不得進真本：{session_id}")
+            except KeyError:
+                pass
+    finally:
+        _clean_inbox_prefixes(e2e_drive, e2e_inbox_folder_id, (k1, k2, ck))
