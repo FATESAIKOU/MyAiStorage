@@ -18,7 +18,7 @@ from typing import Any, Protocol, Sequence, runtime_checkable
 from aistorage.clock import Clock, format_rfc3339
 from aistorage.converters.base import ConversionError, SessionFacts
 from aistorage.drive.model import DriveClient
-from aistorage.errors import AiStorageError, ReadError
+from aistorage.errors import AiStorageError, IncompleteFetch, ReadError
 from aistorage.inbox_builder import build_session_item, load_private_key, upload_item
 from aistorage.syncer.opencode_api import OpencodeApi, OcSession
 from aistorage.syncer.state import SyncState
@@ -227,7 +227,10 @@ def sync_once(
        `resumed_after_stop`（daemon 看到就立刻同步並提交）。
     5. `parent_id` 取 API 的 parentID（子 Session 也是 Agora 的 Session）。
     6. 超過 raw 上限 → 不上傳，標 too_large。
-    7. `keep_exports=True`：上傳之後保留匯出檔（`skill` 算接續點時需要；
+    7. **取得不完整**（匯出被截斷、形狀不符、訊息對不上 API）→ 不上傳，
+       記成 `incomplete`（明確有別於 ReadError 的「讀不到」）。半份原始紀錄
+       進了 Agora 就再也分不出來，所以寧可這一輪不收。
+    8. `keep_exports=True`：上傳之後保留匯出檔（`skill` 算接續點時需要；
        預設會刪掉，因為匯出檔是原始紀錄的副本，留在 /work 會累積真實對話
        內容，而且抹除 6.1 不會涵蓋那個目錄——review-g5-6 M5）。
     """
@@ -358,6 +361,14 @@ def sync_once(
             uploaded.append(sid)
             if outcome.resumed:
                 resumed.append(sid)
+        except IncompleteFetch as e:
+            # 匯出只拿到一部分（9.5 e2e：stdout 是 pipe 時超過約 64 KiB 就會被截斷，
+            # rc 卻是 0）。`OpencodeApi.export` 在驗證通過前只寫暫存檔，所以這裡
+            # **一定沒有半份被上傳**；這裡只負責把它明確記成「取得不完整」，
+            # 不要混在 ReadError 裡（那是「讀不到」，處置與判讀都不同）。
+            # last_seen_sha 刻意不更新：這一輪我們並沒有看到完整的 Session。
+            errors.append((sid, f"incomplete: {e}"))
+            rec.error_code = "incomplete"
         except Exception as e:  # noqa: BLE001 - 逐 Session 攔截，daemon 要繼續跑
             # 一個 Session 失敗不影響其他（daemon 記錄 id 與代碼後繼續）。
             # M1：原本只擋 (ReadError, OSError, ValueError)，而 `upload_item`

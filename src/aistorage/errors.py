@@ -60,3 +60,16 @@ class TooLarge(AiStorageError):
 
 class MismatchError(AiStorageError):
     """完整性不符、未預期的檔案或格式錯誤例外。"""
+
+
+class IncompleteFetch(AiStorageError):
+    """取到的東西**不完整**（讀得到，但拿到的比實際的少）。
+
+    注意：IncompleteFetch 不是 ReadError 的子類別，和 TooLarge 同一個理由。
+    ReadError 是「讀不到」（連不上、rc≠0、權限不足）；這裡是「讀到了，但東西
+    只拿到一部分」——兩者的處置不同：後者**絕對不能**把已拿到的部分當成完整的
+    原始紀錄上傳（那會讓 Agora 裡存一份被截斷的紀錄，而且之後沒辦法分辨）。
+
+    出處：9.5 e2e 實測，`opencode export` 在 stdout 是 pipe 時，輸出超過約
+    64 KiB 就會以 rc=0 回傳被截斷的 JSON（見 docs/spike/evidence/impl1-export-truncation.md）。
+    """
