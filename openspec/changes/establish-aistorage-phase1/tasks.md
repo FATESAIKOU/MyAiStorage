@@ -66,7 +66,7 @@
 
 ## 7. Foundry
 
-- [ ] 7.1 移除 git-annex 版 Foundry（程式、測試、測試 Drive 殘留），提交流程只處理 Agora（ADR 0009）
+- [x] 7.1 移除 git-annex 版 Foundry（程式、測試、測試 Drive 殘留），提交流程只處理 Agora（ADR 0009）
 
 以下是原本的 7.x，已被 ADR 0009 取代，留著看歷史：
 
