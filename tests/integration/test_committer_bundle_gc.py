@@ -62,7 +62,7 @@ def test_bundle_consolidation_then_gc_then_keep_working(
         key_path=it_settings["pin_key"], known_hosts_path=it_settings["known_hosts"],
     )
     cfg = CommitterConfig(
-        repo="agora",
+        repo=sandbox.pin_repo_name(),
         repo_uuid=annex.uuid,
         repo_url=annex.url,
         prefix_folder_id=prefix_id,
@@ -80,6 +80,7 @@ def test_bundle_consolidation_then_gc_then_keep_working(
         publisher=NullPublisher(),
         clock=SystemClock(),
     )
+    sandbox.register_pin_store(pins)
     init_pin_cli(cfg, deps, confirm=True)
 
     def _bundle_names() -> set[str]:
@@ -119,7 +120,7 @@ def test_bundle_consolidation_then_gc_then_keep_working(
 
     # ── 回收之後：manifest 的 active bundle 都還在，而且 refs 完整 ───
     assert remaining >= set(manifest.active), (remaining, manifest.active)
-    state, pending = pins.load("agora")
+    state, pending = pins.load(cfg.repo)
     assert pending is None
     assert (
         main_sha_of(annex, it_settings["rclone_conf"]) == state.refs["refs/heads/main"]
@@ -136,7 +137,7 @@ def test_bundle_consolidation_then_gc_then_keep_working(
     assert report4.counts["accepted"] == 1
 
     manifest_after = _manifest()
-    state_after, pending_after = pins.load("agora")
+    state_after, pending_after = pins.load(cfg.repo)
     assert pending_after is None
     assert _bundle_names() >= set(manifest_after.active), "active 的 bundle 必須都還在"
     assert (

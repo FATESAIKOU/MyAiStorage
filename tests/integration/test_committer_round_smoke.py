@@ -71,7 +71,7 @@ def test_full_round_with_handoff_and_claim(it_settings, real_drive, sandbox, tmp
     from aistorage.committer.run import Deps, init_pin_cli
 
     cfg = CommitterConfig(
-        repo="agora",
+        repo=sandbox.pin_repo_name(),
         repo_uuid=annex.uuid,
         repo_url=annex.url,
         prefix_folder_id=prefix_id,
@@ -89,6 +89,7 @@ def test_full_round_with_handoff_and_claim(it_settings, real_drive, sandbox, tmp
         publisher=NullPublisher(),
         clock=SystemClock(),
     )
+    sandbox.register_pin_store(pins)
     state = init_pin_cli(cfg, deps, confirm=True)
     assert state.repo_uuid == annex.uuid
     assert state.refs["refs/heads/main"] == annex.main_sha
@@ -133,8 +134,19 @@ def test_full_round_with_handoff_and_claim(it_settings, real_drive, sandbox, tmp
     assert real_drive.list_children(inbox.id) == []
 
     # 釘選值已轉正，且 pending 不再存在
-    promoted, pending = pins.load("agora")
+    promoted, pending = pins.load(cfg.repo)
     assert pending is None
+    # 釘選值必須記到「真的」每一個 annex key：閱讀版／meta.json 也都在 annex 裡。
+    # （曾經因為 git annex find --format 不換行，key 全被串成一行，pin 只記到一個
+    #   垃圾字串，下一輪 sweep 就把這些物件全隔離了。）
+    assert len(promoted.annex_keys) >= 2, promoted.annex_keys
+    assert all(k.startswith("SHA256E-") and len(k) > 20 for k in promoted.annex_keys), \
+        promoted.annex_keys
+    # Drive 上真的 annex 物件都要在釘選值裡，否則下一輪會被隔離
+    on_drive = {
+        f.name for f in real_drive.list_children(prefix_id) if f.name.startswith("SHA256E-")
+    }
+    assert on_drive <= set(promoted.annex_keys), sorted(on_drive - set(promoted.annex_keys))
     assert promoted.manifest_sha256 != state.manifest_sha256
     assert promoted.refs["refs/heads/main"] != annex.main_sha  # 這一輪有新 commit
 
@@ -145,7 +157,7 @@ def test_full_round_with_handoff_and_claim(it_settings, real_drive, sandbox, tmp
     assert report2.counts["already"] == 1
     assert report2.counts["accepted"] == 0
     assert real_drive.list_children(inbox.id) == []
-    promoted2, pending2 = pins.load("agora")
+    promoted2, pending2 = pins.load(cfg.repo)
     assert pending2 is None
     # ALREADY 不產生新的 Session 內容：兩輪之間只有 _committer/（清冊）被改動。
     # （refs 仍可能變：`git annex copy` 會寫 location log，H1 之後這是預期行為。）

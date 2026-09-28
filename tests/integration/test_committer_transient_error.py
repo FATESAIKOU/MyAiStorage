@@ -136,7 +136,7 @@ def test_transient_503_aborts_run_without_moving_anything(
         key_path=it_settings["pin_key"], known_hosts_path=it_settings["known_hosts"],
     )
     cfg = CommitterConfig(
-        repo="agora",
+        repo=sandbox.pin_repo_name(),
         repo_uuid=annex.uuid,
         repo_url=annex.url,
         prefix_folder_id=prefix_id,
@@ -157,8 +157,9 @@ def test_transient_503_aborts_run_without_moving_anything(
             clock=SystemClock(),
         )
 
+    sandbox.register_pin_store(pins)
     init_pin_cli(cfg, _deps(real_drive), confirm=True)
-    state_before, pending_before = pins.load("agora")
+    state_before, pending_before = pins.load(cfg.repo)
     assert pending_before is None
 
     manifest_name = f"GITMANIFEST--{annex.uuid}"
@@ -179,7 +180,7 @@ def test_transient_503_aborts_run_without_moving_anything(
         "503 中止後不該有東西被隔離"
     )
     assert [f.name for f in real_drive.list_children(inbox_id)], "503 中止後收件匣不該被清空"
-    state_after, pending_after = pins.load("agora")
+    state_after, pending_after = pins.load(cfg.repo)
     assert pending_after is None, "503 中止後不該留下 pending"
     assert state_after.refs == state_before.refs, "503 中止後釘選值不該被推進"
     assert state_after.manifest_sha256 == state_before.manifest_sha256
@@ -216,5 +217,5 @@ def test_transient_503_aborts_run_without_moving_anything(
     assert report3.ok is True, f"恢復後中止於 {report3.aborted_at}:{report3.code}"
     assert report3.counts["quarantined_files"] >= 1, report3.counts
     assert real_drive.list_children(inbox_id) == [], "恢復後收件匣應該清空"
-    state_final, _ = pins.load("agora")
+    state_final, _ = pins.load(cfg.repo)
     assert state_final.refs["refs/heads/main"] != state_before.refs["refs/heads/main"]

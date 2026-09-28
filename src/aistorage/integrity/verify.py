@@ -34,12 +34,32 @@ def verify_annex_coverage(
     """驗證 integrity 的 annex key 集合是否涵蓋所有必要的 annex 物件（如原始紀錄、產出本體）。
 
     若缺少任一必要 key，拋出 MismatchError。
+
+    review-g7-e2e A-M1：檢查本身是對的，問題在「必要 key 從哪裡來」。在
+    `AnnexRawStorage` 改用 `git annex lookupkey` 之後（review A-H2），這裡的
+    `required_keys` 必須是 git-annex 實際產生的 key。所以這裡多加一道把關：
+    形狀不合法（例如自己推算時補上的 `.json` 副檔名，而檔案本身沒有副檔名）
+    直接 raise——寧可在覆蓋檢查就爆掉，不要等到 settle 誤判成「遠端少了物件」。
     """
+    for key in sorted(set(required_keys)):
+        if not _is_plausible_annex_key(key):
+            raise MismatchError(
+                f"必要的 annex key 形狀不合法（不是 git-annex 產生的 key）: {key!r}；"
+                "key 必須來自 `git annex lookupkey`，不能自己用 "
+                "SHA256E-s<size>--<sha><ext> 推算"
+            )
     missing = set(required_keys) - set(annex_keys)
     if missing:
         raise MismatchError(
             f"integrity annex_keys 集合缺少必要之物件: {sorted(missing)}"
         )
+
+
+def _is_plausible_annex_key(key: str) -> bool:
+    """`SHA256E-s<size>--<sha256>[.<ext>]` 或 `WORM-s<size>--<sha256>`。"""
+    import re
+
+    return bool(re.match(r"^(SHA256E|WORM)-s\d+--[0-9a-f]{64}(\.[^/\s]*)?$", key))
 
 
 def verify_clone(
@@ -127,6 +147,7 @@ def verify_after_push(
     *,
     workdir: Path,
     expected_annex_keys: frozenset[str] | set[str] | None = None,
+    pushed_annex_keys: frozenset[str] | set[str] | None = None,
 ) -> PushVerification:
     """提交流程第 10 步：push 後遠端狀態驗證。
 
@@ -142,14 +163,22 @@ def verify_after_push(
        - listing_before 裡沒有同名檔。
        - 篩選比對名稱與雜湊相符之檔案。
     5. 下載 active bundle（篩選符合雜湊者），連同既有 active 依序重放，驗證 refs == local_refs。
-    6. 若提供 expected_annex_keys，驗證 state.annex_keys 涵蓋所有預期之 annex 物件。
+    6. 若提供 expected_annex_keys，驗證「這一輪 push 出去的 annex key 集合」涵蓋所有
+       預期之 annex 物件。比較對象是 `pushed_annex_keys`（即 pending 記的那一份），
+       不是 `state.annex_keys`——正式釘選值在第 12 步 promote 之前本來就落後這一輪
+       剛寫進去的 key，拿它當比較對象會讓「有新增物件」的所有輪次都失敗。
     - 任何一條不符拋出 MismatchError（待定釘選值保留，留待下一輪 settle 結算）。
     """
     workdir = Path(workdir).resolve()
     workdir.mkdir(parents=True, exist_ok=True)
 
     if expected_annex_keys is not None:
-        verify_annex_coverage(state.annex_keys, expected_annex_keys)
+        # 比較對象：優先用這一輪 push 出去的 key 集合（pending 那份），沒有才退回
+        # 正式釘選值（此時只驗「既有 key 沒被弄丟」）。
+        verify_annex_coverage(
+            pushed_annex_keys if pushed_annex_keys is not None else state.annex_keys,
+            expected_annex_keys,
+        )
 
     if isinstance(push_started_at, str):
         push_dt = parse_rfc3339(push_started_at)

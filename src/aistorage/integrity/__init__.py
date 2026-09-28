@@ -48,6 +48,7 @@ from aistorage.integrity.verify import (
     PushVerification,
     precheck,
     verify_after_push,
+    verify_annex_coverage,
     verify_clone,
 )
 
@@ -79,5 +80,6 @@ __all__ = [
     "run_settle_and_sweep",
     "settle",
     "verify_after_push",
+    "verify_annex_coverage",
     "verify_clone",
 ]

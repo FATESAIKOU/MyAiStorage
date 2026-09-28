@@ -39,7 +39,7 @@ from aistorage.admin.erase import (
     verify_canary,
 )
 from aistorage.admin.lock import AdminLock, GitPinFiles, read_maintenance
-from aistorage.agora.store import AgoraStore, SessionRecord
+from aistorage.agora.store import AgoraStore, AnnexRawStorage, SessionRecord
 from aistorage.clock import SystemClock
 from aistorage.committer.config import CommitterConfig
 from aistorage.committer.publish import NullPublisher
@@ -62,7 +62,9 @@ pytestmark = [pytest.mark.integration]
 CANARY = "SPIKE-ERASE-CANARY-" + generate_ulid()[-8:].upper()
 KEEP_SESSION = "opencode:keep-me"
 ERASE_SESSION = "opencode:erase-me"
-BIG_FILE = "big-annex.bin"
+#: 含 canary 的 annex 物件；放在 Session 目錄底下（1.3 用的是 repo 根的大檔，
+#: 但那需要第二條 largefiles 規則，而 git-annex 10 不接受多條）
+BIG_FILE = "sessions/opencode/erase-me/payload.bin"
 BIG_KIB = 192
 
 
@@ -199,15 +201,19 @@ def test_full_erase_scenario_on_drive(it_settings, real_drive, sandbox, tmp_path
     clone = git_factory(tmp_path / "clone")
     work = clone.workdir
     env = git_env(it_settings["rclone_conf"])
-    store = AgoraStore(work, git=clone, temp_dir=tmp_path / "store")
-    # AgoraStore 建構時會把 annex.largefiles 設成 include=*.json；這裡改成
-    # largerthan=100kb，讓下面那個大檔真的進 annex（1.3 的 big-annex.bin）。
-    _git(work, "config", "annex.largefiles", "largerthan=100kb",
-         conf=it_settings["rclone_conf"])
+    # review A-H1/A-H2：原始紀錄真的進 annex（key 由 git annex lookupkey 決定）。
+    # 這裡用 include=sessions/*/*/* 而不是預設的 include=sessions/*/*/raw，
+    # 因為下面那個含 canary 的大檔（1.3 的 big-annex.bin）也在 sessions 底下，
+    # 而 git-annex 10 只吃**單一** largefiles 規則（多條規則會全部失效）。
+    store = AgoraStore(
+        work,
+        AnnexRawStorage(work, git=clone, largefiles="include=sessions/*/*/*"),
+        git=clone, temp_dir=tmp_path / "store")
     _put(store, tmp_path, KEEP_SESSION, _raw(KEEP_SESSION, "harmless"),
          "2026-09-27T08:00:00Z")
     _put(store, tmp_path, ERASE_SESSION, _raw(ERASE_SESSION, CANARY),
          "2026-09-27T08:05:00Z")
+    (work / BIG_FILE).parent.mkdir(parents=True, exist_ok=True)
     (work / BIG_FILE).write_bytes(
         CANARY.encode() + bytes((i * 7) % 251 for i in range(BIG_KIB * 1024)))
     _git(work, "add", "-A", conf=it_settings["rclone_conf"])
@@ -232,9 +238,16 @@ def test_full_erase_scenario_on_drive(it_settings, real_drive, sandbox, tmp_path
     assert any(CANARY.encode() in p.read_bytes() for p in work.rglob("*")
                if p.is_file() and p.stat().st_size < (1 << 20)), \
         "抹除前 canary 必須在本機工作樹可見"
+    # A-H1 修正後：canary **不在** git 歷史裡（raw 與 payload 都是 annex pointer），
+    # 這正是 2.6 量測的前提。歷史可搜尋性因此只涵蓋 metadata。
     assert _git(work, "log", "--all", "-S" + CANARY, "--format=%H",
-                conf=it_settings["rclone_conf"]).strip() != "", \
-        "抹除前 canary 必須在 git 歷史裡"
+                conf=it_settings["rclone_conf"]).strip() == "", \
+        "原始紀錄進 annex 之後，git 歷史不該還留著 canary 內容"
+    listed = {k for k in _git(work, "annex", "find", "--include=*", "--format=${key}\n",
+                              conf=it_settings["rclone_conf"]).splitlines() if k.strip()}
+    erase_snap = store.snapshots(ERASE_SESSION)[-1]
+    assert erase_snap.annex_key in listed, "原始紀錄的 key 必須列在 git annex find（review A-H1 建議的斷言）"
+    assert big_key in listed
     assert (work / ".git" / "annex" / "objects").rglob(big_key), \
         "本機 annex 物件必須存在"
     assert env["RCLONE_CONFIG"] == str(it_settings["rclone_conf"])

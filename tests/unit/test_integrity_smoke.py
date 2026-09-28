@@ -1375,7 +1375,12 @@ def test_git_pin_store_h1_h2_strict_schema(tmp_path: Path):
 
 
 def test_git_pin_store_non_fast_forward_rejected(tmp_path: Path):
-    """測試 GitPinStore 在非 fast-forward 衝突時拒絕寫入拋出 WriteError (L)。"""
+    """GitPinStore 遇到「同一路徑的內容衝突」仍然拒絕寫入拋出 WriteError (L)。
+
+    遠端只被「別的 repo 條目」推進（ref 落後）時會自動 rebase 後重試——那是多條線
+    共用同一個 pin repo 的正常情況，不算衝突。真正的衝突是同一個檔案被別人改過，
+    那必須停下來交人工看（review L 的原意）。
+    """
     pin_remote = tmp_path / "pin_remote.git"
     _init_bare_pin_repo(pin_remote, tmp_path / "init_work2")
 
@@ -1400,7 +1405,7 @@ def test_git_pin_store_non_fast_forward_rejected(tmp_path: Path):
     # store2 同步載入
     store2.load("agora")
 
-    # store1 先寫入新版本並 push
+    # store1 先寫入新版本並 push（store2 的 ref 從此落後）
     state2 = PinState(
         repo="agora",
         repo_uuid=uuid,
@@ -1415,9 +1420,54 @@ def test_git_pin_store_non_fast_forward_rejected(tmp_path: Path):
     )
     store1.promote(state2)
 
-    # 模擬 push 衝突：在 clone2 內部寫入新變更並嘗試 _commit_and_push
-    (tmp_path / "clone2" / ".pin" / "conflict.txt").write_text("conflict")
+    # 模擬同一路徑的內容衝突：遠端已改過 agora.json，store2 又改一次 → rebase 失敗
+    (tmp_path / "clone2" / ".pin" / "agora.json").write_text('{"repo": "agora", "clobbered": true}')
     with pytest.raises(WriteError):
         store2._commit_and_push("conflict")
+
+
+def test_git_pin_store_recovers_stale_ref_by_rebase(tmp_path: Path):
+    """遠端只被別的 repo 條目推進時，push 應自動 rebase 後重試成功。
+
+    這是多條線的整合測試共用同一個 pin-test repo 時的必要行為：否則任何一次
+    併發 push 都會讓另一條線的 `pins.write_pending` 直接中止。
+    """
+    pin_remote = tmp_path / "pin_remote.git"
+    _init_bare_pin_repo(pin_remote, tmp_path / "init_work3")
+
+    store1 = GitPinStore(repo_url=f"file://{pin_remote}", workdir=tmp_path / "clone1")
+    store2 = GitPinStore(repo_url=f"file://{pin_remote}", workdir=tmp_path / "clone2")
+
+    uuid = "01234567-89ab-cdef-0123-456789abcdef"
+
+    def _state(repo: str, main_sha: str, run_id: str) -> PinState:
+        return PinState(
+            repo=repo,
+            repo_uuid=uuid,
+            refs={"refs/heads/main": main_sha},
+            manifest_sha256=(main_sha[:4] + "m1" * 31)[:64],
+            prev_manifest_sha256=None,
+            active_bundles=(),
+            removed_bundles=frozenset(),
+            annex_keys=frozenset(),
+            promoted_at="2026-09-27T08:00:00Z",
+            run_id=run_id,
+        )
+
+    # store1 寫 agora（store2 這時還沒 clone，ref 落後）
+    store1.promote(_state("agora", "1" * 40, "run-1"))
+    store2.load("agora")
+    # store1 再寫別的 repo（例如另一條線的 admin 測試用不同 repo 名）
+    store1.promote(_state("agora-erase-XYZ", "3" * 40, "run-2"))
+
+    # store2 現在寫自己的 agora：遠端只是多了別的 repo 的條目，應該 rebase 後成功
+    store2.promote(_state("agora", "2" * 40, "run-3"))
+
+    # 兩邊的內容都在遠端，沒有互相覆蓋
+    store3 = GitPinStore(repo_url=f"file://{pin_remote}", workdir=tmp_path / "clone3")
+    state_agora, _ = store3.load("agora")
+    state_other, _ = store3.load("agora-erase-XYZ")
+    assert state_agora.refs["refs/heads/main"] == "2" * 40
+    assert state_other.refs["refs/heads/main"] == "3" * 40
 
 

@@ -77,7 +77,7 @@ def test_injected_artifacts_are_quarantined_and_next_round_recovers(
         key_path=it_settings["pin_key"], known_hosts_path=it_settings["known_hosts"],
     )
     cfg = CommitterConfig(
-        repo="agora",
+        repo=sandbox.pin_repo_name(),
         repo_uuid=annex.uuid,
         repo_url=annex.url,
         prefix_folder_id=prefix_id,
@@ -95,8 +95,9 @@ def test_injected_artifacts_are_quarantined_and_next_round_recovers(
         publisher=NullPublisher(),
         clock=SystemClock(),
     )
+    sandbox.register_pin_store(pins)
     init_pin_cli(cfg, deps, confirm=True)
-    state, _ = pins.load("agora")
+    state, _ = pins.load(cfg.repo)
 
     # ── 注入四種不該存在的東西（都用真的 Drive 寫入）──────────────
     manifest_name = f"GITMANIFEST--{annex.uuid}"
@@ -169,7 +170,7 @@ def test_injected_artifacts_are_quarantined_and_next_round_recovers(
     assert empty_report.counts["accepted"] == 1
     assert empty_report.counts["quarantined_files"] == 0, "恢復輪不該再隔離任何東西"
 
-    state_after, pending = pins.load("agora")
+    state_after, pending = pins.load(cfg.repo)
     assert pending is None
     assert state_after.manifest_sha256 != state.manifest_sha256, "這一輪應該推進了 manifest"
     assert (

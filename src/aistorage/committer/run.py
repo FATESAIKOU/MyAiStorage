@@ -34,6 +34,7 @@ from aistorage.agora.apply import (
 )
 from aistorage.agora.store import (
     AgoraStore,
+    AnnexRawStorage,
     FakeRawStorage,
     GitRawStorage,
     RawStorage,
@@ -89,6 +90,9 @@ from aistorage.intake.evaluate import (
 )
 from aistorage.intake.ledger import Ledger
 from aistorage.intake.scan import count_shaped, scan_inboxes
+from aistorage.publish.publisher import load_manifest
+from aistorage.publish.rejections import collect_rejections
+from aistorage.readview.model import trusted_ids
 from aistorage.schema import generate_ulid
 
 
@@ -120,6 +124,14 @@ class RunReport:
     durations_ms: dict[str, int] = field(default_factory=dict)
     guard: str = "ok"
     readview_sweep: str | None = None
+    #: 讀取視圖發佈結果：published／skipped／planned／publish_failed／skipped_no_readview
+    readview_publish: str | None = None
+    #: 發佈失敗時的例外類型名（不印內文，避免洩漏路徑或內容）
+    publish_error: str | None = None
+    #: 管理操作進行中：active（有維護旗標）／flag_corrupt（旗標損毀，fail-closed）
+    maintenance: str | None = None
+    #: 維護旗標的原因字串（管理者留下的，會出現在 log，所以只印短字串）
+    maintenance_reason: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -131,7 +143,13 @@ class RunReport:
         counts_str = ", ".join(f"{k}={v}" for k, v in sorted(self.counts.items()))
         durations_str = ", ".join(f"{k}={v}ms" for k, v in sorted(self.durations_ms.items()))
         rv_str = f" | readview_sweep={self.readview_sweep}" if self.readview_sweep else ""
-        return f"[RunReport {self.run_id}] {status} | counts: [{counts_str}] | durations: [{durations_str}]{rv_str}"
+        pub_str = f" | readview_publish={self.readview_publish}" if self.readview_publish else ""
+        err_str = f" ({self.publish_error})" if self.publish_error else ""
+        mt_str = f" | maintenance={self.maintenance}" if self.maintenance else ""
+        return (
+            f"[RunReport {self.run_id}] {status} | counts: [{counts_str}]"
+            f" | durations: [{durations_str}]{rv_str}{pub_str}{mt_str}{err_str}"
+        )
 
 
 def _check_test_kill(step_name: str) -> None:
@@ -147,6 +165,69 @@ JUNK_RETENTION = timedelta(hours=24)
 #: traceback 除錯檔的輸出目錄（review-g3g L：只寫檔，不進 Actions log）。
 DEBUG_DIR_ENV = "AISTORAGE_DEBUG_DIR"
 DEFAULT_DEBUG_DIR = "debug"
+
+
+def _check_maintenance(cfg: CommitterConfig, deps: Deps, report: RunReport) -> bool:
+    """第 1b 步：檢查 pin repo 的維護旗標；有旗標就整輪不做任何事。
+
+    回傳 True 表示「因為維護中而結束」。旗標讀不到或損毀時 fail-closed：
+    把它當成維護中（中止），寧可少跑一輪，也不要在管理操作期間動真本。
+    """
+    from aistorage.admin.lock import maintenance_relpath, parse_maintenance
+
+    read_text = getattr(deps.pins, "read_text", None)
+    if not callable(read_text):
+        # 還沒實作 read_text 的 PinStore（例如舊的 fake）：不等於維護中
+        return False
+
+    try:
+        raw = read_text(maintenance_relpath(cfg.repo))
+    except AiStorageError as e:
+        # 讀不到旗標本身（例如 pin repo 連不上）：fail-closed，中止這一輪
+        report.aborted_at = "maintenance"
+        report.code = type(e).__name__
+        return True
+
+    if raw is None:
+        return False
+
+    try:
+        flag = parse_maintenance(raw)
+    except Exception as e:  # noqa: BLE001 - 旗標損毀 fail-closed
+        report.aborted_at = "maintenance"
+        report.code = "flag_corrupt"
+        report.maintenance = "flag_corrupt"
+        _dump_traceback(report.run_id, "maintenance", e)
+        return True
+
+    report.maintenance = "active"
+    report.maintenance_reason = flag.reason
+    return True
+
+
+def _build_publisher(
+    cfg: CommitterConfig, deps: Deps, workdir: Path
+) -> ReadViewPublisher | None:
+    """決定第 13 步要用哪個發佈器。
+
+    讀取視圖有設定（資料夾 ＋ manifest 檔）就用第 4 組的 `DriveReadViewPublisher`；
+    沒設定就沿用 `deps.publisher`（第 3 組階段是 NullPublisher，之後可換別的實作）。
+    換發佈器不影響介面：`Deps.publisher` 仍可注入別的實作（例如測試用），
+    只要它接受 `agora_main_sha`／`run_rejections` 關鍵字。
+    """
+    if not (cfg.readview_folder_id and cfg.readview_manifest_file_id):
+        return deps.publisher
+    from aistorage.publish.publisher import DriveReadViewPublisher
+
+    return DriveReadViewPublisher(
+        deps.drive,
+        folder_id=cfg.readview_folder_id or "",
+        manifest_file_id=cfg.readview_manifest_file_id or "",
+        converters=deps.converters,
+        clock=deps.clock,
+        workdir=workdir,
+        rebuild_epoch=cfg.readview_rebuild_epoch,
+    )
 
 
 def _dump_traceback(run_id: str, step: str, exc: BaseException) -> str | None:
@@ -432,6 +513,18 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             report.durations_ms["guard"] = int((time.monotonic() - t0) * 1000)
 
             # ---------------------------------------------------------
+            # 第 1b 步：維護旗標（H4／PM 決定 7）
+            # ---------------------------------------------------------
+            # 管理操作（抹除、回滾）進行中時，提交流程必須**整輪不做任何事**：
+            # 不清扫、不 push、不發佈、不刪收件匣。沒有這一步，住民重新啟用
+            # workflow 觸發就會和管理操作撞在一起。
+            # 旗標內容損毀 → 當成維護中（fail-closed）並中止，不猜。
+            current_step = "maintenance"
+            if _check_maintenance(cfg, deps, report):
+                report.counts["scanned_items"] = 0
+                return report
+
+            # ---------------------------------------------------------
             # 第 2 步：intake.scan 掃描收件匣
             # ---------------------------------------------------------
             current_step = "intake.scan"
@@ -553,11 +646,15 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             current_step = "annex.git.clone"
             t0 = time.monotonic()
             git = deps.git_factory(git_dir)
+            # 覆蓋率檢查：clone 出來的遠端必須至少涵蓋釘選值記錄的每一個 key。
+            # 之前這裡沒有傳 expected_annex_keys，verify_annex_coverage 拿到的是空集合，
+            # 檢查形同虛設（review-g7-e2e A-M1）。
             verify_clone(
                 git,
                 state,
                 drive=deps.drive,
                 prefix_folder_id=cfg.prefix_folder_id,
+                expected_annex_keys=state.annex_keys,
             )
             report.durations_ms["annex.git.clone"] = int((time.monotonic() - t0) * 1000)
 
@@ -575,12 +672,14 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             current_step = "intake.evaluate"
             t0 = time.monotonic()
 
+            # 2.6 決策：原始紀錄與閱讀版放 git-annex 物件庫（keys 由 git annex
+            # lookupkey 產生，見 AnnexRawStorage）。測試仍可注入 raw_storage_factory。
             if deps.raw_storage_factory:
                 raw_storage = deps.raw_storage_factory(git_dir, git)
             elif isinstance(git, FakeAnnexGit):
                 raw_storage = FakeRawStorage()
             else:
-                raw_storage = GitRawStorage(git_dir)
+                raw_storage = AnnexRawStorage(git_dir, git=git)
 
             store = AgoraStore(
                 worktree=git_dir,
@@ -718,11 +817,18 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             # refs 與 annex key 集合取自 AnnexGit 自己的公開方法；缺少必要分支
             # 由 SubprocessAnnexGit.local_refs() raise，不在這裡吞掉例外。
             local_refs = git.local_refs()
+            # 遠端此刻「看得見」的 key（`git annex find --in=…`）**還不含**這一輪
+            # 剛 copy 上去的物件：那筆 location log 要等 git-annex 分支被 push
+            # 之後才進得去（實測）。所以要把 store 記錄的 key（全部來自
+            # `git annex lookupkey`）聯集進來——pending 要記的是「這輪 push 之後
+            # 遠端會有什麼」，第 10 步的 verify 才會真的驗到有沒有推上去。
+            # 只靠 find 的話 pending 會少記新 key，下一輪 sweep 就把它們隔離
+            # （H2 的第 3 點）。
             annex_keys = (
                 git.annex_keys_in(state.repo_uuid)
                 if hasattr(git, "annex_keys_in")
-                else state.annex_keys
-            )
+                else frozenset(state.annex_keys)
+            ) | store.annex_keys()
 
             has_git_changes = (local_refs != state.refs) or (annex_keys != state.annex_keys)
 
@@ -767,6 +873,8 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             push_verification = None
 
             if has_git_changes and not dry_run:
+                # 必要 key＝真本記錄的全部 key（既有 ＋ 這一輪新寫的原始紀錄與閱讀版；
+                # 都來自 `git annex lookupkey`，見 AnnexRawStorage）。
                 push_verification = verify_after_push(
                     git,
                     deps.drive,
@@ -775,6 +883,10 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
                     local_refs,
                     push_started_at,
                     workdir=work_temp,
+                    expected_annex_keys=store.annex_keys(),
+                    # 比較對象＝pending 記的那份 key（push 出去的），不是還沒
+                    # promote 的正式釘選值（見 verify_after_push 的說明）。
+                    pushed_annex_keys=annex_keys,
                 )
 
             report.durations_ms["verify.verify_after_push"] = int((time.monotonic() - t0) * 1000)
@@ -826,11 +938,28 @@ def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport
             report.durations_ms["pins.promote"] = int((time.monotonic() - t0) * 1000)
 
             # ---------------------------------------------------------
-            # 第 13 步：publisher.publish
+            # 第 13 步：publisher.publish（讀取視圖 4.1）
             # ---------------------------------------------------------
+            # 發佈失敗只標記、不中止：真本已經轉正（第 12 步），收件匣照常清理
+            # （第 14 步）。讀取視圖是衍生物，下一輪補發即可（4.5 prescan）。
             current_step = "publisher.publish"
             t0 = time.monotonic()
-            deps.publisher.publish(store, dry_run=dry_run)
+            try:
+                pub = _build_publisher(cfg, deps, work_temp)
+                if pub is None:
+                    report.readview_publish = "skipped_no_readview"
+                else:
+                    pub_rep = pub.publish(
+                        store,
+                        agora_main_sha=local_refs.get("refs/heads/main", ""),
+                        run_rejections=collect_rejections(store, decisions),
+                        dry_run=dry_run,
+                    )
+                    report.readview_publish = getattr(pub_rep, "status", "published")
+            except Exception as e:  # noqa: BLE001 - 發佈失敗不得影響真本與收件匣
+                report.readview_publish = "publish_failed"
+                report.publish_error = type(e).__name__
+                _dump_traceback(run_id, "publisher.publish", e)
             report.durations_ms["publisher.publish"] = int((time.monotonic() - t0) * 1000)
 
             # ---------------------------------------------------------

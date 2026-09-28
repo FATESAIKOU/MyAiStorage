@@ -5,6 +5,7 @@
   python -m aistorage.committer run [--config CONFIG] [--dry-run]
   python -m aistorage.committer plan-sweep [--config CONFIG]
   python -m aistorage.committer init-pin [--config CONFIG] [--dry-run | --confirm]
+  python -m aistorage.committer rebuild-readview --repo <repo> [--verify]
 
 依據規格：docs/impl/group3-modules.md 第 7.2 節
 """
@@ -108,6 +109,24 @@ def build_production_deps(cfg: CommitterConfig, *, allow_production: bool = Fals
     )
 
 
+def _rebuild_argv(args: argparse.Namespace) -> list[str]:
+    """把 `rebuild-readview` 的子命令參數轉成 `committer.rebuild.main` 吃的 argv。"""
+    argv: list[str] = []
+    if args.repo:
+        argv += ["--repo", args.repo]
+    if args.verify:
+        argv.append("--verify")
+    if args.reader_config:
+        argv += ["--reader-config", args.reader_config]
+    if args.manifest_file_id:
+        argv += ["--manifest-file-id", args.manifest_file_id]
+    if args.out:
+        argv += ["--out", args.out]
+    if args.json:
+        argv.append("--json")
+    return argv
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m aistorage.committer",
@@ -136,7 +155,25 @@ def main(argv: list[str] | None = None) -> int:
     init_mode.add_argument("--dry-run", action="store_true", default=True, help="僅列印計畫（預設）")
     init_mode.add_argument("--confirm", action="store_true", help="確定寫入正式釘選值至 pin repo")
 
+    # rebuild-readview（4.5：唯讀，可在本機跑，不需寫入身分）
+    p_rebuild = subparsers.add_parser(
+        "rebuild-readview",
+        help="從真本重建讀取視圖並（選用）與已發佈的讀取視圖比對（唯讀）",
+    )
+    p_rebuild.add_argument("--repo", default=None, help="真本 repo（路徑或 annex url）")
+    p_rebuild.add_argument("--verify", action="store_true", help="與已發佈的讀取視圖比對")
+    p_rebuild.add_argument("--reader-config", default=None, help="讀者設定檔路徑")
+    p_rebuild.add_argument("--manifest-file-id", default=None, help="覆寫讀者設定裡的 manifest id")
+    p_rebuild.add_argument("--out", default=None, help="重建產物的輸出目錄（預設暫存目錄）")
+    p_rebuild.add_argument("--json", action="store_true", help="以 JSON 輸出報告")
+
     args = parser.parse_args(argv)
+
+    # rebuild-readview 完全唯讀：不需要提交流程設定檔，所以要提早分派
+    if args.command == "rebuild-readview":
+        from aistorage.committer import rebuild
+
+        return rebuild.main(_rebuild_argv(args))
 
     cfg = CommitterConfig.load(args.config)
 

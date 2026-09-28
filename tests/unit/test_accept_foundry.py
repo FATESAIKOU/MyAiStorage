@@ -148,8 +148,31 @@ def foundry_env(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
+def _second_artifact_item(env):
+    """再上傳一個新的 artifact 項目（第一個已被記錄成拒收，不能重用）。"""
+    payload2 = env["tmp_path"] / "model2.bin"
+    payload2.write_bytes(b"binary weights data 2")
+    upload_item(
+        env["drive"],
+        env["inbox_folder_id"],
+        build_artifact_item(
+            kind="contained",
+            produced_by_session_id=env["session_id"],
+            name="model2.bin",
+            content_type="application/octet-stream",
+            raw_path=payload2,
+            profile=PROFILE,
+            key=env["key"],
+            key_id=env["key_id"],
+            clock=env["clock"],
+        ),
+    )
+    others = [it for it in scan_inboxes(env["drive"], env["registry"]).items]
+    return others[-1]
+
+
 def test_evaluate_artifact_dispatch_defer_and_accept(foundry_env):
-    """驗證收件匣 evaluate 對 artifact 的分派: 未啟用 Foundry 時 DEFER，啟用時 ACCEPT。"""
+    """驗證收件匣 evaluate 對 artifact 的分派：未啟用 Foundry 時 REJECT，啟用時 ACCEPT。"""
     env = foundry_env
     drive: FakeDrive = env["drive"]
 
@@ -173,8 +196,8 @@ def test_evaluate_artifact_dispatch_defer_and_accept(foundry_env):
     assert len(inbox_items) == 1
     item = inbox_items[0]
 
-    # 1. 未啟用 Foundry -> DEFER(foundry_not_enabled)
-    dec_defer = evaluate(
+    # 1. 未啟用 Foundry -> REJECT(foundry_not_enabled)
+    dec_disabled = evaluate(
         item,
         drive=drive,
         registry=env["registry"],
@@ -184,12 +207,27 @@ def test_evaluate_artifact_dispatch_defer_and_accept(foundry_env):
         workdir=env["workdir"],
         foundry_enabled=False,
     )
-    assert dec_defer.kind == DecisionKind.DEFER
-    assert dec_defer.code == "foundry_not_enabled"
+    # PM 指示：Foundry 沒設定時 REJECT 而非 DEFER（DEFER 會永遠留在收件匣裡）
+    assert dec_disabled.kind == DecisionKind.REJECT
+    assert dec_disabled.code == "foundry_not_enabled"
 
-    # 2. 啟用 Foundry -> ACCEPT(ok)
-    dec_accept = evaluate(
+    # 2. 同一個 item_key 再評估一次仍然是同一個拒收（真本記錄了拒收原因）
+    dec_again = evaluate(
         item,
+        drive=drive,
+        registry=env["registry"],
+        store=env["agora_store"],
+        ledger=env["ledger"],
+        clock=env["clock"],
+        workdir=env["workdir"],
+        foundry_enabled=True,
+    )
+    assert dec_again.kind == DecisionKind.REJECT
+    assert dec_again.code == "foundry_not_enabled"
+
+    # 3. 新項目 + 啟用 Foundry -> ACCEPT(ok)
+    dec_accept = evaluate(
+        _second_artifact_item(env),
         drive=drive,
         registry=env["registry"],
         store=env["agora_store"],

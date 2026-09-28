@@ -161,14 +161,36 @@ def _is_stopped(facts: Any) -> bool:
     """3.9：事實上有封存紀錄，且最後一則訊息不晚於封存 → 停止中；否則運作中。
 
     比較一律用毫秒整數時間戳（R3）；缺少任一者時，有封存、無訊息視為停止中。
+
+    **「訊息」用 `created` 判斷，不用 completed**（review-g5-6 H3、D10）：
+    宣告停止是在 AI 回覆**生成中**呼叫的，那一則訊息在封存**之前**建立、
+    封存**之後**才完成。用 completed 判，下一輪會把它誤認成「封存之後的新訊息」
+    而自己恢復成 running，宣告停止就永遠不成立。
+    `last_message_created_ms` 沒有（舊的 facts 物件）時退回 `last_message_ms`。
     """
     archived_ms = getattr(facts, "archived_ms", None)
-    last_ms = getattr(facts, "last_message_ms", None)
+    last_ms = getattr(facts, "last_message_created_ms", None)
+    if last_ms is None:
+        last_ms = getattr(facts, "last_message_ms", None)
     if archived_ms is None or archived_ms <= 0:
         return False
     if last_ms is None:
         return True
     return last_ms <= archived_ms
+
+
+def has_message_created_after_archive(facts: Any) -> bool:
+    """封存之後**又建立了**訊息 → 不能宣告停止中（review-g5-6 H3）。
+
+    沒有封存時間就回 False（那不是「有訊息在封存之後」）。
+    """
+    archived_ms = getattr(facts, "archived_ms", None)
+    if archived_ms is None or archived_ms <= 0:
+        return False
+    created_ms = getattr(facts, "last_message_created_ms", None)
+    if created_ms is None:
+        return False
+    return created_ms > archived_ms
 
 
 def _is_last_completed(reading: dict, message_id: str) -> bool:

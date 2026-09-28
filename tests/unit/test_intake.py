@@ -595,7 +595,7 @@ def test_evaluate_collision_rejects(tmp_path: Path):
     assert d.code == "collision"
 
 
-def test_evaluate_artifact_defers_as_foundry_not_enabled(tmp_path: Path):
+def test_evaluate_artifact_rejects_as_foundry_not_enabled(tmp_path: Path):
     """決策表 14: artifact 項目一律 DEFER(foundry_not_enabled)（保留在收件匣，第 7 組處理）。"""
     env = IntakeTestEnv(tmp_path)
     ulid = generate_ulid()
@@ -635,7 +635,8 @@ def test_evaluate_artifact_defers_as_foundry_not_enabled(tmp_path: Path):
     )
 
     d = env.evaluate_item(item)
-    assert d.kind == DecisionKind.DEFER
+    # PM 指示：Foundry 沒設定時 REJECT（DEFER 會讓項目永遠留在收件匣裡）
+    assert d.kind == DecisionKind.REJECT
     assert d.code == "foundry_not_enabled"
 
 

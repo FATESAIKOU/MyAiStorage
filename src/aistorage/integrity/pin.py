@@ -69,6 +69,14 @@ class PinStore(Protocol):
         """丟棄待定釘選值。"""
         ...
 
+    def read_text(self, relpath: str) -> str | None:
+        """讀取 pin repo 內的文字檔；不存在回傳 None。
+
+        第 6 組的維護旗標（`admin.lock.read_maintenance`）靠這個方法判斷
+        管理操作進行中；提交流程的唯讀 deploy key 讀得到這個檔案。
+        """
+        ...
+
 
 class MemoryPinStore(PinStore):
     """記憶體釘選值儲存實作（供單元測試與純函式流程使用）。"""
@@ -77,9 +85,12 @@ class MemoryPinStore(PinStore):
         self,
         initial_state: PinState | None = None,
         initial_pending: PinPending | None = None,
+        *,
+        texts: dict[str, str] | None = None,
     ) -> None:
         self._states: dict[str, PinState] = {}
         self._pendings: dict[str, PinPending] = {}
+        self._texts: dict[str, str] = dict(texts or {})
         if initial_state:
             self._states[initial_state.repo] = initial_state
         if initial_pending:
@@ -99,6 +110,9 @@ class MemoryPinStore(PinStore):
 
     def drop_pending(self, repo: str) -> None:
         self._pendings.pop(repo, None)
+
+    def read_text(self, relpath: str) -> str | None:
+        return self._texts.get(relpath)
 
 
 _ALLOWED_REMOTE_GITHUB_SSH = re.compile(
@@ -141,8 +155,12 @@ class GitPinStore(PinStore):
         user_email: str = "committer@aistorage.local",
         allow_production: bool = False,
     ) -> None:
+        from aistorage.safety import assert_safe_workdir
+
         self.repo_url = repo_url
-        self.workdir = Path(workdir).resolve()
+        # M8：pin repo 的 clone 目錄同樣不得位於專案 repo 之內。pin repo 會被
+        # commit＋push，寫錯地方等於在專案裡製造無關的歷史。
+        self.workdir = assert_safe_workdir(workdir, purpose="pin repo 工作目錄")
         self.key_path = Path(key_path).resolve() if key_path else None
         self.known_hosts_path = Path(known_hosts_path).resolve() if known_hosts_path else None
         self.user_name = user_name
@@ -351,8 +369,23 @@ class GitPinStore(PinStore):
 
         self._run_git(["commit", "-m", commit_msg])
         proc = self._run_git(["push", "origin", "main"], check=False)
-        if proc.returncode != 0:
-            raise WriteError(f"pin repo push 失敗 (可能遭遇衝突或 non-fast-forward, rc={proc.returncode})")
+        if proc.returncode == 0:
+            return
+
+        # 遠端在我們 fetch 之後又往前走了（多個工作流／多條線共用同一個 pin repo 時
+        # 會發生）。這種情況不是「有人在改同一個 repo」的內容，而是**別的 repo 條目**
+        # 被寫進來，所以重讀遠端、把我們這個 commit rebase 上去再推一次。
+        # rebase 衝突（真的有同路徑衝突）→ 仍然中止，交人工看。
+        pull = self._run_git(["pull", "--rebase", "origin", "main"], check=False)
+        if pull.returncode != 0:
+            raise WriteError(
+                f"pin repo push 失敗且 rebase 衝突，保留現況待人工處理 (rc={pull.returncode})"
+            )
+        retry = self._run_git(["push", "origin", "main"], check=False)
+        if retry.returncode != 0:
+            raise WriteError(
+                f"pin repo push 失敗 (可能遭遇衝突或 non-fast-forward, rc={retry.returncode})"
+            )
 
     def write_pending(self, pending: PinPending) -> None:
         self._ensure_cloned()
@@ -419,6 +452,23 @@ class GitPinStore(PinStore):
             p_keys.unlink()
 
         self._commit_and_push(f"pin({state.repo}): promote for run {state.run_id}")
+
+    def read_text(self, relpath: str) -> str | None:
+        """讀 pin repo 裡的檔案（唯讀）。不存在或讀不到回傳 None。"""
+        try:
+            self._ensure_cloned()
+        except (ReadError, WriteError):
+            return None
+        path = (self.workdir / relpath).resolve()
+        # 防呆：只讀 pin repo 內的檔案，路徑逃逸（../）一律拒絕
+        if not str(path).startswith(str(self.workdir.resolve()) + "/"):
+            raise ReadError(f"拒絕讀取 pin repo 外的路徑: {relpath}")
+        if not path.is_file():
+            return None
+        try:
+            return path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            raise ReadError(f"讀取 pin repo 檔案失敗: {type(e).__name__}") from None
 
     def drop_pending(self, repo: str) -> None:
         self._ensure_cloned()

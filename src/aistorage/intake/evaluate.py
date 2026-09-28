@@ -161,12 +161,13 @@ def _check_reference_monotonicity(
         return reject_decision("invalid_format", authenticated=True)
 
     link_p = store.worktree / link_rel
-    if not link_p.is_file():
+    if not link_p.is_file() and not link_p.is_symlink():
         return None
 
     try:
-        content = link_p.read_text(encoding="utf-8")
-        link_data = json.loads(content)
+        # .json 記錄可能被 git-annex 收走（工作樹裡是指標文字），用 store 的讀法
+        # 讓它先取回真正的內容再解析。
+        link_data = store.read_json_file(link_rel)
         if not isinstance(link_data, dict):
             raise MismatchError(f"參考 Link 索引內容非字典: {link_rel}")
     except Exception as e:
@@ -217,7 +218,7 @@ def evaluate(
     評估流水線順序（review-g3d M5）：
     1. 驗章＋授權（多候選逐一嘗試，通過才往下）
     2. 清冊與防重放檢核（命中 REJECT 沿用代碼，同 raw sha 回傳 ALREADY）
-    3. artifact → DEFER(foundry_not_enabled)（無需下載 raw）
+    3. artifact → Foundry 未設定則 REJECT(foundry_not_enabled)（無需下載 raw）
     4. Session 快照上限調整與蓋章 stamp_record + classify_id
     5. 單調性防重放檢核（以宣告之 raw sha256 與快照時間比較，無需下載 raw）
     6. Raw metadata 比對（size、sha256Checksum）
@@ -460,18 +461,13 @@ def evaluate(
     if item_type == "rewrite":
         return reject_decision("rewrite_not_supported", authenticated=True)
 
-    # 3. M5: artifact → 若尚未啟用 foundry 則 DEFER(foundry_not_enabled)（無需下載 raw）
+    # 3. artifact：Foundry 沒設定就 REJECT（PM 指示）。
+    #    為什麼不是 DEFER：DEFER 的項目會一直留在收件匣裡、每一輪都被重新評估，
+    #    永遠不會前進，而且收件匣永遠不是空的（7.3 的 M4 垃圾清理也抓不到它）。
+    #    REJECT 會被記錄、發佈拒收原因，並在 24 小時後被清掉，寫入者看得到原因。
     if item_type == "artifact":
         if not foundry_enabled and foundry_store is None:
-            return Decision(
-                kind=DecisionKind.DEFER,
-                item=item,
-                code="foundry_not_enabled",
-                authenticated=True,
-                producer=selected_producer,
-                record_metadata=metadata,
-                sidecar=selected_sc_dict,
-            )
+            return reject_decision("foundry_not_enabled", authenticated=True)
         body = selected_sc_dict.get("body", {})
         art_kind = body.get("kind")
         if art_kind not in ("link", "contained"):

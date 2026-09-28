@@ -205,7 +205,13 @@ def test_build_artifact_item(test_setup):
 
 
 def test_evaluate_artifact_dispatch(test_setup):
-    """驗證 evaluate 對 artifact 的分派：未啟用 DEFER、啟用時 ACCEPT。"""
+    """驗證 evaluate 對 artifact 的分派：未啟用 REJECT、啟用時 ACCEPT。
+
+    注意兩者用的是**不同的項目**：REJECT 會把拒收原因寫進真本
+    （`_committer/rejections/<item_key>.json`），所以同一個 item_key 再評估一次
+    一定還是同一個拒收（g3d 的設計：避免同一個項目每一輪重新評估）。寫入者要重試
+    就得重新上傳一個新的項目。
+    """
     env = test_setup
     drive = env["drive"]
 
@@ -229,8 +235,8 @@ def test_evaluate_artifact_dispatch(test_setup):
     assert len(inbox_items) == 1
     inbox_item = inbox_items[0]
 
-    # 1. 未啟用 Foundry（預設 foundry_enabled=False）-> DEFER(foundry_not_enabled)
-    dec_defer = evaluate(
+    # 1. 未啟用 Foundry（預設 foundry_enabled=False）-> REJECT(foundry_not_enabled)
+    dec_disabled = evaluate(
         inbox_item,
         drive=drive,
         registry=env["registry"],
@@ -240,12 +246,49 @@ def test_evaluate_artifact_dispatch(test_setup):
         workdir=env["workdir"],
         foundry_enabled=False,
     )
-    assert dec_defer.kind == DecisionKind.DEFER
-    assert dec_defer.code == "foundry_not_enabled"
+    # PM 指示：Foundry 沒設定時 REJECT 而非 DEFER（DEFER 會永遠留在收件匣裡）
+    assert dec_disabled.kind == DecisionKind.REJECT
+    assert dec_disabled.code == "foundry_not_enabled"
 
-    # 2. 啟用 Foundry (foundry_enabled=True) -> ACCEPT(ok)
-    dec_accept = evaluate(
+    # 同一個項目再評估一次（即使 Foundry 已啟用）→ 仍然是同一個拒收（真本有記錄）
+    dec_again = evaluate(
         inbox_item,
+        drive=drive,
+        registry=env["registry"],
+        store=env["agora_store"],
+        ledger=env["ledger"],
+        clock=env["clock"],
+        workdir=env["workdir"],
+        foundry_enabled=True,
+    )
+    assert dec_again.kind == DecisionKind.REJECT
+    assert dec_again.code == "foundry_not_enabled"
+
+    # 2. 換一個新項目，Foundry 啟用（foundry_enabled=True）-> ACCEPT(ok)
+    payload2 = env["tmp_path"] / "report2.pdf"
+    payload2.write_bytes(b"%PDF-fake-content-2")
+    upload_item(
+        drive,
+        env["inbox_folder_id"],
+        build_artifact_item(
+            kind="contained",
+            produced_by_session_id=env["session_id"],
+            name="report2.pdf",
+            content_type="application/pdf",
+            raw_path=payload2,
+            profile=PROFILE,
+            key=env["key"],
+            key_id=env["key_id"],
+            clock=env["clock"],
+        ),
+    )
+    fresh_items = [
+        it for it in scan_inboxes(drive, env["registry"]).items
+        if it.item_key != inbox_item.item_key
+    ]
+    assert len(fresh_items) == 1
+    dec_accept = evaluate(
+        fresh_items[0],
         drive=drive,
         registry=env["registry"],
         store=env["agora_store"],

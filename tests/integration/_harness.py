@@ -29,6 +29,41 @@ def new_prefix_name() -> str:
     return f"it-{generate_ulid()}"
 
 
+#: 每個測試自己的釘選值條目名必須唯一（pin repo 是所有線共用的）。
+#: 用法見 conftest 的 `sandbox.pin_repo_name()`：它在測試結束時把條目刪掉。
+
+def cleanup_pin_entries(pin_store, repo_names: list[str]) -> None:
+    """把測試用過的釘選值條目從 pin repo 移除（git rm ＋ commit ＋ push）。
+
+    pin repo 是所有線共用的，留下幾百個 `.pin/it-*.json` 沒有意義，也會讓
+    「這個條目是誰的」難以判讀。只刪自己建立的條目名稱。
+    """
+    import subprocess
+
+    for name in repo_names:
+        if not name.startswith("it-"):
+            continue
+        workdir = pin_store.workdir
+        rel = [f".pin/{name}.json", f".pin/{name}.keys", f".pin/{name}.pending.json"]
+        removed = False
+        for path in rel:
+            proc = subprocess.run(
+                ["git", "-C", str(workdir), "rm", "-q", "--ignore-unmatch", path],
+                capture_output=True, text=True, check=False,
+            )
+            removed = removed or proc.returncode == 0
+        if not removed:
+            continue
+        subprocess.run(
+            ["git", "-C", str(workdir), "commit", "-q", "-m", f"pin: drop {name} (integration cleanup)"],
+            capture_output=True, text=True, check=False,
+        )
+        subprocess.run(
+            ["git", "-C", str(workdir), "push", "-q", "origin", "main"],
+            capture_output=True, text=True, check=False,
+        )
+
+
 def create_prefix(drive: DriveClient, test_root_id: str, name: str) -> tuple[str, str]:
     """在測試根資料夾底下建立前綴資料夾與隔離資料夾。
 

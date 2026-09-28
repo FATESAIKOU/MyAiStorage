@@ -571,7 +571,7 @@ def test_failure_injection_at_step11_pins_promote(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(
         committer_run,
         "verify_after_push",
-        lambda git, drive, listing, state, refs, started, workdir: PushVerification(
+        lambda git, drive, listing, state, refs, started, workdir, **kw: PushVerification(
             new_manifest_sha256="new_sha",
             active=state.active_bundles,
             removed=frozenset(),
@@ -603,7 +603,7 @@ def test_step13_clean_inbox_safety_precheck(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr(
         committer_run,
         "verify_after_push",
-        lambda git, drive, listing, state, refs, started, workdir: PushVerification(
+        lambda git, drive, listing, state, refs, started, workdir, **kw: PushVerification(
             new_manifest_sha256="new_sha",
             active=state.active_bundles,
             removed=frozenset(),

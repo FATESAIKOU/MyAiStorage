@@ -519,6 +519,85 @@ class AgoraStore:
             self._temp_dir = Path(tempfile.mkdtemp(prefix="aistorage_store_"))
         self._changed_paths: list[str] = []
 
+    #: git-annex 沒 symlink 支援時，checkout 出來的檔案會是「指標文字」
+    #: （內容形如 `/annex/objects/SHA256E-…`），不是真正的內容。
+    _ANNEX_POINTER_PREFIXES = (b"/annex/objects/", b".git/annex/objects/")
+
+    def _is_annex_pointer(self, p: Path) -> bool:
+        """判斷工作樹裡的檔案其實是 git-annex 的指標（而非內容）。"""
+        try:
+            head = p.read_bytes()[:64]
+        except OSError:
+            return False
+        return any(head.startswith(prefix) for prefix in self._ANNEX_POINTER_PREFIXES)
+
+    def _annex_key_of(self, relpath: str) -> str | None:
+        """`git annex lookupkey <path>`：工作樹指標對應的 annex key。"""
+        proc = subprocess.run(
+            ["git", "-C", str(self.worktree), "annex", "lookupkey", relpath],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=get_git_env(),
+            timeout=60,
+        )
+        key = proc.stdout.strip()
+        return key or None
+
+    def _materialize_annexed(self, relpath: str) -> bool:
+        """把 annex 指標換成真實內容（`git annex get --key=…`）。成功回傳 True。
+
+        為什麼需要：工作樹是 git-annex clone 時，`.json` 記錄（meta.json、閱讀版）
+        會被 annex 收走。git-annex 若判定這個 repo 沒有 symlink 支援，checkout 出來
+        的就是指標文字（`/annex/objects/…`）而不是內容，而且 clone 之後物件也還沒
+        抓回來。整合測試在真 Drive 上遇到：第二輪讀 `meta.json` 拿到指標文字 →
+        「JSON 損毀」→ 整輪中止。
+
+        注意 git-annex 10.x **沒有** `get --file=`／`cat --file=`（實測：會印出
+        指令清單、rc=1），只能用 `lookupkey` ＋ `get --key=`。
+        """
+        if self.git is None:
+            return False
+        key = self._annex_key_of(relpath)
+        if key is None:
+            # 取不到 key 就整批取回（較慢，但比讀到指標文字好）
+            proc = subprocess.run(
+                ["git", "-C", str(self.worktree), "annex", "get", "--all"],
+                capture_output=True,
+                check=False,
+                env=get_git_env(),
+                timeout=900,
+            )
+            return proc.returncode == 0
+        proc = subprocess.run(
+            ["git", "-C", str(self.worktree), "annex", "get", f"--key={key}", "--from", "origin"],
+            capture_output=True,
+            check=False,
+            env=get_git_env(),
+            timeout=300,
+        )
+        return proc.returncode == 0
+
+    def read_json_file(self, relpath: str) -> dict[str, Any]:
+        """讀工作樹裡的 JSON 記錄；必要時先讓 git-annex 取回真正的內容。"""
+        p = self.worktree / relpath
+        if self._is_annex_pointer(p):
+            self._materialize_annexed(relpath)
+        try:
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # 可能是指標沒成功換成內容；再試一次 get，然後仍失敗才算損毀
+            if self._is_annex_pointer(p) and self._materialize_annexed(relpath):
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        return json.load(f)
+                except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                    pass
+            raise MismatchError(f"真本項目 JSON 損毀: {relpath}") from None
+        except OSError as e:
+            raise MismatchError(f"真本項目無法讀取: {relpath} ({type(e).__name__})") from None
+
     def get_record(self, item_id: str) -> dict[str, Any] | None:
         """依據 item_id 取得真本項目的 JSON 字典。若項目不存在回傳 None。"""
         try:
@@ -527,14 +606,9 @@ class AgoraStore:
             return None
 
         p = self.worktree / relpath
-        if not p.is_file():
+        if not p.is_file() and not p.is_symlink():
             return None
-
-        try:
-            with open(p, encoding="utf-8") as f:
-                return json.load(f)
-        except json.JSONDecodeError as e:
-            raise MismatchError(f"真本項目 JSON 損毀: {relpath}") from None
+        return self.read_json_file(relpath)
 
     def get_session(self, session_id: str) -> SessionRecord | None:
         """取得指定 Session 的 SessionRecord。若不存在回傳 None。"""

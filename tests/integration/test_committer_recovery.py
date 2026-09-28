@@ -101,7 +101,7 @@ def test_interrupted_between_push_and_promote_is_recovered(
         )
 
     cfg = CommitterConfig(
-        repo="agora",
+        repo=sandbox.pin_repo_name(),
         repo_uuid=annex.uuid,
         repo_url=annex_url,
         prefix_folder_id=prefix_id,
@@ -117,6 +117,7 @@ def test_interrupted_between_push_and_promote_is_recovered(
         known_hosts_path=it_settings["known_hosts"],
     )
     write_registry(signer, inbox_id)
+    sandbox.register_pin_store(pins)
     init_pin_cli(
         cfg,
         Deps(
@@ -147,7 +148,7 @@ def test_interrupted_between_push_and_promote_is_recovered(
     assert report2.aborted_at == "pins.promote", report2.aborted_at
 
     # 中斷後的狀態：真本已被推上去，釘選值有 pending，收件匣還留著項目
-    state_mid, pending_mid = pins.load("agora")
+    state_mid, pending_mid = pins.load(cfg.repo)
     assert pending_mid is not None, "中斷後應該留下 pending"
     sha_pushed = main_sha_of(annex, it_settings["rclone_conf"])
     assert sha_pushed != sha_after_round1, "中斷前應該已經 push 出新 commit"
@@ -158,7 +159,7 @@ def test_interrupted_between_push_and_promote_is_recovered(
     report3 = run(cfg, _deps(pins), dry_run=False)
     assert report3.ok is True, f"恢復輪中止於 {report3.aborted_at}:{report3.code}"
 
-    state_after, pending_after = pins.load("agora")
+    state_after, pending_after = pins.load(cfg.repo)
     assert pending_after is None, "恢復後不該還留著 pending"
     # 恢復輪可以再有一個 commit（清冊記下 ALREADY），但不得重做 Session 內容，
     # 而且只能往後接：歷史不可改寫。
