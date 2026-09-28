@@ -53,6 +53,7 @@ Requirement（與它的 Scenario）逐一對到驗證它的測試。測試以檔
 
 ### Requirement: 禁止的能力不存在
 - Scenario: AI 嘗試破壞歷史 → e2e `test_adversarial.py::test_9_4_worker_cannot_delete_or_modify_true_store`（worker 憑證刪／改都失敗）；整合 `test_admin_erase_integration.py::test_full_erase_scenario_on_drive`（抹除情境）；SA 不能寫 manifest → 整合 `test_readview_integration.py::test_sa_cannot_update_manifest`
+- worker 憑證刪不了真本（403）與抹除只認管理憑證 → 單元 `test_accept_gaps.py::test_worker_credentials_cannot_delete_true_copy_files`、`test_worker_credentials_give_404_on_repo_folders`、`test_erase_cli_requires_management_credentials`、`test_erase_plan_refuses_files_outside_the_allowed_parents`
 - Scenario: AI 在 repo 資料夾放入偽造的歷史 → 整合 `test_committer_injection.py::test_injected_artifacts_are_quarantined_and_next_round_recovers`（注入被隔離且下一輪恢復）
 
 ### Requirement: 期 1 的身分種類
@@ -83,10 +84,11 @@ Requirement（與它的 Scenario）逐一對到驗證它的測試。測試以檔
 ### Requirement: 抹除
 - Scenario: AI 發現機敏內容 → 單元 `test_accept_admin.py::test_erase_plan_dry_run_and_partial_erase`（只有管理員能抹）；「AI 只能提醒」的介面斷言**未覆蓋**（目前沒有「AI 發起抹除被拒」的測試），建議在 `test_accept_skill.py` 或 e2e 補一個（skill 沒有 erase 工具，但可加一個明確的負向案例）。
 - Scenario: 憑證外洩 → 整合 `test_admin_erase_integration.py::test_full_erase_scenario_on_drive`（canary 在版本／歷史／bundle／舊 revision／垃圾桶都找不到）、單元 `test_admin_erase_smoke.py::test_verify_canary_counts_and_is_fail_closed`、`test_admin_erase_smoke.py::test_rewrite_local_session_erases_history`、`test_erasure_record_contains_no_content`
-- 「用 worker 憑證不能抹除」→ **未覆蓋**：`docs/impl/group5-7-modules.md` 第 367 行要求「用 worker 的 conf 執行抹除必須 403／404」，整合測試目前沒有這一段；建議在 `test_admin_erase_integration.py` 補一個負向案例。
+- 「用 worker 憑證不能抹除」→ 單元 `test_accept_gaps.py::test_erase_cli_requires_management_credentials`（worker conf 被 not_wired／admin_error 擋下，回報 0 刪除）；`test_worker_credentials_cannot_delete_true_copy_files`、`test_erase_plan_refuses_files_outside_the_allowed_parents`（檔案不在允許 parent 下 → 拒絕整個計畫）；`test_erase_plan_only_deletes_its_own_categories`（無關檔案不得進計畫）。**整合層的 403 負向案例仍未覆蓋**（要真 worker conf，見 e2e README）。
 
 ### Requirement: 永久保存
 - Scenario: 來源應用刪除了自己的紀錄 → 單元 `test_syncer_smoke.py::test_unchanged_is_not_reuploaded`、`test_agora::test_agora_store_session_crud_and_deduplication`；**「來源端刪除後 Agora 不受影響」的專門斷言未覆蓋**（同步器不會刪 Agora，但沒有測試明確演這個情境），建議在 `test_accept_syncer.py` 補。
+- 「GC 只回收 bundle、annex 物件（Agora raw 與 Foundry 收容產出）永遠不被刪」→ 單元 `test_accept_gaps.py::test_gc_only_reclaims_bundles_and_never_touches_annex_objects`、`test_foundry_contained_object_survives_committer_gc`
 
 ### Requirement: 單一 Session 手動匯入
 - Scenario: 匯入一個舊的 Claude Code Session → 單元 `test_accept_importer.py::test_import_session_out_dir_claude_code`、`test_accept_importer.py::test_import_repeat_same_item_key`、`test_importer_smoke.py::test_import_claude_code_to_out_dir`
@@ -188,10 +190,10 @@ Requirement（與它的 Scenario）逐一對到驗證它的測試。測試以檔
 
 ### Requirement: 從目錄找得到並拿得到
 - Scenario: 找上個月的報告 → 單元 `test_accept_foundry.py::test_foundry_reader_find_by_type_case_producer_time_and_session`、`test_foundry_reader_get_contained_by_annex_key_with_hash_verification`、`test_foundry_reader_get_link_origin`
-- 新鮮度規則：`FoundryReader` 的 freshness 已實作，**測試未覆蓋**（沒有斷言 Foundry 讀取附快照時間／max_lag 警告）；建議在 `test_accept_foundry.py` 補一個。
+- 每筆結果附快照時間與新鮮度 → 單元 `test_accept_gaps.py::test_foundry_results_attach_a_snapshot_time`（有附）、`test_foundry_get_attaches_snapshot_time_and_freshness`（get 的 contained 與 link）；**「附的是哪個時間」目前未通過**：`test_foundry_freshness_uses_the_generation_published_at` 以 `xfail(strict=True)` 鎖住 F-M1（現況用產出的 `created_at`，契約是世代的 `published_at`，g4 第 6 節），修好會 XPASS。
 
 ### Requirement: 永久保存
-- Scenario: 一年前的簡報 → **未覆蓋**：沒有測試「Foundry 的 GC 只回收 bundle、annex 物件永遠不刪」。建議在 `test_foundry_smoke.py` 或 `test_integrity.py` 補一個（對 Foundry 的 objects 路徑跑 sweep，斷言不隔離 annex 物件）。
+- Scenario: 一年前的簡報 → 單元 `test_accept_gaps.py::test_gc_only_reclaims_bundles_and_never_touches_annex_objects`（annex 物件只會 KEEP；GC 只刪 removed bundle；誤放進候選會被防呆擋下）、`test_foundry_contained_object_survives_committer_gc`（Foundry 收容產出不被提交流程 GC 掃到）
 
 ---
 
@@ -209,29 +211,31 @@ Requirement（與它的 Scenario）逐一對到驗證它的測試。測試以檔
 ## 總結
 
 - Requirement 總數：**42**（Scenario 總數 60）。
-- 有測試覆蓋（所有列出的 Scenario 都對得到測試）：**28**。
+- 有測試覆蓋（所有列出的 Scenario 都對得到測試）：**29**。
 - 部分覆蓋（Requirement 下有一條以上 Scenario 未覆蓋）：**10**。
-- 完全未覆蓋：**4**。清單如下。
+- 完全未覆蓋：**3**。清單如下。
 
-**完全未覆蓋（4）**
+**完全未覆蓋（3）**
 1. session-sync / 同步不以其他執行體存在為前提 —— spec 已註明「架構保證、第 9 組不另外驗收」，建議不算缺口。
-2. foundry / 永久保存 —— 沒有測試「Foundry 的 GC 只回收 bundle、annex 物件永遠不刪」；建議在 `test_foundry_smoke.py` 或 `test_integrity.py` 補。
-3. mybrain / 案件以不變的 id 被參照 —— 「解析所屬案件」spec 註明期 1 不驗收（依賴 MyBrain PR）；「id 指不到案件」未覆蓋，建議在 `test_accept_search.py` 補一個。
-4. mybrain / MyBrain 既有寫入流程不變 —— AiStorage 沒有提供寫入 MyBrain 的路徑（設計上成立），建議保留說明、不算缺口。
+2. mybrain / 案件以不變的 id 被參照 —— 「解析所屬案件」spec 註明期 1 不驗收（依賴 MyBrain PR）；「id 指不到案件」未覆蓋，建議在 `test_accept_search.py` 補一個。
+3. mybrain / MyBrain 既有寫入流程不變 —— AiStorage 沒有提供寫入 MyBrain 的路徑（設計上成立），建議保留說明、不算缺口。
 
 **部分覆蓋（10）**
 1. item-model / id 不變：搬移類比未覆蓋（等 MyBrain 接上）。
 2. session-record / 原始紀錄是真本：「匯出不含帳號憑證」的 canary 斷言未覆蓋（1.7i 只有人工檢查）。
 3. session-record / 閱讀版重建：跨應用（A 讀 B）端到端未覆蓋。
 4. session-record / 版本保留與回滾：同步器尊重回滾未覆蓋（期 1 回滾改管理者直接操作）。
-5. session-record / 抹除：「AI 只能提醒、沒有抹除能力」與「worker 憑證抹除必須 403／404」未覆蓋。
-6. session-record / 永久保存：「來源端刪除後 Agora 不受影響」專門斷言未覆蓋。
+5. session-record / 抹除：「AI 只能提醒、沒有抹除能力」未覆蓋；worker 憑證抹除的**單元層已補**（`test_accept_gaps.py`），整合層的 403 負向案例仍缺。
+6. session-record / 永久保存：「來源端刪除後 Agora 不受影響」專門斷言未覆蓋（GC 不刪 annex 已補，見 foundry 永久保存）。
 7. session-sync / 每個來源應用一個同步器：第二個同步器的擴充性未覆蓋（期 1 外）。
 8. session-link / Session Link 的兩種類型：未知 Link 類型被忽略未覆蓋。
 9. session-link / 所屬案件：e2e 沒有用案件篩選的端到端情境。
-10. foundry / 從目錄找得到並拿得到：Foundry 讀取的新鮮度附帶未覆蓋。
+10. foundry / 從目錄找得到並拿得到：每筆附快照時間已補（`test_accept_gaps.py`）；「附 published_at」被 F-M1 擋住（strict xfail）。
 
-**建議優先補的三個（風險高且可寫）**
-1. Foundry 永久保存：annex 物件不隨 GC 刪除。
-2. 用 worker 憑證執行抹除必須 403／404。
-3. Foundry 讀取介面的新鮮度附帶。
+**建議優先補的三個（風險高且可寫）** —— 本輪已寫成 `tests/unit/test_accept_gaps.py`
+1. Foundry 永久保存：annex 物件不隨 GC 刪除 ✅（`test_gc_only_reclaims_bundles_and_never_touches_annex_objects`、`test_foundry_contained_object_survives_committer_gc`）
+2. 用 worker 憑證執行抹除必須 403／404 ✅ 單元層（`test_erase_cli_requires_management_credentials`、`test_worker_credentials_cannot_delete_true_copy_files`、`test_worker_credentials_give_404_on_repo_folders`、`test_erase_plan_refuses_files_outside_the_allowed_parents`）
+3. Foundry 讀取的新鮮度附帶 ✅ 部分（`test_foundry_results_attach_a_snapshot_time`、`test_foundry_get_attaches_snapshot_time_and_freshness`）；時間基準待 F-M1 修好（strict xfail）
+
+**本輪新測試的失敗項（需 PM 判斷）**
+- `test_foundry_freshness_uses_the_generation_published_at`（**strict xfail → 實作 F-M1 未修**）：`FoundryReader.find`／`get` 以產出的 `created_at` 當 `snapshot_at`；契約（`docs/impl/group4-modules.md` 第 6 節、review-g7-e2e F-M1）是這一類結果用**世代的 `published_at`**。修好後會 XPASS，請移除 xfail 標記。
