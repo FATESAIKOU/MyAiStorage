@@ -121,6 +121,9 @@ task 9.4 的項目分佈在 e2e 與整合測試；每一項都查得到在哪裡
   `agora`／`agora-opencode`／`wire_prefix` 輔助。
 - `test_split.py`（9.1）、`test_consolidation.py`（9.2）、`test_reference.py`（9.3）、
   `test_adversarial.py`（9.4）、`test_persistence.py`（9.5）。
+- `test_continuation.py`：1→1「接著做」（設計文件場景 A）。起點是
+  `<session>[@<訊息>]`，**不經交接單**——`agora checkout` 送一筆接續單
+  （`continuation:`），所以這一種起點也記錄接續 Link（2bc0785）。
 - `test_91_front_half.py`：只驗 9.1 的前半段（S1 交出兩張交接單），不需要 S2／S3。
 - `test_split_helpers.py`：容器匯出失敗的形狀 ＋ `wire_prefix` 的截斷與
   `callID` 語意（不需要容器）。
