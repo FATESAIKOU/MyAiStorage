@@ -189,11 +189,14 @@ Session 的狀態之一：來源應用仍可能往它追加內容。
 **停止中**:
 Session 的狀態之一：來源應用目前不會再往它追加內容。由來源應用的可信訊號判定；沒有可信訊號的來源應用（例如 opencode），只能由你或 AI 明確宣告（opencode 用它自己的封存，`time.archived`），不從閒置時間推測。停止中的 Session 又被追加內容時，回到運作中，同步器會立刻同步並提交一次。
 
+**預留中**:
+Session 的狀態之一：`agora checkout` 已經在 Agora 裡佔下這個 Session 的位置（零則訊息的空紀錄加上接續 Link），但還沒有人真的開工。帶一個期限（期 1 預設 7 天），第一份真實快照到達就離開這個狀態。過期只是顯示與管理用的訊號，期 1 不會自動刪除。
+
 **Session Link**:
-從一個 Session 指向另一個 Session 的有向關係，類型是接續或參考。接續的目標一定是較早的 Session；參考的目標可以是任何其他 Session，包括仍在並行的 Session。一個 Session 可以有多條 Session Link。
+從一個 Session 指向另一個 Session 的有向關係，類型是接續或參考。接續的目標一定是較早的 Session；參考的目標可以是任何其他 Session，包括仍在並行的 Session。一個 Session 可以有多條 Session Link，但**同一個新 Session 對同一個被接續 Session 只有一條接續 Link**——認領與接續單適用同一條規則，`agora checkout` 一次也不能給同一個來源兩個起點。
 
 **接續**（Continuation）:
-一種 Session Link：新 Session 從較早 Session 的某個接續點開始承接它的工作。**接續不需要交接單**——`agora checkout <起點>…` 每一次都會為每個起點留下一條接續 Link，不論起點是交接單還是某個位置。較早的 Session 不受影響，可以照常繼續。Session 之間的關係只有四種：1→1、1→n、n→1、n↔m，前三種都是接續 Link，第四種是參考 Link。
+一種 Session Link：新 Session 從較早 Session 的某個接續點開始承接它的工作。**接續不需要交接單**——`agora checkout <起點>…` 每一次都會為每個起點留下一條接續 Link，不論起點是交接單還是某個位置。較早的 Session 不受影響，可以照常繼續。Session 之間的關係只有四種：1→1、1→n、n→1、n↔m，前三種都是接續 Link，第四種是參考 Link。接續的目標必須是主 Session，子 Session 要接就接它的母 Session。
 _Avoid_: handoff、resume、移交
 
 **參考**（Reference）:

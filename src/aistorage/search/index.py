@@ -192,7 +192,7 @@ def build_index(
             in_progress = m.get("in_progress", False)
             con.execute(
                 """INSERT OR REPLACE INTO sessions VALUES
-                   (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     m.get("session_id"),
                     m.get("source"),
@@ -211,6 +211,8 @@ def build_index(
                     m.get("reading_status"),
                     m.get("reading_error_code"),
                     normalize_time(m.get("committed_at")),
+                    # 預留期限：只有 status='reserved' 的 Session 有值（review-2bc0785 M2）
+                    normalize_time(m.get("reserved_until")),
                 ),
             )
             sid = m.get("session_id")

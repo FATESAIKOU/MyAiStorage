@@ -135,6 +135,27 @@ def _fixture(tmp_path: Path, drive_cls: type[FakeDrive] = FakeDrive
             reading=None,
             reading_ref=None,
         ),
+        # `checkout` 預留好、還沒有人開工的新 Session（review-2bc0785 M2）：
+        # 狀態是 reserved，帶期限；`agora find --status reserved` 要能把它挑出來。
+        IndexEntry(
+            metadata={"session_id": "opencode:s-reserved", "source": "opencode",
+                      "title": "接手甲的工作", "producer": "profile:mac-opencode",
+                      "case_id": None, "status": "reserved", "stopped_at": None,
+                      "in_progress": False, "created_at": "2026-09-27T09:00:00Z",
+                      "updated_at": "2026-09-27T09:00:00.000Z",
+                      "snapshot_at": "2026-09-27T09:00:00.000Z",
+                      "raw_sha256": SNAP_A, "raw_size": 10, "parent_id": None,
+                      "reading_status": "ok", "reading_error_code": None,
+                      "committed_at": "2026-09-27T09:00:00.000Z",
+                      "reserved_until": "2026-09-29T09:00:00.000Z"},
+            snapshots=[
+                {"snapshot_sha256": SNAP_A, "snapshot_at": "2026-09-27T09:00:00.000Z",
+                 "committed_at": "2026-09-27T09:00:00.000Z", "via": "import"},
+            ],
+            reading=_reading("opencode:s-reserved", SNAP_A, []),
+            reading_ref={"snapshot_sha256": SNAP_A, "file_id": ra["file_id"],
+                         "sha256": ra["sha256"], "size": ra["size"]},
+        ),
     ]
     index_path = tmp_path / "index.sqlite3"
     build_index(
@@ -266,6 +287,72 @@ def test_reader_happy_paths_are_read_only(tmp_path: Path):
         "opencode:s1", SNAP_B, timeout=timedelta(seconds=5)).value is True
     assert reader.wait_for_snapshot(
         "opencode:s1", "f" * 64, timeout=timedelta(seconds=0)).value is False
+
+
+def test_reserved_sessions_are_separate_from_working_ones(tmp_path: Path):
+    """M2：預留（還沒有人開工）與真正開工的 Session 在讀取介面分得開。
+
+    `find --status reserved` 只挑出預留；預留帶期限，期限內不算「落後」，
+    期限過了才警告（期 1 **不自動刪除**，那要人決定）。
+    """
+    drive, cfg, clock = _fixture(tmp_path)
+    reader = AgoraReader(ReadViewClient(drive, cfg, clock=clock), clock=clock)
+
+    reserved = reader.find_sessions(Query(status="reserved")).value
+    assert [f.hit.session.session_id for f in reserved] == ["opencode:s-reserved"]
+    row = reserved[0].hit.session
+    assert row.status == "reserved"
+    assert row.reserved_until == "2026-09-29T09:00:00.000Z"
+
+    # 沒有期限的普通 session：欄位是 None（不影響其他判斷）
+    working = reader.get_session("opencode:s1").value.session
+    assert working.status == "stopped" and working.reserved_until is None
+
+    # 期限內（now=09-27，期限 09-29）→ 符合，不警告
+    ok = reader.get_session("opencode:s-reserved", max_lag=timedelta(minutes=1))
+    assert ok.freshness.satisfied is True
+    assert ok.freshness.warning is None
+
+    # 期限過了 → 警告「預留已過期」（不是「落後」）
+    later = AgoraReader(ReadViewClient(drive, cfg, clock=clock),
+                        clock=FixedClock("2026-10-01T00:00:00.000Z"))
+    expired = later.get_session("opencode:s-reserved", max_lag=timedelta(minutes=1))
+    assert expired.freshness.satisfied is False
+    assert "預留已過期" in (expired.freshness.warning or "")
+
+
+def test_reserved_until_absent_in_older_index_generations(tmp_path: Path):
+    """舊世代的 index 沒有 `reserved_until` 欄 → 讀取端當作 None，不報錯。
+
+    欄位放在 sessions 表最後一個，舊 index 照樣能讀（`get_snapshot` 的 annex_key
+    也是同樣的相容寫法）。
+    """
+    import sqlite3 as _sqlite3
+
+    from aistorage.search.query import get_session_row
+
+    index = tmp_path / "old.sqlite3"
+    build_index(index, entries=[], meta=IndexMeta(
+        generation=1, built_at="2026-09-27T09:00:00.000Z", agora_main_sha="x",
+        converter_versions={}))
+    con = _sqlite3.connect(str(index))
+    try:
+        con.execute("ALTER TABLE sessions DROP COLUMN reserved_until")
+        con.execute(
+            "INSERT INTO sessions (session_id, source, title, producer, case_id,"
+            " status, stopped_at, in_progress, created_at, updated_at, snapshot_at,"
+            " raw_sha256, raw_size, parent_id, reading_status, reading_error_code,"
+            " committed_at) VALUES ('opencode:old','opencode','t','p',NULL,"
+            " 'reserved',NULL,0,'2026-09-27T09:00:00Z','2026-09-27T09:00:00Z',"
+            "'2026-09-27T09:00:00Z','a',1,NULL,'ok',NULL,'2026-09-27T09:00:00Z')")
+        con.commit()
+        cols = [r[1] for r in con.execute("PRAGMA table_info(sessions)")]
+        assert "reserved_until" not in cols
+        row = get_session_row(con, "opencode:old")
+    finally:
+        con.close()
+    assert row is not None and row.status == "reserved"
+    assert row.reserved_until is None
 
 
 def test_freshness_warnings_and_stopped(tmp_path: Path):

@@ -587,10 +587,14 @@ def apply_erase(plan: ErasePlan, *, confirm: str, admin: AdminDeps,
 def _remap_hashes(store: AgoraStore, remap: dict[str, str],
                   new_refs: dict[str, tuple[str, str]],
                   erased_by_session: dict[str, set[str]]) -> None:
-    """把 snapshots.jsonl、handoffs、links 裡的舊雜湊換成新的。
+    """把 snapshots.jsonl、handoffs、links、continuations、claims 裡的舊雜湊換成新的。
 
     接續點訊息本身被抹除的交接單標 `erased: true`
     （讀取時照樣看得到交接單，但內容已經被抹除）。
+
+    **`continuations/` 與 `claims/` 也要重寫**（review-2bc0785 M3）：它們的
+    `body.continuation.snapshot_sha256` 指向被抹除的那一份快照。不重寫的話，抹除
+    之後真本裡還留著「被抹除的那一版曾經存在」的指紋，而且和 Link 的雜湊對不上。
     """
     import json as _json
 
@@ -604,13 +608,15 @@ def _remap_hashes(store: AgoraStore, remap: dict[str, str],
         return obj
 
     for rel in [*(str(p.relative_to(store.worktree))
-                 for p in store.worktree.glob("sessions/*/snapshots.jsonl")),
+                 for p in store.worktree.glob("sessions/*/*/snapshots.jsonl")),
                 *(str(p.relative_to(store.worktree))
-                 for p in (store.worktree / "handoffs").glob("*.json")
-                 if (store.worktree / "handoffs").is_dir()),
+                 for p in store.worktree.glob("handoffs/*.json")),
                 *(str(p.relative_to(store.worktree))
-                 for p in (store.worktree / "links").rglob("*.json")
-                 if (store.worktree / "links").is_dir())]:
+                 for p in store.worktree.glob("continuations/*.json")),
+                *(str(p.relative_to(store.worktree))
+                 for p in store.worktree.glob("claims/*.json")),
+                *(str(p.relative_to(store.worktree))
+                 for p in store.worktree.glob("links/**/*.json"))]:
         target = store.worktree / rel
         if rel.endswith(".jsonl"):
             lines = []

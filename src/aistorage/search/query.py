@@ -66,6 +66,10 @@ class SessionRow:
     reading_status: str
     reading_error_code: str | None
     committed_at: str
+    #: 預留的期限（`status='reserved'` 才有值）。過期只是顯示與管理用的訊號，
+    #: 提交流程不會自動刪（review-2bc0785 M2）。
+    #: 舊世代的 index 沒有這一欄（`len(row) <= 17`）→ None。
+    reserved_until: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +118,9 @@ def _session_row(row: tuple) -> SessionRow:
         snapshot_at=row[10], raw_sha256=row[11], raw_size=row[12],
         parent_id=row[13], reading_status=row[14],
         reading_error_code=row[15], committed_at=row[16],
+        # 升級前發佈的舊世代 index 沒有 `reserved_until` 欄（review-2bc0785 M2），
+        # 那時回傳 None 而不是報錯——預留期限是附加訊號，缺它不影響讀取。
+        reserved_until=(str(row[17]) if len(row) > 17 and row[17] else None),
     )
 
 

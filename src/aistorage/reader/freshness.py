@@ -4,6 +4,9 @@
 - max_lag is None → satisfied=None，不警告，但一定附 snapshot_at。
 - status == "stopped" 而且 snapshot_at >= stopped_at（datetime 比較）
   → satisfied=True、stopped_ok=True，不論落後多久。
+- status == "reserved"（checkout 預留好、還沒有人開工）：期限之內 → satisfied=True
+  （**沒有東西會再變動**，不該用落後時間去警告人）；期限已過 → 警告「預留已過期」
+  （review-2bc0785 M2；期限只是顯示與管理用的訊號，提交流程不會自動刪除）。
 - 否則 now − snapshot_at <= max_lag → 符合；不符合 → satisfied=False＋warning。
 - 交接單、Link、拒收這類非單一 Session 結果，呼叫端以該世代 published_at
   當 snapshot_at 傳入。
@@ -29,7 +32,8 @@ def _format_lag(seconds: float) -> str:
 def evaluate_freshness(*, snapshot_at: str | None, status: str | None,
                        stopped_at: str | None, generation: int,
                        published_at: str, now: datetime,
-                       max_lag: timedelta | None) -> dict:
+                       max_lag: timedelta | None,
+                       reserved_until: str | None = None) -> dict:
     """回傳 Freshness 欄位 dict（由 reader 組成 Freshness dataclass）。"""
     base = {
         "snapshot_at": snapshot_at,
@@ -47,6 +51,18 @@ def evaluate_freshness(*, snapshot_at: str | None, status: str | None,
                 return {**base, "satisfied": True, "stopped_ok": True}
         except ValueError:
             pass
+    if status == "reserved" and reserved_until:
+        # 預留是零則訊息的空紀錄，本來就沒有東西會再變動 → 用期限判斷，不看落後
+        try:
+            deadline = parse_rfc3339(reserved_until)
+        except ValueError:
+            return {**base, "satisfied": False,
+                    "warning": "expired: 預留期限格式錯誤，無法判定"}
+        if now <= deadline:
+            return {**base, "satisfied": True}
+        return {**base, "satisfied": False,
+                "warning": f"expired: 預留已過期（期限 {reserved_until}），"
+                           "還沒有人開工"}
     if not snapshot_at:
         return {**base, "satisfied": False,
                 "warning": "stale: 沒有快照時間，無法判定新鮮度"}

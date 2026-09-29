@@ -20,6 +20,8 @@ from aistorage.integrity.sweep import PrefixLevel
 DEFAULT_MAX_GIT_BUNDLES = 20
 DEFAULT_MAX_GC_PER_RUN = 200
 DEFAULT_MAX_RAW_SIZE = 50 * 1024 * 1024  # 50 MiB
+#: 每個 profile 每輪能建立的預留／接續數量上限（review-2bc0785 M2）。0 或負數＝不設上限。
+DEFAULT_MAX_LINKS_PER_PROFILE_PER_ROUND = 20
 DEFAULT_QUARANTINE_DAYS = 7
 DEFAULT_LEDGER_MONTHS = 3
 #: `.github/workflows/committer.yml`（3.1 建的骨架；錯開要停用的就是它）
@@ -54,6 +56,10 @@ class CommitterConfig:
     max_git_bundles: int = DEFAULT_MAX_GIT_BUNDLES
     max_gc_per_run: int = DEFAULT_MAX_GC_PER_RUN
     max_raw_size: int = DEFAULT_MAX_RAW_SIZE
+    #: 每輪每個 profile 能建立的預留／接續（claim／continuation）數量上限
+    #: （review-2bc0785 M2）。任何 profile 都能為任何一份既有快照送接續，沒有這個
+    #: 上限時讀取視圖要發佈的閱讀版數量沒有邊界。0 或負數＝不設上限。
+    max_links_per_profile_per_round: int = DEFAULT_MAX_LINKS_PER_PROFILE_PER_ROUND
     quarantine_retention_days: int = DEFAULT_QUARANTINE_DAYS
     ledger_retention_months: int = DEFAULT_LEDGER_MONTHS
     prefix_levels: tuple[PrefixLevel, ...] = ()
@@ -219,6 +225,9 @@ class CommitterConfig:
             max_git_bundles=int(data.get("max_git_bundles", DEFAULT_MAX_GIT_BUNDLES)),
             max_gc_per_run=int(data.get("max_gc_per_run", DEFAULT_MAX_GC_PER_RUN)),
             max_raw_size=int(data.get("max_raw_size", DEFAULT_MAX_RAW_SIZE)),
+            max_links_per_profile_per_round=int(data.get(
+                "max_links_per_profile_per_round",
+                DEFAULT_MAX_LINKS_PER_PROFILE_PER_ROUND)),
             quarantine_retention_days=int(data.get("quarantine_retention_days", DEFAULT_QUARANTINE_DAYS)),
             ledger_retention_months=int(data.get("ledger_retention_months", DEFAULT_LEDGER_MONTHS)),
             prefix_levels=tuple(levels),

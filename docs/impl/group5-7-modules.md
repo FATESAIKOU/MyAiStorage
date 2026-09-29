@@ -374,7 +374,7 @@ def apply_erase(plan: ErasePlan, *, confirm: str, admin: AdminDeps) -> EraseRepo
 10. 後置條件：`verify_remote.py`
 
 **segment 抹除會改變快照的雜湊。** 被釘住的接續點（交接單與 Link 的 `continuation.snapshot_sha256`）必須一起重新對應，否則接續就會失效。建議：
-- 抹除時同步改寫 `snapshots.jsonl`、`handoffs/*`、`links/continuation/*` 裡的雜湊，並在抹除紀錄裡保存 `snapshot_remap`，但**只記雜湊的對應，不記內容**。
+- 抹除時同步改寫 `snapshots.jsonl`、`handoffs/*`、`continuations/*`、`claims/*`、`links/continuation/*` 裡的雜湊，並在抹除紀錄裡保存 `snapshot_remap`，但**只記雜湊的對應，不記內容**。接續單與認領單也要在範圍內（review 2bc0785 M3）：它們的 `body.continuation.snapshot_sha256` 一樣指向被抹除的那一份快照，不重寫就會在真本裡留下「那一版曾經存在」的指紋，而且和 Link 的雜湊對不上。
 - 接續點指向的訊息本身被抹除時，那張交接單標成 `erased`（讀取時照樣看得到交接單，但內容已經被抹除）。
 
 這需要 PM 決定（**PM 決定 5**）。

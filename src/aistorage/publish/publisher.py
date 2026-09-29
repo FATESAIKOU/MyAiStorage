@@ -256,6 +256,9 @@ def index_entries(
                     "reading_status": smeta.get("reading_status", "ok"),
                     "reading_error_code": smeta.get("reading_error_code"),
                     "committed_at": smeta.get("committed_at"),
+                    # 預留期限（review-2bc0785 M2）：只有 status='reserved' 有值，
+                    # 讀取端用它顯示「還沒有人開工、期限到哪」。
+                    "reserved_until": smeta.get("reserved_until"),
                 },
                 snapshots=snaps,
                 reading=bodies.get(key),

@@ -29,7 +29,15 @@ Session 之間的關係 MUST 只有四種：1→1、1→n、n→1、n↔m。每�
 ### Requirement: 接續經由起點建出新 Session
 新 Session MUST 由 Agora 從起點建出：`agora checkout` 產出起點包，內含起點之前的原始紀錄、要交代的任務與來源 Session 的 id，再由轉接器載入成 coding agent 的原生 session。起點 MUST 可以是一張交接單，也 MAY 是任何 Session 的任何一則已提交訊息（不指定訊息就是最新已提交的那一則）。**接續 MUST NOT 以交接單為前提**：交接單只是可選的便利。交接單若存在 MUST 由被接續 Session 的持有者發起：同步並建立一張交接單，一起提交。交接單 MUST 是 Agora 的一個項目，帶有 id，記錄被接續的 Session、接續點與要交代的任務。
 
-每一次 checkout MUST 為**每一個**起點留下一筆接續記錄，無論起點是交接單還是某個位置：起點是交接單時沿用認領（認領本身就代表接續，MUST NOT 另記一條），起點是某個位置時建立一筆接續單項目。該記錄 MUST 由 checkout 簽章後放進收件匣，MUST 由提交流程收進 Agora 後建立從新 Session 指向被接續 Session 的接續 Link，並 MUST 自己帶著新 Session 的空紀錄（預留），所以記錄被拒時 Agora 裡 MUST NOT 留下任何東西。同一個新 Session 對同一個起點 MUST 只有一條接續 Link，重複送 MUST 冪等。
+每一次 checkout MUST 為**每一個**起點留下一筆接續記錄，無論起點是交接單還是某個位置：起點是交接單時沿用認領（認領本身就代表接續，MUST NOT 另記一條），起點是某個位置時建立一筆接續單項目。該記錄 MUST 由 checkout 簽章後放進收件匣，MUST 由提交流程收進 Agora 後建立從新 Session 指向被接續 Session 的接續 Link，並 MUST 自己帶著新 Session 的空紀錄（預留），所以記錄被拒時 Agora 裡 MUST NOT 留下任何東西。
+
+**同一個新 Session 對同一個被接續 Session MUST 只有一條接續 Link**（不論是認領還是接續單建立的）。同一個起點重複送 MUST 冪等；同一個新 Session 對同一個被接續 Session 的**第二個**起點（不同接續點、或同一個來源的第二張交接單）MUST 被明確拒收，且 MUST NOT 寫入第二條 Link。checkout MUST 在本機就拒絕同一批起點裡同一個被接續 Session 出現兩次的組合（交接單起點的來源是該交接單的目標 Session，與直接起點混用也算同一個來源），所以留下哪一條 Link MUST NOT 取決於提交流程的套用順序。
+
+被接續的目標 MUST 是**主 Session**（與交接單一致）：子 Session 是母 Session 內部的一段工作，接續它 MUST 被拒收。
+
+每個 profile 每輪能建立的預留／接續數量 MUST 有上限（可設定，附預設值）。任何 profile 都能為任何一份既有快照送接續，沒有上限時讀取視圖要發佈的閱讀版數量沒有邊界。超過上限的項目 MUST 被明確拒收並在讀取視圖發佈原因，**已經是冪等重送的那一筆 MUST NOT 佔用額度**。
+
+預留出來的新 Session 狀態 MUST 是 `reserved`（不是「運作中」）並帶一個期限。有人真的載入它（第一份真實快照）之後，它 MUST 回到一般的運作中／停止狀態且期限消失。**期 1 MUST NOT 自動刪除過期的預留**：那是改動真本，屬於管理操作；期限只是顯示與管理用的訊號。讀取介面 MUST 能把預留與已經開工的 Session 分開（`agora find --status reserved`），並在顯示時指出期限與是否已過期。
 
 認領 MUST 只適用於以交接單為起點的情況（直接起點沒有交接單可認，也不需要認）。一張交接單 MUST 只能被認領一次；尚未被認領的交接單 MUST 能經由讀取介面找到。checkout MUST 先登記認領或接續記錄，並在讀取介面確認那條接續 Link 屬於自己之後，才產出起點包；被拒絕時 MUST NOT 產出任何東西，所以被拒的一方不會有 Session 開工。交接單起點的接手者 SHALL 能先讀任務，需要時再深入閱讀版。
 
@@ -52,6 +60,26 @@ Session 之間的關係 MUST 只有四種：1→1、1→n、n→1、n↔m。每�
 #### Scenario: 重複送同一個起點
 - **WHEN** 同一個新 Session 對同一個起點重複送出接續記錄（例如換了一個 item id）
 - **THEN** 提交流程不寫入第二條接續 Link，重複的那筆被當成已完成；被接續的 Session 完全不受影響
+
+#### Scenario: 同一個新 Session 接同一個來源兩次
+- **WHEN** 同一個新 Session 先以直接起點接續 S1，之後又認領 S1 的另一張交接單（或反過來）
+- **THEN** 第二筆被明確拒收，真本裡仍然只有一條接續 Link，留下哪一條不取決於兩筆的套用順序；被拒的認領不會把那張交接單標成已認領
+
+#### Scenario: 一批起點裡同一個來源出現兩次
+- **WHEN** 呼叫者一次 checkout 同時給 `handoff:H`（目標是 S1）與 `S1@某訊息`
+- **THEN** checkout 在登記任何接續記錄之前就明確拒絕，說明同一個來源只能接一次，而且不產出起點包
+
+#### Scenario: 接續的目標是子 Session
+- **WHEN** 呼叫者以一個子 Session 的某個位置為起點執行 checkout
+- **THEN** 提交流程明確拒收（與交接單只能由主 Session 接一致），且不留下那筆預留
+
+#### Scenario: 超過每輪的接續數量上限
+- **WHEN** 某個 profile 在同一輪建立的預留／接續數量已達上限
+- **THEN** 下一筆被明確拒收並發佈原因，不留下預留；被拒的或冪等重送的那一筆不佔用額度
+
+#### Scenario: 預留一直沒有人開工
+- **WHEN** `agora checkout` 預留了新 Session，但之後一直沒有它的真實快照
+- **THEN** 讀取介面把它顯示為預留（附期限），與已經開工的 Session 分開；期限過了只標示為已過期，提交流程不會自動刪除它
 
 #### Scenario: 重複認領
 - **WHEN** 兩次 checkout 幾乎同時以同一張交接單為起點

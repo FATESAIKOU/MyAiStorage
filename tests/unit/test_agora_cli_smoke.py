@@ -480,22 +480,61 @@ HANDOFF = "handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV"
 HANDOFF2 = "handoff:01BX5ZZKBKACTAV9WEVGEMMVRZ"
 HANDOFF3 = "handoff:01CX6AABKACTAV9WEVGEMMVRZ"
 
+#: 額外的交接單各自屬於**不同的**來源 session（n→1 統合的形狀）。
+#: 同一個被接續 session 被接兩次不再是合法的起點組合（review-2bc0785 M1），
+#: 那個 case 由 `test_checkout_refuses_two_start_points_for_the_same_session` 驗。
+_HANDOFF_SOURCES = (S1, S2, S3)
+
 
 def _reader_with_handoff(*handoff_ids: str) -> FakeReader:
-    raw = _raw("ses_aaa", ["一", "二"])
+    """`handoff_ids[0]` 一律是 S1 的單；其餘依序掛到 S2、S3（n→1 用）。
+
+    每個來源 session 都有自己的 raw 與訊息，讀取介面查得到那份被釘住的快照。
+    """
+    ids = (HANDOFF,) + tuple(handoff_ids)
+    raws = {sid: _raw(sid.split(":", 1)[1], ["一", "二"])
+            for sid in _HANDOFF_SOURCES}
     reader = FakeReader(
-        {S1: {"raw": raw, "texts": ["一", "二"]}},
-        {HANDOFF: {
-            "target_session_id": S1, "snapshot_sha256": _sha(raw),
-            "message_id": "msg_ses_aaa_1", "content": "接手後續調查",
-        }},
+        {sid: {"raw": raws[sid], "texts": ["一", "二"]} for sid in raws},
+        {},
     )
-    for handoff_id in handoff_ids:
+    for index, handoff_id in enumerate(ids):
+        sid = _HANDOFF_SOURCES[index]
         reader.handoffs[handoff_id] = {
-            "target_session_id": S1, "snapshot_sha256": _sha(raw),
-            "message_id": "msg_ses_aaa_1", "content": f"接手 {handoff_id}",
+            "target_session_id": sid, "snapshot_sha256": _sha(raws[sid]),
+            "message_id": f"msg_{sid.split(':', 1)[1]}_1",
+            "content": ("接手後續調查" if index == 0
+                        else f"接手 {handoff_id}"),
         }
     return reader
+
+
+def test_checkout_refuses_two_start_points_for_the_same_session(tmp_path: Path):
+    """M1：同一批起點裡同一個被接續 session 出現兩次 → **本機**就拒絕。
+
+    提交流程那邊只會留下一條 Link（而且留下哪一條取決於套用順序），所以這個組合
+    在登記任何接續記錄之前就不該送出。`handoff:H` 與 `S1@某訊息` 混用也算同一個
+    來源——交接單的目標就是 S1。
+    """
+    reader = _reader_with_handoff()
+    commit = FakeCommit()
+
+    with pytest.raises(CheckoutError) as excinfo:
+        checkout(reader, _deps(reader, commit),
+                 [HANDOFF, f"{S1}@msg_ses_aaa_0"], tmp_path / "pkg")
+    assert S1 in str(excinfo.value)
+    assert "只能接一次" in str(excinfo.value)
+
+    # 兩張交接單指向同一個 session 也是一樣（helper 之外的排法）
+    reader.handoffs[HANDOFF2] = dict(reader.handoffs[HANDOFF])
+    with pytest.raises(CheckoutError):
+        checkout(reader, _deps(reader, FakeCommit()),
+                 [HANDOFF, HANDOFF2], tmp_path / "pkg2")
+
+    # 什麼都沒送出去，輸出目錄也沒生出來
+    assert commit.claims == []
+    assert not (tmp_path / "pkg").exists()
+    assert not (tmp_path / "pkg2").exists()
 
 
 def test_handoff_startpoint_registers_a_claim_before_producing_the_package(tmp_path: Path):

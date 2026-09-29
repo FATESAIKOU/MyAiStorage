@@ -10,6 +10,12 @@ schema 以 `src/aistorage/search/schema.sql` 為準（TS 照抄該檔）。
   `built_at`、`agora_main_sha`、`converter_versions`（JSON）。
 - `sessions`：每個 Session 一列，最新快照的 metadata（欄位見 schema.sql）。
   `reading_status='failed'` 的 Session 只有 metadata，沒有全文。
+  `status` 除了 `running`／`stopped`，還有 **`reserved`**：`agora checkout` 預留好、
+  還沒有人真正開工的新 Session（零則訊息的空紀錄）。只有 `status='reserved'` 的
+  Session 有 `reserved_until`（預留期限，RFC 3339 UTC Z）。
+  `reserved_until` 放在**最後一欄**，舊世代的 index 沒有它；讀取端讀到舊 index 時
+  MUST 當作 NULL（`get_snapshot` 的 `annex_key` 是同樣的相容寫法），**不報錯**。
+  **過期不會自動刪除**——期限只是顯示與管理用的訊號。
 - `snapshots`：每個 Session 的快照歷史（`via` 為 sync／rewrite／import）。
 - `readings`：有發佈 reading 檔的快照（最新＋被釘住的），`is_latest` 標最新；
   `file_id`／`sha256`／`size` 供讀者下載驗證。
@@ -63,7 +69,8 @@ schema 以 `src/aistorage/search/schema.sql` 為準（TS 照抄該檔）。
 ## 4. 篩選語意
 
 - `title_contains`：子字串，語意同第 3 節（標題欄位）。
-- `case_id`、`source`、`status`、`producer`：相等比對。
+- `case_id`、`source`、`status`、`producer`：相等比對（`status` 含
+  `running`／`stopped`／`reserved`）。
 - `updated_after`／`updated_before`：RFC 3339，依 datetime 比較
  （含邊界；先正規化到第 2 節形狀）。
 - `parent_id`：`None` 表示不限；`""` 表示只要主 Session。
@@ -82,6 +89,9 @@ schema 以 `src/aistorage/search/schema.sql` 為準（TS 照抄該檔）。
 - 沒有指定要求時不產生警告，但一定附上快照時間。
 - `status == "stopped"` 而且 `snapshot_at` 在 `stopped_at` 之後
   （datetime 比較）→ 視為符合，不論落後多久。
+- `status == "reserved"`（還沒有人開工的預留）：期限之內 → 視為符合（沒有東西會
+  再變動，不該用落後時間警告）；期限已過 → 不符合，警告「預留已過期」。
+  舊世代 index 沒有 `reserved_until` → 該 Session 走一般的落後規則。
 - 否則以「讀者時鐘 − 快照時間」是否在要求內判定；未達時照樣回傳，
   附警告與實際快照時間。讀取不觸發任何同步或提交流程。
 

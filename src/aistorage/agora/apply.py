@@ -8,6 +8,10 @@
 - specs/agora/session-link、session-record、session-sync
 - review-g3d M6（apply 以本輪已套用狀態重檢單調性）
 - review-g3e（H1 兩階段、H2 轉換失敗照收、H3 持有者檢查、M3〜M6、L）
+- review-2bc0785 M1（同一個新 session 對同一個被接續 session 只能一條 Link，
+  claim 與 continuation 共用同一個檢查）、M2（每個 profile 每輪的預留／接續
+  上限、預留標成 reserved 並設期限）、L（接續目標只能是主 Session、same_link
+  提早回傳、被拒不留預留殘留、預留 id 的格式規則）
 - PM 決定（期 1 拿掉改寫：apply_rewrite 一律 REJECT）
 
 呼叫順序由 intake.evaluate.sort_accepted_decisions 決定：
@@ -22,11 +26,12 @@ reference。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+import weakref
 
 from aistorage.agora import layout, rejections
 from aistorage.agora.store import AgoraStore, SessionRecord
@@ -42,6 +47,18 @@ if TYPE_CHECKING:  # pragma: no cover
     # →（回到）agora.__init__，結果 `import aistorage.intake.evaluate` 直接失敗。
     # 依賴方向應該是 intake → agora，不是 agora → intake。
     from aistorage.intake.evaluate import Decision
+
+
+#: 每個 profile **每輪**能建立的接續記錄（claim／continuation）數量上限
+#: （review-2bc0785 M2）。任何 profile 都能為任何一份既有快照送接續，所以不設上限
+#: 時，讀取視圖要發佈的閱讀版數量沒有邊界。預設值給 20：一輪之內足以做十幾次
+#: 分裂（1→n）或統合（n→1），遠低於成本失控的量。
+DEFAULT_MAX_LINKS_PER_PROFILE_PER_ROUND = 20
+
+#: 預留（checkout 為新 session 準備的空紀錄）多久算過期
+#: （review-2bc0785 M2／L）。**期 1 不自動刪除**：刪除真本裡的項目是管理操作，
+#: 不該由提交流程顺手做。期限只是顯示與管理用的訊號（`agora show` 標 `expired`）。
+DEFAULT_RESERVED_TTL_DAYS = 7
 
 
 @dataclass(frozen=True)
@@ -156,6 +173,76 @@ def _converter_for(conv: Converter, session_id: str) -> Converter:
     if source == getattr(conv, "source", None):
         return conv
     return get_converter(source)
+
+
+def _existing_continuation_links(store: AgoraStore, new_session_id: str
+                                 ) -> list[tuple[str, dict[str, Any]]]:
+    """新 Session 已經發出的接續 Link：[(相對路徑, 內容), ...]。
+
+    讀不到就 raise（`store.read_json_file` 會把損毀轉成 MismatchError）——真本
+    的索引損毀不能當成「沒有這條 Link」，那會讓同一個起點被記成兩條。
+    """
+    base = store.worktree / layout.continuation_link_dir(new_session_id)
+    if not base.is_dir():
+        return []
+    return [
+        (f"links/continuation/{layout.enc(new_session_id)}/{p.name}",
+         store.read_json_file(
+             f"links/continuation/{layout.enc(new_session_id)}/{p.name}"))
+        for p in sorted(base.glob("*.json"))
+    ]
+
+
+def _check_one_link_per_source(
+    store: AgoraStore,
+    new_session_id: str,
+    target_id: str,
+    continuation: dict[str, Any] | None,
+    *,
+    own_link_rel: str,
+    own_item_id: str,
+) -> str:
+    """**同一個新 Session 對同一個被接續 Session 只能有一條接續 Link**
+    （review-2bc0785 M1）。claim 與 continuation 共用這一個檢查。
+
+    回傳三種狀態，呼叫端各自映射成自己的結果：
+
+    - `clear`：還沒有指向 `target_id` 的 Link → 可以寫一條。
+    - `own`：唯一那條 Link 就是**本項目自己**寫的那個（`own_link_rel` 加上
+      `own_item_id`，中斷後重跑要補齊的情況）→ 往下走補齊，不要重寫。
+    - `same`：已經有一條指向 `target_id`、**接續點也相同**、而且是**接續單**建的
+      Link → 這是同一個起點的重送（換 `item_key` 重送、`--resume`），冪等。
+    - `duplicate`：已經有指向同一個 `to` 的 Link，而這一次**不是**上面那兩種
+      （接續點不同、或既有那條是 claim 建的）→ 這個新 Session 已經在接續那個
+      Session 了，再要一條就是送錯。
+
+    判成 `duplicate` 而不是一律冪等，是為了讓**兩種順序的結果一樣**：先 claim
+    再 continuation 與先 continuation 再 claim，第二筆都拿到 `duplicate_link`，
+    真本裡永遠只有一條 Link，留下哪一條不再取決於套用順序。
+
+    Link 缺 `continuation` 時 raise MismatchError：真本索引不完整不能當成
+    「沒有這條 Link」，那會讓同一組起點被記成兩條。
+    """
+    cont = continuation if isinstance(continuation, dict) else {}
+    same = False
+    for rel, existing_link in _existing_continuation_links(store, new_session_id):
+        if existing_link.get("to") != target_id:
+            continue
+        if (rel == own_link_rel
+                and (existing_link.get("claim_id") == own_item_id
+                     or existing_link.get("continuation_id") == own_item_id)):
+            return "own"        # 自己寫的那條（寫到一半中斷）→ 往下補齊
+        existing_cont = existing_link.get("continuation")
+        if not isinstance(existing_cont, dict):
+            raise MismatchError(f"接續 Link 缺少 continuation: {rel}（真本索引不完整）")
+        if (str(existing_cont.get("snapshot_sha256") or "").lower()
+                == str(cont.get("snapshot_sha256") or "").lower()
+                and existing_cont.get("message_id") == cont.get("message_id")
+                and not existing_link.get("claim_id")):
+            same = True          # 接續單建的那一條、接續點又相同 → 重送
+        else:
+            return "duplicate"
+    return "same" if same else "clear"
 
 
 def _is_stopped(facts: Any) -> bool:
@@ -293,7 +380,12 @@ def apply_session(
         facts_ok = False
 
     if not facts_ok:
+        # `reserved` 是預留專用的狀態：新的快照表示有人真的載入那個 session 了
+        # （預留的那份是零則訊息的空匯出檔，不會再送一次），所以預留到此為止。
+        # facts 失敗時判不出 running／stopped，但「不再只是預留」是確定的。
         status = existing.status if existing is not None else "running"
+        if status == "reserved":
+            status = "running"
         stopped_at = existing.stopped_at if existing is not None else None
         in_progress_raw = sess.get("in_progress", False)
         in_progress = in_progress_raw if isinstance(in_progress_raw, bool) else False
@@ -453,7 +545,7 @@ def _build_reserved_session(
     claimer_id: str,
     clock: Clock,
 ) -> SessionRecord | ApplyResult:
-    """從 claim 單裡的預留組出那個**空**的新 Session 紀錄（不寫入）。
+    """從 claim／continuation 單裡的預留組出那個**空**的新 Session 紀錄（不寫入）。
 
     預留是 `agora checkout` 替新 session 準備的第一份快照：**零則訊息**的空匯出檔
     （review-73dbf2c H2）。它不是來源 session 的副本，所以 Agora 裡不會出現一份
@@ -461,6 +553,10 @@ def _build_reserved_session(
 
     回傳 `ApplyResult` 代表形狀不合法（呼叫端轉成 REJECT）；回傳 `SessionRecord`
     代表可以寫。**不寫任何東西**——寫入由呼叫端在所有檢查都通過之後才做。
+
+    **狀態是 `reserved` 而不是 `running`**（review-2bc0785 M2／L）：這筆 session
+    還沒有人開工，帶著期限（`reserved_until`）。有人真的載入它（第一份真實快照）
+    之後，`apply_session` 會把它改回 `running`／`stopped`，期限欄一併消失。
     """
     before = list(store.changed_paths())
     now_str = format_rfc3339(clock.now(), include_fraction=True)
@@ -522,7 +618,7 @@ def _build_reserved_session(
         producer=rec.get("producer", ""),
         created_at=rec.get("created_at", ""),
         updated_at=rec.get("updated_at", ""),
-        status="running",
+        status="reserved",
         snapshot_at=snapshot_at,
         raw_sha256=incoming_sha,
         raw_size=len(raw_bytes),
@@ -542,26 +638,105 @@ def _build_reserved_session(
             "reading_error_code": reading_error_code,
             "reading_error_message": None,
             "reserved_by": rec.get("id"),
+            "reserved_until": _reserved_until(clock),
         },
     )
 
 
-def apply_claim(store: AgoraStore, dec: Decision, clock: Clock) -> ApplyResult:
+def _reserved_until(clock: Clock) -> str:
+    """預留的期限（`reserved_until`）：建立之後 `DEFAULT_RESERVED_TTL_DAYS` 天。
+
+    **期 1 不會自動刪除過期的預留**（review-2bc0785 M2／L，PM 裁決）：刪除真本裡
+    的項目是管理操作（`admin erase`／rollback），提交流程不該顺手做。期限是顯示與
+    管理用的訊號——`agora show` 看到過期就標 `expired`，要清理由人決定。
+    """
+    return format_rfc3339(
+        clock.now() + timedelta(days=DEFAULT_RESERVED_TTL_DAYS),
+        include_fraction=True)
+
+
+#: 本輪各 profile 已經發出的接續記錄數（producer → 筆數），review-2bc0785 M2。
+#:
+#: **鍵是 `AgoraStore` 實例**，所以「一輪」就是那個實體的生命週期：提交流程每一輪
+#: 開一個 store（ADR 0009：一輪一個實體），下一輪自然歸零。刻意**不寫進真本**——
+#: 上限是寫入端的成本控制，不是真本內容；要寫進真本就得在 manifest／pin 裡多一項
+#: 約定（ADR 0008），而那個規則本身還在待確認。中途崩掉會少算幾筆，是保守的方向：
+#: 下一輪重跑時那些項目已經在真本裡、會先被冪等擋掉。
+#:
+#: 用 `WeakKeyDictionary` 而不是 `store` 的屬性：配額是 apply 這個模組的政策，不該
+#: 掛在別人的物件上；弱引用也不會讓 store 一直活著。
+_LINK_QUOTA_LEDGER: weakref.WeakKeyDictionary[AgoraStore, dict[str, int]] = (
+    weakref.WeakKeyDictionary())
+
+
+def _links_filed_this_round(store: AgoraStore, producer: str) -> int:
+    """**本輪**這個 profile 已經發出的接續記錄數（review-2bc0785 M2）。
+
+    只數**被接受並寫入真本**的那些（`_note_link_filed` 在寫入之後才記）：被明確拒收
+    的不該佔用額度，冪等重送更不能讓額度一直掉。
+    """
+    return _LINK_QUOTA_LEDGER.get(store, {}).get(producer, 0)
+
+
+def _note_link_filed(store: AgoraStore, producer: str) -> None:
+    """記一筆「本輪這個 profile 拿到一筆接續」（見 `_LINK_QUOTA_LEDGER`）。"""
+    per_store = _LINK_QUOTA_LEDGER.setdefault(store, {})
+    per_store[producer] = per_store.get(producer, 0) + 1
+
+
+def _check_link_quota(
+    store: AgoraStore,
+    dec: Decision,
+    before: list[str],
+    producer: str,
+    now_str: str,
+    *,
+    max_per_round: int,
+) -> ApplyResult | None:
+    """每個 profile 每輪的預留／接續數量上限（review-2bc0785 M2）。
+
+    任何 profile 都能為任何一份既有快照送接續，所以沒有這個上限時，一輪之內就能
+    把讀取視圖要發佈的閱讀版數量灌到沒有邊界。超過就明確拒收（`link_quota_exceeded`）
+    並發佈原因——寫入端看得到，下一輪再送。
+
+    回傳 `None` 代表還在額度內。
+    """
+    if max_per_round <= 0:      # 0 或負數＝不設上限（測試與除錯用）
+        return None
+    if _links_filed_this_round(store, producer) < max_per_round:
+        return None
+    return _fail(store, dec, before, "link_quota_exceeded", now_str)
+
+
+def apply_claim(
+    store: AgoraStore,
+    dec: Decision,
+    clock: Clock,
+    *,
+    max_links_per_round: int = DEFAULT_MAX_LINKS_PER_PROFILE_PER_ROUND,
+) -> ApplyResult:
     """套用認領：交接單存在且未被認領、認領者 Session 已在 Agora（含本輪剛收），
     寫 claim、標記 claimed_by、建接續 Link（claimer → target，記接續點）。
 
     一張交接單只能被認領一次（同輪第二個認領者看到 claimed_by 非空 → already_claimed）；
-    一個 Session 可認領多張（統合：每張交接單各建一條 Link）。
+    一個 Session 可認領**不同**的多張（統合：S2、S3 各一張交接單 → 兩條 Link）。
     H3：認領者必須是自己的持有者（producer 相同）、是主 Session（parent_id 為 None）、
     且不能是交接單的目標本身。
 
     **預留（review-73dbf2c H2）**：帶 `session` 區塊的 claim **自己帶著**一個空的
-    新 Session 紀錄（`agora checkout` 預留給新 session 的第一份快照）。所以認領者
-    不必是「先存在的 session」，而且**被拒時 Agora 裡不會留下任何東西**——所有檢查
-    都通過之後才寫，順序是預留 → link → handoff → claim。
+    新 Session 紀錄（`agora checkout` 預留給新 session 的第一份快照，狀態
+    `reserved` 並帶期限）。所以認領者不必是「先存在的 session」，而且**被拒時
+    Agora 裡不會留下任何東西**——所有檢查都通過之後才寫，順序是
+    預留 → link → handoff → claim。
+
+    **一個新 Session 對同一個被接續 Session 只能一條 Link**（review-2bc0785 M1）：
+    這裡與 `apply_continuation` 共用 `_check_one_link_per_source`。同一個新 session
+    認領同一個 session 的**第二張**交接單 → `duplicate_link`（不管接續點是否相同：
+    兩個起點指向同一個來源就是同一件事，checkout 也擋掉這種組合）。
 
     失敗碼：invalid_format、unknown_handoff、already_claimed、unknown_claimer、
-    not_holder、claim_from_subsession、self_claim、stale。
+    not_holder、claim_from_subsession、self_claim、duplicate_link、
+    link_quota_exceeded、stale。
     """
     before = list(store.changed_paths())
     rec = _record(dec)
@@ -634,6 +809,31 @@ def apply_claim(store: AgoraStore, dec: Decision, clock: Clock) -> ApplyResult:
     continuation = h_body.get("continuation") if isinstance(h_body, dict) else None
     if claimer_id == target_id:
         return _fail(store, dec, before, "self_claim", now_str)
+    if not isinstance(target_id, str) or not target_id:
+        return _fail(store, dec, before, "invalid_format", now_str)
+    target_sess = store.get_session(target_id)
+    if target_sess is None:
+        return _fail(store, dec, before, "unknown_target", now_str)
+    if target_sess.parent_id is not None:
+        # 被接續的目標也必須是主 Session（與交接單一致；review-2bc0785 L）
+        return _fail(store, dec, before, "continuation_to_subsession", now_str)
+
+    # M1：同一個新 Session 對同一個被接續 Session 只能有一條 Link。
+    # 這裡與 `apply_continuation` 共用 `_check_one_link_per_source`；那條 Link 是
+    # **認領**建的，所以同一個新 session 認領同一個 session 的第二張交接單
+    # （接續點相同也一樣）→ `duplicate_link`。
+    link_state = _check_one_link_per_source(
+        store, claimer_id, target_id, continuation,
+        own_link_rel=link_rel, own_item_id=str(rec_id))
+    if link_state in ("same", "duplicate"):
+        return _fail(store, dec, before, "duplicate_link", now_str)
+
+    # M2：每個 profile 每輪的接續數量上限。
+    quota = _check_link_quota(
+        store, dec, before, str(producer), now_str,
+        max_per_round=max_links_per_round)
+    if quota is not None:
+        return quota
 
     # ---- 寫入階段（顺序：預留 → link → handoff → claim；错误往上抛） ----
     if reserved is not None:
@@ -667,28 +867,14 @@ def apply_claim(store: AgoraStore, dec: Decision, clock: Clock) -> ApplyResult:
             },
         },
     )
+    _note_link_filed(store, producer)
     return ApplyResult(ok=True, code="ok", paths=_new_paths(store, before))
 
 
-def _existing_continuation_links(store: AgoraStore, new_session_id: str
-                                 ) -> list[dict[str, Any]]:
-    """新 Session 已經發出的接續 Link（`links/continuation/<from>/*.json`）。
-
-    讀不到就 raise（`store.read_json_file` 會把損毀轉成 MismatchError）——真本
-    的索引損毀不能當成「沒有這條 Link」，那會讓同一個起點被記成兩條。
-    """
-    base = store.worktree / layout.continuation_link_dir(new_session_id)
-    if not base.is_dir():
-        return []
-    return [
-        store.read_json_file(
-            f"links/continuation/{layout.enc(new_session_id)}/{p.name}")
-        for p in sorted(base.glob("*.json"))
-    ]
-
-
 def apply_continuation(
-    store: AgoraStore, dec: Decision, conv: Converter, clock: Clock
+    store: AgoraStore, dec: Decision, conv: Converter, clock: Clock,
+    *,
+    max_links_per_round: int = DEFAULT_MAX_LINKS_PER_PROFILE_PER_ROUND,
 ) -> ApplyResult:
     """套用接續單：**每一次 checkout 都記錄接續 Link**（impl2 M6）。
 
@@ -702,14 +888,18 @@ def apply_continuation(
     直接起點則允許從任何位置開始（`agora checkout <session>@<訊息>`）。
 
     冪等：同一個新 Session 對同一個起點（同一個 to ＋ 同一個接續點）只保留一條
-    Link，換 `item_key` 重送也一樣；同一個 id 重送且內容相同 → already。
+    Link，換 `item_key` 重送也一樣；同一個 id 重送且內容相同 → already。已經有
+    那條 Link 時**提早回傳**（review-2bc0785 L）：既有 Link 記的就是同一個接續
+    點，再轉換一次那份快照只是白費力氣。
 
     H3：只有新 Session 的持有者（producer 相同）能建立它的接續 Link，且必須是
-    主 Session（parent_id 為 None）、不能接續自己。
+    主 Session（parent_id 為 None）、不能接續自己。**被接續的目標也必須是主
+    Session**（與交接單一致；review-2bc0785 L／Night decisions）——子 Session
+    是母 Session 內部的一段工作，要接就接那個母 Session。
 
     失敗碼：invalid_format、unknown_target、unknown_claimer、not_holder、
-    continuation_from_subsession、self_continuation、invalid_continuation、
-    duplicate_link、stale。
+    continuation_from_subsession、continuation_to_subsession、self_continuation、
+    invalid_continuation、duplicate_link、link_quota_exceeded、stale。
     """
     before = list(store.changed_paths())
     rec = _record(dec)
@@ -755,6 +945,9 @@ def apply_continuation(
     target = store.get_session(target_id)
     if target is None:
         return _fail(store, dec, before, "unknown_target", now_str)
+    if target.parent_id is not None:
+        # 被接續的目標也必須是主 Session（與交接單一致）
+        return _fail(store, dec, before, "continuation_to_subsession", now_str)
 
     new_sess = store.get_session(new_id)
     reserved: SessionRecord | None = None
@@ -774,22 +967,18 @@ def apply_continuation(
         # 接續只能由主 Session 發起；預留也一樣
         return _fail(store, dec, before, "continuation_from_subsession", now_str)
 
-    # 同一個新 Session 對同一個起點只能有一條 Link（冪等與去重都在這裡）。
-    # M3：索引讀取失敗或損毀 → MismatchError 中止，不轉 REJECT。
-    same_link: dict[str, Any] | None = None
-    for existing_link in _existing_continuation_links(store, new_id):
-        if existing_link.get("to") != target_id:
-            continue
-        existing_cont = existing_link.get("continuation")
-        if not isinstance(existing_cont, dict):
-            raise MismatchError(
-                f"接續 Link 缺少 continuation: {link_rel}（真本索引不完整）")
-        if (str(existing_cont.get("snapshot_sha256") or "").lower()
-                == snap_sha.lower()
-                and existing_cont.get("message_id") == message_id):
-            same_link = existing_link
-        else:
-            return _fail(store, dec, before, "duplicate_link", now_str)
+    # M1：同一個新 Session 對同一個被接續 Session 只能有一條 Link（與
+    # `apply_claim` 共用同一個檢查）。`own`＝中斷後重跑（Link 已寫、接續單還沒
+    # 寫），照樣往下補齊；`same`＝同一個起點的重送（冪等提早回傳）；`duplicate`
+    # ＝同一個來源的第二個起點，或同一個來源被 claim 接走過 → 明確拒收。
+    # 索引讀取失敗或損毀 → MismatchError 中止，不轉 REJECT。
+    link_state = _check_one_link_per_source(
+        store, new_id, target_id, continuation,
+        own_link_rel=link_rel, own_item_id=str(rec_id))
+    if link_state == "same":
+        return ApplyResult(ok=True, code="already", paths=[])
+    if link_state == "duplicate":
+        return _fail(store, dec, before, "duplicate_link", now_str)
 
     # 接續點必須落在**被接續 Session 既有快照**裡（不是最新版本）。
     snaps = {s.snapshot_sha256.lower() for s in store.snapshots(target_id)}
@@ -807,9 +996,12 @@ def apply_continuation(
     if check_continuation(reading, continuation):
         return _fail(store, dec, before, "invalid_continuation", now_str)
 
-    # 已經有同一條 Link（換 id／重跑送來的）→ 冪等：不多寫一條。
-    if same_link is not None:
-        return ApplyResult(ok=True, code="already", paths=[])
+    # M2：每個 profile 每輪的接續數量上限（已經記過的冪等提早回傳，不佔額度）。
+    quota = _check_link_quota(
+        store, dec, before, str(producer), now_str,
+        max_per_round=max_links_per_round)
+    if quota is not None:
+        return quota
 
     # ---- 寫入階段（順序：預留 → Link → 接續單；錯誤往上拋） ----
     if reserved is not None:
@@ -835,6 +1027,7 @@ def apply_continuation(
             "result": {"link": link_rel},
         },
     )
+    _note_link_filed(store, str(producer))
     return ApplyResult(ok=True, code="ok", paths=_new_paths(store, before))
 
 

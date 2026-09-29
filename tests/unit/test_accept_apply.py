@@ -181,9 +181,14 @@ def test_apply_claim_single_claim_and_consolidation(tmp_path: Path):
     store = AgoraStore(tmp_path, FakeRawStorage(), temp_dir=tmp_path / "tmp")
     clock = FixedClock("2026-09-27T10:00:00.000Z")
 
-    # 建立兩張交接單
+    # 建立兩張交接單（各掛在一個**不同的**被接續 Session 上：n→1 統合）
+    # 交接單不可能掛在 Agora 裡不存在的 Session 上（`apply_handoff` 會擋），
+    # 而 `apply_claim` 也會確認目標存在、且是主 Session。
     h_ulid1 = "01ARZ3NDEKTSV4RRFFQ69G5FH1"
     h_ulid2 = "01ARZ3NDEKTSV4RRFFQ69G5FH2"
+    for target in ("opencode:target_1", "opencode:target_2"):
+        store.put_json(f"sessions/{target.replace(':', '/')}/meta.json",
+                       _make_session_meta(target, "alice"))
     store.put_json(
         f"handoffs/{h_ulid1}.json",
         {

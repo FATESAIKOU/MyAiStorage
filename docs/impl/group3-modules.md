@@ -514,6 +514,7 @@ _committer/
 ```
 - `enc()` 使用 `urllib.parse.quote(s, safe="-_")`；依 RFC 3986 未保留字元預設不編碼小數點，防止路徑穿越係透過明確檢查拒絕 `.` 與 `..`，保證路徑安全、可逆；**冒號不會出現在路徑裡**。
 - session 的 `meta.json` 額外欄位：`status`、`stopped_at`、`snapshot_at`、`raw_sha256`、`raw_size`、`parent_id`、`in_progress`、`archived_at`、`committed_at`、`last_item_key`、`title`，以及轉換狀態欄位（R9，供 3.7 apply 與第 4 組讀取視圖依循）：`reading_status: "ok" | "failed"`、`reading_error_code: str | None`（`"facts_error"`、`"conversion_error"` 二選一）、`reading_error_message` 恆為 null（review-g3e M6：轉換錯誤訊息可能含原始內容，只存代碼；完整訊息只進 run 的除錯檔）。
+  `status` 除了 `"running"`／`"stopped"` 還有 **`"reserved"`**（review-2bc0785 M2）：`agora checkout` 預留出來、還沒有人真正開工的新 Session。預留另外帶 `reserved_by`（建立它的那個項目 id）與 `reserved_until`（期限）；有人送來第一份真實快照時（`apply_session`）這兩個欄位與 `reserved` 狀態都消失。**期 1 不會自動刪除過期的預留**——那是管理操作。
 - `stopped_at` 的來源（review-g3e L）：新停止時取 sidecar 的 `stopped_at`（同步器觀測），缺省時取提交時鐘；已停止的 Session 再收封存快照時沿用原本的 `stopped_at`。
 - **閱讀版不放在真本**（它是衍生物，design D5）。需要某個舊快照的閱讀版時（接續、第 4 組），用 `snapshots.jsonl` 找到 `git_blob` 或 `annex_key` 取出那一份 raw，再跑轉換器。這也讓「從被釘住的快照讀」（D10）有明確的實作路徑。
 - commit 訊息只寫計數與 item_key（不寫標題或內容，design D2 的 log 規則同樣適用於 git 歷史）。
@@ -562,13 +563,22 @@ def apply_handoff(store, dec, conv, clock) -> ApplyResult: ...
     # 依 target 的 source 取轉換器（與傳入的不同時向登錄查詢）→ convert →
     # reading.check_continuation，且必須是該快照最後一則已完成的訊息（M5）；
     # 不通過 → REJECT(invalid_continuation)
-def apply_claim(store, dec, clock) -> ApplyResult: ...
+def apply_claim(store, dec, clock, *, max_links_per_round=20) -> ApplyResult: ...
     # 交接單存在、claimed_by 是 null（同輪第二人 → already_claimed）、claimer 在 Agora
     # （或這一輪剛收，否則 unknown_claimer）→ 寫 link、設 claimed_by、寫 claim；
     # H3：claimer 的持有者須與認領單 producer 相同（否則 not_holder）、須是主 Session
     # （parent_id 非空 → claim_from_subsession）、不能是交接單的目標本身（→ self_claim）；
-    # 否則 REJECT(unknown_handoff / already_claimed / unknown_claimer /
-    #            not_holder / claim_from_subsession / self_claim)
+    # 被接續的目標（交接單的 target）也須是主 Session（否則 continuation_to_subsession）、
+    # 須存在（否則 unknown_target）；
+    # M1：同一個新 session 對同一個被接續 session 只能一條 Link——與 apply_continuation
+    # 共用同一個檢查；既有那條是 claim 建的（不論接續點是否相同）→ duplicate_link；
+        # M2：這個 profile 本輪已建立的 claim/continuation 達上限 → link_quota_exceeded
+    # （冪等重送提早回傳，不佔額度；上限的計數是「本輪」＝這個 store 實例，不寫進真本，
+    #   每輪歸零。**run.py 要把設定值傳進來**：`max_links_per_round=rcfg.max_links_per_profile_per_round`）
+；
+    # 否則 REJECT(unknown_handoff / already_claimed / unknown_claimer / not_holder /
+    #            claim_from_subsession / self_claim / unknown_target /
+    #            continuation_to_subsession / duplicate_link / link_quota_exceeded)
     # 建接續 Link（方向：claimer → target）；寫入順序 link → handoff → claim，
     # 中斷後重跑可補齊（claimed_by 指向自己但 claim 未寫時繼續完成）。
 def apply_reference(store, dec, clock) -> ApplyResult: ...

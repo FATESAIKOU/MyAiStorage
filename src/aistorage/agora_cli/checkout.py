@@ -209,6 +209,30 @@ def _journal_key(resolved: ResolvedStartPoint) -> str:
         message_id=resolved.message_id)
 
 
+def _reject_duplicate_sources(resolved: Sequence[ResolvedStartPoint]) -> None:
+    """同一批起點裡同一個**被接續 session** 只准出現一次（review-2bc0785 M1）。
+
+    這是提交流程那條規則（同一個新 session 對同一個 to 只能一條接續 Link）的本機
+    版：交接單起點的「來源」是那張單的目標 session，直接起點的來源就是它自己。
+    兩者混用也算同一個來源——`handoff:H` 與 `S1@某訊息` 若 H 的目標就是 S1，那是
+    同一個 session 被接兩次。
+
+    在**登記任何接續記錄之前**就拒絕，所以被擋下時 Agora 裡不會有半套東西。
+    """
+    seen: dict[str, str] = {}
+    for r in resolved:
+        label = r.handoff_id or f"{r.session_id}@{r.message_id}"
+        first = seen.get(r.session_id)
+        if first is not None:
+            raise CheckoutError(
+                f"這批起點裡 {r.session_id} 出現兩次（{first} 與 {label}）。"
+                "同一個新 session 對同一個被接續 session 只能有一條接續 Link，"
+                "所以同一個來源只能接一次——要分岔就各跑一次 checkout（1→n），"
+                "要收攏就接**不同**的來源（n→1）。"
+            )
+        seen[r.session_id] = label
+
+
 def _new_session_id(source: str) -> str:
     """為這個起點包編一個新的 Session id（Agora 的完整形式）。
 
@@ -360,6 +384,10 @@ def checkout(
     交給轉接器——這裡的回傳只是為了測試與人看的摘要。
 
     `resume=True` 時沿用本機記錄的認領（同一個 claim id 與新 session id）。
+
+    **同一批起點不能有兩個指向同一個 session 的來源**（`_reject_duplicate_sources`）：
+    那在提交流程那邊只會留下一條 Link，而且留下哪一條取決於順序。在本機就拒絕，
+    錯誤訊息才說得清楚。
     """
     if not startpoint_texts:
         raise StartPointError("至少要給一個起點")
@@ -374,6 +402,13 @@ def checkout(
     for text in startpoint_texts:
         resolved.append(resolve_startpoint(
             reader, parse_startpoint(text, source=source), max_lag=max_lag))
+
+    # ★ 同一個被接續 session 不能出現兩次（review-2bc0785 M1／Night decisions）。
+    #   提交流程那邊是「一個新 session 對同一個被接續 session 只能一條 Link」，所以
+    #   這組合本來就會被拒（`duplicate_link`），而且**順序**會決定哪一筆留下來。
+    #   在本機就擋掉，錯誤訊息才說得清楚「同一個來源只能接一次」——兩次接同一個
+    #   session 的語意本來就是 1→1 或 1→n，不是 n→1。
+    _reject_duplicate_sources(resolved)
 
     # 讀取介面只給 key，位元組自己去 Agora 的物件資料夾取並驗證（見 objects.py）
     stage = Path(stage_dir) if stage_dir is not None else _make_stage_dir()

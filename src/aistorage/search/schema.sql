@@ -16,6 +16,9 @@ CREATE TABLE sessions (
   title TEXT,
   producer TEXT NOT NULL,
   case_id TEXT,
+  -- running／stopped／reserved。`reserved`＝`agora checkout` 預留好、還沒有人
+  -- 真正開工的新 Session（零則訊息的空紀錄）。它與「已經在跑」是兩件事，
+  -- 讀取端要分得出來（`agora find --status reserved`）。
   status TEXT NOT NULL,
   stopped_at TEXT,
   in_progress INTEGER NOT NULL,
@@ -27,7 +30,11 @@ CREATE TABLE sessions (
   parent_id TEXT,
   reading_status TEXT NOT NULL,
   reading_error_code TEXT,
-  committed_at TEXT NOT NULL
+  committed_at TEXT NOT NULL,
+  -- 預留的期限（RFC 3339 UTC Z）。只有 `status='reserved'` 才有值：期限到了只
+  -- 是**顯示與管理用的訊號**（`agora show` 標 `expired`），提交流程不會自動刪。
+  -- 放在最後一欄：舊世代的 index 沒有它，讀取端讀到時當作 NULL（見 query.py）。
+  reserved_until TEXT
 );
 
 CREATE TABLE snapshots (

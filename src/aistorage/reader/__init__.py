@@ -143,9 +143,11 @@ class AgoraReader:
 
     def _fresh(self, manifest: dict, *, snapshot_at: str | None,
                status: str | None = None, stopped_at: str | None = None,
-               max_lag: timedelta | None) -> Freshness:
+               max_lag: timedelta | None,
+               reserved_until: str | None = None) -> Freshness:
         return Freshness(**evaluate_freshness(
             snapshot_at=snapshot_at, status=status, stopped_at=stopped_at,
+            reserved_until=reserved_until,
             generation=manifest["generation"], published_at=manifest["published_at"],
             now=self._clock.now(), max_lag=max_lag))
 
@@ -178,7 +180,7 @@ class AgoraReader:
                 freshness=self._fresh(
                     manifest, snapshot_at=h.session.snapshot_at,
                     status=h.session.status, stopped_at=h.session.stopped_at,
-                    max_lag=max_lag),
+                    reserved_until=h.session.reserved_until, max_lag=max_lag),
             )
             for h in hits
         ]
@@ -214,7 +216,8 @@ class AgoraReader:
             db.close()
         return Result(value=view, freshness=self._fresh(
             manifest, snapshot_at=row.snapshot_at, status=row.status,
-            stopped_at=row.stopped_at, max_lag=max_lag))
+            stopped_at=row.stopped_at, reserved_until=row.reserved_until,
+            max_lag=max_lag))
 
     def get_reading(self, session_id: str, *, snapshot_sha256: str | None = None,
                     include_reverted: bool = False,
@@ -245,7 +248,9 @@ class AgoraReader:
         return Result(value=view, freshness=self._fresh(
             manifest, snapshot_at=snap_at,
             status=row.status if row else None,
-            stopped_at=row.stopped_at if row else None, max_lag=max_lag))
+            stopped_at=row.stopped_at if row else None,
+            reserved_until=row.reserved_until if row else None,
+            max_lag=max_lag))
 
     def get_snapshot(self, session_id: str, snapshot_sha256: str, *,
                      max_lag: timedelta | None = None) -> Result[SnapshotRef]:

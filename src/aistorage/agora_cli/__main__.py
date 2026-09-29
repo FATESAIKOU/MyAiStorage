@@ -200,6 +200,9 @@ def cmd_find(args: argparse.Namespace, reader: Any) -> int:
             "status": getattr(row, "status", None),
             "case_id": getattr(row, "case_id", None),
             "snapshot_at": getattr(row, "snapshot_at", None),
+            # 預留期限（只在 status=reserved 有值）：`--status reserved` 列出
+            # 那些「checkout 預留好、還沒有人開工」的新 Session（review-2bc0785 M2）
+            "reserved_until": getattr(row, "reserved_until", None),
             "freshness": _freshness(own),
         })
     return _emit({"hits": hits, "freshness": _freshness(overall)})
@@ -267,8 +270,38 @@ def cmd_show(args: argparse.Namespace, reader: Any) -> int:
             }
             for s in (getattr(view, "snapshots", ()) or ())
         ],
+        # 預留（review-2bc0785 M2）：checkout 預留好、還沒有人真正開工。
+        # `expired` 只是「期限已過、該回頭看了」的訊號——**期 1 不自動刪除**
+        # （刪真本裡的項目是管理操作），要清理由人決定。
+        "reservation": _reservation(getattr(session, "status", None),
+                                    getattr(session, "reserved_until", None),
+                                    reader),
         "freshness": _freshness(getattr(result, "freshness", None)),
     })
+
+
+def _reservation(status: Any, reserved_until: Any, reader: Any) -> dict[str, Any] | None:
+    """預留狀態（`agora show` 的輸出）：不是預留就回 None。
+
+    `expired` 用**讀取端的時鐘**比期限，不用寫入端的——讀取介面是唯讀的，它只
+    報告「看起來過期了」。期限本身只是顯示與管理用的訊號，不會有任何自動刪除。
+    """
+    if status != "reserved":
+        return None
+    out: dict[str, Any] = {"reserved_until": reserved_until, "expired": False}
+    if isinstance(reserved_until, str) and reserved_until:
+        from aistorage.clock import parse_rfc3339
+
+        try:
+            deadline = parse_rfc3339(reserved_until)
+        except ValueError:
+            out["expired"] = None      # 期限格式壞掉：不猜
+            return out
+        now = getattr(reader, "_clock", None)
+        now_dt = now.now() if now is not None else None
+        if now_dt is not None:
+            out["expired"] = now_dt > deadline
+    return out
 
 
 def cmd_read(args: argparse.Namespace, reader: Any) -> int:
@@ -484,7 +517,10 @@ def build_parser() -> argparse.ArgumentParser:
     find = sub.add_parser("find", help="找 Session；--waiting 列出等人接的交接單")
     find.add_argument("query", nargs="?", default="", help="關鍵字（留空＝全部）")
     find.add_argument("--case", default=None, help="只看某個案件")
-    find.add_argument("--status", default=None, choices=("running", "stopped"))
+    find.add_argument("--status", default=None,
+                      choices=("running", "stopped", "reserved"),
+                      help="reserved＝checkout 預留好、還沒有人開工的新 Session")
+
     find.add_argument("--limit", type=int, default=50)
     find.add_argument("--max-lag", dest="max_lag", default=None, help="例如 5m")
     find.add_argument("--waiting", action="store_true", help="列出還沒被認領的交接單")

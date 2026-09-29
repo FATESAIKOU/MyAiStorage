@@ -290,6 +290,48 @@ def test_remap_hashes_and_erased_marking(tmp_path: Path) -> None:
     assert second.get("erased") is None
 
 
+def test_remap_hashes_also_covers_continuations_and_claims(tmp_path: Path) -> None:
+    """M3：接續單與認領單的接續點雜湊也要重寫，抹除後真本裡不得留有舊雜湊。
+
+    不重寫的話，那兩個檔案會留著「被抹除的那一版曾經存在」的指紋，而且和
+    `links/` 裡的雜湊對不上（review-2bc0785 M3）。
+    """
+    fx = _fixture(tmp_path)
+    store = fx["store"]
+    old = [s.snapshot_sha256 for s in store.snapshots(fx["sid"])][0]
+    new = "f" * 64
+    from aistorage.agora import layout
+    cont_ulid = generate_ulid()
+    claim_ulid = generate_ulid()
+    store.put_json(layout.continuation_path(cont_ulid), {
+        "id": f"continuation:{cont_ulid}", "type": "continuation",
+        "body": {"target_session_id": fx["sid"], "new_session_id": "opencode:new",
+                 "continuation": {"snapshot_sha256": old, "message_id": "m1"}}})
+    store.put_json(layout.claim_path(claim_ulid), {
+        "id": f"claim:{claim_ulid}", "type": "claim",
+        "body": {"handoff_id": "handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                 "claimer_session_id": "opencode:new"}})
+    store.put_json("links/continuation/opencode%3Anew/" + cont_ulid + ".json", {
+        "from": "opencode:new", "to": fx["sid"],
+        "continuation": {"snapshot_sha256": old, "message_id": "m1"},
+        "continuation_id": f"continuation:{cont_ulid}"})
+
+    _remap_hashes(store, {old.lower(): new}, {old.lower(): ("git", "blob123")},
+                  {fx["sid"]: {"m1"}})
+
+    assert store.get_record(f"continuation:{cont_ulid}")["body"]["continuation"][
+        "snapshot_sha256"] == new
+    link = json.loads(
+        (store.worktree / f"links/continuation/opencode%3Anew/{cont_ulid}.json")
+        .read_text(encoding="utf-8"))
+    assert link["continuation"]["snapshot_sha256"] == new
+    # 整個真本裡不得再出現舊雜湊（claims/ 沒有接續點欄，但也要確定它被掃過了）
+    assert not any(old in p.read_text(encoding="utf-8")
+                   for p in store.worktree.rglob("*.json"))
+    assert not any(old in p.read_text(encoding="utf-8")
+                   for p in store.worktree.rglob("*.jsonl"))
+
+
 def test_erasure_record_contains_no_content(tmp_path: Path) -> None:
     fx = _fixture(tmp_path)
     plan = plan_erase([EraseTarget(kind="session", session_id=fx["sid"])],

@@ -105,10 +105,23 @@ agora checkout <起點>… [--task "…"] [-–resume] -o <目錄>  # A、B、C�
   哪」）；已經寫好的交接單被接時，接續點是照抄的，不再重驗。
 - **直接起點**可以停在快照裡的**任何**已完成、未撤銷的訊息（`checkout <s>@<訊息>`）。
 
-**冪等**：同一個新 session 對同一個起點（同一個被接續 session ＋ 同一個接續點）
-只保留一條 Link。換 `item_key` 重送也一樣；`--resume` 沿用同一個 `item_key` 重送更是
-`already`。反過來，同一個新 session 對同一個被接續 session 想要**另一個**接續點，
-會被明確拒收（`duplicate_link`）——那一定是送錯了。
+**冪等與去重**：同一個新 session 對**同一個被接續 session** 只保留一條 Link。
+同一個起點重送（換 `item_key`、`--resume`）是冪等；同一個來源的第二個起點——不管
+是直接起點還是同一個 session 的第二張交接單——會被明確拒收（`duplicate_link`）。
+所以「哪一條留下來」不取決於套用順序。`agora checkout` 更早一步就擋掉：同一批起點裡
+同一個被接續 session 出現兩次（`handoff:H` 與 `S1@某訊息` 混用也算）→ 直接拒絕，
+連接續記錄都不送。1→n 是**各跑一次** checkout，n→1 是接**不同**的來源。
+
+**接續目標只能是主 Session**（與交接單一致）：子 session 是母 session 內部的一段
+工作，要接就接那個母 session。
+
+**別人可以接任何人的任何快照**（2026-09-30 裁決）：任何 profile 都能為任何一份既有
+快照送接續，而那份快照因此被釘住、發佈出閱讀版。這沒有擴大讀取邊界（讀取身分本來
+就能讀整個 Agora 前綴，見 ADR 0010 與 2026-09-28 的決定），所以接受；**用成本封頂**
+而不是用權限封：每個 profile 每輪能建立的預留／接續數量有上限（可設定，預設 20，
+`max_links_per_profile_per_round`），超過就明確拒收並發佈原因。冪等重送不佔額度。
+「一輪」是提交流程的一輪（一個 `AgoraStore`），所以額度每輪歸零、不會把某個 profile
+永久鎖死；這個計數刻意不寫進真本（寫入端的成本限制不是內容，見 decision log）。
 
 ### 認領卡住怎麼重跑
 
@@ -156,3 +169,20 @@ AI 在 session 裡用的是同一組指令，透過 skill 包成工具：`agora_
 空 session（還帶著指向被接續 session 的接續 Link），`agora-opencode load` 匯入之後
 第一則真訊息會接在它後面。**所以 `checkout` 需要可用的寫入身分**：沒有簽章金鑰就
 連起點包都產不出來——沒有接續 Link 的新 session 沒有人負責。
+
+**預留 id 的格式規則**（2026-09-30）：預留只能佔用**呼叫端自己產生的** session id，
+格式是 `agora checkout` 產生的那個形狀（`<source>:ses_` ＋ ULid 後 16 碼），
+或呼叫端在 checkout 時用 `--new-session-id` 指定、而**那個 agent 真的會用**的那個
+id（轉接器沿用它匯入）。預留不會去猜別人的 id：opencode 的 id 帶 ULID 尾巴，猜不到，
+所以實務上沒有佔用問題；但**這是規則不是保障**——一個 profile 若預留了某個它不會
+真正建立的 id，那個 id 之後被真正的持有者第一次上傳時會被判定為 collision，而且
+永遠如此（那個預留已經寫進真本、提交流程不會自動刪除）。所以：**一次 checkout 沒
+被接下來就重跑時要沿用同一組預留**（`--resume`／本機記錄自動沿用），不要清記錄
+重來，也不要用 `--new-session-id` 換一個。
+
+**預留不是「運作中」**：預留出來的 session 狀態是 `reserved`，並帶一個期限
+（預設 7 天）。有人真的載入它（第一份真實快照）之後，它回到一般的 `running`／
+`stopped`，期限欄消失。讀取介面把兩者分開：`agora find --status reserved` 只列出
+預留，`agora show` 會顯示期限，過期就標 `expired`。**期 1 不自動刪除過期的預留**——
+刪除真本裡的項目是管理操作（`admin erase`／rollback），要人決定；期限只是顯示與
+管理用的訊號。

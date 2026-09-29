@@ -32,7 +32,8 @@
    → ls-remote 與 manifest 驗證 → 以觀測到的遠端狀態重建正式 pin
    → `readview_rebuild_epoch` 加 1（下一輪完整重建讀取視圖）
    → 後置條件（Drive／bundle／git 歷史／git 物件／annex 物件掃描 canary）。
-6. segment 抹除會同步改寫 `snapshots.jsonl`、`handoffs`、`links` 的雜湊；
+6. segment 抹除會同步改寫 `snapshots.jsonl`、`handoffs`、`continuations`、`claims`、
+   `links` 的雜湊（抹除之後真本裡不該留有被抹除那一版的雜湊）；
    接續點訊息本身被抹除的交接單標 `erased`（看得到交接單，看不到內容）。
 7. with 區塊正常結束才會解鎖（旗標刪除、workflow 重開）。
 
