@@ -76,8 +76,10 @@ from aistorage.integrity.settle import (
 from aistorage.integrity.sweep import (
     Disposition,
     SweepDecision,
+    SweepPolicy,
     apply_sweep,
     check_parents,
+    file_age_days,
     plan_readview_sweep,
     plan_sweep,
     resolve_content_checks,
@@ -146,6 +148,12 @@ class RunReport:
     maintenance: str | None = None
     #: 維護旗標的原因字串（管理者留下的，會出現在 log，所以只印短字串）
     maintenance_reason: str | None = None
+    #: 第 4 步留下、等人處理的檔名（HOLD＝有 pending 背書、等釘選值轉正；
+    #: NEED_ADMIN＝沒有任何可信來源能解釋它，需要管理者 init-pin）。
+    #: 這是「HOLD 是一個計數、沒有門檻與警示」那個問題的回應（review-1926cd3 L）：
+    #: 健康檢查要能指出是哪幾個檔案卡住，而不是只說「有 N 個」。
+    held_files: list[str] = field(default_factory=list)
+    need_admin_files: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -160,9 +168,16 @@ class RunReport:
         pub_str = f" | readview_publish={self.readview_publish}" if self.readview_publish else ""
         err_str = f" ({self.publish_error})" if self.publish_error else ""
         mt_str = f" | maintenance={self.maintenance}" if self.maintenance else ""
+        held_str = (
+            f" | held={self.held_files}" if self.held_files else ""
+        )
+        admin_str = (
+            f" | need_admin={self.need_admin_files}" if self.need_admin_files else ""
+        )
         return (
             f"[RunReport {self.run_id}] {status} | counts: [{counts_str}]"
-            f" | durations: [{durations_str}]{rv_str}{pub_str}{mt_str}{err_str}"
+            f" | durations: [{durations_str}]{rv_str}{pub_str}{mt_str}"
+            f"{held_str}{admin_str}{err_str}"
         )
 
 
@@ -444,11 +459,19 @@ def plan_sweep_cli(cfg: CommitterConfig, deps: Deps) -> list[SweepDecision]:
         parent_decisions = []
         if cfg.prefix_levels:
             parent_decisions = check_parents(list(cfg.prefix_levels), deps.drive)
+        # 與第 4 步同一份 policy。這支 CLI 是唯讀的（不 promote／drop），
+        # 所以 pin repo 裡的 pending 還在，可以拿來當背書。
+        policy = SweepPolicy(
+            pending=pending,
+            hold_max_age_days=cfg.quarantine_retention_days,
+            now=deps.clock.now(),
+        )
         sweep_decisions = plan_sweep(
             repo_listing,
             current_state,
             repo_uuid=cfg.repo_uuid,
             prefix_folder_id=cfg.prefix_folder_id,
+            policy=policy,
         )
         sweep_decisions = resolve_content_checks(
             sweep_decisions,
@@ -459,6 +482,20 @@ def plan_sweep_cli(cfg: CommitterConfig, deps: Deps) -> list[SweepDecision]:
             listing=repo_listing,
             prefix_folder_id=cfg.prefix_folder_id,
             workdir=workdir,
+            policy=policy,
+        )
+        # 內容證據也要算，否則這支 CLI 會把「其實是注入物」的 manifest 顯示成
+        # NEED_MANIFEST_CHECK，讓人無法從計畫看出真相。
+        sweep_decisions = resolve_manifest_evidence(
+            sweep_decisions,
+            deps.drive,
+            {},
+            current_state,
+            repo_uuid=cfg.repo_uuid,
+            listing=repo_listing,
+            prefix_folder_id=cfg.prefix_folder_id,
+            workdir=workdir,
+            policy=policy,
         )
         return parent_decisions + sweep_decisions
 
@@ -698,9 +735,33 @@ def _relist_prefix(drive: DriveClient, prefix_folder_id: str) -> RepoListing:
     children = drive.list_children(prefix_folder_id)
     return RepoListing(
         prefix_folder_id=prefix_folder_id,
-        files=tuple(f for f in children if not f.is_folder),
-        subfolders=tuple(f for f in children if f.is_folder),
+        files=tuple(c for c in children if not c.is_folder),
+        subfolders=tuple(c for c in children if c.is_folder),
     )
+
+
+def _hold_age_days(d: SweepDecision, now: datetime) -> float:
+    """HOLD 中的檔案在 Drive 上的年齡（天）；讀不出 created_time 回 0。"""
+    return file_age_days(d.file, now) or 0.0
+
+
+def _sweep_backing_pending(
+    pending: PinPending | None, *, dry_run: bool
+) -> PinPending | None:
+    """第 4 步用來判斷「誰替前綴裡的檔案背書」的那一份 pending。
+
+    settle 的每一種結論都會**消耗掉** pending：PROMOTED → `promote()` 連帶
+    刪掉、DROPPED／BAK_RECOVERY → `drop_pending()` 刪掉、NO_PENDING 本來就
+    沒有。所以正常一輪走到第 4 步時，pin repo 裡已經沒有 pending 了。
+
+    把「已經被丟掉的那份」當背書會**誤認可信度**，而且方向正好相反：
+    DROPPED 的意思是「那一輪的 push 沒有落實」，`pending.annex_keys` 記的是
+    「本來要寫上去什麼」，不是「遠端現在有什麼」——拿它背書會讓那些孤兒物件
+    被 HOLD 而不是隔離。只有 dry-run（不寫釘選值）時 pending 才真的還在。
+    """
+    if pending is None or dry_run:
+        return pending
+    return None
 
 
 def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
@@ -765,11 +826,21 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
     if rcfg.prefix_levels:
         parent_decisions = check_parents(list(rcfg.prefix_levels), deps.drive)
 
+    # HOLD 的背書與年齡上限（review-1926cd3 M1）。pending 用的是**還在 pin repo
+    # 裡**的那一份（見 `_sweep_backing_pending`）：settle 剛剛可能已經把它
+    # promote／drop 掉了，用那份被丟掉的紀錄背書會誤認可信度。
+    sweep_policy = SweepPolicy(
+        pending=_sweep_backing_pending(pending, dry_run=dry_run),
+        hold_max_age_days=rcfg.quarantine_retention_days,
+        now=deps.clock.now(),
+    )
+
     sweep_decisions = plan_sweep(
         repo_listing,
         state,
         repo_uuid=rcfg.repo_uuid,
         prefix_folder_id=rcfg.prefix_folder_id,
+        policy=sweep_policy,
     )
 
     sweep_decisions = resolve_content_checks(
@@ -781,15 +852,14 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
         listing=repo_listing,
         prefix_folder_id=rcfg.prefix_folder_id,
         workdir=work_temp,
+        policy=sweep_policy,
     )
 
-    # impl1：manifest／bundle 在沒有「是注入物」的證據之前一律不搬。
-    # 釘選值落後遠端是完全正常的中間狀態（某一輪 push 成功、第 11 步驗證沒過），
-    # 照舊把那份 manifest 與它引用的新 bundle 當注入物搬走的話，`git clone` 就再也
-    # 找不到 manifest（`No git repository found in this remote`），而且沒有任何一輪
-    # 能自己回來——真本被提交流程自己消滅。所以這一步讀 manifest 內容，把
-    # 「解析得出來、且它列的 bundle 都在」的那幾份標成 HOLD（留在原地），
-    # 解析不了或引用不存在 bundle 的才隔離。
+    # H1／M1：前綴裡已經有一份內容等於正式值的 manifest 時，其餘同名 manifest
+    # 在 `plan_sweep` 就直接隔離（不讀內容）；只有在**沒有** KEEP 候選時才讀
+    # 內容，而且留下來的證據必須綁在 pending 上（重放 refs == pending.refs）。
+    # 沒有 pending 就不是 HOLD 而是 NEED_ADMIN：不搬移（避免消滅真本），但
+    # 健康檢查會報出檔名（`need_admin_files`）。
     sweep_decisions = resolve_manifest_evidence(
         sweep_decisions,
         deps.drive,
@@ -798,11 +868,26 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
         repo_uuid=rcfg.repo_uuid,
         listing=repo_listing,
         prefix_folder_id=rcfg.prefix_folder_id,
+        workdir=work_temp,
+        policy=sweep_policy,
     )
-    ctx.bump(
-        "held_files",
-        sum(1 for d in sweep_decisions if d.disposition == Disposition.HOLD),
-    )
+    held = [d for d in sweep_decisions if d.disposition == Disposition.HOLD]
+    need_admin = [
+        d for d in sweep_decisions if d.disposition == Disposition.NEED_ADMIN
+    ]
+    # 逾齡的 HOLD 已經在 `plan_sweep` 裡降級成 QUARANTINE；這些是「還在等、
+    # 但已經很老」的檔案，同樣列進報告（review-1926cd3 M1／L）。
+    aging = [d for d in held if _hold_age_days(d, deps.clock.now()) > (
+        rcfg.quarantine_retention_days / 2
+    )]
+    ctx.bump("held_files", len(held))
+    ctx.bump("need_admin_files", len(need_admin))
+    ctx.bump("aging_held_files", len(aging))
+    if held or need_admin:
+        # D2 log 規則：只記 id／計數與耗時。這裡記的是**檔名**（不是內容），
+        # 而且是「等人處理的狀態」——健康檢查要能指出是哪幾個檔案。
+        ctx.report.held_files = sorted(d.file.name for d in held)
+        ctx.report.need_admin_files = sorted(d.file.name for d in need_admin)
 
     readview_decisions: list[SweepDecision] = []
     if not rcfg.readview_folder_id:

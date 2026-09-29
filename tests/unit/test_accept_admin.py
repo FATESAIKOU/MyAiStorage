@@ -422,6 +422,7 @@ def test_health_checks_all_ok():
         readview_files=100,
         manifest_main_sha="sha_valid",
         pin_main_sha="sha_valid",
+        held_files_known=True,
         prune_ok=True,
     )
     checks = run_health(data, now=NOW)

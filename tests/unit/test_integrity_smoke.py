@@ -571,37 +571,44 @@ def test_plan_sweep_smoke():
     assert dec_by_id[sub_id].disposition == Disposition.QUARANTINE
     assert dec_by_id[m1_id].disposition == Disposition.KEEP
     assert dec_by_id[m2_id].disposition == Disposition.QUARANTINE
-    # impl1：內容雜湊不在釘選值內的 manifest 不再直接隔離——要讀內容才知道
-    # 是不是注入物（b"wrong\n" 解析不出來，所以 resolve_manifest_evidence
-    # 之後會判定為注入物 → QUARANTINE，見下一段）。
-    assert dec_by_id[m3_id].disposition == Disposition.NEED_MANIFEST_CHECK
+    # review-1926cd3 H1：已經有一份 KEEP 候選時，其餘同名主 manifest 必然是
+    # 注入物（rclone 原地更新不會有第二份同名檔），直接隔離、不讀內容。
+    assert dec_by_id[m3_id].disposition == Disposition.QUARANTINE
     assert dec_by_id[bak1_id].disposition == Disposition.KEEP
-    assert dec_by_id[bak2_id].disposition == Disposition.NEED_MANIFEST_CHECK
+    # .bak 同樣：有 KEEP 候選時其餘同名 .bak 直接隔離
+    assert dec_by_id[bak2_id].disposition == Disposition.QUARANTINE
     assert dec_by_id[b1_id].disposition == Disposition.KEEP
     assert dec_by_id[b1_dup_id].disposition == Disposition.QUARANTINE
     assert dec_by_id[b_rem_id].disposition == Disposition.GC
-    # impl1：自我一致（內容與檔名宣告相符）卻不在釘選值裡的 bundle 不隔離，
-    # 留給「釘選值還沒轉正」的情境。
-    assert dec_by_id[b_unk_id].disposition == Disposition.HOLD
+    # review-1926cd3 M1：自洽不等於被背書——沒有 pending.annex_keys 或候選
+    # manifest 的背書，一律隔離（否則住民可以永久把任意位元組放進真本前綴）。
+    assert dec_by_id[b_unk_id].disposition == Disposition.QUARANTINE
     assert dec_by_id[annex1_id].disposition == Disposition.KEEP
     assert dec_by_id[annex1_dup_id].disposition == Disposition.QUARANTINE
-    # impl1：自我一致（內容與 key 自稱值相符）卻不在釘選值裡的 annex 物件不隔離，
-    # 留給「釘選值還沒轉正」的情境。
-    assert dec_by_id[annex_unk_id].disposition == Disposition.HOLD
+    assert dec_by_id[annex_unk_id].disposition == Disposition.QUARANTINE
     assert dec_by_id[junk_id].disposition == Disposition.QUARANTINE
     assert dec_by_id[no_sha_id].disposition == Disposition.NEED_CONTENT_CHECK
 
-    # 讀完 manifest 內容後：解析不出來 → 有證據是注入物 → 隔離
+    # 沒有任何 KEEP 候選時才需要讀內容判斷；讀完解析不出來 → 有證據是注入物
+    only_bad = RepoListing(
+        prefix_folder_id=p_id,
+        files=tuple(f for f in files if f.id not in (m1_id, m2_id, bak1_id)),
+        subfolders=(subfolder_file,),
+    )
+    pending_decisions = plan_sweep(only_bad, state, repo_uuid=uuid)
+    pending_by_id = {d.file.id: d for d in pending_decisions}
+    assert pending_by_id[m3_id].disposition == Disposition.NEED_MANIFEST_CHECK
+    assert pending_by_id[bak2_id].disposition == Disposition.NEED_MANIFEST_CHECK
+
     resolved = resolve_manifest_evidence(
-        decisions, drive, {}, state, repo_uuid=uuid, listing=listing,
+        pending_decisions, drive, {}, state, repo_uuid=uuid, listing=only_bad,
         prefix_folder_id=p_id,
     )
     resolved_by_id = {d.file.id: d for d in resolved}
     assert resolved_by_id[m3_id].disposition == Disposition.QUARANTINE
     assert resolved_by_id[bak2_id].disposition == Disposition.QUARANTINE
     # 已經定案的項目不受影響
-    assert resolved_by_id[m1_id].disposition == Disposition.KEEP
-    assert resolved_by_id[b_unk_id].disposition == Disposition.HOLD
+    assert resolved_by_id[b_rem_id].disposition == Disposition.GC
 
 
 def test_resolve_content_checks_smoke():

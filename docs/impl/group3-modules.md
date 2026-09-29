@@ -271,6 +271,17 @@ def settle(state: PinState, pending: PinPending | None, listing: RepoListing,
 ```
 - 沒有待定時，仍然要做「refs 是否等於正式」的核對，但那一步放在第 5 步（clone 之後），這裡直接回 `NO_PENDING`。
 - 注意：**不存在**「信任任何能重放的 manifest」的模式（review-1.4f3 M2）；可信的依據只有 `state` 與 `pending`。
+- **丟掉 pending 前要重新列舉**（impl1）：`DROPPED`／`BAK_RECOVERY` 會丟掉 pending，
+  而「這一輪 push 之後遠端會變成什麼」只有 pending 記著。步驟 2 要下載並重放
+  bundle（數十秒），這段期間別的輪次可能已經把 push 落實——impl1 現場就是這樣
+  把 pending 丟掉、遠端從此沒有人負責。所以這兩個結論在丟東西之前重新列舉一次，
+  前綴有變動就重做整段判斷（最多 `_MAX_RECHECK = 2` 次）。
+- **用完重查上限、前綴仍在變動 → 中止這一輪並保留 pending**（review-1926cd3 M2，
+  fail-closed）。舊行為是第三次不論清單是否還在變動都回傳 `DROPPED`，等於「用完
+  上限」就照舊丟掉 pending，方向和「主 manifest 缺失」那條路（raise）相反。
+- **指紋只算與結論有關的檔案**（review-1926cd3 M2）：主 manifest、`.bak`、
+  pending 與正式值引用的 bundle。舊的指紋涵蓋前綴裡所有檔案，住民只要在重查
+  期間持續放垃圾檔就能讓每次重查都「有變動」、必定用完上限——上限等於沒有。
 
 ### 3.4 上層同名檢查與清掃（第 4 步，`integrity/sweep.py`）
 
@@ -287,22 +298,61 @@ class Disposition(Enum):
     QUARANTINE = "quarantine"
     GC = "gc"                         # 在 removed_bundles 裡：第 3 步不動，第 11 步永久刪除
     NEED_CONTENT_CHECK = "need_content_check"   # sha256Checksum 缺少：要下載驗證一次
+    NEED_MANIFEST_CHECK = "need_manifest_check" # 沒有 KEEP 候選時：要讀 manifest 內容才能判斷
+    HOLD = "hold"                     # 有背書（pending）且未逾齡：不動，等釘選值轉正
+    NEED_ADMIN = "need_admin"         # 沒有任何背書、也沒有「是注入物」的證據：不動，列入健康檢查
+
+@dataclass(frozen=True)
+class SweepPolicy:
+    pending: PinPending | None = None      # 唯一可信的「即將發生」紀錄（push 之前寫下來）
+    hold_max_age_days: int | None = None   # HOLD 的年齡上限（quarantine_retention_days）；None = 不設上限
+    now: datetime | None = None            # 算年齡用的時鐘
 
 @dataclass(frozen=True)
 class SweepDecision:
     file: DriveFile; disposition: Disposition; reason: str; from_parent: str = ""
 
-def plan_sweep(listing: RepoListing, state: PinState, *, repo_uuid: str) -> list[SweepDecision]:
-    # 純函式，不碰網路。規則（design D2、review-1.4f3 H2/H3、review-1.4f5 H1）：
-    # - 非 .bak 的 GITMANIFEST：只 KEEP 一個（sha256 == state.manifest_sha256）；其他 QUARANTINE
-    # - .bak：sha256 ∈ {state.manifest_sha256, state.prev_manifest_sha256} 的保留一個；其他 QUARANTINE
+def plan_sweep(listing: RepoListing, state: PinState, *, repo_uuid: str,
+               manifest_verdicts=None, backed_bundles=None, policy: SweepPolicy | None = None,
+               ) -> list[SweepDecision]:
+    # 純函式，不碰網路。規則（design D2、review-1.4f3 H2/H3、review-1.4f5 H1、
+    #                     review-1926cd3-142fd04 H1／M1）：
+    # - 非 .bak 的 GITMANIFEST：sha256 == state.manifest_sha256 → KEEP 一個；
+    #   == prev_manifest_sha256 → QUARANTINE（退位版本冒充）
+    #   **已經有一份 KEEP 候選時，其餘同名主 manifest 一律 QUARANTINE（不讀內容）**：
+    #     Drive 是原地更新，正常流程不會有第二份同名檔，所以那份必然是注入物。
+    #     沒有任何 KEEP 候選時才標 NEED_MANIFEST_CHECK，讀內容（見下）
+    # - .bak：sha256 ∈ {state.manifest_sha256, state.prev_manifest_sha256} 的保留一個；
+    #   已有 KEEP 候選時其餘同名 .bak 一律 QUARANTINE；否則 NEED_MANIFEST_CHECK
     # - GITBUNDLE：名稱 ∈ active 而且 sha256 == 名稱內嵌的雜湊、size 相符 → KEEP（同內容重複的只留一個）
     #             名稱 ∈ removed → GC
-    #             其他 → QUARANTINE
-    # - annex 物件（SHA256E-s<N>--<sha>…）：key ∈ state.annex_keys 而且 sha256Checksum 相符且 size 相符 → KEEP；其他 QUARANTINE
+    #             檔名宣告與內容不符 → QUARANTINE（證據：檔名在騙人）
+    #             其餘（自洽但不在釘選值裡）→ 被候選 manifest 列為 active 就跟著那份 manifest
+    #               （HOLD／NEED_ADMIN）；否則在前綴與釘選值一致時 QUARANTINE，
+    #               釘選值對前綴沒有權威時 NEED_ADMIN（見下）
+    # - annex 物件（SHA256E-s<N>--<sha>…）：key ∈ state.annex_keys 而且 sha256Checksum 相符且 size 相符 → KEEP；
+    #   key ∈ pending.annex_keys 且自洽 → HOLD；其餘同上（有背書 → HOLD，釘選值有權威 → QUARANTINE，否則 NEED_ADMIN）
     # - sha256 或 size 缺失的檔 → NEED_CONTENT_CHECK（由 apply 前的步驟下載驗證，再重新判定）
     # - 子資料夾 → QUARANTINE（整個子樹；layout 是平的）
     # - 其他名稱 → QUARANTINE
+    # - **HOLD 只給有背書的檔案，而且有年齡上限**：逾齡（超過 quarantine_retention_days）
+    #   就降級成 QUARANTINE 並在報告裡回報，不再無限期等
+    # - **「自洽不等於被背書就隔離」只在釘選值與前綴一致時適用**（前綴裡有內容等於
+    #   正式值的那份主 manifest）。沒有的話釘選值對這個前綴沒有權威，「不在釘選值
+    #   裡」不足以指認注入物——那會搬走「遠端領先釘選值、pending 又不見」時真正的新
+    #   世代物件（impl1 終局）。這種檔案一律 NEED_ADMIN：不搬移、列入健康檢查；
+    #   釘選值追上（settle 轉正或 init-pin）之後下一輪就會被正常隔離。
+
+def resolve_manifest_evidence(decisions, drive, cache, state, *, repo_uuid, listing=None,
+                              prefix_folder_id=None, workdir=None, policy: SweepPolicy | None = None,
+                              ) -> list[SweepDecision]: ...
+    # 只處理 NEED_MANIFEST_CHECK（也就是前綴裡沒有 KEEP 候選時）。兩層證據：
+    # 1. 內容能 parse_manifest(repo_uuid=…) 且它列的每個 active bundle 都在前綴裡、雜湊相符
+    #    → 否則有「是注入物」的證據 → QUARANTINE
+    # 2. 有 pending：把候選 manifest 的 active bundle 實際下載並重放（與 settle 同一套
+    #    _download_and_replay），refs == pending.refs 才算真的 → HOLD（它列為 active 的
+    #    bundle 一併被背書，經 backed_bundles 帶回 plan_sweep）
+    #    refs 對不上、或沒有 pending、或重放出錯但沒有證據 → NEED_ADMIN（不搬移、不無限期 HOLD）
 
 def resolve_content_checks(decisions, drive, cache: ChecksumCache) -> list[SweepDecision]: ...
     # 下載 NEED_CONTENT_CHECK 的檔算 sha256，寫進 cache（存在真本的 _committer/checksums.json），替換回完整 listing 重新整份判定

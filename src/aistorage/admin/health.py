@@ -36,6 +36,9 @@ QUOTA_FAIL_RATIO = 0.95               # 配額使用率超過 → fail
 INDEX_BYTES_WARN = 50 * 1024 * 1024   # D5：索引 50MB
 READVIEW_FILES_WARN = 5000            # D5：讀取視圖 5,000 個檔案
 LAUNCHD_INTERVAL_S = 6 * 3600         # launchd 每 6 小時
+#: 前綴裡「釘選值背書不了」的檔案放超過一輪（預設 6h 排程 × 2）就報 warn
+#: 並列出檔名（review-1926cd3 L：held_files 本來只是一個計數，沒有門檻與警示）。
+HELD_STALE_HOURS = 12
 
 
 @dataclass(frozen=True)
@@ -68,6 +71,13 @@ class HealthData:
     syncer_rejected: int = 0
     prune_ok: bool | None = None
     maintenance: bool | None = None       # pin repo 的維護旗標
+    #: 真本前綴裡釘選值背書不了的檔名（HOLD／待判斷／沒有人能解釋）。
+    #: 健康檢查要指出「是哪幾個檔案卡住」，不是只說「有 N 個」。
+    held_files: list[str] = field(default_factory=list)
+    #: 其中已經放超過一輪的（= 已經活過一整輪提交卻仍然沒被隔離也沒轉正）
+    held_stale_files: list[str] = field(default_factory=list)
+    #: 這兩項真的查到了嗎？查不到是 warn 而不是 ok（M7：查不到 ≠ 正常）
+    held_files_known: bool = False
 
 
 def _hours_since(at: str, now: datetime) -> float | None:
@@ -217,6 +227,30 @@ def run_health(data: HealthData, *, now: datetime) -> list[Check]:
     else:
         checks.append(Check(name="prune", status="warn", value="prune 行為異常",
                             hint="重跑 resident/verify-prune.sh"))
+
+    # 前綴裡釘選值背書不了的檔案：HOLD 是「有人背書、等釘選值轉正」，
+    # NEED_ADMIN 是「沒有任何可信來源能解釋它，需要管理者 init-pin」。
+    # 兩者都留在原地（搬走等於消滅真本），所以**只靠計數沒有人會注意到**。
+    # 超過一輪還在原地就是需要人處理的訊號，於是報出檔名。
+    if not data.held_files_known:
+        checks.append(Check(name="held_files", status="warn",
+                            value="未知（讀不到真本前綴或 pin）"))
+    elif data.held_stale_files:
+        checks.append(Check(
+            name="held_files", status="warn",
+            value=(
+                f"{len(data.held_stale_files)} 個檔案在前綴裡超過一輪"
+                f"（共 {len(data.held_files)} 個待處理）："
+                f"{'、'.join(sorted(data.held_stale_files)[:5])}"
+            ),
+            hint="真本上有釘選值背書不了的檔案：查 pending 還在不在，"
+                 "或用 init-pin 以觀測到的遠端狀態重建釘選值"))
+    elif data.held_files:
+        checks.append(Check(
+            name="held_files", status="ok",
+            value=f"{len(data.held_files)} 個（都在本輪內，等釘選值轉正）"))
+    else:
+        checks.append(Check(name="held_files", status="ok", value="無"))
     return checks
 
 
@@ -270,6 +304,8 @@ def collect_health(sources: CollectSources, *, clock: Clock | None = None) -> He
 
     last_success: str | None = None
     pin_main: str | None = None
+    state: Any = None
+    _pending: Any = None
     try:
         state, _pending = sources.pins.load(sources.repo)
         last_success = state.promoted_at
@@ -328,6 +364,10 @@ def collect_health(sources: CollectSources, *, clock: Clock | None = None) -> He
         except Exception:
             q_files = q_bytes = 0
 
+    held_files, held_stale, held_known = _unbacked_prefix_files(
+        sources.drive, sources.prefix_folder_id, state, _pending, now=now
+    )
+
     manifest_main: str | None = None
     index_bytes: int | None = None
     readview_files: int | None = None
@@ -368,7 +408,72 @@ def collect_health(sources: CollectSources, *, clock: Clock | None = None) -> He
         syncer_rejected=sources.syncer_rejected,
         prune_ok=sources.prune_ok,
         maintenance=maintenance,
+        held_files=held_files,
+        held_stale_files=held_stale,
+        held_files_known=held_known,
     )
+
+
+def _unbacked_prefix_files(
+    drive: DriveClient,
+    prefix_folder_id: str,
+    state: Any,
+    pending: Any,
+    *,
+    now: datetime,
+) -> tuple[list[str], list[str], bool]:
+    """真本前綴裡「釘選值背書不了」的檔名、其中已逾齡的，以及是否真的查到了。
+
+    這裡呼叫的是提交流程第 4 步**同一個**純函式 `plan_sweep`（不下載內容），
+    所以健康檢查看到的和提交流程看到的是同一套規則，不會各自發明一套。
+    健康檢查刻意**不做**內容驗證（不重放、不下載）：那要花幾十秒而且會動到
+    網路；這裡只要知道「哪些檔案釘選值解釋不了」就夠了。
+
+    回傳 `(held_files, held_stale_files)`；取不到資料（沒有設定檔 id、pin
+    讀不到、Drive 讀不到）就回兩個空清單——判定時是「無」，而不是把
+    「查不到」說成「一切正常」（見模組開頭 M7 的原則）。
+    """
+    if not prefix_folder_id or state is None:
+        return [], [], False
+    try:
+        from aistorage.integrity.settle import RepoListing
+        from aistorage.integrity.sweep import (
+            Disposition,
+            SweepPolicy,
+            file_age_days,
+            plan_sweep,
+        )
+
+        children = drive.list_children(prefix_folder_id)
+        listing = RepoListing(
+            prefix_folder_id=prefix_folder_id,
+            files=tuple(c for c in children if not c.is_folder),
+            subfolders=tuple(c for c in children if c.is_folder),
+        )
+        decisions = plan_sweep(
+            listing, state,
+            repo_uuid=state.repo_uuid,
+            prefix_folder_id=prefix_folder_id,
+            policy=SweepPolicy(pending=pending, now=now),
+        )
+    except Exception:
+        return [], [], False
+
+    interesting = (
+        Disposition.HOLD,
+        Disposition.NEED_ADMIN,
+        Disposition.NEED_MANIFEST_CHECK,
+    )
+    held: list[str] = []
+    stale: list[str] = []
+    for d in decisions:
+        if d.disposition not in interesting:
+            continue
+        held.append(d.file.name)
+        age_h = (file_age_days(d.file, now) or 0.0) * 24
+        if age_h > HELD_STALE_HOURS:
+            stale.append(d.file.name)
+    return sorted(held), sorted(stale), True
 
 
 def quarantine_usage(drive: DriveClient, quarantine_folder_id: str) -> tuple[int, int]:

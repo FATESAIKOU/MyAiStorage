@@ -99,16 +99,24 @@ def test_injected_artifacts_are_quarantined_and_next_round_recovers(
     init_pin_cli(cfg, deps, confirm=True)
     state, _ = pins.load(cfg.repo)
 
-    # ── 注入四種不該存在的東西（都用真的 Drive 寫入）──────────────
+    # ── 注入五種不該存在的東西（都用真的 Drive 寫入）──────────────
     manifest_name = f"GITMANIFEST--{annex.uuid}"
     real_manifest = next(
         f for f in real_drive.list_children(prefix_id) if f.name == manifest_name
     )
+    manifest_bytes = real_drive.download_bytes(real_manifest.id, max_bytes=1 << 20)
     injected: list[str] = []
 
     # (1) 上一版 manifest 冒充：拿初始 manifest 的內容，改成主 manifest 的名字再放一份
-    real_drive.create(prefix_id, real_manifest.name, real_drive.download_bytes(real_manifest.id, max_bytes=1 << 20))
+    real_drive.create(prefix_id, real_manifest.name, manifest_bytes)
     injected.append("舊 manifest 冒充")
+
+    # (1b) review-1926cd3 H1：**內容完全合法**的第二份主 manifest（多一個換行，
+    #      解析得過、引用的 bundle 也都在）。這是舊規則最嚴重的洞：它會被 HOLD，
+    #      於是 `verify_clone` 的「主 manifest 恰好一份」每一輪都失敗，提交流程
+    #      永久停擺，而任何一個住民都做得到（讀取身分可以讀整個前綴）。
+    real_drive.create(prefix_id, real_manifest.name, manifest_bytes + b"\n")
+    injected.append("合法的第二份主 manifest")
 
     # (2) 名字像 bundle、但內容雜湊對不上（夾帶 payload）
     fake_bundle = f"GITBUNDLE-{annex.uuid[:8]}-{'0' * 64}"
@@ -137,14 +145,21 @@ def test_injected_artifacts_are_quarantined_and_next_round_recovers(
     assert report.ok is True, f"注入後這一輪應該要成功，中止於 {report.aborted_at}:{report.code}"
     assert report.counts["rejected"] == 0
     assert report.counts["accepted"] == 1
-    assert report.counts["quarantined_files"] >= 4, report.counts
+    assert report.counts["quarantined_files"] >= 5, report.counts
+    assert report.counts["held_files"] == 0, (
+        f"注入物不該被 HOLD（等於讓它留在真本裡）: {report.held_files}"
+    )
+    assert report.counts["need_admin_files"] == 0, (
+        f"注入物不該變成 NEED_ADMIN（等於沒有人處理的假訊號）: "
+        f"{report.need_admin_files}"
+    )
 
-    # 隔離是搬走，不是刪除：隔離資料夾裡（依日期分層）應該找得到那四樣東西
+    # 隔離是搬走，不是刪除：隔離資料夾裡（依日期分層）應該找得到那幾樣東西
     quarantined = _names_under(real_drive, quarantine_id)
     assert fake_bundle in quarantined, quarantined
     assert orphan in quarantined, quarantined
     assert sub.name in quarantined, quarantined
-    # 冒充的 manifest 有一份被搬走（另一份是合法的主 manifest，仍留在前綴）
+    # 冒充的 manifest 有兩份被搬走（另一份是合法的主 manifest，仍留在前綴）
     assert real_manifest.name in quarantined, quarantined
 
     # 真本裡不再有注入物，只剩 git-remote-annex 自己的東西（manifest／bundle／annex 物件）
@@ -153,6 +168,19 @@ def test_injected_artifacts_are_quarantined_and_next_round_recovers(
     assert orphan not in after, "未引用的 annex 物件還留在真本裡"
     assert sub.name not in after, "子資料夾還留在真本裡"
     assert manifest_name in after, "合法的主 manifest 不該被搬走"
+    # H1：主 manifest 恰好一份（`verify_clone` 就是這樣檢查的）
+    main_manifests = [
+        f for f in real_drive.list_children(prefix_id) if f.name == manifest_name
+    ]
+    assert len(main_manifests) == 1, (
+        f"主 manifest 必須恰好一份（否則 verify_clone 每一輪都中止）: "
+        f"{[f.id for f in main_manifests]}"
+    )
+    promoted, pending_now = pins.load(cfg.repo)
+    assert pending_now is None
+    assert main_manifests[0].sha256 == promoted.manifest_sha256, (
+        "留下來的那份必須是這一輪轉正後的正式 manifest（不是任何一份注入物）"
+    )
     assert {n for n in after if n.startswith("GITMANIFEST--")} <= {
         manifest_name, f"{manifest_name}.bak"
     }, after

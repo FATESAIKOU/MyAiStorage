@@ -210,8 +210,8 @@ def verify_new_keys_on_drive(
     prefix_folder_id: str,
     new_keys: frozenset[str] | set[str],
     *,
-    attempts: int = 3,
-    retry_delay_s: float = 2.0,
+    attempts: int = 4,
+    retry_delay_s: float = 10.0,
 ) -> int:
     """M1（review-25a48a9）：這一輪新寫的 annex 物件，**Drive 上**真的在嗎？
 
@@ -231,8 +231,14 @@ def verify_new_keys_on_drive(
     impl1：Drive 的列表會**落後**寫入。剛 push 完就去列舉，新上傳的物件常常還
     沒出現（impl1 現場：上傳後 30 秒仍列不到，於是這裡誤判「物件不在」而中止，
     釘選值不轉正，留下一個沒人負責的 pending）。所以判定為缺物件時**重試**：
-    重新列舉、隔一會兒再看。真的沒上傳成功的話，重試只會多花幾秒，最後照樣
+    重新列舉、隔一會兒再看。真的沒上傳成功的話，重試只會多花時間，最後照樣
     中止——方向仍然是 fail-closed。
+
+    review-1926cd3-142fd04 L：原本 3 次 × 2 秒 = 6 秒，遠小於實測的 30 秒延遲，
+    等於每次都會誤判而中止（雖然後續有 pending 與 settle 接手，方向是對的）。
+    預設值改成 **4 次、每次等 10 秒（檢查落在第 0／10／30／60 秒，總計等待
+    60 秒）**，涵蓋觀察到的 30 秒列表延遲並留一點餘裕。真的壞掉時這一輪就多花
+    60 秒才中止，比起誤判留下一個沒人負責的 pending划算得多。
     """
     if not new_keys:
         return 0
@@ -255,9 +261,11 @@ def verify_new_keys_on_drive(
             return len(keys)
         if attempt + 1 < max(1, attempts):
             time.sleep(retry_delay_s * (attempt + 1))
+    waited = retry_delay_s * sum(range(1, max(1, attempts)))
     raise MismatchError(
         f"這一輪新寫的 annex 物件沒有真的在 Drive 上（{len(problems)} 個，"
-        f"已重新列舉 {attempts} 次）：{problems[:3]}")
+        f"已重新列舉 {attempts} 次、等待約 {waited:.0f} 秒；Drive 的列表落後"
+        f"實測可達 30 秒）：{problems[:3]}")
 
 
 def precheck(

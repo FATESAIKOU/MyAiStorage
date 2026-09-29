@@ -29,6 +29,7 @@ def test_all_ok_and_summary() -> None:
         quota_limit=1000, quota_usage=100,
         index_bytes=1000, readview_files=10,
         manifest_main_sha="a", pin_main_sha="a",
+        held_files_known=True,
         prune_ok=True)
     checks = run_health(data, now=NOW)
     assert summarize(checks) == "ok"
@@ -119,8 +120,117 @@ def test_maintenance_flag_is_reported() -> None:
     assert by2["workflow"] == "fail" and "maintenance" not in by2
 
 
+def _pin_with_pending(*annex_keys: str):
+    """釘選值落後遠端、而且 pending 還在的 pin store（impl1 現場的形狀）。"""
+    import hashlib
+
+    from aistorage.integrity.pin import MemoryPinStore, PinPending, PinState
+
+    uuid = "01234567-89ab-cdef-0123-456789abcdef"
+    official = hashlib.sha256(b"official\n").hexdigest()
+    return MemoryPinStore(
+        initial_state=PinState(
+            repo="agora", repo_uuid=uuid, refs={"refs/heads/main": "a" * 40},
+            manifest_sha256=official, prev_manifest_sha256=None,
+            active_bundles=(), removed_bundles=frozenset(),
+            annex_keys=frozenset(), promoted_at="2026-09-27T09:00:00.000Z",
+            run_id="1",
+        ),
+        initial_pending=PinPending(
+            repo="agora", base_manifest_sha256=official,
+            refs={"refs/heads/main": "b" * 40},
+            annex_keys=frozenset(annex_keys),
+            written_at="2026-09-27T09:30:00.000Z", run_id="2",
+        ),
+    )
+
+
+def test_health_reports_unbacked_prefix_files_with_names() -> None:
+    """review-1926cd3 L：前綴裡釘選值背書不了的檔案放超過一輪 → 報出並列檔名。
+
+    這些檔案在真本前綴裡（HOLD＝有人背書、等釘選值轉正；待判斷＝還沒有人
+    讀過內容），提交流程不會搬它們，所以只能靠健康檢查讓人看到。判定用的是
+    提交流程同一個 `plan_sweep`，兩邊的規則不會各說各話。
+    """
+    import hashlib
+
+    from aistorage.admin.health import CollectSources, collect_health
+    from aistorage.clock import FixedClock
+
+    uuid = "01234567-89ab-cdef-0123-456789abcdef"
+    drive = FakeDrive()
+    prefix = drive.seed_folder("agora-prefix")
+    # 釘選值落後遠端：前綴裡的主 manifest 沒有任何 KEEP 候選
+    drive.seed_file(prefix, f"GITMANIFEST--{uuid}", b"ahead-of-the-pin\n")
+    # pending 記著、所以有背書的新 annex 物件（HOLD）
+    held_body = b"orphan"
+    held_key = f"SHA256E-s{len(held_body)}--{hashlib.sha256(held_body).hexdigest()}"
+    drive.seed_file(prefix, held_key, held_body)
+    # 已經放很久的一份（超過 HELD_STALE_HOURS）
+    old_sha = hashlib.sha256(b"ancient").hexdigest()
+    old_body = b"ancient"
+    old_key = f"SHA256E-s{len(old_body)}--{old_sha}"
+    drive.seed_file(
+        prefix, old_key, old_body, created_time="2026-09-01T00:00:00.000000Z",
+    )
+    data = collect_health(
+        CollectSources(
+            drive=drive, pins=_pin_with_pending(held_key, old_key),
+            repo="agora", prefix_folder_id=prefix,
+        ),
+        clock=FixedClock("2026-09-27T10:00:00Z"),
+    )
+    assert held_key in data.held_files
+    assert old_key in data.held_stale_files
+    assert f"GITMANIFEST--{uuid}" in data.held_files
+
+    checks = run_health(data, now=NOW)
+    c = _by_name(checks, "held_files")
+    assert c.status == "warn"
+    assert old_key in c.value
+    assert summarize(checks) == "warn"
+
+
+def test_health_prefix_holding_nothing_is_ok() -> None:
+    """前綴乾淨時這項是 ok（不是 warn）：否則每次健康檢查都在報假警。"""
+    from aistorage.admin.health import CollectSources, collect_health
+    from aistorage.clock import FixedClock
+
+    drive = FakeDrive()
+    prefix = drive.seed_folder("agora-prefix")
+    drive.seed_file(prefix, "unrelated.txt", b"not in the canonical prefix")
+    data = collect_health(
+        CollectSources(
+            drive=drive, pins=_pin_with_pending(), repo="agora",
+            prefix_folder_id=prefix,
+        ),
+        clock=FixedClock("2026-09-27T10:00:00Z"),
+    )
+    assert data.held_files == [] and data.held_stale_files == []
+    assert _by_name(run_health(data, now=NOW), "held_files").status == "ok"
+
+
+def test_held_files_check_levels() -> None:
+    # 查不到 → warn（M7：查不到 ≠ 正常）
+    assert _by_name(run_health(HealthData(), now=NOW), "held_files").status == "warn"
+    clean = run_health(HealthData(held_files_known=True), now=NOW)
+    assert _by_name(clean, "held_files").status == "ok"
+    fresh = run_health(
+        HealthData(held_files_known=True, held_files=["GITMANIFEST--x"]), now=NOW
+    )
+    assert _by_name(fresh, "held_files").status == "ok"
+    stale = run_health(
+        HealthData(
+            held_files_known=True, held_files=["GITMANIFEST--x"],
+            held_stale_files=["GITMANIFEST--x"],
+        ),
+        now=NOW,
+    )
+    assert _by_name(stale, "held_files").status == "warn"
+    assert "GITMANIFEST--x" in _by_name(stale, "held_files").value
+
+
 def test_collect_health_from_fake_sources(tmp_path) -> None:
-    """collect_health 真的去取資料；取不到的留 None。"""
     from aistorage.admin.health import CollectSources, collect_health
     from aistorage.clock import FixedClock
     from aistorage.drive.fake import FakeDrive

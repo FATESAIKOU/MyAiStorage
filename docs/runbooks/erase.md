@@ -35,6 +35,17 @@
 6. segment 抹除會同步改寫 `snapshots.jsonl`、`handoffs`、`continuations`、`claims`、
    `links` 的雜湊（抹除之後真本裡不該留有被抹除那一版的雜湊）；
    接續點訊息本身被抹除的交接單標 `erased`（看得到交接單，看不到內容）。
+   - **`snapshots.jsonl` 的 glob 曾經少一層（`sessions/*/`，實際路徑是
+     `sessions/<source>/<id>/snapshots.jsonl`）**，所以在那次修正之前跑過的抹除
+     **從來沒有重寫過快照清單**——被抹除那一版的 snapshot sha 會留在
+     `snapshots.jsonl` 裡。歷史影響已確認為零：修正之前跑過的抹除只有 1.3 的
+     spike 實測（`agora-erase/` 拋棄式前綴、`spike/scripts/annex_1_3_erase.sh`，
+     見 `docs/spike/evidence/1.3-erase.md`），那份 repo 沒有 Agora 的目錄結構；
+     `python -m aistorage.admin erase` 是在那之後才接上的，而且只跑過整合測試
+     的測試資源。**正式環境至今沒有跑過抹除**，所以沒有真本帶著未重寫的雜湊。
+     若日後要對正式環境執行抹除，先用
+     `rg '<被抹除的 sha>' <clone>/agora` 確認快照清單乾淨（重寫會把該 sha 換成
+     抹除後的新 sha，舊 sha 不該再出現）。
 7. with 區塊正常結束才會解鎖（旗標刪除、workflow 重開）。
 
 ## 中途失敗（重要）

@@ -33,10 +33,12 @@ from aistorage.integrity.settle import (
     settle,
 )
 from aistorage.integrity.sweep import (
+    DEFAULT_HOLD_MAX_AGE_DAYS,
     Disposition,
     PrefixLevel,
     SettleAndSweepResult,
     SweepDecision,
+    SweepPolicy,
     apply_sweep,
     check_parents,
     plan_readview_sweep,
@@ -54,6 +56,7 @@ from aistorage.integrity.verify import (
 )
 
 __all__ = [
+    "DEFAULT_HOLD_MAX_AGE_DAYS",
     "DEFAULT_QUARANTINE_DAYS",
     "Disposition",
     "GitPinStore",
@@ -68,6 +71,7 @@ __all__ = [
     "SettleAndSweepResult",
     "SettleOutcome",
     "SweepDecision",
+    "SweepPolicy",
     "apply_sweep",
     "check_manifest_continuity",
     "check_parents",

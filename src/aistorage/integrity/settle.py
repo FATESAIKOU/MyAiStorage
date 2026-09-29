@@ -122,18 +122,44 @@ def _relist(drive: DriveClient, prefix_folder_id: str) -> RepoListing:
     )
 
 
-def _fingerprint(listing: RepoListing) -> tuple[tuple[str, str | None, int | None, str], ...]:
-    """前綴的「指紋」：檔名、雜湊、大小、id。任一項不同就代表期間有變動。"""
+def _relevant_names(state: PinState) -> frozenset[str]:
+    """settle 的結論真正依賴的檔名（其餘檔案變動與結論無關）。
+
+    review-1926cd3-142fd04 M2：`_fingerprint` 原本涵蓋前綴裡**所有**檔案，
+    於是住民只要在重查期間持續放檔案，每一次重新列舉都「有變動」，重查必定
+    用完上限，最後照樣丟掉 pending——把一個上限變成住民可以操縱的開關。
+
+    settle 判斷用得到的只有：主 manifest、`.bak`、以及正式值引用的 bundle
+    （active 與 removed）。pending 記的是 refs 與 annex key，沒有 bundle 名單，
+    所以「pending 引用的 bundle」在這個模型裡就是正式值的那一份。
+    住民的垃圾檔、未知檔名、未被引用的 annex 物件都不影響結論。
+    """
+    return frozenset(
+        {f"GITMANIFEST--{state.repo_uuid}", f"GITMANIFEST--{state.repo_uuid}.bak"}
+        | set(state.active_bundles)
+        | set(state.removed_bundles)
+    )
+
+
+def _fingerprint(
+    listing: RepoListing, names: frozenset[str] = frozenset()
+) -> tuple[tuple[str, str | None, int | None, str], ...]:
+    """前綴的「指紋」：檔名、雜湊、大小、id。任一項不同就代表期間有變動。
+
+    `names` 給定時只看這些檔名（M2：住民的垃圾檔不應該影響 settle 的結論）。
+    """
     return tuple(
         sorted(
             (f.name, f.sha256, f.size, f.id)
             for f in listing.files
+            if not names or f.name in names
         )
     )
 
 
-#: DROPPED／BAK_RECOVERY 這兩個結論會**丟掉 pending**，所以它們最多重查這麼多次。
-#: 重查是為了讓「丟掉 pending」建立在決定當下的證據上，而不是進場時的快照。
+#: DROPPED／BAK_RECOVERY 這兩個結論會**丟掉 pending**，所以它們在丟東西之前
+#: 最多重新列舉這麼多次。重查是為了讓「丟掉 pending」建立在決定當下的證據上，
+#: 而不是進場時的快照；用完仍在變動就中止（保留 pending），不是照丟。
 _MAX_RECHECK = 2
 
 
@@ -164,6 +190,17 @@ def settle(
     `No git repository found in this remote`）。PROMOTED 不受影響——它要求「看得到」
     新 manifest，而 Drive 的列表只會落後、不會超前。所以只有這兩個結論在丟東西
     之前重新列舉一次，前綴有變動就重做整段判斷（有上限）。
+
+    review-1926cd3-142fd04 M2：兩件事要一起改，否則上限形同虛設。
+
+    1. **用完上限時中止，不丟 pending**。原本第三次不論清單是否還在變動都照樣
+       回傳 DROPPED／BAK_RECOVERY，等於把「用完上限」變成「照舊丟掉 pending」，
+       行為回到修改之前。現在改成 fail-closed：中止這一輪（pending 保留），
+       方向和「主 manifest 缺失」那條路一致。
+    2. **指紋只算與結論有關的檔案**（`_relevant_names`）。原本指紋涵蓋前綴裡
+       所有檔案，住民只要持續放垃圾檔就能讓每一次重查都「有變動」、必定用完
+       上限。指紋縮小到主 manifest／`.bak`／pending 與正式值引用的 bundle 之後，
+       垃圾檔不再影響結論，也就無法再操縱這個上限。
     """
     if pending is None:
         return SettleOutcome.NO_PENDING, state
@@ -179,6 +216,7 @@ def settle(
 
     main_name = f"GITMANIFEST--{state.repo_uuid}"
     bak_name = f"GITMANIFEST--{state.repo_uuid}.bak"
+    relevant = _relevant_names(state)
 
     # 進場就用自己的 listing：呼叫端那份是第 3 步開始時的快照。
     listing = _relist(drive, listing.prefix_folder_id)
@@ -197,7 +235,7 @@ def settle(
                     "真本已不完整，需要管理者用 init-pin 重建釘選值"
                 )
             fresh = _relist(drive, listing.prefix_folder_id)
-            if _fingerprint(fresh) != _fingerprint(listing):
+            if _fingerprint(fresh, relevant) != _fingerprint(listing, relevant):
                 listing = fresh
                 continue
             raise MismatchError(
@@ -207,11 +245,19 @@ def settle(
         if not discard:
             return outcome, new_state
         # 這個結論會丟掉 pending → 確認前綴在這段時間裡沒有變動
-        if attempt == _MAX_RECHECK:
-            return outcome, new_state
         fresh = _relist(drive, listing.prefix_folder_id)
-        if _fingerprint(fresh) == _fingerprint(listing):
+        if _fingerprint(fresh, relevant) == _fingerprint(listing, relevant):
             return outcome, new_state
+        if attempt == _MAX_RECHECK:
+            # M2：重查用完上限、前綴仍在變動 → 中止這一輪並**保留 pending**。
+            # 丟掉 pending 就再也沒有人負責把遠端往前推（impl1 的終局）。
+            raise MismatchError(
+                f"前綴在重查期間持續變動（已重查 {_MAX_RECHECK} 次），"
+                f"無法在決定當下確認遠端狀態；中止這一輪並保留待定釘選值——"
+                f"它仍然是「這一輪 push 之後遠端會變成什麼」的唯一說明。"
+                f"若確實需要管理者介入，請確認前綴不再變動後再由 settle 結算，"
+                f"或用 init-pin 以觀測到的遠端狀態重建釘選值"
+            )
         listing = fresh
 
     raise MismatchError("內部錯誤：settle 的重查迴圈沒有回傳結果")

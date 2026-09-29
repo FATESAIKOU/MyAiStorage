@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from aistorage.annex.fake import FakeAnnexGit
-from aistorage.clock import FixedClock
+from aistorage.clock import FixedClock, parse_rfc3339
 from aistorage.drive.fake import FakeDrive
 from aistorage.errors import MismatchError, ReadError, WriteError
 from aistorage.integrity.gc import (
@@ -43,6 +43,7 @@ from aistorage.integrity.sweep import (
     Disposition,
     PrefixLevel,
     SweepDecision,
+    SweepPolicy,
     apply_sweep,
     check_parents,
     plan_readview_sweep,
@@ -332,10 +333,115 @@ def test_settle_still_drops_when_the_remote_really_has_not_moved(bundles: dict, 
     st = _state(bundles, manifest_sha=bundles["m1sha"])
     drive = FakeDrive()
     prefix, listing = _seed_prefix(drive, bundles, bundles["m1"], ["b1"])
-    outcome, ns = settle(st, _pending(bundles), listing, drive,
-                         workdir=tmp_path, clock=FixedClock())
+    outcome, ns = settle(st, _pending(bundles), listing, drive, workdir=tmp_path, clock=FixedClock())
     assert outcome == SettleOutcome.DROPPED
     assert ns == st
+
+
+class _JitteringListingDrive:
+    """每次列舉都多放一個垃圾檔（住民持續寫入前綴的形狀）。
+
+    M2：原本 `_fingerprint` 涵蓋前綴裡所有檔案，於是這種寫入會讓每一次
+    重查都「有變動」、必定用完上限，最後照樣丟掉 pending——上限等於沒有。
+    指紋縮小到與結論有關的檔案之後，垃圾檔不再影響判斷。
+    """
+
+    def __init__(self, inner: FakeDrive, *, folder_id: str, extra: int) -> None:
+        self._inner = inner
+        self._folder_id = folder_id
+        self._extra = extra
+        self._calls = 0
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def list_children(self, folder_id):
+        if folder_id != self._folder_id:
+            return self._inner.list_children(folder_id)
+        self._calls += 1
+        for i in range(self._extra):
+            self._inner.seed_file(
+                self._folder_id, f"resident-junk-{self._calls}-{i}.bin", b"junk" * 8
+            )
+        return self._inner.list_children(folder_id)
+
+
+def test_settle_ignores_resident_junk_when_rechecking(bundles: dict, tmp_path: Path):
+    """M2：住民在重查期間持續放垃圾檔，不該讓重查失效、也不該讓 pending 被丟。
+
+    舊行為：每一次重新列舉都「有變動」→ 用完上限 → 照樣回傳 DROPPED。
+    新行為：垃圾檔不在結論依賴的檔名集合裡，指紋不變 → 結論成立，DROPPED。
+    """
+    st = _state(bundles, manifest_sha=bundles["m1sha"])
+    drive = FakeDrive()
+    prefix, listing = _seed_prefix(drive, bundles, bundles["m1"], ["b1"])
+    jitter = _JitteringListingDrive(drive, folder_id=prefix, extra=3)
+    outcome, ns = settle(
+        st, _pending(bundles), listing, jitter, workdir=tmp_path, clock=FixedClock()
+    )
+    assert outcome == SettleOutcome.DROPPED, "垃圾檔不該讓 settle 放棄結論"
+    assert ns == st
+    # 進場列舉一次 + 確認一次；不會因為垃圾檔反覆重列（否則重查上限形同虛設）
+    assert jitter._calls == 2
+
+
+class _ShiftingManifestIdDrive:
+    """每次列舉都給主 manifest 一個新的 file id（內容與雜湊完全相同）。
+
+    指紋含 file id，所以這代表「與結論有關的檔案在判定期間換了一份」——
+    對應的現實是 Drive 原地更新同一個 manifest（rclone 重寫）而列表回報的
+    檔案換了新 id。settle 必須重判；重查到上限還在換，就只能中止。
+    """
+
+    def __init__(self, inner: FakeDrive, *, folder_id: str, name: str) -> None:
+        self._inner = inner
+        self._folder_id = folder_id
+        self._name = name
+        self._n = 0
+        self._calls = 0
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def list_children(self, folder_id):
+        if folder_id != self._folder_id:
+            return self._inner.list_children(folder_id)
+        self._calls += 1
+        # 每次列舉前都把那一份 manifest「原地改寫」成新的 file id
+        # （Drive 改寫檔案會換 revision id；內容與雜湊不變）
+        current = [f for f in self._inner.list_children(folder_id) if f.name == self._name]
+        for f in current:
+            self._n += 1
+            content = self._inner.download_bytes(f.id, max_bytes=1 << 20)
+            new_id = self._inner.seed_file(
+                self._folder_id, self._name, content, file_id=f"{f.id}-r{self._n}"
+            )
+            self._inner._files.pop(f.id, None)
+            self._inner._contents.pop(f.id, None)
+            assert new_id  # 新 id 真的建出來了（否則 download 會失敗）
+        return self._inner.list_children(folder_id)
+
+
+def test_settle_aborts_and_keeps_pending_when_the_listing_never_settles(
+    bundles: dict, tmp_path: Path,
+):
+    """M2：重查用完上限、前綴**仍在變動** → 中止這一輪並保留 pending。
+
+    舊行為：第三次不論清單是否還在變動都回傳 DROPPED，等於「用完上限」就
+    照舊丟掉 pending——而 pending 是「這一輪 push 之後遠端會變成什麼」的唯一
+    說明，丟掉之後遠端就再也沒有人負責（impl1 的終局）。而且方向和
+    「主 manifest 缺失」那條路（raise）不一致。
+    """
+    st = _state(bundles, manifest_sha=bundles["m1sha"])
+    drive = FakeDrive()
+    prefix, listing = _seed_prefix(drive, bundles, bundles["m1"], ["b1"])
+    shifting = _ShiftingManifestIdDrive(drive, folder_id=prefix, name=MANIFEST_NAME)
+    with pytest.raises(MismatchError, match="保留待定釘選值"):
+        settle(st, _pending(bundles), listing, shifting,
+               workdir=tmp_path, clock=FixedClock())
+    # 進場列舉 1 次 + 每次判斷後的確認列舉（_MAX_RECHECK + 1 次）= 4 次；
+    # 用完之後中止，而不是硬把 pending 丟掉。
+    assert shifting._calls == 4
 
 
 def test_settle_two_matching_candidates_abort(bundles: dict, tmp_path: Path):
@@ -423,13 +529,14 @@ def _sweep_state(bundles: dict, **kw) -> PinState:
 
 
 def test_plan_sweep_manifest_roles(bundles: dict):
-    """主 manifest 只 KEEP 正式值；同名第二份、上一版冒充（非 .bak 名）→ QUARANTINE；
+    """主 manifest 只 KEEP 正式值；上一版冒充（非 .bak 名）→ QUARANTINE；
     .bak 只接受正式值或上一版；其他名稱 → QUARANTINE。
 
-    impl1：內容雜湊**既不是正式值也不是上一版**的 manifest 不再直接隔離——那正是
-    「釘選值還沒轉正、push 已經完成」的那一份，隔離它等於消滅真本（`git clone`
-    之後就找不到 manifest，而且沒有任何一輪能自己回來）。它被標成
-    NEED_MANIFEST_CHECK，讀完內容才決定：解析不出來 → 隔離。
+    review-1926cd3 H1：**已有 KEEP 候選時，同名的第二份主 manifest 直接隔離，
+    不讀內容**。rclone 更新 manifest 是原地更新，正常流程不會產生第二份同名
+    主 manifest，所以「KEEP 候選還在 + 又多一份同名檔」只可能是注入物。
+    舊規則在這裡會讀內容、看到合法就 HOLD，於是 `verify_clone` 的「恰好一份」
+    每輪都失敗——提交流程永久停擺，而且任何一個住民都做得到。
     """
     st = _sweep_state(bundles, prev=bundles["m1sha"])
     drive = FakeDrive()
@@ -444,20 +551,77 @@ def test_plan_sweep_manifest_roles(bundles: dict):
                           files=tuple(drive.list_children(prefix)), subfolders=tuple())
     decs = {d.file.id: d.disposition for d in plan_sweep(listing, st, repo_uuid=UUID)}
     assert decs[good] == Disposition.KEEP
-    assert decs[dup] == Disposition.NEED_MANIFEST_CHECK
+    assert decs[dup] == Disposition.QUARANTINE
     assert decs[prev_impostor] == Disposition.QUARANTINE
     assert decs[bak] == Disposition.KEEP
     assert decs[bak_bad] == Disposition.QUARANTINE
     assert decs[other] == Disposition.QUARANTINE
 
-    # 讀內容：junk-content 解析不出來 → 有證據是注入物 → 隔離
-    resolved = resolve_manifest_evidence(
-        plan_sweep(listing, st, repo_uuid=UUID), drive, {}, st,
-        repo_uuid=UUID, listing=listing, prefix_folder_id=prefix,
-    )
-    decs2 = {d.file.id: d.disposition for d in resolved}
-    assert decs2[dup] == Disposition.QUARANTINE
+    # 就算那份同名檔的內容**完全合法**（刪掉一行、引用的 bundle 都還在），
+    # 有 KEEP 候選在場時一樣隔離，而且不讀它的內容。
+    legal = drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"] + b"\n")
+    listing2 = RepoListing(prefix_folder_id=prefix,
+                           files=tuple(drive.list_children(prefix)), subfolders=tuple())
+    decs2 = {d.file.id: d.disposition for d in plan_sweep(listing2, st, repo_uuid=UUID)}
+    assert decs2[legal] == Disposition.QUARANTINE
     assert decs2[good] == Disposition.KEEP
+
+
+def test_plan_sweep_quarantines_second_legal_manifest_and_verify_clone_recovers(
+    bundles: dict,
+):
+    """H1 的完整案例：KEEP 候選 + 一份「刪一行的合法 manifest」→ 隔離，
+    下一輪的 `verify_clone`（要求主 manifest 恰好一份）恢復正常。
+
+    住民拿得到真正的 manifest 內容與 bundle 名稱，把真正那份刪掉一行放進去
+    就得到一個「解析得出來、引用的 bundle 都在」的同名 manifest。舊規則會
+    HOLD 它，於是 `verify_clone` 每一輪都以「主 manifest 數量異常」中止。
+    """
+    from aistorage.annex.fake import FakeAnnexGit
+    from aistorage.integrity.verify import verify_clone
+
+    st = _sweep_state(bundles, active=(bundles["b1"], bundles["b2"]))
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    official = drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"])
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"])
+    drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"])
+    # 合法但內容不同：多一個換行（解析仍通過，active 仍是 b1+b2）
+    forged = drive.seed_file(prefix, MANIFEST_NAME, bundles["m2"] + b"\n")
+
+    quarantine = drive.seed_folder("quarantine")
+    clock = FixedClock(CLOCK_T0)
+
+    def _sweep_once() -> int:
+        listing = RepoListing(
+            prefix_folder_id=prefix,
+            files=tuple(drive.list_children(prefix)),
+            subfolders=tuple(),
+        )
+        return apply_sweep(
+            plan_sweep(listing, st, repo_uuid=UUID),
+            drive, quarantine_folder_id=quarantine,
+            clock=clock, prefix_folder_id=prefix,
+        )
+
+    # 第 1 輪：那份同名 manifest 被隔離（搬走，不是刪除）
+    assert _sweep_once() == 1
+    assert [f.name for f in drive.list_children(prefix)].count(MANIFEST_NAME) == 1
+    assert forged not in [f.id for f in drive.list_children(prefix)]
+    assert official in [f.id for f in drive.list_children(prefix)]
+    assert any(
+        f.id == forged
+        for day in drive.list_children(quarantine)
+        if day.is_folder
+        for f in drive.list_children(day.id)
+    ), "隔離是搬到 quarantine/<日期>/ 底下，不是刪除"
+
+    # 第 2 輪起：前綴乾淨，什麼都不動（不會反覆搬移）
+    assert _sweep_once() == 0
+
+    # 隔離之後 verify_clone 通過（主 manifest 恰好一份且雜湊等於正式值）
+    git = FakeAnnexGit(refs=dict(st.refs))
+    verify_clone(git, st, drive=drive, prefix_folder_id=prefix)
 
 
 def test_plan_sweep_prev_manifest_with_normal_name_quarantined(bundles: dict):
@@ -502,24 +666,99 @@ def test_plan_sweep_bundle_rules(bundles: dict):
 def test_plan_sweep_annex_objects(bundles: dict):
     """key ∈ 釘選值且雜湊＋size 相符 → KEEP。
 
-    impl1：不在釘選值裡的物件分兩種——內容與 key 自稱值相符的（多半是「剛 push
-    上去、還沒轉正」）→ HOLD；不相符的（key 內嵌的雜湊／大小與內容對不上，
-    證據確鑿是注入物）→ QUARANTINE。
+    review-1926cd3 M1：**自洽不等於被背書**。不在釘選值、又不在
+    `pending.annex_keys` 裡的 annex 物件，舊規則會 HOLD（檔名自稱的 sha256／
+    大小與內容相符就留下），於是住民可以把自己的任意位元組以「檔名＝自己的
+    雜湊」的形式永久放存在真本前綴裡。現在沒有 pending 背書就隔離。
     """
     content = b"0123456789a"  # 11 bytes
     key = f"SHA256E-s11--{hashlib.sha256(content).hexdigest()}"
+    new_content = b"brand-new-raw"  # 13 bytes，這輪 push 上去的新物件
+    new_key = f"SHA256E-s13--{hashlib.sha256(new_content).hexdigest()}"
     st = _sweep_state(bundles, keys=frozenset({key}))
     drive = FakeDrive()
     prefix = drive.seed_folder("prefix")
     keep = drive.seed_file(prefix, key, content)
     orphan = drive.seed_file(prefix, f"SHA256E-s3--{hashlib.sha256(b'zzz').hexdigest()}", b"zzz")
     sizemismatch = drive.seed_file(prefix, key, b"short")
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"])
     listing = RepoListing(prefix_folder_id=prefix,
                           files=tuple(drive.list_children(prefix)), subfolders=tuple())
     decs = {d.file.id: d.disposition for d in plan_sweep(listing, st, repo_uuid=UUID)}
     assert decs[keep] == Disposition.KEEP
-    assert decs[orphan] == Disposition.HOLD
+    assert decs[orphan] == Disposition.QUARANTINE
     assert decs[sizemismatch] == Disposition.QUARANTINE
+
+    # 唯一可信的背書是 pending.annex_keys（push **之前**就寫進 pin repo）
+    drive2 = FakeDrive()
+    prefix2 = drive2.seed_folder("prefix")
+    drive2.seed_file(prefix2, MANIFEST_NAME, bundles["m1"])
+    pending_obj = drive2.seed_file(prefix2, new_key, new_content)
+    orphan2 = drive2.seed_file(
+        prefix2, f"SHA256E-s3--{hashlib.sha256(b'zzz').hexdigest()}", b"zzz"
+    )
+    listing2 = RepoListing(prefix_folder_id=prefix2,
+                           files=tuple(drive2.list_children(prefix2)), subfolders=tuple())
+    pend = _pending(bundles)
+    pend = PinPending(
+        repo=pend.repo, base_manifest_sha256=pend.base_manifest_sha256,
+        refs=pend.refs, annex_keys=frozenset({new_key}),
+        written_at=pend.written_at, run_id=pend.run_id,
+    )
+    decs2 = {
+        d.file.id: d.disposition
+        for d in plan_sweep(
+            listing2, st, repo_uuid=UUID,
+            policy=SweepPolicy(pending=pend, now=None),
+        )
+    }
+    assert decs2[pending_obj] == Disposition.HOLD
+    assert decs2[orphan2] == Disposition.QUARANTINE
+
+
+def test_plan_sweep_hold_has_an_age_limit(bundles: dict):
+    """M1：HOLD 設年齡上限——超過 `quarantine_retention_days` 就隔離並回報。
+
+    否則 HOLD 就是住民的永久存放區：釘選值一個禮拜都沒追上（pending 被丟掉、
+    管理操作卡住）的情況會無限期拖下去，而且沒有人知道。
+    """
+    content = b"brand-new-raw"
+    key = f"SHA256E-s13--{hashlib.sha256(content).hexdigest()}"
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"])
+    fresh = drive.seed_file(prefix, key, content)
+    old = drive.seed_file(
+        prefix, key.replace("s13", "s13"),
+        content, created_time="2026-08-01T00:00:00Z", file_id="old_file",
+    )
+    pend = PinPending(
+        repo="agora", base_manifest_sha256=bundles["m1sha"],
+        refs={"refs/heads/main": bundles["c2"]},
+        annex_keys=frozenset({key}), written_at="2026-09-27T01:00:00Z", run_id="run-2",
+    )
+    listing = RepoListing(prefix_folder_id=prefix,
+                          files=tuple(drive.list_children(prefix)), subfolders=tuple())
+    now = parse_rfc3339(CLOCK_T0)
+    decs = {
+        d.file.id: d
+        for d in plan_sweep(
+            listing, st, repo_uuid=UUID,
+            policy=SweepPolicy(pending=pend, hold_max_age_days=7, now=now),
+        )
+    }
+    assert decs[fresh].disposition == Disposition.HOLD
+    assert decs[old].disposition == Disposition.QUARANTINE
+    assert "超過" in decs[old].reason
+    # 兩個同名檔：只有舊的那一份被降級，apply_sweep 也只搬它
+    quarantine = drive.seed_folder("quarantine")
+    moved = apply_sweep(
+        list(decs.values()), drive, quarantine_folder_id=quarantine,
+        clock=FixedClock(CLOCK_T0), prefix_folder_id=prefix,
+    )
+    assert moved == 1
+    assert drive.get(old).parents[0] != prefix
 
 
 # ---------------------------------------------------------------------------
@@ -532,31 +771,107 @@ def test_plan_sweep_keeps_a_manifest_the_pin_has_not_caught_up_with(bundles: dic
     這種狀態下遠端有的是**真的** manifest（內容合法、它列的 bundle 都在前綴裡）
     與一個**真的**新 bundle。舊規則會把兩者都當注入物搬走，於是 `git clone`
     再也找不到 manifest，真本被提交流程自己消滅，而且沒有任何一輪能自己回來。
-    證明它是真的之後只能 HOLD（留在原地），不能 QUARANTINE。
+
+    證明它是真的之後只能 HOLD（留在原地），不能 QUARANTINE——而「證明」的
+    標準是 **pending**（review-1926cd3 M1）：pending 在 push 之前就寫定
+    「這一輪 push 之後遠端會變成什麼」，候選 manifest 重放出來的 refs 必須
+    等於 `pending.refs`。它列為 active 的新 bundle 也一併被背書。
+
+    注意這裡的前綴**沒有**那份舊的正式 manifest：rclone 是原地更新同一個檔案，
+    釘選值落後時前綴裡看不到舊內容（所以 H1 的「已有 KEEP 候選就隔離同名檔」
+    不會誤傷這個狀況）。
     """
     st = _sweep_state(bundles)  # 釘選值只有 b1
     drive = FakeDrive()
     prefix = drive.seed_folder("prefix")
-    official = drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"])
     keep_bundle = drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"])
     new_bundle = drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"])
     ahead = drive.seed_file(prefix, MANIFEST_NAME, bundles["m2"])  # b1+b2，釘選值還沒跟上
 
     listing = RepoListing(prefix_folder_id=prefix,
                           files=tuple(drive.list_children(prefix)), subfolders=tuple())
-    first = plan_sweep(listing, st, repo_uuid=UUID)
+    pend = _pending(bundles)  # refs == 重放 m2 的結果
+    first = plan_sweep(
+        listing, st, repo_uuid=UUID,
+        policy=SweepPolicy(pending=pend, now=None),
+    )
     by_id = {d.file.id: d for d in first}
-    assert by_id[official].disposition == Disposition.KEEP
     assert by_id[ahead].disposition == Disposition.NEED_MANIFEST_CHECK
-    assert by_id[new_bundle].disposition == Disposition.HOLD
-    assert by_id[keep_bundle].disposition == Disposition.KEEP
 
-    second = resolve_manifest_evidence(first, drive, {}, st, repo_uuid=UUID,
-                                       listing=listing, prefix_folder_id=prefix)
+    second = resolve_manifest_evidence(
+        first, drive, {}, st, repo_uuid=UUID,
+        listing=listing, prefix_folder_id=prefix,
+        policy=SweepPolicy(pending=pend, now=None),
+    )
     by_id2 = {d.file.id: d for d in second}
-    assert by_id2[ahead].disposition == Disposition.HOLD
-    assert by_id2[new_bundle].disposition == Disposition.HOLD
-    assert by_id2[official].disposition == Disposition.KEEP
+    assert by_id2[ahead].disposition == Disposition.HOLD, (
+        "重放出來的 refs 等於 pending.refs → 有背書，必須留著"
+    )
+    assert by_id2[new_bundle].disposition == Disposition.HOLD, (
+        "被 pending 對應的 manifest 列為 active 的 bundle 一併被背書"
+    )
+    assert by_id2[keep_bundle].disposition == Disposition.KEEP
+
+
+def test_manifest_without_pending_backing_is_need_admin_not_hold(bundles: dict):
+    """沒有 pending（或 refs 對不上）時不是 HOLD，而是 NEED_ADMIN。
+
+    HOLD 的意思是「有人替它背書、釘選值這一輪就會追上」；沒有 pending 就沒有
+    這種背書，於是它是 **NEED_ADMIN**：不搬移（沒有「是注入物」的證據，搬走
+    等於消滅真本），但健康檢查會報出檔名等人處理——而不是無限期地安靜留著。
+
+    這正是 impl1 的終局（pending 被丟掉、遠端領先釘選值）會遇到的分支。
+    """
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"])
+    drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"])
+    ahead = drive.seed_file(prefix, MANIFEST_NAME, bundles["m2"])
+    listing = RepoListing(prefix_folder_id=prefix,
+                          files=tuple(drive.list_children(prefix)), subfolders=tuple())
+
+    resolved = resolve_manifest_evidence(
+        plan_sweep(listing, st, repo_uuid=UUID, policy=SweepPolicy(now=None)),
+        drive, {}, st, repo_uuid=UUID, listing=listing, prefix_folder_id=prefix,
+        policy=SweepPolicy(now=None),
+    )
+    by_id = {d.file.id: d for d in resolved}
+    assert by_id[ahead].disposition == Disposition.NEED_ADMIN
+    assert "init-pin" in by_id[ahead].reason
+
+    # apply_sweep 不會搬它（真本不能被消滅）
+    quarantine = drive.seed_folder("quarantine")
+    moved = apply_sweep(resolved, drive, quarantine_folder_id=quarantine,
+                        clock=FixedClock(CLOCK_T0), prefix_folder_id=prefix)
+    assert moved == 0
+    assert ahead in [f.id for f in drive.list_children(prefix)]
+
+
+def test_resolve_manifest_evidence_needs_matching_pending_refs(bundles: dict):
+    """有 pending、但候選 manifest 重放出來的 refs 對不上 → NEED_ADMIN（不隔離）。
+
+    refs 對不上代表「沒有任何可信來源能解釋這份 manifest」。它還不是注入物
+    （內容合法、bundle 都在），所以不能隔離；但也沒有 pending 背書，所以不是
+    HOLD。這一輪會在 `verify_clone` 中止，等管理者用 init-pin 重建釘選值。
+    """
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"])
+    drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"])
+    ahead = drive.seed_file(prefix, MANIFEST_NAME, bundles["m2"])
+    listing = RepoListing(prefix_folder_id=prefix,
+                          files=tuple(drive.list_children(prefix)), subfolders=tuple())
+    wrong_pending = _pending(bundles, refs={"refs/heads/main": "0" * 40})
+
+    resolved = resolve_manifest_evidence(
+        plan_sweep(listing, st, repo_uuid=UUID, policy=SweepPolicy(now=None)),
+        drive, {}, st, repo_uuid=UUID, listing=listing, prefix_folder_id=prefix,
+        policy=SweepPolicy(pending=wrong_pending, now=None),
+    )
+    by_id = {d.file.id: d for d in resolved}
+    assert by_id[ahead].disposition == Disposition.NEED_ADMIN
 
 
 def test_resolve_manifest_evidence_quarantines_manifest_with_missing_bundles(
@@ -582,7 +897,12 @@ def test_resolve_manifest_evidence_quarantines_manifest_with_missing_bundles(
 
 
 def test_plan_sweep_quarantines_bundle_whose_name_lies(bundles: dict):
-    """自我一致但不在釘選值裡的 bundle → HOLD；檔名宣告與內容不符 → QUARANTINE。"""
+    """自我一致但沒有任何背書的 bundle → QUARANTINE；檔名宣告與內容不符 → QUARANTINE。
+
+    review-1926cd3 M1：舊規則是「自洽就 HOLD」，等於住民可以把自己的位元組
+    以「檔名＝自己的雜湊」的形式永久放存在真本前綴裡（前綴因此不再是
+    「只有釘選值背書的東西」）。現在自洽只是必要條件，還需要有人背書。
+    """
     st = _sweep_state(bundles)
     drive = FakeDrive()
     prefix = drive.seed_folder("prefix")
@@ -590,25 +910,102 @@ def test_plan_sweep_quarantines_bundle_whose_name_lies(bundles: dict):
     liar = drive.seed_file(prefix, bundles["b2"], b"payload-from-a-resident")
     listing = RepoListing(prefix_folder_id=prefix,
                           files=tuple(drive.list_children(prefix)), subfolders=tuple())
+    # 釘選值與前綴一致（主 manifest 的內容等於正式值）→ 自洽但沒背書就隔離
     decs = {d.file.id: d.disposition for d in plan_sweep(listing, st, repo_uuid=UUID)}
-    assert decs[honest] == Disposition.HOLD
-    assert decs[liar] == Disposition.QUARANTINE
+    assert decs[honest] == Disposition.NEED_ADMIN
+    assert decs[liar] == Disposition.QUARANTINE, "檔名宣告與內容不符永遠是注入物"
+
+    drive2 = FakeDrive()
+    prefix2 = drive2.seed_folder("prefix")
+    drive2.seed_file(prefix2, MANIFEST_NAME, bundles["m1"])
+    honest2 = drive2.seed_file(prefix2, bundles["b2"], bundles["b2_bytes"])
+    listing2 = RepoListing(prefix_folder_id=prefix2,
+                           files=tuple(drive2.list_children(prefix2)), subfolders=tuple())
+    decs2 = {d.file.id: d.disposition for d in plan_sweep(listing2, st, repo_uuid=UUID)}
+    assert decs2[honest2] == Disposition.QUARANTINE
+
+
+def test_unbacked_files_survive_only_while_the_pin_has_no_manifest(bundles: dict):
+    """M1 的閘門：釘選值與前綴一致時，自洽但沒背書的檔案一律隔離；
+    釘選值對前綴沒有權威時（沒有任何主 manifest 的內容等於正式值），
+    「不在釘選值裡」不足以指認注入物 → 不搬移，改列入健康檢查。
+
+    為什麼要有這個閘門：impl1 的終局就是 pending 被丟掉、遠端領先釘選值的
+    狀態。那時候前綴裡的「新 raw 物件／新 bundle」是真本的新世代，不是注入物。
+    照字面把「自洽但沒有背書 → 隔離」套上去，就會把它們搬走：raw 物件被隔離
+    之後 `init-pin` 會因為「釘選值記載的物件不在 Drive 上」而拒絕建立釘選值，
+    只能照 recovery runbook 模式 0 從隔離區搬回來。釘選值一旦追上（或管理者
+    init-pin），這些檔案在下一輪就會被正常隔離——所以不是永久存放區。
+    """
+    content = b"brand-new-raw"
+    key = f"SHA256E-s{len(content)}--{hashlib.sha256(content).hexdigest()}"
+
+    # (a) 前綴有 KEEP 候選：釘選值有權威 → 自洽但沒背書 → 隔離
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"])
+    self_consistent = drive.seed_file(prefix, key, content)
+    unbacked_bundle = drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"])
+    listing = RepoListing(prefix_folder_id=prefix,
+                          files=tuple(drive.list_children(prefix)), subfolders=tuple())
+    decs = {d.file.id: d.disposition for d in plan_sweep(listing, st, repo_uuid=UUID)}
+    assert decs[self_consistent] == Disposition.QUARANTINE
+    assert decs[unbacked_bundle] == Disposition.QUARANTINE
+
+    # (b) 前綴沒有 KEEP 候選（釘選值落後遠端）：不搬移，列入健康檢查
+    drive2 = FakeDrive()
+    prefix2 = drive2.seed_folder("prefix")
+    ahead = drive2.seed_file(prefix2, MANIFEST_NAME, bundles["m2"])
+    raw2 = drive2.seed_file(prefix2, key, content)
+    drive2.seed_file(prefix2, bundles["b1"], bundles["b1_bytes"])
+    drive2.seed_file(prefix2, bundles["b2"], bundles["b2_bytes"])
+    listing2 = RepoListing(prefix_folder_id=prefix2,
+                           files=tuple(drive2.list_children(prefix2)), subfolders=tuple())
+    decs2 = {
+        d.file.id: d.disposition
+        for d in plan_sweep(listing2, st, repo_uuid=UUID)
+    }
+    assert decs2[ahead] == Disposition.NEED_MANIFEST_CHECK
+    assert decs2[raw2] == Disposition.NEED_ADMIN
+    # apply_sweep 不會搬它們（真本不能被消滅）
+    quarantine = drive2.seed_folder("quarantine")
+    assert apply_sweep(
+        plan_sweep(listing2, st, repo_uuid=UUID), drive2,
+        quarantine_folder_id=quarantine, clock=FixedClock(CLOCK_T0),
+        prefix_folder_id=prefix2,
+    ) == 0
 
 
 def test_apply_sweep_never_moves_held_files(bundles: dict, tmp_path: Path):
-    """HOLD 只是「不動」，不是「漏處理」：apply_sweep 不會搬它。"""
+    """HOLD 只是「不動」，不是「漏處理」：apply_sweep 不會搬它。
+
+    NEED_ADMIN 同理——那是「沒有證據是注入物、也沒有任何背書」的狀態，
+    搬走等於消滅真本（impl1 的終局），所以它留在原地，改由健康檢查報出來。
+    """
     st = _sweep_state(bundles)
     drive = FakeDrive()
     prefix = drive.seed_folder("prefix")
     quarantine = drive.seed_folder("quarantine")
-    held = drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"])
+    new_raw = b"brand-new-raw"
+    key = f"SHA256E-s13--{hashlib.sha256(new_raw).hexdigest()}"
+    held = drive.seed_file(prefix, key, new_raw)
+    pend = PinPending(
+        repo="agora", base_manifest_sha256=bundles["m1sha"],
+        refs={"refs/heads/main": bundles["c2"]},
+        annex_keys=frozenset({key}), written_at="2026-09-27T01:00:00Z", run_id="run-2",
+    )
     listing = RepoListing(prefix_folder_id=prefix,
                           files=tuple(drive.list_children(prefix)), subfolders=tuple())
-    decisions = plan_sweep(listing, st, repo_uuid=UUID)
+    decisions = plan_sweep(
+        listing, st, repo_uuid=UUID,
+        policy=SweepPolicy(pending=pend, now=None),
+    )
+    assert {d.file.id: d.disposition for d in decisions}[held] == Disposition.HOLD
     moved = apply_sweep(decisions, drive, quarantine_folder_id=quarantine,
                         clock=FixedClock(), prefix_folder_id=prefix)
     assert moved == 0
-    assert [f.name for f in drive.list_children(prefix)] == [bundles["b2"]]
+    assert held in [f.id for f in drive.list_children(prefix)]
 
 
 def test_plan_sweep_missing_checksum_needs_content_check(bundles: dict):
