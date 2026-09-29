@@ -271,12 +271,32 @@ def _committer_env(e2e_settings: dict[str, Any]) -> dict[str, str]:
     return env
 
 
+#: **同一個 e2e 環境同一時間只跑一輪提交流程**（序列化）。
+#:
+#: 為什麼需要：提交流程是「讀 pin → 改 → 推回 pin repo」，兩輪重疊時後推的那一輪
+#: 會被 pin 的安全閘擋下來（`WriteError: 同一個 repo 的檔案在遠端已被改動`）。
+#: 實測（2026-09-30）：`prompt_with_commits`／`checkout_with_commits` 都在背景
+#: 執行提交流程，而 `join(timeout=60.0)` 比一輪還短（實測一輪 30〜90 秒：
+#: `annex.git.clone` 39 秒、`publisher.publish` 89 秒），於是背景那一輪被丟下、
+#: 測試本體的 `run_committer()` 與它重疊。閘本身是對的（不推就不破壞），
+#: 要修的是 harness 不要讓兩輪並跑。
+COMMITTER_LOCK = threading.Lock()
+
+#: 等背景提交流程收尾的上限。一輪實測 30〜90 秒（clone 39 秒、publish 89 秒），
+#: 給寬鬆一點；真的逾時也不會造成兩輪並跑（`COMMITTER_LOCK` 擋著）。
+COMMITTER_JOIN_TIMEOUT_S = 300.0
+
+
 @pytest.fixture
 def run_committer(e2e_settings) -> Callable[..., subprocess.CompletedProcess]:
     """在本機以 committer-test 身分執行提交流程 (python -m aistorage.committer run)。
 
     失敗時 raise（呼叫端不必再檢查 returncode）。`config_path` 可以覆寫設定檔
     （撤銷金鑰等安全測試用），`env_extra` 可以疊加環境變數。
+
+    **整個回合在 `COMMITTER_LOCK` 裡跑**：同一個 e2e 環境同時只允許一輪，
+    背景（`prompt_with_commits`／`checkout_with_commits`）與測試本體呼叫的是
+    同一把鎖，所以不會有兩輪同時推 pin。
     """
     default_cfg_path = str(e2e_settings["committer_config_path"])
     default_env = _committer_env(e2e_settings)
@@ -292,11 +312,15 @@ def run_committer(e2e_settings) -> Callable[..., subprocess.CompletedProcess]:
         env = dict(default_env)
         if env_extra:
             env.update(env_extra)
-        res = subprocess.run(
-            cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, env=env, timeout=timeout_s
-        )
+        with COMMITTER_LOCK:
+            res = subprocess.run(
+                cmd, cwd=str(REPO_ROOT), capture_output=True, text=True, env=env,
+                timeout=timeout_s,
+            )
         outcome = _record_committer_outcome(res.stdout)
-        print(f"[committer] {outcome}")
+        # 印出 run id：對應到 debug/run-<id>.log，重疊或中止時可以直接比對時間序。
+        m = re.search(r"\[RunReport ([0-9A-Z]+)\]", res.stdout or "")
+        print(f"[committer run={m.group(1) if m else '?'} {outcome}]")
         if res.returncode != 0:
             raise RuntimeError(
                 f"Committer 執行失敗 (rc={res.returncode}, {outcome}):\n"
@@ -502,7 +526,10 @@ class ResidentContainerHandle:
             response = self.send(sid, text, timeout_s=timeout_s)
         finally:
             stop.set()
-            thread.join(timeout=60.0)
+            # 必須等這輪跑完再把控制權交回測試本體：一輪 30〜90 秒，
+            # join 60 秒會留下孤兒執行緒，與後面的 run_committer() 重疊推 pin。
+            # 真跑不完（逾時）也不會重疊——COMMITTER_LOCK 擋著。
+            thread.join(timeout=COMMITTER_JOIN_TIMEOUT_S)
         # 提交流程每一輪的結果都留下來：A 線目前有兩種會中止的情況
         # （verify_after_push 的 MismatchError、write_pending 的 WriteError），
         # 測試要能回答「這一輪中止了幾次」而不是只看最後有沒有成功。
@@ -712,7 +739,10 @@ class ResidentContainerHandle:
                                    extra_args=extra_args, check=False)
         finally:
             stop.set()
-            thread.join(timeout=60.0)
+            # 必須等這輪跑完再把控制權交回測試本體：一輪 30〜90 秒，
+            # join 60 秒會留下孤兒執行緒，與後面的 run_committer() 重疊推 pin。
+            # 真跑不完（逾時）也不會重疊——COMMITTER_LOCK 擋著。
+            thread.join(timeout=COMMITTER_JOIN_TIMEOUT_S)
         self.committer_tally = dict(tally)
         print(f"[e2e:{self.name}] checkout 期間提交流程 {tally or '（沒有跑成）'}"
               + (f" 例外：{errors[-1][:160]}" if errors else ""))

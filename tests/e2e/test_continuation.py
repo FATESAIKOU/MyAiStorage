@@ -36,8 +36,15 @@ from .conftest import (
     wire_prefix,
 )
 
-#: 容器內的起點包目錄（`/work` 就是該容器的工作目錄，宿主機讀得到同一份）
-PKG_DIR = "/work/pkg-1to1"
+def _package_dir(label: str) -> str:
+    """容器內的起點包目錄，**每次呼叫都不同**。
+
+    `/work` 就是該容器的工作目錄（容器刪掉之後目錄還在），而 `agora checkout`
+    拒絕覆蓋非空的目錄（ADR 0010「被拒就不產出」的同一個原則）。用固定名稱的話，
+    同一個環境重跑第二次就會撞上「目錄已經有東西」——那是上一輪的產物，不是
+    checkout 的問題。所以名稱帶一次性的後綴。
+    """
+    return f"/work/pkg-{label}-{generate_ulid()[-8:]}"
 
 
 def _message_text(message: dict) -> str:
@@ -67,6 +74,7 @@ def test_continuation_1_to_1(resident_pool, run_committer, e2e_reader: AgoraRead
     四種 Session 關係裡的 1→1，**不經交接單**也能記錄接續（2bc0785）。
     """
     canary = f"CANARY-1TO1-{generate_ulid()}"
+    package_dir = _package_dir("1to1")
 
     # 1. S1 講幾句（第一則帶一次工具呼叫），明確同步＋提交
     c1 = resident_pool("e2e-1to1-s1")
@@ -99,20 +107,20 @@ def test_continuation_1_to_1(resident_pool, run_committer, e2e_reader: AgoraRead
     # 2. 直接從 session 起點 checkout（不經交接單）→ 起點包 → S2
     c2 = resident_pool("e2e-1to1-s2")
     res = c2.checkout_with_commits(
-        [s1_agora], PKG_DIR, run_committer,
+        [s1_agora], package_dir, run_committer,
         task="接著把這一則做完",
     )
     assert res.returncode == 0, (
         f"agora checkout 失敗 (rc={res.returncode})\n"
         f"STDOUT: {res.stdout[-1500:]}\nSTDERR: {res.stderr[-1500:]}"
     )
-    s2_id = c2.opencode_load(PKG_DIR)
+    s2_id = c2.opencode_load(package_dir)
     assert s2_id, "agora-opencode load 必須印出新 session id"
     s2_agora = agora_session_id(s2_id)
     assert s2_agora != s1_agora, "S2 必須是不同的 Session"
 
     # 3. 起點包：直接起點沒有交接單、沒有認領，原料與被釘住的快照同一個位元組
-    pkg, raws = _package_on_host(c2, PKG_DIR)
+    pkg, raws = _package_on_host(c2, package_dir)
     assert len(pkg["segments"]) == 1, f"起點包必須只有一段，實際 {len(pkg['segments'])}"
     segment = pkg["segments"][0]
     assert segment["source_session_id"] == s1_agora
@@ -121,7 +129,11 @@ def test_continuation_1_to_1(resident_pool, run_committer, e2e_reader: AgoraRead
         "起點包的接續點必須是被釘住快照裡最後一則已完成的訊息"
     )
     assert segment["handoff_id"] is None, "直接起點不經交接單"
-    assert segment["claim_id"] is None
+    # `claim_id` 記的是「登記這條接續的項目」：交接單起點是 `claim:`（認領），
+    # 直接起點是 `continuation:`（接續單）。這裡要斷言後者，才不會被誤認成認領。
+    assert str(segment["claim_id"]).startswith("continuation:"), (
+        f"直接起點應該由接續單登記，實際 {segment['claim_id']!r}"
+    )
     assert pkg["new_session"]["claimed_handoffs"] == [], "直接起點沒有認領"
     assert pkg["new_session"]["session_id"] == s2_agora
     assert hashlib.sha256(raws[0]).hexdigest().lower() == pinned_sha
@@ -132,10 +144,19 @@ def test_continuation_1_to_1(resident_pool, run_committer, e2e_reader: AgoraRead
     assert wire_prefix(s2_export) == wire_prefix(json.loads(raws[0]), cont_message_id), (
         "S2 送給模型的開頭必須與 S1 在接續點之前的內容位元組相同"
     )
-    # 接續點那一則**含在內**（新 session 從它之後開始寫）
+    # 接續點那一則**含在內**（新 session 從它之後開始寫）。
+    # 注意：**不能拿 id 跨這條界線比**——`opencode import` 會重編訊息 id
+    # （轉接器先編一次，opencode 自己再編一次），所以「接續點是���後一則」要看
+    # 則數與位元組，不是看 id。位元組比對已經證明內容一模一樣。
+    raw_messages = json.loads(raws[0])["messages"]
+    expected_count = next(
+        i for i, m in enumerate(raw_messages)
+        if m["info"]["id"] == cont_message_id
+    ) + 1
     s2_message_ids = export_message_ids(s2_export)
-    assert s2_message_ids[-1] == cont_message_id, (
-        f"S2 開頭的最後一則必須就是接續點 {cont_message_id}，實際 {s2_message_ids[-1]}"
+    assert len(s2_message_ids) == expected_count, (
+        f"S2 開頭必須剛好是接續點（含）為止的 {expected_count} 則，"
+        f"實際 {len(s2_message_ids)} 則"
     )
 
     # 5. S2 有一條接續 Link 指向 S1，接續點正確；S1 那邊也查得到

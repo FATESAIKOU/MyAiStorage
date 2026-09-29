@@ -26,6 +26,7 @@ import pytest
 
 from aistorage.agora_cli.package import read_package
 from aistorage.reader import AgoraReader
+from aistorage.schema import generate_ulid
 
 from .conftest import (
     agora_session_id,
@@ -35,8 +36,10 @@ from .conftest import (
     wire_prefix,
 )
 
-PKG_DIR = "/work/pkg-s4"
-PKG_DIR_TOO_LONG = "/work/pkg-s4-too-long"
+def _package_dir(label: str) -> str:
+    """容器內的起點包目錄，**每次呼叫都不同**（`/work` 在容器刪掉之後還在，
+    而 `agora checkout` 拒絕覆蓋非空目錄——固定名稱會讓重跑撞上上一輪的產物）。"""
+    return f"/work/pkg-{label}-{generate_ulid()[-8:]}"
 
 
 def _open_handoff_for(reader: AgoraReader, session_id: str):
@@ -94,8 +97,9 @@ def test_9_2_consolidation_n_to_1(resident_pool, run_committer, e2e_reader: Agor
     # 3. 超出 context 上限要**明確拒絕、不產出**（先跑這一條，確認它與後面的
     #    成功路徑無關：被拒時連認領都還沒送出）
     c4 = resident_pool("e2e-s4-consolidator")
+    too_long_dir = _package_dir("s4-too-long")
     too_long = c4.checkout_with_commits(
-        startpoints, PKG_DIR_TOO_LONG, run_committer,
+        startpoints, too_long_dir, run_committer,
         task="整合兩邊的成果", extra_args=["--max-chars", "1"],
     )
     assert too_long.returncode == 2, (
@@ -105,7 +109,7 @@ def test_9_2_consolidation_n_to_1(resident_pool, run_committer, e2e_reader: Agor
     assert "超過上限" in too_long.stderr, (
         f"拒絕訊息要說清楚是長度上限：{too_long.stderr[-800:]}"
     )
-    assert not (c4.work_dir / "pkg-s4-too-long").exists(), (
+    assert not (c4.work_dir / too_long_dir.removeprefix("/work/")).exists(), (
         "被拒就不產出起點包（目錄不該被建立）"
     )
     # 被拒的那一次沒有送出認領：兩張交接單還是沒人接
@@ -113,21 +117,22 @@ def test_9_2_consolidation_n_to_1(resident_pool, run_committer, e2e_reader: Agor
         assert e2e_reader.get_continuation(hid).value.handoff.claimed_by_session_id is None
 
     # 4. 真的 checkout 兩個起點 → 起點包 → agora-opencode load → S4
+    package_dir = _package_dir("s4")
     res = c4.checkout_with_commits(
-        startpoints, PKG_DIR, run_committer,
+        startpoints, package_dir, run_committer,
         task="把 S2 的後端與 S3 的前端整合成一份可以上線的說明",
     )
     assert res.returncode == 0, (
         f"agora checkout 失敗 (rc={res.returncode})\n"
         f"STDOUT: {res.stdout[-1500:]}\nSTDERR: {res.stderr[-1500:]}"
     )
-    s4_id = c4.opencode_load(PKG_DIR)
+    s4_id = c4.opencode_load(package_dir)
     assert s4_id, "agora-opencode load 必須印出新 session id"
     s4_agora = agora_session_id(s4_id)
     assert s4_agora not in (s2_agora, s3_agora)
 
     # 5. 起點包：兩段都在、原料與真本同一個位元組，而且**最長的一段在最前面**
-    pkg, raws = _package_on_host(c4, PKG_DIR)
+    pkg, raws = _package_on_host(c4, package_dir)
     segments = pkg["segments"]
     assert len(segments) == 2, f"起點包必須有兩段，實際 {len(segments)}"
     first, second = segments[0], segments[1]

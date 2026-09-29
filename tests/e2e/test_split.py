@@ -42,10 +42,15 @@ from .conftest import (
     wire_prefix,
 )
 
-#: 容器內的起點包目錄（`/work` 就是 `ResidentContainerHandle.work_dir`，
-#: 所以宿主機上讀得到同一份，用來驗位元組與 sha）。
-PKG_DIR = "/work/pkg-s2"
-PKG_DIR_S3 = "/work/pkg-s3"
+def _package_dir(label: str) -> str:
+    """容器內的起點包目錄，**每次呼叫都不同**。
+
+    `/work` 就是 `ResidentContainerHandle.work_dir`（容器刪掉之後目錄還在，宿主機
+    上讀得到同一份，用來驗位元組與 sha），而 `agora checkout` 拒絕覆蓋非空的
+    目錄。固定名稱的話，同一個環境重跑第二次就會撞上「目錄已經有東西」——那是
+    上一輪的產物，不是 checkout 的問題。
+    """
+    return f"/work/pkg-{label}-{generate_ulid()[-8:]}"
 
 
 def _message_text(message: dict) -> str:
@@ -150,8 +155,10 @@ def test_9_1_split_1_to_n(resident_pool, run_committer, e2e_reader: AgoraReader)
         )
         return container.opencode_load(package_dir)
 
-    s2_id = _build(c2, h1, PKG_DIR)
-    s3_id = _build(c3, h2, PKG_DIR_S3)
+    pkg_dir_s2 = _package_dir("s2")
+    pkg_dir_s3 = _package_dir("s3")
+    s2_id = _build(c2, h1, pkg_dir_s2)
+    s3_id = _build(c3, h2, pkg_dir_s3)
     assert s2_id and s3_id, "agora-opencode load 必須印出新 session id"
     s2_agora, s3_agora = agora_session_id(s2_id), agora_session_id(s3_id)
     assert s2_agora != s3_agora, "S2 與 S3 必須是不同 Session"
@@ -160,8 +167,8 @@ def test_9_1_split_1_to_n(resident_pool, run_committer, e2e_reader: AgoraReader)
     # 5. 起點包裡的原始紀錄就是被釘住的那一份真本（`read_package` 已驗過
     #    package.json 記的 sha；這裡再對上交接單釘的快照），而且 S2、S3 拿到
     #    的是同一個位元組
-    pkg2, raws2 = _package_on_host(c2, PKG_DIR)
-    pkg3, raws3 = _package_on_host(c3, PKG_DIR_S3)
+    pkg2, raws2 = _package_on_host(c2, pkg_dir_s2)
+    pkg3, raws3 = _package_on_host(c3, pkg_dir_s3)
     pinned = cont_h1_before.handoff
     assert hashlib.sha256(raws2[0]).hexdigest().lower() == pinned.snapshot_sha256
     assert raws2[0] == raws3[0], "兩張交接單釘的是同一份快照，原料必須同一個位元組"

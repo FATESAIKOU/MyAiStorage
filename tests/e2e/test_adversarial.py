@@ -230,9 +230,13 @@ def test_9_4_duplicate_checkout_produces_no_package(
 
     # 第一個接手者：checkout 成功
     # handoff_id 本身已經是 `handoff:<ULID>` 的完整形式，不要再加前綴
+    # 輸出目錄帶一次性後綴：`/work` 在容器刪掉之後還在，而 checkout 拒絕覆蓋
+    # 非空目錄，固定名稱會讓重跑撞上上一輪的產物。
+    first_dir = f"/work/pkg-first-{generate_ulid()[-8:]}"
+    second_dir = f"/work/pkg-second-{generate_ulid()[-8:]}"
     first = resident_pool("e2e-adv-first")
     ok = first.checkout_with_commits(
-        [handoff.handoff_id], "/work/pkg-first", run_committer,
+        [handoff.handoff_id], first_dir, run_committer,
         task="第一個接手者",
     )
     assert ok.returncode == 0, (
@@ -249,7 +253,7 @@ def test_9_4_duplicate_checkout_produces_no_package(
     # 第二個接手者：同一張再 checkout 一次，必須被明確拒絕
     second = resident_pool("e2e-adv-second")
     dupe = second.checkout_with_commits(
-        [handoff.handoff_id], "/work/pkg-second", run_committer,
+        [handoff.handoff_id], second_dir, run_committer,
         task="第二個接手者",
     )
     assert dupe.returncode == 6, (
@@ -259,7 +263,7 @@ def test_9_4_duplicate_checkout_produces_no_package(
     text = dupe.stdout + dupe.stderr
     assert "already_claimed" in text, f"拒絕原因要說 already_claimed：{text[-800:]}"
     assert "沒有產出起點包" in text, f"要明說沒有產出起點包：{text[-800:]}"
-    assert not (second.work_dir / "pkg-second").exists(), (
+    assert not (second.work_dir / second_dir.removeprefix("/work/")).exists(), (
         "被拒就不產出起點包（目錄不該被建立）"
     )
 
