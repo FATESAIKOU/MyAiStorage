@@ -180,14 +180,17 @@ def test_health_reports_unbacked_prefix_files_with_names() -> None:
         ),
         clock=FixedClock("2026-09-27T10:00:00Z"),
     )
-    assert held_key in data.held_files
-    assert old_key in data.held_stale_files
-    assert f"GITMANIFEST--{uuid}" in data.held_files
+    # 檔名後面帶著 Drive 的建立時間（review-903d7e2 M1）：只給檔名時分不出哪
+    # 一份才是真的（前綴裡可能有 rclone 自己留下的重複 manifest）。
+    assert any(x.startswith(held_key + "@") for x in data.held_files)
+    assert any(x.startswith(old_key + "@") for x in data.held_stale_files)
+    assert any(x.startswith(f"GITMANIFEST--{uuid}@") for x in data.held_files)
+    assert all("@" in x for x in data.held_files)
 
     checks = run_health(data, now=NOW)
     c = _by_name(checks, "held_files")
     assert c.status == "warn"
-    assert old_key in c.value
+    assert any(old_key in v for v in c.value.split("、"))
     assert summarize(checks) == "warn"
 
 

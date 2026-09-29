@@ -145,13 +145,19 @@ def test_injected_artifacts_are_quarantined_and_next_round_recovers(
     assert report.ok is True, f"注入後這一輪應該要成功，中止於 {report.aborted_at}:{report.code}"
     assert report.counts["rejected"] == 0
     assert report.counts["accepted"] == 1
-    assert report.counts["quarantined_files"] >= 5, report.counts
+    assert report.counts["quarantined_files"] >= 4, report.counts
     assert report.counts["held_files"] == 0, (
         f"注入物不該被 HOLD（等於讓它留在真本裡）: {report.held_files}"
     )
-    assert report.counts["need_admin_files"] == 0, (
-        f"注入物不該變成 NEED_ADMIN（等於沒有人處理的假訊號）: "
-        f"{report.need_admin_files}"
+    # (1) 那份與正式 manifest **位元組完全相同**的副本：分不出哪一份才是真的
+    # （rclone 每輪 push 都重寫 manifest、file id 會變，createdTime 判不出真身，
+    #  實測見 tests/integration/test_committer_dup_manifest.py），所以不搬移、
+    #  列入報告等人判斷。(1b) 多一個換行那份是內容不同 → 照樣隔離。
+    assert report.counts["need_admin_files"] == 1, (
+        f"只有位元組相同的那份該是 NEED_ADMIN: {report.need_admin_files}"
+    )
+    assert report.need_admin_files[0].startswith(manifest_name + "@"), (
+        f"need_admin 應該是主 manifest 的重複檔: {report.need_admin_files}"
     )
 
     # 隔離是搬走，不是刪除：隔離資料夾裡（依日期分層）應該找得到那幾樣東西
@@ -159,7 +165,7 @@ def test_injected_artifacts_are_quarantined_and_next_round_recovers(
     assert fake_bundle in quarantined, quarantined
     assert orphan in quarantined, quarantined
     assert sub.name in quarantined, quarantined
-    # 冒充的 manifest 有兩份被搬走（另一份是合法的主 manifest，仍留在前綴）
+    # 冒充的 manifest（多一個換行那份）被搬走；位元組相同的那份留在前綴
     assert real_manifest.name in quarantined, quarantined
 
     # 真本裡不再有注入物，只剩 git-remote-annex 自己的東西（manifest／bundle／annex 物件）
@@ -168,12 +174,17 @@ def test_injected_artifacts_are_quarantined_and_next_round_recovers(
     assert orphan not in after, "未引用的 annex 物件還留在真本裡"
     assert sub.name not in after, "子資料夾還留在真本裡"
     assert manifest_name in after, "合法的主 manifest 不該被搬走"
-    # H1：主 manifest 恰好一份（`verify_clone` 就是這樣檢查的）
+    # H1：主 manifest 可以有兩份同名檔（rclone 自己留下的），但**只有一種內容**，
+    # 而且那份內容就是轉正後的正式值（`verify_clone` 就是這樣檢查的）
     main_manifests = [
         f for f in real_drive.list_children(prefix_id) if f.name == manifest_name
     ]
-    assert len(main_manifests) == 1, (
-        f"主 manifest 必須恰好一份（否則 verify_clone 每一輪都中止）: "
+    assert len({f.sha256 for f in main_manifests}) == 1, (
+        f"主 manifest 的內容必須只有一種（否則 verify_clone 每一輪都中止）: "
+        f"{[(f.id, f.sha256) for f in main_manifests]}"
+    )
+    assert len(main_manifests) <= 2, (
+        f"注入一份之後最多兩份同名 manifest（一份正式＋一份位元組相同的副本）: "
         f"{[f.id for f in main_manifests]}"
     )
     promoted, pending_now = pins.load(cfg.repo)

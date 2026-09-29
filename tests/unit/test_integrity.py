@@ -717,26 +717,37 @@ def test_plan_sweep_annex_objects(bundles: dict):
 
 
 def test_plan_sweep_hold_has_an_age_limit(bundles: dict):
-    """M1：HOLD 設年齡上限——超過 `quarantine_retention_days` 就隔離並回報。
+    """M1：HOLD 設年齡上限——超過 `quarantine_retention_days` 就升級成 NEED_ADMIN。
 
     否則 HOLD 就是住民的永久存放區：釘選值一個禮拜都沒追上（pending 被丟掉、
     管理操作卡住）的情況會無限期拖下去，而且沒有人知道。
+
+    review-903d7e2 L：**升級成 NEED_ADMIN 而不是自動隔離**。逾齡代表 pending 卡了
+    一整週，這時候被隔離的很可能**就是真正的新世代**（impl1 事故的形狀：把新 raw
+    物件當注入物搬走，之後 `init-pin` 斷言它們在 Drive 上）。所以不搬移，改由健康
+    檢查報出「可能是真本」讓管理者判斷。
+
+    （兩個檔用**不同的 key**：同名同內容的副本現在由 createdTime 決勝，那條規則在
+    另一個測試裡。）
     """
-    content = b"brand-new-raw"
-    key = f"SHA256E-s13--{hashlib.sha256(content).hexdigest()}"
+    fresh_content = b"brand-new-raw"
+    old_content = b"stuck-for-a-week"
+    fresh_key = f"SHA256E-s13--{hashlib.sha256(fresh_content).hexdigest()}"
+    old_key = f"SHA256E-s16--{hashlib.sha256(old_content).hexdigest()}"
     st = _sweep_state(bundles)
     drive = FakeDrive()
     prefix = drive.seed_folder("prefix")
     drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"])
-    fresh = drive.seed_file(prefix, key, content)
+    fresh = drive.seed_file(prefix, fresh_key, fresh_content)
     old = drive.seed_file(
-        prefix, key.replace("s13", "s13"),
-        content, created_time="2026-08-01T00:00:00Z", file_id="old_file",
+        prefix, old_key, old_content,
+        created_time="2026-08-01T00:00:00Z", file_id="old_file",
     )
     pend = PinPending(
         repo="agora", base_manifest_sha256=bundles["m1sha"],
         refs={"refs/heads/main": bundles["c2"]},
-        annex_keys=frozenset({key}), written_at="2026-09-27T01:00:00Z", run_id="run-2",
+        annex_keys=frozenset({fresh_key, old_key}),
+        written_at="2026-09-27T01:00:00Z", run_id="run-2",
     )
     listing = RepoListing(prefix_folder_id=prefix,
                           files=tuple(drive.list_children(prefix)), subfolders=tuple())
@@ -749,16 +760,17 @@ def test_plan_sweep_hold_has_an_age_limit(bundles: dict):
         )
     }
     assert decs[fresh].disposition == Disposition.HOLD
-    assert decs[old].disposition == Disposition.QUARANTINE
+    assert decs[old].disposition == Disposition.NEED_ADMIN
     assert "超過" in decs[old].reason
-    # 兩個同名檔：只有舊的那一份被降級，apply_sweep 也只搬它
+    assert "可能是真本" in decs[old].reason
+    # 逾齡的不再自動隔離：apply_sweep 一個都不搬（搬掉的可能就是真本）
     quarantine = drive.seed_folder("quarantine")
     moved = apply_sweep(
         list(decs.values()), drive, quarantine_folder_id=quarantine,
         clock=FixedClock(CLOCK_T0), prefix_folder_id=prefix,
     )
-    assert moved == 1
-    assert drive.get(old).parents[0] != prefix
+    assert moved == 0
+    assert drive.get(old).parents[0] == prefix
 
 
 # ---------------------------------------------------------------------------
@@ -1178,9 +1190,19 @@ def test_verify_clone_ok_and_mismatches(bundles: dict):
                                         "refs/heads/evil": bundles["c1"]}),
                      st, drive=drive, prefix_folder_id=prefix)
 
+    # 位元組相同的第二份主 manifest（rclone 每輪 push 都重寫 manifest、同一輪
+    # push 內也可能因 Drive 列表落後留下兩份，實測 1.75.1 與 1.69.3）：這是
+    # **健康狀態**，clone 驗證不該因此失敗（review-903d7e2）。
     drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"])
-    with pytest.raises(MismatchError):
+    verify_clone(git, st, drive=drive, prefix_folder_id=prefix)
+    precheck(drive, prefix, MANIFEST_NAME, st)
+
+    # 內容不同的第二份仍然是注入物 → 中止
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m2"])
+    with pytest.raises(MismatchError, match="內容不一致"):
         verify_clone(git, st, drive=drive, prefix_folder_id=prefix)
+    with pytest.raises(MismatchError, match="內容不一致"):
+        precheck(drive, prefix, MANIFEST_NAME, st)
 
 
 def test_verify_clone_missing_checksum(bundles: dict):
@@ -1714,3 +1736,290 @@ def test_run_settle_and_sweep_promoted_writes_pins(bundles: dict, tmp_path: Path
     assert loaded.refs == {"refs/heads/main": bundles["c2"]}
     assert loaded.manifest_sha256 == bundles["m2sha"]
     assert no_pending is None
+
+
+# ---------------------------------------------------------------------------
+# review-903d7e2 H1／M1／M2：重複檔用 createdTime 決勝、偏離時的注入物證據
+# ---------------------------------------------------------------------------
+
+#: 提交流程那一輪 push 的時刻（manifest 就是在這個時候之後被 rclone 寫出來的）
+PUSH_AT = "2026-09-27T02:00:00Z"
+#: 比 push 早：真正的 manifest／bundle／物件（正常流程先上傳它們，最後才寫 manifest）
+BEFORE_PUSH = "2026-09-27T01:59:00Z"
+#: 比 push 晚十分鐘以上：正常流程不可能有這種東西（`INJECTION_SKEW_GRACE` 之後）
+AFTER_PUSH = "2026-09-27T02:30:00Z"
+
+
+def _decide(drive: FakeDrive, st: PinState, **policy) -> dict[str, SweepDecision]:
+    prefix = policy.pop("prefix")
+    listing = RepoListing(
+        prefix_folder_id=prefix,
+        files=tuple(drive.list_children(prefix)),
+        subfolders=(),
+    )
+    return {
+        d.file.id: d
+        for d in plan_sweep(listing, st, repo_uuid=UUID, prefix_folder_id=prefix, **policy)
+    }
+
+
+def test_h1_dup_active_bundle_keeps_the_earlier_created_one(bundles: dict):
+    """住民上傳一份位元組相同的 active bundle 副本，而且排在清單**最前面**。
+
+    舊規則是「清單裡的第一個留著」，清單順序 Drive 不保證，所以住民可以一直重試
+    直到自己的副本被留下、真正的那份被隔離；`verify_after_push` 與
+    `verify_pin_keys_on_drive` 之後每一輪都失敗。createdTime 是住民偽造不了的，
+    而且 bundle 一個世代只上傳一次 → 副本一定比較晚。
+    """
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"])
+    official = drive.seed_file(
+        prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH,
+    )
+    # 副本**先**放進清單（FakeDrive 的 list_children 依建立順序回傳）
+    copy_id = drive.seed_file(
+        prefix, bundles["b1"], bundles["b1_bytes"], created_time=AFTER_PUSH,
+    )
+    decs = _decide(drive, st, prefix=prefix)
+    assert decs[official].disposition == Disposition.KEEP
+    assert decs[copy_id].disposition == Disposition.QUARANTINE
+    assert "建立最早" in decs[copy_id].reason
+
+
+def test_h1_dup_annex_object_keeps_the_earlier_created_one(bundles: dict):
+    """釘選值記載的 annex 物件也一樣：副本（晚建立、位元組相同）被隔離。"""
+    body = b"a-raw-record"
+    key = f"SHA256E-s{len(body)}--{hashlib.sha256(body).hexdigest()}"
+    st = _sweep_state(bundles, keys=frozenset({key}))
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"])
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    official = drive.seed_file(prefix, key, body, created_time=BEFORE_PUSH)
+    copy_id = drive.seed_file(prefix, key, body, created_time=AFTER_PUSH)
+    decs = _decide(drive, st, prefix=prefix)
+    assert decs[official].disposition == Disposition.KEEP
+    assert decs[copy_id].disposition == Disposition.QUARANTINE
+    assert "建立最早" in decs[copy_id].reason
+
+
+def test_h1_identical_official_manifest_duplicates_are_left_alone(bundles: dict):
+    """位元組相同的主 manifest 重複：**兩份都不搬**，只有最早那份 KEEP。
+
+    為什麼不用 createdTime 決勝（review-903d7e2 的前提是錯的）：rclone 每輪 push
+    都重寫 manifest、**file id 每輪都會變**（實測 1.75.1 與 1.69.3），所以正式那份
+    的 createdTime 是「上一輪 push 的時間」；而 manifest 的內容在好幾輪 push 之間
+    可以位元組相同，於是住民的舊副本可能比正式那份還早——留最早和留最新都各被居民
+    贏一次，而贏了的代價是隔離真本。而且健康前綴本來就可能有兩份同名同內容
+    （同一輪 push 內 Drive 列表落後，實測每輪都會發生）。
+
+    所以：分不出真身就不動手，改列入健康檢查等人判斷（附建立時間）。
+    `verify_clone`／`precheck`／`verify_after_push` 也改成要求「只有一種內容」，
+    push 與 clone 在有這種重複時都實測正常。
+    """
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    official = drive.seed_file(
+        prefix, MANIFEST_NAME, bundles["m1"], created_time=BEFORE_PUSH,
+    )
+    copy_id = drive.seed_file(
+        prefix, MANIFEST_NAME, bundles["m1"], created_time=AFTER_PUSH,
+    )
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    decs = _decide(drive, st, prefix=prefix)
+    assert decs[official].disposition == Disposition.KEEP
+    assert decs[copy_id].disposition == Disposition.NEED_ADMIN
+    assert "created=" in decs[copy_id].reason
+    # 而且一個都不搬
+    quarantine = drive.seed_folder("quarantine")
+    assert apply_sweep(
+        list(decs.values()), drive, quarantine_folder_id=quarantine,
+        clock=FixedClock(CLOCK_T0), prefix_folder_id=prefix,
+    ) == 0
+    assert drive.get(copy_id).parents[0] == prefix
+
+
+def test_h1_verify_clone_accepts_identical_duplicate_manifests(bundles: dict):
+    """前綴裡有兩份位元組相同的主 manifest 時，clone 驗證與預檢都要通過。"""
+    st = _state(bundles, manifest_sha=bundles["m1sha"])
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"], created_time=BEFORE_PUSH)
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"], created_time=AFTER_PUSH)
+    git = FakeAnnexGit(refs={"refs/heads/main": bundles["c1"]})
+    verify_clone(git, st, drive=drive, prefix_folder_id=prefix)
+    precheck(drive, prefix, MANIFEST_NAME, st)
+
+
+def test_m1_deviation_quarantines_files_created_after_the_last_manifest_write(
+    bundles: dict,
+):
+    """偏離期間（釘選值對前綴沒有權威）仍然隔得掉注入物——證據是 createdTime。
+
+    正常流程一定先上傳物件與 bundle、最後才重寫 manifest，所以建立時間晚於主
+    manifest 最後一次寫入的檔案不屬於遠端任何一個世代。沒有 pending 時這些檔案
+    會是 NEED_ADMIN（impl1 的終局就是新世代物件被搬走）；有了這條證據之後，
+    偏離期間住民放的垃圾檔照樣隔離，而真正的物件（push 之前建立）不動。
+    """
+    ahead = bundles["m2"]
+    ahead_sha = hashlib.sha256(ahead).hexdigest()
+    st = _sweep_state(bundles)          # 釘選值還停在 m1 → 偏離
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    # 遠端領先：主 manifest 的內容既不是正式值也不是上一版
+    drive.seed_file(
+        prefix, MANIFEST_NAME, ahead, created_time=PUSH_AT, modified_time=PUSH_AT,
+    )
+    # 新世代的 bundle：push 之前上傳（正常流程）→ 不動
+    new_bundle = drive.seed_file(
+        prefix, bundles["b2"], bundles["b2_bytes"], created_time=BEFORE_PUSH,
+    )
+    # 住民在 push 之後放的檔案（檔名宣告與內容相符，所以「自洽」不能拿來指認它）
+    junk_body = b"resident-junk"
+    junk_name = f"GITBUNDLE-s{len(junk_body)}--{UUID}-{hashlib.sha256(junk_body).hexdigest()}"
+    junk_bundle = drive.seed_file(prefix, junk_name, junk_body, created_time=AFTER_PUSH)
+    body = b"a-raw-record"
+    key = f"SHA256E-s{len(body)}--{hashlib.sha256(body).hexdigest()}"
+    real_obj = drive.seed_file(prefix, key, body, created_time=BEFORE_PUSH)
+    junk_obj_body = b"resident-junk-raw"
+    junk_obj = f"SHA256E-s{len(junk_obj_body)}--{hashlib.sha256(junk_obj_body).hexdigest()}"
+    junk_obj_id = drive.seed_file(prefix, junk_obj, junk_obj_body, created_time=AFTER_PUSH)
+    decs = _decide(drive, st, prefix=prefix)
+    assert ahead_sha != bundles["m1sha"]
+    assert decs[new_bundle].disposition == Disposition.NEED_ADMIN
+    assert decs[real_obj].disposition == Disposition.NEED_ADMIN
+    assert decs[junk_bundle].disposition == Disposition.QUARANTINE
+    assert decs[junk_obj_id].disposition == Disposition.QUARANTINE
+    assert "晚於前綴裡主 manifest 最後一次寫入" in decs[junk_bundle].reason
+    assert "晚於前綴裡主 manifest 最後一次寫入" in decs[junk_obj_id].reason
+
+
+def test_m1_deviation_keeps_the_earlier_new_generation_manifest(bundles: dict):
+    """偏離期間同一份「新世代」內容有兩份同名 manifest → 早建立的那份是候選。
+
+    這裡 createdTime 判得出真身：新世代的 manifest 是上一輪 push 剛寫出來的，
+    住民要複製就得先讀到它，一定比較晚。
+    """
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    real = drive.seed_file(
+        prefix, MANIFEST_NAME, bundles["m2"], created_time=PUSH_AT, modified_time=PUSH_AT,
+    )
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"], created_time=BEFORE_PUSH)
+    copy_id = drive.seed_file(
+        prefix, MANIFEST_NAME, bundles["m2"], created_time=AFTER_PUSH, modified_time=AFTER_PUSH,
+    )
+    decs = _decide(
+        drive, st, prefix=prefix, policy=SweepPolicy(
+            now=parse_rfc3339(CLOCK_T0)),
+    )
+    # 沒有 pending、refs 對不上 → 兩份都不是 HOLD/NEED_ADMIN 的背書來源：真的那份
+    # 進內容驗證（NEED_MANIFEST_CHECK），副本直接隔離。
+    assert decs[copy_id].disposition == Disposition.QUARANTINE
+    assert "副本" in decs[copy_id].reason
+    assert decs[real].disposition == Disposition.NEED_MANIFEST_CHECK
+
+
+def test_m2_settle_picks_the_earlier_created_candidate_that_replays_pending(
+    bundles: dict, tmp_path: Path,
+):
+    """refs 相符但位元組相異的多份候選：createdTime 決勝，不再中止這一輪。
+
+    舊規則是直接 raise，於是住民放一份「差一個換行、重放出同樣 refs」的主
+    manifest，settle 就**每一輪都中止在第 3 步**；而第 3 步在 sweep 之前，那份
+    副本永遠不會被隔離，清掃形同停擺。
+    """
+    st = _state(bundles, manifest_sha=bundles["m1sha"])
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"], created_time=BEFORE_PUSH)
+    real = drive.seed_file(
+        prefix, MANIFEST_NAME, bundles["m2"], created_time=PUSH_AT,
+    )
+    forged = drive.seed_file(
+        prefix, MANIFEST_NAME, bundles["m2"] + b"\n", created_time=AFTER_PUSH,
+    )
+    listing = RepoListing(
+        prefix_folder_id=prefix,
+        files=tuple(drive.list_children(prefix)), subfolders=(),
+    )
+    outcome, ns = settle(st, _pending(bundles), listing, drive,
+                         workdir=tmp_path, clock=FixedClock(CLOCK_T0))
+    assert outcome == SettleOutcome.PROMOTED
+    # 轉正成真正那份的雜湊（建立較早），不是住民那份多一個換行的
+    assert ns.manifest_sha256 == hashlib.sha256(bundles["m2"]).hexdigest()
+    assert ns.manifest_sha256 != hashlib.sha256(bundles["m2"] + b"\n").hexdigest()
+    # 轉正之後下一輪的 sweep 會把副本隔離（內容既不是新的正式值也不是上一版）
+    st2 = _state(bundles, manifest_sha=bundles["m1sha"])
+    decs = _decide(drive, ns, prefix=prefix)
+    assert decs[forged].disposition == Disposition.QUARANTINE
+    assert decs[real].disposition == Disposition.KEEP
+
+
+def test_m2_late_same_named_manifest_cannot_exhaust_the_rechecks(
+    bundles: dict, tmp_path: Path,
+):
+    """push 之後才出現的同名 manifest 連指紋都不算 → 住民無法用重查上限拖住 settle。
+
+    舊規則（指紋只看檔名）留下這個洞：主 manifest 的**檔名本身**就在相關檔名裡，
+    住民只要在重查那幾十秒裡新增同名檔，每一次重查都必定「有變動」→ 必定用完上限
+    → 每一輪都中止在第 3 步、sweep 永遠跑不到。
+    """
+    st = _state(bundles, manifest_sha=bundles["m1sha"])
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"], created_time=BEFORE_PUSH)
+    listing = RepoListing(
+        prefix_folder_id=prefix,
+        files=tuple(drive.list_children(prefix)), subfolders=(),
+    )
+    shift = _ShiftingManifestIdDrive(drive, folder_id=prefix, name=MANIFEST_NAME)
+    with pytest.raises(MismatchError, match="保留待定釘選值"):
+        settle(st, _pending(bundles), listing, shift, workdir=tmp_path, clock=FixedClock())
+
+    # 同一個情境，但「變動」是 push 之後才出現的同名 manifest → 不算變動，
+    # settle 照樣 DROPPED（pending 丟掉是對的：遠端真的還停在正式值）。
+    drive2 = FakeDrive()
+    prefix2 = drive2.seed_folder("prefix")
+    drive2.seed_file(prefix2, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    drive2.seed_file(prefix2, MANIFEST_NAME, bundles["m1"], created_time=BEFORE_PUSH)
+    listing2 = RepoListing(
+        prefix_folder_id=prefix2,
+        files=tuple(drive2.list_children(prefix2)), subfolders=(),
+    )
+
+    class _AddsLateManifest:
+        """每次 list_children 都多放一份「push 之後建立的同名 manifest」。"""
+
+        def __init__(self, inner: FakeDrive, folder_id: str) -> None:
+            self._inner = inner
+            self._folder_id = folder_id
+            self._added: set[str] = set()
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def list_children(self, folder_id):
+            out = list(self._inner.list_children(folder_id))
+            if folder_id == self._folder_id:
+                for idx in range(4):
+                    new_id = f"late_dup_{idx}"
+                    if new_id not in self._added:
+                        self._added.add(new_id)
+                        self._inner.seed_file(
+                            self._folder_id, MANIFEST_NAME, bundles["m1"] + b"\n",
+                            created_time=AFTER_PUSH, file_id=new_id,
+                        )
+                out = list(self._inner.list_children(folder_id))
+            return out
+
+    outcome, _ns = settle(st, _pending(bundles), listing2, _AddsLateManifest(drive2, prefix2),
+                          workdir=tmp_path, clock=FixedClock(CLOCK_T0))
+    assert outcome == SettleOutcome.DROPPED

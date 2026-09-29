@@ -152,6 +152,9 @@ class RunReport:
     #: NEED_ADMIN＝沒有任何可信來源能解釋它，需要管理者 init-pin）。
     #: 這是「HOLD 是一個計數、沒有門檻與警示」那個問題的回應（review-1926cd3 L）：
     #: 健康檢查要能指出是哪幾個檔案卡住，而不是只說「有 N 個」。
+    #: 格式是 `<檔名>@<Drive createdTime>`——只給檔名時分不出哪一份才是真的
+    #: （前綴裡可能有 rclone 自己留下的重複 manifest，也可能是住民放的副本，
+    #: 兩者檔名完全一樣），所以附上住民偽造不了的建立時間（review-903d7e2 M1）。
     held_files: list[str] = field(default_factory=list)
     need_admin_files: list[str] = field(default_factory=list)
 
@@ -884,10 +887,15 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
     ctx.bump("need_admin_files", len(need_admin))
     ctx.bump("aging_held_files", len(aging))
     if held or need_admin:
-        # D2 log 規則：只記 id／計數與耗時。這裡記的是**檔名**（不是內容），
-        # 而且是「等人處理的狀態」——健康檢查要能指出是哪幾個檔案。
-        ctx.report.held_files = sorted(d.file.name for d in held)
-        ctx.report.need_admin_files = sorted(d.file.name for d in need_admin)
+        # D2 log 規則：只記 id／計數與耗時。這裡記的是**檔名＋建立時間**（不是內容），
+        # 而且是「等人處理的狀態」——健康檢查要能指出是哪幾個檔案，而要動手之前
+        # 只看檔名分不出哪一份才是真的（review-903d7e2 M1）。
+        ctx.report.held_files = sorted(
+            f"{d.file.name}@{d.file.created_time}" for d in held
+        )
+        ctx.report.need_admin_files = sorted(
+            f"{d.file.name}@{d.file.created_time}" for d in need_admin
+        )
 
     readview_decisions: list[SweepDecision] = []
     if not rcfg.readview_folder_id:

@@ -316,15 +316,23 @@ def plan_sweep(listing: RepoListing, state: PinState, *, repo_uuid: str,
                manifest_verdicts=None, backed_bundles=None, policy: SweepPolicy | None = None,
                ) -> list[SweepDecision]:
     # 純函式，不碰網路。規則（design D2、review-1.4f3 H2/H3、review-1.4f5 H1、
-    #                     review-1926cd3-142fd04 H1／M1）：
+    #                     review-1926cd3-142fd04 H1／M1、review-903d7e2 H1／M1／L）：
     # - 非 .bak 的 GITMANIFEST：sha256 == state.manifest_sha256 → KEEP 一個；
     #   == prev_manifest_sha256 → QUARANTINE（退位版本冒充）
-    #   **已經有一份 KEEP 候選時，其餘同名主 manifest 一律 QUARANTINE（不讀內容）**：
-    #     Drive 是原地更新，正常流程不會有第二份同名檔，所以那份必然是注入物。
-    #     沒有任何 KEEP 候選時才標 NEED_MANIFEST_CHECK，讀內容（見下）
+    #   **已經有一份 KEEP 候選時，內容不同的其餘同名主 manifest 一律 QUARANTINE
+    #     （不讀內容）**；沒有任何 KEEP 候選時才標 NEED_MANIFEST_CHECK，讀內容（見下）
+    # - **同名重複檔的去留用 createdTime（`dedup_rank`，同時間以 file id 決勝）**：
+    #     bundle／annex 物件、以及偏離期間「新世代」的主 manifest → 留建立最早的，
+    #     其餘隔離（這些檔案一個世代只上傳一次，住民要複製一定比較晚）
+    #   **例外：位元組等於正式值的 manifest／.bak 重複一律不搬**（建立最早的 KEEP、
+    #     其餘 NEED_ADMIN 並附時間戳）。rclone 每輪 push 都重寫 manifest、file id 會變，
+    #     所以 createdTime 判不出真身；而且健康前綴本來就可能有兩份同名同內容
+    #     （同一輪 push 內 Drive 列表落後，1.75.1 與 1.69.3 都實測到），
+    #     push 與 clone 在那種狀態下都正常。對應的，`verify_clone`／`precheck`／
+    #     `verify_after_push`／`init-pin` 判的是「只有一種內容」而不是「恰好一個檔」
     # - .bak：sha256 ∈ {state.manifest_sha256, state.prev_manifest_sha256} 的保留一個；
     #   已有 KEEP 候選時其餘同名 .bak 一律 QUARANTINE；否則 NEED_MANIFEST_CHECK
-    # - GITBUNDLE：名稱 ∈ active 而且 sha256 == 名稱內嵌的雜湊、size 相符 → KEEP（同內容重複的只留一個）
+    # - GITBUNDLE：名稱 ∈ active 而且 sha256 == 名稱內嵌的雜湊、size 相符 → KEEP（同內容重複的只留建立最早的一個）
     #             名稱 ∈ removed → GC
     #             檔名宣告與內容不符 → QUARANTINE（證據：檔名在騙人）
     #             其餘（自洽但不在釘選值裡）→ 被候選 manifest 列為 active 就跟著那份 manifest
@@ -335,13 +343,17 @@ def plan_sweep(listing: RepoListing, state: PinState, *, repo_uuid: str,
     # - sha256 或 size 缺失的檔 → NEED_CONTENT_CHECK（由 apply 前的步驟下載驗證，再重新判定）
     # - 子資料夾 → QUARANTINE（整個子樹；layout 是平的）
     # - 其他名稱 → QUARANTINE
-    # - **HOLD 只給有背書的檔案，而且有年齡上限**：逾齡（超過 quarantine_retention_days）
-    #   就降級成 QUARANTINE 並在報告裡回報，不再無限期等
+    # - **HOLD 只給有背書的檔案，而且有年齡上限**：超過（`quarantine_retention_days`）
+    #   就升級成 NEED_ADMIN 並標成「可能是真本」（逾齡的 pending 卡了一週，自動隔離
+    #   正是 impl1 弄壞真本的那一步），仍列入健康檢查
     # - **「自洽不等於被背書就隔離」只在釘選值與前綴一致時適用**（前綴裡有內容等於
     #   正式值的那份主 manifest）。沒有的話釘選值對這個前綴沒有權威，「不在釘選值
     #   裡」不足以指認注入物——那會搬走「遠端領先釘選值、pending 又不見」時真正的新
     #   世代物件（impl1 終局）。這種檔案一律 NEED_ADMIN：不搬移、列入健康檢查；
     #   釘選值追上（settle 轉正或 init-pin）之後下一輪就會被正常隔離。
+    #   **但 createdTime 仍然是指認注入物的證據**：建立時間晚於前綴裡主 manifest
+    #   最後一次寫入的 bundle／物件不屬於任何一個世代（正常流程先上傳物件與 bundle、
+    #   最後才重寫 manifest），照樣隔離（留 `INJECTION_SKEW_GRACE` 的時鐘誤差）
 
 def resolve_manifest_evidence(decisions, drive, cache, state, *, repo_uuid, listing=None,
                               prefix_folder_id=None, workdir=None, policy: SweepPolicy | None = None,

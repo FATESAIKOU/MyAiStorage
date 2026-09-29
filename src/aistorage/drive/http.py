@@ -217,6 +217,11 @@ class HttpDriveClient(DriveClient):
                 "q": q,
                 "fields": f"nextPageToken,files({DEFAULT_FIELDS})",
                 "pageSize": "1000",
+                # 明確指定排序：Drive 預設不保證順序，而「重複檔取哪一份」這種
+                # 判斷不該建立在列舉順序上（review-903d7e2）。仍然以 createdTime
+                # 為準（`integrity.sweep.dedup_rank`），這裡只是讓結果可重現、
+                # 分頁之間也不會跳來跳去。
+                "orderBy": "createdTime",
                 "supportsAllDrives": "true",
                 "includeItemsFromAllDrives": "true",
             }

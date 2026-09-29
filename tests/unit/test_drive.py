@@ -14,6 +14,7 @@ import threading
 import traceback
 from typing import Any
 import urllib.error
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
@@ -342,6 +343,43 @@ def test_http_drive_list_children_pagination(mock_drive_server: str, monkeypatch
     assert [c.id for c in children] == ["file_1", "file_2"]
     assert children[0].sha256 == "aaa"
     assert children[1].sha256 == "bbb"
+
+
+def test_http_drive_list_children_asks_for_created_time_order(
+    mock_drive_server: str, monkeypatch,
+):
+    """list_children 必須明確指定排序並且取 createdTime（review-903d7e2）。
+
+    Drive 預設不保證列舉順序，而「同名重複檔留哪一份」這種判斷不該建立在
+    順序上；`integrity.sweep.dedup_rank` 用的是 Drive 記錄的 createdTime，所以
+    查詢要明確 `orderBy=createdTime`（分頁之間也不會跳來跳去），而
+    `fields` 必須含 createdTime——少了就等於沒有排序依據。
+    """
+    monkeypatch.setattr("aistorage.drive.http.DRIVE_API_BASE", mock_drive_server)
+    MockDriveHandler.responses_queue = [
+        {"status": 200, "body": {"files": [
+            {
+                "id": "file_1",
+                "name": "a.txt",
+                "mimeType": "text/plain",
+                "parents": ["parent_0"],
+                "size": "100",
+                "sha256Checksum": "aaa",
+                "createdTime": "2026-09-27T08:00:00Z",
+                "modifiedTime": "2026-09-27T08:00:00Z",
+                "trashed": False,
+            },
+        ]}},
+    ]
+    client = HttpDriveClient(lambda: "mock_tok")
+    client.list_children("parent_0")
+
+    query = urllib.parse.parse_qs(
+        urllib.parse.urlparse(MockDriveHandler.requests_received[0]["path"]).query
+    )
+    assert query["orderBy"] == ["createdTime"]
+    assert "createdTime" in query["fields"][0]
+    assert "modifiedTime" in query["fields"][0]
 
 
 def test_http_drive_list_children_page_failure_raises_read_error(mock_drive_server: str, monkeypatch):

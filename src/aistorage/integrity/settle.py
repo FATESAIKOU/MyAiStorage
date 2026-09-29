@@ -5,11 +5,14 @@
 - design.md D2（第 3 步結算、唯讀不移動、重放驗證、.bak 復原）
 - ADR 0008（信任錨點防線）
 - review-1.4f3 M2（不存在「信任任何能重放的 manifest」模式，僅 state 與 pending 可信）
+- review-903d7e2 M2（主 manifest 候選與重查指紋都用「這一輪 push 之前就存在」這個
+  住民偽造不了的條件篩掉；重放出同樣 refs 的多份候選用 createdTime 決勝）
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from enum import Enum
 import hashlib
 from pathlib import Path
@@ -19,10 +22,28 @@ from typing import Any
 
 from aistorage.annex.manifest import BundleName, Manifest, parse_bundle_name, parse_manifest
 from aistorage.annex.replay import replay_refs
-from aistorage.clock import Clock
+from aistorage.clock import Clock, parse_rfc3339
 from aistorage.drive.model import DriveClient, DriveFile
 from aistorage.errors import MismatchError, ReadError, TooLarge
 from aistorage.integrity.pin import PinPending, PinState
+
+#: `pending.written_at` 之後多久還算「這一輪 push 的產物」。
+#:
+#: review-903d7e2 M2：pending 寫在 push **之前**，而 manifest 是 push **期間**由
+#: rclone 寫出來的（實測 rclone 1.75.1 與 1.69.3：file id 每輪都會變，是刪掉
+#: 重建），所以真正那份 manifest 的 createdTime **晚於** `written_at`——不能拿
+#: 「早於 written_at」篩候選，那會把真本篩掉。改用反過來的方向：晚於
+#: `written_at + 這個容差` 的同名檔不算候選、也不進重查指紋。push 實測 22～29 秒、
+#: Drive 列表落後實測可達 30 秒，給十分鐘綽綽有餘。
+#:
+#: 這同時是住民攻擊的下限：要放一份「重放出同樣 refs」的同名 manifest 來
+#: 拖住 settle（review-903d7e2 M2 的攻擊 (a)），他必須在 push 之後十分鐘內上傳，
+#: 而他得先讀到剛 push 出去的 manifest 才有內容可複製（Drive 列表落後）。
+#:
+#: 更重要的是「一次就永久」：被篩掉的檔案從此不進指紋，所以他**不斷新增同名檔也
+#: 操縱不了重查上限**（舊規則是指紋每次都變，必定用完上限、每一輪都中止在第 3 步，
+#: sweep 永遠跑不到）。
+PUSH_GRACE = timedelta(minutes=10)
 
 
 @dataclass(frozen=True)
@@ -142,19 +163,79 @@ def _relevant_names(state: PinState) -> frozenset[str]:
 
 
 def _fingerprint(
-    listing: RepoListing, names: frozenset[str] = frozenset()
+    listing: RepoListing,
+    names: frozenset[str] = frozenset(),
+    *,
+    exclude_created_after: datetime | None = None,
 ) -> tuple[tuple[str, str | None, int | None, str], ...]:
     """前綴的「指紋」：檔名、雜湊、大小、id。任一項不同就代表期間有變動。
 
     `names` 給定時只看這些檔名（M2：住民的垃圾檔不應該影響 settle 的結論）。
+
+    `exclude_created_after` 給定時，**建立時間晚於它**的檔案完全不進指紋
+    （review-903d7e2 M2）：那一輪 push 之後才出現的同名 manifest／`.bak` 不是
+    「遠端狀態改變了」，而是有人放了東西進來。把它算進指紋等於給住民一個
+    「每次重查都一定有變動」的開關——他只要在重查那幾十秒裡加檔名就能讓上限
+    必定用完、每一輪都中止在第 3 步。
     """
-    return tuple(
-        sorted(
-            (f.name, f.sha256, f.size, f.id)
-            for f in listing.files
-            if not names or f.name in names
-        )
-    )
+    def _in_fingerprint(f: DriveFile) -> bool:
+        if names and f.name not in names:
+            return False
+        if exclude_created_after is not None:
+            try:
+                if f.created_at > exclude_created_after:
+                    return False
+            except (ValueError, TypeError):
+                pass  # 讀不出建立時間：寧可算進來（多一次重查），不要漏掉真變動
+        return True
+
+    kept = [f for f in listing.files if _in_fingerprint(f)]
+    if not kept and exclude_created_after is not None:
+        # 篩完一個都不剩＝連真本都被算成「push 之後」——那一定是推算出錯或這一輪
+        # push 慢到離譜。不要因為篩選而看不到任何相關檔案（會把「遠端有變動」判成
+        # 「沒變動」），寧可不做這次篩選。
+        kept = [f for f in listing.files if not names or f.name in names]
+    return tuple(sorted((f.name, f.sha256, f.size, f.id) for f in kept))
+
+
+def push_cutoff(pending: PinPending | None) -> datetime | None:
+    """這一輪 push 的產物最晚可以建立到什麼時候（`written_at + PUSH_GRACE`）。
+
+    讀不出 `pending.written_at` 就沒有這條篩選（回 None＝全部都算候選），寧可多
+    比較幾份，也不要因為時間欄位壞掉而看不到真本。
+    """
+    if pending is None:
+        return None
+    try:
+        return parse_rfc3339(pending.written_at) + PUSH_GRACE
+    except (ValueError, TypeError):
+        return None
+
+
+def _is_push_output(f: DriveFile, cutoff: datetime | None) -> bool:
+    """這份檔案算不算「這一輪 push 已經寫出來的東西」。
+
+    cutoff 為 None（沒有 pending／時間讀不出來）時全部算——篩選是為了排除住民在
+    push 之後放的東西，不能反過來把真本篩掉。
+    """
+    if cutoff is None:
+        return True
+    try:
+        return f.created_at <= cutoff
+    except (ValueError, TypeError):
+        return True
+
+
+def _only_push_output(files: list[DriveFile], cutoff: datetime | None) -> list[DriveFile]:
+    """只留下「這一輪 push 寫出來的」那些；**一個都沒有時原樣返回**。
+
+    為什麼要這個讓步：`written_at + PUSH_GRACE` 是一個「不早不晚」的推算，正常
+    情況下真正那份 manifest 一定落在裡面（push 實測 22～29 秒）。但如果一輪 push
+    真的超過十分鐘（卡住），連真本都會被篩掉——那時寧可**不要篩**、讓下面的比對
+    照舊以 createdTime 決議或 fail-closed 中止，也不要因為篩選把真本判成不存在。
+    """
+    inside = [f for f in files if _is_push_output(f, cutoff)]
+    return inside or files
 
 
 #: DROPPED／BAK_RECOVERY 這兩個結論會**丟掉 pending**，所以它們在丟東西之前
@@ -201,6 +282,14 @@ def settle(
        所有檔案，住民只要持續放垃圾檔就能讓每一次重查都「有變動」、必定用完
        上限。指紋縮小到主 manifest／`.bak`／pending 與正式值引用的 bundle 之後，
        垃圾檔不再影響結論，也就無法再操縱這個上限。
+    3. **push 之後才出現的同名 manifest／`.bak` 連指紋都不算**
+       （`_fingerprint(exclude_created_after=…)`，見 `push_cutoff`）。第 2 項還漏
+       了一個洞：主 manifest 的**檔名本身**就在相關檔名裡，住民只要在重查那幾十
+       秒裡新增同名檔，每一次重查都必定「有變動」→ 必定用完上限 → 每一輪都中止
+       在第 3 步、sweep 永遠跑不到。
+
+    review-903d7e2 M2：候選也用同一條規則篩，而且「refs 相符但內容相異」的多份
+    候選不再中止——用 createdTime 決勝（見 `_settle_once`）。
     """
     if pending is None:
         return SettleOutcome.NO_PENDING, state
@@ -217,6 +306,10 @@ def settle(
     main_name = f"GITMANIFEST--{state.repo_uuid}"
     bak_name = f"GITMANIFEST--{state.repo_uuid}.bak"
     relevant = _relevant_names(state)
+    cutoff = push_cutoff(pending)
+
+    def _fp(ls: RepoListing) -> tuple[tuple[str, str | None, int | None, str], ...]:
+        return _fingerprint(ls, relevant, exclude_created_after=cutoff)
 
     # 進場就用自己的 listing：呼叫端那份是第 3 步開始時的快照。
     listing = _relist(drive, listing.prefix_folder_id)
@@ -225,7 +318,7 @@ def settle(
         outcome, new_state, discard = _settle_once(
             state, pending, listing, drive,
             main_name=main_name, bak_name=bak_name, workdir=workdir, clock=clock,
-            may_recheck=attempt < _MAX_RECHECK,
+            may_recheck=attempt < _MAX_RECHECK, cutoff=cutoff,
         )
         if outcome is None:
             # 「判定用的畫面裡沒有主 manifest」有可能是 Drive 的列表落後：先重查再說
@@ -235,7 +328,7 @@ def settle(
                     "真本已不完整，需要管理者用 init-pin 重建釘選值"
                 )
             fresh = _relist(drive, listing.prefix_folder_id)
-            if _fingerprint(fresh, relevant) != _fingerprint(listing, relevant):
+            if _fp(fresh) != _fp(listing):
                 listing = fresh
                 continue
             raise MismatchError(
@@ -246,7 +339,7 @@ def settle(
             return outcome, new_state
         # 這個結論會丟掉 pending → 確認前綴在這段時間裡沒有變動
         fresh = _relist(drive, listing.prefix_folder_id)
-        if _fingerprint(fresh, relevant) == _fingerprint(listing, relevant):
+        if _fp(fresh) == _fp(listing):
             return outcome, new_state
         if attempt == _MAX_RECHECK:
             # M2：重查用完上限、前綴仍在變動 → 中止這一輪並**保留 pending**。
@@ -263,6 +356,42 @@ def settle(
     raise MismatchError("內部錯誤：settle 的重查迴圈沒有回傳結果")
 
 
+def _pick_pending_candidate(matches: list[dict[str, Any]]) -> dict[str, Any]:
+    """多份候選都重放得出 `pending.refs` 時選哪一份（review-903d7e2 M2）。
+
+    舊規則是直接 `MismatchError` 中止，於是住民只要放一份「和真正那份差一個換行、
+    重放出同樣 refs」的主 manifest，settle 就**每一輪都中止在第 3 步**——而第 3 步
+    在 sweep 之前，那份副本永遠不會被隔離，清掃形同停擺。
+
+    這裡可以分辨真身：refs 相同代表它描述的是同一個遠端狀態，但**位元組**可能不同
+    （多一個換行之類），而 `createdTime` 是住民偽造不了的——真正那份是這一輪 push
+    期間由 rclone 寫出來的，住民要複製就得先讀到它，一定比較晚。取建立最早的那一份
+    當正式值（與第 4 步 sweep 對「新世代同名 manifest」用同一條規則），其餘留給
+    sweep 收拾：轉正之後它們的內容既不等於新的正式值、也不等於已退役的上一版，
+    會被隔離（`plan_sweep` 的 (A) 分支）。
+
+    createdTime 讀不出來或全部相同（讀不到就不排序）時退回 fail-closed：中止。
+    """
+    from aistorage.integrity.sweep import dedup_rank
+
+    shas = {c["sha256"] for c in matches}
+    if len(shas) == 1:
+        return matches[0]
+
+    ranked = sorted(matches, key=lambda c: dedup_rank(c["file"]))
+    earliest_dt = dedup_rank(ranked[0]["file"])[0]
+    tied = [c for c in matches if dedup_rank(c["file"])[0] == earliest_dt]
+    if len({c["sha256"] for c in tied}) > 1:
+        raise MismatchError(
+            f"存在多個內容相異但重放 refs 均相符待定之 manifest 候選: {sorted(shas)}；"
+            f"而且建立最早的那幾份時間相同（或都讀不出來）"
+            f"（{[c['file'].created_time for c in tied]}），"
+            f"無法分辨哪一份才是這一輪 push 的產物——不猜，保留 pending 與遠端原狀，"
+            f"中止這一輪"
+        )
+    return ranked[0]
+
+
 def _settle_once(
     state: PinState,
     pending: PinPending,
@@ -274,18 +403,25 @@ def _settle_once(
     workdir: Path,
     clock: Clock,
     may_recheck: bool,
+    cutoff: datetime | None = None,
 ) -> tuple[SettleOutcome | None, PinState, bool]:
     """`settle` 的一輪判斷。
 
     回傳 `(outcome, state, discard)`：
     - `outcome` 為 None 代表「判定用的畫面可能落後了，請重新列舉再判一次」；
     - `discard` 代表這個結論會**丟掉 pending**（DROPPED／BAK_RECOVERY）。
+
+    `cutoff` = `push_cutoff(pending)`：建立時間晚於它的同名 manifest／`.bak`
+    **不算候選**（review-903d7e2 M2）。這些是這一輪 push 之後才被放進來的東西，
+    不是「這一輪 push 的產物」；它們也不進指紋，所以無法用來操縱重查上限。
     """
     main_files = [f for f in listing.files if f.name == main_name]
 
     # 若無主 manifest，檢驗是否符合 Rule C: .bak 復原
     if not main_files:
-        bak_files = [f for f in listing.files if f.name == bak_name]
+        bak_files = _only_push_output(
+            [f for f in listing.files if f.name == bak_name], cutoff
+        )
         for bf in bak_files:
             b_data = drive.download_bytes(bf.id, max_bytes=1024 * 1024)
             b_hash = hashlib.sha256(b_data).hexdigest().lower()
@@ -307,10 +443,10 @@ def _settle_once(
             "真本已不完整，需要管理者用 init-pin 重建釘選值"
         )
 
-    # 存在主 manifest 候選檔案
+    # 存在主 manifest 候選檔案（篩掉這一輪 push 之後才出現的那些）
     candidate_results: list[dict[str, Any]] = []
 
-    for mf in main_files:
+    for mf in _only_push_output(main_files, cutoff):
         m_bytes = drive.download_bytes(mf.id, max_bytes=1024 * 1024)
         m_sha = hashlib.sha256(m_bytes).hexdigest().lower()
 
@@ -323,6 +459,7 @@ def _settle_once(
                 "sha256": m_sha,
                 "manifest": parsed,
                 "refs": replayed,
+                "file": mf,
             })
         except (MismatchError, TooLarge):
             # 無效或無法重放之候選
@@ -336,12 +473,7 @@ def _settle_once(
             pending_matches.append(c)
 
     if pending_matches:
-        distinct_shas = {c["sha256"] for c in pending_matches}
-        if len(distinct_shas) > 1:
-            raise MismatchError(
-                f"存在多個內容相異但重放 refs 均相符待定之 manifest 候選: {distinct_shas}"
-            )
-        matched = pending_matches[0]
+        matched = _pick_pending_candidate(pending_matches)
         new_state = PinState(
             repo=state.repo,
             repo_uuid=state.repo_uuid,

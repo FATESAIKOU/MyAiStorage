@@ -17,13 +17,18 @@
 - review-1926cd3-142fd04 H1／M1（見 plan_sweep 與 resolve_manifest_evidence）：
   已有 KEEP 候選時其餘同名 manifest 一律隔離（不讀內容）；內容證據必須綁在
   pending 上（重放 refs == pending.refs）；HOLD 只給有背書的檔案並設年齡上限
+- review-903d7e2 H1／M1／L（見 `dedup_rank`、`plan_sweep` 與 `file_stamp`）：
+  重複檔的去留改用住民偽造不了的 `createdTime`；**位元組相同的主 manifest 重複
+  不搬任何一份**（1.75.1／1.69.3 實測：健康前綴本來就可能有兩份同名同內容，
+  而且 push 與 clone 都不會因此失敗）；偏離（釘選值對前綴沒有權威）時用
+  `createdTime` 當「是注入物」的證據；HOLD 逾齡改為升級成 NEED_ADMIN
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 import hashlib
 from pathlib import Path
@@ -43,6 +48,13 @@ _ANNEX_KEY_PATTERN = re.compile(r"^SHA256E-s(\d+)--([0-9a-f]{64})(\..*)?$")
 #: manifest 檔案的大小上限：git-remote-annex 的 manifest 只是 bundle 名字清單，
 #: 遠超過這個大小就不可能是 manifest（也就是說，它是注入物）。
 MANIFEST_MAX_BYTES = 1024 * 1024
+
+#: 「建立時間晚於主 manifest 最後一次寫入」這條證據的容差（review-903d7e2 M1）。
+#: 兩個時間都由 Drive 記錄，誤差極小（Drive 列表落後實測可達 30 秒）；留十分鐘
+#: 只是為了不要因為量測誤差把新世代的物件誤判成注入物——那正是 impl1 弄壞真本的
+#: 那一步。住民要利用這個窗口，得在每一輪 push 之後十分鐘內放檔案，而提交間隔
+#: 是 6 小時，所以這點餘裕換來的是零成本。
+INJECTION_SKEW_GRACE = timedelta(minutes=10)
 
 
 @dataclass(frozen=True)
@@ -107,6 +119,53 @@ def file_age_days(f: DriveFile, now: datetime | None) -> float | None:
     except (ValueError, TypeError):
         return None
     return (now - created).total_seconds() / 86400.0
+
+
+#: 讀不出 created_time 時的排序值：排到最後。**沒有任何證據可以判斷年輕老，
+#: 就不讓它贏**（見 dedup_rank）。
+_UNKNOWN_CREATED = datetime.max.replace(tzinfo=timezone.utc)
+
+
+def dedup_rank(f: DriveFile) -> tuple[datetime, str]:
+    """同名重複檔的排序鍵：建立時間最早者優先，同時間再以 file id 決定。
+
+    `createdTime` 是 Drive 自己記錄的，寫入者設定不了（`update_content` 不會改它，
+    刪掉重建才會換一個新的），所以它是住民唯一偽造不了的時間戳。同秒建立的
+    兩份（例如 Drive 同一個 push 內先後寫入）以 file id 決定，確保結果穩定、
+    同一份 listing 每次重算都一樣。
+
+    讀不出建立時間的檔案排到最後：沒有證據就不足以贏得「這一份才是真的」。
+    """
+    try:
+        return (f.created_at, f.id)
+    except (ValueError, TypeError):
+        return (_UNKNOWN_CREATED, f.id)
+
+
+def earliest_of(files: Iterable[DriveFile]) -> DriveFile | None:
+    """一組同名檔裡建立最早的那一份（空集合回 None）。"""
+    return min(files, key=dedup_rank) if files else None
+
+
+def file_stamp(f: DriveFile) -> str:
+    """報告用的時間戳（`created`／`modified`）。
+
+    管理者要判斷「前綴裡這幾個檔案哪一個才是真的」時，光看檔名會判錯——
+    所以 HOLD／NEED_ADMIN 的理由與健康檢查都附上這兩個時間（review-903d7e2 M1）。
+    """
+    return f"created={f.created_time} modified={f.modified_time}"
+
+
+def _dup_of_official_reason(f: DriveFile, keeper: DriveFile) -> str:
+    """重複之正式 manifest（位元組相同）的理由。"""
+    return (
+        "與前綴裡另一份主 manifest 位元組相同（同為正式值），無法分辨哪一份才是"
+        f"提交流程在用的（保留的是建立較早的 {keeper.id}，{file_stamp(keeper)}；"
+        f"本檔 {file_stamp(f)}）。rclone 每輪 push 都會重寫 manifest、同一輪"
+        "push 內也可能因為 Drive 列表落後而留下兩份（實測 1.75.1 與 1.69.3），"
+        "兩種做法都分不出真身：搬錯那一份等於消滅真本。不搬移，改列入健康檢查"
+    )
+
 
 
 @dataclass(frozen=True)
@@ -215,11 +274,46 @@ def plan_sweep(
     - manifest 的背書是「重放出來的 refs == pending.refs」；
     - 沒有 pending、也沒有任何東西背書 → 不是 HOLD，是 **NEED_ADMIN**：
       不搬移（沒有「是注入物」的證據），但要列入健康檢查等人處理。
-    - HOLD 超過 `hold_max_age_days`（`quarantine_retention_days`）→ QUARANTINE
-      並在報告裡回報（`held_expired_files`），不再無限期等。
+    - HOLD 超過 `hold_max_age_days`（`quarantine_retention_days`）→ **升級成
+      NEED_ADMIN**（review-903d7e2 L）：逾齡代表 pending 卡了一整週，這時候
+      隔離的很可能就是真正的新世代（impl1 事故的形狀）。「可能是真本」留給
+      管理者判斷，報告裡會標出來。
 
-    `manifest_verdicts`（file id → (處置, 理由)）由 `resolve_manifest_evidence`
-    帶進來重算，`backed_bundles` 由它一併帶入，維持「整份重判」而不是逐項補丁。
+    **H1（review-903d7e2）：重複檔的去留由 `createdTime` 決定，但有一個例外。**
+
+    舊規則是「同名重複檔只留清單裡的第一個」。清單順序 Drive 不保證，而且所有
+    client 是同一個 Google 帳號（ADR 0008：無法用擁有者區分），所以住民只要
+    上傳一份**位元組完全相同**的副本就有機會搶到 KEEP，真正的那份反而被隔離；
+    住民再刪掉自己那份，前綴就沒有 manifest 了——而 `verify_clone` 在 push
+    之前就失敗，提交流程從此推不動，只能人工 mode 0 搬回。
+
+    能用的是 `createdTime`（Drive 記錄、寫入者設定不了，見 `dedup_rank`）：
+
+    - **bundle 與 annex 物件**：一個世代只上傳一次，副本一定要先讀到那份才拿得到，
+      一定比較晚 → 保留建立最早的那份，其餘隔離。
+    - **主 manifest／`.bak` 的「新世代」**（內容既不是正式值也不是已退役的上一版，
+      也就是剛由上一輪 push 寫出來、還沒轉正的那份）：同上，副本只能在 push
+      之後才拿得到 → 保留建立最早的那份，其餘隔離。
+    - **主 manifest／`.bak` 的「正式值」：例外，不搬任何一份。** 這裡
+      createdTime 判不出真身：rclone 每輪 push 都會重寫 manifest（實測
+      1.75.1 與 1.69.3：file id 每輪都會變，是刪掉重建），所以正式那份的
+      createdTime 是「上一輪 push 的時間」；而 manifest 的內容在好幾輪 push
+      之間可以完全相同（bundle 集合沒變時），於是住民的舊副本可能比正式那份
+      還早——「留最早」和「留最新」都會被住民各贏一次，而贏了的代價是消滅真本。
+      而且健康前綴本來就可能有兩份同名同內容（同一輪 push 內 Drive 列表落後，
+      實測每輪都會發生），搬其中一份只是在跟 rclone 對抗。
+      → 位元組相同就**都不搬**（最早那份 KEEP、其餘 NEED_ADMIN 並附時間戳），
+      真正的分歧交給管理者；push 與 clone 在有重複檔時都實測正常，而且 rclone
+      下一輪 push 會自己把多餘的那份清掉。
+
+    **M1：偏離時（`pin_in_sync=False`）用 createdTime 當「是注入物」的證據。**
+
+    前綴裡沒有任何一份主 manifest 的內容等於正式值時，釘選值對這個前綴沒有
+    權威，「不在釘選值裡」不能指認注入物（impl1 的終局）。但 createdTime 可以：
+    正常流程一定是先上傳物件與 bundle、最後才寫 manifest，所以**建立時間晚於
+    前綴裡主 manifest 最後一次寫入時間的 bundle／物件不屬於遠端任何一個世代**
+    ——正常流程不會有這種東西，它只能是住民放進去的。留 `INJECTION_SKEW_GRACE`
+    的時鐘誤差。於是偏離期間住民放的垃圾檔照樣隔得掉，不必等到釘選值追上。
     """
     decisions: list[SweepDecision] = []
     default_from_parent = prefix_folder_id or listing.prefix_folder_id
@@ -238,28 +332,27 @@ def plan_sweep(
         return age is not None and age > max_age
 
     def _hold(f: DriveFile, reason: str) -> SweepDecision:
-        """HOLD 的單一出口：逾齡（超過 quarantine_retention_days）就降級成隔離。
+        """HOLD 的單一出口：逾齡就**升級成 NEED_ADMIN**（不隔離）。
 
         M1：HOLD 是「有人替它背書、釘選值這一輪就會追上」的**暫時**狀態。
         放了七天還在 HOLD，代表釘選值這一週都沒追上（多半是 pending 被丟掉、
-        或管理操作卡住），繼續等下去只是讓住民多一個永久存放區——所以逾齡就
-        隔離，並且在報告裡回報（`held_expired_files`），讓它變成可見的問題。
+        或管理操作卡住），「有人背書、下一輪就會追上」這個理由已經不成立了。
 
-        **NEED_ADMIN 不走這裡**：它代表「沒有任何可信來源能解釋這個檔案」，
-        而那個檔案很可能**就是**真本唯一的一份（impl1 現場：pending 被丟掉之後
-        剩下的那份 manifest）。逾齡就隔離等於消滅真本。它改由健康檢查警示 +
-        檔名回報來逼人處理（`need_admin_files`），隔離留給「有證據是注入物」的
-        情況。
+        review-903d7e2 L：逾齡原本是自動隔離，但逾齡同時代表 pending 卡了一整
+        週，這時候被隔離的很可能**就是真正的新世代**（impl1 事故的形狀：把
+        新 raw 物件當注入物搬走，之後 `init-pin` 斷言它們在 Drive 上）。所以
+        改成升級成 NEED_ADMIN：不搬移，報告裡標成「可能是真本」，由管理者判斷。
+        看得見這件事（健康檢查按檔名與時間戳報出來）就夠了，自動隔離的好處
+        （不讓住民長期停放檔案）不值得拿消滅真本的風險去換。
         """
         if _aged_out(f):
-            return SweepDecision(
-                file=f,
-                disposition=Disposition.QUARANTINE,
-                reason=(
-                    f"{reason}；但它作為 HOLD 已經超過 {max_age} 天仍然沒有釘選值／"
-                    "待定背書（釘選值這一週都沒追上），不再等待：隔離並回報"
-                ),
-                from_parent=default_from_parent,
+            return _need_admin(
+                f,
+                f"{reason}；但它作為 HOLD 已經超過 {max_age} 天仍然沒有釘選值／"
+                "待定背書（釘選值這一週都沒追上），「有人背書、下一輪就會追上」"
+                f"已不成立。它**可能是真本**（逾齡的 pending 卡住時，自動隔離正是"
+                f"impl1 弄壞真本的那一步）：不搬移，升級為需要管理者判斷"
+                f"（{file_stamp(f)}）",
             )
         return SweepDecision(
             file=f, disposition=Disposition.HOLD, reason=reason,
@@ -284,32 +377,94 @@ def plan_sweep(
             )
         )
 
-    # 追蹤已保留之唯一實體
-    kept_main_manifest = False
-    kept_bak_manifest = False
-    kept_bundles: set[str] = set()
-    kept_annex_keys: set[str] = set()
-
     main_name = f"GITMANIFEST--{repo_uuid}"
     bak_name = f"GITMANIFEST--{repo_uuid}.bak"
 
     allowed_bak_hashes = {state.manifest_sha256.lower()}
     if state.prev_manifest_sha256:
         allowed_bak_hashes.add(state.prev_manifest_sha256.lower())
+    official_sha = state.manifest_sha256.lower()
+    retired_shas = {official_sha, *allowed_bak_hashes}
 
-    # H1：先掃一次清單，找出「已經有 KEEP 候選」的兩種名字。Drive 更新是原地
-    # 更新，正常流程不會有第二份同名檔；有 KEEP 候選就代表其餘同名檔是注入物。
-    has_main_keep_candidate = any(
-        f.name == main_name and f.sha256 is not None
-        and f.sha256.lower() == state.manifest_sha256.lower()
-        for f in listing.files
-    )
-    has_bak_keep_candidate = any(
-        f.name == bak_name and f.sha256 is not None
-        and f.sha256.lower() in allowed_bak_hashes
-        for f in listing.files
-    )
-    # 前綴裡有沒有「釘選值背書得住」的那一份主 manifest。沒有的話釘選值對這個
+    # ---------------------------------------------------------------- H1
+    # 先把清單按檔名分組並選出每一組的「保留者」。缺 sha256 的檔不在組內——它們
+    # 走 NEED_CONTENT_CHECK，等下載補齊之後整份重判時再比。
+    by_name: dict[str, list[DriveFile]] = {}
+    for f in listing.files:
+        if f.sha256 is not None:
+            by_name.setdefault(f.name, []).append(f)
+
+    def _self_consistent(f: DriveFile) -> bool:
+        """檔名宣告（bundle 內嵌的 sha256／大小、annex key 內嵌的值）與內容相符。"""
+        b_info = parse_bundle_name(f.name)
+        if b_info and b_info.repo_uuid == repo_uuid:
+            return f.size == b_info.size and f.sha256 is not None \
+                and f.sha256.lower() == b_info.sha256.lower()
+        m = _ANNEX_KEY_PATTERN.match(f.name)
+        if m:
+            return f.size == int(m.group(1)) and f.sha256 is not None \
+                and f.sha256.lower() == m.group(2).lower()
+        return False
+
+    # bundle／annex 物件：保留建立最早的那一份（見 plan_sweep 的 H1 說明）。
+    kept_by_name: dict[str, DriveFile] = {}
+    for name, group in by_name.items():
+        if not (parse_bundle_name(name) or _ANNEX_KEY_PATTERN.match(name)):
+            continue
+        eligible = [f for f in group if _self_consistent(f)]
+        keeper = earliest_of(eligible)
+        if keeper is not None:
+            kept_by_name[name] = keeper
+
+    # 主 manifest：正式值（內容 == 釘選值）與「新世代」（內容不在釘選值任何一個
+    # 雜湊裡，也就是剛由上一輪 push 寫出來的那份）各自選一次保留者。
+    # 兩組都可能有多份同名檔，兩組之間互不影響：正式值永遠優先。
+    main_group = by_name.get(main_name, [])
+    main_officials = [f for f in main_group if f.sha256.lower() == official_sha]
+    main_new_gen = [f for f in main_group if f.sha256.lower() not in retired_shas]
+    main_official_keeper = earliest_of(main_officials)
+    main_new_gen_keeper = earliest_of(main_new_gen)
+
+    bak_group = by_name.get(bak_name, [])
+    bak_allowed = [f for f in bak_group if f.sha256.lower() in allowed_bak_hashes]
+    bak_keeper = earliest_of(bak_allowed)
+
+    has_main_keep_candidate = main_official_keeper is not None
+    has_bak_keep_candidate = bak_keeper is not None
+
+    # 偏離時「是注入物」的證據（review-903d7e2 M1）：前綴裡主 manifest 最後一次
+    # 寫入的時間。正常流程先上傳物件與 bundle、最後才寫 manifest，所以建立時間
+    # 晚於這個時刻的檔案不屬於遠端任何一個世代。取保留者（建立最早的那一份）的
+    # modified_time——它就是 rclone 每輪 push 會重寫的那個檔案；住民改得了自己
+    # 副本的 modified_time，改不了提交流程那一份的。
+    _cutoff_file = main_official_keeper or main_new_gen_keeper
+    try:
+        manifest_cutoff = _cutoff_file.modified_at if _cutoff_file is not None else None
+    except (ValueError, TypeError):
+        manifest_cutoff = None
+
+    def _post_push_injection(f: DriveFile) -> str | None:
+        """偏離期間的注入物證據：建立時間晚於主 manifest 最後一次寫入。
+
+        讀不到建立時間、或前綴裡沒有主 manifest，就沒有證據（回 None＝不判定）。
+        """
+        if manifest_cutoff is None:
+            return None
+        try:
+            created = f.created_at
+        except (ValueError, TypeError):
+            return None
+        if created <= manifest_cutoff + INJECTION_SKEW_GRACE:
+            return None
+        return (
+            f"建立時間 ({f.created_time}) 晚於前綴裡主 manifest 最後一次寫入的時間"
+            f"（{manifest_cutoff.isoformat()}，容許 {INJECTION_SKEW_GRACE} 的時鐘誤差）："
+            "正常流程一定先上傳物件與 bundle、最後才重寫 manifest，所以這個檔案不屬於"
+            "遠端現在的任何一個世代——即使釘選值暫時對這個前綴沒有權威，這一條仍然"
+            "是「它是注入物」的證據：隔離"
+        )
+
+    # 前綴裡有沒有「釘選值背書得住的那一份主 manifest」。沒有的話釘選值對這個
     # 前綴沒有任何權威，「不在釘選值裡」就不能當成注入物的證據（見 docstring）。
     pin_in_sync = has_main_keep_candidate
 
@@ -330,9 +485,8 @@ def plan_sweep(
 
         # (A) 主 GITMANIFEST
         if f.name == main_name:
-            if f_sha == state.manifest_sha256.lower():
-                if not kept_main_manifest:
-                    kept_main_manifest = True
+            if f_sha == official_sha:
+                if main_official_keeper is not None and main_official_keeper.id == f.id:
                     decisions.append(
                         SweepDecision(
                             file=f,
@@ -342,13 +496,12 @@ def plan_sweep(
                         )
                     )
                 else:
+                    # H1 的例外：位元組相同就分不出真身，兩種排序都會被住民各贏
+                    # 一次（見 docstring）。保留建立最早的那一份，其餘不搬移、
+                    # 列入健康檢查（附時間戳讓管理者有得判斷）。
+                    keeper = main_official_keeper
                     decisions.append(
-                        SweepDecision(
-                            file=f,
-                            disposition=Disposition.QUARANTINE,
-                            reason="重複之正式 manifest",
-                            from_parent=default_from_parent,
-                        )
+                        _need_admin(f, _dup_of_official_reason(f, keeper) if keeper else "")
                     )
             elif state.prev_manifest_sha256 and f_sha == state.prev_manifest_sha256.lower():
                 # 證據充分：內容雜湊正是釘選值記載「已經退位」的上一版，而真本
@@ -362,8 +515,8 @@ def plan_sweep(
                     )
                 )
             elif has_main_keep_candidate:
-                # H1：前綴裡已經有一份內容等於正式值的 manifest（Drive 原地更新，
-                # 不會產生第二份同名檔），這份同名檔必然是注入物。不讀內容。
+                # 正式值已經在前綴裡（Drive 原地更新，不會產生第二份同名檔），
+                # 這份同名檔必然是注入物。不讀內容。
                 decisions.append(
                     SweepDecision(
                         file=f,
@@ -371,6 +524,23 @@ def plan_sweep(
                         reason=(
                             "已有內容等於正式值的主 manifest，另一份同名主 manifest "
                             "必然是注入物（rclone 原地更新，不會有第二份同名檔）"
+                        ),
+                        from_parent=default_from_parent,
+                    )
+                )
+            elif main_new_gen_keeper is not None and main_new_gen_keeper.id != f.id:
+                # 偏離期間（釘選值還沒追上）：同一份「新世代」內容有兩份同名檔。
+                # 這裡 createdTime **判得出**真身——新世代的 manifest 是上一輪
+                # push 剛寫出來的，住民要複製就得先讀到它，一定比較晚。
+                decisions.append(
+                    SweepDecision(
+                        file=f,
+                        disposition=Disposition.QUARANTINE,
+                        reason=(
+                            "同名主 manifest 的副本：保留的是建立最早的那一份"
+                            f"（{file_stamp(main_new_gen_keeper)}），本檔建立較晚"
+                            f"（{file_stamp(f)}）。新世代的 manifest 由上一輪 push "
+                            "寫出，複製它必須先讀到它，所以一定比較晚"
                         ),
                         from_parent=default_from_parent,
                     )
@@ -401,8 +571,7 @@ def plan_sweep(
         # (B) 備份 GITMANIFEST.bak
         if f.name == bak_name:
             if f_sha in allowed_bak_hashes:
-                if not kept_bak_manifest:
-                    kept_bak_manifest = True
+                if bak_keeper is not None and bak_keeper.id == f.id:
                     decisions.append(
                         SweepDecision(
                             file=f,
@@ -412,12 +581,14 @@ def plan_sweep(
                         )
                     )
                 else:
+                    # 同 (A)：.bak 也是 rclone 每輪重寫，分不出真身就不搬。
                     decisions.append(
-                        SweepDecision(
-                            file=f,
-                            disposition=Disposition.QUARANTINE,
-                            reason="重複之備份 manifest",
-                            from_parent=default_from_parent,
+                        _need_admin(
+                            f,
+                            f"重複之備份 manifest（與另一份 .bak 位元組相同，"
+                            f"保留的是建立較早的 {bak_keeper.id}，{file_stamp(f)}）："
+                            "無法分辨哪一份才是提交流程在用的，不搬移"
+                            if bak_keeper else "重複之備份 manifest",
                         )
                     )
             elif has_bak_keep_candidate:
@@ -475,8 +646,8 @@ def plan_sweep(
                 size_matches = (f.size == b_info.size)
                 sha_matches = (f_sha == b_info.sha256.lower())
                 if sha_matches and size_matches:
-                    if f.name not in kept_bundles:
-                        kept_bundles.add(f.name)
+                    keeper = kept_by_name.get(f.name)
+                    if keeper is not None and keeper.id == f.id:
                         decisions.append(
                             SweepDecision(
                                 file=f,
@@ -490,7 +661,12 @@ def plan_sweep(
                             SweepDecision(
                                 file=f,
                                 disposition=Disposition.QUARANTINE,
-                                reason="重複之 active bundle",
+                                reason=(
+                                    "重複之 active bundle（位元組相同）：保留的是建立"
+                                    f"最早的那一份（{file_stamp(keeper)}，本檔"
+                                    f"{file_stamp(f)}）。bundle 一個世代只上傳一次，"
+                                    "住民要複製就得先讀到它，一定比較晚"
+                                ) if keeper is not None else "重複之 active bundle",
                                 from_parent=default_from_parent,
                             )
                         )
@@ -545,7 +721,35 @@ def plan_sweep(
                     continue
 
                 backed_verdict = backed.get(f.name)
-                if backed_verdict is None and not pin_in_sync:
+                keeper = kept_by_name.get(f.name)
+                if keeper is not None and keeper.id != f.id:
+                    # 同名同內容的副本（不在釘選值裡也一樣）：保留建立最早的那一份。
+                    decisions.append(
+                        SweepDecision(
+                            file=f,
+                            disposition=Disposition.QUARANTINE,
+                            reason=(
+                                "重複之 bundle（位元組相同）：保留的是建立最早的那一份"
+                                f"（{file_stamp(keeper)}，本檔 {file_stamp(f)}）。"
+                                "bundle 一個世代只上傳一次，住民要複製就得先讀到它，"
+                                "一定比較晚"
+                            ),
+                            from_parent=default_from_parent,
+                        )
+                    )
+                    continue
+
+                injection = None if pin_in_sync else _post_push_injection(f)
+                if injection is not None:
+                    decisions.append(
+                        SweepDecision(
+                            file=f,
+                            disposition=Disposition.QUARANTINE,
+                            reason=injection,
+                            from_parent=default_from_parent,
+                        )
+                    )
+                elif backed_verdict is None and not pin_in_sync:
                     decisions.append(
                         _need_admin(
                             f,
@@ -604,8 +808,8 @@ def plan_sweep(
                     continue
 
                 if f.size == key_size:
-                    if f.name not in kept_annex_keys:
-                        kept_annex_keys.add(f.name)
+                    keeper = kept_by_name.get(f.name)
+                    if keeper is not None and keeper.id == f.id:
                         decisions.append(
                             SweepDecision(
                                 file=f,
@@ -619,7 +823,12 @@ def plan_sweep(
                             SweepDecision(
                                 file=f,
                                 disposition=Disposition.QUARANTINE,
-                                reason="重複之 annex 物件",
+                                reason=(
+                                    "重複之 annex 物件（位元組相同）：保留的是建立最早的"
+                                    f"那一份（{file_stamp(keeper)}，本檔 {file_stamp(f)}）。"
+                                    "annex 物件一個世代只上傳一次，住民要複製就得先讀到"
+                                    "它，一定比較晚"
+                                ) if keeper is not None else "重複之 annex 物件",
                                 from_parent=default_from_parent,
                             )
                         )
@@ -635,7 +844,34 @@ def plan_sweep(
             elif f.size == key_size and f_sha == key_sha:
                 # M1：自洽但不在釘選值裡。唯一可信的背書是 pending.annex_keys
                 # ——它在 push **之前**就寫進 pin repo，記的是「這輪會寫上去什麼」。
-                if pending is not None and f.name in pending.annex_keys:
+                keeper = kept_by_name.get(f.name)
+                if keeper is not None and keeper.id != f.id:
+                    decisions.append(
+                        SweepDecision(
+                            file=f,
+                            disposition=Disposition.QUARANTINE,
+                            reason=(
+                                "重複之 annex 物件（位元組相同）：保留的是建立最早的"
+                                f"那一份（{file_stamp(keeper)}，本檔 {file_stamp(f)}）。"
+                                "annex 物件一個世代只上傳一次，住民要複製就得先讀到它，"
+                                "一定比較晚"
+                            ),
+                            from_parent=default_from_parent,
+                        )
+                    )
+                    continue
+
+                injection = None if pin_in_sync else _post_push_injection(f)
+                if injection is not None:
+                    decisions.append(
+                        SweepDecision(
+                            file=f,
+                            disposition=Disposition.QUARANTINE,
+                            reason=injection,
+                            from_parent=default_from_parent,
+                        )
+                    )
+                elif pending is not None and f.name in pending.annex_keys:
                     decisions.append(
                         _hold(
                             f,
@@ -650,7 +886,8 @@ def plan_sweep(
                             "內容與 key 內嵌的 sha256／大小相符，但前綴裡沒有任何"
                             "一份主 manifest 的內容等於正式釘選值——釘選值對這個前綴"
                             "沒有權威，無法分辨它是新世代的 raw 物件還是注入物："
-                            "不搬移（搬走等於消滅真本），列入健康檢查等人處理",
+                            f"不搬移（搬走等於消滅真本），列入健康檢查等人處理"
+                            f"（{file_stamp(f)}）",
                         )
                     )
                 else:

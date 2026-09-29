@@ -485,8 +485,11 @@ def test_plan_sweep_smoke():
 
     # 1. 正確主 manifest
     m1_id = drive.seed_file(p_id, f"GITMANIFEST--{uuid}", b"active_bundle\n", sha256=m_sha)
-    # 2. 重複主 manifest
-    m2_id = drive.seed_file(p_id, f"GITMANIFEST--{uuid}", b"active_bundle\n", sha256=m_sha)
+    # 2. 重複主 manifest（位元組相同、建立較晚＝住民的副本）
+    m2_id = drive.seed_file(
+        p_id, f"GITMANIFEST--{uuid}", b"active_bundle\n", sha256=m_sha,
+        created_time="2026-09-27T09:00:00Z",
+    )
     # 3. 雜湊不符之主 manifest
     m3_id = drive.seed_file(p_id, f"GITMANIFEST--{uuid}", b"wrong\n", sha256=wrong_sha)
     # 4. 正確 .bak（符合 prev_manifest_sha256）
@@ -570,14 +573,18 @@ def test_plan_sweep_smoke():
 
     assert dec_by_id[sub_id].disposition == Disposition.QUARANTINE
     assert dec_by_id[m1_id].disposition == Disposition.KEEP
-    assert dec_by_id[m2_id].disposition == Disposition.QUARANTINE
-    # review-1926cd3 H1：已經有一份 KEEP 候選時，其餘同名主 manifest 必然是
-    # 注入物（rclone 原地更新不會有第二份同名檔），直接隔離、不讀內容。
+    # review-903d7e2 H1：位元組相同的主 manifest 重複**分不出真身**（rclone 每輪
+    # push 都重寫 manifest，健康前綴本來就可能有兩份），所以不搬任何一份：保留建立
+    # 最早的那份，其餘列入健康檢查等人判斷。
+    assert dec_by_id[m2_id].disposition == Disposition.NEED_ADMIN
+    # review-1926cd3 H1：已經有一份 KEEP 候選時，**內容不同**的同名主 manifest
+    # 必然是注入物，直接隔離、不讀內容。
     assert dec_by_id[m3_id].disposition == Disposition.QUARANTINE
     assert dec_by_id[bak1_id].disposition == Disposition.KEEP
     # .bak 同樣：有 KEEP 候選時其餘同名 .bak 直接隔離
     assert dec_by_id[bak2_id].disposition == Disposition.QUARANTINE
     assert dec_by_id[b1_id].disposition == Disposition.KEEP
+    # bundle／annex 物件的副本照 createdTime 決勝：晚建立的那份隔離
     assert dec_by_id[b1_dup_id].disposition == Disposition.QUARANTINE
     assert dec_by_id[b_rem_id].disposition == Disposition.GC
     # review-1926cd3 M1：自洽不等於被背書——沒有 pending.annex_keys 或候選
@@ -716,11 +723,17 @@ def test_verify_clone_and_precheck_smoke():
     with pytest.raises(MismatchError):
         verify_clone(git_bad, state, drive=drive, prefix_folder_id=p_id)
 
-    # 3. 遠端主 manifest 數量異常（新增第二個同名）
-    drive.seed_file(p_id, m_name, b"dummy2", sha256="m" * 64)
-    with pytest.raises(MismatchError):
+    # 3. 位元組相同的第二個同名 manifest 是健康狀態（rclone 每輪 push 都重寫
+    #    manifest，實測同一輪 push 內也可能留下兩份），驗證照樣通過
+    drive.seed_file(p_id, m_name, b"dummy", sha256="m" * 64)
+    verify_clone(git_ok, state, drive=drive, prefix_folder_id=p_id)
+    precheck(drive, p_id, m_name, state)
+
+    # 4. 內容不一致的第二個同名 manifest 仍然是注入物 → 中止
+    drive.seed_file(p_id, m_name, b"dummy2", sha256="9" * 64)
+    with pytest.raises(MismatchError, match="內容不一致"):
         verify_clone(git_ok, state, drive=drive, prefix_folder_id=p_id)
-    with pytest.raises(MismatchError):
+    with pytest.raises(MismatchError, match="內容不一致"):
         precheck(drive, p_id, m_name, state)
 
 
@@ -993,10 +1006,11 @@ def test_resolve_content_checks_replan_duplicate():
         listing=listing,
     )
     assert len(resolved) == 2
-    # 全量重新 plan_sweep 後：恰好一個 KEEP，重複者被判定為 QUARANTINE
+    # 全量重新 plan_sweep 後：恰好一個 KEEP，重複者判為 NEED_ADMIN
+    # （review-903d7e2 H1：位元組相同的主 manifest 重複分不出真身，不搬移）
     assert resolved[0].disposition == Disposition.KEEP
-    assert resolved[1].disposition == Disposition.QUARANTINE
-    assert "重複" in resolved[1].reason
+    assert resolved[1].disposition == Disposition.NEED_ADMIN
+    assert "created=" in resolved[1].reason
 
 
 def test_plan_readview_sweep_smoke():

@@ -58,6 +58,7 @@
 - 容器時鐘在睡眠喚醒後的漂移（技術驗證 1.7j），與使用者一起補測。
 - 1.3 誤刪事件的時間點與根本原因補進 `docs/spike/evidence/1.3-erase.md`（推測是 `rclone --drive-trashed-only` 的清單混入 live 資料夾）。
 - 提交流程的釘選值寫回、清掃在 Actions cache 或自架 runner 下的行為（如果之後採用）。
+- **把主 manifest 的 Drive file id 綁進釘選值（待使用者決定，2026-09-30 提出）**。理由：rclone 每輪 push 都重寫 `GITMANIFEST--<uuid>` 且 **file id 會變**（實測 1.75.1 與 1.69.3，見 decision-log 2026-09-30 那節），所以「哪一份同名 manifest 才是真的」用 `createdTime` 判不出來——現在的作法是位元組相同就**兩份都不搬**、列入健康檢查等人判斷（安全，但重複會留著，健康檢查會一直提到它）。真正能一勞永逸的是**記 id**：push 後由提交流程把新 manifest 的 file id 寫進 pin repo（新的 post-push 觀測紀錄，格式待定），`settle` 轉正時綁進 `PinState`，`sweep`／`verify_*` 以 id 判斷真本，住民就完全偽造不了。代價：pin repo 多一種紀錄、新的失敗模式（觀測紀錄缺漏時要退回現在的保守行為）、屬於 ADR 0008 層級的形狀決定，而且要真的 Drive 驗證。**這一輪不做，等使用者決定要不要做。**
 - Claude Code 的子代理（jsonl 裡的 isSidechain 紀錄）拆成獨立的 Agora Session（期 1 只保存在母 Session 的原始紀錄裡，閱讀版不含）。
 - 改寫（在 Agora 裡修改 Session 內容，例如遮蔽誤貼的秘密）：期 1 拿掉。要做的話，需要處理「來源端下一次同步會把原內容帶回來」的問題（例如遮蔽規則持續套用到之後的每一份快照）。
 - 新 Foundry 的 link 型產出：現在的 schema 規定 link 必須有 URL，repo＋path 只是補充的出處；要讓 repo＋path 單獨成立，需要改 schema 與 build_artifact_item。

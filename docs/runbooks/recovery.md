@@ -67,10 +67,23 @@ git-remote-annex: No git repository found in this remote.
 
    | 檔 | 必要性 | 不搬會怎樣 |
    |---|---|---|
-   | `GITMANIFEST--<uuid>` | **必需** | `init-pin` 直接 `AbortRun`（它要求前綴裡恰好一個主 manifest） |
+   | `GITMANIFEST--<uuid>` | **必需** | `init-pin` 直接 `AbortRun`（它要求前綴裡**只有一種內容**的主 manifest） |
    | manifest 的 active 列表裡、但前綴沒有的 `GITBUNDLE-*` | **必需** | manifest 解析得出來但 `_download_and_replay` 找不到 bundle → 中止 |
    | 那一輪新寫入的 `SHA256E-*`（manifest 引用不到，但樹狀指得到） | **必需** | `init-pin` 的 key 集合不含它 → 之後讀不到那份 Session |
    | `GITMANIFEST--<uuid>.bak` | 選搬 | `init-pin` 只看主 manifest；搬回去只是讓前綴回到 push 完的形狀 |
+
+   > **前綴裡有兩份同名主 manifest 是正常狀態，不要當成注入物**（2026-09-30 實測，
+   > 見 `docs/decision-log.md` 同一節）：rclone 每輪 push 都重寫 manifest、file id
+   > 會變，而同一輪 push 內因為 Drive 的列表落後，有時會留下**兩份位元組相同**的
+   > 主 manifest。`git push` 與 `git clone` 在那種狀態下都正常，下一輪 push 會由
+   > rclone 自己清掉多餘的那份。清掃的規則是「**位元組相同就都不搬**、列入健康檢查」
+   > ——因為分不出哪一份才是真的，搬錯就是消滅真本。
+   >
+   > 所以要判斷的時候：**看 `createdTime` 與 `modifiedTime`**（健康檢查的
+   > `held_files` 與提交流程報告的 `need_admin_files` 都附上了 `@<createdTime>`）。
+   > 真正在用的是**最近被改寫（`modifiedTime` 最新）的那一份**；建立時間較早但已經
+   > 很久沒被改的那幾份通常是被 rclone 留下的舊世代或住民的副本。**內容不同於釘選值
+   > 的同名 manifest 才是注入物**，可以直接隔離。
 
 2. **在 AdminLock 內搬回**。`AdminLock` 的真正互斥是 **pin repo 裡的維護旗標**
    （提交流程第 1b 步與 write_pending／push／promote 三個重查點都讀它）；

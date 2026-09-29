@@ -469,10 +469,14 @@ def _unbacked_prefix_files(
     for d in decisions:
         if d.disposition not in interesting:
             continue
-        held.append(d.file.name)
+        # 檔名後面附上 Drive 的建立時間（review-903d7e2 M1）：要動手搬或刪之前，
+        # 只看檔名分不出哪一份才是真的——前綴裡可能有 rclone 自己留下的重複
+        # manifest，也可能有住民放的副本，兩者檔名完全一樣。
+        stamp = f"@{d.file.created_time}"
+        held.append(f"{d.file.name}{stamp}")
         age_h = (file_age_days(d.file, now) or 0.0) * 24
         if age_h > HELD_STALE_HOURS:
-            stale.append(d.file.name)
+            stale.append(f"{d.file.name}{stamp}")
     return sorted(held), sorted(stale), True
 
 

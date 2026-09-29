@@ -16,7 +16,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import time
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Iterable, Sequence
 from datetime import datetime
 
 from aistorage.annex.git import AnnexGit
@@ -103,6 +103,38 @@ def find_annex_file(files: Iterable[DriveFile], key: str) -> DriveFile | None:
     return None
 
 
+def unique_manifest_sha(files: Sequence[DriveFile]) -> str | None:
+    """這批同名主 manifest 的「唯一內容雜湊」；只有一種內容時回它，否則回 None。
+
+    為什麼不是「恰好一個檔」（review-903d7e2 實測）：rclone 每輪 push 都會重寫
+    manifest，**同一輪 push 內**因為 Drive 的列表落後也可能寫成兩份——實測
+    1.75.1（committer workflow 釘的版本）與 1.69.3（Mac 上跑 e2e 的版本）都是
+    每輪 push 後前綴裡有兩份同名、位元組相同的主 manifest，而且：
+
+    - `git push` 一樣成功（不會出現 Duplicate object 之类的錯誤）；
+    - `git clone` 一樣成功；
+    - 下一輪 push 會由 rclone 自己把多餘的那份清掉。
+
+    所以「檔案數 ≠ 1」不是健康的判斷依據，「**內容種類 ≠ 1**」才是：只要所有同名
+    manifest 的內容都等於正式值，遠端狀態就是對的（`plan_sweep` 也不會搬它們，
+    見 sweep 的 H1）。同名但內容相異仍然是注入物，照樣中止。
+    """
+    shas = {f.sha256 for f in files if not f.is_folder}
+    if len(shas) != 1:
+        return None
+    only = next(iter(shas))
+    return only.lower() if only else None
+
+
+def _manifest_with_sha(files: Sequence[DriveFile], sha: str) -> DriveFile:
+    """從同名 manifest 清單裡挑出內容雜湊等於 `sha` 的那一個（`unique_manifest_sha`
+    已經確認過只有一種內容，這裡只是挑一個下載）。"""
+    for f in files:
+        if not f.is_folder and f.sha256 is not None and f.sha256.lower() == sha:
+            return f
+    raise MismatchError(f"找不到內容雜湊等於 {sha} 的 manifest")
+
+
 def verify_clone(
     git: AnnexGit,
     state: PinState,
@@ -114,7 +146,9 @@ def verify_clone(
     """提交流程第 5 步：驗證 clone 成果。
 
     - git.ls_remote() 之 ref 集合與值必須完全等於 state.refs。
-    - 遠端主 manifest 必須恰好一個且內容雜湊等於 state.manifest_sha256。
+    - 遠端主 manifest 必須**只有一種內容**且等於 state.manifest_sha256——不是
+      「恰好一個檔」：rclone 同一輪 push 內可能因 Drive 列表落後留下兩份位元組
+      相同的（實測 1.75.1 與 1.69.3），而 push 與 clone 在那種狀態下都正常。
     - 若 Drive 未提供 checksum，拋出 MismatchError 註明 Drive 尚未提供 checksum。
     - 若提供 expected_annex_keys，驗證 state.annex_keys 涵蓋所有預期之 annex 物件。
     - 否則拋出 MismatchError。
@@ -134,16 +168,20 @@ def verify_clone(
 
     manifest_name = f"GITMANIFEST--{state.repo_uuid}"
     m_files = drive.find_by_name(prefix_folder_id, manifest_name)
-    if len(m_files) != 1:
-        raise MismatchError(f"遠端主 manifest 數量異常: 找到 {len(m_files)} 個 (預期恰好 1 個)")
-
-    mf = m_files[0]
-    if mf.sha256 is None:
-        raise MismatchError(f"Drive 尚未提供 checksum (sha256 is None): {mf.name}")
-
-    if mf.sha256 != state.manifest_sha256:
+    if not m_files:
+        raise MismatchError(f"遠端主 manifest 不存在: {manifest_name}")
+    # 「恰好一種內容」而不是「恰好一個檔」：rclone 每輪 push 都重寫 manifest，
+    # 同一輪 push 內也可能因 Drive 列表落後留下兩份位元組相同的（實測）。
+    remote_sha = unique_manifest_sha(m_files)
+    if remote_sha is None:
         raise MismatchError(
-            f"遠端主 manifest 雜湊 ({mf.sha256}) 與釘選值 ({state.manifest_sha256}) 不符"
+            f"遠端主 manifest 內容不一致或 Drive 尚未提供 checksum: 找到 {len(m_files)} 個"
+            f"（內容雜湊 {sorted(str(x) for x in {f.sha256 for f in m_files})}，"
+            f"預期所有同名檔的內容都等於 {state.manifest_sha256}）"
+        )
+    if remote_sha != state.manifest_sha256:
+        raise MismatchError(
+            f"遠端主 manifest 雜湊 ({remote_sha}) 與釘選值 ({state.manifest_sha256}) 不符"
         )
 
     if expected_annex_keys is not None:
@@ -277,20 +315,27 @@ def precheck(
     """提交流程第 9 步：push 前預檢。
 
     - 只查名稱符合 manifest_name 的檔案。
-    - 必須恰好一個，且 sha256Checksum 等於 state.manifest_sha256。
+    - 必須**只有一種內容**，且等於 state.manifest_sha256。
+      （不是「恰好一個檔」：rclone 每輪 push 都重寫 manifest，同一輪 push 內也可能
+      因 Drive 列表落後留下兩份位元組相同的——實測 1.75.1 與 1.69.3 都如此。）
     - 任何不符拋出 MismatchError（中止流程）。
     """
     files = drive.find_by_name(prefix_folder_id, manifest_name)
-    if len(files) != 1:
-        raise MismatchError(f"預檢失敗：遠端 manifest 數量異常 ({len(files)} != 1)")
+    if not files:
+        raise MismatchError(f"預檢失敗：遠端 manifest 不存在 ({manifest_name})")
 
-    f = files[0]
-    if f.sha256 is None:
-        raise MismatchError(f"Drive 尚未提供 checksum (sha256 is None): {f.name}")
-
-    if f.sha256 != state.manifest_sha256:
+    sha = unique_manifest_sha(files)
+    if sha is None:
         raise MismatchError(
-            f"預檢失敗：遠端 manifest 雜湊 ({f.sha256}) 與釘選值 ({state.manifest_sha256}) 不符"
+            f"預檢失敗：遠端 manifest 內容不一致或 Drive 尚未提供 checksum "
+            f"({len(files)} 個同名檔，內容雜湊 "
+            f"{sorted(str(x) for x in {f.sha256 for f in files})}，"
+            f"預期全部等於 {state.manifest_sha256})"
+        )
+
+    if sha != state.manifest_sha256:
+        raise MismatchError(
+            f"預檢失敗：遠端 manifest 雜湊 ({sha}) 與釘選值 ({state.manifest_sha256}) 不符"
         )
 
 
@@ -358,14 +403,27 @@ def verify_after_push(
             f"push 後 ls-remote ({remote_refs}) 與本地 refs ({local_refs}) 不符"
         )
 
-    # 2. 重新尋找主 manifest
+    # 2. 重新尋找主 manifest（要求「只有一種內容」，不是「恰好一個檔」——
+    #    rclone 同一輪 push 內可能因 Drive 列表落後留下兩份位元組相同的，實測 1.75.1
+    #    與 1.69.3 都如此；push 與 clone 在有這種重複時都正常）
     manifest_name = f"GITMANIFEST--{state.repo_uuid}"
     m_files = drive.find_by_name(listing_before.prefix_folder_id, manifest_name)
-    if len(m_files) != 1:
-        raise MismatchError(f"push 後遠端主 manifest 數量異常 ({len(m_files)} != 1)")
+    pushed_sha = unique_manifest_sha(m_files)
+    if pushed_sha is None:
+        raise MismatchError(
+            f"push 後遠端主 manifest 內容不一致或缺少 checksum（{len(m_files)} 個同名檔，"
+            f"內容雜湊 {sorted({f.sha256 for f in m_files})}）；無法確定這一輪 push 寫出來的是哪一份"
+        )
 
-    m_data = drive.download_bytes(m_files[0].id, max_bytes=1024 * 1024)
+    m_data = drive.download_bytes(
+        _manifest_with_sha(m_files, pushed_sha).id, max_bytes=1024 * 1024
+    )
     new_manifest_sha = hashlib.sha256(m_data).hexdigest().lower()
+    if new_manifest_sha != pushed_sha:
+        raise MismatchError(
+            f"push 後主 manifest 的 Drive checksum ({pushed_sha}) 與實際內容雜湊 "
+            f"({new_manifest_sha}) 不符"
+        )
     parsed_manifest = parse_manifest(m_data, repo_uuid=state.repo_uuid)
 
     # 3. 連續性檢查 (M3, M5)

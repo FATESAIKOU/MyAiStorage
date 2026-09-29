@@ -164,7 +164,10 @@ def read_remote_manifest_sha256(
     只用 Drive 的 metadata（`sha256Checksum`），不下載整個 manifest——
     這裡要的只是「有沒有被動過」的指紋。回傳 `None` 代表遠端沒有主 manifest。
 
-    - 找到多個 → 拒絕（狀態已經不明，中止，不要猜）；
+    - 找到多個**但內容全部相同** → 接受（review-903d7e2 實測：rclone 每輪 push 都
+      重寫 manifest，同一輪 push 內也可能因 Drive 列表落後留下兩份位元組相同的；
+      這種狀態下 push 與 clone 都正常，rclone 下一輪會自己清掉多餘的那份）；
+    - 找到多個且**內容不一致** → 拒絕（狀態已經不明，中止，不要猜）；
     - 找不到且 `allow_missing=False` → 拒絕；
     - 檔案沒有 checksum → 拒絕（fail-closed：判斷不出有沒有被動過就不准推）。
     """
@@ -175,10 +178,14 @@ def read_remote_manifest_sha256(
             return None
         raise AdminError(
             f"重讀遠端 manifest 失敗：{name} 不存在（這一輪不該不見）")
-    if len(found) > 1:
+    shas = {f.sha256 for f in found if not f.is_folder}
+    if len(shas) > 1 or None in shas:
         raise AdminError(
-            f"重讀遠端 manifest 失敗：{name} 找到 {len(found)} 個（應為 1）")
-    sha = found[0].sha256
+            f"重讀遠端 manifest 失敗：{name} 找到 {len(found)} 個，內容雜湊 "
+            f"{sorted(str(s) for s in shas)}——必須全部相同（rclone 同一輪 push 內"
+            f"可能留下兩份位元組相同的，那是正常的；內容不一致才是注入物）。"
+            f"先確認前綴裡這幾份的 created/modified 時間再繼續")
+    sha = next(iter(shas))
     if not sha:
         raise AdminError(
             f"重讀遠端 manifest 失敗：Drive 尚未提供 checksum（{name}）")
@@ -243,10 +250,17 @@ def verify_remote_refs(*, repo_dir: Path, git: Any, drive: DriveClient,
 
     manifest_name = f"GITMANIFEST--{repo_uuid}"
     found = drive.find_by_name(prefix_folder_id, manifest_name)
-    if len(found) != 1:
+    # 「只有一種內容」而不是「恰好一個檔」：rclone 同一輪 push 內可能因 Drive 列表
+    # 落後留下兩份位元組相同的 manifest（實測 1.75.1 與 1.69.3 都如此），push 與
+    # clone 在那種狀態下都正常。
+    shas = {f.sha256 for f in found if not f.is_folder}
+    if len(shas) != 1 or None in shas:
         raise AdminError(
-            f"push 後驗證失敗：遠端主 manifest {manifest_name} 找到 {len(found)} 個（應為 1）")
-    data = drive.download_bytes(found[0].id, max_bytes=1024 * 1024)
+            f"push 後驗證失敗：遠端主 manifest {manifest_name} 找到 {len(found)} 個、"
+            f"內容雜湊 {sorted(str(s) for s in shas)}（必須只有一種內容）")
+    sha = next(iter(shas))
+    target = next(f for f in found if not f.is_folder)
+    data = drive.download_bytes(target.id, max_bytes=1024 * 1024)
     manifest = parse_manifest(data, repo_uuid=repo_uuid)
     known = set(manifest.active) | set(manifest.removed)
     unlisted = [f.name for f in _list_files(drive, prefix_folder_id)
@@ -255,7 +269,7 @@ def verify_remote_refs(*, repo_dir: Path, git: Any, drive: DriveClient,
         raise AdminError(
             f"push 後驗證失敗：遠端有 {len(unlisted)} 個不在 manifest 的 bundle"
             f"（{unlisted[0]}…）")
-    return found[0].id, hashlib.sha256(data).hexdigest().lower()
+    return target.id, hashlib.sha256(data).hexdigest().lower()
 
 
 def _list_files(drive: DriveClient, folder_id: str, _depth: int = 0) -> list[Any]:
