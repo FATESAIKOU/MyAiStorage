@@ -52,9 +52,9 @@
 - [x] 5.3 「同步並提交」指令（觸發時一律帶 `--ref main`；逾時的訊息提示「提交流程可能被停用或遭到注入」）：同步指定的 Session（可以連同交接單、認領等項目）、觸發提交流程，等到讀取介面看得到這次放進去的每一個項目或它的拒絕原因（顯示進度，逾時明確告知）
 - [x] 5.4 給 opencode 用的 skill：分裂（同步，為每一份工作各寫一張交接單，一起提交）、交出末端（統合前，同步並寫一張交接單，一起提交）、認領（找出並認領交接單，同步並提交，等讀取介面確認 Link 屬於自己才開工、看到拒絕就停下；接著先讀交接單，再讀接續點之前的閱讀版）、統合（一個新 Session 認領多張交接單）、參照（用讀取介面找與讀，留下參考 Link，把快照時間與警告帶進上下文）、宣告停止（以 API 設 `time.archived`）；認領與宣告停止只能在主 Session 執行，子 Session 呼叫時拒絕
 - [x] 5.5 技術驗證：opencode 匯入 session。開頭位元組相同、1→n 共用開頭、n→1 能否合併（`docs/spike/session-import.md`）
-- [ ] 5.6 實作 `agora` CLI（find／show／read／handoff／checkout）與起點包格式：起點可以是 `handoff:<id>` 或 `<session>[@<訊息>]`；原始紀錄原封不動放進起點包；起點是交接單時登記認領並等確認，被拒就不產出；n→1 最長的一段放最前面，超過目標模型的 context 上限就明確拒絕（design D10）
-- [ ] 5.7 實作轉接器 `agora-opencode`：`load <起點包>` 截斷、重編 id、在目標專案目錄執行 `opencode import`，印出新 session id；同一個 coding agent 之間開頭位元組相同
-- [ ] 5.8 skill／plugin 改成 `agora_find`、`agora_read`、`agora_handoff`、`agora_checkout`，拿掉 claim；宣告停止與 checkout 只能在主 Session 執行
+- [x] 5.6 實作 `agora` CLI（find／show／read／handoff／checkout）與起點包格式：起點可以是 `handoff:<id>` 或 `<session>[@<訊息>]`；原始紀錄原封不動放進起點包；起點是交接單時登記認領並等確認，被拒就不產出；n→1 最長的一段放最前面，超過目標模型的 context 上限就明確拒絕（design D10）
+- [x] 5.7 實作轉接器 `agora-opencode`：`load <起點包>` 截斷、重編 id、在目標專案目錄執行 `opencode import`，印出新 session id；同一個 coding agent 之間開頭位元組相同
+- [x] 5.8 skill／plugin 改成 `agora_find`、`agora_read`、`agora_handoff`、`agora_checkout`，拿掉 claim；宣告停止與 checkout 只能在主 Session 執行
 
 ## 6. 管理操作
 
@@ -84,7 +84,7 @@
 
 每個 Session 都在各自的容器裡執行，不共用工作目錄與 opencode 的本機資料；接手或參照的一方唯一的資訊來源是讀取介面。
 
-- [ ] 9.1 分裂（1→n）：S1 剛講完幾句就用 `agora handoff` 同步、寫兩張交接單，一起提交（一次提交流程）；每張各跑一次 `agora checkout handoff:Hx` 加 `agora-opencode load`，建出 S2、S3，兩者的開頭與 S1 在接續點之前的內容位元組相同；接續點包含最後那幾句；S2、S3 讀得到兩張交接單；S1 照常繼續、不受影響；之後對 S1 做 /undo 再重新輸入，S2 承接的內容不變
+- [x] 9.1 分裂（1→n）：S1 剛講完幾句就用 `agora handoff` 同步、寫兩張交接單，一起提交（一次提交流程）；每張各跑一次 `agora checkout handoff:Hx` 加 `agora-opencode load`，建出 S2、S3，兩者的開頭與 S1 在接續點之前的內容位元組相同；接續點包含最後那幾句；S2、S3 讀得到兩張交接單；S1 照常繼續、不受影響；之後對 S1 做 /undo 再重新輸入，S2 承接的內容不變
 - [ ] 9.2 統合（n→1）：S2、S3 各自交出末端；`agora checkout handoff:H2 handoff:H3` 加 `agora-opencode load` 建出 S4，S4 開頭就帶著兩者接續點之前的內容（最長的一段在最前面），並有兩條接續 Link；超過 context 上限時 checkout 明確拒絕
 - [x] 9.3 相互參照（n↔m）：並行中的 S2、S3 反覆用讀取介面讀對方，各自只有一條指向對方的參考 Link、記最新的快照時間；指定新鮮度而對方未主動提交時得到警告；對方同步並提交後讀到新的快照；被參考的一方沒有任何變化，讀取沒有觸發任何寫入
 - [ ] 9.4 反向測試：Mac opencode 的憑證推不了、改不了、刪不了 Agora 的真本與舊版本；沒有簽章或簽章不符的收件匣項目被拒收，自填的產生者被忽略；兩次 checkout 同一張交接單時，被拒的一方不產出起點包；注入（換掉 main、真 main＋偽造 `git-annex` 分支、多餘 ref、同名 DoS、上一版 manifest 冒充目前版本、名稱與內容相符但沒被引用的 annex 物件、prepare 之後 push 之前的注入、多層同名資料夾）都被偵測，偽造的歷史不會成為真本，清掃後能恢復；push 後、轉正前被取消，下一輪自動恢復，而且真的新 manifest 與新 bundle 沒有被隔離；在 GITMANIFEST 替換空檔 kill 提交流程，下一輪自動恢復；consolidate 之後的 prepare 與 push 正常；暫時性的讀取錯誤不會移動任何真檔；被刪掉的收件匣項目由同步器補傳；撤銷 Mac opencode 的簽章金鑰之後，它的項目一律被拒收、其他 profile 不受影響
