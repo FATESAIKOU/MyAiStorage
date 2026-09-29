@@ -42,6 +42,7 @@ from aistorage.integrity.sweep import (
     plan_readview_sweep,
     plan_sweep,
     resolve_content_checks,
+    resolve_manifest_evidence,
     run_settle_and_sweep,
 )
 from aistorage.integrity.verify import (
@@ -77,6 +78,7 @@ __all__ = [
     "precheck",
     "purge_quarantine",
     "resolve_content_checks",
+    "resolve_manifest_evidence",
     "run_settle_and_sweep",
     "settle",
     "verify_after_push",

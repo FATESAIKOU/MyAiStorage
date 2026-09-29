@@ -32,6 +32,7 @@ import urllib.request
 
 from aistorage.agora.apply import (
     apply_claim,
+    apply_continuation,
     apply_handoff,
     apply_reference,
     apply_session,
@@ -80,6 +81,7 @@ from aistorage.integrity.sweep import (
     plan_readview_sweep,
     plan_sweep,
     resolve_content_checks,
+    resolve_manifest_evidence,
 )
 from aistorage.integrity.verify import (
     precheck,
@@ -781,6 +783,27 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
         workdir=work_temp,
     )
 
+    # impl1：manifest／bundle 在沒有「是注入物」的證據之前一律不搬。
+    # 釘選值落後遠端是完全正常的中間狀態（某一輪 push 成功、第 11 步驗證沒過），
+    # 照舊把那份 manifest 與它引用的新 bundle 當注入物搬走的話，`git clone` 就再也
+    # 找不到 manifest（`No git repository found in this remote`），而且沒有任何一輪
+    # 能自己回來——真本被提交流程自己消滅。所以這一步讀 manifest 內容，把
+    # 「解析得出來、且它列的 bundle 都在」的那幾份標成 HOLD（留在原地），
+    # 解析不了或引用不存在 bundle 的才隔離。
+    sweep_decisions = resolve_manifest_evidence(
+        sweep_decisions,
+        deps.drive,
+        content_cache,
+        state,
+        repo_uuid=rcfg.repo_uuid,
+        listing=repo_listing,
+        prefix_folder_id=rcfg.prefix_folder_id,
+    )
+    ctx.bump(
+        "held_files",
+        sum(1 for d in sweep_decisions if d.disposition == Disposition.HOLD),
+    )
+
     readview_decisions: list[SweepDecision] = []
     if not rcfg.readview_folder_id:
         ctx.report.readview_sweep = "skipped_no_folder"
@@ -926,7 +949,7 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
 
     for dec in sorted_accepted:
         item_type = dec.record_metadata.get("type") if dec.record_metadata else ""
-        if item_type in ("session", "handoff", "claim", "reference"):
+        if item_type in ("session", "handoff", "claim", "continuation", "reference"):
             if item_type == "session":
                 source = dec.sidecar["session"]["source"] if dec.sidecar else "opencode"
                 conv = deps.converters.get(source) or get_converter(source)
@@ -939,6 +962,15 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
                 res = apply_handoff(store, dec, conv, deps.clock)
             elif item_type == "claim":
                 res = apply_claim(store, dec, deps.clock)
+            elif item_type == "continuation":
+                # 接續單（impl2 M6）：`agora checkout <session>@<訊息>` 每次都會為
+                # 每個起點留一條接續 Link，不論起點是交接單還是某個位置。接續點是
+                # 以**被接續 Session 的原始紀錄**驗證的，所以轉換器要跟目標 Session
+                # 的來源走（與 handoff 同一個理由）。少了這個分支，continuation 會
+                # 掉進下面的 else 被 `apply_reference` 當成參考 Link 收掉。
+                cont_source = _target_source(dec)
+                conv = deps.converters.get(cont_source) or get_converter(cont_source)
+                res = apply_continuation(store, dec, conv, deps.clock)
             else:
                 res = apply_reference(store, dec, deps.clock)
         else:

@@ -272,6 +272,66 @@ def _capture_abort_messages(monkeypatch, run_mod) -> list[str]:
     return seen
 
 
+def test_apply_loop_dispatches_continuation_to_apply_continuation(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """impl2 M6：接續單走 `apply_continuation`，不是 `apply_reference`。
+
+    `agora checkout <session>@<訊息>` 每次都會為每個起點留一條接續 Link。apply
+    迴圈少了一個分支的話，continuation 會掉進最後那個 `else`，被
+    `apply_reference` 當成參考 Link 收掉——接續（1→1／1→n／n→1）就整個消失，
+    而且看起來「成功」。所以這裡直接觀察被呼叫的是哪一個 apply。
+    """
+    import importlib
+
+    from aistorage.agora.apply import ApplyResult
+    from aistorage.intake.evaluate import Decision, DecisionKind
+
+    run_mod = importlib.import_module("aistorage.committer.run")
+    cfg, deps, extra = _env(tmp_path)
+    drive = deps.drive  # type: ignore[assignment]
+    _seed_artifact(drive, extra)
+
+    real_evaluate = run_mod.evaluate
+    calls: list[str] = []
+    real_continuation = run_mod.apply_continuation
+    real_reference = run_mod.apply_reference
+
+    def _evaluate(item, **kw):
+        dec = real_evaluate(item, **kw)
+        if dec.kind is not DecisionKind.REJECT:
+            return dec
+        return Decision(
+            kind=DecisionKind.ACCEPT, item=item, code="ok", authenticated=True,
+            record_metadata={"id": f"continuation:{item.item_key}",
+                             "type": "continuation"},
+            sidecar={"metadata": {"type": "continuation"},
+                     "body": {"target_session_id": "opencode:ses_smoke_001",
+                              "continuation": {"snapshot_sha256": "0" * 64,
+                                               "message_id": "m1"},
+                              "new_session_id": "opencode:ses_new_001"}},
+        )
+
+    def _continuation(store, dec, conv, clock):
+        calls.append("continuation")
+        return ApplyResult(ok=True, code="ok")
+
+    def _reference(store, dec, clock):
+        calls.append("reference")
+        return ApplyResult(ok=True, code="ok")
+
+    monkeypatch.setattr(run_mod, "evaluate", _evaluate)
+    monkeypatch.setattr(run_mod, "apply_continuation", _continuation)
+    monkeypatch.setattr(run_mod, "apply_reference", _reference)
+    assert real_continuation is not _continuation
+    assert real_reference is not _reference
+
+    report = run(cfg, deps, dry_run=False)
+
+    assert report.ok is True, f"{report.aborted_at}:{report.code}"
+    assert calls == ["continuation"], f"continuation 走錯分支了：{calls}"
+
+
 # ------------------------------------------------------------- H3：維護旗標
 
 
@@ -369,12 +429,12 @@ def test_new_keys_must_really_be_on_drive() -> None:
     key = f"SHA256E-s{len(payload)}--{sha}"
 
     with pytest.raises(MismatchError, match="沒有真的在 Drive 上"):
-        verify_new_keys_on_drive(drive, prefix, {key})
+        verify_new_keys_on_drive(drive, prefix, {key}, attempts=1)
 
     # 放一個同名但內容不同的檔案 → 雜湊不符，仍然擋下來
     drive.seed_file(prefix, key, b"y" * 16)
     with pytest.raises(MismatchError, match="checksum"):
-        verify_new_keys_on_drive(drive, prefix, {key})
+        verify_new_keys_on_drive(drive, prefix, {key}, attempts=1)
 
     # 真的在，且 checksum 與 size 相符 → 過
     drive2 = FakeDrive()
@@ -383,6 +443,52 @@ def test_new_keys_must_really_be_on_drive() -> None:
     assert verify_new_keys_on_drive(drive2, prefix2, {key}) == 1
     # 沒有新 key 時什麼都不做
     assert verify_new_keys_on_drive(drive2, prefix2, set()) == 0
+
+
+def test_new_keys_check_retries_before_giving_up(monkeypatch) -> None:
+    """impl1：Drive 的列表會落後寫入，剛 push 上去的物件常常列不到。
+
+    舊行為是「列不到就是沒有」→ 這一輪中止、釘選值不轉正，留下一個沒人負責的
+    pending；下一輪就會把它連同新 manifest 一起當注入物搬走，真本從此無法 clone。
+    所以判定為缺物件時要重新列舉再試；真的沒有才中止（方向仍然是 fail-closed）。
+    """
+    from aistorage.drive.fake import FakeDrive
+
+    monkeypatch.setattr("aistorage.integrity.verify.time.sleep", lambda _s: None)
+
+    payload = b"x" * 16
+    sha = hashlib.sha256(payload).hexdigest()
+    key = f"SHA256E-s{len(payload)}--{sha}"
+
+    class _LaggingList:
+        """前 `lag_calls` 次 list_children 看不到新上傳的檔案，之後才看得到。"""
+
+        def __init__(self, inner: FakeDrive, folder_id: str, lag_calls: int) -> None:
+            self._inner = inner
+            self._folder = folder_id
+            self._lag = lag_calls
+            self._calls = 0
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def list_children(self, folder_id):
+            if folder_id == self._folder and self._calls < self._lag:
+                self._calls += 1
+                return []
+            return self._inner.list_children(folder_id)
+
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, key, payload)
+
+    lagging = _LaggingList(drive, prefix, lag_calls=1)
+    assert verify_new_keys_on_drive(lagging, prefix, {key}, retry_delay_s=0.0) == 1
+
+    # 一直列不到 → 重試到上限仍然中止（不吞掉）
+    never = _LaggingList(drive, prefix, lag_calls=99)
+    with pytest.raises(MismatchError, match="已重新列舉"):
+        verify_new_keys_on_drive(never, prefix, {key}, attempts=2, retry_delay_s=0.0)
 
 
 def test_step_11_checks_new_keys_on_drive(tmp_path: Path, monkeypatch) -> None:

@@ -35,6 +35,7 @@ from aistorage.integrity import (
     precheck,
     purge_quarantine,
     resolve_content_checks,
+    resolve_manifest_evidence,
     run_settle_and_sweep,
     settle,
     verify_after_push,
@@ -570,18 +571,37 @@ def test_plan_sweep_smoke():
     assert dec_by_id[sub_id].disposition == Disposition.QUARANTINE
     assert dec_by_id[m1_id].disposition == Disposition.KEEP
     assert dec_by_id[m2_id].disposition == Disposition.QUARANTINE
-    assert dec_by_id[m3_id].disposition == Disposition.QUARANTINE
+    # impl1：內容雜湊不在釘選值內的 manifest 不再直接隔離——要讀內容才知道
+    # 是不是注入物（b"wrong\n" 解析不出來，所以 resolve_manifest_evidence
+    # 之後會判定為注入物 → QUARANTINE，見下一段）。
+    assert dec_by_id[m3_id].disposition == Disposition.NEED_MANIFEST_CHECK
     assert dec_by_id[bak1_id].disposition == Disposition.KEEP
-    assert dec_by_id[bak2_id].disposition == Disposition.QUARANTINE
+    assert dec_by_id[bak2_id].disposition == Disposition.NEED_MANIFEST_CHECK
     assert dec_by_id[b1_id].disposition == Disposition.KEEP
     assert dec_by_id[b1_dup_id].disposition == Disposition.QUARANTINE
     assert dec_by_id[b_rem_id].disposition == Disposition.GC
-    assert dec_by_id[b_unk_id].disposition == Disposition.QUARANTINE
+    # impl1：自我一致（內容與檔名宣告相符）卻不在釘選值裡的 bundle 不隔離，
+    # 留給「釘選值還沒轉正」的情境。
+    assert dec_by_id[b_unk_id].disposition == Disposition.HOLD
     assert dec_by_id[annex1_id].disposition == Disposition.KEEP
     assert dec_by_id[annex1_dup_id].disposition == Disposition.QUARANTINE
-    assert dec_by_id[annex_unk_id].disposition == Disposition.QUARANTINE
+    # impl1：自我一致（內容與 key 自稱值相符）卻不在釘選值裡的 annex 物件不隔離，
+    # 留給「釘選值還沒轉正」的情境。
+    assert dec_by_id[annex_unk_id].disposition == Disposition.HOLD
     assert dec_by_id[junk_id].disposition == Disposition.QUARANTINE
     assert dec_by_id[no_sha_id].disposition == Disposition.NEED_CONTENT_CHECK
+
+    # 讀完 manifest 內容後：解析不出來 → 有證據是注入物 → 隔離
+    resolved = resolve_manifest_evidence(
+        decisions, drive, {}, state, repo_uuid=uuid, listing=listing,
+        prefix_folder_id=p_id,
+    )
+    resolved_by_id = {d.file.id: d for d in resolved}
+    assert resolved_by_id[m3_id].disposition == Disposition.QUARANTINE
+    assert resolved_by_id[bak2_id].disposition == Disposition.QUARANTINE
+    # 已經定案的項目不受影響
+    assert resolved_by_id[m1_id].disposition == Disposition.KEEP
+    assert resolved_by_id[b_unk_id].disposition == Disposition.HOLD
 
 
 def test_resolve_content_checks_smoke():

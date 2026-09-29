@@ -15,6 +15,7 @@ import hashlib
 from pathlib import Path
 import shutil
 import tempfile
+import time
 from typing import TYPE_CHECKING, Iterable
 from datetime import datetime
 
@@ -120,8 +121,15 @@ def verify_clone(
     """
     remote_refs = git.ls_remote()
     if remote_refs != state.refs:
+        # impl1：這是「遠端已經往前、釘選值還在後面」——最常見的原因是某一輪
+        # push 成功但第 11 步驗證沒過（那一輪沒有 promote，也沒有任何東西被
+        # 改動）。這種狀態要嘛由下一輪的 settle 從 pending 結算回來，要嘛等人
+        # 用 init-pin 重建釘選值；**不會**自己好。把怎麼辦寫進訊息。
         raise MismatchError(
-            f"clone 後 ls-remote ({remote_refs}) 與正式釘選值 refs ({state.refs}) 不符"
+            f"clone 後 ls-remote ({remote_refs}) 與正式釘選值 refs ({state.refs}) 不符："
+            f"遠端已經領先釘選值。這一輪不動任何東西（不清掃、不 push）。"
+            f"若某一輪 push 成功但驗證未完成，下一輪會從 pending 結算；"
+            f"若已經沒有 pending，需要管理者確認後用 init-pin 重建釘選值"
         )
 
     manifest_name = f"GITMANIFEST--{state.repo_uuid}"
@@ -201,6 +209,9 @@ def verify_new_keys_on_drive(
     drive: DriveClient,
     prefix_folder_id: str,
     new_keys: frozenset[str] | set[str],
+    *,
+    attempts: int = 3,
+    retry_delay_s: float = 2.0,
 ) -> int:
     """M1（review-25a48a9）：這一輪新寫的 annex 物件，**Drive 上**真的在嗎？
 
@@ -208,7 +219,6 @@ def verify_new_keys_on_drive(
     而那份 location log 是提交流程自己寫的。Drive 上的物件如果實際上不在
     （被誤隔離後又被 purge、Drive 端遺失……），location log 仍然會宣稱它在，
     覆蓋率檢查就會通過。所以這裡直接問 Drive：
-
     - 前綴底下有沒有 `name == key` 的檔案；
     - `sha256Checksum` 等於 key 內嵌的雜湊；
     - `size` 等於 key 內嵌的大小。
@@ -217,27 +227,37 @@ def verify_new_keys_on_drive(
 
     **必須在 push 之後呼叫**：第 3 步的 listing 是 push 之前的，拿它來比對會把
     「這一輪剛推上去的物件」全部判成不存在。
+
+    impl1：Drive 的列表會**落後**寫入。剛 push 完就去列舉，新上傳的物件常常還
+    沒出現（impl1 現場：上傳後 30 秒仍列不到，於是這裡誤判「物件不在」而中止，
+    釘選值不轉正，留下一個沒人負責的 pending）。所以判定為缺物件時**重試**：
+    重新列舉、隔一會兒再看。真的沒上傳成功的話，重試只會多花幾秒，最後照樣
+    中止——方向仍然是 fail-closed。
     """
     if not new_keys:
         return 0
-    candidates = tuple(drive.list_children(prefix_folder_id))
-    problems: list[str] = []
-    for key in sorted(new_keys):
-        if not _is_plausible_annex_key(key):
-            problems.append(f"{key}（形狀不合法）")
-            continue
-        by_name = tuple(f for f in candidates if f.name == key)
-        if not by_name:
-            problems.append(f"{key}（Drive 上沒有同名檔案）")
-            continue
-        # M3：同名多檔時，只要**任一**檔 checksum 與 size 都相符就算存在。
-        if find_annex_file(by_name, key) is None:
-            problems.append(f"{key}（同名檔的 checksum／size 都不符 key 內嵌值）")
-    if problems:
-        raise MismatchError(
-            f"這一輪新寫的 annex 物件沒有真的在 Drive 上（{len(problems)} 個）："
-            f"{problems[:3]}")
-    return len(new_keys)
+    keys = sorted(new_keys)
+    for attempt in range(max(1, attempts)):
+        candidates = tuple(drive.list_children(prefix_folder_id))
+        problems: list[str] = []
+        for key in keys:
+            if not _is_plausible_annex_key(key):
+                problems.append(f"{key}（形狀不合法）")
+                continue
+            by_name = tuple(f for f in candidates if f.name == key)
+            if not by_name:
+                problems.append(f"{key}（Drive 上沒有同名檔案）")
+                continue
+            # M3：同名多檔時，只要**任一**檔 checksum 與 size 都相符就算存在。
+            if find_annex_file(by_name, key) is None:
+                problems.append(f"{key}（同名檔的 checksum／size 都不符 key 內嵌值）")
+        if not problems:
+            return len(keys)
+        if attempt + 1 < max(1, attempts):
+            time.sleep(retry_delay_s * (attempt + 1))
+    raise MismatchError(
+        f"這一輪新寫的 annex 物件沒有真的在 Drive 上（{len(problems)} 個，"
+        f"已重新列舉 {attempts} 次）：{problems[:3]}")
 
 
 def precheck(

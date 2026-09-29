@@ -112,6 +112,31 @@ def _download_and_replay(
         shutil.rmtree(temp_bundle_dir, ignore_errors=True)
 
 
+def _relist(drive: DriveClient, prefix_folder_id: str) -> RepoListing:
+    """重新列舉前綴（只讀；用於「決定當下」的證據）。"""
+    children = drive.list_children(prefix_folder_id)
+    return RepoListing(
+        prefix_folder_id=prefix_folder_id,
+        files=tuple(c for c in children if not c.is_folder),
+        subfolders=tuple(c for c in children if c.is_folder),
+    )
+
+
+def _fingerprint(listing: RepoListing) -> tuple[tuple[str, str | None, int | None, str], ...]:
+    """前綴的「指紋」：檔名、雜湊、大小、id。任一項不同就代表期間有變動。"""
+    return tuple(
+        sorted(
+            (f.name, f.sha256, f.size, f.id)
+            for f in listing.files
+        )
+    )
+
+
+#: DROPPED／BAK_RECOVERY 這兩個結論會**丟掉 pending**，所以它們最多重查這麼多次。
+#: 重查是為了讓「丟掉 pending」建立在決定當下的證據上，而不是進場時的快照。
+_MAX_RECHECK = 2
+
+
 def settle(
     state: PinState,
     pending: PinPending | None,
@@ -132,6 +157,13 @@ def settle(
        - 主 manifest 不在、.bak 內容雜湊 == state.manifest_sha256 且重放 refs == state.refs -> BAK_RECOVERY。
        - 其他情形 -> 拋出 MismatchError（中止）。
     4. 任何 ReadError 原樣往上拋（中止，不猜）。
+
+    impl1：DROPPED 與 BAK_RECOVERY 會丟掉 pending，所以它們必須建立在**決定當下**
+    的證據上。步驟 2 要下載並重放 bundle，耗時數十秒；這段時間裡別的輪次可能
+    已經把 push 完成（impl1 現場：pending 被丟掉、遠端卻已經往前，之後每一輪都
+    `No git repository found in this remote`）。PROMOTED 不受影響——它要求「看得到」
+    新 manifest，而 Drive 的列表只會落後、不會超前。所以只有這兩個結論在丟東西
+    之前重新列舉一次，前綴有變動就重做整段判斷（有上限）。
     """
     if pending is None:
         return SettleOutcome.NO_PENDING, state
@@ -148,6 +180,61 @@ def settle(
     main_name = f"GITMANIFEST--{state.repo_uuid}"
     bak_name = f"GITMANIFEST--{state.repo_uuid}.bak"
 
+    # 進場就用自己的 listing：呼叫端那份是第 3 步開始時的快照。
+    listing = _relist(drive, listing.prefix_folder_id)
+
+    for attempt in range(_MAX_RECHECK + 1):
+        outcome, new_state, discard = _settle_once(
+            state, pending, listing, drive,
+            main_name=main_name, bak_name=bak_name, workdir=workdir, clock=clock,
+            may_recheck=attempt < _MAX_RECHECK,
+        )
+        if outcome is None:
+            # 「判定用的畫面裡沒有主 manifest」有可能是 Drive 的列表落後：先重查再說
+            if attempt == _MAX_RECHECK:
+                raise MismatchError(
+                    "主 manifest 缺失且 .bak 無法恢復至正式釘選值；"
+                    "真本已不完整，需要管理者用 init-pin 重建釘選值"
+                )
+            fresh = _relist(drive, listing.prefix_folder_id)
+            if _fingerprint(fresh) != _fingerprint(listing):
+                listing = fresh
+                continue
+            raise MismatchError(
+                "主 manifest 缺失且 .bak 無法恢復至正式釘選值；"
+                "真本已不完整，需要管理者用 init-pin 重建釘選值"
+            )
+        if not discard:
+            return outcome, new_state
+        # 這個結論會丟掉 pending → 確認前綴在這段時間裡沒有變動
+        if attempt == _MAX_RECHECK:
+            return outcome, new_state
+        fresh = _relist(drive, listing.prefix_folder_id)
+        if _fingerprint(fresh) == _fingerprint(listing):
+            return outcome, new_state
+        listing = fresh
+
+    raise MismatchError("內部錯誤：settle 的重查迴圈沒有回傳結果")
+
+
+def _settle_once(
+    state: PinState,
+    pending: PinPending,
+    listing: RepoListing,
+    drive: DriveClient,
+    *,
+    main_name: str,
+    bak_name: str,
+    workdir: Path,
+    clock: Clock,
+    may_recheck: bool,
+) -> tuple[SettleOutcome | None, PinState, bool]:
+    """`settle` 的一輪判斷。
+
+    回傳 `(outcome, state, discard)`：
+    - `outcome` 為 None 代表「判定用的畫面可能落後了，請重新列舉再判一次」；
+    - `discard` 代表這個結論會**丟掉 pending**（DROPPED／BAK_RECOVERY）。
+    """
     main_files = [f for f in listing.files if f.name == main_name]
 
     # 若無主 manifest，檢驗是否符合 Rule C: .bak 復原
@@ -163,10 +250,16 @@ def settle(
                         parsed_bak.active, state.repo_uuid, listing.files, drive, workdir
                     )
                     if replayed == state.refs:
-                        return SettleOutcome.BAK_RECOVERY, state
+                        return SettleOutcome.BAK_RECOVERY, state, True
                 except (MismatchError, TooLarge):
                     continue
-        raise MismatchError("主 manifest 缺失且 .bak 無法恢復至正式釘選值")
+        if may_recheck:
+            # 「沒有主 manifest」有可能是 Drive 的列表落後：重新列舉再判一次
+            return None, state, False
+        raise MismatchError(
+            "主 manifest 缺失且 .bak 無法恢復至正式釘選值；"
+            "真本已不完整，需要管理者用 init-pin 重建釘選值"
+        )
 
     # 存在主 manifest 候選檔案
     candidate_results: list[dict[str, Any]] = []
@@ -215,7 +308,7 @@ def settle(
             promoted_at=clock.now_utc(),
             run_id=pending.run_id,
         )
-        return SettleOutcome.PROMOTED, new_state
+        return SettleOutcome.PROMOTED, new_state, False
 
     # 2. 檢查是否符合 DROPPED（符合 state.refs 且內容雜湊相符）
     state_matches = [
@@ -223,7 +316,14 @@ def settle(
         if c["refs"] == state.refs and c["sha256"] == state.manifest_sha256
     ]
     if state_matches:
-        return SettleOutcome.DROPPED, state
+        return SettleOutcome.DROPPED, state, True
 
-    # 3. 兩者皆不符合 -> 中止
-    raise MismatchError("遠端 manifest 狀態與待定或正式釘選值均不符，無法自動結算")
+    # 3. 兩者皆不符合 -> 中止（不丟 pending：遠端已經領先釘選值，丟掉 pending
+    #    就再也沒有人負責把它推進）
+    seen = {c["sha256"] for c in candidate_results}
+    raise MismatchError(
+        f"遠端 manifest 狀態與待定或正式釘選值均不符，無法自動結算"
+        f"（讀到的 manifest 內容雜湊: {sorted(seen) or '（沒有讀到任何候選）'}，"
+        f"待定 refs: {pending.refs}，正式 refs: {state.refs}）；"
+        f"pending 保留不動，遠端也沒有被動過——需要管理者確認後用 init-pin 重建釘選值"
+    )

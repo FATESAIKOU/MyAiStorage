@@ -48,6 +48,7 @@ from aistorage.integrity.sweep import (
     plan_readview_sweep,
     plan_sweep,
     resolve_content_checks,
+    resolve_manifest_evidence,
     run_settle_and_sweep,
 )
 from aistorage.integrity.verify import (
@@ -247,6 +248,96 @@ def test_settle_bak_recovery(bundles: dict, tmp_path: Path):
     assert ns == st
 
 
+class _StaleListingDrive:
+    """包住 FakeDrive：前 `stale_calls` 次 list_children 回傳「push 還沒完成」的舊畫面。
+
+    這是 impl1 現場的形狀：Drive 的列舉會落後寫入。某一輪已經 push 成功、釘選值還
+    沒轉正（pending 留著），另一輪在 push 落實**之前**就列舉了前綴，於是把
+    「遠端已經往前」看成「遠端沒動」→ 丟掉 pending → 之後遠端再也沒有人負責，
+    下一輪的清掃就把新的 manifest 當注入物搬走，真本從此無法 clone。
+    """
+
+    def __init__(self, inner: FakeDrive, *, folder_id: str, stale_calls: int) -> None:
+        self._inner = inner
+        self._folder_id = folder_id
+        self._stale_calls = stale_calls
+        self._calls = 0
+        self._stale_snapshot: list = []
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def list_children(self, folder_id):
+        if folder_id != self._folder_id:
+            return self._inner.list_children(folder_id)
+        self._calls += 1
+        if self._calls <= self._stale_calls and self._stale_snapshot:
+            return list(self._stale_snapshot)
+        return self._inner.list_children(folder_id)
+
+
+def test_settle_promotes_when_the_push_lands_while_it_was_deciding(bundles: dict, tmp_path: Path):
+    """push 在 settle 判斷的期間才落實 → 必須 PROMOTED，不能 DROPPED 掉 pending。
+
+    這就是 impl1 現場的形狀：判定前的那份畫面裡，遠端看起來還是正式值
+    （DROPPED 的條件成立），但判定真正做完之前，別的輪次已經把 push 落實了。
+    舊行為會在這裡丟掉 pending，遠端從此領先釘選值而沒有人負責。
+    """
+    st = _state(bundles, manifest_sha=bundles["m1sha"])
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"])
+    # 進場時的畫面：遠端還停在正式值
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"])
+    stale = _StaleListingDrive(drive, folder_id=prefix, stale_calls=1)
+    stale._stale_snapshot = list(drive.list_children(prefix))
+    stale_listing = RepoListing(
+        prefix_folder_id=prefix, files=tuple(stale._stale_snapshot), subfolders=tuple()
+    )
+
+    # 幾乎是同一瞬間，push 落實：新的 manifest（b1+b2）與新 bundle 出現
+    drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"])
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m2"])
+
+    outcome, ns = settle(st, _pending(bundles), stale_listing, stale,
+                         workdir=tmp_path, clock=FixedClock())
+    assert outcome == SettleOutcome.PROMOTED, "push 已落實卻被判成 DROPPED＝丟掉了 pending"
+    assert ns.refs == _pending(bundles).refs
+    assert ns.manifest_sha256 == bundles["m2sha"]
+
+
+def test_settle_promotes_when_the_manifest_appears_mid_settle(bundles: dict, tmp_path: Path):
+    """判定用的畫面裡連 manifest 都還沒有，落實之後才有 → 同樣不能中止或丟 pending。"""
+    st = _state(bundles, manifest_sha=bundles["m1sha"])
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"])
+    stale = _StaleListingDrive(drive, folder_id=prefix, stale_calls=1)
+    stale._stale_snapshot = list(drive.list_children(prefix))
+    stale_listing = RepoListing(
+        prefix_folder_id=prefix, files=tuple(stale._stale_snapshot), subfolders=tuple()
+    )
+
+    drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"])
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m2"])
+
+    outcome, ns = settle(st, _pending(bundles), stale_listing, stale,
+                         workdir=tmp_path, clock=FixedClock())
+    assert outcome == SettleOutcome.PROMOTED
+    assert ns.manifest_sha256 == bundles["m2sha"]
+
+
+def test_settle_still_drops_when_the_remote_really_has_not_moved(bundles: dict, tmp_path: Path):
+    """重查之後確認遠端真的還在正式值 → 仍然 DROPPED（不是一律不丟）。"""
+    st = _state(bundles, manifest_sha=bundles["m1sha"])
+    drive = FakeDrive()
+    prefix, listing = _seed_prefix(drive, bundles, bundles["m1"], ["b1"])
+    outcome, ns = settle(st, _pending(bundles), listing, drive,
+                         workdir=tmp_path, clock=FixedClock())
+    assert outcome == SettleOutcome.DROPPED
+    assert ns == st
+
+
 def test_settle_two_matching_candidates_abort(bundles: dict, tmp_path: Path):
     """兩個同名候選內容不同但都能重放相符 → 中止（M2：不信任任一個）。"""
     st = _state(bundles, manifest_sha=bundles["m1sha"])
@@ -333,7 +424,13 @@ def _sweep_state(bundles: dict, **kw) -> PinState:
 
 def test_plan_sweep_manifest_roles(bundles: dict):
     """主 manifest 只 KEEP 正式值；同名第二份、上一版冒充（非 .bak 名）→ QUARANTINE；
-    .bak 只接受正式值或上一版；其他名稱 → QUARANTINE。"""
+    .bak 只接受正式值或上一版；其他名稱 → QUARANTINE。
+
+    impl1：內容雜湊**既不是正式值也不是上一版**的 manifest 不再直接隔離——那正是
+    「釘選值還沒轉正、push 已經完成」的那一份，隔離它等於消滅真本（`git clone`
+    之後就找不到 manifest，而且沒有任何一輪能自己回來）。它被標成
+    NEED_MANIFEST_CHECK，讀完內容才決定：解析不出來 → 隔離。
+    """
     st = _sweep_state(bundles, prev=bundles["m1sha"])
     drive = FakeDrive()
     prefix = drive.seed_folder("prefix")
@@ -347,11 +444,20 @@ def test_plan_sweep_manifest_roles(bundles: dict):
                           files=tuple(drive.list_children(prefix)), subfolders=tuple())
     decs = {d.file.id: d.disposition for d in plan_sweep(listing, st, repo_uuid=UUID)}
     assert decs[good] == Disposition.KEEP
-    assert decs[dup] == Disposition.QUARANTINE
+    assert decs[dup] == Disposition.NEED_MANIFEST_CHECK
     assert decs[prev_impostor] == Disposition.QUARANTINE
     assert decs[bak] == Disposition.KEEP
     assert decs[bak_bad] == Disposition.QUARANTINE
     assert decs[other] == Disposition.QUARANTINE
+
+    # 讀內容：junk-content 解析不出來 → 有證據是注入物 → 隔離
+    resolved = resolve_manifest_evidence(
+        plan_sweep(listing, st, repo_uuid=UUID), drive, {}, st,
+        repo_uuid=UUID, listing=listing, prefix_folder_id=prefix,
+    )
+    decs2 = {d.file.id: d.disposition for d in resolved}
+    assert decs2[dup] == Disposition.QUARANTINE
+    assert decs2[good] == Disposition.KEEP
 
 
 def test_plan_sweep_prev_manifest_with_normal_name_quarantined(bundles: dict):
@@ -394,8 +500,12 @@ def test_plan_sweep_bundle_rules(bundles: dict):
 
 
 def test_plan_sweep_annex_objects(bundles: dict):
-    """key ∈ 釘選值且雜湊＋size 相符 → KEEP；沒被引用的 key → QUARANTINE；
-    s<N> 與 size 不符 → QUARANTINE。"""
+    """key ∈ 釘選值且雜湊＋size 相符 → KEEP。
+
+    impl1：不在釘選值裡的物件分兩種——內容與 key 自稱值相符的（多半是「剛 push
+    上去、還沒轉正」）→ HOLD；不相符的（key 內嵌的雜湊／大小與內容對不上，
+    證據確鑿是注入物）→ QUARANTINE。
+    """
     content = b"0123456789a"  # 11 bytes
     key = f"SHA256E-s11--{hashlib.sha256(content).hexdigest()}"
     st = _sweep_state(bundles, keys=frozenset({key}))
@@ -408,8 +518,97 @@ def test_plan_sweep_annex_objects(bundles: dict):
                           files=tuple(drive.list_children(prefix)), subfolders=tuple())
     decs = {d.file.id: d.disposition for d in plan_sweep(listing, st, repo_uuid=UUID)}
     assert decs[keep] == Disposition.KEEP
-    assert decs[orphan] == Disposition.QUARANTINE
+    assert decs[orphan] == Disposition.HOLD
     assert decs[sizemismatch] == Disposition.QUARANTINE
+
+
+# ---------------------------------------------------------------------------
+# impl1：釘選值落後遠端時，清掃不得消滅真本
+# ---------------------------------------------------------------------------
+
+def test_plan_sweep_keeps_a_manifest_the_pin_has_not_caught_up_with(bundles: dict):
+    """push 成功、驗證未完成 → 釘選值還在上一版。
+
+    這種狀態下遠端有的是**真的** manifest（內容合法、它列的 bundle 都在前綴裡）
+    與一個**真的**新 bundle。舊規則會把兩者都當注入物搬走，於是 `git clone`
+    再也找不到 manifest，真本被提交流程自己消滅，而且沒有任何一輪能自己回來。
+    證明它是真的之後只能 HOLD（留在原地），不能 QUARANTINE。
+    """
+    st = _sweep_state(bundles)  # 釘選值只有 b1
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    official = drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"])
+    keep_bundle = drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"])
+    new_bundle = drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"])
+    ahead = drive.seed_file(prefix, MANIFEST_NAME, bundles["m2"])  # b1+b2，釘選值還沒跟上
+
+    listing = RepoListing(prefix_folder_id=prefix,
+                          files=tuple(drive.list_children(prefix)), subfolders=tuple())
+    first = plan_sweep(listing, st, repo_uuid=UUID)
+    by_id = {d.file.id: d for d in first}
+    assert by_id[official].disposition == Disposition.KEEP
+    assert by_id[ahead].disposition == Disposition.NEED_MANIFEST_CHECK
+    assert by_id[new_bundle].disposition == Disposition.HOLD
+    assert by_id[keep_bundle].disposition == Disposition.KEEP
+
+    second = resolve_manifest_evidence(first, drive, {}, st, repo_uuid=UUID,
+                                       listing=listing, prefix_folder_id=prefix)
+    by_id2 = {d.file.id: d for d in second}
+    assert by_id2[ahead].disposition == Disposition.HOLD
+    assert by_id2[new_bundle].disposition == Disposition.HOLD
+    assert by_id2[official].disposition == Disposition.KEEP
+
+
+def test_resolve_manifest_evidence_quarantines_manifest_with_missing_bundles(
+    bundles: dict,
+):
+    """manifest 本身合法，但它列的 bundle 不在前綴裡 → 有證據是注入物 → 隔離。"""
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"])
+    # m2 宣告 b1、b2，但前綴裡只有 b1
+    impostor = drive.seed_file(prefix, f"{MANIFEST_NAME}.bak", bundles["m2"])
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"])
+
+    listing = RepoListing(prefix_folder_id=prefix,
+                          files=tuple(drive.list_children(prefix)), subfolders=tuple())
+    resolved = resolve_manifest_evidence(
+        plan_sweep(listing, st, repo_uuid=UUID), drive, {}, st,
+        repo_uuid=UUID, listing=listing, prefix_folder_id=prefix,
+    )
+    by_id = {d.file.id: d for d in resolved}
+    assert by_id[impostor].disposition == Disposition.QUARANTINE
+
+
+def test_plan_sweep_quarantines_bundle_whose_name_lies(bundles: dict):
+    """自我一致但不在釘選值裡的 bundle → HOLD；檔名宣告與內容不符 → QUARANTINE。"""
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    honest = drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"])
+    liar = drive.seed_file(prefix, bundles["b2"], b"payload-from-a-resident")
+    listing = RepoListing(prefix_folder_id=prefix,
+                          files=tuple(drive.list_children(prefix)), subfolders=tuple())
+    decs = {d.file.id: d.disposition for d in plan_sweep(listing, st, repo_uuid=UUID)}
+    assert decs[honest] == Disposition.HOLD
+    assert decs[liar] == Disposition.QUARANTINE
+
+
+def test_apply_sweep_never_moves_held_files(bundles: dict, tmp_path: Path):
+    """HOLD 只是「不動」，不是「漏處理」：apply_sweep 不會搬它。"""
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    quarantine = drive.seed_folder("quarantine")
+    held = drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"])
+    listing = RepoListing(prefix_folder_id=prefix,
+                          files=tuple(drive.list_children(prefix)), subfolders=tuple())
+    decisions = plan_sweep(listing, st, repo_uuid=UUID)
+    moved = apply_sweep(decisions, drive, quarantine_folder_id=quarantine,
+                        clock=FixedClock(), prefix_folder_id=prefix)
+    assert moved == 0
+    assert [f.name for f in drive.list_children(prefix)] == [bundles["b2"]]
 
 
 def test_plan_sweep_missing_checksum_needs_content_check(bundles: dict):
