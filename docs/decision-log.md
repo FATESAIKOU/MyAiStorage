@@ -163,3 +163,10 @@ The user found the pipeline-centred design hard to follow and restated AiStorage
 ## Reader access to Agora raw records (2026-09-28 night)
 
 For `agora checkout` to rebuild prefixes verbatim, the read-only identity (whose key is in every resident container) can read the whole Agora prefix folder, including raw records and git bundles. Raw records carry the model's reasoning and full tool output, which the reading version trims, so an accidentally printed secret in a tool output becomes readable by every resident. The user accepted this boundary (review 73dbf2c-8e3be02 M4). The deploy runbook and resident docs state it, and "do not print secrets into tool output" stays a resident rule.
+
+## Night decisions pending the user's confirmation (2026-09-30)
+
+Made under the user's night rule (pick the conservative, reversible option; record for morning review).
+- **Pinning others' snapshots (review 2bc0785 M2):** any resident may start from any completed message in any existing snapshot of any session, which pins that snapshot and publishes its reading. This is accepted because it widens nothing beyond the reader boundary already accepted (readers can read the whole Agora prefix). Cost is bounded instead: each profile may file at most a fixed number of reservations/continuations per committer round (configurable), and a reserved session that never gets a follow-up snapshot shows as `reserved` and expires. *Pending confirmation.*
+- **Continuation targets:** like handoffs, only main sessions can be continued; sub-sessions are rejected. *Pending confirmation.*
+- **One link per (new session, source session):** the same rule for claims and continuations; checkout rejects a start-point set that names the same source twice. *Pending confirmation.*
