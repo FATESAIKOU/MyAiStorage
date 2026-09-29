@@ -394,10 +394,20 @@ def test_checkout_records_a_continuation_link_for_a_direct_start_point(
         return getattr(result, "value", result)
 
     new_view = _value(boot.reader.get_session(new_id))
-    assert new_view.session.status == "running"
+    # 預留**不是** running：`agora checkout` 只是把這個新 session 的位置與那份
+    # 零則訊息的空匯出檔準備好，還沒有人開工（fff6169／review-2bc0785 M2）。
+    # 第一份真實快照到達之後 `apply_session` 才把它改回 running／stopped。
+    assert new_view.session.status == "reserved", (
+        f"S2 還沒有人開工，應該是 reserved：{new_view.session.status}")
+    assert new_view.session.reserved_until, "預留要帶期限（期 1 不自動刪過期的預留）"
     assert new_view.session.raw_sha256, "預留的空匯出檔成為 S2 的第一份快照"
     # 零則訊息：S2 還沒有人開工
     assert _value(boot.reader.get_reading(new_id))["messages"] == []
+    # 新鮮度看的是**期限**不是落後：預留是零則訊息的空紀錄，本來就不會再變動，
+    # 所以 max_lag=0 也應該是 satisfied（`reader/freshness.py` 的 reserved 分支）。
+    # 注意 freshness 在 `Result` 上，不在 `SessionView` 裡。
+    assert boot.reader.get_session(
+        new_id, max_lag=timedelta(0)).freshness.satisfied is True
 
     out = [(l.kind, l.from_session_id, l.to_session_id, l.snapshot_sha256,
             l.message_id) for l in new_view.links_out]
@@ -409,7 +419,9 @@ def test_checkout_records_a_continuation_link_for_a_direct_start_point(
     assert [(l.from_session_id, l.to_session_id, l.snapshot_sha256, l.message_id)
             for l in old_view.links_in] == [(new_id, AGORA_SESSION, snap_sha,
                                              point_id)]
-    assert old_view.links_out == []
+    # S1 沒有指向別人的 Link。`SessionView` 的幾個集合欄位是 **tuple**
+    # （`reader.SessionView` 的型別註記），所以比的是 `()` 不是 `[]`。
+    assert old_view.links_out == ()
     assert old_view.session.raw_sha256 == snap_sha
     # 接續點指著的那份快照有被發佈（否則 checkout 交出去的原始紀錄在讀取視圖裡
     # 沒有對應的東西）

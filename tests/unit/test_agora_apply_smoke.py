@@ -643,6 +643,9 @@ def test_reserving_claim_creates_the_empty_new_session(tmp_path: Path):
     assert r.ok, r.code
     session = store.get_session("opencode:new1")
     assert session is not None, "預留應該生出一個新 session 紀錄"
+    # 預留**不是** running：還沒有人開工，帶著期限（fff6169／review-2bc0785 M2）
+    assert session.status == "reserved", session.status
+    assert session.extra.get("reserved_until"), "預留要帶期限（期 1 不自動刪）"
     assert session.raw_sha256 == reserved[1]
     assert session.producer == PRODUCER
     assert session.parent_id is None, "預留的是主 Session（接續只能由主 Session 發起）"
@@ -657,6 +660,47 @@ def test_reserving_claim_creates_the_empty_new_session(tmp_path: Path):
             / f"links/continuation/opencode%3Anew1/{h_ulid}.json").is_file()
     assert store.get_record(f"handoff:{h_ulid}")["claimed_by"]["session_id"] \
         == "opencode:new1"
+
+
+def test_a_reservation_ends_even_when_the_facts_cannot_be_read(tmp_path: Path):
+    """facts 失敗時判不出 running／stopped，但「不再只是預留」是確定的。
+
+    正常路徑（facts 讀得出來 → running）由
+    `test_continuation_dedup_quota_smoke.test_reservation_disappears_once_the_session_really_starts`
+    涵蓋；這裡專門守 `apply_session` 那個「facts 失敗」的分支——它很容易在改
+    `_build_reserved_session` 時被順手改掉。
+    """
+    store = _new_store(tmp_path)
+    conv = FakeConverter()
+    clock = FixedClock("2026-09-27T09:00:00Z")
+    sha_t = _apply_session_ok(store, tmp_path, "opencode:s1", [_msg("m1")],
+                              clock=clock, conv=conv)
+    h_ulid = generate_ulid()
+    h_rec, h_sc = _handoff_parts(h_ulid, "opencode:s1", sha_t, "m1")
+    assert apply_handoff(store, _dec(generate_ulid(), h_rec, h_sc), conv, clock).ok
+    reserved = _write_opencode_export(
+        tmp_path, "reserved.raw", "opencode:new1", "接手甲的工作", [])
+    c_ulid = generate_ulid()
+    c_rec, c_sc = _reserving_claim_parts(c_ulid, h_ulid, "opencode:new1", reserved)
+    assert apply_claim(
+        store, _dec(generate_ulid(), c_rec, c_sc, reserved[0]), clock).ok
+
+    class _BrokenConverter(FakeConverter):
+        def facts(self, path: Path):
+            raise ValueError("壞掉的原始紀錄")
+
+    # 這裡上傳的 raw 與預留那份**不同**（所以不是 no-op），而且轉不出 facts
+    broken = _write_raw(tmp_path, "broken.raw", [_msg("m9")])
+    rec, sc = _session_parts("opencode:new1", "2026-09-27T10:00:00Z",
+                             broken[1], broken[2])
+    r = apply_session(store, _dec(generate_ulid(), rec, sc, broken[0]),
+                      _BrokenConverter(), clock)
+    assert r.ok, r.code
+
+    session = store.get_session("opencode:new1")
+    assert session.status == "running", session.status
+    assert session.extra.get("reading_status") == "failed"
+    assert session.extra.get("reading_error_code") == "facts_error"
 
 
 def test_rejected_reserving_claim_writes_nothing_but_the_rejection(tmp_path: Path):
