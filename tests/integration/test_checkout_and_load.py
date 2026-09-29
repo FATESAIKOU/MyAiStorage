@@ -27,18 +27,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import timedelta
 from pathlib import Path
 import sys
+import time
+from types import SimpleNamespace
 from typing import Any, Sequence
 
 import pytest
 
+from aistorage.agora_cli.claims import ClaimJournal
 from aistorage.agora_cli.checkout import CheckoutDeps, checkout
 from aistorage.agora_cli.objects import ObjectFetcher
 from aistorage.agora_cli.package import read_package
 from aistorage.clock import SystemClock
 from aistorage.committer.publish import NullPublisher
 from aistorage.converters import get_converter
+from aistorage.inbox_builder import upload_item
 from aistorage.integrity.pin import GitPinStore
 from aistorage.publish.publisher import DriveReadViewPublisher
 from aistorage.reader import AgoraReader
@@ -84,8 +89,8 @@ def _raw_export(limit: int | None = None) -> dict:
     return data
 
 
-def _continuable_limit(tmp_path: Path) -> int:
-    """到「最後一則已完成、未撤銷的訊息」為止的則數（接續點的定義）。
+def _continuation_point(tmp_path: Path) -> tuple[int, str]:
+    """接續點的（則數, message id）。
 
     真的跑一次轉換器 + 接續點計算，**不重新實作那個判定**——自己寫一份就會和
     寫交接單的那一邊漂移（`syncer/continuation.py` 的模組說明）。
@@ -101,27 +106,38 @@ def _continuable_limit(tmp_path: Path) -> int:
     assert point is not None, "黃金樣本應該有可用的接續點"
     for index, message in enumerate(_raw_export()["messages"]):
         if message["info"]["id"] == point.message_id:
-            return index + 1
+            return index + 1, point.message_id
     raise AssertionError(f"接續點訊息不在黃金樣本裡: {point.message_id}")
 
 
+def _continuable_limit(tmp_path: Path) -> int:
+    """到「最後一則已完成、未撤銷的訊息」為止的則數（接續點的定義）。"""
+    return _continuation_point(tmp_path)[0]
+
+
 # ---------------------------------------------------------------------------
-# 測試
+# 共用準備：真 Drive、真 git-annex、真 pin repo、真讀取視圖
 # ---------------------------------------------------------------------------
 
 
-def test_committer_round_then_checkout_and_load_replay_identical_prefix(
-    it_settings, real_drive, sandbox, tmp_path
-):
+class _Bootstrap:
+    """一條線起好的環境：pin repo、讀取視圖、收件匣、提交流程設定、讀取端與 S1。"""
+
+    def __init__(self, **kw: Any) -> None:
+        self.__dict__.update(kw)
+
+
+def _bootstrap(it_settings, real_drive, sandbox, tmp_path) -> _Bootstrap:
+    """起好一條線，跑一輪提交流程把 S1 收進 Agora 並發佈到讀取視圖。"""
+    from aistorage.committer.config import CommitterConfig
+    from aistorage.committer.run import Deps, init_pin_cli, run
+    from aistorage.identity import load_registry
+
     prefix_name, prefix_id, quarantine_id = sandbox.create()
     inbox_id = sandbox.create_folder(f"{prefix_name}-inbox")
 
-    class _Folder:
-        id = inbox_id
-    inbox = _Folder()
-
     harness_signer = make_signer(tmp_path)
-    write_registry(harness_signer, inbox.id)
+    write_registry(harness_signer, inbox_id)
 
     annex = build_annex_repo(
         prefix=prefix_name, workdir=tmp_path / "seed",
@@ -145,10 +161,6 @@ def test_committer_round_then_checkout_and_load_replay_identical_prefix(
             agora_main_sha="unborn", published_at="2026-09-27T08:00:00Z")),
         mime_type="application/json").id
 
-    from aistorage.committer.config import CommitterConfig
-    from aistorage.committer.run import Deps, init_pin_cli, run
-    from aistorage.identity import load_registry
-
     cfg = CommitterConfig(
         repo=sandbox.pin_repo_name(),   # 唯一名稱（pin repo 是所有線共用的）
         repo_uuid=annex.uuid,
@@ -159,16 +171,14 @@ def test_committer_round_then_checkout_and_load_replay_identical_prefix(
         pin_repo_url=str(it_settings["pin_repo_url"]),
         max_git_bundles=20,
     )
-    deps = Deps(
+    state = init_pin_cli(cfg, Deps(
         drive=real_drive, pins=pins, git_factory=git_factory, registry=None,
         converters={"opencode": get_converter("opencode")},
-        publisher=NullPublisher(), clock=SystemClock(),
-    )
-    state = init_pin_cli(cfg, deps, confirm=True)
+        publisher=NullPublisher(), clock=SystemClock()), confirm=True)
     assert state.repo_uuid == annex.uuid
 
     # 一個 session 進收件匣
-    _put_session(real_drive, inbox.id, harness_signer, RAW_S1, S1,
+    _put_session(real_drive, inbox_id, harness_signer, RAW_S1, S1,
                  "2026-09-27T08:00:00Z")
 
     deps = Deps(
@@ -184,7 +194,57 @@ def test_committer_round_then_checkout_and_load_replay_identical_prefix(
     report = run(cfg, deps, dry_run=False)
     assert report.ok is True, f"中止於 {report.aborted_at}:{report.code}"
     assert report.counts["accepted"] == 1 and report.counts["rejected"] == 0
-    assert real_drive.list_children(inbox.id) == []
+    assert real_drive.list_children(inbox_id) == []
+
+    reader = AgoraReader(
+        ReadViewClient(
+            real_drive,
+            ReaderConfig(manifest_file_id=manifest_id,
+                         sa_key_path=tmp_path / "sa.json",
+                         cache_dir=tmp_path / "cache"),
+            clock=SystemClock(),
+        ),
+        clock=SystemClock(),
+    )
+    return _Bootstrap(
+        prefix_id=prefix_id, readview_id=readview_id, manifest_id=manifest_id,
+        inbox_id=inbox_id, harness_signer=harness_signer, cfg=cfg, deps=deps,
+        reader=reader, run=run, tmp_path=tmp_path,
+    )
+
+
+def _writer_deps(boot: _Bootstrap, real_drive, commit: Any) -> Any:
+    """`agora checkout` 的寫入端：簽章金鑰 ＋ 收件匣 ＋ 觸發提交流程的函式。
+
+    用的是**登錄檔裡那把**簽章金鑰（`harness_signer`）：收件匣的授權是依登錄檔
+    的 `allowed_types` 與金鑰判定的，臨時編一把沒登錄的會被驗章擋下來。
+
+    `commit` 就是「同步並提交」那個可注入的函式：把項目放進收件匣、跑一輪
+    提交流程、再等讀取介面看得到。
+    """
+    signer = boot.harness_signer
+    # 讀取身分對 Agora 物件資料夾只有唯讀權限（分享步驟見 deploy.md 步驟 2）；
+    # 這裡用測試用的 rclone 憑證（它本來就看得到整個前綴），驗的是機制。
+    return CheckoutDeps(
+        reader=boot.reader, clock=SystemClock(),
+        signer=Signer(signer.profile, signer.key_id, signer.private_key),
+        inbox_folder_id=boot.inbox_id, drive=real_drive, commit_claim=commit,
+        objects=ObjectFetcher(real_drive, boot.prefix_id),
+        journal=ClaimJournal(boot.tmp_path / "checkout-claims"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 測試
+# ---------------------------------------------------------------------------
+
+
+def test_committer_round_then_checkout_and_load_replay_identical_prefix(
+    it_settings, real_drive, sandbox, tmp_path
+):
+    boot = _bootstrap(it_settings, real_drive, sandbox, tmp_path)
+    prefix_id, readview_id, inbox_id = (
+        boot.prefix_id, boot.readview_id, boot.inbox_id)
 
     # 讀取視圖**只**發佈閱讀版——raw 的位元組不進衍生物（那等於把真本的位元組
     # 複製一份出來）。`agora checkout` 改走 annex key。
@@ -203,39 +263,25 @@ def test_committer_round_then_checkout_and_load_replay_identical_prefix(
     # ------------------------------------------------------------------
     # agora checkout
     # ------------------------------------------------------------------
-    reader = AgoraReader(
-        ReadViewClient(
-            real_drive,
-            ReaderConfig(manifest_file_id=manifest_id,
-                         sa_key_path=tmp_path / "sa.json",
-                         cache_dir=tmp_path / "cache"),
-            clock=SystemClock(),
-        ),
-        clock=SystemClock(),
-    )
-    profile = "it-checkout"
-    priv, pub = _test_keypair()
-    # 讀取身分對 Agora 物件資料夾只有唯讀權限（分享步驟見 deploy.md 步驟 2）；
-    # 這裡用測試用的 rclone 憑證（它本來就看得到整個前綴），驗的是機制。
-    objects = ObjectFetcher(real_drive, prefix_id)
-    deps_out = CheckoutDeps(
-        reader=reader, clock=SystemClock(),
-        signer=Signer(profile, f"{profile}-{hashlib.sha256(pub).hexdigest()[:8]}",
-                      priv),
-        inbox_folder_id=inbox.id, drive=real_drive, commit_claim=None,
-        objects=objects,
-    )
+    # 這支測試只驗「開頭位元組相同」，所以提交那一步只把接續記錄放進收件匣就當
+    # 成功；真的跑一輪提交流程並等讀取介面確認的是下一支測試。
+    def upload_only(items, *, timeout: Any) -> Any:
+        for item in items:
+            upload_item(real_drive, inbox_id, item)
+        return SimpleNamespace(rejected=(), timed_out=False,
+                               summary=lambda: "只上傳，沒跑提交流程")
+
+    deps_out = _writer_deps(boot, real_drive, upload_only)
     pkg_dir = tmp_path / "pkg"
     try:
-        pkg = checkout(reader, deps_out, [AGORA_SESSION], pkg_dir,
+        pkg = checkout(boot.reader, deps_out, [AGORA_SESSION], pkg_dir,
                        task="接著把這一段做完")
     finally:
-        objects.close()
+        deps_out.objects.close()
 
     data, raws = read_package(pkg_dir)
     assert raws[0] == RAW_S1, "起點包裡的原始紀錄必須與來源位元組相同"
-    assert data["segments"][0]["snapshot_sha256"] == hashlib.sha256(
-        RAW_S1).hexdigest().lower()
+    assert data["segments"][0]["snapshot_sha256"] == expected_sha
     assert data["new_session"]["session_id"].startswith("opencode:ses_")
 
     # ------------------------------------------------------------------
@@ -293,22 +339,81 @@ def test_committer_round_then_checkout_and_load_replay_identical_prefix(
     assert seen["cwd"] == project
     assert seen["payload"]["info"]["id"] == result.session_id
     assert result.session_id == pkg.new_session_id.split(":", 1)[1], \
-        "轉接器要沿用起點包預留的 id（收件匣裡的認領記的是它）"
+        "轉接器要沿用起點包預留的 id（收件匣裡的認領或接續記錄寫的是它）"
     assert result.messages == limit and result.segments == 1
 
 
-def _test_keypair() -> tuple[bytes, bytes]:
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric import ed25519
+def test_checkout_records_a_continuation_link_for_a_direct_start_point(
+    it_settings, real_drive, sandbox, tmp_path
+):
+    """1→1：直接起點（沒有交接單）也必須在 Agora 留下一條接續 Link。
 
-    priv = ed25519.Ed25519PrivateKey.generate()
-    priv_raw = priv.private_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PrivateFormat.Raw,
-        encryption_algorithm=serialization.NoEncryption())
-    pub_raw = priv.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw)
-    return priv_raw, pub_raw
+    完整走一遍：`agora checkout <session>` → 接續單進收件匣 → 一輪提交流程 →
+    讀取視圖。驗的是：
+    - 新的 S2 在 Agora 裡（自己帶的預留，零則訊息）；
+    - 一條從 S2 指向 S1 的接續 Link，接續點就是 checkout 定位的那個位置，
+      而且指向**被釘住的那份快照**；
+    - `agora show` 讀的那個視圖裡，正向（S2 的 links_out）與反向（S1 的
+      links_in）**兩個方向都看得到**。
+    """
+    from aistorage.syncer.commit import awaited_for_item, wait_visible
+
+    boot = _bootstrap(it_settings, real_drive, sandbox, tmp_path)
+    rounds: list[Any] = []
+
+    def commit_and_wait(items, *, timeout: Any) -> Any:
+        """把接續記錄放進收件匣，跑一輪提交流程，等讀取介面看得到。"""
+        for item in items:
+            upload_item(real_drive, boot.inbox_id, item)
+        report = boot.run(boot.cfg, boot.deps, dry_run=False)
+        assert report.ok is True, f"中止於 {report.aborted_at}:{report.code}"
+        rounds.append(report)
+        # 真的輪詢讀取介面（用的是同步器同一支可見性判斷）
+        result = wait_visible(
+            boot.reader, [awaited_for_item(i) for i in items],
+            timeout=timedelta(minutes=2), poll=timedelta(seconds=1),
+            progress=lambda _m: None, sleeper=time.sleep)
+        assert not result.rejected, f"被拒：{result.rejected}"
+        return result
+
+    deps_out = _writer_deps(boot, real_drive, commit_and_wait)
+    pkg_dir = tmp_path / "pkg"
+    try:
+        pkg = checkout(boot.reader, deps_out, [AGORA_SESSION], pkg_dir,
+                       task="接著把這一段做完")
+    finally:
+        deps_out.objects.close()
+
+    assert len(rounds) == 1, "checkout 應該只觸發一輪提交流程"
+    assert real_drive.list_children(boot.inbox_id) == [], "收件匣要清空"
+    new_id = pkg.new_session_id
+    _limit, point_id = _continuation_point(tmp_path)
+    snap_sha = hashlib.sha256(RAW_S1).hexdigest().lower()
+
+    def _value(result: Any) -> Any:
+        return getattr(result, "value", result)
+
+    new_view = _value(boot.reader.get_session(new_id))
+    assert new_view.session.status == "running"
+    assert new_view.session.raw_sha256, "預留的空匯出檔成為 S2 的第一份快照"
+    # 零則訊息：S2 還沒有人開工
+    assert _value(boot.reader.get_reading(new_id))["messages"] == []
+
+    out = [(l.kind, l.from_session_id, l.to_session_id, l.snapshot_sha256,
+            l.message_id) for l in new_view.links_out]
+    assert out == [("continuation", new_id, AGORA_SESSION, snap_sha, point_id)], \
+        f"S2 應該有一條指向 S1 的接續 Link，接續點是 checkout 定位的那一則：{out}"
+
+    # 反向：被接續的 S1 看得見誰接續了它，而且自己完全沒變
+    old_view = _value(boot.reader.get_session(AGORA_SESSION))
+    assert [(l.from_session_id, l.to_session_id, l.snapshot_sha256, l.message_id)
+            for l in old_view.links_in] == [(new_id, AGORA_SESSION, snap_sha,
+                                             point_id)]
+    assert old_view.links_out == []
+    assert old_view.session.raw_sha256 == snap_sha
+    # 接續點指著的那份快照有被發佈（否則 checkout 交出去的原始紀錄在讀取視圖裡
+    # 沒有對應的東西）
+    pinned = boot.reader.get_snapshot(AGORA_SESSION, snap_sha)
+    assert _value(pinned).annex_key, "被接續 Session 的最新快照就是這一份"
 
 

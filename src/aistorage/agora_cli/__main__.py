@@ -233,7 +233,9 @@ def cmd_show(args: argparse.Namespace, reader: Any) -> int:
                 "from": getattr(r, "from_session_id", None),
                 "to": getattr(r, "to_session_id", None),
                 "handoff_id": getattr(r, "handoff_id", None),
+                "claim_id": getattr(r, "claim_id", None),
                 "reference_id": getattr(r, "reference_id", None),
+                "snapshot_sha256": getattr(r, "snapshot_sha256", None),
                 "message_id": getattr(r, "message_id", None),
             }
             for r in (rows or ())

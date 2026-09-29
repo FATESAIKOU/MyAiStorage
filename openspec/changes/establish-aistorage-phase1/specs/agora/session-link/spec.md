@@ -1,6 +1,6 @@
 ## Purpose
 
-定義 Session 之間的關係：接續與參考、接續點、交接單與認領、由起點建出新 Session，以及它們組成的三種工作形態：分裂（1→n）、統合（n→1）、相互參照（n↔m），並把 Session 歸到 MyBrain 的案件底下。
+定義 Session 之間的關係：接續與參考、接續點、交接單與認領、由起點建出新 Session，以及它們組成的四種工作形態：1→1、1→n、n→1（分裂與統合）、n↔m（相互參照），並把 Session 歸到 MyBrain 的案件底下。
 
 ## ADDED Requirements
 
@@ -11,10 +11,27 @@ Session Link MUST 是從一個 Session 指向另一個 Session 的有向關係�
 - **WHEN** S4 由分別來自 S2 與 S3 的兩張交接單建出
 - **THEN** S4 有兩條接續 Link，分別指向 S2 與 S3，各自記錄接續點
 
-### Requirement: 接續經由起點建出新 Session
-新 Session MUST 由 Agora 從起點建出：`agora checkout` 產出起點包，內含起點之前的原始紀錄、要交代的任務與來源 Session 的 id，再由轉接器載入成 coding agent 的原生 session。起點 MUST 可以是一張交接單，也 MAY 是任何 Session 的任何一則已提交訊息（不指定訊息就是最新已提交的那一則）。交接單 MUST 由被接續 Session 的持有者發起：同步並建立一張交接單，一起提交。交接單 MUST 是 Agora 的一個項目，帶有 id，記錄被接續的 Session、接續點與要交代的任務。新 Session 收進 Agora 時，SHALL 形成從新 Session 指向被接續 Session 的接續 Link。
+### Requirement: 四種關係都留下記錄
+Session 之間的關係 MUST 只有四種：1→1、1→n、n→1、n↔m。每一種關係 MUST 在 Agora 留下可經由讀取介面查到的記錄：1→1、1→n、n→1 是接續 Link（由新 Session 指向被接續的 Session，各自記著接續點），n↔m 是參考 Link。分岔、收斂、統合、相互參照 MUST 只是這四種關係的組合，MUST NOT 引入新的關係類型。
 
-認領 MUST 只適用於以交接單為起點的情況。一張交接單 MUST 只能被認領一次；尚未被認領的交接單 MUST 能經由讀取介面找到。checkout 以交接單為起點時 MUST 先登記認領，並在讀取介面確認這張交接單由自己接手之後，才產出起點包；被拒絕時 MUST NOT 產出任何東西，所以被拒的一方不會有 Session 開工。接手的 Session SHALL 能先讀任務，需要時再深入閱讀版。
+#### Scenario: 1→1 不經過交接單
+- **WHEN** 呼叫者以 `agora checkout S1` 建出新 Session S2，沒有任何交接單
+- **THEN** S2 有一條指向 S1 的接續 Link，接續點就是那個起點；讀取介面在 `agora show S1` 與 `agora show S2` 兩個方向都看得到它
+
+#### Scenario: 1→n 每個新 Session 各一條
+- **WHEN** 同一個起點 S1 被 checkout n 次，產出 S2…S(n+1)
+- **THEN** 每個新 Session 各自有一條指向 S1 的接續 Link，S1 有 n 條入向 Link，沒有任何一方因此被鎖住
+
+#### Scenario: n→1 一個新 Session 多條
+- **WHEN** 一次 checkout 以 S2、S3 為起點建出 S4
+- **THEN** S4 有分別指向 S2 與 S3 的兩條接續 Link
+
+### Requirement: 接續經由起點建出新 Session
+新 Session MUST 由 Agora 從起點建出：`agora checkout` 產出起點包，內含起點之前的原始紀錄、要交代的任務與來源 Session 的 id，再由轉接器載入成 coding agent 的原生 session。起點 MUST 可以是一張交接單，也 MAY 是任何 Session 的任何一則已提交訊息（不指定訊息就是最新已提交的那一則）。**接續 MUST NOT 以交接單為前提**：交接單只是可選的便利。交接單若存在 MUST 由被接續 Session 的持有者發起：同步並建立一張交接單，一起提交。交接單 MUST 是 Agora 的一個項目，帶有 id，記錄被接續的 Session、接續點與要交代的任務。
+
+每一次 checkout MUST 為**每一個**起點留下一筆接續記錄，無論起點是交接單還是某個位置：起點是交接單時沿用認領（認領本身就代表接續，MUST NOT 另記一條），起點是某個位置時建立一筆接續單項目。該記錄 MUST 由 checkout 簽章後放進收件匣，MUST 由提交流程收進 Agora 後建立從新 Session 指向被接續 Session 的接續 Link，並 MUST 自己帶著新 Session 的空紀錄（預留），所以記錄被拒時 Agora 裡 MUST NOT 留下任何東西。同一個新 Session 對同一個起點 MUST 只有一條接續 Link，重複送 MUST 冪等。
+
+認領 MUST 只適用於以交接單為起點的情況（直接起點沒有交接單可認，也不需要認）。一張交接單 MUST 只能被認領一次；尚未被認領的交接單 MUST 能經由讀取介面找到。checkout MUST 先登記認領或接續記錄，並在讀取介面確認那條接續 Link 屬於自己之後，才產出起點包；被拒絕時 MUST NOT 產出任何東西，所以被拒的一方不會有 Session 開工。交接單起點的接手者 SHALL 能先讀任務，需要時再深入閱讀版。
 
 #### Scenario: 分裂（切分工作）
 - **WHEN** S1 同步，並為同一件工作的兩個部分各寫一張交接單、一起提交，之後依兩張交接單各跑一次 checkout，再由轉接器各自載入
@@ -28,6 +45,14 @@ Session Link MUST 是從一個 Session 指向另一個 Session 的有向關係�
 - **WHEN** 呼叫者以 `<session>@<訊息>` 為起點執行 checkout，沒有經過交接單
 - **THEN** 不需要認領，checkout 直接產出起點包；載入後的新 Session 有一條指向來源 Session 的接續 Link，接續點就是那則訊息
 
+#### Scenario: 直接起點不需要寫入端以外的準備
+- **WHEN** 呼叫者只有讀取身分但沒有簽章金鑰，卻要以 `<session>[@<訊息>]` 為起點執行 checkout
+- **THEN** checkout 明確拒絕並說明沒有接續記錄就不能產出起點包，因為沒有接續 Link 的新 Session 沒有人負責
+
+#### Scenario: 重複送同一個起點
+- **WHEN** 同一個新 Session 對同一個起點重複送出接續記錄（例如換了一個 item id）
+- **THEN** 提交流程不寫入第二條接續 Link，重複的那筆被當成已完成；被接續的 Session 完全不受影響
+
 #### Scenario: 重複認領
 - **WHEN** 兩次 checkout 幾乎同時以同一張交接單為起點
 - **THEN** 提交流程只接受先處理到的那一次認領，拒絕另一次並在讀取視圖發佈原因；被拒絕的那次 checkout 看到拒絕後不產出起點包，不會有 Session 從它開工
@@ -35,13 +60,19 @@ Session Link MUST 是從一個 Session 指向另一個 Session 的有向關係�
 ### Requirement: 建出的 Session 保留原始開頭
 同一個 coding agent 之間接續時，新 Session 在起點之前的內容 MUST 與被釘住的原始紀錄快照位元組相同，MUST NOT 經過閱讀版轉換。跨 coding agent 接續或需要壓縮時 MAY 改寫開頭，但 MUST 在新 Session 的 metadata 標記「開頭已改寫」。多個起點合成一個 Session（n→1）時，最長的一段 SHALL 原樣放最前面；總長度超過目標模型的 context 上限時 MUST 明確拒絕，MUST NOT 默默截斷。
 
+轉接器 MUST 沿用起點包預留的新 Session id。呼叫端要求換一個 id 時，MUST 明確拒絕並說明：起點包預留的那個 id 是提交流程認得出這筆預留與接續 Link 的唯一線索，換 id 匯入會留下一筆沒有人負責的空 Session。要換 id MUST 在 checkout 階段就指定，讓它預留呼叫端要的那一個。
+
 #### Scenario: 1→n 建出的開頭相同
 - **WHEN** 同一個起點各跑一次 checkout 與轉接器，建出兩個 opencode Session
-- **THEN** 兩個 Session 送給模型的開頭位元組相同，也與原 Session 在起點之前的內容相同，只在起點之後分岔
+- **THEN** 兩個 Session 送給模型的開頭位元組相同，也與原 Session 在起續點之前的內容相同，只在接續點之後分岔
 
 #### Scenario: n→1 超過 context 上限
 - **WHEN** checkout 以兩張交接單為起點，兩段合起來超過目標模型的 context 上限
 - **THEN** checkout 明確拒絕並說明原因，不產出起點包，也不截斷任何一段
+
+#### Scenario: 轉接器被要求換 id
+- **WHEN** 呼叫端對起點包傳入一個與預留不同的 `--session-id`
+- **THEN** 轉接器明確拒絕、不匯入任何東西，並說明預留的 id 是哪一個
 
 ### Requirement: Agora 不依賴特定 coding agent
 Agora 的 session 操作（找、看、讀、寫交接單、產出起點包）MUST NOT 依賴任何特定的 coding agent。把起點包載入成原生 session 的工作 MUST 由各 coding agent 的轉接器負責，轉接器命名為 `agora-<名稱>`。誰開 agent、在哪開，由呼叫者決定，Agora MUST NOT 限制呼叫者是人還是 AI。
@@ -51,7 +82,9 @@ Agora 的 session 操作（找、看、讀、寫交接單、產出起點包）MU
 - **THEN** 只需要新增轉接器 `agora-claude-code`，`agora` 的指令與起點包的格式都不變
 
 ### Requirement: 接續點
-每條接續 Link MUST 記錄它的接續點，也就是交接單所記的位置。接續點 MUST 同時指明它所依據的原始紀錄快照與快照裡的一則訊息（最後一則已完成的訊息；寫交接單時仍在生成中的那一則不算）；新 Session 承接的內容 MUST 從這份被指明的快照讀取，不從被接續 Session 的最新版本讀取。接續點之後被接續 Session 新增的內容，以及來源端之後對既有訊息的編輯或刪除，都 MUST NOT 改變新 Session 承接的內容。
+每條接續 Link MUST 記錄它的接續點，也就是接續所依據的位置。接續點 MUST 同時指明它所依據的原始紀錄快照與快照裡的一則訊息；那份快照因此被釘住，MUST 被發佈到讀取視圖。新 Session 承接的內容 MUST 從這份被指明的快照讀取，不從被接續 Session 的最新版本讀取。接續點之後被接續 Session 新增的內容，以及來源端之後對既有訊息的編輯或刪除，都 MUST NOT 改變新 Session 承接的內容。
+
+接續點指到的訊息 MUST 在該快照裡存在、已完成且未被撤銷。**兩種起點的驗證規則不同**：交接單的接續點 MUST 是該快照**最後一則已完成**的訊息（交接單是交出手上做到哪）；直接起點 MAY 是該快照裡的**任何**一則已完成、未撤銷的訊息（呼叫端要從某個位置繼續）。
 
 #### Scenario: 被接續後繼續聊
 - **WHEN** S2 接續 S1 之後，你又對 S1 多講了幾句
@@ -59,7 +92,11 @@ Agora 的 session 操作（找、看、讀、寫交接單、產出起點包）MU
 
 #### Scenario: 來源端之後刪掉了訊息
 - **WHEN** S2 接續 S1 之後，你在 opencode 裡對 S1 做了 /undo 再重新輸入，接續點之前的幾則訊息在來源端被刪掉
-- **THEN** S2 承接的內容不變，仍然是交接單所依據的那份快照裡、接續點之前的內容
+- **THEN** S2 承接的內容不變，仍然是被指明的那份快照裡、接續點之前的內容
+
+#### Scenario: 從中間某一則開始接續
+- **WHEN** 呼叫者以 `<session>@<訊息>` 指定該快照裡倒數第二則已完成訊息為接續點
+- **THEN** 該接續被接受並記下那個接續點；讀取介面看得到那條 Link 與它的接續點，而且那份快照有被發佈
 
 ### Requirement: 接續不影響被接續的 Session
 接續 MUST NOT 改變被接續 Session 的狀態、內容或它在來源應用中的可用性。

@@ -88,7 +88,8 @@ def test_9_2_consolidation_n_to_1(resident_pool, run_committer, e2e_reader: Agor
 
     cont_s2 = e2e_reader.get_continuation(h_s2.handoff_id).value
     cont_s3 = e2e_reader.get_continuation(h_s3.handoff_id).value
-    startpoints = [f"handoff:{h_s2.handoff_id}", f"handoff:{h_s3.handoff_id}"]
+    # handoff_id 本身已經是 `handoff:<ULID>` 的完整形式，不要再加前綴
+    startpoints = [h_s2.handoff_id, h_s3.handoff_id]
 
     # 3. 超出 context 上限要**明確拒絕、不產出**（先跑這一條，確認它與後面的
     #    成功路徑無關：被拒時連認領都還沒送出）

@@ -31,6 +31,7 @@
 ## Agora
 
 - Mac 本機既有的 Claude Code、opencode、agy、codex Session 的自動同步（需要一個「Mac 同步程式」profile）。
+- **跨 profile 載入起點包**（impl2 M1，期 1 不做，限制寫在下面）：`agora checkout` 產出起點包時把它**預留**的新 Session 記進 Agora（認領或接續 Link 都自帶那筆預留），所以起點包只能由**同一個 profile** 拿它預留的那個新 Session id 載入。worker A checkout 出來的起點包，worker B 拿去 `agora-opencode load` 會被明確拒絕（起點包預留的 id 對不上 B 預留的 id），而 A 預留的那筆空 session 留在 Agora 裡沒有人接手。要跨 profile 就要決定「誰是那個接手者」：選項是(a) 起點包可以指定接手 profile，由它重新登記認領／接續並改寫預留，(b) 起點包不預留、由接手方在載入時才登記接續（那「接續 Link 屬於自己之後才開工」就不成立了）。兩個選項都會改變 checkout 的等待語意，要重新設計，不是加一個參數。
 - 摘要、收斂 AI、語意搜尋。
 - 跨 coding agent 的 checkout（opencode↔Claude Code）與轉接器 `agora-claude-code`：改走共通閱讀版轉換，開頭會改寫，並在 metadata 標記（ADR 0010、`docs/design/agora-session-operations.md`）。
 - n→1 超過目標模型 context 上限時的壓縮策略（期 1 只偵測並明確拒絕，ADR 0010）。

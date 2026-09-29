@@ -6,6 +6,7 @@
         "session",
         "handoff",
         "claim",
+        "continuation",
         "reference",
         "rewrite",
         "artifact"

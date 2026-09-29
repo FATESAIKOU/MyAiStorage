@@ -16,6 +16,7 @@ from aistorage.agora_cli.claims import (
     ClaimJournal,
     ClaimJournalError,
     ClaimRecord,
+    startpoint_key,
 )
 from aistorage.agora_cli.package import (
     DEFAULT_MAX_CONTEXT_CHARS,
@@ -57,5 +58,6 @@ __all__ = [
     "parse_startpoint",
     "read_package",
     "resolve_startpoint",
+    "startpoint_key",
     "write_package",
 ]

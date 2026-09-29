@@ -34,6 +34,7 @@ from aistorage.inbox import (
 from aistorage.schema import (
     SESSION_ID_PATTERN,
     generate_ulid,
+    is_session_id,
     make_item_id,
     make_session_id,
 )
@@ -740,6 +741,141 @@ def build_claim_item(
     if errors:
         raise InboxBuildError(
             f"組裝出的 claim sidecar 未通過驗證: "
+            + "; ".join(f"{e.field}: {e.message}" for e in errors)
+        )
+    if raw_path is not None:
+        with open(raw_path, "rb") as raw_fh:
+            raw_errors = check_raw(sidecar, raw_fh, max_size=DEFAULT_MAX_RAW_SIZE)
+        if raw_errors:
+            raise InboxBuildError(
+                "預留的匯出檔與 sidecar 不一致: "
+                + "; ".join(f"{e.field}: {e.message}" for e in raw_errors)
+            )
+    sidecar_bytes = serialize_json(sidecar)
+    return BuiltItem(
+        item_key=key_value,
+        item_id=str(sidecar["metadata"]["id"]),
+        sidecar_bytes=sidecar_bytes,
+        sig=sign_sidecar_bytes(sidecar_bytes, key, key_id),
+        raw_path=raw_path,
+    )
+
+
+def build_continuation_item(
+    *,
+    target_session_id: str,
+    new_session_id: str,
+    continuation: dict[str, Any],
+    profile: str,
+    key: bytes,
+    key_id: str,
+    case_id: str | None = None,
+    provenance: str | None = None,
+    created_at: str | None = None,
+    updated_at: str | None = None,
+    item_key: str | None = None,
+    now: str | None = None,
+    clock: Clock | None = None,
+    extra: dict[str, Any] | None = None,
+    new_session: NewSessionReservation | None = None,
+) -> BuiltItem:
+    """組一筆接續單（continuation）：`agora checkout` 以 `<session>[@<訊息>]`
+    為起點時送出它，提交流程收進 Agora 後建出接續 Link（impl2 M6）。
+
+    **接續不需要交接單**（四種關係 1→1、1→n、n→1、n↔m 一律記錄）。交接單只是
+    可選的便利：持有者事先寫好任務，而且只能被接一次。起點是交接單時走的是
+    `build_claim_item`（claim 本身就代表接續），**不會**再送一筆接續單。
+
+    `new_session` 是預留（與 claim 同一個理由）：新 session 這時還不存在於任何
+    來源應用裡，它的第一份（空的）快照由這個項目自己帶。被拒時 Agora 裡不會留下
+    任何東西。
+
+    `item_key` 與 `now` 由呼叫端決定，讓重跑產生**同一個** item（給了
+    `item_key` 時項目 id 就是 `continuation:<item_key>`）。提交流程另外在套用時
+    以「同一個新 Session 對同一個起點只留一條 Link」做冪等，所以就算換了
+    `item_key` 重送，也不會出現第二條 Link。
+    """
+    if not isinstance(continuation, dict):
+        raise InboxBuildError("continuation 必須是字典")
+    snap = continuation.get("snapshot_sha256")
+    message_id = continuation.get("message_id")
+    if not isinstance(snap, str) or not re.fullmatch(r"[0-9a-f]{64}", snap):
+        raise InboxBuildError("continuation.snapshot_sha256 必須是 64 字元小寫 hex")
+    if not isinstance(message_id, str) or not message_id.strip():
+        raise InboxBuildError("continuation.message_id 必須是非空字串")
+    if not is_session_id(target_session_id) or not is_session_id(new_session_id):
+        raise InboxBuildError(
+            f"Session id 必須是 <source>:<source_session_id>: "
+            f"{target_session_id!r} / {new_session_id!r}"
+        )
+    if target_session_id == new_session_id:
+        raise InboxBuildError("被接續的 Session 不能就是新 Session 自己")
+    if new_session is not None and new_session.session_id != new_session_id:
+        raise InboxBuildError(
+            f"預留的 session ({new_session.session_id}) 必須就是新 session "
+            f"({new_session_id})：預留是為了讓這筆接續有個 from 端"
+        )
+    _check_signer(profile, key_id)
+    created, updated = _now(now, clock, created_at, updated_at)
+
+    body: dict[str, Any] = {
+        "target_session_id": target_session_id,
+        "new_session_id": new_session_id,
+        "continuation": {"snapshot_sha256": snap, "message_id": message_id},
+    }
+    if extra:
+        body.update(extra)
+
+    raw: dict[str, Any] | None = None
+    raw_path: Path | None = None
+    session: dict[str, Any] | None = None
+    if new_session is not None:
+        raw_path = Path(new_session.raw_path)
+        if not raw_path.is_file():
+            raise InboxBuildError(f"找不到預留的匯出檔: {raw_path}")
+        raw_sha, raw_size = _hash_raw(raw_path, DEFAULT_MAX_RAW_SIZE)
+        raw = {"sha256": raw_sha, "size": raw_size}
+        source, _sep, native = new_session.session_id.partition(":")
+        if not source or not native:
+            raise InboxBuildError(
+                f"預留的 session id 不合法（要 <source>:<source_session_id>）: "
+                f"{new_session.session_id!r}"
+            )
+        session = {
+            "source": source,
+            "source_session_id": native,
+            "snapshot_at": new_session.snapshot_at,
+            "status": "running",
+            "stopped_at": None,
+            "in_progress": False,
+            "parent_id": None,
+            "reserving": True,
+        }
+
+    key_value = _check_item_key(item_key)
+    sidecar: dict[str, Any] = {
+        "format": SIDECAR_FORMAT,
+        "item_key": key_value,
+        "profile": profile,
+        "metadata": {
+            "id": f"continuation:{key_value}" if item_key else make_item_id("continuation"),
+            "type": "continuation",
+            "created_at": created,
+            "updated_at": updated,
+            "case_id": case_id,
+            "provenance": provenance,
+        },
+        "raw": raw,
+        "body": body,
+    }
+    if session is not None:
+        sidecar["session"] = session
+
+    key_value = str(sidecar["item_key"])
+    errors = validate_sidecar(sidecar, expected_item_key=key_value)
+    if errors:
+        raise InboxBuildError(
+            "組裝出的 continuation sidecar 未通過驗證: "
             + "; ".join(f"{e.field}: {e.message}" for e in errors)
         )
     if raw_path is not None:

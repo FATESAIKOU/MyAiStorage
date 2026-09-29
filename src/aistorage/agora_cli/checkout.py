@@ -3,20 +3,25 @@
 流程（設計文件第 1、2、3 點），**順序本身就是安全的一部分**：
 
 1. 從讀取介面取得起點與**被釘住的快照**，把原始紀錄**原封不動**放進起點包；
-2. **所有本機檢查都在登記認領之前完成**（review-73dbf2c H1）：輸出目錄可寫而且是
+2. **所有本機檢查都在登記接續之前完成**（review-73dbf2c H1）：輸出目錄可寫而且是
    空的、每段 raw 的 SHA-256 等於快照雜湊、Agora 物件讀得到。任一項失敗就停下，
-   這個世界裡還沒有任何認領；
-3. 起點是交接單時，放**一筆**認領進收件匣——認領自己**預留**那個空的新 session，
-   等讀取介面確認，**被拒就不產出**；
-4. 確認之後才把 `package.json` 寫進暫存目錄並一次改名（此時才知道 claim id）。
+   這個世界裡還沒有任何接續記錄；
+3. **每一個起點都要留下一條接續 Link**（impl2 M6）。起點是交接單時放**一筆認領**
+   （claim 本身就代表接續），起點是 `<session>[@<訊息>]` 時放**一筆接續單**；
+   兩者都自己**預留**那個空的新 session，都等讀取介面確認，**被拒就不產出**；
+4. 確認之後才把 `package.json` 寫進暫存目錄並一次改名。
 
-**認領被接受時，等候確認的同時新 session 已經是一筆空紀錄**（`apply_claim` 從
-認領單裡的預留生出來）。被拒時**什麼都沒寫進 Agora**：沒有「已被認領卻沒有人接手」
-的交接單，也沒有留在 Agora 裡的假快照（review-73dbf2c H2）。
+**Session 之間只有四種關係，一律記錄**：1→1、1→n、n→1 各是新 session 對每個
+起點一條接續 Link；n↔m 是 `agora read` 記的參考 Link。**接續不需要交接單**——
+交接單只是可選的便利（持有者事先寫好任務，而且只能被接一次）。
 
-**重跑要沿用同一個認領**（`--resume`，見 `agora_cli/claims.py`）：交接單只能被
-認領一次，換一個新的 claim id 重來只會得到 `already_claimed`，而那張單永遠不會
-有 session 接手。
+被接受時，等候確認的同時新 session 已經是一筆空紀錄（`apply_claim`／
+`apply_continuation` 從項目裡的預留生出來）。被拒時**什麼都沒寫進 Agora**：沒有
+「已被接走卻沒有人接手」的交接單，也沒有留在 Agora 裡的假快照（review-73dbf2c H2）。
+
+**重跑要沿用同一組預留**（`--resume`，見 `agora_cli/claims.py`）：交接單只能被
+認領一次，換一個新的 claim id 重來只會得到 `already_claimed`；直接起點雖然沒有
+「只能被接一次」的問題，重跑卻會多留一筆沒有人開工的預留 session。
 
 **這個模組完全不碰任何 coding agent**：原始紀錄是來源應用的匯出檔，起點包
 原封不動地放著它。截斷、重編 id、匯入是轉接器（`agora-opencode load`）的事。
@@ -32,7 +37,7 @@ import shutil
 import tempfile
 from typing import Any, Sequence
 
-from aistorage.agora_cli.claims import ClaimJournal, ClaimRecord
+from aistorage.agora_cli.claims import ClaimJournal, ClaimRecord, startpoint_key
 from aistorage.agora_cli.objects import ObjectError
 from aistorage.agora_cli.package import (
     DEFAULT_MAX_CONTEXT_CHARS,
@@ -64,7 +69,7 @@ class CheckoutError(RuntimeError):
 
 
 class ClaimRejected(CheckoutError):
-    """認領被拒收（或等不到確認）——**不產出起點包**。
+    """接續記錄（認領或接續單）被拒收（或等不到確認）——**不產出起點包**。
 
     照 AGENTS.md 的「認領」：接續 Link 屬於自己之後才開工。被拒就停下來，
     不要重試同一批（被拒的原因通常要人處理，例如交接單已被別人接走）。
@@ -168,8 +173,11 @@ def _recorded_session_id(deps: CheckoutDeps,
     `--new-session-id` 這個參數可傳，重跑路徑等於走不通。改成「記錄有就沿用」，
     重跑就不需要任何額外參數。
 
-    n→1 時多張交接單各自有記錄，它們**必須是同一個** session id（那才是同一個
-    新 session）。不一致代表這批之中有一張已經被別的 checkout 預留走了，明確
+    鍵是**起點鍵**（`claims.startpoint_key`）：交接單起點是交接單 id，直接起點是
+    `startpoint:<session>@<訊息>`——兩種起點都要認得出來。
+
+    n→1 時多個起點各自有記錄，它們**必須是同一個** session id（那才是同一個
+    新 session）。不一致代表這批之中有一個起點已經被別的 checkout 預留走了，明確
     拒絕，不要猜。
     """
     journal = deps.journal
@@ -177,10 +185,7 @@ def _recorded_session_id(deps: CheckoutDeps,
         return None
     found: set[str] = set()
     for segment in ordered:
-        handoff_id = segment.resolved.handoff_id
-        if not handoff_id:
-            continue
-        record = journal.get(str(handoff_id))
+        record = journal.get(_journal_key(segment.resolved))
         if record is not None:
             found.add(record.new_session_id)
     if not found:
@@ -190,11 +195,18 @@ def _recorded_session_id(deps: CheckoutDeps,
         raise CheckoutError(
             f"這批起點的本機認領記錄預留了不同的新 session id: {joined}。"
             "它們不可能是同一個新 session（每一批預留各自一個 id），"
-            "所以其中某一張交接單已經被另一個 checkout 預留走了。"
+            "所以其中某一個起點已經被另一個 checkout 預留走了。"
             "請把這批拆成與記錄相符的幾組再各自 checkout，"
             "或清掉 ~/.aistorage/checkout-claims/ 裡過期的記錄後重新開始"
         )
     return found.pop()
+
+
+def _journal_key(resolved: ResolvedStartPoint) -> str:
+    """這個起點在本機認領記錄裡的鍵（交接單 id 或 `startpoint:<session>@<訊息>`）。"""
+    return startpoint_key(
+        resolved.handoff_id, session_id=resolved.session_id,
+        message_id=resolved.message_id)
 
 
 def _new_session_id(source: str) -> str:
@@ -249,24 +261,34 @@ def _reservation_path(stage: Path, item_key: str) -> Path:
     return stage / f"reserved-{item_key}.json"
 
 
-def _build_claim(deps: CheckoutDeps, resolved: ResolvedStartPoint, *,
-                 record: ClaimRecord, stage: Path) -> Any:
-    """組一筆認領，並且**把新 session 的空紀錄一起帶上**（照
-    `inbox_builder.build_claim_item`，不重寫簽章邏輯）。
+def _reservation(deps: CheckoutDeps, record: ClaimRecord, stage: Path) -> Any:
+    """新 session 的空紀錄（預留）——認領與接續單**都**帶著它。
 
-    預留（reservation）放在認領單裡而不是另外送一個 session 項目，這樣被拒時
-    Agora 裡不會留下任何東西。
+    預留放在記錄裡而不是另外送一個 session 項目，這樣被拒時 Agora 裡不會留下
+    任何東西。
     """
-    from aistorage.inbox_builder import NewSessionReservation, build_claim_item
+    from aistorage.inbox_builder import NewSessionReservation
     from aistorage.clock import parse_rfc3339
 
-    assert resolved.handoff_id is not None
     _source, _sep, native = record.new_session_id.partition(":")
     raw_path = _reservation_path(stage, record.item_key)
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     raw_path.write_bytes(_empty_export_bytes(
         native, record.title,
         int(parse_rfc3339(record.reserved_at).timestamp() * 1000)))
+    return NewSessionReservation(
+        session_id=record.new_session_id,
+        raw_path=raw_path,
+        snapshot_at=record.reserved_at,
+    )
+
+
+def _build_claim(deps: CheckoutDeps, resolved: ResolvedStartPoint, *,
+                 record: ClaimRecord, stage: Path) -> Any:
+    """組一筆認領（交接單起點），連同新 session 的空紀錄。"""
+    from aistorage.inbox_builder import build_claim_item
+
+    assert resolved.handoff_id is not None
     return build_claim_item(
         handoff_id=resolved.handoff_id,
         claimer_session_id=record.new_session_id,
@@ -275,11 +297,37 @@ def _build_claim(deps: CheckoutDeps, resolved: ResolvedStartPoint, *,
         key_id=deps.signer.key_id,
         now=record.created_at,
         item_key=record.item_key,
-        new_session=NewSessionReservation(
-            session_id=record.new_session_id,
-            raw_path=raw_path,
-            snapshot_at=record.reserved_at,
-        ),
+        new_session=_reservation(deps, record, stage),
+    )
+
+
+def _build_continuation(deps: CheckoutDeps, resolved: ResolvedStartPoint, *,
+                        record: ClaimRecord, stage: Path) -> Any:
+    """組一筆接續單（`<session>[@<訊息>]` 起點），連同新 session 的空紀錄。
+
+    接續點是**讀取介面釘住的那個位置**：快照雜湊 ＋ 該快照裡的那一則訊息。提交流程
+    會重新確認它落在被接續 Session 的既有快照裡、那一則已完成且未撤銷。
+    """
+    from aistorage.inbox_builder import build_continuation_item
+
+    if not resolved.message_id:
+        raise CheckoutError(
+            f"起點 {resolved.session_id} 沒有解析出接續點的訊息 id，"
+            "不能建立接續記錄"
+        )
+    return build_continuation_item(
+        target_session_id=resolved.session_id,
+        new_session_id=record.new_session_id,
+        continuation={
+            "snapshot_sha256": resolved.snapshot_sha256,
+            "message_id": resolved.message_id,
+        },
+        profile=deps.signer.profile,
+        key=deps.signer.key,
+        key_id=deps.signer.key_id,
+        now=record.created_at,
+        item_key=record.item_key,
+        new_session=_reservation(deps, record, stage),
     )
 
 
@@ -351,8 +399,9 @@ def checkout(
                     task = segment.resolved.task
                     break
         # ★ 新 session id 要**先**看本機記錄（review-7a4ca87 H1）。記錄裡已經有
-        #   這張交接單就表示那筆認領可能已經被接受，此時重新編一個 id 會讓這次
-        #   認領得到 already_claimed，而那張單永遠沒有 session 接手。
+        #   這個起點就表示那筆接續記錄可能已經被接受，此時重新編一個 id 會讓這次
+        #   認領得到 already_claimed，而那張單永遠沒有 session 接手（直接起點則會
+        #   多留一筆沒有人開工的預留 session）。
         #   沒有記錄才編新的。
         target_session_id = (
             new_session_id
@@ -369,15 +418,15 @@ def checkout(
         )
         check_context_length(pkg)
 
-        # ★ 所有本機檢查都在認領之前（review-73dbf2c H1）：輸出目錄、位元組、
-        #   雜湊都在這裡做完，之後才碰得到那張交接單。
+        # ★ 所有本機檢查都在寫接續記錄之前（review-73dbf2c H1）：輸出目錄、位元組、
+        #   雜湊都在這裡做完，之後才碰得到那些起點。
         staging = stage_package(pkg, Path(out_dir))
 
         handoff_ids = tuple(
             s.resolved.handoff_id for s in ordered if s.resolved.handoff_id)
-        if handoff_ids:
-            ordered = _claim(deps, ordered, pkg, stage, timeout=claim_timeout,
-                             resume=resume)
+        # ★ 每一個起點都要有接續記錄：交接單 → 認領，直接起點 → 接續單。
+        ordered = _link_items(deps, ordered, pkg, stage, timeout=claim_timeout,
+                              resume=resume)
         pkg = ContextPackage(
             segments=tuple(ordered), task=pkg.task,
             new_session_id=pkg.new_session_id,
@@ -398,13 +447,13 @@ def checkout(
     try:
         commit_staged_package(pkg, staging, Path(out_dir))
     except ContextPackageError as e:
-        # ★ 認領確認**之後**才發生的失敗（review-7a4ca87 M2）：到這一步為止，
+        # ★ 接續記錄確認**之後**才發生的失敗（review-7a4ca87 M2）：到這一步為止，
         #   交接單已經被接走、Agora 裡已經有一筆預留的 session 了。這不是一般錯誤——
         #   把它講成一般錯誤，人會去「修好再重跑」，而重跑會撞 already_claimed。
         #   必須明確說明：認領已經成立、不要再送新的認領、要沿用同一個。
         raise ClaimAlreadyCommitted(
             f"認領**已經成立**，但起點包沒有產出來：{e}\n"
-            f"  已經被接走的交接單：{'、'.join(pkg.claimed_handoffs)}\n"
+            f"  已經被接走的交接單：{'、'.join(pkg.claimed_handoffs) or '（無）'}\n"
             f"  預留給新 session 的 id：{pkg.new_session_id}"
             "（Agora 裡已經有一筆空的預留 session 與接續 Link）\n"
             "  **不要再送一次認領**（會得到 already_claimed）。"
@@ -470,78 +519,92 @@ def _fetch_raw(reader: Any, r: ResolvedStartPoint, objects: Any) -> bytes:
         raise CheckoutError(str(e)) from e
 
 
-def _claim(deps: CheckoutDeps, ordered: list[PackageSegment], pkg: ContextPackage,
-           stage: Path, *, timeout: timedelta,
-           resume: bool) -> list[PackageSegment]:
-    """放認領（**連同新 session 的空紀錄**），等讀取介面確認。
+def _link_items(deps: CheckoutDeps, ordered: list[PackageSegment],
+                pkg: ContextPackage, stage: Path, *, timeout: timedelta,
+                resume: bool) -> list[PackageSegment]:
+    """為**每個**起點放一筆接續記錄（連同新 session 的空紀錄），等讀取介面確認。
 
-    `--resume` 時沿用本機記錄：同一個 claim id、同一個新 session id、同一份
-    空匯出檔位元組，所以提交流程把它當成同一筆（`already`）而不是新認領。
+    - 起點是交接單 → 認領（claim 本身就代表接續，不再另外送接續單）
+    - 起點是 `<session>[@<訊息>]` → 接續單
+
+    所以 1→1、1→n、n→1 都會在 Agora 裡留下對應的接續 Link；n↔m 是 `agora read`
+    記的參考 Link。
+
+    `--resume` 時沿用本機記錄：同一個項目 id、同一個新 session id、同一份
+    空匯出檔位元組，所以提交流程把它當成同一筆（`already`）而不是新的一筆。
     """
     if deps.signer is None or not deps.inbox_folder_id:
         raise CheckoutError(
-            "起點是交接單，但這台機器沒有可用的寫入身分（沒有簽章金鑰／收件匣），"
-            "不能放認領。要接手就得起點用 <session>[@<訊息>]，"
-            "或讓有寫入身分的 profile 來跑這一次 checkout。"
+            "這台機器沒有可用的寫入身分（沒有簽章金鑰／收件匣），"
+            "不能為這個起點留下接續記錄——沒有接續 Link 的新 session 等於"
+            "沒有人負責的孤兒，Agora 不能接受。"
+            "請讓有寫入身分的 profile 來跑這一次 checkout。"
         )
     if deps.commit_claim is None:
         raise CheckoutError(
-            "起點是交接單，但這台機器沒有可用的寫入身分（沒有簽章金鑰／收件匣），"
-            "不能放認領。要接手就得起點用 <session>[@<訊息>]，"
-            "或讓有寫入身分的 profile 來跑這一次 checkout。"
+            "這台機器沒有可用的寫入身分（沒有簽章金鑰／收件匣），"
+            "不能為這個起點留下接續記錄——沒有接續 Link 的新 session 等於"
+            "沒有人負責的孤兒，Agora 不能接受。"
+            "請讓有寫入身分的 profile 來跑這一次 checkout。"
         )
 
-    claims: list[Any] = []
-    claimed: list[PackageSegment] = []
+    items: list[Any] = []
+    linked: list[PackageSegment] = []
     for segment in ordered:
-        if not segment.resolved.handoff_id:
-            claimed.append(segment)
-            continue
-        record = _claim_record(deps, segment.resolved, pkg, resume=resume)
-        item = _build_claim(deps, segment.resolved, record=record, stage=stage)
-        claims.append(item)
-        claimed.append(_with_claim(segment, item.item_id))
-    _commit_claims(deps, claims, timeout=timeout)
-    return claimed
+        record = _link_record(deps, segment.resolved, pkg, resume=resume)
+        if segment.resolved.handoff_id:
+            item = _build_claim(deps, segment.resolved, record=record, stage=stage)
+        else:
+            item = _build_continuation(
+                deps, segment.resolved, record=record, stage=stage)
+        items.append(item)
+        linked.append(_with_claim(segment, item.item_id))
+    _commit_claims(deps, items, timeout=timeout)
+    return linked
 
 
-def _claim_record(deps: CheckoutDeps, resolved: ResolvedStartPoint,
-                  pkg: ContextPackage, *, resume: bool) -> ClaimRecord:
-    """這張交接單的認領記錄：`--resume` 沿用舊的，否則新編。
+def _link_record(deps: CheckoutDeps, resolved: ResolvedStartPoint,
+                 pkg: ContextPackage, *, resume: bool) -> ClaimRecord:
+    """這個起點的本機預留記錄：`--resume` 沿用舊的，否則新編。
+
+    鍵是**起點鍵**（交接單 id 或 `startpoint:<session>@<訊息>`），所以 1→n 的
+    同一個起點checkout n 次時，n 個預留各自一個檔案（不共用一個 id）。
 
     **寫進本機記錄是在把項目送出去之前**（`commit_claim` 之後就來不及了）：
     行程在中間被殺掉時才救得回來。
     """
     from aistorage.schema import generate_ulid
 
-    handoff_id = str(resolved.handoff_id)
+    key = _journal_key(resolved)
     journal = deps.journal
-    existing = journal.get(handoff_id) if journal is not None else None
+    existing = journal.get(key) if journal is not None else None
 
     if existing is not None:
         # ★ 有記錄就**自動沿用**，不管有沒有 --resume（review-7a4ca87 H1）。
-        #   記錄存在的唯一理由是「那筆認領可能已經被接受」；此時換一個新的
-        #   claim id 或新 session id 重來，只會得到 already_claimed，而那張交接單
-        #   就永遠卡在「已被認領、卻沒有任何 session 接手」。
+        #   記錄存在的唯一理由是「那筆接續記錄可能已經被接受」；換一個新的 id
+        #   重來，交接單起點會得到 already_claimed 而那張單永遠沒有 session
+        #   接手，直接起點則會多留一筆沒有人開工的預留 session。
         #   `pkg.new_session_id` 必須已經是記錄裡那個（`checkout()` 會先對齊）。
         return existing
     if resume and journal is not None:
         raise CheckoutError(
-            f"--resume 找不到 {handoff_id} 的本機認領記錄"
+            f"--resume 找不到 {key} 的本機認領記錄"
             "（認領記錄在 ~/.aistorage/checkout-claims/）。"
-            "沒有記錄就沒有辦法沿用同一個認領：請去掉 --resume 重新開始，"
-            "或確認那張交接單還沒被別人接走"
+            "沒有記錄就沒有辦法沿用同一組預留：請去掉 --resume 重新開始，"
+            "或確認那個起點還沒被別的 checkout 預留走"
         )
 
     now = deps.clock.now_utc()
     item_key = generate_ulid()
+    item_id = (
+        f"claim:{item_key}" if resolved.handoff_id else f"continuation:{item_key}")
     record = ClaimRecord(
-        handoff_id=handoff_id,
-        claim_id=f"claim:{item_key}",
+        startpoint_key=key,
+        claim_id=item_id,
         item_key=item_key,
         new_session_id=pkg.new_session_id,
         reserved_at=now,
-        title=_reserved_title(pkg.task, handoff_id),
+        title=_reserved_title(pkg.task, resolved.handoff_id),
         profile=str(deps.signer.profile),
         created_at=now,
     )
@@ -552,13 +615,14 @@ def _claim_record(deps: CheckoutDeps, resolved: ResolvedStartPoint,
 
 def _commit_claims(deps: CheckoutDeps, claims: list[Any], *,
                    timeout: timedelta) -> None:
-    """把認領提交並等確認；被拒就明確拒絕。
+    """把接續記錄（認領／接續單）提交並等確認；被拒就明確拒絕。
 
-    認領裡帶著新 session 的**空**紀錄，所以 `apply_claim` 不需要另外收到一個
-    session 項目：被接受時接續 Link 與那筆空紀錄一起進 Agora，被拒時什麼都沒寫。
+    這些項目裡帶著新 session 的**空**紀錄，所以 `apply_claim`／
+    `apply_continuation` 不需要另外收到一個 session 項目：被接受時接續 Link 與
+    那筆空紀錄一起進 Agora，被拒時什麼都沒寫。
 
-    等的是**認領**（讀取介面看到接續 Link 屬於新 session），不是新 session 本身
-    ——它這時還沒有後續快照，用 `raw_sha256` 判可見會永遠等不到。
+    等的是**接續記錄**（讀取介面看到接續 Link 屬於新 session），不是新 session
+    本身——它這時還沒有後續快照，用 `raw_sha256` 判可見會永遠等不到。
     """
     result = deps.commit_claim(claims, timeout=timeout)
     rejected = tuple(getattr(result, "rejected", ()) or ())
@@ -579,46 +643,54 @@ def _commit_claims(deps: CheckoutDeps, claims: list[Any], *,
         _forget_claims(deps, rejected_ids=rejected_ids)
         if accepted and rejected_ids:
             raise PartialClaimAccepted(
-                f"這批認領**部分被接受**，所以沒有產出起點包：{details}。"
+                f"這批接續記錄**部分被接受**，所以沒有產出起點包：{details}。"
                 f"已經被接受的是：{'、'.join(_handoff_of(c) for c in accepted)}，"
                 f"它們已被預留的 {pkg_session_id(deps, accepted)} 接走"
                 "（Agora 裡現在有一筆空的預留 session 與接續 Link）。"
-                "接下來請人決定：只拿已被接受的那幾張產出起點包"
+                "接下來請人決定：只拿已被接受的那幾筆產出起點包"
                 "（--accept-partial），或等它們的狀態釐清。"
-                "已被拒那幾張的對象已經不是這次的了，不要重試它們。",
+                "已被拒那幾筆的對象已經不是這次的了，不要重試它們。",
                 accepted=tuple(_handoff_of(c) for c in accepted),
                 rejected=tuple(sorted(_rejected_ids(rejected))),
                 new_session_id=pkg_session_id(deps, accepted),
             )
         raise ClaimRejected(
-            f"認領被拒收，所以沒有產出起點包：{details}。"
+            f"接續記錄被拒收，所以沒有產出起點包：{details}。"
             "被拒通常要人處理（例如交接單已被別人接走、快照已過期）；"
             "不要重試同一批，請把原因回報給使用者。"
         )
     if getattr(result, "timed_out", False):
-        # 逾時不等於被拒：認領可能下一輪就被收進去了，所以**留著記錄**，
-        # 重跑時自動沿用（見 `_recorded_session_id` 與 `_claim_record`）。
+        # 逾時不等於被拒：那筆可能下一輪就被收進去了，所以**留著記錄**，
+        # 重跑時自動沿用（見 `_recorded_session_id` 與 `_link_record`）。
         raise ClaimRejected(
-            "認領還沒被讀取介面確認，所以沒有產出起點包："
+            "接續記錄還沒被讀取介面確認，所以沒有產出起點包："
             f"{getattr(result, 'summary', lambda: '')()}。"
             "先確認提交流程正常（健康檢查）再重跑一次；"
-            "本機已記下這次認領，重跑會自動沿用同一個認領與同一個預留的 session id"
+            "本機已記下這次預留，重跑會自動沿用同一組 id 與同一個預留的 session id"
             "（不要換新的，也不要自己去清認領記錄）"
         )
 
 
 def _handoff_of(item: Any) -> str:
-    """認領項目對應的交接單 id。"""
-    handoff_id = (getattr(item, "sidecar", {}).get("body") or {}).get("handoff_id")
-    return str(handoff_id or "?")
+    """這個接續記錄項目接的是哪個起點（交接單 id，或 `<session>@<訊息>`）。
+
+    認領項目看 `body.handoff_id`；接續單項目沒有交接單，用它記錄的接續點。
+    """
+    body = (getattr(item, "sidecar", {}) or {}).get("body") or {}
+    handoff_id = body.get("handoff_id")
+    if handoff_id:
+        return str(handoff_id)
+    cont = body.get("continuation") or {}
+    message_id = cont.get("message_id") if isinstance(cont, dict) else None
+    return f"{body.get('target_session_id')}@{message_id}"
 
 
 def _rejected_ids(rejected: Sequence[Any]) -> set[str]:
-    """`commit_claim` 回報的拒收清單裡的交接單 id。
+    """`commit_claim` 回報的拒收清單裡的項目 id。
 
-    `rejected` 的每一項是 `(awaited, code)`；`awaited.target` 是那個交接單 id
-    （`_label` 印出來的形式是 `handoff:<id>`）。取不到就回空集合——寧可少刪，
-    也不要刪到別人的記錄。
+    `rejected` 的每一項是 `(awaited, code)`；`awaited.target` 是那個項目自己的 id
+    （`claim:<ULID>` 或 `continuation:<ULID>`，`_label` 印出來的形式就是它）。
+    取不到就回空集合——寧可少刪，也不要刪到別人的記錄（見 `_forget_claims`）。
     """
     out: set[str] = set()
     for entry in rejected:
@@ -630,20 +702,20 @@ def _rejected_ids(rejected: Sequence[Any]) -> set[str]:
 
 
 def pkg_session_id(deps: CheckoutDeps, claims: Sequence[Any]) -> str:
-    """這批認領預留的 session id（已經被接受的那幾張）。"""
+    """這批接續記錄預留的 session id（已經被接受的那幾筆）。"""
     for item in claims:
-        session_id = (getattr(item, "sidecar", {}).get("body") or {}).get(
-            "claimer_session_id")
+        body = (getattr(item, "sidecar", {}) or {}).get("body") or {}
+        session_id = body.get("claimer_session_id") or body.get("new_session_id")
         if isinstance(session_id, str):
             return session_id
     return "?"
 
 
 def _forget_claims(deps: CheckoutDeps, *, rejected_ids: set[str]) -> None:
-    """只刪**被明確拒收**那幾張的記錄（review-7a4ca87 H2）。
+    """只刪**被明確拒收**那幾筆的記錄（review-7a4ca87 H2）。
 
-    已經被接受的那幾張**一定要留著**：它們的交接單已被預留的 session 接走，
-    記錄是那個預留日後還能被認出來的唯一線索。逾時也留著（同樣理由）。
+    已經被接受的那幾筆**一定要留著**：它們的起點已被預留的 session 接走，記錄是
+    那個預留日後還能被認出來的唯一線索。逾時也留著（同樣理由）。
     """
     journal = deps.journal
     if journal is None:

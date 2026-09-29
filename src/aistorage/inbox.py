@@ -224,10 +224,10 @@ def check_raw(
 
     規則：
     - session、rewrite、以及 kind='contained' 的 artifact 必須有 raw。
-    - handoff、reference、以及 kind='link' 的 artifact 不應有 raw（raw 為 None）。
-    - **claim 例外**：帶 `session` 預留區塊的 claim 必須有 raw（那份 raw 就是
-      它預留給新 session 的空匯出檔，`agora checkout --resume` 靠它位元組相同
-      才認得回同一筆）；沒有預留的 claim 仍然不應有 raw。
+    - handoff、continuation、reference、以及 kind='link' 的 artifact 不應有 raw（raw 為 None）。
+    - **claim 與 continuation 例外**：帶 `session` 預留區塊的 claim／continuation 必須有 raw
+      （那份 raw 就是它預留給新 session 的空匯出檔，`agora checkout --resume` 靠它
+      位元組相同才認得回同一筆）；沒有預留的仍然不應有 raw。
     - session、rewrite、contained artifact 的 raw 大小上限預設為 100 MiB (104,857,600 位元組)。
     - 若 sidecar 載明 raw，其 sha256（小寫 hex）與 size 必須與實際 raw 完全吻合。
     """
@@ -249,8 +249,9 @@ def check_raw(
             needs_raw = True
         elif kind == "link":
             needs_raw = False
-    elif item_type == "claim":
-        # 帶預留的 claim 挾帶新 session 的空匯出檔（review-73dbf2c H2）
+    elif item_type in ("claim", "continuation"):
+        # 帶預留的 claim／continuation 挾帶新 session 的空匯出檔
+        # （review-73dbf2c H2、impl2 M6）
         needs_raw = isinstance(sidecar.get("session"), dict)
     elif item_type in ("handoff", "reference"):
         needs_raw = False
@@ -269,7 +270,7 @@ def check_raw(
         return errors
 
     # 情況 B：提供了 raw 本體
-    if not needs_raw and item_type in ("handoff", "claim", "reference"):
+    if not needs_raw and item_type in ("handoff", "claim", "continuation", "reference"):
         errors.append(FieldError(field="raw", message="該項目型態不應包含 raw 本體，但傳入了 raw"))
 
     # 串流讀取計算 size 與 sha256

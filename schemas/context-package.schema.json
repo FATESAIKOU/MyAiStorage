@@ -66,12 +66,12 @@
       "properties": {
         "session_id": {
           "type": "string",
-          "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
+          "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
           "description": "為這個起點預留的新 Session id（`<source>:<source_session_id>`）。轉接器沿用它當匯入時的 session id，所以收件匣裡的認領（claimer_session_id）與之後同步上來的 Session 對得上。1→n 時每個起點包各編一套"
         },
         "source": {
           "type": "string",
-          "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*$",
+          "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*$",
           "description": "來源應用（`opencode`、`claude-code`…）。同名或同前綴的原始紀錄才能「原封不動」重建開頭（ADR 0010）；跨來源的片段只能走共通閱讀版，開頭會被改寫"
         },
         "claimed_handoffs": {
@@ -159,12 +159,12 @@
         },
         "source_session_id": {
           "type": "string",
-          "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
+          "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
           "description": "這一段的來源 Session id（`<source>:<source_session_id>`）"
         },
         "source": {
           "type": "string",
-          "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*$",
+          "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*$",
           "description": "來源應用"
         },
         "snapshot_sha256": {
@@ -187,8 +187,8 @@
         },
         "claim_id": {
           "type": ["string", "null"],
-          "pattern": "^claim:[0-9A-HJKMNP-TV-Z]{26}$",
-          "description": "這次放進收件匣的認領項目 id（起點是交接單時必有；被拒就不會有起點包）"
+          "pattern": "^(claim|continuation):[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "這次放進收件匣、為這個起點記錄接續的項目 id：交接單起點是認領（claim:<ULID>），直接起點是接續單（continuation:<ULID>）。每一段都必有——接續 Link 屬於新 session 之後才產出起點包"
         },
         "raw_file": {
           "type": "string",

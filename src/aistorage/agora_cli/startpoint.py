@@ -86,7 +86,8 @@ def parse_startpoint(text: str, *, source: str = DEFAULT_SOURCE) -> StartPoint:
     matched = SESSION_ID_RE.match(session_part)
     if matched:
         got_source, native = matched.group("source"), matched.group("native")
-        if got_source in ("handoff", "claim", "reference", "rewrite", "artifact", "session"):
+        if got_source in ("handoff", "claim", "reference", "continuation",
+                          "rewrite", "artifact", "session"):
             raise StartPointError(
                 f"起點 {raw!r} 的前綴 {got_source!r} 是項目型態的保留字，"
                 "不是來源應用名稱"

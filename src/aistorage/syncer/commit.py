@@ -41,6 +41,7 @@ STALENESS_HINT = "提交流程可能被停用或遭到注入（請執行健康�
 KIND_SESSION = "session"
 KIND_HANDOFF = "handoff"
 KIND_CLAIM = "claim"
+KIND_CONTINUATION = "continuation"
 KIND_REFERENCE = "reference"
 
 
@@ -49,8 +50,14 @@ class Awaited:
     """等待中的一個項目。
 
     `view_session` 是「要去哪個 Session 的視圖看」：交接單看**被接續**的
-    Session（它會收到那張交接單）；認領／參考看**自己**（Link 是自己發出的）。
-    `target` 則是項目自己的 id（handoff:…／claim:…／reference:…）。
+    Session（它會收到那張交接單）；認領／接續／參考看**自己**（Link 是自己發出的）。
+    `target` 則是項目自己的 id（handoff:…／claim:…／continuation:…／reference:…）。
+
+    接續單沒有 claim_id 可比（`apply_continuation` 記的是 `continuation_id`，讀取
+    索引裡沒有那一欄），所以它靠**接續點**認出自己：`link_to_session_id` 加上
+    `link_snapshot_sha256`／`link_message_id` 就是那一條 Link 的完整樣貌——
+    同一個新 Session 對同一個起點只會有一條（apply 的冪等規則），所以它是不會
+    認錯的鍵。
     """
 
     item_key: str
@@ -58,7 +65,10 @@ class Awaited:
     target: str
     sha256: str | None = None      # session：上傳的 raw sha256
     source: str = "opencode"       # session：Agora id 的 source
-    view_session: str = ""         # handoff/claim/reference：要看的 Session id
+    view_session: str = ""         # handoff/claim/continuation/reference：要看的 Session id
+    link_to_session_id: str = ""   # continuation：Link 的 to 端（被接續的 Session）
+    link_snapshot_sha256: str = ""  # continuation：Link 記的接續點快照
+    link_message_id: str = ""      # continuation：Link 記的接續點訊息
 
     @property
     def session_id(self) -> str | None:
@@ -232,7 +242,7 @@ def _is_visible(reader: CommitReader, item: Awaited) -> bool:
         )
         return bool(item.sha256) and raw_sha == item.sha256
 
-    # handoff / claim / reference 都要看連結在哪裡
+    # claim / continuation / reference 都要看連結在哪裡
     if not item.view_session:
         return False
     try:
@@ -251,14 +261,32 @@ def _is_visible(reader: CommitReader, item: Awaited) -> bool:
     # claim：接續 Link 的 claim_id 是這次的 claim，而且 from 是自己
     # （view_session 已經保證是「自己」）
     for link in getattr(view, "links_out", ()) or ():
-        if (item.kind == KIND_CLAIM
-                and getattr(link, "kind", None) == "continuation"
-                and getattr(link, "claim_id", None) == item.target):
+        link_kind = getattr(link, "kind", None)
+        if item.kind == KIND_REFERENCE:
+            if getattr(link, "reference_id", None) == item.target:
+                return True
+            continue
+        if link_kind != "continuation":
+            continue
+        if item.kind == KIND_CLAIM and getattr(link, "claim_id", None) == item.target:
             return True
-        if (item.kind == KIND_REFERENCE
-                and getattr(link, "reference_id", None) == item.target):
+        if item.kind == KIND_CONTINUATION and _is_my_continuation(item, link):
             return True
     return False
+
+
+def _is_my_continuation(item: Awaited, link: Any) -> bool:
+    """這條接續 Link 就是這次 checkout 記的那一條嗎（接續單沒有 claim_id 可比）。
+
+    比對 **to 端 ＋ 接續點（快照 ＋ 訊息）**：`apply_continuation` 保證同一個新
+    Session 對同一個被接續 Session 只留一條 Link，所以這組值不會指到別人的。
+    """
+    return (
+        getattr(link, "to_session_id", None) == item.link_to_session_id
+        and (getattr(link, "snapshot_sha256", None) or "").lower()
+        == item.link_snapshot_sha256.lower()
+        and getattr(link, "message_id", None) == item.link_message_id
+    )
 
 
 def _other_session(item: Awaited) -> str:
@@ -279,6 +307,15 @@ def awaited_for_item(item: BuiltItem) -> Awaited:
         return Awaited(
             item_key=item.item_key, kind=kind, target=item.item_id,
             view_session=str(body.get("claimer_session_id") or ""),
+        )
+    if kind == KIND_CONTINUATION:
+        cont = body.get("continuation") or {}
+        return Awaited(
+            item_key=item.item_key, kind=kind, target=item.item_id,
+            view_session=str(body.get("new_session_id") or ""),
+            link_to_session_id=str(body.get("target_session_id") or ""),
+            link_snapshot_sha256=str(cont.get("snapshot_sha256") or ""),
+            link_message_id=str(cont.get("message_id") or ""),
         )
     if kind == KIND_REFERENCE:
         return Awaited(

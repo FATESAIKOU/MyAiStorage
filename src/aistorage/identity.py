@@ -51,6 +51,7 @@ ALLOWED_ITEM_TYPES = {
     "session",
     "handoff",
     "claim",
+    "continuation",
     "reference",
     "rewrite",
     "artifact",

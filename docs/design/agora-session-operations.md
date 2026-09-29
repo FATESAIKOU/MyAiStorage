@@ -1,6 +1,10 @@
 # Agora 的 session 操作：從場景推出的指令
 
 > 2026-09-28 本人確認（v2，含轉接器命名 `agora-<coding agent 名稱>`）。取代 ADR 0010 裡暫定的 `agora init session`。ADR 0010 的原則不變：新 session 帶著前面的內容開始、開頭原樣保留以命中 KV cache、AI 不再自己 claim。
+>
+> 2026-09-29 追加（impl2 M6）：**接續不需要交接單**。Session 之間只有四種關係
+> （1→1、1→n、n→1、n↔m），**每一次 `checkout` 都記錄接續 Link**。交接單只是可選的
+> 便利（持有者事先寫好任務，而且只能被接一次）。直接起點走新的**接續單**項目。
 
 ## 誰會用
 
@@ -19,10 +23,18 @@
 | D | 互相參照 | 「S2、S3 同時在做，要能看對方做到哪」 | n↔m |
 | E | 找 | 「上週那個 session 在哪？有哪些工作在等人接？」 | — |
 
+**只有這四種關係，而且一律留下記錄。** 前三種是接續 Link（由 `agora checkout`
+寫下），第四種是參考 Link（由 `agora read` 寫下）。分岔、收斂、統合、相互參照
+都是這四種的組合，不是新的關係。
+
+**接續不需要交接單。** 交接單只是可選的便利：持有者事先把任務寫好，而且只能被
+接一次。所以 A 場景（1→1）完全可以 `agora checkout S1` 就開工，不必先寫交接單。
+
 ## 基本概念
 
 - **起點**：一個 session 的某個位置（快照＋那一則訊息）。不指定位置，就是最新已提交的那一則。
 - **交接單**：持有者寫下的「起點＋要交代的任務」。只能被接一次，接之前會出現在「等人接的工作」清單裡。
+- **接續單**：沒有交接單時，`checkout` 為那個起點記的「由我接手」。和交接單一樣帶著新 session 的空紀錄（預留），被拒就不產出起點包。
 - **起點包**：`agora checkout` 產出的一個目錄，內含起點之前的**原始紀錄（原封不動）**、要交代的任務，以及來源 session 的 id。它不屬於任何一個 coding agent。
 - **轉接器**：每個 coding agent 一個，命名為 `agora-<coding agent 名稱>`（`agora-opencode`、之後的 `agora-claude-code`…），和同步器放在一起。它負責把起點包載入成那個 agent 的原生 session。
 
@@ -63,19 +75,55 @@ agora checkout <起點>… [--task "…"] [-–resume] -o <目錄>  # A、B、C�
 `agora checkout` 做的事：
 1. 從讀取介面取得起點與被釘住的快照，把原始紀錄原封不動放進起點包；
 2. **先把所有本機檢查做完**——輸出目錄可寫且為空、`raw/` 位元組與釘住快照的 sha256 相符、Agora 物件讀得到；
-3. 起點是交接單時才登記「由我接手」，等確認沒有人先接走。那筆認領**自己帶著**預留給新 session 的空紀錄（見下），被拒就不產出起點包，且 Agora 裡連預留都不會有；
-4. 認領通過才寫 `package.json` 並把暫存目錄改名成起點包；
+3. **為每一個起點記錄接續**（見下），等讀取介面確認之後才產出起點包；
+4. 認領／接續通過才寫 `package.json` 並把暫存目錄改名成起點包；
 5. 多個起點（n→1）時，最長的一段放最前面，並檢查總長度沒有超過目標模型的上限，超過就明確拒絕。
 
-**認領卡住怎麼重跑**：交接單只能被認領一次，換一個 id 重來只會得到 `already_claimed`。所以
-`checkout` 在認領送出**之前**就把這次用的 claim id 與預留 id 寫進本機記錄
-（`~/.aistorage/checkout-claims/`，一張交接單一個檔案）。逾時或中斷之後重跑會**自動沿用**
-記錄裡那一組 id——不需要任何額外參數（`--resume` 只是把它寫成明示）。
+### 每一次 checkout 都記錄接續
 
-被**明確拒收**時只刪被拒那幾張的記錄，可以乾淨地從頭來。n→1 時可能只有一張被拒而其餘
-被接受：此時已經被接受的那幾張**留著記錄**（它們的交接單已被預留的 session 接走，記錄是
-那個預留日後唯一的線索），並以「部分被接受」明確報出哪幾張被接走、預留的 session 是哪個。
-記錄檔壞掉時會**出聲**而不是當成空的——當成空的會讓下一次寫入覆蓋掉其他交接單的記錄。
+| 起點 | 放進收件匣的項目 | 提交流程做的事 |
+|---|---|---|
+| `handoff:<id>` | **認領**（claim）——認領本身就代表接續，不再另外記一筆 | 認領那張交接單 ＋ 建接續 Link |
+| `<session>[@<訊息>]` | **接續單**（continuation） | 建接續 Link（新 session → 被接續的 session） |
+
+所以四種關係都留下記錄：
+
+| 關係 | 怎麼做 | Agora 裡留下什麼 |
+|---|---|---|
+| 1→1 | `agora checkout S1` | 一條接續 Link，指向 S1，接續點就是那個位置 |
+| 1→n | 同一個起點 checkout n 次 | n 條接續 Link（每個新 session 各一條） |
+| n→1 | `agora checkout S2 S3` | 一個新 session 兩條接續 Link |
+| n↔m | 工作中的 AI 用 `agora read S3` | 參考 Link（`agora checkout` 不參與） |
+
+兩種項目都**自帶新 session 的空紀錄**（預留），所以被拒時 Agora 裡連預留都不會
+有——沒有「已記錄接續卻沒有人開工」的新 session。
+
+**接續點**：接續 Link 記著它所依據的**那份快照**（不是「最新」）與該快照裡的
+那一則訊息。那份快照因此被釘住，發佈階段一定會發出來。驗證規則兩邊不同：
+
+- **交接單**的接續點必須是該快照**最後一則已完成**的訊息（交接單是「交出手上做到
+  哪」）；已經寫好的交接單被接時，接續點是照抄的，不再重驗。
+- **直接起點**可以停在快照裡的**任何**已完成、未撤銷的訊息（`checkout <s>@<訊息>`）。
+
+**冪等**：同一個新 session 對同一個起點（同一個被接續 session ＋ 同一個接續點）
+只保留一條 Link。換 `item_key` 重送也一樣；`--resume` 沿用同一個 `item_key` 重送更是
+`already`。反過來，同一個新 session 對同一個被接續 session 想要**另一個**接續點，
+會被明確拒收（`duplicate_link`）——那一定是送錯了。
+
+### 認領卡住怎麼重跑
+
+交接單只能被認領一次，換一個 id 重來只會得到 `already_claimed`。直接起點沒有這個
+問題，但重跑會多留一筆沒有人開工的預留 session（提交流程只會留一條 Link，那筆多
+出來的預留就成了沒有人接手的空 session）。所以 `checkout` 在把項目送出**之前**就
+把這次用的項目 id 與預留 id 寫進本機記錄（`~/.aistorage/checkout-claims/`，**一個
+起點一個檔案**）。逾時或中斷之後重跑會**自動沿用**記錄裡那一組 id——不需要任何
+額外參數（`--resume` 只是把它寫成明示）。
+
+被**明確拒收**時只刪被拒那幾筆的記錄，可以乾淨地從頭來。n→1 時可能只有一筆被拒而
+其餘被接受：此時已經被接受的那幾筆**留著記錄**（它們的起點已被預留的 session 接走，
+記錄是那個預留日後唯一的線索），並以「部分被接受」明確報出哪幾筆被接走、預留的
+session 是哪個。記錄檔壞掉時會**出聲**而不是當成空的——當成空的會讓下一次寫入覆蓋掉
+其他起點的記錄。
 
 **轉接器（以 opencode 為例）：**
 
@@ -86,17 +134,25 @@ opencode --session <新 session id>      # 誰要開、在哪開，由呼叫者�
 
 同一個 agent 之間接續時，轉接器直接使用起點包裡的原始紀錄，新 session 送給模型的開頭會與原 session 位元組相同（技術驗證 `docs/spike/session-import.md`）。跨 agent（例如 opencode → Claude Code）時，改走共通閱讀版轉換，開頭會改寫，並在 metadata 標記。
 
+**轉接器不換 id**：`agora-opencode load --session-id` 只接受**等於**起點包預留的
+那個 id，否則明確拒絕。`checkout` 已經把接續 Link 與那筆預留記進 Agora，那個 id
+是提交流程認得出預留的唯一線索；換一個 id 匯入進去，Agora 裡就多一筆沒有人負責的
+空 session，而真正開工的那個 session 沒有接續 Link。要指定別的 id，請在
+`checkout` 時就用 `--new-session-id` 指定，讓它預留你要的那一個。
+
 | 場景 | 怎麼下 |
 |---|---|
 | A 接著做 | `agora checkout S1 -o p/` → `agora-opencode load p/` |
-| B 分工 | `agora handoff S1 --task "做前端" --task "做後端"` → 每張各跑一次 `checkout handoff:Hx` 加 `load` |
+| B 分工 | `agora handoff S1 --task "做前端" --task "做後端"` → 每張各跑一次 `checkout handoff:Hx` 加 `load`；不想寫交接單也可以直接對同一個起點各 checkout 一次 |
 | C 匯總 | `agora checkout handoff:H2 handoff:H3 --task "整合兩邊的成果" -o p/` → `load p/` |
 | D 互相參照 | 工作中的 AI 用 `agora read S3` |
 
 AI 在 session 裡用的是同一組指令，透過 skill 包成工具：`agora_find`、`agora_show`、
 `agora_read`、`agora_handoff`、`agora_checkout`（`resident/opencode/plugin/aistorage.ts`
-把它們轉呼叫 `agora` CLI）。**沒有認領工具**——認領由 `agora checkout` 在產出
-起點包時一併登記，被拒就不產出。
+把它們轉呼叫 `agora` CLI）。**沒有認領工具**——認領（交接單起點）或接續記錄（直接
+起點）都由 `agora checkout` 在產出起點包時一併登記，被拒就不產出。
 
 轉接器拿到的 `new_session.session_id` 是**預留**的：它在 Agora 裡已經是一個零則訊息的
-空 session，`agora-opencode load` 匯入之後第一則真訊息會接在它後面。
+空 session（還帶著指向被接續 session 的接續 Link），`agora-opencode load` 匯入之後
+第一則真訊息會接在它後面。**所以 `checkout` 需要可用的寫入身分**：沒有簽章金鑰就
+連起點包都產不出來——沒有接續 Link 的新 session 沒有人負責。

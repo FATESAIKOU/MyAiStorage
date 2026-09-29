@@ -58,7 +58,7 @@ def split_session_id(session_id: str) -> tuple[str, str]:
 
 
 def session_dir(source: str, source_session_id: str) -> str:
-    """取得指定 Session 之目錄相對路徑：sessions/<source>/<enc(source_session_id)>。"""
+    """取得指定 Session 之目錄相對路徑：sessions/<source>/<enc(source_session_id)>/。"""
     if not _SOURCE_PATTERN.match(source):
         raise ValueError(f"無效之 Session source: {repr(source)}")
     return f"sessions/{source}/{enc(source_session_id)}"
@@ -97,6 +97,17 @@ def claim_path(ulid: str) -> str:
     return f"claims/{ulid}.json"
 
 
+def continuation_path(ulid: str) -> str:
+    """接續單檔案相對路徑：continuations/<ULID>.json。
+
+    接續單（continuation）是**不經交接單**的接續記錄：`agora checkout` 以
+    `<session>[@<訊息>]` 為起點時送它，提交流程收進 Agora 後建出接續 Link。
+    交接單起點走的是 claim（claim 本身就代表接續），不會另外送一筆。
+    """
+    _validate_ulid(ulid, "continuation ULID")
+    return f"continuations/{ulid}.json"
+
+
 def rewrite_path(ulid: str) -> str:
     """改寫提案檔案相對路徑：rewrites/<ULID>.json。"""
     _validate_ulid(ulid, "rewrite ULID")
@@ -109,10 +120,21 @@ def reference_path(ulid: str) -> str:
     return f"references/{ulid}.json"
 
 
-def continuation_link_path(new_session_id: str, handoff_ulid: str) -> str:
-    """接續 Link 相對路徑：links/continuation/<enc(new_session_id)>/<handoff ULID>.json。"""
-    _validate_ulid(handoff_ulid, "handoff ULID")
-    return f"links/continuation/{enc(new_session_id)}/{handoff_ulid}.json"
+def continuation_link_dir(new_session_id: str) -> str:
+    """接續 Link 目錄相對路徑：links/continuation/<enc(new_session_id)>/。"""
+    return f"links/continuation/{enc(new_session_id)}"
+
+
+def continuation_link_path(new_session_id: str, link_ulid: str) -> str:
+    """接續 Link 相對路徑：links/continuation/<enc(new_session_id)>/<ULID>.json。
+
+    檔名的 ULID 是「那個建立這條 Link 的項目」：交接單起點是交接單自己的 ULID
+    （由 claim 建立），直接起點是接續單自己的 ULID（由 continuation 建立）。
+    同一個新 Session 對同一個被接續 Session 因此可以有多條 Link（n→1），而
+    讀取端只要看 `links/continuation/<from>/*.json` 就拿得到全部。
+    """
+    _validate_ulid(link_ulid, "continuation link ULID")
+    return f"links/continuation/{enc(new_session_id)}/{link_ulid}.json"
 
 
 def reference_link_path(from_session_id: str, to_session_id: str) -> str:
@@ -147,7 +169,7 @@ def record_path_for_id(item_id: str) -> str:
     """依據項目 ID (<type>:<ULID> 或 <source>:<source_session_id>) 推算真本內儲存相對路徑。
 
     M5 規則：
-    - handoff / claim / rewrite / reference 明確路由至專屬目錄
+    - handoff / claim / continuation / rewrite / reference 明確路由至專屬目錄
     - artifact 產出登錄不進 Agora（ADR 0009），拋出 ValueError
     - session 或其他 RESERVED_TYPE_NAMES 不得直接推算檔案路徑
     - 其它符合 <source>:<id> 格式者路由為 session_meta_path
@@ -160,6 +182,8 @@ def record_path_for_id(item_id: str) -> str:
         return handoff_path(suffix)
     if prefix == "claim":
         return claim_path(suffix)
+    if prefix == "continuation":
+        return continuation_path(suffix)
     if prefix == "rewrite":
         return rewrite_path(suffix)
     if prefix == "reference":

@@ -512,9 +512,9 @@ def evaluate(
         return reject_decision("rewrite_not_supported", authenticated=True)
 
     # 4. Session 調整 snapshot_at 上限（D4）與蓋章 stamp_record + classify
-    #    帶預留的 claim 也挾帶一個 session 區塊（`agora checkout` 預留的新
-    #    session），同樣要夾住快照時間上限。
-    if item_type in ("session", "claim") and isinstance(
+    #    帶預留的 claim 與 continuation 也挾帶一個 session 區塊（`agora checkout`
+    #    預留的新 session），同樣要夾住快照時間上限。
+    if item_type in ("session", "claim", "continuation") and isinstance(
             selected_sc_dict.get("session"), dict):
         sess_info = dict(selected_sc_dict["session"])
         claimed_snap = sess_info.get("snapshot_at", "")
@@ -583,10 +583,11 @@ def evaluate(
 
     # 6. M5: Raw metadata 檢查
     effective_max_raw = max_raw
-    # 帶預留的 claim 也要它的 raw（那份空匯出檔就是預留給新 session 的第一份
-    # 快照；`--resume` 重跑時位元組必須相同，否則清冊會判成換了一個 item）
+    # 帶預留的 claim／continuation 也要它的 raw（那份空匯出檔就是預留給新
+    # session 的第一份快照；重跑時位元組必須相同，否則清冊會判成換了一個 item）
     needs_raw = item_type in ("session", "rewrite") or (
-        item_type == "claim" and isinstance(selected_sc_dict.get("session"), dict)
+        item_type in ("claim", "continuation")
+        and isinstance(selected_sc_dict.get("session"), dict)
     )
 
     raw_path: Path | None = None
@@ -655,7 +656,10 @@ _DISPATCH_ORDER = {
     "rewrite": 2,
     "handoff": 3,
     "claim": 4,
-    "reference": 5,
+    # 接續單要在 claim 之後：它同樣可能**預留**新 session，先被套用的那個建立
+    # session 紀錄，其餘看到它已經存在就直接跳過（與 n→1 的多張 claim 同一個道理）。
+    "continuation": 5,
+    "reference": 6,
 }
 
 

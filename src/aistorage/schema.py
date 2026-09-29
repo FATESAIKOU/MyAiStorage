@@ -24,6 +24,7 @@ RESERVED_TYPE_NAMES = frozenset({
     "session",
     "handoff",
     "claim",
+    "continuation",
     "reference",
     "rewrite",
     "artifact",
@@ -194,7 +195,8 @@ _SESSION_SOURCE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 #: 與 inbox-sidecar / metadata / reading-version 三個 schema 的 pattern 一致；
 #: 寫入端在本地組裝時直接用這一份，不要各自重寫（review-g3g L）。
 SESSION_ID_PATTERN = re.compile(
-    r"^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\S+$"
+    r"^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)"
+    r"[a-z0-9][a-z0-9_-]*:\S+$"
 )
 
 
@@ -236,8 +238,8 @@ def make_item_id(item_type: str) -> str:
 
     ULID 為 26 字元之 Crockford's Base32 編碼，保證時間可排序與全域唯一性。
 
-    Args:
-        item_type: 項目型態（如 'handoff'、'claim'、'reference'、'rewrite'、'artifact'；拒絕 'session'）
+        Args:
+            item_type: 項目型態（如 'handoff'、'claim'、'continuation'、'reference'、'rewrite'、'artifact'；拒絕 'session'）
 
     Raises:
         ValueError: 當 item_type 為空、純空白、為 'session' 或含有冒號/空白時。

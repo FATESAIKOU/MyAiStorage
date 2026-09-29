@@ -47,6 +47,7 @@
             "session",
             "handoff",
             "claim",
+            "continuation",
             "reference",
             "rewrite",
             "artifact"
@@ -128,7 +129,7 @@
       "properties": {
         "source": {
           "type": "string",
-          "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session)$)[a-z0-9][a-z0-9_-]*$",
+          "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session)$)[a-z0-9][a-z0-9_-]*$",
           "description": "來源應用識別碼（不得為保留名，不得含冒號或空白）"
         },
         "source_session_id": {
@@ -171,7 +172,7 @@
           "oneOf": [
             {
               "type": "string",
-              "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+              "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
             },
             {
               "type": "null"
@@ -275,7 +276,7 @@
             "properties": {
               "target_session_id": {
                 "type": "string",
-                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
               },
               "continuation": {
                 "type": "object",
@@ -331,7 +332,75 @@
               },
               "claimer_session_id": {
                 "type": "string",
-                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "anyOf": [
+          {
+            "not": { "required": ["session"] }
+          },
+          {
+            "required": ["session", "raw"],
+            "properties": {
+              "raw": { "type": "object" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "metadata": {
+            "properties": {
+              "type": {
+                "const": "continuation"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "type": "object",
+            "required": [
+              "target_session_id",
+              "new_session_id",
+              "continuation"
+            ],
+            "properties": {
+              "target_session_id": {
+                "type": "string",
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
+                "description": "被接續的 Session（接續 Link 的 to 端）"
+              },
+              "new_session_id": {
+                "type": "string",
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
+                "description": "由這個起點建出的新 Session（接續 Link 的 from 端）"
+              },
+              "continuation": {
+                "type": "object",
+                "required": [
+                  "snapshot_sha256",
+                  "message_id"
+                ],
+                "properties": {
+                  "snapshot_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "message_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": true,
+                "description": "接續點：被接續 Session 的一個快照 ＋ 該快照裡的一則已完成訊息"
               }
             },
             "additionalProperties": true
@@ -374,11 +443,11 @@
             "properties": {
               "from_session_id": {
                 "type": "string",
-                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
               },
               "to_session_id": {
                 "type": "string",
-                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
               },
               "read_snapshot_at": {
                 "type": "string",
@@ -427,7 +496,7 @@
             "properties": {
               "target_session_id": {
                 "type": "string",
-                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
               },
               "base_snapshot_sha256": {
                 "type": "string",
@@ -509,7 +578,7 @@
               },
               "produced_by_session_id": {
                 "type": "string",
-                "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
               },
               "filename": {
                 "oneOf": [

@@ -35,7 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
     load_p.add_argument("-C", "--workdir", default=".",
                         help="要開在哪個專案目錄（import 會把 session 掛在這裡）")
     load_p.add_argument("--session-id", default=None,
-                        help="覆寫新 session id（1→n 時才需要；預設用起點包裡的）")
+                        help="（只能等於起點包預留的 id）覆寫新 session id；"
+                             "預設直接用起點包裡的。換 id 會讓 Agora 裡那筆預留"
+                             "沒有人接手，所以不符就拒絕")
     load_p.add_argument("--json", action="store_true", help="輸出 JSON 而不是只有 id")
     load_p.add_argument("--print-export", action="store_true",
                         help="只印組好的匯出 JSON，不呼叫 opencode（除錯用）")

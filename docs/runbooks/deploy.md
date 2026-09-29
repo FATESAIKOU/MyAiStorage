@@ -482,7 +482,7 @@ uv run python -m aistorage.identity keygen \
   "format": "aistorage.identity/v1",
   "profiles": {
     "mac-opencode": {
-      "allowed_types": ["session", "handoff", "claim", "reference"],
+      "allowed_types": ["session", "handoff", "claim", "continuation", "reference"],
       "signing_keys": [
         {"key_id": "mac-opencode-xxxxxxxx",
          "public_key": "（keygen 印出的 Base64）",

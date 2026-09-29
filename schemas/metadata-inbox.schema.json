@@ -22,11 +22,12 @@
         "session",
         "handoff",
         "claim",
+        "continuation",
         "reference",
         "rewrite",
         "artifact"
       ],
-      "description": "項目型態（期 1 支援的值：session、handoff、claim、reference、rewrite、artifact）"
+      "description": "項目型態（期 1 支援的值：session、handoff、claim、continuation、reference、rewrite、artifact）"
     },
     "created_at": {
       "type": "string",
@@ -83,7 +84,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+            "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
           }
         }
       }
@@ -119,6 +120,23 @@
           "id": {
             "type": "string",
             "pattern": "^claim:[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "continuation"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^continuation:[0-9A-HJKMNP-TV-Z]{26}$"
           }
         }
       }

@@ -141,7 +141,7 @@ def test_9_1_split_1_to_n(resident_pool, run_committer, e2e_reader: AgoraReader)
 
     def _build(container, handoff: Any, package_dir: str) -> str:
         res = container.checkout_with_commits(
-            [f"handoff:{handoff.handoff_id}"], package_dir, run_committer,
+            [handoff.handoff_id], package_dir, run_committer,
             task=_handoff_content(handoff),
         )
         assert res.returncode == 0, (

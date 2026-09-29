@@ -4,6 +4,7 @@ from aistorage.agora import layout
 from aistorage.agora.apply import (
     ApplyResult,
     apply_claim,
+    apply_continuation,
     apply_handoff,
     apply_reference,
     apply_rewrite,
@@ -35,5 +36,6 @@ __all__ = [
     "apply_rewrite",
     "apply_handoff",
     "apply_claim",
+    "apply_continuation",
     "apply_reference",
 ]

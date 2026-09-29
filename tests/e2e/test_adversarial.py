@@ -229,9 +229,10 @@ def test_9_4_duplicate_checkout_produces_no_package(
     )
 
     # 第一個接手者：checkout 成功
+    # handoff_id 本身已經是 `handoff:<ULID>` 的完整形式，不要再加前綴
     first = resident_pool("e2e-adv-first")
     ok = first.checkout_with_commits(
-        [f"handoff:{handoff.handoff_id}"], "/work/pkg-first", run_committer,
+        [handoff.handoff_id], "/work/pkg-first", run_committer,
         task="第一個接手者",
     )
     assert ok.returncode == 0, (
@@ -248,7 +249,7 @@ def test_9_4_duplicate_checkout_produces_no_package(
     # 第二個接手者：同一張再 checkout 一次，必須被明確拒絕
     second = resident_pool("e2e-adv-second")
     dupe = second.checkout_with_commits(
-        [f"handoff:{handoff.handoff_id}"], "/work/pkg-second", run_committer,
+        [handoff.handoff_id], "/work/pkg-second", run_committer,
         task="第二個接手者",
     )
     assert dupe.returncode == 6, (

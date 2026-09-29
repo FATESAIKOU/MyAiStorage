@@ -23,7 +23,7 @@
 | 欄位名 | 型態 | 收件匣 | 真本 | 說明 |
 |---|---|---|---|---|
 | `id` | `string` | 必填 | 必填 | 項目的唯一不可變識別碼。非空且不得包含空白字元，格式符合 ID 規範（依 type 限制）。 |
-| `type` | `string` | 必填 | 必填 | 項目型態。收件匣維持封閉 enum（`session`、`handoff`、`claim`、`reference`、`rewrite`、`artifact`）；真本採用 `^[a-z][a-z_]*$` 以支援讀取端擴充相容性。 |
+| `type` | `string` | 必填 | 必填 | 項目型態。收件匣維持封閉 enum（`session`、`handoff`、`claim`、`continuation`、`reference`、`rewrite`、`artifact`）；真本採用 `^[a-z][a-z_]*$` 以支援讀取端擴充相容性。 |
 | `producer` | `string` | **不帶** | 必填 | 產生者身分（Profile 識別碼，例如 `profile:mac-opencode`，具體格式在 2.3 定案）。收件匣中不得採用寫入者自行宣稱的值；真本中由提交流程依驗章結果蓋章填入。 |
 | `created_at` | `string` | 必填 | 必填 | 項目業務建立時間，遵循 RFC 3339 UTC `Z` 格式（`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$`）。Session 取自來源應用建立時間。 |
 | `updated_at` | `string` | 必填 | 必填 | 項目內容最後修改時間，遵循 RFC 3339 UTC `Z` 格式。Session 取自來源應用最後修改時間。 |
@@ -63,12 +63,12 @@
 
 1. **Session 項目**：
    - 格式：`<source>:<source_session_id>`
-   - `source`：來源應用（例如 `opencode`、`claude-desktop`），**非空、不得包含冒號 `:` 或空白，且不得使用保留型態名（`session`、`handoff`、`claim`、`reference`、`rewrite`、`artifact`）**。
+   - `source`：來源應用（例如 `opencode`、`claude-desktop`），**非空、不得包含冒號 `:` 或空白，且不得使用保留型態名（`session`、`handoff`、`claim`、`continuation`、`reference`、`rewrite`、`artifact`）**。
    - `source_session_id`：來源應用自身的 Session ID，非空且不得包含空白字元。
    - 範例：`opencode:ses_01J8Z9X0P1Q2R3S4T5U6V7W8X9`
-2. **其他項目（handoff、claim、reference、rewrite、artifact）**：
+2. **其他項目（handoff、claim、continuation、reference、rewrite、artifact）**：
    - 格式：`<type>:<ULID>`
-   - `type`：項目型態（如 `handoff`、`claim` 等；`make_item_id` 拒絕 `session` 型態）。
+   - `type`：項目型態（如 `handoff`、`claim`、`continuation` 等；`make_item_id` 拒絕 `session` 型態）。
    - `ULID`：26 字元之 Crockford's Base32 字串（48-bit 毫秒時間戳 + 80-bit 加密安全隨機數），保證時間可排序與全域唯一性。
    - 範例：`handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV`
 3. **分類與衝突處理（`classify_id`）**：
@@ -167,6 +167,32 @@
   claim），所以被拒時連那個空紀錄都不會有。`session.reserving` 標記它是預留而不是
   真的同步；`session.source` + `source_session_id` 必須等於 `claimer_session_id`。
   帶 `session` 的 claim **必須**有 `raw`（反過來，沒帶預留的 claim 不該有 raw）。
+- **`continuation`（接續單）**：**接續不需要交接單**——`agora checkout` 以
+  `<session>[@<訊息>]` 為起點時送它，提交流程收進 Agora 後建出接續 Link。形狀與
+  帶預留的 `claim` 相同（`session` ＋ `raw` 一起帶上，所以被拒時 Agora 裡連預留都
+  不會有）：
+  ```json
+  {
+    "raw": { "sha256": "9c1e...", "size": 128 },
+    "session": {
+      "source": "opencode", "source_session_id": "ses_002",
+      "snapshot_at": "2026-09-28T08:00:00.000Z",
+      "status": "running", "in_progress": false, "parent_id": null,
+      "reserving": true
+    },
+    "body": {
+      "target_session_id": "opencode:ses_001",
+      "new_session_id": "opencode:ses_002",
+      "continuation": { "snapshot_sha256": "3f7a…", "message_id": "msg_002" }
+    }
+  }
+  ```
+  `target_session_id` 是**被接續**的 Session（接續 Link 的 to 端，與交接單同一個
+  詞）；`new_session_id` 是這次建出來的新 Session（Link 的 from 端，也是預留的那
+  個，必須等於 `session.source`:`session.source_session_id`）。`continuation` 是接續
+  點：`snapshot_sha256` MUST 是 `target_session_id` 的一份**既有快照**，`message_id`
+  MUST 是該快照裡已完成、未撤銷的一則訊息（**不**要求是最後一則——直接起點可以停在
+  中間）。同一個新 Session 對同一個起點只留一條 Link，重複送冪等。
 - **`reference`（參考 Link）**：
   ```json
   {

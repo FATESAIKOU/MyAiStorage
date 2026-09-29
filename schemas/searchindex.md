@@ -13,9 +13,11 @@ schema 以 `src/aistorage/search/schema.sql` 為準（TS 照抄該檔）。
 - `snapshots`：每個 Session 的快照歷史（`via` 為 sync／rewrite／import）。
 - `readings`：有發佈 reading 檔的快照（最新＋被釘住的），`is_latest` 標最新；
   `file_id`／`sha256`／`size` 供讀者下載驗證。
-- `links`：`kind` 為 `continuation`（附 `handoff_id`、`claim_id`、
-  `snapshot_sha256`、`message_id`）或 `reference`（附 `reference_id`、
-  `read_snapshot_at`）；`links_to` 索引供反向查詢。
+- `links`：`kind` 為 `continuation` 或 `reference`（附 `reference_id`、
+  `read_snapshot_at`）；`links_to` 索引供反向查詢。接續 Link 一律附
+  `snapshot_sha256`、`message_id`（接續點）；`handoff_id`／`claim_id` 只有走
+  交接單的接續才有（直接起點的接續 Link 兩者皆為 NULL，辨認它要看
+  `from` ＋ `to` ＋ 接續點）。
 - `handoffs`：`body_json` 是寫入者提供的交接內容（原樣）；
   `claimed_by_*` 是提交流程寫入的狀態；未認領時三者皆為 NULL。
   `author_session_id` 是寫這張交接單的 Session id，**由提交流程（publisher）填成

@@ -144,7 +144,7 @@
       "properties": {
         "session_id": {
           "type": "string",
-          "pattern": "^(?!(handoff|claim|reference|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
+          "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
           "description": "Session 識別碼（<source>:<source_session_id>）"
         },
         "snapshot_sha256": {

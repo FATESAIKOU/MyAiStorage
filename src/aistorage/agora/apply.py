@@ -11,7 +11,8 @@
 - PM 決定（期 1 拿掉改寫：apply_rewrite 一律 REJECT）
 
 呼叫順序由 intake.evaluate.sort_accepted_decisions 決定：
-session（依 snapshot_at 由舊到新）→ rewrite → handoff → claim → reference。
+session（依 snapshot_at 由舊到新）→ rewrite → handoff → claim → continuation →
+reference。
 
 每個 apply_* 都是兩階段（H1）：先完成所有檢查（形狀、單調性、持有者、
 路徑計算、所需檔案讀取），確定可套用後才寫入；寫入階段不再有
@@ -664,6 +665,174 @@ def apply_claim(store: AgoraStore, dec: Decision, clock: Clock) -> ApplyResult:
                 "claimer_session_id": claimer_id,
                 "link": link_rel,
             },
+        },
+    )
+    return ApplyResult(ok=True, code="ok", paths=_new_paths(store, before))
+
+
+def _existing_continuation_links(store: AgoraStore, new_session_id: str
+                                 ) -> list[dict[str, Any]]:
+    """新 Session 已經發出的接續 Link（`links/continuation/<from>/*.json`）。
+
+    讀不到就 raise（`store.read_json_file` 會把損毀轉成 MismatchError）——真本
+    的索引損毀不能當成「沒有這條 Link」，那會讓同一個起點被記成兩條。
+    """
+    base = store.worktree / layout.continuation_link_dir(new_session_id)
+    if not base.is_dir():
+        return []
+    return [
+        store.read_json_file(
+            f"links/continuation/{layout.enc(new_session_id)}/{p.name}")
+        for p in sorted(base.glob("*.json"))
+    ]
+
+
+def apply_continuation(
+    store: AgoraStore, dec: Decision, conv: Converter, clock: Clock
+) -> ApplyResult:
+    """套用接續單：**每一次 checkout 都記錄接續 Link**（impl2 M6）。
+
+    起點是交接單時走 `apply_claim`（claim 本身就代表接續，不會另外送接續單）；
+    起點是 `<session>[@<訊息>]` 時走這裡。四種關係因此都會留下一條接續 Link：
+    1→1、1→n、n→1 各是一個新 Session 對每個起點一條，n↔m 走 `apply_reference`。
+
+    接續點必須指向**被接續 Session 的一份既有快照**，而且那一則訊息要在該快照裡
+    存在、已完成、未撤銷（M3 的「已完成的訊息才算數」）。這裡**不**要求它是該
+    快照最後一則完成的訊息——交接單是「交出手上做到哪」，接續點自然是最後一則；
+    直接起點則允許從任何位置開始（`agora checkout <session>@<訊息>`）。
+
+    冪等：同一個新 Session 對同一個起點（同一個 to ＋ 同一個接續點）只保留一條
+    Link，換 `item_key` 重送也一樣；同一個 id 重送且內容相同 → already。
+
+    H3：只有新 Session 的持有者（producer 相同）能建立它的接續 Link，且必須是
+    主 Session（parent_id 為 None）、不能接續自己。
+
+    失敗碼：invalid_format、unknown_target、unknown_claimer、not_holder、
+    continuation_from_subsession、self_continuation、invalid_continuation、
+    duplicate_link、stale。
+    """
+    before = list(store.changed_paths())
+    rec = _record(dec)
+    sc = _sidecar(dec)
+    now_str = format_rfc3339(clock.now(), include_fraction=True)
+
+    # ---- 檢查階段（不寫入真本） ----
+    body = sc.get("body")
+    if not isinstance(body, dict):
+        return _fail(store, dec, before, "invalid_format", now_str)
+    target_id = body.get("target_session_id")
+    new_id = body.get("new_session_id")
+    continuation = body.get("continuation")
+    if not (isinstance(target_id, str) and target_id
+            and isinstance(new_id, str) and new_id
+            and isinstance(continuation, dict)):
+        return _fail(store, dec, before, "invalid_format", now_str)
+    snap_sha = continuation.get("snapshot_sha256")
+    message_id = continuation.get("message_id")
+    if not isinstance(snap_sha, str) or not snap_sha:
+        return _fail(store, dec, before, "invalid_continuation", now_str)
+    if not isinstance(message_id, str) or not message_id:
+        return _fail(store, dec, before, "invalid_continuation", now_str)
+
+    rec_id = rec.get("id")
+    ulid = rec_id.split(":", 1)[1] if isinstance(rec_id, str) and ":" in rec_id else ""
+    rel = layout.continuation_path(ulid)  # ULID 非法 → ValueError 往上拋（程式錯誤）
+    link_rel = layout.continuation_link_path(new_id, ulid)
+
+    # 同 id 重送：內容相同且 Link 也在 → 冪等跳過；內容不同 → stale。
+    dup = store.get_record(rec_id) if isinstance(rec_id, str) else None
+    if dup is not None:
+        if dup.get("body") != body:
+            return _fail(store, dec, before, "stale", now_str)
+        link_now = store.worktree / link_rel
+        if link_now.is_file():
+            return ApplyResult(ok=True, code="already", paths=[])
+        # Link 還沒寫（中断後重跑）→ 往下補齊
+
+    if new_id == target_id:
+        return _fail(store, dec, before, "self_continuation", now_str)
+
+    target = store.get_session(target_id)
+    if target is None:
+        return _fail(store, dec, before, "unknown_target", now_str)
+
+    new_sess = store.get_session(new_id)
+    reserved: SessionRecord | None = None
+    if new_sess is None:
+        # 預留路徑：接續單自己帶著新 Session 的空紀錄（與 claim 同一個理由：
+        # 被拒時 Agora 裡不該留下任何東西）。
+        built = _build_reserved_session(store, dec, rec, sc, new_id, clock)
+        if isinstance(built, ApplyResult):
+            return built
+        reserved = built
+        producer = rec.get("producer")
+    else:
+        producer = new_sess.producer
+    if not isinstance(producer, str) or rec.get("producer") != producer:
+        return _fail(store, dec, before, "not_holder", now_str)
+    if new_sess is not None and new_sess.parent_id is not None:
+        # 接續只能由主 Session 發起；預留也一樣
+        return _fail(store, dec, before, "continuation_from_subsession", now_str)
+
+    # 同一個新 Session 對同一個起點只能有一條 Link（冪等與去重都在這裡）。
+    # M3：索引讀取失敗或損毀 → MismatchError 中止，不轉 REJECT。
+    same_link: dict[str, Any] | None = None
+    for existing_link in _existing_continuation_links(store, new_id):
+        if existing_link.get("to") != target_id:
+            continue
+        existing_cont = existing_link.get("continuation")
+        if not isinstance(existing_cont, dict):
+            raise MismatchError(
+                f"接續 Link 缺少 continuation: {link_rel}（真本索引不完整）")
+        if (str(existing_cont.get("snapshot_sha256") or "").lower()
+                == snap_sha.lower()
+                and existing_cont.get("message_id") == message_id):
+            same_link = existing_link
+        else:
+            return _fail(store, dec, before, "duplicate_link", now_str)
+
+    # 接續點必須落在**被接續 Session 既有快照**裡（不是最新版本）。
+    snaps = {s.snapshot_sha256.lower() for s in store.snapshots(target_id)}
+    if snap_sha.lower() not in snaps:
+        return _fail(store, dec, before, "invalid_continuation", now_str)
+
+    # M3：真本讀取錯誤（KeyError／MismatchError／OSError）一律往上拋，不轉 REJECT
+    raw_p = store.raw_path_for_snapshot(target_id, snap_sha)
+
+    conv2 = _converter_for(conv, target_id)
+    try:
+        reading = conv2.convert(raw_p, session_id=target_id)
+    except ConversionError:
+        return _fail(store, dec, before, "invalid_continuation", now_str)
+    if check_continuation(reading, continuation):
+        return _fail(store, dec, before, "invalid_continuation", now_str)
+
+    # 已經有同一條 Link（換 id／重跑送來的）→ 冪等：不多寫一條。
+    if same_link is not None:
+        return ApplyResult(ok=True, code="already", paths=[])
+
+    # ---- 寫入階段（順序：預留 → Link → 接續單；錯誤往上拋） ----
+    if reserved is not None:
+        raw_path = Path(dec.raw_path) if dec.raw_path is not None else None
+        assert raw_path is not None  # _build_reserved_session 已驗過
+        store.put_session(reserved, raw_path, via="import")
+    store.put_json(
+        link_rel,
+        {
+            "from": new_id,
+            "to": target_id,
+            "continuation": {"snapshot_sha256": snap_sha.lower(),
+                             "message_id": message_id},
+            "continuation_id": rec_id,
+        },
+    )
+    store.put_json(
+        rel,
+        {
+            **rec,
+            "body": body,
+            "committed_at": now_str,
+            "result": {"link": link_rel},
         },
     )
     return ApplyResult(ok=True, code="ok", paths=_new_paths(store, before))

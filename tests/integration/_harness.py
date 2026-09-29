@@ -311,7 +311,8 @@ class Signer:
             "profiles": {
                 self.profile: {
                     "allowed_types": [
-                        "session", "handoff", "claim", "reference", "rewrite", "artifact",
+                        "session", "handoff", "claim", "continuation",
+                        "reference", "rewrite", "artifact",
                     ],
                     "signing_keys": [
                         {

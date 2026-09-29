@@ -168,15 +168,31 @@ def build_export(package_dir: Path, *, session_id: str | None = None,
 
     回傳 `(匯出字典, 新 session 的來源端 id, 段數, 來源應用)`。**這一步不碰
     opencode**——所以可以被單元測試直接驗（「重編 id」與「n→1 串接」）。
+
+    `session_id` 只能**等於**起點包預留的那個 id（M7）：`agora checkout` 已經把
+    「由我接手」記進 Agora（認領或接續 Link，而且連帶預留了這個新 session），那是
+    提交流程認得出這筆預留的唯一線索。換一個 id 匯入進去，Agora 裡那筆預留就永遠
+    沒有任何對應的 Session——一筆沒有人負責的空 session。所以覆寫不等就明確拒絕，
+    不要「幫忙」換一個。
     """
     data, raws = read_package(Path(package_dir))
     new_session = data.get("new_session") or {}
-    session_ref = session_id or str(new_session.get("session_id") or "")
-    if not session_ref:
+    reserved_ref = str(new_session.get("session_id") or "")
+    if not reserved_ref:
         raise ContextPackageError(
             "起點包沒有 new_session.session_id："
-            "轉接器必須沿用它（收件匣裡的認領記的是這個 id）"
+            "轉接器必須沿用它（收件匣裡的認領或接續 Link 記的是這個 id）"
         )
+    if session_id is not None and session_id != reserved_ref:
+        raise ContextPackageError(
+            f"--session-id 給的是 {session_id}，但起點包預留的是 {reserved_ref}。"
+            "兩者必須一樣：`agora checkout` 已經把接續 Link 與那筆預留記進 Agora，"
+            "換一個 id 匯入進去，那筆預留就永遠沒有對應的 Session"
+            "（一筆沒有人負責的空 session）。"
+            "要換 id，請在 checkout 時就用 --new-session-id 指定，"
+            "讓它預留你要的那一個。"
+        )
+    session_ref = session_id or reserved_ref
     # Agora 的 Session id 是 `<source>:<native>`；opencode 的匯出檔用的是
     # 只有 `<native>` 的形式（`info.id`）。收件匣與同步器那邊認的是完整形式，
     # 所以完整形式留在 `package.json`，匯出時去掉前綴。

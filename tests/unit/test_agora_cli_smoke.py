@@ -676,13 +676,51 @@ def test_handoff_startpoint_without_writer_identity_is_refused(tmp_path: Path):
     assert not (tmp_path / "pkg").exists()
 
 
-def test_plain_session_startpoint_needs_no_claim(tmp_path: Path):
-    """直接起點（`session[@訊息]`）本來就沒有交接單，也不需要認領。"""
+def test_plain_session_startpoint_records_a_continuation_not_a_claim(tmp_path: Path):
+    """直接起點（`session[@訊息]`）**不認領**——沒有交接單可認。
+
+    但接續 Link 還是要記（impl2 M6：四種關係一律記錄），所以放的是一筆
+    **接續單**：接續點是被接續 Session 的那一個快照 ＋ 那一則訊息。
+    """
     raw = _raw("ses_aaa", ["一", "二"])
     reader = FakeReader({S1: {"raw": raw, "texts": ["一", "二"]}})
     commit = FakeCommit()
-    checkout(reader, _deps(reader, commit), [S1], tmp_path / "pkg")
-    assert commit.claims == []
+    pkg = checkout(reader, _deps(reader, commit), [S1], tmp_path / "pkg")
+
+    assert len(commit.claims) == 1
+    item = commit.claims[0]
+    assert item.item_type == "continuation"
+    assert item.sidecar["metadata"]["type"] == "continuation"
+    body = item.sidecar["body"]
+    assert "handoff_id" not in body
+    assert body["target_session_id"] == S1
+    assert body["new_session_id"] == pkg.new_session_id
+    assert body["continuation"] == {
+        "snapshot_sha256": _sha(raw), "message_id": "msg_ses_aaa_1"}
+    # 預留一併帶著：新 session 這時還不存在於任何來源應用裡
+    assert item.sidecar["session"]["reserving"] is True
+    assert json.loads(commit.claim_raws[0])["messages"] == []
+    # 起點包記下的是接續單的 id
+    data, _raws = read_package(tmp_path / "pkg")
+    assert data["segments"][0]["claim_id"] == item.item_id
+    assert data["new_session"]["claimed_handoffs"] == []
+
+
+def test_plain_session_startpoint_without_a_writer_refuses(tmp_path: Path):
+    """沒有寫入身分就不能產出起點包：沒有接續 Link 的新 session 是沒人負責的孤兒。
+
+    以前直接起點不需要寫入端，所以它能離線產生起點包；接續 Link 一律要記之後
+    就不行了——這是刻意的取捨（impl2 M6）。
+    """
+    raw = _raw("ses_aaa", ["一", "二"])
+    reader = FakeReader({S1: {"raw": raw, "texts": ["一", "二"]}})
+    deps = CheckoutDeps(reader=reader, clock=FixedClock(T1), signer=None,
+                        inbox_folder_id="", commit_claim=None,
+                        objects=_objects(reader))
+    with pytest.raises(CheckoutError) as excinfo:
+        checkout(reader, deps, [S1], tmp_path / "pkg")
+    assert "沒有可用的寫入身分" in str(excinfo.value)
+    assert not (tmp_path / "pkg").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -859,6 +897,32 @@ def test_build_export_uses_the_reserved_session_id_and_verifies_the_raw(tmp_path
     assert len(payload["messages"]) == 2
     # 內容來自原始紀錄，沒被改寫
     assert [p["parts"][0]["text"] for p in payload["messages"]] == ["一", "二"]
+
+
+def test_session_id_override_must_equal_the_reserved_one(tmp_path: Path):
+    """M7：`--session-id` 只能等於起點包預留的 id，否則明確拒絕。
+
+    `agora checkout` 已經把接續 Link 與那筆預留記進 Agora，那個 id 是提交流程
+    認得出預留的唯一線索。換一個 id 匯入進去，Agora 裡就多一筆沒有人負責的
+    空 session，而真正開工的那個 session 沒有接續 Link。
+    """
+    from aistorage.adapters.opencode import build_export
+    from aistorage.agora_cli.package import ContextPackageError
+
+    raw = _raw("ses_aaa", ["一", "二"])
+    reader = FakeReader({S1: {"raw": raw, "texts": ["一", "二"]}})
+    out = tmp_path / "pkg"
+    pkg = checkout(reader, _deps(reader), [S1], out)
+
+    # 一致時就當作沒給
+    _payload, session_id, _segments, _source = build_export(
+        out, session_id=pkg.new_session_id)
+    assert session_id == pkg.new_session_id.split(":", 1)[1]
+
+    with pytest.raises(ContextPackageError) as excinfo:
+        build_export(out, session_id="opencode:ses_別的")
+    assert "必須一樣" in str(excinfo.value)
+    assert pkg.new_session_id in str(excinfo.value)
 
 
 def test_build_export_refuses_to_mix_sources(tmp_path: Path):
@@ -1429,12 +1493,12 @@ def test_journal_refuses_to_overwrite_an_existing_record(tmp_path: Path):
 
     journal = ClaimJournal(tmp_path / "claims")
     first = ClaimRecord(
-        handoff_id=HANDOFF, claim_id="claim:01A", item_key="01A",
+        startpoint_key=HANDOFF, claim_id="claim:01A", item_key="01A",
         new_session_id=S2, reserved_at=T1, title="t", profile=PROFILE, created_at=T1)
     journal.put(first)
     with pytest.raises(ClaimJournalError, match="已經有"):
         journal.put(ClaimRecord(
-            handoff_id=HANDOFF, claim_id="claim:01B", item_key="01B",
+            startpoint_key=HANDOFF, claim_id="claim:01B", item_key="01B",
             new_session_id=S3, reserved_at=T1, title="t", profile=PROFILE,
             created_at=T1))
     assert journal.get(HANDOFF) == first
@@ -1447,7 +1511,7 @@ def test_journal_keeps_other_handoffs_when_one_file_is_corrupt(tmp_path: Path):
     journal = ClaimJournal(tmp_path / "claims")
     for handoff_id, item_key in ((HANDOFF, "01A"), (HANDOFF2, "01B")):
         journal.put(ClaimRecord(
-            handoff_id=handoff_id, claim_id=f"claim:{item_key}", item_key=item_key,
+            startpoint_key=handoff_id, claim_id=f"claim:{item_key}", item_key=item_key,
             new_session_id=S2, reserved_at=T1, title="t", profile=PROFILE,
             created_at=T1))
     # 把其中一份弄壞
@@ -1470,7 +1534,7 @@ def test_journal_refuses_to_write_when_a_record_is_corrupt(tmp_path: Path):
                                                                     encoding="utf-8")
     with pytest.raises(ClaimJournalError):
         journal.put(ClaimRecord(
-            handoff_id=HANDOFF, claim_id="claim:01A", item_key="01A",
+            startpoint_key=HANDOFF, claim_id="claim:01A", item_key="01A",
             new_session_id=S2, reserved_at=T1, title="t", profile=PROFILE,
             created_at=T1))
     assert (journal.path / f"{HANDOFF.replace(':', '_')}.json").read_text(
@@ -1484,7 +1548,7 @@ def test_journal_uses_one_file_per_handoff(tmp_path: Path):
     journal = ClaimJournal(tmp_path / "claims")
     for handoff_id in (HANDOFF, HANDOFF2, HANDOFF3):
         journal.put(ClaimRecord(
-            handoff_id=handoff_id, claim_id=f"claim:{handoff_id}",
+            startpoint_key=handoff_id, claim_id=f"claim:{handoff_id}",
             item_key="01A", new_session_id=S2, reserved_at=T1, title="t",
             profile=PROFILE, created_at=T1))
     files = sorted(p.name for p in journal.path.glob("*.json"))
@@ -1499,7 +1563,7 @@ def test_concurrent_journal_writes_do_not_lose_records(tmp_path: Path):
     handoffs = [f"handoff:01{i:022d}" for i in range(12)]
     for index, handoff_id in enumerate(handoffs):
         journal.put(ClaimRecord(
-            handoff_id=handoff_id, claim_id=f"claim:{index:03d}",
+            startpoint_key=handoff_id, claim_id=f"claim:{index:03d}",
             item_key=f"{index:03d}", new_session_id=S2, reserved_at=T1, title="t",
             profile=PROFILE, created_at=T1))
     for index, handoff_id in enumerate(handoffs):
