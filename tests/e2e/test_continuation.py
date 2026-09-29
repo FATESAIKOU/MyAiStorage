@@ -76,6 +76,11 @@ def test_continuation_1_to_1(resident_pool, run_committer, e2e_reader: AgoraRead
         run_committer,
     )
     assert_tool_called(c1, s1_id, "aistorage_whoami")
+    # **明確同步＋提交**：一般對話不會自動上傳（同步器每 10 分鐘才跑一輪），
+    # 而且這裡沒有交出工作，所以不會有工具順手把它送上來——不自己觸發的話
+    # 讀取視圖永遠看不到 S1。
+    c1.sync_once([s1_id])
+    run_committer()
     s1_agora = agora_session_id(s1_id)
     s1_view = poll(
         lambda: e2e_reader.get_session(s1_agora).value,
