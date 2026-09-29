@@ -240,8 +240,8 @@ def _new_session_id(source: str) -> str:
     （`claimer_session_id`）與之後同步器送上來的新 Session 對得上——那樣
     提交流程才收得到接續 Link。
 
-    尾段沿用來源應用慣例（opencode 是 `ses_` ＋ ULID 的後 16 碼）：opencode 的
-    `import` 對 id 前綴寬鬆但仍以 `ses_` 為慣例（spike Q1-4）。1→n 時每個起點包
+    尾段沿用來源應用慣例（opencode 是 `ses_` ＋ ULID 的後 16 碼）：`import` **要求**
+    id 有 `ses_` 這種前綴，前綴之外的字元集寬鬆（spike Q1-4、Q6）。1→n 時每個起點包
     各編一套（不能共用：id 撞了匯入會被靜默丟棄）。
     """
     from aistorage.schema import generate_ulid

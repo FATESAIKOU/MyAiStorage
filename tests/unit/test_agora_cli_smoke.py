@@ -866,6 +866,9 @@ def test_every_id_is_reidentified_and_the_rest_is_untouched():
 
     動到別的欄位，開頭就不會與原 session 位元組相同，KV cache 全部落空
     （docs/spike/session-import.md Q2）。
+
+    重編後的 id 形狀是「前綴＋時間＋序號＋鹽」（28 個字元）；斷言的是
+    **性質**（前綴、全域唯一、字典序遞增），不是那個字串本身。
     """
     from aistorage.adapters.opencode import reidentify
 
@@ -876,8 +879,10 @@ def test_every_id_is_reidentified_and_the_rest_is_untouched():
 
     assert out["info"]["id"] == "ses_NEW01"
     ids = [m["info"]["id"] for m in out["messages"]]
-    assert all(i.startswith("msg_NEW01") for i in ids)
     assert ids != ["msg_ses_aaa_0", "msg_ses_aaa_1"]
+    assert all(i.startswith("msg_") for i in ids), ids
+    # 匯出訊息是 ORDER BY time_created, id：id 的字典序必須跟匯出順序一致
+    assert ids == sorted(ids), ids
     for original_m, m in zip(original["messages"], out["messages"]):
         # 除了 id 與 sessionID 之外，每個欄位都必須一模一樣
         assert m["info"]["role"] == original_m["info"]["role"]
@@ -886,9 +891,68 @@ def test_every_id_is_reidentified_and_the_rest_is_untouched():
         for p, original_p in zip(m["parts"], original_m["parts"]):
             assert p["sessionID"] == "ses_NEW01"
             assert p["messageID"] == m["info"]["id"]
-            assert p["id"].startswith("prt_NEW01")
+            assert p["id"].startswith("prt_")
             assert p["type"] == original_p["type"]
             assert p["text"] == original_p["text"]
+
+
+def test_reidentified_ids_stay_unique_and_ordered_for_any_session_id(tmp_path):
+    """**任何**長度的預留 session id 都不能讓 id 互相重複（impl2 e2e 9.1／9.2）。
+
+    舊的寫法是 `f"msg_{tag}{i:020d}"[:30]`，而 tag 取自預留 session id 的尾段
+    （最長 10 碼）再加段落標記，於是總長超過 30 就被截斷、序號的位數全被吃掉，
+    **每一則訊息拿到同一個 id**。`opencode import` 對重複 id 是
+    `onConflictDoNothing`：8 則進、1 則出，rc=0、沒有任何錯誤訊息。
+
+    這裡用三種長度的預留 id 各跑一次，驗「全部唯一、字典序遞增、長度在 30 以內」。
+    """
+    from aistorage.adapters.opencode import build_export, reidentify
+
+    payload = _adapter_export("ses_aaa", [f"第 {i} 則" for i in range(9)])
+    for reserved in ("ses_s", "ses_" + "M" * 12, "ses_" + "X" * 24):
+        out = reidentify(payload, payload["messages"], session_id=reserved)
+        ids = [m["info"]["id"] for m in out["messages"]]
+        part_ids = [p["id"] for m in out["messages"] for p in m["parts"]]
+        assert len(set(ids)) == len(ids) == 9, (reserved, ids)
+        assert len(set(part_ids)) == len(part_ids) == 9, (reserved, part_ids)
+        assert ids == sorted(ids), (reserved, ids)
+        assert all(len(i) <= 30 for i in ids + part_ids), reserved
+        # 不同預留 id → 不同 id（1→n 與重跑都不會互相撞）
+        assert reidentify(payload, payload["messages"],
+                          session_id="ses_另一個")["messages"][0]["info"]["id"] \
+            != out["messages"][0]["info"]["id"]
+
+    # 整條路徑（起點包 → 匯出）也要過：8 則進就必須 8 則出
+    reader = FakeReader({S1: {"raw": _raw("ses_aaa", [f"第 {i} 則" for i in range(9)]),
+                             "texts": [f"第 {i} 則" for i in range(9)]}})
+    pkg_dir = tmp_path / "pkg-unique-ids"
+    checkout(reader, _deps(reader), [S1], pkg_dir)
+    built, session_id, _segments, _source = build_export(pkg_dir)
+    built_ids = [m["info"]["id"] for m in built["messages"]]
+    assert len(set(built_ids)) == 9, built_ids
+    assert built_ids == sorted(built_ids), built_ids
+
+
+def test_reidentifying_the_same_package_twice_gives_the_same_ids(tmp_path):
+    """同一個預留 session id 重跑 `load` 必須得到**同一套** id。
+
+    鹽由預留 id 推導（不是隨機），所以重跑是 no-op，不會把同一段歷史複製一份。
+    9.2 的失敗正是「load 跑第二次」：舊的 id 全部撞上第一次那批，匯入後整個 session
+    變成 0 則。
+    """
+    from aistorage.adapters.opencode import build_export
+
+    raw = _raw("ses_aaa", ["一", "二", "三"])
+    reader = FakeReader({S1: {"raw": raw, "texts": ["一", "二", "三"]}})
+    pkg_dir = tmp_path / "pkg-retry"
+    checkout(reader, _deps(reader), [S1], pkg_dir)
+
+    first, _sid, _segments, _source = build_export(pkg_dir)
+    again, _sid2, _segments2, _source2 = build_export(pkg_dir)
+    assert [m["info"]["id"] for m in first["messages"]] == \
+        [m["info"]["id"] for m in again["messages"]]
+    assert [p["id"] for m in first["messages"] for p in m["parts"]] == \
+        [p["id"] for m in again["messages"] for p in m["parts"]]
 
 
 def test_parent_pointing_outside_the_truncation_is_cleared():

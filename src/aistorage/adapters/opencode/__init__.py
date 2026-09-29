@@ -15,6 +15,7 @@ from aistorage.adapters.opencode.loader import (
     load,
     reidentify,
     run_import,
+    salt_for,
     truncate_to,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "load",
     "reidentify",
     "run_import",
+    "salt_for",
     "truncate_to",
 ]

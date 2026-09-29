@@ -141,7 +141,9 @@ n→1（統合）時，呼叫端給的次序不代表什麼，所以 `agora chec
 2. 每段讀 `raw_file`、**先驗 `raw_sha256`**；
 3. 截到 `message_id`（`null` 就不截）；
 4. `session`／`message`／`part` 的 id **全部重編**（沿用 id 匯入會被靜默丟棄，
-   見 `docs/spike/session-import.md` Q1-1），session id 用 `new_session.session_id`；
+   見 `docs/spike/session-import.md` Q1-1）。**重編出來的 id 也要彼此唯一、而且
+   字典序要跟匯出順序一致**——自編的 id 互相重複時，`import` 丟棄的是同一批而
+   不報錯（Q6，9.1／9.2 的失敗）；session id 用 `new_session.session_id`；
 5. n→1 時第二段起首則的 parent 手工鏈到前一段末則；
 6. 在**目標專案目錄**執行 `opencode import`（匯入會把 directory／project 強制
    改寫為當下目錄，Q1-2）；

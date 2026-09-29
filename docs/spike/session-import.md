@@ -22,9 +22,12 @@ ADR 0010 的「原封不動重建開頭」在 opencode 上**做得到**，做法
 - 原 session 接續 vs 匯入 session 接續：共同前綴（system＋前 k 則重播）**位元組完全相同**
   （實測前 10469 bytes 全同，差異恰好從歷史分岔處開始）。
 - n→1：兩段串接＋重編 id＋手動鏈 parent，import 收、export 正常、接續可跑。
-- 限制只有三條（見 Q1、Q3）：id 必須重編（沿用會被靜默丟棄）、import 強制改寫
-  directory／project 為當下目錄、skill 重名會讓 system prompt 在不同 run 翻轉
-  （resident 容器 skill 固定則無此問題）。
+- 限制只有四條（見 Q1、Q3、Q6）：id 必須重編（沿用會被靜默丟棄，且**自編的 id 互相
+  重複也一樣被靜默丟棄**——9.1／9.2 的失敗就是這個）、重編後的 id 字典序要跟匯出
+  順序一致、import 強制改寫 directory／project 為當下目錄、skill 重名會讓 system
+  prompt 在不同 run 翻轉（resident 容器 skill 固定則無此問題）。
+- 2026-09-30 補：Q6 是本來沒測到的部分（重編 id 的長度與順序），後來在 e2e 9.1／9.2
+  上炸開；證據與修法見 `docs/spike/evidence/impl2-import-id-collision.md`。
 
 ## Q1：官方匯入方式與限制（1.18.32）
 
@@ -41,12 +44,19 @@ ADR 0010 的「原封不動重建開頭」在 opencode 上**做得到**，做法
 1. **message／part id 全域唯一**：與已存在 id 相同的訊息／段落會被 `onConflictDoNothing` **靜默丟棄**。
    同一份 export 原樣改個 session id 再匯入，新 session 是**空的**（0 則，實測）。
    同 id 的 session 再匯入一次則是 no-op（只更新 project／directory／path）。
+   **自己編的 id 若互相重複，丟棄的也是同一批**（Q6）——這是 9.1／9.2 的失敗。
 2. **directory／project／path 強制改寫為當下 context**：實測把 `info.directory` 改成
    `/no/such/dir` 再匯入，DB 裡仍是執行 import 時的目錄（`global`／`/private/tmp/impl2-s1-work`）。
    → `agora init session` 必須在**目標專案目錄**執行 import（或事後搬）。
 3. **parent 不驗證**：指到不存在訊息的 parent 也照收（n→1 實測，見 Q4）。
-4. id 格式寬鬆：`ses_`／`msg_`／`prt_` 前綴＋自定字串可收（未測極端格式）。
+4. id 格式：`ses_`／`msg_`／`prt_` **前綴一定要有**；前綴之外寬鬆（長度不設限、
+   連 `.` `-` `/` 都收）。以數字開頭、沒有前綴的 id 會被**整份拒絕**（Q6 補測，
+   這格當時沒測）。
 5. `opencode export` 無參數會進互動選單（1.7a 已知）；同步器一律明示 session id。
+6. **形狀錯會大聲報錯**：每則訊息與每個 part 都過 `decodeUnknownSync`，缺
+   `slug`／`agent`／`model`／`step-start` 之類的欄位就整份拒絕，**不會**靜默丟棄
+   （Q6 補測）。所以「匯入之後少了東西」只可能來自 id，不是來自形狀。
+
 
 ## Q2：截斷匯入後接著送新訊息，開頭是否位元組相同
 
@@ -115,11 +125,46 @@ import **照收不報錯**，正好證明它不驗 parent），匯入結果：
 同步器照既有路徑（列舉→export）即可把它當**新 session**送進 Agora；
 接續 Link 的建立照 ADR 0010 由提交流程依認領處理。
 
+## Q6：重編 id 的長度與順序（本來沒測，9.1／9.2 上炸開的那格）
+
+2026-09-30 補測，證據在 `docs/spike/evidence/impl2-import-id-collision.md`。這裡的
+spike 用 `--tag IMPA`（**4 碼**），`f"msg_{tag}{i:020d}"[:30]` 剛好 28 個字元、
+沒有被截斷，所以一直正常；`agora-opencode` 的實作改用**預留 session id 的尾
+10 碼**再加段落標記（12 碼），總長 36 就被 `[:30]` 截掉序號，**整批訊息拿到同一個
+id**，`import` 靜默丟棄（8 則進、1 則出；重跑時是 0 則）。
+
+實測（容器內、乾淨的資料庫、每個形狀各匯入一次）：
+
+| 匯入的 id | 結果 |
+|---|---|
+| `msg_01a0ee3e449d0000009479fc`（現在的形狀） | 收；9／9 則、31／31 個 part，內容與順序與來源相同 |
+| `00000000000000000000`（以數字開頭、沒前綴） | **拒絕**：`Expected a string starting with "msg"` |
+| 66 個字元的 id | 收（沒有長度上限） |
+| 含 `.` `-` `_` `/` `?` 的 id | 收（字元集不限制） |
+| 全部訊息同一個 id | 收，**靜默丟棄**：9 則進、1 則出 |
+| part id 遞減（前綴正確） | 收，但**同一則訊息內 part 的順序被翻轉** |
+
+兩條要記的規則：
+
+- **前綴一定要有**（`ses_`／`msg_／`prt_`）：沒有前綴是整份拒絕，不是靜默丟棄。
+  「以數字開頭的 id 沒測過」這格現在補上了：不行。
+- **id 的字典序要跟匯出順序一致**。匯出排序是 `ORDER BY time_created, id`（訊息）
+  與 `ORDER BY message_id, id`（同一則訊息內的 part）；`time_created` 一樣時
+  （合成資料、同毫秒產生）順序由 id 決定——實測把 id 弄成遞減，匯出順序整個翻轉。
+
+所以 `loader.py` 的重編 id 是三段**固定寬度**、共 28 個字元、時間取自原始紀錄的
+`time.created`、序號跨段遞增、鹽由預留 session id 推導（不是隨機：重跑同一個起點包
+因此是 no-op，1→n 因為預留 id 不同而不同），**沒有任何可以被截斷的地方**，超出
+長度上限時明確報錯。守門是
+`tests/integration/test_opencode_load_roundtrip.py`（容器裡真的 load → export →
+stub 抓包，不需要模型）。
+
 ## 給 `agora init session` 的建議
 
 1. 固定流程：export → 截到接續點（接續點定義沿用 1.7c：快照識別＋message id，
-   取到最後一則已完成訊息）→ session／message／part id 全重編（前綴保留，
-   後綴隨機；同一次 1→n 的 n 個各編一套）→ 在目標專案目錄 `opencode import`。
+   取到最後一則已完成訊息）→ session／message／part id 全重編（前綴保留，後綴
+   「時間＋序號＋鹽」，**不要截斷**；鹽由預留 session id 推導）→ 在目標專案目錄
+   `opencode import`。
 2. n→1：最長的一段放最前面（ADR 0010 已定），其餘接後；parent 手工鏈成一串；
    超 context 上限先明確拒絕（ADR 0010 已定，不默默截斷）。
 3. resident 鏡像去掉重名 skill（或固定解析順序），否則同批建出的 session
@@ -138,6 +183,9 @@ export XDG_DATA_HOME=/tmp/s1-data XDG_CONFIG_HOME=/tmp/s1-config \
 mkdir -p /tmp/s1-work && cd /tmp/s1-work
 
 # 1. 造 session（含一次工具呼叫），免費模型即可
+#    不想真的呼叫模型時，用 fixtures 腳本造一份形狀真實的匯出檔（Q6 的說明）：
+#      python3 scripts/spike/session_import_fixture.py seed-src.json ses_SEED01
+#      opencode import seed-src.json && opencode export ses_SEED01 > seed.json
 echo "fixture alpha" > fixture.txt
 opencode run --auto -m opencode/space-bunny-free --title SEED \
   "Remember codeword ALFA-123. Read fixture.txt, run 'echo TOOL-CHECK-789', reply one sentence."
@@ -159,8 +207,16 @@ opencode run -m stub/stub-echo -s ses_IMPB01 "PROBE"
 python3 scripts/spike/session_import_compare.py caps/req-001.json caps/req-002.json
 ```
 
+匯入之後**一定要再 export 一次數訊息**（Q6 的教訓）：`import` 對重複 id 是靜默
+丟棄，rc=0、沒有任何訊息，只看匯入檔看不出來。
+
 ## 腳本
 
-- `scripts/spike/session_import_make.py`：截斷＋重編 id。
+- `scripts/spike/session_import_make.py`：截斷＋重編 id（**這支的 `--tag` 只有 4 碼，
+  所以不會觸發 Q6 的截斷**；正式實作在 `loader.py`，id 是固定寬度、不截斷）。
+- `scripts/spike/session_import_fixture.py`：造形狀真實的匯出檔（測試資料，不碰真實
+  Session）。`import` 會驗每一個欄位，所以樣本的形狀必須真的對得上。
 - `scripts/spike/session_import_stub.py`：本機 stub provider，存 request body。
 - `scripts/spike/session_import_compare.py`：兩次請求的位元組比對。
+- `tests/integration/test_opencode_load_roundtrip.py`：Q6 的守門——在真的 resident
+  容器裡 load → export → stub 抓包，**不需要模型、Drive 或網路**。

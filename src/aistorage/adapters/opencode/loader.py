@@ -9,12 +9,18 @@
 > 匯出 JSON 截斷到接續點 → **session／message／part id 全部重編** →
 > 在目標專案目錄執行 `opencode import`。
 
-三個不能省的規則：
-1. **id 一定要重編**。`import` 對已存在的 message／part id 是 `onConflictDoNothing`
-   **靜默丟棄**：沿用原 id 匯入兩次，第二次得到的是空 session（Q1-1）。
-2. **在目標專案目錄匯入**。`import` 強制把 directory／project/path 改寫為當下的
+四個不能省的規則：
+1. **id 一定要重編，而且要唯一**。`import` 對已存在的 message／part id 是
+   `onConflictDoNothing` **靜默丟棄**：沿用原 id 匯入兩次，第二次得到的是空
+   session（Q1-1）；**自己編的 id 若互相重複，丟棄的是同一批**——9.1 的 8 則進、
+   1 則出就是這樣來的（`_reidentified_id` 的說明）。
+2. **重編後的 id 字典序要跟匯出檔的順序一致**。opencode 匯出訊息是
+   `ORDER BY time_created, id`、訊息內的 part 是 `ORDER BY message_id, id`：
+   `time.created` 一樣時（合成資料、或同毫秒產生）順序由 id 決定。實測把 id 弄成
+   遞減，匯出順序就會翻轉（`docs/spike/session-import.md` Q6）。
+3. **在目標專案目錄匯入**。`import` 強制把 directory／project/path 改寫為當下的
    context，目錄寫在匯出檔裡也沒用（Q1-2）。
-3. **n→1 要手工鏈 parent**。`import` 不驗 parent（Q1-3），所以時序與鏈接由這裡
+4. **n→1 要手工鏈 parent**。`import` 不驗 parent（Q1-3），所以時序與鏈接由這裡
    保證。
 
 `load` 印出新 session id 就結束。**開不開 agent、在哪開，是呼叫者的事**。
@@ -23,6 +29,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -34,6 +41,20 @@ from aistorage.agora_cli.package import ContextPackageError, read_package
 #: 匯入後預設的 session 標題前綴（`package.json` 的 `task` 會接在後面）。
 TITLE_PREFIX = "Agora 起點"
 
+#: 重編 id 的長度上限。opencode 自己的 id 是 29～30 個字元（Q6）；超過就明確
+#: 報錯，**絕不截斷**——截斷會把 id 尾端那些真正負責唯一的位數吃掉，於是同一批
+#: 訊息拿到同一個 id，匯入時被靜默丟棄（impl2 9.1／9.2）。
+_ID_MAX = 30
+#: id 裡時間那一段的位數（16 進位）。`time.created` 是毫秒，12 碼夠用到西元
+#: 10889 年。
+_TIME_HEX = 12
+#: id 裡序號那一段的位數（16 進位）：單一匯入最多 16,777,216 則訊息／單一訊息
+#: 最多 16,777,216 個 part。
+_ORDINAL_HEX = 6
+#: id 裡鹽雜湊那一段的位數（16 進位，24 bits）：讓不同匯入（1→n、重跑）不會
+#: 拿到同一個 id。
+_SALT_HEX = 6
+
 __all__ = [
     "AdapterError",
     "LoadResult",
@@ -42,6 +63,7 @@ __all__ = [
     "load",
     "reidentify",
     "run_import",
+    "salt_for",
     "truncate_to",
 ]
 
@@ -93,26 +115,84 @@ def truncate_to(payload: dict, message_id: str | None) -> list[dict]:
     )
 
 
+def salt_for(session_id: str) -> str:
+    """這個新 session 的重編鹽（`_SALT_HEX` 碼）。
+
+    **由新 session id 推導，不隨機**：
+    - 同一個起點包重跑（`agora checkout --resume` 之後再 `load` 一次）算出一模
+      一樣的 id，匯入因此是 no-op，不會把同一段歷史複製一份（9.2 的重跑情境）。
+    - 1→n 每一份起點包的預留 session id 不同（`checkout._new_session_id` 每次
+      編新的），鹽就不同，id 也就不同——撞了會被 `onConflictDoNothing` 靜默丟棄。
+    """
+    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:_SALT_HEX]
+
+
+def _reidentified_id(prefix: str, *, time_ms: int, ordinal: int, salt: str) -> str:
+    """組一個重編 id：`<prefix>_<時間><序號><鹽雜湊>`（固定 28 個字元）。
+
+    三段各有用途，缺一段就會出事：
+
+    1. **時間**（`_TIME_HEX` 碼，原始紀錄的 `time.created`）：opencode 自己就是
+       「時間＋亂數」的形式，而且匯出訊息是 `ORDER BY time_created, id`——
+       `time.created` 相同時順序由 id 決定，所以 id 的字典序必須跟匯出檔的順序
+       一致（Q6）。
+    2. **序號**（`_ORDINAL_HEX` 碼，這次匯入裡的位置）：負責**唯一**。舊的寫法
+       是 `f"msg_{tag}{i:020d}"[:30]`，tag 一旦長過 10 碼就會被截斷，序號的位數
+       全被吃掉，**每一則訊息都拿到同一個 id**；`opencode import` 對重複 id 是
+       `onConflictDoNothing`，於是 8 則進、1 則出，而且 rc=0、沒有任何訊息
+       （impl2 e2e 9.1／9.2）。**所有欄位都是固定寬度，所以不可能再被截斷。**
+    3. **鹽雜湊**（`_SALT_HEX` 碼）：把新 session id、段落、原始 id 一起雜湊進去，
+       讓不同匯入（1→n 的 n 份、重跑、n→1 的多段）拿到不同的 id。
+
+    匯出時的排序是 `ORDER BY time_created, id`（訊息）與 `ORDER BY message_id, id`
+    （同一則訊息內的 part），所以兩個序號都要**依匯出檔的順序遞增**。
+    """
+    stamp = f"{max(int(time_ms), 0) & ((1 << (4 * _TIME_HEX)) - 1):0{_TIME_HEX}x}"
+    ident = f"{prefix}_{stamp}{ordinal:0{_ORDINAL_HEX}x}{salt}"
+    if len(ident) > _ID_MAX:  # pragma: no cover - 固定寬度欄位加起來不會超過
+        raise AdapterError(
+            f"重編出來的 id 有 {len(ident)} 個字元，超過 opencode 的 {_ID_MAX}："
+            f"{ident[:12]}…（要重新檢查 _TIME_HEX／_ORDINAL_HEX／_SALT_HEX 的寬度）"
+        )
+    return ident
+
+
+def _time_ms(info: dict, fallback: int) -> int:
+    """訊息的 `time.created`（毫秒）。缺就用前一則的，維持順序不倒退。"""
+    time = info.get("time")
+    created = time.get("created") if isinstance(time, dict) else None
+    return created if isinstance(created, int) else fallback
+
+
 def reidentify(payload: dict, messages: Sequence[dict], *, session_id: str,
-               tag: str) -> dict:
+               tag: str | None = None, first_ordinal: int = 0) -> dict:
     """把截斷後的訊息**全部 id 重編**成新 session 的（回傳新的匯出字典）。
 
-    前綴保留（`ses_`／`msg_`／`prt_`，spike Q1-4：id 格式寬鬆但這是慣例），
-    後綴換成這一次專屬的。`parentID` 與 `part.messageID` 依對應表改寫，
-    **其餘欄位一個位元組都不動**——動了開頭就不會與原 session 位元組相同。
+    前綴保留（`ses_`／`msg_`／`prt_`，spike Q1-4：id 必須以這些開頭，實測以數字
+    開頭會被 `import` 擋下），後綴是「時間＋序號＋鹽」（見 `_reidentified_id`）。
+    `parentID` 與 `part.messageID` 依對應表改寫，**其餘欄位一個位元組都不動**
+    ——動了開頭就不會與原 session 位元組相同。
+
+    `tag` 是鹽（測試可以固定它）；預設由 `session_id` 推導（`salt_for`）。
+    `first_ordinal` 是這一段在**整份匯出**裡的起始序號（n→1 時遞增），讓重編
+    出來的 id 字典序與整份匯出的順序一致。
     """
     out = dict(payload)
     info = dict(payload.get("info") or {})
     info["id"] = session_id
     out["info"] = info
 
+    salt = tag if tag else salt_for(session_id)
     message_map: dict[str, str] = {}
     new_messages: list[dict] = []
+    previous_time = 0
     for i, m in enumerate(messages):
         m = dict(m)
         m_info = dict(m["info"])
         old = str(m_info.get("id"))
-        new = f"msg_{tag}{i:020d}"[:30]
+        previous_time = _time_ms(m_info, previous_time)
+        new = _reidentified_id(
+            "msg", time_ms=previous_time, ordinal=first_ordinal + i, salt=salt)
         message_map[old] = new
         m_info["id"] = new
         m_info["sessionID"] = session_id
@@ -127,7 +207,8 @@ def reidentify(payload: dict, messages: Sequence[dict], *, session_id: str,
         parts: list[dict] = []
         for j, p in enumerate(m.get("parts") or []):
             p = dict(p)
-            p["id"] = f"prt_{tag}{i:010d}{j:06d}"[:30]
+            p["id"] = _reidentified_id(
+                "prt", time_ms=previous_time, ordinal=j, salt=salt)
             p["sessionID"] = session_id
             p["messageID"] = new
             parts.append(p)
@@ -198,9 +279,9 @@ def build_export(package_dir: Path, *, session_id: str | None = None,
     # 所以完整形式留在 `package.json`，匯出時去掉前綴。
     source = str(new_session.get("source") or "opencode")
     target = session_ref.split(":", 1)[1] if ":" in session_ref else session_ref
-    use_tag = tag or _tag_for(target)
 
     segments: list[list[dict]] = []
+    ordinal = 0
     for position, (segment, raw) in enumerate(zip(data["segments"], raws)):
         if segment.get("source") != new_session.get("source"):
             # 跨來源的片段沒有辦法「原封不動」重建開頭（ADR 0010）。期 1 只做
@@ -213,10 +294,13 @@ def build_export(package_dir: Path, *, session_id: str | None = None,
             )
         payload = _loads(raw, segment)
         messages = truncate_to(payload, segment.get("message_id"))
-        # 每段各自重編（1→n 時同一份內容要能被匯入 n 次，所以 id 不能重複）。
-        segments.append(list(reidentify(payload, messages,
-                                        session_id=target,
-                                        tag=f"{use_tag}{position}X")["messages"]))
+        # 每段各自重編，並給每一段不同的鹽（同一個新 session 裡兩段不能撞 id）；
+        # `first_ordinal` 讓序號在整份匯出裡遞增，id 字典序 = 匯出順序。
+        rebuilt = reidentify(payload, messages, session_id=target,
+                             tag=_segment_salt(tag, target, position),
+                             first_ordinal=ordinal)["messages"]
+        segments.append(rebuilt)
+        ordinal += len(rebuilt)
 
     merged = chain_parents(segments)
     if not merged:
@@ -244,10 +328,18 @@ def _loads(raw: bytes, segment: Any) -> dict:
     return payload
 
 
-def _tag_for(session_id: str) -> str:
-    """從新 session id 取出重編 id 用的 tag（要短且唯一到 30 字元以內）。"""
-    tail = session_id.rsplit("_", 1)[-1]
-    return (tail or session_id)[-10:]
+def _segment_salt(tag: str | None, session_id: str, position: int) -> str:
+    """第 `position` 段用的鹽（`_SALT_HEX` 碼十六進位）。
+
+    單段時就是 `salt_for(session_id)`（重跑 `load` 因此是同一套 id，匯入 no-op）；
+    n→1 時每段加進自己的位置，同一個新 session 裡兩段不會撞 id。
+    """
+    base = tag if tag else salt_for(session_id)
+    if position == 0:
+        return base
+    mixed = hashlib.sha256(
+        f"{base}|{session_id}|{position}".encode("utf-8")).hexdigest()
+    return mixed[:_SALT_HEX]
 
 
 def run_import(payload: dict, *, workdir: Path,
