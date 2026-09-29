@@ -313,7 +313,7 @@ def test_apply_loop_dispatches_continuation_to_apply_continuation(
         )
 
     def _continuation(store, dec, conv, clock, **kwargs):
-        # `**kwargs`：apply 的簽章會長（impl2 加了 max_links_per_round），這支
+        # `**kwargs`：apply 的簽章會長（impl2 加了預留數量上限），這支
         # spy 只負責確認「走的是哪一個分支」，不該被簽章綁死。
         calls.append("continuation")
         return ApplyResult(ok=True, code="ok")

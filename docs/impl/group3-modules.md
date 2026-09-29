@@ -563,7 +563,7 @@ def apply_handoff(store, dec, conv, clock) -> ApplyResult: ...
     # 依 target 的 source 取轉換器（與傳入的不同時向登錄查詢）→ convert →
     # reading.check_continuation，且必須是該快照最後一則已完成的訊息（M5）；
     # 不通過 → REJECT(invalid_continuation)
-def apply_claim(store, dec, clock, *, max_links_per_round=20) -> ApplyResult: ...
+def apply_claim(store, dec, clock, *, max_open_reservations=20) -> ApplyResult: ...
     # 交接單存在、claimed_by 是 null（同輪第二人 → already_claimed）、claimer 在 Agora
     # （或這一輪剛收，否則 unknown_claimer）→ 寫 link、設 claimed_by、寫 claim；
     # H3：claimer 的持有者須與認領單 producer 相同（否則 not_holder）、須是主 Session
@@ -572,15 +572,23 @@ def apply_claim(store, dec, clock, *, max_links_per_round=20) -> ApplyResult: ..
     # 須存在（否則 unknown_target）；
     # M1：同一個新 session 對同一個被接續 session 只能一條 Link——與 apply_continuation
     # 共用同一個檢查；既有那條是 claim 建的（不論接續點是否相同）→ duplicate_link；
-        # M2：這個 profile 本輪已建立的 claim/continuation 達上限 → link_quota_exceeded
-    # （冪等重送提早回傳，不佔額度；上限的計數是「本輪」＝這個 store 實例，不寫進真本，
-    #   每輪歸零。**run.py 要把設定值傳進來**：`max_links_per_round=rcfg.max_links_per_profile_per_round`）
-；
+    # M2：這個 profile 的**未結預留**（`status=reserved` 且沒有後續快照）達上限
+    #   → link_quota_exceeded。只有這次真的會預留一個新 session 才佔額度；冪等重送提早
+    #   回傳也不佔額度。數量**直接從真本算**（掃 sessions/*/*/meta.json），跨輪累計、
+    #   不留任何程式內帳本（review-1926cd3-142fd04 M3：每輪歸零只是限速）。
+    #   **run.py 要把設定值傳進來**：
+    #   `max_open_reservations=rcfg.max_open_reservations_per_profile`（只接受正整數）；
     # 否則 REJECT(unknown_handoff / already_claimed / unknown_claimer / not_holder /
     #            claim_from_subsession / self_claim / unknown_target /
     #            continuation_to_subsession / duplicate_link / link_quota_exceeded)
     # 建接續 Link（方向：claimer → target）；寫入順序 link → handoff → claim，
     # 中斷後重跑可補齊（claimed_by 指向自己但 claim 未寫時繼續完成）。
+def apply_continuation(store, dec, conv, clock, *, max_open_reservations=20) -> ApplyResult: ...
+    # 與 apply_claim 同一套：持有者檢查（not_holder／主 Session／不能接自己／
+    # 目標也要是主 Session）、M1 的一個來源一條 Link（→ duplicate_link）、
+    # 接續點必須在被接續 session 的**既有快照**裡且訊息已完成未撤銷（M3），
+    # 以及 M2 的未結預留上限（`max_open_reservations`，跨輪累計、從真本算）。
+    # 冪等：同一個新 session 對同一個來源有那條 Link 時提早回傳 `already`（不佔額度）。
 def apply_reference(store, dec, clock) -> ApplyResult: ...
     # H3：from 的持有者須與參考單 producer 相同（from 不存在或不符 → not_holder），
     # to 必須存在於 Agora（否則 unknown_target）；

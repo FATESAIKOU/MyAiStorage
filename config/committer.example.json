@@ -13,7 +13,7 @@
   "max_git_bundles": 10,
   "max_gc_per_run": 200,
   "max_raw_size": 52428800,
-  "max_links_per_profile_per_round": 20,
+  "max_open_reservations_per_profile": 20,
   "quarantine_retention_days": 7,
   "ledger_retention_months": 3,
   "prefix_levels": [],

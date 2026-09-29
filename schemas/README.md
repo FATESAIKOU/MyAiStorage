@@ -167,6 +167,13 @@
   claim），所以被拒時連那個空紀錄都不會有。`session.reserving` 標記它是預留而不是
   真的同步；`session.source` + `source_session_id` 必須等於 `claimer_session_id`。
   帶 `session` 的 claim **必須**有 `raw`（反過來，沒帶預留的 claim 不該有 raw）。
+
+  帶預留的 claim 會佔用這個 profile 的**未結預留額度**：提交流程直接從真本算每個
+  profile 目前「狀態還是 `reserved`、而且還沒有後續快照」的預留數，超過上限
+  （`max_open_reservations_per_profile`，預設 20，只接受正整數）就以
+  `link_quota_exceeded` 明確拒收，被拒時一樣什麼都不留下。額度是**跨輪累計**的，
+  不是「每輪 20 筆」——預留有了第一份真實快照之後就不再計數，所以已經開工的 Session
+  不會卡住自己的額度。
 - **`continuation`（接續單）**：**接續不需要交接單**——`agora checkout` 以
   `<session>[@<訊息>]` 為起點時送它，提交流程收進 Agora 後建出接續 Link。形狀與
   帶預留的 `claim` 相同（`session` ＋ `raw` 一起帶上，所以被拒時 Agora 裡連預留都
@@ -192,7 +199,8 @@
   個，必須等於 `session.source`:`session.source_session_id`）。`continuation` 是接續
   點：`snapshot_sha256` MUST 是 `target_session_id` 的一份**既有快照**，`message_id`
   MUST 是該快照裡已完成、未撤銷的一則訊息（**不**要求是最後一則——直接起點可以停在
-  中間）。同一個新 Session 對同一個起點只留一條 Link，重複送冪等。
+  中間）。同一個新 Session 對同一個起點只留一條 Link，重複送冪等。帶預留的接續單與
+  帶預留的 claim 共用同一個未結預留上限（見上面 claim 那段）。
 - **`reference`（參考 Link）**：
   ```json
   {

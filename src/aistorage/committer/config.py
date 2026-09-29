@@ -20,8 +20,9 @@ from aistorage.integrity.sweep import PrefixLevel
 DEFAULT_MAX_GIT_BUNDLES = 20
 DEFAULT_MAX_GC_PER_RUN = 200
 DEFAULT_MAX_RAW_SIZE = 50 * 1024 * 1024  # 50 MiB
-#: 每個 profile 每輪能建立的預留／接續數量上限（review-2bc0785 M2）。0 或負數＝不設上限。
-DEFAULT_MAX_LINKS_PER_PROFILE_PER_ROUND = 20
+#: 每個 profile 能同時掛著的未結預留（`reserved` 且沒有後續快照）數量上限
+#: （review-2bc0785 M2，review-1926cd3-142fd04 M3 改成跨輪累計）。**只接受正整數**。
+DEFAULT_MAX_OPEN_RESERVATIONS_PER_PROFILE = 20
 DEFAULT_QUARANTINE_DAYS = 7
 DEFAULT_LEDGER_MONTHS = 3
 #: `.github/workflows/committer.yml`（3.1 建的骨架；錯開要停用的就是它）
@@ -56,10 +57,12 @@ class CommitterConfig:
     max_git_bundles: int = DEFAULT_MAX_GIT_BUNDLES
     max_gc_per_run: int = DEFAULT_MAX_GC_PER_RUN
     max_raw_size: int = DEFAULT_MAX_RAW_SIZE
-    #: 每輪每個 profile 能建立的預留／接續（claim／continuation）數量上限
-    #: （review-2bc0785 M2）。任何 profile 都能為任何一份既有快照送接續，沒有這個
-    #: 上限時讀取視圖要發佈的閱讀版數量沒有邊界。0 或負數＝不設上限。
-    max_links_per_profile_per_round: int = DEFAULT_MAX_LINKS_PER_PROFILE_PER_ROUND
+    #: 每個 profile 能同時掛著的**未結預留**（`status=reserved` 且還沒有後續快照）
+    #: 數量上限（review-2bc0785 M2；review-1926cd3-142fd04 M3 從「每輪」改成跨輪
+    #: 累計，直接從真本算，不留帳本）。任何 profile 都能為任何一份既有快照送接續，
+    #: 沒有這個上限時讀取視圖要發佈的閱讀版數量沒有邊界。**只接受正整數**。
+    max_open_reservations_per_profile: int = (
+        DEFAULT_MAX_OPEN_RESERVATIONS_PER_PROFILE)
     quarantine_retention_days: int = DEFAULT_QUARANTINE_DAYS
     ledger_retention_months: int = DEFAULT_LEDGER_MONTHS
     prefix_levels: tuple[PrefixLevel, ...] = ()
@@ -149,6 +152,30 @@ class CommitterConfig:
                 f"不合法的 readview_rebuild_epoch: {repr(readview_rebuild_epoch)}（要非負整數）"
             )
 
+        # 預留數量上限（review-1926cd3-142fd04 M3）：**只接受正整數**。0 或負數
+        # 在舊版代表「不設上限」，那等於一個打錯字就默默關掉保護，所以改成載入時
+        # 就報錯（review-1926cd3-142fd04 建議）。
+        max_open_reservations = data.get(
+            "max_open_reservations_per_profile",
+            DEFAULT_MAX_OPEN_RESERVATIONS_PER_PROFILE)
+        if (isinstance(max_open_reservations, bool)
+                or not isinstance(max_open_reservations, int)
+                or max_open_reservations <= 0):
+            raise ValueError(
+                f"max_open_reservations_per_profile 必須是正整數: "
+                f"{max_open_reservations!r}（0 與負數**不**代表「不設上限」，"
+                f"要放寬請直接給一個更大的數）"
+            )
+        # 舊欄位（每輪限速版）已經被這個取代：留著不報錯的話，設定檔會安靜地退回
+        # 預設值，上限看起來有設、其實沒生效。照 `_foundry` 那條的作法直接擋。
+        if "max_links_per_profile_per_round" in data:
+            raise ValueError(
+                "設定檔還有舊欄位 `max_links_per_profile_per_round`（每輪限速版）。"
+                "它已被 `max_open_reservations_per_profile`（每個 profile 的未結"
+                "預留上限，跨輪累計）取代，請改名並確認數值——兩個欄位的意義不同，"
+                "直接沿用舊值會讓上限變成另一件事。"
+            )
+
         # ADR 0009：設定檔只描述**一個**實體（期 1 是 Agora）。舊的設定檔帶著
         # `repos: {foundry: …}`（多 repo 的提交流程）時**必須報錯**，不能默默忽略：
         # 默默忽略的後果是「以為還在跑的 Foundry 其實從期 1 開始就沒被處理過」，
@@ -225,9 +252,7 @@ class CommitterConfig:
             max_git_bundles=int(data.get("max_git_bundles", DEFAULT_MAX_GIT_BUNDLES)),
             max_gc_per_run=int(data.get("max_gc_per_run", DEFAULT_MAX_GC_PER_RUN)),
             max_raw_size=int(data.get("max_raw_size", DEFAULT_MAX_RAW_SIZE)),
-            max_links_per_profile_per_round=int(data.get(
-                "max_links_per_profile_per_round",
-                DEFAULT_MAX_LINKS_PER_PROFILE_PER_ROUND)),
+            max_open_reservations_per_profile=max_open_reservations,
             quarantine_retention_days=int(data.get("quarantine_retention_days", DEFAULT_QUARANTINE_DAYS)),
             ledger_retention_months=int(data.get("ledger_retention_months", DEFAULT_LEDGER_MONTHS)),
             prefix_levels=tuple(levels),

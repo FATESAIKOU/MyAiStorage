@@ -1,15 +1,15 @@
-"""提交流程把設定檔的 `max_links_per_profile_per_round` 傳到 apply（接續數量上限）。
+"""提交流程把設定檔的 `max_open_reservations_per_profile` 傳到 apply（未結預留上限）。
 
-apply 層的額度語意（每個 profile 每輪、per-round 歸零、被拒不佔額度）在
-`test_continuation_dedup_quota_smoke.py` 驗過了。這裡驗的是**接線**：
-`committer/config.py` 的設定欄位真的有到達 `apply_claim` 與
-`apply_continuation`——不傳的話，apply 只會吃自己的預設值
-（`DEFAULT_MAX_LINKS_PER_PROFILE_PER_ROUND`），設定檔改了完全不會生效，而且
-沒有任何測試會發現。
+apply 層的額度語意（每個 profile 的未結預留、跨輪累計、預留開工後不再計分、
+被拒不佔額度、0 與負數是程式錯誤）在 `test_continuation_dedup_quota_smoke.py`
+驗過了。這裡驗的是**接線**與**設定檔驗證**：`committer/config.py` 的設定欄位真的有
+到達 `apply_claim` 與 `apply_continuation`——不傳的話，apply 只會吃自己的預設值
+（`DEFAULT_MAX_OPEN_RESERVATIONS_PER_PROFILE`），設定檔改了完全不會生效，而且沒有
+任何測試會發現。
 
-證明方式不是 spy 參數，而是**真的讓額度生效**：`max_links_per_profile_per_round=1`
-時，同一個 profile 這一輪的**第二筆**接續（claim／continuation 都算）會被明確
-拒收成 `link_quota_exceeded`。
+證明方式不是 spy 參數，而是**真的讓額度生效**：
+`max_open_reservations_per_profile=1` 時，同一個 profile 的**第二個未結預留**會被
+明確拒收成 `link_quota_exceeded`。
 
 每一輪的目標 session 與接續單放在**同一批**提交：apply 的順序是
 session → handoff → claim → continuation（`sort_accepted_decisions`），所以目標
@@ -24,6 +24,12 @@ import importlib
 import json
 from pathlib import Path
 
+import pytest
+
+from aistorage.committer.config import (
+    DEFAULT_MAX_OPEN_RESERVATIONS_PER_PROFILE,
+    CommitterConfig,
+)
 from aistorage.committer.run import run
 from aistorage.inbox_builder import (
     NewSessionReservation,
@@ -134,12 +140,12 @@ def _env_with_cap(tmp_path: Path, cap: int | None):
     cfg, deps, extra = _env(tmp_path, seed_session=False)
     _allow_continuation(deps)
     if cap is not None:
-        cfg = dataclasses.replace(cfg, max_links_per_profile_per_round=cap)
+        cfg = dataclasses.replace(cfg, max_open_reservations_per_profile=cap)
     return cfg, deps, extra
 
 
-def test_configured_link_cap_reaches_apply_continuation(tmp_path, monkeypatch):
-    """`max_links_per_profile_per_round=1` → 這一輪第二筆接續單被拒成 link_quota_exceeded。
+def test_configured_reservation_cap_reaches_apply_continuation(tmp_path, monkeypatch):
+    """`max_open_reservations_per_profile=1` → 第二個未結預留被拒成 link_quota_exceeded。
 
     被拒是**明確決定**不是中止：整輪仍然成功（`report.ok`），拒收原因也會經由
     讀取視圖發佈給寫入端。
@@ -172,12 +178,12 @@ def test_configured_link_cap_reaches_apply_continuation(tmp_path, monkeypatch):
     assert report.counts["accepted"] == 2, report.counts
 
 
-def test_configured_link_cap_reaches_apply_claim(tmp_path, monkeypatch):
-    """同一個設定值也要管到 `apply_claim`（交接單的認領同樣會建接續 Link）。
+def test_configured_reservation_cap_reaches_apply_claim(tmp_path, monkeypatch):
+    """同一個設定值也要管到 `apply_claim`（交接單的認領同樣會預留一個新 session）。
 
     這一輪是「一筆 claim ＋ 一筆 continuation」：claim 先拿到唯一的名額
     （`_DISPATCH_ORDER`：handoff → claim → continuation），接續單撞上限。兩條路徑
-    共用同一個額度（impl2 M2 的 `_check_link_quota`），所以這裡同時證明設定值對
+    共用同一個上限（`_check_reservation_cap`），所以這裡同時證明設定值對
     claim 生效、以及兩種型態共用同一份額度。
     """
     run_mod = importlib.import_module("aistorage.committer.run")
@@ -216,7 +222,8 @@ def test_default_cap_is_high_enough_for_two_links(tmp_path, monkeypatch):
     """
     run_mod = importlib.import_module("aistorage.committer.run")
     cfg, deps, extra = _env_with_cap(tmp_path, None)
-    assert cfg.max_links_per_profile_per_round >= 2, cfg.max_links_per_profile_per_round
+    assert cfg.max_open_reservations_per_profile >= 2, \
+        cfg.max_open_reservations_per_profile
     drive, inbox = extra["drive"], extra["inbox_folder_id"]
 
     _key, snap_sha = _seed_valid_inbox_session(
@@ -239,3 +246,61 @@ def test_default_cap_is_high_enough_for_two_links(tmp_path, monkeypatch):
     ], seen
     assert report.counts["accepted"] == 3, report.counts   # session + 兩筆接續
     assert report.counts["rejected"] == 0, report.counts
+
+
+# ---------------------------------------------------------------------
+# 設定檔驗證：只接受正整數
+# ---------------------------------------------------------------------
+
+
+def _config_json(tmp_path: Path, **overrides) -> Path:
+    data = {
+        "format": "aistorage.committer/v1",
+        "repo": "agora",
+        "repo_uuid": "uuid-1",
+        "repo_url": "drive://agora",
+        "prefix_folder_id": "pf",
+        "quarantine_folder_id": "qf",
+        "identity_registry_path": "config/identity.json",
+    }
+    data.update(overrides)
+    cfg_path = tmp_path / "committer.json"
+    cfg_path.write_text(json.dumps(data), encoding="utf-8")
+    return cfg_path
+
+
+def test_config_reads_a_positive_reservation_cap(tmp_path: Path) -> None:
+    cfg = CommitterConfig.load(
+        _config_json(tmp_path, max_open_reservations_per_profile=7), env={})
+    assert cfg.max_open_reservations_per_profile == 7
+
+
+def test_config_defaults_the_reservation_cap(tmp_path: Path) -> None:
+    cfg = CommitterConfig.load(_config_json(tmp_path), env={})
+    assert cfg.max_open_reservations_per_profile == \
+        DEFAULT_MAX_OPEN_RESERVATIONS_PER_PROFILE
+    assert cfg.max_open_reservations_per_profile > 0
+
+
+@pytest.mark.parametrize("bad", [0, -1, -20, 1.5, "20", True, None])
+def test_config_rejects_a_non_positive_integer_reservation_cap(
+        tmp_path: Path, bad) -> None:
+    """0、負數與非整數在**載入時**就報錯。
+
+    舊版把 0 與負數當成「不設上限」，那等於一個打錯字就默默關掉成本上限
+    （review-1926cd3-142fd04 建議）。報錯而不是默默照收，寧可開不起來。
+    """
+    with pytest.raises(ValueError, match="max_open_reservations_per_profile"):
+        CommitterConfig.load(
+            _config_json(tmp_path, max_open_reservations_per_profile=bad), env={})
+
+
+def test_config_rejects_the_renamed_per_round_cap_field(tmp_path: Path) -> None:
+    """舊欄位 `max_links_per_profile_per_round` 直接報錯，不會被安靜忽略。
+
+    兩個欄位的意義不同（每輪限速 vs. 跨輪累計的未結預留），沿用舊值會讓上限變成
+    另一件事；忽略舊欄位則會讓設定看起來有設、其實退回預設值。
+    """
+    with pytest.raises(ValueError, match="max_open_reservations_per_profile"):
+        CommitterConfig.load(
+            _config_json(tmp_path, max_links_per_profile_per_round=20), env={})

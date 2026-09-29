@@ -9,9 +9,11 @@
 - review-g3d M6（apply 以本輪已套用狀態重檢單調性）
 - review-g3e（H1 兩階段、H2 轉換失敗照收、H3 持有者檢查、M3〜M6、L）
 - review-2bc0785 M1（同一個新 session 對同一個被接續 session 只能一條 Link，
-  claim 與 continuation 共用同一個檢查）、M2（每個 profile 每輪的預留／接續
-  上限、預留標成 reserved 並設期限）、L（接續目標只能是主 Session、same_link
+  claim 與 continuation 共用同一個檢查）、M2（預留標成 reserved 並設期限、每個
+  profile 的預留／接續數量上限）、L（接續目標只能是主 Session、same_link
   提早回傳、被拒不留預留殘留、預留 id 的格式規則）
+- review-1926cd3-142fd04 M3（PM 裁決：上限是**跨輪累計的未結預留數**，不是每輪
+  限速；直接從真本算，不留任何程式內帳本）
 - PM 決定（期 1 拿掉改寫：apply_rewrite 一律 REJECT）
 
 呼叫順序由 intake.evaluate.sort_accepted_decisions 決定：
@@ -31,7 +33,6 @@ import hashlib
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-import weakref
 
 from aistorage.agora import layout, rejections
 from aistorage.agora.store import AgoraStore, SessionRecord
@@ -49,11 +50,11 @@ if TYPE_CHECKING:  # pragma: no cover
     from aistorage.intake.evaluate import Decision
 
 
-#: 每個 profile **每輪**能建立的接續記錄（claim／continuation）數量上限
-#: （review-2bc0785 M2）。任何 profile 都能為任何一份既有快照送接續，所以不設上限
-#: 時，讀取視圖要發佈的閱讀版數量沒有邊界。預設值給 20：一輪之內足以做十幾次
-#: 分裂（1→n）或統合（n→1），遠低於成本失控的量。
-DEFAULT_MAX_LINKS_PER_PROFILE_PER_ROUND = 20
+#: 每個 profile 能同時掛著的**未結預留**（`reserved` 且還沒有後續快照）數量上限
+#: （review-2bc0785 M2 開始，review-1926cd3-142fd04 M3 改成跨輪累計）。任何
+#: profile 都能為任何一份既有快照送接續，所以不設上限時，讀取視圖要發佈的閱讀版
+#: 數量沒有邊界。預設值給 20：同時掛著十幾個沒人開工的預留已經是不對勁的量。
+DEFAULT_MAX_OPEN_RESERVATIONS_PER_PROFILE = 20
 
 #: 預留（checkout 為新 session 準備的空紀錄）多久算過期
 #: （review-2bc0785 M2／L）。**期 1 不自動刪除**：刪除真本裡的項目是管理操作，
@@ -655,55 +656,69 @@ def _reserved_until(clock: Clock) -> str:
         include_fraction=True)
 
 
-#: 本輪各 profile 已經發出的接續記錄數（producer → 筆數），review-2bc0785 M2。
-#:
-#: **鍵是 `AgoraStore` 實例**，所以「一輪」就是那個實體的生命週期：提交流程每一輪
-#: 開一個 store（ADR 0009：一輪一個實體），下一輪自然歸零。刻意**不寫進真本**——
-#: 上限是寫入端的成本控制，不是真本內容；要寫進真本就得在 manifest／pin 裡多一項
-#: 約定（ADR 0008），而那個規則本身還在待確認。中途崩掉會少算幾筆，是保守的方向：
-#: 下一輪重跑時那些項目已經在真本裡、會先被冪等擋掉。
-#:
-#: 用 `WeakKeyDictionary` 而不是 `store` 的屬性：配額是 apply 這個模組的政策，不該
-#: 掛在別人的物件上；弱引用也不會讓 store 一直活著。
-_LINK_QUOTA_LEDGER: weakref.WeakKeyDictionary[AgoraStore, dict[str, int]] = (
-    weakref.WeakKeyDictionary())
+def _open_reservation_ids(store: AgoraStore, producer: str) -> list[str]:
+    """這個 profile 目前的**未結預留** session id（直接從真本算，沒有任何帳本）。
 
+    「未結」＝ `status == "reserved"` **而且**只有預留自己那一份快照。兩個條件都查：
+    `apply_session` 收到新快照時本來就會把狀態換成 running／stopped，再查一次快照
+    數是因為期限只顯示、不刪除（期 1 不自動清除過期的預留，見 `_reserved_until`），
+    真本裡一筆「狀態說是預留、快照卻已經有後續」的行不該繼續佔著額度。
 
-def _links_filed_this_round(store: AgoraStore, producer: str) -> int:
-    """**本輪**這個 profile 已經發出的接續記錄數（review-2bc0785 M2）。
+    **為什麼不算在程式裡**（review-1926cd3-142fd04 M3，PM 裁決）：原本這裡有一個
+    每輪歸零的 in-process ledger，但輪數是住民自己觸發的（`sync and commit` 會觸發
+    提交流程），每輪歸零等於只是限速、總量沒有上限。這個數量本來就擺在真本裡，
+    每輪重算就跨輪一致，也不用擔心崩潰時少算。
 
-    只數**被接受並寫入真本**的那些（`_note_link_filed` 在寫入之後才記）：被明確拒收
-    的不該佔用額度，冪等重送更不能讓額度一直掉。
+    讀不到或損毀的 meta／快照歷史由 `read_json_file`／`snapshots` 往上拋
+    （fail-closed），不會被當成「這個 profile 沒有預留」而放行。
     """
-    return _LINK_QUOTA_LEDGER.get(store, {}).get(producer, 0)
+    root = store.worktree / "sessions"
+    if not root.is_dir():
+        return []
+    open_ids: list[str] = []
+    for source_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        for sess_dir in sorted(p for p in source_dir.iterdir() if p.is_dir()):
+            rel = f"sessions/{source_dir.name}/{sess_dir.name}/meta.json"
+            if not (store.worktree / rel).is_file():
+                continue
+            meta = store.read_json_file(rel)
+            if not isinstance(meta, dict) or not isinstance(meta.get("id"), str):
+                continue
+            if meta.get("producer") != producer or meta.get("status") != "reserved":
+                continue
+            if len(store.snapshots(meta["id"])) > 1:
+                continue          # 已經有後續快照 → 預留已經開工，不再計數
+            open_ids.append(meta["id"])
+    return open_ids
 
 
-def _note_link_filed(store: AgoraStore, producer: str) -> None:
-    """記一筆「本輪這個 profile 拿到一筆接續」（見 `_LINK_QUOTA_LEDGER`）。"""
-    per_store = _LINK_QUOTA_LEDGER.setdefault(store, {})
-    per_store[producer] = per_store.get(producer, 0) + 1
-
-
-def _check_link_quota(
+def _check_reservation_cap(
     store: AgoraStore,
     dec: Decision,
     before: list[str],
     producer: str,
     now_str: str,
     *,
-    max_per_round: int,
+    max_open_reservations: int,
 ) -> ApplyResult | None:
-    """每個 profile 每輪的預留／接續數量上限（review-2bc0785 M2）。
+    """每個 profile 的**未結預留**數量上限，超過就明確拒收（`link_quota_exceeded`）。
 
-    任何 profile 都能為任何一份既有快照送接續，所以沒有這個上限時，一輪之內就能
-    把讀取視圖要發佈的閱讀版數量灌到沒有邊界。超過就明確拒收（`link_quota_exceeded`）
-    並發佈原因——寫入端看得到，下一輪再送。
+    只有**會新增一筆預留**的項目受這個上限管：claim／continuation 帶著 `session`
+    區塊時才會在真本裡多一個沒人開工的 Session（每個都是讀取視圖要發佈的一份閱讀
+    版）。不預留的項目不讓未結預留數變多，所以不佔額度；冪等重送更早一步就
+    `already` 回傳，同樣不佔額度（否則逾時重跑會把自己的額度吃掉）。
 
-    回傳 `None` 代表還在額度內。
+    拒收碼沿用 `link_quota_exceeded`：它是已經發佈到讀取視圖給寫入端看的外部契約，
+    語意從「每輪限速」改成「跨輪累計」不該換掉寫入端認得的那個字串。
+
+    回傳 `None` 代表還在上限內。
     """
-    if max_per_round <= 0:      # 0 或負數＝不設上限（測試與除錯用）
-        return None
-    if _links_filed_this_round(store, producer) < max_per_round:
+    if max_open_reservations <= 0:
+        # 刻意不保留「0 ＝ 不設上限」這個後門：一個打錯字就默默關掉保護。設定檔在
+        # 載入時就擋掉（`committer/config.py`），走到這裡代表呼叫端傳了不法的程式值。
+        raise ValueError(
+            f"max_open_reservations 必須是正整數: {max_open_reservations!r}")
+    if len(_open_reservation_ids(store, producer)) < max_open_reservations:
         return None
     return _fail(store, dec, before, "link_quota_exceeded", now_str)
 
@@ -713,7 +728,7 @@ def apply_claim(
     dec: Decision,
     clock: Clock,
     *,
-    max_links_per_round: int = DEFAULT_MAX_LINKS_PER_PROFILE_PER_ROUND,
+    max_open_reservations: int = DEFAULT_MAX_OPEN_RESERVATIONS_PER_PROFILE,
 ) -> ApplyResult:
     """套用認領：交接單存在且未被認領、認領者 Session 已在 Agora（含本輪剛收），
     寫 claim、標記 claimed_by、建接續 Link（claimer → target，記接續點）。
@@ -733,6 +748,9 @@ def apply_claim(
     這裡與 `apply_continuation` 共用 `_check_one_link_per_source`。同一個新 session
     認領同一個 session 的**第二張**交接單 → `duplicate_link`（不管接續點是否相同：
     兩個起點指向同一個來源就是同一件事，checkout 也擋掉這種組合）。
+
+    **預留數量上限**（`_check_reservation_cap`）：每個 profile 能同時掛著的未結
+    預留有上限，跨輪累計、從真本算。帶預留的 claim 撞到上限 → `link_quota_exceeded`。
 
     失敗碼：invalid_format、unknown_handoff、already_claimed、unknown_claimer、
     not_holder、claim_from_subsession、self_claim、duplicate_link、
@@ -828,12 +846,14 @@ def apply_claim(
     if link_state in ("same", "duplicate"):
         return _fail(store, dec, before, "duplicate_link", now_str)
 
-    # M2：每個 profile 每輪的接續數量上限。
-    quota = _check_link_quota(
-        store, dec, before, str(producer), now_str,
-        max_per_round=max_links_per_round)
-    if quota is not None:
-        return quota
+    # M2：每個 profile 的未結預留數量上限（跨輪累計，不是每輪歸零）。只有這次
+    # 真的會預留一個新 session 才佔額度。
+    if reserved is not None:
+        cap = _check_reservation_cap(
+            store, dec, before, str(producer), now_str,
+            max_open_reservations=max_open_reservations)
+        if cap is not None:
+            return cap
 
     # ---- 寫入階段（顺序：預留 → link → handoff → claim；错误往上抛） ----
     if reserved is not None:
@@ -867,14 +887,13 @@ def apply_claim(
             },
         },
     )
-    _note_link_filed(store, producer)
     return ApplyResult(ok=True, code="ok", paths=_new_paths(store, before))
 
 
 def apply_continuation(
     store: AgoraStore, dec: Decision, conv: Converter, clock: Clock,
     *,
-    max_links_per_round: int = DEFAULT_MAX_LINKS_PER_PROFILE_PER_ROUND,
+    max_open_reservations: int = DEFAULT_MAX_OPEN_RESERVATIONS_PER_PROFILE,
 ) -> ApplyResult:
     """套用接續單：**每一次 checkout 都記錄接續 Link**（impl2 M6）。
 
@@ -896,6 +915,10 @@ def apply_continuation(
     主 Session（parent_id 為 None）、不能接續自己。**被接續的目標也必須是主
     Session**（與交接單一致；review-2bc0785 L／Night decisions）——子 Session
     是母 Session 內部的一段工作，要接就接那個母 Session。
+
+    **預留數量上限**（`_check_reservation_cap`）：每個 profile 能同時掛著的未結
+    預留有上限，跨輪累計、從真本算。帶預留的接續單撞到上限 →
+    `link_quota_exceeded`。
 
     失敗碼：invalid_format、unknown_target、unknown_claimer、not_holder、
     continuation_from_subsession、continuation_to_subsession、self_continuation、
@@ -996,12 +1019,14 @@ def apply_continuation(
     if check_continuation(reading, continuation):
         return _fail(store, dec, before, "invalid_continuation", now_str)
 
-    # M2：每個 profile 每輪的接續數量上限（已經記過的冪等提早回傳，不佔額度）。
-    quota = _check_link_quota(
-        store, dec, before, str(producer), now_str,
-        max_per_round=max_links_per_round)
-    if quota is not None:
-        return quota
+    # M2：每個 profile 的未結預留數量上限（跨輪累計，不是每輪歸零）。只有這次
+    # 真的會預留一個新 session 才佔額度；冪等重送上面就提早回傳了。
+    if reserved is not None:
+        cap = _check_reservation_cap(
+            store, dec, before, str(producer), now_str,
+            max_open_reservations=max_open_reservations)
+        if cap is not None:
+            return cap
 
     # ---- 寫入階段（順序：預留 → Link → 接續單；錯誤往上拋） ----
     if reserved is not None:
@@ -1027,7 +1052,6 @@ def apply_continuation(
             "result": {"link": link_rel},
         },
     )
-    _note_link_filed(store, str(producer))
     return ApplyResult(ok=True, code="ok", paths=_new_paths(store, before))
 
 

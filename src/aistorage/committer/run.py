@@ -961,12 +961,12 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
                 conv = deps.converters.get(target_source) or get_converter(target_source)
                 res = apply_handoff(store, dec, conv, deps.clock)
             elif item_type == "claim":
-                # 每個 profile 每輪的接續／預留數量上限來自設定檔
-                # （max_links_per_profile_per_round，impl2 M2）。不傳就是 apply 端的
-                # 預設值，設定檔改了也不會生效——所以這裡一定要傳。
+                # 每個 profile 的未結預留數量上限來自設定檔
+                # （max_open_reservations_per_profile，review-1926cd3-142fd04 M3）。
+                # 不傳就是 apply 端的預設值，設定檔改了也不會生效——所以這裡一定要傳。
                 res = apply_claim(
                     store, dec, deps.clock,
-                    max_links_per_round=rcfg.max_links_per_profile_per_round)
+                    max_open_reservations=rcfg.max_open_reservations_per_profile)
             elif item_type == "continuation":
                 # 接續單（impl2 M6）：`agora checkout <session>@<訊息>` 每次都會為
                 # 每個起點留一條接續 Link，不論起點是交接單還是某個位置。接續點是
@@ -977,7 +977,7 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
                 conv = deps.converters.get(cont_source) or get_converter(cont_source)
                 res = apply_continuation(
                     store, dec, conv, deps.clock,
-                    max_links_per_round=rcfg.max_links_per_profile_per_round)
+                    max_open_reservations=rcfg.max_open_reservations_per_profile)
             else:
                 res = apply_reference(store, dec, deps.clock)
         else:
