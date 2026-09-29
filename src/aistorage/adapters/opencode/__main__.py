@@ -68,6 +68,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "messages": result.messages,
             "segments": result.segments,
             "import_output": result.import_output,
+            # n→1 時後段被往後移了多少毫秒（第一段固定 0）。實際數字只有載入端
+            # 算得出來（閱讀版的時間只有秒精度），所以起點包裡只放規則宣告。
+            "time_shift_ms": list(result.time_shift_ms),
         }, ensure_ascii=False, sort_keys=True))
     else:
         # 呼叫者只要 id：`opencode --session <id>` 就帶著前面的內容了。

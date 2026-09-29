@@ -113,7 +113,8 @@ msg_ / prt_ + <time.created 的 12 碼 16 進位> + <序號 6 碼> + <鹽雜湊 
 取得原始紀錄 → 用 repo 自己的 `write_package` 組起點包 → `agora-opencode load` →
 再 `export`，然後斷言訊息數／part 數／內容／順序與原始紀錄一致、id 唯一且遞增、
 重跑不變、1→n 兩份完整，再用 spike 的 stub provider 抓**真的** request body 比對
-（送給模型的共同前綴位元組相同、1→n FULL 位元組相同）。
+（送給模型的共同前綴位元組相同、1→n FULL 位元組相同），以及 n→1 的兩段時間交錯
+情境（順序正確、第一段開頭位元組相同，見第 6 節）。
 
 把 `loader.py` 暫時換回舊的 id 寫法，這支測試立刻用 9.1／9.2 的形狀失敗：
 
@@ -123,24 +124,82 @@ E  AssertionError: {'messages': 0, 'parts': 0, 'same_shape': False}    # 9.2：0
 E  AssertionError: 1→n 的兩份 request body 不同：[32329, 32237]
 ```
 
-## 6. 順便量到、但**不屬於這次修法範圍**的兩件事
+## 6. n→1 的兩件事（同一天量到、同一天修好）
 
-驗 n→1（兩個片段合成一個匯出）時用 8 則訊息實測，兩件事都跟 id 重編無關、修法前後
-一模一樣，所以這裡只記下來，不動程式：
+第一輪只把它們記下來；量完「opencode 到底靠什麼決定上下文」之後，兩件都有了明確
+的機制與修法。probe 用 8 則訊息、兩個時間交錯的片段（`session_import_fixture.py`
+造兩個 session，時間基準相同 → 訊息時間一格一格交錯）。
 
-1. **匯出順序由 `time_created` 決定，所以片段的時間不能交錯**。兩個片段的
-   `time.created` 有重疊時，匯出會把兩段交錯著排出來（實測：段 1 五則、段 2 三則，
-   匯出順序變成 1,2,1,2,1,2,1,1）。ADR 0010 要求「最長的一段放最前面」是對**匯出
-   檔的陣列**而言的，opencode 匯入後會用自己的排序再排一次。時間不交錯的片段
-   （spike 的 SEED＋SMOKE 就是這樣）沒有這個問題。要不要在 `checkout` 端主動檢查
-   片段之間的時間是否交錯，是 n→1 的決定範圍，先不動。
-2. **`import` 會把 user 訊息的 `parentID` 丟掉**。真實的 opencode 匯出檔裡，
-   **user 訊息根本沒有 `parentID` 這個欄位**（只有 assistant 有），而 zod 解析會
-   去掉 schema 沒宣告的欄位——所以 `chain_parents` 手工鏈的那條 link，若該則訊息
-   是 user 訊息，匯入後在 DB 裡就不見了（實測：`select json_extract(data,
-   '$.parentID')` 是空的）。n→1 的第一則通常是 user 訊息，也就是說這條鏈接在常見
-   情況下沒生效。影響多大（重播是照陣列順序，理論上不受影響；受影響的是
-   rewind／分支的樹狀結構）要另外驗，屬於 n→1 的議題。
+### 6.1 opencode 決定上下文的依據（先量這個，兩件事的答案都在裡面）
+
+在容器裡造四個 session，內容一樣、只改 parent 鏈，用 stub provider 接一句探針，
+看**送給模型的 request body**：
+
+| 情境 | DB 裡的 parentID | 送模型的歷史 |
+|---|---|---|
+| A 正常：兩個 user root，各自的 assistant 掛在下面 | 如匯入 | 四則全在，順序照時間 |
+| B 想把 user 訊息串到前一則 | **user 的 parentID 被丟掉**（zod 去掉未宣告的欄位） | 四則全在，順序照時間 |
+| C assistant 的 parent 指向不存在的訊息 | 照收 | 四則全在，順序照時間 |
+| D assistant **沒有** `parentID` | — | **整份匯入被拒絕**：`Missing key at ["parentID"]` |
+| E assistant 的 `parentID` 是 `null` | — | **整份匯入被拒絕**：`Expected string, got null` |
+
+兩條結論：
+
+1. **送模型的上下文是照 `(time_created, id)` 排出來的，不是照 parent 樹。** A／B／C
+   的 parent 鏈分別是「正常」「被清掉」「指向不存在」，送模型的歷史**完全一樣**。
+   parent 只負責分支結構。
+2. **`parentID` 是 assistant 的必填非 null 欄位，user 訊息則不能有它。** 真實的
+   opencode 匯出檔裡 user 訊息根本沒有這個 key（`/undo` 之後長的就是多個 root），
+   而 zod 解析會把沒宣告的欄位去掉——所以「把指不到的 parent 清成 null」會讓
+   assistant 訊息**整份匯不進去**（D／E）。
+
+### 6.2 兩段時間交錯 → 匯出（與上下文）會交錯排列
+
+opencode 匯出訊息是 `ORDER BY time_created, id`，所以兩段的時間一旦交錯，ADR 0010
+的「最長的一段放最前面」在**匯入之後**就不成立了。實測（段 1 五則、段 2 三則，
+時間交錯）：匯出順序變成 `1,2,1,2,1,2,1,1`，而不是 `1,1,1,1,1,2,2,2`。
+
+修法（`loader.py` 的 `shift_plan`／`shift_times`／`merge_offsets`）：
+
+- **第一段一個位元組都不動**（位移固定 0）；
+- 後面各段**整體**往後排，段內相對順序不變，段與段之間是「上一段最後一則的下一
+  毫秒」接續；已經排好的段落位移是 0（沒有東西被改寫）；
+- 連 part 的 `time`（`start`／`end`）一起移，讓匯出檔不會出現「part 發生在它的
+  訊息之前」；
+- 起點包 metadata 記一筆 `time_shift`（`rule: later_segments_after_first`、
+  `first_segment_unchanged: true`、`applier: adapter`）——**宣告規則**，實際位移由
+  轉接器算（閱讀版的 `created_at` 只有秒精度，checkout 算不出毫秒位移）。轉接器
+  看到兩段以上卻沒有這條宣告就**明確拒絕**，不要默默照舊組。
+- 套用完再驗一次：第一段必須與解析結果逐欄位相同、合併後的時間必須非遞減。
+  違了就報錯（`opencode` 自己不會提醒順序被改掉）。
+
+### 6.3 串接：只有 assistant 接得起來
+
+由 6.1 的結論，`chain_parents` 改成「首則是 assistant 才手工鏈到前一段末則；首則
+是 user 就讓它當 root」。段與段的先後由**時間**承載（6.2），parent 鏈只是讓匯出
+檔的樹是一條線，而不是兩條互不相干的線。另外 `reidentify` 不再把指不到的 parent
+清成 null（原本那個寫法會讓 assistant 訊息匯不進去），改成**原樣留著**：
+`import` 不驗 parent，而第一段又必須原封不動。
+
+### 6.4 驗證
+
+`tests/integration/test_opencode_load_roundtrip.py` 裡兩支新的：兩個時間交錯的片段
+合成一個起點包（用 repo 自己的 `write_package` 與 `merge_later_segments=True`），
+`agora-opencode load` 之後
+
+- 匯出順序 = 起點包宣告的順序（第一段六則原封不動、第二段三則在後）、時間單調
+  遞增、第一段的時間一個都沒變、`--json` 回報的 `time_shift_ms` 是 `[0, 正數]`；
+- 接續「只載入第一段」的 session 與接續合併結果，**第一段送給模型的開頭位元組
+  相同**（共同前綴涵蓋整段第一段的重播）。
+
+把位移關掉（連驗證也一起關掉）看它怎麼失敗：
+
+```
+E  AssertionError: {'first_segment_intact': False, 'second_segment_intact': False, ...}
+```
+
+兩段都被交錯排列——所以這個位移不是保險，是必要的。只關位移、留驗證的話，載入
+會**明確拒絕**而不是安靜地組出順序錯掉的 session。
 
 ## 7. 這個 bug 為什麼會活到 e2e
 

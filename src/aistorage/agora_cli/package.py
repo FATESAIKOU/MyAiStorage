@@ -35,6 +35,16 @@ GENERATOR_VERSION = "1"
 #: 的模型是安全的保守值）。呼叫端可用 `--max-chars` 覆寫。
 DEFAULT_MAX_CONTEXT_CHARS = 800_000
 
+#: `time_shift.rule` 的代碼：n→1 時**後段要整體排在第一段之後**。
+#:
+#: 為什麼需要這條宣告：ADR 0010 只規定了「最長的一段放最前面」（陣列順序），
+#: 但 opencode 匯出與**送模型的上下文**是照來源應用的時間排出來的，兩段的時間
+#: 一旦交錯，順序就會在匯入之後被改回來，第一段就不再是開頭（實測見
+#: `docs/spike/evidence/impl2-import-id-collision.md` 第 6 節）。位移由轉接器算
+#: （毫秒精度），起點包這裡只宣告**規則**；轉接器看到兩段以上卻沒有這條宣告就
+#: 明確拒絕，不要默默照舊組。
+TIME_SHIFT_RULE = "later_segments_after_first"
+
 
 class ContextPackageError(ValueError):
     """起點包組不起來、寫不進去，或讀回來的內容不自洽。"""
@@ -87,6 +97,10 @@ class ContextPackage:
     created_at: str = ""
     created_by: str = ""
     max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS
+    #: True 表示這是 n→1（兩段以上），而且**後段的時間已改寫**這件事要記在
+    #: `package.json` 裡。實際位移由轉接器算（毫秒精度），這裡只宣告規則
+    #: （見 `time_shift` 欄位與 `schemas/context-package.md`）。
+    merge_later_segments: bool = False
 
     @property
     def text_chars(self) -> int:
@@ -149,7 +163,7 @@ def check_context_length(pkg: ContextPackage) -> None:
 
 def to_dict(pkg: ContextPackage) -> dict[str, Any]:
     """組出 `package.json` 的字典（schema 的形狀）。"""
-    return {
+    payload: dict[str, Any] = {
         "format": FORMAT,
         "created_at": pkg.created_at,
         "created_by": pkg.created_by,
@@ -191,6 +205,14 @@ def to_dict(pkg: ContextPackage) -> dict[str, Any]:
             "within_limit": True,
         },
     }
+    if pkg.merge_later_segments:
+        # 「後段時間已改寫」的記錄。單段時不寫：沒有後段、沒有東西被改寫。
+        payload["time_shift"] = {
+            "rule": TIME_SHIFT_RULE,
+            "first_segment_unchanged": True,
+            "applier": "adapter",
+        }
+    return payload
 
 
 def stage_package(pkg: ContextPackage, out_dir: Path) -> Path:

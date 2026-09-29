@@ -450,6 +450,10 @@ def checkout(
             created_at=deps.clock.now_utc(),
             created_by=f"profile:{_profile_of(deps)}",
             max_context_chars=max_context_chars,
+            # n→1（兩段以上）時宣告「後段時間已改寫」：opencode 依時間排序，
+            # 兩段的時間交錯就會讓 ADR 0010 的次序在匯入後被改回來。實際位移由
+            # 轉接器算（毫秒精度），這裡只宣告規則（package.TIME_SHIFT_RULE）。
+            merge_later_segments=len(ordered) > 1,
         )
         check_context_length(pkg)
 
@@ -468,6 +472,7 @@ def checkout(
             claimed_handoffs=handoff_ids,
             created_at=pkg.created_at, created_by=pkg.created_by,
             max_context_chars=pkg.max_context_chars,
+            merge_later_segments=pkg.merge_later_segments,
         )
     except BaseException:
         # 被拒或失敗：暫存目錄與認領記錄以外的東西都不留在磁碟上

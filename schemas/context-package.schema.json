@@ -128,6 +128,29 @@
         }
       },
       "additionalProperties": false
+    },
+    "time_shift": {
+      "type": "object",
+      "description": "**後段時間已改寫**的記錄。只在 n→1（兩段以上）時出現：單段沒有後段、沒有東西被改寫。opencode 匯出與送模型的上下文是照時間排出來的，所以兩段的時間一旦交錯，ADR 0010 的「最長的一段放最前面」就會在匯入後被改回來；轉接器因此要把後段整體往後排（段內相對順序不動、第一段原封不動）。**這裡只宣告規則**：實際位移由轉接器算（毫秒精度，閱讀版的時間只有秒），並在 `agora-opencode load --json` 的 `time_shift_ms` 回報。轉接器看到兩段以上卻沒有這個欄位必須明確拒絕。",
+      "required": ["rule", "first_segment_unchanged", "applier"],
+      "properties": {
+        "rule": {
+          "type": "string",
+          "const": "later_segments_after_first",
+          "description": "規則代碼：後面各段的時間要依序排在第一段最後一則之後（段內相對順序不變）。轉接器只認得這一個代碼，其他值明確拒絕（不要猜）"
+        },
+        "first_segment_unchanged": {
+          "type": "boolean",
+          "const": true,
+          "description": "第一段必須一個位元組都不動（ADR 0010 的位元組相同），只有後段可以改"
+        },
+        "applier": {
+          "type": "string",
+          "const": "adapter",
+          "description": "執行位移的是轉接器（`agora-<coding agent 名稱>`），不是 `agora checkout`——checkout 讀的是閱讀版，時間只有秒精度"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": true,

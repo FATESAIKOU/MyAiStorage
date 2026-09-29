@@ -3,6 +3,13 @@
 > 2026-09-28 本人確認。取代 design D3 中「AI 自己呼叫 claim 工具認領」的部分。
 >
 > 同日更新：指令的名稱與形狀改以 `docs/design/agora-session-operations.md` 為準。`agora checkout` 產出起點包，由各 coding agent 的轉接器 `agora-<名稱>` 載入成原生 session；Agora 本身不依賴任何 coding agent，開 agent 由呼叫者決定（AI 也可以）。下方的 `agora init session` 範例僅為當時的暫定形狀。
+>
+> 2026-09-30 補充（實作面的補充，決策不變）：下方「n→1：最長的一段原封不動放最前面」在
+> opencode 上**只排陣列不夠**——`import` 之後它照 `time.created` 重新排序，送給模型的
+> 上下文也是照時間排出來的（`docs/spike/session-import.md` Q6.1／Q6.2）。所以轉接器會把
+> 後面各段的時間整體往後排到第一段之後（段內相對順序不動、第一段一個位元組都不動），
+> 起點包 metadata 記一筆 `time_shift` 宣告這件事。證據與實作見
+> `docs/spike/evidence/impl2-import-id-collision.md` 第 6 節。
 
 分裂（1→n）、統合（n→1）、相互參照（n↔m）是 Agora 要支援的事。原本的做法是：新的 AI session 一開始是空的，由 AI 自己呼叫 `claim` 工具，工具再把前一個 session 到接續點為止的內容當成回覆交給它。本人要的是另一種形狀：由 Agora 依交接單直接**建出**一個 opencode 或 Claude Code 原生格式的 session，AI 一載入就帶著前面的內容，直接接著做。
 

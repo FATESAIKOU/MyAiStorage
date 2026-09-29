@@ -104,6 +104,44 @@ def _raw(native: str, texts: Sequence[str]) -> bytes:
     return json.dumps(_export(native, texts), ensure_ascii=False).encode("utf-8")
 
 
+def _export_at(native: str, texts: Sequence[str], base_ms: int) -> dict:
+    """`_export` 但時間從 `base_ms` 起算、每則差 1000 ms。
+
+    n→1 的測試要能控制兩段的時間是否交錯，所以時間必須可指定。
+    """
+    doc = _export(native, texts)
+    for i, message in enumerate(doc["messages"]):
+        message["info"]["time"]["created"] = base_ms + i * 1000
+        if "completed" in message["info"]["time"]:
+            message["info"]["time"]["completed"] = base_ms + i * 1000 + 500
+    doc["info"]["time"] = {"created": base_ms, "updated": base_ms + 1000}
+    return doc
+
+
+def _raw_at(native: str, base_ms: int, texts: Sequence[str]) -> bytes:
+    return json.dumps(_export_at(native, texts, base_ms),
+                      ensure_ascii=False).encode("utf-8")
+
+
+def _export_with_parents(native: str, count: int, *, first_role: str = "user") -> dict:
+    """帶 `parentID` 的匯出檔：assistant 掛在前一則，user 自己是 root。
+
+    這是**真實** opencode 匯出檔的形狀：user 訊息沒有 `parentID` 這個欄位，
+    assistant 一定有（Q6 實測：assistant 缺或 null 會被整份拒絕，user 的會被去掉）。
+    """
+    doc = _export(native, [f"{native} 第 {i} 則" for i in range(count)])
+    previous: str | None = None
+    for i, message in enumerate(doc["messages"]):
+        role = first_role if i == 0 else ("assistant" if i % 2 else "user")
+        message["info"]["role"] = role
+        if role == "assistant":
+            message["info"]["parentID"] = previous or "msg_被截掉的那一則"
+        else:
+            message["info"].pop("parentID", None)
+        previous = message["info"]["id"]
+    return doc
+
+
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest().lower()
 
@@ -955,32 +993,160 @@ def test_reidentifying_the_same_package_twice_gives_the_same_ids(tmp_path):
         [p["id"] for m in again["messages"] for p in m["parts"]]
 
 
-def test_parent_pointing_outside_the_truncation_is_cleared():
-    """parent 指向被截掉的那一則時要清掉，不要留著指向不存在的訊息。"""
+def test_a_parent_outside_the_kept_range_is_left_alone():
+    """parent 指向被截掉的那一則時**原樣留著**，不要清成 null。
+
+    opencode 的訊息 schema：assistant 的 `parentID` 必須是**非 null 字串**（缺或
+    null 都整份拒絕匯入），user 訊息的 `parentID` 則會被去掉（Q6 實測）。所以
+    「清成 null」會讓 assistant 訊息匯不進去，而留著一個指不到的 id 沒有壞處
+    （`import` 不驗 parent，送模型的上下文也不看 parent 樹）。
+    """
     from aistorage.adapters.opencode import reidentify
 
-    payload = _adapter_export("ses_aaa", ["一", "二", "三"])
-    kept = truncate_to(payload, "msg_ses_aaa_1")
+    # 第一則是 assistant 而它的 parent 落在截斷範圍外（最需要留著原值的情況）
+    payload = _export_with_parents("ses_aaa", 4, first_role="assistant")
+    kept = truncate_to(payload, "msg_ses_aaa_2")
     out = reidentify(payload, kept, session_id="ses_NEW01", tag="T")
-    for m in out["messages"]:
-        parent = m["info"].get("parentID")
-        assert parent is None or parent in {x["info"]["id"] for x in out["messages"]}
+
+    ids = [m["info"]["id"] for m in out["messages"]]
+    assert len(ids) == 3 and len(set(ids)) == 3, ids
+    # 段內的 parent 照對應表改寫（不是原 id）
+    assert out["messages"][1]["info"]["parentID"] == ids[0]
+    # 指向被截掉那則的：原樣留著（不是 null，也不是新 id）
+    assert out["messages"][0]["info"]["parentID"] == "msg_被截掉的那一則"
 
 
-def test_n_to_one_chains_parents_by_hand():
-    """n→1：第二段首則的 parent 手工鏈到第一段末則（spike Q4）。"""
+def test_n_to_one_chains_parents_only_where_opencode_keeps_them():
+    """n→1：第二段首則**是 assistant** 時 parent 手工鏈到第一段末則（spike Q4）。
+
+    首則是 **user** 時不鏈：opencode 的 schema 會把 user 訊息的 `parentID` 去掉，
+    寫了也留不住（Q6 實測）。真實的 opencode session 在 `/undo` 之後長的就是
+    這個樣子——新的 user 訊息自己是一個 root。段與段的先後由 `time.created`
+    承載（`shift_plan`），送模型的上下文也是照時間排出來的。
+    """
     from aistorage.adapters.opencode import chain_parents, reidentify
 
-    seg1 = reidentify(_adapter_export("ses_aaa", ["一", "二"]),
-                      truncate_to(_adapter_export("ses_aaa", ["一", "二"]), None),
-                      session_id="ses_NEW01", tag="S1")["messages"]
-    seg2 = reidentify(_adapter_export("ses_bbb", ["三", "四"]),
-                      truncate_to(_adapter_export("ses_bbb", ["三", "四"]), None),
-                      session_id="ses_NEW01", tag="S2")["messages"]
+    def rebuilt(native, texts, tag):
+        payload = _export_with_parents(native, len(texts), first_role="assistant")
+        return reidentify(payload, payload["messages"], session_id="ses_NEW01",
+                          tag=tag)["messages"]
+
+    # 第二段首則是 assistant → 鏈到第一段末則
+    seg1 = rebuilt("ses_aaa", ["一", "二"], "S1")
+    seg2 = rebuilt("ses_bbb", ["三", "四"], "S2")
     merged = chain_parents([seg1, seg2])
     assert [m["info"]["id"] for m in merged] == (
         [m["info"]["id"] for m in seg1] + [m["info"]["id"] for m in seg2])
+    assert merged[2]["info"]["role"] == "assistant"
     assert merged[2]["info"]["parentID"] == merged[1]["info"]["id"]
+
+    # 第二段首則是 user → 保持 root（不寫 parentID）
+    seg2_user = reidentify(_export_with_parents("ses_bbb", 2),
+                           _export_with_parents("ses_bbb", 2)["messages"],
+                           session_id="ses_NEW01", tag="S3")["messages"]
+    merged_user = chain_parents([seg1, seg2_user])
+    assert merged_user[2]["info"]["role"] == "user"
+    assert "parentID" not in merged_user[2]["info"]
+
+
+def test_n_to_one_moves_later_segments_after_the_first_ones_time(tmp_path: Path):
+    """兩段時間交錯時，後段整體往後排；第一段一個位元組都不動。
+
+    opencode 匯出與送模型的上下文是照 `time.created` 排的（Q6），所以只把陣列
+    排好不夠——ADR 0010 的「最長的一段放最前面」要真的排到時間上。
+    """
+    from aistorage.adapters.opencode import build_export
+
+    # 兩段的時間完全交錯（第二段比第一段早一分鐘）
+    early = _raw_at("ses_aaa", 1_000_000, ["一", "二", "三"])
+    late = _raw_at("ses_bbb", 500_000, ["四", "五"])
+    reader = FakeReader({
+        f"opencode:ses_aaa": {"raw": early, "texts": ["一", "二", "三"]},
+        f"opencode:ses_bbb": {"raw": late, "texts": ["四", "五"]},
+    })
+    pkg_dir = tmp_path / "pkg-n21"
+    checkout(reader, _deps(reader), [S1, S2], pkg_dir)
+
+    # 起點包 metadata 有記「後段時間已改寫」
+    data = json.loads((pkg_dir / "package.json").read_text(encoding="utf-8"))
+    assert data["time_shift"] == {
+        "rule": "later_segments_after_first", "first_segment_unchanged": True,
+        "applier": "adapter"}
+
+    decisions: dict = {}
+    payload, _sid, segments, _source = build_export(pkg_dir, decisions=decisions)
+    assert segments == 2
+    times = [m["info"]["time"]["created"] for m in payload["messages"]]
+    assert times == sorted(times), times
+    # 第二段（早一分鐘）整體往後移到第一段最後一則的下一毫秒
+    assert decisions["time_shift_ms"] == [0, 1_002_001 - 500_000], decisions
+    # 第一段的時間一個都沒動
+    assert [m["info"]["time"]["created"] for m in payload["messages"][:3]] == \
+        [1_000_000, 1_001_000, 1_002_000]
+
+
+def test_a_two_segment_package_without_the_declaration_is_refused(tmp_path: Path):
+    """兩段以上卻沒有 `time_shift` 宣告 → 明確拒絕，不要默默照舊組。
+
+    沒有宣告就不知道這份起點包是不是用新規則組的；默默組出來的 session，順序
+    會在時間交錯時悄悄變掉（第一段就不再是開頭）。
+    """
+    from aistorage.adapters.opencode import AdapterError, build_export
+
+    reader = FakeReader({
+        S1: {"raw": _raw_at("ses_aaa", 1_000_000, ["一", "二"]), "texts": ["一", "二"]},
+        S2: {"raw": _raw_at("ses_bbb", 500_000, ["三", "四"]), "texts": ["三", "四"]},
+    })
+    pkg_dir = tmp_path / "pkg-undeclared"
+    checkout(reader, _deps(reader), [S1, S2], pkg_dir)
+    data = json.loads((pkg_dir / "package.json").read_text(encoding="utf-8"))
+    data.pop("time_shift")
+    (pkg_dir / "package.json").write_text(
+        json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8")
+
+    with pytest.raises(AdapterError) as excinfo:
+        build_export(pkg_dir)
+    assert "time_shift" in str(excinfo.value)
+    assert "重新跑" in str(excinfo.value)
+
+
+def test_single_segment_packages_need_no_declaration(tmp_path: Path):
+    """單段沒有後段、沒有東西被改寫，所以不必（也沒有）那條宣告。"""
+    from aistorage.adapters.opencode import build_export
+
+    reader = FakeReader({S1: {"raw": _raw("ses_aaa", ["一", "二"]),
+                              "texts": ["一", "二"]}})
+    pkg_dir = tmp_path / "pkg-single"
+    checkout(reader, _deps(reader), [S1], pkg_dir)
+    data = json.loads((pkg_dir / "package.json").read_text(encoding="utf-8"))
+    assert "time_shift" not in data
+
+    decisions: dict = {}
+    payload, _sid, segments, _source = build_export(pkg_dir, decisions=decisions)
+    assert segments == 1 and decisions["time_shift_ms"] == [0]
+
+
+def test_shift_plan_keeps_intra_segment_order_and_only_moves_later_ones():
+    """位移的規則：段內相對順序不動、已經排好的段落不動。"""
+    from aistorage.adapters.opencode import shift_plan, shift_times
+
+    # 三段時間依序 100-200、50-80、300-320 → 中間那段要往後排
+    assert shift_plan([(100, 200), (50, 80), (300, 320)]) == (0, 151, 0)
+    # 已經排好 → 全都不動
+    assert shift_plan([(100, 200), (201, 300)]) == (0, 0)
+    assert shift_plan([]) == ()
+    assert shift_plan([(100, 200)]) == (0,)
+
+    messages = [{"info": {"id": "m0", "role": "user",
+                          "time": {"created": 50, "completed": 55}},
+                 "parts": [{"id": "p0", "type": "text",
+                            "time": {"start": 51, "end": 54}}]}]
+    shifted = shift_times(messages, 151)
+    assert shifted[0]["info"]["time"] == {"created": 201, "completed": 206}
+    assert shifted[0]["parts"][0]["time"] == {"start": 202, "end": 205}
+    # 沒東西要移時**原樣**（第一段就是這樣，它必須與原始紀錄一個位元組都不差）
+    assert shift_times(messages, 0) == messages
 
 
 def test_build_export_uses_the_reserved_session_id_and_verifies_the_raw(tmp_path: Path):

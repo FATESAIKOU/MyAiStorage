@@ -22,12 +22,16 @@ ADR 0010 的「原封不動重建開頭」在 opencode 上**做得到**，做法
 - 原 session 接續 vs 匯入 session 接續：共同前綴（system＋前 k 則重播）**位元組完全相同**
   （實測前 10469 bytes 全同，差異恰好從歷史分岔處開始）。
 - n→1：兩段串接＋重編 id＋手動鏈 parent，import 收、export 正常、接續可跑。
-- 限制只有四條（見 Q1、Q3、Q6）：id 必須重編（沿用會被靜默丟棄，且**自編的 id 互相
+- 限制只有五條（見 Q1、Q3、Q6）：id 必須重編（沿用會被靜默丟棄，且**自編的 id 互相
   重複也一樣被靜默丟棄**——9.1／9.2 的失敗就是這個）、重編後的 id 字典序要跟匯出
-  順序一致、import 強制改寫 directory／project 為當下目錄、skill 重名會讓 system
-  prompt 在不同 run 翻轉（resident 容器 skill 固定則無此問題）。
-- 2026-09-30 補：Q6 是本來沒測到的部分（重編 id 的長度與順序），後來在 e2e 9.1／9.2
-  上炸開；證據與修法見 `docs/spike/evidence/impl2-import-id-collision.md`。
+  順序一致、匯出順序由 `time_created` 決定（n→1 要把後段的時間往後排）、
+  import 強制改寫 directory／project 為當下目錄、skill 重名會讓 system prompt
+  在不同 run 翻轉（resident 容器 skill 固定則無此問題）。
+- 2026-09-30 補：Q6 是本來沒測到的部分（重編 id 的長度與順序、n→1 的時間與
+  parent），後來在 e2e 9.1／9.2 上炸開；證據與修法見
+  `docs/spike/evidence/impl2-import-id-collision.md`。
+- n→1：送模型的上下文照**時間順序**排（Q6.1），所以後段的時間要整體往後排到第一段
+  之後（Q6.2）；parent 鏈只有 assistant 接得起來。
 
 ## Q1：官方匯入方式與限制（1.18.32）
 
@@ -152,6 +156,43 @@ id**，`import` 靜默丟棄（8 則進、1 則出；重跑時是 0 則）。
   與 `ORDER BY message_id, id`（同一則訊息內的 part）；`time_created` 一樣時
   （合成資料、同毫秒產生）順序由 id 決定——實測把 id 弄成遞減，匯出順序整個翻轉。
 
+### Q6.1 送模型的上下文靠什麼？（parent 樹 vs 時間順序）
+
+補測（同一天，證據與細節在 evidence 第 6.1 節）。四個 session、內容一樣、只改
+parent 鏈，用本檔 Q2 的 stub 抓 request body：
+
+| 情境 | 結果 |
+|---|---|
+| 正常（兩個 user root，assistant 掛在下面） | 歷史全在，照時間順序 |
+| 把 user 訊息的 `parentID` 設成前一則 | **匯入後被清掉**（zod 去掉未宣告的欄位），歷史一樣全在 |
+| assistant 的 `parentID` 指向不存在的訊息 | 照收，歷史一樣全在 |
+| assistant **沒有** `parentID`／`parentID` 是 `null` | **整份匯入被拒絕** |
+
+結論兩條：
+
+1. **上下文是照 `(time_created, id)` 排出來的，不是照 parent 樹**——parent 鏈斷掉、
+   清掉、指向不存在，送模型的歷史一模一樣。parent 只負責分支結構。
+2. **`parentID` 是 assistant 的必填非 null 欄位，user 訊息不能有它**（真實匯出檔的
+   user 訊息就沒有這個 key，`/undo` 之後長的就是多個 root）。
+
+所以 n→1 的兩件事的機制是同一件：**順序由時間承載，parent 鏈能接就接**。
+
+### Q6.2 n→1：後段的時間要整體往後排
+
+兩段的時間交錯時，匯出（以及送模型的上下文）會交錯排列（實測段 1 五則、段 2 三則
+變成 `1,2,1,2,1,2,1,1`），ADR 0010 的「最長的一段放最前面」在匯入後就不成立。
+轉接器的做法（`loader.py` 的 `shift_plan`／`shift_times`／`merge_offsets`）：
+
+- 第一段位移固定 0（**原封不動**）；
+- 後面各段整體往後排到「上一段最後一則的下一毫秒」，**段內相對順序不變**；已經排好
+  的段落位移 0；
+- 起點包 metadata 記 `time_shift`（`rule: later_segments_after_first`）——宣告規則，
+  實際位移由轉接器算（閱讀版的時間只有秒精度）；兩段以上卻沒有宣告就**明確拒絕**；
+- 套用完再驗一次（第一段逐欄位沒變、合併後時間非遞減），違了就報錯。
+
+串接則改成「首則是 assistant 才手工鏈到前一段末則；首則是 user 就讓它當 root」，
+`reidentify` 也不再把指不到的 parent 清成 null（那會讓 assistant 匯不進去）。
+
 所以 `loader.py` 的重編 id 是三段**固定寬度**、共 28 個字元、時間取自原始紀錄的
 `time.created`、序號跨段遞增、鹽由預留 session id 推導（不是隨機：重跑同一個起點包
 因此是 no-op，1→n 因為預留 id 不同而不同），**沒有任何可以被截斷的地方**，超出
@@ -165,8 +206,10 @@ stub 抓包，不需要模型）。
    取到最後一則已完成訊息）→ session／message／part id 全重編（前綴保留，後綴
    「時間＋序號＋鹽」，**不要截斷**；鹽由預留 session id 推導）→ 在目標專案目錄
    `opencode import`。
-2. n→1：最長的一段放最前面（ADR 0010 已定），其餘接後；parent 手工鏈成一串；
-   超 context 上限先明確拒絕（ADR 0010 已定，不默默截斷）。
+2. n→1：最長的一段放最前面（ADR 0010 已定），其餘接後；**後段的時間整體往後排到
+   第一段之後**（段內相對順序不變，Q6.2——順序是由時間決定的）；parent 只在首則
+   是 assistant 時手工鏈（Q6.1）；超 context 上限先明確拒絕（ADR 0010 已定，
+   不默默截斷）。
 3. resident 鏡像去掉重名 skill（或固定解析順序），否則同批建出的 session
    可能因 system prompt 差幾個位元組而斷 cache。
 4. 上線後以 `step-finish.tokens.cache.read` 監控：接續步若 cache 命中，

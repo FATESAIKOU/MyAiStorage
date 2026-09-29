@@ -7,27 +7,35 @@
 from __future__ import annotations
 
 from aistorage.adapters.opencode.loader import (
+    TIME_SHIFT_RULE,
     TITLE_PREFIX,
     AdapterError,
     LoadResult,
     build_export,
     chain_parents,
     load,
+    merge_offsets,
     reidentify,
     run_import,
     salt_for,
+    shift_plan,
+    shift_times,
     truncate_to,
 )
 
 __all__ = [
+    "TIME_SHIFT_RULE",
     "AdapterError",
     "LoadResult",
     "TITLE_PREFIX",
     "build_export",
     "chain_parents",
     "load",
+    "merge_offsets",
     "reidentify",
     "run_import",
     "salt_for",
+    "shift_plan",
+    "shift_times",
     "truncate_to",
 ]

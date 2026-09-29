@@ -105,7 +105,9 @@ def load_roundtrip() -> dict:
         pytest.fail(f"起容器失敗：{started.stderr.strip()}")
     try:
         report = _stage_import_and_export()
-        report["wire"] = _stage_stub_capture(port)
+        _start_stub(port)
+        report["wire"] = _stage_stub_capture()
+        report["merge"] = _stage_merge_interleaved()
         yield report
     finally:
         _docker("rm", "-f", CONTAINER)
@@ -259,7 +261,13 @@ def _stage_import_and_export() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _stage_stub_capture(port: int) -> dict:
+def _start_stub(port: int) -> None:
+    """在容器裡起 stub provider（`scripts/spike/session_import_stub.py`）。
+
+    `@ai-sdk/openai-compatible` 是 opencode 內建的，所以**不需要外連**——這就是
+    這支測試「不需要模型」的關鍵：opencode 真的把 request body 送出去，只是收件
+    的不是模型而是一個本機 stub。
+    """
     config = {
         "$schema": "https://opencode.ai/config.json",
         "model": "stub/stub-echo",
@@ -279,12 +287,10 @@ def _stage_stub_capture(port: int) -> dict:
             }
         },
     }
-    (Path.home() / ".local" / "share" / "aistorage" / "work"
-     / f"impl2-it-{os.getpid()}" / "oc-stub.json").write_text(
-        json.dumps(config), encoding="utf-8")
-    _docker("cp", str(Path.home() / ".local" / "share" / "aistorage" / "work"
-                      / f"impl2-it-{os.getpid()}" / "oc-stub.json"),
-            f"{CONTAINER}:/work/oc-stub.json")
+    work = (Path.home() / ".local" / "share" / "aistorage" / "work"
+            / f"impl2-it-{os.getpid()}")
+    (work / "oc-stub.json").write_text(json.dumps(config), encoding="utf-8")
+    _docker("cp", str(work / "oc-stub.json"), f"{CONTAINER}:/work/oc-stub.json")
     _docker("cp", str(REPO_ROOT / "scripts" / "spike" / "session_import_stub.py"),
             f"{CONTAINER}:/work/stub.py")
     _docker("exec", CONTAINER, "mkdir", "-p", "/work/caps")
@@ -301,11 +307,12 @@ def _stage_stub_capture(port: int) -> dict:
                    "urllib.request.urlopen("
                    f"'http://127.0.0.1:{port}/v1/models', timeout=5).read()"
                    ).returncode == 0:
-            break
+            return
         time.sleep(0.5)
-    else:
-        pytest.fail("容器裡的 stub 30 秒內沒起來")
+    pytest.fail("容器裡的 stub 30 秒內沒起來")
 
+
+def _stage_stub_capture() -> dict:
     return _in_container(
         f"""
         import json, subprocess
@@ -376,6 +383,178 @@ def _stage_stub_capture(port: int) -> dict:
             "one_to_n_bytes": [len(ra), len(rb)],
             "one_to_n_messages": [len(loaded["messages"]), len(split["messages"])],
             "requests_per_run": counts,
+        }}, ensure_ascii=False))
+        """,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 第三段：n→1，兩段的時間交錯
+# ---------------------------------------------------------------------------
+
+
+def _stage_merge_interleaved() -> dict:
+    """兩段時間**交錯**的 n→1：匯入後順序要對，而且第一段的開頭位元組相同。
+
+    兩個來源 session 用同一個時間基準（fixture 腳本的種子與時間都固定），所以
+    它們的訊息時間是一格一格交錯的——沒有時間位移的話，opencode 匯出（以及送
+    模型的上下文）會把兩段交錯著排出來，ADR 0010 的「最長的一段放最前面」就不
+    成立（`docs/spike/evidence/impl2-import-id-collision.md` 第 6 節）。
+
+    對照組是「只載入第一段」的 session：接續它與接續合併結果，兩邊送模型的開頭
+    必須位元組相同（第一段原封不動）。
+    """
+    return _in_container(
+        f"""
+        import hashlib, json, os, subprocess
+        from pathlib import Path
+        from aistorage.agora_cli.package import (
+            ContextPackage, PackageSegment, write_package)
+        from aistorage.agora_cli.startpoint import ResolvedStartPoint, parse_startpoint
+
+        PROBE = {PROBE!r}
+        A, B = "ses_impl2mergeA01", "ses_impl2mergeB02"
+        KEEP_A, KEEP_B = 6, 3          # A 比較長 → 排序後第一段是 A（ADR 0010）
+        env = dict(os.environ)
+        env.update({{"OPENCODE_DISABLE_PROJECT_CONFIG": "1"}})
+
+        def oc(*args, check=True):
+            return subprocess.run(["opencode", *args], capture_output=True,
+                                  text=True, cwd="/work", env=env, check=check)
+
+        def export_to(sid, path):
+            subprocess.run(["sh", "-c", f"opencode export {{sid}} > {{path}}"],
+                           capture_output=True, cwd="/work", env=env, check=True)
+            return Path(path).read_bytes()
+
+        def source_session(native):
+            # 造一個來源 session，回傳**真實的匯出位元組**
+            subprocess.run(["python3", "/probe-spike/session_import_fixture.py",
+                            f"/work/{{native}}.json", native], check=True, env=env,
+                           capture_output=True)
+            oc("import", f"/work/{{native}}.json")
+            return export_to(native, f"/work/{{native}}-raw.json")
+
+        def segment(native, raw, keep):
+            doc = json.loads(raw)
+            ids = [m["info"]["id"] for m in doc["messages"]]
+            point = ids[keep - 1]
+            resolved = ResolvedStartPoint(
+                startpoint=parse_startpoint(f"opencode:{{native}}@{{point}}"),
+                session_id=f"opencode:{{native}}", source="opencode",
+                snapshot_sha256=hashlib.sha256(raw).hexdigest(), snapshot_at=None,
+                message_id=point)
+            chars = sum(len(p.get("text") or "")
+                        for m in doc["messages"][:keep] for p in m["parts"])
+            return PackageSegment(resolved=resolved, raw=raw, message_count=keep,
+                                  text_chars=chars)
+
+        raw_a, raw_b = source_session(A), source_session(B)
+        seg_a, seg_b = segment(A, raw_a, KEEP_A), segment(B, raw_b, KEEP_B)
+
+        def package(segs, reserved, out):
+            # `merge_later_segments` 就是 checkout 會做的事（n→1 宣告「後段時間
+            # 已改寫」），用真的 to_dict 寫，不要在測試裡手刻那份宣告。
+            write_package(ContextPackage(
+                segments=tuple(segs), task="兩段合一",
+                new_session_id=f"opencode:{{reserved}}",
+                created_at="2026-09-30T00:00:00Z", created_by="profile:impl2-test",
+                merge_later_segments=len(segs) > 1), Path(out))
+            return json.loads((Path(out) / "package.json").read_text())
+
+        merged_pkg = package([seg_a, seg_b], "ses_impl2merged0001", "/work/pkg-merge")
+        package([seg_a], "ses_impl2onlya00001", "/work/pkg-onlya")
+
+        def load(pkg):
+            out = subprocess.run(
+                ["python3", "-m", "aistorage.adapters.opencode", "load", pkg,
+                 "-C", "/work", "--json"], capture_output=True, text=True,
+                cwd="/work", env=env)
+            assert out.returncode == 0, out.stdout + out.stderr
+            return json.loads(out.stdout.strip().splitlines()[-1])
+
+        merged = load("/work/pkg-merge")
+        only_a = load("/work/pkg-onlya")
+        merged_doc = json.loads(
+            export_to(merged["session_id"], "/work/merged.json").decode())
+        only_a_doc = json.loads(
+            export_to(only_a["session_id"], "/work/only-a.json").decode())
+
+        def texts(doc):
+            return [next((p.get("text") for p in m["parts"]
+                          if p.get("type") == "text"), "")
+                    for m in doc["messages"]]
+
+        src_a = json.loads(raw_a)
+        src_a_texts = texts(src_a)[:KEEP_A]
+        src_b_texts = texts(json.loads(raw_b))[:KEEP_B]
+        merged_texts = texts(merged_doc)
+        times = [m["info"]["time"]["created"] for m in merged_doc["messages"]]
+
+        # ── 送模型的開頭：只載入第一段 vs 載入兩段 ──────────────────────────
+        def caps():
+            return sorted(Path("/work/caps").glob("req-*.json"),
+                          key=lambda p: int(p.stem.split("-")[1]))
+
+        def continue_with(sid, mark):
+            before = len(caps())
+            out = subprocess.run(
+                ["opencode", "run", "-m", "stub/stub-echo", "-s", sid, PROBE],
+                capture_output=True, text=True, cwd="/work",
+                env={{**env, "OPENCODE_CONFIG": "/work/oc-stub.json"}})
+            assert out.returncode == 0, out.stdout + out.stderr
+            fresh = caps()[before:]
+            assert fresh, "stub 沒有抓到任何請求"
+            counts.append(len(fresh))
+            Path(f"/work/cap-{{mark}}.json").write_bytes(fresh[-1].read_bytes())
+            return json.loads(fresh[-1].read_text())
+
+        counts = []
+        wire_a = continue_with(only_a["session_id"], "onlya")
+        wire_merged = continue_with(merged["session_id"], "merged")
+
+        def canon(value):
+            return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                              separators=(",", ":")).encode("utf-8")
+
+        a_msgs, merged_msgs = wire_a["messages"], wire_merged["messages"]
+        common = 0
+        for x, y in zip(a_msgs, merged_msgs):
+            if canon(x) != canon(y):
+                break
+            common += 1
+        raw_a_body = Path("/work/cap-onlya.json").read_bytes()
+        raw_merged_body = Path("/work/cap-merged.json").read_bytes()
+        byte_common = next(
+            (i for i, (x, y) in enumerate(zip(raw_a_body, raw_merged_body))
+             if x != y), min(len(raw_a_body), len(raw_merged_body)))
+
+        print(json.dumps({{
+            "package": {{"segments": merged_pkg["totals"]["segments"],
+                        "time_shift": merged_pkg.get("time_shift"),
+                        "declared_kept": [KEEP_A, KEEP_B]}},
+            "load": {{"merged": merged, "only_a": only_a}},
+            "order": {{"first_segment_intact":
+                       merged_texts[:KEEP_A] == src_a_texts,
+                       "second_segment_intact":
+                       merged_texts[KEEP_A:KEEP_A + KEEP_B] == src_b_texts,
+                       "only_a_messages": len(only_a_doc["messages"])}},
+            "times": {{"monotonic": times == sorted(times),
+                      "shift_ms": merged.get("time_shift_ms"),
+                      "first_segment_unchanged":
+                          times[:KEEP_A] == [m["info"]["time"]["created"]
+                                             for m in src_a["messages"][:KEEP_A]],
+                      "count": len(times)}},
+            "wire": {{"only_a_messages": len(a_msgs),
+                     "merged_messages": len(merged_msgs),
+                     "common": common,
+                     "prefix_identical": common > 1 and
+                        canon(a_msgs[:common]) == canon(merged_msgs[:common]),
+                     "last_of_a_is_probe":
+                        a_msgs[-1] == {{"role": "user", "content": PROBE}},
+                     "prefix_bytes": len(canon(a_msgs[:common])),
+                     "raw_common_prefix_bytes": byte_common,
+                     "requests_per_run": counts}},
         }}, ensure_ascii=False))
         """,
     )
@@ -477,4 +656,48 @@ def test_two_loads_of_the_same_start_point_send_identical_bytes(load_roundtrip: 
     )
     assert wire["one_to_n_bytes"][0] > 1000, wire
     # 三次接續各送出同樣數量的請求（比對才是在比同樣的東西）
+    assert len(set(wire["requests_per_run"])) == 1, wire["requests_per_run"]
+
+
+@pytest.mark.integration
+def test_n_to_one_keeps_the_declared_segment_order(load_roundtrip: dict):
+    """兩段時間交錯的 n→1：匯入後的順序仍然是起點包宣告的順序。
+
+    opencode 匯出是 `ORDER BY time_created`，所以只把陣列排好不夠——後段必須整體
+    往後排（ADR 0010 的「最長的一段放最前面」）。這裡的兩段時間是一格一格交錯的
+    （沒有位移就會被交錯排出來），所以這個測試抓得到。
+    """
+    merge = load_roundtrip["merge"]
+    package, order, times = merge["package"], merge["order"], merge["times"]
+
+    assert package["segments"] == 2, package
+    assert package["time_shift"] == {
+        "rule": "later_segments_after_first", "first_segment_unchanged": True,
+        "applier": "adapter"}, "起點包 metadata 沒有記「後段時間已改寫」"
+    assert merge["load"]["merged"]["segments"] == 2
+    assert merge["load"]["merged"]["messages"] == sum(package["declared_kept"]) == 9
+
+    # 匯出來的順序 = 第一段六則（原封不動）＋第二段三則
+    assert order["first_segment_intact"] is True, order
+    assert order["second_segment_intact"] is True, order
+    assert times["count"] == 9
+    assert times["monotonic"] is True, (
+        "時間必須單調遞增，否則 opencode 會依 time.created 交錯排列"
+    )
+    assert times["first_segment_unchanged"] is True, times
+    assert times["shift_ms"][0] == 0 and times["shift_ms"][1] > 0, times
+
+
+@pytest.mark.integration
+def test_n_to_one_first_segment_prefix_is_byte_identical(load_roundtrip: dict):
+    """合併之後，第一段送給模型的開頭與「只載入第一段」時**位元組相同**。
+
+    這是 n→1 的位元組相同要求：第二段是**後來加上去的**，所以前綴不能動。
+    對照組是只載入第一段的 session，兩邊用同一句探針接續。
+    """
+    wire = load_roundtrip["merge"]["wire"]
+    assert wire["common"] == wire["only_a_messages"] - 1, wire
+    assert wire["prefix_identical"] is True, wire
+    assert wire["last_of_a_is_probe"] is True, wire
+    assert wire["raw_common_prefix_bytes"] >= wire["prefix_bytes"], wire
     assert len(set(wire["requests_per_run"])) == 1, wire["requests_per_run"]

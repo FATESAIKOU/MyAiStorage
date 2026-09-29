@@ -135,6 +135,34 @@ n→1（統合）時，呼叫端給的次序不代表什麼，所以 `agora chec
 等於快照雜湊、Agora 的物件讀得到。任一項失敗就停下——那時這張交接單還沒被動過。
 反過來說，認領之後只剩下寫 `package.json` 與一次改名。
 
+## n→1 的順序：後段時間已改寫（`time_shift`）
+
+`segments` 的順序是**送進模型的順序**（ADR 0010：最長的一段放最前面），但對
+opencode 來說，「順序」是 `time.created`：`import` 之後它會照時間重新排序，
+**送給模型的上下文也是照時間排出來的，不是照 parent 樹**（實測見
+`docs/spike/session-import.md` Q6.1／Q6.2）。所以兩段的時間一旦交錯，合併出來的
+session 在匯入後就會變成交錯排列——第一段不再是開頭。
+
+因此兩段以上時 `package.json` 一定會有 `time_shift`：
+
+```json
+"time_shift": {
+  "rule": "later_segments_after_first",
+  "first_segment_unchanged": true,
+  "applier": "adapter"
+}
+```
+
+- **宣告的是規則，不是數字**：位移由轉接器算（毫秒精度；checkout 讀的是閱讀版，
+  `created_at` 只有秒精度，算不出來）。實際位移在 `agora-opencode load --json` 的
+  `time_shift_ms` 回報。
+- **轉接器看到兩段以上卻沒有這個欄位要明確拒絕**：那份起點包不是用這個規則組的，
+  默默照舊組會得到一個順序錯掉而沒人發現的 session。單段沒有後段、沒有東西被改寫，
+  所以沒有這個欄位。
+- 轉接器的做法：**第一段位移固定 0（原封不動）**，後面各段整體往後排到「上一段最後
+  一則的下一毫秒」，段內相對順序不變；已經排好的段落位移 0。套用完要自己驗一次
+  （第一段逐欄位沒變、合併後時間非遞減），違了就報錯——opencode 不會提醒順序被改掉。
+
 ## 轉接器要做的（以 opencode 為例）
 
 1. 讀 `package.json`，照 `segments` 的順序；
@@ -144,10 +172,15 @@ n→1（統合）時，呼叫端給的次序不代表什麼，所以 `agora chec
    見 `docs/spike/session-import.md` Q1-1）。**重編出來的 id 也要彼此唯一、而且
    字典序要跟匯出順序一致**——自編的 id 互相重複時，`import` 丟棄的是同一批而
    不報錯（Q6，9.1／9.2 的失敗）；session id 用 `new_session.session_id`；
-5. n→1 時第二段起首則的 parent 手工鏈到前一段末則；
-6. 在**目標專案目錄**執行 `opencode import`（匯入會把 directory／project 強制
+5. n→1（兩段以上）時照 `time_shift` 把後段的時間整體往後排（第一段不動），
+   並在 `package.json` 沒有該宣告時明確拒絕；
+6. n→1 時第二段起首則的 parent 手工鏈到前一段末則——**只有 assistant 接得起來**：
+   opencode 要求 assistant 的 `parentID` 是非 null 字串，而 user 訊息的 `parentID`
+   會被 schema 去掉（Q6.1）。首則是 user 就讓它當 root，次序由第 5 步的時間承載。
+   **不要**把指不到的 parent 清成 `null`（那會讓 assistant 訊息整份匯不進去）；
+7. 在**目標專案目錄**執行 `opencode import`（匯入會把 directory／project 強制
    改寫為當下目錄，Q1-2）；
-7. 印出新 session id。
+8. 印出新 session id。
 
 之後 `opencode --session <新 id>` 就帶著前面的內容了。開在哪、由誰開，
 是呼叫者的事。
