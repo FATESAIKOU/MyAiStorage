@@ -112,6 +112,8 @@ class FakeAnnexGit(AnnexGit):
         self.pushed: list[tuple[str, tuple[str, ...]]] = []
         self.pending_refs: dict[str, str] = {}
         self._injections: dict[str, type[Exception]] = {}
+        #: H1：上一次 push 寫出去的 manifest 位元組（`local_manifest_sha256` 的來源）
+        self._local_manifest_bytes: bytes | None = None
 
     def inject(self, op: str, error: type[Exception] = WriteError) -> None:
         """注入指定操作的例外。"""
@@ -353,6 +355,10 @@ class FakeAnnexGit(AnnexGit):
                         m_name,
                         new_manifest_text.encode("utf-8"),
                     )
+            # H1：真的 git-remote-annex 會把剛寫上遠端的那份 manifest 留在本機
+            # `.git/annex/git-remote-annex/<uuid>/manifest`，sha256 完全相同。fake
+            # 記住位元組，`local_manifest_sha256()` 就是它的雜湊。
+            self._local_manifest_bytes = new_manifest_text.encode("utf-8")
 
     def push(
         self,
@@ -430,6 +436,22 @@ class FakeAnnexGit(AnnexGit):
     def register_object(self, key: str, data: bytes) -> None:
         """登錄一個「遠端上存在」的物件，讓 get_key 取得得到。"""
         self._fake_objects[key] = bytes(data)
+
+    def local_manifest_sha256(self, remote_uuid: str) -> str | None:
+        """H1：fake 版的「剛寫上去那份 manifest 的雜湊」。
+
+        真的 `SubprocessAnnexGit` 讀的是 `.git/annex/git-remote-annex/<uuid>/
+        manifest`（push 之後 git-remote-annex 留在本機的那份）。fake 沒有真的
+        git-remote-annex，所以它記住自己**上一次 push 寫出去的 manifest 內容**
+        並回它的雜湊；還沒 push 過就回 None（沒有這個證據）。
+        """
+        if self._local_manifest_bytes is None:
+            return None
+        return hashlib.sha256(self._local_manifest_bytes).hexdigest().lower()
+
+    def set_local_manifest(self, data: bytes) -> None:
+        """測試用：宣告「這一輪 push 寫出去的 manifest 就是這些位元組」。"""
+        self._local_manifest_bytes = bytes(data)
 
     def local_refs(self, branches: tuple[str, ...] = ("main", "git-annex")) -> dict[str, str]:
         self._check_injection("local_refs")

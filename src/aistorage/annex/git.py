@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -148,6 +149,21 @@ class AnnexGit(Protocol):
         提交流程每一輪都是全新 clone，annex 物件的內容不會跟著 clone 下來；
         沒有這一步，`apply_handoff` 驗證前一輪的接續點時取不回舊快照，整輪中止。
         取不到要 raise（ReadError），不要靜默略過。
+        """
+        ...
+
+    def local_manifest_sha256(self, remote_uuid: str) -> str | None:
+        """**這一輪 push 實際寫出去的那份主 manifest 的內容雜湊**（H1）。
+
+        git-remote-annex 在 push 之後會把它剛寫上遠端的 manifest 留在本機
+        `.git/annex/git-remote-annex/<uuid>/manifest`——實測（1.75.1 與 1.69.3）
+        那個檔案與遠端剛寫出的那一份 sha256 完全相同。提交流程自己知道剛寫了
+        什麼位元組，把它記進 pending 之後，settle／sweep／verify 只認這個內容，
+        住民就無法用一份「重放出同樣 refs、位元組不同」的變體把 promote 拖住，
+        或讓自己的變體被轉正成正式值。
+
+        檔案不存在（還沒 push 過、push 失敗、或 remote 不是 git-remote-annex）
+        回傳 `None`：呼叫端要把它當成「沒有這個證據」，而不是猜。
         """
         ...
 
@@ -409,6 +425,26 @@ class SubprocessAnnexGit:
         if missing:
             raise ReadError(f"缺少必要之本地分支: {', '.join(missing)}")
         return found
+
+    def local_manifest_sha256(self, remote_uuid: str) -> str | None:
+        """H1：push 之後本機 git-remote-annex 狀態裡那份 manifest 的內容雜湊。
+
+        路徑是 git-remote-annex 的本機快取：`.git/annex/git-remote-annex/<uuid>/
+        manifest`。用 `git rev-parse --absolute-git-dir` 取得 git 目錄，不要假設
+        工作目錄下的 `.git`（worktree／子模組的形狀會不同）。
+        """
+        git_dir = self._run(
+            ["git", "rev-parse", "--absolute-git-dir"], is_write=False
+        ).strip()
+        if not git_dir:
+            return None
+        manifest = Path(git_dir) / "annex" / "git-remote-annex" / remote_uuid / "manifest"
+        try:
+            data = manifest.read_bytes()
+        except OSError:
+            # 還沒 push 過、或這個 remote 不是 git-remote-annex：沒有這個證據。
+            return None
+        return hashlib.sha256(data).hexdigest().lower()
 
     @classmethod
     def clone_for_commit(

@@ -16,7 +16,7 @@ workflow 再跑一次 `run()`。
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -82,8 +82,11 @@ from aistorage.integrity.sweep import (
     file_age_days,
     plan_readview_sweep,
     plan_sweep,
+    plan_upload_exclusive,
     resolve_content_checks,
     resolve_manifest_evidence,
+    upload_window,
+    verify_upload_window,
 )
 from aistorage.integrity.verify import (
     precheck,
@@ -157,6 +160,11 @@ class RunReport:
     #: 兩者檔名完全一樣），所以附上住民偽造不了的建立時間（review-903d7e2 M1）。
     held_files: list[str] = field(default_factory=list)
     need_admin_files: list[str] = field(default_factory=list)
+    #: H1（review-5d4dd52）：這一輪有没有把「剛 push 出去的那份主 manifest 的內容
+    #: 雜湊」補寫進 pending。`False` 表示讀不到本機
+    #: `.git/annex/git-remote-annex/<uuid>/manifest`——那之後 settle／sweep 只能退回
+    #: 保守行為（多份內容不同的候選一律 fail-closed 中止），健康檢查要能看到。
+    expected_manifest_recorded: bool | None = None
 
     @property
     def ok(self) -> bool:
@@ -177,10 +185,14 @@ class RunReport:
         admin_str = (
             f" | need_admin={self.need_admin_files}" if self.need_admin_files else ""
         )
+        exp_str = (
+            "" if self.expected_manifest_recorded is not False
+            else " | expected_manifest=UNRECORDED"
+        )
         return (
             f"[RunReport {self.run_id}] {status} | counts: [{counts_str}]"
             f" | durations: [{durations_str}]{rv_str}{pub_str}{mt_str}"
-            f"{held_str}{admin_str}{err_str}"
+            f"{held_str}{admin_str}{exp_str}{err_str}"
         )
 
 
@@ -1154,6 +1166,8 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
     #      會把新上傳的物件全部隔離。
     # 中止時這些物件不在釘選值裡，下一輪會被隔離，是安全的方向。
     # M1：dry-run 不得寫入遠端。
+    new_keys_to_copy: list[str] = []
+    upload_window_start = upload_window_end = None
     if not dry_run:
         # H1（review-cdb4a34，資料遺失）：`git annex copy` 預設只搬「樹狀裡還在」
         # 的檔案。同一輪收進同一個 Session 的兩版時，樹狀的 raw 只剩最新那一版，
@@ -1162,7 +1176,35 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
         # 率與 sweep 都看不出來（key 有名字、物件卻不存在）。所以明確把這一輪新增
         # 的 key 交給 annex copy，不讓它靠樹狀決定。
         new_keys_to_copy = sorted(store.annex_keys() - keys_before)
+
+        # H2（review-5d4dd52）：**上傳之前**先隔離這一批 key 既有的同名檔。
+        # 住民知道自己的 raw key（送出 session 時就算得出來），可以預先放一份
+        # 同名同內容的物件；sweep 的「建立最早者勝」會保留他那份、隔離提交流程
+        # 上傳的那份，他再刪掉自己那份，被釘選的 key 就從 Drive 上消失（每一輪都
+        # 中止、不會自己好，而那份 raw 已經是 Agora 的真本）。
+        # 順帶回答 M3：先把同名檔搬走，rclone 就沒有東西可以「因為已存在而跳過」。
+        if new_keys_to_copy:
+            pre_listing = _relist_prefix(deps.drive, rcfg.prefix_folder_id)
+            pre_moved = apply_sweep(
+                plan_upload_exclusive(pre_listing, new_keys_to_copy, stage="第 8 步上傳前"),
+                deps.drive,
+                quarantine_folder_id=rcfg.quarantine_folder_id,
+                clock=deps.clock,
+                prefix_folder_id=rcfg.prefix_folder_id,
+            )
+            ctx.bump("quarantined_files", pre_moved)
+
+        upload_window_start = deps.clock.now()
         git.copy("origin", to_copy=new_keys_to_copy or None)
+        upload_window_end = deps.clock.now()
+
+        # H2：上傳之後，每個新 key 都必須有一份**建立時間落在這個時間窗裡**的檔案。
+        # 窗內一份都沒有 = rclone 跳過了上傳（M3）或 Drive 的列表還沒更新。中止，
+        # 不寫 pending、不 push——寫了 pending 就留下一個沒人負責的 pending。
+        verify_upload_window(
+            deps.drive, rcfg.prefix_folder_id, new_keys_to_copy,
+            upload_window(upload_window_start, upload_window_end),
+        )
     ctx.time("annex.git.copy", int((time.monotonic() - t0) * 1000))
 
     # ---------------------------------------------------------
@@ -1223,6 +1265,16 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
             annex_keys=annex_keys,
             written_at=format_rfc3339(deps.clock.now(), include_fraction=True),
             run_id=run_id,
+            # H2：第 8 步的上傳時間窗（兩端都早於 written_at）。annex 物件的真身
+            # 用「建立時間落在這個窗裡」認，不看 createdTime 誰最早。
+            upload_window_start=(
+                format_rfc3339(upload_window_start, include_fraction=True)
+                if upload_window_start else None
+            ),
+            upload_window_end=(
+                format_rfc3339(upload_window_end, include_fraction=True)
+                if upload_window_end else None
+            ),
         )
         if not dry_run:
             deps.pins.write_pending(pending)
@@ -1259,6 +1311,31 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
     push_verification = None
 
     if has_git_changes and not dry_run:
+        # H1（review-5d4dd52）：push 成功之後、`verify_after_push` 之前，先算出
+        # 「這一輪**實際寫出去**的那份主 manifest 的內容雜湊」並**再寫一次 pending**。
+        #
+        # 提交流程自己知道剛寫了什麼位元組：push 之後本機的
+        # `.git/annex/git-remote-annex/<uuid>/manifest` 就是剛寫上遠端的那一份
+        # （實測 1.75.1／1.69.3，兩者的 sha256 完全相同）。把它記進 pending 之後，
+        # verify／settle／sweep 都只認這個內容：
+        #   - 住民在 push 期間放一份「能解析、重放出同樣 refs、位元組不同」的主
+        #     manifest 變體，既**拖不住 promote**（舊規則要求「只有一種內容」，於是
+        #     每一輪都失敗、pending 延一輪、收件匣的項目多等一輪），也**不可能被
+        #     轉正**（舊規則是「建立最早者勝」，而住民只要早於 rclone 寫出 manifest
+        #     就能贏；贏了之後他的變體被轉正、真本被隔離，他再刪掉自己那份，
+        #     `git clone` 就失敗且不會自己好）。
+        #   - 讀不到本機 manifest 時欄位缺席，接下來退回「只有一種內容才接受」，
+        #     settle 那邊則是 fail-closed（不用 createdTime 猜）。
+        expected_manifest_sha256 = git.local_manifest_sha256(state.repo_uuid)
+        if expected_manifest_sha256:
+            # 重查一次旗標：管理操作最怕的就是「已經推上去了才被擋下來」。
+            _assert_no_maintenance(rcfg, deps, ctx.report, "pins.write_pending(expected)")
+            deps.pins.write_pending(
+                replace(pending, expected_manifest_sha256=expected_manifest_sha256)
+            )
+        else:
+            ctx.report.expected_manifest_recorded = False
+
         # H1（review-b1039a8）：覆蓋率檢查要比對**遠端實況**，不是自己跟自己比。
         #   - 必要 key＝這一輪新寫進去的 key（`store.annex_keys()` 減掉這一輪之前的），
         #     全部來自 `git annex lookupkey`；
@@ -1297,6 +1374,7 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
             workdir=work_temp,
             expected_annex_keys=expected_in_log,
             pushed_annex_keys=remote_keys_after_push,
+            expected_manifest_sha256=expected_manifest_sha256,
         )
         verify_new_keys_on_drive(deps.drive, rcfg.prefix_folder_id, new_keys)
 

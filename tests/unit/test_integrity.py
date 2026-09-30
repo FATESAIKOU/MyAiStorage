@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
+import json
 import os
 import subprocess
 from datetime import datetime, timezone
@@ -48,9 +50,12 @@ from aistorage.integrity.sweep import (
     check_parents,
     plan_readview_sweep,
     plan_sweep,
+    plan_upload_exclusive,
     resolve_content_checks,
     resolve_manifest_evidence,
     run_settle_and_sweep,
+    upload_window,
+    verify_upload_window,
 )
 from aistorage.integrity.verify import (
     precheck,
@@ -1748,6 +1753,9 @@ PUSH_AT = "2026-09-27T02:00:00Z"
 BEFORE_PUSH = "2026-09-27T01:59:00Z"
 #: 比 push 晚十分鐘以上：正常流程不可能有這種東西（`INJECTION_SKEW_GRACE` 之後）
 AFTER_PUSH = "2026-09-27T02:30:00Z"
+#: 比 push **還早**：住民搶在 rclone 寫出 manifest 之前放進去的變體／物件
+#: （review-5d4dd52 H1／H2 的攻擊前提：他可以在 push 之前就贏「建立最早」）
+EARLIER_THAN_PUSH = "2026-09-27T01:58:00Z"
 
 
 def _decide(drive: FakeDrive, st: PinState, **policy) -> dict[str, SweepDecision]:
@@ -1928,11 +1936,12 @@ def test_m1_deviation_keeps_the_earlier_new_generation_manifest(bundles: dict):
 def test_m2_settle_picks_the_earlier_created_candidate_that_replays_pending(
     bundles: dict, tmp_path: Path,
 ):
-    """refs 相符但位元組相異的多份候選：createdTime 決勝，不再中止這一輪。
+    """refs 相符但位元組相異的多份候選：**只有一種內容**時就採用它（review-903d7e2 M2）。
 
     舊規則是直接 raise，於是住民放一份「差一個換行、重放出同樣 refs」的主
     manifest，settle 就**每一輪都中止在第 3 步**；而第 3 步在 sweep 之前，那份
-    副本永遠不會被隔離，清掃形同停擺。
+    副本永遠不會被隔離，清掃形同停擺。候選只有一種內容時沒有可選的余地，直接
+    採用（真正會被多份不同內容絆住的，是 H1 那條，見下面兩個測試）。
     """
     st = _state(bundles, manifest_sha=bundles["m1sha"])
     drive = FakeDrive()
@@ -1942,9 +1951,6 @@ def test_m2_settle_picks_the_earlier_created_candidate_that_replays_pending(
     real = drive.seed_file(
         prefix, MANIFEST_NAME, bundles["m2"], created_time=PUSH_AT,
     )
-    forged = drive.seed_file(
-        prefix, MANIFEST_NAME, bundles["m2"] + b"\n", created_time=AFTER_PUSH,
-    )
     listing = RepoListing(
         prefix_folder_id=prefix,
         files=tuple(drive.list_children(prefix)), subfolders=(),
@@ -1952,14 +1958,271 @@ def test_m2_settle_picks_the_earlier_created_candidate_that_replays_pending(
     outcome, ns = settle(st, _pending(bundles), listing, drive,
                          workdir=tmp_path, clock=FixedClock(CLOCK_T0))
     assert outcome == SettleOutcome.PROMOTED
-    # 轉正成真正那份的雜湊（建立較早），不是住民那份多一個換行的
     assert ns.manifest_sha256 == hashlib.sha256(bundles["m2"]).hexdigest()
+    assert decs_keeper_is_official(drive, ns, prefix, real)
+
+
+def decs_keeper_is_official(drive, ns, prefix, official_id) -> bool:
+    """轉正之後，那一份正式 manifest 在 sweep 眼裡是 KEEP（不是被隔離）。"""
+    listing = RepoListing(
+        prefix_folder_id=prefix,
+        files=tuple(drive.list_children(prefix)), subfolders=(),
+    )
+    decs = {
+        d.file.id: d.disposition
+        for d in plan_sweep(listing, ns, repo_uuid=UUID, prefix_folder_id=prefix)
+    }
+    return decs[official_id] == Disposition.KEEP
+
+
+# ---------------------------------------------------------------------------
+# review-5d4dd52 H1：候選只認 pending 記的內容雜湊（不用 createdTime 猜）
+# ---------------------------------------------------------------------------
+
+def _pending_with_expected(bx: dict, expected: str | None) -> PinPending:
+    """帶（或不帶）`expected_manifest_sha256` 的 pending。"""
+    from dataclasses import replace
+
+    return replace(_pending(bx), expected_manifest_sha256=expected)
+
+
+def test_h1_settle_promotes_the_recorded_content_not_the_earlier_variant(
+    bundles: dict, tmp_path: Path,
+):
+    """H1：變體建立得**比真正那份還早**、兩者都重放出 pending.refs → 被轉正的仍是真本。
+
+    攻擊（review-5d4dd52 H1）：住民自己就能製造 pending 狀態（push 期間放一份
+    「重放出同樣 refs、位元組不同」的主 manifest 變體），而且只要**早於** rclone
+    寫出 manifest 就能在「建立最早者勝」裡贏。贏了之後他的變體被轉正成正式值、
+    真正那份被當成「內容不同的同名 manifest」隔離，他再刪掉自己那份，前綴就沒有
+    能用的 manifest，`git clone` 失敗而且不會自己好——而且每一輪都可以重來。
+
+    提交流程自己知道剛寫出去的位元組（push 之後本機
+    `.git/annex/git-remote-annex/<uuid>/manifest` 與遠端那份 sha256 相同），
+    記在 pending 的 `expected_manifest_sha256`。所以無論變體建立得多早，被轉正的
+    都只有內容等於那個雜湊的那一份。
+    """
+    st = _state(bundles, manifest_sha=bundles["m1sha"])
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"], created_time=BEFORE_PUSH)
+    # 住民的變體**比真正那份早 30 秒**建立（他搶在 rclone 寫出 manifest 之前）
+    forged = drive.seed_file(
+        prefix, MANIFEST_NAME, bundles["m2"] + b"\n", created_time=EARLIER_THAN_PUSH,
+    )
+    real = drive.seed_file(prefix, MANIFEST_NAME, bundles["m2"], created_time=PUSH_AT)
+    listing = RepoListing(
+        prefix_folder_id=prefix,
+        files=tuple(drive.list_children(prefix)), subfolders=(),
+    )
+    outcome, ns = settle(
+        st, _pending_with_expected(bundles, bundles["m2sha"]), listing, drive,
+        workdir=tmp_path, clock=FixedClock(CLOCK_T0),
+    )
+    assert outcome == SettleOutcome.PROMOTED
+    assert ns.manifest_sha256 == bundles["m2sha"], "被轉正的必須是真正 push 出去的那份"
     assert ns.manifest_sha256 != hashlib.sha256(bundles["m2"] + b"\n").hexdigest()
-    # 轉正之後下一輪的 sweep 會把副本隔離（內容既不是新的正式值也不是上一版）
-    st2 = _state(bundles, manifest_sha=bundles["m1sha"])
+    assert decs_keeper_is_official(drive, ns, prefix, real)
+    # 轉正之後下一輪的 sweep 把住民那份變體隔離（內容既不是新的正式值也不是上一版）
     decs = _decide(drive, ns, prefix=prefix)
     assert decs[forged].disposition == Disposition.QUARANTINE
     assert decs[real].disposition == Disposition.KEEP
+
+
+def test_h1_settle_fails_closed_when_pending_has_no_expected_sha(
+    bundles: dict, tmp_path: Path,
+):
+    """H1 fail-closed：pending 沒有 `expected_manifest_sha256` 又有多種內容 → 中止。
+
+    「停擺」是 ADR 0008 殘餘風險 (1) 已接受的（偵測得到、不會遺失或竄改內容）；
+    「被接管」不是。所以這裡一律中止、保留 pending 與遠端原狀，**不用 createdTime
+    猜**——猜就等於讓住民自己決定真身。
+    """
+    st = _state(bundles, manifest_sha=bundles["m1sha"])
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"], created_time=BEFORE_PUSH)
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m2"], created_time=PUSH_AT)
+    drive.seed_file(
+        prefix, MANIFEST_NAME, bundles["m2"] + b"\n", created_time=EARLIER_THAN_PUSH,
+    )
+    before = drive.snapshot()
+    listing = RepoListing(
+        prefix_folder_id=prefix,
+        files=tuple(drive.list_children(prefix)), subfolders=(),
+    )
+    with pytest.raises(MismatchError, match="expected_manifest_sha256"):
+        settle(st, _pending(bundles), listing, drive,
+               workdir=tmp_path, clock=FixedClock(CLOCK_T0))
+    assert drive.snapshot() == before, "中止時一個檔都不能動"
+
+
+def test_h1_verify_after_push_accepts_the_recorded_content_among_variants(
+    bundles: dict, tmp_path: Path,
+):
+    """H1：`verify_after_push` 只認 pending 記的內容——住民的變體不再拖住 promote。
+
+    舊規則要求「所有同名主 manifest 只有一種內容」，於是住民在 push 期間放一份
+    位元組不同的變體就能讓這一輪**永遠不 promote**：pending 延一輪才結算、收件匣
+    的項目多等一輪，而他可以一再重來。現在只要遠端有 pending 記載的那一份就過。
+    """
+    st = _state(bundles, manifest_sha=bundles["m1sha"])
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"], created_time=BEFORE_PUSH)
+    # push 前的 listing（`listing_before`）：只有 b1 與舊的 manifest
+    listing_before = RepoListing(
+        prefix_folder_id=prefix,
+        files=tuple(drive.list_children(prefix)), subfolders=(),
+    )
+    # 這一輪 push 寫出來的新世代 manifest（＋ 新的 bundle）
+    drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"], created_time=PUSH_AT)
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m2"], created_time=PUSH_AT)
+    # 住民的變體（位元組不同，但重放出同樣 refs）
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m2"] + b"\n", created_time=PUSH_AT)
+    listing = RepoListing(
+        prefix_folder_id=prefix,
+        files=tuple(drive.list_children(prefix)), subfolders=(),
+    )
+
+    class _Git:
+        def ls_remote(self, remote: str = "origin") -> dict[str, str]:
+            return {"refs/heads/main": bundles["c2"]}
+
+    pv = verify_after_push(
+        _Git(), drive, listing_before, st, {"refs/heads/main": bundles["c2"]}, PUSH_AT,
+        workdir=tmp_path, expected_manifest_sha256=bundles["m2sha"],
+    )
+    assert pv.new_manifest_sha256 == bundles["m2sha"]
+
+    # 遠端沒有 pending 記載的那一份 → 中止（而且訊息要說得出是哪一份）
+    with pytest.raises(MismatchError, match="expected_manifest_sha256"):
+        verify_after_push(
+            _Git(), drive, listing_before, st, {"refs/heads/main": bundles["c2"]}, PUSH_AT,
+            workdir=tmp_path, expected_manifest_sha256="0" * 64,
+        )
+
+    # pending 沒有這個欄位（push 與補寫之間中斷）＋有多種內容 → 一樣 fail-closed
+    with pytest.raises(MismatchError, match="expected_manifest_sha256"):
+        verify_after_push(
+            _Git(), drive, listing_before, st, {"refs/heads/main": bundles["c2"]}, PUSH_AT,
+            workdir=tmp_path, expected_manifest_sha256=None,
+        )
+    assert listing.files, "listing 本身沒被動過"
+
+
+def test_h1_plan_sweep_keeps_the_recorded_new_generation_manifest(
+    bundles: dict,
+):
+    """H1：偏離期間「新世代」同名 manifest 的保留者 = pending 記的內容雜湊。
+
+    這裡故意讓**住民的變體建立得更早**：舊規則（建立最早者勝）會保留他那份、
+    隔離真正上傳的那份。
+    """
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    real = drive.seed_file(
+        prefix, MANIFEST_NAME, bundles["m2"], created_time=PUSH_AT, modified_time=PUSH_AT,
+    )
+    forged = drive.seed_file(
+        prefix, MANIFEST_NAME, bundles["m2"] + b"\n",
+        created_time=EARLIER_THAN_PUSH, modified_time=EARLIER_THAN_PUSH,
+    )
+    decs = _decide(
+        drive, st, prefix=prefix,
+        policy=SweepPolicy(
+            pending=_pending_with_expected(bundles, bundles["m2sha"]),
+            now=parse_rfc3339(CLOCK_T0),
+        ),
+    )
+    # 真正那份是 pending 記載的內容 → 不是「副本」，進內容驗證等著被背書；
+    # 住民那份無論建立得多早都是副本，隔離。
+    assert decs[forged].disposition == Disposition.QUARANTINE
+    assert "expected_manifest_sha256" in decs[forged].reason
+    assert decs[real].disposition == Disposition.NEED_MANIFEST_CHECK
+
+
+def test_h1_plan_sweep_needs_admin_when_no_new_gen_file_matches(
+    bundles: dict,
+):
+    """H1 fail-closed：pending 記了 expected sha，但前綴裡一份都沒有那個內容 → 不猜。
+
+    沒有任何證據指認哪一份是新世代的真本（可能是那一輪在 push 與補寫之間中斷，
+    也可能是變體被刪了），所以**一個都不搬**，全部列入健康檢查等人處理。
+    """
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    forged = drive.seed_file(
+        prefix, MANIFEST_NAME, bundles["m2"] + b"\n", created_time=PUSH_AT,
+    )
+    decs = _decide(
+        drive, st, prefix=prefix,
+        policy=SweepPolicy(
+            pending=_pending_with_expected(bundles, bundles["m2sha"]),
+            now=parse_rfc3339(CLOCK_T0),
+        ),
+    )
+    assert decs[forged].disposition == Disposition.NEED_ADMIN
+    assert "expected_manifest_sha256" in decs[forged].reason
+    quarantine = drive.seed_folder("quarantine")
+    assert apply_sweep(
+        list(decs.values()), drive, quarantine_folder_id=quarantine,
+        clock=FixedClock(CLOCK_T0), prefix_folder_id=prefix,
+    ) == 0, "fail-closed 時一個檔都不能搬"
+
+
+def test_h1_injection_cutoff_uses_the_recorded_manifest_created_time(bundles: dict):
+    """M1：偏離時的注入物證據取 `expected_manifest_sha256` 那一份的 **createdTime**。
+
+    舊規則取「建立最早者」的 `modifiedTime`，而「建立最早者」現在由住民的搶跑
+    決定 → 證據的時間點也由住民控制（他隨時改寫自己的副本就會更新
+    `modifiedTime`），偏離期間所有垃圾檔都會變成 NEED_ADMIN、掃描形同停擺。
+    這裡讓住民那份變體建立得更早、而且**改寫時間很新**，斷言真正那份建立的時間
+    仍然把垃圾檔照樣隔離掉。
+    """
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    drive.seed_file(prefix, bundles["b2"], bundles["b2_bytes"], created_time=BEFORE_PUSH)
+    real = drive.seed_file(
+        prefix, MANIFEST_NAME, bundles["m2"], created_time=PUSH_AT, modified_time=PUSH_AT,
+    )
+    forged = drive.seed_file(
+        prefix, MANIFEST_NAME, bundles["m2"] + b"\n",
+        created_time=EARLIER_THAN_PUSH, modified_time=AFTER_PUSH,
+    )
+    junk_body = b"resident-junk"
+    junk_name = f"GITBUNDLE-s{len(junk_body)}--{UUID}-{hashlib.sha256(junk_body).hexdigest()}"
+    junk_bundle = drive.seed_file(prefix, junk_name, junk_body, created_time=AFTER_PUSH)
+    real_body = b"a-raw-record"
+    real_key = f"SHA256E-s{len(real_body)}--{hashlib.sha256(real_body).hexdigest()}"
+    real_obj = drive.seed_file(prefix, real_key, real_body, created_time=BEFORE_PUSH)
+    junk_obj_body = b"resident-junk-raw"
+    junk_key = f"SHA256E-s{len(junk_obj_body)}--{hashlib.sha256(junk_obj_body).hexdigest()}"
+    junk_obj_id = drive.seed_file(prefix, junk_key, junk_obj_body, created_time=AFTER_PUSH)
+    decs = _decide(
+        drive, st, prefix=prefix,
+        policy=SweepPolicy(
+            pending=_pending_with_expected(bundles, bundles["m2sha"]),
+            now=parse_rfc3339(CLOCK_T0),
+        ),
+    )
+    # 真正那份的 createdTime（PUSH_AT）＋ 十分鐘容差 < AFTER_PUSH，所以垃圾檔照樣隔離
+    assert decs[junk_bundle].disposition == Disposition.QUARANTINE
+    assert decs[junk_obj_id].disposition == Disposition.QUARANTINE
+    assert "晚於前綴裡主 manifest 最後一次寫入" in decs[junk_bundle].reason
+    # push 之前建立的（真世代）不動；住民那份變體被隔離；真正那份等著被背書
+    assert decs[real_obj].disposition == Disposition.NEED_ADMIN
+    assert decs[forged].disposition == Disposition.QUARANTINE
+    assert decs[real].disposition == Disposition.NEED_MANIFEST_CHECK
 
 
 def test_m2_late_same_named_manifest_cannot_exhaust_the_rechecks(
@@ -2023,3 +2286,292 @@ def test_m2_late_same_named_manifest_cannot_exhaust_the_rechecks(
     outcome, _ns = settle(st, _pending(bundles), listing2, _AddsLateManifest(drive2, prefix2),
                           workdir=tmp_path, clock=FixedClock(CLOCK_T0))
     assert outcome == SettleOutcome.DROPPED
+
+
+# ---------------------------------------------------------------------------
+# review-5d4dd52 H2：annex 物件的真身是「上傳時間窗內那一份」，不是建立最早者
+# ---------------------------------------------------------------------------
+
+#: 第 8 步 `git annex copy` 的上傳時間窗（提交流程自己量的，寫進 pending）
+UPLOAD_START = "2026-09-27T02:00:00Z"
+UPLOAD_END = "2026-09-27T02:00:30Z"
+
+
+def _uploaded_pending(bx: dict, keys: frozenset[str], **kw) -> PinPending:
+    """帶上傳時間窗的 pending（`state` 還沒有那些 key → 它們是這一輪才上傳的）。"""
+    from dataclasses import replace
+
+    return replace(
+        _pending(bx), annex_keys=keys,
+        upload_window_start=kw.get("start", UPLOAD_START),
+        upload_window_end=kw.get("end", UPLOAD_END),
+    )
+
+
+def _raw_key(body: bytes) -> str:
+    return f"SHA256E-s{len(body)}--{hashlib.sha256(body).hexdigest()}"
+
+
+def test_h2_sweep_keeps_the_in_window_upload_not_the_earlier_preplaced_copy(bundles: dict):
+    """H2：住民**預先**放一份同名同內容的物件 → 保留的是上傳時間窗內那一份。
+
+    攻擊（review-5d4dd52 H2）：住民送出自己的 session 時就知道自己 raw 的 key，
+    從這一輪開始每隔幾秒就在前綴放一份同名同內容的物件。第 4 步 sweep 會隔離
+    「那一刻已經存在」的那些，但第 4 步列舉**之後**才放進去的會留下來，而且它
+    建立得比提交流程上傳的那份更早 → 「建立最早者勝」會保留它、隔離真正上傳的
+    那份。住民再刪掉自己那份，被釘選的 key 就從 Drive 上消失：
+    `verify_pin_keys_on_drive` 每一輪都中止、不會自己好，而那份 raw 已經是 Agora
+    的真本。
+    """
+    body = b"a-raw-record-for-this-round"
+    key = _raw_key(body)
+    st = _sweep_state(bundles)          # 釘選值還沒有這個 key
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"], created_time=BEFORE_PUSH)
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    # 住民預先放的那份：建立得比上傳時間窗**還早**
+    preplaced = drive.seed_file(
+        prefix, key, body, created_time=EARLIER_THAN_PUSH, modified_time=AFTER_PUSH,
+    )
+    # 提交流程上傳的那一份（落在 pending 記的時間窗裡）
+    uploaded = drive.seed_file(
+        prefix, key, body, created_time=UPLOAD_START, modified_time=UPLOAD_START,
+    )
+    decs = _decide(
+        drive, st, prefix=prefix,
+        policy=SweepPolicy(pending=_uploaded_pending(bundles, frozenset({key})),
+                           now=parse_rfc3339(CLOCK_T0)),
+    )
+    assert decs[uploaded].disposition == Disposition.HOLD, "窗內那一份才是提交流程上傳的"
+    assert decs[preplaced].disposition == Disposition.QUARANTINE
+    assert "上傳時間窗" in decs[preplaced].reason, (
+        "保留者是用上傳時間窗認的，理由不能寫成「建立最早者勝」"
+    )
+    assert "預先放置" in decs[preplaced].reason
+
+
+def test_h2_sweep_needs_admin_when_no_copy_falls_inside_the_upload_window(bundles: dict):
+    """H2 fail-closed：有同名副本但窗內一份都沒有 → 不退回「建立最早」，也不搬移。
+
+    這同時是 M3 的答案：rclone 若因為前綴裡已有同名檔而跳過上傳（review-903d7e2
+    一直沒實測的那件事），提交流程上傳的那一份就不存在。於是窗內一份都沒有，而
+    剩下的都是預先放置的——不能保留（會被住民刪掉）、也不能搬移（他還在不斷重放，
+    搬了下一輪又長出來）。列入健康檢查等人處理。
+    """
+    body = b"a-raw-record-for-this-round"
+    key = _raw_key(body)
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"], created_time=BEFORE_PUSH)
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    # 兩份都在時間窗之外（一份上傳前、一份上傳後，都是住民放的）
+    preplaced = drive.seed_file(
+        prefix, key, body, created_time=EARLIER_THAN_PUSH, modified_time=AFTER_PUSH,
+    )
+    late = drive.seed_file(
+        prefix, key, body, created_time=AFTER_PUSH, modified_time=AFTER_PUSH,
+    )
+    decs = _decide(
+        drive, st, prefix=prefix,
+        policy=SweepPolicy(pending=_uploaded_pending(bundles, frozenset({key})),
+                           now=parse_rfc3339(CLOCK_T0)),
+    )
+    assert decs[preplaced].disposition == Disposition.NEED_ADMIN
+    assert decs[late].disposition == Disposition.NEED_ADMIN
+    assert "上傳時間窗" in decs[preplaced].reason
+    assert "checkpresent" in decs[preplaced].reason
+    quarantine = drive.seed_folder("quarantine")
+    assert apply_sweep(
+        list(decs.values()), drive, quarantine_folder_id=quarantine,
+        clock=FixedClock(CLOCK_T0), prefix_folder_id=prefix,
+    ) == 0, "沒有證據時一個都不能搬"
+
+
+def test_h2_plan_upload_exclusive_quarantines_preexisting_same_named_copies(bundles: dict):
+    """H2：第 8 步上傳之前，前綴裡既有的同名檔先隔離。
+
+    這一批 key 是這一輪才建出來的（`store.annex_keys() - keys_before`），遠端上
+    不可能有正當的同名檔，所以既有的那些都是預先放置的。順帶讓 rclone 沒有東西
+    可以「因為已存在而跳過上傳」（M3）。
+    """
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    quarantine = drive.seed_folder("quarantine")
+    key_a, key_b = _raw_key(b"round-a"), _raw_key(b"round-b")
+    keep = drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"], created_time=BEFORE_PUSH)
+    other = drive.seed_file(
+        prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH,
+    )
+    preplaced_a = drive.seed_file(
+        prefix, key_a, b"round-a", created_time=EARLIER_THAN_PUSH,
+    )
+    preplaced_b = drive.seed_file(prefix, key_b, b"round-b", created_time=EARLIER_THAN_PUSH)
+    decoy = drive.seed_file(prefix, _raw_key(b"other-round"), b"other-round")
+
+    listing = RepoListing(
+        prefix_folder_id=prefix,
+        files=tuple(c for c in drive.list_children(prefix) if not c.is_folder),
+        subfolders=(),
+    )
+    decs = plan_upload_exclusive(listing, [key_a, key_b], stage="第 8 步上傳前")
+    decided = {d.file.id: d.disposition for d in decs}
+    assert decided[preplaced_a] == Disposition.QUARANTINE
+    assert decided[preplaced_b] == Disposition.QUARANTINE
+    assert len(decs) == 2, decs
+    assert apply_sweep(
+        decs, drive, quarantine_folder_id=quarantine, clock=FixedClock(CLOCK_T0),
+        prefix_folder_id=prefix,
+    ) == 2
+    left = {f.name for f in drive.list_children(prefix)}
+    assert key_a not in left and key_b not in left
+    assert keep in [f.id for f in drive.list_children(prefix)]
+    assert other in [f.id for f in drive.list_children(prefix)]
+    assert decoy in [f.id for f in drive.list_children(prefix)], "不屬於這一輪的不動"
+
+
+def test_h2_verify_upload_window_requires_a_copy_inside_the_window():
+    """H2：第 8 步之後，每個新 key 都必須有一份建立時間落在窗裡的檔案。
+
+    這一步就是 M3 的實測答案：如果 rclone 的 `checkpresent` 因為同名檔已存在而
+    跳過上傳，前綴裡就一份窗內的檔都沒有 → 中止（不寫 pending、不 push）。
+    """
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    body = b"round-raw"
+    key = _raw_key(body)
+    window = upload_window(
+        parse_rfc3339(UPLOAD_START), parse_rfc3339(UPLOAD_END),
+    )
+    assert window is not None
+
+    # 窗內有 → 通過
+    drive.seed_file(prefix, key, body, created_time=UPLOAD_START)
+    assert verify_upload_window(drive, prefix, [key], window) is None
+
+    # 只有窗外的一份（住民預先放的）→ 重試之後中止
+    drive2 = FakeDrive()
+    prefix2 = drive2.seed_folder("prefix")
+    drive2.seed_file(prefix2, key, body, created_time=EARLIER_THAN_PUSH)
+    with pytest.raises(MismatchError, match="上傳時間窗"):
+        verify_upload_window(drive2, prefix2, [key], window, attempts=2, retry_delay_s=0.0)
+
+    # 完全沒有同名檔 → 也中止
+    drive3 = FakeDrive()
+    prefix3 = drive3.seed_folder("prefix")
+    with pytest.raises(MismatchError, match="上傳時間窗"):
+        verify_upload_window(drive3, prefix3, [key], window, attempts=1, retry_delay_s=0.0)
+
+    # 沒有 key 要查 → 什麼都不做（空集合不該被擋）
+    assert verify_upload_window(drive3, prefix3, [], window) is None
+
+
+def test_h2_upload_window_parsing_is_fail_closed_on_broken_fields():
+    """時間窗欄位壞掉 → 回 None（沒有證據），而且**不是**反過來推一個窗出來。"""
+    assert upload_window(None, UPLOAD_END) is None
+    assert upload_window(UPLOAD_START, None) is None
+    assert upload_window("not-a-time", UPLOAD_END) is None
+    assert upload_window(UPLOAD_START, "not-a-time") is None
+    assert upload_window(UPLOAD_END, UPLOAD_START) is None, "順序不對也不猜"
+    assert upload_window(UPLOAD_START, UPLOAD_END) is not None
+
+
+def test_git_pin_store_roundtrips_the_h1_and_h2_pending_fields(
+    bundles: dict, tmp_path: Path,
+):
+    """H1／H2 的三個欄位要真的進得了 pin repo、也讀得回來（缺席 ≠ null）。
+
+    這三個欄位是 settle／sweep／verify 唯一的權威證據，寫不進去就等於整套規則
+    退回去用 `createdTime` 猜——所以 pin store 的往返必須被釘住。
+    """
+    url = _bare_repo(tmp_path / "pin.git")
+    pins = GitPinStore(url, tmp_path / "wd")
+    st = _state(bundles, manifest_sha=bundles["m1sha"])
+    pins.promote(st)
+
+    pend = _uploaded_pending(bundles, frozenset({"SHA256E-s3--aa"}))
+    pend = replace(pend, expected_manifest_sha256=bundles["m2sha"])
+    pins.write_pending(pend)
+    _loaded, got = pins.load("agora")
+    assert got == pend
+    assert got.expected_manifest_sha256 == bundles["m2sha"]
+    assert got.upload_window == (UPLOAD_START, UPLOAD_END)
+
+    # 舊格式的 pending（push 之前就中斷、還沒補寫）讀起來是「沒有這個證據」，
+    # 而不是「證據是 null」——settle 靠這個區分決定要不要 fail-closed。
+    pending_json = pins.workdir / ".pin" / "agora.pending.json"
+    raw = json.loads(pending_json.read_text(encoding="utf-8"))
+    stripped = {
+        k: v for k, v in raw.items()
+        if k not in ("expected_manifest_sha256", "upload_window_start", "upload_window_end")
+    }
+    pending_json.write_text(
+        json.dumps(stripped, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+    )
+    pins._commit_and_push("pin(agora): drop the post-push fields", repo="agora")
+    fresh = GitPinStore(url, tmp_path / "wd-fresh")
+    _loaded, old = fresh.load("agora")
+    assert old is not None
+    assert old.expected_manifest_sha256 is None
+    assert old.upload_window_start is None
+    assert old.upload_window is None
+    # 而且新寫回去的 pending 也不會憑空生出那些鍵
+    fresh.write_pending(replace(pend, expected_manifest_sha256=None,
+                                upload_window_start=None, upload_window_end=None))
+    written = json.loads(
+        (fresh.workdir / ".pin" / "agora.pending.json").read_text(encoding="utf-8")
+    )
+    assert "expected_manifest_sha256" not in written
+    assert "upload_window_start" not in written
+    assert "upload_window_end" not in written
+
+
+def test_h2_verify_upload_window_refuses_to_guess_without_a_window(bundles: dict) -> None:
+    """H2：沒有量到時間窗卻有 key 要查 → 中止，不用 createdTime 猜。"""
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    body = b"round-raw"
+    key = _raw_key(body)
+    drive.seed_file(prefix, key, body, created_time=BEFORE_PUSH)
+    with pytest.raises(MismatchError, match="沒有量到上傳時間窗"):
+        verify_upload_window(drive, prefix, [key], None)
+    # 沒有 key 要查時，空的時間窗不算問題（不該為了沒有東西而中止一輪）
+    assert verify_upload_window(drive, prefix, [], None) is None
+
+
+def test_h2_sweep_does_not_fall_back_to_earliest_when_the_window_is_missing(
+    bundles: dict,
+) -> None:
+    """H2：pending 記得到 key 卻沒有時間窗 → 有副本也一樣不搬移。
+
+    這是從舊格式 pending（pin repo 裡還沒有上傳時間窗的那種）轉換過來的缺口。
+    那種 pending 撐不到下一輪就會被 settle 結算掉，但在那之前 sweep 必須站在安全
+    的那一邊：預先放置的那份建立得更早，「最早者勝」正是住民要的。
+    """
+    body = b"a-raw-record-for-this-round"
+    key = _raw_key(body)
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"], created_time=BEFORE_PUSH)
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    preplaced = drive.seed_file(
+        prefix, key, body, created_time=EARLIER_THAN_PUSH, modified_time=AFTER_PUSH,
+    )
+    late = drive.seed_file(
+        prefix, key, body, created_time=AFTER_PUSH, modified_time=AFTER_PUSH,
+    )
+    decs = _decide(
+        drive, st, prefix=prefix,
+        # annex_keys 有這個 key，但沒有 upload_window_*（舊格式 pending）
+        policy=SweepPolicy(
+            pending=_uploaded_pending(
+                bundles, frozenset({key}), start=None, end=None,
+            ),
+            now=parse_rfc3339(CLOCK_T0),
+        ),
+    )
+    assert decs[preplaced].disposition == Disposition.NEED_ADMIN
+    assert decs[late].disposition == Disposition.NEED_ADMIN
+    assert "上傳時間窗" in decs[preplaced].reason

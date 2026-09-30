@@ -30,6 +30,7 @@ def test_all_ok_and_summary() -> None:
         index_bytes=1000, readview_files=10,
         manifest_main_sha="a", pin_main_sha="a",
         held_files_known=True,
+        manifest_conflict_known=True,
         prune_ok=True)
     checks = run_health(data, now=NOW)
     assert summarize(checks) == "ok"
@@ -273,3 +274,86 @@ def test_collect_health_from_fake_sources(tmp_path) -> None:
     by_name = {c.name: c.status for c in run_health(data2, now=NOW)}
     assert by_name["last_success"] == "warn"
     assert by_name["quota"] == "warn"
+
+
+# ------------------------------------------- M2：持續注入同名 manifest 的警示
+
+
+def test_manifest_conflict_is_warned_and_persistent_injection_fails() -> None:
+    """M2（review-5d4dd52）：同名但內容不等於正式值的主 manifest 要看得見。
+
+    這是 ADR 0008 殘餘風險 (1) 已接受的「暫停」：住民在每一輪的第 4 步之後放一份
+    位元組不同的同名 manifest，`verify_clone`／`precheck` 就每一輪中止。`H1` 的
+    `expected_manifest_sha256` **救不了這條**——clone 是用檔名找檔案的，
+    git-remote-annex 與 rclone 都沒辦法用 file id 做 clone。所以系統只能暫停，
+    而暫停必須看得見、而且要分得出「一次手滑」與「持續注入」。
+    """
+    import hashlib
+    from aistorage.admin.health import CollectSources, collect_health
+    from aistorage.clock import FixedClock
+    from aistorage.integrity.pin import MemoryPinStore, PinState
+
+    uuid = "u-uuid"
+    manifest_name = f"GITMANIFEST--{uuid}"
+    official = b"GITBUNDLE-a\n"
+    pins = MemoryPinStore(initial_state=PinState(
+        repo="agora", repo_uuid=uuid, refs={"refs/heads/main": "a" * 40},
+        manifest_sha256=hashlib.sha256(official).hexdigest(),
+        prev_manifest_sha256=None, active_bundles=(), removed_bundles=frozenset(),
+        annex_keys=frozenset(), promoted_at="2026-09-27T09:00:00.000Z", run_id="1"))
+    drive = FakeDrive()
+    prefix = drive.seed_folder("agora-prefix")
+    drive.seed_file(prefix, manifest_name, official, created_time="2026-09-27T08:00:00Z")
+    variant = b"GITBUNDLE-a\n\n"          # 位元組不同，但一樣能解析
+    assert hashlib.sha256(variant) != hashlib.sha256(official)
+    drive.seed_file(
+        prefix, manifest_name, variant, created_time="2026-09-27T09:30:00Z",
+    )
+
+    data = collect_health(
+        CollectSources(drive=drive, pins=pins, repo="agora", prefix_folder_id=prefix),
+        clock=FixedClock("2026-09-27T10:00:00Z"),
+    )
+    assert data.manifest_conflict_known is True
+    assert len(data.manifest_conflicts) == 1
+    assert data.manifest_conflict_stale == [], "30 分鐘還不到一輪，不算持續注入"
+    fresh = _by_name(run_health(data, now=NOW), "manifest_conflict")
+    assert fresh.status == "warn"
+    assert "持續注入" in fresh.hint
+
+    # 活過一整輪（> HELD_STALE_HOURS）→ 有人在一再放回來 → fail，而且要說怎麼處置
+    aged = collect_health(
+        CollectSources(drive=drive, pins=pins, repo="agora", prefix_folder_id=prefix),
+        clock=FixedClock("2026-09-28T10:00:00Z"),
+    )
+    assert aged.manifest_conflict_stale == aged.manifest_conflicts
+    stale = _by_name(run_health(aged, now=datetime(2026, 9, 28, 10, 0, tzinfo=timezone.utc)),
+                     "manifest_conflict")
+    assert stale.status == "fail"
+    assert "撤銷" in stale.hint and "簽章金鑰" in stale.hint
+    assert summarize(run_health(aged, now=datetime(2026, 9, 28, 10, 0, tzinfo=timezone.utc))) == "fail"
+
+
+def test_manifest_conflict_is_ok_when_only_one_distinct_content() -> None:
+    """健康前綴本來就可能有兩份同名同內容的 manifest（rclone 造成的）——那不是警示。"""
+    import hashlib
+    from aistorage.admin.health import manifest_conflicts_in_prefix
+    from aistorage.integrity.pin import PinState
+
+    uuid = "u-uuid"
+    name = f"GITMANIFEST--{uuid}"
+    official = b"GITBUNDLE-a\n"
+    state = PinState(
+        repo="agora", repo_uuid=uuid, refs={"refs/heads/main": "a" * 40},
+        manifest_sha256=hashlib.sha256(official).hexdigest(),
+        prev_manifest_sha256=None, active_bundles=(), removed_bundles=frozenset(),
+        annex_keys=frozenset(), promoted_at="2026-09-27T09:00:00.000Z", run_id="1")
+    drive = FakeDrive()
+    prefix = drive.seed_folder("agora-prefix")
+    drive.seed_file(prefix, name, official, created_time="2026-09-27T08:00:00Z")
+    drive.seed_file(prefix, name, official, created_time="2026-09-27T08:00:30Z")
+    conflicts, stale, known = manifest_conflicts_in_prefix(
+        drive, prefix, state, now=NOW)
+    assert (conflicts, stale, known) == ([], [], True)
+    # 讀不到（沒有設定檔 id／pin）→ known=False，判定時是 warn 而不是「無」
+    assert manifest_conflicts_in_prefix(drive, "", state, now=NOW) == ([], [], False)

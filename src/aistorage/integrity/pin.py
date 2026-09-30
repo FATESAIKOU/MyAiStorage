@@ -39,7 +39,12 @@ class PinState:
 
 @dataclass(frozen=True)
 class PinPending:
-    """待定釘選值（在 push 前記錄即將推入之目標狀態）。"""
+    """待定釘選值（在 push 前記錄即將推入之目標狀態）。
+
+    後面三個欄位是 **push 之後**才補寫的（review-5d4dd52 H1／H2），所以都是
+    選填：寫不進去（例如這一輪在 push 與補寫之間中斷）時缺席，呼叫端必須把
+    「缺席」當成「沒有這個證據」而不是「值是 None 所以等同於空字串」。
+    """
 
     repo: str
     base_manifest_sha256: str         # 寫待定時的正式 manifest 雜湊（基準檢驗）
@@ -47,6 +52,32 @@ class PinPending:
     annex_keys: frozenset[str]        # push 之後 remote 將具備之 key 集合
     written_at: str                   # 寫入時間 (ISO 8601)
     run_id: str                       # 當前 workflow run id
+
+    #: H1：這一轮 push **實際寫出去**的那份主 manifest 的內容雜湊。
+    #:
+    #: 提交流程自己知道剛寫了什麼位元組（push 之後本機的
+    #: `.git/annex/git-remote-annex/<uuid>/manifest` 就是剛寫上遠端的那份，
+    #: 實測 sha256 完全相同），所以把它記下來之後，settle／sweep／verify
+    #: 只認這個內容——住民預先放一份「重放出同樣 refs、位元組卻不同」的變體
+    #: 既不會被轉正，也不會拖住 promote。
+    #:
+    #: 缺席＝「這一轮在 push 與補寫之間中斷」，此時多份內容不同的候選一律
+    #: fail-closed 中止（不用 `createdTime` 猜）。
+    expected_manifest_sha256: str | None = None
+
+    #: H2：第 8 步（`git annex copy`）上傳 annex 物件的時間窗（ISO 8601，
+    #: 兩端都早於 `written_at`）。annex 物件的真身用「建立時間落在這個窗裡」
+    #: 認，不看 `createdTime` 誰最早——住民只要預先放一份同名同內容的物件，
+    #: 「最早者勝」就會保留他那份、隔離提交流程上傳的那份。
+    upload_window_start: str | None = None
+    upload_window_end: str | None = None
+
+    @property
+    def upload_window(self) -> tuple[str, str] | None:
+        """上傳時間窗；兩端缺一就回 None（沒有這個證據，不要用 createdTime 猜）。"""
+        if self.upload_window_start and self.upload_window_end:
+            return (self.upload_window_start, self.upload_window_end)
+        return None
 
 
 @runtime_checkable
@@ -364,6 +395,11 @@ class GitPinStore(PinStore):
                 annex_keys=pending_keys,
                 written_at=pdata["written_at"],
                 run_id=pdata["run_id"],
+                # H1／H2：這三個欄位是 push 之後才補寫的，舊的 pending 檔沒有
+                # （`required_pending_keys` 不含它們，缺席就是「沒有證據」）。
+                expected_manifest_sha256=pdata.get("expected_manifest_sha256"),
+                upload_window_start=pdata.get("upload_window_start"),
+                upload_window_end=pdata.get("upload_window_end"),
             )
 
         return state, pending
@@ -462,6 +498,13 @@ class GitPinStore(PinStore):
             "annex_keys_count": len(pending.annex_keys),
             "annex_keys_sha256": hashlib.sha256(keys_bytes).hexdigest().lower(),
         }
+        # H1／H2：缺席就**不要**寫這個鍵，而不是寫 null——`load` 讀的是
+        # 「這一轮有沒有留下這個證據」，寫 null 會看起來像「證據是空值」。
+        if pending.expected_manifest_sha256:
+            pdata["expected_manifest_sha256"] = pending.expected_manifest_sha256
+        if pending.upload_window_start and pending.upload_window_end:
+            pdata["upload_window_start"] = pending.upload_window_start
+            pdata["upload_window_end"] = pending.upload_window_end
         (pin_dir / f"{pending.repo}.pending.json").write_text(
             json.dumps(pdata, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",

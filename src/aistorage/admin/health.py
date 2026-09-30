@@ -78,6 +78,13 @@ class HealthData:
     held_stale_files: list[str] = field(default_factory=list)
     #: 這兩項真的查到了嗎？查不到是 warn 而不是 ok（M7：查不到 ≠ 正常）
     held_files_known: bool = False
+    #: 前綴裡**同名但內容不等於正式值**的主 manifest（M2：持續注入）。
+    #: 格式 `<createdTime>@<內容雜湊前 8 碼>`。
+    manifest_conflicts: list[str] = field(default_factory=list)
+    #: 其中已存在超過一輪的——每一輪都被隔離過卻又被放回來，這是「持續注入」
+    #: 而不是「某一次手滑」的證據。
+    manifest_conflict_stale: list[str] = field(default_factory=list)
+    manifest_conflict_known: bool = False
 
 
 def _hours_since(at: str, now: datetime) -> float | None:
@@ -251,6 +258,48 @@ def run_health(data: HealthData, *, now: datetime) -> list[Check]:
             value=f"{len(data.held_files)} 個（都在本輪內，等釘選值轉正）"))
     else:
         checks.append(Check(name="held_files", status="ok", value="無"))
+
+    # M2（review-5d4dd52）：**持續**注入「內容不同的同名主 manifest」。
+    #
+    # 這一條是 ADR 0008 殘餘風險 (1) 的樣子：住民在每一輪的第 4 步（sweep 列舉）
+    # 之後、第 5 步（clone）之前放一份位元組不同的同名 manifest，clone 就會拿到
+    # 不確定是哪一份，於是每一輪都在第 5 步中止。`verify_clone` 與 `precheck` 都
+    # 要求只有一種內容，而 **clone 是用檔名找檔案的**——`expected_manifest_sha256`
+    #（H1）救不了這裡，`git-remote-annex` 與 rclone 也沒辦法用 file id 做 clone。
+    # 所以系統只能**暫停**（偵測得到、不會遺失或竄改內容），而暫停要看得見。
+    #
+    # 「持續」的判準是年齡：sweep 每一輪都會隔離這些檔，所以還留在前綴裡、
+    # 而且已經活過一整輪的，一定是被**一再放回來**的。
+    if not data.manifest_conflict_known:
+        checks.append(Check(
+            name="manifest_conflict", status="warn",
+            value="未知（讀不到真本前綴或 pin）"))
+    elif data.manifest_conflict_stale:
+        checks.append(Check(
+            name="manifest_conflict", status="fail",
+            value=(
+                f"前綴裡有 {len(data.manifest_conflict_stale)} 份同名主 manifest 的內容"
+                f"不等於正式釘選值，而且已經存在超過一輪"
+                f"（{'、'.join(sorted(data.manifest_conflict_stale)[:5])}）"
+            ),
+            hint=(
+                "這是持續注入，不是手滑（ADR 0008 殘餘風險 (1) 已接受：偵測得到、"
+                "不會遺失或竄改內容，但提交會持續暫停）。clone 是用檔名找檔案的，"
+                "釘選值救不了。處置只有一條路：停掉那個 profile 對真本前綴的寫入"
+                "（撤銷它的收件匣權限，或撤銷它的簽章金鑰）。"
+                "確認注入已停之後再手動刪掉前綴裡那份，再跑一輪提交流程"
+            )))
+    elif data.manifest_conflicts:
+        checks.append(Check(
+            name="manifest_conflict", status="warn",
+            value=(
+                f"前綴裡有 {len(data.manifest_conflicts)} 份同名主 manifest 的內容"
+                f"不等於正式釘選值（{'、'.join(sorted(data.manifest_conflicts)[:5])}）；"
+                f"下一輪的清掃會隔離它"
+            ),
+            hint="若下一輪之後它又出現，就是持續注入：撤銷該 profile 的收件匣權限或簽章金鑰"))
+    else:
+        checks.append(Check(name="manifest_conflict", status="ok", value="無"))
     return checks
 
 
@@ -367,6 +416,9 @@ def collect_health(sources: CollectSources, *, clock: Clock | None = None) -> He
     held_files, held_stale, held_known = _unbacked_prefix_files(
         sources.drive, sources.prefix_folder_id, state, _pending, now=now
     )
+    conflicts, conflict_stale, conflict_known = manifest_conflicts_in_prefix(
+        sources.drive, sources.prefix_folder_id, state, now=now
+    )
 
     manifest_main: str | None = None
     index_bytes: int | None = None
@@ -411,6 +463,9 @@ def collect_health(sources: CollectSources, *, clock: Clock | None = None) -> He
         held_files=held_files,
         held_stale_files=held_stale,
         held_files_known=held_known,
+        manifest_conflicts=conflicts,
+        manifest_conflict_stale=conflict_stale,
+        manifest_conflict_known=conflict_known,
     )
 
 
@@ -478,6 +533,49 @@ def _unbacked_prefix_files(
         if age_h > HELD_STALE_HOURS:
             stale.append(f"{d.file.name}{stamp}")
     return sorted(held), sorted(stale), True
+
+
+def manifest_conflicts_in_prefix(
+    drive: DriveClient, prefix_folder_id: str, state: Any, *, now: datetime,
+) -> tuple[list[str], list[str], bool]:
+    """前綴裡**同名但內容不等於正式值**的主 manifest（M2：持續注入）。
+
+    回傳 `(conflicts, stale, known)`；格式 `<createdTime>@<內容雜湊前 8 碼>`。
+
+    為什麼要獨立於 `plan_sweep`：這些檔案在 `plan_sweep` 眼裡是 **QUARANTINE**
+    （「已有正式值，另一份同名主 manifest 必然是注入物」），所以不會出現在
+    `held_files`——而「持續注入」正是最需要有人看的一種狀態：sweep 每一輪都會
+    把它搬走，住民主動放回來，提交就一直停在第 5 步（`verify_clone` 要求只有一種
+    內容，而 clone 是用檔名找檔案的，釘選值救不了）。
+
+    判「持續」的依據是年齡：能活過一整輪（`HELD_STALE_HOURS`）的，一定是被一再
+    放回來的，而不是某一次手滑。
+    """
+    if not prefix_folder_id or state is None:
+        return [], [], False
+    from aistorage.integrity.sweep import file_age_days
+
+    try:
+        children = [
+            c for c in drive.list_children(prefix_folder_id)
+            if not c.is_folder and c.name == f"GITMANIFEST--{state.repo_uuid}"
+        ]
+    except Exception:
+        return [], [], False
+
+    official = (state.manifest_sha256 or "").lower()
+    conflicts: list[str] = []
+    stale: list[str] = []
+    for f in children:
+        sha = (f.sha256 or "").lower()
+        if not sha or sha == official:
+            continue
+        entry = f"{f.created_time}@{sha[:8]}"
+        conflicts.append(entry)
+        age_h = (file_age_days(f, now) or 0.0) * 24
+        if age_h > HELD_STALE_HOURS:
+            stale.append(entry)
+    return sorted(conflicts), sorted(stale), True
 
 
 def quarantine_usage(drive: DriveClient, quarantine_folder_id: str) -> tuple[int, int]:

@@ -74,6 +74,12 @@ jobs:
           GIT_ANNEX_VERSION: "10.20260717"
           GIT_ANNEX_URL: "https://downloads.kitenet.net/git-annex/linux/current/git-annex-standalone-amd64.tar.gz"
           GIT_ANNEX_SHA256: "a3c9d10ee33a7ace69efeaa8cd6282cfd7444ec797d732cebae12a64efefa18a"
+          # rclone 的版本**不能隨意升**：整套同名檔去留規則建立在「rclone 每次 push
+          # 都刪掉重建 GITMANIFEST（file id 每輪都會變）」這個實測上（1.75.1 與
+          # 1.69.3 都如此，見 docs/decision-log.md 2026-09-30 與
+          # tests/integration/test_committer_dup_manifest.py）。若某個版本改成**原地
+          # 更新**，而它剛好更新到住民建立的那份副本，正式 manifest 就會住進住民
+          # 控制的 file id 裡。升級前請先在整合沙盒跑那支測試。
           RCLONE_VERSION: "1.75.1"
           RCLONE_SHA256: "982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab"
         run: |

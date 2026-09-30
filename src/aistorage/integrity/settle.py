@@ -7,6 +7,9 @@
 - review-1.4f3 M2（不存在「信任任何能重放的 manifest」模式，僅 state 與 pending 可信）
 - review-903d7e2 M2（主 manifest 候選與重查指紋都用「這一輪 push 之前就存在」這個
   住民偽造不了的條件篩掉；重放出同樣 refs 的多份候選用 createdTime 決勝）
+- review-5d4dd52 H1（候選**只認** `pending.expected_manifest_sha256`：提交流程
+  自己知道剛寫出去的位元組，住民就無法靠搶「建立最早」把自己的變體轉正成真本；
+  沒有這個欄位時多份內容不同的候選一律 fail-closed，不用 createdTime 猜）
 """
 
 from __future__ import annotations
@@ -290,6 +293,10 @@ def settle(
 
     review-903d7e2 M2：候選也用同一條規則篩，而且「refs 相符但內容相異」的多份
     候選不再中止——用 createdTime 決勝（見 `_settle_once`）。
+
+    review-5d4dd52 H1：`createdTime` 決勝被拿掉了（它等於讓住民自己決定真身）。
+    現在候選只認 `pending.expected_manifest_sha256`；沒有這個欄位時多份內容不同
+    的候選一律 fail-closed 中止（見 `_pick_pending_candidate`）。
     """
     if pending is None:
         return SettleOutcome.NO_PENDING, state
@@ -356,40 +363,59 @@ def settle(
     raise MismatchError("內部錯誤：settle 的重查迴圈沒有回傳結果")
 
 
-def _pick_pending_candidate(matches: list[dict[str, Any]]) -> dict[str, Any]:
-    """多份候選都重放得出 `pending.refs` 時選哪一份（review-903d7e2 M2）。
+def _pick_pending_candidate(
+    matches: list[dict[str, Any]], pending: PinPending
+) -> dict[str, Any]:
+    """多份候選都重放得出 `pending.refs` 時，哪一份才是這一輪 push 的產物？
 
-    舊規則是直接 `MismatchError` 中止，於是住民只要放一份「和真正那份差一個換行、
-    重放出同樣 refs」的主 manifest，settle 就**每一輪都中止在第 3 步**——而第 3 步
-    在 sweep 之前，那份副本永遠不會被隔離，清掃形同停擺。
+    **H1（review-5d4dd52）：只認 `pending.expected_manifest_sha256`。**
 
-    這裡可以分辨真身：refs 相同代表它描述的是同一個遠端狀態，但**位元組**可能不同
-    （多一個換行之類），而 `createdTime` 是住民偽造不了的——真正那份是這一輪 push
-    期間由 rclone 寫出來的，住民要複製就得先讀到它，一定比較晚。取建立最早的那一份
-    當正式值（與第 4 步 sweep 對「新世代同名 manifest」用同一條規則），其餘留給
-    sweep 收拾：轉正之後它們的內容既不等於新的正式值、也不等於已退役的上一版，
-    會被隔離（`plan_sweep` 的 (A) 分支）。
+    提交流程 push 之後從本機 `.git/annex/git-remote-annex/<uuid>/manifest` 讀到
+    自己剛寫出去的位元組（實測與遠端那份 sha256 完全相同），把它記進 pending。
+    舊規則是「refs 相同就成立，多份用 `createdTime` 最早者勝」，而那個「最早」
+    是住民**自己就能製造**的：只要早於 rclone 寫出 manifest 就能贏。贏了之後
+    住民的變體被轉正成正式值（釘選值的 `manifest_sha256` 就是它）、真正那份被
+    當成「內容不同的同名 manifest」隔離，住民再刪掉自己那份，前綴就沒有能用的
+    manifest、`git clone` 失敗，而且不會自己好。
 
-    createdTime 讀不出來或全部相同（讀不到就不排序）時退回 fail-closed：中止。
+    所以改成：候選**只接受** sha 等於 `expected_manifest_sha256` 的檔案。
+
+    - 有這個欄位 → 命中它就採用（其他內容的同名檔不是這一輪的產物，之後由
+      sweep 收拾）。
+    - 沒有這個欄位（push 與補寫 pending 之間中斷）**而且**候選內容不只一種
+      → **fail-closed 中止**：保留 pending 與遠端原狀。「停擺」是已經接受的
+      殘餘風險（ADR 0008 殘餘風險 (1)），「被接管」不是，所以寧可停擺。
+    - 沒有這個欄位、候選內容只有一種 → 那就是它（沒有可選的余地）。
     """
-    from aistorage.integrity.sweep import dedup_rank
-
     shas = {c["sha256"] for c in matches}
     if len(shas) == 1:
         return matches[0]
 
-    ranked = sorted(matches, key=lambda c: dedup_rank(c["file"]))
-    earliest_dt = dedup_rank(ranked[0]["file"])[0]
-    tied = [c for c in matches if dedup_rank(c["file"])[0] == earliest_dt]
-    if len({c["sha256"] for c in tied}) > 1:
+    expected = pending.expected_manifest_sha256
+    if expected:
+        pinned = [c for c in matches if c["sha256"].lower() == expected.lower()]
+        if len(pinned) == 1:
+            return pinned[0]
+        if len(pinned) > 1:
+            # 內容雜湊相同的多份（rclone 同一輪 push 內因 Drive 列表落後會留下
+            # 兩份位元組相同的主 manifest，實測 1.75.1／1.69.3）：對 settle 的
+            # 結論沒有分別，挑建立最早的一份下載。
+            from aistorage.integrity.verify import _created_rank
+
+            return min(pinned, key=lambda c: _created_rank(c["file"]))
         raise MismatchError(
-            f"存在多個內容相異但重放 refs 均相符待定之 manifest 候選: {sorted(shas)}；"
-            f"而且建立最早的那幾份時間相同（或都讀不出來）"
-            f"（{[c['file'].created_time for c in tied]}），"
-            f"無法分辨哪一份才是這一輪 push 的產物——不猜，保留 pending 與遠端原狀，"
-            f"中止這一輪"
+            f"候選之中沒有一份的內容雜湊等於 pending 記載的 expected_manifest_sha256"
+            f"（{expected}）；讀到的候選內容雜湊 {sorted(shas)}——"
+            f"遠端沒有這一輪 push 寫出去的位元組，不猜，保留 pending 與遠端原狀，中止這一輪"
         )
-    return ranked[0]
+
+    raise MismatchError(
+        f"存在多個內容相異但重放 refs 均相符待定之 manifest 候選: {sorted(shas)}；"
+        f"而 pending 沒有 expected_manifest_sha256（這一轮在 push 與補寫之間中斷了，"
+        f"或 pin repo 裡是舊格式的 pending）——沒有任何證據能分辨哪一份才是這一輪 "
+        f"push 的產物，而用 createdTime 決勝等於讓住民自己決定真身。不猜，"
+        f"保留 pending 與遠端原狀，中止這一輪"
+    )
 
 
 def _settle_once(
@@ -473,7 +499,7 @@ def _settle_once(
             pending_matches.append(c)
 
     if pending_matches:
-        matched = _pick_pending_candidate(pending_matches)
+        matched = _pick_pending_candidate(pending_matches, pending)
         new_state = PinState(
             repo=state.repo,
             repo_uuid=state.repo_uuid,

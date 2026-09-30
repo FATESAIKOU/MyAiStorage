@@ -43,9 +43,11 @@ from aistorage.integrity.sweep import (
     check_parents,
     plan_readview_sweep,
     plan_sweep,
+    plan_upload_exclusive,
     resolve_content_checks,
     resolve_manifest_evidence,
     run_settle_and_sweep,
+    verify_upload_window,
 )
 from aistorage.integrity.verify import (
     PushVerification,
@@ -79,6 +81,7 @@ __all__ = [
     "gc_removed",
     "plan_readview_sweep",
     "plan_sweep",
+    "plan_upload_exclusive",
     "precheck",
     "purge_quarantine",
     "resolve_content_checks",
@@ -88,4 +91,5 @@ __all__ = [
     "verify_after_push",
     "verify_annex_coverage",
     "verify_clone",
+    "verify_upload_window",
 ]

@@ -31,6 +31,16 @@
   抓不到 → warn）。
 - 讀取視圖：索引 >50MB 或檔案 >5,000 → warn（D5）。
 - manifest 落後 pin 的 main → warn（等下一個非空輪次補發）。
+- **前綴裡有名同但內容不等於正式釘選值的主 manifest → warn；而且已經存在超過一輪
+  → fail**（`manifest_conflict`，review-5d4dd52 M2）。這一項是「持續注入」的警示：
+  住民在每一輪的第 4 步（sweep 列舉）之後放一份位元組不同的同名 manifest，
+  `verify_clone`／`precheck` 就每一輪中止。`git clone` 是用**檔名**找檔案的，
+  git-remote-annex 與 rclone 都沒辦法用 file id 做 clone，所以釘選值（連同
+  `expected_manifest_sha256`）**救不了這條**——它屬於 ADR 0008 已接受的殘餘風險
+  (1)：偵測得到、不會遺失或竄改內容，但提交會持續暫停。**處置只有一條路：先停掉
+  注入**（撤銷那個 profile 對真本前綴的寫入：收件匣權限或簽章金鑰），**再**手動
+  刪掉前綴裡那份；順序反了下一輪又會長出來。完整步驟見 `docs/runbooks/recovery.md`
+  的「模式 4」。
 - 同步器等待／拒收 → warn。
 - opencode 升級時重跑 `resident/verify-prune.sh`（prune 只加標記）。
 

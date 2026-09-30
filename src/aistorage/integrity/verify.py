@@ -17,7 +17,7 @@ import shutil
 import tempfile
 import time
 from typing import TYPE_CHECKING, Iterable, Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 
 from aistorage.annex.git import AnnexGit
 from aistorage.annex.manifest import parse_bundle_name, parse_manifest
@@ -133,6 +133,68 @@ def _manifest_with_sha(files: Sequence[DriveFile], sha: str) -> DriveFile:
         if not f.is_folder and f.sha256 is not None and f.sha256.lower() == sha:
             return f
     raise MismatchError(f"找不到內容雜湊等於 {sha} 的 manifest")
+
+
+def manifest_files_with_sha(files: Sequence[DriveFile], sha: str) -> list[DriveFile]:
+    """同名主 manifest 裡，Drive checksum 等於 `sha` 的那些檔。"""
+    want = sha.lower()
+    return [
+        f for f in files
+        if not f.is_folder and f.sha256 is not None and f.sha256.lower() == want
+    ]
+
+
+def pinned_push_manifest(
+    files: Sequence[DriveFile],
+    expected_sha256: str | None,
+    *,
+    context: str,
+) -> DriveFile:
+    """H1：這一輪 push 的產物 = 內容雜湊等於 `expected_sha256` 的那份同名 manifest。
+
+    **只認這一個內容。** 住民可以在同一輪 push 期間放一份「能解析、而且重放得出
+    同樣 refs、但位元組不同（多一個換行之類）」的主 manifest 變體；舊規則要求
+    「所有同名檔只有一種內容」，於是這份變體每一輪都讓 `verify_after_push` 失敗，
+    把 promote 拖到下一輪（而且 pending 延後一輪才結算，收件匣的項目也跟著多等
+    一輪）。現在改成「遠端必須有這一份，其他內容不算這一輪的產物」——變體再也
+    拖不住 promote，也沒有任何一份變體會被轉正。
+
+    `expected_sha256` 缺席（push 與補寫 pending 之間中斷）時退回
+    `unique_manifest_sha`：只有一種內容就接受，有多種就中止（fail-closed，不用
+    `createdTime` 猜）。
+    """
+    if expected_sha256:
+        matched = manifest_files_with_sha(files, expected_sha256)
+        if not matched:
+            other = sorted({str(f.sha256) for f in files if not f.is_folder})
+            raise MismatchError(
+                f"{context}：遠端沒有任何一份主 manifest 的內容雜湊等於 pending 記載的"
+                f" expected_manifest_sha256 ({expected_sha256})"
+                f"（找到 {len(files)} 個同名檔，內容雜湊 {other or '（沒有 checksum）'}）"
+                f"——這一輪 push 寫出去的位元組不在遠端，中止，不 promote"
+            )
+        # 內容雜湊相同的多份（rclone 同一輪 push 內因 Drive 列表落後會留下兩份）
+        # 對驗證沒有分別，挑建立最早的那一份下載即可。
+        return min(matched, key=_created_rank)
+
+    sha = unique_manifest_sha(files)
+    if sha is None:
+        raise MismatchError(
+            f"{context}：遠端主 manifest 內容不一致或缺少 checksum"
+            f"（{len(files)} 個同名檔，內容雜湊 "
+            f"{sorted({f.sha256 for f in files})}）；pending 沒有記"
+            f" expected_manifest_sha256（這一轮在 push 與補寫之間中斷了？），"
+            f"無法分辨哪一份才是這一輪 push 的產物——不猜，中止"
+        )
+    return _manifest_with_sha(files, sha)
+
+
+def _created_rank(f: DriveFile) -> tuple[datetime, str]:
+    """`created_at`（讀不出來排最後）＋ file id，確保結果穩定。"""
+    try:
+        return (f.created_at, f.id)
+    except (ValueError, TypeError):
+        return (datetime.max.replace(tzinfo=timezone.utc), f.id)
 
 
 def verify_clone(
@@ -359,6 +421,7 @@ def verify_after_push(
     workdir: Path,
     expected_annex_keys: frozenset[str] | set[str] | None = None,
     pushed_annex_keys: frozenset[str] | set[str] | None = None,
+    expected_manifest_sha256: str | None = None,
 ) -> PushVerification:
     """提交流程第 10 步：push 後遠端狀態驗證。
 
@@ -379,6 +442,16 @@ def verify_after_push(
        不是 `state.annex_keys`——正式釘選值在第 12 步 promote 之前本來就落後這一輪
        剛寫進去的 key，拿它當比較對象會讓「有新增物件」的所有輪次都失敗。
     - 任何一條不符拋出 MismatchError（待定釘選值保留，留待下一輪 settle 結算）。
+
+    **H1（review-5d4dd52）：第 2 條只認 `expected_manifest_sha256`。**
+
+    提交流程 push 之後從本機 `.git/annex/git-remote-annex/<uuid>/manifest` 讀到
+    自己剛寫出去的位元組（實測與遠端那份 sha256 相同），把它記進 pending。
+    舊規則要求「所有同名主 manifest 只有一種內容」，於是住民在 push 期間放一份
+    位元組不同的變體就能讓這一輪**永遠不 promote**（pending 延一輪、收件匣項目
+    多等一輪，而且他可以一再重來）。現在改成「遠端必須有 pending 記載的那一份；
+    其他內容不是這一輪的產物，不讓驗證失敗」——變體既拖不住 promote，也不可能
+    被轉正成正式值。
     """
     workdir = Path(workdir).resolve()
     workdir.mkdir(parents=True, exist_ok=True)
@@ -403,23 +476,18 @@ def verify_after_push(
             f"push 後 ls-remote ({remote_refs}) 與本地 refs ({local_refs}) 不符"
         )
 
-    # 2. 重新尋找主 manifest（要求「只有一種內容」，不是「恰好一個檔」——
-    #    rclone 同一輪 push 內可能因 Drive 列表落後留下兩份位元組相同的，實測 1.75.1
-    #    與 1.69.3 都如此；push 與 clone 在有這種重複時都正常）
+    # 2. 重新尋找主 manifest。H1：只認 pending 記載的那一份位元組；其他內容
+    #    （住民在 push 期間放的變體）不是這一輪的產物，不讓驗證失敗。
     manifest_name = f"GITMANIFEST--{state.repo_uuid}"
     m_files = drive.find_by_name(listing_before.prefix_folder_id, manifest_name)
-    pushed_sha = unique_manifest_sha(m_files)
-    if pushed_sha is None:
-        raise MismatchError(
-            f"push 後遠端主 manifest 內容不一致或缺少 checksum（{len(m_files)} 個同名檔，"
-            f"內容雜湊 {sorted({f.sha256 for f in m_files})}）；無法確定這一輪 push 寫出來的是哪一份"
-        )
-
-    m_data = drive.download_bytes(
-        _manifest_with_sha(m_files, pushed_sha).id, max_bytes=1024 * 1024
+    pushed_file = pinned_push_manifest(
+        m_files, expected_manifest_sha256, context="push 後主 manifest 驗證"
     )
+    pushed_sha = pushed_file.sha256.lower() if pushed_file.sha256 else None
+
+    m_data = drive.download_bytes(pushed_file.id, max_bytes=1024 * 1024)
     new_manifest_sha = hashlib.sha256(m_data).hexdigest().lower()
-    if new_manifest_sha != pushed_sha:
+    if pushed_sha is not None and new_manifest_sha != pushed_sha:
         raise MismatchError(
             f"push 後主 manifest 的 Drive checksum ({pushed_sha}) 與實際內容雜湊 "
             f"({new_manifest_sha}) 不符"

@@ -22,6 +22,11 @@
   不搬任何一份**（1.75.1／1.69.3 實測：健康前綴本來就可能有兩份同名同內容，
   而且 push 與 clone 都不會因此失敗）；偏離（釘選值對前綴沒有權威）時用
   `createdTime` 當「是注入物」的證據；HOLD 逾齡改為升級成 NEED_ADMIN
+- review-5d4dd52 H1／H2／M1（見 `plan_sweep`）：`createdTime` 決勝拿掉兩個用法
+  ——新世代同名 manifest 改認 `pending.expected_manifest_sha256`（提交流程自己
+  知道剛寫出去的位元組），這一輪上傳的 annex 物件改認 pending 記的上傳時間窗；
+  兩個證據都缺席時 fail-closed（不猜、不搬移），偏離時的注入物證據也改取
+  `expected_manifest_sha256` 那一份的 `createdTime`
 """
 
 from __future__ import annotations
@@ -34,10 +39,11 @@ import hashlib
 from pathlib import Path
 import re
 import tempfile
+import time
 from typing import Any
 
 from aistorage.annex.manifest import parse_bundle_name, parse_manifest
-from aistorage.clock import Clock, FixedClock
+from aistorage.clock import Clock, FixedClock, parse_rfc3339
 from aistorage.drive.model import GOOGLE_FOLDER_MIME, DriveClient, DriveFile
 from aistorage.errors import AbortRun, MismatchError, ReadError, TooLarge
 from aistorage.integrity.pin import PinPending, PinState, PinStore
@@ -147,6 +153,81 @@ def earliest_of(files: Iterable[DriveFile]) -> DriveFile | None:
     return min(files, key=dedup_rank) if files else None
 
 
+def upload_window(
+    start: datetime | str | None, end: datetime | str | None
+) -> tuple[datetime, datetime] | None:
+    """把上傳時間窗的兩端解析成 `datetime`；任一端缺席／壞掉／順序不對回 None。
+
+    回 None 的意思是「沒有這個證據」，呼叫端**不要**改用 `createdTime` 猜。
+    """
+    if start is None or end is None:
+        return None
+    try:
+        lo = start if isinstance(start, datetime) else parse_rfc3339(start)
+        hi = end if isinstance(end, datetime) else parse_rfc3339(end)
+    except (ValueError, TypeError):
+        return None
+    if lo > hi:
+        return None
+    return (lo, hi)
+
+
+def upload_window_of(pending: PinPending | None) -> tuple[datetime, datetime] | None:
+    """`pending` 記的第 8 步上傳時間窗（`PinPending.upload_window`）。"""
+    if pending is None:
+        return None
+    return upload_window(pending.upload_window_start, pending.upload_window_end)
+
+
+def in_window(f: DriveFile, window: tuple[datetime, datetime] | None) -> bool:
+    """檔案的建立時間是否落在時間窗裡（讀不出來建立時間回 False）。
+
+    兩端都含（`<=`）：測試用的固定時鐘會讓窗的起訖同一瞬間，而 Drive 的
+    `createdTime` 精度不見得比我們的量測細。
+    """
+    if window is None:
+        return False
+    try:
+        created = f.created_at
+    except (ValueError, TypeError):
+        return False
+    return window[0] <= created <= window[1]
+
+
+def _window_text(window: tuple[datetime, datetime] | None) -> str:
+    """時間窗的報告用字串。"""
+    if window is None:
+        return "（pending 沒有記）"
+    return f"{window[0].isoformat()} ～ {window[1].isoformat()}"
+
+
+def window_keeper(
+    files: Iterable[DriveFile], window: tuple[datetime, datetime] | None
+) -> DriveFile | None:
+    """時間窗內建立的那一份（沒有就回 None）。
+
+    H2：annex 物件的真身不能用「建立最早」決定——住民知道自己 raw 的 key，
+    可以**預先**在前綴放一份同名同內容的物件，於是「最早者勝」會保留他那份、
+    隔離提交流程上傳的那份，他再刪掉自己那份，被釘選的 key 就從 Drive 上消失
+    （每一輪都中止，而且不會自己好）。真身是「提交流程上傳的那一份」，也就是
+    建立時間落在 `pending` 記的上傳時間窗裡的那一份。
+    """
+    inside = [f for f in files if in_window(f, window)]
+    if not inside:
+        return None
+    return min(inside, key=dedup_rank)
+
+
+def _created_at_of(f: DriveFile | None) -> datetime | None:
+    """檔案的 `createdTime`（讀不出來回 None）。"""
+    if f is None:
+        return None
+    try:
+        return f.created_at
+    except (ValueError, TypeError):
+        return None
+
+
 def file_stamp(f: DriveFile) -> str:
     """報告用的時間戳（`created`／`modified`）。
 
@@ -154,6 +235,30 @@ def file_stamp(f: DriveFile) -> str:
     所以 HOLD／NEED_ADMIN 的理由與健康檢查都附上這兩個時間（review-903d7e2 M1）。
     """
     return f"created={f.created_time} modified={f.modified_time}"
+
+
+def _dup_reason(
+    kind: str, f: DriveFile, keeper: DriveFile, window_bound: bool
+) -> str:
+    """同名同內容副本的隔離理由（管理者要靠它判斷哪一份才是真的）。
+
+    `window_bound=True` 表示這個 key 是**這一輪才上傳**的（H2）：保留者是「建立時間
+    落在 pending 記的上傳時間窗裡」的那一份，所以副本是**預先放置**的——它建立得
+    更早正是攻擊的一部分，理由不能寫成「建立最早者勝」。
+    """
+    if window_bound:
+        return (
+            f"重複之{kind}（位元組相同）：保留的是建立時間落在 pending 記載的上傳時間窗"
+            f"內的那一份（{file_stamp(keeper)}），本檔 {file_stamp(f)} 在時間窗之外——"
+            f"這是住民預先放置的副本（他知道自己 raw 的 key）。用「建立最早者勝」會保留"
+            f"預先放置的那份、隔離提交流程上傳的那份，他再刪掉自己那份，被釘選的 key 就"
+            f"從 Drive 上消失（每一輪都中止、不會自己好）"
+        )
+    return (
+        f"重複之{kind}（位元組相同）：保留的是建立最早的那一份"
+        f"（{file_stamp(keeper)}，本檔 {file_stamp(f)}）。"
+        f"{kind}一個世代只上傳一次，住民要複製就得先讀到它，一定比較晚"
+    )
 
 
 def _dup_of_official_reason(f: DriveFile, keeper: DriveFile) -> str:
@@ -311,9 +416,44 @@ def plan_sweep(
     前綴裡沒有任何一份主 manifest 的內容等於正式值時，釘選值對這個前綴沒有
     權威，「不在釘選值裡」不能指認注入物（impl1 的終局）。但 createdTime 可以：
     正常流程一定是先上傳物件與 bundle、最後才寫 manifest，所以**建立時間晚於
-    前綴裡主 manifest 最後一次寫入時間的 bundle／物件不屬於遠端任何一個世代**
+    前綴裡主 manifest 最後一次寫入時間**的 bundle／物件不屬於遠端任何一個世代
     ——正常流程不會有這種東西，它只能是住民放進去的。留 `INJECTION_SKEW_GRACE`
     的時鐘誤差。於是偏離期間住民放的垃圾檔照樣隔得掉，不必等到釘選值追上。
+
+    那個「最後一次寫入的時間」取**內容等於 `pending.expected_manifest_sha256` 的
+    那一份**的 `createdTime`（H1／M1，review-5d4dd52）。舊規則取「建立最早者」的
+    `modifiedTime`，而「建立最早者」現在由住民的搶跑決定，於是證據的時間點也跟著
+    由住民控制（他隨時改寫自己的副本就會更新 `modifiedTime`），偏離期間所有垃圾
+    檔都會變成 NEED_ADMIN、掃描形同停擺。rclone 每一次 push 都是刪掉再建立
+    （實測 file id 每輪都變），所以真正那份的 `createdTime` 就是「這一輪 push
+    寫入的時間」，而且不會再被改動。
+
+    **H1（review-5d4dd52）：新世代同名 manifest 的保留者只認內容雜湊。**
+
+    `pending.expected_manifest_sha256` 是提交流程 push 之後從**本機**
+    `.git/annex/git-remote-annex/<uuid>/manifest` 讀到的、自己剛寫出去的位元組
+    （實測與遠端那份 sha256 完全相同）。「建立最早者勝」等於讓住民自己決定真身：
+    他只要早於 rclone 寫出 manifest 就能贏，贏了之後他的變體被轉正成正式值、
+    真正那份被隔離，他再刪掉自己那份，前綴就沒有能用的 manifest，而且不會自己好。
+    所以這裡只保留內容雜湊等於 `expected_manifest_sha256` 的那一份。
+
+    這個欄位缺席時（那一輪在 push 與補寫之間中斷）**不退回 createdTime 決勝**：
+    有「新世代」內容的同名 manifest 而沒有一份對得上 → 全部 NEED_ADMIN，不搬移。
+    「停擺」是 ADR 0008 已接受的殘餘風險 (1)，「被接管」不是。
+
+    **H2（review-5d4dd52）：這一輪上傳的 annex 物件，保留者是時間窗內那一份。**
+
+    住民知道自己 raw 的 key（送出 session 時就算得出來），可以**預先**在前綴放
+    一份同名同內容的物件；「建立最早者勝」會保留他那份、隔離提交流程上傳的那份，
+    他再刪掉自己那份，被釘選的 key 就從 Drive 上消失（每一輪都中止、不會自己好，
+    而且那份 raw 已經是 Agora 的真本）。所以 `pending` 記下第 8 步
+    `git annex copy` 的上傳時間窗（`upload_window_start/end`），而
+    `pending.annex_keys - state.annex_keys` 裡那些 key 的保留者必須是**建立時間
+    落在窗裡**的那一份；窗外的同名檔都是預先放置的，隔離。
+
+    窗內一份都沒有時（Drive 的列表還沒更新，或 rclone 的 checkpresent 因為同名檔
+    已存在而跳過上傳——這正是 M3 一直沒實測的那件事）**不退回 createdTime 決勝**，
+    也不搬移：判 NEED_ADMIN，理由裡附上時間窗，列入健康檢查等人處理。
     """
     decisions: list[SweepDecision] = []
     default_from_parent = prefix_folder_id or listing.prefix_folder_id
@@ -406,12 +546,45 @@ def plan_sweep(
                 and f.sha256.lower() == m.group(2).lower()
         return False
 
-    # bundle／annex 物件：保留建立最早的那一份（見 plan_sweep 的 H1 說明）。
+    # bundle／annex 物件：一般情形保留建立最早的那一份（見 plan_sweep 的 H1 說明）。
+    #
+    # H2 例外：**這一輪才上傳上去的** annex 物件，保留者必須是「建立時間落在
+    # pending 記的上傳時間窗裡」的那一份。住民只要預先在前綴放一份同名同內容的
+    # 物件，「最早者勝」就會保留他那份、隔離提交流程上傳的那份；他再刪掉自己
+    # 那份，被釘選的 key 就從 Drive 上消失（每一輪都中止、不會自己好）。
+    # 判斷「這一輪才上傳」＝`pending.annex_keys` 有、正式釘選值沒有。
+    # 時間窗缺席（欄位壞掉、或 pin repo 裡是舊格式的 pending）時**一樣不能**退回
+    # 「建立最早者勝」——那正是住民要的。於是這些 key 直接進 `window_missing_names`，
+    # 一律不搬移。
+    window = upload_window_of(pending)
+    uploaded_this_round: frozenset[str] = frozenset()
+    if pending is not None:
+        uploaded_this_round = frozenset(pending.annex_keys) - frozenset(state.annex_keys)
+
     kept_by_name: dict[str, DriveFile] = {}
+    #: H2：這一輪上傳的 key，但窗內一份檔都沒有（或根本沒有時間窗）→ 沒有證據指認
+    #: 任何一份是注入物，一律不搬移（`window_missing_names` 的檔案走 NEED_ADMIN）。
+    window_missing_names: set[str] = set()
     for name, group in by_name.items():
         if not (parse_bundle_name(name) or _ANNEX_KEY_PATTERN.match(name)):
             continue
         eligible = [f for f in group if _self_consistent(f)]
+        if name in uploaded_this_round:
+            keeper = window_keeper(eligible, window) if window is not None else None
+            if keeper is not None:
+                kept_by_name[name] = keeper
+            elif len(eligible) > 1:
+                # **同名同內容的副本**存在，但窗內一份都沒有（Drive 的列表還沒更新、
+                # 或這一輪的上傳被 rclone 的 checkpresent 跳過了），或根本沒有時間窗。
+                # 「保留建立最早者」正好是住民要的，所以不猜、不搬移，列入健康檢查。
+                #
+                # 只有一份的時候不看這裡：那是「HOLD 還是隔離」的背書問題（pending
+                # 記了這個 key 就是有背書），不是「哪一份才是真身」的問題；而且
+                # 「唯一一份就是住民預先放的」這種情形在第 8 步就被
+                # `verify_upload_window` 擋下來了（窗內一份都沒有 → 那一輪中止、
+                # 不寫 pending），所以不會走到這裡。
+                window_missing_names.add(name)
+            continue
         keeper = earliest_of(eligible)
         if keeper is not None:
             kept_by_name[name] = keeper
@@ -419,11 +592,26 @@ def plan_sweep(
     # 主 manifest：正式值（內容 == 釘選值）與「新世代」（內容不在釘選值任何一個
     # 雜湊裡，也就是剛由上一輪 push 寫出來的那份）各自選一次保留者。
     # 兩組都可能有多份同名檔，兩組之間互不影響：正式值永遠優先。
+    #
+    # H1：「新世代」的保留者**只認 `pending.expected_manifest_sha256`**。舊規則是
+    # 「建立最早者勝」，而住民只要早於 rclone 寫出 manifest 就能贏——他的變體被
+    # 轉正、真正那份被當成「內容不同的同名 manifest」隔離，他再刪掉自己那份，
+    # 前綴就沒有能用的 manifest，`git clone` 失敗且不會自己好。這個欄位缺席時
+    # （push 與補寫 pending 之間中斷）退回建立最早，並標成 NEED_ADMIN 交人判斷。
+    expected_sha = pending.expected_manifest_sha256.lower() if (
+        pending is not None and pending.expected_manifest_sha256
+    ) else None
     main_group = by_name.get(main_name, [])
     main_officials = [f for f in main_group if f.sha256.lower() == official_sha]
     main_new_gen = [f for f in main_group if f.sha256.lower() not in retired_shas]
     main_official_keeper = earliest_of(main_officials)
-    main_new_gen_keeper = earliest_of(main_new_gen)
+    if expected_sha:
+        pinned_new_gen = [f for f in main_new_gen if f.sha256.lower() == expected_sha]
+        main_new_gen_keeper = earliest_of(pinned_new_gen)
+        new_gen_ambiguous = bool(main_new_gen) and main_new_gen_keeper is None
+    else:
+        main_new_gen_keeper = earliest_of(main_new_gen)
+        new_gen_ambiguous = False
 
     bak_group = by_name.get(bak_name, [])
     bak_allowed = [f for f in bak_group if f.sha256.lower() in allowed_bak_hashes]
@@ -434,14 +622,21 @@ def plan_sweep(
 
     # 偏離時「是注入物」的證據（review-903d7e2 M1）：前綴裡主 manifest 最後一次
     # 寫入的時間。正常流程先上傳物件與 bundle、最後才寫 manifest，所以建立時間
-    # 晚於這個時刻的檔案不屬於遠端任何一個世代。取保留者（建立最早的那一份）的
-    # modified_time——它就是 rclone 每輪 push 會重寫的那個檔案；住民改得了自己
-    # 副本的 modified_time，改不了提交流程那一份的。
-    _cutoff_file = main_official_keeper or main_new_gen_keeper
-    try:
-        manifest_cutoff = _cutoff_file.modified_at if _cutoff_file is not None else None
-    except (ValueError, TypeError):
-        manifest_cutoff = None
+    # 晚於這個時刻的檔案不屬於遠端任何一個世代。
+    #
+    # M1（review-5d4dd52）：這個時刻要取**內容等於 `expected_manifest_sha256` 的
+    # 那一份**的 `createdTime`，而且是 `createdTime` 不是 `modifiedTime`。舊規則取
+    # 「建立最早者」的 `modifiedTime`，而「建立最早者」現在由住民的搶跑決定，於是
+    # 注入物證據的時間點也由住民控制（他隨時改寫自己的檔案就會更新
+    # `modifiedTime`），偏離期間所有垃圾檔都會變成 NEED_ADMIN、掃描形同停擺。
+    # rclone 每一次 push 都是刪掉再建立（實測 file id 每輪都變），所以真正那份
+    # manifest 的 `createdTime` 就是「這一輪 push 寫入的時間」，而且不會再被改動。
+    if expected_sha:
+        _cutoff_pool = [f for f in main_group if f.sha256.lower() == expected_sha]
+    else:
+        _cutoff_pool = main_officials or main_new_gen
+    _cutoff_file = earliest_of(_cutoff_pool)
+    manifest_cutoff = _created_at_of(_cutoff_file)
 
     def _post_push_injection(f: DriveFile) -> str | None:
         """偏離期間的注入物證據：建立時間晚於主 manifest 最後一次寫入。
@@ -530,19 +725,38 @@ def plan_sweep(
                 )
             elif main_new_gen_keeper is not None and main_new_gen_keeper.id != f.id:
                 # 偏離期間（釘選值還沒追上）：同一份「新世代」內容有兩份同名檔。
-                # 這裡 createdTime **判得出**真身——新世代的 manifest 是上一輪
-                # push 剛寫出來的，住民要複製就得先讀到它，一定比較晚。
+                # H1：保留的是**內容等於 `pending.expected_manifest_sha256`** 的那一份
+                # （提交流程自己知道剛寫出去的是什麼位元組）；住民那份變體建立得
+                # 再早也拿不到這個雜湊，所以隔離的一定是他的那份，不是真本。
                 decisions.append(
                     SweepDecision(
                         file=f,
                         disposition=Disposition.QUARANTINE,
                         reason=(
-                            "同名主 manifest 的副本：保留的是建立最早的那一份"
-                            f"（{file_stamp(main_new_gen_keeper)}），本檔建立較晚"
-                            f"（{file_stamp(f)}）。新世代的 manifest 由上一輪 push "
-                            "寫出，複製它必須先讀到它，所以一定比較晚"
+                            "同名主 manifest 的副本：保留的是 pending 記載的"
+                            f" expected_manifest_sha256（{expected_sha}）那一份"
+                            f"（{file_stamp(main_new_gen_keeper)}），本檔內容雜湊是 {f_sha}"
+                            f"（{file_stamp(f)}）。提交流程自己知道剛 push 出去的位元組，"
+                            f"住民的變體無論建立得多早都不會被轉正"
                         ),
                         from_parent=default_from_parent,
+                    )
+                )
+            elif new_gen_ambiguous:
+                # H1 的 fail-closed 分支：有「新世代」內容的同名 manifest，但沒有一份
+                # 的內容等於 pending 記載的 `expected_manifest_sha256`（那一輪在 push
+                # 與補寫之間中斷，pending 裡沒有這個欄位）。沒有證據指認哪一份是
+                # 注入物 → 不搬移，列入健康檢查等人處理。「停擺」是已接受的殘餘風險，
+                # 「被接管」不是。
+                decisions.append(
+                    _need_admin(
+                        f,
+                        f"內容雜湊 ({f_sha}) 不在釘選值內，而且沒有一份同名 manifest 的"
+                        f"內容等於 pending 記載的 expected_manifest_sha256"
+                        f"（{expected_sha}）——pending 沒有這個證據（那一輪在 push 與"
+                        f"補寫之間中斷了？），無法分辨哪一份才是新世代的真本："
+                        f"不搬移（搬錯就是消滅真本），列入健康檢查等人處理"
+                        f"（{file_stamp(f)}）",
                     )
                 )
             else:
@@ -795,6 +1009,28 @@ def plan_sweep(
         if annex_match:
             key_size = int(annex_match.group(1))
             key_sha = annex_match.group(2).lower()
+            if (
+                f.name in window_missing_names
+                and f.size == key_size
+                and f_sha == key_sha
+            ):
+                # H2：這一輪上傳的 key，但前綴裡**沒有任何一份**建立時間落在
+                # pending 記的上傳時間窗裡的檔案（或 pending 根本沒記時間窗）。
+                # 這時「保留建立最早者」正好是住民要的（他預先放的那份會贏），所以
+                # 不猜、不搬移：列入健康檢查等人處理。理由裡附上時間窗。
+                decisions.append(
+                    _need_admin(
+                        f,
+                        f"這是這一輪上傳的 annex key，但前綴裡沒有任何一份檔案的建立時間"
+                        f"落在 pending 記的上傳時間窗"
+                        f"（{_window_text(window)}）內——可能是 Drive 的列表還沒更新，"
+                        f"也可能是 rclone 的 checkpresent 因為同名檔已存在而跳過上傳"
+                        f"（那唯一的一份就是住民預先放的），或者 pending 根本沒記時間窗。"
+                        f"沒有證據指認哪一份是注入物：不搬移，列入健康檢查等人處理"
+                        f"（{file_stamp(f)}）",
+                    )
+                )
+                continue
             if f.name in state.annex_keys and f_sha == key_sha:
                 if f.size is None:
                     decisions.append(
@@ -824,11 +1060,12 @@ def plan_sweep(
                                 file=f,
                                 disposition=Disposition.QUARANTINE,
                                 reason=(
-                                    "重複之 annex 物件（位元組相同）：保留的是建立最早的"
-                                    f"那一份（{file_stamp(keeper)}，本檔 {file_stamp(f)}）。"
-                                    "annex 物件一個世代只上傳一次，住民要複製就得先讀到"
-                                    "它，一定比較晚"
-                                ) if keeper is not None else "重複之 annex 物件",
+                                    _dup_reason(
+                                        "annex 物件", f, keeper,
+                                        f.name in uploaded_this_round,
+                                    )
+                                    if keeper is not None else "重複之 annex 物件"
+                                ),
                                 from_parent=default_from_parent,
                             )
                         )
@@ -850,11 +1087,9 @@ def plan_sweep(
                         SweepDecision(
                             file=f,
                             disposition=Disposition.QUARANTINE,
-                            reason=(
-                                "重複之 annex 物件（位元組相同）：保留的是建立最早的"
-                                f"那一份（{file_stamp(keeper)}，本檔 {file_stamp(f)}）。"
-                                "annex 物件一個世代只上傳一次，住民要複製就得先讀到它，"
-                                "一定比較晚"
+                            reason=_dup_reason(
+                                "annex 物件", f, keeper,
+                                f.name in uploaded_this_round,
                             ),
                             from_parent=default_from_parent,
                         )
@@ -1372,6 +1607,116 @@ def apply_sweep(
             ) from e
 
     return moved_count
+
+
+def plan_upload_exclusive(
+    listing: RepoListing,
+    keys: Iterable[str],
+    *,
+    stage: str,
+) -> list[SweepDecision]:
+    """H2：這一輪要上傳的 key，**前綴裡既有的同名檔一律隔離**（第 8 步之前）。
+
+    這一批 key 是 `store.annex_keys() - keys_before`：**這一輪才建出來的**，
+    所以遠端上不可能有正當的同名檔——前綴裡出現的就是住民預先放的（他送出自己的
+    session 時就算得出自己 raw 的 key）。而且預先放置的那份建立得更早，於是
+    sweep 的「建立最早者勝」會保留他那份、隔離提交流程上傳的那份；他再刪掉自己
+    那份，被釘選的 key 就從 Drive 上消失（每一輪都中止、不會自己好，而那份 raw
+    已經是 Agora 的真本）。
+
+    這一步同時回答了 review-903d7e2 一直留著的 **M3**（rclone 的 `checkpresent`
+    會不會因為同名檔已存在而跳過上傳）：先把既有的同名檔搬走，rclone 就沒有東西
+    可以跳過；萬一它還是跳過了，第 8 步之後的 `verify_upload_window` 會抓出來。
+
+    `stage` 只是寫進理由的字串（`before`／`after`），讓報告讀得出來。
+    """
+    wanted = set(keys)
+    if not wanted:
+        return []
+    from_parent = listing.prefix_folder_id
+    decisions: list[SweepDecision] = []
+    for entry in (*listing.files, *listing.subfolders):
+        if entry.name not in wanted:
+            continue
+        decisions.append(
+            SweepDecision(
+                file=entry,
+                disposition=Disposition.QUARANTINE,
+                reason=(
+                    f"H2（{stage}）：這個 annex key 是這一輪才建出來的，遠端上不可能有"
+                    f"正當的同名檔——前綴裡這一份是預先放置的。它建立得比提交流程上傳的"
+                    f"那份更早，於是「建立最早者勝」會保留它、隔離真正上傳的那份，"
+                    f"住民再刪掉自己那份，被釘選的 key 就從 Drive 上消失"
+                    f"（{file_stamp(entry)}）"
+                ),
+                from_parent=from_parent,
+            )
+        )
+    return decisions
+
+
+def verify_upload_window(
+    drive: DriveClient,
+    prefix_folder_id: str,
+    keys: Iterable[str],
+    window: tuple[datetime, datetime] | None,
+    *,
+    attempts: int = 4,
+    retry_delay_s: float = 10.0,
+) -> None:
+    """H2：第 8 步之後，每個新 key 都必須有一份**建立時間落在上傳時間窗裡**的檔案。
+
+    這一條同時回答 **M3**（review-903d7e2 留下的未實測項）：rclone 若因為前綴裡
+    已經有同名檔而跳過上傳（或 `checkpresent` 用了落後的列表判斷「已存在」），
+    前綴裡就一份窗內的檔都沒有——這裡會中止，而不會讓「住民預先放的那一份」成為
+    前綴裡唯一的一份。
+
+    判定為缺任何一個 key 時**重試**（Drive 的列表落後實測可達 30 秒，impl1 現場
+    因此中止並留下一個沒人負責的 pending）。真的沒上傳成功的話，重試只會多花時間，
+    最後照樣中止——方向仍然是 fail-closed。
+
+    `window` 是 `None`（兩端讀不出來）而 `keys` 非空 → 直接中止：**沒有這個證據
+    就不能確認上傳有沒有真的發生**，這裡不能用 `createdTime` 猜。
+    """
+    keys = sorted(set(keys))
+    if not keys:
+        return
+    if window is None:
+        raise MismatchError(
+            f"第 8 步上傳之後要確認 {len(keys)} 個新 annex key 真的在 Drive 上，"
+            f"但提交流程沒有量到上傳時間窗（起訖讀不出來）：無法分辨窗內外，"
+            f"不猜，中止這一輪（不寫 pending、不 push）"
+        )
+    for attempt in range(max(1, attempts)):
+        candidates = tuple(drive.list_children(prefix_folder_id))
+        missing = [
+            key for key in keys
+            if not any(in_window(f, window) and _annex_file_matches(f, key) for f in candidates)
+        ]
+        if not missing:
+            return
+        if attempt + 1 < max(1, attempts):
+            time.sleep(retry_delay_s * (attempt + 1))
+    raise MismatchError(
+        f"第 8 步上傳之後，這一轮新增的 {len(missing)} 個 annex key 在 Drive 上沒有任何"
+        f"一份建立時間落在上傳時間窗（{_window_text(window)}）內的檔案：{missing[:3]}。"
+        f"可能是 Drive 的列表落後（實測可達 30 秒，已重試 {attempts} 次），也可能是 "
+        f"rclone 的 checkpresent 因為前綴裡已有同名檔而跳過了上傳——那唯一的一份就是"
+        f"住民預先放的。中止這一輪（不 push、不 promote）"
+    )
+
+
+def _annex_file_matches(f: DriveFile, key: str) -> bool:
+    """檔案的 sha256／size 是否與 annex key 內嵌的值相符（不含建立時間）。"""
+    m = _ANNEX_KEY_PATTERN.match(key)
+    if not m:
+        return False
+    return (
+        not f.is_folder
+        and f.sha256 is not None
+        and f.sha256.lower() == m.group(2).lower()
+        and f.size == int(m.group(1))
+    )
 
 
 def plan_readview_sweep(

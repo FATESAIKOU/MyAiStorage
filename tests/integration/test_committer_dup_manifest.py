@@ -20,6 +20,7 @@ manifest」）是錯的，所以這裡把它變成一個**會被持續檢查的�
 from __future__ import annotations
 
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,34 @@ def test_duplicate_identical_manifest_does_not_break_push_or_clone(
     )
     verify_clone(_LsRemoteGit(annex), state, drive=real_drive, prefix_folder_id=prefix_id)
     precheck(real_drive, prefix_id, main_name, state)
+
+    # ── L（review-5d4dd52）：整套規則建立在「rclone 每次 push 都刪掉重建 manifest」
+    # 這個實測上。如果某個版本改成**原地更新**，而它剛好更新到住民建立的那份副本，
+    # 正式 manifest 就會住進住民控制的 file id 裡——而「位元組相同就都不搬」會讓
+    # 兩份一直並存、health check 一直報。釘住這個前提：push 之後，內容等於新正式值
+    # 的檔案，createdTime 不早於 push 開始的時間。
+    push_started = datetime.now(timezone.utc) - timedelta(seconds=2)
+    (repo / "notes2.md").write_text("dup2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "notes2.md"], cwd=repo, env=env, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "notes2"], cwd=repo, env=env, check=True,
+                   capture_output=True)
+    push2 = subprocess.run(
+        ["git", "push", "drive", "main", "git-annex"],
+        cwd=repo, env=env, capture_output=True, text=True,
+    )
+    assert push2.returncode == 0, push2.stderr[-2000:]
+    fresh = manifests()
+    new_sha = next(iter({f.sha256 for f in fresh if f.sha256}), None)
+    assert new_sha, "push 之後應該有一份新的主 manifest"
+    for f in fresh:
+        if f.sha256 != new_sha:
+            continue
+        assert f.created_at.replace(tzinfo=timezone.utc) >= push_started, (
+            f"內容等於新正式值的那份 createdTime ({f.created_time}) 早於這次 push；"
+            f"rclone 改成原地更新了？H1 的前提要重新量測："
+            f"{[(x.id, x.created_time) for x in fresh]}"
+        )
 
     # 副本的建立時間晚於正式那份（createdTime 是 Drive 記錄的）
     by_id = {f.id: f for f in after}

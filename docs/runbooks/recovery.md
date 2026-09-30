@@ -15,7 +15,7 @@ Drive 上的 repo 被刪除時，從任一個 git clone 重建。全部在 Admin
 > `swap-finish` 的範圍，沒有管理憑證時會報 `not_wired`。
 > **模式 0（從隔離區搬回）沒有 CLI**，照下面「模式 0」自己寫一支腳本。
 
-## 四種模式（`python -m aistorage.admin recover --check …` 先判定）
+## 五種模式（`python -m aistorage.admin recover --check …` 先判定 0～3）
 
 **模式 0 最先問**：主 manifest 與它引用的 bundle／annex 物件是不是只是被**隔離**
 到 `quarantine/<日期>/` 了？隔離是「搬走」不是「刪除」（`apply_sweep` 用 Drive 的
@@ -36,6 +36,46 @@ addParents/removeParents，檔案本身還在，file id 也還在）。是 → �
    更新 `config/committer.json`；`readview_rebuild_epoch` 加 1
    完整重建讀取視圖（等全部上傳完才切換 manifest）；
    跑一輪完整提交流程（含清掃）確認正常，把步驟與耗時記在下面。
+4. **主 manifest 還在，但每一輪都因為「同名 manifest 內容不一致」而中止**
+   （持續注入）：不是資料遺失，是提交被暫停。**CLI 不判定這個**（它不是「檔案
+   不在」的狀況），靠健康檢查的 `manifest_conflict` 認出來，處置見下面那一節。
+
+## 模式 4：每一輪都因為同名 manifest 內容不一致而中止（持續注入）
+
+**先分清楚兩件事**（review-5d4dd52 M2）：
+
+| 現象 | 是不是持續注入 | 處置 |
+|---|---|---|
+| 只有**某一輪**中止，下一輪就自己好 | 不是。是 Drive 的列表落後造成的誤判 | 不用管（`verify_new_keys_on_drive` 的重查就是為它而存在的） |
+| 提交**一次都沒成功過**，而且健康檢查的 `manifest_conflict` 一直是 warn／fail | 是 | 照下面走 |
+
+**怎麼認出來**：
+
+- 健康檢查多了一項 `manifest_conflict`。它是 `warn` 表示前綴裡有名同但內容不等於
+  正式值的主 manifest（下一輪的清掃會隔離它）；它是 `fail` 表示**它已經活過一整輪**
+  ——也就是有人在一輪又一輪地把它放回來。
+- 提交流程的報告每一輪都停在 `annex.git.clone`（`verify_clone` 要求同名主 manifest
+  只有一種內容），而且 `quarantined_files` 每輪都 ≥ 1。
+
+**為什麼釘選值救不了**：`git clone` 是用**檔名**找檔案的，前綴裡有兩種內容時拿到
+哪一份沒有保證。git-remote-annex 與 rclone 都沒有「用 file id 做 clone」這回事，
+所以 `expected_manifest_sha256`（H1）只能讓**提交流程自己**分辨得多可靠，不能讓
+clone 變可靠。這一條屬於 ADR 0008 已接受的殘餘風險 (1)：**偵測得到、不會遺失或
+竄改內容，但提交會持續暫停**。
+
+**處置只有一條路**（依序做）：
+
+1. **先停掉注入**。找出是誰在寫——按 `held_files`／`need_admin_files` 附上的
+   `@<createdTime>` 對照提交時段；再回頭看那個 profile 的收件匣權限與簽章金鑰。
+   動作是**撤銷那個 profile 對真本前綴的寫入**（撤銷收件匣權限，或撤銷它的簽章
+   金鑰——簽章金鑰一撤，那個 profile 連寫進收件匣都不行了，它會改走去問本人）。
+   **不要**先去刪檔案：在注入還沒停的情況下刪，下一輪又會長出來。
+2. 確認注入停了之後，`AdminLock` 內手動刪掉前綴裡那份內容不一致的主 manifest。
+3. 跑一輪提交流程確認恢復（要有 `SUCCESS`），並把 `manifest_conflict` 回到 `ok`
+   記在下面。
+
+> 註：`quarantine/<日期>/` 裡通常已經有前幾輪被隔離的那些變體。它們不用搬回來——
+> 搬回來等於把注入物放回真本。
 
 ## 模式 0：從隔離區把真本搬回來
 
@@ -84,6 +124,22 @@ git-remote-annex: No git repository found in this remote.
    > 真正在用的是**最近被改寫（`modifiedTime` 最新）的那一份**；建立時間較早但已經
    > 很久沒被改的那幾份通常是被 rclone 留下的舊世代或住民的副本。**內容不同於釘選值
    > 的同名 manifest 才是注入物**，可以直接隔離。
+   >
+   > **兩種內容並存時，有一個不會被住民偽造的判準（review-5d4dd52 H1）**：
+   > 提交流程 push 成功之後會把它**實際寫出去**的那份 manifest 的內容雜湊記在
+   > pending 的 **`expected_manifest_sha256`**（它讀的是本機
+   > `.git/annex/git-remote-annex/<uuid>/manifest`，實測與遠端那份 sha256 相同）。
+   > pending 還在的話：
+   >
+   > ```bash
+   > uv run python -c "import json,subprocess,sys; \
+   >   print(json.loads(subprocess.run(['git','show','origin/main:.pin/agora.pending.json'],\
+   >   capture_output=True,text=True).stdout)['expected_manifest_sha256'])"
+   > ```
+   >
+   > 這一份才是真的，其餘同名檔（不管是 rclone 留下的重複，還是住民的變體）都可以
+   > 直接隔離。**不要用 `createdTime` 判斷**——住民可以早於 rclone 寫出 manifest 就
+   > 放一份變體，那會讓「最早者」是他而不是真本。
 
 2. **在 AdminLock 內搬回**。`AdminLock` 的真正互斥是 **pin repo 裡的維護旗標**
    （提交流程第 1b 步與 write_pending／push／promote 三個重查點都讀它）；

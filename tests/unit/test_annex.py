@@ -361,3 +361,46 @@ def test_fake_annex_git_annex_keys(tmp_path: Path):
     keys = frozenset({"SHA256E-s100--abc", "SHA256E-s200--def"})
     fake_git = FakeAnnexGit(workdir=tmp_path, annex_keys=keys)
     assert fake_git.annex_keys_in("some_remote") == keys
+
+
+def test_local_manifest_sha256_reads_the_git_remote_annex_cache(tmp_path: Path):
+    """H1：push 之後本機 `.git/annex/git-remote-annex/<uuid>/manifest` 就是剛寫出去的那份。
+
+    提交流程靠它算出「這一輪 push 的確切位元組」寫進 pending，所以這個讀取路徑
+    必須真的指向 git-remote-annex 的本機狀態目錄（不是猜工作目錄下的 `.git`）。
+    """
+    from aistorage.annex.git import SubprocessAnnexGit
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main", "-q", str(repo)],
+                   check=True, capture_output=True)
+
+    git = SubprocessAnnexGit(repo, allow_unsafe_workdir=True)
+    uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    # 還沒 push 過 → 沒有這個證據（回 None，不是猜）
+    assert git.local_manifest_sha256(uuid) is None
+
+    cache = repo / ".git" / "annex" / "git-remote-annex" / uuid
+    cache.mkdir(parents=True)
+    (cache / "manifest").write_bytes(b"GITBUNDLE-s1--x\n")
+    assert git.local_manifest_sha256(uuid) == hashlib.sha256(b"GITBUNDLE-s1--x\n").hexdigest()
+
+    # 換一份內容（rclone 每輪 push 都刪掉重建）→ 雜湊跟著變，而且要跟 Drive 那份相同
+    (cache / "manifest").write_bytes(b"GITBUNDLE-s1--x\nGITBUNDLE-s2--y\n")
+    assert git.local_manifest_sha256(uuid) == hashlib.sha256(
+        b"GITBUNDLE-s1--x\nGITBUNDLE-s2--y\n"
+    ).hexdigest()
+    # 別的 uuid 讀不到
+    assert git.local_manifest_sha256("other-uuid") is None
+
+
+def test_fake_annex_git_local_manifest_sha256(tmp_path: Path):
+    """FakeAnnexGit 也要有同一個介面（否則 run() 的 wiring 無法用假實作測）。"""
+    fake = FakeAnnexGit(refs={"refs/heads/main": "1" * 40}, workdir=tmp_path)
+    assert fake.local_manifest_sha256("uuid") is None
+    fake.set_local_manifest(b"GITBUNDLE-s1--x\n")
+    assert fake.local_manifest_sha256("uuid") == hashlib.sha256(
+        b"GITBUNDLE-s1--x\n"
+    ).hexdigest()
