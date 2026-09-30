@@ -35,19 +35,31 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "committer.yml"
 
 #: 單元測試證明不了、必須在真的 GitHub 上實測的項目（見 tasks 3.1 最後一句）。
+#: **已驗過的不要留在這裡**——這個常數存在的目的就是避免它們被當成已經驗過；
+#: 驗完的請移到下面的 `VERIFIED_ON_GITHUB`，連同證據連結。
 NEEDS_GITHUB_CHECKS = (
-    "workflow_dispatch 任意觸發：Actions 頁面手動 Run workflow（確認沒有 inputs "
-    "可填、且 refs/heads/main 預設帶 main）",
     "rerun 舊的 run：在 Actions 頁面對一個**舊的**（較早 commit 的）run 按 "
     "Re-run all jobs，確認 guard 因為 github.sha != 遠端 main HEAD 而中止、"
-    "不會重跑舊的真本",
-    "其他分支觸發：對 feature 分支手動 dispatch（或在該分支 push 時由 "
-    "workflow_dispatch 觸發），確認 guard 因為 github.ref != refs/heads/main 中止",
+    "不會重跑舊的真本（注意 rerun 用的是**原本那個 sha 上的 workflow 檔**，"
+    "要挑 workflow 檔本身是好的舊 run，否則會死在 job setup 而走不到 guard）",
     "repo 設定（由你在 repo 設定頁操作，程式看不到）：Actions 的 artifact 與 "
     "log 保留天數設到最短、Actions 使用額度上限",
-    "commit.yaml 曾被硬編碼在管理操作裡（已改成設定檔 committer_workflow）："
-    "在真的 repo 上確認 `gh workflow disable committer.yml` 成功、"
-    "`gh workflow enable committer.yml` 成功",
+)
+
+#: 2026-09-30 已在 `FATESAIKOU/MyAiStorage` 上實測過的（證據見
+#: `docs/spike/evidence/3.1-6.5-github.md`，harness 見 `scripts/check_workflow_guards.py`）。
+#: (關鍵字, 證據檔裡必須存在的章節標題, 對應的 run id 或 None)
+VERIFIED_ON_GITHUB = (
+    # 3.1-1：guard 放行，之後在 inbox-prescan 因缺 RCLONE_CONF 失敗
+    ("3.1-1", "## 1. 3.1 逐項結果", 36690207277),
+    # 3.1-2：guard 因 github.ref != refs/heads/main 拒絕，後面 0 個 workflow 步驟執行
+    ("3.1-2", "## 1. 3.1 逐項結果", 36690597897),
+    # 3.1-4：GITHUB_TOKEN 只有 contents: read（+ Actions 隱含的 metadata: read）
+    ("3.1-4", "## 1. 3.1 逐項結果", 36690207277),
+    # B1：setup-uv 釘了不存在的 SHA，run 死在 Set up job、guard 從沒跑到
+    ("B1", "## 0. 結論先講", None),
+    # 6.5：真的 repo 上 gh workflow disable／enable 都成功
+    ("gh workflow disable committer.yml", "## 2. 6.5 管理操作的真 GitHub 路徑", None),
 )
 
 
@@ -266,8 +278,48 @@ def test_report_log_has_no_content(wf: dict) -> None:
 def test_needs_github_checks_are_documented() -> None:
     """把「必須在真的 GitHub 上驗」的三件事釘在測試裡，避免它被當成已驗過。"""
     assert isinstance(NEEDS_GITHUB_CHECKS, tuple)
-    for keyword in ("任意觸發", "rerun", "其他分支"):
+    for keyword in ("rerun", "保留天數"):
         assert any(keyword in item for item in NEEDS_GITHUB_CHECKS), \
             f"tasks 3.1 明列的「{keyword}」不可漏掉"
     for item in NEEDS_GITHUB_CHECKS:
         assert isinstance(item, str) and item.strip(), item
+
+
+def test_verified_on_github_items_have_evidence() -> None:
+    """已驗過的每一項都要指向真的證據檔（run id 或 evidence 章節）。
+
+    沒有這一條的話，`NEEDS_GITHUB_CHECKS` 會被清空、A11y 沒人看得見差別——
+    「已驗過」和「沒人查過」在測試輸出裡長得一樣。
+    """
+    assert isinstance(VERIFIED_ON_GITHUB, tuple) and VERIFIED_ON_GITHUB
+    doc = REPO_ROOT / "docs" / "spike" / "evidence" / "3.1-6.5-github.md"
+    assert doc.is_file(), f"證據檔不存在：{doc}"
+    text = doc.read_text(encoding="utf-8")
+    for keyword, section, run_id in VERIFIED_ON_GITHUB:
+        assert section in text, f"證據檔裡找不到章節 {section!r}"
+        assert keyword in text, f"證據檔裡找不到「{keyword}」的紀錄"
+        if run_id is not None:
+            assert str(run_id) in text, f"證據檔裡找不到 run {run_id}"
+    # 已驗過的關鍵字不可以同時還留在待驗清單裡
+    for keyword, _where, _run in VERIFIED_ON_GITHUB:
+        for item in NEEDS_GITHUB_CHECKS:
+            assert keyword not in item, \
+                f"「{keyword}」已經驗過（見 VERIFIED_ON_GITHUB），不可留在 NEEDS_GITHUB_CHECKS"
+
+
+def test_guard_sha_check_is_reachable_in_the_yaml(wf: dict) -> None:
+    """guard 的 sha 檢查必須真的比對**遠端** main HEAD。
+
+    這一段在真實 GitHub 上還沒有被執行過（需要一個 workflow 檔是好的舊 run ＋
+    main 再前進，見 evidence §1.2），所以這裡至少把它的形狀釘住：不能是拿
+    checkout 下來的東西比對（fetch-depth: 1 拿不到遠端 HEAD）。
+    """
+    run = _step(wf, "guard")["run"]
+    assert "GITHUB_SHA" in run and "REMOTE_SHA" in run
+    # 三段依序是：先用 ref 擋 → 再向 API 查遠端 HEAD → 最後比 sha。
+    # 順序不可調換：ref 檢查在最前才不會對著非 main 的分支去查 API；
+    # 查 HEAD 必須在比 sha 之前，否則拿到空字串比對會誤判成通過。
+    ref_check = run.index('GITHUB_REF" != "refs/heads/main')
+    fetch = run.index("/commits/main")
+    sha_check = run.index('GITHUB_SHA" != "$REMOTE_SHA')
+    assert ref_check < fetch < sha_check, "guard 的三段順序不對"

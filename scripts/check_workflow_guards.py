@@ -72,9 +72,7 @@ class Result:
 
     @property
     def runs(self) -> str:
-        return " ".join(
-            f"https://github.com/{r}" for r in self.run_ids
-        ) or "（無 run）"
+        return " ".join(run_url(r) for r in self.run_ids) or "（無 run）"
 
 
 def gh(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -88,6 +86,16 @@ def gh(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
 def gh_json(*args: str) -> Any:
     proc = gh(*args, check=True)
     return json.loads(proc.stdout or "null")
+
+
+def gh_scalar(*args: str) -> str:
+    """`gh … --jq <expr>` 取**純量**時用這個，不要用 gh_json。
+
+    `gh api … --jq .sha` 印的是沒有引號的裸字串，不是 JSON——用 json.loads 會去
+    解析它。commit sha 又剛好常以數字開頭（`41b2d57…` 會被當成數字 41 再撞上
+    `b2d57`），報出莫名其妙的 "Extra data: line 1 column 3"。
+    """
+    return gh(*args, check=True).stdout.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +168,29 @@ def dispatch(workflow: str, ref: str) -> int:
     raise RuntimeError(f"dispatch {ref} 之後找不到新 run")
 
 
+#: GitHub 自己塞進來的步驟，不是 workflow 檔裡的步驟。「Post <action>」是那個
+#: action 自己的收尾（無論前面成不成功都會跑），「Set up job」／「Complete job」
+#: 是框架 pseudo-step。把它們算成「guard 拒絕後還有步驟執行」是假警報
+#: ——2026-09-30 第二輪實測就這樣把正確的 guard 報成 fail。
+SYNTHETIC_STEPS = ("Set up job", "Complete job")
+
+
+def is_synthetic(step: dict[str, Any]) -> bool:
+    name = str(step.get("name") or "")
+    return name in SYNTHETIC_STEPS or name.startswith("Post ")
+
+
+def real_steps_after(steps: list[dict[str, Any]], name: str) -> list[dict[str, Any]]:
+    """`name` 之後**真正被執行**的 workflow 步驟。
+
+    被跳過的步驟在 API 上是 `status: "completed"` ＋ `conclusion: "skipped"`——
+    篩 `status` 會把它們全部算成有執行過（2026-09-30 第二輪實測踩過）。要看
+    `conclusion`。
+    """
+    return [s for s in steps_after(steps, name)
+            if not is_synthetic(s) and s["conclusion"] not in (None, "skipped")]
+
+
 def step_by_name(steps: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
     for s in steps:
         if s["name"] == name:
@@ -217,9 +248,10 @@ def check_guard_main(workflow: str) -> Result:
     if guard["conclusion"] != "success":
         return Result("guard-main", "fail",
                       f"在 main 上觸發，guard 竟然沒有放行：{guard}", [run_id])
-    rest = steps_after(steps, "guard")
-    first_fail = next((s for s in rest if s["conclusion"] not in (None, "success", "skipped")), None)
-    reached = [s["name"] for s in rest if s["conclusion"] in ("success", "failure", "skipped")]
+    rest = [s for s in steps_after(steps, "guard") if not is_synthetic(s)]
+    first_fail = next((s for s in rest
+                       if s["conclusion"] not in (None, "success", "skipped")), None)
+    reached = [s["name"] for s in rest if s["conclusion"] != "skipped"]
     if first_fail is None:
         return Result("guard-main", "fail",
                       f"guard 放行了，但之後沒有任何一步失敗（正式部署前應該在需要秘密的"
@@ -242,21 +274,60 @@ def check_guard_branch(workflow: str, branch: str) -> Result:
     if guard["conclusion"] == "success":
         return Result("guard-branch", "fail",
                       f"從 {branch} 觸發，guard 竟然放行了", [run_id])
-    later = [s for s in steps_after(steps, "guard")
-             if s["status"] not in ("", None) and s["status"] != "skipped"]
+    skipped = [s["name"] for s in steps_after(steps, "guard")
+               if not is_synthetic(s) and s["conclusion"] == "skipped"]
+    later = real_steps_after(steps, "guard")
     if later:
         return Result("guard-branch", "fail",
                       f"guard 拒絕了，但後面還有步驟被執行："
                       f"{[(s['name'], s['conclusion']) for s in later]}", [run_id])
     log = run_log(run_id)
+    # 要抓 `Ref refs/heads/phase1-spike is not refs/heads/main` 那一行實際輸出，
+    # 不要抓到 Actions echo 出來的腳本原始碼 `Ref $GITHUB_REF is not refs/heads/main`
+    # ——後者會讓報告看起來像環境變數沒展開。
     reason = ""
-    m = re.search(r"Ref (\S+) is not refs/heads/main", log)
+    m = re.search(r"Ref (refs/\S+) is not refs/heads/main", log)
     if m:
-        reason = f"，log 訊息：{m.group(0)!r}"
+        reason = f"，log 訊息：Ref {m.group(1)} is not refs/heads/main"
     return Result("guard-branch", "pass",
                   f"從 {branch}（{fetch_run(run_id)['headSha'][:7]}）觸發，"
-                  f"guard 拒絕（{guard['conclusion']}），後面 0 個步驟被執行{reason}",
+                  f"guard 拒絕（{guard['conclusion']}），後面 0 個 workflow 步驟被執行"
+                  f"（{len(skipped)} 個被 skipped：{', '.join(skipped)}）{reason}",
                   [run_id])
+
+
+#: `gh run view --log` 每行的前綴：`<job>\t<step>\t<BOM?>\<timestamp> `。
+LOG_PREFIX = re.compile(
+    r"^(?:[^\t\n]*\t[^\t\n]*\t)?(?:\ufeff)?\d{4}-\d{2}-\d{2}T[\d:.]+Z ?",
+)
+
+
+def log_body(line: str) -> str:
+    """去掉 `gh run view --log` 的 job/step/timestamp 前綴，只留內容。"""
+    return LOG_PREFIX.sub("", line, count=1)
+
+
+def diagnose_pins_at(ref: str) -> str:
+    """列出某個 ref 上的 workflow 檔釘了哪些 action、哪些解析不了。
+
+    rerun 用的是**原本那個 sha** 上的 workflow 檔。如果那一版釘的 action SHA 是壞的，
+    rerun 會死在 job setup 而非 guard——把它講清楚，才不會被誤讀成 guard 壞掉。
+    """
+    try:
+        raw = gh_scalar("api",
+                        f"repos/{REPO}/contents/.github/workflows/committer.yml?ref={ref}",
+                        "--jq", ".content")
+        import base64
+        text = base64.b64decode(raw).decode("utf-8")
+    except Exception as e:  # noqa: BLE001 — 診斷本身失敗不要蓋掉主訊息
+        return f"（讀不到該 ref 的 workflow 檔：{e}）"
+    pins = re.findall(r"uses:\s*([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)@([0-9a-f]{40})", text)
+    bad = [f"{o}/{n}@{s[:12]}…" for o, n, s in pins
+           if gh("api", f"repos/{o}/{n}/commits/{s}").returncode != 0]
+    if not bad:
+        return f"（{ref} 上的 action SHA 都解析得到，那要另外查——把 run 的完整 log 貼出來。）"
+    return f"診斷：{ref} 上的 workflow 檔釘了 {len(bad)} 個解析不了的 action SHA：" \
+           f"{', '.join(bad)}。要驗 sha 檢查，請改 rerun 一個**workflow 檔是好的**舊 run。"
 
 
 def check_permissions(workflow: str, main_run: int | None) -> Result:
@@ -270,7 +341,7 @@ def check_permissions(workflow: str, main_run: int | None) -> Result:
                       f"run {main_run} 的 log 裡找不到 GITHUB_TOKEN Permissions 一節", [main_run])
     found: dict[str, str] = {}
     for line in (block.group(1) if block else "").splitlines():
-        m = re.match(r"\s*([A-Za-z-]+):\s*(\S+)\s*$", line)
+        m = re.match(r"\s*([A-Za-z][A-Za-z-]*):\s*(\S+)\s*$", log_body(line))
         if m:
             found[m.group(1).lower()] = m.group(2)
     extra = {k: v for k, v in found.items()
@@ -336,7 +407,16 @@ def check_inputs(workflow: str) -> Result:
 
 
 def check_rerun(workflow: str, run_id: int | None) -> Result:
-    """rerun 一個舊的 run：main 已經前進，guard 必須拒絕（sha 對不上）。"""
+    """rerun 一個舊的 run：main 已經前進，guard 必須拒絕（sha 對不上）。
+
+    `gh run rerun` **沿用同一個 databaseId**、把 `run_attempt` 加一，不會產生新的
+    run——所以這裡一律重新讀同一個 id，千萬不要用「最新那個 run」去猜（那會拿到
+    別的 run 的結果，看起來像通過其實查錯對象）。
+
+    還有一件事要留意：rerun 會用**原本那個 sha** 上的 workflow 檔。如果那個 sha
+    的 workflow 檔本身有問題（例如 action SHA 釘錯），rerun 會死在 job setup 而
+    不是 guard——那不算通過。本檢查會把這種情況標成 fail 並說明。
+    """
     if run_id is None:
         return Result("rerun", "skip",
                       "沒有指定 --rerun <run-id>。這一項要拿一個在舊 commit 上的 run，"
@@ -344,47 +424,47 @@ def check_rerun(workflow: str, run_id: int | None) -> Result:
     data = fetch_run(run_id)
     if data["status"] != "completed":
         return Result("rerun", "skip", f"run {run_id} 還沒結束（{data['status']}）", [run_id])
-    remote = gh_json("api", f"repos/{REPO}/commits/main", "--jq", ".sha")
+    remote = gh_scalar("api", f"repos/{REPO}/commits/main", "--jq", ".sha")
     if data["headSha"] == remote:
         return Result("rerun", "skip",
                       f"run {run_id} 的 sha 還是遠端 main HEAD（{remote[:7]}），"
                       "guard 沒有東西可擋。請先讓 main 前進（合併下一包）再跑這項。",
                       [run_id])
+    before = gh_scalar("api", f"repos/{REPO}/actions/runs/{run_id}", "--jq", ".run_attempt")
     proc = gh("run", "rerun", str(run_id), "--repo", REPO)
     if proc.returncode != 0:
         return Result("rerun", "fail",
                       f"gh run rerun 失敗: {proc.stderr.strip()}", [run_id])
-    new_id = latest_run_id(workflow, data["headBranch"])
-    if new_id is None or new_id == run_id:
-        # rerun 不會產生新的 databaseId，就只能看原本那筆的 updated_at／attempt
-        time.sleep(20)
-        attempt = gh_json("api", f"repos/{REPO}/actions/runs/{run_id}",
-                          "--jq", ".run_attempt")
-        wait_for_run(run_id)
-    else:
-        wait_for_run(new_id)
-        ids = [run_id, new_id]
-        steps = steps_of(new_id)
-        guard = step_by_name(steps, "guard")
-        if guard is None or guard["conclusion"] == "success":
-            return Result("rerun", "fail",
-                          f"rerun 在 sha {data['headSha'][:7]}（遠端 main 已經是 "
-                          f"{remote[:7]}）竟然通過了 guard", ids)
-        later = [s for s in steps_after(steps, "guard")
-                 if s["status"] not in ("", None, "skipped")]
-        if later:
-            return Result("rerun", "fail",
-                          f"rerun 的 guard 拒絕了但後面還跑了 {[s['name'] for s in later]}",
-                          ids)
-        return Result("rerun", "pass",
-                      f"rerun 停留在舊 sha {data['headSha'][:7]}（遠端 main 已經是 "
-                      f"{remote[:7]}），guard 拒絕，後面 0 個步驟被執行", ids)
+    wait_for_run(run_id)
+    after = gh_scalar("api", f"repos/{REPO}/actions/runs/{run_id}", "--jq", ".run_attempt")
+    if after == before:
+        return Result("rerun", "fail",
+                      f"rerun 之後 run_attempt 沒有變（{before} → {after}），"
+                      "這輪可能根本沒跑起來", [run_id])
+
     steps = steps_of(run_id)
+    names = [s["name"] for s in steps]
     guard = step_by_name(steps, "guard")
-    ok = guard is not None and guard["conclusion"] not in (None, "success")
-    return Result("rerun", "pass" if ok else "fail",
-                  f"rerun（attempt {attempt}）在 sha {data['headSha'][:7]} 上，"
-                  f"guard = {(guard or {}).get('conclusion')}", [run_id])
+    if guard is None:
+        return Result("rerun", "fail",
+                      f"rerun（attempt {before}→{after}）沒有 guard 這個步驟：{names}。"
+                      f"rerun 用的是 **sha {data['headSha'][:7]} 上**的 workflow 檔，"
+                      "那一版本身跑不起來（死在 job setup），guard 根本沒跑到——"
+                      "這不算通過，也不代表 guard 有問題。"
+                      + diagnose_pins_at(data["headSha"]), [run_id])
+    if guard["conclusion"] == "success":
+        return Result("rerun", "fail",
+                      f"rerun 在 sha {data['headSha'][:7]}（遠端 main 已經是 "
+                      f"{remote[:7]}）竟然通過了 guard", [run_id])
+    later = real_steps_after(steps, "guard")
+    if later:
+        return Result("rerun", "fail",
+                      f"rerun 的 guard 拒絕了但後面還跑了 "
+                      f"{[(s['name'], s['conclusion']) for s in later]}", [run_id])
+    return Result("rerun", "pass",
+                  f"rerun（attempt {before}→{after}）停留在舊 sha {data['headSha'][:7]}"
+                  f"（遠端 main 已經是 {remote[:7]}），guard 拒絕"
+                  f"（{guard['conclusion']}），後面 0 個步驟被執行", [run_id])
 
 
 def check_log_secrets(run_ids: list[int]) -> Result:
