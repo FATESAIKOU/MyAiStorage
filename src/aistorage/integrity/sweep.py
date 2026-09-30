@@ -27,6 +27,9 @@
   知道剛寫出去的位元組），這一輪上傳的 annex 物件改認 pending 記的上傳時間窗；
   兩個證據都缺席時 fail-closed（不猜、不搬移），偏離時的注入物證據也改取
   `expected_manifest_sha256` 那一份的 `createdTime`
+- review-final M1（見 `copies_in_window` 與 `plan_sweep`）：上傳時間窗內要求
+  **恰好一份**。窗內兩份以上時一個都不選（`window_ambiguous` → 全部 NEED_ADMIN、
+  一個都不搬），因為「窗內最早者勝」是住民在第 8 步之後補放一份就能贏的
 """
 
 from __future__ import annotations
@@ -201,21 +204,26 @@ def _window_text(window: tuple[datetime, datetime] | None) -> str:
     return f"{window[0].isoformat()} ～ {window[1].isoformat()}"
 
 
-def window_keeper(
+def copies_in_window(
     files: Iterable[DriveFile], window: tuple[datetime, datetime] | None
-) -> DriveFile | None:
-    """時間窗內建立的那一份（沒有就回 None）。
+) -> list[DriveFile]:
+    """時間窗內建立的那些同名副本（依 `dedup_rank` 排序；沒有窗回空清單）。
 
     H2：annex 物件的真身不能用「建立最早」決定——住民知道自己 raw 的 key，
     可以**預先**在前綴放一份同名同內容的物件，於是「最早者勝」會保留他那份、
     隔離提交流程上傳的那份，他再刪掉自己那份，被釘選的 key 就從 Drive 上消失
     （每一輪都中止，而且不會自己好）。真身是「提交流程上傳的那一份」，也就是
     建立時間落在 `pending` 記的上傳時間窗裡的那一份。
+
+    **M1（review-final）：窗內要的是「恰好一份」，不是「窗內最早的那一份」。**
+    住民只要在第 8 步之後、promote 之前再放一份（同樣落在窗內），窗內就有兩份，
+    而「窗內最早者勝」正是他要的——第 8 步的 `verify_upload_window` 只要求「窗內
+    至少有一份」，抓不到這種事後加的。呼叫端拿到兩份以上時一律不選（見
+    `plan_sweep` 的 `window_ambiguous`）。
     """
-    inside = [f for f in files if in_window(f, window)]
-    if not inside:
-        return None
-    return min(inside, key=dedup_rank)
+    if window is None:
+        return []
+    return sorted((f for f in files if in_window(f, window)), key=dedup_rank)
 
 
 def _created_at_of(f: DriveFile | None) -> datetime | None:
@@ -454,6 +462,22 @@ def plan_sweep(
     窗內一份都沒有時（Drive 的列表還沒更新，或 rclone 的 checkpresent 因為同名檔
     已存在而跳過上傳——這正是 M3 一直沒實測的那件事）**不退回 createdTime 決勝**，
     也不搬移：判 NEED_ADMIN，理由裡附上時間窗，列入健康檢查等人處理。
+
+    **M1（review-final）：窗內要的是「恰好一份」，不是「窗內最早的那一份」。**
+
+    舊規則是「窗內最早者勝」。住民只要在第 8 步上傳之後、promote 之前再放一份
+    同名同內容的物件（前綴裡當時沒有同名檔，第 8 步的隔離什麼都沒搬，而 rclone
+    的 `checkpresent` 讓上傳被跳過或 Drive 的列表讓剛上傳的那份還沒出現——
+    `verify_upload_window` 只要求「窗內**至少**有一份」，所以第一輪查詢就過了），
+    窗內就有兩份，而且他自己那份一定比較早，「窗內最早者勝」就會保留他那份、
+    隔離提交流程上傳的那份；他再刪掉自己那份，被釘選的 key 就從 Drive 上消失
+    （每一輪都中止、不會自己好，而那份 raw 已經是 Agora 的真本）。
+
+    所以窗內**兩份以上**時一個都不選：那些檔案全部走 NEED_ADMIN，列入健康檢查等
+    人處理。代價是住民可以用這個手法讓自己的 session 一直進不來——只影響他自己，
+    而且真本並沒有消失（兩份都還在前綴裡），所以方向仍然是「停擺」而不是「遺失」。
+    「rclone 跳過上傳、窗內只有他那一份」這個連 (a) 也救不了的情況，靠
+    `verify_pin_keys_on_drive` 的隔離區自癒（見 `verify.py`）。
     """
     decisions: list[SweepDecision] = []
     default_from_parent = prefix_folder_id or listing.prefix_folder_id
@@ -549,12 +573,12 @@ def plan_sweep(
     # bundle／annex 物件：一般情形保留建立最早的那一份（見 plan_sweep 的 H1 說明）。
     #
     # H2 例外：**這一輪才上傳上去的** annex 物件，保留者必須是「建立時間落在
-    # pending 記的上傳時間窗裡」的那一份。住民只要預先在前綴放一份同名同內容的
-    # 物件，「最早者勝」就會保留他那份、隔離提交流程上傳的那份；他再刪掉自己
-    # 那份，被釘選的 key 就從 Drive 上消失（每一輪都中止、不會自己好）。
+    # pending 記的上傳時間窗裡」而且**窗內恰好一份**的那一份。住民只要預先在前綴放
+    # 一份同名同內容的物件，「最早者勝」就會保留他那份、隔離提交流程上傳的那份；
+    # 他再刪掉自己那份，被釘選的 key 就從 Drive 上消失（每一輪都中止、不會自己好）。
     # 判斷「這一輪才上傳」＝`pending.annex_keys` 有、正式釘選值沒有。
     # 時間窗缺席（欄位壞掉、或 pin repo 裡是舊格式的 pending）時**一樣不能**退回
-    # 「建立最早者勝」——那正是住民要的。於是這些 key 直接進 `window_missing_names`，
+    # 「建立最早者勝」——那正是住民要的。於是這些 key 直接進 `window_ambiguous`，
     # 一律不搬移。
     window = upload_window_of(pending)
     uploaded_this_round: frozenset[str] = frozenset()
@@ -562,17 +586,39 @@ def plan_sweep(
         uploaded_this_round = frozenset(pending.annex_keys) - frozenset(state.annex_keys)
 
     kept_by_name: dict[str, DriveFile] = {}
-    #: H2：這一輪上傳的 key，但窗內一份檔都沒有（或根本沒有時間窗）→ 沒有證據指認
-    #: 任何一份是注入物，一律不搬移（`window_missing_names` 的檔案走 NEED_ADMIN）。
-    window_missing_names: set[str] = set()
+    #: H2／M1：這一輪上傳的 key，但時間窗指認不出**唯一**的那一份（窗內一份都沒有、
+    #: 窗內兩份以上、或根本沒有時間窗）→ 沒有證據指認任何一份是注入物，一律不搬移
+    #: （這些檔案走 NEED_ADMIN）。值是報告用的理由（不含檔案自己的時間戳，那一段
+    #: 在套用決策時補，避免同一個檔案的理由出現兩種寫法）。
+    window_ambiguous: dict[str, str] = {}
     for name, group in by_name.items():
         if not (parse_bundle_name(name) or _ANNEX_KEY_PATTERN.match(name)):
             continue
         eligible = [f for f in group if _self_consistent(f)]
         if name in uploaded_this_round:
-            keeper = window_keeper(eligible, window) if window is not None else None
-            if keeper is not None:
-                kept_by_name[name] = keeper
+            inside = copies_in_window(eligible, window)
+            if len(inside) == 1:
+                kept_by_name[name] = inside[0]
+            elif inside:
+                # M1（review-final）：窗內**兩份以上**。第 8 步的
+                # `verify_upload_window` 只要求「窗內至少有一份」，抓不到住民在
+                # 上傳之後、promote 之前補放的那一份（前綴裡當時沒有同名檔，第 8 步
+                # 的隔離什麼都沒搬）。而舊規則的「窗內最早者勝」正好是他要的：他自己
+                # 補放的那份一定比提交流程上傳的更早（更早的副本會落在窗外被隔離），
+                # 於是他贏了、真正上傳的那份被當成重複檔隔離，他再刪掉自己那份。
+                # 所以窗內兩份時**不選**：全部不搬移，列入健康檢查等人處理——兩份都還
+                # 在前綴裡，真本並沒有消失。
+                window_ambiguous[name] = (
+                    f"這是這一輪上傳的 annex key，但 pending 記的上傳時間窗"
+                    f"（{_window_text(window)}）內有 {len(inside)} 份位元組相同的副本"
+                    f"（{file_stamp(inside[0])}、{file_stamp(inside[-1])} …）。"
+                    "正常流程一個世代只會上傳一份，所以窗內兩份代表第 8 步的"
+                    " verify_upload_window 當時只看到一份（Drive 的列表還沒更新，"
+                    "或 rclone 的 checkpresent 因為同名檔已存在而跳過了上傳），"
+                    "而住民在 promote 之前又補放了一份——那正是他需要贏的位置。"
+                    "無法分辨哪一份才是真本：一份都不選、一個都不搬（真本沒有消失，"
+                    "兩份都還在前綴裡），列入健康檢查等人處理"
+                )
             elif len(eligible) > 1:
                 # **同名同內容的副本**存在，但窗內一份都沒有（Drive 的列表還沒更新、
                 # 或這一輪的上傳被 rclone 的 checkpresent 跳過了），或根本沒有時間窗。
@@ -583,7 +629,14 @@ def plan_sweep(
                 # 「唯一一份就是住民預先放的」這種情形在第 8 步就被
                 # `verify_upload_window` 擋下來了（窗內一份都沒有 → 那一輪中止、
                 # 不寫 pending），所以不會走到這裡。
-                window_missing_names.add(name)
+                window_ambiguous[name] = (
+                    f"這是這一輪上傳的 annex key，但前綴裡沒有任何一份檔案的建立時間"
+                    f"落在 pending 記的上傳時間窗（{_window_text(window)}）內——"
+                    "可能是 Drive 的列表還沒更新，也可能是 rclone 的 checkpresent "
+                    "因為同名檔已存在而跳過上傳（那唯一的一份就是住民預先放的），"
+                    "或者 pending 根本沒記時間窗。沒有證據指認哪一份是注入物："
+                    "不搬移，列入健康檢查等人處理"
+                )
             continue
         keeper = earliest_of(eligible)
         if keeper is not None:
@@ -1010,24 +1063,18 @@ def plan_sweep(
             key_size = int(annex_match.group(1))
             key_sha = annex_match.group(2).lower()
             if (
-                f.name in window_missing_names
+                f.name in window_ambiguous
                 and f.size == key_size
                 and f_sha == key_sha
             ):
-                # H2：這一輪上傳的 key，但前綴裡**沒有任何一份**建立時間落在
-                # pending 記的上傳時間窗裡的檔案（或 pending 根本沒記時間窗）。
-                # 這時「保留建立最早者」正好是住民要的（他預先放的那份會贏），所以
-                # 不猜、不搬移：列入健康檢查等人處理。理由裡附上時間窗。
+                # H2／M1：這一輪上傳的 key，但時間窗指認不出**唯一**的那一份
+                # （窗內一份都沒有，或窗內兩份以上）。這時「保留窗內最早者」正好是
+                # 住民要的（他預先放的那份、或他事後補放的那份會贏），所以不猜、
+                # 不搬移：列入健康檢查等人處理。理由裡附上時間窗與判定結果。
                 decisions.append(
                     _need_admin(
                         f,
-                        f"這是這一輪上傳的 annex key，但前綴裡沒有任何一份檔案的建立時間"
-                        f"落在 pending 記的上傳時間窗"
-                        f"（{_window_text(window)}）內——可能是 Drive 的列表還沒更新，"
-                        f"也可能是 rclone 的 checkpresent 因為同名檔已存在而跳過上傳"
-                        f"（那唯一的一份就是住民預先放的），或者 pending 根本沒記時間窗。"
-                        f"沒有證據指認哪一份是注入物：不搬移，列入健康檢查等人處理"
-                        f"（{file_stamp(f)}）",
+                        f"{window_ambiguous[f.name]}（{file_stamp(f)}）",
                     )
                 )
                 continue

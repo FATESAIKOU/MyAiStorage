@@ -152,9 +152,9 @@ def test_run_uses_the_prefix_listing_from_after_the_sweep(
     seen_listing: list[Any] = []
     original = run_mod.verify_pin_keys_on_drive
 
-    def _spy(drive_, prefix, state, *, repo_listing=None):
-        seen_listing.append(repo_listing)
-        return original(drive_, prefix, state, repo_listing=repo_listing)
+    def _spy(drive_, prefix, state, **kw):
+        seen_listing.append(kw.get("repo_listing"))
+        return original(drive_, prefix, state, **kw)
 
     monkeypatch.setattr(run_mod, "verify_pin_keys_on_drive", _spy)
 

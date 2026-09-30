@@ -31,6 +31,7 @@ def test_all_ok_and_summary() -> None:
         manifest_main_sha="a", pin_main_sha="a",
         held_files_known=True,
         manifest_conflict_known=True,
+        quarantined_pinned_keys_known=True,
         prune_ok=True)
     checks = run_health(data, now=NOW)
     assert summarize(checks) == "ok"
@@ -357,3 +358,92 @@ def test_manifest_conflict_is_ok_when_only_one_distinct_content() -> None:
     assert (conflicts, stale, known) == ([], [], True)
     # 讀不到（沒有設定檔 id／pin）→ known=False，判定時是 warn 而不是「無」
     assert manifest_conflicts_in_prefix(drive, "", state, now=NOW) == ([], [], False)
+
+
+def test_health_reports_pinned_keys_left_in_quarantine() -> None:
+    """M1（review-final）b：隔離區裡還留著釘選值記載的 annex key → warn 並列 key。
+
+    提交流程第 5 步會把這種 key **自動**搬回前綴（內容定址，搬回來的一定是對的位元
+    組），所以正常情況下這一項應該是「無」。看得到就代表自癒還沒跑，或者同一個 key
+    **反覆**被誤隔離（impl1 那一類）——而隔離區 7 天後會被 purge，拖不得。
+    """
+    import hashlib
+
+    from aistorage.admin.health import CollectSources, collect_health
+    from aistorage.clock import FixedClock
+    from aistorage.integrity.pin import MemoryPinStore, PinState
+
+    body = b"the canonical raw record"
+    key = f"SHA256E-s{len(body)}--{hashlib.sha256(body).hexdigest()}"
+    tampered = f"SHA256E-s{len(body)}--{hashlib.sha256(b'other bytes').hexdigest()}"
+
+    drive = FakeDrive()
+    prefix = drive.seed_folder("agora-prefix")
+    quarantine = drive.seed_folder("quarantine")
+    day = drive.seed_folder("2026-09-27", parent=quarantine)
+    # 真的那份被隔離了（自癒的對象）
+    drive.seed_file(day, key, body, created_time="2026-09-27T03:00:00Z")
+    # 同名但位元組不同的一份：不是自癒的對象，不該被報出來
+    drive.seed_file(day, tampered, b"other bytes", created_time="2026-09-27T03:00:00Z")
+
+    pins = MemoryPinStore(initial_state=PinState(
+        repo="agora", repo_uuid="01234567-89ab-cdef-0123-456789abcdef",
+        refs={"refs/heads/main": "a" * 40},
+        manifest_sha256=hashlib.sha256(b"official\n").hexdigest(),
+        prev_manifest_sha256=None, active_bundles=(), removed_bundles=frozenset(),
+        annex_keys=frozenset({key, tampered}),
+        promoted_at="2026-09-27T09:00:00.000Z", run_id="1",
+    ))
+    data = collect_health(
+        CollectSources(
+            drive=drive, pins=pins, repo="agora", prefix_folder_id=prefix,
+            quarantine_folder_id=quarantine,
+        ),
+        clock=FixedClock("2026-09-27T10:00:00Z"),
+    )
+
+    assert data.quarantined_pinned_keys_known is True
+    assert [x.split("@")[0] for x in data.quarantined_pinned_keys] == [key], (
+        "只認 sha256 與 size 都相符的那一份；位元組不同的同名檔不算")
+    check = _by_name(run_health(data, now=NOW), "quarantined_pinned_keys")
+    assert check.status == "warn"
+    assert key in check.value
+    assert "purge" in (check.hint or "")
+
+
+def test_quarantined_pinned_keys_check_levels() -> None:
+    """查不到 → warn（M7）；前綴裡有同一個 key → ok（已經搬回去了）。"""
+    assert _by_name(run_health(HealthData(), now=NOW), "quarantined_pinned_keys").status \
+        == "warn"
+    clean = run_health(
+        HealthData(quarantined_pinned_keys_known=True), now=NOW
+    )
+    assert _by_name(clean, "quarantined_pinned_keys").status == "ok"
+
+
+def test_quarantined_pinned_keys_is_empty_once_the_key_is_back_in_the_prefix() -> None:
+    """自癒搬回之後隔離區裡就沒有它了 → 這一項回到 ok（不是一直報 warn）。"""
+    import hashlib
+
+    from aistorage.admin.health import quarantined_pinned_keys_in
+    from aistorage.integrity.pin import PinState
+
+    body = b"the canonical raw record"
+    key = f"SHA256E-s{len(body)}--{hashlib.sha256(body).hexdigest()}"
+    state = PinState(
+        repo="agora", repo_uuid="u", refs={}, manifest_sha256="m" * 64,
+        prev_manifest_sha256=None, active_bundles=(), removed_bundles=frozenset(),
+        annex_keys=frozenset({key}), promoted_at="2026-09-27T09:00:00.000Z", run_id="1",
+    )
+    drive = FakeDrive()
+    prefix = drive.seed_folder("agora-prefix")
+    quarantine = drive.seed_folder("quarantine")
+
+    assert quarantined_pinned_keys_in(drive, quarantine, prefix, state) == ([], True)
+    drive.seed_file(quarantine, key, body, created_time="2026-09-27T03:00:00Z")
+    hits, known = quarantined_pinned_keys_in(drive, quarantine, prefix, state)
+    assert known and len(hits) == 1
+    # 搬回前綴（自癒做的那件事）之後就不再是問題
+    drive.move(drive.find_by_name(quarantine, key)[0].id,
+               from_parent=quarantine, to_parent=prefix)
+    assert quarantined_pinned_keys_in(drive, quarantine, prefix, state) == ([], True)

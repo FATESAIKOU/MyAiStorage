@@ -71,6 +71,15 @@ jobs:
         env:
           # M7：工具的版本、網址與 SHA256 集中在這裡，升級時三個一起改。
           # 改版號或改 sha 之前先看 docs/impl/group3-modules.md 第 7.1 節的「工具升級」。
+          # git-annex 還多一處依賴：`AnnexGit.local_manifest_sha256()` 讀的是
+          # git-remote-annex 留在**本機**的快取
+          # `.git/annex/git-remote-annex/<uuid>/manifest`（第 11 步用它算出「這一輪
+          # 實際寫出去的那份主 manifest」的內容雜湊，記進 pending 的
+          # expected_manifest_sha256）。那是實作細節、不是公開介面：升級後如果它換了
+          # 路徑或不再留著，H1 會退回 fail-closed（報告印
+          # expected_manifest=UNRECORDED，settle／sweep 遇到多份候選就中止）。
+          # 升級後**必須重跑** tests/integration/test_committer_dup_manifest.py
+          # （它斷言本機那份的 sha256 == push 之後遠端那份的 sha256），不要只看流程跑完。
           GIT_ANNEX_VERSION: "10.20260717"
           GIT_ANNEX_URL: "https://downloads.kitenet.net/git-annex/linux/current/git-annex-standalone-amd64.tar.gz"
           GIT_ANNEX_SHA256: "a3c9d10ee33a7ace69efeaa8cd6282cfd7444ec797d732cebae12a64efefa18a"

@@ -61,6 +61,7 @@ from aistorage.integrity.verify import (
     precheck,
     verify_after_push,
     verify_clone,
+    verify_pin_keys_on_drive,
 )
 
 UUID = "11111111-2222-3333-4444-555555555555"
@@ -2389,6 +2390,83 @@ def test_h2_sweep_needs_admin_when_no_copy_falls_inside_the_upload_window(bundle
     ) == 0, "沒有證據時一個都不能搬"
 
 
+def test_h2_sweep_does_not_pick_any_copy_when_the_window_holds_two(bundles: dict):
+    """M1（review-final a）：上傳時間窗內**兩份**時一個都不選、**一個都不搬**。
+
+    攻擊：住民在第 8 步上傳**之後**、promote 之前再放一份同名同內容的物件。前綴裡
+    當時沒有同名檔，第 8 步的隔離什麼都沒搬；第 8 步的 `verify_upload_window` 只要求
+    「窗內**至少**有一份」（而且那時他還沒放），所以兩道門都過。下一輪 sweep 看到窗內
+    有兩份——舊規則是「窗內最早者勝」，而他自己那份一定比較早，於是他贏了、提交流程
+    上傳的那份被當成重複檔隔離，他再刪掉自己那份，被釘選的 key 就從 Drive 上消失
+    （每一輪都中止、不會自己好，而那份 raw 已經是 Agora 的真本）。
+
+    現在窗內兩份就不選：兩份都是 NEED_ADMIN、`apply_sweep` 一個都不搬。代價是住民可以
+    讓自己的 session 一直進不來（只影響他自己，而且真本沒有消失——兩份都還在前綴裡）。
+    """
+    body = b"a-raw-record-for-this-round"
+    key = _raw_key(body)
+    st = _sweep_state(bundles)          # 釘選值還沒有這個 key → 它是這一輪才上傳的
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"], created_time=BEFORE_PUSH)
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    # 提交流程上傳的那一份（落在 pending 記的時間窗裡）
+    uploaded = drive.seed_file(
+        prefix, key, body, created_time=UPLOAD_START, modified_time=UPLOAD_START,
+    )
+    # 住民在 promote 之前補放的：同樣落在窗內，而且**更早**（舊規則會選它）
+    late_preplaced = drive.seed_file(
+        prefix, key, body, created_time="2026-09-27T02:00:10Z",
+        modified_time="2026-09-27T02:00:10Z",
+    )
+    decs = _decide(
+        drive, st, prefix=prefix,
+        policy=SweepPolicy(pending=_uploaded_pending(bundles, frozenset({key})),
+                           now=parse_rfc3339(CLOCK_T0)),
+    )
+    assert decs[uploaded].disposition == Disposition.NEED_ADMIN
+    assert decs[late_preplaced].disposition == Disposition.NEED_ADMIN
+    for dec in (decs[uploaded], decs[late_preplaced]):
+        assert "2 份" in dec.reason, dec.reason
+        assert "上傳時間窗" in dec.reason
+    # 一個都不能搬：真本沒有消失（兩份都還在前綴裡），只是等人判斷
+    quarantine = drive.seed_folder("quarantine")
+    assert apply_sweep(
+        list(decs.values()), drive, quarantine_folder_id=quarantine,
+        clock=FixedClock(CLOCK_T0), prefix_folder_id=prefix,
+    ) == 0
+    left = {f.name for f in drive.list_children(prefix)}
+    assert key in left, "窗內兩份時一份都不能被搬走"
+
+
+def test_m1_sweep_still_keeps_the_single_copy_inside_the_window(bundles: dict):
+    """M1 a 的回歸保護：窗內**恰好一份**時照舊保留、窗外的預先放置份照舊隔離。
+
+    「不選」只針對指認不出唯一真身的情形；正常流程（一個世代上傳一次、窗內一份）
+    不能被這個規則擋下來。
+    """
+    body = b"a-raw-record-for-this-round"
+    key = _raw_key(body)
+    st = _sweep_state(bundles)
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    drive.seed_file(prefix, MANIFEST_NAME, bundles["m1"], created_time=BEFORE_PUSH)
+    drive.seed_file(prefix, bundles["b1"], bundles["b1_bytes"], created_time=BEFORE_PUSH)
+    preplaced = drive.seed_file(
+        prefix, key, body, created_time=EARLIER_THAN_PUSH, modified_time=AFTER_PUSH,
+    )
+    uploaded = drive.seed_file(
+        prefix, key, body, created_time=UPLOAD_START, modified_time=UPLOAD_START,
+    )
+    decs = _decide(
+        drive, st, prefix=prefix,
+        policy=SweepPolicy(pending=_uploaded_pending(bundles, frozenset({key})),
+                           now=parse_rfc3339(CLOCK_T0)),
+    )
+    assert decs[uploaded].disposition == Disposition.HOLD
+    assert decs[preplaced].disposition == Disposition.QUARANTINE
+
+
 def test_h2_plan_upload_exclusive_quarantines_preexisting_same_named_copies(bundles: dict):
     """H2：第 8 步上傳之前，前綴裡既有的同名檔先隔離。
 
@@ -2575,3 +2653,148 @@ def test_h2_sweep_does_not_fall_back_to_earliest_when_the_window_is_missing(
     assert decs[preplaced].disposition == Disposition.NEED_ADMIN
     assert decs[late].disposition == Disposition.NEED_ADMIN
     assert "上傳時間窗" in decs[preplaced].reason
+
+
+# ---------------------------------------------------------------------------
+# review-final M1 b：被釘選的 key 不見時，先到隔離區自動搬回來
+# ---------------------------------------------------------------------------
+
+
+def _key_state(key: str) -> PinState:
+    """釘選值只記載一個 annex key 的最小狀態（這個測試不需要真的 bundle）。"""
+    return PinState(
+        repo="agora", repo_uuid=UUID,
+        refs={"refs/heads/main": "c" * 40},
+        manifest_sha256="0" * 64,
+        prev_manifest_sha256=None,
+        active_bundles=(), removed_bundles=frozenset(),
+        annex_keys=frozenset({key}),
+        promoted_at="2026-09-27T00:00:00Z", run_id="run-1",
+    )
+
+
+def test_m1_pin_key_check_moves_the_object_back_from_quarantine():
+    """M1 b：key 在前綴裡不見了，但隔離區有一份 sha256／size 都相符的 → 自動搬回。
+
+    這是 review-final 的失敗情境的收尾：住民預先放一份同名同內容的物件贏了「保留
+    者」，提交流程上傳的那份被隔離，他再刪掉自己那份——被釘選的 key 就從 Drive 上
+    消失，`verify_pin_keys_on_drive` 每一輪都中止、不會自己好，而那份 raw 已經是
+    Agora 的真本。
+
+    內容定址（key 的形狀是 `SHA256E-s<size>--<sha256>`），所以搬回來的一定是對的位元
+    組；這等於 recovery runbook 模式 0 的自動版，impl1 那一類事故也會自己好。
+    """
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    quarantine = drive.seed_folder("quarantine")
+    day = drive.create(quarantine, "2026-09-27", b"", mime_type="application/vnd.google-apps.folder")
+    body = b"the canonical raw record"
+    key = _raw_key(body)
+    quarantined = drive.seed_file(day.id, key, body, created_time="2026-09-27T03:00:00Z")
+
+    restored = verify_pin_keys_on_drive(
+        drive, prefix, _key_state(key), quarantine_folder_id=quarantine,
+    )
+
+    assert [r.key for r in restored] == [key]
+    assert restored[0].quarantine_file_id == quarantined
+    assert restored[0].dry_run is False
+    # 檔案真的回到前綴裡（parents 是前綴），而且隔離區那邊沒有它了
+    moved = drive.get(quarantined)
+    assert moved.parents == (prefix,), moved.parents
+    assert not [
+        f for f in drive.list_children(day.id) if f.id == quarantined
+    ]
+    # 再查一次當然過（這一輪照常繼續，沒有中止）
+    assert verify_pin_keys_on_drive(
+        drive, prefix, _key_state(key), quarantine_folder_id=quarantine,
+    ) == ()
+
+
+def test_m1_pin_key_check_ignores_a_quarantine_copy_whose_bytes_differ():
+    """只有 sha256 **與** size 都相符才算：內容不符的同名檔不是被搬回的對象。
+
+    這是自癒唯一的安全邊界——搬回一個位元組不同的檔等於往真本裡塞東西。
+    """
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    quarantine = drive.seed_folder("quarantine")
+    day = drive.create(quarantine, "2026-09-27", b"", mime_type="application/vnd.google-apps.folder")
+    body = b"the canonical raw record"
+    key = _raw_key(body)
+    # 同名、但位元組不同（Drive 的 sha256 與 key 內嵌的不符）
+    drive.seed_file(day.id, key, body + b" tampered", created_time="2026-09-27T03:00:00Z")
+
+    with pytest.raises(MismatchError) as excinfo:
+        verify_pin_keys_on_drive(
+            drive, prefix, _key_state(key), quarantine_folder_id=quarantine,
+        )
+
+    assert "隔離區裡也沒有" in str(excinfo.value)
+    assert [f.name for f in drive.list_children(prefix)] == [], "一個都不能搬進前綴"
+
+
+def test_m1_pin_key_check_says_the_quarantine_looked_empty_before_it_gives_up():
+    """隔離區也沒有 → 照原樣中止，而且訊息要說明「隔離區也沒有」。
+
+    隔離區 7 天後會被 purge，所以「隔離區沒有」和「被刪掉」對管理者的意義完全不同：
+    前者還來得及照 recovery runbook 模式 0 處理，後者只能重建釘選值。
+    """
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    quarantine = drive.seed_folder("quarantine")
+    key = _raw_key(b"the canonical raw record")
+
+    with pytest.raises(MismatchError) as excinfo:
+        verify_pin_keys_on_drive(
+            drive, prefix, _key_state(key), quarantine_folder_id=quarantine,
+        )
+
+    message = str(excinfo.value)
+    assert "隔離區裡也沒有" in message
+    assert "7 天後會被 purge" in message
+
+
+def test_m1_pin_key_check_without_a_quarantine_folder_stays_fail_closed():
+    """沒有傳隔離區 id（舊呼叫端）→ 行為與原本完全一樣：中止，不猜。
+
+    自癒是**加上去**的，不是取代掉原有的中止；拿不到隔離區就只能照舊。
+    """
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    key = _raw_key(b"the canonical raw record")
+
+    with pytest.raises(MismatchError) as excinfo:
+        verify_pin_keys_on_drive(drive, prefix, _key_state(key))
+
+    assert "隔離區裡也沒有" not in str(excinfo.value)
+    assert key in str(excinfo.value)
+
+
+def test_m1_pin_key_check_dry_run_records_the_restore_without_moving_anything():
+    """dry-run 不搬檔（`--dry-run` 不得寫入 Drive），但要記下會搬哪幾個。
+
+    沒有記錄的話，dry-run 就看不出「這一輪其實可以自己好」；而因為什麼都沒搬，
+    這一輪仍然照原樣中止（方向是 fail-closed）。
+    """
+    from aistorage.integrity.verify import restore_pinned_keys_from_quarantine
+
+    drive = FakeDrive()
+    prefix = drive.seed_folder("prefix")
+    quarantine = drive.seed_folder("quarantine")
+    body = b"the canonical raw record"
+    key = _raw_key(body)
+    quarantined = drive.seed_file(quarantine, key, body, created_time="2026-09-27T03:00:00Z")
+
+    planned = restore_pinned_keys_from_quarantine(
+        drive, quarantine, prefix, [key], dry_run=True,
+    )
+    assert [(r.key, r.dry_run) for r in planned] == [(key, True)]
+    assert drive.get(quarantined).parents == (quarantine,), "dry-run 不得搬任何東西"
+
+    with pytest.raises(MismatchError) as excinfo:
+        verify_pin_keys_on_drive(
+            drive, prefix, _key_state(key), quarantine_folder_id=quarantine, dry_run=True,
+        )
+    assert "dry-run" in str(excinfo.value)
+    assert drive.get(quarantined).parents == (quarantine,)

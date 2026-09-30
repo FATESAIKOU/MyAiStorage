@@ -22,6 +22,14 @@ Drive 上的 repo 被刪除時，從任一個 git clone 重建。全部在 Admin
 addParents/removeParents，檔案本身還在，file id 也還在）。是 → 照模式 0 搬回，
 **資料一件都不會少**。先列隔離區確認，不要直接跳到模式 3。
 
+> **annex 物件已經自動做了（2026-09-30，review-final M1 b）。** 釘選值記載、但前綴裡
+> 不見了的 annex key，提交流程第 5 步會自己去隔離區找 sha256 與 size 都相符的那一份
+> **自動搬回來**，然後照常繼續這一輪（報告裡會有 `restored=[...]`，健康檢查看得到）。
+> 內容定址是它安全的原因：三項都對上就代表搬回去的位元組就是釘選值記載的物件。
+> 所以**下面的模式 0 手動步驟，現在只需要處理 manifest 與 bundle**（提交流程不會
+> 自動搬它們），以及「隔離區也沒有相符的檔」的情形——那時中止訊息會寫「隔離區裡也
+> 沒有……7 天後會被 purge」，要趁隔離區還在的時候做。
+
 0. **真本被隔離，但還在隔離區**（`lsf` 前綴看不到 manifest，但隔離區看得到）：
    從隔離區搬回前綴 → 重建釘選值。步驟見下。
 1. **主 manifest 還在**：不需要復原，先跑健康檢查找真正的原因。
@@ -109,8 +117,13 @@ git-remote-annex: No git repository found in this remote.
    |---|---|---|
    | `GITMANIFEST--<uuid>` | **必需** | `init-pin` 直接 `AbortRun`（它要求前綴裡**只有一種內容**的主 manifest） |
    | manifest 的 active 列表裡、但前綴沒有的 `GITBUNDLE-*` | **必需** | manifest 解析得出來但 `_download_and_replay` 找不到 bundle → 中止 |
-   | 那一輪新寫入的 `SHA256E-*`（manifest 引用不到，但樹狀指得到） | **必需** | `init-pin` 的 key 集合不含它 → 之後讀不到那份 Session |
+   | 那一輪新寫入的 `SHA256E-*`（manifest 引用不到，但樹狀指得到） | 釘選值已記載它 → 提交流程自動搬；釘選值還沒記載 → **必需**手動 | `init-pin` 的 key 集合不含它 → 之後讀不到那份 Session |
    | `GITMANIFEST--<uuid>.bak` | 選搬 | `init-pin` 只看主 manifest；搬回去只是讓前綴回到 push 完的形狀 |
+
+   > **`SHA256E-*` 已經不用手動搬了**（2026-09-30，review-final M1 b）：釘選值記載的
+   > key 只要在隔離區裡有 sha256 與 size 都相符的一份，第 5 步就會自動搬回前綴並繼續
+   > 這一輪。真的需要手動搬的，是上面那種「釘選值還沒記載、但真本該有的」物件——
+   > 那要靠 `init-pin --confirm` 重建釘選值，順便把 key 收進去。
 
    > **前綴裡有兩份同名主 manifest 是正常狀態，不要當成注入物**（2026-09-30 實測，
    > 見 `docs/decision-log.md` 同一節）：rclone 每輪 push 都重寫 manifest、file id

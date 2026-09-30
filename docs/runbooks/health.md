@@ -42,6 +42,12 @@
   刪掉前綴裡那份；順序反了下一輪又會長出來。完整步驟見 `docs/runbooks/recovery.md`
   的「模式 4」。
 - 同步器等待／拒收 → warn。
+- **隔離區裡還留著釘選值記載的 annex 物件 → warn**（`quarantined_pinned_keys`，
+  review-final M1 b）。正常情況下應該永遠是「無」：提交流程第 5 步發現這種 key 會
+  **自動**從隔離區搬回前綴（sha256 與 size 都相符才搬，內容定址所以搬回去的一定
+  是對的位元組），報告裡會出現 `restored=[...]`。看得到就代表自癒還沒跑（下一輪就
+  好），或者同一個 key **反覆**被誤隔離——後者才是要人看的，對照 `held_files` 看
+  是不是同一個 key 每次都被判成注入物。隔離區 7 天後會被 purge，看到就別拖。
 - opencode 升級時重跑 `resident/verify-prune.sh`（prune 只加標記）。
 
 ## 資料來源（`collect_health`）

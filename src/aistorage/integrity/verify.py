@@ -6,6 +6,9 @@
 - review-1.2-1.6 H3（push 後以 ls-remote 驗證）
 - review-1.4f3 M1（push 後驗證：active 清單比對、created_time、removed 包含關係、重放比對）
 - review-cdb4a34 M3（同名檔：任一檔 checksum＋size 相符就算存在）
+- review-final M1 b（被釘選的 key 不見時，先到隔離區找 sha256 與 size 都相符的
+  檔自動搬回來——內容定址，所以搬回來的一定是對的位元組；見
+  `restore_pinned_keys_from_quarantine`）
 """
 
 from __future__ import annotations
@@ -250,13 +253,126 @@ def verify_clone(
         verify_annex_coverage(state.annex_keys, expected_annex_keys)
 
 
+def _pinned_keys_not_on_drive(
+    candidates: Sequence[DriveFile], annex_keys: Iterable[str],
+) -> tuple[list[str], list[str]]:
+    """把 key 分成「前綴裡一份都沒有」與「同名但內容不符」兩組。
+
+    兩組都是「被釘選的 key 在 Drive 上沒有相符的檔案」，處置相同（自癒或中止），
+    但報告要分得開：前者多半是檔案被搬走或被刪了，後者是前綴裡躺著一份同名
+    垃圾檔（`find_annex_file` 以「任一檔相符就算存在」判定，見 M3）。
+    """
+    missing: list[str] = []
+    unreadable: list[str] = []
+    for key in sorted(set(annex_keys)):
+        if not _is_plausible_annex_key(key):
+            unreadable.append(f"{key}（形狀不合法）")
+            continue
+        by_name = tuple(f for f in candidates if f.name == key)
+        if not by_name:
+            missing.append(key)
+            continue
+        if find_annex_file(by_name, key) is None:
+            unreadable.append(key)
+    return missing, unreadable
+
+
+@dataclass(frozen=True)
+class RestoredFromQuarantine:
+    """自癒：從隔離區搬回一個被釘選的 annex key 的紀錄。
+
+    只記 key、隔離區裡那一檔的 file id 與它原本的父資料夾（D2 log 規則：不記
+    內容）。`dry_run=True` 表示「記下來但沒有真的搬」。
+    """
+
+    key: str
+    quarantine_file_id: str
+    from_parent: str
+    dry_run: bool = False
+
+
+#: 隔離區的遞迴深度上限（`quarantine/<日期>/` 只有一層，但別讓它變成無上限的掃描）。
+QUARANTINE_SCAN_DEPTH = 4
+
+
+def restore_pinned_keys_from_quarantine(
+    drive: DriveClient,
+    quarantine_folder_id: str,
+    prefix_folder_id: str,
+    keys: Iterable[str],
+    *,
+    dry_run: bool = False,
+) -> tuple[RestoredFromQuarantine, ...]:
+    """隔離區裡有 sha256 與 size 都相符的檔，就把它搬回前綴（M1 自癒）。
+
+    為什麼可以自動搬（review-final M1 b）：
+
+    - **內容定址**：annex key 的形狀是 `SHA256E-s<size>--<sha256>`，所以「檔名相符
+      ＋ Drive 的 `sha256Checksum` 相符 ＋ `size` 相符」三項都對上，就代表這一份的
+      位元組**就是**釘選值記載的那個物件。搬回來的不可能是別人的東西。
+    - **隔離是搬走不是刪除**（`apply_sweep` 用 addParents/removeParents，file id
+      還在），而且隔離區保留 7 天（`quarantine_retention_days`），足以涵蓋住民為了
+      讓提交流程停擺而反覆重來的時間。
+    - 這是 recovery runbook「模式 0（從隔離區搬回真本）」的**自動版**：那一類
+      事故（impl1 把真正的新世代 raw 當注入物搬走）從此會自己好，不必人工寫腳本。
+      範圍仍然很窄——**只有釘選值記載的 key**，而且只從隔離區搬，所以永遠不會把
+      注入物放回真本。
+
+    找不到就什麼都不做（回空 tuple），由呼叫端照原樣中止。`dry_run` 只記錄會搬
+    哪幾個，不真的搬（第 12 步的隔離區清理也會尊重 dry-run，所以這裡必須一致）。
+    """
+    wanted = {k for k in keys if _is_plausible_annex_key(k)}
+    if not wanted or not quarantine_folder_id:
+        return ()
+
+    found: dict[str, DriveFile] = {}
+    pending_dirs: list[tuple[str, int]] = [(quarantine_folder_id, 0)]
+    while pending_dirs:
+        folder_id, depth = pending_dirs.pop()
+        try:
+            children = drive.list_children(folder_id)
+        except Exception:
+            # 讀不到隔離區不是「有東西可搬」，也不是「確定沒有」——交給呼叫端照原樣
+            # 中止並把情況寫進訊息。
+            continue
+        for child in children:
+            if child.is_folder:
+                if depth < QUARANTINE_SCAN_DEPTH:
+                    pending_dirs.append((child.id, depth + 1))
+                continue
+            if child.name in wanted and child.name not in found and (
+                # key 的形狀就是檔名，所以拿檔名當 key 問同一個規則：
+                # sha256 與 size 都要和 key 內嵌的值相符。
+                find_annex_file((child,), child.name) is not None
+            ):
+                found[child.name] = child
+
+    restored: list[RestoredFromQuarantine] = []
+    for key in sorted(found):
+        f = found[key]
+        from_parent = f.parents[0] if f.parents else ""
+        if not from_parent:
+            continue
+        if not dry_run:
+            drive.move(f.id, from_parent=from_parent, to_parent=prefix_folder_id)
+        restored.append(
+            RestoredFromQuarantine(
+                key=key, quarantine_file_id=f.id, from_parent=from_parent,
+                dry_run=dry_run,
+            )
+        )
+    return tuple(restored)
+
+
 def verify_pin_keys_on_drive(
     drive: DriveClient,
     prefix_folder_id: str,
     state: PinState,
     *,
     repo_listing: RepoListing | None = None,
-) -> None:
+    quarantine_folder_id: str | None = None,
+    dry_run: bool = False,
+) -> tuple[RestoredFromQuarantine, ...]:
     """第 5 步（e2e 修正）：釘選值記載的 annex 物件，**Drive 上**真的在嗎？
 
     為什麼不能只信 `git annex find --in=<uuid>`（location log）：
@@ -274,35 +390,66 @@ def verify_pin_keys_on_drive(
     清掃第 4 步判定 annex 物件用的是同一套規則）。少一個就是真的不見了 →
     中止（fail-closed，寧可不要靜靜地把真本當成完整的）。
 
+    **M1（review-final）b：少一個時先到隔離區自癒，再照常繼續。**
+    內容定址，所以從隔離區搬回來的一定是對的位元組（見
+    `restore_pinned_keys_from_quarantine`）。找得到就搬回前綴、重查一次，然後
+    **照常繼續這一輪**（回傳搬了哪幾個，寫進執行報告與健康檢查）；隔離區也沒有
+    才中止——而且中止訊息要說明「隔離區也沒有」，因為隔離區 7 天後會被 purge，
+    那之後就真的沒有了。沒給 `quarantine_folder_id` 時行為與原本完全相同。
+
     `repo_listing` 必須是**第 4 步 sweep 之後**重新列舉的前綴（M3）：sweep 之前
     的 listing 還含著被隔離掉的同名注入檔，用它比對會把「真的那份物件明明還在」
-    判成不存在。
+    判成不存在。（自癒搬回之後不看這份 listing：它是在搬回之前列的。）
     """
     if not state.annex_keys:
-        return
+        return ()
     if repo_listing is not None:
-        candidates = tuple(repo_listing.files)
+        candidates: Sequence[DriveFile] = tuple(repo_listing.files)
     else:
         candidates = tuple(drive.list_children(prefix_folder_id))
-    missing: list[str] = []
-    unreadable: list[str] = []
-    for key in sorted(state.annex_keys):
-        if not _is_plausible_annex_key(key):
-            unreadable.append(f"{key}（形狀不合法）")
-            continue
-        by_name = tuple(f for f in candidates if f.name == key)
-        if not by_name:
-            missing.append(key)
-            continue
-        if find_annex_file(by_name, key) is None:
-            unreadable.append(key)
+    missing, unreadable = _pinned_keys_not_on_drive(candidates, state.annex_keys)
+
+    restored: tuple[RestoredFromQuarantine, ...] = ()
     if missing or unreadable:
+        restored = restore_pinned_keys_from_quarantine(
+            drive,
+            quarantine_folder_id or "",
+            prefix_folder_id,
+            missing + [k for k in unreadable if _is_plausible_annex_key(k)],
+            dry_run=dry_run,
+        )
+        if restored and not dry_run:
+            # 搬回來的檔案不在原本那份 listing 裡（它是在隔離區被列到的），
+            # 所以要重新列舉一次前綴再判。
+            missing, unreadable = _pinned_keys_not_on_drive(
+                tuple(drive.list_children(prefix_folder_id)), state.annex_keys
+            )
+
+    if missing or unreadable:
+        healed = [r.key for r in restored]
+        if restored and dry_run:
+            detail = (
+                f"（dry-run：隔離區裡有 {len(healed)} 個相符的檔"
+                f"（{healed[:3]}），但 dry-run 不搬任何東西，所以這一輪照原樣中止。）"
+            )
+        elif healed:
+            detail = (
+                f"已從隔離區搬回 {len(healed)} 個（{healed[:3]}），但這些仍然不符："
+            )
+        elif quarantine_folder_id:
+            detail = (
+                "隔離區裡也沒有 sha256 與 size 都相符的檔——注意隔離區 7 天後會被"
+                " purge，屆時就真的沒有了（模式 0 要趁現在做）："
+            )
+        else:
+            detail = ""
         raise MismatchError(
             f"釘選值記載的 annex 物件在 Drive 上不存在或內容不符"
             f"（不在 {prefix_folder_id}: {len(missing)} 個、不符: {len(unreadable)} 個）："
-            f"{(missing + unreadable)[:3]}；真本與釘選值已不一致，"
-            "需要管理者確認後重建釘選值（init-pin），不要自己好"
+            f"{(missing + unreadable)[:3]}{detail}"
+            f"真本與釘選值已不一致，需要管理者確認後重建釘選值（init-pin），不要自己好"
         )
+    return restored
 
 
 def verify_new_keys_on_drive(

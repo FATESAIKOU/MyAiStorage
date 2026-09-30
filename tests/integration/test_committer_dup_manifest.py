@@ -122,6 +122,30 @@ def test_duplicate_identical_manifest_does_not_break_push_or_clone(
         assert original, "副本之外應該還有正式那份"
         assert by_id[copy_id].created_time >= original[0].created_time
 
+    # ── L（review-final）：`local_manifest_sha256` 讀的是 git-remote-annex 的**本機
+    # 快取**路徑 `.git/annex/git-remote-annex/<uuid>/manifest`。那是實作細節，不是
+    # 公開介面——整套 H1（pending 記 expected_manifest_sha256、settle／verify／sweep
+    # 只認它）都建立在「那個檔案的位元組 == 剛 push 上遠端的那一份」上。改版時它可能
+    # 換路徑或不再留著，所以把它釘成一個會被持續檢查的事實，跟上面 rclone 的量測
+    # 同一個道理。
+    from aistorage.annex.git import SubprocessAnnexGit
+
+    local_sha = SubprocessAnnexGit(repo).local_manifest_sha256(annex.uuid)
+    assert local_sha is not None, (
+        "git-remote-annex push 之後必須在本機留下 "
+        f".git/annex/git-remote-annex/{annex.uuid}/manifest；"
+        "讀不到時提交流程會記 expected_manifest=UNRECORDED，"
+        "而 settle／sweep 只能退回 fail-closed（多份候選一律中止）"
+    )
+    remote_shas = {f.sha256 for f in manifests() if f.sha256}
+    assert local_sha in remote_shas, (
+        f"本機快取那份的 sha256 ({local_sha}) 不等於 push 之後遠端任何一份的 "
+        f"({sorted(remote_shas)})：H1 的證據來源壞了，pending 記的 "
+        "expected_manifest_sha256 會指向一份遠端不存在的位元組"
+    )
+    # 而且它就是**新**寫上去的那一份（不是上一次 push 留下的舊世代快取）
+    assert local_sha == next(iter({f.sha256 for f in fresh if f.sha256}), None)
+
 
 class _LsRemoteGit:
     """只支援 `ls_remote()` 的最小 AnnexGit（`verify_clone` 只需要它）。"""

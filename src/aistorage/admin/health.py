@@ -85,6 +85,12 @@ class HealthData:
     #: 而不是「某一次手滑」的證據。
     manifest_conflict_stale: list[str] = field(default_factory=list)
     manifest_conflict_known: bool = False
+    #: 被釘選值記載、前綴裡卻沒有、但**還在隔離區**的 annex key（M1 自癒的線索）。
+    #: 正常情況下這些 key 會在下一輪被 `verify_pin_keys_on_drive` 自動搬回來，所以
+    #: 看得到就代表「還沒搬」或「搬不回去」——例如同一個 key 反覆被誤隔離。格式是
+    #: `<key>@<隔離檔的 Drive createdTime>`。
+    quarantined_pinned_keys: list[str] = field(default_factory=list)
+    quarantined_pinned_keys_known: bool = False
 
 
 def _hours_since(at: str, now: datetime) -> float | None:
@@ -300,6 +306,31 @@ def run_health(data: HealthData, *, now: datetime) -> list[Check]:
             hint="若下一輪之後它又出現，就是持續注入：撤銷該 profile 的收件匣權限或簽章金鑰"))
     else:
         checks.append(Check(name="manifest_conflict", status="ok", value="無"))
+
+    # M1（review-final）b：被釘選值記載的物件還躺在隔離區。
+    #
+    # 提交流程第 5 步發現這種 key 會**自動**從隔離區搬回來（內容定址，搬回來的
+    # 一定是對的位元組），所以正常情況下這裡應該永遠是「無」——搬回之後隔離區裡就
+    # 沒有它了。看得到代表兩件事之一：自癒還沒跑（下一輪就會好），或者同一個 key
+    # **反覆**被誤隔離（後者才是要人看的：按時間看是不是每輪都出現同一個 key）。
+    # 隔離區 7 天後會被 purge，所以看到就別拖。
+    if not data.quarantined_pinned_keys_known:
+        checks.append(Check(name="quarantined_pinned_keys", status="warn",
+                            value="未知（讀不到隔離區或 pin）"))
+    elif data.quarantined_pinned_keys:
+        checks.append(Check(
+            name="quarantined_pinned_keys", status="warn",
+            value=(
+                f"隔離區裡還留著 {len(data.quarantined_pinned_keys)} 個釘選值記載的"
+                f" annex 物件，前綴裡沒有："
+                f"{'、'.join(sorted(data.quarantined_pinned_keys)[:3])}"
+            ),
+            hint="下一輪提交流程會自動從隔離區搬回來（內容定址），跑完看這一項還在"
+                 "不在；一直反覆出現代表有東西在被誤隔離，對照 held_files 看是不是"
+                 "同一個 key 每次都被判成注入物。隔離區 7 天後會被 purge",
+        ))
+    else:
+        checks.append(Check(name="quarantined_pinned_keys", status="ok", value="無"))
     return checks
 
 
@@ -419,6 +450,9 @@ def collect_health(sources: CollectSources, *, clock: Clock | None = None) -> He
     conflicts, conflict_stale, conflict_known = manifest_conflicts_in_prefix(
         sources.drive, sources.prefix_folder_id, state, now=now
     )
+    q_pinned, q_pinned_known = quarantined_pinned_keys_in(
+        sources.drive, sources.quarantine_folder_id, sources.prefix_folder_id, state,
+    )
 
     manifest_main: str | None = None
     index_bytes: int | None = None
@@ -466,6 +500,8 @@ def collect_health(sources: CollectSources, *, clock: Clock | None = None) -> He
         manifest_conflicts=conflicts,
         manifest_conflict_stale=conflict_stale,
         manifest_conflict_known=conflict_known,
+        quarantined_pinned_keys=q_pinned,
+        quarantined_pinned_keys_known=q_pinned_known,
     )
 
 
@@ -533,6 +569,43 @@ def _unbacked_prefix_files(
         if age_h > HELD_STALE_HOURS:
             stale.append(f"{d.file.name}{stamp}")
     return sorted(held), sorted(stale), True
+
+
+def quarantined_pinned_keys_in(
+    drive: DriveClient, quarantine_folder_id: str, prefix_folder_id: str, state: Any,
+) -> tuple[list[str], bool]:
+    """隔離區裡還留著、而釘選值記載的 annex key（`<key>@<createdTime>`）。
+
+    M1（review-final）b 的自癒線索。判定與 `verify.restore_pinned_keys_from_quarantine`
+    同一套規則：**只認 sha256 與 size 都和 key 內嵌值相符的檔**（內容定址，所以相符
+    就代表那一份位元組就是釘選值記載的物件），而且**前綴裡必須沒有**（已經搬回去了
+    就不算）。
+
+    刻意與「隔離區的檔案數／大小」分開報：那一項只量容量，這一項量「真本是不是
+    有東西被搬走了還沒回來」。
+    """
+    if not quarantine_folder_id or not prefix_folder_id or state is None:
+        return [], False
+    from aistorage.integrity.verify import find_annex_file
+
+    try:
+        in_prefix = {
+            f.name for f in drive.list_children(prefix_folder_id) if not f.is_folder
+        }
+        by_name: dict[str, list[Any]] = {}
+        for f in list_files(drive, quarantine_folder_id):
+            by_name.setdefault(f.name, []).append(f)
+    except Exception:
+        return [], False
+
+    hits: list[str] = []
+    for key in sorted(state.annex_keys):
+        if key in in_prefix:
+            continue
+        group = by_name.get(key)
+        if group and find_annex_file(group, key) is not None:
+            hits.append(f"{key}@{group[0].created_time}")
+    return sorted(hits), True
 
 
 def manifest_conflicts_in_prefix(

@@ -424,6 +424,7 @@ def test_health_checks_all_ok():
         pin_main_sha="sha_valid",
         held_files_known=True,
     manifest_conflict_known=True,
+    quarantined_pinned_keys_known=True,
         prune_ok=True,
     )
     checks = run_health(data, now=NOW)

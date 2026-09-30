@@ -165,6 +165,11 @@ class RunReport:
     #: `.git/annex/git-remote-annex/<uuid>/manifest`——那之後 settle／sweep 只能退回
     #: 保守行為（多份內容不同的候選一律 fail-closed 中止），健康檢查要能看到。
     expected_manifest_recorded: bool | None = None
+    #: M1（review-final）b：這一輪有沒有把「釘選值記載、但 Drive 上不見了」的 annex
+    #: 物件**從隔離區搬回來**（內容定址，所以搬回來的一定是對的位元組）。格式是 key
+    #: 名單——自癒不該是無聲的：反覆發生代表有東西在被誤隔離（impl1 那一類），健康
+    #: 檢查與執行報告都要看得見。空清單＝沒有自癒。
+    restored_from_quarantine: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -189,10 +194,14 @@ class RunReport:
             "" if self.expected_manifest_recorded is not False
             else " | expected_manifest=UNRECORDED"
         )
+        restore_str = (
+            f" | restored={self.restored_from_quarantine}"
+            if self.restored_from_quarantine else ""
+        )
         return (
             f"[RunReport {self.run_id}] {status} | counts: [{counts_str}]"
             f" | durations: [{durations_str}]{rv_str}{pub_str}{mt_str}"
-            f"{held_str}{admin_str}{exp_str}{err_str}"
+            f"{held_str}{admin_str}{exp_str}{restore_str}{err_str}"
         )
 
 
@@ -988,8 +997,21 @@ def _run_pipeline(ctx: PipelineContext) -> PipelineResult:
     # 只是不再拿來當這一輪的門檻。
     # `repo_listing` 是 sweep **之後**重新列舉的（見第 4 步），而且同名檔以
     # 「任一檔 checksum＋size 相符」為準（verify.find_annex_file，M3）。
-    verify_pin_keys_on_drive(
-        deps.drive, rcfg.prefix_folder_id, state, repo_listing=repo_listing)
+    #
+    # M1（review-final）b：這裡少一個 key 時，先到隔離區找 sha256 與 size 都相符
+    # 的檔，**找到就自動搬回前綴**（內容定址，搬回來的一定是對的位元組），然後照常
+    # 繼續這一輪——這是 recovery runbook「模式 0」的自動版，impl1 那一類「真的那份
+    # 被誤隔離」從此會自己好。搬了哪幾個寫進報告與健康檢查（自癒不該是無聲的：
+    # 反覆發生代表有東西在被誤隔離，要看得見）。隔離區也沒有才中止。
+    restored = verify_pin_keys_on_drive(
+        deps.drive, rcfg.prefix_folder_id, state,
+        repo_listing=repo_listing,
+        quarantine_folder_id=rcfg.quarantine_folder_id,
+        dry_run=dry_run,
+    )
+    if restored:
+        ctx.report.restored_from_quarantine = sorted(r.key for r in restored)
+        ctx.bump("restored_from_quarantine", len(restored))
     ctx.bump("annex_keys_checked", len(state.annex_keys))
     ctx.time("annex.git.clone", int((time.monotonic() - t0) * 1000))
 
