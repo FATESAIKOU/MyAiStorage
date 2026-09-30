@@ -303,7 +303,9 @@ class AnnexRawStorage(RawStorage):
     ) -> None:
         self.git_workdir = Path(git_workdir).resolve()
         self.git = git
-        # A-H1：預設是路徑規則，不是 include=*.json（那個涵蓋不到 `raw`）
+        # A-H1：預設是路徑規則，不是 include=*.json（那個涵蓋不到 `raw`）。
+        # 記下「有沒有**明確**給規則」：沒給才用預設去補設定，給了就是覆寫。
+        self._requested_largefiles = largefiles
         self.largefiles = largefiles if largefiles is not None else LARGEFILES_RAW
         self.remote = remote
         self._blobs: dict[str, bytes] = {}
@@ -311,29 +313,50 @@ class AnnexRawStorage(RawStorage):
 
         self._ensure_largefiles_config()
 
-    def _ensure_largefiles_config(self) -> None:
-        """只在**還沒設定**時補上 `annex.largefiles`（M2）。
-
-        M2：`clone_for_commit` 已經把最終規則設好了，這裡再覆寫會讓結果取決於
-        建構順序（管理腳本直接開的 clone、FakeAnnexGit 分支都
-        沒有建構 `AnnexRawStorage`，規則就不對）。所以：
-
-        - 已經有設定 → 什麼都不做（尊重呼叫端傳進來的規則）；
-        - 沒有設定（自己 `git init` 出來的 repo）→ 補上預設規則，並在失敗時 raise
-          （A-H1：設定沒生效時後面的 lookupkey 會全部查不到，錯誤會被誤判成
-          「沒有進 annex」）。
-        """
-        git_dir = self.git_workdir / ".git"
-        if not git_dir.exists():
-            return
-
+    def _read_largefiles_config(self) -> str | None:
         current = subprocess.run(
             ["git", "-C", str(self.git_workdir), "config", "--get", "annex.largefiles"],
             capture_output=True, text=True, check=False, env=get_git_env(),
             timeout=30.0,
         )
-        if current.returncode == 0 and current.stdout.strip():
+        if current.returncode != 0:
+            return None
+        return current.stdout.strip() or None
+
+    def _ensure_largefiles_config(self) -> None:
+        """決定這個 repo 的 `annex.largefiles`，並把**實際生效**的規則記下來。
+
+        M2：`clone_for_commit` 已經把最終規則設好了，這裡**用預設規則**覆寫會讓
+        結果取決於建構順序（管理腳本直接開的 clone、FakeAnnexGit 分支都沒有
+        建構 `AnnexRawStorage`，規則就不對）。所以：
+
+        - 呼叫端**沒有**給規則 → 已經有設定就什麼都不做；沒有設定（自己
+          `git init` 出來的 repo）才補上預設。
+        - 呼叫端**明確給了**規則 → 以它為準。那是刻意的選擇（自己的 repo、
+          自己的規則，例如抹除整合測試要連 `payload.bin` 一起入 annex），
+          不是預設值被亂蓋掉，因此不會把順序依賴帶回來。
+
+        早先這裡不管有沒有明確給規則都跳過，於是 `largefiles=` 這個參數在
+        clone 出來的 repo 上被**靜靜丟掉**：檔案沒進 annex，`git annex lookupkey`
+        回 1 而且什麼都不印，錯誤看起來像「lookupkey 在這台機器上壞掉」，
+        實際上是規則根本沒生效。
+
+        設定寫不進去要 raise（A-H1：設定沒生效時後面的 lookupkey 會全部查不到，
+        錯誤會被誤判成「沒有進 annex」）。
+        """
+        git_dir = self.git_workdir / ".git"
+        if not git_dir.exists():
             return
+
+        effective = self._read_largefiles_config()
+        if self._requested_largefiles is None and effective is not None:
+            # 尊重 repo 現有的規則（M2），但記下**實際生效**的那條。
+            self.largefiles = effective
+            return
+        if effective == self.largefiles:
+            self.largefiles = effective
+            return
+
         proc = subprocess.run(
             ["git", "-C", str(self.git_workdir), "config", "annex.largefiles",
              self.largefiles],
@@ -342,6 +365,9 @@ class AnnexRawStorage(RawStorage):
         if proc.returncode != 0:
             raise WriteError(
                 f"設定 annex.largefiles 失敗 (rc={proc.returncode}): {self.largefiles}")
+        # 記下實際生效的規則：`store()` 失敗時的訊息要講真的那條，
+        # 而不是「我以為是的那條」。
+        self.largefiles = self._read_largefiles_config() or self.largefiles
 
     def _lookup_key(self, path: Path) -> str | None:
         """annex key 的唯一來源：git annex lookupkey（SubprocessAnnexGit 或直接呼叫）。

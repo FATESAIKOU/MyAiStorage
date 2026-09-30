@@ -1,8 +1,10 @@
 """review-b1039a8 的 M2／M3／L（largefiles 單一來源、指標解析、annex key 形狀）。
 
 M2：`annex.largefiles` 的**單一來源**是 `annex.git.DEFAULT_LARGEFILES`，
-     `clone_for_commit` 在 clone 時就設好；`AnnexRawStorage` 不再覆寫（只在
-     還沒設定時補上預設），所以結果不再取決於建構順序。
+     `clone_for_commit` 在 clone 時就設好；`AnnexRawStorage` 不用預設規則覆寫
+     （只在還沒設定時補上預設），所以結果不再取決於建構順序。
+     但呼叫端**明確傳入**的規則仍然優先：那不是預設值被亂蓋，是自己的 repo
+     自己的規則（不生效的話參數會被靜靜丟掉，見下一個測試）。
 M3：annex 指標的 key **直接從指標內容解析**；解析不出來就 raise，
      不再退回 `git annex get --all`（那會把所有 Session 的歷史 raw 全部下載）。
 L：  `verify_annex_coverage` 的 key 形狀檢查只接受 SHA256E（WORM 沒有雜湊、不可驗證）。
@@ -97,6 +99,40 @@ def test_annex_raw_storage_does_not_override_an_existing_rule(tmp_path: Path) ->
     repo, _ = _annex_repo(tmp_path / "foundry", largefiles="include=objects/*/*")
     AnnexRawStorage(repo)          # 預設是 Agora 的規則，但不該覆寫
     assert _git(repo, "config", "--get", "annex.largefiles").strip() == "include=objects/*/*"
+
+
+def test_an_explicit_rule_replaces_the_existing_one(tmp_path: Path) -> None:
+    """**明確給的**規則要真的生效。
+
+    早先 `AnnexRawStorage(largefiles=...)` 不論有沒有給都跳過，參數在
+    `clone_for_commit` 做出來的 repo 上被靜靜丟掉：檔案沒進 annex，
+    `git annex lookupkey` 回 1 而且不印任何東西，錯誤看起來像「lookupkey 壞掉」。
+    抹除整合測試就是這樣壞的（它要 `include=sessions/*/*/*` 才會把
+    `payload.bin` 一起入 annex）。
+    """
+    repo, _ = _annex_repo(tmp_path / "erase", largefiles=DEFAULT_LARGEFILES)
+    storage = AnnexRawStorage(repo, largefiles="include=sessions/*/*/*")
+    assert _git(repo, "config", "--get", "annex.largefiles").strip() == \
+        "include=sessions/*/*/*"
+    assert storage.largefiles == "include=sessions/*/*/*"
+
+    # 實際效果：不是 raw 的檔案也真的進 annex（所以 lookupkey 查得到）
+    payload = repo / "sessions" / "opencode" / "erase-me" / "payload.bin"
+    payload.parent.mkdir(parents=True, exist_ok=True)
+    payload.write_bytes(b"CANARY" * 1000)
+    _git(repo, "add", ".")
+    rc, key = _git_soft(repo, "annex", "lookupkey", "sessions/opencode/erase-me/payload.bin")
+    assert rc == 0 and key.startswith("SHA256E-s"), (rc, key)
+
+
+def test_storage_reports_the_rule_actually_in_effect(tmp_path: Path) -> None:
+    """`storage.largefiles` 要是 repo 裡**真的**那條規則。
+
+    `store()` 失敗時的訊息會印它；印「我以為是的那條」會把診斷帶到錯的方向
+    （實際上栽在整合測試裡的就是這個）。
+    """
+    repo, _ = _annex_repo(tmp_path / "foundry", largefiles="include=objects/*/*")
+    assert AnnexRawStorage(repo).largefiles == "include=objects/*/*"
 
 
 def test_annex_raw_storage_fills_in_a_missing_rule(tmp_path: Path) -> None:
