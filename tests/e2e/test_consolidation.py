@@ -72,9 +72,14 @@ def test_9_2_consolidation_n_to_1(resident_pool, run_committer, e2e_reader: Agor
     # 1. S2 與 S3 各自交出末端（agora handoff 內部同步並提交）
     c2 = resident_pool("e2e-s2-worker")
     s2_id, _ = c2.prompt_with_commits(
+        # 提示寫得非常直接：`space-bunny-free` 常先跑去讀 skill／用 bash 探索，
+        # 讀完就滿足了、忘記要交出末端（9.2-clean4／clean6 兩次都是這樣）。
+        # 所以明說「直接呼叫、不要先讀 skill、不要用 bash」，第一回合就該呼叫。
         "後端實作已完成，包含 RESTful API 與認證模組。"
-        "請用 agora_handoff 交出末端（一個 task，summary 說明後端成果），"
-        "完成後回報 handoff_id。",
+        "請**直接呼叫 agora_handoff** 交出末端：tasks 給一個物件，"
+        "title 與 summary 寫『後端：RESTful API 與認證模組』，next_steps 寫『接著做前端整合』。"
+        "不要先用 skill 或 bash 探索工具說明、不要讀檔案——你已經知道要交出什麼了，"
+        "現在就呼叫 agora_handoff。",
         run_committer,
     )
     assert_tool_called(c2, s2_id, "agora_handoff")
@@ -82,8 +87,10 @@ def test_9_2_consolidation_n_to_1(resident_pool, run_committer, e2e_reader: Agor
     c3 = resident_pool("e2e-s3-worker")
     s3_id, _ = c3.prompt_with_commits(
         "前端設計已完成，包含響應式介面與狀態管理。"
-        "請用 agora_handoff 交出末端（一個 task，summary 說明前端成果），"
-        "完成後回報 handoff_id。",
+        "請**直接呼叫 agora_handoff** 交出末端：tasks 給一個物件，"
+        "title 與 summary 寫『前端：響應式介面與狀態管理』，next_steps 寫『接著做後端整合』。"
+        "不要先用 skill 或 bash 探索工具說明、不要讀檔案——你已經知道要交出什麼了，"
+        "現在就呼叫 agora_handoff。",
         run_committer,
     )
     assert_tool_called(c3, s3_id, "agora_handoff")
