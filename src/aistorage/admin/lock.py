@@ -248,9 +248,35 @@ class GitHubAdmin:
         self._run("workflow", action, workflow)
 
     def workflow_enabled(self, workflow: str) -> bool:
-        """查詢 workflow 是否啟用（整合測試驗證 gh 語法）。"""
-        out = self._run("workflow", "view", workflow, "--json", "state", "--jq", ".state")
-        return out.strip() == "active"
+        """查詢 workflow 是否啟用。
+
+        `gh workflow view` 沒有 `--json`（實測 gh 2.101.0，`unknown flag: --json`），
+        所以只能從 `gh workflow list --json path,state` 依路徑比對。`workflow` 給
+        檔名（`committer.yml`）或完整路徑（`.github/workflows/committer.yml`）都認得。
+
+        **`--all` 不能少**：實測停用中的 workflow 不會出現在預設清單裡（只有
+        `--all` 或被 `gh api` 查到時看得到）。少了它，6.3 健康檢查在「被停用」這個
+        最該被找出來的情況反而會查不到、回報「未知」。
+
+        查不到這個 workflow 時報錯而**不是**回傳 False：回傳 False 會讓健康檢查
+        對一個根本不存在的 workflow 發出「被停用」的假警報。
+        """
+        out = self._run("workflow", "list", "--all", "--json", "path,state",
+                        "--limit", "200")
+        try:
+            items = json.loads(out or "[]")
+        except ValueError as e:
+            raise AdminError(f"gh workflow list 解析失敗: {e}") from None
+        if not isinstance(items, list):
+            raise AdminError("gh workflow list 回傳的不是陣列")
+        want = workflow.strip().removeprefix("./")
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "")
+            if path == want or path.endswith(f"/{want}"):
+                return str(item.get("state") or "") == "active"
+        raise AdminError(f"repo 裡查不到 workflow {workflow}（檔名寫錯了？）")
 
     def active_runs(self, workflow: str) -> list[dict]:
         """列出 in_progress 與 queued 的 run（id 與狀態）。"""

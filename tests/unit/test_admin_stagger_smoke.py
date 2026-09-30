@@ -130,8 +130,9 @@ def _gh_runner(cmd: list[str], state: dict) -> str:
     if cmd[1:3] == ["workflow", "enable"]:
         state["enabled"] = True
         return ""
-    if cmd[1:4] == ["workflow", "view"]:
-        return '"active"' if state["enabled"] else '"disabled"'
+    if cmd[1:3] == ["workflow", "list"]:
+        return json.dumps([{"path": ".github/workflows/committer.yml",
+                            "state": "active" if state["enabled"] else "disabled_manually"}])
     if cmd[1:3] == ["run", "list"]:
         status = cmd[cmd.index("--status") + 1]
         return json.dumps([r for r in state["runs"] if r["status"] == status])

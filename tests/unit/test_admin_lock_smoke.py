@@ -31,8 +31,9 @@ def _gh_fake(*, runs: list[dict] | None = None):
         if cmd[1:3] == ["workflow", "enable"]:
             state["enabled"] = True
             return ""
-        if cmd[1:4] == ["workflow", "view"]:
-            return '"active"' if state["enabled"] else '"disabled"'
+        if cmd[1:3] == ["workflow", "list"]:
+            return json.dumps([{"path": ".github/workflows/committer.yml",
+                                "state": "active" if state["enabled"] else "disabled_manually"}])
         if cmd[1:3] == ["run", "list"]:
             status = cmd[cmd.index("--status") + 1]
             return json.dumps([r for r in state["runs"] if r["status"] == status])
@@ -136,6 +137,42 @@ def test_unlock_is_idempotent() -> None:
                      reason="x")
     assert lock.unlock() is None      # 沒有旗標也視為成功（冪等）
     assert state["enabled"] is True
+
+
+def test_workflow_enabled_uses_all_flag() -> None:
+    """`gh workflow list` 少了 `--all` 就查不到**停用中**的 workflow。
+
+    2026-09-30 的真 GitHub 實測：整個 repo 只有一個 workflow 而它被停用時，
+    預設清單回空陣列。少了 `--all`，6.3 健康檢查在「被停用」這個最該被找出來的
+    情況反而查不到、印「未知（查不到狀態）」。這裡把 `--all` 釘住。
+    """
+    pins = MemoryPinFiles()
+    runner, state = _gh_fake()
+    gh = GitHubAdmin("owner/repo", runner=runner)
+    assert gh.workflow_enabled("committer.yml") is True
+    state["enabled"] = False
+    assert gh.workflow_enabled("committer.yml") is False
+    list_calls = [c for c in gh.calls if c[1:3] == ["workflow", "list"]]
+    assert list_calls, "應該走 gh workflow list"
+    assert "--all" in list_calls[0], list_calls[0]
+
+
+def test_workflow_enabled_accepts_filename_or_path() -> None:
+    """檔名與完整路徑都要認得（`admin unlock --workflow` 是自由字串）。"""
+    runner, _ = _gh_fake()
+    gh = GitHubAdmin("owner/repo", runner=runner)
+    for name in ("committer.yml",
+                 ".github/workflows/committer.yml",
+                 "./.github/workflows/committer.yml"):
+        assert gh.workflow_enabled(name) is True, name
+
+
+def test_workflow_enabled_unknown_workflow_raises() -> None:
+    """查不到要報錯，不能回 False——否則健康檢查會對不存在的 workflow 發假警報。"""
+    runner, _ = _gh_fake()
+    gh = GitHubAdmin("owner/repo", runner=runner)
+    with pytest.raises(AdminError, match="nope.yml"):
+        gh.workflow_enabled("nope.yml")
 
 
 def test_lock_precheck_failure_aborts() -> None:
