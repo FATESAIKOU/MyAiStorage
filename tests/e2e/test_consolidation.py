@@ -185,8 +185,23 @@ def test_9_2_consolidation_n_to_1(resident_pool, run_committer, e2e_reader: Agor
     assert _reserialize(s4_wire[: len(longest_wire)]) == _reserialize(longest_wire), (
         "S4 開頭的前綴重新序列化後必須與最長那一段的 wire 位元組相同"
     )
-    # 另一段也有帶進來（n→1 會把後一段的首則手工鏈在前一段的末則之後）
+    # 另一段也有帶進來，而且**整段併入**（n→1 現在是把兩段都放進去、靠
+    # `time.created` 排出先後，不是只取後段的首則）。所以 S4 的訊息數是兩段的
+    # 總和，而且與 package.json 記的 `totals.messages` 一致。
     second_raw = json.loads(raws[1])
+    assert len(export_message_ids(s4_export)) == (
+        first["message_count"] + second["message_count"]
+    ) == pkg["totals"]["messages"], (
+        "S4 的訊息數必須是兩段之和，且與起點包的 totals.messages 一致"
+    )
+
+    # 後段逐則等於第二段（順序與內容都要對）
+    second_wire = json.loads(
+        wire_prefix(second_raw, second["message_id"])
+    )
+    assert s4_wire[len(longest_wire):] == second_wire, (
+        "S4 後半段必須逐則等於第二段在接續點之前的內容（順序與內容）"
+    )
     second_first_text = "\n".join(
         p.get("text") or ""
         for p in (second_raw["messages"][0].get("parts") or [])
@@ -196,7 +211,6 @@ def test_9_2_consolidation_n_to_1(resident_pool, run_committer, e2e_reader: Agor
     assert second_first_text in json.dumps(s4_export, ensure_ascii=False), (
         "S4 的開頭必須也帶著另一段接續點之前的內容"
     )
-    assert len(export_message_ids(s4_export)) == first["message_count"] + 1
 
     # 7. 兩張交接單都被登記成指向 S4 的接續 Link
     def _both_claimed():
