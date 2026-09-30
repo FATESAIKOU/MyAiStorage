@@ -653,16 +653,17 @@ class DriveReadViewPublisher:
     ) -> tuple[
         dict[ReadingKey, FileRef],
         dict[str, str],
-        list[tuple[str, str, str, int, str]],
+        list[tuple[str, str, str, int, str, str]],
     ]:
         """下載舊 index，取出 prev_readings、meta 與 rejections（唯讀）。
 
         索引雜湊與 manifest 記錄不符 → MismatchError（信任錨點被動過，不可繼續）。
         缺表（例如某個 Session 轉換失敗）視為沒有可沿用的項目。
+        舊世代的 rejections 沒有 `detail` 欄 → 取出來是空字串（視為沒有）。
         """
         readings: dict[ReadingKey, FileRef] = {}
         meta: dict[str, str] = {}
-        rejections: list[tuple[str, str, str, int, str]] = []
+        rejections: list[tuple[str, str, str, int, str, str]] = []
         if prev is None:
             return readings, meta, rejections
 
@@ -684,7 +685,7 @@ class DriveReadViewPublisher:
 
         readings: dict[ReadingKey, FileRef] = {}
         meta: dict[str, str] = {}
-        rejections: list[tuple[str, str, str, int, str]] = []
+        rejections: list[tuple[str, str, str, int, str, str]] = []
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
             tables = {
@@ -704,11 +705,24 @@ class DriveReadViewPublisher:
                         id=str(fid), sha256=str(sha).lower(), size=int(size)
                     )
             if "rejections" in tables:
-                for row in con.execute(
-                    "SELECT item_key, code, at, authenticated, item_id FROM rejections"
-                ):
+                # 舊世代的 index 沒有 `detail` 欄（升級前發佈的）→ 用實際欄位
+                # 組出 SELECT，別硬寫一個不存在的欄名（那會 OperationalError）。
+                cols = {
+                    str(r[1]) for r in con.execute("PRAGMA table_info(rejections)")
+                }
+                has_detail = "detail" in cols
+                sql = (
+                    "SELECT item_key, code, at, authenticated, item_id, detail"
+                    " FROM rejections"
+                    if has_detail
+                    else "SELECT item_key, code, at, authenticated, item_id"
+                    " FROM rejections"
+                )
+                for row in con.execute(sql):
+                    detail = str(row[5]) if has_detail and row[5] else ""
                     rejections.append(
-                        (str(row[0]), str(row[1]), str(row[2]), int(row[3] or 0), row[4] or "")
+                        (str(row[0]), str(row[1]), str(row[2]), int(row[3] or 0),
+                         row[4] or "", detail)
                     )
         finally:
             con.close()
@@ -717,7 +731,7 @@ class DriveReadViewPublisher:
 
     @staticmethod
     def _rejections_fingerprint(
-        rows: Sequence[tuple[str, str, str, int, str]]
+        rows: Sequence[tuple[str, str, str, int, str, str]]
     ) -> str:
         return rejections_fingerprint(
             [
@@ -727,17 +741,24 @@ class DriveReadViewPublisher:
                     at=c,
                     item_id=(e or None),
                     authenticated=bool(d),
+                    detail=(f or None),
                 )
-                for a, b, c, d, e in rows
+                for a, b, c, d, e, f in rows
             ]
         )
 
 
 def rejections_fingerprint(rows: Sequence[RejectionRow]) -> str:
-    """拒收原因集合的指紋（只用代碼與時間，不含任何內容）。"""
+    """拒收原因集合的指紋（代碼、時間、item 與 detail；不含任何內容）。
+
+    `detail` 必須進指紋：佔住額度的預留清單每一輪可能不同，指紋不動的話
+    publisher 會判定「這一代沒變」而跳過發佈，寫入端就永遠看不到更新後的說明
+    （review-55edd374 M3）。它只放公開的識別資訊，進指紋不外洩任何內容。
+    """
     payload = json.dumps(
         sorted(
-            (r.item_key, r.code, r.at, r.item_id or "", bool(r.authenticated))
+            (r.item_key, r.code, r.at, r.item_id or "", bool(r.authenticated),
+             r.detail or "")
             for r in rows
         ),
         separators=(",", ":"),

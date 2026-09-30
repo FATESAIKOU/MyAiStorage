@@ -99,7 +99,12 @@ CREATE TABLE rejections (
   code TEXT NOT NULL,
   at TEXT NOT NULL,
   item_id TEXT,
-  authenticated INTEGER NOT NULL
+  authenticated INTEGER NOT NULL,
+  -- 給寫入端看的補充說明。**只放本來就公開的識別資訊**（目前只有
+  -- link_quota_exceeded 會帶「哪些預留佔住額度」＝一串 session id，
+  -- review-55edd374 M3），不放標題、不放訊息、不放交接說明。
+  -- 升級前發佈的舊世代 index 沒有這一欄 → 讀取端當作 None。
+  detail TEXT
 );
 
 -- 全文只放最新快照的閱讀版，以訊息為單位（spec 要標出命中的位置）。

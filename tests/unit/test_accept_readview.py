@@ -491,6 +491,41 @@ def test_publish_rejections_end_to_end(tmp_path: Path) -> None:
     finally:
         con.close()
     assert got is not None and got.code == "bad_signature" and got.authenticated
+    assert got.detail is None
+
+
+def test_publish_carries_the_rejection_detail_to_the_read_view(tmp_path: Path) -> None:
+    """`link_quota_exceeded` 的詳細訊息要真的進到讀取視圖（review-55edd374 M3）。
+
+    真本拒收紀錄 → 發佈 → 讀取端 `get_rejection` 拿得到，寫入端才知道被什麼擋住。
+    """
+    import sqlite3
+
+    from aistorage.search.query import get_rejection
+
+    drive, folder, store, sid, ctx = _publisher_fixture(tmp_path)
+    item_key = generate_ulid()
+    store.put_json(
+        f"_committer/rejections/{item_key}.json",
+        {"code": "link_quota_exceeded", "at": "2026-09-27T07:00:00.000Z",
+         "item_id": None,
+         "detail": "佔住額度的預留：opencode:hold0、opencode:hold1"},
+    )
+    report = _publish(drive, folder, store, ctx, tmp_path,
+                      run_rejections=collect_rejections(store))
+    assert report.rejections == 1
+    index_id = _manifest_in_drive(drive).index.id
+    assert index_id is not None
+    index_path = tmp_path / "check-detail.sqlite3"
+    index_path.write_bytes(drive.download_bytes(index_id, max_bytes=1 << 26))
+    con = sqlite3.connect(str(index_path))
+    try:
+        got = get_rejection(con, item_key)
+    finally:
+        con.close()
+    assert got is not None
+    assert got.code == "link_quota_exceeded"
+    assert got.detail == "佔住額度的預留：opencode:hold0、opencode:hold1"
 
 
 # ---------------------------------------------------------------------------

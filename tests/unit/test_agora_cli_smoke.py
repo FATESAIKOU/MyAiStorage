@@ -190,6 +190,8 @@ class FakeReader:
         #: session_id -> {"raw": bytes, "texts": [...]}
         self.sessions = sessions
         self.handoffs = handoffs or {}
+        #: item_key -> 拒收紀錄（`SimpleNamespace(code=..., detail=...)`）
+        self.rejections: dict[str, Any] = {}
         self.raw_calls: list[tuple[str, str]] = []
 
     def get_session(self, session_id: str, *, max_lag: Any = None) -> Any:
@@ -243,6 +245,10 @@ class FakeReader:
             session_id=session_id, snapshot_sha256=snapshot_sha256,
             snapshot_at=T0, via="sync",
             annex_key=annex_key_of(entry["raw"])))
+
+    def get_rejection(self, item_key: str) -> Any:
+        """讀取視圖的拒收紀錄；`detail` 是 `link_quota_exceeded` 帶的說明。"""
+        return SimpleNamespace(value=self.rejections.get(item_key))
 
     def get_continuation(self, handoff_id: str) -> Any:
         handoff = self.handoffs.get(handoff_id)
@@ -640,6 +646,45 @@ def test_rejected_claim_produces_no_package(tmp_path: Path):
     assert not out.exists(), "被拒時目錄不該被建立"
     assert not out.with_name(f".{out.name}.staging").exists(), \
         "被拒時暫存目錄要清掉"
+
+
+def test_quota_rejection_names_the_reservations_holding_the_quota(tmp_path: Path):
+    """撞到預留上限時，訊息要說出**哪些預留**佔著額度（review-55edd374 M3）。
+
+    否則住民只看到一個 `link_quota_exceeded`，既不知道被什麼擋住、也不知道該去看
+    哪裡——而這個上限是跨輪累計的，不會自己好。
+    """
+    detail = ("這個 profile 已有 20 筆未結預留，達到上限 20；"
+              "佔住額度的預留：opencode:hold0、opencode:hold1。")
+    reader = _reader_with_handoff()
+    item_key = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    reader.rejections[item_key] = SimpleNamespace(
+        code="link_quota_exceeded", detail=detail)
+    commit = FakeCommit(rejected=[(SimpleNamespace(
+        kind="claim", target="claim:01X", item_key=item_key),
+        "link_quota_exceeded")])
+    out = tmp_path / "pkg"
+
+    with pytest.raises(ClaimRejected) as excinfo:
+        checkout(reader, _deps(reader, commit), [HANDOFF], out)
+
+    message = str(excinfo.value)
+    assert "link_quota_exceeded" in message
+    assert "opencode:hold0" in message and "opencode:hold1" in message
+    assert not out.exists()
+
+
+def test_a_rejection_without_a_detail_still_reports_the_code(tmp_path: Path):
+    """讀不到 detail（例如舊世代的讀取視圖）時照樣報代碼，不換成別的失敗。"""
+    reader = _reader_with_handoff()
+    commit = FakeCommit(rejected=[(SimpleNamespace(
+        kind="claim", target="claim:01X", item_key="01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+        "link_quota_exceeded")])
+
+    with pytest.raises(ClaimRejected) as excinfo:
+        checkout(reader, _deps(reader, commit), [HANDOFF], tmp_path / "pkg")
+
+    assert "link_quota_exceeded" in str(excinfo.value)
 
 
 def test_claim_timeout_keeps_the_local_record_so_a_rerun_can_resume(tmp_path: Path):

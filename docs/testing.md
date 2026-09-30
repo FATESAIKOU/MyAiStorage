@@ -103,9 +103,14 @@ uv run python scripts/cleanup_integration_leftovers.py --confirm  # 真的刪
 repo 的 `.pin/it-*`。**`e2e-*` 一律不碰**（e2e 環境是單例，impl3 在用；要清
 e2e 的東西走 `scripts/e2e_setup.py --sweep-orphans`）。
 
-沒有 `--confirm` 就是 dry-run，會把「會刪什麼」與「不碰什麼」都列出來。
-`--confirm` 時每個資料夾刪之前重新 `get()` 確認 parents 與名字都對得上，
-對不上就跳過並說明——快照是上一個行程拍的，中間別人可能動過。
+**只看名字還不夠，也要看年齡**：`it-<ULID>` 的 ULID 前 10 碼就是建立時間，所以只刪
+建立時間超過 6 小時的（`--min-age-hours` 可調）。太新的照樣列在 dry-run 清單裡，
+但標成「太新、跳過」並附上幾歲——多半是另一個終端**正在跑**的整合測試，刪掉會讓
+那一輪以奇怪的錯誤失敗、pin 條目也被抽走。
+
+沒有 `--confirm` 就是 dry-run，會把「會刪什麼」「太新所以跳過什麼」「不碰什麼」
+都列出來。`--confirm` 時每個資料夾刪之前重新 `get()` 確認 parents 與名字都對得上，
+對不上就跳過並說明——快照是上一個行程拍的，中間別人可能動過；年齡也再算一次。
 
 ### e2e 額外前置
 

@@ -653,6 +653,29 @@ def _link_record(deps: CheckoutDeps, resolved: ResolvedStartPoint,
     return record
 
 
+def _rejection_detail(reader: Any, item_key: str | None) -> str | None:
+    """這一筆拒收的詳細說明（讀取視圖的 `rejections.detail`）。
+
+    目前只有 `link_quota_exceeded` 會帶：`apply` 側把「哪些預留佔住額度」寫進
+    拒收紀錄並發佈出來（review-55edd374 M3）。沒有它，住民只看到一個代碼，
+    既不知道被什麼擋住、也不知道該清哪幾筆。讀不到就回 None——這是錯誤訊息的
+    補充，缺它不該讓 `checkout` 的失敗處理換成另一條路徑。
+    """
+    if not item_key or reader is None:
+        return None
+    try:
+        result = reader.get_rejection(item_key)
+    except Exception:
+        return None
+    row = getattr(result, "value", result)
+    if row is None:
+        return None
+    detail = getattr(row, "detail", None) or (
+        row.get("detail") if isinstance(row, dict) else None
+    )
+    return str(detail) if detail else None
+
+
 def _commit_claims(deps: CheckoutDeps, claims: list[Any], *,
                    timeout: timedelta) -> None:
     """把接續記錄（認領／接續單）提交並等確認；被拒就明確拒絕。
@@ -667,7 +690,14 @@ def _commit_claims(deps: CheckoutDeps, claims: list[Any], *,
     result = deps.commit_claim(claims, timeout=timeout)
     rejected = tuple(getattr(result, "rejected", ()) or ())
     if rejected:
-        details = "、".join(f"{_label(a)} {code}" for a, code in rejected)
+        details = "、".join(
+            f"{_label(a)} {code}"
+            + (
+                f"（{_rejection_detail(deps.reader, getattr(a, 'item_key', None))}）"
+                if code == "link_quota_exceeded" else ""
+            )
+            for a, code in rejected
+        )
         # ★ 只刪**被拒的那幾張**的記錄（review-7a4ca87 H2）。n→1 時提交流程是
         #   一筆一筆分別套用的，所以可能有幾張被接受、幾張被拒（那幾張已經被
         #   別人接走）。此時若把整批記錄都刪掉，已經被接受的那幾張就變成

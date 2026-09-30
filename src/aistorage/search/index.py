@@ -116,6 +116,10 @@ class RejectionRow:
     at: str
     item_id: str | None = None
     authenticated: bool = True
+    # 給寫入端看的補充說明，**只放本來就公開的識別資訊**（目前只有
+    # link_quota_exceeded 會帶「哪些預留佔住額度」＝一串 session id，
+    # review-55edd374 M3）。不放標題、不放訊息、不放交接說明。
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -274,8 +278,9 @@ def build_index(
             )
         for r in rejections:
             con.execute(
-                "INSERT OR REPLACE INTO rejections VALUES (?,?,?,?,?)",
-                (r.item_key, r.code, normalize_time(r.at), r.item_id, _bool(r.authenticated)),
+                "INSERT OR REPLACE INTO rejections VALUES (?,?,?,?,?,?)",
+                (r.item_key, r.code, normalize_time(r.at), r.item_id,
+                 _bool(r.authenticated), r.detail),
             )
         con.execute(
             "INSERT INTO meta VALUES ('format', ?), ('generation', ?),"

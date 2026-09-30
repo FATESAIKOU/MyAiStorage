@@ -355,6 +355,41 @@ def test_reserved_until_absent_in_older_index_generations(tmp_path: Path):
     assert row.reserved_until is None
 
 
+def test_rejection_detail_absent_in_older_index_generations(tmp_path: Path):
+    """舊世代的 index 沒有 `detail` 欄 → 讀取端當作 None，不報錯。
+
+    `rejections` 的新欄位放在最後一個，舊 index 照樣能讀（升級前發佈的那些仍然
+    在讀取端的 cache 裡，review-55edd374 M3）。
+    """
+    import sqlite3 as _sqlite3
+
+    from aistorage.search.index import RejectionRow
+    from aistorage.search.query import get_rejection
+
+    index = tmp_path / "old-rejections.sqlite3"
+    build_index(
+        index,
+        entries=[],
+        rejections=[RejectionRow(item_key="01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                                code="link_quota_exceeded",
+                                at="2026-09-27T09:00:00.000Z",
+                                detail="佔住額度的預留：opencode:hold0")],
+        meta=IndexMeta(generation=1, built_at="2026-09-27T09:00:00.000Z",
+                       agora_main_sha="x", converter_versions={}),
+    )
+    con = _sqlite3.connect(str(index))
+    try:
+        con.execute("ALTER TABLE rejections DROP COLUMN detail")
+        con.commit()
+        cols = [r[1] for r in con.execute("PRAGMA table_info(rejections)")]
+        assert "detail" not in cols
+        row = get_rejection(con, "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+    finally:
+        con.close()
+    assert row is not None and row.code == "link_quota_exceeded"
+    assert row.detail is None
+
+
 def test_freshness_warnings_and_stopped(tmp_path: Path):
     drive, cfg, clock = _fixture(tmp_path)
     reader = AgoraReader(ReadViewClient(drive, cfg, clock=clock), clock=clock)

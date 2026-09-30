@@ -7,6 +7,10 @@
   的 REJECT（驗章之前，依 g3d-recheck R1 不寫進真本）。
 - **只有** item_key、code、at、item_id、authenticated，**不含任何內容**
   （不記標題、不記訊息、不記交接說明）。
+- `detail` 是唯一的例外，而且**只放本來就公開的識別資訊**（目前只有
+  `link_quota_exceeded` 會帶「哪些預留佔住額度」——一串 session id，
+  review-55edd374 M3）。沒有它，寫入端只看到一個代碼，既不知道被什麼擋住，
+  也不知道該去看哪裡。
 - 驗章前的拒收每一輪都會重新評估，若 rejected_at 永遠取「當下」，第 13 步的
   `deletable_after` 永遠到不了，檔案永遠刪不掉。所以驗章前的拒收改用**該項目
   檔案最早的 created_time**（Drive 的 metadata，寫入者無法控制）當時間基準，
@@ -31,13 +35,17 @@ REJECTIONS_DIR = "_committer/rejections"
 
 @dataclass(frozen=True)
 class RejectionRow:
-    """一筆拒收原因（發佈到讀取視圖的 rejections 表；只有代碼，沒有內容）。"""
+    """一筆拒收原因（發佈到讀取視圖的 rejections 表；只有代碼，沒有內容）。
+
+    `detail` 是給寫入端看的補充說明，只放公開的識別資訊（見模組 docstring）。
+    """
 
     item_key: str
     code: str
     at: str
     item_id: str | None = None
     authenticated: bool = False
+    detail: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -46,6 +54,7 @@ class RejectionRow:
             "at": self.at,
             "item_id": self.item_id,
             "authenticated": 1 if self.authenticated else 0,
+            "detail": self.detail,
         }
 
 
@@ -90,6 +99,7 @@ def collect_true_copy_rejections(store: AgoraStore) -> list[RejectionRow]:
         if not isinstance(at, str) or not at:
             raise MismatchError(f"真本拒收紀錄缺少 at: {p}")
         item_id = data.get("item_id")
+        detail = data.get("detail")
         out.append(
             RejectionRow(
                 item_key=item_key,
@@ -97,6 +107,7 @@ def collect_true_copy_rejections(store: AgoraStore) -> list[RejectionRow]:
                 at=at,
                 item_id=item_id if isinstance(item_id, str) and item_id else None,
                 authenticated=True,
+                detail=detail if isinstance(detail, str) and detail else None,
             )
         )
     return out

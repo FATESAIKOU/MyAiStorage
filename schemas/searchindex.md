@@ -37,6 +37,10 @@ schema 以 `src/aistorage/search/schema.sql` 為準（TS 照抄該檔）。
   舊世代 index 若無此欄，讀取端必須報錯而非默默不篩。
 - `rejections`：只有 `item_key`、`code`、`at`、`item_id`，
   `authenticated` 標是否通過驗章；**沒有內容**。
+  `detail` 是唯一的例外，而且**只放本來就公開的識別資訊**：目前只有
+  `link_quota_exceeded` 會帶「哪些預留佔住額度」＝一串 session id
+  （review-55edd374 M3）。寫入端要靠它知道被什麼擋住、該去看哪裡——光有代碼
+  等於一個會卡住又沒有線索的地雷。沒有 detail 的舊世代 index，讀取端當作 NULL。
 - `message_fts`／`title_fts`：FTS5（`tokenize='trigram'`），只放**最新快照**
   的閱讀版；`message_fts.text` 取每則**非撤銷**訊息的文字（不含 reasoning），
   撤銷的訊息不索引。

@@ -447,5 +447,8 @@ def get_rejection(db: sqlite3.Connection, item_key: str) -> RejectionRow | None:
                      (item_key,)).fetchone()
     if row is None:
         return None
+    # 升級前發佈的舊世代 index 沒有 `detail` 欄（review-55edd374 M3），
+    # 那時回傳 None 而不是報錯——詳細說明是附加訊息，缺它不影響讀取。
     return RejectionRow(item_key=row[0], code=row[1], at=row[2],
-                        item_id=row[3], authenticated=bool(row[4]))
+                        item_id=row[3], authenticated=bool(row[4]),
+                        detail=(str(row[5]) if len(row) > 5 and row[5] else None))

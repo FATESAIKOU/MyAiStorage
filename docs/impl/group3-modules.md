@@ -634,10 +634,14 @@ def apply_claim(store, dec, clock, *, max_open_reservations=20) -> ApplyResult: 
     # 須存在（否則 unknown_target）；
     # M1：同一個新 session 對同一個被接續 session 只能一條 Link——與 apply_continuation
     # 共用同一個檢查；既有那條是 claim 建的（不論接續點是否相同）→ duplicate_link；
-    # M2：這個 profile 的**未結預留**（`status=reserved` 且沒有後續快照）達上限
-    #   → link_quota_exceeded。只有這次真的會預留一個新 session 才佔額度；冪等重送提早
+    # M2：這個 profile 的**未結預留**（`status=reserved`、沒有後續快照、而且**還沒過
+    #   `reserved_until`**）達上限 → link_quota_exceeded，訊息（`detail`）要列出是哪些
+    #   預留佔住額度。只有這次真的會預留一個新 session 才佔額度；冪等重送提早
     #   回傳也不佔額度。數量**直接從真本算**（掃 sessions/*/*/meta.json），跨輪累計、
     #   不留任何程式內帳本（review-1926cd3-142fd04 M3：每輪歸零只是限速）。
+    #   過期的預留**仍然存在、仍然被顯示、仍然等人清理**，只是不佔額度
+    #   （review-55edd374 M3：否則放棄太多次 checkout 的 profile 會被自己的殘留
+    #   永久鎖住）。期限讀不到時一律當作還沒過期（fail-closed）。
     #   **run.py 要把設定值傳進來**：
     #   `max_open_reservations=rcfg.max_open_reservations_per_profile`（只接受正整數）；
     # 否則 REJECT(unknown_handoff / already_claimed / unknown_claimer / not_holder /

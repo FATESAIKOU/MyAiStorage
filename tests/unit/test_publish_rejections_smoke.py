@@ -80,10 +80,30 @@ def test_true_copy_rejections_are_read_without_content(tmp_path: Path):
         (ULID, "stale", "opencode:ses_1", True),
         (ULID2, "too_old", None, True),
     ]
-    # 只有代碼與時間，沒有任何欄位裝載內容
+    # 只有代碼、時間、item 與 detail，沒有任何欄位裝載內容
+    # （detail 目前只帶公開的 session id，見 review-55edd374 M3）
     assert set(rows[0].to_dict()) == {
-        "item_key", "code", "at", "item_id", "authenticated"
+        "item_key", "code", "at", "item_id", "authenticated", "detail"
     }
+    assert rows[0].detail is None and rows[1].detail is None
+
+
+def test_true_copy_rejection_carries_its_detail(tmp_path: Path):
+    """真本拒收紀錄裡的 `detail` 會被帶進讀取視圖（寫入端要靠它知道被什麼擋住）。"""
+    store = _store(tmp_path)
+    store.put_json(
+        f"_committer/rejections/{ULID}.json",
+        {"code": "link_quota_exceeded", "at": T0, "item_id": None,
+         "detail": "佔住額度的預留：opencode:ses_a"},
+    )
+    store.put_json(
+        f"_committer/rejections/{ULID2}.json",
+        {"code": "link_quota_exceeded", "at": T0, "detail": ""},   # 壞型別 → None
+    )
+
+    rows = {r.item_key: r for r in collect_true_copy_rejections(store)}
+    assert rows[ULID].detail == "佔住額度的預留：opencode:ses_a"
+    assert rows[ULID2].detail is None
 
 
 def test_corrupt_true_copy_rejection_aborts(tmp_path: Path):
@@ -164,5 +184,6 @@ def test_rejection_row_roundtrip_shape():
         "at": T0,
         "item_id": None,
         "authenticated": 0,
+        "detail": None,
     }
     assert json.loads(json.dumps(row.to_dict()))["code"] == "orphan"

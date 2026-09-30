@@ -14,6 +14,8 @@
   提早回傳、被拒不留預留殘留、預留 id 的格式規則）
 - review-1926cd3-142fd04 M3（PM 裁決：上限是**跨輪累計的未結預留數**，不是每輪
   限速；直接從真本算，不留任何程式內帳本）
+- review-55edd374 M3（過了 `reserved_until` 的預留不佔額度——仍然顯示、仍然等人
+  清理，只是不計數；`link_quota_exceeded` 的詳細訊息列出是哪些預留佔住額度）
 - PM 決定（期 1 拿掉改寫：apply_rewrite 一律 REJECT）
 
 呼叫順序由 intake.evaluate.sort_accepted_decisions 決定：
@@ -27,8 +29,9 @@ reference。
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -70,6 +73,8 @@ class ApplyResult:
     ok=False 表示轉成 REJECT（拒收檔已由本模組寫入，不影響同輪其他項目）。
     paths 為本次寫入的新增相對路徑（供 run.py 批次 commit 與發佈用）。
     rejected_at／deletable_after 供 run.py 發佈拒收原因（24 小時窗口）。
+    detail 是給寫入端看的補充說明（目前只有預留上限用得到，
+    review-55edd374 M3），隨拒收紀錄發佈；沒有就留 None。
     """
 
     ok: bool
@@ -77,6 +82,7 @@ class ApplyResult:
     paths: list[str] = field(default_factory=list)
     rejected_at: str | None = None
     deletable_after: datetime | None = None
+    detail: str | None = None
 
 
 def _item_key(dec: Decision) -> str:
@@ -108,12 +114,17 @@ def _write_rejection(
     code: str,
     at: str,
     item_id: str | None,
+    detail: str | None = None,
 ) -> str:
     """寫入拒收紀錄（第 4 組發佈到讀取視圖的來源）。回傳相對路徑。
 
     M3：形狀必須與 evaluate 的 `reject_decision` 完全一致（`inbox_folder_id`、
     `candidate_ids`、`entries`），否則 evaluate 的拒收快取認不得這一筆，
     同一個項目會每一輪重新評估、重新拒收。`at` 只在第一次寫入。
+
+    `detail` 只加在**最上層**、不放進 `entries`：entries 是 evaluate 與 apply 共用
+    的 fast path，比對只看 `inbox_folder_id` ＋ `candidate_ids`，多帶一個欄位不會
+    壞掉比對，但保持兩邊形狀一致比較安全（review-55edd374 M3）。
 
     item_key 格式錯誤時直接 raise（scan 已驗證 ULID，走到這裡代表程式錯誤）。
     """
@@ -128,6 +139,7 @@ def _write_rejection(
         item_id=item_id,
         inbox_folder_id=str(getattr(item, "inbox_folder_id", "") or ""),
         candidates=rejections.candidate_ids(sidecars, sigs),
+        detail=detail,
     )
     return layout.rejection_path(_item_key(dec))
 
@@ -147,11 +159,18 @@ def _fail(
     before: list[str],
     code: str,
     at: str,
+    *,
+    detail: str | None = None,
 ) -> ApplyResult:
-    """套用失敗轉 REJECT：寫拒收紀錄，回傳 ok=False。"""
+    """套用失敗轉 REJECT：寫拒收紀錄，回傳 ok=False。
+
+    `detail` 是給寫入端看的補充說明（`link_quota_exceeded` 會帶「哪些預留佔住
+    額度」，review-55edd374 M3）；它寫進拒收紀錄，跟著發佈到讀取視圖。
+    """
     item_id = _record(dec).get("id")
     _write_rejection(store, dec, code, at,
-                     item_id if isinstance(item_id, str) else None)
+                     item_id if isinstance(item_id, str) else None,
+                     detail=detail)
     return ApplyResult(
         ok=False,
         code=code,
@@ -160,6 +179,7 @@ def _fail(
         # M3／docs 4.4：刪除期限以項目檔案最早的 created_time 為基準，
         # 不是「當下 + 24h」，否則躺了幾天的壞項目永遠多等一天。
         deletable_after=rejections.deletable_after_for(_item_files(dec), at),
+        detail=detail,
     )
 
 
@@ -656,13 +676,44 @@ def _reserved_until(clock: Clock) -> str:
         include_fraction=True)
 
 
-def _open_reservation_ids(store: AgoraStore, producer: str) -> list[str]:
+def _reservation_expired(meta: dict, now: datetime) -> bool:
+    """這筆預留是不是已經過了 `reserved_until`？
+
+    期 1 不會自動刪除過期的預留（見 `_reserved_until`），所以「過期」純粹是一個
+    判斷：**它還在真本裡、還會被 `agora show` 標成 `expired`、還在等人清理，
+    只是不再佔未結預留的額度**（review-55edd374 M3）。否則一個放棄過太多次
+    checkout 的 profile 會被自己過去留下的殘留永久鎖住，而且不會自己好。
+
+    期限**讀不到或壞掉時一律當作還沒過期**（仍然佔額度）：上限是保護，壞掉就
+    放行等於把它關掉。
+    """
+    raw = meta.get("reserved_until")
+    if not isinstance(raw, str) or not raw:
+        return False
+    try:
+        deadline = parse_rfc3339(raw)
+    except ValueError:
+        return False
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    return deadline <= now
+
+
+def _open_reservation_ids(
+    store: AgoraStore, producer: str, now: datetime
+) -> list[str]:
     """這個 profile 目前的**未結預留** session id（直接從真本算，沒有任何帳本）。
 
-    「未結」＝ `status == "reserved"` **而且**只有預留自己那一份快照。兩個條件都查：
+    「未結」＝ `status == "reserved"` **而且**只有預留自己那一份快照。三個條件都查：
     `apply_session` 收到新快照時本來就會把狀態換成 running／stopped，再查一次快照
     數是因為期限只顯示、不刪除（期 1 不自動清除過期的預留，見 `_reserved_until`），
     真本裡一筆「狀態說是預留、快照卻已經有後續」的行不該繼續佔著額度。
+
+    **過了 `reserved_until` 的不算數**（review-55edd374 M3）：它們仍然存在、
+    仍然被顯示、仍然等人清理，只是不佔額度——這樣放棄過太多次 checkout 的
+    profile 過了一週就自己好，不必管理者先動手抹。
 
     **為什麼不算在程式裡**（review-1926cd3-142fd04 M3，PM 裁決）：原本這裡有一個
     每輪歸零的 in-process ledger，但輪數是住民自己觸發的（`sync and commit` 會觸發
@@ -688,8 +739,33 @@ def _open_reservation_ids(store: AgoraStore, producer: str) -> list[str]:
                 continue
             if len(store.snapshots(meta["id"])) > 1:
                 continue          # 已經有後續快照 → 預留已經開工，不再計數
+            if _reservation_expired(meta, now):
+                continue          # 過期：仍然顯示、等人清理，但不佔額度
             open_ids.append(meta["id"])
     return open_ids
+
+
+#: 拒收訊息裡最多列幾個佔住額度的預留（再多對寫入端也沒用，看要清的是哪幾個就夠）
+QUOTA_DETAIL_LIMIT = 10
+
+
+def _quota_detail(open_ids: Sequence[str], cap: int) -> str:
+    """`link_quota_exceeded` 的詳細訊息：到底是哪些預留佔住了額度。
+
+    沒有這段的話，寫入端只看到一個 `link_quota_exceeded`，既不知道是哪些預留、
+    也不知道該去看哪裡（review-55edd374 M3）。內容**只有 session id**——那些本來
+    就是讀取視圖裡公開的欄位，不帶任何交接內容或訊息本文。
+    """
+    shown = list(open_ids[:QUOTA_DETAIL_LIMIT])
+    more = len(open_ids) - len(shown)
+    listed = "、".join(shown)
+    tail = f"…另外 {more} 筆" if more > 0 else ""
+    return (
+        f"這個 profile 已有 {len(open_ids)} 筆未結預留，達到上限 {cap}；"
+        f"佔住額度的預留：{listed}{tail}。"
+        f"清掉不再需要的預留（或等它們過期）就能再 checkout；"
+        f"過期的預留不佔額度但要由管理者抹除。"
+    )
 
 
 def _check_reservation_cap(
@@ -709,7 +785,8 @@ def _check_reservation_cap(
     `already` 回傳，同樣不佔額度（否則逾時重跑會把自己的額度吃掉）。
 
     拒收碼沿用 `link_quota_exceeded`：它是已經發佈到讀取視圖給寫入端看的外部契約，
-    語意從「每輪限速」改成「跨輪累計」不該換掉寫入端認得的那個字串。
+    語意從「每輪限速」改成「跨輪累計」不該換掉寫入端認得的那個字串。詳細訊息
+    （哪些預留佔住額度）走 `detail` 欄，隨拒收紀錄發佈到讀取視圖。
 
     回傳 `None` 代表還在上限內。
     """
@@ -718,9 +795,13 @@ def _check_reservation_cap(
         # 載入時就擋掉（`committer/config.py`），走到這裡代表呼叫端傳了不法的程式值。
         raise ValueError(
             f"max_open_reservations 必須是正整數: {max_open_reservations!r}")
-    if len(_open_reservation_ids(store, producer)) < max_open_reservations:
+    open_ids = _open_reservation_ids(store, producer, parse_rfc3339(now_str))
+    if len(open_ids) < max_open_reservations:
         return None
-    return _fail(store, dec, before, "link_quota_exceeded", now_str)
+    return _fail(
+        store, dec, before, "link_quota_exceeded", now_str,
+        detail=_quota_detail(open_ids, max_open_reservations),
+    )
 
 
 def apply_claim(

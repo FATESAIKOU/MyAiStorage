@@ -13,13 +13,20 @@
 的「e2e 環境鎖」一節）。要清 e2e 的東西走 `scripts/e2e_setup.py --sweep-orphans`，
 那支知道自己的形狀。
 
+**只看名字還不夠，也要看年齡**（review-55edd374 M2）：另一個終端**正在跑**的
+整合測試用的是同一種前綴，刪掉它的沙箱會讓那一輪以奇怪的錯誤失敗、pin 條目
+也被抽走。ULID 的前 10 碼就是建立時間（48-bit 毫秒），所以只刪建立時間超過
+`--min-age-hours`（預設 6 小時）的；太新的照樣列在 dry-run 清單裡，但標成
+「太新、跳過」——邊界要讓人看得見。
+
 用法（預設就是 dry-run，不帶 `--confirm` 絕不會刪）：
 
     uv run python scripts/cleanup_integration_leftovers.py
     uv run python scripts/cleanup_integration_leftovers.py --confirm
+    uv run python scripts/cleanup_integration_leftovers.py --min-age-hours 24
 
 刪之前一律先 `get()` 確認該資料夾的 parents 確實是 `TEST_FOLDER_ID`，
-並且名字通過上面的白名單；對不上就跳過並說明，不猜。
+並且名字通過上面的白名單、年齡也超過門檻；對不上就跳過並說明，不猜。
 秘密只以路徑引用，內容不讀不印。
 """
 
@@ -30,6 +37,7 @@ import re
 import sys
 import tempfile
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +50,8 @@ from run_integration import (  # 需要先補 sys.path
     resolve_settings,
 )
 
+from aistorage.intake.ledger import parse_ulid_timestamp_ms
+
 #: 整合測試自己的前綴：`it-<ULID>` 或 `it-erase-<ULID>`。
 #: ULID 是 26 碼 Crockford base32（少了 I L O U），大小寫不拘。
 ULID_CHARS = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -53,8 +63,10 @@ INTEGRATION_PREFIX = re.compile(
     rf"(?:-(?:{'|'.join(KNOWN_SUFFIXES)}))?$",
     re.IGNORECASE,
 )
-#: pin repo 的條目檔名：`.pin/it-<ULID>.json` 之類。
-INTEGRATION_PIN_ENTRY = re.compile(rf"^it-[{ULID_CHARS}]{{26}}(?:[.-].*)?$", re.IGNORECASE)
+
+#: 只刪建立時間比這麼久以前的 `it-<ULID>`（review-55edd374 M2）。
+#: 6 小時夠跨過任何一場整合測試，又不會讓殘留留在測試根資料夾裡幾天。
+DEFAULT_MIN_AGE_HOURS = 6.0
 
 #: 明確不碰的名字前綴（e2e 環境是單例，別人的）。
 PROTECTED_PREFIXES = ("e2e-", "syncer-", "probe-")
@@ -65,6 +77,58 @@ def is_integration_prefix(name: str) -> bool:
     if name.startswith(PROTECTED_PREFIXES):
         return False
     return bool(INTEGRATION_PREFIX.match(name))
+
+
+def strip_known_suffix(name: str) -> str:
+    """剝掉 `-inbox`／`-quarantine`／`-readview` 附屬後綴，留下測試前綴名。
+
+    分組與算年齡都靠它，所以兩邊不會對「哪個資料夾屬於哪一組」有不同解讀。
+    """
+    for suffix in KNOWN_SUFFIXES:
+        if name.lower().endswith(f"-{suffix}"):
+            return name[: -(len(suffix) + 1)]
+    return name
+
+
+def integration_ulid(name: str) -> str | None:
+    """取出 `it-<ULID>`／`it-erase-<ULID>`／`it-<ULID>-inbox` 裡的那 26 碼 ULID。
+
+    回傳 `None` 表示這個名字不是整合測試的前綴（附屬後綴先剝掉，所以同一組
+    共用同一個 ULID）。
+    """
+    if not is_integration_prefix(name):
+        return None
+    stem = strip_known_suffix(name)
+    if stem.lower().startswith("it-erase-"):
+        return stem[len("it-erase-"):]
+    if stem.lower().startswith("it-"):
+        return stem[len("it-"):]
+    return None
+
+
+def age_hours(name: str, now: datetime) -> float | None:
+    """這個整合測試前綴離現在幾個小時（依 ULID 前 10 碼的建立時間）。
+
+    ULID 的前 10 碼是 48-bit 的 UTC 毫秒時間戳（`generate_ulid` 怎麼編出來的，
+    這裡就怎麼解回來）。回傳 `None` 表示時間解析不出來——那個時候一律**當成
+    太新**（不刪）：刪資料的腳本寧可少刪也不要刪錯。
+    """
+    ulid = integration_ulid(name)
+    if ulid is None:
+        return None
+    ms = parse_ulid_timestamp_ms(ulid)
+    if ms is None:
+        return None
+    created = datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return (now - created).total_seconds() / 3600.0
+
+
+def is_old_enough(name: str, now: datetime, min_age_hours: float) -> bool:
+    """這個前綴是不是已經老到可以刪了（建立時間超過 `min_age_hours` 小時）？"""
+    hours = age_hours(name, now)
+    return hours is not None and hours >= min_age_hours
 
 
 #: 釘選值條目的副檔名。`.maintenance` 是第 6 組抹除測試用 `AdminLock` 留下的
@@ -108,12 +172,7 @@ def group_prefix_folders(names: Sequence[str]) -> list[tuple[str, list[str]]]:
     for name in sorted(names):
         if not is_integration_prefix(name):
             continue
-        base = name
-        for suffix in KNOWN_SUFFIXES:
-            if base.lower().endswith(f"-{suffix}"):
-                base = base[: -(len(suffix) + 1)]
-                break
-        groups.setdefault(base, []).append(name)
+        groups.setdefault(strip_known_suffix(name), []).append(name)
     return [(base, members) for base, members in sorted(groups.items())]
 
 
@@ -152,18 +211,57 @@ def pin_candidates(settings: Settings, workdir: Path) -> list[str]:
     return sorted({n for n in names if is_integration_pin_entry(n)})
 
 
-def plan(settings: Settings, workdir: Path) -> dict[str, object]:
-    """跑一次完整的 dry-run：會刪什麼都先算出來，不動任何東西。"""
-    folders = drive_candidates(settings)
-    pin_files = pin_candidates(settings, workdir)
+def plan(
+    settings: Settings,
+    workdir: Path,
+    *,
+    now: datetime | None = None,
+    min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
+) -> dict[str, object]:
+    """跑一次完整的 dry-run：會刪什麼都先算出來，不動任何東西。
+
+    白名單過關的再按**年齡**分兩堆（review-55edd374 M2）：
+
+    - `folders`／`pin_files`：老到可以刪的（`--confirm` 只碰這兩堆）；
+    - `young_folders`／`young_pin_files`：太新的，標成「太新、跳過」並連同
+      幾歲一起列出來——很可能是另一個終端**正在跑**的整合測試，刪了會害到它。
+
+    `skipped` 是連名字都不符合的（e2e／syncer／probe 之類），本來就不在範圍內。
+    """
+    at = now or datetime.now(timezone.utc)
+    all_folders = drive_candidates(settings)
+    all_pin = pin_candidates(settings, workdir)
     skipped = sorted(
         n for n in _all_drive_names(settings) if not is_integration_prefix(n)
     )
+
+    old_folders: list[tuple[str, str, str]] = []
+    young_folders: list[tuple[str, str, float | None]] = []
+    for entry in all_folders:
+        name = entry[1]
+        hours = age_hours(name, at)
+        if hours is not None and hours >= min_age_hours:
+            old_folders.append(entry)
+        else:
+            young_folders.append((entry[0], name, hours))
+
+    old_pin: list[str] = []
+    young_pin: list[tuple[str, float | None]] = []
+    for name in all_pin:
+        hours = age_hours(pin_entry_stem(name), at)
+        if hours is not None and hours >= min_age_hours:
+            old_pin.append(name)
+        else:
+            young_pin.append((name, hours))
+
     return {
-        "folders": folders,
-        "pin_files": pin_files,
+        "folders": old_folders,
+        "pin_files": old_pin,
+        "young_folders": young_folders,
+        "young_pin_files": young_pin,
         "skipped": skipped,
-        "groups": group_prefix_folders([f[1] for f in folders]),
+        "groups": group_prefix_folders([f[1] for f in old_folders]),
+        "min_age_hours": min_age_hours,
     }
 
 
@@ -178,10 +276,19 @@ def _all_drive_names(settings: Settings) -> list[str]:
     return [c.name for c in drive.list_children(root_id)]
 
 
-def confirm_deletions(settings: Settings, folders: Sequence[tuple[str, str, str]]) -> dict:
+def confirm_deletions(
+    settings: Settings,
+    folders: Sequence[tuple[str, str, str]],
+    *,
+    now: datetime | None = None,
+    min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
+) -> dict:
     """真的刪：每個資料夾刪之前重新 `get()` 確認 parents 與名字都對得上。
 
-    對不上就跳過並回報——快照是上一個行程拍 的，中間別人可能動過。
+    對不上就跳過並回報——快照是上一個行程拍的，中間別人可能動過。
+    **年齡也再確認一次**（review-55edd374 M2）：刪之前那一步不管篩過沒有，
+    這裡都自己算，所以就算呼叫端不小心把太新的清單傳進來也不會刪到別人
+    正在跑的整合測試。
     """
     from run_integration import read_test_folder_id
 
@@ -189,6 +296,7 @@ def confirm_deletions(settings: Settings, folders: Sequence[tuple[str, str, str]
     from aistorage.drive.http import HttpDriveClient
     from tests.integration._harness import destroy_tree
 
+    at = now or datetime.now(timezone.utc)
     root_id = read_test_folder_id(settings.ids_env)
     drive = HttpDriveClient(RcloneConfToken(settings.rclone_conf, remote="gdrive"))
     removed: list[str] = []
@@ -196,6 +304,9 @@ def confirm_deletions(settings: Settings, folders: Sequence[tuple[str, str, str]
     for base, name, folder_id in folders:
         if not is_integration_prefix(name):
             skipped.append(f"{name}（名字不符合整合測試前綴）")
+            continue
+        if not is_old_enough(name, at, min_age_hours):
+            skipped.append(f"{name}（太新、可能正在跑，跳過）")
             continue
         # 下面三個 except 都是刻意的：清理一個前綴不該讓整場清理中斷，
         # 對不上的就跳過並說明（刪資料的腳本寧可少刪也不要刪錯）。
@@ -219,14 +330,25 @@ def confirm_deletions(settings: Settings, folders: Sequence[tuple[str, str, str]
     return {"removed": removed, "skipped": skipped}
 
 
-def confirm_pin_deletions(settings: Settings, file_names: Sequence[str]) -> dict:
+def confirm_pin_deletions(
+    settings: Settings,
+    file_names: Sequence[str],
+    *,
+    now: datetime | None = None,
+    min_age_hours: float = DEFAULT_MIN_AGE_HOURS,
+) -> dict:
     """真的刪 pin repo 的條目：一個 commit 刪一批，再 push。
 
     用 `GitPinStore` 自己的環境變數（帶 deploy key 的 `GIT_SSH_COMMAND`），
-    push 不掉就明確回報失敗，不假裝成功。
+    push 不掉就明確回報失敗，不假裝成功。**push 掉之前，遠端一個條目都沒少**，
+    所以失敗時回傳的 `removed` 一律是空的（`staged` 只是本機那個用完就丟的
+    暫存 clone 裡 `git rm` 過的檔名）——訊息要照這個事實講。
+
+    年齡同樣在刪之前自己算一次（review-55edd374 M2）。
     """
     from aistorage.integrity.pin import GitPinStore
 
+    at = now or datetime.now(timezone.utc)
     # 暫存目錄只是這次清理用的 clone，結束就留著給系統清（呼叫端是短命 CLI）
     workdir = Path(tempfile.mkdtemp(prefix="pin-cleanup-"))
     store = GitPinStore(
@@ -243,6 +365,8 @@ def confirm_pin_deletions(settings: Settings, file_names: Sequence[str]) -> dict
     for name in file_names:
         if not is_integration_pin_entry(name):
             continue
+        if not is_old_enough(pin_entry_stem(name), at, min_age_hours):
+            continue
         rel = f".pin/{name}"
         if not (store.workdir / rel).is_file():
             continue
@@ -253,14 +377,18 @@ def confirm_pin_deletions(settings: Settings, file_names: Sequence[str]) -> dict
         if proc.returncode == 0:
             removed.append(name)
     if not removed:
-        return {"removed": [], "error": None}
+        return {"removed": [], "error": None, "staged": []}
     commit = subprocess.run(
         ["git", "-C", str(store.workdir), "commit", "-q", "-m",
          f"pin: drop {len(removed)} integration leftovers"],
         capture_output=True, text=True, check=False, env=env,
     )
     if commit.returncode != 0:
-        return {"removed": [], "error": commit.stderr.strip()[:300]}
+        return {
+            "removed": [],
+            "error": commit.stderr.strip()[:300],
+            "staged": removed,
+        }
     push = subprocess.run(
         ["git", "-C", str(store.workdir), "push", "-q", "origin", "main"],
         capture_output=True, text=True, check=False, env=env,
@@ -271,7 +399,7 @@ def confirm_pin_deletions(settings: Settings, file_names: Sequence[str]) -> dict
             "error": push.stderr.strip()[:300],
             "staged": removed,
         }
-    return {"removed": removed, "error": None}
+    return {"removed": removed, "error": None, "staged": []}
 
 
 # ---------------------------------------------------------------------------
@@ -279,15 +407,30 @@ def confirm_pin_deletions(settings: Settings, file_names: Sequence[str]) -> dict
 # ---------------------------------------------------------------------------
 
 
+def _age_text(hours: float | None) -> str:
+    """年齡的顯示文字（解析不出來就說看不出來，不假裝知道）。"""
+    if hours is None:
+        return "看不出建立時間"
+    if hours < 1:
+        return f"{hours * 60:.0f} 分鐘前建立"
+    if hours < 48:
+        return f"{hours:.1f} 小時前建立"
+    return f"{hours / 24:.1f} 天前建立"
+
+
 def format_plan(plan_result: dict, settings: Settings) -> str:
     folders = plan_result["folders"]
     pin_files = plan_result["pin_files"]
     groups = plan_result["groups"]
     skipped = plan_result["skipped"]
+    young_folders = plan_result["young_folders"]
+    young_pin = plan_result["young_pin_files"]
+    min_age = plan_result["min_age_hours"]
     lines = [
         "=== dry-run：以下是「會刪」的東西（沒有 --confirm 所以不動）===",
         f"Drive 測試根資料夾：{settings.ids_env} 裡的 TEST_FOLDER_ID",
         f"pin repo：{settings.pin_repo_url}",
+        f"年齡門檻：建立超過 {min_age:g} 小時才刪",
         "",
         f"Drive：{len(folders)} 個資料夾，{len(groups)} 組前綴",
     ]
@@ -299,11 +442,24 @@ def format_plan(plan_result: dict, settings: Settings) -> str:
     lines += [f"    - {n}" for n in pin_files[:40]]
     if len(pin_files) > 40:
         lines.append(f"    …另外還有 {len(pin_files) - 40} 個")
+
+    # 太新的照樣列出來（帶年齡），讓人知道為什麼它沒被算進上面那堆
+    # （review-55edd374 M2）：多半是另一個終端正在跑的整合測試。
+    lines += ["", (
+        f"太新、跳過（不滿 {min_age:g} 小時）："
+        f"{len(young_folders)} 個資料夾、{len(young_pin)} 個條目檔"
+    )]
+    for base, name, hours in young_folders:
+        lines.append(f"    - {name}（{_age_text(hours)}，{base}）")
+    for name, hours in young_pin:
+        lines.append(f"    - {name}（{_age_text(hours)}）")
+
     lines += ["", f"不碰的（名字不符合 it-<ULID>）：{len(skipped)} 個"]
     lines += [f"    - {n}" for n in skipped]
     lines += [
         "",
         "e2e-* 一律不碰（e2e 環境是單例，另有 scripts/e2e_setup.py --sweep-orphans）。",
+        "太新的要等過了門檻再跑一次（門檻用 --min-age-hours 調）。",
         "真的要刪就加 --confirm。",
     ]
     return "\n".join(lines)
@@ -319,14 +475,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="真的刪（沒有這個旗標就只列清單）",
     )
+    parser.add_argument(
+        "--min-age-hours",
+        type=float,
+        default=DEFAULT_MIN_AGE_HOURS,
+        help=(
+            "只刪建立時間超過這麼多小時的 it-<ULID>"
+            f"（預設 {DEFAULT_MIN_AGE_HOURS:g}；太小會踩到另一個終端正在跑的整合測試）"
+        ),
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.min_age_hours < 0:
+        print("--min-age-hours 不能是負的", file=sys.stderr)
+        return 2
     settings = resolve_settings()
     workdir = Path(tempfile.mkdtemp(prefix="cleanup-plan-"))
-    result = plan(settings, workdir)
+    result = plan(settings, workdir, min_age_hours=args.min_age_hours)
     print(format_plan(result, settings))
 
     if not args.confirm:
@@ -335,12 +503,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     folders = result["folders"]
     pin_files = result["pin_files"]
     if not folders and not pin_files:
-        print("\n沒有東西要清。")
+        print("\n沒有東西要清（太新的都留著，等過了門檻再跑）。")
         return 0
 
     print("\n=== --confirm：開始刪 ===", flush=True)
-    drive_result = confirm_deletions(settings, folders)
-    pin_result = confirm_pin_deletions(settings, pin_files)
+    drive_result = confirm_deletions(
+        settings, folders, min_age_hours=args.min_age_hours)
+    pin_result = confirm_pin_deletions(
+        settings, pin_files, min_age_hours=args.min_age_hours)
 
     print(f"Drive：刪掉 {len(drive_result['removed'])} 個資料夾")
     for name in drive_result["removed"]:
@@ -351,8 +521,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if pin_result["removed"]:
         print(f"pin repo：刪掉 {len(pin_result['removed'])} 個條目")
     if pin_result.get("error"):
-        print(f"pin repo：失敗 —— {pin_result['error']}")
-        print(f"    （已 stage 但沒推上去：{pin_result.get('staged')}）")
+        # 措辭要照事實講（review-55edd374 M2／L）：commit 與 push 都在一個用完
+        # 就丟的暫存 clone 裡，遠端的條目一個都還在。舊的說法「已 stage 但沒推
+        # 上去」會讓人以為遠端已經少東西了。
+        print("pin repo：失敗 —— 沒有任何東西被刪掉"
+              f"（{len(pin_result.get('staged') or [])} 個條目只在本機的暫存 clone 裡刪掉，"
+              "遠端原封不動）")
+        print(f"    原因：{pin_result['error']}")
         return 1
     return 0
 

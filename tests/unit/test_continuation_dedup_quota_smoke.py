@@ -1,5 +1,5 @@
 """接續記錄的去重、預留數量上限與預留本身（review-2bc0785 M1／M2／L、
-review-1926cd3-142fd04 M3）。
+review-1926cd3-142fd04 M3、review-55edd374 M3）。
 
 - **M1**：同一個新 session 對同一個被接續 session **只能有一條**接續 Link。
   claim 與 continuation 共用同一個檢查，所以兩種順序的結果一樣，不會出現
@@ -8,7 +8,8 @@ review-1926cd3-142fd04 M3）。
   **期 1 不自動刪除**。
 - **M3**：每個 profile 能同時掛著的**未結預留**（`status=reserved` 且沒有後續
   快照）有上限，**跨輪累計**、直接從真本算。輪數是住民自己觸發的，所以「每輪 N 筆」
-  只是限速（PM 裁決，見 decision log 最後一條）。
+  只是限速（PM 裁決，見 decision log 最後一條）。過了期限的預留不佔額度
+  （review-55edd374 M3），而拒收訊息會說出是哪些預留佔著。
 - **L**：接續目標只能是主 Session（與交接單一致）、已經有同一條 Link 時提早回傳、
   被拒時 Agora 裡不留預留殘留。
 """
@@ -186,17 +187,17 @@ def _continuation(new_id: str, target_id: str, snap_sha: str, mid: str, *,
 
 def _apply_cont(store: AgoraStore, record: dict, sidecar: dict,
                 reserved: tuple[Path, str, int] | None = None,
-                *, producer: str = PRODUCER, **kw):
+                *, producer: str = PRODUCER, clock: FixedClock = CLOCK, **kw):
     raw_path = reserved[0] if reserved is not None else None
     return apply_continuation(
-        store, _dec(record, sidecar, raw_path, producer), FakeConverter(), CLOCK, **kw)
+        store, _dec(record, sidecar, raw_path, producer), FakeConverter(), clock, **kw)
 
 
 def _apply_claim(store: AgoraStore, record: dict, sidecar: dict,
                  reserved: tuple[Path, str, int] | None = None,
-                 *, producer: str = PRODUCER, **kw):
+                 *, producer: str = PRODUCER, clock: FixedClock = CLOCK, **kw):
     raw_path = reserved[0] if reserved is not None else None
-    return apply_claim(store, _dec(record, sidecar, raw_path, producer), CLOCK, **kw)
+    return apply_claim(store, _dec(record, sidecar, raw_path, producer), clock, **kw)
 
 
 def _links_of(store: AgoraStore, new_id: str) -> list[dict]:
@@ -505,7 +506,7 @@ def test_a_link_without_a_new_reservation_does_not_consume_the_cap(tmp_path: Pat
 
     # opencode:s4 已經在 Agora（不是預留），用它當新 session 接兩個來源（n→1）
     _put_session(store, tmp_path, "opencode:s4", [_msg("s4")], name="s4.raw")
-    assert _open_reservation_ids(store, PRODUCER) == []
+    assert _open_reservation_ids(store, PRODUCER, CLOCK.now()) == []
 
     first = _continuation("opencode:s4", "opencode:s2", sha_a, "a1")
     assert _apply_cont(store, *first, max_open_reservations=1).ok
@@ -703,3 +704,141 @@ def test_rejected_claim_leaves_no_reservation(tmp_path: Path):
     # 交接單仍然是「沒人認領」，別人還能接
     handoff = store.get_record(f"handoff:{h2}")
     assert handoff is not None and handoff["claimed_by"] is None
+
+
+# ---------------------------------------------------------------------------
+# review-55edd374 M3：過期的預留不佔額度；拒收訊息說出是哪些預留佔著
+# ---------------------------------------------------------------------------
+
+
+def test_expired_reservations_stop_consuming_the_cap(tmp_path: Path):
+    """過了 `reserved_until` 的預留不佔額度——放棄太多次 checkout 的 profile
+    過了一週就自己好，不必管理者先動手抹（review-55edd374 M3）。
+
+    這是 M3 指的「會卡住的地雷」：期 1 不自動刪過期的預留，所以原本這 20 筆會
+    永遠算在裡面，之後每一次 checkout 都得到 `link_quota_exceeded`。
+    """
+    store = _new_store(tmp_path)
+    sha = _put_session(store, tmp_path, "opencode:s1", [_msg("m1")], name="s1.raw")
+
+    reserved = _write_raw(tmp_path, "expired.json", [])
+    cont = _continuation("opencode:old", "opencode:s1", sha, "m1", reserved=reserved)
+    assert _apply_cont(store, *cont, reserved, max_open_reservations=1).ok
+
+    # 期限還沒到：一樣擋得住
+    soon = _write_raw(tmp_path, "soon.json", [])
+    soon_cont = _continuation("opencode:soon", "opencode:s1", sha, "m1", reserved=soon)
+    assert _apply_cont(store, *soon_cont, soon, max_open_reservations=1).code \
+        == "link_quota_exceeded"
+
+    # 期限過了（CLOCK 往後推一天以上，TTL 是 7 天）：額度回來了
+    later_clock = FixedClock("2026-10-05T09:00:00Z")
+    fresh = _write_raw(tmp_path, "fresh.json", [])
+    fresh_cont = _continuation("opencode:fresh", "opencode:s1", sha, "m1",
+                               reserved=fresh)
+    assert _apply_cont(store, *fresh_cont, fresh, max_open_reservations=1,
+                       clock=later_clock).ok
+
+
+def test_expired_reservations_are_still_shown_and_not_deleted(tmp_path: Path):
+    """不佔額度 ≠ 消失：過期的預留仍然在真本裡，仍然帶著期限等人清理。"""
+    store = _new_store(tmp_path)
+    sha = _put_session(store, tmp_path, "opencode:s1", [_msg("m1")], name="s1.raw")
+    reserved = _write_raw(tmp_path, "kept.json", [])
+    cont = _continuation("opencode:kept", "opencode:s1", sha, "m1", reserved=reserved)
+    assert _apply_cont(store, *cont, reserved, max_open_reservations=1).ok
+
+    later_clock = FixedClock("2026-10-05T09:00:00Z")
+    fresh = _write_raw(tmp_path, "fresh.json", [])
+    fresh_cont = _continuation("opencode:fresh", "opencode:s1", sha, "m1",
+                               reserved=fresh)
+    assert _apply_cont(store, *fresh_cont, fresh, max_open_reservations=1,
+                       clock=later_clock).ok
+
+    kept = store.get_session("opencode:kept")
+    assert kept is not None, "期 1 不會自動刪過期的預留"
+    assert kept.status == "reserved"
+    assert kept.extra["reserved_until"] == "2026-10-04T09:00:00.000000Z"
+
+
+def test_a_reservation_without_a_readable_deadline_still_consumes_the_cap(
+        tmp_path: Path):
+    """期限讀不到就當作還沒過期（上限是保護，壞掉就放行等於把它關掉）。"""
+    import json
+
+    from aistorage.agora import layout
+    from aistorage.agora.apply import _open_reservation_ids
+
+    store = _new_store(tmp_path)
+    sha = _put_session(store, tmp_path, "opencode:s1", [_msg("m1")], name="s1.raw")
+    reserved = _write_raw(tmp_path, "reserved.json", [])
+    cont = _continuation("opencode:s2", "opencode:s1", sha, "m1", reserved=reserved)
+    assert _apply_cont(store, *cont, reserved, max_open_reservations=1).ok
+
+    # 繞過 apply_session：把期限欄弄壞，看它是不是還算數
+    meta_rel = layout.session_meta_path("opencode:s2")
+    meta = json.loads((store.worktree / meta_rel).read_text(encoding="utf-8"))
+    meta["reserved_until"] = "不是時間"
+    (store.worktree / meta_rel).write_text(
+        json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+    later_clock = FixedClock("2026-11-01T09:00:00Z")
+    assert _open_reservation_ids(store, PRODUCER, later_clock.now()) == ["opencode:s2"]
+    blocked = _write_raw(tmp_path, "blocked.json", [])
+    blocked_cont = _continuation("opencode:s3", "opencode:s1", sha, "m1",
+                                 reserved=blocked)
+    assert _apply_cont(store, *blocked_cont, blocked, max_open_reservations=1,
+                       clock=later_clock).code == "link_quota_exceeded"
+
+
+def test_quota_rejection_says_which_reservations_hold_the_quota(tmp_path: Path):
+    """`link_quota_exceeded` 的訊息要說出是哪些預留佔住額度（review-55edd374 M3）。
+
+    沒有這段的話，寫入端只看到一個代碼，既不知道被什麼擋住、也不知道該去看哪裡。
+    """
+    from aistorage.publish.rejections import collect_true_copy_rejections
+
+    store = _new_store(tmp_path)
+    sha = _put_session(store, tmp_path, "opencode:s1", [_msg("m1")], name="s1.raw")
+
+    holders = []
+    for index in range(2):
+        sid = f"opencode:hold{index}"
+        holders.append(sid)
+        reserved = _write_raw(tmp_path, f"hold{index}.json", [])
+        cont = _continuation(sid, "opencode:s1", sha, "m1", reserved=reserved)
+        assert _apply_cont(store, *cont, reserved, max_open_reservations=2).ok
+
+    reserved = _write_raw(tmp_path, "blocked.json", [])
+    cont = _continuation("opencode:blocked", "opencode:s1", sha, "m1",
+                         reserved=reserved)
+    result = _apply_cont(store, *cont, reserved, max_open_reservations=2)
+
+    assert not result.ok and result.code == "link_quota_exceeded"
+    assert result.detail is not None
+    for sid in holders:
+        assert sid in result.detail, result.detail
+    assert "opencode:blocked" not in result.detail, "被拒的那筆不算佔住額度"
+    assert "2" in result.detail and "20" not in result.detail
+
+    # 訊息跟著拒收紀錄進真本，也跟著發佈到讀取視圖（寫入端讀得到）
+    rows = {r.item_key: r for r in collect_true_copy_rejections(store)}
+    assert len(rows) == 1
+    row = next(iter(rows.values()))
+    assert row.code == "link_quota_exceeded"
+    assert row.detail == result.detail
+    for sid in holders:
+        assert sid in (row.detail or "")
+
+
+def test_quota_detail_truncates_a_long_list_of_holders(tmp_path: Path):
+    """佔住額度的預留太多時只列前幾個，但要說明還有幾個沒列。"""
+    from aistorage.agora.apply import QUOTA_DETAIL_LIMIT, _quota_detail
+
+    ids = [f"opencode:hold{i:02d}" for i in range(QUOTA_DETAIL_LIMIT + 2)]
+    detail = _quota_detail(ids, cap=20)
+    for sid in ids[:QUOTA_DETAIL_LIMIT]:
+        assert sid in detail
+    assert f"opencode:hold{QUOTA_DETAIL_LIMIT:02d}" not in detail
+    assert "另外 2 筆" in detail
+    assert "20" in detail

@@ -15,11 +15,16 @@
       "item_key": "...", "code": "...", "at": "<第一次拒收時間>",
       "item_id": "..." | null,
       "inbox_folder_id": "...", "candidate_ids": ["<file id>", ...],
-      "entries": [ {"inbox_folder_id", "candidate_ids", "code", "at"}, ... ]
+      "entries": [ {"inbox_folder_id", "candidate_ids", "code", "at"}, ... ],
+      "detail": "..." | <缺席>
     }
 
 `entries` 是 fast path：同一個收件匣資料夾、同一組候選檔案（file id）只認第一筆，
 寫入者換掉檔案（新的 id）才算新的候選。
+
+`detail` 是給寫入端看的補充說明（目前只有預留上限用得到，review-55edd374 M3），
+只放 session id 之類本來就公開的欄位，不放任何交接內容或訊息本文；它**不在**
+`entries` 裡，也不參與 fast path 比對。
 """
 
 from __future__ import annotations
@@ -106,11 +111,17 @@ def record_rejection(
     item_id: str | None = None,
     inbox_folder_id: str = "",
     candidates: Sequence[str] = (),
+    detail: str | None = None,
 ) -> dict[str, Any]:
     """寫入（或更新）一個項目的拒收紀錄，回傳寫入的內容。
 
     `at` 只在第一次寫入：同一組候選檔案重複被拒收時保留第一次的時間，
     讓 `deletable_after` 能夠到期、項目能被刪除。
+
+    `detail` 是給寫入端看的補充說明（目前只有預留上限用得到，
+    review-55edd374 M3），隨紀錄發佈到讀取視圖的 `rejections.detail`。它**每一輪
+    都更新**：佔住額度的預留清單會變，舊的留著只會誤導。內容只有 session id，
+    不帶任何交接內容或訊息本文（`entries` 那個 fast path 完全不含它）。
     """
     rel = layout.rejection_path(item_key)
     rej_path = store.worktree / rel
@@ -146,5 +157,7 @@ def record_rejection(
         "candidate_ids": list(candidates),
         "entries": existing_entries,
     }
+    if detail:
+        payload["detail"] = detail
     store.put_json(rel, payload)
     return payload
