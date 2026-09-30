@@ -30,8 +30,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Callable, Generator, Iterator, Sequence
@@ -588,29 +590,46 @@ class ResidentContainerHandle:
     def export(self, session_id: str) -> dict[str, Any]:
         """`opencode export <id>` 的原生匯出（1.7a：必須明示 id）。
 
+        **stdout 導到「一般檔案」再用 `docker cp` 取回**，不用 pipe：實測
+        `opencode export` 寫完 stdout 就結束行程、不等 pipe 排空，輸出超過約
+        64 KiB 就會以 rc=0 回傳**被截斷**的 JSON（impl1 在同步器那邊修掉的正是
+        這件事，`opencode_api.export`）。harness 自己若還用 pipe，長對話就會在
+        這裡炸 `Unterminated string`（9.2 e2e 實測：61,816 bytes 被切）。
+
         匯出失敗要**明確說是匯出失敗**，不要讓它看起來像 AiStorage 的系統錯誤。
-        9.1 e2e 實測：容器裡的對話被免費模型回覆塞到很大時，`opencode export`
-        吐出被截斷的 JSON（`Unterminated string`），而呼叫端（`assert_tool_called`）
-        剛好也在用匯出，於是整場 e2e 看起來像「工具被呼叫了但都失敗」——
-        實際上只是匯出讀不到。
         """
-        res = self.exec_in(["opencode", "export", session_id], timeout_s=180.0)
+        remote = f"/tmp/aistorage/e2e-export-{session_id}.json"
+        quoted = shlex.quote(session_id)
+        self.exec_in(
+            ["sh", "-c", f"opencode export {quoted} > {remote}"], timeout_s=180.0
+        )
+        with tempfile.TemporaryDirectory(prefix="aistorage-e2e-export-") as td:
+            local = Path(td) / "export.json"
+            copied = subprocess.run(
+                ["docker", "cp", f"{self.name}:{remote}", str(local)],
+                capture_output=True, text=True,
+            )
+            if copied.returncode != 0 or not local.is_file():
+                raise ExportFailed(
+                    f"取回匯出檔失敗 (session={session_id}): {copied.stderr.strip()[:300]}"
+                )
+            data = local.read_bytes()
         try:
-            data = json.loads(res.stdout)
-        except ValueError as e:
-            tail = res.stdout[-200:].replace("\n", "\\n")
+            parsed = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as e:
+            tail = data[-200:].decode("utf-8", errors="replace").replace("\n", "\\n")
             raise ExportFailed(
                 f"匯出這個 Session 失敗（session={session_id}）：{e}\n"
-                f"輸出長度 {len(res.stdout)} bytes，結尾是 …{tail}\n"
+                f"輸出長度 {len(data)} bytes，結尾是 …{tail}\n"
                 "這是 opencode 匯出端的問題（常見於對話很長時輸出被截斷），"
                 "不是 AiStorage 的錯誤，也無法據此判斷 AI 有沒有呼叫工具。"
             ) from None
-        if not isinstance(data, dict) or "messages" not in data:
+        if not isinstance(parsed, dict) or "messages" not in parsed:
             raise ExportFailed(
                 f"匯出這個 Session 失敗（session={session_id}）："
-                f"形狀不符（缺 messages，拿到 {type(data).__name__}）"
+                f"形狀不符（缺 messages，拿到 {type(parsed).__name__}）"
             )
-        return data
+        return parsed
 
     def tool_parts(self, session_id: str) -> list[dict[str, Any]]:
         """匯出裡全部的 tool part 摘要（依出現順序）。"""
@@ -1032,8 +1051,10 @@ def latest_raw_sha(container: ResidentContainerHandle, session_id: str) -> str:
     """目前容器裡這個 Session 匯出的內容雜湊（用來確認同步器已上傳新版）。"""
     import hashlib
 
-    res = container.exec_in(["opencode", "export", session_id], timeout_s=180.0)
-    return hashlib.sha256(res.stdout.encode("utf-8")).hexdigest().lower()
+    # 走 `export()`：它把 stdout 導到檔案再用 docker cp 取回。直接用
+    # `exec_in(["opencode","export",…])` 會經過 pipe，長對話會被截斷。
+    data = json.dumps(container.export(session_id), ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(data.encode("utf-8")).hexdigest().lower()
 
 
 def read_rejection_rows(reader: AgoraReader) -> list[dict[str, Any]]:

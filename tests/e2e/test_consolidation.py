@@ -42,6 +42,13 @@ def _package_dir(label: str) -> str:
     return f"/work/pkg-{label}-{generate_ulid()[-8:]}"
 
 
+def _reserialize(messages: list) -> bytes:
+    """把 wire 訊息陣列序列化回位元組（與 `export_prefix_bytes` 同一組參數）。"""
+    return json.dumps(
+        messages, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
 def _open_handoff_for(reader: AgoraReader, session_id: str):
     hits = [h for h in reader.list_open_handoffs().value if h.author_session_id == session_id]
     return hits[0] if hits else None
@@ -155,11 +162,28 @@ def test_9_2_consolidation_n_to_1(resident_pool, run_committer, e2e_reader: Agor
     assert cont_s2.messages and cont_s3.messages, "接續點之前必須有訊息"
 
     # 6. S4 的開頭：最長那一段的整段內容位元組相同地放在最前面
+    #
+    # ⚠️ 這裡要**逐則 wire 訊息**比，不能對 `wire_prefix()` 的位元組做
+    # `startswith`：兩者都是 `json.dumps` 出來的**完整 JSON 陣列**，第一段那份
+    # 在最後一個元素之後就收尾成 `]`，而 S4 那份同一個位置還有後段的訊息
+    # （是 `,`）。只要 S4 比第一段長，`startswith` 必然為 False —— 那是比較的
+    # 形狀問題，不是內容被改寫。9.2-clean3 的失敗就是這樣：pytest 把兩個
+    # 位元組串各截斷成頭尾顯示，尾巴那個 tool_call_id 差異看起來像
+    # 「callID 被改寫」，其實只是兩個不同長度陣列的尾端。
+    #
+    # 正確的位元組相同判準：把 S4 的 wire 訊息取前 N 則重新序列化，必須與
+    # 第一段的 wire **一個位元組都不差**（同樣的 sort_keys 與 separators，
+    # 所以「序列化後相等」就是位元組相同）。
     s4_export = c4.export(s4_id)
-    s4_wire = wire_prefix(s4_export)
-    longest_wire = wire_prefix(json.loads(raws[0]), first["message_id"])
-    assert s4_wire.startswith(longest_wire), (
-        "S4 開頭必須先帶著最長那一段在接續點之前的內容（位元組相同）"
+    s4_wire = json.loads(wire_prefix(s4_export))
+    longest_wire = json.loads(
+        wire_prefix(json.loads(raws[0]), first["message_id"])
+    )
+    assert s4_wire[: len(longest_wire)] == longest_wire, (
+        "S4 開頭必須先帶著最長那一段在接續點之前的內容（逐則相同，含 tool_call_id）"
+    )
+    assert _reserialize(s4_wire[: len(longest_wire)]) == _reserialize(longest_wire), (
+        "S4 開頭的前綴重新序列化後必須與最長那一段的 wire 位元組相同"
     )
     # 另一段也有帶進來（n→1 會把後一段的首則手工鏈在前一段的末則之後）
     second_raw = json.loads(raws[1])

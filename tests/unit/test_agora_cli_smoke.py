@@ -1085,6 +1085,84 @@ def test_n_to_one_moves_later_segments_after_the_first_ones_time(tmp_path: Path)
         [1_000_000, 1_001_000, 1_002_000]
 
 
+def _tool_export(native: str, texts: Sequence[str], base_ms: int) -> dict:
+    """`_export_at`，但 assistant 的訊息帶一個 tool part（帶 `callID`）。
+
+    `callID` 是**送給模型的** `tool_call_id`（spike Q2：重播時保留原值），
+    所以第一段原封不動就包含它——ADR 0010 的位元組相同把它算在裡面。
+    """
+    doc = _export_at(native, texts, base_ms)
+    for index, message in enumerate(doc["messages"]):
+        if message["info"]["role"] != "assistant":
+            continue
+        message["parts"].append({
+            "id": f"prt_{native}_tool{index}",
+            "sessionID": native,
+            "messageID": message["info"]["id"],
+            "type": "tool",
+            "callID": f"call_function_{native}_{index}",
+            "tool": "bash",
+            "state": {"status": "completed", "input": {"command": "ls"},
+                      "output": f"{native} 的輸出", "time": {"start": base_ms}},
+        })
+    return doc
+
+
+def _raw_tool(native: str, texts: Sequence[str], base_ms: int) -> bytes:
+    return json.dumps(_tool_export(native, texts, base_ms),
+                      ensure_ascii=False).encode("utf-8")
+
+
+def test_n_to_one_never_rewrites_the_first_segments_tool_call_ids(tmp_path: Path):
+    """n→1：第一段的 `callID` 原封不動（ADR 0010 的位元組相同包含它）。
+
+    `callID` 會原樣進入送給模型的 `tool_call_id`，所以第一段（最長那段）的
+    `callID` 被改寫就代表開頭與原 session 不再位元組相同、prompt cache 失效。
+    重編 id 是允許的（`id`／`sessionID`／`messageID`），`callID` 不在名單裡。
+
+    9.2-clean3 的失敗看起來像這裡被改寫了，實際上是 e2e 那條斷言拿兩個
+    **完整 JSON 陣列**做 `bytes.startswith`（形狀問題）；這個測試直接比
+    `callID` 本身，把「有沒有被改寫」講成會失敗的樣子。
+    """
+    from aistorage.adapters.opencode import build_export
+
+    # 第一段比較長（ADR 0010：最長的放最前面），第二段比較短
+    first_texts = ["一", "二", "三", "四", "五"]
+    second_texts = ["六", "七"]
+    first = _raw_tool("ses_aaa", first_texts, 2_000_000)
+    second = _raw_tool("ses_bbb", second_texts, 1_000_000)
+    reader = FakeReader({
+        "opencode:ses_aaa": {"raw": first, "texts": first_texts},
+        "opencode:ses_bbb": {"raw": second, "texts": second_texts},
+    })
+    pkg_dir = tmp_path / "pkg-n21-callid"
+    checkout(reader, _deps(reader), [S1, S2], pkg_dir)
+
+    data = json.loads((pkg_dir / "package.json").read_text(encoding="utf-8"))
+    assert data["segments"][0]["source_session_id"] == "opencode:ses_aaa", data["segments"]
+
+    payload, _sid, segments, _source = build_export(pkg_dir)
+    assert segments == 2
+    built = payload["messages"]
+
+    def call_ids(messages: Sequence[dict]) -> list[str]:
+        return [p["callID"] for m in messages for p in m["parts"]
+                if p.get("type") == "tool"]
+
+    source_first = json.loads(first)["messages"][: len(first_texts)]
+    expected_first = call_ids(source_first)
+    assert expected_first, "這個樣本沒有 tool part，測不到東西"
+
+    # 第一段（位移 0）的 callID 一個都沒變
+    assert call_ids(built[: len(first_texts)]) == expected_first, (
+        "第一段的 callID 被改寫了："
+        f"{expected_first} → {call_ids(built[: len(first_texts)])}"
+    )
+    # 後段照原樣帶著自己的 callID（這一版沒有跨段去重，所以兩段都保留原值）
+    assert call_ids(built[len(first_texts):]) == call_ids(
+        json.loads(second)["messages"][: len(second_texts)])
+
+
 def test_a_two_segment_package_without_the_declaration_is_refused(tmp_path: Path):
     """兩段以上卻沒有 `time_shift` 宣告 → 明確拒絕，不要默默照舊組。
 
