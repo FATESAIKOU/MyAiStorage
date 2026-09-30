@@ -202,3 +202,62 @@ def test_real_subprocess_inherits_rclone_config(
         assert proc.stdout == str(conf)
     finally:
         conf.unlink(missing_ok=True)
+
+
+# ── git 身分（2026-09-30 正式 run 36727247657）──────────────────────────────
+#
+# `GIT_CONFIG_GLOBAL=/dev/null` 之後沒有 user.name／user.email。`git-remote-annex`
+# 在 clone 時會自己跑 `git commit-tree`，runner 上猜不出 email 就失敗。Mac 猜得出來，
+# 所以用 `user.useConfigOnly=true`（不准猜）模擬 runner。
+
+_IDENTITY_KEYS = (
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+)
+
+
+@pytest.fixture
+def no_identity(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
+    for key in (*_IDENTITY_KEYS, "EMAIL"):
+        monkeypatch.delenv(key, raising=False)
+    return monkeypatch
+
+
+def test_git_env_provides_identity(no_identity: pytest.MonkeyPatch) -> None:
+    env = get_git_env()
+    for key in _IDENTITY_KEYS:
+        assert env[key], key
+
+
+def test_git_env_keeps_caller_identity(no_identity: pytest.MonkeyPatch) -> None:
+    no_identity.setenv("GIT_AUTHOR_NAME", "Someone Else")
+    assert get_git_env()["GIT_AUTHOR_NAME"] == "Someone Else"
+
+
+def test_commit_tree_works_when_git_cannot_guess_identity(
+    tmp_path: Path, no_identity: pytest.MonkeyPatch
+) -> None:
+    """runner 的情境：不准猜身分時，拿 get_git_env() 的環境 commit-tree 仍然要成功。"""
+    import subprocess
+
+    no_identity.setenv("GIT_CONFIG_PARAMETERS", "'user.useconfigonly'='true'")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, env=get_git_env())
+    tree = subprocess.run(
+        ["git", "-C", str(tmp_path), "write-tree"],
+        check=True, capture_output=True, text=True, env=get_git_env(),
+    ).stdout.strip()
+
+    bare = {k: v for k, v in get_git_env().items() if k not in _IDENTITY_KEYS}
+    guessed = subprocess.run(
+        ["git", "-C", str(tmp_path), "commit-tree", tree, "-m", "x"],
+        capture_output=True, text=True, env=bare,
+    )
+    assert guessed.returncode != 0, "前提不成立：這台機器在不准猜身分時仍然 commit 成功"
+
+    ok = subprocess.run(
+        ["git", "-C", str(tmp_path), "commit-tree", tree, "-m", "x"],
+        capture_output=True, text=True, env=get_git_env(),
+    )
+    assert ok.returncode == 0, ok.stderr
