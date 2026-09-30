@@ -25,7 +25,7 @@
 
 ## 3. 提交流程：Agora 路徑
 
-- [ ] 3.1 建立提交流程的 workflow 骨架：定時（間隔可以設定，預設每 6 小時）、workflow_dispatch（不接受任何自由輸入，也供你手動觸發）、concurrency group、secrets 的讀取方式；開頭檢查 `github.sha == main HEAD` 與 `github.ref == refs/heads/main`；收件匣是空的（只算形狀符合格式的檔）就不 clone 直接結束；log 只輸出 id、計數與耗時，repo 的 log 保留天數設到最短（repo 設定，由你操作）；整個提交流程是單一 job，`GITHUB_TOKEN` 只有 contents 讀取；確認被任意觸發、rerun 舊 run、用其他分支觸發時都安全
+- [x] 3.1 建立提交流程的 workflow 骨架：定時（間隔可以設定，預設每 6 小時）、workflow_dispatch（不接受任何自由輸入，也供你手動觸發）、concurrency group、secrets 的讀取方式；開頭檢查 `github.sha == main HEAD` 與 `github.ref == refs/heads/main`；收件匣是空的（只算形狀符合格式的檔）就不 clone 直接結束；log 只輸出 id、計數與耗時，repo 的 log 保留天數設到最短（repo 設定，由你操作）；整個提交流程是單一 job，`GITHUB_TOKEN` 只有 contents 讀取；確認被任意觸發、rerun 舊 run、用其他分支觸發時都安全（2026-09-30 在真的 `FATESAIKOU/MyAiStorage` 上驗完，證據見 `docs/spike/evidence/3.1-6.5-github.md`；過程中修掉兩個 bug：釘的 `setup-uv` SHA 不存在導致每輪 run 死在 job setup、以及 `gh workflow view` 沒有 `--json` 讓 6.3 查不到 workflow 狀態。repo 設定的保留天數仍待使用者操作→見 3.1 evidence §3 的 P5）
 - [x] 3.2 完整性機制（design D2、ADR 0008）：釘選值存在獨立的 pin repo（`MyAiStorage-pin`，不放 workflow；提交流程以只對它有寫入權的 deploy key 寫入）（全部 ref、manifest 內容雜湊、active 與已移除 bundle 清單、annex key 集合），兩階段寫入（待定→正式），只由提交流程依觀測到的遠端狀態寫入；每一輪先結算待定（內容重放，全程唯讀）再清掃；只看 metadata（`sha256Checksum`）的清掃，逐層檢查同名資料夾、遞迴，讀不到就中止、不做移動，移動失敗也中止；manifest 依角色判定（`.bak` 只能等於目前或上一個正式 manifest）、解析 active 與已移除兩個集合；bundle 回收（已移除清單依 file id 永久刪除），並驗證回收之後 clone、push、consolidate 仍正常；隔離資料夾保存 7 天；clone 後核對全部 ref；「只剩 `.bak`」的恢復規則。起點不要用 spike 的 `f3_*` 腳本（它們沿用舊的信任規則）
 - [x] 3.3 掃描收件匣、驗證項目、驗章（沒有簽章或驗章失敗一律拒收），依驗章通過的金鑰蓋產生者章，忽略寫入者自填的產生者；以收件匣檔案的建立時間當快照時間的上限；只看到一半的項目留到下一輪；不合格的項目把拒絕原因發佈到讀取視圖，不進真本；push 後以 `git ls-remote` 確認全部 ref、重新讀 manifest 比對 active 清單，通過才刪除已處理的收件匣項目（push 會靜默失敗）；被拒收與逾時的孤兒項目在 24 小時後刪除並永久刪除；push 前預檢：遠端 manifest 的內容雜湊仍等於正式釘選值（只查名稱符合 GITMANIFEST 的檔，出錯就中止）
 - [x] 3.4 以內容雜湊判斷重複；同一內容重複上傳不產生新 commit，重跑保持冪等
@@ -62,7 +62,7 @@
 - [x] 6.2 回滾腳本：把某個 Session 退回指定版本，閱讀版隨之重建
 - [x] 6.3 健康檢查：OAuth refresh token 是否有效、提交流程的 workflow 有沒有被停用、被取消的 run 數、Actions 分鐘數用量（連續兩週超過 300 就提醒調整間隔）、定時提交的實際間隔、距離上一次成功提交的時間、連續中止的輪數（連續 N 輪就通知你）、隔離資料夾的增長、家庭共用的整體配額（`limit - usage`）、搜尋索引大小與讀取視圖檔案數（對照 design D5 的門檻）；升級 opencode 時重驗 prune 不清除匯出內容
 - [x] 6.4 復原手冊與演練：Drive 上的 repo 被刪除時，從任一個 git clone 重建並重新推回 Drive，重建釘選值，實際演練一次並記錄步驟；手冊記每個 repo 的完整 clone URL，以及「只剩 `.bak`」「主 manifest 與 `.bak` 都不在」時的恢復方式（技術驗證 1.2m）
-- [ ] 6.5 管理操作與提交流程錯開：6.1、6.2、6.4 的腳本先停用提交流程的 workflow、確認沒有執行中的 run，push 前重讀遠端 manifest，重建釘選值期間暫停清掃，做完再恢復；驗收時與提交流程同時觸發、以及在管理操作期間用住民的 token 重新啟用 workflow，確認都不會互相覆蓋
+- [x] 6.5 管理操作與提交流程錯開：6.1、6.2、6.4 的腳本先停用提交流程的 workflow、確認沒有執行中的 run，push 前重讀遠端 manifest，重建釘選值期間暫停清掃，做完再恢復；驗收時與提交流程同時觸發、以及在管理操作期間用住民的 token 重新啟用 workflow，確認都不會互相覆蓋（2026-09-30 在真的 `FATESAIKOU/MyAiStorage` 上驗完上鎖／解鎖、等待執行中的 run 結束、H5 中止時保持鎖住、`admin unlock --confirm` 退場，證據見 `docs/spike/evidence/3.1-6.5-github.md` §2。**住民 PAT 重新啟用 workflow 的情境：部署後驗證**——住民的 PAT 要等 5.1 的容器與正式 secrets 就位才有，驗法與條件見該 evidence §3 的 P4）
 
 ## 7. Foundry
 

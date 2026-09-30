@@ -38,10 +38,6 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "committer.yml"
 #: **已驗過的不要留在這裡**——這個常數存在的目的就是避免它們被當成已經驗過；
 #: 驗完的請移到下面的 `VERIFIED_ON_GITHUB`，連同證據連結。
 NEEDS_GITHUB_CHECKS = (
-    "rerun 舊的 run：在 Actions 頁面對一個**舊的**（較早 commit 的）run 按 "
-    "Re-run all jobs，確認 guard 因為 github.sha != 遠端 main HEAD 而中止、"
-    "不會重跑舊的真本（注意 rerun 用的是**原本那個 sha 上的 workflow 檔**，"
-    "要挑 workflow 檔本身是好的舊 run，否則會死在 job setup 而走不到 guard）",
     "repo 設定（由你在 repo 設定頁操作，程式看不到）：Actions 的 artifact 與 "
     "log 保留天數設到最短、Actions 使用額度上限",
 )
@@ -54,8 +50,12 @@ VERIFIED_ON_GITHUB = (
     ("3.1-1", "## 1. 3.1 逐項結果", 36690207277),
     # 3.1-2：guard 因 github.ref != refs/heads/main 拒絕，後面 0 個 workflow 步驟執行
     ("3.1-2", "## 1. 3.1 逐項結果", 36690597897),
+    # 3.1-3：rerun 舊 sha 的 run，guard 因 github.sha != 遠端 main HEAD 拒絕，後面 0 步驟執行
+    ("3.1-3", "## 1. 3.1 逐項結果", 36690567806),
     # 3.1-4：GITHUB_TOKEN 只有 contents: read（+ Actions 隱含的 metadata: read）
     ("3.1-4", "## 1. 3.1 逐項結果", 36690207277),
+    # 3.1-5 concurrency／3.1-6 不接受 inputs／3.1-7 log 沒有秘密形狀
+    ("3.1-5", "## 1. 3.1 逐項結果", None),
     # B1：setup-uv 釘了不存在的 SHA，run 死在 Set up job、guard 從沒跑到
     ("B1", "## 0. 結論先講", None),
     # 6.5：真的 repo 上 gh workflow disable／enable 都成功
@@ -276,11 +276,20 @@ def test_report_log_has_no_content(wf: dict) -> None:
 
 
 def test_needs_github_checks_are_documented() -> None:
-    """把「必須在真的 GitHub 上驗」的三件事釘在測試裡，避免它被當成已驗過。"""
+    """tasks 3.1 明列的三個「必須在真的 GitHub 上驗」都要有地方可追。
+
+    驗完的移到 `VERIFIED_ON_GITHUB`、沒驗完的留在 `NEEDS_GITHUB_CHECKS`——兩邊都要
+    找得到，否則會出現「沒人查過但看起來像查過」或反過來。
+    """
     assert isinstance(NEEDS_GITHUB_CHECKS, tuple)
-    for keyword in ("rerun", "保留天數"):
-        assert any(keyword in item for item in NEEDS_GITHUB_CHECKS), \
-            f"tasks 3.1 明列的「{keyword}」不可漏掉"
+    pending = " ".join(NEEDS_GITHUB_CHECKS)
+    verified = " ".join(keyword for keyword, _s, _r in VERIFIED_ON_GITHUB)
+    # tasks 3.1 最後一句明列的三個情境：任意觸發／rerun 舊 run／其他分支觸發
+    for keyword in ("3.1-1", "3.1-2", "3.1-3"):
+        assert keyword in pending or keyword in verified, \
+            f"tasks 3.1 明列的「{keyword}」在待驗與已驗兩邊都找不到"
+    # repo 設定（保留天數）是程式看不到的，只能由使用者操作，留在待驗
+    assert "保留天數" in pending, "repo 設定的保留天數不可從待驗清單消失"
     for item in NEEDS_GITHUB_CHECKS:
         assert isinstance(item, str) and item.strip(), item
 

@@ -1,0 +1,138 @@
+commit	Set up job	﻿2026-09-30T08:44:48.3448980Z Current runner version: '2.337.0'
+commit	Set up job	2026-09-30T08:44:48.3483142Z ##[group]Runner Image Provisioner
+commit	Set up job	2026-09-30T08:44:48.3484515Z Hosted Compute Agent
+commit	Set up job	2026-09-30T08:44:48.3485820Z Version: 20260828.587
+commit	Set up job	2026-09-30T08:44:48.3486984Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+commit	Set up job	2026-09-30T08:44:48.3488256Z Build Date: 2026-08-28T16:44:25Z
+commit	Set up job	2026-09-30T08:44:48.3489372Z Worker ID: {800b30b6-7703-4bc2-9e82-4ada6c359c9d}
+commit	Set up job	2026-09-30T08:44:48.3491058Z Azure Region: northcentralus
+commit	Set up job	2026-09-30T08:44:48.3492115Z ##[endgroup]
+commit	Set up job	2026-09-30T08:44:48.3495077Z ##[group]Operating System
+commit	Set up job	2026-09-30T08:44:48.3496348Z Ubuntu
+commit	Set up job	2026-09-30T08:44:48.3497332Z 24.04.5
+commit	Set up job	2026-09-30T08:44:48.3498183Z LTS
+commit	Set up job	2026-09-30T08:44:48.3499099Z ##[endgroup]
+commit	Set up job	2026-09-30T08:44:48.3499858Z ##[group]Runner Image
+commit	Set up job	2026-09-30T08:44:48.3500543Z Image: ubuntu-24.04
+commit	Set up job	2026-09-30T08:44:48.3501322Z Version: 20260920.314.1
+commit	Set up job	2026-09-30T08:44:48.3502583Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260920.314/images/ubuntu/Ubuntu2404-Readme.md
+commit	Set up job	2026-09-30T08:44:48.3504573Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260920.314
+commit	Set up job	2026-09-30T08:44:48.3506048Z ##[endgroup]
+commit	Set up job	2026-09-30T08:44:48.3507352Z ##[group]GITHUB_TOKEN Permissions
+commit	Set up job	2026-09-30T08:44:48.3509841Z Contents: read
+commit	Set up job	2026-09-30T08:44:48.3510535Z Metadata: read
+commit	Set up job	2026-09-30T08:44:48.3511361Z ##[endgroup]
+commit	Set up job	2026-09-30T08:44:48.3513745Z Secret source: Actions
+commit	Set up job	2026-09-30T08:44:48.3514954Z Cache mode: write
+commit	Set up job	2026-09-30T08:44:48.3516117Z Prepare workflow directory
+commit	Set up job	2026-09-30T08:44:48.4431468Z Prepare all required actions
+commit	Set up job	2026-09-30T08:44:48.4479467Z Getting action download info
+commit	Set up job	2026-09-30T08:44:48.6596740Z Download action repository 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' (SHA:11bd71901bbe5b1630ceea73d27597364c9af683)
+commit	Set up job	2026-09-30T08:44:49.0553215Z Download action repository 'astral-sh/setup-uv@887a942a15af3a7626099df99e897a18d9e5ab3a' (SHA:887a942a15af3a7626099df99e897a18d9e5ab3a)
+commit	Set up job	2026-09-30T08:44:49.7372225Z Complete job name: commit
+commit	Checkout repository	﻿2026-09-30T08:44:49.8160282Z ##[group]Run actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+commit	Checkout repository	2026-09-30T08:44:49.8161506Z with:
+commit	Checkout repository	2026-09-30T08:44:49.8162052Z   fetch-depth: 1
+commit	Checkout repository	2026-09-30T08:44:49.8162641Z   repository: FATESAIKOU/MyAiStorage
+commit	Checkout repository	2026-09-30T08:44:49.8167071Z   token: ***
+commit	Checkout repository	2026-09-30T08:44:49.8167626Z   ssh-strict: true
+commit	Checkout repository	2026-09-30T08:44:49.8168184Z   ssh-user: git
+commit	Checkout repository	2026-09-30T08:44:49.8168753Z   persist-credentials: true
+commit	Checkout repository	2026-09-30T08:44:49.8169368Z   clean: true
+commit	Checkout repository	2026-09-30T08:44:49.8169928Z   sparse-checkout-cone-mode: true
+commit	Checkout repository	2026-09-30T08:44:49.8170567Z   fetch-tags: false
+commit	Checkout repository	2026-09-30T08:44:49.8171122Z   show-progress: true
+commit	Checkout repository	2026-09-30T08:44:49.8171686Z   lfs: false
+commit	Checkout repository	2026-09-30T08:44:49.8172265Z   submodules: false
+commit	Checkout repository	2026-09-30T08:44:49.8172848Z   set-safe-directory: true
+commit	Checkout repository	2026-09-30T08:44:49.8173659Z ##[endgroup]
+commit	Checkout repository	2026-09-30T08:44:49.9173277Z Syncing repository: FATESAIKOU/MyAiStorage
+commit	Checkout repository	2026-09-30T08:44:49.9175677Z ##[group]Getting Git version info
+commit	Checkout repository	2026-09-30T08:44:49.9176634Z Working directory is '/home/runner/work/MyAiStorage/MyAiStorage'
+commit	Checkout repository	2026-09-30T08:44:49.9178101Z [command]/usr/bin/git version
+commit	Checkout repository	2026-09-30T08:44:49.9205978Z git version 2.55.0
+commit	Checkout repository	2026-09-30T08:44:49.9226512Z ##[endgroup]
+commit	Checkout repository	2026-09-30T08:44:49.9240517Z Temporarily overriding HOME='/home/runner/work/_temp/3602607c-ef93-4b1e-aa83-6fc3ba075764' before making global git config changes
+commit	Checkout repository	2026-09-30T08:44:49.9243140Z Adding repository directory to the temporary git global config as a safe directory
+commit	Checkout repository	2026-09-30T08:44:49.9246502Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/MyAiStorage/MyAiStorage
+commit	Checkout repository	2026-09-30T08:44:49.9290864Z Deleting the contents of '/home/runner/work/MyAiStorage/MyAiStorage'
+commit	Checkout repository	2026-09-30T08:44:49.9295388Z ##[group]Initializing the repository
+commit	Checkout repository	2026-09-30T08:44:49.9300393Z [command]/usr/bin/git init /home/runner/work/MyAiStorage/MyAiStorage
+commit	Checkout repository	2026-09-30T08:44:49.9373510Z hint: Using 'master' as the name for the initial branch. This default branch name
+commit	Checkout repository	2026-09-30T08:44:49.9374969Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+commit	Checkout repository	2026-09-30T08:44:49.9377141Z hint: to use in all of your new repositories, which will suppress this warning,
+commit	Checkout repository	2026-09-30T08:44:49.9378697Z hint: call:
+commit	Checkout repository	2026-09-30T08:44:49.9379599Z hint:
+commit	Checkout repository	2026-09-30T08:44:49.9380695Z hint: 	git config --global init.defaultBranch <name>
+commit	Checkout repository	2026-09-30T08:44:49.9382018Z hint:
+commit	Checkout repository	2026-09-30T08:44:49.9383281Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+commit	Checkout repository	2026-09-30T08:44:49.9385411Z hint: 'development'. The just-created branch can be renamed via this command:
+commit	Checkout repository	2026-09-30T08:44:49.9386982Z hint:
+commit	Checkout repository	2026-09-30T08:44:49.9388007Z hint: 	git branch -m <name>
+commit	Checkout repository	2026-09-30T08:44:49.9389069Z hint:
+commit	Checkout repository	2026-09-30T08:44:49.9390350Z hint: Disable this message with "git config set advice.defaultBranchName false"
+commit	Checkout repository	2026-09-30T08:44:49.9392386Z Initialized empty Git repository in /home/runner/work/MyAiStorage/MyAiStorage/.git/
+commit	Checkout repository	2026-09-30T08:44:49.9395952Z [command]/usr/bin/git remote add origin https://github.com/FATESAIKOU/MyAiStorage
+commit	Checkout repository	2026-09-30T08:44:49.9431333Z ##[endgroup]
+commit	Checkout repository	2026-09-30T08:44:49.9432975Z ##[group]Disabling automatic garbage collection
+commit	Checkout repository	2026-09-30T08:44:49.9435616Z [command]/usr/bin/git config --local gc.auto 0
+commit	Checkout repository	2026-09-30T08:44:49.9466608Z ##[endgroup]
+commit	Checkout repository	2026-09-30T08:44:49.9468174Z ##[group]Setting up auth
+commit	Checkout repository	2026-09-30T08:44:49.9473432Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+commit	Checkout repository	2026-09-30T08:44:49.9506011Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+commit	Checkout repository	2026-09-30T08:44:49.9808265Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+commit	Checkout repository	2026-09-30T08:44:49.9841202Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+commit	Checkout repository	2026-09-30T08:44:50.0071238Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+commit	Checkout repository	2026-09-30T08:44:50.0108519Z ##[endgroup]
+commit	Checkout repository	2026-09-30T08:44:50.0109579Z ##[group]Fetching the repository
+commit	Checkout repository	2026-09-30T08:44:50.0116890Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +41b2d5720fc346e105cb237f44495b42a19ccf6e:refs/remotes/origin/main
+commit	Checkout repository	2026-09-30T08:44:50.9357948Z From https://github.com/FATESAIKOU/MyAiStorage
+commit	Checkout repository	2026-09-30T08:44:50.9361814Z  * [new ref]         41b2d5720fc346e105cb237f44495b42a19ccf6e -> origin/main
+commit	Checkout repository	2026-09-30T08:44:50.9367930Z ##[endgroup]
+commit	Checkout repository	2026-09-30T08:44:50.9370201Z ##[group]Determining the checkout info
+commit	Checkout repository	2026-09-30T08:44:50.9372936Z ##[endgroup]
+commit	Checkout repository	2026-09-30T08:44:50.9374771Z [command]/usr/bin/git sparse-checkout disable
+commit	Checkout repository	2026-09-30T08:44:50.9419447Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+commit	Checkout repository	2026-09-30T08:44:50.9450384Z ##[group]Checking out the ref
+commit	Checkout repository	2026-09-30T08:44:50.9454109Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+commit	Checkout repository	2026-09-30T08:44:51.0012984Z Switched to a new branch 'main'
+commit	Checkout repository	2026-09-30T08:44:51.0017106Z branch 'main' set up to track 'origin/main'.
+commit	Checkout repository	2026-09-30T08:44:51.0026693Z ##[endgroup]
+commit	Checkout repository	2026-09-30T08:44:51.0066696Z [command]/usr/bin/git log -1 --format=%H
+commit	Checkout repository	2026-09-30T08:44:51.0097964Z 41b2d5720fc346e105cb237f44495b42a19ccf6e
+commit	guard	﻿2026-09-30T08:44:51.0392752Z ##[group]Run if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+commit	guard	2026-09-30T08:44:51.0395757Z ^[[36;1mif [ "$GITHUB_REF" != "refs/heads/main" ]; then^[[0m
+commit	guard	2026-09-30T08:44:51.0398234Z ^[[36;1m  echo "Ref $GITHUB_REF is not refs/heads/main" >&2^[[0m
+commit	guard	2026-09-30T08:44:51.0400468Z ^[[36;1m  exit 1^[[0m
+commit	guard	2026-09-30T08:44:51.0401996Z ^[[36;1mfi^[[0m
+commit	guard	2026-09-30T08:44:51.0404330Z ^[[36;1mREMOTE_SHA=$(curl -s -H "Authorization: ***" \^[[0m
+commit	guard	2026-09-30T08:44:51.0407103Z ^[[36;1m  -H "Accept: application/vnd.github.v3+json" \^[[0m
+commit	guard	2026-09-30T08:44:51.0410235Z ^[[36;1m  "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/main" | jq -r .sha)^[[0m
+commit	guard	2026-09-30T08:44:51.0413825Z ^[[36;1mif [ -z "$REMOTE_SHA" ] || [ "$REMOTE_SHA" = "null" ]; then^[[0m
+commit	guard	2026-09-30T08:44:51.0416608Z ^[[36;1m  echo "Failed to fetch remote main HEAD" >&2^[[0m
+commit	guard	2026-09-30T08:44:51.0418768Z ^[[36;1m  exit 1^[[0m
+commit	guard	2026-09-30T08:44:51.0420255Z ^[[36;1mfi^[[0m
+commit	guard	2026-09-30T08:44:51.0421865Z ^[[36;1mif [ "$GITHUB_SHA" != "$REMOTE_SHA" ]; then^[[0m
+commit	guard	2026-09-30T08:44:51.0424615Z ^[[36;1m  echo "Run sha $GITHUB_SHA does not match remote main HEAD $REMOTE_SHA" >&2^[[0m
+commit	guard	2026-09-30T08:44:51.0427539Z ^[[36;1m  exit 1^[[0m
+commit	guard	2026-09-30T08:44:51.0429004Z ^[[36;1mfi^[[0m
+commit	guard	2026-09-30T08:44:51.0663116Z shell: /usr/bin/bash -e {0}
+commit	guard	2026-09-30T08:44:51.0664843Z env:
+commit	guard	2026-09-30T08:44:51.0680060Z   GITHUB_TOKEN: ***
+commit	guard	2026-09-30T08:44:51.0681539Z ##[endgroup]
+commit	guard	2026-09-30T08:44:51.5134539Z Run sha 41b2d5720fc346e105cb237f44495b42a19ccf6e does not match remote main HEAD 351e27346e03e2e63242cf06591962d67c334c21
+commit	guard	2026-09-30T08:44:51.5149663Z ##[error]Process completed with exit code 1.
+commit	Post Checkout repository	﻿2026-09-30T08:44:51.5354934Z Post job cleanup.
+commit	Post Checkout repository	2026-09-30T08:44:51.6196137Z [command]/usr/bin/git version
+commit	Post Checkout repository	2026-09-30T08:44:51.6232786Z git version 2.55.0
+commit	Post Checkout repository	2026-09-30T08:44:51.6267601Z Temporarily overriding HOME='/home/runner/work/_temp/4b657268-41b3-47ad-957f-4e3d40828974' before making global git config changes
+commit	Post Checkout repository	2026-09-30T08:44:51.6268593Z Adding repository directory to the temporary git global config as a safe directory
+commit	Post Checkout repository	2026-09-30T08:44:51.6272937Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/MyAiStorage/MyAiStorage
+commit	Post Checkout repository	2026-09-30T08:44:51.6310210Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+commit	Post Checkout repository	2026-09-30T08:44:51.6346316Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+commit	Post Checkout repository	2026-09-30T08:44:51.6578784Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+commit	Post Checkout repository	2026-09-30T08:44:51.6605033Z http.https://github.com/.extraheader
+commit	Post Checkout repository	2026-09-30T08:44:51.6614249Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+commit	Post Checkout repository	2026-09-30T08:44:51.6646796Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+commit	Complete job	﻿2026-09-30T08:44:51.7056795Z Cleaning up orphan processes
+commit	Complete job	2026-09-30T08:44:51.7342735Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
