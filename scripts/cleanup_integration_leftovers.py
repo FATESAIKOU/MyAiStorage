@@ -67,8 +67,11 @@ def is_integration_prefix(name: str) -> bool:
     return bool(INTEGRATION_PREFIX.match(name))
 
 
-#: 釘選值條目的副檔名（含待定那兩個）。
-PIN_SUFFIXES = (".pending.json", ".pending.keys", ".json", ".keys")
+#: 釘選值條目的副檔名。`.maintenance` 是第 6 組抹除測試用 `AdminLock` 留下的
+#: 維護旗標（`reason: "erase-it"`），repo 名同樣是 `it-<ULID>`，所以算在內——
+#: 但它只在 repo 名通過 `is_integration_prefix` 之後才會被刪，`e2e-*` 的旗標
+#: 因為前綴就被擋掉，碰不到。
+PIN_SUFFIXES = (".pending.json", ".pending.keys", ".maintenance", ".json", ".keys")
 
 
 def pin_entry_stem(file_name: str) -> str:
@@ -80,7 +83,18 @@ def pin_entry_stem(file_name: str) -> str:
 
 
 def is_integration_pin_entry(file_name: str) -> bool:
-    """這個 `.pin/` 底下的檔名是不是整合測試的釘選值條目？"""
+    """這個 `.pin/` 底下的檔名是不是整合測試留下的？
+
+    判斷分兩層，順序有意義：
+
+    1. 副檔名必須是 `PIN_SUFFIXES` 認得的其中一種（`pin_entry_stem` 認不出來就
+       原樣回傳，後面自然會被形狀檢查擋下）；
+    2. 去掉的副檔名之後，剩下的 repo 名必須通過 `is_integration_prefix`
+       （`it-<ULID>`／`it-erase-<ULID>`，且不是 `e2e-`／`syncer-`／`probe-`）。
+
+    所以 `agora-e2e-<ULID>.json` 與 `agora-e2e-<ULID>.maintenance` 都不會被刪：
+    e2e 環境是單例，別人的線正在用。
+    """
     return is_integration_prefix(pin_entry_stem(file_name))
 
 

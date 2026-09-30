@@ -65,11 +65,13 @@ def test_protected_prefixes_win_even_with_a_ulid_shape() -> None:
     assert not is_integration_prefix(f"e2e-{U}")
 
 
-def test_pin_entry_stem_strips_all_four_suffixes() -> None:
+def test_pin_entry_stem_strips_every_known_suffix() -> None:
     assert pin_entry_stem(f"it-{V}.json") == f"it-{V}"
     assert pin_entry_stem(f"it-{V}.keys") == f"it-{V}"
     assert pin_entry_stem(f"it-{V}.pending.json") == f"it-{V}"
     assert pin_entry_stem(f"it-{V}.pending.keys") == f"it-{V}"
+    # 第 6 組抹除測試用 AdminLock 留下的維護旗標也要認得
+    assert pin_entry_stem(f"it-{V}.maintenance") == f"it-{V}"
     # 認不得的副檔名就原樣回傳（不要猜）
     assert pin_entry_stem(f"it-{V}.weird") == f"it-{V}.weird"
 
@@ -81,9 +83,30 @@ def test_pin_entry_matching_uses_the_stem() -> None:
     assert not is_integration_pin_entry("agora.json")
 
 
+def test_maintenance_flag_of_an_integration_entry_is_cleaned() -> None:
+    """`it-<ULID>.maintenance` 是抹除測試留下的旗標，算在清理範圍內。"""
+    assert is_integration_pin_entry(f"it-{V}.maintenance")
+    assert is_integration_pin_entry(f"it-erase-{V}.maintenance")
+
+
+def test_maintenance_flag_of_e2e_is_never_touched() -> None:
+    """e2e 的維護旗標絕對不能刪：e2e 環境是單例，別人的線正在用。"""
+    assert not is_integration_pin_entry(f"agora-e2e-{U}.maintenance")
+    assert not is_integration_pin_entry(f"e2e-{U}.maintenance")
+    assert not is_integration_pin_entry("maintenance")
+
+
+def test_maintenance_flag_with_a_foreign_repo_name_is_left_alone() -> None:
+    """repo 名不在 `it-<ULID>`／`it-erase-<ULID>` 白名單裡就不動。"""
+    assert not is_integration_pin_entry(f"agora-{U}.maintenance")
+    assert not is_integration_pin_entry("it-probe1234abcd.maintenance")
+    assert not is_integration_pin_entry("syncer-1.maintenance")
+
+
 def test_strip_pin_suffix_matches_the_cleanup_script() -> None:
     """兩個模組對「條目名」的收斂必須一致（runner 的殘留比對靠它）。"""
-    for name in (f"it-{V}.json", f"it-{V}.pending.json", f"it-{V}.keys"):
+    for name in (f"it-{V}.json", f"it-{V}.pending.json", f"it-{V}.keys",
+                 f"it-{V}.maintenance"):
         assert strip_pin_suffix(name) == pin_entry_stem(name)
 
 

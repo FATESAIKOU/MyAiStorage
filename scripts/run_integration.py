@@ -207,8 +207,9 @@ def preflight(
 # ---------------------------------------------------------------------------
 
 
-#: 釘選值條目的四種副檔名。
-PIN_SUFFIXES = (".pending.json", ".pending.keys", ".json", ".keys")
+#: 釘選值條目的副檔名（含抹除測試的 `.maintenance` 旗標；與
+#: `scripts/cleanup_integration_leftovers.py` 的白名單保持一致）。
+PIN_SUFFIXES = (".pending.json", ".pending.keys", ".maintenance", ".json", ".keys")
 
 
 def strip_pin_suffix(file_name: str) -> str:
