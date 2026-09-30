@@ -1,4 +1,26 @@
 {
   "format": "aistorage.identity/v1",
-  "profiles": {}
+  "profiles": {
+    "mac-opencode": {
+      "allowed_types": [
+        "session",
+        "handoff",
+        "claim",
+        "continuation",
+        "reference"
+      ],
+      "signing_keys": [
+        {
+          "key_id": "mac-opencode-2a297893",
+          "public_key": "E0gLa8DlLrC3UdPYfheBGTKmufa+Lgo6uiLTUIRHPfo=",
+          "status": "active",
+          "added_at": "2026-09-30T09:08:33Z",
+          "revoked_at": null
+        }
+      ],
+      "inbox_folder_ids": [
+        "1RPkyRqRx8sC9KKmbUFA9iyqnR78iqNwk"
+      ]
+    }
+  }
 }

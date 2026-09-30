@@ -201,6 +201,8 @@ PY
 
 ## 步驟 3｜初始化 Agora 的 git-annex 遠端（產生第一個 manifest）
 
+> ⚠ **先做步驟 6（設 `root_folder_id`）再做這一步**（2026-09-30 正式部署時修正）。`root_folder_id` 設好之後，rclone 的根就是 `aistorage/`，`rcloneprefix` 只要寫 `agora`。若反過來先用 `aistorage/agora` 初始化，之後設了根，路徑會變成 `aistorage/aistorage/agora`，提交流程找不到真本。
+
 **誰做**：🛠 PM（暫存目錄內；**不在專案 repo 裡跑 git**）
 
 `init-pin` 要讀前綴裡的主 manifest，所以必須先把 annex special remote 建好並推一個空
@@ -210,7 +212,7 @@ PY
 ```bash
 cd "$(mktemp -d)"                       # 暫存目錄；git-annex 的工作目錄防呆靠這裡
 export RCLONE_CONFIG="$HOME/.config/aistorage/rclone-committer.conf"
-export AGORA_PREFIX="aistorage/agora"   # rcloneprefix 只能是資料夾「名稱路徑」
+export AGORA_PREFIX="agora"             # 相對於 root_folder_id（步驟 6）的名稱路徑
 
 uv run --project /path/to/MyAiStorage python - <<'PYEOF2'
 import os
@@ -277,6 +279,11 @@ PY
 
 **誰做**：🛠 PM（Mac 上、管理者身分；**只跑一次**）
 
+> 2026-09-30 正式部署時踩到的三件事：
+> - **pin repo 必須至少有一個 commit**。全新的空 repo 會讓 AdminLock 的 `reset --hard origin/HEAD` 失敗。先用 `gh api -X PUT repos/FATESAIKOU/MyAiStorage-pin/contents/README.md -f message=… -f content=<base64> -f branch=main` 放一個 README。
+> - 乾跑也要帶 `--i-am-admin`：非 CI 環境對正式 pin repo 一律要這個旗標，才建得出依賴。
+> - workflow 已經停用時，AdminLock 的「停用 workflow」會失敗，旗標留在 `aborted`。**再跑一次同一個 `init-pin --confirm`** 會走 aborted 的路徑完成；維護旗標留到步驟 10 用 `admin unlock --confirm` 清除（它也會重新啟用 workflow）。
+
 ```bash
 cd /path/to/MyAiStorage
 export AISTORAGE_RCLONE_CONF="$HOME/.config/aistorage/rclone-committer.conf"
@@ -287,7 +294,7 @@ export AISTORAGE_PIN_KNOWN_HOSTS="config/github_known_hosts"
 # readview_folder_id（步驟 5 之後再填 readview_manifest_file_id）
 
 # (a) 乾跑：只會印出計畫，不寫 pin repo
-uv run python -m aistorage.committer init-pin --config config/committer.json --dry-run
+uv run python -m aistorage.committer init-pin --config config/committer.json --dry-run --i-am-admin
 
 # (b) 確認計畫合理後才寫入
 uv run python -m aistorage.committer init-pin --config config/committer.json \
@@ -333,14 +340,17 @@ manifest 是讀取端的信任錨點，覆寫它等於改掉信任根。
 cd /path/to/MyAiStorage
 export AISTORAGE_RCLONE_CONF="$HOME/.config/aistorage/rclone-committer.conf"
 
+export AISTORAGE_PIN_KEY="$HOME/.config/aistorage/pin-deploy-key"        # admin 指令會建 pin store，缺這兩個會回 not_wired
+export AISTORAGE_PIN_KNOWN_HOSTS="config/github_known_hosts"
+
 # (a) 先看計畫（不寫入、不分享）
-uv run python -m aistorage.admin init-readview \
+uv run python -m aistorage.admin init-readview --config config/committer.json \
   --folder-id <步驟 1 的 readview id> \
   --sa-email spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com \
   --dry-run
 
 # (b) 確認計畫（blocked=false、folder_children 是空的）後才建立
-uv run python -m aistorage.admin init-readview \
+uv run python -m aistorage.admin init-readview --config config/committer.json \
   --folder-id <步驟 1 的 readview id> \
   --sa-email spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com \
   --confirm
@@ -717,7 +727,7 @@ rm ~/Library/LaunchAgents/local.aistorage.health.plist
 | 讀取視圖 manifest（`admin init-readview --confirm` 印出） | | `config/committer.json` `readview_manifest_file_id` ＋ `reader.json` `manifest_file_id` |
 | `aistorage/`（Agora 真本前綴，annex 物件） | 唯讀分享給讀取用 SA（步驟 2；`agora checkout` 取原始紀錄用） | `reader.json` `agora_folder_id` |
 | `aistorage-inbox-mac-opencode/`（worker 自建，步驟 9） | | `config/identity.json` `inbox_folder_ids` ＋ `reader.json` `inbox_folder_ids` |
-| Agora annex remote uuid | | `config/committer.json` `repo_uuid`、`repo_url`（`annex::<uuid>?…&rcloneprefix=aistorage/agora`） |
+| Agora annex remote uuid | | `config/committer.json` `repo_uuid`、`repo_url`（`annex::<uuid>?…&rcloneprefix=agora`） |
 | `root_folder_id` | | `rclone-committer.conf`（步驟 6） |
 
 `config/committer.json` 改完要 **commit 並 push 到 `main`**——workflow 的 guard 步驟會
