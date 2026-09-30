@@ -17,6 +17,7 @@ import re
 
 import pytest
 
+from aistorage.errors import NotFound
 from aistorage.schema import generate_ulid
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -99,6 +100,26 @@ def test_root_id(it_settings) -> str:
 #: 只記錄自己建過的 id，所以 session 收尾的補掃不會碰到別的線正在用的前綴。
 _SESSION_CREATED: list[str] = []
 
+#: 本場清不掉的名字（測試跑完印在摘要裡，別讓殘留變成無聲的垃圾）。
+_SESSION_CLEANUP_FAILURES: list[str] = []
+
+
+def report_cleanup_failure(message: str) -> None:
+    """記一筆清理失敗並立刻讓人看到（pytest 會把它顯示成 warning 摘要）。"""
+    _SESSION_CLEANUP_FAILURES.append(message)
+    import warnings
+
+    warnings.warn(f"[integration cleanup] {message}", stacklevel=2)
+
+
+def _forget_created(folder_id: str) -> None:
+    """這個 id 已經清掉了（或本來就不在），不要留給 session 補掃再打一次。
+
+    沒有這裡的話，已經刪乾淨的測試會在補掃時全部撞 404，
+    警告清單就淹在「其實沒事」的錯誤裡，真正該看的反而看不到。
+    """
+    _SESSION_CREATED[:] = [c for c in _SESSION_CREATED if c != folder_id]
+
 
 @pytest.fixture
 def sandbox(real_drive, test_root_id):
@@ -156,7 +177,7 @@ def sandbox(real_drive, test_root_id):
         def destroy(self, folder_id: str) -> None:
             destroy_tree(real_drive, folder_id, test_root_id)
             created[:] = [c for c in created if c != folder_id]
-            _SESSION_CREATED[:] = [c for c in _SESSION_CREATED if c != folder_id]
+            _forget_created(folder_id)
 
     box = Sandbox()
     try:
@@ -167,13 +188,22 @@ def sandbox(real_drive, test_root_id):
             from ._harness import cleanup_pin_entries
             try:
                 cleanup_pin_entries(box.pin_store, list(box.pin_names))
-            except Exception:
-                pass
+            except Exception as e:
+                report_cleanup_failure(f"釘選值條目 {box.pin_names}：{e}")
         for folder_id in list(created):
             try:
                 destroy_tree(real_drive, folder_id, test_root_id)
-            except Exception:
-                pass  # 清理是盡力而為；測試本身的斷言才是重點
+            except NotFound:
+                # 已經不在了（測試自己先刪過）——不是殘留，不要吵
+                _forget_created(folder_id)
+            except Exception as e:
+                # 清理是盡力而為，測試本身的斷言才是重點——但**不能靜默**：
+                # 靜默時「Drive 上留了東西」完全沒有線索（實測累積了十幾組
+                # it-<ULID> 前綴而沒有人知道是誰留下的、為什麼沒刪掉）。
+                report_cleanup_failure(f"Drive 資料夾 {folder_id}：{e}")
+            else:
+                _forget_created(folder_id)
+        created.clear()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -192,9 +222,18 @@ def sweep_session_leftovers(request):
     for folder_id in list(_SESSION_CREATED):
         try:
             destroy_tree(drive, folder_id, root)
-        except Exception:
-            pass
+        except NotFound:
+            pass  # 測試自己的 teardown 已經刪掉了
+        except Exception as e:  # noqa: BLE001 - 補掃要繼續，不該被一個失敗中止
+            report_cleanup_failure(f"補掃 Drive 資料夾 {folder_id}：{e}")
     _SESSION_CREATED.clear()
+    if _SESSION_CLEANUP_FAILURES:
+        print(
+            f"\n[integration cleanup] {len(_SESSION_CLEANUP_FAILURES)} 筆清理失敗"
+            "（Drive 或 pin repo 上會留下東西）：\n  "
+            + "\n  ".join(_SESSION_CLEANUP_FAILURES),
+            flush=True,
+        )
 
 
 @pytest.fixture(scope="session")

@@ -325,6 +325,8 @@ def test_summary_exit_code_strict_leftovers() -> None:
     summary = Summary(
         phases=[PhaseResult("integration", 0, passed=3)],
         leftovers={"drive": ["it-01ABC"], "pin": []},
+        fresh={"drive": ["it-01ABC"], "pin": []},
+        earlier={"drive": [], "pin": []},
         leftover_checked=True,
     )
     assert summary.exit_code() == 0
@@ -338,6 +340,8 @@ def test_format_summary_reports_counts_and_leftovers() -> None:
         Summary(
             phases=[PhaseResult("integration", 1, passed=4, failed=2, skipped=1, duration_s=61.0)],
             leftovers={"drive": ["it-01ABC"], "pin": []},
+            fresh={"drive": ["it-01ABC"], "pin": []},
+            earlier={"drive": [], "pin": []},
             leftover_checked=True,
             duration_s=62.5,
         ),
@@ -349,13 +353,15 @@ def test_format_summary_reports_counts_and_leftovers() -> None:
     assert "結果：失敗" in text
 
 
-def test_format_summary_says_no_leftovers_when_clean() -> None:
+def test_format_summary_says_no_fresh_leftovers_when_clean() -> None:
     from scripts.run_integration import PhaseResult
 
     text = format_summary(
         Summary(
             phases=[PhaseResult("integration", 0, passed=1)],
             leftovers={"drive": [], "pin": []},
+            fresh={"drive": [], "pin": []},
+            earlier={"drive": [], "pin": []},
             leftover_checked=True,
         ),
         strict_leftovers=False,

@@ -207,6 +207,18 @@ def preflight(
 # ---------------------------------------------------------------------------
 
 
+#: 釘選值條目的四種副檔名。
+PIN_SUFFIXES = (".pending.json", ".pending.keys", ".json", ".keys")
+
+
+def strip_pin_suffix(file_name: str) -> str:
+    """把 `.pin/` 的檔名收斂成條目名（`it-x.pending.json` → `it-x`）。"""
+    for suffix in PIN_SUFFIXES:
+        if file_name.endswith(suffix):
+            return file_name[: -len(suffix)]
+    return file_name
+
+
 def diff_names(before: Sequence[str], after: Sequence[str]) -> list[str]:
     """回傳 `after` 有、`before` 沒有的項目（依排序，值去重）。
 
@@ -214,6 +226,32 @@ def diff_names(before: Sequence[str], after: Sequence[str]) -> list[str]:
     """
     seen_before = set(before)
     return sorted({name for name in after if name not in seen_before})
+
+
+#: 本場「之前就已經存在」的 Drive 前綴與 pin 條目（別人留下的，或更早的執行）。
+#: 跑前快照一次當基準，摘要就能把「這一輪留的」與「早就有的」分開講。
+BASELINE: dict[str, list[str]] = {"drive": [], "pin": []}
+
+
+def set_baseline(snap: Mapping[str, Sequence[str]]) -> None:
+    """記下「本場之前就有的」Drive 前綴與 pin 條目。"""
+    BASELINE["drive"] = list(snap.get("drive") or [])
+    BASELINE["pin"] = list(snap.get("pin") or [])
+
+
+def partition_leftovers(
+    new_names: Sequence[str], baseline: Sequence[str]
+) -> tuple[list[str], list[str]]:
+    """把新出現的名稱分成「本場新增」與「更早就在的」。
+
+    回傳 `(本場新增, 早已存在)`。快照比對本來就只給「新增」，但實務上
+    Drive 上常早就堆著十幾組別人留下的 `it-<ULID>`；把它們算進「這一輪的殘留」
+    會誤導人以為是這一輪沒清乾淨。分開報之後，要清舊的用
+    `scripts/cleanup_integration_leftovers.py`（先 dry-run）。
+    """
+    earlier = set(baseline)
+    fresh = [n for n in new_names if n not in earlier]
+    return fresh, sorted(earlier)
 
 
 def drive_prefix_names(drive, test_root_id: str) -> list[str]:
@@ -229,7 +267,12 @@ def drive_prefix_names(drive, test_root_id: str) -> list[str]:
 
 
 def pin_entry_names(settings: Settings, workdir: Path) -> list[str]:
-    """用 deploy key 把 pin repo 淺複製到 `workdir`，回傳 `.pin/` 底下的條目名。
+    """用 deploy key 把 pin repo 淺複製到 `workdir`，回傳 `.pin/` 底下的**檔名**。
+
+    回傳檔名（含 `.json`／`.keys`／`.pending.json`／`.pending.keys` 副檔名）而不是
+    `Path.stem`：`stem` 只去掉最後一段副檔名，於是 `it-x.json` 與 `it-x.keys`
+    都變成 `it-x`（重複），而 `it-x.pending.json` 變成 `it-x.pending`——
+    兩種形狀混在一起。要比對名稱的話用 `strip_pin_suffix()` 收斂成條目名。
 
     只讀不寫；clone 用 `GIT_SSH_COMMAND` 隔離個人身分（和 `GitPinStore` 一致）。
     """
@@ -252,7 +295,7 @@ def pin_entry_names(settings: Settings, workdir: Path) -> list[str]:
     pin_dir = dest / ".pin"
     if not pin_dir.is_dir():
         return []
-    return sorted(p.stem for p in pin_dir.iterdir() if p.is_file())
+    return sorted(p.name for p in pin_dir.iterdir() if p.is_file())
 
 
 def snapshot(settings: Settings, test_folder_id: str, workdir: Path) -> dict[str, list[str]]:
@@ -292,7 +335,12 @@ class PhaseResult:
 @dataclass
 class Summary:
     phases: list[PhaseResult] = field(default_factory=list)
+    #: 快照比對出來的新名稱（未區分本場／更早）。
     leftovers: dict[str, list[str]] = field(default_factory=dict)
+    #: 這一輪真的留下來的（`leftovers` 扣掉跑前就有的）。
+    fresh: dict[str, list[str]] = field(default_factory=dict)
+    #: 跑前就已經在的（別人或更早的執行留下來的）。
+    earlier: dict[str, list[str]] = field(default_factory=dict)
     leftover_checked: bool = False
     duration_s: float = 0.0
 
@@ -309,10 +357,14 @@ class Summary:
         return sum(p.skipped for p in self.phases)
 
     def exit_code(self, *, strict_leftovers: bool = False) -> int:
-        """任一階段失敗 → 1；嚴格殘留模式下有殘留也 → 1。"""
+        """任一階段失敗 → 1；嚴格殘留模式下**這一輪**有殘留也 → 1。
+
+        只看 `fresh`：跑前就在的東西不是這一輪的責任，算進去會讓每一場
+        都紅，而實際上沒有任何改進的空間（要清那些用專門的清理腳本）。
+        """
         if any(p.returncode != 0 for p in self.phases):
             return 1
-        if strict_leftovers and any(self.leftovers.values()):
+        if strict_leftovers and any(self.fresh.values()):
             return 1
         return 0
 
@@ -412,12 +464,20 @@ def format_summary(summary: Summary, *, strict_leftovers: bool) -> str:
     if not summary.phases:
         lines.append("  （沒有跑任何階段）")
     if summary.leftover_checked:
-        leftovers = [f"{k}: {v}" for k, v in summary.leftovers.items() if v]
-        if leftovers:
-            lines.append("  殘留（這一輪留下來的東西，沒自動清）：")
-            lines += [f"    - {item}" for item in leftovers]
+        fresh = [f"{k}: {v}" for k, v in summary.fresh.items() if v]
+        if fresh:
+            lines.append("  這一輪的殘留（沒自動清乾淨）：")
+            lines += [f"    - {item}" for item in fresh]
         else:
-            lines.append("  殘留：無（Drive 前綴與 pin repo 都回到跑前的樣子）")
+            lines.append("  這一輪的殘留：無（Drive 前綴與 pin repo 都回到跑前的樣子）")
+        earlier = {k: len(v) for k, v in summary.earlier.items() if v}
+        if earlier:
+            total = sum(earlier.values())
+            lines.append(
+                f"  跑前就存在的舊東西（不是這一輪的，共 {total} 項"
+                f"：{earlier}）——要清的話用 "
+                "scripts/cleanup_integration_leftovers.py（先 dry-run）"
+            )
     else:
         lines.append("  殘留：沒檢查（拿不到 Drive 或 pin repo）")
     lines.append(
@@ -481,11 +541,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     test_folder_id = str(result.test_folder_id)
     with tempfile.TemporaryDirectory(prefix="run-integration-") as tmp_name:
         tmp = Path(tmp_name)
-        before = (
-            snapshot(settings, test_folder_id, tmp / "before")
-            if not args.skip_leftovers
-            else None
-        )
+        before = None
+        if not args.skip_leftovers:
+            before = snapshot(settings, test_folder_id, tmp / "before")
+            # 跑前就有的那些記成基準：Drive 上常早就堆著別人留下的前綴，
+            # 不分開的話每一場都會把它算成「這一輪沒清乾淨」。
+            set_baseline(before)
         try:
             for phase in phases:
                 summary.phases.append(
@@ -496,6 +557,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             if before is not None:
                 after = snapshot(settings, test_folder_id, tmp / "after")
                 summary.leftovers = {k: diff_names(before[k], after[k]) for k in before}
+                fresh, earlier = {}, {}
+                for key, names in summary.leftovers.items():
+                    new, old = partition_leftovers(names, BASELINE.get(key) or [])
+                    fresh[key] = new
+                    earlier[key] = old
+                summary.fresh = fresh
+                summary.earlier = earlier
                 summary.leftover_checked = True
 
     print()

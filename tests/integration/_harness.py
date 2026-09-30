@@ -32,36 +32,79 @@ def new_prefix_name() -> str:
 #: 每個測試自己的釘選值條目名必須唯一（pin repo 是所有線共用的）。
 #: 用法見 conftest 的 `sandbox.pin_repo_name()`：它在測試結束時把條目刪掉。
 
+#: 釘選值條目的四個檔（正式與待定，各有 .json 與 .keys）。
+PIN_ENTRY_SUFFIXES = (".json", ".keys", ".pending.json", ".pending.keys")
+
+
 def cleanup_pin_entries(pin_store, repo_names: list[str]) -> None:
     """把測試用過的釘選值條目從 pin repo 移除（git rm ＋ commit ＋ push）。
 
     pin repo 是所有線共用的，留下幾百個 `.pin/it-*.json` 沒有意義，也會讓
-    「這個條目是誰的」難以判讀。只刪自己建立的條目名稱。
+    「這個條目是誰的」難以判讀。只刪自己建立的條目名稱（`it-` 前綴）。
+
+    ⚠️ 必須用 `pin_store._env` 跑 git，**不能**用繼承的環境變數：那份 env 帶著
+    `GIT_SSH_COMMAND`（deploy key ＋ 隔離設定）。用預設環境的話 push 會拿個人的
+    ssh 身分，遠端只會回 `Permission denied (publickey)`，而這裡原本
+    `check=False` 地把失敗吞掉 —— 條目就永遠留在 pin repo 上（實測 695 個條目、
+    只有 1 筆 `pin: drop` commit，就是這個原因）。
+
+    條目也可能因為寫入當下 remote 已被別的線推進而 push 不掉（non-fast-forward），
+    所以刪完要重新讀一次遠端確認；沒清掉就把名字回報給呼叫端，不要假裝成功。
     """
     import subprocess
+
+    workdir = pin_store.workdir
+    env = getattr(pin_store, "_env", None)
+    if env is None:
+        raise RuntimeError(
+            "pin_store 沒有 _env：清理必須用 pin store 自己那份帶 "
+            "GIT_SSH_COMMAND 的環境變數，否則 push 不會成功"
+        )
+
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(workdir), *args],
+            capture_output=True, text=True, check=False, env=env,
+        )
+
+    # 先對齊遠端：別的線可能在我們上次操作之後又推了東西
+    git("fetch", "origin")
+    git("reset", "-q", "--hard", "origin/main")
+    git("clean", "-qfdx")
 
     for name in repo_names:
         if not name.startswith("it-"):
             continue
-        workdir = pin_store.workdir
-        rel = [f".pin/{name}.json", f".pin/{name}.keys", f".pin/{name}.pending.json"]
         removed = False
-        for path in rel:
-            proc = subprocess.run(
-                ["git", "-C", str(workdir), "rm", "-q", "--ignore-unmatch", path],
-                capture_output=True, text=True, check=False,
-            )
-            removed = removed or proc.returncode == 0
+        for suffix in PIN_ENTRY_SUFFIXES:
+            path = f".pin/{name}{suffix}"
+            if not (workdir / path).is_file():
+                continue
+            proc = git("rm", "-q", path)
+            if proc.returncode == 0:
+                removed = True
         if not removed:
             continue
-        subprocess.run(
-            ["git", "-C", str(workdir), "commit", "-q", "-m", f"pin: drop {name} (integration cleanup)"],
-            capture_output=True, text=True, check=False,
-        )
-        subprocess.run(
-            ["git", "-C", str(workdir), "push", "-q", "origin", "main"],
-            capture_output=True, text=True, check=False,
-        )
+        commit = git("commit", "-q", "-m", f"pin: drop {name} (integration cleanup)")
+        if commit.returncode != 0:
+            raise RuntimeError(
+                f"清理釘選值條目 {name} 時 commit 失敗：{commit.stderr.strip()[:200]}"
+            )
+        push = git("push", "-q", "origin", "main")
+        if push.returncode != 0:
+            # non-fast-forward 是實際會發生的（pin repo 共用）：抓最新再試一次
+            git("fetch", "origin")
+            git("reset", "-q", "--hard", "origin/main")
+            for suffix in PIN_ENTRY_SUFFIXES:
+                path = f".pin/{name}{suffix}"
+                if (workdir / path).is_file():
+                    git("rm", "-q", "--ignore-unmatch", path)
+            git("commit", "-q", "-m", f"pin: drop {name} (integration cleanup)")
+            push = git("push", "-q", "origin", "main")
+            if push.returncode != 0:
+                raise RuntimeError(
+                    f"清理釘選值條目 {name} 時 push 失敗：{push.stderr.strip()[:200]}"
+                )
 
 
 def create_prefix(drive: DriveClient, test_root_id: str, name: str) -> tuple[str, str]:
