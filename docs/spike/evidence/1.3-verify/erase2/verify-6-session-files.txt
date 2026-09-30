@@ -1,0 +1,3 @@
+session 2 content (keep)
+extra line
+session 3 content (keep)

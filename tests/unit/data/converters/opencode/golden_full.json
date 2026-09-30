@@ -1,0 +1,166 @@
+{
+  "info": {
+    "id": "ses_golden_001",
+    "title": "Opencode Converter Golden Sample",
+    "parentID": "ses_parent_000",
+    "time": {
+      "created": 1790420000000,
+      "updated": 1790420600000,
+      "archived": 1790420800000
+    }
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "msg_001",
+        "role": "user",
+        "time": {
+          "created": 1790420000000
+        }
+      },
+      "parts": [
+        {
+          "type": "text",
+          "text": "Please check the workspace status and files."
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_002",
+        "role": "assistant",
+        "time": {
+          "created": 1790420050000,
+          "completed": 1790420060000
+        }
+      },
+      "parts": [
+        {
+          "type": "step-start"
+        },
+        {
+          "type": "reasoning",
+          "text": "I should first run git status to check the workspace."
+        },
+        {
+          "type": "tool",
+          "tool": "bash",
+          "state": {
+            "status": "success",
+            "input": "git status",
+            "output": "On branch main\nnothing to commit, working tree clean",
+            "time": {
+              "created": 1790420051000,
+              "completed": 1790420052000
+            }
+          }
+        },
+        {
+          "type": "tool",
+          "tool": "read",
+          "state": {
+            "status": "error",
+            "input": "missing.txt",
+            "error": "FileNotFoundError: missing.txt not found",
+            "time": {
+              "created": 1790420053000,
+              "completed": 1790420054000
+            }
+          }
+        },
+        {
+          "type": "step-finish"
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_003",
+        "role": "user",
+        "summary": {
+          "diffs": []
+        },
+        "time": {
+          "created": 1790420100000
+        }
+      },
+      "parts": [
+        {
+          "type": "compaction",
+          "auto": true
+        },
+        {
+          "type": "text",
+          "text": "Here are the attachment files for review."
+        },
+        {
+          "type": "file",
+          "mime": "text/plain",
+          "filename": "spec.txt",
+          "url": "data:text/plain;base64,aGVsbG8gd29ybGQ="
+        },
+        {
+          "type": "file",
+          "mime": "image/png",
+          "filename": "dot.png",
+          "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        },
+        {
+          "type": "file",
+          "mime": "application/pdf",
+          "filename": "offline.pdf",
+          "url": "file:///tmp/offline.pdf"
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_004",
+        "role": "assistant",
+        "summary": true,
+        "time": {
+          "created": 1790420200000,
+          "completed": 1790420210000
+        }
+      },
+      "parts": [
+        {
+          "type": "text",
+          "text": "Summarized previous progress: checked workspace and reviewed specifications."
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_005",
+        "role": "assistant",
+        "time": {
+          "created": 1790420300000,
+          "completed": 1790420310000
+        }
+      },
+      "parts": [
+        {
+          "type": "tool",
+          "tool": "task",
+          "state": {
+            "status": "success",
+            "input": "Subagent task execution",
+            "output": "Child session completed",
+            "metadata": {
+              "sessionId": "ses_child_001"
+            },
+            "time": {
+              "created": 1790420301000,
+              "completed": 1790420305000
+            }
+          }
+        },
+        {
+          "type": "text",
+          "text": "Subagent has completed the task."
+        }
+      ]
+    }
+  ]
+}

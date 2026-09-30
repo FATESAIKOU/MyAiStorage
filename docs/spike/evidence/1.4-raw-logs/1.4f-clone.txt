@@ -1,0 +1,23 @@
+=== clone with fake same-name files present ===
+Cloning into '/work/attack-clone-after'...
+git-remote-annex: Error parsing manifest
+
+### delete C fake manifest 1ORpMsOz...
+op=delete
+target=1ORpMsOz5IgXt_YRnCTj2knb9Xx97XI5c
+http=204
+### keep c-into-repo.txt and fake bundle for now; re-clone to isolate cause
+=== clone after deleting fake manifest (fake bundle + c-into-repo.txt still present) ===
+  Verification of content failed
+git-remote-annex: Failed to download GITBUNDLE-s395--4c20f00b-9ec3-4457-b5b3-7f3e0c52d7d6-93a4e2d836810fe76f6e461a4b4ca6e63e9073c1ee79ae428878150603116c8d
+
+clone_rc=128
+op=delete
+target=1QnHBeD6f7e2WXkIfU6S32aZXAd4fZHbB
+http=204
+=== clone with only c-into-repo.txt extra (fakes removed) ===
+Cloning into '/work/attack-clone-after3'...
+clone_rc=0
+HEAD=9f4e912be87ae2656cb92629a617837f408f4c1c
+9f4e912 init: agora-attack/
+README for /work/attack-repo

@@ -1,0 +1,664 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aistorage:schema:inbox-sidecar",
+  "title": "AiStorage Inbox Sidecar Schema",
+  "description": "收件匣項目的 sidecar 規格（格式 aistorage.inbox/v1，不含簽章）",
+  "type": "object",
+  "required": [
+    "format",
+    "item_key",
+    "profile",
+    "metadata",
+    "raw",
+    "body"
+  ],
+  "properties": {
+    "format": {
+      "type": "string",
+      "const": "aistorage.inbox/v1",
+      "description": "格式版本標識"
+    },
+    "item_key": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "收件匣項目識別碼（26 字元 Crockford's Base32 ULID）"
+    },
+    "profile": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "寫入者宣稱的 profile，只在等於驗章金鑰所屬 profile 時才收"
+    },
+    "metadata": {
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^\\S+$"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "session",
+            "handoff",
+            "claim",
+            "continuation",
+            "reference",
+            "rewrite",
+            "artifact"
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$"
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$"
+        },
+        "case_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provenance": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "raw": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "sha256",
+            "size"
+          ],
+          "properties": {
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "description": "原始紀錄本體的 SHA-256 雜湊（小寫 hex）"
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "原始紀錄本體的大小（位元組）"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "session": {
+      "type": "object",
+      "required": [
+        "source",
+        "source_session_id",
+        "snapshot_at",
+        "status",
+        "in_progress"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session)$)[a-z0-9][a-z0-9_-]*$",
+          "description": "來源應用識別碼（不得為保留名，不得含冒號或空白）"
+        },
+        "source_session_id": {
+          "type": "string",
+          "pattern": "^\\S+$",
+          "description": "來源應用內部 Session ID（不得含空白）"
+        },
+        "snapshot_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+          "description": "快照時間（RFC 3339 UTC Z）"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "running",
+            "stopped"
+          ],
+          "description": "Session 狀態"
+        },
+        "stopped_at": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "停止時間（status=stopped 時必填 RFC 3339 UTC Z 字串）"
+        },
+        "in_progress": {
+          "type": "boolean",
+          "description": "是否仍在生成中"
+        },
+        "parent_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "母 Session ID（若為子 Session，需符合 Session ID 規範）"
+        }
+      },
+      "additionalProperties": true
+    },
+    "body": {
+      "type": "object",
+      "description": "依 type 決定之業務內容"
+    }
+  },
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "session": {
+            "properties": {
+              "status": {
+                "const": "stopped"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "session": {
+            "required": [
+              "stopped_at"
+            ],
+            "properties": {
+              "stopped_at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "metadata": {
+            "properties": {
+              "type": {
+                "const": "session"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "session",
+          "raw"
+        ],
+        "properties": {
+          "raw": {
+            "type": "object",
+            "properties": {
+              "size": {
+                "type": "integer",
+                "maximum": 104857600
+              }
+            }
+          },
+          "body": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "metadata": {
+            "properties": {
+              "type": {
+                "const": "handoff"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "type": "object",
+            "required": [
+              "target_session_id",
+              "continuation",
+              "content"
+            ],
+            "properties": {
+              "target_session_id": {
+                "type": "string",
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+              },
+              "continuation": {
+                "type": "object",
+                "required": [
+                  "snapshot_sha256",
+                  "message_id"
+                ],
+                "properties": {
+                  "snapshot_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "message_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": true
+              },
+              "content": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "metadata": {
+            "properties": {
+              "type": {
+                "const": "claim"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "type": "object",
+            "required": [
+              "handoff_id",
+              "claimer_session_id"
+            ],
+            "properties": {
+              "handoff_id": {
+                "type": "string",
+                "pattern": "^handoff:[0-9A-HJKMNP-TV-Z]{26}$"
+              },
+              "claimer_session_id": {
+                "type": "string",
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "anyOf": [
+          {
+            "not": { "required": ["session"] }
+          },
+          {
+            "required": ["session", "raw"],
+            "properties": {
+              "raw": { "type": "object" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "metadata": {
+            "properties": {
+              "type": {
+                "const": "continuation"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "type": "object",
+            "required": [
+              "target_session_id",
+              "new_session_id",
+              "continuation"
+            ],
+            "properties": {
+              "target_session_id": {
+                "type": "string",
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
+                "description": "被接續的 Session（接續 Link 的 to 端）"
+              },
+              "new_session_id": {
+                "type": "string",
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$",
+                "description": "由這個起點建出的新 Session（接續 Link 的 from 端）"
+              },
+              "continuation": {
+                "type": "object",
+                "required": [
+                  "snapshot_sha256",
+                  "message_id"
+                ],
+                "properties": {
+                  "snapshot_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "message_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": true,
+                "description": "接續點：被接續 Session 的一個快照 ＋ 該快照裡的一則已完成訊息"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "anyOf": [
+          {
+            "not": { "required": ["session"] }
+          },
+          {
+            "required": ["session", "raw"],
+            "properties": {
+              "raw": { "type": "object" }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "metadata": {
+            "properties": {
+              "type": {
+                "const": "reference"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "type": "object",
+            "required": [
+              "from_session_id",
+              "to_session_id",
+              "read_snapshot_at"
+            ],
+            "properties": {
+              "from_session_id": {
+                "type": "string",
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+              },
+              "to_session_id": {
+                "type": "string",
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+              },
+              "read_snapshot_at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$"
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "metadata": {
+            "properties": {
+              "type": {
+                "const": "rewrite"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "raw"
+        ],
+        "properties": {
+          "raw": {
+            "type": "object",
+            "properties": {
+              "size": {
+                "type": "integer",
+                "maximum": 104857600
+              }
+            }
+          },
+          "body": {
+            "type": "object",
+            "required": [
+              "target_session_id",
+              "base_snapshot_sha256",
+              "reason"
+            ],
+            "properties": {
+              "target_session_id": {
+                "type": "string",
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+              },
+              "base_snapshot_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "metadata": {
+            "properties": {
+              "type": {
+                "const": "artifact"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "body": {
+            "type": "object",
+            "required": [
+              "kind",
+              "produced_by_session_id"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "link",
+                  "contained"
+                ]
+              },
+              "content_type": {
+                "type": "string",
+                "minLength": 1
+              },
+              "link": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "repo": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "path": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "produced_by_session_id": {
+                "type": "string",
+                "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+              },
+              "filename": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "body": {
+                  "properties": {
+                    "kind": {
+                      "const": "contained"
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "raw"
+              ],
+              "properties": {
+                "body": {
+                  "required": [
+                    "content_type"
+                  ]
+                },
+                "raw": {
+                  "type": "object",
+                  "properties": {
+                    "size": {
+                      "type": "integer",
+                      "maximum": 104857600
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "body": {
+                  "properties": {
+                    "kind": {
+                      "const": "link"
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "body": {
+                  "required": [
+                    "link"
+                  ],
+                  "properties": {
+                    "link": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

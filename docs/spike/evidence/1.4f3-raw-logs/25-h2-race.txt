@@ -1,0 +1,14 @@
+http=200
+file_id=1A9B3u6ZKTHNvOUuErJQyGnR61aT-l3rX
+http=200
+file_id=1msyDv9Rpi9Xr3TKRmFqM2XBvyaC3a5J7
+== H2b: verify only (no clean) — must show git-annex=forged refs ==
+verify: refs={"refs/heads/git-annex": "c3df98ae0187f1ca3651e76fb40d3f2a0991ce83", "refs/heads/main": "c41abe73b8b4d15d9fc4f18ec4c43709d9e30456"}
+verify: manifest_sha256=7fa3b8dc12a5bc22… bundles=5
+verify_rc=0
+verify_rc=0
+== H2b check (forged git-annex present): must fail-closed ==
+verify: refs={"refs/heads/git-annex": "c3df98ae0187f1ca3651e76fb40d3f2a0991ce83", "refs/heads/main": "c41abe73b8b4d15d9fc4f18ec4c43709d9e30456"}
+verify: manifest_sha256=7fa3b8dc12a5bc22… bundles=5
+check: remote 與 promoted/pending 皆不符 → fail-closed
+check_rc=2

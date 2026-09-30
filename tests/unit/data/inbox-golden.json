@@ -1,0 +1,20 @@
+{
+  "description": "AiStorage inbox detached signature golden vector",
+  "key_id": "mac-opencode-56475aa7",
+  "private_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "public_key_b64": "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+  "sidecar_bytes_utf8": "{\n  \"format\": \"aistorage.inbox/v1\",\n  \"item_key\": \"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\n  \"profile\": \"mac-opencode\",\n  \"metadata\": {\n    \"id\": \"opencode:ses_20260927_001\",\n    \"type\": \"session\",\n    \"created_at\": \"2026-09-27T08:00:00Z\",\n    \"updated_at\": \"2026-09-27T08:00:00Z\",\n    \"case_id\": null,\n    \"provenance\": null\n  },\n  \"raw\": {\n    \"sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\n    \"size\": 0\n  },\n  \"session\": {\n    \"source\": \"opencode\",\n    \"source_session_id\": \"ses_20260927_001\",\n    \"snapshot_at\": \"2026-09-27T08:00:00Z\",\n    \"status\": \"running\",\n    \"stopped_at\": null,\n    \"in_progress\": false,\n    \"parent_id\": null\n  },\n  \"body\": {}\n}\n",
+  "expected_sig": {
+    "alg": "ed25519",
+    "key_id": "mac-opencode-56475aa7",
+    "value": "f7Xia+4cAr7PhVZA8dob1jnjohmb1ydVuGMyDbHoWjBx01bSlYOdrAG3OfT83Bit4cbvBG1fpWnzZ9sB+08JCw=="
+  },
+  "negative_no_prefix": {
+    "description": "簽章時少了 aistorage.inbox/v1\\n 用途前綴，驗章必須失敗",
+    "sig": {
+      "alg": "ed25519",
+      "key_id": "mac-opencode-56475aa7",
+      "value": "CoxdWvXSFK5gPm1ZKQdQLJyJSVVWnciOlL6uU6lQETk5Gaw10PgH8npsP/vRFtvAwXAvhuh2+z8yXATpUqnHCA=="
+    }
+  }
+}

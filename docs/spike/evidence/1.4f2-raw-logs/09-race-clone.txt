@@ -1,0 +1,9 @@
+== step5: race — clone WITHOUT cleaning, pinned check must abort ==
+pinned_head=5950b3c272e4c0dad2793e0b833e652cecfe27b1
+cloned_head=d1d0f3130dc8cc78ae6f52e94178a1c52ead2d7a
+PIN-MISMATCH: abort（不得繼續 push）
+verify_rc=2
+== abort confirmed: NO push attempted ==
+== what did the racy clone actually get (evidence only) ==
+d1d0f31 pwned
+FORGED.txt

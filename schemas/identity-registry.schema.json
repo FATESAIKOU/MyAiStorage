@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aistorage:schema:identity-registry",
+  "title": "AiStorage Identity Registry Schema",
+  "description": "AiStorage Profile 身分與簽章金鑰登錄檔規範（只包含公開資訊）",
+  "type": "object",
+  "required": [
+    "format",
+    "profiles"
+  ],
+  "properties": {
+    "format": {
+      "type": "string",
+      "const": "aistorage.identity/v1",
+      "description": "登錄檔格式版本識別碼"
+    },
+    "profiles": {
+      "type": "object",
+      "description": "各 profile 授權與金鑰登錄表",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]*$",
+        "description": "Profile 名稱格式限制為小寫字母開頭之連字號字母數字字串"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "allowed_types",
+          "signing_keys",
+          "inbox_folder_ids"
+        ],
+        "properties": {
+          "allowed_types": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "session",
+                "handoff",
+                "claim",
+                "continuation",
+                "reference",
+                "rewrite",
+                "artifact"
+              ]
+            },
+            "description": "該 profile 獲授權寫入之項目型態清單（限定 2.1 定義之項目型態）"
+          },
+          "signing_keys": {
+            "type": "array",
+            "description": "該 profile 持有之簽章公鑰清單",
+            "items": {
+              "type": "object",
+              "required": [
+                "key_id",
+                "public_key",
+                "status",
+                "added_at",
+                "revoked_at"
+              ],
+              "properties": {
+                "key_id": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9-]*-[0-9a-f]{8}$",
+                  "description": "金鑰識別碼，格式為 <profile>-<sha256(公鑰raw32)前8小寫hex>，整份登錄檔全域唯一"
+                },
+                "public_key": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9+/]{43}={0,2}$",
+                  "description": "Base64 編碼之 Ed25519 32 位元組原始公鑰"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "active",
+                    "revoked"
+                  ],
+                  "description": "金鑰狀態（有效 active 或已撤銷 revoked）"
+                },
+                "added_at": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+                  "description": "金鑰啟用登錄時間（RFC 3339 UTC 'Z' 格式）"
+                },
+                "revoked_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+                  "description": "金鑰撤銷時間（RFC 3339 UTC 'Z' 格式）；未撤銷時為 null"
+                }
+              },
+              "if": {
+                "properties": {
+                  "status": {
+                    "const": "active"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "revoked_at": {
+                    "type": "null"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "inbox_folder_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "該 profile 在 Drive 上的收件匣資料夾 ID 清單（僅供提交流程掃描定位）"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

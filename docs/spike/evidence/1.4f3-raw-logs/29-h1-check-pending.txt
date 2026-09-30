@@ -1,0 +1,5 @@
+== H1 state: remote is at NEW main (push done), pending exists, promoted is old ==
+verify: refs={"refs/heads/git-annex": "a51d0562232911bc9e6283b194fcd4df1f1b82a3", "refs/heads/main": "494ac08f53344a420806ba9c4d76463b3fe46d06"}
+verify: manifest_sha256=6422ba571348b8be… bundles=3
+check: remote == pending（可轉正）
+check_rc=3 (expect 3 = pending match)

@@ -1,0 +1,14 @@
+### 1.4a-caveat: A (same project as committer) creates file inside committer's readview folder
+op=create-file
+name=a-into-committer-readview.txt
+parent=1aT4CTgDE8gUN62Y5s9G-UT9OZ6laMhP0
+http=200
+file_id=1s9txWQfl72AHb2ZwzczYFm4_JdGS4yfx
+md5=2accd3b56f1d6a401cef42bc688a4b16
+### committer sees it
+op=find-name
+target=1aT4CTgDE8gUN62Y5s9G-UT9OZ6laMhP0
+http=200
+count=1
+file={"id": "1s9txWQfl72AHb2ZwzczYFm4_JdGS4yfx", "md5Checksum": "2accd3b56f1d6a401cef42bc688a4b16", "mimeType": "text/plain", "name": "a-into-committer-readview.txt", "size": "25"}
+### cleanup: committer deletes A-injected file (keep readview clean for 1.4i record)

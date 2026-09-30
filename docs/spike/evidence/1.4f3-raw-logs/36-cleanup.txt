@@ -1,0 +1,2 @@
+kept_count=7 moved_count=2 move_failures=0
+CLEAN-OK

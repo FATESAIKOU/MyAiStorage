@@ -1,0 +1,124 @@
+### 1.4c C permissions-create on B's live b-own2.txt (reader)
+op=permissions-create
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+role=reader email=spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com
+http=404
+reason=notFound
+message=File not found: 1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_.
+### 1.4c C permissions-list on live b-own2.txt
+op=permissions-list
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+http=404
+reason=notFound
+message=File not found: 1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_.
+### 1.4c C update-name on live b-own2.txt
+op=update-name
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+new_name=c-renamed2.txt
+http=403
+reason=appNotAuthorizedToFile
+message=The user has not granted the app <app-id-redacted> write access to the file 1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_.
+### 1.4c B confirm b-own2.txt unchanged
+op=get
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+http=200
+name=b-own2.txt
+mime=text/plain
+md5=89bbdbb6a1b2e66da9e9b847b92b4f85
+size=17
+created=2026-09-26T07:41:13.195Z
+modified=2026-09-26T07:41:13.195Z
+head_revision=0BxGkb7nCu1AXWjFQL2ZETUtDamZtNVJHdjhjUHltbjVJaHpRPQ
+trashed=False
+canEdit=True canDelete=True
+### 1.4c-supp A permissions-create(writer) on B's LIVE b-own2.txt (same project)
+op=permissions-create
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+role=writer email=spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com
+http=401
+reason=authError
+message=Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-
+### 1.4c-supp A permissions-list B's b-own2.txt
+op=permissions-list
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+http=401
+reason=authError
+message=Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-
+### 1.4c B permissions-list on b-own2 after C's attacks (unchanged?)
+op=permissions-list
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+http=401
+reason=authError
+message=Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-
+### 1.4c B confirms name/md5/full fields
+op=get
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+http=401
+reason=authError
+message=Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-
+### retry 1.4c-supp A permissions-create(writer) on B's b-own2.txt
+op=permissions-create
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+role=writer email=spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com
+http=200
+permission_id=<sa-perm-id-redacted>
+### A permissions-list B's file
+op=permissions-list
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+http=200
+perm={"emailAddress": "<account-email-redacted>", "id": "<owner-perm-id-redacted>", "role": "owner", "type": "user"}
+perm={"emailAddress": "spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com", "id": "<sa-perm-id-redacted>", "role": "writer", "type": "user"}
+### B permissions-list after (unchanged?)
+op=permissions-list
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+http=200
+perm={"emailAddress": "<account-email-redacted>", "id": "<owner-perm-id-redacted>", "role": "owner", "type": "user"}
+perm={"emailAddress": "spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com", "id": "<sa-perm-id-redacted>", "role": "writer", "type": "user"}
+### B confirms fields
+op=get
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+http=200
+name=b-own2.txt
+mime=text/plain
+md5=89bbdbb6a1b2e66da9e9b847b92b4f85
+size=17
+created=2026-09-26T07:41:13.195Z
+modified=2026-09-26T08:33:48.634Z
+head_revision=0BxGkb7nCu1AXWjFQL2ZETUtDamZtNVJHdjhjUHltbjVJaHpRPQ
+trashed=False
+parents=['1_F3u9VqO3BEGrwo7-Iw9Hnt2VEUFo1o7']
+canEdit=True canDelete=True
+### 1.4c C permissions-create on LIVE b-own2 (retry with token refresh)
+op=permissions-create
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+role=reader email=spike-reader@aistorage-spike-1-260926.iam.gserviceaccount.com
+http=404
+reason=notFound
+message=File not found: 1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_.
+### 1.4c C update-name LIVE b-own2
+op=update-name
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+new_name=c-renamed2.txt
+http=403
+reason=appNotAuthorizedToFile
+message=The user has not granted the app <app-id-redacted> write access to the file 1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_.
+### 1.4c C delete LIVE b-own2
+op=delete
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+http=404
+reason=notFound
+message=File not found: 1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_.
+### B final confirm b-own2 intact
+op=get
+target=1kV9nuMQPvK4PGc1mDf7ORT2AcQHnFzI_
+http=200
+name=b-own2.txt
+mime=text/plain
+md5=89bbdbb6a1b2e66da9e9b847b92b4f85
+size=17
+created=2026-09-26T07:41:13.195Z
+modified=2026-09-26T08:33:58.549Z
+head_revision=0BxGkb7nCu1AXWjFQL2ZETUtDamZtNVJHdjhjUHltbjVJaHpRPQ
+trashed=False
+parents=['1_F3u9VqO3BEGrwo7-Iw9Hnt2VEUFo1o7']
+canEdit=True canDelete=True

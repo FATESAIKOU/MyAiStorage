@@ -1,0 +1,28 @@
+{
+  "files": [
+    {
+      "createdTime": "2026-09-26T11:27:11.091Z",
+      "id": "1LShPsHoUE-9iF7lT44Koa62u9MPom-lJ",
+      "md5Checksum": "47169202e3ddf31bc4fcdaf6c6ec9ec8",
+      "name": "GITMANIFEST--6d0d198f-5fbf-4b15-a9b2-628f92e8ce48",
+      "size": "118"
+    },
+    {
+      "createdTime": "2026-09-26T11:27:08.215Z",
+      "id": "1x2Wp9AjtnMOwpPMAn8qRIC_H9g41UROM",
+      "md5Checksum": "47169202e3ddf31bc4fcdaf6c6ec9ec8",
+      "name": "GITMANIFEST--6d0d198f-5fbf-4b15-a9b2-628f92e8ce48.bak",
+      "size": "118"
+    },
+    {
+      "createdTime": "2026-09-26T11:27:04.470Z",
+      "id": "13t-eWE8eWSN1eXts3pTlVtC12ddfsieO",
+      "md5Checksum": "8a6252f1b513d29f713060ecb81cb104",
+      "name": "GITBUNDLE-s367--6d0d198f-5fbf-4b15-a9b2-628f92e8ce48-e2de355c7ba486d1a6ba4f6588e47bcf79a27f0fe4ec73a3a67c0e5989004e1c",
+      "size": "367"
+    }
+  ],
+  "pinned_head": "1a8e4887edc2a7fd3f91e73f9f5d2e1374975ea6",
+  "recorded_at": "2026-09-26T11:27:23.641337+00:00",
+  "repo_prefix": "agora-1.4f2b/"
+}

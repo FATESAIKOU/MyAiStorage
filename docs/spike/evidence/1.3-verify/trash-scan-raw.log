@@ -1,0 +1,11 @@
+trash_total 1055
+{'other': 29, 'GITMANIFEST': 1013, 'GITBUNDLE': 10, 'annex-bin': 3}
+unique_names 38
+scanned=38 canary_hits=0 download_errors=0
+### sample trashed flag check
+  1LShPsHoUE-9iF7lT44Koa62u9MPom-lJ trashed=True
+  1x2Wp9AjtnMOwpPMAn8qRIC_H9g41UROM trashed=True
+  1JBqg636f55Gy37nRd-uxYNvCBn-lgnb_ trashed=True
+  1OYafT9JI0SVq4pE5ldQip7EXKF-EnOKy trashed=True
+  1LyZBPxrtRsIzLsoO9BSg7iI6i83Ty02T trashed=True
+DONE

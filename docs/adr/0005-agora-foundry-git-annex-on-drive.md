@@ -1,5 +1,7 @@
 # Agora 與 Foundry 以 git 為介面、Google Drive 為唯一儲存實體
 
+> 2026-09-26 re-scope：決定本身不變。文中的分期（期 1／期 2／期 3）、角色（員工、秘書）與範圍（大檔、Atelier）說法，以 `openspec/changes/establish-aistorage-phase1/proposal.md` 與 `docs/backlog.md` 為準。
+
 使用者要求 Agora 與 Foundry 用 git 形式操作（看重版本與回滾、熟悉的指令、跟 MyBrain / Atelier 一致），而儲存實體只放已經付費的 Google Drive，不增加月費，也不保留第二份副本。現存「以 Drive 當 git remote」的做法裡，唯一還在維護、能把整個 repo（歷史與大檔）存進 Drive 的，是 git-annex 內建的 `git-remote-annex` 加上 rclone special remote。所以採用它，並把「在使用者的 Drive 上實測 clone、revert、抹除、大檔」列為期 1 的第一個任務。
 
 ## Considered Options
@@ -13,3 +15,4 @@
 
 - Drive 沒有條件寫入，同時 push 會悄悄互相覆蓋。所以寫入必須序列化，見 ADR 0006。
 - Drive 的垃圾桶與舊版本只保留 30 天，持有完整權限的憑證可以永久刪除。使用者明示接受這個風險；之後要加第二份副本時，git-annex 的 numcopies 就是擴張點。
+- 2026-09-26：AiStorage 改放在 Google One 家庭共用裡的專用帳號（共用同一份 5TB 配額），提交流程的完整權限憑證外洩時，影響範圍只限 AiStorage，不含使用者個人的 Drive。

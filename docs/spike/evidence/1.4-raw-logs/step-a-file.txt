@@ -1,0 +1,13 @@
+### A creates a-visible.txt inside folder 1kAcj-CER8VRRTWoHG7GAxHMY-vsbsZ1j
+op=create-file
+name=a-visible.txt
+parent=1kAcj-CER8VRRTWoHG7GAxHMY-vsbsZ1j
+http=200
+file_id=1a7Hc3nP7INdYY0LZGYezLeWp9ZLdZzHC
+md5=c688cdb38fa59b486416db3d4bcff7da
+### A lists its own folder
+op=list-children
+target=1kAcj-CER8VRRTWoHG7GAxHMY-vsbsZ1j
+http=200
+count=1
+file={"id": "1a7Hc3nP7INdYY0LZGYezLeWp9ZLdZzHC", "md5Checksum": "c688cdb38fa59b486416db3d4bcff7da", "mimeType": "text/plain", "name": "a-visible.txt", "size": "20"}

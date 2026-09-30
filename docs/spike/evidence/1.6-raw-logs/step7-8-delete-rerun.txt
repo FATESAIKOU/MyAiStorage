@@ -1,0 +1,15 @@
+== step7: delete run 36231116203 via PAT ==
+✓ Request to delete workflow run submitted.
+delete_rc=0
+failed to get run: HTTP 404: Not Found (https://api.github.com/repos/FATESAIKOU/aistorage-spike/actions/runs/36231116203?exclude_pull_requests=true)
+== step8: rerun — trigger another then rerun it ==
+https://github.com/FATESAIKOU/aistorage-spike/actions/runs/36231131323
+run2=36231131323
+run 36231131323 cannot be rerun; This workflow is already running
+rerun_rc=1
+== step8b: wait for completion then rerun ==
+poll1: completed/success
+rerun_rc=0
+queued		spike-empty-check	spike-empty-check	main	workflow_dispatch	36231131323	4s	2026-09-26T08:53:38Z
+completed	success	spike-empty-check	spike-empty-check	main	workflow_dispatch	36231073352	10s	2026-09-26T08:52:12Z
+completed	success	spike-empty-check	spike-empty-check	main	workflow_dispatch	36227666548	13s	2026-09-26T07:43:52Z

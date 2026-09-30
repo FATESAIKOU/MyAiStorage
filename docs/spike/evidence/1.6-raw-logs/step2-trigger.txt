@@ -1,0 +1,12 @@
+== step2: trigger spike-empty-check via PAT ==
+unable to determine default branch for FATESAIKOU/aistorage-spike: GraphQL: Resource not accessible by personal access token (repository.defaultBranchRef)
+trigger rc=1
+== run list right after trigger ==
+completed	success	spike-empty-check	spike-empty-check	main	workflow_dispatch	36227666548	13s	2026-09-26T07:43:52Z
+completed	failure	spike-empty-check	spike-empty-check	main	workflow_dispatch	36227630906	10s	2026-09-26T07:43:09Z
+== step2b: trigger with explicit --ref main ==
+https://github.com/FATESAIKOU/aistorage-spike/actions/runs/36231073352
+trigger rc=0
+in_progress		spike-empty-check	spike-empty-check	main	workflow_dispatch	36231073352	6s	2026-09-26T08:52:12Z
+completed	success	spike-empty-check	spike-empty-check	main	workflow_dispatch	36227666548	13s	2026-09-26T07:43:52Z
+completed	failure	spike-empty-check	spike-empty-check	main	workflow_dispatch	36227630906	10s	2026-09-26T07:43:09Z

@@ -1,0 +1,4 @@
+=== Step 3 (exec): Current trash count = 115 ===
+Calling files.emptyTrash...
+files.emptyTrash returned http=204 success
+Post-verification: trashed=true remaining count = 115

@@ -1,0 +1,34 @@
+### parents field for c-into-spike.txt (who put it where)
+op=get
+target=16s0_jlpueOguhCGUcL91TaXJdWQs57OE
+http=200
+name=c-into-spike.txt
+mime=text/plain
+md5=17fae4227f97d0c64d8429dd905e8583
+size=12
+created=2026-09-26T07:43:03.906Z
+modified=2026-09-26T07:43:03.906Z
+head_revision=0BxGkb7nCu1AXVUkzWG1wdjIzVkgvK202aE5wZDF5MlBXMDNjPQ
+trashed=False
+parents=['1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj']
+canEdit=True canDelete=True
+### 1.4h same-name: C creates a SECOND committer-owned.txt in SPIKE_FOLDER_ID
+op=create-file
+name=committer-owned.txt
+parent=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj
+http=200
+file_id=1CF9Is2AjkmoI728gz3gUana9s3xGGjTT
+md5=426d77443f235334ff20f2b0249a5e85
+### committer counts by name
+op=find-name
+target=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj
+http=200
+count=2
+file={"id": "1CF9Is2AjkmoI728gz3gUana9s3xGGjTT", "md5Checksum": "426d77443f235334ff20f2b0249a5e85", "mimeType": "text/plain", "name": "committer-owned.txt", "size": "25"}
+file={"id": "13Tj__1eJrBAiH9660-XBn_sCQmOE2dZt", "md5Checksum": "ac80f9624f201f8cdd9435e077799e79", "mimeType": "text/plain", "name": "committer-owned.txt", "size": "26"}
+### C sees same-name clones only
+op=find-name
+target=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj
+http=200
+count=1
+file={"id": "1CF9Is2AjkmoI728gz3gUana9s3xGGjTT", "md5Checksum": "426d77443f235334ff20f2b0249a5e85", "mimeType": "text/plain", "name": "committer-owned.txt", "size": "25"}

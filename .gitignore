@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+# 提交流程中止時的 traceback 除錯檔（review-g3g L：不進 Actions log，只寫本機）
+debug/
+
+# 第 9 組 e2e 環境的產出（scripts/e2e_setup.py 產生；都是環境專屬的 id，
+# 每跑一次 setup 就不同，而且不該進版控）
+config/e2e_state.json
+config/*.e2e.json
+reader.e2e.json

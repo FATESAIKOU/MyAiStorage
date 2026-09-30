@@ -1,5 +1,7 @@
 # 授權依 profile，職務不參與授權
 
+> 2026-09-26 re-scope：決定本身不變。文中的分期（期 1／期 2／期 3）、角色（員工、秘書）與範圍（大檔、Atelier）說法，以 `openspec/changes/establish-aistorage-phase1/proposal.md` 與 `docs/backlog.md` 為準。
+
 執行體（worker、手機 App、同步程式）只負責向儲存要素的介面證明自己是誰；它屬於哪個 profile 由 MyLinuxPool 證明；各要素依 profile 查自己持有的授權規則，並把產生者蓋進 metadata。職務雖然決定員工「該做什麼」，但它是 AI 在執行期自己從 Atelier 載入的，無法被證明，拿來授權就等於讓 AI 自己決定權限。profile 則在 worker 建立時就固定，AI 改不了。員工能跑任意 shell，所以它看得到自己的憑證。這條邊界誠實的講法是：「那個 profile 被允許的操作」就是員工權限的上限，刪掉 worker 就等於撤銷它的身分。
 
 ## Considered Options

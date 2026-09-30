@@ -1,0 +1,5 @@
+== cleanup H2 injections first (so we start from clean promoted state) ==
+kept_count=5 moved_count=2 move_failures=0
+  [moved] /GITBUNDLE-s2289--c2febd2f-f053-4012-8b0e-fa932e763922-c344e4d5ee9e0f9be83882acc461be247c536aafba0a92b7575b32a37736758d id=1msyDv9Rpi9Xr3TKRmFqM2XBvyaC3a5J7 (bundle-未被引用或雜湊不符)
+  [moved] /GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 id=1A9B3u6ZKTHNvOUuErJQyGnR61aT-l3rX (manifest-內容不符)
+CLEAN-OK

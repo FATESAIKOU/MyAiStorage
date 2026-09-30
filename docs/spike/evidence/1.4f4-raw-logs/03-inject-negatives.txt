@@ -1,0 +1,9 @@
+== inject all negative shapes: garbage same-name manifest, unreferenced bundle, fake annex object, nested folder ==
+http=200
+file_id=1h5UmEqYBlLilfjTKsyKNNNsIbgwvgcHg
+http=200
+file_id=1YPJ7-05Mz1ijlc5CwTg16kOBw63Dwq4o
+http=200
+file_id=1SzrymM7EJnaMZhAnsKDW3CWQPONAWZts
+http=200
+file_id=1PBneA4m10bDE1X7nOK47kiIRZ2YAODFq

@@ -1,0 +1,49 @@
+### A lists root (sees committer folder?)
+op=list-root
+target=root
+http=200
+count=6
+file={"id": "173O-NBiv3iFygsV4IDQj7Zjcba5A4_K7", "mimeType": "application/vnd.google-apps.folder", "name": "aistorage-spike-inbox-mac-opencode"}
+file={"id": "1_F3u9VqO3BEGrwo7-Iw9Hnt2VEUFo1o7", "mimeType": "application/vnd.google-apps.folder", "name": "aistorage-spike-probe-b"}
+file={"id": "1kAcj-CER8VRRTWoHG7GAxHMY-vsbsZ1j", "mimeType": "application/vnd.google-apps.folder", "name": "aistorage-spike-probe-a"}
+file={"id": "1KSccKo07AmihMaiSyws6bKmOjXsVlq3y", "mimeType": "application/vnd.google-apps.folder", "name": "aistorage-spike-smoke-test-profile"}
+file={"id": "1kQMuPggTFcpWxfQcEewN9TOExvvx7syv", "mimeType": "application/vnd.google-apps.folder", "name": "aistorage-spike-smoke-mac-opencode"}
+file={"id": "1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj", "mimeType": "application/vnd.google-apps.folder", "name": "aistorage-spike"}
+### A get committer-owned.txt inside SPIKE_FOLDER_ID
+op=get
+target=13Tj__1eJrBAiH9660-XBn_sCQmOE2dZt
+http=200
+name=committer-owned.txt
+mime=text/plain
+md5=ac80f9624f201f8cdd9435e077799e79
+size=26
+created=2026-09-26T07:39:06.977Z
+modified=2026-09-26T07:39:06.977Z
+head_revision=0BxGkb7nCu1AXZEN6Z1ZGWEhKdEZEUmZMUUFyNVFNUWdYMHFnPQ
+trashed=False
+canEdit=True canDelete=True
+### A update-name committer-owned.txt -> a-tampered-committer.txt
+op=update-name
+target=13Tj__1eJrBAiH9660-XBn_sCQmOE2dZt
+new_name=a-tampered-committer.txt
+http=200
+name=a-tampered-committer.txt
+### A rename back
+op=update-name
+target=13Tj__1eJrBAiH9660-XBn_sCQmOE2dZt
+new_name=committer-owned.txt
+http=200
+name=committer-owned.txt
+### committer confirm unchanged md5
+op=get
+target=13Tj__1eJrBAiH9660-XBn_sCQmOE2dZt
+http=200
+name=committer-owned.txt
+mime=text/plain
+md5=ac80f9624f201f8cdd9435e077799e79
+size=26
+created=2026-09-26T07:39:06.977Z
+modified=2026-09-26T07:44:27.606Z
+head_revision=0BxGkb7nCu1AXZEN6Z1ZGWEhKdEZEUmZMUUFyNVFNUWdYMHFnPQ
+trashed=False
+canEdit=True canDelete=True

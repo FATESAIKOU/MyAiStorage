@@ -1,0 +1,13 @@
+### committer battery scoped under SPIKE_FOLDER_ID
+op=battery
+parent=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj
+create_folder.http=200
+create_folder.file_id=1KLSh1ttMRR0kBhV5Y9Bd_tHWGoaF2blL
+create_file.http=200
+create_file.file_id=16_grWAAb0ljjs8GGPKLGJoDomcywJood
+update_content.http=200
+update_content.md5=4e131482a364afb1fbc227bec50cc910
+get.http=200
+get.md5=4e131482a364afb1fbc227bec50cc910
+delete.http=204
+delete_folder.http=204

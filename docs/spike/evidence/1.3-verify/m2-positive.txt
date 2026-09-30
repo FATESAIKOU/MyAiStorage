@@ -1,0 +1,22 @@
+
+### 1) bundle 查驗（只做 bundle 段）
+   bundle 檔數：4
+   manifest：GITMANIFEST--0dd55042-9a09-4d75-bff6-140c7ea92dac
+   --- 依 manifest 順序（共 4 顆）逐顆 unbundle ---
+   ok：GITBUNDLE-s386--0dd55042-9a09-4d75-bff6-140c7ea92dac-2c7304da34ff6022d97346fb1b1eecc90d698e164f8d4b40e63b84c9ebb18025
+   ok：GITBUNDLE-s1815--0dd55042-9a09-4d75-bff6-140c7ea92dac-fc749e318b7641396b7ff2afd980fabd44524f8b7b3e2bae13b0300b2475f92e
+   ok：GITBUNDLE-s503--0dd55042-9a09-4d75-bff6-140c7ea92dac-a532810016372209b7d2fae6c1ee61e650b387ed27bff864e24595e892369a09
+   ok：GITBUNDLE-s468--0dd55042-9a09-4d75-bff6-140c7ea92dac-b4e43374c8d044f2107000e56ab815800b5a0331f9dab2ec99c6e3cdc8f9d409
+   累積物件數：25
+   無命中（manifest 鏈）
+   --- 交叉檢查：逐一獨立 unbundle ---
+   （獨立解不開，需依 manifest 鏈：GITBUNDLE-s1815--0dd55042-9a09-4d75-bff6-140c7ea92dac-fc749e318b7641396b7ff2afd980fabd44524f8b7b3e2bae13b0300b2475f92e）
+   無命中：GITBUNDLE-s386--0dd55042-9a09-4d75-bff6-140c7ea92dac-2c7304da34ff6022d97346fb1b1eecc90d698e164f8d4b40e63b84c9ebb18025
+   （獨立解不開，需依 manifest 鏈：GITBUNDLE-s468--0dd55042-9a09-4d75-bff6-140c7ea92dac-b4e43374c8d044f2107000e56ab815800b5a0331f9dab2ec99c6e3cdc8f9d409）
+   （獨立解不開，需依 manifest 鏈：GITBUNDLE-s503--0dd55042-9a09-4d75-bff6-140c7ea92dac-a532810016372209b7d2fae6c1ee61e650b387ed27bff864e24595e892369a09）
+   annex 物件以 key（SHA256）確認：
+     （無 annex 物件）
+
+### part=bundlecheck 完成（查驗有效 rc=0）
+
+### part=bundlecheck 完成

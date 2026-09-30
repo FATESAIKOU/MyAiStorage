@@ -1,0 +1,17 @@
+
+### 1) bundle 查驗（只做 bundle 段）
+   bundle 檔數：1
+   manifest：GITMANIFEST--b83f474b-3020-4b4c-8b90-d8c691bfff65
+   --- 依 manifest 順序（共 1 顆）逐顆 unbundle ---
+   ok：GITBUNDLE-s2533--b83f474b-3020-4b4c-8b90-d8c691bfff65-ca288740719759852885cab668a9426d6c24f618ce7ac76285378d65fbb29ec8
+   累積物件數：27
+   命中 canary（manifest 鏈）
+   --- 交叉檢查：逐一獨立 unbundle ---
+   命中 canary：GITBUNDLE-s2533--b83f474b-3020-4b4c-8b90-d8c691bfff65-ca288740719759852885cab668a9426d6c24f618ce7ac76285378d65fbb29ec8
+   annex 物件以 key（SHA256）確認：
+     （無 annex 物件）
+
+### part=bundlecheck 完成（查驗有效 rc=0）
+
+### part=bundlecheck 完成
+rc=0

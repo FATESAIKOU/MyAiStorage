@@ -1,0 +1,4 @@
+=== GITMANIFEST content (committer, after dup folder removed) ===
+GITBUNDLE-s395--4c20f00b-9ec3-4457-b5b3-7f3e0c52d7d6-93a4e2d836810fe76f6e461a4b4ca6e63e9073c1ee79ae428878150603116c8d
+=== .bak variant ===
+GITBUNDLE-s395--4c20f00b-9ec3-4457-b5b3-7f3e0c52d7d6-93a4e2d836810fe76f6e461a4b4ca6e63e9073c1ee79ae428878150603116c8d

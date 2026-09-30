@@ -1,0 +1,822 @@
+# 第 3 組（提交流程，tasks 3.1〜3.11）：模組切分與介面草案（架構師）
+
+依據：design D2（13 步、收件匣處理、workflow 規則）、D3、D4、D10；review-1.2-1.6、review-1.4f2、review-1.4f3、review-1.4f5、review-1.8、review-followups、review-design-writeback、review-g2-close；既有的 `aistorage.schema`、`aistorage.inbox`、`aistorage.identity`、`aistorage.reading`。
+
+這份是**設計草案**：函式簽名與檔案佈局可以直接照做；標了「**PM 決定**」的地方需要先拍板。
+
+---
+
+## 0. 開工前的前置（不是程式）
+
+| # | 事項 | 誰 |
+|---|---|---|
+| P1 | review-g2-close 的 M1：刪掉 `inbox.py` 裡的 `canonical_bytes`、`sign_sidecar`、`verify_sidecar`（舊的內嵌簽章路徑），3.3 只能用 `verify_sidecar_bytes` | impl（5 分鐘） |
+| P2 | 建立 pin repo `MyAiStorage-pin`（private，**空的，不放任何 workflow**），產生一把 deploy key（write），私鑰放進 MyAiStorage 的 Actions secret `PIN_DEPLOY_KEY`，公鑰加到 pin repo | 使用者（PM 提供步驟） |
+| P3 | 整合測試用的 pin repo（例如 `MyAiStorage-pin-test`）與它的 deploy key，放在 `~/.config/aistorage/pin-test.key`（600，只以路徑引用） | 使用者 |
+| P4 | 決定 Claude Code 的 source 名稱：`claude-code` 還是 `claude_code`（`schemas/reading-version.md:19` 與 `reading-version.schema.json:31` 的例子寫 `claude_code`，骨架目錄是 `committer/converters/claude-code/`）。兩者都符合 Session id 的 pattern；建議 `claude-code`，並同步改 2.4 文件的例子 | **PM 決定** |
+| P5 | 2.6 的結論（原始紀錄放 git 還是 annex、`max-git-bundles` 的值）。本草案以 `RawStorage` 抽象處理兩種都可以，不擋開工 | 2.6 |
+
+---
+
+## 1. 套件佈局
+
+```
+src/aistorage/
+  schema.py  inbox.py  identity.py  reading.py        # 既有（第 2 組）
+  errors.py                 # AbortRun、ReadError、MismatchError 等共用例外
+  clock.py                  # Clock protocol（now_utc），測試用 FixedClock
+  drive/
+    __init__.py
+    model.py                # DriveFile dataclass、DriveClient protocol
+    auth.py                 # 從 rclone conf 讀 token、刷新
+    http.py                 # HttpDriveClient（Drive v3 REST，標準庫 urllib）
+    fake.py                 # FakeDrive（in-memory，可注入錯誤）
+  annex/
+    __init__.py
+    manifest.py             # 解析 GITMANIFEST（active／removed）、bundle 名稱
+    replay.py               # 依 manifest 順序 unbundle，算出 refs
+    git.py                  # AnnexGit：clone、ls-remote、add、commit、copy、push（subprocess）
+    fake.py                 # FakeAnnexGit（單元測試用）
+  integrity/
+    __init__.py
+    pin.py                  # PinState、PinPending、PinStore protocol、GitPinStore、MemoryPinStore
+    settle.py               # 結算待定（第 3 步）
+    sweep.py                # 上層同名檢查、清掃計畫（純函式）、套用
+    verify.py               # clone 後核對（第 5 步）、預檢（第 9 步）、push 後驗證（第 10 步）
+    gc.py                   # bundle 回收（第 11 步）、隔離資料夾 7 天清理
+  intake/
+    __init__.py
+    scan.py                 # 掃收件匣、組出 InboxItem、完整性
+    evaluate.py             # 驗章 → authorize → 格式 → 防重放 → dedup → 決策
+    ledger.py               # 處理過的 item_key 清冊（讀寫真本裡的檔）
+  agora/
+    __init__.py
+    layout.py               # 真本 repo 內的路徑規則（純函式）
+    store.py                # AgoraStore：在本機 clone 的工作樹上讀寫
+    apply.py                # 依型態套用：session、handoff、claim、reference、rewrite
+  converters/
+    __init__.py             # CONVERTERS 登錄、get_converter(source)
+    base.py                 # Converter protocol、SessionFacts
+    opencode.py             # 3.5
+    claude_code.py          # 3.6
+  committer/
+    __init__.py
+    config.py               # CommitterConfig（讀 config/committer.json＋環境變數裡的路徑）
+    run.py                  # 13 步的編排、RunReport
+    publish.py              # ReadViewPublisher protocol；第 3 組先放 NullPublisher（第 4 組實作）
+    __main__.py             # CLI：python -m aistorage.committer ...
+  importer/
+    __init__.py
+    __main__.py             # 3.11：python -m aistorage.importer ...
+config/
+  committer.example.json    # 非秘密的 id 與上限（真的 committer.json 在 3.1 建）
+.github/workflows/
+  committer.yml             # 單一 job
+tests/
+  unit/…                    # 每個模組一個 test_*.py（直接 import，不用 skip）
+  unit/data/converters/{opencode,claude-code}/*.{json,jsonl} + *.reading.json   # 自己編的黃金樣本
+  integration/              # pytest -m integration 才跑；設定缺少時要 FAIL，不能 skip
+```
+
+repo 根目錄的舊骨架（`committer/README.md` 與 `committer/converters/{opencode,claude-code}/`、`syncers/`、`search/`、`admin/`，只放 README）：建議在 3.1 把 README 改成「程式在 `src/aistorage/<模組>`」，或者直接移除，避免兩套佈局並存（**PM 決定**）。
+
+---
+
+## 2. Drive 存取層（`aistorage.drive`）
+
+### 2.1 資料模型與介面
+
+```python
+# drive/model.py
+@dataclass(frozen=True)
+class DriveFile:
+    id: str
+    name: str
+    mime_type: str
+    parents: tuple[str, ...]
+    size: int | None                 # 資料夾是 None
+    sha256: str | None               # Drive 的 sha256Checksum（小寫 hex）；缺少時 None
+    md5: str | None
+    created_time: str                # RFC 3339 UTC Z（照原樣保留）
+    modified_time: str
+    trashed: bool
+
+    @property
+    def is_folder(self) -> bool: ...
+
+class DriveClient(Protocol):
+    def list_children(self, folder_id: str) -> list[DriveFile]: ...
+        # 分頁讀完；只回 trashed=false；任何 HTTP 錯誤 raise ReadError（不回部分結果）
+    def find_by_name(self, parent_id: str, name: str) -> list[DriveFile]: ...
+    def get(self, file_id: str) -> DriveFile: ...              # 404 → raise NotFound；其他錯誤 ReadError
+    def download(self, file_id: str, dest: Path, *, max_bytes: int) -> int: ...
+        # 串流寫檔，超過 max_bytes 立即中止並 raise TooLarge；回傳位元組數
+    def download_bytes(self, file_id: str, *, max_bytes: int) -> bytes: ...   # 小檔（manifest、sidecar、sig）用
+    def create(self, parent_id: str, name: str, content: bytes | Path, *, mime_type: str = "application/octet-stream") -> DriveFile: ...
+    def update_content(self, file_id: str, content: bytes | Path) -> DriveFile: ...   # files.update 原地（id 不變）
+    def move(self, file_id: str, *, from_parent: str, to_parent: str) -> DriveFile: ...
+    def delete_permanently(self, file_id: str) -> None: ...     # files.delete（不經垃圾桶）
+```
+
+- 錯誤一律分成三類（`errors.py`）：`NotFound`（404）、`ReadError`（429、5xx、逾時、網路、解析失敗）、`WriteError`。**呼叫端從型別就能分辨「讀不到」與「確實不符」**，這是 review-1.4f3 H1「讀不到就中止、不做移動」的基礎。
+- 不提供「依名稱下載」「依路徑」的操作：所有讀取都以 id 進行（design D5）。`find_by_name` 只用在上層同名檢查與掃描。
+- 自動重試：只在 `HttpDriveClient` 內對 429／5xx 做有上限的指數退避（例如 3 次）；重試用完仍然失敗就 raise `ReadError`，由呼叫端中止這一輪。
+
+### 2.2 憑證
+
+```python
+# drive/auth.py
+class RcloneConfToken:
+    def __init__(self, conf_path: Path, remote: str = "gdrive"): ...
+    def access_token(self) -> str: ...     # 記憶體快取；過期前 60 秒自動刷新
+```
+- 只讀 conf 裡的 `client_id`、`client_secret`、`token.refresh_token`；刷新結果**不寫回檔案**（runner 上的 conf 是暫存複本，這樣做也避免 1.4 的「唯讀 conf 寫不回去」錯誤）。
+- token、client secret 不進 log、例外訊息與 repr（`__repr__` 覆寫成 `<RcloneConfToken remote=gdrive>`）。
+
+### 2.3 Fake
+
+```python
+# drive/fake.py
+class FakeDrive(DriveClient):
+    def __init__(self, clock: Clock): ...
+    def seed_folder(self, name: str, parent: str | None = None) -> str: ...
+    def seed_file(self, parent: str, name: str, content: bytes, *, sha256: str | None = "auto", created_time: str | None = None) -> str: ...
+    def inject(self, op: str, file_id: str | None = None, *, error: type[Exception] = ReadError, times: int = 1) -> None: ...
+        # 例：inject("download", fid) → 下一次 download 這個檔時 raise ReadError
+    def snapshot(self) -> dict: ...       # 讓測試斷言「沒有任何移動」
+```
+- 同名檔、`sha256` 缺少（`sha256=None`）、垃圾桶狀態都要能模擬。
+- 單元測試**一律用 FakeDrive**；`HttpDriveClient` 只在整合測試用。
+- 時間比較規則（N4）：`now_utc()` 只用於顯示與記錄，比較時間一律用 `now()` 或是 `DriveFile.created_at`。`FakeDrive` 生成的時間戳一律透過 `format_rfc3339(self._clock.now(), include_fraction=True)` 輸出帶有小數部分之 RFC 3339 UTC 字串，以杜絕同秒內建立時間與 push 啟動時間的比對誤差。
+
+---
+
+## 3. 完整性機制（3.2）
+
+### 3.1 manifest 與重放（`aistorage.annex`）
+
+> **實證結果（N1）**：經真實 bundle（`docs/spike/evidence/1.3-verify/current.bundle`）驗證，`git bundle list-heads` 輸出之 heads 必定帶有 `refs/namespaces/git-remote-annex/<uuid>/` 前綴；而透過 `annex::` 之 `git ls-remote` 輸出則為標準 clean ref（例如 `refs/heads/main`）。兩者分別透過 `normalize_bundle_heads` 與 `normalize_ls_remote` 正規化為完全相同之 ref 字典以供 pin 比對。
+
+```python
+# annex/manifest.py
+@dataclass(frozen=True)
+class BundleName:
+    name: str; size: int; repo_uuid: str; sha256: str
+def parse_bundle_name(name: str) -> BundleName | None: ...      # GITBUNDLE-s<N>--<uuid>-<sha256>
+
+@dataclass(frozen=True)
+class Manifest:
+    active: tuple[str, ...]      # 依順序
+    removed: frozenset[str]      # '-' 開頭的行（去掉 '-'）
+def parse_manifest(data: bytes, *, repo_uuid: str) -> Manifest: ...
+    # repo_uuid 為必填參數；每一行只能是 bundle 名稱或 '-'＋bundle 名稱；其他內容 raise MismatchError；空 active 也是 MismatchError
+
+def normalize_bundle_heads(raw: dict[str, str], *, repo_uuid: str) -> dict[str, str]: ...
+    # 嚴格剝除 refs/namespaces/git-remote-annex/<repo_uuid>/ 前綴，排除 HEAD 與 peeled ref（^{}）
+
+def normalize_ls_remote(raw: dict[str, str]) -> dict[str, str]: ...
+    # 只接受標準 refs/，若帶有 namespace 前綴直接 raise MismatchError，排除 HEAD 與 peeled ref（^{}）
+
+# annex/replay.py
+def replay_refs(bundle_paths_in_order: list[Path], *, workdir: Path, repo_uuid: str) -> dict[str, str]: ...
+    # 每次在全新暫存 bare repo 依序 git bundle unbundle（結束後銷毀，H2）；
+    # 分塊計算 bundle 檔案 SHA-256 雜湊（N7）；以 git cat-file 驗證 commit 存在性（M4）；
+    # 透過 normalize_bundle_heads 算出 clean refs（N1）；套用環境隔離與逾時（N7）
+
+# annex/git.py
+# SubprocessAnnexGit:
+# - copy 與 push 逾時可設定（預設 900 秒，N2）
+# - clone_for_commit 逾時可設定（預設 600 秒，N2）
+# - 子程序失敗時將 stderr 尾端 4 KiB 寫入 debug/git-<ts>.log，主例外訊息僅附檔名（N6）
+```
+
+### 3.2 釘選值與 pin repo（`integrity/pin.py`）
+
+pin repo 裡的檔案（**以 repo 名稱分檔**，所以同一個 pin repo 可以放不只一個實體的釘選值）：
+```
+.pin/agora.json            # 正式
+.pin/agora.pending.json    # 待定（沒有就不存在）
+.pin/agora.keys            # 正式的 annex key 集合，一行一個、排序（避免 agora.json 過大）
+.pin/agora.pending.keys
+```
+
+```python
+@dataclass(frozen=True)
+class PinState:                       # 正式
+    repo: str                         # "agora"
+    repo_uuid: str
+    refs: dict[str, str]              # 全部 ref（集合要完全相同）
+    manifest_sha256: str
+    prev_manifest_sha256: str | None  # .bak 的合法值之一
+    active_bundles: tuple[str, ...]
+    removed_bundles: frozenset[str]
+    annex_keys: frozenset[str]
+    promoted_at: str
+    run_id: str
+
+@dataclass(frozen=True)
+class PinPending:
+    repo: str
+    base_manifest_sha256: str         # 寫待定時的正式 manifest 雜湊（用來確認基準沒變）
+    refs: dict[str, str]              # 即將 push 的 refs
+    annex_keys: frozenset[str]        # push 之後 git-annex 分支上這個 remote 會有的 key 集合（本機算得出來）
+    written_at: str
+    run_id: str
+
+class PinStore(Protocol):
+    def load(self, repo: str) -> tuple[PinState, PinPending | None]: ...   # 讀不到 → ReadError（中止）
+    def write_pending(self, pending: PinPending) -> None: ...
+    def promote(self, state: PinState) -> None: ...          # 寫正式並刪除待定（同一個 commit）
+    def drop_pending(self, repo: str) -> None: ...
+
+class GitPinStore(PinStore):
+    def __init__(self, ssh_url: str, key_path: Path, known_hosts_path: Path, workdir: Path): ...
+    # GIT_SSH_COMMAND="ssh -i <key> -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=<known_hosts>"
+    # known_hosts 放 repo 裡固定的 github.com 主機金鑰（不要 accept-new）
+    # 每次寫入：fetch → 以 pin repo 的 HEAD 為基底 commit → push；non-fast-forward 就中止（同一時間只會有一個提交流程）
+class MemoryPinStore(PinStore): ...   # 單元測試用
+```
+- **只有 `committer/run.py` 會呼叫寫入方法**，而且傳入的值一律是 run 自己觀測或本機算出的結果；CLI 沒有「手動寫 pin」的子命令（design D2：不得有可觸發、可輸入的寫入路徑）。管理者重建 pin 是另一個只在 Mac 執行的管理工具（第 6 組），不放在這個套件的 CLI 裡。
+- 首次初始化：`python -m aistorage.committer init-pin --dry-run` 印出「從目前遠端觀測到的狀態會寫成什麼」；真正寫入需要 `--confirm`，只能在 Mac 上用管理者的 deploy key 執行（workflow 裡沒有這個步驟）。
+
+### 3.3 結算待定（第 3 步，`integrity/settle.py`）
+
+```python
+@dataclass(frozen=True)
+class RepoListing:                    # 一次列舉的結果（第 3、4 步共用）
+    prefix_folder_id: str
+    files: tuple[DriveFile, ...]      # 前綴資料夾的直接子項
+    subfolders: tuple[DriveFile, ...]
+
+class SettleOutcome(Enum):
+    NO_PENDING = "no_pending"
+    PROMOTED = "promoted"             # 遠端＝待定 → 轉正
+    DROPPED = "dropped"               # 遠端＝正式 → 丟棄待定
+    BAK_RECOVERY = "bak_recovery"     # 主 manifest 不在、.bak＝正式 → 丟棄待定，照常往下
+
+def settle(state: PinState, pending: PinPending | None, listing: RepoListing,
+           drive: DriveClient, *, workdir: Path, clock: Clock) -> tuple[SettleOutcome, PinState]:
+    # 全程唯讀，不做任何移動。
+    # 1. 候選 manifest：名稱是 GITMANIFEST--<uuid> 的檔（可能有多個同名）；逐一 download_bytes（上限 1 MiB）
+    # 2. 對每個候選：parse_manifest → active 的每個 bundle 在 listing 裡找「名稱相符且 sha256Checksum 等於名稱內嵌值」的檔
+    #    → 依序下載（上限：單一 bundle 256 MiB）→ replay_refs
+    # 3. 判定：
+    #    - 有候選的 refs == pending.refs，而且沒有第二個「內容不同但也相符」的候選 → PROMOTED
+    #      新 PinState：refs、manifest_sha256＝該候選的雜湊、prev＝舊的 manifest_sha256、
+    #      active／removed＝該候選的解析結果、annex_keys＝pending.annex_keys
+    #    - 有候選的 refs == state.refs 而且雜湊 == state.manifest_sha256 → DROPPED
+    #    - 沒有主 manifest、.bak 的內容雜湊 == state.manifest_sha256、.bak 重放出的 refs == state.refs → BAK_RECOVERY
+    #    - 其他 → raise MismatchError（中止）
+    # 4. 任何下載或列舉的 ReadError → 原樣往上拋（中止，不猜）
+```
+- 沒有待定時，仍然要做「refs 是否等於正式」的核對，但那一步放在第 5 步（clone 之後），這裡直接回 `NO_PENDING`。
+- 注意：**不存在**「信任任何能重放的 manifest」的模式（review-1.4f3 M2）；可信的依據只有 `state` 與 `pending`。
+- **丟掉 pending 前要重新列舉**（impl1）：`DROPPED`／`BAK_RECOVERY` 會丟掉 pending，
+  而「這一輪 push 之後遠端會變成什麼」只有 pending 記著。步驟 2 要下載並重放
+  bundle（數十秒），這段期間別的輪次可能已經把 push 落實——impl1 現場就是這樣
+  把 pending 丟掉、遠端從此沒有人負責。所以這兩個結論在丟東西之前重新列舉一次，
+  前綴有變動就重做整段判斷（最多 `_MAX_RECHECK = 2` 次）。
+- **用完重查上限、前綴仍在變動 → 中止這一輪並保留 pending**（review-1926cd3 M2，
+  fail-closed）。舊行為是第三次不論清單是否還在變動都回傳 `DROPPED`，等於「用完
+  上限」就照舊丟掉 pending，方向和「主 manifest 缺失」那條路（raise）相反。
+- **指紋只算與結論有關的檔案**（review-1926cd3 M2）：主 manifest、`.bak`、
+  pending 與正式值引用的 bundle。舊的指紋涵蓋前綴裡所有檔案，住民只要在重查
+  期間持續放垃圾檔就能讓每次重查都「有變動」、必定用完上限——上限等於沒有。
+
+### 3.4 上層同名檢查與清掃（第 4 步，`integrity/sweep.py`）
+
+```python
+@dataclass(frozen=True)
+class PrefixLevel:
+    parent_id: str; name: str; expected_id: str
+
+def check_parents(levels: list[PrefixLevel], drive: DriveClient) -> list[DriveFile]:
+    # 回傳要隔離的同名資料夾；expected_id 不在清單裡 → MismatchError；讀取錯誤 → ReadError
+
+class Disposition(Enum):
+    KEEP = "keep"
+    QUARANTINE = "quarantine"
+    GC = "gc"                         # 在 removed_bundles 裡：第 3 步不動，第 11 步永久刪除
+    NEED_CONTENT_CHECK = "need_content_check"   # sha256Checksum 缺少：要下載驗證一次
+    NEED_MANIFEST_CHECK = "need_manifest_check" # 沒有 KEEP 候選時：要讀 manifest 內容才能判斷
+    HOLD = "hold"                     # 有背書（pending）且未逾齡：不動，等釘選值轉正
+    NEED_ADMIN = "need_admin"         # 沒有任何背書、也沒有「是注入物」的證據：不動，列入健康檢查
+
+@dataclass(frozen=True)
+class SweepPolicy:
+    pending: PinPending | None = None      # 唯一可信的「即將發生」紀錄（push 之前寫下來）
+    hold_max_age_days: int | None = None   # HOLD 的年齡上限（quarantine_retention_days）；None = 不設上限
+    now: datetime | None = None            # 算年齡用的時鐘
+
+@dataclass(frozen=True)
+class SweepDecision:
+    file: DriveFile; disposition: Disposition; reason: str; from_parent: str = ""
+
+def plan_sweep(listing: RepoListing, state: PinState, *, repo_uuid: str,
+               manifest_verdicts=None, backed_bundles=None, policy: SweepPolicy | None = None,
+               ) -> list[SweepDecision]:
+    # 純函式，不碰網路。規則（design D2、review-1.4f3 H2/H3、review-1.4f5 H1、
+    #                     review-1926cd3-142fd04 H1／M1、review-903d7e2 H1／M1／L）：
+    # - 非 .bak 的 GITMANIFEST：sha256 == state.manifest_sha256 → KEEP 一個；
+    #   == prev_manifest_sha256 → QUARANTINE（退位版本冒充）
+    #   **已經有一份 KEEP 候選時，內容不同的其餘同名主 manifest 一律 QUARANTINE
+    #     （不讀內容）**；沒有任何 KEEP 候選時才標 NEED_MANIFEST_CHECK，讀內容（見下）
+    # - **同名重複檔的去留用 createdTime（`dedup_rank`，同時間以 file id 決勝）**：
+    #     bundle／annex 物件、以及偏離期間「新世代」的主 manifest → 留建立最早的，
+    #     其餘隔離（這些檔案一個世代只上傳一次，住民要複製一定比較晚）
+    #   **例外：位元組等於正式值的 manifest／.bak 重複一律不搬**（建立最早的 KEEP、
+    #     其餘 NEED_ADMIN 並附時間戳）。rclone 每輪 push 都重寫 manifest、file id 會變，
+    #     所以 createdTime 判不出真身；而且健康前綴本來就可能有兩份同名同內容
+    #     （同一輪 push 內 Drive 列表落後，1.75.1 與 1.69.3 都實測到），
+    #     push 與 clone 在那種狀態下都正常。對應的，`verify_clone`／`precheck`／
+    #     `verify_after_push`／`init-pin` 判的是「只有一種內容」而不是「恰好一個檔」
+    # - .bak：sha256 ∈ {state.manifest_sha256, state.prev_manifest_sha256} 的保留一個；
+    #   已有 KEEP 候選時其餘同名 .bak 一律 QUARANTINE；否則 NEED_MANIFEST_CHECK
+    # - GITBUNDLE：名稱 ∈ active 而且 sha256 == 名稱內嵌的雜湊、size 相符 → KEEP（同內容重複的只留建立最早的一個）
+    #             名稱 ∈ removed → GC
+    #             檔名宣告與內容不符 → QUARANTINE（證據：檔名在騙人）
+    #             其餘（自洽但不在釘選值裡）→ 被候選 manifest 列為 active 就跟著那份 manifest
+    #               （HOLD／NEED_ADMIN）；否則在前綴與釘選值一致時 QUARANTINE，
+    #               釘選值對前綴沒有權威時 NEED_ADMIN（見下）
+    # - annex 物件（SHA256E-s<N>--<sha>…）：key ∈ state.annex_keys 而且 sha256Checksum 相符且 size 相符 → KEEP；
+    #   key ∈ pending.annex_keys 且自洽 → HOLD；其餘同上（有背書 → HOLD，釘選值有權威 → QUARANTINE，否則 NEED_ADMIN）
+    # - sha256 或 size 缺失的檔 → NEED_CONTENT_CHECK（由 apply 前的步驟下載驗證，再重新判定）
+    # - 子資料夾 → QUARANTINE（整個子樹；layout 是平的）
+    # - 其他名稱 → QUARANTINE
+    # - **HOLD 只給有背書的檔案，而且有年齡上限**：超過（`quarantine_retention_days`）
+    #   就升級成 NEED_ADMIN 並標成「可能是真本」（逾齡的 pending 卡了一週，自動隔離
+    #   正是 impl1 弄壞真本的那一步），仍列入健康檢查
+    # - **「自洽不等於被背書就隔離」只在釘選值與前綴一致時適用**（前綴裡有內容等於
+    #   正式值的那份主 manifest）。沒有的話釘選值對這個前綴沒有權威，「不在釘選值
+    #   裡」不足以指認注入物——那會搬走「遠端領先釘選值、pending 又不見」時真正的新
+    #   世代物件（impl1 終局）。這種檔案一律 NEED_ADMIN：不搬移、列入健康檢查；
+    #   釘選值追上（settle 轉正或 init-pin）之後下一輪就會被正常隔離。
+    #   **但 createdTime 仍然是指認注入物的證據**：建立時間晚於前綴裡主 manifest
+    #   最後一次寫入的 bundle／物件不屬於任何一個世代（正常流程先上傳物件與 bundle、
+    #   最後才重寫 manifest），照樣隔離（留 `INJECTION_SKEW_GRACE` 的時鐘誤差）
+
+def resolve_manifest_evidence(decisions, drive, cache, state, *, repo_uuid, listing=None,
+                              prefix_folder_id=None, workdir=None, policy: SweepPolicy | None = None,
+                              ) -> list[SweepDecision]: ...
+    # 只處理 NEED_MANIFEST_CHECK（也就是前綴裡沒有 KEEP 候選時）。兩層證據：
+    # 1. 內容能 parse_manifest(repo_uuid=…) 且它列的每個 active bundle 都在前綴裡、雜湊相符
+    #    → 否則有「是注入物」的證據 → QUARANTINE
+    # 2. 有 pending：把候選 manifest 的 active bundle 實際下載並重放（與 settle 同一套
+    #    _download_and_replay），refs == pending.refs 才算真的 → HOLD（它列為 active 的
+    #    bundle 一併被背書，經 backed_bundles 帶回 plan_sweep）
+    #    refs 對不上、或沒有 pending、或重放出錯但沒有證據 → NEED_ADMIN（不搬移、不無限期 HOLD）
+
+def resolve_content_checks(decisions, drive, cache: ChecksumCache) -> list[SweepDecision]: ...
+    # 下載 NEED_CONTENT_CHECK 的檔算 sha256，寫進 cache（存在真本的 _committer/checksums.json），替換回完整 listing 重新整份判定
+
+def apply_sweep(decisions: list[SweepDecision], drive: DriveClient, *, quarantine_folder_id: str,
+                clock: Clock | None = None, prefix_folder_id: str | None = None, dry_run: bool = False) -> int:
+    # 只執行 QUARANTINE 的移動；移至日期子資料夾 quarantine/<YYYY-MM-DD>/（按日分層，保留 7 天救回窗口，review-g3c H3）；
+    # 逐項使用各自的 from_parent 搬移（M7）；任何一次 WriteError → raise AbortRun（這一輪中止）；回傳移動的數量
+```
+- **順序保證**：`plan_sweep` 先完整算完，才開始移動；只要計畫階段有任何 `ReadError`，就一個檔都不動。
+- 讀取視圖資料夾也用同一套：讀取視圖的可信集合是「讀取視圖 manifest 列出的 file id」（第 4 組定義），第 3 組先只清掃 repo 資料夾，介面預留 `plan_readview_sweep(listing, state)`；提交流程 `run.py` 第 4 步必須同時呼叫 `plan_readview_sweep`（或於 `run_settle_and_sweep` 傳入 `readview_listing`）。
+
+### 3.5 核對、預檢、push 後驗證（`integrity/verify.py`）
+
+```python
+def verify_clone(git: AnnexGit, state: PinState, *, drive: DriveClient, prefix_folder_id: str) -> None:
+    # 第 5 步：git.ls_remote() 的 ref 集合與值 == state.refs；遠端主 manifest（以 find_by_name
+    #          找、只允許恰好一個）的 sha256Checksum == state.manifest_sha256；否則 MismatchError
+
+def verify_pin_keys_on_drive(drive, prefix_folder_id, state, *, repo_listing=None) -> None:
+    # 釘選值記載的每個 annex 物件，Drive 上都要有「同名」且 checksum＋size 相符的檔案。
+    # 兩個要點（review-cdb4a34 M3）：
+    #   1. Drive 允許同名檔，所以是「**任一**同名檔的 checksum＋size 相符就算存在」，
+    #      不是「取其中一個」（後者會被同名注入檔打中，讓每一輪都中止）。
+    #   2. `repo_listing` 必須是**第 4 步 sweep 之後**重新列舉的前綴：sweep 之前的
+    #      listing 還含著剛被隔離的同名注入檔。
+
+def precheck(drive: DriveClient, prefix_folder_id: str, manifest_name: str, state: PinState) -> None:
+    # 第 9 步：只查名稱符合的檔（find_by_name）；恰好一個、sha256 == state.manifest_sha256；否則中止
+
+@dataclass(frozen=True)
+class PushVerification:
+    new_manifest_sha256: str; active: tuple[str, ...]; removed: frozenset[str]
+
+def verify_after_push(git: AnnexGit, drive: DriveClient, listing_before: RepoListing,
+                      state: PinState, local_refs: dict[str, str], push_started_at: str) -> PushVerification:
+    # 第 10 步（review-1.2-1.6 H3、review-1.4f3 M1、review-g3c M5）：
+    # 1. ls_remote == local_refs（全部 ref）
+    # 2. 重新列舉，主 manifest 恰好一個；解析
+    # 3. 連續性檢查（removed ⊇ state.removed, newly_removed ⊆ state.active, 舊 active 不得消失）
+    # 4. active 裡不在 state.active_bundles 的 bundle，其 created_at ≥ push_started_at（時間比較），而且 listing_before 裡沒有同名檔
+    # 5. 下載新增的 bundle，連同既有的 active 依序重放，refs == local_refs
+    # 任何一條不符 → MismatchError（待定留著，下一輪由 settle 判定）
+```
+
+### 3.6 回收與隔離清理（`integrity/gc.py`）
+
+```python
+def collect_removed_bundles(listing: RepoListing, state: PinState) -> list[DriveFile]: ...
+def gc_removed(files: list[DriveFile], drive: DriveClient, *, prefix_folder_id: str, state: PinState, max_delete: int = 200, dry_run: bool = False) -> int:
+    # 第 11 步：永久刪除前，逐一 get() 確認 parents 包含 prefix_folder_id、名稱 ∈ state.removed_bundles（防呆，review-1.3c M1）
+    # 依名稱排序確保確定性；盡力而為捕捉 ReadError/WriteError/NotFound 不中止整輪（M6）
+def purge_quarantine(drive: DriveClient, quarantine_folder_id: str, *, older_than_days: int = 7, now: str | datetime, max_delete: int = 200, dry_run: bool = False) -> int: ...
+    # 依日期子資料夾名稱（YYYY-MM-DD）或 created_at 判定是否超過指定天數，整批刪除；單輪設上限（預設 200）；盡力而為（H3, M6）
+```
+- 依 design D2「第 11 步回收」：用**新的**正式釘選值的 removed 清單。第一次回收（大量舊 bundle）要設上限，例如每一輪最多刪 200 個，其餘留到下一輪，避免單一輪超時。
+
+---
+
+## 4. 收件匣處理（3.3、3.4，`aistorage.intake`）
+
+### 4.1 掃描
+
+```python
+# intake/scan.py
+@dataclass(frozen=True)
+class InboxItem:
+    item_key: str
+    inbox_folder_id: str
+    sidecar: DriveFile | None
+    sig: DriveFile | None
+    raw: DriveFile | None
+    extras: tuple[DriveFile, ...]    # 名稱不符合格式的檔（不算項目；24 小時後當孤兒清掉）
+
+def scan_inboxes(drive: DriveClient, registry: Registry) -> list[InboxItem]:
+    # registry.inbox_folders() 的每個資料夾；檔名依 <ULID>.(raw|sidecar.json|sig) 分組
+def is_actionable(item: InboxItem) -> bool: ...
+    # 有 sig 與 sidecar → True（raw 的需要與否在讀 sidecar 之後判定）
+def count_shaped(items: list[InboxItem]) -> int: ...
+    # 第 2 步用：只算「形狀符合」（有 sig 與 sidecar）的項目數，0 就結束（review-1.8 L4）
+```
+- 第 2 步在**安裝 git-annex 之前**跑（workflow 裡是獨立的 step，見第 7 節），只需要 `drive` 與登錄檔。
+
+### 4.2 評估（驗章 → authorize → 格式 → 防重放 → dedup）
+
+```python
+# intake/evaluate.py
+class DecisionKind(Enum):
+    ACCEPT = "accept"; REJECT = "reject"; DEFER = "defer"; ALREADY = "already"   # ALREADY：已經收過，只需刪除
+
+@dataclass(frozen=True)
+class Decision:
+    kind: DecisionKind
+    item: InboxItem
+    code: str                        # 例：bad_signature、unauthorized、stale、collision、orphan、raw_mismatch、artifact_not_supported、rewrite_not_supported
+    producer: str | None = None
+    record_metadata: dict | None = None
+    sidecar: dict | None = None
+    raw_path: Path | None = None
+
+def evaluate(item: InboxItem, *, drive: DriveClient, registry: Registry, store: AgoraStore,
+             ledger: Ledger, clock: Clock, workdir: Path, max_raw: int) -> Decision:
+    # 1. 缺 sig：raw 或 sidecar 的 created_time 超過 24 小時 → REJECT(orphan)；否則 DEFER
+    # 2. sidecar_bytes = download_bytes(sidecar, max_bytes=1 MiB)；sig = json(download_bytes(sig, 4 KiB))
+    # 3. folder_profile = registry.inbox_folders()[item.inbox_folder_id]
+    #    key_id = verify_sidecar_bytes(sidecar_bytes, sig, registry.active_public_keys(folder_profile))；None → REJECT(bad_signature)
+    #    （只用「這個收件匣所屬 profile」的金鑰驗章：放錯收件匣的項目直接失敗，不需要新增全域金鑰查詢）
+    # 4. sidecar = strict_json(sidecar_bytes)（object_pairs_hook 拒絕重複 key）
+    #    errs = validate_sidecar(sidecar, expected_item_key=item.item_key)；有錯 → REJECT(invalid_format)
+    # 5. sidecar["profile"] != folder_profile → REJECT(unauthorized)
+    #    producer, why = registry.authorize(sidecar, key_id)；None → REJECT(unauthorized)
+    # 6. ledger.contains(item.item_key)：同一個 raw sha → ALREADY；不同 → REJECT(replayed_item_key)
+    # 7. 需要 raw：raw.size（Drive metadata）> max_raw → REJECT(too_large)（先看 metadata，不下載）
+    #    下載到 workdir 後 check_raw(sidecar, file)；有錯 → REJECT(raw_mismatch)
+    # 8. session：snapshot_at = min(sidecar.session.snapshot_at, sidecar 檔的 created_time)（D4 的上限）
+    # 9. record = stamp_record(sidecar["metadata"], producer=producer)（見下）；
+    #    existing = store.get_record(record["id"])；classify_id(existing, record)：collision → REJECT(collision)
+    # 10. 單調性（防重放，review-2.2 H3）：
+    #     session：existing 的 raw_sha256 == 這次的 → ALREADY（3.4 dedup）；snapshot_at ≤ existing 的 → REJECT(stale)
+    #     reference：read_snapshot_at ≤ existing 的 → REJECT(stale)
+    #     其他：updated_at ≤ existing 的，而且內容相同 → ALREADY；更舊 → REJECT(stale)
+    # 11. artifact → REJECT(artifact_not_supported)（ADR 0009：產出登錄不再經過 Agora 的收件匣；
+    #     明確拒收而不是 DEFER——DEFER 會讓項目永遠留在收件匣裡、每一輪都變成非空輪）
+    # 12. 否則 ACCEPT
+
+def stamp_record(inbox_metadata: dict, *, producer: str) -> dict:
+    # 唯一的蓋章入口（review-2.1 L2）：strip_claimed_producer → 設 producer → 補 case_id/provenance 為 null
+    # → validate_record_metadata；不通過 → raise（程式錯誤，不是輸入錯誤）
+    # committed_at 在 commit 前才補（run.py）
+```
+
+### 4.3 處理過的 item_key 清冊
+
+```python
+# intake/ledger.py
+class Ledger:
+    def __init__(self, store: AgoraStore): ...
+    def contains(self, item_key: str) -> LedgerEntry | None: ...
+    def record(self, item_key: str, *, item_id: str, decision: str, raw_sha256: str | None, at: str) -> None: ...
+```
+- 存放位置：真本 repo 的 `_committer/ledger/<YYYY-MM>.jsonl`（一行一筆，只有 id、雜湊、代碼、時間，**不含內容**）。查詢時載入最近 N 個月（建議 3）；更早的由單調性檢查兜底（item_key 本身帶時間，ULID 早於 N 個月的直接 REJECT(too_old)）。
+- REJECT 也記進清冊（附代碼），這樣同一個 item_key 重新上傳不會被重複評估。
+
+### 4.4 分派順序
+
+同一輪 ACCEPT 的項目依下面的順序套用（design D2「先收原始紀錄、再收交接單與認領」）：
+`session`（依 snapshot_at 由舊到新，以 datetime 比較）→ `rewrite` → `handoff` → `claim` → `reference`。
+套用失敗（例如交接單的接續點不存在）轉成 REJECT，**不影響同一輪其他項目**；但任何 I/O 錯誤都中止整輪。
+
+**注意（review-g3d M6）**：`evaluate` 僅與真本已提交之狀態比較。同一輪內若包含同一 Session 的多份快照或同一對的參考，均會各自 ACCEPT；`apply_*` 必須以本輪已套用的狀態重新檢查單調性（草案 6.2 再次防護），這是 apply 的責任。
+
+---
+
+## 5. 轉換器（3.5、3.6，`aistorage.converters`）
+
+```python
+# converters/base.py
+@dataclass(frozen=True)
+class SessionFacts:
+    title: str | None
+    created_at: str | None
+    updated_at: str | None
+    message_ids: tuple[str, ...]          # 閱讀版的順序
+    archived_at: str | None               # opencode 的 time.archived（>0 才有值）
+    last_message_at: str | None           # 3.9：判斷「封存之後有沒有新訊息」
+    in_progress: bool
+
+class Converter(Protocol):
+    source: str                                            # "opencode" | "claude-code"（P4）
+    def facts(self, raw_path: Path) -> SessionFacts: ...
+    def convert(self, raw_path: Path, *, session_id: str, snapshot_sha256: str,
+                parent_id: str | None) -> dict: ...        # 回傳閱讀版 v1；結果必須通過 validate_reading
+    def child_session_ids(self, raw_path: Path) -> tuple[str, ...]: ...   # 子代理（task／sidechain）
+
+# converters/__init__.py
+CONVERTERS: dict[str, Converter]
+def get_converter(source: str) -> Converter: ...           # 不認得 → KeyError（evaluate 轉成 REJECT(unknown_source)）
+```
+- **純函式**：不碰網路、不碰 git，只讀本機檔案。這讓 3.5、3.6 可以跟其他模組完全並行開發。
+- 依 `schemas/reading-version.md` 的轉換對應表實作；摘要截斷以 code point 計（4,000，含「…」）。
+- opencode 的 `info.revert` → 指標之後的訊息 `reverted: true`；Claude Code 沿最新的葉節點展開，其他分支標 `reverted: true`；依 `tool_use_id` 配對組成 `tool_call`。
+- 轉換器的輸出**不進真本 repo**（見第 6 節），只在第 7 步用來做檢查（接續點、改寫的位置）與之後的讀取視圖。
+
+---
+
+## 6. Agora 真本資料模型（3.7〜3.10）
+
+### 6.1 repo 內佈局（`agora/layout.py`）
+
+```
+sessions/<source>/<enc(source_session_id)>/
+  meta.json            # 真本 metadata（2.1 record）＋ session 欄位（見下）
+  raw                  # 原始紀錄本體（git 或 annex 由 2.6 決定；路徑固定，不帶副檔名）
+  snapshots.jsonl      # 每次收進的快照一行：{snapshot_sha256, snapshot_at, raw_size, item_key, committed_at,
+                       #   git_blob（raw 在 git 時）或 annex_key（raw 在 annex 時）}
+handoffs/<ULID>.json   # 交接單：真本 metadata＋body＋{claimed_by: {claim_id, session_id, at} | null}
+                     # claimed_by 是提交流程寫入的狀態（review-g3e L）：寫入者只提供 metadata＋body；
+                     # 第 4 組發佈時區分「寫入者的內容」與「提交流程的狀態」
+references/<ULID>.json # 參考紀錄真本（M5）：完整 metadata＋body，依 id 查找與分類
+links/continuation/<enc(new_session_id)>/<handoff ULID>.json   # 接續 Link：from、to、continuation、handoff_id、claim_id
+links/reference/<enc(from_session_id)>/<enc(to_session_id)>.json  # 參考索引：記錄生效中 reference id 與 read_snapshot_at
+claims/<ULID>.json     # 認領的真本紀錄（metadata＋body＋結果）
+rewrites/<ULID>.json   # 改寫提案的真本紀錄：metadata＋body＋{applied_snapshot_sha256}
+_committer/
+  ledger/<YYYY-MM>.jsonl
+  rejections/<item_key>.json     # {code, at, item_id?}；不含內容；第 4 組發佈到讀取視圖
+  checksums.json                 # sha256Checksum 缺少時的下載驗證結果（file id → sha256）
+  schema_version                 # "agora/v1"
+```
+- `enc()` 使用 `urllib.parse.quote(s, safe="-_")`；依 RFC 3986 未保留字元預設不編碼小數點，防止路徑穿越係透過明確檢查拒絕 `.` 與 `..`，保證路徑安全、可逆；**冒號不會出現在路徑裡**。
+- session 的 `meta.json` 額外欄位：`status`、`stopped_at`、`snapshot_at`、`raw_sha256`、`raw_size`、`parent_id`、`in_progress`、`archived_at`、`committed_at`、`last_item_key`、`title`，以及轉換狀態欄位（R9，供 3.7 apply 與第 4 組讀取視圖依循）：`reading_status: "ok" | "failed"`、`reading_error_code: str | None`（`"facts_error"`、`"conversion_error"` 二選一）、`reading_error_message` 恆為 null（review-g3e M6：轉換錯誤訊息可能含原始內容，只存代碼；完整訊息只進 run 的除錯檔）。
+  `status` 除了 `"running"`／`"stopped"` 還有 **`"reserved"`**（review-2bc0785 M2）：`agora checkout` 預留出來、還沒有人真正開工的新 Session。預留另外帶 `reserved_by`（建立它的那個項目 id）與 `reserved_until`（期限）；有人送來第一份真實快照時（`apply_session`）這兩個欄位與 `reserved` 狀態都消失。**期 1 不會自動刪除過期的預留**——那是管理操作。
+- `stopped_at` 的來源（review-g3e L）：新停止時取 sidecar 的 `stopped_at`（同步器觀測），缺省時取提交時鐘；已停止的 Session 再收封存快照時沿用原本的 `stopped_at`。
+- **閱讀版不放在真本**（它是衍生物，design D5）。需要某個舊快照的閱讀版時（接續、第 4 組），用 `snapshots.jsonl` 找到 `git_blob` 或 `annex_key` 取出那一份 raw，再跑轉換器。這也讓「從被釘住的快照讀」（D10）有明確的實作路徑。
+- commit 訊息只寫計數與 item_key（不寫標題或內容，design D2 的 log 規則同樣適用於 git 歷史）。
+
+### 6.2 `AgoraStore` 與套用
+
+```python
+# agora/store.py
+class AgoraStore:
+    def __init__(self, worktree: Path, raw_storage: RawStorage): ...
+    def get_record(self, item_id: str) -> dict | None: ...
+    def get_session(self, session_id: str) -> SessionRecord | None: ...
+    def snapshots(self, session_id: str) -> list[SnapshotEntry]: ...
+    def raw_path_for_snapshot(self, session_id: str, snapshot_sha256: str) -> Path: ...   # 取出舊版 raw 到暫存
+    def put_session(self, rec: SessionRecord, raw_src: Path) -> None: ...
+    def put_json(self, relpath: str, obj: dict) -> None: ...     # 固定格式：sort_keys、indent=2、結尾換行
+    def changed_paths(self) -> list[str]: ...
+
+class RawStorage(Protocol):                     # 2.6 的決定落在這裡
+    def store(self, worktree_path: Path, src: Path) -> str: ...        # 回傳 git_blob 或 annex_key
+    def retrieve(self, ref: str, dest: Path) -> None: ...
+# GitRawStorage（git add）與 AnnexRawStorage（git annex add，largefiles=anything）兩種實作
+
+# agora/apply.py —— 全部回傳 ApplyResult(ok, code, paths, rejected_at, deletable_after)。
+# 通則（review-g3e）：
+# - 兩階段（H1）：先完成所有檢查（形狀、單調性、持有者、路徑計算、所需檔案讀取），
+#   確定可套用後才寫入；寫入階段不再有「失敗 → REJECT」分支，錯誤一律往上拋、整輪中止。
+# - clock 一律必填（M4）：committed_at 與拒收記錄的 at 只用提交時鐘，不用寫入者宣告的值。
+# - 真本／I/O 錯誤不轉 REJECT（M3）：raw 取出失敗、索引損毀、put_session 的驗證失敗一律往上拋。
+# - 轉換失敗照收（H2、PM 決定）：facts() 失敗時沿用現有值（無則 running／None／sidecar 的
+#   in_progress）並記 reading_status="failed"、code="facts_error"；convert() 失敗記
+#   code="conversion_error"；raw 一律收進真本。
+def apply_session(store, dec: Decision, conv: Converter, clock: Clock) -> ApplyResult: ...
+    # 寫 raw、追加 snapshots.jsonl、更新 meta.json；3.9：
+    #   facts.archived_ms 且 last_message_ms ≤ archived_ms → status=stopped；
+    #   stopped_at：新停止取 sidecar 的 stopped_at（缺省取提交時鐘），已停止沿用原本的值；
+    #   否則 running（封存之後又有新訊息 → 回到運作中）
+    # 子 Session：meta.json 記 parent_id（來自 sidecar）
+def apply_rewrite(store, dec, conv, clock) -> ApplyResult: ...
+    # 期 1 不提供改寫（PM 決定）：一律 REJECT(rewrite_not_supported)，真本不動。
+    # 來源端自己的刪改走 apply_session（新版本），不走這裡。
+def apply_handoff(store, dec, conv, clock) -> ApplyResult: ...
+    # 只有目標 Session 的持有者能寫（rec.producer == target.producer，否則 not_holder）；
+    # 目標不存在 → unknown_target；
+    # continuation.snapshot_sha256 必須在 target 的 snapshots（含這一輪剛收的）裡；取出那份 raw，
+    # 依 target 的 source 取轉換器（與傳入的不同時向登錄查詢）→ convert →
+    # reading.check_continuation，且必須是該快照最後一則已完成的訊息（M5）；
+    # 不通過 → REJECT(invalid_continuation)
+def apply_claim(store, dec, clock, *, max_open_reservations=20) -> ApplyResult: ...
+    # 交接單存在、claimed_by 是 null（同輪第二人 → already_claimed）、claimer 在 Agora
+    # （或這一輪剛收，否則 unknown_claimer）→ 寫 link、設 claimed_by、寫 claim；
+    # H3：claimer 的持有者須與認領單 producer 相同（否則 not_holder）、須是主 Session
+    # （parent_id 非空 → claim_from_subsession）、不能是交接單的目標本身（→ self_claim）；
+    # 被接續的目標（交接單的 target）也須是主 Session（否則 continuation_to_subsession）、
+    # 須存在（否則 unknown_target）；
+    # M1：同一個新 session 對同一個被接續 session 只能一條 Link——與 apply_continuation
+    # 共用同一個檢查；既有那條是 claim 建的（不論接續點是否相同）→ duplicate_link；
+    # M2：這個 profile 的**未結預留**（`status=reserved`、沒有後續快照、而且**還沒過
+    #   `reserved_until`**）達上限 → link_quota_exceeded，訊息（`detail`）要列出是哪些
+    #   預留佔住額度。只有這次真的會預留一個新 session 才佔額度；冪等重送提早
+    #   回傳也不佔額度。數量**直接從真本算**（掃 sessions/*/*/meta.json），跨輪累計、
+    #   不留任何程式內帳本（review-1926cd3-142fd04 M3：每輪歸零只是限速）。
+    #   過期的預留**仍然存在、仍然被顯示、仍然等人清理**，只是不佔額度
+    #   （review-55edd374 M3：否則放棄太多次 checkout 的 profile 會被自己的殘留
+    #   永久鎖住）。期限讀不到時一律當作還沒過期（fail-closed）。
+    #   **run.py 要把設定值傳進來**：
+    #   `max_open_reservations=rcfg.max_open_reservations_per_profile`（只接受正整數）；
+    # 否則 REJECT(unknown_handoff / already_claimed / unknown_claimer / not_holder /
+    #            claim_from_subsession / self_claim / unknown_target /
+    #            continuation_to_subsession / duplicate_link / link_quota_exceeded)
+    # 建接續 Link（方向：claimer → target）；寫入順序 link → handoff → claim，
+    # 中斷後重跑可補齊（claimed_by 指向自己但 claim 未寫時繼續完成）。
+def apply_continuation(store, dec, conv, clock, *, max_open_reservations=20) -> ApplyResult: ...
+    # 與 apply_claim 同一套：持有者檢查（not_holder／主 Session／不能接自己／
+    # 目標也要是主 Session）、M1 的一個來源一條 Link（→ duplicate_link）、
+    # 接續點必須在被接續 session 的**既有快照**裡且訊息已完成未撤銷（M3），
+    # 以及 M2 的未結預留上限（`max_open_reservations`，跨輪累計、從真本算）。
+    # 冪等：同一個新 session 對同一個來源有那條 Link 時提早回傳 `already`（不佔額度）。
+def apply_reference(store, dec, clock) -> ApplyResult: ...
+    # H3：from 的持有者須與參考單 producer 相同（from 不存在或不符 → not_holder），
+    # to 必須存在於 Agora（否則 unknown_target）；
+    # 同一對只留一個檔；read_snapshot_at 單調（evaluate 已經擋過，這裡再防一次；舊 → stale）。
+    # 寫入順序 reference 檔 → 索引，中斷重跑可補齊；索引損毀 → MismatchError 中止。
+```
+
+---
+
+## 7. workflow 與 CLI
+
+### 7.1 `.github/workflows/committer.yml`（單一 job）
+
+```yaml
+on:
+  schedule: [{cron: "7 */6 * * *"}]   # 預設 6 小時；分鐘避開整點
+  workflow_dispatch: {}               # 沒有任何 inputs
+concurrency: {group: committer-agora, cancel-in-progress: false}
+permissions: {contents: read}
+jobs:
+  commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@<pinned sha>
+      - name: guard            # github.ref == refs/heads/main 且 github.sha == main HEAD（用 GITHUB_TOKEN 查 API）
+      - uses: astral-sh/setup-uv@<pinned sha>     # 只快取依賴，不快取任何內容
+      - name: secrets-to-rclone # RCLONE_CONF → $RUNNER_TEMP/rclone.conf（600，可寫的暫存複本）
+      - name: inbox-prescan    # 只需要 Drive 與身分登錄檔（不建立 pin store、不碰 git）；輸出寫成 $GITHUB_OUTPUT 的 shaped=<N>
+      - name: install-tools    # git-annex、rclone：版本＋網址＋sha256 集中在同一個 env 區塊
+      - name: secrets-to-pin-key # PIN_DEPLOY_KEY → 600
+      - name: run              # uv run python -m aistorage.committer run --config config/committer.json
+```
+- 環境變數只傳**路徑**：`AISTORAGE_RCLONE_CONF`、`AISTORAGE_PIN_KEY`、`AISTORAGE_PIN_KNOWN_HOSTS`（repo 內的檔）。
+- log：`RunReport` 只印計數、步驟耗時、中止的步驟與代碼；不印檔名以外的內容（檔名是 ULID）。中止時的 traceback 寫到 `AISTORAGE_DEBUG_DIR`（預設 `debug/`），**不進 Actions log**。
+- 步驟順序有相依：`secrets-to-rclone` 必須在 `inbox-prescan` 之前（prescan 要讀得到收件匣），而 prescan 失敗要讓 job 失敗（不可 `|| true`），否則讀不到收件匣時仍會進入完整的一輪，D9 的「空的一輪 1 分鐘」成本模型會失效。
+
+#### 排程頻率怎麼改
+GitHub Actions 的排程**只能寫在 workflow 檔裡**，設定檔（`config/committer.json`）的欄位不會被讀取（`schedule_cron` 已移除，留在那裡只會讓人以為改設定檔就有效）。
+
+- **改頻率＝改 `.github/workflows/committer.yml` 的 `schedule.cron`**，而且**只能在 `main` 上改**：第 1 步的 guard 會擋掉非 main 分支的執行（`github.ref != refs/heads/main` 或 `github.sha != main HEAD` 就中止），在別的分支改 cron 不會生效。
+- 改完照常走 PR 合併；合併後下一次排程即生效。
+- 頻率是 D9 用量估算的輸入：預設 6 小時（276〜372 分鐘／月，以「空的一輪 1 分鐘」估算）。改動前先想過 Actions 用量。
+
+#### 工具升級（git-annex、rclone）
+兩個工具的**版本、網址、SHA256 集中在 `install-tools` 步驟的同一個 `env:` 區塊**，升級時三個一起改，並且走 PR 合併。
+
+- rclone 用 `https://downloads.rclone.org/v<version>/…`，那個路徑帶版本號、內容不可變。
+- git-annex 的 standalone tarball **上游只提供 `current/`**（`downloads.kitenet.net/git-annex/linux/` 下只有 `current/`，沒有帶版本號的目錄；autobuild 只留最新一 build；GitHub release 沒有附檔）。所以網址會跟著上游動，`sha256` 不符就是上游發了新版本。
+- 升級步驟：下載目前 `current/` 的 tarball → `sha256sum` 取值 → 用 `git-annex version`（解壓後執行）確認實際版本 → 更新 `GIT_ANNEX_VERSION`、`GIT_ANNEX_URL`、`GIT_ANNEX_SHA256` → 合併。驗證步驟（3.2 與 9.4 的整合測試）要在升級後重跑。
+- sha256 不符時流程 **fail-closed**：job 在 `install-tools` 就停住，不會動到真本（也不會寫 pin）。log 會印出釘選的版本。
+
+### 7.2 CLI（`python -m aistorage.committer`）
+
+| 子命令 | 用途 | 寫入？ |
+|---|---|---|
+| `prescan` | 第 2 步：形狀符合的收件匣項目數；0 就回傳 exit 0 並印 `EMPTY` | 否 |
+| `run [--dry-run]` | 13 步；`--dry-run` 走完所有判定、印出計畫，不移動、不寫 pin、不 push | 是（非 dry-run） |
+| `plan-sweep` | 只跑第 3〜4 步的判定並印出處置 | 否 |
+| `init-pin --dry-run / --confirm` | 首次建立正式釘選值（只在 Mac、管理者身分） | 只有 `--confirm` |
+
+本機執行（整合測試、手動）：
+```
+AISTORAGE_RCLONE_CONF=~/.config/aistorage/rclone-committer-test.conf \
+AISTORAGE_PIN_KEY=~/.config/aistorage/pin-test.key \
+uv run python -m aistorage.committer run --config config/committer.test.json --dry-run
+```
+- `run` 的第 1 步（github.sha 檢查）在非 Actions 環境下跳過，並在 RunReport 標明 `guard=local`。
+
+### 7.3 `committer/run.py` 的骨架
+
+```python
+@dataclass
+class Deps:
+    drive: DriveClient; pins: PinStore; git_factory: Callable[[Path], AnnexGit]
+    registry: Registry; converters: dict[str, Converter]; publisher: ReadViewPublisher; clock: Clock
+
+@dataclass
+class RunReport:
+    run_id: str; aborted_at: str | None; code: str | None
+    counts: dict[str, int]; durations_ms: dict[str, int]
+
+def run(cfg: CommitterConfig, deps: Deps, *, dry_run: bool = False) -> RunReport:
+    # 每一步是一個小函式；失敗 raise AbortRun(step, code)；run 捕捉後填 RunReport（exit code 非 0）
+```
+- 13 步與模組的對應：1 `guard`；2 `intake.scan`；3 `integrity.settle`；4 `integrity.sweep`；5 `annex.git.clone`＋`integrity.verify.verify_clone`；6 `annex.git`；7 `intake.evaluate`＋`agora.apply`；**8 `annex.git.copy`（上傳 annex 物件）**；9 `pins.write_pending`；10 `verify.precheck`＋`git.push`；11 `verify.verify_after_push`；12 `pins.promote`＋`gc.gc_removed`；13 `publisher.publish`（第 3 組是 NullPublisher）；14 刪除 ACCEPT、ALREADY 與逾時 REJECT 的收件匣項目，以及逾時 24 小時的 junk（`drive.delete_permanently`，刪前 `get()` 確認 parents 是收件匣；刪除失敗計入 `inbox_delete_failed`）。
+- **copy 必須在算 refs／annex keys 之前**（review-g3g H1）：`git annex copy` 會寫入 location log（`refs/heads/git-annex` 的 sha 改變）並讓新上傳的 key 變成「在 remote 上」。若先算 pending 再 copy：push 出去的 ref 與 pending 不符（`verify_after_push` 中止）、下一輪 settle 遠端既不等於 pending 也不等於正式值（每輪 MismatchError，要人工重建 pin）、promote 後下一輪 sweep 把新上傳的物件全部隔離。中止時這些物件不在釘選值裡，下一輪會被隔離，是安全的方向。
+- `--dry-run` 不執行 `git annex copy` 也不 push（copy 會寫入 Drive）。
+
+### 7.4 手動匯入（3.11，`python -m aistorage.importer`）
+
+```
+python -m aistorage.importer opencode --export <opencode export 的 JSON 檔> --key <私鑰路徑> --key-id <id> \
+       --profile mac-opencode (--inbox-folder <id> | --out-dir <本機目錄>)
+python -m aistorage.importer claude-code --jsonl <檔> ...（同上）
+```
+- 共用一個 `build_inbox_item(raw_path, *, source, source_session_id, facts, profile, key, key_id) -> (sidecar_bytes, sig_obj)`，放在 `aistorage/inbox_builder.py`（**不在 CLI 套件裡**，同步器 5.2 直接用，不必匯入 argparse 那套）。**同步器之後也用這個函式**，匯入與同步產生的收件匣項目形式相同（spec「單一 Session 手動匯入」）。
+- 重複匯入：id＝`<source>:<source_session_id>`，內容相同 → 提交流程判為 ALREADY（3.4）。
+- **轉換器讀不到事實時仍然匯入**（`--strict` 才拒絕）：這個工具存在的理由是「Claude Code 的 Session 約 30 天就會被本機清掉，要能及時救進來」，轉換失敗就整個拒絕＝永遠救不回來。改用保守值（時間＝原始紀錄檔的 **mtime**、`in_progress=False`、無標題），metadata 留 `time_source: import`，提交流程照收原始紀錄、只在閱讀版標記失敗（PM 決定 1 的精神）。CLI 會在 stderr 印一行警告。
+- **快照時間預設用檔案的 mtime**（`--snapshot-at` 可覆寫）：手動匯入的檔案可能是幾天前匯出的，mtime 比「匯入的當下」更接近 D4 的「擷取時間」。
+- **母 Session 自動帶入**：沒給 `--parent-id` 時從原始紀錄取（opencode 的 `info.parentID`）；兩者不一致就報錯，不要猜。
+- **金鑰識別碼本機先驗**：必須是 `<profile>-<公鑰雜湊前 8 位小寫 hex>` 且屬於該 profile（2.3），避免上傳後才被拒成 `unauthorized`。私鑰只以路徑讀取，權限不是 600 就拒絕。
+- **期 1 的已知限制**：Claude Code 的**子代理內容不會被匯入**，也不保證取得得到子 Session 的 id（新版可能把子代理存成獨立檔案；見 `schemas/reading-version.md` 對應表的最後一列）。母 Session 的原始紀錄完整保留。
+
+---
+
+## 8. 並行、順序與測試策略
+
+### 8.1 相依與順序
+
+```
+A（可以全部並行）   drive/*（含 fake）  │ annex/manifest+replay │ converters/opencode │ converters/claude_code │ agora/layout+store（純檔案）
+B（依賴 A）         integrity/pin（需要 P2/P3）│ integrity/settle+sweep+verify+gc │ intake/scan+evaluate+ledger │ agora/apply
+C（依賴 B）         committer/run＋CLI＋workflow │ importer
+D（依賴 C）         整合測試（TEST_FOLDER_ID）、中斷注入、bundle 回收的容忍度（3.2 的必要驗收）
+```
+建議分派：impl-1：A 的 drive＋annex → B 的 integrity；impl-2：A 的兩個轉換器（3.5、3.6）；impl-3：A 的 agora → B 的 intake＋apply；PM 或 impl-1：C。測試方照第 2 組的分工（不看實作、依本草案的介面寫）。
+
+### 8.2 單元測試（每個模組一個檔，直接 import）
+
+| 模組 | 重點案例 |
+|---|---|
+| drive/http | 用假的 HTTP 伺服器（`http.server` 或 monkeypatch）驗：分頁、429 重試後成功、重試用完 → ReadError、404 → NotFound、下載超過上限中止 |
+| annex/manifest、replay | `-` 行、空 active、非法行 → MismatchError；依順序重放；最後一個 bundle 決定 ref 集合；解不開 → MismatchError |
+| integrity/settle | 決策表：無待定／遠端＝待定／遠端＝正式／兩者皆非／只剩 `.bak`／兩個同名候選都相符（→ 中止）／任何 ReadError（→ 往上拋，FakeDrive 快照不變） |
+| integrity/sweep | 每一條規則一個案例；**性質測試**：任何 ReadError 注入之下，`apply_sweep` 從來不會被呼叫（FakeDrive 快照不變）；上一版 manifest 用非 `.bak` 名稱冒充 → QUARANTINE；沒被引用的 annex 物件 → QUARANTINE；removed → GC 而不是 QUARANTINE；`sha256=None` → NEED_CONTENT_CHECK |
+| integrity/verify | push 後：多一個 bundle 但 created_time 早於 push → 中止；removed 少了舊的 → 中止；ref 多一個 → 中止 |
+| integrity/pin | MemoryPinStore 的狀態機；GitPinStore 用本機 bare repo（`file://`）測 commit、non-ff 中止 |
+| intake/evaluate | 決策表：沒有 sig（新的→DEFER、舊的→orphan）、簽章錯、重複 key 的 sidecar、item_key 不符、冒充 profile、撤銷、type 不允許、raw 太大（只看 metadata、不下載）、raw 雜湊錯、重放（同 item_key、舊 snapshot）、ALREADY（同 raw 雜湊）、collision、artifact → DEFER |
+| agora/apply | 臨時目錄＋FakeRawStorage：接續點不在 snapshots → REJECT；接續點未完成／已撤銷 → REJECT；重複認領；統合（一個 Session 認領兩張）；參考 Link 同一對只留一個、單調；改寫改變位置 → REJECT；封存後又有新訊息 → running |
+| converters | 黃金樣本（自己編，形狀取自 spike 1.7 與 Claude Code jsonl 的欄位）：輸入 → 預期閱讀版逐欄相同，而且通過 `validate_reading`；revert、壓縮、子代理、reasoning、tool 錯誤、Claude Code 分支與 tool 配對 |
+| committer/run | 全部用 fake：正常一輪、每一步注入失敗都會中止而且後續步驟沒有執行、dry-run 沒有任何寫入 |
+
+### 8.3 整合測試（`tests/integration/`，`pytest -m integration`）
+
+- 設定：`~/.config/aistorage/ids.env` 的 `TEST_FOLDER_ID`、`~/.config/aistorage/rclone-committer-test.conf`、`~/.config/aistorage/pin-test.key`，**只以路徑引用**。**選了 integration 標記但設定缺少時要 FAIL，不能 skip**（review-2.1 H1 的教訓）；平常 `pytest` 預設不選 integration（`addopts = -m "not integration"`），所以不會因為缺設定而失敗。
+- 每個測試在 `TEST_FOLDER_ID` 底下建自己的前綴（例如 `it-<ULID>/`），測完依 file id 永久刪除（先 `get()` 確認 parents）。
+- 必要案例（對應 tasks 9.4 與 design 的「3.2 驗證」）：
+  1. 一輪正常提交：session＋handoff＋claim 同一批，接續 Link 建立；ALREADY（重複上傳）不產生 commit。
+  2. 中斷注入（用環境變數 `AISTORAGE_TEST_KILL_AFTER=<step>` 讓 run 在指定步驟之後 `os._exit`）：push 後、轉正前 → 下一輪 PROMOTED，真檔沒被隔離；寫待定後、push 前 → DROPPED。
+  3. 注入：真 main＋偽造 git-annex、上一版 manifest 冒充、沒被引用的 annex 物件、上層同名資料夾 → 偵測、隔離、下一輪恢復。
+  4. **bundle 回收的容忍度**：設小的 `max-git-bundles` 觸發 consolidate，回收 removed 之後 clone、push、再 consolidate 都正常（design D2 明文要求在 3.2 驗證）。
+  5. 暫時性錯誤：在 HttpDriveClient 外包一層注入 503 → 中止，沒有任何移動。
+- **CI / workflow 執行安全注意事項（N8）**：執行 pytest 時切勿開啟 `-l`（`--show-locals`）或 rich traceback，以避免本機區域變數（可能含有秘密、token 或未過濾路徑）印出至 GitHub Actions log 或 artifact 中。
+
+---
+
+## 9. 需要 PM 決定的事
+
+1. Claude Code 的 source 名稱：`claude-code` 還是 `claude_code`（P4）。
+2. 舊骨架目錄（`committer/`、`syncers/`、`search/`、`admin/`）移除，還是改成指向 `src/aistorage` 的說明（第 1 節）。
+3. 處理過的 item_key 清冊的保留月數（建議 3），以及「比 N 個月更早的 ULID 直接拒收」這條規則（4.3）。
+4. 第一次 bundle 回收每一輪的上限（建議 200）（3.6）。
+5. artifact 在第 7 組之前一律 DEFER（留在收件匣），還是 REJECT（4.2 第 11 點）。建議 DEFER。
+
+---
+
+## PM 的決定（2026-09-27）
+
+1. Claude Code 的 source 名稱：`claude-code`（同步修正 `schemas/reading-version.md` 與 `reading-version.schema.json` 的例子）。
+2. 根目錄的舊骨架目錄（`committer/`、`syncers/`、`search/`、`admin/`、`atelier-template/`）只留 README，內容改成「程式在 `src/aistorage/<模組>`」，由 3.1 一併處理。
+3. 處理過的 item_key 清冊保留 3 個月；ULID 時間早於 3 個月的收件匣項目直接拒收。
+4. 第一次 bundle 回收每一輪最多處理 200 個，其餘留到下一輪。
+5. artifact 在第 7 組之前一律 DEFER（留在收件匣）。
+6. 前置 P2、P3 已完成：`MyAiStorage-pin`（Actions secret `PIN_DEPLOY_KEY`）、`MyAiStorage-pin-test`（deploy key 私鑰 `~/.config/aistorage/pin-test.key`）。整合測試的 Drive 資料夾 id 在 `~/.config/aistorage/ids.env` 的 `TEST_FOLDER_ID`，rclone 設定 `~/.config/aistorage/rclone-committer-test.conf`（只以路徑引用）。

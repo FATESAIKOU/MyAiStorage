@@ -1,0 +1,5 @@
+Parsed 1 commitsParsed 15 commitsHEAD is now at 7360fd1 session-2 update
+
+New history written in 0.43 seconds; now repacking/cleaning...
+Repacking your repo and cleaning out old unneeded objects
+Completely finished after 1.95 seconds.

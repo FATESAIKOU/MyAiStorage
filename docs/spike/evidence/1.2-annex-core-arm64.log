@@ -1,0 +1,104 @@
+掛載（唯讀）：/Users/fatesaikou/.config/aistorage-spike/rclone-committer.conf -> /secrets/rclone-committer.conf
+工作目錄：/Users/fatesaikou/.local/share/aistorage-spike/work/a12 -> /work
+啟動容器：a12（image: aistorage-spike-env:latest，user: 501:20）
+
+### 0) 環境版本
+git-annex version: 10.20260717-g0c917920c80ab1e8cc3d8f5886537708949e1659
+rclone v1.75.1
+git version 2.43.0
+
+### 1) 建 repo（agora-basic）＋小檔與大檔
+  Detected a filesystem without fifo support.
+  Disabling ssh connection caching.
+initremote drive ok
+(recording state in git...)
+=== 確認 URL 由 --with-url 記進 git config ===
+uuid=915a333b-2996-4d85-9430-14a608e61b7e
+=== 確認 remote 參數（不印秘密） ===
+uuid: 915a333b-2996-4d85-9430-14a608e61b7e
+description: [drive]
+type: rclone
+encryption: none
+chunking: none
+=== push 初始版本 ===
+Full remote url: annex::915a333b-2996-4d85-9430-14a608e61b7e?encryption=none&type=rclone
+To annex::
+ * [new branch]      main -> main
+=== 摘要 ===
+repo=/work/basic
+prefix=agora-basic
+url_file=/work/basic.url
+a6ed2fc5c6a24fe49a0aa1cb16752449c3be862150e13d8d4eb7037312c30bdf  large.bin
+
+### 2) 上傳 annex 內容（copy --to drive；不改變 GITMANIFEST，可先做）
+ok
+(recording state in git...)
+annex_copy_ms=10402
+
+### 3) manifest 預檢（正向）＋量測『預檢結束→push 完成』窗口（M8）
+snapshot ok：2 個 manifest 物件
+manifest_precheck: PASS（與快照相同，允許 push）
+precheck_read_ms=6974
+To annex::
+   0a4c1bc..c8e4b11  main -> main
+ * [new branch]      git-annex -> git-annex
+unprotected_window_ms=22647（預檢讀完到 push 寫完；D2 的競爭窗口）
+
+### 3b) push 後重讀 manifest：確認指紋與檔案 id 的變化方式（決定預檢能不能以 id 比對）
+manifest_precheck: CHANGED（遠端 manifest 與快照不同）——中止 push
+  1,2c1,2
+  < ad24a4bd710b85b01f66563d8c8ead92c4f16c643ff198de38410354ae5f92d2  GITMANIFEST--915a333b-2996-4d85-9430-14a608e61b7e
+  < ad24a4bd710b85b01f66563d8c8ead92c4f16c643ff198de38410354ae5f92d2  GITMANIFEST--915a333b-2996-4d85-9430-14a608e61b7e.bak
+  ---
+  > 810b4185ae35ac62e9bbaadf204b098d965011d274453fd86756a0baae2a4911  GITMANIFEST--915a333b-2996-4d85-9430-14a608e61b7e
+  > 810b4185ae35ac62e9bbaadf204b098d965011d274453fd86756a0baae2a4911  GITMANIFEST--915a333b-2996-4d85-9430-14a608e61b7e.bak
+（預期內：push 後指紋改變）
+--- remote 上的 GITMANIFEST 檔案與 id（push 後）---
+  13fGONliMZcRz86zhEco75Gy5woZUU-El  GITMANIFEST--915a333b-2996-4d85-9430-14a608e61b7e.bak
+  1k71LmW-BPaemMEbqfGGh5eJ3mq1xJbUz  GITMANIFEST--915a333b-2996-4d85-9430-14a608e61b7e
+
+### 4) 全新 clone（arm64）＋get＋雜湊比對
+  Detected a filesystem without fifo support.
+  Disabling ssh connection caching.
+clone_ms=27018
+clone 內 remote:
+origin	annex::915a333b-2996-4d85-9430-14a608e61b7e?encryption=none&type=rclone&rcloneremotename=gdrive&rcloneprefix=agora-basic (fetch)
+origin	annex::915a333b-2996-4d85-9430-14a608e61b7e?encryption=none&type=rclone&rcloneremotename=gdrive&rcloneprefix=agora-basic (push)
+get large.bin (from origin...) 
+(checksum...) ok
+(recording state in git...)
+a6ed2fc5c6a24fe49a0aa1cb16752449c3be862150e13d8d4eb7037312c30bdf  large.bin
+large.bin 內容一致
+
+### 5) log / diff
+c8e4b11 add small + large
+0a4c1bc init: agora-basic
+diff HEAD~1..HEAD --stat:
+ large.bin | 1 +
+ small.txt | 1 +
+ 2 files changed, 2 insertions(+)
+
+### 6) revert 一次並 push revert（在 clone 內做；此處 remote 名為 origin）
+[main aff464c] Revert "add small + large"
+ Date: Sat Sep 26 08:07:15 2026 +0000
+ 2 files changed, 2 deletions(-)
+ delete mode 100644 large.bin
+ delete mode 100644 small.txt
+   bc9f47c..a555e5c  git-annex -> git-annex
+   c8e4b11..aff464c  main -> main
+
+### 7) 又一個全新 clone，比對 HEAD 與檔案
+  Detected a filesystem without fifo support.
+  Disabling ssh connection caching.
+HEAD=aff464c4e7eedeec2260949a9879950242ebd162
+aff464c Revert "add small + large"
+c8e4b11 add small + large
+0a4c1bc init: agora-basic
+total 16
+drwxr-xr-x 1 501 dialout 128 Sep 26 08:08 .
+drwx------ 1 501 dialout 288 Sep 26 08:07 ..
+drwxr-xr-x 1 501 dialout 448 Sep 26 08:08 .git
+-rw-r--r-- 1 501 dialout  23 Sep 26 08:08 README.md
+(revert 掉 large.bin 後，工作樹沒有它＝預期)
+
+### part=core 完成

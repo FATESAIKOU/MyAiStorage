@@ -1,0 +1,38 @@
+== LIMITATION TEST: C creates duplicate agora-1.4f2 folder at parent layer ==
+op=create-folder
+name=agora-1.4f2
+parent=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj
+http=200
+file_id=1wI6nDhaAWnH8LtG41TVz5OTL63jC0hwq
+== committer count of same-name folders ==
+op=find-name
+target=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj
+http=200
+count=2
+file={"id": "1wI6nDhaAWnH8LtG41TVz5OTL63jC0hwq", "mimeType": "application/vnd.google-apps.folder", "name": "agora-1.4f2"}
+file={"id": "1GAuQqxHfUyNmWUeopWEr89NG_RTJgHEa", "mimeType": "application/vnd.google-apps.folder", "name": "agora-1.4f2"}
+== scan of the REAL folder (by id) — will it see the duplicate? ==
+op=scan folder=1GAuQqxHfUyNmWUeopWEr89NG_RTJgHEa
+inventory_count=3 children_count=3 unknown_count=0
+  [OK] id=1DbQbD9AoukSPJ3XE8UdBzBb-BKEJKgta name=GITMANIFEST--616fdf69-6077-4730-ba09-e7e0553d2f74 md5=f9059497dc674285b0fd751ab5f228aa
+== 15b: clone with duplicate folder present (no cleaning) ==
+PIN-CHECK: clone failed (rc=128)
+  Cloning into '/work/clone-dup-parent'...
+  git-remote-annex: No git repository found in this remote.
+  
+PIN-MISMATCH: abort (clone 失敗視同釘選不符)
+verify_rc=2
+== extension: detect duplicate parent folder and quarantine ==
+op=scan-parent parent=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj name=agora-1.4f2 count=2
+  [DUPLICATE] id=1wI6nDhaAWnH8LtG41TVz5OTL63jC0hwq created=2026-09-26T11:27:30.839Z
+  [EXPECTED] id=1GAuQqxHfUyNmWUeopWEr89NG_RTJgHEa created=2026-09-26T11:23:06.613Z
+moved id=1wI6nDhaAWnH8LtG41TVz5OTL63jC0hwq http=200 to=1sC3sk9UYkG3O_NjpPqsABYRfa0xptUDv
+== recheck ==
+op=scan-parent parent=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj name=agora-1.4f2 count=1
+  [EXPECTED] id=1GAuQqxHfUyNmWUeopWEr89NG_RTJgHEa created=2026-09-26T11:23:06.613Z
+no_duplicates
+== clone after duplicate-parent-folder cleanup ==
+pinned_head=5950b3c272e4c0dad2793e0b833e652cecfe27b1
+cloned_head=5950b3c272e4c0dad2793e0b833e652cecfe27b1
+PIN-OK
+verify_rc=0

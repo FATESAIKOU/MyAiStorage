@@ -1,0 +1,49 @@
+### 1.4d C get B's inbox-b folder
+op=get
+target=1DxLZShmbp0oDFMDmf1Ym3ZbZMBIKe8-r
+http=404
+reason=notFound
+message=File not found: 1DxLZShmbp0oDFMDmf1Ym3ZbZMBIKe8-r.
+### 1.4d C list children of B's inbox-b
+op=list-children
+target=1DxLZShmbp0oDFMDmf1Ym3ZbZMBIKe8-r
+http=200
+count=0
+### 1.4d C create-file in B's inbox-b (unique name)
+op=create-file
+name=c-into-inbox-b.txt
+parent=1DxLZShmbp0oDFMDmf1Ym3ZbZMBIKe8-r
+http=200
+file_id=1ruNX1J6v0r4hE_0RYSveDZueC9XgY7r5
+md5=3fd6825587370b928a085e47cdfb4d69
+### 1.4d C create-file SAME NAME as B's b-inbox.txt in inbox-b
+op=create-file
+name=b-inbox.txt
+parent=1DxLZShmbp0oDFMDmf1Ym3ZbZMBIKe8-r
+http=200
+file_id=1JcSiP_-F2400tTKKGUv5xtI0DM_klmX9
+md5=6f8466d2085c66b419b4431b693f89eb
+### 1.4d C create-folder in B's inbox-b
+op=create-folder
+name=c-subfolder
+parent=1DxLZShmbp0oDFMDmf1Ym3ZbZMBIKe8-r
+http=200
+file_id=1D2hgtJOcBuVRcgSzW_QKIG3k33_Obho-
+### 1.4d C update B's b-inbox.txt
+op=update-content
+target=1MC9NB1N9cp8_Ldgf1NUc_fuE0TGnuGjM
+http=404
+reason=notFound
+message=File not found: 1MC9NB1N9cp8_Ldgf1NUc_fuE0TGnuGjM.
+### 1.4d C delete B's b-inbox.txt
+op=delete
+target=1MC9NB1N9cp8_Ldgf1NUc_fuE0TGnuGjM
+http=404
+reason=notFound
+message=File not found: 1MC9NB1N9cp8_Ldgf1NUc_fuE0TGnuGjM.
+### 1.4d B counts inbox-b children + hashes
+op=list-children
+target=1DxLZShmbp0oDFMDmf1Ym3ZbZMBIKe8-r
+http=200
+count=1
+file={"id": "1MC9NB1N9cp8_Ldgf1NUc_fuE0TGnuGjM", "md5Checksum": "8c161b01d2e70a58d1f15f72a7a147e6", "mimeType": "text/plain", "name": "b-inbox.txt", "size": "18"}

@@ -1,0 +1,2 @@
+=== Step 3 (dry-run): Current trash count = 115 ===
+Dry-run: Will call files.emptyTrash to delete all 115 trashed items.

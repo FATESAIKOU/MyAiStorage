@@ -1,0 +1,283 @@
+{
+  "meta": {
+    "generation": 7,
+    "built_at": "2026-09-27T09:05:00.000Z",
+    "agora_main_sha": "abc123def456abc123def456abc123def456abcd",
+    "converter_versions": {"claude-code": "1", "opencode": "1"}
+  },
+  "entries": [
+    {
+      "metadata": {
+        "session_id": "opencode:s1",
+        "source": "opencode",
+        "title": "接續點設計討論",
+        "producer": "profile:mac-opencode",
+        "case_id": "case-agora",
+        "status": "stopped",
+        "stopped_at": "2026-09-27T09:05:00.000Z",
+        "in_progress": false,
+        "created_at": "2026-09-27T08:00:00.000Z",
+        "updated_at": "2026-09-27T09:00:00.000Z",
+        "snapshot_at": "2026-09-27T09:00:00.000Z",
+        "raw_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "raw_size": 1200,
+        "parent_id": null,
+        "reading_status": "ok",
+        "reading_error_code": null,
+        "committed_at": "2026-09-27T09:01:00.000Z"
+      },
+      "snapshots": [
+        {
+          "snapshot_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "snapshot_at": "2026-09-27T08:30:00.000Z",
+          "committed_at": "2026-09-27T08:31:00.000Z",
+          "via": "sync",
+          "file_id": "file-pinned-A",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 900
+        },
+        {
+          "snapshot_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "snapshot_at": "2026-09-27T09:00:00.000Z",
+          "committed_at": "2026-09-27T09:01:00.000Z",
+          "via": "sync",
+          "file_id": "file-latest-B",
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "size": 1200
+        }
+      ],
+      "reading": {
+        "format": "aistorage.reading/v1",
+        "session_id": "opencode:s1",
+        "source": "opencode",
+        "title": "接續點設計討論",
+        "parent_id": null,
+        "snapshot_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "in_progress": false,
+        "messages": [
+          {
+            "message_id": "m1a",
+            "index": 0,
+            "role": "user",
+            "created_at": "2026-09-27T08:31:00.000Z",
+            "completed": true,
+            "reverted": false,
+            "parts": [{"type": "text", "text": "我們決定了接續點的格式"}]
+          },
+          {
+            "message_id": "m1b",
+            "index": 1,
+            "role": "assistant",
+            "created_at": "2026-09-27T08:32:00.000Z",
+            "completed": true,
+            "reverted": false,
+            "parts": [{"type": "text", "text": "交接單由持有者發起"}]
+          },
+          {
+            "message_id": "m1c",
+            "index": 2,
+            "role": "assistant",
+            "created_at": "2026-09-27T08:33:00.000Z",
+            "completed": true,
+            "reverted": true,
+            "parts": [{"type": "text", "text": "舊的草稿不要索引接續點"}]
+          },
+          {
+            "message_id": "m1d",
+            "index": 3,
+            "role": "user",
+            "created_at": "2026-09-27T08:34:00.000Z",
+            "completed": true,
+            "reverted": false,
+            "parts": [{"type": "text", "text": "接續點與交接單都要記錄"}]
+          }
+        ]
+      },
+      "reading_ref": {
+        "snapshot_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "file_id": "file-latest-B",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "size": 1200
+      }
+    },
+    {
+      "metadata": {
+        "session_id": "opencode:s2",
+        "source": "claude-code",
+        "title": "引き継ぎメモ",
+        "producer": "profile:worker-2",
+        "case_id": null,
+        "status": "running",
+        "stopped_at": null,
+        "in_progress": true,
+        "created_at": "2026-09-26T08:00:00.000Z",
+        "updated_at": "2026-09-26T08:10:00.000Z",
+        "snapshot_at": "2026-09-26T08:10:00.000Z",
+        "raw_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "raw_size": 800,
+        "parent_id": "opencode:s1",
+        "reading_status": "ok",
+        "reading_error_code": null,
+        "committed_at": "2026-09-26T08:11:00.000Z"
+      },
+      "snapshots": [
+        {
+          "snapshot_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "snapshot_at": "2026-09-26T08:10:00.000Z",
+          "committed_at": "2026-09-26T08:11:00.000Z",
+          "via": "sync",
+          "file_id": "file-latest-C",
+          "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "size": 800
+        }
+      ],
+      "reading": {
+        "format": "aistorage.reading/v1",
+        "session_id": "opencode:s2",
+        "source": "claude-code",
+        "title": "引き継ぎメモ",
+        "parent_id": "opencode:s1",
+        "snapshot_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "in_progress": true,
+        "messages": [
+          {
+            "message_id": "n1",
+            "index": 0,
+            "role": "user",
+            "created_at": "2026-09-26T08:10:00.000Z",
+            "completed": true,
+            "reverted": false,
+            "parts": [{"type": "text", "text": "引き継ぎ内容を確認する"}]
+          },
+          {
+            "message_id": "n2",
+            "index": 1,
+            "role": "assistant",
+            "created_at": "2026-09-26T08:10:30.000Z",
+            "completed": false,
+            "reverted": false,
+            "parts": [{"type": "text", "text": "hello world from Tokyo"}]
+          }
+        ]
+      },
+      "reading_ref": {
+        "snapshot_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "file_id": "file-latest-C",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "size": 800
+      }
+    },
+    {
+      "metadata": {
+        "session_id": "opencode:s3",
+        "source": "opencode",
+        "title": "plain session notes",
+        "producer": "profile:mac-opencode",
+        "case_id": null,
+        "status": "running",
+        "stopped_at": null,
+        "in_progress": false,
+        "created_at": "2026-09-25T08:00:00.000Z",
+        "updated_at": "2026-09-25T08:00:00.000Z",
+        "snapshot_at": "2026-09-25T08:00:00.000Z",
+        "raw_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "raw_size": 100,
+        "parent_id": null,
+        "reading_status": "failed",
+        "reading_error_code": "conversion_error",
+        "committed_at": "2026-09-25T08:01:00.000Z"
+      },
+      "snapshots": [
+        {
+          "snapshot_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "snapshot_at": "2026-09-25T08:00:00.000Z",
+          "committed_at": "2026-09-25T08:01:00.000Z",
+          "via": "sync"
+        }
+      ],
+      "reading": null,
+      "reading_ref": null
+    }
+  ],
+  "links": [
+    {
+      "kind": "continuation",
+      "from_session_id": "opencode:s2",
+      "to_session_id": "opencode:s1",
+      "handoff_id": "handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "claim_id": "claim:01ARZ3NDEKTSV4RRFFQ69G5FAW",
+      "snapshot_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "message_id": "m1a",
+      "reference_id": null,
+      "read_snapshot_at": null
+    },
+    {
+      "kind": "reference",
+      "from_session_id": "opencode:s1",
+      "to_session_id": "opencode:s2",
+      "handoff_id": null,
+      "claim_id": null,
+      "snapshot_sha256": null,
+      "message_id": null,
+      "reference_id": "reference:01ARZ3NDEKTSV4RRFFQ69G5FAX",
+      "read_snapshot_at": "2026-09-26T08:10:00.000Z"
+    },
+    {
+      "kind": "reference",
+      "from_session_id": "opencode:s2",
+      "to_session_id": "opencode:s1",
+      "handoff_id": null,
+      "claim_id": null,
+      "snapshot_sha256": null,
+      "message_id": null,
+      "reference_id": "reference:01ARZ3NDEKTSV4RRFFQ69G5FAY",
+      "read_snapshot_at": "2026-09-27T09:00:00.000Z"
+    }
+  ],
+  "handoffs": [
+    {
+      "handoff_id": "handoff:01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "target_session_id": "opencode:s1",
+      "snapshot_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "message_id": "m1a",
+      "producer": "profile:mac-opencode",
+      "created_at": "2026-09-27T08:35:00.000Z",
+      "updated_at": "2026-09-27T08:35:00.000Z",
+      "case_id": "case-agora",
+      "body_json": "{\"content\":\"把接續點格式定下來\"}",
+      "claimed_by_claim_id": "claim:01ARZ3NDEKTSV4RRFFQ69G5FAW",
+      "claimed_by_session_id": "opencode:s2",
+      "claimed_at": "2026-09-27T08:45:00.000Z"
+    },
+    {
+      "handoff_id": "handoff:01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+      "target_session_id": "opencode:s2",
+      "snapshot_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "message_id": "n1",
+      "producer": "profile:worker-2",
+      "created_at": "2026-09-26T08:20:00.000Z",
+      "updated_at": "2026-09-26T08:20:00.000Z",
+      "case_id": null,
+      "body_json": "{\"content\":\"確認引き継ぎ内容\"}",
+      "claimed_by_claim_id": null,
+      "claimed_by_session_id": null,
+      "claimed_at": null
+    }
+  ],
+  "rejections": [
+    {
+      "item_key": "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+      "code": "bad_signature",
+      "at": "2026-09-27T07:00:00.000Z",
+      "item_id": "handoff:01ARZ3NDEKTSV4RRFFQ69G5FB1",
+      "authenticated": true
+    },
+    {
+      "item_key": "01ARZ3NDEKTSV4RRFFQ69G5FB2",
+      "code": "orphan",
+      "at": "2026-09-27T07:30:00.000Z",
+      "item_id": null,
+      "authenticated": false
+    }
+  ]
+}

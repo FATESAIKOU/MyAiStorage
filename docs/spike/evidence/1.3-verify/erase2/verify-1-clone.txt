@@ -1,0 +1,4 @@
+Cloning into '/work/e2-verify'...
+  Detected a filesystem without fifo support.
+  Disabling ssh connection caching.
+clone rc=0 ms=9934

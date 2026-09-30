@@ -1,0 +1,43 @@
+掛載（唯讀）：/Users/fatesaikou/.config/aistorage-spike/rclone-committer.conf -> /secrets/rclone-committer.conf
+工作目錄：/Users/fatesaikou/.local/share/aistorage-spike/work/a12 -> /work
+啟動容器：a12（image: aistorage-spike-env:latest，user: 501:20）
+
+### 8) 中斷測試：先同步（模擬真實寫入前先 pull），再做稍大的 commit
+ * branch            main       -> FETCH_HEAD
+ * branch            git-annex  -> FETCH_HEAD
+Current branch main is up to date.
+(recording state in git...)
+--- 開始 push（3 秒後 SIGKILL）---
+Full remote url: annex::915a333b-2996-4d85-9430-14a608e61b7e?encryption=none&type=rclone
+/work/annex_1_2_core.sh: line 20:   207 Killed                  timeout -s KILL 3 git push drive main git-annex
+timeout rc=137（137 = SIGKILL，代表真的中斷了）
+--- 中斷後立刻查 remote 上的物件（部分上傳／舊版本的痕跡）---
+remote 檔案數：12
+  GITBUNDLE-s1505--915a333b-2996-4d85-9430-14a608e61b7e-4f6477f13ff8f58e02d411bc245f4f6e6c093826e67e6af7a1899398bbdc8b09
+  GITBUNDLE-s2745--915a333b-2996-4d85-9430-14a608e61b7e-b3d84aa57d0687b3f8a7ad113c37b28f975af619a0742b7b851ab10892e588b0
+  GITBUNDLE-s388--915a333b-2996-4d85-9430-14a608e61b7e-c763e5bad1c972d5342ccd67b3d853c88166e04b9a88787d14c6e8f78151e40a
+  GITMANIFEST--915a333b-2996-4d85-9430-14a608e61b7e
+  GITMANIFEST--915a333b-2996-4d85-9430-14a608e61b7e.bak
+  SHA256E-s307200--a6ed2fc5c6a24fe49a0aa1cb16752449c3be862150e13d8d4eb7037312c30bdf.bin
+  SHA256E-s4194304--01f5d8ac9742dadf657d837ebee0b11837b161ebbc348018635b1a5a00f3fc3a.bin
+  SHA256E-s4194304--2fabae7607c063e6f076d020875c54488ede914ac51e13dacfc422d7402d4bb5.bin
+  SHA256E-s4194304--36344abcbcea0c1da3e814e571e396edb7262a30913393e3a7d7c81970d8ee6e.bin
+  SHA256E-s4194304--54d008c5b918578462aa2073275f2463aac45a1aa5a1ed718684783eb6d1d4ba.bin
+  SHA256E-s4194304--986304473a0802c324ef9a72288b330c55d762f1ba861286c9b360cec9105aba.bin
+  SHA256E-s4194304--9cc8d62ce851259b211dfcb2eea8bb89aa710c9b546426e55961c0010b224a51.bin
+
+### 9) 重新 push（先重讀遠端狀態；中斷後遠端可能已前進）
+ * branch            main       -> FETCH_HEAD
+ * branch            git-annex  -> FETCH_HEAD
+2026/09/26 08:36:41 ERROR : Failed to save config after 10 tries: failed to create temp file for new config: open /secrets/rclone-committer.conf2988659002: permission denied
+To annex::
+   a555e5c..f2f00f8  git-annex -> git-annex
+   aff464c..ebdca4d  main -> main
+re-push rc=0 ms=28035
+
+### 10) 全新 clone 驗證中斷前已 commit 的內容都在（沒有遺失）
+  Detected a filesystem without fifo support.
+  Disabling ssh connection caching.
+ebdca4d big files for interrupt test
+aff464c Revert "add small + large"
+c8e4b11 add small + large

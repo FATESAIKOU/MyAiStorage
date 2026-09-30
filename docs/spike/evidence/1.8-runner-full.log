@@ -1,0 +1,242 @@
+commit	Set up job	﻿2026-09-26T16:44:54.6485296Z Current runner version: '2.337.0'
+commit	Set up job	2026-09-26T16:44:54.6524022Z ##[group]Runner Image Provisioner
+commit	Set up job	2026-09-26T16:44:54.6525689Z Hosted Compute Agent
+commit	Set up job	2026-09-26T16:44:54.6527101Z Version: 20260828.587
+commit	Set up job	2026-09-26T16:44:54.6528909Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+commit	Set up job	2026-09-26T16:44:54.6530614Z Build Date: 2026-08-28T16:44:25Z
+commit	Set up job	2026-09-26T16:44:54.6532071Z Worker ID: {4f10b5eb-3023-4173-99c6-c680f8a6f712}
+commit	Set up job	2026-09-26T16:44:54.6533624Z Azure Region: westus
+commit	Set up job	2026-09-26T16:44:54.6535107Z ##[endgroup]
+commit	Set up job	2026-09-26T16:44:54.6538642Z ##[group]Operating System
+commit	Set up job	2026-09-26T16:44:54.6540125Z Ubuntu
+commit	Set up job	2026-09-26T16:44:54.6541356Z 24.04.5
+commit	Set up job	2026-09-26T16:44:54.6542805Z LTS
+commit	Set up job	2026-09-26T16:44:54.6543953Z ##[endgroup]
+commit	Set up job	2026-09-26T16:44:54.6545309Z ##[group]Runner Image
+commit	Set up job	2026-09-26T16:44:54.6546701Z Image: ubuntu-24.04
+commit	Set up job	2026-09-26T16:44:54.6548388Z Version: 20260920.314.1
+commit	Set up job	2026-09-26T16:44:54.6550580Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260920.314/images/ubuntu/Ubuntu2404-Readme.md
+commit	Set up job	2026-09-26T16:44:54.6554158Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260920.314
+commit	Set up job	2026-09-26T16:44:54.6556246Z ##[endgroup]
+commit	Set up job	2026-09-26T16:44:54.6558865Z ##[group]GITHUB_TOKEN Permissions
+commit	Set up job	2026-09-26T16:44:54.6562126Z Contents: read
+commit	Set up job	2026-09-26T16:44:54.6563383Z Metadata: read
+commit	Set up job	2026-09-26T16:44:54.6564489Z Packages: read
+commit	Set up job	2026-09-26T16:44:54.6565574Z ##[endgroup]
+commit	Set up job	2026-09-26T16:44:54.6581053Z Secret source: Actions
+commit	Set up job	2026-09-26T16:44:54.6583175Z Cache mode: write
+commit	Set up job	2026-09-26T16:44:54.6584693Z Prepare workflow directory
+commit	Set up job	2026-09-26T16:44:54.7266177Z Prepare all required actions
+commit	Set up job	2026-09-26T16:44:54.7341205Z Getting action download info
+commit	Set up job	2026-09-26T16:44:55.1333554Z Download action repository 'actions/checkout@v4' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+commit	Set up job	2026-09-26T16:44:55.3539873Z Complete job name: commit
+commit	Checkout（拿 inbox_probe.py）	﻿2026-09-26T16:44:55.4324378Z ##[group]Run actions/checkout@v4
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4325406Z with:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4326042Z   repository: FATESAIKOU/aistorage-spike
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4330217Z   token: ***
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4330808Z   ssh-strict: true
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4331390Z   ssh-user: git
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4332012Z   persist-credentials: true
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4332664Z   clean: true
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4333256Z   sparse-checkout-cone-mode: true
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4333940Z   fetch-depth: 1
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4334505Z   fetch-tags: false
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4335096Z   show-progress: true
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4335681Z   lfs: false
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4336269Z   submodules: false
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4336856Z   set-safe-directory: true
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4337526Z   allow-unsafe-pr-checkout: false
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.4338850Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5454858Z Syncing repository: FATESAIKOU/aistorage-spike
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5458886Z ##[group]Getting Git version info
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5460751Z Working directory is '/home/runner/work/aistorage-spike/aistorage-spike'
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5463367Z [command]/usr/bin/git version
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5529745Z git version 2.55.0
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5550541Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5566022Z Temporarily overriding HOME='/home/runner/work/_temp/3b4d77cb-1db5-4cab-80aa-1b5ae17d4efa' before making global git config changes
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5569375Z Adding repository directory to the temporary git global config as a safe directory
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5573390Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/aistorage-spike/aistorage-spike
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5632923Z Deleting the contents of '/home/runner/work/aistorage-spike/aistorage-spike'
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5639910Z ##[group]Initializing the repository
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5644463Z [command]/usr/bin/git init /home/runner/work/aistorage-spike/aistorage-spike
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5753707Z hint: Using 'master' as the name for the initial branch. This default branch name
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5755870Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5757852Z hint: to use in all of your new repositories, which will suppress this warning,
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5760540Z hint: call:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5763172Z hint:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5765570Z hint: 	git config --global init.defaultBranch <name>
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5767056Z hint:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5768657Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5771029Z hint: 'development'. The just-created branch can be renamed via this command:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5772739Z hint:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5773908Z hint: 	git branch -m <name>
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5775135Z hint:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5776522Z hint: Disable this message with "git config set advice.defaultBranchName false"
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5779145Z Initialized empty Git repository in /home/runner/work/aistorage-spike/aistorage-spike/.git/
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5783210Z [command]/usr/bin/git remote add origin https://github.com/FATESAIKOU/aistorage-spike
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5824137Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5825896Z ##[group]Disabling automatic garbage collection
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5829155Z [command]/usr/bin/git config --local gc.auto 0
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5863184Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5865077Z ##[group]Setting up auth
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5870977Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.5905380Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.6285798Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.6321153Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.6568417Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.6594870Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.7566559Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.7570940Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.7572634Z ##[group]Fetching the repository
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:55.7575319Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +549d85619931c6dd92bbcc78ffada5a9da6e2198:refs/remotes/origin/main
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:56.1781724Z From https://github.com/FATESAIKOU/aistorage-spike
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:56.1788358Z  * [new ref]         549d85619931c6dd92bbcc78ffada5a9da6e2198 -> origin/main
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:56.1795349Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:56.1797418Z ##[group]Determining the checkout info
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:56.1799945Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:56.1801528Z [command]/usr/bin/git sparse-checkout disable
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:56.1809584Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:56.1841423Z ##[group]Checking out the ref
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:56.1844059Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:56.1917465Z Switched to a new branch 'main'
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:56.1925995Z branch 'main' set up to track 'origin/main'.
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:56.1933151Z ##[endgroup]
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:56.1971211Z [command]/usr/bin/git log -1 --format=%H
+commit	Checkout（拿 inbox_probe.py）	2026-09-26T16:44:56.1996528Z 549d85619931c6dd92bbcc78ffada5a9da6e2198
+commit	時間起點	﻿2026-09-26T16:44:56.2230176Z ##[group]Run echo "START_UTC=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" | tee -a "$GITHUB_STEP_SUMMARY"
+commit	時間起點	2026-09-26T16:44:56.2231731Z ^[[36;1mecho "START_UTC=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	時間起點	2026-09-26T16:44:56.2523280Z shell: /usr/bin/bash -e {0}
+commit	時間起點	2026-09-26T16:44:56.2524022Z ##[endgroup]
+commit	時間起點	2026-09-26T16:44:56.2653679Z START_UTC=2026-09-26T16:44:56.264Z
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	﻿2026-09-26T16:44:56.2733826Z ##[group]Run set -euo pipefail
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:44:56.2800998Z ^[[36;1mset -euo pipefail^[[0m
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:44:56.2802488Z ^[[36;1mpython3 spike/inbox_probe.py > /tmp/inbox.txt^[[0m
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:44:56.2803538Z ^[[36;1mcount="$(head -1 /tmp/inbox.txt)"^[[0m
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:44:56.2804382Z ^[[36;1mecho "count=$count" >> "$GITHUB_OUTPUT"^[[0m
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:44:56.2805298Z ^[[36;1mecho "收件匣檔案數：$count" | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:44:56.2806418Z ^[[36;1mtail -n +2 /tmp/inbox.txt | sed 's/^/  - /' | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:44:56.2866759Z shell: /usr/bin/bash -e {0}
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:44:56.2867464Z env:
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:44:56.2873531Z   RCLONE_CONF: ***
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:44:56.2874242Z   INBOX_ID: 173O-NBiv3iFygsV4IDQj7Zjcba5A4_K7
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:44:56.2875027Z ##[endgroup]
+commit	以資料夾 id 掃收件匣（純 Python，未安裝工具）	2026-09-26T16:44:56.7090676Z 收件匣檔案數：0
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	﻿2026-09-26T16:44:56.7357176Z ##[group]Run set -euo pipefail
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:44:56.7359025Z ^[[36;1mset -euo pipefail^[[0m
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:44:56.7361187Z ^[[36;1mANNEX_SHA256=a3c9d10ee33a7ace69efeaa8cd6282cfd7444ec797d732cebae12a64efefa18a^[[0m
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:44:56.7365064Z ^[[36;1mcurl -fsSL "https://downloads.kitenet.net/git-annex/linux/current/git-annex-standalone-amd64.tar.gz" -o /tmp/git-annex.tar.gz^[[0m
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:44:56.7368625Z ^[[36;1mecho "${ANNEX_SHA256}  /tmp/git-annex.tar.gz" | sha256sum -c -^[[0m
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:44:56.7370713Z ^[[36;1msudo tar -xzf /tmp/git-annex.tar.gz -C /opt^[[0m
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:44:56.7372849Z ^[[36;1msudo ln -sf /opt/git-annex.linux/git-annex /usr/local/bin/git-annex^[[0m
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:44:56.7375483Z ^[[36;1msudo ln -sf /opt/git-annex.linux/git-annex-shell /usr/local/bin/git-annex-shell^[[0m
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:44:56.7378488Z ^[[36;1msudo ln -sf /opt/git-annex.linux/git-remote-annex /usr/local/bin/git-remote-annex^[[0m
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:44:56.7381727Z ^[[36;1msudo sed -i 's/^GIT_ANNEX_PACKAGE_INSTALL=$/GIT_ANNEX_PACKAGE_INSTALL=1/' /opt/git-annex.linux/runshell^[[0m
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:44:56.7384332Z ^[[36;1mgit annex version | sed -n 1p^[[0m
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:44:56.7385877Z ^[[36;1mcommand -v git-remote-annex^[[0m
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:44:56.7452011Z shell: /usr/bin/bash -e {0}
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:44:56.7453361Z ##[endgroup]
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:44:59.3048416Z /tmp/git-annex.tar.gz: OK
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:45:01.0119764Z git-annex version: 10.20260717-g0c917920c80ab1e8cc3d8f5886537708949e1659
+commit	安裝 git-annex（與 Dockerfile 同版本同 sha256）	2026-09-26T16:45:01.0121307Z /usr/local/bin/git-remote-annex
+commit	安裝 rclone（與 Dockerfile 同版本同 sha256）	﻿2026-09-26T16:45:01.0182832Z ##[group]Run set -euo pipefail
+commit	安裝 rclone（與 Dockerfile 同版本同 sha256）	2026-09-26T16:45:01.0183222Z ^[[36;1mset -euo pipefail^[[0m
+commit	安裝 rclone（與 Dockerfile 同版本同 sha256）	2026-09-26T16:45:01.0183529Z ^[[36;1mRCLONE_VERSION=1.75.1^[[0m
+commit	安裝 rclone（與 Dockerfile 同版本同 sha256）	2026-09-26T16:45:01.0183988Z ^[[36;1mRCLONE_SHA256=982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab^[[0m
+commit	安裝 rclone（與 Dockerfile 同版本同 sha256）	2026-09-26T16:45:01.0184787Z ^[[36;1mcurl -fsSL "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-amd64.zip" -o /tmp/rclone.zip^[[0m
+commit	安裝 rclone（與 Dockerfile 同版本同 sha256）	2026-09-26T16:45:01.0185515Z ^[[36;1mecho "${RCLONE_SHA256}  /tmp/rclone.zip" | sha256sum -c -^[[0m
+commit	安裝 rclone（與 Dockerfile 同版本同 sha256）	2026-09-26T16:45:01.0185928Z ^[[36;1munzip -q /tmp/rclone.zip -d /tmp^[[0m
+commit	安裝 rclone（與 Dockerfile 同版本同 sha256）	2026-09-26T16:45:01.0186460Z ^[[36;1msudo install -m 0755 "/tmp/rclone-v${RCLONE_VERSION}-linux-amd64/rclone" /usr/local/bin/rclone^[[0m
+commit	安裝 rclone（與 Dockerfile 同版本同 sha256）	2026-09-26T16:45:01.0186994Z ^[[36;1mrclone version | sed -n 1p^[[0m
+commit	安裝 rclone（與 Dockerfile 同版本同 sha256）	2026-09-26T16:45:01.0248294Z shell: /usr/bin/bash -e {0}
+commit	安裝 rclone（與 Dockerfile 同版本同 sha256）	2026-09-26T16:45:01.0248621Z ##[endgroup]
+commit	安裝 rclone（與 Dockerfile 同版本同 sha256）	2026-09-26T16:45:05.0962436Z /tmp/rclone.zip: OK
+commit	安裝 rclone（與 Dockerfile 同版本同 sha256）	2026-09-26T16:45:06.0460635Z rclone v1.75.1
+commit	寫入 rclone conf（從 secret，不印出）	﻿2026-09-26T16:45:06.2977234Z ##[group]Run set -euo pipefail
+commit	寫入 rclone conf（從 secret，不印出）	2026-09-26T16:45:06.2977632Z ^[[36;1mset -euo pipefail^[[0m
+commit	寫入 rclone conf（從 secret，不印出）	2026-09-26T16:45:06.2978507Z ^[[36;1mmkdir -p "$HOME/.config/rclone"; umask 077^[[0m
+commit	寫入 rclone conf（從 secret，不印出）	2026-09-26T16:45:06.2978995Z ^[[36;1mprintf '%s' "$RCLONE_CONF" > "$HOME/.config/rclone/rclone.conf"^[[0m
+commit	寫入 rclone conf（從 secret，不印出）	2026-09-26T16:45:06.2979435Z ^[[36;1mchmod 600 "$HOME/.config/rclone/rclone.conf"^[[0m
+commit	寫入 rclone conf（從 secret，不印出）	2026-09-26T16:45:06.2979865Z ^[[36;1mgit config --global user.email 'spike@aistorage.invalid'^[[0m
+commit	寫入 rclone conf（從 secret，不印出）	2026-09-26T16:45:06.2980333Z ^[[36;1mgit config --global user.name 'aistorage-spike-runner'^[[0m
+commit	寫入 rclone conf（從 secret，不印出）	2026-09-26T16:45:06.2980720Z ^[[36;1mecho "conf 已寫入，不印內容"^[[0m
+commit	寫入 rclone conf（從 secret，不印出）	2026-09-26T16:45:06.3039932Z shell: /usr/bin/bash -e {0}
+commit	寫入 rclone conf（從 secret，不印出）	2026-09-26T16:45:06.3040232Z env:
+commit	寫入 rclone conf（從 secret，不印出）	2026-09-26T16:45:06.3044298Z   RCLONE_CONF: ***
+commit	寫入 rclone conf（從 secret，不印出）	2026-09-26T16:45:06.3044572Z ##[endgroup]
+commit	寫入 rclone conf（從 secret，不印出）	2026-09-26T16:45:06.3178471Z conf 已寫入，不印內容
+commit	Clone ＋ Push ＋ 驗證（分段計時）	﻿2026-09-26T16:45:06.3234633Z ##[group]Run set -euo pipefail
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3235042Z ^[[36;1mset -euo pipefail^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3235447Z ^[[36;1m[ -n "$SPIKE_LOAD_REPO_URL" ] || { echo "SPIKE_LOAD_REPO_URL 未設"; exit 1; }^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3235881Z ^[[36;1mt0=$(date +%s%3N)^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3236207Z ^[[36;1mgit clone -b main "$SPIKE_LOAD_REPO_URL" /tmp/wt^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3236562Z ^[[36;1mt1=$(date +%s%3N)^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3236933Z ^[[36;1mecho "clone_history_ms=$((t1-t0))" | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3237383Z ^[[36;1mgit -C /tmp/wt log --oneline | sed -n 1p^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3237709Z ^[[36;1m^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3238279Z ^[[36;1mif [ "full" = "clone-only" ]; then^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3238792Z ^[[36;1m  echo "clone-only：量 annex get（1GB 內容）後結束，不 push" | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3239285Z ^[[36;1m  cd /tmp/wt^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3239594Z ^[[36;1m  git annex init runner >/dev/null 2>&1 || true^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3239949Z ^[[36;1m  t2=$(date +%s%3N)^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3240264Z ^[[36;1m  git annex get bulk-1gb.bin^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3240562Z ^[[36;1m  t3=$(date +%s%3N)^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3240945Z ^[[36;1m  echo "annex_get_1gb_ms=$((t3-t2))" | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3241436Z ^[[36;1m  sha256sum bulk-1gb.bin | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3241817Z ^[[36;1m  exit 0^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3242048Z ^[[36;1mfi^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3242261Z ^[[36;1m^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3242962Z ^[[36;1mecho "runner $(date -u +%Y-%m-%dT%H:%M:%SZ) $(git -C /tmp/wt rev-parse --short HEAD)" > /tmp/wt/runner-commit.txt^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3243910Z ^[[36;1mgit -C /tmp/wt add runner-commit.txt^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3244633Z ^[[36;1mgit -C /tmp/wt commit -qm "runner commit $(date -u +%Y-%m-%dT%H:%M:%SZ)"^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3245374Z ^[[36;1mnew_head=$(git -C /tmp/wt rev-parse HEAD)^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3245922Z ^[[36;1m^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3246412Z ^[[36;1mt2=$(date +%s%3N)^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3246969Z ^[[36;1mgit -C /tmp/wt push origin main git-annex^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3247580Z ^[[36;1mt3=$(date +%s%3N)^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3248439Z ^[[36;1m# review H3：push 後的 ls-remote 驗證也算進提交耗時^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3249025Z ^[[36;1mt4=$(date +%s%3N)^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3249703Z ^[[36;1mremote_head=$(git -C /tmp/wt ls-remote origin refs/heads/main | cut -f1)^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3250432Z ^[[36;1mt5=$(date +%s%3N)^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3251006Z ^[[36;1mecho "push_ms=$((t3-t2))" | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3251785Z ^[[36;1mecho "verify_ms=$((t5-t4))" | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3252626Z ^[[36;1mecho "push_plus_verify_ms=$((t3-t2+t5-t4))" | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3253173Z ^[[36;1mecho "local HEAD=$new_head remote main=$remote_head"^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3253586Z ^[[36;1mif [ "$new_head" != "$remote_head" ]; then^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3253948Z ^[[36;1m  echo "::error::push 靜默失敗：remote main 沒有前進"^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3254275Z ^[[36;1m  exit 1^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3254509Z ^[[36;1mfi^[[0m
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3313127Z shell: /usr/bin/bash -e {0}
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3313417Z env:
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3314004Z   SPIKE_LOAD_REPO_URL: annex::70404bdc-86e0-416e-a106-2d4d11fb629c?encryption=none&type=rclone&rcloneremotename=gdrive&rcloneprefix=agora-load
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3314661Z ##[endgroup]
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:06.3417001Z Cloning into '/tmp/wt'...
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:21.8590868Z clone_history_ms=15517
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:21.8687735Z 610ebbb load 500
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:38.8000583Z To annex::70404bdc-86e0-416e-a106-2d4d11fb629c?encryption=none&type=rclone&rcloneremotename=gdrive&rcloneprefix=agora-load
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:38.8001967Z    610ebbb..cd4ed98  main -> main
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:46.9082703Z push_ms=15180
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:46.9097619Z verify_ms=8087
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:46.9117339Z push_plus_verify_ms=23267
+commit	Clone ＋ Push ＋ 驗證（分段計時）	2026-09-26T16:45:46.9129290Z local HEAD=cd4ed988a8e5a9578ae7c8d07fd9f336d48f6deb remote main=cd4ed988a8e5a9578ae7c8d07fd9f336d48f6deb
+commit	時間終點與計費參考	﻿2026-09-26T16:45:46.9171308Z ##[group]Run echo "END_UTC=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" | tee -a "$GITHUB_STEP_SUMMARY"
+commit	時間終點與計費參考	2026-09-26T16:45:46.9172005Z ^[[36;1mecho "END_UTC=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)" | tee -a "$GITHUB_STEP_SUMMARY"^[[0m
+commit	時間終點與計費參考	2026-09-26T16:45:46.9231595Z shell: /usr/bin/bash -e {0}
+commit	時間終點與計費參考	2026-09-26T16:45:46.9231903Z ##[endgroup]
+commit	時間終點與計費參考	2026-09-26T16:45:46.9325778Z END_UTC=2026-09-26T16:45:46.932Z
+commit	Post Checkout（拿 inbox_probe.py）	﻿2026-09-26T16:45:46.9450668Z Post job cleanup.
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:45:47.0352187Z [command]/usr/bin/git version
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:45:47.0394859Z git version 2.55.0
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:45:47.0432890Z Copying '/home/runner/.gitconfig' to '/home/runner/work/_temp/33e498e0-b3a9-4391-b012-f01552612baf/.gitconfig'
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:45:47.0444899Z Temporarily overriding HOME='/home/runner/work/_temp/33e498e0-b3a9-4391-b012-f01552612baf' before making global git config changes
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:45:47.0446861Z Adding repository directory to the temporary git global config as a safe directory
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:45:47.0451326Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/aistorage-spike/aistorage-spike
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:45:47.0495024Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:45:47.0534727Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:45:47.0790279Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:45:47.0831332Z http.https://github.com/.extraheader
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:45:47.0844760Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:45:47.0881619Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:45:47.1125444Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+commit	Post Checkout（拿 inbox_probe.py）	2026-09-26T16:45:47.1160230Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+commit	Complete job	﻿2026-09-26T16:45:47.1542781Z Cleaning up orphan processes
+commit	Complete job	2026-09-26T16:45:47.1836111Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

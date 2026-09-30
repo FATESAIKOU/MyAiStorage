@@ -1,0 +1,28 @@
+== FULL-download cleaner (f3_clean, dry-run) ==
+  [KEEP] /GITBUNDLE-s2679--c2febd2f-f053-4012-8b0e-fa932e763922-fea4a9a31d7b24d5a6ab2a11f501a2300fa05f31e9a05e4ea312a3bbb628a8a6 id=1IXQUQ9-4MN98zzzLeJUtTvvFJTmR3CJm (bundle-被引用且雜湊相符)
+  [KEEP] /GITBUNDLE-s389--c2febd2f-f053-4012-8b0e-fa932e763922-1a9eb385d331ee885f24606e14fb42731570bc701a516949c8d78056e9c3d504 id=1LwSZkzKpGBkiROKwUfLHVWHRAa4g1IpV (bundle-被引用且雜湊相符)
+  [KEEP] /GITBUNDLE-s521--c2febd2f-f053-4012-8b0e-fa932e763922-e1f9976dc980bae931e7b5b0ff00a1ab9561e01739971420311b5f8af82d4f4b id=1ECIAVBnsax2Db3uAVQkzdnVMJa6PZp6V (bundle-被引用且雜湊相符)
+  [KEEP] /GITBUNDLE-s531--c2febd2f-f053-4012-8b0e-fa932e763922-518e6b0b0a88fe28f1e6daaa16ed74c2d3f3f276aeb676d5767a75f39f695090 id=1TeuYw1NS0pCItv-PcQxa-J8HO2m7uwPY (bundle-被引用且雜湊相符)
+  [KEEP] /GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 id=1aOl0P79HPpdwF1DTRBibaqEr2fc-9WqR (manifest-內容相符)
+  [KEEP] /GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922.bak id=1vFJFYzOOpZCULbs5IkjpkQzFw5uOLQaV (manifest-內容相符)
+  [KEEP] /SHA256E-s18--408838fc1b6efd75c669b66f2f2611de79b5c4514375b3298a705b219a2264ac.bin id=1SzrymM7EJnaMZhAnsKDW3CWQPONAWZts (annex-object-結構有效)
+  [KEEP] /SHA256E-s204800--cda04a975f86da471071ffa0587c2177a2e5a99c3196bae13e9c179a0817cfaf.bin id=1cXz9056-pKjMBaBtrN-jeloOhfQiU-LP (annex-object-結構有效)
+  [would_move] /c-nested-f4/ id=1PBneA4m10bDE1X7nOK47kiIRZ2YAODFq (subfolder-非可信結構（含子樹）)
+  [would_move] /GITBUNDLE-s100--c2febd2f-f053-4012-8b0e-fa932e763922-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa id=1YPJ7-05Mz1ijlc5CwTg16kOBw63Dwq4o (bundle-未被引用或雜湊不符)
+  [would_move] /GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 id=1h5UmEqYBlLilfjTKsyKNNNsIbgwvgcHg (manifest-內容不符)
+== metadata-only snapshot + clean (dry-run) ==
+snapshot(meta) folder=1S7XOdRUH4SAwspZvAZDKl0BodFtoTeaZ manifests=3 bundles=5 annex=2 others=1 media_gets=2 bytes=946
+  manifest id=1h5UmEqYBlLilfjTKsyKNNNsIbgwvgcHg name=GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 sha=d9e13d62f9923056 trusted=False parsed=False valid=False
+  manifest id=1vFJFYzOOpZCULbs5IkjpkQzFw5uOLQaV name=GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922.bak sha=81aad756d6a47016 trusted=True parsed=True valid=True
+  manifest id=1aOl0P79HPpdwF1DTRBibaqEr2fc-9WqR name=GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 sha=81aad756d6a47016 trusted=True parsed=True valid=True
+  [KEEP] /GITBUNDLE-s2679--c2febd2f-f053-4012-8b0e-fa932e763922-fea4a9a31d7b24d5a6ab2a11f501a2300fa05f31e9a05e4ea312a3bbb628a8a6 id=1IXQUQ9-4MN98zzzLeJUtTvvFJTmR3CJm (bundle-被引用且雜湊相符（metadata）)
+  [KEEP] /GITBUNDLE-s389--c2febd2f-f053-4012-8b0e-fa932e763922-1a9eb385d331ee885f24606e14fb42731570bc701a516949c8d78056e9c3d504 id=1LwSZkzKpGBkiROKwUfLHVWHRAa4g1IpV (bundle-被引用且雜湊相符（metadata）)
+  [KEEP] /GITBUNDLE-s521--c2febd2f-f053-4012-8b0e-fa932e763922-e1f9976dc980bae931e7b5b0ff00a1ab9561e01739971420311b5f8af82d4f4b id=1ECIAVBnsax2Db3uAVQkzdnVMJa6PZp6V (bundle-被引用且雜湊相符（metadata）)
+  [KEEP] /GITBUNDLE-s531--c2febd2f-f053-4012-8b0e-fa932e763922-518e6b0b0a88fe28f1e6daaa16ed74c2d3f3f276aeb676d5767a75f39f695090 id=1TeuYw1NS0pCItv-PcQxa-J8HO2m7uwPY (bundle-被引用且雜湊相符（metadata）)
+  [KEEP] /GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 id=1aOl0P79HPpdwF1DTRBibaqEr2fc-9WqR (manifest-內容相符（metadata）)
+  [KEEP] /GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922.bak id=1vFJFYzOOpZCULbs5IkjpkQzFw5uOLQaV (manifest-內容相符（metadata）)
+  [KEEP] /SHA256E-s18--408838fc1b6efd75c669b66f2f2611de79b5c4514375b3298a705b219a2264ac.bin id=1SzrymM7EJnaMZhAnsKDW3CWQPONAWZts (annex-object-結構有效（metadata）)
+  [KEEP] /SHA256E-s204800--cda04a975f86da471071ffa0587c2177a2e5a99c3196bae13e9c179a0817cfaf.bin id=1cXz9056-pKjMBaBtrN-jeloOhfQiU-LP (annex-object-結構有效（metadata）)
+  [would_move] /c-nested-f4/ id=1PBneA4m10bDE1X7nOK47kiIRZ2YAODFq (subfolder-非可信結構（含子樹）)
+  [would_move] /GITBUNDLE-s100--c2febd2f-f053-4012-8b0e-fa932e763922-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa id=1YPJ7-05Mz1ijlc5CwTg16kOBw63Dwq4o (bundle-未被引用或雜湊不符（metadata）)
+  [would_move] /GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 id=1h5UmEqYBlLilfjTKsyKNNNsIbgwvgcHg (manifest-內容不符（metadata）)

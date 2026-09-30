@@ -1,0 +1,41 @@
+
+### 1) 抹除後查驗
+=== a. 現行版本（全新 clone）===
+  Disabling ssh connection caching.
+   工作樹檔案:
+   total 12
+   drwxr-xr-x 1 501 dialout   96 Sep 26 16:01 .
+   drwx------ 1 501 dialout 1280 Sep 26 16:01 ..
+   drwxr-xr-x 1 501 dialout  448 Sep 26 16:01 .git
+   grep -r 工作樹 canary:
+   （無命中）
+   git grep HEAD canary:
+   （無命中）
+
+=== b. git 歷史（clone 內）===
+   git log --all -S canary -p:
+   （以上無輸出＝無命中）
+   rev-list --all --objects 含 erase-canary 的項數:
+0
+   0
+   git annex unused / fsck:
+     To remove unwanted data: git-annex dropunused NUMBER
+     
+   ok
+   (recording state in git...)
+   annex 物件（**只掃這個 clone 內**）含 canary 的檔數:
+   0（無命中）
+
+=== c. bundle（依 GITMANIFEST 順序 unbundle，任何 bundle 解不開即判查驗無效）===
+   bundle 檔數：1
+   manifest：GITMANIFEST--e21ed358-47bc-4c66-b4b9-d8046484e9e2
+   --- 依 manifest 順序（共 1 顆）逐顆 unbundle ---
+   ok：GITBUNDLE-s1367--e21ed358-47bc-4c66-b4b9-d8046484e9e2-0435393ea047f142759e638603ac320703d94331cc2b57a4ae60f846f70ed56e
+   累積物件數：11
+   無命中（manifest 鏈）
+   --- 交叉檢查：逐一獨立 unbundle ---
+   無命中：GITBUNDLE-s1367--e21ed358-47bc-4c66-b4b9-d8046484e9e2-0435393ea047f142759e638603ac320703d94331cc2b57a4ae60f846f70ed56e
+   annex 物件以 key（SHA256）確認：
+     （無 annex 物件）
+
+### part=postcheck 完成

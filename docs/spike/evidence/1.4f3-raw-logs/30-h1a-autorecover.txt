@@ -1,0 +1,35 @@
+== H1(a): simulate kill after push, before promote (pending on disk, promoted stale) ==
+pending exists: yes
+== next round: prepare must auto-recover (promote from pending), not quarantine real files ==
+== parents ==
+level=agora-1.4f3 parent=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj count=1 expected_id=1S7XOdRUH4SAwspZvAZDKl0BodFtoTeaZ
+  [EXPECTED] id=1S7XOdRUH4SAwspZvAZDKl0BodFtoTeaZ
+PARENTS-OK
+== settle pending ==
+settle: 發現 pending（main=494ac08f53344a420806ba9c4d76463b3fe46d06）
+snapshot folder=1S7XOdRUH4SAwspZvAZDKl0BodFtoTeaZ manifests=2 bundles=3 annex=1 others=0 out=/Users/fatesaikou/.local/share/aistorage-spike/work/oc14f3/snapshot.json
+  manifest id=1LyZBPxrtRsIzLsoO9BSg7iI6i83Ty02T name=GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922.bak sha=6422ba571348b8be parsed=True valid=True reasons=[]
+  manifest id=17T8-riIkSWt7nhR5S3tUzgfOVkvg-VwF name=GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 sha=6422ba571348b8be parsed=True valid=True reasons=[]
+candidate id=1LyZBPxrtRsIzLsoO9BSg7iI6i83Ty02T name=GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922.bak skipped (bak)
+candidate id=17T8-riIkSWt7nhR5S3tUzgfOVkvg-VwF name=GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 ok=True refs={"refs/heads/git-annex": "a51d0562232911bc9e6283b194fcd4df1f1b82a3", "refs/heads/main": "494ac08f53344a420806ba9c4d76463b3fe46d06"}
+passing_count=1 distinct_passing_sha=1
+REPLAY-UNIQUE-PASS
+result_written=/Users/fatesaikou/.local/share/aistorage-spike/work/oc14f3/settle-replay-result.json
+settle: pending 的 refs 可由遠端內容唯一重放 → 轉正（自動恢復）
+pin_promoted=/Users/fatesaikou/.local/share/aistorage-spike/work/oc14f3/pin.json main=494ac08f53344a420806ba9c4d76463b3fe46d06 git-annex=a51d0562232911bc9e6283b194fcd4df1f1b82a3 manifest_sha=6422ba571348b8be… bundles=3 annex_objects=1
+== clean ==
+op=clean folder=1S7XOdRUH4SAwspZvAZDKl0BodFtoTeaZ trusted_manifest=2 trusted_bundles=3
+kept_count=6 moved_count=0 move_failures=0
+  [KEEP] /GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922.bak id=1LyZBPxrtRsIzLsoO9BSg7iI6i83Ty02T (manifest-內容相符)
+  [KEEP] /GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 id=17T8-riIkSWt7nhR5S3tUzgfOVkvg-VwF (manifest-內容相符)
+  [KEEP] /GITBUNDLE-s521--c2febd2f-f053-4012-8b0e-fa932e763922-e1f9976dc980bae931e7b5b0ff00a1ab9561e01739971420311b5f8af82d4f4b id=1ECIAVBnsax2Db3uAVQkzdnVMJa6PZp6V (bundle-被引用且雜湊相符)
+  [KEEP] /GITBUNDLE-s2679--c2febd2f-f053-4012-8b0e-fa932e763922-fea4a9a31d7b24d5a6ab2a11f501a2300fa05f31e9a05e4ea312a3bbb628a8a6 id=1IXQUQ9-4MN98zzzLeJUtTvvFJTmR3CJm (bundle-被引用且雜湊相符)
+  [KEEP] /SHA256E-s204800--cda04a975f86da471071ffa0587c2177a2e5a99c3196bae13e9c179a0817cfaf.bin id=1cXz9056-pKjMBaBtrN-jeloOhfQiU-LP (annex-object-結構有效)
+  [KEEP] /GITBUNDLE-s389--c2febd2f-f053-4012-8b0e-fa932e763922-1a9eb385d331ee885f24606e14fb42731570bc701a516949c8d78056e9c3d504 id=1LwSZkzKpGBkiROKwUfLHVWHRAa4g1IpV (bundle-被引用且雜湊相符)
+CLEAN-OK
+== verify vs promoted ==
+verify: refs={"refs/heads/git-annex": "a51d0562232911bc9e6283b194fcd4df1f1b82a3", "refs/heads/main": "494ac08f53344a420806ba9c4d76463b3fe46d06"}
+verify: manifest_sha256=6422ba571348b8be… bundles=3
+prepare: OK
+prepare_rc=0
+pending after: gone

@@ -1,0 +1,16 @@
+== step3a: git push HEAD:refs/heads/probe-pat via gh credential helper ==
+remote: Write access to repository not granted.
+fatal: unable to access 'https://github.com/FATESAIKOU/aistorage-spike.git/': The requested URL returned error: 403
+push_probe-pat_rc=128
+== step3b: git push HEAD:main ==
+remote: Write access to repository not granted.
+fatal: unable to access 'https://github.com/FATESAIKOU/aistorage-spike.git/': The requested URL returned error: 403
+push_main_rc=128
+== proof that gh credential helper returned the PAT (compare in memory, no print) ==
+helper_used_pat=yes
+== negative control: invalid GH_TOKEN must give auth error (401), not write-denied ==
+remote: Invalid username or token. Password authentication is not supported for Git operations.
+fatal: Authentication failed for 'https://github.com/FATESAIKOU/aistorage-spike.git/'
+== step3c: API contents PUT ==
+{"message":"Resource not accessible by personal access token","documentation_url":"https://docs.github.com/rest/repos/contents#create-or-update-file-contents","status":"403"}gh: Resource not accessible by personal access token (HTTP 403)
+api_put_rc=1

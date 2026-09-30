@@ -1,0 +1,4 @@
+inventory_written=/var/folders/gp/bgth03d57dn53ys13c29m0_h0000gn/T/opencode/impl2/f2/inv/initial.json files=3 pinned_head=5950b3c272e4c0dad2793e0b833e652cecfe27b1
+  id=1DbQbD9AoukSPJ3XE8UdBzBb-BKEJKgta name=GITMANIFEST--616fdf69-6077-4730-ba09-e7e0553d2f74
+  id=1KgR24y8MQ9sSLbXWN7FOnYQ4TlvBhAa3 name=GITMANIFEST--616fdf69-6077-4730-ba09-e7e0553d2f74.bak
+  id=1rwWwyiVGRuj1ZfD3LfZZjU5-W3qzPjoI name=GITBUNDLE-s390--616fdf69-6077-4730-ba09-e7e0553d2f74-3f9e9bcbf35c1556a5a99d20e025ac2003f3fb95586ec9b8b5eadfdb8eaa257c

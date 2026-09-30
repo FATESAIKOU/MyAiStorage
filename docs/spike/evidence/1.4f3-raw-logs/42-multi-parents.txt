@@ -1,0 +1,21 @@
+== M2: C creates duplicate at layer 1 (agora-1.4f3multi) ==
+http=200
+file_id=1r6CjTS4ERqLJYPIX4LDDLx8uuBw-PE0i
+== M2: C creates duplicate at layer 2 (inner, under the REAL layer-1) ==
+http=200
+file_id=16UgpXTr3RN6MB6auejOA9PW4n3PqmbP9
+== M2: parents check (multi-level) should find and quarantine both ==
+level=agora-1.4f3multi parent=1Obn3Rj1Quyg1l_2YW0GhXE39FpETeyLj count=2 expected_id=1R79gKSkgKLwjbdzkYIXAMXr-uBvsvj2y
+  [DUPLICATE] id=1r6CjTS4ERqLJYPIX4LDDLx8uuBw-PE0i
+  [EXPECTED] id=1R79gKSkgKLwjbdzkYIXAMXr-uBvsvj2y
+  moved id=1r6CjTS4ERqLJYPIX4LDDLx8uuBw-PE0i http=200
+level=agora-1.4f3multi/inner parent=1R79gKSkgKLwjbdzkYIXAMXr-uBvsvj2y count=2 expected_id=1Su10xF22tniML94RYAVtOlX4hKs7pRJB
+  [DUPLICATE] id=16UgpXTr3RN6MB6auejOA9PW4n3PqmbP9
+  [EXPECTED] id=1Su10xF22tniML94RYAVtOlX4hKs7pRJB
+  moved id=16UgpXTr3RN6MB6auejOA9PW4n3PqmbP9 http=200
+PARENTS-OK
+parents_rc=0
+== re-check ==
+level=agora-1.4f3multi/inner parent=1R79gKSkgKLwjbdzkYIXAMXr-uBvsvj2y count=1 expected_id=1Su10xF22tniML94RYAVtOlX4hKs7pRJB
+  [EXPECTED] id=1Su10xF22tniML94RYAVtOlX4hKs7pRJB
+PARENTS-OK

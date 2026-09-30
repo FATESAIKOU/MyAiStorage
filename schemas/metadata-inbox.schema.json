@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:aistorage:schema:metadata-inbox",
+  "title": "AiStorage Inbox Metadata Schema",
+  "description": "收件匣項目的共通 metadata（由寫入者提供，不含產生者）",
+  "type": "object",
+  "required": [
+    "id",
+    "type",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^\\S+$",
+      "description": "項目唯一識別碼（Session 為 <source>:<source_session_id>；其他項目為 <type>:<ULID>）"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "session",
+        "handoff",
+        "claim",
+        "continuation",
+        "reference",
+        "rewrite",
+        "artifact"
+      ],
+      "description": "項目型態（期 1 支援的值：session、handoff、claim、continuation、reference、rewrite、artifact）"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+      "description": "項目建立時間（RFC 3339 UTC Z 字串）"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,6})?Z$",
+      "description": "項目內容最後更新時間（RFC 3339 UTC Z 字串）"
+    },
+    "case_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "所屬案件（MyBrain 案件 id，不透明字串；未知或不適用時為 null）"
+    },
+    "provenance": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "出處說明（字串；不適用時為 null）"
+    },
+    "role": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "預留選填：角色識別（期 1 不驗證內容）"
+    },
+    "role_version": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "預留選填：角色版本（期 1 不驗證內容）"
+    }
+  },
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "session"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^(?!(handoff|claim|reference|continuation|rewrite|artifact|session):)[a-z0-9][a-z0-9_-]*:\\S+$"
+          }
+        }
+      }
+
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "handoff"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^handoff:[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "claim"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^claim:[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "continuation"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^continuation:[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "reference"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^reference:[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "rewrite"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^rewrite:[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "artifact"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^artifact:[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      }
+    }
+  ]
+}

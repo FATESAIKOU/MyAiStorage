@@ -1,0 +1,32 @@
+### 1.4f C files.get on agora-attack prefix folder
+op=get
+target=1IP1mlfMuF4lrV53juSyPINrItax9g72I
+http=404
+reason=notFound
+message=File not found: 1IP1mlfMuF4lrV53juSyPINrItax9g72I.
+### 1.4f C list children of prefix folder
+op=list-children
+target=1IP1mlfMuF4lrV53juSyPINrItax9g72I
+http=200
+count=0
+### 1.4f C creates c-into-repo.txt in prefix folder
+op=create-file
+name=c-into-repo.txt
+parent=1IP1mlfMuF4lrV53juSyPINrItax9g72I
+http=200
+file_id=1OM-aB-WZ6NBG5V5AfKFpmwWooTTMg6ol
+md5=01072dba600820a3ca689ec929592328
+### 1.4f C creates SAME-NAME file as GITMANIFEST (random content)
+op=create-file
+name=GITMANIFEST--4c20f00b-9ec3-4457-b5b3-7f3e0c52d7d6
+parent=1IP1mlfMuF4lrV53juSyPINrItax9g72I
+http=200
+file_id=1ORpMsOz5IgXt_YRnCTj2knb9Xx97XI5c
+md5=5255791f08a3ccfe8038573db191b703
+### 1.4f C creates SAME-NAME file as GITBUNDLE
+op=create-file
+name=GITBUNDLE-s395--4c20f00b-9ec3-4457-b5b3-7f3e0c52d7d6-93a4e2d836810fe76f6e461a4b4ca6e63e9073c1ee79ae428878150603116c8d
+parent=1IP1mlfMuF4lrV53juSyPINrItax9g72I
+http=200
+file_id=1QnHBeD6f7e2WXkIfU6S32aZXAd4fZHbB
+md5=e4410f0f7255b469b3150547cfec222f
