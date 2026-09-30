@@ -33,6 +33,14 @@ DEFAULT_LARGEFILES = "include=sessions/*/*/raw"
 #: 根**。寧可讓它明確地找不到，也不要讓它安靜地連到錯的地方。
 _RCLONE_SENTINEL = "/nonexistent/aistorage-rclone-config-not-set"
 
+#: 子程序預設的 git 身分，與 `SubprocessAnnexGit.commit()` 用的同一組。
+_GIT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "AiStorage Committer",
+    "GIT_AUTHOR_EMAIL": "committer@aistorage.local",
+    "GIT_COMMITTER_NAME": "AiStorage Committer",
+    "GIT_COMMITTER_EMAIL": "committer@aistorage.local",
+}
+
 
 def get_git_env(
     rclone_conf: str | Path | None = None,
@@ -63,6 +71,13 @@ def get_git_env(
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_CONFIG_GLOBAL"] = "/dev/null"
     env["GIT_CONFIG_NOSYSTEM"] = "1"
+    # 全域設定被關掉之後就沒有 git 身分。`git-remote-annex` 在 clone 時自己會跑
+    # `git commit-tree`（建 git-annex 分支），拿不到身分就去猜 email；runner 的
+    # hostname 沒有網域，猜不出來，clone 直接失敗（2026-09-30 正式 run
+    # 36727247657，`failed to read sha from git commit-tree`）。Mac 上猜得出來，
+    # 所以本機看不到。呼叫端已經自己給身分時不覆蓋。
+    for key, value in _GIT_IDENTITY.items():
+        env.setdefault(key, value)
 
     resolved = rclone_conf or os.environ.get("AISTORAGE_RCLONE_CONF") or ""
     if not resolved:
