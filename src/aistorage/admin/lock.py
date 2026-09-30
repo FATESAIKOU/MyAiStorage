@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -109,12 +110,52 @@ class MemoryPinFiles(PinFiles):
         self.writes.append((relpath, f"delete: {message}"))
 
 
+def empty_pin_repo_message(repo_url: str) -> str:
+    """完全空的 pin repo（沒有任何 commit）時給管理者的訊息。
+
+    **為什麼程式不自己建立那個初始 commit**（保守、可逆的選擇）：
+
+    1. pin repo 是可信內容的**唯一來源**（ADR 0008），而它只對提交流程的 deploy key
+       有寫入權——那條寫入路徑是整個設計裡最該被監看的一條。在管理操作中「順手」
+       推進去一個 commit，等於讓一次以「抹除／回滾／重建釘選值」為名的操作，
+       在別人檢查 commit 記錄時看起來像是做了它沒宣告的事。
+    2. 不好回退。`.pin/*.json` 的內容雜湊被記在別處（讀取視圖、commit 訊息），
+       在一個還沒有任何釘選值的 repo 裡亂加 commit，之後要回頭清掉得動 git 歷史。
+    3. **這是設定期的錯誤，不是執行期的狀況。** 空的 pin repo 應該在部署手冊的
+       前置檢查就被發現（`deploy.md` 事前檢查第 2 條），不是等到真的要鎖的時候。
+    4. 整個 codebase 面對歧義的既定做法都是 fail-closed 並讓人來處理
+       （`AdminLock` 的 `_mark_aborted`／H5、提交流程遇到不確定就中止）。自動補一顆
+       commit 是唯一一個「自己猜」的做法，方向相反。
+
+    修正的成本很低而且 idempotent：一顆 README commit 就好。所以停在這裡。
+    """
+    return (
+        f"pin repo 裡還沒有任何 commit（{repo_url} 是空的），無法繼續。\n"
+        "\n"
+        "請先在 pin repo 放一個初始 commit（一個 README.md 就夠），再重跑這個指令。\n"
+        "\n"
+        "    # 用 git\n"
+        f"    git clone {repo_url} /tmp/pin-seed && cd /tmp/pin-seed\n"
+        "    printf '# pin repo\\n' > README.md\n"
+        "    git add README.md && git commit -m 'init: initial commit' && git push\n"
+        "\n"
+        "    # 或直接在 GitHub 網頁上 Add a README\n"
+        "\n"
+        "程式刻意不自動建立這顆 commit：pin repo 是可信內容的唯一來源（ADR 0008），\n"
+        "管理操作裡靜靜寫一個 commit 進去既難稽核也不好回退。寧可停在這裡讓人決定。\n"
+        "（這是設定期的錯誤，`docs/runbooks/deploy.md` 事前檢查第 2 條就該先發現。）"
+    )
+
+
 class GitPinFiles(PinFiles):
     """本機 git 操作的 pin 檔儲存（管理寫入身分）。
 
     repo_url 是本機路徑或 file:// 時不需要 SSH（測試與 Mac 本機管理用）；
     其他形式必須提供 key_path（deploy key），一律經 GIT_SSH_COMMAND 使用，
     不讀 ~/.ssh/config，不用 ssh-agent。
+
+    pin repo 必須已經有至少一個 commit；完全空的（`empty_pin_repo_message()`）
+    會在 `_ensure()` 擋下來，不會自己去補。
     """
 
     def __init__(self, repo_url: str, workdir: Path | str, *,
@@ -163,9 +204,22 @@ class GitPinFiles(PinFiles):
             raise AdminError(f"git {' '.join(args)} 失敗 (rc={proc.returncode})")
         return proc.stdout.strip()
 
+    def _has_commits(self) -> bool:
+        """這個 clone 裡有沒有任何 commit（`git rev-parse --verify HEAD` 的成敗）。"""
+        return subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"], cwd=self._workdir,
+            env=self._env, capture_output=True, text=True, timeout=60,
+            check=False,
+        ).returncode == 0
+
     def _ensure(self) -> None:
         if self._ready and (self._workdir / ".git").is_dir():
             self._run("fetch", "origin")
+            # 完全空的 pin repo 沒有 `origin/HEAD` 可 reset，`git reset --hard
+            # origin/HEAD` 會 rc=128「ambiguous argument 'origin/HEAD'」——那個
+            # 訊息對管理者毫無幫助。先確認有 commit，換成下面那則會告訴他怎麼辦的。
+            if not self._has_commits():
+                raise AdminError(empty_pin_repo_message(self._repo_url))
             self._run("reset", "--hard", "origin/HEAD")
             return
         import shutil
@@ -173,6 +227,9 @@ class GitPinFiles(PinFiles):
         self._workdir.mkdir(parents=True, exist_ok=True)
         self._run("clone", self._repo_url, ".")
         self._ready = True
+        # clone 空 repo 會成功（只有一句 warning），所以同樣要在這裡擋。
+        if not self._has_commits():
+            raise AdminError(empty_pin_repo_message(self._repo_url))
 
     def read_text(self, relpath: str) -> str | None:
         self._ensure()
@@ -222,6 +279,17 @@ def _real_runner(cmd: list[str]) -> str:
     return proc.stdout
 
 
+#: `gh` 對「這個 workflow 本來就不是 active」講的話（實測 gh 2.101.0 回
+#: `HTTP 403: Unable to disable a workflow that is not active.`）。
+#: 只認這一句，不做模糊比對——寧可漏判（照舊報錯）也不誤判（吞掉真的錯）。
+_NOT_ACTIVE_RE = re.compile(
+    r"unable to disable a workflow that is not active", re.IGNORECASE)
+
+
+def _is_not_active_error(err: BaseException) -> bool:
+    return bool(_NOT_ACTIVE_RE.search(str(err)))
+
+
 class GitHubAdmin:
     """gh CLI 包裝（管理者的登入；token 不進 argv、log 與例外）。
 
@@ -244,8 +312,40 @@ class GitHubAdmin:
             raise AdminError(f"gh 執行失敗: {e}") from None
 
     def set_workflow_enabled(self, workflow: str, enabled: bool) -> None:
-        action = "enable" if enabled else "disable"
-        self._run("workflow", action, workflow)
+        """把 workflow 設成 `enabled`，**冪等**。
+
+        `gh workflow disable` 對一個已經是停用狀態的 workflow 會回錯（實測 gh 2.101.0：
+        `HTTP 403: Unable to disable a workflow that is not active.`，rc=1）。這在
+        6.5 的路徑上會造成假的失敗：管理操作開始時 workflow 可能**已經**是停用的
+        （前一次中止沒清乾淨、人工先停用过、或連續跑兩次），而那正是我們要的狀態。
+        原本這裡會讓 `AdminLock.__enter__` 走 `_mark_aborted()`、把旗標留在
+        `aborted` 並中止整個管理操作——為了已經成立的事情。
+
+        兩道防線，都不解析錯誤訊息以外的東西：
+
+        1. 先查狀態。已經是目標狀態就直接當成功，不必送指令（`enable` 本身
+           冪等，但查一次比較便宜，也讓 `enable` 對稱）。
+        2. 查得到狀態卻仍送出指令且失敗——那是「查完到送指令之間狀態被別人改掉」
+           的競態。此時若錯誤講的是「已經不是 active」，代表**別人**剛好替我們
+           达成了目標狀態，同樣當成功。
+
+        查不到狀態（例如 repo 裡沒有這個 workflow）就**不假裝知道**，照常送指令，
+        讓原本的錯誤照舊往外拋——那個錯誤是對的，不該被冪等邏輯吞掉。
+        """
+        try:
+            already = self.workflow_enabled(workflow)
+        except AdminError:
+            already = None
+        if already is enabled:
+            return
+        try:
+            self._run("workflow", "enable" if enabled else "disable", workflow)
+        except AdminError as e:
+            # 「已經不是 active」這句本身就是**目標狀態已達成**的證明（是 GitHub
+            # 自己說的），所以不管前面查得到查不到都算成功。
+            if not enabled and _is_not_active_error(e):
+                return
+            raise
 
     def workflow_enabled(self, workflow: str) -> bool:
         """查詢 workflow 是否啟用。
