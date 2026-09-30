@@ -108,6 +108,7 @@ def load_roundtrip() -> dict:
         _start_stub(port)
         report["wire"] = _stage_stub_capture()
         report["merge"] = _stage_merge_interleaved()
+        report["no_time"] = _stage_merge_parts_without_time()
         yield report
     finally:
         _docker("rm", "-f", CONTAINER)
@@ -391,6 +392,148 @@ def _stage_stub_capture() -> dict:
 # ---------------------------------------------------------------------------
 # 第三段：n→1，兩段的時間交錯
 # ---------------------------------------------------------------------------
+
+
+def _stage_merge_parts_without_time() -> dict:
+    """n→1，其中一段的 part **沒有 `time` 欄位**：平移後欄位集合必須不變、匯入成功。
+
+    9.2 的失敗形狀：真實的 opencode 匯出裡，`step-start`／`step-finish`／`tool`
+    這幾種 part 常常沒有 `time`，而 `shift_times` 以前對它們也無條件寫回
+    `p["time"] = ...` → 憑空多出 `time: null`，`opencode import` 對型別很嚴，
+    整份拒收。
+
+    這裡用真的容器跑：把一段 raw 的 part `time` 去掉（`text`／`reasoning` 留著，
+    免得動到 opencode 真的要求有時間的東西），組 n→1 起點包、平移、匯入，
+    再比對**平移前後每個 part 的欄位集合**，並確認匯入真的成功。
+    """
+    return _in_container(
+        f"""
+        import hashlib, json, os, subprocess
+        from pathlib import Path
+        from aistorage.agora_cli.package import (
+            ContextPackage, PackageSegment, write_package)
+        from aistorage.agora_cli.startpoint import ResolvedStartPoint, parse_startpoint
+
+        A, B = "ses_impl2notimeA1", "ses_impl2notimeB2"
+        KEEP_A, KEEP_B = 6, 3
+        env = dict(os.environ)
+        env.update({{"OPENCODE_DISABLE_PROJECT_CONFIG": "1"}})
+
+        # 這些 part 在真實匯出裡本來就沒有 time（9.2 的失敗形狀）
+        NO_TIME = ("step-start", "step-finish", "tool")
+
+        def export_to(sid, path):
+            subprocess.run(["sh", "-c", f"opencode export {{sid}} > {{path}}"],
+                           capture_output=True, cwd="/work", env=env, check=True)
+            return Path(path).read_bytes()
+
+        def source_session(native):
+            subprocess.run(["python3", "/probe-spike/session_import_fixture.py",
+                            f"/work/{{native}}.json", native], check=True, env=env,
+                           capture_output=True)
+            subprocess.run(["opencode", "import", f"/work/{{native}}.json"],
+                           capture_output=True, cwd="/work", env=env, check=True)
+            return export_to(native, f"/work/{{native}}-raw.json")
+
+        # 把 step-start／step-finish／tool 的 part time 拿掉：這些 part 在真實的
+        # opencode 匯出裡本來就常常沒有 time；保險起見（也讓這個案例一定測得到
+        # 東西）本來有的也拿掉——text／reasoning 留著，那兩種匯出時一定帶時間。
+        def strip_part_time(raw):
+            doc = json.loads(raw)
+            stripped = 0
+            for m in doc["messages"]:
+                for p in m["parts"]:
+                    if p.get("type") in NO_TIME and isinstance(p.get("time"), dict):
+                        del p["time"]
+                        stripped += 1
+            data = json.dumps(doc, ensure_ascii=False).encode("utf-8")
+            return data, stripped
+
+        def without_time(raw):
+            doc = json.loads(raw)
+            return sum(1 for m in doc["messages"] for p in m["parts"]
+                       if "time" not in p)
+
+        def segment(native, raw, keep):
+            doc = json.loads(raw)
+            ids = [m["info"]["id"] for m in doc["messages"]]
+            point = ids[keep - 1]
+            resolved = ResolvedStartPoint(
+                startpoint=parse_startpoint(f"opencode:{{native}}@{{point}}"),
+                session_id=f"opencode:{{native}}", source="opencode",
+                snapshot_sha256=hashlib.sha256(raw).hexdigest(), snapshot_at=None,
+                message_id=point)
+            chars = sum(len(p.get("text") or "")
+                        for m in doc["messages"][:keep] for p in m["parts"])
+            return PackageSegment(resolved=resolved, raw=raw, message_count=keep,
+                                  text_chars=chars)
+
+        # 每則訊息、每個 part 的欄位名稱集合（依序）
+        def field_sets(raw):
+            return [[sorted(p.keys()) for p in json.loads(raw)["messages"][i]["parts"]]
+                    for i in range(len(json.loads(raw)["messages"]))]
+
+        raw_a, raw_b = source_session(A), source_session(B)
+        # 兩段都去掉 part time：位移 0 的第一段也一併驗「沒有就不會生出來」
+        raw_a_clean, stripped_a = strip_part_time(raw_a)
+        raw_b_clean, stripped_b = strip_part_time(raw_b)
+        without_a, without_b = without_time(raw_a_clean), without_time(raw_b_clean)
+        before = field_sets(raw_b_clean)
+        before_first = field_sets(raw_a_clean)
+
+        seg_a = segment(A, raw_a_clean, KEEP_A)
+        seg_b = segment(B, raw_b_clean, KEEP_B)
+        write_package(ContextPackage(
+            segments=(seg_a, seg_b), task="兩段合一，後段有沒有 time 的 part",
+            new_session_id="opencode:ses_impl2notimed01",
+            created_at="2026-09-30T00:00:00Z", created_by="profile:impl2-test",
+            merge_later_segments=True), Path("/work/pkg-notime"))
+
+        # --print-export：不匯入就能看到平移後的形狀（欄位集合比對用）
+        printed = subprocess.run(
+            ["python3", "-m", "aistorage.adapters.opencode", "load",
+             "/work/pkg-notime", "-C", "/work", "--json", "--print-export"],
+            capture_output=True, text=True, cwd="/work", env=env)
+        assert printed.returncode == 0, printed.stdout + printed.stderr
+        built = json.loads(printed.stdout.strip().splitlines()[-1])["export"]
+
+        def part_keys(messages):
+            return [[sorted(p.keys()) for p in m["parts"]] for m in messages]
+
+        shifted = part_keys(built["messages"])[KEEP_A:KEEP_A + KEEP_B]
+        first_seg = part_keys(built["messages"])[:KEEP_A]
+        expected_first = before_first[:KEEP_A]
+
+        # 真的匯入（這是重點：以前會在這裡被 opencode 拒收）
+        loaded = subprocess.run(
+            ["python3", "-m", "aistorage.adapters.opencode", "load",
+             "/work/pkg-notime", "-C", "/work", "--json"],
+            capture_output=True, text=True, cwd="/work", env=env)
+        assert loaded.returncode == 0, loaded.stdout + loaded.stderr
+        result = json.loads(loaded.stdout.strip().splitlines()[-1])
+        after_doc = json.loads(
+            export_to(result["session_id"], "/work/notime.json").decode())
+
+        print(json.dumps({{
+            "stripped": {{"a": stripped_a, "b": stripped_b}},
+            "without_time": {{"a": without_a, "b": without_b}},
+            "before": before,
+            "shifted_field_sets": shifted,
+            "first_segment_field_sets": first_seg,
+            "expected_first": expected_first,
+            "field_sets_unchanged": shifted == before[:KEEP_B],
+            "first_segment_field_sets_unchanged": first_seg == expected_first,
+            "load": result,
+            "imported_messages": len(after_doc["messages"]),
+            "imported_parts_without_time": sum(
+                1 for m in after_doc["messages"] for p in m["parts"]
+                if p.get("type") in NO_TIME and "time" not in p),
+            "imported_null_times": sum(
+                1 for m in after_doc["messages"] for p in m["parts"]
+                if p.get("time", "absent") is None),
+        }}, ensure_ascii=False))
+        """,
+    )
 
 
 def _stage_merge_interleaved() -> dict:
@@ -701,3 +844,36 @@ def test_n_to_one_first_segment_prefix_is_byte_identical(load_roundtrip: dict):
     assert wire["last_of_a_is_probe"] is True, wire
     assert wire["raw_common_prefix_bytes"] >= wire["prefix_bytes"], wire
     assert len(set(wire["requests_per_run"])) == 1, wire["requests_per_run"]
+
+
+@pytest.mark.integration
+def test_n_to_one_parts_without_a_time_field_survive_the_shift(load_roundtrip: dict):
+    """n→1：part 本來沒有 `time` 的，平移後仍然沒有——而且匯入成功。
+
+    9.2 的失敗就落在這裡：`shift_times` 對 `step-start`／`step-finish`／`tool`
+    這些沒有 `time` 的 part 也無條件寫回，憑空生出 `time: null`，opencode import
+    對型別嚴，整份拒收（rc≠0、0 則訊息）。平移只該改數字，不該生欄位。
+    """
+    no_time = load_roundtrip["no_time"]
+    assert no_time["without_time"]["b"] > 0, (
+        "第二段沒有任何沒有 time 的 part，這個測試等於沒測到東西"
+    )
+    # 被平移的那一段：欄位集合一個不多一個不少
+    assert no_time["field_sets_unchanged"] is True, (
+        "平移改變了 part 的欄位集合（憑空多出 time 就會讓 import 拒收）："
+        f"{no_time['before']} → {no_time['shifted_field_sets']}"
+    )
+    # 第一段位移 0，欄位集合同樣一個不多一個不少
+    assert no_time["first_segment_field_sets_unchanged"] is True, no_time
+    assert no_time["load"]["segments"] == 2, no_time["load"]
+    assert no_time["load"]["time_shift_ms"][1] > 0, (
+        "第二段必須真的有位移，否則這個案例測不到平移"
+    )
+    assert no_time["imported_messages"] == no_time["load"]["messages"], no_time
+    assert no_time["imported_messages"] > 0, "匯入後一則都不剩：opencode 拒收了"
+    assert no_time["imported_null_times"] == 0, (
+        "匯入後出現 time: null——平移憑空造出了欄位"
+    )
+    assert no_time["imported_parts_without_time"] > 0, (
+        "沒有 time 的 part 在匯入後應該還是沒有"
+    )

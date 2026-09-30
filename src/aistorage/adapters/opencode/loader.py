@@ -303,6 +303,20 @@ def _shift_time_object(value: Any, offset: int) -> Any:
             for k, v in value.items()}
 
 
+def _shift_time_field(container: dict, offset: int) -> dict:
+    """平移 `container["time"]`；**本來沒有 `time` 欄位就完全不動它**。
+
+    為什麼要這樣：opencode 的匯出裡並不是每個 part 都有 `time`（text、
+    step-start／step-finish、tool 常常沒有），而 opencode import 對型別很嚴——
+    多出一個 `time: null` 就整份拒收。平移只改數字，不該憑空生出欄位，
+    所以這裡要求「欄位集合不變」，只有原本就有 `time` 的才平移再寫回。
+    """
+    if "time" not in container:
+        return container
+    container["time"] = _shift_time_object(container["time"], offset)
+    return container
+
+
 def shift_times(messages: Sequence[dict], offset: int) -> list[dict]:
     """把這一段的時間整體往後移 `offset` 毫秒（段內相對順序不變）。
 
@@ -310,18 +324,15 @@ def shift_times(messages: Sequence[dict], offset: int) -> list[dict]:
     一起移：排序只看得到訊息的 `created`，但讓整段的時鐘一致，匯出檔才不會出現
     「part 發生在它的訊息之前」。`offset` 為 0 時**原樣回傳**（第一段就是這樣，
     它必須與原始紀錄一個位元組都不差）。
+
+    欄位集合不變：沒有 `time` 的訊息／part 平移後仍然沒有（見 `_shift_time_field`）。
     """
     if not offset:
         return list(messages)
     out: list[dict] = []
     for m in messages:
-        info = dict(m.get("info") or {})
-        info["time"] = _shift_time_object(info.get("time"), offset)
-        parts: list[dict] = []
-        for p in m.get("parts") or []:
-            p = dict(p)
-            p["time"] = _shift_time_object(p.get("time"), offset)
-            parts.append(p)
+        info = _shift_time_field(dict(m.get("info") or {}), offset)
+        parts = [_shift_time_field(dict(p), offset) for p in (m.get("parts") or [])]
         out.append({**m, "info": info, "parts": parts})
     return out
 

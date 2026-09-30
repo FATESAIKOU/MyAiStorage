@@ -1149,6 +1149,49 @@ def test_shift_plan_keeps_intra_segment_order_and_only_moves_later_ones():
     assert shift_times(messages, 0) == messages
 
 
+def test_shift_times_never_invents_a_time_field():
+    """本來沒有 `time` 的 part／訊息，平移後仍然沒有。
+
+    opencode 的匯出裡 text、step-start／step-finish、tool 常常沒有 `time`，
+    而 `opencode import` 對型別很嚴：憑空多一個 `time: null` 就整份拒收
+    （9.2 的失敗）。所以平移只改數字，不生欄位。
+    """
+    from aistorage.adapters.opencode import shift_times
+
+    messages = [{
+        "info": {"id": "m0", "role": "assistant", "time": {"created": 50}},
+        "parts": [
+            {"id": "p0", "type": "step-start", "sessionID": "s", "messageID": "m0"},
+            {"id": "p1", "type": "step-finish", "sessionID": "s", "messageID": "m0",
+             "tokens": {"total": 10}},
+            {"id": "p2", "type": "tool", "sessionID": "s", "messageID": "m0",
+             "state": {"status": "completed", "time": {"start": 51, "end": 90}}},
+            {"id": "p3", "type": "text", "sessionID": "s", "messageID": "m0",
+             "time": {"start": 52, "end": 60}, "text": "在時間裡"},
+        ],
+    }, {
+        # 整則訊息都沒有 time（罕見但不能因此壞掉）
+        "info": {"id": "m1", "role": "user"},
+        "parts": [{"id": "p4", "type": "text", "text": "沒時間"}],
+    }]
+    before = [
+        (sorted(m["info"]), [sorted(p) for p in m["parts"]]) for m in messages
+    ]
+
+    shifted = shift_times(messages, 151)
+
+    after = [(sorted(m["info"]), [sorted(p) for p in m["parts"]]) for m in shifted]
+    assert after == before, "平移不得改變欄位集合"
+    for message in shifted:
+        assert all("time" not in p for p in message["parts"]
+                   if p["type"] in {"step-start", "step-finish"}), shifted
+    # 真的有 time 的仍然平移了
+    assert shifted[0]["parts"][3]["time"] == {"start": 203, "end": 211}
+    assert shifted[0]["info"]["time"] == {"created": 201}
+    # 原始紀錄沒被就地改寫
+    assert messages[0]["parts"][3]["time"] == {"start": 52, "end": 60}
+
+
 def test_build_export_uses_the_reserved_session_id_and_verifies_the_raw(tmp_path: Path):
     """轉接器沿用起點包預留的 session id，並且自己驗過原始紀錄。"""
     from aistorage.adapters.opencode import build_export
