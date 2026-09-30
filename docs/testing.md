@@ -60,7 +60,8 @@ uv run python scripts/run_integration.py --include-e2e      # 再加跑 tests/e2
 其他選項：
 
 - `--skip-leftovers`：不跑收尾殘留檢查（Drive 或 pin repo 連不上時）。
-- `--strict-leftovers`：有殘留時 exit code 也算 1（CI 用；預設只列出來）。
+- `--strict-leftovers`：**這一輪**有殘留時 exit code 也算 1（CI 用；預設只列出來）。
+  跑前就存在的舊東西不算——那不是這一輪的責任，算進去會讓每一場都紅。
 
 行為：
 
@@ -70,18 +71,41 @@ uv run python scripts/run_integration.py --include-e2e      # 再加跑 tests/e2
 - **不開 `-l`／rich traceback**（用 `--tb=short`）：本機區域變數可能含秘密或
   未過濾路徑，不能印進 Actions log（`docs/impl/group3-modules.md` 8.3 的 N8）。
 - **殘留檢查**：跑前拍一張快照（Drive 測試根底下的直接子資料夾名 ＋ pin repo
-  `.pin/` 條目名），跑完再拍一次，把新增的列出來。沒有自動刪——可能是別條線的。
+  `.pin/` 條目名），跑完再拍一次。摘要分成兩段：
+  **這一輪的殘留**（快照比對出來的新名稱）與**跑前就存在的舊東西**
+  （只報數量，指向清理腳本）。沒有自動刪——可能是別條線的。
 - **摘要與 exit code**：結束印各階段與合計的通過／失敗／略過數與總時間；
   任一階段失敗 → exit 1，preflight 沒過 → exit 2，全部通過 → 0。
 
 ### 殘留長什麼樣
 
-Drive 底下留下 `it-<ULID>/` 或 `it-erase-<ULID>/` 前綴、pin repo 留下
-`.pin/it-*.json`，就是有東西沒清掉。常見原因是測試被中斷（Ctrl-C、機器睡著）。
-conftest 的 `sweep_session_leftovers` 會補掃自己建過的 file id，但被硬殺就沒用。
+Drive 底下留下 `it-<ULID>/` 或 `it-erase-<ULID>/` 前綴（連同同名的
+`-inbox`／`-quarantine`／`-readview`）、pin repo 留下 `.pin/it-*`，就是有東西
+沒清掉。常見原因是測試被中斷（Ctrl-C、機器睡著）。
 
-要自己清的時候用 `scripts/e2e_setup.py --sweep-orphans` 之外的路子：前綴名是
-`it-` 開頭、`get()` 確認 parents 確實在測試根底下，再依 file id 永久刪除。
+conftest 的三道清理都只認「自己建過的 file id」：`sandbox` teardown 逐一刪掉
+它建的前綴與收件匣、`sweep_session_leftovers` 在整場結束時補掃一次、
+`cleanup_pin_entries` 用 pin store 自己的 `GIT_SSH_COMMAND` 推一筆刪除 commit。
+被硬殺就沒用——那些就是下面這支腳本要清的。
+
+清理失敗不再靜默：conftest 會用 `warnings.warn` 說出是什麼、哪個 id，
+整場結束再印一次彙總（否則「Drive 上留了東西」完全沒有線索）。
+
+### 清掉舊殘留
+
+```bash
+uv run python scripts/cleanup_integration_leftovers.py            # dry-run（預設）
+uv run python scripts/cleanup_integration_leftovers.py --confirm  # 真的刪
+```
+
+範圍只有整合測試自己的東西：Drive `TEST_FOLDER_ID` 底下符合 `it-<ULID>`
+（含 `it-erase-`）的前綴與其 `-inbox`／`-quarantine`／`-readview`，以及 pin-test
+repo 的 `.pin/it-*`。**`e2e-*` 一律不碰**（e2e 環境是單例，impl3 在用；要清
+e2e 的東西走 `scripts/e2e_setup.py --sweep-orphans`）。
+
+沒有 `--confirm` 就是 dry-run，會把「會刪什麼」與「不碰什麼」都列出來。
+`--confirm` 時每個資料夾刪之前重新 `get()` 確認 parents 與名字都對得上，
+對不上就跳過並說明——快照是上一個行程拍的，中間別人可能動過。
 
 ### e2e 額外前置
 
@@ -174,3 +198,10 @@ Actions 上唯一要注意的環境差異：
 `resolve_settings` 的環境變數覆寫、`diff_names`、`parse_junit`、
 `pytest_argv`（不開 `-l`）、`format_issues`／`format_summary` 的內容、
 `Summary.exit_code` 的組合。
+
+`tests/unit/test_cleanup_leftovers_smoke.py`：清理腳本的名字邊界
+（`it-<ULID>`／`it-erase-<ULID>`／三種附屬資料夾算，`e2e-*`／`syncer-*`／
+不像 ULID 的一律不算）、pin 條目的四種副檔名收斂成同一個條目名、
+`partition_leftovers` 把這一輪與更早的分開、`--strict-leftovers` 只對這一輪
+生效，以及 **CLI 預設絕不刪**（用假的 `confirm_deletions` /
+`confirm_pin_deletions` 斷言它們沒被呼叫）。
