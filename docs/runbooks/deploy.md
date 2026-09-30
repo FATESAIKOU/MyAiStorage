@@ -23,7 +23,9 @@
    worker client（project 2）、`spike-reader@…` SA、`FATESAIKOU/MyAiStorage-pin`、
    deploy key 私鑰 `~/.config/aistorage/pin-deploy-key`。
 2. 正式 pin repo **還沒有**任何 `.pin/*.json`（還沒 `init-pin`）。
-3. `FATESAIKOU/MyAiStorage` 的 Actions **還沒有**啟用 `committer` workflow。
+3. `FATESAIKOU/MyAiStorage` 的 Actions **停用中**（`gh workflow list --all --repo
+   FATESAIKOU/MyAiStorage` 的 `state` 是 `disabled_manually`）——正式部署完成前刻意不啟用，
+   排程才不會每 6 小時空跑一次。步驟 10 會開回來。
 4. Mac 上：`uv --version`、`git --version`、`git-annex version`、`rclone version`、`gh auth status` 都可用。
 5. `~/.config/aistorage/` 權限 700、其中 conf／key 檔 600：
    ```bash
@@ -571,17 +573,35 @@ PYEOF3
 
 ## 步驟 10｜啟用 committer workflow（排程每 6 小時）
 
-**誰做**：👤 使用者（GitHub 網頁：`FATESAIKOU/MyAiStorage` → Actions → `committer` → Enable）
+**誰做**：👤 使用者（GitHub 網頁：`FATESAIKOU/MyAiStorage` → Actions → `committer` → Enable，
+或用下面的 CLI）
 
 排程是 `.github/workflows/committer.yml` 裡的 `cron: "7 */6 * * *"`（每 6 小時的第 7 分），
 不需要改檔案。workflow 需要兩個 secret（步驟 7）與 `PIN_DEPLOY_KEY`。
 
+```bash
+gh workflow enable committer.yml --repo FATESAIKOU/MyAiStorage
+gh workflow list --all --repo FATESAIKOU/MyAiStorage   # state 應該是 active
+```
+
+**這一步不是選配**：2026-09-30 起 `committer` workflow 在正式部署完成前是**刻意停用**的
+（見 `docs/spike/evidence/3.1-6.5-github.md`），所以部署前 `gh workflow list` 只會顯示
+`disabled_manually`，排程不會空跑。而且步驟 4 的 `init-pin --confirm` 會經過
+`admin_lock_if_needed` → `AdminLock`，它為了等沒有執行中的 run 會**再停用一次** workflow
+（`src/aistorage/admin/lock.py`），做完也不會自己開回來。**步驟 4 結束後它一定是停用的**，
+這一步就是把它開回來的最後一步。
+
+注意 `gh workflow list` **不加 `--all` 時看不到停用中的 workflow**（實測：整個 repo
+只有一個 workflow 而它被停用時，預設清單回空陣列）。所以確認狀態時務必加 `--all`。
+
 **怎麼驗證**
 
-1. Actions 頁面 `committer` 顯示「Enable workflow」按鈕已消失（= 已啟用）。
-2. 先不要等排程，直接用步驟 11 手動觸發一次。
+1. `gh workflow list --all --repo FATESAIKOU/MyAiStorage` 的 `state` 是 `active`
+   （網頁的話：`committer` 頁面「Enable workflow」按鈕已消失）。
+2. 先不要等排程，直接用步驟 12 手動觸發一次。
 
-**失敗怎麼退**：同一頁面 Disable。停用期間真本不會前進（同步器上傳的項目會留在收件匣），
+**失敗怎麼退**：`gh workflow disable committer.yml --repo FATESAIKOU/MyAiStorage`
+（網頁同一頁面 Disable）。停用期間真本不會前進（同步器上傳的項目會留在收件匣），
 之後重新啟用即可。
 
 ---

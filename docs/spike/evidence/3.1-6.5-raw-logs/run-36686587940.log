@@ -1,0 +1,30 @@
+commit	Set up job	﻿2026-09-30T07:56:27.2470772Z Current runner version: '2.337.0'
+commit	Set up job	2026-09-30T07:56:27.2493377Z ##[group]Runner Image Provisioner
+commit	Set up job	2026-09-30T07:56:27.2494183Z Hosted Compute Agent
+commit	Set up job	2026-09-30T07:56:27.2494897Z Version: 20260828.587
+commit	Set up job	2026-09-30T07:56:27.2495484Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+commit	Set up job	2026-09-30T07:56:27.2496262Z Build Date: 2026-08-28T16:44:25Z
+commit	Set up job	2026-09-30T07:56:27.2496928Z Worker ID: {2c40293a-5951-42cf-9d6c-5555471cd8c9}
+commit	Set up job	2026-09-30T07:56:27.2498060Z Azure Region: westus3
+commit	Set up job	2026-09-30T07:56:27.2498608Z ##[endgroup]
+commit	Set up job	2026-09-30T07:56:27.2500359Z ##[group]Operating System
+commit	Set up job	2026-09-30T07:56:27.2500975Z Ubuntu
+commit	Set up job	2026-09-30T07:56:27.2501573Z 24.04.5
+commit	Set up job	2026-09-30T07:56:27.2502079Z LTS
+commit	Set up job	2026-09-30T07:56:27.2502627Z ##[endgroup]
+commit	Set up job	2026-09-30T07:56:27.2503182Z ##[group]Runner Image
+commit	Set up job	2026-09-30T07:56:27.2503722Z Image: ubuntu-24.04
+commit	Set up job	2026-09-30T07:56:27.2504397Z Version: 20260920.314.1
+commit	Set up job	2026-09-30T07:56:27.2505388Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260920.314/images/ubuntu/Ubuntu2404-Readme.md
+commit	Set up job	2026-09-30T07:56:27.2507093Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260920.314
+commit	Set up job	2026-09-30T07:56:27.2508118Z ##[endgroup]
+commit	Set up job	2026-09-30T07:56:27.2509284Z ##[group]GITHUB_TOKEN Permissions
+commit	Set up job	2026-09-30T07:56:27.2511352Z Contents: read
+commit	Set up job	2026-09-30T07:56:27.2511885Z Metadata: read
+commit	Set up job	2026-09-30T07:56:27.2512555Z ##[endgroup]
+commit	Set up job	2026-09-30T07:56:27.2514416Z Secret source: Actions
+commit	Set up job	2026-09-30T07:56:27.2515387Z Cache mode: write
+commit	Set up job	2026-09-30T07:56:27.2516199Z Prepare workflow directory
+commit	Set up job	2026-09-30T07:56:27.3740201Z Prepare all required actions
+commit	Set up job	2026-09-30T07:56:27.3782002Z Getting action download info
+commit	Set up job	2026-09-30T07:56:27.7318007Z ##[error]Unable to resolve action `astral-sh/setup-uv@16b49045b85040e34c9f13674686b24a3500854d`, unable to find version `16b49045b85040e34c9f13674686b24a3500854d`
