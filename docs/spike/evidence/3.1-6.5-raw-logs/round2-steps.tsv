@@ -1,0 +1,27 @@
+--- 36690207277 ---
+1	Set up job	success
+2	Checkout repository	success
+3	guard	success
+4	setup-uv	success
+5	secrets-to-rclone	success
+6	inbox-prescan	failure
+7	install-tools	skipped
+8	secrets-to-pin-key	skipped
+9	run	skipped
+17	Post setup-uv	skipped
+18	Post Checkout repository	success
+19	Complete job	success
+--- 36690597897 ---
+1	Set up job	success
+2	Checkout repository	success
+3	guard	failure
+4	setup-uv	skipped
+5	secrets-to-rclone	skipped
+6	inbox-prescan	skipped
+7	install-tools	skipped
+8	secrets-to-pin-key	skipped
+9	run	skipped
+18	Post Checkout repository	success
+19	Complete job	success
+--- 36686407460 ---
+1	Set up job	failure
