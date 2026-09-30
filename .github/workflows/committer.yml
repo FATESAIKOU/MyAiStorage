@@ -60,6 +60,10 @@ jobs:
         id: prescan
         env:
           AISTORAGE_RCLONE_CONF: ${{ runner.temp }}/rclone.conf
+          # 雙保險：程式端已經會把 RCLONE_CONFIG 釘到 AISTORAGE_RCLONE_CONF
+          # （annex/git.py 的 get_git_env），這裡再釘一次，讓「萬一程式端漏了」
+          # 也不會退回 runner HOME 底下不存在的預設設定。
+          RCLONE_CONFIG: ${{ runner.temp }}/rclone.conf
         run: |
           # 讀不到收件匣必須讓整個 job 失敗（不可 || true），否則錯誤會被掩蓋
           RESULT=$(uv run python -m aistorage.committer prescan --config config/committer.json)
@@ -135,6 +139,13 @@ jobs:
         if: steps.prescan.outputs.shaped != '0'
         env:
           AISTORAGE_RCLONE_CONF: ${{ runner.temp }}/rclone.conf
+          # 雙保險：git-remote-annex／rclone special remote 是子程序，只認
+          # RCLONE_CONFIG，不會讀 AISTORAGE_RCLONE_CONF。少了這行，runner 上
+          # 會去讀 runner HOME 底下不存在的預設設定，gdrive remote 找不到，
+          # 整輪死在 `ABORTED(annex.git.clone:ReadError)`（2026-09-30 的
+          # 正式 run 36695731310）。程式端 annex/git.py 的 get_git_env() 已經
+          # 會自己釘，這裡是第二道。
+          RCLONE_CONFIG: ${{ runner.temp }}/rclone.conf
           AISTORAGE_PIN_KEY: ${{ runner.temp }}/pin_deploy.key
           AISTORAGE_PIN_KNOWN_HOSTS: config/github_known_hosts
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

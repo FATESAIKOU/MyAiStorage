@@ -536,6 +536,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(format_issues(result.problems), flush=True)
         return 2
 
+    # annex/git 子程序只認 RCLONE_CONFIG，不會讀 AISTORAGE_RCLONE_CONF
+    # （`aistorage.annex.git.get_git_env` 負責把它翻過去）。在這裡先匯出來，
+    # 整場整合測試——包含 preflight 的 `rclone lsf` 與測試自己 spawn 的
+    # git-annex／git-remote-annex——就都用測試那份設定。
+    # 設定真的不見時，get_git_env() 會把 RCLONE_CONFIG 釘成一個**不存在**的路徑，
+    # 所以任何 code path 都不會安靜地退回 `~/.config/rclone/rclone.conf`——
+    # 那一份可能指向別的 Drive 根。
+    os.environ["AISTORAGE_RCLONE_CONF"] = str(settings.rclone_conf)
+    os.environ.pop("RCLONE_CONFIG", None)
+
     phases = ["integration"] + (["e2e"] if args.include_e2e else [])
     summary = Summary()
     started = time.monotonic()

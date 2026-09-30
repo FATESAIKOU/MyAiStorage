@@ -26,12 +26,58 @@ from aistorage.errors import ReadError, WriteError
 DEFAULT_LARGEFILES = "include=sessions/*/*/raw"
 
 
-def get_git_env() -> dict[str, str]:
-    """建立隔離的環境變數，防止終端機互動提示與繼承全域設定。"""
+#: `RCLONE_CONFIG` 解析不出來時指向哪裡：一個**保證不存在**的路徑。
+#: 目的不是讓 rclone 讀到東西，是讓它**絕對讀不到預設設定**。
+#: rclone 找不到 `RCLONE_CONFIG` 會往 `$XDG_CONFIG_HOME/rclone/rclone.conf`、
+#: `~/.config/rclone/rclone.conf` 找——本機上那份常常存在，而且**可能指向別的 Drive
+#: 根**。寧可讓它明確地找不到，也不要讓它安靜地連到錯的地方。
+_RCLONE_SENTINEL = "/nonexistent/aistorage-rclone-config-not-set"
+
+
+def get_git_env(
+    rclone_conf: str | Path | None = None,
+    *,
+    require_rclone_conf: bool = False,
+) -> dict[str, str]:
+    """建立隔離的環境變數，防止終端機互動提示與繼承全域設定。
+
+    順帶把 `RCLONE_CONFIG` 釘死。`git-remote-annex` 與 rclone special remote 是
+    **子程序**，它們不會知道 `AISTORAGE_RCLONE_CONF` 這個變數——只認 `RCLONE_CONFIG`
+    或自己的預設探索路徑。少了這一行，提交流程在 runner 上會去讀 runner HOME 底下
+    根本不存在的設定，於是 `gdrive` 這個 remote 找不到，annex clone 直接
+    `ABORTED(annex.git.clone:ReadError)`（2026-09-30 正式 run 36695731310 就是這樣）。
+
+    在本機上同一個洞更危險但是**看不見**：`~/.config/rclone/rclone.conf` 通常存在，
+    所以本機測試會通過，卻可能連到與 `AISTORAGE_RCLONE_CONF` 不同的 Drive 根。
+
+    解析順序：`rclone_conf` 參數 → `AISTORAGE_RCLONE_CONF` 環境變數。
+    解析不到時：
+
+    - `require_rclone_conf=True` → 立刻丟 `ReadError`，訊息指明要設哪個變數。
+      給「確定會 shell out 到 rclone」的呼叫端用（annex clone／replay／rebuild）。
+    - 否則 → `RCLONE_CONFIG` 指向一個保證不存在的路徑。純 git 的呼叫端
+      （例如 pin repo 用 GitHub SSH）本來就不需要 rclone，不該為了它壞掉；
+      但也**絕不**讓它們安靜地 fallback 到使用者的預設設定。
+    """
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_CONFIG_GLOBAL"] = "/dev/null"
     env["GIT_CONFIG_NOSYSTEM"] = "1"
+
+    resolved = rclone_conf or os.environ.get("AISTORAGE_RCLONE_CONF") or ""
+    if not resolved:
+        if require_rclone_conf:
+            raise ReadError(
+                "需要 rclone 設定檔，但 AISTORAGE_RCLONE_CONF 沒有設定。"
+                "git-remote-annex／rclone special remote 只認 RCLONE_CONFIG，"
+                "不會讀 AISTORAGE_RCLONE_CONF，沒有它就會退回 ~/.config/rclone/rclone.conf"
+                "——那份可能指向別的 Drive 根。請設定環境變數 AISTORAGE_RCLONE_CONF "
+                "指向要用的 rclone conf 路徑。"
+            )
+        env["RCLONE_CONFIG"] = _RCLONE_SENTINEL
+        return env
+
+    env["RCLONE_CONFIG"] = str(resolved)
     return env
 
 
@@ -204,7 +250,17 @@ class SubprocessAnnexGit:
         )
 
     def _get_env(self) -> dict[str, str]:
-        """建立隔離的環境變數，防止終端機互動提示與繼承全域設定。"""
+        """建立隔離的環境變數，防止終端機互動提示與繼承全域設定。
+
+        這裡**不**要求 rclone 設定：本類別也有只操作本機 repo 的用法（單元測試、
+        已 clone 好之後的維護操作），那些路徑不碰 rclone，不該因為它壞掉。
+        但 `RCLONE_CONFIG` 一律被釘死（見 `get_git_env`），所以真的會 shell out 到
+        rclone 的操作拿到的永遠是明確指定的那一份，**不會** fallback 到使用者的
+        `~/.config/rclone/rclone.conf`。
+
+        確定會碰遠端的入口（`clone_for_commit`、`replay`、rebuild 的 clone）另外用
+        `require_rclone_conf=True`，缺設定時在第一個子程序之前就報清楚的錯。
+        """
         return get_git_env()
 
     def _run(
@@ -215,6 +271,10 @@ class SubprocessAnnexGit:
         timeout: float = 60.0,
         input_text: str | None = None,
     ) -> str:
+        # 環境變數**在建 try 之外**組出來：缺 rclone 設定是一個要讓人一眼看懂的
+        # 設定錯誤，不該被下面那個 `except Exception` 改寫成
+        # 「Git 命令呼叫失敗: git」。
+        env = self._get_env()
         try:
             proc = subprocess.run(
                 cmd,
@@ -222,7 +282,7 @@ class SubprocessAnnexGit:
                 capture_output=True,
                 text=True,
                 errors="replace",
-                env=self._get_env(),
+                env=env,
                 timeout=timeout,
                 check=False,
                 input=input_text,
@@ -474,6 +534,9 @@ class SubprocessAnnexGit:
         dest_path = assert_safe_workdir(dest, purpose="真本 clone 目的地")
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # 不要求設定存在：這裡也會被本機／測試的純本機 repo 呼叫。
+        # RCLONE_CONFIG 一律被釘死，所以真的 clone rclone special remote 時
+        # 也不會 fallback 到使用者的預設設定。
         env = get_git_env()
 
         # 1. clone -b main

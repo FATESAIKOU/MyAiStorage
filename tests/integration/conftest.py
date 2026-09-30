@@ -207,6 +207,24 @@ def sandbox(real_drive, test_root_id):
 
 
 @pytest.fixture(scope="session", autouse=True)
+def pin_rclone_config_for_subprocesses():
+    """把測試的 rclone 設定檔釘成**子程序**看得到的那一個。
+
+    `git-remote-annex`／rclone special remote 是子程序，只認 `RCLONE_CONFIG`，
+    不會讀 `AISTORAGE_RCLONE_CONF`（`aistorage.annex.git.get_git_env` 負責翻譯）。
+    沒有這段的話，整合測試裡的 annex 操作會去讀 `~/.config/rclone/rclone.conf`
+    ——那份通常存在、而且可能指向**別的** Drive 根，於是測試會「通過」但連到錯的
+    地方；正式 run 36695731310 反過來是在 runner 上因為找不到該檔而整輪中止。
+
+    同時把繼承來的 `RCLONE_CONFIG` 清掉，避免外面設的設定滲進來。
+    """
+    settings = require_settings()
+    os.environ["AISTORAGE_RCLONE_CONF"] = str(settings["rclone_conf"])
+    os.environ.pop("RCLONE_CONFIG", None)
+    yield
+
+
+@pytest.fixture(scope="session", autouse=True)
 def sweep_session_leftovers(request):
     """整場跑完再補掃一次：把這場建過、卻沒被 teardown 刪掉的資料夾清掉。
 
