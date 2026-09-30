@@ -212,8 +212,10 @@ def test_admin_lock_uses_workflow_from_args_and_config(monkeypatch) -> None:
         github_repository="owner/repo", committer_workflow="commit.yml")
     with _admin_lock(Namespace(workflow=None), cfg, deps,
                      reason="x", strict_precheck=False):
-        assert gh.calls[0][1:3] == ["workflow", "disable"]
-        assert "commit.yml" in gh.calls[0]
+        # 停用前先查狀態（冪等：已經是停用的就不送 disable）
+        assert gh.calls[0][1:3] == ["workflow", "list"]
+        assert ["workflow", "disable"] in [c[1:3] for c in gh.calls]
+        assert "commit.yml" in next(c for c in gh.calls if c[1:3] == ["workflow", "disable"])
     with _admin_lock(Namespace(workflow="other.yml"), cfg, deps,
                      reason="x", strict_precheck=False):
         assert "other.yml" in gh.calls[-1]
@@ -523,6 +525,7 @@ def test_init_pin_confirm_takes_the_lock(tmp_path: Path, monkeypatch) -> None:
     committer_main._init_pin_under_lock(cfg, deps)
 
     assert seen == [True]
-    assert gh.calls[0][1:3] == ["workflow", "disable"]
+    assert gh.calls[0][1:3] == ["workflow", "list"]
+    assert ["workflow", "disable"] in [c[1:3] for c in gh.calls]
     assert read_maintenance(pins, "agora") is None, "做完要恢復"
     assert state["enabled"] is True

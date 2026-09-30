@@ -643,17 +643,32 @@ gh run view --repo FATESAIKOU/MyAiStorage --log-failed | tail -40
 ```
 
 第一次觸發時**收件匣是空的**，`prescan` 會回 0，後面所有步驟都跳過——這是預期行為，
-不是失敗。想看完整一輪，先在 Mac 上做一次「同步並提交」：
+不是失敗。想看完整一輪，先在 Mac 上做一次「同步並提交」（`agora` CLI 或 opencode 的
+`agora_checkout`／同步器），把收件匣填出項目，再回來觸發 workflow。
+
+**本機只跑 `prescan`，不要跑 `committer run`**
 
 ```bash
-# 在 Mac 上（暫存目錄內的 clone 由工具自己管理）
 cd /path/to/MyAiStorage
 AISTORAGE_RCLONE_CONF="$HOME/.config/aistorage/rclone-committer.conf" \
-AISTORAGE_PIN_KEY="$HOME/.config/aistorage/pin-deploy-key" \
-AISTORAGE_PIN_KNOWN_HOSTS="config/github_known_hosts" \
-uv run python -m aistorage.committer run --config config/committer.json --dry-run
+  uv run python -m aistorage.committer prescan --config config/committer.json
 ```
-`--dry-run` 不寫入、不推送，只會把 13 步的計畫印出來。確認無誤後去掉 `--dry-run` 才真的跑。
+
+`prescan` 只讀收件匣、印「形狀符合的收件匣項目數」，**不碰 pin repo**、不寫入、不推送。
+它就是本機唯一該用的正式環境檢查。
+
+**不要用 `committer run --dry-run` 來驗正式環境。** 它會在建相依元件時就失敗，而且是
+**設計如此**：提交流程本來就只能由 Actions 跑，`integrity/pin.py` 對正式 pin repo
+（`MyAiStorage-pin`）有硬性檢查——`GITHUB_ACTIONS != "true"` 且沒有 `allow_production`
+就丟 `PermissionError`。這道檢查在**建 GitPinStore 時**就觸發，`--dry-run` 也不例外
+（`--dry-run` 只擋後續的寫入動作，擋不住「準備寫入身分」這一步）。
+
+| 想要確認的事 | 在哪裡做 |
+|---|---|
+| 收件匣讀不讀得到、裡面有什麼 | **本機** `committer prescan --config config/committer.json` |
+| 收件匣有東西時的完整一輪（釘選值轉正、推 bundle、發讀取視圖） | **Actions**：`gh workflow run committer.yml --repo FATESAIKOU/MyAiStorage --ref main` |
+| 某一輪的結果 | `gh run view --repo FATESAIKOU/MyAiStorage --log-failed`（job 失敗時看最後 40 行） |
+| 本機想跑完整一輪演練 | 用 `config/committer.e2e.json` ＋ `MyAiStorage-pin-test`（`scripts/run_integration.py`），**不要**拿正式設定檔 |
 
 **驗收清單（全部要成立）**
 
