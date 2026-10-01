@@ -55,3 +55,79 @@
 - `code-adapters.md` E 節的 E-1（連續 `/clear`）、E-2（整合測試沒有驗證 agent 讀到了注入的內容）、E-3（part 序號的寬度）。
 - `simplify.md` 與 `code-adapters.md` 的 Q1～Q9（精簡）：impl1 目前在工作目錄裡處理，還沒 commit。
 - test-plan 的 M-03（opencode TUI、Ctrl-C）仍然是人工確認，也就是 acceptance.md 第 1、2、4 節要做的事；F3 修好之後才完整。
+
+---
+
+## 最後一輪補充：`9f88769`（impl1：opencode e2e＋Q1～Q9）與 `e1439ab`（PM：F1～F5、G1～G3）
+
+對象：`9f88769` 的 `src/agora/agents/opencode.py`、`tests/integration/test_e2e_opencode.py`、`tests/fakes/opencode_noninteractive.py`，以及 `e1439ab` 的 `docs/acceptance.md`、`cli.py`、`store.py`。工作目錄裡 impl1 還有**沒 commit 的變更**（`opencode_noninteractive.py`、`test_e2e_opencode.py`、`test_opencode_real.py`），這次只看已經 commit 的版本。
+
+### 結論
+
+- **還沒解決的 High：1 條（P1）**。`test_e2e_opencode.py` 的 teardown 又用了 `store.Index(paths).known()`，也就是 D-1 的錯誤**又出現了**：它會 purge 共用的 `agora-test/sessions/` 裡**所有**的 Session。工作目錄裡還沒 commit 的版本也一樣。
+- **還沒解決的 Medium：2 條（P2、P3）**，都在測試裡，`src` 沒有。
+- **PR：修好 P1 之後就可以開**（只要改 1 行）。P2、P3 可以放進同一個 PR，也可以當成後續工作，但在下一次跑 e2e 之前要改好。`src` 本身：**沒有還沒解決的 High 或 Medium**。
+
+### opencode.py 精簡之後，行為有沒有變 — ✅ 沒有變
+
+| 項目 | 確認的方法 | 結果 |
+|---|---|---|
+| 三種 id 重編 | 把舊版（`d3ae9cb`）和新版（HEAD）的 `reidentify` 載入同一個 Python，用 `oc-basic.json` 加上一個人工的 `info.revert`，各跑一次 | **輸出完全相同**（`a == b`）。`_id(prefix, *positions, …)` 產生的 msg／prt 格式和寬度都沒有變；`revert` 改成用合併後的對應表 `{**message_map, **part_map}`，因為前綴不同（`msg_`／`prt_`），不會撞到 |
+| 注入 | 同樣的做法，固定 `time.time()` 之後，比對 `_injected_payload` | **輸出完全相同**。改成「先用暫時的 id，再交給 `reidentify`」之後，id 的規則就只剩一個地方 |
+| 回讀驗證 | 讀程式 | `_import_verified` 沒有變，訊息數和 part 數都比對；`_delete` 和 `_discard` 合併了，rc 也照樣會檢查 |
+| timeout | 讀程式 | `_run` 多了 `stdout=` 參數，export 也改走 `_run`，所以同樣有 timeout；而且仍然是 stdout 寫檔、stderr 用 PIPE，沒有 `2>&1` |
+| 其他 | | `_cli_version` 刪掉了，沒有 `info.version` 時，`agent_version` 就是 None（cli 允許這種情況）。`_MESSAGE_REFERENCES`／`_PART_REFERENCES` 現在有被用到了 |
+| 單元測試 | `git archive HEAD` 取出到 scratchpad，再跑 `pytest -q tests/unit` | **156 passed** |
+| 行數 | HEAD 的 `src` | **1,925 行**（原本是 1,994 行） |
+
+只有一個 Low：`_id` 裡的 `assert` 在 `python -O` 下不會執行。實際上不會溢位，所以可以接受。
+
+### test_e2e_opencode.py 的清理是否只動自己建的東西
+
+| 對象 | 結果 | 說明 |
+|---|---|---|
+| Drive 的 ULID | ❌ **P1（High）** | `ulids.update(store.Index(paths).known())`：`search`／`sync` 已經把 `agora-test/sessions/` 的**全部** Session 都同步進這個 cache，所以 teardown 會把其他次執行、其他整合測試、impl2 的 e2e 的 Session 全部 purge 掉。impl2 在 `aaa2d4e` 修 D-1 的方法，是「只收集 `run_main` 在 stdout 印出來的 id」，這裡應該照做：刪掉這一行，在 `run_main` 裡記下 import／continue／merge 印出的 id（可以直接沿用 `test_e2e_cli.py` 的 `created["printed"]` 寫法） |
+| opencode session | ✅ | 依 id 一個一個 `session delete`，id 來自測試本身，以及 wrapper 紀錄裡的 `--session`／`-s`；`PWD` 也有設定。另外，opencode 這邊用的是 conftest 隔離的 HOME（`AGORA_REAL_HOME` 被刻意 unset），**真的 `~/.local/share/opencode` 不會被碰到**，資料庫隨著 tmp 一起消失。小提醒：wrapper 的 docstring 還寫著「把 HOME 改回 `AGORA_REAL_HOME`，因為隔離的 HOME 會讓 export 找不到」，和 fixture 現在的做法相反，要改成一致的說法（Low） |
+| claude 的 jsonl | ⚠️ **P2（Medium）** | (a) uuid **只在** `header_of(id3)` 的斷言成功之後才記下來（`created["uuids"].append(uuid3)`），沒有像 `test_e2e_cli.py`（E3）那樣，也從 claude wrapper 的 `e2e-args.log` 收集 `--session-id`。只要 continue 失敗，claude 在真實 `~/.claude/projects/` 裡寫的 jsonl 就會留下來。(b) 刪除時用的是 `C.projects_dir().glob(f"*/{session_id}.jsonl")`、`glob(f"*/{session_id}")`，以及 `cfgdir.glob(f"todos/{session_id}-*.json")`，這些都會掃過真實的 `~/.claude/projects/*/` 和 `~/.claude/todos/` 的檔名（CL12、D-2 已經在 claude 那邊拿掉的寫法，這裡又出現了）。(c) 最後用 `glob(f"*{encode(proj)}*")` 找資料夾，然後 `rmtree(stale / "memory")`，這是用子字串比對**真實的**專案資料夾名稱，再整個刪掉 memory。 | (a) teardown 也讀 `fake_home / "e2e-args.log"`，收集 `--session-id`／`--resume` 後面的 uuid；(b)(c) 一律改用精確的路徑 `C.projects_dir() / C.encode_project_dir(proj) / f"{uuid}.jsonl"`（以及同名的 sidecar 資料夾）、`session-env/<uuid>`、`file-history/<uuid>`。todos 不要處理（工具已經禁止了，所以不會產生 todos）。資料夾只對 `encode_project_dir(proj)` 這一個精確的名字做 `rmdir`／刪掉 `memory`。這些都可以直接照抄 `test_e2e_cli.py`（`aaa2d4e`）的寫法 |
+
+### 有沒有讀到真實資料的可能
+
+| # | 嚴重度 | 位置 | 問題 | 建議 |
+|---|---|---|---|---|
+| P3 | **Medium** | `opencode_noninteractive.py`、`test_e2e_opencode.py` 的 `opencode_run`、`test_opencode_real.py` | opencode 的 `run` 只靠 prompt 裡的「不要呼叫任何工具」，**沒有用設定限制工具**（Claude 那邊 E6 已經用 `--disallowedTools` 擋住了）。opencode 的 read／glob／grep／bash 都可以用絕對路徑讀到 `/Users/…` 底下的任何檔案；HOME 被隔離，只會改變 `~` 指向哪裡 | 在這三個地方的 env 裡設定 `OPENCODE_PERMISSION='{"*":"deny"}'`（opencode 支援用這個環境變數設定權限；團隊平常用的是 allow-all，這裡要反過來）。用一次 `opencode run` 確認它真的會拒絕工具呼叫，再把結果記到 spike/opencode.md |
+| — | ✅ | claude | e2e 和整合測試裡**所有的** claude 呼叫都有 `--disallowedTools`：`claude_noninteractive.py` 的 `GUARDS`、`test_e2e_cli.py:169`、`test_claude_real.py` 的 `run_claude` |
+
+### `--disallowedTools` 會不會吃掉 prompt — ✅ 不會
+
+`--disallowedTools` 是可變長度的選項，會一直吃參數，直到遇到下一個選項為止。所有地方都把它放在**最前面**，後面緊接著另一個選項，所以 prompt 一定不會被吃掉：
+
+- `claude_noninteractive.py`：`[real, "--disallowedTools", "Bash Read … Task", "--model", "haiku", "--resume"|"--session-id", <id>, "-p", <prompt>]`：工具清單後面接的是 `--model`，所以會在這裡停下來；prompt 是最後一個位置參數。
+- `test_e2e_cli.py:169`：`["claude", "--disallowedTools", DISALLOW, "--model", "haiku", …]`，同上。
+- `test_claude_real.py`：`["--disallowedTools", DISALLOW, *argv]`，`argv` 都是以 `-p` 或 `--resume` 開頭，同上。
+
+工具清單是用空白隔開、包成一個參數的字串，Claude 接受這種格式。
+
+### e1439ab：F1～F5、G1～G3 的確認
+
+| # | 狀態 | 確認的內容 |
+|---|---|---|
+| F1 | ✅（做法和建議不同，可以接受） | 清理改成**寫死的路徑**，沒有任何會變空的變數或佔位字：Claude 用 `rm -rf "$HOME/.claude/projects/-private-tmp-agora-acc-proj"`（和 `encode_project_dir('/private/tmp/agora-acc/proj')` 的結果一致）；Drive 用 `test -n "$FID" && … purge gdrive:sessions`。`FID` 抓不到時（python3 失敗，或者找不到 agora-test），`next()` 會丟出例外，`FID` 變成空字串，就不會執行 purge。**提醒（Low）**：這會清掉**整個** `agora-test/sessions/`，包括其他測試留下的資料。對使用者自己的驗收來說可以接受，但要在文件寫一句「清理時，不要同時有整合測試或 e2e 在跑」 |
+| F2 | ✅ | 改成 `env.sh`，每一節的第一行都是 `source`，並且會印出 `[acc] … ✓` 讓人確認。我建議的程式端提示（每次寫入 Drive 時印出資料夾名稱）沒有做，維持 Low |
+| F3 | ✅ | 第 4 節改成：等第一段說完 → 再送一句話 → 在回覆到一半時按 Ctrl-C → `/exit`。計數會大於 `before_count=2`，所以會存出 D；文件也寫明了「在 Claude 說出任何話之前就按 Ctrl-C，會印出『這次沒有新內容』，這也是正確的」 |
+| F4 | ✅ | 改成「包含 A、B、C、D」。continue 會沿用父 Session 的 title（「驗收表格」），所以這四個都搜得到 |
+| F5 | ✅ | 清理改成刪掉整個驗收專案的 Claude 資料夾，所以沒有存檔的 uuid 也會一起清掉 |
+| G1 | ✅ | `folder_id()` 會 `pop` 舊的 `folder_id`／`folder_name`；下一次寫入 `config.json` 時，它們就會消失 |
+| G2 | ✅ | 只有 `-` 開頭、而且**不是** `--` 開頭的那一個多餘參數，才會被當成關鍵字；打錯的 `--flag` 照樣會報錯 |
+| G3 | ✅ | sync 遇到「還沒寫完」時，也會把鏡像裡那份 session.md 刪掉，離線重建時就不會把它放回來 |
+
+另外，acceptance.md 現在的第 2、3、4、5 節都**沒有帶 `--dir`**，靠的是 `source.dir`（`/private/tmp/agora-acc/proj`）的預設值；第 6 節的 merge 沒有 `source`，所以用的是 `env.sh` cd 進去的那個目錄。兩者一致，Claude 的資料夾名稱也和清理時用的路徑相同。✅
+
+### 這次跑過的指令
+
+| 指令 | 結果（只記形狀） |
+|---|---|
+| `git show d3ae9cb:…/opencode.py` 存到 scratchpad；用 importlib 和 exec 把新舊兩版載入同一個 Python，比對 `reidentify` 與 `_injected_payload` | 兩者都完全相同；之後 scratchpad 的檔案已經刪掉 |
+| `git archive HEAD \| tar -x`，再用 `PYTHONPATH=<head>/src` 跑 `pytest -q tests/unit` | 156 passed；`src` 是 1,925 行；之後副本已經刪掉 |
+| `grep -cF` 檢查工作目錄裡 `test_e2e_opencode.py` 的 `known()`／`todos`／`OPENCODE_PERMISSION` | 還沒 commit 的版本也一樣有 `known()` 和 todos 的 glob，也沒有 `OPENCODE_PERMISSION` |
+
+沒有執行 e2e、整合測試或驗收清單，沒有碰 Drive，沒有叫真的 opencode 或 claude，也沒有讀任何真實的 Session。
