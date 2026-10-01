@@ -9,6 +9,7 @@ every other field alone.
 from __future__ import annotations
 
 import os
+import sys
 import time
 from dataclasses import dataclass
 from urllib.parse import quote, unquote
@@ -128,11 +129,11 @@ def parse_header_args(args: list[str]) -> dict:
     for arg in args:
         key, sep, value = arg.partition("=")
         key = key.strip()
-        if not sep or not key.isidentifier():
+        if not sep or key not in SETTABLE:
+            if sep and key.isidentifier():
+                print(f"[agora] --header 的 {key!r} 不是可設定的欄位，整段當成 note", file=sys.stderr)
             notes.append(arg)
             continue
-        if key not in SETTABLE:
-            raise HeaderError(f"--header 不能設定 {key!r}（可用：{', '.join(SETTABLE)}）")
         if key in MULTI:
             updates.setdefault(key, []).append(value)
         elif key == "note":

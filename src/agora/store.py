@@ -123,13 +123,13 @@ class Drive:
         self.settings_file.write_text(json.dumps(self.settings, indent=2))
         return self.settings["folder_id"]
 
-    def list_sessions(self) -> dict[str, dict[str, str]]:
-        """{ulid: {file name: md5}} in one recursive listing."""
+    def list_sessions(self) -> dict[str, dict[str, str]] | None:
+        """{ulid: {file name: md5}} in one recursive listing; None if sessions/ is missing."""
         try:
             out = self._run("lsjson", "gdrive:sessions", "-R", "--fast-list", "--hash", "--files-only")
         except StoreError as e:
             if "directory not found" in str(e):
-                return {}
+                return None
             raise
         found: dict[str, dict[str, str]] = {}
         for entry in json.loads(out or "[]"):
@@ -178,6 +178,20 @@ def outbox_count(paths: Paths) -> int:
     return len(list(paths.outbox.iterdir())) if paths.outbox.exists() else 0
 
 
+def _outbox_ulids(paths: Paths) -> set[str]:
+    return {p.name for p in paths.outbox.iterdir()} if paths.outbox.exists() else set()
+
+
+def _index_outbox(paths: Paths, index: "Index") -> None:
+    """Sessions still waiting in the outbox are searchable here, marked as not uploaded."""
+    for ulid in _outbox_ulids(paths):
+        hdr, body = h.split_document((paths.outbox / ulid / "session.md").read_text(encoding="utf-8"))
+        index.put(ulid, "outbox", hdr, body)
+        mirror = paths.mirror / ulid
+        mirror.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(paths.outbox / ulid / "session.md", mirror / "session.md")
+
+
 def push_one(drive: Drive, folder: Path) -> None:
     """Upload one outbox entry in the safe order, verify, then clean up."""
     ulid = folder.name
@@ -188,7 +202,7 @@ def push_one(drive: Drive, folder: Path) -> None:
         _fault("after-raw-upload")
     drive.upload(folder / "session.md", ulid, "session.md")
     _fault("after-session-upload")
-    remote = drive.list_sessions().get(ulid, {})
+    remote = (drive.list_sessions() or {}).get(ulid, {})
     if remote.get("session.md") != md5_file(folder / "session.md"):
         raise StoreError(f"{ulid} 的 session.md 在 Drive 上的 md5 不符，留在 outbox")
     if raw and remote.get(raw["file"]) != raw["md5"]:
@@ -333,6 +347,8 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
         return index
     if failed:
         _warn(f"outbox 還有 {len(failed)} 筆沒上傳成功")
+    missing = remote is None
+    remote = remote or {}
     known = index.known()
     for ulid, files in remote.items():
         md5 = files.get("session.md")
@@ -353,9 +369,14 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
             index.drop(ulid)
             continue
         index.put(ulid, md5, hdr, body)
-    for ulid in set(known) - set(remote):
-        index.drop(ulid)
-        shutil.rmtree(paths.mirror / ulid, ignore_errors=True)
+    gone = set(known) - set(remote) - _outbox_ulids(paths)
+    if gone and missing:
+        _warn("Drive 上找不到 sessions/，可能是 folder ID 或 token 有問題，先不刪鏡像")
+    else:
+        for ulid in gone:
+            index.drop(ulid)
+            shutil.rmtree(paths.mirror / ulid, ignore_errors=True)
+    _index_outbox(paths, index)
     paths.state.mkdir(parents=True, exist_ok=True)
     stamp.write_text(str(now()))
     return index
@@ -368,7 +389,16 @@ def fetch_raw(paths: Paths, drive: Drive, ulid: str, header: dict) -> bytes:
         raise StoreError(f"{ulid} 沒有 raw（merge 出來的 Session 只能用閱讀版接續）")
     local = paths.mirror / ulid / raw["file"]
     if not local.exists() or md5_file(local) != raw["md5"]:
-        drive.download(ulid, raw["file"], local)
+        try:
+            drive.download(ulid, raw["file"], local)
+        except StoreError:
+            # Another machine may have re-imported it and removed this raw:
+            # refresh session.md once and follow its pointer.
+            drive.download(ulid, "session.md", paths.mirror / ulid / "session.md")
+            header, _ = h.split_document((paths.mirror / ulid / "session.md").read_text(encoding="utf-8"))
+            raw = header.get("raw") or raw
+            local = paths.mirror / ulid / raw["file"]
+            drive.download(ulid, raw["file"], local)
     if md5_file(local) != raw["md5"]:
         raise StoreError(f"{ulid} 的 raw md5 和 header 不符")
     return local.read_bytes()

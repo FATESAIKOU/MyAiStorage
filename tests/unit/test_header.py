@@ -41,9 +41,9 @@ def test_free_text_goes_to_note():  # U-HDR-03
     assert h.parse_header_args(["一些 meta 資訊", "note=第二段"]) == {"note": "一些 meta 資訊\n第二段"}
 
 
-def test_unknown_settable_key_is_an_error():
-    with pytest.raises(h.HeaderError, match="可用"):
-        h.parse_header_args(["owner=me"])
+def test_unknown_key_becomes_note_with_warning(capsys):  # N7
+    assert h.parse_header_args(["x=1 先試"]) == {"note": "x=1 先試"}
+    assert "note" in capsys.readouterr().err
 
 
 def test_search_filter_rejects_unknown_key():  # U-HDR-04
