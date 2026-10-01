@@ -526,8 +526,6 @@ def test_search_special_keywords_no_crash(env, capsys):  # U-SRC-07
         assert code == 0, kw
 
 
-@pytest.mark.xfail(strict=True, reason="PM: 開頭是 - 的關鍵字被 argparse 當成旗標，"
-                                       "search 要支援 -- 分隔或自行解析 (U-SRC-07)")
 def test_search_keyword_starting_with_dash(env, capsys):
     _, _, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
     code, _, _ = run(capsys, "search", "session", "-x", "--no-sync")

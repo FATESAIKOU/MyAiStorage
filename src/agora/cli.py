@@ -117,7 +117,7 @@ def _body_for(paths: store.Paths, agora_id: str) -> str:
 
 def cmd_search(args, paths: store.Paths) -> int:
     filters = h.parse_search_filters(args.header)
-    index = store.Index(paths) if args.no_sync else store.sync(paths, throttle=True)
+    index = store.Index(paths).rebuild_from_mirror(paths) if args.no_sync else store.sync(paths, throttle=True)
     seen: dict[tuple, str] = {}
     outbox = store.outbox_ulids(paths)
     for ulid, hdr, snippet in index.search(args.keyword, filters):
@@ -367,7 +367,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args, extra = parser.parse_known_args(argv)
+    if extra and args.command == "search" and not args.keyword and len(extra) == 1:
+        args.keyword = extra[0]          # a keyword that starts with "-", like "-x"
+    elif extra:
+        parser.error(f"不認得的參數：{' '.join(extra)}")
     paths = store.Paths.from_env()
     try:
         recover_pending(paths, notice_only=getattr(args, "no_sync", False))

@@ -313,6 +313,17 @@ class Index:
                 ulid UNINDEXED, text, tokenize='trigram');
         """)
 
+    def rebuild_from_mirror(self, paths: Paths) -> "Index":
+        """An empty index next to a filled mirror (the db was deleted): rebuild it offline."""
+        if not self.known() and paths.mirror.exists():
+            for md in paths.mirror.glob("*/session.md"):
+                try:
+                    hdr, body = h.split_document(md.read_text(encoding="utf-8"))
+                except (h.HeaderError, OSError, UnicodeDecodeError):
+                    continue
+                self.put(md.parent.name, md5_file(md), hdr, body)
+        return self
+
     def known(self) -> dict[str, str]:
         return dict(self.db.execute("SELECT ulid, md5 FROM sessions"))
 
