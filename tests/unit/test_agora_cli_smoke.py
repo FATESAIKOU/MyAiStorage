@@ -2158,3 +2158,42 @@ def test_object_index_refuses_when_no_candidate_matches(tmp_path: Path):
     fetcher = ObjectFetcher(drive, folder)
     with pytest.raises(ObjectError, match="sha256 與 size 都和 key 相符"):
         fetcher.file_id_for(key)
+
+
+# ---------------------------------------------------------------------------
+# checkout 登記認領時**不准同步任何 session**（2026-10-01，在 Mac 本機試用前發現）
+#
+# `sync_and_commit(session_ids=())` 會變成 `sync_once(only=None)`＝全部上傳。
+# 容器裡只有試用的對話所以看不出來；在 Mac 本機跑 checkout 就會把整台機器的
+# 真實 session 全部送進 Agora。
+# ---------------------------------------------------------------------------
+
+
+def test_checkout_commit_claim_never_syncs_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    import argparse
+
+    import aistorage.syncer.__main__ as syncer_main
+    import aistorage.syncer.commit as syncer_commit
+    import aistorage.syncer.config as syncer_config
+    from aistorage.agora_cli import __main__ as cli
+
+    fake_deps = SimpleNamespace(clock=None, signer=None, inbox_folder_id="inbox", drive=None)
+    monkeypatch.setattr(syncer_config.SyncerConfig, "load", classmethod(lambda cls, **_k: object()))
+    monkeypatch.setattr(syncer_main, "_deps", lambda _cfg: fake_deps)
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_sync_and_commit(**kwargs: Any) -> str:
+        calls.append(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(syncer_commit, "sync_and_commit", fake_sync_and_commit)
+
+    writer_deps, _ = cli._writer_deps(argparse.Namespace(claims_path=None))
+    from datetime import timedelta
+
+    assert writer_deps.commit_claim(["claim"], timeout=timedelta(seconds=1)) == "ok"
+    assert len(calls) == 1
+    assert tuple(calls[0]["session_ids"]) == ()
+    assert calls[0]["already_synced"] is True, "認領只上傳認領單，不能順手同步全部 session"
+    assert calls[0]["extra_items"] == ["claim"]
