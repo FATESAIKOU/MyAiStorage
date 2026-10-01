@@ -1,6 +1,6 @@
 # Agora lite 基本設計
 
-第 2 版（2026-10-02）：併入 `docs/review/design.md`（S1–S10、H1–H7、L1–L4）與 `docs/review/test-plan.md`（T1、T2）的意見。spike（第 7 節）出來之後再更新標「待 spike」的地方。
+第 3 版（2026-10-02）：第 2 版併入 `docs/review/design.md` 的 S1–S10、H1–H7、L1–L4 與 `docs/review/test-plan.md` 的 T1、T2；第 3 版再併入 spike 結果（`docs/spike/`）與第 2 版確認的 N1–N17。
 
 取代期 1 的實作（約 3.2 萬行程式碼，大多在防「AI 住民篡改真本」與「把 git 放在 Drive 上」）。舊實作留在 git 歷史與 main，這個 branch（`agora-lite`）從零開始。
 
@@ -114,7 +114,9 @@ raw: {file: raw-0123456789ab.json, md5: "…", size: 12345}   # S1；merge 沒�
 Drive: agora/                              （worker client 建立；以 folder ID 存取）
   sessions/<ULID>/
     session.md                header ＋ 閱讀版；「這個版本完成了」的標記
-    raw-<md5 前 12 碼>.json   來源 agent 的原始匯出，原封不動
+    raw-<md5 前 12 碼>.json   來源 agent 的原始匯出（N15）：
+                              opencode＝export 的 JSON 原封不動；
+                              claude＝{"format":"claude-jsonl/1","main":[每一行原字串],"aux":{"<相對路徑>":"內容"}}
 Mac:
   ~/.config/agora/            rclone.conf（worker client）、config.toml（folder ID）
   ~/.cache/agora/             鏡像（只有 session.md）＋ index.sqlite；壞了刪掉重建
@@ -133,13 +135,17 @@ Mac:
 ### 4.2 outbox 與 pending（S2、S3）
 
 - **outbox**：上傳失敗時留在這裡。`sync` 一律**先推再拉**；每個指令開始時，outbox 不是空的就印一行提示。
-- **pending**：continue-session 啟動 agent **之前**寫一份 `{agora_id, parent, agent, agent_session_id, dir, started_at, before}`。agent 結束後收尾成功才刪。任何 agora 指令開始時檢查 pending：對應的 agent 已經不在執行，就補做收尾。
+- **pending**：continue-session 啟動 agent **之前**寫一份 `{agora_id, parent, agent, agent_session_id, dir, started_at, before_count}`，並在整個執行期間對它持有 `flock`。agent 結束後收尾成功才刪。任何 agora 指令開始時檢查 pending：**拿得到 flock**（表示那個 agora 已經不在了）才補做收尾；`agora_id` 事先決定，所以補存是冪等的（N2）。
+- 上傳失敗、留在 outbox 時 exit code 是 3；outbox 裡的 Session 在這台機器上照樣搜得到（N13）。
+- header 沒有 `raw` 的 session.md（merge）本身就是完整的；讀的一方比對 raw 用的是 `lsjson --hash` 列出的 md5，不下載 raw（N5、N11）。
 
 ### 4.3 sync（S5、L2）
 
 - 列檔一律 `rclone lsjson -R --fast-list --hash`，一次拿到所有檔案的 md5；用 md5 判斷要不要下載（不用時間）。
 - 鏡像只抓 `session.md`；raw 在 continue 或 `show --raw` 用到時才抓。
-- Drive 上已經不存在的 Session，從鏡像和索引刪掉（outbox、pending 不動）。
+- Drive 上已經不存在的 Session，從鏡像和索引刪掉（outbox、pending 不動）。但 Drive 上**找不到 `sessions/`**（folder ID 或 token 出問題）時不刪，只警告（N12）。
+- continue 時抓不到 raw（另一台機器重新匯入、刪了舊 raw），先重抓那一份 session.md 再試一次（N8）。
+- 上傳一律用 `rclone copyto`：`rclone copy` 目的地寫成檔名時會靜默建成同名資料夾（spike V4）。
 - search 前的 sync 有節流：距離上次成功 sync 不到 5 分鐘就跳過；`--no-sync` 直接跳過；網路不通時查本機，印一行警告。
 - import 前一律做一次不節流的 sync（S6）。
 
@@ -170,7 +176,7 @@ Mac:
 agora search session '<關鍵字>' [--header key=value]... [--no-sync]
 agora import --format opencode|claude --session-id <id> [--header ...]...
 agora merge-session <id1> <id2> [...] [--header ...]...
-agora continue-session <id> --agent opencode|claude [--dir <專案目錄>]
+agora continue-session <id> --agent opencode|claude [--dir <專案目錄>] [--header ...]...
 agora show <id> [--raw]
 agora sync
 ```
@@ -184,13 +190,13 @@ $ agora search session 'CSV'
 agora:01K6...  2026-10-01  opencode  …把 CSV 轉成 Markdown 表格…
 ```
 
-- 日期用 `source.created_at`。
+- 日期用 `source.created_at`；merge 沒有 `source`，日期用 `created_at`，agent 欄顯示 `merge`（N6）。continue 的 `source` 是這次新的 agent session。
 - 同一個來源有多個 agora id 時，顯示最新的那個並警告（S6）。
 
 ### 5.2 import
 
-- opencode：`opencode export <id>` 寫到檔案（不接 pipe；stderr 另外導走）。檢查 JSON 能解析、message 數大於 0（S10）。
-- claude：`~/.claude/projects/*/<id>.jsonl`，加上附屬資料夾（待 spike V2，S9）；最後一行不完整就丟掉並警告（S10）。
+- opencode：`opencode export <id> > 檔案`，stderr 另外導走、**不能 `2>&1`**（進度行在 stderr）。檢查 JSON 能解析、message 數大於 0（S10）。`source.dir` 取 `info.directory`（N9）。
+- claude：`~/.claude/projects/*/<id>.jsonl`，加上 `<id>/` 附屬資料夾（`subagents/` 等，S9）；最後一行不完整就丟掉並警告（S10）。`source.dir` 取 jsonl 的 `cwd`，不從資料夾名稱反推（N9）。
 - 只上傳指定的那一個 Session。
 - 同一個來源 Session 再匯入：內容沒變就不做事；內容變了而且**還沒有子 Session** 就更新同一個 agora id；**已經有子 Session**（本機索引查得到）就建一個新的 Session，`relation: import`、`parents: [舊 id]`（S7）。
 
@@ -206,13 +212,17 @@ agora:01K6...  2026-10-01  opencode  …把 CSV 轉成 Markdown 表格…
 
    | 來源 | 目標 | 方式 |
    |---|---|---|
-   | 單一 opencode | opencode | **原生**：把 export 裡**所有** id（session、每個 message 與 part 的 id 與它們的 `sessionID`）換成新產生的 id 之後 `opencode import`（S4；細節待 spike V1） |
-   | 單一 claude | claude | **原生**：複製 jsonl（與附屬檔）成新 uuid，改寫必要的欄位，`claude --resume`（細節待 spike V2） |
-   | 跨 agent，或 merge 出來的 | 任一 | **閱讀版注入**（細節待 spike V3） |
+   | 單一 opencode | opencode | **原生**：export 裡的三種 id（`ses`／`msg`／`prt`）與所有參照欄位全部重編：固定寬度、保留前綴、依匯出順序遞增（N3、N14）。在工作目錄 `opencode import`，**回頭 export 比對訊息數**——id 撞到時 import 是 rc=0 但 0 則訊息（spike V1(b)）；不符就刪掉那個新 session 並報錯 |
+   | 單一 claude | claude | **原生**：產生新 uuid，把每一行頂層 `sessionId` 改成它（其他欄位不動），連同附屬檔寫到 `~/.claude/projects/<工作目錄編碼>/<新uuid>.jsonl`，`claude --resume <新uuid>`（spike V2） |
+   | 跨 agent，或 merge 出來的 | opencode | **閱讀版注入**：agora 自己做一份只有一則 user 訊息（說明＋閱讀版全文）的 export，id 由 agora 決定，`opencode import` 後開啟（N4） |
+   | 跨 agent，或 merge 出來的 | claude | **閱讀版注入**：`claude --session-id <新uuid> "@<閱讀版絕對路徑> …"`，CLI 會把檔案展開進第一則訊息，不需要工具權限（spike V3） |
 
-2. 工作目錄：`--dir` 預設用 `source.dir`（這台機器上存在的話），否則用目前目錄；印出實際用的目錄（H1、待 spike V5）。
-3. 寫 pending（4.2），再在前景啟動 agent。agora 在 agent 執行期間忽略 SIGINT，Ctrl-C 只給 agent（S3）。
-4. agent 結束後：取得那一次的 Session，內容比啟動前多才存（S9）；存成新的 agora Session，`relation: continue`、`parents: [{id: <來源>, raw_md5}]`；刪掉 pending；印出新的 agora id。
+   兩種原生載入與兩種注入，都在啟動前就知道新 session 的 id。
+
+2. 工作目錄：`--dir` 預設用 `source.dir`（這台機器上存在的話），否則用目前目錄；印出實際用的目錄（H1）。**新 session 一律放在這個目錄**：opencode 的 session 屬於 `import` 時的 cwd，Claude 的新 jsonl 也落在啟動 cwd 的編碼目錄（spike V5）。
+3. 寫 pending 並持有 flock（4.2），再在前景啟動 agent。agora 在 agent 執行期間忽略 SIGINT；子行程在 exec 前把 SIGINT 還原成預設，Ctrl-C 只給 agent（S3、N1）。
+4. `--header` 和 import 一樣，寫進接續出來的新 Session（N17）。
+5. agent 結束後：取得那一次的 Session，內容比啟動前多才存（S9）；存成新的 agora Session，`relation: continue`、`parents: [{id: <來源>, raw_md5}]`；刪掉 pending；印出新的 agora id。
 
 ### 5.5 Session 壓縮
 
@@ -225,7 +235,17 @@ agora:01K6...  2026-10-01  opencode  …把 CSV 轉成 Markdown 表格…
 - Foundry、Atelier 的程式（只保留 header 規則）。
 - 跨機器同時改同一個 Session 的衝突處理（最後寫的贏；S7 讓舊版本不會被子 Session 弄丟）。
 
-## 7. 要先驗證的事（spike）
+## 7. spike 的結論（2026-10-02，詳見 `docs/spike/`）
+
+| # | 結論 |
+|---|---|
+| V1 | **可行。** 三種 id 全部重編後 import，原本的 session 位元組不變，新訊息接在後面。只換 session id 會靜默失敗（rc=0、0 則訊息），所以一定要回讀驗證 |
+| V2 | **可行。** 只需改每行頂層 `sessionId`；`--session-id` 搭 `--resume` 必須加 `--fork-session`；用過 Task 的 session 有 `subagents/` 附屬檔；進行中讀 jsonl 沒看到半行（仍防禦性處理） |
+| V3 | **可行。** opencode 用一則 user 訊息帶全文；claude 用 `@<路徑>` |
+| V4 | **可行。** `drive.file` 下建立、上傳、列出、增量、刪除都行；要用 `copyto`；access token 約 1 小時、rclone 自己刷新，agora 不碰 token |
+| V5 | opencode 的 session 屬於 import 時的 cwd；claude 的新檔落在啟動 cwd 的編碼目錄。continue 一律在工作目錄開 |
+
+## 7.1 驗證時的原問題（保留）
 
 | # | 問題 | 負責 |
 |---|---|---|
