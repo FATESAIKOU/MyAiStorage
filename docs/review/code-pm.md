@@ -186,3 +186,53 @@ PM 的測試裡已經有：U-HDR-01～07、03b；U-ST-01/02、03（只驗了最�
 | `uv run pytest -q tests/unit` | 34 passed |
 | `scratchpad/cr.sh`：用 scratchpad 裡的 HOME／CONFIG／CACHE／STATE，`AGORA_RCLONE=/usr/bin/false`，用 `.venv/bin/python -m agora.cli` 執行 | (1) 不完整的 pending JSON → `search --no-sync` rc=1，`JSONDecodeError`；(2) outbox 裡沒有 session.md → `sync` rc=1，`FileNotFoundError`；(3) YAML 壞掉的 session.md → `sync` rc=1，`yaml.parser.ParserError`（C2） |
 | `scratchpad/flock_demo.py`：父行程持有 flock 之後執行 `sleep 6`，然後 `kill -9` 父行程，再用另一個行程 `LOCK_NB` | 沒有加 `pass_fds`：鎖是**空的**，`sleep` 還活著（C1 成立）；加了 `pass_fds`：鎖**仍然被持有** |
+
+---
+
+## 修正確認（2026-10-02，對象 `1c0177e`）
+
+**結論：C1～C14 都修了，方向都對，39 個單元測試全部通過，我原本的三個 C2 重現也都不再 crash。** 但 C2 的修法帶進了一個新的 **High**（R1）：rclone 叫不起來時，**完好的 outbox entry 會被當成壞檔，移進 `.bad/`**，從此不再重送。這已經實際重現了。另外還有 2 條 Medium、4 條 Low。
+
+### 逐條確認
+
+| # | 狀態 | 確認的內容 |
+|---|---|---|
+| C1 | ✅ | `subprocess.run(..., pass_fds=(lock.fileno(),))`。design 4.2 也改成「agora **和** agent 都不在了，才拿得到鎖」。但測試沒有真的走過 cmd_continue（R3） |
+| C2 | ⚠️ | `split_document` 會把 YAML 錯誤包成 HeaderError；pending 與 outbox 的壞檔會移進 `.bad/`；main 最外層有 catch-all。我的 `cr.sh` 三個情境現在 rc 都是 0，壞掉的 outbox 也確實移進了 `.bad/`。**但 push_outbox 把所有 `OSError` 都當成「壞檔」**（R1）；另外，recover_pending 把 `_finish` 裡的 `KeyError` 也當成壞檔（R4） |
+| C3 | ⚠️ | 改成建立時就上鎖，並且容忍同時補存（`path.exists()` 檢查加上 `missing_ok`），主要的競態已經解決。從 `open("a+")` 建立檔案到 `flock` 之間，還有一個非常短的空窗（R5） |
+| C4 | ⚠️ | 先寫到 `.tmp-<ulid>`，再 rename 成正式的名字，最常見的情況已經解決。但 `rmtree(folder)` 和 `tmp.rename(folder)` 之間還有一個空窗（R6） |
+| C5 | ✅ | `.expanduser().resolve()`；也有測試。目錄不存在時沒有報錯，但不影響正確性 |
+| C6 | ✅ | `hdr.get("title") or ...`；也有測試 |
+| C7 | ✅ | 新增 `list_one(ulid)`，push 只列自己這一個資料夾 |
+| C8 | ✅ | 只看 `parents[*].id` |
+| C9 | ✅ | 改成用實際抓到的 raw 算 md5 |
+| C10 | ✅ | 排序鍵改成 `(source.created_at, updated_at, ulid)` |
+| C11 | ✅ | search 的輸出加了 `(未上傳)`，也有測試 |
+| C12 | ✅ | 改成 `_save` 回傳 `(id, uploaded)` 再由 `_emit` 決定；全域變數已經移除，也有測試 |
+| C13 | ✅ | sync 時會呼叫 `validate`。只是嚴格程度可以再調整（R7） |
+| C14 | ✅ | fault 點改名成 `before-agent-launch`；`--no-sync` 時只提示、不補存；內容沒變但有 `--header` 時會更新 header；design 補上了片段是正規化文字的說明，`config.json` 也統一了。孤兒 session 這點沒有寫進 design（可以接受） |
+
+第 (3) 節的刪減建議（`Ref.__str__`、`remember` 與 `_index_outbox` 合併、`"outbox"` 這個特殊 md5、merge 的逗號）都沒有採納。其中**逗號寫法是使用者原本的指令格式，要保留**，所以那一條撤回，test-plan 也已經補上測試（U-MRG-05）。其他幾條都不影響正確性，要不要做都可以。
+
+### 新的問題
+
+| # | 嚴重度 | 位置 | 問題 | 建議 |
+|---|---|---|---|---|
+| R1 | **High** | store.py 的 `push_outbox`，以及 `Drive._run` | push_outbox 接到 `(h.HeaderError, OSError)` 就 quarantine。但 `subprocess.run` 找不到 rclone 時丟的是 `FileNotFoundError`，它也是 OSError，所以**完好的 outbox entry 會被移進 `.bad/`**。之後沒有任何指令會重送它，也不會再提醒。會觸發的情況：rclone 不在 PATH 上（例如 launchd 或 cron 的環境、`brew upgrade` 的途中、`AGORA_RCLONE` 打錯）。outbox 裡往往是**還沒上傳的唯一一份**（agent 那邊雖然還在，但 agora 的關聯會斷掉）。**已重現**：stage 一筆正常的 entry，用 `AGORA_RCLONE=/nonexistent/rclone` 執行 `sync`，結果那筆被移進了 `outbox/.bad/`，而且 main 的 catch-all 又印了一次 FileNotFoundError | (a) `Drive._run` 把 `OSError` 包成 `StoreError`（「叫不起 rclone」屬於暫時性的失敗，下次可以再試）；(b) push_one 先**單獨**讀取並解析本機的檔案，只有這一步失敗才 quarantine，rclone 階段的任何錯誤都留在 outbox。只要 (a) 就能修好這次的重現，(b) 是讓「什麼算壞檔」的界線清楚 |
+| R2 | Medium | cli.py 的 main、store.py 的 quarantine | `.bad/` 只在被移進去的那一次警告一行，之後就沒有任何提醒。使用者很容易沒看到，而裡面的東西可能是唯一的一份 | 每個指令開始時，如果 `outbox/.bad` 或 `pending/.bad` 不是空的，就印一行「有 N 筆壞檔在 …，請檢查」（和 outbox 的提示放在一起，大約 3 行） |
+| R3 | Medium | tests/unit/test_cli.py 的 `test_lock_survives_agora_death_while_agent_lives` | 這個測試是自己 `Popen(..., pass_fds=...)`，驗證的是 flock 的語意，**沒有**走過 cmd_continue。就算有人刪掉 cmd_continue 裡的 `pass_fds`，它也照樣會過 | 用 cmd_continue 跑一個真的子行程 agent（像 N1 測試那樣的 python script，裡面 sleep）：用 subprocess 啟動 `python -m agora.cli continue-session ...`，等 agent 寫好 marker 之後，`kill -9` agora，確認 LOCK_NB 拿不到鎖；殺掉 agent 之後，`sync` 就會補存。或者至少 monkeypatch `subprocess.run`，確認收到的參數裡有 `pass_fds` |
+| R4 | Low | cli.py 的 recover_pending | 這裡的 `except (json.JSONDecodeError, KeyError, UnicodeDecodeError)` 把整個 `_finish` 包在一起。adapter 的 `collect` 如果因為 bug 丟出 KeyError，**好的 pending 也會被 quarantine**，就不再自動重試 | 先 `json.loads`，並且檢查必要的 key（`agora_id`、`agent`、`dir`、`parent`），只有這一步失敗才 quarantine；`_finish` 丟出的任何例外，都當成「下次再試」 |
+| R5 | Low | cli.py 的 `_write_pending` | `open(path, "a+")` 建立檔案之後、`flock` 之前，另一個指令可能搶先拿到鎖，讀到空檔案，然後把它 quarantine。結果是：這次 continue 沒有 pending 保護，而且結束時的 `pending.unlink()` 會丟出 FileNotFoundError。空窗只有幾微秒 | 寫到 `<ulid>.json.tmp`（glob 是 `*.json`，所以不會被掃到），上鎖、寫入之後再 `os.rename`；或者 recover_pending 遇到**空檔案**時直接跳過，不要 quarantine（一行就好） |
+| R6 | Low | store.py 的 `stage` | 如果在 `rmtree(folder)` 之後、`tmp.rename(folder)` 之前 crash，新的內容只在 `.tmp-<ulid>` 裡，而 `_outbox_ulids` 會跳過開頭是 `.` 的名字，所以它不會被上傳，舊的也已經刪掉了 | 先把舊的 rename 成 `.old-<ulid>`，再把 tmp rename 成正式名字，最後才 rmtree 舊的；或者 push_outbox 時，如果看到含有 session.md 的 `.tmp-*`，而正式的資料夾不存在，就把它補上去 |
+| R7 | Low | store.py 的 sync | `validate` 遇到 HeaderError（例如 refs 裡有一個未來才會有的 entity）就整份跳過。這和 H3／H4「不認得就警告，照樣讀共通欄位」的精神不一致 | 在 sync 裡，ref 或 case 的錯誤降級成警告；只有 `entity`／`id` 錯了才跳過 |
+
+### 這次跑過的指令
+
+| 指令 | 結果（只記形狀） |
+|---|---|
+| `git fetch`、`git diff ef9f90a 1c0177e` | 改到的是 src 的 3 個檔、test_cli.py、design.md（4.2、D5、4.5） |
+| `.venv/bin/python -m pytest -q tests/unit/test_header.py test_store.py test_cli.py` | 39 passed |
+| `scratchpad/cr.sh`（同上一節，`AGORA_RCLONE=/usr/bin/false`） | 三個情境都是 rc=0；壞掉的 outbox entry 移進了 `outbox/.bad/`；`--no-sync` 時不會去動 pending |
+| 用 scratchpad 的目錄 stage 一筆正常的 entry，`AGORA_RCLONE=/nonexistent/rclone`，執行 `agora sync` | 那筆**正常的** entry 被移進了 `outbox/.bad/`，outbox 變成只剩 `.bad`（R1） |
+
+沒有碰 Drive，沒有跑任何 agent，沒有讀任何 Session、MyBrain 或 rclone.conf。

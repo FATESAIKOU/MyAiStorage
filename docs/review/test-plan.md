@@ -1,9 +1,10 @@
 # Agora lite 驗收測試清單
 
-2026-10-02，review。給 impl 照著寫自動化測試。範圍是 `docs/design.md`（**第 2 版**，`90f55ad`）第 5 節的六個指令。
-「對應」一欄的 S1…H7、L1…L4、N1…N17 指的是 `docs/review/design.md` 的編號（N 開頭的在「第 2 版確認」那一節）；「5.x」「4.x」指 design.md 的小節；T1、T2 見第 0.4 節。
+2026-10-02，review。給 impl 照著寫自動化測試。範圍是 `docs/design.md`（**第 3 版**；最後一次對照的是 `1c0177e`）第 5 節的六個指令。
+2026-10-02 第二次修改：U-ST-20 依 design 第 3 版改寫；整合測試直接使用 `agora-test/`，不做巢狀的子資料夾；加入 merge-session 的逗號寫法（U-MRG-05）；加入 `code-pm.md` 的 C／R 編號會用到的測試（U-ST-23～25、U-CON-20～21）。
+「對應」一欄的 S1…H7、L1…L4、N1…N17 指的是 `docs/review/design.md` 的編號（N 開頭的在「第 2 版確認」那一節），C1…C14、R1…R7 指的是 `docs/review/code-pm.md` 的編號；「5.x」「4.x」指 design.md 的小節；T1、T2 見第 0.4 節。
 
-> **前提**：S／H／L／T 都已經併入 design 第 2 版。**N 開頭的測試，是假設 design 會採納「第 2 版確認」裡的建議。** PM／使用者如果不採納某一條，就刪掉或改寫對應的測試，不要讓測試偷偷定義規格。
+> **前提**：S／H／L／T／N 都已經併入 design 第 3 版。**R 開頭的測試，是假設 PM 會採納 `code-pm.md`「修正確認」那一節的建議。** PM／使用者如果不採納某一條，就刪掉或改寫對應的測試，不要讓測試偷偷定義規格。
 
 ## 0. 共通約定
 
@@ -17,7 +18,7 @@
 | `AGORA_RCLONE`（rclone 執行檔的路徑） | 單元測試換成假的 rclone |
 | `AGORA_OPENCODE_CMD`、`AGORA_CLAUDE_CMD` | 單元測試換成假的 agent；整合測試換成非互動的 `opencode run`／`claude -p` |
 | `AGORA_CLAUDE_HOME`（預設是 `~`） | 單元測試把 `~/.claude/projects` 指到暫存目錄，**絕對不能讀到真的 `~/.claude`** |
-| `AGORA_TEST_FAULT=<點>` | 在指定的點讓程式直接 `os._exit(137)`：`after-raw-upload`、`after-session-upload`、`after-agent-launch`、`before-finalize` |
+| `AGORA_TEST_FAULT=<點>` | 在指定的點讓程式直接 `os._exit(137)`：`after-raw-upload`、`after-session-upload`、`before-agent-launch`（寫好 pending、啟動 agent 之前；C14）、`before-finalize` |
 | 可以注入的時鐘（例如 `AGORA_NOW`） | 測 sync 的節流 |
 
 ### 0.3 假的 rclone 與假的 agent（單元測試用）
@@ -89,9 +90,12 @@
 | U-ST-17 | 沒有 config（第一次執行） | `agora sync` | 建好根資料夾，把它的 folder ID 寫進 config；第二次執行不再建 | S8 |
 | U-ST-18 | 遠端有一個 merge Session（只有 session.md，header 沒有 `raw`） | 用另一組 cache `sync`，再 `search` | 照常建索引，不會被當成「還沒寫完」 | N5 |
 | U-ST-19 | U-ST-04 的狀態 | 檢查 `calls.log` | 判斷 raw 是否完整時，只用列檔拿到的 md5，**沒有**下載 raw | N11 |
-| U-ST-20 | 鏡像裡有 3 個 Session；假的 rclone 的 `lsjson` 回傳空清單（另一個 case 是 exit 1） | `sync` | 鏡像和索引都不會被刪，警告一行 | N12 |
+| U-ST-20 | 鏡像裡有 3 個 Session。分三個 case：(a) 遠端的 `sessions/` **不存在**（假的 rclone 回 `directory not found`）；(b) `lsjson` 以 exit 1 失敗；(c) `sessions/` 存在，但裡面是空的 | 分別執行 `sync` | (a) 鏡像和索引都不刪，警告一行（design 4.3、N12）；(b) 什麼都不刪，警告「連不上 Drive」，改查本機；(c) **照常刪掉**鏡像和索引裡的 3 筆（`sessions/` 存在就表示 Session 真的被刪了） | N12、S5 |
 | U-ST-21 | 鏡像裡 A 的 session.md 是舊的，指向的 raw 在遠端已經被刪掉，遠端有新的 session.md | `continue-session A`（原生載入） | 抓 raw 失敗後，重新抓 A 的 session.md，改抓新的 raw，然後繼續 | N8 |
-| U-ST-22 | U-ST-06 跑完的狀態 | 在同一台機器 `search` 那個 Session 的關鍵字 | 搜得到，並且標示「未上傳」 | N13 |
+| U-ST-22 | U-ST-06 跑完的狀態 | 在同一台機器 `search` 那個 Session 的關鍵字 | 搜得到，那一行的最後是 `(未上傳)` | N13、C11 |
+| U-ST-23 | outbox 裡有一筆**正常的** entry；`AGORA_RCLONE=/nonexistent/rclone` | `sync` | 那一筆**還在** `outbox/<ulid>/`，沒有被移進 `.bad/`；警告的是「叫不起 rclone」；把 rclone 改回來之後再 sync，就會上傳 | R1 |
+| U-ST-24 | outbox 裡有：沒有 session.md 的資料夾、YAML 壞掉的 session.md、非 UTF-8 的 session.md | `sync`，再執行 `search --no-sync` | 這三筆都移進了 `outbox/.bad/`；兩個指令的 rc 都是 0；之後每個指令開始時，都會印一行「有 N 筆壞檔」 | C2、R2 |
+| U-ST-25 | 模擬 `stage` 在「舊的已經刪掉、新的還在 `.tmp-<ulid>`」時 crash（直接把資料夾擺成那個狀態） | `sync` | 新的內容會被上傳（不會因為名字開頭是 `.` 就被跳過） | C4、R6 |
 
 ### U-IMP import
 
@@ -118,6 +122,7 @@
 | U-MRG-02b | Session M＝merge(A, B) | `merge-session M C` | 新 Session 的 `parents` 是 `[{id: M, raw_md5: null}, {id: C, raw_md5: …}]`；閱讀版裡 M 的段落照原樣串進來 | N5 |
 | U-MRG-03 | 無 | `merge-session A agora:不存在` | exit ≠ 0；遠端和 outbox 都沒有新東西 | 5.3 |
 | U-MRG-04 | A 的 raw 還沒寫完（狀態同 U-ST-04） | `merge-session A B` | exit ≠ 0，訊息說 A 還不完整；或者先 sync 再試一次。兩種做法擇一，寫進 design | S1 |
+| U-MRG-05 | Session A、B、C | **使用者原本的寫法** `merge-session A, B, C`（shell 拿到的參數是 `A,`、`B,`、`C`）；再試 `merge-session A,B,C`、`merge-session A , B`（參數裡有單獨一個 `,`）、`merge-session agora:A, B`（有的帶前綴，有的沒有） | 每一種寫法的 `parents` 都依給的順序排列，沒有空的 id，前綴有沒有都一樣；`merge-session A,` 只有一個 Session，exit ≠ 0 並且說至少要兩個 | 5.3（使用者的指令格式） |
 
 ### U-CON continue-session（假的 agent）
 
@@ -145,6 +150,8 @@
 | U-CON-17 | 一份已經過期的 pending（agora 和 agent 都已經結束） | 兩個行程同時執行 `agora show A` | 遠端只有**一個**新的 Session 資料夾，就是 pending 裡的 `agora_id` | N2 |
 | U-CON-18 | 從 merge 的結果 M continue | 讀新 Session | `parents: [{id: M, raw_md5: null}]` | N5 |
 | U-CON-19 | 從 oc-basic 的 A continue 到 opencode | 讀新 Session 的 `source` | `source.session_id` 是這次新的 opencode session id，`source.dir` 是這次實際用的目錄；之後用這個新 id 重新匯入，會對到這個 continue Session | N6 |
+| U-CON-20 | fake agent 是一個真的子行程（python script，先寫 marker，再 sleep） | 用 subprocess 啟動 `python -m agora.cli continue-session ...`；看到 marker 之後，`kill -9` agora；用 `LOCK_NB` 試著鎖 pending，並執行 `agora sync`；再殺掉 agent，執行 `agora sync` | agent 還活著時鎖不到，pending 還在，也沒有補存；agent 死了之後才補存，而且只有一個新的 Session。**一定要走過 cmd_continue**，刪掉 `pass_fds` 這個測試就要失敗 | C1、N2、R3 |
+| U-CON-21 | 一份格式正確的 pending；adapter 的 `collect` 會丟出 KeyError（模擬 adapter 的 bug） | 執行 `agora sync` 兩次 | pending **不會**被移進 `.bad/`，兩次都警告「補存失敗，下次再試」；把 adapter 修好之後，就會補存 | R4 |
 
 ### U-SHW show
 
@@ -178,9 +185,10 @@
 
 ### 安全規則（每次執行都要遵守）
 - 每次執行前先 `mkdir -p /tmp/agora-it-<run>/{proj,proj2}`，兩個資料夾**各自** `git init && git commit --allow-empty -m init`。所有 opencode 指令只在這兩個資料夾裡跑。
-- Drive 的根目錄設成 `gdrive:agora-test/it-<run>/`（`--config ~/.config/agora/rclone.conf`）。不准碰 `agora-test/` 以外的地方。rclone.conf 不准印出，也不准貼出來。
+- Drive 的根目錄**直接用 `agora-test/`**（`AGORA_FOLDER_NAME=agora-test`，`--config ~/.config/agora/rclone.conf`），不做巢狀的子資料夾（`folder_id()` 只會在 Drive 根目錄找名字）。不准碰 `agora-test/` 以外的地方。rclone.conf 不准印出，也不准貼出來。
+- `agora-test/sessions/` 是好幾次執行**共用**的，裡面可能有其他次執行留下來的 Session。所以：(a) 每次執行都記下自己建的 ULID，所有斷言只看自己的 ULID（例如「搜得到」要比對 ULID，不能用「結果是 N 筆」）；(b) 每次執行用自己的 `AGORA_CONFIG`／`AGORA_CACHE_DIR`／`AGORA_STATE_DIR`；(c) 搜尋用的關鍵字要帶這次執行的標記（例如在 prompt 裡放 `run-<run>`），避免撞到其他次執行的內容；(d) 不准對 `agora-test/` 或 `agora-test/sessions/` 做 purge。
 - 只用 opencode zen 的免費模型（`opencode/space-bunny-free`、`opencode/muse-spark-1.3-contributor-free`），以及 `claude -p`。prompt 都是自編的短句子。
-- 清理時，只用這次執行記下來的 id **一個一個**刪：opencode session、`~/.claude/projects/<編碼後的 /private/tmp/agora-it-<run>/...>/` 底下的檔案（只刪自己建的 uuid），以及 `agora-test/it-<run>/`。不准批次刪除，也不准列出其他的 session。注意 macOS 的 `/tmp` 實際路徑是 `/private/tmp`，Claude 會用後者來編碼專案路徑。
+- 清理時，只用這次執行記下來的 id **一個一個**刪：opencode session、`~/.claude/projects/<編碼後的 /private/tmp/agora-it-<run>/...>/` 底下的檔案（只刪自己建的 uuid），以及 `agora-test/sessions/<這次建的 ULID>/`（一個 ULID 一個 ULID 地 `rclone purge`）。不准批次刪除，也不准列出其他的 session。注意 macOS 的 `/tmp` 實際路徑是 `/private/tmp`，Claude 會用後者來編碼專案路徑。
 - 檢查結果時只比對形狀與欄位（行數、md5、欄位是否存在、有沒有某個自編的關鍵字），不把對話內容寫進 log。
 - 每一步都 `nohup` 到檔案，單一步驟不超過 90 秒，會等 agent 的步驟要設 timeout。
 
@@ -203,13 +211,13 @@
 
 | ID | 前置 | 步驟 | 預期 | 對應 |
 |---|---|---|---|---|
-| I-01 | 空的 `agora-test/it-<run>/` | `agora sync`（第一次）；用 rclone 從外部放一份 session.md 和 raw；再 `sync` | 建好根資料夾，並把 folder ID 寫進 config；第二次只下載新的那一份 session.md；`rclone lsjson --hash` 拿得到 md5 | V4、S8、L2 |
+| I-01 | 新的 `AGORA_CONFIG`（還沒有 folder ID）；`agora-test/` 可能已經存在 | `agora sync`（第一次）；用 rclone 從外部放一份屬於這次執行的 session.md 和 raw（新的 ULID）；再 `sync` | config.json 裡有 `agora-test` 的 folder ID（已經存在就沿用，不會再建一個同名的）；第二次 sync 時，這次執行的 ULID 只下載 session.md（看 rclone 的呼叫紀錄）；`rclone lsjson --hash` 拿得到 md5 | V4、S8、L2 |
 | I-02 | proj | `opencode run -m <免費模型> '把 CSV 轉成 Markdown 表格，先列三個步驟'`，記下 session id；`agora import --format opencode --session-id <id>`；`show`；`search 'CSV'`、`'表格'`、`'步驟'` | 印出 agora id；Drive 上有 session.md 和 `raw-<md5>.json`，而且 md5 相符；三個搜尋都有結果（`表格`、`步驟` 是二字詞，測的是 T1）；閱讀版沒有工具結果 | 5.2、S1、T1、0.1 |
 | I-03 | proj | 在 proj 裡執行 `claude -p --session-id <uuid> 'CSV を Markdown の表に変換する手順を三つ挙げて'`；`agora import --format claude --session-id <uuid>`；`search '変換'`、`'手順'` | 匯入成功；如果有附屬資料夾，raw 裡的 `aux` 也有（只記檔名）；兩個搜尋都有結果 | 5.2、S9、T1 |
 | I-04 | I-02 的 A；先 export A 原本的 opencode session，記下 message 數與 md5 | `AGORA_OPENCODE_CMD='opencode run -m <免費模型> --session {id} 續：把第二步寫成程式碼'`，執行 `continue-session A --agent opencode --dir proj`；再 export 一次原本的 session | 原本那個 session 的 message 數和 md5 都沒變；新的 agora Session 的 `parents[0]` 是 A，閱讀版的 message 比 A 多 | S4、V1 |
 | I-05 | I-03 的 B；記下原本 jsonl 的行數與 md5 | `AGORA_CLAUDE_CMD='claude -p --resume {id} 續：把第一步寫成指令'`，執行 `continue-session B --agent claude` | 原本那個 jsonl 沒有變；新 uuid 的 jsonl 在編碼後的 proj 底下，而且行數變多；新的 agora Session 的 `parents[0]` 是 B | S9、H1、V2 |
 | I-06 | A（opencode）、B（claude） | `continue-session A --agent claude`（1 次 `claude -p`）；`continue-session B --agent opencode`（1 次 opencode） | 兩邊都是用閱讀版注入；回覆裡出現自編內容的關鍵字（例如「CSV」）。只做寬鬆的比對 | 5.4、V3 |
-| I-07 | A、B | `merge-session A B`；`continue-session <M> --agent opencode` | M 的 `parents` 是 [A, B]；Drive 上 M 的資料夾只有 session.md；continue 用的是閱讀版注入（opencode 端是 import 一則訊息的 export），而且存成新的 Session | 5.3、L3、N4 |
+| I-07 | A、B | `merge-session A, B`（使用者的逗號寫法）；`continue-session <M> --agent opencode` | M 的 `parents` 是 [A, B]；Drive 上 M 的資料夾只有 session.md；continue 用的是閱讀版注入（opencode 端是 import 一則訊息的 export），而且存成新的 Session | 5.3、L3、N4 |
 | I-08 | proj 裡已經有一個自編的 opencode session（可以重複使用 I-02 的） | 用 cache 1 加上 `AGORA_TEST_FAULT=after-raw-upload` 匯入；用 cache 2 `sync` 再 `search`；用 cache 1（不加 fault）`sync`；用 cache 2 再 `sync` 再 `search` | 第一次 cache 2 搜不到，也沒有錯誤；cache 1 的 sync 把 outbox 推上去；第二次 cache 2 就搜得到 | S1、S2 |
 | I-09 | 用 `AGORA_RCLONE` 包一層，讓真的 rclone 在第 1 次 copyto 時失敗 | 匯入 → 拿掉那一層包裝 → `sync` | 第一次 exit ≠ 0，outbox 裡有那一筆；sync 之後 Drive 上的內容齊全，outbox 是空的 | S2 |
 | I-10 | A | `AGORA_OPENCODE_CMD` 用 `opencode run --session {id} '再加一個驗證步驟'`；continue 在背景啟動，3 秒後 `kill -9` agora 的行程；等 agent 結束（timeout 80 秒）後執行 `agora sync` | sync 時把 pending 補存成新的 continue Session，`parents` 是 A；pending 是空的 | S3 |
@@ -220,7 +228,7 @@
 | ID | 項目 | 預期 | 對應 |
 |---|---|---|---|
 | M-01 | worker OAuth client 的 consent screen 狀態（在 GCP console 看，不要印出任何憑證） | 是「In production」；如果是「Testing」，design 要寫明 7 天要重新授權一次 | S8 |
-| M-02 | 用 Drive 網頁在 `agora-test/it-<run>/` 底下手動上傳一個檔，然後 `agora sync` | agora 看不到這個檔，也不會出錯（確認 drive.file 的行為，並寫進 design） | S8 |
+| M-02 | 用 Drive 網頁在 `agora-test/sessions/` 底下手動上傳一個名字像 ULID 的資料夾，然後 `agora sync`；做完之後從網頁刪掉它 | agora 看不到這個檔，也不會出錯（確認 drive.file 的行為，並寫進 design） | S8 |
 | M-03 | 互動模式的 continue：真的打開 opencode TUI 和互動式 claude，打一句自編的話，然後用各自的方式離開（包括按 Ctrl-C 離開） | 兩邊都會存回去；按 Ctrl-C 不會讓 agora 先死掉 | S3、5.4 |
 
 ## 對照：review 的每一條 High 都有測試
@@ -228,9 +236,10 @@
 | review 編號 | 單元測試 | 整合測試 |
 |---|---|---|
 | S1 半份寫入 | U-ST-01～05、U-ST-07、U-IMP-07、U-MRG-04、U-CON-14 | I-02、I-08 |
-| S2 上傳失敗重送 | U-ST-06～10、U-CON-13 | I-08、I-09 |
+| S2 上傳失敗重送 | U-ST-06～10、U-ST-23、U-CON-13 | I-08、I-09 |
 | S3 continue 中途被打斷 | U-CON-08～13 | I-10、M-03 |
 | S4 opencode id 改寫 | U-CON-01、U-CON-02 | I-04 |
 | H1 工作目錄 | U-HDR-08、U-CON-02、U-CON-04、U-CON-06、U-IMP-04 | I-05、I-12 |
 | T1 中文二字詞 | U-SRC-03、U-SRC-04、U-SRC-12 | I-02、I-03 |
-| N2 pending 判斷 agent 是否還在執行 | U-CON-15～17 | I-10 |
+| N2／C1 pending 判斷 agent 是否還在執行 | U-CON-15～17、U-CON-20 | I-10 |
+| C2／R1 壞檔不會讓指令壞掉，好檔不會被當成壞檔 | U-ST-23、U-ST-24、U-CON-21 | — |
