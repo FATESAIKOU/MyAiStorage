@@ -116,6 +116,19 @@ claude -p --session-id <uuidV3c> --append-system-prompt="$(cat reading.md)" '…
 
 注意：`--allowedTools` 是 variadic，吃掉後面的 prompt——寫 `--allowedTools=Bash`（`=` 式）。
 
+## 附記：`src/agora/agents/claude.py` 實作（2026-10-02，334 行）
+
+照本報告＋N 項實作，單元 17 個全過、整合（真實 3 次 `claude -p`）通過：
+
+- 編碼規則以實測修正：`/`、`.` → `-`，leading `/` 轉完本來就是 `-` 開頭，
+  **不要**再加前綴（`/tmp/my-proj.v2` → `-tmp-my-proj-v2`）。
+- `start_native` 改寫每行 `sessionId`，`cwd` 逐行覆成 workdir
+  （U-CON-04 要求連 bookkeeping 行也有 cwd）；aux 的 `.jsonl` 同樣改寫。
+- 真實 2 輪 `-p` 的 user＋assistant 行數是 5 不是 4（resume 疑似多記一 user 行），
+  整合測試只斷言「成長＋2」，不寫死行數。
+- 需 PM 處理（不改別人的檔）：U-CON-05 說 noop 時「pending 留著」，但現行
+  `cli.py` `cmd_continue` 在 `_finish` 回 `None` 後仍會刪 pending——留或刪請 PM 定。
+
 ## 對 design.md 的修改建議
 
 1. §5.4「單一 claude→claude 原生」改為 `--resume <id> --fork-session --session-id <新uuid>`
