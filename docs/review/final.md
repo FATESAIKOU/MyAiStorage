@@ -131,3 +131,44 @@
 | `grep -cF` 檢查工作目錄裡 `test_e2e_opencode.py` 的 `known()`／`todos`／`OPENCODE_PERMISSION` | 還沒 commit 的版本也一樣有 `known()` 和 todos 的 glob，也沒有 `OPENCODE_PERMISSION` |
 
 沒有執行 e2e、整合測試或驗收清單，沒有碰 Drive，沒有叫真的 opencode 或 claude，也沒有讀任何真實的 Session。
+
+---
+
+## 最終確認：`9462f70`（impl1：P1～P3、模型 fallback）與 `f033e0b`（PM：PWD）
+
+這次依照指示**沒有跑整合測試**（PM 正在跑），只讀了程式，並從 `git archive HEAD` 取出的副本跑了單元測試。
+
+### 逐條確認
+
+| # | 狀態 | 確認的內容 |
+|---|---|---|
+| P1 | ✅ | teardown 拿掉了 `store.Index(paths).known()`。ULID 只來自 `run_main` 在 import／continue／merge 之後，從 stdout 記下的 `agora:<26 字元>`（在斷言**之前**就記下了，所以 exit 3 的情況也會被收到），加上測試自己附加的部分。和 `test_e2e_cli.py`（D-1）的寫法一致 |
+| P2 | ✅ | claude 的 uuid 也會從 `e2e-args.log` 收集（wrapper 在啟動 agent **之前**就會寫好這份紀錄），所以 continue 失敗也清得到。刪除一律用精確的路徑：`projects/<encode(proj)>/<uuid>.jsonl`、同名的 sidecar、`session-env/<uuid>`、`file-history/<uuid>`；資料夾和 `memory/` 也只對這一個精確的名字做 `rmdir`。檔案裡已經沒有 glob，`todos` 只出現在註解裡 |
+| P3 | ✅ | 所有從測試發出的 `opencode run` 都經過 `opencode_noninteractive.ask()`，它**一律**會設定 `OPENCODE_PERMISSION='{"*":"deny"}'`，而且不能覆蓋。這包括 wrapper 的 TUI 替身、`test_e2e_opencode.opencode_run`，以及 `test_opencode_real.ask`。wrapper 直接轉交的 export／import／delete 也帶著同樣的 env。impl1 實測過：沒有設定時，模型會發出 read 工具呼叫；設定之後，tool_use 是 0 次（記錄在 spike/opencode.md） |
+| 模型 fallback | ✅ | 依序是 `space-bunny-free` → `muse-spark-1.3-contributor-free` →（只有在 `opencode models ollama-cloud` 列得出那個模型時）`ollama-cloud/deepseek-v4.1-flash --variant max`。測試用的是隔離的 HOME，所以第三個不會出現，**不會用掉使用者的第三方額度**。全部都失敗時才 skip，而且 skip 的訊息會寫出試了哪些、每個是怎麼失敗的。這符合「teammate 模型優先順序」裡 opencode 免費模型在前、ollama-cloud 在後的順序 |
+| f033e0b | ✅ | `subprocess.run(launch.argv, …, env={…, "PWD": launch.cwd})`。opencode 是用 `PWD` 而不是真正的 cwd 來判斷專案的，所以 `--dir` 和呼叫者所在的目錄不同時，以前會在錯的專案裡打開 agent。adapter 自己呼叫的 `import` 是看真正的 cwd（`_run(cwd=…)`），export 和 delete 則是全域的，所以只有啟動 agent 這一處需要修，修法是對的。也有單元測試 |
+| 單元測試 | ✅ | HEAD `f033e0b`：**157 passed**；`src` 是 **1,926 行** |
+
+### 新發現（都只在測試裡，不影響 `src`）
+
+| # | 嚴重度 | 位置 | 問題 | 建議 |
+|---|---|---|---|---|
+| R-1 | Medium（推論，沒有執行） | `tests/integration/test_opencode_real.py` 的 `ask()` | 它呼叫 `agent.ask(list(args), cwd=PROJ, …)`，**沒有傳入帶 `PWD` 的 env**，所以 `child_env` 會沿用 pytest 行程的 `PWD`，也就是啟動 pytest 的那個目錄。依照 wrapper 自己 docstring 裡的實測結果（opencode 用 `PWD` 判斷專案；`run --session` 在其他目錄會卡住，沒有任何輸出），`test_real_round_trip`／`test_real_injected_round_trip` 對**匯入到 PROJ 的 session** 執行的 `ask("run", "-s", <id>, …)` 可能會卡住，然後兩個模型都逾時，最後 **skip**，看起來像是「免費模型沒有回答」，而不是失敗。不會讀到或寫到真實資料（資料庫是隔離的），問題只在於測試被靜默跳過了 | 和 e2e 的 `opencode_run` 一樣，傳入 `env={**os.environ, "PWD": str(PROJ)}`。**請 PM 看一下這次整合測試的結果：如果 `test_opencode_real.py` 的這幾個是 `skipped`，或者每個都花了好幾分鐘，原因就是這個** |
+| R-2 | Low | 同上 | `ask("run", …)` 會傳進 `agent.ask`，而 `agent.ask` 自己已經在最前面加了 `run`，所以實際執行的是 `opencode run -m <model> run --format json …`，多出來的那個 `run` 會變成訊息的一部分 | 呼叫端把第一個 `"run"` 拿掉 |
+| R-3 | Low | `opencode_noninteractive.py` 的 docstring | 還寫著「把 HOME 改回 `AGORA_REAL_HOME`」，但 e2e 和整合測試都是刻意讓 opencode 使用隔離的 HOME（`AGORA_REAL_HOME` 是 unset 的） | docstring 改成「只有在 `AGORA_REAL_HOME` 有設定時才換 HOME，測試不會設定它」 |
+
+### 最終結論：**PR 可以開。**
+
+- `src`：**沒有還沒解決的 High 或 Medium。** 157 個單元測試全部通過，總行數 1,926（在 2,000 以內）。這一路的 S／H／L／N／T、C／R、CL／E／D、OC、P、F／G 各項，High 和 Medium 都已經修好並確認過了。
+- 測試：還沒解決的只有 **R-1（Medium）**，而且只會讓 `test_opencode_real.py` 被**跳過**，不會讀到或寫錯任何資料。如果 PM 這次的整合測試裡這幾個是 passed，那 R-1 就不成立（可以當成 Low 結案）；如果是 skipped，用 R-1 的一行修法改完之後再跑一次就好。不論哪一種，都不需要擋 PR。
+- 開 PR 時建議在描述裡寫明：(1) 驗收要照 `docs/acceptance.md` 由使用者人工執行（M-03 的 opencode TUI 與 Ctrl-C 還沒有被自動驗證）；(2) 留下來的 Low 都列在 `docs/review/final.md`、`code-adapters.md` E 節與 `simplify.md` 裡；(3) 工作目錄裡有一個沒有追蹤的 `spike/perf/`，不要把它一起 add 進去。
+
+### 這次跑過的指令
+
+| 指令 | 結果（只記形狀） |
+|---|---|
+| `git show --stat 9462f70 f033e0b`，讀 `opencode_noninteractive.py`、`test_e2e_opencode.py`（`_cleanup`、`run_main`、`opencode_run`）、`test_opencode_real.py`（`ask`） | 見上表 |
+| `grep -cF` 檢查 `known()`、`glob(`、`todos`、`OPENCODE_PERMISSION` 等字串 | e2e 裡沒有 `known()`，也沒有 `glob(`；`OPENCODE_PERMISSION` 集中在 wrapper 的 `ask()`／`main()` |
+| `git archive HEAD \| tar -x`，再用 `PYTHONPATH=<head>/src` 跑 `pytest -q tests/unit` | 157 passed；`src` 是 1,926 行；之後副本已經刪掉 |
+
+沒有執行整合測試、e2e 或驗收清單，沒有碰 Drive，沒有叫真的 opencode 或 claude，也沒有讀任何真實的 Session。
