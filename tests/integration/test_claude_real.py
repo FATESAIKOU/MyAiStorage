@@ -59,6 +59,10 @@ def live(monkeypatch, tmp_path):
         sidecar = subdir / sid
         if sidecar.is_dir():
             shutil.rmtree(sidecar)
+    try:
+        subdir.rmdir()  # remove the project dir itself when left empty
+    except OSError:
+        pass
 
 
 def run_claude(live, *argv: str) -> str:

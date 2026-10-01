@@ -129,6 +129,15 @@ claude -p --session-id <uuidV3c> --append-system-prompt="$(cat reading.md)" '…
 - 需 PM 處理（不改別人的檔）：U-CON-05 說 noop 時「pending 留著」，但現行
   `cli.py` `cmd_continue` 在 `_finish` 回 `None` 後仍會刪 pending——留或刪請 PM 定。
 
+## 附記2：e2e（`tests/integration/test_e2e_cli.py`，2026-10-02）
+
+經 `agora.cli.main` 跑真 Drive（`agora-test/`）＋真 claude，全過（約 70 秒）：
+import → search（第一欄即新 id）→ continue 原生（wrapper 收到 `--resume`）
+→ merge（逗號寫法）→ continue 注入（wrapper 收到 `--session-id`，回覆引用閱讀版）。
+新 Session 的 `relation=continue`、`parents[0].id` 正確、`source.session_id` 為新 uuid。
+真實 `claude -p` 共 3 次。cli／store 側沒發現 bug（U-CON-05 pending 留刪問題 PM 已定為刪除）。
+小發現：adapter 的 `claude --version` 也走 `AGORA_CLAUDE_CMD`，wrapper 需透傳 `--version`。
+
 ## 對 design.md 的修改建議
 
 1. §5.4「單一 claude→claude 原生」改為 `--resume <id> --fork-session --session-id <新uuid>`
