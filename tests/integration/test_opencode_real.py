@@ -145,7 +145,7 @@ def test_real_round_trip(project, source, trash, isolated_store):
     assert exported.message_count >= 2
     # spike V5 / R-1: the session has to belong to *this* project, or the
     # `run --session` below is answering for a different project and hangs.
-    assert exported.dir == str(PROJ), f"session 跑到別的專案去了：{exported.dir}"
+    assert os.path.realpath(exported.dir) == os.path.realpath(PROJ), f"session 跑到別的專案去了：{exported.dir}"
     assert exported.agent_version and exported.agent_version[0].isdigit()
     assert exported.created_at.endswith("Z")
     untouched = raw_of(source)
@@ -164,7 +164,7 @@ def test_real_round_trip(project, source, trash, isolated_store):
     assert collected is not None, "the agent said something new"
     assert collected.session_id == launch.agent_session_id
     assert collected.message_count > launch.before_count
-    assert collected.dir == str(project)
+    assert os.path.realpath(collected.dir) == os.path.realpath(project)
 
     body = oc.ADAPTER.reading(collected.raw)
     assert body.count("## user") >= 2  # the original ask plus the new one
