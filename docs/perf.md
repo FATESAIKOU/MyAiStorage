@@ -73,3 +73,8 @@ rclone --config ~/.config/agora/rclone.conf --drive-root-folder-id <agora-test i
 量到的形狀：`results.json`（13 個中位數）、`probe.json`（4 個階段秒數）、
 Drive 上 `agora-test/sessions/` 最後 0 筆、自己那個 uuid 的 `projects/<編碼>/` 與
 `session-env/<uuid>/` 都已刪。
+
+## PM 的處理（2026-10-02）
+
+- **冷啟動改成一次批次下載（已做）**：sync 把所有要更新的 `session.md` 用一次 `rclone copy --files-from … --no-traverse` 抓下來，失敗才退回逐一下載。真的 Drive 上 3 個 Session 的冷啟動從約 13 秒（依上表推算）變成 5.8 秒；Session 越多差越多。
+- **寫入少一次往返（沒做，留給使用者決定）**：建議 1 會拿掉上傳後的 md5 確認，那是 outbox「確認 Drive 有了才移除」的保證（design 4.1），所以不拿掉。另一個做法是把 raw 與 session.md 用一次 `rclone copy --order-by name --transfers 1` 上傳（`raw-…` 排在 `session.md` 前面，順序仍然成立），可以省約 3.5 秒；但要改寫 fake 與幾個依賴 `copyto` 的測試，也要在真的 Drive 上確認順序，所以留到下一輪。

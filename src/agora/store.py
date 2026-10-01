@@ -161,6 +161,16 @@ class Drive:
         local.parent.mkdir(parents=True, exist_ok=True)
         self._run("copyto", f"gdrive:sessions/{ulid}/{name}", str(local))
 
+    def download_many(self, ulids: list[str], mirror: Path) -> None:
+        """Fetch several session.md files in one rclone run instead of one call each."""
+        mirror.mkdir(parents=True, exist_ok=True)
+        listing = mirror / ".files-from"
+        listing.write_text("".join(f"{u}/session.md\n" for u in ulids))
+        try:
+            self._run("copy", "gdrive:sessions", str(mirror), "--files-from", str(listing), "--no-traverse")
+        finally:
+            listing.unlink(missing_ok=True)
+
     def delete(self, ulid: str, name: str) -> None:
         self._run("deletefile", f"gdrive:sessions/{ulid}/{name}")
 
@@ -436,15 +446,20 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
     missing = remote is None
     remote = remote or {}
     known = index.known()
-    for ulid, files in remote.items():
-        md5 = files.get("session.md")
-        if not md5:
-            continue
-        local = paths.mirror / ulid / "session.md"
-        if known.get(ulid) == md5 and local.exists():
-            continue
+    changed = [u for u, f in remote.items() if f.get("session.md")
+               and not (known.get(u) == f["session.md"] and (paths.mirror / u / "session.md").exists())]
+    if len(changed) > 1:
+        # One rclone run for all of them: each call costs seconds (docs/perf.md).
         try:
-            drive.download(ulid, "session.md", local)
+            drive.download_many(changed, paths.mirror)
+        except StoreError as e:
+            _warn(f"批次下載失敗，改成逐一下載：{e}")
+    for ulid in changed:
+        md5 = remote[ulid]["session.md"]
+        local = paths.mirror / ulid / "session.md"
+        try:
+            if not (local.exists() and md5_file(local) == md5):
+                drive.download(ulid, "session.md", local)
             hdr, body = h.split_document(local.read_text(encoding="utf-8"))
             for warning in h.validate(hdr, strict_refs=False):
                 _warn(f"{ulid}：{warning}")
@@ -452,7 +467,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
             _warn(f"{ulid} 讀不到，先跳過：{e}")
             continue
         raw = hdr.get("raw")
-        if raw and files.get(raw["file"]) != raw.get("md5"):
+        if raw and remote[ulid].get(raw["file"]) != raw.get("md5"):
             _warn(f"{ulid} 還沒寫完（raw 不在或 md5 不符），下次再試")
             index.drop(ulid)
             local.unlink(missing_ok=True)   # keep unfinished sessions out of an offline rebuild (G3)

@@ -190,3 +190,15 @@ def test_test_folder_never_leaks_into_normal_runs(remote, monkeypatch):
     assert store.Drive(paths).folder_id() == "agora-test"
     monkeypatch.delenv("AGORA_FOLDER_NAME")
     assert store.Drive(paths).folder_id() == "agora"
+
+
+def test_cold_start_downloads_in_one_batch(remote):  # docs/perf.md
+    paths = store.Paths.from_env()
+    for _ in range(3):
+        _save(paths, _header())
+    before = len(calls(remote))
+    index = store.sync(paths)
+    new_calls = calls(remote)[before:]
+    assert sum(1 for c in new_calls if "copy" in c and "--files-from" in c) == 1
+    assert not any("copyto" in c and "session.md" in c[-1] for c in new_calls if c[-1].startswith("/"))
+    assert len(index.known()) == 3

@@ -90,6 +90,14 @@ elif cmd == "copyto":
         fail("source not found")
     dst_p.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(src_p, dst_p)
+elif cmd == "copy" and "--files-from" in params:
+    src = resolve(params[0])
+    dst = Path(params[1])
+    listed = Path(params[params.index("--files-from") + 1]).read_text().split()
+    for rel in listed:
+        if (src / rel).exists():
+            (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src / rel, dst / rel)
 elif cmd == "deletefile":
     resolve(params[0]).unlink()
 elif cmd == "purge":
