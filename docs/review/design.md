@@ -243,3 +243,65 @@ Drive 的單一檔案上傳是原子的（上傳完成才出現新內容），�
 | `opencode --version`、`opencode import --help`、`opencode export --help` | 1.18.34；`import <file>` 沒有指定 id 的選項；`export [sessionID]` 有 `--sanitize` |
 
 上面所有和實際行為有關的推論（opencode id 衝突、Claude 附屬檔、`--resume` 會寫到哪個檔、token 7 天過期），都還需要 V1、V2、V4 的 spike 確認。impl1／impl2 的報告出來之後，我會對照這份 review 再看一次。
+
+---
+
+## 第 2 版確認（2026-10-02，對象 `90f55ad`）
+
+只看了 design.md 第 2 版，沒看同一個 commit 裡的 `src/`、`tests/`。
+
+### (1) 原本的意見有沒有被正確採納
+
+**結論：23 條都有採納，沒有寫反的。** 有 1 條漏了一部分（S9 的 raw 格式）；有 6 條的寫法還要補一句，都歸到下面的 N 編號。
+
+| 編號 | 狀態 | 位置 | 說明 |
+|---|---|---|---|
+| S1 | ✅ | 4.1 | 寫入順序、raw 檔名帶 md5、讀的一方跳過都寫了。補充見 N8、N11 |
+| S2 | ✅ | 4.2 | outbox 不能刪、sync 先推再拉都有。import 上傳失敗時的 exit code 沒寫（N13） |
+| S3 | ✅ | 4.2、5.4 | pending 在啟動前寫入、補存、SIGINT 都有。但「怎麼判斷 agent 不在執行」與「忽略 SIGINT 會被子行程繼承」是新問題（N1、N2） |
+| S4 | ✅ | 5.4 | 所有 id 都要換。列出的欄位少了 `messageID`、`parentID` 這類參照欄位（N14）；id 的順序是新問題（N3） |
+| S5 | ✅ | 4.3 | 用 md5 判斷、刪除會同步到鏡像。少了列檔異常時的保護（N12） |
+| S6 | ✅ | 4.3、5.1 | 沒問題 |
+| S7 | ✅ | 3.4、5.2 | 沒問題。5.2 的 `parents: [舊 id]` 要寫成 `{id, raw_md5}`；「子 Session」也要寫明包括 merge（N16） |
+| S8 | ✅ | D5 的注意事項 | 四點都有，沒問題 |
+| S9 | ⚠️ 部分 | 5.2、5.4、V2 | 附屬資料夾、改寫欄位、行數變多才存都有了。**漏掉的是 raw 的 Claude 格式**：第 4 節還寫「原封不動」，沒有寫 `{"main": [...], "aux": {...}}` 這種包法（N15） |
+| S10 | ✅ | 5.2 | 沒問題 |
+| H1 | ✅ | 3.4、5.4 | 沒問題。`source.dir` 要從哪裡取值沒寫（N9） |
+| H2 | ✅ | 3.1、3.2 | 沒問題 |
+| H3 | ✅ | 3.1 | 用了方案 (a)，保留不認得的欄位，沒問題 |
+| H4 | ✅ | 3.1 | 沒問題 |
+| H5 | ✅ | 3.3 | 沒問題 |
+| H6 | ✅（改寫過） | 3.5 | 改成「一律 `key=value`，不含 `=` 的文字整段當 note」，沒有 `--note`。可以接受，比我原本的建議更順手。但文字裡有 `=` 時該怎麼處理還沒寫（N7） |
+| H7 | ✅ | 3.1、3.4、5.1 | 沒問題。merge 沒有 `source` 時，日期要用哪一個沒寫（N6） |
+| L1 | ✅ | D6、4.4 | 沒問題 |
+| L2 | ✅ | 4.3 | 沒問題 |
+| L3 | ✅ | 5.3 | merge 改成完全沒有 raw，比我原本的建議（只記 id 與 md5）更簡單。但 S1 的讀取規則與 S7 的 `raw_md5` 要跟著寫一句（N5） |
+| L4 | ✅ | 8 | 沒問題 |
+| T1 | ✅ | 4.5 | 沒問題。`instr()` 的大小寫要和 trigram 一致（N10） |
+| T2 | ✅ | 4.5 | 沒問題 |
+
+### (2) 第 2 版新的問題
+
+| # | 嚴重度 | 位置 | 問題 | 建議 |
+|---|---|---|---|---|
+| N2 | **High** | 4.2 | pending 沒有記 pid，所以「對應的 agent 已經不在執行」**判斷不出來**。使用者在 A 終端機裡 continue 時，B 終端機只要跑一個 `agora search`，就可能把 A 還在進行的 session 當成已經結束，提早補存，然後刪掉 pending。之後 A 正常結束，收尾時找不到 pending。如果實作因此不再存檔，後半段就永遠進不了 Agora（典型的讀到半份） | pending 加 `agora_pid`、`agent_pid`，以及兩者的啟動時間（防止 pid 被重複使用）。執行中的 agora 對 pending 檔持有 `flock`。補存的條件是：拿得到 flock（agora 已經死了），**而且** agent 的 pid 不存在或啟動時間不同（agent 也結束了）。pending 先記好 `agora_id`，這樣兩個指令同時補存也只會寫到同一個資料夾，結果冪等。這點寫進 design 會比較好 |
+| N1 | Medium | 5.4 第 3 步 | 如果 agora 在 spawn 之前就設 `SIG_IGN`，**被忽略的訊號在 exec 之後會被子行程繼承**，agent 也會跟著忽略 Ctrl-C。TUI 用 raw mode，看不出差別；但 `opencode run`／`claude -p` 這種非 TUI 的模式（也就是整合測試的用法），按 Ctrl-C 就停不下來。Python 的 `restore_signals` 不會還原 SIGINT | 用 `preexec_fn`（或 `process_group`＋`signal.SIG_DFL`）在子行程裡把 SIGINT 還原成預設，或者在 `Popen` 回傳之後才在父行程設 `SIG_IGN`。把這句寫進 5.4 |
+| N3 | Medium | 5.4、V1 | opencode 的 id（`ses_`／`msg_`／`prt_`）很可能是依時間遞增的，訊息的順序可能就是依 id 排序。如果新 id 是隨機產生的，import 之後的對話順序會亂掉 | 寫明新 id 要沿用 opencode 的格式，並且**保持原本的相對順序**（依原本的順序重新產生遞增的 id）。V1 要確認 opencode 是不是依 id 排序 |
+| N4 | Medium | 4.2、5.4 | 閱讀版注入到 **opencode** 時，啟動前不知道新 session 的 id，pending 的 `agent_session_id` 就填不出來，結束後也只能用「這個目錄裡最新的 session」去猜（會跟同時在用的 session 撞） | 注入也走原生的那條路：產生一份只有一則 user 訊息（「先讀 <檔案>，然後接著做」）的 export，id 由 agora 決定，`opencode import` 之後用 `--session <id>` 開啟。Claude 端用 `--session-id <uuid>` 開新的對話。這樣 pending 一定有 id，而且重複使用 S4 的程式，行數不會增加。請 V3 一起驗證 |
+| N5 | Low | 4.1、5.3、5.4 | merge 沒有 raw，但 4.1 說「raw 的 md5 和 header 對不上就跳過」，5.4 說 `parents` 要記 `raw_md5`。這兩條沒有說明 merge 的情況 | 寫明：header 沒有 `raw` 欄位的 session.md（merge）本身就是完整的；以 merge 為 parent 時，記 `raw_md5: null`（merge 建好之後不會再被更新） |
+| N6 | Low | 3.4、5.1 | merge 沒有 `source`，那 search 的日期和 agent 欄要顯示什麼？另外，continue 結果的 `source` 指的是誰，也沒寫 | merge：日期用 `created_at`，agent 欄顯示 `merge`。continue：`source` 是這次新的 agent session（新的 id、目錄），這樣重新匯入它時，會對到這個 continue Session |
+| N7 | Low | 3.5 | 不含 `=` 的文字會當成 note，但像 `'x=1 先試'` 這種文字，會被當成 key 是 `x`，結果是報錯還是當成 note？ | 用第一個 `=` 切開；key 在可以設定的清單裡才當鍵值對，否則整段當 note，並且警告一行 |
+| N8 | Low | 4.1、4.3 | 鏡像只抓 session.md，raw 用到時才抓。如果另一台機器重新匯入，刪掉了舊的 raw，這台機器的鏡像裡舊的 session.md 指向的 raw 就不存在了，continue 會失敗 | raw 抓不到（404）時，先重新抓那一份 session.md 再試一次 |
+| N9 | Low | 3.4 | `source.dir` 的取值方式沒寫。Claude 的專案資料夾名稱，是把路徑裡的 `/`、`.` 換成 `-` 之後得到的，**無法還原**回原本的路徑 | Claude：用 jsonl 裡的 `cwd` 欄位。opencode：用 export 裡記錄的目錄欄位（待 V5 確認欄位名稱）。不要從資料夾名稱反推 |
+| N10 | Low | 4.5 | trigram 比對不分大小寫，但 `instr()` 會分。結果是 `ui` 比得到 `UI` 的長字詞，卻比不到二字詞 `UI` | 另外存一欄 NFKC＋casefold 之後的文字給 `instr()` 用，查詢的字串也做一樣的處理 |
+| N11 | Low | 4.1 | 讀的一方是用什麼去比對 raw 的 md5？鏡像不抓 raw | 寫明：用 `lsjson --hash` 列出的 md5 來比對，不用下載 raw |
+| N12 | Low | 4.3 | 列檔回傳空的清單時（folder ID 錯了、token 異常），「Drive 上已經不存在的 Session 從鏡像刪掉」會把整份鏡像清空。資料還在 Drive 上，但要重抓 | 列檔失敗，或結果是空的但鏡像不是空的，就不要刪，並且警告 |
+| N13 | Low | 4.2、5.2 | 上傳失敗、資料留在 outbox 時，exit code 是多少沒寫；在這台機器上能不能搜到 outbox 裡的 Session 也沒寫 | exit code 寫成 ≠ 0（例如 3＝已存進 outbox、尚未上傳）。outbox 裡的 Session 也建索引，search 時標示「未上傳」 |
+| N14 | Low | 5.4 | S4 的寫法只列了 session、message、part 的 id 與 `sessionID` | 改成「這些 id，以及所有參照到它們的欄位（例如 `sessionID`、`messageID`、`parentID`）」，以 V1 實測到的欄位為準 |
+| N15 | Low | 第 4 節 | 見上表的 S9 | 第 4 節的 raw 說明改成：「opencode：export 的 JSON 原封不動；claude：`{"main": [jsonl 的每一行，原封不動], "aux": {"<相對路徑>": 內容}}`」 |
+| N16 | Low | 5.2 | 「已經有子 Session」的定義沒寫 | 寫明：任何一個 Session 的 `parents` 裡有這個 id，就算有子 Session（包括 continue 與 merge）；新建的 import Session，`parents` 也用 `{id, raw_md5}` 的格式 |
+| N17 | Low | 5 | `continue-session` 沒有 `--header`，所以接續出來的新 Session 沒辦法在建立的時候給 title 或 note | 加 `[--header ...]`，和其他兩個寫入的指令一致（要不要加由使用者決定） |
+
+**行數**：第 8 節的估計是 1,600 行。N2 的 flock 與 pid 判斷約 30 行，N4 反而會省掉「猜是哪個 session」的程式。目標仍然做得到。
+
+**test-plan 已經依第 2 版調整好**（同一個 commit）：`--header` 改成 `key=value`，不含 `=` 的文字當 note；merge 沒有 raw；閱讀版裡已知但不收的型態不輸出任何行；並且為 N1–N16 加了測試（N17 要等使用者決定，所以還沒有測試）。
