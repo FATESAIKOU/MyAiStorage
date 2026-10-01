@@ -213,6 +213,9 @@ def recover_pending(paths: store.Paths, *, notice_only: bool = False) -> None:
     """
     if not paths.pending.exists():
         return
+    for tmp in paths.pending.glob("*.json.tmp"):   # left by a crash before the rename
+        if store.now() - tmp.stat().st_mtime > 86400:
+            tmp.unlink(missing_ok=True)
     for path in sorted(paths.pending.glob("*.json")):
         try:
             f = open(path)

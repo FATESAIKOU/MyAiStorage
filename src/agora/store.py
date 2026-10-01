@@ -202,8 +202,10 @@ def _outbox_ulids(paths: Paths) -> set[str]:
     if not paths.outbox.exists():
         return set()
     for old in paths.outbox.glob(".old-*"):
-        target = paths.outbox / old.name[len(".old-"):]
-        if not target.exists():
+        ulid = old.name[len(".old-"):]
+        target = paths.outbox / ulid
+        # Only restore when no stage is in flight for this ULID (its .tmp still exists).
+        if not target.exists() and not (paths.outbox / f".tmp-{ulid}").exists():
             old.rename(target)   # a stage crashed mid-swap: keep the previous complete entry
     return {p.name for p in paths.outbox.iterdir() if p.is_dir() and not p.name.startswith(".")}
 
