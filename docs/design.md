@@ -219,7 +219,7 @@ agora:01K6...  2026-10-01  opencode  …把 CSV 轉成 Markdown 表格…
    | 來源 | 目標 | 方式 |
    |---|---|---|
    | 單一 opencode | opencode | **原生**：export 裡的三種 id（`ses`／`msg`／`prt`）與所有參照欄位全部重編：固定寬度、保留前綴、依匯出順序遞增（N3、N14）。在工作目錄 `opencode import`，**回頭 export 比對訊息數**——id 撞到時 import 是 rc=0 但 0 則訊息（spike V1(b)）；不符就刪掉那個新 session 並報錯 |
-   | 單一 claude | claude | **原生**：產生新 uuid，把每一行頂層 `sessionId` 改成它，`cwd` 改成工作目錄（D6、CL7），連同附屬檔寫到 `~/.claude/projects/<工作目錄編碼>/<新uuid>.jsonl`，`claude --resume <新uuid>`（spike V2） |
+   | 單一 claude | claude | **原生**：產生新 uuid，把每一行頂層 `sessionId` 改成它，原本有 `cwd` 的行改成工作目錄（D6、CL7），連同附屬檔寫到 `~/.claude/projects/<工作目錄編碼>/<新uuid>.jsonl`，`claude --resume <新uuid>`（spike V2） |
    | 跨 agent，或 merge 出來的 | opencode | **閱讀版注入**：agora 自己做一份只有一則 user 訊息（說明＋閱讀版全文）的 export，id 由 agora 決定，`opencode import` 後開啟（N4） |
    | 跨 agent，或 merge 出來的 | claude | **閱讀版注入**：`claude --session-id <新uuid> "@<閱讀版絕對路徑> …"`，CLI 會把檔案展開進第一則訊息，不需要工具權限（spike V3） |
 
@@ -228,7 +228,8 @@ agora:01K6...  2026-10-01  opencode  …把 CSV 轉成 Markdown 表格…
 2. 工作目錄：`--dir` 預設用 `source.dir`（這台機器上存在的話），否則用目前目錄；印出實際用的目錄（H1）。**新 session 一律放在這個目錄**：opencode 的 session 屬於 `import` 時的 cwd，Claude 的新 jsonl 也落在啟動 cwd 的編碼目錄（spike V5）。
 3. 寫 pending 並持有 flock（4.2），再在前景啟動 agent。agora 在 agent 執行期間忽略 SIGINT；子行程在 exec 前把 SIGINT 還原成預設，Ctrl-C 只給 agent（S3、N1）。
 4. `--header` 和 import 一樣，寫進接續出來的新 Session（N17）。
-5. agent 結束後：取得那一次的 Session，內容比啟動前多才存（S9）；存成新的 agora Session，`relation: continue`、`parents: [{id: <來源>, raw_md5}]`；刪掉 pending；印出新的 agora id。
+5. Claude 的 `/clear`（2026-10-02 用真的互動模式實測，CL5）：互動的 `--resume` 會繼續寫同一個 jsonl，所以收尾找得到；但 `/clear` 之後對話會換到同一個專案資料夾裡的**新 uuid**，新檔只靠 attachment 行的 `session_id` 指回原本的 session。agora 不把兩份接起來：照常存 `/clear` 之前的部分，並印出 `/clear` 之後那個 session 的 id 與要執行的 `agora import` 指令。
+6. agent 結束後：取得那一次的 Session，內容比啟動前多才存（S9）；存成新的 agora Session，`relation: continue`、`parents: [{id: <來源>, raw_md5}]`；刪掉 pending；印出新的 agora id。
 
 ### 5.5 Session 壓縮
 
