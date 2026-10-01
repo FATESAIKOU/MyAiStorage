@@ -6,10 +6,18 @@
 做完請照最後一節把這次的 Session 清掉。
 
 ```bash
+# 安裝 agora 指令（之後在任何目錄都能用）
+cd ~/.herdr/worktrees/MyAiStorage/phase1-spike && uv tool install --editable .
+
+# 驗收專用的設定：Drive 的 agora-test，加上自己的快取與狀態目錄，
+# 這樣驗收的 Session 不會混進你平常的索引
 export AGORA_FOLDER_NAME=agora-test
+export AGORA_CACHE_DIR=/tmp/agora-acc/cache AGORA_STATE_DIR=/tmp/agora-acc/state
 mkdir -p /tmp/agora-acc/proj && cd /tmp/agora-acc/proj
 git init -q && git commit -q --allow-empty -m init
 ```
+
+這幾個 `export` 只在這個終端機有效；換終端機要再設一次。
 
 以下每一步印出的 `agora:<ULID>` 都記下來，merge 與清理時要用。
 
@@ -112,5 +120,5 @@ rm ~/.claude/projects/$ENC/<uuid>.jsonl
 rm -rf ~/.claude/projects/$ENC/<uuid>   # 只有用過 subagent 才會有這個目錄
 ```
 
-`/tmp/agora-acc/proj` 整個刪掉即可。`~/.claude.json` 可能留下 `/private/tmp/agora-acc`
+`/tmp/agora-acc`（專案、快取、狀態）整個刪掉即可。`~/.claude.json` 可能留下 `/private/tmp/agora-acc`
 的專案設定，那是本機設定檔，不影響 Drive，不用處理。
