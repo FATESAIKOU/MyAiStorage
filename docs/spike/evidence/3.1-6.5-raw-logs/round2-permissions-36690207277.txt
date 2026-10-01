@@ -1,5 +1,0 @@
-commit	Set up job	2026-09-30T08:31:19.1919474Z ##[group]GITHUB_TOKEN Permissions
-commit	Set up job	2026-09-30T08:31:19.1920788Z Contents: read
-commit	Set up job	2026-09-30T08:31:19.1921233Z Metadata: read
-commit	Set up job	2026-09-30T08:31:19.1921588Z ##[endgroup]
-commit	Set up job	2026-09-30T08:31:19.1922910Z Secret source: Actions

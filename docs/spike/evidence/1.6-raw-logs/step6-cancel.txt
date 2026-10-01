@@ -1,6 +1,0 @@
-== step6: trigger a run then cancel it ==
-https://github.com/FATESAIKOU/aistorage-spike/actions/runs/36231116203
-new_run_id=36231116203
-✓ Request to cancel workflow 36231116203 submitted.
-cancel_rc=0
-status=completed conclusion=cancelled

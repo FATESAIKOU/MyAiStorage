@@ -1,8 +1,0 @@
-== step1 (regenerated): PAT valid (control) ==
-run_at=2026-09-26T08:57:52Z
-FATESAIKOU/aistorage-spike private=true
-== token expiry (response header) ==
-Github-Authentication-Token-Expiration: 2026-10-25 15:00:00 UTC
-== scope probe: token type (from auth status) ==
-  - Active account: true
-  - Git operations protocol: https

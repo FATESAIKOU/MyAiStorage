@@ -1,3 +1,0 @@
-snapshot folder=1S7XOdRUH4SAwspZvAZDKl0BodFtoTeaZ manifests=2 bundles=2 annex=1 others=0 out=/var/folders/gp/bgth03d57dn53ys13c29m0_h0000gn/T/opencode/impl2/f3-snapshot-initial.json
-  manifest id=1wS2Tw09CBPTJXRbSmCKqFhFKqobDsJvi name=GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922.bak sha=6ae3dd97e7576721 parsed=True valid=True reasons=[]
-  manifest id=1ZRDcmKebiTALUk-I8odOf1o3uaE7aaym name=GITMANIFEST--c2febd2f-f053-4012-8b0e-fa932e763922 sha=6ae3dd97e7576721 parsed=True valid=True reasons=[]

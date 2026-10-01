@@ -1,7 +1,0 @@
-== record pending (new refs) ==
-pin_written=/Users/fatesaikou/.local/share/aistorage-spike/work/oc14f3/pin.pending.json state=pending main=494ac08f53344a420806ba9c4d76463b3fe46d06 git-annex=a51d0562232911bc9e6283b194fcd4df1f1b82a3
-== push (both refs) ==
-Full remote url: annex::c2febd2f-f053-4012-8b0e-fa932e763922?encryption=none&type=rclone
-To annex::
-   c41abe7..494ac08  main -> main
-push_rc=0

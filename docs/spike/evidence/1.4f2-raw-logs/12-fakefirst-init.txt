@@ -1,4 +1,0 @@
-  Detected a filesystem without fifo support.
-  Disabling ssh connection caching.
-uuid=6d0d198f-5fbf-4b15-a9b2-628f92e8ce48
-url written

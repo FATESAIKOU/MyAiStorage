@@ -1,2 +1,0 @@
-kept_count=8 moved_count=3 move_failures=0
-CLEAN-OK

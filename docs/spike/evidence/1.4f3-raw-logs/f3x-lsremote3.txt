@@ -1,8 +1,0 @@
-=== push both refs (main + git-annex) on f2b ===
-Full remote url: annex::6d0d198f-5fbf-4b15-a9b2-628f92e8ce48?encryption=none&type=rclone
-To annex::
- * [new branch]      git-annex -> git-annex
-=== ls-remote after pushing both ===
-Full remote url: annex::6d0d198f-5fbf-4b15-a9b2-628f92e8ce48?encryption=none&type=rclone
-f865b66abff8ffe7abab6896aef4eb04cf8c7039	refs/heads/git-annex
-1a8e4887edc2a7fd3f91e73f9f5d2e1374975ea6	refs/heads/main

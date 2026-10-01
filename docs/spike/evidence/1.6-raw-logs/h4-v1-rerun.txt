@@ -1,7 +1,0 @@
-run	環境資訊（v1：無 sha 檢查）	﻿2026-09-26T11:51:36.1239571Z ##[group]Run echo "workflow_version=v1-no-guard"
-run	環境資訊（v1：無 sha 檢查）	2026-09-26T11:51:36.1240563Z ^[[36;1mecho "workflow_version=v1-no-guard"^[[0m
-run	環境資訊（v1：無 sha 檢查）	2026-09-26T11:51:36.1241318Z ^[[36;1mecho "GITHUB_SHA=$GITHUB_SHA"^[[0m
-run	環境資訊（v1：無 sha 檢查）	2026-09-26T11:51:36.1242904Z ^[[36;1mecho "RUN_ID=$GITHUB_RUN_ID ATTEMPT=$GITHUB_RUN_ATTEMPT"^[[0m
-run	環境資訊（v1：無 sha 檢查）	2026-09-26T11:51:36.2436564Z workflow_version=v1-no-guard
-run	環境資訊（v1：無 sha 檢查）	2026-09-26T11:51:36.2438111Z GITHUB_SHA=fc446c764365ff3e9f78613864edc09ce49f88c4
-run	環境資訊（v1：無 sha 檢查）	2026-09-26T11:51:36.2440766Z RUN_ID=36240053095 ATTEMPT=2

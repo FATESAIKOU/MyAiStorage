@@ -1,5 +1,0 @@
-== step4: read workflow file (needs current sha) ==
-got sha (len 166)
-== step4b: PUT workflow file update ==
-{"message":"Resource not accessible by personal access token","documentation_url":"https://docs.github.com/rest/repos/contents#create-or-update-file-contents","status":"403"}gh: Resource not accessible by personal access token (HTTP 403)
-workflow_put_rc=1

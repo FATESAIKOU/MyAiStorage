@@ -1,2 +1,0 @@
-./session-1-attachment.bin
-./session-1.txt
