@@ -138,6 +138,10 @@ class Drive:
                 found.setdefault(parts[0], {})[parts[1]] = (entry.get("Hashes") or {}).get("md5", "")
         return found
 
+    def list_one(self, ulid: str) -> dict[str, str]:
+        out = self._run("lsjson", f"gdrive:sessions/{ulid}", "--hash", "--files-only")
+        return {e["Name"]: (e.get("Hashes") or {}).get("md5", "") for e in json.loads(out or "[]")}
+
     def upload(self, local: Path, ulid: str, name: str) -> None:
         # copyto, never copy: copy treats the target as a directory and
         # silently creates an empty folder named after the file.
@@ -159,27 +163,38 @@ class Drive:
 def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None) -> Path:
     """Write a complete session into the outbox and return its folder."""
     ulid = header["id"].split(":", 1)[1]
+    paths.outbox.mkdir(parents=True, exist_ok=True)
     folder = paths.outbox / ulid
-    if folder.exists():
-        shutil.rmtree(folder)
-    folder.mkdir(parents=True)
+    tmp = paths.outbox / f".tmp-{ulid}"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir()
     if raw_bytes is not None:
         md5 = hashlib.md5(raw_bytes).hexdigest()
         name = f"raw-{md5[:12]}.json"
-        (folder / name).write_bytes(raw_bytes)
+        (tmp / name).write_bytes(raw_bytes)
         header["raw"] = {"file": name, "md5": md5, "size": len(raw_bytes)}
     else:
         header.pop("raw", None)
-    (folder / "session.md").write_text(h.dump_document(header, body), encoding="utf-8")
+    (tmp / "session.md").write_text(h.dump_document(header, body), encoding="utf-8")
+    # Swap in whole, so a crash never leaves an outbox entry without session.md (C4).
+    if folder.exists():
+        shutil.rmtree(folder)
+    tmp.rename(folder)
     return folder
 
 
+def outbox_ulids(paths: Paths) -> set[str]:
+    return _outbox_ulids(paths)
+
+
 def outbox_count(paths: Paths) -> int:
-    return len(list(paths.outbox.iterdir())) if paths.outbox.exists() else 0
+    return len(_outbox_ulids(paths))
 
 
 def _outbox_ulids(paths: Paths) -> set[str]:
-    return {p.name for p in paths.outbox.iterdir()} if paths.outbox.exists() else set()
+    if not paths.outbox.exists():
+        return set()
+    return {p.name for p in paths.outbox.iterdir() if p.is_dir() and not p.name.startswith(".")}
 
 
 def remember(paths: Paths, folder: Path, md5: str) -> None:
@@ -195,7 +210,10 @@ def remember(paths: Paths, folder: Path, md5: str) -> None:
 def _index_outbox(paths: Paths, index: "Index") -> None:
     """Sessions still waiting in the outbox are searchable here, marked as not uploaded."""
     for ulid in _outbox_ulids(paths):
-        hdr, body = h.split_document((paths.outbox / ulid / "session.md").read_text(encoding="utf-8"))
+        try:
+            hdr, body = h.split_document((paths.outbox / ulid / "session.md").read_text(encoding="utf-8"))
+        except (h.HeaderError, OSError, UnicodeDecodeError):
+            continue
         index.put(ulid, "outbox", hdr, body)
         mirror = paths.mirror / ulid
         mirror.mkdir(parents=True, exist_ok=True)
@@ -212,7 +230,7 @@ def push_one(drive: Drive, folder: Path) -> None:
         _fault("after-raw-upload")
     drive.upload(folder / "session.md", ulid, "session.md")
     _fault("after-session-upload")
-    remote = (drive.list_sessions() or {}).get(ulid, {})
+    remote = drive.list_one(ulid)
     if remote.get("session.md") != md5_file(folder / "session.md"):
         raise StoreError(f"{ulid} 的 session.md 在 Drive 上的 md5 不符，留在 outbox")
     if raw and remote.get(raw["file"]) != raw["md5"]:
@@ -228,13 +246,26 @@ def push_outbox(drive: Drive, paths: Paths) -> list[str]:
     failed = []
     if not paths.outbox.exists():
         return failed
-    for folder in sorted(paths.outbox.iterdir()):
+    for ulid in sorted(_outbox_ulids(paths)):
+        folder = paths.outbox / ulid
         try:
             push_one(drive, folder)
         except StoreError as e:
             _warn(str(e))
-            failed.append(folder.name)
+            failed.append(ulid)
+        except (h.HeaderError, OSError) as e:
+            quarantine(folder, paths.outbox / ".bad", f"outbox 的 {ulid} 壞了：{e}")
     return failed
+
+
+def quarantine(path: Path, bad_dir: Path, message: str) -> None:
+    """Move a broken local file aside instead of deleting it; it may hold the only copy."""
+    bad_dir.mkdir(parents=True, exist_ok=True)
+    target = bad_dir / path.name
+    if target.exists():
+        shutil.rmtree(target) if target.is_dir() else target.unlink()
+    path.rename(target)
+    _warn(f"{message}（移到 {target}）")
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +323,11 @@ class Index:
         return [r[0] for r in rows]
 
     def children(self, ulid: str) -> list[str]:
-        needle = f'"agora:{ulid}"'
+        """Sessions that continue or merge from this one (refs alone do not count)."""
+        target = f"agora:{ulid}"
         rows = self.db.execute("SELECT ulid, header FROM sessions")
-        return [u for u, hdr in rows if needle in hdr and u != ulid]
+        return [u for u, hdr in rows
+                if any(p.get("id") == target for p in json.loads(hdr).get("parents") or [])]
 
     def search(self, keyword: str, filters: list[tuple[tuple[str, ...], str]]) -> list[tuple[str, dict, str]]:
         """[(ulid, header, snippet)], newest source first."""
@@ -315,8 +348,9 @@ class Index:
             hdr = json.loads(hdr_json)
             if all(_matches(hdr, path, value) for path, value in filters):
                 hits.append((ulid, hdr, _snippet(body, kw)))
-        hits.sort(key=lambda hit: str((hit[1].get("source") or {}).get("created_at")
-                                      or hit[1].get("created_at")), reverse=True)
+        hits.sort(key=lambda hit: (str((hit[1].get("source") or {}).get("created_at")
+                                       or hit[1].get("created_at")),
+                                   str(hit[1].get("updated_at")), hit[0]), reverse=True)
         return hits
 
 
@@ -370,8 +404,10 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
         try:
             drive.download(ulid, "session.md", local)
             hdr, body = h.split_document(local.read_text(encoding="utf-8"))
-        except (StoreError, h.HeaderError) as e:
-            _warn(f"{ulid} 讀不到：{e}")
+            for warning in h.validate(hdr):
+                _warn(f"{ulid}：{warning}")
+        except (StoreError, h.HeaderError, UnicodeDecodeError) as e:
+            _warn(f"{ulid} 讀不到，先跳過：{e}")
             continue
         raw = hdr.get("raw")
         if raw and files.get(raw["file"]) != raw.get("md5"):

@@ -86,7 +86,10 @@ def split_document(text: str) -> tuple[dict, str]:
     end = text.find("\n---\n", 4)
     if end < 0:
         raise HeaderError("header 沒有結尾的 ---")
-    header = yaml.safe_load(text[4:end]) or {}
+    try:
+        header = yaml.safe_load(text[4:end]) or {}
+    except yaml.YAMLError as e:
+        raise HeaderError(f"header 的 YAML 壞了：{e}") from None
     if not isinstance(header, dict):
         raise HeaderError("header 不是 key: value 的形式")
     return header, text[end + 5:]

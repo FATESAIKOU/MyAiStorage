@@ -30,7 +30,6 @@ from agora.agents.base import Agent, AgentError, Exported, Launch
 
 AGENTS = ("opencode", "claude")
 EXIT_IN_OUTBOX = 3   # saved locally, not on Drive yet (N13)
-EXIT_CODE = 0
 
 
 def load_agent(name: str) -> Agent:
@@ -76,9 +75,8 @@ def _source(agent: Agent, exported: Exported) -> dict:
     }
 
 
-def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None) -> str:
+def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None) -> tuple[str, bool]:
     """Stage into the outbox, then try to push it now."""
-    global EXIT_CODE
     folder = store.stage(paths, hdr, body, raw)
     md5 = store.md5_file(folder / "session.md")
     store.remember(paths, folder, "outbox")
@@ -86,10 +84,14 @@ def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None) -> str:
         store.push_one(store.Drive(paths), folder)
     except store.StoreError as e:
         print(f"[agora] 上傳失敗，已存入 outbox，下次 sync 會再送：{e}", file=sys.stderr)
-        EXIT_CODE = EXIT_IN_OUTBOX
-        return hdr["id"]
+        return hdr["id"], False
     store.Index(paths).put(folder.name, md5, hdr, body)
-    return hdr["id"]
+    return hdr["id"], True
+
+
+def _emit(saved: tuple[str, bool]) -> int:
+    print(saved[0])
+    return 0 if saved[1] else EXIT_IN_OUTBOX
 
 
 def _header_for(index: store.Index, agora_id: str) -> dict:
@@ -113,6 +115,7 @@ def cmd_search(args, paths: store.Paths) -> int:
     filters = h.parse_search_filters(args.header)
     index = store.Index(paths) if args.no_sync else store.sync(paths, throttle=True)
     seen: dict[tuple, str] = {}
+    outbox = store.outbox_ulids(paths)
     for ulid, hdr, snippet in index.search(args.keyword, filters):
         source = hdr.get("source") or {}
         key = (source.get("agent"), source.get("session_id"))
@@ -121,7 +124,8 @@ def cmd_search(args, paths: store.Paths) -> int:
             continue
         seen[key] = f"agora:{ulid}"
         date = str(source.get("created_at") or hdr.get("created_at") or "")[:10]
-        print(f"agora:{ulid}  {date}  {source.get('agent') or hdr.get('relation')}  {snippet}")
+        mark = "  (未上傳)" if ulid in outbox else ""
+        print(f"agora:{ulid}  {date}  {source.get('agent') or hdr.get('relation')}  {snippet}{mark}")
     return 0
 
 
@@ -136,16 +140,16 @@ def cmd_import(args, paths: store.Paths) -> int:
     existing = index.by_source(agent.name, exported.session_id)
     if existing:
         old = index.header(existing[0])
-        if (old.get("raw") or {}).get("md5") == store.hashlib.md5(exported.raw).hexdigest():
+        unchanged = (old.get("raw") or {}).get("md5") == store.hashlib.md5(exported.raw).hexdigest()
+        if unchanged and not updates:
             print(f"agora:{existing[0]}")
             return 0
-        if not index.children(existing[0]):
+        if unchanged or not index.children(existing[0]):
             hdr = _apply(old, updates)
             hdr["source"] = _source(agent, exported)
             hdr["updated_at"] = _now_iso()
             hdr["title"] = hdr.get("title") or exported.title
-            print(_save(paths, hdr, body, exported.raw))
-            return 0
+            return _emit(_save(paths, hdr, body, exported.raw))
         # Already continued or merged from: keep the old version and branch (S7).
         parents = [{"id": f"agora:{existing[0]}", "raw_md5": (old.get("raw") or {}).get("md5")}]
         hdr = _new_header("import", parents, updates)
@@ -153,8 +157,7 @@ def cmd_import(args, paths: store.Paths) -> int:
         hdr = _new_header("import", [], updates)
     hdr["source"] = _source(agent, exported)
     hdr["title"] = hdr.get("title") or exported.title
-    print(_save(paths, hdr, body, exported.raw))
-    return 0
+    return _emit(_save(paths, hdr, body, exported.raw))
 
 
 def cmd_merge(args, paths: store.Paths) -> int:
@@ -171,18 +174,22 @@ def cmd_merge(args, paths: store.Paths) -> int:
     hdr = _new_header("merge", parents, h.parse_header_args(args.header))
     hdr["title"] = hdr.get("title") or "merge: " + " + ".join(
         str(index.header(_ulid_of(p["id"])).get("title") or p["id"]) for p in parents)
-    print(_save(paths, hdr, "\n".join(parts), None))
-    return 0
+    return _emit(_save(paths, hdr, "\n".join(parts), None))
 
 
-def _write_pending(paths: store.Paths, record: dict) -> Path:
+def _write_pending(paths: store.Paths, record: dict):
+    """Create the pending record already locked, so nobody can grab it in between (C3)."""
     paths.pending.mkdir(parents=True, exist_ok=True)
     path = paths.pending / f"{_ulid_of(record['agora_id'])}.json"
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2))
-    return path
+    lock = open(path, "a+")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    lock.truncate(0)
+    lock.write(json.dumps(record, ensure_ascii=False, indent=2))
+    lock.flush()
+    return path, lock
 
 
-def _finish(paths: store.Paths, record: dict) -> str | None:
+def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
     """Store what the agent produced as a new session; None if nothing new."""
     agent = load_agent(record["agent"])
     launch = Launch(argv=[], cwd=record["dir"], agent_session_id=record.get("agent_session_id"),
@@ -193,31 +200,45 @@ def _finish(paths: store.Paths, record: dict) -> str | None:
     hdr = _new_header("continue", [record["parent"]], record.get("header_updates") or {})
     hdr["id"] = record["agora_id"]
     hdr["source"] = _source(agent, exported)
-    hdr["title"] = record.get("title") or exported.title
+    hdr["title"] = hdr.get("title") or record.get("title") or exported.title   # --header wins (C6)
     return _save(paths, hdr, agent.reading(exported.raw), exported.raw)
 
 
-def recover_pending(paths: store.Paths) -> None:
-    """Finish continue-sessions whose agora process died before collecting (S3)."""
+def recover_pending(paths: store.Paths, *, notice_only: bool = False) -> None:
+    """Finish continue-sessions whose agora and agent both ended before collecting (S3).
+
+    The lock is held by agora and inherited by the agent (pass_fds), so it is
+    only free once both are gone (N2, C1).
+    """
     if not paths.pending.exists():
         return
     for path in sorted(paths.pending.glob("*.json")):
-        with open(path) as f:
+        try:
+            f = open(path)
+        except FileNotFoundError:
+            continue
+        with f:
             try:
-                # A running continue-session holds this lock for its whole life,
-                # so a search in another terminal never finishes it early (N2).
                 fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 continue
-            record = json.loads(f.read())
-            try:
-                new_id = _finish(paths, record)
-            except (AgentError, store.StoreError) as e:
-                print(f"[agora] 補存 {record['agora_id']} 失敗，下次再試：{e}", file=sys.stderr)
+            if not path.exists():          # another command just finished it (C3)
                 continue
-            path.unlink()
-        if new_id:
-            print(f"[agora] 補存了中斷的接續：{new_id}", file=sys.stderr)
+            if notice_only:
+                print(f"[agora] 有中斷的接續待補存：{path.stem}（跑 agora sync 補存）", file=sys.stderr)
+                continue
+            try:
+                record = json.loads(f.read())
+                saved = _finish(paths, record)
+            except (json.JSONDecodeError, KeyError, UnicodeDecodeError) as e:
+                store.quarantine(path, paths.pending / ".bad", f"pending {path.name} 壞了：{e}")
+                continue
+            except (AgentError, store.StoreError, OSError) as e:
+                print(f"[agora] 補存 {path.stem} 失敗，下次再試：{e}", file=sys.stderr)
+                continue
+            path.unlink(missing_ok=True)
+        if saved:
+            print(f"[agora] 補存了中斷的接續：{saved[0]}", file=sys.stderr)
 
 
 def cmd_continue(args, paths: store.Paths) -> int:
@@ -227,10 +248,13 @@ def cmd_continue(args, paths: store.Paths) -> int:
     parent = _header_for(index, source_id)
     src = parent.get("source") or {}
     workdir = Path(args.dir or (src.get("dir") if src.get("dir") and Path(src["dir"]).is_dir() else os.getcwd()))
+    workdir = workdir.expanduser().resolve()   # C5
     print(f"[agora] 工作目錄：{workdir}", file=sys.stderr)
     native = parent.get("relation") != "merge" and src.get("agent") == agent.name and parent.get("raw")
+    parent_md5 = (parent.get("raw") or {}).get("md5")
     if native:
         raw = store.fetch_raw(paths, store.Drive(paths), _ulid_of(source_id), parent)
+        parent_md5 = store.hashlib.md5(raw).hexdigest()   # what we really continued from (C9)
         launch = agent.start_native(raw, workdir)
     else:
         reading = paths.state / "reading" / f"{_ulid_of(source_id)}.md"
@@ -240,31 +264,31 @@ def cmd_continue(args, paths: store.Paths) -> int:
     record = {
         "agora_id": f"agora:{h.new_ulid(int(store.now() * 1000))}", "agent": agent.name,
         "agent_session_id": launch.agent_session_id, "dir": launch.cwd,
-        "parent": {"id": source_id, "raw_md5": (parent.get("raw") or {}).get("md5")},
+        "parent": {"id": source_id, "raw_md5": parent_md5},
         "title": parent.get("title"), "before_count": launch.before_count,
         "started_at": _now_iso(), "header_updates": h.parse_header_args(args.header),
     }
-    pending = _write_pending(paths, record)
-    lock = open(pending)
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    store._fault("after-agent-launch")
+    pending, lock = _write_pending(paths, record)
+    store._fault("before-agent-launch")
     # Ctrl-C belongs to the agent. The child gets the default handler back
-    # before exec, otherwise it would inherit the ignore (N1).
+    # before exec, otherwise it would inherit the ignore (N1). The child also
+    # inherits the pending lock, so the record stays locked while the agent
+    # lives even if agora itself is killed (C1).
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         subprocess.run(launch.argv, cwd=launch.cwd, env={**os.environ, **launch.env},
+                       pass_fds=(lock.fileno(),),
                        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
     finally:
         signal.signal(signal.SIGINT, previous)
     store._fault("before-finalize")
-    new_id = _finish(paths, record)
+    saved = _finish(paths, record)
     pending.unlink()
     lock.close()
-    if new_id is None:
+    if saved is None:
         print("[agora] 這次沒有新內容，沒有存", file=sys.stderr)
         return 0
-    print(new_id)
-    return 0
+    return _emit(saved)
 
 
 def cmd_show(args, paths: store.Paths) -> int:
@@ -327,13 +351,17 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     paths = store.Paths.from_env()
     try:
-        recover_pending(paths)
+        recover_pending(paths, notice_only=getattr(args, "no_sync", False))
         if store.outbox_count(paths):
             print(f"[agora] outbox 有 {store.outbox_count(paths)} 筆未上傳", file=sys.stderr)
-        code = args.func(args, paths)
-        return code or EXIT_CODE
+        return args.func(args, paths)
     except (h.HeaderError, store.StoreError, AgentError) as e:
         print(f"[agora] {e}", file=sys.stderr)
+        return 2
+    except Exception as e:   # never let one broken file brick every command (C2)
+        if os.environ.get("AGORA_DEBUG"):
+            raise
+        print(f"[agora] 非預期的錯誤：{type(e).__name__}: {e}（AGORA_DEBUG=1 看細節）", file=sys.stderr)
         return 2
 
 

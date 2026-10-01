@@ -27,7 +27,7 @@
 
 ### D5 的注意事項（S8）
 
-- `agora/` 根資料夾第一次執行時建立，把 **folder ID** 寫進 `~/.config/agora/config.toml`；之後所有存取都用 ID，不靠名字找（Drive 允許同名資料夾）。`sync` 發現同名資料夾時警告。
+- `agora/` 根資料夾第一次執行時建立，把 **folder ID** 寫進 `~/.config/agora/config.json`；之後所有存取都用 ID，不靠名字找（Drive 允許同名資料夾）。`sync` 發現同名資料夾時警告。
 - **只能透過 agora 寫入。** 從 Drive 網頁拖進去的檔案，`drive.file` 看不到。
 - **不要刪除或重建 worker OAuth client。** 換了 client，以前建的檔案全部看不到（資料還在）。萬一發生，復原方法是用一次性的 `drive` scope client 把 `agora/` 複製成新 client 擁有的檔案。
 - OAuth consent screen 要是「In production」，否則 refresh token 7 天失效（V4 確認現況）。
@@ -118,7 +118,7 @@ Drive: agora/                              （worker client 建立；以 folder 
                               opencode＝export 的 JSON 原封不動；
                               claude＝{"format":"claude-jsonl/1","main":[每一行原字串],"aux":{"<相對路徑>":"內容"}}
 Mac:
-  ~/.config/agora/            rclone.conf（worker client）、config.toml（folder ID）
+  ~/.config/agora/            rclone.conf（worker client）、config.json（folder ID）
   ~/.cache/agora/             鏡像（只有 session.md）＋ index.sqlite；壞了刪掉重建
   ~/.local/state/agora/       outbox/、pending/ ——不能刪
 ```
@@ -135,8 +135,9 @@ Mac:
 ### 4.2 outbox 與 pending（S2、S3）
 
 - **outbox**：上傳失敗時留在這裡。`sync` 一律**先推再拉**；每個指令開始時，outbox 不是空的就印一行提示。
-- **pending**：continue-session 啟動 agent **之前**寫一份 `{agora_id, parent, agent, agent_session_id, dir, started_at, before_count}`，並在整個執行期間對它持有 `flock`。agent 結束後收尾成功才刪。任何 agora 指令開始時檢查 pending：**拿得到 flock**（表示那個 agora 已經不在了）才補做收尾；`agora_id` 事先決定，所以補存是冪等的（N2）。
+- **pending**：continue-session 啟動 agent **之前**寫一份 `{agora_id, parent, agent, agent_session_id, dir, started_at, before_count}`，建立時就已經上鎖（`flock`），並把鎖用 `pass_fds` 交給 agent 一起持有（C1、C3）。agent 結束後收尾成功才刪。任何 agora 指令開始時檢查 pending：**拿得到 flock**（表示 agora **和** agent 都已經不在了）才補做收尾；`--no-sync` 時只提示不補存；`agora_id` 事先決定，所以補存是冪等的（N2）。
 - 上傳失敗、留在 outbox 時 exit code 是 3；outbox 裡的 Session 在這台機器上照樣搜得到（N13）。
+- 壞掉的本機檔案（pending 不是合法 JSON、outbox 缺 session.md、header 的 YAML 壞了）移到 `.bad/`，不刪、不讓其他指令跟著壞；Drive 上的壞檔只跳過（C2）。
 - header 沒有 `raw` 的 session.md（merge）本身就是完整的；讀的一方比對 raw 用的是 `lsjson --hash` 列出的 md5，不下載 raw（N5、N11）。
 
 ### 4.3 sync（S5、L2）
@@ -169,6 +170,7 @@ Mac:
 - SQLite FTS5 trigram，索引閱讀版與 header 的文字欄位。
 - 建索引與查詢前都做 **NFKC 正規化**（全形／半形）。
 - **關鍵字少於 3 個字時**（例如「表格」），trigram 比不到，改用 `instr()` 掃描閱讀版的表。
+- 搜尋結果的片段取自正規化後的文字，所以是小寫、可能混著 title／note。
 
 ## 5. 指令
 

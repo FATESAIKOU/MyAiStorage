@@ -70,7 +70,6 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("AGORA_RCLONE", str(wrapper))
     agent = FakeAgent()
     monkeypatch.setattr(cli, "load_agent", lambda name: agent)
-    monkeypatch.setattr(cli, "EXIT_CODE", 0)
     return agent
 
 
@@ -151,9 +150,8 @@ def test_upload_failure_exits_3_and_stays_searchable(env, capsys, monkeypatch): 
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")
     code, out, err = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
     assert code == cli.EXIT_IN_OUTBOX and "outbox" in err
-    monkeypatch.setattr(cli, "EXIT_CODE", 0)
-    _, found, _ = run(capsys, "search", "session", "CSV")
-    assert found.split()[0] == out
+    _, found, _ = run(capsys, "search", "session", "CSV", "--no-sync")
+    assert found.split()[0] == out and found.endswith("(未上傳)")   # C11
 
 
 def test_pending_from_dead_agora_is_finished_later(env, capsys):  # S3, N2
@@ -163,7 +161,8 @@ def test_pending_from_dead_agora_is_finished_later(env, capsys):  # S3, N2
     record = {"agora_id": "agora:01K6DEADBEEF000000000000AA", "agent": "opencode",
               "agent_session_id": "ses_x", "dir": "/tmp", "before_count": 2,
               "parent": {"id": parent, "raw_md5": None}, "title": "t"}
-    cli._write_pending(paths, record)          # nobody holds the lock: that agora died
+    _, lock = cli._write_pending(paths, record)
+    lock.close()                               # that agora died: nobody holds the lock
     _, _, err = run(capsys, "sync")
     assert "補存" in err
     assert store.Index(paths).header("01K6DEADBEEF000000000000AA")["relation"] == "continue"
@@ -175,13 +174,104 @@ def test_pending_held_by_live_agora_is_left_alone(env, capsys):  # N2
     record = {"agora_id": "agora:01K6LIVE0000000000000000AA", "agent": "opencode",
               "agent_session_id": "ses_a", "dir": "/tmp", "before_count": 0,
               "parent": {"id": "agora:x", "raw_md5": None}}
-    path = cli._write_pending(paths, record)
-    with open(path) as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        run(capsys, "sync")
-        assert path.exists()
+    path, lock = cli._write_pending(paths, record)   # created already locked (C3)
+    run(capsys, "sync")
+    assert path.exists()
+    lock.close()
 
 
 def test_search_rejects_unknown_filter(env, capsys):
     code, _, err = run(capsys, "search", "session", "x", "--header", "foo=bar", "--no-sync")
     assert code == 2 and "agent" in err
+
+
+def test_lock_survives_agora_death_while_agent_lives(env, capsys, tmp_path):  # C1
+    import fcntl
+    import os
+    import subprocess
+    import time
+    paths = store.Paths.from_env()
+    record = {"agora_id": "agora:01K6KILL0000000000000000AA", "agent": "opencode",
+              "agent_session_id": "ses_a", "dir": "/tmp", "before_count": 0,
+              "parent": {"id": "agora:x", "raw_md5": None}}
+    path, lock = cli._write_pending(paths, record)
+    agent = subprocess.Popen(["sleep", "30"], pass_fds=(lock.fileno(),))
+    lock.close()                                # agora is gone, the agent is not
+    try:
+        with open(path) as f:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        run(capsys, "sync")
+        assert path.exists()                    # not finished early
+    finally:
+        agent.kill()
+        agent.wait()
+    run(capsys, "sync")
+    assert not path.exists()                    # both gone: finished now
+
+
+def test_broken_local_files_do_not_brick_commands(env, capsys):  # C2
+    paths = store.Paths.from_env()
+    paths.pending.mkdir(parents=True)
+    (paths.pending / "01K6BROKEN000000000000000A.json").write_text("{not json")
+    (paths.outbox / "01K6NOSESSION0000000000000").mkdir(parents=True)
+    bad = paths.outbox / "01K6BADYAML000000000000000"
+    bad.mkdir()
+    (bad / "session.md").write_text("---\ntitle: [unclosed\n---\nbody\n")
+    code, _, err = run(capsys, "sync")
+    assert code == 0
+    assert (paths.pending / ".bad" / "01K6BROKEN000000000000000A.json").exists()
+    assert (paths.outbox / ".bad" / "01K6BADYAML000000000000000").exists()
+    code, _, _ = run(capsys, "search", "session", "x", "--no-sync")
+    assert code == 0
+
+
+def test_relative_dir_and_header_title(env, capsys, tmp_path, monkeypatch):  # C5, C6
+    _, parent, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    work = tmp_path / "proj"
+    work.mkdir()
+    monkeypatch.chdir(tmp_path)
+    _, child, err = run(capsys, "continue-session", parent, "--agent", "opencode", "--dir", "proj",
+                        "--header", "title=接手後的標題")
+    assert env.launched[-1].cwd == str(work.resolve())
+    hdr = store.Index(store.Paths.from_env()).header(child.split(":")[1])
+    assert hdr["title"] == "接手後的標題"
+
+
+def test_failed_recovery_does_not_change_search_exit(env, capsys, monkeypatch):  # C12
+    _, parent, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    paths = store.Paths.from_env()
+    env.sessions["ses_y"] = ["a", "b", "c"]
+    record = {"agora_id": "agora:01K6RECOVER00000000000000A", "agent": "opencode",
+              "agent_session_id": "ses_y", "dir": "/tmp", "before_count": 2,
+              "parent": {"id": parent, "raw_md5": None}}
+    _, lock = cli._write_pending(paths, record)
+    lock.close()
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")
+    code, _, _ = run(capsys, "sync")
+    assert code == 0
+
+
+def test_agent_gets_ctrl_c_and_agora_survives(env, capsys, tmp_path):  # N1
+    import os
+    import signal
+    import subprocess
+    import textwrap
+    script = tmp_path / "agent.py"
+    script.write_text(textwrap.dedent("""
+        import signal, sys, os
+        h = signal.getsignal(signal.SIGINT)
+        open(sys.argv[1], "w").write("default" if h is signal.default_int_handler else str(h))
+        os.kill(os.getppid(), signal.SIGINT)   # Ctrl-C reaches the whole group
+    """))
+    marker = tmp_path / "handler.txt"
+    _, parent, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    orig = env.start_native
+    def start_native(raw, workdir):
+        launch = orig(raw, workdir)
+        launch.argv = [sys.executable, str(script), str(marker)]
+        return launch
+    env.start_native = start_native
+    code, child, _ = run(capsys, "continue-session", parent, "--agent", "opencode", "--dir", str(tmp_path))
+    assert marker.read_text() == "default"     # the agent can be stopped with Ctrl-C
+    assert code == 0 and child.startswith("agora:")   # agora ignored it and finished
