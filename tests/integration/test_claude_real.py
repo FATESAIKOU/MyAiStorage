@@ -24,6 +24,7 @@ from agora.agents import claude as C
 pytestmark = pytest.mark.integration
 
 CLAUDE = shutil.which("claude")
+DISALLOW = "Bash Read Glob Grep Edit Write WebFetch WebSearch Task"
 
 P1 = "請用繁體中文列出「把 CSV 轉成 Markdown 表格」的三個步驟。只要文字回答，不要呼叫任何工具、不要寫檔案。"
 P2 = "把你剛才的三個步驟濃縮成一句話。只要文字回答，不要呼叫任何工具、不要寫檔案。"
@@ -40,7 +41,7 @@ def live(monkeypatch, tmp_path):
         pytest.skip("claude CLI not found")
     home = real_home()
     monkeypatch.setenv("AGORA_CLAUDE_HOME", home)
-    proj = Path("/tmp/agora-it-claude/proj")
+    proj = Path("/tmp/agora-it-claude/p_專案.v2")  # CL13: _, CJK, . on purpose
     if proj.exists():
         shutil.rmtree(proj)
     proj.mkdir(parents=True)
@@ -51,21 +52,37 @@ def live(monkeypatch, tmp_path):
     env = {**os.environ, "HOME": home, "AGORA_CLAUDE_HOME": home}
     created: list[str] = []
     yield {"proj": proj, "env": env, "created": created}
-    subdir = C.projects_dir() / C.encode_project_dir(proj)
+    basedir = C.projects_dir() / C.encode_project_dir(proj)
+    cfgdir = C.config_dir()
     for sid in created:  # only our own uuids, one by one
-        jsonl = subdir / f"{sid}.jsonl"
+        jsonl = basedir / f"{sid}.jsonl"
         if jsonl.is_file():
             jsonl.unlink()
-        sidecar = subdir / sid
+        sidecar = basedir / sid
         if sidecar.is_dir():
             shutil.rmtree(sidecar)
+        for extra in [cfgdir / "session-env" / sid, cfgdir / "file-history" / sid]:
+            if extra.is_dir():  # E4: per-uuid side files only, never listed
+                shutil.rmtree(extra)
+        for todo in sorted(cfgdir.glob(f"todos/{sid}-*.json")):
+            todo.unlink()
     try:
-        subdir.rmdir()  # remove the project dir itself when left empty
+        basedir.rmdir()  # remove the project dir itself when left empty
+    except OSError:
+        pass
+    for leftover in [basedir / "memory"]:
+        try:
+            leftover.rmdir()  # claude leaves an empty memory/ dir; drop it too
+        except OSError:
+            pass
+    try:
+        basedir.rmdir()
     except OSError:
         pass
 
 
 def run_claude(live, *argv: str) -> str:
+    argv = ["--disallowedTools", DISALLOW, *argv]  # E6: flags, not just words
     proc = subprocess.run([CLAUDE, *argv], cwd=live["proj"], env=live["env"],
                           capture_output=True, text=True, timeout=300)
     assert proc.returncode == 0, proc.stderr[-500:]
@@ -78,7 +95,7 @@ def test_native_round_trip(live):
     run_claude(live, "-p", "--session-id", uuid1, P1)
     run_claude(live, "--resume", uuid1, "-p", P2)
 
-    exported = C.ADAPTER.export(uuid1)
+    exported = C.ADAPTER.export(uuid1, hint_dir=live["proj"])  # CL12: no glob scan
     assert exported.session_id == uuid1
     assert exported.dir == str(live["proj"])
     assert exported.title

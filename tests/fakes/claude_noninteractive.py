@@ -21,6 +21,9 @@ import sys
 from pathlib import Path
 
 P_NATIVE = "你前面在做什麼？用一句話回答。不要呼叫任何工具、不要寫檔案。"
+GUARDS = ["--disallowedTools",
+          "Bash Read Glob Grep Edit Write WebFetch WebSearch Task",
+          "--model", "haiku"]
 
 
 def main(argv: list[str]) -> int:
@@ -40,11 +43,11 @@ def main(argv: list[str]) -> int:
         return proc.returncode
     if "--resume" in argv:
         sid = argv[argv.index("--resume") + 1]
-        child = [real, "--resume", sid, "-p", P_NATIVE]
+        child = [real, *GUARDS, "--resume", sid, "-p", P_NATIVE]
     elif "--session-id" in argv:
         sid = argv[argv.index("--session-id") + 1]
         prompt = argv[argv.index("--session-id") + 2]
-        child = [real, "--session-id", sid, "-p", prompt]
+        child = [real, *GUARDS, "--session-id", sid, "-p", prompt]
     else:
         print(f"wrapper does not support {argv}", file=sys.stderr)
         return 2

@@ -15,9 +15,8 @@ import sys
 import uuid
 from pathlib import Path
 
-
-def encode(pwd: str) -> str:
-    return os.path.abspath(pwd).replace("/", "-").replace(".", "-")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
+from agora.agents.claude import encode_project_dir as encode  # same rule (CL1)
 
 
 def fail(msg: str) -> None:

@@ -138,6 +138,53 @@ import → search（第一欄即新 id）→ continue 原生（wrapper 收到 `-
 真實 `claude -p` 共 3 次。cli／store 側沒發現 bug（U-CON-05 pending 留刪問題 PM 已定為刪除）。
 小發現：adapter 的 `claude --version` 也走 `AGORA_CLAUDE_CMD`，wrapper 需透傳 `--version`。
 
+## 附記3：CL1–CL14、P 精簡、E1–E8（2026-10-02，claude.py 355 行，src 合計 1840）
+
+單元 27 個全過；整合（中文目錄 `p_專案.v2`＋hint）與 e2e（haiku＋E 修正）各跑一次通過。
+真實 `claude -p`：CL5 spike 用 1 次 seed，兩個整合測試各 3 次。
+
+- CL1 可行：`re.sub(r"[^A-Za-z0-9]", "-", abspath)`；fake 改 import 同一函式；
+  中文目錄編碼 `-private-tmp-agora-it-claude-p----v2`，session 正常找到。
+  emoji（BMP 外）與超長路徑截斷未驗證，留待 V5 spike。
+- CL2 可行：`isMeta`、`<command-name>／<local-command-stdout>／<local-command-caveat>`
+  開頭的 user 行、`system` 行不計數、不進閱讀版；`isCompactSummary` 保留。
+- CL3 可行：單元改 sh wrapper（`exec sys.executable fake`），不再依賴 shebang。
+- CL4 可行：`AGORA_CLAUDE_HOME/.claude` ＞ `CLAUDE_CONFIG_DIR` ＞ `~/.claude`；
+  單元固定刪掉 `CLAUDE_CONFIG_DIR` 保隔離。
+- CL5 **驗證不了**：pty（`pty.fork`＋固定時長＋non-blocking 讀）試了 4 輪——信任框可用
+  Down＋Enter 回答；但之後 TUI 零渲染、行程靜默退出、jsonl 行數不變，
+  全新 session 與 `--resume` 皆然。`/clear` 完全沒測到。依指示不猜：collect 不改；
+  跨目錄找新檔（掃專案目錄）在 adapter 裡也不做（違反不列出規則）。
+- CL6 可行：aux `.jsonl` 共用 `_split_lines`（半行丟掉＋警告）並保留尾換行；有單元測試。
+- CL7 可行：只改既有 `cwd`＋`ensure_ascii=False`。U-CON-04 需 review 跟著改
+  （「`cwd` 都是」→「有 `cwd` 的行才是」）。
+- CL8 可行：非 UTF-8 包成帶檔名的 AgentError；中間空行略過。
+- CL9 可行：`start_injected` 的 `before_count=2`。
+- CL10 可行：`*_tool_use`→`tool_line`、`*_tool_result` 靜默。連續同角色段落合併要改
+  `base.format_reading`，請 PM 改（不在我的檔案）。
+- CL11 可行：`created_at` 取第一個有的 timestamp；P3 後 `agent_version` 只取 jsonl
+  最後一行的 `version`，不再跑 CLI（單元用壞掉的 CMD 證明不呼叫）。
+- CL12 可行：`find_jsonl` 先試 hint 目錄再 glob；`export` 加可選 `hint_dir`；
+  整合測試傳 proj。e2e 經 cli 無法傳 hint，glob 只會開啟自己 uuid 的檔。
+- CL13 可行：見 CL1。
+- CL14 可行：aux 的 `..` 與絕對路徑擋成 AgentError；有單元測試。
+- P1／P2／P3／P12／P13／P18 照做（`_block_lines`、`_user_text` 吃 `_user_lines`、
+  刪 `_agent_version`、`_unpack_aux(rewrite=)`、分派表、一行 regex）。
+- E1 可行：e2e 改 sh wrapper。E2 可行：加 `show`、`show --raw`（輸出是文件本身，
+  斷言改成含 `id: <id>`）、`sync`＋Index 讀 header、merge 用 `'id1,' 'id2'` 兩參數。
+  E3 可行：teardown 從 wrapper log＋自家 cache 索引＋outbox 回收 id。E4 有條件：
+  實測每個 `-p` 都會建 `session-env/<uuid>/`（附帶發現），teardown 按 uuid 清
+  jsonl／sidecar／session-env／file-history／todos／空目錄；舊 run 殘留的 12 個
+  session-env 已按記下的 uuid 清掉，更早成功 run 的 uuid 已無記錄，需 PM 決定才能掃。
+  E5 可行：purge 失敗警告＋收掉 proj。E6 可行：全部真 `-p` 加 `--disallowedTools`
+ （Bash Read Glob Grep Edit Write WebFetch WebSearch Task）＋haiku；
+  `@<路徑>` 展開不受影響（注入步通過）。E7 可行：`pwd` 取 REAL_HOME＋hint
+  （e2e 限制見 CL12）。E8 的 README 由 PM 改。
+- 跑過的指令（形狀）：`uv run pytest -q`（97 過）；`uv run pytest -q -m integration
+  tests/integration/test_claude_real.py`（1 過）；同上 e2e（1 過，約 70 秒）；
+  `claude -p --session-id <uuid>` seed 1 次；pty 驅動 4 輪（信任框回答＋靜默退出）；
+  按記下 uuid 的 `test -e`＋刪除（session-env 12 個、jsonl、空目錄 `rmdir`）。
+
 ## 對 design.md 的修改建議
 
 1. §5.4「單一 claude→claude 原生」改為 `--resume <id> --fork-session --session-id <新uuid>`
