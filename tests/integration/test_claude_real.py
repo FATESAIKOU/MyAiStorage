@@ -94,7 +94,8 @@ def test_native_round_trip(live):
     got = C.ADAPTER.collect(launch)
     assert got is not None
     assert got.session_id == uuid2
-    assert got.message_count == exported.message_count + 2  # one more round
+    # Claude writes one line per content block, so a round adds two or more lines.
+    assert got.message_count >= exported.message_count + 2
     main = json.loads(got.raw.decode("utf-8"))["main"]
     assert len(main) > len(json.loads(exported.raw.decode("utf-8"))["main"])
     assert {json.loads(line)["sessionId"] for line in main} == {uuid2}

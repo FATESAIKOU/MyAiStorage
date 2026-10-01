@@ -68,7 +68,7 @@ def find_jsonl(session_id: str) -> Path:
     """Locate <session_id>.jsonl under projects/*/; AgentError if missing."""
     matches = sorted(projects_dir().glob(f"*/{session_id}.jsonl"))
     if not matches:
-        raise AgentError(f"[agora] 找不到 Claude session：{session_id}")
+        raise AgentError(f"找不到 Claude session：{session_id}")
     return matches[0]
 
 
@@ -86,7 +86,7 @@ def _read_lines(path: Path) -> list[str]:
             if i == len(lines) - 1:
                 print(f"[agora] 警告：{path.name} 最後一行不完整，已丟掉", file=sys.stderr)
                 return lines[:i]
-            raise AgentError(f"[agora] {path.name} 第 {i + 1} 行解析失敗")
+            raise AgentError(f"{path.name} 第 {i + 1} 行解析失敗")
     return lines
 
 
@@ -134,7 +134,7 @@ def _unpack_raw(raw: bytes) -> tuple[list[str], dict]:
         doc = json.loads(raw.decode("utf-8"))
         return list(doc["main"]), dict(doc.get("aux") or {})
     except (ValueError, KeyError, AttributeError) as e:
-        raise AgentError(f"[agora] Claude raw 解析失敗：{e}")
+        raise AgentError(f"Claude raw 解析失敗：{e}")
 
 
 def _agent_version() -> str | None:
@@ -320,7 +320,7 @@ class ClaudeAgent:
 
     def collect(self, launch: Launch) -> Exported | None:
         if not launch.agent_session_id:
-            raise AgentError("[agora] 沒有 agent session id，無法收尾")
+            raise AgentError("沒有 agent session id，無法收尾")
         session_id = launch.agent_session_id
         path = projects_dir() / encode_project_dir(launch.cwd) / f"{session_id}.jsonl"
         if not path.is_file():
