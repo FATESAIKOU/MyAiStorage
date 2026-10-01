@@ -275,3 +275,42 @@ def test_agent_gets_ctrl_c_and_agora_survives(env, capsys, tmp_path):  # N1
     code, child, _ = run(capsys, "continue-session", parent, "--agent", "opencode", "--dir", str(tmp_path))
     assert marker.read_text() == "default"     # the agent can be stopped with Ctrl-C
     assert code == 0 and child.startswith("agora:")   # agora ignored it and finished
+
+
+def test_missing_rclone_keeps_good_outbox_entry(env, capsys, monkeypatch):  # R1, R2
+    monkeypatch.setenv("AGORA_RCLONE", "/nonexistent/rclone")
+    code, out, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    assert code == cli.EXIT_IN_OUTBOX
+    run(capsys, "sync")
+    paths = store.Paths.from_env()
+    assert store.outbox_count(paths) == 1 and store.bad_count(paths) == 0
+
+
+def test_bad_entries_are_reported_every_command(env, capsys):  # R2
+    paths = store.Paths.from_env()
+    bad = paths.outbox / ".bad" / "x"
+    bad.mkdir(parents=True)
+    _, _, err = run(capsys, "search", "session", "x", "--no-sync")
+    assert "壞檔" in err
+
+
+def test_continue_hands_the_pending_lock_to_the_agent(env, capsys, monkeypatch):  # R3 (C1 through cmd_continue)
+    import fcntl
+    _, parent, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    seen = {}
+    real_run = cli.subprocess.run
+
+    def spy(argv, **kwargs):
+        if argv != ["true"]:                     # rclone calls go through untouched
+            return real_run(argv, **kwargs)
+        paths = store.Paths.from_env()
+        [pending] = list(paths.pending.glob("*.json"))
+        seen["fds"] = kwargs.get("pass_fds")
+        with open(pending) as f:                 # locked while the agent runs
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(cli.subprocess, "run", spy)
+    code, _, _ = run(capsys, "continue-session", parent, "--agent", "opencode", "--dir", "/tmp")
+    assert code == 0 and seen["fds"] and len(seen["fds"]) == 1

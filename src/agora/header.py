@@ -101,8 +101,12 @@ def dump_document(header: dict, body: str) -> str:
     return f"---\n{text}---\n{body}"
 
 
-def validate(header: dict) -> list[str]:
-    """Check the shared fields; return warnings, raise on hard errors."""
+def validate(header: dict, *, strict_refs: bool = True) -> list[str]:
+    """Check the shared fields; return warnings, raise on hard errors.
+
+    With strict_refs=False a bad ref or case (say, an entity this version
+    does not know yet) is only a warning, so the item is still read (R7).
+    """
     warnings = []
     version = header.get("header")
     if version != HEADER_VERSION:
@@ -113,10 +117,13 @@ def validate(header: dict) -> list[str]:
     item_id = header.get("id")
     if not isinstance(item_id, str) or not item_id.startswith(f"{entity}:"):
         raise HeaderError(f"id 必須以 {entity}: 開頭：{item_id!r}")
-    if header.get("case") is not None:
-        parse_ref(header["case"])
-    for ref in header.get("refs") or []:
-        parse_ref(ref)
+    for ref in ([header["case"]] if header.get("case") is not None else []) + list(header.get("refs") or []):
+        try:
+            parse_ref(ref)
+        except HeaderError as e:
+            if strict_refs:
+                raise
+            warnings.append(str(e))
     return warnings
 
 

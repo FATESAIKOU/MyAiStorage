@@ -173,3 +173,12 @@ def test_search_filters(remote):
     index = store.sync(paths)
     assert len(index.search("CSV", [(("source", "agent"), "claude")])) == 1
     assert len(index.search("", [])) == 2
+
+
+def test_unknown_ref_entity_is_still_indexed(remote):  # R7
+    paths = store.Paths.from_env()
+    hdr = _header()
+    hdr["refs"] = ["future:thing"]
+    folder = store.stage(paths, hdr, "## user\nCSV\n", b"{}")
+    store.push_one(store.Drive(paths), folder)
+    assert store.sync(paths).search("CSV", [])

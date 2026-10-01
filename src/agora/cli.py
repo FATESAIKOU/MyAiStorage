@@ -181,11 +181,12 @@ def _write_pending(paths: store.Paths, record: dict):
     """Create the pending record already locked, so nobody can grab it in between (C3)."""
     paths.pending.mkdir(parents=True, exist_ok=True)
     path = paths.pending / f"{_ulid_of(record['agora_id'])}.json"
-    lock = open(path, "a+")
+    tmp = path.with_suffix(".json.tmp")          # not matched by *.json, so nobody sees it yet (R5)
+    lock = open(tmp, "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
-    lock.truncate(0)
     lock.write(json.dumps(record, ensure_ascii=False, indent=2))
     lock.flush()
+    os.rename(tmp, path)                         # appears already locked
     return path, lock
 
 
@@ -229,11 +230,15 @@ def recover_pending(paths: store.Paths, *, notice_only: bool = False) -> None:
                 continue
             try:
                 record = json.loads(f.read())
-                saved = _finish(paths, record)
-            except (json.JSONDecodeError, KeyError, UnicodeDecodeError) as e:
+                missing = [k for k in ("agora_id", "agent", "dir", "parent") if k not in record]
+                if missing:
+                    raise KeyError(", ".join(missing))
+            except (json.JSONDecodeError, KeyError, UnicodeDecodeError, TypeError) as e:
                 store.quarantine(path, paths.pending / ".bad", f"pending {path.name} 壞了：{e}")
                 continue
-            except (AgentError, store.StoreError, OSError) as e:
+            try:
+                saved = _finish(paths, record)
+            except Exception as e:   # a bug or outage while finishing: keep the record and retry (R4)
                 print(f"[agora] 補存 {path.stem} 失敗，下次再試：{e}", file=sys.stderr)
                 continue
             path.unlink(missing_ok=True)
@@ -354,6 +359,8 @@ def main(argv: list[str] | None = None) -> int:
         recover_pending(paths, notice_only=getattr(args, "no_sync", False))
         if store.outbox_count(paths):
             print(f"[agora] outbox 有 {store.outbox_count(paths)} 筆未上傳", file=sys.stderr)
+        if store.bad_count(paths):
+            print(f"[agora] 有 {store.bad_count(paths)} 筆壞檔放在 {paths.state}/*/.bad，請檢查", file=sys.stderr)
         return args.func(args, paths)
     except (h.HeaderError, store.StoreError, AgentError) as e:
         print(f"[agora] {e}", file=sys.stderr)

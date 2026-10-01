@@ -103,7 +103,10 @@ class Drive:
         cmd = [self.rclone, "--config", str(self.conf)]
         if root:
             cmd += ["--drive-root-folder-id", self.folder_id()]
-        proc = subprocess.run(cmd + list(args), capture_output=True, text=True)
+        try:
+            proc = subprocess.run(cmd + list(args), capture_output=True, text=True)
+        except OSError as e:   # rclone missing or not executable: a Drive problem, not a bad file (R1)
+            raise StoreError(f"叫不起 rclone（{self.rclone}）：{e}") from None
         if proc.returncode != 0:
             raise StoreError(f"rclone {args[0]} 失敗（rc={proc.returncode}）：{proc.stderr.strip()[-300:]}")
         return proc.stdout
@@ -176,10 +179,14 @@ def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None) -> Pat
     else:
         header.pop("raw", None)
     (tmp / "session.md").write_text(h.dump_document(header, body), encoding="utf-8")
-    # Swap in whole, so a crash never leaves an outbox entry without session.md (C4).
+    # Swap in whole, so a crash never leaves an outbox entry without session.md
+    # (C4): the old entry is renamed aside, the new one moved in, then the old removed (R6).
+    old = paths.outbox / f".old-{ulid}"
+    shutil.rmtree(old, ignore_errors=True)
     if folder.exists():
-        shutil.rmtree(folder)
+        folder.rename(old)
     tmp.rename(folder)
+    shutil.rmtree(old, ignore_errors=True)
     return folder
 
 
@@ -194,6 +201,10 @@ def outbox_count(paths: Paths) -> int:
 def _outbox_ulids(paths: Paths) -> set[str]:
     if not paths.outbox.exists():
         return set()
+    for old in paths.outbox.glob(".old-*"):
+        target = paths.outbox / old.name[len(".old-"):]
+        if not target.exists():
+            old.rename(target)   # a stage crashed mid-swap: keep the previous complete entry
     return {p.name for p in paths.outbox.iterdir() if p.is_dir() and not p.name.startswith(".")}
 
 
@@ -249,13 +260,24 @@ def push_outbox(drive: Drive, paths: Paths) -> list[str]:
     for ulid in sorted(_outbox_ulids(paths)):
         folder = paths.outbox / ulid
         try:
+            hdr, _ = h.split_document((folder / "session.md").read_text(encoding="utf-8"))
+            raw = hdr.get("raw")
+            if raw and not (folder / raw["file"]).is_file():
+                raise h.HeaderError(f"缺少 {raw['file']}")
+        except (h.HeaderError, OSError, UnicodeDecodeError, KeyError, TypeError) as e:
+            quarantine(folder, paths.outbox / ".bad", f"outbox 的 {ulid} 壞了：{e}")
+            continue
+        try:
             push_one(drive, folder)
         except StoreError as e:
             _warn(str(e))
             failed.append(ulid)
-        except (h.HeaderError, OSError) as e:
-            quarantine(folder, paths.outbox / ".bad", f"outbox 的 {ulid} 壞了：{e}")
     return failed
+
+
+def bad_count(paths: Paths) -> int:
+    """Broken entries set aside in outbox/.bad and pending/.bad (R2)."""
+    return sum(len(list(d.iterdir())) for d in (paths.outbox / ".bad", paths.pending / ".bad") if d.exists())
 
 
 def quarantine(path: Path, bad_dir: Path, message: str) -> None:
@@ -404,7 +426,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
         try:
             drive.download(ulid, "session.md", local)
             hdr, body = h.split_document(local.read_text(encoding="utf-8"))
-            for warning in h.validate(hdr):
+            for warning in h.validate(hdr, strict_refs=False):
                 _warn(f"{ulid}：{warning}")
         except (StoreError, h.HeaderError, UnicodeDecodeError) as e:
             _warn(f"{ulid} 讀不到，先跳過：{e}")
