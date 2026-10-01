@@ -369,8 +369,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args, extra = parser.parse_known_args(argv)
-    if extra and args.command == "search" and not args.keyword and len(extra) == 1:
-        args.keyword = extra[0]          # a keyword that starts with "-", like "-x"
+    if (extra and args.command == "search" and not args.keyword and len(extra) == 1
+            and not extra[0].startswith("--")):
+        args.keyword = extra[0]          # a keyword that starts with "-", like "-x"; a mistyped --flag still errors (G2)
     elif extra:
         parser.error(f"不認得的參數：{' '.join(extra)}")
     paths = store.Paths.from_env()

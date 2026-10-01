@@ -118,6 +118,8 @@ class Drive:
         never makes the next normal run write into the test folder.
         """
         name = os.environ.get("AGORA_FOLDER_NAME", "agora")
+        self.settings.pop("folder_id", None)       # old single-folder format (G1)
+        self.settings.pop("folder_name", None)
         folders = self.settings.setdefault("folders", {})
         if folders.get(name):
             return folders[name]
@@ -453,6 +455,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
         if raw and files.get(raw["file"]) != raw.get("md5"):
             _warn(f"{ulid} 還沒寫完（raw 不在或 md5 不符），下次再試")
             index.drop(ulid)
+            local.unlink(missing_ok=True)   # keep unfinished sessions out of an offline rebuild (G3)
             continue
         index.put(ulid, md5, hdr, body)
     gone = set(known) - set(remote) - outbox_ulids(paths)
