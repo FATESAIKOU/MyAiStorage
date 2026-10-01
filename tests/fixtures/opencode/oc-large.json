@@ -43,6 +43,11 @@
     "time": {
       "created": 1790214000000,
       "updated": 1790214400000
+    },
+    "revert": {
+      "messageID": "msg_ZZSRCID0000000000000002",
+      "partID": "prt_ZZSRCID0000000000000013",
+      "reason": "ZZREVERT 使用者按了 undo"
     }
   },
   "messages": [
@@ -186,9 +191,6 @@
         "id": "msg_ZZSRCID0000000000000003",
         "sessionID": "ses_ZZSRCID0000000000000000AA",
         "role": "user",
-        "time": {
-          "created": 1790214100000
-        },
         "agent": "build",
         "model": {
           "id": "space-bunny-free",
@@ -213,8 +215,8 @@
         "role": "assistant",
         "parentID": "msg_ZZSRCID0000000000000003",
         "time": {
-          "created": 1790214101000,
-          "completed": 1790214102000
+          "created": 1790214200000,
+          "completed": 1790214200005
         },
         "agent": "build",
         "mode": "build",

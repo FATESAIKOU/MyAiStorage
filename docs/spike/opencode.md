@@ -500,3 +500,31 @@ model{providerID,modelID}, summary{diffs}`——**沒有 `path`**（只有 assis
 2. `store.fetch_raw` 回傳的 `bytes` 若有為空的情形（`{}`），`start_native` 會丟
    `AgentError("匯出檔缺少 messages 清單")`——訊息清楚，但若 PM 想要一句更像
    「這個 Session 沒有 raw」，可以在 `store` 端先擋。
+
+---
+
+## code-adapters.md OC1–OC11 的修法（2026-10-02 晚）
+
+`docs/review/code-adapters.md` B 節的十一項。OC11 是 conftest（PM 的檔案），而且
+PM 已經自己加上了（`XDG_*`／`CLAUDE_CONFIG_DIR` 的 `delenv`，加上單元測試預設把
+`AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD` 指向不存在的路徑），所以這一項不用動。
+
+| # | 修法 | 新的測試 |
+|---|---|---|
+| OC1 | part id 改成 `prt_` + time(12) + **訊息序號(6)** + part 序號(4) + salt(6)；message id 是 `msg_` + time(12) + 訊息序號(6) + salt(6)。訊息序號是「在匯出檔裡的位置」，所以**兩則訊息同一毫秒、缺 `time.created`、全部都缺 time 三種情況都不會撞**。回讀驗證從「只數訊息」改成**訊息數與 part 數都數** | `test_part_ids_are_unique_when_two_messages_share_a_millisecond`、`…_when_a_message_has_no_created_time`、`…_when_no_message_has_a_time`、`test_part_ids_sort_by_message_then_by_part`、`test_import_verification_counts_parts_not_only_messages`（假 agent 用 `FAKE_OPENCODE_DROP_PART` 留下全部訊息但少一個 part） |
+| OC2 | 遞迴找 key 的寫法刪掉，改成明確的位置：`info.id`、`messages[].info.{id,sessionID,parentID}`、`messages[].parts[].{id,sessionID,messageID}`、`info.revert.{messageID,partID}`。`state`／`metadata`／`input`／`output` 一律不動 | `test_a_subagent_session_id_in_a_tool_part_is_left_alone`（task part 的 `state.metadata.sessionId` 與工具 input 裡的 `sessionId`／`messageID` 都保持原值）、`test_nothing_outside_the_structural_positions_changes`（去掉 id 欄位後整棵樹等於原檔） |
+| OC3 | `start_native`／`start_injected` 的匯入＋回讀＋數量檢查＋刪除抽成 `_import_verified()`，兩邊共用 | `test_start_injected_verifies_and_cleans_up`（`FAKE_OPENCODE_DROP=0` → 空 session → 報錯並刪掉）、`test_a_failed_delete_is_reported_as_such` |
+| OC4 | 整合測試改成**刻意隔離**：module 專用的 HOME（`tmp_path_factory`）＋ function scope 的 `monkeypatch.setenv("HOME", …)`，`XDG_*` 全部 `delenv`；`trash` 只刪測試自己記下的 id（`source` fixture 自己 append）。原來的寫法是 module scope 改 `os.environ`，被 conftest 的 autouse fixture 蓋掉，導致測試本體與 teardown 用到兩個不同的 opencode 資料庫 | —（整合測試） |
+| OC5 | 注入的 part 加上 `"synthetic": true` 與 `metadata.agora = "agora-injected"`；`_lines_of` 遇到自己注入的只輸出一行 `[注入的閱讀版]`，遇到 opencode 自己 inline 的 attachment（也是 `synthetic`）**完全不輸出** | `test_our_injected_reading_version_is_one_line`（50 段閱讀版只變一行）、`test_an_injected_part_is_marked_synthetic`、`test_an_attachment_opencode_inlined_produces_no_line` |
+| OC6 | 保留 `part_map`，`info.revert.partID` 也照對應改寫 | `test_a_reverted_session_keeps_its_undo_pointer` |
+| OC7 | 所有對 opencode 的 subprocess 都加 timeout（`AGORA_OPENCODE_TIMEOUT`，預設 60 秒），逾時丟 `AgentError`，所以會走 R4 的「下次再試」而不是把每一個後續 agora 指令一起卡住。timeout 每次呼叫再讀（不是 import 時讀），測試才改得動 | `test_a_hanging_opencode_becomes_an_error_not_a_hang` |
+| OC8 | `agent_version` 改成用 `info.version`（那才是**產生這個 session** 的版本），拿不到才叫 `opencode --version` | `test_export_fills_every_field`（改成斷言 1.18.34）、`test_the_version_falls_back_to_the_cli_only_when_the_export_has_none` |
+| OC9 | `_delete` 檢查 rc；失敗時訊息改成「刪除也失敗了，請手動 `opencode session delete <id>`」 | `test_a_failed_delete_is_reported_as_such` |
+| OC10 | `collect` 沒有 `agent_session_id` 時丟 `AgentError`（與 claude 一致），不再回 None——回 None 會讓 CLI 刪掉 pending，整個 Session 就沒了 | `test_collect_without_a_session_id_raises` |
+| OC11 | conftest 是 PM 的檔案，不動。PM 已經自己處理了 | — |
+
+fixture 也補齊（review 指出的三個缺口）：`info.revert`、task tool part（含
+`state.metadata.sessionId` 與使用者形狀的 input）、`synthetic` text part、
+`compaction`／`subtask` part、兩則同一毫秒的訊息、一則沒有 `time.created` 的訊息。
+
+單元測試 44 個、全單元 128 個全過。

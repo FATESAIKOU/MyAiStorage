@@ -43,6 +43,11 @@
     "time": {
       "created": 1790214000000,
       "updated": 1790214400000
+    },
+    "revert": {
+      "messageID": "msg_ZZSRCID0000000000000002",
+      "partID": "prt_ZZSRCID0000000000000013",
+      "reason": "ZZREVERT 使用者按了 undo"
     }
   },
   "messages": [
@@ -169,6 +174,33 @@
           }
         },
         {
+          "id": "prt_ZZSRCID0000000000000017",
+          "sessionID": "ses_ZZSRCID0000000000000000AA",
+          "messageID": "msg_ZZSRCID0000000000000002",
+          "type": "tool",
+          "callID": "call_ZZSRCID0017",
+          "tool": "task",
+          "time": {
+            "start": 1790214001500,
+            "end": 1790214001600
+          },
+          "state": {
+            "status": "completed",
+            "input": {
+              "prompt": "ZZTASKPROMPT 找一個 CSV 的例子",
+              "payload": {
+                "sessionId": "ZZUSERSESSIONID000000000001",
+                "messageID": "ZZUSERMESSAGEID00000000001"
+              }
+            },
+            "output": "ZZTASKOUT 找到一個例子",
+            "metadata": {
+              "sessionId": "ses_ZZSRCIDSUBAGENT0001",
+              "agent": "sub"
+            }
+          }
+        },
+        {
           "id": "prt_ZZSRCID0000000000000016",
           "sessionID": "ses_ZZSRCID0000000000000000AA",
           "messageID": "msg_ZZSRCID0000000000000002",
@@ -186,9 +218,6 @@
         "id": "msg_ZZSRCID0000000000000003",
         "sessionID": "ses_ZZSRCID0000000000000000AA",
         "role": "user",
-        "time": {
-          "created": 1790214100000
-        },
         "agent": "build",
         "model": {
           "id": "space-bunny-free",
@@ -203,6 +232,14 @@
           "messageID": "msg_ZZSRCID0000000000000003",
           "type": "text",
           "text": "第二步裡的引號欄位，如果值裡有逗號該怎麼辦？只講方法。"
+        },
+        {
+          "id": "prt_ZZSRCID0000000000000021",
+          "sessionID": "ses_ZZSRCID0000000000000000AA",
+          "messageID": "msg_ZZSRCID0000000000000003",
+          "type": "text",
+          "synthetic": true,
+          "text": "ZZATTACHMENT 這份是使用者夾帶的檔案內容"
         }
       ]
     },
@@ -213,8 +250,8 @@
         "role": "assistant",
         "parentID": "msg_ZZSRCID0000000000000003",
         "time": {
-          "created": 1790214101000,
-          "completed": 1790214102000
+          "created": 1790214200000,
+          "completed": 1790214200005
         },
         "agent": "build",
         "mode": "build",
@@ -237,6 +274,20 @@
         "finish": "stop"
       },
       "parts": [
+        {
+          "id": "prt_ZZSRCID0000000000000029",
+          "sessionID": "ses_ZZSRCID0000000000000000AA",
+          "messageID": "msg_ZZSRCID0000000000000004",
+          "type": "compaction",
+          "reason": "ZZCOMPACT 自動壓縮"
+        },
+        {
+          "id": "prt_ZZSRCID0000000000000028",
+          "sessionID": "ses_ZZSRCID0000000000000000AA",
+          "messageID": "msg_ZZSRCID0000000000000004",
+          "type": "subtask",
+          "task": "ZZSUBTASK 查證"
+        },
         {
           "id": "prt_ZZSRCID0000000000000030",
           "sessionID": "ses_ZZSRCID0000000000000000AA",

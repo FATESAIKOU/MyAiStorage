@@ -28,10 +28,12 @@ pytestmark = pytest.mark.integration
 MODEL = os.environ.get("AGORA_TEST_MODEL", "opencode/space-bunny-free")
 PROJ = Path("/tmp/agora-it-opencode/proj")
 
-# conftest points HOME at a tmp folder so unit tests cannot read real sessions.
-# This test needs the opposite: the real opencode config and auth. Captured at
-# import time, before the autouse fixture replaces it.
-REAL_HOME = Path(os.environ["HOME"])
+# OC4: an earlier version of this file set the *real* HOME in a module-scope
+# fixture and was then overridden by conftest's autouse per-test HOME, so the
+# test body and the teardown used two different opencode databases. Now the
+# database is isolated on purpose: HOME (and the XDG_* vars) point at a folder
+# that belongs to this module and to nothing else, and teardown deletes exactly
+# the ids that were recorded. The free model needs no auth, so nothing is lost.
 
 FIRST_ASK = "把 CSV 轉成 Markdown 表格，先列三個步驟就好，不要真的動手做。"
 SECOND_ASK = "你前面在做什麼？用一句話回答。"
@@ -76,13 +78,24 @@ def raw_of(session_id: str) -> bytes:
 
 
 @pytest.fixture(scope="module")
-def real_home():
-    os.environ["HOME"] = str(REAL_HOME)
-    yield REAL_HOME
+def opencode_home(tmp_path_factory):
+    """A HOME that exists only for this module, with an empty opencode database."""
+    home = tmp_path_factory.mktemp("opencode-home")
+    return home
+
+
+@pytest.fixture
+def isolated_store(opencode_home, monkeypatch):
+    """Point this test at that HOME. Function-scoped through monkeypatch, so the
+    teardown below still sees it."""
+    monkeypatch.setenv("HOME", str(opencode_home))
+    for var in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(var, raising=False)
+    return opencode_home
 
 
 @pytest.fixture(scope="module")
-def project(real_home):
+def project(opencode_home):
     PROJ.mkdir(parents=True, exist_ok=True)
     if not (PROJ / ".git").exists():
         subprocess.run(["git", "init", "-q"], cwd=str(PROJ), check=True)
@@ -95,39 +108,35 @@ def project(real_home):
 
 
 @pytest.fixture
-def source(project):
-    """A real session built with the free model, from self-authored filler.
+def trash(project, isolated_store):
+    """Delete the ids this test recorded, one at a time, and nothing else.
 
-    Function-scoped on purpose: the module-level cleanup deletes the sessions
-    this directory holds, so a shared one would vanish between tests.
+    Recording is the point: the database is this module's, so deleting by id is
+    both sufficient and impossible to overreach (design.md section 7).
     """
-    proc = ask("run", "-m", MODEL, "--format", "json", "--title",
-               "agora-it-source", FIRST_ASK)
-    events = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
-    return next(event["sessionID"] for event in events if "sessionID" in event)
-
-
-@pytest.fixture(scope="module")
-def trash(project):
-    """Delete every session under /tmp/agora-it-opencode at the end of the module.
-
-    One id at a time, and only ids whose directory is this throwaway project, so
-    nothing else in the store can be touched (design.md section 7).
-    """
-    yield []
-    listing = subprocess.run(["opencode", "session", "list", "--format", "json"],
-                             cwd=str(PROJ), capture_output=True, text=True)
-    known = set()
-    if listing.returncode == 0:
-        for row in json.loads(listing.stdout):
-            if (row.get("directory") or "").startswith(str(project)):
-                known.add(row["id"])
-    for session_id in sorted(known):
+    recorded: list[str] = []
+    yield recorded
+    for session_id in sorted(set(recorded)):
         subprocess.run(["opencode", "session", "delete", session_id],
                        cwd=str(PROJ), capture_output=True)
 
 
-def test_real_round_trip(project, source, trash):
+@pytest.fixture
+def source(project, isolated_store, trash):
+    """A real session built with the free model, from self-authored filler.
+
+    It records its own id for cleanup the moment it exists, so a failure later in
+    the test still tidies up after it.
+    """
+    proc = ask("run", "-m", MODEL, "--format", "json", "--title",
+               "agora-it-source", FIRST_ASK)
+    events = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+    session_id = next(event["sessionID"] for event in events if "sessionID" in event)
+    trash.append(session_id)
+    return session_id
+
+
+def test_real_round_trip(project, source, trash, isolated_store):
     """export -> start_native -> one real turn -> collect (design.md 5.2, 5.4)."""
     exported = oc.ADAPTER.export(source)
     assert exported.message_count >= 2
@@ -161,7 +170,7 @@ def test_real_round_trip(project, source, trash):
     assert raw_of(source) == untouched
 
 
-def test_real_injected_round_trip(project, source, trash, tmp_path):
+def test_real_injected_round_trip(project, source, trash, tmp_path, isolated_store):
     """The reading version goes in as one user message with a known id (N4)."""
     exported = oc.ADAPTER.export(source)
     reading = tmp_path / "reading.md"
@@ -179,7 +188,7 @@ def test_real_injected_round_trip(project, source, trash, tmp_path):
     assert collected.message_count > 1
 
 
-def test_real_reimport_is_idempotent(project, source, trash, monkeypatch):
+def test_real_reimport_is_idempotent(project, source, trash, monkeypatch, isolated_store):
     """Importing the same transcript twice under the same id must keep every
     message, and the adapter's post-import count check must pass.
 

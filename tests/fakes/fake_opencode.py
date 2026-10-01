@@ -26,6 +26,9 @@ FAKE_AGENT_MODE:
 FAKE_OPENCODE_FAIL=export|import|delete  make that subcommand exit 1
 FAKE_OPENCODE_DROP=<n>   import the payload but keep only the first <n> messages
                          (simulates opencode's silent onConflictDoNothing)
+FAKE_OPENCODE_DROP_PART=<n>  drop the <n>th part of every message but keep the
+                         messages: what a part-id collision looks like
+FAKE_OPENCODE_SLEEP=<s>  sleep before doing anything (for timeout tests)
 FAKE_OPENCODE_LEAVE=<id> import refuses: "Expected a string starting with msg"
 """
 
@@ -45,6 +48,10 @@ CWDS = HOME / "opencode-cwd.log"
 VERSION = os.environ.get("FAKE_OPENCODE_VERSION", "9.9.9")
 
 argv = sys.argv[1:]
+sleep_for = os.environ.get("FAKE_OPENCODE_SLEEP")
+if sleep_for:
+    time.sleep(float(sleep_for))
+
 CALLS.parent.mkdir(parents=True, exist_ok=True)
 with open(CALLS, "a") as f:
     f.write(json.dumps({"argv": argv, "cwd": os.getcwd(), "mode": os.environ.get("FAKE_AGENT_MODE", "")}) + "\n")
@@ -126,6 +133,12 @@ def do_import(params: list[str]):
         # What opencode does when an id already exists: keep the rows that fit,
         # drop the rest, report success.
         payload["messages"] = payload["messages"][: int(keep)]
+    lose = os.environ.get("FAKE_OPENCODE_DROP_PART")
+    if lose:
+        for message in payload["messages"]:
+            parts = message.get("parts") or []
+            if len(parts) > int(lose):
+                del parts[int(lose)]
     save(session_id, payload)
     print(f"Imported session: {session_id}")
 

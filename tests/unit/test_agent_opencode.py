@@ -61,7 +61,8 @@ def test_export_fills_every_field(fake, workdir):
     assert exported.session_id == "ses_ZZSRCID0000000000000000AA"
     assert exported.dir == "/tmp/agora-it-opencode/proj"
     assert exported.title == "把 CSV 轉成 Markdown 表格"
-    assert exported.agent_version == "9.9.9"
+    # OC8: the version comes from the export, not from `opencode --version`
+    assert exported.agent_version == "1.18.34"
     assert exported.message_count == 4
     # ms -> RFC 3339 UTC (design.md 3.4 wants UTC with a Z)
     assert exported.created_at == "2026-09-24T01:40:00Z"
@@ -179,15 +180,21 @@ def test_every_id_and_every_reference_is_rewritten(fake):
 
 def test_ids_keep_the_shape_and_the_order(fake):
     """N3: opencode sorts by time.created then id and sends that order to the
-    model, so sorting the new ids must reproduce the order of the file."""
+    model, so sorting the new ids must reproduce the order of the file.
+
+    The fixture has one message with no time.created (the OC1 case), so give
+    every message a time first: without one there is no order to preserve."""
     before = json.loads(raw())
+    for position, m in enumerate(before["messages"]):
+        m["info"]["time"] = {"created": 1790214000000 + position}
     after = oc.reidentify(before, session_id="ses_" + "B" * 16)
     in_file = [m["info"]["id"] for m in after["messages"]]
 
     # same prefixes, same width
     for new in after["messages"]:
         assert new["info"]["id"].startswith("msg_")
-        assert len(new["info"]["id"]) == len("msg_") + oc._TIME_HEX + oc._ORDINAL_HEX + oc._SALT_HEX
+        assert len(new["info"]["id"]) == (len("msg_") + oc._TIME_HEX
+                                        + oc._MESSAGE_HEX + oc._SALT_HEX)
         for part in new["parts"]:
             assert part["id"].startswith("prt_")
 
@@ -262,7 +269,7 @@ def test_start_native_detects_a_short_import_and_cleans_up(fake, workdir, monkey
     """opencode drops colliding rows silently; the count check is the only thing
     that notices, and the half-built session must not be left behind (trap 4)."""
     monkeypatch.setenv("FAKE_OPENCODE_DROP", "2")
-    with pytest.raises(AgentError, match="訊息數不對"):
+    with pytest.raises(AgentError, match="數量不對"):
         oc.ADAPTER.start_native(raw(), workdir)
     assert list((fake / "opencode-sessions").glob("*.json")) == \
         [fake / "opencode-sessions" / "default.json"]
@@ -317,7 +324,9 @@ def test_injected_payload_has_every_field_opencode_needs(fake, workdir):
     """
     payload = oc._injected_payload("ses_" + "H" * 16, "ZZ\n", "probe", workdir)
     real = json.loads(raw())
-    assert set(payload["info"]) == set(real["info"])
+    # `revert` is what a session the user undid something in carries; a fresh
+    # injected one has nothing to revert.
+    assert set(payload["info"]) == set(real["info"]) - {"revert"}
     assert isinstance(payload["info"]["permission"], list)
     assert set(payload["info"]["tokens"]["cache"]) == {"read", "write"}
     real_user = next(m for m in real["messages"] if m["info"]["role"] == "user")
@@ -356,8 +365,12 @@ def test_collect_returns_the_grown_session(fake, workdir, monkeypatch):
     assert "ZZAPPEND" in oc.ADAPTER.reading(exported.raw)
 
 
-def test_collect_without_a_session_id(fake):
-    assert oc.ADAPTER.collect(Launch(argv=[], cwd=".", agent_session_id=None)) is None
+def test_collect_without_a_session_id_raises(fake):
+    """OC10: a pending record always has the id; if it does not, the record is
+    broken and the CLI must keep the pending instead of declaring 'nothing new'
+    and deleting it."""
+    with pytest.raises(AgentError, match="session id"):
+        oc.ADAPTER.collect(Launch(argv=[], cwd=".", agent_session_id=None))
 
 
 def test_module_exposes_the_adapter_cli_imports():
@@ -372,3 +385,183 @@ def test_never_touches_the_real_opencode_storage(fake, workdir):
     oc.ADAPTER.start_native(raw(), workdir)
     assert os.environ["HOME"].endswith("home")  # conftest points HOME at tmp_path
     assert not Path(os.environ["HOME"], ".local/share/opencode").exists()
+
+# --- OC1: ids stay unique when time cannot be trusted -----------------------
+
+
+def _ids(payload: dict) -> tuple[list[str], list[str]]:
+    rebuilt = oc.reidentify(payload, session_id="ses_" + "Z" * 16)
+    return ([m["info"]["id"] for m in rebuilt["messages"]],
+            [p["id"] for m in rebuilt["messages"] for p in m["parts"]])
+
+
+def test_part_ids_are_unique_when_two_messages_share_a_millisecond(fake):
+    """OC1: a part id built from the message's time alone would give both first
+    parts the same id, and opencode drops the second one without a word — the
+    message count would still match, so nothing would notice."""
+    payload = json.loads(raw())
+    for m in payload["messages"]:
+        m["info"]["time"] = {"created": 1790214000000}
+    message_ids, part_ids = _ids(payload)
+    assert len(set(part_ids)) == len(part_ids)
+    assert len(set(message_ids)) == len(message_ids)
+    # and the order still follows the export, not the id sort
+    rebuilt = oc.reidentify(payload, session_id="ses_" + "Z" * 16)
+    in_file = [m["info"]["id"] for m in rebuilt["messages"]]
+    assert sorted(in_file) == in_file
+
+
+def test_part_ids_are_unique_when_a_message_has_no_created_time(fake):
+    """A message without time.created inherits the previous stamp, which lands on
+    the same millisecond as its neighbour just as easily."""
+    payload = json.loads(raw())
+    for m in payload["messages"][1:]:
+        m["info"].pop("time", None)
+    _, part_ids = _ids(payload)
+    assert len(set(part_ids)) == len(part_ids)
+
+
+def test_part_ids_are_unique_when_no_message_has_a_time(fake):
+    payload = json.loads(raw())
+    for m in payload["messages"]:
+        m["info"].pop("time", None)
+    _, part_ids = _ids(payload)
+    assert len(set(part_ids)) == len(part_ids)
+
+
+def test_part_ids_sort_by_message_then_by_part(fake):
+    """opencode orders parts by (message_id, id): inside a message only the part
+    position may vary, and across messages the message position decides."""
+    rebuilt = oc.reidentify(json.loads(raw()), session_id="ses_" + "Z" * 16)
+    for message in rebuilt["messages"]:
+        ids = [p["id"] for p in message["parts"]]
+        assert sorted(ids) == ids
+    firsts = [m["parts"][0]["id"] for m in rebuilt["messages"]]
+    assert sorted(firsts) == firsts
+
+
+def test_import_verification_counts_parts_not_only_messages(fake, workdir, monkeypatch):
+    """The fake keeps every message but drops a part, which is exactly what an id
+    collision inside one message looks like from the outside."""
+    monkeypatch.setenv("FAKE_OPENCODE_DROP_PART", "1")
+    with pytest.raises(AgentError, match="數量不對"):
+        oc.ADAPTER.start_native(raw(), workdir)
+    assert list((fake / "opencode-sessions").glob("*.json")) == \
+        [fake / "opencode-sessions" / "default.json"]
+
+
+# --- OC2: only structural ids are rewritten -------------------------------
+
+
+def test_a_subagent_session_id_in_a_tool_part_is_left_alone(fake):
+    """OC2: state.metadata.sessionId names the subagent's own session; pointing it
+    at the parent would make the subagent recurse into itself."""
+    before = json.loads(raw())
+    after = oc.reidentify(before, session_id="ses_" + "S" * 16)
+    task = next(p for p in after["messages"][1]["parts"] if p.get("tool") == "task")
+    assert task["state"]["metadata"]["sessionId"] == "ses_ZZSRCIDSUBAGENT0001"
+    assert task["state"]["metadata"]["sessionId"] != after["info"]["id"]
+    # the tool's own payload is the user's data, not ours
+    assert task["state"]["input"]["payload"]["sessionId"] == "ZZUSERSESSIONID000000000001"
+    assert task["state"]["input"]["payload"]["messageID"] == "ZZUSERMESSAGEID00000000001"
+    # while the part's own references did move
+    assert task["sessionID"] == after["info"]["id"]
+    assert task["messageID"] == after["messages"][1]["info"]["id"]
+
+
+def test_nothing_outside_the_structural_positions_changes(fake):
+    before = json.loads(raw())
+    after = oc.reidentify(before, session_id="ses_" + "Q" * 16)
+    skip = {"id", "sessionID", "messageID", "parentID", "partID"}
+    def strip(node):
+        if isinstance(node, dict):
+            return {k: strip(v) for k, v in node.items() if k not in skip}
+        if isinstance(node, list):
+            return [strip(v) for v in node]
+        return node
+    assert strip(after) == strip(before)
+
+
+def test_a_reverted_session_keeps_its_undo_pointer(fake):
+    """OC6: info.revert.partID is not in the message map, so a naive rewrite left
+    it pointing at a part that no longer exists and undo/redo would break."""
+    before = json.loads(raw())
+    assert before["info"]["revert"]["partID"] == "prt_ZZSRCID0000000000000013"
+    after = oc.reidentify(before, session_id="ses_" + "R" * 16)
+    part_ids = {p["id"] for m in after["messages"] for p in m["parts"]}
+    assert after["info"]["revert"]["partID"] in part_ids
+    assert after["info"]["revert"]["messageID"] in {m["info"]["id"] for m in after["messages"]}
+    assert after["info"]["revert"]["reason"] == "ZZREVERT 使用者按了 undo"
+
+
+# --- OC5: what the reading version does with synthetic parts --------------
+
+
+def test_our_injected_reading_version_is_one_line(fake, workdir, tmp_path):
+    reading = tmp_path / "r.md"
+    reading.write_text("## user\nZZLONG 一整份閱讀版\n" * 50, encoding="utf-8")
+    launch = oc.ADAPTER.start_injected(reading, workdir)
+    body = oc.ADAPTER.reading(
+        (fake / "opencode-sessions" / f"{launch.agent_session_id}.json").read_bytes())
+    assert body.count("[注入的閱讀版]") == 1
+    assert "ZZLONG" not in body          # otherwise every handoff nests the last one
+    assert launch.before_count == 1
+
+
+def test_an_injected_part_is_marked_synthetic(fake, workdir, tmp_path):
+    reading = tmp_path / "r.md"
+    reading.write_text("ZZ\n", encoding="utf-8")
+    launch = oc.ADAPTER.start_injected(reading, workdir)
+    part = stored(fake, launch.agent_session_id)["messages"][0]["parts"][0]
+    assert part["synthetic"] is True
+    assert part["metadata"]["agora"] == oc.INJECTED_MARK
+
+
+def test_an_attachment_opencode_inlined_produces_no_line(fake):
+    """D6: tool results and inlined attachments are not the user's words."""
+    body = oc.ADAPTER.reading(raw())
+    assert "ZZATTACHMENT" not in body
+    assert "ZZCOMPACT" not in body and "ZZSUBTASK" not in body
+    assert "ZZTASKOUT" not in body
+    assert "[tool] task" in body        # the call itself is one line, per D6
+
+
+# --- OC3: the injected path is verified too -------------------------------
+
+
+def test_start_injected_verifies_and_cleans_up(fake, workdir, tmp_path, monkeypatch):
+    reading = tmp_path / "r.md"
+    reading.write_text("ZZ 一段閱讀版\n", encoding="utf-8")
+    monkeypatch.setenv("FAKE_OPENCODE_DROP", "0")
+    with pytest.raises(AgentError, match="數量不對"):
+        oc.ADAPTER.start_injected(reading, workdir)
+    assert list((fake / "opencode-sessions").glob("*.json")) == \
+        [fake / "opencode-sessions" / "default.json"]
+
+
+def test_a_failed_delete_is_reported_as_such(fake, workdir, tmp_path, monkeypatch):
+    reading = tmp_path / "r.md"
+    reading.write_text("ZZ\n", encoding="utf-8")
+    monkeypatch.setenv("FAKE_OPENCODE_DROP", "0")
+    monkeypatch.setenv("FAKE_OPENCODE_FAIL", "delete")
+    with pytest.raises(AgentError) as e:
+        oc.ADAPTER.start_injected(reading, workdir)
+    assert "刪不掉" in str(e.value) and "opencode session delete" in str(e.value)
+
+
+# --- OC7/OC8: bounded calls, version from the export ----------------------
+
+
+def test_a_hanging_opencode_becomes_an_error_not_a_hang(fake, workdir, monkeypatch):
+    monkeypatch.setenv("AGORA_OPENCODE_TIMEOUT", "1")
+    monkeypatch.setenv("FAKE_OPENCODE_SLEEP", "5")
+    with pytest.raises(AgentError, match="逾時"):
+        oc.ADAPTER.export("default")
+
+
+def test_the_version_falls_back_to_the_cli_only_when_the_export_has_none(fake):
+    payload = json.loads(raw())
+    payload["info"].pop("version")
+    store = fake / "opencode-sessions" / "noversion.json"
+    store.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    assert oc.ADAPTER.export("noversion").agent_version == "9.9.9"
