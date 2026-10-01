@@ -68,7 +68,58 @@
 
 ## B. agents/opencode.py
 
-（等 `agents/opencode.py` commit 之後補上。）
+對象是 `e4d0228` 的 `src/agora/agents/opencode.py`、`tests/unit/test_agent_opencode.py`、`tests/fakes/fake_opencode.py`、`tests/fixtures/opencode/`、`tests/integration/test_opencode_real.py`。對照的是 design 第 3 版 5.2／5.4、`docs/spike/opencode.md`（V1 陷阱 1–6、V3、V5），以及 base.py。
+
+### 結論（依 PM 指定的重點）
+
+| 重點 | 結論 | 說明 |
+|---|---|---|
+| id 重編是否完整（三種 id、所有參照欄位、固定寬度、依匯出順序遞增） | **有條件可行** | 三種前綴都對（陷阱 3），寬度固定是 28 個字元，message id 是「time.created 加上陣列位置」，所以和 `ORDER BY time_created, id` 的順序一致（陷阱 5）。`sessionID`／`messageID`／`parentID` 也都改寫了（N14）。但是 **part id 會撞號（OC1，High，已重現）**；參照欄位的改寫範圍又**太寬**，會改到工具的 metadata（OC2）；`partID` 沒有改到（OC6） |
+| import 後是否回讀驗證訊息數，失敗時刪掉半個 session | **原生：可行；注入：不可行** | `start_native` 在 import 之後立刻 export 一次並比對訊息數，不一致就 `session delete`，然後報錯（陷阱 2、4）。但只比對**訊息數**，所以 OC1 那種「訊息都在、part 掉了」抓不到。`start_injected` **完全沒有回讀**（OC3） |
+| 注入的 export 形狀 | **可行** | 一則 user 訊息，內容是說明加上閱讀版全文（N4、V3）。`info` 補齊了 opencode 匯入與匯出都需要的欄位（整合測試抓到的第 1 個問題已經修好）。`before_count=1` 是對的。另見 OC5（閱讀版會一層一層重複） |
+| export 是否沒有 `2>&1` | **可行** | stdout 寫到暫存檔，stderr 用 PIPE 分開接（陷阱 1）。也有測試確認進度行不會進到 stdout |
+| 測試會不會碰到真的 `~/.local/share/opencode`，或在沒有 commit 的資料夾跑 `session list` | **單元測試：可行；整合測試：有條件** | 單元測試全部透過 `sys.executable` 的 wrapper 叫 fake，不會叫到真的 opencode，HOME 也被 conftest 隔離了。整合測試的 `session list` 只在 `/tmp/agora-it-opencode/proj` 裡跑，fixture 會確保那裡是有 commit 的 git repo，刪除也是一個 id 一個 id 地刪。但是 **`real_home` 這個 fixture 實際上沒有作用（OC4，已實測）**：測試本體裡的 HOME 仍然是 pytest 的暫存目錄，teardown 時卻是真的 HOME，所以「建立」和「清理」用的是兩個不同的 opencode 資料庫 |
+
+### 問題清單
+
+| # | 嚴重度 | 位置 | 問題 | 建議 |
+|---|---|---|---|---|
+| OC1 | **High** | `reidentify`（約 174–177 行） | part id 是 `prt_` 加上 **該則訊息**的 time 加上 **訊息內的** part 序號，再加上 salt，裡面沒有訊息的位置。所以兩則訊息只要 `time.created` 相同（同一毫秒），或其中一則**沒有** `time.created`（程式會沿用前一則的 stamp），它們的第 0 個 part 就會拿到**完全相同的 id**。**已重現**：用自編的兩則訊息 payload 跑 `reidentify`，「同一毫秒」與「缺少 time」兩種情況，兩個 part 的 id 都一模一樣。opencode 的 import 是 `onConflictDoNothing`（陷阱 2），**第二個 part 會被靜默丟掉**；因為訊息數沒有變，回讀驗證也會通過。結果是接續之後的對話少了內容，而且沒有任何警告 | part id 改成包含訊息位置，例如 `prt_` + time(12) + **訊息序號(6)** + part 序號(4) + salt(6)。這樣仍然是固定寬度，訊息內的順序也不變（同一則訊息的 time 與訊息序號相同，只有 part 序號在遞增）。回讀驗證另外比對 **part 總數**。單元測試加上「兩則訊息同一毫秒」和「缺少 time.created」這兩個案例 |
+| OC2 | Medium | `_rewrite_references` | 它會遞迴走過**整個** payload，所有名叫 `sessionid` 的 key（不分大小寫）都改成新的 session id。**已重現**：task 工具 part 的 `state.metadata.sessionId`（它指向的是 subagent 的**子 session**）被改成了新的父 session id，等於讓它指向自己。工具的 input、output 裡如果剛好有 `sessionId`、`messageID`、`parentID` 這種 key（例如使用者自己的 JSON），也會被改掉，這和 docstring 說的「除了 id，其他位元組都不變」不一致 | 只改結構上的位置：`info.id`；`messages[].info.{id, sessionID, parentID}`；`messages[].parts[].{id, sessionID, messageID}`；`info.revert.{messageID, partID}`（見 OC6）。`state`、`metadata`、`input`、`output` 一律不動。單元測試加上「task part 的 metadata.sessionId 保持不變」 |
+| OC3 | Medium | `start_injected` | 和 start_native 不一樣，這裡沒有做陷阱 4 的回讀驗證。如果注入的 payload 被拒絕（只寫進一半，或者是空的 session），agent 照樣會被打開；使用者說了話之後，collect 會因為 `>1` 而存檔，但 agent **根本沒有看到閱讀版**，整個過程沒有任何訊息 | 把 start_native 的「export 回讀 → 數量不符就刪掉並報錯」抽成 `_import_verified(payload, workdir)`，兩邊共用（也順便省幾行） |
+| OC4 | Medium | `tests/integration/test_opencode_real.py` 的 `real_home`／`trash` | `real_home` 是 module scope，直接改 `os.environ["HOME"]`。但 conftest 的 autouse `isolated_home` 是 function scope，會在**每個測試本體**裡用 monkeypatch 再把 HOME 換成暫存目錄。**已實測**：我把 conftest 複製到 scratchpad，配一個同樣寫法的 module fixture，結果測試本體裡的 HOME **不是**真的家目錄。所以：(a) 測試裡的 `opencode run`／`import`／`export` 用的是暫存目錄裡全新的資料庫，不是 docstring 說的「real store」；(b) `trash` 的 teardown 是在 monkeypatch 還原之後才跑，這時 HOME 是真的家目錄，它會到**真的**資料庫裡列出並刪掉 PROJ 底下的 session，和測試建立的 session 不是同一批；(c) `trash.append(...)` 收集的 id 完全沒有被用到 | 明確選一種做法，建議用比較安全的那種：在 function scope 用 monkeypatch 把 `HOME`（以及 `XDG_DATA_HOME`）指到**這個 module 專用的暫存目錄**，讓 opencode 的資料庫完全隔離（目前測試能跑通，表示免費模型不需要真的 auth）；teardown 只刪 `trash` 裡記下的 id。如果真的需要碰真的資料庫，就在 function scope 用 monkeypatch 設定真的 HOME，並且把 docstring 和 teardown 都改成一致的做法 |
+| OC5 | Low | `start_injected`／`reading_of` | 注入的閱讀版會以一般的 user text part 存進新的 session。之後如果再從這個 session 跨 agent 接續、或者被 merge，它的閱讀版裡會**再包一次**上一層的完整閱讀版。每多接一次，內容就重複一層，搜尋結果也會重複。Claude 那邊用的是 `@路徑`，檔案的內容是放在 attachment 行裡（靜默），所以不會有這個問題 | 注入的 part 加上 `"synthetic": true`（或者 `metadata.agora = "injected"`）。`_lines_of` 遇到它時，只輸出一行 `[注入的閱讀版]`。另外，opencode 自己產生的 `synthetic: true` text part（附加檔案時，它會放進檔案內容）也一樣略過，這也比較符合 D6 的「不收工具結果」 |
+| OC6 | Low | `reidentify` | session 的 `info.revert`（`{messageID, partID, …}`）裡，`partID` 不在 `_REFERENCE_KEYS` 裡，所以重編之後它指向一個不存在的 part。在被 revert 過的 session 上接續時，undo／redo 的狀態會壞掉 | 留一份 `part_map`，把 `partID` 也照著對應過去（OC2 改成只處理結構位置時，一起加進去） |
+| OC7 | Low | `_run`、`_export_bytes`、`_import`、`_delete` | 所有對 opencode 的 subprocess 呼叫都沒有 timeout。cli 會在**每個指令開始時**跑 recover_pending，而它會呼叫 collect，也就是 export。opencode 只要卡住一次（例如資料庫被鎖住），之後每一個 agora 指令都會跟著卡住 | export／import／delete 都加上 `timeout=60`，逾時就丟出 AgentError（這樣會走到 R4 的「下次再試」） |
+| OC8 | Low | `export` 的 `_version()` | 每次 export、collect 都會多跑一次 `opencode --version`。但匯出檔的 `info.version` 本來就有版本（fixture 裡是 `1.18.34`），而且那才是產生這個 session 的版本 | 改用 `info.version`，找不到時才叫 CLI（和 claude 的 P3 一致，也可以省幾行） |
+| OC9 | Low | `_delete` | rc 沒有檢查，但錯誤訊息寫的是「已經刪掉 {id}」。如果刪除失敗，訊息就是錯的，下一次重試還會撞到同一個 id | 檢查 rc；失敗時，錯誤訊息改成「刪除也失敗了，請手動 `opencode session delete <id>`」 |
+| OC10 | Low | `collect` | 沒有 `agent_session_id` 時，opencode 回傳 None（cli 會把它當成「沒有新內容」，然後刪掉 pending），但 claude 會丟出 AgentError（pending 會留下來再試）。兩個 adapter 的行為不一致 | 統一成丟出 AgentError。pending 裡一定會有這個 id（N4），如果沒有，就表示 record 壞了 |
+| OC11 | Low | `tests/conftest.py` | 單元測試的隔離只靠 HOME。這台機器目前沒有設定 `XDG_DATA_HOME`，但如果有人設了，忘了用 `fake` fixture 的測試就會去叫真的 opencode，連到真的資料庫 | conftest 加上 `monkeypatch.delenv("XDG_DATA_HOME")`、`delenv("XDG_CONFIG_HOME")`，並且預設把 `AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD` 指向一個「一定會失敗」的 stub。需要 fake 的測試再自己覆蓋 |
+
+### 測試的缺口
+
+- OC1 需要的案例：同一毫秒、缺少 `time.created`、回讀時比對 part 數。
+- OC2：task part 的 metadata 不變；工具 input 裡有 `sessionId` 這個 key 的時候也不變。
+- OC3：注入時 import 只寫進一半，要報錯，並且刪掉那個 session。
+- fixture 裡沒有 `synthetic` text part、沒有 `compaction`／`subtask` part、也沒有 `info.revert`（OC5、OC6）。
+- OC4 修好之前，整合測試的「真實資料庫」語意都不成立。
+
+### 對 design.md 的修改建議
+
+1. 5.4 opencode 原生那一列：「依匯出順序遞增」改寫成「message id＝time＋訊息序號；part id＝time＋**訊息序號**＋part 序號」，並且說明回讀時同時比對訊息數與 part 數（OC1）。
+2. 同一列：寫明「只改結構位置上的 id 與參照，`state`／`metadata` 不動」（OC2）。
+3. 5.4 注入那一列：寫明「注入同樣要回讀驗證」，並且說明注入的 part 有一個標記，閱讀版只會輸出一行（OC3、OC5）。
+
+### 這次跑過的指令（opencode 部分）
+
+| 指令 | 結果（只記形狀） |
+|---|---|
+| `.venv/bin/python - <<…`：用自編的兩則訊息 payload 呼叫 `opencode.reidentify` | 「同一毫秒」：part id 相同；「缺少 time」：part id 相同（OC1）。task part 的 `state.metadata.sessionId` 變成了新的 session id（OC2） |
+| 把 `tests/conftest.py` 複製到 scratchpad，配一個和 `real_home` 同樣寫法的 module fixture，執行 pytest | 測試本體裡的 HOME 不是真的家目錄（OC4）。scratchpad 已經刪掉 |
+| `echo ${XDG_DATA_HOME:+set}` 等 | `XDG_DATA_HOME`、`XDG_CONFIG_HOME`、`OPENCODE_DATA_DIR` 都沒有設定 |
+| `.venv/bin/python -m pytest -q tests/unit` | 98 passed |
+
+沒有執行任何真的 opencode 指令，也沒有讀 `~/.local/share/opencode`、Drive 或 rclone.conf。
 
 ---
 
@@ -122,3 +173,54 @@
 | `HOME=<暫存目錄> FAKE_HOME=<暫存目錄> tests/fakes/claude_noninteractive.py --version` | 印出「unknown command: python3. Perhaps you have to reshim?」（E1）。暫存的 FAKE_HOME 已經刪掉 |
 
 沒有執行 e2e，沒有碰 Drive，沒有呼叫 claude，也沒有讀任何真實的 Session 或 rclone.conf。
+
+---
+
+## D. claude 修正確認（impl2 的 `180d658`，對照 CL1–CL14、E1–E8）
+
+**結論：CL1–CL14、E1–E8 幾乎都修對了，單元測試 98 個全部通過。** 但 E3 的修法帶進了一個新的 **High**（D-1）：e2e 的 teardown 會把 `agora-test/sessions/` 裡**所有**的 Session 都 purge 掉，包括其他次執行、其他測試留下來的。
+
+### 逐條確認
+
+| # | 狀態 | 確認的內容 |
+|---|---|---|
+| CL1 | ✅ | 改成 `re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(...))`；單元測試有 `/tmp/a_b 專案.v2` → `-tmp-a-b----v2`。fake_claude 改成直接 import adapter 的函式，規則因此一致。這樣 fake 雖然抓不到 adapter 的錯，但參數化測試已經把實測值寫死了，可以接受 |
+| CL2 | ✅ | `_is_noise` 排除 `isMeta` 行與本機指令行（`isCompactSummary` 保留）；`system` 行加進了靜默清單；計數和閱讀版都走同一套規則；也有測試 |
+| CL3 | ✅ | 單元測試改用 `#!/bin/sh exec {sys.executable}` 的 wrapper。在這台機器上，原本失敗的 2 個測試現在都通過了 |
+| CL4 | ✅ | 優先順序是 `AGORA_CLAUDE_HOME/.claude` > `CLAUDE_CONFIG_DIR` > `~/.claude`；單元測試會刪掉 `CLAUDE_CONFIG_DIR` |
+| CL5 | ⚠️ 仍然開著 | impl2 用 pty 試了 4 輪，都沒辦法驗證互動模式的行為（spike/claude.md 有記錄），所以 collect 沒有改。這條只能留給 **test-plan 的 M-03 人工確認**：在互動模式下說一句話、執行 `/clear`、再說一句話，然後離開。design 5.4 要先寫一句「`/clear` 之後的內容可能不會存回（未驗證）」 |
+| CL6 | ✅ | aux 的 `.jsonl` 共用 `_split_lines`，最後的換行也保留了 |
+| CL7 | ✅ | 只改原本就有的 `cwd`，並且加了 `ensure_ascii=False`。**test-plan 的 U-CON-04 要跟著改**（「每一行的 `cwd`」改成「原本有 `cwd` 的行」），design 5.4 的說法也要改。這兩份文件留到下一次一起改（test-plan 是我的檔，這次只能 commit 這個檔） |
+| CL8 | ✅ | 非 UTF-8 改成丟出 AgentError；中間的空行直接略過 |
+| CL9 | ✅ | `before_count=2` |
+| CL10 | ⚠️ | `*_tool_use` 會輸出成工具一行，`*_tool_result` 靜默，也有 WebSearch 的測試。**新的小問題**：如果 block 沒有 `type`，`btype.endswith(...)` 會對 None 丟出 AttributeError（已用 `_block_lines([{"text": "x"}], tools=True)` 重現），最後只會被 main 的 catch-all 接住。改成 `btype = str(block.get("type") or "")` 就好。另外，「連續的 assistant 段落合併」沒有做（base.py 的 `format_reading`），維持 Low |
+| CL11 | ✅ | `created_at` 取第一個有 timestamp 的行；`agent_version` 取 jsonl 最後一行的 `version`，subprocess 也刪掉了 |
+| CL12 | ✅（大部分） | `find_jsonl(session_id, hint_dir)` 會先看指定的資料夾；collect 會傳 `launch.cwd`；整合測試會傳 `hint_dir`。但是 **cli 的 import 呼叫的是 `agent.export(args.session_id)`，沒有 hint**，所以 e2e 的 import 那一步，仍然會用 glob 掃過真實 `projects/*/` 的目錄名稱（E7 的殘留）。可以在 cli 傳入 `hint_dir=os.getcwd()`，或者讓 e2e 在 proj 底下執行 import |
+| CL13 | ✅ | 整合測試的資料夾改成 `/tmp/agora-it-claude/p_專案.v2` |
+| CL14 | ✅ | 絕對路徑或含有 `..` 的 aux 路徑，都會丟出 AgentError |
+| E1 | ✅ | e2e 改用 `#!/bin/sh exec {sys.executable}` 的 wrapper |
+| E2 | ✅ | `show`、`show --raw`、`sync` 都經過 cli.main；merge 用的是 `f"{id1},", id2`（使用者的寫法）。exit 3 與 `--no-sync` 仍然沒有測到，可以接受 |
+| E3 | ⚠️ 帶進了新的 High | uuid 改成從 wrapper 的紀錄收集（好）。但 **ULID 是從 `store.Index(paths).known()` 收集的**（第 93 行，註解寫「our cache is test-exclusive」）。這個 cache 的確是這個測試專用的，**但它的內容不是**：search／sync 會把 `agora-test/sessions/` 裡**所有**的 Session 都同步進來。結果 teardown 會把整個共用資料夾裡的每一個 Session 都 purge 掉（見 D-1） |
+| E4 | ✅（小問題） | 依 uuid 刪掉 `session-env/<uuid>`、`file-history/<uuid>`，也會刪掉空的 `memory/`。但 todos 用的是 `cfgdir.glob(f"todos/{sid}-*.json")`，這等於列出了真實 `~/.claude/todos/` 底下的檔名（D-2） |
+| E5 | ✅ | purge 失敗時會發出 `warnings.warn` |
+| E6 | ✅ | wrapper 和整合測試都加了 `--disallowedTools "Bash Read Glob Grep Edit Write WebFetch WebSearch Task"`，wrapper 也加了 `--model haiku` |
+| E7 | ✅ | `REAL_HOME` 改成從 `pwd.getpwuid` 取 |
+| E8 | ✅ | README 改成 `nohup … > it.log 2>&1 &`，並且寫明大約會呼叫 6 次 `claude -p` |
+
+### 新的問題
+
+| # | 嚴重度 | 位置 | 問題 | 建議 |
+|---|---|---|---|---|
+| D-1 | **High** | `tests/integration/test_e2e_cli.py:93` | `ulids.update(store.Index(paths).known())` 會把這次 sync 看到的**全部** ULID 都拿去 purge。`agora-test/sessions/` 是好幾次執行共用的（test-plan (b) 的規則 (a)～(d)），所以會刪到：其他次執行留下的 Session、**同時在跑的** `test_store_drive.py`／`test_opencode_real.py` 正在用的 Session，以及 impl1 的測試資料。這違反了「只看、只刪自己的 ULID」與「不准對 `agora-test/sessions/` 全部 purge」這兩條規則，也可能讓同時在跑的測試莫名其妙地失敗 | 只收集「確定是這次建立的」：(1) 每個 `run_main` 的 stdout 第一欄（`run_main` 改成先記錄 id，再做斷言）；(2) outbox 裡的 ULID；(3) 索引裡 `source.session_id` 在這次的 uuid 集合裡的 Session，以及 `parents` 裡有 (1)～(3) 的 merge／continue Session。不要直接使用 `known()` 的全部結果 |
+| D-2 | Low | `test_e2e_cli.py:117`、`test_claude_real.py:67` | `cfgdir.glob(f"todos/{sid}-*.json")` 會列出真實的 `~/.claude/todos/` 目錄（雖然只會比對自己的 uuid） | 改成用精確的名字 `todos/{sid}-agent-{sid}.json` 做 `is_file()`。如果實際的檔名格式不同，就照實測到的格式寫死，不要用 glob |
+| D-3 | Low | claude.py 的 `_block_lines` | 見上表 CL10：沒有 `type` 的 block 會造成 AttributeError | `btype = str(block.get("type") or "")` |
+
+### 這次跑過的指令（claude 修正確認）
+
+| 指令 | 結果（只記形狀） |
+|---|---|
+| `git diff 9d1d549 180d658 -- src/agora/agents/claude.py tests/…` | 逐條對照 CL／E |
+| `.venv/bin/python -m pytest -q tests/unit` | 98 passed（CL3 修好之後，原本失敗的 2 個也通過了） |
+| `.venv/bin/python -c '… _block_lines([{"text": "x"}], tools=True)'` | AttributeError（D-3） |
+
+沒有執行 e2e 和整合測試，沒有碰 Drive，沒有呼叫 claude 或 opencode，也沒有讀任何真實的 Session。
