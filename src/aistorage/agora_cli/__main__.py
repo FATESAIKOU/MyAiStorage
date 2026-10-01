@@ -112,9 +112,13 @@ def _writer_deps(args: argparse.Namespace) -> tuple[CheckoutDeps, Any]:
     deps = _deps(SyncerConfig.load())
 
     def commit(claims: list[Any], *, timeout: timedelta) -> Any:
+        # `already_synced=True` 不是「已經同步過」，是「這一步不准同步」：
+        # `session_ids=()` 在 sync_and_commit 裡會變成 `only=None`，也就是把
+        # opencode 裡的**每一個** session 都上傳。容器裡只有試用的對話，看不出來；
+        # 在 Mac 本機跑 checkout 就會把整台機器的真實 session 全部簽章送進 Agora。
         return sync_and_commit(
             session_ids=(), extra_items=list(claims), deps=deps,
-            timeout=timeout, progress=lambda _m: None,
+            timeout=timeout, progress=lambda _m: None, already_synced=True,
         )
 
     return (
