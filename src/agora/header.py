@@ -12,19 +12,12 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from urllib.parse import quote, unquote
+from urllib.parse import unquote
 
 import yaml
 
 HEADER_VERSION = 1
 ENTITIES = ("mybrain", "agora", "foundry", "atelier")
-
-# Top-level fields shared by all four entities. Anything else is
-# entity-specific and is kept as-is on read and write.
-RESERVED = (
-    "header", "entity", "type", "id", "title", "created_at", "updated_at",
-    "refs", "case", "note", "tags",
-)
 
 # Keys a user may set with `--header key=value` on import and merge.
 SETTABLE = ("title", "case", "refs", "tags", "note")
@@ -51,14 +44,6 @@ class Ref:
     locator: str
     rev: str | None = None
     fragment: str | None = None
-
-    def __str__(self) -> str:
-        text = f"{self.entity}:{quote(self.locator, safe='/:._-~ ')}"
-        if self.rev:
-            text += f"@{self.rev}"
-        if self.fragment:
-            text += f"#{self.fragment}"
-        return text
 
 
 def parse_ref(text: str) -> Ref:

@@ -115,7 +115,7 @@ class Drive:
         """The root folder's ID, created on first use and kept in config.json."""
         if self.settings.get("folder_id"):
             return self.settings["folder_id"]
-        name = self.settings.get("folder_name") or os.environ.get("AGORA_FOLDER_NAME", "agora")
+        name = os.environ.get("AGORA_FOLDER_NAME", "agora")
         self._run("mkdir", f"gdrive:{name}", root=False)
         entries = json.loads(self._run("lsjson", "gdrive:", "--dirs-only", root=False))
         matches = [e for e in entries if e["Name"] == name]
@@ -190,15 +190,11 @@ def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None) -> Pat
     return folder
 
 
-def outbox_ulids(paths: Paths) -> set[str]:
-    return _outbox_ulids(paths)
-
-
 def outbox_count(paths: Paths) -> int:
-    return len(_outbox_ulids(paths))
+    return len(outbox_ulids(paths))
 
 
-def _outbox_ulids(paths: Paths) -> set[str]:
+def outbox_ulids(paths: Paths) -> set[str]:
     if not paths.outbox.exists():
         return set()
     for old in paths.outbox.glob(".old-*"):
@@ -210,33 +206,40 @@ def _outbox_ulids(paths: Paths) -> set[str]:
     return {p.name for p in paths.outbox.iterdir() if p.is_dir() and not p.name.startswith(".")}
 
 
-def remember(paths: Paths, folder: Path, md5: str) -> None:
+def remember(paths: Paths, folder: Path, index: "Index | None" = None) -> None:
     """Put a session we just wrote into the local mirror and index right away."""
-    ulid = folder.name
-    mirror = paths.mirror / ulid
+    mirror = paths.mirror / folder.name
     mirror.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(folder / "session.md", mirror / "session.md")
     hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
-    Index(paths).put(ulid, md5, hdr, body)
+    (index or Index(paths)).put(folder.name, md5_file(mirror / "session.md"), hdr, body)
 
 
 def _index_outbox(paths: Paths, index: "Index") -> None:
     """Sessions still waiting in the outbox are searchable here, marked as not uploaded."""
-    for ulid in _outbox_ulids(paths):
+    for ulid in outbox_ulids(paths):
         try:
-            hdr, body = h.split_document((paths.outbox / ulid / "session.md").read_text(encoding="utf-8"))
+            remember(paths, paths.outbox / ulid, index)
         except (h.HeaderError, OSError, UnicodeDecodeError):
             continue
-        index.put(ulid, "outbox", hdr, body)
-        mirror = paths.mirror / ulid
-        mirror.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(paths.outbox / ulid / "session.md", mirror / "session.md")
+
+
+def read_entry(folder: Path) -> dict:
+    """The header of an outbox entry; HeaderError if it is unreadable or incomplete."""
+    try:
+        hdr, _ = h.split_document((folder / "session.md").read_text(encoding="utf-8"))
+        raw = hdr.get("raw")
+        if raw and not (folder / raw["file"]).is_file():
+            raise h.HeaderError(f"缺少 {raw['file']}")
+    except (OSError, UnicodeDecodeError, KeyError, TypeError) as e:
+        raise h.HeaderError(str(e)) from None
+    return hdr
 
 
 def push_one(drive: Drive, folder: Path) -> None:
     """Upload one outbox entry in the safe order, verify, then clean up."""
     ulid = folder.name
-    hdr, _ = h.split_document((folder / "session.md").read_text(encoding="utf-8"))
+    hdr = read_entry(folder)
     raw = hdr.get("raw")
     if raw:
         drive.upload(folder / raw["file"], ulid, raw["file"])
@@ -259,14 +262,11 @@ def push_outbox(drive: Drive, paths: Paths) -> list[str]:
     failed = []
     if not paths.outbox.exists():
         return failed
-    for ulid in sorted(_outbox_ulids(paths)):
+    for ulid in sorted(outbox_ulids(paths)):
         folder = paths.outbox / ulid
         try:
-            hdr, _ = h.split_document((folder / "session.md").read_text(encoding="utf-8"))
-            raw = hdr.get("raw")
-            if raw and not (folder / raw["file"]).is_file():
-                raise h.HeaderError(f"缺少 {raw['file']}")
-        except (h.HeaderError, OSError, UnicodeDecodeError, KeyError, TypeError) as e:
+            read_entry(folder)
+        except h.HeaderError as e:
             quarantine(folder, paths.outbox / ".bad", f"outbox 的 {ulid} 壞了：{e}")
             continue
         try:
@@ -439,7 +439,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
             index.drop(ulid)
             continue
         index.put(ulid, md5, hdr, body)
-    gone = set(known) - set(remote) - _outbox_ulids(paths)
+    gone = set(known) - set(remote) - outbox_ulids(paths)
     if gone and missing:
         _warn("Drive 上找不到 sessions/，可能是 folder ID 或 token 有問題，先不刪鏡像")
     else:
@@ -452,7 +452,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
     return index
 
 
-def fetch_raw(paths: Paths, drive: Drive, ulid: str, header: dict) -> bytes:
+def fetch_raw(paths: Paths, drive: Drive, ulid: str, header: dict, *, retry: bool = True) -> bytes:
     """Download a session's raw on demand and verify it against the header."""
     raw = header.get("raw")
     if not raw:
@@ -462,13 +462,13 @@ def fetch_raw(paths: Paths, drive: Drive, ulid: str, header: dict) -> bytes:
         try:
             drive.download(ulid, raw["file"], local)
         except StoreError:
+            if not retry:
+                raise
             # Another machine may have re-imported it and removed this raw:
-            # refresh session.md once and follow its pointer.
+            # refresh session.md once and follow its new pointer (N8).
             drive.download(ulid, "session.md", paths.mirror / ulid / "session.md")
-            header, _ = h.split_document((paths.mirror / ulid / "session.md").read_text(encoding="utf-8"))
-            raw = header.get("raw") or raw
-            local = paths.mirror / ulid / raw["file"]
-            drive.download(ulid, raw["file"], local)
+            fresh, _ = h.split_document((paths.mirror / ulid / "session.md").read_text(encoding="utf-8"))
+            return fetch_raw(paths, drive, ulid, fresh, retry=False)
     if md5_file(local) != raw["md5"]:
         raise StoreError(f"{ulid} 的 raw md5 和 header 不符")
     return local.read_bytes()

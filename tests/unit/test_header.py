@@ -70,10 +70,6 @@ def test_parse_ref_rules():  # U-HDR-06
         h.parse_ref("nobody:x")
 
 
-def test_ref_round_trips_through_str():
-    ref = h.Ref("mybrain", "技術/動手做/AiStorage.md", rev="r1", fragment="s2")
-    assert h.parse_ref(str(ref)) == ref
-
 
 def test_case_must_be_a_ref():  # U-HDR-07
     with pytest.raises(h.HeaderError):

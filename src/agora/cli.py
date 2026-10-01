@@ -84,14 +84,12 @@ def _source(agent: Agent, exported: Exported) -> dict:
 def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None) -> tuple[str, bool]:
     """Stage into the outbox, then try to push it now."""
     folder = store.stage(paths, hdr, body, raw)
-    md5 = store.md5_file(folder / "session.md")
-    store.remember(paths, folder, "outbox")
+    store.remember(paths, folder)
     try:
         store.push_one(store.Drive(paths), folder)
     except store.StoreError as e:
         print(f"[agora] 上傳失敗，已存入 outbox，下次 sync 會再送：{e}", file=sys.stderr)
         return hdr["id"], False
-    store.Index(paths).put(folder.name, md5, hdr, body)
     return hdr["id"], True
 
 
@@ -171,15 +169,15 @@ def cmd_merge(args, paths: store.Paths) -> int:
     if len(ids) < 2:
         raise InputError("merge-session 至少要兩個 Session")
     index = store.sync(paths, throttle=True)
-    parents, parts = [], []
+    parents, parts, titles = [], [], []
     for agora_id in ids:
         agora_id = f"agora:{_ulid_of(agora_id)}"
         parent = _header_for(index, agora_id)
         parents.append({"id": agora_id, "raw_md5": (parent.get("raw") or {}).get("md5")})
         parts.append(f"# from {agora_id}\n\n{_body_for(paths, agora_id)}")
+        titles.append(str(parent.get("title") or agora_id))
     hdr = _new_header("merge", parents, h.parse_header_args(args.header))
-    hdr["title"] = hdr.get("title") or "merge: " + " + ".join(
-        str(index.header(_ulid_of(p["id"])).get("title") or p["id"]) for p in parents)
+    hdr["title"] = hdr.get("title") or "merge: " + " + ".join(titles)
     return _emit(_save(paths, hdr, "\n".join(parts), None))
 
 
@@ -324,6 +322,11 @@ def cmd_sync(args, paths: store.Paths) -> int:
     return 0
 
 
+def _with_header(parser: argparse.ArgumentParser, help: str | None = None) -> argparse.ArgumentParser:
+    parser.add_argument("--header", action="append", default=[], help=help)
+    return parser
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agora", description="找、合、接 coding agent 的 Session")
     sub = p.add_subparsers(dest="command", required=True)
@@ -331,26 +334,26 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("search", help="找 Session")
     s.add_argument("kind", choices=["session"])
     s.add_argument("keyword", nargs="?", default="")
-    s.add_argument("--header", action="append", default=[], help="key=value（agent、relation、case、tag、ref、title）")
+    _with_header(s, "key=value（agent、relation、case、tag、ref、title）")
     s.add_argument("--no-sync", action="store_true")
     s.set_defaults(func=cmd_search)
 
     i = sub.add_parser("import", help="初次引入一個 Session")
     i.add_argument("--format", required=True, choices=AGENTS)
     i.add_argument("--session-id", required=True)
-    i.add_argument("--header", action="append", default=[])
+    _with_header(i)
     i.set_defaults(func=cmd_import)
 
     m = sub.add_parser("merge-session", help="把幾個 Session 合成一個新的")
     m.add_argument("ids", nargs="+")
-    m.add_argument("--header", action="append", default=[])
+    _with_header(m)
     m.set_defaults(func=cmd_merge)
 
     c = sub.add_parser("continue-session", help="用某個 agent 接著做，結束時存回")
     c.add_argument("id")
     c.add_argument("--agent", required=True, choices=AGENTS)
     c.add_argument("--dir", default=None)
-    c.add_argument("--header", action="append", default=[])
+    _with_header(c)
     c.set_defaults(func=cmd_continue)
 
     sh = sub.add_parser("show", help="看 header 與閱讀版")
