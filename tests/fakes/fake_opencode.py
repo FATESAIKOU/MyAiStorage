@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""A fake opencode for unit tests (test-plan 0.3).
+
+It keeps "sessions" as JSON files under $FAKE_HOME/opencode-sessions/<id>.json,
+so tests can see exactly what import was handed. Calls are appended to
+$FAKE_HOME/opencode-calls.log and the working directory of every call to
+$FAKE_HOME/opencode-cwd.log.
+
+Subcommands / flags:
+    --version                 print a fake version
+    export <id>               the stored JSON for <id> on stdout, progress on
+                              stderr (like the real one); rc=1 + "Session not
+                              found" for an id that was never imported
+    import <file>             store the file under its own session id
+    session delete <id>       forget it
+    --session <id>            the TUI: act on <id> per FAKE_AGENT_MODE
+    run [--session <id>]      the same, non-interactive
+    run -m <model> <text...>  a headless run; -s/--session means "append to <id>"
+
+FAKE_AGENT_MODE:
+    append      add one user + one assistant message to the session
+    noop        change nothing
+    crash       exit 2
+    sleep:<n>   sleep <n> seconds first, then behave as append
+    ignore-int  ignore SIGINT while sleeping, then append
+FAKE_OPENCODE_FAIL=export|import|delete  make that subcommand exit 1
+FAKE_OPENCODE_DROP=<n>   import the payload but keep only the first <n> messages
+                         (simulates opencode's silent onConflictDoNothing)
+FAKE_OPENCODE_LEAVE=<id> import refuses: "Expected a string starting with msg"
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+
+HOME = Path(os.environ.get("FAKE_HOME", os.environ["HOME"]))
+STORE = HOME / "opencode-sessions"
+CALLS = HOME / "opencode-calls.log"
+CWDS = HOME / "opencode-cwd.log"
+VERSION = os.environ.get("FAKE_OPENCODE_VERSION", "9.9.9")
+
+argv = sys.argv[1:]
+CALLS.parent.mkdir(parents=True, exist_ok=True)
+with open(CALLS, "a") as f:
+    f.write(json.dumps({"argv": argv, "cwd": os.getcwd(), "mode": os.environ.get("FAKE_AGENT_MODE", "")}) + "\n")
+with open(CWDS, "a") as f:
+    f.write(os.getcwd() + "\n")
+
+STORE.mkdir(parents=True, exist_ok=True)
+
+
+def die(message: str, code: int = 1):
+    print(message, file=sys.stderr)
+    sys.exit(code)
+
+
+def path_of(session_id: str) -> Path:
+    return STORE / f"{session_id}.json"
+
+
+def load(session_id: str) -> dict:
+    target = path_of(session_id)
+    if not target.exists():
+        die(f"Error: Session not found: {session_id}")
+    return json.loads(target.read_text(encoding="utf-8"))
+
+
+def save(session_id: str, payload: dict):
+    path_of(session_id).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def act(session_id: str):
+    mode = os.environ.get("FAKE_AGENT_MODE", "noop")
+    head, _, tail = mode.partition(":")
+    if head == "sleep":
+        time.sleep(float(tail or 1))
+        head = "append"
+    elif head == "ignore-int":
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        time.sleep(float(tail or 1))
+        head = "append"
+    if head == "crash":
+        sys.exit(2)
+    if head != "append":
+        return
+    payload = load(session_id)
+    now = int(time.time() * 1000)
+    base = len(payload["messages"])
+    payload["messages"].extend([
+        {"info": {"id": f"msg_FAKE{base:04d}a", "sessionID": session_id, "role": "user",
+                  "time": {"created": now}},
+         "parts": [{"id": f"prt_FAKE{base:04d}a", "sessionID": session_id,
+                    "messageID": f"msg_FAKE{base:04d}a", "type": "text",
+                    "text": "ZZAPPEND 使用者又問了一句。"}]},
+        {"info": {"id": f"msg_FAKE{base:04d}b", "sessionID": session_id, "role": "assistant",
+                  "parentID": f"msg_FAKE{base:04d}a", "time": {"created": now + 1}},
+         "parts": [{"id": f"prt_FAKE{base:04d}b", "sessionID": session_id,
+                    "messageID": f"msg_FAKE{base:04d}b", "type": "text",
+                    "text": "ZZAPPEND 助手多說了一句。"}]},
+    ])
+    save(session_id, payload)
+
+
+def do_export(params: list[str]):
+    if os.environ.get("FAKE_OPENCODE_FAIL") == "export":
+        die("injected export failure")
+    session_id = params[0]
+    print(f"Exporting session: {session_id}", file=sys.stderr)
+    sys.stdout.write(json.dumps(load(session_id), ensure_ascii=False))
+
+
+def do_import(params: list[str]):
+    if os.environ.get("FAKE_OPENCODE_FAIL") == "import":
+        die("injected import failure")
+    if os.environ.get("FAKE_OPENCODE_LEAVE"):
+        die('Error: Unexpected error\n\nExpected a string starting with "msg", got "m0"')
+    payload = json.loads(Path(params[0]).read_text(encoding="utf-8"))
+    session_id = str((payload.get("info") or {}).get("id"))
+    keep = os.environ.get("FAKE_OPENCODE_DROP")
+    if keep:
+        # What opencode does when an id already exists: keep the rows that fit,
+        # drop the rest, report success.
+        payload["messages"] = payload["messages"][: int(keep)]
+    save(session_id, payload)
+    print(f"Imported session: {session_id}")
+
+
+def main() -> int:
+    if "--version" in argv:
+        print(VERSION)
+        return 0
+    if argv[:1] == ["export"]:
+        do_export(argv[1:])
+        return 0
+    if argv[:1] == ["import"]:
+        do_import(argv[1:])
+        return 0
+    if argv[:1] == ["session"] and argv[1:2] == ["delete"]:
+        if os.environ.get("FAKE_OPENCODE_FAIL") == "delete":
+            die("injected delete failure")
+        target = path_of(argv[2])
+        if target.exists():
+            target.unlink()
+            print(f"Session {argv[2]} deleted")
+        else:
+            die(f"Error: Session not found: {argv[2]}")
+        return 0
+
+    target = None
+    for flag in ("--session", "-s", "--continue"):
+        if flag in argv:
+            index = argv.index(flag)
+            if index + 1 < len(argv):
+                target = argv[index + 1]
+    if argv[:1] == ["run"]:
+        # A plain `run` with no target starts a fresh session.
+        if target:
+            act(target)
+        return 0
+    if target:  # the TUI
+        act(target)
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

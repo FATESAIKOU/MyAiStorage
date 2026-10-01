@@ -25,13 +25,43 @@
 | 1 | 建目錄 | `rclone mkdir gdrive:agora-test/sessions/<ULID>` | rc=0，**不需**事先建父層 |
 | 2 | 上傳 | `rclone copyto <本機檔> gdrive:…/session.md` | rc=0；`lsjson` 顯示 `MimeType=text/markdown`、`Size` 正確、`IsDir=false` |
 | 3 | 列出 | `lsf … --format pst` ／ `lsjson` | `raw.json;48;2026-10-02 00:28:25`（路徑;大小;時間）；`lsjson` 另有 `Name/ID/ModTime/IsDir/MimeType` |
+| 3b | **一次拿到所有 md5**（§4.3 指定的方式） | `rclone lsjson -R --fast-list --hash gdrive:agora-test/` | rc=0；**每個檔案都有 `Hashes.md5`**（另外還有 sha1／sha256），而且**與本機 `md5 -q` 完全相同**（見下表）；目錄項目也有 `ID` |
 | 4 | 增量下載 | `rclone copy gdrive:…/sessions/<ULID> <mirror> --include session.md --include raw.json` | 第一次取回 2 檔 |
 | 4b | 再下一次 | 同上（加上 `-v`） | `There was nothing to transfer`、`Checks: 3 / 3`、`Transferred: 0 B` ——**只拿新的** |
 | 4c | 遠端加檔 | 遠端加一個檔，再 `copy --include raw2.json` | 只補那 1 個 |
 | 5d | 覆寫 | `copyto` 覆寫既有的 `session.md` | 成功（同一個 Session 重新匯入的「最後寫的贏」，D2） |
 | 6 | 遠端刪檔 | `deletefile gdrive:…/raw2.json` 後再看鏡像 | **鏡像裡的檔案還在**（鏡像不會自動少） |
-| 7 | token | `rclone config dump \| jq '.gdrive.token\|fromjson\|{expiry}'` | 見下 |
+| 7 | token | `rclone config dump \| jq '.gdrive.token\|fromjson\|{expiry}'` | access token 約 1 小時；到期後 rclone 自己刷新並改寫檔案（見下） |
 | 8 | 收尾 | `rclone purge gdrive:agora-test` | rc=0；`lsf gdrive:` 空 |
+
+## `lsjson --hash`：Drive 的 md5 能不能用（§4.3 的核心）
+
+§4.3 要「列檔一律 `rclone lsjson -R --fast-list --hash`，一次拿到所有檔案的 md5；
+用 md5 判斷要不要下載（不用時間）」。實測：
+
+```bash
+rclone lsjson -R --fast-list --hash gdrive:agora-test/
+```
+
+| 本機檔案 | 本機 `md5 -q` | Drive `Hashes.md5` | 一致 |
+|---|---|---|---|
+| `session.md`（12 bytes，`text/markdown`） | `7d8ad0147d0cc2a069b45da054cfa922` | 同左 | ✅ |
+| `raw.json`（16 bytes，`application/json`） | `207999057af01556a81681700da2d6a6` | 同左 | ✅ |
+
+`lsjson` 的每個項目欄位（v1.69.3）：`Path`、`Name`、`Size`、`MimeType`、`ModTime`、
+`IsDir`、`Hashes{md5,sha1,sha256}`（檔案）或 `ID`（兩者都有，目錄也有 `ID`）。
+
+→ **`--hash` 可行，Drive 端 md5 與本機 `md5 -q` 逐字相同**，`raw-<md5 前12>.json`
+的命名與「用 md5 判斷要不要下載」都成立。兩個檔案一個是文字檔一個是 JSON，
+MimeType 不同但都有 md5。
+
+時間成本（3 層 4 個項目）：`-R` 1.81 秒、加 `--fast-list --hash` 1.82 秒——
+**在這個規模下 `--fast-list` 沒有帶來可測的加速**。Agora 的 session 數變多之後
+才值得重新量一次；先用設計上寫的那組旗標就好。
+
+一個限制要知道：Drive 只對**二進位內容**提供 md5。從 Drive 網頁上傳的原生
+Google 檔案（Docs/Sheets）沒有 md5，`Hashes` 會是空的——但 D5／`drive.file`
+本來就看不到那些檔案，所以對 Agora 不構成問題。
 
 ## 四個陷阱
 
@@ -70,8 +100,8 @@ rclone --config … --drive-root-folder-id "$ID" lsf .
 但目標不能寫 `.`／本機路徑，否則 rclone 會把它當本機目錄、靜默列出本機檔案。
 這在 Agora 裡不會發生（我們永遠寫 `gdrive:` 開頭），但值得記一筆。
 
-用 `lsjson --dirs-only` 就能拿到 folder ID（`ID` 欄位）——這代表**索引可以存
-Drive 的檔案 ID**，之後要改名／移動／刪除都不必再靠名字比對。
+用 `lsjson --dirs-only` 就能拿到 folder ID（`ID` 欄位）——§2 D5 決定要把 folder ID
+寫進 `config.toml`，這個 ID 就是這樣來的。
 
 ### 陷阱 3：同一層的同名資料夾 vs 同名檔案
 
@@ -109,13 +139,25 @@ Error: unknown command "gdrive:agora-test" for "rclone"
 `access_token` / `expiry` / `refresh_token` / `token_type`）。
 
 ```
-expiry = 2026-10-02T00:51:06.318512+09:00      （= 2026-10-01T15:51:06Z）
+測試開始時  expiry = 2026-10-02T00:51:06.318512+09:00   （= 2026-10-01T15:51:06Z）
+到期後      expiry = 2026-10-02T01:54:27.788543+09:00   （= 2026-10-01T16:54:27Z）
 token_type = Bearer
 ```
 
+（`~/.config/agora/client-worker.json` 也看過欄位名：**只有** `client_id`、
+`client_secret`、`project_id`、三個 URL、`redirect_uris`——是 OAuth *client* 的
+描述，**沒有 token 也沒有 expiry**。所以整個 `~/.config/agora/` 裡唯一的
+expiry 就是 rclone.conf 的那一個。）
+
 觀察到的是 **access token 約 1 小時壽命**（不是 7 天；`refresh_token` 才是長期的，
-它也存在同一個檔案裡）。整個測試期間（跨過多次 rclone 呼叫）`expiry` 欄位**沒有
-變過**，因為當時 access token 還沒到期。
+它也存在同一個檔案裡、沒有 expiry 欄位）。§2 D5 講的「refresh token 7 天失效」
+是**另一件事**（consent screen 沒設 In production 的後果），別把兩個數字混在
+一起：rclone.conf 裡看得到的 `expiry` 是 1 小時級距的 access token。
+
+**自動刷新實測過**（這是 agora 能不能無人值守的關鍵）：在 access token 過期
+（15:51:06Z）之後跑第一個 rclone 指令（`lsf gdrive:`），rclone 自己用
+refresh_token 換了新的 access token，**並把新的 expiry 寫回 rclone.conf**
+（15:54:29Z 讀到 16:54:27Z）。整個過程沒有任何錯誤訊息、沒有互動、rc=0。
 
 **這代表：**
 - Agora **不能**自己讀／解析 token（那會把憑證值帶進程式）；一律讓 rclone 自己去
@@ -132,35 +174,49 @@ token_type = Bearer
 |---|---|---|
 | 建 session 目錄 | `rclone mkdir gdrive:agora/sessions/<ULID>` | `--config <路徑>` |
 | 上傳兩個檔 | `rclone copyto <本機> gdrive:…/<檔名>` | `--config <路徑>`；**必須 copyto** |
-| 列出（給索引） | `rclone lsjson gdrive:agora/sessions --recursive` | `--config`（要 `--recursive` 才走深層） |
-| 增量下載 | `rclone copy gdrive:agora/sessions <鏡像>/sessions` | `--config`；鏡像目錄不存在時 rclone 會自己建 |
+| 列檔（給索引與 md5 比對） | `rclone lsjson -R --fast-list --hash <agora 根>` | `--config`；`--hash` 才有 `Hashes.md5` |
+| 增量下載 | `rclone copy <agora 根>/sessions <鏡像>/sessions` | `--config`；鏡像目錄不存在時 rclone 會自己建 |
 | 刪一個 session | `rclone purge gdrive:agora/sessions/<ULID>` | `--config` |
 | 刪整個 agora | `rclone purge gdrive:agora` | `--config` |
+| 用 folder ID 當根（§2 D5 已決定要用） | `rclone --drive-root-folder-id <ID> lsjson -R --fast-list --hash gdrive:` | `--config`、`--drive-root-folder-id`；**目標一定要寫 `gdrive:`** |
 
 建議再加的：
-- `--drive-root-folder-id <ID>`：**可以不要**。好處是 agora 的根資料夾改名或移動時
-  不會壞（索引存 ID 就能繼續）；壞處是多一個要保存的欄位。初期建議**不要**，
-  等真的被改名再說。
+- `--drive-root-folder-id <ID>`：**要**（§2 D5 已決定）。實測可行：列出與讀檔都
+  正常，路徑相對於該資料夾。**但目標必須是 remote**（`gdrive:` 開頭），寫成 `.`
+  會變成列本機目錄（陷阱 2）。ID 從 `lsjson --dirs-only` 的 `ID` 欄位拿。
 - `--transfers`／`--checkers`：Drive 的 API 配額有限，**不要**開太大。實測
   單次 `lsjson`／`copy` 在 0.5～2 秒內回來，預設值就夠。
 - `--drive-...` 的其他參數（`--drive-pacer-min-sleep` 等）**不需要**。
 - 刪除 Drive 上的檔案要靠 `rclone deletefile`／`purge`，**沒有**「刪本機鏡像裡
-  對應檔案」的旗標；鏡像與 Drive 不同步（陷阱 3 那條）要靠 Agora 自己處理：
+  對應檔案」的旗標；鏡像與 Drive 不同步（§4.3 那條）要靠 Agora 自己處理：
   `sync` 時把「Drive 上不存在但鏡像有」視為刪除。
 
 ## 對 design.md 的修改建議
 
-1. §4 的路徑補一句：**建目錄不需事先建父層**（`rclone mkdir` 會連建），但
-   **上傳檔案要用 `copyto`**——§5.2／§4 寫「上傳 session.md 與 raw.json」時
-   應該把指令列明確寫出來，這是本次最容易踩到的錯。
-2. §5.1 `sync` 的「增量」要寫清楚是 `rclone copy`（只取新的）**加上**「遠端刪掉
-   的，本機鏡像要跟著刪」這半邊；`rclone copy` 本身**不會**刪本機的檔案。
-3. §2 D5／§4 的 `~/.config/agora/rclone.conf`：補一句 **access token 約 1 小時
-   會過期，rclone 會自己用 refresh token 換並改寫這個檔**，Agora 不要自己碰
-   token；另外要決定 refresh token 失效時怎麼辦（現在只能
-   `rclone config reconnect gdrive` 互動重跑）。
-4. §4 的索引可以存 Drive 的**檔案／資料夾 ID**（`lsjson` 的 `ID` 欄位就有），
-   這樣刪除不用靠名字比對，也為將來「改名或移動根資料夾」留出路。
+design.md 已經是第 2 版，所以以下是「**要補的**」而不是改寫既有決定：
+
+1. **§5.2／§4.1 的上傳指令要寫成 `copyto`。** §4.1 說「上傳 raw」「上傳
+   session.md」但沒寫指令；`rclone copy` 給檔名當目的地會**靜默建成空資料夾**，
+   這是本次最容易踩到的錯。寫成 `rclone copyto <本機> <遠端完整檔名>`。
+2. **§2 D5 的 folder ID 存取**：可行，但要在該節寫一句「目標路徑必須是
+   `gdrive:` 開頭；寫本機路徑會靜默讀本機目錄」。另外 ID 從
+   `lsjson --dirs-only` 的 `ID` 欄位取（實測）。
+3. **§4.3 的 `lsjson -R --fast-list --hash` 確認可用**：Drive 的 `Hashes.md5` 與
+   本機 `md5 -q` 逐字相同，`raw-<md5 前12>.json` 的命名與「用 md5 判斷要不要
+   下載」都成立。補一個限制說明：Google 原生檔案沒有 md5（`drive.file` 看不到，
+   所以不構成問題）。
+4. **§4.3／§6 的「Drive 上刪掉的，鏡像跟著刪」**：`rclone copy` **不會**刪本機
+   檔案（實測遠端 `deletefile` 後鏡像裡還在）。這半邊必須由 Agora 自己做，
+   建議寫成「用 `lsjson --hash` 的結果與鏡像比對，Drive 沒有的就刪」——正好
+   md5 已經拿到了，不用額外呼叫。
+5. **§2 D5 的 token**：實測 `expiry` 是 **access token，約 1 小時**（見上面
+   「Token 過期」），不是 7 天；7 天是 **consent screen 沒設 In production** 時
+   refresh token 的失效期，這兩件事要分開寫，否則實作的人會去讀 rclone.conf 的
+   `expiry` 當成 7 天。要補的是：rclone 會自己刷新並**改寫這個檔**，所以
+   `~/.config/agora/rclone.conf` 不能設成唯讀；Agora 不要自己讀 token。
+6. **§4.5 索引**：可以存 Drive 的**檔案／資料夾 ID**（`lsjson` 的 `ID` 欄位），
+   刪除不用靠名字比對。既然 §2 D5 已經決定用 folder ID 存根目錄，把每個檔案的
+   ID 一起存下來是同一個成本。
 
 ## 清理
 

@@ -359,3 +359,144 @@ cd /tmp/agora-spike-impl1/plain && opencode import … && opencode export …
 `session list --format json | jq 'select(.directory|startswith("/private/tmp/agora-spike-impl1"))'`
 確認為空）。沒有碰 `~/.local/share/opencode` 的資料庫、沒有碰 `~/.claude/projects`、
 沒有 export 任何不是自己建立的 session。
+---
+
+# 實作：`src/agora/agents/opencode.py`（2026-10-02 晚，同一個作者）
+
+把上面 V1／V3／V5 的結論寫成 `src/agora/agents/opencode.py`（361 行，含
+docstring），測試在 `tests/unit/test_agent_opencode.py`（30 個）與
+`tests/integration/test_opencode_real.py`（真的 opencode ＋ 免費模型，
+`/tmp/agora-it-opencode/proj`）。
+
+## 每項規格的結論
+
+| 規格 | 結論 | 備註 |
+|---|---|---|
+| `export(id)`：stdout 寫檔、stderr 分開、找不到就 raise「找不到…」 | **可行** | 進度行 `Exporting session: …` 在 stderr；不存在的 id 是 rc=1 ＋ `Session not found`，翻成 `AgentError("opencode 找不到 Session …")` |
+| `Exported` 的欄位 | **可行** | `dir`＝`info.directory`（N9）、`title`＝`info.title`、`created_at` 由 `info.time.created`（毫秒）轉 UTC `…Z`、`agent_version`＝`opencode --version`、`message_count`＝訊息數 |
+| `reading(raw)` | **可行** | 只收 text 與 tool 一行；reasoning／tool 的 output／step-start／step-finish／file **完全不產出任何行**；不認得的型態 → `[skip <type>]`。全部走 `base.format_reading`／`base.tool_line` |
+| `start_native`：三種 id 全重編、固定寬度、參照欄位一起改 | **可行** | 28 字元（`msg_`／`prt_` ＋ 12 碼時間 ＋ 6 碼序號 ＋ 6 碼鹽）；`sessionID`／`messageID`／`parentID` 用結構化重寫，深度不拘；鹽由新 session id 推導，所以重跑是 no-op、不同匯入不撞 |
+| 匯入後回讀驗證訊息數，不符就刪掉新 id 再 raise | **可行，而且必要** | 見下面「整合測試抓到的兩個問題」 |
+| `start_injected`：只有一則 user 訊息的 export，id 由 agora 決定 | **可行（有條件）** | 有條件＝payload 的欄位必須帶齊，否則 import 會過、之後 export 不了 |
+| `collect` | **可行** | 訊息數 `<= before_count` 回 `None` |
+| TUI 旗標 | **`opencode --session <id>`** | `opencode --help`：`‑s, --session  session id to continue`。`opencode run -s <id>` 是同一個 session id 的 headless 版（整合測試用這個） |
+
+## 實際跑過的指令（形狀，不貼對話內容）
+
+```bash
+# 單元（30 個，全過）
+uv run pytest -q tests/unit/test_agent_opencode.py
+
+# 全單元（98 個，全過）
+uv run pytest -q
+
+# 整合（真的 opencode；免費模型不穩，會 skip）
+uv run pytest -q -m integration tests/integration/test_opencode_real.py
+#   → 3 passed, 2 skipped in 20m27s（skip 的兩個是真正需要模型回答的）
+
+# 端對端手動重跑（模型有回應時；都在 /tmp/agora-it-opencode/proj）
+opencode run -m opencode/space-bunny-free --format json --title manual-rt "把 CSV …"
+opencode export <source id> > m1raw.json
+python3 -c "…oc.ADAPTER.start_native(open('m1raw.json','rb').read(), Path('/tmp/agora-it-opencode/proj'))"
+#   → NEW_ID ses_JFE2Y1Z0PPE09ERV before 2     （import ＋ 回讀驗證都過了）
+opencode run -m opencode/space-bunny-free -s ses_JFE2Y1Z0PPE09ERV --format json "你前面在做什麼？"
+#   → rc=0；模型答得出前一輪的主題與「沒動任何檔案」
+python3 -c "…oc.ADAPTER.collect(Launch(argv=[], cwd=…, agent_session_id='ses_JFE2Y1Z0PPE09ERV', before_count=2))"
+#   → collected=True messages=4 dir=/private/tmp/agora-it-opencode/proj
+#     agent_version=1.18.34 created_at=2026-10-01T17:09:18Z 閱讀版 4 輪
+
+# 欄位集合是逐個試出來的（import 缺一個欄位就整份拒絕）
+opencode import <payload.json>            # 一次加一個欄位，看錯誤訊息往前進到哪裡
+opencode export <new session id>          # import 過了之後一定要 export 得到
+```
+
+## 端對端（真的 opencode、真的模型）確認過的形狀
+
+| 量 | 值 |
+|---|---|
+| `export` 的 `dir` | `/private/tmp/agora-it-opencode/proj`（V5：就是匯入時的目錄） |
+| `agent_version` | `1.18.34` |
+| `created_at` | `2026-10-01T17:09:18Z`（由 `info.time.created` 的毫秒換算） |
+| `start_native` 回讀 | 匯入前後訊息數相同（2 → 2），檢查通過 |
+| `opencode run -s <新 id>` | rc=0，模型**答得出**前一輪的主題與「沒有動任何檔案」 |
+| `collect` | `messages=4`（原本 2 + 新 2），`session_id` 與匯入時的新 id 相同 |
+| 閱讀版 | 4 個 `## user`／`## assistant` 段落（本輪沒有工具呼叫，所以沒有 `[tool]` 行） |
+| 清理 | 兩個 session 各自用 `opencode session delete <id>` 刪掉 |
+
+## 形狀：opencode 匯出檔必須長什麼樣才會被接受
+
+`info`（缺任何一個，`import` rc=1 並印 `Missing key at ["…"]`）：
+
+```
+id, slug, projectID, directory, path, title, agent, version, permission,
+model{…}, summary{additions,deletions,files}, cost,
+tokens{input,output,reasoning,cache{read,write}}, time{created,updated}
+```
+
+型態上也有坑：`permission` 是**陣列**（`[{permission,pattern,action}]`）不是字串；
+`tokens.cache` 一定要有 `read`／`write`；`tokens` 少一個 `cache` 會被拒。
+
+user 訊息的 `info`：`id, sessionID, role, time{created}, agent,
+model{providerID,modelID}, summary{diffs}`——**沒有 `path`**（只有 assistant 訊息有）。
+
+## 整合測試抓到的兩個問題
+
+### 1. 注入路徑會「匯入成功但存不回來」（真 bug，已修）
+
+最初的 `_injected_payload` 只給 `{id, title, time}`。結果：
+
+| 步驟 | 結果 |
+|---|---|
+| `opencode import` | **rc=0**、stdout `Imported session: ses_…` |
+| agent 在裡面工作 | 正常 |
+| `opencode export <id>`（`collect` 做的事） | **rc≠0**、`Error: Unexpected error / Missing key at ["slug"]` |
+
+`collect()` 因此拋錯 → CLI 走「這次沒有新內容，沒有存」那條路 → **整段工作
+消失，而且使用者看不到任何錯誤**。逐欄位試出完整的集合後補齊（上一節），並加了一個
+單元測試把「注入 payload 的 `info`／訊息 `info` 欄位集合 == 真實 export 的欄位集合」
+鎖住，免得日後 opencode 改版時重演。
+
+→ 這是「import 後一定要回讀驗證」最實際的 justification：**rc=0 不等於匯入成功，
+而 export 才是後面每一個步驟的入口**。
+
+### 2. 免費模型會無聲卡住超過 7 分鐘
+
+今天對 `opencode/space-bunny-free` 發了數十次請求，觀察到：
+
+- 正常 45 秒；
+- 也觀察到**超過 420 秒、stdout／stderr 一個位元組都沒有**就停在那裡（第一次
+  整合測試就是這樣逾時）；
+- 同一條指令在十分鐘後手動重跑就正常。
+
+整合測試因此用 `AGORA_TEST_TIMEOUT`（預設 300 秒）與 `AGORA_TEST_ATTEMPTS`
+（預設 3），連續無回應就 **skip** 而不是 fail——第三方模型慢不是 adapter 的缺陷，
+但要在報告裡誠實寫出來。
+
+同一條指令在超時後手動重跑就正常，所以**不是 adapter 的問題**；端對端那條路徑
+（export → start_native → `run -s` → collect）已經手動完整跑過一次並通過
+（見上一節）。
+
+## 對 design.md 的修改建議
+
+1. **§5.4 的「閱讀版注入」那一列要加一句**：注入用的 export payload 必須帶齊
+   opencode 的 `info`／訊息 `info` 欄位，否則 `import` 會成功而 `export` 會失敗，
+   等於整次 continue 成果蒸發且無錯誤。並列在上面那個欄位清單裡。
+2. **§5.4 第 1 步的「原生」要寫明驗證迴圈**：`import` → `export` 回讀比對訊息數
+   → 不符就 `opencode session delete <新id>` 再報錯（`import` 不是交易式的，
+   失敗也會留下半個 session）。
+3. **§7／test-plan 的整合測試**：免費模型的逾時要設得寬（≥ 300 秒）並允許 skip，
+   否則同一份程式碼會 intermittent fail。
+4. **§5.4 第 3 步**：`Launch.argv` 給的是 TUI（`opencode --session <id>`），
+   所以「前景執行、使用者照常操作」與「headless 跑」是兩件事；若要加 headless
+   模式，`cli` 需要一個旗標把 argv 換成 `opencode run -s <id>`（本模組已支援）。
+
+## 要 PM 動的地方（我沒有改 `cli.py`／`base.py`／`store.py`）
+
+讀過 `cmd_import`、`cmd_continue`、`_finish` 之後，介面是對得上的，**沒有必須改的
+地方**。只有兩個建議：
+
+1. `cli.py` 若要加 `--headless`／`--print`：本模組已備好
+   `opencode run --session <id>`，在 `Launch.argv` 換一個元素即可，其他不用動。
+2. `store.fetch_raw` 回傳的 `bytes` 若有為空的情形（`{}`），`start_native` 會丟
+   `AgentError("匯出檔缺少 messages 清單")`——訊息清楚，但若 PM 想要一句更像
+   「這個 Session 沒有 raw」，可以在 `store` 端先擋。
