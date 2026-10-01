@@ -209,9 +209,17 @@ import → search（第一欄即新 id）→ continue 原生（wrapper 收到 `-
   不會從鏡像重建（要等節流過後才從 Drive 重建）；② U-IMP-10 的重複來源靠排序取最新，
   同 `updated_at` 時退化成 ulid 排序。
 - 跑過的指令：`uv run pytest -q`（154 passed, 1 xfailed）；單檔重跑若干次。
-  沒碰 Drive／真 agent／真 Session／rclone.conf。
+沒碰 Drive／真 agent／真 Session／rclone.conf。
 
 ## 對 design.md 的修改建議
+
+## 附記5：安裝測試（2026-10-02，`tests/integration/test_install.py`）
+
+`uv tool install --editable` 裝進暫存的 `UV_TOOL_DIR／UV_TOOL_BIN_DIR`，裝出來的
+`agora`：`--help` 有六個指令；暫存 AGORA 目錄＋`AGORA_RCLONE=/usr/bin/false`
+下 `search --no-sync` 回 0、`show` 不存在的 id 回 1；`~/.local/bin` 前後一致。
+約 2 秒跑完（快取是暖的）。全套單元 156 過。
+沒碰 Drive／真 agent／真 Session／rclone.conf。
 
 1. §5.4「單一 claude→claude 原生」改為 `--resume <id> --fork-session --session-id <新uuid>`
    （官方做法，原檔不動；§5.2 import 同理），手動複製改 sessionId 只當備援。
