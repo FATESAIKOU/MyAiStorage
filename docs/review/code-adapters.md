@@ -69,3 +69,56 @@
 ## B. agents/opencode.py
 
 （等 `agents/opencode.py` commit 之後補上。）
+
+---
+
+## C. e2e 與文件
+
+對象：`3bd4823` 的 `tests/integration/test_e2e_cli.py`、`tests/fakes/claude_noninteractive.py`；以及 `README.md`、`docs/design.md` 第 3 版，對照目前的 `src/agora/cli.py`（`2471a66`）。這次**沒有執行** e2e，因為它會用到真的 Drive 和 3 次 `claude -p`，只做了靜態檢查，再加上一個不花費 token 的 shebang 檢查。
+
+### C-1. e2e：是否真的走過每個指令
+
+**結論：有條件可行。** import、search、continue（原生與注入各一次）、merge 都是透過 `agora.cli.main` 執行的，而且斷言了 relation、parents、`source.session_id`，以及 wrapper 收到的是 `--resume` 還是 `--session-id`。這條主鏈驗證得很完整。但是：
+
+| # | 嚴重度 | 問題 | 建議 |
+|---|---|---|---|
+| E1 | **High**（在這台機器上） | `claude_noninteractive.py` 的 shebang 是 `#!/usr/bin/env python3`，和 CL3 是同一個問題：cli 用 `os.environ` 啟動 wrapper，而 conftest 已經把 HOME 換成 pytest 的暫存目錄，所以 asdf 的 shim 會失敗。**已實測**：`HOME=<暫存目錄> claude_noninteractive.py --version` 印出「unknown command: python3」。在這台機器上，continue 會叫不起 agent，collect 回傳 None，stdout 是空的，結果 `out.split()[0]` 丟出 IndexError。這個測試應該是在 impl2 的環境（python3 不是走 asdf）才跑得通 | 和 CL3 一起修：fixture 在 tmp 底下產生 `#!/bin/sh\nexec {sys.executable} claude_noninteractive.py "$@"`，再讓 `AGORA_CLAUDE_CMD` 指向它 |
+| E2 | Medium | **`show` 和 `sync` 沒有經過 cli.main**：`read_header` 直接呼叫 `store.sync`，`show`、`show --raw` 都沒有測到。merge 只測了 `id1,id2`，沒有測使用者原本的寫法 `id1, id2`（shell 拿到的參數是 `id1,`、`id2`）。exit 3（outbox）與 `--no-sync` 也沒有測到 | 加一步 `run_main("show", id2)`，斷言第一行是 id2，而且內容有 header；加一步 `run_main("show", id1, "--raw")`，斷言 `format == claude-jsonl/1`；`read_header` 改用 `run_main("sync")` 加上 `store.Index`；merge 改成 `run_main("merge-session", f"{id1},", id2)` |
+
+### C-2. e2e：清理是否完整
+
+| # | 嚴重度 | 問題 | 建議 |
+|---|---|---|---|
+| E3 | Medium | **id 是在斷言成功之後才記下來的**。如果中途失敗，就會漏掉清理：(a) `run_main` 先 `assert rc == 0` 才 return，所以 import 如果回 3（outbox）或 2，那個 ULID 不會被記下（之後 sync 有可能把它推上 Drive）；(b) uuid2、uuid3 是從 agora 的 header 讀出來的，如果 continue 失敗（例如 E1、CL1），agora 在 `start_native` 已經寫好的 `<uuid2>.jsonl`，以及 claude 建的檔，都不會被刪掉，就留在真實的 `~/.claude/projects/` 裡 | teardown 一律從 wrapper 的 `e2e-args.log` 收集所有 `--resume`／`--session-id` 後面的 uuid（這份紀錄在 agent 啟動前就寫好了），再加上 uuid1。ULID 則是在 teardown 時，從 `AGORA_CACHE_DIR` 的索引和 `AGORA_STATE_DIR/outbox` 收集「這次的 cache 建的全部 ULID」（cache 和 state 都是這個測試專用的，所以這樣收集是安全的） |
+| E4 | Medium（待驗證） | 真的 claude 除了 `projects/<編碼>/<uuid>.jsonl` 之外，通常還會依 session 寫出其他檔案，例如 `~/.claude/todos/<uuid>-*.json`、`~/.claude/session-env/<uuid>/`、`~/.claude/file-history/<uuid>/`，以及 `~/.claude.json` 裡以專案路徑為 key 的設定。teardown 只刪了 jsonl、sidecar 和空的專案資料夾。**我自己在 CL1 的實驗也只刪了 jsonl 和資料夾，同樣可能留下這幾類檔案**；那次的 uuid 已經沒有記下來了，所以沒辦法逐一核對 | 用 uuid 對這幾個路徑做 `test -e`（不要列出資料夾）。存在的話，就按 uuid 刪掉。`~/.claude.json` 不要自動改，在 README 寫一句「整合測試會在 `~/.claude.json` 留下 `/private/tmp/agora-it-*` 的專案設定」就好。請 PM 決定我那次實驗留下的檔要怎麼處理（我需要 PM 同意，才能用時間範圍去找，因為那等於是在列出真實的資料夾） |
+| E5 | Low | Drive 的 purge 用的是 `capture_output=True`，而且沒有檢查 rc，所以清理失敗時不會有任何訊息。`/tmp/agora-it-e2e/proj` 也只在開始時刪，結束時沒有刪 | rc ≠ 0 時用 `warnings.warn` 印出 ULID；teardown 時順手 `shutil.rmtree(proj)` |
+
+### C-3. e2e：有沒有讀到真實資料的可能
+
+| # | 嚴重度 | 問題 | 建議 |
+|---|---|---|---|
+| E6 | Medium | 三次 `claude -p` 都只靠 prompt 裡的「不要呼叫任何工具」，**沒有**用旗標限制工具。在 `-p` 模式下，Read／Glob／Grep 這類唯讀工具預設是允許的。模型如果決定去讀 cwd 以外的檔案（例如家目錄），是攔不住的 | wrapper 和 P1 的呼叫都加上 `--disallowedTools "Bash Read Glob Grep Edit Write WebFetch WebSearch Task"`。`@<路徑>` 的展開是 CLI 自己做的，不經過工具，所以注入照樣能用。另外建議加 `--model haiku`，既省成本也比較快 |
+| E7 | Low | `AGORA_CLAUDE_HOME` 指向真的家目錄，所以 `export` 會走到 `find_jsonl` 的 glob，掃過真實 `~/.claude/projects/*/` 的目錄名稱（CL12）。`REAL_HOME` 是在 import 的時候從 `HOME` 取的；如果有人在已經隔離 HOME 的環境下執行，就會指到錯的地方（只會失敗，不會讀錯資料） | 用 CL12 的 `hint_dir`，讓 export 直接看 `projects/<encode(proj)>/`。`REAL_HOME` 改用 `pwd.getpwuid(os.getuid()).pw_dir`，和 `test_claude_real.py` 一致 |
+| E8 | Low | README 的整合測試指令是直接 `uv run pytest -m integration`，但它會用到真的 Drive 和真的 claude，執行時間也超過共通規則的 90 秒 | README 改成 `nohup uv run pytest -q -m integration tests/integration > it.log 2>&1 &`，並且寫明「會呼叫 `claude -p` 約 6 次、只動 `agora-test/`」 |
+
+### C-4. README／design 和 cli.py 是否一致
+
+| # | 嚴重度 | 項目 | README | design 第 3 版 | cli.py 的實際行為 | 建議 |
+|---|---|---|---|---|---|---|
+| D1 | Medium | merge 的逗號寫法 | 只寫了用空白分隔 | 沒有寫 | `ids` 用 `,` 切開，空的部分會濾掉，所以 `id1, id2, id3` 可以用 | 這是**使用者原本的指令格式**，README 的範例要改成 `agora merge-session agora:01K6…, agora:01K7…`；design 5.3 也補一行，說明兩種寫法都可以 |
+| D2 | Medium | exit code | 沒有寫 | 只寫了 outbox 是 3 | 0＝成功；**1**＝「找不到 id」「沒有任何訊息」「至少要兩個」（這些是 `SystemExit("…")`）；**2**＝HeaderError／StoreError／AgentError／非預期的錯誤，argparse 的用法錯誤也是 2；3＝已存進 outbox | README 加一個小表；design 第 5 節加一行。另外可以考慮把「找不到」也統一成 2（或者把它們都定義成 1），讓腳本好判斷 |
+| D3 | Low | `--no-sync` | 沒有寫 | 有寫 | 有實作，而且 `--no-sync` 時 pending 只提示、不補存 | README 補上 |
+| D4 | Low | search 不給關鍵字 | 沒有寫 | 寫成必填的 `'<關鍵字>'` | `keyword` 是 `nargs="?"`，不給的話就列出全部 | 兩份文件都寫成「可以省略，省略時列出全部」，或者在 cli 改成必填 |
+| D5 | Low | state 裡的檔案 | 只寫了 outbox、pending | 只寫了 outbox、pending，以及 4.2 的 `.bad/` | 另外還有 `outbox/.bad`、`pending/.bad`、`reading/<ulid>.md`（注入用的閱讀版，永遠不會被清掉）、`last-sync` | README 的表補上 `.bad`（以及「每個指令都會提示」）與 `reading/`；`reading/` 要不要定期清理，在 design 決定 |
+| D6 | Low | Claude 原生接續要改寫的欄位 | — | 5.4 寫「只改頂層 `sessionId`（其他欄位不動）」 | 同時也改寫了 `cwd`（見 CL7） | 照 CL7 的建議，統一成同一種說法 |
+| D7 | Low | 根資料夾的名稱 | 寫的是 `agora/` | 寫的是 `agora/` | 預設是 `agora`，可以用 `AGORA_FOLDER_NAME` 改（整合測試設成 `agora-test`） | README 補一句「測試用 `AGORA_FOLDER_NAME=agora-test`」；design 8 的接縫清單也加上 `AGORA_FOLDER_NAME` |
+| D8 | — | 其他都一致 | 六個指令、`--header` 的規則、search 的別名、`show --raw`、檔案位置（`config.json`、cache、state）、5 分鐘節流、import 不節流 | 同左 | 同左 | — |
+
+### 這次跑過的指令（e2e 與文件）
+
+| 指令 | 結果（只記形狀） |
+|---|---|
+| `git show --stat 3bd4823`、讀 e2e、wrapper、README、design、cli 的 parser | 只做靜態檢查 |
+| `HOME=<暫存目錄> FAKE_HOME=<暫存目錄> tests/fakes/claude_noninteractive.py --version` | 印出「unknown command: python3. Perhaps you have to reshim?」（E1）。暫存的 FAKE_HOME 已經刪掉 |
+
+沒有執行 e2e，沒有碰 Drive，沒有呼叫 claude，也沒有讀任何真實的 Session 或 rclone.conf。
