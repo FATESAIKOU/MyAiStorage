@@ -346,10 +346,32 @@ class ClaudeAgent:
             raise AgentError("沒有 agent session id，無法收尾")
         session_id = launch.agent_session_id
         path = find_jsonl(session_id, launch.cwd)
+        _warn_cleared(path, session_id)
         main = _read_lines(path)
         if _count_messages(_parse_all(main)) <= launch.before_count:
             return None
         return _exported(session_id, main, path.parent / session_id)
+
+
+def _warn_cleared(path: Path, session_id: str) -> None:
+    """/clear moves the conversation to a new uuid in the same project dir.
+
+    Verified on 2.1.286 (CL5): interactive --resume keeps appending to the
+    same file, but after /clear the new file only points back through a
+    `session_id` field on its attachment lines. We do not stitch the two
+    together; we say which session holds the rest so it can be imported.
+    """
+    since = path.stat().st_ctime
+    for other in path.parent.glob("*.jsonl"):
+        if other == path or other.stat().st_mtime < since:
+            continue
+        try:
+            if session_id in other.read_text(encoding="utf-8", errors="replace"):
+                print(f"[agora] 這次接續中用過 /clear，之後的對話在 Claude session {other.stem}；"
+                      f"要存進 Agora 請另外執行：agora import --format claude --session-id {other.stem}",
+                      file=sys.stderr)
+        except OSError:
+            continue
 
 
 ADAPTER = ClaudeAgent()
