@@ -112,19 +112,24 @@ class Drive:
         return proc.stdout
 
     def folder_id(self) -> str:
-        """The root folder's ID, created on first use and kept in config.json."""
-        if self.settings.get("folder_id"):
-            return self.settings["folder_id"]
+        """The root folder's ID, created on first use and kept in config.json.
+
+        IDs are kept per folder name, so a run with AGORA_FOLDER_NAME=agora-test
+        never makes the next normal run write into the test folder.
+        """
         name = os.environ.get("AGORA_FOLDER_NAME", "agora")
+        folders = self.settings.setdefault("folders", {})
+        if folders.get(name):
+            return folders[name]
         self._run("mkdir", f"gdrive:{name}", root=False)
         entries = json.loads(self._run("lsjson", "gdrive:", "--dirs-only", root=False))
         matches = [e for e in entries if e["Name"] == name]
         if len(matches) != 1:
             raise StoreError(f"Drive 根目錄有 {len(matches)} 個 {name}/，請先處理同名資料夾")
-        self.settings.update(folder_name=name, folder_id=matches[0]["ID"])
+        folders[name] = matches[0]["ID"]
         self.paths.config.mkdir(parents=True, exist_ok=True)
         self.settings_file.write_text(json.dumps(self.settings, indent=2))
-        return self.settings["folder_id"]
+        return folders[name]
 
     def list_sessions(self) -> dict[str, dict[str, str]] | None:
         """{ulid: {file name: md5}} in one recursive listing; None if sessions/ is missing."""

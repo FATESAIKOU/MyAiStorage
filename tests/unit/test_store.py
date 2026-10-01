@@ -150,7 +150,7 @@ def test_offline_falls_back_to_local_index(remote, monkeypatch):  # U-ST-15
 def test_folder_id_created_once(remote):  # U-ST-17
     paths = store.Paths.from_env()
     store.Drive(paths).folder_id()
-    assert json.loads((paths.config / "config.json").read_text())["folder_id"] == "agora"
+    assert json.loads((paths.config / "config.json").read_text())["folders"] == {"agora": "agora"}
     before = len(calls(remote))
     store.Drive(paths).folder_id()
     assert len(calls(remote)) == before
@@ -182,3 +182,11 @@ def test_unknown_ref_entity_is_still_indexed(remote):  # R7
     folder = store.stage(paths, hdr, "## user\nCSV\n", b"{}")
     store.push_one(store.Drive(paths), folder)
     assert store.sync(paths).search("CSV", [])
+
+
+def test_test_folder_never_leaks_into_normal_runs(remote, monkeypatch):
+    paths = store.Paths.from_env()
+    monkeypatch.setenv("AGORA_FOLDER_NAME", "agora-test")
+    assert store.Drive(paths).folder_id() == "agora-test"
+    monkeypatch.delenv("AGORA_FOLDER_NAME")
+    assert store.Drive(paths).folder_id() == "agora"
