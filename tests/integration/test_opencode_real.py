@@ -54,8 +54,15 @@ MODEL_TIMEOUT = int(os.environ.get("AGORA_TEST_TIMEOUT", "300"))
 
 
 def ask(*args: str) -> subprocess.CompletedProcess:
-    """`opencode run` on the first candidate model that answers."""
-    proc, model, failures = agent.ask(list(args), cwd=PROJ, timeout=MODEL_TIMEOUT)
+    """`opencode run` on the first candidate model that answers.
+
+    PWD is set as well as cwd: opencode picks its project from $PWD, so without
+    it the session lands in the directory the test runner was started in and the
+    later `run --session` in this project never answers (R-1).
+    """
+    env = {**os.environ, "PWD": str(PROJ)}
+    proc, model, failures = agent.ask(list(args), cwd=PROJ, timeout=MODEL_TIMEOUT,
+                                      env=env)
     if proc is None:
         pytest.skip(agent.skip_reason(failures))
     print(f"[{os.path.basename(__file__)}] 用到模型：{model}", file=sys.stderr)
@@ -67,7 +74,8 @@ def raw_of(session_id: str) -> bytes:
     out = Path("/tmp/agora-it-opencode/raw.json")
     with open(out, "wb") as handle:
         proc = subprocess.run(["opencode", "export", session_id], cwd=str(PROJ),
-                              stdout=handle, stderr=subprocess.DEVNULL)
+                              stdout=handle, stderr=subprocess.DEVNULL,
+                              env={**os.environ, "PWD": str(PROJ)})
     assert proc.returncode == 0
     return out.read_bytes()
 
@@ -113,7 +121,8 @@ def trash(project, isolated_store):
     yield recorded
     for session_id in sorted(set(recorded)):
         subprocess.run(["opencode", "session", "delete", session_id],
-                       cwd=str(PROJ), capture_output=True)
+                       cwd=str(PROJ), env={**os.environ, "PWD": str(PROJ)},
+                       capture_output=True)
 
 
 @pytest.fixture
@@ -134,7 +143,9 @@ def test_real_round_trip(project, source, trash, isolated_store):
     """export -> start_native -> one real turn -> collect (design.md 5.2, 5.4)."""
     exported = oc.ADAPTER.export(source)
     assert exported.message_count >= 2
-    assert exported.dir, "spike V5: the export records the project directory"
+    # spike V5 / R-1: the session has to belong to *this* project, or the
+    # `run --session` below is answering for a different project and hangs.
+    assert exported.dir == str(PROJ), f"session 跑到別的專案去了：{exported.dir}"
     assert exported.agent_version and exported.agent_version[0].isdigit()
     assert exported.created_at.endswith("Z")
     untouched = raw_of(source)

@@ -97,7 +97,12 @@ def ask(args: list[str], *, cwd, timeout: int | None = None,
     if real is None:
         return None, None, ["opencode 不在 PATH 上"]
     seconds = timeout or TIMEOUT
-    child_env = {**(env or os.environ), "OPENCODE_PERMISSION": PERMISSION}
+    # PWD, not just cwd: opencode resolves its project from $PWD (measured -
+    # docs/spike/opencode.md), so a caller that sets only `cwd=` files the
+    # session under whatever directory the parent shell was in, and a later
+    # `run --session` in the intended project then hangs with no output.
+    child_env = {**(env or os.environ), "OPENCODE_PERMISSION": PERMISSION,
+                 "PWD": str(cwd)}
     failures: list[str] = []
     for flags in model_chain():
         model = flags[1]

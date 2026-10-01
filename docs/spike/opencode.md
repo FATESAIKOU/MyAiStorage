@@ -729,3 +729,19 @@ claude 那一側本來就是用 `--disallowedTools` 擋的，現在兩邊一致�
 都逾時或 rc≠0 才 `pytest.skip`，而且 skip 訊息會列出試過哪些模型、每個的錯誤是什麼
 （`opencode/space-bunny-free: 逾時（300 秒，沒有任何輸出）；…`）。回答的模型會印一行
 出來，e2e 也把它記進 wrapper 的 log（`{"model": …, "failures": […]}`）。
+
+### R-1：這兩條一直 skip 的真正原因
+
+`test_opencode_real.py` 的 `ask()` 只給了 `cwd=PROJ`，**沒有給 `PWD`**
+（$PWD 那個陷阱，上面「陷阱 A」）。所以：
+
+1. `opencode run` 產生的 source session 落在**測試啟動時的目錄**（repo），不是
+   `/tmp/agora-it-opencode/proj`；
+2. `start_native` 把 `import` 匯入 PROJ（import 用 cwd），新 session 在 PROJ；
+3. 接著 `opencode run -s <新 id>` 帶著舊的 `$PWD`，在 repo 專案裡找這個 id
+   ——**就是 V5 量到的那個「永久卡住、零輸出」**。
+
+於是每次都是 300 秒逾時，看起來像「免費模型沒回答」。修正：`ask()` 與
+`agent.ask()` 都把 `PWD` 設成傳給它的 cwd（wrapper 本來就設了），並加了一個會
+直接抓到這個錯的斷言——source session 的 `info.directory` 必須等於 PROJ。
+順手把該檔案裡其他呼叫 opencode 的地方（`export`、`session delete`）也補上 `PWD`。
