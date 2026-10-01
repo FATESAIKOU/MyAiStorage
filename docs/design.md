@@ -134,6 +134,7 @@ Mac:
 
 ### 4.2 outbox 與 pending（S2、S3）
 
+- **reading**：注入用的閱讀版暫存在 `reading/<ulid>.md`，接續結束就刪（D5）。
 - **outbox**：上傳失敗時留在這裡。`sync` 一律**先推再拉**；每個指令開始時，outbox 不是空的就印一行提示。
 - **pending**：continue-session 啟動 agent **之前**寫一份 `{agora_id, parent, agent, agent_session_id, dir, started_at, before_count}`，建立時就已經上鎖（`flock`），並把鎖用 `pass_fds` 交給 agent 一起持有（C1、C3）。agent 結束後收尾成功才刪。任何 agora 指令開始時檢查 pending：**拿得到 flock**（表示 agora **和** agent 都已經不在了）才補做收尾；`--no-sync` 時只提示不補存；`agora_id` 事先決定，所以補存是冪等的（N2）。
 - 上傳失敗、留在 outbox 時 exit code 是 3；outbox 裡的 Session 在這台機器上照樣搜得到（N13）。
@@ -185,6 +186,8 @@ agora sync
 
 所有指令的輸出第一欄都是 agora id（`agora:<ULID>`），方便接到下一個指令。
 
+exit code：0 成功；1 做不到（找不到 id、沒有訊息、merge 少於兩個）；2 錯誤（header、Drive、agent、非預期，以及用法錯誤）；3 已存進 outbox、還沒上傳（D2）。search 的關鍵字可以省略，省略時列出全部（D4）。
+
 ### 5.1 search
 
 ```
@@ -205,6 +208,7 @@ agora:01K6...  2026-10-01  opencode  …把 CSV 轉成 Markdown 表格…
 ### 5.3 merge-session
 
 - 產生一個新的 Session：`relation: merge`、`parents` 依給的順序，各記當時的 raw md5。
+- id 用空白或逗號分隔都可以：使用者原本的寫法是 `agora merge-session id1, id2, id3`（D1）。
 - 閱讀版是各來源的閱讀版依序串接，每段標出來源。
 - **沒有 raw**（L3）：merge 出來的 Session 一律用閱讀版注入接續。
 
@@ -215,7 +219,7 @@ agora:01K6...  2026-10-01  opencode  …把 CSV 轉成 Markdown 表格…
    | 來源 | 目標 | 方式 |
    |---|---|---|
    | 單一 opencode | opencode | **原生**：export 裡的三種 id（`ses`／`msg`／`prt`）與所有參照欄位全部重編：固定寬度、保留前綴、依匯出順序遞增（N3、N14）。在工作目錄 `opencode import`，**回頭 export 比對訊息數**——id 撞到時 import 是 rc=0 但 0 則訊息（spike V1(b)）；不符就刪掉那個新 session 並報錯 |
-   | 單一 claude | claude | **原生**：產生新 uuid，把每一行頂層 `sessionId` 改成它（其他欄位不動），連同附屬檔寫到 `~/.claude/projects/<工作目錄編碼>/<新uuid>.jsonl`，`claude --resume <新uuid>`（spike V2） |
+   | 單一 claude | claude | **原生**：產生新 uuid，把每一行頂層 `sessionId` 改成它，`cwd` 改成工作目錄（D6、CL7），連同附屬檔寫到 `~/.claude/projects/<工作目錄編碼>/<新uuid>.jsonl`，`claude --resume <新uuid>`（spike V2） |
    | 跨 agent，或 merge 出來的 | opencode | **閱讀版注入**：agora 自己做一份只有一則 user 訊息（說明＋閱讀版全文）的 export，id 由 agora 決定，`opencode import` 後開啟（N4） |
    | 跨 agent，或 merge 出來的 | claude | **閱讀版注入**：`claude --session-id <新uuid> "@<閱讀版絕對路徑> …"`，CLI 會把檔案展開進第一則訊息，不需要工具權限（spike V3） |
 
@@ -271,4 +275,4 @@ Python（uv）＋ rclone ＋ SQLite FTS5。**`src/` 的程式碼目標 2,000 行
 | `agents/claude` | 找 jsonl 與附屬檔、改寫欄位、閱讀版、找出結束後的 session | 350 |
 | `cli` | 六個指令、continue 流程、pending 補存、merge | 400 |
 
-測試照 `docs/review/test-plan.md`。測試用的接縫：`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`AGORA_RCLONE`、`AGORA_OPENCODE_CMD`、`AGORA_CLAUDE_CMD`、`AGORA_CLAUDE_HOME`、`AGORA_TEST_FAULT`、`AGORA_NOW`。
+測試照 `docs/review/test-plan.md`。測試用的接縫：`AGORA_FOLDER_NAME`（整合測試設成 `agora-test`）、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`AGORA_RCLONE`、`AGORA_OPENCODE_CMD`、`AGORA_CLAUDE_CMD`、`AGORA_CLAUDE_HOME`、`AGORA_TEST_FAULT`、`AGORA_NOW`。

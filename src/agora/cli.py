@@ -29,12 +29,18 @@ from agora import store
 from agora.agents.base import Agent, AgentError, Exported, Launch
 
 AGENTS = ("opencode", "claude")
+EXIT_INPUT = 1       # the request cannot be done: unknown id, nothing to import, too few ids
+EXIT_ERROR = 2       # header, Drive, agent or unexpected error (argparse usage errors are 2 too)
 EXIT_IN_OUTBOX = 3   # saved locally, not on Drive yet (N13)
+
+
+class InputError(Exception):
+    """The user asked for something that does not exist or cannot be done."""
 
 
 def load_agent(name: str) -> Agent:
     if name not in AGENTS:
-        raise SystemExit(f"[agora] 不支援的 agent：{name}（可用：{', '.join(AGENTS)}）")
+        raise InputError(f"不支援的 agent：{name}（可用：{', '.join(AGENTS)}）")
     module = importlib.import_module(f"agora.agents.{name}")
     return module.ADAPTER
 
@@ -97,7 +103,7 @@ def _emit(saved: tuple[str, bool]) -> int:
 def _header_for(index: store.Index, agora_id: str) -> dict:
     hdr = index.header(_ulid_of(agora_id))
     if hdr is None:
-        raise SystemExit(f"[agora] 找不到 {agora_id}（先 agora sync？）")
+        raise InputError(f"找不到 {agora_id}（先 agora sync？）")
     return hdr
 
 
@@ -134,7 +140,7 @@ def cmd_import(args, paths: store.Paths) -> int:
     updates = h.parse_header_args(args.header)
     exported = agent.export(args.session_id)
     if exported.message_count <= 0:
-        raise SystemExit(f"[agora] {args.session_id} 沒有任何訊息，不匯入")
+        raise InputError(f"{args.session_id} 沒有任何訊息，不匯入")
     body = agent.reading(exported.raw)
     index = store.sync(paths)  # never throttled: we must see other machines' imports (S6)
     existing = index.by_source(agent.name, exported.session_id)
@@ -163,7 +169,7 @@ def cmd_import(args, paths: store.Paths) -> int:
 def cmd_merge(args, paths: store.Paths) -> int:
     ids = [i.strip() for raw in args.ids for i in raw.split(",") if i.strip()]
     if len(ids) < 2:
-        raise SystemExit("[agora] merge-session 至少要兩個 Session")
+        raise InputError("merge-session 至少要兩個 Session")
     index = store.sync(paths, throttle=True)
     parents, parts = [], []
     for agora_id in ids:
@@ -293,6 +299,8 @@ def cmd_continue(args, paths: store.Paths) -> int:
     saved = _finish(paths, record)
     pending.unlink()
     lock.close()
+    if not native:
+        reading.unlink(missing_ok=True)   # only the agent needed it (D5)
     if saved is None:
         print("[agora] 這次沒有新內容，沒有存", file=sys.stderr)
         return 0
@@ -365,14 +373,17 @@ def main(argv: list[str] | None = None) -> int:
         if store.bad_count(paths):
             print(f"[agora] 有 {store.bad_count(paths)} 筆壞檔放在 {paths.state}/*/.bad，請檢查", file=sys.stderr)
         return args.func(args, paths)
+    except InputError as e:
+        print(f"[agora] {e}", file=sys.stderr)
+        return EXIT_INPUT
     except (h.HeaderError, store.StoreError, AgentError) as e:
         print(f"[agora] {e}", file=sys.stderr)
-        return 2
+        return EXIT_ERROR
     except Exception as e:   # never let one broken file brick every command (C2)
         if os.environ.get("AGORA_DEBUG"):
             raise
         print(f"[agora] 非預期的錯誤：{type(e).__name__}: {e}（AGORA_DEBUG=1 看細節）", file=sys.stderr)
-        return 2
+        return EXIT_ERROR
 
 
 if __name__ == "__main__":
