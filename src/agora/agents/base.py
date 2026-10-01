@@ -81,9 +81,15 @@ def format_reading(turns: list[tuple[str, list[str]]]) -> str:
     already filtered: text, tool_line(...) results, or "[skip <type>]".
     Tool results and thinking must not be passed in.
     """
-    out = []
+    # Claude writes one line per content block, so one turn arrives as several
+    # same-role entries; merge consecutive ones into one section (CL10).
+    merged: list[tuple[str, list[str]]] = []
     for role, lines in turns:
         lines = [line for line in lines if line.strip()]
-        if lines:
-            out.append(f"## {role}\n" + "\n".join(lines) + "\n")
-    return "\n".join(out)
+        if not lines:
+            continue
+        if merged and merged[-1][0] == role:
+            merged[-1][1].extend(lines)
+        else:
+            merged.append((role, lines))
+    return "\n".join(f"## {role}\n" + "\n".join(lines) + "\n" for role, lines in merged)
