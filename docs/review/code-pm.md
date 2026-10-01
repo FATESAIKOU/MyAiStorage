@@ -236,3 +236,25 @@ PM 的測試裡已經有：U-HDR-01～07、03b；U-ST-01/02、03（只驗了最�
 | 用 scratchpad 的目錄 stage 一筆正常的 entry，`AGORA_RCLONE=/nonexistent/rclone`，執行 `agora sync` | 那筆**正常的** entry 被移進了 `outbox/.bad/`，outbox 變成只剩 `.bad`（R1） |
 
 沒有碰 Drive，沒有跑任何 agent，沒有讀任何 Session、MyBrain 或 rclone.conf。
+
+---
+
+## R1–R7 修正確認（2026-10-02，對象 `4e3833c`）
+
+**結論：R1–R7 都修對了，43 個單元測試全部通過。沒有新的 High 或 Medium。**
+
+| # | 狀態 | 確認的內容 |
+|---|---|---|
+| R1 | ✅ | `Drive._run` 把 `OSError` 包成 `StoreError`。push_outbox 先**單獨**讀取並檢查本機的檔（session.md、header、raw 是否存在），只有這一步失敗才 quarantine。測試 `test_missing_rclone_keeps_good_outbox_entry` 驗證了 outbox 保留、`.bad` 是 0 筆，和我之前重現的情境相同 |
+| R2 | ✅ | 新增 `bad_count`，每個指令開始時都會提示 |
+| R3 | ✅（可接受） | 用 spy 確認 cmd_continue 有傳 `pass_fds`，而且 agent 執行期間 pending 是鎖住的。這樣已經抓得到「有人刪掉 `pass_fds`」。端對端的 `kill -9` 情境（test-plan U-CON-20）留給整合測試就好 |
+| R4 | ✅ | 只有格式錯誤的 record 會被 quarantine；`_finish` 的任何例外都會保留，下次再試 |
+| R5 | ✅ | 先寫 `.json.tmp`，上鎖、寫入，再 rename。鎖跟著 inode 走，所以檔案一出現就已經上鎖 |
+| R6 | ✅ | 改成「舊的 → `.old-<ulid>`，tmp → 正式名字，再刪掉舊的」；`_outbox_ulids` 會把孤兒的 `.old-*` 補回去 |
+| R7 | ✅ | sync 改用 `validate(strict_refs=False)`，未知的 entity 只警告，照樣建索引；也有測試 |
+
+剩下兩個 Low，不影響這一輪：
+- **R6 的並行情況**：A 行程正在 stage，剛把舊的移成 `.old-<ulid>`，還沒把 tmp 移進來。這時 B 行程的 `_outbox_ulids` 會把 `.old` 補回成正式的名字，接著 A 的 `tmp.rename(folder)` 會因為目標已經存在而丟出 OSError，新的內容就留在 `.tmp-<ulid>`。只有同一台機器上兩個指令同時處理同一個 ULID 時才會發生。可以在 `_outbox_ulids` 補回之前，先確認 `.tmp-<ulid>` 不存在。
+- **R5 的殘檔**：如果在 `open(tmp)` 和 `os.rename` 之間 crash，會留下一個 `.json.tmp`，從此沒有人會清它。這個檔案無害，可以在 recover_pending 時順手把超過一天的 `.json.tmp` 刪掉。
+
+跑過的指令：`.venv/bin/python -m pytest -q tests/unit/test_header.py test_store.py test_cli.py`，結果 43 passed。
