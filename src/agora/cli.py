@@ -78,13 +78,17 @@ def _source(agent: Agent, exported: Exported) -> dict:
 
 def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None) -> str:
     """Stage into the outbox, then try to push it now."""
+    global EXIT_CODE
     folder = store.stage(paths, hdr, body, raw)
+    md5 = store.md5_file(folder / "session.md")
+    store.remember(paths, folder, "outbox")
     try:
         store.push_one(store.Drive(paths), folder)
     except store.StoreError as e:
         print(f"[agora] 上傳失敗，已存入 outbox，下次 sync 會再送：{e}", file=sys.stderr)
-        global EXIT_CODE
         EXIT_CODE = EXIT_IN_OUTBOX
+        return hdr["id"]
+    store.Index(paths).put(folder.name, md5, hdr, body)
     return hdr["id"]
 
 

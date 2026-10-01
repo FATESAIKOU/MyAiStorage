@@ -182,6 +182,16 @@ def _outbox_ulids(paths: Paths) -> set[str]:
     return {p.name for p in paths.outbox.iterdir()} if paths.outbox.exists() else set()
 
 
+def remember(paths: Paths, folder: Path, md5: str) -> None:
+    """Put a session we just wrote into the local mirror and index right away."""
+    ulid = folder.name
+    mirror = paths.mirror / ulid
+    mirror.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(folder / "session.md", mirror / "session.md")
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    Index(paths).put(ulid, md5, hdr, body)
+
+
 def _index_outbox(paths: Paths, index: "Index") -> None:
     """Sessions still waiting in the outbox are searchable here, marked as not uploaded."""
     for ulid in _outbox_ulids(paths):
