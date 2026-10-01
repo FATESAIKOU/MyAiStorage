@@ -185,6 +185,32 @@ import → search（第一欄即新 id）→ continue 原生（wrapper 收到 `-
   `claude -p --session-id <uuid>` seed 1 次；pty 驅動 4 輪（信任框回答＋靜默退出）；
   按記下 uuid 的 `test -e`＋刪除（session-env 12 個、jsonl、空目錄 `rmdir`）。
 
+## 附記4：code-pm 第 (2) 節缺的測試（2026-10-02，只寫測試不改 src）
+
+新增 `tests/unit/test_store_more.py`（13 個）與 `tests/unit/test_cli_more.py`
+（27 個），全套 `uv run pytest -q` 154 過＋1 xfail。`fake_rclone.py` 加了每次呼叫後
+快照（`snapshots/<NNN>/` 整份遠端複製）與 `FAKE_RCLONE_DUP`。
+
+- U-HDR-08 可行：經 cli import（claude fixture），`source.dir／host／agent_version／
+  source.created_at／header: 1` 都有值；壞 YAML→HeaderError；非 UTF-8 的 session.md
+  在 `read_entry` 即包成 HeaderError 進 `.bad/`。
+- U-ST：03（逐快照無懸空 raw 指標）／04（缺 raw 不建索引、補上可搜）／07（只剩 raw、
+  另一台不建索引）／16（同名→`folder_id` 報錯）／18（無 raw 的 merge 可索引）／
+  19（calls.log 無 raw 下載）／20（sessions 不見／列檔失敗都不刪鏡像）／21（重抓
+  session.md 再試＋C9）／壞 outbox 進 `.bad`／push 只列自己資料夾——全部可行。
+- 指令層：CON-06／08／10／11／11b／13／14／16／17、IMP-08b／09／10、C8、MRG-02b／03、
+  SHW-01–03、SRC-01／07／09／10／12／13——全部可行（11／11b／16／17 用真子行程跑
+  `python -m agora.cli`；C11／C12 已有測試故未重寫）。
+- 1 個 xfail（strict）：開頭是 `-` 的關鍵字（`-x`）被 argparse 當成旗標 exit 2。
+  要支援需改 cli（`--` 分隔或自行解析），由 PM 決定。
+- 兩個測試寫法修正（非 src 問題）：`show`／`merge` 找不到 id 走 `InputError`→rc 2
+  （不是 SystemExit）；`Drive._run` 會在參數前加 `--config`，看 calls.log 要用 `in`。
+- 發現但超出本次範圍（請 PM 決定）：① 刪掉 `index.sqlite` 後 `--no-sync` 的 search
+  不會從鏡像重建（要等節流過後才從 Drive 重建）；② U-IMP-10 的重複來源靠排序取最新，
+  同 `updated_at` 時退化成 ulid 排序。
+- 跑過的指令：`uv run pytest -q`（154 passed, 1 xfailed）；單檔重跑若干次。
+  沒碰 Drive／真 agent／真 Session／rclone.conf。
+
 ## 對 design.md 的修改建議
 
 1. §5.4「單一 claude→claude 原生」改為 `--resume <id> --fork-session --session-id <新uuid>`
