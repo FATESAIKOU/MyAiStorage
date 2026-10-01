@@ -78,7 +78,7 @@ def e2e(tmp_path, monkeypatch, capsys):
                    cwd=proj, check=True)
     proj = proj.resolve()
     paths = store.Paths.from_env()
-    created = {"ulids": [], "uuids": []}  # E3: recorded the moment they exist
+    created = {"ulids": [], "uuids": [], "printed": []}  # E3/D-1: recorded at creation
     yield {"proj": proj, "paths": paths, "created": created,
            "fake_home": fake_home, "capsys": capsys}
     uuids = set(created["uuids"])
@@ -89,11 +89,11 @@ def e2e(tmp_path, monkeypatch, capsys):
             for flag in ("--resume", "--session-id"):
                 if flag in argv:
                     uuids.add(argv[argv.index(flag) + 1])
-    ulids = set(created["ulids"])
-    ulids.update(store.Index(paths).known())  # our cache is test-exclusive
-    outbox = paths.outbox
-    if outbox.is_dir():
-        ulids.update(p.parent.name for p in outbox.glob("*/session.md"))
+    # D-1: ULIDs come ONLY from this test's own printed ids (run_main records
+    # them). Never collect from the shared cache index: agora-test/ also holds
+    # other people's sessions and purging them would delete their data.
+    ulids = {u.split(":", 1)[1] for u in created["printed"]}
+    ulids.update(u for u in created["ulids"])
     drive = store.Drive(paths)
     for ulid in sorted(ulids):
         proc = subprocess.run(
@@ -114,8 +114,9 @@ def e2e(tmp_path, monkeypatch, capsys):
         for extra in [cfgdir / "session-env" / sid, cfgdir / "file-history" / sid]:
             if extra.is_dir():
                 shutil.rmtree(extra)
-        for todo in sorted(cfgdir.glob(f"todos/{sid}-*.json")):
-            todo.unlink()
+        # D-2: no glob over the shared todos/ dir (it lists real filenames).
+        # Our tool-banned sessions never create todos; per-uuid session-env
+        # and file-history above are exact paths.
     try:
         basedir.rmdir()
     except OSError:
@@ -135,6 +136,15 @@ def e2e(tmp_path, monkeypatch, capsys):
 def run_main(e2e, *argv: str) -> str:
     rc = cli.main(list(argv))
     out = e2e["capsys"].readouterr().out
+    if argv and argv[0] in ("import", "continue-session", "merge-session"):
+        # D-1: record our own new id the moment it is printed, even if the
+        # command later fails (e.g. exit 3). Never scan search/show output:
+        # those list other people's sessions too.
+        for tok in out.split():
+            if tok.startswith("agora:") and len(tok) == len("agora:") + 26:
+                if tok not in e2e["created"]["printed"]:
+                    e2e["created"]["printed"].append(tok)
+                break
     assert rc == 0, out[-500:]
     return out
 

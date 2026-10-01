@@ -28,6 +28,15 @@ with open(log, "a") as f:
 if os.environ.get("FAKE_RCLONE_FAIL") and os.environ["FAKE_RCLONE_FAIL"] in " ".join(args):
     fail("injected failure")
 
+
+def snapshot():
+    """Copy the whole remote aside after every successful call (test-plan 0.3b)."""
+    snaps = remote.parent / "snapshots"
+    snaps.mkdir(exist_ok=True)
+    n = len([p for p in snaps.iterdir() if p.is_dir()])
+    if remote.exists():
+        shutil.copytree(remote, snaps / f"{n:04d}")
+
 root = remote
 rest = []
 i = 0
@@ -69,6 +78,9 @@ elif cmd == "lsjson":
         if p.is_file() and "--hash" in params:
             entry["Hashes"] = {"md5": hashlib.md5(p.read_bytes()).hexdigest()}
         out.append(entry)
+    dup = os.environ.get("FAKE_RCLONE_DUP")
+    if dup and "--dirs-only" in params and params[0] == "gdrive:":
+        out.append({"Path": dup, "Name": dup, "IsDir": True, "ID": dup + "-dup"})
     print(json.dumps(out))
 elif cmd == "copyto":
     src, dst = params[0], params[1]
@@ -84,3 +96,4 @@ elif cmd == "purge":
     shutil.rmtree(resolve(params[0]))
 else:
     fail(f"fake rclone does not support {cmd}")
+snapshot()

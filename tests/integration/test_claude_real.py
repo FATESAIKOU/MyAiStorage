@@ -64,8 +64,8 @@ def live(monkeypatch, tmp_path):
         for extra in [cfgdir / "session-env" / sid, cfgdir / "file-history" / sid]:
             if extra.is_dir():  # E4: per-uuid side files only, never listed
                 shutil.rmtree(extra)
-        for todo in sorted(cfgdir.glob(f"todos/{sid}-*.json")):
-            todo.unlink()
+        # D-2: no glob over the shared todos/ dir (it lists real filenames).
+        # Our tool-banned sessions never create todos.
     try:
         basedir.rmdir()  # remove the project dir itself when left empty
     except OSError:

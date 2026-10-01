@@ -273,7 +273,7 @@ def _block_lines(content: list, *, tools: bool) -> list[str] | None:
     for block in content:
         if not isinstance(block, dict):
             continue
-        btype = block.get("type")
+        btype = block.get("type") or ""  # CL10: typeless blocks must not crash
         if btype == "text" and str(block.get("text", "")).strip():
             lines.append(str(block["text"]))
         elif tools and (btype == "tool_use" or btype.endswith("_tool_use")):  # CL10

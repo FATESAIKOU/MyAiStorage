@@ -213,10 +213,13 @@ def test_reading_unknown_type_is_skipped_explicitly():
     raw = json.dumps({
         "format": C.FORMAT,
         "main": ['{"type": "user", "sessionId": "s", "message": "hi"}',
-                 '{"type": "zzwidget", "sessionId": "s"}'],
+                 '{"type": "zzwidget", "sessionId": "s"}',
+                 '{"type": "assistant", "sessionId": "s", "message": {"content": [{"text": "x"}]}}'],
         "aux": {},
     }).encode()
-    assert "[skip zzwidget]" in C.ADAPTER.reading(raw)
+    body = C.ADAPTER.reading(raw)
+    assert "[skip zzwidget]" in body
+    assert "[skip ]" in body  # CL10: a block without type must not crash
 
 
 # --- start_native / collect (U-CON-04, U-CON-05) -------------------------------
