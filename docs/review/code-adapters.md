@@ -224,3 +224,77 @@
 | `.venv/bin/python -c '… _block_lines([{"text": "x"}], tools=True)'` | AttributeError（D-3） |
 
 沒有執行 e2e 和整合測試，沒有碰 Drive，沒有呼叫 claude 或 opencode，也沒有讀任何真實的 Session。
+
+---
+
+## E. 修正確認：OC1–OC11、D-1／D-2／CL10、CL5，以及 opencode.py 的精簡
+
+對象：`d3ae9cb`（impl1：OC1–OC10）、`153015a`（PM：OC11）、`aaa2d4e`（impl2：D-1、D-2、CL10）、`c91f437`＋`b329b72`（PM：CL5，以及 design）、`1413629`（PM：連續相同角色的段落合併，CL10 剩下的部分）。
+
+**結論：全部都修對了。** 已 commit 的單元測試 128 個全部通過；我原本用來重現 OC1／OC2 的程式，現在跑出來的結果也都正確。沒有新的 High 或 Medium，只有三個 Low（E-1～E-3）。另外要提醒一件事：工作目錄裡有一個**還沒 commit** 的 `tests/unit/test_cli_more.py`（不知道是誰的），裡面有 4 個測試失敗，所以直接跑 `pytest tests/unit` 會是紅的（E-4）。
+
+### 逐條確認
+
+| # | 狀態 | 確認的內容 |
+|---|---|---|
+| OC1 | ✅ | part id 改成 `prt_`＋time(12)＋**訊息序號(6)**＋part 序號(4)＋salt(6)；`_import_verified` 會同時比對訊息數和 **part 數**。重新跑我的重現程式：「同一毫秒」與「缺少 time」兩種情況，part id 都不再相同，message 和 part 的 id 排序也都和匯出順序一致 |
+| OC2 | ✅ | 改成只處理結構位置：`info.id`、message 的 `sessionID`／`parentID`、part 的 `sessionID`／`messageID`。重新跑：task part 的 `state.metadata.sessionId` 保持 `ses_CHILD`，tool input 裡的 `sessionId` 也沒有被動到 |
+| OC3 | ✅ | 原生和注入都改走 `_import_verified`，失敗就 `_discard`。注入的 `before_count` 改成回讀到的數量 |
+| OC4 | ✅ | 整合測試改用 function scope 的 monkeypatch，把 `HOME` 和 `XDG_*` 指向這個 module 專用的暫存目錄（`tmp_path_factory`）；`trash` 只刪記下來的 id。這樣真的 `~/.local/share/opencode` 完全不會被碰到，docstring 也和實際行為一致了 |
+| OC5 | ✅ | 注入的 part 加上 `synthetic: true` 和 `metadata.agora = "agora-injected"`，閱讀版裡只輸出一行 `[注入的閱讀版]`；opencode 自己產生的 synthetic part 則略過。`compaction`、`subtask` 也加進了靜默清單。小提醒見 E-2 |
+| OC6 | ✅ | `info.revert` 的 `messageID`／`partID` 都會照對應表改寫 |
+| OC7 | ✅ | `_run` 和 `_export_bytes` 都加了 timeout（預設 60 秒，可以用 `AGORA_OPENCODE_TIMEOUT` 調整），逾時就丟 AgentError；也有測試 `test_a_hanging_opencode_becomes_an_error_not_a_hang` |
+| OC8 | ✅ | 優先用 `info.version`，沒有才叫 CLI |
+| OC9 | ✅ | `_delete` 會檢查 rc；`_discard` 會把「刪不掉」寫進錯誤訊息 |
+| OC10 | ✅ | collect 沒有 id 時改成丟出 AgentError（和 claude 一致） |
+| OC11 | ✅ | conftest 會刪掉 `XDG_DATA_HOME`／`XDG_CONFIG_HOME`／`XDG_STATE_HOME`／`XDG_CACHE_HOME`／`CLAUDE_CONFIG_DIR`。非整合測試的 `AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD` 預設會指向 `/nonexistent/…`，所以忘了用 fake 的測試會直接失敗，不會跑到真的 agent |
+| D-1 | ✅ | e2e 的 teardown 只會 purge「這次的 import／continue／merge 在 stdout 印出來的 id」，不再收集共用索引裡的全部 ULID。search／show 的輸出也明確排除了 |
+| D-2 | ✅ | 拿掉了 todos 的 glob。用的工具都被禁止了，所以不會產生 todos；`session-env`／`file-history` 都是用精確的路徑刪除 |
+| CL10 | ✅ | `btype = block.get("type") or ""`；`1413629` 也在 `format_reading` 合併了連續相同角色的段落 |
+| CL5 | ✅ | PM 用真的互動 claude 驗證過：`--resume` 會接著寫同一個檔；`/clear` 之後會換到新的 uuid。collect 會用 `_warn_cleared` 印出 `/clear` 之後那個 session 的 id，以及要另外執行的 `agora import` 指令。design 5.4 第 5 點也寫進去了；測試是 `tests/unit/test_claude_clear.py` 裡的 2 個。test-plan 已經新增 **M-03b（已驗證）**，並對應到這兩個測試 |
+
+### 剩下的小問題
+
+| # | 嚴重度 | 位置 | 問題 | 建議 |
+|---|---|---|---|---|
+| E-1 | Low | claude.py 的 `_warn_cleared` | (a) 只找「直接指回原 session」的檔，所以連續 `/clear` 兩次時，第二段（它指回的是第一段 `/clear` 之後的 uuid）不會被提到；(b) 它會讀取同一個專案資料夾裡、所有在 `since` 之後修改過的 jsonl 全文。這是使用者自己的工具、自己的資料，所以可以接受；但在整合測試裡，只有測試專用的資料夾才安全，目前也的確是這樣 | (a) 用找到的 uuid 再往下找一層（迴圈到找不到為止，大約 3 行），或者在 design 寫明「只提示第一層」；(b) 不用改 |
+| E-2 | Low | opencode 的注入 part 用了 `synthetic: true` | opencode 在送給模型時，**會**把 synthetic 的 text part 一起送出去（它就是靠這個把附件內容交給模型的），所以 agent 應該看得到閱讀版。但 `test_real_injected_round_trip` 只驗證了 `message_count > 1`，沒有驗證 agent 真的讀到了 | 整合測試的斷言加一個寬鬆的條件：回答裡出現 `CSV` 或 `表格` 這類自編內容的關鍵字。這樣如果哪一版 opencode 改成過濾 synthetic，就會被抓到 |
+| E-3 | Low | opencode 的 part 序號 4 hex | 單一訊息超過 65,536 個 part 時，寬度會變成 5 位，排序就會亂掉 | 實際上不會發生。在 `_part_id` 加一個 `assert part_position < 1 << 16` 就好，或者直接接受 |
+| E-4 | 提醒 | 工作目錄裡沒有 commit 的 `tests/unit/test_cli_more.py` | 4 個測試失敗：`test_merge_missing_id_fails_clean`、`test_show_format_and_missing`、`test_search_special_keywords_no_crash`、`test_index_rebuild_after_delete`。其他已 commit 的 128 個測試都通過。這個檔不是我的，我沒有去看它失敗的原因 | 請它的作者確認。看起來像是 test-plan U-MRG-03／U-SHW／U-SRC-07／U-SRC-10 正在補的測試 |
+
+### opencode.py（466 行）可以精簡的地方
+
+466 行裡，**實際的程式碼大約只有 266 行**。其他是 90 行 docstring、36 行註解、74 行空行。所以，壓力主要來自說明文字，不是邏輯。
+
+| # | 位置 | 建議 | 約省 | 風險 |
+|---|---|---|---|---|
+| Q1 | 模組 docstring（1–51 行） | 「五條規則」已經寫在 spike/opencode.md 和 design 5.4 裡了。模組 docstring 只留 5～8 行的摘要，再加上「詳見 docs/spike/opencode.md 陷阱 1–6」 | 40 | 無 |
+| Q2 | `_MESSAGE_REFERENCES`、`_PART_REFERENCES`（81–82 行）以及它們上方 5 行的註解 | **定義了但沒有人用**（reidentify 裡寫的是字面的 `("parentID",)`）。要嘛刪掉，要嘛讓 reidentify 改用它們 | 7 | 無 |
+| Q3 | 各個 `#:` 註解區塊（`INJECTED_MARK`、`DEFAULT_CLI_TIMEOUT`、`_injected_info` 上方各 4～6 行） | 每段縮成一行，理由留在 commit 訊息或 spike 文件裡就好 | 10 | 無 |
+| Q4 | `_export_bytes` 的 timeout 處理 | 它自己又寫了一次 `TimeoutExpired → AgentError`，和 `_run` 重複。讓 `_run` 多收一個 `stdout=` 參數，export 也走 `_run` | 6 | 低 |
+| Q5 | `_delete` 加 `_discard` | `_discard` 只是把 `_delete` 的例外包成一句話。合併成一個 `_discard(session_id, cwd) -> str`，直接檢查 rc | 5 | 低 |
+| Q6 | `_injected_payload` 自己產生 message 和 part 的 id | 改成先組一份用暫時 id 的 payload，再交給 `reidentify(payload, session_id=…)`，這樣 id 的規則只有一個地方 | 4 | 低（測試要確認注入的 id 形狀沒變） |
+| Q7 | `_stamp`／`_message_id`／`_part_id` | 可以合併成一個 `_id(prefix, time_ms, *positions, salt)`，每個 position 帶自己的寬度 | 4 | 低 |
+| Q8 | `_cli_version` | export 一定有 `info.version`（spike 量到的形狀），所以這個退路幾乎用不到。可以刪掉，沒有的話就是 None | 6 | 低（`agent_version` 有可能變成 None；cli 允許這種情況） |
+| Q9 | `_payload_messages` 加上 `reidentify` 開頭的兩個形狀檢查 | 同樣的檢查寫了兩次。reidentify 改成呼叫 `_payload_messages` | 3 | 無 |
+| **合計** | | | **約 85** | |
+
+做完 Q1～Q9 之後，opencode.py 大約是 380 行，`src` 的總行數會從 1,973 降到大約 1,890，留出大約 110 行給之後的修正。另外建議 PM 在 design 第 8 節寫清楚「2,000 行」怎麼算（例如用 `cloc` 算程式碼行，不含 docstring、註解、空行）。用那種算法，現在的 `src` 遠低於 2,000，說明文字也就不必為了行數去砍。
+
+### test-plan 的更新（這次一起 commit）
+
+- **U-CON-04**：改成「原本有 `cwd` 的行，才把 `cwd` 改成 `$T/proj`；原本沒有的不會被加上；中文沒有被轉成 `\u` 跳脫」（CL7）。
+- **M-03b**（新增）：Claude 的 `/clear`，**已驗證**（PM 在 herdr pane 用真的互動 claude 實測，`c91f437`），對應 `tests/unit/test_claude_clear.py` 的兩個測試；換 Claude 版本時要再人工確認一次。原本的 M-03（opencode TUI、按 Ctrl-C 離開）仍然是人工確認。
+- 對照表新增一列：CL5 → `test_claude_clear.py`／M-03b。
+
+### 這次跑過的指令
+
+| 指令 | 結果（只記形狀） |
+|---|---|
+| `git diff e4d0228 d3ae9cb`、`git show 153015a／aaa2d4e／c91f437／b329b72` | 逐條對照 |
+| `.venv/bin/python - <<…`：用自編的 payload 重新跑 OC1／OC2 的重現 | 「同一毫秒」與「缺少 time」：part id 不再相同，排序正確；`metadata.sessionId` 和 tool input 都保持不變 |
+| `nohup .venv/bin/python -m pytest -q -rf tests/unit`（在背景跑） | 150 passed、4 failed，失敗的 4 個全部在沒有 commit 的 `test_cli_more.py`（E-4） |
+| `.venv/bin/python -m pytest -q tests/unit --ignore=tests/unit/test_cli_more.py` | 128 passed |
+| `grep -c` 檢查 opencode.py 的各個符號；`awk`／`ast` 計算空行、註解、docstring 的行數 | 見 Q1～Q9 |
+
+沒有執行真的 opencode、claude、e2e 或整合測試，也沒有碰 Drive 或任何真實的資料。

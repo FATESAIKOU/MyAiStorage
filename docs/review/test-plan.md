@@ -132,7 +132,7 @@
 | U-CON-01b | 同上 | 比較新舊 id 的順序 | 新 id 和原本的 id 格式相同（前綴與長度）；依新 id 排序的 message／part 順序，和原本的順序相同 | N3 |
 | U-CON-02 | 同上 | 檢查假的 opencode 收到的參數與 cwd | 用 `--session <新 id>` 啟動，`opencode-cwd.log` 是 `$T/proj`；結束後 export 的是新 id | S4、H1 |
 | U-CON-03 | 同上 | 讀新 Session | stdout 第一欄是新的 agora id；`relation: continue`；`parents: [{id: A, raw_md5: <A 當時的 md5>}]`；閱讀版裡有 append 進來的那則訊息 | 5.4、S7 |
-| U-CON-04 | A 是從 cl-basic 匯入的，`source.dir=$T/proj`；假的 claude 設成 `append` | `continue-session A --agent claude`（不帶 `--dir`） | `$AGORA_CLAUDE_HOME/.claude/projects/<編碼後的 $T/proj>/<新 uuid>.jsonl` 存在，裡面每一行的 `sessionId` 都是新的 uuid，`cwd` 都是 `$T/proj`；aux 也複製到同一個位置；用 `--resume <新 uuid>` 啟動，cwd 是 `$T/proj` | S9、H1 |
+| U-CON-04 | A 是從 cl-basic 匯入的，`source.dir=$T/proj`；假的 claude 設成 `append` | `continue-session A --agent claude`（不帶 `--dir`） | `$AGORA_CLAUDE_HOME/.claude/projects/<編碼後的 $T/proj>/<新 uuid>.jsonl` 存在，裡面每一行的 `sessionId` 都是新的 uuid；**原本有 `cwd` 的行**，`cwd` 改成 `$T/proj`，原本沒有 `cwd` 的行（`summary`、`queue-operation` 等）不會被加上 `cwd`；中文沒有被轉成 `\u` 跳脫（CL7）；aux 也複製到同一個位置；用 `--resume <新 uuid>` 啟動，cwd 是 `$T/proj` | S9、H1 |
 | U-CON-05 | 同 U-CON-04，但假的 claude 設成 `noop` | continue | 不會存成新 Session；pending 留著；警告一行「session 沒有新增內容」 | S9 |
 | U-CON-06 | A 的 `source.dir` 在這台機器上不存在 | 在 `$T/other` 底下執行 continue（不帶 `--dir`） | 用 `$T/other`，stderr 印出實際用的目錄；帶 `--dir $T/x` 時就用 `$T/x` | H1 |
 | U-CON-07 | A 是 opencode，目標是 claude | continue | 不複製 jsonl；寫出一個閱讀版的檔案；用 `--session-id <新 uuid>` 啟動，初始訊息裡包含這個檔的路徑；啟動前 pending 裡已經有這個 uuid | 5.4、N4 |
@@ -230,6 +230,7 @@
 | M-01 | worker OAuth client 的 consent screen 狀態（在 GCP console 看，不要印出任何憑證） | 是「In production」；如果是「Testing」，design 要寫明 7 天要重新授權一次 | S8 |
 | M-02 | 用 Drive 網頁在 `agora-test/sessions/` 底下手動上傳一個名字像 ULID 的資料夾，然後 `agora sync`；做完之後從網頁刪掉它 | agora 看不到這個檔，也不會出錯（確認 drive.file 的行為，並寫進 design） | S8 |
 | M-03 | 互動模式的 continue：真的打開 opencode TUI 和互動式 claude，打一句自編的話，然後用各自的方式離開（包括按 Ctrl-C 離開） | 兩邊都會存回去；按 Ctrl-C 不會讓 agora 先死掉 | S3、5.4 |
+| M-03b | **Claude 的 `/clear`（已驗證，2026-10-02，PM 在 herdr pane 用真的互動 claude 2.1.286 實測，`c91f437`）**：互動模式的 `--resume`，說一句話、`/clear`、再說一句話、離開 | 互動模式的 `--resume` 會繼續寫**同一個** jsonl，所以收尾找得到 `/clear` 之前的部分，照常存檔；`/clear` 之後的對話換到同一個專案資料夾裡的新 uuid，agora 不會把兩邊接起來，而是在 stderr 印出那個 uuid，以及要另外執行的 `agora import --format claude --session-id <uuid>`。自動化的對應測試是 `tests/unit/test_claude_clear.py`（`test_collect_points_at_the_post_clear_session`、`test_no_warning_without_clear`）。換 Claude 版本時，要再人工確認一次 | CL5、5.4 第 5 點 |
 
 ## 對照：review 的每一條 High 都有測試
 
@@ -238,6 +239,7 @@
 | S1 半份寫入 | U-ST-01～05、U-ST-07、U-IMP-07、U-MRG-04、U-CON-14 | I-02、I-08 |
 | S2 上傳失敗重送 | U-ST-06～10、U-ST-23、U-CON-13 | I-08、I-09 |
 | S3 continue 中途被打斷 | U-CON-08～13 | I-10、M-03 |
+| CL5 Claude 的 `/clear` | `test_claude_clear.py` | M-03b（已驗證） |
 | S4 opencode id 改寫 | U-CON-01、U-CON-02 | I-04 |
 | H1 工作目錄 | U-HDR-08、U-CON-02、U-CON-04、U-CON-06、U-IMP-04 | I-05、I-12 |
 | T1 中文二字詞 | U-SRC-03、U-SRC-04、U-SRC-12 | I-02、I-03 |
