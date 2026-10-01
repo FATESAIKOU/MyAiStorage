@@ -314,3 +314,22 @@ def test_continue_hands_the_pending_lock_to_the_agent(env, capsys, monkeypatch):
     monkeypatch.setattr(cli.subprocess, "run", spy)
     code, _, _ = run(capsys, "continue-session", parent, "--agent", "opencode", "--dir", "/tmp")
     assert code == 0 and seen["fds"] and len(seen["fds"]) == 1
+
+
+def test_agent_runs_with_pwd_set_to_the_workdir(env, capsys, monkeypatch, tmp_path):  # opencode reads PWD
+    _, parent, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    seen = {}
+    real_run = cli.subprocess.run
+
+    def spy(argv, **kwargs):
+        if argv == ["true"]:
+            seen["pwd"] = kwargs["env"]["PWD"]
+            seen["cwd"] = kwargs["cwd"]
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(cli.subprocess, "run", spy)
+    monkeypatch.chdir(tmp_path)
+    work = tmp_path / "other"
+    work.mkdir()
+    run(capsys, "continue-session", parent, "--agent", "opencode", "--dir", str(work))
+    assert seen["pwd"] == seen["cwd"] == str(work.resolve())

@@ -288,7 +288,8 @@ def cmd_continue(args, paths: store.Paths) -> int:
     # lives even if agora itself is killed (C1).
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
-        subprocess.run(launch.argv, cwd=launch.cwd, env={**os.environ, **launch.env},
+        # opencode reads PWD, not the real cwd, to pick the project (impl1).
+        subprocess.run(launch.argv, cwd=launch.cwd, env={**os.environ, **launch.env, "PWD": launch.cwd},
                        pass_fds=(lock.fileno(),),
                        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
     finally:
