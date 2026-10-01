@@ -528,3 +528,139 @@ fixture 也補齊（review 指出的三個缺口）：`info.revert`、task tool 
 `compaction`／`subtask` part、兩則同一毫秒的訊息、一則沒有 `time.created` 的訊息。
 
 單元測試 44 個、全單元 128 個全過。
+
+---
+
+# e2e：真的 Drive ＋ 真的 opencode ＋ 真的 claude（2026-10-02 晚）
+
+`tests/integration/test_e2e_opencode.py`，照 impl2 的 `test_e2e_cli.py` 的做法：
+`AGORA_CONFIG` 是暫存目錄、`rclone.conf` symlink 到 `~/.config/agora/rclone.conf`、
+每一個指令都經過 `agora.cli.main`。專案目錄是 `/tmp/agora-it-e2e-oc/p_專案.v2`
+（底線、中文、點，故意），開頭是 `git init` ＋ 空 commit。
+
+| # | 做什麼 | 結論 |
+|---|---|---|
+| 1 | 免費模型建自編短對話 → `agora import --format opencode` → `agora search session 表格` | **可行** |
+| 2 | `agora continue-session <id> --agent opencode`（原生匯入） | **可行，但要靠包裝腳本** |
+| 3 | 同一個 Session 用 `--agent claude` 接（閱讀版注入） | **可行** |
+| 4 | 清理（Drive ULID、opencode session id、claude jsonl 與空目錄） | **可行**，第一版有兩個洞，都已補 |
+
+## 實際跑過的指令
+
+```bash
+nohup uv run pytest -q -m integration tests/integration/test_e2e_opencode.py > log 2>&1 &
+# → 1 passed in 67～77 秒（三種 agent 的步驟各呼叫一次模型）
+```
+
+包裝腳本：`tests/fakes/opencode_noninteractive.py`，用 `sys.executable` 叫
+（`#!/bin/sh` + `exec`），收到 `--session <id>` 就改跑
+`opencode run -s <id> -m opencode/space-bunny-free <固定自編問題>`；
+`--version`／`export`／`import`／`session delete` 直接往真的 opencode 送。
+claude 端用 impl2 的 `tests/fakes/claude_noninteractive.py`（裡面本來就有
+`--disallowedTools Bash Read Glob Grep Edit Write WebFetch WebSearch Task`），
+`claude -p` 只呼叫 1 次。
+
+## 看到的結果（形狀與欄位名）
+
+匯入後的 header：
+
+```
+source: {agent: opencode, session_id: ses_…, dir: /private/tmp/agora-it-e2e-oc/p_專案.v2,
+         host: …, agent_version: 1.18.34, created_at: 2026-…Z}
+relation: import      parents: []
+raw: {file: raw-<md5 前12>.json, md5: …, size: …}
+title: e2e 表格      （--header title= 進來的）
+```
+
+`continue-session` 之後（原生）：
+
+```
+relation: continue
+parents: [{id: agora:<匯入那個>, raw_md5: <該 session 當時的 md5>}]
+source.session_id: 新的 ses_…（和來源不同）
+source.dir: /private/tmp/agora-it-e2e-oc/p_專案.v2
+```
+
+驗到的幾件事：
+
+- **`opencode run -s <新 id>` 真的接得上**：新 session 的訊息數是來源 ＋ 2，
+  `info.directory` 就是匯入時的目錄（V5）。
+- **V1(a)**：`source` 那個 opencode session 的訊息數在 continue 前後**一樣**。
+- **跨 agent**：wrapper 的 log 顯示 claude 收到的是 `--session-id`（注入）而不是
+  `--resume`（原生），而且只有一次啟動。
+- wrapper 的 log 裡 opencode 只收到一次 `--session <新 id>`：`agora import` 走的是
+  `export`，不是 TUI。
+
+## 兩個環境陷阱（第一版就踩到，第二個差點讓清理變成假的）
+
+### 陷阱 A：opencode 的專案是從 `$PWD` 決定的，不是從行程的 cwd
+
+實測：`cwd=X`、`$PWD=Y` 時，
+
+| 指令 | 結果 |
+|---|---|
+| `opencode run …`（建新 session） | session 落在 **Y** 的專案 |
+| `opencode import <payload>` | session 落在 **X** 的專案 |
+| `opencode export <id>` | 照 session 自己的目錄，與呼叫位置無關 |
+
+第一版測試就是這樣：session 落在 repo 目錄，於是 `source.dir` 變成 repo、
+`session delete` 說「Session not found」（它在自己看不到的專案裡找）。
+
+→ 對測試：每個 opencode 呼叫都要帶 `PWD`（包裝腳本裡 `env["PWD"] = os.getcwd()`，
+測試裡顯式給）。
+
+→ **⚠️ 這是 cli.py 的 bug**（不是我的檔案，請 PM 改）：`cmd_continue` 現在是
+`subprocess.run(launch.argv, cwd=launch.cwd, env=...)`，**沒有設定 `PWD`**。
+`agora continue-session X --dir /other/project`（從別的目錄執行）時，
+`start_native` 會把 session 匯入到 `/other/project`（import 用 cwd），
+但接著啟動的 opencode 會因為 `$PWD` 還是呼叫者的目錄而**在別的專案裡**開一個
+session——使用者看到的是空的對話，而 pending 記的 id 在那個專案裡根本不存在。
+修法：`env` 裡加上 `"PWD": launch.cwd`。
+（`--dir` 與呼叫者目錄相同的情況不會出事，所以一般用法看不出來。）
+
+### 陷阱 B：建立與清理用了兩個不同的 opencode 資料庫
+
+第一版在測試本體把 `HOME` 指回真實家目錄（照 spike 的習慣），teardown 卻繼承
+conftest 的暫存 HOME，於是「刪掉」刪的是一個從來沒寫進去的資料庫——兩個
+`Session not found` 警告。改成**全程用 conftest 的暫存 HOME**（免費模型不需要
+auth），`AGORA_REAL_HOME` 不設，teardown 就刪得到。順帶的好處是這個測試完全不會
+碰到真的 opencode 資料庫。
+
+清理另外補了 claude 留下的空目錄：`~/.claude/projects/<編碼後>` 底下空的
+`memory/`，以及空的專案目錄本身。Drive 那邊只 purge 這次建立的 ULID，沒有動
+`agora-test/` 以外任何東西（`agora-test/sessions/` 空目錄會留下，和 impl2 的 e2e
+一致）。
+
+## code-adapters.md Q1–Q9（精簡）與 E-2
+
+`src/agora/agents/opencode.py` 466 行 → **393 行**，`src` 合計 1,973 → **1,900 行**。
+
+| # | 做法 |
+|---|---|
+| Q1 | 模組 docstring 51 行 → 20 行摘要＋「詳見 docs/spike/opencode.md 陷阱 1–6」 |
+| Q2 | `_MESSAGE_REFERENCES`／`_PART_REFERENCES` 從「定義了沒人用」改成 `reidentify` 真的呼叫它們（`sessionID` 仍然顯式賦值） |
+| Q3 | 各個 `#:` 區塊壓成一行 |
+| Q4 | `_run` 多收一個 `stdout=`，`export` 也走 `_run`，刪掉重複的 `TimeoutExpired` 處理 |
+| Q5 | `_delete` 與 `_discard` 合併成 `_discard(session_id, cwd) -> str`（直接檢查 rc） |
+| Q6 | `_injected_payload` 用暫時 id 組 payload 再交給 `reidentify`，id 規則只剩一個地方 |
+| Q7 | `_stamp`／`_message_id`／`_part_id` 合併成 `_id(prefix, *positions, time_ms, salt)`，每個 position 自帶寬度；順手加了一個 `assert`（E-3）防止溢出成五位破壞排序 |
+| Q8 | 拿掉 `_cli_version()`：匯出檔一定帶 `info.version`，沒有就是 `None`，不拿 CLI 的版本冒充（測試改成斷言 `None`） |
+| Q9 | `reidentify` 改呼叫 `_payload_messages()`，形狀檢查只留一份 |
+| E-2 | 整合測試的注入那條加了寬鬆斷言：回答裡必須出現 `CSV` 或 `表格`（閱讀版才有的字），不然只斷言 `message_count > 1` 的話，opencode 哪天改成不送 synthetic part 也看不出來 |
+
+單元測試 154 個全過（含 adapter 的 44 個）。
+
+## 對 design.md 的修改建議
+
+1. **§5.4 第 3 步要加一句**：啟動 agent 時除了 `cwd`，**環境裡的 `PWD` 也要設成
+   同一個目錄**。opencode 的 TUI／`run` 是從 `$PWD` 決定專案的，而 `import` 是從
+   cwd；兩者不一致時會開到別的專案去。
+2. **§5.4 第 1 步**：「message id＝time＋訊息序號；part id＝time＋**訊息序號**＋
+   part 序號」，並寫明「回讀時同時比對訊息數與 part 數」（OC1）。
+3. **§5.4 同一列**：「只改結構位置上的 id 與參照，`state`／`metadata`／`input`／
+   `output` 不動」（OC2）。
+4. **§5.4 注入那一列**：注入同樣要回讀驗證；注入的 part 帶 `synthetic` 標記，
+   閱讀版只輸出一行 `[注入的閱讀版]`，否則每接一次就把上一次整份包進來（OC3、OC5）。
+5. **§8**：`src` 的 2,000 行目標建議寫清楚怎麼算（review 也提了）。現在用
+   `wc -l` 算是 1,900 行，其中說明文字（docstring、註解、空行）大約 200 行；
+   真正的程式碼遠低於 1,700，說明文字不必為了行數去砍。

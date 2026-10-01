@@ -1,0 +1,297 @@
+"""End to end through agora.cli.main with opencode: import -> search -> continue
+(native) -> continue (cross agent, reading injected), against real Drive
+(agora-test/), real opencode and real claude.
+
+Mirrors tests/integration/test_e2e_cli.py (which does the same with claude):
+the config is a temp dir whose rclone.conf symlinks to ~/.config/agora/rclone.conf
+(never read, only referenced by path), and every command goes through
+`agora.cli.main` so the assertions read like a user's session.
+
+Two shims make the interactive parts testable:
+
+* AGORA_OPENCODE_CMD -> tests/fakes/opencode_noninteractive.py, which turns the
+  TUI form `opencode --session <id>` into `opencode run -s <id> -m <model>
+  <fixed question>`. Invoked through `sys.executable`, so no shebang roulette.
+* AGORA_CLAUDE_CMD -> tests/fakes/claude_noninteractive.py (impl2's), which adds
+  `--disallowedTools Bash Read Glob Grep Edit Write WebFetch WebSearch Task` and
+  a fixed self-made prompt.
+
+The project directory is /tmp/agora-it-e2e-oc/p_專案.v2 on purpose: an underscore,
+Chinese and a dot in one path, which is what exercises opencode's project id and
+claude's directory encoding. opencode scopes sessions to the project directory,
+so running it here cannot reach the user's own sessions.
+
+Cleanup (ids are recorded the moment they exist, so a mid-test failure still
+tidies up): Drive sessions/<ULID> purged, own opencode session ids deleted one by
+one, own claude jsonl uuids deleted, then the project tree. Nothing is deleted in
+bulk and nothing outside agora-test/ is touched.
+
+Run: uv run pytest -q -m integration tests/integration/test_e2e_opencode.py
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import pwd
+import shutil
+import stat
+import subprocess
+import sys
+import uuid
+import warnings
+
+import pytest
+
+from agora import cli, store
+from agora.agents import claude as C
+
+pytestmark = pytest.mark.integration
+
+# pwd, not HOME: the sandbox replaces HOME per test.
+REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
+REAL_CONF = REAL_HOME / ".config" / "agora" / "rclone.conf"
+OPENCODE_WRAPPER = Path(__file__).parent.parent / "fakes" / "opencode_noninteractive.py"
+CLAUDE_WRAPPER = Path(__file__).parent.parent / "fakes" / "claude_noninteractive.py"
+MODEL = os.environ.get("AGORA_E2E_MODEL", "opencode/space-bunny-free")
+ASK = "把 CSV 轉成 Markdown 表格，先列三個步驟就好，不要真的動手做。"
+
+ROOT = Path("/tmp/agora-it-e2e-oc")
+PROJ = ROOT / "p_專案.v2"   # underscore + Chinese + dot, on purpose
+
+
+@pytest.fixture()
+def e2e(tmp_path, monkeypatch, capsys):
+    if not REAL_CONF.exists():
+        pytest.fail("需要 ~/.config/agora/rclone.conf（整合測試不能 skip）")
+    if shutil.which("opencode") is None:
+        pytest.skip("opencode not found")
+    if shutil.which("claude") is None:
+        pytest.skip("claude CLI not found")
+
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "rclone.conf").symlink_to(REAL_CONF)
+    monkeypatch.setenv("AGORA_CONFIG", str(config))
+    monkeypatch.setenv("AGORA_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("AGORA_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("AGORA_FOLDER_NAME", "agora-test")
+    monkeypatch.delenv("AGORA_RCLONE", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("AGORA_CLAUDE_HOME", str(REAL_HOME))
+    # opencode is left on the sandboxed HOME that conftest sets, so this test
+    # never writes to the real store; the free model needs no auth. (An earlier
+    # version forced HOME back to the real one and then cleaned up with the
+    # sandboxed HOME, so the teardown was deleting from a database the test had
+    # never written to.) Only the wrapper honours AGORA_REAL_HOME, and it is
+    # deliberately left unset here.
+    monkeypatch.delenv("AGORA_REAL_HOME", raising=False)
+    monkeypatch.setenv("AGORA_E2E_MODEL", MODEL)
+    monkeypatch.delenv("AGORA_OPENCODE_CMD", raising=False)
+
+    for src, var in ((OPENCODE_WRAPPER, "AGORA_OPENCODE_CMD"),
+                     (CLAUDE_WRAPPER, "AGORA_CLAUDE_CMD")):
+        shim = tmp_path / src.stem  # exec through sys.executable: no shebang lottery
+        shim.write_text(f"#!/bin/sh\nexec {sys.executable} {src} \"$@\"\n")
+        shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
+        monkeypatch.setenv(var, str(shim))
+
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    monkeypatch.setenv("FAKE_HOME", str(fake_home))
+
+    if ROOT.exists():
+        shutil.rmtree(ROOT)
+    PROJ.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=PROJ, check=True)
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "init"],
+                   cwd=PROJ, check=True)
+
+    paths = store.Paths.from_env()
+    # ids are recorded the moment they exist, not at the end (E3)
+    created = {"ulids": [], "ses": [], "uuids": []}
+    state = {"proj": PROJ.resolve(), "paths": paths, "created": created,
+             "fake_home": fake_home, "capsys": capsys}
+    yield state
+
+    _cleanup(state)
+
+
+def _cleanup(state) -> None:
+    created = state["created"]
+    proj, paths = state["proj"], state["paths"]
+
+    # opencode resolves the project from $PWD, so every call below has to carry
+    # it: cleanup that only sets cwd would look in the wrong project and leave
+    # the session behind (measured).
+    env = {**os.environ, "PWD": str(proj)}
+
+    # ids are taken from the wrapper log too, so a launch that happened right
+    # before a crash is still cleaned up.
+    log = state["fake_home"] / "opencode-e2e-args.log"
+    if log.exists():
+        for line in log.read_text().splitlines():
+            argv = json.loads(line)["argv"]
+            for flag in ("--session", "-s"):
+                if flag in argv and argv[argv.index(flag) + 1].startswith("ses_"):
+                    created["ses"].append(argv[argv.index(flag) + 1])
+
+    # opencode: one id at a time, never a pattern or a bulk delete
+    for session_id in sorted(set(created["ses"])):
+        proc = subprocess.run(["opencode", "session", "delete", session_id],
+                              cwd=str(proj), env=env, capture_output=True)
+        if proc.returncode != 0:
+            warnings.warn(f"delete {session_id} failed: {proc.stderr.decode()[-200:]}")
+
+    ulids = set(created["ulids"])
+    ulids.update(store.Index(paths).known())
+    if paths.outbox.is_dir():
+        ulids.update(p.parent.name for p in paths.outbox.glob("*/session.md"))
+    drive = store.Drive(paths)
+    for ulid in sorted(ulids):
+        proc = subprocess.run(
+            ["rclone", "--config", str(REAL_CONF),
+             "--drive-root-folder-id", drive.folder_id(),
+             "purge", f"gdrive:sessions/{ulid}"], capture_output=True)
+        if proc.returncode != 0:
+            warnings.warn(f"purge sessions/{ulid} failed: {proc.stderr.decode()[-200:]}")
+
+    # claude: only our own uuids, wherever claude decided to put them
+    for session_id in sorted(set(created["uuids"])):
+        for jsonl in C.projects_dir().glob(f"*/{session_id}.jsonl"):
+            jsonl.unlink()
+        for extra in C.projects_dir().glob(f"*/{session_id}"):
+            shutil.rmtree(extra, ignore_errors=True)
+        for cfgdir in (C.config_dir(),):
+            for extra in (cfgdir / "session-env" / session_id,
+                          cfgdir / "file-history" / session_id):
+                shutil.rmtree(extra, ignore_errors=True)
+            for todo in cfgdir.glob(f"todos/{session_id}-*.json"):
+                todo.unlink()
+    # claude leaves the project directory (and a memory/ inside it) behind even
+    # when every session file is gone; remove them if they are empty.
+    for stale in sorted(C.projects_dir().glob(f"*{C.encode_project_dir(proj).lstrip('-')}*"),
+                        key=lambda p: -len(str(p))):
+        shutil.rmtree(stale / "memory", ignore_errors=True)
+        try:
+            stale.rmdir()
+        except OSError:
+            pass   # something of someone else's is still in there: leave it
+    shutil.rmtree(ROOT, ignore_errors=True)
+
+
+def run_main(state, *argv: str) -> str:
+    rc = cli.main(list(argv))
+    out = state["capsys"].readouterr().out
+    assert rc == 0, out[-500:]
+    return out
+
+
+def header_of(state, agora_id: str) -> dict:
+    run_main(state, "sync")  # read back through the CLI + index, like a user
+    hdr = store.Index(state["paths"]).header(agora_id.split(":", 1)[1])
+    assert hdr is not None, f"{agora_id} 不在索引裡"
+    return hdr
+
+
+def opencode_run(state, *args: str, timeout: int = 300) -> str:
+    """`opencode run` in the project directory; returns stdout.
+
+    PWD is set explicitly: opencode picks the project from $PWD rather than the
+    process working directory, so a caller that only sets `cwd=` would file the
+    session under whatever directory the parent shell was in.
+    """
+    env = {**os.environ, "PWD": str(state["proj"])}
+    proc = subprocess.run(["opencode", "run", "-m", MODEL, *args],
+                          cwd=str(state["proj"]), env=env,
+                          capture_output=True, text=True, timeout=timeout)
+    assert proc.returncode == 0, proc.stderr[-400:]
+    return proc.stdout
+
+
+def export_bytes(state, session_id: str) -> bytes:
+    out = Path("/tmp/agora-it-e2e-oc/export.json")
+    with open(out, "wb") as handle:
+        proc = subprocess.run(["opencode", "export", session_id], cwd=str(state["proj"]),
+                              stdout=handle, stderr=subprocess.DEVNULL,
+                              env={**os.environ, "PWD": str(state["proj"])})
+    assert proc.returncode == 0
+    return out.read_bytes()
+
+
+def test_import_search_continue_native_then_cross_agent(e2e):
+    proj = e2e["proj"]
+    created = e2e["created"]
+    assert proj.name == "p_專案.v2" and proj.is_dir()
+
+    # 1. self-made short dialogue with the free model, then import it.
+    events = [json.loads(line) for line in
+              opencode_run(e2e, "--format", "json", "--title", "e2e-oc", ASK).splitlines()
+              if line.strip()]
+    source_id = next(e["sessionID"] for e in events if "sessionID" in e)
+    created["ses"].append(source_id)
+    source_before = len(json.loads(export_bytes(e2e, source_id))["messages"])
+
+    out = run_main(e2e, "import", "--format", "opencode", "--session-id", source_id,
+                   "--header", "title=e2e 表格")
+    id1 = out.split()[0]
+    assert id1.startswith("agora:")
+    created["ulids"].append(id1.split(":", 1)[1])
+
+    hdr1 = header_of(e2e, id1)
+    assert hdr1["source"]["agent"] == "opencode"
+    assert hdr1["source"]["session_id"] == source_id
+    assert hdr1["source"]["dir"] == str(proj)      # N9: from the export, not the folder name
+    assert hdr1["source"]["agent_version"][0].isdigit()
+    assert hdr1["relation"] == "import" and hdr1["parents"] == []
+    assert hdr1["raw"]["md5"] and hdr1["raw"]["file"].startswith("raw-")
+
+    # 2. search finds it through the index; the agora id comes first.
+    out = run_main(e2e, "search", "session", "表格")
+    assert any(line.split()[0] == id1 for line in out.splitlines() if line.split())
+
+    # 3. continue with opencode: native load (import with new ids), then the
+    #    wrapper's headless run on that new session.
+    out = run_main(e2e, "continue-session", id1, "--agent", "opencode", "--dir", str(proj))
+    id2 = out.split()[0]
+    assert id2.startswith("agora:") and id2 != id1
+    created["ulids"].append(id2.split(":", 1)[1])
+    hdr2 = header_of(e2e, id2)
+    assert hdr2["relation"] == "continue"
+    assert hdr2["parents"][0]["id"] == id1
+    assert hdr2["parents"][0]["raw_md5"] == hdr1["raw"]["md5"]
+    forked = hdr2["source"]["session_id"]
+    assert forked.startswith("ses_") and forked != source_id
+    created["ses"].append(forked)
+    assert hdr2["source"]["dir"] == str(proj)
+
+    # the session we branched from is untouched (spike V1a)
+    assert len(json.loads(export_bytes(e2e, source_id))["messages"]) == source_before
+
+    # the new session really carries the old transcript plus the new turn, and it
+    # belongs to the project directory agora imported it into (spike V5)
+    grown = json.loads(export_bytes(e2e, forked))
+    assert len(grown["messages"]) >= source_before + 2
+    assert grown["info"]["directory"].endswith("p_專案.v2")
+
+    # 4. cross agent: the same session continued by claude, reading version in.
+    #    No raw re-import, so the claude side must be an injected launch.
+    out = run_main(e2e, "continue-session", id1, "--agent", "claude", "--dir", str(proj))
+    id3 = out.split()[0]
+    assert id3.startswith("agora:") and id3 not in (id1, id2)
+    created["ulids"].append(id3.split(":", 1)[1])
+    hdr3 = header_of(e2e, id3)
+    assert hdr3["relation"] == "continue" and hdr3["parents"][0]["id"] == id1
+    uuid3 = hdr3["source"]["session_id"]
+    uuid.UUID(uuid3)
+    created["uuids"].append(uuid3)
+
+    # 5. what each agent was asked to do, from the wrappers' logs.
+    oc_launches = [json.loads(line)["argv"] for line in
+                   (e2e["fake_home"] / "opencode-e2e-args.log").read_text().splitlines()]
+    assert [a for a in oc_launches if "--session" in a] == [["--session", forked]]
+    cl_launches = [json.loads(line) for line in
+                   (e2e["fake_home"] / "e2e-args.log").read_text().splitlines()
+                   if "--resume" in line or "--session-id" in line]
+    assert len(cl_launches) == 1 and "--session-id" in cl_launches[0]

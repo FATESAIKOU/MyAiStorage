@@ -186,6 +186,13 @@ def test_real_injected_round_trip(project, source, trash, tmp_path, isolated_sto
     collected = oc.ADAPTER.collect(launch)
     assert collected is not None
     assert collected.message_count > 1
+    # E-2: a loose check that the agent really read it. The injected part is
+    # marked `synthetic`, which is exactly how opencode hands a file to the
+    # model - so if a future version stopped doing that, the message count would
+    # still look fine and this is what would notice.
+    body = oc.ADAPTER.reading(collected.raw)
+    assert ("CSV" in body) or ("表格" in body), \
+        "回答裡完全沒有閱讀版才有的字，agent 可能根本沒讀到"
 
 
 def test_real_reimport_is_idempotent(project, source, trash, monkeypatch, isolated_store):

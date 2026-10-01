@@ -559,9 +559,11 @@ def test_a_hanging_opencode_becomes_an_error_not_a_hang(fake, workdir, monkeypat
         oc.ADAPTER.export("default")
 
 
-def test_the_version_falls_back_to_the_cli_only_when_the_export_has_none(fake):
+def test_no_version_in_the_export_means_no_version_in_the_header(fake):
+    """Q8: asking the CLI would report whatever is installed now, which is not the
+    version that produced the session. Nothing is better than the wrong answer."""
     payload = json.loads(raw())
     payload["info"].pop("version")
     store = fake / "opencode-sessions" / "noversion.json"
     store.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    assert oc.ADAPTER.export("noversion").agent_version == "9.9.9"
+    assert oc.ADAPTER.export("noversion").agent_version is None
