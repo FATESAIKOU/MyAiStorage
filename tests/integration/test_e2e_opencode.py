@@ -47,6 +47,11 @@ import pytest
 from agora import cli, store
 from agora.agents import claude as C
 
+# The model chain lives in the fake the wrapper runs, so both integration tests
+# try the same models in the same order (tests/fakes is not a package).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fakes"))
+import opencode_noninteractive as agent  # noqa: E402  (needs the path above)
+
 pytestmark = pytest.mark.integration
 
 # pwd, not HOME: the sandbox replaces HOME per test.
@@ -54,7 +59,6 @@ REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
 REAL_CONF = REAL_HOME / ".config" / "agora" / "rclone.conf"
 OPENCODE_WRAPPER = Path(__file__).parent.parent / "fakes" / "opencode_noninteractive.py"
 CLAUDE_WRAPPER = Path(__file__).parent.parent / "fakes" / "claude_noninteractive.py"
-MODEL = os.environ.get("AGORA_E2E_MODEL", "opencode/space-bunny-free")
 ASK = "把 CSV 轉成 Markdown 表格，先列三個步驟就好，不要真的動手做。"
 
 ROOT = Path("/tmp/agora-it-e2e-oc")
@@ -87,7 +91,6 @@ def e2e(tmp_path, monkeypatch, capsys):
     # never written to.) Only the wrapper honours AGORA_REAL_HOME, and it is
     # deliberately left unset here.
     monkeypatch.delenv("AGORA_REAL_HOME", raising=False)
-    monkeypatch.setenv("AGORA_E2E_MODEL", MODEL)
     monkeypatch.delenv("AGORA_OPENCODE_CMD", raising=False)
 
     for src, var in ((OPENCODE_WRAPPER, "AGORA_OPENCODE_CMD"),
@@ -110,7 +113,7 @@ def e2e(tmp_path, monkeypatch, capsys):
 
     paths = store.Paths.from_env()
     # ids are recorded the moment they exist, not at the end (E3)
-    created = {"ulids": [], "ses": [], "uuids": []}
+    created = {"ulids": [], "ses": [], "uuids": [], "printed": []}
     state = {"proj": PROJ.resolve(), "paths": paths, "created": created,
              "fake_home": fake_home, "capsys": capsys}
     yield state
@@ -144,10 +147,11 @@ def _cleanup(state) -> None:
         if proc.returncode != 0:
             warnings.warn(f"delete {session_id} failed: {proc.stderr.decode()[-200:]}")
 
-    ulids = set(created["ulids"])
-    ulids.update(store.Index(paths).known())
-    if paths.outbox.is_dir():
-        ulids.update(p.parent.name for p in paths.outbox.glob("*/session.md"))
+    # P1 (D-1): this test's own printed ids only. `agora-test/` also holds other
+    # people's sessions, and a sync has already listed them into this cache, so
+    # purging "everything I know about" would delete their data.
+    ulids = {u.split(":", 1)[1] for u in created["printed"]}
+    ulids.update(created["ulids"])
     drive = store.Drive(paths)
     for ulid in sorted(ulids):
         proc = subprocess.run(
@@ -157,23 +161,29 @@ def _cleanup(state) -> None:
         if proc.returncode != 0:
             warnings.warn(f"purge sessions/{ulid} failed: {proc.stderr.decode()[-200:]}")
 
-    # claude: only our own uuids, wherever claude decided to put them
+    # P2 (E3/D-2): the wrapper logs the uuid before the agent starts, so a failed
+    # continue still gets cleaned up. Paths are exact - never a glob over the real
+    # ~/.claude/projects/*/ or todos/, which lists other people's filenames.
+    claude_log = state["fake_home"] / "e2e-args.log"
+    if claude_log.exists():
+        for line in claude_log.read_text().splitlines():
+            argv = json.loads(line)
+            for flag in ("--resume", "--session-id"):
+                if flag in argv:
+                    created["uuids"].append(argv[argv.index(flag) + 1])
+    basedir = C.projects_dir() / C.encode_project_dir(proj)
+    cfgdir = C.config_dir()
     for session_id in sorted(set(created["uuids"])):
-        for jsonl in C.projects_dir().glob(f"*/{session_id}.jsonl"):
+        jsonl = basedir / f"{session_id}.jsonl"
+        if jsonl.is_file():
             jsonl.unlink()
-        for extra in C.projects_dir().glob(f"*/{session_id}"):
+        shutil.rmtree(basedir / session_id, ignore_errors=True)
+        for extra in (cfgdir / "session-env" / session_id,
+                      cfgdir / "file-history" / session_id):
             shutil.rmtree(extra, ignore_errors=True)
-        for cfgdir in (C.config_dir(),):
-            for extra in (cfgdir / "session-env" / session_id,
-                          cfgdir / "file-history" / session_id):
-                shutil.rmtree(extra, ignore_errors=True)
-            for todo in cfgdir.glob(f"todos/{session_id}-*.json"):
-                todo.unlink()
     # claude leaves the project directory (and a memory/ inside it) behind even
-    # when every session file is gone; remove them if they are empty.
-    for stale in sorted(C.projects_dir().glob(f"*{C.encode_project_dir(proj).lstrip('-')}*"),
-                        key=lambda p: -len(str(p))):
-        shutil.rmtree(stale / "memory", ignore_errors=True)
+    # when every session file is gone. Only this exact name, and only if empty.
+    for stale in (basedir / "memory", basedir):
         try:
             stale.rmdir()
         except OSError:
@@ -184,6 +194,15 @@ def _cleanup(state) -> None:
 def run_main(state, *argv: str) -> str:
     rc = cli.main(list(argv))
     out = state["capsys"].readouterr().out
+    if argv and argv[0] in ("import", "continue-session", "merge-session"):
+        # P1 (D-1): record our own new id the moment it is printed, even if the
+        # command then fails. Never collect from the index: agora-test/ is shared,
+        # and `sync` has already pulled everyone else's sessions into this cache.
+        for token in out.split():
+            if token.startswith("agora:") and len(token) == len("agora:") + 26:
+                if token not in state["created"]["printed"]:
+                    state["created"]["printed"].append(token)
+                break
     assert rc == 0, out[-500:]
     return out
 
@@ -198,15 +217,19 @@ def header_of(state, agora_id: str) -> dict:
 def opencode_run(state, *args: str, timeout: int = 300) -> str:
     """`opencode run` in the project directory; returns stdout.
 
+    Tries each candidate model in turn (see tests/fakes/opencode_noninteractive.py)
+    and only skips when none of them answered.
+
     PWD is set explicitly: opencode picks the project from $PWD rather than the
     process working directory, so a caller that only sets `cwd=` would file the
     session under whatever directory the parent shell was in.
     """
     env = {**os.environ, "PWD": str(state["proj"])}
-    proc = subprocess.run(["opencode", "run", "-m", MODEL, *args],
-                          cwd=str(state["proj"]), env=env,
-                          capture_output=True, text=True, timeout=timeout)
-    assert proc.returncode == 0, proc.stderr[-400:]
+    proc, model, failures = agent.ask(list(args), cwd=str(state["proj"]),
+                                      timeout=timeout, env=env)
+    if proc is None:
+        pytest.skip(agent.skip_reason(failures))
+    print(f"[{os.path.basename(__file__)}] 來源 Session 用到模型：{model}", file=sys.stderr)
     return proc.stdout
 
 
@@ -285,12 +308,17 @@ def test_import_search_continue_native_then_cross_agent(e2e):
     assert hdr3["relation"] == "continue" and hdr3["parents"][0]["id"] == id1
     uuid3 = hdr3["source"]["session_id"]
     uuid.UUID(uuid3)
-    created["uuids"].append(uuid3)
+    assert uuid3 in {json.loads(l)[json.loads(l).index("--session-id") + 1]
+                     for l in (e2e["fake_home"] / "e2e-args.log").read_text().splitlines()
+                     if "--session-id" in json.loads(l)}, \
+        "wrapper 沒有記到這個 uuid，teardown 會漏掉它的 jsonl"
 
     # 5. what each agent was asked to do, from the wrappers' logs.
-    oc_launches = [json.loads(line)["argv"] for line in
-                   (e2e["fake_home"] / "opencode-e2e-args.log").read_text().splitlines()]
-    assert [a for a in oc_launches if "--session" in a] == [["--session", forked]]
+    oc_log = [json.loads(line) for line in
+              (e2e["fake_home"] / "opencode-e2e-args.log").read_text().splitlines()]
+    launches = [row for row in oc_log if "--session" in row["argv"]]
+    assert [row["argv"] for row in launches] == [["--session", forked]]
+    assert launches[0]["model"], "wrapper log 沒有記錄到用哪個模型"
     cl_launches = [json.loads(line) for line in
                    (e2e["fake_home"] / "e2e-args.log").read_text().splitlines()
                    if "--resume" in line or "--session-id" in line]

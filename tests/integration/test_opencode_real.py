@@ -18,14 +18,19 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
 from agora.agents import opencode as oc
 
+# The model chain lives in the fake so the e2e uses the same one (tests/fakes is
+# not a package; the integration tests are the only importers).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fakes"))
+import opencode_noninteractive as agent  # noqa: E402  (needs the path above)
+
 pytestmark = pytest.mark.integration
 
-MODEL = os.environ.get("AGORA_TEST_MODEL", "opencode/space-bunny-free")
 PROJ = Path("/tmp/agora-it-opencode/proj")
 
 # OC4: an earlier version of this file set the *real* HOME in a module-scope
@@ -39,32 +44,22 @@ FIRST_ASK = "把 CSV 轉成 Markdown 表格，先列三個步驟就好，不要�
 SECOND_ASK = "你前面在做什麼？用一句話回答。"
 
 
-#: The free model is a shared, rate-limited endpoint. Calls that normally take
-#: 45s have been measured taking more than seven minutes with no output at all
-#: (spike V1 saw the same hang). Retry a couple of times, then skip rather than
-#: fail: a slow third-party model is not a defect in the adapter.
+#: The free models are shared, rate-limited endpoints: calls that normally take
+#: 45s have been measured taking more than seven minutes with no output at all.
+#: So each candidate model gets a generous deadline, the candidates are tried in
+#: order, and the test only skips when every one of them has failed - with the
+#: list of what was tried, because a skip nobody can explain is a test nobody
+#: trusts.
 MODEL_TIMEOUT = int(os.environ.get("AGORA_TEST_TIMEOUT", "300"))
-MODEL_ATTEMPTS = int(os.environ.get("AGORA_TEST_ATTEMPTS", "3"))
-
-
-def _opencode(*args: str, cwd: Path = PROJ, timeout: int = MODEL_TIMEOUT) -> subprocess.CompletedProcess:
-    return subprocess.run(["opencode", *args], cwd=str(cwd), capture_output=True,
-                          text=True, timeout=timeout)
 
 
 def ask(*args: str) -> subprocess.CompletedProcess:
-    """`opencode run`, with retries; skip the test if the model stays silent."""
-    last = ""
-    for attempt in range(MODEL_ATTEMPTS):
-        try:
-            proc = _opencode(*args)
-        except subprocess.TimeoutExpired:
-            last = f"timed out after {MODEL_TIMEOUT}s (attempt {attempt + 1})"
-            continue
-        if proc.returncode == 0:
-            return proc
-        last = proc.stderr[-400:]
-    pytest.skip(f"the free model did not answer: {last}")
+    """`opencode run` on the first candidate model that answers."""
+    proc, model, failures = agent.ask(list(args), cwd=PROJ, timeout=MODEL_TIMEOUT)
+    if proc is None:
+        pytest.skip(agent.skip_reason(failures))
+    print(f"[{os.path.basename(__file__)}] 用到模型：{model}", file=sys.stderr)
+    return proc
 
 
 def raw_of(session_id: str) -> bytes:
@@ -128,8 +123,7 @@ def source(project, isolated_store, trash):
     It records its own id for cleanup the moment it exists, so a failure later in
     the test still tidies up after it.
     """
-    proc = ask("run", "-m", MODEL, "--format", "json", "--title",
-               "agora-it-source", FIRST_ASK)
+    proc = ask("run", "--format", "json", "--title", "agora-it-source", FIRST_ASK)
     events = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
     session_id = next(event["sessionID"] for event in events if "sessionID" in event)
     trash.append(session_id)
@@ -153,8 +147,7 @@ def test_real_round_trip(project, source, trash, isolated_store):
     # here is `run --session <id>` on the same session id.
     assert launch.argv[1:] == ["--session", launch.agent_session_id]
 
-    ask("run", "-m", MODEL, "-s", launch.agent_session_id,
-        "--format", "json", SECOND_ASK)
+    ask("run", "-s", launch.agent_session_id, "--format", "json", SECOND_ASK)
 
     collected = oc.ADAPTER.collect(launch)
     assert collected is not None, "the agent said something new"
@@ -180,8 +173,8 @@ def test_real_injected_round_trip(project, source, trash, tmp_path, isolated_sto
     trash.append(launch.agent_session_id)
     assert launch.before_count == 1
 
-    ask("run", "-m", MODEL, "-s", launch.agent_session_id,
-        "--format", "json", "你讀到的閱讀版在講什麼？用一句話回答。")
+    ask("run", "-s", launch.agent_session_id, "--format", "json",
+        "你讀到的閱讀版在講什麼？用一句話回答。")
 
     collected = oc.ADAPTER.collect(launch)
     assert collected is not None

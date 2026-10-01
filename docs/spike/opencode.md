@@ -664,3 +664,68 @@ auth），`AGORA_REAL_HOME` 不設，teardown 就刪得到。順帶的好處是�
 5. **§8**：`src` 的 2,000 行目標建議寫清楚怎麼算（review 也提了）。現在用
    `wc -l` 算是 1,900 行，其中說明文字（docstring、註解、空行）大約 200 行；
    真正的程式碼遠低於 1,700，說明文字不必為了行數去砍。
+
+---
+
+## final.md P1–P3 與模型 fallback（2026-10-02 深夜）
+
+### P1（High）：e2e 的 teardown 只收這個測試自己印出來的 id
+
+原本寫 `ulids.update(store.Index(paths).known())` 想「保險一點全刪」，但 `sync`
+早就把共用 `agora-test/sessions/` 裡**所有人**的 Session 同步進這個 cache，
+所以那行等於「把別人的資料刪掉」（和 impl2 的 D-1 同一個錯）。改成照
+`test_e2e_cli.py`：只有 `run_main` 在 `import`／`continue-session`／
+`merge-session` 的 stdout 印出來的那個 id 會被記下（`created["printed"]`，
+`len(token) == len("agora:") + 26` 才算），teardown 只 purge 這些。
+`search`／`show` 的輸出永遠不掃——那裡面會有別人的 Session。
+
+### P2（Medium）：claude 的 uuid 也從 wrapper 的參數紀錄收
+
+原本只在 `header_of(id3)` 的斷言成功之後才 append，所以 continue 一失敗，
+claude 寫在真實 `~/.claude/projects/` 裡的 jsonl 就留下來。改成 teardown 也讀
+`$FAKE_HOME/e2e-args.log`，把 `--session-id`／`--resume` 後面的 uuid 收進來。
+
+順手把刪除改成**精確路徑**（D-2／CL12 那一類寫法）：`projects_dir()/<encode(proj)>/<uuid>.jsonl`
+與同名 sidecar 目錄、`config_dir()/session-env/<uuid>`、`file-history/<uuid>`。
+不再 `glob("*/<uuid>.jsonl")`（會掃過真實的專案目錄清單）、不再 glob `todos/`
+（工具都擋掉了，不會有）、也不再用子字串比對專案資料夾名稱後整個刪 `memory/`——
+只有 `encode(proj()` 這一個精確名字，而且是 `rmdir`（非空就不動）。
+
+### P3（Medium）：用設定擋掉 opencode 的工具，不只靠 prompt
+
+所有測試裡的 `opencode run`（wrapper 與兩個測試的 `opencode_run`／`ask`）都在
+env 裡帶 `OPENCODE_PERMISSION='{"*":"deny"}'`，放在 `tests/fakes/opencode_noninteractive.py`
+的 `PERMISSION` 常數，不給環境變數覆寫（免得 CI 上不小心關掉）。
+
+**怎麼確認它真的擋住了**（在 `/private/tmp/agora-it-x/p_專案.v2`，免費模型，
+問題是「請用 read 工具讀取 /tmp/agora-it-x/不存在的檔案.txt」，
+以 `--format json` 看事件）：
+
+| 設定 | `tool_use` 事件 | 模型回答 |
+|---|---|---|
+| 不設（對照組） | **1 個**：`{tool: read, status: error}`（`File not found`） | 說檔案不存在，並列出專案目錄 |
+| `OPENCODE_PERMISSION='{"*":"deny"}'` | **0 個** | 直接說無法讀取該檔案 |
+
+也就是說：沒有這個設定時，模型會照著提示去呼叫 `read`，而 opencode 的 read／glob／
+grep／bash 都能用絕對路徑讀到 `~/` 底下的任何檔案（HOME 被隔離只會改變 `~` 指向哪裡）；
+有了這個設定，模型**連嘗試都沒有**。這比「在 prompt 裡拜託它不要用工具」可靠——
+claude 那一側本來就是用 `--disallowedTools` 擋的，現在兩邊一致了。
+
+### 模型 fallback：依序試，全部沒回答才 skip
+
+`tests/fakes/opencode_noninteractive.py` 的 `model_chain()` 定義順序：
+
+1. `opencode/space-bunny-free`
+2. `opencode/muse-spark-1.3-contributor-free`
+3. `ollama-cloud/deepseek-v4.1-flash --variant max`——**只在這台機器真的有這個
+   provider 時**才列入，用 `opencode models ollama-cloud` 判斷（結果快取）。
+   實測：真的 HOME 底下列得出來（`opencode providers list` 也有 Ollama Cloud 的
+   credential），但**整合測試刻意用隔離的 HOME**，那裡沒有 credential，
+   `opencode models ollama-cloud` 會回答 `Provider not found`，所以第三個模型會被
+   自動略過——測試因此**不會**用到使用者自己的第三方額度。要驗證第三個模型，
+   得用真的 HOME 跑，那就不在測試裡做了。
+
+`ask()` 逐個試，每個都有 `AGORA_TEST_TIMEOUT`（預設 300 秒）的期限；只有**全部**
+都逾時或 rc≠0 才 `pytest.skip`，而且 skip 訊息會列出試過哪些模型、每個的錯誤是什麼
+（`opencode/space-bunny-free: 逾時（300 秒，沒有任何輸出）；…`）。回答的模型會印一行
+出來，e2e 也把它記進 wrapper 的 log（`{"model": …, "failures": […]}`）。
