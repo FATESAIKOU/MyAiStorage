@@ -182,6 +182,38 @@ def test_failed_listing_keeps_mirror(remote, monkeypatch):  # U-ST-20, N12
     assert store.sync(paths).search(T("CSV"))
 
 
+def test_a_mark_that_is_already_there_survives_a_broken_listing(remote, monkeypatch):
+    """L4, spec: 「原本的標記也不變」. Start from a session already marked."""
+    paths = store.Paths.from_env()
+    ulid = _save(paths, _header())
+    import shutil
+    assert store.sync(paths).search(T("CSV"))            # indexed first: it is a local session
+    shutil.rmtree(remote / "agora" / "sessions" / ulid)
+    assert store.sync(paths).missing_in_cloud() == [ulid]
+
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "lsjson")       # offline
+    assert store.sync(paths).missing_in_cloud() == [ulid]
+    monkeypatch.delenv("FAKE_RCLONE_FAIL")
+    shutil.rmtree(remote / "agora" / "sessions")           # no sessions/ at all
+    assert store.sync(paths).missing_in_cloud() == [ulid]
+    assert store.sync(paths).cloud_has(ulid) is False
+
+
+def test_a_session_in_the_outbox_is_not_marked(remote, monkeypatch, capsys):  # L4, Q2
+    """Not up yet is not "deleted on another machine", even when the listing works."""
+    paths = store.Paths.from_env()
+    folder = store.stage(paths, _header(), "## user\n還沒上傳的內容\n", None)
+    ulid = folder.name
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")       # the upload fails, the listing does not
+    capsys.readouterr()
+    assert ulid in store.outbox_ulids(paths)
+    assert store.sync(paths).missing_in_cloud() == []
+    assert ulid in store.outbox_ulids(paths)               # still staged, still not marked
+    monkeypatch.delenv("FAKE_RCLONE_FAIL")
+    store.push_one(store.Drive(paths), folder)
+    assert store.sync(paths).missing_in_cloud() == []
+
+
 def test_fetch_raw_refetches_session_md(remote, tmp_path):  # U-ST-21, N8
     paths = store.Paths.from_env()
     hdr = _header()

@@ -497,6 +497,20 @@ def test_not_exist_delete_for_an_agent_id_drops_its_cached_text(drive, capsys):
     assert not (paths.reading / "claude" / "s.md").exists()
 
 
+def test_not_exist_delete_for_an_agent_id_the_agent_still_has(drive, capsys):
+    """M2: the flag says "the agent lost it", so ask the agent. It still has this
+    one, so this is an ordinary pull - the cached text stays and gets refreshed."""
+    paths = store.Paths.from_env()
+    agent = Agent({"s": ["問", "答"]}, [Listed("s", "/tmp/p", "t", "2026-10-02T00:00:00Z")])
+    cache.local_reading(paths, agent, "s", "2026-10-01T00:00:00Z")     # cached, and stale
+    agent.texts["s"] = ["問", "答", "補一句"]
+
+    assert cache.pull(paths, ["claude:s"], {"claude": agent}, not_exist_delete=True) == (1, 0)
+    assert "快取已刪" not in capsys.readouterr().err
+    assert "## user\n問" in (paths.reading / "claude" / "s.md").read_text()
+    assert agent.exports == 2             # the one above, plus this pull refreshing the cache
+
+
 def test_not_exist_upload_sends_the_session_back(drive):
     paths = store.Paths.from_env()
     ulid = _on_drive(paths)

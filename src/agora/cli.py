@@ -163,6 +163,33 @@ def _header_for(index: store.Index, agora_id: str) -> dict:
     return hdr
 
 
+def _lost_in_cloud(paths: store.Paths, agora_id: str) -> bool:
+    """Whether Drive has stopped having this session, asked now (review M1).
+
+    Not the marker: markers move on a sync, a throttled one can be five minutes
+    old, and a session being continued is never marked at all (Q2). Only Drive can
+    answer, and it answers about this one folder, so nothing else is disturbed.
+    Offline is not a delete: the write goes to the outbox and a later push retries.
+    """
+    try:
+        return _ulid_of(agora_id) not in store.Drive(paths).list_sessions()
+    except store.StoreError:
+        return False
+
+
+def _cloud_lost(agora_id: str) -> str:
+    """The one place the two ways out of a deleted session are worded (review L2)."""
+    return (f"{agora_id} 雲端沒有（別台機器刪掉了），不再寫回去；"
+            f"要傳回去用 agora push session {agora_id} --not-exist-upload，"
+            f"要刪掉本機這份用 agora pull session {agora_id} --not-exist-delete")
+
+
+def _refuse_if_gone(paths: store.Paths, agora_id: str) -> None:
+    """The write-side guard for the long paths: continue, edit (review M1)."""
+    if _lost_in_cloud(paths, agora_id):
+        raise InputError(_cloud_lost(agora_id))
+
+
 def _need_in_cloud(index: store.Index, agora_id: str) -> None:
     """Refuse to write to a session Drive no longer has (T1 3.3, Q1).
 
@@ -172,9 +199,7 @@ def _need_in_cloud(index: store.Index, agora_id: str) -> None:
     """
     if index.cloud_has(_ulid_of(agora_id)):
         return
-    raise InputError(f"{agora_id} 雲端沒有（別台機器刪掉了），不再寫回去；"
-                     f"要傳回去用 agora push session {agora_id} --not-exist-upload，"
-                     f"要刪掉本機這份用 agora pull session {agora_id} --not-exist-delete")
+    raise InputError(_cloud_lost(agora_id))
 
 
 def _body_for(paths: store.Paths, agora_id: str) -> str:
@@ -199,7 +224,7 @@ def cmd_search(args, paths: store.Paths) -> int:
     if args.ids:
         raise InputError("search 不接 session id；用 --filter，例如 --filter text~=表格")
     filters = h.parse_filters(args.filter)
-    index = store.Index(paths).rebuild_from_mirror(paths) if args.no_sync else store.sync(paths, throttle=True)
+    index = store.Index(paths) if args.no_sync else store.sync(paths, throttle=True)
     seen: dict[tuple, str] = {}
     outbox = store.outbox_ulids(paths)
     for ulid, hdr, snippet in index.search(filters):
@@ -529,7 +554,18 @@ def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
     body = reading(agent, exported.raw)
     index = store.Index(paths)
     hdr = index.header(_ulid_of(record["agora_id"])) or {}
-    if not hdr:                  # gone meanwhile (deleted elsewhere): keep the work as a session of its own
+    lost = bool(hdr) and _lost_in_cloud(paths, record["agora_id"])
+    if lost:
+        # Deleted on another machine while the agent was working. The conversation
+        # is the user's work and does not go away with the session, so it becomes a
+        # session of its own and points back at the one that is gone (review M1).
+        raw_md5 = (h.agora_of(hdr).get("raw") or {}).get("md5")
+        hdr = _auto_header("continue", [{"id": record["agora_id"], "raw_md5": raw_md5}], body,
+                           title=record.get("title") or exported.title, exported=exported,
+                           agent=agent, parent_headers=[hdr])
+        print(f"[agora] {record['agora_id']} 在你接續的時候被別台機器刪掉了，"
+              f"這次的對話另存成 {hdr['id']}；原來那個保持被刪掉的狀態", file=sys.stderr)
+    elif not hdr:           # forgotten here entirely: same work, its own session
         hdr = _auto_header("import", [], body, title=record.get("title") or exported.title,
                            exported=exported, agent=agent)
         hdr["id"] = record["agora_id"]
@@ -605,7 +641,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
     updates = _updates(args)
     source_id = _the_id(args)
     index = _sync_for(paths, [source_id])
-    _need_in_cloud(index, source_id)          # T1 3.3: no agent is opened for it
+    _refuse_if_gone(paths, source_id)         # T1 3.3: no agent is opened for it
     parent = _header_for(index, source_id)
     agora = h.agora_of(parent)
     src = agora.get("source") or {}
@@ -760,7 +796,7 @@ def _remember_deleted(paths: store.Paths, ulid: str) -> None:
 def cmd_edit(args, paths: store.Paths) -> int:
     agora_id = _the_id(args)
     index = _sync_for(paths, [agora_id])
-    _need_in_cloud(index, agora_id)
+    _refuse_if_gone(paths, agora_id)
     old = _header_for(index, agora_id)
     body = _body_for(paths, agora_id)
     updates = _updates(args)

@@ -124,6 +124,20 @@ def test_deleted_remote_session_stays_and_is_marked(remote):  # U-ST-12, T1 R6
     assert index.missing_in_cloud() == [ulid] and not index.cloud_has(ulid)
 
 
+def test_a_bumped_index_is_filled_from_the_mirror_whatever_was_put_first(remote):
+    """M3: after a version bump the index is rebuilt from the mirror, not only when
+    it looks empty - `recover_pending` writes a row before anything else looks."""
+    paths = store.Paths.from_env()
+    ulids = [_save(paths, _header(f"第 {i} 篇")) for i in range(3)]
+    store.sync(paths)                        # the mirror is the local truth
+    index = store.Index(paths)
+    index.db.execute(f"PRAGMA user_version = {store.INDEX_VERSION - 1}")
+    index.put(ulids[0], "0" * 32, _header("先寫進去的那筆"), "")   # a row lands first
+
+    assert sorted(store.Index(paths).known()) == sorted(ulids)
+    assert sorted(u for u, _, _ in store.Index(paths).search(T("第"))) == sorted(ulids)
+
+
 def test_mirror_holds_only_session_md_and_one_listing(remote):  # U-ST-13
     paths = store.Paths.from_env()
     for _ in range(3):

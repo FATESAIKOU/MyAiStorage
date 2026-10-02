@@ -959,6 +959,50 @@ def test_edit_refuses_a_session_the_cloud_lost(env, capsys):
     assert code == 1 and "雲端沒有" in err
 
 
+def test_continue_and_edit_ask_drive_even_right_after_a_sync(env, capsys):
+    """M1: the import synced a moment ago, so a throttled answer would be the one
+    that still says "yes". The delete came after it, so only a fresh listing sees it."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    assert (store.Paths.from_env().state / "last-sync").exists()   # the throttle is armed
+    shutil.rmtree(Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid)
+
+    code, _, err = run(capsys, "continue", "session", a, "--agent", "opencode")
+    assert code == 1 and "雲端沒有" in err and not env.launched
+    code, _, err = run(capsys, "edit", "session", a, "--header", "title=改了")
+    assert code == 1 and "雲端沒有" in err
+
+
+def test_a_continue_whose_session_vanished_keeps_the_work_as_its_own_session(env, capsys):
+    """M1: another machine deleted it while the agent worked. The conversation is the
+    user's work, so it becomes a session of its own; the deleted one stays deleted."""
+    _, parent, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = parent.split(":")[1]
+    env.sessions["ses_x"] = ["繼續的問題", "接著做完了"]
+    record = {"agora_id": parent, "agent": "opencode", "agent_session_id": "ses_x",
+              "dir": "/tmp", "before_count": 1, "parent": {"id": parent, "raw_md5": None},
+              "title": "接著做的"}
+    _, lock = cli._write_pending(paths, record)     # the agent is working: pending exists
+    lock.close()
+    shutil.rmtree(Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid)
+
+    _, _, err = run(capsys, "search", "session")
+    assert "在你接續的時候被別台機器刪掉了" in err
+    index = store.sync(paths)                       # a full sync: it is gone from Drive now
+    assert index.missing_in_cloud() == [ulid] and not index.cloud_has(ulid)
+    assert index.header(ulid) is not None           # the deleted one stays put, marked
+    kept = [hdr for _, hdr, _ in index.search([]) if hdr["id"] != parent]
+    assert len(kept) == 1
+    hdr = kept[0]
+    assert hdr["agora"]["relation"] == "continue"
+    assert [p["id"] for p in hdr["agora"]["parents"]] == [parent]
+    assert [s["id"] for s in hdr["sources"]] == ["opencode:ses_x", parent]
+    assert hdr["agora"]["source"]["session_id"] == "ses_x"
+    body = (paths.mirror / hdr["id"].split(":")[1] / "session.md").read_text(encoding="utf-8")
+    assert "接著做完了" in body                     # the work is not thrown away
+
+
 def test_merge_refuses_a_source_the_cloud_lost(env, capsys):
     a, _ = _lost_in_the_cloud(capsys)
     env.sessions["ses_b"] = ["另一個", "好"]

@@ -67,6 +67,10 @@
 - **WHEN** X 雲端沒有，執行 `agora continue session X --agent opencode`
 - **THEN** exit 1，提示兩個選擇，agent 沒有被打開
 
+#### Scenario: 接續到一半被別台刪掉的
+- **WHEN** 執行 `agora continue session X` 之前 X 還在雲端，agent 工作的這段時間裡另一台機器刪掉了 X
+- **THEN** 這次的工作不丟掉：另存成一個新的 Session Y（relation continue、parents 指向 X），並說明 X 已被刪；X 維持被刪的狀態，沒有被寫回去
+
 #### Scenario: 用管線清掉
 - **WHEN** 執行 `agora search session --filter cloud=no`
 - **THEN** 只列出雲端沒有的 Session，每行最後標示 `(雲端沒有)`

@@ -359,11 +359,12 @@ class Index:
     def __init__(self, paths: Paths):
         paths.cache.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(paths.cache / "index.sqlite")
-        if self.db.execute("PRAGMA user_version").fetchone()[0] != INDEX_VERSION:
+        bumped = self.db.execute("PRAGMA user_version").fetchone()[0] != INDEX_VERSION
+        if bumped:
             self.db.executescript("DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS fts;"
                                   " DROP TABLE IF EXISTS cloud_missing;")
             self.db.execute(f"PRAGMA user_version = {INDEX_VERSION}")
-            self.db.commit()   # sync fills it again from the mirror and the listing
+            self.db.commit()
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS sessions (
                 ulid TEXT PRIMARY KEY, md5 TEXT, header TEXT, body TEXT,
@@ -372,15 +373,17 @@ class Index:
                 ulid UNINDEXED, text, tokenize='trigram');
             CREATE TABLE IF NOT EXISTS cloud_missing (ulid TEXT PRIMARY KEY);
         """)
+        if bumped:
+            self.rebuild_from_mirror(paths)
 
     def rebuild_from_mirror(self, paths: Paths) -> "Index":
-        """An empty index next to a filled mirror (the db was deleted): rebuild it offline."""
-        if not self.known() and paths.mirror.exists():
-            for md in paths.mirror.glob("*/session.md"):
-                try:
-                    _put_file(self, md)
-                except (h.HeaderError, OSError, UnicodeDecodeError):
-                    continue
+        """Fill an index that has just been emptied (a version bump, a deleted db)
+        from the mirror, which is the local truth and needs no Drive (review M3)."""
+        for md in sorted(paths.mirror.glob("*/session.md")):
+            try:
+                _put_file(self, md)
+            except (h.HeaderError, OSError, UnicodeDecodeError):
+                continue
         return self
 
     def known(self) -> dict[str, str]:
@@ -540,8 +543,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
     came back whole (Q4).
     """
     say = warn or _warn      # the interactive mode passes its own sink, not the screen's (review K3)
-    index = Index(paths)
-    index.rebuild_from_mirror(paths)   # after a version bump the index is empty; the mirror has it
+    index = Index(paths)   # a bumped index is already back from the mirror
     stamp = paths.state / "last-sync"
     if throttle and stamp.exists() and now() - float(stamp.read_text()) < SYNC_THROTTLE_S:
         return index

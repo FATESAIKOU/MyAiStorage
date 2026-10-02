@@ -29,6 +29,7 @@
 - [x] 3.4 search／show 標示、`--filter cloud=no|yes`；merge 拒絕雲端沒有的來源；delete 雲端沒有的只刪本機；`children()` 與 import 的對應不計入雲端沒有的（Q3）
 - [x] 3.5 單元測試：列檔失敗不動標記、別台刪掉被標記、又出現被清除、outbox 不被標記也不被刪、continue 被拒絕、search 的 filter
 - [x] 3.6 S1-4b：purge 失敗時再列檔確認，列檔也失敗就不算已刪（review T1-sec1）
+- [x] 3.7 review T1-sec3 的 M1～M3 與 L4：M1 寫回前直接問 Drive（continue／edit 開始前、agent 結束後各一次；中途被刪就另存新 Session，parents 指向原本的，原本保持被刪）、M2 `--not-exist-delete` 對 agent id 先確認 agent 真的沒有了否則照常 pull、M3 索引版本不同一律從鏡像重建（不看是不是空的）、L4 補「原本的標記在列檔失敗或 sessions/ 不見時不變」與 outbox 不被標記的測試；spec 補「接續到一半被別台刪掉」的 scenario
 
 ## 4. 收尾（PM 驗收，review 審）
 

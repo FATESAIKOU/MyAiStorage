@@ -153,7 +153,8 @@ def pull(paths: store.Paths, ids: list[str], agents: dict, *,
     session is still in the outbox or a continue is running on it - work that has
     not reached Drive yet is not something to tidy away. For an agent id the flag
     means "the agent does not have this session any more", so its cached full
-    text is what goes.
+    text is what goes - but only after asking the agent, which may well still have
+    it (review M2); if it does, this is an ordinary pull.
     """
     index = store.Index(paths)
     # A batch of agent ids needs no Drive at all: asking anyway would make an
@@ -177,12 +178,13 @@ def pull(paths: store.Paths, ids: list[str], agents: dict, *,
                 if offline is not None:
                     raise store.StoreError(f"連不上 Drive：{offline}")
                 _pull_agora(paths, drive, index, remote, bare, not_exist_delete)
-            elif not_exist_delete:
-                _drop_reading(paths, kind, bare)
             else:
                 if kind not in listed:
                     listed[kind] = _listed(agents, kind)
-                local_reading(paths, agents[kind], bare, listed[kind].get(bare))
+                if bare not in listed[kind] and not_exist_delete:
+                    _drop_reading(paths, kind, bare)   # the agent really lost it (review M2)
+                else:
+                    local_reading(paths, agents[kind], bare, listed[kind].get(bare))
             done += 1
         except Exception as e:      # one session must not stop the rest (review K5)
             failed += 1
