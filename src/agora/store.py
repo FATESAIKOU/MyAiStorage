@@ -155,10 +155,6 @@ class Drive:
         # silently creates an empty folder named after the file.
         self._run("copyto", str(local), f"gdrive:sessions/{ulid}/{name}")
 
-    def upload_tree(self, mirror: Path) -> None:
-        """Every file of the mirror back to sessions/, same names overwritten, nothing deleted (agora sync)."""
-        self._run("copy", str(mirror), "gdrive:sessions", "--exclude", ".files-from", "--exclude", ".bad/**")
-
     def download(self, ulid: str, name: str, local: Path) -> None:
         local.parent.mkdir(parents=True, exist_ok=True)
         self._run("copyto", f"gdrive:sessions/{ulid}/{name}", str(local))
@@ -248,6 +244,11 @@ def _index_outbox(paths: Paths, index: "Index") -> None:
             continue
 
 
+def index_mirror(paths: Paths, ulid: str, index: "Index | None" = None) -> None:
+    """Index what the mirror holds under this ULID - after a pull, or a write."""
+    _put_file(index or Index(paths), paths.mirror / ulid / "session.md")
+
+
 def read_entry(folder: Path) -> dict:
     """The header of an outbox entry; HeaderError if it is unreadable or incomplete."""
     try:
@@ -279,6 +280,24 @@ def push_one(drive: Drive, folder: Path) -> None:
         if name.startswith("raw-") and (not raw or name != raw["file"]):
             drive.delete(ulid, name)
     shutil.rmtree(folder)
+
+
+def push_mirror(drive: Drive, paths: Paths, ulid: str, header: dict) -> None:
+    """Send one mirrored session up: `session.md` and the raw its header names.
+
+    Nothing else goes (R7): an older raw, a `*.partial` left by an interrupted
+    write, a `.DS_Store` - none of them is what the session is, and uploading one
+    is how a half-written file comes back to life on Drive. `push_one` does the
+    same for an outbox entry, and also checks the md5s; this is the already-pushed
+    case, where the local copy is the one Drive had.
+    """
+    folder = paths.mirror / ulid
+    raw = h.agora_of(header).get("raw") or {}
+    if raw.get("file") and (folder / raw["file"]).is_file():
+        drive.upload(folder / raw["file"], ulid, raw["file"])
+    elif raw.get("file"):
+        _warn(f"{ulid} 標頭指到的 {raw['file']} 本機沒有，只傳 session.md")
+    drive.upload(folder / "session.md", ulid, "session.md")
 
 
 def push_outbox(drive: Drive, paths: Paths) -> list[str]:

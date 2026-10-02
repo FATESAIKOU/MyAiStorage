@@ -1,16 +1,25 @@
-"""Local caches (design 5.10), filled lazily and refreshed in one go by `agora cache`.
+"""Local caches (design 5.10), filled one session at a time by `agora pull`.
 
 The Drive mirror (cache/sessions/) is agora's own cache: session.md holds a
 session's reading version and raws are fetched when first needed. Agent
 sessions not in agora get their reading version in cache/reading/<agent>/<id>.md,
 its mtime set to the session's own update time, so a newer session is stale.
+
+`agora pull` and `agora push` take the ids they act on (T1 R5) - there is no
+`--all`, because everything else agora does is id-shaped too, and "all of it" is
+a thing to ask for from the screen where you can see it. Neither of them invents
+a session that is not there: an id Drive no longer has gets one line and nothing
+else, because putting it back is not what anybody asked for (review Q1).
 """
 
 from __future__ import annotations
 
 import os
+import sys
+import uuid
 from datetime import datetime
 
+from agora import header as h
 from agora import store
 from agora.agents.base import reading
 
@@ -43,41 +52,6 @@ def local_reading(paths: store.Paths, agent, session_id: str, updated_at: str | 
     return text
 
 
-def refresh_local(paths: store.Paths, agents: list) -> tuple[int, int]:
-    """`agora cache local`: every agent session on this machine into the cache; (written or fresh, failed)."""
-    done = failed = 0
-    for agent in agents:
-        listed = agent.list_sessions()
-        for n, s in enumerate(listed, 1):
-            print(f"[agora] {agent.name} {n}/{len(listed)}  {s.session_id[-8:]}")
-            try:
-                local_reading(paths, agent, s.session_id, s.updated_at)
-                done += 1
-            except Exception as e:   # one unreadable session must not stop the rest
-                failed += 1
-                print(f"[agora] {agent.name} {s.session_id} 讀不到：{e}")
-    return done, failed
-
-
-def refresh_agora(paths: store.Paths) -> tuple[int, int]:
-    """`agora cache agora`: sync session.md files, then every raw not here yet; (done, failed)."""
-    index = store.sync(paths)
-    drive = store.Drive(paths)
-    ulids = sorted(index.known())
-    done = failed = 0
-    for n, ulid in enumerate(ulids, 1):
-        print(f"[agora] Agora {n}/{len(ulids)}  {ulid[-8:]}")
-        hdr = index.header(ulid) or {}
-        try:
-            if (hdr.get("agora") or {}).get("raw"):
-                store.fetch_raw(paths, drive, ulid, hdr)
-            done += 1
-        except store.StoreError as e:
-            failed += 1
-            print(f"[agora] {ulid} 下載不到：{e}")
-    return done, failed
-
-
 def search_cached(paths: store.Paths, agent_name: str, keyword: str):
     """Ids of cached agent sessions whose full text contains keyword (NFKC, case-insensitive), as found."""
     needle = store.normalize(keyword)
@@ -92,10 +66,95 @@ def search_cached(paths: store.Paths, agent_name: str, keyword: str):
             continue
 
 
-def sync_up(paths: store.Paths) -> None:
-    """`agora sync`: the outbox, then every mirrored file written back to Drive, same names overwritten."""
+def _progress(word: str, k: int, total: int) -> None:
+    """One line per item, '… k/N …' (T1 R3); stderr so the ids stay on stdout."""
+    print(f"[agora] {word} {k}/{total}", file=sys.stderr)
+
+
+def _line(message: str) -> None:
+    print(f"[agora] {message}", file=sys.stderr)
+
+
+def _looks_like_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _split(session_id: str, agents: dict) -> tuple[str, str]:
+    """(`agora` or an agent name, the id under it) for one id given to pull or push.
+
+    A bare id is an agora one (R5). A bare `ses_…` or a bare uuid is an agent
+    session id, and reading it as an agora ULID would go looking for a folder
+    that cannot exist and report the session as missing from Drive - so the user
+    is told which prefix to write instead (review Q5).
+    """
+    prefix, sep, bare = session_id.partition(":")
+    if not sep:
+        if session_id.startswith("ses_") or _looks_like_uuid(session_id):
+            names = " 或 ".join(f"{name}:" for name in agents)
+            raise ValueError(f"{session_id} 是 agent 的 session id，請寫前綴（{names}）")
+        return "agora", session_id
+    if prefix not in ("agora", *agents):
+        raise ValueError(f"看不懂的 id：{session_id}")
+    return prefix, bare
+
+
+def _listed(agents: dict, name: str) -> dict:
+    """One agent's sessions as {id: updated_at}, so `is_fresh` can tell stale from uncached."""
+    return {s.session_id: s.updated_at for s in agents[name].list_sessions()}
+
+
+def pull(paths: store.Paths, ids: list[str], agents: dict) -> tuple[int, int]:
+    """`agora pull session <id>…`: bring the given sessions here; (pulled, failed).
+
+    An `agora:` id (or a bare ULID) comes off Drive: session.md, plus the raw its
+    header names, so the mirror is whole. An `opencode:`/`claude:` id is an agent
+    session on this machine and its reading version goes into the cache. Cached
+    and not stale is a skip, which is what makes a re-run after Ctrl-C cheap (R4).
+
+    An id Drive does not have is left alone with one line saying so: pulling is
+    not deleting, and reviving or dropping a session is the user's call, not this
+    command's (review Q1).
+    """
     drive = store.Drive(paths)
-    failed = store.push_outbox(drive, paths)
-    if paths.mirror.is_dir():
-        drive.upload_tree(paths.mirror)
-    print(f"[agora] 已寫回 Drive" + (f"；outbox 還有 {len(failed)} 筆沒上傳成功" if failed else ""))
+    index = store.Index(paths)
+    remote = drive.list_sessions()          # one listing for the whole batch (docs/perf.md)
+    listed: dict[str, dict] = {}
+    done = failed = 0
+    for k, session_id in enumerate(ids, 1):
+        _progress("pull", k, len(ids))
+        try:
+            kind, bare = _split(session_id, agents)
+            if kind == "agora":
+                _pull_agora(paths, drive, index, remote, bare)
+            else:
+                if kind not in listed:
+                    listed[kind] = _listed(agents, kind)
+                local_reading(paths, agents[kind], bare, listed[kind].get(bare))
+            done += 1
+        except Exception as e:      # one session must not stop the rest (review K5)
+            failed += 1
+            _line(f"{session_id} 拉不到：{e}")
+    return done, failed
+
+
+def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
+                remote: dict | None, ulid: str) -> None:
+    """One `agora:` id from Drive, into the mirror and the index."""
+    if remote is None or ulid not in remote:
+        _line(f"{ulid} 雲端沒有，本機的不動")
+        return
+    files = remote[ulid]
+    local = paths.mirror / ulid / "session.md"
+    if not (local.exists() and store.md5_file(local) == files.get("session.md")):
+        drive.download(ulid, "session.md", local)
+    hdr, _ = h.split_document(local.read_text(encoding="utf-8"))
+    raw = h.agora_of(hdr).get("raw") or {}
+    if raw.get("file") and files.get(raw["file"]) != raw.get("md5"):
+        _line(f"{ulid} 雲端上的 raw 還沒齊，下次再拉")
+    elif raw.get("file"):
+        store.fetch_raw(paths, drive, ulid, hdr)   # a no-op when the local copy is the right one
+    store.index_mirror(paths, ulid, index)   # readable, indexed and searchable again

@@ -9,7 +9,7 @@
 ## 2. pull／push（impl1）
 
 - [ ] 2.1 拿掉 `cache`、`sync`，新增 `pull session <id>…`、`push session <id>…`，只吃 id，id 前綴規則照 spec（session-sync「pull 只處理給的 id」）
-- [ ] 2.2 pull：agora id 拿 session.md 與原始檔，agent id 寫全文快取，沒過時的略過；每一個的例外都接住、照樣做下一個（review K5）
+- [x] 2.2 pull：agora id 拿 session.md 與原始檔，agent id 寫全文快取，沒過時的略過；每一個的例外都接住、照樣做下一個（review K5）
 - [ ] 2.3 push：先送 outbox，再逐一 copyto `session.md` 與它指到的原始檔（本機沒有就只傳 session.md）；不傳舊原始檔、`*.partial`、`.*`（「push 只寫回該寫的檔案」，K1、K2、Q7）
 - [ ] 2.4 全文快取的暫存檔名加唯一碼（review K4）
 - [ ] 2.5 單元測試：pull／push 的情境、k/N、K4、K5
