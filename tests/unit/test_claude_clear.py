@@ -34,7 +34,7 @@ def test_collect_points_at_the_post_clear_session(tmp_path, capsys):
     got = C.ADAPTER.collect(Launch(argv=[], cwd=str(work), agent_session_id=old, before_count=0))
     assert got is not None and got.session_id == old
     err = capsys.readouterr().err
-    assert new in err and "agora import --format claude" in err
+    assert new in err and "agora import session --external-session-id" in err
 
 
 def test_no_warning_without_clear(tmp_path, capsys):

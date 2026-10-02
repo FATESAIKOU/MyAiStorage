@@ -1,6 +1,6 @@
 """The opencode adapter (design.md 5.2 and 5.4).
 
-    import --format opencode      -> export()
+    import session --agent opencode -> export()
     continue-session --agent opencode            -> start_native()
     continue-session --agent opencode (跨 agent)  -> start_injected()
 

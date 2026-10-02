@@ -381,7 +381,7 @@ def _warn_cleared(path: Path, session_id: str) -> None:
         try:
             if session_id in other.read_text(encoding="utf-8", errors="replace"):
                 print(f"[agora] 這次接續中用過 /clear，之後的對話在 Claude session {other.stem}；"
-                      f"要存進 Agora 請另外執行：agora import --format claude --session-id {other.stem}",
+                      f"要存進 Agora 請另外執行：agora import session --external-session-id {other.stem} --agent claude",
                       file=sys.stderr)
         except OSError:
             continue
