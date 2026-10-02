@@ -833,3 +833,70 @@ agora:                            ← 系統欄位全在這裡
 3. **§7／test-plan 給測試作者一句**：`sync` 拿掉之後，整合測試想讀回索引要自己
    `store.sync(paths)`（或直接讀本機 cache）；`agora show` 只印文字，不能拿來斷言
    標頭欄位。
+
+
+---
+
+## 那個 stray session 是誰留下的（2026-10-03）
+
+`ses_DAK29P8XD5BE4K17`（標題「Agora 接續（閱讀版）」、`directory` 是 repo、建立於
+2026-10-02T00:33:50Z）**不是測試留下的**，是 `docs/acceptance.md` 第 6 節那一行：
+
+```bash
+agora merge-session <B>, <C>
+agora continue-session <merge 印出的 id> --agent opencode   ← 沒有 --dir，而且是舊語法
+```
+
+三件事疊在一起：
+
+1. **沒有 `--dir`** → 工作目錄退回 `os.getcwd()`，而驗收是**在 repo 裡**跑的；
+2. 來源是 **merge**（`relation: merge`、沒有 `raw`）→ 走**閱讀版注入**路徑；
+3. 目標是 **opencode** → `start_injected` 用 `opencode import` 建了一個新 session，
+   標題就是 `_injected_payload` 的「Agora 接續（閱讀版）」。
+
+`opencode import` 用的是 **cwd**（實測：`cwd=A`、`$PWD=B` 時 session 落在 A），
+所以「注入 + 沒給 `--dir`」就足以把 session 建在使用者正在看的專案裡。
+
+（同一份 acceptance.md 的其他步驟也還是舊語法 `continue-session`／`merge-session`／
+`import --format … --session-id`，建議一併更新成第 4 版的 `continue session`／
+`merge session`／`import session --external-session-id … --agent …`，並且每一步都
+補上 `--dir`。）
+
+### 測試這邊的稽核結果
+
+`tests/integration/` 與 `tests/fakes/` 裡所有會碰到 opencode 的呼叫，**本來就都在
+自己的 scratch 目錄**，沒有一個用 cwd：
+
+| 檔案 | 呼叫 | 工作目錄 |
+|---|---|---|
+| `test_opencode_real.py` | `opencode run`／`export`／`session delete`／`start_native`／`start_injected` | `/tmp/agora-it-opencode/proj`（`cwd` 與 `PWD` 都給） |
+| `test_e2e_opencode.py` | `agora import/continue`（都有 `--dir`）／wrapper／`export`／`delete` | `/tmp/agora-it-e2e-oc/p_專案.v2` |
+| `fakes/opencode_noninteractive.py` | wrapper 轉成 `opencode run` | `env["PWD"] = os.getcwd()` |
+
+而且這些測試**用 conftest 隔離的 HOME**，所以就算寫錯了路徑，也只會寫進暫存 HOME
+的資料庫，不會碰到使用者真正的 opencode store（實測：`HOME=<tmp>` 時
+`opencode import` 的 session 落在暫存 store，repo 的 session 數不變）。
+
+### 新增的保護：repo 目錄的 session 數不允許變多
+
+`tests/conftest.py` 加了一個 autouse fixture（只對 `integration` 生效）：
+
+- 測試**開始前**用**真的 HOME** 數一次 repo 這個 project 的 session id
+  （`opencode session list --format json`，project-scoped，只留 id、不留標題或內文）；
+- 測試**結束後**再數一次；
+- 多出來的話：逐個 `opencode session delete <id>` 刪掉，然後 `pytest.fail` 並把
+  新增的 id 印出來（「請找出是哪條指令忘了 `--dir`」）。
+
+**實測有效**：寫了一個臨時的整合測試，故意用真的 HOME 在 repo 裡
+`opencode import` 一個注入用的 session，guard 偵測到、刪掉、並讓測試失敗：
+
+```
+Failed: 整合測試在 repo 目錄留下 opencode session（已刪掉，請找出是哪條指令忘了 --dir）：ses_RC76X8AH5J9SYPD4
+1 passed, 1 error
+```
+
+刪掉之後 repo 的 session 數回到原來的 36，沒有殘留。臨時測試檔已移除。
+
+順帶一提：驗收腳本（`/tmp/agora-acc/env.sh` 那種）**不會**被這個 guard 保護——
+guard 只在 pytest 裡生效。若要連驗收也保護，`agora continue` 在 `source.dir`
+不存在又沒給 `--dir` 時印一行警告（說「將使用目前目錄 <cwd>」）會更直接。
