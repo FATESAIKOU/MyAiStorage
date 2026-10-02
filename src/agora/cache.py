@@ -158,3 +158,49 @@ def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
     elif raw.get("file"):
         store.fetch_raw(paths, drive, ulid, hdr)   # a no-op when the local copy is the right one
     store.index_mirror(paths, ulid, index)   # readable, indexed and searchable again
+
+
+def push(paths: store.Paths, ids: list[str], agents: dict) -> tuple[int, int]:
+    """`agora push session <agora id>…`: send the given sessions to Drive; (pushed, failed).
+
+    Only `session.md` and the raw its header names go up (R7), and only for the
+    ids given (R5). A session Drive no longer has is *not* quietly brought back -
+    that was K1, and it is how another machine's delete gets undone without
+    anyone deciding to - so it gets one line and nothing happens (review Q1).
+    """
+    drive = store.Drive(paths)
+    staged = store.outbox_ulids(paths)
+    left = store.push_outbox(drive, paths)      # staged writes first: those are the same sessions
+    if left:
+        _line(f"outbox 還有 {len(left)} 筆沒上傳成功")
+    listing = drive.list_sessions()
+    done = failed = 0
+    for k, agora_id in enumerate(ids, 1):
+        _progress("push", k, len(ids))
+        try:
+            kind, ulid = _split(agora_id, agents)
+            if kind != "agora":
+                raise ValueError(f"push 只吃 agora 的 session id，收到 {agora_id}")
+            if ulid in staged:
+                pass                            # the flush above is what sent this one up
+            elif (paths.outbox / ulid).is_dir():
+                store.push_one(drive, paths.outbox / ulid)
+            elif listing is None or ulid not in listing:
+                _line(f"{ulid} 雲端沒有，沒有傳")
+                continue
+            else:
+                _push_mirrored(paths, drive, ulid)
+            done += 1
+        except Exception as e:      # one session must not stop the rest (review K5)
+            failed += 1
+            _line(f"{agora_id} 傳不上去：{e}")
+    return done, failed
+
+
+def _push_mirrored(paths: store.Paths, drive: store.Drive, ulid: str) -> None:
+    """One session up from the mirror: the two files its header names."""
+    local = paths.mirror / ulid / "session.md"
+    if not local.is_file():
+        raise store.StoreError("本機沒有這個 Session，先 pull 或匯入")
+    hdr, _ = h.split_document(local.read_text(encoding="utf-8"))
+    store.push_mirror(drive, paths, ulid, hdr)
