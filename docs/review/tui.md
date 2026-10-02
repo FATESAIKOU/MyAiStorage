@@ -98,3 +98,77 @@
 | `opencode session list --help` | 只有 `-n/--max-count`、`--format`，沒有「所有專案」的選項（T2） |
 
 沒有跑整合測試，沒有碰 Drive，沒有叫任何 agent 執行任務，也沒有讀任何真實的 Session，也沒有在沒有 commit 的資料夾裡跑 `opencode session list`。
+
+---
+
+## 實作確認（`70a5a9e`、`3de46ef`、claude `31c362c`＋`051e5c6`、opencode `21f0aa3`＋`3ca81fb`）
+
+依照指示，沒有跑整合測試、沒有碰 Drive、沒有讀任何真實的 Session，也**沒有執行不帶參數的 `agora`**。我讀了程式和 design 5.9，用 scratchpad 裡自編的 Claude 檔案（`AGORA_CLAUDE_HOME` 指到 scratchpad）實測了例外處理，並且跑了單元測試：**266 passed**。
+
+**結論：T1～T13、T15 都落實了。T6 和篩選這兩項是刻意改了做法，design 裡也寫了理由，可以接受。只剩一個 Medium（U1：Claude 的 `list_sessions` 遇到格式怪的檔案會丟出例外，讓 TUI 在啟動時就 crash，已實測），以及幾個 Low。**
+
+### 兩個轉接器的 list_sessions／last_message：效能、唯讀、例外
+
+| | opencode（`21f0aa3`＋`3ca81fb`） | claude（`31c362c`＋`051e5c6`） |
+|---|---|---|
+| 唯讀 | ✅ `sqlite3.connect("file:…?mode=ro", uri=True)`；檔案不存在就回傳空的 | ✅ 只用 `open()` 讀取；也略過 symlink |
+| 位置 | ✅ `$XDG_DATA_HOME/opencode/opencode.db`，預設是 `~/.local/share`（conftest 會刪掉 `XDG_*`，HOME 是 tmp，所以單元測試是隔離的） | ✅ `config_dir()`（`AGORA_CLAUDE_HOME` > `CLAUDE_CONFIG_DIR` > `~/.claude`）；刻意**不**理 XDG，因為 Claude Code 本身也不理 |
+| 效能：清單 | ✅ 只讀 `session` 表的 4 個欄位（不讀任何對話內容）；用 `(路徑, mtime, size, WAL 的 mtime 和 size)` 做快取（`3ca81fb` 修正了「新資料還在 -wal 裡、主檔沒有變」的情況） | ✅ 只看 `projects/*/*.jsonl`（不含 subagents）；每個檔案只讀開頭的 40 行來取標題與 cwd，而且先用正規表示式篩過，只有少數幾行才真的 `json.loads`；用 `(路徑, mtime, size)` 做快取，沒再出現的 key 會被清掉，不會無限增長 |
+| 效能：預覽 | ✅ 最多 20 則訊息，取每則的 parts，最多 2,000 字 | ✅ 只讀檔案**最後 1 MB**（`TAIL_BYTES`），由後往前找，略過雜訊行和寫到一半的最後一行，回傳最後 2,000 字 |
+| 例外 | ✅ `sqlite3.Error`、JSON 解析失敗，都會回傳空的或 None，並且只警告一次「資料庫結構認不出來」 | ⚠️ **U1**（見下） |
+
+### U1（Medium，已實測）：Claude 的 list_sessions／last_message 還是會丟出例外
+
+用自編的檔案（`AGORA_CLAUDE_HOME=<scratchpad>`）實測：
+
+| 檔案內容 | 結果 |
+|---|---|
+| 某一行的 `"cwd":"bad\x escape"`（JSON 裡不合法的跳脫序列） | `list_sessions()` 丟出 **`JSONDecodeError`**。`_json_str(_CWD_RE.search(line))` 會 `json.loads` 正規表示式抓到的字串，但 `_peek_session` 只接了 `OSError` |
+| 某一行是 JSON 陣列（`["type","user"]`），不是物件 | `last_message()` 丟出 **`AttributeError: 'list' object has no attribute 'get'`**（`_is_noise(o)`／`o.get(...)`） |
+
+- `last_message` 在 TUI 裡被 `import_preview` 的 `except Exception` 接住了，**不會**讓畫面 crash ✅。
+- 但是 **`list_sessions` 沒有被包住**：`tui.import_rows` 會直接呼叫它，而 `cli.main` 是在 `try` 區塊**之前**就 `return tui.main(...)`，所以只要使用者本機上有**任何一個** jsonl 的開頭 40 行裡有這種行，打開 `agora` 時就會直接印出 traceback，互動模式完全沒辦法用，直到那個檔案被修好為止（而那是 Claude 自己的檔案，使用者通常不會去碰）。
+- **建議**：(a) `_peek_session` 改成接 `(OSError, ValueError, TypeError, AttributeError)`，遇到就略過那個檔案；`last_message` 的迴圈在 `json.loads` 之後，`if not isinstance(o, dict): continue`。(b) `tui.import_rows` 呼叫每一個轉接器的 `list_sessions()` 時，都包一層 `try/except Exception`，失敗就回傳空的，並且在狀態列顯示「<agent> 的 session 清單讀不到」。(c) 單元測試加上這兩個檔案（不合法的跳脫、非物件的行）。
+
+### T1～T15 逐條確認
+
+| # | 狀態 | 確認的內容 |
+|---|---|---|
+| T1 | ✅ | `cli.main([])`：stdin **或** stdout 不是 TTY 時，只印出用法，exit 2，**不會** import tui，也不會列出任何東西；有單元測試（pytest 的 stdin 不是 TTY）。design 5.9 也寫了。整合測試的守衛（「整合測試不准呼叫 `list_sessions`，也不准不帶參數呼叫 `main`」）還沒有看到，見 U5 |
+| T2 | ✅ | 讀 opencode 的 SQLite，唯讀、尊重 `XDG_DATA_HOME`、遇到不認得的 schema 就回傳空清單並警告；spike/opencode.md 也記錄了（`21f0aa3`）。**完全沒有**用到「在沒有 commit 的資料夾裡跑 `session list`」那個怪行為 |
+| T3 | ✅ | `locale.setlocale(LC_ALL, "")`；`display_width` 用的是 `east_asian_width` 的 W／F；截斷和對齊都依照顯示寬度（`test_columns_line_up_by_display_width`）；輸入用 `get_wch()`；寫到右下角那一格時，會接住 `curses.error` |
+| T4 | ✅ | 小於 40×10 時，只顯示「終端機太小」；`KEY_RESIZE` 會重畫 |
+| T5 | ✅ | 接續之後「沒有新內容」時，會把 `agent:session_id` 記到 `<state>/unsaved-launches`，未匯入頁會略過這些；`dir` 在 `<state>` 底下的（summarize）也不會列出來（`test_import_tab_leaves_out_agoras_own_copies`）。做法是「記下來、不列出」，不是「刪掉」，也可以接受，因為不會多刪任何東西 |
+| T6 | ✅（改了做法） | 打開時做一次**節流**的同步，同步完才進全螢幕，**沒有**改成背景同步。design 寫了理由（同步和動作會同時寫同一份索引和鏡像），可以接受。每個動作結束之後，只重新讀本機的索引 ✅ |
+| T7 | ✅ | `ask_dir`：預設是來源的 `dir`（在這台機器上存在的話），否則是目前目錄，並且顯示「⚠ 來源沒有記錄目錄…會在目前目錄開」；**一定可以選「改目錄…」**，輸入的目錄不存在時會提示 |
+| T8 | ✅ | 清單是空的時候，顯示「（沒有東西；按 / 改篩選，或按 Tab 換頁）」；合併少於 2 個時，有提示 |
+| T9 | ✅ | 短 id 改成 ULID 的**最後 8 碼**（隨機的部分）；未匯入頁顯示 session id 的最後 12 碼 |
+| T10 | ✅（有一個 Low） | 勾選多個匯入時，會一個一個執行 `cli.main(argv)`，失敗也會繼續下一個，最後顯示「成功 k 個、失敗 m 個」。每一次匯入仍然會各自做一次不節流的 sync（U4） |
+| T11 | ✅ | 每個動作都透過 `cli.main` 執行，例外都會變成 exit code，不會讓 TUI 結束；Ctrl-C 也會被 `cli.main` 的 `except KeyboardInterrupt` 接住（回傳 130），merge 這時還沒存檔，所以不會留下半份。接下來是「按 Enter 回到選單」 |
+| T12 | ✅ | 預覽裡不是 `isprintable()` 的字元都會顯示成 `·`；兩個轉接器都把長度限制在 2,000 字；Claude 會略過雜訊行，opencode 會略過 `synthetic` |
+| T13 | ✅（改了做法） | `/` 篩選改成「清單上看得到的文字（id、agent、標題、目錄）；用空白分開的每一個字都要出現」，所以不會有語法錯誤，也就不會出現 HeaderError。design 已經改成這種寫法。代價是**沒辦法搜尋對話的內容**，要搜尋內容，請用指令模式的 `--filter text~=` |
+| T14 | ❌ 沒有做 | 「已經匯入、但 agent 那邊有更新」的 session，在 TUI 裡看不到，沒辦法重新匯入；只能用指令模式的 `agora import session …`（Low，不影響正確性） |
+| T15 | ✅（除了 U1） | 見上面的表 |
+
+### 其他（Low）
+
+| # | 問題 | 建議 |
+|---|---|---|
+| U2 | opencode 的 URI 是直接把路徑接成 `file:{path}?mode=ro`。如果路徑裡有 `?`、`#`、`%`，SQLite 會把它解析錯 | 改成 `f"{path.as_uri()}?mode=ro"`（`as_uri` 會做百分比編碼） |
+| U3 | opencode 的 `last_message` 回傳的是那則訊息的**最後一個** text part，不是整則訊息的內容（一則長的回覆可能分成好幾個 part） | 預覽本來就只是用來辨認的，可以接受；或者依順序把那則訊息的所有 text part 接起來，再截到 2,000 字 |
+| U4 | 批次匯入 N 個時，`cmd_import` 每次都會做一次不節流的 sync | 批次匯入之前先同步一次，再用一個環境變數或參數，讓之後的 N 次 import 跳過 sync |
+| U5 | 整合測試的守衛：「整合測試不准呼叫 `list_sessions`，也不准不帶參數呼叫 `main`」。這條規則還沒有被測試鎖住（e2e 會把 `AGORA_CLAUDE_HOME` 設成真的家目錄） | 在 `tests/integration/` 加一個守衛測試，掃描原始碼，確認沒有 `list_sessions(`／`main([])`／`last_message(` |
+| U6 | `<state>/unsaved-launches` 只會一直追加，從來不會被清理 | 讀取的時候，順便把「agent 那邊已經不存在的 id」清掉，或者只保留最近 N 筆 |
+| U7 | `display_width` 只看 `east_asian_width`，把組合字元（例如重音符號）也算成 1 欄 | 加一行 `unicodedata.combining(c)` 算 0；中文和日文不受影響 |
+| U8 | curses 執行期間，stderr 被導到 `io.StringIO()`，之後就**丟掉**了，所以 `_warn_schema` 這類警告，使用者完全看不到 | 回到選單時，如果 `noise` 不是空的，就把它的第一行顯示在狀態列上 |
+
+### 這次跑過的指令
+
+| 指令 | 結果（只記形狀） |
+|---|---|
+| `git log c730987..HEAD`，對 6 個 commit 跑 `git show --stat`，讀 `opencode.py`／`claude.py` 的 `list_sessions`／`last_message` 與相關的輔助函式、`tui.py` 的 `agora_rows`／`import_rows`／`import_preview`／`ask_dir`／`main`、`cli.main` 的 TTY 檢查和 `KeyboardInterrupt` | 見上面 |
+| 在 scratchpad 建 `AGORA_CLAUDE_HOME=<scratchpad>/.claude/projects/-tmp-x/` 和兩個自編的 jsonl（不合法的跳脫、非物件的行），再呼叫 `C.ADAPTER.list_sessions()`／`last_message()` | U1 的實測結果；之後已經刪掉 |
+| 讀 design 5.9（篩選、TTY、同步、unsaved-launches 的說明） | T6、T13 的做法改了，design 也已經同步 |
+| `.venv/bin/python -m pytest -q tests/unit` | 266 passed |
+
+沒有跑整合測試，沒有碰 Drive，沒有讀任何真實的 Session，也沒有執行不帶參數的 `agora`。
