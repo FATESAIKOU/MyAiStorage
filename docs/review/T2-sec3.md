@@ -106,3 +106,34 @@
 | U2 | Low | Tab 只有在 `Confirm` 開著的時候才會交出去。其他的視窗（delete 的確認 `Choose`、接續時選 agent 和目錄的 `Choose`、`AskText`、`Tell`）開著的時候，按 Tab **還是會切換底下的頁面**。實測：按 `d` 打開刪除確認、按 Tab 之後，`app.tab` 變成了 `import`。要處理的列在開視窗之前就決定了，不會送錯，但動作做完之後，畫面會停在另一頁 | `action_next_tab`／`action_toggle_focus` 改成判斷 `isinstance(self.screen, ModalScreen)`：是 `Confirm` 就交給它，其他的視窗就什麼都不做 |
 | U3 | Low（潛在） | 沒有帶 `extra` 的 `Confirm`，不會產生 `#extra`，這時候按 Tab 或空白，`query_one("#extra")` 會丟出 `NoMatches`。現在所有的呼叫者都有帶 `extra`，所以不會發生 | 沒有 `#extra` 的時候，`action_toggle`／`action_focus_next` 直接 return |
 | U4 | Low | 3.2 的 S2（未匯入頁的 pull 也出現「雲端沒有的就刪掉本機的」）、S3（「雲端沒的」少了一個字）、S4（傳回去之後 ✗ 要等下一次完整同步才會變回 ✓）、S6（測試名稱說 pull，按的是 push）這次都沒有處理 | 照 3.2 的建議 |
+
+## U1 的修正確認（`472d683`）
+
+2026-10-03，review。在 `git archive 472d683` 取出的副本跑 `test_tui.py`，連跑兩次：**58 passed**。mutation 在副本裡做。規則同上。
+
+**修對了。** `Confirm` 加了一個 priority 的 `enter` → `action_confirm`，不管焦點在哪裡，都用清單目前停的那一個選項來確定（停在 None 時當成 0，也就是「取消」），並帶上目前勾選框的狀態。勾選框只有空白鍵能切換。
+
+- App 的 `enter`（`primary`）雖然也是 priority，但它的 `check_action` 只在 `DataTable` 有焦點的時候才成立，所以在視窗裡會讓給 `Confirm` ✅。
+- 新的測試：
+  - `test_enter_on_the_checkbox_confirms_and_does_not_tick_it`：Tab 到勾選框之後按 Enter，送出去的指令**沒有** flag；
+  - `test_space_is_what_ticks_it`：空白鍵勾選、shift+tab 回到清單、Enter，送出去的指令**有** flag。
+- **mutation**：拿掉那一行 `Binding("enter", …)` 之後，`test_enter_on_the_checkbox_confirms_and_does_not_tick_it` 就會失敗 ✅。
+- 同一個 commit 也順便修了 T2-sec2 的 P2：「另一頁的勾選」那個測試，現在真的有在未匯入頁勾一列。
+
+**還沒處理的**（不擋這次的確認）：U2（其他視窗開著的時候，Tab 還是會切換底下的頁面）、U3（沒有 extra 的 `Confirm`）、S2、S3（「雲端沒的」少了一個字，連這次的 commit 訊息裡也是這樣寫的）、S4、S6。
+
+### HEAD 的程式碼行數（`472d683`，算法同 T1-size：不含空行、註解、docstring）
+
+| 檔案 | 程式碼行 | T1-final（`35ab469`）時 | 差 |
+|---|---:|---:|---:|
+| tui.py | 816 | 692 | **+124** |
+| cli.py | 727 | 729 | −2 |
+| agents/opencode.py | 538 | 538 | 0 |
+| store.py | 476 | 470 | +6 |
+| agents/claude.py | 442 | 442 | 0 |
+| cache.py | 182 | 182 | 0 |
+| header.py | 169 | 169 | 0 |
+| agents/base.py | 63 | 63 | 0 |
+| **合計** | **3,413** | 3,285 | **+128** |
+
+比 2,900 多了 **513 行**。這段期間增加的幾乎全部都是 T2 第 2、3 節的 tui.py：選取規則、`a`、自己畫的按鍵列、雲端欄、`Confirm`、拒絕的畫面、還有幾個修正。store 的 +6 是 `cloud_lost`／`cloud_gone`。額度怎麼處理，還是要使用者決定（見 T1-size、adapters-size、T1-final 的 D10）。
