@@ -63,8 +63,28 @@ def split_document(text: str) -> tuple[dict, str]:
     end = text.find("\n---\n", 4)
     if end < 0:
         raise HeaderError("header 沒有結尾的 ---")
-    header = _load_yaml(text[4:end])
+    header = upgrade(_load_yaml(text[4:end]))
     return header, text[end + 5:]
+
+
+_OLD_AGORA_KEYS = ("relation", "parents", "source", "raw", "created_at", "updated_at")
+
+
+def upgrade(header: dict) -> dict:
+    """Read a version-1 header (before OKF, v4 design) as the current shape (V1).
+
+    Old Agora headers kept relation, parents, source, raw and timestamps at
+    the top level, used `type: session`, `entity` and `note`. Move them into
+    the agora block so every reader sees one shape; the next save writes it.
+    """
+    if "agora" in header or not str(header.get("id", "")).startswith("agora:"):
+        return header
+    out = {k: v for k, v in header.items() if k not in _OLD_AGORA_KEYS + ("header", "entity", "note")}
+    out["type"] = SESSION_TYPE
+    if header.get("note") and not out.get("description"):
+        out["description"] = header["note"]
+    out["agora"] = {"header": HEADER_VERSION, **{k: header[k] for k in _OLD_AGORA_KEYS if k in header}}
+    return out
 
 
 def dump_document(header: dict, body: str) -> str:
@@ -148,12 +168,14 @@ def parse_header_args(args: list[str]) -> dict:
         key = key.strip()
         if not sep or not key or any(not part for part in key.split(".")):
             raise HeaderError(f"--header 要寫成 key=value（例如 description=…）：{arg!r}")
-        try:
-            parsed = yaml.safe_load(value) if value.strip() else ""
-        except yaml.YAMLError:
-            parsed = value
-        if isinstance(parsed, (int, float)) and not isinstance(parsed, bool) and str(parsed) != value.strip():
-            parsed = value                      # keep "01" or "1.10" as written
+        # Only lists and mappings are parsed as YAML; everything else stays the
+        # text the user typed, so "把 CSV: 轉成表格", "no" or a date stay strings (V2, V3).
+        parsed: object = value
+        if value.strip().startswith(("[", "{")):
+            try:
+                parsed = _plain(yaml.safe_load(value))
+            except yaml.YAMLError as e:
+                raise HeaderError(f"--header {key} 的清單／物件寫法有誤：{e}") from None
         node = updates
         parts = key.split(".")
         for part in parts[:-1]:
@@ -167,6 +189,22 @@ def parse_header_args(args: list[str]) -> dict:
     return updates
 
 
+def _plain(value: object) -> object:
+    """YAML dates and datetimes as ISO 8601 strings (OKF uses …Z for UTC), recursively."""
+    import datetime as dt
+    if isinstance(value, dt.datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(dt.timezone.utc).replace(tzinfo=None)
+        return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_plain(v) for v in value]
+    return value
+
+
 def load_header_file(path: str | None) -> dict:
     """A YAML header file, with or without surrounding `---` lines."""
     if not path:
@@ -177,7 +215,7 @@ def load_header_file(path: str | None) -> dict:
         text = text[3:]
         if text.rstrip().endswith("---"):
             text = text.rstrip()[:-3]
-    return _load_yaml(text)
+    return _plain(_load_yaml(text))
 
 
 LIST_KEYS = ("tags", "refs", "sources", "verified")   # OKF list fields; a single value becomes [value]

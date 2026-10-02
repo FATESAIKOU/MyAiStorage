@@ -425,3 +425,41 @@ def test_positional_rules(env, capsys):
     assert code == 1 and "--filter" in err
     code, _, err = run(capsys, "continue", "session")
     assert code == 1
+
+
+def test_old_format_sessions_still_work(env, capsys):  # V1
+    """Version-1 headers (before OKF) on Drive are read as the current shape."""
+    paths = store.Paths.from_env()
+    remote = Path(os.environ["FAKE_REMOTE"])
+    parent_ulid, child_ulid = h.new_ulid(), h.new_ulid()
+    old_parent = {"header": 1, "entity": "agora", "type": "session", "id": f"agora:{parent_ulid}",
+                  "title": "舊格式", "note": "舊的備註", "tags": [], "refs": [], "case": None,
+                  "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z",
+                  "relation": "import", "parents": [],
+                  "source": {"agent": "opencode", "session_id": "ses_a", "created_at": "2026-10-01T00:00:00Z"}}
+    old_child = {**old_parent, "id": f"agora:{child_ulid}", "relation": "continue",
+                 "parents": [{"id": f"agora:{parent_ulid}", "raw_md5": None}]}
+    run(capsys, "search", "session")                      # creates the Drive folder
+    for hdr in (old_parent, old_child):
+        folder = remote / "agora" / "sessions" / hdr["id"].split(":")[1]
+        folder.mkdir(parents=True)
+        (folder / "session.md").write_text(h.dump_document(hdr, "## user\n表格\n"))
+    (paths.state / "last-sync").unlink()                 # skip the 5-minute search throttle
+    code, found, _ = run(capsys, "search", "session", "--filter", "agora.relation=import")
+    assert code == 0 and f"agora:{parent_ulid}" in found
+    code, _, err = run(capsys, "delete", "session", f"agora:{parent_ulid}", "--yes")
+    assert code == 1 and "子 Session" in err             # the child check still works
+    code, _, _ = run(capsys, "edit", "session", f"agora:{child_ulid}", "--header", "tags=[舊]")
+    assert code == 0
+    hdr = store.Index(paths).header(child_ulid)
+    assert hdr["type"] == "Session" and hdr["agora"]["relation"] == "continue" and hdr["tags"] == ["舊"]
+    assert hdr["description"] == "舊的備註"
+
+
+def test_header_values_stay_text_unless_list_or_mapping(env, capsys):  # V2, V3
+    _, sid, _ = _import(capsys, "--header", "description=把 CSV: 轉成表格", "--header", "title=no",
+                        "--header", "stale_after=2027-01-01")
+    hdr = store.Index(store.Paths.from_env()).header(sid.split(":")[1])
+    assert hdr["description"] == "把 CSV: 轉成表格" and hdr["title"] == "no" and hdr["stale_after"] == "2027-01-01"
+    code, found, _ = run(capsys, "search", "session", "--filter", "stale_after=2027-01-01", "--no-sync")
+    assert found.split()[0] == sid

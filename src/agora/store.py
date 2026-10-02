@@ -365,7 +365,7 @@ class Index:
 
     def header(self, ulid: str) -> dict | None:
         row = self.db.execute("SELECT header FROM sessions WHERE ulid=?", (ulid,)).fetchone()
-        return json.loads(row[0]) if row else None
+        return h.upgrade(json.loads(row[0])) if row else None   # rows cached before v4 (V1)
 
     def by_source(self, agent: str, source_id: str) -> list[str]:
         rows = self.db.execute(
@@ -378,7 +378,7 @@ class Index:
         target = f"agora:{ulid}"
         rows = self.db.execute("SELECT ulid, header FROM sessions")
         return [u for u, hdr in rows
-                if any(p.get("id") == target for p in h.agora_of(json.loads(hdr)).get("parents") or [])]
+                if any(p.get("id") == target for p in h.agora_of(h.upgrade(json.loads(hdr))).get("parents") or [])]
 
     def search(self, filters: list[tuple[tuple[str, ...], str, str]]) -> list[tuple[str, dict, str]]:
         """[(ulid, header, snippet)] matching every filter, newest source first.
@@ -402,7 +402,7 @@ class Index:
                 "WHERE fts MATCH ?", (phrase,))
         hits = []
         for ulid, hdr_json, body in rows:
-            hdr = json.loads(hdr_json)
+            hdr = h.upgrade(json.loads(hdr_json))
             if all(t in body for t in texts[1:]) and all(_matches(hdr, *f) for f in others):
                 hits.append((ulid, hdr, _snippet(body, kw)))
         hits.sort(key=lambda hit: (sort_date(hit[1]), str(h.agora_of(hit[1]).get("updated_at")), hit[0]),
