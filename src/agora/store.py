@@ -119,6 +119,7 @@ class Drive:
         self.rclone = os.environ.get("AGORA_RCLONE", "rclone")
         self.conf = paths.config / "rclone.conf"
         self.settings_file = paths.config / "config.json"
+        self.fetched = 0                  # downloads so far: pull tells a skip from a pull (P3)
         self.settings = json.loads(self.settings_file.read_text()) if self.settings_file.exists() else {}
 
     def _run(self, *args: str, root: bool = True) -> str:
@@ -180,6 +181,7 @@ class Drive:
         self._run("copyto", str(local), f"gdrive:sessions/{ulid}/{name}")
 
     def download(self, ulid: str, name: str, local: Path) -> None:
+        self.fetched += 1
         local.parent.mkdir(parents=True, exist_ok=True)
         self._run("copyto", f"gdrive:sessions/{ulid}/{name}", str(local))
 
