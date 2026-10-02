@@ -9,7 +9,9 @@ only paints them.
 
 from __future__ import annotations
 
+import contextlib
 import curses
+import io
 import locale
 import os
 import unicodedata
@@ -418,7 +420,9 @@ def main(paths: store.Paths) -> int:
 
     message = ""
     while True:
-        action, rows, agent, workdir = curses.wrapper(screen_loop, state, previews, message)
+        noise = io.StringIO()   # a warning printed under curses would scribble over the screen
+        with contextlib.redirect_stderr(noise):
+            action, rows, agent, workdir = curses.wrapper(screen_loop, state, previews, message)
         if action == "quit":
             return 0
         codes = [cli.main(argv) for argv in argv_for(action, rows, agent, workdir)]   # one failing goes on (T10)

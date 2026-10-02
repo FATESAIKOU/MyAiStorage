@@ -122,7 +122,7 @@ _PARTS_SQL = "select data from part where message_id=? order by time_created des
 _PREVIEW_CHARS = 2000
 
 _warned_schema = False
-_list_cache: tuple[tuple[str, int, int], list[Listed]] | None = None
+_list_cache: tuple[tuple, list[Listed]] | None = None
 
 
 def _data_home() -> Path:
@@ -529,7 +529,12 @@ class OpencodeAgent:
             info = path.stat()
         except OSError:
             return []
-        key = (str(path), info.st_mtime_ns, info.st_size)
+        try:   # with WAL, new rows land in -wal first and the main file may not change
+            wal = path.with_name(path.name + "-wal").stat()
+            wal_key = (wal.st_mtime_ns, wal.st_size)
+        except OSError:
+            wal_key = None
+        key = (str(path), info.st_mtime_ns, info.st_size, wal_key)
         if _list_cache and _list_cache[0] == key:
             return list(_list_cache[1])
         rows = self._read_sessions(path)
