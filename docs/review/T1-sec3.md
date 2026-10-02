@@ -1,4 +1,5 @@
-**修正確認（2026-10-03，見最後一節）：有 1 個 High（F1：離線時 continue 一個已經標成雲端沒有的 Session，會把它寫回雲端）。**
+**第二次修正確認（2026-10-03，見最後一節）：F1（High）已經在 7029b68 修好，沒有 High 了。** 帶進了一個新的 Medium（G1：一筆收不了尾的 pending 會讓 delete 永遠被擋），另外 F3、F6 的測試還是測不到。
+~~第一次修正確認：有 1 個 High（F1：離線時 continue 一個已經標成雲端沒有的 Session，會把它寫回雲端）。~~（已修）
 
 **沒有 High。** 有 3 個 Medium：寫回之前的「雲端沒有」判斷最舊可能是 5 分鐘前的（M1）、`pull --not-exist-delete` 對 agent 的 id 會**無條件**刪掉快取（M2）、索引版本重建只有在「索引是空的」時才會觸發（M3）。
 
@@ -151,3 +152,48 @@ continue X → 沒有被拒絕，agent 打開 → 存進 outbox（exit 3）→ �
 | F11 | Low | `_finish` 遇到離線時照常寫回 X（因為不知道 X 被刪了），之後推 outbox 的時候也沒有再檢查，所以「接續途中被刪、結束的時候剛好離線」這種情況還是會讓 X 復活 | 在 outbox 那一筆加上「這是更新既有的 X」的註記，`push_outbox` 推之前用列檔確認 X 還在，不在就改成另存（可以和 F1 一起排進 T1 的收尾，或者在 design 裡寫明這是已知的窗口） |
 
 **結論**：M2、M3 修對了，L4 的第一個測試也對。M1 修對了 PM 決定的那一半（中途被別台刪掉就另存 Y，測試也有），但把「看標記」換成了「只問 Drive」，造成了 F1 這個回歸（High）；F2～F4 是這個新寫法的三個邊界。建議先修 F1～F4 再驗收。
+
+## 第二次修正確認（2026-10-03）
+
+對象：`7029b68`（F1～F7，順便修了 F8、F9；同一個 commit 也做了 T1-size 的幾項精簡：`_listing`、`_absent`、`_split_ids`、`_actor`、pull 改用 `store.mirror_one`）。在 `git archive 7029b68` 取出的副本跑單元測試：**387 passed**。在副本裡重跑上一次的 7 個探測測試，再加 2 個新的，並做了 9 個 mutation。repo 沒有動。沒有跑整合測試，沒有碰 Drive，也沒有讀任何真實的 Session。
+
+### 上一次的探測，現在的結果
+
+| 探測 | 上一次（5eab055） | 現在（7029b68） |
+|---|---|---|
+| 離線時 continue 一個已經標記的 Session（F1） | agent 打開、exit 3、X 回到 Drive | **exit 1，agent 沒有打開，outbox 沒有 X，沒有復活** ✅ |
+| 離線時 edit 一個已經標記的 Session（F1） | 不會被擋 | exit 1 ✅ |
+| Drive 上沒有 `sessions/`（F2） | TypeError | 不再是 TypeError；edit 會因為原始檔拿不到而失敗，這是預期的 ✅ |
+| 還在 outbox 的 Session（F3） | 被說成「別台機器刪掉了」 | 不再出現「雲端沒有」 ✅ |
+| 在這台機器上接續的途中 delete（F4） | 結束時用同一個 id 寫回去，X 復活 | **delete 被拒絕（exit 1，「正在接續」），X 留著，結束時正常寫回** ✅ |
+
+### Mutation（每次只拿掉一個修正，跑 cli、cli_more、cache、store、store_more 的測試）
+
+| 拿掉的修正 | 結果 |
+|---|---|
+| F1：`_refuse_if_gone` 裡看標記的那一行 | **被抓到**（`test_continue_of_a_marked_session_is_refused_even_offline`） |
+| F1：`_finish` 裡看標記的那一行 | 沒被抓到。接續中的 Session 不會被標記，接續一個已經標記的 Session 一開始就會被拒絕，所以這一行實際上走不到，算是防禦性的寫法，可以接受 |
+| F2：`remote is not None` | 沒被抓到：沒有任何測試在「沒有 `sessions/`」的情況下跑 continue 或 edit |
+| F3：`_lost_in_cloud` 的 outbox 判斷 | **沒被抓到**：新的測試 `test_a_session_in_the_outbox_is_not_taken_for_deleted` 是 edit 一個**已經在 Drive 上**的 Session，所以 Drive 的清單裡本來就有它，outbox 的判斷有沒有都一樣。要用「第一次上傳就沒成功」的 Session 才測得到（上一次的探測就是這樣做的） |
+| F4：delete 的 `continuing` 判斷 | **被抓到**（`test_delete_refuses_a_session_that_is_being_continued`） |
+| F4b：索引裡沒有的也另存一個新的 | **被抓到**（`test_lock_survives_agora_death_while_agent_lives`） |
+| F5：清單是空的就不刪 | **被抓到**（`test_not_exist_delete_keeps_the_cache_when_the_agent_lists_nothing`） |
+| F6：`mark_missing` 排除 outbox | **還是沒被抓到**：那個測試裡從來沒有東西成功上傳到 Drive，所以 Drive 上**根本沒有 `sessions/`**，sync 走的是「標記不動」那條路（我實際印出來看了：「Drive 上找不到 sessions/……標記不動」），標記本來就不會動 |
+| F8：edit 存檔前再查一次 | 沒被抓到：沒有測試 |
+
+### 新的問題
+
+| # | 嚴重度 | 問題 | 建議 |
+|---|---|---|---|
+| G1 | **Medium**（F4 帶進來的回歸） | `cmd_delete` 只要看到 `pending/<ulid>.json` **存在**就拒絕，訊息是「正在接續，等它結束再刪」。可是一筆**收不了尾**的 pending（例如 agent 的 session 已經不見了，或者 `_finish` 每次都失敗）會一直留著，**沒有任何程序拿著它的鎖**，結果 X 就**永遠刪不掉**，訊息還說它正在接續。實測：`補存 … 失敗，下次再試：'ses_gone'` → `正在接續，等它結束再刪`，再跑一次也一樣，pending 還在 | 用 `flock(LOCK_EX \| LOCK_NB)` 判斷真的有人在跑：拿不到鎖 → 拒絕（真的在接續）；拿得到鎖 → 讓 delete 照做，並提示「有一筆中斷的接續沒補存成功：pending/<ulid>.json」。之後如果 `_finish` 成功，也會依 F4b 另存一個新的，不會讓 X 復活 |
+| G2 | Low | 一批 delete 裡只要有一個是接續中的，就會丟出 InputError，**整批**都不刪；有子 Session 的那種情況只是略過那一個，其他的照刪 | 和 children 一樣，略過那一個、印出原因，exit 1 |
+| G3 | Low～Medium（**不是回歸**，8561bbd 就這樣了） | `pull X --not-exist-delete` 在 Drive 上**沒有 `sessions/`**時（N12：可能是 folder ID 或 token 有問題）會把 X 當成雲端沒有，然後**刪掉本機副本**。實測：exit 0，本機和索引裡的 X 都不見了。sync 和 `_lost_in_cloud` 在同樣的情況下都當成「不知道」，只有這裡不是 | `_pull_agora` 收到 `remote is None` 時，拒絕這一個（「Drive 上找不到 sessions/，不能確定它是被刪掉的」） |
+| G4 | Low | F3、F6、F2、F8 的測試補強（見上面 mutation 的結果）。F6 的修法：先 `_save` 另一個 Session 讓 Drive 上有 `sessions/`，再做現在的步驟 | 各補一個；F3 用「stage 但從來沒上傳成功」的 Session |
+| G5 | Low | `_pull_agora` 先用 `mirror_one` 把 session.md 放進索引，最後又 `index_file` 一次。在 `fetch_raw` 依 N8 換了 session.md 的時候，第二次是需要的，所以不是錯，只是要加一句註解說明 | 加註解 |
+
+### 其他確認
+
+- design 5.4 第 6 步已經寫進「接續途中被刪掉了（不論是別台還是這台）就另存成新的」✅。5.10 寫明了「判斷同時看標記與當下的 Drive，離線時也不會放行」✅，import 那句也改成「不更新它，改建一個新的」✅；不過同一段的最後還保留著舊的那句「import 的來源對到雲端沒有的那一筆時建一個新的 Session」，兩句意思一樣，重複了，刪掉一句就好。
+- 精簡的部分（`_listing` 用回傳 StoreError 物件來表示離線、pull 在遇到第一個 agora id 時才列 Drive、`_absent`、`_split_ids`）：行為沒有變；`_split_ids` 讓 pull 和 push 也會 strip 了，順便修好了 T1-size L4 提到的那個 `"a, b"` 的小 bug ✅。
+
+**結論**：F1（High）和 F4 都修對了，探測和 mutation 都證實。F2、F3、F5、F7 也修對了。F4 帶進了 **G1（Medium）**：一筆收不了尾的 pending 會讓 delete 永遠被擋，建議在驗收之前修。F3 和 F6 的測試還是測不到它們要保護的東西（G4）。G3 是之前就有的問題，可以和 G1 一起修。
