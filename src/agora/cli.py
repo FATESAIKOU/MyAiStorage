@@ -211,8 +211,9 @@ def _progress(word: str, k: int, total: int, item: str = "") -> None:
 def cmd_import(args, paths: store.Paths) -> int:
     """Import one or several agent sessions (T1 R2: several ids, one line each).
 
-    Every id is imported even if an earlier one failed (R2); the exit code is
-    the worst of the individual results.
+    Every id is imported even if an earlier one failed (R2). The exit code is
+    the first non-zero result, and a single id behaves exactly as before
+    (spec batch-commands「import 一次多個」, review S1-1, S1-2).
     """
     if args.ids:
         raise InputError("import 不接 session id；用 --external-session-id 給 agent 自己的 id")
@@ -223,27 +224,36 @@ def cmd_import(args, paths: store.Paths) -> int:
     ids = [i.strip() for raw in args.external_session_id for i in raw.split(",") if i.strip()]
     if not ids:
         raise InputError("--external-session-id 沒有內容")
-    store.sync(paths)  # once, never throttled: we must see other machines' imports (S6)
-    worst = 0
+    # Once, never throttled: we must see other machines' imports (S6). The batch
+    # shares this index; _save keeps it current as it goes (review S1-3).
+    index = store.sync(paths)
+    first_bad = 0
     for k, external_id in enumerate(ids, 1):
         _progress("匯入", k, len(ids), external_id)
         try:
-            code = _import_one(agent, external_id, updates, paths)
+            code = _import_one(agent, external_id, updates, paths, index)
+        except InputError as e:      # a single id used to end here: exit 1 (S1-2)
+            print(f"[agora] {external_id} 匯入失敗：{e}", file=sys.stderr)
+            code = EXIT_INPUT
         except Exception as e:   # one bad id must not stop the batch (R2; review K5)
             print(f"[agora] {external_id} 匯入失敗：{e}", file=sys.stderr)
             code = EXIT_ERROR
-        worst = code or worst
-    return worst
+        first_bad = first_bad or code   # the first non-zero wins (S1-1)
+    return first_bad
 
 
-def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Paths) -> int:
+def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Paths,
+                index: store.Index) -> int:
     """One import. Unchanged content and no --header is a no-op that just
-    prints the same id (R4: a re-run after Ctrl-C skips what is done)."""
+    prints the same id (R4: a re-run after Ctrl-C skips what is done).
+
+    The caller syncs once and passes the index in (review S1-3); _save keeps
+    that index current, so a later id still sees what an earlier one saved.
+    """
     exported = agent.export(external_id)
     if exported.message_count <= 0:
         raise InputError(f"{external_id} 沒有任何訊息，不匯入")
     body = reading(agent, exported.raw)
-    index = store.sync(paths)
     existing = index.by_source(agent.name, exported.session_id)
     if existing:
         old = index.header(existing[0])
@@ -459,10 +469,15 @@ def _cache_section(paths: store.Paths, agent_name: str, agora_id: str, text: str
     folder = _sections_cache_dir(paths)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{_section_key(agent_name, agora_id, text)}.json"
-    tmp = path.with_suffix(".json.tmp")          # never leave half a file behind
-    tmp.write_text(json.dumps({"summary": summary, "model": model}, ensure_ascii=False),
-                   encoding="utf-8")
-    os.replace(tmp, path)
+    # A unique temp name: two merges working on one source must not share it (S1-9).
+    handle, tmp = tempfile.mkstemp(dir=folder, prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"summary": summary, "model": model}, ensure_ascii=False))
+        os.replace(tmp, path)         # never leave half a file behind
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _require_sections(agora_id: str, agora: dict) -> None:
@@ -695,7 +710,9 @@ def cmd_delete(args, paths: store.Paths) -> int:
         print(f"[agora] {agora_id} 有子 Session，不能刪：{children}", file=sys.stderr)
         refused.append(agora_id)
     if done:
-        print(f"[agora] 已把 {done} 個移到 Drive 垃圾桶，30 天內可以在 Drive 網頁還原", file=sys.stderr)
+        more = f"，重跑會接著做剩下的 {len(left) + len(missing)} 個" if left else ""
+        print(f"[agora] 已把 {done} 個移到 Drive 垃圾桶，30 天內可以在 Drive 網頁還原{more}",
+              file=sys.stderr)
     return EXIT_INPUT if refused else 0
 
 

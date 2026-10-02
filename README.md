@@ -21,12 +21,19 @@ uv tool install --editable .     # 之後就有 agora 指令
 agora <動作> <型態> [session_id] [選項]
 ```
 
-動作是 `search`、`import`、`merge`、`continue`、`delete`、`edit`、`show`；型態目前只有 `session`。
+動作是 `search`、`import`、`merge`、`continue`、`delete`、`edit`、`show`、`pull`、`push`；
+型態目前只有 `session`。
+
+`import`、`delete`、`merge`、`pull`、`push` 一次可以處理多個，處理時在 stderr 逐行印
+`k/N` 進度，stdout 只印 agora id（所以可以直接接管線）。被 Ctrl-C 中斷後，重跑同一個
+指令會接著做：import 略過已匯入的、delete 略過自己刪過的、merge 沿用已寫好的要約、
+pull 略過已經是新的。
 
 ```bash
-# 初次引入（只上傳指定的那一個 Session）
+# 初次引入（只上傳指定的那一個 Session）；--external-session-id 可以給多次或用逗號分隔
 agora import session --external-session-id ses_xxxx --agent opencode --header 'title=CSV 規劃'
 agora import session --external-session-id 0f1e…-uuid --agent claude
+agora import session --external-session-id ses_a,ses_b --external-session-id ses_c --agent opencode
 
 # 找：--filter KEY=VALUE 是全等，KEY~=TEXT 是包含；text 是全文
 agora search session --filter text~=表格
@@ -47,14 +54,17 @@ agora edit session agora:01K6… --header 'tags=[csv, 表格]' --header 'status=
 agora edit session agora:01K6…
 
 # 刪除：移到 Drive 垃圾桶（30 天內可以在 Drive 網頁還原），一定要加 --yes
+# 有找不到的 id 時整批都不刪（exit 1）；自己刪過的 id 重跑時會略過
 agora delete session agora:01K6… --yes
+agora delete session agora:01K6…, agora:01K7… --yes
 
-# 快取：一次把 Drive 上的 Session（含原始檔）或這台機器上 agent session 的全文拿到本機
-agora cache agora
-agora cache local
+# pull／push 只吃給的 id（沒有 --all；id 的前綴決定意思，不從形狀猜）
+# agora:X → agora 的 Session；opencode:<id>／claude:<id> → 這台機器上的 agent session
+agora pull session agora:01K6…                    # 拿下 session.md 與它指到的原始檔
+agora pull session claude:0f1e…-uuid              # 把那個 session 的全文寫進本機快取
 
-# 把本機的 agora 寫回 Drive（同名覆蓋，Drive 上多的不刪）
-agora sync
+# 把給的 agora Session 寫回 Drive：只傳 session.md 與它標頭指到的那一個原始檔
+agora push session agora:01K6… agora:01K7…
 
 # 看標頭＋閱讀版／原始匯出
 agora show session agora:01K6…

@@ -176,18 +176,21 @@ Mac:
 agora <動作> <型態> [session_id] [選項]
 
 agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync]
-agora import   session --external-session-id <id> --agent opencode|claude [--header-file F] [--header K=V]...
+agora import   session --external-session-id <id>[,<id>...] [--external-session-id <id>...] --agent opencode|claude [--header-file F] [--header K=V]...
 agora merge    session <id>, <id>, ... --agent opencode|claude [--header-file F] [--header K=V]...
 agora continue session <id> --agent opencode|claude [--dir <專案目錄>] [--header-file F] [--header K=V]...
-agora delete   session <id> --yes
+agora delete   session <id>, <id>, ... --yes
 agora edit     session <id> [--header-file F] [--header K=V]...
 agora show     session <id> [--raw]
+agora pull     session <id>, <id>, ... [--not-exist-delete]
+agora push     session <id>, <id>, ... [--not-exist-upload]
 ```
 
 - 位置參數固定是「動作、型態、session id」。型態目前只有 `session`。
 - `--agent`：import 時是「這是哪個 agent 的 session」，merge 時是「誰寫要約」，continue 時是「用哪個 agent 接」。不再有 `--format`。
-- `--external-session-id`：只有 import 用，是 agent 自己的 session id。
-- `sync` 拿掉了：每個指令開頭都會自動推 outbox、需要時拉 Drive（4.3），使用者不必自己下。
+- `--external-session-id`：只有 import 用，是 agent 自己的 session id，可以給多次或用逗號分隔（5.2）。
+- **一次處理多個**（2026-10-03 使用者決定）：import、delete、merge、pull、push 都吃 id 清單；逐一在 **stderr** 印一行 `k/N` 進度，**stdout 只放 agora id**（可以接管線）。被 Ctrl-C 中斷後重跑同一個指令會接著做：import 略過已匯入、delete 略過已刪、merge 沿用已寫好的要約、pull 略過已快取（5.2、5.3、5.6、5.10）。
+- `cache`／`sync` 拿掉了，改成 `pull`／`push`，而且**只吃給的 id**（5.10）。
 - 所有寫入指令的輸出第一欄都是 agora id。exit code：0 成功；1 做不到（找不到 id、沒有訊息、merge 少於兩個、delete 沒加 `--yes`、有子 Session）；2 錯誤（包含要約失敗：agent 錯誤、逾時、空的回覆，這時不存檔）；3 已存進 outbox、還沒上傳。
 
 ### 5.1 search
@@ -205,6 +208,7 @@ agora show     session <id> [--raw]
 - `--agent opencode`：`opencode export <id> > 檔案`，stderr 另外導走、**不能 `2>&1`**。檢查 JSON 能解析、message 數大於 0（S10）。`agora.source.dir` 取 `info.directory`（N9）。
 - `--agent claude`：`~/.claude/projects/*/<id>.jsonl` 加上 `<id>/` 附屬資料夾（S9）；最後一行不完整就丟掉並警告（S10）。`agora.source.dir` 取 jsonl 的 `cwd`（N9）。
 - 只上傳指定的那一個 Session。
+- **一次可以匯入多個**（2026-10-03 使用者決定）：`--external-session-id` 可以給多次或用逗號分隔。**先同步一次**，再逐一匯入；**某一個失敗照樣做下一個**，stderr 說明是哪一個失敗，exit code 是第一個非零的（全部成功是 0）。
 - 同一個來源 Session 再匯入：內容沒變、也沒有 `--header`，就不做事；內容沒變但有 `--header`，只更新標頭；內容變了而且還沒有子 Session，就更新同一個 agora id；已經有子 Session，就建一個新的（`relation: import`、`parents: [舊 id]`，S7）。
 
 ### 5.3 merge（第 7 版：2026-10-02 使用者決定）
@@ -213,6 +217,7 @@ agora show     session <id> [--raw]
 
 - `agora merge session id1 id2 … --agent opencode|claude`：`--agent` 必填，指定**誰寫要約**。id 用空白或逗號分隔都可以；同一個 id 給兩次是錯誤（X4）。
 - 產生一個新的 Session：`relation: merge`、`parents` 依給的順序。它的 raw 是 `sections.json`（每個來源一節的結構化要約，見下）；`session.md` 的內文由程式從這份 JSON 排出來。
+- **中斷後重跑會接著做**（2026-10-03 使用者決定）：每寫好一個來源的要約就**先存在本機** `<state>/merge-sections/<key>.json`，鍵是「agent ＋提示詞版本 ＋模型設定（`AGORA_OPENCODE_MODEL` 之類）＋來源 id ＋實際送出的那段文字（截斷之後）」的雜湊。重跑時同樣的來源**沿用**已寫好的要約（沿用前再用 JSON Schema 驗一次），只寫還沒寫的；任何一項不同就重寫。
 - **每個直接來源一節**：
   - 普通 Session：叫一次 `summarize`，**只給它這一個來源**的閱讀版（最多 60,000 字，超過保留頭尾，review Y1），請它照下面的 schema 只輸出 JSON。
   - 來源是 merge：**不叫 AI**，直接沿用它 `sections.json` 裡已經寫好的各節，放在這個來源的節底下（巢狀）。
@@ -284,6 +289,7 @@ agora show     session <id> [--raw]
 - 把 Drive 上 `sessions/<ULID>/` 整個**移到 Drive 垃圾桶**（30 天內可以在 Drive 網頁還原），本機的鏡像與索引一起拿掉。
 - 一定要加 `--yes`，沒加就只印出會刪什麼，exit 1。
 - 有子 Session（別的 Session 的 `parents` 指向它）時不刪，列出那些子 Session，exit 1。
+- **重跑會接著做**（2026-10-03 使用者決定）：刪除成功時把 ULID 記到 `<state>/deleted`；重跑同一個指令時，**在這份記錄裡的** id 印「已經不在了，略過」並不算失敗（全部都略過時 exit 0）。**從來不存在的 id（例如打錯）照樣報找不到、exit 1**——只有自己刪過的才略過。
 - **一次可以刪多個**（2026-10-02 使用者決定）：`agora delete session id1 id2 … --yes`，空白或逗號分隔。子 Session 也在同一次要刪的，就先刪子 Session，它的來源接著就能刪；子 Session 不在這次裡面的照樣拒絕，其他的照刪，有被拒絕的就 exit 1。互動模式的 `d` 刪掉所有勾選的（沒有勾選就是游標那一個），確認視窗列出數量與標題，預設停在「取消」。
 
 ### 5.7 edit
@@ -346,15 +352,22 @@ agora show     session <id> [--raw]
 - 未匯入頁不列 agora 自己留下的複本：接續後「沒有新內容」時，agent 那邊的那個 session 記在 `<state>/unsaved-launches`；寫要約用的 `<state>/summarize/` 底下的 session 也不列（review T5）。
 - 勾選多個匯入時，一個失敗照樣做下一個，最後顯示成功幾個、失敗幾個（review T10）。
 
-### 5.10 快取與 sync（2026-10-02 使用者決定）
+### 5.10 本機與 Drive（2026-10-03 使用者決定：`cache`＋`sync` → `pull`＋`push`）
 
-- **全文快取，全部懶載入**：既有用到才讀的東西，結果都存到同一個本機位置 `~/.cache/agora/`。
-  - agora 的 Session：本來就有的 Drive 鏡像 `sessions/<ULID>/`（`session.md` 就是閱讀版，原始檔用到才下載）。
-  - 這台機器上 agent 的 session：`reading/<agent>/<session id>.md`，是閱讀版的全文。檔案的 mtime 設成那個 session 自己的更新時間；session 比較新就是過時，下次看到時重寫。
-- **`agora cache agora`**：同步一次，再把每個 Session 還沒下載的原始檔補齊。**`agora cache local`**：把這台機器上每個 agent session 沒有或過時的全文寫進快取。兩個都逐個印出「n/總數」，某一個失敗照樣做下一個，最後印出完成幾個、失敗幾個（有失敗時 exit 2）。
-- **`agora sync`**：先送出 outbox，再把本機鏡像裡的每個檔寫回 Drive 的 `sessions/`，同名直接覆蓋，**Drive 上多的不刪**（刪除只能用 delete）。不比對誰比較新：別台機器剛改過、這台還沒同步到的，會被這台的版本蓋過去（使用者接受）。
-- 互動模式：`r` 選「Agora／本機」更新快取，`s` 確認後 sync，都在等待視窗裡跑，最新一行就是進度。未匯入頁的完整對話用 `reading/` 的快取；內文搜尋先搜快取，再用轉接器的 `search_text()` 補搜還沒快取的。
-- 指令格式：`agora cache agora|local`、`agora sync`（不寫型態）；其他動作的型態照舊是 `session`。
+- **本機位置**（都在 `~/.cache/agora/`，需要時才讀）：
+  - agora 的 Session：Drive 鏡像 `sessions/<ULID>/`（`session.md` 就是閱讀版，原始檔用到才下載）。
+  - 這台機器上 agent 的 session：`reading/<agent>/<session id>.md`，閱讀版的全文；mtime 設成該 session 自己的更新時間，比較新就是過時。
+- **`agora pull session <id>…`／`agora push session <id>…`：只吃給的 id**（2026-10-03 使用者決定，沒有 `--all`，不給 id 就報錯；要全部就在 TUI 按 `a`，或從 search 用管線接過來）。id 的前綴決定意思，不從形狀猜：
+  - 沒有前綴或 `agora:`：agora 的 Session。pull 拿下 `session.md` 與標頭指到的原始檔；push 寫回 `session.md` 與同一個原始檔。
+  - `opencode:<id>`／`claude:<id>`：這台機器上的 agent session，pull 把全文寫進快取。
+  - `ses_…`／uuid 沒有 agent 前綴：報錯。
+  - push 的 id 只能是 agora 的。
+- 已經在本機、沒有過時的，pull 略過；push 則重新覆蓋一次（結果一樣）。
+- **push 只傳該傳的兩個檔**：`session.md` 與它標頭 `agora.raw.file` 指到的那一個原始檔（本機沒有那個原始檔就只傳 `session.md`）。舊的原始檔、下載到一半的檔、以 `.` 開頭的檔都不傳。
+- 兩個指令都逐個在 stderr 印 `k/N`，某一個失敗照樣做下一個。
+- **雲端沒有的 Session**（2026-10-03 決定，規格見 `openspec/changes/command-batch-actions/specs/session-sync/spec.md`）：**同步時不再自動清掉**別台機器刪掉的 Session，本機鏡像與索引保留並標成「雲端沒有」。`pull --not-exist-delete` 刪掉本機副本；`push --not-exist-upload` 把它傳回去（等於撤銷別台的刪除）；兩個 flag 都沒加時只印一行提醒、不動。`search`／`show` 會標示，`--filter cloud=no|yes` 可查。
+  - **TODO（impl1，change 第 3 節）**：上面這段「雲端沒有」尚未實作，實作中；程式與測試以 `openspec/changes/command-batch-actions/specs/session-sync/spec.md` 為準。
+- 互動模式：`r` 選「Agora／本機」更新快取，`s` 確認後 push，都在等待視窗裡跑，最新一行就是進度。未匯入頁的完整對話用 `reading/` 的快取；內文搜尋先搜快取，再用轉接器的 `search_text()` 補搜還沒快取的。
 
 ## 6. 不做的事
 
