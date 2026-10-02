@@ -945,3 +945,36 @@ def test_a_success_clears_only_the_rows_it_acted_on():
             await _close_result(pilot, app)
             assert set(app.marked) == hidden                   # only the hidden one is left
     _run(go)
+
+
+def test_a_leaves_the_cursor_where_it_was():
+    """review T2-sec2: marking everything must not move the cursor to the top."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down", "down")
+            before = app.current().key
+            assert app.query_one("#table").cursor_row == 2
+            await pilot.press("a")
+            await pilot.pause()
+            assert app.current().key == before and app.query_one("#table").cursor_row == 2
+    _run(go)
+
+
+def test_cancelling_every_visible_row_keeps_the_hidden_marks():
+    """review T2-sec2: `a` twice with a filter on unmarks what is on screen only."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("a")                       # all three
+            await pilot.pause()
+            await _filter_to(pilot, "甲")
+            await _wait(lambda: len(app.shown()) == 1, pilot)
+            await pilot.press("a")                       # 甲 visible and marked -> unmark it
+            await pilot.pause()
+            assert app.marked == {r.key for r in app.rows["agora"] if r.cells[1] != "甲"}
+    _run(go)

@@ -929,14 +929,15 @@ class AgoraApp(App):
         left in (spec「全選切換」), so filtering back and forth does not quietly
         unmark what was marked on purpose.
         """
+        row = self.current()          # the cursor stays where it was: this is not a jump
         keys = [r.key for r in self.shown()]
         if not keys:
             return
         if all(key in self.marked for key in keys):
-            self.marked -= set(keys)
+            self.marked -= set(keys)  # visible ones only; a hidden mark is another decision
         else:
             self.marked |= set(keys)
-        self.show()
+        self.show(keep=row.key if row else None)
 
     def action_edit(self) -> None:
         row = self.current()
