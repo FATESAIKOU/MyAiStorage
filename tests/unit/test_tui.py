@@ -541,7 +541,7 @@ def test_the_escalation_goes_on_after_agora_itself_is_gone(group_calls, monkeypa
 
 def test_the_escalation_stops_when_the_group_is_gone(group_calls, monkeypatch):
     """review M4: a process that ends on SIGINT gets no SIGTERM."""
-    monkeypatch.setattr(tui, "ESCALATE_AFTER", 0.2)
+    monkeypatch.setattr(tui, "ESCALATE_AFTER", 0.15)
     sent, alive = group_calls
     app, _ = _app([])
     proc = FakeProc(lines=["[agora] 刪除 1/1"], hang=True)
@@ -559,7 +559,7 @@ def test_the_escalation_stops_when_the_group_is_gone(group_calls, monkeypatch):
             await pilot.press("escape")
             await _wait(lambda: sent, pilot)
             proc.done.set()
-            await pilot.pause(0.5)               # long enough for both later steps
+            await _wait(lambda: len(sent) > 1, pilot, tries=20)   # both later steps had their turn
             assert [sig for _pgid, sig in sent] == [int(signal.SIGINT)]
     _run(go)
 
@@ -914,20 +914,21 @@ def test_a_failed_segment_keeps_its_own_marks():
 
 
 def test_a_failure_on_one_tab_keeps_the_other_tabs_marks():
-    """M1(b): the import tab's mark is not this command's business."""
+    """M1(b): a delete that fails on the agora tab must not touch the import tab's
+    marks. It used to keep only the current tab's, which dropped them."""
     app, _ = _two_tab_app()
     app.spawn, _mades = _spawn_per_call([2])
-    keys = {r.key for r in app.rows["agora"]}
-    app.marked = set(keys)
+    on_import = {r.key for r in app.rows["import"]}
+    app.marked = {r.key for r in app.rows["agora"]} | on_import
 
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("d")
+            await pilot.press("d")                       # the agora row under the cursor
             await pilot.pause()
             await pilot.press("down", "enter")
             await _close_result(pilot, app)
-            assert set(app.marked) == keys
+            assert on_import <= set(app.marked), "另一頁的勾選被丟掉了"
     _run(go)
 
 
@@ -1215,3 +1216,46 @@ def test_the_refusal_is_the_command_modes_own_wording():
     store.Index(paths).mark_missing(["01AAAAAAAAAAAAAAAAAAAAAAAA"])
     refusal = store.cloud_gone(store.Index(paths), "agora:01AAAAAAAAAAAAAAAAAAAAAAAA")
     assert refusal == cli._cloud_lost("agora:01AAAAAAAAAAAAAAAAAAAAAAAA")
+
+
+def test_enter_on_the_checkbox_confirms_and_does_not_tick_it():   # review U1
+    """The option that deletes a local copy or puts a session back must not be one
+    Enter away from being ticked."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("p")
+            await pilot.pause()
+            window = app.screen
+            assert isinstance(window, tui.Confirm)
+            await pilot.press("down")                      # 確定 is highlighted
+            await pilot.press("tab")                       # then focus the checkbox
+            await pilot.pause()
+            assert not window.picked
+            await pilot.press("enter")                      # confirm, not tick
+            await _wait(lambda: app._last_spawned, pilot)
+            assert "--not-exist-delete" not in app._last_spawned[-1]
+    _run(go)
+
+
+def test_space_is_what_ticks_it():
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("P")
+            await pilot.pause()
+            window = app.screen
+            await pilot.press("down")                      # 確定
+            await pilot.press("tab")
+            await pilot.press("space")                      # tick
+            await pilot.pause()
+            assert window.picked
+            await pilot.press("shift+tab")                  # back to the buttons
+            await pilot.press("enter")                      # 確定 (already highlighted)
+            await _wait(lambda: app._last_spawned, pilot)
+            assert app._last_spawned[-1][-1] == "--not-exist-upload"
+    _run(go)

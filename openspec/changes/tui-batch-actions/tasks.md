@@ -20,7 +20,8 @@
 - [x] 3.1 Agora 頁加「雲端」欄（✓、✗、未上傳）（spec「雲端欄與 pull／push 的選項」）
 - [x] 3.2 pull、push 的確認視窗加預設不勾的選項，對應 `--not-exist-delete`、`--not-exist-upload`
 - [x] 3.3 對雲端沒有的列接續、改標頭時，顯示指令模式的拒絕訊息
-- [x] 3.4 review T2-sec3 Q1：未匯入頁不綁 P、沒有 id 時不啟動子程序
+- [x] 3.7 review T2-sec3 Q1：未匯入頁不綁 P、沒有 id 時不啟動子程序
+- [x] 3.6 review T2-sec3 U1：確認視窗的 Enter 一律是確定，只有空白鍵切換勾選
 - [x] 3.5 review T2-sec3 S1：確認視窗的勾選可以用鍵盤（Tab／空白），Tab 不再切頁
 
 ## 4. 測試與收尾

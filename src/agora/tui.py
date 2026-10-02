@@ -444,6 +444,7 @@ class Confirm(ModalScreen):
     """
 
     BINDINGS = [Binding("escape", "dismiss((None, False))", "取消"),
+                Binding("enter", "confirm", "確定", priority=True),
                 Binding("space", "toggle", "勾選", priority=True)]
 
     def __init__(self, title: str, options: list[str], note: str = "", extra: str = ""):
@@ -482,6 +483,16 @@ class Confirm(ModalScreen):
     @on(OptionList.OptionSelected)
     def chosen(self, event: OptionList.OptionSelected) -> None:
         self.dismiss((event.option_index, self.picked))
+
+    def action_confirm(self) -> None:
+        """Enter confirms with whatever is ticked; it never ticks (review U1).
+
+        A checkbox that toggles on Enter makes the dangerous direction one keystroke
+        away: the box means deleting a local copy or putting a session back, and
+        Enter is the key people press to accept what they were shown.
+        """
+        options = self.query_one("OptionList")
+        self.dismiss((options.highlighted if options.highlighted is not None else 0, self.picked))
 
 
 class Tell(ModalScreen):
