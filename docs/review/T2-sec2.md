@@ -120,3 +120,39 @@ A 是 2.1 最直接要求的「失敗保留」沒做到，而且會讓 M2（T2-s
 |---|---|---|---|
 | P3 | Low | exit 3（已存進 outbox）被當成失敗，所以勾選都留著。對 merge 來說，exit 3 代表新的 Session **已經做出來了**（只是還沒上傳），這時再按一次 `m`，就會**再做一個**合併的 Session（要約會沿用快取，所以很快，但結果是兩份）。import 的 exit 3 重跑不會有問題（內容沒變，會沿用同一個 id） | `code in (0, 3)` 時清掉 `sent` 的勾選（exit 3 是「做完了，只是還沒上傳」，outbox 之後會自己送）；狀態列已經寫了「已存進 outbox」 |
 | P4 | Low | 動作成功之後，`act()` 裡的 `self.show()` 和 `reload()` 裡的 `show()` 都沒有帶 `keep`，所以每一次動作做完，游標都會回到第一列（這不是新的問題） | 和 N2 一樣，記住動作之前游標那一列，`show(keep=…)` |
+
+## 2.3 按鍵（`996c440`）
+
+2026-10-03，review。對照 spec 的「按鍵」。在 `git archive 416647a`（包含 2.3 和 3.1）取出的副本跑 `test_tui.py`：**48 passed**，連跑兩次都一樣。P1 那個不穩定的測試也一起修好了：`ESCALATE_AFTER` 改成 0.2 秒，而且一開始就把 group 設成「已經不在了」。探測測試只在副本裡做。規則同上。
+
+**沒有 High。**
+
+| spec | 實作 | 結果 |
+|---|---|---|
+| `p` pull、`P` push；拿掉 `r`、`s` | 綁定換成了 `p`→`action_pull`、`P`→`action_push` | ✅（`test_p_pulls_and_P_pushes`） |
+| 其他的鍵（↑↓、Tab、shift+tab、空白、`a`、`/`、ctrl+t、Enter、`m`、`e`、`d`、`q`；等待視窗裡的 Esc） | 都在 | ✅ |
+| 按鍵列只顯示能用的；未匯入頁沒有 `m`、`e`、`d`、`P` | 拿掉了 Textual 的 Footer，改用自己畫的 `#keys`，依照每一頁的 `KEYS` 表 | ✅（`test_the_key_bar_shows_only_what_works_on_this_tab`）；但還不完全，見 Q2 |
+| 未匯入頁按 `m`、`e`、`d` 沒有作用 | `check_action` 加上這三個 handler 裡各自的 tab 判斷 | ✅ |
+| 未匯入頁按 `P` 沒有作用 | **還是會作用** | ❌ Q1 |
+
+### Q1（Medium）：未匯入頁的 `P` 被藏起來了，但按下去還是會動作
+
+`check_action` 把 `push` 放在 `("mark", "mark_all", "primary", "filter", "pull", "push")` 那一組，只看焦點，**不看是哪一頁**；`action_push` 裡面也沒有判斷是哪一頁。實測（副本裡的探測測試）：
+
+1. 在未匯入頁，`check_action("push")` 回傳 **True**；
+2. 按 `P` → 出現確認視窗「把 1 個寫回 Drive？」；
+3. 選「確定」之後，送出去的指令是 **`agora push session`**。因為 `argv_for` 只取 `agora:` 開頭的 key，所以一個 id 都沒有，指令模式會回「push 要給 session id」，exit 1。
+
+按鍵列上看不到它，按下去卻會問一個沒有意義的問題，然後失敗。commit 訊息說「`check_action` follows suit, so the keys that are not there do not fire either」，對 `P` 來說這不成立。測試 `test_the_agora_only_keys_do_nothing_on_the_import_tab` 雖然按了 `P`，但只斷言「沒有啟動子程序」，而 push 會先開確認視窗，所以這個測試在現在的程式上照樣會過。
+
+**修法**：把 `push` 移到 `("merge", "edit", "delete")` 那一組（只在 Agora 頁）；`action_push` 也像其他三個一樣加一個頁面判斷。測試改成斷言 `check_action("push") is False`，並且按 `P` 之後畫面不是 `Choose`。
+
+### Q2（Low）：按鍵列是一張寫死的表，不會跟著焦點和狀態變
+
+- 預覽區有焦點的時候，`check_action` 會停用 mark、`a`、Enter、`/`、`p`、`P`，可是按鍵列（`KEYS[self.tab]`）還是照樣列著它們。spec 寫的是「MUST 只顯示**目前**能用的鍵」。
+- 另外，`KEYS` 是 `BINDINGS` 之外**另一份**手寫的清單，以後加一個鍵就要記得改兩個地方；Q1 就是這兩份（加上 `check_action`）沒有對齊造成的。
+- **建議**：按鍵列由 `BINDINGS` 產生，每一個鍵都用 `check_action` 過濾一次，在焦點或頁面改變時重畫。這樣按鍵列、實際能不能按、測試，三者都只看同一個來源。
+
+### Q3（Low）：沒有顯示 Tab、shift+tab
+
+spec 的按鍵清單裡有 Tab（換頁）和 shift+tab（左右切換焦點），舊的 Footer 也會顯示它們，新的 `KEYS` 表裡沒有。這兩個鍵在兩頁都能用，應該列出來。
