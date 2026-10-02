@@ -36,6 +36,26 @@ if args[:1] == ["--version"]:
     print(os.environ.get("FAKE_CLAUDE_VERSION", "9.9.9 (Fake Claude)"))
     sys.exit(0)
 
+if "-p" in args and "--resume" not in args and "--session-id" not in args:
+    # summarize(): the prompt arrives on stdin (Y1), output is JSON on stdout.
+    prompt = sys.stdin.read()
+    with open(fake_home / "claude-stdin.log", "a") as f:
+        f.write(prompt + "\n")
+    mode = os.environ.get("FAKE_SUMMARIZE_MODE", "ok")
+    if mode == "fail":
+        print("fake failure", file=sys.stderr)
+        sys.exit(1)
+    if mode == "empty":
+        print(json.dumps({"result": "", "modelUsage": {}}))
+        sys.exit(0)
+    if mode == "garbage":
+        print("not json at all")
+        sys.exit(0)
+    sid = str(uuid.uuid4())
+    print(json.dumps({"result": "ZZSUM 這是自編的要約", "session_id": sid,
+                      "modelUsage": {"zz-model": {"inputTokens": 1}}}))
+    sys.exit(0)
+
 if "--resume" in args:
     sid = args[args.index("--resume") + 1]
     path = (Path(os.environ["AGORA_CLAUDE_HOME"]) / ".claude" / "projects"

@@ -19,6 +19,7 @@ import base64
 import json
 import os
 import re
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,7 @@ from agora.agents.base import AgentError, Exported, Launch, Turns, agent_cmd, to
 
 FORMAT = "claude-jsonl/1"
 TITLE_MAX = 60
+SUMMARIZE_TIMEOUT_S = 600
 
 # Top-level line types that exist but carry nothing for the reading version
 # (test-plan 0.1: known-but-skipped types produce no output at all).
@@ -357,6 +359,35 @@ class ClaudeAgent:
                       cwd=workdir_str, agent_session_id=new_id,
                       before_count=_count_messages(_parse_all(rewritten)))
 
+    def summarize(self, prompt: str, workdir: Path) -> tuple[str, str | None]:
+        """One headless `claude -p` that cannot use any tool (design 5.3, review Y3).
+
+        `--tools ""` turns off every built-in tool (and any tool added later),
+        `--strict-mcp-config` keeps the user's MCP servers out, and
+        `--setting-sources ""` skips the user's hooks and settings. The prompt
+        goes in on stdin, never after a variable-length flag (Y1).
+        `--no-session-persistence` means nothing is written under
+        projects/, so there is no session to delete afterwards (Y3).
+        """
+        argv = [agent_cmd("claude"), "-p", "--tools", "", "--strict-mcp-config",
+                "--setting-sources", "", "--no-session-persistence",
+                "--output-format", "json"]
+        try:
+            proc = subprocess.run(argv, input=prompt, cwd=str(workdir), env=_child_env(),
+                                  capture_output=True, text=True, timeout=_summarize_timeout())
+        except (OSError, subprocess.SubprocessError) as e:
+            raise AgentError(f"Claude 要約失敗：{e}")
+        if proc.returncode != 0:
+            raise AgentError(f"Claude 要約失敗（rc={proc.returncode}）：{proc.stderr.strip()[-300:]}")
+        try:
+            doc = json.loads(proc.stdout or "{}")
+        except ValueError:
+            doc = {"result": proc.stdout}
+        text = str(doc.get("result") or "").strip()
+        if not text:
+            raise AgentError("Claude 沒有回覆")
+        return text, _used_model(doc)
+
     def collect(self, launch: Launch) -> Exported | None:
         if not launch.agent_session_id:
             raise AgentError("沒有 agent session id，無法收尾")
@@ -367,6 +398,26 @@ class ClaudeAgent:
         if _count_messages(_parse_all(main)) <= launch.before_count:
             return None
         return _exported(session_id, main, path.parent / session_id)
+
+
+def _used_model(doc: dict) -> str | None:
+    """The model claude reports for this run (--output-format json has no
+    plain `model` field, only the modelUsage breakdown)."""
+    if isinstance(doc.get("model"), str):
+        return doc["model"]
+    usage = doc.get("modelUsage")
+    if isinstance(usage, dict) and usage:
+        return next(iter(usage))
+    return None
+
+
+def _child_env() -> dict:
+    """HOME follows AGORA_CLAUDE_HOME so a sandboxed HOME cannot redirect it."""
+    return {**os.environ, "HOME": str(config_dir().parent)}
+
+
+def _summarize_timeout() -> float:
+    return float(os.environ.get("AGORA_SUMMARIZE_TIMEOUT", SUMMARIZE_TIMEOUT_S))
 
 
 def _warn_cleared(path: Path, session_id: str) -> None:

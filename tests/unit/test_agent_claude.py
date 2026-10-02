@@ -416,11 +416,85 @@ def test_collect_missing_session_raises(claude_env, tmp_path):
                                  agent_session_id=str(uuid.uuid4()), before_count=0))
 
 
+# --- summarize (design 5.3, review Y3) ------------------------------------------
+
+def test_summarize_returns_text_and_model(claude_env, tmp_path):
+    workdir = (tmp_path / "sum").resolve()
+    workdir.mkdir()
+    prompt = "請把下面兩段對話寫成三句話的摘要：\n\nA：規劃表格\nB：開始實作"
+    text, model = C.ADAPTER.summarize(prompt, workdir)
+    assert text == "ZZSUM 這是自編的要約"
+    assert model == "zz-model"
+
+
+def test_summarize_passes_the_prompt_on_stdin_and_blocks_tools(claude_env, tmp_path, monkeypatch):
+    workdir = (tmp_path / "sum").resolve()
+    workdir.mkdir()
+    monkeypatch.setenv("FAKE_SUMMARIZE_MODE", "ok")
+    C.ADAPTER.summarize("很長的材料" * 100, workdir)
+    assert (claude_env["fake_home"] / "claude-stdin.log").read_text().strip() == "很長的材料" * 100
+    argv = json.loads((claude_env["fake_home"] / "claude-args.log").read_text().splitlines()[-1])
+    for flag, value in [("-p", None), ("--tools", ""), ("--strict-mcp-config", None),
+                        ("--setting-sources", ""), ("--no-session-persistence", None)]:
+        assert flag in argv, flag
+        if value is not None:
+            assert argv[argv.index(flag) + 1] == value
+    # the prompt is never a command-line argument
+    assert not any("很長的材料" in a for a in argv)
+
+
+def test_summarize_runs_in_the_given_workdir(claude_env, tmp_path):
+    workdir = (tmp_path / "sum").resolve()
+    workdir.mkdir()
+    C.ADAPTER.summarize("材料", workdir)
+    assert (claude_env["fake_home"] / "claude-cwd.log").read_text().splitlines()[-1] == str(workdir)
+
+
+def test_summarize_timeout_is_configurable(claude_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("AGORA_SUMMARIZE_TIMEOUT", "12")
+    assert C._summarize_timeout() == 12.0
+    monkeypatch.delenv("AGORA_SUMMARIZE_TIMEOUT")
+    assert C._summarize_timeout() == 600.0
+
+
+def test_summarize_failures_raise_agent_error(claude_env, tmp_path, monkeypatch):
+    workdir = (tmp_path / "sum").resolve()
+    workdir.mkdir()
+    for mode in ("fail", "empty"):
+        monkeypatch.setenv("FAKE_SUMMARIZE_MODE", mode)
+        with pytest.raises(AgentError):
+            C.ADAPTER.summarize("材料", workdir)
+    monkeypatch.setenv("FAKE_CLAUDE_CMD", "/nonexistent/zz-claude")
+    with pytest.raises(AgentError):
+        C.ADAPTER.summarize("材料", workdir)
+
+
+def test_summarize_asks_for_no_session_file(claude_env, tmp_path):
+    """--no-session-persistence is what keeps projects/ clean (Y3); the real
+    check that nothing is written lives in tests/integration/test_claude_summarize.py."""
+    workdir = (tmp_path / "sum").resolve()
+    workdir.mkdir()
+    C.ADAPTER.summarize("材料", workdir)
+    argv = json.loads((claude_env["fake_home"] / "claude-args.log").read_text().splitlines()[-1])
+    assert "--no-session-persistence" in argv
+
+
+def test_summarize_falls_back_to_plain_stdout(claude_env, tmp_path, monkeypatch):
+    """A CLI that prints text instead of JSON still gives us the summary."""
+    workdir = (tmp_path / "sum").resolve()
+    workdir.mkdir()
+    monkeypatch.setenv("FAKE_SUMMARIZE_MODE", "garbage")
+    text, model = C.ADAPTER.summarize("材料", workdir)
+    assert text == "not json at all"
+    assert model is None
+
+
 # --- adapter surface -------------------------------------------------------------
 
 def test_adapter_surface():
     assert C.ADAPTER.name == "claude"
     assert hasattr(C.ADAPTER, "export")
+    assert hasattr(C.ADAPTER, "summarize")
     assert hasattr(C.ADAPTER, "turns")
     assert hasattr(C.ADAPTER, "native")
     assert hasattr(C.ADAPTER, "start_native")
