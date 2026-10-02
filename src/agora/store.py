@@ -52,17 +52,9 @@ class Paths:
             state=_env_path("AGORA_STATE_DIR", "~/.local/state/agora"),
         )
 
-    @property
-    def mirror(self) -> Path:
-        return self.cache / "sessions"
-
-    @property
-    def outbox(self) -> Path:
-        return self.state / "outbox"
-
-    @property
-    def pending(self) -> Path:
-        return self.state / "pending"
+    mirror = property(lambda s: s.cache / "sessions")
+    outbox = property(lambda s: s.state / "outbox")
+    pending = property(lambda s: s.state / "pending")
 
 
 def now() -> float:
@@ -87,6 +79,11 @@ def _fault(point: str) -> None:
 
 def _warn(message: str) -> None:
     print(f"[agora] {message}", file=sys.stderr)
+
+
+def _md5(entry: dict) -> str:
+    """The md5 Drive reported for a file, or "" when it has none."""
+    return (entry.get("Hashes") or {}).get("md5", "")
 
 
 class Drive:
@@ -145,12 +142,12 @@ class Drive:
         for entry in json.loads(out or "[]"):
             parts = entry["Path"].split("/")
             if len(parts) == 2:
-                found.setdefault(parts[0], {})[parts[1]] = (entry.get("Hashes") or {}).get("md5", "")
+                found.setdefault(parts[0], {})[parts[1]] = _md5(entry)
         return found
 
     def list_one(self, ulid: str) -> dict[str, str]:
         out = self._run("lsjson", f"gdrive:sessions/{ulid}", "--hash", "--files-only")
-        return {e["Name"]: (e.get("Hashes") or {}).get("md5", "") for e in json.loads(out or "[]")}
+        return {e["Name"]: _md5(e) for e in json.loads(out or "[]")}
 
     def upload(self, local: Path, ulid: str, name: str) -> None:
         # copyto, never copy: copy treats the target as a directory and
@@ -223,13 +220,18 @@ def outbox_ulids(paths: Paths) -> set[str]:
     return {p.name for p in paths.outbox.iterdir() if p.is_dir() and not p.name.startswith(".")}
 
 
+def _put_file(index: "Index", session_md: Path) -> None:
+    """Index one mirrored session.md under its ULID. Raises on an unreadable one."""
+    hdr, body = h.split_document(session_md.read_text(encoding="utf-8"))
+    index.put(session_md.parent.name, md5_file(session_md), hdr, body)
+
+
 def remember(paths: Paths, folder: Path, index: "Index | None" = None) -> None:
     """Put a session we just wrote into the local mirror and index right away."""
     mirror = paths.mirror / folder.name
     mirror.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(folder / "session.md", mirror / "session.md")
-    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
-    (index or Index(paths)).put(folder.name, md5_file(mirror / "session.md"), hdr, body)
+    _put_file(index or Index(paths), mirror / "session.md")
 
 
 def _index_outbox(paths: Paths, index: "Index") -> None:
@@ -335,10 +337,9 @@ class Index:
         if not self.known() and paths.mirror.exists():
             for md in paths.mirror.glob("*/session.md"):
                 try:
-                    hdr, body = h.split_document(md.read_text(encoding="utf-8"))
+                    _put_file(self, md)
                 except (h.HeaderError, OSError, UnicodeDecodeError):
                     continue
-                self.put(md.parent.name, md5_file(md), hdr, body)
         return self
 
     def known(self) -> dict[str, str]:

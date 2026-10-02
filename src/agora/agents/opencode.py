@@ -58,6 +58,13 @@ _SILENT_PARTS = {"reasoning", "step-start", "step-finish", "step-start-finish",
 #: the header, and opencode overwrites this one on the next continue anyway.
 NATIVE_TITLE = "Agora 接續"
 
+#: Ids `native()` writes as placeholders. start_native re-identifies every one of
+#: them before importing, so they only have to be unique within the payload - but
+#: they keep opencode's prefixes, because a payload whose ids do not start with
+#: `ses`/`msg`/`prt` is refused outright ("Expected a string starting with msg"),
+#: and a raw from `native()` should not be a trap for whoever debugs it.
+PLACEHOLDER_ID = "ses_agora_pending0"
+
 #: Every call gets a deadline: the CLI collects on every command, so one wedged
 #: opencode would wedge all of them (OC7). Read per call so a test can shorten it.
 DEFAULT_CLI_TIMEOUT = 60
@@ -70,17 +77,18 @@ def _timeout() -> int:
         return DEFAULT_CLI_TIMEOUT
 
 
-def _session_info(session_id: str, title: str, created: int) -> dict:
+def _session_info(created: int) -> dict:
     """The smallest `info` opencode will import *and* export again.
 
     Import rejects the whole payload when a field is missing, and export needs
     all of them, so a session that cannot be exported cannot be collected after
-    the agent has worked in it. `directory` / `projectID` are placeholders: import
-    rewrites both from the working directory (spike V5).
+    the agent has worked in it. The id is a placeholder (start_native re-identifies
+    the whole payload), and so are `directory` / `projectID`: import rewrites both
+    from the working directory (spike V5).
     """
     stamp = {"created": created, "updated": created}
     return {
-        "id": session_id, "slug": "agora-handoff", "title": title,
+        "id": PLACEHOLDER_ID, "slug": "agora-handoff", "title": NATIVE_TITLE,
         "directory": "", "projectID": "", "path": "",
         "agent": "build", "version": "", "cost": 0, "permission": [],
         "model": {"id": "", "providerID": "opencode", "variant": "default"},
@@ -236,71 +244,6 @@ def _lines_of(parts: list[dict]) -> list[str]:
     return lines
 
 
-def turns_of(payload: dict) -> list[tuple[str, list[str]]]:
-    """One entry per user/assistant message: its text, plus a line per tool call.
-
-    The same rules as the reading version (design 4.4), so `native(turns(raw))`
-    can rebuild a session whose history reads the same way.
-    """
-    turns: list[tuple[str, list[str]]] = []
-    for message in _payload_messages(payload):
-        role = (message.get("info") or {}).get("role")
-        if role in ("user", "assistant"):
-            turns.append((role, _lines_of(message.get("parts") or [])))
-    return turns
-
-
-def native_of(turns: list[tuple[str, list[str]]], session_id: str) -> dict:
-    """Turns as an opencode export, ready for `start_native` to re-identify.
-
-    The caller (cli._converted_turns) hands over what design v5 promises: starts
-    with a user turn, strictly alternating, no empty turn, no `[skip …]` line. So
-    this only has to compose them in order — no merging, no padding.
-
-    Plain, visible text parts — no synthetic, no attachment: whatever a session
-    says has to be on screen when the agent opens. One part per line, the way
-    opencode stores a multi-paragraph reply, so `turns(native(turns(raw)))` is the
-    same list of lines it started from. Ids are placeholders; `reidentify` hands
-    out the real ones, so the id rules live in one place.
-    """
-    created = int(time.time() * 1000)
-    messages: list[dict] = []
-    previous = ""
-    for role, lines in turns:
-        # the contract says both are true already; the check keeps a caller that
-        # breaks it from producing a message opencode would reject
-        body = [line for line in lines if line.strip()]
-        if role not in ("user", "assistant") or not body:
-            continue
-        at = created + len(messages)      # times only move forward: opencode sorts by them
-        message_id = f"tmp-msg{len(messages)}"
-        info = {"id": message_id, "sessionID": session_id, "role": role,
-                "time": {"created": at}, "agent": "build",
-                "model": {"providerID": "opencode", "modelID": ""}}
-        if role == "assistant":
-            # import rejects an assistant message whose parentID is null, so it
-            # has to point at the message it answers; the rest of these fields
-            # are what its schema insists on (measured: each missing one is
-            # "Missing key at [...]" and the whole payload is refused)
-            info.update({"parentID": previous, "mode": "build", "finish": "stop",
-                         "providerID": "opencode", "modelID": "", "cost": 0,
-                         "path": {"cwd": "", "root": ""},
-                         "tokens": {"total": 0, "input": 0, "output": 0,
-                                    "reasoning": 0,
-                                    "cache": {"read": 0, "write": 0}}})
-            info["time"]["completed"] = at
-        else:
-            info["summary"] = {"diffs": []}
-        messages.append({"info": info, "parts": [
-            {"id": f"tmp-prt{len(messages)}-{n}", "sessionID": session_id,
-             "messageID": message_id, "type": "text", "text": line}
-            for n, line in enumerate(body)]})
-        previous = message_id
-    payload = {"info": _session_info(session_id, NATIVE_TITLE, created),
-               "messages": messages}
-    return reidentify(payload, session_id=session_id)
-
-
 class OpencodeAgent:
     """Speaks to the `opencode` executable; owns nothing else."""
 
@@ -404,11 +347,64 @@ class OpencodeAgent:
         )
 
     def turns(self, raw: bytes) -> Turns:
-        return turns_of(self._read(raw))
+        """One entry per user/assistant message: its text, plus a line per tool
+        call - the reading version's rules (design 4.4), so `native(turns(raw))`
+        can rebuild a session whose history reads the same way."""
+        out: Turns = []
+        for message in _payload_messages(self._read(raw)):
+            role = (message.get("info") or {}).get("role")
+            if role in ("user", "assistant"):
+                out.append((role, _lines_of(message.get("parts") or [])))
+        return out
 
     def native(self, turns: Turns) -> bytes:
-        return json.dumps(native_of(turns, _session_id()),
-                          ensure_ascii=False).encode("utf-8")
+        """Turns as an opencode export, ready for `start_native` to load.
+
+        The caller (cli._converted_turns) hands over what design v5 promises:
+        starts with a user turn, strictly alternating, no empty turn, no
+        `[skip …]` line. So this only has to compose them in order - no merging,
+        no padding.
+
+        Plain, visible text parts - no synthetic, no attachment: whatever a
+        session says has to be on screen when the agent opens. One part per line,
+        the way opencode stores a multi-paragraph reply, so `turns(native(
+        turns(raw)))` is the same list of lines it started from.
+        """
+        created = int(time.time() * 1000)
+        messages: list[dict] = []
+        previous = ""
+        for role, lines in turns:
+            # the contract says both are true already; the check keeps a caller
+            # that breaks it from producing a message opencode would reject
+            body = [line for line in lines if line.strip()]
+            if role not in ("user", "assistant") or not body:
+                continue
+            at = created + len(messages)   # times move forward: opencode sorts by them
+            message_id = f"msg_agora{len(messages)}"
+            info = {"id": message_id, "sessionID": PLACEHOLDER_ID, "role": role,
+                    "time": {"created": at}, "agent": "build",
+                    "model": {"providerID": "opencode", "modelID": ""}}
+            if role == "assistant":
+                # import rejects an assistant message whose parentID is null, so
+                # it has to point at the message it answers; the rest of these
+                # fields are what its schema insists on (measured: each missing
+                # one is "Missing key at [...]" and the whole payload is refused)
+                info.update({"parentID": previous, "mode": "build", "finish": "stop",
+                             "providerID": "opencode", "modelID": "", "cost": 0,
+                             "path": {"cwd": "", "root": ""},
+                             "tokens": {"total": 0, "input": 0, "output": 0,
+                                        "reasoning": 0,
+                                        "cache": {"read": 0, "write": 0}}})
+                info["time"]["completed"] = at
+            else:
+                info["summary"] = {"diffs": []}
+            messages.append({"info": info, "parts": [
+                {"id": f"prt_agora{len(messages)}-{n}", "sessionID": PLACEHOLDER_ID,
+                 "messageID": message_id, "type": "text", "text": line}
+                for n, line in enumerate(body)]})
+            previous = message_id
+        payload = {"info": _session_info(created), "messages": messages}
+        return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     def start_native(self, raw: bytes, workdir: Path) -> Launch:
         session_id, landed = self._import_verified(

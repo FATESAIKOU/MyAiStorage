@@ -132,7 +132,7 @@ def test_the_reading_version_is_the_shared_one(fake):
 def test_tool_arguments_are_truncated_at_200(fake):
     payload = json.loads(raw())
     payload["messages"][1]["parts"][3]["state"]["input"] = {"blob": "x" * 1000}
-    body = base.format_reading(oc.turns_of(payload))
+    body = base.format_reading(oc.ADAPTER.turns(json.dumps(payload).encode()))
     line = next(l for l in body.splitlines() if l.startswith("[tool]"))
     assert line.endswith("…")
     assert len(line) <= 200 + len("[tool] read ") + 1
@@ -142,7 +142,7 @@ def test_reading_skips_turns_that_have_no_lines(fake):
     payload = json.loads(raw())
     payload["messages"] = [{"info": {"role": "user"}, "parts": [
         {"id": "prt_x", "type": "reasoning", "text": "ZZTHINK"}]}]
-    assert "##" not in base.format_reading(oc.turns_of(payload))
+    assert "##" not in base.format_reading(oc.ADAPTER.turns(json.dumps(payload).encode()))
 
 
 # --- re-identifying (U-CON-01, 01b) ---------------------------------------
@@ -520,6 +520,22 @@ def test_native_gives_every_message_a_later_time_than_the_last(fake):
     payload = json.loads(oc.ADAPTER.native(oc.ADAPTER.turns(raw())))
     times = [m["info"]["time"]["created"] for m in payload["messages"]]
     assert times == sorted(times) and len(set(times)) == len(times)
+
+
+def test_native_output_carries_id_prefixes_opencode_accepts(fake):
+    """Q2 lets native() skip reidentify (start_native does it), but a raw that
+    cannot be imported is a trap: opencode refuses a payload whose ids do not
+    start with ses/msg/prt ("Expected a string starting with msg"). Verified by
+    importing it as-is."""
+    payload = json.loads(oc.ADAPTER.native(oc.ADAPTER.turns(raw())))
+    assert payload["info"]["id"].startswith("ses")
+    for message in payload["messages"]:
+        assert message["info"]["id"].startswith("msg")
+        for part in message["parts"]:
+            assert part["id"].startswith("prt")
+    ids = [m["info"]["id"] for m in payload["messages"]] + \
+          [p["id"] for m in payload["messages"] for p in m["parts"]]
+    assert len(set(ids)) == len(ids)          # unique inside the payload
 
 
 def test_native_loads_through_start_native(fake, workdir):
