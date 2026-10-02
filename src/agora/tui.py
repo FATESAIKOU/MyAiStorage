@@ -528,8 +528,7 @@ class AgoraApp(App):
         if row:
             self.marked.symmetric_difference_update({row.key})
             table = self.query_one("#table", DataTable)
-            table.update_cell(row.key, "mark", self.tick(row))
-            table.action_cursor_down()
+            table.update_cell(row.key, "mark", self.tick(row))   # the cursor stays put (user's call)
 
     def action_filter(self) -> None:
         self.query_one("#filterbar").add_class("on")

@@ -217,7 +217,9 @@ def test_mark_two_then_merge_runs_the_command():
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("space", "space", "m")
+            await pilot.press("space")
+            assert app.query_one("#table").cursor_row == 0         # marking does not move the cursor
+            await pilot.press("down", "space", "m")
             await pilot.pause()
             await pilot.press("enter")                     # opencode writes the summaries
             for _ in range(40):
