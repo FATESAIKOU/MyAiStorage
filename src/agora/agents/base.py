@@ -26,6 +26,7 @@ class Exported:
     created_at: str | None = None   # RFC 3339 UTC
     agent_version: str | None = None
     message_count: int = 0
+    model: str | None = None        # the model used most recently, e.g. "space-bunny-free" or "claude-opus-5-5"
 
 
 @dataclass

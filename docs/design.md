@@ -1,6 +1,6 @@
 # Agora lite 基本設計
 
-第 3 版（2026-10-02）：第 2 版併入 `docs/review/design.md` 的 S1–S10、H1–H7、L1–L4 與 `docs/review/test-plan.md` 的 T1、T2；第 3 版再併入 spike 結果（`docs/spike/`）與第 2 版確認的 N1–N17。
+第 4 版（2026-10-02）：標頭改成 OKF frontmatter、命令改成「動作 型態 [id] [選項]」、新增 delete 與 edit、拿掉 sync。第 3 版：第 2 版併入 `docs/review/design.md` 的 S1–S10、H1–H7、L1–L4 與 `docs/review/test-plan.md` 的 T1、T2；第 3 版再併入 spike 結果（`docs/spike/`）與第 2 版確認的 N1–N17。
 
 取代期 1 的實作（約 3.2 萬行程式碼，大多在防「AI 住民篡改真本」與「把 git 放在 Drive 上」）。舊實作留在 git 歷史與 main，這個 branch（`agora-lite`）從零開始。
 
@@ -36,22 +36,22 @@
 
 四個實體的每一個項目都帶同一種 header（YAML front matter，第一個 `---` 區塊）。**實體之間只靠 header 互相指，不共用程式或儲存。**
 
-### 3.1 頂層保留欄位（四個實體共通，H3）
+### 3.1 標頭就是 OKF frontmatter（2026-10-02 使用者決定）
 
-| 欄位 | 意思 |
-|---|---|
-| `header` | header 的版本，目前 `1`（H4）。讀到不認得的版本：警告，只讀共通欄位 |
-| `entity` | `mybrain`｜`agora`｜`foundry`｜`atelier` |
-| `type` | 實體自己的型態（agora 只有 `session`） |
-| `id` | `<entity>:<不變 id>`；agora 用 ULID |
-| `title` | 標題 |
-| `created_at`／`updated_at` | **這個項目**在該實體裡建立／更新的時間（H7） |
-| `refs` | 指向其他項目的 ref 清單 |
-| `case` | 所屬案件，是一個 ref 或 `null`（H2） |
-| `note` | 自由文字 |
-| `tags` | 標籤 |
+每個項目的標頭**用 MyBrain 筆記同一套 OKF v0.2 frontmatter**，所以 MyBrain 的任何欄位 Agora 都能放，兩邊可以用同一套工具讀。OKF 只要求 `type`，其他欄位都選填，**不認得的欄位一律保留**。
 
-**其他頂層欄位都是實體專用的**，只有該實體的程式解讀。讀取時保留不認得的欄位，寫回時原樣保留。
+| 欄位 | 來源 | 意思 |
+|---|---|---|
+| `type` | OKF（必填） | 形式。Agora 的 Session 是 `Session` |
+| `title`、`description`、`tags` | OKF | 標題、一句話摘要、標籤（清單） |
+| `status` | OKF | `draft`／`stable`／`deprecated` |
+| `generated` | OKF | `{by: <actor>, at: <ISO 8601 UTC>}`；actor 照 OKF 慣例：`opencode/<模型>`、`claude-code/<模型>`、`human:fatesaikou` |
+| `verified` | OKF | `[{by, at}]`；**只有本人能加** |
+| `sources` | OKF | `[{id, title, resource, author, last_modified}]` |
+| `stale_after` | OKF | 絕對日期 |
+| `id` | 四實體共通 | `<entity>:<不變 id>`；Agora 用 ULID |
+| `refs`、`case` | 四實體共通 | 指向其他實體的 ref（3.2）；`case` 是 ref 或 `null` |
+| `agora` | Agora 專用 | 系統欄位，見 3.4 |
 
 ### 3.2 ref 的語法（H2）
 
@@ -69,44 +69,42 @@ entity = "mybrain" | "agora" | "foundry" | "atelier"
 
 項目本身放不了 front matter（Google Docs、二進位檔）時，旁邊放一個 sidecar `<檔名>.header.md`，內容只有 header。
 
-### 3.4 Agora 的 header
+### 3.4 Agora 的標頭
 
 ```yaml
 ---
-header: 1
-entity: agora
-type: session
-id: agora:01K6XYZ...
+type: Session
 title: "CSV 轉 Markdown 的規劃"
-created_at: 2026-10-01T12:00:00Z      # 存進 agora 的時間
-updated_at: 2026-10-01T12:30:00Z
+description: "把 CSV 轉成 Markdown 表格，先列三個步驟"   # 自動：第一則 user 訊息的前 80 字
+tags: []
+generated: {by: "opencode/space-bunny-free", at: 2026-10-01T11:00:00Z}
+sources:
+  - {id: "opencode:ses_xxxx", title: "opencode session", author: "opencode/space-bunny-free", last_modified: 2026-10-01}
+id: agora:01K6XYZ...
 refs: ["mybrain:技術/動手做/AiStorage.md"]
 case: null
-note: "使用者給的自由文字"
-tags: []
-# ↓ agora 專用
-source:
-  agent: opencode                     # opencode | claude
-  session_id: ses_xxxx                # 來源 agent 自己的 id
-  dir: /Users/me/proj                 # 來源 session 所屬的專案目錄（H1）
-  host: mbp                           # 產生的機器
-  agent_version: 1.18.34
-  created_at: 2026-10-01T11:00:00Z    # 來源 session 建立的時間（H7）
-relation: import                      # import | continue | merge
-parents:                              # 接續或合併自誰，記當時的版本（S7）
-  - {id: "agora:01K5...", raw_md5: "…"}
-raw: {file: raw-0123456789ab.json, md5: "…", size: 12345}   # S1；merge 沒有 raw
+agora:                                # 系統欄位，使用者不能改
+  header: 2
+  created_at: 2026-10-01T12:00:00Z    # 存進 agora 的時間
+  updated_at: 2026-10-01T12:30:00Z
+  relation: import                    # import | continue | merge
+  parents: [{id: "agora:01K5...", raw_md5: "…"}]
+  source: {agent: opencode, session_id: ses_xxxx, dir: /Users/me/proj, host: mbp, agent_version: 1.18.34, created_at: 2026-10-01T11:00:00Z}
+  raw: {file: raw-0123456789ab.json, md5: "…", size: 12345}
 ---
 ```
 
-- header 一律用 `yaml.safe_dump` 產生、`yaml.safe_load` 讀，不用字串拼接。
+**自動填的欄位**（import／merge／continue）：`type`、`title`（來源的標題）、`description`、`generated`（agent 與模型、來源的建立時間）、`sources`（來源 session；continue／merge 另外列出父 Session），以及整個 `agora` 區塊。`status` 不自動填（OKF 預設 `stable`），`verified` 永遠不自動填。
 
-### 3.5 `--header` 的寫法（H6）
+### 3.5 使用者給的標頭：差分疊加
 
-- 一律 `--header key=value`，可以給多次；`refs`、`tags` 給多次就是多筆。
-- 可以設定的 key：`title`、`case`、`refs`、`tags`、`note`。
-- 不含 `=` 的文字整段當成 `note`（使用者原本的用法 `--header '一些 meta 資訊'` 照樣可以用）。
-- search 的 `--header` 只接受這些扁平別名：`agent`（＝`source.agent`）、`relation`、`case`、`tag`、`ref`、`title`；其他 key 報錯並列出可用的 key。
+順序是 **自動填 → `--header-file <yaml>` → `--header key=value`（依序）**，後面的覆蓋前面的：
+
+- `--header-file`：一份 YAML（只有標頭，可以有也可以沒有 `---`）。對應的 mapping 會遞迴合併，清單與純量整個覆蓋。
+- `--header key=value`：可以給多次。key 可以用點路徑（`generated.by=human:fatesaikou`），value 用 YAML 解析，所以 `tags=[csv, 表格]`、`sources=[{id: x, title: y}]` 都可以。**同一個 key 就覆蓋**。
+- 不含 `=` 的參數是錯誤（請寫成 `description=…`）。
+- **不能改的**：`id` 與整個 `agora` 區塊（系統欄位）；`type` 只能是 `Session`。違反時報錯。
+- `refs`、`case` 的值要符合 ref 語法（3.2）。
 
 ## 4. 儲存
 
@@ -173,63 +171,80 @@ Mac:
 - **關鍵字少於 3 個字時**（例如「表格」），trigram 比不到，改用 `instr()` 掃描閱讀版的表。
 - 搜尋結果的片段取自正規化後的文字，所以是小寫、可能混著 title／note。
 
-## 5. 指令
+## 5. 指令（2026-10-02 使用者重新整理）
 
 ```
-agora search session '<關鍵字>' [--header key=value]... [--no-sync]
-agora import --format opencode|claude --session-id <id> [--header ...]...
-agora merge-session <id1> <id2> [...] [--header ...]...
-agora continue-session <id> --agent opencode|claude [--dir <專案目錄>] [--header ...]...
-agora show <id> [--raw]
-agora sync
+agora <動作> <型態> [session_id] [選項]
+
+agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync]
+agora import   session --external-session-id <id> --agent opencode|claude [--header-file F] [--header K=V]...
+agora merge    session <id>, <id>, ... [--header-file F] [--header K=V]...
+agora continue session <id> --agent opencode|claude [--dir <專案目錄>] [--header-file F] [--header K=V]...
+agora delete   session <id> --yes
+agora edit     session <id> [--header-file F] [--header K=V]...
+agora show     session <id> [--raw]
 ```
 
-所有指令的輸出第一欄都是 agora id（`agora:<ULID>`），方便接到下一個指令。
-
-exit code：0 成功；1 做不到（找不到 id、沒有訊息、merge 少於兩個）；2 錯誤（header、Drive、agent、非預期，以及用法錯誤）；3 已存進 outbox、還沒上傳（D2）。search 的關鍵字可以省略，省略時列出全部（D4）。
+- 位置參數固定是「動作、型態、session id」。型態目前只有 `session`。
+- `--agent`：import 時是「這是哪個 agent 的 session」，continue 時是「用哪個 agent 接」。不再有 `--format`。
+- `--external-session-id`：只有 import 用，是 agent 自己的 session id。
+- `sync` 拿掉了：每個指令開頭都會自動推 outbox、需要時拉 Drive（4.3），使用者不必自己下。
+- 所有寫入指令的輸出第一欄都是 agora id。exit code：0 成功；1 做不到（找不到 id、沒有訊息、merge 少於兩個、delete 沒加 `--yes`、有子 Session）；2 錯誤；3 已存進 outbox、還沒上傳。
 
 ### 5.1 search
 
-```
-$ agora search session 'CSV'
-agora:01K6...  2026-10-01  opencode  …把 CSV 轉成 Markdown 表格…
-```
-
-- 日期用 `source.created_at`；merge 沒有 `source`，日期用 `created_at`，agent 欄顯示 `merge`（N6）。continue 的 `source` 是這次新的 agent session。
-- 同一個來源有多個 agora id 時，顯示最新的那個並警告（S6）。
+- `--filter KEY=VALUE`：**全等**；`--filter KEY~=TEXT`：**包含**。可以給多次，全部都要成立（AND）。
+- KEY 是標頭的點路徑（`type`、`tags`、`status`、`generated.by`、`agora.source.agent`…），另外有兩個特別的 key：
+  - `text`：閱讀版加上標頭裡的文字欄位（全文；`text~=表格`）；
+  - `agent`：`agora.source.agent` 的簡寫。
+- 清單欄位（`tags`、`refs`）：`=` 是「清單裡有一個全等」，`~=` 是「有一個包含」。
+- 沒有 filter 就列出全部。之後要加更複雜的比較時，再加運算子（例如 `>`、`<`）。
+- 全文 `~=` 用 FTS5 trigram，少於 3 個字時改用掃描（4.5）。
 
 ### 5.2 import
 
-- opencode：`opencode export <id> > 檔案`，stderr 另外導走、**不能 `2>&1`**（進度行在 stderr）。檢查 JSON 能解析、message 數大於 0（S10）。`source.dir` 取 `info.directory`（N9）。
-- claude：`~/.claude/projects/*/<id>.jsonl`，加上 `<id>/` 附屬資料夾（`subagents/` 等，S9）；最後一行不完整就丟掉並警告（S10）。`source.dir` 取 jsonl 的 `cwd`，不從資料夾名稱反推（N9）。
+- `--agent opencode`：`opencode export <id> > 檔案`，stderr 另外導走、**不能 `2>&1`**。檢查 JSON 能解析、message 數大於 0（S10）。`agora.source.dir` 取 `info.directory`（N9）。
+- `--agent claude`：`~/.claude/projects/*/<id>.jsonl` 加上 `<id>/` 附屬資料夾（S9）；最後一行不完整就丟掉並警告（S10）。`agora.source.dir` 取 jsonl 的 `cwd`（N9）。
 - 只上傳指定的那一個 Session。
-- 同一個來源 Session 再匯入：內容沒變就不做事；內容變了而且**還沒有子 Session** 就更新同一個 agora id；**已經有子 Session**（本機索引查得到）就建一個新的 Session，`relation: import`、`parents: [舊 id]`（S7）。
+- 同一個來源 Session 再匯入：內容沒變、也沒有 `--header`，就不做事；內容沒變但有 `--header`，只更新標頭；內容變了而且還沒有子 Session，就更新同一個 agora id；已經有子 Session，就建一個新的（`relation: import`、`parents: [舊 id]`，S7）。
 
-### 5.3 merge-session
+### 5.3 merge
 
-- 產生一個新的 Session：`relation: merge`、`parents` 依給的順序，各記當時的 raw md5。
-- id 用空白或逗號分隔都可以：使用者原本的寫法是 `agora merge-session id1, id2, id3`（D1）。
-- 閱讀版是各來源的閱讀版依序串接，每段標出來源。
-- **沒有 raw**（L3）：merge 出來的 Session 一律用閱讀版注入接續。
+- 產生一個新的 Session：`relation: merge`、`parents` 依給的順序。id 用空白或逗號分隔都可以（`agora merge session id1, id2, id3`）。
+- 閱讀版是各來源依序串接，每段標出來源；沒有 raw，接續時一律用閱讀版注入。
 
-### 5.4 continue-session
+### 5.4 continue
+
+（流程同第 3 版：原生載入或閱讀版注入、pending＋flock、PWD、/clear 的處理。）
 
 1. 決定載入方式：
 
    | 來源 | 目標 | 方式 |
    |---|---|---|
-   | 單一 opencode | opencode | **原生**：export 裡的三種 id（`ses`／`msg`／`prt`）與所有參照欄位全部重編：固定寬度、保留前綴、依匯出順序遞增（N3、N14）。在工作目錄 `opencode import`，**回頭 export 比對訊息數**——id 撞到時 import 是 rc=0 但 0 則訊息（spike V1(b)）；不符就刪掉那個新 session 並報錯 |
-   | 單一 claude | claude | **原生**：產生新 uuid，把每一行頂層 `sessionId` 改成它，原本有 `cwd` 的行改成工作目錄（D6、CL7），連同附屬檔寫到 `~/.claude/projects/<工作目錄編碼>/<新uuid>.jsonl`，`claude --resume <新uuid>`（spike V2） |
-   | 跨 agent，或 merge 出來的 | opencode | **閱讀版注入**：agora 自己做一份只有一則 user 訊息（說明＋閱讀版全文）的 export，id 由 agora 決定，`opencode import` 後開啟（N4） |
-   | 跨 agent，或 merge 出來的 | claude | **閱讀版注入**：`claude --session-id <新uuid> "@<閱讀版絕對路徑> …"`，CLI 會把檔案展開進第一則訊息，不需要工具權限（spike V3） |
+   | 單一 opencode | opencode | **原生**：三種 id 全部重編後 `opencode import`，回頭 export 比對訊息數 |
+   | 單一 claude | claude | **原生**：新 uuid、改寫 `sessionId`（有 `cwd` 的行改成工作目錄），`claude --resume <新uuid>` |
+   | 跨 agent，或 merge 出來的 | opencode | **閱讀版注入**：一則 user 訊息帶全文的 export，`opencode import` 後開啟 |
+   | 跨 agent，或 merge 出來的 | claude | **閱讀版注入**：`claude --session-id <新uuid> "@<閱讀版絕對路徑> …"` |
 
-   兩種原生載入與兩種注入，都在啟動前就知道新 session 的 id。
+2. 工作目錄：`--dir`，預設是 `agora.source.dir`（這台機器上存在的話），否則是目前目錄。agent 啟動時同時設定 cwd 與 `PWD`。
+3. 寫 pending 並持有 flock（交給 agent 繼承），在前景啟動 agent；Ctrl-C 只給 agent。
+4. agent 結束後，內容比啟動前多才存成新 Session（`relation: continue`、`parents: [{id, raw_md5}]`）。Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之後那個 session 要用的 import 指令。
 
-2. 工作目錄：`--dir` 預設用 `source.dir`（這台機器上存在的話），否則用目前目錄；印出實際用的目錄（H1）。**新 session 一律放在這個目錄**：opencode 的 session 屬於 `import` 時的 cwd，Claude 的新 jsonl 也落在啟動 cwd 的編碼目錄（spike V5）。
-3. 寫 pending 並持有 flock（4.2），再在前景啟動 agent。agora 在 agent 執行期間忽略 SIGINT；子行程在 exec 前把 SIGINT 還原成預設，Ctrl-C 只給 agent（S3、N1）。
-4. `--header` 和 import 一樣，寫進接續出來的新 Session（N17）。
-5. Claude 的 `/clear`（2026-10-02 用真的互動模式實測，CL5）：互動的 `--resume` 會繼續寫同一個 jsonl，所以收尾找得到；但 `/clear` 之後對話會換到同一個專案資料夾裡的**新 uuid**，新檔只靠 attachment 行的 `session_id` 指回原本的 session。agora 不把兩份接起來：照常存 `/clear` 之前的部分，並印出 `/clear` 之後那個 session 的 id 與要執行的 `agora import` 指令。
-6. agent 結束後：取得那一次的 Session，內容比啟動前多才存（S9）；存成新的 agora Session，`relation: continue`、`parents: [{id: <來源>, raw_md5}]`；刪掉 pending；印出新的 agora id。
+### 5.6 delete
+
+- 把 Drive 上 `sessions/<ULID>/` 整個**移到 Drive 垃圾桶**（30 天內可以在 Drive 網頁還原），本機的鏡像與索引一起拿掉。
+- 一定要加 `--yes`，沒加就只印出會刪什麼，exit 1。
+- 有子 Session（別的 Session 的 `parents` 指向它）時不刪，列出那些子 Session，exit 1。
+
+### 5.7 edit
+
+- 只改標頭，不動 raw 與閱讀版；改完存成同一個 agora id 的新版本 session.md。
+- 有給 `--header`／`--header-file` 就照 3.5 疊加；**都沒給就用 `$EDITOR` 打開標頭的 YAML**，存檔關掉之後驗證並上傳，驗證不過就不存並印出原因。
+- `id`、`agora` 區塊同樣不能改。`verified` 由本人在這裡加。
+
+### 5.8 show
+
+- 印出標頭與閱讀版；`--raw` 印出原始匯出。
 
 ### 5.5 Session 壓縮
 
