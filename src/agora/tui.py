@@ -327,6 +327,10 @@ def colours() -> None:
              "claude": (orange, bg), "merge": (curses.COLOR_GREEN, bg), "mark": (curses.COLOR_YELLOW, bg),
              "key": (curses.COLOR_YELLOW, bg), "user": (curses.COLOR_BLUE, bg),
              "assistant": (curses.COLOR_GREEN, bg), "frame": (curses.COLOR_CYAN, bg), "warn": (curses.COLOR_RED, bg)}
+    if curses.COLORS >= 256:     # the current row: a light ground, with each role's colour kept on it
+        hl = 237
+        roles.update({"cursor": (-1 if bg == -1 else curses.COLOR_WHITE, hl), "pointer": (curses.COLOR_CYAN, hl),
+                      **{f"{r}_cur": (roles[r][0], hl) for r in ("opencode", "claude", "merge", "mark")}})
     for n, (role, (fg, back)) in enumerate(roles.items(), 1):
         try:
             curses.init_pair(n, fg, back)
@@ -384,16 +388,22 @@ def paint(screen, state: State, preview: tuple[list[str], list[str]], message: s
     cells = aligned(shown)
     for i, row in enumerate(shown[state.top:state.top + height]):
         n = state.top + i
-        here = n == state.cursor
-        base = (curses.A_REVERSE if state.focus == "list" else curses.A_BOLD) if here else 0
-        _put(screen, top + i, left, f"{'▸' if here else ' '}", wide, base)
-        _put(screen, top + i, left + 1, "✓" if row.key in state.marked else " ", 1, c("mark", curses.A_BOLD) | base)
+        lit = n == state.cursor and state.focus == "list"     # the fzf look: a bar on the left, a light ground
+        ground = (c("cursor") if "cursor" in COLORS else curses.A_REVERSE) if lit else 0
+
+        def tint(role: str) -> int:
+            return (COLORS.get(f"{role}_cur", ground) if lit else c(role)) if role else ground
+
+        _put(screen, top + i, left, "", wide, ground)          # paint the whole row's ground first
+        if n == state.cursor:
+            _put(screen, top + i, left, "▌", 1, (c("pointer") if lit and "pointer" in COLORS else c("frame")) | curses.A_BOLD)
+        _put(screen, top + i, left + 1, "✓" if row.key in state.marked else " ", 1, tint("mark") | curses.A_BOLD)
         x = left + 3
         for cell in cells[n]:
             if x >= left + wide:
                 break
             role = cell.strip() if cell.strip() in ("opencode", "claude", "merge") else ""
-            _put(screen, top + i, x, cell, left + wide - x, (c(role) if role else 0) | base)
+            _put(screen, top + i, x, cell, left + wide - x, tint(role) | (curses.A_BOLD if lit else 0))
             x += width(cell) + 2
     ptop, pleft, pheight, pwide = box["preview"]
     frame = c("frame", curses.A_BOLD) if state.focus == "preview" else curses.A_DIM

@@ -327,6 +327,7 @@ agora show     session <id> [--raw]
 - **多選**：空白鍵勾選（`✓`），只有 merge 和匯入用得到；接續、改標頭、刪除只作用在游標那一個，**刪除不做多選**，避免一次刪太多。
 - **動作不離開畫面**（2026-10-02 使用者要求）：匯入、合併、刪除都在小視窗裡跑，顯示「執行中…（秒數）」和指令模式印出的最新一行，跑完用結果視窗顯示輸出的最後幾行。只有兩個例外會暫時離開畫面：**接續**（agent 自己是全螢幕程式，要接手終端機）和**改標頭**（照舊開 $EDITOR，使用者決定）。
 - **第一次執行的引導**：沒有 rclone 時，視窗提示 `brew install rclone`；沒有 `~/.config/agora/rclone.conf` 時，視窗說明並提供「用瀏覽器授權」：執行 `rclone config create gdrive drive scope=drive.file`（rclone 內建的 client，使用者決定），授權完就同步一次，在 Drive 建立 `agora/`。輸出裡含 token 的行不顯示。Agora 頁是空的時候，提示去「未匯入」匯入。
+- **目前這一行**（使用者選的，和 mlp 用的 fzf 一樣）：最左邊一條青色的 `▌`，整行淺灰底，字保持原本的顏色；焦點在預覽時只留色條。
 - **顏色**：標題列、agent（opencode 青、claude 橘、merge 綠）、勾選、按鍵、對話裡的 user／assistant 標題各有顏色；工具摘要變暗；終端機沒有顏色時照常可以用。
 - **完整對話**：預覽區顯示整份對話（Agora 頁是 `session.md` 的內文；未匯入頁平常只有最後一則，按 shift+tab 切到預覽時才用轉接器既有的 `export()`＋閱讀版讀整份），一開始停在最下面。**shift+tab 切換焦點**：焦點在預覽時，↑↓ 捲動、PgUp／PgDn 翻頁、g／G 到最上／最下，再按 shift+tab 回清單。`dir`、`tags` 固定在預覽最上面兩行。
 - 轉接器新增兩個方法：`list_sessions() -> [(session_id, dir, title, updated_at)]`（全部專案）、`last_message(session_id) -> (role, text) | None`。只讀 agent 自己的檔案或 CLI，不寫入。
