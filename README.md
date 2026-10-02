@@ -17,43 +17,61 @@ uv tool install --editable .     # 之後就有 agora 指令
 
 ## 指令
 
-```bash
-# 初次引入（只上傳指定的那一個 Session）
-agora import --format opencode --session-id ses_xxxx --header 'title=CSV 規劃' --header '先做讀取'
-agora import --format claude   --session-id 0f1e…-uuid
-
-# 找
-agora search session '表格'
-agora search session 'CSV' --header agent=claude
-agora search session                 # 省略關鍵字＝列出全部
-agora search session 'CSV' --no-sync # 不連 Drive，只查本機索引
-
-# 合併成一個新的 Session（空白或逗號分隔都可以）
-agora merge-session agora:01K6…, agora:01K7…, agora:01K8…
-
-# 接著做（agent 結束時自動存回，印出新的 agora id）
-agora continue-session agora:01K6… --agent opencode
-agora continue-session agora:01K8… --agent claude --dir ~/proj
-
-# 其他
-agora show agora:01K6…        # header ＋ 閱讀版
-agora show agora:01K6… --raw  # 原始匯出
-agora sync                     # 推 outbox、拉 Drive、重建索引
+```
+agora <動作> <型態> [session_id] [選項]
 ```
 
-`--header` 的寫法：
-- `key=value`，可以設定 `title`、`case`、`refs`、`tags`、`note`。
-- 不含 `=` 的文字整段當成 note。
-- `search` 的 `--header` 可以用 `agent`、`relation`、`case`、`tag`、`ref`、`title`。
+動作是 `search`、`import`、`merge`、`continue`、`delete`、`edit`、`show`；型態目前只有 `session`。
+
+```bash
+# 初次引入（只上傳指定的那一個 Session）
+agora import session --external-session-id ses_xxxx --agent opencode --header 'title=CSV 規劃'
+agora import session --external-session-id 0f1e…-uuid --agent claude
+
+# 找：--filter KEY=VALUE 是全等，KEY~=TEXT 是包含；text 是全文
+agora search session --filter text~=表格
+agora search session --filter agent=claude --filter tags=csv
+agora search session --filter generated.by~=opencode
+agora search session                          # 沒有 filter＝列出全部
+agora search session --filter text~=CSV --no-sync   # 不連 Drive，只查本機索引
+
+# 合併成一個新的 Session（空白或逗號分隔都可以）
+agora merge session agora:01K6…, agora:01K7…, agora:01K8…
+
+# 接著做（agent 結束時自動存回，印出新的 agora id）
+agora continue session agora:01K6… --agent opencode
+agora continue session agora:01K8… --agent claude --dir ~/proj
+
+# 改標頭：給 --header／--header-file 就直接疊加；都不給就用 $EDITOR 打開
+agora edit session agora:01K6… --header 'tags=[csv, 表格]' --header 'status=stable'
+agora edit session agora:01K6…
+
+# 刪除：移到 Drive 垃圾桶（30 天內可以在 Drive 網頁還原），一定要加 --yes
+agora delete session agora:01K6… --yes
+
+# 看標頭＋閱讀版／原始匯出
+agora show session agora:01K6…
+agora show session agora:01K6… --raw
+```
+
+**標頭：** 和 MyBrain 筆記一樣是 OKF frontmatter（`type`、`title`、`description`、`tags`、`status`、`generated`、`verified`、`sources`、`stale_after`…），另外有四個實體共通的 `id`、`refs`、`case`，以及系統欄位 `agora`。
+- `import`／`merge`／`continue` 會自動填好需要的欄位，再依序疊上：
+  1. `--header-file <yaml>`；
+  2. 每一個 `--header KEY=VALUE`，同一個 key 後面的蓋掉前面的。
+- KEY 可以用點路徑，例如 `generated.by=human:fatesaikou`。
+- VALUE 用 YAML 解析，例如 `tags=[a, b]`、`sources=[{id: x, title: y}]`；清單欄位只給一個值時，會變成只有那一個值的清單。
+- `id` 和 `agora` 區塊是系統欄位，不能改。
 
 **exit code：**
 
 | code | 意思 |
 |---|---|
 | 0 | 成功 |
-| 1 | 做不到：找不到 id、沒有訊息可匯入、merge 少於兩個 |
-| 2 | 錯誤：header、Drive、agent 或非預期的錯誤，以及指令用法錯誤 |
-| 3 | 已存在本機 outbox，還沒上傳到 Drive（下次 `sync` 會再送） |
+| 1 | 做不到：找不到 id、沒有訊息可匯入、merge 少於兩個、delete 沒加 `--yes`、有子 Session |
+| 2 | 錯誤：標頭、Drive、agent 或非預期的錯誤，以及指令用法錯誤 |
+| 3 | 已存在本機 outbox，還沒上傳到 Drive（之後的指令會自動再送） |
+
+不用自己同步：每個指令開頭都會自動把沒上傳成功的送出去，需要時也會從 Drive 拉新的內容。
 
 **壓縮：** 用 agent 內建的指令，opencode 是 `/compact`，Claude Code 是 `/compact`。壓縮後的內容會在 agent 結束時存回 Agora。
 
