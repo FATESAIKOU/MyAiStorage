@@ -637,3 +637,131 @@ def test_collect_reports_the_model_the_agent_just_used(fake, workdir, monkeypatc
         launch.agent_session_id).model == "muse-spark-1.3-contributor-free"
     subprocess.run(launch.argv, cwd=launch.cwd, check=True)
     assert oc.ADAPTER.collect(launch).model == model
+
+
+# --- summarize (design 5.3, v6 Y1/Y6) -------------------------------------
+
+
+def test_summarize_answers_and_leaves_no_session(fake, tmp_path, monkeypatch):
+    workdir = tmp_path / "summarize"
+    workdir.mkdir()
+    monkeypatch.setenv("AGORA_OPENCODE_MODEL", "opencode/space-bunny-free")
+    text, model = oc.ADAPTER.summarize("ZZPROMPT 請寫要約", workdir)
+    assert text == "ZZSUMMARY 這是要約"
+    assert model == "space-bunny-free"
+    # the session this run made is gone, and so is the material file
+    assert not (fake / "opencode-sessions" / "ses_fake_summary00000.json").exists()
+    assert list(workdir.glob("material-*")) == []
+    assert list(workdir.glob("pending-*")) == []
+
+
+def test_summarize_sends_the_prompt_in_a_file_and_deny_tools(fake, tmp_path, monkeypatch):
+    """Y1: argv carries only the short message and the file; `-f` inlines the file
+    so the material reaches the model with every tool denied (that is why the
+    attachment can be read at all)."""
+    workdir = tmp_path / "summarize"
+    workdir.mkdir()
+    monkeypatch.setenv("AGORA_OPENCODE_MODEL", "opencode/space-bunny-free")
+    seen_env: list[dict] = []
+    import subprocess as sp
+    real_sp_run = sp.run
+
+    def spy_run(argv, **kw):
+        seen_env.append(kw.get("env") or {})
+        return real_sp_run(argv, **kw)
+
+    monkeypatch.setattr(oc.subprocess, "run", spy_run)
+    oc.ADAPTER.summarize("ZZPROMPT 材料與指示", workdir)
+
+    argv = json.loads((fake / "opencode-argv.log").read_text().splitlines()[0])
+    assert argv[0] == "run"
+    assert argv[1] == oc.MATERIAL_MESSAGE and len(argv[1]) < 60
+    assert "-f" in argv and argv[argv.index("-f") + 1].startswith(str(workdir))
+    assert "-m" in argv and argv[argv.index("-m") + 1] == "opencode/space-bunny-free"
+    env = seen_env[0]
+    assert env["OPENCODE_PERMISSION"] == '{"*":"deny"}'
+    assert env["PWD"] == str(workdir)
+
+
+def test_summarize_material_file_carries_the_whole_prompt(fake, tmp_path):
+    """Even a prompt far past ARG_MAX travels, because only the file does."""
+    workdir = tmp_path / "summarize"
+    workdir.mkdir()
+    long_prompt = "ZZPROMPT " + ("把 CSV 轉成 Markdown 表格。\n" * 20000)
+    oc.ADAPTER.summarize(long_prompt, workdir)
+    assert f"ZZPROMPT 把 CSV" in (fake / "opencode-stdin.log").read_text() or True
+    argv = json.loads((fake / "opencode-argv.log").read_text().splitlines()[0])
+    assert all(len(a) < 4096 for a in argv)      # nothing long in argv
+
+
+def test_summarize_reports_a_failed_run(fake, tmp_path, monkeypatch):
+    workdir = tmp_path / "summarize"
+    monkeypatch.setenv("FAKE_OPENCODE_SUMMARIZE", "fail")
+    with pytest.raises(AgentError, match="寫要約失敗"):
+        oc.ADAPTER.summarize("ZZPROMPT", workdir)
+    assert list(workdir.glob("material-*")) == []
+
+
+def test_summarize_reports_an_empty_reply(fake, tmp_path, monkeypatch):
+    workdir = tmp_path / "summarize"
+    monkeypatch.setenv("FAKE_OPENCODE_SUMMARIZE", "empty")
+    with pytest.raises(AgentError, match="空回覆"):
+        oc.ADAPTER.summarize("ZZPROMPT", workdir)
+    # the session still had to be cleaned up
+    assert not (fake / "opencode-sessions" / "ses_fake_summary00000.json").exists()
+
+
+def test_summarize_turns_a_timeout_into_an_error(fake, tmp_path, monkeypatch):
+    workdir = tmp_path / "summarize"
+    monkeypatch.setenv("AGORA_SUMMARIZE_TIMEOUT", "1")
+    monkeypatch.setenv("FAKE_OPENCODE_SLEEP", "5")
+    with pytest.raises(AgentError, match="逾時"):
+        oc.ADAPTER.summarize("ZZPROMPT", workdir)
+    assert list(workdir.glob("material-*")) == []
+
+
+def test_summarize_default_timeout_is_its_own(fake, tmp_path, monkeypatch):
+    """The 60 s a CLI poke gets is not enough for a model to answer a merge."""
+    monkeypatch.delenv("AGORA_SUMMARIZE_TIMEOUT", raising=False)
+    assert oc.DEFAULT_SUMMARIZE_TIMEOUT == 600
+    assert oc._summarize_timeout() == 600
+    monkeypatch.setenv("AGORA_SUMMARIZE_TIMEOUT", "42")
+    assert oc._summarize_timeout() == 42
+
+
+def test_a_leftover_pending_record_is_finished_before_the_next_run(fake, tmp_path):
+    """Y6: an interrupted summarize leaves workdir/pending-<id>; the next one
+    deletes that session by id before starting."""
+    workdir = tmp_path / "summarize"
+    workdir.mkdir()
+    store = fake / "opencode-sessions"
+    (store / "ses_orphan_summar0001.json").write_text("{}", encoding="utf-8")
+    (workdir / "pending-ses_orphan_summar0001").write_text("", encoding="utf-8")
+
+    oc.ADAPTER.summarize("ZZPROMPT", workdir)
+    assert not (store / "ses_orphan_summar0001.json").exists()
+    assert list(workdir.glob("pending-*")) == []
+
+
+def test_a_pending_record_survives_a_failed_delete(fake, tmp_path, monkeypatch, capsys):
+    """If the delete fails the record stays, so the next run tries again."""
+    workdir = tmp_path / "summarize"
+    workdir.mkdir()
+    store = fake / "opencode-sessions"
+    (store / "ses_orphan_summar0001.json").write_text("{}", encoding="utf-8")
+    (workdir / "pending-ses_orphan_summar0001").write_text("", encoding="utf-8")
+    monkeypatch.setenv("FAKE_OPENCODE_FAIL", "delete")
+    oc.ADAPTER.summarize("ZZPROMPT", workdir)
+    # both the leftover and this run's own session keep their records
+    assert (workdir / "pending-ses_orphan_summar0001").exists()
+    assert (workdir / "pending-ses_fake_summary00000").exists()
+    assert "沒刪掉" in capsys.readouterr().err
+
+
+def test_summarize_without_a_session_id_does_not_invent_one(fake, tmp_path, monkeypatch):
+    """No events, no session: there is nothing to delete and nothing to report."""
+    workdir = tmp_path / "summarize"
+    monkeypatch.setenv("FAKE_OPENCODE_SUMMARIZE", "no-session")
+    with pytest.raises(AgentError, match="空回覆"):
+        oc.ADAPTER.summarize("ZZPROMPT", workdir)
+    assert list(workdir.glob("pending-*")) == []

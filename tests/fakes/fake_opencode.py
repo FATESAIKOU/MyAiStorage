@@ -145,6 +145,49 @@ def do_import(params: list[str]):
     print(f"Imported session: {session_id}")
 
 
+def summarize_run(argv: list[str]) -> int:
+    """`opencode run <message> [-f file]` with no session: what summarize() does.
+
+    Emits the same event stream as the real one (one JSON object per line), and
+    stores a session so `export` can be asked which model answered.
+    FAKE_OPENCODE_SUMMARIZE: normal | empty | fail | no-session
+    """
+    with open(HOME / "opencode-argv.log", "a") as f:
+        f.write(json.dumps(argv) + "\n")
+    with open(HOME / "opencode-stdin.log", "ab") as f:   # the prompt, if it came in
+        f.write(sys.stdin.buffer.read() if not sys.stdin.isatty() else b"")
+        f.write(b"\n---8<---\n")
+    mode = os.environ.get("FAKE_OPENCODE_SUMMARIZE", "normal")
+    if mode == "fail":
+        die("injected summarize failure")
+    session_id = "ses_fake_summary00000"
+    now = int(time.time() * 1000)
+    if mode != "no-session":
+        save(session_id, {
+            "info": {"id": session_id, "title": "summarize", "directory": os.getcwd(),
+                     "version": "9.9.9",
+                     "model": {"id": os.environ.get("FAKE_OPENCODE_MODEL", "space-bunny-free"),
+                               "providerID": "opencode", "variant": "default"},
+                     "time": {"created": now, "updated": now}},
+            "messages": [{"info": {"id": "msg_fake0", "sessionID": session_id,
+                                   "role": "assistant", "modelID":
+                                   os.environ.get("FAKE_OPENCODE_MODEL", "space-bunny-free"),
+                                   "time": {"created": now}}, "parts": []}],
+        })
+    if mode == "no-session":       # a run that produced no events at all
+        return 0
+    print(json.dumps({"type": "step_start", "sessionID": session_id,
+                      "timestamp": now, "part": {"type": "step-start"}}))
+    if mode != "empty":
+        print(json.dumps({"type": "text", "sessionID": session_id, "timestamp": now,
+                          "part": {"type": "text",
+                                   "text": os.environ.get("FAKE_OPENCODE_REPLY",
+                                                           "ZZSUMMARY 這是要約")}}))
+    print(json.dumps({"type": "step_finish", "sessionID": session_id,
+                      "timestamp": now, "part": {"type": "step-finish"}}))
+    return 0
+
+
 def main() -> int:
     if "--version" in argv:
         print(VERSION)
@@ -173,10 +216,10 @@ def main() -> int:
             if index + 1 < len(argv):
                 target = argv[index + 1]
     if argv[:1] == ["run"]:
-        # A plain `run` with no target starts a fresh session.
         if target:
             act(target)
-        return 0
+            return 0
+        return summarize_run(argv)
     if target:  # the TUI
         act(target)
         return 0

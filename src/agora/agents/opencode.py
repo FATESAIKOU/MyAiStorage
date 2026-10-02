@@ -32,6 +32,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -69,12 +70,64 @@ PLACEHOLDER_ID = "ses_agora_pending0"
 #: opencode would wedge all of them (OC7). Read per call so a test can shorten it.
 DEFAULT_CLI_TIMEOUT = 60
 
+#: summarize is one model round trip, not a CLI poke, so it gets its own budget:
+#: a merge prompt is a whole session to read, and the 60 s a CLI poke gets is not
+#: enough for a free model to answer one.
+DEFAULT_SUMMARIZE_TIMEOUT = 600
+
+#: The whole prompt goes into a file next to the session and only a short message
+#: travels in argv: a merge prompt carries every source's reading version, and
+#: argv tops out at ARG_MAX (1 MB here). `-f` inlines the file into the message,
+#: so it reaches the model without any tool - verified with every tool denied.
+MATERIAL_PREFIX = "material-"
+MATERIAL_MESSAGE = "附件是完整的指示與材料。請依照附件的指示作答，只輸出它要求的結果。"
+
+#: A summarize session is written down here before it is deleted, so a run that
+#: dies mid-way leaves a record a later run can finish (Y6).
+PENDING_PREFIX = "pending-"
+
+#: A merge prompt must not be able to reach for a file, so every tool is denied -
+#: a prompt asking nicely is not a boundary (measured in docs/spike/opencode.md).
+DENY_TOOLS = '{"*":"deny"}'
+
+
+def _seconds(name: str, default: int) -> int:
+    try:  # a test may set it to something silly; the default is not negotiable
+        return int(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
 
 def _timeout() -> int:
-    try:  # a test may set it to something silly; the default is not negotiable
-        return int(os.environ.get("AGORA_OPENCODE_TIMEOUT") or DEFAULT_CLI_TIMEOUT)
-    except ValueError:
-        return DEFAULT_CLI_TIMEOUT
+    return _seconds("AGORA_OPENCODE_TIMEOUT", DEFAULT_CLI_TIMEOUT)
+
+
+def _summarize_timeout() -> int:
+    return _seconds("AGORA_SUMMARIZE_TIMEOUT", DEFAULT_SUMMARIZE_TIMEOUT)
+
+
+def _last_reply(stdout: bytes) -> tuple[str | None, str | None]:
+    """(session id, last assistant text) out of `opencode run --format json`.
+
+    One JSON event per line. The session id comes from the first event that
+    carries one, the text from the last `text` event - which is the reply, since
+    opencode emits a text event for every assistant message.
+    """
+    session_id = text = None
+    for line in stdout.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        session_id = session_id or event.get("sessionID")
+        if event.get("type") == "text":
+            body = (event.get("part") or {}).get("text")
+            if isinstance(body, str) and body.strip():
+                text = body
+    return session_id, text
 
 
 def _session_info(created: int) -> dict:
@@ -405,6 +458,91 @@ class OpencodeAgent:
             previous = message_id
         payload = {"info": _session_info(created), "messages": messages}
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    def summarize(self, prompt: str, workdir: Path) -> tuple[str, str | None]:
+        """One headless turn with every tool denied; returns (text, model).
+
+        The prompt and its materials go into a file inside `workdir` and only a
+        short message travels in argv: a merge prompt carries every source's
+        reading version, and argv stops at ARG_MAX (1 MB here). `-f` inlines the
+        file into the message, so the material reaches the model with no tool
+        available - measured: with `OPENCODE_PERMISSION={"*":"deny"}` the model
+        still answered with a word that only existed in the attachment. In this
+        version the message has to come *before* `-f`; after it, opencode reads
+        the message as one more filename and fails.
+
+        The session this run creates is recorded in `workdir/pending-<id>` before
+        it is deleted, and the record only goes away once the delete succeeded,
+        so an interrupted run leaves something the next one can finish (Y6).
+
+        AGORA_OPENCODE_MODEL picks the model; without it opencode uses whatever
+        the user's own default is.
+        """
+        workdir.mkdir(parents=True, exist_ok=True)
+        self._sweep_pending(workdir)
+        unique = _session_id()[-16:]
+        material = workdir / f"{MATERIAL_PREFIX}{unique}.md"
+        argv = [agent_cmd(self.name), "run", MATERIAL_MESSAGE, "-f", str(material),
+                "--format", "json"]
+        model = os.environ.get("AGORA_OPENCODE_MODEL")
+        if model:
+            argv += ["-m", model]
+        material.write_text(prompt, encoding="utf-8")
+        seconds = _summarize_timeout()
+        try:
+            proc = subprocess.run(
+                argv, cwd=str(workdir),
+                env={**os.environ, "OPENCODE_PERMISSION": DENY_TOOLS,
+                     "PWD": str(workdir)},
+                capture_output=True, timeout=seconds)
+        except subprocess.TimeoutExpired:
+            raise AgentError(f"opencode 寫要約逾時（{seconds} 秒）") from None
+        finally:
+            material.unlink(missing_ok=True)
+        session_id, text = _last_reply(proc.stdout)
+        # the run's JSON events carry no model name, so the session we are about
+        # to delete is where we read it from
+        answered = self._model_of(session_id, workdir) if session_id else None
+        self._drop_summary_session(session_id, workdir)
+        if proc.returncode != 0:
+            detail = proc.stderr.decode("utf-8", "replace").strip()[-200:]
+            raise AgentError(f"opencode 寫要約失敗：{detail}")
+        if not (text or "").strip():
+            raise AgentError("opencode 沒有寫出要約（空回覆）")
+        return text, answered
+
+    def _sweep_pending(self, workdir: Path) -> None:
+        """Finish what an interrupted run left: one id at a time, then drop the record."""
+        for record in sorted(workdir.glob(f"{PENDING_PREFIX}*")):
+            self._drop_summary_session(record.name[len(PENDING_PREFIX):], workdir)
+
+    def _drop_summary_session(self, session_id: str | None, workdir: Path) -> None:
+        """Delete the one session a summarize run made - by id, never a pattern and
+        never by listing. The record in `workdir` is removed only once that
+        worked, so a failure leaves the next run something to finish."""
+        if not session_id:
+            return
+        record = workdir / f"{PENDING_PREFIX}{session_id}"
+        record.write_text("", encoding="utf-8")
+        proc = self._run([agent_cmd(self.name), "session", "delete", session_id],
+                         cwd=workdir)
+        if proc.returncode != 0:
+            detail = proc.stderr.decode("utf-8", "replace").strip()[-160:]
+            print(f"[agora] 寫要約用掉的 {session_id} 沒刪掉（記錄留在 {record}）："
+                  f"{detail}", file=sys.stderr)
+            return
+        record.unlink(missing_ok=True)
+
+    def _model_of(self, session_id: str, workdir: Path) -> str | None:
+        """Which model answered, read from the session this run just made."""
+        try:
+            payload = self._read(self._export_bytes(session_id, cwd=workdir))
+        except AgentError:
+            return None
+        if _last_model(payload):
+            return _last_model(payload)
+        name = ((payload.get("info") or {}).get("model") or {}).get("id")
+        return name if isinstance(name, str) and name else None
 
     def start_native(self, raw: bytes, workdir: Path) -> Launch:
         session_id, landed = self._import_verified(

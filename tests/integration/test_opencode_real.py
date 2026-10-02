@@ -249,3 +249,45 @@ def test_fixture_is_self_authored():
 @pytest.mark.skipif(shutil.which("opencode") is None, reason="opencode is not installed")
 def test_opencode_is_the_executable_we_expect():
     assert oc.agent_cmd("opencode") in ("opencode", os.environ.get("AGORA_OPENCODE_CMD", "opencode"))
+
+SUMMARIZE_WORKDIR = Path("/tmp/agora-it-summarize")
+
+
+def test_real_summarize_answers_and_cleans_up_after_itself(project, isolated_store,
+                                                          monkeypatch, tmp_path):
+    """summarize() on the real opencode: a reply comes back, and the session it
+    used is gone (design 5.3, v6 Y1/Y6).
+
+    The work directory is its own git repo under /tmp - never the project the rest
+    of this module uses - so a leftover summarize session cannot be mistaken for
+    something the other tests own.
+    """
+    workdir = SUMMARIZE_WORKDIR / "summarize"
+    if workdir.exists():
+        shutil.rmtree(workdir)
+    workdir.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=workdir, check=True)
+    subprocess.run(["git", "-c", "user.email=agora@example.invalid",
+                    "-c", "user.name=agora", "commit", "-q", "--allow-empty",
+                    "-m", "init"], cwd=workdir, check=True)
+    monkeypatch.setenv("AGORA_OPENCODE_MODEL", agent.PRIMARY)
+
+    prompt = ("以下是材料，請寫一段三行的要約給之後接手的人，只輸出要約本身：\n"
+              "ZZMATERIAL 我們決定用 Markdown 表格輸出；ZZMATERIAL 未解決的是欄位對齊。")
+    text, model = oc.ADAPTER.summarize(prompt, workdir)
+
+    assert text.strip(), "沒有回覆"
+    assert model, "拿不到這次用的模型名稱（design 5.3 的 generated.by 要用）"
+    # Y1: the material reached the model even though every tool is denied
+    assert any(word in text for word in ("Markdown", "表格", "欄位")), \
+        f"回答裡沒有材料才有的字：{text[:120]}"
+
+    # the session this run made is deleted, and so are the files it left behind
+    left = subprocess.run(["opencode", "session", "list", "--format", "json"],
+                          cwd=str(workdir), env={**os.environ, "PWD": str(workdir)},
+                          capture_output=True, text=True)
+    ids = [row["id"] for row in json.loads(left.stdout or "[]")]
+    assert not ids, f"寫要約的 session 沒刪掉：{ids}"
+    assert list(workdir.glob("material-*")) == []
+    assert list(workdir.glob("pending-*")) == []
+    shutil.rmtree(SUMMARIZE_WORKDIR, ignore_errors=True)
