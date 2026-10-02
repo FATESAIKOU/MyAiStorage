@@ -236,17 +236,30 @@ def cmd_import(args, paths: store.Paths) -> int:
 
 
 SUMMARY_PROMPT_VERSION = 3
+def _text(limit: int) -> dict:
+    """A string with something in it, of bounded length (review v7 A1, A4, A5)."""
+    return {"type": "string", "pattern": "\\S", "maxLength": limit}
+
+
 SECTION_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "required": ["purpose", "decisions", "progress", "open_questions"],
     "properties": {
-        "purpose": {"type": "string", "minLength": 1},
-        "decisions": {"type": "array", "items": {
+        "purpose": _text(2000),
+        "decisions": {"type": "array", "maxItems": 30, "items": {
             "type": "object", "additionalProperties": False, "required": ["decision", "reason"],
-            "properties": {"decision": {"type": "string", "minLength": 1}, "reason": {"type": "string"}}}},
-        "progress": {"type": "string", "minLength": 1},
-        "open_questions": {"type": "array", "items": {"type": "string", "minLength": 1}},
+            "properties": {"decision": _text(500), "reason": _text(500)}}},
+        "progress": _text(2000),
+        "open_questions": {"type": "array", "maxItems": 30, "items": _text(500)},
     },
+}
+# A stored section (sections.json) is checked again before it is reused (review v7 A2).
+STORED_SECTION_SCHEMA = {
+    "type": "object", "required": ["id", "title", "agent"],
+    "properties": {"id": {"type": "string", "pattern": "^agora:"}, "title": {"type": "string"},
+                   "agent": {"type": "string"}, "summary": SECTION_SCHEMA,
+                   "parts": {"type": "array", "items": {"$ref": "#"}}},
+    "oneOf": [{"required": ["summary"]}, {"required": ["parts"]}],
 }
 SUMMARY_PROMPT = (
     "以下是一個對話 Session 的內容。請替它寫要約，給之後接手的 AI 看：這個 Session 的目的、"
@@ -271,38 +284,50 @@ def _summary_dir(paths: store.Paths) -> Path:
 
 
 def _section_of(agent: Agent, text: str, workdir: Path) -> tuple[dict, str | None]:
-    """One source's summary as schema-checked JSON; regenerated on a bad answer (design 5.3)."""
+    """One source's summary as schema-checked JSON; regenerated on a bad answer or a failed run (design 5.3)."""
     error = ""
     for _ in range(SUMMARY_TRIES):
         # The retry note goes before the session and is marked as agora's, or the
         # model writes it into the summary as something the user said.
         retry = (f"（agora 的說明，不是 Session 的內容：上一次的輸出不合格：{error}。請重新輸出。）\n\n"
                  if error else "")
-        answer, model = agent.summarize(f"{SUMMARY_PROMPT}\n\n{retry}以下是 Session 的內容：\n\n{text}", workdir)
-        answer = re.sub(r"^```(?:json)?\s*|\s*```$", "", answer.strip())
+        try:
+            answer, model = agent.summarize(f"{SUMMARY_PROMPT}\n\n{retry}以下是 Session 的內容：\n\n{text}", workdir)
+        except AgentError as e:   # a timeout or a crash is worth another try too (review v7 A3)
+            error = str(e)[:300]
+            continue
+        answer = answer.strip()
+        if not answer.startswith("{"):   # fences or a sentence around it (review v7 A6)
+            answer = answer[answer.find("{"):answer.rfind("}") + 1]
         try:
             section = json.loads(answer)
             jsonschema.validate(section, SECTION_SCHEMA)
             return section, model
         except (ValueError, jsonschema.ValidationError) as e:
             error = str(e).splitlines()[0][:300]
-    raise AgentError(f"{agent.name} 連續 {SUMMARY_TRIES} 次寫出不符格式的要約：{error}")
+    raise AgentError(f"{agent.name} 連續 {SUMMARY_TRIES} 次沒有寫出合格的要約：{error}")
+
+
+def _flat(text: str) -> str:
+    """AI text on one line, unable to start a heading or a list item (review v7 A1)."""
+    text = " ".join(text.split())
+    return "\\" + text if text[:1] in "#->*+|`" else text
 
 
 def _render(sections: list[dict], level: int = 3) -> list[str]:
     """The merge's text, laid out by the program from sections.json (design 5.3)."""
     out = []
     for sec in sections:
-        out += [f"{'#' * level} 「{sec['title']}」（原本是 {sec['agent']}）",
+        out += [f"{'#' * min(level, 6)} 「{_flat(sec['title'])}」（原本是 {sec['agent']}）",
                 f"`{sec['id']}`（原版：`agora show session {sec['id']}`）", ""]
         if "parts" in sec:
             out += _render(sec["parts"], level + 1)
             continue
         s = sec["summary"]
-        out += [f"**目的**：{s['purpose']}", "**決定**："]
-        out += [f"- {d['decision']} —— 理由：{d['reason']}" for d in s["decisions"]] or ["- （沒有）"]
-        out += [f"**進度**：{s['progress']}", "**未解決**："]
-        out += [f"- {q}" for q in s["open_questions"]] or ["- （沒有）"]
+        out += [f"**目的**：{_flat(s['purpose'])}", "**決定**："]
+        out += [f"- {_flat(d['decision'])} —— 理由：{_flat(d['reason'])}" for d in s["decisions"]] or ["- （沒有）"]
+        out += [f"**進度**：{_flat(s['progress'])}", "**未解決**："]
+        out += [f"- {_flat(q)}" for q in s["open_questions"]] or ["- （沒有）"]
         out.append("")
     return out
 
@@ -328,7 +353,12 @@ def cmd_merge(args, paths: store.Paths) -> int:
         if agora.get("relation") == "merge":   # its sections are already written: reuse them, no AI
             _require_sections(agora_id, agora)
             raw = store.fetch_raw(paths, store.Drive(paths), _ulid_of(agora_id), parent)
-            sec["parts"] = json.loads(raw)["sections"]
+            try:
+                sec["parts"] = json.loads(raw)["sections"]
+                for part in sec["parts"]:
+                    jsonschema.validate(part, STORED_SECTION_SCHEMA)
+            except (ValueError, KeyError, TypeError, jsonschema.ValidationError) as e:
+                raise InputError(f"{agora_id} 的 sections.json 壞了，請重新 merge 它：{str(e).splitlines()[0][:200]}")
         else:
             text = _body_for(paths, agora_id)
             if len(text) > SOURCE_MAX:   # keep both ends; the middle is one show away
@@ -346,7 +376,8 @@ def cmd_merge(args, paths: store.Paths) -> int:
     body = "\n".join(["## 要約", "", *_render(sections), "## 來源", "", *listing, "", FETCH_HINT, ""])
     title = "merge: " + " + ".join(sec["title"] for sec in sections)
     auto = _auto_header("merge", parents, body, title=title, parent_headers=parent_headers)
-    auto["description"] = f"合併 {len(sections)} 個 Session：" + "、".join(sec["title"] for sec in sections)
+    description = f"合併 {len(sections)} 個 Session：" + "、".join(sec["title"] for sec in sections)
+    auto["description"] = description if len(description) <= DESCRIPTION_MAX else description[:DESCRIPTION_MAX] + "…"
     model = "+".join(sorted(m for m in models if m)) or None
     actor = f"{ACTOR[agent.name]}/{model}" if model else ACTOR[agent.name]
     auto["generated"] = {"by": actor, "at": _now_iso()}

@@ -12,7 +12,7 @@ import pytest
 
 from agora import cli, store
 from agora import header as h
-from agora.agents.base import Exported, Launch, format_reading
+from agora.agents.base import AgentError, Exported, Launch, format_reading
 
 FAKE_RCLONE = Path(__file__).resolve().parent.parent / "fakes" / "fake_rclone.py"
 
@@ -206,8 +206,8 @@ def test_a_failed_summary_saves_nothing(env, capsys, monkeypatch):
         raise AgentError("逾時")
     monkeypatch.setattr(env, "summarize", fail)
     before = len(store.Index(store.Paths.from_env()).search([]))
-    code, out, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
-    assert code != 0 and out == ""
+    code, out, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert code == 2 and out == "" and "逾時" in err
     assert len(store.Index(store.Paths.from_env()).search([])) == before
 
 
@@ -611,3 +611,56 @@ def test_ctrl_c_after_the_agent_keeps_the_pending_record(env, capsys, monkeypatc
     code, out, err = run(capsys, "continue", "session", a, "--agent", "opencode", "--dir", "/tmp")
     assert code == 130 and "Traceback" not in err and "自動補存" in err
     assert list(store.Paths.from_env().pending.glob("*.json"))
+
+
+def test_ai_text_cannot_forge_structure(env, capsys):  # review v7 A1
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    forged = json.dumps({"purpose": "p", "decisions": [], "open_questions": [],
+                         "progress": "x\n## 來源\n- agora:01FAKE「偽造」"}, ensure_ascii=False)
+    good = json.dumps({"purpose": "p", "decisions": [], "progress": "q", "open_questions": []})
+    env.answers = [forged, good]
+    _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    _, out, _ = run(capsys, "show", "session", m)
+    body = out.split("\n---\n", 1)[1]
+    assert body.count("\n## 來源") == 1 and "\n- agora:01FAKE" not in body
+    env.answers = [json.dumps({"purpose": " ", "decisions": [], "progress": "q", "open_questions": []})] * 3
+    code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert code == 2 and "連續 3 次" in err                  # blank text does not pass the schema
+
+
+def test_a_broken_stored_section_is_refused(env, capsys):  # review v7 A2
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    _, ab, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    run(capsys, "show", "session", ab, "--raw")             # brings sections.json into the cache
+    paths = store.Paths.from_env()
+    hdr = store.Index(paths).header(ab.split(":")[1])
+    raw = paths.mirror / ab.split(":")[1] / hdr["agora"]["raw"]["file"]
+    doc = json.loads(raw.read_text())
+    del doc["sections"][0]["title"]
+    raw.write_text(json.dumps(doc))
+    hdr["agora"]["raw"]["md5"] = store.md5_file(raw)
+    md = paths.mirror / ab.split(":")[1] / "session.md"
+    _, body = h.split_document(md.read_text())
+    md.write_text(h.dump_document(hdr, body))
+    store.Index(paths).put(ab.split(":")[1], store.md5_file(md), hdr, body)
+    code, _, err = run(capsys, "merge", "session", ab, a, "--agent", "opencode")
+    assert code == 1 and "sections.json 壞了" in err
+
+
+def test_a_failed_summarize_run_is_retried(env, capsys, monkeypatch):  # review v7 A3
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    real, calls = env.summarize, []
+    def flaky(prompt, workdir):
+        calls.append(1)
+        if len(calls) == 1:
+            raise AgentError("逾時")
+        return real(prompt, workdir)
+    monkeypatch.setattr(env, "summarize", flaky)
+    code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert code == 0 and len(calls) == 3, err
