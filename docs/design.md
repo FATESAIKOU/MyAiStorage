@@ -213,22 +213,22 @@ agora show     session <id> [--raw]
 - 產生一個新的 Session：`relation: merge`、`parents` 依給的順序。id 用空白或逗號分隔都可以（`agora merge session id1, id2, id3`）。
 - 閱讀版是各來源依序串接，每段標出來源；沒有 raw，接續時一律用閱讀版注入。
 
-### 5.4 continue
+### 5.4 continue（第 5 版：2026-10-03 使用者決定）
 
-（流程同第 3 版：原生載入或閱讀版注入、pending＋flock、PWD、/clear 的處理。）
+**continue ＝ ① 取得需要的原始 session，② 交給目標 agent 的轉接器轉成它自己的格式載入。** 不論 opencode 或 Claude、不論接的是普通還是 merge 出來的 Session，畫面上一打開都看得到前文，行為相同。import 與 merge 不用考慮這件事。
 
-1. 決定載入方式：
-
-   | 來源 | 目標 | 方式 |
-   |---|---|---|
-   | 單一 opencode | opencode | **原生**：三種 id 全部重編後 `opencode import`，回頭 export 比對訊息數 |
-   | 單一 claude | claude | **原生**：新 uuid、改寫 `sessionId`（有 `cwd` 的行改成工作目錄），`claude --resume <新uuid>` |
-   | 跨 agent，或 merge 出來的 | opencode | **閱讀版注入**：一則 user 訊息帶全文的 export，`opencode import` 後開啟 |
-   | 跨 agent，或 merge 出來的 | claude | **閱讀版注入**：`claude --session-id <新uuid> "@<閱讀版絕對路徑> …"` |
-
-2. 工作目錄：`--dir`，預設是 `agora.source.dir`（這台機器上存在的話），否則是目前目錄。agent 啟動時同時設定 cwd 與 `PWD`。
-3. 寫 pending 並持有 flock（交給 agent 繼承），在前景啟動 agent；Ctrl-C 只給 agent。
-4. agent 結束後，內容比啟動前多才存成新 Session（`relation: continue`、`parents: [{id, raw_md5}]`）。Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之後那個 session 要用的 import 指令。
+1. **取得原始 session（cli）**：
+   - 普通 Session：它自己的 raw（`agora.raw`）。
+   - merge 出來的：依 `agora.parents` 的順序，取每個來源的 raw；來源本身也是 merge 的話往下遞迴。每一段帶著來源的 agent 名稱與 agora id。
+2. **轉成目標格式（轉接器）**：每個轉接器只提供兩個方向：
+   - `turns(raw)`：把**自己格式**的 raw 拆成共通的一輪一輪（`[(role, lines)]`，規則同閱讀版 4.4：文字＋工具一行摘要）。閱讀版就是 `format_reading(turns(raw))`。
+   - `native(turns)`：把共通的一輪一輪組成**自己格式**的 raw。
+   - 只有一段、而且來源 agent ＝目標 agent → 直接用原始 raw，不經過轉換（保留工具呼叫與前綴，快取能命中）。
+   - 其他情況（跨 agent、merge）→ 每段用來源 agent 的 `turns()` 拆開，依序串起來（merge 的每段前面加一則標示來源的 user 訊息），再用目標 agent 的 `native()` 組成原生 raw。
+3. **載入**：一律走目標轉接器的 `start_native(raw, workdir)`（opencode：id 重編、`opencode import`、回讀驗證；Claude：新 uuid、寫 jsonl、`claude --resume`）。不再有「注入」這條路。
+4. 工作目錄：`--dir`，預設是 `agora.source.dir`（這台機器上存在的話），否則是目前目錄並提示。agent 啟動時同時設定 cwd 與 `PWD`。
+5. 寫 pending 並持有 flock（交給 agent 繼承），在前景啟動 agent；Ctrl-C 只給 agent。
+6. agent 結束後，內容比啟動前多才存成新 Session（`relation: continue`、`parents`）。Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之後那個 session 要用的 import 指令。
 
 ### 5.6 delete
 
