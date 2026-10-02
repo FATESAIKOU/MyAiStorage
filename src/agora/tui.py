@@ -272,7 +272,7 @@ class Choose(ModalScreen):
             yield OptionList(*self.options)
             if self.note:
                 yield Static(self.note, classes="note")
-            yield Static("Enter 確定   Esc 取消", classes="hint")
+            yield Static("Enter 選擇   Esc 取消", classes="hint")
 
     @on(OptionList.OptionSelected)
     def chosen(self, event: OptionList.OptionSelected) -> None:
@@ -290,7 +290,7 @@ class AskText(ModalScreen):
         with Vertical(classes="box"):
             yield Static(self.title_, classes="box-title")
             yield Input(self.text)
-            yield Static("Enter 確定   Esc 取消", classes="hint")
+            yield Static("Enter 選擇   Esc 取消", classes="hint")
 
     @on(Input.Submitted)
     def done(self, event: Input.Submitted) -> None:
@@ -329,6 +329,7 @@ class Run(ModalScreen):
         self.proc = None
         self.started = time.monotonic()
         self.stopping = False
+        self.done = False                  # the command exited cleanly: the bar is full
         self.signals: list[int] = []      # what was sent, in order (a test reads this)
 
     def compose(self) -> ComposeResult:
@@ -348,6 +349,7 @@ class Run(ModalScreen):
             for line in self.proc.stdout:
                 self.lines.append(line.rstrip())
             code = self.proc.wait()
+            self.done = code == 0
         except Exception as e:       # never leave the window up forever (review L6)
             code, self.lines = 2, self.lines + [f"讀不到輸出：{e}"]
         # The app may already be gone (ctrl+q closed it); that is not our problem.
@@ -358,8 +360,11 @@ class Run(ModalScreen):
         step = next((m for m in map(self.PROGRESS.match, reversed(self.lines))
                      if m and 1 <= int(m.group(1)) <= int(m.group(2))), None)
         if step:
-            self.query_one("#bar", ProgressBar).update(total=int(step.group(2)),
-                                                        progress=int(step.group(1)))
+            # `k/N` means the k-th one has *started*, so N-1 of them are finished;
+            # reaching N/N means the command said it was done (review Q3)
+            total, started = int(step.group(2)), int(step.group(1))
+            self.query_one("#bar", ProgressBar).update(
+                total=total, progress=total if self.done else max(0, started - 1))
         spent = int(time.monotonic() - self.started)
         last = self.lines[-1] if self.lines else ""
         prefix = "中斷中… " if self.stopping else ""
@@ -444,9 +449,11 @@ class Confirm(ModalScreen):
                 Binding("enter", "confirm", "確定", priority=True),
                 Binding("space", "toggle", "勾選", priority=True)]
 
-    def __init__(self, title: str, options: list[str], note: str = "", extra: str = ""):
+    def __init__(self, title: str, options: list[str], note: str = "", extra: str = "",
+                 note_on: str = ""):
         super().__init__()
         self.title_, self.options, self.note, self.extra = title, options, note, extra
+        self.note_on = note_on
         self.picked = False
 
     def compose(self) -> ComposeResult:
@@ -454,14 +461,22 @@ class Confirm(ModalScreen):
             yield Static(self.title_, classes="box-title")
             yield OptionList(*self.options)
             if self.extra:
-                yield Checkbox(self.extra, value=False, id="extra")
+                # [ ] / [x] in the label: a tick that only changes colour is a tick
+                # the user cannot read (review Q1)
+                yield Checkbox(f"[ ] {self.extra}", value=False, id="extra")
             if self.note:
-                yield Static(self.note, classes="note")
-            yield Static("空白 勾選   Enter 確定   Esc 取消", classes="hint")
+                yield Static(self.note, classes="note", id="effect")
+            yield Static("空白 勾選   Enter 選擇   Esc 取消", classes="hint")
 
     @on(Checkbox.Changed, "#extra")
     def ticked(self, event: Checkbox.Changed) -> None:
+        """Ticking shows `[x]`, and the line under it says what will happen - which
+        is the whole reason to tick it (review Q1)."""
         self.picked = event.value
+        box = self.query_one("#extra", Checkbox)
+        box.label = Text(f"[{'x' if self.picked else ' '}] {self.extra}")
+        if self.note_on:
+            self.query_one("#effect", Static).update(self.note_on if self.picked else self.note)
 
     def action_toggle(self) -> None:
         """Space on the checkbox ticks it; on the list there is nothing to tick here."""
@@ -941,7 +956,10 @@ class AgoraApp(App):
         if code == 0 and sent:
             self.marked -= set(sent)
             self.show()
-        self.say(note, failed=code != 0)
+        # The note is in the window the user just read; leaving it on the status
+        # line too made the next screen look like it was still about that action
+        # (review Q4).
+        self.say("", failed=code != 0)
         return stopped
 
     def stop_group(self, pgid: int) -> None:
@@ -1104,8 +1122,9 @@ class AgoraApp(App):
             return
         argv = argv_for("pull", rows, None, None)[0]
         answer = await self.push_screen_wait(Confirm(
-            f"把 {len(rows)} 個拉到本機？", ["取消", "確定"], "雲端沒有的會印一行提醒，本機的不動",
-            "雲端沒有的就刪掉本機的（等同 --not-exist-delete）"))
+            f"把 {len(rows)} 個拉到本機？", ["取消", "確定"], "雲端沒有的：印一行提醒，本機的不動",
+            "雲端沒有的就刪掉本機的（等同 --not-exist-delete）",
+            "⚠ 勾了：雲端沒有的，本機這份會被刪掉"))
         if answer and answer[0] == 1:
             await self.act(f"拉下 {len(rows)} 個", argv + (["--not-exist-delete"] if answer[1] else []),
                            sent=[r.key for r in rows])
@@ -1118,8 +1137,10 @@ class AgoraApp(App):
             return
         argv = argv_for("push", rows, None, None)[0]
         answer = await self.push_screen_wait(Confirm(
-            f"把 {len(rows)} 個寫回 Drive？", ["取消", "確定"], "同名的檔案直接覆蓋；Drive 上多的不動",
-            "雲端沒有的就傳回去（等同 --not-exist-upload）"))
+            f"把 {len(rows)} 個寫回 Drive？", ["取消", "確定"],
+            "雲端沒有的：印一行提醒，不傳；同名的檔案直接覆蓋",
+            "雲端沒有的就傳回去（等同 --not-exist-upload）",
+            "⚠ 勾了：別台機器刪掉的 Session 會被傳回 Drive"))
         if answer and answer[0] == 1:
             await self.act("寫回 Drive", argv + (["--not-exist-upload"] if answer[1] else []),
                            sent=[r.key for r in rows])

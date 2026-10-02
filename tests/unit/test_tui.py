@@ -418,7 +418,7 @@ def test_the_progress_bar_follows_the_k_of_n_lines():
                 bar = app.screen.query_one("#bar")
                 if bar.total:
                     break
-            assert (bar.progress, bar.total) == (2, 2)
+            assert (bar.progress, bar.total) == (1, 2)      # 2/2 started, so one is finished
     _run(go)
 
 
@@ -439,7 +439,7 @@ def test_progress_is_read_only_from_our_own_lines():   # review V8
                 bar = app.screen.query_one("#bar")
                 if bar.total:
                     break
-            assert (bar.progress, bar.total) == (1, 1)
+            assert (bar.progress, bar.total) == (0, 1)      # 1/1 means the first started
     _run(go)
 
 
@@ -511,9 +511,10 @@ def test_esc_stops_the_group_and_the_window_says_it_was_interrupted(group_calls,
             proc.done.set()
             assert _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
             await pilot.press("space")                      # close the result window
+            assert "重跑同一個動作會接著做" in " ".join(str(app.screen.lines).split())
             await pilot.press("space")                      # close the result window
-            await _wait(lambda: "重跑" in str(app.query_one("#msg").render()), pilot)
-            assert "重跑同一個動作會接著做" in str(app.query_one("#msg").render())
+            await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
+            assert str(app.query_one("#msg").render()) == ""      # Q4
     _run(go)
 
 
@@ -690,7 +691,7 @@ def test_a_failure_line_with_a_timestamp_in_it_is_not_progress():
                 bar = app.screen.query_one("#bar")
                 return (bar.progress, bar.total) if bar.total else None
             await _wait(lambda: progress() is not None, pilot)
-            assert progress() == (1, 2)
+            assert progress() == (0, 2)      # 1/2 means the first one started (Q3)
     _run(go)
 
 
@@ -1335,8 +1336,8 @@ def test_the_progress_bar_walks_from_one_to_five():
                     return None
                 bar = app.screen.query_one("#bar")
                 return (bar.progress, bar.total) if bar.total else None
-            await _wait(lambda: progress() == (5, 5), pilot)
-            assert progress() == (5, 5)
+            await _wait(lambda: progress() == (4, 5), pilot)
+            assert progress() == (4, 5)      # the fifth started, so four are finished
     _run(go)
 
 
@@ -1360,10 +1361,10 @@ def test_interrupting_a_merge_returns_to_the_list_and_says_it_carries_on(group_c
             alive[4242] = False
             proc.done.set()
             await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert "重跑同一個動作會接著做" in " ".join(str(app.screen.lines).split())
             await pilot.press("space")
-            await _wait(lambda: "重跑" in str(app.query_one("#msg").render()), pilot)
-            assert "重跑同一個動作會接著做" in str(app.query_one("#msg").render())
-            assert not isinstance(app.screen, tui.ModalScreen)      # back at the list
+            assert _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)   # back at the list
+            assert str(app.query_one("#msg").render()) == ""       # nothing left over (Q4)
     _run(go)
 
 
@@ -1534,4 +1535,106 @@ def test_enter_on_the_confirmation_window_keeps_it_cancelled():   # review W2
             await pilot.press("enter")                   # still on 取消
             await pilot.pause()
             assert not app._last_spawned
+    _run(go)
+
+
+# --- PM's own run through the screen (docs/tickets/T2-pm-run.md) ------------
+
+
+def test_the_tick_is_readable_as_text_and_the_line_says_what_it_does():   # Q1
+    """A tick that only changes colour is a tick nobody can read."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("p")
+            await pilot.pause()
+            window = app.screen
+            assert "[ ]" in str(window.query_one("#extra").label)
+            assert "本機的不動" in str(window.query_one("#effect").render())
+            await pilot.press("tab")
+            await pilot.press("space")
+            await pilot.pause()
+            assert "[x]" in str(window.query_one("#extra").label)
+            assert "會被刪掉" in str(window.query_one("#effect").render())
+    _run(go)
+
+
+def test_the_push_option_says_what_ticking_it_does():   # Q1
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("P")
+            await pilot.pause()
+            window = app.screen
+            assert "不傳" in str(window.query_one("#effect").render())
+            await pilot.press("tab")
+            await pilot.press("space")
+            await pilot.pause()
+            assert "傳回 Drive" in str(window.query_one("#effect").render())
+    _run(go)
+
+
+def test_enter_selects_rather_than_confirms():   # Q2
+    """The wording read as 「Enter＝確定」 when Enter is 「選停著的那一個」, and
+    Enter on the default (取消) cancels."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")                      # the delete window
+            await pilot.pause()
+            hints = [str(w.render()) for w in app.screen.query("Static")]
+            assert any("Enter 選擇" in h for h in hints)
+            assert not any("Enter 確定" in h for h in hints)
+    _run(go)
+
+
+def test_the_bar_counts_what_is_finished_and_fills_only_on_a_clean_exit():   # Q3
+    """`k/N` says the k-th has started, so k-1 are done; N/N means the command
+    said it finished - not that the last one had begun."""
+    app = _marked_app(None)
+    proc = FakeProc(lines=["[agora] 匯入 1/3", "[agora] 匯入 2/3", "[agora] 匯入 3/3"], hang=True)
+    app.spawn, _ = _spawn(proc)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+
+            def progress():
+                if not isinstance(app.screen, tui.Run):
+                    return None
+                bar = app.screen.query_one("#bar")
+                return (bar.progress, bar.total) if bar.total else None
+            await _wait(lambda: progress() == (2, 3), pilot)
+            assert progress() == (2, 3)              # the third started, two are done
+            proc.done.set()                           # and now it exits cleanly
+            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert "完成" in " ".join(str(app.screen.lines).split())
+    _run(go)
+
+
+def test_the_status_line_is_empty_after_the_result_window_closes():   # Q4
+    app = _marked_app(None)
+    app.spawn, _ = _spawn()
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert "完成" in " ".join(str(app.screen.lines).split())     # it is in the window
+            await pilot.press("space")
+            await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
+            assert str(app.query_one("#msg").render()) == ""
     _run(go)
