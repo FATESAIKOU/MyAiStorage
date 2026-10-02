@@ -224,3 +224,41 @@ def test_deleting_a_session_drive_already_lost_still_finishes(remote):  # review
     store.delete_session(paths, store.Drive(paths), ulid)   # no StoreError
     assert not (paths.mirror / ulid).exists()
     assert store.Index(paths).header(ulid) is None
+
+
+def test_a_failed_purge_that_still_finds_the_session_forgets_nothing(remote):  # review S1-4b
+    """"Not found" also means a wrong folder id or a token that sees nothing. Only a
+    listing without this ULID means it is gone."""
+    paths = store.Paths.from_env()
+    ulid = _save(paths, _header())
+    store.sync(paths)          # mirrored and indexed: there is a local copy to forget
+    monkey = os.environ.get("FAKE_RCLONE_FAIL")
+    os.environ["FAKE_RCLONE_FAIL"] = "purge"
+    try:
+        with pytest.raises(store.StoreError):
+            store.delete_session(paths, store.Drive(paths), ulid)
+    finally:
+        if monkey is None:
+            os.environ.pop("FAKE_RCLONE_FAIL")
+        else:
+            os.environ["FAKE_RCLONE_FAIL"] = monkey
+    assert (paths.mirror / ulid / "session.md").is_file()
+    assert store.Index(paths).header(ulid) is not None
+    assert (remote / "agora" / "sessions" / ulid).is_dir()
+
+
+def test_a_purge_that_fails_and_a_listing_that_fails_forgets_nothing(remote):  # review S1-4b
+    paths = store.Paths.from_env()
+    ulid = _save(paths, _header())
+    store.sync(paths)
+    monkey = os.environ.get("FAKE_RCLONE_FAIL")
+    os.environ["FAKE_RCLONE_FAIL"] = "sessions"      # every call that names the folder
+    try:
+        with pytest.raises(store.StoreError):
+            store.delete_session(paths, store.Drive(paths), ulid)
+    finally:
+        if monkey is None:
+            os.environ.pop("FAKE_RCLONE_FAIL")
+        else:
+            os.environ["FAKE_RCLONE_FAIL"] = monkey
+    assert store.Index(paths).header(ulid) is not None

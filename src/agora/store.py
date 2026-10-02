@@ -612,13 +612,24 @@ def delete_session(paths: Paths, drive: Drive, ulid: str) -> None:
     be cleaned up: the rerun purged a folder that was already gone, failed, and
     said so. The same road is 3.4's "delete only the local copy" for a session
     another machine removed, so it is settled here, once.
+
+    "Not found" alone is not enough to believe (S1-4b): the Drive API says the
+    same thing when the folder id is wrong or the token cannot see anything, and
+    then forgetting it here would drop a session that is perfectly safe. So a
+    failed purge is followed by a listing, and only a listing that came back
+    without this ULID means it is gone. A listing that fails as well leaves the
+    original error alone.
     """
     # rclone purge on Drive honours drive.use_trash, which defaults to true.
     try:
         drive._run("purge", f"gdrive:sessions/{ulid}")
-    except StoreError as e:
-        if "not found" not in str(e).lower():
-            raise
+    except StoreError:
+        try:
+            remote = drive.list_sessions()
+        except StoreError:
+            raise          # cannot tell what happened: the purge failure stands
+        if remote is not None and ulid in remote:
+            raise          # it is still there, so the purge failed for another reason
         _warn(f"{ulid} 在 Drive 上已經沒有了，當成刪掉")
     forget_local(paths, ulid)
     shutil.rmtree(paths.outbox / ulid, ignore_errors=True)
