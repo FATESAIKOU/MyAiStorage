@@ -277,7 +277,7 @@ agora show     session <id> [--raw]
 3. **載入**：一律走目標轉接器的 `start_native(raw, workdir)`（opencode：id 重編、`opencode import`、回讀驗證；Claude：新 uuid、寫 jsonl、`claude --resume`）。不再有「注入」這條路。
 4. 工作目錄：`--dir`，預設是 `agora.source.dir`（這台機器上存在的話），否則是目前目錄並提示。agent 啟動時同時設定 cwd 與 `PWD`。
 5. 寫 pending 並持有 flock（交給 agent 繼承），在前景啟動 agent；Ctrl-C 只給 agent。
-6. agent 結束後，內容比啟動前多才存成新 Session（`relation: continue`、`parents`）。Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之後那個 session 要用的 import 指令。
+6. agent 結束後，內容比啟動前多才存檔，**寫回原本那個 agora Session（同一個 id）**（2026-10-02 使用者決定，原本是另存新的）：raw 與閱讀版換成接續後的整段對話，`agora.source` 換成接續用的那個 agent session，舊的記到 `agora.previous_sources`（未匯入頁因此不再列它）；標題、tags 這些使用者欄位不變。接續的是 merge 時，它就變成那段對話：`relation` 改成 `continue`、拿掉 `agora.merge` 與 `status: draft`，`parents` 留著當出處。不再能從同一點分岔。Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之後那個 session 要用的 import 指令。
 
 ### 5.6 delete
 

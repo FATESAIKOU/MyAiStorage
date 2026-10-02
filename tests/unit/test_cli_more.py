@@ -349,9 +349,10 @@ def test_continue_from_merge_has_null_parent_md5(env, capsys):  # U-CON-18, N5
     _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
     _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
     _, child, _ = run(capsys, "continue", "session", m, "--agent", "opencode", "--dir", "/tmp")
-    hdr = store.Index(paths()).header(child.split(":")[1])
+    assert child == m                                         # written back in place (design 5.4)
+    hdr = store.Index(paths()).header(m.split(":")[1])
     from agora import header as h
-    assert h.agora_of(hdr)["parents"] == [{"id": m, "raw_md5": None}]
+    assert [p["id"] for p in h.agora_of(hdr)["parents"]] == [a, b]
 
 
 def test_continue_source_is_the_new_session(env, capsys, tmp_path):  # U-CON-19, N6
@@ -420,8 +421,9 @@ def test_fault_before_finalize_recovers(env, capsys, tmp_path, claude_env, monke
     code, _, err = run(capsys, "show", "session", parent)
     assert code == 0 and "補存" in err
     assert not list(paths().pending.glob("*.json"))
-    kids = store.Index(paths()).children(parent.split(":")[1])
-    assert len(kids) == 1
+    hdr = store.Index(paths()).header(parent.split(":")[1])
+    assert hdr["agora"]["source"]["session_id"] != CL_SID       # recovered into the same session
+    assert hdr["agora"]["previous_sources"] == [f"claude:{CL_SID}"]
 
 
 def test_sigint_kills_agent_not_agora(env, capsys, tmp_path, claude_env, monkeypatch):  # U-CON-11
@@ -480,11 +482,12 @@ def test_killed_agora_does_not_finish_early(env, capsys, tmp_path, claude_env, m
     code, _, _ = run(capsys, "show", "session", parent)
     assert code == 0
     assert len(list(paths().pending.glob("*.json"))) == 1  # still protected
-    assert store.Index(paths()).children(parent.split(":")[1]) == []
+    source = lambda: store.Index(paths()).header(parent.split(":")[1])["agora"]["source"]["session_id"]
+    assert source() == CL_SID                               # not finished yet
     os.kill(pid, signal.SIGTERM)
     wait_gone(pid)          # the lock frees only once the agent is really gone
     run(capsys, "show", "session", parent)
-    assert store.Index(paths()).children(parent.split(":")[1]) != []
+    assert source() != CL_SID
     assert not list(paths().pending.glob("*.json"))
 
 

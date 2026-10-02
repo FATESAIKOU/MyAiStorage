@@ -114,26 +114,39 @@ def test_reimport_changed_without_children_updates_same_id(env, capsys):
     assert first == second
 
 
-def test_reimport_after_continue_branches(env, capsys):  # S7
+def test_reimporting_the_agent_session_a_continue_moved_past_is_a_session_of_its_own(env, capsys):
     _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     run(capsys, "continue", "session", first, "--agent", "opencode", "--dir", "/tmp")
     env.sessions["ses_a"].append("來源端又改了")
     _, second, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     assert second != first
-    hdr = store.Index(store.Paths.from_env()).header(second.split(":")[1])
-    assert hdr["agora"]["parents"][0]["id"] == first
 
 
-def test_continue_native_creates_child(env, capsys):
+def test_continue_writes_back_into_the_same_session(env, capsys):  # design 5.4, user's call
     _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
-    code, child, _ = run(capsys, "continue", "session", parent, "--agent", "opencode", "--dir", "/tmp",
-                         "--header", "tags=next")
-    assert code == 0 and child.startswith("agora:") and child != parent
-    hdr = store.Index(store.Paths.from_env()).header(child.split(":")[1])
-    assert hdr["agora"]["relation"] == "continue" and hdr["agora"]["parents"][0]["id"] == parent
-    assert hdr["tags"] == ["next"]
+    code, out, _ = run(capsys, "continue", "session", parent, "--agent", "opencode", "--dir", "/tmp",
+                       "--header", "tags=next")
+    assert code == 0 and out == parent                       # no new session
+    paths = store.Paths.from_env()
+    hdr = store.Index(paths).header(parent.split(":")[1])
+    assert hdr["agora"]["relation"] == "import" and hdr["tags"] == ["next"]
+    assert hdr["agora"]["source"]["session_id"] == env.launched[-1].agent_session_id
+    assert hdr["agora"]["previous_sources"] == ["opencode:ses_a"]
+    assert "接著做完了" in (paths.mirror / parent.split(":")[1] / "session.md").read_text()
     assert env.launched[-1].agent_session_id.startswith("ses_n")   # same agent → native
-    assert not list(store.Paths.from_env().pending.glob("*.json"))
+    assert not list(paths.pending.glob("*.json"))
+    assert len(store.Index(paths).search([])) == 1
+
+
+def test_continuing_a_merge_turns_it_into_that_conversation(env, capsys):
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    code, out, _ = run(capsys, "continue", "session", m, "--agent", "opencode", "--dir", "/tmp")
+    hdr = store.Index(store.Paths.from_env()).header(m.split(":")[1])
+    assert code == 0 and out == m and hdr["agora"]["relation"] == "continue" and "merge" not in hdr["agora"]
+    assert [p["id"] for p in hdr["agora"]["parents"]] == [a, b] and hdr["agora"]["raw"]
 
 
 def test_continue_with_nothing_new_saves_nothing(env, capsys):
@@ -223,14 +236,14 @@ def test_pending_from_dead_agora_is_finished_later(env, capsys):  # S3, N2
     _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     paths = store.Paths.from_env()
     env.sessions["ses_x"] = ["a", "b"]
-    record = {"agora_id": "agora:01K6DEADBEEF000000000000AA", "agent": "opencode",
+    record = {"agora_id": parent, "agent": "opencode",
               "agent_session_id": "ses_x", "dir": "/tmp", "before_count": 2,
               "parent": {"id": parent, "raw_md5": None}, "title": "t"}
     _, lock = cli._write_pending(paths, record)
     lock.close()                               # that agora died: nobody holds the lock
     _, _, err = run(capsys, "search", "session")
     assert "補存" in err
-    assert store.Index(paths).header("01K6DEADBEEF000000000000AA")["agora"]["relation"] == "continue"
+    assert store.Index(paths).header(parent.split(":")[1])["agora"]["source"]["session_id"] == "ses_x"
 
 
 def test_pending_held_by_live_agora_is_left_alone(env, capsys):  # N2
@@ -454,7 +467,9 @@ def test_delete_needs_yes_and_moves_to_trash(env, capsys, tmp_path):
 
 def test_delete_refuses_a_session_with_children(env, capsys):
     _, sid, _ = _import(capsys)
-    run(capsys, "continue", "session", sid, "--agent", "opencode", "--dir", "/tmp")
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    run(capsys, "merge", "session", sid, b, "--agent", "opencode")      # a merge is a child of its sources
     code, _, err = run(capsys, "delete", "session", sid, "--yes")
     assert code == 1 and "子 Session" in err
 

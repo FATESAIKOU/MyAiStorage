@@ -85,6 +85,8 @@ def import_rows(index: store.Index, agents: list, paths: store.Paths | None = No
             skip = set((paths.state / "unsaved-launches").read_text(encoding="utf-8").split())
         except OSError:
             pass
+    for _ulid, hdr, _snippet in index.search([]):   # agent sessions a continue has moved past
+        skip.update(h.agora_of(hdr).get("previous_sources") or [])
     found = []
     for agent in agents:
         try:

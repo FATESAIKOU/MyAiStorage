@@ -408,7 +408,7 @@ def _write_pending(paths: store.Paths, record: dict):
 
 
 def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
-    """Store what the agent produced as a new session; None if nothing new."""
+    """Write what the agent produced back into the session it continued (design 5.4); None if nothing new."""
     agent = load_agent(record["agent"])
     launch = Launch(argv=[], cwd=record["dir"], agent_session_id=record.get("agent_session_id"),
                     before_count=record.get("before_count", 0))
@@ -416,10 +416,31 @@ def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
     if exported is None:
         return None
     body = reading(agent, exported.raw)
-    auto = _auto_header("continue", [record["parent"]], body, title=record.get("title") or exported.title,
-                        exported=exported, agent=agent, parent_headers=record.get("parent_headers") or [])
-    auto["id"] = record["agora_id"]
-    return _save(paths, _with_user(auto, record.get("header_updates") or {}), body, exported.raw)
+    index = store.Index(paths)
+    hdr = index.header(_ulid_of(record["agora_id"])) or {}
+    if not hdr:                  # gone meanwhile (deleted elsewhere): keep the work as a session of its own
+        hdr = _auto_header("import", [], body, title=record.get("title") or exported.title,
+                           exported=exported, agent=agent)
+        hdr["id"] = record["agora_id"]
+    agora = h.agora_of(hdr)
+    old = agora.get("source") or {}
+    if old.get("session_id") and old.get("session_id") != exported.session_id:
+        # the agent session it came from is not "not imported" now: the import tab leaves it out
+        agora.setdefault("previous_sources", []).append(f"{old.get('agent')}:{old['session_id']}")
+    if agora.get("relation") == "merge":   # a continued merge is that conversation now, not its summary
+        agora["relation"] = "continue"
+        agora.pop("merge", None)
+        hdr.pop("status", None)
+    agora["source"] = _source(agent, exported)
+    agora["updated_at"] = _now_iso()
+    actor = f"{ACTOR[agent.name]}/{exported.model}" if exported.model else ACTOR[agent.name]
+    hdr["generated"] = {"by": actor, "at": exported.created_at or _now_iso()}
+    sources = [s for s in hdr.get("sources") or [] if not str(s.get("id", "")).startswith(f"{agent.name}:")]
+    hdr["sources"] = [{"id": f"{agent.name}:{exported.session_id}", "title": f"{agent.name} session",
+                       "author": actor, "last_modified": _now_iso()[:10]}, *sources]
+    if not hdr.get("description"):
+        hdr["description"] = _description(body)
+    return _save(paths, _with_user(hdr, record.get("header_updates") or {}), body, exported.raw)
 
 
 def recover_pending(paths: store.Paths, *, notice_only: bool = False) -> None:
@@ -495,7 +516,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
             _converted_turns(src.get("agent"), source_id, own))
     launch = agent.start_native(raw, workdir)
     record = {
-        "agora_id": f"agora:{h.new_ulid(int(store.now() * 1000))}", "agent": agent.name,
+        "agora_id": source_id, "agent": agent.name,     # written back in place (design 5.4, user's call)
         "agent_session_id": launch.agent_session_id, "dir": launch.cwd,
         "parent": {"id": source_id, "raw_md5": parent_md5},
         "parent_headers": [{"id": source_id, "title": parent.get("title"), "agora": {"updated_at": agora.get("updated_at")}}],

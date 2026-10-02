@@ -282,3 +282,11 @@ def test_content_search_scans_only_what_the_cache_lacks():
             assert {r.key for r in app.shown()} == {"claude:s1", "claude:s2"}
             assert agent.searched == {"s2"}                         # the slow scan skipped s1
     _run(go)
+
+
+def test_import_tab_leaves_out_agent_sessions_a_continue_moved_past():
+    hdr = _hdr("01FFFFFFFFFFFFFFFFFFFFFFFF", "接續過的", sid="ses_new")
+    hdr["agora"]["previous_sources"] = ["opencode:ses_old"]
+    _, index = _index((hdr, "## user\nx\n"))
+    agent = FakeAgent("opencode", [Listed("ses_old", "/tmp/p", "舊的", None), Listed("ses_other", "/tmp/p", "別的", None)])
+    assert [r.key for r in tui.import_rows(index, [agent])] == ["opencode:ses_other"]
