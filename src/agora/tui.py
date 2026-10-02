@@ -65,6 +65,15 @@ def wrap(text: str, cols: int) -> list[str]:
     return lines
 
 
+def aligned(rows: list["Row"], cap: int = 24) -> list[str]:
+    """Each row's cells padded to a shared width per column, so the columns line up; the last is free."""
+    if not rows:
+        return []
+    n = max(len(r.cells) for r in rows)
+    widths = [min(max(width(r.cells[i]) for r in rows if i < len(r.cells)), cap) for i in range(n - 1)]
+    return ["  ".join([clip(c, widths[i]) if i < n - 1 else c for i, c in enumerate(r.cells)]) for r in rows]
+
+
 def layout(rows: int, cols: int) -> dict[str, tuple[int, int, int, int]]:
     """(top, left, height, width) of the list and the preview; the last two rows are the key bar."""
     body = max(rows - 3, 2)
@@ -260,9 +269,9 @@ def _key(screen) -> str:
     return _NAMED.get(k, "")
 
 
-def _put(screen, y: int, x: int, text: str, cols: int, attr: int = 0) -> None:
+def _put(screen, y: int, x: int, text: str, cols: int, attr: int = 0, pad: bool = True) -> None:
     try:
-        screen.addstr(y, x, clip(text, cols), attr)
+        screen.addstr(y, x, clip(text, cols) if pad else clip(text, min(cols, width(text))), attr)
     except curses.error:         # the bottom-right cell cannot be written; nothing to do about it
         pass
 
@@ -284,12 +293,18 @@ def paint(screen, state: State, preview: list[str], message: str) -> None:
     shown = state.shown()
     if not shown:
         _put(screen, top, left, "  （沒有東西；按 / 改篩選，或按 Tab 換頁）", wide)
+    lines = aligned(shown)
     for i, row in enumerate(shown[state.top:state.top + height]):
         n = state.top + i
         mark = "✓" if row.key in state.marked else " "
-        _put(screen, top + i, left, f"{'▸' if n == state.cursor else ' '}{mark} " + "  ".join(row.cells), wide,
+        _put(screen, top + i, left, f"{'▸' if n == state.cursor else ' '}{mark} " + lines[n], wide,
              curses.A_REVERSE if n == state.cursor else 0)
     ptop, pleft, pheight, pwide = box["preview"]
+    if pleft:                    # a rule between the list and the preview
+        for y in range(ptop, ptop + pheight):
+            _put(screen, y, pleft - 1, "│", 1, curses.A_DIM)
+    else:
+        _put(screen, ptop - 1, 0, "─" * cols, cols, curses.A_DIM)
     lines = [line for text in preview for line in wrap(text, max(pwide - 1, 1))]
     for i, line in enumerate(lines[:pheight]):
         _put(screen, ptop + i, pleft, line, pwide)
@@ -302,19 +317,19 @@ def choose(screen, title: str, options: list[str], note: str = "") -> int | None
     """A small window in the middle; the index chosen, or None on Esc."""
     rows, cols = screen.getmaxyx()
     wide = min(max(width(title), *(width(o) for o in options), width(note)) + 6, cols)
-    tall = len(options) + (4 if note else 3)
+    tall = len(options) + (3 if note else 2)
     win = curses.newwin(tall, wide, max((rows - tall) // 2, 0), max((cols - wide) // 2, 0))
     win.keypad(True)
     pick = 0
     while True:
         win.erase()
         win.box()
-        _put(win, 0, 2, f" {title} ", wide - 4, curses.A_BOLD)
+        _put(win, 0, 2, f" {title} ", wide - 4, curses.A_BOLD, pad=False)
         for i, option in enumerate(options):
             _put(win, 1 + i, 2, f"{'▸' if i == pick else ' '} {option}", wide - 4, curses.A_REVERSE if i == pick else 0)
         if note:
             _put(win, len(options) + 1, 2, note, wide - 4, curses.A_DIM)
-        _put(win, tall - 1, 2, " Enter 確定  Esc 取消 ", wide - 4)
+        _put(win, tall - 1, 2, " Enter 確定  Esc 取消 ", wide - 4, pad=False)
         win.refresh()
         key = _key(win)
         if key in ("UP", "k"):
@@ -336,9 +351,9 @@ def ask_text(screen, title: str, text: str) -> str | None:
     while True:
         win.erase()
         win.box()
-        _put(win, 0, 2, f" {title} ", wide - 4, curses.A_BOLD)
+        _put(win, 0, 2, f" {title} ", wide - 4, curses.A_BOLD, pad=False)
         _put(win, 1, 2, text[-(wide - 6):] + "_", wide - 4)
-        _put(win, 2, 2, " Enter 確定  Esc 取消 ", wide - 4)
+        _put(win, 2, 2, " Enter 確定  Esc 取消 ", wide - 4, pad=False)
         win.refresh()
         key = _key(win)
         if key == "\n":
@@ -387,7 +402,7 @@ def screen_loop(screen, state: State, previews, message: str):
         if action in ("quit", "import", "edit"):
             return action, rows, None, None
         if action == "delete":
-            if choose(screen, "移到 Drive 垃圾桶？", ["確定", "取消"], f"{rows[0].key}「{rows[0].cells[-1]}」") == 0:
+            if choose(screen, "移到 Drive 垃圾桶？", ["取消", "確定"], f"{rows[0].key}「{rows[0].cells[-1]}」") == 1:
                 return action, rows, None, None
             continue
         if action == "continue":
@@ -405,6 +420,7 @@ def screen_loop(screen, state: State, previews, message: str):
 def main(paths: store.Paths) -> int:
     from agora import cli       # the command mode does the work; imported here to avoid a cycle
     locale.setlocale(locale.LC_ALL, "")         # or curses prints CJK as garbage (review T3)
+    os.environ.setdefault("ESCDELAY", "25")     # Esc closes a window at once, not after a second
     agents = [cli.load_agent(name) for name in cli.AGENTS]
     print("[agora] 同步 Drive、列出這台機器上的 session…（離線時用本機的資料）")
     index = store.sync(paths, throttle=True)

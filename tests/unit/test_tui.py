@@ -160,3 +160,10 @@ def test_short_ids_are_the_random_part_and_control_characters_stay_inert():  # r
     _, index = _index((_hdr("01M3XB78461N9TCC4DB84PKF2V", "一"), "## user\nx\n"))
     assert tui.agora_rows(index, [])[0].cells[0] == "4DB84PKF2V"[-8:]
     assert tui.clip("a\x1b[31mb", 6) == "a·[31m"
+
+
+def test_columns_line_up_by_display_width():
+    rows = [tui.Row("a", ["ses_1", "claude", "/tmp/p", "標題"], ""),
+            tui.Row("b", ["ses_22", "opencode", "/tmp/其他", "另一個"], "")]
+    first, second = tui.aligned(rows)
+    assert tui.width(first.split("標題")[0]) == tui.width(second.split("另一個")[0])
