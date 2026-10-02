@@ -716,3 +716,12 @@ def test_adapter_surface():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+def test_odd_lines_do_not_break_listing_or_preview(claude_env):  # review U1
+    odd = "cccccccc-3333-4333-8333-333333333333"
+    (claude_env["proj"] / f"{odd}.jsonl").write_text(
+        '{"type":"user","cwd":"bad\\x escape","message":{"content":"hi"}}\n["type","user"]\n', encoding="utf-8")
+    listed = C.ADAPTER.list_sessions()                       # no exception; the odd file is just left out
+    assert all(s.session_id != odd for s in listed)
+    assert C.ADAPTER.last_message(odd) is None

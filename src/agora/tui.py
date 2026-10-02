@@ -14,6 +14,7 @@ import curses
 import io
 import locale
 import os
+import sys
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,7 +35,8 @@ KEYS = {
 # --- text that fits the screen (CJK characters take two columns) ---------------
 
 def width(text: str) -> int:
-    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
+    return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in "WF" else 1
+               for c in text)
 
 
 def clip(text: str, cols: int) -> str:
@@ -118,7 +120,12 @@ def import_rows(index: store.Index, agents: list, paths: store.Paths | None = No
             pass
     found = []
     for agent in agents:
-        for s in agent.list_sessions():
+        try:
+            listed = agent.list_sessions()
+        except Exception as e:   # one adapter failing leaves the other's list (review U1)
+            print(f"[agora] {agent.name} 的 session 清單讀不到：{e}", file=sys.stderr)
+            listed = []
+        for s in listed:
             key = f"{agent.name}:{s.session_id}"
             if key in skip or (own and (s.dir or "").startswith(own)) or index.by_source(agent.name, s.session_id):
                 continue
@@ -441,6 +448,8 @@ def main(paths: store.Paths) -> int:
             action, rows, agent, workdir = curses.wrapper(screen_loop, state, previews, message)
         if action == "quit":
             return 0
+        if noise.getvalue().strip():             # warnings from under curses, shown now (review U8)
+            print(noise.getvalue().strip(), file=sys.stderr)
         codes = [cli.main(argv) for argv in argv_for(action, rows, agent, workdir)]   # one failing goes on (T10)
         try:
             input("\n按 Enter 回到選單…")

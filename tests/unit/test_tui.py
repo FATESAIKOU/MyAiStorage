@@ -167,3 +167,13 @@ def test_columns_line_up_by_display_width():
             tui.Row("b", ["ses_22", "opencode", "/tmp/其他", "另一個"], "")]
     first, second = tui.aligned(rows)
     assert tui.width(first.split("標題")[0]) == tui.width(second.split("另一個")[0])
+
+
+def test_a_failing_adapter_leaves_the_others_list(capsys):  # review U1
+    _, index = _index()
+
+    class Broken(FakeAgent):
+        def list_sessions(self):
+            raise ValueError("odd file")
+    rows = tui.import_rows(index, [Broken("claude", []), FakeAgent("opencode", [Listed("ses_ok", None, "好", None)])])
+    assert [r.key for r in rows] == ["opencode:ses_ok"] and "claude 的 session 清單讀不到" in capsys.readouterr().err

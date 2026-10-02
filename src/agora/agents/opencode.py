@@ -139,7 +139,7 @@ def _open_readonly(path: Path) -> sqlite3.Connection | None:
     if not path.is_file():
         return None
     try:
-        return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        return sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)   # as_uri escapes ? # % (U2)
     except sqlite3.Error:
         return None
 

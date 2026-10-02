@@ -88,7 +88,7 @@ def _peek_session(path: Path) -> tuple[str | None, str | None, bool]:
                         title, has_text = text[:TITLE_MAX], True
                 elif kind.group(1) == "assistant":
                     has_text = has_text or bool(_line_text(o))
-    except OSError:
+    except (OSError, ValueError, TypeError, AttributeError):   # one odd file must not break the list (review U1)
         return None, None, False
     return title, directory, has_text
 
@@ -498,7 +498,7 @@ class ClaudeAgent:
                 o = json.loads(line)
             except ValueError:
                 continue
-            if o.get("type") not in ("user", "assistant") or _is_noise(o):
+            if not isinstance(o, dict) or o.get("type") not in ("user", "assistant") or _is_noise(o):
                 continue
             text = _line_text(o)
             if text:
