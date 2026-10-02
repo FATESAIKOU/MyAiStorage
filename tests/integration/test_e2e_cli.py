@@ -1,5 +1,5 @@
 """End to end through agora.cli.main, design v4 grammar:
-import -> search -> show -> continue (native) -> merge -> continue (injected)
+import -> search -> show -> continue (native) -> merge -> continue (converted)
 -> edit -> delete, with real Drive (agora-test/) and real claude.
 
 Continue spawns interactive claude, so AGORA_CLAUDE_CMD points at a sh
@@ -208,8 +208,8 @@ def test_import_search_show_continue_merge_continue_edit_delete(e2e):
     uuid.UUID(uuid2)
     created["uuids"].append(uuid2)
 
-    # 4. merge with the user's comma form, then continue off the merge: must
-    # inject the reading version (wrapper receives --session-id, not --resume).
+    # 4. merge with the user's comma form, then continue off the merge: the
+    # parents' raws are converted into one Claude jsonl and resumed (design v5).
     out = run_main(e2e, "merge", "session", f"{id1},", id2)  # E2: 'id1,' 'id2'
     idm = out.split()[0]
     assert idm.startswith("agora:")
@@ -225,6 +225,8 @@ def test_import_search_show_continue_merge_continue_edit_delete(e2e):
     uuid3 = h.agora_of(hdr3)["source"]["session_id"]
     assert uuid3 not in (uuid1, uuid2)
     created["uuids"].append(uuid3)
+    loaded = run_main(e2e, "show", "session", id3, "--raw")
+    assert cli.CONVERTED_NOTE in loaded and f"（以下來自 {id1}" in loaded
 
     # 5. edit the merge's title; same id, new title, raw untouched.
     out = run_main(e2e, "edit", "session", idm, "--header", "title=合併後改名")
@@ -242,11 +244,10 @@ def test_import_search_show_continue_merge_continue_edit_delete(e2e):
     created["ulids"].remove(id3.split(":", 1)[1])   # already gone from Drive
     created["printed"].remove(id3)                  # so teardown does not re-purge it
 
-    # The wrapper saw one native launch and one injected launch, in order
+    # Every continue is a --resume now, the merge one included
     # (--version probes also land in the log; only launches count).
     launches = [json.loads(line)
                 for line in (e2e["fake_home"] / "e2e-args.log").read_text().splitlines()
                 if "--resume" in line or "--session-id" in line]
     assert len(launches) == 2
-    assert "--resume" in launches[0] and "--session-id" not in launches[0]
-    assert "--session-id" in launches[1] and "--resume" not in launches[1]
+    assert all("--resume" in argv and "--session-id" not in argv for argv in launches)

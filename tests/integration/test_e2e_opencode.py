@@ -1,5 +1,5 @@
 """End to end through agora.cli.main with opencode: import -> search -> continue
-(native) -> continue (cross agent, reading injected), against real Drive
+(native) -> continue (cross agent, converted), against real Drive
 (agora-test/), real opencode and real claude.
 
 Mirrors tests/integration/test_e2e_cli.py (which does the same with claude):
@@ -334,8 +334,8 @@ def test_import_search_continue_native_then_cross_agent(e2e):
     assert len(grown["messages"]) >= source_before + 2
     assert grown["info"]["directory"].endswith("p_專案.v2")
 
-    # 4. cross agent: the same session continued by claude, reading version in.
-    #    No raw re-import, so the claude side must be an injected launch.
+    # 4. cross agent: the same session continued by claude. The opencode raw is
+    #    converted into a Claude jsonl and resumed (design v5).
     out = run_main(e2e, "continue", "session", id1, "--agent", "claude",
                    "--dir", str(proj))
     id3 = out.split()[0]
@@ -348,10 +348,11 @@ def test_import_search_continue_native_then_cross_agent(e2e):
     assert hdr3["generated"]["by"].startswith("claude-code/")
     uuid3 = hdr3["agora"]["source"]["session_id"]
     uuid.UUID(uuid3)
-    assert uuid3 in {json.loads(l)[json.loads(l).index("--session-id") + 1]
+    assert uuid3 in {json.loads(l)[json.loads(l).index("--resume") + 1]
                      for l in (e2e["fake_home"] / "e2e-args.log").read_text().splitlines()
-                     if "--session-id" in json.loads(l)}, \
+                     if "--resume" in json.loads(l)}, \
         "wrapper 沒有記到這個 uuid，teardown 會漏掉它的 jsonl"
+    assert cli.CONVERTED_NOTE in run_main(e2e, "show", "session", id3, "--raw")
 
     # 5. what each agent was asked to do, from the wrappers' logs.
     oc_log = [json.loads(line) for line in
@@ -362,4 +363,4 @@ def test_import_search_continue_native_then_cross_agent(e2e):
     cl_launches = [json.loads(line) for line in
                    (e2e["fake_home"] / "e2e-args.log").read_text().splitlines()
                    if "--resume" in line or "--session-id" in line]
-    assert len(cl_launches) == 1 and "--session-id" in cl_launches[0]
+    assert len(cl_launches) == 1 and "--resume" in cl_launches[0]
