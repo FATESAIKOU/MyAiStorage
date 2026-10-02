@@ -7,7 +7,7 @@
 | 編號 | 標題 | 狀態 | 負責 | 備註 |
 |---|---|---|---|---|
 | T2 | 互動模式：多選、全選、進度、中斷、按鍵整理 → change [`tui-batch-actions`](../../openspec/changes/tui-batch-actions/) | 待歸檔：功能、4.1b、T2-final 的 W1～W3／S3 都修完；PM 在 pane 用假資料試過（`T2-pm-run.md`，全部的按鍵路徑都正常，Q1～Q4 小修正排成 4.2b）；review 確認修正中（→ `docs/review/T2-archive.md`） | impl1 | review T2-sec1～3 的意見都已修 |
-| T1 | 指令模式：pull／push、批次動作的進度與續傳 → change [`command-batch-actions`](../../openspec/changes/command-batch-actions/) | 待歸檔：review T1-archive 沒有 High，D3～D7 文字已改（2d37ba2）；PM 用假資料實跑第 1～6 節都過（`T1-pm-run.md`）；P2～P4 小修正（4.2d）impl2 做中；P1 等使用者決定（不擋歸檔） | impl1、impl2 | review Q1～Q12 已併入 |
+| T1 | 指令模式：pull／push、批次動作的進度與續傳 → change [`command-batch-actions`](../../openspec/changes/archive/2026-10-03-command-batch-actions/)（已歸檔，規格在 `openspec/specs/batch-commands`、`session-sync`） | **完成（10-03 歸檔）**，等本人驗收（1-5）；P1 與行數額度等使用者決定 | impl1、impl2 | review T1-archive、T1-4.2d、final-checks 都沒有 High；PM 實跑 `T1-pm-run.md` |
 | T0 | e2e 整合測試改成「continue 寫回原本的 Session」 | 完成 | impl1（3011d15）、impl2（745e5e8） | 兩邊都實跑過整合測試 |
 
 ## 2026-10-03 夜間的順序（使用者睡覺時；使用者說回來前不要停）
@@ -18,7 +18,7 @@
 |---|---|---|---|
 | 1 | T1 `command-batch-actions` 的 tasks 1、2、3 | impl2（1）、impl1（2、3） | 完成（F1 回歸已修、去重複已做） |
 | 2 | T1 tasks 4.1 文件、4.2 整合測試實跑、4.3 review 審程式 | 隊員寫文件與跑測試，review 審，PM 看結果 | 完成（review T1-archive、PM 實跑）；剩 4.2d |
-| 3 | T1 歸檔（`openspec archive`） | PM | 等 2 |
+| 3 | T1 歸檔（`openspec archive`） | PM | 完成（10-03） |
 | 4 | T2 轉成 change（需求已定，見 T2-tui-batch.md），review 看 specs | PM 寫、review 看 | 完成（提前做，和 T1 收尾並行） |
 | 5 | T2 實作與測試 | 隊員 | 完成，剩 T2-final 的修正 |
 | 6 | T2 PM 用假資料試、review 審、歸檔 | PM、review | PM 試過、review 審完；剩 4.2b 與修正確認 |
