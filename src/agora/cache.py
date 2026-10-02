@@ -195,6 +195,8 @@ def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
     """One `agora:` id from Drive, into the mirror and the index."""
     if remote is None or ulid not in remote:
         if not not_exist_delete:
+            if not (paths.mirror / ulid).exists():
+                raise store.StoreError("本機和雲端都沒有這個 Session")   # a typo, not a deletion
             _line(f"{ulid} 雲端沒有，本機的不動")
             return
         if (paths.outbox / ulid).is_dir():
@@ -259,6 +261,8 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
                 store.push_one(drive, paths.outbox / ulid)
             elif listing is None or ulid not in listing:
                 if not not_exist_upload:
+                    if not (paths.mirror / ulid).exists():
+                        raise store.StoreError("本機和雲端都沒有這個 Session")
                     _line(f"{ulid} 雲端沒有，沒有傳")
                     continue
                 _push_mirrored(paths, drive, ulid, need_raw=True)
