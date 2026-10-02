@@ -66,6 +66,18 @@ agora pull session claude:0f1e…-uuid              # 把那個 session 的全�
 # 把給的 agora Session 寫回 Drive：只傳 session.md 與它標頭指到的那一個原始檔
 agora push session agora:01K6… agora:01K7…
 
+# 雲端沒有的 Session（被另一台機器刪掉的）：本機的副本與索引都留著，標成「雲端沒有」，
+# 同步**不會**自己清掉——要不要刪、要不要傳回去，是你的決定，要明確說。
+agora search session --filter cloud=no        # 只列出雲端沒有的（每行最後標「(雲端沒有)」）
+agora search session --filter cloud=yes       # 列出雲端還有的
+agora pull session agora:01K6… --not-exist-delete   # 雲端沒有 → 刪掉本機這份
+agora push session agora:01K6… --not-exist-upload   # 雲端沒有 → 把它傳回去（撤銷刪除）
+# 兩個 flag 都不加時只印一行提醒、不動。還在 outbox（未上傳）或正在接續的不算「雲端沒有」，
+# 也不會被 --not-exist-delete 刪掉。continue／edit 遇到雲端沒有的會拒絕（exit 1），
+# delete 雲端沒有的只刪本機這份。對 agent 的 id，--not-exist-delete 是「agent 那邊已經沒有了，
+# 就刪掉它的全文快取」；對 agora 的 id，Drive 上沒有 sessions/（資料夾 id 或 token 的問題）
+# 時會拒絕那一個，不會當成刪除。
+
 # 看標頭＋閱讀版／原始匯出
 agora show session agora:01K6…
 agora show session agora:01K6… --raw

@@ -7,6 +7,7 @@ cache/state pair on the same fake remote. Mirrors test_store.py conventions.
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import sys
 from pathlib import Path
@@ -217,10 +218,33 @@ def test_a_session_in_the_outbox_is_not_marked(remote, monkeypatch, capsys):  # 
     assert ulid in store.outbox_ulids(paths)               # and it really is still staged
 
 
+def test_a_session_being_continued_is_not_marked(remote):
+    """Spec「標記：**不在接續中的**才標」: a continue that is *running* right now is not
+    a delete on another machine. G1 is what makes this reachable - a leftover record
+    no longer blocks the mark, a held lock still does."""
+    paths = store.Paths.from_env()
+    ulid = _save(paths, _header())
+    assert store.sync(paths).search(T("CSV"))
+    import shutil
+    shutil.rmtree(remote / "agora" / "sessions" / ulid)
+    paths.pending.mkdir(parents=True, exist_ok=True)
+    lock = open(paths.pending / f"{ulid}.json", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)              # an agent is working on it
+
+    index = store.sync(paths)
+    assert index.missing_in_cloud() == []         # not marked while it is in flight
+    assert index.header(ulid) is not None
+
+    lock.close()                                  # the run ends (or gives up)
+    assert store.sync(paths).missing_in_cloud() == [ulid]
+
+
 def test_a_staged_session_the_index_cannot_read_is_not_marked_either(remote, monkeypatch, capsys):
-    """F6/G4: here the exclusion in `sync` is the *only* thing protecting the session -
-    `_index_outbox` cannot index a broken session.md, so nothing clears the marker
-    afterwards. Without the exclusion this one is marked as deleted on Drive."""
+    """F6/G4, with the truth spelled out (review H2): for a session we *can* index, the
+    exclusion is a second layer - `_index_outbox` runs after the marking and `Index.put`
+    drops the marker again. This test is not that case: a broken session.md is
+    quarantined by `push_outbox` before anything is marked, so this one was never
+    markable. Kept as a second observation of the rule, not as a mutation guard."""
     paths = store.Paths.from_env()
     _save(paths, _header("先讓 Drive 上有 sessions/"))
     capsys.readouterr()

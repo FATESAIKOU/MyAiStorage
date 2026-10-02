@@ -631,6 +631,31 @@ def test_delete_refuses_a_session_with_children(env, capsys):
     assert code == 1 and "子 Session" in err
 
 
+def test_a_session_the_cloud_lost_is_not_a_child_that_blocks_its_parent(env, capsys):
+    """Spec「其他指令遇到雲端沒有的 Session」: it does not count as somebody's child, so
+    it must not hold up a delete here, and must not make import think this branched."""
+    _, parent, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, child, _ = run(capsys, "import", "session", "--external-session-id", "ses_b",
+                      "--agent", "opencode")
+    _, merge, _ = run(capsys, "merge", "session", parent, child, "--agent", "opencode")
+    ulid = _lose_it_on_drive(capsys, merge)          # the merge is a child of parent, and Drive lost it
+
+    code, _, err = run(capsys, "delete", "session", parent, "--yes")
+    assert code == 0, err                        # not blocked by a child Drive dropped
+    index = store.Index(store.Paths.from_env())
+    assert index.header(ulid) is not None         # the lost child is still here, marked
+    assert index.missing_in_cloud() == [ulid]
+
+
+def _lose_it_on_drive(capsys, agora_id) -> str:
+    """Another machine deleted this one, and this machine synced that."""
+    ulid = agora_id.split(":")[1]
+    shutil.rmtree(Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid)
+    assert store.sync(store.Paths.from_env()).missing_in_cloud() == [ulid]
+    return ulid
+
+
 def test_edit_with_header_keeps_raw_and_system_fields(env, capsys):
     _, sid, _ = _import(capsys)
     paths = store.Paths.from_env()
@@ -1034,21 +1059,23 @@ def test_delete_goes_through_when_the_pending_record_is_a_leftover(env, capsys):
 
 
 def test_editing_one_the_editor_kept_open_while_it_vanished(env, capsys, monkeypatch):
-    """F8: $EDITOR can be open for an hour; Drive is asked again before saving."""
+    """F8: $EDITOR can be open for an hour. The session is still on Drive when edit
+    starts, and gone by the time it is saved - only the second check sees that (H3)."""
     _, a, _ = _import(capsys)
     ulid = a.split(":")[1]
-    store.fetch_raw(store.Paths.from_env(), store.Drive(store.Paths.from_env()), ulid,
-                    store.Index(store.Paths.from_env()).header(ulid))
     import shutil
     from pathlib import Path as P
-    shutil.rmtree(P(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid)
+    remote = P(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid
+    assert remote.is_dir()
 
     def editor(old):                       # the delete happens while it is open
+        shutil.rmtree(remote)
         return {**old, "title": "改好了"}
 
     monkeypatch.setattr(cli, "_edit_in_editor", editor)
     code, _, err = run(capsys, "edit", "session", a)
     assert code == 1 and "雲端沒有" in err
+    assert not remote.exists()
 
 
 def test_continue_and_edit_survive_a_drive_without_a_sessions_folder(env, capsys, monkeypatch):
@@ -1065,6 +1092,33 @@ def test_continue_and_edit_survive_a_drive_without_a_sessions_folder(env, capsys
         code, _, err = run(capsys, *argv)
         assert code in (0, 1, 2), (argv, code, err)
         assert "TypeError" not in err and "非預期的錯誤" not in err, argv
+
+
+def test_an_interrupted_continue_finished_offline_still_keeps_the_work(env, capsys, monkeypatch):
+    """H1: the continue was interrupted, another machine deleted X, a full sync marked
+    it - and now we are offline. `_lost_in_cloud` cannot answer, so the marker is the
+    only thing stopping X from being written back (and revived)."""
+    _, parent, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = parent.split(":")[1]
+    env.sessions["ses_x"] = ["繼續的問題", "接著做完了"]
+    record = {"agora_id": parent, "agent": "opencode", "agent_session_id": "ses_x",
+              "dir": "/tmp", "before_count": 1, "parent": {"id": parent, "raw_md5": None},
+              "title": "接著做的"}
+    _, lock = cli._write_pending(paths, record)      # agora and the agent both died
+    lock.close()
+    shutil.rmtree(Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid)
+
+    index = store.sync(paths)                        # a whole listing: X is marked now
+    assert index.missing_in_cloud() == [ulid]         # G1: the leftover record does not block it
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "lsjson")  # and now Drive cannot be asked
+
+    _, _, err = run(capsys, "search", "session")
+    assert "在你接續的時候被別台機器刪掉了" in err
+    assert not (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid).exists(), \
+        "X must not come back to Drive"
+    made = [hdr for _, hdr, _ in store.sync(paths, throttle=False).search([]) if hdr["id"] != parent]
+    assert len(made) == 1 and [p["id"] for p in made[0]["agora"]["parents"]] == [parent]
 
 
 def test_a_continue_whose_session_vanished_keeps_the_work_as_its_own_session(env, capsys):

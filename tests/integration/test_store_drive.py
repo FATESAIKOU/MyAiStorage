@@ -88,13 +88,23 @@ def test_reimport_swaps_raw_and_other_machine_follows(two_machines):
     assert store.fetch_raw(b, store.Drive(b), ulid, stale) == b'{"v": 2}'   # N8 refresh
 
 
-def test_deleted_on_drive_disappears_from_other_mirror(two_machines):
+def test_deleted_on_drive_stays_here_marked_not_gone(two_machines):
+    """T1 R6 / Q1: another machine's delete is not quietly copied here, and not quietly
+    undone either. The session stays in this machine's mirror and index, marked
+    「雲端沒有」; only `pull --not-exist-delete` takes the local copy away (covered in
+    test_pull_push.py). This test used to assert the opposite - that sync drops it."""
     a, b, created = two_machines
     folder = store.stage(a, _header("整合測試：刪除"), "## user\n要被刪掉\n", b"{}")
     ulid = folder.name
+    created.append(ulid)
     store.push_one(store.Drive(a), folder)
     assert store.sync(b).header(ulid)
     drive = store.Drive(a)
     subprocess.run(["rclone", "--config", str(REAL_CONF), "--drive-root-folder-id", drive.folder_id(),
                     "purge", f"gdrive:sessions/{ulid}"], check=True, capture_output=True)
-    assert store.sync(b).header(ulid) is None
+
+    index = store.sync(b)
+    assert index.header(ulid) is not None, "the local copy stays"
+    assert (b.mirror / ulid / "session.md").is_file()
+    assert index.missing_in_cloud() == [ulid], "and it is marked as not in the cloud"
+    assert [hit[0] for hit in index.search(T("要被刪掉"))] == [ulid], "still searchable"
