@@ -1479,3 +1479,45 @@ def test_each_step_of_the_escalation_gets_its_own_time(group_calls, monkeypatch)
             alive[4242] = False
             proc.done.set()
     _run(go)
+
+
+def test_marking_all_leaves_the_rows_the_filter_hides_alone():   # review W2
+    """The direction the other test did not cover: `a` marking everything must not
+    overwrite a mark made on a row that is filtered out."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            second = next(r for r in app.shown() if r.cells[1] == "乙")
+            app.marked = {second.key}
+            await _filter_to(pilot, "甲")
+            await _wait(lambda: len(app.shown()) == 1, pilot)
+            await pilot.press("a")                       # mark what is on screen
+            await pilot.pause()
+            assert second.key in app.marked               # 乙 was already marked, still is
+            assert app.marked == {second.key, next(r.key for r in app.rows["agora"]
+                                                   if r.cells[1] == "甲")}
+            await pilot.press("slash", "backspace", "enter")     # and the filter off
+            await _wait(lambda: len(app.shown()) == 3, pilot)
+            assert app.marked == {second.key, next(r.key for r in app.rows["agora"]
+                                                   if r.cells[1] == "甲")}
+    _run(go)
+
+
+def test_enter_on_the_confirmation_window_keeps_it_cancelled():   # review W2
+    """It opens on 取消, so Enter straight away is the safe one - the distance
+    between "one Enter too many" and deleting a local copy."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("p")
+            await pilot.pause()
+            assert isinstance(app.screen, tui.Confirm)
+            assert app.screen.query_one("OptionList").highlighted == 0
+            await pilot.press("enter")                   # still on 取消
+            await pilot.pause()
+            assert not app._last_spawned
+    _run(go)
