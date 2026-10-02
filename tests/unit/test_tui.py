@@ -1616,6 +1616,59 @@ def test_enter_selects_rather_than_confirms():   # Q2
     _run(go)
 
 
+def test_a_window_with_nothing_to_choose_says_enter_submits():   # E3
+    """The working-directory prompt has no options to pick between, so 「選擇」 is
+    simply wrong there - Enter sends what was typed."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(tui.AskText("工作目錄", "/tmp"))
+            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            await pilot.pause()                        # let it compose
+            assert isinstance(app.screen, tui.AskText), app.screen
+            hints = [str(w.render()) for w in app.screen.query("Static")]
+            assert any("Enter 確定" in h for h in hints), hints
+            assert not any("Enter 選擇" in h for h in hints), hints
+    _run(go)
+
+
+def test_the_bar_really_reaches_n_n_before_the_window_goes():   # E2
+    """A clean exit fills the bar - on screen, before the window closes.
+
+    `tick` redraws every 0.1s and the window used to dismiss the instant the process
+    ended, so `N/N` was in the code and nowhere on the screen. Recording every value
+    the bar is given is the only way to see it: a test that looks at the bar after
+    the window closed sees nothing at all.
+    """
+    app = _marked_app(None)
+    proc = FakeProc(lines=["[agora] 刪除 1/3", "[agora] 刪除 2/3", "[agora] 刪除 3/3"],
+                    code=0, hang=True)
+    app.spawn, _ = _spawn(proc)
+    seen: list[tuple] = []
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            window, bar = app.screen, app.screen.query_one("#bar")
+            real_update = bar.update
+
+            def recording(**kw):
+                seen.append((kw.get("progress"), kw.get("total"), app.screen is window))
+                return real_update(**kw)
+            bar.update = recording
+            proc.done.set()                            # and now it ends cleanly
+            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+    _run(go)
+    full = [row for row in seen if row[:2] == (3, 3)]
+    assert full, f"the bar never reached full: {seen}"
+    assert full[-1][2], f"it filled only after the window closed: {seen}"
+
+
 def test_the_bar_counts_what_is_finished_and_fills_only_on_a_clean_exit():   # Q3
     """`k/N` says the k-th has started, so k-1 are done; N/N means the command
     said it finished - not that the last one had begun."""

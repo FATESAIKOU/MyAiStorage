@@ -290,7 +290,8 @@ class AskText(ModalScreen):
         with Vertical(classes="box"):
             yield Static(self.title_, classes="box-title")
             yield Input(self.text)
-            yield Static("Enter 選擇   Esc 取消", classes="hint")
+            # Nothing to choose between here: Enter submits what was typed (review E3)
+            yield Static("Enter 確定   Esc 取消", classes="hint")
 
     @on(Input.Submitted)
     def done(self, event: Input.Submitted) -> None:
@@ -354,7 +355,23 @@ class Run(ModalScreen):
             code, self.lines = 2, self.lines + [f"讀不到輸出：{e}"]
         # The app may already be gone (ctrl+q closed it); that is not our problem.
         with contextlib.suppress(Exception):
-            self.app.call_from_thread(self.dismiss, (code, "\n".join(self.lines)))
+            self.app.call_from_thread(self.finish, code)
+
+    def finish(self, code: int) -> None:
+        """Close the window - but only after a clean run has shown its full bar.
+
+        `tick` redraws every 0.1s, so dismissing the moment the process ended usually
+        closed the window before the last bar was ever drawn: `N/N` existed in the
+        code and nowhere on the screen (review E2).
+        """
+        if self.done:
+            step = next((m for m in map(self.PROGRESS.match, reversed(self.lines))
+                         if m and 1 <= int(m.group(1)) <= int(m.group(2))), None)
+            with contextlib.suppress(Exception):
+                if step:
+                    self.query_one("#bar", ProgressBar).update(
+                        total=int(step.group(2)), progress=int(step.group(2)))
+        self.dismiss((code, "\n".join(self.lines)))
 
     def tick(self) -> None:
         step = next((m for m in map(self.PROGRESS.match, reversed(self.lines))
