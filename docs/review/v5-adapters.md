@@ -104,3 +104,31 @@
 | `nohup .venv/bin/python -m pytest -q tests/unit` | 200 passed |
 
 沒有跑整合測試，沒有碰 Drive，沒有叫真的 agent，也沒有讀任何真實的 Session。
+
+---
+
+## 精簡之後的行為確認（`9ba343b`、`d0346e3`）
+
+依照指示，沒有跑整合測試，也沒有碰 Drive。**結論：行為沒有變。** 單元測試 **201 passed**；程式碼行 **1,591 → 1,553**（cli 418、store 387、claude 270、opencode 256、header 169、base 53）。
+
+我把精簡**之前**（`6224628`）的 `opencode.py`／`claude.py` 存到 scratchpad，和現在的版本一起載入同一個 Python，用相同的輸入比對輸出（比完之後 scratchpad 的檔案已經刪掉）：
+
+| 項目 | 結果 |
+|---|---|
+| opencode `turns()`（`oc-basic.json`） | 新舊**完全相同** |
+| opencode 的 `native()` 結果經過 `reidentify` 之後（用同一個 session id、固定 `time.time()`，輸入是一組 4 個 turn，包含總說明、來源標示、`[tool]` 行和 `NO_REPLY`） | 每一則訊息的角色、id、`parentID`，以及每一個 part 的 id 和文字，新舊**完全相同**；`info` 除了 `id` 以外也一樣（title 都是 `NATIVE_TITLE`） |
+| opencode `native()` 的**佔位 id** | `ses_agora_pending0`、`msg_agora<n>`、`prt_agora<n>-<k>`，都**保留了** `ses`／`msg`／`prt` 的前綴（不然 import 會直接拒絕，這是 trap 3），而且在同一份 payload 裡不會重複。`start_native` 會用 `reidentify` 全部換成正式的 id：`parentID` 透過 `message_map` 對應，part 透過 `part_map` 對應，`sessionID` 統一改成新的 session id。`cli` 裡只有 `start_native` 會用到 `native()` 的輸出 |
+| claude `_exported`（`cl-basic.jsonl`） | `dir`／`model`／`created_at`／`agent_version`／`message_count`／`title`，新舊**完全相同**。`next(…)` 的寫法和原本的 `_session_dir`（第一個字串型態的 `cwd`）、`_last_model`（從後面往前找，第一個帶有非空 `model` 的 assistant）語意一樣 |
+| claude `config_dir()` | 優先順序不變（`AGORA_CLAUDE_HOME/.claude` > `CLAUDE_CONFIG_DIR` > `~/.claude`） |
+| header `check_ref` | 切割的規則和錯誤的情況都和原本的 `parse_ref` 相同，只是不再回傳 `Ref`；`src` 和測試裡已經沒有任何地方用到 `parse_ref` |
+| store `Paths` 的 property 改成 lambda | 寫成 `mirror = property(lambda s: …)`，沒有型別註記，所以不會變成 dataclass 的欄位，`Paths(config=…, cache=…, state=…)` 照樣能用 |
+| store `_md5`、`_put_file` | 純粹是抽出來共用，`remember`／`list_sessions`／`list_one` 的行為不變 |
+
+**`rebuild_from_mirror` 現在連 `put` 也包進了 `try`**：`except` 只接 `(h.HeaderError, OSError, UnicodeDecodeError)`，所以實際上新包進去的，只有 `md5_file(md)` 和 `put`。
+
+- `md5_file` 丟出的 `OSError`（例如檔案在讀取途中被刪掉）：以前會讓整個 `search --no-sync` 失敗，現在會跳過那一份。這是**改善**。
+- `put` 寫索引時丟出的 `sqlite3.Error`：它**不是** `OSError` 的子類別，所以**不會被吞掉**，照樣會傳出去，和以前一樣。也就是說，索引寫入失敗不會被悄悄略過，不會出現「重建了，但少了幾筆」卻沒有任何訊息的情況。
+
+剩下的 Q5～Q7（約 6 行）沒有做，都不影響正確性。
+
+跑過的指令：`git show 9ba343b d0346e3 -- src`；把 `6224628` 的兩個轉接器存到 scratchpad，用 importlib 和現在的版本一起載入並比對（之後已經刪掉）；`git grep parse_ref|turns_of|native_of`；`.venv/bin/python -m pytest -q tests/unit`（201 passed）；用 `ast` 計算程式碼行（1,553）。
