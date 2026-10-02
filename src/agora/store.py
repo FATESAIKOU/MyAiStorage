@@ -296,11 +296,19 @@ def push_mirror(drive: Drive, paths: Paths, ulid: str, header: dict) -> None:
     """
     folder = paths.mirror / ulid
     raw = h.agora_of(header).get("raw") or {}
-    if raw.get("file") and (folder / raw["file"]).is_file():
+    uploaded_raw = bool(raw.get("file")) and (folder / raw["file"]).is_file()
+    if uploaded_raw:
         drive.upload(folder / raw["file"], ulid, raw["file"])
     elif raw.get("file"):
         _warn(f"{ulid} 標頭指到的 {raw['file']} 本機沒有，只傳 session.md")
     drive.upload(folder / "session.md", ulid, "session.md")
+    # Drive's own md5 is the only answer that counts (review S2-7): a copyto that
+    # returned zero is not proof that the bytes arrived.
+    remote = drive.list_one(ulid)
+    if remote.get("session.md") != md5_file(folder / "session.md"):
+        raise StoreError(f"{ulid} 的 session.md 在 Drive 上的 md5 不符")
+    if uploaded_raw and remote.get(raw["file"]) != raw.get("md5"):
+        raise StoreError(f"{ulid} 的 raw 在 Drive 上的 md5 不符")
 
 
 def push_outbox(drive: Drive, paths: Paths) -> list[str]:

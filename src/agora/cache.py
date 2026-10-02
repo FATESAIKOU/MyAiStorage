@@ -87,6 +87,16 @@ def _line(message: str) -> None:
     print(f"[agora] {message}", file=sys.stderr)
 
 
+def _unique(ids: list[str]) -> list[str]:
+    """The same id twice is one piece of work and one line of progress (review S2-7)."""
+    seen, out = set(), []
+    for session_id in ids:
+        if session_id not in seen:
+            seen.add(session_id)
+            out.append(session_id)
+    return out
+
+
 def _plan_one(session_id: str, agents: dict) -> tuple[str, str | None, Exception | None]:
     """(kind, id, complaint): parse up front so a bad id is that id's failure only."""
     try:
@@ -148,7 +158,7 @@ def pull(paths: store.Paths, ids: list[str], agents: dict, *,
     index = store.Index(paths)
     # A batch of agent ids needs no Drive at all: asking anyway would make an
     # offline machine fail a pull that has nothing to do with Drive (review S2-3).
-    plan = [_plan_one(session_id, agents) for session_id in ids]
+    plan = [_plan_one(session_id, agents) for session_id in _unique(ids)]
     drive, remote, offline = None, None, None
     if any(kind == "agora" for kind, _, _ in plan):
         try:
@@ -158,7 +168,7 @@ def pull(paths: store.Paths, ids: list[str], agents: dict, *,
             offline = e
     listed: dict[str, dict] = {}
     done = failed = 0
-    for k, (session_id, (kind, bare, complaint)) in enumerate(zip(ids, plan), 1):
+    for k, (session_id, (kind, bare, complaint)) in enumerate(zip(_unique(ids), plan), 1):
         _progress("pull", k, len(plan))
         try:
             if complaint:
@@ -209,6 +219,11 @@ def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
         _line(f"{ulid} 雲端沒有，本機的副本已刪")
         return
     files = remote[ulid]
+    if (paths.outbox / ulid).is_dir():
+        # What is in the outbox is newer than anything on Drive: pulling would put
+        # the older copy in the mirror and the session would go backwards (S2-7).
+        _line(f"{ulid} 還沒上傳，不覆蓋本機這一份")
+        return
     local = paths.mirror / ulid / "session.md"
     if not (local.exists() and store.md5_file(local) == files.get("session.md")):
         drive.download(ulid, "session.md", local)
@@ -235,6 +250,7 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
     that was K1, and it is how another machine's delete gets undone without
     anyone deciding to - so it gets one line and nothing happens (review Q1).
     """
+    wanted = _unique(ids)
     drive = store.Drive(paths)
     staged = store.outbox_ulids(paths)
     left = store.push_outbox(drive, paths)      # staged writes first: those are the same sessions
@@ -246,8 +262,8 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
     except store.StoreError as e:
         listing, offline = None, e            # offline: every id here fails, and says so
     done = failed = 0
-    for k, agora_id in enumerate(ids, 1):
-        _progress("push", k, len(ids))
+    for k, agora_id in enumerate(wanted, 1):
+        _progress("push", k, len(wanted))
         try:
             kind, ulid = _split(agora_id, agents)
             if kind != "agora":
