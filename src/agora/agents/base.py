@@ -42,6 +42,16 @@ class Launch:
     before_count: int = 0           # messages present before the user starts (S9)
 
 
+@dataclass
+class Listed:
+    """One agent session found on this machine, for the interactive mode's import tab."""
+
+    session_id: str
+    dir: str | None
+    title: str | None
+    updated_at: str | None          # RFC 3339 UTC, for sorting newest first
+
+
 class Agent(Protocol):
     name: str                       # "opencode" | "claude"
 
@@ -53,6 +63,12 @@ class Agent(Protocol):
 
     def native(self, turns: Turns) -> bytes:
         """Build this agent's raw from shared turns, so a merged or other-agent session loads natively."""
+
+    def list_sessions(self) -> list[Listed]:
+        """Every session of this agent on this machine, across all projects (design 5.9). Read only."""
+
+    def last_message(self, session_id: str) -> tuple[str, str] | None:
+        """(role, text) of the session's last user or assistant text, as stored; None if there is none."""
 
     def summarize(self, prompt: str, workdir: Path) -> tuple[str, str | None]:
         """Run the agent once headless with no tools allowed; return (text, model).
