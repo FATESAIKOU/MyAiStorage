@@ -141,6 +141,17 @@ def _emit(saved: tuple[str, bool]) -> int:
     return 0 if saved[1] else EXIT_IN_OUTBOX
 
 
+def _sync_for(paths: store.Paths, ids: list[str]) -> store.Index:
+    """A throttled sync, but a full one when any of ids is not known here yet.
+
+    Covers a session another machine just imported, and a deleted cache.
+    """
+    index = store.sync(paths, throttle=True)
+    if any(index.header(_ulid_of(i)) is None for i in ids):
+        index = store.sync(paths)
+    return index
+
+
 def _header_for(index: store.Index, agora_id: str) -> dict:
     hdr = index.header(_ulid_of(agora_id))
     if hdr is None:
@@ -226,7 +237,7 @@ def cmd_merge(args, paths: store.Paths) -> int:
     if len(ids) < 2:
         raise InputError("merge 至少要兩個 Session")
     updates = _updates(args)
-    index = store.sync(paths, throttle=True)
+    index = _sync_for(paths, ids)
     parents, parts, parent_headers = [], [], []
     for agora_id in ids:
         agora_id = f"agora:{_ulid_of(agora_id)}"
@@ -318,7 +329,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
     agent = load_agent(args.agent)
     updates = _updates(args)
     source_id = _the_id(args)
-    index = store.sync(paths, throttle=True)
+    index = _sync_for(paths, [source_id])
     parent = _header_for(index, source_id)
     agora = h.agora_of(parent)
     src = agora.get("source") or {}
@@ -431,7 +442,7 @@ def cmd_delete(args, paths: store.Paths) -> int:
 
 def cmd_edit(args, paths: store.Paths) -> int:
     agora_id = _the_id(args)
-    index = store.sync(paths, throttle=True)
+    index = _sync_for(paths, [agora_id])
     old = _header_for(index, agora_id)
     body = _body_for(paths, agora_id)
     updates = _updates(args)
@@ -471,7 +482,7 @@ def _edit_in_editor(old: dict) -> dict:
 
 def cmd_show(args, paths: store.Paths) -> int:
     agora_id = _the_id(args)
-    index = store.sync(paths, throttle=True)
+    index = _sync_for(paths, [agora_id])
     hdr = _header_for(index, agora_id)
     if args.raw:
         sys.stdout.buffer.write(store.fetch_raw(paths, store.Drive(paths), _ulid_of(agora_id), hdr))

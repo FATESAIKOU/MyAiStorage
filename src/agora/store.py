@@ -516,7 +516,7 @@ def fetch_raw(paths: Paths, drive: Drive, ulid: str, header: dict, *, retry: boo
     """Download a session's raw on demand and verify it against the header."""
     raw = h.agora_of(header).get("raw")
     if not raw:
-        raise StoreError(f"{ulid} 沒有 raw（merge 出來的 Session 只能用閱讀版接續）")
+        raise StoreError(f"{ulid} 沒有 raw：merge 出來的 Session 沒有自己的 raw，請看 agora.parents 裡各個來源的 raw")
     local = paths.mirror / ulid / raw["file"]
     if not local.exists() or md5_file(local) != raw["md5"]:
         try:

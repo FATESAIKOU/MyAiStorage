@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -509,3 +510,12 @@ def test_a_session_merged_twice_is_loaded_once(env, capsys):  # review W3
     run(capsys, "continue", "session", aab, "--agent", "opencode", "--dir", "/tmp")
     loaded = "\n".join(env.sessions[env.launched[-1].agent_session_id])
     assert loaded.count("把 CSV 轉成 Markdown 表格") == 1
+
+
+def test_an_id_not_known_here_skips_the_throttle(env, capsys):
+    """A session another machine imported a minute ago, or a deleted cache, is still found."""
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    shutil.rmtree(paths.cache)                            # last-sync in state stays fresh
+    code, out, _ = run(capsys, "show", "session", a)
+    assert code == 0 and "把 CSV 轉成 Markdown 表格" in out
