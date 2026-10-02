@@ -16,7 +16,7 @@
 
 | 順序 | 項目 | 負責 | 狀態 |
 |---|---|---|---|
-| 1 | T1 `command-batch-actions` 的 tasks 1、2、3 | impl2（1）、impl1（2、3） | 進行中。第 1～3 節與 review 的 S1、S2 修正都完成（tasks.md 打勾）；剩 4.1 文件與 4.2「雲端沒有」整合情境（impl2）、第 3 節的 review（T1-sec3.md）、PM 驗證 |
+| 1 | T1 `command-batch-actions` 的 tasks 1、2、3 | impl2（1）、impl1（2、3） | 進行中。第 1～3 節與 review 的 S1、S2 修正都完成（tasks.md 打勾）；4.1、4.2 完成；第 3 節的 review 修正（M1～M3）帶進一個回歸 F1（High：離線時 continue 會讓別台刪掉的 Session 復活），impl2 修正中；之後是去重複、PM 驗證 |
 | 2 | T1 tasks 4.1 文件、4.2 整合測試實跑、4.3 review 審程式 | 隊員寫文件與跑測試，review 審，PM 看結果 | 等 1 |
 | 3 | T1 歸檔（`openspec archive`） | PM | 等 2 |
 | 4 | T2 轉成 change（需求已定，見 T2-tui-batch.md），review 看 specs | PM 寫、review 看 | 等 3 |
