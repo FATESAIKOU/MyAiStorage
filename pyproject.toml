@@ -3,7 +3,10 @@ name = "agora"
 version = "0.1.0"
 description = "Find, merge and continue coding-agent sessions stored as plain files on Google Drive"
 requires-python = ">=3.12"
-dependencies = ["pyyaml>=6"]
+dependencies = [
+    "jsonschema>=4.26.0",
+    "pyyaml>=6",
+]
 
 [project.scripts]
 agora = "agora.cli:main"

@@ -63,7 +63,8 @@ class FakeAgent:
         return json.dumps({"id": "native", "m": msgs}, ensure_ascii=False).encode()
 
     def summarize(self, prompt, workdir):
-        return "合併要約", "fake-model"
+        return json.dumps({"purpose": "合併要約", "decisions": [], "progress": "進行中",
+                           "open_questions": []}, ensure_ascii=False), "fake-model"
 
     def start_native(self, raw, workdir):
         new = f"ses_n{len(self.sessions)}"
@@ -314,8 +315,7 @@ def test_merge_of_merge(env, capsys):  # U-MRG-02b, N5
     _, n, _ = run(capsys, "merge", "session", m, c, "--agent", "opencode")
     parents = h.agora_of(store.Index(paths()).header(n.split(":")[1]))["parents"]
     assert [p["id"] for p in parents] == [m, c]
-    assert parents[0]["raw_md5"] is None
-    assert parents[1]["raw_md5"] is not None
+    assert all(p["raw_md5"] for p in parents)            # a merge's raw is its sections.json (design v7)
 
 
 def test_merge_missing_id_fails_clean(env, capsys, tmp_path):  # U-MRG-03
@@ -524,8 +524,8 @@ def test_show_raw_lazy_and_merge_message(env, capsys):  # U-SHW-03
     env.sessions["ses_b"] = ["讀取 CSV", "完成"]
     _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
     _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
-    code, _, err = run(capsys, "show", "session", m, "--raw")
-    assert code != 0 and "agora.parents" in err
+    code, out, _ = run(capsys, "show", "session", m, "--raw")
+    assert code == 0 and len(json.loads(out)["sections"]) == 2   # a merge's raw is its sections.json
 
 
 # --- U-SRC -------------------------------------------------------------------------------
