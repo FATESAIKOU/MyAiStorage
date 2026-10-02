@@ -88,7 +88,7 @@
 | D7 | Low | spec「進度」的例子 `[agora] 來源 1/3：…` | 實際的格式是 `[agora] 來源 1/3  agora:…`（兩個空白，沒有冒號）。T2 的進度解析就是依實際的格式寫的 | 例子照實際的格式改 |
 | D8 | Low | tasks 4.2b「S1（`store.mirror_one`，**sync 與 pull 的 G3 只有一份**）」 | `sync` 還是用它自己那一份，沒有呼叫 `mirror_one`（只有 pull 用），所以 G3 的邏輯還是有兩份 | 改正 tasks 的敘述，或者讓 sync 也改用 `mirror_one` |
 | D9 | Low（T2） | `docs/design.md` 5.10 最後一行「互動模式：`r`…、`s`…」 | T2 已經拿掉 `r`、`s`（5.9 在 4262e30 已經對齊了） | 交給 T2 的 4.x 一起改 |
-| D10 | **要使用者決定** | proposal「程式碼行數目標 2,900 行」、tasks 4.3 | HEAD 是 **3,285**（cache 180、cli 735、store 476、tui 692、opencode 538、claude 442、header 169、base 63，算法同 T1-size） | 歸檔之前，請使用者決定要放寬額度，還是接受目前的行數（見 T1-size、adapters-size） |
+| D10 | **要使用者決定** | proposal「程式碼行數目標 2,900 行」、tasks 4.3 | HEAD 是 **3,285**（cache 182、cli 729、store 470、tui 692、opencode 538、claude 442、header 169、base 63，算法同 T1-size） | 歸檔之前，請使用者決定要放寬額度，還是接受目前的行數（見 T1-size、adapters-size） |
 
 ## 之前的 review 還沒處理的（不擋歸檔，但要記下來）
 
