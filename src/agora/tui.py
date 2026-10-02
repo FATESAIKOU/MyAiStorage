@@ -10,6 +10,7 @@ only paints them.
 from __future__ import annotations
 
 import curses
+import locale
 import os
 import unicodedata
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from agora import header as h
 from agora import store
 
 WIDE = 100                       # columns from which the preview goes to the right
+MIN_COLS, MIN_ROWS = 40, 10      # smaller than this, the screen only says so (review T4)
 TABS = ("agora", "import")
 TAB_NAMES = {"agora": "Agora", "import": "未匯入"}
 KEYS = {
@@ -37,6 +39,7 @@ def clip(text: str, cols: int) -> str:
     """text cut and padded to exactly `cols` display columns."""
     out, used = [], 0
     for c in text.replace("\n", " "):
+        c = c if c.isprintable() else "·"        # control characters and escapes stay visible but inert (T12)
         w = width(c)
         if used + w > cols:
             break
@@ -88,20 +91,29 @@ def agora_rows(index: store.Index, filters: list) -> list[Row]:
         source = agora.get("source") or {}
         kind = source.get("agent") or agora.get("relation") or ""
         title = str(hdr.get("title") or "")
-        rows.append(Row(f"agora:{ulid}", [ulid[:8], store.sort_date(hdr)[5:10], kind, title],
+        rows.append(Row(f"agora:{ulid}", [ulid[-8:], store.sort_date(hdr)[5:10], kind, title],   # the random part (T9)
                         f"{ulid} {kind} {title}", kind, source.get("dir")))
     return rows
 
 
-def import_rows(index: store.Index, agents: list) -> list[Row]:
+def import_rows(index: store.Index, agents: list, paths: store.Paths | None = None) -> list[Row]:
+    """Agent sessions not in agora yet, newest first, leaving out the copies agora made itself (review T5)."""
+    skip, own = set(), None
+    if paths is not None:
+        own = str(paths.state)
+        try:
+            skip = set((paths.state / "unsaved-launches").read_text(encoding="utf-8").split())
+        except OSError:
+            pass
     found = []
     for agent in agents:
         for s in agent.list_sessions():
-            if not index.by_source(agent.name, s.session_id):
-                found.append((s.updated_at or "", Row(
-                    f"{agent.name}:{s.session_id}",
-                    [s.session_id[:12], agent.name, _home(s.dir), s.title or ""],
-                    f"{s.session_id} {agent.name} {s.dir or ''} {s.title or ''}", agent.name, s.dir)))
+            key = f"{agent.name}:{s.session_id}"
+            if key in skip or (own and (s.dir or "").startswith(own)) or index.by_source(agent.name, s.session_id):
+                continue
+            found.append((s.updated_at or "", Row(
+                key, [s.session_id[-12:], agent.name, _home(s.dir), s.title or ""],
+                f"{s.session_id} {agent.name} {s.dir or ''} {s.title or ''}", agent.name, s.dir)))
     return [row for _when, row in sorted(found, key=lambda pair: pair[0], reverse=True)]
 
 
@@ -235,7 +247,7 @@ def argv_for(action: str, rows: list[Row], agent: str | None, workdir: str | Non
 
 # --- curses: paint, and ask small questions ------------------------------------
 
-_NAMED = {curses.KEY_UP: "UP", curses.KEY_DOWN: "DOWN", curses.KEY_BACKSPACE: "BACKSPACE",
+_NAMED = {curses.KEY_UP: "UP", curses.KEY_DOWN: "DOWN", curses.KEY_BACKSPACE: "BACKSPACE", curses.KEY_RESIZE: "RESIZE",
           127: "BACKSPACE", 27: "ESC", 10: "\n", 13: "\n", 9: "\t"}
 
 
@@ -256,6 +268,10 @@ def _put(screen, y: int, x: int, text: str, cols: int, attr: int = 0) -> None:
 def paint(screen, state: State, preview: list[str], message: str) -> None:
     rows, cols = screen.getmaxyx()
     screen.erase()
+    if cols < MIN_COLS or rows < MIN_ROWS:
+        _put(screen, 0, 0, f"終端機太小（至少 {MIN_COLS}×{MIN_ROWS}）", cols)
+        screen.refresh()
+        return
     tabs = "  ".join(f"[{TAB_NAMES[t]} {len(state.rows[t])}]" if t == state.tab else f"{TAB_NAMES[t]} {len(state.rows[t])}"
                      for t in TABS)
     flt = f"篩選: {state.filter}{'_' if state.editing else ''}" if state.filter or state.editing else ""
@@ -309,6 +325,48 @@ def choose(screen, title: str, options: list[str], note: str = "") -> int | None
             return None
 
 
+def ask_text(screen, title: str, text: str) -> str | None:
+    """One line of input in a small window (get_wch, so CJK input works); None on Esc."""
+    rows, cols = screen.getmaxyx()
+    wide = min(max(width(title), width(text), 40) + 6, cols)
+    win = curses.newwin(3, wide, max(rows // 2 - 1, 0), max((cols - wide) // 2, 0))
+    win.keypad(True)
+    while True:
+        win.erase()
+        win.box()
+        _put(win, 0, 2, f" {title} ", wide - 4, curses.A_BOLD)
+        _put(win, 1, 2, text[-(wide - 6):] + "_", wide - 4)
+        _put(win, 2, 2, " Enter 確定  Esc 取消 ", wide - 4)
+        win.refresh()
+        key = _key(win)
+        if key == "\n":
+            return text
+        if key == "ESC":
+            return None
+        if key == "BACKSPACE":
+            text = text[:-1]
+        elif len(key) == 1 and key.isprintable():
+            text += key
+
+
+def ask_dir(screen, row: Row) -> str | None:
+    """Where to open the agent: the source's directory when it exists here, and always changeable (review T7)."""
+    known = bool(row.dir and os.path.isdir(row.dir))
+    workdir = row.dir if known else os.getcwd()
+    note = "" if known else "⚠ 來源沒有記錄目錄（或這台機器上沒有），會在目前目錄開"
+    while True:
+        pick = choose(screen, "在哪裡開？", [f"在這裡開：{workdir}", "改目錄…"], note)
+        if pick is None:
+            return None
+        if pick == 0:
+            return workdir
+        typed = ask_text(screen, "工作目錄", workdir)
+        if typed and os.path.isdir(os.path.expanduser(typed)):
+            workdir, note = os.path.expanduser(typed), ""
+        elif typed is not None:
+            note = f"⚠ 找不到這個目錄：{typed}"
+
+
 def screen_loop(screen, state: State, previews, message: str):
     """Run the screen until an action needs the terminal; return (action, rows, agent, workdir)."""
     curses.curs_set(0)
@@ -330,19 +388,25 @@ def screen_loop(screen, state: State, previews, message: str):
             if choose(screen, "移到 Drive 垃圾桶？", ["確定", "取消"], f"{rows[0].key}「{rows[0].cells[-1]}」") == 0:
                 return action, rows, None, None
             continue
-        workdir = rows[0].dir if action == "continue" and rows[0].dir and os.path.isdir(rows[0].dir) else os.getcwd()
-        title = "用哪個 agent 接續？" if action == "continue" else f"合併 {len(rows)} 個：由誰寫要約？"
-        pick = choose(screen, title, ["opencode", "claude"], f"工作目錄：{workdir}" if action == "continue" else "")
+        if action == "continue":
+            pick = choose(screen, "用哪個 agent 接續？", ["opencode", "claude"])
+            workdir = ask_dir(screen, rows[0]) if pick is not None else None
+            if workdir is not None:
+                return action, rows, ("opencode", "claude")[pick], workdir
+            continue
+        pick = choose(screen, f"合併 {len(rows)} 個：由誰寫要約？", ["opencode", "claude"],
+                      "每個來源叫一次 AI；內容會送到那個 agent 的模型供應商")
         if pick is not None:
-            return action, rows, ("opencode", "claude")[pick], workdir
+            return action, rows, ("opencode", "claude")[pick], None
 
 
 def main(paths: store.Paths) -> int:
     from agora import cli       # the command mode does the work; imported here to avoid a cycle
+    locale.setlocale(locale.LC_ALL, "")         # or curses prints CJK as garbage (review T3)
     agents = [cli.load_agent(name) for name in cli.AGENTS]
-    print("[agora] 同步 Drive、列出這台機器上的 session…")
-    index = store.sync(paths)
-    state = State(rows={"agora": agora_rows(index, []), "import": import_rows(index, agents)})
+    print("[agora] 同步 Drive、列出這台機器上的 session…（離線時用本機的資料）")
+    index = store.sync(paths, throttle=True)
+    state = State(rows={"agora": agora_rows(index, []), "import": import_rows(index, agents, paths)})
     cache: dict[str, list[str]] = {}
 
     def previews(tab: str, row: Row) -> list[str]:
@@ -357,11 +421,15 @@ def main(paths: store.Paths) -> int:
         action, rows, agent, workdir = curses.wrapper(screen_loop, state, previews, message)
         if action == "quit":
             return 0
-        codes = [cli.main(argv) for argv in argv_for(action, rows, agent, workdir)]
-        input("\n按 Enter 回到選單…")
-        message = "完成" if all(code == 0 for code in codes) else "有動作沒有成功，訊息在上一個畫面"
+        codes = [cli.main(argv) for argv in argv_for(action, rows, agent, workdir)]   # one failing goes on (T10)
+        try:
+            input("\n按 Enter 回到選單…")
+        except (KeyboardInterrupt, EOFError):
+            pass
+        ok = sum(code == 0 for code in codes)
+        message = "完成" if ok == len(codes) else f"成功 {ok} 個、失敗 {len(codes) - ok} 個，訊息在上一個畫面"
         state.marked.clear()
-        index = store.Index(paths)
-        state.rows = {"agora": agora_rows(index, []), "import": import_rows(index, agents)}
+        index = store.Index(paths)               # local only; no full sync after every action (T6)
+        state.rows = {"agora": agora_rows(index, []), "import": import_rows(index, agents, paths)}
         state.cursor = min(state.cursor, max(len(state.shown()) - 1, 0))
         cache.clear()

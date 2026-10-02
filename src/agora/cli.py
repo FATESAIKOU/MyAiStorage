@@ -521,6 +521,9 @@ def cmd_continue(args, paths: store.Paths) -> int:
     pending.unlink()
     lock.close()
     if saved is None:
+        # the agent still holds the copy agora loaded; the import tab leaves it out (review T5)
+        with open(paths.state / "unsaved-launches", "a", encoding="utf-8") as f:
+            f.write(f"{agent.name}:{launch.agent_session_id}\n")
         print("[agora] 這次沒有新內容，沒有存", file=sys.stderr)
         return 0
     return _emit(saved)
@@ -637,7 +640,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if not argv:                 # the interactive mode (design 5.9)
+    if not argv:                 # the interactive mode (design 5.9), only for a person at a terminal (review T1)
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            build_parser().print_usage(sys.stderr)
+            print("[agora] 互動模式只在終端機裡開；指令模式請給動作，例如 agora search session", file=sys.stderr)
+            return EXIT_ERROR
         from agora import tui
         return tui.main(store.Paths.from_env())
     args = build_parser().parse_args(argv)

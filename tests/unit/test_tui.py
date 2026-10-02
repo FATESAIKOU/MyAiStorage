@@ -136,3 +136,27 @@ def test_scrolling_keeps_the_cursor_visible():
     s.cursor = 0
     tui.scroll(s, 2)
     assert s.top == 0
+
+
+def test_no_interactive_mode_without_a_terminal(monkeypatch, capsys):  # review T1
+    from agora import cli
+    called = []
+    monkeypatch.setattr(tui, "main", lambda paths: called.append(1) or 0)
+    assert cli.main([]) == cli.EXIT_ERROR and not called       # pytest's stdin/stdout are not a TTY
+    assert "互動模式只在終端機裡開" in capsys.readouterr().err
+
+
+def test_import_tab_leaves_out_agoras_own_copies():  # review T5
+    paths, index = _index()
+    paths.state.mkdir(parents=True, exist_ok=True)
+    (paths.state / "unsaved-launches").write_text("opencode:ses_copy\n")
+    agent = FakeAgent("opencode", [Listed("ses_copy", "/tmp/p", "複本", None),
+                                   Listed("ses_sum", str(paths.state / "summarize"), "要約用", None),
+                                   Listed("ses_real", "/tmp/p", "真的", None)])
+    assert [r.key for r in tui.import_rows(index, [agent], paths)] == ["opencode:ses_real"]
+
+
+def test_short_ids_are_the_random_part_and_control_characters_stay_inert():  # review T9, T12
+    _, index = _index((_hdr("01M3XB78461N9TCC4DB84PKF2V", "一"), "## user\nx\n"))
+    assert tui.agora_rows(index, [])[0].cells[0] == "4DB84PKF2V"[-8:]
+    assert tui.clip("a\x1b[31mb", 6) == "a·[31m"
