@@ -345,6 +345,16 @@ agora show     session <id> [--raw]
 - 未匯入頁不列 agora 自己留下的複本：接續後「沒有新內容」時，agent 那邊的那個 session 記在 `<state>/unsaved-launches`；寫要約用的 `<state>/summarize/` 底下的 session 也不列（review T5）。
 - 勾選多個匯入時，一個失敗照樣做下一個，最後顯示成功幾個、失敗幾個（review T10）。
 
+### 5.10 快取與 sync（2026-10-02 使用者決定）
+
+- **全文快取，全部懶載入**：既有用到才讀的東西，結果都存到同一個本機位置 `~/.cache/agora/`。
+  - agora 的 Session：本來就有的 Drive 鏡像 `sessions/<ULID>/`（`session.md` 就是閱讀版，原始檔用到才下載）。
+  - 這台機器上 agent 的 session：`reading/<agent>/<session id>.md`，是閱讀版的全文。檔案的 mtime 設成那個 session 自己的更新時間；session 比較新就是過時，下次看到時重寫。
+- **`agora cache agora`**：同步一次，再把每個 Session 還沒下載的原始檔補齊。**`agora cache local`**：把這台機器上每個 agent session 沒有或過時的全文寫進快取。兩個都逐個印出「n/總數」，某一個失敗照樣做下一個，最後印出完成幾個、失敗幾個（有失敗時 exit 2）。
+- **`agora sync`**：先送出 outbox，再把本機鏡像裡的每個檔寫回 Drive 的 `sessions/`，同名直接覆蓋，**Drive 上多的不刪**（刪除只能用 delete）。不比對誰比較新：別台機器剛改過、這台還沒同步到的，會被這台的版本蓋過去（使用者接受）。
+- 互動模式：`r` 選「Agora／本機」更新快取，`s` 確認後 sync，都在等待視窗裡跑，最新一行就是進度。未匯入頁的完整對話用 `reading/` 的快取；內文搜尋先搜快取，再用轉接器的 `search_text()` 補搜還沒快取的。
+- 指令格式：`agora cache agora|local`、`agora sync`（不寫型態）；其他動作的型態照舊是 `session`。
+
 ## 6. 不做的事
 
 - 簽章、收件匣、提交流程、pin repo、隔離、抹除流程（D2）。要刪 Session 就是刪掉 Drive 上那個資料夾，下一次 sync 時鏡像跟著刪。
@@ -376,7 +386,7 @@ agora show     session <id> [--raw]
 
 ## 8. 實作規模
 
-Python（uv）＋ rclone ＋ SQLite FTS5。**`src/` 的程式碼目標 2,600 行以內（2026-10-02 為了互動模式先從 2,000 放寬到 2,300、再放寬到 2,600，都是使用者決定），不含測試與 fixture；算法是不含空行、註解、docstring**（L4）。**算的是程式碼行**（不含空行、註解、docstring；2026-10-03 決定）：說明安全機制的 docstring 不該為了行數砍掉。第 4 版時檔案總行數約 2,200、程式碼行約 1,500。
+Python（uv）＋ rclone ＋ SQLite FTS5。**`src/` 的程式碼目標 2,900 行以內（2026-10-02 為了互動模式與快取，從 2,000 一路放寬到 2,300、2,600、2,900，都是使用者決定），不含測試與 fixture；算法是不含空行、註解、docstring**（L4）。**算的是程式碼行**（不含空行、註解、docstring；2026-10-03 決定）：說明安全機制的 docstring 不該為了行數砍掉。第 4 版時檔案總行數約 2,200、程式碼行約 1,500。
 
 | 模組 | 內容 | 估計行數 |
 |---|---|---|

@@ -98,6 +98,14 @@ elif cmd == "copy" and "--files-from" in params:
         if (src / rel).exists():
             (dst / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src / rel, dst / rel)
+elif cmd == "copy":          # a local tree up to the remote, same names overwritten (agora sync)
+    src, dst = Path(params[0]), resolve(params[1])
+    excluded = [params[n + 1] for n, p in enumerate(params) if p == "--exclude"]
+    for path in sorted(src.rglob("*")):
+        rel = path.relative_to(src).as_posix()
+        if path.is_file() and not any(rel == e or rel.startswith(e.rstrip("*")) for e in excluded):
+            (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, dst / rel)
 elif cmd == "deletefile":
     resolve(params[0]).unlink()
 elif cmd == "purge":

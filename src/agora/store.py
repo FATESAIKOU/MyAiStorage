@@ -55,6 +55,7 @@ class Paths:
     mirror = property(lambda s: s.cache / "sessions")
     outbox = property(lambda s: s.state / "outbox")
     pending = property(lambda s: s.state / "pending")
+    reading = property(lambda s: s.cache / "reading")   # agent sessions' full text (design 5.10)
 
 
 def now() -> float:
@@ -153,6 +154,10 @@ class Drive:
         # copyto, never copy: copy treats the target as a directory and
         # silently creates an empty folder named after the file.
         self._run("copyto", str(local), f"gdrive:sessions/{ulid}/{name}")
+
+    def upload_tree(self, mirror: Path) -> None:
+        """Every file of the mirror back to sessions/, same names overwritten, nothing deleted (agora sync)."""
+        self._run("copy", str(mirror), "gdrive:sessions", "--exclude", ".files-from", "--exclude", ".bad/**")
 
     def download(self, ulid: str, name: str, local: Path) -> None:
         local.parent.mkdir(parents=True, exist_ok=True)

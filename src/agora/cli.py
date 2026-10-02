@@ -615,16 +615,35 @@ def cmd_show(args, paths: store.Paths) -> int:
     return 0
 
 
+def cmd_cache(args, paths: store.Paths) -> int:
+    """`agora cache agora|local`: fill the local caches in one go (design 5.10)."""
+    from agora import cache
+    if args.type not in ("agora", "local"):
+        raise InputError("cache 要給 agora 或 local：agora cache agora、agora cache local")
+    done, failed = (cache.refresh_agora(paths) if args.type == "agora"
+                    else cache.refresh_local(paths, [load_agent(name) for name in AGENTS]))
+    print(f"[agora] 快取完成：{done} 個" + (f"，{failed} 個失敗" if failed else ""))
+    return EXIT_ERROR if failed else 0
+
+
+def cmd_sync(args, paths: store.Paths) -> int:
+    """`agora sync`: write the local agora state back to Drive, overwriting (design 5.10)."""
+    from agora import cache
+    cache.sync_up(paths)
+    return 0
+
+
 ACTIONS = {
     "search": cmd_search, "import": cmd_import, "merge": cmd_merge, "continue": cmd_continue,
-    "delete": cmd_delete, "edit": cmd_edit, "show": cmd_show,
+    "delete": cmd_delete, "edit": cmd_edit, "show": cmd_show, "cache": cmd_cache, "sync": cmd_sync,
 }
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agora", description="找、合、接 coding agent 的 Session")
     p.add_argument("action", choices=list(ACTIONS))
-    p.add_argument("type", choices=TYPES)
+    p.add_argument("type", nargs="?", choices=(*TYPES, "agora", "local"),
+                   help="session；cache 用 agora 或 local；sync 不用寫")
     p.add_argument("ids", nargs="*", help="session id（merge 可以給多個，用空白或逗號分隔）")
     p.add_argument("--external-session-id", help="import：agent 自己的 session id")
     p.add_argument("--agent", choices=AGENTS, help="import：來源的 agent；merge：誰寫要約；continue：用哪個 agent 接")
@@ -648,6 +667,9 @@ def main(argv: list[str] | None = None) -> int:
         from agora import tui
         return tui.main(store.Paths.from_env())
     args = build_parser().parse_args(argv)
+    if args.action not in ("cache", "sync") and args.type != "session":
+        print(f"[agora] {args.action} 的型態要寫 session，例如 agora {args.action} session", file=sys.stderr)
+        return EXIT_INPUT
     paths = store.Paths.from_env()
     try:
         recover_pending(paths, notice_only=args.no_sync)

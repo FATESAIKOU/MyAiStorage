@@ -29,6 +29,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, OptionList, Static
 
+from agora import cache
 from agora import header as h
 from agora import store
 
@@ -49,6 +50,7 @@ class Row:
     text: str                    # what the title filter looks in
     agent: str | None = None
     dir: str | None = None
+    updated: str | None = None   # the agent session's own update time, to tell a stale cache
 
 
 def _when(stamp: str | None) -> str:
@@ -100,7 +102,7 @@ def import_rows(index: store.Index, agents: list, paths: store.Paths | None = No
             mark = "↻ " if imported else ""   # imported before, talked to since: import again
             found.append((s.updated_at or "", Row(
                 key, [s.session_id[-8:], _short(mark + (s.title or "")), agent.name, _when(s.updated_at), _home(s.dir)],
-                f"{s.session_id} {agent.name} {s.dir or ''} {s.title or ''}", agent.name, s.dir)))
+                f"{s.session_id} {agent.name} {s.dir or ''} {s.title or ''}", agent.name, s.dir, s.updated_at)))
     return [row for _stamp, row in sorted(found, key=lambda pair: pair[0], reverse=True)]
 
 
@@ -143,12 +145,15 @@ def agora_preview(paths: store.Paths, index: store.Index, agora_id: str) -> tupl
     return pinned, body.strip()
 
 
-def import_preview(agent, session_id: str, full: bool = False) -> tuple[str, str]:
-    """The last message; with `full`, the whole conversation as its reading version (existing code, no new conversion)."""
+def import_preview(agent, session_id: str, full: bool = False, paths: store.Paths | None = None,
+                   updated: str | None = None) -> tuple[str, str]:
+    """The last message; with `full`, the whole conversation as its reading version, kept in the cache (5.10)."""
     from agora.agents.base import reading
     try:
         if full:
-            return "整份對話（閱讀版）", reading(agent, agent.export(session_id).raw).strip()
+            text = (cache.local_reading(paths, agent, session_id, updated) if paths
+                    else reading(agent, agent.export(session_id).raw))
+            return "整份對話（閱讀版）", text.strip()
         last = agent.last_message(session_id)
     except Exception:            # a preview must never take the screen down
         return "讀不到這個 session", ""
@@ -324,6 +329,8 @@ class AgoraApp(App):
         Binding("d", "delete", "刪除"),
         Binding("slash", "filter", "篩選"),
         Binding("ctrl+t", "search_mode", "標題／內文", priority=True),
+        Binding("r", "refresh_cache", "更新快取"),
+        Binding("s", "sync", "寫回 Drive"),
         Binding("q", "quit", "離開"),
     ]
 
@@ -465,11 +472,11 @@ class AgoraApp(App):
             agent = next((a for a in self.agents if a.name == row.agent), None)
             if agent:
                 self.put_preview(*import_preview(agent, row.key.split(":", 1)[1]))
-                self.load_full(agent, row.key)
+                self.load_full(agent, row.key, row.updated)
 
     @work(thread=True, exclusive=True, group="preview")
-    def load_full(self, agent, key: str) -> None:
-        result = import_preview(agent, key.split(":", 1)[1], full=True)
+    def load_full(self, agent, key: str, updated: str | None) -> None:
+        result = import_preview(agent, key.split(":", 1)[1], True, self.paths, updated)
         self.call_from_thread(self.loaded, key, result)
 
     def loaded(self, key: str, result: tuple[str, str]) -> None:
@@ -501,7 +508,7 @@ class AgoraApp(App):
             return isinstance(self.focused, DataTable)
         if action in ("merge", "edit", "delete"):
             return self.tab == "agora" and not in_preview
-        if action in ("mark", "primary", "filter"):
+        if action in ("mark", "primary", "filter", "refresh_cache", "sync"):
             return not in_preview
         return True
 
@@ -560,10 +567,14 @@ class AgoraApp(App):
 
     @work(thread=True, exclusive=True, group="search")
     def find_in_agents(self, text: str) -> None:
-        for agent in self.agents:
+        for agent in self.agents:   # the cache first (fast), then what is not cached yet
+            seen: set[str] = set()
             try:
-                for session_id in agent.search_text(text):
-                    self.call_from_thread(self.found, text, f"{agent.name}:{session_id}")
+                for source in (cache.search_cached(self.paths, agent.name, text), agent.search_text(text)):
+                    for session_id in source:
+                        if session_id not in seen:
+                            seen.add(session_id)
+                            self.call_from_thread(self.found, text, f"{agent.name}:{session_id}")
             except Exception:    # a search must never take the screen down
                 continue
         self.call_from_thread(self.say, f"內文搜尋「{text}」完成")
@@ -652,6 +663,19 @@ class AgoraApp(App):
             code = self.outside(argv_for("edit", [row], None, None)[0])   # the editor needs the terminal
             self.reload()
             self.say("完成" if code == 0 else "改標頭沒有成功", failed=code != 0)
+
+    @work
+    async def action_refresh_cache(self) -> None:
+        pick = await self.push_screen_wait(Choose("更新哪個快取？", ["Agora：Drive 上的 Session（含原始檔）",
+                                                              "本機：opencode／claude 的 session 全文"]))
+        if pick is not None:
+            await self.act("更新快取", [["cache", ("agora", "local")[pick]]])
+
+    @work
+    async def action_sync(self) -> None:
+        if await self.push_screen_wait(Choose("把本機的 agora 寫回 Drive？", ["取消", "確定"],
+                                              "同名的檔案直接覆蓋；Drive 上多的不動")) == 1:
+            await self.act("寫回 Drive", [["sync"]])
 
     @work
     async def action_delete(self) -> None:

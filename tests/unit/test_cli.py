@@ -664,3 +664,28 @@ def test_a_failed_summarize_run_is_retried(env, capsys, monkeypatch):  # review 
     monkeypatch.setattr(env, "summarize", flaky)
     code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
     assert code == 0 and len(calls) == 3, err
+
+
+
+def test_cache_needs_agora_or_local_and_other_actions_need_session(env, capsys):  # design 5.10
+    code, _, err = run(capsys, "cache", "session")
+    assert code == 1 and "agora 或 local" in err
+    code, _, err = run(capsys, "search")
+    assert code == 1 and "型態要寫 session" in err
+
+
+def test_cache_agora_brings_every_raw_and_sync_writes_the_mirror_back(env, capsys):  # design 5.10
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = a.split(":")[1]
+    hdr = store.Index(paths).header(ulid)
+    raw = paths.mirror / ulid / hdr["agora"]["raw"]["file"]
+    if raw.exists():
+        raw.unlink()
+    code, out, _ = run(capsys, "cache", "agora")
+    assert code == 0 and raw.exists() and "快取完成：1 個" in out
+    md = paths.mirror / ulid / "session.md"
+    md.write_text(md.read_text() + "\n本機改的一行\n")
+    code, out, _ = run(capsys, "sync")
+    remote = Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid / "session.md"
+    assert code == 0 and "已寫回 Drive" in out and "本機改的一行" in remote.read_text()

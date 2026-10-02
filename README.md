@@ -49,6 +49,13 @@ agora edit session agora:01K6…
 # 刪除：移到 Drive 垃圾桶（30 天內可以在 Drive 網頁還原），一定要加 --yes
 agora delete session agora:01K6… --yes
 
+# 快取：一次把 Drive 上的 Session（含原始檔）或這台機器上 agent session 的全文拿到本機
+agora cache agora
+agora cache local
+
+# 把本機的 agora 寫回 Drive（同名覆蓋，Drive 上多的不刪）
+agora sync
+
 # 看標頭＋閱讀版／原始匯出
 agora show session agora:01K6…
 agora show session agora:01K6… --raw
