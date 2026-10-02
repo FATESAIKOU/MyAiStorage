@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import signal
+import subprocess
+import sys
 import threading
 
 import pytest
@@ -1355,4 +1358,87 @@ def test_interrupting_a_merge_returns_to_the_list_and_says_it_carries_on(group_c
             await _wait(lambda: "重跑" in str(app.query_one("#msg").render()), pilot)
             assert "重跑同一個動作會接著做" in str(app.query_one("#msg").render())
             assert not isinstance(app.screen, tui.ModalScreen)      # back at the list
+    _run(go)
+
+
+# --- 4.1b: a real process group, a real signal (review V7) --------------------
+
+#: A leader that exits on SIGINT the way `agora` does (KeyboardInterrupt -> 130)
+#: and leaves behind a grandchild that ignores SIGINT and SIGTERM - the case
+#: review M1 is about, where our own child is gone and the agent is not.
+LEADER = """
+import os, signal, subprocess, sys, time
+signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
+child = subprocess.Popen([sys.executable, "-c", "import signal, time\\n"
+                         "signal.signal(signal.SIGINT, signal.SIG_IGN)\\n"
+                         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
+                         "time.sleep(300)"])
+# its own file, not stdout: the waiting window's reader thread owns that pipe
+open(sys.argv[1], "w").write(f"{os.getpgid(0)} {child.pid}")
+time.sleep(300)
+"""
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def test_esc_stops_a_real_process_group_with_a_stubborn_grandchild(monkeypatch, tmp_path):
+    """The real thing, once (review V7, M1): the whole group goes and nothing is left
+    behind - not even a grandchild that ignores SIGINT and SIGTERM.
+
+    The leader behaves like `agora` does under Esc: it catches the signal and exits
+    130 while the agent it started keeps running. A fake process cannot show that,
+    because its death is what the fake checks."""
+    monkeypatch.setattr(tui, "ESCALATE_AFTER", 0.5)
+    sent: list[int] = []
+    real_killpg = tui.killpg
+    monkeypatch.setattr(tui, "killpg", lambda pgid, sig: (sent.append(int(sig)),
+                                                          real_killpg(pgid, sig))[1])
+    paths, _ = _index((_hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "甲", sid="s1"), "## user\nx\n"),
+                      (_hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "乙", sid="s2"), "## user\nx\n"))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+    pidfile = tmp_path / "group.pids"
+    pids: dict[str, int] = {}
+
+    def spawn(argv):
+        """The command mode, as a real process group with a stubborn child."""
+        return subprocess.Popen([sys.executable, "-c", LEADER, str(pidfile)],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, bufsize=1, start_new_session=True)
+
+    async def go():
+        app.spawn = spawn
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            for _ in range(60):                     # it writes the two pids and goes on
+                await pilot.pause(0.1)
+                if pidfile.exists():
+                    break
+            pgid, grandchild = pidfile.read_text().split()
+            pids.update(pgid=int(pgid), grandchild=int(grandchild))
+            assert _alive(pids["grandchild"])
+
+            await pilot.press("escape")
+            for _ in range(120):
+                await pilot.pause(0.1)
+                if not _alive(pids["grandchild"]):
+                    break
+            assert sent == [int(signal.SIGINT), int(signal.SIGTERM), int(signal.SIGKILL)]
+            assert not _alive(pids["grandchild"]), "孫程序還活著"
+            try:
+                os.killpg(pids["pgid"], 0)
+                raise AssertionError("process group 還在")
+            except ProcessLookupError:
+                pass                     # the group is empty: nothing was left running
     _run(go)

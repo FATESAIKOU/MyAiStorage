@@ -27,6 +27,6 @@
 ## 4. 測試與收尾
 
 - [x] 4.1 `run_test` 測：勾選的列被送進指令、篩選掉的不算、`a` 切換、進度條跟著 k/N、Esc 送中斷、雲端欄
-- [ ] 4.1b 用**真的子程序**測一次 Esc：整個 process group 都停、沒有殘留的子程序（review V7）
+- [x] 4.1b 用**真的子程序**測一次 Esc：整個 process group 都停、沒有殘留的子程序（review V7）
 - [x] 4.2 `docs/design.md` 5.9 更新（子程序與進度條、Esc 中斷的階梯、勾選規則與 `a` 全選、雲端欄與 pull／push 的兩個選項、按鍵表；順手刪掉 5.10 重複的一句 import 敘述）
 - [ ] 4.3 PM 用假資料在 pane 操作一遍；review 審程式
