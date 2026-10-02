@@ -30,6 +30,8 @@ import hashlib
 import json
 import os
 import sqlite3
+import unicodedata
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
@@ -120,6 +122,8 @@ _LAST_SQL = "select id, data from message where session_id=? order by time_creat
 _LAST_SCAN = 20
 _PARTS_SQL = "select data from part where message_id=? order by time_created, id"
 _PREVIEW_CHARS = 2000
+_SEARCH_LIKE_SQL = "select session_id, data from part where data like ? escape '\\'"
+_SEARCH_ALL_SQL = "select session_id, data from part"
 
 _warned_schema = False
 _list_cache: tuple[tuple, list[Listed]] | None = None
@@ -160,6 +164,17 @@ def _field(blob: str, key: str):
     except (TypeError, json.JSONDecodeError):
         return None
     return value.get(key) if isinstance(value, dict) else None
+
+
+def _folded(text: str) -> str:
+    """How a string is compared: NFKC first, then case folding."""
+    return unicodedata.normalize("NFKC", text).casefold()
+
+
+def _like_pattern(keyword: str) -> str:
+    """`%keyword%`, with LIKE's own wildcards escaped so they stay literal."""
+    escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
 
 
 def _session_directory(session_id: str) -> str | None:
@@ -594,6 +609,44 @@ class OpencodeAgent:
         except sqlite3.Error:
             _warn_schema()
             return []
+        finally:
+            connection.close()
+
+    def search_text(self, keyword: str) -> Iterator[str]:
+        """Session ids whose conversation mentions `keyword`, one at a time.
+
+        Case-insensitive and compared after NFKC, across every project, read-only,
+        and streamed: the caller runs this in a thread and puts each id on screen as
+        it arrives, so the first match must not wait for the whole store. Hence the
+        two passes - `part.data LIKE %keyword%` is cheap and hands over the common
+        case in milliseconds, then a full scan checks what LIKE cannot see (LIKE
+        folds ASCII case only, and normalises nothing, so full-width "Ｈｅｌｌｏ"
+        must still match "hello"). Python decides every match; SQL only chooses
+        what to look at. Nothing is exported - that would read whole transcripts to
+        answer a question about text.
+        """
+        keyword = keyword.strip()
+        wanted = _folded(keyword)
+        if not wanted:
+            return
+        connection = _open_readonly(_db_path())
+        if connection is None:
+            return
+        seen: set[str] = set()
+        try:
+            passes = ((_SEARCH_LIKE_SQL, (_like_pattern(keyword),)), (_SEARCH_ALL_SQL, ()))
+            for statement, arguments in passes:
+                for session_id, blob in connection.execute(statement, arguments):
+                    if session_id in seen or _field(blob, "type") != "text":
+                        continue
+                    if _field(blob, "synthetic") is True:
+                        continue
+                    text = _field(blob, "text")
+                    if isinstance(text, str) and wanted in _folded(text):
+                        seen.add(session_id)
+                        yield session_id
+        except sqlite3.Error:
+            _warn_schema()
         finally:
             connection.close()
 

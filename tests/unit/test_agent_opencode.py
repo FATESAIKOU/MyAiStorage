@@ -1018,3 +1018,156 @@ def _calls(home: Path, subcommand: str) -> list[str]:
     if not log.exists():
         return []
     return [line for line in log.read_text().splitlines() if f'"{subcommand}"' in line]
+
+
+# --- searching the text of sessions not imported yet (T15) -------------------
+
+class _CountingConnection:
+    """Stands in for the read-only connection, so a test can watch how much of
+    the table a search has read by the time it hands over its first hit."""
+
+    def __init__(self, connection, rows, statements):
+        self._connection = connection
+        self._rows = rows
+        self._statements = statements
+
+    def execute(self, statement, arguments=()):
+        self._statements.append(statement)
+        cursor = self._connection.execute(statement, arguments)
+        rows = self._rows
+
+        def counted():
+            for index, row in enumerate(cursor, 1):
+                rows[index] = rows.get(index, 0) + 1
+                yield row
+        return counted()
+
+    def close(self):
+        self._connection.close()
+
+
+@pytest.fixture
+def watched(store_db, monkeypatch):
+    """The fake database, with the adapter's connection watched."""
+    db, path = store_db
+    real = oc._open_readonly
+    watched = {"rows": {}, "statements": []}
+    monkeypatch.setattr(oc, "_open_readonly", lambda where: _CountingConnection(
+        real(where), watched["rows"], watched["statements"]))
+    yield db, watched
+
+
+def test_search_finds_sessions_in_every_project(watched):
+    db, _ = watched
+    _add_session(db, "ses_one00000000000001", "/tmp/專案甲", "t", 1000, turns=[
+        ("user", [{"type": "text", "text": "ZZ 我在這裡"}])])
+    _add_session(db, "ses_two00000000000002", "/tmp/專案乙", "t", 2000, turns=[
+        ("assistant", [{"type": "text", "text": "ZZ 不相關的答案"}]),
+        ("user", [{"type": "text", "text": "ZZ 我在這裡 也一樣"}])])
+    db.commit()
+
+    assert list(oc.ADAPTER.search_text("我在這裡")) == ["ses_one00000000000001",
+                                                        "ses_two00000000000002"]
+
+
+def test_search_ignores_case_and_full_width(watched):
+    """NFKC, so Ｈｅｌｌｏ and hello are the same word - and the like pass cannot
+    see that, which is why there is a second one."""
+    db, seen = watched
+    _add_session(db, "ses_full0000000000003", "/tmp/p", "t", 1000, turns=[
+        ("user", [{"type": "text", "text": "ZZ Ｈｅｌｌｏ 世界"}]),
+        ("user", [{"type": "text", "text": "ZZ ｱｲｳ の ふりがな"}])])
+    db.commit()
+
+    assert list(oc.ADAPTER.search_text("hello")) == ["ses_full0000000000003"]
+    assert list(oc.ADAPTER.search_text("アイウ")) == ["ses_full0000000000003"]
+    assert list(oc.ADAPTER.search_text("HELLO 世界")) == ["ses_full0000000000003"]
+    assert oc._SEARCH_LIKE_SQL in seen["statements"]      # the cheap pass ran first
+
+
+def test_search_treats_wildcards_as_ordinary_characters(watched):
+    db, _ = watched
+    _add_session(db, "ses_pct00000000000001", "/tmp/p", "t", 1000, turns=[
+        ("user", [{"type": "text", "text": "ZZ 進度 50% 完成了"}])])
+    _add_session(db, "ses_pad00000000000002", "/tmp/p", "t", 2000, turns=[
+        ("user", [{"type": "text", "text": "ZZ 一些不一樣的話"}])])
+    db.commit()
+
+    assert list(oc.ADAPTER.search_text("50%")) == ["ses_pct00000000000001"]
+    assert list(oc.ADAPTER.search_text("_")) == []
+
+
+def test_search_reads_only_text_that_was_actually_said(watched):
+    db, _ = watched
+    _add_session(db, "ses_tool00000000000001", "/tmp/p", "t", 1000, turns=[
+        ("assistant", [{"type": "tool", "text": "ZZ 工具輸出 ZZ"}]),
+        ("user", [{"type": "text", "synthetic": True, "text": "ZZ 附件 ZZ"}]),
+        ("user", [{"type": "text", "text": "ZZ 真的話 ZZ"}])])
+    db.commit()
+
+    assert list(oc.ADAPTER.search_text("ZZ 工具輸出")) == []
+    assert list(oc.ADAPTER.search_text("ZZ 附件")) == []
+    assert list(oc.ADAPTER.search_text("ZZ 真的話")) == ["ses_tool00000000000001"]
+
+
+def test_search_reports_a_session_once(watched):
+    db, _ = watched
+    _add_session(db, "ses_twice000000000001", "/tmp/p", "t", 1000, turns=[
+        ("user", [{"type": "text", "text": "ZZ 提到 ZZ"}]),
+        ("assistant", [{"type": "text", "text": "ZZ 再提一次 ZZ"}])])
+    db.commit()
+
+    assert list(oc.ADAPTER.search_text("ZZ 提到")) == ["ses_twice000000000001"]
+
+
+def test_search_hands_over_its_first_hit_before_reading_the_rest(watched):
+    """It runs in a thread and the page fills in as results arrive."""
+    db, seen = watched
+    _add_session(db, "ses_first000000000001", "/tmp/p", "t", 1000, turns=[
+        ("user", [{"type": "text", "text": "ZZ 目標字串"}])])
+    for n in range(40):
+        _add_session(db, f"ses_pad{n:016d}", "/tmp/p", "t", 2000 + n, turns=[
+            ("user", [{"type": "text", "text": "ZZ 雜訊"}])])
+    db.commit()
+    seen["rows"].clear()
+
+    found = oc.ADAPTER.search_text("目標字串")
+    assert next(found) == "ses_first000000000001"
+    assert sum(seen["rows"].values()) <= 2          # not through the other 40
+
+
+def test_search_of_nothing_finds_nothing_and_asks_no_database(watched):
+    db, seen = watched
+    _add_session(db, "ses_any00000000000001", "/tmp/p", "t", 1000, turns=[
+        ("user", [{"type": "text", "text": "ZZ 任何字"}])])
+    db.commit()
+
+    assert list(oc.ADAPTER.search_text("")) == []
+    assert list(oc.ADAPTER.search_text("   ")) == []
+    assert list(oc.ADAPTER.search_text("找不到的話")) == []
+
+
+def test_search_without_a_database_yields_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "no-store"))
+    monkeypatch.setattr(oc, "_list_cache", None)
+    assert list(oc.ADAPTER.search_text("ZZ")) == []
+
+
+def test_search_over_an_unknown_schema_yields_nothing(store_db, capsys):
+    db, _ = store_db
+    db.executescript("drop table part; create table part (id text primary key);")
+    db.commit()
+    db.close()
+
+    assert list(oc.ADAPTER.search_text("ZZ")) == []
+    assert "資料庫結構認不出來" in capsys.readouterr().err
+
+
+def test_search_never_exports_a_session(fake, store_db, workdir):
+    db, _ = store_db
+    _add_session(db, "ses_x0000000000000001", str(workdir), "t", 1000, turns=[
+        ("user", [{"type": "text", "text": "ZZ 搜尋得到"}])])
+    db.close()
+
+    assert list(oc.ADAPTER.search_text("搜尋得到")) == ["ses_x0000000000000001"]
+    assert not [line for line in _calls(fake, "export")]      # no transcript read
