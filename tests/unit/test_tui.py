@@ -1259,3 +1259,100 @@ def test_space_is_what_ticks_it():
             await _wait(lambda: app._last_spawned, pilot)
             assert app._last_spawned[-1][-1] == "--not-exist-upload"
     _run(go)
+
+
+# --- spec「進度與中斷」and every remaining Scenario, driven by key presses ---
+
+
+def test_deleting_three_marked_rows_is_one_command():
+    """spec: 三列勾選後按 d → 三個 Session 送進一個 delete 指令。"""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            for _ in range(3):
+                await pilot.press("space", "down")
+            marked = [r.key for r in app.shown() if r.key in app.marked]
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _wait(lambda: app._last_spawned, pilot)
+            assert app._last_spawned[-1] == ["delete", "session", *marked, "--yes"]
+    _run(go)
+
+
+def test_import_uses_the_row_under_the_cursor_when_nothing_is_marked():
+    """spec: 未匯入頁沒有勾選任何列，按 Enter → 只有游標那一列被匯入。"""
+    agent = FakeAgent("opencode", [Listed("s1", "/tmp/p", "甲", None), Listed("s2", "/tmp/q", "乙", None)],
+                      texts={"s1": ["問"], "s2": ["答"]})
+    app = tui.AgoraApp(app_paths := store.Paths.from_env(), FakeCli(), agents=[agent], check_setup=False)
+    for n, title in enumerate("甲乙", 1):
+        ulid = f"02{'0' * 23}{n}"
+        (app_paths.mirror / ulid).mkdir(parents=True, exist_ok=True)
+        (app_paths.mirror / ulid / "session.md").write_text(
+            h.dump_document(_hdr(ulid, f"已在 agora {n}", sid=f"in{n}"), "## user\\nx\\n"), encoding="utf-8")
+        store.Index(app_paths).put(ulid, "md5", _hdr(ulid, f"已在 agora {n}", sid=f"in{n}"), "## user\\nx\\n")
+    app.spawn, started = _spawn()
+    app._last_spawned = started
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("tab")                      # 未匯入
+            await pilot.pause()
+            await pilot.press("down")                     # the second row, un-marked
+            await pilot.press("enter")
+            await _wait(lambda: app._last_spawned, pilot)
+            assert app._last_spawned[-1] == ["import", "session", "--agent", "opencode",
+                                             "--external-session-id", "s2"]
+    _run(go)
+
+
+def test_the_progress_bar_walks_from_one_to_five():
+    """spec: 匯入五個 session → 進度條從 1/5 走到 5/5。"""
+    app = _marked_app(None)
+    app.spawn, _ = _spawn(lines=[f"[agora] 匯入 {n}/5" for n in range(1, 6)], hang=True)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+
+            def progress():
+                if not isinstance(app.screen, tui.Run):
+                    return None
+                bar = app.screen.query_one("#bar")
+                return (bar.progress, bar.total) if bar.total else None
+            await _wait(lambda: progress() == (5, 5), pilot)
+            assert progress() == (5, 5)
+    _run(go)
+
+
+def test_interrupting_a_merge_returns_to_the_list_and_says_it_carries_on(group_calls):
+    """spec: 中斷 merge → 動作停止、回到清單，並說重跑會接著做。"""
+    sent, alive = group_calls
+    app = _marked_app(None)
+    proc = FakeProc(lines=["[agora] 來源 1/2", "[agora] 來源 2/2"], hang=True)
+    app.spawn, _ = _spawn(proc)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            for _ in range(3):
+                await pilot.press("space", "down")
+            await pilot.press("m")
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            await pilot.press("escape")
+            alive[4242] = False
+            proc.done.set()
+            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            await pilot.press("space")
+            await _wait(lambda: "重跑" in str(app.query_one("#msg").render()), pilot)
+            assert "重跑同一個動作會接著做" in str(app.query_one("#msg").render())
+            assert not isinstance(app.screen, tui.ModalScreen)      # back at the list
+    _run(go)
