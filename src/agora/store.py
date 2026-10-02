@@ -431,17 +431,30 @@ class Index:
         return h.upgrade(json.loads(row[0])) if row else None   # rows cached before v4 (V1)
 
     def by_source(self, agent: str, source_id: str) -> list[str]:
+        """Sessions imported from this agent session, newest first.
+
+        A session Drive no longer has is not among them (T1 3.4): importing that
+        agent session again has to make a new one rather than write over the copy
+        another machine deleted.
+        """
         rows = self.db.execute(
-            "SELECT ulid FROM sessions WHERE agent=? AND source_id=? ORDER BY ulid DESC",
+            "SELECT ulid FROM sessions WHERE agent=? AND source_id=? "
+            "AND ulid NOT IN (SELECT ulid FROM cloud_missing) ORDER BY ulid DESC",
             (agent, source_id))
         return [r[0] for r in rows]
 
     def children(self, ulid: str) -> list[str]:
-        """Sessions that continue or merge from this one (refs alone do not count)."""
+        """Sessions that continue or merge from this one (refs alone do not count).
+
+        A session Drive no longer has is not a child (T1 3.4): it must not hold up
+        a delete here, and it must not make the import tab think this one already
+        branched.
+        """
         target = f"agora:{ulid}"
         rows = self.db.execute("SELECT ulid, header FROM sessions")
-        return [u for u, hdr in rows
-                if any(p.get("id") == target for p in h.agora_of(h.upgrade(json.loads(hdr))).get("parents") or [])]
+        return [u for u, hdr in rows if self.cloud_has(u)
+                and any(p.get("id") == target
+                        for p in h.agora_of(h.upgrade(json.loads(hdr))).get("parents") or [])]
 
     def search(self, filters: list[tuple[tuple[str, ...], str, str]]) -> list[tuple[str, dict, str]]:
         """[(ulid, header, snippet)] matching every filter, newest source first.
@@ -451,7 +464,9 @@ class Index:
         it is shorter than three characters, which trigram cannot match).
         """
         texts = [normalize(value) for path, _op, value in filters if path == (h.TEXT_KEY,)]
-        others = [f for f in filters if f[0] != (h.TEXT_KEY,)]
+        others = [f for f in filters if f[0] not in ((h.TEXT_KEY,), ("cloud",))]
+        # `cloud=no|yes` asks about the marker, which is not in the header (T1 3.4)
+        clouds = {value for path, _op, value in filters if path == ("cloud",)}
         kw = texts[0] if texts else ""
         if not kw:
             rows = self.db.execute("SELECT ulid, header, body FROM sessions")
@@ -465,6 +480,8 @@ class Index:
                 "WHERE fts MATCH ?", (phrase,))
         hits = []
         for ulid, hdr_json, body in rows:
+            if clouds and (("no" in clouds) == self.cloud_has(ulid)):
+                continue        # the marker says the other thing
             hdr = h.upgrade(json.loads(hdr_json))
             if all(t in body for t in texts[1:]) and all(_matches(hdr, *f) for f in others):
                 hits.append((ulid, hdr, _snippet(body, kw)))

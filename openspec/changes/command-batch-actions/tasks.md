@@ -5,6 +5,7 @@
 - [x] 1.3 delete：刪除成功時記到 `<state>/deleted`，重跑時只略過記錄裡的；打錯的 id 照樣找不到（「delete 重跑略過已刪除」）
 - [x] 1.4 merge：要約存到 `<state>/merge-sections/`，鍵含 agent、提示詞版本、模型設定、來源 id、實際送出文字的雜湊；沿用前再驗 schema（「merge 沿用已寫好的要約」）
 - [x] 1.5 單元測試：上面四項各自的情境（含中斷後重跑）
+- [x] 1.6 review T1-sec1：S1-1 exit code 取第一個非零、S1-2 單一 id 的 InputError 維持 exit 1、S1-3 批次只同步一次（index 傳給 `_import_one`）；順手修 S1-6（訊息說重跑會接著做）、S1-9（快取暫存檔用唯一名）
 
 ## 2. pull／push（impl1）
 
@@ -25,11 +26,11 @@
 - [x] 3.1 索引記「雲端沒有」，與 outbox（未上傳）分開；只有列檔完整成功才更新標記；索引版本不同就重建（「雲端沒有的 Session 保留在本機並標記」，Q2、Q4）
 - [x] 3.2 `pull --not-exist-delete`、`push --not-exist-upload`；都沒加時只提醒；outbox 與接續中的不刪（「只在明確要求時刪除或復活」）
 - [ ] 3.3 continue、edit、import 的更新路徑遇到雲端沒有的就拒絕並提示兩個選擇（「其他指令遇到雲端沒有的 Session」，Q1）
-- [ ] 3.4 search／show 標示、`--filter cloud=no|yes`；merge 拒絕雲端沒有的來源；delete 雲端沒有的只刪本機；`children()` 與 import 的對應不計入雲端沒有的（Q3）
+- [x] 3.4 search／show 標示、`--filter cloud=no|yes`；merge 拒絕雲端沒有的來源；delete 雲端沒有的只刪本機；`children()` 與 import 的對應不計入雲端沒有的（Q3, 索引與上傳那半）
 - [ ] 3.5 單元測試：列檔失敗不動標記、別台刪掉被標記、又出現被清除、outbox 不被標記也不被刪、continue 被拒絕、search 的 filter
 
 ## 4. 收尾（PM 驗收，review 審）
 
-- [ ] 4.1 `docs/design.md`（5.2、5.3、5.6、5.10）與 README 更新
-- [ ] 4.2 整合測試（只用 `agora-test`、自編短對話）：pull、push、import 多個，實跑通過
+- [ ] 4.1 `docs/design.md`（5.2、5.3、5.6、5.10）與 README 更新（**部分完成**：5.2／5.3／5.6／5.10 與 README 的指令已更新，design 5.10 的「雲端沒有」只留 TODO 指向 specs/session-sync/spec.md，等 impl1 第 3 節）
+- [ ] 4.2 整合測試（只用 `agora-test`、自編短對話）：pull、push、import 多個，實跑通過（**部分完成**：`tests/integration/test_import_batch.py` 的「import 一次多個」已實跑通過；pull／push 等 impl1 的 2.x）
 - [ ] 4.3 review 審程式；PM 驗收；程式碼行數在 2,900 行內
