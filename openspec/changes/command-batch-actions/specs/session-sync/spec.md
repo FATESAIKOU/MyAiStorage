@@ -61,7 +61,7 @@
 - **THEN** X 回到 Drive，下一次同步後標記被清掉
 
 ### Requirement: 其他指令遇到雲端沒有的 Session
-會寫回既有 id 的指令（continue、edit、import 的更新路徑，以及互動模式裡的對應動作）遇到雲端沒有的 Session MUST 拒絕（exit 1），並提示 `agora push session X --not-exist-upload` 或 `agora pull session X --not-exist-delete`。search 與 show MUST 標出「雲端沒有」，search MUST 支援 `--filter cloud=no` 與 `cloud=yes`。merge MUST NOT 接受雲端沒有的 Session 當來源。delete 一個雲端沒有的 Session MUST 只刪本機副本（exit 0）。雲端沒有的 Session MUST NOT 算成別人的子 Session（不擋刪除、不觸發 import 的分岔）。import 的來源對到雲端沒有的那一筆時 MUST 建一個新的 Session。
+會寫回既有 id 的指令（continue、edit，以及互動模式裡的對應動作）遇到雲端沒有的 Session MUST 拒絕（exit 1），並提示 `agora push session X --not-exist-upload` 或 `agora pull session X --not-exist-delete`。search 與 show MUST 標出「雲端沒有」，search MUST 支援 `--filter cloud=no` 與 `cloud=yes`。merge MUST NOT 接受雲端沒有的 Session 當來源。delete 一個雲端沒有的 Session MUST 只刪本機副本（exit 0）。雲端沒有的 Session MUST NOT 算成別人的子 Session（不擋刪除、不觸發 import 的分岔）。import 的來源對到雲端沒有的那一筆時 MUST NOT 寫回它，而是 MUST 建一個新的 Session（使用者接受 review T1 Q3 的建議；review T1-final 指出原本和上一句矛盾）。
 
 #### Scenario: 接續被別台刪掉的
 - **WHEN** X 雲端沒有，執行 `agora continue session X --agent opencode`
