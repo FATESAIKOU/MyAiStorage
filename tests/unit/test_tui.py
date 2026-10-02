@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
@@ -1374,10 +1375,15 @@ def test_interrupting_a_merge_returns_to_the_list_and_says_it_carries_on(group_c
 LEADER = """
 import os, signal, subprocess, sys, time
 signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
+# DEVNULL, not the leader's stdout: the agent agora writes a summary with has its
+# own pipe, so it does not hold the interactive mode's pipe open - and a grandchild
+# that did would keep the leader a zombie, which is what made this test blind to
+# the "only look at the leader" bug (review X1).
 child = subprocess.Popen([sys.executable, "-c", "import signal, time\\n"
                          "signal.signal(signal.SIGINT, signal.SIG_IGN)\\n"
                          "signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
-                         "time.sleep(300)"])
+                         "time.sleep(300)"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 # its own file, not stdout: the waiting window's reader thread owns that pipe
 open(sys.argv[1], "w").write(f"{os.getpgid(0)} {child.pid}")
 time.sleep(300)
@@ -1446,7 +1452,11 @@ def test_esc_stops_a_real_process_group_with_a_stubborn_grandchild(monkeypatch, 
                 raise AssertionError("process group 還在")
             except ProcessLookupError:
                 pass                     # the group is empty: nothing was left running
-    _run(go)
+    try:
+        _run(go)
+    finally:                            # a failed assertion must not leave it sleeping
+        with contextlib.suppress(ProcessLookupError, KeyError, OSError):
+            os.killpg(pids["pgid"], signal.SIGKILL)
 
 
 def test_each_step_of_the_escalation_gets_its_own_time(group_calls, monkeypatch):
