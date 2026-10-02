@@ -1,4 +1,5 @@
-**第二次修正確認（2026-10-03，見最後一節）：F1（High）已經在 7029b68 修好，沒有 High 了。** 帶進了一個新的 Medium（G1：一筆收不了尾的 pending 會讓 delete 永遠被擋），另外 F3、F6 的測試還是測不到。
+**第三次修正確認（2026-10-03，見最後一節）：G1、G3 修對了，沒有 High。** 但 G1 讓 `_finish` 裡看標記的那一行變成了**唯一**的保護，卻沒有測試（H1，Medium，實測拿掉它 X 會復活）；F6、F8 的測試還是測不到。
+~~第二次修正確認（2026-10-03，見最後一節）：F1（High）已經在 7029b68 修好，沒有 High 了。 帶進了一個新的 Medium（G1：一筆收不了尾的 pending 會讓 delete 永遠被擋），另外 F3、F6 的測試還是測不到。~~（G1 已修）
 ~~第一次修正確認：有 1 個 High（F1：離線時 continue 一個已經標成雲端沒有的 Session，會把它寫回雲端）。~~（已修）
 
 **沒有 High。** 有 3 個 Medium：寫回之前的「雲端沒有」判斷最舊可能是 5 分鐘前的（M1）、`pull --not-exist-delete` 對 agent 的 id 會**無條件**刪掉快取（M2）、索引版本重建只有在「索引是空的」時才會觸發（M3）。
@@ -197,3 +198,76 @@ continue X → 沒有被拒絕，agent 打開 → 存進 outbox（exit 3）→ �
 - 精簡的部分（`_listing` 用回傳 StoreError 物件來表示離線、pull 在遇到第一個 agora id 時才列 Drive、`_absent`、`_split_ids`）：行為沒有變；`_split_ids` 讓 pull 和 push 也會 strip 了，順便修好了 T1-size L4 提到的那個 `"a, b"` 的小 bug ✅。
 
 **結論**：F1（High）和 F4 都修對了，探測和 mutation 都證實。F2、F3、F5、F7 也修對了。F4 帶進了 **G1（Medium）**：一筆收不了尾的 pending 會讓 delete 永遠被擋，建議在驗收之前修。F3 和 F6 的測試還是測不到它們要保護的東西（G4）。G3 是之前就有的問題，可以和 G1 一起修。
+
+## 第三次修正確認（2026-10-03）
+
+對象：`9e56116`（G1、G3、G4）。在 `git archive 9e56116` 取出的副本跑單元測試：**393 passed**。做了 9 個 mutation，並在副本裡加了探測測試，repo 沒有動（工作目錄裡的 `store.py` 有別人還沒 commit 的改動，我沒有碰，量測也不包含它）。沒有跑整合測試，沒有碰 Drive，也沒有讀任何真實的 Session。
+
+### G1：用 flock 判斷「真的有人在接續」✅
+
+`store.continuing()` 改成：檔案不在 → False；用 `LOCK_EX | LOCK_NB` 拿得到鎖 → False（是留下來的記錄）；拿不到 → True。我直接測了五種情況，都對：
+
+| 情況 | `continuing()` |
+|---|---|
+| 有記錄，沒有人拿著鎖 | False |
+| 同一個程序用另一個 fd 拿著鎖（flock 是以 open file description 為單位，所以一樣會衝突） | True |
+| agora 關掉了自己的 fd，但繼承了鎖的 agent 子程序還活著（C1） | True |
+| 子程序也結束了 | False |
+| 記錄不在 | False |
+
+delete 遇到真的在接續的 → 拒絕；遇到留下來的記錄 → 印出「有一筆中斷的接續沒補存成功（路徑），照樣刪」，然後照常刪除。上一次的探測（`ses_gone` 那一筆讓 delete 永遠被擋）現在可以刪了，新的測試 `test_delete_goes_through_when_the_pending_record_is_a_leftover` 也測到了這一點。
+
+### G3：沒有 `sessions/` 時，`--not-exist-delete` 不刪 ✅
+
+`_pull_agora` 依序檢查 outbox、接續中，最後是 `remote is None`，遇到時丟出「不能確定它是被刪掉的」，本機的副本留著。測試有。
+
+### Mutation（每次只拿掉一個修正）
+
+| 拿掉的修正 | 結果 |
+|---|---|
+| G1：`continuing()` 改回「檔案存在就算」 | **被抓到**（`test_delete_goes_through_when_the_pending_record_is_a_leftover`） |
+| G1：`continuing()` 不看鎖，一律回傳 False | **被抓到**（`test_delete_refuses_a_session_that_is_being_continued`） |
+| G3：沒有 `sessions/` 的那個判斷 | **被抓到** |
+| F2：`remote is not None` | **被抓到**（新的 `test_continue_and_edit_survive_a_drive_without_a_sessions_folder`） |
+| F3：`_lost_in_cloud` 的 outbox 判斷 | **被抓到**（新的測試改用「從來沒上傳成功」的 Session）✅ G4 這一半做到了 |
+| F4：delete 的接續中判斷 | **被抓到** |
+| F6：`mark_missing` 排除 outbox | **還是沒被抓到**，原因見 H2 |
+| F8：edit 存檔前再查一次 | **還是沒被抓到**，原因見 H3 |
+| F1：`_finish` 裡看標記的那一行 | **沒被抓到**，但現在這一行很重要，見 H1 |
+
+### H1（Medium）：G1 讓 `_finish` 的標記判斷變成唯一的保護，卻沒有測試
+
+以前，接續中的記錄（只要檔案存在）會讓那個 Session **永遠不被標記**，所以 `_finish` 裡看標記的那一行實際上走不到（第二次確認時我說「可以接受」）。G1 之後，**留下來的記錄不再擋標記**，於是有了這條路：接續被中斷（agora 和 agent 都死了）→ 別台機器刪掉 X → 這台機器做一次完整同步，**X 被標記** → 之後在**離線**的時候 `recover_pending` 把那筆接續收尾。這時 `_lost_in_cloud` 因為離線而回傳 False，**只有標記**能讓 `_finish` 改成另存 Y。
+
+我實測了這條路（探測測試，fake rclone 和 fake agent）：
+
+| | 有沒有標記 | 恢復連線之後 X 有沒有回到 Drive |
+|---|---|---|
+| `9e56116` | True | **False** ✅（另存成 Y） |
+| 拿掉 `_finish` 裡的 `not index.cloud_has(ulid)` | True | **True** ❌（X 復活了） |
+
+程式現在是對的，但這是 Q1 那一類的保證，卻沒有測試在守著它。**建議**：把這個探測測試（步驟就是上面那幾步）正式加進 `test_cli.py`。
+
+### H2（Low）：F6 的 mutation 抓不到，是因為它本來就是「等價的 mutant」
+
+這一次補了兩個測試，但兩個都抓不到，原因不一樣：
+
+1. `test_a_session_in_the_outbox_is_not_marked`：就算拿掉排除，sync 在 `mark_missing` **之後**還會跑 `_index_outbox` → `remember` → `Index.put` → `drop`，而 **`drop` 會把那一筆的標記一起刪掉**，所以 sync 回傳的時候，標記已經沒了。也就是說，對一個讀得到的 outbox Session 來說，那個排除是**多出來的一層保險**，拿掉它，對外看得到的結果也一樣。
+2. `test_a_staged_session_the_index_cannot_read_is_not_marked_either`：它的 docstring 說「沒有這個排除就會被標記」，**這不正確**。壞掉的 session.md 在標記之前，就已經被 `push_outbox` 的 `read_entry` 擋下、移到 `outbox/.bad` 了（實測：sync 之後 `staged: False`、`quarantined: [ulid]`、`in index: False`）。它不在 outbox，也不在索引裡，本來就不可能被標記。
+
+**建議**：二選一。(a) 接受它是保險，在 `sync` 的註解寫明「`_index_outbox` 也會清掉標記，這個排除是為了不讓標記短暫出現」，並刪掉第二個測試，或者至少改掉它不正確的 docstring；(b) 想測就直接測 `mark_missing` 收到的參數（spy 一下 `Index.mark_missing`），斷言 staged 的 ulid 不在裡面，這樣拿掉排除就會失敗。
+
+### H3（Low）：F8 的測試在 edit 開始**之前**就刪了
+
+`test_editing_one_the_editor_kept_open_while_it_vanished` 是在呼叫 `edit` **之前**就 `rmtree`，所以第一個 `_refuse_if_gone` 就已經拒絕了，存檔前的那一次檢查根本沒有走到。註解寫的是「the delete happens while it is open」，但 fake 的 `editor()` 裡什麼都沒做。**建議**：把 `rmtree` 搬進 fake 的 `editor()` 裡面。
+
+### 其他
+
+| # | 嚴重度 | 問題 | 建議 |
+|---|---|---|---|
+| H4 | Low | `continuing()` 在 `exists()` 和 `open()` 之間，如果檔案剛好被刪掉（接續剛好結束），`FileNotFoundError` 是 OSError，會被當成「有人拿著鎖」而回傳 True，那一次就會誤判成「正在接續」 | `except FileNotFoundError: return False` 放在 `except OSError` 前面 |
+| H5 | Low | 刪掉一個有留下記錄的 Session 之後，那筆記錄還在；之後如果 `_finish` 有一天成功了（例如 agent 的 session 又讀得到了），就會依 F4b 另存成一個新的 Y（「在這台機器上被刪掉了」）。使用者明明刪掉了，結果冒出一個新的 Session，可能會嚇一跳；而如果它一直收不了尾，每個指令都會再試一次、再印一次失敗 | delete 時把那筆記錄移到 `pending/.bad`（`quarantine`，保留內容，但不再重試），訊息裡說清楚；或者在 design 5.6 寫明這個行為 |
+| H6 | Low | G2（整批 delete 只要有一個在接續中，就整批都不刪）還沒修 | 同第二次確認的建議 |
+| — | — | T1-size 的 D1（每一筆 outbox 上傳兩次）在 `9e56116` 還在；工作目錄裡的 `store.py` 有改動，看起來正在修 | 修好之後，順便看 `_fault` 有沒有一起搬過去 |
+
+**結論**：G1、G3 都修對了，flock 的判斷五種情況都對，mutation 也抓得到。G4 修好了 F2、F3 兩個測試；F6 是等價的 mutant（H2），F8 的測試步驟順序錯了（H3）。G1 帶來的副作用是 **H1（Medium）**：`_finish` 裡看標記的那一行從「走不到」變成了「離線收尾時唯一的保護」，程式是對的，但要補測試。
