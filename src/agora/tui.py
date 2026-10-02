@@ -436,9 +436,15 @@ class Confirm(ModalScreen):
     the local copy of a session Drive no longer has, or putting that session back.
     Both are decisions, so neither is pre-ticked (spec 3.2). Dismisses
     `(index, extra)`, or None on Esc.
+
+    Tab moves between the buttons and the checkbox *here* and nowhere else: the app
+    below binds Tab to changing tab, and a priority binding on the screen wins over
+    it - without that, reaching the checkbox with the keyboard switched the page
+    underneath and left nothing to tick (review S1).
     """
 
-    BINDINGS = [Binding("escape", "dismiss((None, False))", "取消")]
+    BINDINGS = [Binding("escape", "dismiss((None, False))", "取消"),
+                Binding("space", "toggle", "勾選", priority=True)]
 
     def __init__(self, title: str, options: list[str], note: str = "", extra: str = ""):
         super().__init__()
@@ -453,11 +459,25 @@ class Confirm(ModalScreen):
                 yield Checkbox(self.extra, value=False, id="extra")
             if self.note:
                 yield Static(self.note, classes="note")
-            yield Static("Enter 確定   Esc 取消", classes="hint")
+            yield Static("空白 勾選   Enter 確定   Esc 取消", classes="hint")
 
     @on(Checkbox.Changed, "#extra")
     def ticked(self, event: Checkbox.Changed) -> None:
         self.picked = event.value
+
+    def action_toggle(self) -> None:
+        """Space on the checkbox ticks it; on the list there is nothing to tick here."""
+        box = self.query_one("#extra", Checkbox)
+        if self.focused is box:
+            box.toggle()
+
+    def action_focus_next(self) -> None:
+        """Tab and shift+tab move between the buttons and the checkbox (review S1)."""
+        box = self.query_one("#extra", Checkbox)
+        self.query_one("OptionList" if self.focused is box else "#extra").focus()
+
+    def action_focus_previous(self) -> None:
+        self.action_focus_next()      # two things to focus: the other one is the point
 
     @on(OptionList.OptionSelected)
     def chosen(self, event: OptionList.OptionSelected) -> None:
@@ -737,12 +757,23 @@ class AgoraApp(App):
         return True
 
     def action_next_tab(self) -> None:
+        """Tab changes page - unless a window on top wants it for itself.
+
+        The app's priority bindings are checked before the screen's, so a window
+        cannot take a key away by binding it: the app has to hand it over (review S1).
+        """
+        if isinstance(self.screen, Confirm):
+            self.screen.action_focus_next()
+            return
         self.tab = TABS[(TABS.index(self.tab) + 1) % len(TABS)]
         self.say("")
         self.show()
         self.refresh_bindings()
 
     def action_toggle_focus(self) -> None:
+        if isinstance(self.screen, Confirm):
+            self.screen.action_focus_previous()
+            return
         target = "#right" if self.focused is self.query_one("#table") else "#table"
         self.query_one(target).focus()
         self.refresh_bindings()

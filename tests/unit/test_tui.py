@@ -1086,11 +1086,15 @@ def test_pull_and_push_ask_before_doing_it_and_offer_the_flag():   # spec 3.2
             assert isinstance(window, tui.Confirm)
             assert window.extra.startswith("雲端沒有的就刪掉")
             assert not window.picked                     # nothing pre-ticked
-            window.query_one("#extra").focus()
+            await pilot.press("tab")                      # the page below must not change
+            await pilot.pause()
+            assert app.tab == "agora" and isinstance(app.screen, tui.Confirm)
+            from textual.widgets import Checkbox
+            assert isinstance(app.focused, Checkbox)
             await pilot.press("space")                   # tick it
             await pilot.pause()
             assert window.picked
-            window.query_one("OptionList").focus()       # back to the buttons
+            await pilot.press("shift+tab")                # back to the buttons
             await pilot.press("down", "enter")            # 確定
             await _wait(lambda: app._last_spawned, pilot)
             assert app._last_spawned[-1][-1] == "--not-exist-delete"
