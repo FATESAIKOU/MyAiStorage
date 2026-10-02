@@ -1014,6 +1014,8 @@ def test_p_pulls_and_P_pushes():
             await pilot.pause()
             assert app.check_action("pull", ()) and app.check_action("push", ())
             await pilot.press("p")
+            await pilot.pause()
+            await pilot.press("down", "enter")            # 確定 in the confirm window
             await _wait(lambda: app._last_spawned, pilot)
             assert app._last_spawned[-1][:2] == ["pull", "session"]
             await pilot.pause()
@@ -1025,7 +1027,7 @@ def test_p_pulls_and_P_pushes():
             await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
             await pilot.press("P")
             await pilot.pause()
-            assert isinstance(app.screen, tui.Choose)          # push asks first
+            assert isinstance(app.screen, tui.Confirm)          # push asks first
             await pilot.press("escape")
     _run(go)
 
@@ -1068,4 +1070,60 @@ def test_the_cloud_column_says_where_each_session_is():   # spec 3.1
             assert cells["agora:01BBBBBBBBBBBBBBBBBBBBBBBB"][4] == "✗"
             assert cells["agora:01CCCCCCCCCCCCCCCCCCCCCCCC"][4] == "未上傳"
             assert str(table.get_row("agora:01BBBBBBBBBBBBBBBBBBBBBBBB")[-1]) == "✗"
+    _run(go)
+
+
+def test_pull_and_push_ask_before_doing_it_and_offer_the_flag():   # spec 3.2
+    """The option that changes what happens to a session Drive lost is off by
+    default - it is the decision, not the default."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("p")
+            await pilot.pause()
+            window = app.screen
+            assert isinstance(window, tui.Confirm)
+            assert window.extra.startswith("雲端沒有的就刪掉")
+            assert not window.picked                     # nothing pre-ticked
+            window.query_one("#extra").focus()
+            await pilot.press("space")                   # tick it
+            await pilot.pause()
+            assert window.picked
+            window.query_one("OptionList").focus()       # back to the buttons
+            await pilot.press("down", "enter")            # 確定
+            await _wait(lambda: app._last_spawned, pilot)
+            assert app._last_spawned[-1][-1] == "--not-exist-delete"
+    _run(go)
+
+
+def test_pull_without_the_option_sends_no_flag():
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("P")
+            await pilot.pause()
+            assert isinstance(app.screen, tui.Confirm)
+            assert app.screen.extra.startswith("雲端沒的就傳回去")
+            await pilot.press("down", "enter")            # 確定, unticked
+            await _wait(lambda: app._last_spawned, pilot)
+            assert app._last_spawned[-1][:2] == ["push", "session"]
+            assert "--not-exist-upload" not in app._last_spawned[-1]
+    _run(go)
+
+
+def test_cancelling_pull_runs_nothing():
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("p")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not app._last_spawned
     _run(go)

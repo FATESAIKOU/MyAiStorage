@@ -30,7 +30,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Input, OptionList, ProgressBar, Static
+from textual.widgets import Checkbox, DataTable, Input, OptionList, ProgressBar, Static
 
 from agora import cache
 from agora import header as h
@@ -427,6 +427,41 @@ class Busy(ModalScreen):
         except Exception as e:   # shown in the result window, never a traceback over the screen
             error = e
         self.app.call_from_thread(self.dismiss, (value, "\n".join(self.lines), error))
+
+
+class Confirm(ModalScreen):
+    """Cancel or confirm, with one extra option that is off unless asked for.
+
+    The extra option is the one whose default is "do nothing about it": deleting
+    the local copy of a session Drive no longer has, or putting that session back.
+    Both are decisions, so neither is pre-ticked (spec 3.2). Dismisses
+    `(index, extra)`, or None on Esc.
+    """
+
+    BINDINGS = [Binding("escape", "dismiss((None, False))", "取消")]
+
+    def __init__(self, title: str, options: list[str], note: str = "", extra: str = ""):
+        super().__init__()
+        self.title_, self.options, self.note, self.extra = title, options, note, extra
+        self.picked = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="box"):
+            yield Static(self.title_, classes="box-title")
+            yield OptionList(*self.options)
+            if self.extra:
+                yield Checkbox(self.extra, value=False, id="extra")
+            if self.note:
+                yield Static(self.note, classes="note")
+            yield Static("Enter 確定   Esc 取消", classes="hint")
+
+    @on(Checkbox.Changed, "#extra")
+    def ticked(self, event: Checkbox.Changed) -> None:
+        self.picked = event.value
+
+    @on(OptionList.OptionSelected)
+    def chosen(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss((event.option_index, self.picked))
 
 
 class Tell(ModalScreen):
@@ -995,8 +1030,13 @@ class AgoraApp(App):
         if not rows:
             self.say("先選要拉下來的 Session", failed=True)
             return
-        await self.act(f"拉下 {len(rows)} 個", argv_for("pull", rows, None, None)[0],
-                       sent=[r.key for r in rows])
+        argv = argv_for("pull", rows, None, None)[0]
+        answer = await self.push_screen_wait(Confirm(
+            f"把 {len(rows)} 個拉到本機？", ["取消", "確定"], "雲端沒有的會印一行提醒，本機的不動",
+            "雲端沒有的就刪掉本機的（等同 --not-exist-delete）"))
+        if answer and answer[0] == 1:
+            await self.act(f"拉下 {len(rows)} 個", argv + (["--not-exist-delete"] if answer[1] else []),
+                           sent=[r.key for r in rows])
 
     @work
     async def action_push(self) -> None:
@@ -1004,9 +1044,12 @@ class AgoraApp(App):
         if not rows:
             self.say("先選要寫回的 Session", failed=True)
             return
-        if await self.push_screen_wait(Choose(f"把 {len(rows)} 個寫回 Drive？", ["取消", "確定"],
-                                              "同名的檔案直接覆蓋；Drive 上多的不動")) == 1:
-            await self.act("寫回 Drive", argv_for("push", rows, None, None)[0],
+        argv = argv_for("push", rows, None, None)[0]
+        answer = await self.push_screen_wait(Confirm(
+            f"把 {len(rows)} 個寫回 Drive？", ["取消", "確定"], "同名的檔案直接覆蓋；Drive 上多的不動",
+            "雲端沒的就傳回去（等同 --not-exist-upload）"))
+        if answer and answer[0] == 1:
+            await self.act("寫回 Drive", argv + (["--not-exist-upload"] if answer[1] else []),
                            sent=[r.key for r in rows])
 
     @work
