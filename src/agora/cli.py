@@ -324,7 +324,9 @@ def cmd_continue(args, paths: store.Paths) -> int:
     src = agora.get("source") or {}
     workdir = Path(args.dir or (src.get("dir") if src.get("dir") and Path(src["dir"]).is_dir() else os.getcwd()))
     workdir = workdir.expanduser().resolve()   # C5
-    print(f"[agora] 工作目錄：{workdir}", file=sys.stderr)
+    fallback = not args.dir and not (src.get("dir") and Path(src["dir"]).is_dir())
+    print(f"[agora] 工作目錄：{workdir}" + ("（來源沒有記錄目錄，用目前目錄；要換地方請加 --dir）" if fallback else ""),
+          file=sys.stderr)
     native = agora.get("relation") != "merge" and src.get("agent") == agent.name and agora.get("raw")
     parent_md5 = (agora.get("raw") or {}).get("md5")
     if native:
