@@ -854,3 +854,94 @@ def test_space_marks_without_moving_the_cursor():
             await pilot.pause()
             assert app.query_one("#table").cursor_row == before
     _run(go)
+
+
+# --- review M1: only the marks of the rows that actually went (T2 2.4) --------
+
+
+def _two_tab_app():
+    """One agent session on each agent, so the import tab has two segments."""
+    agent = FakeAgent("opencode", [Listed("s1", "/tmp/p", "甲", None)], texts={"s1": ["問"]})
+    agent2 = FakeAgent("claude", [Listed("c1", "/tmp/r", "乙", None)], texts={"c1": ["問"]})
+    paths, _ = _index((_hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "已在 agora", sid="ses_in"), "## user\\nx\\n"))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[agent, agent2], check_setup=False)
+    app.spawn, started = _spawn()
+    app._last_spawned = started
+    return app, started
+
+
+def _spawn_per_call(codes):
+    """A spawn whose processes return the given exit codes, one per call."""
+    made: list[FakeProc] = []
+
+    def spawn(argv):
+        proc = FakeProc(lines=["[agora] 匯入 1/1"], code=codes[min(len(made), len(codes) - 1)])
+        made.append(proc)
+        return proc
+    return spawn, made
+
+
+async def _close_result(pilot, app):
+    for _ in range(80):
+        await pilot.pause(0.05)
+        if isinstance(app.screen, tui.Tell):
+            break
+    await pilot.press("space")
+
+
+def test_a_failed_segment_keeps_its_own_marks():
+    """M1(a): opencode imported, claude failed - claude's row is still marked."""
+    app, _ = _two_tab_app()
+    app.spawn, _mades = _spawn_per_call([0, 2])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("tab")                          # 未匯入
+            await pilot.pause()
+            await pilot.press("space", "down", "space")        # mark both agents' rows
+            assert app.marked == {"opencode:s1", "claude:c1"}
+            await pilot.press("enter")
+            await _close_result(pilot, app)                     # the opencode segment
+            await _close_result(pilot, app)                     # the claude one, which failed
+            assert app.marked == {"claude:c1"}                  # that row is still marked
+    _run(go)
+
+
+def test_a_failure_on_one_tab_keeps_the_other_tabs_marks():
+    """M1(b): the import tab's mark is not this command's business."""
+    app, _ = _two_tab_app()
+    app.spawn, _mades = _spawn_per_call([2])
+    keys = {r.key for r in app.rows["agora"]}
+    app.marked = set(keys)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _close_result(pilot, app)
+            assert set(app.marked) == keys
+    _run(go)
+
+
+def test_a_success_clears_only_the_rows_it_acted_on():
+    """M1(c): the row the filter hid was not sent, so its mark stays."""
+    app = _marked_app(None)
+    app.spawn, _started = _spawn_per_call([0])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            for _ in range(3):
+                await pilot.press("space", "down")            # mark all three
+            await _filter_to(pilot, "甲")
+            await _wait(lambda: len(app.shown()) == 1, pilot)
+            hidden = set(app.marked) - {r.key for r in app.shown()}
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _close_result(pilot, app)
+            assert set(app.marked) == hidden                   # only the hidden one is left
+    _run(go)

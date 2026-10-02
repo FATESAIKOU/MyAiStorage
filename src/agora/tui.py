@@ -547,7 +547,8 @@ class AgoraApp(App):
         if not keep_marked:
             self.marked.clear()
         else:
-            self.marked &= {r.key for r in self.rows[self.tab]}   # only rows that are still there
+            # Only rows that are gone go; a mark on either tab survives (review M1)
+            self.marked &= {r.key for tab in TABS for r in self.rows[tab]}
         self.cache.clear()
         self.show()
 
@@ -794,13 +795,17 @@ class AgoraApp(App):
             bufsize=1, start_new_session=True,
             env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"})
 
-    async def act(self, title: str, argv: list[str]) -> bool:
+    async def act(self, title: str, argv: list[str], sent: list[str] | None = None) -> bool:
         """One command in a child process, under a window with its progress and Esc.
 
         Says whether it was stopped, so a caller with more than one command does not
-        start the next one after an interruption (review M2) - and clears the
-        selection only when the command succeeded, so a failure can be run again by
-        pressing the same key (spec「成功後清掉勾選」).
+        start the next one after an interruption (review M2).
+
+        `sent` is the rows this command acted on, and only their marks are cleared
+        when it succeeded (spec「成功後清掉勾選」, review M1). Everything else stays:
+        the rows of a segment that failed, the rows on the other tab, and the rows
+        the filter hid - none of them took part in this command, so none of them
+        should quietly lose their mark.
 
         Re-running the same action carries on from where it stopped (design 5.11):
         the command mode is the one that knows how to skip what is already done.
@@ -821,7 +826,10 @@ class AgoraApp(App):
             note = "沒有全部成功，訊息在下面"
         await self.push_screen_wait(Tell(f"{title}{'（已中斷）' if stopped else ''}",
                                          f"{note}\n\n{out}", code == 0))
-        self.reload(keep_marked=code != 0)
+        self.reload(keep_marked=True)
+        if code == 0 and sent:
+            self.marked -= set(sent)
+            self.show()
         self.say(note, failed=code != 0)
         return stopped
 
@@ -870,7 +878,8 @@ class AgoraApp(App):
             for agent in dict.fromkeys(r.agent for r in rows):
                 mine = [r for r in rows if r.agent == agent]
                 if await self.act(f"匯入 {len(mine)} 個（{agent}）",
-                                  argv_for("import", mine, None, None)[0]):
+                                  argv_for("import", mine, None, None)[0],
+                                  sent=[r.key for r in mine]):
                     break      # Esc means stop this action, not half of it (review M2)
             return
         row = self.current()
@@ -910,7 +919,8 @@ class AgoraApp(App):
         pick = await self.push_screen_wait(Choose(f"合併 {len(rows)} 個：由誰寫要約？", ["opencode", "claude"],
                                                   "每個來源叫一次 AI；內容會送到那個 agent 的模型供應商"))
         if pick is not None:
-            await self.act("合併", argv_for("merge", rows, ("opencode", "claude")[pick], None)[0])
+            await self.act("合併", argv_for("merge", rows, ("opencode", "claude")[pick], None)[0],
+                           sent=[r.key for r in rows])
 
     def action_mark_all(self) -> None:
         """`a`: mark every row on screen, or unmark them if they all are.
@@ -943,7 +953,8 @@ class AgoraApp(App):
         if not rows:
             self.say("先選要拉下來的 Session", failed=True)
             return
-        await self.act(f"拉下 {len(rows)} 個", argv_for("pull", rows, None, None)[0])
+        await self.act(f"拉下 {len(rows)} 個", argv_for("pull", rows, None, None)[0],
+                       sent=[r.key for r in rows])
 
     @work
     async def action_sync(self) -> None:
@@ -953,7 +964,8 @@ class AgoraApp(App):
             return
         if await self.push_screen_wait(Choose(f"把 {len(rows)} 個寫回 Drive？", ["取消", "確定"],
                                               "同名的檔案直接覆蓋；Drive 上多的不動")) == 1:
-            await self.act("寫回 Drive", argv_for("push", rows, None, None)[0])
+            await self.act("寫回 Drive", argv_for("push", rows, None, None)[0],
+                           sent=[r.key for r in rows])
 
     @work
     async def action_delete(self) -> None:
@@ -962,7 +974,8 @@ class AgoraApp(App):
             return
         listed = "\n".join(f"{r.key}「{r.cells[1]}」" for r in rows[:6]) + ("\n…" if len(rows) > 6 else "")
         if await self.push_screen_wait(Choose(f"把 {len(rows)} 個移到 Drive 垃圾桶？", ["取消", "確定"], listed)) == 1:
-            await self.act(f"刪除 {len(rows)} 個", argv_for("delete", rows, None, None)[0])
+            await self.act(f"刪除 {len(rows)} 個", argv_for("delete", rows, None, None)[0],
+                           sent=[r.key for r in rows])
 
 
 def main(paths: store.Paths) -> int:
