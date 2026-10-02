@@ -31,5 +31,5 @@
 - [x] 4.2 `docs/design.md` 5.9 更新（子程序與進度條、Esc 中斷的階梯、勾選規則與 `a` 全選、雲端欄與 pull／push 的兩個選項、按鍵表；順手刪掉 5.10 重複的一句 import 敘述）
 - [x] 4.2d review T2-final W3（進度只讀自己那一行）、S3（「雲端沒的」錯字）
 - [x] 4.2c review T2-final W2：`a` 全選不動隱藏的勾選、確認視窗直接 Enter 是取消
-- [x] 4.2b review T2-final W1（升級時間）、W2（兩個安全的預設）、W3（進度只讀自己那一行）、S3（錯字）
+- [x] 4.2b review T2-final W1：升級的第 n 步等 ESCALATE_AFTER*n，刪掉重複定義的 ESCALATION
 - [ ] 4.3 PM 用假資料在 pane 操作一遍；review 審程式
