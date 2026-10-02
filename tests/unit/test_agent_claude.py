@@ -850,3 +850,10 @@ def test_odd_lines_do_not_break_listing_or_preview(claude_env):  # review U1
     listed = C.ADAPTER.list_sessions()                       # no exception; the odd file is just left out
     assert all(s.session_id != odd for s in listed)
     assert C.ADAPTER.last_message(odd) is None
+
+
+def test_search_text_goes_on_past_an_odd_line(claude_env):
+    odd = "dddddddd-4444-4444-8444-444444444444"
+    (claude_env["proj"] / f"{odd}.jsonl").write_text(
+        '["type","user"]\n{"type":"user","message":{"content":"找得到的字"}}\n', encoding="utf-8")
+    assert odd in list(C.ADAPTER.search_text("找得到"))

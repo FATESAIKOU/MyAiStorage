@@ -536,13 +536,13 @@ class ClaudeAgent:
                             o = json.loads(line)
                         except ValueError:
                             continue
-                        if _is_noise(o):
+                        if not isinstance(o, dict) or _is_noise(o):   # one odd line must not end the search
                             continue
                         text = _line_text(o)
                         if text and needle in normalize(text):
                             yield path.stem
                             break
-            except OSError:
+            except (OSError, ValueError, TypeError, AttributeError):
                 continue
 
     def summarize(self, prompt: str, workdir: Path) -> tuple[str, str | None]:
