@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -162,6 +163,20 @@ def _header_for(index: store.Index, agora_id: str) -> dict:
     return hdr
 
 
+def _need_in_cloud(index: store.Index, agora_id: str) -> None:
+    """Refuse to write to a session Drive no longer has (T1 3.3, Q1).
+
+    It was deleted on another machine; writing to it here would put it back on the
+    next sync, which is the user's decision to make, not ours. The interactive mode
+    runs these same commands, so one check covers it too (design.md, T1).
+    """
+    if index.cloud_has(_ulid_of(agora_id)):
+        return
+    raise InputError(f"{agora_id} 雲端沒有（別台機器刪掉了），不再寫回去；"
+                     f"要傳回去用 agora push session {agora_id} --not-exist-upload，"
+                     f"要刪掉本機這份用 agora pull session {agora_id} --not-exist-delete")
+
+
 def _body_for(paths: store.Paths, agora_id: str) -> str:
     _, body = h.split_document((paths.mirror / _ulid_of(agora_id) / "session.md").read_text(encoding="utf-8"))
     return body
@@ -197,6 +212,8 @@ def cmd_search(args, paths: store.Paths) -> int:
         seen[key] = f"agora:{ulid}"
         date = store.sort_date(hdr)[:10]
         mark = "  (未上傳)" if ulid in outbox else ""
+        if not index.cloud_has(ulid):
+            mark += "  (雲端沒有)"      # T1 3.4: the row is here, Drive's copy is not
         text = snippet or str(hdr.get("title") or "")
         print(f"agora:{ulid}  {date}  {source.get('agent') or agora.get('relation')}  {text}{mark}")
     return 0
@@ -386,6 +403,7 @@ def cmd_merge(args, paths: store.Paths) -> int:
     parents, parent_headers, sections, models = [], [], [], set()
     for k, agora_id in enumerate(ids, 1):
         agora_id = f"agora:{_ulid_of(agora_id)}"
+        _need_in_cloud(index, agora_id)      # a summary of a deleted session is not a session
         parent = _header_for(index, agora_id)
         agora = h.agora_of(parent)
         _progress("來源", k, len(ids), agora_id)
@@ -587,6 +605,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
     updates = _updates(args)
     source_id = _the_id(args)
     index = _sync_for(paths, [source_id])
+    _need_in_cloud(index, source_id)          # T1 3.3: no agent is opened for it
     parent = _header_for(index, source_id)
     agora = h.agora_of(parent)
     src = agora.get("source") or {}
@@ -701,7 +720,13 @@ def cmd_delete(args, paths: store.Paths) -> int:
         for agora_id in ready:
             done += 1
             _progress("刪除", done, total)
-            store.delete_session(paths, store.Drive(paths), _ulid_of(agora_id))
+            if index.cloud_has(_ulid_of(agora_id)):
+                store.delete_session(paths, store.Drive(paths), _ulid_of(agora_id))
+            else:
+                # Drive does not have it (T1 3.4): the local copy is the whole of it
+                store.forget_local(paths, _ulid_of(agora_id))
+                shutil.rmtree(paths.outbox / _ulid_of(agora_id), ignore_errors=True)
+                print(f"[agora] {agora_id} 雲端沒有，只刪本機這份", file=sys.stderr)
             _remember_deleted(paths, _ulid_of(agora_id))
             print(agora_id)
             left.remove(agora_id)
@@ -735,6 +760,7 @@ def _remember_deleted(paths: store.Paths, ulid: str) -> None:
 def cmd_edit(args, paths: store.Paths) -> int:
     agora_id = _the_id(args)
     index = _sync_for(paths, [agora_id])
+    _need_in_cloud(index, agora_id)
     old = _header_for(index, agora_id)
     body = _body_for(paths, agora_id)
     updates = _updates(args)
@@ -776,6 +802,10 @@ def cmd_show(args, paths: store.Paths) -> int:
     agora_id = _the_id(args)
     index = _sync_for(paths, [agora_id])
     hdr = _header_for(index, agora_id)
+    if not index.cloud_has(_ulid_of(agora_id)):
+        print(f"[agora] {agora_id} 雲端沒有（別台機器刪掉了）；"
+              f"agora push session {agora_id} --not-exist-upload 傳回去，"
+              f"agora pull session {agora_id} --not-exist-delete 刪掉本機這份", file=sys.stderr)
     if args.raw:
         sys.stdout.buffer.write(store.fetch_raw(paths, store.Drive(paths), _ulid_of(agora_id), hdr))
         return 0

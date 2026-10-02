@@ -906,3 +906,80 @@ def test_delete_several_refuses_only_those_with_children_left(env, capsys):
     _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
     code, out, err = run(capsys, "delete", "session", a, c, "--yes")    # a still has m as a child
     assert code == 1 and out == c and f"{a} 有子 Session" in err
+
+
+# --- T1 3.3 / 3.4 / 3.5: a session Drive no longer has -----------------------
+
+
+def _lost_in_the_cloud(capsys):
+    """Import one, then have it deleted on another machine and synced here.
+
+    store.sync directly rather than through a command: the throttle would let the
+    import's own sync stand in for the one that has to notice.
+    """
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    shutil.rmtree(Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid)
+    assert store.sync(store.Paths.from_env()).missing_in_cloud() == [ulid]
+    return a, ulid
+
+
+def test_search_marks_what_the_cloud_does_not_have(env, capsys):
+    a, _ = _lost_in_the_cloud(capsys)
+    code, out, _ = run(capsys, "search", "session", "--filter", "text~=CSV", "--no-sync")
+    line = next(line for line in out.splitlines() if line.startswith(a))
+    assert code == 0 and line.endswith("(雲端沒有)")
+
+
+def test_search_can_ask_for_it(env, capsys):
+    a, ulid = _lost_in_the_cloud(capsys)
+    code, out, _ = run(capsys, "search", "session", "--filter", "cloud=no")
+    assert code == 0 and any(line.startswith(a) for line in out.splitlines())
+    code, out, _ = run(capsys, "search", "session", "--filter", "cloud=yes")
+    assert code == 0 and not any(line.startswith(f"agora:{ulid}") for line in out.splitlines())
+
+
+def test_show_says_it_is_not_in_the_cloud(env, capsys):
+    a, _ = _lost_in_the_cloud(capsys)
+    code, out, err = run(capsys, "show", "session", a)
+    assert code == 0 and "雲端沒有" in err and "not-exist-upload" in err
+
+
+def test_continue_refuses_a_session_the_cloud_lost(env, capsys):
+    """Q1: the agent must not even be opened - writing would put the session back."""
+    a, _ = _lost_in_the_cloud(capsys)
+    code, _, err = run(capsys, "continue", "session", a, "--agent", "opencode")
+    assert code == 1 and "雲端沒有" in err and "--not-exist-upload" in err
+    assert not env.launched
+
+
+def test_edit_refuses_a_session_the_cloud_lost(env, capsys):
+    a, _ = _lost_in_the_cloud(capsys)
+    code, _, err = run(capsys, "edit", "session", a, "--header", "title=改了")
+    assert code == 1 and "雲端沒有" in err
+
+
+def test_merge_refuses_a_source_the_cloud_lost(env, capsys):
+    a, _ = _lost_in_the_cloud(capsys)
+    env.sessions["ses_b"] = ["另一個", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert code == 1 and "雲端沒有" in err
+    assert not env.launched
+
+
+def test_delete_of_one_the_cloud_lost_removes_only_the_local_copy(env, capsys):
+    a, ulid = _lost_in_the_cloud(capsys)
+    code, out, err = run(capsys, "delete", "session", a, "--yes")
+    assert code == 0 and out.strip() == a and "只刪本機這份" in err
+    assert store.Index(store.Paths.from_env()).header(ulid) is None
+
+
+def test_importing_the_same_source_again_makes_a_new_session(env, capsys):
+    """The old one is a copy of something another machine deleted; overwriting it
+    would write over the deletion."""
+    a, ulid = _lost_in_the_cloud(capsys)
+    code, out, _ = run(capsys, "import", "session", "--external-session-id", "ses_a",
+                       "--agent", "opencode")
+    assert code == 0 and out.strip() != a
+    assert store.Index(store.Paths.from_env()).header(ulid) is not None   # the old one stays
