@@ -82,7 +82,7 @@ agora show session agora:01K6… --raw
 | Drive `agora/sessions/<ULID>/` | `session.md`（header＋閱讀版）、`raw-<md5>.json`（原始匯出） |
 | `~/.config/agora/` | `rclone.conf`、`config.json` |
 | `~/.cache/agora/` | 鏡像與搜尋索引，刪掉也會重建 |
-| `~/.local/state/agora/` | `outbox/`（還沒上傳成功的）、`pending/`（接續中的）、`*/.bad/`（讀不了的壞檔，每個指令都會提示）、`reading/`（注入用的閱讀版，接續結束就刪）——**不要刪** |
+| `~/.local/state/agora/` | `outbox/`（還沒上傳成功的）、`pending/`（接續中的）、`*/.bad/`（讀不了的壞檔，每個指令都會提示）——**不要刪** |
 
 ## 測試
 

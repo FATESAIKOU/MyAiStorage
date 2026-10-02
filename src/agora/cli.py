@@ -329,18 +329,13 @@ def cmd_continue(args, paths: store.Paths) -> int:
           file=sys.stderr)
     # ① the raw sessions this one is made of, ② the target adapter turns them
     # into its own format, ③ one way to load it (design v5, 5.4).
-    segments = _raw_segments(paths, index, source_id)
-    parent_md5 = (agora.get("raw") or {}).get("md5")
+    segments = _raw_segments(paths, index, source_id, seen=set())
+    # Record what we really continued from (C9): the raw itself for one segment, nothing for a merge.
+    parent_md5 = store.hashlib.md5(segments[0][2]).hexdigest() if len(segments) == 1 else None
     if len(segments) == 1 and segments[0][0] == agent.name:
         raw = segments[0][2]
-        parent_md5 = store.hashlib.md5(raw).hexdigest()   # what we really continued from (C9)
     else:
-        turns = []
-        for seg_agent, seg_id, seg_raw in segments:
-            if len(segments) > 1:
-                turns.append(("user", [f"（以下來自 {seg_id}）"]))
-            turns.extend(load_agent(seg_agent).turns(seg_raw))
-        raw = agent.native(merge_turns(turns))
+        raw = agent.native(_converted_turns(segments))
     launch = agent.start_native(raw, workdir)
     record = {
         "agora_id": f"agora:{h.new_ulid(int(store.now() * 1000))}", "agent": agent.name,
@@ -374,10 +369,38 @@ def cmd_continue(args, paths: store.Paths) -> int:
     return _emit(saved)
 
 
-def _raw_segments(paths: store.Paths, index: store.Index, agora_id: str, depth: int = 0) -> list[tuple[str, str, bytes]]:
-    """[(agent, agora id, raw)] a session is made of: its own raw, or for a merge its parents' in order."""
-    if depth > 20:
-        raise InputError(f"{agora_id} 的 merge 層數太深")
+CONVERTED_NOTE = ("（以下是從其他 Session 轉過來的對話紀錄。[tool] 開頭的行只是當時工具呼叫的摘要，"
+                  "不是這次執行的結果；需要時請重新執行。）")
+NO_REPLY = "（這一段在這裡結束，當時沒有回覆）"
+
+
+def _converted_turns(segments: list[tuple[str, str, bytes]]) -> list[tuple[str, list[str]]]:
+    """Alternating turns for a target agent built from other sessions (design v5, 5.4; review W1, W2, W6).
+
+    A segment that ends on an unanswered question gets a placeholder reply, so
+    the question never fuses with the next segment's marker.
+    """
+    turns: list[tuple[str, list[str]]] = [("user", [CONVERTED_NOTE])]
+    for seg_agent, seg_id, seg_raw in segments:
+        turns.append(("user", [f"（以下來自 {seg_id}，原本是 {seg_agent} 的對話）"]))
+        seg = [(role, [line for line in lines if not line.startswith("[skip ")])
+               for role, lines in load_agent(seg_agent).turns(seg_raw)]
+        seg = merge_turns(seg)
+        turns.extend(seg)
+        if seg and seg[-1][0] == "user":
+            turns.append(("assistant", [NO_REPLY]))
+    return merge_turns(turns)
+
+
+def _raw_segments(paths: store.Paths, index: store.Index, agora_id: str,
+                  seen: set[str]) -> list[tuple[str, str, bytes]]:
+    """[(agent, agora id, raw)] a session is made of: its own raw, or for a merge its parents' in order.
+
+    A session reached twice (a diamond of merges) is used once; a cycle is an error (W3).
+    """
+    if agora_id in seen:
+        return []
+    seen.add(agora_id)
     hdr = _header_for(index, agora_id)
     agora = h.agora_of(hdr)
     if agora.get("raw"):
@@ -387,7 +410,7 @@ def _raw_segments(paths: store.Paths, index: store.Index, agora_id: str, depth: 
         raise InputError(f"{agora_id} 沒有原始紀錄，也沒有來源可以接")
     segments = []
     for parent in agora["parents"]:
-        segments.extend(_raw_segments(paths, index, parent["id"], depth + 1))
+        segments.extend(_raw_segments(paths, index, parent["id"], seen))
     return segments
 
 

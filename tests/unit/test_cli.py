@@ -477,3 +477,35 @@ def test_continue_a_merge_of_a_merge_gathers_every_raw(env, capsys):  # design v
     for text in ("把 CSV 轉成 Markdown 表格", "讀取 CSV", "輸出表格"):
         assert text in loaded
     assert loaded.index("把 CSV") < loaded.index("讀取 CSV") < loaded.index("輸出表格")
+
+
+def test_converted_continue_marks_sources_and_keeps_boundaries(env, capsys):  # review W1, W2
+    env.sessions["ses_q"] = ["只有一個沒被回答的問題"]          # ends with a user turn
+    _, q, _ = run(capsys, "import", "session", "--external-session-id", "ses_q", "--agent", "opencode")
+    _, a, _ = _import(capsys)
+    _, m, _ = run(capsys, "merge", "session", q, a)
+    run(capsys, "continue", "session", m, "--agent", "opencode", "--dir", "/tmp")
+    loaded = env.sessions[env.launched[-1].agent_session_id]
+    text = "\n".join(loaded)
+    assert text.startswith(cli.CONVERTED_NOTE)
+    question, marker = text.index("只有一個沒被回答的問題"), text.index(f"（以下來自 {a}")
+    assert question < text.index(cli.NO_REPLY) < marker              # a reply sits between them
+
+
+def test_cross_agent_single_segment_gets_the_note(env, capsys, monkeypatch):  # review W2, W4
+    _, a, _ = _import(capsys)
+    monkeypatch.setattr(env, "name", "claude", raising=False)
+    run(capsys, "continue", "session", a, "--agent", "claude", "--dir", "/tmp")
+    loaded = env.sessions[env.launched[-1].agent_session_id]
+    assert loaded[0].startswith(cli.CONVERTED_NOTE)
+
+
+def test_a_session_merged_twice_is_loaded_once(env, capsys):  # review W3
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    _, ab, _ = run(capsys, "merge", "session", a, b)
+    _, aab, _ = run(capsys, "merge", "session", a, ab)
+    run(capsys, "continue", "session", aab, "--agent", "opencode", "--dir", "/tmp")
+    loaded = "\n".join(env.sessions[env.launched[-1].agent_session_id])
+    assert loaded.count("把 CSV 轉成 Markdown 表格") == 1

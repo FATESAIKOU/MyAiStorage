@@ -132,7 +132,6 @@ Mac:
 
 ### 4.2 outbox 與 pending（S2、S3）
 
-- **reading**：注入用的閱讀版暫存在 `reading/<ulid>.md`，接續結束就刪（D5）。
 - **outbox**：上傳失敗時留在這裡。`sync` 一律**先推再拉**；每個指令開始時，outbox 不是空的就印一行提示。
 - **pending**：continue-session 啟動 agent **之前**寫一份 `{agora_id, parent, agent, agent_session_id, dir, started_at, before_count}`，建立時就已經上鎖（`flock`），並把鎖用 `pass_fds` 交給 agent 一起持有（C1、C3）。agent 結束後收尾成功才刪。任何 agora 指令開始時檢查 pending：**拿得到 flock**（表示 agora **和** agent 都已經不在了）才補做收尾；`--no-sync` 時只提示不補存；`agora_id` 事先決定，所以補存是冪等的（N2）。
 - 上傳失敗、留在 outbox 時 exit code 是 3；outbox 裡的 Session 在這台機器上照樣搜得到（N13）。
@@ -211,7 +210,7 @@ agora show     session <id> [--raw]
 ### 5.3 merge
 
 - 產生一個新的 Session：`relation: merge`、`parents` 依給的順序。id 用空白或逗號分隔都可以（`agora merge session id1, id2, id3`）。
-- 閱讀版是各來源依序串接，每段標出來源；沒有 raw，接續時一律用閱讀版注入。
+- 閱讀版是各來源依序串接，每段標出來源；沒有 raw，接續時依 parents 取各來源的 raw（5.4）。
 
 ### 5.4 continue（第 5 版：2026-10-03 使用者決定）
 
@@ -224,7 +223,7 @@ agora show     session <id> [--raw]
    - `turns(raw)`：把**自己格式**的 raw 拆成共通的一輪一輪（`[(role, lines)]`，規則同閱讀版 4.4：文字＋工具一行摘要）。閱讀版就是 `format_reading(turns(raw))`。
    - `native(turns)`：把共通的一輪一輪組成**自己格式**的 raw。
    - 只有一段、而且來源 agent ＝目標 agent → 直接用原始 raw，不經過轉換（保留工具呼叫與前綴，快取能命中）。
-   - 其他情況（跨 agent、merge）→ 每段用來源 agent 的 `turns()` 拆開，依序串起來（merge 的每段前面加一則標示來源的 user 訊息），再用目標 agent 的 `native()` 組成原生 raw。
+   - 其他情況（跨 agent、merge）→ 開頭加一則說明「以下是轉過來的紀錄，`[tool]` 行只是摘要」的 user 訊息（W2）；每段前面加一則標示來源的 user 訊息；某一段以沒有回覆的 user 結束時，補一則 assistant「（這一段在這裡結束，當時沒有回覆）」，所以前一段的問題不會和下一段黏在一起，交給 `native()` 的一定是 user／assistant 交替（W1）；丟掉 `[skip …]` 行（W6）；再用目標 agent 的 `native()` 組成原生 raw。同一個 Session 在 merge 裡出現兩次只取一次（W3）。
 3. **載入**：一律走目標轉接器的 `start_native(raw, workdir)`（opencode：id 重編、`opencode import`、回讀驗證；Claude：新 uuid、寫 jsonl、`claude --resume`）。不再有「注入」這條路。
 4. 工作目錄：`--dir`，預設是 `agora.source.dir`（這台機器上存在的話），否則是目前目錄並提示。agent 啟動時同時設定 cwd 與 `PWD`。
 5. 寫 pending 並持有 flock（交給 agent 繼承），在前景啟動 agent；Ctrl-C 只給 agent。
