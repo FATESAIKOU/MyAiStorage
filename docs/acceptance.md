@@ -53,16 +53,18 @@ agora continue session <A> --agent opencode --dir /tmp/agora-acc/proj
 在 TUI 裡再說一句自編的話（例如「把第二步寫詳細一點」），正常離開。
 算過：印出新的 `agora:<ULID>`（記為 B）；`agora show session <B>` 看得到剛才那句話。
 
-## 3. 同一個 Session 換 claude 接（閱讀版注入）
+## 3. 同一個 Session 換 claude 接（轉成 Claude 的格式載入）
 
 ```bash
 source /tmp/agora-acc/env.sh
 agora continue session <A> --agent claude --dir /tmp/agora-acc/proj
 ```
 
-Claude 的第一則訊息會先讀 A 的閱讀版。算過：它先用兩三句話說明理解的進度
-（內容對得上步驟 1 的對話）；你再說一句自編的話，用 `/exit` 離開；
+算過：Claude 一打開，畫面上就有步驟 1 的對話（開頭多一則說明：這是轉過來的紀錄，
+`[tool]` 行只是摘要），和 opencode 接續時看到的一樣；你再說一句自編的話，用 `/exit` 離開；
 印出新的 `agora:<ULID>`（記為 C）。
+
+再做一次，但**打開後什麼都不說就 `/exit`**：應該印「這次沒有新內容」，不存新 Session。
 
 ## 4. claude 接續中按 Ctrl-C
 
@@ -71,12 +73,12 @@ source /tmp/agora-acc/env.sh
 agora continue session <A> --agent claude --dir /tmp/agora-acc/proj
 ```
 
-1. 等 Claude 說完第一段（讀完閱讀版的那段）。
-2. 再送一句自編的話，**在它回覆到一半時按一次 `Ctrl-C`**——這只會中斷這一輪回覆，Claude 不會結束。
+1. 確認畫面上有之前的對話。
+2. 送一句自編的話，**在它回覆到一半時按一次 `Ctrl-C`**——這只會中斷這一輪回覆，Claude 不會結束。
 3. 用 `/exit` 離開。
 
 算過：agora 沒有跟著被中斷，最後印出新的 `agora:<ULID>`（記為 D）；
-`agora show session <D>` 看得到第 1 點那段。
+`agora show session <D>` 看得到第 2 點那段。
 （如果你在 Claude 說出任何話之前就按了 Ctrl-C，agora 會印「這次沒有新內容」而不存——這也是正確的。）
 
 ## 5. claude 接續中用一次 /clear
@@ -100,7 +102,9 @@ agora merge session <B>, <C>
 agora continue session <merge 印出的 id> --agent opencode --dir /tmp/agora-acc/proj
 ```
 
-在 TUI 裡說一句話後離開。算過：merge 印出新 id（記為 G），continue 又印出新的 id（記為 H）。
+算過：opencode 一打開，畫面上就依序有 B 和 C 的對話，每一段前面標出來源。
+說一句話後離開；merge 印出新 id（記為 G），continue 又印出新的 id（記為 H）。
+同一個 G 換 `--agent claude` 接，畫面上看到的內容應該一樣。
 
 ## 7. 改標頭
 
