@@ -70,8 +70,8 @@ class Agent(Protocol):
     def last_message(self, session_id: str) -> tuple[str, str] | None:
         """(role, text) of the session's last user or assistant text, as stored; None if there is none."""
 
-    def search_text(self, keyword: str) -> "Iterator[str]":
-        """Session ids, across all projects, whose conversation text contains keyword; yielded as found."""
+    def search_text(self, keyword: str, only: "set[str] | None" = None) -> "Iterator[str]":
+        """Session ids, across all projects (or only those in `only`), whose text contains keyword; as found."""
 
     def summarize(self, prompt: str, workdir: Path) -> tuple[str, str | None]:
         """Run the agent once headless with no tools allowed; return (text, model).

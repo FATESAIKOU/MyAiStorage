@@ -507,7 +507,7 @@ class ClaudeAgent:
                 return o["type"], text[-PREVIEW_MAX:]
         return None
 
-    def search_text(self, keyword: str) -> Iterator[str]:
+    def search_text(self, keyword: str, only: set[str] | None = None) -> Iterator[str]:
         """Session ids whose conversation text contains keyword, yielded as found.
 
         Streams every project file line by line - never loads one whole - and
@@ -524,7 +524,7 @@ class ClaudeAgent:
         except OSError:
             return
         for path in paths:
-            if path.is_symlink() or not path.is_file():
+            if path.is_symlink() or not path.is_file() or (only is not None and path.stem not in only):
                 continue
             try:
                 with path.open(encoding="utf-8", errors="replace") as f:

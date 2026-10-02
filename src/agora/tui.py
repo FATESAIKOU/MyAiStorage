@@ -567,10 +567,14 @@ class AgoraApp(App):
 
     @work(thread=True, exclusive=True, group="search")
     def find_in_agents(self, text: str) -> None:
-        for agent in self.agents:   # the cache first (fast), then what is not cached yet
+        for agent in self.agents:   # the cache first (fast), then only what is not cached or is stale
+            rows = [r for r in self.rows["import"] if r.agent == agent.name]
+            missing = {r.key.split(":", 1)[1] for r in rows
+                       if not cache.is_fresh(self.paths, agent.name, r.key.split(":", 1)[1], r.updated)}
             seen: set[str] = set()
             try:
-                for source in (cache.search_cached(self.paths, agent.name, text), agent.search_text(text)):
+                later = agent.search_text(text, only=missing) if missing else ()
+                for source in (cache.search_cached(self.paths, agent.name, text), later):
                     for session_id in source:
                         if session_id not in seen:
                             seen.add(session_id)

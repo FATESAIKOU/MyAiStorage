@@ -50,8 +50,10 @@ class FakeAgent:
         msgs = json.loads(raw)["m"]
         return [("user" if i % 2 == 0 else "assistant", [m]) for i, m in enumerate(msgs)]
 
-    def search_text(self, keyword):
-        yield from (sid for sid, msgs in self.texts.items() if any(keyword in m for m in msgs))
+    def search_text(self, keyword, only=None):
+        self.searched = only
+        yield from (sid for sid, msgs in self.texts.items()
+                    if (only is None or sid in only) and any(keyword in m for m in msgs))
 
 
 # --- the plain parts -----------------------------------------------------------
@@ -257,4 +259,24 @@ def test_content_search_finds_in_agora_and_streams_in_the_import_tab():  # feedb
             await pilot.press("tab")
             await pilot.pause(0.2)
             assert [r.key for r in app.shown()] == ["claude:s2"]
+    _run(go)
+
+
+def test_content_search_scans_only_what_the_cache_lacks():
+    from agora import cache
+    agent = FakeAgent("claude", [Listed("s1", "/tmp/p", "甲", None), Listed("s2", "/tmp/p", "乙", None)],
+                      texts={"s1": ["表格在快取裡"], "s2": ["表格不在快取裡"]})
+    app, _ = _app([agent])
+    cache.local_reading(app.paths, agent, "s1")                   # s1 is cached, s2 is not
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("tab", "ctrl+t", "slash")
+            for ch in "表格":
+                await pilot.press(ch)
+            await pilot.press("enter")
+            await pilot.pause(0.3)
+            assert {r.key for r in app.shown()} == {"claude:s1", "claude:s2"}
+            assert agent.searched == {"s2"}                         # the slow scan skipped s1
     _run(go)

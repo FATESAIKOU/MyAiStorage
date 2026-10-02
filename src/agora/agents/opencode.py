@@ -612,7 +612,7 @@ class OpencodeAgent:
         finally:
             connection.close()
 
-    def search_text(self, keyword: str) -> Iterator[str]:
+    def search_text(self, keyword: str, only: set[str] | None = None) -> Iterator[str]:
         """Session ids whose conversation mentions `keyword`, one at a time.
 
         Case-insensitive and compared after NFKC, across every project, read-only,
@@ -637,7 +637,8 @@ class OpencodeAgent:
             passes = ((_SEARCH_LIKE_SQL, (_like_pattern(keyword),)), (_SEARCH_ALL_SQL, ()))
             for statement, arguments in passes:
                 for session_id, blob in connection.execute(statement, arguments):
-                    if session_id in seen or _field(blob, "type") != "text":
+                    if session_id in seen or (only is not None and session_id not in only) \
+                            or _field(blob, "type") != "text":
                         continue
                     if _field(blob, "synthetic") is True:
                         continue
