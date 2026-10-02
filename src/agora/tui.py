@@ -730,7 +730,9 @@ class AgoraApp(App):
             return isinstance(self.focused, DataTable)
         if action in ("merge", "edit", "delete"):
             return self.tab == "agora" and not in_preview
-        if action in ("mark", "mark_all", "primary", "filter", "pull", "push"):
+        if action == "push":            # only Sessions agora already has (review Q1)
+            return self.tab == "agora" and not in_preview
+        if action in ("mark", "mark_all", "primary", "filter", "pull"):
             return not in_preview
         return True
 
@@ -941,6 +943,7 @@ class AgoraApp(App):
     async def action_primary(self) -> None:
         rows = self.chosen_rows()
         if not rows:
+            self._nothing_to_do("先選要處理的 Session")
             return
         if self.tab == "import":
             # One command per agent: they are separate stores, and each of them gets
@@ -987,13 +990,22 @@ class AgoraApp(App):
             return
         rows = self.chosen_rows()          # the visible marked ones, in screen order
         if len(rows) < 2:
-            self.say("合併要先用空白鍵勾選至少兩個")
+            self.say("合併要先用空白鍵勾選至少兩個", failed=True)
             return
         pick = await self.push_screen_wait(Choose(f"合併 {len(rows)} 個：由誰寫要約？", ["opencode", "claude"],
                                                   "每個來源叫一次 AI；內容會送到那個 agent 的模型供應商"))
         if pick is not None:
             await self.act("合併", argv_for("merge", rows, ("opencode", "claude")[pick], None)[0],
                            sent=[r.key for r in rows])
+
+    def _nothing_to_do(self, what: str) -> None:
+        """No rows to send: say so in the status line and start nothing (review Q1).
+
+        A command with no ids is not a harmless no-op - `push session` with none
+        would be a command that cannot do what it says, and it would still have
+        been a process to wait for.
+        """
+        self.say(f"{what}（空白鍵勾選，游標那一列也可以）", failed=True)
 
     def action_mark_all(self) -> None:
         """`a`: mark every row on screen, or unmark them if they all are.
@@ -1028,7 +1040,7 @@ class AgoraApp(App):
         tab into the full-text cache. There is no "all of them" here either."""
         rows = self.chosen_rows()
         if not rows:
-            self.say("先選要拉下來的 Session", failed=True)
+            self._nothing_to_do("先選要拉下來的 Session")
             return
         argv = argv_for("pull", rows, None, None)[0]
         answer = await self.push_screen_wait(Confirm(
@@ -1042,7 +1054,7 @@ class AgoraApp(App):
     async def action_push(self) -> None:
         rows = self.chosen_rows()
         if not rows:
-            self.say("先選要寫回的 Session", failed=True)
+            self._nothing_to_do("先選要寫回的 Session")
             return
         argv = argv_for("push", rows, None, None)[0]
         answer = await self.push_screen_wait(Confirm(
@@ -1059,6 +1071,7 @@ class AgoraApp(App):
             return
         rows = self.chosen_rows()            # every marked row, or the one under the cursor
         if not rows:
+            self._nothing_to_do("先選要刪除的 Session")
             return
         listed = "\n".join(f"{r.key}「{r.cells[1]}」" for r in rows[:6]) + ("\n…" if len(rows) > 6 else "")
         if await self.push_screen_wait(Choose(f"把 {len(rows)} 個移到 Drive 垃圾桶？", ["取消", "確定"], listed)) == 1:

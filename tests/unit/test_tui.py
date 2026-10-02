@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
-import sys
 import threading
 
 import pytest
@@ -1125,5 +1124,42 @@ def test_cancelling_pull_runs_nothing():
             await pilot.pause()
             await pilot.press("escape")
             await pilot.pause()
+            assert not app._last_spawned
+    _run(go)
+
+
+def test_push_is_not_bound_on_the_import_tab():   # review Q1
+    """P there started a push with no ids at all."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("tab")
+            await pilot.pause()
+            assert not app.check_action("push", ())
+            await pilot.press("P")
+            await pilot.pause()
+            assert not app._last_spawned
+            assert "P push" not in " ".join(str(app.query_one("#keys").render()).split())
+    _run(go)
+
+
+def test_no_action_starts_a_process_without_rows_to_send():
+    """review Q1: an empty list of ids is not a command, so nothing runs."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("slash")
+            for ch in "zzzz":
+                await pilot.press(ch)
+            await pilot.press("enter")
+            await _wait(lambda: app.shown() == [], pilot)
+            for key in ("d", "p"):
+                await pilot.press(key)
+                await pilot.pause()
+                assert "先選" in str(app.query_one("#msg").render())
             assert not app._last_spawned
     _run(go)
