@@ -120,6 +120,7 @@ source /tmp/agora-acc/env.sh
 agora delete session <D>            # 沒加 --yes：應該被拒絕，exit code 1，訊息叫你加 --yes
 agora delete session <D> --yes      # 印出 id，並說已移到 Drive 垃圾桶
 agora show session <D>              # 應該說「找不到」，exit code 1
+agora delete session <A> --yes      # A 有子 Session：應該被拒絕，exit code 1，並列出它的子 Session
 ```
 
 算過：沒有 `--yes` 會被拒；有 `--yes` 之後 Drive 上那個資料夾不見了（30 天內可從 Drive 網頁還原），
@@ -139,6 +140,8 @@ agora search session                                 # 省略 filter＝列出全
 （`search` 會順便同步 Drive，所以沒有 `sync` 指令。）
 
 ## 清理
+
+⚠️ **先確認沒有整合測試或 e2e 正在跑**（它們也用 `agora-test`）。下面第一段會把 `agora-test/sessions/` 整個移到 Drive 垃圾桶。
 
 全部用**寫死的路徑**，沒有任何會變空的變數或佔位字。
 
