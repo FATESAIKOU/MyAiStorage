@@ -1,6 +1,6 @@
 # T1 指令模式：pull／push、批次動作的進度與續傳
 
-- 狀態：**已確認，待派工**（2026-10-03 使用者決定了 K1 與 pull／push 的形狀）
+- 狀態：**已轉成 OpenSpec change `command-batch-actions`**（2026-10-03，使用者要用 opsx 的流程）。之後以 `openspec/changes/command-batch-actions/` 為準，這份只留作歷史。
 - 來源：使用者 2026-10-03 的回饋與決定（對話中的 AskUserQuestion）；review `docs/review/cache.md`
 - 負責：impl1（pull／push 與快取）、impl2（import／delete／merge）；review 看完再合
 - 先做 T1（指令模式），T1 驗收後才做 T2（TUI）。TUI 的所有動作都呼叫這裡的指令，所以行為以 T1 為準。
