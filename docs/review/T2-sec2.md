@@ -83,3 +83,40 @@ A 是 2.1 最直接要求的「失敗保留」沒做到，而且會讓 M2（T2-s
 ### N3（Low）：預覽區有焦點的時候，`a` 也有作用
 
 `check_action` 沒有列出 `mark_all`，所以它永遠是可用的。空白鍵（`mark`）在預覽區有焦點的時候是停用的，`a` 卻會改左邊清單的勾選，兩個不一致。這和 2.3 的「按鍵列只顯示能用的」一起處理就好：把 `mark_all` 加進 `("mark", …)` 那一組。
+
+## 修正確認（2026-10-03）：`1c390d4`（M1）、`aa81e2e`（2.2 的 N1、N2）
+
+在 `git archive aa81e2e` 取出的副本跑 `test_tui.py`：**44 passed**（但其中一個測試不穩定，見 P1）。每一個修正各做一次 mutation，都在副本裡做。規則同上。
+
+**M1 修對了。** `act()` 多了 `sent`，也就是這次送出去的那些 key。成功時只從勾選裡拿掉這些；失敗時什麼都不拿。`reload` 只拿掉兩頁都已經不存在的列的勾選。5 個呼叫 `act()` 的地方（import 的每一段、merge、pull、push、delete）都有傳 `sent`。
+
+**N1、N2 也修對了。** `a` 會記住游標那一列，用 `show(keep=…)` 重建，游標不會再跳。
+
+| 拿掉的修正 | 結果 |
+|---|---|
+| M1：回到「成功全清、失敗只留這一頁」 | **被抓到**（`test_a_failed_segment_keeps_its_own_marks`、`test_a_success_clears_only_the_rows_it_acted_on`） |
+| M1：成功時清掉所有的勾選 | **被抓到**（同上兩個） |
+| M1：`reload` 只留**這一頁**的勾選（也就是 M1 的情況 B） | **沒被抓到**，見 P2 |
+| N1：全部取消時，連看不到的勾選也清掉 | **被抓到**（`test_cancelling_every_visible_row_keeps_the_hidden_marks`） |
+| N2：`a` 重建時不保留游標 | **被抓到**（`test_a_leaves_the_cursor_where_it_was`） |
+
+### P1（Low～Medium）：`test_the_escalation_stops_when_the_group_is_gone` 不穩定
+
+在**沒有改過**的副本上連跑 3 次：失敗、通過、失敗。第一輪 mutation 裡，它在好幾個跟升級完全無關的 mutant 上也失敗了。
+
+原因：測試把 `ESCALATE_AFTER` 設成 0.05 秒，按 Esc 之後用 `_wait(lambda: sent, pilot)` 等 SIGINT 送出去，**然後**才設 `alive[4242] = False`。可是 SIGTERM 的計時器從 `stop_group` 那一刻就開始算了，`_wait` 只要多輪詢了一次，SIGTERM 就會在「group 已經不在了」被設定之前送出去，`sent` 就變成 `[SIGINT, SIGTERM]`。
+
+這是 T2 1.x 的測試，不是這兩個 commit 帶進來的，但它會讓任何人跑 `test_tui.py` 時隨機失敗，也會讓 mutation 的結果失準。**建議**：讓假的 `killpg` 收到 SIGINT 時就把 `alive[pgid]` 設成 False（模擬「收到 SIGINT 就結束」的程序），不要在測試裡事後去改。
+
+### P2（Low）：「失敗時另一頁的勾選留著」，測試其實沒有測到
+
+`test_a_failure_on_one_tab_keeps_the_other_tabs_marks` 的做法是 `app.marked = set(keys)`，其中 `keys` 只有 **Agora 頁**的列，未匯入頁根本沒有勾選。所以把 `reload` 改回「只留這一頁」之後，這個測試還是會過。程式是對的（`reload` 的確是對兩頁一起算），只是測試不符合它的名字。
+
+**建議**：在未匯入頁也勾一列（`opencode:s1`），斷言 delete 失敗之後它還在。這就是我 2.1 的探測 B 的步驟。
+
+### 其他
+
+| # | 嚴重度 | 問題 | 建議 |
+|---|---|---|---|
+| P3 | Low | exit 3（已存進 outbox）被當成失敗，所以勾選都留著。對 merge 來說，exit 3 代表新的 Session **已經做出來了**（只是還沒上傳），這時再按一次 `m`，就會**再做一個**合併的 Session（要約會沿用快取，所以很快，但結果是兩份）。import 的 exit 3 重跑不會有問題（內容沒變，會沿用同一個 id） | `code in (0, 3)` 時清掉 `sent` 的勾選（exit 3 是「做完了，只是還沒上傳」，outbox 之後會自己送）；狀態列已經寫了「已存進 outbox」 |
+| P4 | Low | 動作成功之後，`act()` 裡的 `self.show()` 和 `reload()` 裡的 `show()` 都沒有帶 `keep`，所以每一次動作做完，游標都會回到第一列（這不是新的問題） | 和 N2 一樣，記住動作之前游標那一列，`show(keep=…)` |
