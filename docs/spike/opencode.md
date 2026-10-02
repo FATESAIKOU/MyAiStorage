@@ -745,3 +745,32 @@ claude 那一側本來就是用 `--disallowedTools` 擋的，現在兩邊一致�
 `agent.ask()` 都把 `PWD` 設成傳給它的 cwd（wrapper 本來就設了），並加了一個會
 直接抓到這個錯的斷言——source session 的 `info.directory` 必須等於 PROJ。
 順手把該檔案裡其他呼叫 opencode 的地方（`export`、`session delete`）也補上 `PWD`。
+
+
+---
+
+## design v4：`Exported.model`（2026-10-03）
+
+design 第 4 版把標頭改成 OKF 形狀，其中 `generated.by` 是
+`opencode/<模型>`、`sources[].author` 也是 `opencode/<模型>`，所以 adapter 要回報
+「這個 Session 最近用哪個模型」。結論：**可行，欄位來源唯一**。
+
+- **來源**：opencode 的 export 裡**只有 assistant 訊息**的 `info` 有 `modelID`
+  （旁邊是 `providerID`）；user 訊息是巢狀的 `info.model` 物件
+  （`{providerID, modelID}`），形狀不同，不能混用。
+- **取法**：由**最後一則** assistant 的 `modelID`；沒有 assistant 訊息、或該欄位是
+  空字串，就回 `None`（不留空字串，避免 header 出現 `by: "opencode/"`）。
+- `export()` 與 `collect()` 都填：`collect()` 是走 `export()` 回讀整個 session，
+  所以「接續之後」拿到的是**剛才回答的那個模型**，不是匯入時 transcript 最後那個。
+- 形狀驗證（自編 fixture，兩則 assistant 的 `modelID` 故意不同）：
+  `oc-basic.json` 第 1 則 assistant 是 `space-bunny-free`、最後一則是
+  `muse-spark-1.3-contributor-free` → `export()` 回後者，證明是「最後一則」而不是
+  「第一則」或「任何一則」。
+- 假的 opencode（`FAKE_OPENCODE_MODEL`，預設 `space-bunny-free`）會在 append 的
+  assistant 訊息上寫 `modelID`，所以 `collect()` 的兩種模型都能測。
+- 單元測試 5 個（四個 model 欄位 ＋ collect），`tests/unit/test_agent_opencode.py`
+  49 個全過。
+
+**不需要改 design.md。** 只有一點值得記：這個欄位描述的是「**最近一次**使用的
+模型」，不是 session 建立時的模型，所以 `generated.by` 對一個被接續過很多次的
+Session 會反映最後一次。名稱 `model`（不是 `created_with_model`）已經表達了這件事。

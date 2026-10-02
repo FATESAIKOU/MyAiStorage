@@ -567,3 +567,44 @@ def test_no_version_in_the_export_means_no_version_in_the_header(fake):
     store = fake / "opencode-sessions" / "noversion.json"
     store.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     assert oc.ADAPTER.export("noversion").agent_version is None
+
+
+# --- the model the session used most recently ------------------------------
+
+
+def test_export_reports_the_model_of_the_last_assistant_turn(fake):
+    """opencode puts the bare model id on assistant messages only (user messages
+    carry a nested `model` object), and the newest turn is the one that answers
+    "which model was this" - design v4 puts it in `generated.by`."""
+    exported = oc.ADAPTER.export("default")
+    assert exported.model == "muse-spark-1.3-contributor-free"
+
+
+def test_export_without_an_assistant_turn_has_no_model(fake, monkeypatch):
+    payload = json.loads(raw())
+    payload["messages"] = [m for m in payload["messages"]
+                           if m["info"]["role"] == "user"]
+    store = fake / "opencode-sessions" / "nouser.json"
+    store.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    assert oc.ADAPTER.export("nouser").model is None
+
+
+def test_export_with_an_empty_model_id_is_none(fake, monkeypatch):
+    payload = json.loads(raw())
+    payload["messages"][-1]["info"]["modelID"] = ""
+    store = fake / "opencode-sessions" / "nomodel.json"
+    store.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    assert oc.ADAPTER.export("nomodel").model is None
+
+
+@pytest.mark.parametrize("model", ["muse-spark-1.3-contributor-free", "space-bunny-free"])
+def test_collect_reports_the_model_the_agent_just_used(fake, workdir, monkeypatch, model):
+    """After a continue, `model` is the one that answered, not the one the
+    imported transcript ended with: the appended turn names it."""
+    monkeypatch.setenv("FAKE_AGENT_MODE", "append")
+    monkeypatch.setenv("FAKE_OPENCODE_MODEL", model)
+    launch = oc.ADAPTER.start_native(raw(), workdir)
+    assert launch.before_count and oc.ADAPTER.export(
+        launch.agent_session_id).model == "muse-spark-1.3-contributor-free"
+    subprocess.run(launch.argv, cwd=launch.cwd, check=True)
+    assert oc.ADAPTER.collect(launch).model == model

@@ -193,6 +193,22 @@ def _payload_messages(payload: object) -> list[dict]:
     return payload["messages"]
 
 
+def _last_model(payload: dict) -> str | None:
+    """The model the session used most recently.
+
+    opencode records the bare model id on assistant messages (`modelID`, with
+    `providerID` beside it); user messages carry a nested `model` object instead,
+    so the last assistant turn is the one that answers "which model was this".
+    A session with no assistant turn yet has none.
+    """
+    for message in reversed(_payload_messages(payload)):
+        info = message.get("info") or {}
+        if info.get("role") == "assistant":
+            model = info.get("modelID")
+            return model if isinstance(model, str) and model else None
+    return None
+
+
 def _lines_of(parts: list[dict]) -> list[str]:
     """One reading-version turn's worth of lines, D6 rules applied."""
     lines: list[str] = []
@@ -356,6 +372,7 @@ class OpencodeAgent:
             created_at=_iso(_created_ms(info)),
             agent_version=str(version) if version else None,
             message_count=len(_payload_messages(payload)),
+            model=_last_model(payload),
         )
 
     def reading(self, raw: bytes) -> str:
@@ -379,7 +396,11 @@ class OpencodeAgent:
                       cwd=str(workdir), agent_session_id=session_id, before_count=landed)
 
     def collect(self, launch: Launch) -> Exported | None:
-        """What the agent produced, or None if it said nothing new (S9)."""
+        """What the agent produced, or None if it said nothing new (S9).
+
+        Read back like an import, so `model` is the one the agent just used and
+        not the one the session started with.
+        """
         if not launch.agent_session_id:
             # OC10: claude raises here too. A pending record always carries the
             # id, so its absence means the record is broken; returning None would

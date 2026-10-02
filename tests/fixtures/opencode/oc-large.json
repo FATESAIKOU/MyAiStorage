@@ -221,7 +221,7 @@
         "agent": "build",
         "mode": "build",
         "providerID": "opencode",
-        "modelID": "space-bunny-free",
+        "modelID": "muse-spark-1.3-contributor-free",
         "path": {
           "cwd": "/tmp/agora-it-opencode/proj",
           "root": "/tmp/agora-it-opencode/proj"
