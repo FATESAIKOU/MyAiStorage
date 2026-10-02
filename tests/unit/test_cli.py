@@ -35,21 +35,18 @@ class FakeAgent:
     def export(self, sid):
         return self._exported(sid)
 
-    def reading(self, raw):
+    def turns(self, raw):
         msgs = json.loads(raw)["m"]
-        return format_reading([("user" if i % 2 == 0 else "assistant", [m]) for i, m in enumerate(msgs)])
+        return [("user" if i % 2 == 0 else "assistant", [m]) for i, m in enumerate(msgs)]
+
+    def native(self, turns):
+        return json.dumps({"id": "synth", "m": ["\n".join(lines) for _role, lines in turns]},
+                          ensure_ascii=False).encode()
 
     def start_native(self, raw, workdir):
         new = f"ses_n{len(self.sessions)}"
         self.sessions[new] = list(json.loads(raw)["m"])
         launch = Launch(argv=["true"], cwd=str(workdir), agent_session_id=new, before_count=len(self.sessions[new]))
-        self.launched.append(launch)
-        return launch
-
-    def start_injected(self, reading_file, workdir):
-        new = f"ses_i{len(self.sessions)}"
-        self.sessions[new] = [f"read {reading_file}"]
-        launch = Launch(argv=["true"], cwd=str(workdir), agent_session_id=new, before_count=1)
         self.launched.append(launch)
         return launch
 
@@ -144,7 +141,8 @@ def test_merge_then_continue_uses_injection(env, capsys):  # L3
     assert hdr["agora"]["relation"] == "merge" and [p["id"] for p in hdr["agora"]["parents"]] == [a, b]
     assert "raw" not in hdr["agora"]
     _, child, _ = run(capsys, "continue", "session", merged, "--agent", "opencode", "--dir", "/tmp")
-    assert env.launched[-1].agent_session_id.startswith("ses_i")   # merge → injection
+    loaded = env.sessions[env.launched[-1].agent_session_id]
+    assert any("以下來自" in m for m in loaded) and any("讀取 CSV" in m for m in loaded)   # both parents, natively
 
 
 def test_upload_failure_exits_3_and_stays_searchable(env, capsys, monkeypatch):  # N13
@@ -463,3 +461,19 @@ def test_header_values_stay_text_unless_list_or_mapping(env, capsys):  # V2, V3
     assert hdr["description"] == "把 CSV: 轉成表格" and hdr["title"] == "no" and hdr["stale_after"] == "2027-01-01"
     code, found, _ = run(capsys, "search", "session", "--filter", "stale_after=2027-01-01", "--no-sync")
     assert found.split()[0] == sid
+
+
+def test_continue_a_merge_of_a_merge_gathers_every_raw(env, capsys):  # design v5 5.4
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    env.sessions["ses_c"] = ["輸出表格", "好"]
+    _, c, _ = run(capsys, "import", "session", "--external-session-id", "ses_c", "--agent", "opencode")
+    _, ab, _ = run(capsys, "merge", "session", a, b)
+    _, abc, _ = run(capsys, "merge", "session", ab, c)
+    code, child, _ = run(capsys, "continue", "session", abc, "--agent", "opencode", "--dir", "/tmp")
+    assert code == 0
+    loaded = "\n".join(env.sessions[env.launched[-1].agent_session_id])
+    for text in ("把 CSV 轉成 Markdown 表格", "讀取 CSV", "輸出表格"):
+        assert text in loaded
+    assert loaded.index("把 CSV") < loaded.index("讀取 CSV") < loaded.index("輸出表格")

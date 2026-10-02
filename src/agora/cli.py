@@ -31,7 +31,7 @@ from pathlib import Path
 
 from agora import header as h
 from agora import store
-from agora.agents.base import Agent, AgentError, Exported, Launch
+from agora.agents.base import Agent, AgentError, Exported, Launch, merge_turns, reading
 
 AGENTS = ("opencode", "claude")
 TYPES = ("session",)
@@ -198,7 +198,7 @@ def cmd_import(args, paths: store.Paths) -> int:
     exported = agent.export(args.external_session_id)
     if exported.message_count <= 0:
         raise InputError(f"{args.external_session_id} 沒有任何訊息，不匯入")
-    body = agent.reading(exported.raw)
+    body = reading(agent, exported.raw)
     index = store.sync(paths)  # never throttled: we must see other machines' imports (S6)
     existing = index.by_source(agent.name, exported.session_id)
     if existing:
@@ -261,7 +261,7 @@ def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
     exported = agent.collect(launch)
     if exported is None:
         return None
-    body = agent.reading(exported.raw)
+    body = reading(agent, exported.raw)
     auto = _auto_header("continue", [record["parent"]], body, title=record.get("title") or exported.title,
                         exported=exported, agent=agent, parent_headers=record.get("parent_headers") or [])
     auto["id"] = record["agora_id"]
@@ -327,17 +327,21 @@ def cmd_continue(args, paths: store.Paths) -> int:
     fallback = not args.dir and not (src.get("dir") and Path(src["dir"]).is_dir())
     print(f"[agora] 工作目錄：{workdir}" + ("（來源沒有記錄目錄，用目前目錄；要換地方請加 --dir）" if fallback else ""),
           file=sys.stderr)
-    native = agora.get("relation") != "merge" and src.get("agent") == agent.name and agora.get("raw")
+    # ① the raw sessions this one is made of, ② the target adapter turns them
+    # into its own format, ③ one way to load it (design v5, 5.4).
+    segments = _raw_segments(paths, index, source_id)
     parent_md5 = (agora.get("raw") or {}).get("md5")
-    if native:
-        raw = store.fetch_raw(paths, store.Drive(paths), _ulid_of(source_id), parent)
+    if len(segments) == 1 and segments[0][0] == agent.name:
+        raw = segments[0][2]
         parent_md5 = store.hashlib.md5(raw).hexdigest()   # what we really continued from (C9)
-        launch = agent.start_native(raw, workdir)
     else:
-        reading = paths.state / "reading" / f"{_ulid_of(source_id)}.md"
-        reading.parent.mkdir(parents=True, exist_ok=True)
-        reading.write_text(_body_for(paths, source_id), encoding="utf-8")
-        launch = agent.start_injected(reading, workdir)
+        turns = []
+        for seg_agent, seg_id, seg_raw in segments:
+            if len(segments) > 1:
+                turns.append(("user", [f"（以下來自 {seg_id}）"]))
+            turns.extend(load_agent(seg_agent).turns(seg_raw))
+        raw = agent.native(merge_turns(turns))
+    launch = agent.start_native(raw, workdir)
     record = {
         "agora_id": f"agora:{h.new_ulid(int(store.now() * 1000))}", "agent": agent.name,
         "agent_session_id": launch.agent_session_id, "dir": launch.cwd,
@@ -364,12 +368,27 @@ def cmd_continue(args, paths: store.Paths) -> int:
     saved = _finish(paths, record)
     pending.unlink()
     lock.close()
-    if not native:
-        reading.unlink(missing_ok=True)   # only the agent needed it (D5)
     if saved is None:
         print("[agora] 這次沒有新內容，沒有存", file=sys.stderr)
         return 0
     return _emit(saved)
+
+
+def _raw_segments(paths: store.Paths, index: store.Index, agora_id: str, depth: int = 0) -> list[tuple[str, str, bytes]]:
+    """[(agent, agora id, raw)] a session is made of: its own raw, or for a merge its parents' in order."""
+    if depth > 20:
+        raise InputError(f"{agora_id} 的 merge 層數太深")
+    hdr = _header_for(index, agora_id)
+    agora = h.agora_of(hdr)
+    if agora.get("raw"):
+        raw = store.fetch_raw(paths, store.Drive(paths), _ulid_of(agora_id), hdr)
+        return [((agora.get("source") or {}).get("agent"), agora_id, raw)]
+    if not agora.get("parents"):
+        raise InputError(f"{agora_id} 沒有原始紀錄，也沒有來源可以接")
+    segments = []
+    for parent in agora["parents"]:
+        segments.extend(_raw_segments(paths, index, parent["id"], depth + 1))
+    return segments
 
 
 def cmd_delete(args, paths: store.Paths) -> int:
