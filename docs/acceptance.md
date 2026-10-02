@@ -158,7 +158,10 @@ agora search session                                 # 省略 filter＝列出全
 # Drive：只清 agora-test 底下的 sessions/（這個資料夾只放測試資料）
 FID=$(rclone --config ~/.config/agora/rclone.conf lsjson gdrive: --dirs-only \
   | python3 -c "import json,sys; print(next(e['ID'] for e in json.load(sys.stdin) if e['Name']=='agora-test'))")
-test -n "$FID" && rclone --config ~/.config/agora/rclone.conf --drive-root-folder-id "$FID" purge gdrive:sessions
+# 一個資料夾一個資料夾地移到垃圾桶：整個 sessions/ 一次 purge 會被 drive.file 權限擋下（403 appNotAuthorizedToChild）
+test -n "$FID" && for d in $(rclone --config ~/.config/agora/rclone.conf --drive-root-folder-id "$FID" lsf gdrive:sessions --dirs-only); do
+  rclone --config ~/.config/agora/rclone.conf --drive-root-folder-id "$FID" purge "gdrive:sessions/${d%/}"
+done
 
 # Claude：驗收專案的資料夾只有這次驗收建的檔，整個刪
 rm -rf "$HOME/.claude/projects/-private-tmp-agora-acc-proj"
