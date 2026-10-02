@@ -164,20 +164,32 @@ def read_header(e2e, agora_id: str) -> dict:
     return hdr
 
 
+def drive_md5(e2e, agora_id: str) -> str:
+    """The Drive md5 of one session's session.md (content check, not a listing)."""
+    drive = store.Drive(e2e["paths"])
+    files = drive.list_one(agora_id.split(":", 1)[1])
+    return files.get("session.md", "")
+
+
 def test_import_search_show_continue_merge_continue_edit_delete(e2e):
     proj = e2e["proj"]
     created = e2e["created"]
     env = {**os.environ, "HOME": str(REAL_HOME),
            "AGORA_CLAUDE_HOME": str(REAL_HOME)}
 
-    # 1. self-made short dialogue, then import it.
-    uuid1 = str(uuid.uuid4())
-    created["uuids"].append(uuid1)
-    proc = subprocess.run(
-        ["claude", "--disallowedTools", DISALLOW, "--model", "haiku",  # E6
-         "-p", "--session-id", uuid1, P1],
-        cwd=proj, env=env, capture_output=True, text=True, timeout=300)
-    assert proc.returncode == 0, proc.stderr[-500:]
+    def seed() -> str:
+        """One self-made short dialogue through the real CLI."""
+        sid = str(uuid.uuid4())
+        created["uuids"].append(sid)
+        proc = subprocess.run(
+            ["claude", "--disallowedTools", DISALLOW, "--model", "haiku",  # E6
+             "-p", "--session-id", sid, P1],
+            cwd=proj, env=env, capture_output=True, text=True, timeout=300)
+        assert proc.returncode == 0, proc.stderr[-500:]
+        return sid
+
+    # 1. import the first self-made dialogue.
+    uuid1 = seed()
     out = run_main(e2e, "import", "session", "--external-session-id", uuid1,
                    "--agent", "claude", "--header", "title=e2e 表格")
     id1 = out.split()[0]
@@ -194,58 +206,70 @@ def test_import_search_show_continue_merge_continue_edit_delete(e2e):
     out = run_main(e2e, "show", "session", id1, "--raw")
     assert '"format": "claude-jsonl/1"' in out
 
-    # 3. native continue: wrapper receives --resume, saves a new session.
+    # 3. native continue writes back into the SAME agora session (design 5.4).
+    before_md5 = drive_md5(e2e, id1)
     out = run_main(e2e, "continue", "session", id1, "--agent", "claude",
                    "--dir", str(proj))
-    id2 = out.split()[0]
-    assert id2.startswith("agora:") and id2 != id1
-    created["ulids"].append(id2.split(":", 1)[1])
-    hdr2 = read_header(e2e, id2)
-    assert h.agora_of(hdr2)["relation"] == "continue"
-    assert h.agora_of(hdr2)["parents"][0]["id"] == id1
-    uuid2 = h.agora_of(hdr2)["source"]["session_id"]
+    assert out.split()[0] == id1, "continue must keep the same agora id"
+    hdr1 = read_header(e2e, id1)
+    source = h.agora_of(hdr1)["source"]
+    uuid2 = source["session_id"]
     assert uuid2 != uuid1
     uuid.UUID(uuid2)
-    created["uuids"].append(uuid2)
+    created["uuids"].append(uuid2)          # the agent-side session this created
+    assert h.agora_of(hdr1)["previous_sources"] == [f"claude:{uuid1}"]
+    assert h.agora_of(hdr1)["relation"] == "import"      # not a merge: unchanged
+    assert hdr1["title"] == "e2e 表格"                    # user fields untouched
+    assert drive_md5(e2e, id1) != before_md5, "session.md on Drive must be rewritten"
 
-    # 4. merge with the user's comma form: claude writes a summary headless (design v6),
-    # then continue off the merge loads only that summary and the source list.
-    out = run_main(e2e, "merge", "session", f"{id1},", id2, "--agent", "claude")  # E2: 'id1,' 'id2'
+    # 4. a second session, then merge (claude writes the summary headless, v6).
+    uuid_b = seed()
+    out = run_main(e2e, "import", "session", "--external-session-id", uuid_b,
+                   "--agent", "claude", "--header", "title=e2e 第二份")
+    id2 = out.split()[0]
+    created["ulids"].append(id2.split(":", 1)[1])
+    out = run_main(e2e, "merge", "session", f"{id1},", id2, "--agent", "claude")
     idm = out.split()[0]
     assert idm.startswith("agora:")
     created["ulids"].append(idm.split(":", 1)[1])
     shown = run_main(e2e, "show", "session", idm)
     assert "## 要約" in shown and f"- {id1}「" in shown and f"- {id2}「" in shown
     assert read_header(e2e, idm)["status"] == "draft"
+
+    # 5. continuing the merge turns it into that conversation, same id.
     out = run_main(e2e, "continue", "session", idm, "--agent", "claude",
                    "--dir", str(proj))
-    id3 = out.split()[0]
-    assert id3.startswith("agora:") and id3 not in (id1, id2, idm)
-    created["ulids"].append(id3.split(":", 1)[1])
-    hdr3 = read_header(e2e, id3)
-    assert h.agora_of(hdr3)["relation"] == "continue"
-    assert h.agora_of(hdr3)["parents"][0]["id"] == idm
-    uuid3 = h.agora_of(hdr3)["source"]["session_id"]
-    assert uuid3 not in (uuid1, uuid2)
-    created["uuids"].append(uuid3)
-    loaded = run_main(e2e, "show", "session", id3, "--raw")
+    assert out.split()[0] == idm
+    hdr_m = read_header(e2e, idm)
+    assert h.agora_of(hdr_m)["relation"] == "continue"
+    assert "merge" not in h.agora_of(hdr_m)
+    assert "status" not in hdr_m
+    assert [p["id"] for p in h.agora_of(hdr_m)["parents"]] == [id1, id2]
+    uuid_m = h.agora_of(hdr_m)["source"]["session_id"]
+    assert uuid_m not in (uuid1, uuid2, uuid_b)
+    created["uuids"].append(uuid_m)
+    # a merge had no source of its own, so nothing lands in previous_sources
+    assert not h.agora_of(hdr_m).get("previous_sources")
+    loaded = run_main(e2e, "show", "session", idm, "--raw")
     assert cli.MERGE_NOTE.split("{by}")[0] in loaded and f"- {id1}「" in loaded
 
-    # 5. edit the merge's title; same id, new title, raw untouched.
-    out = run_main(e2e, "edit", "session", idm, "--header", "title=合併後改名")
-    assert out.split()[0] == idm
-    assert read_header(e2e, idm)["title"] == "合併後改名"
+    # 6. edit a header field; same id, user fields change.
+    out = run_main(e2e, "edit", "session", id1, "--header", "title=接續後改名")
+    assert out.split()[0] == id1
+    assert read_header(e2e, id1)["title"] == "接續後改名"
 
-    # 6. delete a childless session: refused without --yes, gone from
-    #    sessions/ on Drive with it.
-    rc = cli.main(["delete", "session", id3])
+    # 7. delete several at once: refused without --yes, then id1 (whose only
+    #    child is idm) and idm go together, off Drive.
+    rc = cli.main(["delete", "session", id1, idm])
     err = e2e["capsys"].readouterr().err
     assert rc == cli.EXIT_INPUT and "--yes" in err
-    out = run_main(e2e, "delete", "session", id3, "--yes")
-    assert out.split()[0] == id3
-    assert id3.split(":", 1)[1] not in drive_session_names(e2e)
-    created["ulids"].remove(id3.split(":", 1)[1])   # already gone from Drive
-    created["printed"].remove(id3)                  # so teardown does not re-purge it
+    out = run_main(e2e, "delete", "session", f"{id1},", idm, "--yes")
+    assert set(out.split()) >= {id1, idm}
+    left = drive_session_names(e2e)
+    assert id1.split(":", 1)[1] not in left and idm.split(":", 1)[1] not in left
+    for gone in (id1, idm):                  # teardown must not re-purge them
+        created["ulids"].remove(gone.split(":", 1)[1])
+        created["printed"].remove(gone)
 
     # Every continue is a --resume now, the merge one included
     # (--version probes also land in the log; only launches count).
