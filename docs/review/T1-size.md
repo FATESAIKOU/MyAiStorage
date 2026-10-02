@@ -95,3 +95,49 @@ def sloc(path):
     return len(code - doc)
 print(sum(sloc(p) for p in pathlib.Path(sys.argv[1]).rglob("*.py")))
 ```
+
+## 去重複確認（2026-10-03）
+
+對象：`8cc6838`（第 2 節的建議）。PM 特別點名的上傳路徑（`_upload_checked`）和鏡像（`mirror_one`）是更早的 `9e44286`、`7029b68` 合併的，所以也照 HEAD 的樣子一起看了。在 `git archive HEAD` 取出的副本跑單元測試：**387 passed**。call 的次數是在副本裡加探測測試，用 fake rclone 的 `calls.log` 數出來的，repo 沒有動。沒有跑整合測試，沒有碰 Drive，也沒有讀任何真實的 Session。
+
+### D1（Medium）：outbox 的每一筆都上傳**兩次**
+
+`push_one` 合併到 `_upload_checked` 的時候，只拿掉了原本的 md5 檢查，**自己上傳的那兩行沒有拿掉**。現在的流程是：先傳 raw → `_fault("after-raw-upload")` → 傳 session.md → `_fault("after-session-upload")` → 然後 `_upload_checked` **再傳一次 raw 和 session.md**，接著才列檔、比對 md5。實測一次 `push_one`（含 raw）的 rclone 呼叫：
+
+| | copyto | lsjson |
+|---|---:|---:|
+| `5eab055`（合併之前） | 2 | 2 |
+| HEAD | **4** | 2 |
+
+結果是對的，但 import、merge、continue、edit 每一次存檔（`_save` → `push_one`），以及每一次推 outbox，網路傳輸都變成兩倍，raw 可能有好幾 MB；每一次 copyto 本身也要好幾秒（docs/perf.md）。這是 `9e44286` 帶進來的，`8cc6838` 沒有動到。**沒有任何測試抓得到**：沒有測試在數 push 的 copyto 次數。
+
+**修法**：`push_one` 不要自己上傳，全部交給 `_upload_checked`，並且把兩個 `_fault` 搬進 `_upload_checked` 裡原本的位置（raw 之後、session.md 之後）。這兩個點在 mirror 那條路徑上也會出現，但不設 `AGORA_TEST_FAULT` 的時候什麼都不做，沒有影響。**要小心的是**：如果只是刪掉 `push_one` 裡那兩行，`_fault` 也會跟著消失，test-plan 的 I-08（`after-raw-upload`）就測不到了。目前單元測試裡沒有任何一個用到這兩個 fault 點，只有整合測試會用。另外補一個測試：一次 push_one 的 copyto 數 = 原始檔數 + 1。
+
+### 其他確認
+
+| 項目 | 結果 |
+|---|---|
+| 上傳順序（R7、S2-7） | ✅ 都是 raw 先、session.md 後，然後用 Drive 的 md5 決定；只送標頭指到的那兩個檔案。mirror 路徑的「本機沒有那個 raw 就只傳 session.md 並警告」保留下來了；`--not-exist-upload` 的 `need_raw` 拒絕還在 cache 那一層 |
+| `_fault` 的位置 | ✅ 相對於**第一次**上傳的位置沒有變（raw 之後、session.md 之後）；但修 D1 的時候要一起搬過去（見上面） |
+| 舊 raw 的清理 | ✅ `push_one` 還是只刪 `raw-*` 裡不是現在那個的；mirror 路徑一樣不刪 |
+| `mirror_one`（G3：半套的 Session 不進鏡像也不進索引） | ✅ pull 改用它，判斷和原本一樣（標頭指到的 raw 不在，或 md5 不符 → 刪掉本機的 session.md、從索引拿掉）。差別：pull 現在會在 `fetch_raw` **之前**就把新的標頭放進索引，所以 fetch_raw 失敗的時候，索引已經是新的版本、原始檔則等要用的時候再拿；之前是舊的那一列留著。我認為這樣比較一致，不算回歸。sync 還是保留自己那一份（有 `h.validate` 的警告），**G3 的邏輯還是有兩份**，T1-size 的 S1 只做了一半 |
+| `write_atomic` | ✅ 兩個地方都是 mkstemp → 寫入 → `os.replace` → 在 finally 裡清掉暫存檔，行為一樣。唯一的差別：全文快取的暫存檔名稱從 `.s.md.XXXX.tmp`（隱藏檔）變成 `s.mdXXXX.tmp`，`*.md` 的 glob（搜尋、`_cached`）不會比對到它，沒有影響。K4 的測試（`test_two_threads_caching_two_sessions_do_not_collide`）還在，也照樣通過 |
+| `warn`／`progress` | ✅ 輸出的格式一字不差（cache 的 `pull k/N` 沒有 item，`.rstrip()` 之後一樣）。`sync(warn=warn)` 和 `push_outbox(warn=warn)` 的參數名稱會蓋過模組裡的 `warn`；現在沒有人傳 `warn=None`，所以沒有問題，但以後要是有人傳 None，就會 TypeError。`quarantine` 還是直接用模組的 `warn`，互動模式的等待視窗看不到它（T2-sec1 L5 剩下的那一半） |
+| `_pull_or_push` | ✅ 訊息、flag、exit code 都和原本一樣 |
+| delete 只建一個 Drive | ✅ `Drive()` 只讀 config.json，不碰網路；唯一的差別是：全部都是「雲端沒有、只刪本機」的情況下，也會先讀一次 config.json |
+| `push_outbox` 拿掉 `outbox.exists()` | ✅ `outbox_ulids` 遇到不存在的目錄會回傳空的集合 |
+
+### 行數（HEAD `68fafee`，算法同第 1 節）
+
+| | cache | cli | store | tui | 合計 |
+|---|---:|---:|---:|---:|---:|
+| `55a5f0c`（第 1 節量的時候） | 207 | 707 | 440 | 563 | **3,121** |
+| `9e44286`（T2 第 1 節） | 208 | 725 | 455 | 692 | 3,292 |
+| `7029b68`（F1～F7） | 192 | 735 | 455 | 692 | 3,286 |
+| `8cc6838`（這次的去重複） | 180 | 726 | 464 | 692 | **3,274** |
+
+（opencode 538、claude 442、header 169、base 63，這段期間都沒有變；opencode 比第 1 節的時候多了 8 行，是 T2 1.6 加的。）
+
+`8cc6838` 本身只淨省了 **12 行**（cache −12、cli −9、store +9：多出來的是共用函式）。從第 1 節到現在的總變化是 **+153**，主要是 T2 的互動模式（tui +129）和 T1-sec3 的修正（cli +19、store +24）。第 2 節估計的「約 75 行」，到目前為止做到的有：C1、C3、C4、C6、C7、L1、L4、L5 的一部分、L6、S2（不過造成了 D1）、S3、S4、S5，以及 S1 的一半；還沒做的有 S1 的 sync 那一半、C5、L2、L3。照現在的速度，HEAD 離 2,900 有 **374 行**，比第 1 節的時候（221）差得更多了，額度的決定更需要使用者來做。
+
+**結論**：`8cc6838` 本身沒有改變行為，原本的情況也都還有測試在測。但上傳路徑有 **D1（Medium）**：每一筆 outbox 都會上傳兩次，修的時候要記得把 `_fault` 一起搬過去，並且補一個數 copyto 次數的測試。
