@@ -6,7 +6,7 @@
 
 | 編號 | 標題 | 狀態 | 負責 | 備註 |
 |---|---|---|---|---|
-| T2 | 互動模式：多選、全選、進度、中斷、按鍵整理 → change [`tui-batch-actions`](../../openspec/changes/tui-batch-actions/) | 規劃完成，等 T1 | impl3（Opus 恢復後）或 impl2 | review T2.md 的 V1～V8 已併入 |
+| T2 | 互動模式：多選、全選、進度、中斷、按鍵整理 → change [`tui-batch-actions`](../../openspec/changes/tui-batch-actions/) | 進行中：第 1～3 節與 review 修正都完成，剩 4.1b（真的子程序測 Esc）與 PM 用假資料試 | impl1 | review T2-sec1～3 的意見都已修 |
 | T1 | 指令模式：pull／push、批次動作的進度與續傳 → change [`command-batch-actions`](../../openspec/changes/command-batch-actions/) | 進行中 | impl1（tasks 2、3）、impl2（tasks 1） | review Q1～Q12 已併入 |
 | T0 | e2e 整合測試改成「continue 寫回原本的 Session」 | 完成 | impl1（3011d15）、impl2（745e5e8） | 兩邊都實跑過整合測試 |
 
@@ -29,7 +29,7 @@
 
 **等使用者確認的事**（不擋進度，先照 PM 的判斷做）：
 - T2 的「勾選但被篩選掉的列不算進動作」（review V4，PM 選了比較安全的做法）。
-- **行數額度（要使用者決定）**：03:10 的 HEAD 是 **3,274 行**（含 F1～F7 修正與 T2 進行中的部分；去重複已做）。T1 剛完成時是 3,121 行，超過 2,900 行的目標 221 行（review `docs/review/T1-size.md`）。去重複可省約 75 行（impl2 在做），T2 還會再加一些，做完預估約 3,050～3,150 行。兩個轉接器還能再省約 85 行（`docs/review/adapters-size.md`，不拿掉 export 的重試是 65 行）。兩項都做完約 2,960 行，仍超過約 60 行，T2 還會再加。選項：(a) 放寬額度到 3,300；(b) 去重複＋精簡轉接器，再放寬一點；(c) 接受現在的大小。PM 建議 (b)。在使用者決定前，只做去重複（不改行為），轉接器的精簡先不動。
+- **行數額度（要使用者決定）**：04:30 的 HEAD 是 **3,413 行**（T2 的功能都做完了，只剩測試；去重複已做）。T1 剛完成時是 3,121 行，超過 2,900 行的目標 221 行（review `docs/review/T1-size.md`）。去重複可省約 75 行（impl2 在做），T2 還會再加一些，做完預估約 3,050～3,150 行。兩個轉接器還能再省約 85 行（`docs/review/adapters-size.md`，不拿掉 export 的重試是 65 行）。兩項都做完約 2,960 行，仍超過約 60 行，T2 還會再加。選項：(a) 放寬額度到 3,300；(b) 去重複＋精簡轉接器，再放寬一點；(c) 接受現在的大小。PM 建議 (b)。在使用者決定前，只做去重複（不改行為），轉接器的精簡先不動。
 - T1 的「continue 進行中、原本的 Session 被別台刪掉」：agent 結束時不寫回、改存成一個新的 Session，避免丟掉這次的對話（review T1-sec3 M1）。
 
 規則：不合併任何 PR；不碰使用者的真實 session；需要使用者決定的事先停在那一項、寫進這裡，做其他不受影響的項目。
