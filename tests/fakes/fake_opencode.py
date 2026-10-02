@@ -158,6 +158,7 @@ def summarize_run(argv: list[str]) -> int:
     Emits the same event stream as the real one (one JSON object per line), and
     stores a session so `export` can be asked which model answered.
     FAKE_OPENCODE_SUMMARIZE: normal | empty | fail | no-session
+    FAKE_OPENCODE_SUMMARIZE_HOLD=1  after the first event, wait for workdir/pending-<id>
     """
     with open(HOME / "opencode-argv.log", "a") as f:
         f.write(json.dumps(argv) + "\n")
@@ -184,7 +185,17 @@ def summarize_run(argv: list[str]) -> int:
     if mode == "no-session":       # a run that produced no events at all
         return 0
     print(json.dumps({"type": "step_start", "sessionID": session_id,
-                      "timestamp": now, "part": {"type": "step-start"}}))
+                      "timestamp": now, "part": {"type": "step-start"}}), flush=True)
+    if os.environ.get("FAKE_OPENCODE_SUMMARIZE_HOLD"):
+        # Only answer once workdir/pending-<id> is there: if the adapter waits for
+        # the run to end before recording it, this never arrives (review V5).
+        record = Path.cwd() / f"pending-{session_id}"
+        for _ in range(300):
+            if record.exists():
+                break
+            time.sleep(0.05)
+        else:
+            die("the pending record never appeared")
     if mode != "empty":
         print(json.dumps({"type": "text", "sessionID": session_id, "timestamp": now,
                           "part": {"type": "text",

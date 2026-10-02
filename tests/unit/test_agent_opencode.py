@@ -665,13 +665,14 @@ def test_summarize_sends_the_prompt_in_a_file_and_deny_tools(fake, tmp_path, mon
     monkeypatch.setenv("AGORA_OPENCODE_MODEL", "opencode/space-bunny-free")
     seen_env: list[dict] = []
     import subprocess as sp
-    real_sp_run = sp.run
+    real_popen = sp.Popen
 
-    def spy_run(argv, **kw):
+    def spy_popen(argv, **kw):
         seen_env.append(kw.get("env") or {})
-        return real_sp_run(argv, **kw)
+        return real_popen(argv, **kw)
 
-    monkeypatch.setattr(oc.subprocess, "run", spy_run)
+    # the run is streamed now, so it starts with Popen rather than run (review V5)
+    monkeypatch.setattr(oc.subprocess, "Popen", spy_popen)
     oc.ADAPTER.summarize("ZZPROMPT 材料與指示", workdir)
 
     argv = json.loads((fake / "opencode-argv.log").read_text().splitlines()[0])
@@ -1171,3 +1172,38 @@ def test_search_never_exports_a_session(fake, store_db, workdir):
 
     assert list(oc.ADAPTER.search_text("搜尋得到")) == ["ses_x0000000000000001"]
     assert not [line for line in _calls(fake, "export")]      # no transcript read
+
+
+def test_summarize_records_the_session_while_the_run_is_still_going(fake, tmp_path,
+                                                                   monkeypatch):
+    """Review V5: the record used to be written after the run finished, which is
+    exactly when an interruption happens - so an interrupted run left a session
+    with nothing pointing at it. The fake only answers once the record is there."""
+    workdir = tmp_path / "summarize"
+    workdir.mkdir()
+    monkeypatch.setenv("FAKE_OPENCODE_SUMMARIZE_HOLD", "1")
+    monkeypatch.setenv("AGORA_SUMMARIZE_TIMEOUT", "30")
+
+    text, _ = oc.ADAPTER.summarize("ZZPROMPT", workdir)
+
+    assert "ZZSUMMARY" in text
+    # it was there while the run was still going, and the delete cleared it again
+    assert list(workdir.glob("pending-*")) == []
+    assert not (fake / "opencode-sessions" / "ses_fake_summary00000.json").exists()
+
+
+def test_the_record_is_written_even_when_the_run_is_interrupted(fake, tmp_path,
+                                                               monkeypatch):
+    """The id is in the first events; the file has to be too, or Esc leaves nothing."""
+    workdir = tmp_path / "summarize"
+    workdir.mkdir()
+    seen: list[str] = []
+    real = oc._remember_summary_session
+
+    def spy(path, session_id):
+        seen.append(session_id)
+        return real(path, session_id)
+
+    monkeypatch.setattr(oc, "_remember_summary_session", spy)
+    oc.ADAPTER.summarize("ZZPROMPT", workdir)
+    assert seen[0] == "ses_fake_summary00000"     # before the delete, not after

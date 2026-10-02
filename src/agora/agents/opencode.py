@@ -37,6 +37,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 from .base import AgentError, Exported, Launch, Listed, Turns, agent_cmd, tool_line
@@ -192,6 +193,30 @@ def _session_directory(session_id: str) -> str | None:
         connection.close()
     directory = row[0] if row else None
     return directory if isinstance(directory, str) and Path(directory).is_dir() else None
+
+
+def _event_session_id(line: bytes) -> str | None:
+    """The session id one `opencode run --format json` event carries, if any.
+
+    The first events have it, minutes before the run ends - which is what lets the
+    record go down while the model is still working (review V5).
+    """
+    text = line.decode("utf-8", "replace").strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        event = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    session_id = event.get("sessionID") if isinstance(event, dict) else None
+    return session_id if isinstance(session_id, str) and session_id.strip() else None
+
+
+def _remember_summary_session(workdir: Path, session_id: str) -> Path:
+    """The record saying `workdir`'s summarize session still has to be deleted."""
+    record = workdir / f"{PENDING_PREFIX}{session_id}"
+    record.write_text("", encoding="utf-8")
+    return record
 
 
 def _last_reply(stdout: bytes) -> tuple[str | None, str | None]:
@@ -694,9 +719,12 @@ class OpencodeAgent:
         version the message has to come *before* `-f`; after it, opencode reads
         the message as one more filename and fails.
 
-        The session this run creates is recorded in `workdir/pending-<id>` before
-        it is deleted, and the record only goes away once the delete succeeded,
-        so an interrupted run leaves something the next one can finish (Y6).
+        The session this run creates is recorded in `workdir/pending-<id>` as soon
+        as its id appears in the event stream - not when the run ends, because the
+        run is exactly when an interruption happens and a record written after it
+        describes nothing (review V5) - and the record only goes away once the
+        delete succeeded, so an interrupted run leaves something the next one can
+        finish (Y6).
 
         AGORA_OPENCODE_MODEL picks the model; without it opencode uses whatever
         the user's own default is.
@@ -713,26 +741,63 @@ class OpencodeAgent:
         material.write_text(prompt, encoding="utf-8")
         seconds = _summarize_timeout()
         try:
-            proc = subprocess.run(
-                argv, cwd=str(workdir),
-                env={**os.environ, "OPENCODE_PERMISSION": DENY_TOOLS,
-                     "PWD": str(workdir)},
-                capture_output=True, timeout=seconds)
-        except subprocess.TimeoutExpired:
-            raise AgentError(f"opencode 寫要約逾時（{seconds} 秒）") from None
+            code, events, errors = self._summarizing(argv, workdir, seconds)
         finally:
             material.unlink(missing_ok=True)
-        session_id, text = _last_reply(proc.stdout)
+        session_id, text = _last_reply(events)
         # the run's JSON events carry no model name, so the session we are about
         # to delete is where we read it from
         answered = self._model_of(session_id, workdir) if session_id else None
         self._drop_summary_session(session_id, workdir)
-        if proc.returncode != 0:
-            detail = proc.stderr.decode("utf-8", "replace").strip()[-200:]
-            raise AgentError(f"opencode 寫要約失敗：{detail}")
+        if code != 0:
+            raise AgentError(f"opencode 寫要約失敗：{errors.decode('utf-8', 'replace').strip()[-200:]}")
         if not (text or "").strip():
             raise AgentError("opencode 沒有寫出要約（空回覆）")
         return text, answered
+
+    def _summarizing(self, argv: list[str], workdir: Path, seconds: int) -> tuple[int, bytes, bytes]:
+        """`opencode run … --format json`, read while it runs.
+
+        Each pipe gets its own thread, so neither can fill up and wedge the run,
+        and the session id is recorded the moment an event carries it (review V5):
+        Esc in the interactive mode interrupts the run, and a record written after
+        the run would leave the session it created with nothing pointing at it.
+        The deadline is the one every other call has (OC7).
+        """
+        try:
+            proc = subprocess.Popen(
+                argv, cwd=str(workdir), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env={**os.environ, "OPENCODE_PERMISSION": DENY_TOOLS, "PWD": str(workdir)})
+        except OSError as e:
+            raise AgentError(f"叫不起 opencode（{argv[0]}）：{e}") from None
+        events: list[bytes] = []
+        errors: list[bytes] = []
+        remembered: list[str] = []
+
+        def read_events() -> None:
+            for line in iter(proc.stdout.readline, b""):
+                events.append(line)
+                session_id = _event_session_id(line)
+                if session_id and session_id not in remembered:
+                    remembered.append(session_id)
+                    _remember_summary_session(workdir, session_id)
+
+        readers = (threading.Thread(target=read_events, daemon=True),
+                   threading.Thread(target=lambda: errors.append(proc.stderr.read()), daemon=True))
+        for reader in readers:
+            reader.start()
+        try:
+            proc.wait(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raise AgentError(f"opencode 寫要約逾時（{seconds} 秒）") from None
+        finally:
+            for reader in readers:
+                reader.join(timeout=5)     # the pipes close as the child goes, so this returns
+            proc.stdout.close()
+            proc.stderr.close()
+        return proc.returncode, b"".join(events), b"".join(errors)
 
     def _sweep_pending(self, workdir: Path) -> None:
         """Finish what an interrupted run left: one id at a time, then drop the record."""
@@ -745,8 +810,7 @@ class OpencodeAgent:
         worked, so a failure leaves the next run something to finish."""
         if not session_id:
             return
-        record = workdir / f"{PENDING_PREFIX}{session_id}"
-        record.write_text("", encoding="utf-8")
+        record = _remember_summary_session(workdir, session_id)   # already there if the run streamed it
         proc = self._run([agent_cmd(self.name), "session", "delete", session_id],
                          cwd=workdir)
         if proc.returncode != 0:
