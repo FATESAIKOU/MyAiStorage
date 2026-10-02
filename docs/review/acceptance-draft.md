@@ -1,6 +1,8 @@
 # Agora lite 人工驗收清單（草稿，給 PM 看過後換掉 docs/acceptance.md）
 
-> review 起草，2026-10-03。依 HEAD 的行為寫：continue **寫回同一個 id**；`cache`／`sync` 已經拿掉，改成 `pull`／`push`；雲端沒有的 Session 會保留並標記。**這份草稿沒有實際跑過**，指令與訊息是照程式和測試寫的，跑的時候如果有不一樣的地方，以實際畫面為準，再回報給 review。
+> review 起草，2026-10-03。依 HEAD 的行為寫：continue **寫回同一個 id**；`cache`／`sync` 已經拿掉，改成 `pull`／`push`；雲端沒有的 Session 會保留並標記。
+>
+> **第 2 版**（2026-10-03）：PM 用假資料實跑過兩段（`docs/tickets/T1-pm-run.md`、`docs/tickets/T2-pm-run.md`）。訊息改成 HEAD `a29fd0d` 實際印出的字（review 在副本裡用 fake rclone／fake agent 逐條印出來對過）；impl2 正在改 P3／P4 的訊息，那兩處標了「**改到一半**」，以改完之後的 HEAD 為準。實跑時發現兩個步驟照原本的順序會失敗（6.10、7.17），已經改了順序，見各步旁的說明。
 
 全程只用 Drive 上的 `agora-test`，以及 `/tmp/agora-acc` 底下的目錄。對話一律用自編短句（例如「把 CSV 轉成 Markdown 表格，先列三個步驟」），不要貼真實內容。做完照最後一節清掉。
 
@@ -55,20 +57,20 @@ opencode session list   # 只列出這個專案的；記下三個 ses_…（s1�
 | 1.1 | `agora import session --external-session-id s1,s2 --external-session-id s3 --agent opencode` | stdout 有三行 `agora:<ULID>`（記為 A、B、C）；stderr 有 `匯入 1/3`、`2/3`、`3/3` |
 | 1.2 | `echo $?` | `0` |
 | 1.3 | 同 1.1 再跑一次 | 印出**同樣的**三個 id（內容沒變就略過），不會多出新的 Session |
-| 1.4 | `agora import session --external-session-id s1,ses_nope --agent opencode; echo $?` | 印出 A；stderr 說 `ses_nope` 匯入失敗；exit 不是 0 |
+| 1.4 | `agora import session --external-session-id s1,ses_nope --agent opencode; echo $?` | stdout 印出 A；stderr 有 `[agora] ses_nope 匯入失敗：…`；exit `2`（第一個非零的） |
 | 1.5 | `agora import session --external-session-id s1,s2 --agent opencode 2>/dev/null \| wc -l` | `2`（進度只在 stderr） |
 
 ## 2. pull／push
 
 | # | 指令 | 算過 |
 |---|---|---|
-| 2.1 | `agora pull session; echo $?` | 提示要給 session id，exit `1` |
-| 2.2 | `agora pull session <A>` | stderr 有 `pull 1/1`；`ls /tmp/agora-acc/cache/sessions/<A的ULID>/` 有 `session.md` 和一個 `raw-….json` |
-| 2.3 | 同 2.2 再跑一次 | 很快結束（已經是新的，所以略過） |
+| 2.1 | `agora pull session; echo $?` | `[agora] pull 要給 session id；要全部就在互動模式按 a，或從 agora search session 用管線接過來`，exit `1` |
+| 2.2 | `agora pull session <A>` | stderr 有 `[agora] pull 1/1`，**stdout** 有 `[agora] 拉下 1 個`；`ls /tmp/agora-acc/cache/sessions/<A的ULID>/` 有 `session.md` 和一個 `raw-….json` |
+| 2.3 | 同 2.2 再跑一次 | 很快結束（已經是新的，所以略過）。**目前**結尾還是印 `[agora] 拉下 1 個`（略過也算進去，T1 P3；**改到一半**，impl2 正在改成說「略過」） |
 | 2.4 | `agora pull session opencode:s1` | `ls /tmp/agora-acc/cache/reading/opencode/` 有 `s1.md` |
-| 2.5 | `agora pull session s1; echo $?` | 提示 `s1` 是 agent 的 id、要寫前綴，exit 不是 0 |
-| 2.6 | `agora edit session <A> --header 'title=驗收改名'` 之後 `agora push session <A>` | stderr 有 `push 1/1`、「寫回 1 個」 |
-| 2.7 | `agora push session opencode:s1; echo $?` | 拒絕：push 只吃 agora 的 id |
+| 2.5 | `agora pull session <s1 的 ses_…>; echo $?`（不寫前綴） | stderr：`… 拉不到：ses_… 是 agent 的 session id，請寫前綴（opencode: 或 claude:）`；stdout：`[agora] 拉下 0 個，1 個失敗`；exit `2` |
+| 2.6 | `agora edit session <A> --header 'title=驗收改名'` 之後 `agora push session <A>` | stderr 有 `[agora] push 1/1`，**stdout** 有 `[agora] 寫回 1 個` |
+| 2.7 | `agora push session opencode:<s1 的 ses_…>; echo $?` | stderr：`… 傳不上去：push 只吃 agora 的 session id，收到 opencode:…`；exit `2` |
 
 ## 3. 接續會寫回原本那一個
 
@@ -77,16 +79,16 @@ opencode session list   # 只列出這個專案的；記下三個 ses_…（s1�
 | 3.1 | `agora continue session <A> --agent opencode --dir /tmp/agora-acc/proj` | opencode 打開時，畫面上已經有 A 的對話；說一句自編的話（例如「把第二步寫詳細一點」），離開 |
 | 3.2 | （3.1 結束時） | 印出的是**同一個 A**，不是新的 id |
 | 3.3 | `agora show session <A> \| tail -5` | 看得到 3.1 說的那句話 |
-| 3.4 | 同 3.1，但打開之後什麼都不說就離開 | 印「這次沒有新內容，沒有存」 |
+| 3.4 | 同 3.1，但打開之後什麼都不說就離開 | stderr：`[agora] 這次沒有新內容，沒有存` |
 
 ## 4. delete 多個與重跑
 
 | # | 指令 | 算過 |
 |---|---|---|
-| 4.1 | `agora delete session <B> <C>; echo $?` | 列出會刪的兩個，叫你加 `--yes`；exit `1` |
-| 4.2 | `agora delete session <B> <C> --yes \| wc -l` | `2`；stderr 有 `刪除 1/2`、`2/2`，以及「移到 Drive 垃圾桶」 |
-| 4.3 | 同 4.2 再跑一次（等同中斷後重跑），然後 `echo $?` | stderr 說「已經不在了，略過 2 個」；exit `0` |
-| 4.4 | `agora delete session agora:01ZZZZZZZZZZZZZZZZZZZZZZZZ --yes; echo $?` | 「找不到」，exit `1`（打錯的 id 不會被當成已刪） |
+| 4.1 | `agora delete session <B> <C>; echo $?` | `[agora] 會把這 2 個移到 Drive 垃圾桶：`，下面列出兩個，最後是 `確定的話加 --yes`；exit `1` |
+| 4.2 | `agora delete session <B> <C> --yes \| wc -l` | `2`；stderr 有 `刪除 1/2`、`2/2`，以及 `[agora] 已把 2 個移到 Drive 垃圾桶，30 天內可以在 Drive 網頁還原` |
+| 4.3 | 同 4.2 再跑一次（等同中斷後重跑），然後 `echo $?` | stderr：`[agora] 已經不在了，略過 2 個：agora:…、agora:…`；exit `0` |
+| 4.4 | `agora delete session agora:01ZZZZZZZZZZZZZZZZZZZZZZZZ --yes; echo $?` | `[agora] 找不到：agora:01ZZZZZZZZZZZZZZZZZZZZZZZZ`，exit `1`（打錯的 id 不會被當成已刪） |
 
 ## 5. merge 被中斷之後沿用
 
@@ -95,8 +97,8 @@ opencode session list   # 只列出這個專案的；記下三個 ses_…（s1�
 | # | 指令 | 算過 |
 |---|---|---|
 | 5.1 | `agora merge session <B2>, <C2> --agent opencode` | stderr 先出現 `來源 1/2`，然後「請 opencode 寫 <B2> 的要約…」 |
-| 5.2 | 看到 `來源 2/2` 和「請 opencode 寫 <C2> 的要約…」時，按 **Ctrl-C** | 中斷；`echo $?` 是 `130` |
-| 5.3 | 同 5.1 再跑一次 | stderr 有「<B2> 的要約沿用上次寫好的」，**只**為 C2 叫一次 opencode；最後印出新的 id（記為 G） |
+| 5.2 | 看到 `來源 2/2` 和「請 opencode 寫 <C2> 的要約…」時，按 **Ctrl-C** | 中斷；`echo $?` 是 `130`。**目前**印的是 `[agora] 中斷了；沒存完的接續會在下一個 agora 指令自動補存`，那是 continue 的說法（T1 P4）；**改到一半**，impl2 正在改成 merge 的說法（重跑會沿用已寫好的要約） |
+| 5.3 | 同 5.1 再跑一次 | stderr 有 `[agora] agora:<B2> 的要約沿用上次寫好的`，**只**為 C2 叫一次 opencode；最後印出新的 id（記為 G） |
 | 5.4 | `agora show session <G>` | 「## 要約」底下 B2、C2 各一節；標頭有 `status: draft` |
 | 5.5 | `opencode session list` | **沒有**多出寫要約用的 session |
 
@@ -104,6 +106,7 @@ opencode session list   # 只列出這個專案的；記下三個 ses_…（s1�
 
 | # | 指令 | 算過 |
 |---|---|---|
+| 6.0 | `agora pull session <A>` | **先把 A 現在的原始檔拿下來**。3.1 的接續把 A 寫回時換了一個新的原始檔，那個新檔只上傳到 Drive，不會留在本機；2.2 拿下來的是**舊的**那一個。不做這一步的話，6.10 會被拒絕（見 6.10 旁的說明、已知問題 T1 P1） |
 | 6.1 | `source /tmp/agora-acc/env2.sh` 之後 `agora delete session <A> --yes` | 機器 2 把 A 移到 Drive 垃圾桶 |
 | 6.2 | `source /tmp/agora-acc/env.sh` 之後 `rm -f /tmp/agora-acc/state/last-sync` | 回到機器 1，並且讓下一次同步不被節流 |
 | 6.3 | `agora search session` | A 那一行的最後是 `(雲端沒有)`；A 還在機器 1 上，沒有被清掉 |
@@ -111,11 +114,11 @@ opencode session list   # 只列出這個專案的；記下三個 ses_…（s1�
 | 6.5 | `agora continue session <A> --agent opencode --dir /tmp/agora-acc/proj; echo $?` | **不會**打開 opencode；訊息提示兩個選擇（`push … --not-exist-upload`、`pull … --not-exist-delete`）；exit `1` |
 | 6.6 | `agora edit session <A> --header 'title=x'; echo $?` | 一樣拒絕，exit `1` |
 | 6.7 | `agora merge session <A>, <G> --agent opencode; echo $?` | 拒絕，exit `1` |
-| 6.8 | `agora pull session <A>` | 只印一行「雲端沒有，本機的不動」；A 還在 |
-| 6.9 | `agora push session <A>` | 只印一行「雲端沒有，沒有傳」；Drive 上還是沒有 A |
-| 6.10 | `agora push session <A> --not-exist-upload` | A 傳回 Drive；`rm -f /tmp/agora-acc/state/last-sync && agora search session` 之後，A 那一行**沒有** `(雲端沒有)` |
-| 6.11 | 再做一次 6.1、6.2，然後 `agora search session --filter cloud=no \| awk '{print $1}' \| xargs agora pull session --not-exist-delete` | 「雲端沒有，本機的副本已刪」；`agora search session` 裡沒有 A 了 |
-| 6.12 | `agora show session <A>; echo $?` | 「找不到」，exit `1` |
+| 6.8 | `agora pull session <A>` | stderr 只多一行 `[agora] <A的ULID> 雲端沒有，本機的不動`（印的是 ULID，沒有 `agora:`）；A 還在。stdout **目前**是 `[agora] 拉下 1 個`（T1 P3，**改到一半**） |
+| 6.9 | `agora push session <A>` | stderr：`[agora] <A的ULID> 雲端沒有，沒有傳`；stdout：`[agora] 寫回 0 個`；Drive 上還是沒有 A |
+| 6.10 | `agora push session <A> --not-exist-upload` | stdout：`[agora] 寫回 1 個`；A 傳回 Drive；`rm -f /tmp/agora-acc/state/last-sync && agora search session` 之後，A 那一行**沒有** `(雲端沒有)`。⚠️ **這一步會過，只是因為 6.0 把 A 現在的原始檔拿下來了**。在這台機器上 import 或接續的 Session，本機只有 `session.md`，沒有原始檔（已知問題 T1 P1）；少了 6.0 的話，這一步會是 exit `2`、`… 傳不上去：標頭指到的 raw-….json 本機沒有，不傳半套`。review 在副本裡照原本的順序（2.2 → 3.1 → 6.10）跑過，確認會被拒絕，所以只靠 2.2 不夠 |
+| 6.11 | 再做一次 6.1、6.2，然後 `agora search session --filter cloud=no \| awk '{print $1}' \| xargs agora pull session --not-exist-delete` | stderr：`[agora] <A的ULID> 雲端沒有，本機的副本已刪`；`agora search session` 裡沒有 A 了 |
+| 6.12 | `agora show session <A>; echo $?` | `[agora] 找不到 agora:…`，exit `1` |
 
 ---
 
@@ -134,22 +137,35 @@ opencode session list   # 只列出這個專案的；記下三個 ses_…（s1�
 | 7.7 | `a` | 看得到的列全部打勾；游標**還在原本那一列** |
 | 7.8 | `a` | 全部取消 |
 | 7.9 | 勾 H、I 兩列，然後 `/`，輸入 H 的標題裡的一個字，`Enter` | 只剩看得到的列；標題列寫著「另有 1 個勾選被篩選掉」 |
-| 7.10 | `d` | 確認視窗**只列出看得到的那一個**；選「取消」（預設就是取消）。`/` → 清空 → `Enter` 取消篩選 |
+| 7.10 | `d` | 確認視窗「把 1 個移到 Drive 垃圾桶？」**只列出看得到的那一個**，停在「取消」；直接 `Enter`（提示寫「Enter 確定」，其實是選目前停的那一個，T2 Q2）→ 什麼都不做。`/` → 清空 → `Enter` 取消篩選 |
 | 7.11 | 勾 H、I，`m`，選 opencode | 等待視窗出現進度；在進度還沒走完之前按 **`Esc`** |
-| 7.12 | （7.11 之後） | 視窗顯示「已中斷」，回到清單，提示「重跑同一個動作會接著做」；H、I **還是勾著的** |
+| 7.12 | （7.11 之後） | 結果視窗的標題是「合併（已中斷）」，第一行「已中斷；重跑同一個動作會接著做」；關掉之後回到清單，狀態列是同一句；H、I **還是勾著的** |
 | 7.13 | 另開一個終端機：`pgrep -fl "opencode run"` | 沒有殘留的 opencode（寫要約的那個也停了） |
-| 7.14 | 回到互動模式，再按一次 `m`，選 opencode | 這次會沿用已經寫好的那一節；完成之後，最上面多一個合併出來的 Session，勾選清掉 |
-| 7.15 | 游標放在一列上，`p` | 確認視窗「把 1 個拉到本機？」，有一個**沒有勾**的「雲端沒有的就刪掉本機的」；選「確定」→ 等待視窗 → 完成 |
-| 7.16 | 同一列，`P` | 確認視窗「把 1 個寫回 Drive？」，有一個**沒有勾**的「雲端沒有的就傳回去」；選「取消」 |
-| 7.17 | `q` 離開；在另一個終端機做 6.1、6.2，把 H 用機器 2 刪掉，再回機器 1 執行 `agora` | H 那一列的雲端欄是 **✗** |
-| 7.18 | 游標放在 H 上，`Enter`（接續） | 不會打開 agent；畫面顯示指令模式的拒絕訊息和兩個選擇 |
-| 7.19 | 游標放在 H 上，`P`，用 `Tab` 移到「雲端沒有的就傳回去」、按空白鍵勾起來，然後「確定」（`Enter` 一律是確定，不會勾選） | 完成；**下一次同步之後**，H 的雲端欄變回 ✓ |
+| 7.14 | 回到互動模式，再按一次 `m`，選 opencode | 這次會沿用已經寫好的那一節；完成之後，最上面多一個合併出來的 Session（記為 **J**），H、I 的勾選清掉。（狀態列可能還留著 7.12 的那一句，T2 Q4） |
+| 7.15 | 游標放在 **J** 上，`p` | 確認視窗「把 1 個拉到本機？」，有一個**沒有勾**的「雲端沒有的就刪掉本機的（等同 --not-exist-delete）」；`↓` 到「確定」、`Enter` → 等待視窗 → 完成。這一步也把 J 的原始檔拿下來了，7.19 要用（已知問題 T1 P1）。勾選框不管勾了沒都畫成 `X`，只差顏色（T2 Q1） |
+| 7.16 | 同一列（J），`P` | 確認視窗「把 1 個寫回 Drive？」，有一個**沒有勾**的「雲端沒有的就傳回去（等同 --not-exist-upload）」；直接 `Enter`（停在取消）→ 什麼都不做 |
+| 7.17 | `q` 離開；在另一個終端機做 6.1、6.2，把 **J** 用機器 2 刪掉（`agora delete session <J> --yes`），再回機器 1 執行 `agora` | J 那一列的雲端欄是 **✗**。⚠️ 用的是 J，不是 H：7.14 之後 H、I 都有子 Session（J），機器 2 刪 H 會被拒絕（「有子 Session，不能刪」） |
+| 7.18 | 游標放在 J 上，`Enter`（接續） | 不會打開 agent；視窗「不能接續」，內容是指令模式的拒絕訊息：`agora:<J> 雲端沒有（別台機器刪掉了），不再寫回去；要傳回去用 agora push session … --not-exist-upload，要刪掉本機這份用 agora pull session … --not-exist-delete` |
+| 7.19 | 游標放在 J 上，`P`，`Tab` 移到「雲端沒有的就傳回去」、`空白` 勾起來，`shift+tab` 回到選項、`↓` 到「確定」、`Enter`（`Enter` 一律是「選目前停的那一個」，不會勾選） | 完成；**下一次同步之後**，J 的雲端欄變回 ✓（見已知問題 R3／S4） |
 | 7.20 | 對任何一列 `m`（只勾一列） | 提示「合併要先用空白鍵勾選至少兩個」，什麼都不做 |
 | 7.21 | 勾兩列，`m`，等待視窗出現後按 `ctrl+q` | 不會直接離開，而是先中斷，等它停下來；`pgrep -fl "opencode run"` 沒有殘留 |
 | 7.22 | `q` | 離開互動模式 |
 
-**已知問題，驗收時請留意**（review 已回報，修好之後就把這幾行拿掉；勾選框只能用滑鼠點（S1）、未匯入頁的 `P`（Q1）已修好，那兩行已拿掉）：
-- 7.19 傳回去之後，✗ 要等下一次完整同步才會變回 ✓（T2-sec3 R3／S4）。可以 `q` 離開，`rm -f /tmp/agora-acc/state/last-sync`，再執行 `agora`。
+**已知問題，驗收時請留意**（修好之後就把對應的那一行拿掉；勾選框只能用滑鼠點（S1）、未匯入頁的 `P`（Q1）已修好，那兩行已拿掉）：
+
+T1（`docs/tickets/T1-pm-run.md`）：
+- **P1（要使用者決定）**：在這台機器上 import、接續或合併的 Session，本機只有 `session.md`，**沒有原始檔**（原始檔只有在 pull 的時候才拿下來）。所以別台刪掉之後，`push --not-exist-upload` 會拒絕（`標頭指到的 raw-….json 本機沒有，不傳半套`），pull 也拿不到了——實際上救不回來。驗收步驟裡用 6.0、7.15 先 pull 一次來避開這個問題。
+- **P2**：merge 的來源裡有雲端沒有的、而且不是第一個時，會先為前面的來源寫要約（花一次 AI），輪到那一個才拒絕（6.7 的 A 放在第一個，所以不會遇到）。
+- **P3**（**改到一半**）：pull 略過已經是新的那些時，結尾還是說「拉下 N 個」。
+- **P4**（**改到一半**）：merge 被中斷時，印的是 continue 的說法。
+
+T2（`docs/tickets/T2-pm-run.md`，Q1～Q4 已派給 impl1，tasks 4.2b）：
+- **Q1**：確認視窗的勾選框不管勾了沒都畫成 `X`，只差顏色；下面的說明也不會跟著狀態變。
+- **Q2**：delete 確認視窗的提示寫「Enter 確定」，但 Enter 其實是選目前停的那一個（預設是「取消」）。
+- **Q3**：進度條算的是「開始做第 k 個」：寫第 1 個要約時就已經 50%，寫第 2 個時就是 100%，看起來像卡在 100%。
+- **Q4**：結果視窗關掉之後，狀態列還留著上一次的說明（例如「已中斷；重跑同一個動作會接著做」）。
+- **Q6**：雲端欄是 ✗ 的 Session，它原本的 agent session 會重新出現在未匯入頁（因為之後的 import 會建一個新的）；這符合 spec。
+- **R3／S4**：7.19 傳回去之後，✗ 要等到下一次完整同步才會變回 ✓。可以 `q` 離開，`rm -f /tmp/agora-acc/state/last-sync`，再執行 `agora`。
 
 ---
 
@@ -203,4 +219,10 @@ cd ~ && rm -rf /tmp/agora-acc
 - 新增第 1、4、5、6 節（批次、重跑、merge 沿用、雲端沒有），還有第二段的 T2。
 - 用 `env2.sh`（另一組快取和狀態目錄）模擬「另一台機器刪掉」，不需要真的第二台機器；用 `rm -f …/last-sync` 讓同步不被 5 分鐘的節流擋住。
 - 舊版第 6～9 節（merge 再接續、edit、delete、search）的重點，分別併進了第 5、2、4、6 節；舊版的「merge 再接續」那一步我沒有放進來，需要的話，可以把舊版第 6 節的後半段照舊附上。
-- 「已知問題」那一段是根據目前還沒修的 review 意見寫的，修好之後就拿掉對應的那一行。
+- 「已知問題」那一段是根據目前還沒修的 review 意見，以及 PM 實跑的發現寫的，修好之後就拿掉對應的那一行。
+- **第 2 版改了什麼**：
+  - 各步的「算過」改成 HEAD 實際印出的字（1.4、2.1～2.7、3.4、4.x、5.2、5.3、6.8～6.12）；pull 和 push 的總結（「拉下 N 個」「寫回 N 個」）是印在 **stdout** 的。
+  - 新增 6.0：3.1 的接續換掉了 A 的原始檔，2.2 拿下來的是舊的那一個，照原本的順序 6.10 會被拒絕。
+  - 7.15～7.19 改用 7.14 合併出來的 J：H、I 在 7.14 之後都有子 Session，機器 2 刪 H 會被拒絕；而且 7.15 的 pull 正好把 J 的原始檔拿下來，給 7.19 用。
+  - 7.10、7.12、7.14、7.16 加上了 PM 試用時看到的畫面（Q1～Q4）。
+  - 已知問題加上了 T1 P1～P4、T2 Q1～Q4、Q6。
