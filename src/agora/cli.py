@@ -236,6 +236,8 @@ def cmd_merge(args, paths: store.Paths) -> int:
     ids = [i.strip() for raw in args.ids for i in raw.split(",") if i.strip()]
     if len(ids) < 2:
         raise InputError("merge 至少要兩個 Session")
+    if len({_ulid_of(i) for i in ids}) < len(ids):
+        raise InputError("merge 的 Session 重複了")
     updates = _updates(args)
     index = _sync_for(paths, ids)
     parents, parts, parent_headers = [], [], []
@@ -340,7 +342,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
           file=sys.stderr)
     # ① the raw sessions this one is made of, ② the target adapter turns them
     # into its own format, ③ one way to load it (design v5, 5.4).
-    segments = _raw_segments(paths, index, source_id, seen=set())
+    segments = _raw_segments(paths, index, source_id, done=set())
     # Record what we really continued from (C9): the raw itself for one segment, nothing for a merge.
     parent_md5 = store.hashlib.md5(segments[0][2]).hexdigest() if len(segments) == 1 else None
     if len(segments) == 1 and segments[0][0] == agent.name:
@@ -393,25 +395,30 @@ def _converted_turns(segments: list[tuple[str, str, bytes]]) -> list[tuple[str, 
     """
     turns: list[tuple[str, list[str]]] = [("user", [CONVERTED_NOTE])]
     for seg_agent, seg_id, seg_raw in segments:
+        seg = merge_turns([(role, [line for line in lines if not line.startswith("[skip ")])
+                           for role, lines in load_agent(seg_agent).turns(seg_raw)])
+        if not seg:
+            continue                          # nothing to show: no marker either (X1, X2)
         turns.append(("user", [f"（以下來自 {seg_id}，原本是 {seg_agent} 的對話）"]))
-        seg = [(role, [line for line in lines if not line.startswith("[skip ")])
-               for role, lines in load_agent(seg_agent).turns(seg_raw)]
-        seg = merge_turns(seg)
         turns.extend(seg)
         if seg and seg[-1][0] == "user":
             turns.append(("assistant", [NO_REPLY]))
+    if len(turns) == 1:
+        raise InputError("這些來源裡沒有可以接續的對話內容")
     return merge_turns(turns)
 
 
 def _raw_segments(paths: store.Paths, index: store.Index, agora_id: str,
-                  seen: set[str]) -> list[tuple[str, str, bytes]]:
+                  done: set[str], path: tuple[str, ...] = ()) -> list[tuple[str, str, bytes]]:
     """[(agent, agora id, raw)] a session is made of: its own raw, or for a merge its parents' in order.
 
-    A session reached twice (a diamond of merges) is used once; a cycle is an error (W3).
+    A session reached twice (a diamond of merges) is used once; a cycle is an error (W3, X3).
     """
-    if agora_id in seen:
+    if agora_id in path:
+        raise InputError(f"{agora_id} 的來源繞回了自己：{' → '.join(path + (agora_id,))}")
+    if agora_id in done:
         return []
-    seen.add(agora_id)
+    done.add(agora_id)
     hdr = _header_for(index, agora_id)
     agora = h.agora_of(hdr)
     if agora.get("raw"):
@@ -421,7 +428,7 @@ def _raw_segments(paths: store.Paths, index: store.Index, agora_id: str,
         raise InputError(f"{agora_id} 沒有原始紀錄，也沒有來源可以接")
     segments = []
     for parent in agora["parents"]:
-        segments.extend(_raw_segments(paths, index, parent["id"], seen))
+        segments.extend(_raw_segments(paths, index, parent["id"], done, path + (agora_id,)))
     return segments
 
 

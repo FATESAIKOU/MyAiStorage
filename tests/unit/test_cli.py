@@ -519,3 +519,28 @@ def test_an_id_not_known_here_skips_the_throttle(env, capsys):
     shutil.rmtree(paths.cache)                            # last-sync in state stays fresh
     code, out, _ = run(capsys, "show", "session", a)
     assert code == 0 and "把 CSV 轉成 Markdown 表格" in out
+
+
+def test_merge_refuses_the_same_session_twice(env, capsys):  # review X4
+    _, a, _ = _import(capsys)
+    code, _, err = run(capsys, "merge", "session", a, a)
+    assert code == 1 and "重複" in err
+
+
+def test_a_cycle_of_merges_is_an_error():  # review X3; only hand-edited data can do this
+    class Index:
+        headers = {u: {"agora": {"parents": [{"id": f"agora:{p}"}]}} for u, p in (("X", "Y"), ("Y", "X"))}
+
+        def header(self, ulid):
+            return self.headers.get(ulid)
+    with pytest.raises(cli.InputError, match="繞回"):
+        cli._raw_segments(None, Index(), "agora:X", done=set())
+
+
+def test_an_empty_segment_gets_no_marker(env, capsys, monkeypatch):  # review X1, X2
+    turns = {b"a": [("user", ["問題"]), ("assistant", ["回答"])], b"e": [("user", ["[skip image]"])]}
+    monkeypatch.setattr(cli, "load_agent", lambda name: type("A", (), {"turns": staticmethod(turns.get)})())
+    got = cli._converted_turns([("opencode", "agora:A", b"a"), ("opencode", "agora:E", b"e")])
+    assert "agora:E" not in str(got) and got[-1] == ("assistant", ["回答"])
+    with pytest.raises(cli.InputError):
+        cli._converted_turns([("opencode", "agora:E", b"e")])
