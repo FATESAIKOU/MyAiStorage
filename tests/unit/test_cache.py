@@ -191,12 +191,15 @@ def test_pull_of_an_agent_session_caches_its_full_text(drive):
     assert agent.exports == 1
 
 
-def test_pull_of_an_agent_session_skips_one_that_is_not_stale(drive):
-    """R4: a re-run after Ctrl-C does not pay for what it already has."""
+def test_pull_of_an_agent_session_skips_one_that_is_not_stale(drive, capsys):
+    """R4: a re-run after Ctrl-C does not pay for what it already has - and P3: what it
+    skips is not counted as pulled, it is counted as skipped."""
     paths = store.Paths.from_env()
     agent = Agent({"s": ["問", "答"]}, [Listed("s", "/tmp/p", "t", "2026-10-02T00:00:00Z")], name="claude")
     assert cache.pull(paths, ["claude:s"], {"claude": agent}) == (1, 0)
-    assert cache.pull(paths, ["claude:s"], {"claude": agent}) == (1, 0)
+    capsys.readouterr()
+    assert cache.pull(paths, ["claude:s"], {"claude": agent}) == (0, 0)
+    assert "已經是新的，略過 1 個" in capsys.readouterr().err
     assert agent.exports == 1
 
 
@@ -228,9 +231,11 @@ def test_pull_of_an_id_the_cloud_does_not_have_changes_nothing(drive, capsys):
 def test_pull_of_one_that_is_already_fresh_asks_rclone_for_nothing(drive, capsys):
     paths = store.Paths.from_env()
     ulid = _on_drive(paths)
-    cache.pull(paths, [ulid], {})
+    assert cache.pull(paths, [ulid], {}) == (1, 0)          # the first one is a pull
     mark = len(calls(drive))
-    assert cache.pull(paths, [ulid], {}) == (1, 0)
+    capsys.readouterr()
+    assert cache.pull(paths, [ulid], {}) == (0, 0)          # P3: the second is a skip
+    assert "已經是新的，略過 1 個" in capsys.readouterr().err
     assert not [c for c in calls(drive)[mark:] if "copyto" in c]   # nothing downloaded again
     assert "雲端沒有" not in capsys.readouterr().err
 

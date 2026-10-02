@@ -1160,6 +1160,48 @@ def test_merge_refuses_a_source_the_cloud_lost(env, capsys):
     assert not env.launched
 
 
+def test_pull_reports_what_it_skipped(env, capsys):
+    """P3: the summary line counts what it pulled, and says how many were already the
+    newest instead of quietly counting them as pulled."""
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    # the import already left a copy here, so the "pulled one" case needs it gone
+    (paths.mirror / a.split(":")[1] / "session.md").unlink()
+    code, out, err = run(capsys, "pull", "session", a)
+    assert code == 0 and "拉下 1 個" in out and "略過" not in err
+    code, out, err = run(capsys, "pull", "session", a)
+    assert code == 0 and "拉下 0 個" in out and "已經是新的，略過 1 個" in err
+
+
+def test_merge_checks_every_source_before_it_pays_for_any_summary(env, capsys):
+    """P2: the second source is the one Drive lost. The first one's summary costs an
+    AI call, so all of them are checked first - nothing is paid for."""
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["另一個", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    lost = _lose_it_on_drive(capsys, b)
+    env.prompts.clear()
+
+    code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert code == 1 and lost in err
+    assert env.prompts == [], "no AI call before the sources are all checked"
+
+
+def test_an_interrupted_merge_says_its_own_re_run_hint(env, capsys, monkeypatch):
+    """P4: a merge leaves the summaries it already wrote, not a pending continue."""
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["另一個", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+
+    def interrupted(prompt, workdir):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(env, "summarize", interrupted)
+    code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert code == 130 and "沿用已寫好的要約" in err
+    assert "自動補存" not in err
+
+
 def test_delete_of_one_the_cloud_lost_removes_only_the_local_copy(env, capsys):
     a, ulid = _lost_in_the_cloud(capsys)
     code, out, err = run(capsys, "delete", "session", a, "--yes")

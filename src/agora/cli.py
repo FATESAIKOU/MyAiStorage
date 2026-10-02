@@ -438,10 +438,11 @@ def cmd_merge(args, paths: store.Paths) -> int:
         raise InputError("merge 的 Session 重複了")
     updates = _updates(args)
     index = _sync_for(paths, ids)
+    for session_id in ids:      # P2: all of them first - writing a summary costs an AI
+        _need_in_cloud(index, f"agora:{_ulid_of(session_id)}")   # call, and none should be
     parents, parent_headers, sections, models = [], [], [], set()
     for k, agora_id in enumerate(ids, 1):
         agora_id = f"agora:{_ulid_of(agora_id)}"
-        _need_in_cloud(index, agora_id)      # a summary of a deleted session is not a session
         parent = _header_for(index, agora_id)
         agora = h.agora_of(parent)
         _progress("來源", k, len(ids), agora_id)
@@ -965,7 +966,11 @@ def main(argv: list[str] | None = None) -> int:
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return 0
     except KeyboardInterrupt:   # e.g. while reading the session back: the pending record is kept
-        print("\n[agora] 中斷了；沒存完的接續會在下一個 agora 指令自動補存", file=sys.stderr)
+        # P4: what a re-run gets differs - continue leaves a pending record to be
+        # finished later, merge leaves the summaries it already wrote in the cache.
+        hint = ("重跑同一個指令會沿用已寫好的要約" if args.action == "merge"
+                else "沒存完的接續會在下一個 agora 指令自動補存")
+        print(f"\n[agora] 中斷了；{hint}", file=sys.stderr)
         return 130
     except Exception as e:   # never let one broken file brick every command (C2)
         if os.environ.get("AGORA_DEBUG"):
