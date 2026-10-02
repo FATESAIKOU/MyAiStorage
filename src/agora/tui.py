@@ -30,7 +30,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Input, OptionList, ProgressBar, Static
+from textual.widgets import DataTable, Input, OptionList, ProgressBar, Static
 
 from agora import cache
 from agora import header as h
@@ -42,6 +42,16 @@ TAB_NAMES = {"agora": "Agora", "import": "未匯入"}
 COLUMNS = {"agora": ("id", "標題", "agent", "更新"), "import": ("id", "標題", "agent", "更新", "目錄")}
 TITLE_MAX = 36                   # the title column is cut here, so the others stay on screen
 AGENT_STYLE = {"opencode": "cyan", "claude": "#ff8700", "merge": "green"}
+#: The key bar, per tab (spec「按鍵」): what a key does here, and only here. The
+#: import tab has no merge, no header, no delete and no push - those are all about
+#: Sessions agora already has.
+KEYS = {
+    "agora": [("空白", "勾選"), ("a", "全選／全不選"), ("enter", "接續"), ("m", "合併"),
+              ("e", "改標頭"), ("d", "刪除"), ("p", "pull"), ("P", "push"),
+              ("/", "篩選"), ("ctrl+t", "標題／內文"), ("q", "離開")],
+    "import": [("空白", "勾選"), ("a", "全選／全不選"), ("enter", "匯入"), ("p", "pull"),
+               ("/", "篩選"), ("ctrl+t", "標題／內文"), ("q", "離開")],
+}
 
 
 # --- what each tab lists -------------------------------------------------------
@@ -451,6 +461,7 @@ class AgoraApp(App):
     #mode { width: auto; padding: 0 1; background: #5f0000; }
     #filter { border: none; height: 1; padding: 0; background: #1c1c1c; }
     #msg { height: 1; color: #ffd75f; }
+    #keys { height: 1; background: #1c1c1c; }
     #msg.failed { color: #ff5f5f; }
     .box { width: 70; height: auto; max-height: 80%; padding: 0 1; border: round #00afaf; background: #1c1c1c; }
     .box.failed { border: round #ff5f5f; }
@@ -470,8 +481,8 @@ class AgoraApp(App):
         Binding("d", "delete", "刪除"),
         Binding("slash", "filter", "篩選"),
         Binding("ctrl+t", "search_mode", "標題／內文", priority=True),
-        Binding("r", "refresh_cache", "更新快取"),
-        Binding("s", "sync", "寫回 Drive"),
+        Binding("p", "pull", "pull"),
+        Binding("P", "push", "push"),
         Binding("q", "quit", "離開"),
     ]
 
@@ -498,11 +509,11 @@ class AgoraApp(App):
             with VerticalScroll(id="right"):
                 yield Static(id="pinned")
                 yield Static(id="history")
+        yield Static(id="keys")
         with Horizontal(id="filterbar"):
             yield Static("標題", id="mode")
             yield Input(id="filter", placeholder="輸入後按 Enter；Esc 清掉；ctrl+t 切換標題／內文")
         yield Static(id="msg")
-        yield Footer()
 
     # -- setup and data ------------------------------------------------------
 
@@ -570,6 +581,7 @@ class AgoraApp(App):
         if keep and keep in {r.key for r in rows}:
             table.move_cursor(row=[r.key for r in rows].index(keep))
         self.paint_bar()
+        self.paint_keys()
         self.gutter()
         self.preview()
 
@@ -579,6 +591,18 @@ class AgoraApp(App):
     def current(self) -> Row | None:
         rows, table = self.shown(), self.query_one("#table", DataTable)
         return rows[table.cursor_row] if rows and 0 <= table.cursor_row < len(rows) else None
+
+    def paint_keys(self) -> None:
+        """The keys that work on this tab, and nothing else (spec「按鍵列」).
+
+        Textual's Footer listed every binding all the time, so the import tab
+        offered `m`, `e`, `d` and `P` - four keys that cannot do anything there.
+        """
+        bar = Text(" ")
+        for key, what in KEYS[self.tab]:
+            bar.append(f" {key} ", style="bold #000000 on #00afaf")
+            bar.append(f" {what}  ", style="#bcbcbc")
+        self.query_one("#keys", Static).update(bar)
 
     def paint_bar(self) -> None:
         bar = Text(" agora ", style="bold #000000 on #00afaf")
@@ -660,7 +684,7 @@ class AgoraApp(App):
             return isinstance(self.focused, DataTable)
         if action in ("merge", "edit", "delete"):
             return self.tab == "agora" and not in_preview
-        if action in ("mark", "primary", "filter", "refresh_cache", "sync"):
+        if action in ("mark", "mark_all", "primary", "filter", "pull", "push"):
             return not in_preview
         return True
 
@@ -912,6 +936,9 @@ class AgoraApp(App):
 
     @work
     async def action_merge(self) -> None:
+        if self.tab != "agora":
+            self.say("合併是 Agora 頁的動作；未匯入的用 Enter 匯入")
+            return
         rows = self.chosen_rows()          # the visible marked ones, in screen order
         if len(rows) < 2:
             self.say("合併要先用空白鍵勾選至少兩個")
@@ -940,6 +967,9 @@ class AgoraApp(App):
         self.show(keep=row.key if row else None)
 
     def action_edit(self) -> None:
+        if self.tab != "agora":
+            self.say("改標頭是 Agora 頁的動作")
+            return
         row = self.current()
         if row:
             code = self.outside(argv_for("edit", [row], None, None)[0])   # the editor needs the terminal
@@ -947,7 +977,7 @@ class AgoraApp(App):
             self.say("完成" if code == 0 else "改標頭沒有成功", failed=code != 0)
 
     @work
-    async def action_refresh_cache(self) -> None:
+    async def action_pull(self) -> None:
         """Pull what is marked: a row on the agora tab off Drive, one on the import
         tab into the full-text cache. There is no "all of them" here either."""
         rows = self.chosen_rows()
@@ -958,7 +988,7 @@ class AgoraApp(App):
                        sent=[r.key for r in rows])
 
     @work
-    async def action_sync(self) -> None:
+    async def action_push(self) -> None:
         rows = self.chosen_rows()
         if not rows:
             self.say("先選要寫回的 Session", failed=True)
@@ -970,6 +1000,9 @@ class AgoraApp(App):
 
     @work
     async def action_delete(self) -> None:
+        if self.tab != "agora":
+            self.say("刪除是 Agora 頁的動作")
+            return
         rows = self.chosen_rows()            # every marked row, or the one under the cursor
         if not rows:
             return

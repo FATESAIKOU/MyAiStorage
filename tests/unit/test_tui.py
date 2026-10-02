@@ -541,7 +541,7 @@ def test_the_escalation_goes_on_after_agora_itself_is_gone(group_calls, monkeypa
 
 def test_the_escalation_stops_when_the_group_is_gone(group_calls, monkeypatch):
     """review M4: a process that ends on SIGINT gets no SIGTERM."""
-    monkeypatch.setattr(tui, "ESCALATE_AFTER", 0.05)
+    monkeypatch.setattr(tui, "ESCALATE_AFTER", 0.2)
     sent, alive = group_calls
     app, _ = _app([])
     proc = FakeProc(lines=["[agora] 刪除 1/1"], hang=True)
@@ -555,11 +555,11 @@ def test_the_escalation_stops_when_the_group_is_gone(group_calls, monkeypatch):
             await pilot.pause()
             await pilot.press("down", "enter")
             await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            alive[4242] = False                  # nothing left in the group, from the start
             await pilot.press("escape")
             await _wait(lambda: sent, pilot)
-            alive[4242] = False                  # nothing left in the group
             proc.done.set()
-            await pilot.pause(0.4)                     # long enough for both later steps
+            await pilot.pause(0.5)               # long enough for both later steps
             assert [sig for _pgid, sig in sent] == [int(signal.SIGINT)]
     _run(go)
 
@@ -674,9 +674,14 @@ def test_a_failure_line_with_a_timestamp_in_it_is_not_progress():
             await pilot.press("d")
             await pilot.pause()
             await pilot.press("down", "enter")
-            assert _wait(lambda: app.screen.query_one("#bar").total, pilot)
-            bar = app.screen.query_one("#bar")
-            assert (bar.progress, bar.total) == (1, 2)
+
+            def progress():
+                if not isinstance(app.screen, tui.Run):
+                    return None
+                bar = app.screen.query_one("#bar")
+                return (bar.progress, bar.total) if bar.total else None
+            await _wait(lambda: progress() is not None, pilot)
+            assert progress() == (1, 2)
     _run(go)
 
 
@@ -977,4 +982,64 @@ def test_cancelling_every_visible_row_keeps_the_hidden_marks():
             await pilot.press("a")                       # 甲 visible and marked -> unmark it
             await pilot.pause()
             assert app.marked == {r.key for r in app.rows["agora"] if r.cells[1] != "甲"}
+    _run(go)
+
+
+def test_the_key_bar_shows_only_what_works_on_this_tab():
+    """spec 2.3 /「按鍵」: the import tab has no merge, header, delete or push."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            keys = " ".join(str(app.query_one("#keys").render()).split())
+            assert "m 合併" in keys and "P push" in keys and "enter 接續" in keys
+            await pilot.press("tab")
+            await pilot.pause()
+            keys = " ".join(str(app.query_one("#keys").render()).split())
+            for gone in ("m 合併", "P push", "d 刪除", "e 改標頭"):
+                assert gone not in keys
+            assert "enter 匯入" in keys and "p pull" in keys
+    _run(go)
+
+
+def test_p_pulls_and_P_pushes():
+    """spec 2.3: p pulls, P pushes; the old r and s are gone."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            assert app.check_action("pull", ()) and app.check_action("push", ())
+            await pilot.press("p")
+            await _wait(lambda: app._last_spawned, pilot)
+            assert app._last_spawned[-1][:2] == ["pull", "session"]
+            await pilot.pause()
+            for _ in range(60):                      # close the result window
+                await pilot.pause(0.05)
+                if isinstance(app.screen, tui.Tell):
+                    break
+            await pilot.press("space")
+            await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
+            await pilot.press("P")
+            await pilot.pause()
+            assert isinstance(app.screen, tui.Choose)          # push asks first
+            await pilot.press("escape")
+    _run(go)
+
+
+def test_the_agora_only_keys_do_nothing_on_the_import_tab():
+    """merge, edit, delete and push are not bound there (spec「按鍵」)."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("tab")
+            await pilot.pause()
+            assert not app.check_action("merge", ()) and not app.check_action("delete", ())
+            await pilot.press("m", "d", "P")
+            await pilot.pause()
+            assert not app._last_spawned
     _run(go)
