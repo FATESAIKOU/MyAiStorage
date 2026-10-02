@@ -207,23 +207,46 @@ agora show     session <id> [--raw]
 - 只上傳指定的那一個 Session。
 - 同一個來源 Session 再匯入：內容沒變、也沒有 `--header`，就不做事；內容沒變但有 `--header`，只更新標頭；內容變了而且還沒有子 Session，就更新同一個 agora id；已經有子 Session，就建一個新的（`relation: import`、`parents: [舊 id]`，S7）。
 
-### 5.3 merge
+### 5.3 merge（第 6 版：2026-10-02 使用者決定）
 
-- 產生一個新的 Session：`relation: merge`、`parents` 依給的順序。id 用空白或逗號分隔都可以（`agora merge session id1, id2, id3`）。
-- 閱讀版是各來源依序串接，每段標出來源；沒有 raw，接續時依 parents 取各來源的 raw（5.4）。
+**merge ＝ 寫一份多個 Session 的要約，加上來源清單。** 不再把各來源的全文串起來：前文太長，接手的 AI 注意力會被稀釋。要細節時，AI 自己用 agora 取原版。
 
-### 5.4 continue（第 5 版：2026-10-03 使用者決定）
+- `agora merge session id1 id2 … --agent opencode|claude`：`--agent` 必填，指定**誰寫要約**。id 用空白或逗號分隔都可以；同一個 id 給兩次是錯誤（X4）。
+- 產生一個新的 Session：`relation: merge`、`parents` 依給的順序，沒有 raw。
+- **材料**：每個**直接**來源的 agora id、標題、原本的 agent，以及它的閱讀版（`session.md` 的內文）。來源本身是 merge 時，它的內文就是它的要約，不往下展開。
+- **寫要約（轉接器 `summarize(prompt)`）**：在背景跑一次目標 agent，不開 TUI，回傳要約文字與所用的模型。
+  - **不准用任何工具**（opencode：`OPENCODE_PERMISSION` 全部 deny；Claude：`-p` 並禁用所有工具）。
+  - 工作目錄是 `<state>/summarize/`（第一次用時 `git init` 並做一個空 commit，opencode 的 session 才不會歸到全域專案）。
+  - 跑完**只刪掉它自己這一次產生的那個 session**（依 id，一個），不在使用者的 session 清單留下東西。
+  - 失敗（agent 錯誤、逾時、空的回覆）→ merge 失敗，什麼都不存。
+- **merge 的內文**：
+
+  ```markdown
+  ## 要約
+  （agent 寫的要約）
+
+  ## 來源
+  - agora:<ULID>「標題」（原本是 opencode）
+  - …
+
+  要看某個來源的原版：`agora show session <id>`（對話文字＋工具一行摘要）；要看工具呼叫的完整內容加 `--raw`。
+  ```
+
+- 標頭：`generated.by` 是寫要約的 `<agent>/<model>`；`description` 取要約的第一段。可以用 `edit` 改標頭；要約本身要改的話，之後再加。
+- 要約的提示詞放在 cli（兩個 agent 共用）：請它寫給之後接手的 AI 看，涵蓋每個來源的目的、決定與理由、目前進度、未解決的問題，最後是整體的下一步；不要編造來源裡沒有的內容；用來源的語言；只輸出要約本身。
+
+### 5.4 continue（第 5 版：2026-10-02 使用者決定；merge 部分第 6 版改寫）
 
 **continue ＝ ① 取得需要的原始 session，② 交給目標 agent 的轉接器轉成它自己的格式載入。** 不論 opencode 或 Claude、不論接的是普通還是 merge 出來的 Session，畫面上一打開都看得到前文，行為相同。import 與 merge 不用考慮這件事。
 
 1. **取得原始 session（cli）**：
    - 普通 Session：它自己的 raw（`agora.raw`）。
-   - merge 出來的：依 `agora.parents` 的順序，取每個來源的 raw；來源本身也是 merge 的話往下遞迴。每一段帶著來源的 agent 名稱與 agora id。
+   - merge 出來的（第 6 版）：**不取來源的 raw**。它的內文（要約＋來源清單）就是要載入的內容：交給 `native()` 的是一則 user「以下是 merge 的要約與來源清單，需要細節時用清單裡的指令取原版」＋內文，和一則 assistant「（讀完了，等你的指示）」。opencode 與 Claude 都一樣。
 2. **轉成目標格式（轉接器）**：每個轉接器只提供兩個方向：
    - `turns(raw)`：把**自己格式**的 raw 拆成共通的一輪一輪（`[(role, lines)]`，規則同閱讀版 4.4：文字＋工具一行摘要）。閱讀版就是 `format_reading(turns(raw))`。
    - `native(turns)`：把共通的一輪一輪組成**自己格式**的 raw。
    - 只有一段、而且來源 agent ＝目標 agent → 直接用原始 raw，不經過轉換（保留工具呼叫與前綴，快取能命中）。
-   - 其他情況（跨 agent、merge）→ 開頭加一則說明「以下是轉過來的紀錄，`[tool]` 行只是摘要」的 user 訊息（W2）；每段前面加一則標示來源的 user 訊息；某一段以沒有回覆的 user 結束時，補一則 assistant「（這一段在這裡結束，當時沒有回覆）」，所以前一段的問題不會和下一段黏在一起，交給 `native()` 的一定是 user／assistant 交替（W1）；丟掉 `[skip …]` 行（W6）；再用目標 agent 的 `native()` 組成原生 raw。同一個 Session 在 merge 裡出現兩次只取一次（W3）。
+   - 跨 agent → 開頭加一則說明「以下是轉過來的紀錄，`[tool]` 行只是摘要」的 user 訊息（W2）；每段前面加一則標示來源的 user 訊息；某一段以沒有回覆的 user 結束時，補一則 assistant「（這一段在這裡結束，當時沒有回覆）」，所以前一段的問題不會和下一段黏在一起，交給 `native()` 的一定是 user／assistant 交替（W1）；丟掉 `[skip …]` 行（W6）；再用目標 agent 的 `native()` 組成原生 raw。
 3. **載入**：一律走目標轉接器的 `start_native(raw, workdir)`（opencode：id 重編、`opencode import`、回讀驗證；Claude：新 uuid、寫 jsonl、`claude --resume`）。不再有「注入」這條路。
 4. 工作目錄：`--dir`，預設是 `agora.source.dir`（這台機器上存在的話），否則是目前目錄並提示。agent 啟動時同時設定 cwd 與 `PWD`。
 5. 寫 pending 並持有 flock（交給 agent 繼承），在前景啟動 agent；Ctrl-C 只給 agent。

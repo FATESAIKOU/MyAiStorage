@@ -54,6 +54,12 @@ class Agent(Protocol):
     def native(self, turns: Turns) -> bytes:
         """Build this agent's raw from shared turns, so a merged or other-agent session loads natively."""
 
+    def summarize(self, prompt: str, workdir: Path) -> tuple[str, str | None]:
+        """Run the agent once headless with no tools allowed; return (text, model).
+
+        Leaves no session behind: deletes only the one session this run made (design 5.3).
+        """
+
     def start_native(self, raw: bytes, workdir: Path) -> Launch:
         """Load raw (this agent's format) as a brand-new session and return how to open it."""
 
