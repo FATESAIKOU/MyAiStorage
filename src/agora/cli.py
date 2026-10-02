@@ -335,9 +335,9 @@ def cmd_continue(args, paths: store.Paths) -> int:
     parent = _header_for(index, source_id)
     agora = h.agora_of(parent)
     src = agora.get("source") or {}
-    workdir = Path(args.dir or (src.get("dir") if src.get("dir") and Path(src["dir"]).is_dir() else os.getcwd()))
-    workdir = workdir.expanduser().resolve()   # C5
-    fallback = not args.dir and not (src.get("dir") and Path(src["dir"]).is_dir())
+    src_dir = src.get("dir") if src.get("dir") and Path(src["dir"]).is_dir() else None
+    workdir = Path(args.dir or src_dir or os.getcwd()).expanduser().resolve()   # C5
+    fallback = not args.dir and not src_dir
     print(f"[agora] 工作目錄：{workdir}" + ("（來源沒有記錄目錄，用目前目錄；要換地方請加 --dir）" if fallback else ""),
           file=sys.stderr)
     # ① the raw sessions this one is made of, ② the target adapter turns them
