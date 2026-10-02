@@ -378,7 +378,7 @@ class ClaudeAgent:
         except (OSError, subprocess.SubprocessError) as e:
             raise AgentError(f"Claude 要約失敗：{e}")
         if proc.returncode != 0:
-            raise AgentError(f"Claude 要約失敗（rc={proc.returncode}）：{proc.stderr.strip()[-300:]}")
+            raise AgentError(f"Claude 要約失敗（rc={proc.returncode}）：{(proc.stderr or proc.stdout).strip()[-300:]}")
         try:
             doc = json.loads(proc.stdout or "{}")
         except ValueError:
@@ -406,14 +406,16 @@ def _used_model(doc: dict) -> str | None:
     if isinstance(doc.get("model"), str):
         return doc["model"]
     usage = doc.get("modelUsage")
-    if isinstance(usage, dict) and usage:
-        return next(iter(usage))
+    if isinstance(usage, dict) and usage:   # the model that wrote the most, not a helper model
+        return max(usage, key=lambda m: (usage[m] or {}).get("outputTokens", 0) if isinstance(usage[m], dict) else 0)
     return None
 
 
 def _child_env() -> dict:
-    """HOME follows AGORA_CLAUDE_HOME so a sandboxed HOME cannot redirect it."""
-    return {**os.environ, "HOME": str(config_dir().parent)}
+    """HOME follows AGORA_CLAUDE_HOME when tests set it; otherwise the user's own environment."""
+    if os.environ.get("AGORA_CLAUDE_HOME"):
+        return {**os.environ, "HOME": os.environ["AGORA_CLAUDE_HOME"]}
+    return dict(os.environ)
 
 
 def _summarize_timeout() -> float:

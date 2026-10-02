@@ -28,8 +28,8 @@ PROMPT = ("請用兩句繁體中文，把下面這件事說清楚：有人在規
           "的流程，已經決定先讀檔、組表頭、再輸出資料列。只輸出這兩句話。")
 
 
-@pytest.fixture(scope="module")
-def workdir():
+@pytest.fixture
+def workdir(monkeypatch):
     if shutil.which("claude") is None:
         pytest.skip("claude CLI not found")
     if PROJ.exists():
@@ -39,7 +39,9 @@ def workdir():
     subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "init"],
                    cwd=PROJ, check=True)
     proj = PROJ.resolve()
-    os.environ["AGORA_CLAUDE_HOME"] = str(REAL_HOME)
+    # conftest gives every test a fake HOME; this one needs the real login (only here, only per test).
+    monkeypatch.setenv("HOME", str(REAL_HOME))
+    monkeypatch.setenv("AGORA_CLAUDE_HOME", str(REAL_HOME))
     yield proj
     _assert_and_clean(proj)
 
