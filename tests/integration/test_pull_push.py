@@ -9,9 +9,10 @@ opencode for one self-made session. Scenarios:
   reading cache (and a second pull says it is fresh and skips);
 * no id at all -> exit 1.
 
-TODO (impl1, change section 3): the "cloud does not have it" scenarios
-(`--not-exist-delete` / `--not-exist-upload` / the plain notice) get their own
-tests once specs/session-sync/spec.md section 3 lands.
+The "cloud does not have it" scenarios (spec session-sync「雲端沒有的 Session
+保留在本機並標記」、「只在明確要求時刪除或復活」、「其他指令遇到雲端沒有的
+Session」) are at the bottom: another machine's delete is simulated by purging
+the folder on Drive directly, never by another agora.
 
 Cleanup: Drive sessions this created are purged one by one, the opencode session
 is deleted by id, then the project tree. Nothing outside agora-test/ is touched.
@@ -116,14 +117,20 @@ def imported(env) -> tuple[str, str]:
     return agora_id, session_id
 
 
+def fetch_local_raw(env, agora_id: str):
+    """The raw as `agora show --raw` would leave it: here, fetched once by hand."""
+    paths, ulid = env["paths"], agora_id.split(":", 1)[1]
+    hdr = store.Index(paths).header(ulid)
+    store.fetch_raw(paths, store.Drive(paths), ulid, hdr)
+    raw = paths.mirror / ulid / h.agora_of(hdr)["raw"]["file"]
+    assert raw.is_file()
+    return hdr, raw
+
+
 def test_pull_brings_the_raw_back(env):
     agora_id, _ = imported(env)
     paths = env["paths"]
-    hdr = store.Index(paths).header(agora_id.split(":", 1)[1])
-    raw_name = h.agora_of(hdr)["raw"]["file"]
-    local_raw = paths.mirror / agora_id.split(":", 1)[1] / raw_name
-    store.fetch_raw(paths, store.Drive(paths), agora_id.split(":", 1)[1], hdr)
-    assert local_raw.is_file()
+    hdr, local_raw = fetch_local_raw(env, agora_id)
     local_raw.unlink()                      # only the raw is gone; session.md stays
 
     code, out, err = run_cli(env, "pull", "session", agora_id)
@@ -183,6 +190,115 @@ def test_push_refuses_an_agent_id(env):
     _agora_id, session_id = imported(env)
     code, _, err = run_cli(env, "push", "session", f"opencode:{session_id}")
     assert code != 0 and "opencode" in err
+
+
+# --- the cloud no longer has it (spec session-sync, change section 3) ----------
+
+def resync(env) -> str:
+    """Really list Drive again: `search` syncs, but sync is throttled."""
+    (env["paths"].state / "last-sync").unlink(missing_ok=True)
+    code, out, err = run_cli(env, "search", "session", "--filter", "cloud=no")
+    assert code == 0, err
+    return out
+
+
+def purge_on_drive(env, agora_id: str) -> None:
+    """Another machine deleted it: the folder is gone from Drive, nothing else."""
+    drive = store.Drive(env["paths"])
+    subprocess.run(["rclone", "--config", str(REAL_CONF),
+                    "--drive-root-folder-id", drive.folder_id(),
+                    "purge", f"gdrive:sessions/{agora_id.split(':', 1)[1]}"],
+                   check=True, capture_output=True)
+
+
+def test_a_session_deleted_elsewhere_is_kept_here_and_marked(env):
+    agora_id, _ = imported(env)
+    ulid = agora_id.split(":", 1)[1]
+    purge_on_drive(env, agora_id)                       # another machine's delete
+    env["created"]["ulids"].remove(ulid)                # Drive has none left to purge
+
+    resync(env)
+    assert store.Index(env["paths"]).header(ulid) is not None, "the mirror must stay"
+    assert not store.Index(env["paths"]).cloud_has(ulid)
+
+    code, out, _ = run_cli(env, "search", "session", "--filter", "cloud=no")
+    assert code == 0 and agora_id in out and "(雲端沒有)" in out
+
+    code, out, _ = run_cli(env, "search", "session", "--filter", "cloud=yes")
+    assert code == 0 and agora_id not in out
+
+
+def test_continue_refuses_a_session_the_cloud_lost(env):
+    agora_id, _ = imported(env)
+    ulid = agora_id.split(":", 1)[1]
+    purge_on_drive(env, agora_id)
+    env["created"]["ulids"].remove(ulid)
+    resync(env)
+
+    code, out, err = run_cli(env, "continue", "session", agora_id, "--agent", "opencode",
+                             "--dir", str(env["proj"]))
+    assert code == cli.EXIT_INPUT, "must not write back what the cloud dropped"
+    assert out == "" and "--not-exist-upload" in err and "--not-exist-delete" in err
+    assert not list(env["paths"].pending.glob("*.json")), "no agent was started"
+
+
+def test_not_exist_upload_puts_it_back_and_the_mark_clears(env):
+    agora_id, _ = imported(env)
+    ulid = agora_id.split(":", 1)[1]
+    hdr, local_raw = fetch_local_raw(env, agora_id)     # both files go up (R7)
+    raw_name = h.agora_of(hdr)["raw"]["file"]
+    purge_on_drive(env, agora_id)
+    resync(env)
+    assert not store.Index(env["paths"]).cloud_has(ulid)
+
+    code, _, err = run_cli(env, "push", "session", agora_id, "--not-exist-upload")
+    assert code == 0, err
+    assert ulid in remote_names(env), "it should be back on Drive"
+    on_drive = {e["Name"] for e in json.loads(
+        store.Drive(env["paths"])._run("lsjson", f"gdrive:sessions/{ulid}", "--files-only") or "[]")}
+    assert on_drive == {"session.md", raw_name}, on_drive
+    (env["paths"].state / "last-sync").unlink(missing_ok=True)
+    run_cli(env, "search", "session", "--filter", "cloud=yes")
+    assert store.Index(env["paths"]).cloud_has(ulid), "the mark clears once it is back"
+
+
+def test_not_exist_delete_drops_the_local_copy(env):
+    agora_id, _ = imported(env)
+    ulid = agora_id.split(":", 1)[1]
+    purge_on_drive(env, agora_id)
+    env["created"]["ulids"].remove(ulid)
+    resync(env)
+    assert store.Index(env["paths"]).header(ulid) is not None
+
+    code, _, err = run_cli(env, "pull", "session", agora_id, "--not-exist-delete")
+    assert code == 0, err
+    assert store.Index(env["paths"]).header(ulid) is None
+    assert not (env["paths"].mirror / ulid).exists()
+    code, out, _ = run_cli(env, "search", "session", "--filter", "cloud=no")
+    assert agora_id not in out
+
+
+def test_a_plain_pull_or_push_only_says_it(env):
+    agora_id, _ = imported(env)
+    ulid = agora_id.split(":", 1)[1]
+    purge_on_drive(env, agora_id)
+    env["created"]["ulids"].remove(ulid)
+    resync(env)
+
+    code, _, err = run_cli(env, "pull", "session", agora_id)
+    assert code == 0 and "雲端沒有" in err
+    assert store.Index(env["paths"]).header(ulid) is not None     # untouched
+
+    code, _, err = run_cli(env, "push", "session", agora_id)
+    assert code == 0 and "雲端沒有" in err
+    assert ulid not in remote_names(env)                          # not revived
+    assert store.Index(env["paths"]).header(ulid) is not None
+
+
+def remote_names(env) -> set[str]:
+    drive = store.Drive(env["paths"])
+    out = drive._run("lsjson", "gdrive:sessions", "--dirs-only")
+    return {e["Name"] for e in json.loads(out or "[]")}
 
 
 if __name__ == "__main__":

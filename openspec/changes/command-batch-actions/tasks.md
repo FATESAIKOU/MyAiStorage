@@ -32,6 +32,6 @@
 
 ## 4. 收尾（PM 驗收，review 審）
 
-- [ ] 4.1 `docs/design.md`（5.2、5.3、5.6、5.10）與 README 更新（**部分完成**：5.2／5.3／5.6／5.10 與 README 的指令已更新，design 5.10 的「雲端沒有」只留 TODO 指向 specs/session-sync/spec.md，等 impl1 第 3 節）
-- [x] 4.2 整合測試（只用 `agora-test`、自編短對話）：pull、push、import 多個，實跑通過（`tests/integration/test_import_batch.py`：import 多個與其中一個失敗；`tests/integration/test_pull_push.py`：pull 把原始檔拿回來、push 覆寫 Drive、pull agent id 進全文快取與再 pull 略過、不給 id 報錯、push 拒絕 agent id。**「雲端沒有」那幾個情境等 impl1 第 3 節，測試裡已留 TODO**）
+- [x] 4.1 `docs/design.md`（5.2、5.3、5.6、5.10）與 README 更新（5.10 的「雲端沒有」已照 specs/session-sync/spec.md 寫完：什麼時候更新標記、兩個 flag 的分界、其他指令遇到它怎麼拒絕、search／show 怎麼標）
+- [x] 4.2 整合測試（只用 `agora-test`、自編短對話）：pull、push、import 多個，實跑通過（`tests/integration/test_import_batch.py`：import 多個與其中一個失敗；`tests/integration/test_pull_push.py`：pull 把原始檔拿回來、push 覆寫 Drive、pull agent id 進全文快取與再 pull 略過、不給 id 報錯、push 拒絕 agent id。「雲端沒有」：在 Drive 上直接 purge 模擬別台刪掉 → 保留並標記、`search --filter cloud=no|yes`、continue 被拒（exit 1、沒開 agent）、`push --not-exist-upload` 傳回去且標記清除、`pull --not-exist-delete` 刪本機、不加 flag 只提醒不動）
 - [ ] 4.3 review 審程式；PM 驗收；程式碼行數在 2,900 行內

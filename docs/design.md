@@ -365,8 +365,11 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 - 已經在本機、沒有過時的，pull 略過；push 則重新覆蓋一次（結果一樣）。
 - **push 只傳該傳的兩個檔**：`session.md` 與它標頭 `agora.raw.file` 指到的那一個原始檔（本機沒有那個原始檔就只傳 `session.md`）。舊的原始檔、下載到一半的檔、以 `.` 開頭的檔都不傳。
 - 兩個指令都逐個在 stderr 印 `k/N`，某一個失敗照樣做下一個。
-- **雲端沒有的 Session**（2026-10-03 決定，規格見 `openspec/changes/command-batch-actions/specs/session-sync/spec.md`）：**同步時不再自動清掉**別台機器刪掉的 Session，本機鏡像與索引保留並標成「雲端沒有」。`pull --not-exist-delete` 刪掉本機副本；`push --not-exist-upload` 把它傳回去（等於撤銷別台的刪除）；兩個 flag 都沒加時只印一行提醒、不動。`search`／`show` 會標示，`--filter cloud=no|yes` 可查。
-  - **TODO（impl1，change 第 3 節）**：上面這段「雲端沒有」尚未實作，實作中；程式與測試以 `openspec/changes/command-batch-actions/specs/session-sync/spec.md` 為準。
+- **雲端沒有的 Session**（2026-10-03 決定，規格見 `openspec/changes/command-batch-actions/specs/session-sync/spec.md`）：
+  - **同步時不再自動清掉**別台機器刪掉的 Session：本機的鏡像與索引都保留，標成「雲端沒有」。**只有在這次列檔完整成功時**才更新標記；列檔失敗、離線、或 Drive 上沒有 `sessions/` 時不新增也不清除任何標記；雲端又出現時，下一次同步就清掉。還在 outbox 的顯示為「未上傳」，不算雲端沒有；接續中（pending）的也不算。
+  - **只在明確要求時才刪或復活**：`pull --not-exist-delete` 刪掉本機副本（在 outbox 或接續中的不刪，並印出原因）；`push --not-exist-upload` 把它傳回 Drive（等於撤銷別台的刪除；本機沒有那個原始檔時拒絕這一個）。兩個 flag 都沒加時只印一行提醒、不動。兩個 flag 對 agent 的 id 也有意思：`--not-exist-delete` 是「agent 那邊已經沒有這個 session 了，就刪掉它的全文快取」。
+  - **其他指令遇到它**：會寫回既有 id 的指令（continue、edit、import 的更新路徑）**拒絕**（exit 1），並提示上面那兩個選擇，agent 不會被打開；merge 不接受雲端沒有的 Session 當來源；delete 雲端沒有的只刪本機副本（exit 0）；它不算成別人的子 Session（不擋刪除、也不讓 import 分岔）；import 的來源對到雲端沒有的那一筆時建一個新的 Session。
+  - **看得到**：`search` 每行最後標 `(雲端沒有)`，並支援 `--filter cloud=no`／`cloud=yes`（只列出雲端沒有的可以用管線接著清掉）；`show` 也標。
 - 互動模式：`r` 選「Agora／本機」更新快取，`s` 確認後 push，都在等待視窗裡跑，最新一行就是進度。未匯入頁的完整對話用 `reading/` 的快取；內文搜尋先搜快取，再用轉接器的 `search_text()` 補搜還沒快取的。
 
 ## 6. 不做的事
