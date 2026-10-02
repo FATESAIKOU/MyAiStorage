@@ -211,6 +211,33 @@ def authorize(paths: store.Paths, say=print) -> int:
 
 # --- small windows -------------------------------------------------------------
 
+def killpg(pgid: int, sig) -> bool:
+    """Send `sig` to a whole process group; False if there is nothing left to signal."""
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        return False            # the group is gone, which is the answer we wanted
+    except OSError:
+        return False
+    return True
+
+
+def group_alive(pgid: int) -> bool:
+    """Whether anyone is still in this process group.
+
+    Not whether *our* child is running: agora can exit first and leave the agent it
+    started in the group (review M1), and that agent is exactly what an escalation
+    is for. Signal 0 asks without sending anything.
+    """
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 class Choose(ModalScreen):
     """A few options in the middle of the screen; dismisses with the index chosen, or None on Esc."""
     BINDINGS = [Binding("escape", "dismiss(None)", "取消")]
@@ -257,6 +284,11 @@ class AskText(ModalScreen):
 ESCALATION = (signal.SIGTERM, signal.SIGKILL)
 
 
+#: What a group is sent after SIGINT, and how long each step is given (review V2).
+ESCALATION = (signal.SIGTERM, signal.SIGKILL)
+ESCALATE_AFTER = 5.0
+
+
 class Run(ModalScreen):
     """One command-mode command in a child process, with a progress bar and Esc.
 
@@ -267,9 +299,11 @@ class Run(ModalScreen):
     a path can easily contain digits and a slash. Dismisses (code, output).
     """
 
-    BINDINGS = [Binding("escape", "stop", "中斷", priority=True)]
-    PROGRESS = re.compile(r"^\[agora\].*?\b(\d+)/(\d+)\b")
-    STOP_AFTER = 5.0        # seconds before the next signal; a test shortens it
+    BINDINGS = [Binding("escape", "stop", "中斷", priority=True),
+                Binding("ctrl+q", "stop", "中斷", priority=True)]   # review M3
+    # Only our own progress lines: `[agora] <word> k/N` and nothing after (review
+    # V8, L1). A failure line carries rclone's tail, and its timestamp reads as 2026/10.
+    PROGRESS = re.compile(r"^\[agora\] \S+ (\d+)/(\d+)(?:\s|$)")
 
     def __init__(self, title: str, argv: list[str], spawn):
         super().__init__()
@@ -279,7 +313,6 @@ class Run(ModalScreen):
         self.started = time.monotonic()
         self.stopping = False
         self.signals: list[int] = []      # what was sent, in order (a test reads this)
-        self.armed: list[int] = []
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="box"):
@@ -294,13 +327,19 @@ class Run(ModalScreen):
         self.set_interval(0.1, self.tick)
 
     def read(self) -> None:
-        for line in self.proc.stdout:
-            self.lines.append(line.rstrip())
-        code = self.proc.wait()
-        self.app.call_from_thread(self.dismiss, (code, "\n".join(self.lines)))
+        try:
+            for line in self.proc.stdout:
+                self.lines.append(line.rstrip())
+            code = self.proc.wait()
+        except Exception as e:       # never leave the window up forever (review L6)
+            code, self.lines = 2, self.lines + [f"讀不到輸出：{e}"]
+        # The app may already be gone (ctrl+q closed it); that is not our problem.
+        with contextlib.suppress(Exception):
+            self.app.call_from_thread(self.dismiss, (code, "\n".join(self.lines)))
 
     def tick(self) -> None:
-        step = next((m for m in map(self.PROGRESS.search, reversed(self.lines)) if m), None)
+        step = next((m for m in map(self.PROGRESS.match, reversed(self.lines))
+                     if m and 1 <= int(m.group(1)) <= int(m.group(2))), None)
         if step:
             self.query_one("#bar", ProgressBar).update(total=int(step.group(2)),
                                                         progress=int(step.group(1)))
@@ -310,32 +349,20 @@ class Run(ModalScreen):
         self.query_one("#last", Static).update(f"{prefix}（{spent} 秒）{last}")
 
     def action_stop(self) -> None:
-        if self.proc is None or self.proc.poll() is not None:
+        """Esc (or ctrl+q): stop the whole group, and go on stopping it after we go.
+
+        A second Esc does nothing: the escalation is already running, and a second
+        SIGINT would interrupt agora while it is keeping its pending record (review L3).
+        """
+        if self.stopping or self.proc is None or self.proc.poll() is not None:
             return
         self.stopping = True
-        self._send(signal.SIGINT)
-        self.armed = [int(sig) for sig in ESCALATION]
-        self._arm()
-
-    def _arm(self) -> None:
-        if self.armed:
-            self.set_timer(self.STOP_AFTER, lambda: self._again(self.armed[0]))
-
-    def _again(self, sig: int) -> None:
-        if self.proc is None or self.proc.poll() is not None:
-            return
-        if sig in self.armed:               # not sent yet: still alive, so it goes up a step
-            self.armed.remove(sig)
-            self._send(signal.Signals(sig))
-            self._arm()
-
-    def _send(self, sig) -> None:
-        self.signals.append(int(sig))
-        try:
-            os.killpg(self.proc.pid, sig)   # its own group: agora and whatever it started
-        except (AttributeError, TypeError, OSError):
+        group = getattr(self.proc, "pid", None)
+        if isinstance(group, int):
+            self.app.stop_group(group)
+        else:
             with contextlib.suppress(Exception):
-                self.proc.send_signal(sig)
+                self.proc.send_signal(signal.SIGINT)   # a fake in a test
 
 
 class Busy(ModalScreen):
@@ -458,6 +485,8 @@ class AgoraApp(App):
         self.marked: set[str] = set()
         self.cache: dict[str, tuple[str, str]] = {}
         self.status = ""
+        self._stopped = False        # an Esc went through, whatever the exit code says
+        self._groups: set[int] = set()   # process groups an action started
 
     def compose(self) -> ComposeResult:
         yield Static(id="bar")
@@ -511,10 +540,13 @@ class AgoraApp(App):
                 return False
         return True
 
-    def reload(self) -> None:
+    def reload(self, keep_marked: bool = False) -> None:
         self.index = store.Index(self.paths)       # local only; no full sync after every action (T6)
         self.rows = {"agora": agora_rows(self.index, []), "import": import_rows(self.index, self.agents, self.paths)}
-        self.marked.clear()
+        if not keep_marked:
+            self.marked.clear()
+        else:
+            self.marked &= {r.key for r in self.rows[self.tab]}   # only rows that are still there
         self.cache.clear()
         self.show()
 
@@ -711,6 +743,21 @@ class AgoraApp(App):
         row = self.current()
         return marked or ([row] if row else [])
 
+    def action_quit(self) -> None:
+        """ctrl+q while a command is running stops it first (review M3).
+
+        Textual's own ctrl+q is a priority binding on the app, so it reaches over a
+        modal screen: with the window up, quitting used to close everything and leave
+        the command running with nobody watching. Whichever of the two bindings wins,
+        the answer is the same - stop the group - and a second one is ignored while
+        the escalation is already going.
+        """
+        screen = self.screen
+        if isinstance(screen, Run) and screen.proc is not None:
+            screen.action_stop()
+            return
+        self.exit()
+
     def spawn(self, argv: list[str]) -> subprocess.Popen:
         """The child process an action runs in; a test replaces this (design, T2).
 
@@ -724,29 +771,66 @@ class AgoraApp(App):
         return subprocess.Popen(
             [sys.executable, "-m", "agora.cli", *argv],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, start_new_session=True,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"})
+            text=True, encoding="utf-8", errors="replace",   # review L6: a bad byte must not wedge the window
+            bufsize=1, start_new_session=True,
+            env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"})
 
-    async def act(self, title: str, argv: list[str]) -> None:
-        """An action that needs no terminal of its own: a child process, a window
-        with its progress and Esc, then what it said.
+    async def act(self, title: str, argv: list[str]) -> bool:
+        """One command in a child process, under a window with its progress and Esc.
 
-        Re-running the same action carries on from where it stopped (design 5.11),
-        which is what the screen says after an interruption, because the command
-        mode is the one that knows how to skip what is already done.
+        Says whether it was stopped, so a caller with more than one command does not
+        start the next one after an interruption (review M2) - and clears the
+        selection only when the command succeeded, so a failure can be run again by
+        pressing the same key (spec「成功後清掉勾選」).
+
+        Re-running the same action carries on from where it stopped (design 5.11):
+        the command mode is the one that knows how to skip what is already done.
         """
+        self._stopped = False
         code, out = await self.push_screen_wait(Run(title, argv, self.spawn))
-        stopped = code in (130, -signal.SIGINT, -signal.SIGTERM, -signal.SIGKILL)
-        await self.push_screen_wait(Tell(f"{title}{'（已中斷）' if stopped else ''}", out, code == 0))
-        self.reload()
-        if code == 0:
-            self.say("完成")
-        elif stopped:
-            self.say("已中斷；重跑同一個動作會接著做", failed=True)
+        # Esc wins over the exit code (review L2): the child may have finished in the
+        # same instant, and a -9 from the OOM killer is not an interruption. What we
+        # know is that we sent SIGINT to a group that was still running.
+        stopped = bool(self._stopped or code == 130)
+        if stopped:
+            note = "已中斷；重跑同一個動作會接著做"
+        elif code == 0:
+            note = "完成"
         elif code == 3:
-            self.say("已存進 outbox，之後的指令會自動再送", failed=True)
+            note = "已存進 outbox，之後的指令會自動再送"
         else:
-            self.say("沒有全部成功，訊息在結果視窗", failed=True)
+            note = "沒有全部成功，訊息在下面"
+        await self.push_screen_wait(Tell(f"{title}{'（已中斷）' if stopped else ''}",
+                                         f"{note}\n\n{out}", code == 0))
+        self.reload(keep_marked=code != 0)
+        self.say(note, failed=code != 0)
+        return stopped
+
+    def stop_group(self, pgid: int) -> None:
+        """SIGINT, then SIGTERM, then SIGKILL to a process group (review V2).
+
+        Here, on the app, rather than in the waiting window: the window goes away
+        as soon as agora itself exits, and whatever it started can still be running
+        in that group (review M1). Whether it is gone is `killpg(pgid, 0)` saying so,
+        not our child having exited. Timers belong to the app, so they outlive the
+        screen.
+        """
+        self._groups.add(pgid)
+        if killpg(pgid, signal.SIGINT):
+            self._stopped = True
+            for sig in ESCALATION:
+                self.set_timer(ESCALATE_AFTER, lambda sig=sig: self._step(pgid, sig))
+
+    def _step(self, pgid: int, sig) -> None:
+        if group_alive(pgid):
+            killpg(pgid, sig)
+        else:
+            self._groups.discard(pgid)      # nothing left in it
+
+    def stop_everything(self) -> None:
+        """Leaving with a command still running: SIGTERM to whatever is left."""
+        for pgid in list(self._groups):
+            killpg(pgid, signal.SIGTERM)
 
     def outside(self, argv: list[str]) -> int:
         """Hand the whole terminal over (an agent, an editor), then come back."""
@@ -766,8 +850,9 @@ class AgoraApp(App):
             # its own k/N progress in the window (V6).
             for agent in dict.fromkeys(r.agent for r in rows):
                 mine = [r for r in rows if r.agent == agent]
-                await self.act(f"匯入 {len(mine)} 個（{agent}）",
-                               argv_for("import", mine, None, None)[0])
+                if await self.act(f"匯入 {len(mine)} 個（{agent}）",
+                                  argv_for("import", mine, None, None)[0]):
+                    break      # Esc means stop this action, not half of it (review M2)
             return
         row = self.current()
         pick = await self.push_screen_wait(Choose("用哪個 agent 接續？", ["opencode", "claude"]))
@@ -847,5 +932,19 @@ class AgoraApp(App):
 
 def main(paths: store.Paths) -> int:
     from agora import cli       # the command mode does the work; imported here to avoid a cycle
-    AgoraApp(paths, cli).run()
+    app = AgoraApp(paths, cli)
+
+    def on_hangup(_signum, _frame):
+        # The terminal window is gone. The children are in their own sessions, so
+        # they would not get the SIGHUP - they would just keep writing summaries or
+        # deleting on Drive (review M3).
+        app.stop_everything()
+        raise SystemExit(130)
+
+    with contextlib.suppress(ValueError, AttributeError, OSError):
+        signal.signal(signal.SIGHUP, on_hangup)
+    try:
+        app.run()
+    finally:
+        app.stop_everything()   # ctrl+q closes the app without telling the group
     return 0

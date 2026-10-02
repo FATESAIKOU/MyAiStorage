@@ -27,6 +27,7 @@ see docs/spike/opencode.md (traps 1-6) for the evidence:
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import json
 import os
 import sqlite3
@@ -792,6 +793,14 @@ class OpencodeAgent:
             proc.kill()
             proc.wait()
             raise AgentError(f"opencode 寫要約逾時（{seconds} 秒）") from None
+        except BaseException:      # Esc, a closed terminal: kill opencode now (review M5)
+            # The pending record is already written, so killing it is safe - and the
+            # alternative is waiting on a stdout that never reaches EOF, until
+            # something stronger than SIGINT arrives.
+            with contextlib.suppress(Exception):
+                proc.kill()
+                proc.wait()
+            raise
         finally:
             for reader in readers:
                 reader.join(timeout=5)     # the pipes close as the child goes, so this returns
@@ -800,9 +809,16 @@ class OpencodeAgent:
         return proc.returncode, b"".join(events), b"".join(errors)
 
     def _sweep_pending(self, workdir: Path) -> None:
-        """Finish what an interrupted run left: one id at a time, then drop the record."""
+        """Finish what an interrupted run left: one id at a time, then drop the record.
+
+        The material files go too: one holds the whole conversation being summarised,
+        and a run killed by SIGTERM or SIGKILL never reaches its own cleanup. The
+        directory is agora's own (design 5.3), so what is in it is ours to remove.
+        """
         for record in sorted(workdir.glob(f"{PENDING_PREFIX}*")):
             self._drop_summary_session(record.name[len(PENDING_PREFIX):], workdir)
+        for material in workdir.glob(f"{MATERIAL_PREFIX}*"):
+            material.unlink(missing_ok=True)
 
     def _drop_summary_session(self, session_id: str | None, workdir: Path) -> None:
         """Delete the one session a summarize run made - by id, never a pattern and

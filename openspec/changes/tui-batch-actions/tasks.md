@@ -5,6 +5,7 @@
 - [x] 1.3 拿掉執行緒裡的 `redirect_stdout`（review K3）；首次設定與同步若仍用執行緒，只收自己的輸出
 - [x] 1.4 opencode 的 summarize 一從事件串流讀到 session id 就寫 `pending-<id>`（review V5；改 `opencode.py`，負責：impl1）
 - [x] 1.5 Esc 的升級：SIGINT → 5 秒 SIGTERM → 5 秒 SIGKILL；`stdin=DEVNULL`；進度只讀 `[agora] … k/N` 的行（review V1、V2、V8）
+- [x] 1.6 review T2-sec1 M1～M3：升級看整個 process group、中斷不再開始下一段、離開前停掉執行中的 group（順手修 L1～L7 與 M5）
 
 ## 2. 選取與按鍵
 

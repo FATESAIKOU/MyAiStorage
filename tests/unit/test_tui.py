@@ -7,6 +7,8 @@ import json
 import signal
 import threading
 
+import pytest
+
 from agora import header as h
 from agora import store, tui
 from agora.agents.base import Exported, Listed
@@ -174,6 +176,8 @@ class FakeCli:
 
 class FakeProc:
     """What AgoraApp.spawn hands back: its output, and signals it was sent."""
+
+    pid = 4242                # a group of its own, so the real signalling path runs
 
     def __init__(self, lines=(), code=0, hang=False):
         self.stdout = iter(f"{line}\n" for line in lines)
@@ -454,3 +458,264 @@ def test_a_child_process_cannot_take_the_users_keystrokes():   # review V1
     assert seen["stdin"] is tui.subprocess.DEVNULL
     assert seen["start_new_session"] is True and seen["stderr"] is tui.subprocess.STDOUT
     assert seen["env"]["PYTHONUNBUFFERED"] == "1"
+
+
+# --- review T2-sec1: stopping a command, and stopping it completely -----------
+
+
+@pytest.fixture
+def group_calls(monkeypatch):
+    """Watch the real signalling functions instead of signalling anything."""
+    sent: list[tuple[int, int]] = []
+    alive = {4242: True}
+    monkeypatch.setattr(tui, "killpg", lambda pgid, sig: (sent.append((pgid, int(sig))) or alive.get(pgid, False)))
+    monkeypatch.setattr(tui, "group_alive", lambda pgid: alive.get(pgid, False))
+    return sent, alive
+
+
+async def _wait(predicate, pilot, tries=80):
+    """Give the screen the pauses it needs; `pilot.pause` is what runs the timers."""
+    for _ in range(tries):
+        if predicate():
+            return True
+        await pilot.pause(0.05)
+    return predicate()
+
+
+def test_esc_stops_the_group_and_the_window_says_it_was_interrupted(group_calls, monkeypatch):
+    """review M4: Esc sends SIGINT, and the interruption is what the screen reports."""
+    monkeypatch.setattr(tui, "ESCALATE_AFTER", 60)      # no escalation in this one
+    sent, alive = group_calls
+    app, _ = _app([])
+    proc = FakeProc(lines=["[agora] 刪除 1/3"], hang=True)
+    spawn, _ = _spawn(proc)
+    app.spawn = spawn
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            await pilot.press("escape")
+            await _wait(lambda: sent, pilot)
+            assert sent == [(4242, int(signal.SIGINT))]
+            alive[4242] = False                             # the group is gone
+            proc.done.set()
+            assert _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            await pilot.press("space")                      # close the result window
+            await pilot.press("space")                      # close the result window
+            await _wait(lambda: "重跑" in str(app.query_one("#msg").render()), pilot)
+            assert "重跑同一個動作會接著做" in str(app.query_one("#msg").render())
+    _run(go)
+
+
+def test_the_escalation_goes_on_after_agora_itself_is_gone(group_calls, monkeypatch):
+    """review M1: our child can exit first and leave its agent in the group, so
+    'stopped' means killpg(pgid, 0) says there is nobody left - not that we reaped it."""
+    monkeypatch.setattr(tui, "ESCALATE_AFTER", 0.05)
+    sent, alive = group_calls
+    app, _ = _app([])
+    proc = FakeProc(lines=["[agora] 合併 1/2"], hang=True)
+    spawn, _ = _spawn(proc)
+    app.spawn = spawn
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("space", "down", "space", "m")
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            await pilot.press("escape")
+            await _wait(lambda: sent, pilot)
+            proc.done.set()                     # agora itself is gone; the agent is not
+            proc.code = 130
+            await _wait(lambda: len(sent) >= 3, pilot)
+            assert [sig for _pgid, sig in sent] == [int(signal.SIGINT),
+                                                     int(signal.SIGTERM), int(signal.SIGKILL)]
+    _run(go)
+
+
+def test_the_escalation_stops_when_the_group_is_gone(group_calls, monkeypatch):
+    """review M4: a process that ends on SIGINT gets no SIGTERM."""
+    monkeypatch.setattr(tui, "ESCALATE_AFTER", 0.05)
+    sent, alive = group_calls
+    app, _ = _app([])
+    proc = FakeProc(lines=["[agora] 刪除 1/1"], hang=True)
+    spawn, _ = _spawn(proc)
+    app.spawn = spawn
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            await pilot.press("escape")
+            await _wait(lambda: sent, pilot)
+            alive[4242] = False                  # nothing left in the group
+            proc.done.set()
+            await pilot.pause(0.4)                     # long enough for both later steps
+            assert [sig for _pgid, sig in sent] == [int(signal.SIGINT)]
+    _run(go)
+
+
+def test_ctrl_q_in_the_window_interrupts_instead_of_leaving(group_calls, monkeypatch):
+    """review M3: Textual's own ctrl+q is priority, so it reached the app while a
+    command ran and closed everything without stopping it."""
+    monkeypatch.setattr(tui, "ESCALATE_AFTER", 60)
+    sent, alive = group_calls
+    app, _ = _app([])
+    proc = FakeProc(lines=["[agora] 合併 1/2"], hang=True)
+    spawn, _ = _spawn(proc)
+    app.spawn = spawn
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("space", "down", "space", "m")
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: sent, pilot)
+            await pilot.press("ctrl+q")
+            assert _wait(lambda: len(sent) >= 1, pilot)
+            assert app.is_running                       # still here: it interrupted
+            alive[4242] = False
+            proc.done.set()
+    _run(go)
+
+
+def test_leaving_stops_a_command_that_is_still_running(group_calls):
+    """review M3: ctrl+q from the list, or the terminal closing, must not leave a
+    child writing summaries or deleting on Drive."""
+    sent, alive = group_calls
+    app, _ = _app([])
+    app._groups.add(4242)
+    app.stop_everything()
+    assert sent == [(4242, int(signal.SIGTERM))]
+
+
+def test_an_interruption_does_not_start_the_next_command(group_calls, monkeypatch):
+    """review M2: Esc stops the action, not just the command that happened to be on
+    screen - the second agent's import must not start by itself."""
+    monkeypatch.setattr(tui, "ESCALATE_AFTER", 60)
+    sent, alive = group_calls
+    agent = FakeAgent("opencode", [Listed("s1", "/tmp/p", "甲", None)], texts={"s1": ["問"]})
+    agent2 = FakeAgent("claude", [Listed("c1", "/tmp/r", "乙", None)], texts={"c1": ["問"]})
+    app, _ = _app([agent, agent2])
+    first = FakeProc(lines=["[agora] 匯入 1/1"], hang=True)
+    started: list[list[str]] = []
+
+    def spawn(argv):
+        started.append(argv)
+        return first
+
+    app.spawn = spawn
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("tab")
+            await pilot.pause()
+            await pilot.press("space", "down", "space", "enter")     # mark both, then import
+            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            await pilot.press("escape")
+            await _wait(lambda: sent, pilot)
+            alive[4242] = False
+            first.done.set()
+            assert _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            await pilot.press("space")                               # close the result window
+            await pilot.pause(0.3)
+            assert len(started) == 1, "中斷之後不該再開始第二段"
+    _run(go)
+
+
+def test_a_second_escape_does_not_resend_or_restart_the_escalation(group_calls, monkeypatch):
+    """review L3: a second SIGINT would land while agora is keeping its pending
+    record, and the old timer would bring SIGKILL forward."""
+    monkeypatch.setattr(tui, "ESCALATE_AFTER", 60)
+    sent, alive = group_calls
+    app, _ = _app([])
+    proc = FakeProc(lines=["[agora] 合併 1/2"], hang=True)
+    spawn, _ = _spawn(proc)
+    app.spawn = spawn
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("space", "down", "space", "m")
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: sent, pilot)
+            await pilot.press("escape")
+            await pilot.press("escape")
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            assert [sig for _pgid, sig in sent] == [int(signal.SIGINT)]
+            alive[4242] = False
+            proc.done.set()
+    _run(go)
+
+
+def test_a_failure_line_with_a_timestamp_in_it_is_not_progress():
+    """review L1: `[agora] … 拉不到：rclone … 2026/10/03` read as 2026 of 10."""
+    app, _ = _app([])
+    spawn, _ = _spawn(lines=["[agora] pull 拉不到：rclone copyto 失敗 2026/10/03 12:00:00 ERROR",
+                              "[agora] pull 1/2"], hang=True)
+    app.spawn = spawn
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            assert _wait(lambda: app.screen.query_one("#bar").total, pilot)
+            bar = app.screen.query_one("#bar")
+            assert (bar.progress, bar.total) == (1, 2)
+    _run(go)
+
+
+def test_the_selection_is_cleared_only_when_the_command_succeeded():
+    """spec: a failure keeps it, so the same key can be pressed again."""
+    app, _ = _app([])
+    spawn, _ = _spawn(code=2)
+    app.spawn = spawn
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            assert app.marked
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            assert _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert app.marked, "失敗之後勾選要留著"
+            await pilot.press("space")
+            await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
+            assert app.marked
+    _run(go)
+
+
+def test_the_selection_is_cleared_after_a_success():
+    app, _ = _app([])
+    spawn, _ = _spawn()
+    app.spawn = spawn
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            assert app.marked
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            assert _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            await pilot.press("space")
+            assert _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
+            assert not app.marked
+    _run(go)

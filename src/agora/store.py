@@ -224,8 +224,8 @@ def outbox_ulids(paths: Paths) -> set[str]:
     return {p.name for p in paths.outbox.iterdir() if p.is_dir() and not p.name.startswith(".")}
 
 
-def _put_file(index: "Index", session_md: Path) -> None:
-    """Index one mirrored session.md under its ULID. Raises on an unreadable one."""
+def index_file(index: "Index", session_md: Path) -> None:
+    """Index one session.md under its ULID. Raises on an unreadable one."""
     hdr, body = h.split_document(session_md.read_text(encoding="utf-8"))
     index.put(session_md.parent.name, md5_file(session_md), hdr, body)
 
@@ -235,7 +235,7 @@ def remember(paths: Paths, folder: Path, index: "Index | None" = None) -> None:
     mirror = paths.mirror / folder.name
     mirror.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(folder / "session.md", mirror / "session.md")
-    _put_file(index or Index(paths), mirror / "session.md")
+    index_file(index or Index(paths), mirror / "session.md")
 
 
 def _index_outbox(paths: Paths, index: "Index") -> None:
@@ -245,11 +245,6 @@ def _index_outbox(paths: Paths, index: "Index") -> None:
             remember(paths, paths.outbox / ulid, index)
         except (h.HeaderError, OSError, UnicodeDecodeError):
             continue
-
-
-def index_mirror(paths: Paths, ulid: str, index: "Index | None" = None) -> None:
-    """Index what the mirror holds under this ULID - after a pull, or a write."""
-    _put_file(index or Index(paths), paths.mirror / ulid / "session.md")
 
 
 def read_entry(folder: Path) -> dict:
@@ -264,55 +259,81 @@ def read_entry(folder: Path) -> dict:
     return hdr
 
 
+def _upload_checked(drive: Drive, folder: Path, ulid: str, raw: dict,
+                    uploaded_raw: bool, tail: str) -> dict:
+    """The safe order - the raw, then session.md - then Drive's own md5s (S2-7).
+
+    Nothing else goes (R7): an older raw, a `*.partial` left by an interrupted
+    write, a `.DS_Store` - none of them is what the session is, and uploading one
+    is how a half-written file comes back to life on Drive. A copyto that returned
+    zero is not proof that the bytes arrived, so the md5s Drive reports decide.
+    """
+    if uploaded_raw:
+        drive.upload(folder / raw["file"], ulid, raw["file"])
+    elif raw.get("file"):
+        _warn(f"{ulid} 標頭指到的 {raw['file']} 本機沒有{tail}")
+    drive.upload(folder / "session.md", ulid, "session.md")
+    remote = drive.list_one(ulid)
+    if remote.get("session.md") != md5_file(folder / "session.md"):
+        raise StoreError(f"{ulid} 的 session.md 在 Drive 上的 md5 不符{tail}")
+    if uploaded_raw and remote.get(raw["file"]) != raw.get("md5"):
+        raise StoreError(f"{ulid} 的 raw 在 Drive 上的 md5 不符{tail}")
+    return remote
+
+
 def push_one(drive: Drive, folder: Path) -> None:
-    """Upload one outbox entry in the safe order, verify, then clean up."""
+    """Upload one outbox entry, verify it, then clean the staging folder up."""
     ulid = folder.name
     hdr = read_entry(folder)
-    raw = h.agora_of(hdr).get("raw")
-    if raw:
+    raw = h.agora_of(hdr).get("raw") or {}
+    if raw.get("file"):
         drive.upload(folder / raw["file"], ulid, raw["file"])
         _fault("after-raw-upload")
     drive.upload(folder / "session.md", ulid, "session.md")
     _fault("after-session-upload")
-    remote = drive.list_one(ulid)
-    if remote.get("session.md") != md5_file(folder / "session.md"):
-        raise StoreError(f"{ulid} 的 session.md 在 Drive 上的 md5 不符，留在 outbox")
-    if raw and remote.get(raw["file"]) != raw["md5"]:
-        raise StoreError(f"{ulid} 的 raw 在 Drive 上的 md5 不符，留在 outbox")
+    remote = _upload_checked(drive, folder, ulid, raw, bool(raw.get("file")), "，留在 outbox")
     for name in remote:
-        if name.startswith("raw-") and (not raw or name != raw["file"]):
+        if name.startswith("raw-") and name != (raw or {}).get("file"):
             drive.delete(ulid, name)
     shutil.rmtree(folder)
 
 
 def push_mirror(drive: Drive, paths: Paths, ulid: str, header: dict) -> None:
-    """Send one mirrored session up: `session.md` and the raw its header names.
-
-    Nothing else goes (R7): an older raw, a `*.partial` left by an interrupted
-    write, a `.DS_Store` - none of them is what the session is, and uploading one
-    is how a half-written file comes back to life on Drive. `push_one` does the
-    same for an outbox entry, and also checks the md5s; this is the already-pushed
-    case, where the local copy is the one Drive had.
-    """
+    """Send one mirrored session up: `session.md` and the raw its header names."""
     folder = paths.mirror / ulid
     raw = h.agora_of(header).get("raw") or {}
-    uploaded_raw = bool(raw.get("file")) and (folder / raw["file"]).is_file()
-    if uploaded_raw:
-        drive.upload(folder / raw["file"], ulid, raw["file"])
-    elif raw.get("file"):
-        _warn(f"{ulid} 標頭指到的 {raw['file']} 本機沒有，只傳 session.md")
-    drive.upload(folder / "session.md", ulid, "session.md")
-    # Drive's own md5 is the only answer that counts (review S2-7): a copyto that
-    # returned zero is not proof that the bytes arrived.
-    remote = drive.list_one(ulid)
-    if remote.get("session.md") != md5_file(folder / "session.md"):
-        raise StoreError(f"{ulid} 的 session.md 在 Drive 上的 md5 不符")
-    if uploaded_raw and remote.get(raw["file"]) != raw.get("md5"):
-        raise StoreError(f"{ulid} 的 raw 在 Drive 上的 md5 不符")
+    _upload_checked(drive, folder, ulid, raw,
+                    bool(raw.get("file")) and (folder / raw["file"]).is_file(), "")
 
 
-def push_outbox(drive: Drive, paths: Paths) -> list[str]:
-    """Push every outbox entry; return the ones that failed (they stay)."""
+def mirror_one(paths: Paths, drive: Drive, index: "Index", ulid: str,
+               files: dict) -> dict | None:
+    """Put one session Drive has into the mirror and the index (sync and pull, once).
+
+    None means it is not whole yet: its header names a raw that is missing or has
+    another md5, so the half-written session.md leaves the mirror and the index
+    (G3). The caller words that case its own way.
+    """
+    local = paths.mirror / ulid / "session.md"
+    if not (local.exists() and md5_file(local) == files.get("session.md")):
+        drive.download(ulid, "session.md", local)
+    hdr, body = h.split_document(local.read_text(encoding="utf-8"))
+    raw = h.agora_of(hdr).get("raw") or {}
+    if raw.get("file") and files.get(raw["file"]) != raw.get("md5"):
+        local.unlink(missing_ok=True)
+        index.drop(ulid)
+        return None
+    index.put(ulid, files.get("session.md"), hdr, body)
+    return hdr
+
+
+def push_outbox(drive: Drive, paths: Paths, warn=None) -> list[str]:
+    """Push every outbox entry; return the ones that failed (they stay).
+
+    `warn` is where the per-entry failures go when a caller wants its own sink -
+    the interactive mode's waiting window, which does not see our stderr (review L5).
+    """
+    say = warn or _warn
     failed = []
     if not paths.outbox.exists():
         return failed
@@ -326,7 +347,7 @@ def push_outbox(drive: Drive, paths: Paths) -> list[str]:
         try:
             push_one(drive, folder)
         except StoreError as e:
-            _warn(str(e))
+            say(str(e))
             failed.append(ulid)
     return failed
 
@@ -549,7 +570,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
         return index
     drive = drive or Drive(paths)
     try:
-        failed = push_outbox(drive, paths)
+        failed = push_outbox(drive, paths, warn=say)
         remote = drive.list_sessions()
     except StoreError as e:
         say(f"連不上 Drive，改查本機索引：{e}")
