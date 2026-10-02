@@ -290,6 +290,8 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 - 一定要加 `--yes`，沒加就只印出會刪什麼，exit 1。
 - 有子 Session（別的 Session 的 `parents` 指向它）時不刪，列出那些子 Session，exit 1。
 - **重跑會接著做**（2026-10-03 使用者決定）：刪除成功時把 ULID 記到 `<state>/deleted`；重跑同一個指令時，**在這份記錄裡的** id 印「已經不在了，略過」並不算失敗（全部都略過時 exit 0）。**從來不存在的 id（例如打錯）照樣報找不到、exit 1**——只有自己刪過的才略過。
+- **正在接續的（有人拿著 `pending/<ULID>.json` 的鎖）拒絕刪除**，exit 1，訊息說「正在接續，等它結束再刪」——那時候刪了，`_finish` 只會把結果另存成一個新的 Session，等於刪不掉又冒出一個。**只是留下來的記錄**（鎖已經沒人拿，例如那個 agent 的 session 已經不見了、收不了尾）**照樣刪**，並印一行「有一筆中斷的接續沒補存成功（`<state>/pending/<ULID>.json`）」——否則一個收不了尾的接續會讓那個 Session 永遠刪不掉。
+- **Drive 上已經沒有的資料夾當成已刪掉**（S1-4：rclone 不會 purge 一個不存在的資料夾，會回錯；中斷在 purge 與本機忘掉之間就會這樣，否則重跑會永遠失敗）。但**「找不到」不能單獨相信**（S1-4b）：Drive API 在 folder id 錯了或 token 看不到東西時說的也是同一句話。所以 purge 失敗之後會再列檔一次，**只有列檔回來而且清單裡沒有這個 ULID** 才當成已刪掉；列檔也失敗就照原本的錯誤丟出。
 - **一次可以刪多個**（2026-10-02 使用者決定）：`agora delete session id1 id2 … --yes`，空白或逗號分隔。子 Session 也在同一次要刪的，就先刪子 Session，它的來源接著就能刪；子 Session 不在這次裡面的照樣拒絕，其他的照刪，有被拒絕的就 exit 1。互動模式的 `d` 刪掉所有勾選的（沒有勾選就是游標那一個），確認視窗列出數量與標題，預設停在「取消」。
 
 ### 5.7 edit
@@ -399,7 +401,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 - **push 只傳該傳的兩個檔**：`session.md` 與它標頭 `agora.raw.file` 指到的那一個原始檔（本機沒有那個原始檔就只傳 `session.md`）。舊的原始檔、下載到一半的檔、以 `.` 開頭的檔都不傳。
 - 兩個指令都逐個在 stderr 印 `k/N`，某一個失敗照樣做下一個。
 - **雲端沒有的 Session**（2026-10-03 決定，規格見 `openspec/changes/command-batch-actions/specs/session-sync/spec.md`）：
-  - **同步時不再自動清掉**別台機器刪掉的 Session：本機的鏡像與索引都保留，標成「雲端沒有」。**只有在這次列檔完整成功時**才更新標記；列檔失敗、離線、或 Drive 上沒有 `sessions/` 時不新增也不清除任何標記；雲端又出現時，下一次同步就清掉。還在 outbox 的顯示為「未上傳」，不算雲端沒有；接續中（pending）的也不算。
+  - **同步時不再自動清掉**別台機器刪掉的 Session：本機的鏡像與索引都保留，標成「雲端沒有」。**只有在這次列檔完整成功時**才更新標記；列檔失敗、離線、或 Drive 上沒有 `sessions/` 時不新增也不清除任何標記；雲端又出現時，下一次同步就清掉。還在 outbox 的顯示為「未上傳」，不算雲端沒有；**正在接續的**（有人拿著 `pending/<ULID>.json` 的鎖）也不算——**只是留下來的記錄不算**（鎖沒人拿就是收不了尾的接續，它不再護著這個 Session，見 5.6）。另外三個「不算刪除」的情況：`pull --not-exist-delete` 時 **Drive 上沒有 `sessions/`**（那是 folder id 或 token 的問題，不是刪除的證據）會拒絕那一個；對 **agent 的 id**，`--not-exist-delete` 會先問那個 agent，**清單讀不到**（資料庫不見、認不出結構、sqlite 出錯）就當成「不知道」，不刪快取並印一行說明。
   - **只在明確要求時才刪或復活**：`pull --not-exist-delete` 刪掉本機副本（在 outbox 或接續中的不刪，並印出原因）；`push --not-exist-upload` 把它傳回 Drive（等於撤銷別台的刪除；本機沒有那個原始檔時拒絕這一個）。兩個 flag 都沒加時只印一行提醒、不動。兩個 flag 對 agent 的 id 也有意思：`--not-exist-delete` 是「agent 那邊已經沒有這個 session 了，就刪掉它的全文快取」。
   - **其他指令遇到它**：會寫回既有 id 的指令（continue、edit）**拒絕**（exit 1），並提示上面那兩個選擇，agent 不會被打開（判斷同時看標記與當下的 Drive，離線時也不會放行）；merge 不接受雲端沒有的 Session 當來源；delete 雲端沒有的只刪本機副本（exit 0）；它不算成別人的子 Session（不擋刪除、也不讓 import 分岔）；import 的來源對到雲端沒有的那一筆時建一個新的 Session。
   - **看得到**：`search` 每行最後標 `(雲端沒有)`，並支援 `--filter cloud=no`／`cloud=yes`（只列出雲端沒有的可以用管線接著清掉）；`show` 也標。

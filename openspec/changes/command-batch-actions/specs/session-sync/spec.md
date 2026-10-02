@@ -16,11 +16,11 @@
 - **THEN** 那個 session 的閱讀版寫進本機快取；再執行一次時，因為沒有過時而略過
 
 #### Scenario: 沒給 id
-- **WHEN** 執行 `agora pull`
+- **WHEN** 執行 `agora pull session`（型態有寫，但沒給任何 id）
 - **THEN** exit 1，提示要給 session id
 
 ### Requirement: push 只寫回該寫的檔案
-`agora push session <agora id>…` MUST 先送出 outbox，再把每個給的、雲端還在的 Session 的 `session.md` 與它標頭 `agora.raw.file` 指到的那一個原始檔寫回 Drive，同名覆蓋，Drive 上多的不刪。本機沒有那個原始檔時，只傳 `session.md`。舊的原始檔、下載到一半的檔、以 `.` 開頭的檔 MUST NOT 被上傳。
+`agora push session <agora id>…` MUST 先送出 outbox，再把每個給的、雲端還在的 Session 的 `session.md` 與它標頭 `agora.raw.file` 指到的那一個原始檔寫回 Drive，同名覆蓋。**從鏡像送出時**，Drive 上多出來的檔不刪；**從 outbox 送出時**（`push_one`），被取代的舊 `raw-*` 會被刪掉（換過原始檔的 Session 需要這樣，N8），其餘多出來的檔仍然不刪。本機沒有那個原始檔時，只傳 `session.md`。舊的原始檔、下載到一半的檔、以 `.` 開頭的檔 MUST NOT 被上傳。
 
 #### Scenario: 覆蓋雲端的版本
 - **WHEN** 本機改過某個 Session 的 `session.md`，執行 `agora push session agora:X`
@@ -31,7 +31,7 @@
 - **THEN** push 之後 Drive 上沒有這些檔
 
 ### Requirement: 雲端沒有的 Session 保留在本機並標記
-同步時，**只有在這次列檔完整成功**時，本機有、雲端沒有、而且不在 outbox 與接續中（pending）的 Session MUST 被標成「雲端沒有」，鏡像與索引 MUST 保留。列檔失敗、離線或 Drive 上沒有 `sessions/` 時，MUST NOT 新增或清除任何標記。雲端又出現時，下一次同步 MUST 清除標記。還在 outbox 的 MUST 顯示為「未上傳」，不算雲端沒有。
+同步時，**只有在這次列檔完整成功**時，本機有、雲端沒有、而且不在 outbox、也不是**正在接續中**（`pending/<ULID>.json` 的鎖有人拿著；只是留下來、沒有人拿鎖的記錄不算）的 Session MUST 被標成「雲端沒有」，鏡像與索引 MUST 保留。列檔失敗、離線或 Drive 上沒有 `sessions/` 時，MUST NOT 新增或清除任何標記。雲端又出現時，下一次同步 MUST 清除標記。還在 outbox 的 MUST 顯示為「未上傳」，不算雲端沒有。
 
 #### Scenario: 別台機器刪掉了
 - **WHEN** 另一台機器刪掉 X，這台機器同步

@@ -16,7 +16,8 @@ import、delete、merge 一次處理多個 Session，逐一顯示進度，被中
 - **THEN** 第一個因為內容沒變而略過，只做剩下的
 
 ### Requirement: 進度
-import、delete、merge、pull、push MUST 在處理多個項目時，逐一在 stderr 印出一行含 `k/N` 的進度（例如 `[agora] 匯入 2/5  ses_…`、`[agora] 來源 1/3：…`）。stdout 只放結果（agora id），可以接到管線。
+import、delete、merge、pull、push MUST 在處理多個項目時，逐一在 stderr 印出一行含 `k/N` 的進度。
+格式是 `[agora]`、一個空格、動作名、空白、`k/N`、兩個空格、該項的 id（沒有冒號），例如 `[agora] 匯入 2/5  ses_…`、`[agora] 來源 1/3  agora:01K6…`。stdout 只放結果（agora id），可以接到管線。
 
 #### Scenario: 管線不被進度弄髒
 - **WHEN** 執行 `agora delete session A B --yes | wc -l`
