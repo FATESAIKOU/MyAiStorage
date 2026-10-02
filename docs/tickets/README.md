@@ -23,7 +23,7 @@
 | 5 | T2 實作與測試 | 隊員 | 等 4 |
 | 6 | T2 PM 用假資料試、review 審、歸檔 | PM、review | 等 5 |
 | 7 | 3-1 更新 MyBrain PR #151 | PM | 等 6 |
-| — | 等使用者回來：T1 驗收（1-5）、T2 真實資料試用（2-4）、合併 PR | 使用者 | |
+| — | 等使用者回來：T1 驗收（1-5）、T2 真實資料試用（2-4）、合併 PR | 使用者 | 驗收步驟草稿在 `docs/review/acceptance-draft.md`（review 寫，T2 做完後更新「已知問題」再換掉 docs/acceptance.md） |
 
 隊員的模型：impl1、impl2 用 opencode（Space Bunny Free → Muse Spark 1.3 Free → ollama-cloud DeepSeek V4.1 Flash max，用完往下換）；impl3（`w2:p14`）、impl4（`w2:p15`）是 agy，額度 0%：Claude Opus 約 10-03 10:00 恢復、Gemini 約 10-03 18:05 恢復，恢復就換上去接主要的實作。
 
