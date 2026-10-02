@@ -1119,7 +1119,7 @@ class AgoraApp(App):
         argv = argv_for("push", rows, None, None)[0]
         answer = await self.push_screen_wait(Confirm(
             f"把 {len(rows)} 個寫回 Drive？", ["取消", "確定"], "同名的檔案直接覆蓋；Drive 上多的不動",
-            "雲端沒的就傳回去（等同 --not-exist-upload）"))
+            "雲端沒有的就傳回去（等同 --not-exist-upload）"))
         if answer and answer[0] == 1:
             await self.act("寫回 Drive", argv + (["--not-exist-upload"] if answer[1] else []),
                            sent=[r.key for r in rows])
