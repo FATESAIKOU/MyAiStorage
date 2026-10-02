@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
@@ -1441,4 +1442,40 @@ def test_esc_stops_a_real_process_group_with_a_stubborn_grandchild(monkeypatch, 
                 raise AssertionError("process group 還在")
             except ProcessLookupError:
                 pass                     # the group is empty: nothing was left running
+    _run(go)
+
+
+def test_each_step_of_the_escalation_gets_its_own_time(group_calls, monkeypatch):
+    """Review W1: SIGTERM and SIGKILL used the same timer, so they arrived together
+    and an agent had no time to wind up between them."""
+    monkeypatch.setattr(tui, "ESCALATE_AFTER", 0.4)
+    sent, alive = group_calls
+    stamps: dict[int, float] = {}
+    real_killpg = tui.killpg
+
+    def timed(pgid, sig):
+        stamps.setdefault(int(sig), time.monotonic())
+        return real_killpg(pgid, sig)
+
+    monkeypatch.setattr(tui, "killpg", timed)
+    app = _marked_app(None)
+    proc = FakeProc(lines=["[agora] 合併 1/2"], hang=True)
+    app.spawn, _ = _spawn(proc)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("space", "down", "space", "m")
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            await pilot.press("escape")
+            for count in (1, 2, 3):
+                await _wait(lambda count=count: len(stamps) >= count, pilot)
+            assert [sig for _pgid, sig in sent] == [int(signal.SIGINT),
+                                                     int(signal.SIGTERM), int(signal.SIGKILL)]
+            gap = stamps[int(signal.SIGKILL)] - stamps[int(signal.SIGTERM)]
+            assert gap >= tui.ESCALATE_AFTER * 0.9, f"SIGKILL 只比 SIGTERM 晚 {gap:.2f} 秒"
+            alive[4242] = False
+            proc.done.set()
     _run(go)

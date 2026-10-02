@@ -297,14 +297,11 @@ class AskText(ModalScreen):
         self.dismiss(event.value)
 
 
-#: What Esc escalates to, and how long each step is given (review V2). SIGINT first:
-#: it is what Ctrl-C would send, and it is what cli.main turns into exit 130 after
-#: it has kept the pending record. An agent that ignores it gets SIGTERM, then
-#: SIGKILL - always to the whole process group, so the agent goes with it.
-ESCALATION = (signal.SIGTERM, signal.SIGKILL)
-
-
-#: What a group is sent after SIGINT, and how long each step is given (review V2).
+#: Esc escalates SIGINT → SIGTERM → SIGKILL, a step every ESCALATE_AFTER seconds
+#: (review V2, W1). SIGINT is what Ctrl-C would send and what cli.main turns into
+#: exit 130 after keeping its pending record; the agent that ignores it gets
+#: SIGTERM and then SIGKILL, always to the whole process group. The gap matters:
+#: a process sent both at once has no time to wind up.
 ESCALATION = (signal.SIGTERM, signal.SIGKILL)
 ESCALATE_AFTER = 5.0
 
@@ -959,8 +956,10 @@ class AgoraApp(App):
         self._groups.add(pgid)
         if killpg(pgid, signal.SIGINT):
             self._stopped = True
-            for sig in ESCALATION:
-                self.set_timer(ESCALATE_AFTER, lambda sig=sig: self._step(pgid, sig))
+            for step, sig in enumerate(ESCALATION, 1):
+                # step n waits n * ESCALATE_AFTER, so each signal gets its own
+                # window and the agent can wind up between them (review W1)
+                self.set_timer(ESCALATE_AFTER * step, lambda sig=sig: self._step(pgid, sig))
 
     def _step(self, pgid: int, sig) -> None:
         if group_alive(pgid):
