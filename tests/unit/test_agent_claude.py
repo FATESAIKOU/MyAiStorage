@@ -665,14 +665,30 @@ def test_list_sessions_only_reads_the_head(claude_env):
     assert listed[sid].dir == "/tmp/deep"
 
 
-def test_config_dir_follows_xdg_when_nothing_else_is_set(monkeypatch):
+def test_config_dir_ignores_xdg_like_claude_does(monkeypatch):
     monkeypatch.delenv("AGORA_CLAUDE_HOME", raising=False)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    monkeypatch.setenv("XDG_DATA_HOME", "/tmp/zz-xdg")
-    assert C.config_dir() == Path("/tmp/zz-xdg") / "claude"
-    assert C.projects_dir() == Path("/tmp/zz-xdg") / "claude" / "projects"
-    monkeypatch.delenv("XDG_DATA_HOME")
+    monkeypatch.setenv("XDG_DATA_HOME", "/tmp/zz-xdg")      # Claude Code does not read it
     assert C.config_dir() == Path(os.path.expanduser("~")) / ".claude"
+
+
+def test_last_message_reads_past_a_long_tool_result(claude_env):
+    proj = claude_env["proj"]
+    with (proj / f"{SID}.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "assistant", "sessionId": SID,
+                            "message": {"content": [{"type": "text", "text": "工具前的回答"}]}},
+                           ensure_ascii=False) + "\n")
+        f.write(json.dumps({"type": "user", "sessionId": SID, "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t", "content": "x" * 50_000}]}}) + "\n")
+    assert C.ADAPTER.last_message(SID) == ("assistant", "工具前的回答")
+
+
+def test_list_cache_keeps_every_file_seen(claude_env):
+    C.ADAPTER.list_sessions()
+    first = dict(C._LIST_CACHE)
+    assert len(first) >= 1
+    C.ADAPTER.list_sessions()
+    assert C._LIST_CACHE == first                            # nothing read again, nothing dropped
 
 
 def test_list_and_last_message_survive_unreadable_files(claude_env):

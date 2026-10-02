@@ -25,15 +25,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
-from agora.agents.base import (
-    AgentError,
-    Exported,
-    Launch,
-    Listed,
-    Turns,
-    agent_cmd,
-    tool_line,
-)
+from agora.agents.base import AgentError, Exported, Launch, Listed, Turns, agent_cmd, tool_line
 
 FORMAT = "claude-jsonl/1"
 TITLE_MAX = 60
@@ -61,9 +53,9 @@ TAIL_BYTES = 1 << 20         # at most this much of the end of a file is read
 _LIST_CACHE: dict = {}       # (path, mtime, size) -> (title, dir, has_text)
 
 
-def _forget_other_keys(keep: tuple) -> None:
+def _forget_other_keys(keep: set) -> None:
     """Keep the cache to the files we just walked, so it cannot grow forever."""
-    for key in [k for k in _LIST_CACHE if k != keep]:
+    for key in [k for k in _LIST_CACHE if k not in keep]:
         del _LIST_CACHE[key]
 
 
@@ -101,8 +93,12 @@ def _peek_session(path: Path) -> tuple[str | None, str | None, bool]:
     return title, directory, has_text
 
 
-def _tail_lines(path: Path, want: int) -> list[str]:
-    """Whole lines from the end of a file, reading at most TAIL_BYTES."""
+def _tail_lines(path: Path) -> list[str]:
+    """Whole lines from the end of a file, last first, reading at most TAIL_BYTES.
+
+    No budget on line length: a tool result line can be far longer than the
+    message we are after, and stopping at it would hide the message.
+    """
     try:
         with path.open("rb") as f:
             f.seek(0, os.SEEK_END)
@@ -111,17 +107,10 @@ def _tail_lines(path: Path, want: int) -> list[str]:
             blob = f.read()
     except OSError:
         return []
-    text = blob.decode("utf-8", errors="replace")
-    lines = text.split("\n")
+    lines = blob.decode("utf-8", errors="replace").split("\n")
     if size > TAIL_BYTES and len(lines) > 1:
         lines = lines[1:]          # the first one may be cut in half
-    kept, total = [], 0
-    for line in reversed(lines):
-        if total + len(line) > want:
-            break
-        total += len(line)
-        kept.append(line)
-    return kept
+    return list(reversed(lines))
 
 
 def _json_str(match: re.Match | None) -> str | None:
@@ -137,15 +126,13 @@ def _line_text(o: dict) -> str | None:
 
 
 def config_dir() -> Path:
-    """Where Claude keeps projects/ (review CL4, T15):
-    $AGORA_CLAUDE_HOME/.claude, then $CLAUDE_CONFIG_DIR, then
-    $XDG_DATA_HOME/claude, then ~/.claude. Never a hard-coded home."""
+    """Where Claude keeps projects/ (review CL4):
+    $AGORA_CLAUDE_HOME/.claude, then $CLAUDE_CONFIG_DIR, then ~/.claude.
+    Claude Code does not read XDG_DATA_HOME, so neither do we."""
     if os.environ.get("AGORA_CLAUDE_HOME"):
         return Path(os.environ["AGORA_CLAUDE_HOME"]) / ".claude"
     if os.environ.get("CLAUDE_CONFIG_DIR"):
         return Path(os.environ["CLAUDE_CONFIG_DIR"])
-    if os.environ.get("XDG_DATA_HOME"):
-        return Path(os.environ["XDG_DATA_HOME"]) / "claude"
     return Path.home() / ".claude"
 
 
@@ -473,17 +460,17 @@ class ClaudeAgent:
             paths = [p for p in root.glob("*/*.jsonl") if p.is_file() and not p.is_symlink()]
         except OSError:
             return found
+        seen: set = set()
         for path in sorted(paths):
             try:
                 stat = path.stat()
             except OSError:
                 continue
             key = (str(path), stat.st_mtime, stat.st_size)
+            seen.add(key)
             cached = _LIST_CACHE.get(key)
             if cached is None:
-                cached = _peek_session(path)
-                _LIST_CACHE[key] = cached
-                _forget_other_keys(key)
+                cached = _LIST_CACHE[key] = _peek_session(path)
             title, directory, has_text = cached
             if not has_text:
                 continue
@@ -491,6 +478,7 @@ class ClaudeAgent:
                 session_id=path.stem, dir=directory, title=title,
                 updated_at=datetime.fromtimestamp(stat.st_mtime, timezone.utc)
                 .strftime("%Y-%m-%dT%H:%M:%SZ")))
+        _forget_other_keys(seen)
         found.sort(key=lambda item: item.updated_at or "", reverse=True)
         return found
 
@@ -505,7 +493,7 @@ class ClaudeAgent:
             path = find_jsonl(session_id)
         except (AgentError, OSError):
             return None
-        for line in _tail_lines(path, PREVIEW_MAX * 8):
+        for line in _tail_lines(path):
             try:
                 o = json.loads(line)
             except ValueError:
