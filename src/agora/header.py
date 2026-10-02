@@ -1,41 +1,33 @@
 """The shared header (design.md section 3).
 
-Every item in MyBrain, Agora, Foundry and Atelier carries the same kind of
-YAML front matter. Entities point at each other only through it, so this
-module knows the reserved top-level fields and the ref syntax, and leaves
-every other field alone.
+Every item in MyBrain, Agora, Foundry and Atelier carries OKF v0.2
+frontmatter: `type` is required, every other field is optional, and
+unknown fields are kept. Entities point at each other through `id`,
+`refs` and `case`; Agora's own system fields live under `agora`.
 """
 
 from __future__ import annotations
 
 import os
-import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import unquote
 
 import yaml
 
-HEADER_VERSION = 1
+HEADER_VERSION = 2
 ENTITIES = ("mybrain", "agora", "foundry", "atelier")
+SESSION_TYPE = "Session"
+SYSTEM_KEYS = ("id", "agora")          # never set by the user (design 3.5)
 
-# Keys a user may set with `--header key=value` on import and merge.
-SETTABLE = ("title", "case", "refs", "tags", "note")
-MULTI = ("refs", "tags")
-
-# Flat aliases `search --header key=value` accepts, mapped to header paths.
-SEARCH_ALIASES = {
-    "agent": ("source", "agent"),
-    "relation": ("relation",),
-    "case": ("case",),
-    "tag": ("tags",),
-    "ref": ("refs",),
-    "title": ("title",),
-}
+# search --filter shorthands
+FILTER_ALIASES = {"agent": ("agora", "source", "agent")}
+TEXT_KEY = "text"                      # the reading version plus the header's text fields
 
 
 class HeaderError(ValueError):
-    """A header, ref or --header argument that breaks the rules."""
+    """A header, ref, --header or --filter argument that breaks the rules."""
 
 
 @dataclass(frozen=True)
@@ -71,19 +63,33 @@ def split_document(text: str) -> tuple[dict, str]:
     end = text.find("\n---\n", 4)
     if end < 0:
         raise HeaderError("header 沒有結尾的 ---")
-    try:
-        header = yaml.safe_load(text[4:end]) or {}
-    except yaml.YAMLError as e:
-        raise HeaderError(f"header 的 YAML 壞了：{e}") from None
-    if not isinstance(header, dict):
-        raise HeaderError("header 不是 key: value 的形式")
+    header = _load_yaml(text[4:end])
     return header, text[end + 5:]
 
 
 def dump_document(header: dict, body: str) -> str:
-    """Serialise with safe_dump so titles and notes with newlines or `---` stay intact."""
-    text = yaml.safe_dump(header, allow_unicode=True, sort_keys=False, width=1000)
-    return f"---\n{text}---\n{body}"
+    """Serialise with safe_dump so titles and descriptions with newlines or `---` stay intact."""
+    return f"---\n{dump_header(header)}---\n{body}"
+
+
+def dump_header(header: dict) -> str:
+    return yaml.safe_dump(header, allow_unicode=True, sort_keys=False, width=1000)
+
+
+def _load_yaml(text: str) -> dict:
+    try:
+        data = yaml.safe_load(text) or {}
+    except yaml.YAMLError as e:
+        raise HeaderError(f"header 的 YAML 壞了：{e}") from None
+    if not isinstance(data, dict):
+        raise HeaderError("header 不是 key: value 的形式")
+    return data
+
+
+def agora_of(header: dict) -> dict:
+    """The Agora system block (relation, parents, source, raw, timestamps)."""
+    block = header.get("agora")
+    return block if isinstance(block, dict) else {}
 
 
 def validate(header: dict, *, strict_refs: bool = True) -> list[str]:
@@ -93,16 +99,17 @@ def validate(header: dict, *, strict_refs: bool = True) -> list[str]:
     does not know yet) is only a warning, so the item is still read (R7).
     """
     warnings = []
-    version = header.get("header")
-    if version != HEADER_VERSION:
-        warnings.append(f"header 版本 {version!r} 不是 {HEADER_VERSION}，只讀共通欄位")
-    entity = header.get("entity")
-    if entity not in ENTITIES:
-        raise HeaderError(f"entity 必須是 {', '.join(ENTITIES)} 之一：{entity!r}")
+    if not header.get("type"):
+        raise HeaderError("OKF 的 type 是必填欄位")
     item_id = header.get("id")
-    if not isinstance(item_id, str) or not item_id.startswith(f"{entity}:"):
-        raise HeaderError(f"id 必須以 {entity}: 開頭：{item_id!r}")
-    for ref in ([header["case"]] if header.get("case") is not None else []) + list(header.get("refs") or []):
+    if not isinstance(item_id, str) or ":" not in item_id or item_id.split(":", 1)[0] not in ENTITIES:
+        raise HeaderError(f"id 必須是 <entity>:<id>：{item_id!r}")
+    if item_id.startswith("agora:") and agora_of(header).get("header") != HEADER_VERSION:
+        warnings.append(f"agora 標頭版本 {agora_of(header).get('header')!r} 不是 {HEADER_VERSION}，只讀共通欄位")
+    refs = header.get("refs") or []
+    if not isinstance(refs, list):
+        raise HeaderError("refs 必須是清單")
+    for ref in ([header["case"]] if header.get("case") is not None else []) + list(refs):
         try:
             parse_ref(ref)
         except HeaderError as e:
@@ -112,47 +119,107 @@ def validate(header: dict, *, strict_refs: bool = True) -> list[str]:
     return warnings
 
 
-def parse_header_args(args: list[str]) -> dict:
-    """Turn `--header` values into field updates.
+# ---------------------------------------------------------------------------
+# User-supplied headers: auto fields, then --header-file, then --header (3.5)
+# ---------------------------------------------------------------------------
 
-    `key=value` sets a settable field (refs and tags accumulate); text
-    without `=` is free text and goes into `note`, so the original
-    `--header '一些 meta 資訊'` usage keeps working.
+
+def overlay(base: dict, updates: dict) -> dict:
+    """Merge updates into base: mappings merge recursively, lists and scalars replace."""
+    out = dict(base)
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = overlay(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def parse_header_args(args: list[str]) -> dict:
+    """`--header a.b=value` → {"a": {"b": value}}; the value is parsed as YAML.
+
+    So `tags=[csv, 表格]`, `generated.by=human:fatesaikou` and
+    `sources=[{id: x, title: y}]` all work. A later --header for the same
+    key wins.
     """
     updates: dict = {}
-    notes: list[str] = []
     for arg in args:
         key, sep, value = arg.partition("=")
         key = key.strip()
-        if not sep or key not in SETTABLE:
-            if sep and key.isidentifier():
-                print(f"[agora] --header 的 {key!r} 不是可設定的欄位，整段當成 note", file=sys.stderr)
-            notes.append(arg)
-            continue
-        if key in MULTI:
-            updates.setdefault(key, []).append(value)
-        elif key == "note":
-            notes.append(value)
-        else:
-            updates[key] = value
-    if "case" in updates:
-        parse_ref(updates["case"])
-    for ref in updates.get("refs", []):
-        parse_ref(ref)
-    if notes:
-        updates["note"] = "\n".join(notes)
+        if not sep or not key or any(not part for part in key.split(".")):
+            raise HeaderError(f"--header 要寫成 key=value（例如 description=…）：{arg!r}")
+        try:
+            parsed = yaml.safe_load(value) if value.strip() else ""
+        except yaml.YAMLError:
+            parsed = value
+        if isinstance(parsed, (int, float)) and not isinstance(parsed, bool) and str(parsed) != value.strip():
+            parsed = value                      # keep "01" or "1.10" as written
+        node = updates
+        parts = key.split(".")
+        for part in parts[:-1]:
+            child = node.get(part)
+            if child is None:
+                child = node[part] = {}
+            elif not isinstance(child, dict):
+                raise HeaderError(f"--header 的 {key!r} 和前面的值衝突")
+            node = child
+        node[parts[-1]] = parsed
     return updates
 
 
-def parse_search_filters(args: list[str]) -> list[tuple[tuple[str, ...], str]]:
-    """`search --header key=value` → [(header path, value)]; unknown keys are an error."""
+def load_header_file(path: str | None) -> dict:
+    """A YAML header file, with or without surrounding `---` lines."""
+    if not path:
+        return {}
+    text = Path(path).read_text(encoding="utf-8")
+    text = text.strip()
+    if text.startswith("---"):
+        text = text[3:]
+        if text.rstrip().endswith("---"):
+            text = text.rstrip()[:-3]
+    return _load_yaml(text)
+
+
+LIST_KEYS = ("tags", "refs", "sources", "verified")   # OKF list fields; a single value becomes [value]
+
+
+def user_updates(header_file: str | None, header_args: list[str]) -> dict:
+    """--header-file first, then each --header in order; reject system fields."""
+    updates = overlay(load_header_file(header_file), parse_header_args(header_args))
+    for key in LIST_KEYS:
+        if key in updates and updates[key] is not None and not isinstance(updates[key], list):
+            updates[key] = [updates[key]]
+    blocked = [k for k in SYSTEM_KEYS if k in updates]
+    if blocked:
+        raise HeaderError(f"{', '.join(blocked)} 是系統欄位，不能用 --header 改")
+    if "type" in updates and updates["type"] != SESSION_TYPE:
+        raise HeaderError(f"Agora 的 type 只能是 {SESSION_TYPE}")
+    for ref in ([updates["case"]] if updates.get("case") is not None else []) + list(updates.get("refs") or []):
+        parse_ref(ref)
+    return updates
+
+
+# ---------------------------------------------------------------------------
+# search --filter KEY=VALUE (equal) and KEY~=TEXT (contains)
+# ---------------------------------------------------------------------------
+
+
+def parse_filters(args: list[str]) -> list[tuple[tuple[str, ...], str, str]]:
+    """→ [(header path, op, value)]; op is "=" or "~=", path ("text",) means full text."""
     filters = []
     for arg in args:
-        key, sep, value = arg.partition("=")
-        if not sep or key not in SEARCH_ALIASES:
-            raise HeaderError(
-                f"search 的 --header 要寫成 key=value，key 只能是 {', '.join(SEARCH_ALIASES)}：{arg!r}")
-        filters.append((SEARCH_ALIASES[key], value))
+        eq = arg.find("=")
+        if eq < 0:
+            raise HeaderError(f"--filter 要寫成 KEY=VALUE（全等）或 KEY~=TEXT（包含）：{arg!r}")
+        contains = eq > 0 and arg[eq - 1] == "~"
+        key, op, value = (arg[:eq - 1], "~=", arg[eq + 1:]) if contains else (arg[:eq], "=", arg[eq + 1:])
+        key = key.strip()
+        if not key:
+            raise HeaderError(f"--filter 少了 KEY：{arg!r}")
+        path = FILTER_ALIASES.get(key) or tuple(key.split("."))
+        if path == (TEXT_KEY,) and op != "~=":
+            raise HeaderError("全文只能用包含：--filter text~=關鍵字")
+        filters.append((path, op, value))
     return filters
 
 

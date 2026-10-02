@@ -45,10 +45,14 @@ def two_machines(tmp_path, monkeypatch):
 
 def _header(title: str) -> dict:
     ulid = h.new_ulid()
-    return {"header": 1, "entity": "agora", "type": "session", "id": f"agora:{ulid}", "title": title,
-            "created_at": "2026-10-02T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z", "refs": [],
-            "case": None, "note": None, "tags": [], "relation": "import", "parents": [],
-            "source": {"agent": "opencode", "session_id": f"ses_it{ulid[-6:]}", "created_at": "2026-10-01T00:00:00Z"}}
+    return {"type": "Session", "title": title, "tags": [], "id": f"agora:{ulid}", "refs": [], "case": None,
+            "agora": {"header": 2, "created_at": "2026-10-02T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z",
+                      "relation": "import", "parents": [],
+                      "source": {"agent": "opencode", "session_id": f"ses_it{ulid[-6:]}", "created_at": "2026-10-01T00:00:00Z"}}}
+
+
+def T(keyword: str) -> list:
+    return [(("text",), "~=", keyword)]
 
 
 def test_write_on_one_machine_read_on_another(two_machines):
@@ -60,7 +64,7 @@ def test_write_on_one_machine_read_on_another(two_machines):
     store.push_one(store.Drive(a), folder)
 
     index_b = store.sync(b)
-    hits = index_b.search("表格", [])
+    hits = index_b.search(T("表格"))
     assert [hit[0] for hit in hits if hit[0] == ulid] == [ulid]
     raw = store.fetch_raw(b, store.Drive(b), ulid, index_b.header(ulid))
     assert raw == b'{"it": 1}'
@@ -78,7 +82,7 @@ def test_reimport_swaps_raw_and_other_machine_follows(two_machines):
     folder = store.stage(a, hdr, "## user\n第二版\n", b'{"v": 2}')
     store.push_one(store.Drive(a), folder)
     files = store.Drive(a).list_sessions()[ulid]
-    assert sorted(files) == sorted(["session.md", hdr["raw"]["file"]])   # the old raw is gone
+    assert sorted(files) == sorted(["session.md", hdr["agora"]["raw"]["file"]])   # the old raw is gone
 
     stale = store.Index(b).header(ulid)          # b still points at the first raw
     assert store.fetch_raw(b, store.Drive(b), ulid, stale) == b'{"v": 2}'   # N8 refresh

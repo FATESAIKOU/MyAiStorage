@@ -1,13 +1,16 @@
 """The agora command (design.md section 5).
 
-    agora search session '<keyword>' [--header key=value]... [--no-sync]
-    agora import --format opencode|claude --session-id <id> [--header ...]...
-    agora merge-session <id> <id> [...] [--header ...]...
-    agora continue-session <id> --agent opencode|claude [--dir <dir>]
-    agora show <id> [--raw]
-    agora sync
+    agora <action> <type> [session_id] [options]
 
-Every command prints the agora id first, so outputs chain into the next one.
+    agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync]
+    agora import   session --external-session-id <id> --agent opencode|claude [--header-file F] [--header K=V]...
+    agora merge    session <id>, <id>, ... [--header-file F] [--header K=V]...
+    agora continue session <id> --agent opencode|claude [--dir <dir>] [--header-file F] [--header K=V]...
+    agora delete   session <id> --yes
+    agora edit     session <id> [--header-file F] [--header K=V]...
+    agora show     session <id> [--raw]
+
+Every write prints the agora id first, so outputs chain into the next command.
 """
 
 from __future__ import annotations
@@ -17,10 +20,12 @@ import fcntl
 import importlib
 import json
 import os
+import shlex
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,9 +34,12 @@ from agora import store
 from agora.agents.base import Agent, AgentError, Exported, Launch
 
 AGENTS = ("opencode", "claude")
-EXIT_INPUT = 1       # the request cannot be done: unknown id, nothing to import, too few ids
+TYPES = ("session",)
+EXIT_INPUT = 1       # cannot be done: unknown id, nothing to import, too few ids, no --yes, has children
 EXIT_ERROR = 2       # header, Drive, agent or unexpected error (argparse usage errors are 2 too)
 EXIT_IN_OUTBOX = 3   # saved locally, not on Drive yet (N13)
+DESCRIPTION_MAX = 80
+ACTOR = {"opencode": "opencode", "claude": "claude-code"}   # OKF actor prefix per agent
 
 
 class InputError(Exception):
@@ -53,23 +61,45 @@ def _ulid_of(agora_id: str) -> str:
     return agora_id.split(":", 1)[1] if agora_id.startswith("agora:") else agora_id
 
 
-def _new_header(relation: str, parents: list[dict], updates: dict) -> dict:
+# ---------------------------------------------------------------------------
+# Headers: automatic OKF fields first, the user's overlay on top (design 3.4, 3.5)
+# ---------------------------------------------------------------------------
+
+
+def _description(body: str) -> str | None:
+    """The first user line of the reading version, shortened."""
+    lines = body.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() == "## user":
+            for text in lines[i + 1:]:
+                if text.strip() and not text.startswith(("## ", "[tool]", "[skip")):
+                    text = text.strip()
+                    return text if len(text) <= DESCRIPTION_MAX else text[:DESCRIPTION_MAX] + "…"
+    return None
+
+
+def _auto_header(relation: str, parents: list[dict], body: str, *, title: str | None,
+                 exported: Exported | None = None, agent: Agent | None = None,
+                 parent_headers: list[dict] = ()) -> dict:
     stamp = _now_iso()
-    hdr = {
-        "header": h.HEADER_VERSION, "entity": "agora", "type": "session",
-        "id": f"agora:{h.new_ulid(int(store.now() * 1000))}", "title": None,
-        "created_at": stamp, "updated_at": stamp, "refs": [], "case": None,
-        "note": None, "tags": [], "relation": relation, "parents": parents,
-    }
-    return _apply(hdr, updates)
-
-
-def _apply(hdr: dict, updates: dict) -> dict:
-    for key, value in updates.items():
-        if key in h.MULTI:
-            hdr[key] = list(dict.fromkeys((hdr.get(key) or []) + value))
-        else:
-            hdr[key] = value
+    hdr: dict = {"type": h.SESSION_TYPE, "title": title, "description": _description(body), "tags": []}
+    sources = []
+    if exported is not None and agent is not None:
+        actor = f"{ACTOR[agent.name]}/{exported.model}" if exported.model else ACTOR[agent.name]
+        hdr["generated"] = {"by": actor, "at": exported.created_at or stamp}
+        sources.append({"id": f"{agent.name}:{exported.session_id}", "title": f"{agent.name} session",
+                        "author": actor, "last_modified": stamp[:10]})
+    for parent in parent_headers:
+        sources.append({"id": parent["id"], "title": parent.get("title") or parent["id"],
+                        "last_modified": str(h.agora_of(parent).get("updated_at") or "")[:10]})
+    hdr["sources"] = sources
+    hdr["id"] = f"agora:{h.new_ulid(int(store.now() * 1000))}"
+    hdr["refs"] = []
+    hdr["case"] = None
+    hdr["agora"] = {"header": h.HEADER_VERSION, "created_at": stamp, "updated_at": stamp,
+                    "relation": relation, "parents": parents}
+    if exported is not None and agent is not None:
+        hdr["agora"]["source"] = _source(agent, exported)
     return hdr
 
 
@@ -81,6 +111,19 @@ def _source(agent: Agent, exported: Exported) -> dict:
     }
 
 
+def _with_user(hdr: dict, updates: dict) -> dict:
+    """The user's overlay wins over the automatic fields; system fields stay ours."""
+    system = {k: hdr[k] for k in h.SYSTEM_KEYS if k in hdr}
+    merged = h.overlay(hdr, updates)
+    merged.update(system)
+    h.validate(merged)
+    return merged
+
+
+def _updates(args) -> dict:
+    return h.user_updates(getattr(args, "header_file", None), getattr(args, "header", []))
+
+
 def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None) -> tuple[str, bool]:
     """Stage into the outbox, then try to push it now."""
     folder = store.stage(paths, hdr, body, raw)
@@ -88,7 +131,7 @@ def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None) -> tuple[
     try:
         store.push_one(store.Drive(paths), folder)
     except store.StoreError as e:
-        print(f"[agora] 上傳失敗，已存入 outbox，下次 sync 會再送：{e}", file=sys.stderr)
+        print(f"[agora] 上傳失敗，已存入 outbox，之後的指令會自動再送：{e}", file=sys.stderr)
         return hdr["id"], False
     return hdr["id"], True
 
@@ -101,7 +144,7 @@ def _emit(saved: tuple[str, bool]) -> int:
 def _header_for(index: store.Index, agora_id: str) -> dict:
     hdr = index.header(_ulid_of(agora_id))
     if hdr is None:
-        raise InputError(f"找不到 {agora_id}（先 agora sync？）")
+        raise InputError(f"找不到 {agora_id}")
     return hdr
 
 
@@ -110,75 +153,91 @@ def _body_for(paths: store.Paths, agora_id: str) -> str:
     return body
 
 
+def _the_id(args) -> str:
+    if not args.ids:
+        raise InputError(f"{args.action} 要給一個 session id")
+    if len(args.ids) > 1:
+        raise InputError(f"{args.action} 只能給一個 session id")
+    return f"agora:{_ulid_of(args.ids[0].rstrip(','))}"
+
+
 # ---------------------------------------------------------------------------
-# commands
+# actions
 # ---------------------------------------------------------------------------
 
 
 def cmd_search(args, paths: store.Paths) -> int:
-    filters = h.parse_search_filters(args.header)
+    if args.ids:
+        raise InputError("search 不接 session id；用 --filter，例如 --filter text~=表格")
+    filters = h.parse_filters(args.filter)
     index = store.Index(paths).rebuild_from_mirror(paths) if args.no_sync else store.sync(paths, throttle=True)
     seen: dict[tuple, str] = {}
     outbox = store.outbox_ulids(paths)
-    for ulid, hdr, snippet in index.search(args.keyword, filters):
-        source = hdr.get("source") or {}
+    for ulid, hdr, snippet in index.search(filters):
+        agora = h.agora_of(hdr)
+        source = agora.get("source") or {}
         key = (source.get("agent"), source.get("session_id"))
         if source.get("session_id") and key in seen:
             print(f"[agora] {seen[key]} 與 agora:{ulid} 來自同一個來源 Session", file=sys.stderr)
             continue
         seen[key] = f"agora:{ulid}"
-        date = str(source.get("created_at") or hdr.get("created_at") or "")[:10]
+        date = store.sort_date(hdr)[:10]
         mark = "  (未上傳)" if ulid in outbox else ""
-        print(f"agora:{ulid}  {date}  {source.get('agent') or hdr.get('relation')}  {snippet}{mark}")
+        text = snippet or str(hdr.get("title") or "")
+        print(f"agora:{ulid}  {date}  {source.get('agent') or agora.get('relation')}  {text}{mark}")
     return 0
 
 
 def cmd_import(args, paths: store.Paths) -> int:
-    agent = load_agent(args.format)
-    updates = h.parse_header_args(args.header)
-    exported = agent.export(args.session_id)
+    if args.ids:
+        raise InputError("import 不接 session id；用 --external-session-id 給 agent 自己的 id")
+    if not args.external_session_id or not args.agent:
+        raise InputError("import 要給 --external-session-id 與 --agent")
+    agent = load_agent(args.agent)
+    updates = _updates(args)
+    exported = agent.export(args.external_session_id)
     if exported.message_count <= 0:
-        raise InputError(f"{args.session_id} 沒有任何訊息，不匯入")
+        raise InputError(f"{args.external_session_id} 沒有任何訊息，不匯入")
     body = agent.reading(exported.raw)
     index = store.sync(paths)  # never throttled: we must see other machines' imports (S6)
     existing = index.by_source(agent.name, exported.session_id)
     if existing:
         old = index.header(existing[0])
-        unchanged = (old.get("raw") or {}).get("md5") == store.hashlib.md5(exported.raw).hexdigest()
+        unchanged = (h.agora_of(old).get("raw") or {}).get("md5") == store.hashlib.md5(exported.raw).hexdigest()
         if unchanged and not updates:
             print(f"agora:{existing[0]}")
             return 0
         if unchanged or not index.children(existing[0]):
-            hdr = _apply(old, updates)
-            hdr["source"] = _source(agent, exported)
-            hdr["updated_at"] = _now_iso()
-            hdr["title"] = hdr.get("title") or exported.title
+            hdr = _with_user(old, updates)
+            hdr["agora"]["source"] = _source(agent, exported)
+            hdr["agora"]["updated_at"] = _now_iso()
             return _emit(_save(paths, hdr, body, exported.raw))
         # Already continued or merged from: keep the old version and branch (S7).
-        parents = [{"id": f"agora:{existing[0]}", "raw_md5": (old.get("raw") or {}).get("md5")}]
-        hdr = _new_header("import", parents, updates)
+        parents = [{"id": f"agora:{existing[0]}", "raw_md5": (h.agora_of(old).get("raw") or {}).get("md5")}]
+        auto = _auto_header("import", parents, body, title=exported.title, exported=exported, agent=agent,
+                            parent_headers=[old])
     else:
-        hdr = _new_header("import", [], updates)
-    hdr["source"] = _source(agent, exported)
-    hdr["title"] = hdr.get("title") or exported.title
-    return _emit(_save(paths, hdr, body, exported.raw))
+        auto = _auto_header("import", [], body, title=exported.title, exported=exported, agent=agent)
+    return _emit(_save(paths, _with_user(auto, updates), body, exported.raw))
 
 
 def cmd_merge(args, paths: store.Paths) -> int:
     ids = [i.strip() for raw in args.ids for i in raw.split(",") if i.strip()]
     if len(ids) < 2:
-        raise InputError("merge-session 至少要兩個 Session")
+        raise InputError("merge 至少要兩個 Session")
+    updates = _updates(args)
     index = store.sync(paths, throttle=True)
-    parents, parts, titles = [], [], []
+    parents, parts, parent_headers = [], [], []
     for agora_id in ids:
         agora_id = f"agora:{_ulid_of(agora_id)}"
         parent = _header_for(index, agora_id)
-        parents.append({"id": agora_id, "raw_md5": (parent.get("raw") or {}).get("md5")})
+        parents.append({"id": agora_id, "raw_md5": (h.agora_of(parent).get("raw") or {}).get("md5")})
         parts.append(f"# from {agora_id}\n\n{_body_for(paths, agora_id)}")
-        titles.append(str(parent.get("title") or agora_id))
-    hdr = _new_header("merge", parents, h.parse_header_args(args.header))
-    hdr["title"] = hdr.get("title") or "merge: " + " + ".join(titles)
-    return _emit(_save(paths, hdr, "\n".join(parts), None))
+        parent_headers.append(parent)
+    body = "\n".join(parts)
+    title = "merge: " + " + ".join(str(p.get("title") or p["id"]) for p in parent_headers)
+    auto = _auto_header("merge", parents, body, title=title, parent_headers=parent_headers)
+    return _emit(_save(paths, _with_user(auto, updates), body, None))
 
 
 def _write_pending(paths: store.Paths, record: dict):
@@ -202,15 +261,15 @@ def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
     exported = agent.collect(launch)
     if exported is None:
         return None
-    hdr = _new_header("continue", [record["parent"]], record.get("header_updates") or {})
-    hdr["id"] = record["agora_id"]
-    hdr["source"] = _source(agent, exported)
-    hdr["title"] = hdr.get("title") or record.get("title") or exported.title   # --header wins (C6)
-    return _save(paths, hdr, agent.reading(exported.raw), exported.raw)
+    body = agent.reading(exported.raw)
+    auto = _auto_header("continue", [record["parent"]], body, title=record.get("title") or exported.title,
+                        exported=exported, agent=agent, parent_headers=record.get("parent_headers") or [])
+    auto["id"] = record["agora_id"]
+    return _save(paths, _with_user(auto, record.get("header_updates") or {}), body, exported.raw)
 
 
 def recover_pending(paths: store.Paths, *, notice_only: bool = False) -> None:
-    """Finish continue-sessions whose agora and agent both ended before collecting (S3).
+    """Finish continue runs whose agora and agent both ended before collecting (S3).
 
     The lock is held by agora and inherited by the agent (pass_fds), so it is
     only free once both are gone (N2, C1).
@@ -233,7 +292,7 @@ def recover_pending(paths: store.Paths, *, notice_only: bool = False) -> None:
             if not path.exists():          # another command just finished it (C3)
                 continue
             if notice_only:
-                print(f"[agora] 有中斷的接續待補存：{path.stem}（跑 agora sync 補存）", file=sys.stderr)
+                print(f"[agora] 有中斷的接續待補存：{path.stem}（下一個不帶 --no-sync 的指令會補存）", file=sys.stderr)
                 continue
             try:
                 record = json.loads(f.read())
@@ -254,16 +313,20 @@ def recover_pending(paths: store.Paths, *, notice_only: bool = False) -> None:
 
 
 def cmd_continue(args, paths: store.Paths) -> int:
+    if not args.agent:
+        raise InputError("continue 要給 --agent opencode|claude")
     agent = load_agent(args.agent)
+    updates = _updates(args)
+    source_id = _the_id(args)
     index = store.sync(paths, throttle=True)
-    source_id = f"agora:{_ulid_of(args.id)}"
     parent = _header_for(index, source_id)
-    src = parent.get("source") or {}
+    agora = h.agora_of(parent)
+    src = agora.get("source") or {}
     workdir = Path(args.dir or (src.get("dir") if src.get("dir") and Path(src["dir"]).is_dir() else os.getcwd()))
     workdir = workdir.expanduser().resolve()   # C5
     print(f"[agora] 工作目錄：{workdir}", file=sys.stderr)
-    native = parent.get("relation") != "merge" and src.get("agent") == agent.name and parent.get("raw")
-    parent_md5 = (parent.get("raw") or {}).get("md5")
+    native = agora.get("relation") != "merge" and src.get("agent") == agent.name and agora.get("raw")
+    parent_md5 = (agora.get("raw") or {}).get("md5")
     if native:
         raw = store.fetch_raw(paths, store.Drive(paths), _ulid_of(source_id), parent)
         parent_md5 = store.hashlib.md5(raw).hexdigest()   # what we really continued from (C9)
@@ -277,8 +340,9 @@ def cmd_continue(args, paths: store.Paths) -> int:
         "agora_id": f"agora:{h.new_ulid(int(store.now() * 1000))}", "agent": agent.name,
         "agent_session_id": launch.agent_session_id, "dir": launch.cwd,
         "parent": {"id": source_id, "raw_md5": parent_md5},
+        "parent_headers": [{"id": source_id, "title": parent.get("title"), "agora": {"updated_at": agora.get("updated_at")}}],
         "title": parent.get("title"), "before_count": launch.before_count,
-        "started_at": _now_iso(), "header_updates": h.parse_header_args(args.header),
+        "started_at": _now_iso(), "header_updates": updates,
     }
     pending, lock = _write_pending(paths, record)
     store._fault("before-agent-launch")
@@ -306,9 +370,68 @@ def cmd_continue(args, paths: store.Paths) -> int:
     return _emit(saved)
 
 
-def cmd_show(args, paths: store.Paths) -> int:
+def cmd_delete(args, paths: store.Paths) -> int:
+    agora_id = _the_id(args)
+    index = store.sync(paths)
+    hdr = _header_for(index, agora_id)
+    children = index.children(_ulid_of(agora_id))
+    if children:
+        raise InputError(f"{agora_id} 有子 Session，不能刪：" + "、".join(f"agora:{c}" for c in children))
+    if not args.yes:
+        raise InputError(f"會把 {agora_id}（{hdr.get('title') or '無標題'}）移到 Drive 垃圾桶；確定的話加 --yes")
+    store.delete_session(paths, store.Drive(paths), _ulid_of(agora_id))
+    print(agora_id)
+    print("[agora] 已移到 Drive 垃圾桶，30 天內可以在 Drive 網頁還原", file=sys.stderr)
+    return 0
+
+
+def cmd_edit(args, paths: store.Paths) -> int:
+    agora_id = _the_id(args)
     index = store.sync(paths, throttle=True)
-    agora_id = f"agora:{_ulid_of(args.id)}"
+    old = _header_for(index, agora_id)
+    body = _body_for(paths, agora_id)
+    updates = _updates(args)
+    system = {k: old[k] for k in h.SYSTEM_KEYS if k in old}
+    if updates:
+        new = _with_user(old, updates)
+    else:
+        new = {**_edit_in_editor(old), **system}   # the editor's version replaces the user part whole
+        h.validate(new)
+    if new == old:
+        print(agora_id)
+        print("[agora] 標頭沒有變", file=sys.stderr)
+        return 0
+    new["agora"] = {**new["agora"], "updated_at": _now_iso()}
+    # Re-stage with the same raw bytes (same md5, same file name) so the
+    # outbox entry is complete; only session.md really changes.
+    raw = store.fetch_raw(paths, store.Drive(paths), _ulid_of(agora_id), old) if h.agora_of(old).get("raw") else None
+    return _emit(_save(paths, new, body, raw))
+
+
+def _edit_in_editor(old: dict) -> dict:
+    """Open the user-editable part of the header in $EDITOR and return the edited version."""
+    editable = {k: v for k, v in old.items() if k not in h.SYSTEM_KEYS}
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as f:
+        f.write("# 改完存檔關掉；id 與 agora 區塊是系統欄位，不在這裡。\n")
+        f.write(h.dump_header(editable))
+        path = f.name
+    try:
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+        subprocess.run(shlex.split(editor) + [path], check=False)
+        edited = h.load_header_file(path)
+    finally:
+        os.unlink(path)
+    blocked = [k for k in h.SYSTEM_KEYS if k in edited]
+    if blocked:
+        raise h.HeaderError(f"{', '.join(blocked)} 是系統欄位，不能改")
+    if edited.get("type") != h.SESSION_TYPE:
+        raise h.HeaderError(f"type 必須是 {h.SESSION_TYPE}")
+    return edited
+
+
+def cmd_show(args, paths: store.Paths) -> int:
+    agora_id = _the_id(args)
+    index = store.sync(paths, throttle=True)
     hdr = _header_for(index, agora_id)
     if args.raw:
         sys.stdout.buffer.write(store.fetch_raw(paths, store.Drive(paths), _ulid_of(agora_id), hdr))
@@ -317,72 +440,39 @@ def cmd_show(args, paths: store.Paths) -> int:
     return 0
 
 
-def cmd_sync(args, paths: store.Paths) -> int:
-    index = store.sync(paths)
-    print(f"[agora] {len(index.known())} 個 Session，outbox {store.outbox_count(paths)} 筆", file=sys.stderr)
-    return 0
-
-
-def _with_header(parser: argparse.ArgumentParser, help: str | None = None) -> argparse.ArgumentParser:
-    parser.add_argument("--header", action="append", default=[], help=help)
-    return parser
+ACTIONS = {
+    "search": cmd_search, "import": cmd_import, "merge": cmd_merge, "continue": cmd_continue,
+    "delete": cmd_delete, "edit": cmd_edit, "show": cmd_show,
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agora", description="找、合、接 coding agent 的 Session")
-    sub = p.add_subparsers(dest="command", required=True)
-
-    s = sub.add_parser("search", help="找 Session")
-    s.add_argument("kind", choices=["session"])
-    s.add_argument("keyword", nargs="?", default="")
-    _with_header(s, "key=value（agent、relation、case、tag、ref、title）")
-    s.add_argument("--no-sync", action="store_true")
-    s.set_defaults(func=cmd_search)
-
-    i = sub.add_parser("import", help="初次引入一個 Session")
-    i.add_argument("--format", required=True, choices=AGENTS)
-    i.add_argument("--session-id", required=True)
-    _with_header(i)
-    i.set_defaults(func=cmd_import)
-
-    m = sub.add_parser("merge-session", help="把幾個 Session 合成一個新的")
-    m.add_argument("ids", nargs="+")
-    _with_header(m)
-    m.set_defaults(func=cmd_merge)
-
-    c = sub.add_parser("continue-session", help="用某個 agent 接著做，結束時存回")
-    c.add_argument("id")
-    c.add_argument("--agent", required=True, choices=AGENTS)
-    c.add_argument("--dir", default=None)
-    _with_header(c)
-    c.set_defaults(func=cmd_continue)
-
-    sh = sub.add_parser("show", help="看 header 與閱讀版")
-    sh.add_argument("id")
-    sh.add_argument("--raw", action="store_true")
-    sh.set_defaults(func=cmd_show)
-
-    sy = sub.add_parser("sync", help="推 outbox、拉 Drive、重建索引")
-    sy.set_defaults(func=cmd_sync)
+    p.add_argument("action", choices=list(ACTIONS))
+    p.add_argument("type", choices=TYPES)
+    p.add_argument("ids", nargs="*", help="session id（merge 可以給多個，用空白或逗號分隔）")
+    p.add_argument("--external-session-id", help="import：agent 自己的 session id")
+    p.add_argument("--agent", choices=AGENTS, help="import：來源的 agent；continue：用哪個 agent 接")
+    p.add_argument("--filter", action="append", default=[], help="search：KEY=VALUE（全等）或 KEY~=TEXT（包含）")
+    p.add_argument("--header", action="append", default=[], help="KEY=VALUE；KEY 可以用點路徑，VALUE 用 YAML 解析")
+    p.add_argument("--header-file", help="YAML 標頭檔，先套用，再套 --header")
+    p.add_argument("--dir", help="continue：在哪個專案目錄開 agent")
+    p.add_argument("--yes", action="store_true", help="delete：確定要移到 Drive 垃圾桶")
+    p.add_argument("--raw", action="store_true", help="show：印出原始匯出")
+    p.add_argument("--no-sync", action="store_true", help="search：不連 Drive，只查本機索引")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args, extra = parser.parse_known_args(argv)
-    if (extra and args.command == "search" and not args.keyword and len(extra) == 1
-            and not extra[0].startswith("--")):
-        args.keyword = extra[0]          # a keyword that starts with "-", like "-x"; a mistyped --flag still errors (G2)
-    elif extra:
-        parser.error(f"不認得的參數：{' '.join(extra)}")
+    args = build_parser().parse_args(argv)
     paths = store.Paths.from_env()
     try:
-        recover_pending(paths, notice_only=getattr(args, "no_sync", False))
+        recover_pending(paths, notice_only=args.no_sync)
         if store.outbox_count(paths):
             print(f"[agora] outbox 有 {store.outbox_count(paths)} 筆未上傳", file=sys.stderr)
         if store.bad_count(paths):
             print(f"[agora] 有 {store.bad_count(paths)} 筆壞檔放在 {paths.state}/*/.bad，請檢查", file=sys.stderr)
-        return args.func(args, paths)
+        return ACTIONS[args.action](args, paths)
     except InputError as e:
         print(f"[agora] {e}", file=sys.stderr)
         return EXIT_INPUT

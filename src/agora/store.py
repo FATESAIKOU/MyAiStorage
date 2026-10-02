@@ -192,9 +192,9 @@ def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None) -> Pat
         md5 = hashlib.md5(raw_bytes).hexdigest()
         name = f"raw-{md5[:12]}.json"
         (tmp / name).write_bytes(raw_bytes)
-        header["raw"] = {"file": name, "md5": md5, "size": len(raw_bytes)}
+        header.setdefault("agora", {})["raw"] = {"file": name, "md5": md5, "size": len(raw_bytes)}
     else:
-        header.pop("raw", None)
+        header.setdefault("agora", {}).pop("raw", None)
     (tmp / "session.md").write_text(h.dump_document(header, body), encoding="utf-8")
     # Swap in whole, so a crash never leaves an outbox entry without session.md
     # (C4): the old entry is renamed aside, the new one moved in, then the old removed (R6).
@@ -245,7 +245,7 @@ def read_entry(folder: Path) -> dict:
     """The header of an outbox entry; HeaderError if it is unreadable or incomplete."""
     try:
         hdr, _ = h.split_document((folder / "session.md").read_text(encoding="utf-8"))
-        raw = hdr.get("raw")
+        raw = h.agora_of(hdr).get("raw")
         if raw and not (folder / raw["file"]).is_file():
             raise h.HeaderError(f"缺少 {raw['file']}")
     except (OSError, UnicodeDecodeError, KeyError, TypeError) as e:
@@ -257,7 +257,7 @@ def push_one(drive: Drive, folder: Path) -> None:
     """Upload one outbox entry in the safe order, verify, then clean up."""
     ulid = folder.name
     hdr = read_entry(folder)
-    raw = hdr.get("raw")
+    raw = h.agora_of(hdr).get("raw")
     if raw:
         drive.upload(folder / raw["file"], ulid, raw["file"])
         _fault("after-raw-upload")
@@ -345,17 +345,16 @@ class Index:
         return dict(self.db.execute("SELECT ulid, md5 FROM sessions"))
 
     def put(self, ulid: str, md5: str, header: dict, body: str) -> None:
-        source = header.get("source") or {}
+        source = h.agora_of(header).get("source") or {}
         text = normalize("\n".join([
-            str(header.get("title") or ""), str(header.get("note") or ""),
-            " ".join(header.get("tags") or []), " ".join(header.get("refs") or []), body,
+            str(header.get("title") or ""), str(header.get("description") or ""),
+            " ".join(map(str, header.get("tags") or [])), " ".join(map(str, header.get("refs") or [])), body,
         ]))
         self.drop(ulid)
         self.db.execute(
             "INSERT INTO sessions VALUES (?,?,?,?,?,?,?)",
             (ulid, md5, json.dumps(header, ensure_ascii=False, default=str), text,
-             source.get("agent"), source.get("session_id"),
-             str(source.get("created_at") or header.get("created_at") or "")))
+             source.get("agent"), source.get("session_id"), sort_date(header)))
         self.db.execute("INSERT INTO fts VALUES (?,?)", (ulid, text))
         self.db.commit()
 
@@ -379,15 +378,21 @@ class Index:
         target = f"agora:{ulid}"
         rows = self.db.execute("SELECT ulid, header FROM sessions")
         return [u for u, hdr in rows
-                if any(p.get("id") == target for p in json.loads(hdr).get("parents") or [])]
+                if any(p.get("id") == target for p in h.agora_of(json.loads(hdr)).get("parents") or [])]
 
-    def search(self, keyword: str, filters: list[tuple[tuple[str, ...], str]]) -> list[tuple[str, dict, str]]:
-        """[(ulid, header, snippet)], newest source first."""
-        kw = normalize(keyword)
+    def search(self, filters: list[tuple[tuple[str, ...], str, str]]) -> list[tuple[str, dict, str]]:
+        """[(ulid, header, snippet)] matching every filter, newest source first.
+
+        A ("text",) filter matches the reading version plus the header's text
+        fields; the first one picks candidates through FTS5 (or a scan when
+        it is shorter than three characters, which trigram cannot match).
+        """
+        texts = [normalize(value) for path, _op, value in filters if path == (h.TEXT_KEY,)]
+        others = [f for f in filters if f[0] != (h.TEXT_KEY,)]
+        kw = texts[0] if texts else ""
         if not kw:
             rows = self.db.execute("SELECT ulid, header, body FROM sessions")
         elif len(kw) < 3:
-            # trigram cannot match fewer than 3 characters (e.g. 表格), so scan.
             rows = self.db.execute(
                 "SELECT ulid, header, body FROM sessions WHERE instr(body, ?) > 0", (kw,))
         else:
@@ -398,21 +403,33 @@ class Index:
         hits = []
         for ulid, hdr_json, body in rows:
             hdr = json.loads(hdr_json)
-            if all(_matches(hdr, path, value) for path, value in filters):
+            if all(t in body for t in texts[1:]) and all(_matches(hdr, *f) for f in others):
                 hits.append((ulid, hdr, _snippet(body, kw)))
-        hits.sort(key=lambda hit: (str((hit[1].get("source") or {}).get("created_at")
-                                       or hit[1].get("created_at")),
-                                   str(hit[1].get("updated_at")), hit[0]), reverse=True)
+        hits.sort(key=lambda hit: (sort_date(hit[1]), str(h.agora_of(hit[1]).get("updated_at")), hit[0]),
+                  reverse=True)
         return hits
 
 
-def _matches(hdr: dict, path: tuple[str, ...], value: str) -> bool:
+def sort_date(header: dict) -> str:
+    """When the conversation happened: the source session, else generated.at, else the import."""
+    agora = h.agora_of(header)
+    generated = header.get("generated") if isinstance(header.get("generated"), dict) else {}
+    return str((agora.get("source") or {}).get("created_at") or generated.get("at") or agora.get("created_at") or "")
+
+
+def _matches(hdr: dict, path: tuple[str, ...], op: str, value: str) -> bool:
     node = hdr
     for key in path:
         node = node.get(key) if isinstance(node, dict) else None
-    if isinstance(node, list):
-        return value in node
-    return node is not None and str(node) == value
+    items = node if isinstance(node, list) else [node]
+    for item in items:
+        if item is None:
+            continue
+        if op == "=" and str(item) == value:
+            return True
+        if op == "~=" and normalize(value) in normalize(str(item)):
+            return True
+    return False
 
 
 def _snippet(body: str, kw: str, width: int = 30) -> str:
@@ -466,7 +483,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
         except (StoreError, h.HeaderError, UnicodeDecodeError) as e:
             _warn(f"{ulid} 讀不到，先跳過：{e}")
             continue
-        raw = hdr.get("raw")
+        raw = h.agora_of(hdr).get("raw")
         if raw and remote[ulid].get(raw["file"]) != raw.get("md5"):
             _warn(f"{ulid} 還沒寫完（raw 不在或 md5 不符），下次再試")
             index.drop(ulid)
@@ -486,9 +503,18 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
     return index
 
 
+def delete_session(paths: Paths, drive: Drive, ulid: str) -> None:
+    """Move sessions/<ULID>/ to the Drive trash (restorable for 30 days) and forget it here."""
+    # rclone purge on Drive honours drive.use_trash, which defaults to true.
+    drive._run("purge", f"gdrive:sessions/{ulid}")
+    Index(paths).drop(ulid)
+    shutil.rmtree(paths.mirror / ulid, ignore_errors=True)
+    shutil.rmtree(paths.outbox / ulid, ignore_errors=True)
+
+
 def fetch_raw(paths: Paths, drive: Drive, ulid: str, header: dict, *, retry: bool = True) -> bytes:
     """Download a session's raw on demand and verify it against the header."""
-    raw = header.get("raw")
+    raw = h.agora_of(header).get("raw")
     if not raw:
         raise StoreError(f"{ulid} 沒有 raw（merge 出來的 Session 只能用閱讀版接續）")
     local = paths.mirror / ulid / raw["file"]

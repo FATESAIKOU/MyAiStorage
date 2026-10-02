@@ -35,11 +35,15 @@ def calls(remote: Path) -> list[list[str]]:
 
 def _header(title="CSV 規劃"):
     ulid = h.new_ulid()
-    return {"header": 1, "entity": "agora", "type": "session", "id": f"agora:{ulid}",
-            "title": title, "created_at": "2026-10-02T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z",
-            "refs": [], "case": None, "note": None, "tags": [],
-            "source": {"agent": "opencode", "session_id": "ses_test", "created_at": "2026-10-01T00:00:00Z"},
-            "relation": "import", "parents": []}
+    return {"type": "Session", "title": title, "tags": [], "id": f"agora:{ulid}", "refs": [], "case": None,
+            "agora": {"header": 2, "created_at": "2026-10-02T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z",
+                      "relation": "import", "parents": [],
+                      "source": {"agent": "opencode", "session_id": "ses_test", "created_at": "2026-10-01T00:00:00Z"}}}
+
+
+def T(keyword: str) -> list:
+    """A full-text filter, or none for an empty keyword."""
+    return [(("text",), "~=", keyword)] if keyword else []
 
 
 def _save(paths, hdr, body="## user\n把 CSV 轉成 Markdown 表格\n", raw=b'{"x": 1}'):
@@ -54,9 +58,9 @@ def test_raw_uploaded_before_session_md(remote):  # U-ST-01, U-ST-02
     uploads = [c for c in calls(remote) if "copyto" in c]
     assert uploads[0][-1].endswith(".json") and uploads[-1][-1].endswith("session.md")
     hdr, _ = h.split_document((remote / "agora" / "sessions" / ulid / "session.md").read_text())
-    raw_path = remote / "agora" / "sessions" / ulid / hdr["raw"]["file"]
-    assert hdr["raw"]["file"] == f"raw-{hdr['raw']['md5'][:12]}.json"
-    assert store.md5_file(raw_path) == hdr["raw"]["md5"]
+    raw_path = remote / "agora" / "sessions" / ulid / hdr["agora"]["raw"]["file"]
+    assert hdr["agora"]["raw"]["file"] == f"raw-{hdr['agora']['raw']['md5'][:12]}.json"
+    assert store.md5_file(raw_path) == hdr["agora"]["raw"]["md5"]
     assert not (paths.outbox / ulid).exists()
 
 
@@ -67,17 +71,17 @@ def test_reimport_replaces_raw_without_dangling_pointer(remote):  # U-ST-03
     _save(paths, hdr, raw=b'{"x": 2}')
     files = sorted(p.name for p in (remote / "agora" / "sessions" / ulid).iterdir())
     final, _ = h.split_document((remote / "agora" / "sessions" / ulid / "session.md").read_text())
-    assert files == sorted([final["raw"]["file"], "session.md"])
+    assert files == sorted([final["agora"]["raw"]["file"], "session.md"])
 
 
 def test_unfinished_session_is_not_indexed(remote):  # U-ST-04, U-ST-05
     paths = store.Paths.from_env()
     ulid = _save(paths, _header())
     hdr, _ = h.split_document((remote / "agora" / "sessions" / ulid / "session.md").read_text())
-    raw = remote / "agora" / "sessions" / ulid / hdr["raw"]["file"]
+    raw = remote / "agora" / "sessions" / ulid / hdr["agora"]["raw"]["file"]
     raw.write_text("tampered")
     index = store.sync(paths)
-    assert index.search("CSV", []) == []
+    assert index.search(T("CSV")) == []
 
 
 def test_failed_upload_stays_in_outbox_and_sync_pushes_it(remote, monkeypatch):  # U-ST-06, U-ST-08
@@ -91,7 +95,7 @@ def test_failed_upload_stays_in_outbox_and_sync_pushes_it(remote, monkeypatch): 
     monkeypatch.delenv("FAKE_RCLONE_FAIL")
     index = store.sync(paths)
     assert store.outbox_count(paths) == 0
-    assert [hit[0] for hit in index.search("CSV", [])] == [hdr["id"].split(":", 1)[1]]
+    assert [hit[0] for hit in index.search(T("CSV"))] == [hdr["id"].split(":", 1)[1]]
 
 
 def test_outbox_survives_cache_wipe(remote, monkeypatch):  # U-ST-09
@@ -108,10 +112,10 @@ def test_outbox_survives_cache_wipe(remote, monkeypatch):  # U-ST-09
 def test_deleted_remote_session_leaves_index(remote):  # U-ST-12
     paths = store.Paths.from_env()
     ulid = _save(paths, _header())
-    assert store.sync(paths).search("CSV", [])
+    assert store.sync(paths).search(T("CSV"))
     import shutil
     shutil.rmtree(remote / "agora" / "sessions" / ulid)
-    assert store.sync(paths).search("CSV", []) == []
+    assert store.sync(paths).search(T("CSV")) == []
     assert not (paths.mirror / ulid).exists()
 
 
@@ -144,7 +148,7 @@ def test_offline_falls_back_to_local_index(remote, monkeypatch):  # U-ST-15
     _save(paths, _header())
     store.sync(paths)
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "lsjson")
-    assert store.sync(paths).search("CSV", [])
+    assert store.sync(paths).search(T("CSV"))
 
 
 def test_folder_id_created_once(remote):  # U-ST-17
@@ -161,18 +165,18 @@ def test_cjk_and_short_keywords(remote):  # T1, T2
     _save(paths, _header(), body="## user\n表格轉換を変換するテーブル　ＣＳＶ\n")
     index = store.sync(paths)
     for kw in ["表格", "表格轉換", "変換する", "テーブル", "CSV", "ｃｓｖ"]:
-        assert index.search(kw, []), kw
+        assert index.search(T(kw)), kw
 
 
 def test_search_filters(remote):
     paths = store.Paths.from_env()
     hdr = _header()
-    hdr["source"]["agent"] = "claude"
+    hdr["agora"]["source"]["agent"] = "claude"
     _save(paths, hdr)
     _save(paths, _header())
     index = store.sync(paths)
-    assert len(index.search("CSV", [(("source", "agent"), "claude")])) == 1
-    assert len(index.search("", [])) == 2
+    assert len(index.search(T("CSV") + [(("agora", "source", "agent"), "=", "claude")])) == 1
+    assert len(index.search(T(""))) == 2
 
 
 def test_unknown_ref_entity_is_still_indexed(remote):  # R7
@@ -181,7 +185,7 @@ def test_unknown_ref_entity_is_still_indexed(remote):  # R7
     hdr["refs"] = ["future:thing"]
     folder = store.stage(paths, hdr, "## user\nCSV\n", b"{}")
     store.push_one(store.Drive(paths), folder)
-    assert store.sync(paths).search("CSV", [])
+    assert store.sync(paths).search(T("CSV"))
 
 
 def test_test_folder_never_leaks_into_normal_runs(remote, monkeypatch):
