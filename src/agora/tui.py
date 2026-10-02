@@ -250,6 +250,13 @@ class AskText(ModalScreen):
         self.dismiss(event.value)
 
 
+#: What Esc escalates to, and how long each step is given (review V2). SIGINT first:
+#: it is what Ctrl-C would send, and it is what cli.main turns into exit 130 after
+#: it has kept the pending record. An agent that ignores it gets SIGTERM, then
+#: SIGKILL - always to the whole process group, so the agent goes with it.
+ESCALATION = (signal.SIGTERM, signal.SIGKILL)
+
+
 class Run(ModalScreen):
     """One command-mode command in a child process, with a progress bar and Esc.
 
@@ -262,6 +269,7 @@ class Run(ModalScreen):
 
     BINDINGS = [Binding("escape", "stop", "中斷", priority=True)]
     PROGRESS = re.compile(r"^\[agora\].*?\b(\d+)/(\d+)\b")
+    STOP_AFTER = 5.0        # seconds before the next signal; a test shortens it
 
     def __init__(self, title: str, argv: list[str], spawn):
         super().__init__()
@@ -271,6 +279,7 @@ class Run(ModalScreen):
         self.started = time.monotonic()
         self.stopping = False
         self.signals: list[int] = []      # what was sent, in order (a test reads this)
+        self.armed: list[int] = []
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="box"):
@@ -305,6 +314,20 @@ class Run(ModalScreen):
             return
         self.stopping = True
         self._send(signal.SIGINT)
+        self.armed = [int(sig) for sig in ESCALATION]
+        self._arm()
+
+    def _arm(self) -> None:
+        if self.armed:
+            self.set_timer(self.STOP_AFTER, lambda: self._again(self.armed[0]))
+
+    def _again(self, sig: int) -> None:
+        if self.proc is None or self.proc.poll() is not None:
+            return
+        if sig in self.armed:               # not sent yet: still alive, so it goes up a step
+            self.armed.remove(sig)
+            self._send(signal.Signals(sig))
+            self._arm()
 
     def _send(self, sig) -> None:
         self.signals.append(int(sig))
@@ -713,7 +736,7 @@ class AgoraApp(App):
         mode is the one that knows how to skip what is already done.
         """
         code, out = await self.push_screen_wait(Run(title, argv, self.spawn))
-        stopped = code in (130, -signal.SIGINT)
+        stopped = code in (130, -signal.SIGINT, -signal.SIGTERM, -signal.SIGKILL)
         await self.push_screen_wait(Tell(f"{title}{'（已中斷）' if stopped else ''}", out, code == 0))
         self.reload()
         if code == 0:
