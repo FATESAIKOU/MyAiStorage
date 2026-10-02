@@ -19,7 +19,7 @@ import pytest
 pytestmark = pytest.mark.integration
 
 REPO = Path(__file__).resolve().parent.parent.parent
-COMMANDS = ["search", "import", "merge-session", "continue-session", "show", "sync"]
+COMMANDS = ["search", "import", "merge", "continue", "delete", "edit", "show"]
 USER_BIN = Path.home() / ".local" / "bin"
 
 
@@ -56,7 +56,7 @@ def test_installed_agora_offline(tmp_path):
         search = subprocess.run([str(agora), "search", "session", "--no-sync"],
                                 capture_output=True, text=True, timeout=120, env=offline)
         assert search.returncode == 0
-        show = subprocess.run([str(agora), "show", "agora:01NADA0000000000000000"],
+        show = subprocess.run([str(agora), "show", "session", "agora:01NADA0000000000000000"],
                               capture_output=True, text=True, timeout=120, env=offline)
         assert show.returncode == 1
         assert listing(USER_BIN) == before
