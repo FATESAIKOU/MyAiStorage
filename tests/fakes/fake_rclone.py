@@ -107,9 +107,15 @@ elif cmd == "copy":          # a local tree up to the remote, same names overwri
             (dst / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, dst / rel)
 elif cmd == "deletefile":
-    resolve(params[0]).unlink()
+    target = resolve(params[0])
+    if not target.is_file():
+        fail("error: object not found")      # what rclone says, so callers can match on it
+    target.unlink()
 elif cmd == "purge":
-    shutil.rmtree(resolve(params[0]))
+    target = resolve(params[0])
+    if not target.is_dir():
+        fail("error: directory not found")   # ditto
+    shutil.rmtree(target)
 else:
     fail(f"fake rclone does not support {cmd}")
 snapshot()

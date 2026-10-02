@@ -587,9 +587,22 @@ def forget_local(paths: Paths, ulid: str) -> None:
 
 
 def delete_session(paths: Paths, drive: Drive, ulid: str) -> None:
-    """Move sessions/<ULID>/ to the Drive trash (restorable for 30 days) and forget it here."""
+    """Move sessions/<ULID>/ to the Drive trash (restorable for 30 days) and forget it here.
+
+    A folder Drive does not have counts as deleted (review S1-4). rclone refuses
+    to purge it, and the caller turns that into a failure - so being interrupted
+    between the purge and forgetting it locally left a session that could never
+    be cleaned up: the rerun purged a folder that was already gone, failed, and
+    said so. The same road is 3.4's "delete only the local copy" for a session
+    another machine removed, so it is settled here, once.
+    """
     # rclone purge on Drive honours drive.use_trash, which defaults to true.
-    drive._run("purge", f"gdrive:sessions/{ulid}")
+    try:
+        drive._run("purge", f"gdrive:sessions/{ulid}")
+    except StoreError as e:
+        if "not found" not in str(e).lower():
+            raise
+        _warn(f"{ulid} 在 Drive 上已經沒有了，當成刪掉")
     forget_local(paths, ulid)
     shutil.rmtree(paths.outbox / ulid, ignore_errors=True)
 

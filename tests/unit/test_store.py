@@ -211,3 +211,16 @@ def test_cold_start_downloads_in_one_batch(remote):  # docs/perf.md
     assert sum(1 for c in new_calls if "copy" in c and "--files-from" in c) == 1
     assert not any("copyto" in c and "session.md" in c[-1] for c in new_calls if c[-1].startswith("/"))
     assert len(index.known()) == 3
+
+
+def test_deleting_a_session_drive_already_lost_still_finishes(remote):  # review S1-4
+    """Interrupted between the purge and forgetting it locally, the rerun purges a
+    folder that is gone. That is a delete that never completes."""
+    paths = store.Paths.from_env()
+    ulid = _save(paths, _header())
+    import shutil
+    shutil.rmtree(remote / "agora" / "sessions" / ulid)   # the purge already happened
+
+    store.delete_session(paths, store.Drive(paths), ulid)   # no StoreError
+    assert not (paths.mirror / ulid).exists()
+    assert store.Index(paths).header(ulid) is None
