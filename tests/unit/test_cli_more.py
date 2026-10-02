@@ -54,21 +54,18 @@ class FakeAgent:
             raise AgentError(f"沒有這個 session：{sid}")
         return self._exported(sid)
 
-    def reading(self, raw):
+    def turns(self, raw):
         msgs = json.loads(raw)["m"]
-        return format_reading([("user" if i % 2 == 0 else "assistant", [m]) for i, m in enumerate(msgs)])
+        return [("user" if i % 2 == 0 else "assistant", [m]) for i, m in enumerate(msgs)]
+
+    def native(self, turns):
+        msgs = [lines[0] for _role, lines in turns if lines]
+        return json.dumps({"id": "native", "m": msgs}, ensure_ascii=False).encode()
 
     def start_native(self, raw, workdir):
         new = f"ses_n{len(self.sessions)}"
         self.sessions[new] = list(json.loads(raw)["m"])
         launch = Launch(argv=["true"], cwd=str(workdir), agent_session_id=new, before_count=len(self.sessions[new]))
-        self.launched.append(launch)
-        return launch
-
-    def start_injected(self, reading_file, workdir):
-        new = f"ses_i{len(self.sessions)}"
-        self.sessions[new] = [f"read {reading_file}"]
-        launch = Launch(argv=["true"], cwd=str(workdir), agent_session_id=new, before_count=1)
         self.launched.append(launch)
         return launch
 
@@ -380,7 +377,10 @@ def test_finalize_upload_failure_keeps_outbox_clears_pending(env, capsys, monkey
     _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     env.sessions["ses_b"] = ["讀取 CSV", "完成"]
     _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
-    _, m, _ = run(capsys, "merge", "session", a, b)  # injected path needs no raw
+    _, m, _ = run(capsys, "merge", "session", a, b)
+    for parent in (a, b):                            # continue reads the parents' raws from the cache
+        run(capsys, "show", "session", parent, "--raw")
+    run(capsys, "search", "session", "--filter", "text~=CSV")   # sync first, so only the finalize upload fails
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")
     code, out, _ = run(capsys, "continue", "session", m, "--agent", "opencode", "--dir", "/tmp")
     assert code == cli.EXIT_IN_OUTBOX
@@ -524,7 +524,7 @@ def test_show_raw_lazy_and_merge_message(env, capsys):  # U-SHW-03
     _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
     _, m, _ = run(capsys, "merge", "session", a, b)
     code, _, err = run(capsys, "show", "session", m, "--raw")
-    assert code != 0 and "閱讀版" in err
+    assert code != 0 and "agora.parents" in err
 
 
 # --- U-SRC -------------------------------------------------------------------------------

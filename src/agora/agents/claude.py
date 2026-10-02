@@ -21,14 +21,15 @@ import os
 import re
 import sys
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 from agora.agents.base import (
     AgentError,
     Exported,
     Launch,
+    Turns,
     agent_cmd,
-    format_reading,
     tool_line,
 )
 
@@ -261,7 +262,7 @@ def _rewrite_aux_jsonl(content: str, rel: str, new_id: str, workdir: str) -> str
     return text
 
 
-def _reading_turns(objs: list[dict]) -> list[tuple[str, list[str]]]:
+def _turns(objs: list[dict]) -> list[tuple[str, list[str]]]:
     handlers = {"user": _user_lines, "assistant": _assistant_lines}  # P13
     turns: list[tuple[str, list[str]]] = []
     for o in objs:
@@ -319,6 +320,35 @@ def _assistant_lines(o: dict) -> list[str] | None:
     return None
 
 
+PLACEHOLDER_ID = "SESSION-PLACEHOLDER"   # start_native replaces it
+PLACEHOLDER_CWD = "CWD-PLACEHOLDER"
+
+
+def _native_lines(turns: Turns) -> list[str]:
+    """Turns → Claude jsonl lines, one line per turn, in the order given.
+
+    cli hands us turns that already start with the user, strictly alternate
+    user/assistant, and have no empty or `[skip …]` lines, so this just writes
+    them out. Each line's uuid/parentUuid chain is what lets `claude --resume`
+    pick the conversation up (spike V2); sessionId and cwd are placeholders
+    that start_native rewrites to the new session's.
+    """
+    base = datetime.now(timezone.utc).replace(microsecond=0)
+    lines, parent = [], None
+    for i, (role, texts) in enumerate(turns):
+        uuid_ = str(uuid.uuid4())
+        lines.append(json.dumps({
+            "type": role, "sessionId": PLACEHOLDER_ID, "uuid": uuid_,
+            "parentUuid": parent,
+            "timestamp": (base + timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "cwd": PLACEHOLDER_CWD, "isSidechain": False, "userType": "external",
+            "entrypoint": "cli", "gitBranch": "",
+            "message": {"role": role, "content": [{"type": "text", "text": t} for t in texts]},
+        }, ensure_ascii=False))
+        parent = uuid_
+    return lines
+
+
 class ClaudeAgent:
     name = "claude"
 
@@ -327,9 +357,14 @@ class ClaudeAgent:
         main = _read_lines(path)
         return _exported(session_id, main, path.parent / session_id)
 
-    def reading(self, raw: bytes) -> str:
+    def turns(self, raw: bytes) -> Turns:
         main, _aux = _unpack_raw(raw)
-        return format_reading(_reading_turns(_parse_all(main)))
+        return _turns(_parse_all(main))
+
+    def native(self, turns: Turns) -> bytes:
+        """Turns (from any agent, or a merge of several) → a Claude jsonl raw
+        that start_native can load directly (design v5 5.4)."""
+        return _pack_raw(_native_lines(turns), {})
 
     def start_native(self, raw: bytes, workdir: Path) -> Launch:
         main, aux = _unpack_raw(raw)
@@ -346,13 +381,6 @@ class ClaudeAgent:
         return Launch(argv=[agent_cmd("claude"), "--resume", new_id],
                       cwd=workdir_str, agent_session_id=new_id,
                       before_count=_count_messages(_parse_all(rewritten)))
-
-    def start_injected(self, reading_file: Path, workdir: Path) -> Launch:
-        new_id = str(uuid.uuid4())
-        prompt = (f"@{reading_file.resolve()} 這是之前一個 Session 的閱讀版。"
-                  "請先讀完，用兩三句話說明你理解的進度，然後等我的指示。")
-        return Launch(argv=[agent_cmd("claude"), "--session-id", new_id, prompt],
-                      cwd=str(workdir), agent_session_id=new_id, before_count=2)
 
     def collect(self, launch: Launch) -> Exported | None:
         if not launch.agent_session_id:

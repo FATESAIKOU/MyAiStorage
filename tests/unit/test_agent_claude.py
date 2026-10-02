@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from agora.agents import claude as C
+from agora.agents import base
 from agora.agents.base import AgentError, Launch
 
 FIX = Path(__file__).parent.parent / "fixtures" / "claude"
@@ -208,10 +209,16 @@ def test_export_no_version_anywhere_gives_none(claude_env):
     assert C.ADAPTER.export(SID).agent_version is None
 
 
-# --- reading (U-RV-02, CL2, CL10) ----------------------------------------------
+# --- turns (U-RV-02, CL2, CL10) ------------------------------------------------
 
-def test_reading_basic(claude_env):
-    body = C.ADAPTER.reading(C.ADAPTER.export(SID).raw)
+def body_of(claude_env, raw=None):
+    from agora.agents.base import format_reading
+    return format_reading(C.ADAPTER.turns(raw if raw is not None
+                                          else C.ADAPTER.export(SID).raw))
+
+
+def test_turns_basic(claude_env):
+    body = body_of(claude_env)
     assert "把 CSV 轉成 Markdown 表格" in body
     assert "三個步驟" in body
     assert "[tool] Bash" in body
@@ -225,15 +232,15 @@ def test_reading_basic(claude_env):
     assert "之前在做表格轉換的規劃" in body  # isCompactSummary is kept
 
 
-def test_reading_truncates_long_tool_input(claude_env):
-    body = C.ADAPTER.reading(C.ADAPTER.export(SID).raw)
+def test_turns_truncates_long_tool_input(claude_env):
+    body = body_of(claude_env)
     long_line = next(line for line in body.splitlines()
                      if line.startswith("[tool] Bash") and "xxx" in line)
     assert long_line.endswith("…")
     assert len(long_line.split(" ", 2)[2]) <= 201
 
 
-def test_reading_unknown_type_is_skipped_explicitly():
+def test_turns_unknown_type_is_skipped_explicitly():
     raw = json.dumps({
         "format": C.FORMAT,
         "main": ['{"type": "user", "sessionId": "s", "message": "hi"}',
@@ -241,9 +248,71 @@ def test_reading_unknown_type_is_skipped_explicitly():
                  '{"type": "assistant", "sessionId": "s", "message": {"content": [{"text": "x"}]}}'],
         "aux": {},
     }).encode()
-    body = C.ADAPTER.reading(raw)
-    assert "[skip zzwidget]" in body
-    assert "[skip ]" in body  # CL10: a block without type must not crash
+    turns = C.ADAPTER.turns(raw)
+    assert ("user", ["[skip zzwidget]"]) in turns
+    assert any("[skip ]" in line for _role, lines in turns for line in lines)  # CL10
+
+
+# --- native() round-trip (design v5 5.4) ---------------------------------------
+
+def test_native_round_trip_keeps_the_text(claude_env):
+    """turns -> native -> turns: identical turns come back.
+
+    native() writes one line per turn in order, so even the grouping survives.
+    """
+    raw = C.ADAPTER.export(SID).raw
+    turns = C.ADAPTER.turns(raw)
+    assert turns, "the fixture has turns"
+    again = C.ADAPTER.turns(C.ADAPTER.native(turns))
+    assert again == turns
+    assert base.format_reading(again) == base.format_reading(turns)
+
+
+def test_native_builds_a_loadable_jsonl(claude_env, tmp_path):
+    turns = [("user", ["把 CSV 轉成 Markdown 表格，先列三個步驟"]),
+             ("assistant", ["1. 讀檔", "2. 組表頭", "3. 輸出資料列"])]
+    raw = C.ADAPTER.native(turns)
+    doc = json.loads(raw.decode("utf-8"))
+    assert doc["format"] == C.FORMAT and doc["aux"] == {}
+    lines = [json.loads(line) for line in doc["main"]]
+    assert [o["type"] for o in lines] == ["user", "assistant"]  # alternating
+    assert lines[0]["parentUuid"] is None
+    assert lines[1]["parentUuid"] == lines[0]["uuid"]           # chained
+    assert all(o["sessionId"] == C.PLACEHOLDER_ID for o in lines)
+    assert all(o["cwd"] == C.PLACEHOLDER_CWD for o in lines)
+    stamps = [o["timestamp"] for o in lines]
+    assert stamps == sorted(stamps) and len(set(stamps)) == 2
+    # Text survives as-is (no tool lines invented, nothing trimmed).
+    assert C.ADAPTER.turns(raw) == turns
+    assert base.format_reading(C.ADAPTER.turns(raw)) == base.format_reading(turns)
+
+    # And start_native loads it: no sessionId/cwd placeholder survives.
+    workdir = (tmp_path / "proj").resolve()
+    workdir.mkdir()
+    launch = C.ADAPTER.start_native(raw, workdir)
+    written = [json.loads(line) for line in
+               (claude_env["home"] / ".claude" / "projects"
+                / C.encode_project_dir(workdir) / f"{launch.agent_session_id}.jsonl"
+                ).read_text(encoding="utf-8").splitlines()]
+    assert [o["sessionId"] for o in written] == [launch.agent_session_id] * 2
+    assert [o["cwd"] for o in written] == [str(workdir)] * 2
+    assert launch.before_count == 2
+
+
+def test_native_writes_the_given_turns_in_order(claude_env):
+    """cli guarantees user-first and strictly alternating turns; we keep the order."""
+    turns = [("user", ["一句話", "同一則的第二句"]),
+             ("assistant", ["回應一"]), ("user", ["追問"]), ("assistant", ["回應二"])]
+    lines = [json.loads(line) for line
+             in json.loads(C.ADAPTER.native(turns).decode("utf-8"))["main"]]
+    assert [o["type"] for o in lines] == ["user", "assistant", "user", "assistant"]
+    assert [b["text"] for b in lines[0]["message"]["content"]] == ["一句話", "同一則的第二句"]
+    assert C.ADAPTER.turns(C.ADAPTER.native(turns)) == turns
+
+
+def test_native_of_empty_turns_is_still_valid(claude_env):
+    doc = json.loads(C.ADAPTER.native([]).decode("utf-8"))
+    assert doc["main"] == [] and C.ADAPTER.turns(C.ADAPTER.native([])) == []
 
 
 # --- start_native / collect (U-CON-04, U-CON-05) -------------------------------
@@ -347,32 +416,17 @@ def test_collect_missing_session_raises(claude_env, tmp_path):
                                  agent_session_id=str(uuid.uuid4()), before_count=0))
 
 
-# --- start_injected ------------------------------------------------------------
-
-def test_start_injected(claude_env, tmp_path):
-    reading = tmp_path / "reading.md"
-    reading.write_text("# from agora:xxx\n\n測試\n", encoding="utf-8")
-    workdir = (tmp_path / "proj").resolve()
-    workdir.mkdir()
-    launch = C.ADAPTER.start_injected(reading, workdir)
-    assert launch.argv[0] == str(claude_env["wrapper"])
-    assert launch.argv[1] == "--session-id"
-    uuid.UUID(launch.argv[2])
-    assert launch.argv[2] == launch.agent_session_id
-    assert launch.argv[3].startswith(f"@{reading.resolve()} ")
-    assert launch.cwd == str(workdir)
-    assert launch.before_count == 2  # CL9: prompt + auto-reply already count
-
-
 # --- adapter surface -------------------------------------------------------------
 
 def test_adapter_surface():
     assert C.ADAPTER.name == "claude"
     assert hasattr(C.ADAPTER, "export")
-    assert hasattr(C.ADAPTER, "reading")
+    assert hasattr(C.ADAPTER, "turns")
+    assert hasattr(C.ADAPTER, "native")
     assert hasattr(C.ADAPTER, "start_native")
-    assert hasattr(C.ADAPTER, "start_injected")
     assert hasattr(C.ADAPTER, "collect")
+    assert not hasattr(C.ADAPTER, "reading")          # gone in design v5
+    assert not hasattr(C.ADAPTER, "start_injected")   # gone in design v5
 
 
 if __name__ == "__main__":
