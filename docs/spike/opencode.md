@@ -774,3 +774,62 @@ design 第 4 版把標頭改成 OKF 形狀，其中 `generated.by` 是
 **不需要改 design.md。** 只有一點值得記：這個欄位描述的是「**最近一次**使用的
 模型」，不是 session 建立時的模型，所以 `generated.by` 對一個被接續過很多次的
 Session 會反映最後一次。名稱 `model`（不是 `created_with_model`）已經表達了這件事。
+
+---
+
+## design v4：e2e 改成新語法與 OKF 標頭（2026-10-03）
+
+`195827d` 之後，e2e 的指令與標頭全換了。結論：**可行**，e2e 66 秒通過、跑完不留東西。
+
+### 指令（每個都實際跑過）
+
+| 舊 | 新 |
+|---|---|
+| `agora import --format opencode --session-id <ses>` | `agora import session --external-session-id <ses> --agent opencode --header title=…` |
+| `agora search session 表格` | `agora search session --filter text~=表格` |
+| `agora continue-session <id> --agent opencode --dir <dir>` | `agora continue session <id> --agent opencode --dir <dir>` |
+| `agora sync`（測試靠它讀回索引） | 沒有這個指令了；`header_of()` 改成直接呼叫 `store.sync(paths)`，和每個指令自己做的事一樣 |
+| — | 多加一條 `agora search session --filter agent=opencode --filter generated.by~=opencode/<模型>`（點路徑 ＋ 包含，同時成立） |
+
+`run_main()` 記 id 的條件也跟著改：動作在 `argv[0]`、型態在 `argv[1]`，所以只認
+`("import", "continue", "merge")` ＋ 第二個字是 `session`（P1 的「只收自己印的 id」照舊）。
+
+### 標頭（形狀）
+
+```
+type: Session
+title: e2e 表格                     ← --header title=
+description: …第一則 user 訊息的前 80 字（自動）
+generated: {by: "opencode/<模型>", at: <來源建立時間，Z 結尾>}
+sources:
+  - {id: "opencode:<ses_id>", title: "opencode session",
+     author: "opencode/<模型>", last_modified: YYYY-MM-DD}
+id: agora:<ULID>
+agora:                            ← 系統欄位全在這裡
+  header: 2
+  created_at / updated_at
+  relation: import | continue | merge
+  parents: [{id: agora:…, raw_md5: …}]
+  source: {agent, session_id, dir, host, agent_version, created_at}
+  raw: {file: raw-<md5前12>.json, md5, size}
+```
+
+驗到的重點（自編測試資料，不貼對話內容）：
+
+- `generated.by` == `opencode/<來源 export 最後一則 assistant 的 modelID>`，而且
+  `sources[0].author` 是同一個字串、`sources[0].id` == `opencode:<來源 ses id>`。
+- 用 claude 接續的那一筆：`agora.source.agent == "claude"`、
+  `generated.by` 以 **`claude-code/`** 開頭（前綴兩個 agent 不同）。
+- `agora.parents[0].raw_md5` == 來源那一筆的 `agora.raw.md5`。
+- opencode 原生接續後來的那個 `ses_` 與來源不同，而且原始 session 的訊息數沒變（V1a）。
+
+### 對 design.md 的建議
+
+1. **§3.4 補一句 `sources[].id` 的前綴**：它是 `<agent>:<該 agent 自己的 id>`
+   （`opencode:ses_xxxx`），**不是** `agora:`——只有 agora 自己的項目才帶 `agora:`，
+   這兩個前綴在同一個檔案裡很容易看錯。
+2. **§3.4 補一句 `generated.by` 的前綴依 agent 而異**：opencode 是 `opencode/`，
+   claude 是 `claude-code/`（`ACTOR` 表）。搜尋與顯示都會用到，值得寫在設計裡。
+3. **§7／test-plan 給測試作者一句**：`sync` 拿掉之後，整合測試想讀回索引要自己
+   `store.sync(paths)`（或直接讀本機 cache）；`agora show` 只印文字，不能拿來斷言
+   標頭欄位。

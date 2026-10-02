@@ -194,10 +194,11 @@ def _cleanup(state) -> None:
 def run_main(state, *argv: str) -> str:
     rc = cli.main(list(argv))
     out = state["capsys"].readouterr().out
-    if argv and argv[0] in ("import", "continue-session", "merge-session"):
+    if argv and argv[0] in ("import", "continue", "merge") and \
+            len(argv) > 1 and argv[1] == "session":
         # P1 (D-1): record our own new id the moment it is printed, even if the
         # command then fails. Never collect from the index: agora-test/ is shared,
-        # and `sync` has already pulled everyone else's sessions into this cache.
+        # and a sync has already pulled everyone else's sessions into this cache.
         for token in out.split():
             if token.startswith("agora:") and len(token) == len("agora:") + 26:
                 if token not in state["created"]["printed"]:
@@ -208,10 +209,24 @@ def run_main(state, *argv: str) -> str:
 
 
 def header_of(state, agora_id: str) -> dict:
-    run_main(state, "sync")  # read back through the CLI + index, like a user
+    """The stored OKF header, read back the way the next command would see it.
+
+    There is no `agora sync` any more: every command pushes the outbox and pulls
+    Drive itself, so this calls the same store.sync the commands call.
+    """
+    store.sync(state["paths"])
     hdr = store.Index(state["paths"]).header(agora_id.split(":", 1)[1])
     assert hdr is not None, f"{agora_id} 不在索引裡"
     return hdr
+
+
+def model_of(payload: dict) -> str | None:
+    """The model the session last used, read straight out of the export."""
+    for message in reversed(payload.get("messages") or []):
+        info = message.get("info") or {}
+        if info.get("role") == "assistant":
+            return info.get("modelID") or None
+    return None
 
 
 def opencode_run(state, *args: str, timeout: int = 300) -> str:
@@ -254,40 +269,61 @@ def test_import_search_continue_native_then_cross_agent(e2e):
               if line.strip()]
     source_id = next(e["sessionID"] for e in events if "sessionID" in e)
     created["ses"].append(source_id)
-    source_before = len(json.loads(export_bytes(e2e, source_id))["messages"])
+    source_raw = export_bytes(e2e, source_id)
+    source_before = len(json.loads(source_raw)["messages"])
+    source_model = model_of(json.loads(source_raw))
 
-    out = run_main(e2e, "import", "--format", "opencode", "--session-id", source_id,
-                   "--header", "title=e2e 表格")
+    out = run_main(e2e, "import", "session", "--external-session-id", source_id,
+                   "--agent", "opencode", "--header", "title=e2e 表格")
     id1 = out.split()[0]
     assert id1.startswith("agora:")
     created["ulids"].append(id1.split(":", 1)[1])
 
+    # The OKF top level: type, the user's title, and who/what made it.
     hdr1 = header_of(e2e, id1)
-    assert hdr1["source"]["agent"] == "opencode"
-    assert hdr1["source"]["session_id"] == source_id
-    assert hdr1["source"]["dir"] == str(proj)      # N9: from the export, not the folder name
-    assert hdr1["source"]["agent_version"][0].isdigit()
-    assert hdr1["relation"] == "import" and hdr1["parents"] == []
-    assert hdr1["raw"]["md5"] and hdr1["raw"]["file"].startswith("raw-")
+    assert hdr1["type"] == "Session"
+    assert hdr1["title"] == "e2e 表格" and "CSV" in hdr1["description"]
+    assert source_model, "來源的 export 沒有 modelID，測試資料不對"
+    assert hdr1["generated"]["by"] == f"opencode/{source_model}"
+    assert hdr1["generated"]["at"].endswith("Z")
+    assert hdr1["sources"][0]["id"] == f"opencode:{source_id}"
+    assert hdr1["sources"][0]["author"] == f"opencode/{source_model}"
+
+    # Everything the system owns lives under `agora` (design v4 3.4).
+    sysblock = hdr1["agora"]
+    assert sysblock["header"] == 2
+    assert sysblock["relation"] == "import" and sysblock["parents"] == []
+    assert sysblock["source"]["agent"] == "opencode"
+    assert sysblock["source"]["session_id"] == source_id
+    assert sysblock["source"]["dir"] == str(proj)   # N9: from the export, not the name
+    assert sysblock["source"]["agent_version"][0].isdigit()
+    assert sysblock["raw"]["md5"] and sysblock["raw"]["file"].startswith("raw-")
 
     # 2. search finds it through the index; the agora id comes first.
-    out = run_main(e2e, "search", "session", "表格")
+    out = run_main(e2e, "search", "session", "--filter", "text~=表格")
+    assert any(line.split()[0] == id1 for line in out.splitlines() if line.split())
+    out = run_main(e2e, "search", "session", "--filter", "agent=opencode",
+                   "--filter", f"generated.by~=opencode/{source_model}")
     assert any(line.split()[0] == id1 for line in out.splitlines() if line.split())
 
     # 3. continue with opencode: native load (import with new ids), then the
     #    wrapper's headless run on that new session.
-    out = run_main(e2e, "continue-session", id1, "--agent", "opencode", "--dir", str(proj))
+    out = run_main(e2e, "continue", "session", id1, "--agent", "opencode",
+                   "--dir", str(proj))
     id2 = out.split()[0]
     assert id2.startswith("agora:") and id2 != id1
     created["ulids"].append(id2.split(":", 1)[1])
     hdr2 = header_of(e2e, id2)
-    assert hdr2["relation"] == "continue"
-    assert hdr2["parents"][0]["id"] == id1
-    assert hdr2["parents"][0]["raw_md5"] == hdr1["raw"]["md5"]
-    forked = hdr2["source"]["session_id"]
+    assert hdr2["agora"]["relation"] == "continue"
+    assert hdr2["agora"]["parents"][0]["id"] == id1
+    assert hdr2["agora"]["parents"][0]["raw_md5"] == hdr1["agora"]["raw"]["md5"]
+    forked = hdr2["agora"]["source"]["session_id"]
     assert forked.startswith("ses_") and forked != source_id
     created["ses"].append(forked)
-    assert hdr2["source"]["dir"] == str(proj)
+    assert hdr2["agora"]["source"]["dir"] == str(proj)
+    # the continue session names the model that just answered, and its own source
+    assert hdr2["sources"][0]["id"] == f"opencode:{forked}"
+    assert hdr2["generated"]["by"].startswith("opencode/")
 
     # the session we branched from is untouched (spike V1a)
     assert len(json.loads(export_bytes(e2e, source_id))["messages"]) == source_before
@@ -300,13 +336,17 @@ def test_import_search_continue_native_then_cross_agent(e2e):
 
     # 4. cross agent: the same session continued by claude, reading version in.
     #    No raw re-import, so the claude side must be an injected launch.
-    out = run_main(e2e, "continue-session", id1, "--agent", "claude", "--dir", str(proj))
+    out = run_main(e2e, "continue", "session", id1, "--agent", "claude",
+                   "--dir", str(proj))
     id3 = out.split()[0]
     assert id3.startswith("agora:") and id3 not in (id1, id2)
     created["ulids"].append(id3.split(":", 1)[1])
     hdr3 = header_of(e2e, id3)
-    assert hdr3["relation"] == "continue" and hdr3["parents"][0]["id"] == id1
-    uuid3 = hdr3["source"]["session_id"]
+    assert hdr3["agora"]["relation"] == "continue"
+    assert hdr3["agora"]["parents"][0]["id"] == id1
+    assert hdr3["agora"]["source"]["agent"] == "claude"
+    assert hdr3["generated"]["by"].startswith("claude-code/")
+    uuid3 = hdr3["agora"]["source"]["session_id"]
     uuid.UUID(uuid3)
     assert uuid3 in {json.loads(l)[json.loads(l).index("--session-id") + 1]
                      for l in (e2e["fake_home"] / "e2e-args.log").read_text().splitlines()

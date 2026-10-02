@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Non-interactive stand-in for the interactive `opencode` in e2e tests.
 
-`agora continue-session --agent opencode` opens the TUI (`opencode --session
-<id>`), which no test can drive. AGORA_OPENCODE_CMD points here instead, and
-this wrapper translates the TUI form into the headless one:
+`agora continue session <id> --agent opencode` opens the TUI
+(`opencode --session <id>`), which no test can drive. AGORA_OPENCODE_CMD points
+here instead, and this wrapper translates the TUI form into the headless one:
 
     [--session <id>]  ->  opencode run -s <id> -m <model> <fixed question>
 
