@@ -203,6 +203,28 @@ class FakeProc:
         self.done.set()
 
 
+class DripProc(FakeProc):
+    """A process whose lines arrive one at a time, when the test opens the gate.
+
+    One that prints everything at once cannot show that the bar *walks* - only that
+    it ends up somewhere.
+    """
+
+    def __init__(self, lines):
+        super().__init__(hang=True)
+        self.gates = [threading.Event() for _ in lines]
+
+        def arriving():
+            for line, gate in zip(lines, self.gates):
+                gate.wait(timeout=10)
+                yield f"{line}\n"
+        self.stdout = arriving()
+
+    def send(self, n: int) -> None:
+        """Let the n-th line out."""
+        self.gates[n].set()
+
+
 def _spawn(proc=None, **kw):
     """A spawn that records what it was asked for and runs a fake process."""
     started: list[list[str]] = []
@@ -1112,7 +1134,7 @@ def test_pull_and_push_ask_before_doing_it_and_offer_the_flag():   # spec 3.2
     _run(go)
 
 
-def test_pull_without_the_option_sends_no_flag():
+def test_push_without_the_option_sends_no_flag():
     app = _marked_app(None)
 
     async def go():
@@ -1638,3 +1660,82 @@ def test_the_status_line_is_empty_after_the_result_window_closes():   # Q4
             await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
             assert str(app.query_one("#msg").render()) == ""
     _run(go)
+
+
+# --- the result window has to say what the exit code means (review T2-final) ---
+
+
+def _result_of(app, code, *, mark_one=False):
+    """Run one delete that exits `code`, and hand back what the result window said."""
+    lines: list[str] = []
+
+    async def go():
+        proc = FakeProc(lines=["[agora] 刪除 1/1"], code=code)
+        app.spawn, _ = _spawn(proc)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            if mark_one:
+                await pilot.press("space")
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            lines.append(" ".join(str(line) for line in app.screen.lines))
+    _run(go)
+    return lines
+
+
+def test_the_result_window_says_a_command_that_worked():
+    """exit 0."""
+    assert "完成" in " ".join(_result_of(_marked_app(None), 0))
+
+
+def test_the_result_window_says_some_of_it_failed():
+    """exit 2: at least one item did not work, and the window says so rather than
+    leaving the user to work it out from the output."""
+    said = _result_of(_marked_app(None), 2, mark_one=True)
+    assert "沒有全部成功" in " ".join(said)
+
+
+def test_the_result_window_says_it_is_waiting_to_be_uploaded():
+    """exit 3: saved here, not on Drive yet - which is not the same as done."""
+    said = _result_of(_marked_app(None), 3)
+    assert "outbox" in " ".join(said) and "再送" in " ".join(said)
+
+
+# --- the bar walks, it does not jump (spec「看得到進度」) --------------------
+
+
+def test_the_progress_bar_walks_through_the_middle_values():
+    """One line at a time, so the intermediate values are on screen before the end."""
+    app = _marked_app(None)
+    proc = DripProc(["[agora] 刪除 1/3", "[agora] 刪除 2/3", "[agora] 刪除 3/3"])
+    app.spawn, _ = _spawn(proc)
+    seen: list[tuple] = []
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            for _ in range(3):
+                await pilot.press("space", "down")
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")            # 確定
+
+            def progress():
+                if not isinstance(app.screen, tui.Run):
+                    return None
+                bar = app.screen.query_one("#bar")
+                return (bar.progress, bar.total) if bar.total else None
+
+            proc.send(0)                                 # 1/3: nothing finished yet
+            await _wait(lambda: progress() == (0, 3), pilot)
+            seen.append(progress())
+            proc.send(1)                                 # 2/3
+            await _wait(lambda: progress() == (1, 3), pilot)
+            seen.append(progress())
+            proc.send(2)                                 # 3/3
+            await _wait(lambda: progress() == (2, 3), pilot)
+            seen.append(progress())
+    _run(go)
+    assert seen == [(0, 3), (1, 3), (2, 3)]              # it walked, and stopped short of full

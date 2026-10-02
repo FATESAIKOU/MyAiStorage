@@ -34,4 +34,5 @@
 - [x] 4.2d review T2-final W3（進度只讀自己那一行）、S3（「雲端沒的」錯字）
 - [x] 4.2e review T2-archive X1：4.1b 的孫程序不繼承互動模式的 pipe、測試最後清場
 - [x] 4.2f PM 試用的 Q1～Q4（`docs/tickets/T2-pm-run.md`）：勾選框的狀態不只靠顏色、說明跟著狀態變；delete 確認視窗的「Enter 確定」改成「Enter 選擇」；進度條算「做完的」而不是「開始的」；結果視窗之後清掉狀態列上一次的訊息
+- [x] 4.2g 結果視窗依 exit code 的說明（0／2／3）、進度條真的「走」過中間值、測試名稱與按鍵一致（S6）
 - [ ] 4.3 PM 用假資料在 pane 操作一遍（✅ `docs/tickets/T2-pm-run.md`，沒有擋歸檔的問題）；review 審程式（✅ T2-final，修正確認中 → `docs/review/T2-archive.md`）
