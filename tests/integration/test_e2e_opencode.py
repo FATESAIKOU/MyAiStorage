@@ -2,6 +2,11 @@
 (native) -> continue (cross agent, converted), against real Drive
 (agora-test/), real opencode and real claude.
 
+Continue writes back into the session it continued (design 5.4, the user's call):
+there is no second agora id, `agora.source` becomes the agent session it just
+used, the one it came from is remembered in `agora.previous_sources` - so the
+import tab stops listing it - and a continued merge stops being a merge.
+
 Mirrors tests/integration/test_e2e_cli.py (which does the same with claude):
 the config is a temp dir whose rclone.conf symlinks to ~/.config/agora/rclone.conf
 (never read, only referenced by path), and every command goes through
@@ -220,6 +225,13 @@ def header_of(state, agora_id: str) -> dict:
     return hdr
 
 
+def session_md(e2e, agora_id: str) -> str:
+    """The session's own document on Drive, the way the next command sees it."""
+    store.sync(e2e["paths"])
+    ulid = agora_id.split(":", 1)[1]
+    return (e2e["paths"].mirror / ulid / "session.md").read_text(encoding="utf-8")
+
+
 def model_of(payload: dict) -> str | None:
     """The model the session last used, read straight out of the export."""
     for message in reversed(payload.get("messages") or []):
@@ -298,6 +310,8 @@ def test_import_search_continue_native_then_cross_agent(e2e):
     assert sysblock["source"]["dir"] == str(proj)   # N9: from the export, not the name
     assert sysblock["source"]["agent_version"][0].isdigit()
     assert sysblock["raw"]["md5"] and sysblock["raw"]["file"].startswith("raw-")
+    body1 = session_md(e2e, id1)
+    assert "CSV" in body1                            # Drive really has it
 
     # 2. search finds it through the index; the agora id comes first.
     out = run_main(e2e, "search", "session", "--filter", "text~=表格")
@@ -307,44 +321,56 @@ def test_import_search_continue_native_then_cross_agent(e2e):
     assert any(line.split()[0] == id1 for line in out.splitlines() if line.split())
 
     # 3. continue with opencode: native load (import with new ids), then the
-    #    wrapper's headless run on that new session.
+    #    wrapper's headless run on that new session. The result goes back into the
+    #    same agora session - the printed id is the one that was continued.
     out = run_main(e2e, "continue", "session", id1, "--agent", "opencode",
                    "--dir", str(proj))
     id2 = out.split()[0]
-    assert id2.startswith("agora:") and id2 != id1
-    created["ulids"].append(id2.split(":", 1)[1])
-    hdr2 = header_of(e2e, id2)
-    assert hdr2["agora"]["relation"] == "continue"
-    assert hdr2["agora"]["parents"][0]["id"] == id1
-    assert hdr2["agora"]["parents"][0]["raw_md5"] == hdr1["agora"]["raw"]["md5"]
+    assert id2 == id1, f"continue 應該寫回原本那個 session，卻印了 {id2}"
+
+    hdr2 = header_of(e2e, id1)
+    # it is still the imported session it was - only a continued *merge* becomes
+    # "continue" - and it has no parent, because nothing branched
+    assert hdr2["agora"]["relation"] == "import"
+    assert hdr2["agora"]["parents"] == []
     forked = hdr2["agora"]["source"]["session_id"]
     assert forked.startswith("ses_") and forked != source_id
-    created["ses"].append(forked)
+    created["ses"].append(forked)                  # teardown deletes it by id
+    assert hdr2["agora"]["source"]["agent"] == "opencode"
     assert hdr2["agora"]["source"]["dir"] == str(proj)
-    # the continue session names the model that just answered, and its own source
+    # the session it came from is remembered, so the import tab leaves it out
+    assert hdr2["agora"]["previous_sources"] == [f"opencode:{source_id}"]
     assert hdr2["sources"][0]["id"] == f"opencode:{forked}"
     assert hdr2["generated"]["by"].startswith("opencode/")
 
-    # the session we branched from is untouched (spike V1a)
+    # the session we continued from is untouched on the agent side (spike V1a)
     assert len(json.loads(export_bytes(e2e, source_id))["messages"]) == source_before
 
-    # the new session really carries the old transcript plus the new turn, and it
-    # belongs to the project directory agora imported it into (spike V5)
+    # the new agent session really carries the old transcript plus the new turn,
+    # and it belongs to the project directory agora imported it into (spike V5)
     grown = json.loads(export_bytes(e2e, forked))
     assert len(grown["messages"]) >= source_before + 2
     assert grown["info"]["directory"].endswith("p_專案.v2")
 
-    # 4. cross agent: the same session continued by claude. The opencode raw is
-    #    converted into a Claude jsonl and resumed (design v5).
+    # and Drive's session.md is that longer conversation now
+    body2 = session_md(e2e, id1)
+    assert agent.QUESTION in body2, "session.md 裡沒有接續時問的那句"
+    assert len(body2) > len(body1)
+
+    # 4. cross agent: the same session continued by claude, again in place. The
+    #    opencode raw is converted into a Claude jsonl and resumed (design v5),
+    #    and the opencode session it replaces is remembered.
     out = run_main(e2e, "continue", "session", id1, "--agent", "claude",
                    "--dir", str(proj))
     id3 = out.split()[0]
-    assert id3.startswith("agora:") and id3 not in (id1, id2)
-    created["ulids"].append(id3.split(":", 1)[1])
-    hdr3 = header_of(e2e, id3)
-    assert hdr3["agora"]["relation"] == "continue"
-    assert hdr3["agora"]["parents"][0]["id"] == id1
+    assert id3 == id1, f"換 agent 接續也該寫回同一個 session，卻印了 {id3}"
+
+    hdr3 = header_of(e2e, id1)
+    assert hdr3["agora"]["relation"] == "import"
+    assert hdr3["agora"]["parents"] == []
     assert hdr3["agora"]["source"]["agent"] == "claude"
+    assert hdr3["agora"]["previous_sources"] == [f"opencode:{source_id}",
+                                                 f"opencode:{forked}"]
     assert hdr3["generated"]["by"].startswith("claude-code/")
     uuid3 = hdr3["agora"]["source"]["session_id"]
     uuid.UUID(uuid3)
@@ -352,7 +378,9 @@ def test_import_search_continue_native_then_cross_agent(e2e):
                      for l in (e2e["fake_home"] / "e2e-args.log").read_text().splitlines()
                      if "--resume" in json.loads(l)}, \
         "wrapper 沒有記到這個 uuid，teardown 會漏掉它的 jsonl"
-    assert cli.CONVERTED_NOTE in run_main(e2e, "show", "session", id3, "--raw")
+    assert cli.CONVERTED_NOTE in run_main(e2e, "show", "session", id1, "--raw")
+    body3 = session_md(e2e, id1)
+    assert len(body3) > len(body2), "claude 接續之後 session.md 沒有變長"
 
     # 5. what each agent was asked to do, from the wrappers' logs.
     oc_log = [json.loads(line) for line in
