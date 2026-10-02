@@ -319,6 +319,47 @@ def test_merge_cache_refuses_a_broken_summary(env, capsys):  # re-validate befor
     assert len(env.prompts) == calls + 2              # invalid cache entries are not reused
 
 
+def test_import_exit_code_is_the_first_non_zero(env, capsys, monkeypatch):  # review S1-1
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    env.sessions["ses_c"] = ["第三段", "好"]
+    codes = {"ses_b": cli.EXIT_IN_OUTBOX, "ses_nope": cli.EXIT_ERROR}
+    monkeypatch.setattr(cli, "_import_one",
+                        lambda agent, ext, upd, paths, index: _fake_one(env, ext, codes))
+    code, _, _ = run(capsys, "import", "session",
+                     "--external-session-id", "ses_b,ses_nope,ses_c", "--agent", "opencode")
+    assert code == cli.EXIT_IN_OUTBOX, "the first non-zero, not the last"
+
+
+def _fake_one(env, external_id, codes):
+    from agora.agents.base import AgentError
+    if external_id in codes and codes[external_id] == cli.EXIT_ERROR:
+        raise AgentError("boom")
+    print(f"agora:01K6{abs(hash(external_id)) % 10 ** 20:020d}")
+    return codes.get(external_id, 0)
+
+
+def test_import_one_id_keeps_the_old_exit_code(env, capsys, monkeypatch):  # review S1-2
+    from agora.agents.base import Exported
+    empty = Exported(session_id="ses_empty", raw=b'{"id": "ses_empty", "m": []}', dir="/tmp",
+                     title=None, created_at="2026-10-01T00:00:00Z", agent_version="9.9",
+                     message_count=0)
+    monkeypatch.setattr(env, "export", lambda sid: empty)
+    code, out, err = run(capsys, "import", "session", "--external-session-id", "ses_empty",
+                         "--agent", "opencode")
+    assert code == cli.EXIT_INPUT and out == "" and "沒有任何訊息" in err
+
+
+def test_import_batch_syncs_once(env, capsys, monkeypatch):  # review S1-3
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    calls = []
+    real = store.sync
+    monkeypatch.setattr(store, "sync", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    monkeypatch.setattr(cli.store, "sync", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    run(capsys, "import", "session", "--external-session-id", "ses_a,ses_b,ses_a",
+        "--agent", "opencode")
+    assert len(calls) == 1
+
+
 def test_merge_needs_an_agent(env, capsys):
     _, a, _ = _import(capsys)
     env.sessions["ses_b"] = ["讀取 CSV", "完成"]

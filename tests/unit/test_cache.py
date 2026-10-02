@@ -344,3 +344,98 @@ def test_push_only_takes_agora_ids(drive, capsys):
     agent = Agent({}, name="opencode")
     assert cache.push(paths, ["opencode:s", ulid], {"opencode": agent}) == (1, 1)
     assert "push 只吃 agora" in capsys.readouterr().err
+
+# --- review T1-sec2: what the first version of these two got wrong ----------
+
+
+def test_push_does_not_count_an_outbox_entry_that_failed(drive, capsys):   # S2-2
+    """With every copyto failing, push used to report one pushed and zero failed
+    while the session was still in the outbox."""
+    paths = store.Paths.from_env()
+    hdr = _header()
+    ulid = hdr["id"].split(":", 1)[1]
+    store.stage(paths, hdr, "## user\n還沒上傳\n", b'{"x": 9}')
+    os.environ["FAKE_RCLONE_FAIL"] = "copyto"
+    try:
+        assert cache.push(paths, [ulid], {}) == (0, 1)
+    finally:
+        os.environ.pop("FAKE_RCLONE_FAIL")
+    assert "仍在 outbox" in capsys.readouterr().err
+    assert (paths.outbox / ulid).is_dir()
+
+
+def test_pull_of_agent_ids_never_asks_drive(drive, capsys):   # S2-3
+    """Nothing in a batch of agent ids needs Drive, so an offline machine still
+    caches them."""
+    paths = store.Paths.from_env()
+    agent = Agent({"s": ["問", "答"]}, [Listed("s", "/tmp/p", "t", None)], name="claude")
+    os.environ["FAKE_RCLONE_FAIL"] = "lsjson"
+    try:
+        assert cache.pull(paths, ["claude:s"], {"claude": agent}) == (1, 0)
+    finally:
+        os.environ.pop("FAKE_RCLONE_FAIL")
+    assert "連不上 Drive" not in capsys.readouterr().err
+    assert (paths.reading / "claude" / "s.md").is_file()
+
+
+def test_pull_marks_every_agora_id_failed_when_drive_is_gone(drive, capsys):   # S2-3
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    os.environ["FAKE_RCLONE_FAIL"] = "lsjson"
+    try:
+        assert cache.pull(paths, [ulid], {}) == (0, 1)
+    finally:
+        os.environ.pop("FAKE_RCLONE_FAIL")
+    assert "連不上 Drive" in capsys.readouterr().err
+
+
+def test_pull_does_not_index_a_session_whose_raw_is_not_there_yet(drive, capsys):   # S2-4
+    """S1/G3: an unfinished session is not searchable and not continuable."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    (sessions_on(drive) / ulid / _raw_name_on_drive(drive, ulid)).unlink()   # Drive lost the raw
+
+    assert cache.pull(paths, [ulid], {}) == (1, 0)
+    assert "先不建索引" in capsys.readouterr().err
+    assert store.Index(paths).header(ulid) is None
+    assert not (paths.mirror / ulid / "session.md").exists()
+
+
+def test_an_id_nowhere_is_not_found(drive, capsys):   # S2-5
+    paths = store.Paths.from_env()
+    assert cache.pull(paths, ["01ARZ3NDEKTSV4RRFFQ69G5FAV"], {}) == (0, 1)
+    assert cache.push(paths, ["01ARZ3NDEKTSV4RRFFQ69G5FAV"], {}) == (0, 1)
+    err = capsys.readouterr().err
+    assert err.count("本機和雲端都沒有") == 2
+
+
+def test_the_same_id_twice_is_one_line_of_work(drive, capsys):   # S2-7
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    assert cache.pull(paths, [ulid, ulid], {}) == (1, 0)
+    assert "pull 1/1" in capsys.readouterr().err and "pull 2/2" not in capsys.readouterr().err
+
+
+def test_push_checks_the_md5_drive_reports(drive, monkeypatch):   # S2-7
+    """A copyto that returned zero is not proof that the bytes arrived."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    cache.pull(paths, [ulid], {})
+    drive = store.Drive(paths)
+    monkeypatch.setattr(store.Drive, "list_one", lambda self, one: {"session.md": "0" * 32})
+    with pytest.raises(store.StoreError, match="md5 不符"):
+        store.push_mirror(drive, paths, ulid, store.h.split_document(
+            (paths.mirror / ulid / "session.md").read_text())[0])
+
+
+def test_pull_leaves_a_session_that_is_still_in_the_outbox_alone(drive, capsys):   # S2-7
+    """What is staged here is newer than anything on Drive; pulling would put the
+    older copy in the mirror and the session would go backwards."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    hdr = _header(ulid)
+    store.stage(paths, hdr, "## user\n本機剛寫的\n", None)     # not uploaded, mirror untouched
+    assert cache.pull(paths, [ulid], {}) == (1, 0)
+    assert "不覆蓋" in capsys.readouterr().err
+    assert not (paths.mirror / ulid / "session.md").exists()
+    assert (paths.outbox / ulid).is_dir()
