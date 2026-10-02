@@ -13,6 +13,12 @@
 - [x] 2.3 push：先送 outbox，再逐一 copyto `session.md` 與它指到的原始檔（本機沒有就只傳 session.md）；不傳舊原始檔、`*.partial`、`.*`（「push 只寫回該寫的檔案」，K1、K2、Q7）
 - [x] 2.4 全文快取的暫存檔名加唯一碼（review K4）
 - [x] 2.5 單元測試：pull／push 的情境、k/N、K4、K5
+- [x] 2.6 S2-2：outbox 上傳失敗的 id 不算成功（review T1-sec2）
+- [ ] 2.7 S2-3：只有 agent id 的 pull 不碰 Drive；Drive 的錯誤逐筆處理
+- [ ] 2.8 S2-4：raw 還沒齊的不建索引（G3）
+- [ ] 2.9 S2-5：本機和雲端都沒有的算找不到
+- [ ] 2.10 S2-6：補測試（沒給 id → exit 1、outbox 上傳失敗算失敗）
+- [ ] 2.11 S2-7：去重、push 後 md5 確認、不覆蓋 outbox 裡的
 
 ## 3. 雲端沒有（impl1，等 2.x 完成）
 

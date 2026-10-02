@@ -222,7 +222,8 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
             if kind != "agora":
                 raise ValueError(f"push 只吃 agora 的 session id，收到 {agora_id}")
             if ulid in staged:
-                pass                            # the flush above is what sent this one up
+                if ulid in left:
+                    raise store.StoreError("還沒上傳成功，仍在 outbox")   # review S2-2
             elif (paths.outbox / ulid).is_dir():
                 store.push_one(drive, paths.outbox / ulid)
             elif listing is None or ulid not in listing:
