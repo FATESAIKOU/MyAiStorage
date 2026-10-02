@@ -173,7 +173,8 @@ def argv_for(action: str, rows: list[Row], agent: str | None, workdir: str | Non
     first = rows[0].key if rows else ""
     return {"continue": [["continue", "session", first, "--agent", agent, "--dir", workdir]],
             "merge": [["merge", "session", *[r.key for r in rows], "--agent", agent]],
-            "edit": [["edit", "session", first]], "delete": [["delete", "session", first, "--yes"]]}.get(action, [])
+            "edit": [["edit", "session", first]],
+            "delete": [["delete", "session", *[r.key for r in rows], "--yes"]]}.get(action, [])
 
 
 def setup_needed(paths: store.Paths) -> str | None:
@@ -684,10 +685,12 @@ class AgoraApp(App):
 
     @work
     async def action_delete(self) -> None:
-        row = self.current()
-        if row and await self.push_screen_wait(
-                Choose("移到 Drive 垃圾桶？", ["取消", "確定"], f"{row.key}「{row.cells[1]}」")) == 1:
-            await self.act("刪除", argv_for("delete", [row], None, None))
+        rows = self.chosen_rows()            # every marked row, or the one under the cursor
+        if not rows:
+            return
+        listed = "\n".join(f"{r.key}「{r.cells[1]}」" for r in rows[:6]) + ("\n…" if len(rows) > 6 else "")
+        if await self.push_screen_wait(Choose(f"把 {len(rows)} 個移到 Drive 垃圾桶？", ["取消", "確定"], listed)) == 1:
+            await self.act(f"刪除 {len(rows)} 個", argv_for("delete", rows, None, None))
 
 
 def main(paths: store.Paths) -> int:

@@ -704,3 +704,30 @@ def test_cache_agora_brings_every_raw_and_sync_writes_the_mirror_back(env, capsy
     code, out, _ = run(capsys, "sync")
     remote = Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid / "session.md"
     assert code == 0 and "已寫回 Drive" in out and "本機改的一行" in remote.read_text()
+
+
+
+def test_delete_several_at_once_children_first(env, capsys):  # user's call
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    env.sessions["ses_c"] = ["第三個", "好"]
+    _, c, _ = run(capsys, "import", "session", "--external-session-id", "ses_c", "--agent", "opencode")
+    _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    code, _, err = run(capsys, "delete", "session", f"{a},{m}", c)
+    assert code == 1 and "這 3 個" in err                       # without --yes: the list, nothing deleted
+    code, out, err = run(capsys, "delete", "session", a, m, c, "--yes")   # m goes first, then a can go
+    assert code == 0 and set(out.split()) == {a, m, c} and "已把 3 個" in err
+    code, out, err = run(capsys, "delete", "session", b, "--yes")
+    assert code == 0 and out == b
+
+
+def test_delete_several_refuses_only_those_with_children_left(env, capsys):
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    env.sessions["ses_c"] = ["第三個", "好"]
+    _, c, _ = run(capsys, "import", "session", "--external-session-id", "ses_c", "--agent", "opencode")
+    _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    code, out, err = run(capsys, "delete", "session", a, c, "--yes")    # a still has m as a child
+    assert code == 1 and out == c and f"{a} 有子 Session" in err

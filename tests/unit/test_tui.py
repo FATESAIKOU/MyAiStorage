@@ -127,7 +127,7 @@ def test_previews_show_the_whole_history_and_never_fail():
 def test_actions_and_what_they_run():
     rows = [tui.Row("agora:a", ["a"], "a"), tui.Row("agora:b", ["b"], "b")]
     assert tui.argv_for("merge", rows, "claude", None) == [["merge", "session", "agora:a", "agora:b", "--agent", "claude"]]
-    assert tui.argv_for("delete", rows[:1], None, None) == [["delete", "session", "agora:a", "--yes"]]
+    assert tui.argv_for("delete", rows, None, None) == [["delete", "session", "agora:a", "agora:b", "--yes"]]
     assert tui.argv_for("continue", rows[:1], "opencode", "/w") == [
         ["continue", "session", "agora:a", "--agent", "opencode", "--dir", "/w"]]
     imp = [tui.Row("opencode:ses_x", ["x"], "x", "opencode")]
@@ -290,3 +290,21 @@ def test_import_tab_leaves_out_agent_sessions_a_continue_moved_past():
     _, index = _index((hdr, "## user\nx\n"))
     agent = FakeAgent("opencode", [Listed("ses_old", "/tmp/p", "舊的", None), Listed("ses_other", "/tmp/p", "別的", None)])
     assert [r.key for r in tui.import_rows(index, [agent])] == ["opencode:ses_other"]
+
+
+
+def test_delete_takes_every_marked_row():
+    app, cli = _app([])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("space", "down", "space", "d")
+            await pilot.pause()
+            await pilot.press("down", "enter")             # 確定
+            for _ in range(40):
+                await pilot.pause(0.05)
+                if cli.calls:
+                    break
+            assert cli.calls and cli.calls[0][:2] == ["delete", "session"] and len(cli.calls[0]) == 5
+    _run(go)

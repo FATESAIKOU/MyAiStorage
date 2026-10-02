@@ -571,18 +571,32 @@ def _converted_turns(seg_agent: str, seg_id: str, raw: bytes) -> list[tuple[str,
 
 
 def cmd_delete(args, paths: store.Paths) -> int:
-    agora_id = _the_id(args)
+    """Move one or several sessions to the Drive trash (design 5.6; several at once is the user's call)."""
+    ids = [f"agora:{_ulid_of(i.strip())}" for raw in args.ids for i in raw.split(",") if i.strip()]
+    if not ids:
+        raise InputError("delete 要給至少一個 session id")
     index = store.sync(paths)
-    hdr = _header_for(index, agora_id)
-    children = index.children(_ulid_of(agora_id))
-    if children:
-        raise InputError(f"{agora_id} 有子 Session，不能刪：" + "、".join(f"agora:{c}" for c in children))
+    headers = {agora_id: _header_for(index, agora_id) for agora_id in ids}
     if not args.yes:
-        raise InputError(f"會把 {agora_id}（{hdr.get('title') or '無標題'}）移到 Drive 垃圾桶；確定的話加 --yes")
-    store.delete_session(paths, store.Drive(paths), _ulid_of(agora_id))
-    print(agora_id)
-    print("[agora] 已移到 Drive 垃圾桶，30 天內可以在 Drive 網頁還原", file=sys.stderr)
-    return 0
+        listed = "\n".join(f"  {i}（{hdr.get('title') or '無標題'}）" for i, hdr in headers.items())
+        raise InputError(f"會把這 {len(ids)} 個移到 Drive 垃圾桶：\n{listed}\n確定的話加 --yes")
+    left, refused, done = list(ids), [], 0
+    while left:   # a child in the same request goes first, so its parents can follow
+        ready = [i for i in left if not index.children(_ulid_of(i))]   # deleted ones leave the index
+        if not ready:
+            break
+        for agora_id in ready:
+            store.delete_session(paths, store.Drive(paths), _ulid_of(agora_id))
+            print(agora_id)
+            left.remove(agora_id)
+            done += 1
+    for agora_id in left:
+        children = "、".join(f"agora:{c}" for c in index.children(_ulid_of(agora_id)))
+        print(f"[agora] {agora_id} 有子 Session，不能刪：{children}", file=sys.stderr)
+        refused.append(agora_id)
+    if done:
+        print(f"[agora] 已把 {done} 個移到 Drive 垃圾桶，30 天內可以在 Drive 網頁還原", file=sys.stderr)
+    return EXIT_INPUT if refused else 0
 
 
 def cmd_edit(args, paths: store.Paths) -> int:
