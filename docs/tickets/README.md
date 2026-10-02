@@ -30,6 +30,7 @@
 **等使用者確認的事**（不擋進度，先照 PM 的判斷做）：
 - T2 的「勾選但被篩選掉的列不算進動作」（review V4，PM 選了比較安全的做法）。
 - **行數額度（要使用者決定）**：04:30 的 HEAD 是 **3,413 行**（T2 的功能都做完了，只剩測試；去重複已做）。T1 剛完成時是 3,121 行，超過 2,900 行的目標 221 行（review `docs/review/T1-size.md`）。去重複可省約 75 行（impl2 在做），T2 還會再加一些，做完預估約 3,050～3,150 行。兩個轉接器還能再省約 85 行（`docs/review/adapters-size.md`，不拿掉 export 的重試是 65 行）。兩項都做完約 2,960 行，仍超過約 60 行，T2 還會再加。選項：(a) 放寬額度到 3,300；(b) 去重複＋精簡轉接器，再放寬一點；(c) 接受現在的大小。PM 建議 (b)。在使用者決定前，只做去重複（不改行為），轉接器的精簡先不動。
+- **T1 PM 驗收 P1**：在這台 import 的 Session 本機只有 `session.md`，別台刪掉之後 `push --not-exist-upload` 會因為本機沒有原始檔而拒絕，實際上救不回來（`docs/tickets/T1-pm-run.md`）。選項 (a) import／continue／merge 寫完後把原始檔留在本機；(b) 只改拒絕訊息；(c) 維持。PM 建議 (a)。決定之後開成一個新的 change，不擋 T1 歸檔。
 - T1 的「continue 進行中、原本的 Session 被別台刪掉」：agent 結束時不寫回、改存成一個新的 Session，避免丟掉這次的對話（review T1-sec3 M1）。
 - **6 個孤兒 `opencode run` 行程**（parent 是 1，10-02 00:17～03:19 開始，提問是整合測試的那幾句，例如 `ses_C2PROJ2DIRTEST01`）：impl2 回報、應是之前幾輪整合測試沒收乾淨的。PM 要停掉時被 auto mode 擋下（停掉行程算「干擾工作負載」），留給使用者決定；隊員也不要清。看的方式：`pgrep -fl "opencode run"`。
 
