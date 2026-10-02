@@ -64,3 +64,26 @@
 ## 這次讀過、跑過的東西
 
 `git show 8f570bd -- src/agora/cli.py`（全文）、`git show 8f570bd -- tests/unit/test_cli.py` 的測試名稱與四個重點測試的內容、batch-commands/spec.md、這個 change 的 design.md、`store.delete_session`。沒有跑任何測試（工作目錄裡有別人還沒 commit 的修改），沒有碰 Drive，沒有叫任何 agent，也沒有讀任何真實的 Session。
+
+---
+
+## 修正確認（`7b77f01`、`a5d31ac`）
+
+**沒有新的 High。** S1-1～S1-3 都修對了，S1-9 也順便修好了；S1-4 修了，但比對錯誤訊息的條件**太寬**，帶進了一個新的 Medium（S1-4b）。單元測試 **351 passed**。
+
+| # | 狀態 | 確認的內容 |
+|---|---|---|
+| S1-1 | ✅ | `first_bad = first_bad or code`，所以第一個非零的會被保留下來（`test_import_exit_code_is_the_first_non_zero`） |
+| S1-2 | ✅ | `except InputError` → `EXIT_INPUT`（1），其他例外仍然是 2，所以只給一個 id 時，exit code 和以前一樣（`test_import_one_id_keeps_the_old_exit_code`）。`KeyboardInterrupt` 仍然會中斷整批，交給 `main` 回傳 130 ✅ |
+| S1-3 | ✅ | `cmd_import` 只同步一次，把 index 傳進 `_import_one`，`_import_one` 不再自己同步（`test_import_batch_syncs_once`）。`_save` → `remember` 用另一個連線寫進同一個 sqlite，所以後面的 `by_source` 照樣看得到前面剛匯入的 ✅ |
+| S1-4 | ⚠️ 修了，但有 S1-4b | `delete_session` 遇到 purge 失敗、而且訊息裡有 `not found` 時，就當作「Drive 上已經沒有了」，照樣 `forget_local` 並寫入墓碑；假 rclone 也改成回報和 rclone 一樣的訊息（`test_deleting_a_session_drive_already_lost_still_finishes`）。中斷之後的重跑可以收尾了 ✅ |
+| S1-6 | ✅ | 有子 Session 而刪不掉的時候，訊息會說「重跑會接著做剩下的 N 個」 |
+| S1-9 | ✅ | merge 快取改用 `tempfile.mkstemp` 產生唯一的暫存檔名，失敗時會刪掉暫存檔 |
+
+### S1-4b（Medium）：「not found」這個條件太寬
+
+`"not found" in str(e).lower()` 不只會比對到 rclone 的 `directory not found`（資料夾真的不在了），**也會**比對到 Google Drive API 的 404。例如，`config.json` 裡記的 folder ID 是錯的（被刪掉了、換了 OAuth client，或者寫成了別的資料夾），這時 rclone 回報的是 `couldn't find root directory ID: … Error 404: File not found …, notFound`。結果：**每一個** delete 都會被當成「Drive 上已經沒有了」，本機就把 Session 忘掉、寫進墓碑、回報成功，但 Drive 上的資料夾根本沒有被移到垃圾桶。之後只要列檔恢復正常，它就又回來了（R6 會保留它，並標成雲端有），使用者會以為刪除失效了。
+
+**建議**：(a) 只比對 `directory not found`（rclone 對「這個資料夾不存在」的固定說法），不要比對一般的 `not found`；(b) 更穩的做法是：purge 失敗時，再呼叫一次 `drive.list_sessions()`，**列檔成功、而且裡面沒有這個 ULID**，才當成已經刪掉；列檔也失敗，就照原本的錯誤處理（exit 2，什麼都不忘掉）。單元測試：讓假 rclone 對 purge 回報 `Error 404: File not found`（模擬 root ID 錯誤），斷言 delete 失敗，本機的索引和鏡像都還在，也沒有寫墓碑。
+
+跑過的指令：`git show 7b77f01 a5d31ac -- src tests`（src 的 diff 與新測試的名稱）；`.venv/bin/python -m pytest -q tests/unit` → 351 passed。沒有跑整合測試，沒有碰 Drive，沒有讀任何真實的 Session，也沒有執行不帶參數的 `agora`。

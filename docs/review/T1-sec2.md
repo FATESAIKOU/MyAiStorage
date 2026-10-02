@@ -72,3 +72,25 @@
 | 在 scratchpad 用假 rclone：stage 一個 Session（不上傳），讓 copyto 全部注入失敗，然後 `cache.push(p, [ulid], {})`；`cache.pull(p, [], {})`；`cache.pull(p, ["01ZZ…"], {})` | push → `done 1 failed 0`，但那個 id 還在 outbox 裡（S2-2）；`pull([])` → `(0, 0)`；打錯的 id → `(1, 0)`（S2-5）；之後 scratchpad 已經刪掉 |
 
 沒有跑整合測試，沒有碰 Drive，沒有讀任何真實的 Session，也沒有執行不帶參數的 `agora`。
+
+---
+
+## 修正確認（`39984b7`、`f2e9376`、`bdc5576`、`062768c`、`a57743e`、`e20bb2a`、`f34a91f`）
+
+**沒有新的 High。** S2-1～S2-7 都修對了；單元測試 **351 passed**（工作目錄是乾淨的，直接在 HEAD 上跑）。只剩兩個 Low。
+
+| # | 狀態 | 確認的內容 |
+|---|---|---|
+| S2-1 | ✅ | `cmd_pull`／`cmd_push` 接上了，`cache`／`sync` 拿掉了，型態只剩 `session`；`_ids_of` 在沒有 id 時丟出 InputError（exit 1），訊息提示「互動模式按 a，或從 search 用管線接」。互動模式的 `r`／`s` 換成了 pull 和 push 勾選的列，push 只會送 `agora:` 的 key。HEAD 又可以用了 |
+| S2-2 | ✅ | `ulid in staged` 而且 `ulid in left` 時，丟出 StoreError「還沒上傳成功，仍在 outbox」，所以會算成失敗（`test_push_does_not_count_an_outbox_entry_that_failed`） |
+| S2-3 | ✅ | pull 會先把每一個 id 解析好（`_plan_one`）；只有在裡面有 agora 的 id 時，才建立 `Drive` 並列檔。列檔失敗時，記下 `offline`：每一個 agora 的 id 都各自失敗，並且說明「連不上 Drive」，agent 的 id 照樣處理。push 也是逐筆失敗（`test_pull_of_agent_ids_never_asks_drive`、`test_pull_marks_every_agora_id_failed_when_drive_is_gone`） |
+| S2-4 | ✅ | 雲端的 raw 還沒齊時：刪掉剛下載的 session.md、`index.drop(ulid)`，然後 return，不會建索引，和 S1／G3 一致（`test_pull_does_not_index_a_session_whose_raw_is_not_there_yet`） |
+| S2-5 | ✅ | pull／push 遇到「雲端沒有、本機鏡像也沒有」的 id，會丟出 StoreError「本機和雲端都沒有這個 Session」，算成失敗（`test_an_id_nowhere_is_not_found`） |
+| S2-6 | ✅ | `test_cli.py` 鎖住了 `pull session`、`push session` 不給 id 時 exit 1；上面的 S2-2～S2-5、S2-7 也都補了測試 |
+| S2-7 | ✅ | `_unique` 會去掉重複的 id（`test_the_same_id_twice_is_one_line_of_work`）；pull 遇到還在 outbox 裡的 id，不會用雲端比較舊的版本覆蓋（`test_pull_leaves_a_session_that_is_still_in_the_outbox_alone`）；`push_mirror` 上傳之後，會用 `list_one` 拿 Drive 回報的 md5 比對 session.md 和 raw（`test_push_checks_the_md5_drive_reports`） |
+
+剩下的（Low）：
+- `_ids_of` 只用逗號切開，**沒有去掉空白**。`agora pull session "A, B"`（整串加了引號）會得到 `" B"`，然後被當成一個本機和雲端都沒有的 id 而失敗。加上 `.strip()` 就好（import 的 `--external-session-id` 和 delete 都已經有 strip）。
+- `_unique` 比較的是原本的字串，所以 `agora:X` 和 `X`（同一個 Session）不會被當成重複，會處理兩次；結果是對的，只是多做一次。可以在 `_plan_one` 之後，用 `(kind, bare)` 去重。
+
+跑過的指令：`git show` 上面 7 個 commit 的 `src` 與測試名稱；`.venv/bin/python -m pytest -q tests/unit` → 351 passed。沒有跑整合測試，沒有碰 Drive，沒有讀任何真實的 Session，也沒有執行不帶參數的 `agora`。
