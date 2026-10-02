@@ -10,7 +10,7 @@ uv tool install --editable .     # 之後就有 agora 指令
 
 需要：
 - `rclone`；
-- `~/.config/agora/rclone.conf`：remote 名稱是 `gdrive`，用 worker OAuth client、scope 是 `drive.file`；
+- `~/.config/agora/rclone.conf`：remote 名稱是 `gdrive`，scope 是 `drive.file`，用 rclone 內建的 client。第一次打 `agora`（互動模式）時會引導你用瀏覽器授權；也可以自己跑 `rclone config create gdrive drive scope=drive.file --config ~/.config/agora/rclone.conf`；
 - `opencode`、`claude`（用到哪個裝哪個）。
 
 第一次執行時，agora 會在 Drive 建一個 `agora/` 資料夾，並把它的 folder ID 記到 `~/.config/agora/config.json`。

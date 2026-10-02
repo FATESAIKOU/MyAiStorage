@@ -22,15 +22,15 @@
 | D2 | **信任自己的機器** | 不做簽章、收件匣、單一提交者、pin repo。寫入是本機直接寫 |
 | D3 | **四個實體的概念全部保留**（MyBrain／Agora／Foundry／Atelier），彼此靠 **header** 參照 | 程式這次只實作 Agora |
 | D4 | **continue 的結果是新的 Session**，header 記下來源 | 可以分岔；merge 的結果也有地方放 |
-| D5 | Drive 憑證只用 **worker OAuth client（`drive.file`）** | 只看得到自己建的檔案 |
+| D5 | Drive 憑證用 **rclone 內建的 OAuth client，scope 是 `drive.file`**（2026-10-02 從自建的 worker client 搬過來，使用者決定） | 只看得到自己建的檔案；不必有自己的 Google Cloud 專案 |
 | D6 | **閱讀版＝user／assistant 的文字＋每次工具呼叫一行摘要**；不收工具結果、不收 thinking（2026-10-02） | 搜尋與跨 agent 接續都用它 |
 
 ### D5 的注意事項（S8）
 
 - `agora/` 根資料夾第一次執行時建立，把 **folder ID** 寫進 `~/.config/agora/config.json`；之後所有存取都用 ID，不靠名字找（Drive 允許同名資料夾）。`sync` 發現同名資料夾時警告。
 - **只能透過 agora 寫入。** 從 Drive 網頁拖進去的檔案，`drive.file` 看不到。
-- **不要刪除或重建 worker OAuth client。** 換了 client，以前建的檔案全部看不到（資料還在）。萬一發生，復原方法是用一次性的 `drive` scope client 把 `agora/` 複製成新 client 擁有的檔案。
-- OAuth consent screen 要是「In production」，否則 refresh token 7 天失效（V4 確認現況）。
+- **換 client，以前建的檔案就全部看不到**（資料還在）。2026-10-02 從 worker client 換成 rclone 內建 client 時是這樣搬的：用舊的設定把 `agora/` 整份下載，用新的設定建新的 `agora/` 並上傳、逐檔核對 md5，切換 `config.json` 的 folder ID，再用舊的設定把舊資料夾移到垃圾桶。
+- rclone 內建 client 的配額是所有 rclone 使用者共用的，用量大時可能被限流；agora 每次只傳幾個小檔，目前不是問題。
 
 ## 3. 共通 header
 
@@ -109,14 +109,14 @@ agora:                                # 系統欄位，使用者不能改
 ## 4. 儲存
 
 ```
-Drive: agora/                              （worker client 建立；以 folder ID 存取）
+Drive: agora/                              （rclone 內建 client 建立；以 folder ID 存取）
   sessions/<ULID>/
     session.md                header ＋ 閱讀版；「這個版本完成了」的標記
     raw-<md5 前 12 碼>.json   來源 agent 的原始匯出（N15）：
                               opencode＝export 的 JSON 原封不動；
                               claude＝{"format":"claude-jsonl/1","main":[每一行原字串],"aux":{"<相對路徑>":"內容"}}
 Mac:
-  ~/.config/agora/            rclone.conf（worker client）、config.json（folder ID）
+  ~/.config/agora/            rclone.conf（rclone 內建 client）、config.json（folder ID）
   ~/.cache/agora/             鏡像（只有 session.md）＋ index.sqlite；壞了刪掉重建
   ~/.local/state/agora/       outbox/、pending/ ——不能刪
 ```
