@@ -18,13 +18,17 @@ export AGORA_FOLDER_NAME=agora-test
 export AGORA_CACHE_DIR=/tmp/agora-acc/cache
 export AGORA_STATE_DIR=/tmp/agora-acc/state
 cd /tmp/agora-acc/proj
-echo "[acc] agora-test、快取 /tmp/agora-acc ✓"
+echo "[acc] agora-test、快取 /tmp/agora-acc、專案 /tmp/agora-acc/proj ✓"
 EOF
 source /tmp/agora-acc/env.sh
 git init -q && git commit -q --allow-empty -m init
 ```
 
 ⚠️ **每一節的第一行都是 `source /tmp/agora-acc/env.sh`，看到 `[acc] … ✓` 才往下做。** 換了終端機或分頁而沒有 source 的話，`agora` 會寫進正式的 `agora/` 與平常的快取。
+
+⚠️ **每一個 `continue` 都明寫 `--dir /tmp/agora-acc/proj`。** merge 出來的 Session 沒有
+`source.dir`，不加 `--dir` 的話 agora 會開在「你當下所在的目錄」，會在別的專案（例如 repo）
+留下 session。`import` 之前也先 `cd /tmp/agora-acc/proj`，opencode 的 session 才是這個專案的。
 
 以下每一步印出的 `agora:<ULID>` 都記下來（A、B、C…）。
 
@@ -34,7 +38,7 @@ git init -q && git commit -q --allow-empty -m init
 source /tmp/agora-acc/env.sh
 opencode                  # TUI，用免費模型說一句自編的話，然後正常離開
 opencode session list     # 只會列出這個專案的 session，找到剛才那個 ses_…
-agora import --format opencode --session-id <ses_id> --header 'title=驗收表格'
+agora import session --external-session-id <ses_id> --agent opencode --header 'title=驗收表格'
 ```
 
 算過：印出 `agora:<ULID>`（記為 A）。
@@ -43,17 +47,17 @@ agora import --format opencode --session-id <ses_id> --header 'title=驗收表�
 
 ```bash
 source /tmp/agora-acc/env.sh
-agora continue-session <A> --agent opencode
+agora continue session <A> --agent opencode --dir /tmp/agora-acc/proj
 ```
 
 在 TUI 裡再說一句自編的話（例如「把第二步寫詳細一點」），正常離開。
-算過：印出新的 `agora:<ULID>`（記為 B）；`agora show <B>` 看得到剛才那句話。
+算過：印出新的 `agora:<ULID>`（記為 B）；`agora show session <B>` 看得到剛才那句話。
 
 ## 3. 同一個 Session 換 claude 接（閱讀版注入）
 
 ```bash
 source /tmp/agora-acc/env.sh
-agora continue-session <A> --agent claude
+agora continue session <A> --agent claude --dir /tmp/agora-acc/proj
 ```
 
 Claude 的第一則訊息會先讀 A 的閱讀版。算過：它先用兩三句話說明理解的進度
@@ -64,46 +68,75 @@ Claude 的第一則訊息會先讀 A 的閱讀版。算過：它先用兩三句�
 
 ```bash
 source /tmp/agora-acc/env.sh
-agora continue-session <A> --agent claude
+agora continue session <A> --agent claude --dir /tmp/agora-acc/proj
 ```
 
 1. 等 Claude 說完第一段（讀完閱讀版的那段）。
 2. 再送一句自編的話，**在它回覆到一半時按一次 `Ctrl-C`**——這只會中斷這一輪回覆，Claude 不會結束。
 3. 用 `/exit` 離開。
 
-算過：agora 沒有跟著被中斷，最後印出新的 `agora:<ULID>`（記為 D）；`agora show <D>` 看得到第 1 點那段。
+算過：agora 沒有跟著被中斷，最後印出新的 `agora:<ULID>`（記為 D）；
+`agora show session <D>` 看得到第 1 點那段。
 （如果你在 Claude 說出任何話之前就按了 Ctrl-C，agora 會印「這次沒有新內容」而不存——這也是正確的。）
 
 ## 5. claude 接續中用一次 /clear
 
 ```bash
 source /tmp/agora-acc/env.sh
-agora continue-session <A> --agent claude
+agora continue session <A> --agent claude --dir /tmp/agora-acc/proj
 ```
 
 先說一句話，執行 `/clear`，再說一句話，然後 `/exit` 離開。
 算過：`/clear` 之前的部分照常存成新 Session（記為 E）；agora 另外印出一行，
 告訴你 `/clear` 之後的對話在某個 Claude session，要用
-`agora import --format claude --session-id <uuid>` 另外存。照那行提示跑完，印出 `agora:<ULID>`（記為 F）。
+`agora import session --external-session-id <uuid> --agent claude` 另外存。
+照那行提示跑完，印出 `agora:<ULID>`（記為 F）。
 
 ## 6. 合併再接續
 
 ```bash
 source /tmp/agora-acc/env.sh
-agora merge-session <B>, <C>
-agora continue-session <merge 印出的 id> --agent opencode
+agora merge session <B>, <C>
+agora continue session <merge 印出的 id> --agent opencode --dir /tmp/agora-acc/proj
 ```
 
 在 TUI 裡說一句話後離開。算過：merge 印出新 id（記為 G），continue 又印出新的 id（記為 H）。
 
-## 7. 搜尋中文二字詞
+## 7. 改標頭
 
 ```bash
 source /tmp/agora-acc/env.sh
-agora search session '表格'
+agora edit session <G> --header 'title=合併後改名' --header 'tags=[驗收]'
+agora show session <G>
 ```
 
-算過：每一行第一欄都是 `agora:<ULID>`，而且包含 A、B、C、D。
+算過：`edit` 印回**同一個** id（G），`show` 的 `title` 變成「合併後改名」；
+閱讀版沒變（只有標頭被改）。
+
+## 8. 刪掉一個 Session
+
+```bash
+source /tmp/agora-acc/env.sh
+agora delete session <D>            # 沒加 --yes：應該被拒絕，exit code 1，訊息叫你加 --yes
+agora delete session <D> --yes      # 印出 id，並說已移到 Drive 垃圾桶
+agora show session <D>              # 應該說「找不到」，exit code 1
+```
+
+算過：沒有 `--yes` 會被拒；有 `--yes` 之後 Drive 上那個資料夾不見了（30 天內可從 Drive 網頁還原），
+`show` 找不到它。有子 Session 的（例如 A）不能刪，會提示是哪幾個。
+
+## 9. 搜尋中文二字詞
+
+```bash
+source /tmp/agora-acc/env.sh
+agora search session --filter 'text~=表格'          # 全文包含
+agora search session --filter agent=claude          # 標頭欄位全等
+agora search session --filter 'title~=驗收'         # 標頭欄位包含
+agora search session                                 # 省略 filter＝列出全部
+```
+
+算過：每一行第一欄都是 `agora:<ULID>`，而且第一個搜尋包含 A、B、C。
+（`search` 會順便同步 Drive，所以沒有 `sync` 指令。）
 
 ## 清理
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Non-interactive stand-in for the interactive `claude` in e2e tests.
 
-AGORA_CLAUDE_CMD points here, so `agora continue-session` spawns this instead
+AGORA_CLAUDE_CMD points here, so `agora continue session` spawns this instead
 of the TUI. Mapping (fixed self-made prompts only):
 
   [..., --resume <id>]            -> real `claude --resume <id> -p <P_NATIVE>`

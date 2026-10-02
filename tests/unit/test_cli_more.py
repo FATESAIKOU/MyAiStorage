@@ -206,6 +206,18 @@ def wait_marker(marker: Path, timeout: float = 60.0) -> str:
     raise TimeoutError(f"agent did not start: {marker}")
 
 
+def wait_gone(pid: int, timeout: float = 30.0) -> None:
+    """Wait until the pid is really dead (it may still hold the pending lock)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.2)
+    pytest.fail(f"agent {pid} did not exit")
+
+
 def cli_child(*argv: str, extra_env: dict | None = None):
     env = {**os.environ, **(extra_env or {})}
     return subprocess.Popen([sys.executable, "-m", "agora.cli", *argv],
@@ -223,65 +235,67 @@ def test_import_source_fields(env, capsys, tmp_path, monkeypatch):
     subdir = home / ".claude" / "projects" / "-tmp-my-proj-v2"
     subdir.mkdir(parents=True)
     shutil.copy(CL_FIX / "cl-basic.jsonl", subdir / f"{CL_SID}.jsonl")
-    code, out, _ = run(capsys, "import", "--format", "claude", "--session-id", CL_SID)
+    code, out, _ = run(capsys, "import", "session", "--external-session-id", CL_SID, "--agent", "claude")
     assert code == 0
     hdr = store.Index(paths()).header(out.split(":")[1])
-    assert hdr["header"] == 1
-    assert hdr["source"]["dir"] == "/tmp/my-proj.v2"
-    assert hdr["source"]["host"]
-    assert hdr["source"]["agent_version"] == "2.1.286"
-    assert hdr["source"]["created_at"] == "2026-10-02T01:00:00.000Z"
-    assert hdr["created_at"] != hdr["source"]["created_at"]
+    assert h.agora_of(hdr)["header"] == 2
+    assert h.agora_of(hdr)["source"]["dir"] == "/tmp/my-proj.v2"
+    assert h.agora_of(hdr)["source"]["host"]
+    assert h.agora_of(hdr)["source"]["agent_version"] == "2.1.286"
+    assert h.agora_of(hdr)["source"]["created_at"] == "2026-10-02T01:00:00.000Z"
+    assert h.agora_of(hdr)["created_at"] != h.agora_of(hdr)["source"]["created_at"]
 
 
 # --- U-IMP -----------------------------------------------------------------------
 
 def test_reimport_only_merged_child_branches(env, capsys):  # U-IMP-08b
-    _, a, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     env.sessions["ses_b"] = ["讀取 CSV", "完成"]
-    _, b, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_b")
-    _, m, _ = run(capsys, "merge-session", a, b)
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    _, m, _ = run(capsys, "merge", "session", a, b)
     env.sessions["ses_a"].append("來源端又改了")
-    _, c, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    _, c, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     assert c != a
-    assert store.Index(paths()).header(c.split(":")[1])["parents"][0]["id"] == a
+    from agora import header as h
+    assert h.agora_of(store.Index(paths()).header(c.split(":")[1]))["parents"][0]["id"] == a
 
 
 def test_reimport_with_ref_only_updates_in_place(env, capsys):  # C8
-    _, a, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     env.sessions["ses_c"] = ["參照別人的內容"]
-    _, c, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_c",
-                   "--header", f"refs={a}")
+    _, c, _ = run(capsys, "import", "session", "--external-session-id", "ses_c",
+                   "--agent", "opencode", "--header", f"refs={a}")
     env.sessions["ses_a"].append("來源端又改了")
-    _, a2, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    _, a2, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     assert a2 == a
 
 
 def test_import_same_source_from_cold_cache(env, capsys, tmp_path, monkeypatch):  # U-IMP-09
-    _, first, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     other = tmp_path / "m2"
     monkeypatch.setenv("AGORA_CONFIG", str(other / "config"))
     monkeypatch.setenv("AGORA_CACHE_DIR", str(other / "cache"))
     monkeypatch.setenv("AGORA_STATE_DIR", str(other / "state"))
-    _, second, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    _, second, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     assert second == first
 
 
 def test_search_same_source_shows_newest_with_warning(env, capsys):  # U-IMP-10, C10
     from agora import header as h
-    import time as _time
-    base = {"header": 1, "entity": "agora", "type": "session", "title": "重複來源",
-            "created_at": "2026-10-01T00:00:00Z", "refs": [], "case": None,
-            "note": None, "tags": [], "relation": "import", "parents": [],
-            "source": {"agent": "opencode", "session_id": "ses_dup",
-                       "created_at": "2026-10-01T00:00:00Z"}}
-    old = dict(base, id=f"agora:{h.new_ulid()}", updated_at="2026-10-02T00:00:00Z")
-    new = dict(base, id=f"agora:{h.new_ulid()}", updated_at="2026-10-03T00:00:00Z")
+    base = {"type": "Session", "title": "重複來源", "refs": [], "case": None, "tags": [],
+            "agora": {"header": 2, "created_at": "2026-10-01T00:00:00Z", "relation": "import",
+                      "parents": [],
+                      "source": {"agent": "opencode", "session_id": "ses_dup",
+                                 "created_at": "2026-10-01T00:00:00Z"}}}
+    old = dict(base, id=f"agora:{h.new_ulid()}")
+    old["agora"] = dict(base["agora"], updated_at="2026-10-02T00:00:00Z")
+    new = dict(base, id=f"agora:{h.new_ulid()}")
+    new["agora"] = dict(base["agora"], updated_at="2026-10-03T00:00:00Z")
     body = "## user\n重複來源表格\n"
     for hdr in (old, new):
         store.push_one(store.Drive(paths()), store.stage(paths(), hdr, body, b"{}"))
     store.sync(paths())
-    code, found, err = run(capsys, "search", "session", "重複來源", "--no-sync")
+    code, found, err = run(capsys, "search", "session", "--filter", "text~=重複來源", "--no-sync")
     assert code == 0
     assert found.split()[0] == new["id"]
     assert "同一個來源" in err
@@ -290,23 +304,24 @@ def test_search_same_source_shows_newest_with_warning(env, capsys):  # U-IMP-10,
 # --- U-MRG ------------------------------------------------------------------------
 
 def test_merge_of_merge(env, capsys):  # U-MRG-02b, N5
-    _, a, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    from agora import header as h
+    _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     env.sessions["ses_b"] = ["讀取 CSV", "完成"]
-    _, b, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_b")
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
     env.sessions["ses_c"] = ["第三份", "好"]
-    _, c, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_c")
-    _, m, _ = run(capsys, "merge-session", a, b)
-    _, n, _ = run(capsys, "merge-session", m, c)
-    hdr = store.Index(paths()).header(n.split(":")[1])
-    assert [p["id"] for p in hdr["parents"]] == [m, c]
-    assert hdr["parents"][0]["raw_md5"] is None
-    assert hdr["parents"][1]["raw_md5"] is not None
+    _, c, _ = run(capsys, "import", "session", "--external-session-id", "ses_c", "--agent", "opencode")
+    _, m, _ = run(capsys, "merge", "session", a, b)
+    _, n, _ = run(capsys, "merge", "session", m, c)
+    parents = h.agora_of(store.Index(paths()).header(n.split(":")[1]))["parents"]
+    assert [p["id"] for p in parents] == [m, c]
+    assert parents[0]["raw_md5"] is None
+    assert parents[1]["raw_md5"] is not None
 
 
 def test_merge_missing_id_fails_clean(env, capsys, tmp_path):  # U-MRG-03
-    _, a, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     before = remote_sessions(tmp_path)
-    code, _, err = run(capsys, "merge-session", a, "agora:01K6NADA0000000000000000")
+    code, _, err = run(capsys, "merge", "session", a, "agora:01K6NADA0000000000000000")
     assert code != 0 and "找不到" in err
     assert remote_sessions(tmp_path) == before
     assert store.outbox_count(paths()) == 0
@@ -318,54 +333,56 @@ def test_dir_defaults_and_relative_resolution(env, capsys, tmp_path, monkeypatch
     work = tmp_path / "proj"
     work.mkdir()
     env.dir = str(work)
-    _, parent, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
-    run(capsys, "continue-session", parent, "--agent", "opencode")
+    _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    run(capsys, "continue", "session", parent, "--agent", "opencode")
     assert env.launched[-1].cwd == str(work)  # source.dir exists: use it
     env.dir = "/nonexistent-agora-xyz"
-    _, parent2, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    _, parent2, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     monkeypatch.chdir(tmp_path)
-    run(capsys, "continue-session", parent2, "--agent", "opencode", "--dir", "proj")
+    run(capsys, "continue", "session", parent2, "--agent", "opencode", "--dir", "proj")
     assert env.launched[-1].cwd == str(work.resolve())  # C5: relative -> absolute
 
 
 def test_continue_from_merge_has_null_parent_md5(env, capsys):  # U-CON-18, N5
-    _, a, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     env.sessions["ses_b"] = ["讀取 CSV", "完成"]
-    _, b, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_b")
-    _, m, _ = run(capsys, "merge-session", a, b)
-    _, child, _ = run(capsys, "continue-session", m, "--agent", "opencode", "--dir", "/tmp")
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    _, m, _ = run(capsys, "merge", "session", a, b)
+    _, child, _ = run(capsys, "continue", "session", m, "--agent", "opencode", "--dir", "/tmp")
     hdr = store.Index(paths()).header(child.split(":")[1])
-    assert hdr["parents"] == [{"id": m, "raw_md5": None}]
+    from agora import header as h
+    assert h.agora_of(hdr)["parents"] == [{"id": m, "raw_md5": None}]
 
 
 def test_continue_source_is_the_new_session(env, capsys, tmp_path):  # U-CON-19, N6
     work = tmp_path / "proj"
     work.mkdir()
     env.dir = str(work)  # a truthful adapter reports its own directory
-    _, parent, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
-    _, child, _ = run(capsys, "continue-session", parent, "--agent", "opencode", "--dir", str(work))
+    _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    _, child, _ = run(capsys, "continue", "session", parent, "--agent", "opencode", "--dir", str(work))
     hdr = store.Index(paths()).header(child.split(":")[1])
-    assert hdr["source"]["session_id"] == env.launched[-1].agent_session_id
-    assert hdr["source"]["dir"] == str(work)
+    from agora import header as h
+    assert h.agora_of(hdr)["source"]["session_id"] == env.launched[-1].agent_session_id
+    assert h.agora_of(hdr)["source"]["dir"] == str(work)
 
 
 def test_continue_without_raw_fails(env, capsys, tmp_path):  # U-CON-14, L2/S1
-    _, parent, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     ulid = parent.split(":")[1]
     raws = list((tmp_path / "remote" / "agora" / "sessions" / ulid).glob("raw-*.json"))
     assert len(raws) == 1
     raws[0].write_bytes(b"tampered")
-    code, _, _ = run(capsys, "continue-session", parent, "--agent", "opencode", "--dir", "/tmp")
+    code, _, _ = run(capsys, "continue", "session", parent, "--agent", "opencode", "--dir", "/tmp")
     assert code != 0
 
 
 def test_finalize_upload_failure_keeps_outbox_clears_pending(env, capsys, monkeypatch):  # U-CON-13
-    _, a, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     env.sessions["ses_b"] = ["讀取 CSV", "完成"]
-    _, b, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_b")
-    _, m, _ = run(capsys, "merge-session", a, b)  # injected path needs no raw
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    _, m, _ = run(capsys, "merge", "session", a, b)  # injected path needs no raw
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")
-    code, out, _ = run(capsys, "continue-session", m, "--agent", "opencode", "--dir", "/tmp")
+    code, out, _ = run(capsys, "continue", "session", m, "--agent", "opencode", "--dir", "/tmp")
     assert code == cli.EXIT_IN_OUTBOX
     assert out.startswith("agora:")
     assert store.outbox_count(paths()) == 1
@@ -380,8 +397,8 @@ def test_pending_visible_and_locked_at_agent_start(env, capsys, tmp_path, claude
     lay_fixture(claude_env["home"], work)
     monkeypatch.setenv("SCRIPT_MODE", "check-pending")
     monkeypatch.setenv("SCRIPT_MARKER", str(claude_env["marker"]))
-    _, parent, _ = run(capsys, "import", "--format", "claude", "--session-id", CL_SID)
-    code, child, _ = run(capsys, "continue-session", parent, "--agent", "claude", "--dir", str(work))
+    _, parent, _ = run(capsys, "import", "session", "--external-session-id", CL_SID, "--agent", "claude")
+    code, child, _ = run(capsys, "continue", "session", parent, "--agent", "claude", "--dir", str(work))
     assert code == 0 and child.startswith("agora:")
     marker = claude_env["marker"].read_text()
     assert "locked=True" in marker
@@ -393,13 +410,13 @@ def test_fault_before_finalize_recovers(env, capsys, tmp_path, claude_env, monke
     work = tmp_path / "proj"
     work.mkdir()
     lay_fixture(claude_env["home"], work)
-    _, parent, _ = run(capsys, "import", "--format", "claude", "--session-id", CL_SID)
+    _, parent, _ = run(capsys, "import", "session", "--external-session-id", CL_SID, "--agent", "claude")
     monkeypatch.setenv("SCRIPT_MODE", "append")
-    proc = cli_child("continue-session", parent, "--agent", "claude", "--dir", str(work),
+    proc = cli_child("continue", "session", parent, "--agent", "claude", "--dir", str(work),
                      extra_env={"AGORA_TEST_FAULT": "before-finalize"})
     assert proc.wait(timeout=120) == 137
     assert len(list(paths().pending.glob("*.json"))) == 1
-    code, _, err = run(capsys, "show", parent)
+    code, _, err = run(capsys, "show", "session", parent)
     assert code == 0 and "補存" in err
     assert not list(paths().pending.glob("*.json"))
     kids = store.Index(paths()).children(parent.split(":")[1])
@@ -410,10 +427,10 @@ def test_sigint_kills_agent_not_agora(env, capsys, tmp_path, claude_env, monkeyp
     work = tmp_path / "proj"
     work.mkdir()
     lay_fixture(claude_env["home"], work)
-    _, parent, _ = run(capsys, "import", "--format", "claude", "--session-id", CL_SID)
+    _, parent, _ = run(capsys, "import", "session", "--external-session-id", CL_SID, "--agent", "claude")
     monkeypatch.setenv("SCRIPT_MODE", "append-sleep-ignore")
     monkeypatch.setenv("SCRIPT_MARKER", str(claude_env["marker"]))
-    proc = cli_child("continue-session", parent, "--agent", "claude", "--dir", str(work))
+    proc = cli_child("continue", "session", parent, "--agent", "claude", "--dir", str(work))
     pid = int(wait_marker(claude_env["marker"]).split("pid=")[1].split()[0])
     time.sleep(1)
     os.killpg(proc.pid, signal.SIGINT)
@@ -428,10 +445,10 @@ def test_agent_dies_fast_on_sigint(env, capsys, tmp_path, claude_env, monkeypatc
     work = tmp_path / "proj"
     work.mkdir()
     lay_fixture(claude_env["home"], work)
-    _, parent, _ = run(capsys, "import", "--format", "claude", "--session-id", CL_SID)
+    _, parent, _ = run(capsys, "import", "session", "--external-session-id", CL_SID, "--agent", "claude")
     monkeypatch.setenv("SCRIPT_MODE", "append-sleep")
     monkeypatch.setenv("SCRIPT_MARKER", str(claude_env["marker"]))
-    proc = cli_child("continue-session", parent, "--agent", "claude", "--dir", str(work))
+    proc = cli_child("continue", "session", parent, "--agent", "claude", "--dir", str(work))
     pid = int(wait_marker(claude_env["marker"]).split("pid=")[1].split()[0])
     time.sleep(1)
     os.killpg(proc.pid, signal.SIGINT)
@@ -452,19 +469,20 @@ def test_killed_agora_does_not_finish_early(env, capsys, tmp_path, claude_env, m
     work = tmp_path / "proj"
     work.mkdir()
     lay_fixture(claude_env["home"], work)
-    _, parent, _ = run(capsys, "import", "--format", "claude", "--session-id", CL_SID)
+    _, parent, _ = run(capsys, "import", "session", "--external-session-id", CL_SID, "--agent", "claude")
     monkeypatch.setenv("SCRIPT_MODE", "append-sleep-ignore")
     monkeypatch.setenv("SCRIPT_MARKER", str(claude_env["marker"]))
-    proc = cli_child("continue-session", parent, "--agent", "claude", "--dir", str(work))
+    proc = cli_child("continue", "session", parent, "--agent", "claude", "--dir", str(work))
     pid = int(wait_marker(claude_env["marker"]).split("pid=")[1].split()[0])
     proc.kill()  # agora dies, the agent lives on
     assert proc.wait(timeout=60) == -9
-    code, _, _ = run(capsys, "show", parent)
+    code, _, _ = run(capsys, "show", "session", parent)
     assert code == 0
     assert len(list(paths().pending.glob("*.json"))) == 1  # still protected
     assert store.Index(paths()).children(parent.split(":")[1]) == []
     os.kill(pid, signal.SIGTERM)
-    run(capsys, "show", parent)
+    wait_gone(pid)          # the lock frees only once the agent is really gone
+    run(capsys, "show", "session", parent)
     assert store.Index(paths()).children(parent.split(":")[1]) != []
     assert not list(paths().pending.glob("*.json"))
 
@@ -473,13 +491,13 @@ def test_concurrent_recovery_makes_one_session(env, capsys, tmp_path, claude_env
     work = tmp_path / "proj"
     work.mkdir()
     lay_fixture(claude_env["home"], work)
-    _, parent, _ = run(capsys, "import", "--format", "claude", "--session-id", CL_SID)
+    _, parent, _ = run(capsys, "import", "session", "--external-session-id", CL_SID, "--agent", "claude")
     record = {"agora_id": f"agora:{h.new_ulid()}", "agent": "claude",
               "agent_session_id": CL_SID, "dir": str(work), "before_count": 0,
               "parent": {"id": parent, "raw_md5": None}, "started_at": "2026-10-02T00:00:00Z"}
     _, lock = cli._write_pending(paths(), record)
     lock.close()  # expired: nobody holds it
-    procs = [cli_child("show", parent), cli_child("show", parent)]
+    procs = [cli_child("show", "session", parent), cli_child("show", "session", parent)]
     for proc in procs:
         assert proc.wait(timeout=120) == 0
     assert (tmp_path / "remote" / "agora" / "sessions" / record["agora_id"].split(":")[1]).is_dir()
@@ -489,46 +507,46 @@ def test_concurrent_recovery_makes_one_session(env, capsys, tmp_path, claude_env
 # --- U-SHW -----------------------------------------------------------------------------
 
 def test_show_format_and_missing(env, capsys):  # U-SHW-01, U-SHW-02
-    _, a, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a",
-                   "--header", "title=規劃表格")
-    code, out, _ = run(capsys, "show", a)
-    assert code == 0 and "規劃表格" in out and "entity: agora" in out
+    _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a",
+                   "--agent", "opencode", "--header", "title=規劃表格")
+    code, out, _ = run(capsys, "show", "session", a)
+    assert code == 0 and "規劃表格" in out and "type: Session" in out
     assert "把 CSV 轉成 Markdown 表格" in out
-    code, _, err = run(capsys, "show", "agora:01K6NADA0000000000000000")
+    code, _, err = run(capsys, "show", "session", "agora:01K6NADA0000000000000000")
     assert code != 0 and "找不到" in err
 
 
 def test_show_raw_lazy_and_merge_message(env, capsys):  # U-SHW-03
-    _, a, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
-    code, out, _ = run(capsys, "show", a, "--raw")
+    _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    code, out, _ = run(capsys, "show", "session", a, "--raw")
     assert code == 0 and '"m": ["把 CSV 轉成 Markdown 表格"' in out
     env.sessions["ses_b"] = ["讀取 CSV", "完成"]
-    _, b, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_b")
-    _, m, _ = run(capsys, "merge-session", a, b)
-    code, _, err = run(capsys, "show", m, "--raw")
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    _, m, _ = run(capsys, "merge", "session", a, b)
+    code, _, err = run(capsys, "show", "session", m, "--raw")
     assert code != 0 and "閱讀版" in err
 
 
 # --- U-SRC -------------------------------------------------------------------------------
 
 def test_search_output_format(env, capsys):  # U-SRC-01
-    _, a, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
-    code, found, _ = run(capsys, "search", "session", "CSV", "--no-sync")
+    _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    code, found, _ = run(capsys, "search", "session", "--filter", "text~=CSV", "--no-sync")
     assert code == 0
     parts = found.split()
     assert parts[0] == a and parts[1] == "2026-10-01" and parts[2] == "opencode"
 
 
 def test_search_special_keywords_no_crash(env, capsys):  # U-SRC-07
-    _, _, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    _, _, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     for kw in ["C++", 'a"b', "AND", "NEAR", "*", "表格 OR"]:
-        code, _, _ = run(capsys, "search", "session", kw, "--no-sync")
+        code, _, _ = run(capsys, "search", "session", "--filter", f"text~={kw}", "--no-sync")
         assert code == 0, kw
 
 
 def test_search_keyword_starting_with_dash(env, capsys):
-    _, _, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
-    code, _, _ = run(capsys, "search", "session", "-x", "--no-sync")
+    _, _, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    code, _, _ = run(capsys, "search", "session", "--filter", "text~=-x", "--no-sync")
     assert code == 0
 
 
@@ -540,44 +558,47 @@ def test_search_all_aliases(env, capsys, tmp_path, monkeypatch):  # U-SRC-09
     subdir = home / ".claude" / "projects" / "-tmp-my-proj-v2"
     subdir.mkdir(parents=True)
     shutil.copy(CL_FIX / "cl-basic.jsonl", subdir / f"{CL_SID}.jsonl")
-    _, op_id, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a",
+    _, op_id, _ = run(capsys, "import", "session", "--external-session-id", "ses_a",
+                       "--agent", "opencode",
                        "--header", "title=規劃", "--header", "case=mybrain:案件/x",
-                       "--header", "tags=csv", "--header", "refs=mybrain:a.md")
-    _, claude_id, _ = run(capsys, "import", "--format", "claude", "--session-id", CL_SID)
-    for alias, want in [("agent=claude", {claude_id}),
-                        ("relation=import", {op_id, claude_id}),
-                        ("case=mybrain:案件/x", {op_id}),
-                        ("tag=csv", {op_id}),
-                        ("ref=mybrain:a.md", {op_id}),
-                        ("title=規劃", {op_id})]:
-        code, found, _ = run(capsys, "search", "session", "", "--header", alias, "--no-sync")
-        assert code == 0, alias
-        assert {line.split()[0] for line in found.splitlines() if line.split()} == want, alias
+                       "--header", "tags=[csv]", "--header", "refs=mybrain:a.md")
+    _, claude_id, _ = run(capsys, "import", "session", "--external-session-id", CL_SID,
+                          "--agent", "claude")
+    for filt, want in [("agent=claude", {claude_id}),
+                       ("agora.relation=import", {op_id, claude_id}),
+                       ("case=mybrain:案件/x", {op_id}),
+                       ("tags=csv", {op_id}),
+                       ("refs=mybrain:a.md", {op_id}),
+                       ("title=規劃", {op_id}),
+                       ("agora.relation=merge", set())]:
+        code, found, _ = run(capsys, "search", "session", "--filter", filt, "--no-sync")
+        assert code == 0, filt
+        assert {line.split()[0] for line in found.splitlines() if line.split()} == want, filt
 
 
 def test_index_rebuild_after_delete(env, capsys, monkeypatch):  # U-SRC-10
-    _, a, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
-    _, before, _ = run(capsys, "search", "session", "CSV", "--no-sync")
+    _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    _, before, _ = run(capsys, "search", "session", "--filter", "text~=CSV", "--no-sync")
     (paths().cache / "index.sqlite").unlink()
     monkeypatch.setenv("AGORA_NOW", str(2000000000))  # past the sync throttle
-    _, after, _ = run(capsys, "search", "session", "CSV")
+    _, after, _ = run(capsys, "search", "session", "--filter", "text~=CSV")
     assert after == before and after.split()[0] == a
 
 
 def test_search_ascii_matches_fullwidth(env, capsys):  # U-SRC-12, T2
     env.sessions["ses_u"] = ["ＵＩ介面表格測試"]
-    _, _, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_u")
-    _, found, _ = run(capsys, "search", "session", "ui", "--no-sync")
+    _, _, _ = run(capsys, "import", "session", "--external-session-id", "ses_u", "--agent", "opencode")
+    _, found, _ = run(capsys, "search", "session", "--filter", "text~=ui", "--no-sync")
     assert found
 
 
 def test_merge_row_display(env, capsys):  # U-SRC-13, N6
     from datetime import datetime, timezone
-    _, a, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_a")
+    _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     env.sessions["ses_b"] = ["讀取 CSV", "完成"]
-    _, b, _ = run(capsys, "import", "--format", "opencode", "--session-id", "ses_b")
-    _, m, _ = run(capsys, "merge-session", a, b)
-    _, found, _ = run(capsys, "search", "session", "CSV", "--no-sync")
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    _, m, _ = run(capsys, "merge", "session", a, b)
+    _, found, _ = run(capsys, "search", "session", "--filter", "text~=CSV", "--no-sync")
     line = next(line for line in found.splitlines() if line.split()[0] == m)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     assert line.split()[1] == today and line.split()[2] == "merge"
@@ -586,3 +607,4 @@ def test_merge_row_display(env, capsys):  # U-SRC-13, N6
 if __name__ == "__main__":
     import sys as _sys
     _sys.exit(__import__("pytest").main([__file__, "-q"]))
+
