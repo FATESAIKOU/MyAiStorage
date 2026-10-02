@@ -213,8 +213,13 @@ def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
     hdr, _ = h.split_document(local.read_text(encoding="utf-8"))
     raw = h.agora_of(hdr).get("raw") or {}
     if raw.get("file") and files.get(raw["file"]) != raw.get("md5"):
-        _line(f"{ulid} 雲端上的 raw 還沒齊，下次再拉")
-    elif raw.get("file"):
+        # S1/G3: an unfinished session stays out of the index, and its half-written
+        # session.md out of the mirror - otherwise it is searchable and continuable.
+        _line(f"{ulid} 雲端上的 raw 還沒齊，先不建索引")
+        local.unlink(missing_ok=True)
+        index.drop(ulid)
+        return
+    if raw.get("file"):
         store.fetch_raw(paths, drive, ulid, hdr)   # a no-op when the local copy is the right one
     store.index_mirror(paths, ulid, index)   # readable, indexed and searchable again
 
