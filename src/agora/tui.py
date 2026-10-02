@@ -3,18 +3,21 @@
 Two tabs - sessions already in agora, and agent sessions on this machine not
 imported yet - a table with column names, a preview of the whole conversation
 rendered as Markdown, and a key bar. Every action runs the command mode's own
-code (cli.main), so this file only lists, draws and asks. The data side (rows,
-previews, the commands an action stands for) is plain functions with tests.
+commands, as child processes, so this file only lists, draws and asks. The data
+side (rows, previews, the commands an action stands for) is plain functions with
+tests.
 """
 
 from __future__ import annotations
 
 import contextlib
-import io
 import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -27,7 +30,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Input, OptionList, Static
+from textual.widgets import DataTable, Footer, Input, OptionList, ProgressBar, Static
 
 from agora import cache
 from agora import header as h
@@ -240,6 +243,71 @@ class AskText(ModalScreen):
         self.dismiss(event.value)
 
 
+class Run(ModalScreen):
+    """One command-mode command in a child process, with a progress bar and Esc.
+
+    A child process rather than a thread, because the interruption has to be a real
+    one and it has to reach the agent the command starts - the opencode writing a
+    summary - which is why the child is given its own process group (review V2).
+    Only our own `[agora] … k/N` lines move the bar (review V8): a title, a date or
+    a path can easily contain digits and a slash. Dismisses (code, output).
+    """
+
+    BINDINGS = [Binding("escape", "stop", "中斷", priority=True)]
+    PROGRESS = re.compile(r"^\[agora\].*?\b(\d+)/(\d+)\b")
+
+    def __init__(self, title: str, argv: list[str], spawn):
+        super().__init__()
+        self.title_, self.argv, self.spawn = title, argv, spawn
+        self.lines: list[str] = []
+        self.proc = None
+        self.started = time.monotonic()
+        self.stopping = False
+        self.signals: list[int] = []      # what was sent, in order (a test reads this)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="box"):
+            yield Static(self.title_, classes="box-title")
+            yield ProgressBar(total=None, show_eta=False, id="bar")
+            yield Static("", id="last", classes="note")
+            yield Static("Esc 中斷（之後重跑同一個動作會接著做）", classes="hint")
+
+    def on_mount(self) -> None:
+        self.proc = self.spawn(self.argv)
+        threading.Thread(target=self.read, daemon=True).start()
+        self.set_interval(0.1, self.tick)
+
+    def read(self) -> None:
+        for line in self.proc.stdout:
+            self.lines.append(line.rstrip())
+        code = self.proc.wait()
+        self.app.call_from_thread(self.dismiss, (code, "\n".join(self.lines)))
+
+    def tick(self) -> None:
+        step = next((m for m in map(self.PROGRESS.search, reversed(self.lines)) if m), None)
+        if step:
+            self.query_one("#bar", ProgressBar).update(total=int(step.group(2)),
+                                                        progress=int(step.group(1)))
+        spent = int(time.monotonic() - self.started)
+        last = self.lines[-1] if self.lines else ""
+        prefix = "中斷中… " if self.stopping else ""
+        self.query_one("#last", Static).update(f"{prefix}（{spent} 秒）{last}")
+
+    def action_stop(self) -> None:
+        if self.proc is None or self.proc.poll() is not None:
+            return
+        self.stopping = True
+        self._send(signal.SIGINT)
+
+    def _send(self, sig) -> None:
+        self.signals.append(int(sig))
+        try:
+            os.killpg(self.proc.pid, sig)   # its own group: agora and whatever it started
+        except (AttributeError, TypeError, OSError):
+            with contextlib.suppress(Exception):
+                self.proc.send_signal(sig)
+
+
 class Busy(ModalScreen):
     """Run `work_` in a thread while a window says so, with its latest output line; dismiss (value, output, error)."""
     SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -320,7 +388,7 @@ class AgoraApp(App):
     #msg.failed { color: #ff5f5f; }
     .box { width: 70; height: auto; max-height: 80%; padding: 0 1; border: round #00afaf; background: #1c1c1c; }
     .box.failed { border: round #ff5f5f; }
-    Choose, AskText, Busy, Tell { align: center middle; }
+    Choose, AskText, Busy, Run, Tell { align: center middle; }
     .box-title { text-style: bold; color: #00d7d7; }
     .note, .hint { color: #8a8a8a; }
     OptionList { height: auto; max-height: 8; background: transparent; border: none; }
@@ -602,14 +670,51 @@ class AgoraApp(App):
         row = self.current()
         return marked or ([row] if row else [])
 
+    def spawn(self, argv: list[str]) -> subprocess.Popen:
+        """The child process an action runs in; a test replaces this (design, T2).
+
+        stdin is /dev/null: start_new_session only detaches the child from the
+        terminal, but it still inherits fd 0, and Textual is reading that terminal
+        in raw mode - one read by the agent or by rclone would take the user's
+        keystrokes (review V1). Its own group is what lets Esc reach the agent the
+        command starts, and PYTHONUNBUFFERED keeps the ids off a buffer until the
+        end (review V1).
+        """
+        return subprocess.Popen(
+            [sys.executable, "-m", "agora.cli", *argv],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, start_new_session=True,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"})
+
     async def act(self, title: str, argvs: list[list[str]]) -> None:
-        """An action that needs no terminal of its own: run it under a window, then show what it said."""
-        codes, out, error = await self.push_screen_wait(Busy(title, lambda: [self.cli.main(a) for a in argvs]))
-        codes = codes or [2]
-        ok = sum(code == 0 for code in codes)
-        await self.push_screen_wait(Tell(title, f"{out}\n{error or ''}", ok == len(codes)))
+        """An action that needs no terminal of its own: a child process per command,
+        a window each with its progress and Esc, then what they said.
+
+        Re-running the same action carries on from where it stopped (design 5.11),
+        which is what the screen says after an interruption, because the command
+        mode is the one that knows how to skip what is already done. An interrupted
+        command does not start the next one.
+        """
+        codes, out, stopped = [], [], False
+        for argv in argvs:
+            code, text = await self.push_screen_wait(Run(title, argv, self.spawn))
+            codes.append(code)
+            out.append(text)
+            if code in (130, -signal.SIGINT):
+                stopped = True
+                break
+        await self.push_screen_wait(Tell(f"{title}{'（已中斷）' if stopped else ''}",
+                                         "\n".join(out), codes == [0] * len(codes)))
         self.reload()
-        self.say("完成" if ok == len(codes) else f"成功 {ok} 個、失敗 {len(codes) - ok} 個", failed=ok != len(codes))
+        if codes and all(code == 0 for code in codes):
+            self.say("完成")
+        elif stopped:
+            self.say("已中斷；重跑同一個動作會接著做", failed=True)
+        elif codes and all(code == 3 for code in codes):
+            self.say("已存進 outbox，之後的指令會自動再送", failed=True)
+        else:
+            self.say("沒有全部成功，訊息在結果視窗", failed=True)
+
 
     def outside(self, argv: list[str]) -> int:
         """Hand the whole terminal over (an agent, an editor), then come back."""

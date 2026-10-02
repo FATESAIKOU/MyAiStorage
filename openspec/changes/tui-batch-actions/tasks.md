@@ -1,6 +1,6 @@
 ## 1. 動作改用子程序（負責：impl3 Opus 恢復後；在那之前 impl2）
 
-- [ ] 1.1 新的等待視窗：子程序跑 `agora` 指令、逐行讀輸出、進度條讀 `k/N`、Esc 對 process group 送 SIGINT；`spawn` 可替換以便測試（spec「進度與中斷」）
+- [x] 1.1 新的等待視窗：子程序跑 `agora` 指令、逐行讀輸出、進度條讀 `k/N`、Esc 對 process group 送 SIGINT；`spawn` 可替換以便測試（spec「進度與中斷」）
 - [ ] 1.2 import、merge、delete、pull、push 改用它；import 同一個 agent 的列合成一個指令
 - [ ] 1.3 拿掉執行緒裡的 `redirect_stdout`（review K3）；首次設定與同步若仍用執行緒，只收自己的輸出
 - [x] 1.4 opencode 的 summarize 一從事件串流讀到 session id 就寫 `pending-<id>`（review V5；改 `opencode.py`，負責：impl1）

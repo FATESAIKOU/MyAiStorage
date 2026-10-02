@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
+import threading
 
 from agora import header as h
 from agora import store, tui
@@ -168,11 +170,45 @@ class FakeCli:
         return 0
 
 
+class FakeProc:
+    """What AgoraApp.spawn hands back: its output, and signals it was sent."""
+
+    def __init__(self, lines=(), code=0, hang=False):
+        self.stdout = iter(f"{line}\n" for line in lines)
+        self.code, self.hang, self.signals = code, hang, []
+        self.done = threading.Event()
+        if not hang:
+            self.done.set()
+
+    def poll(self):
+        return None if self.hang and not self.done.is_set() else self.code
+
+    def wait(self):
+        self.done.wait(timeout=10)
+        return self.code
+
+    def send_signal(self, sig):
+        self.signals.append(int(sig))
+        self.done.set()
+
+
+def _spawn(proc=None, **kw):
+    """A spawn that records what it was asked for and runs a fake process."""
+    started: list[list[str]] = []
+
+    def spawn(argv):
+        started.append(argv)
+        return proc if proc is not None else FakeProc(**kw)
+    return spawn, started
+
+
 def _app(agents):
     paths, _ = _index((_hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "第一個", sid="ses_1"), "## user\n表格的問題\n"),
                       (_hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "第二個", sid="ses_2"), "## user\n別的\n"))
     cli = FakeCli()
-    return tui.AgoraApp(paths, cli, agents=agents, check_setup=False), cli
+    app = tui.AgoraApp(paths, cli, agents=agents, check_setup=False)
+    app.spawn, _ = _spawn()          # no action reaches a real process in a test
+    return app, cli
 
 
 def _run(test):
@@ -211,8 +247,11 @@ def test_shift_tab_moves_focus_between_list_and_preview():  # feedback 6
     _run(go)
 
 
-def test_mark_two_then_merge_runs_the_command():
-    app, cli = _app([])
+def test_mark_two_then_merge_runs_one_command_in_a_child_process():
+    """T2 1.1: the action is a command-mode command in a child process of its own."""
+    app, _ = _app([])
+    spawn, started = _spawn()
+    app.spawn = spawn
 
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
@@ -221,17 +260,20 @@ def test_mark_two_then_merge_runs_the_command():
             assert app.query_one("#table").cursor_row == 0         # marking does not move the cursor
             await pilot.press("down", "space", "m")
             await pilot.pause()
+            order = [r.key for r in app.rows["agora"] if r.key in app.marked]
             await pilot.press("enter")                     # opencode writes the summaries
-            for _ in range(40):
+            for _ in range(60):
                 await pilot.pause(0.05)
-                if cli.calls:
+                if started:
                     break
-            assert cli.calls and cli.calls[0][:2] == ["merge", "session"] and len(cli.calls[0]) == 6
+            assert started == [["merge", "session", *order, "--agent", "opencode"]]
     _run(go)
 
 
 def test_delete_starts_on_cancel():
-    app, cli = _app([])
+    app, _ = _app([])
+    spawn, started = _spawn()
+    app.spawn = spawn
 
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
@@ -240,7 +282,7 @@ def test_delete_starts_on_cancel():
             await pilot.pause()
             await pilot.press("enter")                     # the first option is 取消
             await pilot.pause()
-            assert cli.calls == []
+            assert started == []
     _run(go)
 
 
@@ -294,17 +336,84 @@ def test_import_tab_leaves_out_agent_sessions_a_continue_moved_past():
 
 
 def test_delete_takes_every_marked_row():
-    app, cli = _app([])
+    app, _ = _app([])
+    spawn, started = _spawn()
+    app.spawn = spawn
 
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             await pilot.press("space", "down", "space", "d")
             await pilot.pause()
+            order = [r.key for r in app.rows["agora"] if r.key in app.marked]
             await pilot.press("down", "enter")             # 確定
-            for _ in range(40):
+            for _ in range(60):
                 await pilot.pause(0.05)
-                if cli.calls:
+                if started:
                     break
-            assert cli.calls and cli.calls[0][:2] == ["delete", "session"] and len(cli.calls[0]) == 5
+            assert started == [["delete", "session", *order, "--yes"]]
     _run(go)
+
+
+def test_the_progress_bar_follows_the_k_of_n_lines():
+    app, _ = _app([])
+    spawn, _ = _spawn(lines=["[agora] 刪除 1/2", "[agora] 刪除 2/2"], hang=True)
+    app.spawn = spawn
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")             # 確定
+            for _ in range(60):
+                await pilot.pause(0.05)
+                bar = app.screen.query_one("#bar")
+                if bar.total:
+                    break
+            assert (bar.progress, bar.total) == (2, 2)
+    _run(go)
+
+
+def test_progress_is_read_only_from_our_own_lines():   # review V8
+    """A date, a title or a path can hold digits and a slash; only `[agora] … k/N` counts."""
+    app, _ = _app([])
+    spawn, _ = _spawn(lines=["下載 3/9 個檔案", "/tmp/2026/10/03", "[agora] 刪除 1/1"], hang=True)
+    app.spawn = spawn
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            for _ in range(60):
+                await pilot.pause(0.05)
+                bar = app.screen.query_one("#bar")
+                if bar.total:
+                    break
+            assert (bar.progress, bar.total) == (1, 1)
+    _run(go)
+
+
+def test_a_child_process_cannot_take_the_users_keystrokes():   # review V1
+    """start_new_session detaches the child from the terminal, but fd 0 is still the
+    terminal Textual is reading. And a buffered stdout would hold the ids back until
+    the end."""
+    app, _ = _app([])
+    seen = {}
+
+    class Popen:
+        def __init__(self, argv, **kw):
+            seen.update(argv=argv, **kw)
+
+    real = tui.subprocess.Popen
+    tui.subprocess.Popen = Popen
+    try:
+        tui.AgoraApp.spawn(app, ["merge", "session", "agora:a"])   # the real one, not the fake
+    finally:
+        tui.subprocess.Popen = real
+    assert seen["argv"][1:] == ["-m", "agora.cli", "merge", "session", "agora:a"]
+    assert seen["stdin"] is tui.subprocess.DEVNULL
+    assert seen["start_new_session"] is True and seen["stderr"] is tui.subprocess.STDOUT
+    assert seen["env"]["PYTHONUNBUFFERED"] == "1"
