@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Iterator, Protocol
 
 TOOL_SUMMARY_MAX = 200
 
@@ -69,6 +69,9 @@ class Agent(Protocol):
 
     def last_message(self, session_id: str) -> tuple[str, str] | None:
         """(role, text) of the session's last user or assistant text, as stored; None if there is none."""
+
+    def search_text(self, keyword: str) -> "Iterator[str]":
+        """Session ids, across all projects, whose conversation text contains keyword; yielded as found."""
 
     def summarize(self, prompt: str, workdir: Path) -> tuple[str, str | None]:
         """Run the agent once headless with no tools allowed; return (text, model).
