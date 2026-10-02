@@ -698,6 +698,130 @@ def test_list_and_last_message_survive_unreadable_files(claude_env):
     assert C.ADAPTER.last_message("cccccccc-2222-4333-8444-555555555555") is None
 
 
+# --- search_text (interactive import tab) ---------------------------------------
+
+@pytest.fixture()
+def search_env(claude_env):
+    """An empty store: search tests care only about the sessions they write."""
+    import shutil as _sh
+    projects = claude_env["home"] / ".claude" / "projects"
+    for child in projects.iterdir():
+        _sh.rmtree(child) if child.is_dir() else child.unlink()
+    claude_env["proj"] = projects / "-tmp-search-proj"
+    claude_env["proj"].mkdir(parents=True)
+    return claude_env
+
+
+def write_session(proj: Path, sid: str, messages: list[tuple[str, str]], **extra) -> Path:
+    """Claude stores user text as a string and assistant text as blocks."""
+    def content(role: str, text: str):
+        return text if role == "user" else [{"type": "text", "text": text}]
+    lines = [{"type": role, "sessionId": sid, "message": {"role": role, "content": content(role, text)}, **extra}
+             for role, text in messages]
+    path = proj / f"{sid}.jsonl"
+    path.write_text("\n".join(json.dumps(o, ensure_ascii=False) for o in lines) + "\n",
+                    encoding="utf-8")
+    return path
+
+
+def test_search_text_finds_across_projects(search_env, tmp_path):
+    proj = search_env["proj"]
+    other = proj.parent / "-tmp-other"
+    other.mkdir()
+    write_session(proj, "11111111-1111-4111-8111-111111111111",
+                  [("user", "把 CSV 轉成 Markdown 表格")])
+    write_session(other, "22222222-2222-4222-8222-222222222222",
+                  [("user", "先讀檔"), ("assistant", "規劃表格轉換的流程")])
+    write_session(proj, "33333333-3333-4333-8333-333333333333",
+                  [("user", "完全無關的內容")])
+    found = list(C.ADAPTER.search_text("表格"))
+    # every project, each session once (the walk is per project folder)
+    assert sorted(found) == ["11111111-1111-4111-8111-111111111111",
+                             "22222222-2222-4222-8222-222222222222"]
+    assert len(found) == len(set(found))
+
+
+def test_search_text_is_normalized_and_case_insensitive(search_env):
+    proj = search_env["proj"]
+    write_session(proj, "44444444-4444-4444-8444-444444444444",
+                  [("user", "把 ＣＳＶ 轉成表格")])
+    assert list(C.ADAPTER.search_text("csv")) == ["44444444-4444-4444-8444-444444444444"]
+    assert list(C.ADAPTER.search_text("表格")) == ["44444444-4444-4444-8444-444444444444"]
+    assert list(C.ADAPTER.search_text("cs v")) == []      # not a substring match
+
+
+def test_search_text_ignores_tool_results_and_noise(search_env):
+    proj = search_env["proj"]
+    sid = "55555555-5555-4555-8555-555555555555"
+    lines = [
+        {"type": "user", "sessionId": sid, "message": {"role": "user", "content": "<command-name>/clear</command-name>"}},
+        {"type": "user", "sessionId": sid, "isMeta": True, "message": {"role": "user", "content": "Caveat 表格"}},
+        {"type": "user", "sessionId": sid, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "ZZTOOLOUT 表格"}]}},
+        {"type": "user", "sessionId": sid, "message": {"role": "user", "content": "真的找不到的字"}},
+    ]
+    (proj / f"{sid}.jsonl").write_text(
+        "\n".join(json.dumps(o, ensure_ascii=False) for o in lines) + "\n", encoding="utf-8")
+    assert list(C.ADAPTER.search_text("表格")) == []
+
+
+def test_search_text_matches_assistant_text(search_env):
+    proj = search_env["proj"]
+    write_session(proj, "66666666-6666-4666-8666-666666666666",
+                  [("user", "問題"), ("assistant", "答案是三個步驟")])
+    assert list(C.ADAPTER.search_text("三個步驟")) == ["66666666-6666-4666-8666-666666666666"]
+
+
+def test_search_text_yields_one_id_per_file_and_early(search_env, tmp_path):
+    proj = search_env["proj"]
+    sid = "77777777-7777-4777-8777-777777777777"
+    hits = [("user", "第一段有表格")] + \
+           [("user", "填充" * 300) for _ in range(50)] + \
+           [("assistant", "第二段也有表格")]
+    write_session(proj, sid, hits)
+    results = C.ADAPTER.search_text("表格")
+    assert next(results) == sid          # yielded on the first hit, file not read further
+    with pytest.raises(StopIteration):
+        next(results)
+
+
+def test_search_text_handles_empty_keyword_and_no_projects(search_env):
+    assert list(C.ADAPTER.search_text("")) == []
+    assert list(C.ADAPTER.search_text("   ")) == []
+    shutil.rmtree(search_env["home"] / ".claude")
+    assert list(C.ADAPTER.search_text("表格")) == []
+
+
+def test_search_text_skips_unreadable_files(search_env):
+    proj = search_env["proj"]
+    (proj / "88888888-8888-4888-8888-888888888888.jsonl").write_bytes(b"\x00\x01\x02 not json")
+    write_session(proj, "99999999-9999-4999-8999-999999999999", [("user", "有表格")])
+    assert list(C.ADAPTER.search_text("表格")) == ["99999999-9999-4999-8999-999999999999"]
+
+
+def test_search_text_does_not_load_a_whole_file(search_env, monkeypatch):
+    proj = search_env["proj"]
+    write_session(proj, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", [("user", "開頭有表格")])
+    path = proj / "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl"
+    with path.open("a", encoding="utf-8") as f:
+        for _ in range(3000):
+            f.write(json.dumps({"type": "user", "sessionId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                                "message": {"role": "user", "content": "填充" * 200}},
+                               ensure_ascii=False) + "\n")
+    assert path.stat().st_size > 1_000_000
+    seen = []
+    real_open = Path.open
+
+    def spy(self, *args, **kwargs):
+        if self == path:
+            seen.append(kwargs.get("mode", args[0] if args else "r"))
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", spy)
+    assert list(C.ADAPTER.search_text("表格")) == ["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]
+    assert seen == ["r"], seen        # streamed as text, never read_bytes()
+
+
 # --- adapter surface -------------------------------------------------------------
 
 def test_adapter_surface():
@@ -706,6 +830,7 @@ def test_adapter_surface():
     assert hasattr(C.ADAPTER, "summarize")
     assert hasattr(C.ADAPTER, "list_sessions")
     assert hasattr(C.ADAPTER, "last_message")
+    assert hasattr(C.ADAPTER, "search_text")
     assert hasattr(C.ADAPTER, "turns")
     assert hasattr(C.ADAPTER, "native")
     assert hasattr(C.ADAPTER, "start_native")

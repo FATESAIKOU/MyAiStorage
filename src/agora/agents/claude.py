@@ -22,10 +22,12 @@ import re
 import subprocess
 import sys
 import uuid
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 from agora.agents.base import AgentError, Exported, Launch, Listed, Turns, agent_cmd, tool_line
+from agora.store import normalize
 
 FORMAT = "claude-jsonl/1"
 TITLE_MAX = 60
@@ -504,6 +506,44 @@ class ClaudeAgent:
             if text:
                 return o["type"], text[-PREVIEW_MAX:]
         return None
+
+    def search_text(self, keyword: str) -> Iterator[str]:
+        """Session ids whose conversation text contains keyword, yielded as found.
+
+        Streams every project file line by line - never loads one whole - and
+        yields on the first hit in a file, so the caller gets results early.
+        Only user/assistant text counts (tool results and local-command noise
+        do not); matching is NFKC-normalised and case-insensitive, the same way
+        the search index compares. Unreadable files are skipped.
+        """
+        needle = normalize(keyword)
+        if not needle:
+            return
+        try:
+            paths = sorted(projects_dir().glob("*/*.jsonl"))
+        except OSError:
+            return
+        for path in paths:
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                with path.open(encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        kind = _TYPE_RE.search(line)
+                        if not kind or kind.group(1) not in ("user", "assistant"):
+                            continue
+                        try:
+                            o = json.loads(line)
+                        except ValueError:
+                            continue
+                        if _is_noise(o):
+                            continue
+                        text = _line_text(o)
+                        if text and needle in normalize(text):
+                            yield path.stem
+                            break
+            except OSError:
+                continue
 
     def summarize(self, prompt: str, workdir: Path) -> tuple[str, str | None]:
         """One headless `claude -p` that cannot use any tool (design 5.3, review Y3).
