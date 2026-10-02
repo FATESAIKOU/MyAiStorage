@@ -16,7 +16,7 @@
 
 | 順序 | 項目 | 負責 | 狀態 |
 |---|---|---|---|
-| 1 | T1 `command-batch-actions` 的 tasks 1、2、3 | impl2（1）、impl1（2、3） | 進行中。⚠ 00:50 起 HEAD 的 `cache`／`sync` 暫時壞掉（review S2-1），等 impl2 commit cli.py、impl1 接上 pull／push（task 2.1）才好；在那之前不要試用這個 branch |
+| 1 | T1 `command-batch-actions` 的 tasks 1、2、3 | impl2（1）、impl1（2、3） | 進行中。第 1、2 節做完（8f570bd、39984b7 等），review 的 S1-1～S1-4、S2-2～S2-7 修正中；第 3 節進行中。S2-1（HEAD 壞掉）已在 39984b7 修好 |
 | 2 | T1 tasks 4.1 文件、4.2 整合測試實跑、4.3 review 審程式 | 隊員寫文件與跑測試，review 審，PM 看結果 | 等 1 |
 | 3 | T1 歸檔（`openspec archive`） | PM | 等 2 |
 | 4 | T2 轉成 change（需求已定，見 T2-tui-batch.md），review 看 specs | PM 寫、review 看 | 等 3 |
