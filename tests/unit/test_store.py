@@ -109,14 +109,19 @@ def test_outbox_survives_cache_wipe(remote, monkeypatch):  # U-ST-09
     assert store.outbox_count(paths) == 0
 
 
-def test_deleted_remote_session_leaves_index(remote):  # U-ST-12
+def test_deleted_remote_session_stays_and_is_marked(remote):  # U-ST-12, T1 R6
+    """Another machine deleted it. We keep the mirror, the row and the search
+    entry: whether to drop it or send it back is the user's call."""
     paths = store.Paths.from_env()
     ulid = _save(paths, _header())
     assert store.sync(paths).search(T("CSV"))
     import shutil
     shutil.rmtree(remote / "agora" / "sessions" / ulid)
-    assert store.sync(paths).search(T("CSV")) == []
-    assert not (paths.mirror / ulid).exists()
+
+    index = store.sync(paths)
+    assert [u for u, _, _ in index.search(T("CSV"))] == [ulid]
+    assert (paths.mirror / ulid / "session.md").is_file()
+    assert index.missing_in_cloud() == [ulid] and not index.cloud_has(ulid)
 
 
 def test_mirror_holds_only_session_md_and_one_listing(remote):  # U-ST-13

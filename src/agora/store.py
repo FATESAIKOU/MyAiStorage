@@ -28,6 +28,9 @@ from pathlib import Path
 from agora import header as h
 
 SYNC_THROTTLE_S = 300
+#: Bumped when the index's tables change: the index is a cache of the mirror, so
+#: a new shape is rebuilt from the mirror rather than migrated (design, T1 3.1).
+INDEX_VERSION = 2
 
 
 class StoreError(RuntimeError):
@@ -348,12 +351,18 @@ class Index:
     def __init__(self, paths: Paths):
         paths.cache.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(paths.cache / "index.sqlite")
+        if self.db.execute("PRAGMA user_version").fetchone()[0] != INDEX_VERSION:
+            self.db.executescript("DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS fts;"
+                                  " DROP TABLE IF EXISTS cloud_missing;")
+            self.db.execute(f"PRAGMA user_version = {INDEX_VERSION}")
+            self.db.commit()   # sync fills it again from the mirror and the listing
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS sessions (
                 ulid TEXT PRIMARY KEY, md5 TEXT, header TEXT, body TEXT,
                 agent TEXT, source_id TEXT, created TEXT);
             CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
                 ulid UNINDEXED, text, tokenize='trigram');
+            CREATE TABLE IF NOT EXISTS cloud_missing (ulid TEXT PRIMARY KEY);
         """)
 
     def rebuild_from_mirror(self, paths: Paths) -> "Index":
@@ -386,7 +395,28 @@ class Index:
     def drop(self, ulid: str) -> None:
         self.db.execute("DELETE FROM sessions WHERE ulid=?", (ulid,))
         self.db.execute("DELETE FROM fts WHERE ulid=?", (ulid,))
+        self.db.execute("DELETE FROM cloud_missing WHERE ulid=?", (ulid,))
         self.db.commit()
+
+    def mark_missing(self, ulids) -> None:
+        """Which sessions Drive does not have.
+
+        Only ever called with a complete listing (Q4): a half-read drive must not
+        move a single marker, or an offline machine would declare the whole
+        library deleted on the next start.
+        """
+        self.db.execute("DELETE FROM cloud_missing")
+        self.db.executemany("INSERT OR IGNORE INTO cloud_missing VALUES (?)",
+                            [(ulid,) for ulid in sorted(ulids)])
+        self.db.commit()
+
+    def cloud_has(self, ulid: str) -> bool:
+        """Whether Drive still has this session (T1 R6). One we never indexed counts as local."""
+        return self.db.execute("SELECT 1 FROM cloud_missing WHERE ulid=?", (ulid,)).fetchone() is None
+
+    def missing_in_cloud(self) -> list[str]:
+        """The sessions another machine deleted: kept here, searchable, marked."""
+        return [r[0] for r in self.db.execute("SELECT ulid FROM cloud_missing ORDER BY ulid")]
 
     def header(self, ulid: str) -> dict | None:
         row = self.db.execute("SELECT header FROM sessions WHERE ulid=?", (ulid,)).fetchone()
@@ -465,14 +495,26 @@ def _snippet(body: str, kw: str, width: int = 30) -> str:
     return ("…" if start else "") + text + ("…" if pos + len(kw) + width < len(body) else "")
 
 
+def _pending(paths: Paths, ulid: str) -> bool:
+    """A continue is running on this session right now (T1 3.1)."""
+    return (paths.pending / f"{ulid}.json").exists()
+
+
 def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) -> Index:
     """Push the outbox, then pull session.md files whose md5 changed.
 
     Only session.md is mirrored; raws are fetched on demand. A session whose
     raw is missing or has another md5 than its header says is unfinished
     and is left out of the index until the next sync.
+
+    A session Drive no longer has is *not* removed here (T1 R6): the mirror, the
+    index row and its search entry stay, and it is marked instead, so that
+    `pull --not-exist-delete` or `push --not-exist-upload` is a decision rather
+    than a side effect of running any command. Markers move only when the listing
+    came back whole (Q4).
     """
     index = Index(paths)
+    index.rebuild_from_mirror(paths)   # after a version bump the index is empty; the mirror has it
     stamp = paths.state / "last-sync"
     if throttle and stamp.exists() and now() - float(stamp.read_text()) < SYNC_THROTTLE_S:
         return index
@@ -515,13 +557,15 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
             local.unlink(missing_ok=True)   # keep unfinished sessions out of an offline rebuild (G3)
             continue
         index.put(ulid, md5, hdr, body)
-    gone = set(known) - set(remote) - outbox_ulids(paths)
-    if gone and missing:
-        _warn("Drive 上找不到 sessions/，可能是 folder ID 或 token 有問題，先不刪鏡像")
+    if missing:
+        _warn("Drive 上找不到 sessions/，可能是 folder ID 或 token 有問題，標記不動")
     else:
-        for ulid in gone:
-            index.drop(ulid)
-            shutil.rmtree(paths.mirror / ulid, ignore_errors=True)
+        # The listing is complete, so this is the one moment markers may move.
+        # Not up yet and in flight are not "deleted on another machine".
+        staged = outbox_ulids(paths)
+        local = set(known) | set(index.known())
+        index.mark_missing(u for u in local - set(remote)
+                           if u not in staged and not _pending(paths, u))
     _index_outbox(paths, index)
     paths.state.mkdir(parents=True, exist_ok=True)
     stamp.write_text(str(now()))
