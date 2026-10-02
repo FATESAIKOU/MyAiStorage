@@ -162,6 +162,23 @@ def _field(blob: str, key: str):
     return value.get(key) if isinstance(value, dict) else None
 
 
+def _session_directory(session_id: str) -> str | None:
+    """The project directory the database records for one session, if it exists."""
+    connection = _open_readonly(_db_path())
+    if connection is None:
+        return None
+    try:
+        row = connection.execute("select directory from session where id=?",
+                                (session_id,)).fetchone()
+    except sqlite3.Error:
+        _warn_schema()
+        return None
+    finally:
+        connection.close()
+    directory = row[0] if row else None
+    return directory if isinstance(directory, str) and Path(directory).is_dir() else None
+
+
 def _last_reply(stdout: bytes) -> tuple[str | None, str | None]:
     """(session id, last assistant message's text) out of `opencode run --format json`.
 
@@ -361,24 +378,34 @@ class OpencodeAgent:
     # -- running opencode ---------------------------------------------------
 
     def _run(self, argv: list[str], cwd: Path | str | None = None,
-             stdout: int | None = None) -> subprocess.CompletedProcess:
+             stdout: int | None = None,
+             env: dict | None = None) -> subprocess.CompletedProcess:
         """Every call gets a deadline (OC7) and reports it as an AgentError, so a
         wedged opencode becomes a retryable failure instead of a hung command."""
         seconds = _timeout()
+        child_env = {**os.environ, **env} if env else None
         try:
             return subprocess.run(argv, cwd=str(cwd) if cwd else None, timeout=seconds,
+                                  env=child_env,
                                   **({"stdout": stdout, "stderr": subprocess.PIPE}
                                      if stdout is not None else {"capture_output": True}))
         except subprocess.TimeoutExpired:
             raise AgentError(f"opencode 逾時（{seconds} 秒）：{argv[1] if len(argv) > 1 else argv[0]}") from None
 
     def _export_bytes(self, session_id: str, cwd: Path | str | None = None) -> bytes:
-        """`opencode export <id>` with stdout going to a file, stderr apart."""
+        """`opencode export <id>` with stdout going to a file, stderr apart.
+
+        `cwd` is not needed for this to work - opencode finds any session from any
+        directory (measured, including when the session's own project directory no
+        longer exists) - but when it is given, $PWD goes with it, because opencode
+        reads the project from $PWD.
+        """
         with tempfile.TemporaryDirectory(prefix="agora-opencode-") as tmp:
             target = Path(tmp) / "export.json"
             with open(target, "wb") as out:
                 proc = self._run([agent_cmd(self.name), "export", session_id],
-                                 cwd=cwd, stdout=out)
+                                 cwd=cwd, stdout=out,
+                                 env={"PWD": str(cwd)} if cwd else None)
             if proc.returncode != 0:
                 message = (proc.stderr or b"").decode("utf-8", "replace").strip()
                 if "Session not found" in message:
@@ -439,7 +466,17 @@ class OpencodeAgent:
     # -- the Agent protocol ------------------------------------------------
 
     def export(self, session_id: str) -> Exported:
-        raw = self._export_bytes(session_id)
+        try:
+            raw = self._export_bytes(session_id)
+        except AgentError:
+            # opencode 1.18 exports from anywhere, so this is the belt to that
+            # braces: if a version ever scopes export to the current project, the
+            # directory is one read-only lookup away. Retrying there beats losing
+            # the row the interactive mode is showing.
+            elsewhere = _session_directory(session_id)
+            if not elsewhere:
+                raise
+            raw = self._export_bytes(session_id, cwd=Path(elsewhere))
         payload = self._read(raw)
         info = payload.get("info") or {}
         directory = info.get("directory")

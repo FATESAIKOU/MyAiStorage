@@ -1009,3 +1009,28 @@ user／assistant 而且有非空 text part 的；`synthetic` 的 part 略過（�
 結果依 `(路徑, mtime_ns, size)` 記憶化：互動模式每次刷新都會再問一次，而檔案沒變
 時回同一份。讀不到檔案、schema 認不出來、或 SQLite 開不起來，都回空清單／`None`，
 不丟例外——唯讀也代表不會誤寫。
+
+### `export` 找不找得到別的專案的 session
+
+互動模式要在「未匯入」頁顯示整份對話，會呼叫 `ADAPTER.export(session_id)`。這個
+session 可能屬於任何專案，而 agora 從哪個目錄啟動不是它能選的，所以去量了一下
+（**假 HOME＋自己匯入的 session**，沒有碰任何真實 session）：
+
+匯入一個屬於 `/tmp/agora-export-probe/projA` 的 session，然後從四個地方
+`opencode export <id>`：
+
+| 從哪裡跑 | 結果 |
+|---|---|
+| session 自己的專案（projA） | rc=0，內容正確 |
+| 另一個專案（projB） | rc=0，內容正確 |
+| 根本不是專案的目錄（notaproj） | rc=0，內容正確 |
+| **該 session 的專案目錄已被 `rm -rf`** | rc=0，內容正確 |
+
+也就是說 `export` 是「依 id 全域」的，不吃 cwd，`info.directory` 也是從 session 自己
+來的（不是呼叫端的專案）。所以 `export()` 不需要先查資料庫，也不需要設定 cwd／$PWD。
+
+不過那是 1.18.34 的行為。如果以後的版本改成跟 `session list` 一樣只認目前專案，
+互動模式就會整頁讀不出來——所以留了一條**只在失敗時**走的退路：第一次 `export`
+失敗就去資料庫唯讀查那個 id 的 `directory`，有的話帶著 `cwd`＋`$PWD` 再試一次；
+查不到（沒有那列、目錄已經不見、資料庫開不起來）就維持原本的錯誤。平常的成本是零，
+只有第一次失敗才多一次唯讀查詢。

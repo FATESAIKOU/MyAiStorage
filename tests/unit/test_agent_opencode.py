@@ -933,3 +933,88 @@ def test_last_message_joins_every_text_part_in_order(store_db):
     _add_session(db, "ses_parts000000000000c", "/tmp/p", "分段", 3000,
                  turns=[("assistant", [{"type": "text", "text": "第一段"}, {"type": "text", "text": "第二段"}])])
     assert oc.ADAPTER.last_message("ses_parts000000000000c") == ("assistant", "第一段\n\n第二段")
+
+
+# --- export works for a session of any project (T: 閱讀未匯入頁) -----------
+
+def _fake_session_of(home: Path, directory: Path) -> str:
+    """A stored session that lives in `directory`, under the id agora would pass.
+
+    The fake store keys on the id it is asked for, so the fixture is re-stored
+    under its real id: the database is keyed by real ids too.
+    """
+    payload = stored(home, "default")
+    session_id = payload["info"]["id"]
+    payload["info"]["directory"] = str(directory)
+    (home / "opencode-sessions" / f"{session_id}.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return session_id
+
+
+def test_export_needs_no_cwd_for_another_projects_session(fake, store_db, workdir,
+                                                           monkeypatch, tmp_path):
+    """The opencode we measured finds any session from any directory: here from
+    somewhere that is not even a project."""
+    db, _ = store_db
+    session_id = _fake_session_of(fake, workdir)
+    _add_session(db, session_id, str(workdir), "別的專案", 1000)
+    db.close()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    assert oc.ADAPTER.export(session_id).dir == str(workdir)
+
+
+def test_export_retries_in_the_projects_own_directory(fake, store_db, workdir,
+                                                      monkeypatch, tmp_path):
+    """The belt to those braces: if an opencode only knew $PWD's project, the retry
+    finds the directory in the database and tries there."""
+    db, _ = store_db
+    session_id = _fake_session_of(fake, workdir)
+    _add_session(db, session_id, str(workdir), "別的專案", 1000)
+    db.close()
+    monkeypatch.setenv("FAKE_OPENCODE_EXPORT_SCOPE", "project")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    assert oc.ADAPTER.export(session_id).dir == str(workdir)
+    tried = [line for line in _calls(fake, "export")]
+    assert len(tried) == 2                      # once from here, once from there
+    assert f'"cwd": "{workdir}"' in tried[1]     # and $PWD went with it
+
+
+def test_export_gives_up_when_the_directory_is_gone(fake, store_db, workdir,
+                                                    monkeypatch, tmp_path):
+    """The database knows a directory that no longer exists: no retry, the error
+    stands - the reading view reports it rather than showing an empty session."""
+    db, _ = store_db
+    session_id = _fake_session_of(fake, workdir)
+    gone = tmp_path / "專案被刪掉了"
+    _add_session(db, session_id, str(gone), "消失的", 1000)
+    db.close()
+    monkeypatch.setenv("FAKE_OPENCODE_EXPORT_SCOPE", "project")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(AgentError, match="找不到"):
+        oc.ADAPTER.export(session_id)
+    assert len(_calls(fake, "export")) == 1      # no second try
+
+
+def test_export_does_not_retry_a_session_the_database_never_heard_of(fake, workdir,
+                                                                    monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "no-store"))
+    monkeypatch.setenv("FAKE_OPENCODE_EXPORT_SCOPE", "project")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(AgentError, match="找不到"):
+        oc.ADAPTER.export("default")
+    assert len(_calls(fake, "export")) == 1
+
+
+def _calls(home: Path, subcommand: str) -> list[str]:
+    """The fake records every invocation: `export <id>` lines from its log."""
+    log = home / "opencode-calls.log"
+    if not log.exists():
+        return []
+    return [line for line in log.read_text().splitlines() if f'"{subcommand}"' in line]

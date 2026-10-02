@@ -30,6 +30,7 @@ FAKE_OPENCODE_DROP_PART=<n>  drop the <n>th part of every message but keep the
                          messages: what a part-id collision looks like
 FAKE_OPENCODE_SLEEP=<s>  sleep before doing anything (for timeout tests)
 FAKE_OPENCODE_LEAVE=<id> import refuses: "Expected a string starting with msg"
+FAKE_OPENCODE_EXPORT_SCOPE=project  export only finds sessions of $PWD's project
 """
 
 from __future__ import annotations
@@ -119,6 +120,12 @@ def do_export(params: list[str]):
     if os.environ.get("FAKE_OPENCODE_FAIL") == "export":
         die("injected export failure")
     session_id = params[0]
+    if os.environ.get("FAKE_OPENCODE_EXPORT_SCOPE") == "project":
+        # An opencode that only knows the current project's sessions - what
+        # `opencode session list` does, if export ever followed it.
+        stored = load(session_id)
+        if os.environ.get("PWD", "") != (stored.get("info") or {}).get("directory"):
+            die(f"Error: Session not found: {session_id}")
     print(f"Exporting session: {session_id}", file=sys.stderr)
     sys.stdout.write(json.dumps(load(session_id), ensure_ascii=False))
 
