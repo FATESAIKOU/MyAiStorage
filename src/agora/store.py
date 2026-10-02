@@ -13,6 +13,7 @@ session as unfinished and skips it.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -563,8 +564,22 @@ def _snippet(body: str, kw: str, width: int = 30) -> str:
 
 
 def continuing(paths: Paths, ulid: str) -> bool:
-    """A continue is running on this session right now (T1 3.1)."""
-    return (paths.pending / f"{ulid}.json").exists()
+    """A continue is running on this session right now (T1 3.1, review G1).
+
+    The record's own lock, not its existence: a run whose agent is gone, or one
+    whose `_finish` keeps failing, leaves the record behind for good, and a file
+    that merely exists would keep that session from being marked, from being
+    pulled away, and from being deleted - for ever.
+    """
+    path = paths.pending / f"{ulid}.json"
+    if not path.exists():
+        return False
+    try:
+        with open(path) as f:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True        # somebody holds it: a live continue (C1)
+    return False           # nobody does: what is left of an interrupted one
 
 
 def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,

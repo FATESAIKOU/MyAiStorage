@@ -986,14 +986,21 @@ def test_continue_of_a_marked_session_is_refused_even_offline(env, capsys, monke
 
 
 def test_a_session_in_the_outbox_is_not_taken_for_deleted(env, capsys, monkeypatch):
-    """F3: ours, not up yet. A throttled sync may not have pushed it, but that is
-    not another machine's delete."""
-    _, a, _ = _import(capsys)
+    """F3: ours, not up yet - and *not on Drive at all*, so only the outbox check can
+    tell it apart from another machine's delete (G4: the earlier version of this test
+    edited a session Drive still had, which passed either way)."""
     paths = store.Paths.from_env()
+    run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions").is_dir()   # listing works
+    env.sessions["ses_b"] = ["另一個", "對話"]
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")     # from now on every upload fails
+    code, a, err = run(capsys, "import", "session", "--external-session-id", "ses_b",
+                       "--agent", "opencode")
+    assert code == 3, (code, err)                          # 3 = kept in the outbox
     ulid = a.split(":")[1]
-    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")     # the upload keeps failing
-    store.stage(paths, store.Index(paths).header(ulid), "## user\n改過了\n", None)
     assert ulid in store.outbox_ulids(paths)
+    assert not (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid).exists()
+
     code, _, err = run(capsys, "edit", "session", a, "--header", "title=改了")
     assert code != 1 or "雲端沒有" not in err, "an unuploaded session is not a deleted one"
 
@@ -1008,6 +1015,56 @@ def test_delete_refuses_a_session_that_is_being_continued(env, capsys):
     assert code == 1 and "正在接續" in err
     assert store.Index(paths).header(a.split(":")[1]) is not None
     lock.close()
+
+
+def test_delete_goes_through_when_the_pending_record_is_a_leftover(env, capsys):
+    """G1: the file exists but nobody holds its lock - a continue that could not be
+    finished. It must not keep this session from being deleted for ever."""
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    record = {"agora_id": a, "agent": "opencode", "agent_session_id": "ses_gone",
+              "dir": "/tmp", "before_count": 1, "parent": {"id": a, "raw_md5": None}}
+    _, lock = cli._write_pending(paths, record)
+    lock.close()                      # a run that could not be finished leaves this
+
+    code, out, err = run(capsys, "delete", "session", a, "--yes")
+    assert code == 0 and out.strip() == a
+    assert "中斷的接續沒補存成功" in err
+    assert store.Index(paths).header(a.split(":")[1]) is None
+
+
+def test_editing_one_the_editor_kept_open_while_it_vanished(env, capsys, monkeypatch):
+    """F8: $EDITOR can be open for an hour; Drive is asked again before saving."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    store.fetch_raw(store.Paths.from_env(), store.Drive(store.Paths.from_env()), ulid,
+                    store.Index(store.Paths.from_env()).header(ulid))
+    import shutil
+    from pathlib import Path as P
+    shutil.rmtree(P(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid)
+
+    def editor(old):                       # the delete happens while it is open
+        return {**old, "title": "改好了"}
+
+    monkeypatch.setattr(cli, "_edit_in_editor", editor)
+    code, _, err = run(capsys, "edit", "session", a)
+    assert code == 1 and "雲端沒有" in err
+
+
+def test_continue_and_edit_survive_a_drive_without_a_sessions_folder(env, capsys, monkeypatch):
+    """F2: no sessions/ is "do not know", not a crash (and not a TypeError)."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    from pathlib import Path as P
+    shutil.rmtree(P(os.environ["FAKE_REMOTE"]) / "agora" / "sessions")
+    # Either outcome is fine (the raw really is gone); what must not happen is the
+    # TypeError that `ulid not in None` used to raise - and then every later
+    # command would fail the same way in `recover_pending` (F2).
+    for argv in (("continue", "session", a, "--agent", "opencode"),
+                 ("edit", "session", a, "--header", "title=x")):
+        code, _, err = run(capsys, *argv)
+        assert code in (0, 1, 2), (argv, code, err)
+        assert "TypeError" not in err and "非預期的錯誤" not in err, argv
 
 
 def test_a_continue_whose_session_vanished_keeps_the_work_as_its_own_session(env, capsys):

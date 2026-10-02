@@ -6,6 +6,7 @@ nor the user's own agent sessions.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -475,6 +476,24 @@ def test_not_exist_delete_keeps_what_has_not_been_uploaded(drive, capsys):
 
 
 def test_not_exist_delete_keeps_a_session_being_continued(drive, capsys):
+    """Only a *locked* record counts: a leftover from a crashed continue does not
+    keep a session from being pulled away for ever (review G1)."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    _lost_on_drive(paths, drive, ulid)
+    paths.pending.mkdir(parents=True, exist_ok=True)
+    lock = open(paths.pending / f"{ulid}.json", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+
+    cache.pull(paths, [ulid], {}, not_exist_delete=True)
+    assert "正在接續，不能刪" in capsys.readouterr().err
+    assert (paths.mirror / ulid / "session.md").is_file()
+    lock.close()
+
+
+def test_not_exist_delete_goes_through_when_the_pending_record_is_a_leftover(drive, capsys):
+    """G1: nobody holds this lock - the continue could not be finished. That must not
+    block the delete for ever."""
     paths = store.Paths.from_env()
     ulid = _on_drive(paths)
     _lost_on_drive(paths, drive, ulid)
@@ -482,7 +501,20 @@ def test_not_exist_delete_keeps_a_session_being_continued(drive, capsys):
     (paths.pending / f"{ulid}.json").write_text("{}", encoding="utf-8")
 
     cache.pull(paths, [ulid], {}, not_exist_delete=True)
-    assert "正在接續，不能刪" in capsys.readouterr().err
+    assert "本機的副本已刪" in capsys.readouterr().err
+    assert not (paths.mirror / ulid).exists()
+
+
+def test_not_exist_delete_refuses_when_there_is_no_sessions_folder_at_all(drive, capsys):
+    """G3: Drive without sessions/ is a broken folder id or token, not a deletion."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    assert cache.pull(paths, [ulid], {}) == (1, 0)      # a local copy to lose
+    import shutil
+    shutil.rmtree(drive / "agora" / "sessions")
+
+    assert cache.pull(paths, [ulid], {}, not_exist_delete=True) == (0, 1)
+    assert "不能確定它是被刪掉的" in capsys.readouterr().err
     assert (paths.mirror / ulid / "session.md").is_file()
 
 

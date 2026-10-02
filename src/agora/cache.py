@@ -186,7 +186,7 @@ def _absent(paths: store.Paths, ulid: str, said: str) -> None:
 def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
                 remote: dict | None, ulid: str, not_exist_delete: bool) -> None:
     """One `agora:` id from Drive, into the mirror and the index."""
-    if remote is None or ulid not in remote:
+    if ulid not in (remote or {}):
         if not not_exist_delete:
             _absent(paths, ulid, "本機的不動")
             return
@@ -196,6 +196,11 @@ def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
         if store.continuing(paths, ulid):
             _line(f"{ulid} 正在接續，不能刪")
             return
+        if remote is None:
+            # G3: Drive has no sessions/ at all - a broken folder id or token, not
+            # evidence of a delete (N12). sync and `_lost_in_cloud` both read it as
+            # "do not know"; deleting on it would throw away a real session.
+            raise store.StoreError("Drive 上找不到 sessions/，不能確定它是被刪掉的（先修好連線再說）")
         store.forget_local(paths, ulid)
         _line(f"{ulid} 雲端沒有，本機的副本已刪")
         return
@@ -214,6 +219,8 @@ def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
         return
     if (h.agora_of(hdr).get("raw") or {}).get("file"):
         store.fetch_raw(paths, drive, ulid, hdr)   # a no-op when the local copy is the right one
+    # `mirror_one` already indexed it; this second pass is what picks up the raw
+    # that `fetch_raw` may just have fetched (N8), so the row has the whole session.
     store.index_file(index, paths.mirror / ulid / "session.md")   # searchable again
 
 

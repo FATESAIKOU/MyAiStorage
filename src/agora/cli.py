@@ -743,6 +743,11 @@ def cmd_delete(args, paths: store.Paths) -> int:
             # F4: an agent is working on it right now. Deleting here would only make
             # `_finish` save the result elsewhere; wait until that run is over.
             raise InputError(f"{agora_id} 正在接續，等它結束再刪")
+        stale = paths.pending / f"{_ulid_of(agora_id)}.json"
+        if stale.exists():
+            # G1: nobody holds this one - what is left of a continue that could not
+            # be finished. It must not block the delete for ever.
+            print(f"[agora] {agora_id} 有一筆中斷的接續沒補存成功（{stale}），照樣刪", file=sys.stderr)
         if index.header(_ulid_of(agora_id)) is not None:
             headers[agora_id] = index.header(_ulid_of(agora_id))
         elif _ulid_of(agora_id) in gone:

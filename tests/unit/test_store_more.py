@@ -202,18 +202,35 @@ def test_a_mark_that_is_already_there_survives_a_broken_listing(remote, monkeypa
 def test_a_session_in_the_outbox_is_not_marked(remote, monkeypatch, capsys):  # L4, Q2
     """Not up yet is not "deleted on another machine", even when the listing works."""
     paths = store.Paths.from_env()
+    _save(paths, _header("先讓 Drive 上有 sessions/"))       # F6: without this the listing is
+    capsys.readouterr()                                   # None and no marker moves anyway
     folder = store.stage(paths, _header(), "## user\n還沒上傳的內容\n", None)
     ulid = folder.name
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")       # the upload fails, the listing does not
-    capsys.readouterr()
     assert ulid in store.outbox_ulids(paths)
-    store.remember(paths, folder)      # F6: it has to be in the index, or there is nothing to mark
+    store.remember(paths, folder)      # it has to be in the index, or there is nothing to mark
     assert ulid in store.Index(paths).known()
-    assert store.sync(paths).missing_in_cloud() == []
-    assert ulid in store.outbox_ulids(paths)               # still staged, still not marked
-    monkeypatch.delenv("FAKE_RCLONE_FAIL")
-    store.push_one(store.Drive(paths), folder)
-    assert store.sync(paths).missing_in_cloud() == []
+
+    index = store.sync(paths)
+    assert index.header(ulid) is not None
+    assert index.missing_in_cloud() == []                  # ours, not another machine's delete
+    assert ulid in store.outbox_ulids(paths)               # and it really is still staged
+
+
+def test_a_staged_session_the_index_cannot_read_is_not_marked_either(remote, monkeypatch, capsys):
+    """F6/G4: here the exclusion in `sync` is the *only* thing protecting the session -
+    `_index_outbox` cannot index a broken session.md, so nothing clears the marker
+    afterwards. Without the exclusion this one is marked as deleted on Drive."""
+    paths = store.Paths.from_env()
+    _save(paths, _header("先讓 Drive 上有 sessions/"))
+    capsys.readouterr()
+    folder = store.stage(paths, _header(), "## user\n還沒上傳\n", None)
+    ulid = folder.name
+    (folder / "session.md").write_text("壞掉的 session.md", encoding="utf-8")
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")
+
+    index = store.sync(paths)
+    assert index.missing_in_cloud() == []                  # not marked: it is ours
 
 
 def test_fetch_raw_refetches_session_md(remote, tmp_path):  # U-ST-21, N8

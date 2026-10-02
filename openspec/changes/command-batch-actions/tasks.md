@@ -31,6 +31,7 @@
 - [x] 3.6 S1-4b：purge 失敗時再列檔確認，列檔也失敗就不算已刪（review T1-sec1）
 - [x] 3.7 review T1-sec3 的 M1～M3 與 L4：M1 寫回前直接問 Drive（continue／edit 開始前、agent 結束後各一次；中途被刪就另存新 Session，parents 指向原本的，原本保持被刪）、M2 `--not-exist-delete` 對 agent id 先確認 agent 真的沒有了否則照常 pull、M3 索引版本不同一律從鏡像重建（不看是不是空的）、L4 補「原本的標記在列檔失敗或 sessions/ 不見時不變」與 outbox 不被標記的測試；spec 補「接續到一半被別台刪掉」的 scenario
 - [x] 3.8 review T1-sec3 的 F1～F7：F1 continue／edit／`_finish` **同時**看標記與 Drive（離線不再放行已標記的 Session，補離線測試）、F2 沒有 `sessions/` 時當成不知道、F3 在 outbox 的不算雲端沒有、F4 delete 遇到接續中的拒絕、`_finish` 連「索引裡沒有」也另存新的（parents 用 pending 的 parent）、F5 agent 清單讀不到時不刪快取、F6 outbox 不被標記的測試補上「先進索引」、F7 design 5.4 第 6 步與 5.10 的句子對齊；順手補 F8（edit 存檔前再查一次）、F9（docstring 說明為什麼是完整列檔）
+- [x] 3.9 review T1-sec3 第二次確認的 G1、G3、G4：G1 `continuing()` 改成真的拿 pending 記錄的 flock（拿不到才算正在接續），所以收不了尾的 pending 不再讓 delete 永遠被擋——拿得到鎖就照刪並提示「有一筆中斷的接續沒補存成功」；G3 `pull --not-exist-delete` 遇到 Drive 上沒有 `sessions/` 時拒絕那一個（那是 folder id／token 的問題，不是刪除的證據）；G4 把 F2、F3、F6、F8 的測試補到真的守得住那個修正（兩個都用 mutation 確認過：拿掉修正測試會紅）
 
 ## 4. 收尾（PM 驗收，review 審）
 
