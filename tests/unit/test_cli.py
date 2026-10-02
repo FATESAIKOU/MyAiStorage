@@ -307,6 +307,43 @@ def test_merge_cache_notices_a_different_model(env, capsys, monkeypatch):  # rev
     assert len(env.prompts) == calls + 2              # both sources rewritten
 
 
+def test_merge_cache_notices_a_different_agent(env, capsys, monkeypatch):
+    """Q6: the agent is part of a summary's identity - another agent's summary is not
+    this one's to reuse. The model setting is pinned from the start, so the agent name
+    is the only thing that differs between the two runs."""
+    monkeypatch.setattr(cli, "_model_setting", lambda name: "some/model")
+    monkeypatch.setattr(cli, "load_agent", lambda name: _named(env, name))
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    calls = len(env.prompts)
+
+    code, _, err = run(capsys, "merge", "session", a, b, "--agent", "claude")
+    assert code == 0 and len(env.prompts) == calls + 2, "another agent writes its own"
+    assert "沿用" not in err
+
+
+def test_merge_cache_notices_a_different_prompt_version(env, capsys, monkeypatch):
+    """Q6: the prompt version is part of it too - a new prompt must be re-sent."""
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    calls = len(env.prompts)
+    monkeypatch.setattr(cli, "SUMMARY_PROMPT_VERSION", cli.SUMMARY_PROMPT_VERSION + 1)
+
+    code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert code == 0 and len(env.prompts) == calls + 2
+    assert "沿用" not in err
+
+
+def _named(agent, name):
+    """The same fake agent, answering to another name (merge asks it by name)."""
+    agent.name = name
+    return agent
+
+
 def test_merge_cache_refuses_a_broken_summary(env, capsys):  # re-validate before reuse
     _, a, _ = _import(capsys)
     env.sessions["ses_b"] = ["讀取 CSV", "好"]
@@ -1207,6 +1244,21 @@ def test_delete_of_one_the_cloud_lost_removes_only_the_local_copy(env, capsys):
     code, out, err = run(capsys, "delete", "session", a, "--yes")
     assert code == 0 and out.strip() == a and "只刪本機這份" in err
     assert store.Index(store.Paths.from_env()).header(ulid) is None
+
+
+def test_a_child_the_cloud_lost_does_not_make_import_branch(env, capsys):
+    """The other half of「不算成別人的子 Session」: a session whose only child was
+    deleted on another machine has not branched, so importing its source again
+    updates it in place instead of forking a new Session off it."""
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    _, merge, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    _lose_it_on_drive(capsys, merge)          # the child is gone from Drive, marked here
+
+    env.sessions["ses_a"].append("又聊了一句")    # the source grew, so this is an update
+    code, out, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code == 0 and out.strip() == a, "updated in place, no new branch"
 
 
 def test_importing_the_same_source_again_makes_a_new_session(env, capsys):
