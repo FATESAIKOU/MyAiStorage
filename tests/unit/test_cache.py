@@ -439,3 +439,82 @@ def test_pull_leaves_a_session_that_is_still_in_the_outbox_alone(drive, capsys):
     assert "不覆蓋" in capsys.readouterr().err
     assert not (paths.mirror / ulid / "session.md").exists()
     assert (paths.outbox / ulid).is_dir()
+
+
+# --- 3.2 the two flags: delete or revive, only when asked -------------------
+
+
+def _lost_on_drive(paths, drive, ulid: str) -> None:
+    """A session another machine deleted: mirrored and indexed here, gone from there."""
+    cache.pull(paths, [ulid], {})
+    shutil.rmtree(sessions_on(drive) / ulid)
+    store.sync(paths)          # the sync that notices, and marks it
+
+
+def test_not_exist_delete_drops_the_local_copy(drive, capsys):
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    _lost_on_drive(paths, drive, ulid)
+
+    assert cache.pull(paths, [ulid], {}, not_exist_delete=True) == (1, 0)
+    assert "本機的副本已刪" in capsys.readouterr().err
+    assert not (paths.mirror / ulid).exists()
+    assert store.Index(paths).header(ulid) is None
+
+
+def test_not_exist_delete_keeps_what_has_not_been_uploaded(drive, capsys):
+    """Q2: work that never reached Drive is not something to tidy away."""
+    paths = store.Paths.from_env()
+    hdr = _header()
+    ulid = hdr["id"].split(":", 1)[1]
+    store.stage(paths, hdr, "## user\n還沒上傳\n", b'{"x": 9}')
+
+    cache.pull(paths, [ulid], {}, not_exist_delete=True)
+    assert "還沒上傳，不能刪" in capsys.readouterr().err
+    assert (paths.outbox / ulid).is_dir()
+
+
+def test_not_exist_delete_keeps_a_session_being_continued(drive, capsys):
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    _lost_on_drive(paths, drive, ulid)
+    paths.pending.mkdir(parents=True, exist_ok=True)
+    (paths.pending / f"{ulid}.json").write_text("{}", encoding="utf-8")
+
+    cache.pull(paths, [ulid], {}, not_exist_delete=True)
+    assert "正在接續，不能刪" in capsys.readouterr().err
+    assert (paths.mirror / ulid / "session.md").is_file()
+
+
+def test_not_exist_delete_for_an_agent_id_drops_its_cached_text(drive, capsys):
+    """For an agent id the flag means "the agent does not have this one any more"."""
+    paths = store.Paths.from_env()
+    agent = Agent({"s": ["問", "答"]}, name="claude")
+    cache.local_reading(paths, agent, "s", "2026-10-02T00:00:00Z")
+
+    assert cache.pull(paths, ["claude:s"], {"claude": agent}, not_exist_delete=True) == (1, 0)
+    assert "快取已刪" in capsys.readouterr().err
+    assert not (paths.reading / "claude" / "s.md").exists()
+
+
+def test_not_exist_upload_sends_the_session_back(drive):
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    _lost_on_drive(paths, drive, ulid)
+    assert store.Index(paths).missing_in_cloud() == [ulid]
+
+    assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (1, 0)
+    assert _uploaded(drive, ulid) == {"session.md", _raw_name_on_drive(drive, ulid)}
+    assert store.sync(paths).missing_in_cloud() == []      # and the marker is gone
+
+
+def test_not_exist_upload_refuses_when_the_raw_is_not_here(drive, capsys):
+    """Half a session is not a revived session: the raw is the point of it."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    _lost_on_drive(paths, drive, ulid)
+    (paths.mirror / ulid / _raw_name(paths, ulid)).unlink()
+
+    assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (0, 1)
+    assert "不傳半套" in capsys.readouterr().err
+    assert not (sessions_on(drive) / ulid).exists()
