@@ -1,10 +1,13 @@
-"""The interactive mode's plain parts: layout, rows, previews, keys (design 5.9)."""
+"""The interactive mode (design 5.9): its plain parts, and the Textual screen driven by key presses."""
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 from agora import header as h
 from agora import store, tui
-from agora.agents.base import Listed
+from agora.agents.base import Exported, Listed
 
 
 def _hdr(ulid: str, title: str, relation: str = "import", agent: str | None = "opencode", sid: str = "ses_a") -> dict:
@@ -28,8 +31,8 @@ def _index(*sessions: tuple[dict, str]) -> tuple[store.Paths, store.Index]:
 
 
 class FakeAgent:
-    def __init__(self, name, listed, last=None):
-        self.name, self.listed, self.last = name, listed, last
+    def __init__(self, name, listed, last=None, texts=None):
+        self.name, self.listed, self.last, self.texts = name, listed, last, texts or {}
 
     def list_sessions(self):
         return self.listed
@@ -39,18 +42,27 @@ class FakeAgent:
             raise RuntimeError("unreadable")
         return self.last
 
+    def export(self, session_id):
+        msgs = self.texts.get(session_id, ["問", "答"])
+        return Exported(session_id=session_id, raw=json.dumps({"m": msgs}, ensure_ascii=False).encode())
 
-def test_cjk_takes_two_columns():
-    assert tui.width("表格a") == 5
-    assert tui.clip("表格表格", 5) == "表格 "            # never half a character
-    assert tui.wrap("表格表格", 4) == ["表格", "表格"]
+    def turns(self, raw):
+        msgs = json.loads(raw)["m"]
+        return [("user" if i % 2 == 0 else "assistant", [m]) for i, m in enumerate(msgs)]
+
+    def search_text(self, keyword):
+        yield from (sid for sid, msgs in self.texts.items() if any(keyword in m for m in msgs))
 
 
-def test_preview_on_the_right_when_wide_below_when_narrow():
-    wide = tui.layout(40, 120)
-    assert wide["list"][0] == wide["preview"][0] and wide["preview"][1] > wide["list"][3] - 1
-    tall = tui.layout(40, 80)
-    assert tall["list"][1] == tall["preview"][1] == 0 and tall["preview"][0] > tall["list"][2]
+# --- the plain parts -----------------------------------------------------------
+
+def test_rows_carry_their_last_update():  # feedback 10
+    _, index = _index((_hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "一"), "## user\nx\n"))
+    row = tui.agora_rows(index, [])[0]
+    assert row.cells[:3] == ["AAAAAAAA", "一", "opencode"] and row.cells[3]
+    agent = FakeAgent("claude", [Listed("s1", "/tmp/p", "標題", "2026-10-02T03:04:00Z")])
+    cells = tui.import_rows(index, [agent])[0].cells
+    assert cells[1:3] == ["標題", "claude"] and cells[3].endswith(":04") and cells[4] == "/tmp/p"
 
 
 def test_import_tab_lists_only_sessions_not_in_agora():
@@ -58,43 +70,67 @@ def test_import_tab_lists_only_sessions_not_in_agora():
     agent = FakeAgent("opencode", [Listed("ses_in", "/tmp/p", "已匯入", "2026-10-01T00:00:00Z"),
                                    Listed("ses_new", "/tmp/q", "新的", "2026-10-02T00:00:00Z"),
                                    Listed("ses_old", None, None, "2026-09-01T00:00:00Z")])
+    assert [r.key for r in tui.import_rows(index, [agent])] == ["opencode:ses_new", "opencode:ses_old"]
+
+
+def test_import_tab_leaves_out_agoras_own_copies():  # review T5
+    paths, index = _index()
+    paths.state.mkdir(parents=True, exist_ok=True)
+    (paths.state / "unsaved-launches").write_text("opencode:ses_copy\n")
+    agent = FakeAgent("opencode", [Listed("ses_copy", "/tmp/p", "複本", None),
+                                   Listed("ses_sum", str(paths.state / "summarize"), "要約用", None),
+                                   Listed("ses_real", "/tmp/p", "真的", None)])
+    assert [r.key for r in tui.import_rows(index, [agent], paths)] == ["opencode:ses_real"]
+
+
+def test_a_session_talked_to_after_its_import_comes_back_marked():
+    _, index = _index((_hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "舊的", sid="ses_old"), "## user\nx\n"),
+                      (_hdr("01EEEEEEEEEEEEEEEEEEEEEEEE", "沒動", sid="ses_same"), "## user\nx\n"))
+    agent = FakeAgent("opencode", [Listed("ses_old", "/tmp/p", "舊的", "2026-10-03T00:00:00Z"),
+                                   Listed("ses_same", "/tmp/p", "沒動", "2026-10-01T00:00:00Z")])
     rows = tui.import_rows(index, [agent])
-    assert [r.key for r in rows] == ["opencode:ses_new", "opencode:ses_old"]      # newest first
+    assert [(r.key, r.cells[1]) for r in rows] == [("opencode:ses_old", "↻ 舊的")]
+
+
+def test_a_failing_adapter_leaves_the_others_list(capsys):  # review U1
+    _, index = _index()
+
+    class Broken(FakeAgent):
+        def list_sessions(self):
+            raise ValueError("odd file")
+    rows = tui.import_rows(index, [Broken("claude", []), FakeAgent("opencode", [Listed("ses_ok", None, "好", None)])])
+    assert [r.key for r in rows] == ["opencode:ses_ok"] and "claude 的 session 清單讀不到" in capsys.readouterr().err
+
+
+def test_filter_by_words_or_by_content_matches():
+    rows = [tui.Row(f"agora:{n}", [n], f"{n} 表格" if n != "c" else n) for n in "abc"]
+    assert [r.key for r in tui.filtered(rows, "表格")] == ["agora:a", "agora:b"]
+    assert [r.key for r in tui.filtered(rows, "", {"agora:c"})] == ["agora:c"]
 
 
 def test_previews_show_the_whole_history_and_never_fail():
     normal = _hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "一般")
     paths, index = _index((normal, "## user\n第一句\n\n## assistant\n最後的回答\n"))
     pinned, history = tui.agora_preview(paths, index, normal["id"])
-    assert pinned == ["dir   /tmp/p", "tags  驗收"]
-    assert history[0] == "## user" and history[-1] == "最後的回答"              # the whole thing
-    pinned, history = tui.import_preview(FakeAgent("claude", [], ("assistant", "好\n了")), "s")
-    assert pinned[0] == "最後一則（assistant）" and history == ["好", "了"]
-    assert tui.import_preview(FakeAgent("claude", [], None), "s")[1] == []   # nothing stored: no preview
-    assert tui.import_preview(FakeAgent("claude", [], "boom"), "s")[1] == []
+    assert "dir /tmp/p" in pinned and "tags 驗收" in pinned
+    assert history.startswith("## user") and history.endswith("最後的回答")
+    pinned, history = tui.import_preview(FakeAgent("claude", [], ("assistant", "好")), "s")
+    assert pinned.startswith("最後一則（assistant）") and history == "## assistant\n好"
+    assert tui.import_preview(FakeAgent("claude", [], None), "s") == ("", "")
+    assert tui.import_preview(FakeAgent("claude", [], "boom"), "s")[1] == ""
+    pinned, history = tui.import_preview(FakeAgent("claude", [], texts={"s": ["問題", "回答"]}), "s", full=True)
+    assert "## user\n問題" in history and history.endswith("回答")
 
 
-def test_the_preview_opens_at_the_bottom_and_scrolls():
-    lines = [str(n) for n in range(10)]
-    assert tui.window(lines, 3, 0) == (["7", "8", "9"], 0)
-    assert tui.window(lines, 3, 2) == (["5", "6", "7"], 2)
-    assert tui.window(lines, 3, 99) == (["0", "1", "2"], 7)                  # kept within range
-    assert tui.window(lines[:2], 3, 5) == (["0", "1"], 0)
-
-
-def test_shift_tab_moves_the_keys_to_the_preview():
-    s = _state()
-    tui.handle(s, "BTAB")
-    assert s.focus == "preview"
-    tui.handle(s, "UP")
-    tui.handle(s, "PGUP")
-    assert s.back == 11 and s.cursor == 0                    # scrolls, the list does not move
-    assert tui.handle(s, "d") is None                        # list actions are off here
-    tui.handle(s, "G")
-    assert s.back == 0
-    tui.handle(s, "BTAB")
-    tui.handle(s, "DOWN")
-    assert s.focus == "list" and s.cursor == 1 and s.back == 0
+def test_actions_and_what_they_run():
+    rows = [tui.Row("agora:a", ["a"], "a"), tui.Row("agora:b", ["b"], "b")]
+    assert tui.argv_for("merge", rows, "claude", None) == [["merge", "session", "agora:a", "agora:b", "--agent", "claude"]]
+    assert tui.argv_for("delete", rows[:1], None, None) == [["delete", "session", "agora:a", "--yes"]]
+    assert tui.argv_for("continue", rows[:1], "opencode", "/w") == [
+        ["continue", "session", "agora:a", "--agent", "opencode", "--dir", "/w"]]
+    imp = [tui.Row("opencode:ses_x", ["x"], "x", "opencode")]
+    assert tui.argv_for("import", imp, None, None) == [
+        ["import", "session", "--external-session-id", "ses_x", "--agent", "opencode"]]
 
 
 def test_setup_asks_for_rclone_then_for_authorization(monkeypatch, tmp_path):
@@ -108,67 +144,6 @@ def test_setup_asks_for_rclone_then_for_authorization(monkeypatch, tmp_path):
     assert tui.setup_needed(paths) is None
 
 
-def _state():
-    rows = {"agora": [tui.Row(f"agora:{n}", [n], f"{n} 表格" if n != "c" else n) for n in "abc"],
-            "import": [tui.Row(f"opencode:ses_{n}", [n], n, "opencode") for n in "xy"]}
-    return tui.State(rows=rows)
-
-
-def test_keys_move_mark_and_switch_tabs():
-    s = _state()
-    assert tui.handle(s, "DOWN") is None and s.current().key == "agora:b"
-    tui.handle(s, " ")                                  # marks b, moves to c
-    assert s.marked == {"agora:b"} and s.current().key == "agora:c"
-    tui.handle(s, "\t")
-    assert s.tab == "import" and s.cursor == 0
-    tui.handle(s, "\t")
-    assert s.tab == "agora"
-
-
-def test_filter_typing():
-    s = _state()
-    for key in "/表格\n":
-        tui.handle(s, key)
-    assert [r.key for r in s.shown()] == ["agora:a", "agora:b"] and not s.editing
-    tui.handle(s, "/")
-    tui.handle(s, "ESC")
-    assert s.filter == "" and len(s.shown()) == 3
-
-
-def test_actions_and_what_they_run():
-    s = _state()
-    assert tui.handle(s, "m")[0] == "say"               # merge needs two marked
-    tui.handle(s, " ")
-    tui.handle(s, " ")
-    action, rows = tui.handle(s, "m")
-    assert action == "merge" and [r.key for r in rows] == ["agora:a", "agora:b"]
-    assert tui.argv_for("merge", rows, "claude", None) == [["merge", "session", "agora:a", "agora:b", "--agent", "claude"]]
-    action, rows = tui.handle(s, "d")
-    assert action == "delete" and len(rows) == 1         # never several at once
-    assert tui.argv_for("delete", rows, None, None) == [["delete", "session", rows[0].key, "--yes"]]
-    action, rows = tui.handle(s, "\n")
-    assert tui.argv_for(action, rows, "opencode", "/w") == [
-        ["continue", "session", rows[0].key, "--agent", "opencode", "--dir", "/w"]]
-    tui.handle(s, "\t")
-    action, rows = tui.handle(s, "\n")                  # nothing marked: the row under the cursor
-    assert tui.argv_for(action, rows, None, None) == [
-        ["import", "session", "--external-session-id", "ses_x", "--agent", "opencode"]]
-    tui.handle(s, " ")
-    tui.handle(s, " ")
-    assert len(tui.handle(s, "\n")[1]) == 2             # both marked
-    assert tui.handle(s, "q") == ("quit", [])
-
-
-def test_scrolling_keeps_the_cursor_visible():
-    s = _state()
-    s.cursor = 2
-    tui.scroll(s, 2)
-    assert s.top == 1
-    s.cursor = 0
-    tui.scroll(s, 2)
-    assert s.top == 0
-
-
 def test_no_interactive_mode_without_a_terminal(monkeypatch, capsys):  # review T1
     from agora import cli
     called = []
@@ -177,43 +152,109 @@ def test_no_interactive_mode_without_a_terminal(monkeypatch, capsys):  # review 
     assert "互動模式只在終端機裡開" in capsys.readouterr().err
 
 
-def test_import_tab_leaves_out_agoras_own_copies():  # review T5
-    paths, index = _index()
-    paths.state.mkdir(parents=True, exist_ok=True)
-    (paths.state / "unsaved-launches").write_text("opencode:ses_copy\n")
-    agent = FakeAgent("opencode", [Listed("ses_copy", "/tmp/p", "複本", None),
-                                   Listed("ses_sum", str(paths.state / "summarize"), "要約用", None),
-                                   Listed("ses_real", "/tmp/p", "真的", None)])
-    assert [r.key for r in tui.import_rows(index, [agent], paths)] == ["opencode:ses_real"]
+# --- the screen, driven by key presses (no real agent, no Drive) ---------------
+
+class FakeCli:
+    AGENTS = ("opencode", "claude")
+
+    def __init__(self):
+        self.calls = []
+
+    def main(self, argv):
+        self.calls.append(argv)
+        print(f"agora:01FAKE {' '.join(argv[:2])}")
+        return 0
 
 
-def test_short_ids_are_the_random_part_and_control_characters_stay_inert():  # review T9, T12
-    _, index = _index((_hdr("01M3XB78461N9TCC4DB84PKF2V", "一"), "## user\nx\n"))
-    assert tui.agora_rows(index, [])[0].cells[0] == "4DB84PKF2V"[-8:]
-    assert tui.clip("a\x1b[31mb", 6) == "a·[31m"
+def _app(agents):
+    paths, _ = _index((_hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "第一個", sid="ses_1"), "## user\n表格的問題\n"),
+                      (_hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "第二個", sid="ses_2"), "## user\n別的\n"))
+    cli = FakeCli()
+    return tui.AgoraApp(paths, cli, agents=agents, check_setup=False), cli
 
 
-def test_columns_line_up_by_display_width():
-    rows = [tui.Row("a", ["ses_1", "claude", "/tmp/p", "標題"], ""),
-            tui.Row("b", ["ses_22", "opencode", "/tmp/其他", "另一個"], "")]
-    first, second = tui.aligned(rows)
-    assert [tui.width(cell) for cell in first[:-1]] == [tui.width(cell) for cell in second[:-1]]
+def _run(test):
+    asyncio.run(test())
 
 
-def test_a_failing_adapter_leaves_the_others_list(capsys):  # review U1
-    _, index = _index()
+def test_screen_lists_with_column_names_and_switches_tabs():  # feedback 8
+    agent = FakeAgent("claude", [Listed("s1", "/tmp/p", "未匯入的", "2026-10-02T00:00:00Z")], texts={"s1": ["問", "答"]})
+    app, _ = _app([agent])
 
-    class Broken(FakeAgent):
-        def list_sessions(self):
-            raise ValueError("odd file")
-    rows = tui.import_rows(index, [Broken("claude", []), FakeAgent("opencode", [Listed("ses_ok", None, "好", None)])])
-    assert [r.key for r in rows] == ["opencode:ses_ok"] and "claude 的 session 清單讀不到" in capsys.readouterr().err
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            table = app.query_one("#table")
+            assert [str(c.label) for c in table.columns.values()][2:] == list(tui.COLUMNS["agora"])
+            assert table.row_count == 2
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.tab == "import" and table.row_count == 1
+            assert [str(c.label) for c in table.columns.values()][2:] == list(tui.COLUMNS["import"])
+    _run(go)
 
 
-def test_a_session_talked_to_after_its_import_comes_back_marked():
-    _, index = _index((_hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "舊的", sid="ses_old"), "## user\nx\n"),
-                      (_hdr("01EEEEEEEEEEEEEEEEEEEEEEEE", "沒動", sid="ses_same"), "## user\nx\n"))
-    agent = FakeAgent("opencode", [Listed("ses_old", "/tmp/p", "舊的", "2026-10-03T00:00:00Z"),
-                                   Listed("ses_same", "/tmp/p", "沒動", "2026-10-01T00:00:00Z")])
-    rows = tui.import_rows(index, [agent])
-    assert [(r.key, r.cells[-1]) for r in rows] == [("opencode:ses_old", "↻ 舊的")]
+def test_shift_tab_moves_focus_between_list_and_preview():  # feedback 6
+    app, _ = _app([])
+
+    async def go():
+        async with app.run_test(size=(120, 20)) as pilot:
+            await pilot.pause()
+            assert app.focused is app.query_one("#table")
+            await pilot.press("shift+tab")
+            assert app.focused is app.query_one("#right")
+            assert not app.check_action("delete", ())      # list keys are off in the preview
+            await pilot.press("shift+tab")
+            assert app.focused is app.query_one("#table")
+    _run(go)
+
+
+def test_mark_two_then_merge_runs_the_command():
+    app, cli = _app([])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("space", "space", "m")
+            await pilot.pause()
+            await pilot.press("enter")                     # opencode writes the summaries
+            for _ in range(40):
+                await pilot.pause(0.05)
+                if cli.calls:
+                    break
+            assert cli.calls and cli.calls[0][:2] == ["merge", "session"] and len(cli.calls[0]) == 6
+    _run(go)
+
+
+def test_delete_starts_on_cancel():
+    app, cli = _app([])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("enter")                     # the first option is 取消
+            await pilot.pause()
+            assert cli.calls == []
+    _run(go)
+
+
+def test_content_search_finds_in_agora_and_streams_in_the_import_tab():  # feedback 9
+    agent = FakeAgent("claude", [Listed("s1", "/tmp/p", "甲", None), Listed("s2", "/tmp/p", "乙", None)],
+                      texts={"s1": ["沒有"], "s2": ["表格在這裡"]})
+    app, _ = _app([agent])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+t", "slash")
+            for ch in "表格":
+                await pilot.press(ch)
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert [r.key for r in app.shown()] == ["agora:01AAAAAAAAAAAAAAAAAAAAAAAA"]   # its body has 表格
+            await pilot.press("tab")
+            await pilot.pause(0.2)
+            assert [r.key for r in app.shown()] == ["claude:s2"]
+    _run(go)

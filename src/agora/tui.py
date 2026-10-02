@@ -1,103 +1,43 @@
-"""Interactive mode: `agora` with no arguments (design 5.9).
+"""Interactive mode: `agora` with no arguments (design 5.9), on Textual.
 
 Two tabs - sessions already in agora, and agent sessions on this machine not
-imported yet - a preview of the last native message, and a key bar. Every
-action runs the command mode's own code (cli.main), so this file only lists,
-draws and asks. Layout, rows, previews and keys are plain functions; curses
-only paints them.
+imported yet - a table with column names, a preview of the whole conversation
+rendered as Markdown, and a key bar. Every action runs the command mode's own
+code (cli.main), so this file only lists, draws and asks. The data side (rows,
+previews, the commands an action stands for) is plain functions with tests.
 """
 
 from __future__ import annotations
 
 import contextlib
-import curses
 import io
-import locale
 import os
 import shutil
 import subprocess
 import sys
-import threading
 import time
-import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+
+from rich.markdown import Markdown
+from rich.text import Text
+from textual import on, work
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
+from textual.widgets import DataTable, Footer, Input, OptionList, Static
 
 from agora import header as h
 from agora import store
 
 WIDE = 100                       # columns from which the preview goes to the right
-MIN_COLS, MIN_ROWS = 40, 10      # smaller than this, the screen only says so (review T4)
 TABS = ("agora", "import")
 TAB_NAMES = {"agora": "Agora", "import": "未匯入"}
-KEYS = {
-    "agora": [("↑↓", "移動"), ("空白", "勾選"), ("Enter", "接續"), ("m", "合併"), ("e", "改標頭"), ("d", "刪除"),
-              ("/", "篩選"), ("Tab", "換頁"), ("⇧Tab", "左右"), ("q", "離開")],
-    "import": [("↑↓", "移動"), ("空白", "勾選"), ("Enter", "匯入"), ("/", "篩選"), ("Tab", "換頁"),
-               ("⇧Tab", "左右"), ("q", "離開")],
-    "preview": [("↑↓", "捲動"), ("PgUp/PgDn", "翻頁"), ("g/G", "最上／最下"), ("⇧Tab", "回清單"), ("q", "離開")],
-}
-
-
-# --- text that fits the screen (CJK characters take two columns) ---------------
-
-def width(text: str) -> int:
-    return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in "WF" else 1
-               for c in text)
-
-
-def clip(text: str, cols: int) -> str:
-    """text cut and padded to exactly `cols` display columns."""
-    out, used = [], 0
-    for c in text.replace("\n", " "):
-        c = c if c.isprintable() else "·"        # control characters and escapes stay visible but inert (T12)
-        w = width(c)
-        if used + w > cols:
-            break
-        out.append(c)
-        used += w
-    return "".join(out) + " " * (cols - used)
-
-
-def wrap(text: str, cols: int) -> list[str]:
-    lines = []
-    for para in text.splitlines() or [""]:
-        line, used = "", 0
-        for c in para:
-            w = width(c)
-            if used + w > cols:
-                lines.append(line)
-                line, used = "", 0
-            line += c
-            used += w
-        lines.append(line)
-    return lines
-
-
-def aligned(rows: list["Row"], cap: int = 24) -> list[list[str]]:
-    """Each row's cells padded to a shared width per column, so the columns line up; the last is free."""
-    if not rows:
-        return []
-    n = max(len(r.cells) for r in rows)
-    widths = [min(max(width(r.cells[i]) for r in rows if i < len(r.cells)), cap) for i in range(n - 1)]
-    return [[clip(c, widths[i]) if i < n - 1 else c for i, c in enumerate(r.cells)] for r in rows]
-
-
-def window(lines: list[str], height: int, back: int) -> tuple[list[str], int]:
-    """The `height` lines ending `back` lines above the bottom, and `back` kept within range."""
-    back = max(0, min(back, len(lines) - height))
-    end = len(lines) - back
-    return lines[max(end - height, 0):end], back
-
-
-def layout(rows: int, cols: int) -> dict[str, tuple[int, int, int, int]]:
-    """(top, left, height, width) of the list and the preview; the last two rows are the key bar."""
-    body = max(rows - 3, 2)
-    if cols >= WIDE:
-        left = cols * 11 // 20
-        return {"list": (1, 0, body, left), "preview": (1, left + 1, body, cols - left - 1)}
-    half = max(body // 2, 1)
-    return {"list": (1, 0, half, cols), "preview": (half + 2, 0, body - half - 1, cols)}
+COLUMNS = {"agora": ("id", "標題", "agent", "更新"), "import": ("id", "標題", "agent", "更新", "目錄")}
+TITLE_MAX = 36                   # the title column is cut here, so the others stay on screen
+AGENT_STYLE = {"opencode": "cyan", "claude": "#ff8700", "merge": "green"}
 
 
 # --- what each tab lists -------------------------------------------------------
@@ -105,10 +45,20 @@ def layout(rows: int, cols: int) -> dict[str, tuple[int, int, int, int]]:
 @dataclass
 class Row:
     key: str                     # "agora:<ULID>", or "<agent>:<session id>" on the import tab
-    cells: list[str]
-    text: str                    # what the filter looks in
+    cells: list[str]             # in COLUMNS order
+    text: str                    # what the title filter looks in
     agent: str | None = None
     dir: str | None = None
+
+
+def _when(stamp: str | None) -> str:
+    """An RFC 3339 time as local "MM-DD HH:MM"; the column to sort by at a glance (feedback 10)."""
+    if not stamp:
+        return ""
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone().strftime("%m-%d %H:%M")
+    except ValueError:
+        return stamp[5:16].replace("T", " ")
 
 
 def agora_rows(index: store.Index, filters: list) -> list[Row]:
@@ -118,13 +68,14 @@ def agora_rows(index: store.Index, filters: list) -> list[Row]:
         source = agora.get("source") or {}
         kind = source.get("agent") or agora.get("relation") or ""
         title = str(hdr.get("title") or "")
-        rows.append(Row(f"agora:{ulid}", [ulid[-8:], store.sort_date(hdr)[5:10], kind, title],   # the random part (T9)
+        updated = str(agora.get("updated_at") or store.sort_date(hdr))
+        rows.append(Row(f"agora:{ulid}", [ulid[-8:], _short(title), kind, _when(updated)],   # the random part (T9)
                         f"{ulid} {kind} {title}", kind, source.get("dir")))
     return rows
 
 
 def import_rows(index: store.Index, agents: list, paths: store.Paths | None = None) -> list[Row]:
-    """Agent sessions not in agora yet, newest first, leaving out the copies agora made itself (review T5)."""
+    """Agent sessions not in agora yet (or talked to since), newest first, leaving out agora's own copies (T5)."""
     skip, own = set(), None
     if paths is not None:
         own = str(paths.state)
@@ -148,9 +99,13 @@ def import_rows(index: store.Index, agents: list, paths: store.Paths | None = No
                 continue
             mark = "↻ " if imported else ""   # imported before, talked to since: import again
             found.append((s.updated_at or "", Row(
-                key, [s.session_id[-12:], agent.name, _home(s.dir), mark + (s.title or "")],
+                key, [s.session_id[-8:], _short(mark + (s.title or "")), agent.name, _when(s.updated_at), _home(s.dir)],
                 f"{s.session_id} {agent.name} {s.dir or ''} {s.title or ''}", agent.name, s.dir)))
-    return [row for _when, row in sorted(found, key=lambda pair: pair[0], reverse=True)]
+    return [row for _stamp, row in sorted(found, key=lambda pair: pair[0], reverse=True)]
+
+
+def _short(title: str) -> str:
+    return title if len(title) <= TITLE_MAX else title[:TITLE_MAX - 1] + "…"
 
 
 def _newer(updated_at: str | None, index: store.Index, ulid: str) -> bool:
@@ -164,16 +119,18 @@ def _home(path: str | None) -> str:
     return "~" + path[len(home):] if path and path.startswith(home) else (path or "")
 
 
-def filtered(rows: list[Row], text: str) -> list[Row]:
+def filtered(rows: list[Row], text: str, matches: set[str] | None = None) -> list[Row]:
+    """Rows whose visible text has every word; with `matches`, only those keys (a content search)."""
+    if matches is not None:
+        return [r for r in rows if r.key in matches]
     words = text.lower().split()
     return [r for r in rows if all(w in r.text.lower() for w in words)]
 
 
 # --- previews: what is stored, never generated -------------------------------
-# A preview is (pinned, history): two pinned lines on top, and the history the
-# pane shows from its bottom up.
+# A preview is (pinned, history): a pinned line on top, and the history as Markdown.
 
-def agora_preview(paths: store.Paths, index: store.Index, agora_id: str) -> tuple[list[str], list[str]]:
+def agora_preview(paths: store.Paths, index: store.Index, agora_id: str) -> tuple[str, str]:
     """The whole session.md text (the reading version, or a merge's sections), with dir and tags pinned."""
     ulid = agora_id.split(":", 1)[1]
     hdr = index.header(ulid) or {}
@@ -181,109 +138,24 @@ def agora_preview(paths: store.Paths, index: store.Index, agora_id: str) -> tupl
         _, body = h.split_document((paths.mirror / ulid / "session.md").read_text(encoding="utf-8"))
     except (OSError, h.HeaderError):
         body = ""
-    pinned = [f"dir   {(h.agora_of(hdr).get('source') or {}).get('dir') or '—'}",
-              f"tags  {', '.join(map(str, hdr.get('tags') or [])) or '—'}"]
-    return pinned, body.strip().splitlines()
+    pinned = (f"dir {(h.agora_of(hdr).get('source') or {}).get('dir') or '—'}   "
+              f"tags {', '.join(map(str, hdr.get('tags') or [])) or '—'}")
+    return pinned, body.strip()
 
 
-def import_preview(agent, session_id: str, full: bool = False) -> tuple[list[str], list[str]]:
+def import_preview(agent, session_id: str, full: bool = False) -> tuple[str, str]:
     """The last message; with `full`, the whole conversation as its reading version (existing code, no new conversion)."""
     from agora.agents.base import reading
     try:
         if full:
-            return ["整份對話（閱讀版）", ""], reading(agent, agent.export(session_id).raw).strip().splitlines()
+            return "整份對話（閱讀版）", reading(agent, agent.export(session_id).raw).strip()
         last = agent.last_message(session_id)
     except Exception:            # a preview must never take the screen down
-        return ["讀不到這個 session", ""], []
+        return "讀不到這個 session", ""
     if not last:
-        return ["", ""], []
+        return "", ""
     role, text = last
-    return [f"最後一則（{role}）", "⇧Tab 看整份對話"], text.splitlines()
-
-
-# --- the screen's state and its keys -------------------------------------------
-
-@dataclass
-class State:
-    rows: dict[str, list[Row]]
-    tab: str = "agora"
-    cursor: int = 0
-    top: int = 0
-    filter: str = ""
-    editing: bool = False        # typing into the filter
-    marked: set[str] = field(default_factory=set)
-    focus: str = "list"          # "list" or "preview" (shift+tab)
-    back: int = 0                # preview lines scrolled up from the bottom
-
-    def shown(self) -> list[Row]:
-        return filtered(self.rows[self.tab], self.filter)
-
-    def current(self) -> Row | None:
-        shown = self.shown()
-        return shown[self.cursor] if 0 <= self.cursor < len(shown) else None
-
-
-def handle(state: State, key: str) -> tuple[str, list[Row]] | None:
-    """Apply one key; return (action, rows) when an action has to run outside the screen."""
-    if state.editing:
-        if key in ("\n", "ESC"):
-            state.editing = False
-            if key == "ESC":
-                state.filter = ""
-        elif key == "BACKSPACE":
-            state.filter = state.filter[:-1]
-        elif len(key) == 1 and key.isprintable():
-            state.filter += key
-        state.cursor = 0
-        return None
-    if key == "BTAB":
-        state.focus = "preview" if state.focus == "list" else "list"
-        state.back = 0
-        return None
-    if state.focus == "preview":     # the preview has the keys: scroll the history
-        steps = {"UP": 1, "k": 1, "DOWN": -1, "j": -1, "PGUP": 10, "PGDN": -10, "g": 10 ** 9, "G": -10 ** 9}
-        if key in steps:
-            state.back = max(state.back + steps[key], 0)
-        elif key == "q":
-            return "quit", []
-        return None
-    shown, row = state.shown(), state.current()
-    if key in ("UP", "k", "DOWN", "j"):
-        state.back = 0                # a new row's history opens at its bottom
-    if key in ("UP", "k"):
-        state.cursor = max(state.cursor - 1, 0)
-    elif key in ("DOWN", "j"):
-        state.cursor = min(state.cursor + 1, max(len(shown) - 1, 0))
-    elif key == "\t":
-        state.tab = TABS[(TABS.index(state.tab) + 1) % len(TABS)]
-        state.cursor, state.filter, state.back = 0, "", 0
-    elif key == "/":
-        state.editing = True
-    elif key == " " and row:
-        state.marked.symmetric_difference_update({row.key})
-        state.cursor = min(state.cursor + 1, max(len(shown) - 1, 0))
-    elif key == "q":
-        return "quit", []
-    elif key == "\n" and state.tab == "import" and row:
-        marked = [r for r in state.rows["import"] if r.key in state.marked]
-        return "import", marked or [row]
-    elif key == "\n" and row:
-        return "continue", [row]
-    elif key == "m" and state.tab == "agora":
-        marked = [r for r in state.rows["agora"] if r.key in state.marked]
-        return ("merge", marked) if len(marked) >= 2 else ("say", [Row("", ["合併要先用空白鍵勾選至少兩個"], "")])
-    elif key == "e" and state.tab == "agora" and row:
-        return "edit", [row]
-    elif key == "d" and state.tab == "agora" and row:
-        return "delete", [row]
-    return None
-
-
-def scroll(state: State, height: int) -> None:
-    if state.cursor < state.top:
-        state.top = state.cursor
-    elif state.cursor >= state.top + height:
-        state.top = state.cursor - height + 1
+    return f"最後一則（{role}），整份對話載入中…", f"## {role}\n{text}"
 
 
 def argv_for(action: str, rows: list[Row], agent: str | None, workdir: str | None) -> list[list[str]]:
@@ -302,253 +174,6 @@ def argv_for(action: str, rows: list[Row], agent: str | None, workdir: str | Non
         return [["delete", "session", ids[0], "--yes"]]
     return []
 
-
-# --- curses: colours, painting, small windows ----------------------------------
-
-_NAMED = {curses.KEY_UP: "UP", curses.KEY_DOWN: "DOWN", curses.KEY_BACKSPACE: "BACKSPACE",
-          curses.KEY_RESIZE: "RESIZE", curses.KEY_BTAB: "BTAB", curses.KEY_PPAGE: "PGUP",
-          curses.KEY_NPAGE: "PGDN", 127: "BACKSPACE", 27: "ESC", 10: "\n", 13: "\n", 9: "\t"}
-COLORS: dict[str, int] = {}
-
-
-def colours() -> None:
-    """Colour pairs by role; a terminal without colours just gets none."""
-    COLORS.clear()
-    if not curses.has_colors():
-        return
-    curses.start_color()
-    try:
-        curses.use_default_colors()
-        bg = -1
-    except curses.error:
-        bg = curses.COLOR_BLACK
-    orange = 208 if curses.COLORS >= 256 else curses.COLOR_MAGENTA
-    roles = {"bar": (curses.COLOR_BLACK, curses.COLOR_CYAN), "opencode": (curses.COLOR_CYAN, bg),
-             "claude": (orange, bg), "merge": (curses.COLOR_GREEN, bg), "mark": (curses.COLOR_YELLOW, bg),
-             "key": (curses.COLOR_YELLOW, bg), "user": (curses.COLOR_BLUE, bg),
-             "assistant": (curses.COLOR_GREEN, bg), "frame": (curses.COLOR_CYAN, bg), "warn": (curses.COLOR_RED, bg)}
-    if curses.COLORS >= 256:     # the current row: a light ground, with each role's colour kept on it
-        hl = 237
-        roles.update({"cursor": (-1 if bg == -1 else curses.COLOR_WHITE, hl), "pointer": (curses.COLOR_CYAN, hl),
-                      **{f"{r}_cur": (roles[r][0], hl) for r in ("opencode", "claude", "merge", "mark")}})
-    for n, (role, (fg, back)) in enumerate(roles.items(), 1):
-        try:
-            curses.init_pair(n, fg, back)
-            COLORS[role] = curses.color_pair(n)
-        except curses.error:
-            pass
-
-
-def c(role: str, extra: int = 0) -> int:
-    return COLORS.get(role, 0) | extra
-
-
-def line_attr(line: str) -> int:
-    """How a history line is drawn: who speaks stands out, tool summaries step back."""
-    if line.startswith("## user"):
-        return c("user", curses.A_BOLD)
-    if line.startswith(("## assistant", "### ", "## 要約", "## 來源")):
-        return c("assistant", curses.A_BOLD)
-    return curses.A_DIM if line.startswith(("[tool]", "[skip")) else 0
-
-
-def _key(screen) -> str:
-    k = screen.get_wch()
-    if isinstance(k, str):
-        return _NAMED.get(ord(k), k) if len(k) == 1 else k
-    return _NAMED.get(k, "")
-
-
-def _put(screen, y: int, x: int, text: str, cols: int, attr: int = 0, pad: bool = True) -> None:
-    try:
-        screen.addstr(y, x, clip(text, cols) if pad else clip(text, min(cols, width(text))), attr)
-    except curses.error:         # the bottom-right cell cannot be written; nothing to do about it
-        pass
-
-
-def paint(screen, state: State, preview: tuple[list[str], list[str]], message: str, status: str) -> None:
-    rows, cols = screen.getmaxyx()
-    screen.erase()
-    if cols < MIN_COLS or rows < MIN_ROWS:
-        _put(screen, 0, 0, f"終端機太小（至少 {MIN_COLS}×{MIN_ROWS}）", cols)
-        screen.refresh()
-        return
-    tabs = "  ".join(f"[{TAB_NAMES[t]} {len(state.rows[t])}]" if t == state.tab else f" {TAB_NAMES[t]} {len(state.rows[t])} "
-                     for t in TABS)
-    flt = f"篩選: {state.filter}{'_' if state.editing else ''}" if state.filter or state.editing else ""
-    _put(screen, 0, 0, f" agora  {tabs}  {flt}", cols, c("bar", curses.A_BOLD))
-    if status:
-        _put(screen, 0, max(cols - width(status) - 2, 0), status, width(status) + 1, c("bar"), pad=False)
-    box = layout(rows, cols)
-    top, left, height, wide = box["list"]
-    scroll(state, height)
-    shown = state.shown()
-    if not shown:
-        _put(screen, top, left, "  （沒有東西；按 / 改篩選，或按 Tab 換頁）", wide, curses.A_DIM)
-    cells = aligned(shown)
-    for i, row in enumerate(shown[state.top:state.top + height]):
-        n = state.top + i
-        lit = n == state.cursor and state.focus == "list"     # the fzf look: a bar on the left, a light ground
-        ground = (c("cursor") if "cursor" in COLORS else curses.A_REVERSE) if lit else 0
-
-        def tint(role: str) -> int:
-            return (COLORS.get(f"{role}_cur", ground) if lit else c(role)) if role else ground
-
-        _put(screen, top + i, left, "", wide, ground)          # paint the whole row's ground first
-        if n == state.cursor:
-            _put(screen, top + i, left, "▌", 1, (c("pointer") if lit and "pointer" in COLORS else c("frame")) | curses.A_BOLD)
-        _put(screen, top + i, left + 1, "✓" if row.key in state.marked else " ", 1, tint("mark") | curses.A_BOLD)
-        x = left + 3
-        for cell in cells[n]:
-            if x >= left + wide:
-                break
-            role = cell.strip() if cell.strip() in ("opencode", "claude", "merge") else ""
-            _put(screen, top + i, x, cell, left + wide - x, tint(role) | (curses.A_BOLD if lit else 0))
-            x += width(cell) + 2
-    ptop, pleft, pheight, pwide = box["preview"]
-    frame = c("frame", curses.A_BOLD) if state.focus == "preview" else curses.A_DIM
-    if pleft:                    # a rule between the list and the preview
-        for y in range(ptop, ptop + pheight):
-            _put(screen, y, pleft - 1, "┃" if state.focus == "preview" else "│", 1, frame)
-    else:
-        _put(screen, ptop - 1, 0, "━" * cols if state.focus == "preview" else "─" * cols, cols, frame)
-    pinned, history = preview
-    for i, line in enumerate(pinned[:2]):
-        _put(screen, ptop + i, pleft, line, pwide, curses.A_DIM)
-    lines = [(line, line_attr(text)) for text in history for line in wrap(text, max(pwide - 1, 1))]
-    visible, state.back = window(lines, max(pheight - 2, 1), state.back)
-    for i, (line, attr) in enumerate(visible):
-        _put(screen, ptop + 2 + i, pleft, line, pwide, attr)
-    _put(screen, rows - 2, 0, message, cols, c("warn", curses.A_BOLD) if "失敗" in message else curses.A_BOLD)
-    x = 0
-    for key, label in KEYS["preview" if state.focus == "preview" else state.tab]:
-        _put(screen, rows - 1, x, key, cols - x, c("key", curses.A_BOLD), pad=False)
-        x += width(key) + 1
-        _put(screen, rows - 1, x, label, max(cols - x, 0), curses.A_DIM, pad=False)
-        x += width(label) + 2
-        if x >= cols:
-            break
-    screen.refresh()
-
-
-def _window(screen, tall: int, wide: int, title: str):
-    screen.touchwin()            # bring the main screen back first, so an earlier window leaves no trace
-    screen.noutrefresh()
-    rows, cols = screen.getmaxyx()
-    wide = min(wide, cols)
-    win = curses.newwin(min(tall, rows), wide, max((rows - tall) // 2, 0), max((cols - wide) // 2, 0))
-    win.keypad(True)
-    win.erase()
-    win.attron(c("frame"))
-    win.box()
-    win.attroff(c("frame"))
-    _put(win, 0, 2, f" {title} ", wide - 4, c("frame", curses.A_BOLD), pad=False)
-    return win, wide
-
-
-def choose(screen, title: str, options: list[str], note: str = "") -> int | None:
-    """A small window in the middle; the index chosen, or None on Esc."""
-    notes = note.splitlines() if note else []
-    wide = max(width(title), *(width(o) for o in options), *(width(n) for n in notes)) + 6
-    pick = 0
-    while True:
-        win, wide = _window(screen, len(options) + len(notes) + 2, wide, title)
-        for i, option in enumerate(options):
-            _put(win, 1 + i, 2, f"{'▸' if i == pick else ' '} {option}", wide - 4, curses.A_REVERSE if i == pick else 0)
-        for i, line in enumerate(notes):
-            _put(win, len(options) + 1 + i, 2, line, wide - 4, curses.A_DIM)
-        _put(win, len(options) + len(notes) + 1, 2, " Enter 確定  Esc 取消 ", wide - 4, pad=False)
-        win.refresh()
-        key = _key(win)
-        if key in ("UP", "k"):
-            pick = max(pick - 1, 0)
-        elif key in ("DOWN", "j"):
-            pick = min(pick + 1, len(options) - 1)
-        elif key == "\n":
-            return pick
-        elif key in ("ESC", "q"):
-            return None
-
-
-def ask_text(screen, title: str, text: str) -> str | None:
-    """One line of input in a small window (get_wch, so CJK input works); None on Esc."""
-    while True:
-        win, wide = _window(screen, 3, max(width(title), width(text), 40) + 6, title)
-        _put(win, 1, 2, text[-(wide - 6):] + "_", wide - 4)
-        _put(win, 2, 2, " Enter 確定  Esc 取消 ", wide - 4, pad=False)
-        win.refresh()
-        key = _key(win)
-        if key == "\n":
-            return text
-        if key == "ESC":
-            return None
-        if key == "BACKSPACE":
-            text = text[:-1]
-        elif len(key) == 1 and key.isprintable():
-            text += key
-
-
-def ask_dir(screen, row: Row) -> str | None:
-    """Where to open the agent: the source's directory when it exists here, and always changeable (review T7)."""
-    known = bool(row.dir and os.path.isdir(row.dir))
-    workdir = row.dir if known else os.getcwd()
-    note = "" if known else "⚠ 來源沒有記錄目錄（或這台機器上沒有），會在目前目錄開"
-    while True:
-        pick = choose(screen, "在哪裡開？", [f"在這裡開：{workdir}", "改目錄…"], note)
-        if pick is None:
-            return None
-        if pick == 0:
-            return workdir
-        typed = ask_text(screen, "工作目錄", workdir)
-        if typed and os.path.isdir(os.path.expanduser(typed)):
-            workdir, note = os.path.expanduser(typed), ""
-        elif typed is not None:
-            note = f"⚠ 找不到這個目錄：{typed}"
-
-
-def busy(screen, title: str, work):
-    """Run `work` while a window says so, its latest output line under a spinner; (value, output, error)."""
-    out, result = io.StringIO(), {}
-
-    def run():
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-            try:
-                result["value"] = work()
-            except Exception as e:   # shown in the result window, never a traceback over the screen
-                result["error"] = e
-
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    started, spin = time.monotonic(), "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    screen.timeout(120)
-    while thread.is_alive():
-        last = (out.getvalue().strip().splitlines() or [""])[-1]
-        lines = [f"{spin[int(time.monotonic() * 8) % len(spin)]} 執行中…（{int(time.monotonic() - started)} 秒）", last]
-        win, wide = _window(screen, 4, max(width(title) + 6, 60, width(last) + 6), title)
-        for i, line in enumerate(lines):
-            _put(win, 1 + i, 2, line, wide - 4, c("key") if i == 0 else curses.A_DIM)
-        win.refresh()
-        try:
-            screen.get_wch()         # keys wait; the work cannot be interrupted halfway
-        except (curses.error, KeyboardInterrupt):
-            pass
-    screen.timeout(-1)
-    return result.get("value"), out.getvalue(), result.get("error")
-
-
-def tell(screen, title: str, text: str, ok: bool = True) -> None:
-    """A window with the last lines of an action's output; any key closes it."""
-    lines = [line for line in text.strip().splitlines() if line.strip()][-10:] or ["（沒有輸出）"]
-    win, wide = _window(screen, len(lines) + 3, max(width(title), *(width(x) for x in lines)) + 6,
-                        f"{'✓' if ok else '✗'} {title}")
-    for i, line in enumerate(lines):
-        _put(win, 1 + i, 2, line, wide - 4, 0 if ok else c("warn"))
-    _put(win, len(lines) + 2, 2, " 按任意鍵回到清單 ", wide - 4, curses.A_DIM, pad=False)
-    win.refresh()
-    _key(win)
-
-
-# --- the app: setup, listing, actions -------------------------------------------
 
 def setup_needed(paths: store.Paths) -> str | None:
     """What is missing before agora can reach Drive: "rclone", "auth", or nothing."""
@@ -569,125 +194,482 @@ def authorize(paths: store.Paths) -> int:
     return proc.wait()
 
 
-class App:
-    def __init__(self, paths: store.Paths, cli):
-        self.paths, self.cli = paths, cli
-        self.agents = [cli.load_agent(name) for name in cli.AGENTS]
-        self.state = State(rows={"agora": [], "import": []})
+# --- small windows -------------------------------------------------------------
+
+class Choose(ModalScreen):
+    """A few options in the middle of the screen; dismisses with the index chosen, or None on Esc."""
+    BINDINGS = [Binding("escape", "dismiss(None)", "取消")]
+
+    def __init__(self, title: str, options: list[str], note: str = ""):
+        super().__init__()
+        self.title_, self.options, self.note = title, options, note
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="box"):
+            yield Static(self.title_, classes="box-title")
+            yield OptionList(*self.options)
+            if self.note:
+                yield Static(self.note, classes="note")
+            yield Static("Enter 確定   Esc 取消", classes="hint")
+
+    @on(OptionList.OptionSelected)
+    def chosen(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option_index)
+
+
+class AskText(ModalScreen):
+    BINDINGS = [Binding("escape", "dismiss(None)", "取消")]
+
+    def __init__(self, title: str, text: str):
+        super().__init__()
+        self.title_, self.text = title, text
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="box"):
+            yield Static(self.title_, classes="box-title")
+            yield Input(self.text)
+            yield Static("Enter 確定   Esc 取消", classes="hint")
+
+    @on(Input.Submitted)
+    def done(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value)
+
+
+class Busy(ModalScreen):
+    """Run `work_` in a thread while a window says so, with its latest output line; dismiss (value, output, error)."""
+    SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, title: str, work_):
+        super().__init__()
+        self.title_, self.work_, self.out, self.started = title, work_, io.StringIO(), time.monotonic()
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="box"):
+            yield Static(self.title_, classes="box-title")
+            yield Static("", id="spin")
+            yield Static("", id="last", classes="note")
+
+    def on_mount(self) -> None:
+        self.set_interval(0.12, self.tick)
+        self.run()
+
+    def tick(self) -> None:
+        spent = time.monotonic() - self.started
+        self.query_one("#spin", Static).update(f"{self.SPIN[int(spent * 8) % len(self.SPIN)]} 執行中…（{int(spent)} 秒）")
+        lines = self.out.getvalue().strip().splitlines()
+        self.query_one("#last", Static).update(lines[-1] if lines else "")
+
+    @work(thread=True)
+    def run(self) -> None:
+        value = error = None
+        with contextlib.redirect_stdout(self.out), contextlib.redirect_stderr(self.out):
+            try:
+                value = self.work_()
+            except Exception as e:   # shown in the result window, never a traceback over the screen
+                error = e
+        self.app.call_from_thread(self.dismiss, (value, self.out.getvalue(), error))
+
+
+class Tell(ModalScreen):
+    """The last lines of an action's output; any key closes it."""
+
+    def __init__(self, title: str, text: str, ok: bool = True):
+        super().__init__()
+        self.title_, self.ok = f"{'✓' if ok else '✗'} {title}", ok
+        self.lines = [line for line in text.strip().splitlines() if line.strip()][-12:] or ["（沒有輸出）"]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="box" + ("" if self.ok else " failed")):
+            yield Static(self.title_, classes="box-title")
+            yield Static(Text("\n".join(self.lines)))
+            yield Static("按任意鍵回到清單", classes="hint")
+
+    def on_key(self, event) -> None:
+        event.stop()
+        self.dismiss(None)
+
+
+# --- the app ---------------------------------------------------------------------
+
+class AgoraApp(App):
+    ENABLE_COMMAND_PALETTE = False
+    CSS = """
+    Screen { background: #121212; }
+    #bar { height: 1; background: #1c1c1c; }
+    #main { layout: horizontal; height: 1fr; }
+    #main.narrow { layout: vertical; }
+    #left { width: 55%; background: #303030; }
+    #right { width: 1fr; background: #303030; padding: 0 1; }
+    #main.narrow #left { width: 100%; height: 50%; }
+    #main.narrow #right { width: 100%; height: 1fr; }
+    #left:focus-within, #right:focus { background: #000000; }
+    DataTable { background: transparent; }
+    DataTable > .datatable--cursor { background: #3a3a3a; text-style: bold; }
+    DataTable > .datatable--header { background: transparent; color: #8a8a8a; text-style: bold; }
+    #pinned { color: #8a8a8a; }
+    #filterbar { height: 1; display: none; }
+    #filterbar.on { display: block; }
+    #mode { width: auto; padding: 0 1; background: #5f0000; }
+    #filter { border: none; height: 1; padding: 0; background: #1c1c1c; }
+    #msg { height: 1; color: #ffd75f; }
+    #msg.failed { color: #ff5f5f; }
+    .box { width: 70; height: auto; max-height: 80%; padding: 0 1; border: round #00afaf; background: #1c1c1c; }
+    .box.failed { border: round #ff5f5f; }
+    Choose, AskText, Busy, Tell { align: center middle; }
+    .box-title { text-style: bold; color: #00d7d7; }
+    .note, .hint { color: #8a8a8a; }
+    OptionList { height: auto; max-height: 8; background: transparent; border: none; }
+    """
+    BINDINGS = [
+        Binding("tab", "next_tab", "換頁", priority=True),
+        Binding("shift+tab", "toggle_focus", "左右", priority=True),
+        Binding("space", "mark", "勾選"),
+        Binding("enter", "primary", "接續／匯入", priority=True),   # the table would take it for itself
+        Binding("m", "merge", "合併"),
+        Binding("e", "edit", "改標頭"),
+        Binding("d", "delete", "刪除"),
+        Binding("slash", "filter", "篩選"),
+        Binding("ctrl+t", "search_mode", "標題／內文", priority=True),
+        Binding("q", "quit", "離開"),
+    ]
+
+    def __init__(self, paths: store.Paths, cli, agents: list | None = None, check_setup: bool = True):
+        super().__init__()
+        self.paths, self.cli, self.check_setup = paths, cli, check_setup
+        self.agents = agents if agents is not None else [cli.load_agent(name) for name in cli.AGENTS]
         self.index = store.Index(paths)
-        self.cache: dict = {}
-        self.message = self.status = ""
+        self.rows: dict[str, list[Row]] = {"agora": [], "import": []}
+        self.tab, self.text, self.content = "agora", "", False      # content: search the conversations
+        self.matches: dict[str, set[str] | None] = {"agora": None, "import": None}
+        self.marked: set[str] = set()
+        self.cache: dict[str, tuple[str, str]] = {}
+        self.status = ""
 
-    def reload(self) -> None:
-        self.index = store.Index(self.paths)       # local only; no full sync after every action (T6)
-        self.state.rows = {"agora": agora_rows(self.index, []),
-                           "import": import_rows(self.index, self.agents, self.paths)}
-        self.state.cursor = min(self.state.cursor, max(len(self.state.shown()) - 1, 0))
-        self.state.marked.clear()
-        self.cache.clear()
+    def compose(self) -> ComposeResult:
+        yield Static(id="bar")
+        with Horizontal(id="main"):
+            with Vertical(id="left"):
+                yield DataTable(id="table", cursor_type="row", zebra_stripes=False,
+                                cursor_foreground_priority="renderable")   # the red bar and agent colours stay
+            with VerticalScroll(id="right"):
+                yield Static(id="pinned")
+                yield Static(id="history")
+        with Horizontal(id="filterbar"):
+            yield Static("標題", id="mode")
+            yield Input(id="filter", placeholder="輸入後按 Enter；Esc 清掉；ctrl+t 切換標題／內文")
+        yield Static(id="msg")
+        yield Footer()
 
-    def start(self, screen) -> bool:
-        """Guide a first run through setup, then sync once; False to leave."""
+    # -- setup and data ------------------------------------------------------
+
+    def on_mount(self) -> None:
+        self.start()
+
+    @work
+    async def start(self) -> None:
+        if self.check_setup and not await self.setup():
+            self.exit()
+            return
+        if self.check_setup:
+            _, out, _ = await self.push_screen_wait(Busy("同步 Drive", lambda: store.sync(self.paths, throttle=True)))
+            self.status = "離線：只有本機資料" if "連不上 Drive" in (out or "") else ""
+        self.reload()
+        if not self.rows["agora"]:
+            self.say("Agora 還沒有 Session：按 Tab 到「未匯入」，空白鍵勾選後按 Enter 匯入")
+        self.query_one("#table").focus()
+
+    async def setup(self) -> bool:
+        """Guide a first run: rclone missing, or Drive not authorized yet (design 5.9)."""
         need = setup_needed(self.paths)
         if need == "rclone":
-            choose(screen, "需要 rclone", ["離開"], "請先在終端機執行：brew install rclone\n裝好之後再打 agora")
+            await self.push_screen_wait(Choose("需要 rclone", ["離開"], "請先在終端機執行：brew install rclone\n裝好之後再打 agora"))
             return False
         if need == "auth":
             note = ("agora 把 Session 存在你的 Google Drive。\n用 rclone 內建的 client 授權，權限只有 drive.file：\n"
                     "只看得到 agora 自己建的檔案。")
-            if choose(screen, "還沒設定 Google Drive", ["用瀏覽器授權", "離開"], note) != 0:
+            if await self.push_screen_wait(Choose("還沒設定 Google Drive", ["用瀏覽器授權", "離開"], note)) != 0:
                 return False
-            code, out, error = busy(screen, "請在瀏覽器完成授權", lambda: authorize(self.paths))
+            code, out, error = await self.push_screen_wait(Busy("請在瀏覽器完成授權", lambda: authorize(self.paths)))
             if error or code != 0 or setup_needed(self.paths):
-                tell(screen, "授權沒有完成", f"{out}\n{error or ''}", ok=False)
+                await self.push_screen_wait(Tell("授權沒有完成", f"{out}\n{error or ''}", ok=False))
                 return False
-            tell(screen, "授權完成", "接著在 Drive 建立 agora/ 資料夾並同步")
-        _, out, _ = busy(screen, "同步 Drive", lambda: store.sync(self.paths, throttle=True))
-        self.status = "離線：只有本機資料" if "連不上 Drive" in out else ""
-        self.reload()
-        if not self.state.rows["agora"]:
-            self.message = "Agora 還沒有 Session：按 Tab 到「未匯入」，勾選後按 Enter 匯入"
         return True
 
-    def preview(self, screen, row: Row) -> tuple[list[str], list[str]]:
-        full = self.state.tab == "import" and self.state.focus == "preview"
-        key = (row.key, full)
-        if key not in self.cache:
-            agent = next((a for a in self.agents if a.name == row.agent), None)
-            if self.state.tab == "agora":
-                self.cache[key] = agora_preview(self.paths, self.index, row.key)
-            elif full and agent:
-                value, _, _ = busy(screen, "讀取整份對話", lambda: import_preview(agent, row.key.split(":", 1)[1], True))
-                self.cache[key] = value or (["讀不到這個 session", ""], [])
-            else:
-                self.cache[key] = import_preview(agent, row.key.split(":", 1)[1]) if agent else ([], [])
-        return self.cache[key]
+    def reload(self) -> None:
+        self.index = store.Index(self.paths)       # local only; no full sync after every action (T6)
+        self.rows = {"agora": agora_rows(self.index, []), "import": import_rows(self.index, self.agents, self.paths)}
+        self.marked.clear()
+        self.cache.clear()
+        self.show()
 
-    def act(self, screen, title: str, argvs: list[list[str]]) -> None:
+    def shown(self) -> list[Row]:
+        return filtered(self.rows[self.tab], "" if self.content else self.text, self.matches[self.tab])
+
+    def show(self, keep: str | None = None) -> None:
+        """Fill the table for the current tab, keeping the cursor on `keep` if it is still there."""
+        table = self.query_one("#table", DataTable)
+        table.clear(columns=True)
+        table.add_column("", key="gutter", width=1)
+        table.add_column("", key="mark", width=1)
+        for name in COLUMNS[self.tab]:
+            table.add_column(name, key=name)
+        rows = self.shown()
+        for row in rows:
+            cells = [Text(c, style=AGENT_STYLE.get(c, "")) for c in row.cells]
+            table.add_row(Text("▌", style="#585858"), self.tick(row), *cells, key=row.key)
+        if keep and keep in {r.key for r in rows}:
+            table.move_cursor(row=[r.key for r in rows].index(keep))
+        self.paint_bar()
+        self.gutter()
+        self.preview()
+
+    def tick(self, row: Row) -> Text:
+        return Text("✓", style="bold #ffd75f") if row.key in self.marked else Text(" ")
+
+    def current(self) -> Row | None:
+        rows, table = self.shown(), self.query_one("#table", DataTable)
+        return rows[table.cursor_row] if rows and 0 <= table.cursor_row < len(rows) else None
+
+    def paint_bar(self) -> None:
+        bar = Text(" agora ", style="bold #000000 on #00afaf")
+        bar.append(" ")
+        for t in TABS:   # the current tab is a lit chip, the other a dim one (feedback 7)
+            bar.append(f" {TAB_NAMES[t]} {len(self.rows[t])} ",
+                       style="bold #000000 on #ffd75f" if t == self.tab else "#bcbcbc on #3a3a3a")
+            bar.append(" ")
+        if self.text:
+            bar.append(f" {'內文' if self.content else '標題'}：{self.text} ", style="#ffffff on #5f0000")
+        if self.status:
+            bar.append(f"  {self.status}", style="#ff5f5f")
+        self.query_one("#bar", Static).update(bar)
+
+    def gutter(self) -> None:
+        """Every row has a grey bar on the left; the current one is red (feedback 2, like mlp's fzf)."""
+        table = self.query_one("#table", DataTable)
+        for n, row in enumerate(self.shown()):
+            colour = "#ff5f5f" if n == table.cursor_row else "#585858"
+            table.update_cell(row.key, "gutter", Text("▌", style=f"bold {colour}"))
+
+    def say(self, text: str, failed: bool = False) -> None:
+        msg = self.query_one("#msg", Static)
+        msg.update(text)
+        msg.set_class(failed, "failed")
+
+    # -- preview ---------------------------------------------------------------
+
+    def preview(self) -> None:
+        row = self.current()
+        if row is None:
+            self.put_preview("", "")
+            return
+        if row.key in self.cache:
+            self.put_preview(*self.cache[row.key])
+        elif self.tab == "agora":
+            self.cache[row.key] = agora_preview(self.paths, self.index, row.key)
+            self.put_preview(*self.cache[row.key])
+        else:                    # the last message at once, the whole thing when it is read (feedback 3)
+            agent = next((a for a in self.agents if a.name == row.agent), None)
+            if agent:
+                self.put_preview(*import_preview(agent, row.key.split(":", 1)[1]))
+                self.load_full(agent, row.key)
+
+    @work(thread=True, exclusive=True, group="preview")
+    def load_full(self, agent, key: str) -> None:
+        result = import_preview(agent, key.split(":", 1)[1], full=True)
+        self.call_from_thread(self.loaded, key, result)
+
+    def loaded(self, key: str, result: tuple[str, str]) -> None:
+        self.cache[key] = result
+        row = self.current()
+        if row and row.key == key:
+            self.put_preview(*result)
+
+    def put_preview(self, pinned: str, history: str) -> None:
+        self.query_one("#pinned", Static).update(pinned)
+        # Rendered once by rich and then only scrolled, so a long history scrolls smoothly (feedback 4, 5).
+        self.query_one("#history", Static).update(Markdown(history) if history else "")
+        self.call_after_refresh(self.query_one("#right", VerticalScroll).scroll_end, animate=False)
+
+    @on(DataTable.RowHighlighted)
+    def moved(self) -> None:
+        self.gutter()
+        self.preview()
+
+    def on_resize(self, event) -> None:
+        self.query_one("#main").set_class(event.size.width < WIDE, "narrow")
+
+    # -- keys --------------------------------------------------------------------
+
+    def check_action(self, action: str, parameters) -> bool | None:
+        """Show only the keys that work here (the key bar follows the tab and the focus)."""
+        in_preview = isinstance(self.focused, VerticalScroll)
+        if action == "primary":          # a priority key: only for the list, or Enter in a window or input breaks
+            return isinstance(self.focused, DataTable)
+        if action in ("merge", "edit", "delete"):
+            return self.tab == "agora" and not in_preview
+        if action in ("mark", "primary", "filter"):
+            return not in_preview
+        return True
+
+    def action_next_tab(self) -> None:
+        self.tab = TABS[(TABS.index(self.tab) + 1) % len(TABS)]
+        self.say("")
+        self.show()
+        self.refresh_bindings()
+
+    def action_toggle_focus(self) -> None:
+        target = "#right" if self.focused is self.query_one("#table") else "#table"
+        self.query_one(target).focus()
+        self.refresh_bindings()
+
+    def action_mark(self) -> None:
+        row = self.current()
+        if row:
+            self.marked.symmetric_difference_update({row.key})
+            table = self.query_one("#table", DataTable)
+            table.update_cell(row.key, "mark", self.tick(row))
+            table.action_cursor_down()
+
+    def action_filter(self) -> None:
+        self.query_one("#filterbar").add_class("on")
+        self.query_one("#filter", Input).focus()
+
+    def action_search_mode(self) -> None:
+        self.content = not self.content
+        self.query_one("#mode", Static).update("內文" if self.content else "標題")
+        if self.text:
+            self.search(self.text)
+
+    @on(Input.Submitted, "#filter")
+    def filter_done(self, event: Input.Submitted) -> None:
+        self.query_one("#filterbar").remove_class("on")
+        self.query_one("#table").focus()
+        self.search(event.value.strip())
+
+    def on_key(self, event) -> None:
+        if event.key == "escape" and self.query_one("#filterbar").has_class("on"):
+            self.query_one("#filter", Input).value = ""
+            self.query_one("#filterbar").remove_class("on")
+            self.query_one("#table").focus()
+            self.search("")
+
+    def search(self, text: str) -> None:
+        self.text = text
+        self.matches = {"agora": None, "import": None}
+        if text and self.content:
+            # Agora: its full-text index, at once. Import: each adapter's search, rows coming in as found (feedback 9).
+            self.matches["agora"] = {f"agora:{u}" for u, _h, _s in self.index.search([((h.TEXT_KEY,), "~=", text)])}
+            self.matches["import"] = set()
+            self.say(f"內文搜尋「{text}」中…")
+            self.find_in_agents(text)
+        self.show()
+
+    @work(thread=True, exclusive=True, group="search")
+    def find_in_agents(self, text: str) -> None:
+        for agent in self.agents:
+            try:
+                for session_id in agent.search_text(text):
+                    self.call_from_thread(self.found, text, f"{agent.name}:{session_id}")
+            except Exception:    # a search must never take the screen down
+                continue
+        self.call_from_thread(self.say, f"內文搜尋「{text}」完成")
+
+    def found(self, text: str, key: str) -> None:
+        if self.text == text and self.content and self.matches["import"] is not None:
+            self.matches["import"].add(key)
+            if self.tab == "import":
+                row = self.current()
+                self.show(keep=row.key if row else None)
+
+    # -- actions -------------------------------------------------------------------
+
+    def chosen_rows(self) -> list[Row]:
+        marked = [r for r in self.rows[self.tab] if r.key in self.marked]
+        row = self.current()
+        return marked or ([row] if row else [])
+
+    async def act(self, title: str, argvs: list[list[str]]) -> None:
         """An action that needs no terminal of its own: run it under a window, then show what it said."""
-        codes, out, error = busy(screen, title, lambda: [self.cli.main(argv) for argv in argvs])
+        codes, out, error = await self.push_screen_wait(Busy(title, lambda: [self.cli.main(a) for a in argvs]))
         codes = codes or [2]
         ok = sum(code == 0 for code in codes)
-        tell(screen, title, f"{out}\n{error or ''}", ok == len(codes))
-        self.message = "完成" if ok == len(codes) else f"成功 {ok} 個、失敗 {len(codes) - ok} 個"
+        await self.push_screen_wait(Tell(title, f"{out}\n{error or ''}", ok == len(codes)))
         self.reload()
+        self.say("完成" if ok == len(codes) else f"成功 {ok} 個、失敗 {len(codes) - ok} 個", failed=ok != len(codes))
 
+    def outside(self, argv: list[str]) -> int:
+        """Hand the whole terminal over (an agent, an editor), then come back."""
+        with self.suspend():
+            code = self.cli.main(argv)
+            try:
+                input("\n按 Enter 回到選單…")
+            except (KeyboardInterrupt, EOFError):
+                pass
+        return code
 
-def screen_loop(screen, app: App, first: bool):
-    """Run the screen until an action needs the whole terminal; return (action, rows, agent, workdir)."""
-    curses.curs_set(0)
-    screen.keypad(True)
-    colours()
-    if first and not app.start(screen):
-        return "quit", [], None, None
-    state = app.state
-    while True:
-        row = state.current()
-        paint(screen, state, app.preview(screen, row) if row else ([], []), app.message, app.status)
-        app.message = ""
-        result = handle(state, _key(screen))
-        if result is None:
-            continue
-        action, rows = result
-        if action == "say":
-            app.message = rows[0].cells[0]
-        elif action in ("quit", "edit"):      # the editor needs the terminal
-            return action, rows, None, None
-        elif action == "import":
-            app.act(screen, f"匯入 {len(rows)} 個", argv_for(action, rows, None, None))
-        elif action == "delete":
-            if choose(screen, "移到 Drive 垃圾桶？", ["取消", "確定"], f"{rows[0].key}「{rows[0].cells[-1]}」") == 1:
-                app.act(screen, "刪除", argv_for(action, rows, None, None))
-        elif action == "continue":            # the agent takes the terminal
-            pick = choose(screen, "用哪個 agent 接續？", ["opencode", "claude"])
-            workdir = ask_dir(screen, rows[0]) if pick is not None else None
-            if workdir is not None:
-                return action, rows, ("opencode", "claude")[pick], workdir
-        else:
-            pick = choose(screen, f"合併 {len(rows)} 個：由誰寫要約？", ["opencode", "claude"],
-                          "每個來源叫一次 AI；內容會送到那個 agent 的模型供應商")
-            if pick is not None:
-                app.act(screen, "合併", argv_for(action, rows, ("opencode", "claude")[pick], None))
+    @work
+    async def action_primary(self) -> None:
+        rows = self.chosen_rows()
+        if not rows:
+            return
+        if self.tab == "import":
+            await self.act(f"匯入 {len(rows)} 個", argv_for("import", rows, None, None))
+            return
+        row = self.current()
+        pick = await self.push_screen_wait(Choose("用哪個 agent 接續？", ["opencode", "claude"]))
+        if pick is None:
+            return
+        workdir = await self.ask_dir(row)
+        if workdir is None:
+            return
+        code = self.outside(argv_for("continue", [row], ("opencode", "claude")[pick], workdir)[0])
+        self.reload()
+        self.say("完成" if code == 0 else "接續沒有成功，訊息在上一個畫面", failed=code != 0)
+
+    async def ask_dir(self, row: Row) -> str | None:
+        """Where to open the agent: the source's directory when it exists here, and always changeable (review T7)."""
+        known = bool(row.dir and os.path.isdir(row.dir))
+        workdir = row.dir if known else os.getcwd()
+        note = "" if known else "⚠ 來源沒有記錄目錄（或這台機器上沒有），會在目前目錄開"
+        while True:
+            pick = await self.push_screen_wait(Choose("在哪裡開？", [f"在這裡開：{workdir}", "改目錄…"], note))
+            if pick is None:
+                return None
+            if pick == 0:
+                return workdir
+            typed = await self.push_screen_wait(AskText("工作目錄", workdir))
+            if typed and os.path.isdir(os.path.expanduser(typed)):
+                workdir, note = os.path.expanduser(typed), ""
+            elif typed is not None:
+                note = f"⚠ 找不到這個目錄：{typed}"
+
+    @work
+    async def action_merge(self) -> None:
+        rows = [r for r in self.rows["agora"] if r.key in self.marked]
+        if len(rows) < 2:
+            self.say("合併要先用空白鍵勾選至少兩個")
+            return
+        pick = await self.push_screen_wait(Choose(f"合併 {len(rows)} 個：由誰寫要約？", ["opencode", "claude"],
+                                                  "每個來源叫一次 AI；內容會送到那個 agent 的模型供應商"))
+        if pick is not None:
+            await self.act("合併", argv_for("merge", rows, ("opencode", "claude")[pick], None))
+
+    def action_edit(self) -> None:
+        row = self.current()
+        if row:
+            code = self.outside(argv_for("edit", [row], None, None)[0])   # the editor needs the terminal
+            self.reload()
+            self.say("完成" if code == 0 else "改標頭沒有成功", failed=code != 0)
+
+    @work
+    async def action_delete(self) -> None:
+        row = self.current()
+        if row and await self.push_screen_wait(
+                Choose("移到 Drive 垃圾桶？", ["取消", "確定"], f"{row.key}「{row.cells[1]}」")) == 1:
+            await self.act("刪除", argv_for("delete", [row], None, None))
 
 
 def main(paths: store.Paths) -> int:
     from agora import cli       # the command mode does the work; imported here to avoid a cycle
-    locale.setlocale(locale.LC_ALL, "")         # or curses prints CJK as garbage (review T3)
-    os.environ.setdefault("ESCDELAY", "25")     # Esc closes a window at once, not after a second
-    app, first = App(paths, cli), True
-    while True:
-        noise = io.StringIO()   # a warning printed under curses would scribble over the screen
-        with contextlib.redirect_stderr(noise):
-            action, rows, agent, workdir = curses.wrapper(screen_loop, app, first)
-        first = False
-        if action == "quit":
-            return 0
-        if noise.getvalue().strip():             # warnings from under curses, shown now (review U8)
-            print(noise.getvalue().strip(), file=sys.stderr)
-        codes = [cli.main(argv) for argv in argv_for(action, rows, agent, workdir)]
-        try:
-            input("\n按 Enter 回到選單…")
-        except (KeyboardInterrupt, EOFError):
-            pass
-        app.message = "完成" if all(code == 0 for code in codes) else "沒有成功，訊息在上一個畫面"
-        app.reload()
+    AgoraApp(paths, cli).run()
+    return 0

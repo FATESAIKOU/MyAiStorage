@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "jsonschema>=4.26.0",
     "pyyaml>=6",
+    "textual>=8.2.8",
 ]
 
 [project.scripts]
