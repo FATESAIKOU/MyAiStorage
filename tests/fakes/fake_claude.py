@@ -58,7 +58,8 @@ if "--resume" in args:
             "message": {"role": "user", "content": "ZZSAY 再補一句"}}
     assistant = {"type": "assistant", "sessionId": sid, "uuid": str(uuid.uuid4()),
                  "parentUuid": user["uuid"], "timestamp": now, "cwd": cwd,
-                 "message": {"role": "assistant", "content": [{"type": "text", "text": "ZZSAY 好的"}]}}
+                 "message": {"role": "assistant", "model": "zz-fake-model",
+                             "content": [{"type": "text", "text": "ZZSAY 好的"}]}}
     with open(path, "a") as f:
         f.write(json.dumps(user, ensure_ascii=False) + "\n")
         f.write(json.dumps(assistant, ensure_ascii=False) + "\n")

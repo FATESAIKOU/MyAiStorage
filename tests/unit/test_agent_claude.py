@@ -93,6 +93,30 @@ def test_home_priority_config_dir(tmp_path, monkeypatch):
 
 # --- export ------------------------------------------------------------------
 
+def test_export_model_is_the_last_assistant_one(claude_env):  # design v4 source.model
+    assert C.ADAPTER.export(SID).model == "zz-model"
+    proj = claude_env["proj"]
+    lines = [json.loads(line) for line in (proj / f"{SID}.jsonl").read_text().splitlines()]
+    assistants = [o for o in lines if o.get("type") == "assistant"]
+    last = assistants[-1]
+    last["message"]["model"] = "zz-model-newer"
+    (proj / f"{SID}.jsonl").write_text(
+        "\n".join(json.dumps(o, ensure_ascii=False) for o in lines) + "\n")
+    assert C.ADAPTER.export(SID).model == "zz-model-newer"
+
+
+def test_export_model_none_when_no_model_field(claude_env):
+    proj = claude_env["proj"]
+    lines = []
+    for line in (proj / f"{SID}.jsonl").read_text().splitlines():
+        o = json.loads(line)
+        if o.get("type") == "assistant":
+            o["message"].pop("model", None)
+        lines.append(json.dumps(o, ensure_ascii=False))
+    (proj / f"{SID}.jsonl").write_text("\n".join(lines) + "\n")
+    assert C.ADAPTER.export(SID).model is None
+
+
 def test_export_basic(claude_env):
     e = C.ADAPTER.export(SID)
     assert e.session_id == SID
@@ -311,6 +335,7 @@ def test_collect_after_fake_resume(claude_env, tmp_path):
     assert got is not None
     assert got.session_id == launch.agent_session_id
     assert got.message_count == 8
+    assert got.model == "zz-fake-model"  # the turn the agent just made
     main, _aux = read_main(got)
     assert len(main) == 18
     assert "ZZSAY" in got.raw.decode("utf-8")

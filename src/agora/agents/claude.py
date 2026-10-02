@@ -208,6 +208,18 @@ def _session_title(objs: list[dict]) -> str | None:
     return None
 
 
+def _last_model(objs: list[dict]) -> str | None:
+    """The model of the most recent assistant line (design v4 source.model)."""
+    for o in reversed(objs):
+        if o.get("type") != "assistant":
+            continue
+        message = o.get("message")
+        model = message.get("model") if isinstance(message, dict) else None
+        if isinstance(model, str) and model:
+            return model
+    return None
+
+
 def _exported(session_id: str, main: list[str], sidecar: Path) -> Exported:
     objs = _parse_all(main)
     created = next((o["timestamp"] for o in objs  # CL11: first present timestamp
@@ -222,6 +234,7 @@ def _exported(session_id: str, main: list[str], sidecar: Path) -> Exported:
         created_at=created,
         agent_version=version,
         message_count=_count_messages(objs),
+        model=_last_model(objs),
     )
 
 
