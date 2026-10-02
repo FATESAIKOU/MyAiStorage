@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from agora import header as h
 from agora import store
@@ -38,15 +40,25 @@ def is_fresh(paths: store.Paths, agent_name: str, session_id: str, updated_at: s
 
 
 def local_reading(paths: store.Paths, agent, session_id: str, updated_at: str | None = None) -> str:
-    """An agent session's full text: from the cache when it is fresh, else read now and kept."""
+    """An agent session's full text: from the cache when it is fresh, else read now and kept.
+
+    The staging file is unique per call (review K4): a fixed `.tmp` name meant two
+    threads caching two sessions in one directory raced, and one of them lost the
+    write it was in the middle of.
+    """
     path, when = paths.reading / agent.name / f"{session_id}.md", _stamp(updated_at)
     if is_fresh(paths, agent.name, session_id, updated_at):
         return path.read_text(encoding="utf-8")
     text = reading(agent, agent.export(session_id).raw)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    handle, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    os.close(handle)
+    tmp = Path(tmp_name)
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)   # gone on success; a leftover never clutters the cache
     if when is not None:
         os.utime(path, (when, when))
     return text
