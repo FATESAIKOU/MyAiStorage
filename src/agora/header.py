@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote
 
 import yaml
 
@@ -30,30 +28,20 @@ class HeaderError(ValueError):
     """A header, ref, --header or --filter argument that breaks the rules."""
 
 
-@dataclass(frozen=True)
-class Ref:
-    entity: str
-    locator: str
-    rev: str | None = None
-    fragment: str | None = None
-
-
-def parse_ref(text: str) -> Ref:
-    """`entity ":" locator ["@" rev] ["#" fragment]`, split on the first colon."""
+def check_ref(text: str) -> None:
+    """Validate `entity ":" locator ["@" rev] ["#" fragment]`, split on the
+    first colon. Nothing reads the parts back, so this only raises or returns."""
     if not isinstance(text, str) or ":" not in text:
         raise HeaderError(f"ref 要寫成 <entity>:<locator>：{text!r}")
     entity, rest = text.split(":", 1)
     if entity not in ENTITIES:
         raise HeaderError(f"不認得的 entity {entity!r}（可用：{', '.join(ENTITIES)}）")
-    fragment = None
     if "#" in rest:
-        rest, fragment = rest.split("#", 1)
-    rev = None
+        rest = rest.split("#", 1)[0]
     if "@" in rest:
-        rest, rev = rest.rsplit("@", 1)
+        rest = rest.rsplit("@", 1)[0]
     if not rest:
         raise HeaderError(f"ref 缺少 locator：{text!r}")
-    return Ref(entity, unquote(rest), rev or None, fragment or None)
 
 
 def split_document(text: str) -> tuple[dict, str]:
@@ -131,7 +119,7 @@ def validate(header: dict, *, strict_refs: bool = True) -> list[str]:
         raise HeaderError("refs 必須是清單")
     for ref in ([header["case"]] if header.get("case") is not None else []) + list(refs):
         try:
-            parse_ref(ref)
+            check_ref(ref)
         except HeaderError as e:
             if strict_refs:
                 raise
@@ -238,7 +226,7 @@ def user_updates(header_file: str | None, header_args: list[str]) -> dict:
             updates[key] = [updates[key]]
     check_user_fields(updates)
     for ref in ([updates["case"]] if updates.get("case") is not None else []) + list(updates.get("refs") or []):
-        parse_ref(ref)
+        check_ref(ref)
     return updates
 
 

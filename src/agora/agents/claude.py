@@ -24,14 +24,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
-from agora.agents.base import (
-    AgentError,
-    Exported,
-    Launch,
-    Turns,
-    agent_cmd,
-    tool_line,
-)
+from agora.agents.base import AgentError, Exported, Launch, Turns, agent_cmd, tool_line
 
 FORMAT = "claude-jsonl/1"
 TITLE_MAX = 60
@@ -48,15 +41,11 @@ _SILENT_BLOCKS = frozenset({"tool_result", "thinking", "redacted_thinking"})
 _LOCAL_MARKERS = ("<command-name>", "<local-command-stdout>", "<local-command-caveat>")
 
 
-def claude_home() -> Path:
-    """$AGORA_CLAUDE_HOME, defaulting to ~ (never hard-code ~/.claude)."""
-    return Path(os.environ.get("AGORA_CLAUDE_HOME") or str(Path.home()))
-
-
 def config_dir() -> Path:
-    """Where Claude keeps projects/ (review CL4)."""
+    """Where Claude keeps projects/ (review CL4):
+    $AGORA_CLAUDE_HOME/.claude, then $CLAUDE_CONFIG_DIR, then ~/.claude."""
     if os.environ.get("AGORA_CLAUDE_HOME"):
-        return claude_home() / ".claude"
+        return Path(os.environ["AGORA_CLAUDE_HOME"]) / ".claude"
     if os.environ.get("CLAUDE_CONFIG_DIR"):
         return Path(os.environ["CLAUDE_CONFIG_DIR"])
     return Path.home() / ".claude"
@@ -183,14 +172,6 @@ def _unpack_raw(raw: bytes) -> tuple[list[str], dict]:
         raise AgentError(f"Claude raw 解析失敗：{e}")
 
 
-def _session_dir(objs: list[dict]) -> str | None:
-    """source.dir comes from the jsonl's own cwd field (review N9)."""
-    for o in objs:
-        if isinstance(o.get("cwd"), str):
-            return o["cwd"]
-    return None
-
-
 def _user_text(o: dict) -> str:
     """All text of a user line joined (P2: reuses _user_lines)."""
     return "".join(line for line in (_user_lines(o) or [])
@@ -209,33 +190,27 @@ def _session_title(objs: list[dict]) -> str | None:
     return None
 
 
-def _last_model(objs: list[dict]) -> str | None:
-    """The model of the most recent assistant line (design v4 source.model)."""
-    for o in reversed(objs):
-        if o.get("type") != "assistant":
-            continue
-        message = o.get("message")
-        model = message.get("model") if isinstance(message, dict) else None
-        if isinstance(model, str) and model:
-            return model
-    return None
-
-
 def _exported(session_id: str, main: list[str], sidecar: Path) -> Exported:
     objs = _parse_all(main)
     created = next((o["timestamp"] for o in objs  # CL11: first present timestamp
                     if isinstance(o.get("timestamp"), str)), None)
     version = next((o["version"] for o in reversed(objs)  # P3: from the jsonl
                     if isinstance(o.get("version"), str)), None)
+    # source.dir comes from the jsonl's own cwd field, not the folder name (N9).
+    directory = next((o["cwd"] for o in objs if isinstance(o.get("cwd"), str)), None)
+    # The model of the most recent assistant line (design v4 source.model).
+    model = next((m["model"] for o in reversed(objs) if o.get("type") == "assistant"
+                  and isinstance(m := o.get("message"), dict)
+                  and isinstance(m.get("model"), str) and m["model"]), None)
     return Exported(
         session_id=session_id,
         raw=_pack_raw(main, _pack_aux(sidecar)),
-        dir=_session_dir(objs),
+        dir=directory,
         title=_session_title(objs),
         created_at=created,
         agent_version=version,
         message_count=_count_messages(objs),
-        model=_last_model(objs),
+        model=model,
     )
 
 

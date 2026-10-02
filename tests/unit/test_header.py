@@ -83,12 +83,15 @@ def test_validate_requires_type_and_prefixed_id():
         h.validate(_session(id="01K6TEST"))
 
 
-def test_parse_ref_rules():  # U-HDR-06
-    assert h.parse_ref("mybrain:a:b/c.md") == h.Ref("mybrain", "a:b/c.md")
-    assert h.parse_ref("atelier:職務@v2") == h.Ref("atelier", "職務", rev="v2")
-    assert h.parse_ref("foundry:x#sec") == h.Ref("foundry", "x", fragment="sec")
-    with pytest.raises(h.HeaderError):
-        h.parse_ref("nobody:x")
+def test_check_ref_rules():  # U-HDR-06
+    # Nothing reads the parts back, so check_ref only has to accept or raise:
+    # a locator with colons, an @rev, and a #fragment all pass.
+    for good in ("mybrain:a:b/c.md", "atelier:職務@v2", "foundry:x#sec",
+                 "agora:01K6X", "mybrain:案件/檔名.md#某段"):
+        assert h.check_ref(good) is None
+    for bad in ("nobody:x", "no-colon", "mybrain:", "mybrain:", 42):
+        with pytest.raises(h.HeaderError):
+            h.check_ref(bad)
 
 
 def test_case_must_be_a_ref():  # U-HDR-07
