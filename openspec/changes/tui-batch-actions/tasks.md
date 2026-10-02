@@ -3,10 +3,12 @@
 - [ ] 1.1 新的等待視窗：子程序跑 `agora` 指令、逐行讀輸出、進度條讀 `k/N`、Esc 對 process group 送 SIGINT；`spawn` 可替換以便測試（spec「進度與中斷」）
 - [ ] 1.2 import、merge、delete、pull、push 改用它；import 同一個 agent 的列合成一個指令
 - [ ] 1.3 拿掉執行緒裡的 `redirect_stdout`（review K3）；首次設定與同步若仍用執行緒，只收自己的輸出
+- [ ] 1.4 opencode 的 summarize 一從事件串流讀到 session id 就寫 `pending-<id>`（review V5；改 `opencode.py`，負責：impl1）
+- [ ] 1.5 Esc 的升級：SIGINT → 5 秒 SIGTERM → 5 秒 SIGKILL；`stdin=DEVNULL`；進度只讀 `[agora] … k/N` 的行（review V1、V2、V8）
 
 ## 2. 選取與按鍵
 
-- [ ] 2.1 動作作用在勾選的列，沒有勾選時游標那一列（spec「動作作用在勾選的列」）
+- [ ] 2.1 動作作用在勾選的列（只算看得到的；被篩選掉的提示數量），沒有勾選時游標那一列；merge 照畫面順序；成功後清掉勾選、失敗或中斷時保留（spec「動作作用在勾選的列」，review V4、V6）
 - [ ] 2.2 `a` 全選切換，只算篩選後看得到的列（spec「全選切換」）
 - [ ] 2.3 按鍵改成 spec「按鍵」：拿掉 `r`、`s`，新增 `p`、`P`；按鍵列只顯示能用的
 
@@ -18,6 +20,7 @@
 
 ## 4. 測試與收尾
 
-- [ ] 4.1 `run_test` 測：勾選的列被送進指令、`a` 切換、進度條跟著 k/N、Esc 送中斷、雲端欄
+- [ ] 4.1 `run_test` 測：勾選的列被送進指令、篩選掉的不算、`a` 切換、進度條跟著 k/N、Esc 送中斷、雲端欄
+- [ ] 4.1b 用**真的子程序**測一次 Esc：整個 process group 都停、沒有殘留的子程序（review V7）
 - [ ] 4.2 `docs/design.md` 5.9 更新
 - [ ] 4.3 PM 用假資料在 pane 操作一遍；review 審程式

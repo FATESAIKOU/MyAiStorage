@@ -13,7 +13,7 @@
 
 ## Decisions
 
-- **子程序跑指令**：`[sys.executable, "-m", "agora.cli", …]`，stdout 與 stderr 合在一起逐行讀，`start_new_session=True`，Esc 時對整個 process group 送 SIGINT，讓指令啟動的 agent（例如寫要約的 opencode）一起停。替代方案「執行緒＋redirect_stdout」沒辦法安全中斷，而且會影響整個程式的 stdout。
+- **子程序跑指令**：`[sys.executable, "-m", "agora.cli", …]`，`stdin=DEVNULL`（V1），stdout 與 stderr 合在一起逐行讀，`start_new_session=True`，Esc 時對整個 process group 送 SIGINT，沒停再升級成 SIGTERM、SIGKILL（V2），讓指令啟動的 agent（例如寫要約的 opencode）一起停。替代方案「執行緒＋redirect_stdout」沒辦法安全中斷，而且會影響整個程式的 stdout。
 - **進度**：從輸出裡最後一個 `k/N` 讀；沒有就顯示不確定的進度條。
 - **continue、edit** 照舊用 `App.suspend()`，在本程序呼叫 `cli.main`（要把終端機交給 agent 或編輯器）。
 - **測試**：`spawn` 可以替換成假的程序物件（跑假的 cli、提供 stdout），用 Textual 的 `run_test` 模擬按鍵。
@@ -22,4 +22,6 @@
 ## Risks / Trade-offs
 
 - [子程序每次都要重新載入 Python 與套件，多一兩百毫秒] → 動作本身都是秒級，可以接受。
-- [中斷時 agent 的 session 可能留在寫要約的專案裡] → 那個專案的 session 本來就不列在未匯入頁（review T5）；之後補刪由既有的 pending 記錄處理。
+- [中斷時寫要約的 opencode session 留下來] → opencode 的 summarize 現在要等 `run` 結束才寫 `pending-<id>`，中途被中斷就沒有記錄（review V5、v6 Z2）。改成從 `--format json` 的事件串流一讀到 session id 就先寫記錄（tasks 1.4）；在那之前留下的，只會在寫要約專用的專案裡，未匯入頁本來就不列。
+- [delete 在「Drive 已刪」與「寫墓碑」之間被中斷] → 依賴 command-batch-actions 修好 review S1-4（Drive 上已不存在的視為已刪）；那之前 delete 的「重跑會接著做」不保證（V3）。
+- [未匯入頁同時勾了 opencode 與 claude 的列] → 依 agent 分成兩個指令依序跑，等待視窗標示「第 i／2 段」（V6）。
