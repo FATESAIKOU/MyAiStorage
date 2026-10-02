@@ -1,22 +1,38 @@
-"""Local caches (design 5.10): lazy full text of agent sessions, refreshed in one go."""
+"""Local caches (design 5.10): `agora pull` / `agora push` (T1 R1/R5/R7, K4/K5).
+
+Every test drives the fake rclone and a fake agent: nothing here reaches Drive,
+nor the user's own agent sessions.
+"""
 
 from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
+import shutil
+import sys
+import threading
+
+import pytest
 
 from agora import cache, store
 from agora.agents.base import Exported, Listed
+
+FAKE_RCLONE = Path(__file__).resolve().parent.parent / "fakes" / "fake_rclone.py"
 
 
 class Agent:
     name = "claude"
 
-    def __init__(self, texts, listed=()):
+    def __init__(self, texts, listed=(), name=None):
         self.texts, self.listed, self.exports = texts, list(listed), 0
+        self.lock = threading.Lock()
+        if name:
+            self.name = name
 
     def export(self, session_id):
-        self.exports += 1
+        with self.lock:
+            self.exports += 1
         if session_id not in self.texts:
             raise RuntimeError("gone")
         return Exported(session_id=session_id, raw=json.dumps({"m": self.texts[session_id]}).encode())
@@ -27,6 +43,63 @@ class Agent:
 
     def list_sessions(self):
         return self.listed
+
+
+@pytest.fixture
+def drive(tmp_path, monkeypatch):
+    """A Drive that is a folder, and an rclone that is a python script."""
+    root = tmp_path / "remote"
+    root.mkdir()
+    wrapper = tmp_path / "rclone"
+    wrapper.write_text(f"#!/bin/sh\nexec {sys.executable} {FAKE_RCLONE} \"$@\"\n")
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("FAKE_REMOTE", str(root))
+    monkeypatch.setenv("AGORA_RCLONE", str(wrapper))
+    return root
+
+
+def sessions_on(drive: Path) -> Path:
+    return drive / "agora" / "sessions"
+
+
+def calls(drive: Path) -> list[list[str]]:
+    log = drive.parent / "calls.log"
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def copyto_since(drive: Path, mark: int, ulid: str) -> list[str]:
+    """The remote file names the calls after `mark` wrote, in order."""
+    return [c[-1].rsplit("/", 1)[-1] for c in calls(drive)[mark:]
+            if "copyto" in c and c[-1].startswith(f"gdrive:sessions/{ulid}/")]
+
+
+def _header(ulid=None):
+    return {"type": "Session", "title": "CSV 規劃", "tags": [], "refs": [], "case": None,
+            "id": f"agora:{ulid or store.h.new_ulid()}",
+            "agora": {"header": 2, "created_at": "2026-10-02T00:00:00Z",
+                      "updated_at": "2026-10-02T00:00:00Z", "relation": "import", "parents": [],
+                      "source": {"agent": "opencode", "session_id": "ses_source",
+                                 "created_at": "2026-10-01T00:00:00Z"}}}
+
+
+def _on_drive(paths, body="## user\n把 CSV 轉成 Markdown 表格\n", raw=b'{"x": 1}') -> str:
+    """One session staged and pushed, so it is really on the fake Drive."""
+    hdr = _header()
+    store.push_one(store.Drive(paths), store.stage(paths, hdr, body, raw))
+    return hdr["id"].split(":", 1)[1]
+
+
+def _uploaded(drive: Path, ulid: str) -> set[str]:
+    folder = sessions_on(drive) / ulid
+    return {p.name for p in folder.iterdir()} if folder.is_dir() else set()
+
+
+def _raw_name(paths, ulid: str) -> str:
+    hdr, _ = store.h.split_document((paths.mirror / ulid / "session.md").read_text())
+    return hdr["agora"]["raw"]["file"]
+
+
+# --- the agent full-text cache ------------------------------------------------
 
 
 def test_full_text_is_kept_and_reread_only_when_the_session_is_newer():
@@ -40,17 +113,234 @@ def test_full_text_is_kept_and_reread_only_when_the_session_is_newer():
     assert (paths.reading / "claude" / "s.md").exists()
 
 
-def test_refresh_local_goes_on_past_a_failure_and_reports_progress(capsys):
-    paths = store.Paths.from_env()
-    agent = Agent({"a": ["一"], "c": ["三"]}, [Listed(x, None, None, None) for x in "abc"])
-    assert cache.refresh_local(paths, [agent]) == (2, 1)
-    out = capsys.readouterr().out
-    assert "claude 3/3" in out and "讀不到" in out
-
-
 def test_search_finds_cached_text_whatever_the_width_and_case():
     paths = store.Paths.from_env()
     cache.local_reading(paths, Agent({"s": ["Ｈｅｌｌｏ 表格"]}), "s")
     cache.local_reading(paths, Agent({"t": ["別的"]}), "t")
     assert list(cache.search_cached(paths, "claude", "hello")) == ["s"]
     assert list(cache.search_cached(paths, "opencode", "hello")) == []
+
+
+def test_two_threads_caching_two_sessions_do_not_collide(drive):   # review K4
+    """The staging file used to be a fixed `.tmp` next to the target: two threads
+    writing two sessions in one directory raced on it and one write was lost."""
+    paths = store.Paths.from_env()
+    both_in = threading.Barrier(2, timeout=10)
+    started = []
+
+    class Slow(Agent):
+        def export(self, session_id):
+            started.append(session_id)
+            both_in.wait()        # both threads are inside export at the same time
+            return Exported(session_id=session_id,
+                            raw=json.dumps({"m": [session_id, "答"]}).encode())
+
+    agent = Slow({s: [s] for s in ("s1", "s2")})
+    errors = []
+
+    def pull_one(session_id):
+        try:
+            cache.local_reading(paths, agent, session_id, "2026-10-02T00:00:00Z")
+        except Exception as e:      # pragma: no cover - the point is that this stays empty
+            errors.append(e)
+
+    threads = [threading.Thread(target=pull_one, args=(s,)) for s in ("s1", "s2")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+    assert errors == []
+    assert sorted(started) == ["s1", "s2"]      # they really overlapped
+    for session_id in ("s1", "s2"):
+        assert session_id in (paths.reading / "claude" / f"{session_id}.md").read_text()
+    assert not list((paths.reading / "claude").glob("*.tmp"))   # no staging file left behind
+
+
+# --- pull ---------------------------------------------------------------------
+
+
+def test_pull_brings_one_session_down_with_its_raw_and_says_k_of_n(drive, capsys):
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    assert cache.pull(paths, [ulid], {}) == (1, 0)
+    assert "pull 1/1" in capsys.readouterr().err
+    mirror = paths.mirror / ulid
+    assert (mirror / "session.md").is_file()
+    assert (mirror / _raw_name(paths, ulid)).is_file()   # the raw came too
+    assert store.Index(paths).header(ulid) is not None    # searchable again
+
+
+def test_pull_takes_a_bare_ulid_and_an_agora_prefixed_one(drive, capsys):
+    """R5: no prefix means an agora id; `agora:` says the same thing."""
+    paths = store.Paths.from_env()
+    first = _on_drive(paths)
+    second = _on_drive(paths)
+    assert cache.pull(paths, [first, f"agora:{second}"], {}) == (2, 0)
+    err = capsys.readouterr().err
+    assert "pull 1/2" in err and "pull 2/2" in err
+    assert (paths.mirror / first / "session.md").is_file()
+    assert (paths.mirror / second / "session.md").is_file()
+
+
+def test_pull_of_an_agent_session_caches_its_full_text(drive):
+    paths = store.Paths.from_env()
+    agent = Agent({"s": ["問", "答"]}, [Listed("s", "/tmp/p", "t", "2026-10-02T00:00:00Z")], name="opencode")
+    assert cache.pull(paths, ["opencode:s"], {"opencode": agent}) == (1, 0)
+    assert "## user\n問" in (paths.reading / "opencode" / "s.md").read_text()
+    assert agent.exports == 1
+
+
+def test_pull_of_an_agent_session_skips_one_that_is_not_stale(drive):
+    """R4: a re-run after Ctrl-C does not pay for what it already has."""
+    paths = store.Paths.from_env()
+    agent = Agent({"s": ["問", "答"]}, [Listed("s", "/tmp/p", "t", "2026-10-02T00:00:00Z")], name="claude")
+    assert cache.pull(paths, ["claude:s"], {"claude": agent}) == (1, 0)
+    assert cache.pull(paths, ["claude:s"], {"claude": agent}) == (1, 0)
+    assert agent.exports == 1
+
+
+def test_pull_of_a_bare_agent_id_says_which_prefix_to_write(drive, capsys):   # review Q5
+    """`ses_…` and a bare uuid are agent ids. Reading one as an agora ULID would go
+    looking for a Drive folder that cannot exist and report it as gone."""
+    paths = store.Paths.from_env()
+    agent = Agent({}, name="opencode")
+    assert cache.pull(paths, ["ses_abc", "1b2f5a54-0b0a-4a3e-9c6a-0f0d0f0d0f0d"],
+                      {"opencode": agent, "claude": agent}) == (0, 2)
+    err = capsys.readouterr().err
+    assert err.count("請寫前綴") == 2 and "opencode:" in err and "claude:" in err
+    assert agent.exports == 0            # it never went looking for a session
+
+
+def test_pull_of_an_id_the_cloud_does_not_have_changes_nothing(drive, capsys):
+    """A session another machine deleted is not this command's to drop (Q1)."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    cache.pull(paths, [ulid], {})
+    shutil.rmtree(sessions_on(drive) / ulid)          # ... then deleted over there
+
+    assert cache.pull(paths, [ulid], {}) == (1, 0)
+    assert "雲端沒有" in capsys.readouterr().err
+    assert (paths.mirror / ulid / "session.md").is_file()
+    assert store.Index(paths).header(ulid) is not None
+
+
+def test_pull_of_one_that_is_already_fresh_asks_rclone_for_nothing(drive, capsys):
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    cache.pull(paths, [ulid], {})
+    mark = len(calls(drive))
+    assert cache.pull(paths, [ulid], {}) == (1, 0)
+    assert not [c for c in calls(drive)[mark:] if "copyto" in c]   # nothing downloaded again
+    assert "雲端沒有" not in capsys.readouterr().err
+
+
+def test_pull_goes_on_past_a_failure_and_reports_k_of_n(drive, capsys):   # review K5
+    """One unreadable session must not take the rest of the batch with it."""
+    paths = store.Paths.from_env()
+    good = _on_drive(paths)
+    other = _on_drive(paths)
+    agent = Agent({}, name="opencode")
+    assert cache.pull(paths, ["opencode:gone", good, other], {"opencode": agent}) == (2, 1)
+    err = capsys.readouterr().err
+    assert "pull 3/3" in err and "拉不到" in err
+    assert (paths.mirror / good / "session.md").is_file()
+
+
+# --- push ---------------------------------------------------------------------
+
+
+def test_push_sends_session_md_and_the_raw_it_names_and_nothing_else(drive, capsys):
+    """R7: an older raw, a *.partial and a .DS_Store stay here."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    cache.pull(paths, [ulid], {})                     # so the mirror really has the raw
+    raw = _raw_name(paths, ulid)
+    for name in ("raw-000000000000.json", "session.md.partial", ".DS_Store"):
+        (paths.mirror / ulid / name).write_text("不該被傳上去", encoding="utf-8")
+
+    mark = len(calls(drive))
+    assert cache.push(paths, [ulid], {}) == (1, 0)
+    assert "push 1/1" in capsys.readouterr().err
+    assert sorted(copyto_since(drive, mark, ulid)) == sorted([raw, "session.md"])
+    assert _uploaded(drive, ulid) == {"session.md", raw}
+    assert (paths.mirror / ulid / ".DS_Store").is_file()      # still here, still not up there
+
+
+def test_push_overwrites_the_copy_on_drive(drive):
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    cache.pull(paths, [ulid], {})
+    edited = (paths.mirror / ulid / "session.md").read_text() + "\n本機又改了\n"
+    (paths.mirror / ulid / "session.md").write_text(edited, encoding="utf-8")
+
+    assert cache.push(paths, [ulid], {}) == (1, 0)
+    assert (sessions_on(drive) / ulid / "session.md").read_text() == edited
+
+
+def test_push_sends_only_session_md_when_the_raw_is_not_here(drive, capsys):   # Q7
+    """A header can name a raw this machine does not have - a merge has none. The
+    reading version is the session, so it still goes up."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    cache.pull(paths, [ulid], {})
+    (paths.mirror / ulid / _raw_name(paths, ulid)).unlink()
+
+    mark = len(calls(drive))
+    assert cache.push(paths, [ulid], {}) == (1, 0)
+    assert "本機沒有" in capsys.readouterr().err
+    assert copyto_since(drive, mark, ulid) == ["session.md"]
+    # Drive keeps the raw it already had: push overwrites, it does not tidy up
+    assert _uploaded(drive, ulid) == {"session.md", _raw_name_on_drive(drive, ulid)}
+
+
+def _raw_name_on_drive(drive: Path, ulid: str) -> str:
+    """The raw name Drive has for this session (the mirror copy is gone)."""
+    hdr, _ = store.h.split_document((sessions_on(drive) / ulid / "session.md").read_text())
+    return hdr["agora"]["raw"]["file"]
+
+
+def test_push_does_not_revive_a_session_the_cloud_lost(drive, capsys):
+    """K1/Q1: the old sync pushed whatever was local, so another machine's delete
+    came back as a resurrected session. Push only touches what Drive still has."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    cache.pull(paths, [ulid], {})
+    shutil.rmtree(sessions_on(drive) / ulid)
+
+    assert cache.push(paths, [ulid], {}) == (0, 0)
+    assert "雲端沒有" in capsys.readouterr().err
+    assert not (sessions_on(drive) / ulid).exists()    # still deleted over there
+    assert (paths.mirror / ulid / "session.md").is_file()
+
+
+def test_push_sends_the_outbox_first(drive):
+    """A session this machine just wrote is still in the outbox; push is how it
+    goes up, and it must not be refused as 'not on Drive'."""
+    paths = store.Paths.from_env()
+    hdr = _header()
+    ulid = hdr["id"].split(":", 1)[1]
+    store.stage(paths, hdr, "## user\n還沒上傳\n", b'{"x": 9}')
+
+    assert cache.push(paths, [ulid], {}) == (1, 0)
+    assert not (paths.outbox / ulid).exists()
+    assert _uploaded(drive, ulid) == {"session.md", hdr["agora"]["raw"]["file"]}
+
+
+def test_push_goes_on_past_a_failure_and_reports_k_of_n(drive, capsys):   # review K5
+    paths = store.Paths.from_env()
+    first, second, broken = _on_drive(paths), _on_drive(paths), _on_drive(paths)
+    cache.pull(paths, [first, second, broken], {})
+    shutil.rmtree(paths.mirror / broken)      # Drive has it, here it is gone: this one fails
+    done, failed = cache.push(paths, [first, broken, second], {})
+    assert (done, failed) == (2, 1)
+    err = capsys.readouterr().err
+    assert "push 1/3" in err and "push 3/3" in err and "傳不上去" in err
+
+
+def test_push_only_takes_agora_ids(drive, capsys):
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    cache.pull(paths, [ulid], {})
+    agent = Agent({}, name="opencode")
+    assert cache.push(paths, ["opencode:s", ulid], {"opencode": agent}) == (1, 1)
+    assert "push 只吃 agora" in capsys.readouterr().err
