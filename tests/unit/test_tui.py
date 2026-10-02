@@ -132,9 +132,11 @@ def test_actions_and_what_they_run():
     assert tui.argv_for("delete", rows, None, None) == [["delete", "session", "agora:a", "agora:b", "--yes"]]
     assert tui.argv_for("continue", rows[:1], "opencode", "/w") == [
         ["continue", "session", "agora:a", "--agent", "opencode", "--dir", "/w"]]
-    imp = [tui.Row("opencode:ses_x", ["x"], "x", "opencode")]
+    # one command for all of that agent's sessions, not one per row (T1 R2)
+    imp = [tui.Row("opencode:ses_x", ["x"], "x", "opencode"), tui.Row("opencode:ses_y", ["y"], "y", "opencode")]
     assert tui.argv_for("import", imp, None, None) == [
-        ["import", "session", "--external-session-id", "ses_x", "--agent", "opencode"]]
+        ["import", "session", "--agent", "opencode",
+         "--external-session-id", "ses_x", "--external-session-id", "ses_y"]]
 
 
 def test_setup_asks_for_rclone_then_for_authorization(monkeypatch, tmp_path):
@@ -352,6 +354,41 @@ def test_delete_takes_every_marked_row():
                 if started:
                     break
             assert started == [["delete", "session", *order, "--yes"]]
+    _run(go)
+
+
+def test_import_runs_one_command_per_agent():
+    """V6: opencode and claude are separate stores, so they are separate commands -
+    and each agent's sessions go into one of them."""
+    agent = FakeAgent("opencode", [Listed("s1", "/tmp/p", "甲", None), Listed("s2", "/tmp/q", "乙", None)],
+                      texts={"s1": ["問"], "s2": ["答"]})
+    agent2 = FakeAgent("claude", [Listed("c1", "/tmp/r", "丙", None)], texts={"c1": ["問"]})
+    app, _ = _app([agent, agent2])
+    spawn, started = _spawn()
+    app.spawn = spawn
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("tab")                       # 未匯入
+            await pilot.pause()
+            for _ in range(3):
+                await pilot.press("space")
+                await pilot.press("down")
+            await pilot.press("enter")
+            for _ in range(60):
+                await pilot.pause(0.05)
+                if started:
+                    break
+            await pilot.press("space")                   # close the first result window
+            for _ in range(60):
+                await pilot.pause(0.05)
+                if len(started) >= 2:
+                    break
+            assert started == [
+                ["import", "session", "--agent", "opencode",
+                 "--external-session-id", "s1", "--external-session-id", "s2"],
+                ["import", "session", "--agent", "claude", "--external-session-id", "c1"]]
     _run(go)
 
 

@@ -171,8 +171,11 @@ def import_preview(agent, session_id: str, full: bool = False, paths: store.Path
 def argv_for(action: str, rows: list[Row], agent: str | None, workdir: str | None) -> list[list[str]]:
     """The command-mode invocations an action stands for."""
     if action == "import":
-        return [["import", "session", "--external-session-id", r.key.split(":", 1)[1], "--agent", r.agent]
-                for r in rows]
+        # One command for all of that agent's sessions: the command mode syncs once
+        # and imports them one by one with a k/N line each (T1 R2), so N children
+        # and N syncs become one of each.
+        return [["import", "session", "--agent", rows[0].agent,
+                 *[a for r in rows for a in ("--external-session-id", r.key.split(":", 1)[1])]]]
     first = rows[0].key if rows else ""
     return {"continue": [["continue", "session", first, "--agent", agent, "--dir", workdir]],
             "merge": [["merge", "session", *[r.key for r in rows], "--agent", agent]],
@@ -730,7 +733,12 @@ class AgoraApp(App):
         if not rows:
             return
         if self.tab == "import":
-            await self.act(f"匯入 {len(rows)} 個", argv_for("import", rows, None, None))
+            # One command per agent - they are separate stores - each with its own
+            # k/N progress in its window (review V6).
+            for agent in dict.fromkeys(r.agent for r in rows):
+                mine = [r for r in rows if r.agent == agent]
+                await self.act(f"匯入 {len(mine)} 個（{agent}）",
+                               argv_for("import", mine, None, None))
             return
         row = self.current()
         pick = await self.push_screen_wait(Choose("用哪個 agent 接續？", ["opencode", "claude"]))
