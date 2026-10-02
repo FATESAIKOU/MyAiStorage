@@ -525,7 +525,8 @@ def continuing(paths: Paths, ulid: str) -> bool:
     return (paths.pending / f"{ulid}.json").exists()
 
 
-def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) -> Index:
+def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
+         warn=None) -> Index:
     """Push the outbox, then pull session.md files whose md5 changed.
 
     Only session.md is mirrored; raws are fetched on demand. A session whose
@@ -538,6 +539,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
     than a side effect of running any command. Markers move only when the listing
     came back whole (Q4).
     """
+    say = warn or _warn      # the interactive mode passes its own sink, not the screen's (review K3)
     index = Index(paths)
     index.rebuild_from_mirror(paths)   # after a version bump the index is empty; the mirror has it
     stamp = paths.state / "last-sync"
@@ -548,10 +550,10 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
         failed = push_outbox(drive, paths)
         remote = drive.list_sessions()
     except StoreError as e:
-        _warn(f"連不上 Drive，改查本機索引：{e}")
+        say(f"連不上 Drive，改查本機索引：{e}")
         return index
     if failed:
-        _warn(f"outbox 還有 {len(failed)} 筆沒上傳成功")
+        say(f"outbox 還有 {len(failed)} 筆沒上傳成功")
     missing = remote is None
     remote = remote or {}
     known = index.known()
@@ -562,7 +564,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
         try:
             drive.download_many(changed, paths.mirror)
         except StoreError as e:
-            _warn(f"批次下載失敗，改成逐一下載：{e}")
+            say(f"批次下載失敗，改成逐一下載：{e}")
     for ulid in changed:
         md5 = remote[ulid]["session.md"]
         local = paths.mirror / ulid / "session.md"
@@ -571,19 +573,19 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
                 drive.download(ulid, "session.md", local)
             hdr, body = h.split_document(local.read_text(encoding="utf-8"))
             for warning in h.validate(hdr, strict_refs=False):
-                _warn(f"{ulid}：{warning}")
+                say(f"{ulid}：{warning}")
         except (StoreError, h.HeaderError, UnicodeDecodeError) as e:
-            _warn(f"{ulid} 讀不到，先跳過：{e}")
+            say(f"{ulid} 讀不到，先跳過：{e}")
             continue
         raw = h.agora_of(hdr).get("raw")
         if raw and remote[ulid].get(raw["file"]) != raw.get("md5"):
-            _warn(f"{ulid} 還沒寫完（raw 不在或 md5 不符），下次再試")
+            say(f"{ulid} 還沒寫完（raw 不在或 md5 不符），下次再試")
             index.drop(ulid)
             local.unlink(missing_ok=True)   # keep unfinished sessions out of an offline rebuild (G3)
             continue
         index.put(ulid, md5, hdr, body)
     if missing:
-        _warn("Drive 上找不到 sessions/，可能是 folder ID 或 token 有問題，標記不動")
+        say("Drive 上找不到 sessions/，可能是 folder ID 或 token 有問題，標記不動")
     else:
         # The listing is complete, so this is the one moment markers may move.
         # Not up yet and in flight are not "deleted on another machine".

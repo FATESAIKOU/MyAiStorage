@@ -2,7 +2,7 @@
 
 - [x] 1.1 新的等待視窗：子程序跑 `agora` 指令、逐行讀輸出、進度條讀 `k/N`、Esc 對 process group 送 SIGINT；`spawn` 可替換以便測試（spec「進度與中斷」）
 - [x] 1.2 import、merge、delete、pull、push 改用它；import 同一個 agent 的列合成一個指令
-- [ ] 1.3 拿掉執行緒裡的 `redirect_stdout`（review K3）；首次設定與同步若仍用執行緒，只收自己的輸出
+- [x] 1.3 拿掉執行緒裡的 `redirect_stdout`（review K3）；首次設定與同步若仍用執行緒，只收自己的輸出
 - [x] 1.4 opencode 的 summarize 一從事件串流讀到 session id 就寫 `pending-<id>`（review V5；改 `opencode.py`，負責：impl1）
 - [ ] 1.5 Esc 的升級：SIGINT → 5 秒 SIGTERM → 5 秒 SIGKILL；`stdin=DEVNULL`；進度只讀 `[agora] … k/N` 的行（review V1、V2、V8）
 

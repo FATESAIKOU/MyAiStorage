@@ -171,9 +171,8 @@ def import_preview(agent, session_id: str, full: bool = False, paths: store.Path
 def argv_for(action: str, rows: list[Row], agent: str | None, workdir: str | None) -> list[list[str]]:
     """The command-mode invocations an action stands for."""
     if action == "import":
-        # One command for all of that agent's sessions: the command mode syncs once
-        # and imports them one by one with a k/N line each (T1 R2), so N children
-        # and N syncs become one of each.
+        # One command for every session of that agent: the command mode syncs once
+        # and imports them one by one, with a k/N line for each (T1 R2).
         return [["import", "session", "--agent", rows[0].agent,
                  *[a for r in rows for a in ("--external-session-id", r.key.split(":", 1)[1])]]]
     first = rows[0].key if rows else ""
@@ -193,15 +192,20 @@ def setup_needed(paths: store.Paths) -> str | None:
     return None if (paths.config / "rclone.conf").exists() else "auth"
 
 
-def authorize(paths: store.Paths) -> int:
-    """`rclone config create` with rclone's own client: it opens the browser; we pass its lines on."""
+def authorize(paths: store.Paths, say=print) -> int:
+    """`rclone config create` with rclone's own client: it opens the browser; we pass its lines on.
+
+    `say` is where the lines go - the waiting window when the interactive mode runs
+    it, stdout otherwise - rather than the thread printing behind the screen's back
+    (review K3).
+    """
     paths.config.mkdir(parents=True, exist_ok=True)
     argv = [os.environ.get("AGORA_RCLONE", "rclone"), "config", "create", "gdrive", "drive", "scope=drive.file",
             "--config", str(paths.config / "rclone.conf")]
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     for line in proc.stdout:
         if "token" not in line.lower():   # the token is a secret: never on screen
-            print(line.rstrip())
+            say(line.rstrip())
     return proc.wait()
 
 
@@ -312,12 +316,19 @@ class Run(ModalScreen):
 
 
 class Busy(ModalScreen):
-    """Run `work_` in a thread while a window says so, with its latest output line; dismiss (value, output, error)."""
+    """Run `work_(say)` in a thread while a window says so; dismiss (value, lines, error).
+
+    The work is handed a `say` instead of the thread redirecting the program's
+    stdout, which took every other thread's output with it (review K3). Only the
+    first-run sync and rclone's own authorization still run this way - an action
+    is a child process now - and both say what they have to say through `say`.
+    """
+
     SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
     def __init__(self, title: str, work_):
         super().__init__()
-        self.title_, self.work_, self.out, self.started = title, work_, io.StringIO(), time.monotonic()
+        self.title_, self.work_, self.lines, self.started = title, work_, [], time.monotonic()
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="box"):
@@ -332,18 +343,20 @@ class Busy(ModalScreen):
     def tick(self) -> None:
         spent = time.monotonic() - self.started
         self.query_one("#spin", Static).update(f"{self.SPIN[int(spent * 8) % len(self.SPIN)]} 執行中…（{int(spent)} 秒）")
-        lines = self.out.getvalue().strip().splitlines()
-        self.query_one("#last", Static).update(lines[-1] if lines else "")
+        self.query_one("#last", Static).update(self.lines[-1] if self.lines else "")
 
     @work(thread=True)
     def run(self) -> None:
         value = error = None
-        with contextlib.redirect_stdout(self.out), contextlib.redirect_stderr(self.out):
-            try:
-                value = self.work_()
-            except Exception as e:   # shown in the result window, never a traceback over the screen
-                error = e
-        self.app.call_from_thread(self.dismiss, (value, self.out.getvalue(), error))
+
+        def say(text: str) -> None:
+            self.lines.append(str(text))
+
+        try:
+            value = self.work_(say)
+        except Exception as e:   # shown in the result window, never a traceback over the screen
+            error = e
+        self.app.call_from_thread(self.dismiss, (value, "\n".join(self.lines), error))
 
 
 class Tell(ModalScreen):
@@ -449,7 +462,8 @@ class AgoraApp(App):
             self.exit()
             return
         if self.check_setup:
-            _, out, _ = await self.push_screen_wait(Busy("同步 Drive", lambda: store.sync(self.paths, throttle=True)))
+            _, out, _ = await self.push_screen_wait(
+                Busy("同步 Drive", lambda say: store.sync(self.paths, throttle=True, warn=say)))
             self.status = "離線：只有本機資料" if "連不上 Drive" in (out or "") else ""
         self.reload()
         if not self.rows["agora"]:
@@ -467,7 +481,8 @@ class AgoraApp(App):
                     "只看得到 agora 自己建的檔案。")
             if await self.push_screen_wait(Choose("還沒設定 Google Drive", ["用瀏覽器授權", "離開"], note)) != 0:
                 return False
-            code, out, error = await self.push_screen_wait(Busy("請在瀏覽器完成授權", lambda: authorize(self.paths)))
+            code, out, error = await self.push_screen_wait(
+                Busy("請在瀏覽器完成授權", lambda say: authorize(self.paths, say)))
             if error or code != 0 or setup_needed(self.paths):
                 await self.push_screen_wait(Tell("授權沒有完成", f"{out}\n{error or ''}", ok=False))
                 return False
@@ -689,35 +704,26 @@ class AgoraApp(App):
             text=True, bufsize=1, start_new_session=True,
             env={**os.environ, "PYTHONUNBUFFERED": "1"})
 
-    async def act(self, title: str, argvs: list[list[str]]) -> None:
-        """An action that needs no terminal of its own: a child process per command,
-        a window each with its progress and Esc, then what they said.
+    async def act(self, title: str, argv: list[str]) -> None:
+        """An action that needs no terminal of its own: a child process, a window
+        with its progress and Esc, then what it said.
 
         Re-running the same action carries on from where it stopped (design 5.11),
         which is what the screen says after an interruption, because the command
-        mode is the one that knows how to skip what is already done. An interrupted
-        command does not start the next one.
+        mode is the one that knows how to skip what is already done.
         """
-        codes, out, stopped = [], [], False
-        for argv in argvs:
-            code, text = await self.push_screen_wait(Run(title, argv, self.spawn))
-            codes.append(code)
-            out.append(text)
-            if code in (130, -signal.SIGINT):
-                stopped = True
-                break
-        await self.push_screen_wait(Tell(f"{title}{'（已中斷）' if stopped else ''}",
-                                         "\n".join(out), codes == [0] * len(codes)))
+        code, out = await self.push_screen_wait(Run(title, argv, self.spawn))
+        stopped = code in (130, -signal.SIGINT)
+        await self.push_screen_wait(Tell(f"{title}{'（已中斷）' if stopped else ''}", out, code == 0))
         self.reload()
-        if codes and all(code == 0 for code in codes):
+        if code == 0:
             self.say("完成")
         elif stopped:
             self.say("已中斷；重跑同一個動作會接著做", failed=True)
-        elif codes and all(code == 3 for code in codes):
+        elif code == 3:
             self.say("已存進 outbox，之後的指令會自動再送", failed=True)
         else:
             self.say("沒有全部成功，訊息在結果視窗", failed=True)
-
 
     def outside(self, argv: list[str]) -> int:
         """Hand the whole terminal over (an agent, an editor), then come back."""
@@ -733,12 +739,12 @@ class AgoraApp(App):
         if not rows:
             return
         if self.tab == "import":
-            # One command per agent - they are separate stores - each with its own
-            # k/N progress in its window (review V6).
+            # One command per agent: they are separate stores, and each of them gets
+            # its own k/N progress in the window (V6).
             for agent in dict.fromkeys(r.agent for r in rows):
                 mine = [r for r in rows if r.agent == agent]
                 await self.act(f"匯入 {len(mine)} 個（{agent}）",
-                               argv_for("import", mine, None, None))
+                               argv_for("import", mine, None, None)[0])
             return
         row = self.current()
         pick = await self.push_screen_wait(Choose("用哪個 agent 接續？", ["opencode", "claude"]))
@@ -777,7 +783,7 @@ class AgoraApp(App):
         pick = await self.push_screen_wait(Choose(f"合併 {len(rows)} 個：由誰寫要約？", ["opencode", "claude"],
                                                   "每個來源叫一次 AI；內容會送到那個 agent 的模型供應商"))
         if pick is not None:
-            await self.act("合併", argv_for("merge", rows, ("opencode", "claude")[pick], None))
+            await self.act("合併", argv_for("merge", rows, ("opencode", "claude")[pick], None)[0])
 
     def action_edit(self) -> None:
         row = self.current()
@@ -794,7 +800,7 @@ class AgoraApp(App):
         if not rows:
             self.say("先選要拉下來的 Session", failed=True)
             return
-        await self.act(f"拉下 {len(rows)} 個", argv_for("pull", rows, None, None))
+        await self.act(f"拉下 {len(rows)} 個", argv_for("pull", rows, None, None)[0])
 
     @work
     async def action_sync(self) -> None:
@@ -804,7 +810,7 @@ class AgoraApp(App):
             return
         if await self.push_screen_wait(Choose(f"把 {len(rows)} 個寫回 Drive？", ["取消", "確定"],
                                               "同名的檔案直接覆蓋；Drive 上多的不動")) == 1:
-            await self.act("寫回 Drive", argv_for("push", rows, None, None))
+            await self.act("寫回 Drive", argv_for("push", rows, None, None)[0])
 
     @work
     async def action_delete(self) -> None:
@@ -813,7 +819,7 @@ class AgoraApp(App):
             return
         listed = "\n".join(f"{r.key}「{r.cells[1]}」" for r in rows[:6]) + ("\n…" if len(rows) > 6 else "")
         if await self.push_screen_wait(Choose(f"把 {len(rows)} 個移到 Drive 垃圾桶？", ["取消", "確定"], listed)) == 1:
-            await self.act(f"刪除 {len(rows)} 個", argv_for("delete", rows, None, None))
+            await self.act(f"刪除 {len(rows)} 個", argv_for("delete", rows, None, None)[0])
 
 
 def main(paths: store.Paths) -> int:
