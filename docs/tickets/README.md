@@ -5,7 +5,7 @@
 | 編號 | 標題 | 狀態 | 負責 | 備註 |
 |---|---|---|---|---|
 | T2 | [互動模式：多選、全選、進度、中斷、按鍵整理](T2-tui-batch.md) | 等 T1 | 待派 | |
-| T1 | [指令模式：pull／push、批次動作的進度與續傳](T1-command-batch.md) | 待確認 | impl1、impl2 | K1 等使用者決定 |
+| T1 | [指令模式：pull／push、批次動作的進度與續傳](T1-command-batch.md) | 已確認，待派工 | impl1、impl2 | 等 T0 做完就派 |
 | T0 | e2e 整合測試改成「continue 寫回原本的 Session」 | 進行中 | impl1（opencode）、impl2（claude） | 109c150 的後續 |
 
 ## 已完成（2026-10-02～03，沒有開單的部分）
