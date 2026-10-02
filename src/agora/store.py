@@ -495,7 +495,7 @@ def _snippet(body: str, kw: str, width: int = 30) -> str:
     return ("…" if start else "") + text + ("…" if pos + len(kw) + width < len(body) else "")
 
 
-def _pending(paths: Paths, ulid: str) -> bool:
+def continuing(paths: Paths, ulid: str) -> bool:
     """A continue is running on this session right now (T1 3.1)."""
     return (paths.pending / f"{ulid}.json").exists()
 
@@ -565,19 +565,24 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False) ->
         staged = outbox_ulids(paths)
         local = set(known) | set(index.known())
         index.mark_missing(u for u in local - set(remote)
-                           if u not in staged and not _pending(paths, u))
+                           if u not in staged and not continuing(paths, u))
     _index_outbox(paths, index)
     paths.state.mkdir(parents=True, exist_ok=True)
     stamp.write_text(str(now()))
     return index
 
 
+def forget_local(paths: Paths, ulid: str) -> None:
+    """Drop the local copy of a session: its index row, its search entry, its marker."""
+    Index(paths).drop(ulid)
+    shutil.rmtree(paths.mirror / ulid, ignore_errors=True)
+
+
 def delete_session(paths: Paths, drive: Drive, ulid: str) -> None:
     """Move sessions/<ULID>/ to the Drive trash (restorable for 30 days) and forget it here."""
     # rclone purge on Drive honours drive.use_trash, which defaults to true.
     drive._run("purge", f"gdrive:sessions/{ulid}")
-    Index(paths).drop(ulid)
-    shutil.rmtree(paths.mirror / ulid, ignore_errors=True)
+    forget_local(paths, ulid)
     shutil.rmtree(paths.outbox / ulid, ignore_errors=True)
 
 

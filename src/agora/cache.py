@@ -119,7 +119,8 @@ def _listed(agents: dict, name: str) -> dict:
     return {s.session_id: s.updated_at for s in agents[name].list_sessions()}
 
 
-def pull(paths: store.Paths, ids: list[str], agents: dict) -> tuple[int, int]:
+def pull(paths: store.Paths, ids: list[str], agents: dict, *,
+         not_exist_delete: bool = False) -> tuple[int, int]:
     """`agora pull session <id>…`: bring the given sessions here; (pulled, failed).
 
     An `agora:` id (or a bare ULID) comes off Drive: session.md, plus the raw its
@@ -128,8 +129,12 @@ def pull(paths: store.Paths, ids: list[str], agents: dict) -> tuple[int, int]:
     and not stale is a skip, which is what makes a re-run after Ctrl-C cheap (R4).
 
     An id Drive does not have is left alone with one line saying so: pulling is
-    not deleting, and reviving or dropping a session is the user's call, not this
-    command's (review Q1).
+    not deleting, and dropping a session is the user's call, not this command's
+    (Q1). `--not-exist-delete` is that call: the local copy goes, except when the
+    session is still in the outbox or a continue is running on it - work that has
+    not reached Drive yet is not something to tidy away. For an agent id the flag
+    means "the agent does not have this session any more", so its cached full
+    text is what goes.
     """
     drive = store.Drive(paths)
     index = store.Index(paths)
@@ -141,7 +146,9 @@ def pull(paths: store.Paths, ids: list[str], agents: dict) -> tuple[int, int]:
         try:
             kind, bare = _split(session_id, agents)
             if kind == "agora":
-                _pull_agora(paths, drive, index, remote, bare)
+                _pull_agora(paths, drive, index, remote, bare, not_exist_delete)
+            elif not_exist_delete:
+                _drop_reading(paths, kind, bare)
             else:
                 if kind not in listed:
                     listed[kind] = _listed(agents, kind)
@@ -153,11 +160,31 @@ def pull(paths: store.Paths, ids: list[str], agents: dict) -> tuple[int, int]:
     return done, failed
 
 
+def _drop_reading(paths: store.Paths, agent_name: str, session_id: str) -> None:
+    """The cached full text of an agent session that is gone from the agent."""
+    path = paths.reading / agent_name / f"{session_id}.md"
+    if path.is_file():
+        path.unlink()
+        _line(f"{agent_name}:{session_id} 那邊已經沒有，快取已刪")
+    else:
+        _line(f"{agent_name}:{session_id} 那邊已經沒有，本機本來就沒有快取")
+
+
 def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
-                remote: dict | None, ulid: str) -> None:
+                remote: dict | None, ulid: str, not_exist_delete: bool) -> None:
     """One `agora:` id from Drive, into the mirror and the index."""
     if remote is None or ulid not in remote:
-        _line(f"{ulid} 雲端沒有，本機的不動")
+        if not not_exist_delete:
+            _line(f"{ulid} 雲端沒有，本機的不動")
+            return
+        if (paths.outbox / ulid).is_dir():
+            _line(f"{ulid} 還沒上傳，不能刪")
+            return
+        if store.continuing(paths, ulid):
+            _line(f"{ulid} 正在接續，不能刪")
+            return
+        store.forget_local(paths, ulid)
+        _line(f"{ulid} 雲端沒有，本機的副本已刪")
         return
     files = remote[ulid]
     local = paths.mirror / ulid / "session.md"
@@ -172,7 +199,8 @@ def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
     store.index_mirror(paths, ulid, index)   # readable, indexed and searchable again
 
 
-def push(paths: store.Paths, ids: list[str], agents: dict) -> tuple[int, int]:
+def push(paths: store.Paths, ids: list[str], agents: dict, *,
+         not_exist_upload: bool = False) -> tuple[int, int]:
     """`agora push session <agora id>…`: send the given sessions to Drive; (pushed, failed).
 
     Only `session.md` and the raw its header names go up (R7), and only for the
@@ -198,8 +226,10 @@ def push(paths: store.Paths, ids: list[str], agents: dict) -> tuple[int, int]:
             elif (paths.outbox / ulid).is_dir():
                 store.push_one(drive, paths.outbox / ulid)
             elif listing is None or ulid not in listing:
-                _line(f"{ulid} 雲端沒有，沒有傳")
-                continue
+                if not not_exist_upload:
+                    _line(f"{ulid} 雲端沒有，沒有傳")
+                    continue
+                _push_mirrored(paths, drive, ulid, need_raw=True)
             else:
                 _push_mirrored(paths, drive, ulid)
             done += 1
@@ -209,10 +239,20 @@ def push(paths: store.Paths, ids: list[str], agents: dict) -> tuple[int, int]:
     return done, failed
 
 
-def _push_mirrored(paths: store.Paths, drive: store.Drive, ulid: str) -> None:
-    """One session up from the mirror: the two files its header names."""
+def _push_mirrored(paths: store.Paths, drive: store.Drive, ulid: str, *,
+                   need_raw: bool = False) -> None:
+    """One session up from the mirror: the two files its header names.
+
+    `need_raw` is for putting back a session Drive no longer has: there the raw is
+    the point of reviving it, so a header whose raw is not here is refused instead
+    of sending session.md alone.
+    """
     local = paths.mirror / ulid / "session.md"
     if not local.is_file():
         raise store.StoreError("本機沒有這個 Session，先 pull 或匯入")
     hdr, _ = h.split_document(local.read_text(encoding="utf-8"))
+    if need_raw:
+        raw = h.agora_of(hdr).get("raw") or {}
+        if raw.get("file") and not (paths.mirror / ulid / raw["file"]).is_file():
+            raise store.StoreError(f"標頭指到的 {raw['file']} 本機沒有，不傳半套")
     store.push_mirror(drive, paths, ulid, hdr)
