@@ -668,8 +668,12 @@ def test_a_second_escape_does_not_resend_or_restart_the_escalation(group_calls, 
 def test_a_failure_line_with_a_timestamp_in_it_is_not_progress():
     """review L1: `[agora] … 拉不到：rclone … 2026/10/03` read as 2026 of 10."""
     app, _ = _app([])
-    spawn, _ = _spawn(lines=["[agora] pull 拉不到：rclone copyto 失敗 2026/10/03 12:00:00 ERROR",
-                              "[agora] pull 1/2"], hang=True)
+    # the progress line comes first and the failure line last: the bar reads the
+    # newest match, so a loose `k/N` anywhere in a line would take the date instead
+    spawn, _ = _spawn(lines=["[agora] pull 1/2",
+                              "[agora] pull 拉不到：rclone copyto 失敗，3/4 個檔案，"
+                              "2026/10/03 12:00:00 ERROR"],
+                       hang=True)
     app.spawn = spawn
 
     async def go():
@@ -1115,7 +1119,7 @@ def test_pull_without_the_option_sends_no_flag():
             await pilot.press("P")
             await pilot.pause()
             assert isinstance(app.screen, tui.Confirm)
-            assert app.screen.extra.startswith("雲端沒的就傳回去")
+            assert app.screen.extra == "雲端沒有的就傳回去（等同 --not-exist-upload）"
             await pilot.press("down", "enter")            # 確定, unticked
             await _wait(lambda: app._last_spawned, pilot)
             assert app._last_spawned[-1][:2] == ["push", "session"]
