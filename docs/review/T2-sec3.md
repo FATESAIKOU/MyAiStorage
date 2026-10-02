@@ -69,3 +69,40 @@
 | S4 | Low（就是 3.1 的 R3） | 勾了「傳回去」、push 也成功了之後，那一列在雲端欄還是 ✗，要等下一次完整同步才會變回 ✓；這次的改動沒有處理 | 照 R3 的建議：push 成功的那些 id，直接從 `cloud_missing` 拿掉 |
 | S5 | Low（就是 2.3 的 Q1） | 未匯入頁的 `P` 現在會打開這個新的確認視窗，按「確定」之後送出的是沒有任何 id 的 `push session` | 照 Q1 修 |
 | S6 | Low | `test_pull_without_the_option_sends_no_flag` 的名字說的是 pull，按的卻是 `P`（push）；pull 不勾選項的那個情況，其實沒有測試 | 改名，或者補一個 pull 的版本 |
+
+## 3.3 雲端沒有時的拒絕（`920bd6b`），以及 Q1（`9262a6d`）、S1（`5a6f585`）的修正確認
+
+2026-10-03，review。在 `git archive 920bd6b`（包含這三個 commit）取出的副本跑 `test_tui.py`：**56 passed**。探測測試只在副本裡做。規則同上。
+
+**沒有 High。** 三個都修對了。另外有一個 Low～Medium（U1）：勾選框有焦點的時候按 Enter，會**勾上**那個危險的選項，而不是確定。
+
+### 3.3：對 ✗ 的列接續、改標頭 ✅
+
+- `action_primary`（接續）和 `action_edit` 在問 agent、問目錄、或打開編輯器**之前**，就先呼叫 `_refuse(row, …)`。它用 `store.cloud_gone(self.index, key)` 看標記，有標記就用 `Tell` 顯示拒絕的訊息，然後停下來。agent 和編輯器都不會被打開。
+- 訊息是 `store.cloud_lost()`，指令模式的 `_cloud_lost` 也改成呼叫它，所以兩邊的文字只有一份，不會各說各的（T1-sec3 L2）✅。
+- 測試：接續被拒絕、而且沒有開 agent；改標頭被拒絕；兩邊的文字一樣 ✅。
+- 說明：畫面上的預先檢查**只看標記**。指令模式的 `_refuse_if_gone` 還會再問一次 Drive，也會排除 outbox（M1、F1、F3）。所以「標記還沒有、但 Drive 上已經沒有了」的情況，會照舊進入 suspend，再由指令模式拒絕（訊息印在 suspend 之後的終端機上）。這是可以接受的分工，因為互動模式的清單本來就不去問 Drive（T6）。如果想讓這種情況也在畫面上顯示，可以在 suspend 之前另外開一個子程序做檢查，但我不建議為了這個多花幾秒鐘。
+
+### Q1 的修正 ✅
+
+`check_action` 讓 `push` 只在 Agora 頁、而且不是預覽區有焦點的時候才能用；沒有列可以送的時候，`d`／`p`／`P`／Enter 都會在狀態列提示，不會啟動子程序。測試 `test_push_is_not_bound_on_the_import_tab`、`test_no_action_starts_a_process_without_rows_to_send` ✅。
+
+### S1 的修正 ✅（但有 U1）
+
+`Confirm` 開著的時候，App 會把 Tab／shift+tab 交給它（`action_next_tab`／`action_toggle_focus` 裡判斷 `isinstance(self.screen, Confirm)`），在選項清單和勾選框之間切換；空白鍵（priority）會勾選。我實測過：按 `p` → Tab 之後，焦點就在 `Checkbox` 上。
+
+### U1（Low～Medium）：勾選框有焦點時，Enter 是「勾選」，不是「確定」
+
+實測：按 `p` → Tab（焦點到了勾選框）→ Enter → 視窗**還開著**，`picked` 變成 **True**，沒有任何指令被送出。Textual 的 `Checkbox` 本來就把 Enter 當成切換，可是視窗最下面的提示寫的是「空白 勾選　Enter 確定　Esc 取消」。
+
+使用者用 Tab 移到勾選框上看一下說明，然後照提示按 Enter 想確定，結果是**勾上了**「雲端沒有的就刪掉本機的」或「雲端沒有的就傳回去」。接著再 shift+tab、Enter，就會帶著這個 flag 執行。這兩個選項正是 3.2 刻意預設不勾的那兩個決定。
+
+**建議**：`Confirm` 的勾選框有焦點時，Enter 就當成**確定**，用清單目前停的那一個選項（預設是「取消」，所以是安全的）；或者讓 Enter 只把焦點移回清單，不切換勾選框。並補一個測試：Tab → Enter，`picked` 仍然是 False。
+
+### 其他
+
+| # | 嚴重度 | 問題 | 建議 |
+|---|---|---|---|
+| U2 | Low | Tab 只有在 `Confirm` 開著的時候才會交出去。其他的視窗（delete 的確認 `Choose`、接續時選 agent 和目錄的 `Choose`、`AskText`、`Tell`）開著的時候，按 Tab **還是會切換底下的頁面**。實測：按 `d` 打開刪除確認、按 Tab 之後，`app.tab` 變成了 `import`。要處理的列在開視窗之前就決定了，不會送錯，但動作做完之後，畫面會停在另一頁 | `action_next_tab`／`action_toggle_focus` 改成判斷 `isinstance(self.screen, ModalScreen)`：是 `Confirm` 就交給它，其他的視窗就什麼都不做 |
+| U3 | Low（潛在） | 沒有帶 `extra` 的 `Confirm`，不會產生 `#extra`，這時候按 Tab 或空白，`query_one("#extra")` 會丟出 `NoMatches`。現在所有的呼叫者都有帶 `extra`，所以不會發生 | 沒有 `#extra` 的時候，`action_toggle`／`action_focus_next` 直接 return |
+| U4 | Low | 3.2 的 S2（未匯入頁的 pull 也出現「雲端沒有的就刪掉本機的」）、S3（「雲端沒的」少了一個字）、S4（傳回去之後 ✗ 要等下一次完整同步才會變回 ✓）、S6（測試名稱說 pull，按的是 push）這次都沒有處理 | 照 3.2 的建議 |
