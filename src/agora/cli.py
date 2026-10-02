@@ -620,6 +620,9 @@ def main(argv: list[str] | None = None) -> int:
     except (h.HeaderError, store.StoreError, AgentError) as e:
         print(f"[agora] {e}", file=sys.stderr)
         return EXIT_ERROR
+    except BrokenPipeError:     # `agora search … | head`: the reader is gone, nothing to report
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
     except KeyboardInterrupt:   # e.g. while reading the session back: the pending record is kept
         print("\n[agora] 中斷了；沒存完的接續會在下一個 agora 指令自動補存", file=sys.stderr)
         return 130
