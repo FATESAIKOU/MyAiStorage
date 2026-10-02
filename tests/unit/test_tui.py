@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
+import sys
 import threading
 
 import pytest
@@ -1042,4 +1043,29 @@ def test_the_agora_only_keys_do_nothing_on_the_import_tab():
             await pilot.press("m", "d", "P")
             await pilot.pause()
             assert not app._last_spawned
+    _run(go)
+
+
+def test_the_cloud_column_says_where_each_session_is():   # spec 3.1
+    """✓ on Drive, ✗ deleted by another machine, 未上傳 still in the outbox."""
+    paths, _ = _index((_hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "在雲端", sid="s1"), "## user\nx\n"),
+                      (_hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "被刪了", sid="s2"), "## user\nx\n"))
+    store.Index(paths).mark_missing(["01BBBBBBBBBBBBBBBBBBBBBBBB"])   # deleted elsewhere
+    staged = store.stage(paths, _hdr("01CCCCCCCCCCCCCCCCCCCCCCCC", "還沒上傳"),
+                         "## user\nx\n", None)
+    store.remember(paths, staged, store.Index(paths))     # saved here, not on Drive yet
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+    app.spawn, _ = _spawn()
+
+    async def go():
+        async with app.run_test(size=(140, 30)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            table = app.query_one("#table")
+            assert [str(c.label) for c in table.columns.values()][2:] == list(tui.COLUMNS["agora"])
+            cells = {r.key: r.cells for r in app.rows["agora"]}
+            assert cells["agora:01AAAAAAAAAAAAAAAAAAAAAAAA"][4] == "✓"
+            assert cells["agora:01BBBBBBBBBBBBBBBBBBBBBBBB"][4] == "✗"
+            assert cells["agora:01CCCCCCCCCCCCCCCCCCCCCCCC"][4] == "未上傳"
+            assert str(table.get_row("agora:01BBBBBBBBBBBBBBBBBBBBBBBB")[-1]) == "✗"
     _run(go)

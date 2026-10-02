@@ -17,7 +17,7 @@
 
 ## 3. 雲端欄
 
-- [ ] 3.1 Agora 頁加「雲端」欄（✓、✗、未上傳）（spec「雲端欄與 pull／push 的選項」）
+- [x] 3.1 Agora 頁加「雲端」欄（✓、✗、未上傳）（spec「雲端欄與 pull／push 的選項」）
 - [ ] 3.2 pull、push 的確認視窗加預設不勾的選項，對應 `--not-exist-delete`、`--not-exist-upload`
 - [ ] 3.3 對雲端沒有的列接續、改標頭時，顯示指令模式的拒絕訊息
 

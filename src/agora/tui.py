@@ -39,7 +39,9 @@ from agora import store
 WIDE = 100                       # columns from which the preview goes to the right
 TABS = ("agora", "import")
 TAB_NAMES = {"agora": "Agora", "import": "未匯入"}
-COLUMNS = {"agora": ("id", "標題", "agent", "更新"), "import": ("id", "標題", "agent", "更新", "目錄")}
+COLUMNS = {"agora": ("id", "標題", "agent", "更新", "雲端"),
+           "import": ("id", "標題", "agent", "更新", "目錄")}
+CLOUD_YES, CLOUD_NO, CLOUD_NEW = "✓", "✗", "未上傳"
 TITLE_MAX = 36                   # the title column is cut here, so the others stay on screen
 AGENT_STYLE = {"opencode": "cyan", "claude": "#ff8700", "merge": "green"}
 #: The key bar, per tab (spec「按鍵」): what a key does here, and only here. The
@@ -76,7 +78,14 @@ def _when(stamp: str | None) -> str:
         return stamp[5:16].replace("T", " ")
 
 
-def agora_rows(index: store.Index, filters: list) -> list[Row]:
+def agora_rows(index: store.Index, filters: list, paths: store.Paths | None = None) -> list[Row]:
+    """The agora tab, newest first, each row saying whether Drive still has it.
+
+    The cloud column reads the marker sync left in the index and the outbox - no
+    call to Drive from here. 「未上傳」 is its own state: a session staged here is
+    not a session another machine deleted (T2 3.1).
+    """
+    staged = store.outbox_ulids(paths) if paths is not None else set()
     rows = []
     for ulid, hdr, _snippet in index.search(filters):
         agora = h.agora_of(hdr)
@@ -84,7 +93,8 @@ def agora_rows(index: store.Index, filters: list) -> list[Row]:
         kind = source.get("agent") or agora.get("relation") or ""
         title = str(hdr.get("title") or "")
         updated = str(agora.get("updated_at") or store.sort_date(hdr))
-        rows.append(Row(f"agora:{ulid}", [ulid[-8:], _short(title), kind, _when(updated)],   # the random part (T9)
+        cloud = CLOUD_NEW if ulid in staged else (CLOUD_YES if index.cloud_has(ulid) else CLOUD_NO)
+        rows.append(Row(f"agora:{ulid}", [ulid[-8:], _short(title), kind, _when(updated), cloud],  # the random part (T9)
                         f"{ulid} {kind} {title}", kind, source.get("dir")))
     return rows
 
@@ -554,7 +564,8 @@ class AgoraApp(App):
 
     def reload(self, keep_marked: bool = False) -> None:
         self.index = store.Index(self.paths)       # local only; no full sync after every action (T6)
-        self.rows = {"agora": agora_rows(self.index, []), "import": import_rows(self.index, self.agents, self.paths)}
+        self.rows = {"agora": agora_rows(self.index, [], self.paths),
+                     "import": import_rows(self.index, self.agents, self.paths)}
         if not keep_marked:
             self.marked.clear()
         else:
