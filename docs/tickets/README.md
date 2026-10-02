@@ -27,7 +27,9 @@
 
 隊員的模型：impl1、impl2 用 opencode（Space Bunny Free → Muse Spark 1.3 Free → ollama-cloud DeepSeek V4.1 Flash max，用完往下換）；impl3（`w2:p14`）、impl4（`w2:p15`）是 agy，額度 0%：Claude Opus 約 10-03 10:00 恢復、Gemini 約 10-03 18:05 恢復，恢復就換上去接主要的實作。
 
-**等使用者確認的事**（不擋進度，先照 PM 的判斷做）：T2 的「勾選但被篩選掉的列不算進動作」（review V4，PM 選了比較安全的做法）。
+**等使用者確認的事**（不擋進度，先照 PM 的判斷做）：
+- T2 的「勾選但被篩選掉的列不算進動作」（review V4，PM 選了比較安全的做法）。
+- T1 的「continue 進行中、原本的 Session 被別台刪掉」：agent 結束時不寫回、改存成一個新的 Session，避免丟掉這次的對話（review T1-sec3 M1）。
 
 規則：不合併任何 PR；不碰使用者的真實 session；需要使用者決定的事先停在那一項、寫進這裡，做其他不受影響的項目。
 
