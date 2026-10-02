@@ -32,4 +32,5 @@
 - [x] 4.2d review T2-final W3（進度只讀自己那一行）、S3（「雲端沒的」錯字）
 - [x] 4.2c review T2-final W2：`a` 全選不動隱藏的勾選、確認視窗直接 Enter 是取消
 - [x] 4.2b review T2-final W1：升級的第 n 步等 ESCALATE_AFTER*n，刪掉重複定義的 ESCALATION
-- [ ] 4.3 PM 用假資料在 pane 操作一遍；review 審程式
+- [ ] 4.2b PM 試用的 Q1～Q4（`docs/tickets/T2-pm-run.md`）：勾選框的狀態不只靠顏色、說明跟著狀態變；delete 確認視窗的「Enter 確定」改成「Enter 選擇」；進度條算「做完的」而不是「開始的」；結果視窗之後清掉狀態列上一次的訊息
+- [ ] 4.3 PM 用假資料在 pane 操作一遍（✅ `docs/tickets/T2-pm-run.md`，沒有擋歸檔的問題）；review 審程式（✅ T2-final，修正確認中 → `docs/review/T2-archive.md`）
