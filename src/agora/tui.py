@@ -160,19 +160,13 @@ def import_preview(agent, session_id: str, full: bool = False) -> tuple[str, str
 
 def argv_for(action: str, rows: list[Row], agent: str | None, workdir: str | None) -> list[list[str]]:
     """The command-mode invocations an action stands for."""
-    ids = [r.key for r in rows]
     if action == "import":
         return [["import", "session", "--external-session-id", r.key.split(":", 1)[1], "--agent", r.agent]
                 for r in rows]
-    if action == "continue":
-        return [["continue", "session", ids[0], "--agent", agent, "--dir", workdir]]
-    if action == "merge":
-        return [["merge", "session", *ids, "--agent", agent]]
-    if action == "edit":
-        return [["edit", "session", ids[0]]]
-    if action == "delete":
-        return [["delete", "session", ids[0], "--yes"]]
-    return []
+    first = rows[0].key if rows else ""
+    return {"continue": [["continue", "session", first, "--agent", agent, "--dir", workdir]],
+            "merge": [["merge", "session", *[r.key for r in rows], "--agent", agent]],
+            "edit": [["edit", "session", first]], "delete": [["delete", "session", first, "--yes"]]}.get(action, [])
 
 
 def setup_needed(paths: store.Paths) -> str | None:
@@ -601,10 +595,8 @@ class AgoraApp(App):
         """Hand the whole terminal over (an agent, an editor), then come back."""
         with self.suspend():
             code = self.cli.main(argv)
-            try:
+            with contextlib.suppress(KeyboardInterrupt, EOFError):
                 input("\n按 Enter 回到選單…")
-            except (KeyboardInterrupt, EOFError):
-                pass
         return code
 
     @work
