@@ -20,6 +20,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -81,8 +82,27 @@ def _fault(point: str) -> None:
         os._exit(137)
 
 
-def _warn(message: str) -> None:
+def warn(message: str) -> None:
+    """One line on stderr; stdout keeps only the results (spec「進度」)."""
     print(f"[agora] {message}", file=sys.stderr)
+
+
+def progress(word: str, k: int, total: int, item: str = "") -> None:
+    """The `k/N` line per item (T1 R3), on stderr."""
+    print(f"[agora] {word} {k}/{total}  {item}".rstrip(), file=sys.stderr)
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Write a file so a reader sees the old one or the new one, never half of
+    either. The staging name is unique: two merges over one source, or two
+    sessions cached side by side, must not share it (K4, S1-9)."""
+    handle, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)   # gone on success; a leftover never clutters
 
 
 def _md5(entry: dict) -> str:
@@ -271,7 +291,7 @@ def _upload_checked(drive: Drive, folder: Path, ulid: str, raw: dict,
     if uploaded_raw:
         drive.upload(folder / raw["file"], ulid, raw["file"])
     elif raw.get("file"):
-        _warn(f"{ulid} 標頭指到的 {raw['file']} 本機沒有{tail}")
+        warn(f"{ulid} 標頭指到的 {raw['file']} 本機沒有{tail}")
     drive.upload(folder / "session.md", ulid, "session.md")
     remote = drive.list_one(ulid)
     if remote.get("session.md") != md5_file(folder / "session.md"):
@@ -327,16 +347,14 @@ def mirror_one(paths: Paths, drive: Drive, index: "Index", ulid: str,
     return hdr
 
 
-def push_outbox(drive: Drive, paths: Paths, warn=None) -> list[str]:
+def push_outbox(drive: Drive, paths: Paths, warn=warn) -> list[str]:
     """Push every outbox entry; return the ones that failed (they stay).
 
     `warn` is where the per-entry failures go when a caller wants its own sink -
     the interactive mode's waiting window, which does not see our stderr (review L5).
     """
-    say = warn or _warn
+    say = warn
     failed = []
-    if not paths.outbox.exists():
-        return failed
     for ulid in sorted(outbox_ulids(paths)):
         folder = paths.outbox / ulid
         try:
@@ -364,7 +382,7 @@ def quarantine(path: Path, bad_dir: Path, message: str) -> None:
     if target.exists():
         shutil.rmtree(target) if target.is_dir() else target.unlink()
     path.rename(target)
-    _warn(f"{message}（移到 {target}）")
+    warn(f"{message}（移到 {target}）")
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +568,7 @@ def continuing(paths: Paths, ulid: str) -> bool:
 
 
 def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
-         warn=None) -> Index:
+         warn=warn) -> Index:
     """Push the outbox, then pull session.md files whose md5 changed.
 
     Only session.md is mirrored; raws are fetched on demand. A session whose
@@ -563,7 +581,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
     than a side effect of running any command. Markers move only when the listing
     came back whole (Q4).
     """
-    say = warn or _warn      # the interactive mode passes its own sink, not the screen's (review K3)
+    say = warn      # the interactive mode passes its own sink, not the screen's (review K3)
     index = Index(paths)   # a bumped index is already back from the mirror
     stamp = paths.state / "last-sync"
     if throttle and stamp.exists() and now() - float(stamp.read_text()) < SYNC_THROTTLE_S:
@@ -655,7 +673,7 @@ def delete_session(paths: Paths, drive: Drive, ulid: str) -> None:
             raise          # cannot tell what happened: the purge failure stands
         if remote is not None and ulid in remote:
             raise          # it is still there, so the purge failed for another reason
-        _warn(f"{ulid} 在 Drive 上已經沒有了，當成刪掉")
+        warn(f"{ulid} 在 Drive 上已經沒有了，當成刪掉")
     forget_local(paths, ulid)
     shutil.rmtree(paths.outbox / ulid, ignore_errors=True)
 

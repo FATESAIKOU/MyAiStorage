@@ -16,8 +16,6 @@ from __future__ import annotations
 
 import os
 import re
-import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -44,23 +42,15 @@ def is_fresh(paths: store.Paths, agent_name: str, session_id: str, updated_at: s
 def local_reading(paths: store.Paths, agent, session_id: str, updated_at: str | None = None) -> str:
     """An agent session's full text: from the cache when it is fresh, else read now and kept.
 
-    The staging file is unique per call (review K4): a fixed `.tmp` name meant two
-    threads caching two sessions in one directory raced, and one of them lost the
-    write it was in the middle of.
+    The write is atomic and its staging name unique (review K4): a fixed `.tmp`
+    name meant two threads caching two sessions in one directory raced.
     """
     path, when = paths.reading / agent.name / f"{session_id}.md", _stamp(updated_at)
     if is_fresh(paths, agent.name, session_id, updated_at):
         return path.read_text(encoding="utf-8")
     text = reading(agent, agent.export(session_id).raw)
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    os.close(handle)
-    tmp = Path(tmp_name)
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)   # gone on success; a leftover never clutters the cache
+    store.write_atomic(path, text)
     if when is not None:
         os.utime(path, (when, when))
     return text
@@ -80,13 +70,7 @@ def search_cached(paths: store.Paths, agent_name: str, keyword: str):
             continue
 
 
-def _progress(word: str, k: int, total: int) -> None:
-    """One line per item, '… k/N …' (T1 R3); stderr so the ids stay on stdout."""
-    print(f"[agora] {word} {k}/{total}", file=sys.stderr)
-
-
-def _line(message: str) -> None:
-    print(f"[agora] {message}", file=sys.stderr)
+_line = store.warn
 
 
 def _plan_one(session_id: str, agents: dict) -> tuple[str, str | None, Exception | None]:
@@ -149,7 +133,7 @@ def pull(paths: store.Paths, ids: list[str], agents: dict, *,
     listed: dict[str, dict] = {}
     done = failed = 0
     for k, (session_id, (kind, bare, complaint)) in enumerate(zip(wanted, plan), 1):
-        _progress("pull", k, len(plan))
+        store.progress("pull", k, len(plan))
         try:
             if complaint:
                 raise complaint
@@ -251,7 +235,7 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
     listing = _listing(drive)            # offline: every id here fails, and says so
     done = failed = 0
     for k, agora_id in enumerate(wanted, 1):
-        _progress("push", k, len(wanted))
+        store.progress("push", k, len(wanted))
         try:
             kind, ulid = _split(agora_id, agents)
             if kind != "agora":

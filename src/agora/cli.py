@@ -262,10 +262,7 @@ def cmd_search(args, paths: store.Paths) -> int:
     return 0
 
 
-def _progress(word: str, k: int, total: int, item: str = "") -> None:
-    """One 'k/N' line per item on stderr; stdout keeps only the results
-    (spec batch-commands「進度」), so a pipe sees ids and nothing else."""
-    print(f"[agora] {word} {k}/{total}  {item}".rstrip(), file=sys.stderr)
+_progress = store.progress
 
 
 def cmd_import(args, paths: store.Paths) -> int:
@@ -530,15 +527,7 @@ def _cache_section(paths: store.Paths, agent_name: str, agora_id: str, text: str
     folder = _sections_cache_dir(paths)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{_section_key(agent_name, agora_id, text)}.json"
-    # A unique temp name: two merges working on one source must not share it (S1-9).
-    handle, tmp = tempfile.mkstemp(dir=folder, prefix=path.name, suffix=".tmp")
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as f:
-            f.write(json.dumps({"summary": summary, "model": model}, ensure_ascii=False))
-        os.replace(tmp, path)         # never leave half a file behind
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    store.write_atomic(path, json.dumps({"summary": summary, "model": model}, ensure_ascii=False))
 
 
 def _require_sections(agora_id: str, agora: dict) -> None:
@@ -769,7 +758,7 @@ def cmd_delete(args, paths: store.Paths) -> int:
     if not args.yes:
         listed = "\n".join(f"  {i}（{hdr.get('title') or '無標題'}）" for i, hdr in headers.items())
         raise InputError(f"會把這 {len(headers)} 個移到 Drive 垃圾桶：\n{listed}\n確定的話加 --yes")
-    total = len(headers)
+    total, drive = len(headers), store.Drive(paths)
     left, refused, done = list(headers), [], 0
     while left:   # a child in the same request goes first, so its parents can follow
         ready = [i for i in left if not index.children(_ulid_of(i))]   # deleted ones leave the index
@@ -779,7 +768,7 @@ def cmd_delete(args, paths: store.Paths) -> int:
             done += 1
             _progress("刪除", done, total)
             if index.cloud_has(_ulid_of(agora_id)):
-                store.delete_session(paths, store.Drive(paths), _ulid_of(agora_id))
+                store.delete_session(paths, drive, _ulid_of(agora_id))
             else:
                 # Drive does not have it (T1 3.4): the local copy is the whole of it
                 store.forget_local(paths, _ulid_of(agora_id))
@@ -874,21 +863,23 @@ def cmd_show(args, paths: store.Paths) -> int:
 
 def cmd_pull(args, paths: store.Paths) -> int:
     """`agora pull session <id>…`: bring the given sessions here (design 5.10, T1 R5)."""
-    from agora import cache
-    ids = _ids_of(args, "pull")
-    done, failed = cache.pull(paths, ids, {name: load_agent(name) for name in AGENTS},
-                              not_exist_delete=args.not_exist_delete)
-    print(f"[agora] 拉下 {done} 個" + (f"，{failed} 個失敗" if failed else ""))
-    return EXIT_ERROR if failed else 0
+    return _pull_or_push(args, paths, "pull")
 
 
 def cmd_push(args, paths: store.Paths) -> int:
     """`agora push session <agora id>…`: send the given sessions to Drive (T1 R5/R7)."""
+    return _pull_or_push(args, paths, "push")
+
+
+def _pull_or_push(args, paths: store.Paths, action: str) -> int:
+    """The two are the same command with the other direction: one flag, one verb."""
     from agora import cache
-    ids = _ids_of(args, "push")
-    done, failed = cache.push(paths, ids, {name: load_agent(name) for name in AGENTS},
-                              not_exist_upload=args.not_exist_upload)
-    print(f"[agora] 寫回 {done} 個" + (f"，{failed} 個失敗" if failed else ""))
+    flag = "not_exist_delete" if action == "pull" else "not_exist_upload"
+    done, failed = getattr(cache, action)(paths, _ids_of(args, action),
+                                         {name: load_agent(name) for name in AGENTS},
+                                         **{flag: getattr(args, flag)})
+    print(f"[agora] {'拉下' if action == 'pull' else '寫回'} {done} 個"
+          + (f"，{failed} 個失敗" if failed else ""))
     return EXIT_ERROR if failed else 0
 
 
