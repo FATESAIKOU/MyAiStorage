@@ -572,3 +572,13 @@ def test_an_old_merge_asks_to_be_merged_again(env, capsys):  # review Y2
     store.Index(paths).put(m.split(":")[1], store.md5_file(md), hdr, body)
     code, _, err = run(capsys, "continue", "session", m, "--agent", "opencode", "--dir", "/tmp")
     assert code == 1 and "舊版的 merge" in err and f"agora merge session {a} {b}" in err
+
+
+def test_ctrl_c_after_the_agent_keeps_the_pending_record(env, capsys, monkeypatch):
+    _, a, _ = _import(capsys)
+    def interrupted(launch):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(env, "collect", interrupted)
+    code, out, err = run(capsys, "continue", "session", a, "--agent", "opencode", "--dir", "/tmp")
+    assert code == 130 and "Traceback" not in err and "自動補存" in err
+    assert list(store.Paths.from_env().pending.glob("*.json"))
