@@ -169,7 +169,9 @@ def test_missing_sessions_dir_keeps_mirror(remote, capsys):  # U-ST-20, N12
     index = store.sync(paths)
     assert [hit[0] for hit in index.search(T("CSV"))] == [ulid]
     assert (paths.mirror / ulid / "session.md").is_file()
-    assert "先不刪鏡像" in capsys.readouterr().err
+    # No listing is no evidence of a deletion, so no marker moves either (T1 R6, Q4)
+    assert index.missing_in_cloud() == []
+    assert "標記不動" in capsys.readouterr().err
 
 
 def test_failed_listing_keeps_mirror(remote, monkeypatch):  # U-ST-20, N12

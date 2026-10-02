@@ -174,7 +174,10 @@ def argv_for(action: str, rows: list[Row], agent: str | None, workdir: str | Non
     return {"continue": [["continue", "session", first, "--agent", agent, "--dir", workdir]],
             "merge": [["merge", "session", *[r.key for r in rows], "--agent", agent]],
             "edit": [["edit", "session", first]],
-            "delete": [["delete", "session", *[r.key for r in rows], "--yes"]]}.get(action, [])
+            "delete": [["delete", "session", *[r.key for r in rows], "--yes"]],
+            # pull/push take ids (T1 R5), so the screen passes the rows it has
+            "pull": [["pull", "session", *[r.key for r in rows]]],
+            "push": [["push", "session", *[r.key for r in rows if r.key.startswith("agora:")]]]}.get(action, [])
 
 
 def setup_needed(paths: store.Paths) -> str | None:
@@ -672,16 +675,23 @@ class AgoraApp(App):
 
     @work
     async def action_refresh_cache(self) -> None:
-        pick = await self.push_screen_wait(Choose("更新哪個快取？", ["Agora：Drive 上的 Session（含原始檔）",
-                                                              "本機：opencode／claude 的 session 全文"]))
-        if pick is not None:
-            await self.act("更新快取", [["cache", ("agora", "local")[pick]]])
+        """Pull what is marked: a row on the agora tab off Drive, one on the import
+        tab into the full-text cache. There is no "all of them" here either."""
+        rows = self.chosen_rows()
+        if not rows:
+            self.say("先選要拉下來的 Session", failed=True)
+            return
+        await self.act(f"拉下 {len(rows)} 個", argv_for("pull", rows, None, None))
 
     @work
     async def action_sync(self) -> None:
-        if await self.push_screen_wait(Choose("把本機的 agora 寫回 Drive？", ["取消", "確定"],
+        rows = self.chosen_rows()
+        if not rows:
+            self.say("先選要寫回的 Session", failed=True)
+            return
+        if await self.push_screen_wait(Choose(f"把 {len(rows)} 個寫回 Drive？", ["取消", "確定"],
                                               "同名的檔案直接覆蓋；Drive 上多的不動")) == 1:
-            await self.act("寫回 Drive", [["sync"]])
+            await self.act("寫回 Drive", argv_for("push", rows, None, None))
 
     @work
     async def action_delete(self) -> None:

@@ -766,36 +766,52 @@ def cmd_show(args, paths: store.Paths) -> int:
     return 0
 
 
-def cmd_cache(args, paths: store.Paths) -> int:
-    """`agora cache agora|local`: fill the local caches in one go (design 5.10)."""
+def cmd_pull(args, paths: store.Paths) -> int:
+    """`agora pull session <id>…`: bring the given sessions here (design 5.10, T1 R5)."""
     from agora import cache
-    if args.type not in ("agora", "local"):
-        raise InputError("cache 要給 agora 或 local：agora cache agora、agora cache local")
-    done, failed = (cache.refresh_agora(paths) if args.type == "agora"
-                    else cache.refresh_local(paths, [load_agent(name) for name in AGENTS]))
-    print(f"[agora] 快取完成：{done} 個" + (f"，{failed} 個失敗" if failed else ""))
+    ids = _ids_of(args, "pull")
+    done, failed = cache.pull(paths, ids, {name: load_agent(name) for name in AGENTS},
+                              not_exist_delete=args.not_exist_delete)
+    print(f"[agora] 拉下 {done} 個" + (f"，{failed} 個失敗" if failed else ""))
     return EXIT_ERROR if failed else 0
 
 
-def cmd_sync(args, paths: store.Paths) -> int:
-    """`agora sync`: write the local agora state back to Drive, overwriting (design 5.10)."""
+def cmd_push(args, paths: store.Paths) -> int:
+    """`agora push session <agora id>…`: send the given sessions to Drive (T1 R5/R7)."""
     from agora import cache
-    cache.sync_up(paths)
-    return 0
+    ids = _ids_of(args, "push")
+    done, failed = cache.push(paths, ids, {name: load_agent(name) for name in AGENTS},
+                              not_exist_upload=args.not_exist_upload)
+    print(f"[agora] 寫回 {done} 個" + (f"，{failed} 個失敗" if failed else ""))
+    return EXIT_ERROR if failed else 0
+
+
+def _ids_of(args, action: str) -> list[str]:
+    """The ids this batch is about. None of them is an error, not "all of them".
+
+    `cache agora` and `sync` used to fill or write everything on the machine.
+    That is a thing to ask for where you can see the list, so pull and push take
+    ids and say so when there are none (spec: 不給 id 時 MUST 報錯).
+    """
+    ids = [i for raw in args.ids for i in raw.split(",") if i]
+    if not ids:
+        raise InputError(f"{action} 要給 session id；"
+                         "要全部就在互動模式按 a，或從 agora search session 用管線接過來")
+    return ids
 
 
 ACTIONS = {
     "search": cmd_search, "import": cmd_import, "merge": cmd_merge, "continue": cmd_continue,
-    "delete": cmd_delete, "edit": cmd_edit, "show": cmd_show, "cache": cmd_cache, "sync": cmd_sync,
+    "delete": cmd_delete, "edit": cmd_edit, "show": cmd_show, "pull": cmd_pull, "push": cmd_push,
 }
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agora", description="找、合、接 coding agent 的 Session")
     p.add_argument("action", choices=list(ACTIONS))
-    p.add_argument("type", nargs="?", choices=(*TYPES, "agora", "local"),
-                   help="session；cache 用 agora 或 local；sync 不用寫")
-    p.add_argument("ids", nargs="*", help="session id（merge 可以給多個，用空白或逗號分隔）")
+    p.add_argument("type", nargs="?", choices=TYPES, help="session")
+    p.add_argument("ids", nargs="*",
+                   help="session id（可以給多個，用空白或逗號分隔；沒有前綴當 agora）")
     p.add_argument("--external-session-id", action="append", default=[],
                    help="import：agent 自己的 session id，可重複或用逗號分隔")
     p.add_argument("--agent", choices=AGENTS, help="import：來源的 agent；merge：誰寫要約；continue：用哪個 agent 接")
@@ -806,6 +822,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", action="store_true", help="delete：確定要移到 Drive 垃圾桶")
     p.add_argument("--raw", action="store_true", help="show：印出原始匯出")
     p.add_argument("--no-sync", action="store_true", help="search：不連 Drive，只查本機索引")
+    p.add_argument("--not-exist-delete", action="store_true",
+                   help="pull：給的 id 雲端沒有時，刪掉本機的副本（agent 的 id 是刪它的全文快取）")
+    p.add_argument("--not-exist-upload", action="store_true",
+                   help="push：給的 id 雲端沒有時，把它傳回去")
     return p
 
 
@@ -819,7 +839,7 @@ def main(argv: list[str] | None = None) -> int:
         from agora import tui
         return tui.main(store.Paths.from_env())
     args = build_parser().parse_args(argv)
-    if args.action not in ("cache", "sync") and args.type != "session":
+    if args.type != "session":
         print(f"[agora] {args.action} 的型態要寫 session，例如 agora {args.action} session", file=sys.stderr)
         return EXIT_INPUT
     paths = store.Paths.from_env()

@@ -801,14 +801,12 @@ def test_a_failed_summarize_run_is_retried(env, capsys, monkeypatch):  # review 
 
 
 
-def test_cache_needs_agora_or_local_and_other_actions_need_session(env, capsys):  # design 5.10
-    code, _, err = run(capsys, "cache", "session")
-    assert code == 1 and "agora 或 local" in err
+def test_actions_need_their_type(env, capsys):  # design 5.10
     code, _, err = run(capsys, "search")
     assert code == 1 and "型態要寫 session" in err
 
 
-def test_cache_agora_brings_every_raw_and_sync_writes_the_mirror_back(env, capsys):  # design 5.10
+def test_pull_brings_the_raw_down_and_push_writes_the_session_back(env, capsys):  # design 5.10, T1 R5
     _, a, _ = _import(capsys)
     paths = store.Paths.from_env()
     ulid = a.split(":")[1]
@@ -816,13 +814,30 @@ def test_cache_agora_brings_every_raw_and_sync_writes_the_mirror_back(env, capsy
     raw = paths.mirror / ulid / hdr["agora"]["raw"]["file"]
     if raw.exists():
         raw.unlink()
-    code, out, _ = run(capsys, "cache", "agora")
-    assert code == 0 and raw.exists() and "快取完成：1 個" in out
+    code, out, _ = run(capsys, "pull", "session", ulid)
+    assert code == 0 and raw.exists() and "拉下 1 個" in out
     md = paths.mirror / ulid / "session.md"
     md.write_text(md.read_text() + "\n本機改的一行\n")
-    code, out, _ = run(capsys, "sync")
+    code, out, _ = run(capsys, "push", "session", a)
     remote = Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid / "session.md"
-    assert code == 0 and "已寫回 Drive" in out and "本機改的一行" in remote.read_text()
+    assert code == 0 and "寫回 1 個" in out and "本機改的一行" in remote.read_text()
+
+
+def test_pull_and_push_need_ids(env, capsys):   # review S2-6
+    """`cache agora` and `sync` acted on everything; pull and push do not, and
+    saying nothing would look like it did."""
+    code, _, err = run(capsys, "pull", "session")
+    assert code == 1 and "要給 session id" in err
+    code, _, err = run(capsys, "push", "session")
+    assert code == 1 and "要給 session id" in err
+
+
+def test_cache_and_sync_are_gone(env, capsys):
+    """The old names filled or wrote everything on the machine; a session deleted
+    elsewhere came back that way (K1). `pull`／`push` replace them (T1 R1)."""
+    for argv in (["cache", "agora"], ["cache", "local"], ["sync"]):
+        with pytest.raises(SystemExit):
+            cli.main(argv)
 
 
 
