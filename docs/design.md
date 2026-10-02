@@ -281,7 +281,7 @@ agora show     session <id> [--raw]
 
 ## 8. 實作規模
 
-Python（uv）＋ rclone ＋ SQLite FTS5。**`src/` 的程式碼目標 2,000 行以內，不含測試與 fixture**（L4）。
+Python（uv）＋ rclone ＋ SQLite FTS5。**`src/` 的程式碼目標 2,000 行以內，不含測試與 fixture**（L4）。**算的是程式碼行**（不含空行、註解、docstring；2026-10-03 決定）：說明安全機制的 docstring 不該為了行數砍掉。第 4 版時檔案總行數約 2,200、程式碼行約 1,500。
 
 | 模組 | 內容 | 估計行數 |
 |---|---|---|

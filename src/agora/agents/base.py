@@ -8,7 +8,7 @@ and return bytes and argv for `cli` to act on.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -36,7 +36,6 @@ class Launch:
     argv: list[str]
     cwd: str
     agent_session_id: str | None    # known before launch when the agent lets us pick it
-    env: dict[str, str] = field(default_factory=dict)
     before_count: int = 0           # messages present before the user starts (S9)
 
 

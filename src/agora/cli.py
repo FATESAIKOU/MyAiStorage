@@ -355,7 +355,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         # opencode reads PWD, not the real cwd, to pick the project (impl1).
-        subprocess.run(launch.argv, cwd=launch.cwd, env={**os.environ, **launch.env, "PWD": launch.cwd},
+        subprocess.run(launch.argv, cwd=launch.cwd, env={**os.environ, "PWD": launch.cwd},
                        pass_fds=(lock.fileno(),),
                        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
     finally:
@@ -423,11 +423,7 @@ def _edit_in_editor(old: dict) -> dict:
         edited = h.load_header_file(path)
     finally:
         os.unlink(path)
-    blocked = [k for k in h.SYSTEM_KEYS if k in edited]
-    if blocked:
-        raise h.HeaderError(f"{', '.join(blocked)} 是系統欄位，不能改")
-    if edited.get("type") != h.SESSION_TYPE:
-        raise h.HeaderError(f"type 必須是 {h.SESSION_TYPE}")
+    h.check_user_fields(edited, require_type=True)
     return edited
 
 

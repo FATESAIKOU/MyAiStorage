@@ -221,17 +221,22 @@ def load_header_file(path: str | None) -> dict:
 LIST_KEYS = ("tags", "refs", "sources", "verified")   # OKF list fields; a single value becomes [value]
 
 
+def check_user_fields(fields: dict, *, require_type: bool = False) -> None:
+    """The rules every user-supplied header part follows (--header, --header-file, $EDITOR)."""
+    blocked = [k for k in SYSTEM_KEYS if k in fields]
+    if blocked:
+        raise HeaderError(f"{', '.join(blocked)} 是系統欄位，不能改")
+    if ("type" in fields or require_type) and fields.get("type") != SESSION_TYPE:
+        raise HeaderError(f"Agora 的 type 只能是 {SESSION_TYPE}")
+
+
 def user_updates(header_file: str | None, header_args: list[str]) -> dict:
     """--header-file first, then each --header in order; reject system fields."""
     updates = overlay(load_header_file(header_file), parse_header_args(header_args))
     for key in LIST_KEYS:
         if key in updates and updates[key] is not None and not isinstance(updates[key], list):
             updates[key] = [updates[key]]
-    blocked = [k for k in SYSTEM_KEYS if k in updates]
-    if blocked:
-        raise HeaderError(f"{', '.join(blocked)} 是系統欄位，不能用 --header 改")
-    if "type" in updates and updates["type"] != SESSION_TYPE:
-        raise HeaderError(f"Agora 的 type 只能是 {SESSION_TYPE}")
+    check_user_fields(updates)
     for ref in ([updates["case"]] if updates.get("case") is not None else []) + list(updates.get("refs") or []):
         parse_ref(ref)
     return updates
