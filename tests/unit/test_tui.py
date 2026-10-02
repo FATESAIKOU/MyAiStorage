@@ -213,7 +213,8 @@ def _app(agents):
                       (_hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "第二個", sid="ses_2"), "## user\n別的\n"))
     cli = FakeCli()
     app = tui.AgoraApp(paths, cli, agents=agents, check_setup=False)
-    app.spawn, _ = _spawn()          # no action reaches a real process in a test
+    app.spawn, started = _spawn()    # no action reaches a real process in a test
+    app._last_spawned = started      # what the screen asked the command mode to run
     return app, cli
 
 
@@ -718,4 +719,89 @@ def test_the_selection_is_cleared_after_a_success():
             await pilot.press("space")
             assert _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
             assert not app.marked
+    _run(go)
+
+
+# --- the selection rules (T2 2.1) --------------------------------------------
+
+
+def _marked_app(tmp_path, count=3):
+    """Three agora sessions with titles nothing else in the row shares."""
+    sessions = tuple((_hdr(f"01{'0' * 23}{n}", title, sid=f"ses_{n}"),
+                      f"## user\n{n} 的內容\n")
+                     for n, title in enumerate("甲乙丙"[:count], 1))
+    paths, _ = _index(*sessions)
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+    app.spawn, started = _spawn()
+    app._last_spawned = started
+    return app
+
+
+async def _filter_to(pilot, text):
+    await pilot.press("slash")
+    for ch in text:
+        await pilot.press(ch)
+    await pilot.press("enter")
+    await pilot.pause(0.2)
+
+
+def test_actions_take_the_marked_rows_that_are_on_screen():
+    """review V4: a row marked earlier and then filtered away is not on screen, so
+    pressing d must not delete it."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            for _ in range(3):                                    # mark every row
+                await pilot.press("space", "down")
+            await _filter_to(pilot, "甲")
+            assert [r.cells[1] for r in app.shown()] == ["甲"]
+            assert [r.cells[1] for r in app.chosen_rows()] == ["甲"]   # the hidden two are not acted on
+            assert app.hidden_marked() == 2                       # and the header says so
+    _run(go)
+
+
+def test_the_header_says_how_many_marked_rows_are_hidden():
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("space", "down", "space")
+            assert "篩選掉" not in str(app.query_one("#bar").render())
+            marked = set(app.marked)
+            hidden = len([r for r in app.rows["agora"] if r.key in marked and r.cells[1] != "甲"])
+            await _filter_to(pilot, "甲")
+            assert f"另有 {hidden} 個勾選被篩選掉" in str(app.query_one("#bar").render())
+    _run(go)
+
+
+def test_the_cursor_row_is_used_when_nothing_visible_is_marked():
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            assert app.chosen_rows() == [app.current()]
+    _run(go)
+
+
+def test_merge_reads_its_sources_from_top_to_bottom():
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("space", "down", "space", "down", "space")
+            order = [r.key for r in app.shown()]         # what the screen shows
+            await pilot.press("m")
+            await pilot.pause()
+            await pilot.press("enter")
+            for _ in range(60):
+                await pilot.pause(0.05)
+                if app._last_spawned:
+                    break
+            assert app._last_spawned[0][2:5] == order
     _run(go)

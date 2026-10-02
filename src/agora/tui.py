@@ -587,6 +587,9 @@ class AgoraApp(App):
             bar.append(" ")
         if self.text:
             bar.append(f" {'內文' if self.content else '標題'}：{self.text} ", style="#ffffff on #5f0000")
+        hidden = self.hidden_marked()
+        if hidden:
+            bar.append(f" 另有 {hidden} 個勾選被篩選掉", style="#ffd75f")
         if self.status:
             bar.append(f"  {self.status}", style="#ff5f5f")
         self.query_one("#bar", Static).update(bar)
@@ -739,9 +742,24 @@ class AgoraApp(App):
     # -- actions -------------------------------------------------------------------
 
     def chosen_rows(self) -> list[Row]:
-        marked = [r for r in self.rows[self.tab] if r.key in self.marked]
+        """The rows an action acts on, in the order they are on screen.
+
+        Only the ones the user can see. A row that is marked but filtered out is not
+        acted on (review V4): pressing `d` should not delete a Session that is not on
+        the screen. The header says how many are hidden, so nothing disappears
+        quietly - and merge reads its sources top to bottom, as they are shown.
+        """
+        marked = [r for r in self.shown() if r.key in self.marked]
+        if marked:
+            return marked
         row = self.current()
-        return marked or ([row] if row else [])
+        return [row] if row else []
+
+    def hidden_marked(self) -> int:
+        """Marked rows the filter is hiding (review V4)."""
+        visible = {r.key for r in self.shown()}
+        return len([r for r in self.rows[self.tab]
+                    if r.key in self.marked and r.key not in visible])
 
     def action_quit(self) -> None:
         """ctrl+q while a command is running stops it first (review M3).
@@ -884,7 +902,7 @@ class AgoraApp(App):
 
     @work
     async def action_merge(self) -> None:
-        rows = [r for r in self.rows["agora"] if r.key in self.marked]
+        rows = self.chosen_rows()          # the visible marked ones, in screen order
         if len(rows) < 2:
             self.say("合併要先用空白鍵勾選至少兩個")
             return
