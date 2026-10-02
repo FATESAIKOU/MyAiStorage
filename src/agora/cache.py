@@ -87,6 +87,15 @@ def _line(message: str) -> None:
     print(f"[agora] {message}", file=sys.stderr)
 
 
+def _plan_one(session_id: str, agents: dict) -> tuple[str, str | None, Exception | None]:
+    """(kind, id, complaint): parse up front so a bad id is that id's failure only."""
+    try:
+        kind, bare = _split(session_id, agents)
+    except ValueError as e:
+        return "", None, e
+    return kind, bare, None
+
+
 def _looks_like_uuid(value: str) -> bool:
     try:
         uuid.UUID(value)
@@ -136,16 +145,27 @@ def pull(paths: store.Paths, ids: list[str], agents: dict, *,
     means "the agent does not have this session any more", so its cached full
     text is what goes.
     """
-    drive = store.Drive(paths)
     index = store.Index(paths)
-    remote = drive.list_sessions()          # one listing for the whole batch (docs/perf.md)
+    # A batch of agent ids needs no Drive at all: asking anyway would make an
+    # offline machine fail a pull that has nothing to do with Drive (review S2-3).
+    plan = [_plan_one(session_id, agents) for session_id in ids]
+    drive, remote, offline = None, None, None
+    if any(kind == "agora" for kind, _, _ in plan):
+        try:
+            drive = store.Drive(paths)
+            remote = drive.list_sessions()      # one listing for the whole batch (docs/perf.md)
+        except store.StoreError as e:
+            offline = e
     listed: dict[str, dict] = {}
     done = failed = 0
-    for k, session_id in enumerate(ids, 1):
-        _progress("pull", k, len(ids))
+    for k, (session_id, (kind, bare, complaint)) in enumerate(zip(ids, plan), 1):
+        _progress("pull", k, len(plan))
         try:
-            kind, bare = _split(session_id, agents)
+            if complaint:
+                raise complaint
             if kind == "agora":
+                if offline is not None:
+                    raise store.StoreError(f"連不上 Drive：{offline}")
                 _pull_agora(paths, drive, index, remote, bare, not_exist_delete)
             elif not_exist_delete:
                 _drop_reading(paths, kind, bare)
@@ -213,7 +233,11 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
     left = store.push_outbox(drive, paths)      # staged writes first: those are the same sessions
     if left:
         _line(f"outbox 還有 {len(left)} 筆沒上傳成功")
-    listing = drive.list_sessions()
+    try:
+        listing = drive.list_sessions()
+        offline = None
+    except store.StoreError as e:
+        listing, offline = None, e            # offline: every id here fails, and says so
     done = failed = 0
     for k, agora_id in enumerate(ids, 1):
         _progress("push", k, len(ids))
@@ -221,6 +245,8 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
             kind, ulid = _split(agora_id, agents)
             if kind != "agora":
                 raise ValueError(f"push 只吃 agora 的 session id，收到 {agora_id}")
+            if offline is not None:
+                raise store.StoreError(f"連不上 Drive：{offline}")
             if ulid in staged:
                 if ulid in left:
                     raise store.StoreError("還沒上傳成功，仍在 outbox")   # review S2-2

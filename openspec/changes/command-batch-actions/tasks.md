@@ -14,7 +14,7 @@
 - [x] 2.4 全文快取的暫存檔名加唯一碼（review K4）
 - [x] 2.5 單元測試：pull／push 的情境、k/N、K4、K5
 - [x] 2.6 S2-2：outbox 上傳失敗的 id 不算成功（review T1-sec2）
-- [ ] 2.7 S2-3：只有 agent id 的 pull 不碰 Drive；Drive 的錯誤逐筆處理
+- [x] 2.7 S2-3：只有 agent id 的 pull 不碰 Drive；Drive 的錯誤逐筆處理
 - [ ] 2.8 S2-4：raw 還沒齊的不建索引（G3）
 - [ ] 2.9 S2-5：本機和雲端都沒有的算找不到
 - [ ] 2.10 S2-6：補測試（沒給 id → exit 1、outbox 上傳失敗算失敗）
