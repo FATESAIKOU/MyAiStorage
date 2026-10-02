@@ -1,10 +1,10 @@
 ## 1. 批次指令（impl2）
 
-- [ ] 1.1 import：`--external-session-id` 可以多個（重複或逗號），先同步一次再逐一匯入，失敗照樣做下一個，exit code 為第一個非零（spec batch-commands「import 一次多個」）
-- [ ] 1.2 import、delete、merge 在 stderr 印 `k/N` 進度，stdout 只放 agora id（「進度」）
-- [ ] 1.3 delete：刪除成功時記到 `<state>/deleted`，重跑時只略過記錄裡的；打錯的 id 照樣找不到（「delete 重跑略過已刪除」）
-- [ ] 1.4 merge：要約存到 `<state>/merge-sections/`，鍵含 agent、提示詞版本、模型設定、來源 id、實際送出文字的雜湊；沿用前再驗 schema（「merge 沿用已寫好的要約」）
-- [ ] 1.5 單元測試：上面四項各自的情境（含中斷後重跑）
+- [x] 1.1 import：`--external-session-id` 可以多個（重複或逗號），先同步一次再逐一匯入，失敗照樣做下一個，exit code 為第一個非零（spec batch-commands「import 一次多個」）
+- [x] 1.2 import、delete、merge 在 stderr 印 `k/N` 進度，stdout 只放 agora id（「進度」）
+- [x] 1.3 delete：刪除成功時記到 `<state>/deleted`，重跑時只略過記錄裡的；打錯的 id 照樣找不到（「delete 重跑略過已刪除」）
+- [x] 1.4 merge：要約存到 `<state>/merge-sections/`，鍵含 agent、提示詞版本、模型設定、來源 id、實際送出文字的雜湊；沿用前再驗 schema（「merge 沿用已寫好的要約」）
+- [x] 1.5 單元測試：上面四項各自的情境（含中斷後重跑）
 
 ## 2. pull／push（impl1）
 

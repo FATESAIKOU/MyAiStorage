@@ -198,9 +198,125 @@ def test_a_bad_answer_is_regenerated_then_gives_up(env, capsys):  # design v7: s
     retried = env.prompts[1][0]
     assert retried.index("上一次的輸出不合格") < retried.index("以下是 Session 的內容")   # never inside the session
     assert "required" in env.prompts[2][0]
+    # a different pair, so the sections cached above are not reused (T1 R4)
+    env.sessions["ses_c"] = ["另一段對話", "好"]
+    _, c, _ = run(capsys, "import", "session", "--external-session-id", "ses_c", "--agent", "opencode")
     env.answers = ["{}", "{}", "{}"]
-    code, out, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    code, out, err = run(capsys, "merge", "session", a, c, "--agent", "opencode")
     assert code == 2 and out == "" and "連續 3 次" in err
+
+
+# --- T1 batch actions: import several, progress, re-runs (spec batch-commands) ---
+
+def test_import_several_ids_at_once(env, capsys):  # R2
+    for sid, text in [("ses_b", "讀取 CSV"), ("ses_c", "第三段")]:
+        env.sessions[sid] = [text, "好"]
+    code, out, err = run(capsys, "import", "session",
+                         "--external-session-id", "ses_a,ses_b",
+                         "--external-session-id", "ses_c", "--agent", "opencode")
+    assert code == 0
+    ids = out.split()
+    assert len(ids) == 3 and len(set(ids)) == 3
+    for n in (1, 2, 3):
+        assert f"匯入 {n}/3" in err
+
+
+def test_import_keeps_going_after_one_fails(env, capsys):  # R2
+    env.sessions["ses_c"] = ["第三段", "好"]
+    code, out, err = run(capsys, "import", "session",
+                         "--external-session-id", "ses_a,ses_nope,ses_c", "--agent", "opencode")
+    assert code != 0 and len(out.split()) == 2      # the two that worked
+    assert "ses_nope" in err and "匯入 3/3" in err   # and the failure is named
+
+
+def test_import_rerun_skips_what_is_done(env, capsys):  # R4
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a,ses_b",
+                      "--agent", "opencode")
+    code, again, _ = run(capsys, "import", "session", "--external-session-id", "ses_a,ses_b",
+                         "--agent", "opencode")
+    assert code == 0
+    assert set(again.split()) == set(first.split())  # same ids, nothing rewritten
+
+
+def test_import_progress_stays_off_stdout(env, capsys):  # R3
+    _, out, err = run(capsys, "import", "session", "--external-session-id", "ses_a",
+                      "--agent", "opencode")
+    assert out.startswith("agora:") and len(out.split()) == 1
+    assert "匯入 1/1" in err
+
+
+def test_delete_rerun_skips_what_it_deleted(env, capsys):  # R4
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    run(capsys, "delete", "session", a, "--yes")
+    code, out, err = run(capsys, "delete", "session", a, b, "--yes")
+    assert code == 0
+    assert out.split() == [b] and "已經不在了" in err and a in err
+    assert "刪除 1/1" in err                        # only the one left was counted
+
+
+def test_delete_reports_an_id_it_never_had(env, capsys):  # R4: a typo is not a skip
+    _, a, _ = _import(capsys)
+    code, _, err = run(capsys, "delete", "session", a, "agora:01K6NOSUCH0000000000000", "--yes")
+    assert code == 1 and "找不到" in err
+
+
+def test_delete_progress_counts_down(env, capsys):  # R3
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    code, out, err = run(capsys, "delete", "session", f"{a},", b, "--yes")
+    assert code == 0 and len(out.split()) == 2
+    assert "刪除 1/2" in err and "刪除 2/2" in err
+
+
+def test_merge_reuses_a_summary_it_already_paid_for(env, capsys):  # R4
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    _, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert "來源 1/2" in err and "來源 2/2" in err
+    calls = len(env.prompts)
+    code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert code == 0 and len(env.prompts) == calls    # no AI called the second time
+    assert err.count("沿用") == 2
+
+
+def test_merge_rewrites_when_the_source_changed(env, capsys):  # spec scenario
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    calls = len(env.prompts)
+    env.sessions["ses_b"].append("後來又聊了一句")     # the source grew
+    _, b2, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    run(capsys, "merge", "session", a, b2, "--agent", "opencode")
+    assert len(env.prompts) > calls                    # the changed source was written again
+
+
+def test_merge_cache_notices_a_different_model(env, capsys, monkeypatch):  # review Q6
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    calls = len(env.prompts)
+    monkeypatch.setenv("AGORA_OPENCODE_MODEL", "some/other-model")
+    run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert len(env.prompts) == calls + 2              # both sources rewritten
+
+
+def test_merge_cache_refuses_a_broken_summary(env, capsys):  # re-validate before reuse
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    calls = len(env.prompts)
+    for path in (store.Paths.from_env().state / "merge-sections").glob("*.json"):
+        path.write_text(json.dumps({"summary": {"purpose": "p"}}), encoding="utf-8")
+    code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert len(env.prompts) == calls + 2              # invalid cache entries are not reused
 
 
 def test_merge_needs_an_agent(env, capsys):
@@ -640,8 +756,11 @@ def test_ai_text_cannot_forge_structure(env, capsys):  # review v7 A1
     _, out, _ = run(capsys, "show", "session", m)
     body = out.split("\n---\n", 1)[1]
     assert body.count("\n## 來源") == 1 and "\n- agora:01FAKE" not in body
+    # a third source, so the sections cached above do not apply (T1 R4)
+    env.sessions["ses_z"] = ["第三段", "好"]
+    _, z, _ = run(capsys, "import", "session", "--external-session-id", "ses_z", "--agent", "opencode")
     env.answers = [json.dumps({"purpose": " ", "decisions": [], "progress": "q", "open_questions": []})] * 3
-    code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    code, _, err = run(capsys, "merge", "session", a, z, "--agent", "opencode")
     assert code == 2 and "連續 3 次" in err                  # blank text does not pass the schema
 
 

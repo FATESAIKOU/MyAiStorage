@@ -202,18 +202,48 @@ def cmd_search(args, paths: store.Paths) -> int:
     return 0
 
 
+def _progress(word: str, k: int, total: int, item: str = "") -> None:
+    """One 'k/N' line per item on stderr; stdout keeps only the results
+    (spec batch-commands「進度」), so a pipe sees ids and nothing else."""
+    print(f"[agora] {word} {k}/{total}  {item}".rstrip(), file=sys.stderr)
+
+
 def cmd_import(args, paths: store.Paths) -> int:
+    """Import one or several agent sessions (T1 R2: several ids, one line each).
+
+    Every id is imported even if an earlier one failed (R2); the exit code is
+    the worst of the individual results.
+    """
     if args.ids:
         raise InputError("import 不接 session id；用 --external-session-id 給 agent 自己的 id")
     if not args.external_session_id or not args.agent:
         raise InputError("import 要給 --external-session-id 與 --agent")
     agent = load_agent(args.agent)
     updates = _updates(args)
-    exported = agent.export(args.external_session_id)
+    ids = [i.strip() for raw in args.external_session_id for i in raw.split(",") if i.strip()]
+    if not ids:
+        raise InputError("--external-session-id 沒有內容")
+    store.sync(paths)  # once, never throttled: we must see other machines' imports (S6)
+    worst = 0
+    for k, external_id in enumerate(ids, 1):
+        _progress("匯入", k, len(ids), external_id)
+        try:
+            code = _import_one(agent, external_id, updates, paths)
+        except Exception as e:   # one bad id must not stop the batch (R2; review K5)
+            print(f"[agora] {external_id} 匯入失敗：{e}", file=sys.stderr)
+            code = EXIT_ERROR
+        worst = code or worst
+    return worst
+
+
+def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Paths) -> int:
+    """One import. Unchanged content and no --header is a no-op that just
+    prints the same id (R4: a re-run after Ctrl-C skips what is done)."""
+    exported = agent.export(external_id)
     if exported.message_count <= 0:
-        raise InputError(f"{args.external_session_id} 沒有任何訊息，不匯入")
+        raise InputError(f"{external_id} 沒有任何訊息，不匯入")
     body = reading(agent, exported.raw)
-    index = store.sync(paths)  # never throttled: we must see other machines' imports (S6)
+    index = store.sync(paths)
     existing = index.by_source(agent.name, exported.session_id)
     if existing:
         old = index.header(existing[0])
@@ -344,10 +374,11 @@ def cmd_merge(args, paths: store.Paths) -> int:
     updates = _updates(args)
     index = _sync_for(paths, ids)
     parents, parent_headers, sections, models = [], [], [], set()
-    for agora_id in ids:
+    for k, agora_id in enumerate(ids, 1):
         agora_id = f"agora:{_ulid_of(agora_id)}"
         parent = _header_for(index, agora_id)
         agora = h.agora_of(parent)
+        _progress("來源", k, len(ids), agora_id)
         sec = {"id": agora_id, "title": parent.get("title") or agora_id,
                "agent": (agora.get("source") or {}).get("agent") or agora.get("relation")}
         if agora.get("relation") == "merge":   # its sections are already written: reuse them, no AI
@@ -365,10 +396,17 @@ def cmd_merge(args, paths: store.Paths) -> int:
                 half = SOURCE_MAX // 2
                 text = (f"{text[:half]}\n\n（中間省略 {len(text) - SOURCE_MAX} 字；"
                         f"完整內容用 `agora show session {agora_id}` 看）\n\n{text[-half:]}")
-            print(f"[agora] 請 {agent.name} 寫 {agora_id} 的要約（{len(text)} 字，不開畫面，可能要幾分鐘）…",
-                  file=sys.stderr)
-            sec["summary"], model = _section_of(agent, text, _summary_dir(paths))
-            models.add(model)
+            cached = _cached_section(paths, agent.name, agora_id, text)
+            if cached is not None:      # a re-run reuses what it already paid for (R4)
+                sec["summary"], model = cached
+                models.add(model)
+                print(f"[agora] {agora_id} 的要約沿用上次寫好的", file=sys.stderr)
+            else:
+                print(f"[agora] 請 {agent.name} 寫 {agora_id} 的要約（{len(text)} 字，不開畫面，可能要幾分鐘）…",
+                      file=sys.stderr)
+                sec["summary"], model = _section_of(agent, text, _summary_dir(paths))
+                _cache_section(paths, agent.name, agora_id, text, sec["summary"], model)
+                models.add(model)
         parents.append({"id": agora_id, "raw_md5": (agora.get("raw") or {}).get("md5")})
         parent_headers.append(parent)
         sections.append(sec)
@@ -385,6 +423,46 @@ def cmd_merge(args, paths: store.Paths) -> int:
     auto["agora"]["merge"] = {"kind": "sections", "by": actor, "prompt": SUMMARY_PROMPT_VERSION}
     raw = json.dumps({"sections": sections}, ensure_ascii=False, indent=2).encode()
     return _emit(_save(paths, _with_user(auto, updates), body, raw))
+
+
+def _sections_cache_dir(paths: store.Paths) -> Path:
+    """Written summaries live here so an interrupted merge does not pay twice (T1 R4)."""
+    return paths.state / "merge-sections"
+
+
+def _model_setting(agent_name: str) -> str:
+    """The model the agent would use now: part of a summary's identity (Q6)."""
+    return os.environ.get(f"AGORA_{agent_name.upper()}_MODEL", "") or ""
+
+
+def _section_key(agent_name: str, agora_id: str, text: str) -> str:
+    """agent + prompt version + model setting + source id + the text actually
+    sent (after the SOURCE_MAX cut), so any change means a rewrite (Q6)."""
+    raw = "\n".join([agent_name, str(SUMMARY_PROMPT_VERSION), _model_setting(agent_name),
+                     agora_id, text]).encode("utf-8")
+    return store.hashlib.md5(raw).hexdigest()
+
+
+def _cached_section(paths: store.Paths, agent_name: str, agora_id: str,
+                    text: str) -> tuple[dict, str | None] | None:
+    path = _sections_cache_dir(paths) / f"{_section_key(agent_name, agora_id, text)}.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        jsonschema.validate(doc["summary"], SECTION_SCHEMA)
+        return doc["summary"], doc.get("model")
+    except (OSError, ValueError, KeyError, TypeError, jsonschema.ValidationError):
+        return None
+
+
+def _cache_section(paths: store.Paths, agent_name: str, agora_id: str, text: str,
+                   summary: dict, model: str | None) -> None:
+    folder = _sections_cache_dir(paths)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{_section_key(agent_name, agora_id, text)}.json"
+    tmp = path.with_suffix(".json.tmp")          # never leave half a file behind
+    tmp.write_text(json.dumps({"summary": summary, "model": model}, ensure_ascii=False),
+                   encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _require_sections(agora_id: str, agora: dict) -> None:
@@ -571,25 +649,47 @@ def _converted_turns(seg_agent: str, seg_id: str, raw: bytes) -> list[tuple[str,
 
 
 def cmd_delete(args, paths: store.Paths) -> int:
-    """Move one or several sessions to the Drive trash (design 5.6; several at once is the user's call)."""
+    """Move one or several sessions to the Drive trash (design 5.6).
+
+    A session that is already gone counts as done, so a re-run after Ctrl-C
+    finishes the job instead of failing (T1 R4). Children named in the same
+    request go first; children outside it are still refused.
+    """
     ids = [f"agora:{_ulid_of(i.strip())}" for raw in args.ids for i in raw.split(",") if i.strip()]
     if not ids:
         raise InputError("delete 要給至少一個 session id")
     index = store.sync(paths)
-    headers = {agora_id: _header_for(index, agora_id) for agora_id in ids}
+    gone = _deleted_ids(paths)
+    headers, missing, unknown = {}, [], []
+    for agora_id in ids:
+        if index.header(_ulid_of(agora_id)) is not None:
+            headers[agora_id] = index.header(_ulid_of(agora_id))
+        elif _ulid_of(agora_id) in gone:
+            missing.append(agora_id)    # we deleted it in an earlier, interrupted run
+        else:
+            unknown.append(agora_id)    # never existed: a typo, not something to skip
+    if unknown:
+        raise InputError("找不到：" + "、".join(unknown))
+    if missing:
+        print(f"[agora] 已經不在了，略過 {len(missing)} 個：" + "、".join(missing), file=sys.stderr)
+    if not headers:
+        return 0
     if not args.yes:
         listed = "\n".join(f"  {i}（{hdr.get('title') or '無標題'}）" for i, hdr in headers.items())
-        raise InputError(f"會把這 {len(ids)} 個移到 Drive 垃圾桶：\n{listed}\n確定的話加 --yes")
-    left, refused, done = list(ids), [], 0
+        raise InputError(f"會把這 {len(headers)} 個移到 Drive 垃圾桶：\n{listed}\n確定的話加 --yes")
+    total = len(headers)
+    left, refused, done = list(headers), [], 0
     while left:   # a child in the same request goes first, so its parents can follow
         ready = [i for i in left if not index.children(_ulid_of(i))]   # deleted ones leave the index
         if not ready:
             break
         for agora_id in ready:
+            done += 1
+            _progress("刪除", done, total)
             store.delete_session(paths, store.Drive(paths), _ulid_of(agora_id))
+            _remember_deleted(paths, _ulid_of(agora_id))
             print(agora_id)
             left.remove(agora_id)
-            done += 1
     for agora_id in left:
         children = "、".join(f"agora:{c}" for c in index.children(_ulid_of(agora_id)))
         print(f"[agora] {agora_id} 有子 Session，不能刪：{children}", file=sys.stderr)
@@ -597,6 +697,22 @@ def cmd_delete(args, paths: store.Paths) -> int:
     if done:
         print(f"[agora] 已把 {done} 個移到 Drive 垃圾桶，30 天內可以在 Drive 網頁還原", file=sys.stderr)
     return EXIT_INPUT if refused else 0
+
+
+def _deleted_ids(paths: store.Paths) -> set[str]:
+    """Ids this machine deleted through agora (so a re-run can skip them)."""
+    path = paths.state / "deleted"
+    try:
+        return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
+    except OSError:
+        return set()
+
+
+def _remember_deleted(paths: store.Paths, ulid: str) -> None:
+    path = paths.state / "deleted"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(ulid + "\n")
 
 
 def cmd_edit(args, paths: store.Paths) -> int:
@@ -680,7 +796,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("type", nargs="?", choices=(*TYPES, "agora", "local"),
                    help="session；cache 用 agora 或 local；sync 不用寫")
     p.add_argument("ids", nargs="*", help="session id（merge 可以給多個，用空白或逗號分隔）")
-    p.add_argument("--external-session-id", help="import：agent 自己的 session id")
+    p.add_argument("--external-session-id", action="append", default=[],
+                   help="import：agent 自己的 session id，可重複或用逗號分隔")
     p.add_argument("--agent", choices=AGENTS, help="import：來源的 agent；merge：誰寫要約；continue：用哪個 agent 接")
     p.add_argument("--filter", action="append", default=[], help="search：KEY=VALUE（全等）或 KEY~=TEXT（包含）")
     p.add_argument("--header", action="append", default=[], help="KEY=VALUE；KEY 可以用點路徑，VALUE 用 YAML 解析")
