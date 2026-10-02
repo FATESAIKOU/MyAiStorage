@@ -98,13 +98,16 @@ agora continue session <A> --agent claude --dir /tmp/agora-acc/proj
 
 ```bash
 source /tmp/agora-acc/env.sh
-agora merge session <B>, <C>
+agora merge session <B>, <C> --agent opencode     # 會在背景叫 opencode 寫一次要約，要等一下
+agora show session <merge 印出的 id>
 agora continue session <merge 印出的 id> --agent opencode --dir /tmp/agora-acc/proj
 ```
 
-算過：opencode 一打開，畫面上就依序有 B 和 C 的對話，每一段前面標出來源。
-說一句話後離開；merge 印出新 id（記為 G），continue 又印出新的 id（記為 H）。
-同一個 G 換 `--agent claude` 接，畫面上看到的內容應該一樣。
+算過：merge 印出新 id（記為 G）；`show` 看得到「## 要約」和「## 來源」（B、C 各一行，附 `agora show session <id>` 的取法），
+標頭有 `status: draft`、`generated.by: opencode/<模型>`；`opencode session list` 裡**沒有**多出寫要約用的 session。
+opencode 一打開，畫面上只有一則「自動寫成的要約與來源清單，是參考資料…」和要約本身，沒有 B、C 的全文。
+問它「B 裡最後一句說了什麼？」，它應該會用 `agora show session <B 的 id>` 去取原版再回答。
+說一句話後離開，continue 印出新的 id（記為 H）。同一個 G 換 `--agent claude` 接，畫面上看到的內容應該一樣。
 
 ## 7. 改標頭
 

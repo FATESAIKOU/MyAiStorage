@@ -62,6 +62,9 @@ class FakeAgent:
         msgs = [lines[0] for _role, lines in turns if lines]
         return json.dumps({"id": "native", "m": msgs}, ensure_ascii=False).encode()
 
+    def summarize(self, prompt, workdir):
+        return "合併要約", "fake-model"
+
     def start_native(self, raw, workdir):
         new = f"ses_n{len(self.sessions)}"
         self.sessions[new] = list(json.loads(raw)["m"])
@@ -249,7 +252,7 @@ def test_reimport_only_merged_child_branches(env, capsys):  # U-IMP-08b
     _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     env.sessions["ses_b"] = ["讀取 CSV", "完成"]
     _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
-    _, m, _ = run(capsys, "merge", "session", a, b)
+    _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
     env.sessions["ses_a"].append("來源端又改了")
     _, c, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     assert c != a
@@ -307,8 +310,8 @@ def test_merge_of_merge(env, capsys):  # U-MRG-02b, N5
     _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
     env.sessions["ses_c"] = ["第三份", "好"]
     _, c, _ = run(capsys, "import", "session", "--external-session-id", "ses_c", "--agent", "opencode")
-    _, m, _ = run(capsys, "merge", "session", a, b)
-    _, n, _ = run(capsys, "merge", "session", m, c)
+    _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    _, n, _ = run(capsys, "merge", "session", m, c, "--agent", "opencode")
     parents = h.agora_of(store.Index(paths()).header(n.split(":")[1]))["parents"]
     assert [p["id"] for p in parents] == [m, c]
     assert parents[0]["raw_md5"] is None
@@ -318,7 +321,7 @@ def test_merge_of_merge(env, capsys):  # U-MRG-02b, N5
 def test_merge_missing_id_fails_clean(env, capsys, tmp_path):  # U-MRG-03
     _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     before = remote_sessions(tmp_path)
-    code, _, err = run(capsys, "merge", "session", a, "agora:01K6NADA0000000000000000")
+    code, _, err = run(capsys, "merge", "session", a, "agora:01K6NADA0000000000000000", "--agent", "opencode")
     assert code != 0 and "找不到" in err
     assert remote_sessions(tmp_path) == before
     assert store.outbox_count(paths()) == 0
@@ -344,7 +347,7 @@ def test_continue_from_merge_has_null_parent_md5(env, capsys):  # U-CON-18, N5
     _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     env.sessions["ses_b"] = ["讀取 CSV", "完成"]
     _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
-    _, m, _ = run(capsys, "merge", "session", a, b)
+    _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
     _, child, _ = run(capsys, "continue", "session", m, "--agent", "opencode", "--dir", "/tmp")
     hdr = store.Index(paths()).header(child.split(":")[1])
     from agora import header as h
@@ -377,9 +380,7 @@ def test_finalize_upload_failure_keeps_outbox_clears_pending(env, capsys, monkey
     _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     env.sessions["ses_b"] = ["讀取 CSV", "完成"]
     _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
-    _, m, _ = run(capsys, "merge", "session", a, b)
-    for parent in (a, b):                            # continue reads the parents' raws from the cache
-        run(capsys, "show", "session", parent, "--raw")
+    _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
     run(capsys, "search", "session", "--filter", "text~=CSV")   # sync first, so only the finalize upload fails
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")
     code, out, _ = run(capsys, "continue", "session", m, "--agent", "opencode", "--dir", "/tmp")
@@ -522,7 +523,7 @@ def test_show_raw_lazy_and_merge_message(env, capsys):  # U-SHW-03
     assert code == 0 and '"m": ["把 CSV 轉成 Markdown 表格"' in out
     env.sessions["ses_b"] = ["讀取 CSV", "完成"]
     _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
-    _, m, _ = run(capsys, "merge", "session", a, b)
+    _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
     code, _, err = run(capsys, "show", "session", m, "--raw")
     assert code != 0 and "agora.parents" in err
 
@@ -597,7 +598,7 @@ def test_merge_row_display(env, capsys):  # U-SRC-13, N6
     _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     env.sessions["ses_b"] = ["讀取 CSV", "完成"]
     _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
-    _, m, _ = run(capsys, "merge", "session", a, b)
+    _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
     _, found, _ = run(capsys, "search", "session", "--filter", "text~=CSV", "--no-sync")
     line = next(line for line in found.splitlines() if line.split()[0] == m)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")

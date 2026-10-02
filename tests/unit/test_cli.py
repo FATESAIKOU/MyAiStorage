@@ -26,6 +26,7 @@ class FakeAgent:
         self.sessions: dict[str, list[str]] = {"ses_a": ["把 CSV 轉成 Markdown 表格", "好的，三個步驟"]}
         self.launched: list[Launch] = []
         self.speak = True
+        self.prompts: list = []
 
     def _exported(self, sid):
         msgs = self.sessions[sid]
@@ -43,6 +44,10 @@ class FakeAgent:
     def native(self, turns):
         return json.dumps({"id": "synth", "m": ["\n".join(lines) for _role, lines in turns]},
                           ensure_ascii=False).encode()
+
+    def summarize(self, prompt, workdir):
+        self.prompts.append((prompt, workdir))
+        return "兩個來源都在處理 CSV 轉表格。\n\n下一步：輸出表格。", "fake-model"
 
     def start_native(self, raw, workdir):
         new = f"ses_n{len(self.sessions)}"
@@ -131,19 +136,50 @@ def test_continue_with_nothing_new_saves_nothing(env, capsys):
     assert code == 0 and out == "" and "沒有新內容" in err
 
 
-def test_merge_then_continue_uses_injection(env, capsys):  # L3
+def test_merge_writes_a_summary_and_continue_loads_only_that(env, capsys):  # design v6 5.3
     _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
-    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    env.sessions["ses_b"] = ["讀取 CSV", "只在 B 內文的一句"]
     _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
-    code, merged, _ = run(capsys, "merge", "session", f"{a},{b}")
+    code, merged, _ = run(capsys, "merge", "session", f"{a},{b}", "--agent", "opencode")
     assert code == 0
+    prompt, workdir = env.prompts[-1]
+    assert prompt.startswith(cli.SUMMARY_PROMPT) and "只在 B 內文的一句" in prompt and a in prompt
+    assert (workdir / ".git").is_dir()                     # opencode files the run under its own project
     paths = store.Paths.from_env()
     hdr = store.Index(paths).header(merged.split(":")[1])
     assert hdr["agora"]["relation"] == "merge" and [p["id"] for p in hdr["agora"]["parents"]] == [a, b]
     assert "raw" not in hdr["agora"]
-    _, child, _ = run(capsys, "continue", "session", merged, "--agent", "opencode", "--dir", "/tmp")
+    assert hdr["generated"]["by"] == "opencode/fake-model" and hdr["description"].startswith("兩個來源")
+    assert hdr["status"] == "draft" and hdr["agora"]["merge"] == {"kind": "summary", "by": "opencode/fake-model",
+                                                                 "prompt": cli.SUMMARY_PROMPT_VERSION}
+    _, out, _ = run(capsys, "show", "session", merged)
+    assert "## 要約" in out and f"- {a}「" in out and "agora show session <id>" in out
+    run(capsys, "continue", "session", merged, "--agent", "opencode", "--dir", "/tmp")
     loaded = env.sessions[env.launched[-1].agent_session_id]
-    assert any("以下來自" in m for m in loaded) and any("讀取 CSV" in m for m in loaded)   # both parents, natively
+    assert loaded[0].startswith(cli.MERGE_NOTE.format(by="opencode/fake-model")) and "下一步：輸出表格。" in loaded[0]
+    assert "只在 B 內文的一句" not in "\n".join(loaded)              # the sources' text is not loaded
+    assert loaded[1] == cli.MERGE_READY
+
+
+def test_merge_needs_an_agent(env, capsys):
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    code, _, err = run(capsys, "merge", "session", a, b)
+    assert code == 1 and "--agent" in err
+
+
+def test_a_failed_summary_saves_nothing(env, capsys, monkeypatch):
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    def fail(prompt, workdir):
+        raise AgentError("逾時")
+    monkeypatch.setattr(env, "summarize", fail)
+    before = len(store.Index(store.Paths.from_env()).search([]))
+    code, out, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert code != 0 and out == ""
+    assert len(store.Index(store.Paths.from_env()).search([])) == before
 
 
 def test_upload_failure_exits_3_and_stays_searchable(env, capsys, monkeypatch):  # N13
@@ -464,33 +500,18 @@ def test_header_values_stay_text_unless_list_or_mapping(env, capsys):  # V2, V3
     assert found.split()[0] == sid
 
 
-def test_continue_a_merge_of_a_merge_gathers_every_raw(env, capsys):  # design v5 5.4
+def test_a_merge_of_a_merge_lists_only_its_direct_sources(env, capsys):  # design v6 5.3
     _, a, _ = _import(capsys)
-    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    env.sessions["ses_b"] = ["讀取 CSV", "只在 B 內文的一句"]
     _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
     env.sessions["ses_c"] = ["輸出表格", "好"]
     _, c, _ = run(capsys, "import", "session", "--external-session-id", "ses_c", "--agent", "opencode")
-    _, ab, _ = run(capsys, "merge", "session", a, b)
-    _, abc, _ = run(capsys, "merge", "session", ab, c)
-    code, child, _ = run(capsys, "continue", "session", abc, "--agent", "opencode", "--dir", "/tmp")
-    assert code == 0
-    loaded = "\n".join(env.sessions[env.launched[-1].agent_session_id])
-    for text in ("把 CSV 轉成 Markdown 表格", "讀取 CSV", "輸出表格"):
-        assert text in loaded
-    assert loaded.index("把 CSV") < loaded.index("讀取 CSV") < loaded.index("輸出表格")
-
-
-def test_converted_continue_marks_sources_and_keeps_boundaries(env, capsys):  # review W1, W2
-    env.sessions["ses_q"] = ["只有一個沒被回答的問題"]          # ends with a user turn
-    _, q, _ = run(capsys, "import", "session", "--external-session-id", "ses_q", "--agent", "opencode")
-    _, a, _ = _import(capsys)
-    _, m, _ = run(capsys, "merge", "session", q, a)
-    run(capsys, "continue", "session", m, "--agent", "opencode", "--dir", "/tmp")
-    loaded = env.sessions[env.launched[-1].agent_session_id]
-    text = "\n".join(loaded)
-    assert text.startswith(cli.CONVERTED_NOTE)
-    question, marker = text.index("只有一個沒被回答的問題"), text.index(f"（以下來自 {a}")
-    assert question < text.index(cli.NO_REPLY) < marker              # a reply sits between them
+    _, ab, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    _, abc, _ = run(capsys, "merge", "session", ab, c, "--agent", "opencode")
+    prompt, _ = env.prompts[-1]
+    assert "兩個來源都在處理" in prompt and "只在 B 內文的一句" not in prompt   # ab's summary, not its sources
+    _, out, _ = run(capsys, "show", "session", abc)
+    assert f"- {ab}「" in out and "（原本是 merge）" in out and f"- {a}「" not in out
 
 
 def test_cross_agent_single_segment_gets_the_note(env, capsys, monkeypatch):  # review W2, W4
@@ -499,17 +520,6 @@ def test_cross_agent_single_segment_gets_the_note(env, capsys, monkeypatch):  # 
     run(capsys, "continue", "session", a, "--agent", "claude", "--dir", "/tmp")
     loaded = env.sessions[env.launched[-1].agent_session_id]
     assert loaded[0].startswith(cli.CONVERTED_NOTE)
-
-
-def test_a_session_merged_twice_is_loaded_once(env, capsys):  # review W3
-    _, a, _ = _import(capsys)
-    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
-    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
-    _, ab, _ = run(capsys, "merge", "session", a, b)
-    _, aab, _ = run(capsys, "merge", "session", a, ab)
-    run(capsys, "continue", "session", aab, "--agent", "opencode", "--dir", "/tmp")
-    loaded = "\n".join(env.sessions[env.launched[-1].agent_session_id])
-    assert loaded.count("把 CSV 轉成 Markdown 表格") == 1
 
 
 def test_an_id_not_known_here_skips_the_throttle(env, capsys):
@@ -523,24 +533,42 @@ def test_an_id_not_known_here_skips_the_throttle(env, capsys):
 
 def test_merge_refuses_the_same_session_twice(env, capsys):  # review X4
     _, a, _ = _import(capsys)
-    code, _, err = run(capsys, "merge", "session", a, a)
+    code, _, err = run(capsys, "merge", "session", a, a, "--agent", "opencode")
     assert code == 1 and "重複" in err
 
 
-def test_a_cycle_of_merges_is_an_error():  # review X3; only hand-edited data can do this
-    class Index:
-        headers = {u: {"agora": {"parents": [{"id": f"agora:{p}"}]}} for u, p in (("X", "Y"), ("Y", "X"))}
-
-        def header(self, ulid):
-            return self.headers.get(ulid)
-    with pytest.raises(cli.InputError, match="繞回"):
-        cli._raw_segments(None, Index(), "agora:X", done=set())
-
-
-def test_an_empty_segment_gets_no_marker(env, capsys, monkeypatch):  # review X1, X2
-    turns = {b"a": [("user", ["問題"]), ("assistant", ["回答"])], b"e": [("user", ["[skip image]"])]}
+def test_converted_turns_close_an_unanswered_question(monkeypatch):  # review W1, W6, X1
+    turns = {b"q": [("user", ["問題"]), ("user", ["[skip image]"])], b"e": [("user", ["[skip image]"])]}
     monkeypatch.setattr(cli, "load_agent", lambda name: type("A", (), {"turns": staticmethod(turns.get)})())
-    got = cli._converted_turns([("opencode", "agora:A", b"a"), ("opencode", "agora:E", b"e")])
-    assert "agora:E" not in str(got) and got[-1] == ("assistant", ["回答"])
+    got = cli._converted_turns("opencode", "agora:Q", b"q")
+    assert got == [("user", [cli.CONVERTED_NOTE, "（以下來自 agora:Q，原本是 opencode 的對話）", "問題"]),
+                   ("assistant", [cli.NO_REPLY])]
     with pytest.raises(cli.InputError):
-        cli._converted_turns([("opencode", "agora:E", b"e")])
+        cli._converted_turns("opencode", "agora:E", b"e")
+
+
+def test_a_long_source_is_cut_in_the_middle(env, capsys, monkeypatch):  # review Y1
+    monkeypatch.setattr(cli, "SOURCE_MAX", 40)
+    env.sessions["ses_b"] = ["讀取 CSV", "很長" * 50 + "結尾"]
+    _, a, _ = _import(capsys)
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    prompt, _ = env.prompts[-1]
+    assert "中間省略" in prompt and f"agora show session {b}" in prompt and "結尾" in prompt
+    _, out, _ = run(capsys, "show", "session", m)
+    assert "太長，要約只讀了頭尾" in out
+
+
+def test_an_old_merge_asks_to_be_merged_again(env, capsys):  # review Y2
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    paths = store.Paths.from_env()
+    md = paths.mirror / m.split(":")[1] / "session.md"
+    hdr, body = h.split_document(md.read_text())
+    del hdr["agora"]["merge"]                                  # what a v5 merge looks like
+    md.write_text(h.dump_document(hdr, body))
+    store.Index(paths).put(m.split(":")[1], store.md5_file(md), hdr, body)
+    code, _, err = run(capsys, "continue", "session", m, "--agent", "opencode", "--dir", "/tmp")
+    assert code == 1 and "舊版的 merge" in err and f"agora merge session {a} {b}" in err
