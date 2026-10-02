@@ -51,3 +51,35 @@ A 是 2.1 最直接要求的「失敗保留」沒做到，而且會讓 M2（T2-s
 | L2 | Low | spec 的 Scenario「沒勾選時匯入游標那一列」（未匯入頁）沒有直接的測試；游標那一列的測試只在 Agora 頁 | 在未匯入頁補一個：不勾選，把游標移到第二列，按 Enter，argv 只有那一個 `--external-session-id` |
 | L3 | Low | 只勾了一列，另一列被篩選掉時按 `m`，提示的是「合併要先用空白鍵勾選至少兩個」，沒有說明另外那一個被篩選掉了（雖然標題列有寫） | 有被篩選掉的勾選時，提示改成「看得到的勾選只有 1 個（另有 N 個被篩選掉）」 |
 | L4 | Low | delete 的確認視窗只列出看得到的那幾個，這是對的；但如果有被篩選掉的勾選，確認視窗裡沒有再提一次 | 確認視窗的說明加一行「另有 N 個勾選被篩選掉，不會刪」，因為 delete 是最危險的那一個動作 |
+
+## 2.2 全選切換（`ffedd3d`）
+
+2026-10-03，review。對照 spec 的「全選切換」。在 `git archive ffedd3d` 取出的副本跑 `test_tui.py`：**39 passed**。探測測試和 mutation 都只在副本裡做。規則同上。
+
+**沒有 High，也沒有 Medium。** 切換的邏輯是對的。
+
+| spec | 實作 | 測試 | 結果 |
+|---|---|---|---|
+| `a` 切換看得到的列：沒有全部勾選 → 全部勾選；全部勾選了 → 全部取消 | `action_mark_all`：看 `shown()` 的 key，全部都勾了就 `-=`，否則就 `\|=` | `test_a_marks_every_visible_row_and_toggles_them_off_again`（就是 spec 的 Scenario「切換兩次」） | ✅ |
+| 篩選掉的列，勾選狀態不變 | 只對看得到的 key 做 `-=`／`\|=` | `test_a_does_not_touch_the_rows_the_filter_hides` | ✅ 程式是對的，但測試只守了一個方向（N1） |
+| 空白鍵勾選時游標不動 | `action_mark` 用 `update_cell` | `test_space_marks_without_moving_the_cursor` | ✅ |
+| 標題列的「另有 N 個被篩選掉」跟著更新 | `action_mark_all` 最後呼叫 `show()` → `paint_bar()` | — | ✅ |
+
+### N1（Low）：「全部取消時不動看不到的勾選」這個方向沒有測試
+
+- 我把 `self.marked -= set(keys)` 改成 `self.marked.clear()`（全部取消時，連看不到的也一起清掉），**`test_tui.py` 39 個測試全部照樣通過**。
+- 反方向的 mutation（全選時改成 `self.marked = set(keys)`，把看不到的勾選蓋掉）會被抓到。
+
+也就是說，現有的測試只證明了「篩選之後按 `a`，不會勾到看不到的列」，沒有證明「篩選之後再按 `a` 取消，不會把看不到的勾選清掉」，而後者正是 commit 訊息說的「篩選來回之後，勾選不會變少」。
+
+我在副本裡實測了程式本身：三列全勾 → 篩選到只剩「甲」→ 按 `a` → 剩下的是「乙」「丙」，所以程式是對的。**建議**把這個探測的步驟加成正式的測試。
+
+### N2（Low）：按 `a` 之後，游標會跳回第一列
+
+`action_mark_all` 最後呼叫的是 `self.show()`，沒有帶 `keep`，所以整個表格會重建，游標回到第 0 列。實測：游標在第 2 列，按 `a` 之後變成 0。spec 只規定空白鍵不能移動游標，但「全選之後，游標跑回最上面」一樣會讓使用者失去位置（而且右邊的預覽也會跟著換）。
+
+**建議**：像 `action_mark` 一樣，對看得到的每一列 `update_cell(key, "mark", …)` 之後，再 `paint_bar()`；或者至少用 `self.show(keep=current.key)`。順便加一個斷言：按 `a` 前後，`cursor_row` 不變。
+
+### N3（Low）：預覽區有焦點的時候，`a` 也有作用
+
+`check_action` 沒有列出 `mark_all`，所以它永遠是可用的。空白鍵（`mark`）在預覽區有焦點的時候是停用的，`a` 卻會改左邊清單的勾選，兩個不一致。這和 2.3 的「按鍵列只顯示能用的」一起處理就好：把 `mark_all` 加進 `("mark", …)` 那一組。
