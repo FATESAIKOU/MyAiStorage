@@ -973,3 +973,39 @@ python3 /tmp/agora-it-opencode/probe_assistant.py '{"path": …, "tokens": …}'
    adapter 可以依賴的前提，不然每個 adapter 都會 defensive 地重建一遍。
 2. **§5.4 加一句「一行一個 text part」**：這是 opencode 端 round trip 能成立的關鍵，
    也是畫面上看起來像原對話的原因。
+---
+
+## 互動模式的清單：跨專案列 session（design 5.9，T2／T15）
+
+`opencode session list` 只給**目前這個專案**的 session，而且 CLI 沒有「全部專案」
+的選項（1.18.34 的 `--help` 只有 `--max-count` 與 `--format`）。在沒有 commit 的
+資料夾跑它並不是「列出全部」，只是換了一個未定義的專案——所以這裡**不呼叫它**。
+
+改讀 opencode 自己的 SQLite，**唯讀**開啟：
+`sqlite3.connect("file:<路徑>?mode=ro", uri=True)`，路徑遵守 `XDG_DATA_HOME`，
+預設 `~/.local/share/opencode/opencode.db`（`opencode db path` 印的就是這個）。
+
+**schema 形狀**（形狀來自丟棄的假 HOME 上的一次測量，只記欄位名稱）：
+
+| 表 | 用到的欄位 |
+|---|---|
+| `session` | `id`、`directory`、`title`、`time_created`、`time_updated`（另有 `project_id`、`slug`、`path`、`version`、`parent_id`、`cost`、`tokens_*`、`summary_*`、`time_archived` 等） |
+| `message` | `id`、`session_id`、`time_created`、`time_updated`、`data`（JSON，含 `role`） |
+| `part` | `id`、`message_id`、`session_id`、`time_created`、`time_updated`、`data`（JSON，含 `type`、`text`、`synthetic`） |
+
+清單的 SQL 就兩句：
+
+```sql
+select id, directory, title, time_updated from session order by time_updated desc, id desc
+```
+
+（`pragma table_info(session)` 先確認這四欄都在；不在就回傳空清單並在 stderr 警告
+一行——認不出的 opencode 不是錯誤。）
+
+`last_message(session_id)` 只掃**最後 20 則** `message`，取第一則 `role` 是
+user／assistant 而且有非空 text part 的；`synthetic` 的 part 略過（那是附件，不是
+對話）。回傳文字截到 **2,000 字**。所以預覽永遠不會變成「把整份對話讀進來」。
+
+結果依 `(路徑, mtime_ns, size)` 記憶化：互動模式每次刷新都會再問一次，而檔案沒變
+時回同一份。讀不到檔案、schema 認不出來、或 SQLite 開不起來，都回空清單／`None`，
+不丟例外——唯讀也代表不會誤寫。

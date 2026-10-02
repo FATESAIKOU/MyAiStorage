@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
@@ -36,7 +37,7 @@ import sys
 import tempfile
 import time
 
-from .base import AgentError, Exported, Launch, Turns, agent_cmd, tool_line
+from .base import AgentError, Exported, Launch, Listed, Turns, agent_cmd, tool_line
 
 # Id layout. Fixed width: a truncated ordinal is what made phase 1 import eight
 # messages and get one, silently.
@@ -104,6 +105,61 @@ def _timeout() -> int:
 
 def _summarize_timeout() -> int:
     return _seconds("AGORA_SUMMARIZE_TIMEOUT", DEFAULT_SUMMARIZE_TIMEOUT)
+
+
+#: opencode keeps everything in one SQLite file. `opencode session list` only
+#: shows the current project's sessions and has no flag for the rest, so the
+#: interactive mode reads that file itself - read-only, and only the four columns
+#: the listing needs.
+_DB_DIR = ("opencode", "opencode.db")
+_LIST_COLUMNS = ("id", "directory", "title", "time_updated")
+_LIST_SQL = "select id, directory, title, time_updated from session order by time_updated desc, id desc"
+#: How many of the newest messages to look at for a preview. Reading the whole
+#: transcript to show its last line is what T15 rules out.
+_LAST_SQL = "select id, data from message where session_id=? order by time_created desc, id desc limit ?"
+_LAST_SCAN = 20
+_PARTS_SQL = "select data from part where message_id=? order by time_created desc, id desc"
+_PREVIEW_CHARS = 2000
+
+_warned_schema = False
+_list_cache: tuple[tuple[str, int, int], list[Listed]] | None = None
+
+
+def _data_home() -> Path:
+    """Where opencode keeps its data: XDG_DATA_HOME, else ~/.local/share."""
+    return Path(os.environ.get("XDG_DATA_HOME") or "~/.local/share").expanduser()
+
+
+def _db_path() -> Path:
+    return _data_home().joinpath(*_DB_DIR)
+
+
+def _open_readonly(path: Path) -> sqlite3.Connection | None:
+    """The database, opened so that nothing can be written through it."""
+    if not path.is_file():
+        return None
+    try:
+        return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+
+
+def _warn_schema() -> None:
+    """One line, once: an opencode we do not recognise is not an error to raise."""
+    global _warned_schema
+    if not _warned_schema:
+        _warned_schema = True
+        print("[agora] 這個 opencode 的資料庫結構認不出來，略過未匯入的清單",
+              file=sys.stderr)
+
+
+def _field(blob: str, key: str):
+    """One field out of a JSON blob, or None when it is not the JSON we expect."""
+    try:
+        value = json.loads(blob)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return value.get(key) if isinstance(value, dict) else None
 
 
 def _last_reply(stdout: bytes) -> tuple[str | None, str | None]:
@@ -458,6 +514,74 @@ class OpencodeAgent:
             previous = message_id
         payload = {"info": _session_info(created), "messages": messages}
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    def list_sessions(self) -> list[Listed]:
+        """Every session on this machine, across all projects (design 5.9).
+
+        Read-only, and never `opencode session list`: that only reports the
+        current project. Only the listing columns are read - no transcripts - and
+        the answer is memoised per (path, mtime, size), because the interactive
+        mode asks again on every refresh. Unreadable or unrecognised: empty list.
+        """
+        global _list_cache
+        path = _db_path()
+        try:
+            info = path.stat()
+        except OSError:
+            return []
+        key = (str(path), info.st_mtime_ns, info.st_size)
+        if _list_cache and _list_cache[0] == key:
+            return list(_list_cache[1])
+        rows = self._read_sessions(path)
+        _list_cache = (key, rows)
+        return list(rows)
+
+    def _read_sessions(self, path: Path) -> list[Listed]:
+        connection = _open_readonly(path)
+        if connection is None:
+            return []
+        try:
+            columns = {row[1] for row in connection.execute("pragma table_info(session)")}
+            if not set(_LIST_COLUMNS) <= columns:
+                _warn_schema()
+                return []
+            return [Listed(session_id=session_id, dir=directory or None,
+                           title=title or None, updated_at=_iso(time_updated))
+                    for session_id, directory, title, time_updated
+                    in connection.execute(_LIST_SQL)]
+        except sqlite3.Error:
+            _warn_schema()
+            return []
+        finally:
+            connection.close()
+
+    def last_message(self, session_id: str) -> tuple[str, str] | None:
+        """(role, text) of the newest plain-text turn, as stored; None if there is none.
+
+        Reads the last few messages only, and caps the text at 2,000 characters -
+        the preview pane shows one turn, not a transcript. `synthetic` parts are
+        skipped: they are attachments, not something the session said.
+        """
+        connection = _open_readonly(_db_path())
+        if connection is None:
+            return None
+        try:
+            for message_id, data in connection.execute(_LAST_SQL, (session_id, _LAST_SCAN)):
+                role = _field(data, "role")
+                if role not in ("user", "assistant"):
+                    continue
+                for (blob,) in connection.execute(_PARTS_SQL, (message_id,)):
+                    if _field(blob, "type") != "text" or _field(blob, "synthetic") is True:
+                        continue
+                    text = _field(blob, "text")
+                    if isinstance(text, str) and text.strip():
+                        return role, text.strip()[:_PREVIEW_CHARS]
+        except sqlite3.Error:
+            _warn_schema()
+            return None
+        finally:
+            connection.close()
+        return None
 
     def summarize(self, prompt: str, workdir: Path) -> tuple[str, str | None]:
         """One headless turn with every tool denied; returns (text, model).

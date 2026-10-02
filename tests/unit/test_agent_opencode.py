@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 
@@ -773,3 +774,155 @@ def test_a_reply_in_several_text_parts_is_kept_whole():
               {"type": "text", "sessionID": "ses_x", "part": {"messageID": "msg_a", "text": "第二段"}}]
     stdout = "\n".join(json.dumps(e, ensure_ascii=False) for e in events).encode()
     assert oc._last_reply(stdout) == ("ses_x", "第一段\n\n第二段")
+
+
+# --- the interactive listing (design 5.9, T2/T15) --------------------------
+
+
+@pytest.fixture
+def store_db(tmp_path, monkeypatch):
+    """A fake opencode SQLite, built here rather than by the real binary.
+
+    Only the tables and columns the listing touches, with the shapes measured
+    from a throwaway opencode on a fake HOME (docs/spike/opencode.md).
+    """
+    home = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_DATA_HOME", str(home))
+    monkeypatch.setattr(oc, "_list_cache", None)     # the memo is process-wide
+    monkeypatch.setattr(oc, "_warned_schema", False)
+    path = home / "opencode" / "opencode.db"
+    path.parent.mkdir(parents=True)
+    db = sqlite3.connect(path)
+    db.executescript("""
+        create table session (id text primary key, directory text not null,
+                             title text not null, time_created integer not null,
+                             time_updated integer not null);
+        create table message (id text primary key, session_id text not null,
+                              time_created integer not null,
+                              time_updated integer not null, data text not null);
+        create table part (id text primary key, message_id text not null,
+                           session_id text not null, time_created integer not null,
+                           time_updated integer not null, data text not null);
+    """)
+    return db, path
+
+
+def _add_session(db, session_id, directory, title, updated, turns=()):
+    db.execute("insert into session values (?,?,?,?,?)",
+               (session_id, directory, title, updated, updated))
+    for position, (role, parts) in enumerate(turns):
+        message_id = f"{session_id}-m{position}"
+        db.execute("insert into message values (?,?,?,?,?)",
+                   (message_id, session_id, position, position,
+                    json.dumps({"role": role, "time": {"created": position}})))
+        for n, part in enumerate(parts):
+            db.execute("insert into part values (?,?,?,?,?,?)",
+                       (f"{message_id}-p{n}", message_id, session_id, n, n,
+                        json.dumps(part, ensure_ascii=False)))
+    db.commit()
+
+
+def test_list_sessions_covers_every_project(store_db):
+    db, _ = store_db
+    _add_session(db, "ses_old0000000000000a", "/tmp/proj-one", "舊的", 1000)
+    _add_session(db, "ses_new0000000000000b", "/tmp/proj-two", "新的", 2000)
+
+    listed = oc.ADAPTER.list_sessions()
+    assert [row.session_id for row in listed] == ["ses_new0000000000000b", "ses_old0000000000000a"]
+    assert listed[0].dir == "/tmp/proj-two"
+    assert listed[0].title == "新的"
+    assert listed[0].updated_at == "1970-01-01T00:00:02Z"     # ms -> RFC 3339 UTC
+    assert all(isinstance(row.dir, str) for row in listed)
+
+
+def test_list_sessions_writes_nothing(store_db):
+    db, path = store_db
+    _add_session(db, "ses_x0000000000000001", "/tmp/p", "t", 1000)
+    db.close()
+    before = (path.stat().st_mtime_ns, path.stat().st_size)
+    oc.ADAPTER.list_sessions()
+    assert (path.stat().st_mtime_ns, path.stat().st_size) == before
+
+
+def test_list_sessions_is_memoised_per_mtime(store_db):
+    db, path = store_db
+    _add_session(db, "ses_x0000000000000001", "/tmp/p", "t", 1000)
+    db.close()
+    first = oc.ADAPTER.list_sessions()
+    assert oc.ADAPTER.list_sessions() is not first      # a copy, not the cache
+    assert [r.session_id for r in oc.ADAPTER.list_sessions()] == [r.session_id for r in first]
+    db = sqlite3.connect(path)                          # touching the file ends the memo
+    _add_session(db, "ses_y0000000000000002", "/tmp/p", "u", 3000)
+    db.commit()
+    db.close()
+    assert len(oc.ADAPTER.list_sessions()) == 2
+
+
+def test_list_sessions_without_a_database_is_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "nothing-here"))
+    monkeypatch.setattr(oc, "_list_cache", None)
+    assert oc.ADAPTER.list_sessions() == []
+
+
+def test_list_sessions_with_an_unknown_schema_is_empty(store_db, capsys, monkeypatch):
+    db, path = store_db
+    db.executescript("drop table session; create table session (id text primary key);")
+    db.commit()
+    db.close()
+    assert oc.ADAPTER.list_sessions() == []
+    assert "資料庫結構認不出來" in capsys.readouterr().err
+
+
+def test_list_sessions_follows_xdg_data_home(store_db, tmp_path, monkeypatch):
+    db, path = store_db
+    _add_session(db, "ses_x0000000000000001", "/tmp/p", "t", 1000)
+    db.close()
+    assert oc._db_path() == path
+    monkeypatch.delenv("XDG_DATA_HOME")
+    assert oc._db_path() == Path("~/.local/share").expanduser() / "opencode" / "opencode.db"
+
+
+def test_last_message_returns_the_newest_text_turn(store_db):
+    db, _ = store_db
+    _add_session(db, "ses_x0000000000000001", "/tmp/p", "t", 1000, turns=[
+        ("user", [{"type": "text", "text": "ZZ 問題"}]),
+        ("assistant", [{"type": "reasoning", "text": "ZZTHINK"},
+                       {"type": "text", "text": "ZZ 回答"}]),
+        ("user", [{"type": "text", "text": "ZZ 再問"}]),
+        ("assistant", [{"type": "step-start"}, {"type": "text", "text": "ZZ 最後"}]),
+    ])
+    assert oc.ADAPTER.last_message("ses_x0000000000000001") == ("assistant", "ZZ 最後")
+
+
+def test_last_message_skips_synthetic_parts(store_db):
+    """T15: a synthetic part is an attachment, not something the session said."""
+    db, _ = store_db
+    _add_session(db, "ses_x0000000000000001", "/tmp/p", "t", 1000, turns=[
+        ("user", [{"type": "text", "text": "ZZ 真的話"}]),
+        ("user", [{"type": "text", "synthetic": True, "text": "ZZ 附件內容"},
+                  {"type": "text", "synthetic": True, "text": "ZZ 附件內容 2"}]),
+    ])
+    assert oc.ADAPTER.last_message("ses_x0000000000000001") == ("user", "ZZ 真的話")
+
+
+def test_last_message_is_capped(store_db):
+    db, _ = store_db
+    _add_session(db, "ses_x0000000000000001", "/tmp/p", "t", 1000, turns=[
+        ("assistant", [{"type": "text", "text": "ZZ" + "長" * 5000}]),
+    ])
+    role, text = oc.ADAPTER.last_message("ses_x0000000000000001")
+    assert role == "assistant"
+    assert len(text) == oc._PREVIEW_CHARS == 2000
+
+
+def test_last_message_of_an_unknown_or_empty_session_is_none(store_db):
+    db, _ = store_db
+    _add_session(db, "ses_x0000000000000001", "/tmp/p", "t", 1000)
+    db.commit()
+    assert oc.ADAPTER.last_message("ses_nope") is None
+    assert oc.ADAPTER.last_message("ses_x0000000000000001") is None
+
+
+def test_last_message_without_a_database_is_none(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "nothing-here"))
+    assert oc.ADAPTER.last_message("ses_x") is None
