@@ -50,7 +50,7 @@ class FakeAgent:
         self.prompts.append((prompt, workdir))
         if self.answers:
             return self.answers.pop(0), "fake-model"
-        first = prompt.split(cli.SUMMARY_PROMPT, 1)[1].strip().splitlines()
+        first = prompt.split("以下是 Session 的內容：", 1)[1].strip().splitlines()
         return "```json\n" + json.dumps({"purpose": f"處理：{first[1] if len(first) > 1 else ''}",
                                          "decisions": [{"decision": "先列步驟", "reason": "使用者要求"}],
                                          "progress": "列完了", "open_questions": []},
@@ -182,7 +182,9 @@ def test_a_bad_answer_is_regenerated_then_gives_up(env, capsys):  # design v7: s
     env.answers = ["不是 JSON", json.dumps({"purpose": "p"}), good]          # a: two bad, then good
     code, merged, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
     assert code == 0 and len(env.prompts) == 4
-    assert "上一次的輸出不合格" in env.prompts[1][0] and "required" in env.prompts[2][0]
+    retried = env.prompts[1][0]
+    assert retried.index("上一次的輸出不合格") < retried.index("以下是 Session 的內容")   # never inside the session
+    assert "required" in env.prompts[2][0]
     env.answers = ["{}", "{}", "{}"]
     code, out, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
     assert code == 2 and out == "" and "連續 3 次" in err

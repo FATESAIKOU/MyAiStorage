@@ -272,10 +272,13 @@ def _summary_dir(paths: store.Paths) -> Path:
 
 def _section_of(agent: Agent, text: str, workdir: Path) -> tuple[dict, str | None]:
     """One source's summary as schema-checked JSON; regenerated on a bad answer (design 5.3)."""
-    prompt, error = f"{SUMMARY_PROMPT}\n\n{text}", ""
+    error = ""
     for _ in range(SUMMARY_TRIES):
-        answer, model = agent.summarize(prompt + (f"\n\n上一次的輸出不合格：{error}。請重新輸出。" if error else ""),
-                                        workdir)
+        # The retry note goes before the session and is marked as agora's, or the
+        # model writes it into the summary as something the user said.
+        retry = (f"（agora 的說明，不是 Session 的內容：上一次的輸出不合格：{error}。請重新輸出。）\n\n"
+                 if error else "")
+        answer, model = agent.summarize(f"{SUMMARY_PROMPT}\n\n{retry}以下是 Session 的內容：\n\n{text}", workdir)
         answer = re.sub(r"^```(?:json)?\s*|\s*```$", "", answer.strip())
         try:
             section = json.loads(answer)
