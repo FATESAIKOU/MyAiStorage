@@ -6,6 +6,8 @@
 
 | 編號 | 標題 | 狀態 | 負責 | 備註 |
 |---|---|---|---|---|
+| T4 | 精簡兩個轉接器、放寬行數目標 → [需求單](T4-slim-adapters.md) | 待轉成 change（排在 T3 之後） | — | 使用者 10-03 決定「先精簡，再放寬一點」 |
+| T3 | 寫入先存本機、背景上傳、少連 Drive → [需求單](T3-local-first-writes.md) | 待轉成 change（T2 歸檔後） | — | 使用者 10-03 決定：P1 改成先存本機；慢的問題選 B＋C；A 開成 [issue #11](https://github.com/FATESAIKOU/MyAiStorage/issues/11) 觀察 |
 | T2 | 互動模式：多選、全選、進度、中斷、按鍵整理 → change [`tui-batch-actions`](../../openspec/changes/tui-batch-actions/) | 待歸檔：功能、4.1b、T2-final 的 W1～W3／S3 都修完；PM 在 pane 用假資料試過（`T2-pm-run.md`，全部的按鍵路徑都正常，Q1～Q4 小修正排成 4.2b）；review 確認修正中（→ `docs/review/T2-archive.md`） | impl1 | review T2-sec1～3 的意見都已修 |
 | T1 | 指令模式：pull／push、批次動作的進度與續傳 → change [`command-batch-actions`](../../openspec/changes/archive/2026-10-03-command-batch-actions/)（已歸檔，規格在 `openspec/specs/batch-commands`、`session-sync`） | **完成（10-03 歸檔）**，等本人驗收（1-5）；P1 與行數額度等使用者決定 | impl1、impl2 | review T1-archive、T1-4.2d、final-checks 都沒有 High；PM 實跑 `T1-pm-run.md` |
 | T0 | e2e 整合測試改成「continue 寫回原本的 Session」 | 完成 | impl1（3011d15）、impl2（745e5e8） | 兩邊都實跑過整合測試 |
@@ -22,17 +24,17 @@
 | 4 | T2 轉成 change（需求已定，見 T2-tui-batch.md），review 看 specs | PM 寫、review 看 | 完成（提前做，和 T1 收尾並行） |
 | 5 | T2 實作與測試 | 隊員 | 完成，剩 T2-final 的修正 |
 | 6 | T2 PM 用假資料試、review 審、歸檔 | PM、review | PM 試過、review 審完；剩 4.2b 與修正確認 |
-| 7 | 3-1 更新 MyBrain PR #151 | PM | 等 6 |
+| 7 | 3-1 更新 MyBrain（#151 已合，改開新的 PR） | PM | 草稿寫好、驗證通過，等 T2 歸檔後送出 |
 | — | 等使用者回來：T1 驗收（1-5）、T2 真實資料試用（2-4）、合併 PR | 使用者 | 驗收步驟草稿在 `docs/review/acceptance-draft.md`（review 寫，T2 做完後更新「已知問題」再換掉 docs/acceptance.md） |
 
 隊員的模型：impl1、impl2 用 opencode（Space Bunny Free → Muse Spark 1.3 Free → ollama-cloud DeepSeek V4.1 Flash max，用完往下換）；impl3（`w2:p14`）、impl4（`w2:p15`）是 agy，額度 0%：Claude Opus 約 10-03 10:00 恢復、Gemini 約 10-03 18:05 恢復，恢復就換上去接主要的實作。
 
 **等使用者確認的事**（不擋進度，先照 PM 的判斷做）：
 - T2 的「勾選但被篩選掉的列不算進動作」（review V4，PM 選了比較安全的做法）。
-- **行數額度（要使用者決定）**：04:30 的 HEAD 是 **3,413 行**（T2 的功能都做完了，只剩測試；去重複已做）。T1 剛完成時是 3,121 行，超過 2,900 行的目標 221 行（review `docs/review/T1-size.md`）。去重複可省約 75 行（impl2 在做），T2 還會再加一些，做完預估約 3,050～3,150 行。兩個轉接器還能再省約 85 行（`docs/review/adapters-size.md`，不拿掉 export 的重試是 65 行）。兩項都做完約 2,960 行，仍超過約 60 行，T2 還會再加。選項：(a) 放寬額度到 3,300；(b) 去重複＋精簡轉接器，再放寬一點；(c) 接受現在的大小。PM 建議 (b)。在使用者決定前，只做去重複（不改行為），轉接器的精簡先不動。
-- **T1 PM 驗收 P1**：在這台 import 的 Session 本機只有 `session.md`，別台刪掉之後 `push --not-exist-upload` 會因為本機沒有原始檔而拒絕，實際上救不回來（`docs/tickets/T1-pm-run.md`）。review 的估算（`docs/review/P1-options.md`）：這台 import、continue、merge 出來的 Session 都救不回來，只有別台寫、這台 pull 過的救得回來；另外鏡像裡被取代的舊原始檔從來不會被清掉。選項 (a) 寫完後把原始檔留在本機鏡像（約 8～13 行）；(b) 只改拒絕訊息（約 4～6 行）；(c) 維持。PM 建議 (a)，順手清掉鏡像裡被取代的舊原始檔。決定之後開成一個新的 change，不擋 T1 歸檔。
-- T1 的「continue 進行中、原本的 Session 被別台刪掉」：agent 結束時不寫回、改存成一個新的 Session，避免丟掉這次的對話（review T1-sec3 M1）。
-- **6 個孤兒 `opencode run` 行程**（parent 是 1，10-02 00:17～03:19 開始，提問是整合測試的那幾句，例如 `ses_C2PROJ2DIRTEST01`）：impl2 回報、應是之前幾輪整合測試沒收乾淨的。PM 要停掉時被 auto mode 擋下（停掉行程算「干擾工作負載」），留給使用者決定；隊員也不要清。看的方式：`pgrep -fl "opencode run"`。
+- T1 的「continue 進行中、原本的 Session 被別台刪掉」：另存成一個新的 Session（review T1-sec3 M1）。
+- **6 個孤兒 `opencode run` 行程**：使用者 10-03 說自己停（`pgrep -fl "opencode run"` 確認後 `pkill -f "opencode run -m opencode/space-bunny-free"`）。
+
+**10-03 使用者已決定**：行數 → T4；P1（救不回來）→ T3「先存本機再上傳」；import／delete 太慢 → T3 的 B＋C，A 開 issue #11 觀察。
 
 規則：不合併任何 PR；不碰使用者的真實 session；需要使用者決定的事先停在那一項、寫進這裡，做其他不受影響的項目。
 
