@@ -1,3 +1,5 @@
+**修正確認（2026-10-03，見最後一節）：有 1 個 High（F1：離線時 continue 一個已經標成雲端沒有的 Session，會把它寫回雲端）。**
+
 **沒有 High。** 有 3 個 Medium：寫回之前的「雲端沒有」判斷最舊可能是 5 分鐘前的（M1）、`pull --not-exist-delete` 對 agent 的 id 會**無條件**刪掉快取（M2）、索引版本重建只有在「索引是空的」時才會觸發（M3）。
 
 # Review：openspec change command-batch-actions 第 3 節（雲端沒有的 Session）
@@ -96,3 +98,56 @@ else:
 ## 這次讀過、跑過的東西
 
 `git show` 7 個 commit 的 `src`（`store.py` 的 `cloud_missing`／`mark_missing`／`cloud_has`／`continuing`／`forget_local`／`delete_session`、`cache.py` 的 `--not-exist-delete`／`--not-exist-upload`、`cli.py` 的 `_need_in_cloud` 和它被呼叫的位置），以及測試的名稱；`tests/unit/test_store_more.py`、`test_cache.py`、`test_store.py` 裡和標記有關的那幾個測試；tasks.md 的第 3 節。`git archive HEAD` 取出副本，`PYTHONPATH=<副本>/src .venv/bin/python -m pytest -q tests/unit` → 361 passed。沒有跑整合測試，沒有碰 Drive，沒有讀任何真實的 Session，也沒有執行不帶參數的 `agora`。
+
+## 修正確認（2026-10-03）
+
+對象：`5eab055`（M1～M3、L4）、`738008d`（design 5.10）。在 `git archive 5eab055` 取出的副本跑單元測試：**373 passed**。repro 只在 scratchpad 的副本裡加探測測試，用的是 fake rclone 和 fake agent，repo 沒有動。沒有跑整合測試，沒有碰 Drive，也沒有讀任何真實的 Session。
+
+> 另外：現在的 HEAD `9e44286`（T2 1.6）在 `git archive HEAD` 的副本上有 **10 個單元測試失敗**。原因是它把 `store.index_mirror` 拿掉了、`_put_file` 改名成 `index_file`，可是 `cache.py` 還在呼叫 `index_mirror`，`rebuild_from_mirror` 也還在呼叫 `_put_file`，所以 M3 的重建在 HEAD 上是壞的。工作目錄裡的 `cache.py`／`store.py` 有別人還沒 commit 的改動，看起來正在修；我沒有動。
+
+| 項目 | 結果 |
+|---|---|
+| M1 寫回前直接問 Drive | ⚠️ 方向對（continue 和 edit 開始前、continue 結束後都會問；中途被刪就另存成 Y，parents 指向 X），但有 **F1（High）**、F2～F4，見下 |
+| M2 agent id 先確認真的沒了 | ✅ 還在就照常 pull，測試也有；F5（Low～Medium）：清單讀不到的時候會被當成「沒了」 |
+| M3 版本不同一律從鏡像重建 | ✅ 在 `Index.__init__` 裡偵測到版本不同就重建，「db 被刪掉」也會走到這條路（新檔的 user_version 是 0）；測試寫的就是 `recover_pending` 會先寫一筆的那種情況 ✅（HEAD 上壞了，見上面的註記） |
+| L4 「原本的標記不變」 | ✅ 從已經有標記開始，離線和 `sessions/` 不見都測到了 |
+| L4 「outbox 不被標記」 | ❌ 這個測試**沒有測到**：sync 第一次標記的時候，那一筆還沒進索引，本來就不可能被標；我把 `u not in staged` 拿掉做 mutation，store／cache／cli 的測試全部照樣通過（F6） |
+| 738008d design 5.10 和 spec | ✅ 三個 Requirement 都一致，只有 F7 那兩處 |
+
+### F1（High）：離線時 continue 一個**已經標成雲端沒有**的 Session，會把它寫回雲端
+
+`5eab055` 把 continue 和 edit 原本的 `_need_in_cloud(index, id)`（看標記）**換成了** `_refuse_if_gone`（直接問 Drive），而 `_lost_in_cloud` 遇到離線會回傳 False（「離線不算刪掉」）。所以只要標記已經在了（完整同步過，知道 X 被別台刪掉了）、現在離線、而且 X 的原始檔已經在本機（例如之前 `show --raw` 過，或接續過）：
+
+```
+continue X → 沒有被拒絕，agent 打開 → 存進 outbox（exit 3）→ 恢復連線後隨便一個指令 → X 回到 Drive
+```
+
+我實測過（探測測試 `PROBE-OFFLINE-CONTINUE 3 launched: True outbox has X: True` → `PROBE-RESURRECTED True`）。這正是 spec「接續被別台刪掉的：exit 1、agent 沒有被打開」要擋的事，也正是 Q1／K1 那種「沒有人決定，別台的刪除就被撤銷了」；而且在這個修正**之前**是會被擋下來的，所以是一個回歸。edit 在同樣的條件下，如果 Session 沒有原始檔，也一樣會寫回去。
+
+**修法**：兩個都檢查——`_need_in_cloud(index, id)`（標記說沒了就拒絕）**加上** `_refuse_if_gone`（Drive 說沒了就拒絕）。`_finish` 也一樣：標記說沒了，或 Drive 說沒了，就另存成 Y。補一個測試：先標記，再 `FAKE_RCLONE_FAIL=lsjson`，然後 continue → exit 1，agent 沒有被打開。
+
+### F2（Medium）：Drive 上沒有 `sessions/` 時是 TypeError
+
+`_lost_in_cloud` 寫的是 `ulid not in store.Drive(paths).list_sessions()`，可是 `list_sessions()` 在找不到 `sessions/` 時回傳的是 **None**（N12），所以會丟出 `TypeError`；而它只接 `StoreError`。實測：edit 得到 exit 2，「非預期的錯誤：TypeError: argument of type 'NoneType' is not iterable」。如果發生在 `_finish` 裡，pending 會留著，每一個指令的 `recover_pending` 都會再失敗一次，一直到 `sessions/` 回來為止。**修法**：`remote is None` 時當成「不知道」，回傳 False，和 sync 遇到這種情況「標記不動」是同一個判斷；再配合 F1 的「也看標記」。
+
+### F3（Medium）：還在 outbox 的 Session 會被當成「別台刪掉了」
+
+標記那一邊會排除 outbox（Q2），可是 `_lost_in_cloud` 沒有排除。如果 X 的上傳一直沒成功（離線時匯入，或者上傳不穩），而 `_sync_for` 因為 5 分鐘內同步過被節流、沒有先推 outbox，那麼 `continue X`／`edit X` 就會被拒絕，訊息是「雲端沒有（別台機器刪掉了）」。實測：`PROBE-OUTBOX 1 in outbox: True | … 雲端沒有（別台機器刪掉了）`。在 `_finish` 裡，同樣的情況會讓 X 被另存成一個 Y。**修法**：`ulid in store.outbox_ulids(paths)` 就回傳 False。
+
+### F4（Medium）：在**這台機器上**接續的途中刪掉 X，結束時會用同一個 id 把 X 寫回去
+
+`_finish` 裡 `lost = bool(hdr) and …`：只有 hdr 還在的時候才會問 Drive。`cmd_delete` 不檢查 `continuing`，所以在另一個終端機（或互動模式）`delete X --yes` 之後，索引裡已經沒有 X，`_finish` 就會走 `elif not hdr`，把 `hdr["id"] = X` 當成 import 存回去，X 就這樣回到 Drive 了。實測：`on drive after delete: False` → `on drive after finish: True`。spec 的新 scenario 說的是「另一台機器刪掉」，但「X 維持被刪的狀態」這個承諾，這條路一樣要守住。**修法**：(a) `cmd_delete` 遇到 `store.continuing` 的就拒絕（「正在接續，等它結束再刪」），和 `pull --not-exist-delete` 的作法一樣；(b) `elif not hdr` 也改成另存一個新的 Session（parents 用 pending 記錄裡的 `parent`），不要沿用 X 的 id。
+
+### 其他
+
+| # | 嚴重度 | 問題 | 建議 |
+|---|---|---|---|
+| F5 | Low～Medium | M2：opencode 的 `list_sessions` 在 db 不在、認不出結構、或 sqlite 出錯時回傳 `[]`，claude 在 `projects/` 不在時也回傳 `[]`，所以「讀不到 agent」被當成「agent 那邊什麼都沒有」，`--not-exist-delete` 就會把那個 agent 的快取全部刪掉 | 清單是空的、但快取裡有東西時，就當成「不知道」，不要刪（印一行說明） |
+| F6 | Low | 「outbox 不被標記」的測試沒有測到（見上面的 mutation） | 先 `store.remember(paths, folder)`（或連續 sync 兩次，而且上傳都失敗），再斷言 `missing_in_cloud() == []` |
+| F7 | Low | 738008d 的 design 5.10 寫在 5eab055 **之前**，所以沒有 PM 的 M1 決定；design 5.4 第 6 步還是寫「寫回原本那個 agora Session（同一個 id）」，沒有例外。另外 spec 和 design 都寫「import 的更新路徑……拒絕」，同時又寫「import……建一個新的 Session」，實作是後者 | 5.4 第 6 步加上「接續途中原本的被刪掉了（不論是別台還是這台），就另存一個新的 Session，parents 指向它」；把 import 那句統一成「不更新它，改建一個新的」 |
+| F8 | Low | edit 只在開始前檢查一次，`$EDITOR` 開著的這段時間沒有再檢查（tasks 3.7 寫的是 continue 和 edit 都檢查兩次） | 存檔前再呼叫一次 `_refuse_if_gone` |
+| F9 | Low | 一次 continue 要做兩次完整的 `list_sessions()`（會遞迴列出所有 session，要好幾秒）；docstring 說「只問這一個資料夾」，這不正確。用 `list_one` 不行，因為「找不到」不能信（S1-4b），所以完整列檔是對的選擇，但說明要改 | 修正 docstring；可以把結果交給接下來的 sync 重用 |
+| F10 | Low | 另存成 Y 之後，如果在 `_save` 和 `pending.unlink()` 之間當掉，下一次 `recover_pending` 會再另存一個 Y′（每次都是新的 ULID），結果有兩份 | 把 Y 的 id 在第一次決定的時候就寫進 pending 記錄，重跑時沿用 |
+| F11 | Low | `_finish` 遇到離線時照常寫回 X（因為不知道 X 被刪了），之後推 outbox 的時候也沒有再檢查，所以「接續途中被刪、結束的時候剛好離線」這種情況還是會讓 X 復活 | 在 outbox 那一筆加上「這是更新既有的 X」的註記，`push_outbox` 推之前用列檔確認 X 還在，不在就改成另存（可以和 F1 一起排進 T1 的收尾，或者在 design 裡寫明這是已知的窗口） |
+
+**結論**：M2、M3 修對了，L4 的第一個測試也對。M1 修對了 PM 決定的那一半（中途被別台刪掉就另存 Y，測試也有），但把「看標記」換成了「只問 Drive」，造成了 F1 這個回歸（High）；F2～F4 是這個新寫法的三個邊界。建議先修 F1～F4 再驗收。
