@@ -291,9 +291,11 @@ def _upload_checked(drive: Drive, folder: Path, ulid: str, raw: dict,
     """
     if uploaded_raw:
         drive.upload(folder / raw["file"], ulid, raw["file"])
+        _fault("after-raw-upload")        # crash between the two uploads (AGORA_TEST_FAULT)
     elif raw.get("file"):
         warn(f"{ulid} 標頭指到的 {raw['file']} 本機沒有{tail}")
     drive.upload(folder / "session.md", ulid, "session.md")
+    _fault("after-session-upload")
     remote = drive.list_one(ulid)
     if remote.get("session.md") != md5_file(folder / "session.md"):
         raise StoreError(f"{ulid} 的 session.md 在 Drive 上的 md5 不符{tail}")
@@ -307,11 +309,6 @@ def push_one(drive: Drive, folder: Path) -> None:
     ulid = folder.name
     hdr = read_entry(folder)
     raw = h.agora_of(hdr).get("raw") or {}
-    if raw.get("file"):
-        drive.upload(folder / raw["file"], ulid, raw["file"])
-        _fault("after-raw-upload")
-    drive.upload(folder / "session.md", ulid, "session.md")
-    _fault("after-session-upload")
     remote = _upload_checked(drive, folder, ulid, raw, bool(raw.get("file")), "，留在 outbox")
     for name in remote:
         if name.startswith("raw-") and name != (raw or {}).get("file"):

@@ -52,10 +52,13 @@ def _save(paths, hdr, body="## user\n把 CSV 轉成 Markdown 表格\n", raw=b'{"
     return hdr["id"].split(":", 1)[1]
 
 
-def test_raw_uploaded_before_session_md(remote):  # U-ST-01, U-ST-02
+def test_raw_uploaded_before_session_md(remote):  # U-ST-01, U-ST-02, review D1
     paths = store.Paths.from_env()
     ulid = _save(paths, _header())
     uploads = [c for c in calls(remote) if "copyto" in c]
+    # once each: `push_one` used to upload both files itself and then again inside
+    # `_upload_checked`, so every save sent everything twice (D1).
+    assert len(uploads) == 2
     assert uploads[0][-1].endswith(".json") and uploads[-1][-1].endswith("session.md")
     hdr, _ = h.split_document((remote / "agora" / "sessions" / ulid / "session.md").read_text())
     raw_path = remote / "agora" / "sessions" / ulid / hdr["agora"]["raw"]["file"]
@@ -225,6 +228,17 @@ def test_cold_start_downloads_in_one_batch(remote):  # docs/perf.md
     assert sum(1 for c in new_calls if "copy" in c and "--files-from" in c) == 1
     assert not any("copyto" in c and "session.md" in c[-1] for c in new_calls if c[-1].startswith("/"))
     assert len(index.known()) == 3
+
+
+def test_a_session_without_a_raw_uploads_only_session_md(remote):  # review D1
+    """One file in, one copyto out - the other half of D1's count."""
+    paths = store.Paths.from_env()
+    folder = store.stage(paths, _header(), "## user\n沒有原始檔\n", None)
+    ulid = folder.name
+    store.push_one(store.Drive(paths), folder)
+    uploads = [c for c in calls(remote) if "copyto" in c]
+    assert len(uploads) == 1 and uploads[0][-1].endswith("session.md")
+    assert (remote / "agora" / "sessions" / ulid / "session.md").is_file()
 
 
 def test_deleting_a_session_drive_already_lost_still_finishes(remote):  # review S1-4
