@@ -805,3 +805,52 @@ def test_merge_reads_its_sources_from_top_to_bottom():
                     break
             assert app._last_spawned[0][2:5] == order
     _run(go)
+
+
+def test_a_marks_every_visible_row_and_toggles_them_off_again():
+    """spec 2.2: nothing marked -> all marked -> none marked."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("a")
+            await pilot.pause()
+            assert app.marked == {r.key for r in app.shown()}
+            await pilot.press("a")
+            await pilot.pause()
+            assert app.marked == set()
+    _run(go)
+
+
+def test_a_does_not_touch_the_rows_the_filter_hides():
+    """spec: a hidden row's mark is not changed, so it is still there when it comes back."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await _filter_to(pilot, "甲")
+            await _wait(lambda: len(app.shown()) == 1, pilot)
+            await pilot.press("a")
+            await pilot.pause()
+            assert app.marked == {r.key for r in app.rows["agora"] if r.cells[1] == "甲"}
+            await pilot.press("slash", "backspace", "enter")  # clear the filter
+            await _wait(lambda: len(app.shown()) == 3, pilot)
+            await pilot.press("a")
+            await pilot.pause()
+            assert app.marked == {r.key for r in app.rows["agora"]}
+    _run(go)
+
+
+def test_space_marks_without_moving_the_cursor():
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            before = app.query_one("#table").cursor_row
+            await pilot.press("space")
+            await pilot.pause()
+            assert app.query_one("#table").cursor_row == before
+    _run(go)

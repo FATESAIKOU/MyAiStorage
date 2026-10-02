@@ -463,6 +463,7 @@ class AgoraApp(App):
         Binding("tab", "next_tab", "換頁", priority=True),
         Binding("shift+tab", "toggle_focus", "左右", priority=True),
         Binding("space", "mark", "勾選"),
+        Binding("a", "mark_all", "全選／全不選"),
         Binding("enter", "primary", "接續／匯入", priority=True),   # the table would take it for itself
         Binding("m", "merge", "合併"),
         Binding("e", "edit", "改標頭"),
@@ -910,6 +911,22 @@ class AgoraApp(App):
                                                   "每個來源叫一次 AI；內容會送到那個 agent 的模型供應商"))
         if pick is not None:
             await self.act("合併", argv_for("merge", rows, ("opencode", "claude")[pick], None)[0])
+
+    def action_mark_all(self) -> None:
+        """`a`: mark every row on screen, or unmark them if they all are.
+
+        Only the visible ones: a row the filter hides keeps whatever state it was
+        left in (spec「全選切換」), so filtering back and forth does not quietly
+        unmark what was marked on purpose.
+        """
+        keys = [r.key for r in self.shown()]
+        if not keys:
+            return
+        if all(key in self.marked for key in keys):
+            self.marked -= set(keys)
+        else:
+            self.marked |= set(keys)
+        self.show()
 
     def action_edit(self) -> None:
         row = self.current()
