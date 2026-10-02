@@ -504,7 +504,13 @@ def test_concurrent_recovery_makes_one_session(env, capsys, tmp_path, claude_env
     procs = [cli_child("show", "session", parent), cli_child("show", "session", parent)]
     for proc in procs:
         assert proc.wait(timeout=120) == 0
-    assert (tmp_path / "remote" / "agora" / "sessions" / record["agora_id"].split(":")[1]).is_dir()
+    # One session, not two (C3), and *not* under the id in the record: that session
+    # was never here, so the work becomes a session of its own pointing at the parent
+    # (F4) instead of inventing agora:<a random ULID> on Drive.
+    made = [u for u in remote_sessions(tmp_path) if u != parent.split(":")[1]]
+    assert len(made) == 1
+    hdr = store.Index(paths()).header(made[0])
+    assert [p["id"] for p in hdr["agora"]["parents"]] == [parent]
     assert not list(paths().pending.glob("*.json"))
 
 

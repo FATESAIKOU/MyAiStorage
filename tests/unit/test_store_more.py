@@ -207,6 +207,8 @@ def test_a_session_in_the_outbox_is_not_marked(remote, monkeypatch, capsys):  # 
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")       # the upload fails, the listing does not
     capsys.readouterr()
     assert ulid in store.outbox_ulids(paths)
+    store.remember(paths, folder)      # F6: it has to be in the index, or there is nothing to mark
+    assert ulid in store.Index(paths).known()
     assert store.sync(paths).missing_in_cloud() == []
     assert ulid in store.outbox_ulids(paths)               # still staged, still not marked
     monkeypatch.delenv("FAKE_RCLONE_FAIL")

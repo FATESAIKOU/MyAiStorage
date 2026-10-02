@@ -973,6 +973,43 @@ def test_continue_and_edit_ask_drive_even_right_after_a_sync(env, capsys):
     assert code == 1 and "雲端沒有" in err
 
 
+def test_continue_of_a_marked_session_is_refused_even_offline(env, capsys, monkeypatch):
+    """F1: the marker already said Drive lost it. Being offline must not turn that
+    into a yes - otherwise the outbox brings the session back on the next push."""
+    a, _ = _lost_in_the_cloud(capsys)               # marked: another machine deleted it
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "lsjson")   # and now we cannot even ask
+    code, _, err = run(capsys, "continue", "session", a, "--agent", "opencode")
+    assert code == 1 and "雲端沒有" in err
+    assert not env.launched, "the agent must not be opened"
+    code, _, err = run(capsys, "edit", "session", a, "--header", "title=改了")
+    assert code == 1 and "雲端沒有" in err
+
+
+def test_a_session_in_the_outbox_is_not_taken_for_deleted(env, capsys, monkeypatch):
+    """F3: ours, not up yet. A throttled sync may not have pushed it, but that is
+    not another machine's delete."""
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = a.split(":")[1]
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")     # the upload keeps failing
+    store.stage(paths, store.Index(paths).header(ulid), "## user\n改過了\n", None)
+    assert ulid in store.outbox_ulids(paths)
+    code, _, err = run(capsys, "edit", "session", a, "--header", "title=改了")
+    assert code != 1 or "雲端沒有" not in err, "an unuploaded session is not a deleted one"
+
+
+def test_delete_refuses_a_session_that_is_being_continued(env, capsys):
+    """F4: deleting it now would only make `_finish` save the result elsewhere."""
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    _, lock = cli._write_pending(paths, {"agora_id": a, "agent": "opencode", "agent_session_id": "ses_x",
+                                         "dir": "/tmp", "before_count": 1, "parent": {"id": a}})
+    code, _, err = run(capsys, "delete", "session", a, "--yes")   # the lock keeps it in flight
+    assert code == 1 and "正在接續" in err
+    assert store.Index(paths).header(a.split(":")[1]) is not None
+    lock.close()
+
+
 def test_a_continue_whose_session_vanished_keeps_the_work_as_its_own_session(env, capsys):
     """M1: another machine deleted it while the agent worked. The conversation is the
     user's work, so it becomes a session of its own; the deleted one stays deleted."""

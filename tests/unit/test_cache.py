@@ -487,9 +487,11 @@ def test_not_exist_delete_keeps_a_session_being_continued(drive, capsys):
 
 
 def test_not_exist_delete_for_an_agent_id_drops_its_cached_text(drive, capsys):
-    """For an agent id the flag means "the agent does not have this one any more"."""
+    """For an agent id the flag means "the agent does not have this one any more".
+    It lists another session, so we know the listing is readable and `s` is gone."""
     paths = store.Paths.from_env()
-    agent = Agent({"s": ["問", "答"]}, name="claude")
+    agent = Agent({"s": ["問", "答"], "t": ["別的", "對話"]},
+                  [Listed("t", "/tmp/p", "別的", "2026-10-02T00:00:00Z")], name="claude")
     cache.local_reading(paths, agent, "s", "2026-10-02T00:00:00Z")
 
     assert cache.pull(paths, ["claude:s"], {"claude": agent}, not_exist_delete=True) == (1, 0)
@@ -509,6 +511,18 @@ def test_not_exist_delete_for_an_agent_id_the_agent_still_has(drive, capsys):
     assert "快取已刪" not in capsys.readouterr().err
     assert "## user\n問" in (paths.reading / "claude" / "s.md").read_text()
     assert agent.exports == 2             # the one above, plus this pull refreshing the cache
+
+
+def test_not_exist_delete_keeps_the_cache_when_the_agent_lists_nothing(drive, capsys):
+    """F5: an agent whose listing comes back empty while we hold its text is an
+    agent we could not read (no db, unknown layout), not one that lost everything."""
+    paths = store.Paths.from_env()
+    blind = Agent({}, [])                       # cannot read anything
+    cache.local_reading(paths, Agent({"s": ["問", "答"]}, name="claude"), "s")
+
+    assert cache.pull(paths, ["claude:s"], {"claude": blind}, not_exist_delete=True) == (1, 0)
+    assert "清單讀不到" in capsys.readouterr().err
+    assert (paths.reading / "claude" / "s.md").is_file()
 
 
 def test_not_exist_upload_sends_the_session_back(drive):

@@ -402,7 +402,7 @@ class Index:
         from the mirror, which is the local truth and needs no Drive (review M3)."""
         for md in sorted(paths.mirror.glob("*/session.md")):
             try:
-                _put_file(self, md)
+                index_file(self, md)
             except (h.HeaderError, OSError, UnicodeDecodeError):
                 continue
         return self

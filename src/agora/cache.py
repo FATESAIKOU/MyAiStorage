@@ -15,15 +15,17 @@ else, because putting it back is not what anybody asked for (review Q1).
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
-import uuid
 from datetime import datetime
 from pathlib import Path
 
 from agora import header as h
 from agora import store
 from agora.agents.base import reading
+
+_UUID = re.compile(r"[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
 
 
 def _stamp(updated_at: str | None) -> float | None:
@@ -87,16 +89,6 @@ def _line(message: str) -> None:
     print(f"[agora] {message}", file=sys.stderr)
 
 
-def _unique(ids: list[str]) -> list[str]:
-    """The same id twice is one piece of work and one line of progress (review S2-7)."""
-    seen, out = set(), []
-    for session_id in ids:
-        if session_id not in seen:
-            seen.add(session_id)
-            out.append(session_id)
-    return out
-
-
 def _plan_one(session_id: str, agents: dict) -> tuple[str, str | None, Exception | None]:
     """(kind, id, complaint): parse up front so a bad id is that id's failure only."""
     try:
@@ -104,14 +96,6 @@ def _plan_one(session_id: str, agents: dict) -> tuple[str, str | None, Exception
     except ValueError as e:
         return "", None, e
     return kind, bare, None
-
-
-def _looks_like_uuid(value: str) -> bool:
-    try:
-        uuid.UUID(value)
-    except ValueError:
-        return False
-    return True
 
 
 def _split(session_id: str, agents: dict) -> tuple[str, str]:
@@ -124,7 +108,7 @@ def _split(session_id: str, agents: dict) -> tuple[str, str]:
     """
     prefix, sep, bare = session_id.partition(":")
     if not sep:
-        if session_id.startswith("ses_") or _looks_like_uuid(session_id):
+        if session_id.startswith("ses_") or _UUID.fullmatch(session_id):
             names = " 或 ".join(f"{name}:" for name in agents)
             raise ValueError(f"{session_id} 是 agent 的 session id，請寫前綴（{names}）")
         return "agora", session_id
@@ -159,32 +143,34 @@ def pull(paths: store.Paths, ids: list[str], agents: dict, *,
     index = store.Index(paths)
     # A batch of agent ids needs no Drive at all: asking anyway would make an
     # offline machine fail a pull that has nothing to do with Drive (review S2-3).
-    plan = [_plan_one(session_id, agents) for session_id in _unique(ids)]
-    drive, remote, offline = None, None, None
-    if any(kind == "agora" for kind, _, _ in plan):
-        try:
-            drive = store.Drive(paths)
-            remote = drive.list_sessions()      # one listing for the whole batch (docs/perf.md)
-        except store.StoreError as e:
-            offline = e
+    wanted = list(dict.fromkeys(ids))   # the same id twice is one job, one line (S2-7)
+    plan = [_plan_one(session_id, agents) for session_id in wanted]
+    drive, remote = None, None
     listed: dict[str, dict] = {}
     done = failed = 0
-    for k, (session_id, (kind, bare, complaint)) in enumerate(zip(_unique(ids), plan), 1):
+    for k, (session_id, (kind, bare, complaint)) in enumerate(zip(wanted, plan), 1):
         _progress("pull", k, len(plan))
         try:
             if complaint:
                 raise complaint
             if kind == "agora":
-                if offline is not None:
-                    raise store.StoreError(f"連不上 Drive：{offline}")
+                if drive is None:
+                    drive = store.Drive(paths)
+                    remote = _listing(drive)    # once for the whole batch (docs/perf.md)
+                if isinstance(remote, store.StoreError):
+                    raise store.StoreError(f"連不上 Drive：{remote}")
                 _pull_agora(paths, drive, index, remote, bare, not_exist_delete)
             else:
                 if kind not in listed:
                     listed[kind] = _listed(agents, kind)
-                if bare not in listed[kind] and not_exist_delete:
-                    _drop_reading(paths, kind, bare)   # the agent really lost it (review M2)
-                else:
+                if bare in listed[kind] or not not_exist_delete:
                     local_reading(paths, agents[kind], bare, listed[kind].get(bare))
+                elif not listed[kind] and _cached(paths, kind):
+                    # F5: an agent that lists nothing while its cache has something
+                    # is an agent we could not read, not one that lost everything.
+                    _line(f"{kind} 那邊的清單讀不到（可能是資料庫沒了或認不出結構），不刪快取")
+                else:
+                    _drop_reading(paths, kind, bare)   # the agent really lost it (review M2)
             done += 1
         except Exception as e:      # one session must not stop the rest (review K5)
             failed += 1
@@ -192,14 +178,25 @@ def pull(paths: store.Paths, ids: list[str], agents: dict, *,
     return done, failed
 
 
+def _cached(paths: store.Paths, agent_name: str) -> bool:
+    """Whether we hold any full text for this agent."""
+    folder = paths.reading / agent_name
+    return folder.is_dir() and any(folder.glob("*.md"))
+
+
 def _drop_reading(paths: store.Paths, agent_name: str, session_id: str) -> None:
     """The cached full text of an agent session that is gone from the agent."""
     path = paths.reading / agent_name / f"{session_id}.md"
-    if path.is_file():
-        path.unlink()
-        _line(f"{agent_name}:{session_id} 那邊已經沒有，快取已刪")
-    else:
-        _line(f"{agent_name}:{session_id} 那邊已經沒有，本機本來就沒有快取")
+    had = path.is_file()
+    path.unlink(missing_ok=True)
+    _line(f"{agent_name}:{session_id} 那邊已經沒有，" + ("快取已刪" if had else "本機本來就沒有快取"))
+
+
+def _absent(paths: store.Paths, ulid: str, said: str) -> None:
+    """Drive does not have this session: one line, nothing done (`said` words it)."""
+    if not (paths.mirror / ulid).exists():
+        raise store.StoreError("本機和雲端都沒有這個 Session")   # a typo, not a deletion
+    _line(f"{ulid} 雲端沒有，{said}")
 
 
 def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
@@ -207,9 +204,7 @@ def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
     """One `agora:` id from Drive, into the mirror and the index."""
     if remote is None or ulid not in remote:
         if not not_exist_delete:
-            if not (paths.mirror / ulid).exists():
-                raise store.StoreError("本機和雲端都沒有這個 Session")   # a typo, not a deletion
-            _line(f"{ulid} 雲端沒有，本機的不動")
+            _absent(paths, ulid, "本機的不動")
             return
         if (paths.outbox / ulid).is_dir():
             _line(f"{ulid} 還沒上傳，不能刪")
@@ -226,21 +221,16 @@ def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
         # the older copy in the mirror and the session would go backwards (S2-7).
         _line(f"{ulid} 還沒上傳，不覆蓋本機這一份")
         return
-    local = paths.mirror / ulid / "session.md"
-    if not (local.exists() and store.md5_file(local) == files.get("session.md")):
-        drive.download(ulid, "session.md", local)
-    hdr, _ = h.split_document(local.read_text(encoding="utf-8"))
-    raw = h.agora_of(hdr).get("raw") or {}
-    if raw.get("file") and files.get(raw["file"]) != raw.get("md5"):
-        # S1/G3: an unfinished session stays out of the index, and its half-written
-        # session.md out of the mirror - otherwise it is searchable and continuable.
+    # S1/G3: an unfinished session (its header names a raw that is not there yet)
+    # stays out of the index and out of the mirror - otherwise it is searchable and
+    # continuable. One place decides that, for sync and for pull alike.
+    hdr = store.mirror_one(paths, drive, index, ulid, remote[ulid])
+    if hdr is None:
         _line(f"{ulid} 雲端上的 raw 還沒齊，先不建索引")
-        local.unlink(missing_ok=True)
-        index.drop(ulid)
         return
-    if raw.get("file"):
+    if (h.agora_of(hdr).get("raw") or {}).get("file"):
         store.fetch_raw(paths, drive, ulid, hdr)   # a no-op when the local copy is the right one
-    store.index_mirror(paths, ulid, index)   # readable, indexed and searchable again
+    store.index_file(index, paths.mirror / ulid / "session.md")   # searchable again
 
 
 def push(paths: store.Paths, ids: list[str], agents: dict, *,
@@ -252,17 +242,13 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
     that was K1, and it is how another machine's delete gets undone without
     anyone deciding to - so it gets one line and nothing happens (review Q1).
     """
-    wanted = _unique(ids)
+    wanted = list(dict.fromkeys(ids))   # the same id twice is one job, one line (S2-7)
     drive = store.Drive(paths)
     staged = store.outbox_ulids(paths)
     left = store.push_outbox(drive, paths)      # staged writes first: those are the same sessions
     if left:
         _line(f"outbox 還有 {len(left)} 筆沒上傳成功")
-    try:
-        listing = drive.list_sessions()
-        offline = None
-    except store.StoreError as e:
-        listing, offline = None, e            # offline: every id here fails, and says so
+    listing = _listing(drive)            # offline: every id here fails, and says so
     done = failed = 0
     for k, agora_id in enumerate(wanted, 1):
         _progress("push", k, len(wanted))
@@ -270,8 +256,8 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
             kind, ulid = _split(agora_id, agents)
             if kind != "agora":
                 raise ValueError(f"push 只吃 agora 的 session id，收到 {agora_id}")
-            if offline is not None:
-                raise store.StoreError(f"連不上 Drive：{offline}")
+            if isinstance(listing, store.StoreError):
+                raise store.StoreError(f"連不上 Drive：{listing}")
             if ulid in staged:
                 if ulid in left:
                     raise store.StoreError("還沒上傳成功，仍在 outbox")   # review S2-2
@@ -279,9 +265,7 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
                 store.push_one(drive, paths.outbox / ulid)
             elif listing is None or ulid not in listing:
                 if not not_exist_upload:
-                    if not (paths.mirror / ulid).exists():
-                        raise store.StoreError("本機和雲端都沒有這個 Session")
-                    _line(f"{ulid} 雲端沒有，沒有傳")
+                    _absent(paths, ulid, "沒有傳")
                     continue
                 _push_mirrored(paths, drive, ulid, need_raw=True)
             else:
@@ -291,6 +275,15 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
             failed += 1
             _line(f"{agora_id} 傳不上去：{e}")
     return done, failed
+
+
+def _listing(drive: store.Drive):
+    """The sessions on Drive, or the error that stopped us. None means there is no
+    sessions/ at all: not a failure, and not evidence of a deletion (N12)."""
+    try:
+        return drive.list_sessions()
+    except store.StoreError as e:
+        return e
 
 
 def _push_mirrored(paths: store.Paths, drive: store.Drive, ulid: str, *,

@@ -282,7 +282,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 3. **載入**：一律走目標轉接器的 `start_native(raw, workdir)`（opencode：id 重編、`opencode import`、回讀驗證；Claude：新 uuid、寫 jsonl、`claude --resume`）。不再有「注入」這條路。
 4. 工作目錄：`--dir`，預設是 `agora.source.dir`（這台機器上存在的話），否則是目前目錄並提示。agent 啟動時同時設定 cwd 與 `PWD`。
 5. 寫 pending 並持有 flock（交給 agent 繼承），在前景啟動 agent；Ctrl-C 只給 agent。
-6. agent 結束後，內容比啟動前多才存檔，**寫回原本那個 agora Session（同一個 id）**（2026-10-02 使用者決定，原本是另存新的）：raw 與閱讀版換成接續後的整段對話，`agora.source` 換成接續用的那個 agent session，舊的記到 `agora.previous_sources`（未匯入頁因此不再列它）；標題、tags 這些使用者欄位不變。接續的是 merge 時，它就變成那段對話：`relation` 改成 `continue`、拿掉 `agora.merge` 與 `status: draft`，`parents` 留著當出處。不再能從同一點分岔。Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之後那個 session 要用的 import 指令。
+6. agent 結束後，內容比啟動前多才存檔，**寫回原本那個 agora Session（同一個 id）**（2026-10-02 使用者決定，原本是另存新的）；**但接續途中那個 Session 已經被刪掉了（不管是別台機器還是這台），就另存成一個新的 Session**（`relation: continue`、`parents` 指向原本那個），並印出說明——原本那個保持被刪的狀態，不會因為這次接續而回到雲端：raw 與閱讀版換成接續後的整段對話，`agora.source` 換成接續用的那個 agent session，舊的記到 `agora.previous_sources`（未匯入頁因此不再列它）；標題、tags 這些使用者欄位不變。接續的是 merge 時，它就變成那段對話：`relation` 改成 `continue`、拿掉 `agora.merge` 與 `status: draft`，`parents` 留著當出處。不再能從同一點分岔。Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之後那個 session 要用的 import 指令。
 
 ### 5.6 delete
 
@@ -368,7 +368,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 - **雲端沒有的 Session**（2026-10-03 決定，規格見 `openspec/changes/command-batch-actions/specs/session-sync/spec.md`）：
   - **同步時不再自動清掉**別台機器刪掉的 Session：本機的鏡像與索引都保留，標成「雲端沒有」。**只有在這次列檔完整成功時**才更新標記；列檔失敗、離線、或 Drive 上沒有 `sessions/` 時不新增也不清除任何標記；雲端又出現時，下一次同步就清掉。還在 outbox 的顯示為「未上傳」，不算雲端沒有；接續中（pending）的也不算。
   - **只在明確要求時才刪或復活**：`pull --not-exist-delete` 刪掉本機副本（在 outbox 或接續中的不刪，並印出原因）；`push --not-exist-upload` 把它傳回 Drive（等於撤銷別台的刪除；本機沒有那個原始檔時拒絕這一個）。兩個 flag 都沒加時只印一行提醒、不動。兩個 flag 對 agent 的 id 也有意思：`--not-exist-delete` 是「agent 那邊已經沒有這個 session 了，就刪掉它的全文快取」。
-  - **其他指令遇到它**：會寫回既有 id 的指令（continue、edit、import 的更新路徑）**拒絕**（exit 1），並提示上面那兩個選擇，agent 不會被打開；merge 不接受雲端沒有的 Session 當來源；delete 雲端沒有的只刪本機副本（exit 0）；它不算成別人的子 Session（不擋刪除、也不讓 import 分岔）；import 的來源對到雲端沒有的那一筆時建一個新的 Session。
+  - **其他指令遇到它**：會寫回既有 id 的指令（continue、edit）**拒絕**（exit 1），並提示上面那兩個選擇，agent 不會被打開（判斷同時看標記與當下的 Drive，離線時也不會放行）；import 遇到來源對到雲端沒有的那一筆時**不更新它，改建一個新的 Session**（見上面 5.4 第 6 步的同一個例外）；merge 不接受雲端沒有的 Session 當來源；delete 雲端沒有的只刪本機副本（exit 0）；它不算成別人的子 Session（不擋刪除、也不讓 import 分岔）；import 的來源對到雲端沒有的那一筆時建一個新的 Session。
   - **看得到**：`search` 每行最後標 `(雲端沒有)`，並支援 `--filter cloud=no`／`cloud=yes`（只列出雲端沒有的可以用管線接著清掉）；`show` 也標。
 - 互動模式：`r` 選「Agora／本機」更新快取，`s` 確認後 push，都在等待視窗裡跑，最新一行就是進度。未匯入頁的完整對話用 `reading/` 的快取；內文搜尋先搜快取，再用轉接器的 `search_text()` 補搜還沒快取的。
 

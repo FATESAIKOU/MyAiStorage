@@ -89,7 +89,7 @@ def _auto_header(relation: str, parents: list[dict], body: str, *, title: str | 
     hdr: dict = {"type": h.SESSION_TYPE, "title": title, "description": _description(body), "tags": []}
     sources = []
     if exported is not None and agent is not None:
-        actor = f"{ACTOR[agent.name]}/{exported.model}" if exported.model else ACTOR[agent.name]
+        actor = _actor(agent.name, exported.model)
         hdr["generated"] = {"by": actor, "at": exported.created_at or stamp}
         sources.append({"id": f"{agent.name}:{exported.session_id}", "title": f"{agent.name} session",
                         "author": actor, "last_modified": stamp[:10]})
@@ -105,6 +105,11 @@ def _auto_header(relation: str, parents: list[dict], body: str, *, title: str | 
     if exported is not None and agent is not None:
         hdr["agora"]["source"] = _source(agent, exported)
     return hdr
+
+
+def _actor(agent_name: str, model: str | None) -> str:
+    """Who wrote it, with the model when we know it."""
+    return f"{ACTOR[agent_name]}/{model}" if model else ACTOR[agent_name]
 
 
 def _source(agent: Agent, exported: Exported) -> dict:
@@ -164,17 +169,24 @@ def _header_for(index: store.Index, agora_id: str) -> dict:
 
 
 def _lost_in_cloud(paths: store.Paths, agora_id: str) -> bool:
-    """Whether Drive has stopped having this session, asked now (review M1).
+    """Whether a full listing of Drive says this session is gone (review M1).
 
-    Not the marker: markers move on a sync, a throttled one can be five minutes
-    old, and a session being continued is never marked at all (Q2). Only Drive can
-    answer, and it answers about this one folder, so nothing else is disturbed.
-    Offline is not a delete: the write goes to the outbox and a later push retries.
+    The marker cannot answer alone: it moves on a sync, a throttled one can be five
+    minutes old, and a session being continued is never marked at all (Q2). This
+    asks Drive again, and the whole listing rather than one folder, because "not
+    found" about a single folder is not to be trusted (S1-4b). Three things are not
+    a deletion: being offline (F2), having no sessions/ to list (N12), and still
+    sitting in our own outbox (F3, Q2). Each of those answers False: unknown is not
+    deleted.
     """
+    ulid = _ulid_of(agora_id)
+    if ulid in store.outbox_ulids(paths):
+        return False               # not up yet: ours, not another machine's delete
     try:
-        return _ulid_of(agora_id) not in store.Drive(paths).list_sessions()
+        remote = store.Drive(paths).list_sessions()
     except store.StoreError:
         return False
+    return remote is not None and ulid not in remote
 
 
 def _cloud_lost(agora_id: str) -> str:
@@ -184,8 +196,14 @@ def _cloud_lost(agora_id: str) -> str:
             f"要刪掉本機這份用 agora pull session {agora_id} --not-exist-delete")
 
 
-def _refuse_if_gone(paths: store.Paths, agora_id: str) -> None:
-    """The write-side guard for the long paths: continue, edit (review M1)."""
+def _refuse_if_gone(paths: store.Paths, index: store.Index, agora_id: str) -> None:
+    """The write-side guard for the long paths: continue, edit (review M1, F1).
+
+    Two signals, and one refusal is enough: the marker (this machine already saw
+    the delete) and Drive right now. Asking Drive alone used to let a session that
+    was *already* marked come back whenever this machine was offline.
+    """
+    _need_in_cloud(index, agora_id)
     if _lost_in_cloud(paths, agora_id):
         raise InputError(_cloud_lost(agora_id))
 
@@ -418,7 +436,7 @@ def cmd_merge(args, paths: store.Paths) -> int:
     if not args.agent:
         raise InputError("merge 要給 --agent opencode|claude（由誰來寫要約）")
     agent = load_agent(args.agent)
-    ids = [i.strip() for raw in args.ids for i in raw.split(",") if i.strip()]
+    ids = _split_ids(args.ids)
     if len(ids) < 2:
         raise InputError("merge 至少要兩個 Session")
     if len({_ulid_of(i) for i in ids}) < len(ids):
@@ -470,7 +488,7 @@ def cmd_merge(args, paths: store.Paths) -> int:
     description = f"合併 {len(sections)} 個 Session：" + "、".join(sec["title"] for sec in sections)
     auto["description"] = description if len(description) <= DESCRIPTION_MAX else description[:DESCRIPTION_MAX] + "…"
     model = "+".join(sorted(m for m in models if m)) or None
-    actor = f"{ACTOR[agent.name]}/{model}" if model else ACTOR[agent.name]
+    actor = _actor(agent.name, model)
     auto["generated"] = {"by": actor, "at": _now_iso()}
     auto["status"] = "draft"                     # an AI wrote it; the user can --header status=stable
     auto["agora"]["merge"] = {"kind": "sections", "by": actor, "prompt": SUMMARY_PROMPT_VERSION}
@@ -553,22 +571,22 @@ def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
         return None
     body = reading(agent, exported.raw)
     index = store.Index(paths)
-    hdr = index.header(_ulid_of(record["agora_id"])) or {}
-    lost = bool(hdr) and _lost_in_cloud(paths, record["agora_id"])
-    if lost:
-        # Deleted on another machine while the agent was working. The conversation
-        # is the user's work and does not go away with the session, so it becomes a
-        # session of its own and points back at the one that is gone (review M1).
-        raw_md5 = (h.agora_of(hdr).get("raw") or {}).get("md5")
-        hdr = _auto_header("continue", [{"id": record["agora_id"], "raw_md5": raw_md5}], body,
-                           title=record.get("title") or exported.title, exported=exported,
-                           agent=agent, parent_headers=[hdr])
-        print(f"[agora] {record['agora_id']} 在你接續的時候被別台機器刪掉了，"
+    ulid = _ulid_of(record["agora_id"])
+    hdr = index.header(ulid) or {}
+    # Two signals, either one enough: the marker (this machine already saw it) and
+    # Drive right now (F1). A header that is not here at all is the same story - it
+    # was deleted here, while the agent worked (F4) - and the work is not lost either.
+    if not hdr or not index.cloud_has(ulid) or _lost_in_cloud(paths, record["agora_id"]):
+        # The conversation is the user's work and does not go away with the session:
+        # it becomes a session of its own and points back at the one that is gone.
+        was_here = bool(hdr)
+        raw_md5 = ((h.agora_of(hdr).get("raw") or {}).get("md5")) if hdr else None
+        parents = [record.get("parent") or {"id": record["agora_id"], "raw_md5": raw_md5}]
+        hdr = _auto_header("continue", parents, body, title=record.get("title") or exported.title,
+                           exported=exported, agent=agent, parent_headers=[hdr] if hdr else [])
+        how = "被別台機器刪掉了" if was_here else "在這台機器上被刪掉了"
+        print(f"[agora] {record['agora_id']} 在你接續的時候{how}，"
               f"這次的對話另存成 {hdr['id']}；原來那個保持被刪掉的狀態", file=sys.stderr)
-    elif not hdr:           # forgotten here entirely: same work, its own session
-        hdr = _auto_header("import", [], body, title=record.get("title") or exported.title,
-                           exported=exported, agent=agent)
-        hdr["id"] = record["agora_id"]
     agora = h.agora_of(hdr)
     old = agora.get("source") or {}
     if old.get("session_id") and old.get("session_id") != exported.session_id:
@@ -580,7 +598,7 @@ def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
         hdr.pop("status", None)
     agora["source"] = _source(agent, exported)
     agora["updated_at"] = _now_iso()
-    actor = f"{ACTOR[agent.name]}/{exported.model}" if exported.model else ACTOR[agent.name]
+    actor = _actor(agent.name, exported.model)
     hdr["generated"] = {"by": actor, "at": exported.created_at or _now_iso()}
     sources = [s for s in hdr.get("sources") or [] if not str(s.get("id", "")).startswith(f"{agent.name}:")]
     hdr["sources"] = [{"id": f"{agent.name}:{exported.session_id}", "title": f"{agent.name} session",
@@ -641,7 +659,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
     updates = _updates(args)
     source_id = _the_id(args)
     index = _sync_for(paths, [source_id])
-    _refuse_if_gone(paths, source_id)         # T1 3.3: no agent is opened for it
+    _refuse_if_gone(paths, index, source_id)  # T1 3.3: no agent is opened for it
     parent = _header_for(index, source_id)
     agora = h.agora_of(parent)
     src = agora.get("source") or {}
@@ -725,13 +743,17 @@ def cmd_delete(args, paths: store.Paths) -> int:
     finishes the job instead of failing (T1 R4). Children named in the same
     request go first; children outside it are still refused.
     """
-    ids = [f"agora:{_ulid_of(i.strip())}" for raw in args.ids for i in raw.split(",") if i.strip()]
+    ids = [f"agora:{_ulid_of(i)}" for i in _split_ids(args.ids)]
     if not ids:
         raise InputError("delete 要給至少一個 session id")
     index = store.sync(paths)
     gone = _deleted_ids(paths)
     headers, missing, unknown = {}, [], []
     for agora_id in ids:
+        if store.continuing(paths, _ulid_of(agora_id)):
+            # F4: an agent is working on it right now. Deleting here would only make
+            # `_finish` save the result elsewhere; wait until that run is over.
+            raise InputError(f"{agora_id} 正在接續，等它結束再刪")
         if index.header(_ulid_of(agora_id)) is not None:
             headers[agora_id] = index.header(_ulid_of(agora_id))
         elif _ulid_of(agora_id) in gone:
@@ -796,7 +818,7 @@ def _remember_deleted(paths: store.Paths, ulid: str) -> None:
 def cmd_edit(args, paths: store.Paths) -> int:
     agora_id = _the_id(args)
     index = _sync_for(paths, [agora_id])
-    _refuse_if_gone(paths, agora_id)
+    _refuse_if_gone(paths, index, agora_id)
     old = _header_for(index, agora_id)
     body = _body_for(paths, agora_id)
     updates = _updates(args)
@@ -810,6 +832,7 @@ def cmd_edit(args, paths: store.Paths) -> int:
         print(agora_id)
         print("[agora] 標頭沒有變", file=sys.stderr)
         return 0
+    _refuse_if_gone(paths, index, agora_id)   # the editor was open a while (F8)
     new["agora"] = {**new["agora"], "updated_at": _now_iso()}
     # Re-stage with the same raw bytes (same md5, same file name) so the
     # outbox entry is complete; only session.md really changes.
@@ -869,6 +892,11 @@ def cmd_push(args, paths: store.Paths) -> int:
     return EXIT_ERROR if failed else 0
 
 
+def _split_ids(values: list[str]) -> list[str]:
+    """Ids as the user wrote them: space or comma separated, blanks ignored."""
+    return [i.strip() for raw in values for i in raw.split(",") if i.strip()]
+
+
 def _ids_of(args, action: str) -> list[str]:
     """The ids this batch is about. None of them is an error, not "all of them".
 
@@ -876,7 +904,7 @@ def _ids_of(args, action: str) -> list[str]:
     That is a thing to ask for where you can see the list, so pull and push take
     ids and say so when there are none (spec: 不給 id 時 MUST 報錯).
     """
-    ids = [i for raw in args.ids for i in raw.split(",") if i]
+    ids = _split_ids(args.ids)
     if not ids:
         raise InputError(f"{action} 要給 session id；"
                          "要全部就在互動模式按 a，或從 agora search session 用管線接過來")
@@ -928,10 +956,10 @@ def main(argv: list[str] | None = None) -> int:
     paths = store.Paths.from_env()
     try:
         recover_pending(paths, notice_only=args.no_sync)
-        if store.outbox_count(paths):
-            print(f"[agora] outbox 有 {store.outbox_count(paths)} 筆未上傳", file=sys.stderr)
-        if store.bad_count(paths):
-            print(f"[agora] 有 {store.bad_count(paths)} 筆壞檔放在 {paths.state}/*/.bad，請檢查", file=sys.stderr)
+        if waiting := store.outbox_count(paths):
+            print(f"[agora] outbox 有 {waiting} 筆未上傳", file=sys.stderr)
+        if bad := store.bad_count(paths):
+            print(f"[agora] 有 {bad} 筆壞檔放在 {paths.state}/*/.bad，請檢查", file=sys.stderr)
         return ACTIONS[args.action](args, paths)
     except InputError as e:
         print(f"[agora] {e}", file=sys.stderr)
