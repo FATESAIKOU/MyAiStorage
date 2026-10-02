@@ -22,7 +22,7 @@ import sys
 
 import pytest
 
-from agora.agents import opencode as oc
+from agora.agents import base, opencode as oc
 
 # The model chain lives in the fake so the e2e uses the same one (tests/fakes is
 # not a package; the integration tests are the only importers).
@@ -166,7 +166,7 @@ def test_real_round_trip(project, source, trash, isolated_store):
     assert collected.message_count > launch.before_count
     assert os.path.realpath(collected.dir) == os.path.realpath(project)
 
-    body = oc.ADAPTER.reading(collected.raw)
+    body = base.reading(oc.ADAPTER, collected.raw)
     assert body.count("## user") >= 2  # the original ask plus the new one
     assert "## assistant" in body
 
@@ -174,29 +174,44 @@ def test_real_round_trip(project, source, trash, isolated_store):
     assert raw_of(source) == untouched
 
 
-def test_real_injected_round_trip(project, source, trash, tmp_path, isolated_store):
-    """The reading version goes in as one user message with a known id (N4)."""
-    exported = oc.ADAPTER.export(source)
-    reading = tmp_path / "reading.md"
-    reading.write_text(oc.ADAPTER.reading(exported.raw), encoding="utf-8")
+def test_real_native_round_trip(project, source, trash, isolated_store):
+    """(2) turns -> native -> start_native -> a real turn, on the real opencode.
 
-    launch = oc.ADAPTER.start_injected(reading, project)
+    This is the path design v5 uses for a merged or other-agent session: the
+    history is rebuilt as ordinary opencode messages, imported, and the agent
+    opens on it. So the count has to come back right and the model has to answer
+    from what it was shown.
+    """
+    exported = oc.ADAPTER.export(source)
+    turns = oc.ADAPTER.turns(exported.raw)
+    assert turns, "來源的 export 沒有任何 user/assistant 輪"
+
+    rebuilt = oc.ADAPTER.native(turns)
+    # the round trip is exact before anything touches the real opencode
+    assert oc.ADAPTER.turns(rebuilt) == turns
+    expected = len(turns)
+
+    launch = oc.ADAPTER.start_native(rebuilt, project)
     trash.append(launch.agent_session_id)
-    assert launch.before_count == 1
+    assert launch.before_count == expected
+    assert launch.argv[1:] == ["--session", launch.agent_session_id]
+
+    # what opencode has now: same roles, same lines, nothing dropped
+    landed = oc.ADAPTER.export(launch.agent_session_id)
+    assert landed.message_count == expected
+    assert oc.ADAPTER.turns(landed.raw) == turns
 
     ask("run", "-s", launch.agent_session_id, "--format", "json",
-        "你讀到的閱讀版在講什麼？用一句話回答。")
+        "你前面在做什麼？用一句話回答。")
 
     collected = oc.ADAPTER.collect(launch)
     assert collected is not None
-    assert collected.message_count > 1
-    # E-2: a loose check that the agent really read it. The injected part is
-    # marked `synthetic`, which is exactly how opencode hands a file to the
-    # model - so if a future version stopped doing that, the message count would
-    # still look fine and this is what would notice.
-    body = oc.ADAPTER.reading(collected.raw)
+    assert collected.message_count > expected
+    # E-2: a loose check that the agent really saw the history rather than
+    # starting blank - only the rebuilt turns mention it.
+    body = base.reading(oc.ADAPTER, collected.raw)
     assert ("CSV" in body) or ("表格" in body), \
-        "回答裡完全沒有閱讀版才有的字，agent 可能根本沒讀到"
+        "回答裡沒有前文的關鍵字，agent 可能根本沒讀到重建出來的對話"
 
 
 def test_real_reimport_is_idempotent(project, source, trash, monkeypatch, isolated_store):

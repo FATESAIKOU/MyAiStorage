@@ -1,14 +1,17 @@
-"""The opencode adapter (design.md 5.2 and 5.4).
+"""The opencode adapter (design.md 5.2 and 5.4, v5).
 
     import session --agent opencode -> export()
-    continue-session --agent opencode            -> start_native()
-    continue-session --agent opencode (跨 agent)  -> start_injected()
+    continue: the CLI hands over raws -> turns() / native() -> start_native()
 
-Loading a session from another machine means writing a new one: export to a
-file, re-identify every id, `opencode import` in the target directory, then
-`opencode --session <new id>`. Five things about that are not negotiable, and
-all five were measured rather than assumed — see docs/spike/opencode.md
-(traps 1-6) for the evidence:
+Two directions only (design v5): `turns` splits this format into the shared
+`[(role, lines)]`, and `native` builds this format back from them, so a merged
+or other-agent session still opens with its history on screen. The reading
+version is `base.reading(agent, raw)` — this module has nothing for it.
+
+Loading a session means writing a new one: re-identify every id, `opencode
+import` in the target directory, then `opencode --session <new id>`. Five things
+about that are not negotiable, and all five were measured rather than assumed —
+see docs/spike/opencode.md (traps 1-6) for the evidence:
 
 1. import silently drops rows whose id already exists, so every id is new
    (id order and uniqueness: see `reidentify`).
@@ -32,7 +35,7 @@ import subprocess
 import tempfile
 import time
 
-from .base import AgentError, Exported, Launch, agent_cmd, format_reading, tool_line
+from .base import AgentError, Exported, Launch, Turns, agent_cmd, tool_line
 
 # Id layout. Fixed width: a truncated ordinal is what made phase 1 import eight
 # messages and get one, silently.
@@ -51,10 +54,9 @@ _PART_REFERENCES = ("messageID",)
 _SILENT_PARTS = {"reasoning", "step-start", "step-finish", "step-start-finish",
                  "snapshot", "patch", "agent", "compaction", "subtask"}
 
-#: Marks our own injected part; opencode's own `synthetic` parts get no line (OC5).
-INJECTED_MARK = "agora-injected"
-INJECTED_LINE = "[注入的閱讀版]"
-INJECT_PREAMBLE = "以下是之前一個 Session 的閱讀版，請先讀完，再等我的指示。\n\n"
+#: What a session built by `native()` is called; the CLI gives it a real title in
+#: the header, and opencode overwrites this one on the next continue anyway.
+NATIVE_TITLE = "Agora 接續"
 
 #: Every call gets a deadline: the CLI collects on every command, so one wedged
 #: opencode would wedge all of them (OC7). Read per call so a test can shorten it.
@@ -68,11 +70,18 @@ def _timeout() -> int:
         return DEFAULT_CLI_TIMEOUT
 
 
-def _injected_info(session_id: str, title: str, created: int, workdir: Path) -> dict:
+def _session_info(session_id: str, title: str, created: int) -> dict:
+    """The smallest `info` opencode will import *and* export again.
+
+    Import rejects the whole payload when a field is missing, and export needs
+    all of them, so a session that cannot be exported cannot be collected after
+    the agent has worked in it. `directory` / `projectID` are placeholders: import
+    rewrites both from the working directory (spike V5).
+    """
     stamp = {"created": created, "updated": created}
     return {
         "id": session_id, "slug": "agora-handoff", "title": title,
-        "directory": str(workdir), "projectID": "", "path": "",
+        "directory": "", "projectID": "", "path": "",
         "agent": "build", "version": "", "cost": 0, "permission": [],
         "model": {"id": "", "providerID": "opencode", "variant": "default"},
         "summary": {"additions": 0, "deletions": 0, "files": 0},
@@ -211,12 +220,8 @@ def _lines_of(parts: list[dict]) -> list[str]:
         if not isinstance(part, dict):
             continue
         kind = part.get("type")
-        metadata = part.get("metadata")
-        if isinstance(metadata, dict) and metadata.get("agora") == INJECTED_MARK:
-            lines.append(INJECTED_LINE)   # one line, not the whole reading version
-            continue
         if part.get("synthetic") is True:
-            continue                     # opencode's own inlined attachment (OC5)
+            continue                     # opencode's own inlined attachment (D6)
         if kind == "text":
             text = part.get("text")
             if isinstance(text, str) and text.strip():
@@ -231,40 +236,68 @@ def _lines_of(parts: list[dict]) -> list[str]:
     return lines
 
 
-def reading_of(payload: dict) -> str:
-    """The reading version: user/assistant text plus one line per tool call."""
+def turns_of(payload: dict) -> list[tuple[str, list[str]]]:
+    """One entry per user/assistant message: its text, plus a line per tool call.
+
+    The same rules as the reading version (design 4.4), so `native(turns(raw))`
+    can rebuild a session whose history reads the same way.
+    """
     turns: list[tuple[str, list[str]]] = []
     for message in _payload_messages(payload):
-        info = message.get("info") or {}
-        role = info.get("role")
-        if role not in ("user", "assistant"):
-            continue
-        turns.append((role, _lines_of(message.get("parts") or [])))
-    return format_reading(turns)
+        role = (message.get("info") or {}).get("role")
+        if role in ("user", "assistant"):
+            turns.append((role, _lines_of(message.get("parts") or [])))
+    return turns
 
 
-def _injected_payload(session_id: str, body: str, title: str, workdir: Path) -> dict:
-    """One user message carrying the whole reading version (N4).
+def native_of(turns: list[tuple[str, list[str]]], session_id: str) -> dict:
+    """Turns as an opencode export, ready for `start_native` to re-identify.
 
-    Ids are placeholders; `reidentify` gives out the real ones, so the id rules
-    live in exactly one place. `synthetic` plus the agora mark is what lets the
-    reading version of *this* session be one line instead of a nested copy of the
-    previous one (OC5).
+    The caller (cli._converted_turns) hands over what design v5 promises: starts
+    with a user turn, strictly alternating, no empty turn, no `[skip …]` line. So
+    this only has to compose them in order — no merging, no padding.
+
+    Plain, visible text parts — no synthetic, no attachment: whatever a session
+    says has to be on screen when the agent opens. One part per line, the way
+    opencode stores a multi-paragraph reply, so `turns(native(turns(raw)))` is the
+    same list of lines it started from. Ids are placeholders; `reidentify` hands
+    out the real ones, so the id rules live in one place.
     """
     created = int(time.time() * 1000)
-    payload = {
-        "info": _injected_info(session_id, title, created, workdir),
-        "messages": [{
-            "info": {"id": "tmp-msg", "sessionID": session_id, "role": "user",
-                     "time": {"created": created}, "agent": "build",
-                     "model": {"providerID": "opencode", "modelID": ""},
-                     "summary": {"diffs": []}},
-            "parts": [{"id": "tmp-prt", "sessionID": session_id,
-                       "messageID": "tmp-msg", "type": "text",
-                       "synthetic": True, "metadata": {"agora": INJECTED_MARK},
-                       "text": INJECT_PREAMBLE + body}],
-        }],
-    }
+    messages: list[dict] = []
+    previous = ""
+    for role, lines in turns:
+        # the contract says both are true already; the check keeps a caller that
+        # breaks it from producing a message opencode would reject
+        body = [line for line in lines if line.strip()]
+        if role not in ("user", "assistant") or not body:
+            continue
+        at = created + len(messages)      # times only move forward: opencode sorts by them
+        message_id = f"tmp-msg{len(messages)}"
+        info = {"id": message_id, "sessionID": session_id, "role": role,
+                "time": {"created": at}, "agent": "build",
+                "model": {"providerID": "opencode", "modelID": ""}}
+        if role == "assistant":
+            # import rejects an assistant message whose parentID is null, so it
+            # has to point at the message it answers; the rest of these fields
+            # are what its schema insists on (measured: each missing one is
+            # "Missing key at [...]" and the whole payload is refused)
+            info.update({"parentID": previous, "mode": "build", "finish": "stop",
+                         "providerID": "opencode", "modelID": "", "cost": 0,
+                         "path": {"cwd": "", "root": ""},
+                         "tokens": {"total": 0, "input": 0, "output": 0,
+                                    "reasoning": 0,
+                                    "cache": {"read": 0, "write": 0}}})
+            info["time"]["completed"] = at
+        else:
+            info["summary"] = {"diffs": []}
+        messages.append({"info": info, "parts": [
+            {"id": f"tmp-prt{len(messages)}-{n}", "sessionID": session_id,
+             "messageID": message_id, "type": "text", "text": line}
+            for n, line in enumerate(body)]})
+        previous = message_id
+    payload = {"info": _session_info(session_id, NATIVE_TITLE, created),
+               "messages": messages}
     return reidentify(payload, session_id=session_id)
 
 
@@ -273,7 +306,7 @@ class OpencodeAgent:
 
     name = "opencode"
 
-    # -- reading and writing the agent's own files --------------------------
+    # -- running opencode ---------------------------------------------------
 
     def _run(self, argv: list[str], cwd: Path | str | None = None,
              stdout: int | None = None) -> subprocess.CompletedProcess:
@@ -370,8 +403,12 @@ class OpencodeAgent:
             model=_last_model(payload),
         )
 
-    def reading(self, raw: bytes) -> str:
-        return reading_of(self._read(raw))
+    def turns(self, raw: bytes) -> Turns:
+        return turns_of(self._read(raw))
+
+    def native(self, turns: Turns) -> bytes:
+        return json.dumps(native_of(turns, _session_id()),
+                          ensure_ascii=False).encode("utf-8")
 
     def start_native(self, raw: bytes, workdir: Path) -> Launch:
         session_id, landed = self._import_verified(
@@ -379,16 +416,6 @@ class OpencodeAgent:
         return Launch(argv=[agent_cmd(self.name), "--session", session_id],
                       cwd=str(workdir), agent_session_id=session_id,
                       before_count=landed)
-
-    def start_injected(self, reading_file: Path, workdir: Path) -> Launch:
-        body = Path(reading_file).read_text(encoding="utf-8")
-        # Same verification as the native path (OC3): an injected session that
-        # imported half-way leaves an agent staring at an empty transcript that
-        # looks fine, and nothing would say so.
-        session_id, landed = self._import_verified(
-            _injected_payload(_session_id(), body, "Agora 接續（閱讀版）", workdir), workdir)
-        return Launch(argv=[agent_cmd(self.name), "--session", session_id],
-                      cwd=str(workdir), agent_session_id=session_id, before_count=landed)
 
     def collect(self, launch: Launch) -> Exported | None:
         """What the agent produced, or None if it said nothing new (S9).

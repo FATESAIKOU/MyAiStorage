@@ -16,7 +16,7 @@ import sys
 
 import pytest
 
-from agora.agents import opencode as oc
+from agora.agents import base, opencode as oc
 from agora.agents.base import AgentError, Launch
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "opencode"
@@ -103,8 +103,8 @@ def test_export_of_a_large_session_is_not_truncated(fake, monkeypatch):
 # --- reading version ------------------------------------------------------
 
 
-def test_reading_keeps_text_and_one_line_per_tool_call(fake):
-    body = oc.ADAPTER.reading(raw())
+def test_turns_keep_text_and_one_line_per_tool_call(fake):
+    body = base.reading(oc.ADAPTER, raw())
     assert "## user" in body and "## assistant" in body
     assert "先列三個步驟就好" in body
     assert "[tool] read " in body
@@ -120,23 +120,19 @@ def test_reading_keeps_text_and_one_line_per_tool_call(fake):
     assert "sample.csv" in line
 
 
-def test_reading_goes_through_the_shared_formatter(fake):
-    """The reading version must come out of base.format_reading, so the merge
-    path (U-RV-04) and this adapter cannot drift apart."""
-    import agora.agents.base as base
-
-    payload = json.loads(raw())
-    expected = base.format_reading(
-        [(m["info"]["role"], oc._lines_of(m.get("parts") or []))
-         for m in payload["messages"]])
-    assert oc.ADAPTER.reading(raw()) == expected
+def test_the_reading_version_is_the_shared_one(fake):
+    """There is no reading() here any more: it is base.reading(agent, raw), so the
+    merge path (U-RV-04) and this adapter cannot drift apart."""
+    assert not hasattr(oc.ADAPTER, "reading")
+    assert not hasattr(oc.ADAPTER, "start_injected")
+    assert base.reading(oc.ADAPTER, raw()) == base.format_reading(oc.ADAPTER.turns(raw()))
     assert base.TOOL_SUMMARY_MAX == 200
 
 
 def test_tool_arguments_are_truncated_at_200(fake):
     payload = json.loads(raw())
     payload["messages"][1]["parts"][3]["state"]["input"] = {"blob": "x" * 1000}
-    body = oc.reading_of(payload)
+    body = base.format_reading(oc.turns_of(payload))
     line = next(l for l in body.splitlines() if l.startswith("[tool]"))
     assert line.endswith("…")
     assert len(line) <= 200 + len("[tool] read ") + 1
@@ -146,7 +142,7 @@ def test_reading_skips_turns_that_have_no_lines(fake):
     payload = json.loads(raw())
     payload["messages"] = [{"info": {"role": "user"}, "parts": [
         {"id": "prt_x", "type": "reasoning", "text": "ZZTHINK"}]}]
-    assert "##" not in oc.reading_of(payload)
+    assert "##" not in base.format_reading(oc.turns_of(payload))
 
 
 # --- re-identifying (U-CON-01, 01b) ---------------------------------------
@@ -293,39 +289,21 @@ def test_start_native_refuses_an_empty_or_broken_export(fake, workdir):
         oc.ADAPTER.start_native(b"not json", workdir)
 
 
-# --- start_injected (N4) --------------------------------------------------
+# --- native (design v5) ---------------------------------------------------
 
 
-def test_start_injected_imports_one_user_message_with_the_file(fake, workdir, tmp_path):
-    reading = tmp_path / "reading.md"
-    reading.write_text("## user\n把 CSV 轉成 Markdown 表格\n", encoding="utf-8")
-    launch = oc.ADAPTER.start_injected(reading, workdir)
-
-    assert launch.argv[1:] == ["--session", launch.agent_session_id]
-    assert launch.before_count == 1
-    landed = stored(fake, launch.agent_session_id)
-    assert len(landed["messages"]) == 1
-    message = landed["messages"][0]
-    assert message["info"]["role"] == "user"
-    text = message["parts"][0]["text"]
-    assert text.startswith("以下是之前一個 Session 的閱讀版")
-    assert "把 CSV 轉成 Markdown 表格" in text
-    assert message["info"]["sessionID"] == launch.agent_session_id
-    assert message["parts"][0]["messageID"] == message["info"]["id"]
-
-
-def test_injected_payload_has_every_field_opencode_needs(fake, workdir):
+def test_native_payload_has_every_field_opencode_needs(fake):
     """opencode refuses a payload that is missing a field, and one it accepts but
-    cannot export afterwards loses the whole continue-session result. The
-    integration test found this: the first injected payload imported fine and
-    then failed at `export` with 'Missing key at ["slug"]'.
+    cannot export afterwards loses the whole continue result. The integration test
+    found this: a payload with only {id, title, time} imported fine and then
+    failed at `export` with 'Missing key at ["slug"]'.
 
     Compared against a real export's shape, which the fixture mirrors.
     """
-    payload = oc._injected_payload("ses_" + "H" * 16, "ZZ\n", "probe", workdir)
+    payload = json.loads(oc.ADAPTER.native([("user", ["ZZ\n"])]))
     real = json.loads(raw())
-    # `revert` is what a session the user undid something in carries; a fresh
-    # injected one has nothing to revert.
+    # `revert` is what a session the user undid something in carries; a rebuilt
+    # one has nothing to revert.
     assert set(payload["info"]) == set(real["info"]) - {"revert"}
     assert isinstance(payload["info"]["permission"], list)
     assert set(payload["info"]["tokens"]["cache"]) == {"read", "write"}
@@ -333,16 +311,6 @@ def test_injected_payload_has_every_field_opencode_needs(fake, workdir):
     assert set(payload["messages"][0]["info"]) == set(real_user["info"])
     assert set(payload["messages"][0]["info"]["summary"]) == {"diffs"}
     assert set(payload["messages"][0]["info"]["model"]) == {"providerID", "modelID"}
-
-
-def test_start_injected_reads_the_file_before_launching(fake, workdir, tmp_path):
-    """The file is inlined at launch time, so the agent does not need a tool or
-    a permission to read a path outside the project (spike V3)."""
-    reading = tmp_path / "reading.md"
-    reading.write_text("ZZREADING 一段閱讀版\n", encoding="utf-8")
-    launch = oc.ADAPTER.start_injected(reading, workdir)
-    assert "ZZREADING 一段閱讀版" in \
-        stored(fake, launch.agent_session_id)["messages"][0]["parts"][0]["text"]
 
 
 # --- collect (S9) ---------------------------------------------------------
@@ -362,7 +330,7 @@ def test_collect_returns_the_grown_session(fake, workdir, monkeypatch):
     assert exported is not None
     assert exported.session_id == launch.agent_session_id
     assert exported.message_count == launch.before_count + 2
-    assert "ZZAPPEND" in oc.ADAPTER.reading(exported.raw)
+    assert "ZZAPPEND" in base.reading(oc.ADAPTER, exported.raw)
 
 
 def test_collect_without_a_session_id_raises(fake):
@@ -497,55 +465,100 @@ def test_a_reverted_session_keeps_its_undo_pointer(fake):
 # --- OC5: what the reading version does with synthetic parts --------------
 
 
-def test_our_injected_reading_version_is_one_line(fake, workdir, tmp_path):
-    reading = tmp_path / "r.md"
-    reading.write_text("## user\nZZLONG 一整份閱讀版\n" * 50, encoding="utf-8")
-    launch = oc.ADAPTER.start_injected(reading, workdir)
-    body = oc.ADAPTER.reading(
-        (fake / "opencode-sessions" / f"{launch.agent_session_id}.json").read_bytes())
-    assert body.count("[注入的閱讀版]") == 1
-    assert "ZZLONG" not in body          # otherwise every handoff nests the last one
-    assert launch.before_count == 1
+def test_native_round_trips_the_lines(fake):
+    """(1) native(turns(raw)) and turns() again give the same lines."""
+    turns = oc.ADAPTER.turns(raw())
+    assert oc.ADAPTER.turns(oc.ADAPTER.native(turns)) == turns
 
 
-def test_an_injected_part_is_marked_synthetic(fake, workdir, tmp_path):
-    reading = tmp_path / "r.md"
-    reading.write_text("ZZ\n", encoding="utf-8")
-    launch = oc.ADAPTER.start_injected(reading, workdir)
-    part = stored(fake, launch.agent_session_id)["messages"][0]["parts"][0]
-    assert part["synthetic"] is True
-    assert part["metadata"]["agora"] == oc.INJECTED_MARK
+def test_native_is_visible_plain_text(fake):
+    """No synthetic, no attachment: design v5 wants the history on screen when
+    the agent opens, so the parts have to be ordinary text parts."""
+    payload = json.loads(oc.ADAPTER.native(oc.ADAPTER.turns(raw())))
+    roles = [m["info"]["role"] for m in payload["messages"]]
+    assert roles == ["user", "assistant", "user", "assistant"]
+    for message in payload["messages"]:
+        for part in message["parts"]:
+            assert part["type"] == "text"
+            assert "synthetic" not in part and "metadata" not in part
+            assert part["text"].strip()
+
+
+def test_native_links_every_assistant_message_to_a_parent(fake):
+    """opencode rejects an assistant message whose parentID is null (it is how
+    /undo finds the message to drop), so native() chains them."""
+    payload = json.loads(oc.ADAPTER.native(oc.ADAPTER.turns(raw())))
+    ids = [m["info"]["id"] for m in payload["messages"]]
+    for position, message in enumerate(payload["messages"]):
+        if message["info"]["role"] == "assistant":
+            assert message["info"]["parentID"] == ids[position - 1]
+
+
+def test_native_will_not_emit_an_empty_message(fake):
+    """cli._converted_turns promises user-first, alternating, non-empty turns, so
+    this only guards a caller that breaks the contract: an empty turn must not
+    become a message with empty text."""
+    payload = json.loads(oc.ADAPTER.native([
+        ("user", []), ("assistant", ["ZZ 有一句"]), ("system", ["ZZ 不該出現"])]))
+    assert [m["info"]["role"] for m in payload["messages"]] == ["assistant"]
+
+
+def test_native_takes_converted_turns_as_they_come(fake):
+    """The shape cli._converted_turns produces (user first, alternating, non-empty,
+    no [skip lines) goes through unchanged - no merging, no padding."""
+    converted = [("user", ["（以下來自 agora:01K6…，原本是 claude 的對話）"]),
+                 ("assistant", ["ZZ 讀取中", "[tool] read {filePath: a.csv}"]),
+                 ("user", ["ZZ 繼續嗎"])]
+    payload = json.loads(oc.ADAPTER.native(converted))
+    assert [m["info"]["role"] for m in payload["messages"]] == ["user", "assistant", "user"]
+    assert [len(m["parts"]) for m in payload["messages"]] == [1, 2, 1]
+    assert oc.ADAPTER.turns(oc.ADAPTER.native(converted)) == converted
+
+
+
+def test_native_gives_every_message_a_later_time_than_the_last(fake):
+    payload = json.loads(oc.ADAPTER.native(oc.ADAPTER.turns(raw())))
+    times = [m["info"]["time"]["created"] for m in payload["messages"]]
+    assert times == sorted(times) and len(set(times)) == len(times)
+
+
+def test_native_loads_through_start_native(fake, workdir):
+    """The whole point: turns -> native -> start_native, no injection path."""
+    built = oc.ADAPTER.native(oc.ADAPTER.turns(raw()))
+    launch = oc.ADAPTER.start_native(built, workdir)
+    assert launch.before_count == len(json.loads(built)["messages"])
+    landed = stored(fake, launch.agent_session_id)
+    assert [m["info"]["role"] for m in landed["messages"]] == \
+        [m["info"]["role"] for m in json.loads(built)["messages"]]
+    assert "ZZTOOLOUT" not in json.dumps(landed, ensure_ascii=False)
 
 
 def test_an_attachment_opencode_inlined_produces_no_line(fake):
     """D6: tool results and inlined attachments are not the user's words."""
-    body = oc.ADAPTER.reading(raw())
+    body = base.reading(oc.ADAPTER, raw())
     assert "ZZATTACHMENT" not in body
     assert "ZZCOMPACT" not in body and "ZZSUBTASK" not in body
     assert "ZZTASKOUT" not in body
     assert "[tool] task" in body        # the call itself is one line, per D6
 
 
-# --- OC3: the injected path is verified too -------------------------------
+# --- the loaded session is verified and the wreckage goes -----------------
 
 
-def test_start_injected_verifies_and_cleans_up(fake, workdir, tmp_path, monkeypatch):
-    reading = tmp_path / "r.md"
-    reading.write_text("ZZ 一段閱讀版\n", encoding="utf-8")
+def test_a_short_import_is_detected_on_the_native_path_too(fake, workdir, monkeypatch):
+    """There is one load path now, so this check covers both (OC3)."""
     monkeypatch.setenv("FAKE_OPENCODE_DROP", "0")
     with pytest.raises(AgentError, match="數量不對"):
-        oc.ADAPTER.start_injected(reading, workdir)
+        oc.ADAPTER.start_native(oc.ADAPTER.native(oc.ADAPTER.turns(raw())), workdir)
     assert list((fake / "opencode-sessions").glob("*.json")) == \
         [fake / "opencode-sessions" / "default.json"]
 
 
-def test_a_failed_delete_is_reported_as_such(fake, workdir, tmp_path, monkeypatch):
-    reading = tmp_path / "r.md"
-    reading.write_text("ZZ\n", encoding="utf-8")
+def test_a_failed_delete_is_reported_as_such(fake, workdir, monkeypatch):
     monkeypatch.setenv("FAKE_OPENCODE_DROP", "0")
     monkeypatch.setenv("FAKE_OPENCODE_FAIL", "delete")
     with pytest.raises(AgentError) as e:
-        oc.ADAPTER.start_injected(reading, workdir)
+        oc.ADAPTER.start_native(oc.ADAPTER.native(oc.ADAPTER.turns(raw())), workdir)
     assert "刪不掉" in str(e.value) and "opencode session delete" in str(e.value)
 
 

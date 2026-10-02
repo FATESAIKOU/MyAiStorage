@@ -900,3 +900,76 @@ Failed: 整合測試在 repo 目錄留下 opencode session（已刪掉，請找�
 順帶一提：驗收腳本（`/tmp/agora-acc/env.sh` 那種）**不會**被這個 guard 保護——
 guard 只在 pytest 裡生效。若要連驗收也保護，`agora continue` 在 `source.dir`
 不存在又沒給 `--dir` 時印一行警告（說「將使用目前目錄 <cwd>」）會更直接。
+---
+
+## design v5：轉接器只剩 turns() 與 native()（2026-10-03）
+
+`301b265`／`084986d`：continue ＝ cli 取 raw → 轉接器轉成自己的格式 → 一律
+`start_native`。轉接器只有兩個方向，`reading()` 與 `start_injected()` 都拿掉了
+（閱讀版改用 `base.reading(agent, raw)`）。
+
+### 結論
+
+| 問題 | 結論 |
+|---|---|
+| `native(turns)` 產生的 raw 能不能直接餵 `start_native` | **可行**（真的 opencode 匯入＋匯出驗過） |
+| `native(turns(raw))` 再 `turns()` 會不會一樣 | **一模一樣**（單元測試＋真的 opencode 都驗過） |
+| 程式碼有變少嗎 | **幾乎持平**：opencode.py 檔案行數 409 → 436（多了 `native_of`、少了 `reading_of`／`_injected_payload`／`start_injected`）；**程式碼行**（扣掉空行、註解、docstring）257 → **261**，+4 行 |
+
+### `native()` 組出來的形狀
+
+```
+info   : _session_info(...)        ← 沿用原本注入用的欄位集合（slug、permission、
+                                     tokens.cache、summary…一個都沒少）
+messages[i]:
+  info  : {id, sessionID, role, time{created[,completed]}, agent, model{providerID,modelID}}
+          user      另外 summary{diffs: []}
+          assistant 另外 parentID（指上一則）、mode、finish、providerID、modelID、cost、
+                          path{cwd,root}、tokens{total,input,output,reasoning,cache{read,write}}
+  parts : 每個**非空行一個** text part（{id, sessionID, messageID, type: "text", text}）
+```
+
+- **一行一個 part**：這是 opencode 自己存多段回覆的方式，所以
+  `turns(native(turns(raw)))` 連行的切法都一樣（若把整輪併成一個 part，N 行會變
+  1 行，round trip 就不相等）。
+- **沒有 synthetic、沒有 attachment**：v5 的一個重點就是「打開就看得得到前文」，
+  附件或 synthetic part 在畫面上不是一般的訊息。
+- assistant 的 `parentID` 不能是 null（`/undo` 要靠它），所以每則 assistant 都指到
+  上一則。`cli._converted_turns` 保證 user 開頭、嚴格交替、每則非空、沒有 `[skip `
+  行，`native()` 因此不需要合併也不需要補訊息，照順序組即可（只留一行防呆，避免
+  違約的呼叫端生出空訊息）。
+
+### import 對 assistant 訊息比想像的嚴（一次講清楚，省得下次再猜）
+
+用真的 opencode 逐欄位試出來的，缺一個就是整份拒絕：
+
+| 缺什麼 | 錯誤 |
+|---|---|
+| `info.path`（assistant） | `Missing key at ["path"]` |
+| `info.tokens`（assistant） | 同上，只是換一個 key |
+| assistant 的 `summary` 放成 `{"diffs": []}` | `Expected boolean | undefined, got {"diffs":[]}`（`{diffs}` 是 **user** 訊息的形狀） |
+
+補齊之後：`import rc=0`、`export` 回來訊息數相同、`turns` 完全一致。
+
+### 實際跑過的指令
+
+```bash
+# 單元：round trip、assistant 的 parentID、時間遞增、可見 text part、native→start_native
+uv run pytest -q tests/unit/test_agent_opencode.py          # 52 passed
+
+# 真的 opencode（隔離的 HOME、/tmp/agora-it-opencode/proj、免費模型）
+uv run pytest -q -m integration tests/integration/test_opencode_real.py
+#   → 5 passed（其中 test_real_native_round_trip：turns → native → start_native
+#     → opencode run -s 一輪 → collect，回答裡有前文的關鍵字）
+
+# 欄位需求是這樣試出來的（不叫模型，2 秒一輪）
+python3 /tmp/agora-it-opencode/probe_assistant.py '{"path": …, "tokens": …}'
+```
+
+### 對 design.md 的建議
+
+1. **§5.4 第 2 點可以寫得更硬**：交給 `native()` 的 turns 保證 user 開頭、嚴格交替、
+   每則非空、沒有 `[skip ` 行——這是 `cli._converted_turns` 的既有行為，值得寫成
+   adapter 可以依賴的前提，不然每個 adapter 都會 defensive 地重建一遍。
+2. **§5.4 加一句「一行一個 text part」**：這是 opencode 端 round trip 能成立的關鍵，
+   也是畫面上看起來像原對話的原因。
