@@ -325,7 +325,10 @@ agora show     session <id> [--raw]
   - Agora 頁：`Enter` 接續（彈出小視窗選 agent，顯示工作目錄）、`m` 合併勾選的（至少 2 個，彈出小視窗選誰寫要約）、`e` 改標頭（$EDITOR）、`d` 刪除（彈出確認 y／n；有子 Session 時照指令模式拒絕）、`/` 篩選（清單上看得到的文字：id、agent、標題、目錄；空白分開的每個字都要出現）、`Tab` 換頁、`q` 離開。
   - 未匯入頁：`Enter` 匯入（勾選的全部，沒有勾選就是游標那一個）、`/`、`Tab`、`q`。
 - **多選**：空白鍵勾選（`✓`），只有 merge 和匯入用得到；接續、改標頭、刪除只作用在游標那一個，**刪除不做多選**，避免一次刪太多。
-- 執行動作時先離開全螢幕，照指令模式印出結果（接續時 agent 的 TUI 直接接手終端機），結束後按任意鍵回到選單並重新整理清單。
+- **動作不離開畫面**（2026-10-02 使用者要求）：匯入、合併、刪除都在小視窗裡跑，顯示「執行中…（秒數）」和指令模式印出的最新一行，跑完用結果視窗顯示輸出的最後幾行。只有兩個例外會暫時離開畫面：**接續**（agent 自己是全螢幕程式，要接手終端機）和**改標頭**（照舊開 $EDITOR，使用者決定）。
+- **第一次執行的引導**：沒有 rclone 時，視窗提示 `brew install rclone`；沒有 `~/.config/agora/rclone.conf` 時，視窗說明並提供「用瀏覽器授權」：執行 `rclone config create gdrive drive scope=drive.file`（rclone 內建的 client，使用者決定），授權完就同步一次，在 Drive 建立 `agora/`。輸出裡含 token 的行不顯示。Agora 頁是空的時候，提示去「未匯入」匯入。
+- **顏色**：標題列、agent（opencode 青、claude 橘、merge 綠）、勾選、按鍵、對話裡的 user／assistant 標題各有顏色；工具摘要變暗；終端機沒有顏色時照常可以用。
+- **完整對話**：預覽區顯示整份對話（Agora 頁是 `session.md` 的內文；未匯入頁平常只有最後一則，按 shift+tab 切到預覽時才用轉接器既有的 `export()`＋閱讀版讀整份），一開始停在最下面。**shift+tab 切換焦點**：焦點在預覽時，↑↓ 捲動、PgUp／PgDn 翻頁、g／G 到最上／最下，再按 shift+tab 回清單。`dir`、`tags` 固定在預覽最上面兩行。
 - 轉接器新增兩個方法：`list_sessions() -> [(session_id, dir, title, updated_at)]`（全部專案）、`last_message(session_id) -> (role, text) | None`。只讀 agent 自己的檔案或 CLI，不寫入。
 - 用標準函式庫的 `curses`，不加新的依賴。畫面計算（欄寬、上下或左右、捲動）與按鍵對應寫成純函式並寫單元測試；`curses` 只負責畫。
 - **只有人在終端機前才開**：stdin 或 stdout 不是 TTY 時，`agora` 不帶參數只印用法、exit 2，不列任何 session（review T1）。
@@ -368,7 +371,7 @@ agora show     session <id> [--raw]
 
 ## 8. 實作規模
 
-Python（uv）＋ rclone ＋ SQLite FTS5。**`src/` 的程式碼目標 2,300 行以內（2026-10-02 為了互動模式從 2,000 放寬，使用者決定），不含測試與 fixture；算法是不含空行、註解、docstring**（L4）。**算的是程式碼行**（不含空行、註解、docstring；2026-10-03 決定）：說明安全機制的 docstring 不該為了行數砍掉。第 4 版時檔案總行數約 2,200、程式碼行約 1,500。
+Python（uv）＋ rclone ＋ SQLite FTS5。**`src/` 的程式碼目標 2,600 行以內（2026-10-02 為了互動模式先從 2,000 放寬到 2,300、再放寬到 2,600，都是使用者決定），不含測試與 fixture；算法是不含空行、註解、docstring**（L4）。**算的是程式碼行**（不含空行、註解、docstring；2026-10-03 決定）：說明安全機制的 docstring 不該為了行數砍掉。第 4 版時檔案總行數約 2,200、程式碼行約 1,500。
 
 | 模組 | 內容 | 估計行數 |
 |---|---|---|

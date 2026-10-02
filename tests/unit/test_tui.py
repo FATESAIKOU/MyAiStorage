@@ -62,19 +62,50 @@ def test_import_tab_lists_only_sessions_not_in_agora():
     assert [r.key for r in rows] == ["opencode:ses_new", "opencode:ses_old"]      # newest first
 
 
-def test_previews_show_the_last_native_turn_and_never_fail():
+def test_previews_show_the_whole_history_and_never_fail():
     normal = _hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "一般")
-    merge = _hdr("01CCCCCCCCCCCCCCCCCCCCCCCC", "合併", relation="merge", agent=None)
-    paths, index = _index(
-        (normal, "## user\n第一句\n\n## assistant\n最後的回答\n"),
-        (merge, "## 要約\n\n### 「A」（原本是 opencode）\n甲\n\n### 「B」（原本是 claude）\n乙\n\n## 來源\n\n- x\n"))
-    assert tui.agora_preview(paths, index, normal["id"])[:2] == ["## assistant", "最後的回答"]
-    shown = tui.agora_preview(paths, index, merge["id"])
-    assert shown[0] == "### 「B」（原本是 claude）" and "乙" in shown and "- x" not in shown
-    assert "tags  驗收" in shown
-    assert tui.import_preview(FakeAgent("claude", [], ("assistant", "好\n了")), "s") == ["最後一則（assistant）", "好", "了"]
-    assert tui.import_preview(FakeAgent("claude", [], None), "s") == []          # nothing stored: no preview
-    assert tui.import_preview(FakeAgent("claude", [], "boom"), "s") == []
+    paths, index = _index((normal, "## user\n第一句\n\n## assistant\n最後的回答\n"))
+    pinned, history = tui.agora_preview(paths, index, normal["id"])
+    assert pinned == ["dir   /tmp/p", "tags  驗收"]
+    assert history[0] == "## user" and history[-1] == "最後的回答"              # the whole thing
+    pinned, history = tui.import_preview(FakeAgent("claude", [], ("assistant", "好\n了")), "s")
+    assert pinned[0] == "最後一則（assistant）" and history == ["好", "了"]
+    assert tui.import_preview(FakeAgent("claude", [], None), "s")[1] == []   # nothing stored: no preview
+    assert tui.import_preview(FakeAgent("claude", [], "boom"), "s")[1] == []
+
+
+def test_the_preview_opens_at_the_bottom_and_scrolls():
+    lines = [str(n) for n in range(10)]
+    assert tui.window(lines, 3, 0) == (["7", "8", "9"], 0)
+    assert tui.window(lines, 3, 2) == (["5", "6", "7"], 2)
+    assert tui.window(lines, 3, 99) == (["0", "1", "2"], 7)                  # kept within range
+    assert tui.window(lines[:2], 3, 5) == (["0", "1"], 0)
+
+
+def test_shift_tab_moves_the_keys_to_the_preview():
+    s = _state()
+    tui.handle(s, "BTAB")
+    assert s.focus == "preview"
+    tui.handle(s, "UP")
+    tui.handle(s, "PGUP")
+    assert s.back == 11 and s.cursor == 0                    # scrolls, the list does not move
+    assert tui.handle(s, "d") is None                        # list actions are off here
+    tui.handle(s, "G")
+    assert s.back == 0
+    tui.handle(s, "BTAB")
+    tui.handle(s, "DOWN")
+    assert s.focus == "list" and s.cursor == 1 and s.back == 0
+
+
+def test_setup_asks_for_rclone_then_for_authorization(monkeypatch, tmp_path):
+    paths = store.Paths(config=tmp_path / "config", cache=tmp_path / "cache", state=tmp_path / "state")
+    monkeypatch.setenv("AGORA_RCLONE", "/nonexistent/rclone")
+    assert tui.setup_needed(paths) == "rclone"
+    monkeypatch.setenv("AGORA_RCLONE", "/bin/sh")
+    assert tui.setup_needed(paths) == "auth"
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "rclone.conf").write_text("[gdrive]\n")
+    assert tui.setup_needed(paths) is None
 
 
 def _state():
@@ -166,7 +197,7 @@ def test_columns_line_up_by_display_width():
     rows = [tui.Row("a", ["ses_1", "claude", "/tmp/p", "標題"], ""),
             tui.Row("b", ["ses_22", "opencode", "/tmp/其他", "另一個"], "")]
     first, second = tui.aligned(rows)
-    assert tui.width(first.split("標題")[0]) == tui.width(second.split("另一個")[0])
+    assert [tui.width(cell) for cell in first[:-1]] == [tui.width(cell) for cell in second[:-1]]
 
 
 def test_a_failing_adapter_leaves_the_others_list(capsys):  # review U1
