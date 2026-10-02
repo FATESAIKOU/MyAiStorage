@@ -62,28 +62,23 @@ DEFAULT_CLI_TIMEOUT = 60
 
 
 def _timeout() -> int:
-    try:
-        return int(os.environ.get("AGORA_OPENCODE_TIMEOUT", "") or DEFAULT_CLI_TIMEOUT)
+    try:  # a test may set it to something silly; the default is not negotiable
+        return int(os.environ.get("AGORA_OPENCODE_TIMEOUT") or DEFAULT_CLI_TIMEOUT)
     except ValueError:
         return DEFAULT_CLI_TIMEOUT
 
 
 def _injected_info(session_id: str, title: str, created: int, workdir: Path) -> dict:
+    stamp = {"created": created, "updated": created}
     return {
-        "id": session_id,
-        "slug": "agora-handoff",
-        "projectID": "",
-        "directory": str(workdir),
-        "path": "",
-        "title": title,
-        "agent": "build",
+        "id": session_id, "slug": "agora-handoff", "title": title,
+        "directory": str(workdir), "projectID": "", "path": "",
+        "agent": "build", "version": "", "cost": 0, "permission": [],
         "model": {"id": "", "providerID": "opencode", "variant": "default"},
-        "version": "",
         "summary": {"additions": 0, "deletions": 0, "files": 0},
-        "cost": 0,
-        "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
-        "permission": [],
-        "time": {"created": created, "updated": created},
+        "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                   "cache": {"read": 0, "write": 0}},
+        "time": stamp,
     }
 
 
