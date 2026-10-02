@@ -107,13 +107,13 @@ def _summarize_timeout() -> int:
 
 
 def _last_reply(stdout: bytes) -> tuple[str | None, str | None]:
-    """(session id, last assistant text) out of `opencode run --format json`.
+    """(session id, last assistant message's text) out of `opencode run --format json`.
 
     One JSON event per line. The session id comes from the first event that
-    carries one, the text from the last `text` event - which is the reply, since
-    opencode emits a text event for every assistant message.
+    carries one; the reply is every `text` part of the last message that had
+    one, in order, since a long reply can arrive as several parts.
     """
-    session_id = text = None
+    session_id, parts, last = None, {}, None
     for line in stdout.decode("utf-8", "replace").splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -123,11 +123,11 @@ def _last_reply(stdout: bytes) -> tuple[str | None, str | None]:
         except json.JSONDecodeError:
             continue
         session_id = session_id or event.get("sessionID")
-        if event.get("type") == "text":
-            body = (event.get("part") or {}).get("text")
-            if isinstance(body, str) and body.strip():
-                text = body
-    return session_id, text
+        part = event.get("part") or {}
+        if event.get("type") == "text" and isinstance(part.get("text"), str) and part["text"].strip():
+            last = part.get("messageID")
+            parts.setdefault(last, []).append(part["text"])
+    return session_id, ("\n\n".join(parts[last]) if parts else None)
 
 
 def _session_info(created: int) -> dict:

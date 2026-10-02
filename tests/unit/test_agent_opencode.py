@@ -765,3 +765,11 @@ def test_summarize_without_a_session_id_does_not_invent_one(fake, tmp_path, monk
     with pytest.raises(AgentError, match="空回覆"):
         oc.ADAPTER.summarize("ZZPROMPT", workdir)
     assert list(workdir.glob("pending-*")) == []
+
+
+def test_a_reply_in_several_text_parts_is_kept_whole():
+    events = [{"type": "step_start", "sessionID": "ses_x", "part": {"messageID": "msg_a"}},
+              {"type": "text", "sessionID": "ses_x", "part": {"messageID": "msg_a", "text": "第一段"}},
+              {"type": "text", "sessionID": "ses_x", "part": {"messageID": "msg_a", "text": "第二段"}}]
+    stdout = "\n".join(json.dumps(e, ensure_ascii=False) for e in events).encode()
+    assert oc._last_reply(stdout) == ("ses_x", "第一段\n\n第二段")

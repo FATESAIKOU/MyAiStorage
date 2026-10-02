@@ -1,5 +1,5 @@
 """End to end through agora.cli.main, design v4 grammar:
-import -> search -> show -> continue (native) -> merge -> continue (converted)
+import -> search -> show -> continue (native) -> merge (summary) -> continue
 -> edit -> delete, with real Drive (agora-test/) and real claude.
 
 Continue spawns interactive claude, so AGORA_CLAUDE_CMD points at a sh
@@ -208,12 +208,15 @@ def test_import_search_show_continue_merge_continue_edit_delete(e2e):
     uuid.UUID(uuid2)
     created["uuids"].append(uuid2)
 
-    # 4. merge with the user's comma form, then continue off the merge: the
-    # parents' raws are converted into one Claude jsonl and resumed (design v5).
-    out = run_main(e2e, "merge", "session", f"{id1},", id2)  # E2: 'id1,' 'id2'
+    # 4. merge with the user's comma form: claude writes a summary headless (design v6),
+    # then continue off the merge loads only that summary and the source list.
+    out = run_main(e2e, "merge", "session", f"{id1},", id2, "--agent", "claude")  # E2: 'id1,' 'id2'
     idm = out.split()[0]
     assert idm.startswith("agora:")
     created["ulids"].append(idm.split(":", 1)[1])
+    shown = run_main(e2e, "show", "session", idm)
+    assert "## 要約" in shown and f"- {id1}「" in shown and f"- {id2}「" in shown
+    assert read_header(e2e, idm)["status"] == "draft"
     out = run_main(e2e, "continue", "session", idm, "--agent", "claude",
                    "--dir", str(proj))
     id3 = out.split()[0]
@@ -226,7 +229,7 @@ def test_import_search_show_continue_merge_continue_edit_delete(e2e):
     assert uuid3 not in (uuid1, uuid2)
     created["uuids"].append(uuid3)
     loaded = run_main(e2e, "show", "session", id3, "--raw")
-    assert cli.CONVERTED_NOTE in loaded and f"（以下來自 {id1}" in loaded
+    assert cli.MERGE_NOTE.split("{by}")[0] in loaded and f"- {id1}「" in loaded
 
     # 5. edit the merge's title; same id, new title, raw untouched.
     out = run_main(e2e, "edit", "session", idm, "--header", "title=合併後改名")

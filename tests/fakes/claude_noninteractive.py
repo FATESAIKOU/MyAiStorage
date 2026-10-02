@@ -6,6 +6,8 @@ of the TUI. Mapping (fixed self-made prompts only):
 
   [..., --resume <id>]            -> real `claude --resume <id> -p <P_NATIVE>`
   [..., --session-id <id>, <prompt>] -> real `claude --session-id <id> -p <prompt>`
+  [-p, ..., --no-session-persistence, ...] (merge's summary) -> the same argv on the
+                                   real claude with --model haiku, stdin passed through
 
 Every received argv is appended (JSON) to $FAKE_HOME/e2e-args.log so the test
 can tell native apart from reading-injected launches. HOME is reset to
@@ -41,7 +43,9 @@ def main(argv: list[str]) -> int:
         proc = subprocess.run(child, capture_output=True, text=True, timeout=60)
         sys.stdout.write(proc.stdout)
         return proc.returncode
-    if "--resume" in argv:
+    if "-p" in argv and "--no-session-persistence" in argv:   # summarize: already headless, no tools
+        child = [real, *argv, "--model", "haiku"]
+    elif "--resume" in argv:
         sid = argv[argv.index("--resume") + 1]
         child = [real, *GUARDS, "--resume", sid, "-p", P_NATIVE]
     elif "--session-id" in argv:
