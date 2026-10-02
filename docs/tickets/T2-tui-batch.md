@@ -1,6 +1,6 @@
 # T2 互動模式：多選、全選、進度、中斷、按鍵整理
 
-- 狀態：**等 T1 驗收**
+- 狀態：**已轉成 OpenSpec change `tui-batch-actions`**（2026-10-03）。之後以 `openspec/changes/tui-batch-actions/` 為準，這份只留作歷史。
 - 來源：使用者 2026-10-03 的回饋與決定
 - 負責：T1 驗收後再派（預定 impl2，熟 Textual 版的部分由 PM 審）
 

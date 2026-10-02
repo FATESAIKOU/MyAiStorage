@@ -6,7 +6,7 @@
 
 | 編號 | 標題 | 狀態 | 負責 | 備註 |
 |---|---|---|---|---|
-| T2 | [互動模式：多選、全選、進度、中斷、按鍵整理](T2-tui-batch.md) | 等 T1 | 待派 | T1 完成後轉成 change |
+| T2 | 互動模式：多選、全選、進度、中斷、按鍵整理 → change [`tui-batch-actions`](../../openspec/changes/tui-batch-actions/) | 規劃完成，等 T1 | impl3（Opus 恢復後）或 impl2 | review 看 specs 中 |
 | T1 | 指令模式：pull／push、批次動作的進度與續傳 → change [`command-batch-actions`](../../openspec/changes/command-batch-actions/) | 進行中 | impl1（tasks 2、3）、impl2（tasks 1） | review Q1～Q12 已併入 |
 | T0 | e2e 整合測試改成「continue 寫回原本的 Session」 | 完成 | impl1（3011d15）、impl2（745e5e8） | 兩邊都實跑過整合測試 |
 
