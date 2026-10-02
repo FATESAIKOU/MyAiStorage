@@ -652,6 +652,22 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
     return index
 
 
+def cloud_lost(agora_id: str) -> str:
+    """The one place the two ways out of a deleted session are worded (review L2).
+
+    With the marker itself, which is how the interactive mode asks: it shows this
+    same message rather than a second wording that can drift from it (T2 3.3).
+    """
+    return (f"{agora_id} 雲端沒有（別台機器刪掉了），不再寫回去；"
+            f"要傳回去用 agora push session {agora_id} --not-exist-upload，"
+            f"要刪掉本機這份用 agora pull session {agora_id} --not-exist-delete")
+
+
+def cloud_gone(index: "Index", agora_id: str) -> str | None:
+    """Why this session cannot be written to, or None (T1 3.3 / T2 3.3)."""
+    return None if index.cloud_has(agora_id.split(":", 1)[-1]) else cloud_lost(agora_id)
+
+
 def forget_local(paths: Paths, ulid: str) -> None:
     """Drop the local copy of a session: its index row, its search entry, its marker."""
     Index(paths).drop(ulid)

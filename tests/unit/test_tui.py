@@ -1167,3 +1167,51 @@ def test_no_action_starts_a_process_without_rows_to_send():
                 assert "先選" in str(app.query_one("#msg").render())
             assert not app._last_spawned
     _run(go)
+
+
+def test_continuing_a_session_the_cloud_lost_is_refused_on_screen():   # spec 3.3
+    """No agent is opened, and the message is the command mode's own - with the
+    two commands that settle it."""
+    paths, _ = _index((_hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "被刪了", sid="s1"), "## user\\nx\\n"))
+    store.Index(paths).mark_missing(["01AAAAAAAAAAAAAAAAAAAAAAAA"])
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+    launched = []
+    app.spawn, started = _spawn()
+    app.outside = lambda argv: launched.append(argv) or 0
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            said = app.screen.title_ + " " + " ".join(str(app.screen.lines).split())
+            assert "不能接續" in said and "雲端沒有" in said
+            assert "--not-exist-upload" in said and "--not-exist-delete" in said
+            assert not launched                       # no agent, no directory question
+    _run(go)
+
+
+def test_editing_a_session_the_cloud_lost_is_refused_too():
+    paths, _ = _index((_hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "被刪了", sid="s1"), "## user\\nx\\n"))
+    store.Index(paths).mark_missing(["01AAAAAAAAAAAAAAAAAAAAAAAA"])
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+    launched = []
+    app.outside = lambda argv: launched.append(argv) or 0
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("e")
+            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert "不能改標頭" in app.screen.title_
+            assert not launched                       # the editor never opened
+    _run(go)
+
+
+def test_the_refusal_is_the_command_modes_own_wording():
+    """One wording for both (T2 3.3): the screen asks the data, not cli.py."""
+    from agora import cli
+    paths, index = _index((_hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "被刪了", sid="s1"), "## user\\nx\\n"))
+    store.Index(paths).mark_missing(["01AAAAAAAAAAAAAAAAAAAAAAAA"])
+    refusal = store.cloud_gone(store.Index(paths), "agora:01AAAAAAAAAAAAAAAAAAAAAAAA")
+    assert refusal == cli._cloud_lost("agora:01AAAAAAAAAAAAAAAAAAAAAAAA")

@@ -987,6 +987,8 @@ class AgoraApp(App):
                     break      # Esc means stop this action, not half of it (review M2)
             return
         row = self.current()
+        if await self._refuse(row, "接續"):
+            return
         pick = await self.push_screen_wait(Choose("用哪個 agent 接續？", ["opencode", "claude"]))
         if pick is None:
             return
@@ -1055,15 +1057,32 @@ class AgoraApp(App):
             self.marked |= set(keys)
         self.show(keep=row.key if row else None)
 
-    def action_edit(self) -> None:
+    @work
+    async def action_edit(self) -> None:
         if self.tab != "agora":
             self.say("改標頭是 Agora 頁的動作")
             return
         row = self.current()
-        if row:
-            code = self.outside(argv_for("edit", [row], None, None)[0])   # the editor needs the terminal
-            self.reload()
-            self.say("完成" if code == 0 else "改標頭沒有成功", failed=code != 0)
+        if not row:
+            return
+        if await self._refuse(row, "改標頭"):
+            return
+        code = self.outside(argv_for("edit", [row], None, None)[0])   # the editor needs the terminal
+        self.reload()
+        self.say("完成" if code == 0 else "改標頭沒有成功", failed=code != 0)
+
+    async def _refuse(self, row: Row, what: str) -> bool:
+        """A session Drive no longer has is not written to from here either (T2 3.3).
+
+        The message is the command mode's own - it says which command settles it -
+        shown on the screen, because that is where the user is. Returns whether it
+        refused, so no agent is opened and no editor starts.
+        """
+        refusal = store.cloud_gone(self.index, row.key)
+        if not refusal:
+            return False
+        await self.push_screen_wait(Tell(f"不能{what}", refusal, ok=False))
+        return True
 
     @work
     async def action_pull(self) -> None:

@@ -191,9 +191,7 @@ def _lost_in_cloud(paths: store.Paths, agora_id: str) -> bool:
 
 def _cloud_lost(agora_id: str) -> str:
     """The one place the two ways out of a deleted session are worded (review L2)."""
-    return (f"{agora_id} 雲端沒有（別台機器刪掉了），不再寫回去；"
-            f"要傳回去用 agora push session {agora_id} --not-exist-upload，"
-            f"要刪掉本機這份用 agora pull session {agora_id} --not-exist-delete")
+    return store.cloud_lost(agora_id)
 
 
 def _refuse_if_gone(paths: store.Paths, index: store.Index, agora_id: str) -> None:
