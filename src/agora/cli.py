@@ -636,6 +636,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv:                 # the interactive mode (design 5.9)
+        from agora import tui
+        return tui.main(store.Paths.from_env())
     args = build_parser().parse_args(argv)
     paths = store.Paths.from_env()
     try:
