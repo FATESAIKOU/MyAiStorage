@@ -317,7 +317,7 @@ agora show     session <id> [--raw]
 
 - **兩個分頁**，用 Tab 切換：
   - **Agora**：已經存在 agora 的 Session（本機索引，開啟時同步一次）。每行：短 id、日期、agent（merge 顯示 `merge`）、標題。
-  - **未匯入**：這台機器上**所有專案**裡、還沒匯入的 opencode／Claude session。每行：agent 的 session id（截短）、agent、專案目錄、標題。已經匯入過的（`Index.by_source`）不列。
+  - **未匯入**：這台機器上**所有專案**裡、還沒匯入的 opencode／Claude session。每行：agent 的 session id（截短）、agent、專案目錄、標題。已經匯入過的（`Index.by_source`）不列；但匯入之後 agent 那邊又有更新的（`Listed.updated_at` 晚於 agora 的 `agora.updated_at`），會再列出來並標 `↻`，按 Enter 照 5.2 重新匯入（使用者決定，review T14）。
 - **預覽**：寬的終端機（寬度 ≥ 100 欄）放右側，窄的放在清單下方。內容是**原生紀錄裡的最後一則對話**，照原文顯示，**不另外產生**：
   - Agora 頁：`session.md` 內文的最後一輪（merge 是它的最後一節要約），加上 `dir`、`tags`。
   - 未匯入頁：轉接器從 agent 自己的檔案讀出最後一則 user／assistant 文字；讀不到就不顯示預覽。

@@ -118,7 +118,7 @@ _LIST_SQL = "select id, directory, title, time_updated from session order by tim
 #: transcript to show its last line is what T15 rules out.
 _LAST_SQL = "select id, data from message where session_id=? order by time_created desc, id desc limit ?"
 _LAST_SCAN = 20
-_PARTS_SQL = "select data from part where message_id=? order by time_created desc, id desc"
+_PARTS_SQL = "select data from part where message_id=? order by time_created, id"
 _PREVIEW_CHARS = 2000
 
 _warned_schema = False
@@ -575,12 +575,15 @@ class OpencodeAgent:
                 role = _field(data, "role")
                 if role not in ("user", "assistant"):
                     continue
+                texts = []   # a long reply is several text parts: all of them, in order
                 for (blob,) in connection.execute(_PARTS_SQL, (message_id,)):
                     if _field(blob, "type") != "text" or _field(blob, "synthetic") is True:
                         continue
                     text = _field(blob, "text")
                     if isinstance(text, str) and text.strip():
-                        return role, text.strip()[:_PREVIEW_CHARS]
+                        texts.append(text.strip())
+                if texts:
+                    return role, "\n\n".join(texts)[:_PREVIEW_CHARS]
         except sqlite3.Error:
             _warn_schema()
             return None

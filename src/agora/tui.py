@@ -127,12 +127,22 @@ def import_rows(index: store.Index, agents: list, paths: store.Paths | None = No
             listed = []
         for s in listed:
             key = f"{agent.name}:{s.session_id}"
-            if key in skip or (own and (s.dir or "").startswith(own)) or index.by_source(agent.name, s.session_id):
+            if key in skip or (own and (s.dir or "").startswith(own)):
                 continue
+            imported = index.by_source(agent.name, s.session_id)
+            if imported and not _newer(s.updated_at, index, imported[0]):
+                continue
+            mark = "↻ " if imported else ""   # imported before, talked to since: import again
             found.append((s.updated_at or "", Row(
-                key, [s.session_id[-12:], agent.name, _home(s.dir), s.title or ""],
+                key, [s.session_id[-12:], agent.name, _home(s.dir), mark + (s.title or "")],
                 f"{s.session_id} {agent.name} {s.dir or ''} {s.title or ''}", agent.name, s.dir)))
     return [row for _when, row in sorted(found, key=lambda pair: pair[0], reverse=True)]
+
+
+def _newer(updated_at: str | None, index: store.Index, ulid: str) -> bool:
+    """Whether the agent's session changed after agora last saved it."""
+    saved = str(h.agora_of(index.header(ulid) or {}).get("updated_at") or "")
+    return bool(updated_at and saved) and updated_at[:19] > saved[:19]
 
 
 def _home(path: str | None) -> str:

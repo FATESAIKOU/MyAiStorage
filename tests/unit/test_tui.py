@@ -177,3 +177,12 @@ def test_a_failing_adapter_leaves_the_others_list(capsys):  # review U1
             raise ValueError("odd file")
     rows = tui.import_rows(index, [Broken("claude", []), FakeAgent("opencode", [Listed("ses_ok", None, "好", None)])])
     assert [r.key for r in rows] == ["opencode:ses_ok"] and "claude 的 session 清單讀不到" in capsys.readouterr().err
+
+
+def test_a_session_talked_to_after_its_import_comes_back_marked():
+    _, index = _index((_hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "舊的", sid="ses_old"), "## user\nx\n"),
+                      (_hdr("01EEEEEEEEEEEEEEEEEEEEEEEE", "沒動", sid="ses_same"), "## user\nx\n"))
+    agent = FakeAgent("opencode", [Listed("ses_old", "/tmp/p", "舊的", "2026-10-03T00:00:00Z"),
+                                   Listed("ses_same", "/tmp/p", "沒動", "2026-10-01T00:00:00Z")])
+    rows = tui.import_rows(index, [agent])
+    assert [(r.key, r.cells[-1]) for r in rows] == [("opencode:ses_old", "↻ 舊的")]

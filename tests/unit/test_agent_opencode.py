@@ -926,3 +926,10 @@ def test_last_message_of_an_unknown_or_empty_session_is_none(store_db):
 def test_last_message_without_a_database_is_none(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "nothing-here"))
     assert oc.ADAPTER.last_message("ses_x") is None
+
+
+def test_last_message_joins_every_text_part_in_order(store_db):
+    db, _ = store_db
+    _add_session(db, "ses_parts000000000000c", "/tmp/p", "分段", 3000,
+                 turns=[("assistant", [{"type": "text", "text": "第一段"}, {"type": "text", "text": "第二段"}])])
+    assert oc.ADAPTER.last_message("ses_parts000000000000c") == ("assistant", "第一段\n\n第二段")
