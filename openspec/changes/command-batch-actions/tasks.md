@@ -33,5 +33,5 @@
 ## 4. 收尾（PM 驗收，review 審）
 
 - [ ] 4.1 `docs/design.md`（5.2、5.3、5.6、5.10）與 README 更新（**部分完成**：5.2／5.3／5.6／5.10 與 README 的指令已更新，design 5.10 的「雲端沒有」只留 TODO 指向 specs/session-sync/spec.md，等 impl1 第 3 節）
-- [ ] 4.2 整合測試（只用 `agora-test`、自編短對話）：pull、push、import 多個，實跑通過（**部分完成**：`tests/integration/test_import_batch.py` 的「import 一次多個」已實跑通過；pull／push 等 impl1 的 2.x）
+- [x] 4.2 整合測試（只用 `agora-test`、自編短對話）：pull、push、import 多個，實跑通過（`tests/integration/test_import_batch.py`：import 多個與其中一個失敗；`tests/integration/test_pull_push.py`：pull 把原始檔拿回來、push 覆寫 Drive、pull agent id 進全文快取與再 pull 略過、不給 id 報錯、push 拒絕 agent id。**「雲端沒有」那幾個情境等 impl1 第 3 節，測試裡已留 TODO**）
 - [ ] 4.3 review 審程式；PM 驗收；程式碼行數在 2,900 行內
