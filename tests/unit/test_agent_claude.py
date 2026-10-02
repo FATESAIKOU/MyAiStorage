@@ -489,12 +489,207 @@ def test_summarize_falls_back_to_plain_stdout(claude_env, tmp_path, monkeypatch)
     assert model is None
 
 
+# --- list_sessions / last_message (design 5.9, interactive mode) ----------------
+
+def test_list_sessions_reads_dir_title_and_stamp(claude_env):
+    listed = C.ADAPTER.list_sessions()
+    assert [item.session_id for item in listed] == [SID]
+    item = listed[0]
+    assert item.dir == "/tmp/my-proj.v2"          # from the jsonl's cwd
+    assert item.title == "把 CSV 轉成 Markdown 表格，先列三個步驟"
+    # updated_at is the file's mtime (T15: no full scan for the last stamp)
+    assert item.updated_at and item.updated_at.endswith("Z") and "T" in item.updated_at
+
+
+def test_list_sessions_skips_files_without_messages(claude_env, tmp_path):
+    """What /clear leaves behind: attachment lines only, no conversation."""
+    proj = claude_env["proj"]
+    empty = "22222222-2222-4333-8444-555555555555"
+    (proj / f"{empty}.jsonl").write_text(
+        '{"type": "attachment", "sessionId": "%s", "cwd": "/tmp/x"}\n' % empty)
+    meta_only = "33333333-2222-4333-8444-555555555555"
+    (proj / f"{meta_only}.jsonl").write_text(
+        '{"type": "user", "sessionId": "%s", "isMeta": true, "message": "Caveat"}\n' % meta_only)
+    assert [i.session_id for i in C.ADAPTER.list_sessions()] == [SID]
+
+
+def test_list_sessions_covers_every_project_and_sorts_newest_first(claude_env, tmp_path):
+    proj = claude_env["proj"]
+    other = proj.parent / "-tmp-other-proj"
+    other.mkdir()
+    lines = (proj / f"{SID}.jsonl").read_text().splitlines()
+    older = [json.dumps({**json.loads(l), "timestamp": "2026-09-01T00:00:00.000Z"})
+             for l in lines]
+    (other / "44444444-2222-4333-8444-555555555555.jsonl").write_text(
+        "\n".join(older) + "\n", encoding="utf-8")
+    listed = C.ADAPTER.list_sessions()
+    assert {i.session_id for i in listed} == {SID, "44444444-2222-4333-8444-555555555555"}
+    stamps = [i.updated_at for i in listed]
+    assert stamps == sorted(stamps, reverse=True)      # newest first
+    assert listed[0].session_id == SID                  # this one was written last
+
+
+def test_list_sessions_falls_back_to_the_file_time(claude_env):
+    (claude_env["proj"] / f"{SID}.jsonl").write_text(
+        '{"type": "user", "sessionId": "%s", "cwd": "/tmp/x", "message": "只有一句"}\n' % SID,
+        encoding="utf-8")
+    item = C.ADAPTER.list_sessions()[0]
+    assert item.updated_at and item.updated_at.endswith("Z") and "T" in item.updated_at
+    assert item.title == "只有一句"
+
+
+def test_list_sessions_tolerates_a_half_written_last_line(claude_env):
+    proj = claude_env["proj"]
+    text = (proj / f"{SID}.jsonl").read_text()
+    (proj / f"{SID}.jsonl").write_text(text + '{"type": "user", "mess', encoding="utf-8")
+    assert [i.session_id for i in C.ADAPTER.list_sessions()] == [SID]
+
+
+def test_list_sessions_when_there_are_none(claude_env):
+    shutil.rmtree(claude_env["home"] / ".claude")
+    assert C.ADAPTER.list_sessions() == []
+
+
+def test_last_message_returns_the_last_real_one(claude_env):
+    role, text = C.ADAPTER.last_message(SID)
+    # the fixture ends with local-command, isMeta, system and a compact summary
+    assert (role, text) == ("user", "之前在做表格轉換的規劃")
+
+
+def test_last_message_skips_noise_tail(claude_env):
+    proj = claude_env["proj"]
+    tail = [
+        {"type": "user", "sessionId": SID, "message": "<command-name>/exit</command-name>"},
+        {"type": "assistant", "sessionId": SID, "message": {"content": [{"type": "text", "text": "最後一句回覆"}]}},
+        {"type": "user", "sessionId": SID, "isMeta": True, "message": "Caveat: 系統"},
+    ]
+    with (proj / f"{SID}.jsonl").open("a", encoding="utf-8") as f:
+        for o in tail:
+            f.write(json.dumps(o, ensure_ascii=False) + "\n")
+    assert C.ADAPTER.last_message(SID) == ("assistant", "最後一句回覆")
+
+
+def test_last_message_none_when_no_real_message(claude_env):
+    only_meta = "55555555-2222-4333-8444-555555555555"
+    (claude_env["proj"] / f"{only_meta}.jsonl").write_text(
+        '{"type": "user", "sessionId": "%s", "isMeta": true, "message": "Caveat"}\n' % only_meta,
+        encoding="utf-8")
+    assert C.ADAPTER.last_message(only_meta) is None
+    assert C.ADAPTER.last_message("66666666-2222-4333-8444-555555555555") is None  # T15: no raise
+
+
+def test_last_message_caps_the_text(claude_env):
+    long_text = "字" * 5000
+    sid = "77777777-2222-4333-8444-555555555555"
+    (claude_env["proj"] / f"{sid}.jsonl").write_text(
+        json.dumps({"type": "user", "sessionId": sid, "cwd": "/tmp/x",
+                    "message": {"role": "user", "content": [{"type": "text", "text": long_text}]}},
+                   ensure_ascii=False) + "\n", encoding="utf-8")
+    role, text = C.ADAPTER.last_message(sid)
+    assert role == "user"
+    assert len(text) == C.PREVIEW_MAX <= 2000
+    assert text == long_text[-C.PREVIEW_MAX:]
+
+
+def test_last_message_reads_only_the_tail(claude_env, monkeypatch):
+    """A huge file must not be read whole (review T15)."""
+    sid = "88888888-2222-4333-8444-555555555555"
+    path = claude_env["proj"] / f"{sid}.jsonl"
+    with path.open("w", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "user", "sessionId": sid, "cwd": "/tmp/x",
+                            "message": {"role": "user", "content": "開頭那句"}},
+                           ensure_ascii=False) + "\n")
+        for _ in range(4000):
+            f.write(json.dumps({"type": "user", "sessionId": sid,
+                                "message": {"role": "user", "content": "填充" * 200}},
+                               ensure_ascii=False) + "\n")
+        f.write(json.dumps({"type": "user", "sessionId": sid, "cwd": "/tmp/x",
+                            "message": {"role": "user", "content": "結尾那句"}},
+                           ensure_ascii=False) + "\n")
+    assert path.stat().st_size > C.TAIL_BYTES
+    seen = []
+    real_open = Path.open
+
+    def spy(self, *args, **kwargs):
+        if self == path:
+            seen.append(kwargs.get("mode", args[0] if args else "r"))
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", spy)
+    assert C.ADAPTER.last_message(sid) == ("user", "結尾那句")
+    assert seen == ["rb"], seen          # only the binary tail read
+
+
+def test_last_message_ignores_a_half_written_tail(claude_env):
+    sid = "99999999-2222-4333-8444-555555555555"
+    good = json.dumps({"type": "user", "sessionId": sid, "cwd": "/tmp/x",
+                       "message": {"role": "user", "content": "完整那句"}}, ensure_ascii=False)
+    (claude_env["proj"] / f"{sid}.jsonl").write_text(
+        good + "\n" + '{"type": "user", "message": "半句', encoding="utf-8")
+    assert C.ADAPTER.last_message(sid) == ("user", "完整那句")
+
+
+def test_list_sessions_does_not_reread_an_unchanged_file(claude_env):
+    C._LIST_CACHE.clear()
+    calls = []
+    real = C._peek_session
+
+    def counted(path):
+        calls.append(path)
+        return real(path)
+
+    import unittest.mock
+    with unittest.mock.patch.object(C, "_peek_session", counted):
+        first = C.ADAPTER.list_sessions()
+        assert len(calls) == 1
+        second = C.ADAPTER.list_sessions()
+        assert len(calls) == 1, "an unchanged file should come from the cache"
+        assert [i.session_id for i in first] == [i.session_id for i in second]
+    path = claude_env["proj"] / f"{SID}.jsonl"
+    path.write_text(path.read_text() + "\n", encoding="utf-8")   # size changed
+    with unittest.mock.patch.object(C, "_peek_session", counted):
+        C.ADAPTER.list_sessions()
+    assert len(calls) == 2
+
+
+def test_list_sessions_only_reads_the_head(claude_env):
+    sid = "aaaaaaaa-2222-4333-8444-555555555555"
+    path = claude_env["proj"] / f"{sid}.jsonl"
+    with path.open("w", encoding="utf-8") as f:
+        for i in range(300):        # the title lives in line 1
+            f.write(json.dumps({"type": "user", "sessionId": sid, "cwd": "/tmp/deep",
+                                "message": {"role": "user", "content": f"第{i}句"}},
+                               ensure_ascii=False) + "\n")
+    listed = {i.session_id: i for i in C.ADAPTER.list_sessions()}
+    assert listed[sid].title == "第0句"          # read from the head, not the tail
+    assert listed[sid].dir == "/tmp/deep"
+
+
+def test_config_dir_follows_xdg_when_nothing_else_is_set(monkeypatch):
+    monkeypatch.delenv("AGORA_CLAUDE_HOME", raising=False)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("XDG_DATA_HOME", "/tmp/zz-xdg")
+    assert C.config_dir() == Path("/tmp/zz-xdg") / "claude"
+    assert C.projects_dir() == Path("/tmp/zz-xdg") / "claude" / "projects"
+    monkeypatch.delenv("XDG_DATA_HOME")
+    assert C.config_dir() == Path(os.path.expanduser("~")) / ".claude"
+
+
+def test_list_and_last_message_survive_unreadable_files(claude_env):
+    broken = claude_env["proj"] / "bbbbbbbb-2222-4333-8444-555555555555.jsonl"
+    broken.write_bytes(b"\xff\xfe not utf-8 but text-replaceable")
+    assert C.ADAPTER.list_sessions()                        # no raise, still lists
+    assert C.ADAPTER.last_message("cccccccc-2222-4333-8444-555555555555") is None
+
+
 # --- adapter surface -------------------------------------------------------------
 
 def test_adapter_surface():
     assert C.ADAPTER.name == "claude"
     assert hasattr(C.ADAPTER, "export")
     assert hasattr(C.ADAPTER, "summarize")
+    assert hasattr(C.ADAPTER, "list_sessions")
+    assert hasattr(C.ADAPTER, "last_message")
     assert hasattr(C.ADAPTER, "turns")
     assert hasattr(C.ADAPTER, "native")
     assert hasattr(C.ADAPTER, "start_native")

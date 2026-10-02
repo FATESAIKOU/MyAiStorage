@@ -25,7 +25,15 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
-from agora.agents.base import AgentError, Exported, Launch, Turns, agent_cmd, tool_line
+from agora.agents.base import (
+    AgentError,
+    Exported,
+    Launch,
+    Listed,
+    Turns,
+    agent_cmd,
+    tool_line,
+)
 
 FORMAT = "claude-jsonl/1"
 TITLE_MAX = 60
@@ -42,14 +50,102 @@ _SILENT_BLOCKS = frozenset({"tool_result", "thinking", "redacted_thinking"})
 # Local-command bookkeeping inside user lines (review CL2).
 _LOCAL_MARKERS = ("<command-name>", "<local-command-stdout>", "<local-command-caveat>")
 
+# Cheap field readers for list_sessions: they scan every session file on the
+# machine, so we look at raw text and only json.loads the few lines we need.
+_TYPE_RE = re.compile(r'"type"\s*:\s*"([A-Za-z_]+)"')
+_CWD_RE = re.compile(r'"cwd"\s*:\s*("(?:[^"\\]|\\.)*")')
+_STAMP_RE = re.compile(r'"timestamp"\s*:\s*"([^"]*)"')
+TITLE_HEAD_LINES = 40        # how far into a session the title is taken from (T15)
+PREVIEW_MAX = 2000           # last_message text cap (T15)
+TAIL_BYTES = 1 << 20         # at most this much of the end of a file is read
+_LIST_CACHE: dict = {}       # (path, mtime, size) -> (title, dir, has_text)
+
+
+def _forget_other_keys(keep: tuple) -> None:
+    """Keep the cache to the files we just walked, so it cannot grow forever."""
+    for key in [k for k in _LIST_CACHE if k != keep]:
+        del _LIST_CACHE[key]
+
+
+def _peek_session(path: Path) -> tuple[str | None, str | None, bool]:
+    """(title, cwd, has_text) from the head of a session file; no full parse."""
+    title = directory = None
+    has_text = False
+    try:
+        with path.open(encoding="utf-8", errors="replace") as f:
+            for n, line in enumerate(f):
+                if n >= TITLE_HEAD_LINES:
+                    break
+                kind = _TYPE_RE.search(line)
+                if not kind or kind.group(1) not in ("user", "assistant", "summary"):
+                    continue
+                if directory is None:
+                    directory = _json_str(_CWD_RE.search(line))
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                if _is_noise(o):
+                    continue
+                if kind.group(1) == "summary" and title is None \
+                        and isinstance(o.get("summary"), str) and o["summary"]:
+                    title = o["summary"][:TITLE_MAX]
+                elif kind.group(1) == "user" and title is None:
+                    text = _line_text(o)
+                    if text:
+                        title, has_text = text[:TITLE_MAX], True
+                elif kind.group(1) == "assistant":
+                    has_text = has_text or bool(_line_text(o))
+    except OSError:
+        return None, None, False
+    return title, directory, has_text
+
+
+def _tail_lines(path: Path, want: int) -> list[str]:
+    """Whole lines from the end of a file, reading at most TAIL_BYTES."""
+    try:
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - TAIL_BYTES))
+            blob = f.read()
+    except OSError:
+        return []
+    text = blob.decode("utf-8", errors="replace")
+    lines = text.split("\n")
+    if size > TAIL_BYTES and len(lines) > 1:
+        lines = lines[1:]          # the first one may be cut in half
+    kept, total = [], 0
+    for line in reversed(lines):
+        if total + len(line) > want:
+            break
+        total += len(line)
+        kept.append(line)
+    return kept
+
+
+def _json_str(match: re.Match | None) -> str | None:
+    return json.loads(match.group(1)) if match else None
+
+
+def _line_text(o: dict) -> str | None:
+    """The plain text of a user/assistant line, or None if there is none."""
+    lines = _user_lines(o) if o.get("type") == "user" else _assistant_lines(o)
+    if not lines:
+        return None
+    return "\n".join(line for line in lines if not line.startswith("[skip ")).strip() or None
+
 
 def config_dir() -> Path:
-    """Where Claude keeps projects/ (review CL4):
-    $AGORA_CLAUDE_HOME/.claude, then $CLAUDE_CONFIG_DIR, then ~/.claude."""
+    """Where Claude keeps projects/ (review CL4, T15):
+    $AGORA_CLAUDE_HOME/.claude, then $CLAUDE_CONFIG_DIR, then
+    $XDG_DATA_HOME/claude, then ~/.claude. Never a hard-coded home."""
     if os.environ.get("AGORA_CLAUDE_HOME"):
         return Path(os.environ["AGORA_CLAUDE_HOME"]) / ".claude"
     if os.environ.get("CLAUDE_CONFIG_DIR"):
         return Path(os.environ["CLAUDE_CONFIG_DIR"])
+    if os.environ.get("XDG_DATA_HOME"):
+        return Path(os.environ["XDG_DATA_HOME"]) / "claude"
     return Path.home() / ".claude"
 
 
@@ -358,6 +454,68 @@ class ClaudeAgent:
         return Launch(argv=[agent_cmd("claude"), "--resume", new_id],
                       cwd=workdir_str, agent_session_id=new_id,
                       before_count=_count_messages(_parse_all(rewritten)))
+
+    def list_sessions(self) -> list[Listed]:
+        """Every session under projects/, across all projects (design 5.9).
+
+        Read-only, bounded and cached (review T15): the title comes from the
+        first few lines, the timestamp from the file, and a file already seen
+        with the same (mtime, size) is not read again - a project can hold
+        hundreds of MB of jsonl. A file with no real user/assistant text (what
+        a post-/clear session leaves behind) is skipped. Unreadable files are
+        skipped, never raised.
+        """
+        found: list[Listed] = []
+        root = projects_dir()
+        if not root.is_dir():
+            return found
+        try:
+            paths = [p for p in root.glob("*/*.jsonl") if p.is_file() and not p.is_symlink()]
+        except OSError:
+            return found
+        for path in sorted(paths):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            key = (str(path), stat.st_mtime, stat.st_size)
+            cached = _LIST_CACHE.get(key)
+            if cached is None:
+                cached = _peek_session(path)
+                _LIST_CACHE[key] = cached
+                _forget_other_keys(key)
+            title, directory, has_text = cached
+            if not has_text:
+                continue
+            found.append(Listed(
+                session_id=path.stem, dir=directory, title=title,
+                updated_at=datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+                .strftime("%Y-%m-%dT%H:%M:%SZ")))
+        found.sort(key=lambda item: item.updated_at or "", reverse=True)
+        return found
+
+    def last_message(self, session_id: str) -> tuple[str, str] | None:
+        """(role, text) of the last real message, at most PREVIEW_MAX chars.
+
+        Reads only the tail of the file (review T15/T12): local commands and
+        isMeta lines are skipped, a half-written last line is ignored, and a
+        session we cannot read gives None instead of raising.
+        """
+        try:
+            path = find_jsonl(session_id)
+        except (AgentError, OSError):
+            return None
+        for line in _tail_lines(path, PREVIEW_MAX * 8):
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            if o.get("type") not in ("user", "assistant") or _is_noise(o):
+                continue
+            text = _line_text(o)
+            if text:
+                return o["type"], text[-PREVIEW_MAX:]
+        return None
 
     def summarize(self, prompt: str, workdir: Path) -> tuple[str, str | None]:
         """One headless `claude -p` that cannot use any tool (design 5.3, review Y3).
