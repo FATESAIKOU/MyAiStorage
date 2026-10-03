@@ -25,9 +25,9 @@ import、continue、merge、edit MUST 在把 Session 存進本機（鏡像與 ou
 
 **同一時間 MUST 只有一個上傳在跑，不論前景或背景**：
 - 指令開頭的同步遇到正在跑的上傳時，MUST 跳過 outbox，交給正在跑的那一個，提醒的說法是「背景上傳中，N 筆」，不是「沒上傳成功」；
-- `push session <id>…` MUST 等正在跑的上傳結束，再自己送，直到傳完才結束。
+- `push session <id>…` MUST 等到它給的那幾個 Session 都離開 outbox、Drive 上的 md5 也對了才結束：有上傳在跑時就等（不設逾時，每 10 秒在 stderr 說一次還在等，Ctrl-C 可以中斷），沒有的話自己送。
 
-背景程序開始之後才存進 outbox 的 Session，MUST 在它結束前一併傳完，或由它結束時接著啟動的下一輪傳完，不能留到「下一個指令」。背景上傳失敗時，Session MUST 留在 outbox，下一個會連 Drive 的指令 MUST 再試，並提醒還有幾個沒上傳。
+背景程序開始之後才存進 outbox 的 Session，MUST 在它結束前一併傳完，或由它結束時接著啟動的下一輪傳完，不能留到「下一個指令」。背景上傳失敗時，Session MUST 留在 outbox。下一個會連 Drive 的指令 MUST **啟動背景**再試，而不是在前景上傳，並提醒還有幾個沒上傳。只有 `push` 在前景送。
 
 寫回既有 id 之前的雲端檢查（continue 開始前與結束時、edit 存檔前）照 `session-sync` 的規定，仍然在前景做。
 
@@ -45,7 +45,7 @@ import、continue、merge、edit MUST 在把 Session 存進本機（鏡像與 ou
 
 #### Scenario: push 等背景
 - **WHEN** 背景正在上傳時執行 `agora push session X`
-- **THEN** push 等背景結束後才送 X，結束時 X 已經在 Drive 上
+- **THEN** push 等到 X 離開 outbox 才結束，結束時 X 已經在 Drive 上
 
 #### Scenario: 互動模式等的不是背景上傳
 - **WHEN** 在互動模式裡匯入，背景上傳還沒結束
@@ -54,11 +54,13 @@ import、continue、merge、edit MUST 在把 Session 存進本機（鏡像與 ou
 ### Requirement: 只有自己驗過的版本離開 outbox
 一筆 outbox 項目 MUST 只在「outbox 裡**現在**的 `session.md`，md5 等於 Drive 上的、也等於這一輪上傳的那一個」時才被移除。上傳期間被新版本取代的，MUST 留在 outbox，等下一輪再傳。
 
-上傳一筆**更新既有 id** 的項目之前，MUST 用這一輪列檔的結果確認那個 id 還在 Drive 上。不在的話（別台刪掉了），MUST NOT 傳，留在 outbox 並提醒，處理方式與 `session-sync` 的雲端沒有相同。
+上傳一筆**更新既有 id** 的項目之前，MUST 用這一輪列檔的結果確認那個 id 還在 Drive 上。「更新既有 id」在前景寫入的當下決定：continue 寫回、edit、import 的原地更新、中斷接續的收尾寫回是；新建的 import、merge、另存的 Session 不是。
+
+不在 Drive 上的話（別台刪掉了），MUST NOT 把它傳回去，而是**另存成一個新的 Session**：新的 id，標頭的 parents 指向原本的 id，relation 照原本的寫入（continue 或 edit）。原本的 id 維持被刪的狀態。這和 `session-sync`「接續到一半被別台刪掉的」是同一個規則（使用者 10-03 決定）。
 
 #### Scenario: 別台在上傳前刪掉了
 - **WHEN** X 的新版本在 outbox，背景上傳之前另一台機器刪掉了 X
-- **THEN** X 沒有被傳回 Drive；提醒說 X 雲端沒有，並提示兩個選擇
+- **THEN** X 沒有被傳回 Drive；這次的修改另存成新的 Session Y（parents 指向 X），提醒說明 X 已被別台刪除、修改存成了 Y
 
 ### Requirement: delete 先在本機
 `delete session <id>… --yes` MUST 在前景做三件事，然後指令就結束：

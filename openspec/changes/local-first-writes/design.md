@@ -21,7 +21,7 @@
 
 ## Decisions
 
-（2026-10-03 依 review `docs/review/T3.md` 補上 H1、M1～M7 與 L1～L7。）
+（2026-10-03 依 review `docs/review/T3.md` 補上 H1、M1～M7 與 L1～L7；再依 `T3-sec1.md` 補上 N1～N10，N5 由使用者決定。）
 
 ### 本機完整的一份
 - `remember` 除了 `session.md`，也把標頭指到的原始檔放進鏡像，並刪掉同一個 ULID 底下其他的 `raw-*`。
@@ -40,12 +40,14 @@
   - `env` 原封不動傳下去，包含 `AGORA_FOLDER_NAME`、`AGORA_CACHE_DIR` 等等。
   - stdout 與 stderr 寫到 `<state>/upload.log`。啟動時檔案超過 1 MB，就只留最後 256 KB。
 - **一定不能接呼叫端的 stdout**，否則互動模式的讀取端讀不到 EOF（review T2-archive X1 的同一個道理）。
-- 測試開關：`AGORA_UPLOAD=inline` 時，不啟動背景程序，在前景同步跑同一個函式。既有的單元測試照常假設「指令結束時 Drive 上已經有了」，用這個開關，改動最少。
+- 測試開關：`AGORA_UPLOAD=inline` 時，不啟動背景程序，在前景同步跑同一個函式（上傳與刪除佇列都處理）。既有的單元測試照常假設「指令結束時 Drive 上已經有了」，用這個開關，改動最少。
+- 啟動 helper 回傳三種結果（N1）：已啟動背景／已在前景傳完（inline）／失敗。inline 時上傳失敗、或背景啟動失敗，都回 exit 3，訊息照舊（既有測試 `test_upload_failure_exits_3_and_stays_searchable` 等不變）。
 
 ### 一把鎖，前景背景共用（M1）
 - `<state>/upload.lock` 的 flock。所有會上傳 outbox 的地方都拿它：背景、sync 裡的 `push_outbox`、`push session`。
-- 背景與 sync：非阻塞。拿不到就跳過 outbox；sync 的提醒說「背景上傳中，N 筆」（L5）。
-- `push session`：阻塞等鎖，60 秒逾時；等的時候在 stderr 說「背景上傳中，等它結束…」。
+- 背景：非阻塞，拿不到就結束。
+- 指令開頭的 sync（N3）：**不在前景上傳**。outbox 或刪除佇列不是空的，就透過 helper 啟動背景；拿不到鎖代表已經有一個在跑，什麼都不做。提醒說「背景上傳中，N 筆」（L5）。
+- `push session`（N2、N8）：等的是「它給的那幾個 id 離開 outbox、Drive 上 md5 對了」，不是背景整個結束。拿得到鎖就自己用批次上傳送；拿不到就每 1 秒看一次，每 10 秒在 stderr 說「背景上傳中，還在等…」。不設逾時，Ctrl-C 可以中斷。
 - **晚到的**：背景放開鎖之後，再看一次 outbox 與刪除佇列，不是空的就再拿一次鎖、再跑一輪。因為 stage 一定先寫 outbox、再啟動背景，所以「正在跑的那一個在放開鎖後看到」與「新啟動的那一個拿得到鎖」至少有一個成立，不會留到下一個指令。
 
 ### 只刪自己驗過的版本（H1）
@@ -54,11 +56,21 @@
   - 裡面的 `session.md` md5 等於這一輪的、也等於 Drive 上的，才刪掉；
   - 不相符（上傳期間被新版本取代）就改名回去，下一輪再傳。
 - `stage` 遇到 `.done-<ULID>` 時，把它當成已經不在：照常建新的 `outbox/<ULID>`。背景改名回去之前，發現 `<ULID>` 已經存在，就直接刪掉 `.done-`，因為新的版本比較新。
-- `outbox_ulids` 的啟動清理：沒有人在跑時，留下來的 `.done-<ULID>` 改名回去（再傳一次是安全的）。
+- `outbox_ulids` 的清理（N6）：先非阻塞地試拿 `upload.lock`，拿得到（沒有人在跑）才把留下來的 `.done-<ULID>` 改名回去（再傳一次是安全的）。
+- 交錯（N7）：
+  - 改名 `outbox/X` → `.done-X` 時 X 剛好不在（`stage` 正在換），會丟 `FileNotFoundError`，當成「被取代了」，跳過。
+  - 改名回去時 X 已經是新的（macOS 會 ENOTEMPTY），刪掉 `.done-X`。
+  - 第 5 步清舊 `raw-*` 只對這一輪離開 outbox 的那幾筆做。
 
-### 更新既有 id 前確認還在（L7）
-- 這一輪列檔的結果，就是判斷依據；第 3 步的列檔挪到第 1 步之前做，同一次列檔兩邊共用，所以總次數不變。
-- 標頭的 `agora.previous_sources` 有值，或索引裡本來就有這個 ULID，代表這是**更新既有 id**。這時如果列檔裡沒有它，就不傳，留在 outbox，提醒時用 `cloud_lost` 的說法。
+### 更新既有 id 前確認還在（L7、N4、N5）
+- 「是不是更新既有 id」在**前景寫入的那一刻**決定（N4）：`_save` 寫回一個原本就存在的 id 時，在 `outbox/<ULID>/.update` 放一個空檔。這些情況是：continue 寫回、edit、import 的原地更新、`recover_pending` 寫回。新建的 id 不放，包括新的 import、merge、另存的 Y。`stage` 換掉資料夾時保留這個記號。背景只看這個記號，不看索引；索引裡本來就有所有剛寫的 Session。
+- 這一輪列檔的結果就是判斷依據。有 `.update` 的項目時，第 1 步先列檔；沒有就跳過。
+- 有 `.update`、但 Drive 上沒有的（N5，使用者決定）：不傳回去，改成**另存成新的 Session**。做法沿用 continue 的 F4（`_finish` 另存成 Y）：
+  - 新的 ULID、parents 指向 X、relation 照原本的；
+  - 存進 outbox（沒有 `.update`）並 `remember`；
+  - 丟掉 X 的那一筆 outbox；
+  - 寫一行記錄，下一個指令開頭提醒「X 已被別台刪除，這次的修改存成了 Y」。
+  X 留在本機，照 sync 的規則標成雲端沒有。
 
 ### 一批的上傳（M4）
 1. 列檔一次（`list_sessions`）。
@@ -86,6 +98,7 @@
   - `sync` 列檔看到時，不放進索引，也不算進 `mark_missing`；
   - `pull`、`push`（含 `--not-exist-upload`）拒絕，說「正在刪除」（M5）；
   - 每個指令開頭提醒「有 N 個等著移到 Drive 垃圾桶」（L4）。背景正在跑時不提醒。
+  - 判斷都用同一個 `store.queued_for_trash(paths)`（N10）。
 
 ### exit code（M2）
 - 存進本機並成功啟動背景：exit 0。
