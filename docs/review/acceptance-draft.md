@@ -5,6 +5,8 @@
 > **第 2 版**（2026-10-03）：PM 用假資料實跑過兩段（`docs/tickets/T1-pm-run.md`、`docs/tickets/T2-pm-run.md`）。訊息改成 HEAD `a29fd0d` 實際印出的字（review 在副本裡用 fake rclone／fake agent 逐條印出來對過）；impl2 正在改 P3／P4 的訊息，那兩處標了「**改到一半**」，以改完之後的 HEAD 為準。實跑時發現兩個步驟照原本的順序會失敗（6.10、7.17），已經改了順序，見各步旁的說明。
 >
 > **第 3 版**（2026-10-03）：照 HEAD `428b0b3` 的程式更新：T1 的 P2～P4（`bbc7a4a`）、T2 的 Q1～Q4（`5ae265b`）都已經修好了，相關的步驟改成修好之後的畫面和訊息，已知問題也拿掉了這幾項。進度條在正常結束時會不會到 N/N（final-checks E2），impl1 正在改，那一處標了「**改到一半**」。
+>
+> **第 4 版**（2026-10-03）：加上**第三段：T3 先存本機、背景上傳與刪除**（第 8～15 節），照 `openspec/changes/local-first-writes` 的 spec 寫。T3 第 3、4 節（背景刪除、互動模式的說法）在寫這一版時還在 impl1 的工作目錄裡、沒有 commit，訊息是照 spec 和工作目錄目前的字寫的，以 commit 之後的 HEAD 為準。第 0 節的安裝改成 `--force`（使用者現在裝的是穩定版），清理的最後加上「換回穩定版」。
 
 全程只用 Drive 上的 `agora-test`，以及 `/tmp/agora-acc` 底下的目錄。對話一律用自編短句（例如「把 CSV 轉成 Markdown 表格，先列三個步驟」），不要貼真實內容。做完照最後一節清掉。
 
@@ -14,8 +16,9 @@
 
 ## 0. 準備（只做一次）
 
+先照第 8.1～8.4 步（在第三段的開頭），把 agora 換成這個工作目錄的版本，並確認 Drive 的資料夾（使用者平常用的是穩定版 `9baa0e5`，不換的話驗的是舊程式）。然後：
+
 ```bash
-cd ~/.herdr/worktrees/MyAiStorage/phase1-spike && uv tool install --editable .
 mkdir -p /tmp/agora-acc/proj
 cat > /tmp/agora-acc/env.sh <<'EOF'
 export AGORA_FOLDER_NAME=agora-test
@@ -167,6 +170,172 @@ T2（`docs/tickets/T2-pm-run.md`；Q1～Q4 已經修好（`5ae265b`），那幾�
 
 ---
 
+# 第三段：T3 先存本機、背景上傳與刪除
+
+對照 `openspec/changes/local-first-writes/specs/local-first-writes/spec.md`。這一段可以單獨做：沒做前兩段的話，先做 8.1～8.4，再做第 0 節的 `env.sh`、`env2.sh`、`git init`（第 0 節的三段 opencode 對話這一段用不到），然後回來做第 8 節表格下面的兩個小工具（它們會改 `env.sh`，所以要在 `env.sh` 建好之後做）。
+
+這一段要看的，多半是「指令馬上結束，**不久之後** Drive 上才有／才沒有」。換成自己的 OAuth client 之後，每次 rclone 約 0.6～0.8 秒，所以背景通常幾秒內就做完了；「等 10 秒」就夠。背景的輸出不會出現在終端機，而是寫在 `/tmp/agora-acc/state/upload.log`。
+
+## 8. 準備：換成這個工作目錄的版本
+
+| # | 指令 | 算過 |
+|---|---|---|
+| 8.1 | `cd ~/.herdr/worktrees/MyAiStorage/phase1-spike && git status --short src` | **什麼都沒印**。editable 安裝跑的是工作目錄裡**現在**的程式，包括隊員還沒 commit 的改動；有印出東西，就是還有人沒 commit，先停下來問 PM（寫這一版時 impl1 的第 3、4 節還沒 commit） |
+| 8.2 | `uv tool install --force --editable ~/.herdr/worktrees/MyAiStorage/phase1-spike` | 裝好；`--force` 是因為現在裝的是穩定版 |
+| 8.3 | `cat "$(uv tool dir)/agora/uv-receipt.toml"` | `requirements` 那一行是 `editable = "/Users/…/phase1-spike"`（換回穩定版之後會是 `directory = "…/agora-stable/9baa0e5"`） |
+| 8.4 | `python3 -c "import json,os; print('agora-test' in json.load(open(os.path.expanduser('~/.config/agora/config.json'))).get('folders', {}))"` | 只印 `True` 或 `False`，不印 ID。Drive 已經換成使用者自己的 OAuth client（`docs/tickets/T5-own-oauth-client.md`）。scope 是 `drive.file`，新的 client 看不到舊 client 建的 `agora-test/`。**`False`**：第一個連 Drive 的指令會用新的 client 重建一個 `agora-test/`，正常。**`True`**：如果第 9 節的第一個指令出現 rclone 找不到資料夾（not found／404）的錯誤，停下來問 PM，**不要自己改 `config.json`** |
+
+再建兩個小工具。都只用 `agora-test`，只用路徑引用 rclone 的設定檔，不印出它的內容：
+
+```bash
+# 數 rclone 被叫了幾次：fg = 前景的指令，bg = 背景上傳。只記子指令的名字（copy、lsjson…）
+cat > /tmp/agora-acc/rclone-count.sh <<'EOF'
+#!/bin/sh
+who=fg; ps -o command= -p "$PPID" | grep -q agora.background && who=bg
+sub=; skip=
+for a in "$@"; do
+  if [ -n "$skip" ]; then skip=; continue; fi
+  case "$a" in
+    --config|--drive-root-folder-id) skip=1 ;;
+    -*) ;;
+    *) sub=$a; break ;;
+  esac
+done
+echo "$(date +%T) $who $sub" >> /tmp/agora-acc/rclone-calls.log
+exec rclone "$@"
+EOF
+chmod +x /tmp/agora-acc/rclone-count.sh
+grep -q AGORA_RCLONE /tmp/agora-acc/env.sh || sed -i '' '1a\
+export AGORA_RCLONE=/tmp/agora-acc/rclone-count.sh
+' /tmp/agora-acc/env.sh
+
+# 看 Drive 的 agora-test/sessions：不給參數就列出 ULID；給 ULID 就列那個資料夾；再給檔名就印那個檔
+cat > /tmp/agora-acc/drive.sh <<'EOF'
+#!/bin/sh
+FID=$(python3 -c "import json,os; print(json.load(open(os.path.expanduser('~/.config/agora/config.json')))['folders']['agora-test'])") || exit 1
+R="rclone --config $HOME/.config/agora/rclone.conf --drive-root-folder-id $FID"
+if [ -n "$2" ]; then $R cat "gdrive:sessions/$1/$2"
+elif [ -n "$1" ]; then $R lsf "gdrive:sessions/$1"
+else $R lsf gdrive:sessions --dirs-only; fi
+EOF
+source /tmp/agora-acc/env.sh && echo "$AGORA_RCLONE"
+```
+
+最後一行要印出 `/tmp/agora-acc/rclone-count.sh`。
+
+再用 opencode 在 `/tmp/agora-acc/proj` 說幾段自編的短對話，**不要匯入**，記下 `ses_…`：t1、t2、t3（第 9 節）、t4（第 10 節）、t5（第 14 節）、t6（第 15 節）。
+
+⚠️ 第 14、15 節要用**第二個終端機**。那個終端機也要先 `source /tmp/agora-acc/env.sh`。
+
+## 9. import 多個：指令馬上結束，不久 Drive 上就有了
+
+| # | 指令 | 算過 |
+|---|---|---|
+| 9.1 | `source /tmp/agora-acc/env.sh && rm -f /tmp/agora-acc/state/last-sync /tmp/agora-acc/rclone-calls.log` | 讓開頭的同步不被節流（量的是「最慢」的那一種） |
+| 9.2 | `time agora import session --external-session-id t1,t2,t3 --agent opencode; echo $?` | stdout 有三行 `agora:<ULID>`（記為 K、L、M）；stderr **沒有**「上傳失敗」；exit `0`。**記下 `real` 的秒數**（給 PM：前景時間）。指令不等上傳，所以應該只比「一次同步加上讀三段對話」多一點點 |
+| 9.3 | 馬上執行 `agora search session --no-sync \| grep -c '(未上傳)'` | 0～3 都算對：背景很快，看到 `(未上傳)` 的話，就是還沒傳完 |
+| 9.4 | 等 10 秒，`ls -A /tmp/agora-acc/state/outbox; pgrep -fl agora.background` | 兩個都**什麼都沒印**：outbox 空了，背景也結束了 |
+| 9.5 | `sh /tmp/agora-acc/drive.sh` | 列出 K、L、M 的 ULID（後面有 `/`） |
+| 9.6 | `sh /tmp/agora-acc/drive.sh <K的ULID>` | `session.md` 和一個 `raw-….json` |
+| 9.7 | `ls /tmp/agora-acc/cache/sessions/<K的ULID>/` | **本機也有** `session.md` 和**同一個** `raw-….json`（spec「本機保留完整的一份」，以前只有 `session.md`） |
+| 9.8 | `cat /tmp/agora-acc/rclone-calls.log` | `bg` 的行**不超過 4 行**（spec「一批只連固定幾次 Drive」：原始檔一次 `copy`、`session.md` 一次 `copy`、驗 md5 一次 `lsjson`）。`fg` 的行只有開頭同步用的（記下幾行給 PM）；這一次是第一次用 `agora-test` 的話，還會多 `mkdir`、`lsjson` 各一行（建資料夾） |
+| 9.9 | `grep -i error /tmp/agora-acc/state/upload.log` | 什麼都沒印 |
+
+## 10. import 完馬上 edit，不會遺失
+
+| # | 指令 | 算過 |
+|---|---|---|
+| 10.1 | `N=$(agora import session --external-session-id t4 --agent opencode) && agora edit session $N --header 'title=馬上改'; echo $N $?` | 印出 N 的 id，exit `0`。edit 緊接在 import 後面，背景多半正在傳第一版（spec「上傳中又改了同一個」） |
+| 10.2 | 等 10 秒，`ls -A /tmp/agora-acc/state/outbox` | 什麼都沒印 |
+| 10.3 | `sh /tmp/agora-acc/drive.sh <N的ULID> session.md \| grep title` | `title: 馬上改`（Drive 上是**新的**版本，不是匯入時的標題） |
+| 10.4 | `agora show session $N \| grep title` | 本機也是 `title: 馬上改` |
+
+如果 10.1 的 edit 失敗、出現 `FileNotFoundError` 之類的錯誤，請記下來：這是 review T3-sec5 V5（edit 剛好碰上背景改名）。
+
+## 11. delete：馬上從清單消失，不久 Drive 上就沒有了
+
+| # | 指令 | 算過 |
+|---|---|---|
+| 11.1 | `agora delete session <L> <M> --yes; echo $?` | stdout 印出 L、M；stderr 有 `[agora] 已從本機刪除 2 個，背景移到 Drive 垃圾桶`；exit `0`；指令馬上結束 |
+| 11.2 | 馬上執行 `agora search session --no-sync \| grep -c -e <L的ULID> -e <M的ULID>` | `0`：指令結束時就已經從清單消失了 |
+| 11.3 | 等 10 秒，`ls -A /tmp/agora-acc/state/trash-queue` | 什麼都沒印（背景移完了） |
+| 11.4 | `sh /tmp/agora-acc/drive.sh` | 沒有 L、M（K、N 還在）；Drive 網頁的垃圾桶裡看得到這兩個資料夾 |
+
+## 12. 在這台寫的，被機器 2 刪掉之後救回來
+
+這一節**不先 pull**。以前要用第 6.0 步先 pull 才救得回來（已知問題 T1 P1）；T3 之後不用了。
+
+| # | 指令 | 算過 |
+|---|---|---|
+| 12.1 | `agora continue session <K> --agent opencode --dir /tmp/agora-acc/proj`，說一句自編的話，離開 | 印出的是同一個 K |
+| 12.2 | 等 10 秒，`ls /tmp/agora-acc/cache/sessions/<K的ULID>/ \| grep -c '^raw-'` | `1`：只留新的原始檔（spec「接續之後只留新的原始檔」） |
+| 12.3 | `source /tmp/agora-acc/env2.sh && rm -f /tmp/agora-acc/state2/last-sync && agora search session \| grep <K的ULID>` | 機器 2 看得到 K |
+| 12.4 | `agora delete session <K> --yes`，等 10 秒，`ls -A /tmp/agora-acc/state2/trash-queue` | 機器 2 刪掉了 K；佇列是空的 |
+| 12.5 | `source /tmp/agora-acc/env.sh && rm -f /tmp/agora-acc/state/last-sync && agora search session \| grep <K的ULID>` | 回到機器 1：K 那一行的最後是 `(雲端沒有)` |
+| 12.6 | `agora push session <K> --not-exist-upload; echo $?` | stdout：`[agora] 寫回 1 個`；exit `0`；**沒有**「標頭指到的 raw-….json 本機沒有，不傳半套」 |
+| 12.7 | `sh /tmp/agora-acc/drive.sh <K的ULID>` | `session.md` 和**一個** `raw-….json`（12.1 之後的那一個） |
+| 12.8 | `rm -f /tmp/agora-acc/state/last-sync && agora search session \| grep <K的ULID>` | 沒有 `(雲端沒有)` 了 |
+
+## 13. 改到一半被機器 2 刪掉 → 另存成新的 Session
+
+要讓「這台的修改還沒傳上去，機器 2 就刪掉了」，先**關掉 Wi-Fi**，讓修改留在 outbox。
+
+| # | 指令 | 算過 |
+|---|---|---|
+| 13.1 | **關掉 Wi-Fi**。`source /tmp/agora-acc/env.sh && agora edit session <N> --header 'title=改到一半'; echo $?` | exit `0`（存進本機就算成功；背景連不上 Drive，失敗了，只寫進記錄檔）。離線時 rclone 會重試，這一步可能要等十幾秒 |
+| 13.2 | `ls -A /tmp/agora-acc/state/outbox/<N的ULID>/`，然後 `pgrep -fl agora.background` | outbox 裡有 `.update`（「更新既有的 id」的記號）、`session.md`、`raw-….json`。⚠️ **要等到 `pgrep` 什麼都沒印（背景已經放棄了）才打開 Wi-Fi**；不然還在重試的背景會在 Wi-Fi 一回來時就把修改傳上去，13.4 就變成普通的刪除 |
+| 13.3 | **打開 Wi-Fi**。`source /tmp/agora-acc/env2.sh && rm -f /tmp/agora-acc/state2/last-sync && agora search session \| grep <N的ULID>` | 機器 2 看得到 N，標題是第 10 節的 `馬上改` |
+| 13.4 | `agora delete session <N> --yes`，等 10 秒，`ls -A /tmp/agora-acc/state2/trash-queue` | 機器 2 刪掉了 N；佇列是空的 |
+| 13.5 | `source /tmp/agora-acc/env.sh && rm -f /tmp/agora-acc/state/last-sync && agora search session > /dev/null` | 回到機器 1。這個指令開頭的同步，看到 outbox 不是空的，會啟動背景；stderr 有 `outbox 有 1 筆未上傳`，或者 `背景上傳中，1 筆` |
+| 13.6 | 等 10 秒，`grep 存成了 /tmp/agora-acc/state/upload.log` | `<N的ULID> 已被別台刪除，這次的修改存成了 <新的ULID>`（記為 Y）。spec 說這一句要提醒使用者；目前**只寫在記錄檔**，見已知問題 V4 |
+| 13.7 | `ls -A /tmp/agora-acc/state/outbox; sh /tmp/agora-acc/drive.sh` | outbox 空了；Drive 上有 **Y**，**沒有** N（N 沒有被傳回去） |
+| 13.8 | `sh /tmp/agora-acc/drive.sh <Y的ULID> session.md \| grep -A3 -e title -e parents` | `title: 改到一半`；`parents` 底下有 `agora:<N的ULID>` |
+| 13.9 | `rm -f /tmp/agora-acc/state/last-sync && agora search session \| grep -e <N的ULID> -e <Y的ULID>` | 有 Y（`改到一半`）；N 也還在，最後是 `(雲端沒有)`（N 留在本機，照同步的規則標記） |
+
+## 14. push 會等自己的 id 傳完
+
+要讓「push 的時候背景正在傳」，用第二個終端機**拿住上傳的鎖 30 秒**，假裝背景正在跑。這不是 agora 的程式，只是佔住那把鎖。
+
+| # | 指令 | 算過 |
+|---|---|---|
+| 14.1 | **終端機 B**：`python3 -c 'import fcntl,time; f=open("/tmp/agora-acc/state/upload.lock","a"); fcntl.flock(f, fcntl.LOCK_EX); print("鎖住 30 秒"); time.sleep(30)'` | 印出 `鎖住 30 秒` |
+| 14.2 | **終端機 A**（30 秒內）：`P=$(agora import session --external-session-id t5 --agent opencode) && echo $P && time agora push session $P` | import 馬上結束，印出 P；push **一直等到**終端機 B 結束，才印出 stdout `[agora] 寫回 1 個`；`real` 接近終端機 B 剩下的秒數。spec 說等的時候每 10 秒會在 stderr 說一次 `背景上傳中，還在等…`；目前**不會說**，見已知問題 R7 |
+| 14.3 | push 一結束就執行 `sh /tmp/agora-acc/drive.sh <P的ULID>` | 已經有 `session.md` 和 `raw-….json`（push 結束時，P 就已經在 Drive 上了） |
+| 14.4 | 再做一次 14.1；終端機 A：`agora push session $P`，等 3 秒後按 **Ctrl-C**，`echo $?` | 中斷，exit `130`（等待可以用 Ctrl-C 中斷） |
+
+## 15. 互動模式：「未上傳」與結果視窗的說法
+
+| # | 操作 | 算過 |
+|---|---|---|
+| 15.1 | **終端機 B**：14.1 那一行，把 `30` 改成 `60` | 鎖住 60 秒，讓剛匯入的來不及傳上去 |
+| 15.2 | **終端機 A**：`agora`；`Tab` 到未匯入頁，游標放在 t6，`Enter` | 等待視窗**很快就結束**，不等上傳（spec「互動模式等的不是背景上傳」）；結果視窗寫 **「已經存在本機，背景上傳中」** |
+| 15.3 | 關掉結果視窗，`Tab` 回 Agora 頁 | 剛匯入的那一列（記為 Q），雲端欄是 **「未上傳」** |
+| 15.4 | 游標放在 K 上，`d`，`↓` 到「確定」，`Enter` | 結果視窗寫 **「已從本機刪除，背景移到 Drive 垃圾桶」**；關掉之後，K 那一列不見了 |
+| 15.5 | `q` 離開。等終端機 B 結束，然後 `rm -f /tmp/agora-acc/state/last-sync && agora search session > /dev/null` | 這個指令會啟動背景，把 Q 傳上去、把 K 移到垃圾桶（spec「背景失敗之後補傳」也是同一條路：下一個連 Drive 的指令啟動背景） |
+| 15.6 | 等 10 秒，`ls -A /tmp/agora-acc/state/outbox /tmp/agora-acc/state/trash-queue` | 兩個都是空的 |
+| 15.7 | `sh /tmp/agora-acc/drive.sh` | 有 Q，沒有 K |
+| 15.8 | `agora`，看 Q 那一列 | 雲端欄是 **✓**；`q` 離開 |
+
+結果視窗只有在背景程序**啟動失敗**（exit 3）時，才會說「已存進 outbox，之後的指令會自動再送」。這種情況在驗收時做不出來，單元測試有測。
+
+## 給 PM 填的數字
+
+| 項目 | 數字 |
+|---|---|
+| 9.2：import 3 個的前景時間（`real`） | ___ 秒 |
+| 9.8：前景的 rclone 次數（`fg`）／背景的（`bg`） | ___ ／ ___ |
+| 14.2：push 等了多久（`real`） | ___ 秒 |
+
+**第三段的已知問題**（出自 review `T3-sec3.md`、`T3-sec4.md`、`T3-sec5.md`，修好之後就拿掉那一行）：
+- **V2**：另存出來的 Y，**本機的清單要等下一次同步才看得到**（Y 沒有被放進本機的索引和鏡像）。所以 13.9 要先 `rm -f …/last-sync`。修好之後，13.7 一結束，`agora search session --no-sync` 就應該有 Y 了。
+- **V3**：Y 的標頭裡，relation 是 `import`（spec 說應該是原本的那一種，這裡是 `edit`）；`parents` 只有 N，N 原本的 parents 不見了。
+- **V4**：「N 已被別台刪除，這次的修改存成了 Y」只寫進 `upload.log`，使用者在終端機看不到（13.6）。
+- **R7**：push 在等的時候，不會每 10 秒說一次「背景上傳中，還在等…」（14.2）。
+- **V1**：背景正在把 N 另存成 Y 的那一瞬間又 edit N 的話，第二次的修改會留在本機、不會傳上去。驗收步驟碰不到這個情況，只是先記著。
+- **改到一半**：spec 說「有 N 個等著移到 Drive 垃圾桶」的提醒，以及 pull 拒絕刪除佇列裡的 Session 時算成失敗（T3-sec4 S3），寫這一版時還沒做完。
+
+---
+
 ## 舊版還有效、這次沒有改的部分
 
 舊版 `docs/acceptance.md` 的第 3～5 節（換 claude 接續、Claude 回覆到一半按 Ctrl-C、`/clear`）行為沒有變，可以照舊做，**只差一點**：continue 現在印出的是**原本那一個 id**，不是新的 id。做了 claude 的部分，清理時要加做下面的 Claude 那一行。
@@ -202,11 +371,22 @@ opencode session delete <ses_id> # 一個一個刪
 rm -rf "$HOME/.claude/projects/-private-tmp-agora-acc-proj"
 ```
 
-最後（兩台「機器」的快取和狀態都在這底下）：
+最後（兩台「機器」的快取和狀態，以及第三段的兩個小工具，都在這底下）：
 
 ```bash
 cd ~ && rm -rf /tmp/agora-acc
 ```
+
+舊的 `agora-test/`：換 client 之前建的那一個，新的 client 看不到（`drive.file`），所以上面的清理碰不到它。要不要從 Drive 網頁把它移到垃圾桶，由使用者決定。
+
+### 換回穩定版（做完第三段之後）
+
+| # | 指令 | 算過 |
+|---|---|---|
+| R.1 | `pgrep -fl agora.background` | 什麼都沒印（沒有背景還在跑） |
+| R.2 | `ls -A ~/.local/state/agora/trash-queue 2>/dev/null \| wc -l` | `0`。只列名字，不打開任何檔案。不是 0 的話，就是驗收期間有指令**沒有** source `env.sh`，用新版本在正式的目錄刪了東西；穩定版不會處理這個佇列，先停下來告訴 PM，**不要自己清** |
+| R.3 | `uv tool install --force ~/.local/share/agora-stable/9baa0e5` | 裝回穩定版（不是 editable） |
+| R.4 | `cat "$(uv tool dir)/agora/uv-receipt.toml"` | `requirements` 那一行是 `directory = "/Users/…/.local/share/agora-stable/9baa0e5"` |
 
 ---
 
@@ -225,3 +405,4 @@ cd ~ && rm -rf /tmp/agora-acc
   - 7.10、7.12、7.14、7.16 加上了 PM 試用時看到的畫面（Q1～Q4）。
   - 已知問題加上了 T1 P1～P4、T2 Q1～Q4、Q6。
 - **第 3 版改了什麼**：2.3、5.2、6.8 改成 P3／P4 修好之後的訊息；7.5、7.10、7.11、7.12、7.14、7.15、7.16、7.19 改成 Q1～Q4 修好之後的畫面（勾選框的 `[ ]`／`[x]` 和會跟著變的說明、「Enter 選擇」、進度條顯示做完的個數、結果視窗關掉之後狀態列是空的）；已知問題拿掉了 P2～P4、Q1～Q4，加上 E2（改到一半）、E3。
+- **第 4 版改了什麼**：加上第三段（第 8～15 節），也就是 T3 的「先存本機、背景上傳與刪除」；第 0 節的安裝改到第 8 節（`--force --editable`，並且先確認工作目錄沒有還沒 commit 的程式）；清理的最後加上「換回穩定版」，以及換了 OAuth client 之後舊的 `agora-test/` 碰不到的說明。第 12 節的救回**不再先 pull**（T1 P1 由 T3 解決）；第一段的 6.0、7.15 還是照舊先 pull，等第三段驗收過了，再決定拿不拿掉。
