@@ -20,6 +20,7 @@ from pathlib import Path
 import pwd
 import shutil
 import subprocess
+import time
 import sys
 
 import pytest
@@ -67,11 +68,29 @@ def env(tmp_path, monkeypatch, capsys):
     paths = store.Paths.from_env()
     created = {"ulids": [], "sessions": []}
     yield {"proj": proj, "paths": paths, "created": created, "capsys": capsys}
+    # The uploader this command started is still running: it would put the session on
+    # Drive *after* the purge below, and the folder would stay there for ever (T7 F4).
+    # Empty *twice in a row*, and the lock first: an uploader that has renamed the entry
+    # to `.done-` but not finished yet looks exactly like "nothing is waiting" to a
+    # single look (review T3-it I4) - that is how the first version of this wait still
+    # leaked one. `test_background_writes.wait_uploaded` is the same rule.
+    # settle first (the uploader is detached here, T7 F4), then purge - and look again,
+    # because a purge that raced the uploader is how the folder used to stay behind
+    try:
+        settle(paths)
+    except AssertionError:
+        pass                       # a failing test's leak is reported by its own assert
     drive = store.Drive(paths)
-    for ulid in created["ulids"]:                      # one purge per session
-        subprocess.run(["rclone", "--config", str(REAL_CONF),
-                        "--drive-root-folder-id", drive.folder_id(),
-                        "purge", f"gdrive:sessions/{ulid}"], capture_output=True)
+    giveup = time.monotonic() + 120
+    while time.monotonic() < giveup:
+        for ulid in created["ulids"]:                  # one purge per session
+            subprocess.run(["rclone", "--config", str(REAL_CONF),
+                            "--drive-root-folder-id", drive.folder_id(),
+                            "purge", f"gdrive:sessions/{ulid}"], capture_output=True)
+        there = drive.list_sessions() or {}
+        if not [u for u in created["ulids"] if u in there]:
+            break                                      # gone, and nothing landed after
+        time.sleep(1)
     for sid in created["sessions"]:                    # one delete per session, never in bulk
         subprocess.run(["opencode", "session", "delete", sid], cwd=str(proj),
                        env={**os.environ, "PWD": str(proj)}, capture_output=True)
@@ -99,6 +118,31 @@ def make_session(env, prompt: str) -> str:
     return session_id
 
 
+def settle(paths, timeout: float = 120.0) -> None:
+    """Wait until the detached uploader is through; loud when it is not.
+
+    The imports here leave it detached on purpose (this file is about several ids in
+    one command, not about the uploader), so a command that returns has not uploaded
+    anything yet. Anything the test does next - a re-run, a purge - has to wait for it,
+    or it races the uploader and the race is what T7 F4 found (a folder landing after
+    the cleanup). Same shape as `test_background_writes.wait_uploaded`, and it raises
+    rather than walking away quietly.
+    """
+    settled, nudged, deadline = 0, 0.0, time.monotonic() + timeout
+    while settled < 2 and time.monotonic() < deadline:
+        held = store.uploader_is_running(paths)
+        waiting = bool(store.outbox_ulids(paths) or store.queued_for_trash(paths))
+        if not held and waiting and time.monotonic() - nudged > 5.0:
+            store.kick_uploader(paths)     # what the next command would have done
+            nudged = time.monotonic()
+        settled = settled + 1 if (not held and not waiting) else 0
+        time.sleep(0.5)
+    assert settled >= 2, (
+        f"背景上傳器 {timeout:.0f} 秒還沒做完：鎖={store.uploader_is_running(paths)}"
+        f" outbox={sorted(store.outbox_ulids(paths))}"
+        f" 佇列={sorted(store.queued_for_trash(paths))}")
+
+
 def run_cli(env, *argv: str) -> tuple[int, str, str]:
     code = cli.main(list(argv))
     out = env["capsys"].readouterr()
@@ -118,6 +162,8 @@ def test_import_two_sessions_in_one_command(env):
     for ulid in ids:
         env["created"]["ulids"].append(ulid.split(":", 1)[1])
     assert "匯入 1/2" in err and "匯入 2/2" in err        # progress on stderr
+    settle(env["paths"])   # on Drive before the re-run: otherwise the re-run races it
+                           # and can decide "not there" - and make a second session (F4)
     bodies = {}
     for agora_id in ids:
         ulid = agora_id.split(":", 1)[1]
@@ -131,7 +177,13 @@ def test_import_two_sessions_in_one_command(env):
     code, again, _ = run_cli(env, "import", "session",
                              "--external-session-id", f"{first},{second}",
                              "--agent", "opencode", "--header", "title=批次匯入")
+    # whatever the re-run printed is ours to clean up, old id or not (T7 F4: the rule is
+    # "only what this run printed", and a print we ignore is what left sessions behind)
+    for agora_id in again.split():
+        if agora_id not in ids:
+            env["created"]["ulids"].append(agora_id.split(":", 1)[1])
     assert code == 0 and set(again.split()) == set(ids)
+    settle(env["paths"])
 
 
 def test_import_reports_the_one_that_failed_and_keeps_going(env):

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import shutil
 import signal
 import stat
 import subprocess
@@ -302,6 +303,50 @@ def test_search_same_source_shows_newest_with_warning(env, capsys):  # U-IMP-10,
     assert found.split()[0] == new["id"]
     assert "同一個來源" in err
 
+
+def test_the_same_source_warning_is_said_once_and_never_over_a_rescue(env, capsys):  # T7 F2
+    """Two machines importing one session is worth a line - once, not once per pair.
+    A session rescued out of another is not (they are the same work, parents point
+    back), and a pair whose other half is cloud-missing only repeats「雲端沒有」."""
+    from agora import header as h
+    from agora import store as st
+
+    def make(sid: str, title: str, when: str, parents: list | None = None) -> dict:
+        return {"type": "Session", "title": title, "refs": [], "case": None, "tags": [],
+                "id": f"agora:{h.new_ulid()}",
+                "agora": {"header": 2, "created_at": "2026-10-01T00:00:00Z",
+                          "updated_at": when, "relation": "import", "parents": parents or [],
+                          "source": {"agent": "opencode", "session_id": sid,
+                                     "created_at": "2026-10-01T00:00:00Z"}}}
+
+    def put(hdr: dict) -> dict:
+        st.stage(paths(), hdr, f"## user\n{hdr['title']}的內容\n", b'{"x": 1}')
+        st.upload_batch(st.Drive(paths()), paths())
+        return hdr
+
+    def lines(title: str) -> str:
+        st.sync(paths())
+        _, _, err = run(capsys, "search", "session", "--filter", f"text~={title}的內容", "--no-sync")
+        return err
+
+    # one source imported three times: one line, not a line per pair
+    for n in (2, 3, 4):
+        put(make("ses_dup", "三重複", f"2026-10-0{n}T00:00:00Z"))
+    assert lines("三重複").count("同一個來源") == 1
+
+    # Y rescued out of X: same source, parents point back, and nothing new to say
+    x = put(make("ses_rescue", "四救援", "2026-10-02T00:00:00Z"))
+    put(make("ses_rescue", "四救援", "2026-10-03T00:00:00Z", parents=[{"id": x["id"]}]))
+    assert "同一個來源" not in lines("四救援")
+
+    # the older half is cloud-missing: that is already said by its own row, not news
+    import os
+    from pathlib import Path
+    lost = put(make("ses_lost", "五雲端沒有", "2026-10-02T00:00:00Z"))
+    put(make("ses_lost", "五雲端沒有", "2026-10-03T00:00:00Z"))
+    shutil.rmtree(Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions"
+                  / lost["id"].split(":", 1)[1])
+    assert "同一個來源" not in lines("五雲端沒有")
 
 # --- U-MRG ------------------------------------------------------------------------
 

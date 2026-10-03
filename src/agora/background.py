@@ -82,13 +82,14 @@ def run(paths: store.Paths | None = None, *, notices: bool = False) -> int:
     """
     paths = paths or store.Paths.from_env()
     print("[agora] 背景上傳開始", file=sys.stderr, flush=True)
+    held = True       # F1: a run that never got the lock has no "剩下" to report
     while True:
         lock = store.hold_upload_lock(paths)
         if lock is None:
-            # P8: not a run of our own, so no start/finish pair that reads like one.
-            # The holder looks again before it lets go, so ours is its.
-            print("[agora] 已經有一個上傳在跑，這一輪不重來", file=sys.stderr, flush=True)
-            break
+            # P8 / T7 F1: not a run of our own, so no start/finish pair that reads like
+            # one - the holder looks again before it lets go, so ours is its.
+            print("[agora] 已經有一個上傳在跑，交給它", file=sys.stderr, flush=True)
+            return 0
         try:
             store.restore_done(paths)   # E3: what a crashed uploader left, now that it is ours
             seen = None
@@ -103,7 +104,8 @@ def run(paths: store.Paths | None = None, *, notices: bool = False) -> int:
         if not left or left == seen:
             break               # empty, or the same ones that just failed: leave them be
     # stderr, like every progress line: stdout carries the ids and nothing else
-    print(f"[agora] 背景上傳結束，剩下 {len(_waiting(paths))} 筆", file=sys.stderr, flush=True)
+    if held:
+        print(f"[agora] 背景上傳結束，剩下 {len(_waiting(paths))} 筆", file=sys.stderr, flush=True)
     return 0
 
 

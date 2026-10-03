@@ -212,7 +212,7 @@ def test_a_sync_with_nothing_waiting_starts_nothing(env, monkeypatch):
     assert not started
 
 
-def test_a_second_uploader_skips_while_the_lock_is_held(env):
+def test_a_second_uploader_skips_while_the_lock_is_held(env, capsys):
     """M1: one upload at a time. Whoever cannot take the lock leaves the outbox alone -
     the holder looks again when it lets go, so nothing is left for the next command."""
     paths = store.Paths.from_env()
@@ -225,6 +225,9 @@ def test_a_second_uploader_skips_while_the_lock_is_held(env):
         lock.close()
     assert ulid in store.outbox_ulids(paths)     # still waiting, and nobody sent it
     assert not (env / "agora" / "sessions" / ulid).exists()
+    # T7 F1: it hands over, it does not report a count it never worked out
+    err = capsys.readouterr().err
+    assert "交給它" in err and "剩下" not in err
 
 
 def test_a_session_staged_while_it_runs_still_goes_up(env, monkeypatch):

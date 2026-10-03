@@ -259,13 +259,22 @@ def cmd_search(args, paths: store.Paths) -> int:
     filters = h.parse_filters(args.filter)
     index = store.Index(paths) if args.no_sync else store.sync(paths, throttle=True)
     seen: dict[tuple, str] = {}
+    said: set[tuple] = set()      # T7 F2: the same source gets at most one line
     outbox = store.waiting_ulids(paths)
     for ulid, hdr, snippet in index.search(filters):
         agora = h.agora_of(hdr)
         source = agora.get("source") or {}
         key = (source.get("agent"), source.get("session_id"))
         if source.get("session_id") and key in seen:
-            print(f"[agora] {seen[key]} 與 agora:{ulid} 來自同一個來源 Session", file=sys.stderr)
+            first = seen[key]
+            # F2: not for a pair where one was rescued from the other (Y's parents point
+            # at N) - that is not two machines importing the same session - and not when
+            # either is cloud-missing, which that row already says.
+            both = (first.split(":", 1)[1], ulid)
+            if key not in said and all(index.cloud_has(u) for u in both) \
+                    and not _rescued_pair(index, first, f"agora:{ulid}"):
+                said.add(key)
+                print(f"[agora] {first} 與 agora:{ulid} 來自同一個來源 Session", file=sys.stderr)
             continue
         seen[key] = f"agora:{ulid}"
         date = store.sort_date(hdr)[:10]
@@ -278,6 +287,19 @@ def cmd_search(args, paths: store.Paths) -> int:
 
 
 _progress = store.progress
+
+
+def _rescued_pair(index: store.Index, first: str, second: str) -> bool:
+    """Whether one of these was saved out of the other (a rescue: `parents` point back).
+
+    T7 F2: Y was made from N when Drive lost N; they share a source because they *are*
+    the same work, and telling the reader so on every sync is noise.
+    """
+    for one, other in ((first, second), (second, first)):
+        parents = h.agora_of(index.header(one.split(":", 1)[1]) or {}).get("parents") or []
+        if any(str(p.get("id", "")) == other for p in parents):
+            return True
+    return False
 
 
 def cmd_import(args, paths: store.Paths) -> int:
