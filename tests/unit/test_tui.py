@@ -132,8 +132,10 @@ def test_previews_show_what_was_read_and_never_fail():
     assert preview.more() is False and preview.hint() == ""      # a short file is all here
     one = tui.import_preview(FakeAgent("claude", [], ("assistant", "好")), "s")
     assert one.pinned.startswith("最後一則（assistant）") and one.text == "## assistant\n好"
+    assert not one.more() and one.hint() == "", "no file, so there is nothing above it"
     assert tui.import_preview(FakeAgent("claude", [], None), "s").text == ""
-    assert tui.import_preview(FakeAgent("claude", [], "boom"), "s").text == ""
+    broken = tui.import_preview(FakeAgent("claude", [], "boom"), "s")
+    assert broken.text == "" and broken.hint() == ""
     whole = tui.import_preview(FakeAgent("claude", [], texts={"s": ["問題", "回答"]}), "s", full=True)
     assert "問題" in whole.text and whole.text.endswith("回答")
 

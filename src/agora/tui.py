@@ -229,8 +229,12 @@ class Preview:
         return text
 
     def more(self) -> bool:
-        """Whether anything above is still unread. Nothing read yet counts as "more"."""
-        return self.at != 0
+        """Whether anything above is still unread. Nothing read yet counts as "more".
+
+        A preview with no file behind it (the last message, or one that could not be
+        read) has nothing above it, so it says nothing (review Z1).
+        """
+        return self.path is not None and self.at != 0
 
     def hint(self) -> str:
         """The line that says there is more above - gone once it is all here (T6)."""
