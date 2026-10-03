@@ -14,6 +14,10 @@
 | T1 | 指令模式：pull／push、批次動作的進度與續傳 → change [`command-batch-actions`](../../openspec/changes/archive/2026-10-03-command-batch-actions/)（已歸檔，規格在 `openspec/specs/batch-commands`、`session-sync`） | **完成（10-03 歸檔）**，等本人驗收（1-5）；P1 與行數額度等使用者決定 | impl1、impl2 | review T1-archive、T1-4.2d、final-checks 都沒有 High；PM 實跑 `T1-pm-run.md` |
 | T0 | e2e 整合測試改成「continue 寫回原本的 Session」 | 完成 | impl1（3011d15）、impl2（745e5e8） | 兩邊都實跑過整合測試 |
 
+## 2026-10-03 晚上：全部完成，等使用者驗收
+
+T1～T6 都完成。HEAD `4bf652d`：單元測試 549 passed；整合測試第八輪（07ed920，真 Drive 的 `agora-test`，自己的 OAuth client）**31 passed，18 分 50 秒**（之前 40～50 分鐘，清掉 `agora-test` 裡 45 個舊測試殘骸後變快）。驗收步驟：`docs/acceptance.md`。使用者現在裝的是穩定版 9baa0e5，驗收前換成這個工作目錄的版本（`uv tool install --force --editable .`）。
+
 ## 2026-10-03 夜間的順序（使用者睡覺時；使用者說回來前不要停）
 
 使用者驗收的兩步（T1 的 1-5、T2 的 2-4）往後挪，等使用者回來、在 3-1 之後做。其他照順序推進，**實作一律交給隊員**，PM 只派工、審、測、更新這張表與各 change 的 tasks.md。
