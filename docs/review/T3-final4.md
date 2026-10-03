@@ -185,3 +185,51 @@ V6、K1 都修好了，指令驅動的探測和主要的 mutation 都確認過�
 - 時序敏感的 TUI 測試，在高負載下會偶發失敗。
 
 **從 review 的角度，T3 可以歸檔。** 整合測試的結果以 impl1 的為準，我沒有跑。
+
+---
+
+# 補看三：`8a68881`（T3-final2 的 G4～G6）
+
+2026-10-03，review。
+- 在 `git archive 8a68881` 的副本裡跑：`compileall` 通過；
+- 單元測試 **540 passed、2 failed**；
+- src **3,795** 行（目標 3,800）。
+
+**G4～G6 都修好了，mutation 都抓得到。但 `8a68881` 讓 HEAD 變紅（M1，Medium）**，修好之後 T3 才能歸檔。
+
+## M1（Medium）：一個舊的 TUI 測試，每次都會失敗
+
+`tests/unit/test_tui.py::test_the_result_window_says_it_is_waiting_to_be_uploaded` 用 `_result_of(_marked_app(None), 3)`，而 `_result_of` 的預設動作是 **delete**。這個測試期望的是通用的 exit 3 說法（「outbox」「再送」）。G4 把 delete 的 exit 3 改成「已從本機刪除；背景上傳啟動失敗，outbox 要等之後的指令」，沒有「再送」，所以斷言失敗。
+
+單獨重跑兩次，兩次都失敗，**不是偶發**：
+
+```
+AssertionError: assert ('outbox' in '已從本機刪除；背景上傳啟動失敗，outbox 要等之後的指令 [agora] delete 1/1'
+                        and '再送' in '…')
+```
+
+G4 本身是對的，錯的是這個測試的前提：它想測的是「寫入的 exit 3」，卻用了 delete。
+
+**建議**：這個測試改用寫入的動作，例如 `_result_of(_marked_app(None), 3, action="import")`（或 pull）。commit 前在乾淨的副本跑一次完整的 `tests/unit`（S1、`5d99d0a` 時也發生過同樣的事）。
+
+另一個失敗的 `test_the_bar_really_reaches_n_n_before_the_window_goes`，單獨重跑會通過。和補看二一樣，是時序敏感的測試在高負載下（6 個 mutation 同時在跑）偶發失敗。
+
+## G4～G6
+
+| 項目 | 怎麼修的 | mutation |
+|---|---|---|
+| G4：delete exit 3 的說法 | 指令：有東西進佇列才說「移到 Drive 垃圾桶要等之後的指令」，沒有就說「outbox 的上傳要等之後的指令」。互動模式：delete exit 3 時，依指令的輸出說「已從本機刪除；移到 Drive 垃圾桶要等之後的指令」或「已從本機刪除；背景上傳啟動失敗，outbox 要等之後的指令」，不再說「已存進 outbox」 | ✅ 「一律說垃圾桶」被 `test_a_delete_with_nothing_queued_does_not_blame_the_trash_when_the_uploader_fails` 抓到；「結果視窗又用通用的說法」被 `test_a_delete_whose_uploader_could_not_start_does_not_say_it_was_saved_to_the_outbox` 抓到 |
+| G6：`_put_back` 改名失敗 | 只有 `outbox/X` 已經有新版本時才丟 `.done-X`；其他情況留著，K1 會把它算成「還在等」，下一個背景再試 | ✅ 「一律丟」被 `test_a_set_aside_version_that_cannot_be_put_back_is_kept` 抓到 |
+| G5：R7 沒有測試 | 「10 秒」改成模組常數 `WAIT_SAY_EVERY`，測試調成 0.3 秒，拿住鎖，斷言 stderr 有「還在等」，放開之後 30 秒內一定要結束（`join(timeout=30)`） | ✅ 「改回阻塞地等」被 `test_push_says_it_is_still_waiting_while_the_lock_is_held` 抓到 |
+| G5：鎖沒放開時測試卡住 | 新的 `test_the_lock_is_free_after_the_background_and_after_asking_about_it` | 「`uploader_is_running` 不放開鎖」✅ 6 個測試失敗（不再卡住）。「背景做完不放開鎖」⏱ **還是卡住**（300 秒逾時）。這個 mutant 讓鎖留在同一個 process 裡，push 的迴圈本身就會一直等，在測試能斷言之前就停住了。要讓它變成「失敗」，還是得給單元測試一個全域逾時（例如 `pytest-timeout`）。Low，可以放 backlog |
+
+## 驗收清單（`docs/acceptance.md`，`b60815d`）要跟著改的一行
+
+驗收清單的「已知問題」寫了「互動模式裡 delete 遇到 exit 3 時，結果視窗用的是『已存進 outbox…』這句通用的說法（G4）」。`8a68881` 之後這一句不對了；delete 那一句的訊息也多了「outbox 的上傳要等之後的指令」這種情況。這一行等 PM 指派，我再改。
+
+## 結論
+
+G4～G6 修好了，src 3,795 行。**歸檔前只剩 M1**：把 `test_the_result_window_says_it_is_waiting_to_be_uploaded` 改成用寫入的動作，再在乾淨的副本跑一次完整的 `tests/unit`，確認全綠。剩下的都是 Low，放 backlog：
+- 「背景不放開鎖」的 mutant 會讓測試卡住，需要全域逾時；
+- 時序敏感的 TUI 測試會偶發失敗；
+- 之前列過的那幾項。
