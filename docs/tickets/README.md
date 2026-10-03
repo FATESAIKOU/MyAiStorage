@@ -25,7 +25,7 @@
 | 4 | T2 轉成 change（需求已定，見 T2-tui-batch.md），review 看 specs | PM 寫、review 看 | 完成（提前做，和 T1 收尾並行） |
 | 5 | T2 實作與測試 | 隊員 | 完成，剩 T2-final 的修正 |
 | 6 | T2 PM 用假資料試、review 審、歸檔 | PM、review | 完成（10-03） |
-| 7 | 3-1 更新 MyBrain（#151 已合，改開新的 PR） | PM | 完成：[MyBrain #155](https://github.com/FATESAIKOU/MyBrain/pull/155)，等使用者合 |
+| 7 | 3-1 更新 MyBrain（#151 已合，改開新的 PR） | PM | 完成：[MyBrain #155](https://github.com/FATESAIKOU/MyBrain/pull/155) 使用者 10-03 合了 |
 | — | 等使用者回來：T1 驗收（1-5）、T2 真實資料試用（2-4）、合併 PR | 使用者 | 驗收步驟草稿在 `docs/review/acceptance-draft.md`（review 寫，T2 做完後更新「已知問題」再換掉 docs/acceptance.md） |
 
 隊員的模型：impl1、impl2 用 opencode（Space Bunny Free → Muse Spark 1.3 Free → ollama-cloud DeepSeek V4.1 Flash max，用完往下換）；impl3（`w2:p14`）、impl4（`w2:p15`）是 agy，**同一個帳號、額度共用**。10-03 10:00 換上 Claude Opus 做了約 15 分鐘就用完：Opus 約 15:15 恢復、Gemini 約 18:05 恢復；恢復就換上去接主要的實作。T3 第 3、4 節因此改由 impl1 接手。
@@ -33,7 +33,7 @@
 **等使用者確認的事**（不擋進度，先照 PM 的判斷做）：
 - T2 的「勾選但被篩選掉的列不算進動作」（review V4，PM 選了比較安全的做法）。
 - T1 的「continue 進行中、原本的 Session 被別台刪掉」：另存成一個新的 Session（review T1-sec3 M1）。
-- **6 個孤兒 `opencode run` 行程**：使用者 10-03 說自己停（11:20 時還在）（`pgrep -fl "opencode run"` 確認後 `pkill -f "opencode run -m opencode/space-bunny-free"`）。
+- 6 個孤兒 `opencode run` 行程：使用者 10-03 11:30 停掉了。
 
 - 行數目標：使用者 10-03 決定放寬到 **3,800**（寫進 `docs/design.md`）。T3 做完加上低風險精簡預估約 3,720。
 
