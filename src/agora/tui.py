@@ -52,9 +52,9 @@ AGENT_STYLE = {"opencode": "cyan", "claude": "#ff8700", "merge": "green"}
 KEYS = {
     "agora": [("空白", "勾選"), ("a", "全選／全不選"), ("enter", "接續"), ("m", "合併"),
               ("e", "改標頭"), ("d", "刪除"), ("p", "pull"), ("P", "push"),
-              ("/", "篩選"), ("ctrl+t", "標題／內文"), ("q", "離開")],
+              ("/", "篩選（邊打邊篩）"), ("ctrl+t", "標題／內文"), ("q", "離開")],
     "import": [("空白", "勾選"), ("a", "全選／全不選"), ("enter", "匯入"), ("p", "pull"),
-               ("/", "篩選"), ("ctrl+t", "標題／內文"), ("q", "離開")],
+               ("/", "篩選（邊打邊篩）"), ("ctrl+t", "標題／內文"), ("q", "離開")],
 }
 
 
@@ -792,7 +792,7 @@ class AgoraApp(App):
         yield Static(id="keys")
         with Horizontal(id="filterbar"):
             yield Static("標題", id="mode")
-            yield Input(id="filter", placeholder="輸入後按 Enter；Esc 清掉；ctrl+t 切換標題／內文")
+            yield Input(id="filter", placeholder="邊打邊篩；Esc 清掉；ctrl+t 切換標題／內文")
         yield Static(id="msg")
 
     # -- setup and data ------------------------------------------------------
@@ -1072,6 +1072,28 @@ class AgoraApp(App):
         self.query_one("#filterbar").add_class("on")
         self.query_one("#filter", Input).focus()
 
+    @on(Input.Changed, "#filter")
+    def filter_typed(self, event: Input.Changed) -> None:
+        """Filter on every keystroke, so Enter is never needed to see the result.
+
+        An input method (macOS Chinese, Japanese, Korean) keeps the composing text to
+        itself and takes Enter for the candidate list; the app only sees the committed
+        text. With "type it, then press Enter", a Chinese word could therefore be typed
+        and then never applied - the key that would have applied it never arrived
+        (T7 F3). Filtering as the text changes means the IME's Enter only ends the
+        composition, and the rows are already narrowing while the characters are picked.
+
+        `event.value` is what is committed so far, so a half-composed character is not
+        filtered on; the next keystroke re-filters anyway.
+        """
+        self.search(event.value.strip())
+
+    def action_search_mode(self) -> None:
+        self.content = not self.content
+        self.query_one("#mode", Static).update("內文" if self.content else "標題")
+        if self.text:
+            self.search(self.text)
+
     def action_search_mode(self) -> None:
         self.content = not self.content
         self.query_one("#mode", Static).update("內文" if self.content else "標題")
@@ -1080,6 +1102,9 @@ class AgoraApp(App):
 
     @on(Input.Submitted, "#filter")
     def filter_done(self, event: Input.Submitted) -> None:
+        # The filter is already applied (filter_typed); Enter only means "done - back
+        # to the table". With an IME it usually does not get here at all, which is why
+        # nothing depends on it any more (T7 F3).
         self.query_one("#filterbar").remove_class("on")
         self.query_one("#table").focus()
         self.search(event.value.strip())

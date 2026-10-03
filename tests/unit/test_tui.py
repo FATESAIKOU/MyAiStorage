@@ -2271,3 +2271,73 @@ def test_the_import_tab_reads_the_tail_of_the_reading_version():
     assert cache.reading_path(paths, other, "s2").is_file(), "the cache is built"
     assert built.text.endswith("新回答") and len(built.text.encode("utf-8")) <= tui.PREVIEW_CHUNK
     assert "新問題" in built.text or built.more()      # a short one is all here
+
+
+# --- the filter has to work with an input method (T7 F3) -----------------------
+
+
+def test_the_filter_narrows_while_the_chinese_is_typed():
+    """T7 F3: an IME takes Enter for its candidate list, so a filter that needs Enter
+    never gets it. Typing the word alone has to be enough - no Enter at all here."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            assert len(app.shown()) == 3
+            await pilot.press("slash")
+            await pilot.press("乙")                 # a committed Chinese character
+            await pilot.pause(0.2)
+            shown = [r.text for r in app.shown()]
+            assert len(shown) == 1 and "乙" in shown[0], f"邊打邊篩就該只剩乙：{shown}"
+            await pilot.press("甲")                 # and it re-filters on the next one
+            await pilot.pause(0.2)
+            assert app.shown() == [], "甲乙不是任何一列的一部分"
+    _run(go)
+
+
+def test_enter_is_only_how_the_filter_ends_when_the_ime_lets_it_through():
+    """The IME's Enter usually does not reach the app, so nothing may depend on it; and
+    when it does arrive it means "done", not "apply" (it was applied already)."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("slash")
+            await pilot.press("丙")
+            await pilot.pause(0.2)
+            assert [r.text for r in app.shown()] == [r.text for r in app.rows["agora"]
+                                                     if "丙" in r.text]
+            await pilot.press("enter")              # the one an IME usually swallows
+            await pilot.pause(0.1)
+            assert not app.query_one("#filterbar").has_class("on"), "Enter 收工"
+            assert len(app.shown()) == 1, "而結果留著"
+            # and the bar is still where the user can clear it
+            await pilot.press("slash")
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert len(app.shown()) == 3, "Esc 清掉，全部回來"
+    _run(go)
+
+
+def test_a_half_composed_character_does_not_break_the_filter():
+    """While a character is being composed the IME has not committed anything; when it
+    commits, the input changes and the filter follows. Nothing here may raise or empty
+    the table for a value that is not a word yet."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("slash")
+            await pilot.press("甲", "乙")           # "甲乙" is in no title
+            await pilot.pause(0.1)
+            assert app.shown() == [], "沒有符合的就空著"
+            await pilot.press("backspace")          # the IME deletes a mis-picked character
+            await pilot.pause(0.1)
+            assert len(app.shown()) == 1, "回到只剩甲的那一列"
+            await pilot.press("backspace")
+            await pilot.pause(0.1)
+            assert len(app.shown()) == 3, "整串刪掉就全部回來"
+    _run(go)
