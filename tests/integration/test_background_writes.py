@@ -68,12 +68,16 @@ def env(tmp_path, monkeypatch, capsys):
     PROJ.mkdir(parents=True)
     subprocess.run(["git", "init", "-q"], cwd=PROJ, check=True)
     subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "init"], cwd=PROJ, check=True)
-    created = {"ulids": [], "sessions": []}
+    created = {"ulids": [], "sessions": [], "locks": []}
     here = store.Paths.from_env()
     theirs = store.Paths(config=config, cache=tmp_path / "other" / "cache",
                          state=tmp_path / "other" / "state")
     yield {"proj": PROJ.resolve(), "created": created, "capsys": capsys,
            "here": here, "theirs": theirs, "other": tmp_path / "other"}
+    # a test that failed while holding the lock would make every wait here sit out
+    # its timeout (review J4)
+    for held in created.pop("locks", []):
+        held.close()
     # A background uploader still running would put things on Drive *after* the purge
     # below, so both machines are given a chance to finish first (review I3).
     for paths in (here, theirs):
@@ -104,12 +108,23 @@ def wait_uploaded(paths, timeout: float = 300.0, settle: int = 2) -> None:
     but has not taken the lock yet looks exactly like "nobody is working on it" to a
     single look, which is how this helper used to let a test walk away one round early
     (review T3-it I4 - the same shape as R6).
+
+    When the lock is free and something is still waiting, it gives the uploader a nudge
+    (`store.kick_uploader`, which is what the next command would do). Waiting is for the
+    uploader, not for a command that happens to come along; without the nudge the test
+    depends on a background process started earlier happening to take the lock after the
+    test let go of it (review J1/J3).
     """
     deadline = time.monotonic() + timeout
     quiet = 0
+    nudged = 0.0
     while time.monotonic() < deadline:
-        done = not store.uploader_is_running(paths) and not store.outbox_ulids(paths) \
-            and not store.queued_for_trash(paths)
+        held = store.uploader_is_running(paths)
+        waiting = bool(store.outbox_ulids(paths) or store.queued_for_trash(paths))
+        if not held and waiting and time.monotonic() - nudged > 5.0:
+            store.kick_uploader(paths)
+            nudged = time.monotonic()
+        done = not held and not waiting
         quiet = quiet + 1 if done else 0
         if quiet >= settle:
             return
@@ -221,23 +236,29 @@ def forget_last_sync(paths) -> None:
     (paths.state / "last-sync").unlink(missing_ok=True)
 
 
-def hold_our_lock(paths):
+def hold_our_lock(env, paths):
     """Take this machine's upload lock, so a background uploader cannot start.
 
     Needed for the rescue scenarios: with the user's own client a single rclone takes
     0.6-0.8 s, so an edit would be on Drive before the other machine could delete it,
     and the scenario would pass or fail by luck (review I1 d).
+
+    The lock is remembered so the fixture can let it go if a test fails while holding it
+    (review J4) - otherwise the teardown waits 60 s for an uploader that can never run.
     """
-    return store.hold_upload_lock(paths, blocking=True)
+    held = store.hold_upload_lock(paths, blocking=True)
+    env["created"].setdefault("locks", []).append(held)
+    return held
 
 
 def test_import_several_and_the_background_puts_them_all_on_drive(env, monkeypatch):
     """5.2: the command is done when the session is safe here; Drive catches up."""
     paths = env["here"]
-    held = hold_our_lock(paths)          # the background may not start yet (review I1 d)
+    held = hold_our_lock(env, paths)     # the background may not start yet (review I1 d)
     ids = import_sessions(env, 2)
     assert store.outbox_ulids(paths), "both are staged here, not on Drive yet"
-    held.__exit__()                      # and now the background may
+    held.close()                         # and now the background may
+    store.kick_uploader(paths)           # J1: be the command that starts it, not a hope
     wait_uploaded(paths)
 
     assert store.outbox_ulids(paths) == set()
@@ -250,16 +271,15 @@ def test_import_several_and_the_background_puts_them_all_on_drive(env, monkeypat
 def test_delete_several_and_the_background_takes_them_off_drive(env, monkeypatch):
     """5.2: gone from here at once, gone from Drive once the background gets to it."""
     paths = env["here"]
-    held = hold_our_lock(paths)
+    held = hold_our_lock(env, paths)
     ids = import_sessions(env, 2)
-    held.__exit__()
+    held.close()
     wait_uploaded(paths)
     for agora_id in ids:
         assert on_drive(paths, ulid_of(agora_id))
 
-    held = hold_our_lock(paths)          # so the queue is ours to look at (review I2)
+    held = hold_our_lock(env, paths)     # so the queue is ours to look at (review I2)
     code, out, err = run_cli(env, "delete", "session", *ids, "--yes")
-    held.__exit__()
 
     assert code == 0 and set(out.split()) == set(ids), err
     # the foreground's half is done before the command returns: not in the list, not
@@ -270,7 +290,10 @@ def test_delete_several_and_the_background_takes_them_off_drive(env, monkeypatch
     code, found, _ = run_cli(env, "search", "session", "--filter", f"text~={MARK}")
     assert code == 0 and not any(agora_id in found for agora_id in ids), \
         "刪完就該從搜尋裡消失"
+    # read while the lock is still ours: afterwards the uploader may already be purging
+    # (review J2)
     assert sorted(store.queued_for_trash(paths)) == sorted(ulid_of(i) for i in ids)
+    held.close()
 
     wait_uploaded(paths)
 
@@ -283,9 +306,9 @@ def test_a_session_deleted_elsewhere_comes_back_with_an_explicit_push(env, monke
     """5.2 / spec「只在明確要求時才刪或復活」: another machine's delete is undone by
     `push --not-exist-upload`, and by nothing else."""
     paths = use_machine(env, monkeypatch, "here")
-    held = hold_our_lock(paths)
+    held = hold_our_lock(env, paths)
     (agora_id,) = import_sessions(env, 1)
-    held.__exit__()
+    held.close()
     ulid = ulid_of(agora_id)
     wait_uploaded(paths)
     assert on_drive(paths, ulid)
@@ -296,7 +319,10 @@ def test_a_session_deleted_elsewhere_comes_back_with_an_explicit_push(env, monke
     wait_uploaded(theirs)
     assert not on_drive(theirs, ulid), "另一台刪掉了"
 
-    # back here: the next sync has to really list Drive, or the marker never moves
+    # back here: nothing of ours is running, so say so (review J1)
+    store.kick_uploader(paths)
+
+    # the next sync has to really list Drive, or the marker never moves
     paths = use_machine(env, monkeypatch, "here")
     forget_last_sync(paths)
     code, found, _ = run_cli(env, "search", "session", "--filter", "cloud=no")
@@ -323,7 +349,7 @@ def test_an_edit_deleted_elsewhere_is_kept_as_a_session_of_its_own(env, monkeypa
     (agora_id,) = import_sessions(env, 1)
     ulid = ulid_of(agora_id)
     wait_uploaded(paths)             # the import is on Drive before we start editing
-    held = hold_our_lock(paths)      # and now it is held, so the edit below cannot
+    held = hold_our_lock(env, paths)  # and now it is held, so the edit below cannot
                                      # go up before the other machine deletes it -
                                      # waiting here would deadlock against our own lock
     code, _, err = run_cli(env, "edit", "session", agora_id,
@@ -337,14 +363,19 @@ def test_an_edit_deleted_elsewhere_is_kept_as_a_session_of_its_own(env, monkeypa
     wait_uploaded(theirs)
     assert not on_drive(theirs, ulid), "另一台刪掉了，而我們的改動還沒上傳"
 
-    # now let our uploader meet it: the lock goes, and the next command starts it
-    held.__exit__()
+    # now let our uploader meet it: the lock goes, and a command starts it
+    held.close()
     paths = use_machine(env, monkeypatch, "here")
     forget_last_sync(paths)
     run_cli(env, "search", "session", "--filter", "cloud=no")
     wait_uploaded(paths)
 
     assert not on_drive(paths, ulid), "被別台刪掉的那一筆沒有被傳回去"
+    # the sync that started the uploader listed Drive before Y was up, so Y carries the
+    # 「雲端沒有」marker until the next sync sees it there - and `children` only counts a
+    # child Drive has (T1 3.4). One more sync, then read it.
+    forget_last_sync(paths)
+    run_cli(env, "search", "session", "--filter", "cloud=no")
     index = store.Index(paths)
     new_ids = index.children(ulid)          # parents live under agora.parents (review I1 e)
     assert len(new_ids) == 1, f"應該剛好另外存成一個新的，現在有 {new_ids}"
