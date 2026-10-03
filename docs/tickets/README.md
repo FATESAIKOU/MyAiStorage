@@ -15,6 +15,20 @@
 | T1 | 指令模式：pull／push、批次動作的進度與續傳 → change [`command-batch-actions`](../../openspec/changes/archive/2026-10-03-command-batch-actions/)（已歸檔，規格在 `openspec/specs/batch-commands`、`session-sync`） | **完成（10-03 歸檔）**，等本人驗收（1-5）；P1 與行數額度等使用者決定 | impl1、impl2 | review T1-archive、T1-4.2d、final-checks 都沒有 High；PM 實跑 `T1-pm-run.md` |
 | T0 | e2e 整合測試改成「continue 寫回原本的 Session」 | 完成 | impl1（3011d15）、impl2（745e5e8） | 兩邊都實跑過整合測試 |
 
+## 2026-10-04 夜間（使用者睡覺時）
+
+使用者合了 PR #10（07005a2）與 MyBrain #156，並交代：「把剩下的小問題修掉 你跑 e2e, 然後直接開 PR merge 進入 main, 然後在我這個 mac 裝新的 agora」「幫我直接清掉不需要的密碼跟設定」。
+
+| 順序 | 項目 | 狀態 |
+|---|---|---|
+| 1 | 清掉本機用不到的密碼與設定：`client-secret.txt`、`rclone-builtin.conf`、`rclone-own.conf`、`config.json` 的 `previous_folders` | 完成 |
+| 2 | T7（F1～F4）修好、review 審 | 進行中 |
+| 3 | 完整的整合測試（e2e） | 等 2 |
+| 4 | 開 PR（agora-lite → main），**這一次使用者授權 PM 自己用 merge commit 合** | 等 3 |
+| 5 | 用合進 main 的版本在使用者的 Mac 裝新的 agora（固定一份，`~/.local/share/agora-stable/<commit>`） | 等 4 |
+
+只有使用者能做的（已告知）：Google Cloud 刪舊 secret `****Of6a`；Google 帳號移除「rclone」的存取權；撤銷 GitHub fine-grained token 與 ollama-cloud API key。
+
 ## 2026-10-04：使用者驗收通過
 
 使用者照 `docs/acceptance.md` 走完第 2～16 節，全部通過（`docs/acceptance-result-2026-10-03.md`）。驗收資料已清（`agora-test` 8 個、opencode 測試對話 13 個依 id 一個一個刪、`/tmp/agora-acc`）。使用者平常用的 agora 換成新的穩定版 **0871e1c**（`~/.local/share/agora-stable/0871e1c`）。剩下：合 PR #10（只能用 merge commit，使用者做）、MyBrain #156、T7。
