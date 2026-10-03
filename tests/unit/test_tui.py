@@ -1759,8 +1759,9 @@ def test_the_result_window_says_some_of_it_failed():
 
 
 def test_the_result_window_says_it_is_waiting_to_be_uploaded():
-    """exit 3: saved here, not on Drive yet - which is not the same as done."""
-    said = _result_of(_marked_app(None), 3)
+    """exit 3: saved here, not on Drive yet - which is not the same as done. Every
+    action but delete, which stores nothing in the outbox and says its own thing (G4)."""
+    said = _result_of(_marked_app(None), 3, action="pull")
     assert "outbox" in " ".join(said) and "再送" in " ".join(said)
 
 
