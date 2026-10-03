@@ -6,9 +6,9 @@
 
 | 編號 | 標題 | 狀態 | 負責 | 備註 |
 |---|---|---|---|---|
-| T5 | 首次設定支援自己的 OAuth client、D5 文件改寫 → [需求單](T5-own-oauth-client.md) | 進行中 | impl1 | 10-03 換成自己的 client（issue #11 已關），程式不用改，只差首次設定與文件 |
+| T5 | 首次設定支援自己的 OAuth client、D5 文件改寫 → [需求單](T5-own-oauth-client.md) | 暫停（impl1 先接 T3） | impl1 | 10-03 換成自己的 client（issue #11 已關），程式不用改，只差首次設定與文件 |
 | T4 | 精簡兩個轉接器、放寬行數目標 → change [`slim-adapters`](../../openspec/changes/slim-adapters/) | 進行中（O1 照 PM 預設保留） | impl1 | 使用者 10-03 決定「先精簡，再放寬一點」 |
-| T3 | 寫入先存本機、背景上傳、少連 Drive → change [`local-first-writes`](../../openspec/changes/local-first-writes/) | 進行中：規格經 review 兩輪（T3、T3-sec1），第 1 節骨架完成並審過（T3-sec2）；impl2 做第 2 節，impl3（agy Opus）做第 3、4 節 | impl2、impl3 | 使用者 10-03 決定：P1 改成先存本機；慢的問題選 B＋C；A 原本開成 issue #11 觀察，使用者 10-03 改成立刻做，已完成（T5） |
+| T3 | 寫入先存本機、背景上傳、少連 Drive → change [`local-first-writes`](../../openspec/changes/local-first-writes/) | 進行中：規格經 review 兩輪（T3、T3-sec1），第 1 節骨架完成並審過（T3-sec2）；impl2 做第 2 節，impl1 接手第 3、4 節（impl3 額度用完） | impl2、impl1 | 使用者 10-03 決定：P1 改成先存本機；慢的問題選 B＋C；A 原本開成 issue #11 觀察，使用者 10-03 改成立刻做，已完成（T5） |
 | T2 | 互動模式：多選、全選、進度、中斷、按鍵整理 → change [`tui-batch-actions`](../../openspec/changes/archive/2026-10-03-tui-batch-actions/)（已歸檔，規格在 `openspec/specs/interactive-mode`） | **完成（10-03 歸檔）**，等本人用真實資料試（2-4） | impl1 | review 各輪都沒有 High；PM 試用 `T2-pm-run.md` |
 | T1 | 指令模式：pull／push、批次動作的進度與續傳 → change [`command-batch-actions`](../../openspec/changes/archive/2026-10-03-command-batch-actions/)（已歸檔，規格在 `openspec/specs/batch-commands`、`session-sync`） | **完成（10-03 歸檔）**，等本人驗收（1-5）；P1 與行數額度等使用者決定 | impl1、impl2 | review T1-archive、T1-4.2d、final-checks 都沒有 High；PM 實跑 `T1-pm-run.md` |
 | T0 | e2e 整合測試改成「continue 寫回原本的 Session」 | 完成 | impl1（3011d15）、impl2（745e5e8） | 兩邊都實跑過整合測試 |
@@ -28,7 +28,7 @@
 | 7 | 3-1 更新 MyBrain（#151 已合，改開新的 PR） | PM | 完成：[MyBrain #155](https://github.com/FATESAIKOU/MyBrain/pull/155)，等使用者合 |
 | — | 等使用者回來：T1 驗收（1-5）、T2 真實資料試用（2-4）、合併 PR | 使用者 | 驗收步驟草稿在 `docs/review/acceptance-draft.md`（review 寫，T2 做完後更新「已知問題」再換掉 docs/acceptance.md） |
 
-隊員的模型：impl1、impl2 用 opencode（Space Bunny Free → Muse Spark 1.3 Free → ollama-cloud DeepSeek V4.1 Flash max，用完往下換）；impl3（`w2:p14`）、impl4（`w2:p15`）是 agy，額度 0%：Claude Opus 約 10-03 10:00 恢復、Gemini 約 10-03 18:05 恢復，恢復就換上去接主要的實作。
+隊員的模型：impl1、impl2 用 opencode（Space Bunny Free → Muse Spark 1.3 Free → ollama-cloud DeepSeek V4.1 Flash max，用完往下換）；impl3（`w2:p14`）、impl4（`w2:p15`）是 agy，**同一個帳號、額度共用**。10-03 10:00 換上 Claude Opus 做了約 15 分鐘就用完：Opus 約 15:15 恢復、Gemini 約 18:05 恢復；恢復就換上去接主要的實作。T3 第 3、4 節因此改由 impl1 接手。
 
 **等使用者確認的事**（不擋進度，先照 PM 的判斷做）：
 - T2 的「勾選但被篩選掉的列不算進動作」（review V4，PM 選了比較安全的做法）。
