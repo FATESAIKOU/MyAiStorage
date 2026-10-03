@@ -29,6 +29,7 @@ from rich.markdown import Markdown
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
+from textual.worker import get_current_worker
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
@@ -160,6 +161,7 @@ def filtered(rows: list[Row], text: str, matches: set[str] | None = None) -> lis
 # A preview is (pinned, history): a pinned line on top, and the history as Markdown.
 
 PREVIEW_CHUNK = 30 << 10     # about 30 KB a step; a session.md is 340 KB to 3 MB (T6)
+FILTER_IDLE = 0.3            # content search: this long without a keystroke before it reads the agents (T7 P1)
 PREVIEW_IDLE = 0.15          # the cursor has to rest this long before anything is read
 
 
@@ -772,6 +774,8 @@ class AgoraApp(App):
         self.rows: dict[str, list[Row]] = {"agora": [], "import": []}
         self.tab, self.text, self.content = "agora", "", False      # content: search the conversations
         self.matches: dict[str, set[str] | None] = {"agora": None, "import": None}
+        self._filter_timer = None      # the debounce for the content search (T7 P1)
+        self._pending_filter = ""
         self.marked: set[str] = set()
         self.cache: dict[str, Preview] = {}
         self.status = ""
@@ -1085,14 +1089,25 @@ class AgoraApp(App):
 
         `event.value` is what is committed so far, so a half-composed character is not
         filtered on; the next keystroke re-filters anyway.
-        """
-        self.search(event.value.strip())
 
-    def action_search_mode(self) -> None:
-        self.content = not self.content
-        self.query_one("#mode", Static).update("內文" if self.content else "標題")
-        if self.text:
-            self.search(self.text)
+        In the title mode this is all there is to it: the rows are in memory. In the
+        content mode a search also reads the agents' own stores, so it waits for the
+        typing to stop (`FILTER_IDLE`) - otherwise every keystroke of a word sets a
+        whole scan going, and the earlier ones do not stop when a new one starts
+        (review T7 P1).
+        """
+        text = event.value.strip()
+        if not self.content:
+            self.search(text)          # in memory: filter as fast as the keys arrive
+            return
+        self._pending_filter = text    # reading the agents' stores: wait for a pause
+        if self._filter_timer is not None:
+            self._filter_timer.stop()
+        self._filter_timer = self.set_timer(FILTER_IDLE, self.run_pending_filter)
+
+    def run_pending_filter(self) -> None:
+        self._filter_timer = None
+        self.search(self._pending_filter)
 
     def action_search_mode(self) -> None:
         self.content = not self.content
@@ -1104,13 +1119,24 @@ class AgoraApp(App):
     def filter_done(self, event: Input.Submitted) -> None:
         # The filter is already applied (filter_typed); Enter only means "done - back
         # to the table". With an IME it usually does not get here at all, which is why
-        # nothing depends on it any more (T7 F3).
+        # nothing depends on it any more (T7 F3). It must not search again either: in
+        # the content mode that was one more whole scan on top of the one the keystroke
+        # had started (review T7 P1).
+        text = event.value.strip()
+        if self._filter_timer is not None:
+            self._filter_timer.stop()
+            self._filter_timer = None
         self.query_one("#filterbar").remove_class("on")
         self.query_one("#table").focus()
-        self.search(event.value.strip())
+        if text != self.text:          # the keystroke before this one already searched
+            self.search(text)
 
     def on_key(self, event) -> None:
         if event.key == "escape" and self.query_one("#filterbar").has_class("on"):
+            if self._filter_timer is not None:
+                self._filter_timer.stop()
+                self._filter_timer = None
+            self._pending_filter = ""
             self.query_one("#filter", Input).value = ""
             self.query_one("#filterbar").remove_class("on")
             self.query_one("#table").focus()
@@ -1129,7 +1155,18 @@ class AgoraApp(App):
 
     @work(thread=True, exclusive=True, group="search")
     def find_in_agents(self, text: str) -> None:
+        """Scan the agents for a content word, in a thread, and stop when replaced.
+
+        `exclusive=True` only marks the older workers cancelled - a thread that never
+        looks is a thread that runs to the end, and a word typed one letter at a time
+        left one whole scan per letter going at once (review T7 P1). So this checks
+        between results, and between agents: the work that is still running when the
+        screen has moved on stops as soon as it notices.
+        """
+        worker = get_current_worker()
         for agent in self.agents:   # the cache first (fast), then only what is not cached or is stale
+            if worker.is_cancelled:
+                return
             rows = [r for r in self.rows["import"] if r.agent == agent.name]
             missing = {r.key.split(":", 1)[1] for r in rows
                        if not cache.is_fresh(self.paths, agent.name, r.key.split(":", 1)[1], r.updated)}
@@ -1138,12 +1175,15 @@ class AgoraApp(App):
                 later = agent.search_text(text, only=missing) if missing else ()
                 for source in (cache.search_cached(self.paths, agent.name, text), later):
                     for session_id in source:
+                        if worker.is_cancelled:
+                            return
                         if session_id not in seen:
                             seen.add(session_id)
                             self.call_from_thread(self.found, text, f"{agent.name}:{session_id}")
             except Exception:    # a search must never take the screen down
                 continue
-        self.call_from_thread(self.say, f"內文搜尋「{text}」完成")
+        if not worker.is_cancelled:
+            self.call_from_thread(self.say, f"內文搜尋「{text}」完成")
 
     def found(self, text: str, key: str) -> None:
         if self.text == text and self.content and self.matches["import"] is not None:

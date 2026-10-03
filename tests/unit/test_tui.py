@@ -2341,3 +2341,113 @@ def test_a_half_composed_character_does_not_break_the_filter():
             await pilot.pause(0.1)
             assert len(app.shown()) == 3, "整串刪掉就全部回來"
     _run(go)
+
+
+# --- the content search waits for a pause, and only one runs (T7 P1) -----------
+
+
+class SlowAgent(FakeAgent):
+    """An agent whose search takes a while, and which can say how many were running.
+
+    A real content search reads opencode's database or claude's jsonl, which is what
+    makes "one scan per keystroke" worth fixing (review T7 P1).
+    """
+
+    def __init__(self, name, listed, texts=None, seconds=0.1):
+        super().__init__(name, listed, texts=texts)
+        self.seconds, self.calls = seconds, 0
+        self.running = 0
+        self.most_at_once = 0
+        self.counts: list[int] = []    # how many results each call actually yielded
+        self.lock = threading.Lock()
+
+    def search_text(self, keyword, only=None):
+        with self.lock:
+            self.calls += 1
+            self.running += 1
+            self.most_at_once = max(self.most_at_once, self.running)
+            mine = len(self.counts)
+            self.counts.append(0)
+        try:
+            yielded = [sid for sid, msgs in self.texts.items()
+                       if (only is None or sid in only) and any(keyword in m for m in msgs)]
+            for sid in yielded:
+                time.sleep(self.seconds)      # results arrive as found, and slowly
+                with self.lock:
+                    self.counts[mine] += 1
+                yield sid
+        finally:
+            with self.lock:
+                self.running -= 1
+
+
+def _slow_search_app(seconds=0.2):
+    agent = SlowAgent("claude", [Listed("s1", "/tmp/p", "甲", None)],
+                      texts={"s1": ["table 在這裡"]}, seconds=seconds)
+    app, _ = _app([agent])
+    return app, agent
+
+
+def test_content_search_waits_for_the_typing_to_pause():
+    """P1: `table` typed one letter at a time is one search, not five - the debounce
+    starts it only after the last keystroke, and Enter does not start another."""
+    app, agent = _slow_search_app()
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+t", "slash")
+            for ch in "table":                     # five keystrokes, quickly
+                await pilot.press(ch)
+            assert agent.calls == 0, "還沒停下來就不該開始掃描"
+            await pilot.pause(0.6)                 # the debounce elapses: one scan
+            assert agent.calls == 1, f"暫停之後應該只掃一次，掃了 {agent.calls} 次"
+            await pilot.press("enter")             # the IME-swallowed key: not a second scan
+            assert agent.calls == 1, f"Enter 不該再掃一次，掃了 {agent.calls} 次"
+    _run(go)
+
+
+def test_a_search_that_is_replaced_stops_instead_of_running_to_the_end():
+    """`exclusive=True` only marks the old worker cancelled; the thread has to look.
+    A real scan reads opencode's database and can take seconds, so the one that was
+    replaced must stop where it is, not run to the end beside the new one (T7 P1)."""
+    app, agent = _slow_search_app(seconds=0.2)                    # 0.2 s per result
+    agent.texts = {f"s{n}": [f"t 第 {n} 筆"] for n in range(8)}   # eight results: 1.6 s
+    agent.listed.extend(Listed(f"s{n}", "/tmp/p", f"第{n}", None) for n in range(1, 8))
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+t", "slash")
+            await pilot.press("t")
+            await _wait(lambda: agent.counts and agent.counts[0] >= 1, pilot)  # it started
+            await pilot.press("a")                 # and is replaced while it runs
+            await _wait(lambda: agent.calls >= 2, pilot)   # the new one has started
+            stopped_at = agent.counts[0]
+            await pilot.pause(1.0)                 # five more results, if it kept going
+            assert agent.counts[0] <= stopped_at + 1, \
+                f"被取代的掃描應該停在原地，而不是繼續產出：{agent.counts}"
+            assert agent.counts[0] < 8, \
+                f"更不能把整份掃完：{agent.counts}"
+            # they may overlap for the one result it takes the old worker to notice it
+            # was cancelled; what must not happen is the whole old scan running on
+            assert agent.most_at_once <= 2, f"同時在跑的不該超過兩個：{agent.most_at_once}"
+    _run(go)
+
+
+def test_the_title_filter_is_still_per_keystroke_and_never_scans_an_agent():
+    """The debounce is for the content mode only: the title filter is a memory lookup,
+    and it must stay immediate (T7 F3 was fixed that way)."""
+    app, agent = _slow_search_app()
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("slash")
+            for ch in "第一":                      # one key at a time, like a person
+                await pilot.press(ch)
+            await pilot.pause(0.1)                 # well inside the content debounce
+            assert [r.key for r in app.shown()] == ["agora:01AAAAAAAAAAAAAAAAAAAAAAAA"], \
+                "標題模式立即縮到剩第一個"
+            assert agent.calls == 0, "標題模式不碰 agent"
+    _run(go)
