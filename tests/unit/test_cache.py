@@ -344,6 +344,31 @@ def test_push_goes_on_past_a_failure_and_reports_k_of_n(drive, capsys):   # revi
     assert "push 1/3" in err and "push 3/3" in err and "傳不上去" in err
 
 
+def test_one_unreadable_id_does_not_stop_the_others(drive, capsys, monkeypatch):
+    """review H1: push looks at the outbox once for the whole batch, and reading an id is
+    what tells it whether that id arrived late. An id it cannot read is that one id's
+    problem - the rest still goes up, and the batch still counts it as failed."""
+    paths = store.Paths.from_env()
+    wanted = _on_drive(paths)
+    cache.pull(paths, [wanted], {})
+    real = store.push_outbox
+
+    def push_outbox_then_stage(drive_, paths_, warn=store.warn, notices=False):
+        left = real(drive_, paths_, warn, notices)
+        folder = store.stage(paths_, _header("快照之後才寫好的"),
+                             "## user\n晚到的那筆\n", b'{"x": 9}')
+        store.remember(paths_, folder)
+        return left
+
+    monkeypatch.setattr(store, "push_outbox", push_outbox_then_stage)
+    agent = Agent({}, name="opencode")
+
+    done, failed = cache.push(paths, ["ses_x", wanted], {"opencode": agent})
+
+    assert (done, failed) == (1, 1), "the good one went up, the bad one is a failure"
+    assert "ses_x 傳不上去" in capsys.readouterr().err
+
+
 def test_push_only_takes_agora_ids(drive, capsys):
     paths = store.Paths.from_env()
     ulid = _on_drive(paths)

@@ -83,6 +83,19 @@ def _plan_one(session_id: str, agents: dict) -> tuple[str, str | None, Exception
     return kind, bare, None
 
 
+def _arrived_late(session_id: str, agents: dict, staged: set[str], paths: store.Paths) -> bool:
+    """Whether this id is in the outbox but was not in push's snapshot.
+
+    An id we cannot read is not this function's business: the loop below reports it and
+    carries on with the rest, and this one must not fail the whole push (review H1).
+    """
+    try:
+        ulid = _split(session_id, agents)[1]
+    except ValueError:
+        return False
+    return ulid not in staged and (paths.outbox / ulid).is_dir()
+
+
 def _split(session_id: str, agents: dict) -> tuple[str, str]:
     """(`agora` or an agent name, the id under it) for one id given to pull or push.
 
@@ -266,8 +279,7 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
         # Anything asked for that appeared while we were sending goes in this same lock
         # (G1): `upload_batch` works on the whole outbox, and outside the lock that is
         # push and the background on the same outbox at once.
-        if late := [i for i in wanted if _split(i, agents)[1] not in staged
-                    and (paths.outbox / _split(i, agents)[1]).is_dir()]:
+        if late := [i for i in wanted if _arrived_late(i, agents, staged, paths)]:
             left = sorted(set(left) | set(store.upload_batch(drive, paths)))
     if left:
         _line(f"outbox 還有 {len(left)} 筆沒上傳成功")
