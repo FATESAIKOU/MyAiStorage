@@ -28,7 +28,7 @@
 | 7 | 3-1 更新 MyBrain（#151 已合，改開新的 PR） | PM | 完成：[MyBrain #155](https://github.com/FATESAIKOU/MyBrain/pull/155) 使用者 10-03 合了 |
 | — | 等使用者回來：T1 驗收（1-5）、T2 真實資料試用（2-4）、合併 PR | 使用者 | 驗收步驟草稿在 `docs/review/acceptance-draft.md`（review 寫，T2 做完後更新「已知問題」再換掉 docs/acceptance.md） |
 
-隊員的模型：impl1、impl2 用 opencode（Space Bunny Free → Muse Spark 1.3 Free → ollama-cloud DeepSeek V4.1 Flash max，用完往下換）；impl3（`w2:p14`）、impl4（`w2:p15`）是 agy，**同一個帳號、額度共用**。10-03 10:00 換上 Claude Opus 做了約 15 分鐘就用完：Opus 約 15:15 恢復、Gemini 約 18:05 恢復；恢復就換上去接主要的實作。T3 第 3、4 節因此改由 impl1 接手。
+隊員的模型：impl1、impl2 用 opencode（Space Bunny Free → Muse Spark 1.3 Free → ollama-cloud DeepSeek V4.1 Flash max，用完或連不上就往下換；impl1 10-03 15:40 因 Space Bunny 連不上換成 Muse Spark）；impl3（`w2:p14`）、impl4（`w2:p1C`）是 agy，**同一個帳號、額度共用**。10-03 15:24 換上 Claude Opus 5.5 做了 R6、V6、K1、G4～G6，16:20 撞到**每週上限**（約 10-10 恢復）；Gemini 約 18:05 恢復。
 
 **等使用者確認的事**（不擋進度，先照 PM 的判斷做）：
 - T2 的「勾選但被篩選掉的列不算進動作」（review V4，PM 選了比較安全的做法）。
