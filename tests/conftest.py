@@ -79,6 +79,11 @@ def isolated_home(tmp_path, monkeypatch, request):
     for var in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR"):
         monkeypatch.delenv(var, raising=False)
     if "integration" not in request.keywords:
+        # Unit tests want Drive to have the session by the time the command returns,
+        # so uploads run in the foreground instead of in a background process
+        # (change local-first-writes, design「測試開關」). Integration tests want the
+        # real detached uploader, so they keep the default.
+        monkeypatch.setenv("AGORA_UPLOAD", "inline")
         # A unit test that forgets its fake agent fails loudly instead of running the real one.
         monkeypatch.setenv("AGORA_OPENCODE_CMD", os.environ.get("AGORA_OPENCODE_CMD", "/nonexistent/opencode"))
         monkeypatch.setenv("AGORA_CLAUDE_CMD", os.environ.get("AGORA_CLAUDE_CMD", "/nonexistent/claude"))

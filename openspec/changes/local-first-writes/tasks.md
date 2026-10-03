@@ -1,8 +1,10 @@
 ## 1. 骨架（負責：impl2，先做，做完 impl1 才開始第 4 節）
 
-- [ ] 1.1 `src/agora/background.py`：獨立入口（不經過 `cli.main`）；flock `<state>/upload.lock`、處理到 outbox 與刪除佇列都空、放開鎖後再檢查一次；輸出寫 `<state>/upload.log`（超過 1 MB 只留尾巴）。留一個空的 `process_trash_queue(paths, drive)` 給 impl1（design「背景程序」「一把鎖」）
-- [ ] 1.2 啟動背景的 helper：`start_new_session`、`stdin=DEVNULL`、`close_fds=True`、env 原樣、stdout／stderr 到記錄檔；`AGORA_UPLOAD=inline` 時改在前景同步跑（上傳與刪除佇列）；回傳「已啟動／已在前景傳完／失敗」（N1）
-- [ ] 1.3 測試：真的啟動一次背景，確認沒接到呼叫端的 stdout、沒繼承 pending 鎖、結束後鎖會放開；inline 開關
+- [x] 1.1 `src/agora/background.py`：獨立入口（不經過 `cli.main`）；flock `<state>/upload.lock`、處理到 outbox 與刪除佇列都空、放開鎖後再檢查一次；輸出寫 `<state>/upload.log`（超過 1 MB 只留尾巴）。留一個空的 `process_trash_queue(paths, drive)` 給 impl1（design「背景程序」「一把鎖」）（`_take` 拿不到鎖就結束；`run` 放開鎖後再看一次。mutation 誠實回報見下）
+- [x] 1.2 啟動背景的 helper：`start_new_session`、`stdin=DEVNULL`、`close_fds=True`、env 原樣、stdout／stderr 到記錄檔；`AGORA_UPLOAD=inline` 時改在前景同步跑（上傳與刪除佇列）；回傳「已啟動／已在前景傳完／失敗」（N1）
+- [x] 1.3 測試：真的啟動一次背景，確認沒接到呼叫端的 stdout、沒繼承 pending 鎖、結束後鎖會放開；inline 開關
+- [x] 1.4 依 review T3-sec1 的 N1、N3 調整骨架：啟動 helper 回傳三種結果（已啟動／已在前景傳完／失敗），inline 時上傳失敗回 exit 3（既有測試不變）、刪除佇列也在前景處理；指令開頭的 sync **不在前景上傳**，改成 outbox 或刪除佇列不空就啟動背景，提醒「背景上傳中，N 筆」（L5）。單元測試預設 `AGORA_UPLOAD=inline`（`tests/conftest.py`），整合測試維持真的背景程序。共用判斷放在 `store.queued_for_trash(paths)`（N10）
+- [x] 1.5 mutation（副本裡做）：N1 的 inline 失敗、N3 的 sync 前景上傳、M1 的不拿鎖、日誌不截斷——四個都抓得到。**兩個抓不到，誠實記下**：(a) `close_fds=False` 時 pending 鎖測試仍然綠——Python 的 fd 本來就是 non-inheritable（PEP 446），子程序拿不到那個鎖，真正守住的是這件事而不是那個 flag（flag 本身由啟動參數的測試守著）；(b) 拿掉「放開鎖後再看一次」沒有測試會紅——迴圈內的 `waiting != seen` 就會抓到晚到的 Session，spec 也說兩條路徑任一條成立即可，那一行是窄窗期的第二道防線
 
 ## 2. 本機完整的一份與批次上傳（負責：impl2）
 

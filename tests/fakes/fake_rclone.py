@@ -22,6 +22,10 @@ def fail(msg):
     sys.exit(1)
 
 
+if os.environ.get("FAKE_RCLONE_DELAY"):     # let a test watch a slow upload happen
+    import time
+    time.sleep(float(os.environ["FAKE_RCLONE_DELAY"]))
+
 args = sys.argv[1:]
 with open(log, "a") as f:
     f.write(json.dumps(args) + "\n")

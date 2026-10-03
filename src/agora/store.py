@@ -60,6 +60,7 @@ class Paths:
     mirror = property(lambda s: s.cache / "sessions")
     outbox = property(lambda s: s.state / "outbox")
     pending = property(lambda s: s.state / "pending")
+    trash_queue = property(lambda s: s.state / "trash-queue")   # waiting for the Drive trash
     reading = property(lambda s: s.cache / "reading")   # agent sessions' full text (design 5.10)
 
 
@@ -233,6 +234,17 @@ def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None) -> Pat
 
 def outbox_count(paths: Paths) -> int:
     return len(outbox_ulids(paths))
+
+
+def queued_for_trash(paths: Paths) -> set[str]:
+    """Sessions deleted here, still waiting for the background to move them.
+
+    One place, because the answer is needed in several: the uploader's loop, the
+    reminder at the start of a command, and pull/push refusing them (review N10).
+    """
+    if not paths.trash_queue.exists():
+        return set()
+    return {p.name for p in paths.trash_queue.iterdir() if p.is_file()}
 
 
 def outbox_ulids(paths: Paths) -> set[str]:
@@ -581,9 +593,22 @@ def continuing(paths: Paths, ulid: str) -> bool:
     return False           # nobody does: what is left of an interrupted one
 
 
+def kick_uploader(paths: Paths) -> None:
+    """Make sure something is looking after the outbox and the trash queue.
+
+    The command that notices them does not send them itself: a sync in the foreground
+    is the wait T3 is here to remove, and after a failed upload the first `search` would
+    be slow again (review N3). Not being able to start one means one is already running,
+    and it looks again before it lets the lock go.
+    """
+    from agora import background        # imported here: background imports this module
+    if outbox_ulids(paths) or queued_for_trash(paths):
+        background.start(paths)
+
+
 def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
          warn=warn) -> Index:
-    """Push the outbox, then pull session.md files whose md5 changed.
+    """Start the uploader if anything is waiting, then pull the session.md files whose md5 changed.
 
     Only session.md is mirrored; raws are fetched on demand. A session whose
     raw is missing or has another md5 than its header says is unfinished
@@ -601,14 +626,14 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
     if throttle and stamp.exists() and now() - float(stamp.read_text()) < SYNC_THROTTLE_S:
         return index
     drive = drive or Drive(paths)
+    kick_uploader(paths)
     try:
-        failed = push_outbox(drive, paths, warn=say)
         remote = drive.list_sessions()
     except StoreError as e:
         say(f"連不上 Drive，改查本機索引：{e}")
         return index
-    if failed:
-        say(f"outbox 還有 {len(failed)} 筆沒上傳成功")
+    if waiting := outbox_ulids(paths):
+        say(f"背景上傳中，{len(waiting)} 筆")   # L5: not "upload failed"
     missing = remote is None
     remote = remote or {}
     known = index.known()
