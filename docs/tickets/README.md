@@ -6,6 +6,7 @@
 
 | 編號 | 標題 | 狀態 | 負責 | 備註 |
 |---|---|---|---|---|
+| T7 | 驗收時記下的四個小問題 → [需求單](T7-acceptance-findings.md) | 進行中 | impl2（F1、F2、F4）、impl1（F3） | 使用者 10-04 驗收通過，`docs/acceptance-result-2026-10-03.md` |
 | T6 | 預覽只讀、只排需要的那一段（兩個分頁）→ [需求單](T6-lazy-preview.md) | **完成（10-03）**：0ef57f4、9c74220、07ed920；review T6 確認；PM 量到 Agora 分頁每移動一格約 3 秒 → 約 0.1 秒 | impl2 | 使用者 10-03 回報 Agora 分頁上下移動很慢 |
 | T5 | 首次設定支援自己的 OAuth client、D5 文件改寫 → [需求單](T5-own-oauth-client.md) | **完成（10-03）**：fb920fb、3d2fb86、598981a；review T5、T5-sec1 確認任何讀不了的 client 檔都不會帶出 secret | impl1 | 10-03 換成自己的 client（issue #11 已關） |
 | T4 | 精簡兩個轉接器、放寬行數目標 → change [`slim-adapters`](../../openspec/changes/archive/2026-10-03-slim-adapters/) | **完成（10-03 歸檔）**：−36 行；新的行數目標等使用者決定 | impl1 | 使用者 10-03 決定「先精簡，再放寬一點」 |
@@ -13,6 +14,10 @@
 | T2 | 互動模式：多選、全選、進度、中斷、按鍵整理 → change [`tui-batch-actions`](../../openspec/changes/archive/2026-10-03-tui-batch-actions/)（已歸檔，規格在 `openspec/specs/interactive-mode`） | **完成（10-03 歸檔）**，等本人用真實資料試（2-4） | impl1 | review 各輪都沒有 High；PM 試用 `T2-pm-run.md` |
 | T1 | 指令模式：pull／push、批次動作的進度與續傳 → change [`command-batch-actions`](../../openspec/changes/archive/2026-10-03-command-batch-actions/)（已歸檔，規格在 `openspec/specs/batch-commands`、`session-sync`） | **完成（10-03 歸檔）**，等本人驗收（1-5）；P1 與行數額度等使用者決定 | impl1、impl2 | review T1-archive、T1-4.2d、final-checks 都沒有 High；PM 實跑 `T1-pm-run.md` |
 | T0 | e2e 整合測試改成「continue 寫回原本的 Session」 | 完成 | impl1（3011d15）、impl2（745e5e8） | 兩邊都實跑過整合測試 |
+
+## 2026-10-04：使用者驗收通過
+
+使用者照 `docs/acceptance.md` 走完第 2～16 節，全部通過（`docs/acceptance-result-2026-10-03.md`）。驗收資料已清（`agora-test` 8 個、opencode 測試對話 13 個依 id 一個一個刪、`/tmp/agora-acc`）。使用者平常用的 agora 換成新的穩定版 **0871e1c**（`~/.local/share/agora-stable/0871e1c`）。剩下：合 PR #10（只能用 merge commit，使用者做）、MyBrain #156、T7。
 
 ## 2026-10-03 晚上：全部完成，等使用者驗收
 
