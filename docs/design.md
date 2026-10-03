@@ -29,8 +29,8 @@
 
 - `agora/` 根資料夾第一次執行時建立，把 **folder ID** 寫進 `~/.config/agora/config.json`；之後所有存取都用 ID，不靠名字找（Drive 允許同名資料夾）。`sync` 發現同名資料夾時警告。
 - **只能透過 agora 寫入。** 從 Drive 網頁拖進去的檔案，`drive.file` 看不到。
-- **用自己的 client（2026-10-03，issue #11）**：量過一次 rclone，內建 client 被共用配額擋住時約 50 秒，換成自己的 Desktop client 之後每次 **0.6～0.8 秒**。所以預設路徑還是內建的（不必有 Google Cloud 專案），但首次設定多一個選項：給一個 client 設定檔的**路徑**（Google 下載的 JSON，或 rclone 那種兩行 `Client-ID=`／`SECRET=` 的檔）。程式只讀那個路徑，值直接交給 rclone 的 argv——不印出、不寫進 log、不經過 shell（argv 裡還是看得到 `ps`，這是 rclone 介面的代價）。授權時 **同意畫面要是正式版**：`drive.file` 的 refresh token 在 testing 模式只有 7 天，會在沒人注意的時候失效。
-- **換 client，以前建的檔案就全部看不到**（資料還在；`drive.file` 只看得到建立它的那個 client 的檔案）。2026-10-03 的搬法：用舊的設定把 `agora/` 整份下載，用新的設定建新的 `agora/` 並上傳、逐檔核對 md5，切換 `config.json` 的 folder ID，再用舊的設定把舊資料夾移到垃圾桶。2026-10-02 從 worker client 換到 rclone 內建 client 時也是這樣搬的。
+- **用自己的 client（2026-10-03，issue #11）**：量過一次 rclone，內建 client 被共用配額擋住時約 50 秒，換成自己的 Desktop client 之後每次 **0.6～0.8 秒**。首次設定的**第一個選項仍是內建的**（不必有 Google Cloud 專案）；**第二個選項是自己的**：給一個 client 設定檔的**路徑**——Google 下載的 **Desktop** client 的 JSON，或兩行 `Client-ID=`／`SECRET=` 的文字檔。程式只讀那個路徑，值直接交給 rclone 的 argv——不印出、不寫進 log、不經過 shell（argv 裡還是看得到 `ps`，這是 rclone 介面的代價）。讀檔、編碼、解析任何一步失敗都回「讀不到」（連錯誤訊息都不帶：不是 UTF-8 的檔案，其 decode 錯誤裡有整個檔案，而那個檔案就是憑證），可以重來或改用內建的。`web` 類型不收：rclone 對它用 `http://127.0.0.1:53682/` 當回呼，那種 client 一定授權失敗。授權時 **同意畫面要是正式版**：`drive.file` 的 refresh token 在 testing 模式只有 7 天，會在沒人注意的時候失效。
+- **換 client，以前建的檔案就全部看不到**（資料還在；`drive.file` 只看得到建立它的那個 client 的檔案）。2026-10-03 的搬法：用舊的設定把 `agora/` 整份下載，用新的設定建新的 `agora/` 並上傳、逐檔核對 md5（檔名與 md5 全部一致），**換成新的 `rclone.conf`**、切換 `config.json` 的 folder ID，再用舊的設定把舊資料夾移到垃圾桶。2026-10-02 從 worker client 換到 rclone 內建 client 時也是這樣搬的。
 - **換機器**：把 `~/.config/agora/rclone.conf`（含 `[gdrive]` 與 token）與 `~/.config/agora/config.json`（folder ID）複製過去就能用，client 的值已經在 `rclone.conf` 裡。
 - rclone 內建 client 的配額是所有 rclone 使用者共用的；用自己的 client 就沒有這個問題（這也是 2026-10-03 換掉的原因）。
 

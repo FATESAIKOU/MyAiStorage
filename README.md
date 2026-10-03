@@ -11,15 +11,23 @@ uv tool install --editable .     # 之後就有 agora 指令
 需要：
 - `rclone`；
 - `~/.config/agora/rclone.conf`：remote 名稱是 `gdrive`，scope 是 `drive.file`。第一次打 `agora`（互動模式）時會引導你用瀏覽器授權；也可以自己跑 `rclone config create gdrive drive scope=drive.file --config ~/.config/agora/rclone.conf`；
-- **選填**自己的 OAuth client（Google Cloud 的 Desktop client）。rclone 內建的 client 配額是所有 rclone 使用者共用的，被限流時一次 rclone 約 50 秒，用自己的約 0.6～0.8 秒。首次設定的第二個選項會問你要一個 client 設定檔的**路徑**（Google 下載的 JSON，或 rclone 那種兩行 `Client-ID=`／`SECRET=` 的檔）；也可以自己跑：
+- **選填**自己的 OAuth client（Google Cloud 的 **Desktop** client）。rclone 內建的 client 配額是所有 rclone 使用者共用的，被限流時一次 rclone 約 50 秒，用自己的約 0.6～0.8 秒。
+
+  怎麼給：**在首次設定選第二個項，給它一個 client 設定檔的路徑**——把 Google 下載的 JSON 存成檔案、把路徑給它；或給一個兩行 `Client-ID=`／`SECRET=` 的文字檔。值由 agora 讀出來直接交給 rclone，不會印出來、不寫進 log、也不經過 shell。讀不到（檔案不在、不是 UTF-8、裡面沒有 `client_id`／`client_secret`）時會問你要不要重來一次，還是改用內建的 client。`web` 類型的 client 不收：rclone 對它用 `http://127.0.0.1:53682/` 當回呼，那種 client 授權一定會失敗。
+
+  **不要把 secret 打在命令列上**（會留在 shell 的歷史紀錄裡）。真的要自己跑 `rclone config create`，就讓值從檔案來：
 
   ```bash
-  rclone config create gdrive drive scope=drive.file \
-      client_id=你的CLIENT_ID client_secret=你的CLIENT_SECRET \
-      --config ~/.config/agora/rclone.conf
+  CONF=~/.config/agora/rclone.conf
+  JSON=~/Downloads/client_secret_xxx.json      # Google 下載的那個
+  ID=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["installed"]["client_id"])' "$JSON")
+  SECRET=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["installed"]["client_secret"])' "$JSON")
+  rclone config create gdrive drive scope=drive.file client_id="$ID" client_secret="$SECRET" --config "$CONF"
+  unset ID SECRET
   ```
 
-  agora 只讀那個路徑，值直接交給 rclone，不會印出來或寫進 log。授權時同意畫面**要選正式版**：testing 模式的 refresh token 只有 7 天。換 client 之後以前建的檔案要自己搬（見 design D5）；換機器只要複製 `rclone.conf` 與 `config.json`。
+  設完就把那個 JSON 移走或刪掉：值已經在 `rclone.conf`（權限 600）裡了。授權時同意畫面**要選正式版**：testing 模式的 refresh token 只有 7 天。換 client 之後以前建的檔案要自己搬（見 design D5）；換機器只要複製 `rclone.conf` 與 `config.json`。
+
 - `opencode`、`claude`（用到哪個裝哪個）。
 
 第一次執行時，agora 會在 Drive 建一個 `agora/` 資料夾，並把它的 folder ID 記到 `~/.config/agora/config.json`。

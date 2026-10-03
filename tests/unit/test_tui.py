@@ -1897,6 +1897,32 @@ def test_a_client_file_we_cannot_use_is_none_not_a_guess(tmp_path):
     assert tui.read_client(str(tmp_path)) is None          # a directory
 
 
+def test_a_utf8_bom_is_not_a_reason_to_refuse_the_client_file(tmp_path):
+    """T4: a file saved by an editor that writes a BOM is still a UTF-8 JSON."""
+    path = tmp_path / "bom.json"
+    path.write_bytes(b"\xef\xbb\xbf" + json.dumps(
+        {"installed": {"client_id": FAKE_ID, "client_secret": FAKE_SECRET}}).encode())
+    assert tui.read_client(str(path)) == (FAKE_ID, FAKE_SECRET)
+
+
+def test_only_a_desktop_client_is_accepted(tmp_path):
+    """T4: rclone redirects a `web` client to http://127.0.0.1:53682/, which such a
+    client will not have registered - the user would only see「授權沒有完成」. And a
+    shape we do not recognise is refused rather than guessed at."""
+    web = tmp_path / "web.json"
+    web.write_text(json.dumps({"web": {"client_id": FAKE_ID, "client_secret": FAKE_SECRET}}),
+                   encoding="utf-8")
+    assert tui.read_client(str(web)) is None, "a web client cannot finish this authorization"
+    odd = tmp_path / "odd.json"
+    odd.write_text(json.dumps({"installed": [FAKE_SECRET]}), encoding="utf-8")
+    assert tui.read_client(str(odd)) is None
+    half = tmp_path / "half-web.json"
+    half.write_text(json.dumps({"installed": "x", "web": {"client_id": FAKE_ID,
+                                                          "client_secret": FAKE_SECRET}}),
+                    encoding="utf-8")
+    assert tui.read_client(str(half)) is None
+
+
 def test_the_rclone_command_carries_the_client_when_there_is_one(tmp_path):
     paths = store.Paths(config=tmp_path / "config", cache=tmp_path / "cache", state=tmp_path / "state")
     built_in = tui.authorize_argv(paths)
@@ -1932,7 +1958,7 @@ def test_nothing_about_the_client_is_printed(monkeypatch, tmp_path, capsys):
     assert FAKE_SECRET not in capsys.readouterr().out
 
 
-def _first_run(pick: int, typed: str, tmp_path, monkeypatch):
+def _first_run(pick: int, typed: str, tmp_path, monkeypatch, give_up: bool | None = None):
     """Drive the first-run screens: `pick` on the Choose, then `typed` in the prompt."""
     paths = store.Paths(config=tmp_path / "config", cache=tmp_path / "cache", state=tmp_path / "state")
     (tmp_path / "config").mkdir()
@@ -1957,13 +1983,13 @@ def _first_run(pick: int, typed: str, tmp_path, monkeypatch):
                 for ch in typed:
                     await pilot.press("space" if ch == " " else ch)
                 await pilot.press("enter")
-                # an unreadable path stops at a window that has to be read first
-                await _wait(lambda: isinstance(app.screen, tui.Tell) or bool(authorize_calls),
+                # a path we cannot use stops at a window that has to be read first
+                await _wait(lambda: isinstance(app.screen, tui.Choose) or bool(authorize_calls),
                             pilot)
                 said.extend(str(w.render()) for w in app.screen.walk_children(Widget)
                             if isinstance(w, Static))
-                if isinstance(app.screen, tui.Tell):
-                    await pilot.press("enter")
+                if isinstance(app.screen, tui.Choose) and give_up is not None:
+                    await pilot.press("down", "enter")    # 用內建的 client
                     await pilot.pause()
             await _wait(lambda: bool(authorize_calls), pilot)
     _run(go)
@@ -1982,7 +2008,32 @@ def test_the_first_run_works_on_rclones_own_client_when_you_skip_it(tmp_path, mo
 
 
 def test_a_client_file_we_cannot_read_falls_back_to_rclones_own(tmp_path, monkeypatch):
-    calls, said = _first_run(1, str(tmp_path / "nowhere.json"), tmp_path, monkeypatch)
+    calls, said = _first_run(1, str(tmp_path / "nowhere.json"), tmp_path, monkeypatch, give_up=True)
     assert calls == [None], "it says what happened, then does the thing that works"
     assert "讀不到 client 設定檔" in said
+    assert "找不到這個檔案" in said, "a typo should not read as「你的檔案內容不對」"
     assert FAKE_SECRET not in said and FAKE_ID not in said, "the path is not the values"
+
+
+def test_a_client_file_that_is_not_utf8_falls_back_without_saying_what_was_in_it(
+        tmp_path, monkeypatch, capsys):
+    """T1: a client file saved as UTF-16 raises UnicodeDecodeError, and *its message
+    carries the whole file* - which is the credential. The app must not die, and neither
+    the screen nor anything raised may contain the secret."""
+    utf16 = tmp_path / "client_secret_utf16.json"
+    utf16.write_bytes(json.dumps({"installed": {"client_id": FAKE_ID,
+                                                "client_secret": FAKE_SECRET}}
+                                 ).encode("utf-16"))
+    assert tui.read_client(str(utf16)) is None
+    # and saying why is not an option either: the reason *is* the whole file, mangled
+    # by the failed decode but readable. So: nothing at all comes out of here.
+    quiet = capsys.readouterr()
+    assert quiet.out == "" and quiet.err == "", f"讀一個壞掉的 client 檔不該出聲：{quiet}"
+
+    calls, said = _first_run(1, str(utf16), tmp_path, monkeypatch, give_up=True)
+
+    assert calls == [None], "carry on with rclone's own client, do not fall over"
+    assert "讀不到 client 設定檔" in said
+    assert FAKE_SECRET not in said, "the secret leaked into the window"
+    assert FAKE_ID not in said
+    assert "UnicodeDecodeError" not in said, "nor the exception that would have carried it"

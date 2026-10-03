@@ -216,31 +216,37 @@ def setup_needed(paths: store.Paths) -> str | None:
 def read_client(where: str) -> tuple[str, str] | None:
     """(client_id, client_secret) from the file at `where`, or None if it is not one.
 
-    Two shapes are understood: the JSON Google hands out when you create a Desktop
-    client, and rclone's own two-line `Client-ID=` / `SECRET=` file. Nothing is
-    printed, logged or put on the screen - the values only ever travel into rclone's
-    own argv (design D5).
+    Two shapes: the JSON Google hands out when you create a **Desktop** client, and a
+    two-line `Client-ID=` / `SECRET=` text file. Nothing is printed, logged or put on
+    the screen - the values only ever travel into rclone's own argv (design D5).
+
+    Every way this can fail is None, and nothing is said about which: a file saved as
+    UTF-16 raises `UnicodeDecodeError`, whose message carries **the whole file** - and
+    that file is a credential (review T1). So the reading, the decoding and the parsing
+    all happen inside one `try` whose result is a boolean, not an error message. A
+    `web` client is refused rather than accepted: rclone redirects it to
+    `http://127.0.0.1:53682/`, which a web client will not have registered, and the
+    user would only ever see 「授權沒有完成」 (review T4).
     """
     try:
-        text = Path(where).expanduser().read_text(encoding="utf-8")
-    except OSError:
-        return None
-    if text.lstrip().startswith("{"):
-        try:
-            block = json.loads(text).get("installed") or json.loads(text).get("web") or {}
-        except (json.JSONDecodeError, AttributeError):
+        # utf-8-sig, so a BOM is not mistaken for a format we do not know (review T4)
+        text = Path(where).expanduser().read_bytes().decode("utf-8-sig")
+        if text.lstrip().startswith("{"):
+            block = json.loads(text).get("installed")
+            if not isinstance(block, dict):
+                return None
+            client_id, secret = block.get("client_id"), block.get("client_secret")
+        else:
+            pairs = {}
+            for line in text.splitlines():
+                key, _, value = line.partition("=")
+                pairs[key.strip()] = value.strip()
+            client_id, secret = pairs.get("Client-ID"), pairs.get("SECRET")
+        if not all(isinstance(v, str) and v.strip() for v in (client_id, secret)):
             return None
-        client_id, secret = block.get("client_id"), block.get("client_secret")
-    else:
-        pairs = {}
-        for line in text.splitlines():
-            key, _, value = line.partition("=")
-            pairs[key.strip()] = value.strip()      # rclone writes `Client-ID = …`
-        client_id = pairs.get("Client-ID")
-        secret = pairs.get("SECRET")
-    if not all(isinstance(v, str) and v.strip() for v in (client_id, secret)):
-        return None
-    return client_id.strip(), secret.strip()
+        return client_id.strip(), secret.strip()
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None      # not a word about why: the reason would carry the file
 
 
 def authorize_argv(paths: store.Paths, client: tuple[str, str] | None = None) -> list[str]:
@@ -706,15 +712,31 @@ class AgoraApp(App):
             if pick == 1:
                 # The path is all we ask for: the values are read here and handed to
                 # rclone, never shown (design D5).
-                typed = await self.push_screen_wait(AskText("自己的 client 設定檔路徑", ""))
-                if typed and typed.strip():
-                    client = read_client(typed.strip())
-                    if client is None:
-                        await self.push_screen_wait(Tell(
-                            "讀不到 client 設定檔",
-                            f"{typed.strip()}\n裡面沒有 client_id／client_secret。"
-                            "可以用 Google 下載的 JSON，或兩行 Client-ID=／SECRET= 的文字檔。\n"
-                            "先用 rclone 內建的 client：功能一樣，只是共用配額會慢。", ok=False))
+                leave = False
+                while True:
+                    typed = (await self.push_screen_wait(
+                        AskText("自己的 client 設定檔路徑", "")) or "").strip()
+                    if not typed:
+                        break                        # 沒給就用內建的，和以前一樣
+                    if not Path(typed).expanduser().is_file():
+                        found, why = None, "找不到這個檔案。"
+                    else:
+                        found = read_client(typed)
+                        why = ("這個檔案裡沒有 client_id／client_secret。要用 Google Cloud 的"
+                               " **Desktop** client 下載的 JSON，"
+                               "或兩行 Client-ID=／SECRET= 的文字檔。")
+                    if found:
+                        client = found
+                        break
+                    # 換 client 要搬家，所以打錯一個字值得再問一次（review T4）
+                    again = await self.push_screen_wait(Choose(
+                        "讀不到 client 設定檔", ["重新輸入路徑", "用內建的 client", "離開"],
+                        f"{typed}\n{why}\n用內建的 client 一樣能用，只是共用配額會慢。"))
+                    if again != 0:
+                        leave = again == 2
+                        break
+                if leave:
+                    return False
             code, out, error = await self.push_screen_wait(
                 Busy("請在瀏覽器完成授權", lambda say: authorize(self.paths, say, client)))
             if error or code != 0 or setup_needed(self.paths):
