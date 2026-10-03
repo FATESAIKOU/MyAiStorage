@@ -26,6 +26,7 @@
 | 3 | 完整的整合測試（e2e） | 等 2 |
 | 4 | 開 PR（agora-lite → main），**這一次使用者授權 PM 自己用 merge commit 合** | 等 3 |
 | 5 | 用合進 main 的版本在使用者的 Mac 裝新的 agora（固定一份，`~/.local/share/agora-stable/<commit>`） | 等 4 |
+| 6 | 收掉這個 worktree：PM 用 agora 把**這個 Claude Code session**（`55edd374-…`）匯入正式的 `agora/`，再用 `agora continue session <id> --agent claude --dir ~/testAI/MyAiStorage` 在原路徑接續（使用者 10-04 選的）；新的那個 session 確認 agora-lite 全部合進 main、worktree 乾淨後，移除 worktree、刪掉已合併的 agora-lite 分支（本機與 GitHub）；原路徑的其他檔案不碰 | 等 5 |
 
 只有使用者能做的（已告知）：Google Cloud 刪舊 secret `****Of6a`；Google 帳號移除「rclone」的存取權；撤銷 GitHub fine-grained token 與 ollama-cloud API key。
 
