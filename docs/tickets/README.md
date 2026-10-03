@@ -6,9 +6,9 @@
 
 | 編號 | 標題 | 狀態 | 負責 | 備註 |
 |---|---|---|---|---|
-| T5 | 首次設定支援自己的 OAuth client、D5 文件改寫 → [需求單](T5-own-oauth-client.md) | 暫停（impl1 先接 T3） | impl1 | 10-03 換成自己的 client（issue #11 已關），程式不用改，只差首次設定與文件 |
+| T5 | 首次設定支援自己的 OAuth client、D5 文件改寫 → [需求單](T5-own-oauth-client.md) | **完成（10-03）**：fb920fb、3d2fb86、598981a；review T5、T5-sec1 確認任何讀不了的 client 檔都不會帶出 secret | impl1 | 10-03 換成自己的 client（issue #11 已關） |
 | T4 | 精簡兩個轉接器、放寬行數目標 → change [`slim-adapters`](../../openspec/changes/archive/2026-10-03-slim-adapters/) | **完成（10-03 歸檔）**：−36 行；新的行數目標等使用者決定 | impl1 | 使用者 10-03 決定「先精簡，再放寬一點」 |
-| T3 | 寫入先存本機、背景上傳、少連 Drive → change [`local-first-writes`](../../openspec/changes/local-first-writes/) | 進行中：規格經 review 兩輪（T3、T3-sec1），第 1 節骨架完成並審過（T3-sec2）；impl2 做第 2 節，impl1 接手第 3、4 節（impl3 額度用完） | impl2、impl1 | 使用者 10-03 決定：P1 改成先存本機；慢的問題選 B＋C；A 原本開成 issue #11 觀察，使用者 10-03 改成立刻做，已完成（T5） |
+| T3 | 寫入先存本機、背景上傳、少連 Drive → change [`local-first-writes`](../../openspec/changes/local-first-writes/) | 收尾中：四節程式完成，review 多輪（T3-sec2～7、T3-final）都沒有 High；剩 T3-final 的 F1～F4、V3、V4、R7，低風險精簡（含 E1），X1／W4／W5，整合測試實跑，PM 假資料實跑 | impl2、impl1 | 使用者 10-03 決定：P1 改成先存本機；慢的問題選 B＋C；A 已完成（T5） |
 | T2 | 互動模式：多選、全選、進度、中斷、按鍵整理 → change [`tui-batch-actions`](../../openspec/changes/archive/2026-10-03-tui-batch-actions/)（已歸檔，規格在 `openspec/specs/interactive-mode`） | **完成（10-03 歸檔）**，等本人用真實資料試（2-4） | impl1 | review 各輪都沒有 High；PM 試用 `T2-pm-run.md` |
 | T1 | 指令模式：pull／push、批次動作的進度與續傳 → change [`command-batch-actions`](../../openspec/changes/archive/2026-10-03-command-batch-actions/)（已歸檔，規格在 `openspec/specs/batch-commands`、`session-sync`） | **完成（10-03 歸檔）**，等本人驗收（1-5）；P1 與行數額度等使用者決定 | impl1、impl2 | review T1-archive、T1-4.2d、final-checks 都沒有 High；PM 實跑 `T1-pm-run.md` |
 | T0 | e2e 整合測試改成「continue 寫回原本的 Session」 | 完成 | impl1（3011d15）、impl2（745e5e8） | 兩邊都實跑過整合測試 |
