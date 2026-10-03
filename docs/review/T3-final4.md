@@ -88,3 +88,100 @@ K1 的情境沒有對應的 mutation 可做：缺的是「啟動」那一步，�
 R6 修好了，互動模式重讀不再碰鎖，背景拿到鎖之後還原 `.done-` 也是安全的。但是「當掉之後留下的 `.done-`」，現在只有在別的東西剛好啟動背景時才會被救回來；在那之前，同步會把鏡像蓋回舊版，下一次 edit 就會讓那次修改永久消失。
 
 **建議歸檔前修 K1**：`kick_uploader`、提醒、sync 都把 `.done-*` 算成還在等，再加一個指令驅動的測試。改動不大，而且都不需要拿鎖，不會把 R6 帶回來。
+
+---
+
+# 補看一：`1f81c14`（V6，PM 決定）
+
+2026-10-03，review。
+- 在 `git archive 1f81c14` 的副本裡跑：`compileall` 通過，單元測試 **535 passed**。
+- 隔離方式同上，沒有碰 Drive。
+
+**修好了。**
+
+列檔失敗時（`_listing_with_md5` 回傳 `StoreError`）：
+- 有 `.update` 的項目**這一輪不傳**，留在 outbox，說一句 `列不出 Drive 的檔案，N 筆更新留在 outbox 等下一次：…`；
+- 新建的照常傳；
+- Drive 上根本沒有 `sessions/`（列檔成功，回傳 `None`）照 N12 不當成失敗；
+- design 補了一句，和程式一致。
+
+push 給的 id 剛好是被留下來的那一筆時，照「還在 outbox」算失敗，所以不會謊報寫回。
+
+| mutation | 結果 |
+|---|---|
+| 列檔失敗時 `.update` 照傳（改回去） | ✅ `test_an_update_waits_when_drive_cannot_be_listed_but_a_new_session_goes` |
+| 列檔失敗時連新建的也不傳 | ✅ 同上 |
+| 沒有 `sessions/`（None）也當成列檔失敗 | ✅ `test_continue_and_edit_survive_a_drive_without_a_sessions_folder` |
+| 原始檔那一次失敗、提早結束時，回傳值漏掉留下的更新 | ❌ 沒被抓到 |
+| `session.md` 那一次失敗、提早結束時，回傳值漏掉留下的更新 | ❌ 沒被抓到 |
+
+後兩個沒被抓到的，影響很小（Low）：
+- 回傳值只有 push 用來判斷某一個 id 是不是還沒送；
+- 而 push 自己在列檔失敗時，本來就會把每一個 id 都算成「連不上 Drive」。
+
+只有「這一輪第一次列檔失敗、push 自己的列檔又成功」這種一瞬間的情況，push 才可能把留下來的那一筆算成「寫回」。要補的話：讓列檔和原始檔的 `copy` 都失敗，斷言回傳值裡有那一筆更新。
+
+# 補看二：`e3863f0`（K1）
+
+2026-10-03，review。
+- 在 `git archive e3863f0` 的副本裡跑：`compileall` 通過；
+- 單元測試 **539 passed、1 failed**。失敗的是 `test_tui.py::test_the_bar_really_reaches_n_n_before_the_window_goes`；那時 4 個 mutation 同時在跑，CPU 很忙。單獨重跑三次都通過，這個 commit 也只改了 tui 裡的一行（`outbox_ulids` → `waiting_ulids`）。判斷是**時序敏感的測試在高負載下偶發失敗**，不是這次的退步（Low，記著）。
+
+**K1 修好了，T3 可以歸檔。**
+
+新的 `waiting_ulids` = outbox 加上「當掉後留下、旁邊沒有 `outbox/X` 的 `.done-X`」，**不碰鎖**。這些地方改用它：
+- 啟動背景（`kick_uploader`）；
+- 「outbox 有 N 筆未上傳」的提醒；
+- sync 的說法和標記；
+- `search` 的「(未上傳)」、互動模式的雲端欄；
+- `_lost_in_cloud`。
+
+sync 的 `_index_outbox` 也會從留下的 `.done-X` 把鏡像和索引補回來。delete 會一併刪掉 `.done-X`。還原本身照舊只由拿到鎖的背景做。
+
+同一支探測（edit 成「第二版」→ 模擬當掉留下 `.done-X` → 兩次 search → 再 edit 一次）：
+
+| | `4ac6115` | `e3863f0` |
+|---|---|---|
+| 第一次 search | `.done-X` 留著；Drive、鏡像、索引都是舊的標題 | 提醒 `outbox 有 1 筆未上傳`，啟動背景，還原並送出。Drive、鏡像、索引都是「第二版」 ✅ |
+| 再 edit 一次 | 「第二版」永久消失 | Drive 還是「第二版」，修改沒有掉 ✅ |
+| 留著 `.done-X` 時 delete X | — | `.done-X` 被刪掉；X 從 Drive 移到垃圾桶，之後的同步也沒有把它帶回來 ✅ |
+| 留著 `.done-X` 時，不先同步就 push X | — | 寫回 1 個，Drive 是「第二版」（push 送的是鏡像，而 edit 時鏡像就是新版本）。`.done-X` 留到下一次背景還原、再送一次相同的內容，無害（Low：push 拿到鎖之後也可以順便 `restore_done`） |
+
+**交錯**：
+- `_index_outbox` 從 `.done-X` 補鏡像時只**讀**它。剛好碰上背景比對完把它刪掉的話，讀檔錯誤會被接住，跳過那一筆 ✅；
+- 旁邊已經有 `outbox/X`（比較新的）時，`_set_aside` 不算 `.done-X`，補鏡像時也是 outbox 的優先 ✅；
+- `waiting_ulids` 只看檔案、不拿鎖，所以 R6 不會回來 ✅。
+
+| mutation | 結果 |
+|---|---|
+| 啟動背景時看不到留下的 `.done-` | ✅ `test_a_version_left_aside_by_a_crash_is_kept_by_sync_and_sent` |
+| sync 不從 `.done-` 補回鏡像 | ✅ 同上 |
+| 提醒算不到留下的 | ✅ 同上 |
+| delete 不清 `.done-` | ✅ `test_delete_drops_a_version_an_uploader_left_aside_too` |
+| sync 把留下的標成雲端沒有（`mark_missing` 改回 `outbox_ulids`） | ❌ 沒被抓到 |
+| `_lost_in_cloud` 看不到留下的 | ❌ 沒被抓到 |
+| `outbox/X` 已經有新的時，仍把 `.done-X` 算成留下的 | ❌ 沒被抓到 |
+
+沒被抓到的三個都是邊角（Low）：
+- `.done-X` 只會在 Drive 的 md5 **對上之後**才建立，所以 X 那時一定在 Drive 上；只有「之後別台又剛好刪掉」才會走到前兩條。
+- 第三個：在 `waiting_ulids` 裡結果相同（X 本來就在 outbox）；補鏡像時，dict 的順序也讓 outbox 優先。實際上等價。
+
+## 行數
+
+| | `1f81c14` | `e3863f0` |
+|---|---:|---:|
+| src 合計 | 3,780 | **3,789** |
+
+目標 3,800，還有 11 行的空間。
+
+## 這一輪的結論
+
+V6、K1 都修好了，指令驅動的探測和主要的 mutation 都確認過。T3 剩下的都是 Low，可以列進 backlog：
+- G4：互動模式 delete exit 3 時的說法；
+- G5：R7 的「每 10 秒說一次」沒有測試、鎖沒放開時測試會卡住而不是失敗；
+- G6：`_put_back` 改名失敗時刪掉 `.done-`；
+- V6 的提早結束：回傳值沒有測試；
+- K1：push 拿到鎖之後也 `restore_done`、三個邊角的 mutation；
+- 時序敏感的 TUI 測試，在高負載下會偶發失敗。
+
+**從 review 的角度，T3 可以歸檔。** 整合測試的結果以 impl1 的為準，我沒有跑。
