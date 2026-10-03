@@ -1434,3 +1434,23 @@ def test_importing_the_same_source_again_makes_a_new_session(env, capsys):
                        "--agent", "opencode")
     assert code == 0 and out.strip() != a
     assert store.Index(store.Paths.from_env()).header(ulid) is not None   # the old one stays
+
+
+def test_delete_drops_a_version_an_uploader_left_aside_too(env, capsys, monkeypatch):
+    """K1 follow-on: a `.done-X` left by a crash counts as waiting now, and the next
+    background puts it back and sends it. Deleting X must take it too, or the session
+    the user just deleted comes back from the outbox."""
+    from agora import background
+    _, sid, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = sid.split(":")[1]
+    aside = paths.outbox / f".done-{ulid}"
+    aside.mkdir(parents=True)
+    (aside / "session.md").write_text("當掉時留在一旁的\n", encoding="utf-8")
+    monkeypatch.setattr(background, "start", lambda p=None: background.STARTED)
+
+    code, _, err = run(capsys, "delete", "session", sid, "--yes")
+
+    assert code == 0, err
+    assert not aside.exists()
+    assert store.outbox_count(paths) == 0

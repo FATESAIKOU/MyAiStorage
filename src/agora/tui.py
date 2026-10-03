@@ -86,7 +86,7 @@ def agora_rows(index: store.Index, filters: list, paths: store.Paths | None = No
     call to Drive from here. 「未上傳」 is its own state: a session staged here is
     not a session another machine deleted (T2 3.1).
     """
-    staged = store.outbox_ulids(paths) if paths is not None else set()
+    staged = store.waiting_ulids(paths) if paths is not None else set()
     rows = []
     for ulid, hdr, _snippet in index.search(filters):
         agora = h.agora_of(hdr)

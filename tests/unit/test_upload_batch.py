@@ -738,3 +738,37 @@ def test_an_update_waits_when_drive_cannot_be_listed_but_a_new_session_goes(env,
     assert "既有的" in (env / "agora" / "sessions" / old / "session.md").read_text(encoding="utf-8")
     assert new not in store.outbox_ulids(paths)
     assert (env / "agora" / "sessions" / new / "session.md").is_file()
+
+
+def test_a_version_left_aside_by_a_crash_is_kept_by_sync_and_sent(env, monkeypatch, capsys):
+    """T3-final4 K1: an uploader that died between renaming `outbox/X` to `.done-X` and
+    comparing it leaves the only copy of that edit set aside. Until a background puts it
+    back, sync must not treat it as sent: it starts the uploader, and Drive's older
+    version does not overwrite the mirror - otherwise the next edit starts from the old
+    one and the background then drops `.done-X` for it, losing the edit for good."""
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "第一版")
+    assert store.upload_batch(store.Drive(paths), paths) == []        # Drive: 第一版
+    store.sync(paths)
+    store.stage(paths, _kept_header(ulid, "第二版"), "## user\n第二版\n", b'{"v": 2}')
+    store.mark_update(paths.outbox / ulid)
+    store.remember(paths, paths.outbox / ulid)
+    (paths.outbox / ulid).rename(paths.outbox / f".done-{ulid}")      # the crash
+    started = []
+    monkeypatch.setattr(background, "start", lambda p=None: started.append(1) or background.STARTED)
+    (paths.state / "last-sync").unlink(missing_ok=True)
+
+    index = store.sync(paths)
+    capsys.readouterr()
+
+    assert started, "something has to put it back and send it"
+    assert store.outbox_count(paths) == 1
+    assert index.header(ulid)["title"] == "第二版"
+    assert "第二版" in (paths.mirror / ulid / "session.md").read_text(encoding="utf-8")
+    assert not (paths.mirror / f".done-{ulid}").exists()
+
+    background.run(paths)                                             # the one it started
+    capsys.readouterr()
+    assert "第二版" in (env / "agora" / "sessions" / ulid / "session.md").read_text(encoding="utf-8")
+    assert store.outbox_count(paths) == 0
+    assert not (paths.outbox / f".done-{ulid}").exists()

@@ -234,7 +234,7 @@ def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None) -> Pat
 
 
 def outbox_count(paths: Paths) -> int:
-    return len(outbox_ulids(paths))
+    return len(waiting_ulids(paths))
 
 
 def queued_for_trash(paths: Paths) -> set[str]:
@@ -304,13 +304,37 @@ def outbox_ulids(paths: Paths) -> set[str]:
     return {p.name for p in paths.outbox.iterdir() if p.is_dir() and not p.name.startswith(".")}
 
 
+def _set_aside(paths: Paths) -> dict[str, Path]:
+    """`.done-<ULID>` with no `outbox/<ULID>` next to it: {ULID: folder}.
+
+    Either an uploader comparing it right now, or one that died between the rename and
+    the comparison (T3-final4 K1). Until an uploader has confirmed it, that version is
+    not on Drive as far as anybody else knows - and only the lock holder may put it
+    back (`restore_done`), so everybody else reads it where it is.
+    """
+    if not paths.outbox.exists():
+        return {}
+    return {d.name[len(".done-"):]: d for d in paths.outbox.glob(".done-*")
+            if d.is_dir() and not (paths.outbox / d.name[len(".done-"):]).exists()}
+
+
+def waiting_ulids(paths: Paths) -> set[str]:
+    """Everything not yet confirmed on Drive: the outbox plus what was set aside (K1).
+
+    For the commands that do not send - starting the uploader, the reminders, sync
+    keeping its hands off the mirror. The ones that send hold the lock, put the set-aside
+    ones back first, and use `outbox_ulids`.
+    """
+    return outbox_ulids(paths) | set(_set_aside(paths))
+
+
 def index_file(index: "Index", session_md: Path) -> None:
     """Index one session.md under its ULID. Raises on an unreadable one."""
     hdr, body = h.split_document(session_md.read_text(encoding="utf-8"))
     index.put(session_md.parent.name, md5_file(session_md), hdr, body)
 
 
-def remember(paths: Paths, folder: Path, index: "Index | None" = None) -> None:
+def remember(paths: Paths, folder: Path, index: "Index | None" = None, ulid: str | None = None) -> None:
     """Put a session we just wrote into the local mirror and index right away.
 
     The whole session, not just the reading version: the raw too, so a session written
@@ -318,8 +342,10 @@ def remember(paths: Paths, folder: Path, index: "Index | None" = None) -> None:
     「本機保留完整的一份」). A raw that is already there with the same name and size is
     left alone - sync calls this for every outbox entry on every run - and the ones the
     new header replaced are cleaned up, so a session does not keep both versions.
+
+    `ulid` is for a folder not named after its session (a set-aside `.done-`, K1).
     """
-    mirror = paths.mirror / folder.name
+    mirror = paths.mirror / (ulid or folder.name)
     mirror.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(folder / "session.md", mirror / "session.md")
     raw = (h.agora_of(read_entry(folder)).get("raw") or {})
@@ -334,12 +360,17 @@ def remember(paths: Paths, folder: Path, index: "Index | None" = None) -> None:
 
 
 def _index_outbox(paths: Paths, index: "Index") -> None:
-    """Sessions still waiting in the outbox are searchable here, marked as not uploaded."""
-    for ulid in outbox_ulids(paths):
+    """Sessions still waiting in the outbox are searchable here, marked as not uploaded.
+
+    The set-aside ones too (K1): Drive may still have an older version, and the sync
+    that just mirrored it must not be the last word, or the next edit starts from it.
+    """
+    folders = {ulid: paths.outbox / ulid for ulid in outbox_ulids(paths)}
+    for ulid, folder in {**_set_aside(paths), **folders}.items():
         try:
-            remember(paths, paths.outbox / ulid, index)
+            remember(paths, folder, index, ulid)
         except (h.HeaderError, OSError, UnicodeDecodeError):
-            continue
+            continue   # e.g. the uploader just put it back or finished with it
 
 
 def read_entry(folder: Path) -> dict:
@@ -925,7 +956,7 @@ def kick_uploader(paths: Paths) -> str | None:
     (review P5). None when there was nothing to do.
     """
     from agora import background        # imported here: background imports this module
-    if outbox_ulids(paths) or queued_for_trash(paths):
+    if waiting_ulids(paths) or queued_for_trash(paths):   # K1: set-aside ones too
         return background.start(paths)
     return None
 
@@ -961,7 +992,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
     except StoreError as e:
         say(f"連不上 Drive，改查本機索引：{e}")
         return index
-    if kick and (waiting := outbox_ulids(paths)):
+    if kick and (waiting := waiting_ulids(paths)):
         # L5 / review P5: "someone is uploading" while the lock is held; if nothing holds
         # it and the entries are still here, then nothing is trying and it is a failure.
         # Not said when the caller is about to start the uploader itself (`delete`): the
@@ -1007,7 +1038,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
     else:
         # The listing is complete, so this is the one moment markers may move.
         # Not up yet and in flight are not "deleted on another machine".
-        staged = outbox_ulids(paths)
+        staged = waiting_ulids(paths)
         local = set(known) | set(index.known())
         index.mark_missing(u for u in local - set(remote)
                            if u not in staged and u not in trashing and not continuing(paths, u))

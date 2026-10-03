@@ -197,7 +197,7 @@ def _lost_in_cloud(paths: store.Paths, agora_id: str) -> bool:
     deleted.
     """
     ulid = _ulid_of(agora_id)
-    if ulid in store.outbox_ulids(paths):
+    if ulid in store.waiting_ulids(paths):
         return False               # not up yet: ours, not another machine's delete
     try:
         remote = store.Drive(paths).list_sessions()
@@ -259,7 +259,7 @@ def cmd_search(args, paths: store.Paths) -> int:
     filters = h.parse_filters(args.filter)
     index = store.Index(paths) if args.no_sync else store.sync(paths, throttle=True)
     seen: dict[tuple, str] = {}
-    outbox = store.outbox_ulids(paths)
+    outbox = store.waiting_ulids(paths)
     for ulid, hdr, snippet in index.search(filters):
         agora = h.agora_of(hdr)
         source = agora.get("source") or {}
@@ -814,6 +814,8 @@ def cmd_delete(args, paths: store.Paths) -> int:
             in_cloud = index.cloud_has(ulid)
             store.forget_local(paths, ulid)
             shutil.rmtree(paths.outbox / ulid, ignore_errors=True)
+            # and a set-aside copy (K1): the next background would put it back and send it
+            shutil.rmtree(paths.outbox / f".done-{ulid}", ignore_errors=True)
             if in_cloud:
                 # Drive has it: queue for the background to purge (design「背景刪除」).
                 paths.trash_queue.mkdir(parents=True, exist_ok=True)
