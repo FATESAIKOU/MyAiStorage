@@ -213,6 +213,16 @@ def setup_needed(paths: store.Paths) -> str | None:
     return None if (paths.config / "rclone.conf").exists() else "auth"
 
 
+def _is_file(where: str) -> bool:
+    """Whether `where` names a file at all. Never raises.
+
+    The first-run screen asks this before it reads, and `~someone-who-does-not-exist`
+    makes `Path.expanduser` raise `RuntimeError` - which, from a screen, ends the app
+    (review U1). `os.path.expanduser` leaves such a path as it is instead.
+    """
+    return os.path.isfile(os.path.expanduser(where))
+
+
 def read_client(where: str) -> tuple[str, str] | None:
     """(client_id, client_secret) from the file at `where`, or None if it is not one.
 
@@ -220,33 +230,43 @@ def read_client(where: str) -> tuple[str, str] | None:
     two-line `Client-ID=` / `SECRET=` text file. Nothing is printed, logged or put on
     the screen - the values only ever travel into rclone's own argv (design D5).
 
-    Every way this can fail is None, and nothing is said about which: a file saved as
-    UTF-16 raises `UnicodeDecodeError`, whose message carries **the whole file** - and
-    that file is a credential (review T1). So the reading, the decoding and the parsing
-    all happen inside one `try` whose result is a boolean, not an error message. A
-    `web` client is refused rather than accepted: rclone redirects it to
+    Every way this can fail is None, and nothing is said about which. That is not
+    politeness: a file saved as UTF-16 raises `UnicodeDecodeError`, whose message
+    carries **the whole file**, and that file is a credential (review T1). A deeply
+    nested JSON raises `RecursionError`, and when the app dies Textual prints the
+    locals - `text` is one of them (review U1). So:
+
+    * the answer to any failure is None, with no reason attached, and the `except` is
+      `Exception` rather than a list - this function's whole vocabulary is "a pair or
+      nothing", and a class of failure we did not think of is still just a None;
+    * the two values are read out of whatever we parsed, and nothing else is kept, so
+      a local variable never holds a file we are not sure about.
+
+    A `web` client is refused rather than accepted: rclone redirects it to
     `http://127.0.0.1:53682/`, which a web client will not have registered, and the
     user would only ever see 「授權沒有完成」 (review T4).
     """
     try:
         # utf-8-sig, so a BOM is not mistaken for a format we do not know (review T4)
-        text = Path(where).expanduser().read_bytes().decode("utf-8-sig")
+        text = Path(os.path.expanduser(where)).read_bytes().decode("utf-8-sig")
         if text.lstrip().startswith("{"):
             block = json.loads(text).get("installed")
-            if not isinstance(block, dict):
-                return None
-            client_id, secret = block.get("client_id"), block.get("client_secret")
+            client_id = block.get("client_id") if isinstance(block, dict) else None
+            secret = block.get("client_secret") if isinstance(block, dict) else None
         else:
             pairs = {}
             for line in text.splitlines():
                 key, _, value = line.partition("=")
-                pairs[key.strip()] = value.strip()
+                pairs[key.strip()] = value.strip()     # rclone writes `Client-ID = …`
             client_id, secret = pairs.get("Client-ID"), pairs.get("SECRET")
         if not all(isinstance(v, str) and v.strip() for v in (client_id, secret)):
             return None
         return client_id.strip(), secret.strip()
-    except (OSError, ValueError, TypeError, AttributeError):
-        return None      # not a word about why: the reason would carry the file
+    except Exception:
+        # `os.path.expanduser` raises RuntimeError for `~someone-who-does-not-exist`,
+        # json.loads raises RecursionError on a very deep document, and neither is
+        # worth an exception message: the message would carry the file (review U1).
+        return None
 
 
 def authorize_argv(paths: store.Paths, client: tuple[str, str] | None = None) -> list[str]:
@@ -718,7 +738,7 @@ class AgoraApp(App):
                         AskText("自己的 client 設定檔路徑", "")) or "").strip()
                     if not typed:
                         break                        # 沒給就用內建的，和以前一樣
-                    if not Path(typed).expanduser().is_file():
+                    if not _is_file(typed):
                         found, why = None, "找不到這個檔案。"
                     else:
                         found = read_client(typed)
@@ -1051,7 +1071,10 @@ class AgoraApp(App):
             note = "已中斷；重跑同一個動作會接著做"
         elif code == 0:
             if action == "delete":
-                note = "已從本機刪除，背景移到 Drive 垃圾桶"
+                # Rows that were all cloud-lost never enter the queue, so there is no
+                # Drive half to promise - the command says so, and we repeat it (W5)
+                note = ("已從本機刪除，背景移到 Drive 垃圾桶" if "背景移到 Drive 垃圾桶" in out
+                        else "已從本機刪除")
             elif action in ("import", "merge"):
                 note = "已經存在本機，背景上傳中"
             else:

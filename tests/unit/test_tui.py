@@ -1720,13 +1720,13 @@ def test_the_status_line_is_empty_after_the_result_window_closes():   # Q4
 # --- the result window has to say what the exit code means (review T2-final) ---
 
 
-def _result_of(app, code, *, mark_one=False, action="delete"):
+def _result_of(app, code, *, mark_one=False, action="delete", said=()):
     """Run one `action` that exits `code`, and hand back what the result window said."""
     lines: list[str] = []
     key = {"delete": "d", "pull": "P"}.get(action)
 
     async def go():
-        proc = FakeProc(lines=[f"[agora] {action} 1/1"], code=code)
+        proc = FakeProc(lines=[f"[agora] {action} 1/1", *said], code=code)
         app.spawn, _ = _spawn(proc)
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
@@ -1805,9 +1805,19 @@ def test_the_progress_bar_walks_through_the_middle_values():
 # --- what the background is doing, said where the user is looking (4.1) --------
 
 
+def test_the_result_window_does_not_promise_a_background_delete_that_is_not_queued():
+    """W5: rows that were all cloud-lost never enter the queue, so there is no Drive half
+    coming - and the command's own line is what says so."""
+    said = " ".join(_result_of(_marked_app(None), 0,
+                               said=["[agora] 已從本機刪除 3 個，雲端沒有，只刪本機這份"]))
+    assert "已從本機刪除" in said
+    assert "背景移到 Drive 垃圾桶" not in said
+
+
 def test_the_result_window_says_the_drive_half_is_on_its_way():
     """4.1: delete finished here; Drive is somebody else's turn now."""
-    said = " ".join(_result_of(_marked_app(None), 0))
+    said = " ".join(_result_of(_marked_app(None), 0,
+                               said=["[agora] 已從本機刪除 3 個，背景移到 Drive 垃圾桶"]))
     assert "已從本機刪除，背景移到 Drive 垃圾桶" in said
     assert "已存進 outbox" not in said, "nothing is waiting in the outbox"
 
@@ -1903,6 +1913,34 @@ def test_a_utf8_bom_is_not_a_reason_to_refuse_the_client_file(tmp_path):
     path.write_bytes(b"\xef\xbb\xbf" + json.dumps(
         {"installed": {"client_id": FAKE_ID, "client_secret": FAKE_SECRET}}).encode())
     assert tui.read_client(str(path)) == (FAKE_ID, FAKE_SECRET)
+
+
+def test_a_client_file_nested_deep_enough_to_exhaust_the_parser(tmp_path, capfd):
+    """U1: `json.loads` raises RecursionError on a very deep document, and when the
+    first-run screen dies Textual prints its locals - `text` among them, with the
+    secret at the front. So: None, and nothing on any stream, not even the file
+    descriptor level."""
+    deep = tmp_path / "deep.json"
+    depth = 200_000
+    deep.write_text('{"installed": {"client_secret": "' + FAKE_SECRET + '", "x": '
+                    + "[" * depth + "]" * depth + "}", encoding="utf-8")
+    assert tui.read_client(str(deep)) is None
+    assert capfd.readouterr() == ("", ""), "not even on the file descriptors"
+    assert deep.read_text(encoding="utf-8").startswith("{\"installed\"")
+
+
+def test_a_path_naming_a_user_that_does_not_exist_is_not_a_crash(tmp_path, monkeypatch, capsys):
+    """U1: `~nosuchuser/x.json` makes `Path.expanduser` raise RuntimeError. Inside the
+    reader that is just another None; outside it - the screen asks 「is this a file?」
+    before reading - it went straight to the screen and ended the app."""
+    assert tui.read_client("~nosuchuser_review/x.json") is None
+    # and the question the screen asks *before* reading, which is not inside the reader
+    assert tui._is_file("~nosuchuser_review/x.json") is False
+    calls, said = _first_run(1, "~nosuchuser_review/x.json", tmp_path, monkeypatch, give_up=True)
+    assert calls == [None], "a path we cannot even expand is a path we cannot use"
+    assert "讀不到 client 設定檔" in said
+    quiet = capsys.readouterr()
+    assert quiet.out == "" and quiet.err == ""
 
 
 def test_only_a_desktop_client_is_accepted(tmp_path):
