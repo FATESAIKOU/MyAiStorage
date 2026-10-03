@@ -1085,6 +1085,10 @@ def test_search_ignores_case_and_full_width(watched):
     assert list(oc.ADAPTER.search_text("hello")) == ["ses_full0000000000003"]
     assert list(oc.ADAPTER.search_text("アイウ")) == ["ses_full0000000000003"]
     assert list(oc.ADAPTER.search_text("HELLO 世界")) == ["ses_full0000000000003"]
+    # the keyword is normalised too, not only the text - the other direction, which
+    # is what B3 changed when this started using store.normalize (review T4)
+    assert list(oc.ADAPTER.search_text("ｈｅｌｌｏ 世界")) == ["ses_full0000000000003"]
+    assert list(oc.ADAPTER.search_text("ｈｅｌｌｏ")) == ["ses_full0000000000003"]
     assert oc._SEARCH_LIKE_SQL in seen["statements"]      # the cheap pass ran first
 
 

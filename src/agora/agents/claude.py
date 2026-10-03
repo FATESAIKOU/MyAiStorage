@@ -61,29 +61,34 @@ def _said(line: str, kinds: tuple[str, ...]) -> tuple[str, dict, str | None] | N
     each want the same four things and each had its own copy of them (review C1): is
     this a kind we care about, does it parse, is it bookkeeping rather than a message,
     and what text does it hold.
+
+    Which kind it is comes from the *parsed* line, not from the first `"type"` the
+    regex sees: an assistant line can carry a nested `message.type` ahead of its own,
+    and reading that one skipped the line and showed an older message instead
+    (review K2). The regex is only the cheap question "is it worth parsing at all".
     """
-    kind = _TYPE_RE.search(line)
-    if not kind or kind.group(1) not in kinds:
+    if not set(kinds).intersection(_TYPE_RE.findall(line)):
         return None
     try:
         o = json.loads(line)
     except ValueError:
         return None
-    if not isinstance(o, dict) or _is_noise(o):
+    kind = o.get("type") if isinstance(o, dict) else None
+    if kind not in kinds or _is_noise(o):
         return None
-    return kind.group(1), o, _line_text(o)
+    return kind, o, _line_text(o)
 
 
 def _title_of(o: dict) -> str | None:
-    """The title one line offers: a summary, or a real user turn's first words.
+    """The title one line offers: its summary, or a real user turn's first words.
 
-    One rule for both readers (review C2): the listing peeks the head and the export
-    has every line, and they used to disagree, so a session could import under a
-    different name than the row the user clicked showed. A summary wins either way.
+    A local command is not a message, so it never offers one - without this the
+    export named a session `<command-name>/model</command-name>` while the listing
+    showed what the user actually said (review K1).
     """
     if o.get("type") == "summary" and isinstance(o.get("summary"), str) and o["summary"]:
         return o["summary"][:TITLE_MAX]
-    if o.get("type") == "user" and (text := _line_text(o)):
+    if o.get("type") == "user" and not _is_noise(o) and (text := _line_text(o)):
         return text[:TITLE_MAX]
     return None
 
@@ -104,11 +109,10 @@ def _peek_session(path: Path) -> tuple[str | None, str | None, bool]:
                 if directory is None:
                     match = _CWD_RE.search(line)
                     directory = json.loads(match.group(1)) if match else None
-                if kind == "assistant":
+                if title is None and (offered := _title_of(o)):
+                    title, has_text = offered, has_text or kind == "user"
+                elif kind == "assistant":
                     has_text = has_text or bool(text)
-                elif kind == "summary" or title is None:
-                    if offered := _title_of(o):
-                        title, has_text = offered, has_text or kind == "user"
     except (OSError, ValueError, TypeError, AttributeError):   # one odd file must not break the list (review U1)
         return None, None, False
     return title, directory, has_text
@@ -275,11 +279,18 @@ def _unpack_raw(raw: bytes) -> tuple[list[str], dict]:
 
 
 def _session_title(objs: list[dict]) -> str | None:
-    """The listing's rule, over every line instead of the head (review C2)."""
-    for kind in ("summary", "user"):
-        for o in objs:
-            if o.get("type") == kind and (title := _title_of(o)):
-                return title
+    """The export's rule: a summary anywhere wins, else the first real user turn.
+
+    Left as it was (review K4): C2 tried to fold this into the listing's rule, which
+    changed the title a session imports under - the proposal says behaviour does not
+    change, so the two rules stay two.
+    """
+    for o in objs:
+        if o.get("type") == "summary" and isinstance(o.get("summary"), str):
+            return o["summary"][:TITLE_MAX] or None
+    for o in objs:
+        if (title := _title_of(o)) is not None:
+            return title
     return None
 
 

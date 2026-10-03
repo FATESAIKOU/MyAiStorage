@@ -438,7 +438,8 @@ class OpencodeAgent:
                                   **({"stdout": stdout, "stderr": subprocess.PIPE}
                                      if stdout is not None else {"capture_output": True}))
         except subprocess.TimeoutExpired:
-            raise AgentError(f"opencode 逾時（{seconds} 秒）：{argv[1] if len(argv) > 1 else argv[0]}") from None
+            raise AgentError(f"opencode 逾時（{seconds:g} 秒）："
+                             f"{argv[1] if len(argv) > 1 else argv[0]}") from None
 
     def _export_bytes(self, session_id: str, cwd: Path | str | None = None) -> bytes:
         """`opencode export <id>` with stdout going to a file, stderr apart.
@@ -784,7 +785,7 @@ class OpencodeAgent:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            raise AgentError(f"opencode 寫要約逾時（{seconds} 秒）") from None
+            raise AgentError(f"opencode 寫要約逾時（{seconds:g} 秒）") from None
         except BaseException:      # Esc, a closed terminal: kill opencode now (review M5)
             # The pending record is already written, so killing it is safe - and the
             # alternative is waiting on a stdout that never reaches EOF, until

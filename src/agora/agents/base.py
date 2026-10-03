@@ -97,20 +97,21 @@ class AgentError(RuntimeError):
     """The agent's files or CLI did not behave as expected."""
 
 
-def env_seconds(name: str, default: int) -> int:
+def env_seconds(name: str, default: float) -> float:
     """A deadline from the environment; a value we cannot read leaves the default.
 
-    The two adapters read this differently and claude's `float()` raised on "abc" -
-    which is not something `summarize` catches, so a typo in the environment became
-    the CLI's "unexpected error" instead of a fallback (review B1).
+    Seconds, so a fraction is allowed - claude's `float()` read "1.5" and a test does
+    too. The two adapters used to read this differently and claude's raised on
+    "abc", which `summarize` does not catch, so a typo in the environment became the
+    CLI's "unexpected error" instead of a fallback (review B1, K3).
     """
     try:
-        return int(os.environ.get(name) or default)
+        return float(os.environ.get(name) or default)
     except ValueError:
         return default
 
 
-def summarize_timeout() -> int:
+def summarize_timeout() -> float:
     return env_seconds("AGORA_SUMMARIZE_TIMEOUT", SUMMARIZE_TIMEOUT)
 
 
