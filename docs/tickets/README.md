@@ -6,6 +6,7 @@
 
 | 編號 | 標題 | 狀態 | 負責 | 備註 |
 |---|---|---|---|---|
+| T6 | 預覽只讀、只排需要的那一段（兩個分頁）→ [需求單](T6-lazy-preview.md) | 待做（T3 歸檔後）；行數額度待使用者決定 | — | 使用者 10-03 回報 Agora 分頁上下移動很慢；原因是每次移動都在主執行緒排整份 session.md（340 KB～3 MB） |
 | T5 | 首次設定支援自己的 OAuth client、D5 文件改寫 → [需求單](T5-own-oauth-client.md) | **完成（10-03）**：fb920fb、3d2fb86、598981a；review T5、T5-sec1 確認任何讀不了的 client 檔都不會帶出 secret | impl1 | 10-03 換成自己的 client（issue #11 已關） |
 | T4 | 精簡兩個轉接器、放寬行數目標 → change [`slim-adapters`](../../openspec/changes/archive/2026-10-03-slim-adapters/) | **完成（10-03 歸檔）**：−36 行；新的行數目標等使用者決定 | impl1 | 使用者 10-03 決定「先精簡，再放寬一點」 |
 | T3 | 寫入先存本機、背景上傳、少連 Drive → change [`local-first-writes`](../../openspec/changes/local-first-writes/) | 收尾中：四節程式完成，review 多輪（T3-sec2～7、T3-final）都沒有 High；剩 T3-final 的 F1～F4、V3、V4、R7，低風險精簡（含 E1），X1／W4／W5，整合測試實跑，PM 假資料實跑 | impl2、impl1 | 使用者 10-03 決定：P1 改成先存本機；慢的問題選 B＋C；A 已完成（T5） |
