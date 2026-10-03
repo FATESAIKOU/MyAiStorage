@@ -61,7 +61,7 @@ def test_write_on_one_machine_read_on_another(two_machines):
     folder = store.stage(a, hdr, "## user\n把 CSV 轉成 Markdown 表格\n", b'{"it": 1}')
     ulid = folder.name
     created.append(ulid)
-    store.push_one(store.Drive(a), folder)
+    store.upload_batch(store.Drive(a), a)
 
     index_b = store.sync(b)
     hits = index_b.search(T("表格"))
@@ -76,11 +76,11 @@ def test_reimport_swaps_raw_and_other_machine_follows(two_machines):
     folder = store.stage(a, hdr, "## user\n第一版\n", b'{"v": 1}')
     ulid = folder.name
     created.append(ulid)
-    store.push_one(store.Drive(a), folder)
+    store.upload_batch(store.Drive(a), a)
     store.sync(b)
 
     folder = store.stage(a, hdr, "## user\n第二版\n", b'{"v": 2}')
-    store.push_one(store.Drive(a), folder)
+    store.upload_batch(store.Drive(a), a)
     files = store.Drive(a).list_sessions()[ulid]
     assert sorted(files) == sorted(["session.md", hdr["agora"]["raw"]["file"]])   # the old raw is gone
 
@@ -97,7 +97,7 @@ def test_deleted_on_drive_stays_here_marked_not_gone(two_machines):
     folder = store.stage(a, _header("整合測試：刪除"), "## user\n要被刪掉\n", b"{}")
     ulid = folder.name
     created.append(ulid)
-    store.push_one(store.Drive(a), folder)
+    store.upload_batch(store.Drive(a), a)
     assert store.sync(b).header(ulid)
     drive = store.Drive(a)
     subprocess.run(["rclone", "--config", str(REAL_CONF), "--drive-root-folder-id", drive.folder_id(),

@@ -294,7 +294,8 @@ def test_search_same_source_shows_newest_with_warning(env, capsys):  # U-IMP-10,
     new["agora"] = dict(base["agora"], updated_at="2026-10-03T00:00:00Z")
     body = "## user\n重複來源表格\n"
     for hdr in (old, new):
-        store.push_one(store.Drive(paths()), store.stage(paths(), hdr, body, b"{}"))
+        store.stage(paths(), hdr, body, b'{"x": 1}')
+        store.upload_batch(store.Drive(paths()), paths())
     store.sync(paths())
     code, found, err = run(capsys, "search", "session", "--filter", "text~=重複來源", "--no-sync")
     assert code == 0

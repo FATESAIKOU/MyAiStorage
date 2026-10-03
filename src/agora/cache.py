@@ -142,7 +142,7 @@ def pull(paths: store.Paths, ids: list[str], agents: dict, *,
             if kind == "agora":
                 if drive is None:
                     drive = store.Drive(paths)
-                    remote = _listing(drive)    # once for the whole batch (docs/perf.md)
+                    remote = store._listing_with_md5(drive)   # once for the batch (docs/perf.md)
                 if isinstance(remote, store.StoreError):
                     raise store.StoreError(f"連不上 Drive：{remote}")
                 before = drive.fetched
@@ -236,6 +236,7 @@ def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
     store.index_file(index, paths.mirror / ulid / "session.md")   # searchable again
 
 
+
 def push(paths: store.Paths, ids: list[str], agents: dict, *,
          not_exist_upload: bool = False) -> tuple[int, int]:
     """`agora push session <agora id>…`: send the given sessions to Drive; (pushed, failed).
@@ -250,9 +251,10 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
     # The lock, and wait for it: push is the one command whose contract is "it is on
     # Drive when this returns" (N2). No timeout - one throttled rclone call alone can
     # take 50 seconds - but Ctrl-C still gets out, and every 10 seconds it says why.
+    # The lock is taken without blocking, or that saying could never happen (review R7).
     held, said_at = None, time.monotonic()
     while held is None:
-        held = store.hold_upload_lock(paths, blocking=True)
+        held = store.hold_upload_lock(paths)
         if held is None:
             if time.monotonic() - said_at >= 10:
                 _line("背景上傳中，還在等…")
@@ -263,7 +265,7 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
         left = store.push_outbox(drive, paths)   # staged writes first; those are the same sessions
     if left:
         _line(f"outbox 還有 {len(left)} 筆沒上傳成功")
-    listing = _listing(drive)            # offline: every id here fails, and says so
+    listing = store._listing_with_md5(drive)   # offline: every id here fails, and says so
     done = failed = 0
     for k, agora_id in enumerate(wanted, 1):
         store.progress("push", k, len(wanted))
@@ -279,7 +281,11 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
                 if ulid in left:
                     raise store.StoreError("還沒上傳成功，仍在 outbox")   # review S2-2
             elif (paths.outbox / ulid).is_dir():
-                store.push_one(drive, paths.outbox / ulid)
+                # staged after our snapshot, so it goes through the same batch: it is
+                # verified against Drive before the folder goes, like every other entry
+                # (H1 - `push_one` uploaded, checked and deleted with no comparison at all)
+                if ulid in store.upload_batch(drive, paths):
+                    raise store.StoreError("還沒上傳成功，仍在 outbox")   # review S2-2
             elif listing is None or ulid not in listing:
                 if not not_exist_upload:
                     _absent(paths, ulid, "沒有傳")
@@ -293,14 +299,6 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
             _line(f"{agora_id} 傳不上去：{e}")
     return done, failed
 
-
-def _listing(drive: store.Drive):
-    """The sessions on Drive, or the error that stopped us. None means there is no
-    sessions/ at all: not a failure, and not evidence of a deletion (N12)."""
-    try:
-        return drive.list_sessions()
-    except store.StoreError as e:
-        return e
 
 
 def _push_mirrored(paths: store.Paths, drive: store.Drive, ulid: str, *,

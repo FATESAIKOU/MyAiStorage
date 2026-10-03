@@ -32,9 +32,18 @@ with open(log, "a") as f:
 def _should_fail(needle: str) -> bool:
     if needle in " ".join(args):
         return True
-    # The batch uploader sends with `copy --files-from` where it used to be one
-    # `copyto` per file, so a test that breaks "copyto" means "break the upload".
-    return needle == "copyto" and "copy" in args and "--files-from" in args
+    # The batch uploader sends with `copy --files-from`, where the names are in the
+    # listing and not in the arguments. A test that breaks "session.md" or "raw-" means
+    # the same thing here, so the listing is read before deciding - and a needle that
+    # names the old per-file command still means "break this send".
+    if "--files-from" in args:
+        listing = Path(args[args.index("--files-from") + 1])
+        try:
+            if needle in listing.read_text(encoding="utf-8"):
+                return True
+        except OSError:
+            pass
+    return needle == "copyto" and "copy" in args
 
 
 if os.environ.get("FAKE_RCLONE_FAIL") and _should_fail(os.environ["FAKE_RCLONE_FAIL"]):

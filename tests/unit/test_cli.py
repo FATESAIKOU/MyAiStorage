@@ -1303,6 +1303,24 @@ def test_delete_still_starts_the_uploader_for_another_session_waiting(env, capsy
     assert "雲端沒有" in err
 
 
+def test_delete_says_exit_3_when_the_uploader_could_not_start(env, capsys, monkeypatch):
+    """W4: the Drive half is queued and safe, but with no uploader nobody would do it -
+    so this is the old exit 3 with the old words, not a cheerful「背景移到」."""
+    from agora import background
+    _, sid, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = sid.split(":")[1]
+    started = []
+    monkeypatch.setattr(background, "start", lambda p=None: started.append(p) or background.FAILED)
+
+    code, _, err = run(capsys, "delete", "session", sid, "--yes")
+
+    assert code == 3 and started
+    assert "背景上傳啟動失敗" in err and "要等之後的指令" in err
+    assert store.queued_for_trash(paths) == {ulid}, "the queue is what the next command picks up"
+    assert store.Index(paths).header(ulid) is None
+
+
 def test_the_next_command_says_how_many_are_waiting_for_the_drive_trash(env, capsys):
     """N10 / design L4: a purge that failed leaves the session on Drive, and the next
     command has to say so. With a real background process those lines only reach

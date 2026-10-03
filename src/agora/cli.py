@@ -826,14 +826,20 @@ def cmd_delete(args, paths: store.Paths) -> int:
         children = "、".join(f"agora:{c}" for c in index.children(_ulid_of(agora_id)))
         print(f"[agora] {agora_id} 有子 Session，不能刪：{children}", file=sys.stderr)
         refused.append(agora_id)
+    state = None
     if done:
         # one start, at the end: for the queue we filled, and for anything else that was
         # already waiting - the opening sync above did not start anything (review W1)
         if queued or store.outbox_count(paths):
-            background.start(paths)
+            state = background.start(paths)
         more = f"，重跑會接著做剩下的 {len(left) + len(missing)} 個" if left else ""
         where = "，背景移到 Drive 垃圾桶" if queued else ""
         print(f"[agora] 已從本機刪除 {done} 個{where}{more}", file=sys.stderr)
+    if state == background.FAILED:
+        # The Drive half is queued and safe, but nobody is going to do it now. Same exit
+        # as an upload that did not get through, and the next command starts it again.
+        print("[agora] 背景上傳啟動失敗，移到 Drive 垃圾桶要等之後的指令", file=sys.stderr)
+        return EXIT_IN_OUTBOX
     return EXIT_INPUT if refused else 0
 
 
@@ -996,6 +1002,8 @@ def main(argv: list[str] | None = None) -> int:
     paths = store.Paths.from_env()
     try:
         recover_pending(paths, notice_only=args.no_sync)
+        for line in store.take_notices(paths):
+            print(f"[agora] {line}", file=sys.stderr)
         if waiting := store.outbox_count(paths):
             print(f"[agora] outbox 有 {waiting} 筆未上傳", file=sys.stderr)
         if queued := store.queued_for_trash(paths):

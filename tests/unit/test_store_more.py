@@ -58,7 +58,7 @@ def T(keyword: str) -> list:
 
 def _save(paths, hdr, body="## user\n把 CSV 轉成 Markdown 表格\n", raw=b'{"x": 1}'):
     folder = store.stage(paths, hdr, body, raw)
-    store.push_one(store.Drive(paths), folder)
+    store.upload_batch(store.Drive(paths), paths)
     return hdr["id"].split(":", 1)[1]
 
 
@@ -127,9 +127,8 @@ def test_session_md_upload_failure_leaves_only_raw(remote, tmp_path, monkeypatch
     hdr = _header()
     folder = store.stage(paths, hdr, "## user\nCSV\n", b"{}")
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "session.md")
-    with pytest.raises(store.StoreError):
-        store.push_one(store.Drive(paths), folder)
     ulid = hdr["id"].split(":", 1)[1]
+    assert store.upload_batch(store.Drive(paths), paths) == [ulid]
     assert sorted(p.name for p in (remote / "agora" / "sessions" / ulid).iterdir()) == [h.agora_of(hdr)["raw"]["file"]]
     assert store.sync(machine2(tmp_path)).search(T("CSV")) == []
 
@@ -145,7 +144,7 @@ def test_merge_without_raw_is_indexed(remote, tmp_path):  # U-ST-18, N5
     hdr = _header()
     hdr.pop("source", None)
     folder = store.stage(paths, hdr, "## user\n合併結果表格\n", None)
-    store.push_one(store.Drive(paths), folder)
+    store.upload_batch(store.Drive(paths), paths)
     assert "raw" not in h.agora_of(hdr)
     assert store.sync(machine2(tmp_path)).search(T("表格"))
 
@@ -278,13 +277,3 @@ def test_broken_outbox_entry_quarantined(remote, capsys):  # new, C2/C4
     store.sync(paths)
     assert (paths.outbox / ".bad" / hdr["id"].split(":", 1)[1]).is_dir()
     assert "壞了" in capsys.readouterr().err
-
-
-def test_push_one_lists_only_its_folder(remote):  # new, C7
-    paths = store.Paths.from_env()
-    _save(paths, _header())
-    listings = [c for c in calls(remote)
-                if "lsjson" in c and any("gdrive:sessions" in t for t in gdrive_targets(c))]
-    assert listings, "push_one should verify with list_one"
-    assert all(t != "gdrive:sessions" and t.startswith("gdrive:sessions/")
-               for c in listings for t in gdrive_targets(c) if "gdrive:sessions" in t)

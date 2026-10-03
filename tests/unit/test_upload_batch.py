@@ -122,6 +122,122 @@ def test_three_sessions_go_up_in_a_few_rclone_calls(env, monkeypatch):
         assert (env / "agora" / "sessions" / ulid / "session.md").is_file()
 
 
+def _stage_after_push_looked(paths, monkeypatch, ulid, title="推送途中才寫好的"):
+    """The outbox entry for `ulid` appears after `push` took its snapshot - the case its
+    second upload path was written for."""
+    real = store.push_outbox
+
+    def push_outbox_then_stage(drive, paths_, warn=store.warn):
+        left = real(drive, paths_, warn)
+        folder = store.stage(paths_, _kept_header(ulid, title), f"## user\n{title}\n", b'{"v": 2}')
+        store.remember(paths_, folder)
+        return left
+
+    monkeypatch.setattr(store, "push_outbox", push_outbox_then_stage)
+
+
+def test_a_session_staged_after_push_looked_goes_up_through_the_batch(env, monkeypatch, capsys):
+    """E1: `push` had a second upload path for this case, and it deleted the folder after
+    a check with no `.done-` comparison - so an edit made while it was sending went with
+    it. It goes through `upload_batch` now, like every other entry (H1)."""
+    from agora import cache
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "第一版")
+    assert store.upload_batch(store.Drive(paths), paths) == []       # on Drive
+    _stage_after_push_looked(paths, monkeypatch, ulid)
+
+    done, failed = cache.push(paths, [f"agora:{ulid}"], {})
+    capsys.readouterr()
+
+    assert (done, failed) == (1, 0)
+    assert ulid not in store.outbox_ulids(paths)
+    assert "推送途中才寫好的" in (env / "agora" / "sessions" / ulid / "session.md").read_text(
+        encoding="utf-8")
+
+
+def test_a_late_session_drive_does_not_confirm_stays_in_the_outbox(env, monkeypatch, capsys):
+    """E1's other half, and the hole itself: until Drive's md5 agrees the folder stays.
+    `push_one` deleted it anyway, so a version it had not verified was gone."""
+    from agora import cache
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "第一版")
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    _stage_after_push_looked(paths, monkeypatch, ulid)
+    real_listing = store._listing_with_md5
+
+    def stale(drive):
+        got = real_listing(drive)
+        if isinstance(got, dict) and ulid in got:
+            got[ulid] = {**got[ulid], "session.md": "0" * 32}     # Drive reports another version
+        return got
+
+    monkeypatch.setattr(store, "_listing_with_md5", stale)
+
+    done, failed = cache.push(paths, [f"agora:{ulid}"], {})
+
+    assert (done, failed) == (0, 1)
+    assert ulid in store.outbox_ulids(paths)
+    assert "還沒上傳成功，仍在 outbox" in capsys.readouterr().err
+
+
+def test_the_rescued_session_keeps_this_write_s_relation_and_continues_the_line(env):
+    """V3: Y is this write, so `relation` is the kind this write was; and it continues the
+    line - X's own parents first, then X."""
+    paths = store.Paths.from_env()
+    ulid = _deleted_on_drive(env, paths)
+    hdr = _kept_header(ulid, "原本的")
+    hdr["agora"]["relation"] = "merge"
+    hdr["agora"]["parents"] = [{"id": f"agora:{h.new_ulid()}"}]     # X came from somewhere
+    folder = store.stage(paths, hdr, "## user\n合併結果\n", b'{"v": 2}')
+    store.mark_update(folder)
+    assert store.upload_batch(store.Drive(paths), paths) == []
+
+    new_id = [p.name for p in (env / "agora" / "sessions").iterdir() if p.is_dir()][0]
+    new_hdr, _ = h.split_document(
+        (env / "agora" / "sessions" / new_id / "session.md").read_text(encoding="utf-8"))
+    assert h.agora_of(new_hdr)["relation"] == "merge"
+    assert [p["id"] for p in h.agora_of(new_hdr)["parents"]] == \
+        [hdr["agora"]["parents"][0]["id"], f"agora:{ulid}"]
+
+
+def test_the_next_command_says_where_the_rescued_edit_went(env, capsys):
+    """V4: with a real background process the rescue line only reaches upload.log, so the
+    user never learns that X is gone and the edit is now Y. The next command says it,
+    once."""
+    from agora import cli
+    paths = store.Paths.from_env()
+    ulid = _deleted_on_drive(env, paths)
+    folder = store.stage(paths, _kept_header(ulid, "原本的"), "## user\n救回來的\n", b'{"v": 2}')
+    store.mark_update(folder)
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    new_id = [p.name for p in (env / "agora" / "sessions").iterdir() if p.is_dir()][0]
+    capsys.readouterr()
+
+    env_argv = ["search", "session", "--filter", "text~=救回來的", "--no-sync"]
+    assert cli.main(env_argv) == 0
+    said = capsys.readouterr().err
+    assert f"{ulid} 已被別台刪除，這次的修改存成了 {new_id}" in said
+
+    cli.main(env_argv)          # once, not every command
+    assert "已被別台刪除" not in capsys.readouterr().err
+
+
+def test_a_sync_that_starts_the_uploader_itself_calls_nothing_a_failure(env, monkeypatch, capsys):
+    """X1: `delete` takes the outbox entry away itself and starts the uploader at the end,
+    so its opening sync must not call that entry「沒上傳成功」- nothing has been tried, and
+    the entry may be on its way out. Every other sync still says it."""
+    paths = store.Paths.from_env()
+    _stage(paths, "還沒上傳的")
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")      # it stays in the outbox
+    capsys.readouterr()
+
+    store.sync(paths)
+    assert "沒上傳成功" in capsys.readouterr().err
+
+    store.sync(paths, kick=False)
+    assert "沒上傳成功" not in capsys.readouterr().err
+
+
 def test_a_failed_raw_upload_sends_no_session_md_at_all(env, monkeypatch, capsys):
     """M4: a reader tells a version is finished by its session.md, so a half-uploaded
     batch is worse than no upload."""

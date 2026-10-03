@@ -12,7 +12,6 @@ Nothing it does reaches the terminal that started it: its output goes to
 
 from __future__ import annotations
 
-import fcntl
 import os
 import subprocess
 import sys
@@ -20,35 +19,21 @@ from pathlib import Path
 
 from agora import store
 
-LOG_MAX = 1 << 20            # above this the log is trimmed when the next one starts
-LOG_KEEP = 256 << 10         # and this is how much of it is kept
+LOG_MAX = 1 << 20            # above this the log starts again when the next one starts
 
 STARTED = "background"       # handed to a detached uploader
 FINISHED = "foreground"      # ran right here, and there is nothing left
 FAILED = "failed"            # could not start, or (inline) did not get through
 
 
-def log_path(paths: store.Paths) -> Path:
-    return paths.state / "upload.log"
-
-
-def lock_path(paths: store.Paths) -> Path:
-    return paths.state / "upload.lock"
-
-
 def _trim_log(paths: store.Paths) -> None:
-    """Keep the tail: the interesting part of a failure is at the end, and the file
-    belongs to a process nobody is watching."""
-    path = log_path(paths)
+    """Over the limit the log starts again: it belongs to a process nobody is
+    watching, and a tail nobody will read is not worth the code that keeps it."""
     try:
-        if path.stat().st_size <= LOG_MAX:
-            return
-        with open(path, "rb") as f:
-            f.seek(-LOG_KEEP, os.SEEK_END)
-            tail = f.read()
+        if (paths.state / "upload.log").stat().st_size > LOG_MAX:
+            (paths.state / "upload.log").write_bytes(b"")
     except OSError:
-        return
-    path.write_bytes(tail)
+        pass
 
 
 def _waiting(paths: store.Paths) -> set[tuple[str, str | None]]:
@@ -66,12 +51,6 @@ def _waiting(paths: store.Paths) -> set[tuple[str, str | None]]:
         except OSError:
             versions.add((ulid, None))
     return versions | {(ulid, "trash") for ulid in store.queued_for_trash(paths)}
-
-
-def upload_once(paths: store.Paths, drive: store.Drive) -> None:
-    """One round: whatever is in the outbox, then the trash queue."""
-    store.push_outbox(drive, paths)
-    process_trash_queue(paths, drive)
 
 
 def process_trash_queue(paths: store.Paths, drive: store.Drive) -> None:
@@ -94,24 +73,12 @@ def process_trash_queue(paths: store.Paths, drive: store.Drive) -> None:
         (paths.trash_queue / ulid).unlink(missing_ok=True)
 
 
-def _take(paths: store.Paths):
-    """The lock, or None when somebody else is already uploading."""
-    lock_path(paths).parent.mkdir(parents=True, exist_ok=True)
-    lock = open(lock_path(paths), "a+")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        lock.close()
-        return None         # they re-check the outbox when they let go, so ours is theirs
-    return lock
-
-
 def run(paths: store.Paths | None = None) -> int:
     """Upload and delete until there is nothing left, then look once more."""
     paths = paths or store.Paths.from_env()
     print("[agora] 背景上傳開始", file=sys.stderr, flush=True)
     while True:
-        lock = _take(paths)
+        lock = store.hold_upload_lock(paths)
         if lock is None:
             # P8: not a run of our own, so no start/finish pair that reads like one.
             # The holder looks again before it lets go, so ours is its.
@@ -121,10 +88,11 @@ def run(paths: store.Paths | None = None) -> int:
             seen = None
             while (waiting := _waiting(paths)) and waiting != seen:
                 seen = waiting  # nothing new since the last round: it is failing, stop
-                upload_once(paths, store.Drive(paths))
+                drive = store.Drive(paths)
+                store.push_outbox(drive, paths)     # one round: the outbox first, then
+                process_trash_queue(paths, drive)   # the trash queue
         finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
-            lock.close()
+            lock.close()      # closing the file is what lets the flock go
         left = _waiting(paths)
         if not left or left == seen:
             break               # empty, or the same ones that just failed: leave them be
@@ -150,7 +118,7 @@ def start(paths: store.Paths | None = None) -> str:
     if not store.uploader_is_running(paths):
         _trim_log(paths)     # P7: rewriting the file under a running uploader loses lines
     try:
-        with open(log_path(paths), "ab") as log:
+        with open(paths.state / "upload.log", "ab") as log:
             # env=None: the caller's AGORA_* settings must reach the child, or a test
             # folder would turn into the real one. stdin is DEVNULL so an agent started
             # further down cannot read the user's keys, and the fds are closed so this

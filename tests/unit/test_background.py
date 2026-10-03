@@ -57,7 +57,7 @@ def _staged(paths) -> str:
 
 
 def _lock_is_free(paths) -> bool:
-    lock = open(background.lock_path(paths), "a+")
+    lock = open(paths.state / "upload.lock", "a+")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return True
@@ -89,7 +89,7 @@ def _uploaded(remote: Path):
 
 
 def _child_running(paths) -> bool:
-    log = background.log_path(paths)
+    log = paths.state / "upload.log"
     return log.exists() and "背景上傳開始" in log.read_text(encoding="utf-8")
 
 
@@ -120,7 +120,7 @@ def test_nothing_it_prints_reaches_our_terminal(env, capsys):
 
     out = capsys.readouterr()
     assert "背景上傳開始" not in out.out and "背景上傳開始" not in out.err
-    assert "背景上傳開始" in background.log_path(paths).read_text(encoding="utf-8")
+    assert "背景上傳開始" in (paths.state / "upload.log").read_text(encoding="utf-8")
 
 
 def test_it_does_not_inherit_the_lock_a_continue_is_holding(env, monkeypatch):
@@ -172,7 +172,7 @@ def test_inline_runs_the_same_thing_in_the_foreground(env, monkeypatch):
     assert background.start(paths) == background.FINISHED
     assert (env / "agora" / "sessions" / ulid / "session.md").is_file()
     assert not store.outbox_ulids(paths)
-    assert not background.log_path(paths).exists(), "inline writes no log"
+    assert not (paths.state / "upload.log").exists(), "inline writes no log"
 
 
 def test_inline_says_failed_when_the_upload_did_not_get_through(env, monkeypatch):
@@ -216,7 +216,7 @@ def test_a_second_uploader_skips_while_the_lock_is_held(env):
     """M1: one upload at a time. Whoever cannot take the lock leaves the outbox alone -
     the holder looks again when it lets go, so nothing is left for the next command."""
     paths = store.Paths.from_env()
-    lock = background._take(paths)              # we are the uploader that got there first
+    lock = store.hold_upload_lock(paths)       # we are the uploader that got there first
     ulid = _staged(paths)
     try:
         assert background.run(paths) == 0       # cannot take it, so it returns at once
@@ -252,7 +252,7 @@ def test_it_looks_again_after_letting_the_lock_go(env, monkeypatch):
     def on_release(paths_):
         late.append(_staged(paths_))      # in the gap: the last check is already past
 
-    monkeypatch.setattr(fcntl, "flock", _release_hook(on_release))
+    monkeypatch.setattr(store, "hold_upload_lock", _release_hook(on_release))
     assert background.run(paths) == 0
     assert late, "the test never reached the release"
 
@@ -262,16 +262,25 @@ def test_it_looks_again_after_letting_the_lock_go(env, monkeypatch):
 
 
 def _release_hook(do):
-    """A flock that runs `do` the moment the lock is let go - the gap after the last
-    check, which is the one only the look-again can cover."""
-    real = fcntl.flock
+    """A lock that runs `do` the moment it is let go - the gap after the last check,
+    which is the one only the look-again can cover. Releasing is closing the file (E2)."""
+    real = store.hold_upload_lock
     done = []
 
-    def spy(fd, op, *args):
-        real(fd, op, *args)
-        if op == fcntl.LOCK_UN and not done:
-            done.append(True)
-            do(store.Paths.from_env())
+    def spy(paths, *args, **kwargs):
+        lock = real(paths, *args, **kwargs)
+        if lock is None:
+            return None
+        close = lock.close
+
+        def closing():
+            close()
+            if not done:
+                done.append(True)
+                do(store.Paths.from_env())
+
+        lock.close = closing
+        return lock
 
     return spy
 
@@ -327,14 +336,16 @@ def test_a_reader_of_our_stdout_gets_eof_before_the_background_is_done(env, monk
     _wait_until(_uploaded(env), store.Paths.from_env())   # and it did finish afterwards
 
 
-def test_a_log_over_a_megabyte_keeps_only_its_tail(env):
+def test_a_log_over_a_megabyte_starts_again(env):
+    """E9: over the limit the log is emptied rather than trimmed to a tail. It belongs
+    to a process nobody is watching, and a tail nobody reads is not worth the code."""
     paths = store.Paths.from_env()
     paths.state.mkdir(parents=True, exist_ok=True)
-    background.log_path(paths).write_bytes(b"x" * (background.LOG_MAX + 1000) + b"TAIL")
+    log = paths.state / "upload.log"
+    log.write_bytes(b"x" * (background.LOG_MAX + 1000) + b"TAIL")
 
     background._trim_log(paths)
-    kept = background.log_path(paths).read_bytes()
-    assert len(kept) == background.LOG_KEEP and kept.endswith(b"TAIL")
+    assert log.read_bytes() == b""
 
 # --- section 3: the trash queue (design「背景刪除」) ----------------------------
 

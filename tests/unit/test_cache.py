@@ -86,7 +86,8 @@ def _header(ulid=None):
 def _on_drive(paths, body="## user\n把 CSV 轉成 Markdown 表格\n", raw=b'{"x": 1}') -> str:
     """One session staged and pushed, so it is really on the fake Drive."""
     hdr = _header()
-    store.push_one(store.Drive(paths), store.stage(paths, hdr, body, raw))
+    store.stage(paths, hdr, body, raw)
+    store.upload_batch(store.Drive(paths), paths)
     return hdr["id"].split(":", 1)[1]
 
 
