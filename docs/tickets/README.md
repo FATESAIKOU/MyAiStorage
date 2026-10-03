@@ -27,6 +27,7 @@
 | 5 | T2 實作與測試 | 隊員 | 完成，剩 T2-final 的修正 |
 | 6 | T2 PM 用假資料試、review 審、歸檔 | PM、review | 完成（10-03） |
 | 7 | 3-1 更新 MyBrain（#151 已合，改開新的 PR） | PM | 完成：[MyBrain #155](https://github.com/FATESAIKOU/MyBrain/pull/155) 使用者 10-03 合了 |
+| 8 | MyBrain 補 10-03 下午（換 client、T3） | PM | 完成：[MyBrain #156](https://github.com/FATESAIKOU/MyBrain/pull/156)，等使用者合 |
 | — | 等使用者回來：T1 驗收（1-5）、T2 真實資料試用（2-4）、合併 PR | 使用者 | 驗收步驟草稿在 `docs/review/acceptance-draft.md`（review 寫，T2 做完後更新「已知問題」再換掉 docs/acceptance.md） |
 
 隊員的模型：impl1、impl2 用 opencode（Space Bunny Free → Muse Spark 1.3 Free → ollama-cloud DeepSeek V4.1 Flash max，用完或連不上就往下換；impl1 10-03 15:40 因 Space Bunny 連不上換成 Muse Spark）；impl3（`w2:p14`）、impl4（`w2:p1C`）是 agy，**同一個帳號、額度共用**。10-03 15:24 換上 Claude Opus 5.5 做了 R6、V6、K1、G4～G6，16:20 撞到**每週上限**（約 10-10 恢復）；Gemini 約 18:05 恢復。
