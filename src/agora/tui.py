@@ -163,18 +163,21 @@ PREVIEW_CHUNK = 30 << 10     # about 30 KB a step; a session.md is 340 KB to 3 M
 PREVIEW_IDLE = 0.15          # the cursor has to rest this long before anything is read
 
 
-def read_tail(path: Path, before: int = 0, size: int = PREVIEW_CHUNK) -> tuple[str, int]:
-    """(text, bytes still before it): the last `size` bytes of `path`, cut on a boundary.
+def read_tail(path: Path, at: int | None = None, size: int = PREVIEW_CHUNK) -> tuple[str, int]:
+    """(text, where it starts): the `size` bytes of `path` ending at offset `at`.
 
-    seek, never the whole file - only the end of a conversation is ever on screen. The cut
-    lands just after a `## ` heading or a blank line, so a message is not cut in half, and
-    both ends of what is kept are then just after a newline, so a multibyte character
-    cannot be broken either.
+    `at` is an absolute offset - `None` is the end of the file - and the offset handed
+    back is the one the next call passes, so the steps walk backwards one after another
+    (review Y6: a "bytes from the end" answer fed back as "bytes from the end" jumped to
+    the start of the file). seek, never the whole file: only the end of a conversation is
+    ever on screen. The cut lands just after a `## ` heading or a blank line, so a message
+    is not cut in half, and both ends of what is kept are then just after a newline, so a
+    multibyte character cannot be broken either.
     """
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
-            end = max(0, f.tell() - before)
+            end = f.tell() if at is None else min(at, f.tell())
             start = max(0, end - size)
             f.seek(start)
             raw = f.read(end - start)
@@ -202,17 +205,23 @@ class Preview:
     """
 
     def __init__(self, path: Path | None, pinned: str = "", text: str = ""):
-        self.path, self.pinned, self.text, self.before = path, pinned, text, 0
+        # `at` is where the part that is already here starts, an absolute offset; None is
+        # "nothing read yet". 0 is the beginning of the file, which is how "all of it is
+        # here" is told apart from "none of it is" (review Y1).
+        self.path, self.pinned, self.text, self.at = path, pinned, text, None
 
     def step(self) -> str:
         """Read one more step - the tail first, the step above after that.
 
         Empty when there is nothing left, which is how the caller knows the hint can go.
         """
+        if not self.more():
+            return ""            # everything is already here; there is nothing above it (Y1)
         if self.path is None or not self.path.is_file():
+            self.at = 0          # nothing to read: all here, and the hint goes for good
             return ""
-        text, left = read_tail(self.path, self.before)
-        self.before = left
+        text, start = read_tail(self.path, self.at)
+        self.at = start
         if not text:
             return ""
         step = _no_header(text).strip("\n")
@@ -220,12 +229,12 @@ class Preview:
         return text
 
     def more(self) -> bool:
-        """Whether anything above is still unread."""
-        return self.before > 0
+        """Whether anything above is still unread. Nothing read yet counts as "more"."""
+        return self.at != 0
 
     def hint(self) -> str:
         """The line that says there is more above - gone once it is all here (T6)."""
-        return f"↑ 往上捲載入更早的內容（還有約 {max(1, round(self.before / 1024))} KB）" \
+        return f"↑ 往上捲載入更早的內容（還有約 {max(1, round((self.at or 0) / 1024))} KB）" \
             if self.more() else ""
 
 
@@ -983,14 +992,17 @@ class AgoraApp(App):
         preview = self.cache.get(self.current().key) if self.current() else None
         if preview is None or not preview.step():
             return                              # nothing left above, or not ours to read
-        lines = len(preview.text.splitlines())
         pane = self.query_one("#right", PreviewArea)
-        keep = pane.scroll_offset.y
+        keep, was = pane.scroll_offset.y, pane.virtual_size.height
         self.query_one("#hint", Static).update(preview.hint())
         self.query_one("#history", Static).update(Markdown(preview.text))
-        # The text grew above, so the line the reader was on moved down by exactly that
-        # many lines: put it back under their eyes.
-        self.call_after_refresh(partial(pane.scroll_to, y=keep + lines, animate=False))
+
+        def restore() -> None:
+            # The line the reader was on moved down by however much the rendered text
+            # grew above it - rich's line count, not the source's (review Y2).
+            grew = max(0, pane.virtual_size.height - was)
+            pane.scroll_to(y=keep + grew, animate=False)
+        self.call_after_refresh(restore)
 
     def put_preview(self, preview: Preview) -> None:
         self.query_one("#pinned", Static).update(preview.pinned)

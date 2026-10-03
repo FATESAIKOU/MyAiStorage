@@ -128,6 +128,7 @@ def test_previews_show_what_was_read_and_never_fail():
     preview = tui.agora_preview(paths, index, normal["id"])
     assert "dir /tmp/p" in preview.pinned and "tags 驗收" in preview.pinned
     assert preview.text.endswith("最後的回答") and "第一句" in preview.text
+    assert not preview.text.startswith("---"), "the front matter is not conversation"
     assert preview.more() is False and preview.hint() == ""      # a short file is all here
     one = tui.import_preview(FakeAgent("claude", [], ("assistant", "好")), "s")
     assert one.pinned.startswith("最後一則（assistant）") and one.text == "## assistant\n好"
@@ -2137,7 +2138,8 @@ def test_a_step_is_cut_on_a_boundary_and_breaks_no_character():
 
 def test_scrolling_to_the_top_adds_the_step_above_and_keeps_the_line():
     """T6: reaching the top reads one more step and puts it above, and the line the
-    reader was on stays where it is."""
+    reader was on stays where it is - which is what the rendered height says, not the
+    source's line count (review Y2)."""
     hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
     paths, index = _index((hdr, _big_body()))
     app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
@@ -2149,13 +2151,73 @@ def test_scrolling_to_the_top_adds_the_step_above_and_keeps_the_line():
             await pilot.pause(0.4)                 # the cursor comes to rest
             first = app.cache[hdr["id"]].text
             assert app.cache[hdr["id"]].more(), "there is more above"
-            app.query_one("#right").focus()
+            pane = app.query_one("#right")
+            was = pane.virtual_size.height
+            pane.focus()
             for _ in range(50):                    # up to the top: it asks for the step above
                 await pilot.press("home")
                 await pilot.pause(0.05)
                 if len(app.cache[hdr["id"]].text) > len(first):
                     break
+            await pilot.pause(0.2)
             assert len(app.cache[hdr["id"]].text) > len(first), "a step was added above"
+            grew = pane.virtual_size.height - was
+            assert grew > 0
+            # The reader was on the top line, so what they were reading is now exactly
+            # `grew` rendered lines further down - not at the top of the new part (Y2).
+            assert pane.scroll_offset.y == pytest.approx(grew, abs=2), \
+                "the line the reader was on has to stay under their eyes"
+    _run(go)
+
+
+def test_three_steps_up_are_each_the_one_just_above():
+    """Y6: the offset `read_tail` hands back has to be the one the next call wants. It
+    used to be an absolute start, fed back as "bytes from the end", so the second step
+    jumped to the top of the file and most of it could never be seen. Three steps in a
+    row, each starting one chunk above the last - never at the file's start."""
+    hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
+    paths, index = _index((hdr, _big_body(3)))
+    preview = tui.agora_preview(paths, index, hdr["id"])
+
+    seen, ats = [preview.text], [preview.at]
+    for _ in range(3):
+        assert preview.more(), "3 MB is more than one step"
+        assert preview.step()
+        assert preview.text.endswith(seen[-1]), "each step goes directly above the last"
+        seen.append(preview.text)
+        ats.append(preview.at)
+    assert ats == sorted(ats, reverse=True) and len(set(ats)) == len(ats), ats
+    assert 0 < ats[1] < ats[0], f"the second step must not jump to the start: {ats}"
+    for above, below in zip(ats, ats[1:]):
+        assert below > 0 and above - below <= tui.PREVIEW_CHUNK, \
+            f"one chunk at a time, going backwards: {ats}"
+    assert preview.text.startswith("## "), "every step lands on a heading"
+
+
+
+def test_reaching_the_top_after_everything_is_here_adds_nothing():
+    """Y1: `before == 0` is both "nothing read yet" and "the whole file is on screen".
+    A short session is all here the first time, so going to the top again must not put
+    the tail on top of itself."""
+    normal = _hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "小的")
+    paths, index = _index((normal, "## user\n第一句\n\n## assistant\n最後的回答\n"))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            text = app.cache[normal["id"]].text
+            assert text.count("最後的回答") == 1 and not app.cache[normal["id"]].more()
+            pane = app.query_one("#right")
+            pane.focus()
+            for _ in range(3):
+                pane.scroll_to(y=3, animate=False)
+                await pilot.pause(0.05)
+                await pilot.press("home")
+                await pilot.pause(0.05)
+            assert app.cache[normal["id"]].text.count("最後的回答") == 1
     _run(go)
 
 
