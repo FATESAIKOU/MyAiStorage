@@ -33,11 +33,13 @@
 **等使用者確認的事**（不擋進度，先照 PM 的判斷做）：
 - T2 的「勾選但被篩選掉的列不算進動作」（review V4，PM 選了比較安全的做法）。
 - T1 的「continue 進行中、原本的 Session 被別台刪掉」：另存成一個新的 Session（review T1-sec3 M1）。
-- **6 個孤兒 `opencode run` 行程**：使用者 10-03 說自己停（`pgrep -fl "opencode run"` 確認後 `pkill -f "opencode run -m opencode/space-bunny-free"`）。
+- **6 個孤兒 `opencode run` 行程**：使用者 10-03 說自己停（11:20 時還在）（`pgrep -fl "opencode run"` 確認後 `pkill -f "opencode run -m opencode/space-bunny-free"`）。
 
-- **行數目標（要使用者決定）**：T4 精簡後轉接器少 36 行；T3 第 1、2 節加了 +267 行（規格估 70～120，多在 H1 的版本比對、鎖、批次上傳）。review 估 T3 做完約 **3,780 行**，做了低風險精簡（約 60 行，`docs/review/T3-size.md`，已排給 impl2）約 **3,720 行**。等使用者決定放寬到多少。
+- 行數目標：使用者 10-03 決定放寬到 **3,800**（寫進 `docs/design.md`）。T3 做完加上低風險精簡預估約 3,720。
 
 **10-03 使用者已決定**：行數 → T4；P1（救不回來）→ T3「先存本機再上傳」；import／delete 太慢 → T3 的 B＋C，A 開 issue #11 觀察。
+
+**使用者平常用的 agora**：10-03 11:20 起改成穩定版的一般安裝（9baa0e5，T2 歸檔那一版，位置 `~/.local/share/agora-stable/9baa0e5`），不再跟著這個工作目錄變；T3 做完、使用者驗收時再換回（`uv tool install --force --editable .`）。
 
 規則：不合併任何 PR；不碰使用者的真實 session；需要使用者決定的事先停在那一項、寫進這裡，做其他不受影響的項目。
 
