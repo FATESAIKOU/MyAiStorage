@@ -8,7 +8,7 @@
 |---|---|---|---|---|
 | T4 | 精簡兩個轉接器、放寬行數目標 → [需求單](T4-slim-adapters.md) | 待轉成 change（排在 T3 之後） | — | 使用者 10-03 決定「先精簡，再放寬一點」 |
 | T3 | 寫入先存本機、背景上傳、少連 Drive → [需求單](T3-local-first-writes.md) | 待轉成 change（T2 歸檔後） | — | 使用者 10-03 決定：P1 改成先存本機；慢的問題選 B＋C；A 開成 [issue #11](https://github.com/FATESAIKOU/MyAiStorage/issues/11) 觀察 |
-| T2 | 互動模式：多選、全選、進度、中斷、按鍵整理 → change [`tui-batch-actions`](../../openspec/changes/tui-batch-actions/) | 待歸檔：功能、4.1b、T2-final 的 W1～W3／S3 都修完；PM 在 pane 用假資料試過（`T2-pm-run.md`，全部的按鍵路徑都正常，Q1～Q4 小修正排成 4.2b）；review 確認修正中（→ `docs/review/T2-archive.md`） | impl1 | review T2-sec1～3 的意見都已修 |
+| T2 | 互動模式：多選、全選、進度、中斷、按鍵整理 → change [`tui-batch-actions`](../../openspec/changes/archive/2026-10-03-tui-batch-actions/)（已歸檔，規格在 `openspec/specs/interactive-mode`） | **完成（10-03 歸檔）**，等本人用真實資料試（2-4） | impl1 | review 各輪都沒有 High；PM 試用 `T2-pm-run.md` |
 | T1 | 指令模式：pull／push、批次動作的進度與續傳 → change [`command-batch-actions`](../../openspec/changes/archive/2026-10-03-command-batch-actions/)（已歸檔，規格在 `openspec/specs/batch-commands`、`session-sync`） | **完成（10-03 歸檔）**，等本人驗收（1-5）；P1 與行數額度等使用者決定 | impl1、impl2 | review T1-archive、T1-4.2d、final-checks 都沒有 High；PM 實跑 `T1-pm-run.md` |
 | T0 | e2e 整合測試改成「continue 寫回原本的 Session」 | 完成 | impl1（3011d15）、impl2（745e5e8） | 兩邊都實跑過整合測試 |
 
@@ -23,7 +23,7 @@
 | 3 | T1 歸檔（`openspec archive`） | PM | 完成（10-03） |
 | 4 | T2 轉成 change（需求已定，見 T2-tui-batch.md），review 看 specs | PM 寫、review 看 | 完成（提前做，和 T1 收尾並行） |
 | 5 | T2 實作與測試 | 隊員 | 完成，剩 T2-final 的修正 |
-| 6 | T2 PM 用假資料試、review 審、歸檔 | PM、review | PM 試過、review 審完；剩 4.2b 與修正確認 |
+| 6 | T2 PM 用假資料試、review 審、歸檔 | PM、review | 完成（10-03） |
 | 7 | 3-1 更新 MyBrain（#151 已合，改開新的 PR） | PM | 草稿寫好、驗證通過，等 T2 歸檔後送出 |
 | — | 等使用者回來：T1 驗收（1-5）、T2 真實資料試用（2-4）、合併 PR | 使用者 | 驗收步驟草稿在 `docs/review/acceptance-draft.md`（review 寫，T2 做完後更新「已知問題」再換掉 docs/acceptance.md） |
 
