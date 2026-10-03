@@ -1,7 +1,0 @@
-run	sha 檢查（v2b）：github.sha 必須等於 main 目前 HEAD	2026-09-26T11:52:59.6201376Z workflow_version=v2b-with-guard
-run	sha 檢查（v2b）：github.sha 必須等於 main 目前 HEAD	2026-09-26T11:53:00.1631683Z GITHUB_SHA=8cf6d05795d4832a9b7904f678bde8f943fc7e40
-run	sha 檢查（v2b）：github.sha 必須等於 main 目前 HEAD	2026-09-26T11:53:00.1633283Z main_head=1018d04e7ad41a5abc301ee80c7211cec46a718a
-run	sha 檢查（v2b）：github.sha 必須等於 main 目前 HEAD	2026-09-26T11:52:59.5094023Z ^[[36;1m  echo "::error::github.sha($GITHUB_SHA) != main HEAD($main_head)：這個 run 用的不是 main 最新版——立刻結束"^[[0m
-run	sha 檢查（v2b）：github.sha 必須等於 main 目前 HEAD	2026-09-26T11:53:00.1633283Z main_head=1018d04e7ad41a5abc301ee80c7211cec46a718a
-run	sha 檢查（v2b）：github.sha 必須等於 main 目前 HEAD	2026-09-26T11:53:00.1751146Z ##[error]github.sha(8cf6d05795d4832a9b7904f678bde8f943fc7e40) != main HEAD(1018d04e7ad41a5abc301ee80c7211cec46a718a)：這個 run 用的不是 main 最新版——立刻結束
-run	sha 檢查（v2b）：github.sha 必須等於 main 目前 HEAD	2026-09-26T11:53:00.1766676Z ##[error]Process completed with exit code 1.

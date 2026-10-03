@@ -1,9 +1,0 @@
-== step4: clone after quarantine, verify pinned head ==
-pinned_head=5950b3c272e4c0dad2793e0b833e652cecfe27b1
-cloned_head=5950b3c272e4c0dad2793e0b833e652cecfe27b1
-PIN-OK
-verify_rc=0
-log:
-5950b3c init: agora-1.4f2/
-README: README for /work/f2-repo
-no FORGED.txt (good)

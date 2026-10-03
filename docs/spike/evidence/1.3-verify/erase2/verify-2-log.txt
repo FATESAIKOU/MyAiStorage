@@ -1,4 +1,0 @@
-7360fd1 session-2 update
-da098ff keep annex object
-6e08fdf session-2 and session-3
-2f10153 init: agora-erase2

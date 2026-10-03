@@ -1,0 +1,513 @@
+src/agora/cache.py     |  19 +++++----
+ src/agora/cli.py       |  84 +++++++++++++++++++++++++-----------
+ src/agora/store.py     |   6 +--
+ src/agora/tui.py       | 114 ++++++++++++++++++++++++++++++++++++++-----------
+ tests/unit/test_cli.py |  47 ++++++++++++++++----
+ tests/unit/test_tui.py |  40 +++++++++++++++--
+ 6 files changed, 240 insertions(+), 70 deletions(-)
+
+--- Changes ---
+
+src/agora/cache.py
+  @@ -1,4 +1,4 @@
+  -"""Local caches (design 5.10), filled lazily and refreshed in one go by `agora cache`.
+  +"""Local caches (design 5.10), filled lazily and refreshed in one go by `agora pull`.
+   
+   The Drive mirror (cache/sessions/) is agora's own cache: session.md holds a
+   session's reading version and raws are fetched when first needed. Agent
+  @@ -44,7 +44,7 @@ def local_reading(paths: store.Paths, agent, session_id: str, updated_at: str |
+  -    """`agora cache local`: every agent session on this machine into the cache; (written or fresh, failed)."""
+  +    """`agora pull`, local half: every agent session on this machine into the cache; (written or fresh, failed)."""
+       done = failed = 0
+       for agent in agents:
+           listed = agent.list_sessions()
+  @@ -60,7 +60,7 @@ def refresh_local(paths: store.Paths, agents: list) -> tuple[int, int]:
+  -    """`agora cache agora`: sync session.md files, then every raw not here yet; (done, failed)."""
+  +    """`agora pull`, Drive half: sync session.md files, then every raw not here yet; (done, failed)."""
+       index = store.sync(paths)
+       drive = store.Drive(paths)
+       ulids = sorted(index.known())
+  @@ -92,10 +92,13 @@ def search_cached(paths: store.Paths, agent_name: str, keyword: str):
+  -def sync_up(paths: store.Paths) -> None:
+  -    """`agora sync`: the outbox, then every mirrored file written back to Drive, same names overwritten."""
+  +def push(paths: store.Paths) -> None:
+  +    """`agora push`: the outbox, then each mirrored session written back to Drive, same names overwritten."""
+       drive = store.Drive(paths)
+       failed = store.push_outbox(drive, paths)
+  -    if paths.mirror.is_dir():
+  -        drive.upload_tree(paths.mirror)
+  -    print(f"[agora] 已寫回 Drive" + (f"；outbox 還有 {len(failed)} 筆沒上傳成功" if failed else ""))
+  +    folders = sorted(p for p in paths.mirror.iterdir() if p.is_dir() and not p.name.startswith(".")) \
+  +        if paths.mirror.is_dir() else []
+  +    for n, folder in enumerate(folders, 1):
+  +        print(f"[agora] push {n}/{len(folders)}  {folder.name[-8:]}")
+  +        drive.upload_session(folder)
+  +    print("[agora] 已寫回 Drive" + (f"；outbox 還有 {len(failed)} 筆沒上傳成功" if failed else ""))
+  +11 -8
+
+src/agora/cli.py
+  @@ -203,17 +203,34 @@ def cmd_search(args, paths: store.Paths) -> int:
+  +    """Import one or several agent sessions (several at once is the user's call); progress as k/N."""
+       if args.ids:
+           raise InputError("import 不接 session id；用 --external-session-id 給 agent 自己的 id")
+  -    if not args.external_session_id or not args.agent:
+  +    ids = [i.strip() for raw in args.external_session_id or [] for i in raw.split(",") if i.strip()]
+  +    if not ids or not args.agent:
+           raise InputError("import 要給 --external-session-id 與 --agent")
+       agent = load_agent(args.agent)
+       updates = _updates(args)
+  -    exported = agent.export(args.external_session_id)
+  +    index = store.sync(paths)  # once for the batch, never throttled: we must see other machines' imports (S6)
+  +    codes = []
+  +    for n, session_id in enumerate(ids, 1):
+  +        if len(ids) > 1:
+  +            print(f"[agora] 匯入 {n}/{len(ids)}  {session_id}", file=sys.stderr)
+  +        try:
+  +            codes.append(_import_one(paths, index, agent, session_id, updates))
+  +        except (InputError, AgentError, store.StoreError, h.HeaderError) as e:
+  +            if len(ids) == 1:
+  +                raise
+  +            print(f"[agora] {session_id} 沒有匯入：{e}", file=sys.stderr)
+  +            codes.append(EXIT_ERROR)
+  +    return next((code for code in codes if code), 0)
+  +
+  +
+  +def _import_one(paths: store.Paths, index: store.Index, agent: Agent, session_id: str, updates: dict) -> int:
+  +    exported = agent.export(session_id)
+       if exported.message_count <= 0:
+  -        raise InputError(f"{args.external_session_id} 沒有任何訊息，不匯入")
+  +        raise InputError(f"{session_id} 沒有任何訊息，不匯入")
+       body = reading(agent, exported.raw)
+  -    index = store.sync(paths)  # never throttled: we must see other machines' imports (S6)
+       existing = index.by_source(agent.name, exported.session_id)
+       if existing:
+           old = index.header(existing[0])
+  @@ -226,7 +243,7 @@ def cmd_import(args, paths: store.Paths) -> int:
+  -        # Already continued or merged from: keep the old version and branch (S7).
+  +        # Already merged from: keep the old version and branch (S7).
+           parents = [{"id": f"agora:{existing[0]}", "raw_md5": (h.agora_of(old).get("raw") or {}).get("md5")}]
+           auto = _auto_header("import", parents, body, title=exported.title, exported=exported, agent=agent,
+                               parent_headers=[old])
+  @@ -314,6 +331,21 @@ def _flat(text: str) -> str:
+  +def _written_section(paths: store.Paths, agent: Agent, agora_id: str, text: str, step: str) -> tuple[dict, str | None]:
+  +    """A source's section, reused when an interrupted merge already wrote it for this same text and prompt."""
+  +    key = store.hashlib.md5(f"{agent.name}|{SUMMARY_PROMPT_VERSION}|{agora_id}|{text}".encode()).hexdigest()
+  +    kept = paths.state / "merge-sections" / f"{key}.json"
+  +    if kept.exists():
+  +        print(f"[agora] 來源 {step}：沿用已寫好的 {agora_id} 要約", file=sys.stderr)
+  +        saved = json.loads(kept.read_text(encoding="utf-8"))
+  +        return saved["section"], saved.get("model")
+  +    print(f"[agora] 來源 {step}：請 {agent.name} 寫 {agora_id} 的要約（{len(text)} 字，可能要幾分鐘）…", file=sys.stderr)
+  +    section, model = _section_of(agent, text, _summary_dir(paths))
+  +    kept.parent.mkdir(parents=True, exist_ok=True)
+  +    kept.write_text(json.dumps({"section": section, "model": model}, ensure_ascii=False), encoding="utf-8")
+  +    return section, model
+  +
+  +
+   def _render(sections: list[dict], level: int = 3) -> list[str]:
+       """The merge's text, laid out by the program from sections.json (design 5.3)."""
+       out = []
+  @@ -365,9 +397,7 @@ def cmd_merge(args, paths: store.Paths) -> int:
+  -            print(f"[agora] 請 {agent.name} 寫 {agora_id} 的要約（{len(text)} 字，不開畫面，可能要幾分鐘）…",
+  -                  file=sys.stderr)
+  -            sec["summary"], model = _section_of(agent, text, _summary_dir(paths))
+  +            sec["summary"], model = _written_section(paths, agent, agora_id, text, f"{len(sections) + 1}/{len(ids)}")
+               models.add(model)
+           parents.append({"id": agora_id, "raw_md5": (agora.get("raw") or {}).get("md5")})
+           parent_headers.append(parent)
+  @@ -576,7 +606,13 @@ def cmd_delete(args, paths: store.Paths) -> int:
+  -    headers = {agora_id: _header_for(index, agora_id) for agora_id in ids}
+  +    gone = [i for i in ids if index.header(_ulid_of(i)) is None]
+  +    for agora_id in gone:   # deleted before (an interrupted run, another machine): nothing left to do
+  +        print(f"[agora] {agora_id} 已經不在了，略過", file=sys.stderr)
+  +    ids = [i for i in ids if i not in gone]
+  +    if not ids:
+  +        return 0
+  +    headers = {agora_id: index.header(_ulid_of(agora_id)) for agora_id in ids}
+       if not args.yes:
+           listed = "\n".join(f"  {i}（{hdr.get('title') or '無標題'}）" for i, hdr in headers.items())
+           raise InputError(f"會把這 {len(ids)} 個移到 Drive 垃圾桶：\n{listed}\n確定的話加 --yes")
+  @@ -586,6 +622,7 @@ def cmd_delete(args, paths: store.Paths) -> int:
+  +            print(f"[agora] 刪除 {done + 1}/{len(ids)}  {agora_id}", file=sys.stderr)
+               store.delete_session(paths, store.Drive(paths), _ulid_of(agora_id))
+               print(agora_id)
+               left.remove(agora_id)
+  @@ -650,37 +687,36 @@ def cmd_show(args, paths: store.Paths) -> int:
+  -def cmd_cache(args, paths: store.Paths) -> int:
+  -    """`agora cache agora|local`: fill the local caches in one go (design 5.10)."""
+  +def cmd_pull(args, paths: store.Paths) -> int:
+  +    """`agora pull`: everything to this machine - Drive's sessions with their raws, agent sessions' full text (5.10)."""
+       from agora import cache
+  -    if args.type not in ("agora", "local"):
+  -        raise InputError("cache 要給 agora 或 local：agora cache agora、agora cache local")
+  -    done, failed = (cache.refresh_agora(paths) if args.type == "agora"
+  -                    else cache.refresh_local(paths, [load_agent(name) for name in AGENTS]))
+  -    print(f"[agora] 快取完成：{done} 個" + (f"，{failed} 個失敗" if failed else ""))
+  +    drive = cache.refresh_agora(paths)
+  +    local = cache.refresh_local(paths, [load_agent(name) for name in AGENTS])
+  +    failed = drive[1] + local[1]
+  +    print(f"[agora] pull 完成：{drive[0] + local[0]} 個" + (f"，{failed} 個失敗" if failed else ""))
+       return EXIT_ERROR if failed else 0
+   
+   
+  -def cmd_sync(args, paths: store.Paths) -> int:
+  -    """`agora sync`: write the local agora state back to Drive, overwriting (design 5.10)."""
+  +def cmd_push(args, paths: store.Paths) -> int:
+  +    """`agora push`: write the local agora state back to Drive, overwriting (design 5.10)."""
+       from agora import cache
+  -    cache.sync_up(paths)
+  +    cache.push(paths)
+       return 0
+   
+   
+   ACTIONS = {
+       "search": cmd_search, "import": cmd_import, "merge": cmd_merge, "continue": cmd_continue,
+  -    "delete": cmd_delete, "edit": cmd_edit, "show": cmd_show, "cache": cmd_cache, "sync": cmd_sync,
+  +    "delete": cmd_delete, "edit": cmd_edit, "show": cmd_show, "pull": cmd_pull, "push": cmd_push,
+   }
+   
+   
+   def build_parser() -> argparse.ArgumentParser:
+       p = argparse.ArgumentParser(prog="agora", description="找、合、接 coding agent 的 Session")
+       p.add_argument("action", choices=list(ACTIONS))
+  -    p.add_argument("type", nargs="?", choices=(*TYPES, "agora", "local"),
+  -                   help="session；cache 用 agora 或 local；sync 不用寫")
+  +    p.add_argument("type", nargs="?", choices=TYPES, help="session（pull、push 不用寫）")
+       p.add_argument("ids", nargs="*", help="session id（merge 可以給多個，用空白或逗號分隔）")
+  -    p.add_argument("--external-session-id", help="import：agent 自己的 session id")
+  +    p.add_argument("--external-session-id", action="append",
+  +                   help="import：agent 自己的 session id；可以給多次，或用逗號分隔")
+       p.add_argument("--agent", choices=AGENTS, help="import：來源的 agent；merge：誰寫要約；continue：用哪個 agent 接")
+       p.add_argument("--filter", action="append", default=[], help="search：KEY=VALUE（全等）或 KEY~=TEXT（包含）")
+       p.add_argument("--header", action="append", default=[], help="KEY=VALUE；KEY 可以用點路徑，VALUE 用 YAML 解析")
+  @@ -702,7 +738,7 @@ def main(argv: list[str] | None = None) -> int:
+  -    if args.action not in ("cache", "sync") and args.type != "session":
+  +    if args.action not in ("pull", "push") and args.type != "session":
+           print(f"[agora] {args.action} 的型態要寫 session，例如 agora {args.action} session", file=sys.stderr)
+           return EXIT_INPUT
+       paths = store.Paths.from_env()
+  +60 -24
+
+src/agora/store.py
+  @@ -155,9 +155,9 @@ class Drive:
+  -    def upload_tree(self, mirror: Path) -> None:
+  -        """Every file of the mirror back to sessions/, same names overwritten, nothing deleted (agora sync)."""
+  -        self._run("copy", str(mirror), "gdrive:sessions", "--exclude", ".files-from", "--exclude", ".bad/**")
+  +    def upload_session(self, folder: Path) -> None:
+  +        """One mirrored session back to sessions/<ULID>/, same names overwritten, nothing deleted (agora push)."""
+  +        self._run("copy", str(folder), f"gdrive:sessions/{folder.name}", "--exclude", ".*")
+   
+       def download(self, ulid: str, name: str, local: Path) -> None:
+           local.parent.mkdir(parents=True, exist_ok=True)
+  +3 -3
+
+src/agora/tui.py
+  @@ -12,9 +12,12 @@ from __future__ import annotations
+  +import re
+   import shutil
+  +import signal
+   import subprocess
+   import sys
+  +import threading
+   import time
+   from dataclasses import dataclass
+   from datetime import datetime
+  @@ -27,7 +30,7 @@ from textual.app import App, ComposeResult
+  -from textual.widgets import DataTable, Footer, Input, OptionList, Static
+  +from textual.widgets import DataTable, Footer, Input, OptionList, ProgressBar, Static
+   
+   from agora import cache
+   from agora import header as h
+  @@ -167,9 +170,9 @@ def import_preview(agent, session_id: str, full: bool = False, paths: store.Path
+  -    if action == "import":
+  -        return [["import", "session", "--external-session-id", r.key.split(":", 1)[1], "--agent", r.agent]
+  -                for r in rows]
+  +    if action == "import":   # one command for all of them (rows of one agent)
+  +        return [["import", "session", "--external-session-id", ",".join(r.key.split(":", 1)[1] for r in rows),
+  +                 "--agent", rows[0].agent]]
+       first = rows[0].key if rows else ""
+       return {"continue": [["continue", "session", first, "--agent", agent, "--dir", workdir]],
+               "merge": [["merge", "session", *[r.key for r in rows], "--agent", agent]],
+  @@ -272,6 +275,56 @@ class Busy(ModalScreen):
+  +class Run(ModalScreen):
+  +    """Run a command-mode command in a child process: its k/N lines drive a progress bar; Esc interrupts it.
+  +
+  +    A child process, not a thread, so an interruption is a real one (SIGINT, as Ctrl-C would be);
+  +    every action is safe to run again afterwards (design 5.11). Dismisses (code, output).
+  +    """
+  +    BINDINGS = [Binding("escape", "stop", "中斷")]
+  +    STEP = re.compile(r"(\d+)/(\d+)")
+  +
+  +    def __init__(self, title: str, argv: list[str], spawn):
+  +        super().__init__()
+  +        self.title_, self.argv, self.spawn, self.lines = title, argv, spawn, []
+  +        self.proc, self.started, self.stopping = None, time.monotonic(), False
+  +
+  +    def compose(self) -> ComposeResult:
+  +        with Vertical(classes="box"):
+  +            yield Static(self.title_, classes="box-title")
+  +            yield ProgressBar(total=None, show_eta=False, id="bar")
+  +            yield Static("", id="last", classes="note")
+  +            yield Static("Esc 中斷（之後重跑同一個動作會接著做）", classes="hint")
+  +
+  +    def on_mount(self) -> None:
+  +        self.proc = self.spawn(self.argv)
+  +        threading.Thread(target=self.read, daemon=True).start()
+  +        self.set_interval(0.2, self.tick)
+  +
+  +    def read(self) -> None:
+  +        for line in self.proc.stdout:
+  +            self.lines.append(line.rstrip())
+  +        code = self.proc.wait()
+  +        self.app.call_from_thread(self.dismiss, (code, "\n".join(self.lines)))
+  +
+  +    def tick(self) -> None:
+  +        last = self.lines[-1] if self.lines else ""
+  +        step = next((m for m in map(self.STEP.search, reversed(self.lines)) if m), None)
+  +        bar = self.query_one("#bar", ProgressBar)
+  +        if step:
+  +            bar.update(total=int(step.group(2)), progress=int(step.group(1)))
+  +        spent = int(time.monotonic() - self.started)
+  +        self.query_one("#last", Static).update(f"{'中斷中… ' if self.stopping else ''}（{spent} 秒）{last}")
+  +
+  +    def action_stop(self) -> None:
+  +        if self.proc and self.proc.poll() is None:
+  +            self.stopping = True
+  +            try:
+  +                os.killpg(self.proc.pid, signal.SIGINT)     # agora and, say, the opencode writing a summary
+  +            except (OSError, AttributeError, TypeError):
+  +                self.proc.send_signal(signal.SIGINT)
+  +
+  +
+   class Tell(ModalScreen):
+       """The last lines of an action's output; any key closes it."""
+   
+  @@ -326,14 +379,15 @@ class AgoraApp(App):
+  +        Binding("a", "mark_all", "全選／全不選"),
+           Binding("enter", "primary", "接續／匯入", priority=True),   # the table would take it for itself
+           Binding("m", "merge", "合併"),
+           Binding("e", "edit", "改標頭"),
+           Binding("d", "delete", "刪除"),
+           Binding("slash", "filter", "篩選"),
+           Binding("ctrl+t", "search_mode", "標題／內文", priority=True),
+  -        Binding("r", "refresh_cache", "更新快取"),
+  -        Binding("s", "sync", "寫回 Drive"),
+  +        Binding("p", "pull", "pull"),
+  +        Binding("P", "push", "push"),
+           Binding("q", "quit", "離開"),
+       ]
+   
+  @@ -511,7 +565,7 @@ class AgoraApp(App):
+  -        if action in ("mark", "primary", "filter", "refresh_cache", "sync"):
+  +        if action in ("mark", "mark_all", "primary", "filter", "pull", "push"):
+               return not in_preview
+           return True
+   
+  @@ -533,6 +587,13 @@ class AgoraApp(App):
+  +    def action_mark_all(self) -> None:
+  +        """Mark every row shown (after the filter), or unmark them all if they are all marked already."""
+  +        keys = {r.key for r in self.shown()}
+  +        self.marked = self.marked - keys if keys <= self.marked else self.marked | keys
+  +        row = self.current()
+  +        self.show(keep=row.key if row else None)
+  +
+       def action_filter(self) -> None:
+           self.query_one("#filterbar").add_class("on")
+           self.query_one("#filter", Input).focus()
+  @@ -599,14 +660,20 @@ class AgoraApp(App):
+  -    async def act(self, title: str, argvs: list[list[str]]) -> None:
+  -        """An action that needs no terminal of its own: run it under a window, then show what it said."""
+  -        codes, out, error = await self.push_screen_wait(Busy(title, lambda: [self.cli.main(a) for a in argvs]))
+  -        codes = codes or [2]
+  -        ok = sum(code == 0 for code in codes)
+  -        await self.push_screen_wait(Tell(title, f"{out}\n{error or ''}", ok == len(codes)))
+  +    def spawn(self, argv: list[str]) -> subprocess.Popen:
+  +        """The same agora, as a child process with its output merged into one stream."""
+  +        return subprocess.Popen([sys.executable, "-m", "agora.cli", *argv], stdout=subprocess.PIPE,
+  +                                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True, bufsize=1,
+  +                                start_new_session=True)   # its own group, so Esc reaches the agent it runs too
+  +
+  +    async def act(self, title: str, argv: list[str]) -> None:
+  +        """An action that needs no terminal of its own: run it under a window with progress, then show what it said."""
+  +        code, out = await self.push_screen_wait(Run(title, argv, self.spawn))
+  +        stopped = code in (130, -signal.SIGINT)
+  +        await self.push_screen_wait(Tell(f"{title}{'（已中斷）' if stopped else ''}", out, code == 0))
+           self.reload()
+  -        self.say("完成" if ok == len(codes) else f"成功 {ok} 個、失敗 {len(codes) - ok} 個", failed=ok != len(codes))
+  +        self.say("完成" if code == 0 else "已中斷；重跑同一個動作會接著做" if stopped else "有沒有成功的，訊息在結果視窗",
+  +                 failed=code != 0)
+   
+       def outside(self, argv: list[str]) -> int:
+           """Hand the whole terminal over (an agent, an editor), then come back."""
+  @@ -622,7 +689,9 @@ class AgoraApp(App):
+  -            await self.act(f"匯入 {len(rows)} 個", argv_for("import", rows, None, None))
+  +            for agent in {r.agent for r in rows}:   # one command per agent, all its ids at once
+  +                mine = [r for r in rows if r.agent == agent]
+  +                await self.act(f"匯入 {len(mine)} 個（{agent}）", argv_for("import", mine, None, None)[0])
+               return
+           row = self.current()
+           pick = await self.push_screen_wait(Choose("用哪個 agent 接續？", ["opencode", "claude"]))
+  @@ -661,7 +730,7 @@ class AgoraApp(App):
+  -            await self.act("合併", argv_for("merge", rows, ("opencode", "claude")[pick], None))
+  +            await self.act("合併", argv_for("merge", rows, ("opencode", "claude")[pick], None)[0])
+   
+       def action_edit(self) -> None:
+           row = self.current()
+  @@ -671,17 +740,14 @@ class AgoraApp(App):
+  -    async def action_refresh_cache(self) -> None:
+  -        pick = await self.push_screen_wait(Choose("更新哪個快取？", ["Agora：Drive 上的 Session（含原始檔）",
+  -                                                              "本機：opencode／claude 的 session 全文"]))
+  -        if pick is not None:
+  -            await self.act("更新快取", [["cache", ("agora", "local")[pick]]])
+  +    async def action_pull(self) -> None:
+  +        await self.act("pull：拿到本機", ["pull"])
+   
+       @work
+  -    async def action_sync(self) -> None:
+  +    async def action_push(self) -> None:
+           if await self.push_screen_wait(Choose("把本機的 agora 寫回 Drive？", ["取消", "確定"],
+                                                 "同名的檔案直接覆蓋；Drive 上多的不動")) == 1:
+  -            await self.act("寫回 Drive", [["sync"]])
+  +            await self.act("push：寫回 Drive", ["push"])
+   
+       @work
+       async def action_delete(self) -> None:
+  @@ -690,7 +756,7 @@ class AgoraApp(App):
+  -            await self.act(f"刪除 {len(rows)} 個", argv_for("delete", rows, None, None))
+  +            await self.act(f"刪除 {len(rows)} 個", argv_for("delete", rows, None, None)[0])
+   
+   
+   def main(paths: store.Paths) -> int:
+  +90 -24
+
+tests/unit/test_cli.py
+  @@ -199,6 +199,7 @@ def test_a_bad_answer_is_regenerated_then_gives_up(env, capsys):  # design v7: s
+  +    shutil.rmtree(store.Paths.from_env().state / "merge-sections")   # or the sections written above are reused
+       code, out, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+       assert code == 2 and out == "" and "連續 3 次" in err
+   
+  @@ -641,6 +642,7 @@ def test_ai_text_cannot_forge_structure(env, capsys):  # review v7 A1
+  +    shutil.rmtree(store.Paths.from_env().state / "merge-sections")
+       code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+       assert code == 2 and "連續 3 次" in err                  # blank text does not pass the schema
+   
+  @@ -682,14 +684,12 @@ def test_a_failed_summarize_run_is_retried(env, capsys, monkeypatch):  # review
+  -def test_cache_needs_agora_or_local_and_other_actions_need_session(env, capsys):  # design 5.10
+  -    code, _, err = run(capsys, "cache", "session")
+  -    assert code == 1 and "agora 或 local" in err
+  +def test_actions_other_than_pull_and_push_need_session(env, capsys):  # design 5.10
+       code, _, err = run(capsys, "search")
+       assert code == 1 and "型態要寫 session" in err
+   
+   
+  -def test_cache_agora_brings_every_raw_and_sync_writes_the_mirror_back(env, capsys):  # design 5.10
+  +def test_pull_brings_every_raw_and_push_writes_the_mirror_back(env, capsys):  # design 5.10
+       _, a, _ = _import(capsys)
+       paths = store.Paths.from_env()
+       ulid = a.split(":")[1]
+  @@ -697,15 +697,46 @@ def test_cache_agora_brings_every_raw_and_sync_writes_the_mirror_back(env, capsy
+  -    code, out, _ = run(capsys, "cache", "agora")
+  -    assert code == 0 and raw.exists() and "快取完成：1 個" in out
+  +    code, out, _ = run(capsys, "pull")
+  +    assert code == 0 and raw.exists() and "pull 完成" in out
+       md = paths.mirror / ulid / "session.md"
+       md.write_text(md.read_text() + "\n本機改的一行\n")
+  -    code, out, _ = run(capsys, "sync")
+  +    code, out, _ = run(capsys, "push")
+       remote = Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid / "session.md"
+  -    assert code == 0 and "已寫回 Drive" in out and "本機改的一行" in remote.read_text()
+  +    assert code == 0 and "push 1/1" in out and "本機改的一行" in remote.read_text()
+   
+   
+  +def test_import_several_at_once_goes_on_past_a_failure(env, capsys):  # user's call
+  +    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+  +    code, out, err = run(capsys, "import", "session", "--external-session-id", "ses_a,ses_nope",
+  +                         "--external-session-id", "ses_b", "--agent", "opencode")
+  +    assert code == 2 and len(out.split()) == 2 and "匯入 3/3" in err and "ses_nope 沒有匯入" in err
+  +
+  +
+  +def test_a_merge_interrupted_after_one_source_reuses_it(env, capsys, monkeypatch):  # design 5.11
+  +    _, a, _ = _import(capsys)
+  +    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+  +    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+  +    real = env.summarize
+  +
+  +    def once_then_stop(prompt, workdir):
+  +        if len(env.prompts) >= 1:
+  +            raise KeyboardInterrupt           # Esc in the interactive mode, while the second source is written
+  +        return real(prompt, workdir)
+  +    monkeypatch.setattr(env, "summarize", once_then_stop)
+  +    code, _, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+  +    assert code == 130 and len(env.prompts) == 1
+  +    monkeypatch.setattr(env, "summarize", real)
+  +    code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+  +    assert code == 0 and "沿用已寫好的" in err and len(env.prompts) == 2   # only the second source again
+  +
+  +
+  +def test_deleting_again_skips_what_is_gone(env, capsys):  # design 5.11
+  +    _, a, _ = _import(capsys)
+  +    run(capsys, "delete", "session", a, "--yes")
+  +    code, out, err = run(capsys, "delete", "session", a, "--yes")
+  +    assert code == 0 and out == "" and "已經不在了" in err
+  +
+   
+   def test_delete_several_at_once_children_first(env, capsys):  # user's call
+       _, a, _ = _import(capsys)
+  +39 -8
+
+tests/unit/test_tui.py
+  @@ -130,9 +130,9 @@ def test_actions_and_what_they_run():
+  -    imp = [tui.Row("opencode:ses_x", ["x"], "x", "opencode")]
+  +    imp = [tui.Row("opencode:ses_x", ["x"], "x", "opencode"), tui.Row("opencode:ses_y", ["y"], "y", "opencode")]
+       assert tui.argv_for("import", imp, None, None) == [
+  -        ["import", "session", "--external-session-id", "ses_x", "--agent", "opencode"]]
+  +        ["import", "session", "--external-session-id", "ses_x,ses_y", "--agent", "opencode"]]
+   
+   
+   def test_setup_asks_for_rclone_then_for_authorization(monkeypatch, tmp_path):
+  @@ -168,11 +168,31 @@ class FakeCli:
+  +class FakeProc:
+  +    """What spawn returns in tests: runs the fake command mode and offers its output as stdout."""
+  +
+  +    def __init__(self, cli, argv):
+  +        import contextlib
+  +        import io
+  +        buf = io.StringIO()
+  +        with contextlib.redirect_stdout(buf):
+  +            self.code = cli.main(argv)
+  +        self.stdout, self.pid = iter(buf.getvalue().splitlines(keepends=True)), None
+  +
+  +    def wait(self):
+  +        return self.code
+  +
+  +    def poll(self):
+  +        return self.code
+  +
+  +
+   def _app(agents):
+       paths, _ = _index((_hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "第一個", sid="ses_1"), "## user\n表格的問題\n"),
+                         (_hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "第二個", sid="ses_2"), "## user\n別的\n"))
+       cli = FakeCli()
+  -    return tui.AgoraApp(paths, cli, agents=agents, check_setup=False), cli
+  +    app = tui.AgoraApp(paths, cli, agents=agents, check_setup=False)
+  +    app.spawn = lambda argv: FakeProc(cli, argv)
+  +    return app, cli
+   
+   
+   def _run(test):
+  @@ -308,3 +328,17 @@ def test_delete_takes_every_marked_row():
+  +
+  +
+  +
+  +def test_a_toggles_marking_every_row_shown():
+  +    app, _ = _app([])
+  +
+  +    async def go():
+  +        async with app.run_test(size=(120, 30)) as pilot:
+  +            await pilot.pause()
+  +            await pilot.press("a")
+  +            assert app.marked == {r.key for r in app.shown()} and len(app.marked) == 2
+  +            await pilot.press("a")
+  +            assert app.marked == set()
+  +    _run(go)
+  +37 -3

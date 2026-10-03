@@ -1,8 +1,0 @@
-== disable spike-git-annex via PAT ==
-rc=0
-spike-empty-check	active	367559034
-spike-git-annex	disabled_manually	367559035
-== restore enable via PAT ==
-rc=0
-spike-empty-check	active	367559034
-spike-git-annex	active	367559035

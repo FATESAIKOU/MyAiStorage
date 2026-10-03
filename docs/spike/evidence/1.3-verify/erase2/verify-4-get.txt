@@ -1,4 +1,0 @@
-get keep-annex.bin (from origin...) 
-(checksum...) ok
-(recording state in git...)
-get rc=0 ms=3463

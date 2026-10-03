@@ -1,0 +1,293 @@
+"""The opencode adapter against the real opencode and the real store.
+
+Marked integration, so `uv run pytest -q` skips it:
+    uv run pytest -q -m integration tests/integration/test_opencode_real.py
+
+Everything runs in /tmp/agora-it-opencode/proj, a throwaway git repo, so the
+user's own sessions are out of reach (spike V5: opencode scopes sessions to the
+project directory). The conversation is self-authored filler about turning a CSV
+into a Markdown table; the model is a free one.
+
+The sessions this creates are deleted by id at the end, one at a time.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+import pytest
+
+from agora.agents import base, opencode as oc
+
+# The model chain lives in the fake so the e2e uses the same one (tests/fakes is
+# not a package; the integration tests are the only importers).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fakes"))
+import opencode_noninteractive as agent  # noqa: E402  (needs the path above)
+
+pytestmark = pytest.mark.integration
+
+PROJ = Path("/tmp/agora-it-opencode/proj")
+
+# OC4: an earlier version of this file set the *real* HOME in a module-scope
+# fixture and was then overridden by conftest's autouse per-test HOME, so the
+# test body and the teardown used two different opencode databases. Now the
+# database is isolated on purpose: HOME (and the XDG_* vars) point at a folder
+# that belongs to this module and to nothing else, and teardown deletes exactly
+# the ids that were recorded. The free model needs no auth, so nothing is lost.
+
+FIRST_ASK = "把 CSV 轉成 Markdown 表格，先列三個步驟就好，不要真的動手做。"
+SECOND_ASK = "你前面在做什麼？用一句話回答。"
+
+
+#: The free models are shared, rate-limited endpoints: calls that normally take
+#: 45s have been measured taking more than seven minutes with no output at all.
+#: So each candidate model gets a generous deadline, the candidates are tried in
+#: order, and the test only skips when every one of them has failed - with the
+#: list of what was tried, because a skip nobody can explain is a test nobody
+#: trusts.
+MODEL_TIMEOUT = int(os.environ.get("AGORA_TEST_TIMEOUT", "300"))
+
+
+def ask(*args: str) -> subprocess.CompletedProcess:
+    """`opencode run` on the first candidate model that answers.
+
+    PWD is set as well as cwd: opencode picks its project from $PWD, so without
+    it the session lands in the directory the test runner was started in and the
+    later `run --session` in this project never answers (R-1).
+    """
+    env = {**os.environ, "PWD": str(PROJ)}
+    proc, model, failures = agent.ask(list(args), cwd=PROJ, timeout=MODEL_TIMEOUT,
+                                      env=env)
+    if proc is None:
+        pytest.skip(agent.skip_reason(failures))
+    print(f"[{os.path.basename(__file__)}] 用到模型：{model}", file=sys.stderr)
+    return proc
+
+
+def raw_of(session_id: str) -> bytes:
+    """Export through a file, the way the adapter does (spike V1: never a pipe)."""
+    out = Path("/tmp/agora-it-opencode/raw.json")
+    with open(out, "wb") as handle:
+        proc = subprocess.run(["opencode", "export", session_id], cwd=str(PROJ),
+                              stdout=handle, stderr=subprocess.DEVNULL,
+                              env={**os.environ, "PWD": str(PROJ)})
+    assert proc.returncode == 0
+    return out.read_bytes()
+
+
+@pytest.fixture(scope="module")
+def opencode_home(tmp_path_factory):
+    """A HOME that exists only for this module, with an empty opencode database."""
+    home = tmp_path_factory.mktemp("opencode-home")
+    return home
+
+
+@pytest.fixture
+def isolated_store(opencode_home, monkeypatch):
+    """Point this test at that HOME. Function-scoped through monkeypatch, so the
+    teardown below still sees it."""
+    monkeypatch.setenv("HOME", str(opencode_home))
+    for var in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(var, raising=False)
+    return opencode_home
+
+
+@pytest.fixture(scope="module")
+def project(opencode_home):
+    PROJ.mkdir(parents=True, exist_ok=True)
+    if not (PROJ / ".git").exists():
+        subprocess.run(["git", "init", "-q"], cwd=str(PROJ), check=True)
+    if subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(PROJ),
+                      capture_output=True).returncode != 0:
+        subprocess.run(["git", "-c", "user.email=agora@example.invalid",
+                        "-c", "user.name=agora", "commit", "-q", "--allow-empty",
+                        "-m", "init"], cwd=str(PROJ), check=True)
+    return PROJ
+
+
+@pytest.fixture
+def trash(project, isolated_store):
+    """Delete the ids this test recorded, one at a time, and nothing else.
+
+    Recording is the point: the database is this module's, so deleting by id is
+    both sufficient and impossible to overreach (design.md section 7).
+    """
+    recorded: list[str] = []
+    yield recorded
+    for session_id in sorted(set(recorded)):
+        subprocess.run(["opencode", "session", "delete", session_id],
+                       cwd=str(PROJ), env={**os.environ, "PWD": str(PROJ)},
+                       capture_output=True)
+
+
+@pytest.fixture
+def source(project, isolated_store, trash):
+    """A real session built with the free model, from self-authored filler.
+
+    It records its own id for cleanup the moment it exists, so a failure later in
+    the test still tidies up after it.
+    """
+    proc = ask("run", "--format", "json", "--title", "agora-it-source", FIRST_ASK)
+    events = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+    session_id = next(event["sessionID"] for event in events if "sessionID" in event)
+    trash.append(session_id)
+    return session_id
+
+
+def test_real_round_trip(project, source, trash, isolated_store):
+    """export -> start_native -> one real turn -> collect (design.md 5.2, 5.4)."""
+    exported = oc.ADAPTER.export(source)
+    assert exported.message_count >= 2
+    # spike V5 / R-1: the session has to belong to *this* project, or the
+    # `run --session` below is answering for a different project and hangs.
+    assert os.path.realpath(exported.dir) == os.path.realpath(PROJ), f"session 跑到別的專案去了：{exported.dir}"
+    assert exported.agent_version and exported.agent_version[0].isdigit()
+    assert exported.created_at.endswith("Z")
+    untouched = raw_of(source)
+
+    launch = oc.ADAPTER.start_native(exported.raw, project)
+    trash.append(launch.agent_session_id)
+    assert launch.before_count == exported.message_count
+    assert launch.cwd == str(project)
+    # launch.argv is the TUI (`opencode --session <id>`); the headless form used
+    # here is `run --session <id>` on the same session id.
+    assert launch.argv[1:] == ["--session", launch.agent_session_id]
+
+    ask("run", "-s", launch.agent_session_id, "--format", "json", SECOND_ASK)
+
+    collected = oc.ADAPTER.collect(launch)
+    assert collected is not None, "the agent said something new"
+    assert collected.session_id == launch.agent_session_id
+    assert collected.message_count > launch.before_count
+    assert os.path.realpath(collected.dir) == os.path.realpath(project)
+
+    body = base.reading(oc.ADAPTER, collected.raw)
+    assert body.count("## user") >= 2  # the original ask plus the new one
+    assert "## assistant" in body
+
+    # the session we branched from is still exactly as it was (spike V1a)
+    assert raw_of(source) == untouched
+
+
+def test_real_native_round_trip(project, source, trash, isolated_store):
+    """(2) turns -> native -> start_native -> a real turn, on the real opencode.
+
+    This is the path design v5 uses for a merged or other-agent session: the
+    history is rebuilt as ordinary opencode messages, imported, and the agent
+    opens on it. So the count has to come back right and the model has to answer
+    from what it was shown.
+    """
+    exported = oc.ADAPTER.export(source)
+    turns = oc.ADAPTER.turns(exported.raw)
+    assert turns, "來源的 export 沒有任何 user/assistant 輪"
+
+    rebuilt = oc.ADAPTER.native(turns)
+    # the round trip is exact before anything touches the real opencode
+    assert oc.ADAPTER.turns(rebuilt) == turns
+    expected = len(turns)
+
+    launch = oc.ADAPTER.start_native(rebuilt, project)
+    trash.append(launch.agent_session_id)
+    assert launch.before_count == expected
+    assert launch.argv[1:] == ["--session", launch.agent_session_id]
+
+    # what opencode has now: same roles, same lines, nothing dropped
+    landed = oc.ADAPTER.export(launch.agent_session_id)
+    assert landed.message_count == expected
+    assert oc.ADAPTER.turns(landed.raw) == turns
+
+    ask("run", "-s", launch.agent_session_id, "--format", "json",
+        "你前面在做什麼？用一句話回答。")
+
+    collected = oc.ADAPTER.collect(launch)
+    assert collected is not None
+    assert collected.message_count > expected
+    # E-2: a loose check that the agent really saw the history rather than
+    # starting blank - only the rebuilt turns mention it.
+    body = base.reading(oc.ADAPTER, collected.raw)
+    assert ("CSV" in body) or ("表格" in body), \
+        "回答裡沒有前文的關鍵字，agent 可能根本沒讀到重建出來的對話"
+
+
+def test_real_reimport_is_idempotent(project, source, trash, monkeypatch, isolated_store):
+    """Importing the same transcript twice under the same id must keep every
+    message, and the adapter's post-import count check must pass.
+
+    A genuine collision cannot be staged from the adapter's own output: the id
+    salt is derived from the new session id, so two imports never share a message
+    id. That is the point of the salt. What the count check really guards is
+    opencode accepting *less* than we sent, which the fake reproduces
+    deterministically (FAKE_OPENCODE_DROP in tests/unit/test_agent_opencode.py).
+    """
+    raw = oc.ADAPTER.export(source).raw
+    expected = len(json.loads(raw)["messages"])
+    pinned = "ses_" + "A" * 16
+    trash.append(pinned)
+    monkeypatch.setattr(oc, "_session_id", lambda: pinned)
+
+    first = oc.ADAPTER.start_native(raw, project)
+    assert first.agent_session_id == pinned and first.before_count == expected
+    again = oc.ADAPTER.start_native(raw, project)
+    assert again.before_count == expected
+    assert oc.ADAPTER.export(pinned).message_count == expected
+
+
+def test_fixture_is_self_authored():
+    """Guard against a fixture that was ever copied from a real session."""
+    text = (Path(__file__).resolve().parent.parent / "fixtures" / "opencode"
+            / "oc-basic.json").read_text(encoding="utf-8")
+    for marker in ("ZZTOOLOUT", "ZZTHINK", "ZZSRCID-", "zzunknown"):
+        assert marker in text
+    assert "把 CSV 轉成 Markdown 表格" in text
+
+
+@pytest.mark.skipif(shutil.which("opencode") is None, reason="opencode is not installed")
+def test_opencode_is_the_executable_we_expect():
+    assert oc.agent_cmd("opencode") in ("opencode", os.environ.get("AGORA_OPENCODE_CMD", "opencode"))
+
+SUMMARIZE_WORKDIR = Path("/tmp/agora-it-summarize")
+
+
+def test_real_summarize_answers_and_cleans_up_after_itself(project, isolated_store,
+                                                          monkeypatch, tmp_path):
+    """summarize() on the real opencode: a reply comes back, and the session it
+    used is gone (design 5.3, v6 Y1/Y6).
+
+    The work directory is its own git repo under /tmp - never the project the rest
+    of this module uses - so a leftover summarize session cannot be mistaken for
+    something the other tests own.
+    """
+    workdir = SUMMARIZE_WORKDIR / "summarize"
+    if workdir.exists():
+        shutil.rmtree(workdir)
+    workdir.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=workdir, check=True)
+    subprocess.run(["git", "-c", "user.email=agora@example.invalid",
+                    "-c", "user.name=agora", "commit", "-q", "--allow-empty",
+                    "-m", "init"], cwd=workdir, check=True)
+    monkeypatch.setenv("AGORA_OPENCODE_MODEL", agent.PRIMARY)
+
+    prompt = ("以下是材料，請寫一段三行的要約給之後接手的人，只輸出要約本身：\n"
+              "ZZMATERIAL 我們決定用 Markdown 表格輸出；ZZMATERIAL 未解決的是欄位對齊。")
+    text, model = oc.ADAPTER.summarize(prompt, workdir)
+
+    assert text.strip(), "沒有回覆"
+    assert model, "拿不到這次用的模型名稱（design 5.3 的 generated.by 要用）"
+    # Y1: the material reached the model even though every tool is denied
+    assert any(word in text for word in ("Markdown", "表格", "欄位")), \
+        f"回答裡沒有材料才有的字：{text[:120]}"
+
+    # the session this run made is deleted, and so are the files it left behind
+    left = subprocess.run(["opencode", "session", "list", "--format", "json"],
+                          cwd=str(workdir), env={**os.environ, "PWD": str(workdir)},
+                          capture_output=True, text=True)
+    ids = [row["id"] for row in json.loads(left.stdout or "[]")]
+    assert not ids, f"寫要約的 session 沒刪掉：{ids}"
+    assert list(workdir.glob("material-*")) == []
+    assert list(workdir.glob("pending-*")) == []
+    shutil.rmtree(SUMMARIZE_WORKDIR, ignore_errors=True)

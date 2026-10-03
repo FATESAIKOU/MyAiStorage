@@ -1,9 +1,0 @@
-repo=/work/f3-repo
-prefix=agora-1.4f3/
-url_file=/work/f3-repo.url
-cda04a975f86da471071ffa0587c2177a2e5a99c3196bae13e9c179a0817cfaf  big.bin
-(recording state in git...)
-   2d788c2..c41abe7  main -> main
- * [new branch]      git-annex -> git-annex
-HEAD=c41abe73b8b4d15d9fc4f18ec4c43709d9e30456
-GITANNEX_REF=a51d0562232911bc9e6283b194fcd4df1f1b82a3

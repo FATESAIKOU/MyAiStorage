@@ -1,4 +1,0 @@
-Full remote url: annex::47e51bd2-e94b-4782-bdd4-880756200a1c?encryption=none&type=rclone
-To annex::
- * [new branch]      main -> main
- * [new branch]      git-annex -> git-annex

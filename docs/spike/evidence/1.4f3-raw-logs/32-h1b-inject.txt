@@ -1,8 +1,0 @@
-== H1(b): round-3 has pushed but pending NOT recorded yet (kill between push and record) ==
-== H1(b): C injects the forged pair in this window ==
-http=200
-file_id=1TnNkxoGV3tUylPcMaoGOLpiaBOncXOWN
-http=200
-file_id=1Yeqt338U629nC_ngywTb5mFD-HkSN_st
-== now record pending (late) and see whether the injection gets laundered ==
-pin_written=/Users/fatesaikou/.local/share/aistorage-spike/work/oc14f3/pin.pending.json state=pending main=ca077e5b3bba1a46df2d0b491e00e138bfb9b9f6 git-annex=a51d0562232911bc9e6283b194fcd4df1f1b82a3

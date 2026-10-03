@@ -1,1 +1,0 @@
-trashed_bundles_scanned=40 canary_hits=0

@@ -1,7 +1,0 @@
-### A create folder a
-op=create-folder
-name=aistorage-spike-probe-a
-parent=root
-http=200
-file_id=1kAcj-CER8VRRTWoHG7GAxHMY-vsbsZ1j
-### A create file a-visible.txt (parent later)

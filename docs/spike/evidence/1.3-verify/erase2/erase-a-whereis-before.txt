@@ -1,8 +1,0 @@
-whereis keep-annex.bin (2 copies) 
-  	26193d43-92c4-42d1-be7c-7c3cc5ff7342 -- spike-e2 [here]
-  	47e51bd2-e94b-4782-bdd4-880756200a1c -- [drive]
-ok
-whereis session-1-attachment.bin (2 copies) 
-  	26193d43-92c4-42d1-be7c-7c3cc5ff7342 -- spike-e2 [here]
-  	47e51bd2-e94b-4782-bdd4-880756200a1c -- [drive]
-ok

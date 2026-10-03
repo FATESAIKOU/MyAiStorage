@@ -1,8 +1,0 @@
-total 28
-drwxr-xr-x 1 501 dialout 224 Sep 26 15:42 .
-drwx------ 1 501 dialout 416 Sep 26 15:42 ..
-drwxr-xr-x 1 501 dialout 448 Sep 26 15:42 .git
--rw-r--r-- 1 501 dialout  20 Sep 26 15:42 README.md
--rw-r--r-- 1 501 dialout 102 Sep 26 15:42 keep-annex.bin
--rw-r--r-- 1 501 dialout  36 Sep 26 15:42 session-2.txt
--rw-r--r-- 1 501 dialout  25 Sep 26 15:42 session-3.txt
