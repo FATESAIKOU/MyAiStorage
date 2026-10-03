@@ -269,7 +269,10 @@ def test_sync_leaves_a_queued_for_deletion_session_alone(env, monkeypatch, capsy
     index = store.sync(paths)
     assert index.missing_in_cloud() == []              # not "deleted on another machine"
     assert index.header(ulid) is None                  # and not back in the list
-    assert ulid in store.queued_for_trash(paths)       # still waiting to be trashed
+    # The queue itself is the uploader's half (section 3): by the time this returns it
+    # has moved the folder to the Drive trash, so nothing is left waiting.
+    assert ulid not in store.queued_for_trash(paths)
+    assert not (env / "agora" / "sessions" / ulid).exists()
 
 
 def test_push_refuses_a_session_queued_for_deletion(env, capsys):
