@@ -720,7 +720,11 @@ def _put_back(done: Path, folder: Path) -> None:
     try:
         done.rename(folder)
     except OSError:
-        shutil.rmtree(done, ignore_errors=True)
+        # G6: only a newer version in its place makes ours safe to drop (a stage that
+        # swapped in just now). Anything else - permissions and the like - keeps it
+        # set aside, where it still counts as waiting (K1) and the next uploader tries.
+        if folder.exists():
+            shutil.rmtree(done, ignore_errors=True)
 
 
 def push_outbox(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -> list[str]:

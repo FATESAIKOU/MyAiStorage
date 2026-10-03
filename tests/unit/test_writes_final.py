@@ -249,3 +249,51 @@ def test_two_imports_inside_five_minutes_list_drive_once(env, capsys, monkeypatc
     assert code == 0, err
     assert stamp.read_text() == before, \
         "五分鐘內的第二次匯入不該再列一次檔（節流記錄沒有被更新）"
+
+# --- G5: regressions that used to hang instead of fail ---------------------------
+
+
+def test_push_says_it_is_still_waiting_while_the_lock_is_held(env, capsys, monkeypatch):
+    """R7 / G5: push takes the lock without blocking so it can say why it is waiting.
+    Back to a blocking flock, that line is dead code again - this fails rather than
+    hangs: push runs in a daemon thread and everything here has a time limit."""
+    import threading
+    import time
+    from agora import cache
+
+    paths = store.Paths.from_env()
+    _, out, _ = _import(capsys)
+    monkeypatch.setattr(cache, "WAIT_SAY_EVERY", 0.3)
+    held = store.hold_upload_lock(paths)
+    assert held is not None
+    codes: list[int] = []
+    worker = threading.Thread(target=lambda: codes.append(cli.main(["push", "session", out.strip()])),
+                              daemon=True)
+    try:
+        worker.start()
+        time.sleep(1.2)
+        err = capsys.readouterr().err
+    finally:
+        held.close()
+    worker.join(timeout=30)
+    assert "還在等" in err, err
+    assert not worker.is_alive(), "放開鎖之後 push 應該在時限內結束"
+    assert codes == [0]
+
+
+def test_the_lock_is_free_after_the_background_and_after_asking_about_it(env, capsys):
+    """E2 / G5: the lock not let go used to show up only as a push waiting forever.
+    Asked directly instead: right after a background run, and right after
+    `uploader_is_running`, another descriptor can take it."""
+    from agora import background
+
+    paths = store.Paths.from_env()
+    _import(capsys)
+    background.run(paths)
+    again = store.hold_upload_lock(paths)
+    assert again is not None, "背景做完沒有放開上傳鎖"
+    again.close()
+    assert store.uploader_is_running(paths) is False
+    again = store.hold_upload_lock(paths)
+    assert again is not None, "uploader_is_running 問完沒有放開上傳鎖"
+    again.close()

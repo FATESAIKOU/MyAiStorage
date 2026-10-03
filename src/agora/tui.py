@@ -1079,6 +1079,11 @@ class AgoraApp(App):
                 note = "已經存在本機，背景上傳中"
             else:
                 note = "完成"
+        elif code == 3 and action == "delete":
+            # G4: delete stores nothing in the outbox; what waits is the Drive half, or
+            # (nothing queued) the uploads that were already there - the command says which
+            note = ("已從本機刪除；移到 Drive 垃圾桶要等之後的指令" if "移到 Drive 垃圾桶要等" in out
+                    else "已從本機刪除；背景上傳啟動失敗，outbox 要等之後的指令")
         elif code == 3:
             note = "已存進 outbox，之後的指令會自動再送"
         else:

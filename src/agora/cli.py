@@ -843,7 +843,9 @@ def cmd_delete(args, paths: store.Paths) -> int:
     if state == background.FAILED:
         # The Drive half is queued and safe, but nobody is going to do it now. Same exit
         # as an upload that did not get through, and the next command starts it again.
-        print("[agora] 背景上傳啟動失敗，移到 Drive 垃圾桶要等之後的指令", file=sys.stderr)
+        # Nothing queued means the uploader was only for the outbox (G4): say that.
+        what = "移到 Drive 垃圾桶" if queued else "outbox 的上傳"
+        print(f"[agora] 背景上傳啟動失敗，{what}要等之後的指令", file=sys.stderr)
         return EXIT_IN_OUTBOX
     return EXIT_INPUT if refused else 0
 

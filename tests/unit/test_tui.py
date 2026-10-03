@@ -2075,3 +2075,12 @@ def test_a_client_file_that_is_not_utf8_falls_back_without_saying_what_was_in_it
     assert FAKE_SECRET not in said, "the secret leaked into the window"
     assert FAKE_ID not in said
     assert "UnicodeDecodeError" not in said, "nor the exception that would have carried it"
+
+
+def test_a_delete_whose_uploader_could_not_start_does_not_say_it_was_saved_to_the_outbox():
+    """G4: exit 3 from delete is not「已存進 outbox」- nothing was stored; the Drive half
+    is what waits for a later command."""
+    said = " ".join(_result_of(_marked_app(None), 3,
+                               said=["[agora] 背景上傳啟動失敗，移到 Drive 垃圾桶要等之後的指令"]))
+    assert "已從本機刪除；移到 Drive 垃圾桶要等之後的指令" in said
+    assert "已存進 outbox" not in said

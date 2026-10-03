@@ -72,6 +72,7 @@ def search_cached(paths: store.Paths, agent_name: str, keyword: str):
 
 
 _line = store.warn
+WAIT_SAY_EVERY = 10    # seconds between「還在等」lines while push waits for the lock (R7)
 
 
 def _plan_one(session_id: str, agents: dict) -> tuple[str, str | None, Exception | None]:
@@ -269,7 +270,7 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
     while held is None:
         held = store.hold_upload_lock(paths)
         if held is None:
-            if time.monotonic() - said_at >= 10:
+            if time.monotonic() - said_at >= WAIT_SAY_EVERY:
                 _line("背景上傳中，還在等…")
                 said_at = time.monotonic()
             time.sleep(0.2)

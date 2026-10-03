@@ -772,3 +772,23 @@ def test_a_version_left_aside_by_a_crash_is_kept_by_sync_and_sent(env, monkeypat
     assert "第二版" in (env / "agora" / "sessions" / ulid / "session.md").read_text(encoding="utf-8")
     assert store.outbox_count(paths) == 0
     assert not (paths.outbox / f".done-{ulid}").exists()
+
+
+def test_a_set_aside_version_that_cannot_be_put_back_is_kept(env, monkeypatch):
+    """G6: `.done-X` that will not rename back, with no newer `X` in its place, stays
+    where it is (still waiting, K1) instead of being deleted - it may be the only copy."""
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "唯一的一份")
+    done = paths.outbox / f".done-{ulid}"
+    (paths.outbox / ulid).rename(done)
+    real = Path.rename
+
+    def refuse(self, target):
+        if self == done:
+            raise PermissionError("不讓改名")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", refuse)
+    store._put_back(done, paths.outbox / ulid)
+    assert (done / "session.md").is_file()
+    assert ulid in store.waiting_ulids(paths)

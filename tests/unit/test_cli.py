@@ -1454,3 +1454,19 @@ def test_delete_drops_a_version_an_uploader_left_aside_too(env, capsys, monkeypa
     assert code == 0, err
     assert not aside.exists()
     assert store.outbox_count(paths) == 0
+
+
+def test_a_delete_with_nothing_queued_does_not_blame_the_trash_when_the_uploader_fails(env, capsys, monkeypatch):
+    """G4: a cloud-lost session queues nothing; the uploader was started for what was
+    already in the outbox, so that is what has to wait - not a「移到 Drive 垃圾桶」."""
+    from agora import background
+    a, ulid = _lost_in_the_cloud(capsys)
+    paths = store.Paths.from_env()
+    (paths.outbox / "01AAAAAAAAAAAAAAAAAAAAAAAA").mkdir(parents=True)   # something else waiting
+    monkeypatch.setattr(background, "start", lambda p=None: background.FAILED)
+
+    code, _, err = run(capsys, "delete", "session", a, "--yes")
+
+    assert code == 3, err
+    assert "背景上傳啟動失敗，outbox 的上傳要等之後的指令" in err
+    assert "垃圾桶" not in err
