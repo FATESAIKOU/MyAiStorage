@@ -327,7 +327,7 @@ def test_an_edit_deleted_elsewhere_is_kept_as_a_session_of_its_own(env, monkeypa
                                      # go up before the other machine deletes it -
                                      # waiting here would deadlock against our own lock
     code, _, err = run_cli(env, "edit", "session", agora_id,
-                           "--header", f"title={MARK} 改過}")
+                           "--header", f"title={MARK} 改過")
     assert code == 0, err
     assert store.outbox_ulids(paths) == {ulid}, "還沒上傳的新版本在 outbox"
 
