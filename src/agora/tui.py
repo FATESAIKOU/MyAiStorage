@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from functools import partial
 from datetime import datetime
 from pathlib import Path
 
@@ -158,35 +159,119 @@ def filtered(rows: list[Row], text: str, matches: set[str] | None = None) -> lis
 # --- previews: what is stored, never generated -------------------------------
 # A preview is (pinned, history): a pinned line on top, and the history as Markdown.
 
-def agora_preview(paths: store.Paths, index: store.Index, agora_id: str) -> tuple[str, str]:
-    """The whole session.md text (the reading version, or a merge's sections), with dir and tags pinned."""
+PREVIEW_CHUNK = 30 << 10     # about 30 KB a step; a session.md is 340 KB to 3 MB (T6)
+PREVIEW_IDLE = 0.15          # the cursor has to rest this long before anything is read
+
+
+def read_tail(path: Path, before: int = 0, size: int = PREVIEW_CHUNK) -> tuple[str, int]:
+    """(text, bytes still before it): the last `size` bytes of `path`, cut on a boundary.
+
+    seek, never the whole file - only the end of a conversation is ever on screen. The cut
+    lands just after a `## ` heading or a blank line, so a message is not cut in half, and
+    both ends of what is kept are then just after a newline, so a multibyte character
+    cannot be broken either.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            end = max(0, f.tell() - before)
+            start = max(0, end - size)
+            f.seek(start)
+            raw = f.read(end - start)
+    except OSError:
+        return "", 0
+    if start:
+        cut = min((i for i in (raw.find(b"\n## "), raw.find(b"\n\n")) if i > 0), default=0)
+        raw, start = raw[cut + 1:], start + cut + 1
+    return raw.decode("utf-8", "ignore"), start
+
+
+def _no_header(text: str) -> str:
+    """The YAML front matter is metadata, not conversation, so it is not previewed."""
+    if not text.startswith("---"):
+        return text
+    end = text.find("\n---", 3)
+    return text[text.find("\n", end + 1) + 1:] if 0 <= end <= PREVIEW_CHUNK else text
+
+
+class Preview:
+    """One row's preview: the text read so far, and how much of the file is left above it.
+
+    Only what was read is rendered (T6). The first step is the tail; every time the pane
+    reaches its top one more step is read and put above it.
+    """
+
+    def __init__(self, path: Path | None, pinned: str = "", text: str = ""):
+        self.path, self.pinned, self.text, self.before = path, pinned, text, 0
+
+    def step(self) -> str:
+        """Read one more step - the tail first, the step above after that.
+
+        Empty when there is nothing left, which is how the caller knows the hint can go.
+        """
+        if self.path is None or not self.path.is_file():
+            return ""
+        text, left = read_tail(self.path, self.before)
+        self.before = left
+        if not text:
+            return ""
+        step = _no_header(text).strip("\n")
+        self.text = f"{step}\n{self.text}" if self.text else step    # an earlier one goes above
+        return text
+
+    def more(self) -> bool:
+        """Whether anything above is still unread."""
+        return self.before > 0
+
+    def hint(self) -> str:
+        """The line that says there is more above - gone once it is all here (T6)."""
+        return f"↑ 往上捲載入更早的內容（還有約 {max(1, round(self.before / 1024))} KB）" \
+            if self.more() else ""
+
+
+class PreviewArea(VerticalScroll):
+    """The preview pane: reaching its top asks for the part above (T6)."""
+
+    def watch_scroll_y(self, above: float, here: float) -> None:
+        super().watch_scroll_y(above, here)      # the container's own: scrollbar, refresh
+        if above > 0 and here == 0 and self.is_attached:
+            self.app.load_earlier()
+
+
+def agora_preview(paths: store.Paths, index: store.Index, agora_id: str) -> Preview:
+    """This session's preview: the tail of its session.md, dir and tags pinned above."""
     ulid = agora_id.split(":", 1)[1]
     hdr = index.header(ulid) or {}
-    try:
-        _, body = h.split_document((paths.mirror / ulid / "session.md").read_text(encoding="utf-8"))
-    except (OSError, h.HeaderError):
-        body = ""
     pinned = (f"dir {(h.agora_of(hdr).get('source') or {}).get('dir') or '—'}   "
               f"tags {', '.join(map(str, hdr.get('tags') or [])) or '—'}")
-    return pinned, body.strip()
+    preview = Preview(paths.mirror / ulid / "session.md", pinned)
+    preview.step()
+    return preview
 
 
 def import_preview(agent, session_id: str, full: bool = False, paths: store.Paths | None = None,
-                   updated: str | None = None) -> tuple[str, str]:
-    """The last message; with `full`, the whole conversation as its reading version, kept in the cache (5.10)."""
+                   updated: str | None = None) -> Preview:
+    """The last message at once; with `full`, the tail of the reading version, kept in the
+    cache (5.10). Same rule as the agora side: read a step, not the whole thing (T6)."""
     from agora.agents.base import reading
     try:
         if full:
-            text = (cache.local_reading(paths, agent, session_id, updated) if paths
-                    else reading(agent, agent.export(session_id).raw))
-            return "整份對話（閱讀版）", text.strip()
+            if paths is None:                     # no cache to read: the only way is all of it
+                return Preview(None, "整份對話（閱讀版）",
+                               reading(agent, agent.export(session_id).raw).strip())
+            path = cache.reading_path(paths, agent, session_id)
+            if not path.is_file():
+                cache.local_reading(paths, agent, session_id, updated)   # builds it, once
+            preview = Preview(path, "整份對話（閱讀版）")
+            preview.step()
+            return preview
         last = agent.last_message(session_id)
     except Exception:            # a preview must never take the screen down
-        return "讀不到這個 session", ""
+        return Preview(None, "讀不到這個 session")
     if not last:
-        return "", ""
+        return Preview(None)
     role, text = last
-    return f"最後一則（{role}），整份對話載入中…", f"## {role}\n{text}"
+    return Preview(None, f"最後一則（{role}），整份對話載入中…", f"## {role}\n{text}")
 
 
 def argv_for(action: str, rows: list[Row], agent: str | None, workdir: str | None) -> list[list[str]]:
@@ -675,9 +760,10 @@ class AgoraApp(App):
         self.tab, self.text, self.content = "agora", "", False      # content: search the conversations
         self.matches: dict[str, set[str] | None] = {"agora": None, "import": None}
         self.marked: set[str] = set()
-        self.cache: dict[str, tuple[str, str]] = {}
+        self.cache: dict[str, Preview] = {}
         self.status = ""
         self._stopped = False        # an Esc went through, whatever the exit code says
+        self._timer = None                     # the pending "the cursor came to rest" timer
         self._groups: set[int] = set()   # process groups an action started
 
     def compose(self) -> ComposeResult:
@@ -686,8 +772,9 @@ class AgoraApp(App):
             with Vertical(id="left"):
                 yield DataTable(id="table", cursor_type="row", zebra_stripes=False,
                                 cursor_foreground_priority="renderable")   # the red bar and agent colours stay
-            with VerticalScroll(id="right"):
+            with PreviewArea(id="right"):
                 yield Static(id="pinned")
+                yield Static(id="hint")
                 yield Static(id="history")
         yield Static(id="keys")
         with Horizontal(id="filterbar"):
@@ -847,20 +934,37 @@ class AgoraApp(App):
 
     # -- preview ---------------------------------------------------------------
 
+    def on_unmount(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()          # a pending preview must not fire into a dead app
+
     def preview(self) -> None:
+        """Read the tail for the row under the cursor - and only once it has come to rest.
+
+        Moving up and down a list must not read or lay out anything per keystroke: a
+        whole session.md is up to 3 MB and rendering all of it took 0.72 s (T6).
+        """
+        if self._timer is not None:
+            self._timer.stop()                 # a moving cursor reads nothing (T6)
+        self._timer = self.set_timer(PREVIEW_IDLE, self.settled)
+
+    def settled(self) -> None:
+        try:
+            self.query_one("#table", DataTable)
+        except Exception:
+            return                   # the app is going away; a preview is not worth a crash
         row = self.current()
         if row is None:
-            self.put_preview("", "")
-            return
-        if row.key in self.cache:
-            self.put_preview(*self.cache[row.key])
+            self.put_preview(Preview(None))
+        elif row.key in self.cache:
+            self.put_preview(self.cache[row.key])
         elif self.tab == "agora":
             self.cache[row.key] = agora_preview(self.paths, self.index, row.key)
-            self.put_preview(*self.cache[row.key])
-        else:                    # the last message at once, the whole thing when it is read (feedback 3)
+            self.put_preview(self.cache[row.key])
+        else:                    # the last message at once, the reading version when it is read
             agent = next((a for a in self.agents if a.name == row.agent), None)
             if agent:
-                self.put_preview(*import_preview(agent, row.key.split(":", 1)[1]))
+                self.put_preview(import_preview(agent, row.key.split(":", 1)[1]))
                 self.load_full(agent, row.key, row.updated)
 
     @work(thread=True, exclusive=True, group="preview")
@@ -868,17 +972,33 @@ class AgoraApp(App):
         result = import_preview(agent, key.split(":", 1)[1], True, self.paths, updated)
         self.call_from_thread(self.loaded, key, result)
 
-    def loaded(self, key: str, result: tuple[str, str]) -> None:
+    def loaded(self, key: str, result: Preview) -> None:
         self.cache[key] = result
         row = self.current()
         if row and row.key == key:
-            self.put_preview(*result)
+            self.put_preview(result)
 
-    def put_preview(self, pinned: str, history: str) -> None:
-        self.query_one("#pinned", Static).update(pinned)
-        # Rendered once by rich and then only scrolled, so a long history scrolls smoothly (feedback 4, 5).
-        self.query_one("#history", Static).update(Markdown(history) if history else "")
-        self.call_after_refresh(self.query_one("#right", VerticalScroll).scroll_end, animate=False)
+    def load_earlier(self) -> None:
+        """At the top of the pane: one more step above, and stay on the line we were on."""
+        preview = self.cache.get(self.current().key) if self.current() else None
+        if preview is None or not preview.step():
+            return                              # nothing left above, or not ours to read
+        lines = len(preview.text.splitlines())
+        pane = self.query_one("#right", PreviewArea)
+        keep = pane.scroll_offset.y
+        self.query_one("#hint", Static).update(preview.hint())
+        self.query_one("#history", Static).update(Markdown(preview.text))
+        # The text grew above, so the line the reader was on moved down by exactly that
+        # many lines: put it back under their eyes.
+        self.call_after_refresh(partial(pane.scroll_to, y=keep + lines, animate=False))
+
+    def put_preview(self, preview: Preview) -> None:
+        self.query_one("#pinned", Static).update(preview.pinned)
+        self.query_one("#hint", Static).update(preview.hint())
+        # Rendered once by rich and then only scrolled, so a long history scrolls smoothly
+        # (feedback 4, 5). Only what has been read is ever handed to it (T6).
+        self.query_one("#history", Static).update(Markdown(preview.text) if preview.text else "")
+        self.call_after_refresh(self.query_one("#right", PreviewArea).scroll_end, animate=False)
 
     @on(DataTable.RowHighlighted)
     def moved(self) -> None:

@@ -36,8 +36,13 @@ def _stamp(updated_at: str | None) -> float | None:
 
 def is_fresh(paths: store.Paths, agent_name: str, session_id: str, updated_at: str | None) -> bool:
     """Whether the cached full text is there and not older than the session."""
-    path, when = paths.reading / agent_name / f"{session_id}.md", _stamp(updated_at)
+    path, when = reading_path(paths, agent_name, session_id), _stamp(updated_at)
     return path.exists() and (when is None or path.stat().st_mtime >= when)
+
+
+def reading_path(paths: store.Paths, agent, session_id: str) -> Path:
+    """Where an agent session's reading version is kept - the path, without building it."""
+    return paths.reading / getattr(agent, "name", agent) / f"{session_id}.md"
 
 
 def local_reading(paths: store.Paths, agent, session_id: str, updated_at: str | None = None) -> str:

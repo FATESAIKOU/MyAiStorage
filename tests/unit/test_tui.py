@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import os
+import pathlib
 import signal
 import subprocess
 import sys
@@ -17,7 +18,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from agora import header as h
-from agora import store, tui
+from agora import cache, store, tui
 from agora.agents.base import Exported, Listed
 
 
@@ -121,18 +122,19 @@ def test_filter_by_words_or_by_content_matches():
     assert [r.key for r in tui.filtered(rows, "", {"agora:c"})] == ["agora:c"]
 
 
-def test_previews_show_the_whole_history_and_never_fail():
+def test_previews_show_what_was_read_and_never_fail():
     normal = _hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "一般")
     paths, index = _index((normal, "## user\n第一句\n\n## assistant\n最後的回答\n"))
-    pinned, history = tui.agora_preview(paths, index, normal["id"])
-    assert "dir /tmp/p" in pinned and "tags 驗收" in pinned
-    assert history.startswith("## user") and history.endswith("最後的回答")
-    pinned, history = tui.import_preview(FakeAgent("claude", [], ("assistant", "好")), "s")
-    assert pinned.startswith("最後一則（assistant）") and history == "## assistant\n好"
-    assert tui.import_preview(FakeAgent("claude", [], None), "s") == ("", "")
-    assert tui.import_preview(FakeAgent("claude", [], "boom"), "s")[1] == ""
-    pinned, history = tui.import_preview(FakeAgent("claude", [], texts={"s": ["問題", "回答"]}), "s", full=True)
-    assert "## user\n問題" in history and history.endswith("回答")
+    preview = tui.agora_preview(paths, index, normal["id"])
+    assert "dir /tmp/p" in preview.pinned and "tags 驗收" in preview.pinned
+    assert preview.text.endswith("最後的回答") and "第一句" in preview.text
+    assert preview.more() is False and preview.hint() == ""      # a short file is all here
+    one = tui.import_preview(FakeAgent("claude", [], ("assistant", "好")), "s")
+    assert one.pinned.startswith("最後一則（assistant）") and one.text == "## assistant\n好"
+    assert tui.import_preview(FakeAgent("claude", [], None), "s").text == ""
+    assert tui.import_preview(FakeAgent("claude", [], "boom"), "s").text == ""
+    whole = tui.import_preview(FakeAgent("claude", [], texts={"s": ["問題", "回答"]}), "s", full=True)
+    assert "問題" in whole.text and whole.text.endswith("回答")
 
 
 def test_actions_and_what_they_run():
@@ -2085,3 +2087,123 @@ def test_a_delete_whose_uploader_could_not_start_does_not_say_it_was_saved_to_th
                                said=["[agora] 背景上傳啟動失敗，移到 Drive 垃圾桶要等之後的指令"]))
     assert "已從本機刪除；移到 Drive 垃圾桶要等之後的指令" in said
     assert "已存進 outbox" not in said
+
+
+# --- T6: the preview reads a step, not the file ---------------------------------
+
+
+def _big_body(mb: int = 3) -> str:
+    """A few MB of conversation, written here. The end of it is what is on screen, so it
+    has to end mid-file, not at a message boundary (T6)."""
+    one = "## user\n" + "話" * 3000 + "\n\n## assistant\n" + "答" * 3000 + "\n\n"
+    return one * ((mb * 1024 * 1024) // len(one)) + "## user\n最後一則\n"
+
+
+def _big_session(mb: int = 3) -> tuple[store.Paths, store.Index, dict, str]:
+    hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
+    body = _big_body(mb)
+    paths, index = _index((hdr, body))
+    return paths, index, hdr, body
+
+
+def test_reading_the_preview_never_reads_the_whole_file(monkeypatch):
+    """T6: 3 MB, and only the last step of it is ever in hand. The old code called
+    `read_text` on the whole session.md and rendered all of it (0.72 s a move)."""
+    paths, index, hdr, body = _big_session()
+    assert len(body.encode("utf-8")) > 2 << 20
+
+    def boom(*a, **kw):
+        raise AssertionError("the preview must seek, not read the file")
+    monkeypatch.setattr(pathlib.Path, "read_text", boom)
+
+    preview = tui.agora_preview(paths, index, hdr["id"])
+    assert len(preview.text.encode("utf-8")) <= tui.PREVIEW_CHUNK
+    assert preview.text.endswith("最後一則")            # the end of the conversation
+    assert preview.more() and "還有約" in preview.hint()
+
+
+def test_a_step_is_cut_on_a_boundary_and_breaks_no_character():
+    """T6: a step starts at a `## ` heading or after a blank line, and never inside a
+    multibyte character - a broken one would show as a replacement character."""
+    paths, index, hdr, _ = _big_session()
+    preview = tui.agora_preview(paths, index, hdr["id"])
+    assert preview.text.startswith("## ")
+    assert "\ufffd" not in preview.text and preview.text == preview.text.strip("\ufffd")
+    earlier = preview.step()                      # the step above
+    assert earlier and preview.text.startswith("## ")
+    assert "\ufffd" not in preview.text
+    assert preview.text.count("## ") >= 2        # both steps are on screen now
+
+
+def test_scrolling_to_the_top_adds_the_step_above_and_keeps_the_line():
+    """T6: reaching the top reads one more step and puts it above, and the line the
+    reader was on stays where it is."""
+    hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
+    paths, index = _index((hdr, _big_body()))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")              # onto the row
+            await pilot.pause(0.4)                 # the cursor comes to rest
+            first = app.cache[hdr["id"]].text
+            assert app.cache[hdr["id"]].more(), "there is more above"
+            app.query_one("#right").focus()
+            for _ in range(50):                    # up to the top: it asks for the step above
+                await pilot.press("home")
+                await pilot.pause(0.05)
+                if len(app.cache[hdr["id"]].text) > len(first):
+                    break
+            assert len(app.cache[hdr["id"]].text) > len(first), "a step was added above"
+    _run(go)
+
+
+def test_a_moving_cursor_reads_nothing(monkeypatch):
+    """T6: only once the cursor has come to rest for ~150 ms. Moving through a list must
+    not read or lay out anything per keystroke."""
+    hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
+    paths, _index_ = _index((hdr, _big_body()), (_hdr("01EEEEEEEEEEEEEEEEEEEEEEEE", "小的", sid="ses_b"), "## user\nx\n"))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+    calls: list[int] = []
+    real = tui.read_tail
+
+    def counting(*a, **kw):
+        calls.append(1)
+        return real(*a, **kw)
+    monkeypatch.setattr(tui, "read_tail", counting)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            for _ in range(6):
+                await pilot.press("down")
+                await pilot.press("up")
+            assert calls == [], f"read while the cursor was moving: {len(calls)}"
+            await pilot.pause(0.5)
+            assert calls, "and once it rests, it does read"
+    _run(go)
+
+
+def test_the_import_tab_reads_the_tail_of_the_reading_version():
+    """T6: the other tab reads the same way - the tail of `reading/<agent>/<id>.md`, and
+    builds it in the background when it is not there yet."""
+    paths = store.Paths.from_env()
+    agent = FakeAgent("opencode", [], texts={"ses_big": ["問"]})
+    path = cache.reading_path(paths, agent, "ses_big")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_big_body(), encoding="utf-8")
+
+    preview = tui.import_preview(agent, "ses_big", True, paths, None)
+
+    assert preview.pinned == "整份對話（閱讀版）"
+    assert len(preview.text.encode("utf-8")) <= tui.PREVIEW_CHUNK
+    assert preview.text.endswith("最後一則") and preview.more()
+
+    # not there yet: it is built in the background, and then the same one step is read
+    other = FakeAgent("claude", [], texts={"s2": ["新問題", "新回答"]})
+    assert not cache.reading_path(paths, other, "s2").exists()
+    built = tui.import_preview(other, "s2", True, paths, None)
+    assert cache.reading_path(paths, other, "s2").is_file(), "the cache is built"
+    assert built.text.endswith("新回答") and len(built.text.encode("utf-8")) <= tui.PREVIEW_CHUNK
+    assert "新問題" in built.text or built.more()      # a short one is all here
