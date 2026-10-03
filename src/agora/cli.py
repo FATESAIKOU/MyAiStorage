@@ -746,12 +746,21 @@ def _converted_turns(seg_agent: str, seg_id: str, raw: bytes) -> list[tuple[str,
 
 
 def cmd_delete(args, paths: store.Paths) -> int:
-    """Move one or several sessions to the Drive trash (design 5.6).
+    """Delete one or several sessions locally and queue them for the Drive trash
+    (change local-first-writes, design「背景刪除」).
 
-    A session that is already gone counts as done, so a re-run after Ctrl-C
-    finishes the job instead of failing (T1 R4). Children named in the same
+    The foreground makes them disappear from this machine at once: forget_local
+    drops the index row and the mirror, the tombstone keeps a re-run from treating
+    them as unknown, the outbox entry is removed (L3: an edit that has not uploaded
+    yet does not go up first), and the ULID is placed in the trash queue for the
+    background to purge on Drive.
+
+    A session Drive does not have goes through the same local steps but does not
+    enter the queue: there is nothing to purge (design L6). A session that was
+    already deleted in an earlier run is skipped (R4). Children named in the same
     request go first; children outside it are still refused.
     """
+    from agora import background
     ids = [f"agora:{_ulid_of(i)}" for i in _split_ids(args.ids)]
     if not ids:
         raise InputError("delete 要給至少一個 session id")
@@ -783,7 +792,8 @@ def cmd_delete(args, paths: store.Paths) -> int:
     if not args.yes:
         listed = "\n".join(f"  {i}（{hdr.get('title') or '無標題'}）" for i, hdr in headers.items())
         raise InputError(f"會把這 {len(headers)} 個移到 Drive 垃圾桶：\n{listed}\n確定的話加 --yes")
-    total, drive = len(headers), store.Drive(paths)
+    total = len(headers)
+    queued = False
     left, refused, done = list(headers), [], 0
     while left:   # a child in the same request goes first, so its parents can follow
         ready = [i for i in left if not index.children(_ulid_of(i))]   # deleted ones leave the index
@@ -792,14 +802,22 @@ def cmd_delete(args, paths: store.Paths) -> int:
         for agora_id in ready:
             done += 1
             _progress("刪除", done, total)
-            if index.cloud_has(_ulid_of(agora_id)):
-                store.delete_session(paths, drive, _ulid_of(agora_id))
+            ulid = _ulid_of(agora_id)
+            # Asked before forget_local: dropping the row also drops the marker that
+            # says Drive does not have it, so afterwards every session looks present
+            # and a cloud-lost one is queued for a purge that has nothing to purge.
+            in_cloud = index.cloud_has(ulid)
+            store.forget_local(paths, ulid)
+            shutil.rmtree(paths.outbox / ulid, ignore_errors=True)
+            if in_cloud:
+                # Drive has it: queue for the background to purge (design「背景刪除」).
+                paths.trash_queue.mkdir(parents=True, exist_ok=True)
+                (paths.trash_queue / ulid).write_text("", encoding="utf-8")
+                queued = True
             else:
-                # Drive does not have it (T1 3.4): the local copy is the whole of it
-                store.forget_local(paths, _ulid_of(agora_id))
-                shutil.rmtree(paths.outbox / _ulid_of(agora_id), ignore_errors=True)
+                # Drive does not have it (L6): the local copy is the whole of it.
                 print(f"[agora] {agora_id} 雲端沒有，只刪本機這份", file=sys.stderr)
-            _remember_deleted(paths, _ulid_of(agora_id))
+            _remember_deleted(paths, ulid)
             print(agora_id)
             left.remove(agora_id)
     for agora_id in left:
@@ -807,9 +825,11 @@ def cmd_delete(args, paths: store.Paths) -> int:
         print(f"[agora] {agora_id} 有子 Session，不能刪：{children}", file=sys.stderr)
         refused.append(agora_id)
     if done:
+        if queued:
+            background.start(paths)
         more = f"，重跑會接著做剩下的 {len(left) + len(missing)} 個" if left else ""
-        print(f"[agora] 已把 {done} 個移到 Drive 垃圾桶，30 天內可以在 Drive 網頁還原{more}",
-              file=sys.stderr)
+        where = "，背景移到 Drive 垃圾桶" if queued else ""
+        print(f"[agora] 已從本機刪除 {done} 個{where}{more}", file=sys.stderr)
     return EXIT_INPUT if refused else 0
 
 

@@ -77,9 +77,21 @@ def upload_once(paths: store.Paths, drive: store.Drive) -> None:
 def process_trash_queue(paths: store.Paths, drive: store.Drive) -> None:
     """Move the queued sessions to the Drive trash (design「背景刪除」).
 
-    Empty on purpose: change local-first-writes section 3 fills it in. It is here from
-    the start so the loop, the lock and the tests are the ones section 3 will use.
+    One `purge` per ULID, and the decision is `store.delete_session`'s (S1-4, S1-4b):
+    a purge that fails does not mean the folder is gone, so a listing settles it.
+    Written out here a second time, those two rules would be two rules.
+
+    A success leaves the queue; a failure stays in it, and the very next command
+    starts this loop again (spec). One session that cannot be deleted does not hold
+    up the ones behind it.
     """
+    for ulid in sorted(store.queued_for_trash(paths)):
+        try:
+            store.delete_session(paths, drive, ulid)
+        except store.StoreError as e:
+            store.warn(f"{ulid} 移到 Drive 垃圾桶失敗，還在佇列裡等下一個指令：{e}")
+            continue
+        (paths.trash_queue / ulid).unlink(missing_ok=True)
 
 
 def _take(paths: store.Paths):

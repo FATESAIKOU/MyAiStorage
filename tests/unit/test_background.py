@@ -7,6 +7,7 @@ its hands off our terminal, and not inherit the lock a continue is holding.
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import subprocess
 import sys
@@ -334,3 +335,90 @@ def test_a_log_over_a_megabyte_keeps_only_its_tail(env):
     background._trim_log(paths)
     kept = background.log_path(paths).read_bytes()
     assert len(kept) == background.LOG_KEEP and kept.endswith(b"TAIL")
+
+# --- section 3: the trash queue (design「背景刪除」) ----------------------------
+
+
+def _queued(paths, count: int = 1) -> list[str]:
+    """`count` ULIDs on Drive, deleted here: gone locally, waiting for the trash.
+
+    All of them are staged first and uploaded in one round, so a test can queue two
+    sessions and then make one of them fail - the uploader that gets them onto Drive
+    would otherwise have purged the first one already.
+    """
+    ulids = []
+    for n in range(count):
+        folder = store.stage(paths, _header(title=f"排隊{n}"), "## user\n排隊\n", b'{"x": 1}')
+        store.remember(paths, folder)
+        ulids.append(folder.name)
+    assert background.run(paths) == 0, "the setup upload has to finish first"
+    paths.trash_queue.mkdir(parents=True, exist_ok=True)
+    for ulid in ulids:
+        store.forget_local(paths, ulid)
+        (paths.trash_queue / ulid).write_text("", encoding="utf-8")
+    return ulids
+
+
+def _purges(env: Path) -> list[str]:
+    """The ULIDs the fake was asked to purge, in order (one call per session)."""
+    out = []
+    for line in (env.parent / "calls.log").read_text(encoding="utf-8").splitlines():
+        args = json.loads(line)
+        if "purge" in args:                 # the fake logs the raw argv, --config first
+            out.append(args[args.index("purge") + 1])
+    return out
+
+
+def test_the_background_purges_each_queued_session_and_forgets_it(env):
+    paths = store.Paths.from_env()
+    first, second = _queued(paths, 2)
+
+    assert background.run(paths) == 0
+
+    assert store.queued_for_trash(paths) == set()
+    on_drive = env / "agora" / "sessions"
+    assert not (on_drive / first).exists() and not (on_drive / second).exists()
+    # one purge per session, not one per file: the Drive trash gets whole folders
+    assert sorted(_purges(env)) == sorted([f"gdrive:sessions/{first}", f"gdrive:sessions/{second}"])
+
+
+def test_a_trash_that_fails_stays_in_the_queue_for_the_next_command(env, monkeypatch, capsys):
+    """spec「背景刪除」: the uploader is started again by the very next command, so a
+    failure has to leave the ULID where it is - and has to be said out loud."""
+    paths = store.Paths.from_env()
+    (ulid,) = _queued(paths)
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", ulid)      # only this session's purge
+
+    assert background.run(paths) == 0
+    assert store.queued_for_trash(paths) == {ulid}
+    assert (env / "agora" / "sessions" / ulid).is_dir(), "still on Drive"
+    assert "垃圾桶失敗" in capsys.readouterr().err
+
+    monkeypatch.delenv("FAKE_RCLONE_FAIL")
+    assert background.run(paths) == 0
+    assert store.queued_for_trash(paths) == set()
+    assert not (env / "agora" / "sessions" / ulid).exists()
+
+
+def test_a_failed_trash_whose_folder_is_gone_counts_as_deleted(env, monkeypatch):
+    """S1-4b, kept where it was measured: rclone says "not found" for a wrong folder id
+    and for a token that cannot see anything, so a listing has to agree before we
+    believe the session is deleted."""
+    import shutil
+    paths = store.Paths.from_env()
+    (ulid,) = _queued(paths)
+    shutil.rmtree(env / "agora" / "sessions" / ulid)      # gone before the purge ran
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", ulid)
+
+    assert background.run(paths) == 0
+    assert store.queued_for_trash(paths) == set()
+
+
+def test_one_session_that_cannot_be_deleted_does_not_hold_up_the_next(env, monkeypatch):
+    paths = store.Paths.from_env()
+    stuck, after = _queued(paths, 2)
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", stuck)
+
+    assert background.run(paths) == 0
+    assert store.queued_for_trash(paths) == {stuck}
+    assert not (env / "agora" / "sessions" / after).exists(), "the one behind it still went"

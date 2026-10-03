@@ -954,7 +954,7 @@ def test_delete_several_at_once_children_first(env, capsys):  # user's call
     code, _, err = run(capsys, "delete", "session", f"{a},{m}", c)
     assert code == 1 and "這 3 個" in err                       # without --yes: the list, nothing deleted
     code, out, err = run(capsys, "delete", "session", a, m, c, "--yes")   # m goes first, then a can go
-    assert code == 0 and set(out.split()) == {a, m, c} and "已把 3 個" in err
+    assert code == 0 and set(out.split()) == {a, m, c} and "已從本機刪除 3 個" in err
     code, out, err = run(capsys, "delete", "session", b, "--yes")
     assert code == 0 and out == b
 
@@ -1244,6 +1244,83 @@ def test_delete_of_one_the_cloud_lost_removes_only_the_local_copy(env, capsys):
     code, out, err = run(capsys, "delete", "session", a, "--yes")
     assert code == 0 and out.strip() == a and "只刪本機這份" in err
     assert store.Index(store.Paths.from_env()).header(ulid) is None
+
+
+def test_a_deleted_session_is_queued_for_the_trash_and_the_command_returns(env, capsys, monkeypatch):
+    """3.1 / 4.2: the foreground makes it disappear here and hands the Drive half to the
+    background. The command is done when the session is safe locally - it does not wait
+    for the purge, because that is the whole point of the queue."""
+    from agora import background
+    _, sid, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = sid.split(":")[1]
+    started = []
+    monkeypatch.setattr(background, "start", lambda paths=None: started.append(1) or background.STARTED)
+
+    code, out, err = run(capsys, "delete", "session", sid, "--yes")
+
+    assert code == 0 and out == sid and "背景移到 Drive 垃圾桶" in err
+    assert store.queued_for_trash(paths) == {ulid}, "the Drive half is still to do"
+    assert started, "and something has to go and do it"
+    # still on Drive: this command did not wait for that part
+    assert (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid).is_dir()
+
+
+def test_a_cloud_lost_session_is_not_queued_and_starts_nothing(env, capsys, monkeypatch):
+    """L6: there is nothing on Drive to purge, so the queue stays empty - and a uploader
+    started for an empty queue is a process that has nothing to do."""
+    from agora import background
+    a, ulid = _lost_in_the_cloud(capsys)
+    started = []
+    monkeypatch.setattr(background, "start", lambda paths=None: started.append(1) or background.STARTED)
+
+    code, _, err = run(capsys, "delete", "session", a, "--yes")
+
+    assert code == 0 and "雲端沒有，只刪本機這份" in err
+    assert store.queued_for_trash(store.Paths.from_env()) == set()
+    assert not started
+
+
+def test_a_session_deleted_before_its_upload_never_goes_up(env, capsys, monkeypatch):
+    """L3 / 3.4: an edit that has not reached Drive yet is dropped on the way out, not
+    sent first - otherwise deleting would upload the very thing being deleted.
+
+    The uploader is stubbed out, so what this checks is the foreground's own promise:
+    the entry is gone before anything could have been started."""
+    from agora import background
+    monkeypatch.setattr(background, "start", lambda paths=None: background.STARTED)
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")        # the import cannot go up
+    _, sid, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = sid.split(":")[1]
+    assert ulid in store.outbox_ulids(paths), "the setup has to leave it waiting"
+    monkeypatch.delenv("FAKE_RCLONE_FAIL")
+
+    code, _, _ = run(capsys, "delete", "session", sid, "--yes")
+
+    assert code == 0
+    assert ulid not in store.outbox_ulids(paths)
+    assert not (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid).exists()
+
+
+def test_pull_refuses_a_session_queued_for_deletion(env, capsys):
+    """3.3 / review S3: refused has to be counted as refused. pull counts what it handled
+    as done, so saying the line and returning would end with「拉下 1 個」and exit 0 - the
+    same thing push would have reported as a failure."""
+    from agora import cache
+    _, sid, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = sid.split(":")[1]
+    store.forget_local(paths, ulid)
+    paths.trash_queue.mkdir(parents=True, exist_ok=True)
+    (paths.trash_queue / ulid).write_text("", encoding="utf-8")
+    capsys.readouterr()
+
+    done, failed = cache.pull(paths, [ulid], {})
+
+    assert (done, failed) == (0, 1)
+    assert "正在刪除，不能 pull" in capsys.readouterr().err
+    assert store.Index(paths).header(ulid) is None, "and it did not come back"
 
 
 def test_a_child_the_cloud_lost_does_not_make_import_branch(env, capsys):

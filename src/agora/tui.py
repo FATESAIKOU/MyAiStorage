@@ -959,10 +959,16 @@ class AgoraApp(App):
         # same instant, and a -9 from the OOM killer is not an interruption. What we
         # know is that we sent SIGINT to a group that was still running.
         stopped = bool(self._stopped or code == 130)
+        action = argv[0] if argv else ""
         if stopped:
             note = "已中斷；重跑同一個動作會接著做"
         elif code == 0:
-            note = "完成"
+            if action == "delete":
+                note = "已從本機刪除，背景移到 Drive 垃圾桶"
+            elif action in ("import", "merge"):
+                note = "已經存在本機，背景上傳中"
+            else:
+                note = "完成"
         elif code == 3:
             note = "已存進 outbox，之後的指令會自動再送"
         else:

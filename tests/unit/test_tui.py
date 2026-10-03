@@ -1692,7 +1692,7 @@ def test_the_bar_counts_what_is_finished_and_fills_only_on_a_clean_exit():   # Q
             assert progress() == (2, 3)              # the third started, two are done
             proc.done.set()                           # and now it exits cleanly
             await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
-            assert "完成" in " ".join(str(app.screen.lines).split())
+            assert "已從本機刪除" in " ".join(str(app.screen.lines).split())
     _run(go)
 
 
@@ -1708,7 +1708,7 @@ def test_the_status_line_is_empty_after_the_result_window_closes():   # Q4
             await pilot.pause()
             await pilot.press("down", "enter")
             await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
-            assert "完成" in " ".join(str(app.screen.lines).split())     # it is in the window
+            assert "已從本機刪除" in " ".join(str(app.screen.lines).split())   # it is in the window
             await pilot.press("space")
             await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
             assert str(app.query_one("#msg").render()) == ""
@@ -1718,20 +1718,26 @@ def test_the_status_line_is_empty_after_the_result_window_closes():   # Q4
 # --- the result window has to say what the exit code means (review T2-final) ---
 
 
-def _result_of(app, code, *, mark_one=False):
-    """Run one delete that exits `code`, and hand back what the result window said."""
+def _result_of(app, code, *, mark_one=False, action="delete"):
+    """Run one `action` that exits `code`, and hand back what the result window said."""
     lines: list[str] = []
+    key = {"delete": "d", "pull": "P"}.get(action)
 
     async def go():
-        proc = FakeProc(lines=["[agora] 刪除 1/1"], code=code)
+        proc = FakeProc(lines=[f"[agora] {action} 1/1"], code=code)
         app.spawn, _ = _spawn(proc)
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             if mark_one:
                 await pilot.press("space")
-            await pilot.press("d")
-            await pilot.pause()
-            await pilot.press("down", "enter")
+            if action == "import":       # Enter on the import tab is 匯入; elsewhere it is 接續
+                await pilot.press("tab")
+                await pilot.pause()
+                await pilot.press("enter")
+            else:
+                await pilot.press(key)
+                await pilot.pause()
+                await pilot.press("down", "enter")
             await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
             lines.append(" ".join(str(line) for line in app.screen.lines))
     _run(go)
@@ -1739,8 +1745,8 @@ def _result_of(app, code, *, mark_one=False):
 
 
 def test_the_result_window_says_a_command_that_worked():
-    """exit 0."""
-    assert "完成" in " ".join(_result_of(_marked_app(None), 0))
+    """exit 0, for an action with nothing to send afterwards."""
+    assert "完成" in " ".join(_result_of(_marked_app(None), 0, action="pull"))
 
 
 def test_the_result_window_says_some_of_it_failed():
@@ -1792,3 +1798,48 @@ def test_the_progress_bar_walks_through_the_middle_values():
             seen.append(progress())
     _run(go)
     assert seen == [(0, 3), (1, 3), (2, 3)]              # it walked, and stopped short of full
+
+
+# --- what the background is doing, said where the user is looking (4.1) --------
+
+
+def test_the_result_window_says_the_drive_half_is_on_its_way():
+    """4.1: delete finished here; Drive is somebody else's turn now."""
+    said = " ".join(_result_of(_marked_app(None), 0))
+    assert "已從本機刪除，背景移到 Drive 垃圾桶" in said
+    assert "已存進 outbox" not in said, "nothing is waiting in the outbox"
+
+
+def _after_one_import(code=0) -> str:
+    """Import the one session the fake agent has, and hand back what the window said."""
+    agent = FakeAgent("opencode", [Listed("s1", "/tmp/p", "甲", None)], texts={"s1": ["問"]})
+    app = tui.AgoraApp(store.Paths.from_env(), FakeCli(), agents=[agent], check_setup=False)
+    app.spawn, _ = _spawn(FakeProc(lines=["[agora] 匯入 1/1"], code=code))
+    said: list[str] = []
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("tab")                       # the import tab
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            said.append(" ".join(str(line) for line in app.screen.lines))
+    _run(go)
+    return " ".join(said)
+
+
+def test_the_result_window_says_an_import_is_safe_here():
+    """4.1: the same for the other direction - the session is whole on this machine and
+    going up, which is not the same as "it is on Drive"."""
+    said = _after_one_import()
+    assert "已經存在本機，背景上傳中" in said
+    assert "已存進 outbox" not in said
+
+
+def test_only_a_failed_start_still_says_the_outbox():
+    """4.1: exit 3 is the one case where a background could not start, so it is the one
+    case that still means「已存進 outbox」."""
+    said = _after_one_import(code=3)
+    assert "已存進 outbox" in said
+    assert "背景上傳中" not in said
