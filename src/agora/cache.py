@@ -195,8 +195,9 @@ def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
                 remote: dict | None, ulid: str, not_exist_delete: bool) -> None:
     """One `agora:` id from Drive, into the mirror and the index."""
     if ulid in store.queued_for_trash(paths):
-        _line(f"{ulid} 正在刪除，不能 pull")
-        return
+        # raised, not just said: pull counts what it refused as done and would end
+        # with「拉下 1 個」and exit 0 (review S3)
+        raise store.StoreError(f"{ulid} 正在刪除，不能 pull")
     if ulid not in (remote or {}):
         if not not_exist_delete:
             _absent(paths, ulid, "本機的不動")
