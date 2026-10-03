@@ -8,6 +8,9 @@
 - 例外有兩項，都是 review 列出、順手修掉的：
   - B1：claude 讀到看不懂的 `AGORA_SUMMARIZE_TIMEOUT` 時會丟 ValueError，改成和 opencode 一樣退回預設值；
   - B3：opencode 的比對改用 `store.normalize`，和索引一致。
+- review T4／T4-sec1 實測到的另外兩個小差異，接受，不改回：
+  - opencode 的逾時環境變數現在接受小數（例如 `1.5`）；
+  - claude export 的標題來自多個內容區塊時，用換行接起來。
 - **不做 O1**，保留「export 找不到時回到專案目錄重試」這個保險。這是 PM 的預設，使用者沒有另外說。
 - 做完量行數，由 PM 定新的目標。
 
