@@ -6,7 +6,7 @@
 
 | 編號 | 標題 | 狀態 | 負責 | 備註 |
 |---|---|---|---|---|
-| T8 | 測試的小工具在沒有隔離時拒絕執行 → [需求單](T8-test-isolation-guard.md) | 進行中 | impl2 | 10-04 00:28 impl1 的診斷讀到正式索引：約 8 筆真實 Session 的標題與內文開頭進了外部模型；假 Session 寫進正式鏡像（PM 已清）。要告訴使用者 |
+| T8 | 測試的小工具在沒有隔離時拒絕執行 → [需求單](T8-test-isolation-guard.md) | **完成（10-04）**：b99ff85；PM 實測沒有隔離時 import 測試檔會被擋下、正式目錄沒被碰 | impl2 | 10-04 00:28 impl1 的診斷讀到正式索引：約 8 筆真實 Session 的標題與內文開頭進了外部模型；假 Session 寫進正式鏡像（PM 已清）。要告訴使用者 |
 | T7 | 驗收時記下的四個小問題 → [需求單](T7-acceptance-findings.md) | **完成（10-04）**：F3 078dd07＋f019167＋feb7bed、F1／F2／F4 93bab3b；review T7 確認，Q3～Q5 等 Low 留到之後 | impl2、impl1 | 使用者 10-04 驗收通過 |
 | T6 | 預覽只讀、只排需要的那一段（兩個分頁）→ [需求單](T6-lazy-preview.md) | **完成（10-03）**：0ef57f4、9c74220、07ed920；review T6 確認；PM 量到 Agora 分頁每移動一格約 3 秒 → 約 0.1 秒 | impl2 | 使用者 10-03 回報 Agora 分頁上下移動很慢 |
 | T5 | 首次設定支援自己的 OAuth client、D5 文件改寫 → [需求單](T5-own-oauth-client.md) | **完成（10-03）**：fb920fb、3d2fb86、598981a；review T5、T5-sec1 確認任何讀不了的 client 檔都不會帶出 secret | impl1 | 10-03 換成自己的 client（issue #11 已關） |
@@ -24,10 +24,10 @@
 |---|---|---|
 | 1 | 清掉本機用不到的密碼與設定：`client-secret.txt`、`rclone-builtin.conf`、`rclone-own.conf`、`config.json` 的 `previous_folders` | 完成 |
 | 2 | T7（F1～F4）修好、review 審 | 完成 |
-| 3 | 完整的整合測試（e2e） | 等 2 |
-| 4 | 開 PR（agora-lite → main），**這一次使用者授權 PM 自己用 merge commit 合** | 等 3 |
-| 5 | 用合進 main 的版本在使用者的 Mac 裝新的 agora（固定一份，`~/.local/share/agora-stable/<commit>`） | 等 4 |
-| 6 | 收掉這個 worktree：PM 用 agora 把**這個 Claude Code session**（`55edd374-…`）匯入正式的 `agora/`，再用 `agora continue session <id> --agent claude --dir ~/testAI/MyAiStorage` 在原路徑接續（使用者 10-04 選的）；新的那個 session 確認 agora-lite 全部合進 main、worktree 乾淨後，移除 worktree、刪掉已合併的 agora-lite 分支（本機與 GitHub）；原路徑的其他檔案不碰 | 等 5 |
+| 3 | 完整的整合測試（e2e） | 完成：第九輪 31 passed（20 分 27 秒）；單元 560 passed |
+| 4 | 開 PR（agora-lite → main），**這一次使用者授權 PM 自己用 merge commit 合** | 完成：[PR #20](https://github.com/FATESAIKOU/MyAiStorage/pull/20) 合進 main（b174024）。注意：PR #10 當時合進去的只是 10-03 04:30 的版本，之後的工作都是這次才進 main |
+| 5 | 用合進 main 的版本在使用者的 Mac 裝新的 agora（固定一份，`~/.local/share/agora-stable/<commit>`） | 完成：`~/.local/share/agora-stable/b174024` |
+| 6 | （進行中）收掉這個 worktree：PM 用 agora 把**這個 Claude Code session**（`55edd374-…`）匯入正式的 `agora/`，再用 `agora continue session <id> --agent claude --dir ~/testAI/MyAiStorage` 在原路徑接續（使用者 10-04 選的）；新的那個 session 確認 agora-lite 全部合進 main、worktree 乾淨後，移除 worktree、刪掉已合併的 agora-lite 分支（本機與 GitHub）；原路徑的其他檔案不碰 | 等 5 |
 
 只有使用者能做的（已告知）：Google Cloud 刪舊 secret `****Of6a`；Google 帳號移除「rclone」的存取權；撤銷 GitHub fine-grained token 與 ollama-cloud API key。
 
