@@ -407,16 +407,27 @@ def mirror_one(paths: Paths, drive: Drive, index: "Index", ulid: str,
 UPDATE_MARK = ".update"      # written when the session is an existing id (review N4)
 
 
-def mark_update(folder: Path) -> None:
-    """Say that this entry overwrites a session Drive already has.
+def mark_update(folder: Path, kind: str = "") -> None:
+    """Say that this entry overwrites a session Drive already has, and what kind of write
+    it is (`continue` for one; an edit is not a relation and keeps X's own).
 
     Decided by the writer, in the foreground, because by the time an uploader sees the
     folder `remember` has already put every new session in the index - judging there
     would treat every fresh import as an update, and those are not on Drive yet, so
-    they would never be sent (review N4).
+    they would never be sent (review N4). The kind matters only if that session is gone
+    by the time we send: the edit is then saved as a session of its own, and what it is
+    depends on which command wrote it (review G2).
     """
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / UPDATE_MARK).write_text("", encoding="utf-8")
+    (folder / UPDATE_MARK).write_text(kind, encoding="utf-8")
+
+
+def update_kind(folder: Path) -> str:
+    """What the writer said it was (`""` when it did not say)."""
+    try:
+        return (folder / UPDATE_MARK).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def _is_update(folder: Path) -> bool:
@@ -440,7 +451,7 @@ def _with_files_from(drive: Drive, names: list[str], where: Path, *args: str) ->
     """One rclone call driven by a `--files-from` list, written and cleaned up here."""
     if not names:
         return
-    listing = where / f".files-from-{len(names)}.txt"
+    listing = where / f".files-from-{os.getpid()}-{len(names)}.txt"   # G1: two rounds cannot collide
     listing.write_text("\n".join(names) + "\n", encoding="utf-8")
     try:
         drive._run(*args, "--files-from", str(listing))
@@ -462,7 +473,7 @@ def _delete_batch(drive: Drive, paths: Paths, names: list[str]) -> None:
         warn(f"清掉被取代的舊原始檔失敗，下次再說：{e}")
 
 
-def upload_batch(drive: Drive, paths: Paths, warn=warn) -> list[str]:
+def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -> list[str]:
     """Send the whole outbox in a fixed number of rclone calls (spec「一批只連固定幾次 Drive」).
 
     raws first, then session.md: a reader tells a version is finished by its session.md,
@@ -471,6 +482,10 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn) -> list[str]:
     *and* Drive confirms by md5 (H1) - a version staged while we were sending stays.
 
     Returns the ULIDs still waiting, so the caller can say what did not make it.
+
+    `notices` is for the detached uploader, whose own words go to upload.log: it leaves
+    the lines a person has to see in a file for the next command (review G3). In the
+    foreground what it says reaches the terminal already, and a file would say it twice.
     """
     say = warn
     left = []
@@ -493,7 +508,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn) -> list[str]:
         gone = [u for u in updates if remote is not None and u not in remote]
         rescued = {}
         for ulid in gone:
-            rescued[ulid] = _rescue_deleted(paths, paths.outbox / ulid, ulid, say)
+            rescued[ulid] = _rescue_deleted(paths, paths.outbox / ulid, ulid, say, notices)
         entries = {u: m for u, m in entries.items() if u not in gone}
         # Y went into the outbox while we were here: this round takes it too, so a
         # foreground `push` ends with the edit in Drive rather than still waiting.
@@ -560,7 +575,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn) -> list[str]:
     return sorted(left)
 
 
-def _rescue_deleted(paths: Paths, folder: Path, ulid: str, say) -> str | None:
+def _rescue_deleted(paths: Paths, folder: Path, ulid: str, say, notices: bool = False) -> str | None:
     """N5: the session Drive no longer has - keep this edit as a session of its own.
 
     Returning the old version to that id would undo the other machine's deletion, so
@@ -568,6 +583,7 @@ def _rescue_deleted(paths: Paths, folder: Path, ulid: str, say) -> str | None:
     outbox entry goes away with it (spec「只有自己驗過的版本離開 outbox」). Returns the
     new ULID, or None when even that failed - then X stays, so nothing is lost.
     """
+    kind = update_kind(folder)   # read before the claim: the marker goes with the folder
     done = paths.outbox / f".done-{ulid}"
     try:
         folder.rename(done)      # V1: claim it before reading, like H1 does - what we
@@ -584,7 +600,11 @@ def _rescue_deleted(paths: Paths, folder: Path, ulid: str, say) -> str | None:
         _put_back(done, folder)
         return None
     new_ulid = h.new_ulid()
-    new_hdr = copy.deepcopy(hdr)          # the relation is this write's kind, kept as it is
+    new_hdr = copy.deepcopy(hdr)
+    # A continue is the one write that is a relation of its own; an edit is not, and
+    # keeps X's (spec「continue 另存的用 continue，其他沿用」, review G2)
+    if kind == "continue":
+        new_hdr["agora"]["relation"] = "continue"
     new_hdr["id"] = f"agora:{new_ulid}"
     # Y continues the line: X's own parents, then X (spec「parents 指向 X」, review V3)
     new_hdr["agora"]["parents"] = [*(h.agora_of(hdr).get("parents") or []),
@@ -600,8 +620,10 @@ def _rescue_deleted(paths: Paths, folder: Path, ulid: str, say) -> str | None:
                            # or it would only exist on Drive (P1 all over again)
     shutil.rmtree(done, ignore_errors=True)   # only the version we claimed; if an edit
                                               # landed in `folder` it stays for the next round
-    _notice(paths, f"{ulid} 已被別台刪除，這次的修改存成了 {new_ulid}")
-    say(f"{ulid} 已被別台刪除，這次的修改存成了 {new_ulid}")
+    line = f"{ulid} 已被別台刪除，這次的修改存成了 {new_ulid}"
+    if notices:
+        _notice(paths, line)
+    say(line)
     return new_ulid
 
 
@@ -660,13 +682,13 @@ def _put_back(done: Path, folder: Path) -> None:
         shutil.rmtree(done, ignore_errors=True)
 
 
-def push_outbox(drive: Drive, paths: Paths, warn=warn) -> list[str]:
+def push_outbox(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -> list[str]:
     """Send the outbox in one batch; return the ULIDs still waiting (they stay).
 
     `warn` is where the per-entry failures go when a caller wants its own sink -
     the interactive mode's waiting window, which does not see our stderr (review L5).
     """
-    return upload_batch(drive, paths, warn=warn)
+    return upload_batch(drive, paths, warn=warn, notices=notices)
 
 
 def bad_count(paths: Paths) -> int:

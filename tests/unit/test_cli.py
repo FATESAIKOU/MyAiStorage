@@ -1321,6 +1321,31 @@ def test_delete_says_exit_3_when_the_uploader_could_not_start(env, capsys, monke
     assert store.Index(paths).header(ulid) is None
 
 
+def test_a_continued_session_deleted_elsewhere_is_saved_as_a_continue(env, capsys, monkeypatch):
+    """G2: a continue that finds its session gone is saved as a session of its own, and it
+    is a `continue` - the conversation is the user's work. An edit is not a relation at
+    all, so its rescue keeps X's."""
+    _, sid, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = sid.split(":")[1]
+    env.sessions["ses_a"].append("接著做完了")
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")      # the write stays in the outbox
+    code, _, err = run(capsys, "continue", "session", sid, "--agent", "opencode", "--dir", "/tmp")
+    monkeypatch.delenv("FAKE_RCLONE_FAIL")
+    assert code == 3, err                       # it is safe here, just not on Drive yet
+    assert ulid in store.outbox_ulids(paths)
+    shutil.rmtree(Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid)
+    assert store.upload_batch(store.Drive(paths), paths) == []
+
+    kept = [p.name for p in (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions").iterdir()
+            if p.is_dir()]
+    assert ulid not in kept
+    (new_id,) = kept
+    hdr, _ = h.split_document((Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions"
+                               / new_id / "session.md").read_text(encoding="utf-8"))
+    assert h.agora_of(hdr)["relation"] == "continue"
+
+
 def test_the_next_command_says_how_many_are_waiting_for_the_drive_trash(env, capsys):
     """N10 / design L4: a purge that failed leaves the session on Drive, and the next
     command has to say so. With a real background process those lines only reach

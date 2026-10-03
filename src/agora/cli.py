@@ -134,7 +134,7 @@ def _updates(args) -> dict:
 
 
 def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None, *,
-          update: bool = False) -> tuple[str, bool]:
+          update: bool = False, kind: str = "") -> tuple[str, bool]:
     """Keep the whole session here, then let the background send it (local-first-writes).
 
     `update` says this overwrites a session Drive already has - the caller knows, and
@@ -148,7 +148,7 @@ def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None, *,
     from agora import background
     folder = store.stage(paths, hdr, body, raw)
     if update:
-        store.mark_update(folder)
+        store.mark_update(folder, kind)
     store.remember(paths, folder)
     ulid = folder.name
     state = background.start(paths)
@@ -613,8 +613,11 @@ def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
                        "author": actor, "last_modified": _now_iso()[:10]}, *sources]
     if not hdr.get("description"):
         hdr["description"] = _description(body)
+    # `kind`: a continue is the one write that is a relation of its own, and if this
+    # session is gone by the time it goes up the work is saved as a session of its own -
+    # as a continue, not as whatever X was (review G2)
     return _save(paths, _with_user(hdr, record.get("header_updates") or {}), body,
-                 exported.raw, update=same_id)
+                 exported.raw, update=same_id, kind="continue")
 
 
 def recover_pending(paths: store.Paths, *, notice_only: bool = False) -> None:

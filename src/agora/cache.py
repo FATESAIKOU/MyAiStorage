@@ -263,6 +263,12 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
     with held:
         staged = store.outbox_ulids(paths)
         left = store.push_outbox(drive, paths)   # staged writes first; those are the same sessions
+        # Anything asked for that appeared while we were sending goes in this same lock
+        # (G1): `upload_batch` works on the whole outbox, and outside the lock that is
+        # push and the background on the same outbox at once.
+        if late := [i for i in wanted if _split(i, agents)[1] not in staged
+                    and (paths.outbox / _split(i, agents)[1]).is_dir()]:
+            left = sorted(set(left) | set(store.upload_batch(drive, paths)))
     if left:
         _line(f"outbox 還有 {len(left)} 筆沒上傳成功")
     listing = store._listing_with_md5(drive)   # offline: every id here fails, and says so
@@ -281,11 +287,9 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
                 if ulid in left:
                     raise store.StoreError("還沒上傳成功，仍在 outbox")   # review S2-2
             elif (paths.outbox / ulid).is_dir():
-                # staged after our snapshot, so it goes through the same batch: it is
-                # verified against Drive before the folder goes, like every other entry
-                # (H1 - `push_one` uploaded, checked and deleted with no comparison at all)
-                if ulid in store.upload_batch(drive, paths):
-                    raise store.StoreError("還沒上傳成功，仍在 outbox")   # review S2-2
+                # sent in the same lock a moment ago, so if it is still here that round
+                # did not get through - and it was verified before it was deleted (H1)
+                raise store.StoreError("還沒上傳成功，仍在 outbox")   # review S2-2
             elif listing is None or ulid not in listing:
                 if not not_exist_upload:
                     _absent(paths, ulid, "沒有傳")

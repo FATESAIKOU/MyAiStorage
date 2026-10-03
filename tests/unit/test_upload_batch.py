@@ -155,6 +155,31 @@ def test_a_session_staged_after_push_looked_goes_up_through_the_batch(env, monke
         encoding="utf-8")
 
 
+def test_push_sends_a_late_entry_while_holding_the_upload_lock(env, monkeypatch, capsys):
+    """G1: `upload_batch` works on the whole outbox, so push running one outside the lock
+    is push and the background on the same outbox - renaming, rescuing and deleting the
+    same folders, and writing the same `--files-from` name."""
+    from agora import cache
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "本來就有的")
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    _stage_after_push_looked(paths, monkeypatch, ulid)
+    real_batch = store.upload_batch
+    held = []
+
+    def spy(drive, paths_, warn=store.warn, notices=False):
+        held.append(store.uploader_is_running(paths_))
+        return real_batch(drive, paths_, warn, notices)
+
+    monkeypatch.setattr(store, "upload_batch", spy)
+
+    cache.push(paths, [f"agora:{ulid}"], {})
+    capsys.readouterr()
+
+    assert len(held) == 2, held
+    assert all(held), f"an upload ran without the lock: {held}"
+
+
 def test_a_late_session_drive_does_not_confirm_stays_in_the_outbox(env, monkeypatch, capsys):
     """E1's other half, and the hole itself: until Drive's md5 agrees the folder stays.
     `push_one` deleted it anyway, so a version it had not verified was gone."""
@@ -203,23 +228,43 @@ def test_the_rescued_session_keeps_this_write_s_relation_and_continues_the_line(
 def test_the_next_command_says_where_the_rescued_edit_went(env, capsys):
     """V4: with a real background process the rescue line only reaches upload.log, so the
     user never learns that X is gone and the edit is now Y. The next command says it,
-    once."""
+    once. G3: only the detached uploader leaves that note - in the foreground the line
+    already reached the terminal, and a file would say it twice."""
+    import subprocess
+    import sys
+    from agora import cli
+    paths = store.Paths.from_env()
+    ulid = _deleted_on_drive(env, paths)
+    folder = store.stage(paths, _kept_header(ulid, "原本的"), "## user\n救回來的\n", b'{"v": 2}')
+    store.mark_update(folder)
+    # the detached uploader, the way a command starts it - not `run(notices=True)` by hand
+    subprocess.run([sys.executable, "-m", "agora.background"], check=True, timeout=60)
+    new_id = [p.name for p in (env / "agora" / "sessions").iterdir() if p.is_dir()][0]
+    capsys.readouterr()
+
+    argv = ["search", "session", "--filter", "text~=救回來的", "--no-sync"]
+    assert cli.main(argv) == 0
+    assert f"{ulid} 已被別台刪除，這次的修改存成了 {new_id}" in capsys.readouterr().err
+
+    cli.main(argv)          # once, not every command
+    assert "已被別台刪除" not in capsys.readouterr().err
+
+
+def test_a_rescue_in_the_foreground_is_not_said_twice(env, capsys):
+    """G3: `push` and inline both run `upload_batch` where the user can see it, so no note
+    is left for the next command to repeat."""
     from agora import cli
     paths = store.Paths.from_env()
     ulid = _deleted_on_drive(env, paths)
     folder = store.stage(paths, _kept_header(ulid, "原本的"), "## user\n救回來的\n", b'{"v": 2}')
     store.mark_update(folder)
     assert store.upload_batch(store.Drive(paths), paths) == []
-    new_id = [p.name for p in (env / "agora" / "sessions").iterdir() if p.is_dir()][0]
     capsys.readouterr()
 
-    env_argv = ["search", "session", "--filter", "text~=救回來的", "--no-sync"]
-    assert cli.main(env_argv) == 0
-    said = capsys.readouterr().err
-    assert f"{ulid} 已被別台刪除，這次的修改存成了 {new_id}" in said
-
-    cli.main(env_argv)          # once, not every command
+    assert store.take_notices(paths) == []          # said once, here
+    assert cli.main(["search", "session", "--filter", "text~=救回來的", "--no-sync"]) == 0
     assert "已被別台刪除" not in capsys.readouterr().err
+
 
 
 def test_a_sync_that_starts_the_uploader_itself_calls_nothing_a_failure(env, monkeypatch, capsys):

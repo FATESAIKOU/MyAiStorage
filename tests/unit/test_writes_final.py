@@ -55,9 +55,11 @@ def _marks(monkeypatch) -> list[str]:
     marked: list[str] = []
     real = store.mark_update
 
-    def spy(folder):
+    def spy(folder, kind=""):
+        # `kind` is the write's sort, added for G2: it only matters if the session is
+        # gone by the time it is sent (a continue's rescue is a continue)
         marked.append(folder.name)
-        return real(folder)
+        return real(folder, kind)
     monkeypatch.setattr(store, "mark_update", spy)
     return marked
 

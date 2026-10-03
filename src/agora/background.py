@@ -73,8 +73,13 @@ def process_trash_queue(paths: store.Paths, drive: store.Drive) -> None:
         (paths.trash_queue / ulid).unlink(missing_ok=True)
 
 
-def run(paths: store.Paths | None = None) -> int:
-    """Upload and delete until there is nothing left, then look once more."""
+def run(paths: store.Paths | None = None, *, notices: bool = False) -> int:
+    """Upload and delete until there is nothing left, then look once more.
+
+    `notices` says who is watching: the detached process writes its own words to
+    upload.log, so the lines a person needs are left for the next command instead
+    (review G3). Inline and `push` are watched, so they only say it once.
+    """
     paths = paths or store.Paths.from_env()
     print("[agora] 背景上傳開始", file=sys.stderr, flush=True)
     while True:
@@ -89,7 +94,7 @@ def run(paths: store.Paths | None = None) -> int:
             while (waiting := _waiting(paths)) and waiting != seen:
                 seen = waiting  # nothing new since the last round: it is failing, stop
                 drive = store.Drive(paths)
-                store.push_outbox(drive, paths)     # one round: the outbox first, then
+                store.push_outbox(drive, paths, notices=notices)   # outbox first, then
                 process_trash_queue(paths, drive)   # the trash queue
         finally:
             lock.close()      # closing the file is what lets the flock go
@@ -132,5 +137,5 @@ def start(paths: store.Paths | None = None) -> str:
     return STARTED
 
 
-if __name__ == "__main__":
-    sys.exit(run())
+if __name__ == "__main__":       # detached: nobody sees this process's stderr
+    sys.exit(run(notices=True))
