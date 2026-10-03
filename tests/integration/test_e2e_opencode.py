@@ -88,6 +88,11 @@ def e2e(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("AGORA_FOLDER_NAME", "agora-test")
     monkeypatch.delenv("AGORA_RCLONE", raising=False)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    # This file is about the cross-agent flow, not about the background uploader: in
+    # the foreground the upload is done when the command returns, which is what these
+    # assertions have always meant. The detached uploader has its own tests
+    # (tests/integration/test_background_writes.py, tests/unit/test_background.py).
+    monkeypatch.setenv("AGORA_UPLOAD", "inline")
     monkeypatch.setenv("AGORA_CLAUDE_HOME", str(REAL_HOME))
     # opencode is left on the sandboxed HOME that conftest sets, so this test
     # never writes to the real store; the free model needs no auth. (An earlier

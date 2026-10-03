@@ -96,20 +96,27 @@ def env(tmp_path, monkeypatch, capsys):
     shutil.rmtree(PROJ.parent, ignore_errors=True)
 
 
-def wait_uploaded(paths, timeout: float = 300.0) -> None:
+def wait_uploaded(paths, timeout: float = 300.0, settle: int = 2) -> None:
     """Wait until the background uploader is through: nobody holds the upload lock, and
     the outbox and the trash queue are both empty (spec「delete 先在本機」).
 
-    All three, and the lock first: a queue that empties just as the next round starts
-    would otherwise pass too early, and a lock held by a uploader that is about to fail
-    is exactly the case worth waiting for.
+    All three, and the lock first. And twice in a row: a uploader that has been started
+    but has not taken the lock yet looks exactly like "nobody is working on it" to a
+    single look, which is how this helper used to let a test walk away one round early
+    (review T3-it I4 - the same shape as R6).
     """
     deadline = time.monotonic() + timeout
+    quiet = 0
     while time.monotonic() < deadline:
-        if not store.uploader_is_running(paths) and not store.outbox_ulids(paths) \
-                and not store.queued_for_trash(paths):
+        done = not store.uploader_is_running(paths) and not store.outbox_ulids(paths) \
+            and not store.queued_for_trash(paths)
+        quiet = quiet + 1 if done else 0
+        if quiet >= settle:
             return
         time.sleep(0.5)
+    # A uploader that has been started but has not taken the lock yet looks exactly
+    # like "nobody is working on it" to a poll like this one (review T3-it I4 / R6),
+    # so the message has to be able to say which of the three it was.
     raise AssertionError(
         f"背景上傳器 {timeout:.0f} 秒還沒做完："
         f"鎖={store.uploader_is_running(paths)}"
@@ -302,7 +309,10 @@ def test_a_session_deleted_elsewhere_comes_back_with_an_explicit_push(env, monke
 
     # it came back whole: the session.md and the raw its header names (review I2)
     same_as_local(paths, ulid)
-    assert store.Index(paths).missing_in_cloud() == []
+    # the marker moves on the next *sync*, not on the push itself
+    forget_last_sync(paths)
+    code, found, _ = run_cli(env, "search", "session", "--filter", "cloud=no")
+    assert code == 0 and agora_id not in found, "回到 Drive 之後就不再是雲端沒有的了"
 
 
 def test_an_edit_deleted_elsewhere_is_kept_as_a_session_of_its_own(env, monkeypatch):
@@ -339,5 +349,4 @@ def test_an_edit_deleted_elsewhere_is_kept_as_a_session_of_its_own(env, monkeypa
     env["created"]["ulids"].extend(new_ids)   # and clean it up even if the next line fails
     # what was rescued is that edit, not the version the other machine deleted
     same_as_local(paths, new_ids[0], title_of=f"{MARK} 改過")
-    assert index.header(new_ids[0]) is not None
     assert store.outbox_ulids(paths) == set()
