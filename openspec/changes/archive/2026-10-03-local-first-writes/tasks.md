@@ -32,5 +32,5 @@
 ## 5. 收尾
 
 - [x] 5.1 `docs/design.md` 4.1、5.6、5.10 與 README 更新
-- [x] 5.2 整合測試（**已寫、未跑**：等 impl2 的 W1～W3 修完再實跑）（只用 `agora-test`，`wait_uploaded()`）：import 多個 → Drive 上都有；delete → Drive 上沒有；在這台寫的被刪掉之後救回來
-- [ ] 5.3 review 審程式；PM 用假資料實跑（量 import 3 個、delete 2 個的前景時間、rclone 次數，以及 `-v --stats` 的 API 請求數）；記下行數
+- [x] 5.2 整合測試（第七輪實跑通過，見 5.3）（只用 `agora-test`，`wait_uploaded()`）：import 多個 → Drive 上都有；delete → Drive 上沒有；在這台寫的被刪掉之後救回來
+- [x] 5.3 review 審程式（T3、T3-sec1～7、T3-final、T3-final2～4、T3-it、T3-it2，最後一輪沒有未解決的 Medium 以上）；PM 用假資料實跑（`docs/tickets/T3-pm-run.md`：import 3 個前景 0.12 秒、前景 0 次 rclone、背景 3 次；delete 2 個前景 0.11 秒；救回不用先 pull）；整合測試第七輪 30 passed、1 個因 DNS 暫時查不到而失敗，單獨重跑通過；行數 3,795（只記錄）。API 請求數沒有另外量，記為之後的觀察
