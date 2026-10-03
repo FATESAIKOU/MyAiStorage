@@ -908,8 +908,12 @@ def kick_uploader(paths: Paths) -> str | None:
 
 
 def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
-         warn=warn) -> Index:
+         kick: bool = True, warn=warn) -> Index:
     """Start the uploader if anything is waiting, then pull the session.md files whose md5 changed.
+
+    `kick=False` is for a command that is about to take an entry out of the outbox
+    itself: `delete` must not have the background send the version it is deleting
+    (spec「改完馬上刪」, review W1). It starts the uploader once it is done instead.
 
     Only session.md is mirrored; raws are fetched on demand. A session whose
     raw is missing or has another md5 than its header says is unfinished
@@ -927,7 +931,8 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
     if throttle and stamp.exists() and now() - float(stamp.read_text()) < SYNC_THROTTLE_S:
         return index
     drive = drive or Drive(paths)
-    kick_uploader(paths)
+    if kick:
+        kick_uploader(paths)
     try:
         remote = drive.list_sessions()
     except StoreError as e:

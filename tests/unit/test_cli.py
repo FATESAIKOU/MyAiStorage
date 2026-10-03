@@ -1281,24 +1281,69 @@ def test_a_cloud_lost_session_is_not_queued_and_starts_nothing(env, capsys, monk
     assert not started
 
 
-def test_a_session_deleted_before_its_upload_never_goes_up(env, capsys, monkeypatch):
-    """L3 / 3.4: an edit that has not reached Drive yet is dropped on the way out, not
-    sent first - otherwise deleting would upload the very thing being deleted.
-
-    The uploader is stubbed out, so what this checks is the foreground's own promise:
-    the entry is gone before anything could have been started."""
+def test_delete_still_starts_the_uploader_for_another_session_waiting(env, capsys, monkeypatch):
+    """review W1: the opening sync no longer starts anything, so `delete` has to start the
+    uploader at the end - not only for the queue it just filled, but for whatever else
+    was already waiting, or one command would strand another command's upload."""
     from agora import background
-    monkeypatch.setattr(background, "start", lambda paths=None: background.STARTED)
+    _, sid, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    shutil.rmtree(Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / sid.split(":")[1])
+    started = []
+    monkeypatch.setattr(background, "start", lambda p=None: started.append(p) or background.STARTED)
+    monkeypatch.setattr(store, "outbox_count", lambda p: 1)     # something else is waiting
+    run(capsys, "search", "session", "--filter", "text~=Markdown", "--no-sync")
+    before = len(started)      # whatever a command starts on its own is not this one's doing
+
+    code, _, err = run(capsys, "delete", "session", sid, "--yes")
+
+    assert code == 0
+    assert store.queued_for_trash(paths) == set()     # Drive lost it: nothing to purge
+    assert len(started) > before, "the uploader starts for the outbox too, not only for the queue"
+    assert "雲端沒有" in err
+
+
+def test_the_next_command_says_how_many_are_waiting_for_the_drive_trash(env, capsys):
+    """N10 / design L4: a purge that failed leaves the session on Drive, and the next
+    command has to say so. With a real background process those lines only reach
+    upload.log, so without this the user never finds out (review W2)."""
+    paths = store.Paths.from_env()
+    paths.trash_queue.mkdir(parents=True, exist_ok=True)
+    (paths.trash_queue / h.new_ulid()).write_text("", encoding="utf-8")
+    (paths.trash_queue / h.new_ulid()).write_text("", encoding="utf-8")
+
+    _, _, err = run(capsys, "search", "session", "--filter", "text~=沒有這個", "--no-sync")
+    assert "有 2 個等著移到 Drive 垃圾桶" in err
+
+    # and not while the background is on it: that run says so itself
+    with store.hold_upload_lock(paths):
+        _, _, quiet = run(capsys, "search", "session", "--filter", "text~=沒有這個", "--no-sync")
+    assert "等著移到 Drive 垃圾桶" not in quiet
+
+
+def test_a_session_deleted_before_its_upload_never_goes_up(env, capsys, monkeypatch):
+    """L3 / spec「改完馬上刪」: an edit that has not reached Drive yet is dropped on the
+    way out, not sent first.
+
+    Nothing is stubbed here on purpose (review W1): with `background.start` replaced, the
+    opening sync could not have started an upload either, so the test passed whatever
+    `delete` did. Inline instead, and the assertion is about rclone: while delete runs,
+    nothing is copied."""
+    calls_log = Path(os.environ["FAKE_REMOTE"]).parent / "calls.log"
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")        # the import cannot go up
     _, sid, _ = _import(capsys)
     paths = store.Paths.from_env()
     ulid = sid.split(":")[1]
     assert ulid in store.outbox_ulids(paths), "the setup has to leave it waiting"
     monkeypatch.delenv("FAKE_RCLONE_FAIL")
+    calls_log.unlink(missing_ok=True)
 
     code, _, _ = run(capsys, "delete", "session", sid, "--yes")
 
     assert code == 0
+    copied = [c for c in calls_log.read_text().splitlines() if '"copy' in c] \
+        if calls_log.exists() else []
+    assert copied == [], f"delete sent the version it is deleting: {copied}"
     assert ulid not in store.outbox_ulids(paths)
     assert not (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid).exists()
 

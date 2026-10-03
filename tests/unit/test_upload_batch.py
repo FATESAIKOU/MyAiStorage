@@ -427,27 +427,44 @@ def test_a_session_written_here_can_be_rescued(env, monkeypatch, capsys):
     assert len(list((paths.mirror / ulid).glob("raw-*"))) == 1
 
 
-def test_sync_leaves_a_queued_for_deletion_session_alone(env, monkeypatch, capsys):
-    """2.4 / spec「delete 先在本機」: while it waits for the Drive trash it comes neither
-    back into the list nor gets marked as deleted elsewhere."""
+def test_sync_does_not_mark_a_queued_session_that_drive_lost(env, monkeypatch):
+    """W3, the other half: the marker loop carries the same `u not in trashing` guard, and
+    a queued session can still have its row - `delete` drops the row before queueing, so
+    this is what an interrupted delete (or another process's queue) leaves behind."""
     import shutil
+    from agora import background
     paths = store.Paths.from_env()
-    ulid = _stage(paths, "排隊刪除中")
-    assert store.upload_batch(store.Drive(paths), paths) == []
-    # what `delete` does in the foreground: gone from here, then queued for the trash
-    store.forget_local(paths, ulid)
+    ulid = _stage(paths, "佇列裡的")
+    assert store.upload_batch(store.Drive(paths), paths) == []      # on Drive and indexed
+    shutil.rmtree(env / "agora" / "sessions" / ulid)                # and then Drive lost it
     paths.trash_queue.mkdir(parents=True, exist_ok=True)
     (paths.trash_queue / ulid).write_text("", encoding="utf-8")
-    shutil.rmtree(env / "agora" / "sessions" / ulid)
-    capsys.readouterr()
+    assert store.Index(paths).header(ulid) is not None             # the row is still there
+    monkeypatch.setattr(background, "process_trash_queue", lambda *a: None)
+
+    assert store.sync(paths).missing_in_cloud() == []
+
+
+def test_sync_neither_lists_nor_marks_a_session_queued_for_deletion(env, monkeypatch):
+    """2.4 / N10: the delete queue is not「被別台刪掉」. Drive still has the folder - only
+    the background's purge takes it away - so sync must leave it out of the list and
+    leave no marker on it. The two mutations to watch are the `u not in trashing` checks
+    in the changed/missing loops (review W3)."""
+    from agora import background
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "要刪掉的")
+    assert store.upload_batch(store.Drive(paths), paths) == []     # it is on Drive now
+    store.forget_local(paths, ulid)                               # what delete does locally
+    paths.trash_queue.mkdir(parents=True, exist_ok=True)
+    (paths.trash_queue / ulid).write_text("", encoding="utf-8")
+    assert (env / "agora" / "sessions" / ulid).is_dir()           # Drive still has it
+    monkeypatch.setattr(background, "process_trash_queue", lambda *a: None)   # not yet purged
 
     index = store.sync(paths)
-    assert index.missing_in_cloud() == []              # not "deleted on another machine"
-    assert index.header(ulid) is None                  # and not back in the list
-    # The queue itself is the uploader's half (section 3): by the time this returns it
-    # has moved the folder to the Drive trash, so nothing is left waiting.
-    assert ulid not in store.queued_for_trash(paths)
-    assert not (env / "agora" / "sessions" / ulid).exists()
+    assert index.header(ulid) is None                             # not back in the list
+    assert index.missing_in_cloud() == []                         # and not marked
+    assert (env / "agora" / "sessions" / ulid).is_dir()           # Drive untouched
+    assert ulid in store.queued_for_trash(paths)                  # still waiting to be trashed
 
 
 def test_push_refuses_a_session_queued_for_deletion(env, capsys):

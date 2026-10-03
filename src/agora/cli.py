@@ -764,7 +764,9 @@ def cmd_delete(args, paths: store.Paths) -> int:
     ids = [f"agora:{_ulid_of(i)}" for i in _split_ids(args.ids)]
     if not ids:
         raise InputError("delete 要給至少一個 session id")
-    index = store.sync(paths)
+    # kick=False: the uploader must not start before the outbox entry is gone, or the
+    # version being deleted goes up first and only then gets purged (review W1)
+    index = store.sync(paths, kick=False)
     gone = _deleted_ids(paths)
     headers, missing, unknown = {}, [], []
     for agora_id in ids:
@@ -825,7 +827,9 @@ def cmd_delete(args, paths: store.Paths) -> int:
         print(f"[agora] {agora_id} 有子 Session，不能刪：{children}", file=sys.stderr)
         refused.append(agora_id)
     if done:
-        if queued:
+        # one start, at the end: for the queue we filled, and for anything else that was
+        # already waiting - the opening sync above did not start anything (review W1)
+        if queued or store.outbox_count(paths):
             background.start(paths)
         more = f"，重跑會接著做剩下的 {len(left) + len(missing)} 個" if left else ""
         where = "，背景移到 Drive 垃圾桶" if queued else ""
@@ -994,6 +998,11 @@ def main(argv: list[str] | None = None) -> int:
         recover_pending(paths, notice_only=args.no_sync)
         if waiting := store.outbox_count(paths):
             print(f"[agora] outbox 有 {waiting} 筆未上傳", file=sys.stderr)
+        if queued := store.queued_for_trash(paths):
+            # N10 / design L4: what is still on Drive because a purge failed. Not while
+            # the background is on it - that run says so itself, in upload.log.
+            if not store.uploader_is_running(paths):
+                print(f"[agora] 有 {len(queued)} 個等著移到 Drive 垃圾桶", file=sys.stderr)
         if bad := store.bad_count(paths):
             print(f"[agora] 有 {bad} 筆壞檔放在 {paths.state}/*/.bad，請檢查", file=sys.stderr)
         return ACTIONS[args.action](args, paths)
