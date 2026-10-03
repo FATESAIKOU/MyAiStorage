@@ -194,6 +194,9 @@ def _absent(paths: store.Paths, ulid: str, said: str) -> None:
 def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
                 remote: dict | None, ulid: str, not_exist_delete: bool) -> None:
     """One `agora:` id from Drive, into the mirror and the index."""
+    if ulid in store.queued_for_trash(paths):
+        _line(f"{ulid} 正在刪除，不能 pull")
+        return
     if ulid not in (remote or {}):
         if not not_exist_delete:
             _absent(paths, ulid, "本機的不動")
@@ -267,11 +270,11 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
             kind, ulid = _split(agora_id, agents)
             if kind != "agora":
                 raise ValueError(f"push 只吃 agora 的 session id，收到 {agora_id}")
+            if ulid in store.queued_for_trash(paths):   # M5/N10: on its way to the trash
+                raise store.StoreError(f"{agora_id} 正在刪除，不能 push")
             if isinstance(listing, store.StoreError):
                 raise store.StoreError(f"連不上 Drive：{listing}")
             if ulid in staged:
-            if ulid in store.queued_for_trash(paths):   # M5/N10: on its way to the trash
-                raise store.StoreError(f"{agora_id} 正在刪除，不能 push")
                 if ulid in left:
                     raise store.StoreError("還沒上傳成功，仍在 outbox")   # review S2-2
             elif (paths.outbox / ulid).is_dir():
