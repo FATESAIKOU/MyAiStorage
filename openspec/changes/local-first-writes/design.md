@@ -65,6 +65,7 @@
 ### 更新既有 id 前確認還在（L7、N4、N5）
 - 「是不是更新既有 id」在**前景寫入的那一刻**決定（N4）：`_save` 寫回一個原本就存在的 id 時，在 `outbox/<ULID>/.update` 放一個空檔。這些情況是：continue 寫回、edit、import 的原地更新、`recover_pending` 寫回。新建的 id 不放，包括新的 import、merge、另存的 Y。`stage` 換掉資料夾時保留這個記號。背景只看這個記號，不看索引；索引裡本來就有所有剛寫的 Session。
 - 這一輪列檔的結果就是判斷依據。有 `.update` 的項目時，第 1 步先列檔；沒有就跳過。
+- 列檔失敗時（V6，PM 決定）：有 `.update` 的項目**這一輪不傳**，留在 outbox 等下一次列檔成功——「看不到」不等於「還在」，照傳可能把別台剛刪掉的傳回去。新建的 id 照傳。Drive 上根本沒有 `sessions/`（列檔成功、只是空的）不算失敗，照 N12 不當成被刪。
 - 有 `.update`、但 Drive 上沒有的（N5，使用者決定）：不傳回去，改成**另存成新的 Session**。做法沿用 continue 的 F4（`_finish` 另存成 Y）：
   - 新的 ULID、parents 指向 X、relation 照原本的；
   - 存進 outbox（沒有 `.update`）並 `remember`；

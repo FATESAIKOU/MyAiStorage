@@ -506,8 +506,15 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         # L7: an update needs its id to still be there, or we would put back what
         # another machine deleted.
         remote = _listing_with_md5(drive)
-        if not isinstance(remote, dict):
-            remote = None      # we could not list: not being able to see is not seeing it gone
+        if isinstance(remote, StoreError):
+            # V6 (PM): not being able to see is not seeing it there either. Sending now
+            # could put back what another machine just deleted, so the updates wait for
+            # a round whose listing works; the new ids go up as usual.
+            say(f"列不出 Drive 的檔案，{len(updates)} 筆更新留在 outbox 等下一次：{remote}")
+            entries = {u: m for u, m in entries.items() if u not in updates}
+            left.extend(updates)
+            updates = []
+        # None: Drive has no sessions/ at all - not evidence of a deletion (N12)
         gone = [u for u in updates if remote is not None and u not in remote]
         rescued = {}
         for ulid in gone:
@@ -530,12 +537,12 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
             _copy_batch(drive, paths, raws)
         except StoreError as e:
             say(f"原始檔沒傳好，這一輪不傳 session.md：{e}")
-            return sorted(entries)
+            return sorted(set(entries) | set(left))
     try:
         _copy_batch(drive, paths, [f"{u}/session.md" for u in entries])
     except StoreError as e:
         say(f"session.md 沒傳好：{e}")
-        return sorted(entries)
+        return sorted(set(entries) | set(left))
 
     remote = _listing_with_md5(drive)
     if not isinstance(remote, dict):

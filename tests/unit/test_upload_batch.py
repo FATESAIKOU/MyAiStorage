@@ -708,3 +708,33 @@ def test_the_background_puts_back_what_a_crashed_uploader_renamed_aside(env, cap
     assert store.outbox_ulids(paths) == set()
     assert "當掉時改名的" in (env / "agora" / "sessions" / ulid / "session.md").read_text(
         encoding="utf-8")
+
+
+def test_an_update_waits_when_drive_cannot_be_listed_but_a_new_session_goes(env, monkeypatch, capsys):
+    """V6 (PM): a failed listing is not proof that the id is still there. Sending the
+    update anyway could put back what another machine just deleted, so it stays in the
+    outbox for a round whose listing works; a new session has no such risk and goes."""
+    paths = store.Paths.from_env()
+    old = _stage(paths, "既有的")
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    store.stage(paths, _kept_header(old, "改過的"), "## user\n改過的\n", b'{"v": 2}')
+    store.mark_update(paths.outbox / old)
+    new = _stage(paths, "新的")
+    real = store._listing_with_md5
+    calls = []
+
+    def listing(drive):
+        calls.append(1)
+        if len(calls) == 1:                    # the L7 check, before anything is sent
+            return store.StoreError("連不上 Drive")
+        return real(drive)
+
+    monkeypatch.setattr(store, "_listing_with_md5", listing)
+    capsys.readouterr()
+
+    assert store.upload_batch(store.Drive(paths), paths) == [old]
+    assert "更新留在 outbox" in capsys.readouterr().err
+    assert old in store.outbox_ulids(paths)
+    assert "既有的" in (env / "agora" / "sessions" / old / "session.md").read_text(encoding="utf-8")
+    assert new not in store.outbox_ulids(paths)
+    assert (env / "agora" / "sessions" / new / "session.md").is_file()
