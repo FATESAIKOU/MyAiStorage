@@ -7,6 +7,8 @@ user's real sessions.
 
 from __future__ import annotations
 
+import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
+
 import json
 import os
 from pathlib import Path
@@ -725,10 +727,12 @@ def test_summarize_turns_a_timeout_into_an_error(fake, tmp_path, monkeypatch):
 def test_summarize_default_timeout_is_its_own(fake, tmp_path, monkeypatch):
     """The 60 s a CLI poke gets is not enough for a model to answer a merge."""
     monkeypatch.delenv("AGORA_SUMMARIZE_TIMEOUT", raising=False)
-    assert oc.DEFAULT_SUMMARIZE_TIMEOUT == 600
-    assert oc._summarize_timeout() == 600
+    assert base.SUMMARIZE_TIMEOUT == 600
+    assert base.summarize_timeout() == 600
     monkeypatch.setenv("AGORA_SUMMARIZE_TIMEOUT", "42")
-    assert oc._summarize_timeout() == 42
+    assert base.summarize_timeout() == 42
+    monkeypatch.setenv("AGORA_SUMMARIZE_TIMEOUT", "abc")   # B1: unreadable, not a crash
+    assert base.summarize_timeout() == 600
 
 
 def test_a_leftover_pending_record_is_finished_before_the_next_run(fake, tmp_path):
@@ -1083,6 +1087,10 @@ def test_search_ignores_case_and_full_width(watched):
     assert list(oc.ADAPTER.search_text("hello")) == ["ses_full0000000000003"]
     assert list(oc.ADAPTER.search_text("アイウ")) == ["ses_full0000000000003"]
     assert list(oc.ADAPTER.search_text("HELLO 世界")) == ["ses_full0000000000003"]
+    # the keyword is normalised too, not only the text - the other direction, which
+    # is what B3 changed when this started using store.normalize (review T4)
+    assert list(oc.ADAPTER.search_text("ｈｅｌｌｏ 世界")) == ["ses_full0000000000003"]
+    assert list(oc.ADAPTER.search_text("ｈｅｌｌｏ")) == ["ses_full0000000000003"]
     assert oc._SEARCH_LIKE_SQL in seen["statements"]      # the cheap pass ran first
 
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -35,8 +36,13 @@ def _stamp(updated_at: str | None) -> float | None:
 
 def is_fresh(paths: store.Paths, agent_name: str, session_id: str, updated_at: str | None) -> bool:
     """Whether the cached full text is there and not older than the session."""
-    path, when = paths.reading / agent_name / f"{session_id}.md", _stamp(updated_at)
+    path, when = reading_path(paths, agent_name, session_id), _stamp(updated_at)
     return path.exists() and (when is None or path.stat().st_mtime >= when)
+
+
+def reading_path(paths: store.Paths, agent, session_id: str) -> Path:
+    """Where an agent session's reading version is kept - the path, without building it."""
+    return paths.reading / getattr(agent, "name", agent) / f"{session_id}.md"
 
 
 def local_reading(paths: store.Paths, agent, session_id: str, updated_at: str | None = None) -> str:
@@ -71,6 +77,7 @@ def search_cached(paths: store.Paths, agent_name: str, keyword: str):
 
 
 _line = store.warn
+WAIT_SAY_EVERY = 10    # seconds between「還在等」lines while push waits for the lock (R7)
 
 
 def _plan_one(session_id: str, agents: dict) -> tuple[str, str | None, Exception | None]:
@@ -80,6 +87,19 @@ def _plan_one(session_id: str, agents: dict) -> tuple[str, str | None, Exception
     except ValueError as e:
         return "", None, e
     return kind, bare, None
+
+
+def _arrived_late(session_id: str, agents: dict, staged: set[str], paths: store.Paths) -> bool:
+    """Whether this id is in the outbox but was not in push's snapshot.
+
+    An id we cannot read is not this function's business: the loop below reports it and
+    carries on with the rest, and this one must not fail the whole push (review H1).
+    """
+    try:
+        ulid = _split(session_id, agents)[1]
+    except ValueError:
+        return False
+    return ulid not in staged and (paths.outbox / ulid).is_dir()
 
 
 def _split(session_id: str, agents: dict) -> tuple[str, str]:
@@ -131,23 +151,28 @@ def pull(paths: store.Paths, ids: list[str], agents: dict, *,
     plan = [_plan_one(session_id, agents) for session_id in wanted]
     drive, remote = None, None
     listed: dict[str, dict] = {}
-    done = failed = 0
+    done = failed = skipped = 0
     for k, (session_id, (kind, bare, complaint)) in enumerate(zip(wanted, plan), 1):
         store.progress("pull", k, len(plan))
+        fresh = False         # P3: had nothing to fetch, so it is a skip and not a pull
         try:
             if complaint:
                 raise complaint
             if kind == "agora":
                 if drive is None:
                     drive = store.Drive(paths)
-                    remote = _listing(drive)    # once for the whole batch (docs/perf.md)
+                    remote = store._listing_with_md5(drive)   # once for the batch (docs/perf.md)
                 if isinstance(remote, store.StoreError):
                     raise store.StoreError(f"連不上 Drive：{remote}")
+                before = drive.fetched
                 _pull_agora(paths, drive, index, remote, bare, not_exist_delete)
+                fresh = (drive.fetched == before and bare in (remote or {})   # fetched nothing,
+                         and not (paths.outbox / bare).is_dir() and index.header(bare) is not None)
             else:
                 if kind not in listed:
                     listed[kind] = _listed(agents, kind)
                 if bare in listed[kind] or not not_exist_delete:
+                    fresh = is_fresh(paths, kind, bare, listed[kind].get(bare))
                     local_reading(paths, agents[kind], bare, listed[kind].get(bare))
                 elif not listed[kind] and _cached(paths, kind):
                     # F5: an agent that lists nothing while its cache has something
@@ -155,10 +180,12 @@ def pull(paths: store.Paths, ids: list[str], agents: dict, *,
                     _line(f"{kind} 那邊的清單讀不到（可能是資料庫沒了或認不出結構），不刪快取")
                 else:
                     _drop_reading(paths, kind, bare)   # the agent really lost it (review M2)
-            done += 1
+            done, skipped = done + (not fresh), skipped + fresh
         except Exception as e:      # one session must not stop the rest (review K5)
             failed += 1
             _line(f"{session_id} 拉不到：{e}")
+    if skipped:
+        _line(f"已經是新的，略過 {skipped} 個")
     return done, failed
 
 
@@ -186,6 +213,10 @@ def _absent(paths: store.Paths, ulid: str, said: str) -> None:
 def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
                 remote: dict | None, ulid: str, not_exist_delete: bool) -> None:
     """One `agora:` id from Drive, into the mirror and the index."""
+    if ulid in store.queued_for_trash(paths):
+        # raised, not just said: pull counts what it refused as done and would end
+        # with「拉下 1 個」and exit 0 (review S3)
+        raise store.StoreError(f"{ulid} 正在刪除，不能 pull")
     if ulid not in (remote or {}):
         if not not_exist_delete:
             _absent(paths, ulid, "本機的不動")
@@ -224,6 +255,7 @@ def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
     store.index_file(index, paths.mirror / ulid / "session.md")   # searchable again
 
 
+
 def push(paths: store.Paths, ids: list[str], agents: dict, *,
          not_exist_upload: bool = False) -> tuple[int, int]:
     """`agora push session <agora id>…`: send the given sessions to Drive; (pushed, failed).
@@ -235,11 +267,29 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
     """
     wanted = list(dict.fromkeys(ids))   # the same id twice is one job, one line (S2-7)
     drive = store.Drive(paths)
-    staged = store.outbox_ulids(paths)
-    left = store.push_outbox(drive, paths)      # staged writes first: those are the same sessions
+    # The lock, and wait for it: push is the one command whose contract is "it is on
+    # Drive when this returns" (N2). No timeout - one throttled rclone call alone can
+    # take 50 seconds - but Ctrl-C still gets out, and every 10 seconds it says why.
+    # The lock is taken without blocking, or that saying could never happen (review R7).
+    held, said_at = None, time.monotonic()
+    while held is None:
+        held = store.hold_upload_lock(paths)
+        if held is None:
+            if time.monotonic() - said_at >= WAIT_SAY_EVERY:
+                _line("背景上傳中，還在等…")
+                said_at = time.monotonic()
+            time.sleep(0.2)
+    with held:
+        staged = store.outbox_ulids(paths)
+        left = store.push_outbox(drive, paths)   # staged writes first; those are the same sessions
+        # Anything asked for that appeared while we were sending goes in this same lock
+        # (G1): `upload_batch` works on the whole outbox, and outside the lock that is
+        # push and the background on the same outbox at once.
+        if late := [i for i in wanted if _arrived_late(i, agents, staged, paths)]:
+            left = sorted(set(left) | set(store.upload_batch(drive, paths)))
     if left:
         _line(f"outbox 還有 {len(left)} 筆沒上傳成功")
-    listing = _listing(drive)            # offline: every id here fails, and says so
+    listing = store._listing_with_md5(drive)   # offline: every id here fails, and says so
     done = failed = 0
     for k, agora_id in enumerate(wanted, 1):
         store.progress("push", k, len(wanted))
@@ -247,13 +297,17 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
             kind, ulid = _split(agora_id, agents)
             if kind != "agora":
                 raise ValueError(f"push 只吃 agora 的 session id，收到 {agora_id}")
+            if ulid in store.queued_for_trash(paths):   # M5/N10: on its way to the trash
+                raise store.StoreError(f"{agora_id} 正在刪除，不能 push")
             if isinstance(listing, store.StoreError):
                 raise store.StoreError(f"連不上 Drive：{listing}")
             if ulid in staged:
                 if ulid in left:
                     raise store.StoreError("還沒上傳成功，仍在 outbox")   # review S2-2
             elif (paths.outbox / ulid).is_dir():
-                store.push_one(drive, paths.outbox / ulid)
+                # sent in the same lock a moment ago, so if it is still here that round
+                # did not get through - and it was verified before it was deleted (H1)
+                raise store.StoreError("還沒上傳成功，仍在 outbox")   # review S2-2
             elif listing is None or ulid not in listing:
                 if not not_exist_upload:
                     _absent(paths, ulid, "沒有傳")
@@ -267,14 +321,6 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
             _line(f"{agora_id} 傳不上去：{e}")
     return done, failed
 
-
-def _listing(drive: store.Drive):
-    """The sessions on Drive, or the error that stopped us. None means there is no
-    sessions/ at all: not a failure, and not evidence of a deletion (N12)."""
-    try:
-        return drive.list_sessions()
-    except store.StoreError as e:
-        return e
 
 
 def _push_mirrored(paths: store.Paths, drive: store.Drive, ulid: str, *,

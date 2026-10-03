@@ -6,6 +6,8 @@ nor the user's own agent sessions.
 
 from __future__ import annotations
 
+import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
+
 import fcntl
 import json
 import os
@@ -86,7 +88,8 @@ def _header(ulid=None):
 def _on_drive(paths, body="## user\n把 CSV 轉成 Markdown 表格\n", raw=b'{"x": 1}') -> str:
     """One session staged and pushed, so it is really on the fake Drive."""
     hdr = _header()
-    store.push_one(store.Drive(paths), store.stage(paths, hdr, body, raw))
+    store.stage(paths, hdr, body, raw)
+    store.upload_batch(store.Drive(paths), paths)
     return hdr["id"].split(":", 1)[1]
 
 
@@ -191,12 +194,15 @@ def test_pull_of_an_agent_session_caches_its_full_text(drive):
     assert agent.exports == 1
 
 
-def test_pull_of_an_agent_session_skips_one_that_is_not_stale(drive):
-    """R4: a re-run after Ctrl-C does not pay for what it already has."""
+def test_pull_of_an_agent_session_skips_one_that_is_not_stale(drive, capsys):
+    """R4: a re-run after Ctrl-C does not pay for what it already has - and P3: what it
+    skips is not counted as pulled, it is counted as skipped."""
     paths = store.Paths.from_env()
     agent = Agent({"s": ["問", "答"]}, [Listed("s", "/tmp/p", "t", "2026-10-02T00:00:00Z")], name="claude")
     assert cache.pull(paths, ["claude:s"], {"claude": agent}) == (1, 0)
-    assert cache.pull(paths, ["claude:s"], {"claude": agent}) == (1, 0)
+    capsys.readouterr()
+    assert cache.pull(paths, ["claude:s"], {"claude": agent}) == (0, 0)
+    assert "已經是新的，略過 1 個" in capsys.readouterr().err
     assert agent.exports == 1
 
 
@@ -228,9 +234,11 @@ def test_pull_of_an_id_the_cloud_does_not_have_changes_nothing(drive, capsys):
 def test_pull_of_one_that_is_already_fresh_asks_rclone_for_nothing(drive, capsys):
     paths = store.Paths.from_env()
     ulid = _on_drive(paths)
-    cache.pull(paths, [ulid], {})
+    assert cache.pull(paths, [ulid], {}) == (1, 0)          # the first one is a pull
     mark = len(calls(drive))
-    assert cache.pull(paths, [ulid], {}) == (1, 0)
+    capsys.readouterr()
+    assert cache.pull(paths, [ulid], {}) == (0, 0)          # P3: the second is a skip
+    assert "已經是新的，略過 1 個" in capsys.readouterr().err
     assert not [c for c in calls(drive)[mark:] if "copyto" in c]   # nothing downloaded again
     assert "雲端沒有" not in capsys.readouterr().err
 
@@ -336,6 +344,31 @@ def test_push_goes_on_past_a_failure_and_reports_k_of_n(drive, capsys):   # revi
     assert (done, failed) == (2, 1)
     err = capsys.readouterr().err
     assert "push 1/3" in err and "push 3/3" in err and "傳不上去" in err
+
+
+def test_one_unreadable_id_does_not_stop_the_others(drive, capsys, monkeypatch):
+    """review H1: push looks at the outbox once for the whole batch, and reading an id is
+    what tells it whether that id arrived late. An id it cannot read is that one id's
+    problem - the rest still goes up, and the batch still counts it as failed."""
+    paths = store.Paths.from_env()
+    wanted = _on_drive(paths)
+    cache.pull(paths, [wanted], {})
+    real = store.push_outbox
+
+    def push_outbox_then_stage(drive_, paths_, warn=store.warn, notices=False):
+        left = real(drive_, paths_, warn, notices)
+        folder = store.stage(paths_, _header("快照之後才寫好的"),
+                             "## user\n晚到的那筆\n", b'{"x": 9}')
+        store.remember(paths_, folder)
+        return left
+
+    monkeypatch.setattr(store, "push_outbox", push_outbox_then_stage)
+    agent = Agent({}, name="opencode")
+
+    done, failed = cache.push(paths, ["ses_x", wanted], {"opencode": agent})
+
+    assert (done, failed) == (1, 1), "the good one went up, the bad one is a failure"
+    assert "ses_x 傳不上去" in capsys.readouterr().err
 
 
 def test_push_only_takes_agora_ids(drive, capsys):

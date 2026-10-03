@@ -20,18 +20,17 @@ import json
 import os
 import re
 import subprocess
-import sys
 import uuid
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
-from agora.agents.base import AgentError, Exported, Launch, Listed, Turns, agent_cmd, tool_line
+from agora.agents.base import (AgentError, Exported, Launch, Listed, Turns, agent_cmd,
+                               iso_utc, summarize_timeout, tool_line, warn)
 from agora.store import normalize
 
 FORMAT = "claude-jsonl/1"
 TITLE_MAX = 60
-SUMMARIZE_TIMEOUT_S = 600
 
 # Top-level line types that exist but carry nothing for the reading version
 # (test-plan 0.1: known-but-skipped types produce no output at all).
@@ -55,10 +54,43 @@ TAIL_BYTES = 1 << 20         # at most this much of the end of a file is read
 _LIST_CACHE: dict = {}       # (path, mtime, size) -> (title, dir, has_text)
 
 
-def _forget_other_keys(keep: set) -> None:
-    """Keep the cache to the files we just walked, so it cannot grow forever."""
-    for key in [k for k in _LIST_CACHE if k not in keep]:
-        del _LIST_CACHE[key]
+def _said(line: str, kinds: tuple[str, ...]) -> tuple[str, dict, str | None] | None:
+    """(kind, object, text) for a line that says something, or None for one that does not.
+
+    The three readers - the listing's head peek, the tail for a preview, the search -
+    each want the same four things and each had its own copy of them (review C1): is
+    this a kind we care about, does it parse, is it bookkeeping rather than a message,
+    and what text does it hold.
+
+    Which kind it is comes from the *parsed* line, not from the first `"type"` the
+    regex sees: an assistant line can carry a nested `message.type` ahead of its own,
+    and reading that one skipped the line and showed an older message instead
+    (review K2). The regex is only the cheap question "is it worth parsing at all".
+    """
+    if not set(kinds).intersection(_TYPE_RE.findall(line)):
+        return None
+    try:
+        o = json.loads(line)
+    except ValueError:
+        return None
+    kind = o.get("type") if isinstance(o, dict) else None
+    if kind not in kinds or _is_noise(o):
+        return None
+    return kind, o, _line_text(o)
+
+
+def _title_of(o: dict) -> str | None:
+    """The title one line offers: its summary, or a real user turn's first words.
+
+    A local command is not a message, so it never offers one - without this the
+    export named a session `<command-name>/model</command-name>` while the listing
+    showed what the user actually said (review K1).
+    """
+    if o.get("type") == "summary" and isinstance(o.get("summary"), str) and o["summary"]:
+        return o["summary"][:TITLE_MAX]
+    if o.get("type") == "user" and not _is_noise(o) and (text := _line_text(o)):
+        return text[:TITLE_MAX]
+    return None
 
 
 def _peek_session(path: Path) -> tuple[str | None, str | None, bool]:
@@ -70,26 +102,17 @@ def _peek_session(path: Path) -> tuple[str | None, str | None, bool]:
             for n, line in enumerate(f):
                 if n >= TITLE_HEAD_LINES:
                     break
-                kind = _TYPE_RE.search(line)
-                if not kind or kind.group(1) not in ("user", "assistant", "summary"):
+                said = _said(line, ("user", "assistant", "summary"))
+                if said is None:
                     continue
+                kind, o, text = said
                 if directory is None:
-                    directory = _json_str(_CWD_RE.search(line))
-                try:
-                    o = json.loads(line)
-                except ValueError:
-                    continue
-                if _is_noise(o):
-                    continue
-                if kind.group(1) == "summary" and title is None \
-                        and isinstance(o.get("summary"), str) and o["summary"]:
-                    title = o["summary"][:TITLE_MAX]
-                elif kind.group(1) == "user" and title is None:
-                    text = _line_text(o)
-                    if text:
-                        title, has_text = text[:TITLE_MAX], True
-                elif kind.group(1) == "assistant":
-                    has_text = has_text or bool(_line_text(o))
+                    match = _CWD_RE.search(line)
+                    directory = json.loads(match.group(1)) if match else None
+                if title is None and (offered := _title_of(o)):
+                    title, has_text = offered, has_text or kind == "user"
+                elif kind == "assistant":
+                    has_text = has_text or bool(text)
     except (OSError, ValueError, TypeError, AttributeError):   # one odd file must not break the list (review U1)
         return None, None, False
     return title, directory, has_text
@@ -113,10 +136,6 @@ def _tail_lines(path: Path) -> list[str]:
     if size > TAIL_BYTES and len(lines) > 1:
         lines = lines[1:]          # the first one may be cut in half
     return list(reversed(lines))
-
-
-def _json_str(match: re.Match | None) -> str | None:
-    return json.loads(match.group(1)) if match else None
 
 
 def _line_text(o: dict) -> str | None:
@@ -177,7 +196,7 @@ def _split_lines(text: str, label: str) -> list[str]:
             json.loads(line)
         except json.JSONDecodeError:
             if i == len(lines) - 1:
-                print(f"[agora] 警告：{label} 最後一行不完整，已丟掉", file=sys.stderr)
+                warn(f"警告：{label} 最後一行不完整，已丟掉")
                 continue
             raise AgentError(f"{label} 第 {i + 1} 行解析失敗")
         out.append(line)
@@ -205,7 +224,7 @@ def _is_noise(o: dict) -> bool:
     if o.get("isMeta"):
         return True
     return (o.get("type") == "user"
-            and _user_text(o).lstrip().startswith(_LOCAL_MARKERS))
+            and (_line_text(o) or "").lstrip().startswith(_LOCAL_MARKERS))
 
 
 def _count_messages(objs: list[dict]) -> int:
@@ -259,21 +278,19 @@ def _unpack_raw(raw: bytes) -> tuple[list[str], dict]:
         raise AgentError(f"Claude raw 解析失敗：{e}")
 
 
-def _user_text(o: dict) -> str:
-    """All text of a user line joined (P2: reuses _user_lines)."""
-    return "".join(line for line in (_user_lines(o) or [])
-                   if not line.startswith("[skip "))
-
-
 def _session_title(objs: list[dict]) -> str | None:
+    """The export's rule: a summary anywhere wins, else the first real user turn.
+
+    Left as it was (review K4): C2 tried to fold this into the listing's rule, which
+    changed the title a session imports under - the proposal says behaviour does not
+    change, so the two rules stay two.
+    """
     for o in objs:
         if o.get("type") == "summary" and isinstance(o.get("summary"), str):
             return o["summary"][:TITLE_MAX] or None
     for o in objs:
-        if o.get("type") == "user" and not _is_noise(o):
-            text = _user_text(o).strip()
-            if text:
-                return text[:TITLE_MAX]
+        if (title := _title_of(o)) is not None:
+            return title
     return None
 
 
@@ -314,14 +331,6 @@ def _rewrite_lines(lines: list[str], new_id: str, workdir: str) -> list[str]:
             o["cwd"] = workdir
         out.append(json.dumps(o, ensure_ascii=False))
     return out
-
-
-def _rewrite_aux_jsonl(content: str, rel: str, new_id: str, workdir: str) -> str:
-    """Same S10 rule as main files (review CL6), keeping a trailing newline."""
-    text = "\n".join(_rewrite_lines(_split_lines(content, rel), new_id, workdir))
-    if text and content.endswith("\n"):
-        text += "\n"
-    return text
 
 
 def _turns(objs: list[dict]) -> list[tuple[str, list[str]]]:
@@ -438,8 +447,10 @@ class ClaudeAgent:
         (subdir / f"{new_id}.jsonl").write_text("\n".join(rewritten) + "\n", encoding="utf-8")
         sidecar = subdir / new_id
         if aux:
-            _unpack_aux(aux, sidecar, rewrite=lambda text, rel: _rewrite_aux_jsonl(
-                text, rel, new_id, workdir_str))
+            def rewrite(text: str, rel: str) -> str:   # same S10 rule as main (review CL6)
+                joined = "\n".join(_rewrite_lines(_split_lines(text, rel), new_id, workdir_str))
+                return joined + "\n" if joined and text.endswith("\n") else joined
+            _unpack_aux(aux, sidecar, rewrite=rewrite)
         return Launch(argv=[agent_cmd("claude"), "--resume", new_id],
                       cwd=workdir_str, agent_session_id=new_id,
                       before_count=_count_messages(_parse_all(rewritten)))
@@ -476,11 +487,10 @@ class ClaudeAgent:
             title, directory, has_text = cached
             if not has_text:
                 continue
-            found.append(Listed(
-                session_id=path.stem, dir=directory, title=title,
-                updated_at=datetime.fromtimestamp(stat.st_mtime, timezone.utc)
-                .strftime("%Y-%m-%dT%H:%M:%SZ")))
-        _forget_other_keys(seen)
+            found.append(Listed(session_id=path.stem, dir=directory, title=title,
+                                updated_at=iso_utc(stat.st_mtime)))
+        for stale in [k for k in _LIST_CACHE if k not in seen]:
+            del _LIST_CACHE[stale]          # the cache is only as big as the last walk
         found.sort(key=lambda item: item.updated_at or "", reverse=True)
         return found
 
@@ -496,15 +506,10 @@ class ClaudeAgent:
         except (AgentError, OSError):
             return None
         for line in _tail_lines(path):
-            try:
-                o = json.loads(line)
-            except ValueError:
+            said = _said(line, ("user", "assistant"))
+            if said is None or not said[2]:
                 continue
-            if not isinstance(o, dict) or o.get("type") not in ("user", "assistant") or _is_noise(o):
-                continue
-            text = _line_text(o)
-            if text:
-                return o["type"], text[-PREVIEW_MAX:]
+            return said[0], said[2][-PREVIEW_MAX:]
         return None
 
     def search_text(self, keyword: str, only: set[str] | None = None) -> Iterator[str]:
@@ -529,17 +534,9 @@ class ClaudeAgent:
             try:
                 with path.open(encoding="utf-8", errors="replace") as f:
                     for line in f:
-                        kind = _TYPE_RE.search(line)
-                        if not kind or kind.group(1) not in ("user", "assistant"):
-                            continue
-                        try:
-                            o = json.loads(line)
-                        except ValueError:
-                            continue
-                        if not isinstance(o, dict) or _is_noise(o):   # one odd line must not end the search
-                            continue
-                        text = _line_text(o)
-                        if text and needle in normalize(text):
+                        said = _said(line, ("user", "assistant"))
+                        # one odd line must not end the search
+                        if said is not None and said[2] and needle in normalize(said[2]):
                             yield path.stem
                             break
             except (OSError, ValueError, TypeError, AttributeError):
@@ -560,7 +557,7 @@ class ClaudeAgent:
                 "--output-format", "json"]
         try:
             proc = subprocess.run(argv, input=prompt, cwd=str(workdir), env=_child_env(),
-                                  capture_output=True, text=True, timeout=_summarize_timeout())
+                                  capture_output=True, text=True, timeout=summarize_timeout())
         except (OSError, subprocess.SubprocessError) as e:
             raise AgentError(f"Claude 要約失敗：{e}")
         if proc.returncode != 0:
@@ -578,12 +575,11 @@ class ClaudeAgent:
         if not launch.agent_session_id:
             raise AgentError("沒有 agent session id，無法收尾")
         session_id = launch.agent_session_id
-        path = find_jsonl(session_id, launch.cwd)
-        _warn_cleared(path, session_id)
-        main = _read_lines(path)
-        if _count_messages(_parse_all(main)) <= launch.before_count:
+        _warn_cleared(find_jsonl(session_id, launch.cwd), session_id)
+        exported = self.export(session_id, launch.cwd)
+        if exported.message_count <= launch.before_count:
             return None
-        return _exported(session_id, main, path.parent / session_id)
+        return exported
 
 
 def _used_model(doc: dict) -> str | None:
@@ -604,10 +600,6 @@ def _child_env() -> dict:
     return dict(os.environ)
 
 
-def _summarize_timeout() -> float:
-    return float(os.environ.get("AGORA_SUMMARIZE_TIMEOUT", SUMMARIZE_TIMEOUT_S))
-
-
 def _warn_cleared(path: Path, session_id: str) -> None:
     """/clear moves the conversation to a new uuid in the same project dir.
 
@@ -622,9 +614,9 @@ def _warn_cleared(path: Path, session_id: str) -> None:
             continue
         try:
             if session_id in other.read_text(encoding="utf-8", errors="replace"):
-                print(f"[agora] 這次接續中用過 /clear，之後的對話在 Claude session {other.stem}；"
-                      f"要存進 Agora 請另外執行：agora import session --external-session-id {other.stem} --agent claude",
-                      file=sys.stderr)
+                warn(f"這次接續中用過 /clear，之後的對話在 Claude session {other.stem}；"
+                     f"要存進 Agora 請另外執行：agora import session "
+                     f"--external-session-id {other.stem} --agent claude")
         except OSError:
             continue
 

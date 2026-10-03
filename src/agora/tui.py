@@ -11,6 +11,7 @@ tests.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -20,6 +21,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from functools import partial
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +29,7 @@ from rich.markdown import Markdown
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
+from textual.worker import get_current_worker
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
@@ -50,9 +53,9 @@ AGENT_STYLE = {"opencode": "cyan", "claude": "#ff8700", "merge": "green"}
 KEYS = {
     "agora": [("空白", "勾選"), ("a", "全選／全不選"), ("enter", "接續"), ("m", "合併"),
               ("e", "改標頭"), ("d", "刪除"), ("p", "pull"), ("P", "push"),
-              ("/", "篩選"), ("ctrl+t", "標題／內文"), ("q", "離開")],
+              ("/", "篩選（邊打邊篩）"), ("ctrl+t", "標題／內文"), ("q", "離開")],
     "import": [("空白", "勾選"), ("a", "全選／全不選"), ("enter", "匯入"), ("p", "pull"),
-               ("/", "篩選"), ("ctrl+t", "標題／內文"), ("q", "離開")],
+               ("/", "篩選（邊打邊篩）"), ("ctrl+t", "標題／內文"), ("q", "離開")],
 }
 
 
@@ -85,7 +88,7 @@ def agora_rows(index: store.Index, filters: list, paths: store.Paths | None = No
     call to Drive from here. 「未上傳」 is its own state: a session staged here is
     not a session another machine deleted (T2 3.1).
     """
-    staged = store.outbox_ulids(paths) if paths is not None else set()
+    staged = store.waiting_ulids(paths) if paths is not None else set()
     rows = []
     for ulid, hdr, _snippet in index.search(filters):
         agora = h.agora_of(hdr)
@@ -157,35 +160,133 @@ def filtered(rows: list[Row], text: str, matches: set[str] | None = None) -> lis
 # --- previews: what is stored, never generated -------------------------------
 # A preview is (pinned, history): a pinned line on top, and the history as Markdown.
 
-def agora_preview(paths: store.Paths, index: store.Index, agora_id: str) -> tuple[str, str]:
-    """The whole session.md text (the reading version, or a merge's sections), with dir and tags pinned."""
+PREVIEW_CHUNK = 30 << 10     # about 30 KB a step; a session.md is 340 KB to 3 MB (T6)
+FILTER_IDLE = 0.3            # content search: this long without a keystroke before it reads the agents (T7 P1)
+PREVIEW_IDLE = 0.15          # the cursor has to rest this long before anything is read
+
+
+def read_tail(path: Path, at: int | None = None, size: int = PREVIEW_CHUNK) -> tuple[str, int]:
+    """(text, where it starts): the `size` bytes of `path` ending at offset `at`.
+
+    `at` is an absolute offset - `None` is the end of the file - and the offset handed
+    back is the one the next call passes, so the steps walk backwards one after another
+    (review Y6: a "bytes from the end" answer fed back as "bytes from the end" jumped to
+    the start of the file). seek, never the whole file: only the end of a conversation is
+    ever on screen. The cut lands just after a `## ` heading or a blank line, so a message
+    is not cut in half, and both ends of what is kept are then just after a newline, so a
+    multibyte character cannot be broken either.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            end = f.tell() if at is None else min(at, f.tell())
+            start = max(0, end - size)
+            f.seek(start)
+            raw = f.read(end - start)
+    except OSError:
+        return "", 0
+    if start:
+        cut = min((i for i in (raw.find(b"\n## "), raw.find(b"\n\n")) if i > 0), default=0)
+        raw, start = raw[cut + 1:], start + cut + 1
+    return raw.decode("utf-8", "ignore"), start
+
+
+def _no_header(text: str) -> str:
+    """The YAML front matter is metadata, not conversation, so it is not previewed."""
+    if not text.startswith("---"):
+        return text
+    end = text.find("\n---", 3)
+    return text[text.find("\n", end + 1) + 1:] if 0 <= end <= PREVIEW_CHUNK else text
+
+
+class Preview:
+    """One row's preview: the text read so far, and how much of the file is left above it.
+
+    Only what was read is rendered (T6). The first step is the tail; every time the pane
+    reaches its top one more step is read and put above it.
+    """
+
+    def __init__(self, path: Path | None, pinned: str = "", text: str = ""):
+        # `at` is where the part that is already here starts, an absolute offset; None is
+        # "nothing read yet". 0 is the beginning of the file, which is how "all of it is
+        # here" is told apart from "none of it is" (review Y1).
+        self.path, self.pinned, self.text, self.at = path, pinned, text, None
+
+    def step(self) -> str:
+        """Read one more step - the tail first, the step above after that.
+
+        Empty when there is nothing left, which is how the caller knows the hint can go.
+        """
+        if not self.more():
+            return ""            # everything is already here; there is nothing above it (Y1)
+        if self.path is None or not self.path.is_file():
+            self.at = 0          # nothing to read: all here, and the hint goes for good
+            return ""
+        text, start = read_tail(self.path, self.at)
+        self.at = start
+        if not text:
+            return ""
+        step = _no_header(text).strip("\n")
+        self.text = f"{step}\n{self.text}" if self.text else step    # an earlier one goes above
+        return text
+
+    def more(self) -> bool:
+        """Whether anything above is still unread. Nothing read yet counts as "more".
+
+        A preview with no file behind it (the last message, or one that could not be
+        read) has nothing above it, so it says nothing (review Z1).
+        """
+        return self.path is not None and self.at != 0
+
+    def hint(self) -> str:
+        """The line that says there is more above - gone once it is all here (T6)."""
+        return f"↑ 往上捲載入更早的內容（還有約 {max(1, round((self.at or 0) / 1024))} KB）" \
+            if self.more() else ""
+
+
+class PreviewArea(VerticalScroll):
+    """The preview pane: reaching its top asks for the part above (T6)."""
+
+    def watch_scroll_y(self, above: float, here: float) -> None:
+        super().watch_scroll_y(above, here)      # the container's own: scrollbar, refresh
+        if above > 0 and here == 0 and self.is_attached:
+            self.app.load_earlier()
+
+
+def agora_preview(paths: store.Paths, index: store.Index, agora_id: str) -> Preview:
+    """This session's preview: the tail of its session.md, dir and tags pinned above."""
     ulid = agora_id.split(":", 1)[1]
     hdr = index.header(ulid) or {}
-    try:
-        _, body = h.split_document((paths.mirror / ulid / "session.md").read_text(encoding="utf-8"))
-    except (OSError, h.HeaderError):
-        body = ""
     pinned = (f"dir {(h.agora_of(hdr).get('source') or {}).get('dir') or '—'}   "
               f"tags {', '.join(map(str, hdr.get('tags') or [])) or '—'}")
-    return pinned, body.strip()
+    preview = Preview(paths.mirror / ulid / "session.md", pinned)
+    preview.step()
+    return preview
 
 
 def import_preview(agent, session_id: str, full: bool = False, paths: store.Paths | None = None,
-                   updated: str | None = None) -> tuple[str, str]:
-    """The last message; with `full`, the whole conversation as its reading version, kept in the cache (5.10)."""
+                   updated: str | None = None) -> Preview:
+    """The last message at once; with `full`, the tail of the reading version, kept in the
+    cache (5.10). Same rule as the agora side: read a step, not the whole thing (T6)."""
     from agora.agents.base import reading
     try:
         if full:
-            text = (cache.local_reading(paths, agent, session_id, updated) if paths
-                    else reading(agent, agent.export(session_id).raw))
-            return "整份對話（閱讀版）", text.strip()
+            if paths is None:                     # no cache to read: the only way is all of it
+                return Preview(None, "整份對話（閱讀版）",
+                               reading(agent, agent.export(session_id).raw).strip())
+            path = cache.reading_path(paths, agent, session_id)
+            if not path.is_file():
+                cache.local_reading(paths, agent, session_id, updated)   # builds it, once
+            preview = Preview(path, "整份對話（閱讀版）")
+            preview.step()
+            return preview
         last = agent.last_message(session_id)
     except Exception:            # a preview must never take the screen down
-        return "讀不到這個 session", ""
+        return Preview(None, "讀不到這個 session")
     if not last:
-        return "", ""
+        return Preview(None)
     role, text = last
-    return f"最後一則（{role}），整份對話載入中…", f"## {role}\n{text}"
+    return Preview(None, f"最後一則（{role}），整份對話載入中…", f"## {role}\n{text}")
 
 
 def argv_for(action: str, rows: list[Row], agent: str | None, workdir: str | None) -> list[list[str]]:
@@ -212,19 +313,93 @@ def setup_needed(paths: store.Paths) -> str | None:
     return None if (paths.config / "rclone.conf").exists() else "auth"
 
 
-def authorize(paths: store.Paths, say=print) -> int:
-    """`rclone config create` with rclone's own client: it opens the browser; we pass its lines on.
+def _is_file(where: str) -> bool:
+    """Whether `where` names a file at all. Never raises.
+
+    The first-run screen asks this before it reads, and `~someone-who-does-not-exist`
+    makes `Path.expanduser` raise `RuntimeError` - which, from a screen, ends the app
+    (review U1). `os.path.expanduser` leaves such a path as it is instead.
+    """
+    return os.path.isfile(os.path.expanduser(where))
+
+
+def read_client(where: str) -> tuple[str, str] | None:
+    """(client_id, client_secret) from the file at `where`, or None if it is not one.
+
+    Two shapes: the JSON Google hands out when you create a **Desktop** client, and a
+    two-line `Client-ID=` / `SECRET=` text file. Nothing is printed, logged or put on
+    the screen - the values only ever travel into rclone's own argv (design D5).
+
+    Every way this can fail is None, and nothing is said about which. That is not
+    politeness: a file saved as UTF-16 raises `UnicodeDecodeError`, whose message
+    carries **the whole file**, and that file is a credential (review T1). A deeply
+    nested JSON raises `RecursionError`, and when the app dies Textual prints the
+    locals - `text` is one of them (review U1). So:
+
+    * the answer to any failure is None, with no reason attached, and the `except` is
+      `Exception` rather than a list - this function's whole vocabulary is "a pair or
+      nothing", and a class of failure we did not think of is still just a None;
+    * the two values are read out of whatever we parsed, and nothing else is kept, so
+      a local variable never holds a file we are not sure about.
+
+    A `web` client is refused rather than accepted: rclone redirects it to
+    `http://127.0.0.1:53682/`, which a web client will not have registered, and the
+    user would only ever see 「授權沒有完成」 (review T4).
+    """
+    try:
+        # utf-8-sig, so a BOM is not mistaken for a format we do not know (review T4)
+        text = Path(os.path.expanduser(where)).read_bytes().decode("utf-8-sig")
+        if text.lstrip().startswith("{"):
+            block = json.loads(text).get("installed")
+            client_id = block.get("client_id") if isinstance(block, dict) else None
+            secret = block.get("client_secret") if isinstance(block, dict) else None
+        else:
+            pairs = {}
+            for line in text.splitlines():
+                key, _, value = line.partition("=")
+                pairs[key.strip()] = value.strip()     # rclone writes `Client-ID = …`
+            client_id, secret = pairs.get("Client-ID"), pairs.get("SECRET")
+        if not all(isinstance(v, str) and v.strip() for v in (client_id, secret)):
+            return None
+        return client_id.strip(), secret.strip()
+    except Exception:
+        # `os.path.expanduser` raises RuntimeError for `~someone-who-does-not-exist`,
+        # json.loads raises RecursionError on a very deep document, and neither is
+        # worth an exception message: the message would carry the file (review U1).
+        return None
+
+
+def authorize_argv(paths: store.Paths, client: tuple[str, str] | None = None) -> list[str]:
+    """The rclone command that writes `[gdrive]`; `client` is the user's own OAuth client.
+
+    A list, never a string: the secret must not go through a shell, where it would end
+    up in the process table and in every `ps` (design D5).
+    """
+    argv = [os.environ.get("AGORA_RCLONE", "rclone"), "config", "create", "gdrive", "drive",
+            "scope=drive.file"]
+    if client:
+        argv += [f"client_id={client[0]}", f"client_secret={client[1]}"]
+    return argv + ["--config", str(paths.config / "rclone.conf")]
+
+
+def authorize(paths: store.Paths, say=print, client: tuple[str, str] | None = None) -> int:
+    """`rclone config create`: it opens the browser; we pass its lines on.
+
+    With rclone's own client when the user gave none (design D5), and with their own
+    Desktop client when they pointed at one - same scope either way, and rclone reuses
+    an existing `[gdrive]`'s token only if the client matches, so switching is a
+    deliberate step rather than a silent one.
 
     `say` is where the lines go - the waiting window when the interactive mode runs
     it, stdout otherwise - rather than the thread printing behind the screen's back
-    (review K3).
+    (review K3). Lines naming a token or a secret are dropped: rclone echoes what it
+    wrote, and neither belongs on a screen.
     """
     paths.config.mkdir(parents=True, exist_ok=True)
-    argv = [os.environ.get("AGORA_RCLONE", "rclone"), "config", "create", "gdrive", "drive", "scope=drive.file",
-            "--config", str(paths.config / "rclone.conf")]
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    proc = subprocess.Popen(authorize_argv(paths, client), stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
     for line in proc.stdout:
-        if "token" not in line.lower():   # the token is a secret: never on screen
+        if not any(word in line.lower() for word in ("token", "secret")):
             say(line.rstrip())
     return proc.wait()
 
@@ -272,7 +447,7 @@ class Choose(ModalScreen):
             yield OptionList(*self.options)
             if self.note:
                 yield Static(self.note, classes="note")
-            yield Static("Enter 確定   Esc 取消", classes="hint")
+            yield Static("Enter 選擇   Esc 取消", classes="hint")
 
     @on(OptionList.OptionSelected)
     def chosen(self, event: OptionList.OptionSelected) -> None:
@@ -290,6 +465,7 @@ class AskText(ModalScreen):
         with Vertical(classes="box"):
             yield Static(self.title_, classes="box-title")
             yield Input(self.text)
+            # Nothing to choose between here: Enter submits what was typed (review E3)
             yield Static("Enter 確定   Esc 取消", classes="hint")
 
     @on(Input.Submitted)
@@ -297,14 +473,11 @@ class AskText(ModalScreen):
         self.dismiss(event.value)
 
 
-#: What Esc escalates to, and how long each step is given (review V2). SIGINT first:
-#: it is what Ctrl-C would send, and it is what cli.main turns into exit 130 after
-#: it has kept the pending record. An agent that ignores it gets SIGTERM, then
-#: SIGKILL - always to the whole process group, so the agent goes with it.
-ESCALATION = (signal.SIGTERM, signal.SIGKILL)
-
-
-#: What a group is sent after SIGINT, and how long each step is given (review V2).
+#: Esc escalates SIGINT → SIGTERM → SIGKILL, a step every ESCALATE_AFTER seconds
+#: (review V2, W1). SIGINT is what Ctrl-C would send and what cli.main turns into
+#: exit 130 after keeping its pending record; the agent that ignores it gets
+#: SIGTERM and then SIGKILL, always to the whole process group. The gap matters:
+#: a process sent both at once has no time to wind up.
 ESCALATION = (signal.SIGTERM, signal.SIGKILL)
 ESCALATE_AFTER = 5.0
 
@@ -332,6 +505,7 @@ class Run(ModalScreen):
         self.proc = None
         self.started = time.monotonic()
         self.stopping = False
+        self.done = False                  # the command exited cleanly: the bar is full
         self.signals: list[int] = []      # what was sent, in order (a test reads this)
 
     def compose(self) -> ComposeResult:
@@ -351,18 +525,38 @@ class Run(ModalScreen):
             for line in self.proc.stdout:
                 self.lines.append(line.rstrip())
             code = self.proc.wait()
+            self.done = code == 0
         except Exception as e:       # never leave the window up forever (review L6)
             code, self.lines = 2, self.lines + [f"讀不到輸出：{e}"]
         # The app may already be gone (ctrl+q closed it); that is not our problem.
         with contextlib.suppress(Exception):
-            self.app.call_from_thread(self.dismiss, (code, "\n".join(self.lines)))
+            self.app.call_from_thread(self.finish, code)
+
+    def finish(self, code: int) -> None:
+        """Close the window - but only after a clean run has shown its full bar.
+
+        `tick` redraws every 0.1s, so dismissing the moment the process ended usually
+        closed the window before the last bar was ever drawn: `N/N` existed in the
+        code and nowhere on the screen (review E2).
+        """
+        if self.done:
+            step = next((m for m in map(self.PROGRESS.match, reversed(self.lines))
+                         if m and 1 <= int(m.group(1)) <= int(m.group(2))), None)
+            with contextlib.suppress(Exception):
+                if step:
+                    self.query_one("#bar", ProgressBar).update(
+                        total=int(step.group(2)), progress=int(step.group(2)))
+        self.dismiss((code, "\n".join(self.lines)))
 
     def tick(self) -> None:
         step = next((m for m in map(self.PROGRESS.match, reversed(self.lines))
                      if m and 1 <= int(m.group(1)) <= int(m.group(2))), None)
         if step:
-            self.query_one("#bar", ProgressBar).update(total=int(step.group(2)),
-                                                        progress=int(step.group(1)))
+            # `k/N` means the k-th one has *started*, so N-1 of them are finished;
+            # reaching N/N means the command said it was done (review Q3)
+            total, started = int(step.group(2)), int(step.group(1))
+            self.query_one("#bar", ProgressBar).update(
+                total=total, progress=total if self.done else max(0, started - 1))
         spent = int(time.monotonic() - self.started)
         last = self.lines[-1] if self.lines else ""
         prefix = "中斷中… " if self.stopping else ""
@@ -447,9 +641,11 @@ class Confirm(ModalScreen):
                 Binding("enter", "confirm", "確定", priority=True),
                 Binding("space", "toggle", "勾選", priority=True)]
 
-    def __init__(self, title: str, options: list[str], note: str = "", extra: str = ""):
+    def __init__(self, title: str, options: list[str], note: str = "", extra: str = "",
+                 note_on: str = ""):
         super().__init__()
         self.title_, self.options, self.note, self.extra = title, options, note, extra
+        self.note_on = note_on
         self.picked = False
 
     def compose(self) -> ComposeResult:
@@ -457,14 +653,22 @@ class Confirm(ModalScreen):
             yield Static(self.title_, classes="box-title")
             yield OptionList(*self.options)
             if self.extra:
-                yield Checkbox(self.extra, value=False, id="extra")
+                # [ ] / [x] in the label: a tick that only changes colour is a tick
+                # the user cannot read (review Q1)
+                yield Checkbox(f"[ ] {self.extra}", value=False, id="extra")
             if self.note:
-                yield Static(self.note, classes="note")
-            yield Static("空白 勾選   Enter 確定   Esc 取消", classes="hint")
+                yield Static(self.note, classes="note", id="effect")
+            yield Static("空白 勾選   Enter 選擇   Esc 取消", classes="hint")
 
     @on(Checkbox.Changed, "#extra")
     def ticked(self, event: Checkbox.Changed) -> None:
+        """Ticking shows `[x]`, and the line under it says what will happen - which
+        is the whole reason to tick it (review Q1)."""
         self.picked = event.value
+        box = self.query_one("#extra", Checkbox)
+        box.label = Text(f"[{'x' if self.picked else ' '}] {self.extra}")
+        if self.note_on:
+            self.query_one("#effect", Static).update(self.note_on if self.picked else self.note)
 
     def action_toggle(self) -> None:
         """Space on the checkbox ticks it; on the list there is nothing to tick here."""
@@ -570,10 +774,15 @@ class AgoraApp(App):
         self.rows: dict[str, list[Row]] = {"agora": [], "import": []}
         self.tab, self.text, self.content = "agora", "", False      # content: search the conversations
         self.matches: dict[str, set[str] | None] = {"agora": None, "import": None}
+        self._filter_timer = None      # the debounce for the content search (T7 P1)
+        self._pending_filter = ""
+        self._scanning: str | None = None   # the word being scanned, if one is (T7 Q1)
+        self._scan_wanted = ""              # and the newest one waiting for it
         self.marked: set[str] = set()
-        self.cache: dict[str, tuple[str, str]] = {}
+        self.cache: dict[str, Preview] = {}
         self.status = ""
         self._stopped = False        # an Esc went through, whatever the exit code says
+        self._timer = None                     # the pending "the cursor came to rest" timer
         self._groups: set[int] = set()   # process groups an action started
 
     def compose(self) -> ComposeResult:
@@ -582,13 +791,14 @@ class AgoraApp(App):
             with Vertical(id="left"):
                 yield DataTable(id="table", cursor_type="row", zebra_stripes=False,
                                 cursor_foreground_priority="renderable")   # the red bar and agent colours stay
-            with VerticalScroll(id="right"):
+            with PreviewArea(id="right"):
                 yield Static(id="pinned")
+                yield Static(id="hint")
                 yield Static(id="history")
         yield Static(id="keys")
         with Horizontal(id="filterbar"):
             yield Static("標題", id="mode")
-            yield Input(id="filter", placeholder="輸入後按 Enter；Esc 清掉；ctrl+t 切換標題／內文")
+            yield Input(id="filter", placeholder="邊打邊篩；Esc 清掉；ctrl+t 切換標題／內文")
         yield Static(id="msg")
 
     # -- setup and data ------------------------------------------------------
@@ -617,12 +827,44 @@ class AgoraApp(App):
             await self.push_screen_wait(Choose("需要 rclone", ["離開"], "請先在終端機執行：brew install rclone\n裝好之後再打 agora"))
             return False
         if need == "auth":
-            note = ("agora 把 Session 存在你的 Google Drive。\n用 rclone 內建的 client 授權，權限只有 drive.file：\n"
-                    "只看得到 agora 自己建的檔案。")
-            if await self.push_screen_wait(Choose("還沒設定 Google Drive", ["用瀏覽器授權", "離開"], note)) != 0:
+            note = ("agora 把 Session 存在你的 Google Drive。權限只有 drive.file：只看得到 agora 自己建的檔案。\n"
+                    "用 rclone 內建的 client 就能用；有自己的 OAuth client（Google Cloud 的 Desktop "
+                    "client）會快很多，選第二項可以給一個設定檔的路徑。")
+            pick = await self.push_screen_wait(Choose("還沒設定 Google Drive", [
+                "用瀏覽器授權（rclone 內建的 client）", "用自己的 OAuth client（選填）", "離開"], note))
+            if pick is None or pick == 2:
                 return False
+            client = None
+            if pick == 1:
+                # The path is all we ask for: the values are read here and handed to
+                # rclone, never shown (design D5).
+                leave = False
+                while True:
+                    typed = (await self.push_screen_wait(
+                        AskText("自己的 client 設定檔路徑", "")) or "").strip()
+                    if not typed:
+                        break                        # 沒給就用內建的，和以前一樣
+                    if not _is_file(typed):
+                        found, why = None, "找不到這個檔案。"
+                    else:
+                        found = read_client(typed)
+                        why = ("這個檔案裡沒有 client_id／client_secret。要用 Google Cloud 的"
+                               " **Desktop** client 下載的 JSON，"
+                               "或兩行 Client-ID=／SECRET= 的文字檔。")
+                    if found:
+                        client = found
+                        break
+                    # 換 client 要搬家，所以打錯一個字值得再問一次（review T4）
+                    again = await self.push_screen_wait(Choose(
+                        "讀不到 client 設定檔", ["重新輸入路徑", "用內建的 client", "離開"],
+                        f"{typed}\n{why}\n用內建的 client 一樣能用，只是共用配額會慢。"))
+                    if again != 0:
+                        leave = again == 2
+                        break
+                if leave:
+                    return False
             code, out, error = await self.push_screen_wait(
-                Busy("請在瀏覽器完成授權", lambda say: authorize(self.paths, say)))
+                Busy("請在瀏覽器完成授權", lambda say: authorize(self.paths, say, client)))
             if error or code != 0 or setup_needed(self.paths):
                 await self.push_screen_wait(Tell("授權沒有完成", f"{out}\n{error or ''}", ok=False))
                 return False
@@ -711,20 +953,37 @@ class AgoraApp(App):
 
     # -- preview ---------------------------------------------------------------
 
+    def on_unmount(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()          # a pending preview must not fire into a dead app
+
     def preview(self) -> None:
+        """Read the tail for the row under the cursor - and only once it has come to rest.
+
+        Moving up and down a list must not read or lay out anything per keystroke: a
+        whole session.md is up to 3 MB and rendering all of it took 0.72 s (T6).
+        """
+        if self._timer is not None:
+            self._timer.stop()                 # a moving cursor reads nothing (T6)
+        self._timer = self.set_timer(PREVIEW_IDLE, self.settled)
+
+    def settled(self) -> None:
+        try:
+            self.query_one("#table", DataTable)
+        except Exception:
+            return                   # the app is going away; a preview is not worth a crash
         row = self.current()
         if row is None:
-            self.put_preview("", "")
-            return
-        if row.key in self.cache:
-            self.put_preview(*self.cache[row.key])
+            self.put_preview(Preview(None))
+        elif row.key in self.cache:
+            self.put_preview(self.cache[row.key])
         elif self.tab == "agora":
             self.cache[row.key] = agora_preview(self.paths, self.index, row.key)
-            self.put_preview(*self.cache[row.key])
-        else:                    # the last message at once, the whole thing when it is read (feedback 3)
+            self.put_preview(self.cache[row.key])
+        else:                    # the last message at once, the reading version when it is read
             agent = next((a for a in self.agents if a.name == row.agent), None)
             if agent:
-                self.put_preview(*import_preview(agent, row.key.split(":", 1)[1]))
+                self.put_preview(import_preview(agent, row.key.split(":", 1)[1]))
                 self.load_full(agent, row.key, row.updated)
 
     @work(thread=True, exclusive=True, group="preview")
@@ -732,17 +991,36 @@ class AgoraApp(App):
         result = import_preview(agent, key.split(":", 1)[1], True, self.paths, updated)
         self.call_from_thread(self.loaded, key, result)
 
-    def loaded(self, key: str, result: tuple[str, str]) -> None:
+    def loaded(self, key: str, result: Preview) -> None:
         self.cache[key] = result
         row = self.current()
         if row and row.key == key:
-            self.put_preview(*result)
+            self.put_preview(result)
 
-    def put_preview(self, pinned: str, history: str) -> None:
-        self.query_one("#pinned", Static).update(pinned)
-        # Rendered once by rich and then only scrolled, so a long history scrolls smoothly (feedback 4, 5).
-        self.query_one("#history", Static).update(Markdown(history) if history else "")
-        self.call_after_refresh(self.query_one("#right", VerticalScroll).scroll_end, animate=False)
+    def load_earlier(self) -> None:
+        """At the top of the pane: one more step above, and stay on the line we were on."""
+        preview = self.cache.get(self.current().key) if self.current() else None
+        if preview is None or not preview.step():
+            return                              # nothing left above, or not ours to read
+        pane = self.query_one("#right", PreviewArea)
+        keep, was = pane.scroll_offset.y, pane.virtual_size.height
+        self.query_one("#hint", Static).update(preview.hint())
+        self.query_one("#history", Static).update(Markdown(preview.text))
+
+        def restore() -> None:
+            # The line the reader was on moved down by however much the rendered text
+            # grew above it - rich's line count, not the source's (review Y2).
+            grew = max(0, pane.virtual_size.height - was)
+            pane.scroll_to(y=keep + grew, animate=False)
+        self.call_after_refresh(restore)
+
+    def put_preview(self, preview: Preview) -> None:
+        self.query_one("#pinned", Static).update(preview.pinned)
+        self.query_one("#hint", Static).update(preview.hint())
+        # Rendered once by rich and then only scrolled, so a long history scrolls smoothly
+        # (feedback 4, 5). Only what has been read is ever handed to it (T6).
+        self.query_one("#history", Static).update(Markdown(preview.text) if preview.text else "")
+        self.call_after_refresh(self.query_one("#right", PreviewArea).scroll_end, animate=False)
 
     @on(DataTable.RowHighlighted)
     def moved(self) -> None:
@@ -800,6 +1078,39 @@ class AgoraApp(App):
         self.query_one("#filterbar").add_class("on")
         self.query_one("#filter", Input).focus()
 
+    @on(Input.Changed, "#filter")
+    def filter_typed(self, event: Input.Changed) -> None:
+        """Filter on every keystroke, so Enter is never needed to see the result.
+
+        An input method (macOS Chinese, Japanese, Korean) keeps the composing text to
+        itself and takes Enter for the candidate list; the app only sees the committed
+        text. With "type it, then press Enter", a Chinese word could therefore be typed
+        and then never applied - the key that would have applied it never arrived
+        (T7 F3). Filtering as the text changes means the IME's Enter only ends the
+        composition, and the rows are already narrowing while the characters are picked.
+
+        `event.value` is what is committed so far, so a half-composed character is not
+        filtered on; the next keystroke re-filters anyway.
+
+        In the title mode this is all there is to it: the rows are in memory. In the
+        content mode a search also reads the agents' own stores, so it waits for the
+        typing to stop (`FILTER_IDLE`) - otherwise every keystroke of a word sets a
+        whole scan going, and the earlier ones do not stop when a new one starts
+        (review T7 P1).
+        """
+        text = event.value.strip()
+        if not self.content:
+            self.search(text)          # in memory: filter as fast as the keys arrive
+            return
+        self._pending_filter = text    # reading the agents' stores: wait for a pause
+        if self._filter_timer is not None:
+            self._filter_timer.stop()
+        self._filter_timer = self.set_timer(FILTER_IDLE, self.run_pending_filter)
+
+    def run_pending_filter(self) -> None:
+        self._filter_timer = None
+        self.search(self._pending_filter)
+
     def action_search_mode(self) -> None:
         self.content = not self.content
         self.query_one("#mode", Static).update("內文" if self.content else "標題")
@@ -808,12 +1119,26 @@ class AgoraApp(App):
 
     @on(Input.Submitted, "#filter")
     def filter_done(self, event: Input.Submitted) -> None:
+        # The filter is already applied (filter_typed); Enter only means "done - back
+        # to the table". With an IME it usually does not get here at all, which is why
+        # nothing depends on it any more (T7 F3). It must not search again either: in
+        # the content mode that was one more whole scan on top of the one the keystroke
+        # had started (review T7 P1).
+        text = event.value.strip()
+        if self._filter_timer is not None:
+            self._filter_timer.stop()
+            self._filter_timer = None
         self.query_one("#filterbar").remove_class("on")
         self.query_one("#table").focus()
-        self.search(event.value.strip())
+        if text != self.text:          # the keystroke before this one already searched
+            self.search(text)
 
     def on_key(self, event) -> None:
         if event.key == "escape" and self.query_one("#filterbar").has_class("on"):
+            if self._filter_timer is not None:
+                self._filter_timer.stop()
+                self._filter_timer = None
+            self._pending_filter = ""
             self.query_one("#filter", Input).value = ""
             self.query_one("#filterbar").remove_class("on")
             self.query_one("#table").focus()
@@ -827,12 +1152,47 @@ class AgoraApp(App):
             self.matches["agora"] = {f"agora:{u}" for u, _h, _s in self.index.search([((h.TEXT_KEY,), "~=", text)])}
             self.matches["import"] = set()
             self.say(f"內文搜尋「{text}」中…")
-            self.find_in_agents(text)
+            self.scan_agents(text)
         self.show()
+
+    def scan_agents(self, text: str) -> None:
+        """One agent scan at a time; the newest word waits for the running one.
+
+        A scan that finds nothing never comes back to the worker, so it cannot notice
+        it was replaced - with an input method the user pauses after each committed
+        character, and every pause started another whole scan beside the last (review
+        T7 Q1). Instead of starting one per pause: remember the newest word, and when
+        the scan that is running returns, start it only if the word moved on.
+        """
+        self._scan_wanted = text
+        if self._scanning is None:
+            self._begin_scan(text)
+
+    def _begin_scan(self, text: str) -> None:
+        self._scanning = text
+        self.find_in_agents(text)
+
+    def scan_finished(self, text: str) -> None:
+        """The worker's last word: it is not scanning any more, and if the filter has
+        moved on, the newest word goes now."""
+        self._scanning = None
+        if self._scan_wanted and self._scan_wanted != text:
+            self._begin_scan(self._scan_wanted)
 
     @work(thread=True, exclusive=True, group="search")
     def find_in_agents(self, text: str) -> None:
+        """Scan the agents for a content word, in a thread, and stop when replaced.
+
+        `exclusive=True` only marks the older workers cancelled - a thread that never
+        looks is a thread that runs to the end, and a word typed one letter at a time
+        left one whole scan per letter going at once (review T7 P1). So this checks
+        between results, and between agents: the work that is still running when the
+        screen has moved on stops as soon as it notices.
+        """
+        worker = get_current_worker()
         for agent in self.agents:   # the cache first (fast), then only what is not cached or is stale
+            if worker.is_cancelled:
+                return
             rows = [r for r in self.rows["import"] if r.agent == agent.name]
             missing = {r.key.split(":", 1)[1] for r in rows
                        if not cache.is_fresh(self.paths, agent.name, r.key.split(":", 1)[1], r.updated)}
@@ -841,12 +1201,17 @@ class AgoraApp(App):
                 later = agent.search_text(text, only=missing) if missing else ()
                 for source in (cache.search_cached(self.paths, agent.name, text), later):
                     for session_id in source:
+                        if worker.is_cancelled:
+                            return
                         if session_id not in seen:
                             seen.add(session_id)
                             self.call_from_thread(self.found, text, f"{agent.name}:{session_id}")
             except Exception:    # a search must never take the screen down
                 continue
-        self.call_from_thread(self.say, f"內文搜尋「{text}」完成")
+        if not worker.is_cancelled:
+            self.call_from_thread(self.say, f"內文搜尋「{text}」完成")
+        with contextlib.suppress(Exception):     # the app may be gone
+            self.call_from_thread(self.scan_finished, text)
 
     def found(self, text: str, key: str) -> None:
         if self.text == text and self.content and self.matches["import"] is not None:
@@ -930,10 +1295,24 @@ class AgoraApp(App):
         # same instant, and a -9 from the OOM killer is not an interruption. What we
         # know is that we sent SIGINT to a group that was still running.
         stopped = bool(self._stopped or code == 130)
+        action = argv[0] if argv else ""
         if stopped:
             note = "已中斷；重跑同一個動作會接著做"
         elif code == 0:
-            note = "完成"
+            if action == "delete":
+                # Rows that were all cloud-lost never enter the queue, so there is no
+                # Drive half to promise - the command says so, and we repeat it (W5)
+                note = ("已從本機刪除，背景移到 Drive 垃圾桶" if "背景移到 Drive 垃圾桶" in out
+                        else "已從本機刪除")
+            elif action in ("import", "merge"):
+                note = "已經存在本機，背景上傳中"
+            else:
+                note = "完成"
+        elif code == 3 and action == "delete":
+            # G4: delete stores nothing in the outbox; what waits is the Drive half, or
+            # (nothing queued) the uploads that were already there - the command says which
+            note = ("已從本機刪除；移到 Drive 垃圾桶要等之後的指令" if "移到 Drive 垃圾桶要等" in out
+                    else "已從本機刪除；背景上傳啟動失敗，outbox 要等之後的指令")
         elif code == 3:
             note = "已存進 outbox，之後的指令會自動再送"
         else:
@@ -944,7 +1323,10 @@ class AgoraApp(App):
         if code == 0 and sent:
             self.marked -= set(sent)
             self.show()
-        self.say(note, failed=code != 0)
+        # The note is in the window the user just read; leaving it on the status
+        # line too made the next screen look like it was still about that action
+        # (review Q4).
+        self.say("", failed=code != 0)
         return stopped
 
     def stop_group(self, pgid: int) -> None:
@@ -959,8 +1341,10 @@ class AgoraApp(App):
         self._groups.add(pgid)
         if killpg(pgid, signal.SIGINT):
             self._stopped = True
-            for sig in ESCALATION:
-                self.set_timer(ESCALATE_AFTER, lambda sig=sig: self._step(pgid, sig))
+            for step, sig in enumerate(ESCALATION, 1):
+                # step n waits n * ESCALATE_AFTER, so each signal gets its own
+                # window and the agent can wind up between them (review W1)
+                self.set_timer(ESCALATE_AFTER * step, lambda sig=sig: self._step(pgid, sig))
 
     def _step(self, pgid: int, sig) -> None:
         if group_alive(pgid):
@@ -1105,8 +1489,9 @@ class AgoraApp(App):
             return
         argv = argv_for("pull", rows, None, None)[0]
         answer = await self.push_screen_wait(Confirm(
-            f"把 {len(rows)} 個拉到本機？", ["取消", "確定"], "雲端沒有的會印一行提醒，本機的不動",
-            "雲端沒有的就刪掉本機的（等同 --not-exist-delete）"))
+            f"把 {len(rows)} 個拉到本機？", ["取消", "確定"], "雲端沒有的：印一行提醒，本機的不動",
+            "雲端沒有的就刪掉本機的（等同 --not-exist-delete）",
+            "⚠ 勾了：雲端沒有的，本機這份會被刪掉"))
         if answer and answer[0] == 1:
             await self.act(f"拉下 {len(rows)} 個", argv + (["--not-exist-delete"] if answer[1] else []),
                            sent=[r.key for r in rows])
@@ -1119,8 +1504,10 @@ class AgoraApp(App):
             return
         argv = argv_for("push", rows, None, None)[0]
         answer = await self.push_screen_wait(Confirm(
-            f"把 {len(rows)} 個寫回 Drive？", ["取消", "確定"], "同名的檔案直接覆蓋；Drive 上多的不動",
-            "雲端沒的就傳回去（等同 --not-exist-upload）"))
+            f"把 {len(rows)} 個寫回 Drive？", ["取消", "確定"],
+            "雲端沒有的：印一行提醒，不傳；同名的檔案直接覆蓋",
+            "雲端沒有的就傳回去（等同 --not-exist-upload）",
+            "⚠ 勾了：別台機器刪掉的 Session 會被傳回 Drive"))
         if answer and answer[0] == 1:
             await self.act("寫回 Drive", argv + (["--not-exist-upload"] if answer[1] else []),
                            sent=[r.key for r in rows])

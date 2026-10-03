@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
+
 import json
 import os
 import shutil
@@ -305,6 +307,43 @@ def test_merge_cache_notices_a_different_model(env, capsys, monkeypatch):  # rev
     monkeypatch.setenv("AGORA_OPENCODE_MODEL", "some/other-model")
     run(capsys, "merge", "session", a, b, "--agent", "opencode")
     assert len(env.prompts) == calls + 2              # both sources rewritten
+
+
+def test_merge_cache_notices_a_different_agent(env, capsys, monkeypatch):
+    """Q6: the agent is part of a summary's identity - another agent's summary is not
+    this one's to reuse. The model setting is pinned from the start, so the agent name
+    is the only thing that differs between the two runs."""
+    monkeypatch.setattr(cli, "_model_setting", lambda name: "some/model")
+    monkeypatch.setattr(cli, "load_agent", lambda name: _named(env, name))
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    calls = len(env.prompts)
+
+    code, _, err = run(capsys, "merge", "session", a, b, "--agent", "claude")
+    assert code == 0 and len(env.prompts) == calls + 2, "another agent writes its own"
+    assert "沿用" not in err
+
+
+def test_merge_cache_notices_a_different_prompt_version(env, capsys, monkeypatch):
+    """Q6: the prompt version is part of it too - a new prompt must be re-sent."""
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    calls = len(env.prompts)
+    monkeypatch.setattr(cli, "SUMMARY_PROMPT_VERSION", cli.SUMMARY_PROMPT_VERSION + 1)
+
+    code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert code == 0 and len(env.prompts) == calls + 2
+    assert "沿用" not in err
+
+
+def _named(agent, name):
+    """The same fake agent, answering to another name (merge asks it by name)."""
+    agent.name = name
+    return agent
 
 
 def test_merge_cache_refuses_a_broken_summary(env, capsys):  # re-validate before reuse
@@ -631,6 +670,31 @@ def test_delete_refuses_a_session_with_children(env, capsys):
     assert code == 1 and "子 Session" in err
 
 
+def test_a_session_the_cloud_lost_is_not_a_child_that_blocks_its_parent(env, capsys):
+    """Spec「其他指令遇到雲端沒有的 Session」: it does not count as somebody's child, so
+    it must not hold up a delete here, and must not make import think this branched."""
+    _, parent, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, child, _ = run(capsys, "import", "session", "--external-session-id", "ses_b",
+                      "--agent", "opencode")
+    _, merge, _ = run(capsys, "merge", "session", parent, child, "--agent", "opencode")
+    ulid = _lose_it_on_drive(capsys, merge)          # the merge is a child of parent, and Drive lost it
+
+    code, _, err = run(capsys, "delete", "session", parent, "--yes")
+    assert code == 0, err                        # not blocked by a child Drive dropped
+    index = store.Index(store.Paths.from_env())
+    assert index.header(ulid) is not None         # the lost child is still here, marked
+    assert index.missing_in_cloud() == [ulid]
+
+
+def _lose_it_on_drive(capsys, agora_id) -> str:
+    """Another machine deleted this one, and this machine synced that."""
+    ulid = agora_id.split(":")[1]
+    shutil.rmtree(Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid)
+    assert store.sync(store.Paths.from_env()).missing_in_cloud() == [ulid]
+    return ulid
+
+
 def test_edit_with_header_keeps_raw_and_system_fields(env, capsys):
     _, sid, _ = _import(capsys)
     paths = store.Paths.from_env()
@@ -892,7 +956,7 @@ def test_delete_several_at_once_children_first(env, capsys):  # user's call
     code, _, err = run(capsys, "delete", "session", f"{a},{m}", c)
     assert code == 1 and "這 3 個" in err                       # without --yes: the list, nothing deleted
     code, out, err = run(capsys, "delete", "session", a, m, c, "--yes")   # m goes first, then a can go
-    assert code == 0 and set(out.split()) == {a, m, c} and "已把 3 個" in err
+    assert code == 0 and set(out.split()) == {a, m, c} and "已從本機刪除 3 個" in err
     code, out, err = run(capsys, "delete", "session", b, "--yes")
     assert code == 0 and out == b
 
@@ -1034,21 +1098,23 @@ def test_delete_goes_through_when_the_pending_record_is_a_leftover(env, capsys):
 
 
 def test_editing_one_the_editor_kept_open_while_it_vanished(env, capsys, monkeypatch):
-    """F8: $EDITOR can be open for an hour; Drive is asked again before saving."""
+    """F8: $EDITOR can be open for an hour. The session is still on Drive when edit
+    starts, and gone by the time it is saved - only the second check sees that (H3)."""
     _, a, _ = _import(capsys)
     ulid = a.split(":")[1]
-    store.fetch_raw(store.Paths.from_env(), store.Drive(store.Paths.from_env()), ulid,
-                    store.Index(store.Paths.from_env()).header(ulid))
     import shutil
     from pathlib import Path as P
-    shutil.rmtree(P(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid)
+    remote = P(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid
+    assert remote.is_dir()
 
     def editor(old):                       # the delete happens while it is open
+        shutil.rmtree(remote)
         return {**old, "title": "改好了"}
 
     monkeypatch.setattr(cli, "_edit_in_editor", editor)
     code, _, err = run(capsys, "edit", "session", a)
     assert code == 1 and "雲端沒有" in err
+    assert not remote.exists()
 
 
 def test_continue_and_edit_survive_a_drive_without_a_sessions_folder(env, capsys, monkeypatch):
@@ -1065,6 +1131,33 @@ def test_continue_and_edit_survive_a_drive_without_a_sessions_folder(env, capsys
         code, _, err = run(capsys, *argv)
         assert code in (0, 1, 2), (argv, code, err)
         assert "TypeError" not in err and "非預期的錯誤" not in err, argv
+
+
+def test_an_interrupted_continue_finished_offline_still_keeps_the_work(env, capsys, monkeypatch):
+    """H1: the continue was interrupted, another machine deleted X, a full sync marked
+    it - and now we are offline. `_lost_in_cloud` cannot answer, so the marker is the
+    only thing stopping X from being written back (and revived)."""
+    _, parent, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = parent.split(":")[1]
+    env.sessions["ses_x"] = ["繼續的問題", "接著做完了"]
+    record = {"agora_id": parent, "agent": "opencode", "agent_session_id": "ses_x",
+              "dir": "/tmp", "before_count": 1, "parent": {"id": parent, "raw_md5": None},
+              "title": "接著做的"}
+    _, lock = cli._write_pending(paths, record)      # agora and the agent both died
+    lock.close()
+    shutil.rmtree(Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid)
+
+    index = store.sync(paths)                        # a whole listing: X is marked now
+    assert index.missing_in_cloud() == [ulid]         # G1: the leftover record does not block it
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "lsjson")  # and now Drive cannot be asked
+
+    _, _, err = run(capsys, "search", "session")
+    assert "在你接續的時候被別台機器刪掉了" in err
+    assert not (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid).exists(), \
+        "X must not come back to Drive"
+    made = [hdr for _, hdr, _ in store.sync(paths, throttle=False).search([]) if hdr["id"] != parent]
+    assert len(made) == 1 and [p["id"] for p in made[0]["agora"]["parents"]] == [parent]
 
 
 def test_a_continue_whose_session_vanished_keeps_the_work_as_its_own_session(env, capsys):
@@ -1106,11 +1199,233 @@ def test_merge_refuses_a_source_the_cloud_lost(env, capsys):
     assert not env.launched
 
 
+def test_pull_reports_what_it_skipped(env, capsys):
+    """P3: the summary line counts what it pulled, and says how many were already the
+    newest instead of quietly counting them as pulled."""
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    # the import already left a copy here, so the "pulled one" case needs it gone
+    (paths.mirror / a.split(":")[1] / "session.md").unlink()
+    code, out, err = run(capsys, "pull", "session", a)
+    assert code == 0 and "拉下 1 個" in out and "略過" not in err
+    code, out, err = run(capsys, "pull", "session", a)
+    assert code == 0 and "拉下 0 個" in out and "已經是新的，略過 1 個" in err
+
+
+def test_merge_checks_every_source_before_it_pays_for_any_summary(env, capsys):
+    """P2: the second source is the one Drive lost. The first one's summary costs an
+    AI call, so all of them are checked first - nothing is paid for."""
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["另一個", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    lost = _lose_it_on_drive(capsys, b)
+    env.prompts.clear()
+
+    code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert code == 1 and lost in err
+    assert env.prompts == [], "no AI call before the sources are all checked"
+
+
+def test_an_interrupted_merge_says_its_own_re_run_hint(env, capsys, monkeypatch):
+    """P4: a merge leaves the summaries it already wrote, not a pending continue."""
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["另一個", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+
+    def interrupted(prompt, workdir):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(env, "summarize", interrupted)
+    code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert code == 130 and "沿用已寫好的要約" in err
+    assert "自動補存" not in err
+
+
 def test_delete_of_one_the_cloud_lost_removes_only_the_local_copy(env, capsys):
     a, ulid = _lost_in_the_cloud(capsys)
     code, out, err = run(capsys, "delete", "session", a, "--yes")
     assert code == 0 and out.strip() == a and "只刪本機這份" in err
     assert store.Index(store.Paths.from_env()).header(ulid) is None
+
+
+def test_a_deleted_session_is_queued_for_the_trash_and_the_command_returns(env, capsys, monkeypatch):
+    """3.1 / 4.2: the foreground makes it disappear here and hands the Drive half to the
+    background. The command is done when the session is safe locally - it does not wait
+    for the purge, because that is the whole point of the queue."""
+    from agora import background
+    _, sid, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = sid.split(":")[1]
+    started = []
+    monkeypatch.setattr(background, "start", lambda paths=None: started.append(1) or background.STARTED)
+
+    code, out, err = run(capsys, "delete", "session", sid, "--yes")
+
+    assert code == 0 and out == sid and "背景移到 Drive 垃圾桶" in err
+    assert store.queued_for_trash(paths) == {ulid}, "the Drive half is still to do"
+    assert started, "and something has to go and do it"
+    # still on Drive: this command did not wait for that part
+    assert (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid).is_dir()
+
+
+def test_a_cloud_lost_session_is_not_queued_and_starts_nothing(env, capsys, monkeypatch):
+    """L6: there is nothing on Drive to purge, so the queue stays empty - and a uploader
+    started for an empty queue is a process that has nothing to do."""
+    from agora import background
+    a, ulid = _lost_in_the_cloud(capsys)
+    started = []
+    monkeypatch.setattr(background, "start", lambda paths=None: started.append(1) or background.STARTED)
+
+    code, _, err = run(capsys, "delete", "session", a, "--yes")
+
+    assert code == 0 and "雲端沒有，只刪本機這份" in err
+    assert store.queued_for_trash(store.Paths.from_env()) == set()
+    assert not started
+
+
+def test_delete_still_starts_the_uploader_for_another_session_waiting(env, capsys, monkeypatch):
+    """review W1: the opening sync no longer starts anything, so `delete` has to start the
+    uploader at the end - not only for the queue it just filled, but for whatever else
+    was already waiting, or one command would strand another command's upload."""
+    from agora import background
+    _, sid, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    shutil.rmtree(Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / sid.split(":")[1])
+    started = []
+    monkeypatch.setattr(background, "start", lambda p=None: started.append(p) or background.STARTED)
+    monkeypatch.setattr(store, "outbox_count", lambda p: 1)     # something else is waiting
+    run(capsys, "search", "session", "--filter", "text~=Markdown", "--no-sync")
+    before = len(started)      # whatever a command starts on its own is not this one's doing
+
+    code, _, err = run(capsys, "delete", "session", sid, "--yes")
+
+    assert code == 0
+    assert store.queued_for_trash(paths) == set()     # Drive lost it: nothing to purge
+    assert len(started) > before, "the uploader starts for the outbox too, not only for the queue"
+    assert "雲端沒有" in err
+
+
+def test_delete_says_exit_3_when_the_uploader_could_not_start(env, capsys, monkeypatch):
+    """W4: the Drive half is queued and safe, but with no uploader nobody would do it -
+    so this is the old exit 3 with the old words, not a cheerful「背景移到」."""
+    from agora import background
+    _, sid, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = sid.split(":")[1]
+    started = []
+    monkeypatch.setattr(background, "start", lambda p=None: started.append(p) or background.FAILED)
+
+    code, _, err = run(capsys, "delete", "session", sid, "--yes")
+
+    assert code == 3 and started
+    assert "背景上傳啟動失敗" in err and "要等之後的指令" in err
+    assert store.queued_for_trash(paths) == {ulid}, "the queue is what the next command picks up"
+    assert store.Index(paths).header(ulid) is None
+
+
+def test_a_continued_session_deleted_elsewhere_is_saved_as_a_continue(env, capsys, monkeypatch):
+    """G2: a continue that finds its session gone is saved as a session of its own, and it
+    is a `continue` - the conversation is the user's work. An edit is not a relation at
+    all, so its rescue keeps X's."""
+    _, sid, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = sid.split(":")[1]
+    env.sessions["ses_a"].append("接著做完了")
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")      # the write stays in the outbox
+    code, _, err = run(capsys, "continue", "session", sid, "--agent", "opencode", "--dir", "/tmp")
+    monkeypatch.delenv("FAKE_RCLONE_FAIL")
+    assert code == 3, err                       # it is safe here, just not on Drive yet
+    assert ulid in store.outbox_ulids(paths)
+    shutil.rmtree(Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid)
+    assert store.upload_batch(store.Drive(paths), paths) == []
+
+    kept = [p.name for p in (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions").iterdir()
+            if p.is_dir()]
+    assert ulid not in kept
+    (new_id,) = kept
+    hdr, _ = h.split_document((Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions"
+                               / new_id / "session.md").read_text(encoding="utf-8"))
+    assert h.agora_of(hdr)["relation"] == "continue"
+
+
+def test_the_next_command_says_how_many_are_waiting_for_the_drive_trash(env, capsys):
+    """N10 / design L4: a purge that failed leaves the session on Drive, and the next
+    command has to say so. With a real background process those lines only reach
+    upload.log, so without this the user never finds out (review W2)."""
+    paths = store.Paths.from_env()
+    paths.trash_queue.mkdir(parents=True, exist_ok=True)
+    (paths.trash_queue / h.new_ulid()).write_text("", encoding="utf-8")
+    (paths.trash_queue / h.new_ulid()).write_text("", encoding="utf-8")
+
+    _, _, err = run(capsys, "search", "session", "--filter", "text~=沒有這個", "--no-sync")
+    assert "有 2 個等著移到 Drive 垃圾桶" in err
+
+    # and not while the background is on it: that run says so itself
+    with store.hold_upload_lock(paths):
+        _, _, quiet = run(capsys, "search", "session", "--filter", "text~=沒有這個", "--no-sync")
+    assert "等著移到 Drive 垃圾桶" not in quiet
+
+
+def test_a_session_deleted_before_its_upload_never_goes_up(env, capsys, monkeypatch):
+    """L3 / spec「改完馬上刪」: an edit that has not reached Drive yet is dropped on the
+    way out, not sent first.
+
+    Nothing is stubbed here on purpose (review W1): with `background.start` replaced, the
+    opening sync could not have started an upload either, so the test passed whatever
+    `delete` did. Inline instead, and the assertion is about rclone: while delete runs,
+    nothing is copied."""
+    calls_log = Path(os.environ["FAKE_REMOTE"]).parent / "calls.log"
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")        # the import cannot go up
+    _, sid, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = sid.split(":")[1]
+    assert ulid in store.outbox_ulids(paths), "the setup has to leave it waiting"
+    monkeypatch.delenv("FAKE_RCLONE_FAIL")
+    calls_log.unlink(missing_ok=True)
+
+    code, _, _ = run(capsys, "delete", "session", sid, "--yes")
+
+    assert code == 0
+    copied = [c for c in calls_log.read_text().splitlines() if '"copy' in c] \
+        if calls_log.exists() else []
+    assert copied == [], f"delete sent the version it is deleting: {copied}"
+    assert ulid not in store.outbox_ulids(paths)
+    assert not (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid).exists()
+
+
+def test_pull_refuses_a_session_queued_for_deletion(env, capsys):
+    """3.3 / review S3: refused has to be counted as refused. pull counts what it handled
+    as done, so saying the line and returning would end with「拉下 1 個」and exit 0 - the
+    same thing push would have reported as a failure."""
+    from agora import cache
+    _, sid, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = sid.split(":")[1]
+    store.forget_local(paths, ulid)
+    paths.trash_queue.mkdir(parents=True, exist_ok=True)
+    (paths.trash_queue / ulid).write_text("", encoding="utf-8")
+    capsys.readouterr()
+
+    done, failed = cache.pull(paths, [ulid], {})
+
+    assert (done, failed) == (0, 1)
+    assert "正在刪除，不能 pull" in capsys.readouterr().err
+    assert store.Index(paths).header(ulid) is None, "and it did not come back"
+
+
+def test_a_child_the_cloud_lost_does_not_make_import_branch(env, capsys):
+    """The other half of「不算成別人的子 Session」: a session whose only child was
+    deleted on another machine has not branched, so importing its source again
+    updates it in place instead of forking a new Session off it."""
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    _, merge, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    _lose_it_on_drive(capsys, merge)          # the child is gone from Drive, marked here
+
+    env.sessions["ses_a"].append("又聊了一句")    # the source grew, so this is an update
+    code, out, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code == 0 and out.strip() == a, "updated in place, no new branch"
 
 
 def test_importing_the_same_source_again_makes_a_new_session(env, capsys):
@@ -1121,3 +1436,39 @@ def test_importing_the_same_source_again_makes_a_new_session(env, capsys):
                        "--agent", "opencode")
     assert code == 0 and out.strip() != a
     assert store.Index(store.Paths.from_env()).header(ulid) is not None   # the old one stays
+
+
+def test_delete_drops_a_version_an_uploader_left_aside_too(env, capsys, monkeypatch):
+    """K1 follow-on: a `.done-X` left by a crash counts as waiting now, and the next
+    background puts it back and sends it. Deleting X must take it too, or the session
+    the user just deleted comes back from the outbox."""
+    from agora import background
+    _, sid, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    ulid = sid.split(":")[1]
+    aside = paths.outbox / f".done-{ulid}"
+    aside.mkdir(parents=True)
+    (aside / "session.md").write_text("當掉時留在一旁的\n", encoding="utf-8")
+    monkeypatch.setattr(background, "start", lambda p=None: background.STARTED)
+
+    code, _, err = run(capsys, "delete", "session", sid, "--yes")
+
+    assert code == 0, err
+    assert not aside.exists()
+    assert store.outbox_count(paths) == 0
+
+
+def test_a_delete_with_nothing_queued_does_not_blame_the_trash_when_the_uploader_fails(env, capsys, monkeypatch):
+    """G4: a cloud-lost session queues nothing; the uploader was started for what was
+    already in the outbox, so that is what has to wait - not a「移到 Drive 垃圾桶」."""
+    from agora import background
+    a, ulid = _lost_in_the_cloud(capsys)
+    paths = store.Paths.from_env()
+    (paths.outbox / "01AAAAAAAAAAAAAAAAAAAAAAAA").mkdir(parents=True)   # something else waiting
+    monkeypatch.setattr(background, "start", lambda p=None: background.FAILED)
+
+    code, _, err = run(capsys, "delete", "session", a, "--yes")
+
+    assert code == 3, err
+    assert "背景上傳啟動失敗，outbox 的上傳要等之後的指令" in err
+    assert "垃圾桶" not in err

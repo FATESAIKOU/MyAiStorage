@@ -6,7 +6,10 @@ cache/state pair on the same fake remote. Mirrors test_store.py conventions.
 
 from __future__ import annotations
 
+import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
+
 import hashlib
+import fcntl
 import json
 import sys
 from pathlib import Path
@@ -57,7 +60,7 @@ def T(keyword: str) -> list:
 
 def _save(paths, hdr, body="## user\n把 CSV 轉成 Markdown 表格\n", raw=b'{"x": 1}'):
     folder = store.stage(paths, hdr, body, raw)
-    store.push_one(store.Drive(paths), folder)
+    store.upload_batch(store.Drive(paths), paths)
     return hdr["id"].split(":", 1)[1]
 
 
@@ -126,9 +129,8 @@ def test_session_md_upload_failure_leaves_only_raw(remote, tmp_path, monkeypatch
     hdr = _header()
     folder = store.stage(paths, hdr, "## user\nCSV\n", b"{}")
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "session.md")
-    with pytest.raises(store.StoreError):
-        store.push_one(store.Drive(paths), folder)
     ulid = hdr["id"].split(":", 1)[1]
+    assert store.upload_batch(store.Drive(paths), paths) == [ulid]
     assert sorted(p.name for p in (remote / "agora" / "sessions" / ulid).iterdir()) == [h.agora_of(hdr)["raw"]["file"]]
     assert store.sync(machine2(tmp_path)).search(T("CSV")) == []
 
@@ -144,7 +146,7 @@ def test_merge_without_raw_is_indexed(remote, tmp_path):  # U-ST-18, N5
     hdr = _header()
     hdr.pop("source", None)
     folder = store.stage(paths, hdr, "## user\n合併結果表格\n", None)
-    store.push_one(store.Drive(paths), folder)
+    store.upload_batch(store.Drive(paths), paths)
     assert "raw" not in h.agora_of(hdr)
     assert store.sync(machine2(tmp_path)).search(T("表格"))
 
@@ -217,10 +219,33 @@ def test_a_session_in_the_outbox_is_not_marked(remote, monkeypatch, capsys):  # 
     assert ulid in store.outbox_ulids(paths)               # and it really is still staged
 
 
+def test_a_session_being_continued_is_not_marked(remote):
+    """Spec「標記：**不在接續中的**才標」: a continue that is *running* right now is not
+    a delete on another machine. G1 is what makes this reachable - a leftover record
+    no longer blocks the mark, a held lock still does."""
+    paths = store.Paths.from_env()
+    ulid = _save(paths, _header())
+    assert store.sync(paths).search(T("CSV"))
+    import shutil
+    shutil.rmtree(remote / "agora" / "sessions" / ulid)
+    paths.pending.mkdir(parents=True, exist_ok=True)
+    lock = open(paths.pending / f"{ulid}.json", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)              # an agent is working on it
+
+    index = store.sync(paths)
+    assert index.missing_in_cloud() == []         # not marked while it is in flight
+    assert index.header(ulid) is not None
+
+    lock.close()                                  # the run ends (or gives up)
+    assert store.sync(paths).missing_in_cloud() == [ulid]
+
+
 def test_a_staged_session_the_index_cannot_read_is_not_marked_either(remote, monkeypatch, capsys):
-    """F6/G4: here the exclusion in `sync` is the *only* thing protecting the session -
-    `_index_outbox` cannot index a broken session.md, so nothing clears the marker
-    afterwards. Without the exclusion this one is marked as deleted on Drive."""
+    """F6/G4, with the truth spelled out (review H2): for a session we *can* index, the
+    exclusion is a second layer - `_index_outbox` runs after the marking and `Index.put`
+    drops the marker again. This test is not that case: a broken session.md is
+    quarantined by `push_outbox` before anything is marked, so this one was never
+    markable. Kept as a second observation of the rule, not as a mutation guard."""
     paths = store.Paths.from_env()
     _save(paths, _header("先讓 Drive 上有 sessions/"))
     capsys.readouterr()
@@ -254,13 +279,3 @@ def test_broken_outbox_entry_quarantined(remote, capsys):  # new, C2/C4
     store.sync(paths)
     assert (paths.outbox / ".bad" / hdr["id"].split(":", 1)[1]).is_dir()
     assert "壞了" in capsys.readouterr().err
-
-
-def test_push_one_lists_only_its_folder(remote):  # new, C7
-    paths = store.Paths.from_env()
-    _save(paths, _header())
-    listings = [c for c in calls(remote)
-                if "lsjson" in c and any("gdrive:sessions" in t for t in gdrive_targets(c))]
-    assert listings, "push_one should verify with list_one"
-    assert all(t != "gdrive:sessions" and t.startswith("gdrive:sessions/")
-               for c in listings for t in gdrive_targets(c) if "gdrive:sessions" in t)

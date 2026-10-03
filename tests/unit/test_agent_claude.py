@@ -10,6 +10,8 @@ removed, so the real ~/.claude is never touched (CL4).
 
 from __future__ import annotations
 
+import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
+
 import base64
 import json
 import os
@@ -452,9 +454,11 @@ def test_summarize_runs_in_the_given_workdir(claude_env, tmp_path):
 
 def test_summarize_timeout_is_configurable(claude_env, tmp_path, monkeypatch):
     monkeypatch.setenv("AGORA_SUMMARIZE_TIMEOUT", "12")
-    assert C._summarize_timeout() == 12.0
+    assert base.summarize_timeout() == 12
     monkeypatch.delenv("AGORA_SUMMARIZE_TIMEOUT")
-    assert C._summarize_timeout() == 600.0
+    assert base.summarize_timeout() == 600
+    monkeypatch.setenv("AGORA_SUMMARIZE_TIMEOUT", "abc")   # B1: unreadable, not a crash
+    assert base.summarize_timeout() == 600
 
 
 def test_summarize_failures_raise_agent_error(claude_env, tmp_path, monkeypatch):
@@ -857,3 +861,69 @@ def test_search_text_goes_on_past_an_odd_line(claude_env):
     (claude_env["proj"] / f"{odd}.jsonl").write_text(
         '["type","user"]\n{"type":"user","message":{"content":"找得到的字"}}\n', encoding="utf-8")
     assert odd in list(C.ADAPTER.search_text("找得到"))
+
+
+# --- what T4 changed and had to change back (review T4 K1, K2) ----------------
+
+
+def _write_session(claude_env, lines: list[dict], name: str = SID) -> Path:
+    proj = claude_env["proj"]
+    (proj / f"{name}.jsonl").write_text(
+        "\n".join(json.dumps(line, ensure_ascii=False) for line in lines) + "\n",
+        encoding="utf-8")
+    return proj / f"{name}.jsonl"
+
+
+def _local_command(text: str) -> dict:
+    return {"type": "user", "cwd": "/tmp/my-proj.v2",
+            "message": {"role": "user", "content": f"<command-name>/model</command-name>\n{text}"}}
+
+
+def test_a_local_command_is_not_the_sessions_title(claude_env):
+    """K1: the first line is a local command. The listing skipped it, so the export
+    has to skip it too - otherwise the session imports as `<command-name>…` while the
+    row the user clicked said what they were doing."""
+    _write_session(claude_env, [
+        _local_command("/model"),
+        {"type": "user", "cwd": "/tmp/my-proj.v2",
+         "message": {"role": "user", "content": "把 CSV 轉成表格"}},
+        {"type": "assistant", "cwd": "/tmp/my-proj.v2",
+         "message": {"role": "assistant", "content": [{"type": "text", "text": "好的，三個步驟"}]}},
+    ])
+    assert C.ADAPTER.export(SID).title == "把 CSV 轉成表格"
+    assert [item.title for item in C.ADAPTER.list_sessions()] == ["把 CSV 轉成表格"]
+
+
+def test_a_nested_type_before_its_own_still_counts_as_that_kind(claude_env):
+    """K2: the assistant line says `"type":"message"` (nested, and first) before its
+    own `"type":"assistant"`.
+
+    Reading the first `"type"` in the raw text skipped the line, so the preview showed
+    the older user message instead of the answer - and search never found anything
+    the assistant said at all.
+    """
+    (claude_env["proj"] / "nested.jsonl").write_text(
+        '{"type": "user", "cwd": "/tmp/my-proj.v2",'
+        ' "message": {"role": "user", "content": "把 CSV 轉成表格"}}\n'
+        '{"type": "message", "message": {"role": "assistant", "model": "opus",'
+        ' "content": [{"type": "tool_use", "name": "Bash", "input": {}}]},'
+        ' "cwd": "/tmp/my-proj.v2", "type": "assistant"}\n'
+        '{"type": "text", "text": "好的，三個步驟 4567", "type": "assistant",'
+        ' "cwd": "/tmp/my-proj.v2", "message": {"role": "assistant",'
+        ' "content": [{"type": "text", "text": "好的，三個步驟 4567"}]}}\n',
+        encoding="utf-8")
+    assert C.ADAPTER.last_message("nested") == ("assistant", "好的，三個步驟 4567")
+    assert list(C.ADAPTER.search_text("4567")) == ["nested"]
+
+
+def test_summarize_timeout_still_reads_a_fraction(claude_env, monkeypatch):
+    """K3: claude's float() understood "1.5"; the shared reader must as well."""
+    monkeypatch.setenv("AGORA_SUMMARIZE_TIMEOUT", "1.5")
+    assert base.summarize_timeout() == 1.5
+
+
+def test_warn_is_marked_the_way_every_agora_line_is(capsys):
+    """B5: four stderr lines went through their own print; the prefix is the part a
+    user greps for, so it is worth one test (review T4)."""
+    base.warn("測試訊息")
+    assert capsys.readouterr().err == "[agora] 測試訊息\n"

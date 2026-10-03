@@ -22,6 +22,8 @@ Run: uv run pytest -q -m integration tests/integration/test_pull_push.py
 
 from __future__ import annotations
 
+import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
+
 import json
 import os
 from pathlib import Path
@@ -57,6 +59,11 @@ def env(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("AGORA_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("AGORA_FOLDER_NAME", "agora-test")
     monkeypatch.delenv("AGORA_RCLONE", raising=False)
+    # This file is about pull/push and the CLI, not about the background uploader:
+    # in the foreground the upload is done when the command returns, which is what
+    # these assertions have always meant. The detached uploader has its own tests
+    # (tests/integration/test_background_writes.py, tests/unit/test_background.py).
+    monkeypatch.setenv("AGORA_UPLOAD", "inline")
     # the adapter has to read the same opencode database the session below goes into
     monkeypatch.setenv("HOME", str(REAL_HOME))
     for var in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
@@ -205,10 +212,13 @@ def resync(env) -> str:
 def purge_on_drive(env, agora_id: str) -> None:
     """Another machine deleted it: the folder is gone from Drive, nothing else."""
     drive = store.Drive(env["paths"])
+    # not check=True: rclone exits 3 for a folder that is not there, and "already gone"
+    # is one of the states this helper is used to create (store.delete_session settles
+    # it the same way - S1-4b)
     subprocess.run(["rclone", "--config", str(REAL_CONF),
                     "--drive-root-folder-id", drive.folder_id(),
                     "purge", f"gdrive:sessions/{agora_id.split(':', 1)[1]}"],
-                   check=True, capture_output=True)
+                   capture_output=True)
 
 
 def test_a_session_deleted_elsewhere_is_kept_here_and_marked(env):

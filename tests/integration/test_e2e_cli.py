@@ -18,6 +18,8 @@ Run: uv run pytest -q -m integration tests/integration/test_e2e_cli.py
 
 from __future__ import annotations
 
+import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
+
 import json
 import os
 from pathlib import Path
@@ -60,6 +62,11 @@ def e2e(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("AGORA_FOLDER_NAME", "agora-test")
     monkeypatch.delenv("AGORA_RCLONE", raising=False)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    # This file is about pull/push and the CLI, not about the background uploader:
+    # in the foreground the upload is done when the command returns, which is what
+    # these assertions have always meant. The detached uploader has its own tests
+    # (tests/integration/test_background_writes.py, tests/unit/test_background.py).
+    monkeypatch.setenv("AGORA_UPLOAD", "inline")
     monkeypatch.setenv("AGORA_CLAUDE_HOME", str(REAL_HOME))
     wrapper = tmp_path / "claude-noninteractive"  # E1: no shebang roulette
     wrapper.write_text(f"#!/bin/sh\nexec {sys.executable} {WRAPPER_SRC} \"$@\"\n")

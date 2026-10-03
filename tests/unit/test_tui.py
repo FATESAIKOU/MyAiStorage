@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
+
 import asyncio
+import contextlib
 import json
+import os
+import pathlib
 import signal
+import subprocess
+import sys
 import threading
+import time
 
 import pytest
+from textual.widget import Widget
+from textual.widgets import Static
 
 from agora import header as h
-from agora import store, tui
+from agora import cache, store, tui
 from agora.agents.base import Exported, Listed
 
 
@@ -114,18 +124,22 @@ def test_filter_by_words_or_by_content_matches():
     assert [r.key for r in tui.filtered(rows, "", {"agora:c"})] == ["agora:c"]
 
 
-def test_previews_show_the_whole_history_and_never_fail():
+def test_previews_show_what_was_read_and_never_fail():
     normal = _hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "一般")
     paths, index = _index((normal, "## user\n第一句\n\n## assistant\n最後的回答\n"))
-    pinned, history = tui.agora_preview(paths, index, normal["id"])
-    assert "dir /tmp/p" in pinned and "tags 驗收" in pinned
-    assert history.startswith("## user") and history.endswith("最後的回答")
-    pinned, history = tui.import_preview(FakeAgent("claude", [], ("assistant", "好")), "s")
-    assert pinned.startswith("最後一則（assistant）") and history == "## assistant\n好"
-    assert tui.import_preview(FakeAgent("claude", [], None), "s") == ("", "")
-    assert tui.import_preview(FakeAgent("claude", [], "boom"), "s")[1] == ""
-    pinned, history = tui.import_preview(FakeAgent("claude", [], texts={"s": ["問題", "回答"]}), "s", full=True)
-    assert "## user\n問題" in history and history.endswith("回答")
+    preview = tui.agora_preview(paths, index, normal["id"])
+    assert "dir /tmp/p" in preview.pinned and "tags 驗收" in preview.pinned
+    assert preview.text.endswith("最後的回答") and "第一句" in preview.text
+    assert not preview.text.startswith("---"), "the front matter is not conversation"
+    assert preview.more() is False and preview.hint() == ""      # a short file is all here
+    one = tui.import_preview(FakeAgent("claude", [], ("assistant", "好")), "s")
+    assert one.pinned.startswith("最後一則（assistant）") and one.text == "## assistant\n好"
+    assert not one.more() and one.hint() == "", "no file, so there is nothing above it"
+    assert tui.import_preview(FakeAgent("claude", [], None), "s").text == ""
+    broken = tui.import_preview(FakeAgent("claude", [], "boom"), "s")
+    assert broken.text == "" and broken.hint() == ""
+    whole = tui.import_preview(FakeAgent("claude", [], texts={"s": ["問題", "回答"]}), "s", full=True)
+    assert "問題" in whole.text and whole.text.endswith("回答")
 
 
 def test_actions_and_what_they_run():
@@ -196,6 +210,28 @@ class FakeProc:
     def send_signal(self, sig):
         self.signals.append(int(sig))
         self.done.set()
+
+
+class DripProc(FakeProc):
+    """A process whose lines arrive one at a time, when the test opens the gate.
+
+    One that prints everything at once cannot show that the bar *walks* - only that
+    it ends up somewhere.
+    """
+
+    def __init__(self, lines):
+        super().__init__(hang=True)
+        self.gates = [threading.Event() for _ in lines]
+
+        def arriving():
+            for line, gate in zip(lines, self.gates):
+                gate.wait(timeout=10)
+                yield f"{line}\n"
+        self.stdout = arriving()
+
+    def send(self, n: int) -> None:
+        """Let the n-th line out."""
+        self.gates[n].set()
 
 
 def _spawn(proc=None, **kw):
@@ -413,7 +449,7 @@ def test_the_progress_bar_follows_the_k_of_n_lines():
                 bar = app.screen.query_one("#bar")
                 if bar.total:
                     break
-            assert (bar.progress, bar.total) == (2, 2)
+            assert (bar.progress, bar.total) == (1, 2)      # 2/2 started, so one is finished
     _run(go)
 
 
@@ -434,7 +470,7 @@ def test_progress_is_read_only_from_our_own_lines():   # review V8
                 bar = app.screen.query_one("#bar")
                 if bar.total:
                     break
-            assert (bar.progress, bar.total) == (1, 1)
+            assert (bar.progress, bar.total) == (0, 1)      # 1/1 means the first started
     _run(go)
 
 
@@ -506,9 +542,10 @@ def test_esc_stops_the_group_and_the_window_says_it_was_interrupted(group_calls,
             proc.done.set()
             assert _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
             await pilot.press("space")                      # close the result window
+            assert "重跑同一個動作會接著做" in " ".join(str(app.screen.lines).split())
             await pilot.press("space")                      # close the result window
-            await _wait(lambda: "重跑" in str(app.query_one("#msg").render()), pilot)
-            assert "重跑同一個動作會接著做" in str(app.query_one("#msg").render())
+            await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
+            assert str(app.query_one("#msg").render()) == ""      # Q4
     _run(go)
 
 
@@ -664,8 +701,12 @@ def test_a_second_escape_does_not_resend_or_restart_the_escalation(group_calls, 
 def test_a_failure_line_with_a_timestamp_in_it_is_not_progress():
     """review L1: `[agora] … 拉不到：rclone … 2026/10/03` read as 2026 of 10."""
     app, _ = _app([])
-    spawn, _ = _spawn(lines=["[agora] pull 拉不到：rclone copyto 失敗 2026/10/03 12:00:00 ERROR",
-                              "[agora] pull 1/2"], hang=True)
+    # the progress line comes first and the failure line last: the bar reads the
+    # newest match, so a loose `k/N` anywhere in a line would take the date instead
+    spawn, _ = _spawn(lines=["[agora] pull 1/2",
+                              "[agora] pull 拉不到：rclone copyto 失敗，3/4 個檔案，"
+                              "2026/10/03 12:00:00 ERROR"],
+                       hang=True)
     app.spawn = spawn
 
     async def go():
@@ -681,7 +722,7 @@ def test_a_failure_line_with_a_timestamp_in_it_is_not_progress():
                 bar = app.screen.query_one("#bar")
                 return (bar.progress, bar.total) if bar.total else None
             await _wait(lambda: progress() is not None, pilot)
-            assert progress() == (1, 2)
+            assert progress() == (0, 2)      # 1/2 means the first one started (Q3)
     _run(go)
 
 
@@ -1102,7 +1143,7 @@ def test_pull_and_push_ask_before_doing_it_and_offer_the_flag():   # spec 3.2
     _run(go)
 
 
-def test_pull_without_the_option_sends_no_flag():
+def test_push_without_the_option_sends_no_flag():
     app = _marked_app(None)
 
     async def go():
@@ -1111,7 +1152,7 @@ def test_pull_without_the_option_sends_no_flag():
             await pilot.press("P")
             await pilot.pause()
             assert isinstance(app.screen, tui.Confirm)
-            assert app.screen.extra.startswith("雲端沒的就傳回去")
+            assert app.screen.extra == "雲端沒有的就傳回去（等同 --not-exist-upload）"
             await pilot.press("down", "enter")            # 確定, unticked
             await _wait(lambda: app._last_spawned, pilot)
             assert app._last_spawned[-1][:2] == ["push", "session"]
@@ -1326,8 +1367,8 @@ def test_the_progress_bar_walks_from_one_to_five():
                     return None
                 bar = app.screen.query_one("#bar")
                 return (bar.progress, bar.total) if bar.total else None
-            await _wait(lambda: progress() == (5, 5), pilot)
-            assert progress() == (5, 5)
+            await _wait(lambda: progress() == (4, 5), pilot)
+            assert progress() == (4, 5)      # the fifth started, so four are finished
     _run(go)
 
 
@@ -1351,8 +1392,1116 @@ def test_interrupting_a_merge_returns_to_the_list_and_says_it_carries_on(group_c
             alive[4242] = False
             proc.done.set()
             await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert "重跑同一個動作會接著做" in " ".join(str(app.screen.lines).split())
             await pilot.press("space")
-            await _wait(lambda: "重跑" in str(app.query_one("#msg").render()), pilot)
-            assert "重跑同一個動作會接著做" in str(app.query_one("#msg").render())
-            assert not isinstance(app.screen, tui.ModalScreen)      # back at the list
+            assert _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)   # back at the list
+            assert str(app.query_one("#msg").render()) == ""       # nothing left over (Q4)
+    _run(go)
+
+
+# --- 4.1b: a real process group, a real signal (review V7) --------------------
+
+#: A leader that exits on SIGINT the way `agora` does (KeyboardInterrupt -> 130)
+#: and leaves behind a grandchild that ignores SIGINT and SIGTERM - the case
+#: review M1 is about, where our own child is gone and the agent is not.
+LEADER = """
+import os, signal, subprocess, sys, time
+signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
+# DEVNULL, not the leader's stdout: the agent agora writes a summary with has its
+# own pipe, so it does not hold the interactive mode's pipe open - and a grandchild
+# that did would keep the leader a zombie, which is what made this test blind to
+# the "only look at the leader" bug (review X1).
+child = subprocess.Popen([sys.executable, "-c", "import signal, time\\n"
+                         "signal.signal(signal.SIGINT, signal.SIG_IGN)\\n"
+                         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
+                         "time.sleep(300)"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+# its own file, not stdout: the waiting window's reader thread owns that pipe
+open(sys.argv[1], "w").write(f"{os.getpgid(0)} {child.pid}")
+time.sleep(300)
+"""
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def test_esc_stops_a_real_process_group_with_a_stubborn_grandchild(monkeypatch, tmp_path):
+    """The real thing, once (review V7, M1): the whole group goes and nothing is left
+    behind - not even a grandchild that ignores SIGINT and SIGTERM.
+
+    The leader behaves like `agora` does under Esc: it catches the signal and exits
+    130 while the agent it started keeps running. A fake process cannot show that,
+    because its death is what the fake checks."""
+    monkeypatch.setattr(tui, "ESCALATE_AFTER", 0.5)
+    sent: list[int] = []
+    real_killpg = tui.killpg
+    monkeypatch.setattr(tui, "killpg", lambda pgid, sig: (sent.append(int(sig)),
+                                                          real_killpg(pgid, sig))[1])
+    paths, _ = _index((_hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "甲", sid="s1"), "## user\nx\n"),
+                      (_hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "乙", sid="s2"), "## user\nx\n"))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+    pidfile = tmp_path / "group.pids"
+    pids: dict[str, int] = {}
+
+    def spawn(argv):
+        """The command mode, as a real process group with a stubborn child."""
+        return subprocess.Popen([sys.executable, "-c", LEADER, str(pidfile)],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, bufsize=1, start_new_session=True)
+
+    async def go():
+        app.spawn = spawn
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            for _ in range(60):                     # it writes the two pids and goes on
+                await pilot.pause(0.1)
+                if pidfile.exists():
+                    break
+            pgid, grandchild = pidfile.read_text().split()
+            pids.update(pgid=int(pgid), grandchild=int(grandchild))
+            assert _alive(pids["grandchild"])
+
+            await pilot.press("escape")
+            for _ in range(120):
+                await pilot.pause(0.1)
+                if not _alive(pids["grandchild"]):
+                    break
+            assert sent == [int(signal.SIGINT), int(signal.SIGTERM), int(signal.SIGKILL)]
+            assert not _alive(pids["grandchild"]), "孫程序還活著"
+            try:
+                os.killpg(pids["pgid"], 0)
+                raise AssertionError("process group 還在")
+            except ProcessLookupError:
+                pass                     # the group is empty: nothing was left running
+    try:
+        _run(go)
+    finally:                            # a failed assertion must not leave it sleeping
+        with contextlib.suppress(ProcessLookupError, KeyError, OSError):
+            os.killpg(pids["pgid"], signal.SIGKILL)
+
+
+def test_each_step_of_the_escalation_gets_its_own_time(group_calls, monkeypatch):
+    """Review W1: SIGTERM and SIGKILL used the same timer, so they arrived together
+    and an agent had no time to wind up between them."""
+    monkeypatch.setattr(tui, "ESCALATE_AFTER", 0.4)
+    sent, alive = group_calls
+    stamps: dict[int, float] = {}
+    real_killpg = tui.killpg
+
+    def timed(pgid, sig):
+        stamps.setdefault(int(sig), time.monotonic())
+        return real_killpg(pgid, sig)
+
+    monkeypatch.setattr(tui, "killpg", timed)
+    app = _marked_app(None)
+    proc = FakeProc(lines=["[agora] 合併 1/2"], hang=True)
+    app.spawn, _ = _spawn(proc)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("space", "down", "space", "m")
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            await pilot.press("escape")
+            for count in (1, 2, 3):
+                await _wait(lambda count=count: len(stamps) >= count, pilot)
+            assert [sig for _pgid, sig in sent] == [int(signal.SIGINT),
+                                                     int(signal.SIGTERM), int(signal.SIGKILL)]
+            gap = stamps[int(signal.SIGKILL)] - stamps[int(signal.SIGTERM)]
+            assert gap >= tui.ESCALATE_AFTER * 0.9, f"SIGKILL 只比 SIGTERM 晚 {gap:.2f} 秒"
+            alive[4242] = False
+            proc.done.set()
+    _run(go)
+
+
+def test_marking_all_leaves_the_rows_the_filter_hides_alone():   # review W2
+    """The direction the other test did not cover: `a` marking everything must not
+    overwrite a mark made on a row that is filtered out."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            second = next(r for r in app.shown() if r.cells[1] == "乙")
+            app.marked = {second.key}
+            await _filter_to(pilot, "甲")
+            await _wait(lambda: len(app.shown()) == 1, pilot)
+            await pilot.press("a")                       # mark what is on screen
+            await pilot.pause()
+            assert second.key in app.marked               # 乙 was already marked, still is
+            assert app.marked == {second.key, next(r.key for r in app.rows["agora"]
+                                                   if r.cells[1] == "甲")}
+            await pilot.press("slash", "backspace", "enter")     # and the filter off
+            await _wait(lambda: len(app.shown()) == 3, pilot)
+            assert app.marked == {second.key, next(r.key for r in app.rows["agora"]
+                                                   if r.cells[1] == "甲")}
+    _run(go)
+
+
+def test_enter_on_the_confirmation_window_keeps_it_cancelled():   # review W2
+    """It opens on 取消, so Enter straight away is the safe one - the distance
+    between "one Enter too many" and deleting a local copy."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("p")
+            await pilot.pause()
+            assert isinstance(app.screen, tui.Confirm)
+            assert app.screen.query_one("OptionList").highlighted == 0
+            await pilot.press("enter")                   # still on 取消
+            await pilot.pause()
+            assert not app._last_spawned
+    _run(go)
+
+
+# --- PM's own run through the screen (docs/tickets/T2-pm-run.md) ------------
+
+
+def test_the_tick_is_readable_as_text_and_the_line_says_what_it_does():   # Q1
+    """A tick that only changes colour is a tick nobody can read."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("p")
+            await pilot.pause()
+            window = app.screen
+            assert "[ ]" in str(window.query_one("#extra").label)
+            assert "本機的不動" in str(window.query_one("#effect").render())
+            await pilot.press("tab")
+            await pilot.press("space")
+            await pilot.pause()
+            assert "[x]" in str(window.query_one("#extra").label)
+            assert "會被刪掉" in str(window.query_one("#effect").render())
+    _run(go)
+
+
+def test_the_push_option_says_what_ticking_it_does():   # Q1
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("P")
+            await pilot.pause()
+            window = app.screen
+            assert "不傳" in str(window.query_one("#effect").render())
+            await pilot.press("tab")
+            await pilot.press("space")
+            await pilot.pause()
+            assert "傳回 Drive" in str(window.query_one("#effect").render())
+    _run(go)
+
+
+def test_enter_selects_rather_than_confirms():   # Q2
+    """The wording read as 「Enter＝確定」 when Enter is 「選停著的那一個」, and
+    Enter on the default (取消) cancels."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")                      # the delete window
+            await pilot.pause()
+            hints = [str(w.render()) for w in app.screen.query("Static")]
+            assert any("Enter 選擇" in h for h in hints)
+            assert not any("Enter 確定" in h for h in hints)
+    _run(go)
+
+
+def test_a_window_with_nothing_to_choose_says_enter_submits():   # E3
+    """The working-directory prompt has no options to pick between, so 「選擇」 is
+    simply wrong there - Enter sends what was typed."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            app.push_screen(tui.AskText("工作目錄", "/tmp"))
+            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            await pilot.pause()                        # let it compose
+            assert isinstance(app.screen, tui.AskText), app.screen
+            hints = [str(w.render()) for w in app.screen.query("Static")]
+            assert any("Enter 確定" in h for h in hints), hints
+            assert not any("Enter 選擇" in h for h in hints), hints
+    _run(go)
+
+
+def test_the_bar_really_reaches_n_n_before_the_window_goes():   # E2
+    """A clean exit fills the bar - on screen, before the window closes.
+
+    `tick` redraws every 0.1s and the window used to dismiss the instant the process
+    ended, so `N/N` was in the code and nowhere on the screen. Recording every value
+    the bar is given is the only way to see it: a test that looks at the bar after
+    the window closed sees nothing at all.
+    """
+    app = _marked_app(None)
+    proc = FakeProc(lines=["[agora] 刪除 1/3", "[agora] 刪除 2/3", "[agora] 刪除 3/3"],
+                    code=0, hang=True)
+    app.spawn, _ = _spawn(proc)
+    seen: list[tuple] = []
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            window, bar = app.screen, app.screen.query_one("#bar")
+            real_update = bar.update
+
+            def recording(**kw):
+                seen.append((kw.get("progress"), kw.get("total"), app.screen is window))
+                return real_update(**kw)
+            bar.update = recording
+            proc.done.set()                            # and now it ends cleanly
+            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+    _run(go)
+    full = [row for row in seen if row[:2] == (3, 3)]
+    assert full, f"the bar never reached full: {seen}"
+    assert full[-1][2], f"it filled only after the window closed: {seen}"
+
+
+def test_the_bar_counts_what_is_finished_and_fills_only_on_a_clean_exit():   # Q3
+    """`k/N` says the k-th has started, so k-1 are done; N/N means the command
+    said it finished - not that the last one had begun."""
+    app = _marked_app(None)
+    proc = FakeProc(lines=["[agora] 匯入 1/3", "[agora] 匯入 2/3", "[agora] 匯入 3/3"], hang=True)
+    app.spawn, _ = _spawn(proc)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+
+            def progress():
+                if not isinstance(app.screen, tui.Run):
+                    return None
+                bar = app.screen.query_one("#bar")
+                return (bar.progress, bar.total) if bar.total else None
+            await _wait(lambda: progress() == (2, 3), pilot)
+            assert progress() == (2, 3)              # the third started, two are done
+            proc.done.set()                           # and now it exits cleanly
+            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert "已從本機刪除" in " ".join(str(app.screen.lines).split())
+    _run(go)
+
+
+def test_the_status_line_is_empty_after_the_result_window_closes():   # Q4
+    app = _marked_app(None)
+    app.spawn, _ = _spawn()
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert "已從本機刪除" in " ".join(str(app.screen.lines).split())   # it is in the window
+            await pilot.press("space")
+            await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
+            assert str(app.query_one("#msg").render()) == ""
+    _run(go)
+
+
+# --- the result window has to say what the exit code means (review T2-final) ---
+
+
+def _result_of(app, code, *, mark_one=False, action="delete", said=()):
+    """Run one `action` that exits `code`, and hand back what the result window said."""
+    lines: list[str] = []
+    key = {"delete": "d", "pull": "P"}.get(action)
+
+    async def go():
+        proc = FakeProc(lines=[f"[agora] {action} 1/1", *said], code=code)
+        app.spawn, _ = _spawn(proc)
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            if mark_one:
+                await pilot.press("space")
+            if action == "import":       # Enter on the import tab is 匯入; elsewhere it is 接續
+                await pilot.press("tab")
+                await pilot.pause()
+                await pilot.press("enter")
+            else:
+                await pilot.press(key)
+                await pilot.pause()
+                await pilot.press("down", "enter")
+            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            lines.append(" ".join(str(line) for line in app.screen.lines))
+    _run(go)
+    return lines
+
+
+def test_the_result_window_says_a_command_that_worked():
+    """exit 0, for an action with nothing to send afterwards."""
+    assert "完成" in " ".join(_result_of(_marked_app(None), 0, action="pull"))
+
+
+def test_the_result_window_says_some_of_it_failed():
+    """exit 2: at least one item did not work, and the window says so rather than
+    leaving the user to work it out from the output."""
+    said = _result_of(_marked_app(None), 2, mark_one=True)
+    assert "沒有全部成功" in " ".join(said)
+
+
+def test_the_result_window_says_it_is_waiting_to_be_uploaded():
+    """exit 3: saved here, not on Drive yet - which is not the same as done. Every
+    action but delete, which stores nothing in the outbox and says its own thing (G4)."""
+    said = _result_of(_marked_app(None), 3, action="pull")
+    assert "outbox" in " ".join(said) and "再送" in " ".join(said)
+
+
+# --- the bar walks, it does not jump (spec「看得到進度」) --------------------
+
+
+def test_the_progress_bar_walks_through_the_middle_values():
+    """One line at a time, so the intermediate values are on screen before the end."""
+    app = _marked_app(None)
+    proc = DripProc(["[agora] 刪除 1/3", "[agora] 刪除 2/3", "[agora] 刪除 3/3"])
+    app.spawn, _ = _spawn(proc)
+    seen: list[tuple] = []
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            for _ in range(3):
+                await pilot.press("space", "down")
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.press("down", "enter")            # 確定
+
+            def progress():
+                if not isinstance(app.screen, tui.Run):
+                    return None
+                bar = app.screen.query_one("#bar")
+                return (bar.progress, bar.total) if bar.total else None
+
+            proc.send(0)                                 # 1/3: nothing finished yet
+            await _wait(lambda: progress() == (0, 3), pilot)
+            seen.append(progress())
+            proc.send(1)                                 # 2/3
+            await _wait(lambda: progress() == (1, 3), pilot)
+            seen.append(progress())
+            proc.send(2)                                 # 3/3
+            await _wait(lambda: progress() == (2, 3), pilot)
+            seen.append(progress())
+    _run(go)
+    assert seen == [(0, 3), (1, 3), (2, 3)]              # it walked, and stopped short of full
+
+
+# --- what the background is doing, said where the user is looking (4.1) --------
+
+
+def test_the_result_window_does_not_promise_a_background_delete_that_is_not_queued():
+    """W5: rows that were all cloud-lost never enter the queue, so there is no Drive half
+    coming - and the command's own line is what says so."""
+    said = " ".join(_result_of(_marked_app(None), 0,
+                               said=["[agora] 已從本機刪除 3 個，雲端沒有，只刪本機這份"]))
+    assert "已從本機刪除" in said
+    assert "背景移到 Drive 垃圾桶" not in said
+
+
+def test_the_result_window_says_the_drive_half_is_on_its_way():
+    """4.1: delete finished here; Drive is somebody else's turn now."""
+    said = " ".join(_result_of(_marked_app(None), 0,
+                               said=["[agora] 已從本機刪除 3 個，背景移到 Drive 垃圾桶"]))
+    assert "已從本機刪除，背景移到 Drive 垃圾桶" in said
+    assert "已存進 outbox" not in said, "nothing is waiting in the outbox"
+
+
+def _after_one_import(code=0) -> str:
+    """Import the one session the fake agent has, and hand back what the window said."""
+    agent = FakeAgent("opencode", [Listed("s1", "/tmp/p", "甲", None)], texts={"s1": ["問"]})
+    app = tui.AgoraApp(store.Paths.from_env(), FakeCli(), agents=[agent], check_setup=False)
+    app.spawn, _ = _spawn(FakeProc(lines=["[agora] 匯入 1/1"], code=code))
+    said: list[str] = []
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("tab")                       # the import tab
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            said.append(" ".join(str(line) for line in app.screen.lines))
+    _run(go)
+    return " ".join(said)
+
+
+def test_the_result_window_says_an_import_is_safe_here():
+    """4.1: the same for the other direction - the session is whole on this machine and
+    going up, which is not the same as "it is on Drive"."""
+    said = _after_one_import()
+    assert "已經存在本機，背景上傳中" in said
+    assert "已存進 outbox" not in said
+
+
+def test_only_a_failed_start_still_says_the_outbox():
+    """4.1: exit 3 is the one case where a background could not start, so it is the one
+    case that still means「已存進 outbox」."""
+    said = _after_one_import(code=3)
+    assert "已存進 outbox" in said
+    assert "背景上傳中" not in said
+
+
+# --- first run: your own OAuth client is optional (T5, design D5) ---------------
+
+#: Self-made values. Nothing here is a real credential, and nothing that reads them
+#: is allowed to put them anywhere but rclone's argv.
+FAKE_ID = "1234567890-fakeclientid.apps.googleusercontent.com"
+FAKE_SECRET = "GOCSPX-fakesecret-not-a-real-one"
+
+
+def _client_json(tmp_path) -> str:
+    """The shape Google hands out for a Desktop client, with made-up values."""
+    path = tmp_path / "client_secret_fake.json"
+    path.write_text(json.dumps({"installed": {"client_id": FAKE_ID,
+                                              "client_secret": FAKE_SECRET,
+                                              "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                                              "token_uri": "https://oauth2.googleapis.com/token"}},
+                              ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+def _client_text(tmp_path) -> str:
+    """rclone's own two-line form, with made-up values."""
+    path = tmp_path / "rclone-client.conf"
+    path.write_text(f"[gdrive]\ntype = drive\nClient-ID = {FAKE_ID}\nSECRET = {FAKE_SECRET}\n",
+                    encoding="utf-8")
+    return str(path)
+
+
+def test_a_downloaded_client_json_is_read_by_path(tmp_path, capsys):
+    assert tui.read_client(_client_json(tmp_path)) == (FAKE_ID, FAKE_SECRET)
+    said = capsys.readouterr()
+    assert FAKE_ID not in said.out and FAKE_SECRET not in said.out
+    assert FAKE_SECRET not in said.err, "reading a client file says nothing about it"
+
+
+def test_the_two_line_client_file_is_read_too(tmp_path):
+    assert tui.read_client(_client_text(tmp_path)) == (FAKE_ID, FAKE_SECRET)
+
+
+def test_a_client_file_we_cannot_use_is_none_not_a_guess(tmp_path):
+    """A wrong path, a file that is not one, and one with half the pair: all of them
+    fall back to rclone's own client rather than sending something half-read."""
+    assert tui.read_client(str(tmp_path / "not-there.json")) is None
+    (tmp_path / "notes.txt").write_text("記得換 client\n", encoding="utf-8")
+    assert tui.read_client(str(tmp_path / "notes.txt")) is None
+    half = tmp_path / "half.json"
+    half.write_text(json.dumps({"installed": {"client_id": FAKE_ID}}), encoding="utf-8")
+    assert tui.read_client(str(half)) is None
+    assert tui.read_client(str(tmp_path)) is None          # a directory
+
+
+def test_a_utf8_bom_is_not_a_reason_to_refuse_the_client_file(tmp_path):
+    """T4: a file saved by an editor that writes a BOM is still a UTF-8 JSON."""
+    path = tmp_path / "bom.json"
+    path.write_bytes(b"\xef\xbb\xbf" + json.dumps(
+        {"installed": {"client_id": FAKE_ID, "client_secret": FAKE_SECRET}}).encode())
+    assert tui.read_client(str(path)) == (FAKE_ID, FAKE_SECRET)
+
+
+def test_a_client_file_nested_deep_enough_to_exhaust_the_parser(tmp_path, capfd):
+    """U1: `json.loads` raises RecursionError on a very deep document, and when the
+    first-run screen dies Textual prints its locals - `text` among them, with the
+    secret at the front. So: None, and nothing on any stream, not even the file
+    descriptor level."""
+    deep = tmp_path / "deep.json"
+    depth = 200_000
+    deep.write_text('{"installed": {"client_secret": "' + FAKE_SECRET + '", "x": '
+                    + "[" * depth + "]" * depth + "}", encoding="utf-8")
+    assert tui.read_client(str(deep)) is None
+    assert capfd.readouterr() == ("", ""), "not even on the file descriptors"
+    assert deep.read_text(encoding="utf-8").startswith("{\"installed\"")
+
+
+def test_a_path_naming_a_user_that_does_not_exist_is_not_a_crash(tmp_path, monkeypatch, capsys):
+    """U1: `~nosuchuser/x.json` makes `Path.expanduser` raise RuntimeError. Inside the
+    reader that is just another None; outside it - the screen asks 「is this a file?」
+    before reading - it went straight to the screen and ended the app."""
+    assert tui.read_client("~nosuchuser_review/x.json") is None
+    # and the question the screen asks *before* reading, which is not inside the reader
+    assert tui._is_file("~nosuchuser_review/x.json") is False
+    calls, said = _first_run(1, "~nosuchuser_review/x.json", tmp_path, monkeypatch, give_up=True)
+    assert calls == [None], "a path we cannot even expand is a path we cannot use"
+    assert "讀不到 client 設定檔" in said
+    quiet = capsys.readouterr()
+    assert quiet.out == "" and quiet.err == ""
+
+
+def test_only_a_desktop_client_is_accepted(tmp_path):
+    """T4: rclone redirects a `web` client to http://127.0.0.1:53682/, which such a
+    client will not have registered - the user would only see「授權沒有完成」. And a
+    shape we do not recognise is refused rather than guessed at."""
+    web = tmp_path / "web.json"
+    web.write_text(json.dumps({"web": {"client_id": FAKE_ID, "client_secret": FAKE_SECRET}}),
+                   encoding="utf-8")
+    assert tui.read_client(str(web)) is None, "a web client cannot finish this authorization"
+    odd = tmp_path / "odd.json"
+    odd.write_text(json.dumps({"installed": [FAKE_SECRET]}), encoding="utf-8")
+    assert tui.read_client(str(odd)) is None
+    half = tmp_path / "half-web.json"
+    half.write_text(json.dumps({"installed": "x", "web": {"client_id": FAKE_ID,
+                                                          "client_secret": FAKE_SECRET}}),
+                    encoding="utf-8")
+    assert tui.read_client(str(half)) is None
+
+
+def test_the_rclone_command_carries_the_client_when_there_is_one(tmp_path):
+    paths = store.Paths(config=tmp_path / "config", cache=tmp_path / "cache", state=tmp_path / "state")
+    built_in = tui.authorize_argv(paths)
+    assert "client_id=1234" not in " ".join(built_in), "nothing offered, nothing sent"
+
+    mine = tui.authorize_argv(paths, (FAKE_ID, FAKE_SECRET))
+    assert f"client_id={FAKE_ID}" in mine and f"client_secret={FAKE_SECRET}" in mine
+    assert "scope=drive.file" in mine, "the scope does not change: drive.file either way"
+    # a list, never a string: a secret that goes through a shell is a secret in `ps`
+    assert isinstance(mine, list) and mine[:1] != ["rclone config create"]
+
+
+def test_nothing_about_the_client_is_printed(monkeypatch, tmp_path, capsys):
+    """rclone echoes the remote it wrote, secret and all. The values must not reach the
+    screen, the log, or stdout (design D5)."""
+    said: list[str] = []
+    calls: list[tuple] = []
+    proc = FakeProc(lines=[f"client_id = {FAKE_ID}",
+                           f"client_secret = {FAKE_SECRET}",
+                           "token = {\"access_token\": \"ya29.fake\"}",
+                           "Created remote gdrive"])
+    monkeypatch.setattr(tui.subprocess, "Popen",
+                        lambda *a, **k: calls.append((a, k)) or proc)
+    paths = store.Paths(config=tmp_path / "config", cache=tmp_path / "cache", state=tmp_path / "state")
+
+    assert tui.authorize(paths, said.append, (FAKE_ID, FAKE_SECRET)) == 0
+
+    assert calls and isinstance(calls[0][0][0], list), "argv is a list, not a shell string"
+    assert not calls[0][1].get("shell"), "a secret through a shell is a secret in `ps`"
+    said_text = "\n".join(said)
+    assert FAKE_SECRET not in said_text and "ya29.fake" not in said_text
+    assert "Created remote gdrive" in said_text, "the lines that are safe still come through"
+    assert FAKE_SECRET not in capsys.readouterr().out
+
+
+def _first_run(pick: int, typed: str, tmp_path, monkeypatch, give_up: bool | None = None):
+    """Drive the first-run screens: `pick` on the Choose, then `typed` in the prompt."""
+    paths = store.Paths(config=tmp_path / "config", cache=tmp_path / "cache", state=tmp_path / "state")
+    (tmp_path / "config").mkdir()
+    monkeypatch.setenv("AGORA_RCLONE", "/bin/sh")
+    authorize_calls: list[tuple] = []
+
+    def fake_authorize(p, say=print, client=None):
+        authorize_calls.append(client)
+        (tmp_path / "config" / "rclone.conf").write_text("[gdrive]\n", encoding="utf-8")
+        return 0
+    monkeypatch.setattr(tui, "authorize", fake_authorize)
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=True)
+    said: list[str] = []
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down" * pick, "enter")
+            await pilot.pause()
+            if pick == 1:
+                await pilot.pause()
+                for ch in typed:
+                    await pilot.press("space" if ch == " " else ch)
+                await pilot.press("enter")
+                # a path we cannot use stops at a window that has to be read first
+                await _wait(lambda: isinstance(app.screen, tui.Choose) or bool(authorize_calls),
+                            pilot)
+                said.extend(str(w.render()) for w in app.screen.walk_children(Widget)
+                            if isinstance(w, Static))
+                if isinstance(app.screen, tui.Choose) and give_up is not None:
+                    await pilot.press("down", "enter")    # 用內建的 client
+                    await pilot.pause()
+            await _wait(lambda: bool(authorize_calls), pilot)
+    _run(go)
+    return authorize_calls, " ".join(said)
+
+
+def test_the_first_run_can_use_your_own_client(tmp_path, monkeypatch):
+    calls, _ = _first_run(1, _client_json(tmp_path), tmp_path, monkeypatch)
+    assert calls == [(FAKE_ID, FAKE_SECRET)]
+
+
+def test_the_first_run_works_on_rclones_own_client_when_you_skip_it(tmp_path, monkeypatch):
+    """The second option, then Esc: rclone's own client, exactly as before this existed."""
+    calls, _ = _first_run(1, "", tmp_path, monkeypatch)
+    assert calls == [None]
+
+
+def test_a_client_file_we_cannot_read_falls_back_to_rclones_own(tmp_path, monkeypatch):
+    calls, said = _first_run(1, str(tmp_path / "nowhere.json"), tmp_path, monkeypatch, give_up=True)
+    assert calls == [None], "it says what happened, then does the thing that works"
+    assert "讀不到 client 設定檔" in said
+    assert "找不到這個檔案" in said, "a typo should not read as「你的檔案內容不對」"
+    assert FAKE_SECRET not in said and FAKE_ID not in said, "the path is not the values"
+
+
+def test_a_client_file_that_is_not_utf8_falls_back_without_saying_what_was_in_it(
+        tmp_path, monkeypatch, capsys):
+    """T1: a client file saved as UTF-16 raises UnicodeDecodeError, and *its message
+    carries the whole file* - which is the credential. The app must not die, and neither
+    the screen nor anything raised may contain the secret."""
+    utf16 = tmp_path / "client_secret_utf16.json"
+    utf16.write_bytes(json.dumps({"installed": {"client_id": FAKE_ID,
+                                                "client_secret": FAKE_SECRET}}
+                                 ).encode("utf-16"))
+    assert tui.read_client(str(utf16)) is None
+    # and saying why is not an option either: the reason *is* the whole file, mangled
+    # by the failed decode but readable. So: nothing at all comes out of here.
+    quiet = capsys.readouterr()
+    assert quiet.out == "" and quiet.err == "", f"讀一個壞掉的 client 檔不該出聲：{quiet}"
+
+    calls, said = _first_run(1, str(utf16), tmp_path, monkeypatch, give_up=True)
+
+    assert calls == [None], "carry on with rclone's own client, do not fall over"
+    assert "讀不到 client 設定檔" in said
+    assert FAKE_SECRET not in said, "the secret leaked into the window"
+    assert FAKE_ID not in said
+    assert "UnicodeDecodeError" not in said, "nor the exception that would have carried it"
+
+
+def test_a_delete_whose_uploader_could_not_start_does_not_say_it_was_saved_to_the_outbox():
+    """G4: exit 3 from delete is not「已存進 outbox」- nothing was stored; the Drive half
+    is what waits for a later command."""
+    said = " ".join(_result_of(_marked_app(None), 3,
+                               said=["[agora] 背景上傳啟動失敗，移到 Drive 垃圾桶要等之後的指令"]))
+    assert "已從本機刪除；移到 Drive 垃圾桶要等之後的指令" in said
+    assert "已存進 outbox" not in said
+
+
+# --- T6: the preview reads a step, not the file ---------------------------------
+
+
+def _big_body(mb: int = 3) -> str:
+    """A few MB of conversation, written here. The end of it is what is on screen, so it
+    has to end mid-file, not at a message boundary (T6)."""
+    one = "## user\n" + "話" * 3000 + "\n\n## assistant\n" + "答" * 3000 + "\n\n"
+    return one * ((mb * 1024 * 1024) // len(one)) + "## user\n最後一則\n"
+
+
+def _big_session(mb: int = 3) -> tuple[store.Paths, store.Index, dict, str]:
+    hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
+    body = _big_body(mb)
+    paths, index = _index((hdr, body))
+    return paths, index, hdr, body
+
+
+def test_reading_the_preview_never_reads_the_whole_file(monkeypatch):
+    """T6: 3 MB, and only the last step of it is ever in hand. The old code called
+    `read_text` on the whole session.md and rendered all of it (0.72 s a move)."""
+    paths, index, hdr, body = _big_session()
+    assert len(body.encode("utf-8")) > 2 << 20
+
+    def boom(*a, **kw):
+        raise AssertionError("the preview must seek, not read the file")
+    monkeypatch.setattr(pathlib.Path, "read_text", boom)
+
+    preview = tui.agora_preview(paths, index, hdr["id"])
+    assert len(preview.text.encode("utf-8")) <= tui.PREVIEW_CHUNK
+    assert preview.text.endswith("最後一則")            # the end of the conversation
+    assert preview.more() and "還有約" in preview.hint()
+
+
+def test_a_step_is_cut_on_a_boundary_and_breaks_no_character():
+    """T6: a step starts at a `## ` heading or after a blank line, and never inside a
+    multibyte character - a broken one would show as a replacement character."""
+    paths, index, hdr, _ = _big_session()
+    preview = tui.agora_preview(paths, index, hdr["id"])
+    assert preview.text.startswith("## ")
+    assert "\ufffd" not in preview.text and preview.text == preview.text.strip("\ufffd")
+    earlier = preview.step()                      # the step above
+    assert earlier and preview.text.startswith("## ")
+    assert "\ufffd" not in preview.text
+    assert preview.text.count("## ") >= 2        # both steps are on screen now
+
+
+def test_scrolling_to_the_top_adds_the_step_above_and_keeps_the_line():
+    """T6: reaching the top reads one more step and puts it above, and the line the
+    reader was on stays where it is - which is what the rendered height says, not the
+    source's line count (review Y2)."""
+    hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
+    paths, index = _index((hdr, _big_body()))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")              # onto the row
+            await pilot.pause(0.4)                 # the cursor comes to rest
+            first = app.cache[hdr["id"]].text
+            assert app.cache[hdr["id"]].more(), "there is more above"
+            pane = app.query_one("#right")
+            was = pane.virtual_size.height
+            pane.focus()
+            for _ in range(50):                    # up to the top: it asks for the step above
+                await pilot.press("home")
+                await pilot.pause(0.05)
+                if len(app.cache[hdr["id"]].text) > len(first):
+                    break
+            await pilot.pause(0.2)
+            assert len(app.cache[hdr["id"]].text) > len(first), "a step was added above"
+            grew = pane.virtual_size.height - was
+            assert grew > 0
+            # The reader was on the top line, so what they were reading is now exactly
+            # `grew` rendered lines further down - not at the top of the new part (Y2).
+            assert pane.scroll_offset.y == pytest.approx(grew, abs=2), \
+                "the line the reader was on has to stay under their eyes"
+    _run(go)
+
+
+def test_three_steps_up_are_each_the_one_just_above():
+    """Y6: the offset `read_tail` hands back has to be the one the next call wants. It
+    used to be an absolute start, fed back as "bytes from the end", so the second step
+    jumped to the top of the file and most of it could never be seen. Three steps in a
+    row, each starting one chunk above the last - never at the file's start."""
+    hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
+    paths, index = _index((hdr, _big_body(3)))
+    preview = tui.agora_preview(paths, index, hdr["id"])
+
+    seen, ats = [preview.text], [preview.at]
+    for _ in range(3):
+        assert preview.more(), "3 MB is more than one step"
+        assert preview.step()
+        assert preview.text.endswith(seen[-1]), "each step goes directly above the last"
+        seen.append(preview.text)
+        ats.append(preview.at)
+    assert ats == sorted(ats, reverse=True) and len(set(ats)) == len(ats), ats
+    assert 0 < ats[1] < ats[0], f"the second step must not jump to the start: {ats}"
+    for above, below in zip(ats, ats[1:]):
+        assert below > 0 and above - below <= tui.PREVIEW_CHUNK, \
+            f"one chunk at a time, going backwards: {ats}"
+    assert preview.text.startswith("## "), "every step lands on a heading"
+
+
+
+def test_reaching_the_top_after_everything_is_here_adds_nothing():
+    """Y1: `before == 0` is both "nothing read yet" and "the whole file is on screen".
+    A short session is all here the first time, so going to the top again must not put
+    the tail on top of itself."""
+    normal = _hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "小的")
+    paths, index = _index((normal, "## user\n第一句\n\n## assistant\n最後的回答\n"))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            text = app.cache[normal["id"]].text
+            assert text.count("最後的回答") == 1 and not app.cache[normal["id"]].more()
+            pane = app.query_one("#right")
+            pane.focus()
+            for _ in range(3):
+                pane.scroll_to(y=3, animate=False)
+                await pilot.pause(0.05)
+                await pilot.press("home")
+                await pilot.pause(0.05)
+            assert app.cache[normal["id"]].text.count("最後的回答") == 1
+    _run(go)
+
+
+def test_a_moving_cursor_reads_nothing(monkeypatch):
+    """T6: only once the cursor has come to rest for ~150 ms. Moving through a list must
+    not read or lay out anything per keystroke."""
+    hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
+    paths, _index_ = _index((hdr, _big_body()), (_hdr("01EEEEEEEEEEEEEEEEEEEEEEEE", "小的", sid="ses_b"), "## user\nx\n"))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+    calls: list[int] = []
+    real = tui.read_tail
+
+    def counting(*a, **kw):
+        calls.append(1)
+        return real(*a, **kw)
+    monkeypatch.setattr(tui, "read_tail", counting)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            for _ in range(6):
+                await pilot.press("down")
+                await pilot.press("up")
+            assert calls == [], f"read while the cursor was moving: {len(calls)}"
+            await pilot.pause(0.5)
+            assert calls, "and once it rests, it does read"
+    _run(go)
+
+
+def test_the_import_tab_reads_the_tail_of_the_reading_version():
+    """T6: the other tab reads the same way - the tail of `reading/<agent>/<id>.md`, and
+    builds it in the background when it is not there yet."""
+    paths = store.Paths.from_env()
+    agent = FakeAgent("opencode", [], texts={"ses_big": ["問"]})
+    path = cache.reading_path(paths, agent, "ses_big")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_big_body(), encoding="utf-8")
+
+    preview = tui.import_preview(agent, "ses_big", True, paths, None)
+
+    assert preview.pinned == "整份對話（閱讀版）"
+    assert len(preview.text.encode("utf-8")) <= tui.PREVIEW_CHUNK
+    assert preview.text.endswith("最後一則") and preview.more()
+
+    # not there yet: it is built in the background, and then the same one step is read
+    other = FakeAgent("claude", [], texts={"s2": ["新問題", "新回答"]})
+    assert not cache.reading_path(paths, other, "s2").exists()
+    built = tui.import_preview(other, "s2", True, paths, None)
+    assert cache.reading_path(paths, other, "s2").is_file(), "the cache is built"
+    assert built.text.endswith("新回答") and len(built.text.encode("utf-8")) <= tui.PREVIEW_CHUNK
+    assert "新問題" in built.text or built.more()      # a short one is all here
+
+
+# --- the filter has to work with an input method (T7 F3) -----------------------
+
+
+def test_the_filter_narrows_while_the_chinese_is_typed():
+    """T7 F3: an IME takes Enter for its candidate list, so a filter that needs Enter
+    never gets it. Typing the word alone has to be enough - no Enter at all here."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            assert len(app.shown()) == 3
+            await pilot.press("slash")
+            await pilot.press("乙")                 # a committed Chinese character
+            await pilot.pause(0.2)
+            shown = [r.text for r in app.shown()]
+            assert len(shown) == 1 and "乙" in shown[0], f"邊打邊篩就該只剩乙：{shown}"
+            await pilot.press("甲")                 # and it re-filters on the next one
+            await pilot.pause(0.2)
+            assert app.shown() == [], "甲乙不是任何一列的一部分"
+    _run(go)
+
+
+def test_enter_is_only_how_the_filter_ends_when_the_ime_lets_it_through():
+    """The IME's Enter usually does not reach the app, so nothing may depend on it; and
+    when it does arrive it means "done", not "apply" (it was applied already)."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("slash")
+            await pilot.press("丙")
+            await pilot.pause(0.2)
+            assert [r.text for r in app.shown()] == [r.text for r in app.rows["agora"]
+                                                     if "丙" in r.text]
+            await pilot.press("enter")              # the one an IME usually swallows
+            await pilot.pause(0.1)
+            assert not app.query_one("#filterbar").has_class("on"), "Enter 收工"
+            assert len(app.shown()) == 1, "而結果留著"
+            # and the bar is still where the user can clear it
+            await pilot.press("slash")
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            assert len(app.shown()) == 3, "Esc 清掉，全部回來"
+    _run(go)
+
+
+def test_a_half_composed_character_does_not_break_the_filter():
+    """While a character is being composed the IME has not committed anything; when it
+    commits, the input changes and the filter follows. Nothing here may raise or empty
+    the table for a value that is not a word yet."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("slash")
+            await pilot.press("甲", "乙")           # "甲乙" is in no title
+            await pilot.pause(0.1)
+            assert app.shown() == [], "沒有符合的就空著"
+            await pilot.press("backspace")          # the IME deletes a mis-picked character
+            await pilot.pause(0.1)
+            assert len(app.shown()) == 1, "回到只剩甲的那一列"
+            await pilot.press("backspace")
+            await pilot.pause(0.1)
+            assert len(app.shown()) == 3, "整串刪掉就全部回來"
+    _run(go)
+
+
+# --- the content search waits for a pause, and only one runs (T7 P1) -----------
+
+
+class SlowAgent(FakeAgent):
+    """An agent whose search takes a while, and which can say how many were running.
+
+    A real content search reads opencode's database or claude's jsonl, which is what
+    makes "one scan per keystroke" worth fixing (review T7 P1).
+    """
+
+    def __init__(self, name, listed, texts=None, seconds=0.1):
+        super().__init__(name, listed, texts=texts)
+        self.seconds, self.calls = seconds, 0
+        self.search_nothing = False
+        self.last_keyword = None
+        self.running = 0
+        self.most_at_once = 0
+        self.counts: list[int] = []    # how many results each call actually yielded
+        self.lock = threading.Lock()
+
+    def search_text(self, keyword, only=None):
+        with self.lock:
+            self.calls += 1
+            self.running += 1
+            self.most_at_once = max(self.most_at_once, self.running)
+            mine = len(self.counts)
+            self.counts.append(0)
+            self.last_keyword = keyword
+        try:
+            if self.search_nothing:
+                time.sleep(self.seconds * 4)      # scan the whole store, find nothing
+                yielded = []
+            else:
+                yielded = [sid for sid, msgs in self.texts.items()
+                           if (only is None or sid in only) and any(keyword in m for m in msgs)]
+            for sid in yielded:
+                time.sleep(self.seconds)      # results arrive as found, and slowly
+                with self.lock:
+                    self.counts[mine] += 1
+                yield sid
+        finally:
+            with self.lock:
+                self.running -= 1
+
+
+def _slow_search_app(seconds=0.2):
+    agent = SlowAgent("claude", [Listed("s1", "/tmp/p", "甲", None)],
+                      texts={"s1": ["table 在這裡"]}, seconds=seconds)
+    app, _ = _app([agent])
+    return app, agent
+
+
+def test_content_search_waits_for_the_typing_to_pause():
+    """P1: `table` typed one letter at a time is one search, not five - the debounce
+    starts it only after the last keystroke, and Enter does not start another."""
+    app, agent = _slow_search_app()
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+t", "slash")
+            for ch in "table":                     # five keystrokes, quickly
+                await pilot.press(ch)
+            assert agent.calls == 0, "還沒停下來就不該開始掃描"
+            await pilot.pause(0.6)                 # the debounce elapses: one scan
+            assert agent.calls == 1, f"暫停之後應該只掃一次，掃了 {agent.calls} 次"
+            await pilot.press("enter")             # the IME-swallowed key: not a second scan
+            assert agent.calls == 1, f"Enter 不該再掃一次，掃了 {agent.calls} 次"
+    _run(go)
+
+
+def test_a_search_that_is_replaced_stops_instead_of_running_to_the_end():
+    """`exclusive=True` only marks the old worker cancelled; the thread has to look.
+    A real scan reads opencode's database and can take seconds, so the one that was
+    replaced must stop where it is, not run to the end beside the new one (T7 P1)."""
+    app, agent = _slow_search_app(seconds=0.2)                    # 0.2 s per result
+    agent.texts = {f"s{n}": [f"t 第 {n} 筆"] for n in range(8)}   # eight results: 1.6 s
+    agent.listed.extend(Listed(f"s{n}", "/tmp/p", f"第{n}", None) for n in range(1, 8))
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+t", "slash")
+            await pilot.press("t")
+            await _wait(lambda: agent.counts and agent.counts[0] >= 1, pilot)  # it started
+            await pilot.press("a")                 # and is replaced while it runs
+            await _wait(lambda: agent.calls >= 2, pilot)   # the new one has started
+            stopped_at = agent.counts[0]
+            await pilot.pause(1.0)                 # five more results, if it kept going
+            assert agent.counts[0] <= stopped_at + 1, \
+                f"被取代的掃描應該停在原地，而不是繼續產出：{agent.counts}"
+            assert agent.counts[0] < 8, \
+                f"更不能把整份掃完：{agent.counts}"
+            # they may overlap for the one result it takes the old worker to notice it
+            # was cancelled; what must not happen is the whole old scan running on
+            assert agent.most_at_once <= 2, f"同時在跑的不該超過兩個：{agent.most_at_once}"
+    _run(go)
+
+
+def test_the_title_filter_is_still_per_keystroke_and_never_scans_an_agent():
+    """The debounce is for the content mode only: the title filter is a memory lookup,
+    and it must stay immediate (T7 F3 was fixed that way)."""
+    app, agent = _slow_search_app()
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("slash")
+            for ch in "第一":                      # one key at a time, like a person
+                await pilot.press(ch)
+            await pilot.pause(0.1)                 # well inside the content debounce
+            assert [r.key for r in app.shown()] == ["agora:01AAAAAAAAAAAAAAAAAAAAAAAA"], \
+                "標題模式立即縮到剩第一個"
+            assert agent.calls == 0, "標題模式不碰 agent"
+    _run(go)
+
+
+def test_a_scan_that_finds_nothing_does_not_stack_up():
+    """Q1: `search_text` yields only what matches, so a word that matches nothing never
+    comes back to the worker and cannot notice it was replaced. An input method commits
+    one character at a time with a pause after each, so every pause used to start
+    another whole scan beside the last. One scan at a time: the newest word waits."""
+    app, agent = _slow_search_app(seconds=0.5)     # one scan takes about two seconds
+    agent.search_nothing = True           # scan the whole store, yield nothing
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+t", "slash")
+            for ch in "xyz":                  # three characters, a pause after each
+                await pilot.press(ch)
+                await pilot.pause(0.4)        # past the debounce, like picking candidates
+            assert agent.calls == 1, f"三個字應該只有一個掃描在跑，開了 {agent.calls} 個"
+            assert agent.most_at_once == 1, f"同時在跑的不該超過一個：{agent.most_at_once}"
+            # and the newest word goes once the running one is done - once
+            await _wait(lambda: agent.calls == 2, pilot)
+            await pilot.pause(0.3)
+            assert agent.calls == 2, f"中間的字不該各補一次：{agent.calls}"
+            assert agent.last_keyword == "xyz", "跑的是最後打的那個字"
+            assert agent.most_at_once == 1, "從頭到尾都只有一個"
+    _run(go)
+
+
+def test_enter_before_the_pause_searches_once_not_twice():
+    """Q2: typing a word and pressing Enter inside the debounce window. Enter searches
+    right away and the timer must be stopped with it - otherwise the timer fires a
+    moment later and the same word is scanned again."""
+    app, agent = _slow_search_app(seconds=0.05)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+t", "slash")
+            await pilot.press("t")
+            await pilot.press("enter")             # well inside FILTER_IDLE
+            await pilot.pause(0.1)
+            assert agent.calls == 1, f"Enter 搜一次就好，搜了 {agent.calls} 次"
+            await pilot.pause(0.5)                 # past the debounce: nothing more
+            assert agent.calls == 1, f"計時器應該被停掉，總共搜了 {agent.calls} 次"
     _run(go)

@@ -26,22 +26,23 @@ see docs/spike/opencode.md (traps 1-6) for the evidence:
 
 from __future__ import annotations
 
-import hashlib
 import contextlib
+import hashlib
 import json
 import os
 import sqlite3
-import unicodedata
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from contextlib import contextmanager
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import threading
 import time
 
-from .base import AgentError, Exported, Launch, Listed, Turns, agent_cmd, tool_line
+from agora.store import normalize
+
+from .base import (AgentError, Exported, Launch, Listed, Turns, agent_cmd, env_seconds,
+                   iso_utc, summarize_timeout, tool_line, warn)
 
 # Id layout. Fixed width: a truncated ordinal is what made phase 1 import eight
 # messages and get one, silently.
@@ -75,11 +76,6 @@ PLACEHOLDER_ID = "ses_agora_pending0"
 #: opencode would wedge all of them (OC7). Read per call so a test can shorten it.
 DEFAULT_CLI_TIMEOUT = 60
 
-#: summarize is one model round trip, not a CLI poke, so it gets its own budget:
-#: a merge prompt is a whole session to read, and the 60 s a CLI poke gets is not
-#: enough for a free model to answer one.
-DEFAULT_SUMMARIZE_TIMEOUT = 600
-
 #: The whole prompt goes into a file next to the session and only a short message
 #: travels in argv: a merge prompt carries every source's reading version, and
 #: argv tops out at ARG_MAX (1 MB here). `-f` inlines the file into the message,
@@ -94,21 +90,6 @@ PENDING_PREFIX = "pending-"
 #: A merge prompt must not be able to reach for a file, so every tool is denied -
 #: a prompt asking nicely is not a boundary (measured in docs/spike/opencode.md).
 DENY_TOOLS = '{"*":"deny"}'
-
-
-def _seconds(name: str, default: int) -> int:
-    try:  # a test may set it to something silly; the default is not negotiable
-        return int(os.environ.get(name) or default)
-    except ValueError:
-        return default
-
-
-def _timeout() -> int:
-    return _seconds("AGORA_OPENCODE_TIMEOUT", DEFAULT_CLI_TIMEOUT)
-
-
-def _summarize_timeout() -> int:
-    return _seconds("AGORA_SUMMARIZE_TIMEOUT", DEFAULT_SUMMARIZE_TIMEOUT)
 
 
 #: opencode keeps everything in one SQLite file. `opencode session list` only
@@ -150,13 +131,17 @@ def _open_readonly(path: Path) -> sqlite3.Connection | None:
         return None
 
 
+def _err(proc: subprocess.CompletedProcess, n: int = 300) -> str:
+    """The tail of a failed command's stderr - the part that says what went wrong."""
+    return (proc.stderr or b"").decode("utf-8", "replace").strip()[-n:]
+
+
 def _warn_schema() -> None:
     """One line, once: an opencode we do not recognise is not an error to raise."""
     global _warned_schema
     if not _warned_schema:
         _warned_schema = True
-        print("[agora] 這個 opencode 的資料庫結構認不出來，略過未匯入的清單",
-              file=sys.stderr)
+        warn("這個 opencode 的資料庫結構認不出來，略過未匯入的清單")
 
 
 def _field(blob: str, key: str):
@@ -168,40 +153,47 @@ def _field(blob: str, key: str):
     return value.get(key) if isinstance(value, dict) else None
 
 
-def _folded(text: str) -> str:
-    """How a string is compared: NFKC first, then case folding."""
-    return unicodedata.normalize("NFKC", text).casefold()
-
-
 def _like_pattern(keyword: str) -> str:
     """`%keyword%`, with LIKE's own wildcards escaped so they stay literal."""
     escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
 
 
-def _session_directory(session_id: str) -> str | None:
-    """The project directory the database records for one session, if it exists."""
-    connection = _open_readonly(_db_path())
+@contextmanager
+def _db(path: Path | None = None) -> Iterator[sqlite3.Connection | None]:
+    """The database, read-only, for as long as the block needs it.
+
+    Yields None when there is nothing to read - no file, or not the one we know.
+    A sqlite error inside the block is reported once and ends the block: an opencode
+    we do not recognise is not an error to raise (review O2). Generators (search)
+    live inside it happily; they just stop there.
+    """
+    connection = _open_readonly(path or _db_path())
     if connection is None:
-        return None
+        yield None
+        return
     try:
-        row = connection.execute("select directory from session where id=?",
-                                (session_id,)).fetchone()
+        yield connection
     except sqlite3.Error:
         _warn_schema()
-        return None
     finally:
         connection.close()
+
+
+def _session_directory(session_id: str) -> str | None:
+    """The project directory the database records for one session, if it exists."""
+    with _db() as connection:
+        if connection is None:
+            return None
+        row = connection.execute("select directory from session where id=?",
+                                (session_id,)).fetchone()
     directory = row[0] if row else None
     return directory if isinstance(directory, str) and Path(directory).is_dir() else None
 
 
-def _event_session_id(line: bytes) -> str | None:
-    """The session id one `opencode run --format json` event carries, if any.
-
-    The first events have it, minutes before the run ends - which is what lets the
-    record go down while the model is still working (review V5).
-    """
+def _event(line: bytes) -> dict | None:
+    """One JSON object out of `opencode run --format json`, or None if that is not
+    what this line is."""
     text = line.decode("utf-8", "replace").strip()
     if not text.startswith("{"):
         return None
@@ -209,7 +201,16 @@ def _event_session_id(line: bytes) -> str | None:
         event = json.loads(text)
     except json.JSONDecodeError:
         return None
-    session_id = event.get("sessionID") if isinstance(event, dict) else None
+    return event if isinstance(event, dict) else None
+
+
+def _event_session_id(line: bytes) -> str | None:
+    """The session id one event carries, if any.
+
+    The first events have it, minutes before the run ends - which is what lets the
+    record go down while the model is still working (review V5).
+    """
+    session_id = (_event(line) or {}).get("sessionID")
     return session_id if isinstance(session_id, str) and session_id.strip() else None
 
 
@@ -228,13 +229,9 @@ def _last_reply(stdout: bytes) -> tuple[str | None, str | None]:
     one, in order, since a long reply can arrive as several parts.
     """
     session_id, parts, last = None, {}, None
-    for line in stdout.decode("utf-8", "replace").splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
+    for line in stdout.splitlines():
+        event = _event(line.strip())
+        if event is None:
             continue
         session_id = session_id or event.get("sessionID")
         part = event.get("part") or {}
@@ -361,9 +358,19 @@ def reidentify(payload: dict, *, session_id: str, salt: str | None = None) -> di
 
 
 def _iso(ms: int | None) -> str | None:
-    if not isinstance(ms, int):
+    return iso_utc(ms / 1000) if isinstance(ms, int) else None
+
+
+def _said(blob: str) -> str | None:
+    """The text one part blob holds, if it is text the session said.
+
+    `synthetic` parts are opencode's own inlined attachments: something the session
+    was given, not something it said (review O3).
+    """
+    if _field(blob, "type") != "text" or _field(blob, "synthetic") is True:
         return None
-    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    text = _field(blob, "text")
+    return text.strip() if isinstance(text, str) and text.strip() else None
 
 
 def _payload_messages(payload: object) -> list[dict]:
@@ -423,7 +430,7 @@ class OpencodeAgent:
              env: dict | None = None) -> subprocess.CompletedProcess:
         """Every call gets a deadline (OC7) and reports it as an AgentError, so a
         wedged opencode becomes a retryable failure instead of a hung command."""
-        seconds = _timeout()
+        seconds = env_seconds("AGORA_OPENCODE_TIMEOUT", DEFAULT_CLI_TIMEOUT)
         child_env = {**os.environ, **env} if env else None
         try:
             return subprocess.run(argv, cwd=str(cwd) if cwd else None, timeout=seconds,
@@ -431,7 +438,8 @@ class OpencodeAgent:
                                   **({"stdout": stdout, "stderr": subprocess.PIPE}
                                      if stdout is not None else {"capture_output": True}))
         except subprocess.TimeoutExpired:
-            raise AgentError(f"opencode 逾時（{seconds} 秒）：{argv[1] if len(argv) > 1 else argv[0]}") from None
+            raise AgentError(f"opencode 逾時（{seconds:g} 秒）："
+                             f"{argv[1] if len(argv) > 1 else argv[0]}") from None
 
     def _export_bytes(self, session_id: str, cwd: Path | str | None = None) -> bytes:
         """`opencode export <id>` with stdout going to a file, stderr apart.
@@ -448,10 +456,10 @@ class OpencodeAgent:
                                  cwd=cwd, stdout=out,
                                  env={"PWD": str(cwd)} if cwd else None)
             if proc.returncode != 0:
-                message = (proc.stderr or b"").decode("utf-8", "replace").strip()
+                message = _err(proc)
                 if "Session not found" in message:
                     raise AgentError(f"opencode 找不到 Session {session_id}")
-                raise AgentError(f"opencode export {session_id} 失敗：{message[-300:]}")
+                raise AgentError(f"opencode export {session_id} 失敗：{message}")
             return target.read_bytes()
 
     def _import(self, payload: dict, cwd: Path) -> None:
@@ -460,17 +468,23 @@ class OpencodeAgent:
             path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             proc = self._run([agent_cmd(self.name), "import", str(path)], cwd=cwd)
         if proc.returncode != 0:
-            message = proc.stderr.decode("utf-8", "replace").strip()
-            raise AgentError(f"opencode import 失敗：{message[-300:]}")
+            raise AgentError(f"opencode import 失敗：{_err(proc)}")
+
+    def _delete(self, session_id: str, cwd: Path, n: int = 200) -> str | None:
+        """`opencode session delete <id>` - by id, never a pattern and never a listing.
+
+        None when it worked, otherwise what to tell the user (review O5).
+        """
+        proc = self._run([agent_cmd(self.name), "session", "delete", session_id], cwd=cwd)
+        return None if proc.returncode == 0 else _err(proc, n)
 
     def _discard(self, session_id: str, cwd: Path) -> str:
         """Delete the wreckage, one id at a time, and say what to tell the user."""
-        proc = self._run([agent_cmd(self.name), "session", "delete", session_id], cwd=cwd)
-        if proc.returncode != 0:
-            detail = proc.stderr.decode("utf-8", "replace").strip()[-200:]
-            return (f"而且刪不掉 {session_id}，請手動 "
-                    f"`opencode session delete {session_id}`：{detail}")
-        return f"已經刪掉 {session_id}"
+        detail = self._delete(session_id, cwd)
+        if detail is None:
+            return f"已經刪掉 {session_id}"
+        return (f"而且刪不掉 {session_id}，請手動 "
+                f"`opencode session delete {session_id}`：{detail}")
 
     def _import_verified(self, payload: dict, cwd: Path) -> tuple[str, int]:
         """Import, read it back, and prove nothing was dropped (rules 2 and 4).
@@ -620,10 +634,9 @@ class OpencodeAgent:
         return list(rows)
 
     def _read_sessions(self, path: Path) -> list[Listed]:
-        connection = _open_readonly(path)
-        if connection is None:
-            return []
-        try:
+        with _db(path) as connection:
+            if connection is None:
+                return []
             columns = {row[1] for row in connection.execute("pragma table_info(session)")}
             if not set(_LIST_COLUMNS) <= columns:
                 _warn_schema()
@@ -632,11 +645,7 @@ class OpencodeAgent:
                            title=title or None, updated_at=_iso(time_updated))
                     for session_id, directory, title, time_updated
                     in connection.execute(_LIST_SQL)]
-        except sqlite3.Error:
-            _warn_schema()
-            return []
-        finally:
-            connection.close()
+        return []
 
     def search_text(self, keyword: str, only: set[str] | None = None) -> Iterator[str]:
         """Session ids whose conversation mentions `keyword`, one at a time.
@@ -652,30 +661,22 @@ class OpencodeAgent:
         answer a question about text.
         """
         keyword = keyword.strip()
-        wanted = _folded(keyword)
+        wanted = normalize(keyword)
         if not wanted:
             return
-        connection = _open_readonly(_db_path())
-        if connection is None:
-            return
         seen: set[str] = set()
-        try:
+        with _db() as connection:
+            if connection is None:
+                return
             passes = ((_SEARCH_LIKE_SQL, (_like_pattern(keyword),)), (_SEARCH_ALL_SQL, ()))
             for statement, arguments in passes:
                 for session_id, blob in connection.execute(statement, arguments):
-                    if session_id in seen or (only is not None and session_id not in only) \
-                            or _field(blob, "type") != "text":
+                    if session_id in seen or (only is not None and session_id not in only):
                         continue
-                    if _field(blob, "synthetic") is True:
-                        continue
-                    text = _field(blob, "text")
-                    if isinstance(text, str) and wanted in _folded(text):
+                    text = _said(blob)
+                    if text is not None and wanted in normalize(text):
                         seen.add(session_id)
                         yield session_id
-        except sqlite3.Error:
-            _warn_schema()
-        finally:
-            connection.close()
 
     def last_message(self, session_id: str) -> tuple[str, str] | None:
         """(role, text) of the newest plain-text turn, as stored; None if there is none.
@@ -684,28 +685,19 @@ class OpencodeAgent:
         the preview pane shows one turn, not a transcript. `synthetic` parts are
         skipped: they are attachments, not something the session said.
         """
-        connection = _open_readonly(_db_path())
-        if connection is None:
-            return None
-        try:
+        with _db() as connection:
+            if connection is None:
+                return None
             for message_id, data in connection.execute(_LAST_SQL, (session_id, _LAST_SCAN)):
                 role = _field(data, "role")
                 if role not in ("user", "assistant"):
                     continue
                 texts = []   # a long reply is several text parts: all of them, in order
                 for (blob,) in connection.execute(_PARTS_SQL, (message_id,)):
-                    if _field(blob, "type") != "text" or _field(blob, "synthetic") is True:
-                        continue
-                    text = _field(blob, "text")
-                    if isinstance(text, str) and text.strip():
-                        texts.append(text.strip())
+                    if text := _said(blob):
+                        texts.append(text)
                 if texts:
                     return role, "\n\n".join(texts)[:_PREVIEW_CHARS]
-        except sqlite3.Error:
-            _warn_schema()
-            return None
-        finally:
-            connection.close()
         return None
 
     def summarize(self, prompt: str, workdir: Path) -> tuple[str, str | None]:
@@ -740,7 +732,7 @@ class OpencodeAgent:
         if model:
             argv += ["-m", model]
         material.write_text(prompt, encoding="utf-8")
-        seconds = _summarize_timeout()
+        seconds = summarize_timeout()
         try:
             code, events, errors = self._summarizing(argv, workdir, seconds)
         finally:
@@ -751,7 +743,8 @@ class OpencodeAgent:
         answered = self._model_of(session_id, workdir) if session_id else None
         self._drop_summary_session(session_id, workdir)
         if code != 0:
-            raise AgentError(f"opencode 寫要約失敗：{errors.decode('utf-8', 'replace').strip()[-200:]}")
+            raise AgentError(f"opencode 寫要約失敗："
+                             f"{errors.decode('utf-8', 'replace').strip()[-200:]}")
         if not (text or "").strip():
             raise AgentError("opencode 沒有寫出要約（空回覆）")
         return text, answered
@@ -792,7 +785,7 @@ class OpencodeAgent:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-            raise AgentError(f"opencode 寫要約逾時（{seconds} 秒）") from None
+            raise AgentError(f"opencode 寫要約逾時（{seconds:g} 秒）") from None
         except BaseException:      # Esc, a closed terminal: kill opencode now (review M5)
             # The pending record is already written, so killing it is safe - and the
             # alternative is waiting on a stdout that never reaches EOF, until
@@ -827,12 +820,9 @@ class OpencodeAgent:
         if not session_id:
             return
         record = _remember_summary_session(workdir, session_id)   # already there if the run streamed it
-        proc = self._run([agent_cmd(self.name), "session", "delete", session_id],
-                         cwd=workdir)
-        if proc.returncode != 0:
-            detail = proc.stderr.decode("utf-8", "replace").strip()[-160:]
-            print(f"[agora] 寫要約用掉的 {session_id} 沒刪掉（記錄留在 {record}）："
-                  f"{detail}", file=sys.stderr)
+        detail = self._delete(session_id, workdir, n=160)
+        if detail is not None:
+            warn(f"寫要約用掉的 {session_id} 沒刪掉（記錄留在 {record}）：{detail}")
             return
         record.unlink(missing_ok=True)
 

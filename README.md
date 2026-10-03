@@ -10,7 +10,24 @@ uv tool install --editable .     # 之後就有 agora 指令
 
 需要：
 - `rclone`；
-- `~/.config/agora/rclone.conf`：remote 名稱是 `gdrive`，scope 是 `drive.file`，用 rclone 內建的 client。第一次打 `agora`（互動模式）時會引導你用瀏覽器授權；也可以自己跑 `rclone config create gdrive drive scope=drive.file --config ~/.config/agora/rclone.conf`；
+- `~/.config/agora/rclone.conf`：remote 名稱是 `gdrive`，scope 是 `drive.file`。第一次打 `agora`（互動模式）時會引導你用瀏覽器授權；也可以自己跑 `rclone config create gdrive drive scope=drive.file --config ~/.config/agora/rclone.conf`；
+- **選填**自己的 OAuth client（Google Cloud 的 **Desktop** client）。rclone 內建的 client 配額是所有 rclone 使用者共用的，被限流時一次 rclone 約 50 秒，用自己的約 0.6～0.8 秒。
+
+  怎麼給：**在首次設定選第二個項，給它一個 client 設定檔的路徑**——把 Google 下載的 JSON 存成檔案、把路徑給它；或給一個兩行 `Client-ID=`／`SECRET=` 的文字檔。值由 agora 讀出來直接交給 rclone，不會印出來、不寫進 log、也不經過 shell。讀不到（檔案不在、不是 UTF-8、裡面沒有 `client_id`／`client_secret`）時會問你要不要重來一次，還是改用內建的 client。`web` 類型的 client 不收：rclone 對它用 `http://127.0.0.1:53682/` 當回呼，那種 client 授權一定會失敗。
+
+  **不要把 secret 打在命令列上**（會留在 shell 的歷史紀錄裡）。真的要自己跑 `rclone config create`，就讓值從檔案來：
+
+  ```bash
+  CONF=~/.config/agora/rclone.conf
+  JSON=~/Downloads/client_secret_xxx.json      # Google 下載的那個
+  ID=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["installed"]["client_id"])' "$JSON")
+  SECRET=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["installed"]["client_secret"])' "$JSON")
+  rclone config create gdrive drive scope=drive.file client_id="$ID" client_secret="$SECRET" --config "$CONF"
+  unset ID SECRET
+  ```
+
+  設完就把那個 JSON 移走或刪掉：值已經在 `rclone.conf`（權限 600）裡了。授權時同意畫面**要選正式版**：testing 模式的 refresh token 只有 7 天。換 client 之後以前建的檔案要自己搬（見 design D5）；換機器只要複製 `rclone.conf` 與 `config.json`。
+
 - `opencode`、`claude`（用到哪個裝哪個）。
 
 第一次執行時，agora 會在 Drive 建一個 `agora/` 資料夾，並把它的 folder ID 記到 `~/.config/agora/config.json`。
@@ -53,7 +70,8 @@ agora continue session agora:01K8… --agent claude --dir ~/proj
 agora edit session agora:01K6… --header 'tags=[csv, 表格]' --header 'status=stable'
 agora edit session agora:01K6…
 
-# 刪除：移到 Drive 垃圾桶（30 天內可以在 Drive 網頁還原），一定要加 --yes
+# 刪除：本機立刻不見（鏡像、索引、outbox 那一筆），Drive 那份由背景移到垃圾桶
+# （30 天內可以在 Drive 網頁還原）。指令不等背景。一定要加 --yes
 # 有找不到的 id 時整批都不刪（exit 1）；自己刪過的 id 重跑時會略過
 agora delete session agora:01K6… --yes
 agora delete session agora:01K6…, agora:01K7… --yes
@@ -65,6 +83,18 @@ agora pull session claude:0f1e…-uuid              # 把那個 session 的全�
 
 # 把給的 agora Session 寫回 Drive：只傳 session.md 與它標頭指到的那一個原始檔
 agora push session agora:01K6… agora:01K7…
+
+# 雲端沒有的 Session（被另一台機器刪掉的）：本機的副本與索引都留著，標成「雲端沒有」，
+# 同步**不會**自己清掉——要不要刪、要不要傳回去，是你的決定，要明確說。
+agora search session --filter cloud=no        # 只列出雲端沒有的（每行最後標「(雲端沒有)」）
+agora search session --filter cloud=yes       # 列出雲端還有的
+agora pull session agora:01K6… --not-exist-delete   # 雲端沒有 → 刪掉本機這份
+agora push session agora:01K6… --not-exist-upload   # 雲端沒有 → 把它傳回去（撤銷刪除）
+# 兩個 flag 都不加時只印一行提醒、不動。還在 outbox（未上傳）或正在接續的不算「雲端沒有」，
+# 也不會被 --not-exist-delete 刪掉。continue／edit 遇到雲端沒有的會拒絕（exit 1），
+# delete 雲端沒有的只刪本機這份。對 agent 的 id，--not-exist-delete 是「agent 那邊已經沒有了，
+# 就刪掉它的全文快取」；對 agora 的 id，Drive 上沒有 sessions/（資料夾 id 或 token 的問題）
+# 時會拒絕那一個，不會當成刪除。
 
 # 看標頭＋閱讀版／原始匯出
 agora show session agora:01K6…
@@ -86,9 +116,16 @@ agora show session agora:01K6… --raw
 | 0 | 成功 |
 | 1 | 做不到：找不到 id、沒有訊息可匯入、merge 少於兩個、delete 沒加 `--yes`、有子 Session |
 | 2 | 錯誤：標頭、Drive、agent 或非預期的錯誤，以及指令用法錯誤 |
-| 3 | 已存在本機 outbox，還沒上傳到 Drive（之後的指令會自動再送） |
+| 3 | 還在 outbox（背景上傳器起不來，或 `AGORA_UPLOAD=inline` 時這一輪沒送完） |
 
-不用自己同步：每個指令開頭都會自動把沒上傳成功的送出去，需要時也會從 Drive 拉新的內容。
+**先存本機，Drive 的部分交給背景。** import、continue、merge、edit 寫完本機（鏡像裡有完整的一份，含原始檔）就回 exit 0，背景上傳器慢慢送；`delete` 也是本機先不見，Drive 那份排進 `<state>/trash-queue/`，背景逐一 purge。所以指令的離開時間不再由 Drive 決定。
+
+- 背景輸出寫在 `~/.local/state/agora/upload.log`（超過 1 MB 只留尾巴），鎖是同目錄的 `upload.lock`；它的 stdout 不接到你的終端機，所以管線還是讀得到 EOF。
+- 每個指令開頭若發現還在等的東西，會啟動背景並提示「outbox 有 N 筆未上傳」／「有 N 個等著移到 Drive 垃圾桶」（背景正在跑時不提示），不會在前台慢慢送。
+- **只有 `push` 會等**：它的契約是「回來時那幾筆在 Drive 上」，所以等到自己剛寫的 id 離開 outbox 才算成功；等不到就繼續等（每 10 秒說一次為什麼），Ctrl-C 隨時可退。
+- 還在 outbox 或正等著移到垃圾桶的 Session，`pull`／`push` 會拒絕並說「正在刪除」；雲端沒有的（別台刪掉的）Session 在那之前照樣搜得到、標成「雲端沒有」。
+
+不用自己同步：每個指令開頭都會把 outbox 與刪除佇列交給背景上傳器，需要時也會從 Drive 拉新的內容。
 
 **壓縮：** 用 agent 內建的指令，opencode 是 `/compact`，Claude Code 是 `/compact`。壓縮後的內容會在 agent 結束時存回 Agora。
 
@@ -98,8 +135,8 @@ agora show session agora:01K6… --raw
 |---|---|
 | Drive `agora/sessions/<ULID>/` | `session.md`（header＋閱讀版）、`raw-<md5>.json`（原始匯出） |
 | `~/.config/agora/` | `rclone.conf`、`config.json` |
-| `~/.cache/agora/` | 鏡像與搜尋索引，刪掉也會重建 |
-| `~/.local/state/agora/` | `outbox/`（還沒上傳成功的）、`pending/`（接續中的）、`*/.bad/`（讀不了的壞檔，每個指令都會提示）——**不要刪** |
+| `~/.cache/agora/` | 鏡像與搜尋索引（含原始檔），刪掉也會重建 |
+| `~/.local/state/agora/` | `outbox/`（等著上傳的）、`trash-queue/`（等著移到 Drive 垃圾桶的）、`pending/`（接續中的）、`upload.log`（背景的記錄）、`*/.bad/`（讀不了的壞檔，每個指令都會提示）——**不要刪** |
 
 ## 測試
 

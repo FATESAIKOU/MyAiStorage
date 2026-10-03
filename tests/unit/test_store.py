@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
+
 import json
 import os
 import subprocess
@@ -48,18 +50,21 @@ def T(keyword: str) -> list:
 
 def _save(paths, hdr, body="## user\n把 CSV 轉成 Markdown 表格\n", raw=b'{"x": 1}'):
     folder = store.stage(paths, hdr, body, raw)
-    store.push_one(store.Drive(paths), folder)
+    store.upload_batch(store.Drive(paths), paths)
     return hdr["id"].split(":", 1)[1]
 
 
-def test_raw_uploaded_before_session_md(remote):  # U-ST-01, U-ST-02, review D1
+def test_raw_uploaded_before_session_md(remote, monkeypatch):  # U-ST-01, U-ST-02, review D1
     paths = store.Paths.from_env()
+    batches = []
+    real_copy = store._copy_batch
+    monkeypatch.setattr(store, "_copy_batch",
+                        lambda d, p, names: (batches.append(list(names)), real_copy(d, p, names))[1])
     ulid = _save(paths, _header())
-    uploads = [c for c in calls(remote) if "copyto" in c]
-    # once each: `push_one` used to upload both files itself and then again inside
-    # `_upload_checked`, so every save sent everything twice (D1).
-    assert len(uploads) == 2
-    assert uploads[0][-1].endswith(".json") and uploads[-1][-1].endswith("session.md")
+    # raws first, once each: two batches, and no file sent twice (D1)
+    assert len(batches) == 2, batches
+    assert batches[0][0].split("/")[1].startswith("raw-"), batches
+    assert batches[1] == [f"{ulid}/session.md"]
     hdr, _ = h.split_document((remote / "agora" / "sessions" / ulid / "session.md").read_text())
     raw_path = remote / "agora" / "sessions" / ulid / hdr["agora"]["raw"]["file"]
     assert hdr["agora"]["raw"]["file"] == f"raw-{hdr['agora']['raw']['md5'][:12]}.json"
@@ -92,8 +97,7 @@ def test_failed_upload_stays_in_outbox_and_sync_pushes_it(remote, monkeypatch): 
     hdr = _header()
     folder = store.stage(paths, hdr, "## user\nCSV\n", b"{}")
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "raw-")
-    with pytest.raises(store.StoreError):
-        store.push_one(store.Drive(paths), folder)
+    assert store.upload_batch(store.Drive(paths), paths) == [folder.name]   # it says, not raise
     assert folder.exists() and store.outbox_count(paths) == 1
     monkeypatch.delenv("FAKE_RCLONE_FAIL")
     index = store.sync(paths)
@@ -206,7 +210,7 @@ def test_unknown_ref_entity_is_still_indexed(remote):  # R7
     hdr = _header()
     hdr["refs"] = ["future:thing"]
     folder = store.stage(paths, hdr, "## user\nCSV\n", b"{}")
-    store.push_one(store.Drive(paths), folder)
+    store.upload_batch(store.Drive(paths), paths)
     assert store.sync(paths).search(T("CSV"))
 
 
@@ -230,14 +234,17 @@ def test_cold_start_downloads_in_one_batch(remote):  # docs/perf.md
     assert len(index.known()) == 3
 
 
-def test_a_session_without_a_raw_uploads_only_session_md(remote):  # review D1
+def test_a_session_without_a_raw_uploads_only_session_md(remote, monkeypatch):  # review D1
     """One file in, one copyto out - the other half of D1's count."""
     paths = store.Paths.from_env()
     folder = store.stage(paths, _header(), "## user\n沒有原始檔\n", None)
     ulid = folder.name
-    store.push_one(store.Drive(paths), folder)
-    uploads = [c for c in calls(remote) if "copyto" in c]
-    assert len(uploads) == 1 and uploads[0][-1].endswith("session.md")
+    batches = []
+    real_copy = store._copy_batch
+    monkeypatch.setattr(store, "_copy_batch",
+                        lambda d, p, names: (batches.append(list(names)), real_copy(d, p, names))[1])
+    store.upload_batch(store.Drive(paths), paths)
+    assert batches == [[f"{ulid}/session.md"]], batches   # one batch, and no raw to send
     assert (remote / "agora" / "sessions" / ulid / "session.md").is_file()
 
 

@@ -7,8 +7,11 @@ involving signals, death or races (U-CON-08/10/11/11b/16/17).
 
 from __future__ import annotations
 
+import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
+
 import json
 import os
+import shutil
 import shutil
 import signal
 import stat
@@ -294,13 +297,58 @@ def test_search_same_source_shows_newest_with_warning(env, capsys):  # U-IMP-10,
     new["agora"] = dict(base["agora"], updated_at="2026-10-03T00:00:00Z")
     body = "## user\n重複來源表格\n"
     for hdr in (old, new):
-        store.push_one(store.Drive(paths()), store.stage(paths(), hdr, body, b"{}"))
+        store.stage(paths(), hdr, body, b'{"x": 1}')
+        store.upload_batch(store.Drive(paths()), paths())
     store.sync(paths())
     code, found, err = run(capsys, "search", "session", "--filter", "text~=重複來源", "--no-sync")
     assert code == 0
     assert found.split()[0] == new["id"]
     assert "同一個來源" in err
 
+
+def test_the_same_source_warning_is_said_once_and_never_over_a_rescue(env, capsys):  # T7 F2
+    """Two machines importing one session is worth a line - once, not once per pair.
+    A session rescued out of another is not (they are the same work, parents point
+    back), and a pair whose other half is cloud-missing only repeats「雲端沒有」."""
+    from agora import header as h
+    from agora import store as st
+
+    def make(sid: str, title: str, when: str, parents: list | None = None) -> dict:
+        return {"type": "Session", "title": title, "refs": [], "case": None, "tags": [],
+                "id": f"agora:{h.new_ulid()}",
+                "agora": {"header": 2, "created_at": "2026-10-01T00:00:00Z",
+                          "updated_at": when, "relation": "import", "parents": parents or [],
+                          "source": {"agent": "opencode", "session_id": sid,
+                                     "created_at": "2026-10-01T00:00:00Z"}}}
+
+    def put(hdr: dict) -> dict:
+        st.stage(paths(), hdr, f"## user\n{hdr['title']}的內容\n", b'{"x": 1}')
+        st.upload_batch(st.Drive(paths()), paths())
+        return hdr
+
+    def lines(title: str) -> str:
+        st.sync(paths())
+        _, _, err = run(capsys, "search", "session", "--filter", f"text~={title}的內容", "--no-sync")
+        return err
+
+    # one source imported three times: one line, not a line per pair
+    for n in (2, 3, 4):
+        put(make("ses_dup", "三重複", f"2026-10-0{n}T00:00:00Z"))
+    assert lines("三重複").count("同一個來源") == 1
+
+    # Y rescued out of X: same source, parents point back, and nothing new to say
+    x = put(make("ses_rescue", "四救援", "2026-10-02T00:00:00Z"))
+    put(make("ses_rescue", "四救援", "2026-10-03T00:00:00Z", parents=[{"id": x["id"]}]))
+    assert "同一個來源" not in lines("四救援")
+
+    # the older half is cloud-missing: that is already said by its own row, not news
+    import os
+    from pathlib import Path
+    lost = put(make("ses_lost", "五雲端沒有", "2026-10-02T00:00:00Z"))
+    put(make("ses_lost", "五雲端沒有", "2026-10-03T00:00:00Z"))
+    shutil.rmtree(Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions"
+                  / lost["id"].split(":", 1)[1])
+    assert "同一個來源" not in lines("五雲端沒有")
 
 # --- U-MRG ------------------------------------------------------------------------
 
@@ -367,12 +415,36 @@ def test_continue_source_is_the_new_session(env, capsys, tmp_path):  # U-CON-19,
     assert h.agora_of(hdr)["source"]["dir"] == str(work)
 
 
-def test_continue_without_raw_fails(env, capsys, tmp_path):  # U-CON-14, L2/S1
+def test_continue_uses_the_local_raw_and_puts_drive_s_right(env, capsys, tmp_path):
+    """Since the local mirror keeps the whole session (local-first-writes 2.1), a
+    continue no longer has to fetch it - and a damaged copy on Drive is repaired by the
+    upload instead of stopping the work."""
     _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     ulid = parent.split(":")[1]
     raws = list((tmp_path / "remote" / "agora" / "sessions" / ulid).glob("raw-*.json"))
     assert len(raws) == 1
     raws[0].write_bytes(b"tampered")
+
+    code, _, _ = run(capsys, "continue", "session", parent, "--agent", "opencode", "--dir", "/tmp")
+    assert code == 0
+    hdr = store.Index(paths()).header(ulid)
+    on_drive = tmp_path / "remote" / "agora" / "sessions" / ulid
+    # Drive ends up with the raw this session's header names, and the one it replaced
+    # (here: a damaged copy) is cleared in the same round (N7).
+    assert store.md5_file(on_drive / hdr["agora"]["raw"]["file"]) == hdr["agora"]["raw"]["md5"]
+    assert [p.name for p in on_drive.glob("raw-*")] == [hdr["agora"]["raw"]["file"]]
+
+
+def test_continue_fetches_a_raw_it_does_not_have_and_refuses_a_mismatch(env, capsys, tmp_path):
+    """U-CON-14, L2/S1: still true when the raw really is missing here - then it has to
+    come off Drive, and a copy that does not match the header stops the command."""
+    _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    ulid = parent.split(":")[1]
+    hdr = store.Index(paths()).header(ulid)
+    (paths().mirror / ulid / hdr["agora"]["raw"]["file"]).unlink()      # not here any more
+    raws = list((tmp_path / "remote" / "agora" / "sessions" / ulid).glob("raw-*.json"))
+    raws[0].write_bytes(b"tampered")
+
     code, _, _ = run(capsys, "continue", "session", parent, "--agent", "opencode", "--dir", "/tmp")
     assert code != 0
 

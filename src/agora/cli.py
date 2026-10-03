@@ -133,16 +133,33 @@ def _updates(args) -> dict:
     return h.user_updates(getattr(args, "header_file", None), getattr(args, "header", []))
 
 
-def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None) -> tuple[str, bool]:
-    """Stage into the outbox, then try to push it now."""
+def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None, *,
+          update: bool = False, kind: str = "") -> tuple[str, bool]:
+    """Keep the whole session here, then let the background send it (local-first-writes).
+
+    `update` says this overwrites a session Drive already has - the caller knows, and
+    the uploader cannot tell any more: by the time it looks, `remember` has put every
+    fresh import in the index too, and those are not on Drive yet (review N4).
+
+    The command is done once the session is safe here and a uploader is on its way. Only
+    a uploader that could not start - or, inline, one that did not get through - is a
+    failure, and then it is the old exit 3 with the old words.
+    """
+    from agora import background
     folder = store.stage(paths, hdr, body, raw)
+    if update:
+        store.mark_update(folder, kind)
     store.remember(paths, folder)
-    try:
-        store.push_one(store.Drive(paths), folder)
-    except store.StoreError as e:
-        print(f"[agora] 上傳失敗，已存入 outbox，之後的指令會自動再送：{e}", file=sys.stderr)
-        return hdr["id"], False
-    return hdr["id"], True
+    ulid = folder.name
+    state = background.start(paths)
+    if state == background.STARTED:
+        return hdr["id"], True
+    # Only what this call wrote counts: an entry that never uploads must not turn
+    # someone else's successful import into a failure (review P6).
+    if state == background.FINISHED and ulid not in store.outbox_ulids(paths):
+        return hdr["id"], True
+    print("[agora] 上傳失敗，已存入 outbox，之後的指令會自動再送", file=sys.stderr)
+    return hdr["id"], False
 
 
 def _emit(saved: tuple[str, bool]) -> int:
@@ -180,7 +197,7 @@ def _lost_in_cloud(paths: store.Paths, agora_id: str) -> bool:
     deleted.
     """
     ulid = _ulid_of(agora_id)
-    if ulid in store.outbox_ulids(paths):
+    if ulid in store.waiting_ulids(paths):
         return False               # not up yet: ours, not another machine's delete
     try:
         remote = store.Drive(paths).list_sessions()
@@ -242,13 +259,22 @@ def cmd_search(args, paths: store.Paths) -> int:
     filters = h.parse_filters(args.filter)
     index = store.Index(paths) if args.no_sync else store.sync(paths, throttle=True)
     seen: dict[tuple, str] = {}
-    outbox = store.outbox_ulids(paths)
+    said: set[tuple] = set()      # T7 F2: the same source gets at most one line
+    outbox = store.waiting_ulids(paths)
     for ulid, hdr, snippet in index.search(filters):
         agora = h.agora_of(hdr)
         source = agora.get("source") or {}
         key = (source.get("agent"), source.get("session_id"))
         if source.get("session_id") and key in seen:
-            print(f"[agora] {seen[key]} 與 agora:{ulid} 來自同一個來源 Session", file=sys.stderr)
+            first = seen[key]
+            # F2: not for a pair where one was rescued from the other (Y's parents point
+            # at N) - that is not two machines importing the same session - and not when
+            # either is cloud-missing, which that row already says.
+            both = (first.split(":", 1)[1], ulid)
+            if key not in said and all(index.cloud_has(u) for u in both) \
+                    and not _rescued_pair(index, first, f"agora:{ulid}"):
+                said.add(key)
+                print(f"[agora] {first} 與 agora:{ulid} 來自同一個來源 Session", file=sys.stderr)
             continue
         seen[key] = f"agora:{ulid}"
         date = store.sort_date(hdr)[:10]
@@ -261,6 +287,19 @@ def cmd_search(args, paths: store.Paths) -> int:
 
 
 _progress = store.progress
+
+
+def _rescued_pair(index: store.Index, first: str, second: str) -> bool:
+    """Whether one of these was saved out of the other (a rescue: `parents` point back).
+
+    T7 F2: Y was made from N when Drive lost N; they share a source because they *are*
+    the same work, and telling the reader so on every sync is noise.
+    """
+    for one, other in ((first, second), (second, first)):
+        parents = h.agora_of(index.header(one.split(":", 1)[1]) or {}).get("parents") or []
+        if any(str(p.get("id", "")) == other for p in parents):
+            return True
+    return False
 
 
 def cmd_import(args, paths: store.Paths) -> int:
@@ -279,9 +318,10 @@ def cmd_import(args, paths: store.Paths) -> int:
     ids = [i.strip() for raw in args.external_session_id for i in raw.split(",") if i.strip()]
     if not ids:
         raise InputError("--external-session-id 沒有內容")
-    # Once, never throttled: we must see other machines' imports (S6). The batch
-    # shares this index; _save keeps it current as it goes (review S1-3).
-    index = store.sync(paths)
+    # Once, throttled: a command should not stand in front of Drive just to look for
+    # other machines' imports (S6 relaxed by the local-first-writes batch delta). The
+    # import we are about to write starts the uploader itself.
+    index = store.sync(paths, throttle=True)
     first_bad = 0
     for k, external_id in enumerate(ids, 1):
         _progress("匯入", k, len(ids), external_id)
@@ -320,7 +360,7 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
             hdr = _with_user(old, updates)
             hdr["agora"]["source"] = _source(agent, exported)
             hdr["agora"]["updated_at"] = _now_iso()
-            return _emit(_save(paths, hdr, body, exported.raw))
+            return _emit(_save(paths, hdr, body, exported.raw, update=True))
         # Already continued or merged from: keep the old version and branch (S7).
         parents = [{"id": f"agora:{existing[0]}", "raw_md5": (h.agora_of(old).get("raw") or {}).get("md5")}]
         auto = _auto_header("import", parents, body, title=exported.title, exported=exported, agent=agent,
@@ -438,10 +478,11 @@ def cmd_merge(args, paths: store.Paths) -> int:
         raise InputError("merge 的 Session 重複了")
     updates = _updates(args)
     index = _sync_for(paths, ids)
+    for session_id in ids:      # P2: all of them first - writing a summary costs an AI
+        _need_in_cloud(index, f"agora:{_ulid_of(session_id)}")   # call, and none should be
     parents, parent_headers, sections, models = [], [], [], set()
     for k, agora_id in enumerate(ids, 1):
         agora_id = f"agora:{_ulid_of(agora_id)}"
-        _need_in_cloud(index, agora_id)      # a summary of a deleted session is not a session
         parent = _header_for(index, agora_id)
         agora = h.agora_of(parent)
         _progress("來源", k, len(ids), agora_id)
@@ -560,6 +601,7 @@ def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
     index = store.Index(paths)
     ulid = _ulid_of(record["agora_id"])
     hdr = index.header(ulid) or {}
+    same_id = True            # False once the work has been saved as a session of its own
     # Two signals, either one enough: the marker (this machine already saw it) and
     # Drive right now (F1). A header that is not here at all is the same story - it
     # was deleted here, while the agent worked (F4) - and the work is not lost either.
@@ -571,6 +613,7 @@ def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
         parents = [record.get("parent") or {"id": record["agora_id"], "raw_md5": raw_md5}]
         hdr = _auto_header("continue", parents, body, title=record.get("title") or exported.title,
                            exported=exported, agent=agent, parent_headers=[hdr] if hdr else [])
+        same_id = False        # a new id: Drive has never heard of it, so it is not an update
         how = "被別台機器刪掉了" if was_here else "在這台機器上被刪掉了"
         print(f"[agora] {record['agora_id']} 在你接續的時候{how}，"
               f"這次的對話另存成 {hdr['id']}；原來那個保持被刪掉的狀態", file=sys.stderr)
@@ -592,7 +635,11 @@ def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
                        "author": actor, "last_modified": _now_iso()[:10]}, *sources]
     if not hdr.get("description"):
         hdr["description"] = _description(body)
-    return _save(paths, _with_user(hdr, record.get("header_updates") or {}), body, exported.raw)
+    # `kind`: a continue is the one write that is a relation of its own, and if this
+    # session is gone by the time it goes up the work is saved as a session of its own -
+    # as a continue, not as whatever X was (review G2)
+    return _save(paths, _with_user(hdr, record.get("header_updates") or {}), body,
+                 exported.raw, update=same_id, kind="continue")
 
 
 def recover_pending(paths: store.Paths, *, notice_only: bool = False) -> None:
@@ -724,16 +771,27 @@ def _converted_turns(seg_agent: str, seg_id: str, raw: bytes) -> list[tuple[str,
 
 
 def cmd_delete(args, paths: store.Paths) -> int:
-    """Move one or several sessions to the Drive trash (design 5.6).
+    """Delete one or several sessions locally and queue them for the Drive trash
+    (change local-first-writes, design「背景刪除」).
 
-    A session that is already gone counts as done, so a re-run after Ctrl-C
-    finishes the job instead of failing (T1 R4). Children named in the same
+    The foreground makes them disappear from this machine at once: forget_local
+    drops the index row and the mirror, the tombstone keeps a re-run from treating
+    them as unknown, the outbox entry is removed (L3: an edit that has not uploaded
+    yet does not go up first), and the ULID is placed in the trash queue for the
+    background to purge on Drive.
+
+    A session Drive does not have goes through the same local steps but does not
+    enter the queue: there is nothing to purge (design L6). A session that was
+    already deleted in an earlier run is skipped (R4). Children named in the same
     request go first; children outside it are still refused.
     """
+    from agora import background
     ids = [f"agora:{_ulid_of(i)}" for i in _split_ids(args.ids)]
     if not ids:
         raise InputError("delete 要給至少一個 session id")
-    index = store.sync(paths)
+    # kick=False: the uploader must not start before the outbox entry is gone, or the
+    # version being deleted goes up first and only then gets purged (review W1)
+    index = store.sync(paths, kick=False)
     gone = _deleted_ids(paths)
     headers, missing, unknown = {}, [], []
     for agora_id in ids:
@@ -761,7 +819,8 @@ def cmd_delete(args, paths: store.Paths) -> int:
     if not args.yes:
         listed = "\n".join(f"  {i}（{hdr.get('title') or '無標題'}）" for i, hdr in headers.items())
         raise InputError(f"會把這 {len(headers)} 個移到 Drive 垃圾桶：\n{listed}\n確定的話加 --yes")
-    total, drive = len(headers), store.Drive(paths)
+    total = len(headers)
+    queued = False
     left, refused, done = list(headers), [], 0
     while left:   # a child in the same request goes first, so its parents can follow
         ready = [i for i in left if not index.children(_ulid_of(i))]   # deleted ones leave the index
@@ -770,24 +829,46 @@ def cmd_delete(args, paths: store.Paths) -> int:
         for agora_id in ready:
             done += 1
             _progress("刪除", done, total)
-            if index.cloud_has(_ulid_of(agora_id)):
-                store.delete_session(paths, drive, _ulid_of(agora_id))
+            ulid = _ulid_of(agora_id)
+            # Asked before forget_local: dropping the row also drops the marker that
+            # says Drive does not have it, so afterwards every session looks present
+            # and a cloud-lost one is queued for a purge that has nothing to purge.
+            in_cloud = index.cloud_has(ulid)
+            store.forget_local(paths, ulid)
+            shutil.rmtree(paths.outbox / ulid, ignore_errors=True)
+            # and a set-aside copy (K1): the next background would put it back and send it
+            shutil.rmtree(paths.outbox / f".done-{ulid}", ignore_errors=True)
+            if in_cloud:
+                # Drive has it: queue for the background to purge (design「背景刪除」).
+                paths.trash_queue.mkdir(parents=True, exist_ok=True)
+                (paths.trash_queue / ulid).write_text("", encoding="utf-8")
+                queued = True
             else:
-                # Drive does not have it (T1 3.4): the local copy is the whole of it
-                store.forget_local(paths, _ulid_of(agora_id))
-                shutil.rmtree(paths.outbox / _ulid_of(agora_id), ignore_errors=True)
+                # Drive does not have it (L6): the local copy is the whole of it.
                 print(f"[agora] {agora_id} 雲端沒有，只刪本機這份", file=sys.stderr)
-            _remember_deleted(paths, _ulid_of(agora_id))
+            _remember_deleted(paths, ulid)
             print(agora_id)
             left.remove(agora_id)
     for agora_id in left:
         children = "、".join(f"agora:{c}" for c in index.children(_ulid_of(agora_id)))
         print(f"[agora] {agora_id} 有子 Session，不能刪：{children}", file=sys.stderr)
         refused.append(agora_id)
+    state = None
     if done:
+        # one start, at the end: for the queue we filled, and for anything else that was
+        # already waiting - the opening sync above did not start anything (review W1)
+        if queued or store.outbox_count(paths):
+            state = background.start(paths)
         more = f"，重跑會接著做剩下的 {len(left) + len(missing)} 個" if left else ""
-        print(f"[agora] 已把 {done} 個移到 Drive 垃圾桶，30 天內可以在 Drive 網頁還原{more}",
-              file=sys.stderr)
+        where = "，背景移到 Drive 垃圾桶" if queued else ""
+        print(f"[agora] 已從本機刪除 {done} 個{where}{more}", file=sys.stderr)
+    if state == background.FAILED:
+        # The Drive half is queued and safe, but nobody is going to do it now. Same exit
+        # as an upload that did not get through, and the next command starts it again.
+        # Nothing queued means the uploader was only for the outbox (G4): say that.
+        what = "移到 Drive 垃圾桶" if queued else "outbox 的上傳"
+        print(f"[agora] 背景上傳啟動失敗，{what}要等之後的指令", file=sys.stderr)
+        return EXIT_IN_OUTBOX
     return EXIT_INPUT if refused else 0
 
 
@@ -829,7 +910,7 @@ def cmd_edit(args, paths: store.Paths) -> int:
     # Re-stage with the same raw bytes (same md5, same file name) so the
     # outbox entry is complete; only session.md really changes.
     raw = store.fetch_raw(paths, store.Drive(paths), _ulid_of(agora_id), old) if h.agora_of(old).get("raw") else None
-    return _emit(_save(paths, new, body, raw))
+    return _emit(_save(paths, new, body, raw, update=True))
 
 
 def _edit_in_editor(old: dict) -> dict:
@@ -950,8 +1031,15 @@ def main(argv: list[str] | None = None) -> int:
     paths = store.Paths.from_env()
     try:
         recover_pending(paths, notice_only=args.no_sync)
+        for line in store.take_notices(paths):
+            print(f"[agora] {line}", file=sys.stderr)
         if waiting := store.outbox_count(paths):
             print(f"[agora] outbox 有 {waiting} 筆未上傳", file=sys.stderr)
+        if queued := store.queued_for_trash(paths):
+            # N10 / design L4: what is still on Drive because a purge failed. Not while
+            # the background is on it - that run says so itself, in upload.log.
+            if not store.uploader_is_running(paths):
+                print(f"[agora] 有 {len(queued)} 個等著移到 Drive 垃圾桶", file=sys.stderr)
         if bad := store.bad_count(paths):
             print(f"[agora] 有 {bad} 筆壞檔放在 {paths.state}/*/.bad，請檢查", file=sys.stderr)
         return ACTIONS[args.action](args, paths)
@@ -965,7 +1053,11 @@ def main(argv: list[str] | None = None) -> int:
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return 0
     except KeyboardInterrupt:   # e.g. while reading the session back: the pending record is kept
-        print("\n[agora] 中斷了；沒存完的接續會在下一個 agora 指令自動補存", file=sys.stderr)
+        # P4: what a re-run gets differs - continue leaves a pending record to be
+        # finished later, merge leaves the summaries it already wrote in the cache.
+        hint = ("重跑同一個指令會沿用已寫好的要約" if args.action == "merge"
+                else "沒存完的接續會在下一個 agora 指令自動補存")
+        print(f"\n[agora] 中斷了；{hint}", file=sys.stderr)
         return 130
     except Exception as e:   # never let one broken file brick every command (C2)
         if os.environ.get("AGORA_DEBUG"):

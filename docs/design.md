@@ -22,15 +22,17 @@
 | D2 | **信任自己的機器** | 不做簽章、收件匣、單一提交者、pin repo。寫入是本機直接寫 |
 | D3 | **四個實體的概念全部保留**（MyBrain／Agora／Foundry／Atelier），彼此靠 **header** 參照 | 程式這次只實作 Agora |
 | D4 | **continue 的結果是新的 Session**，header 記下來源 | 可以分岔；merge 的結果也有地方放 |
-| D5 | Drive 憑證用 **rclone 內建的 OAuth client，scope 是 `drive.file`**（2026-10-02 從自建的 worker client 搬過來，使用者決定） | 只看得到自己建的檔案；不必有自己的 Google Cloud 專案 |
+| D5 | Drive 憑證用 **自己的 OAuth client（Desktop，scope `drive.file`）**；沒有就退回 **rclone 內建的 client**，同樣是 `drive.file`（2026-10-03 使用者決定，issue #11） | 只看得到自己建的檔案；用自己的 client 不用跟所有 rclone 使用者共用配額 |
 | D6 | **閱讀版＝user／assistant 的文字＋每次工具呼叫一行摘要**；不收工具結果、不收 thinking（2026-10-02） | 搜尋與跨 agent 接續都用它 |
 
 ### D5 的注意事項（S8）
 
 - `agora/` 根資料夾第一次執行時建立，把 **folder ID** 寫進 `~/.config/agora/config.json`；之後所有存取都用 ID，不靠名字找（Drive 允許同名資料夾）。`sync` 發現同名資料夾時警告。
 - **只能透過 agora 寫入。** 從 Drive 網頁拖進去的檔案，`drive.file` 看不到。
-- **換 client，以前建的檔案就全部看不到**（資料還在）。2026-10-02 從 worker client 換成 rclone 內建 client 時是這樣搬的：用舊的設定把 `agora/` 整份下載，用新的設定建新的 `agora/` 並上傳、逐檔核對 md5，切換 `config.json` 的 folder ID，再用舊的設定把舊資料夾移到垃圾桶。
-- rclone 內建 client 的配額是所有 rclone 使用者共用的，用量大時可能被限流；agora 每次只傳幾個小檔，目前不是問題。
+- **用自己的 client（2026-10-03，issue #11）**：量過一次 rclone，內建 client 被共用配額擋住時約 50 秒，換成自己的 Desktop client 之後每次 **0.6～0.8 秒**。首次設定的**第一個選項仍是內建的**（不必有 Google Cloud 專案）；**第二個選項是自己的**：給一個 client 設定檔的**路徑**——Google 下載的 **Desktop** client 的 JSON，或兩行 `Client-ID=`／`SECRET=` 的文字檔。程式只讀那個路徑，值直接交給 rclone 的 argv——不印出、不寫進 log、不經過 shell（argv 裡還是看得到 `ps`，這是 rclone 介面的代價）。讀檔、編碼、解析任何一步失敗都回「讀不到」（連錯誤訊息都不帶：不是 UTF-8 的檔案，其 decode 錯誤裡有整個檔案，而那個檔案就是憑證），可以重來或改用內建的。`web` 類型不收：rclone 對它用 `http://127.0.0.1:53682/` 當回呼，那種 client 一定授權失敗。授權時 **同意畫面要是正式版**：`drive.file` 的 refresh token 在 testing 模式只有 7 天，會在沒人注意的時候失效。
+- **換 client，以前建的檔案就全部看不到**（資料還在；`drive.file` 只看得到建立它的那個 client 的檔案）。2026-10-03 的搬法：用舊的設定把 `agora/` 整份下載，用新的設定建新的 `agora/` 並上傳、逐檔核對 md5（檔名與 md5 全部一致），**換成新的 `rclone.conf`**、切換 `config.json` 的 folder ID，再用舊的設定把舊資料夾移到垃圾桶。2026-10-02 從 worker client 換到 rclone 內建 client 時也是這樣搬的。
+- **換機器**：把 `~/.config/agora/rclone.conf`（含 `[gdrive]` 與 token）與 `~/.config/agora/config.json`（folder ID）複製過去就能用，client 的值已經在 `rclone.conf` 裡。
+- rclone 內建 client 的配額是所有 rclone 使用者共用的；用自己的 client 就沒有這個問題（這也是 2026-10-03 換掉的原因）。
 
 ## 3. 共通 header
 
@@ -121,12 +123,23 @@ Mac:
   ~/.local/state/agora/       outbox/、pending/ ——不能刪
 ```
 
-### 4.1 寫入順序（S1）
+### 4.1 寫入順序（S1；2026-10-03 改成「先存本機完整的一份，背景上傳」）
 
-1. 先把整個 Session 寫進 outbox（`~/.local/state/agora/outbox/<ULID>/`）。
-2. 上傳 raw（檔名帶 md5，所以重新匯入時是新檔名，不會蓋掉舊的）。
-3. 最後上傳 session.md（指向剛才那份 raw）。
-4. 用 Drive 的 md5 確認兩個檔都對了，才移出 outbox；舊的 raw 這時才刪。
+**前景**（import、continue、merge、edit 都一樣，寫完就結束）：
+
+1. 把整個 Session 寫進 outbox（`<state>/outbox/<ULID>/`），**原始檔也放進本機鏡像**（`<cache>/sessions/<ULID>/`，同名同大小就不複製，原子寫入）。本機從此有完整的一份：Drive 壞掉或被刪都不影響這台機器上讀與接續。
+2. 已經在 Drive 上、這次要覆蓋的那一筆，前置一個 `.update` 記號——上傳器那時候已經分不出「這是新的匯入」還是「既有 id 的新版本」（N4）。
+3. 啟動背景上傳器（`<state>/upload.lock` 一把鎖、`stdin` 接 DEVNULL、輸出寫 `<state>/upload.log`），指令就回 exit 0。**起不來**才是 exit 3，outbox 照留，訊息仍是「已存進 outbox，之後的指令會自動再送」。測試用 `AGORA_UPLOAD=inline` 在前景跑同一條路徑。
+4. 指令開頭的 `sync` **不在前景上傳**：outbox 或刪除佇列不空就啟動背景、印一行「背景上傳中，N 筆」（N3、N10）。
+
+**背景**（一批固定幾次 rclone，`upload_batch`）：
+
+1. 所有原始檔一次 `copy --files-from`（檔名帶 md5，重新匯入時是新檔名，不會蓋掉舊的）。**這一次不乾淨，整輪都不傳 `session.md`**（M4）——讀的一方用 `session.md` 判斷版本完成，所以順序不換。
+2. 所有 `session.md` 一次 `copy --files-from`。
+3. 列一次 Drive，用 **Drive 的 md5** 逐筆核對。標了 `.update` 而 Drive 上已經沒有那一筆的，**另存成新的 Session**（L7、N5）——那是別台機器刪掉的，傳回去等於撤銷它的刪除。
+4. 核對時把 outbox 那一筆先改名成 `.done-<ULID>` 再比一次（H1）：**只有這一輪送出去、而且 Drive 用 md5 確認過、而且期間沒有新版本插進來**的才離開 outbox並刪掉被取代的舊 raw（一次 `delete --files-from`，`.done-` 的交錯見 R1、N6、N7）。上傳期間又編輯過的會以同一個 ULID 留在 outbox，下一輪再送——背景的迴圈比的是**版本**（session.md 的 md5）而不是 ULID（P2），否則會誤判成「沒東西在等」而丟下。
+
+**push 是唯一的例外**：它的契約是「回來時那幾筆在 Drive 上」，所以拿同一把鎖、等自己的 id 離開 outbox 才回報成功（N2）；等待期間每 10 秒說一次自己在等什麼。
 
 任何時候 Drive 上的 session.md 都指向一份完整存在的 raw。讀的一方看到 raw 的 md5 和 header 對不上，就當作「還沒寫完」：跳過、不建索引、下次再試。
 
@@ -286,10 +299,16 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 
 ### 5.6 delete
 
-- 把 Drive 上 `sessions/<ULID>/` 整個**移到 Drive 垃圾桶**（30 天內可以在 Drive 網頁還原），本機的鏡像與索引一起拿掉。
+- **先在本機不見，再談 Drive**（2026-10-03，change `local-first-writes`）：前景把這個 Session 從**本機鏡像與索引拿掉**、寫墓碑到 `<state>/deleted`、**拿掉 outbox 裡那一筆**（還沒上傳的編輯不會先被傳上去，L3）、把 ULID 放進 `<state>/trash-queue/`（空檔即可），然後啟動背景。指令不等垃圾桶。
+- **背景**對佇列裡每個 ULID 跑**一次 `purge`**（不是逐檔刪再加 rmdirs：那樣 Drive 垃圾桶裡會是零散檔案），沿用下面 S1-4／S1-4b 的判斷；成功的從佇列移除，**失敗的留在佇列裡等下一個指令**並說一聲，而且不擋住後面那幾筆。
+- **雲端沒有的 Session 只刪本機，不進佇列**（L6）：沒有東西要 purge。指令的結尾句也只在真的有排隊時才說「背景移到 Drive 垃圾桶」。
+- **佇列裡的 ULID**：`sync` 列檔看到時不放進索引、也不算進 `mark_missing`（所以不會被當成「別台刪掉的」又冒出來）；**`pull`、`push` 都拒絕**，說「正在刪除」（M5），兩個都用同一個 `store.queued_for_trash(paths)` 判斷（N10）；每個指令開頭提醒「有 N 個等著移到 Drive 垃圾桶」（L4），背景正在跑時不提醒。
+- Drive 上 `sessions/<ULID>/` 整個**移到 Drive 垃圾桶**（30 天內可以在 Drive 網頁還原）。
 - 一定要加 `--yes`，沒加就只印出會刪什麼，exit 1。
 - 有子 Session（別的 Session 的 `parents` 指向它）時不刪，列出那些子 Session，exit 1。
 - **重跑會接著做**（2026-10-03 使用者決定）：刪除成功時把 ULID 記到 `<state>/deleted`；重跑同一個指令時，**在這份記錄裡的** id 印「已經不在了，略過」並不算失敗（全部都略過時 exit 0）。**從來不存在的 id（例如打錯）照樣報找不到、exit 1**——只有自己刪過的才略過。
+- **正在接續的（有人拿著 `pending/<ULID>.json` 的鎖）拒絕刪除**，exit 1，訊息說「正在接續，等它結束再刪」——那時候刪了，`_finish` 只會把結果另存成一個新的 Session，等於刪不掉又冒出一個。**只是留下來的記錄**（鎖已經沒人拿，例如那個 agent 的 session 已經不見了、收不了尾）**照樣刪**，並印一行「有一筆中斷的接續沒補存成功（`<state>/pending/<ULID>.json`）」——否則一個收不了尾的接續會讓那個 Session 永遠刪不掉。
+- **Drive 上已經沒有的資料夾當成已刪掉**（S1-4：rclone 不會 purge 一個不存在的資料夾，會回錯；中斷在 purge 與本機忘掉之間就會這樣，否則重跑會永遠失敗）。但**「找不到」不能單獨相信**（S1-4b）：Drive API 在 folder id 錯了或 token 看不到東西時說的也是同一句話。所以 purge 失敗之後會再列檔一次，**只有列檔回來而且清單裡沒有這個 ULID** 才當成已刪掉；列檔也失敗就照原本的錯誤丟出。
 - **一次可以刪多個**（2026-10-02 使用者決定）：`agora delete session id1 id2 … --yes`，空白或逗號分隔。子 Session 也在同一次要刪的，就先刪子 Session，它的來源接著就能刪；子 Session 不在這次裡面的照樣拒絕，其他的照刪，有被拒絕的就 exit 1。互動模式的 `d` 刪掉所有勾選的（沒有勾選就是游標那一個），確認視窗列出數量與標題，預設停在「取消」。
 
 ### 5.7 edit
@@ -313,16 +332,16 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 **版面**（使用者選定）：
 
 ```
-┌ agora ─ [Agora 14]  未匯入 6 ─ 篩選: 表格_ 另有 2 個勾選被篩選掉 ─┐
-│▸ 01M3XB78 10-02 opencode 驗收表格   ✓ │ 最後一則（assistant）│
-│  01M3XSSQ 10-02 merge    合併後改名   ✓ │ 要繼續第三步…        │
-│✓ 01M3XED5 10-02 claude   驗收表格    ✗ │                     │
-├──────────────────────────────────┬────┴─────────────────────┤
-│ ↑↓ 空白 a / Tab shift+tab ctrl+t Enter m e d p P q │           │
-└──────────────────────────────────┴──────────────────────────┘
+┌ agora ─ [Agora 14]  未匯入 6 ─ 篩選: 表格_ 另有 2 個勾選被篩選掉            ┐
+│▸ 01M3XB78 10-02 opencode 驗收表格   ✓  │最後一則（assistant）         │
+│  01M3XSSQ 10-02 merge    合併後改名   ✓ │要繼續第三步…                 │
+│✓ 01M3XED5 10-02 claude   驗收表格    ✗ │                        │
+├────────────────────────────────────┬────────────────────────┤
+│ 空白 a enter m e d p P / ctrl+t q    │                        │
+└────────────────────────────────────┴────────────────────────┘
 ```
 
-（「另有 N 個勾選被篩選掉」只有真的被篩選掉時才出現；`✓`／`✗`／`未上傳` 是「雲端」欄；按鍵列只顯示**現在能用**的鍵——未匯入頁沒有 `m`、`e`、`d`、`P`。）
+（「另有 N 個勾選被篩選掉」只有真的被篩選掉時才出現；`✓`／`✗`／`未上傳` 是「雲端」欄；按鍵列**只印現在能用的鍵**——Agora 頁是上面那一串，未匯入頁少了 `m`、`e`、`d`、`P`，多一個 `enter 匯入`。`Tab`、`shift+tab`、`↑↓` 都**能用**，只是不印在按鍵列上（review T2-final Q3／T2-sec2）。）
 
 - **兩個分頁**，用 Tab 切換：
   - **Agora**：已經存在 agora 的 Session（本機索引，開啟時同步一次）。每行：短 id、日期、agent（merge 顯示 `merge`）、標題、**雲端**（`✓` 雲端有、`✗` 雲端沒有＝被別台機器刪掉了、`未上傳` 還在 outbox）。這個欄讀的是索引裡的標記與 outbox，**不另外問 Drive**（change `tui-batch-actions` 的決定）。
@@ -344,7 +363,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
   | `Enter` | Agora 頁接續（彈出小視窗選 agent，顯示工作目錄）／未匯入頁匯入（勾選優先，沒有勾選就是游標那一列） |
   | `m` | 合併勾選的（至少 2 個，彈出小視窗選誰寫要約） |
   | `e` | 改標頭（$EDITOR，只游標那一列） |
-  | `d` | 刪除（確認 y／n；有子 Session 時照指令模式拒絕） |
+  | `d` | 刪除（跳出一個「取消／確定」的小視窗，**預設停在取消**，並列出要刪的 Session；有子 Session 時照指令模式拒絕） |
   | `p` | pull（把勾選的拉下來） |
   | `P` | push（把勾選的寫回 Drive） |
   | `q` | 離開 |
@@ -359,10 +378,10 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
   - **`a` 全選切換**：切換目前看得到的列——沒有全部勾選就全選，已經全部勾選就全取消；篩選掉的列的勾選狀態不動。
   - 空白鍵勾選時**游標不動**。
   - 動作成功後**勾選清掉**；**失敗或中斷時保留**，方便直接重跑。
-- **動作不離開畫面**（2026-10-02 使用者要求）：匯入、合併、刪除、pull、push 都在**子程序**裡跑同一個指令（`agora <動作> session …`，不是直接呼叫函式），等待視窗有**進度條**（依指令印的 `k/N` 更新）與**最新的一行輸出**，跑完用結果視窗顯示輸出的最後幾行。
+- **動作不離開畫面**（2026-10-02 使用者要求）：匯入、合併、刪除、pull、push 都在**子程序**裡跑同一個指令（`agora <動作> session …`，不是直接呼叫函式），等待視窗有**進度條**（顯示**已經做完**的個數：指令印的 `k/N` 代表第 k 個**開始**，所以是 `k-1` 個做完；指令正常結束時才到 `N/N`）與**最新的一行輸出**，跑完用結果視窗顯示輸出的最後幾行。
   - **進度只從自己的行讀**：只認「以 `[agora]` 開頭、含 `k/N`」的行（`^\[agora\] \S+ (\d+)/(\d+)`），而且是最後一行；沒有這種行就顯示不確定的進度條。子程序自己印的雜訊不會讓進度條跳動（review V8）。
   - **子程序讀不到使用者的鍵盤**：`stdin` 接 DEVNULL，Esc 才不會被 agent 吃掉（review V1）。
-  - **Esc 中斷**（等待視窗裡）：對整個 **process group** 依序送 `SIGINT` → 5 秒沒停 `SIGTERM` → 再 5 秒 `SIGKILL`，讓指令啟動的 agent（例如寫要約的 opencode）一起停（review V2）。中斷後畫面回到清單，並說明「**重跑同一個動作會接著做**」——中斷不等於刪掉，指令模式那邊的續傳會接著處理。
+  - **Esc 中斷**（等待視窗裡）：對整個 **process group** 依序送 `SIGINT` → 5 秒沒停 `SIGTERM` → 再 5 秒 `SIGKILL`，讓指令啟動的 agent（例如寫要約的 opencode）一起停（review V2）。中斷後**結果視窗**說明「**重跑同一個動作會接著做**」，關掉之後回到清單（狀態列不留這一句，review Q4）——中斷不等於刪掉，指令模式那邊的續傳會接著處理。
   - **結果視窗依 exit code 說明**：成功、部分失敗（`k/N` 失敗幾個）、已存進 outbox 等下次上傳、已中斷（review V6）。未匯入頁同時勾了 opencode 與 claude 時，依 agent 分兩段跑，視窗標示「第 i／2 段」。
   - 只有兩個例外會暫時離開畫面：**接續**（`App.suspend()`，agent 自己是全螢幕程式，要接手終端機）和**改標頭**（照舊開 $EDITOR，使用者決定）。
 - **第一次執行的引導**：沒有 rclone 時，視窗提示 `brew install rclone`；沒有 `~/.config/agora/rclone.conf` 時，視窗說明並提供「用瀏覽器授權」：執行 `rclone config create gdrive drive scope=drive.file`（rclone 內建的 client，使用者決定），授權完就同步一次，在 Drive 建立 `agora/`。輸出裡含 token 的行不顯示。Agora 頁是空的時候，提示去「未匯入」匯入。
@@ -387,8 +406,10 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 
 ### 5.10 本機與 Drive（2026-10-03 使用者決定：`cache`＋`sync` → `pull`＋`push`）
 
-- **本機位置**（都在 `~/.cache/agora/`，需要時才讀）：
-  - agora 的 Session：Drive 鏡像 `sessions/<ULID>/`（`session.md` 就是閱讀版，原始檔用到才下載）。
+- **本機位置**（都在 `~/.cache/agora/`；原始檔自 2026-10-03 起也留一份在本機）：
+  - agora 的 Session：Drive 鏡像 `sessions/<ULID>/`，`session.md`（閱讀版）與**原始檔都在**（4.1）。本機的 `continue`／`merge` 因此不必先抓 Drive；抓不到或 md5 不符時那一筆照樣由上傳補回去。
+  - 上傳中的版本：`<state>/outbox/<ULID>/`（stage 出去、Drive 確認之前）。
+  - 背景上傳器的記錄：`<state>/upload.log`（超過 1 MB 只留尾巴）；鎖：`<state>/upload.lock`；等著移到垃圾桶的：`<state>/trash-queue/`。
   - 這台機器上 agent 的 session：`reading/<agent>/<session id>.md`，閱讀版的全文；mtime 設成該 session 自己的更新時間，比較新就是過時。
 - **`agora pull session <id>…`／`agora push session <id>…`：只吃給的 id**（2026-10-03 使用者決定，沒有 `--all`，不給 id 就報錯；要全部就在 TUI 按 `a`，或從 search 用管線接過來）。id 的前綴決定意思，不從形狀猜：
   - 沒有前綴或 `agora:`：agora 的 Session。pull 拿下 `session.md` 與標頭指到的原始檔；push 寫回 `session.md` 與同一個原始檔。
@@ -397,9 +418,10 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
   - push 的 id 只能是 agora 的。
 - 已經在本機、沒有過時的，pull 略過；push 則重新覆蓋一次（結果一樣）。
 - **push 只傳該傳的兩個檔**：`session.md` 與它標頭 `agora.raw.file` 指到的那一個原始檔（本機沒有那個原始檔就只傳 `session.md`）。舊的原始檔、下載到一半的檔、以 `.` 開頭的檔都不傳。
+- **push 會等自己的 id**（2026-10-03，N2）：它拿背景上傳器的那把鎖，等到**它剛寫的**那些 id 離開 outbox 才算成功；背景正在跑就等（每 10 秒說一次為什麼在等，Ctrl-C 隨時可退）。其他指令不等，也不需要等。
 - 兩個指令都逐個在 stderr 印 `k/N`，某一個失敗照樣做下一個。
 - **雲端沒有的 Session**（2026-10-03 決定，規格見 `openspec/changes/command-batch-actions/specs/session-sync/spec.md`）：
-  - **同步時不再自動清掉**別台機器刪掉的 Session：本機的鏡像與索引都保留，標成「雲端沒有」。**只有在這次列檔完整成功時**才更新標記；列檔失敗、離線、或 Drive 上沒有 `sessions/` 時不新增也不清除任何標記；雲端又出現時，下一次同步就清掉。還在 outbox 的顯示為「未上傳」，不算雲端沒有；接續中（pending）的也不算。
+  - **同步時不再自動清掉**別台機器刪掉的 Session：本機的鏡像與索引都保留，標成「雲端沒有」。**只有在這次列檔完整成功時**才更新標記；列檔失敗、離線、或 Drive 上沒有 `sessions/` 時不新增也不清除任何標記；雲端又出現時，下一次同步就清掉。還在 outbox 的顯示為「未上傳」，不算雲端沒有；**正在接續的**（有人拿著 `pending/<ULID>.json` 的鎖）也不算——**只是留下來的記錄不算**（鎖沒人拿就是收不了尾的接續，它不再護著這個 Session，見 5.6）。另外三個「不算刪除」的情況：`pull --not-exist-delete` 時 **Drive 上沒有 `sessions/`**（那是 folder id 或 token 的問題，不是刪除的證據）會拒絕那一個；對 **agent 的 id**，`--not-exist-delete` 會先問那個 agent，**清單讀不到**（資料庫不見、認不出結構、sqlite 出錯）就當成「不知道」，不刪快取並印一行說明。
   - **只在明確要求時才刪或復活**：`pull --not-exist-delete` 刪掉本機副本（在 outbox 或接續中的不刪，並印出原因）；`push --not-exist-upload` 把它傳回 Drive（等於撤銷別台的刪除；本機沒有那個原始檔時拒絕這一個）。兩個 flag 都沒加時只印一行提醒、不動。兩個 flag 對 agent 的 id 也有意思：`--not-exist-delete` 是「agent 那邊已經沒有這個 session 了，就刪掉它的全文快取」。
   - **其他指令遇到它**：會寫回既有 id 的指令（continue、edit）**拒絕**（exit 1），並提示上面那兩個選擇，agent 不會被打開（判斷同時看標記與當下的 Drive，離線時也不會放行）；merge 不接受雲端沒有的 Session 當來源；delete 雲端沒有的只刪本機副本（exit 0）；它不算成別人的子 Session（不擋刪除、也不讓 import 分岔）；import 的來源對到雲端沒有的那一筆時建一個新的 Session。
   - **看得到**：`search` 每行最後標 `(雲端沒有)`，並支援 `--filter cloud=no`／`cloud=yes`（只列出雲端沒有的可以用管線接著清掉）；`show` 也標。
@@ -436,7 +458,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 
 ## 8. 實作規模
 
-Python（uv）＋ rclone ＋ SQLite FTS5。**`src/` 的程式碼目標 2,900 行以內（2026-10-02 為了互動模式與快取，從 2,000 一路放寬到 2,300、2,600、2,900，都是使用者決定），不含測試與 fixture；算法是不含空行、註解、docstring**（L4）。**算的是程式碼行**（不含空行、註解、docstring；2026-10-03 決定）：說明安全機制的 docstring 不該為了行數砍掉。第 4 版時檔案總行數約 2,200、程式碼行約 1,500。
+Python（uv）＋ rclone ＋ SQLite FTS5。**`src/` 的程式碼行數只記錄、不再是硬性上限（2026-10-03 使用者：「基本上都放寬 品質我之後會統一開 issue 處理」；之前的目標是 3,800 行以內，2026-10-02 為了互動模式與快取，從 2,000 一路放寬到 2,300、2,600、2,900；2026-10-03 為了批次動作、背景上傳，先精簡轉接器，再放寬到 3,800，都是使用者決定），不含測試與 fixture；算法是不含空行、註解、docstring**（L4）。**算的是程式碼行**（不含空行、註解、docstring；2026-10-03 決定）：說明安全機制的 docstring 不該為了行數砍掉。第 4 版時檔案總行數約 2,200、程式碼行約 1,500。
 
 | 模組 | 內容 | 估計行數 |
 |---|---|---|
@@ -446,4 +468,4 @@ Python（uv）＋ rclone ＋ SQLite FTS5。**`src/` 的程式碼目標 2,900 行
 | `agents/claude` | 找 jsonl 與附屬檔、改寫欄位、閱讀版、找出結束後的 session | 350 |
 | `cli` | 六個指令、continue 流程、pending 補存、merge | 400 |
 
-測試照 `docs/review/test-plan.md`。測試用的接縫：`AGORA_FOLDER_NAME`（整合測試設成 `agora-test`）、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`AGORA_RCLONE`、`AGORA_OPENCODE_CMD`、`AGORA_CLAUDE_CMD`、`AGORA_CLAUDE_HOME`、`AGORA_TEST_FAULT`、`AGORA_NOW`。
+測試照 `docs/review/test-plan.md`。**測試的 helper 只能在 pytest 或隔離的環境裡用**：不在 pytest（沒有 `PYTEST_VERSION`）而且 `AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`AGORA_CONFIG`／`HOME` 有任一個沒指到暫存目錄時，`tests/_guard.py` 在 import 的當下就 `SystemExit`（T8；在那之前有過兩次直接用真的目錄，其中一次把真實 Session 的標題送進了外部模型）。測試用的接縫：`AGORA_FOLDER_NAME`（整合測試設成 `agora-test`）、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`AGORA_RCLONE`、`AGORA_OPENCODE_CMD`、`AGORA_CLAUDE_CMD`、`AGORA_CLAUDE_HOME`、`AGORA_TEST_FAULT`、`AGORA_NOW`。
