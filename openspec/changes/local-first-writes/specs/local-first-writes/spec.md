@@ -56,7 +56,7 @@ import、continue、merge、edit MUST 在把 Session 存進本機（鏡像與 ou
 
 上傳一筆**更新既有 id** 的項目之前，MUST 用這一輪列檔的結果確認那個 id 還在 Drive 上。「更新既有 id」在前景寫入的當下決定：continue 寫回、edit、import 的原地更新、中斷接續的收尾寫回是；新建的 import、merge、另存的 Session 不是。
 
-不在 Drive 上的話（別台刪掉了），MUST NOT 把它傳回去，而是**另存成一個新的 Session**：新的 id，標頭的 parents 指向原本的 id，relation 照原本的寫入（continue 或 edit）。原本的 id 維持被刪的狀態。這和 `session-sync`「接續到一半被別台刪掉的」是同一個規則（使用者 10-03 決定）。
+不在 Drive 上的話（別台刪掉了），MUST NOT 把它傳回去，而是**另存成一個新的 Session**：新的 id，標頭的 parents 指向原本的 id。relation：continue 寫回的另存成 `continue`（和 `session-sync` 的「接續到一半被別台刪掉的」相同）；edit 與其他寫回的沿用原本的 relation（`edit` 不是 relation 的值）。原本的 id 維持被刪的狀態。這和 `session-sync`「接續到一半被別台刪掉的」是同一個規則（使用者 10-03 決定）。
 
 #### Scenario: 別台在上傳前刪掉了
 - **WHEN** X 的新版本在 outbox，背景上傳之前另一台機器刪掉了 X
