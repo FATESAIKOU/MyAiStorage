@@ -10,6 +10,8 @@ Run: uv run pytest -q -m integration tests/integration/test_claude_summarize.py
 
 from __future__ import annotations
 
+import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
+
 import os
 import pwd
 import shutil

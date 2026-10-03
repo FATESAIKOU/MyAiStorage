@@ -10,6 +10,8 @@ removed, so the real ~/.claude is never touched (CL4).
 
 from __future__ import annotations
 
+import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
+
 import base64
 import json
 import os

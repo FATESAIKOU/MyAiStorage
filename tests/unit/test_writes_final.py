@@ -19,6 +19,8 @@ mutation-checked in a copy: taking the behaviour away has to turn one of them re
 
 from __future__ import annotations
 
+import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
+
 import os
 from pathlib import Path
 import sys

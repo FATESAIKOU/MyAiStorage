@@ -7,6 +7,7 @@ instead of the user's real sessions (design.md section 7).
 
 from __future__ import annotations
 
+import _guard  # noqa: F401  (T8: refuse to run at all outside an isolated pytest)
 import json
 import os
 from pathlib import Path
