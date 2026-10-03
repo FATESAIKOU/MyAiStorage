@@ -2356,6 +2356,8 @@ class SlowAgent(FakeAgent):
     def __init__(self, name, listed, texts=None, seconds=0.1):
         super().__init__(name, listed, texts=texts)
         self.seconds, self.calls = seconds, 0
+        self.search_nothing = False
+        self.last_keyword = None
         self.running = 0
         self.most_at_once = 0
         self.counts: list[int] = []    # how many results each call actually yielded
@@ -2368,9 +2370,14 @@ class SlowAgent(FakeAgent):
             self.most_at_once = max(self.most_at_once, self.running)
             mine = len(self.counts)
             self.counts.append(0)
+            self.last_keyword = keyword
         try:
-            yielded = [sid for sid, msgs in self.texts.items()
-                       if (only is None or sid in only) and any(keyword in m for m in msgs)]
+            if self.search_nothing:
+                time.sleep(self.seconds * 4)      # scan the whole store, find nothing
+                yielded = []
+            else:
+                yielded = [sid for sid, msgs in self.texts.items()
+                           if (only is None or sid in only) and any(keyword in m for m in msgs)]
             for sid in yielded:
                 time.sleep(self.seconds)      # results arrive as found, and slowly
                 with self.lock:
@@ -2450,4 +2457,49 @@ def test_the_title_filter_is_still_per_keystroke_and_never_scans_an_agent():
             assert [r.key for r in app.shown()] == ["agora:01AAAAAAAAAAAAAAAAAAAAAAAA"], \
                 "標題模式立即縮到剩第一個"
             assert agent.calls == 0, "標題模式不碰 agent"
+    _run(go)
+
+
+def test_a_scan_that_finds_nothing_does_not_stack_up():
+    """Q1: `search_text` yields only what matches, so a word that matches nothing never
+    comes back to the worker and cannot notice it was replaced. An input method commits
+    one character at a time with a pause after each, so every pause used to start
+    another whole scan beside the last. One scan at a time: the newest word waits."""
+    app, agent = _slow_search_app(seconds=0.5)     # one scan takes about two seconds
+    agent.search_nothing = True           # scan the whole store, yield nothing
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+t", "slash")
+            for ch in "xyz":                  # three characters, a pause after each
+                await pilot.press(ch)
+                await pilot.pause(0.4)        # past the debounce, like picking candidates
+            assert agent.calls == 1, f"三個字應該只有一個掃描在跑，開了 {agent.calls} 個"
+            assert agent.most_at_once == 1, f"同時在跑的不該超過一個：{agent.most_at_once}"
+            # and the newest word goes once the running one is done - once
+            await _wait(lambda: agent.calls == 2, pilot)
+            await pilot.pause(0.3)
+            assert agent.calls == 2, f"中間的字不該各補一次：{agent.calls}"
+            assert agent.last_keyword == "xyz", "跑的是最後打的那個字"
+            assert agent.most_at_once == 1, "從頭到尾都只有一個"
+    _run(go)
+
+
+def test_enter_before_the_pause_searches_once_not_twice():
+    """Q2: typing a word and pressing Enter inside the debounce window. Enter searches
+    right away and the timer must be stopped with it - otherwise the timer fires a
+    moment later and the same word is scanned again."""
+    app, agent = _slow_search_app(seconds=0.05)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("ctrl+t", "slash")
+            await pilot.press("t")
+            await pilot.press("enter")             # well inside FILTER_IDLE
+            await pilot.pause(0.1)
+            assert agent.calls == 1, f"Enter 搜一次就好，搜了 {agent.calls} 次"
+            await pilot.pause(0.5)                 # past the debounce: nothing more
+            assert agent.calls == 1, f"計時器應該被停掉，總共搜了 {agent.calls} 次"
     _run(go)

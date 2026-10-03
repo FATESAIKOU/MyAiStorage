@@ -776,6 +776,8 @@ class AgoraApp(App):
         self.matches: dict[str, set[str] | None] = {"agora": None, "import": None}
         self._filter_timer = None      # the debounce for the content search (T7 P1)
         self._pending_filter = ""
+        self._scanning: str | None = None   # the word being scanned, if one is (T7 Q1)
+        self._scan_wanted = ""              # and the newest one waiting for it
         self.marked: set[str] = set()
         self.cache: dict[str, Preview] = {}
         self.status = ""
@@ -1150,8 +1152,32 @@ class AgoraApp(App):
             self.matches["agora"] = {f"agora:{u}" for u, _h, _s in self.index.search([((h.TEXT_KEY,), "~=", text)])}
             self.matches["import"] = set()
             self.say(f"內文搜尋「{text}」中…")
-            self.find_in_agents(text)
+            self.scan_agents(text)
         self.show()
+
+    def scan_agents(self, text: str) -> None:
+        """One agent scan at a time; the newest word waits for the running one.
+
+        A scan that finds nothing never comes back to the worker, so it cannot notice
+        it was replaced - with an input method the user pauses after each committed
+        character, and every pause started another whole scan beside the last (review
+        T7 Q1). Instead of starting one per pause: remember the newest word, and when
+        the scan that is running returns, start it only if the word moved on.
+        """
+        self._scan_wanted = text
+        if self._scanning is None:
+            self._begin_scan(text)
+
+    def _begin_scan(self, text: str) -> None:
+        self._scanning = text
+        self.find_in_agents(text)
+
+    def scan_finished(self, text: str) -> None:
+        """The worker's last word: it is not scanning any more, and if the filter has
+        moved on, the newest word goes now."""
+        self._scanning = None
+        if self._scan_wanted and self._scan_wanted != text:
+            self._begin_scan(self._scan_wanted)
 
     @work(thread=True, exclusive=True, group="search")
     def find_in_agents(self, text: str) -> None:
@@ -1184,6 +1210,8 @@ class AgoraApp(App):
                 continue
         if not worker.is_cancelled:
             self.call_from_thread(self.say, f"內文搜尋「{text}」完成")
+        with contextlib.suppress(Exception):     # the app may be gone
+            self.call_from_thread(self.scan_finished, text)
 
     def found(self, text: str, key: str) -> None:
         if self.text == text and self.content and self.matches["import"] is not None:
