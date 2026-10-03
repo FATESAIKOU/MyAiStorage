@@ -31,6 +31,6 @@
 
 ## 5. 收尾
 
-- [ ] 5.1 `docs/design.md` 4.1、5.6、5.10 與 README 更新
+- [x] 5.1 `docs/design.md` 4.1、5.6、5.10 與 README 更新
 - [ ] 5.2 整合測試（只用 `agora-test`，`wait_uploaded()`）：import 多個 → Drive 上都有；delete → Drive 上沒有；在這台寫的被刪掉之後救回來
 - [ ] 5.3 review 審程式；PM 用假資料實跑（量 import 3 個、delete 2 個的前景時間、rclone 次數，以及 `-v --stats` 的 API 請求數）；記下行數

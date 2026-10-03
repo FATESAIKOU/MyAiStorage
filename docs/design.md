@@ -123,12 +123,23 @@ Mac:
   ~/.local/state/agora/       outbox/、pending/ ——不能刪
 ```
 
-### 4.1 寫入順序（S1）
+### 4.1 寫入順序（S1；2026-10-03 改成「先存本機完整的一份，背景上傳」）
 
-1. 先把整個 Session 寫進 outbox（`~/.local/state/agora/outbox/<ULID>/`）。
-2. 上傳 raw（檔名帶 md5，所以重新匯入時是新檔名，不會蓋掉舊的）。
-3. 最後上傳 session.md（指向剛才那份 raw）。
-4. 用 Drive 的 md5 確認兩個檔都對了，才移出 outbox；舊的 raw 這時才刪。
+**前景**（import、continue、merge、edit 都一樣，寫完就結束）：
+
+1. 把整個 Session 寫進 outbox（`<state>/outbox/<ULID>/`），**原始檔也放進本機鏡像**（`<cache>/sessions/<ULID>/`，同名同大小就不複製，原子寫入）。本機從此有完整的一份：Drive 壞掉或被刪都不影響這台機器上讀與接續。
+2. 已經在 Drive 上、這次要覆蓋的那一筆，前置一個 `.update` 記號——上傳器那時候已經分不出「這是新的匯入」還是「既有 id 的新版本」（N4）。
+3. 啟動背景上傳器（`<state>/upload.lock` 一把鎖、`stdin` 接 DEVNULL、輸出寫 `<state>/upload.log`），指令就回 exit 0。**起不來**才是 exit 3，outbox 照留，訊息仍是「已存進 outbox，之後的指令會自動再送」。測試用 `AGORA_UPLOAD=inline` 在前景跑同一條路徑。
+4. 指令開頭的 `sync` **不在前景上傳**：outbox 或刪除佇列不空就啟動背景、印一行「背景上傳中，N 筆」（N3、N10）。
+
+**背景**（一批固定幾次 rclone，`upload_batch`）：
+
+1. 所有原始檔一次 `copy --files-from`（檔名帶 md5，重新匯入時是新檔名，不會蓋掉舊的）。**這一次不乾淨，整輪都不傳 `session.md`**（M4）——讀的一方用 `session.md` 判斷版本完成，所以順序不換。
+2. 所有 `session.md` 一次 `copy --files-from`。
+3. 列一次 Drive，用 **Drive 的 md5** 逐筆核對。標了 `.update` 而 Drive 上已經沒有那一筆的，**另存成新的 Session**（L7、N5）——那是別台機器刪掉的，傳回去等於撤銷它的刪除。
+4. 核對時把 outbox 那一筆先改名成 `.done-<ULID>` 再比一次（H1）：**只有這一輪送出去、而且 Drive 用 md5 確認過、而且期間沒有新版本插進來**的才離開 outbox並刪掉被取代的舊 raw（一次 `delete --files-from`，`.done-` 的交錯見 R1、N6、N7）。上傳期間又編輯過的會以同一個 ULID 留在 outbox，下一輪再送——背景的迴圈比的是**版本**（session.md 的 md5）而不是 ULID（P2），否則會誤判成「沒東西在等」而丟下。
+
+**push 是唯一的例外**：它的契約是「回來時那幾筆在 Drive 上」，所以拿同一把鎖、等自己的 id 離開 outbox 才回報成功（N2）；等待期間每 10 秒說一次自己在等什麼。
 
 任何時候 Drive 上的 session.md 都指向一份完整存在的 raw。讀的一方看到 raw 的 md5 和 header 對不上，就當作「還沒寫完」：跳過、不建索引、下次再試。
 
@@ -288,7 +299,11 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 
 ### 5.6 delete
 
-- 把 Drive 上 `sessions/<ULID>/` 整個**移到 Drive 垃圾桶**（30 天內可以在 Drive 網頁還原），本機的鏡像與索引一起拿掉。
+- **先在本機不見，再談 Drive**（2026-10-03，change `local-first-writes`）：前景把這個 Session 從**本機鏡像與索引拿掉**、寫墓碑到 `<state>/deleted`、**拿掉 outbox 裡那一筆**（還沒上傳的編輯不會先被傳上去，L3）、把 ULID 放進 `<state>/trash-queue/`（空檔即可），然後啟動背景。指令不等垃圾桶。
+- **背景**對佇列裡每個 ULID 跑**一次 `purge`**（不是逐檔刪再加 rmdirs：那樣 Drive 垃圾桶裡會是零散檔案），沿用下面 S1-4／S1-4b 的判斷；成功的從佇列移除，**失敗的留在佇列裡等下一個指令**並說一聲，而且不擋住後面那幾筆。
+- **雲端沒有的 Session 只刪本機，不進佇列**（L6）：沒有東西要 purge。指令的結尾句也只在真的有排隊時才說「背景移到 Drive 垃圾桶」。
+- **佇列裡的 ULID**：`sync` 列檔看到時不放進索引、也不算進 `mark_missing`（所以不會被當成「別台刪掉的」又冒出來）；**`pull`、`push` 都拒絕**，說「正在刪除」（M5），兩個都用同一個 `store.queued_for_trash(paths)` 判斷（N10）；每個指令開頭提醒「有 N 個等著移到 Drive 垃圾桶」（L4），背景正在跑時不提醒。
+- Drive 上 `sessions/<ULID>/` 整個**移到 Drive 垃圾桶**（30 天內可以在 Drive 網頁還原）。
 - 一定要加 `--yes`，沒加就只印出會刪什麼，exit 1。
 - 有子 Session（別的 Session 的 `parents` 指向它）時不刪，列出那些子 Session，exit 1。
 - **重跑會接著做**（2026-10-03 使用者決定）：刪除成功時把 ULID 記到 `<state>/deleted`；重跑同一個指令時，**在這份記錄裡的** id 印「已經不在了，略過」並不算失敗（全部都略過時 exit 0）。**從來不存在的 id（例如打錯）照樣報找不到、exit 1**——只有自己刪過的才略過。
@@ -391,8 +406,10 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 
 ### 5.10 本機與 Drive（2026-10-03 使用者決定：`cache`＋`sync` → `pull`＋`push`）
 
-- **本機位置**（都在 `~/.cache/agora/`，需要時才讀）：
-  - agora 的 Session：Drive 鏡像 `sessions/<ULID>/`（`session.md` 就是閱讀版，原始檔用到才下載）。
+- **本機位置**（都在 `~/.cache/agora/`；原始檔自 2026-10-03 起也留一份在本機）：
+  - agora 的 Session：Drive 鏡像 `sessions/<ULID>/`，`session.md`（閱讀版）與**原始檔都在**（4.1）。本機的 `continue`／`merge` 因此不必先抓 Drive；抓不到或 md5 不符時那一筆照樣由上傳補回去。
+  - 上傳中的版本：`<state>/outbox/<ULID>/`（stage 出去、Drive 確認之前）。
+  - 背景上傳器的記錄：`<state>/upload.log`（超過 1 MB 只留尾巴）；鎖：`<state>/upload.lock`；等著移到垃圾桶的：`<state>/trash-queue/`。
   - 這台機器上 agent 的 session：`reading/<agent>/<session id>.md`，閱讀版的全文；mtime 設成該 session 自己的更新時間，比較新就是過時。
 - **`agora pull session <id>…`／`agora push session <id>…`：只吃給的 id**（2026-10-03 使用者決定，沒有 `--all`，不給 id 就報錯；要全部就在 TUI 按 `a`，或從 search 用管線接過來）。id 的前綴決定意思，不從形狀猜：
   - 沒有前綴或 `agora:`：agora 的 Session。pull 拿下 `session.md` 與標頭指到的原始檔；push 寫回 `session.md` 與同一個原始檔。
@@ -401,6 +418,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
   - push 的 id 只能是 agora 的。
 - 已經在本機、沒有過時的，pull 略過；push 則重新覆蓋一次（結果一樣）。
 - **push 只傳該傳的兩個檔**：`session.md` 與它標頭 `agora.raw.file` 指到的那一個原始檔（本機沒有那個原始檔就只傳 `session.md`）。舊的原始檔、下載到一半的檔、以 `.` 開頭的檔都不傳。
+- **push 會等自己的 id**（2026-10-03，N2）：它拿背景上傳器的那把鎖，等到**它剛寫的**那些 id 離開 outbox 才算成功；背景正在跑就等（每 10 秒說一次為什麼在等，Ctrl-C 隨時可退）。其他指令不等，也不需要等。
 - 兩個指令都逐個在 stderr 印 `k/N`，某一個失敗照樣做下一個。
 - **雲端沒有的 Session**（2026-10-03 決定，規格見 `openspec/changes/command-batch-actions/specs/session-sync/spec.md`）：
   - **同步時不再自動清掉**別台機器刪掉的 Session：本機的鏡像與索引都保留，標成「雲端沒有」。**只有在這次列檔完整成功時**才更新標記；列檔失敗、離線、或 Drive 上沒有 `sessions/` 時不新增也不清除任何標記；雲端又出現時，下一次同步就清掉。還在 outbox 的顯示為「未上傳」，不算雲端沒有；**正在接續的**（有人拿著 `pending/<ULID>.json` 的鎖）也不算——**只是留下來的記錄不算**（鎖沒人拿就是收不了尾的接續，它不再護著這個 Session，見 5.6）。另外三個「不算刪除」的情況：`pull --not-exist-delete` 時 **Drive 上沒有 `sessions/`**（那是 folder id 或 token 的問題，不是刪除的證據）會拒絕那一個；對 **agent 的 id**，`--not-exist-delete` 會先問那個 agent，**清單讀不到**（資料庫不見、認不出結構、sqlite 出錯）就當成「不知道」，不刪快取並印一行說明。

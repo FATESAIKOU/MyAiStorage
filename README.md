@@ -62,7 +62,8 @@ agora continue session agora:01K8… --agent claude --dir ~/proj
 agora edit session agora:01K6… --header 'tags=[csv, 表格]' --header 'status=stable'
 agora edit session agora:01K6…
 
-# 刪除：移到 Drive 垃圾桶（30 天內可以在 Drive 網頁還原），一定要加 --yes
+# 刪除：本機立刻不見（鏡像、索引、outbox 那一筆），Drive 那份由背景移到垃圾桶
+# （30 天內可以在 Drive 網頁還原）。指令不等背景。一定要加 --yes
 # 有找不到的 id 時整批都不刪（exit 1）；自己刪過的 id 重跑時會略過
 agora delete session agora:01K6… --yes
 agora delete session agora:01K6…, agora:01K7… --yes
@@ -107,9 +108,16 @@ agora show session agora:01K6… --raw
 | 0 | 成功 |
 | 1 | 做不到：找不到 id、沒有訊息可匯入、merge 少於兩個、delete 沒加 `--yes`、有子 Session |
 | 2 | 錯誤：標頭、Drive、agent 或非預期的錯誤，以及指令用法錯誤 |
-| 3 | 已存在本機 outbox，還沒上傳到 Drive（之後的指令會自動再送） |
+| 3 | 還在 outbox（背景上傳器起不來，或 `AGORA_UPLOAD=inline` 時這一輪沒送完） |
 
-不用自己同步：每個指令開頭都會自動把沒上傳成功的送出去，需要時也會從 Drive 拉新的內容。
+**先存本機，Drive 的部分交給背景。** import、continue、merge、edit 寫完本機（鏡像裡有完整的一份，含原始檔）就回 exit 0，背景上傳器慢慢送；`delete` 也是本機先不見，Drive 那份排進 `<state>/trash-queue/`，背景逐一 purge。所以指令的離開時間不再由 Drive 決定。
+
+- 背景輸出寫在 `~/.local/state/agora/upload.log`（超過 1 MB 只留尾巴），鎖是同目錄的 `upload.lock`；它的 stdout 不接到你的終端機，所以管線還是讀得到 EOF。
+- 每個指令開頭若發現還在等的東西，會啟動背景並提示「outbox 有 N 筆未上傳」／「有 N 個等著移到 Drive 垃圾桶」（背景正在跑時不提示），不會在前台慢慢送。
+- **只有 `push` 會等**：它的契約是「回來時那幾筆在 Drive 上」，所以等到自己剛寫的 id 離開 outbox 才算成功；等不到就繼續等（每 10 秒說一次為什麼），Ctrl-C 隨時可退。
+- 還在 outbox 或正等著移到垃圾桶的 Session，`pull`／`push` 會拒絕並說「正在刪除」；雲端沒有的（別台刪掉的）Session 在那之前照樣搜得到、標成「雲端沒有」。
+
+不用自己同步：每個指令開頭都會把 outbox 與刪除佇列交給背景上傳器，需要時也會從 Drive 拉新的內容。
 
 **壓縮：** 用 agent 內建的指令，opencode 是 `/compact`，Claude Code 是 `/compact`。壓縮後的內容會在 agent 結束時存回 Agora。
 
@@ -119,8 +127,8 @@ agora show session agora:01K6… --raw
 |---|---|
 | Drive `agora/sessions/<ULID>/` | `session.md`（header＋閱讀版）、`raw-<md5>.json`（原始匯出） |
 | `~/.config/agora/` | `rclone.conf`、`config.json` |
-| `~/.cache/agora/` | 鏡像與搜尋索引，刪掉也會重建 |
-| `~/.local/state/agora/` | `outbox/`（還沒上傳成功的）、`pending/`（接續中的）、`*/.bad/`（讀不了的壞檔，每個指令都會提示）——**不要刪** |
+| `~/.cache/agora/` | 鏡像與搜尋索引（含原始檔），刪掉也會重建 |
+| `~/.local/state/agora/` | `outbox/`（等著上傳的）、`trash-queue/`（等著移到 Drive 垃圾桶的）、`pending/`（接續中的）、`upload.log`（背景的記錄）、`*/.bad/`（讀不了的壞檔，每個指令都會提示）——**不要刪** |
 
 ## 測試
 
