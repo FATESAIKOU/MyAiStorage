@@ -506,6 +506,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn) -> list[str]:
     Returns the ULIDs still waiting, so the caller can say what did not make it.
     """
     say = warn
+    left = []
     entries = {}
     for ulid in sorted(outbox_ulids(paths)):
         folder = paths.outbox / ulid
@@ -530,6 +531,10 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn) -> list[str]:
         for ulid, new_id in rescued.items():
             if new_id and new_id not in entries:
                 entries[new_id] = _entry_md5s(paths.outbox / new_id)
+        # X still in the outbox was not rescued: an edit landed while we were reading it,
+        # or we could not read it. Either way it is still waiting - the next round meets
+        #「.update 而 Drive 沒有」again - and Y goes up in this one (V1).
+        left.extend(u for u in gone if (paths.outbox / u).is_dir())
 
     raws = [f"{u}/{n}" for u in entries for n in _raw_names(paths.outbox / u)]
     session_md5 = {u: m[0] for u, m in entries.items()}
@@ -546,7 +551,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn) -> list[str]:
         return sorted(entries)
 
     remote = _listing_with_md5(drive) or {}
-    left, replaced = [], []
+    replaced = []
     for ulid, (sent_md5, sent_raw) in entries.items():
         folder = paths.outbox / ulid
         files = remote.get(ulid) or {}
@@ -592,13 +597,20 @@ def _rescue_deleted(paths: Paths, folder: Path, ulid: str, say) -> str | None:
     outbox entry goes away with it (spec「只有自己驗過的版本離開 outbox」). Returns the
     new ULID, or None when even that failed - then X stays, so nothing is lost.
     """
+    done = paths.outbox / f".done-{ulid}"
     try:
-        text = (folder / "session.md").read_text(encoding="utf-8")
+        folder.rename(done)      # V1: claim it before reading, like H1 does - what we
+    except OSError:
+        return None             # rescue is whatever we took, never a version a `stage`
+                                # swaps in while we work (that one waits for the next round)
+    try:
+        text = (done / "session.md").read_text(encoding="utf-8")
         hdr, body = h.split_document(text)
         name = (h.agora_of(hdr).get("raw") or {}).get("file")
-        raw = (folder / name).read_bytes() if name else None
+        raw = (done / name).read_bytes() if name else None
     except (OSError, h.HeaderError) as e:
         say(f"{ulid} 雲端沒有，而且讀不出這筆（{e}）；留在 outbox 等你處理")
+        _put_back(done, folder)
         return None
     new_ulid = h.new_ulid()
     new_hdr = copy.deepcopy(hdr)
@@ -606,11 +618,15 @@ def _rescue_deleted(paths: Paths, folder: Path, ulid: str, say) -> str | None:
     new_hdr.setdefault("agora", {})["parents"] = [{"id": f"agora:{ulid}"}]
     new_hdr["agora"].pop("raw", None)           # stage names the raw and hashes it again
     try:
-        stage(paths, new_hdr, body, raw)
+        y = stage(paths, new_hdr, body, raw)
     except OSError as e:
         say(f"{ulid} 另存新 Session 失敗（{e}）；留在 outbox 等你處理")
+        _put_back(done, folder)
         return None
-    shutil.rmtree(folder, ignore_errors=True)   # X leaves the outbox: it is not a version
+    remember(paths, y)     # V2: Y is a session of this machine now - mirror and index,
+                           # or it would only exist on Drive (P1 all over again)
+    shutil.rmtree(done, ignore_errors=True)   # only the version we claimed; if an edit
+                                              # landed in `folder` it stays for the next round
     say(f"{ulid} 已被別台刪除，這次的修改存成了 {new_ulid}")
     return new_ulid
 

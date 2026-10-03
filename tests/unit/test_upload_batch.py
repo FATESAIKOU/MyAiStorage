@@ -308,6 +308,67 @@ def test_an_update_someone_else_deleted_is_saved_as_a_new_session(env, monkeypat
     assert ulid in err and new_ids[0] in err and "已被別台刪除" in err
 
 
+def _deleted_on_drive(env, paths):
+    """X on Drive, then another machine removes it: the state N5's rescue is for."""
+    import shutil
+    ulid = _stage(paths, "原本的")
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    shutil.rmtree(env / "agora" / "sessions" / ulid)
+    return ulid
+
+
+def test_an_edit_that_lands_while_the_rescue_is_staging_y_is_not_deleted(env, monkeypatch):
+    """V1: the rescue used to read `outbox/X` and then `rmtree` it, so an edit made in
+    between went with it - not on Drive, not in the outbox, only in X's local mirror,
+    where the next sync marks it cloud-missing and nobody is told. It claims X the way
+    H1 does and deletes only what it claimed; a newer version waits its turn."""
+    paths = store.Paths.from_env()
+    ulid = _deleted_on_drive(env, paths)
+    hdr = _kept_header(ulid, "原本的")
+    store.stage(paths, hdr, "## user\n第一次改\n", b'{"v": 2}')
+    store.mark_update(paths.outbox / ulid)
+    real_stage = store.stage
+
+    def stage_y_then_edit(paths_, hdr_, body_, raw_):
+        got = real_stage(paths_, hdr_, body_, raw_)
+        if hdr_["id"] != f"agora:{ulid}":        # Y is being staged: this is the window
+            folder = store.stage(paths, hdr, "## user\n第二次改\n", b'{"v": 3}')
+            store.remember(paths, folder)
+            store.mark_update(folder)      # what `edit` does: this id already existed
+        return got
+
+    monkeypatch.setattr(store, "stage", stage_y_then_edit)
+    assert ulid in store.upload_batch(store.Drive(paths), paths)   # still waiting
+    assert "第二次改" in (paths.outbox / ulid / "session.md").read_text(encoding="utf-8")
+
+    # the next round rescues it too, and this time it is the only version there
+    monkeypatch.setattr(store, "stage", real_stage)
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    saved = [p.name for p in (env / "agora" / "sessions").iterdir() if p.is_dir()]
+    assert ulid not in saved
+    held = [(env / "agora" / "sessions" / u / "session.md").read_text(encoding="utf-8")
+            for u in saved]
+    assert sum("第二次改" in t for t in held) == 1
+
+
+def test_the_rescued_session_is_in_the_local_index_and_mirror(env):
+    """V2: Y went to Drive but not to this machine - search could not find it and the
+    raw was not here, which is P1 (Drive-only) all over again for the very session we
+    just rescued."""
+    paths = store.Paths.from_env()
+    ulid = _deleted_on_drive(env, paths)
+    folder = store.stage(paths, _kept_header(ulid, "原本的"), "## user\n救回來的\n", b'{"v": 2}')
+    store.mark_update(folder)
+    assert store.upload_batch(store.Drive(paths), paths) == []
+
+    new_id = [p.name for p in (env / "agora" / "sessions").iterdir() if p.is_dir()][0]
+    assert (paths.mirror / new_id / "session.md").is_file()      # the mirror
+    assert list((paths.mirror / new_id).glob("raw-*")), "the raw too"
+    index = store.Index(paths)                                   # and searchable now
+    hits = index.search([(("text",), "~=", "救回來的")])
+    assert [hit[0] for hit in hits] == [new_id]
+
+
 def test_an_entry_that_cannot_be_read_is_quarantined_not_uploaded(env, capsys):
     """N5's fallback sits one layer up: an entry we cannot read never reaches the
     rescue. It is moved aside whole (so the edit is not thrown away) and Drive does
