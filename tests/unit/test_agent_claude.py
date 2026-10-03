@@ -452,9 +452,11 @@ def test_summarize_runs_in_the_given_workdir(claude_env, tmp_path):
 
 def test_summarize_timeout_is_configurable(claude_env, tmp_path, monkeypatch):
     monkeypatch.setenv("AGORA_SUMMARIZE_TIMEOUT", "12")
-    assert C._summarize_timeout() == 12.0
+    assert base.summarize_timeout() == 12
     monkeypatch.delenv("AGORA_SUMMARIZE_TIMEOUT")
-    assert C._summarize_timeout() == 600.0
+    assert base.summarize_timeout() == 600
+    monkeypatch.setenv("AGORA_SUMMARIZE_TIMEOUT", "abc")   # B1: unreadable, not a crash
+    assert base.summarize_timeout() == 600
 
 
 def test_summarize_failures_raise_agent_error(claude_env, tmp_path, monkeypatch):
@@ -491,12 +493,20 @@ def test_summarize_falls_back_to_plain_stdout(claude_env, tmp_path, monkeypatch)
 
 # --- list_sessions / last_message (design 5.9, interactive mode) ----------------
 
+def test_the_listing_and_the_export_name_a_session_the_same_way(claude_env):
+    """C2: the listing peeks 40 lines and the export has every line. They used to
+    read the title by different rules, so a session imported under a different name
+    than the row the user clicked showed."""
+    listed = C.ADAPTER.list_sessions()
+    assert [item.title for item in listed] == [C.ADAPTER.export(SID).title]
+
+
 def test_list_sessions_reads_dir_title_and_stamp(claude_env):
     listed = C.ADAPTER.list_sessions()
     assert [item.session_id for item in listed] == [SID]
     item = listed[0]
     assert item.dir == "/tmp/my-proj.v2"          # from the jsonl's cwd
-    assert item.title == "把 CSV 轉成 Markdown 表格，先列三個步驟"
+    assert item.title == "CSV 轉 Markdown 的規劃"   # a summary wins, as in the export (C2)
     # updated_at is the file's mtime (T15: no full scan for the last stamp)
     assert item.updated_at and item.updated_at.endswith("Z") and "T" in item.updated_at
 

@@ -725,10 +725,12 @@ def test_summarize_turns_a_timeout_into_an_error(fake, tmp_path, monkeypatch):
 def test_summarize_default_timeout_is_its_own(fake, tmp_path, monkeypatch):
     """The 60 s a CLI poke gets is not enough for a model to answer a merge."""
     monkeypatch.delenv("AGORA_SUMMARIZE_TIMEOUT", raising=False)
-    assert oc.DEFAULT_SUMMARIZE_TIMEOUT == 600
-    assert oc._summarize_timeout() == 600
+    assert base.SUMMARIZE_TIMEOUT == 600
+    assert base.summarize_timeout() == 600
     monkeypatch.setenv("AGORA_SUMMARIZE_TIMEOUT", "42")
-    assert oc._summarize_timeout() == 42
+    assert base.summarize_timeout() == 42
+    monkeypatch.setenv("AGORA_SUMMARIZE_TIMEOUT", "abc")   # B1: unreadable, not a crash
+    assert base.summarize_timeout() == 600
 
 
 def test_a_leftover_pending_record_is_finished_before_the_next_run(fake, tmp_path):

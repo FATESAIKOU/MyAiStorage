@@ -9,11 +9,18 @@ anything; they read and write the agent's own files.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Protocol
 
 TOOL_SUMMARY_MAX = 200
+
+#: summarize is one model round trip, not a CLI poke, so it gets its own budget: a
+#: merge prompt is a whole session to read, and the 60 s a CLI poke gets is not
+#: enough for a free model to answer one (was in opencode.py, review B1).
+SUMMARIZE_TIMEOUT = 600
 
 Turns = list[tuple[str, list[str]]]   # [(role, lines)]; role is "user" or "assistant"
 
@@ -88,6 +95,33 @@ class Agent(Protocol):
 
 class AgentError(RuntimeError):
     """The agent's files or CLI did not behave as expected."""
+
+
+def env_seconds(name: str, default: int) -> int:
+    """A deadline from the environment; a value we cannot read leaves the default.
+
+    The two adapters read this differently and claude's `float()` raised on "abc" -
+    which is not something `summarize` catches, so a typo in the environment became
+    the CLI's "unexpected error" instead of a fallback (review B1).
+    """
+    try:
+        return int(os.environ.get(name) or default)
+    except ValueError:
+        return default
+
+
+def summarize_timeout() -> int:
+    return env_seconds("AGORA_SUMMARIZE_TIMEOUT", SUMMARIZE_TIMEOUT)
+
+
+def iso_utc(seconds: float) -> str:
+    """RFC 3339 UTC to the second - the one shape three places used to write (B2)."""
+    return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def warn(message: str) -> None:
+    """One line on stderr, marked the way every agora message is (review B5)."""
+    print(f"[agora] {message}", file=sys.stderr)
 
 
 def agent_cmd(name: str) -> str:
