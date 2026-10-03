@@ -22,15 +22,17 @@
 | D2 | **信任自己的機器** | 不做簽章、收件匣、單一提交者、pin repo。寫入是本機直接寫 |
 | D3 | **四個實體的概念全部保留**（MyBrain／Agora／Foundry／Atelier），彼此靠 **header** 參照 | 程式這次只實作 Agora |
 | D4 | **continue 的結果是新的 Session**，header 記下來源 | 可以分岔；merge 的結果也有地方放 |
-| D5 | Drive 憑證用 **rclone 內建的 OAuth client，scope 是 `drive.file`**（2026-10-02 從自建的 worker client 搬過來，使用者決定） | 只看得到自己建的檔案；不必有自己的 Google Cloud 專案 |
+| D5 | Drive 憑證用 **自己的 OAuth client（Desktop，scope `drive.file`）**；沒有就退回 **rclone 內建的 client**，同樣是 `drive.file`（2026-10-03 使用者決定，issue #11） | 只看得到自己建的檔案；用自己的 client 不用跟所有 rclone 使用者共用配額 |
 | D6 | **閱讀版＝user／assistant 的文字＋每次工具呼叫一行摘要**；不收工具結果、不收 thinking（2026-10-02） | 搜尋與跨 agent 接續都用它 |
 
 ### D5 的注意事項（S8）
 
 - `agora/` 根資料夾第一次執行時建立，把 **folder ID** 寫進 `~/.config/agora/config.json`；之後所有存取都用 ID，不靠名字找（Drive 允許同名資料夾）。`sync` 發現同名資料夾時警告。
 - **只能透過 agora 寫入。** 從 Drive 網頁拖進去的檔案，`drive.file` 看不到。
-- **換 client，以前建的檔案就全部看不到**（資料還在）。2026-10-02 從 worker client 換成 rclone 內建 client 時是這樣搬的：用舊的設定把 `agora/` 整份下載，用新的設定建新的 `agora/` 並上傳、逐檔核對 md5，切換 `config.json` 的 folder ID，再用舊的設定把舊資料夾移到垃圾桶。
-- rclone 內建 client 的配額是所有 rclone 使用者共用的，用量大時可能被限流；agora 每次只傳幾個小檔，目前不是問題。
+- **用自己的 client（2026-10-03，issue #11）**：量過一次 rclone，內建 client 被共用配額擋住時約 50 秒，換成自己的 Desktop client 之後每次 **0.6～0.8 秒**。所以預設路徑還是內建的（不必有 Google Cloud 專案），但首次設定多一個選項：給一個 client 設定檔的**路徑**（Google 下載的 JSON，或 rclone 那種兩行 `Client-ID=`／`SECRET=` 的檔）。程式只讀那個路徑，值直接交給 rclone 的 argv——不印出、不寫進 log、不經過 shell（argv 裡還是看得到 `ps`，這是 rclone 介面的代價）。授權時 **同意畫面要是正式版**：`drive.file` 的 refresh token 在 testing 模式只有 7 天，會在沒人注意的時候失效。
+- **換 client，以前建的檔案就全部看不到**（資料還在；`drive.file` 只看得到建立它的那個 client 的檔案）。2026-10-03 的搬法：用舊的設定把 `agora/` 整份下載，用新的設定建新的 `agora/` 並上傳、逐檔核對 md5，切換 `config.json` 的 folder ID，再用舊的設定把舊資料夾移到垃圾桶。2026-10-02 從 worker client 換到 rclone 內建 client 時也是這樣搬的。
+- **換機器**：把 `~/.config/agora/rclone.conf`（含 `[gdrive]` 與 token）與 `~/.config/agora/config.json`（folder ID）複製過去就能用，client 的值已經在 `rclone.conf` 裡。
+- rclone 內建 client 的配額是所有 rclone 使用者共用的；用自己的 client 就沒有這個問題（這也是 2026-10-03 換掉的原因）。
 
 ## 3. 共通 header
 

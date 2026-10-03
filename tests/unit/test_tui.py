@@ -13,6 +13,8 @@ import threading
 import time
 
 import pytest
+from textual.widget import Widget
+from textual.widgets import Static
 
 from agora import header as h
 from agora import store, tui
@@ -1843,3 +1845,144 @@ def test_only_a_failed_start_still_says_the_outbox():
     said = _after_one_import(code=3)
     assert "已存進 outbox" in said
     assert "背景上傳中" not in said
+
+
+# --- first run: your own OAuth client is optional (T5, design D5) ---------------
+
+#: Self-made values. Nothing here is a real credential, and nothing that reads them
+#: is allowed to put them anywhere but rclone's argv.
+FAKE_ID = "1234567890-fakeclientid.apps.googleusercontent.com"
+FAKE_SECRET = "GOCSPX-fakesecret-not-a-real-one"
+
+
+def _client_json(tmp_path) -> str:
+    """The shape Google hands out for a Desktop client, with made-up values."""
+    path = tmp_path / "client_secret_fake.json"
+    path.write_text(json.dumps({"installed": {"client_id": FAKE_ID,
+                                              "client_secret": FAKE_SECRET,
+                                              "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                                              "token_uri": "https://oauth2.googleapis.com/token"}},
+                              ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+def _client_text(tmp_path) -> str:
+    """rclone's own two-line form, with made-up values."""
+    path = tmp_path / "rclone-client.conf"
+    path.write_text(f"[gdrive]\ntype = drive\nClient-ID = {FAKE_ID}\nSECRET = {FAKE_SECRET}\n",
+                    encoding="utf-8")
+    return str(path)
+
+
+def test_a_downloaded_client_json_is_read_by_path(tmp_path, capsys):
+    assert tui.read_client(_client_json(tmp_path)) == (FAKE_ID, FAKE_SECRET)
+    said = capsys.readouterr()
+    assert FAKE_ID not in said.out and FAKE_SECRET not in said.out
+    assert FAKE_SECRET not in said.err, "reading a client file says nothing about it"
+
+
+def test_the_two_line_client_file_is_read_too(tmp_path):
+    assert tui.read_client(_client_text(tmp_path)) == (FAKE_ID, FAKE_SECRET)
+
+
+def test_a_client_file_we_cannot_use_is_none_not_a_guess(tmp_path):
+    """A wrong path, a file that is not one, and one with half the pair: all of them
+    fall back to rclone's own client rather than sending something half-read."""
+    assert tui.read_client(str(tmp_path / "not-there.json")) is None
+    (tmp_path / "notes.txt").write_text("記得換 client\n", encoding="utf-8")
+    assert tui.read_client(str(tmp_path / "notes.txt")) is None
+    half = tmp_path / "half.json"
+    half.write_text(json.dumps({"installed": {"client_id": FAKE_ID}}), encoding="utf-8")
+    assert tui.read_client(str(half)) is None
+    assert tui.read_client(str(tmp_path)) is None          # a directory
+
+
+def test_the_rclone_command_carries_the_client_when_there_is_one(tmp_path):
+    paths = store.Paths(config=tmp_path / "config", cache=tmp_path / "cache", state=tmp_path / "state")
+    built_in = tui.authorize_argv(paths)
+    assert "client_id=1234" not in " ".join(built_in), "nothing offered, nothing sent"
+
+    mine = tui.authorize_argv(paths, (FAKE_ID, FAKE_SECRET))
+    assert f"client_id={FAKE_ID}" in mine and f"client_secret={FAKE_SECRET}" in mine
+    assert "scope=drive.file" in mine, "the scope does not change: drive.file either way"
+    # a list, never a string: a secret that goes through a shell is a secret in `ps`
+    assert isinstance(mine, list) and mine[:1] != ["rclone config create"]
+
+
+def test_nothing_about_the_client_is_printed(monkeypatch, tmp_path, capsys):
+    """rclone echoes the remote it wrote, secret and all. The values must not reach the
+    screen, the log, or stdout (design D5)."""
+    said: list[str] = []
+    calls: list[tuple] = []
+    proc = FakeProc(lines=[f"client_id = {FAKE_ID}",
+                           f"client_secret = {FAKE_SECRET}",
+                           "token = {\"access_token\": \"ya29.fake\"}",
+                           "Created remote gdrive"])
+    monkeypatch.setattr(tui.subprocess, "Popen",
+                        lambda *a, **k: calls.append((a, k)) or proc)
+    paths = store.Paths(config=tmp_path / "config", cache=tmp_path / "cache", state=tmp_path / "state")
+
+    assert tui.authorize(paths, said.append, (FAKE_ID, FAKE_SECRET)) == 0
+
+    assert calls and isinstance(calls[0][0][0], list), "argv is a list, not a shell string"
+    assert not calls[0][1].get("shell"), "a secret through a shell is a secret in `ps`"
+    said_text = "\n".join(said)
+    assert FAKE_SECRET not in said_text and "ya29.fake" not in said_text
+    assert "Created remote gdrive" in said_text, "the lines that are safe still come through"
+    assert FAKE_SECRET not in capsys.readouterr().out
+
+
+def _first_run(pick: int, typed: str, tmp_path, monkeypatch):
+    """Drive the first-run screens: `pick` on the Choose, then `typed` in the prompt."""
+    paths = store.Paths(config=tmp_path / "config", cache=tmp_path / "cache", state=tmp_path / "state")
+    (tmp_path / "config").mkdir()
+    monkeypatch.setenv("AGORA_RCLONE", "/bin/sh")
+    authorize_calls: list[tuple] = []
+
+    def fake_authorize(p, say=print, client=None):
+        authorize_calls.append(client)
+        (tmp_path / "config" / "rclone.conf").write_text("[gdrive]\n", encoding="utf-8")
+        return 0
+    monkeypatch.setattr(tui, "authorize", fake_authorize)
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=True)
+    said: list[str] = []
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down" * pick, "enter")
+            await pilot.pause()
+            if pick == 1:
+                await pilot.pause()
+                for ch in typed:
+                    await pilot.press("space" if ch == " " else ch)
+                await pilot.press("enter")
+                # an unreadable path stops at a window that has to be read first
+                await _wait(lambda: isinstance(app.screen, tui.Tell) or bool(authorize_calls),
+                            pilot)
+                said.extend(str(w.render()) for w in app.screen.walk_children(Widget)
+                            if isinstance(w, Static))
+                if isinstance(app.screen, tui.Tell):
+                    await pilot.press("enter")
+                    await pilot.pause()
+            await _wait(lambda: bool(authorize_calls), pilot)
+    _run(go)
+    return authorize_calls, " ".join(said)
+
+
+def test_the_first_run_can_use_your_own_client(tmp_path, monkeypatch):
+    calls, _ = _first_run(1, _client_json(tmp_path), tmp_path, monkeypatch)
+    assert calls == [(FAKE_ID, FAKE_SECRET)]
+
+
+def test_the_first_run_works_on_rclones_own_client_when_you_skip_it(tmp_path, monkeypatch):
+    """The second option, then Esc: rclone's own client, exactly as before this existed."""
+    calls, _ = _first_run(1, "", tmp_path, monkeypatch)
+    assert calls == [None]
+
+
+def test_a_client_file_we_cannot_read_falls_back_to_rclones_own(tmp_path, monkeypatch):
+    calls, said = _first_run(1, str(tmp_path / "nowhere.json"), tmp_path, monkeypatch)
+    assert calls == [None], "it says what happened, then does the thing that works"
+    assert "讀不到 client 設定檔" in said
+    assert FAKE_SECRET not in said and FAKE_ID not in said, "the path is not the values"

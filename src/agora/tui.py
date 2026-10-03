@@ -11,6 +11,7 @@ tests.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -212,19 +213,67 @@ def setup_needed(paths: store.Paths) -> str | None:
     return None if (paths.config / "rclone.conf").exists() else "auth"
 
 
-def authorize(paths: store.Paths, say=print) -> int:
-    """`rclone config create` with rclone's own client: it opens the browser; we pass its lines on.
+def read_client(where: str) -> tuple[str, str] | None:
+    """(client_id, client_secret) from the file at `where`, or None if it is not one.
+
+    Two shapes are understood: the JSON Google hands out when you create a Desktop
+    client, and rclone's own two-line `Client-ID=` / `SECRET=` file. Nothing is
+    printed, logged or put on the screen - the values only ever travel into rclone's
+    own argv (design D5).
+    """
+    try:
+        text = Path(where).expanduser().read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if text.lstrip().startswith("{"):
+        try:
+            block = json.loads(text).get("installed") or json.loads(text).get("web") or {}
+        except (json.JSONDecodeError, AttributeError):
+            return None
+        client_id, secret = block.get("client_id"), block.get("client_secret")
+    else:
+        pairs = {}
+        for line in text.splitlines():
+            key, _, value = line.partition("=")
+            pairs[key.strip()] = value.strip()      # rclone writes `Client-ID = …`
+        client_id = pairs.get("Client-ID")
+        secret = pairs.get("SECRET")
+    if not all(isinstance(v, str) and v.strip() for v in (client_id, secret)):
+        return None
+    return client_id.strip(), secret.strip()
+
+
+def authorize_argv(paths: store.Paths, client: tuple[str, str] | None = None) -> list[str]:
+    """The rclone command that writes `[gdrive]`; `client` is the user's own OAuth client.
+
+    A list, never a string: the secret must not go through a shell, where it would end
+    up in the process table and in every `ps` (design D5).
+    """
+    argv = [os.environ.get("AGORA_RCLONE", "rclone"), "config", "create", "gdrive", "drive",
+            "scope=drive.file"]
+    if client:
+        argv += [f"client_id={client[0]}", f"client_secret={client[1]}"]
+    return argv + ["--config", str(paths.config / "rclone.conf")]
+
+
+def authorize(paths: store.Paths, say=print, client: tuple[str, str] | None = None) -> int:
+    """`rclone config create`: it opens the browser; we pass its lines on.
+
+    With rclone's own client when the user gave none (design D5), and with their own
+    Desktop client when they pointed at one - same scope either way, and rclone reuses
+    an existing `[gdrive]`'s token only if the client matches, so switching is a
+    deliberate step rather than a silent one.
 
     `say` is where the lines go - the waiting window when the interactive mode runs
     it, stdout otherwise - rather than the thread printing behind the screen's back
-    (review K3).
+    (review K3). Lines naming a token or a secret are dropped: rclone echoes what it
+    wrote, and neither belongs on a screen.
     """
     paths.config.mkdir(parents=True, exist_ok=True)
-    argv = [os.environ.get("AGORA_RCLONE", "rclone"), "config", "create", "gdrive", "drive", "scope=drive.file",
-            "--config", str(paths.config / "rclone.conf")]
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    proc = subprocess.Popen(authorize_argv(paths, client), stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
     for line in proc.stdout:
-        if "token" not in line.lower():   # the token is a secret: never on screen
+        if not any(word in line.lower() for word in ("token", "secret")):
             say(line.rstrip())
     return proc.wait()
 
@@ -646,12 +695,28 @@ class AgoraApp(App):
             await self.push_screen_wait(Choose("需要 rclone", ["離開"], "請先在終端機執行：brew install rclone\n裝好之後再打 agora"))
             return False
         if need == "auth":
-            note = ("agora 把 Session 存在你的 Google Drive。\n用 rclone 內建的 client 授權，權限只有 drive.file：\n"
-                    "只看得到 agora 自己建的檔案。")
-            if await self.push_screen_wait(Choose("還沒設定 Google Drive", ["用瀏覽器授權", "離開"], note)) != 0:
+            note = ("agora 把 Session 存在你的 Google Drive。權限只有 drive.file：只看得到 agora 自己建的檔案。\n"
+                    "用 rclone 內建的 client 就能用；有自己的 OAuth client（Google Cloud 的 Desktop "
+                    "client）會快很多，選第二項可以給一個設定檔的路徑。")
+            pick = await self.push_screen_wait(Choose("還沒設定 Google Drive", [
+                "用瀏覽器授權（rclone 內建的 client）", "用自己的 OAuth client（選填）", "離開"], note))
+            if pick is None or pick == 2:
                 return False
+            client = None
+            if pick == 1:
+                # The path is all we ask for: the values are read here and handed to
+                # rclone, never shown (design D5).
+                typed = await self.push_screen_wait(AskText("自己的 client 設定檔路徑", ""))
+                if typed and typed.strip():
+                    client = read_client(typed.strip())
+                    if client is None:
+                        await self.push_screen_wait(Tell(
+                            "讀不到 client 設定檔",
+                            f"{typed.strip()}\n裡面沒有 client_id／client_secret。"
+                            "可以用 Google 下載的 JSON，或兩行 Client-ID=／SECRET= 的文字檔。\n"
+                            "先用 rclone 內建的 client：功能一樣，只是共用配額會慢。", ok=False))
             code, out, error = await self.push_screen_wait(
-                Busy("請在瀏覽器完成授權", lambda say: authorize(self.paths, say)))
+                Busy("請在瀏覽器完成授權", lambda say: authorize(self.paths, say, client)))
             if error or code != 0 or setup_needed(self.paths):
                 await self.push_screen_wait(Tell("授權沒有完成", f"{out}\n{error or ''}", ok=False))
                 return False

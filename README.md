@@ -10,7 +10,16 @@ uv tool install --editable .     # 之後就有 agora 指令
 
 需要：
 - `rclone`；
-- `~/.config/agora/rclone.conf`：remote 名稱是 `gdrive`，scope 是 `drive.file`，用 rclone 內建的 client。第一次打 `agora`（互動模式）時會引導你用瀏覽器授權；也可以自己跑 `rclone config create gdrive drive scope=drive.file --config ~/.config/agora/rclone.conf`；
+- `~/.config/agora/rclone.conf`：remote 名稱是 `gdrive`，scope 是 `drive.file`。第一次打 `agora`（互動模式）時會引導你用瀏覽器授權；也可以自己跑 `rclone config create gdrive drive scope=drive.file --config ~/.config/agora/rclone.conf`；
+- **選填**自己的 OAuth client（Google Cloud 的 Desktop client）。rclone 內建的 client 配額是所有 rclone 使用者共用的，被限流時一次 rclone 約 50 秒，用自己的約 0.6～0.8 秒。首次設定的第二個選項會問你要一個 client 設定檔的**路徑**（Google 下載的 JSON，或 rclone 那種兩行 `Client-ID=`／`SECRET=` 的檔）；也可以自己跑：
+
+  ```bash
+  rclone config create gdrive drive scope=drive.file \
+      client_id=你的CLIENT_ID client_secret=你的CLIENT_SECRET \
+      --config ~/.config/agora/rclone.conf
+  ```
+
+  agora 只讀那個路徑，值直接交給 rclone，不會印出來或寫進 log。授權時同意畫面**要選正式版**：testing 模式的 refresh token 只有 7 天。換 client 之後以前建的檔案要自己搬（見 design D5）；換機器只要複製 `rclone.conf` 與 `config.json`。
 - `opencode`、`claude`（用到哪個裝哪個）。
 
 第一次執行時，agora 會在 Drive 建一個 `agora/` 資料夾，並把它的 folder ID 記到 `~/.config/agora/config.json`。
