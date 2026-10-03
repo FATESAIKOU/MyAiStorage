@@ -127,7 +127,16 @@ def test_a_failed_raw_upload_sends_no_session_md_at_all(env, monkeypatch, capsys
     batch is worse than no upload."""
     paths = store.Paths.from_env()
     ulids = [_stage(paths, f"第 {i} 個") for i in range(3)]
-    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")
+    real_copy = store._copy_batch
+
+    def raws_only(drive, paths_, names):
+        # Only the raws call fails. The session.md call must still be reachable, or
+        # this test cannot tell "stopped after the raws" from "everything failed".
+        if any("/raw-" in n for n in names):
+            raise store.StoreError("原始檔傳不上去")
+        return real_copy(drive, paths_, names)
+
+    monkeypatch.setattr(store, "_copy_batch", raws_only)
     capsys.readouterr()
 
     left = store.upload_batch(store.Drive(paths), paths)
@@ -168,6 +177,80 @@ def test_only_what_drive_confirmed_leaves_the_outbox(env, monkeypatch):
         assert ulid not in store.outbox_ulids(paths)
 
 
+def test_one_entry_that_cannot_be_verified_does_not_end_the_round(env, monkeypatch):
+    """R1's other half: if the folder we renamed aside cannot be read back, that entry
+    is reported as still waiting and put back where it was - the other entries in the
+    same round still go up."""
+    paths = store.Paths.from_env()
+    ulids = [_stage(paths, f"第 {i} 個") for i in range(2)]
+    broken, real = ulids[0], store._entry_md5s
+
+    def md5s(folder):
+        if folder.name == f".done-{broken}":
+            raise h.HeaderError("讀不出來了")
+        return real(folder)
+
+    monkeypatch.setattr(store, "_entry_md5s", md5s)
+    assert store.upload_batch(store.Drive(paths), paths) == [broken]
+    assert (paths.outbox / broken / "session.md").is_file()   # back where it was
+    assert ulids[1] not in store.outbox_ulids(paths)         # the other one went up
+    assert (env / "agora" / "sessions" / ulids[1] / "session.md").is_file()
+
+
+def test_an_edit_that_lands_while_we_compare_is_not_lost(env, monkeypatch, capsys):
+    """R1: the window between renaming our copy aside and comparing it. An edit that
+    arrives here used to be deleted by the same `stage` call (`stage` removed
+    `.done-<ULID>`, which by then held the version we had just sent) - the round then
+    broke and, after a sync, the edit was gone. The edit stays, and the ULID is still
+    reported as waiting."""
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "第一版")
+    hdr = store.read_entry(paths.outbox / ulid)
+    real = store._entry_md5s
+
+    def md5s(folder):
+        if folder.name.startswith(".done-") and not getattr(md5s, "done", False):
+            md5s.done = True
+            hdr["title"] = "上傳途中改的"
+            store.stage(paths, hdr, "## user\n上傳途中改的\n", b'{"v": 2}')
+            store.remember(paths, paths.outbox / ulid)
+        return real(folder)
+
+    monkeypatch.setattr(store, "_entry_md5s", md5s)
+    capsys.readouterr()
+
+    assert store.upload_batch(store.Drive(paths), paths) == [ulid]
+    assert "上傳途中改的" in (paths.outbox / ulid / "session.md").read_text(encoding="utf-8")
+    # Drive has the version that was sent; the newer one waits here for the next round
+    assert "第一版" in (env / "agora" / "sessions" / ulid / "session.md").read_text(encoding="utf-8")
+    assert "驗證不了" not in capsys.readouterr().err
+
+
+def test_an_edit_that_only_changes_the_header_is_not_reported_as_sent(env, monkeypatch):
+    """H1 for `edit --header`: that version's raw is byte-for-byte the one we sent, so
+    the raw comparison cannot catch it. The session.md md5 is the only thing standing
+    between a title changed mid-upload and a silently dropped edit."""
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "第一版")
+    hdr = store.read_entry(paths.outbox / ulid)
+    raw = (paths.outbox / ulid / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    real = store._listing_with_md5
+
+    def listing(drive):
+        got = real(drive)
+        if not getattr(listing, "done", False):
+            listing.done = True
+            hdr["title"] = "換標題"
+            store.stage(paths, hdr, "## user\n第一版\n", raw)   # the same bytes
+            store.remember(paths, paths.outbox / ulid)
+        return got
+
+    monkeypatch.setattr(store, "_listing_with_md5", listing)
+    assert store.upload_batch(store.Drive(paths), paths) == [ulid]
+    assert ulid in store.outbox_ulids(paths)
+    assert "換標題" in (paths.outbox / ulid / "session.md").read_text(encoding="utf-8")
+
+
 def test_a_version_staged_mid_upload_is_reported_as_still_waiting(env, monkeypatch):
     """H1, the part a later round cannot cover: after one round, an entry that was
     replaced while we were sending it must come back as "still waiting". Comparing only
@@ -192,9 +275,10 @@ def test_a_version_staged_mid_upload_is_reported_as_still_waiting(env, monkeypat
     assert "第二版" in (paths.outbox / ulid / "session.md").read_text(encoding="utf-8")
 
 
-def test_an_update_someone_else_deleted_is_not_sent_back(env, monkeypatch, capsys):
+def test_an_update_someone_else_deleted_is_saved_as_a_new_session(env, monkeypatch, capsys):
     """L7 / N5: the `.update` marker says this overwrites an id Drive had. If that id is
-    gone now, putting it back is not ours to decide."""
+    gone now, putting it back is not ours to decide - so the edit becomes a session of
+    its own (spec「另存成一個新的 Session」), and X leaves the outbox for good."""
     import shutil
     paths = store.Paths.from_env()
     ulid = _stage(paths, "原本的")
@@ -208,11 +292,41 @@ def test_an_update_someone_else_deleted_is_not_sent_back(env, monkeypatch, capsy
     capsys.readouterr()
 
     left = store.upload_batch(store.Drive(paths), paths)
-    assert left == [ulid]
-    assert ulid in store.outbox_ulids(paths)     # it stays, for the user to decide
-    assert not (env / "agora" / "sessions" / ulid).exists()
+    assert left == []                            # nothing is left waiting
+    assert ulid not in store.outbox_ulids(paths)          # X is gone from here
+    assert not (env / "agora" / "sessions" / ulid).exists()   # and it did not come back
+    assert len(store.outbox_ulids(paths)) == 0          # and nothing else is waiting
+    # the new session is on Drive, with its parents pointing at X
+    new_ids = sorted(p.name for p in (env / "agora" / "sessions").iterdir() if p.is_dir())
+    assert len(new_ids) == 1 and new_ids[0] != ulid
+    text = (env / "agora" / "sessions" / new_ids[0] / "session.md").read_text(encoding="utf-8")
+    new_hdr, body = h.split_document(text)
+    assert new_hdr["id"] == f"agora:{new_ids[0]}"
+    assert [p["id"] for p in h.agora_of(new_hdr)["parents"]] == [f"agora:{ulid}"]
+    assert "改過了" in body
     err = capsys.readouterr().err
-    assert ulid in err and "雲端沒有" in err
+    assert ulid in err and new_ids[0] in err and "已被別台刪除" in err
+
+
+def test_an_entry_that_cannot_be_read_is_quarantined_not_uploaded(env, capsys):
+    """N5's fallback sits one layer up: an entry we cannot read never reaches the
+    rescue. It is moved aside whole (so the edit is not thrown away) and Drive does
+    not get a half-written session."""
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "原本的")
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    import shutil
+    shutil.rmtree(env / "agora" / "sessions" / ulid)
+    folder = store.stage(paths, _kept_header(ulid, "原本的"), "## user\n改過了\n", None)
+    store.mark_update(folder)
+    (folder / "session.md").unlink()             # cannot read it back
+    capsys.readouterr()
+
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    assert ulid not in store.outbox_ulids(paths)
+    assert (paths.outbox / ".bad" / ulid).is_dir()      # kept, not deleted
+    assert not (env / "agora" / "sessions" / ulid).exists()
+    assert "壞了" in capsys.readouterr().err
 
 
 def test_a_fresh_import_is_not_mistaken_for_an_update(env):

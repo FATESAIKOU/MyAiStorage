@@ -14,6 +14,7 @@ session as unfinished and skips it.
 from __future__ import annotations
 
 import fcntl
+import copy
 import hashlib
 import json
 import os
@@ -229,9 +230,10 @@ def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None) -> Pat
         folder.rename(old)
     tmp.rename(folder)
     shutil.rmtree(old, ignore_errors=True)
-    # An uploader may be comparing `.done-<ULID>` for this one right now (N7): the new
-    # version is newer, so that folder is dropped and it will find nothing left to do.
-    shutil.rmtree(paths.outbox / f".done-{ulid}", ignore_errors=True)
+    # `.done-<ULID>` is left alone (review R1): an uploader may be comparing it right
+    # now, and what it holds is a version that was current a moment ago - deleting it
+    # loses an edit. Whoever finds `outbox/<ULID>` already there drops it instead:
+    # `_rename_back` while comparing, `_restore_done` when nobody is running.
     return folder
 
 
@@ -519,11 +521,15 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn) -> list[str]:
         # another machine deleted.
         remote = _listing_with_md5(drive)
         gone = [u for u in updates if remote is not None and u not in remote]
+        rescued = {}
         for ulid in gone:
-            say(f"{ulid} 雲端沒有，這筆不傳回去；見 push --not-exist-upload／pull --not-exist-delete")
+            rescued[ulid] = _rescue_deleted(paths, paths.outbox / ulid, ulid, say)
         entries = {u: m for u, m in entries.items() if u not in gone}
-        if not entries:
-            return sorted(gone)
+        # Y went into the outbox while we were here: this round takes it too, so a
+        # foreground `push` ends with the edit in Drive rather than still waiting.
+        for ulid, new_id in rescued.items():
+            if new_id and new_id not in entries:
+                entries[new_id] = _entry_md5s(paths.outbox / new_id)
 
     raws = [f"{u}/{n}" for u in entries for n in _raw_names(paths.outbox / u)]
     session_md5 = {u: m[0] for u, m in entries.items()}
@@ -553,9 +559,22 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn) -> list[str]:
         except OSError:
             left.append(ulid)                       # a stage took it; the next round sees it
             continue
-        now_md5, now_raw = _entry_md5s(done)
+        try:
+            now_md5, now_raw = _entry_md5s(done)
+        except (OSError, h.HeaderError) as e:        # R1: one bad entry is not the round's end
+            warn(f"{ulid} 驗證不了，留下一次再說：{e}")
+            _rename_back(done, folder)
+            left.append(ulid)
+            continue
         if now_md5 != sent_md5 or (sent_raw and files.get(_raw_of(done)) != sent_raw):
             _rename_back(done, folder)              # a newer version: it stays for the next round
+            left.append(ulid)
+            continue
+        if folder.exists():
+            # R1: the edit landed after we renamed our copy aside. What we sent is on
+            # Drive and confirmed, so the folder we compared can go; the outbox entry
+            # is a newer version, so this ULID is still waiting either way.
+            shutil.rmtree(done, ignore_errors=True)
             left.append(ulid)
             continue
         for old_raw in _replaced_raws(done, _raw_of(done), files):
@@ -563,6 +582,37 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn) -> list[str]:
         shutil.rmtree(done, ignore_errors=True)
     _delete_batch(drive, paths, replaced)
     return sorted(left)
+
+
+def _rescue_deleted(paths: Paths, folder: Path, ulid: str, say) -> str | None:
+    """N5: the session Drive no longer has - keep this edit as a session of its own.
+
+    Returning the old version to that id would undo the other machine's deletion, so
+    the content becomes a *new* session (new ULID, parents pointing at X) and X's
+    outbox entry goes away with it (spec「只有自己驗過的版本離開 outbox」). Returns the
+    new ULID, or None when even that failed - then X stays, so nothing is lost.
+    """
+    try:
+        text = (folder / "session.md").read_text(encoding="utf-8")
+        hdr, body = h.split_document(text)
+        name = (h.agora_of(hdr).get("raw") or {}).get("file")
+        raw = (folder / name).read_bytes() if name else None
+    except (OSError, h.HeaderError) as e:
+        say(f"{ulid} 雲端沒有，而且讀不出這筆（{e}）；留在 outbox 等你處理")
+        return None
+    new_ulid = h.new_ulid()
+    new_hdr = copy.deepcopy(hdr)
+    new_hdr["id"] = f"agora:{new_ulid}"
+    new_hdr.setdefault("agora", {})["parents"] = [{"id": f"agora:{ulid}"}]
+    new_hdr["agora"].pop("raw", None)           # stage names the raw and hashes it again
+    try:
+        stage(paths, new_hdr, body, raw)
+    except OSError as e:
+        say(f"{ulid} 另存新 Session 失敗（{e}）；留在 outbox 等你處理")
+        return None
+    shutil.rmtree(folder, ignore_errors=True)   # X leaves the outbox: it is not a version
+    say(f"{ulid} 已被別台刪除，這次的修改存成了 {new_ulid}")
+    return new_ulid
 
 
 def _entry_md5s(folder: Path) -> tuple[str, str | None]:
