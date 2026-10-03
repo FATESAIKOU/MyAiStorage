@@ -69,10 +69,24 @@ def env(tmp_path, monkeypatch, capsys):
     subprocess.run(["git", "init", "-q"], cwd=PROJ, check=True)
     subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "init"], cwd=PROJ, check=True)
     created = {"ulids": [], "sessions": []}
+    here = store.Paths.from_env()
+    theirs = store.Paths(config=config, cache=tmp_path / "other" / "cache",
+                         state=tmp_path / "other" / "state")
     yield {"proj": PROJ.resolve(), "created": created, "capsys": capsys,
-           "other": tmp_path / "other"}
-    drive = store.Drive(store.Paths.from_env())
-    for ulid in created["ulids"]:                    # only what this run printed
+           "here": here, "theirs": theirs, "other": tmp_path / "other"}
+    # A background uploader still running would put things on Drive *after* the purge
+    # below, so both machines are given a chance to finish first (review I3).
+    for paths in (here, theirs):
+        try:
+            wait_uploaded(paths, timeout=60)
+        except AssertionError:
+            pass
+    ulids = set(created["ulids"])
+    index = store.Index(here)
+    for root in ulids:                       # anything this run rescued (review I3)
+        ulids.update(index.children(root))
+    drive = store.Drive(here)
+    for ulid in sorted(ulids):               # only what this run printed or created
         subprocess.run(["rclone", "--config", str(REAL_CONF),
                         "--drive-root-folder-id", drive.folder_id(),
                         "purge", f"gdrive:sessions/{ulid}"], capture_output=True)
@@ -133,7 +147,7 @@ def import_sessions(env, count: int = 2) -> list[str]:
     """Import `count` self-made sessions; returns their agora ids."""
     out = []
     for n in range(count):
-        _, sid = make_session(env, f"{PROMPT}（第 {n + 1} 則）")
+        sid = make_session(env, f"{PROMPT}（第 {n + 1} 則）")
         code, ids, err = run_cli(env, "import", "session", "--agent", "opencode",
                                  "--external-session-id", sid,
                                  "--header", f"title={MARK} 匯入 {n + 1}")
@@ -143,59 +157,112 @@ def import_sessions(env, count: int = 2) -> list[str]:
     return out
 
 
+def drive_has(paths, ulid: str) -> dict | None:
+    """What Drive holds for this session: {file name: md5}, or None."""
+    return (store.Drive(paths).list_sessions() or {}).get(ulid)
+
+
+def on_drive(paths, ulid: str) -> bool:
+    return drive_has(paths, ulid) is not None
+
+
+def same_as_local(paths, ulid: str, title_of=None) -> None:
+    """Drive's copy is the local one: the same session.md, and the raw it names.
+
+    "Drive has a folder" is not the same as "Drive has what we wrote" - a half-sent
+    session.md, or one whose raw is missing or is an older version, is what the local
+    mirror exists to make impossible (review I2).
+    """
+    local = paths.mirror / ulid
+    remote = drive_has(paths, ulid)
+    assert remote, f"{ulid} 不在 Drive 上"
+    assert remote.get("session.md") == store.md5_file(local / "session.md"), \
+        f"{ulid} 的 session.md 和本機的不一樣"
+    hdr, _body = h.split_document((local / "session.md").read_text(encoding="utf-8"))
+    raw = (h.agora_of(hdr).get("raw") or {})
+    if raw.get("file"):
+        assert (local / raw["file"]).is_file(), "本機沒有那個原始檔"
+        assert remote.get(raw["file"]) == raw["md5"], f"{ulid} 的原始檔和本機的不一樣"
+    if title_of:
+        assert hdr.get("title") == title_of, f"{ulid} 的標題是 {hdr.get('title')!r}"
+
+
 def ulid_of(agora_id: str) -> str:
     return agora_id.split(":")[1]
 
 
-def other_machine(env, monkeypatch) -> store.Paths:
-    """A second agora on this account: its own cache and state, the same `agora-test/`.
+def use_machine(env, monkeypatch, which: str) -> store.Paths:
+    """Point the environment at one of the two machines in this test.
 
-    Same Drive folder, different machine - which is the whole point of the two rescue
-    scenarios. Its lock and queues are its own, so `wait_uploaded` is told whose.
+    `cli.main` reads `AGORA_CACHE_DIR` / `AGORA_STATE_DIR` every time, so this is how
+    the second agora on this account is simulated: the same Drive folder, its own
+    cache, state, lock and queues. Switching back matters as much as switching over
+    (review I1 b).
     """
-    other = env["other"]
-    monkeypatch.setenv("AGORA_CACHE_DIR", str(other / "cache"))
-    monkeypatch.setenv("AGORA_STATE_DIR", str(other / "state"))
-    return store.Paths.from_env()
+    paths = env[which]
+    monkeypatch.setenv("AGORA_CACHE_DIR", str(paths.cache))
+    monkeypatch.setenv("AGORA_STATE_DIR", str(paths.state))
+    return paths
 
 
-def on_drive(paths, ulid: str) -> bool:
-    """Whether Drive has this session's folder right now."""
-    return ulid in (store.Drive(paths).list_sessions() or {})
+def forget_last_sync(paths) -> None:
+    """Drop the throttle stamp, so the next command really does list Drive.
+
+    `sync` is throttled for five minutes, and the import a moment ago synced anyway -
+    so without this the "cloud does not have it" marker would never move (review I1 c).
+    """
+    (paths.state / "last-sync").unlink(missing_ok=True)
+
+
+def hold_our_lock(paths):
+    """Take this machine's upload lock, so a background uploader cannot start.
+
+    Needed for the rescue scenarios: with the user's own client a single rclone takes
+    0.6-0.8 s, so an edit would be on Drive before the other machine could delete it,
+    and the scenario would pass or fail by luck (review I1 d).
+    """
+    return store.hold_upload_lock(paths, blocking=True)
 
 
 def test_import_several_and_the_background_puts_them_all_on_drive(env, monkeypatch):
     """5.2: the command is done when the session is safe here; Drive catches up."""
-    paths = store.Paths.from_env()
+    paths = env["here"]
+    held = hold_our_lock(paths)          # the background may not start yet (review I1 d)
     ids = import_sessions(env, 2)
-    assert store.outbox_ulids(paths), "they are staged here, not on Drive yet"
-
+    assert store.outbox_ulids(paths), "both are staged here, not on Drive yet"
+    held.__exit__()                      # and now the background may
     wait_uploaded(paths)
 
     assert store.outbox_ulids(paths) == set()
+    assert store.bad_count(paths) == 0, "沒有東西被移到 .bad"
     for agora_id in ids:
-        assert on_drive(paths, ulid_of(agora_id)), f"{agora_id} 沒有上傳"
-        # and the local copy is complete: session.md and the raw it names
-        folder = paths.mirror / ulid_of(agora_id)
-        assert (folder / "session.md").is_file()
-        hdr, _body = h.split_document((folder / "session.md").read_text(encoding="utf-8"))
-        raw = h.agora_of(hdr).get("raw") or {}
-        assert raw.get("file") and (folder / raw["file"]).is_file(), "原始檔也在本機"
+        # Drive has what we wrote, not just a folder with that name (review I2)
+        same_as_local(paths, ulid_of(agora_id))
 
 
 def test_delete_several_and_the_background_takes_them_off_drive(env, monkeypatch):
     """5.2: gone from here at once, gone from Drive once the background gets to it."""
-    paths = store.Paths.from_env()
+    paths = env["here"]
+    held = hold_our_lock(paths)
     ids = import_sessions(env, 2)
+    held.__exit__()
     wait_uploaded(paths)
     for agora_id in ids:
         assert on_drive(paths, ulid_of(agora_id))
 
+    held = hold_our_lock(paths)          # so the queue is ours to look at (review I2)
     code, out, err = run_cli(env, "delete", "session", *ids, "--yes")
+    held.__exit__()
 
     assert code == 0 and set(out.split()) == set(ids), err
-    # the foreground's half is done before the command returns
-    assert store.Index(paths).header(ulid_of(ids[0])) is None
+    # the foreground's half is done before the command returns: not in the list, not
+    # searchable, and the outbox no longer holds them
+    index = store.Index(paths)
+    for agora_id in ids:
+        assert index.header(ulid_of(agora_id)) is None
+    code, found, _ = run_cli(env, "search", "session", "--filter", f"text~={MARK}")
+    assert code == 0 and not any(agora_id in found for agora_id in ids), \
+        "刪完就該從搜尋裡消失"
     assert sorted(store.queued_for_trash(paths)) == sorted(ulid_of(i) for i in ids)
 
     wait_uploaded(paths)
@@ -207,27 +274,34 @@ def test_delete_several_and_the_background_takes_them_off_drive(env, monkeypatch
 
 def test_a_session_deleted_elsewhere_comes_back_with_an_explicit_push(env, monkeypatch):
     """5.2 / spec「只在明確要求時才刪或復活」: another machine's delete is undone by
-    `push --not-exist-upload`, not by anything that happens on its own."""
-    paths = store.Paths.from_env()
+    `push --not-exist-upload`, and by nothing else."""
+    paths = use_machine(env, monkeypatch, "here")
+    held = hold_our_lock(paths)
     (agora_id,) = import_sessions(env, 1)
+    held.__exit__()
     ulid = ulid_of(agora_id)
     wait_uploaded(paths)
+    assert on_drive(paths, ulid)
 
-    theirs = other_machine(env, monkeypatch)
+    theirs = use_machine(env, monkeypatch, "theirs")
     code, out, err = run_cli(env, "delete", "session", agora_id, "--yes")
     assert code == 0, err
     wait_uploaded(theirs)
     assert not on_drive(theirs, ulid), "另一台刪掉了"
 
-    # this machine finds out on its next sync, and says so rather than forgetting it
+    # back here: the next sync has to really list Drive, or the marker never moves
+    paths = use_machine(env, monkeypatch, "here")
+    forget_last_sync(paths)
     code, found, _ = run_cli(env, "search", "session", "--filter", "cloud=no")
     assert code == 0 and agora_id in found, "本機還在，而且標成雲端沒有"
 
+    forget_last_sync(paths)
     code, out, err = run_cli(env, "push", "session", agora_id, "--not-exist-upload")
-
     assert code == 0, err
     wait_uploaded(paths)
-    assert on_drive(paths, ulid), "明講了要傳回去，就真的回去了"
+
+    # it came back whole: the session.md and the raw its header names (review I2)
+    same_as_local(paths, ulid)
     assert store.Index(paths).missing_in_cloud() == []
 
 
@@ -235,38 +309,35 @@ def test_an_edit_deleted_elsewhere_is_kept_as_a_session_of_its_own(env, monkeypa
     """5.2 / L7 / N5: the edit is not pushed back into an id another machine deleted -
     that would undo their delete behind their back - so it becomes a new Session whose
     parent is the deleted one, and the deleted one stays deleted."""
-    paths = store.Paths.from_env()
+    paths = use_machine(env, monkeypatch, "here")
+    held = hold_our_lock(paths)      # our own background must not get there first
     (agora_id,) = import_sessions(env, 1)
     ulid = ulid_of(agora_id)
-    wait_uploaded(paths)
-
-    # this machine starts a new version of it (that is what `.update` means)
-    code, _, err = run_cli(env, "edit", "session", agora_id, "--header", f"title={MARK} 改過")
+    wait_uploaded(paths)             # the import is on Drive before we start editing
+    code, _, err = run_cli(env, "edit", "session", agora_id,
+                           "--header", f"title={MARK} 改過")
     assert code == 0, err
     assert store.outbox_ulids(paths) == {ulid}, "還沒上傳的新版本在 outbox"
 
-    theirs = other_machine(env, monkeypatch)
+    theirs = use_machine(env, monkeypatch, "theirs")
     code, _, err = run_cli(env, "delete", "session", agora_id, "--yes")
     assert code == 0, err
     wait_uploaded(theirs)
-    assert not on_drive(theirs, ulid)
+    assert not on_drive(theirs, ulid), "另一台刪掉了，而我們的改動還沒上傳"
 
-    # any command of ours starts the uploader again, and it meets the same situation
+    # now let our uploader meet it: the lock goes, and the next command starts it
+    held.__exit__()
+    paths = use_machine(env, monkeypatch, "here")
+    forget_last_sync(paths)
     run_cli(env, "search", "session", "--filter", "cloud=no")
     wait_uploaded(paths)
 
     assert not on_drive(paths, ulid), "被別台刪掉的那一筆沒有被傳回去"
     index = store.Index(paths)
-    # what came back is a new id whose parent is the deleted one - one, not two
-    new_ids = [u for u in _ulids(index)
-               if any(p.get("id") == f"agora:{ulid}"
-                      for p in (index.header(u).get("parents") or []))]
+    new_ids = index.children(ulid)          # parents live under agora.parents (review I1 e)
     assert len(new_ids) == 1, f"應該剛好另外存成一個新的，現在有 {new_ids}"
-    env["created"]["ulids"].append(new_ids[0])
-    assert on_drive(paths, new_ids[0]), "新存的那一個有上傳"
+    env["created"]["ulids"].extend(new_ids)   # and clean it up even if the next line fails
+    # what was rescued is that edit, not the version the other machine deleted
+    same_as_local(paths, new_ids[0], title_of=f"{MARK} 改過")
+    assert index.header(new_ids[0]) is not None
     assert store.outbox_ulids(paths) == set()
-
-
-def _ulids(index) -> list[str]:
-    """Every ULID this machine knows about."""
-    return [hdr["id"].split(":")[1] for hdr, _snippet in index.search([])]
