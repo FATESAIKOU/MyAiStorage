@@ -23,16 +23,18 @@
 - `local-first-writes`：寫入先存本機完整的一份、背景上傳與背景刪除、一批只連幾次 Drive，以及互動模式怎麼顯示。
 
 ### Modified Capabilities
+- `batch-commands`：「import 一次多個」的開頭同步改成受 5 分鐘節流；交給背景上傳算成功（exit 0）。
 
-（無。`session-sync` 與 `batch-commands` 的既有要求不變：「雲端沒有」的判斷照舊不把 outbox 裡的算進去；`push --not-exist-upload` 照舊需要本機有原始檔，只是現在本機都會有。）
+（`session-sync` 的既有要求不變。刪除佇列裡的 Session 不能 pull／push，寫在 `local-first-writes`。）
 
 ## Impact
 
 - 程式：
   - `src/agora/store.py`：stage／remember、上傳、sync 跳過等著刪除的、delete；
-  - `src/agora/cli.py`：import／continue／merge／delete 改成背景上傳，加一個內部入口；
+  - `src/agora/cli.py`：import／continue／merge／edit／delete 改成背景上傳與背景刪除；
+  - 新的 `src/agora/background.py`：背景程序的獨立入口；
   - `src/agora/tui.py`：結果視窗的說明；
   - `tests/fakes/fake_rclone.py`：從本機批次 copy 到 Drive。
 - 文件：`docs/design.md` 4.1（寫入順序）、5.6（delete）、5.10，以及 README。
 - 測試：單元測試（假 rclone，數 rclone 的呼叫次數），整合測試（只用 `agora-test`，背景上傳要等它傳完）。
-- 程式碼行數：預估多 50～90 行（T4 的精簡另外算）。
+- 程式碼行數：預估多 70～120 行（含 review T3 的 H1、M1、M3、M5、L5；T4 的精簡另外算）。
