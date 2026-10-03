@@ -94,3 +94,40 @@ D5 和 README 的其他改動：
 T1、T2、T4 都修好了，常見的各種讀不了的檔案都不會洩漏，mutation 也都抓得到。剩下的 U1 是 `except Exception` 加上 `os.path.expanduser` 兩個小改動，加一個測試。**修好 U1 就可以收尾 T5**，那個修正我可以快速再看一次。README 的兩個 Low 可以順便改。
 
 還要請 PM 跟使用者確認的（T5.md 提過）：10-03 那次的同意畫面是不是正式版。
+
+---
+
+# 補看：`598981a`（U1）
+
+2026-10-03，review。
+- 在 `git archive 598981a` 的副本裡跑：`compileall` 通過，單元測試 **522 passed**。
+- 用的是和上面同一份探測（自編的假 secret `GOCSPX-FAKE-REVIEW-ONLY`，四種洩漏形式都查）。
+- 隔離方式相同；沒有碰 Drive，也沒有讀使用者真的 client 檔和 `rclone.conf`。
+
+**U1 修好了，T5 可以收尾。**
+
+| 情況 | 改之前（`3d2fb86`） | `598981a` |
+|---|---|---|
+| `read_client`：巢狀 20 萬層的 JSON | 丟出 `RecursionError` | `None`，什麼都沒印 |
+| `read_client`：`~nosuchuser_review/x.json` | 丟出 `RuntimeError` | `None`，什麼都沒印 |
+| 首次設定：巢狀的 JSON | **當掉，完整的假 secret 出現在 Textual 的 traceback 裡** | 不會當掉；視窗寫「這個檔案裡沒有 client_id／client_secret…」，選「用內建的」之後，`authorize` 收到 `None`。畫面、stdout／stderr **都沒有** secret（四種形式都查了） |
+| 首次設定：`~nosuchuser_review/x.json` | 當掉 | 不會當掉；視窗寫「找不到這個檔案。」，退回內建的 |
+| 上面那 15 種讀不了的檔案（UTF-16、權限 000、目錄、壞掉的 JSON……）重跑一次 | — | 全部一樣是 `None`，沒有輸出 |
+
+做法：
+- `read_client` 改成 `except Exception: return None`；
+- 讀檔前用 `os.path.expanduser`（遇到不認得的使用者不會丟例外）；
+- 首次設定判斷「找不到這個檔案」改用新的 `_is_file`（`os.path.isfile(os.path.expanduser(...))`，不會丟例外）。
+
+Mutation（2 個，都被抓到）：
+
+| 改回去 | 抓到它的測試 |
+|---|---|
+| `except` 改回原本的列舉（不含 `RecursionError`） | `test_a_client_file_nested_deep_enough_to_exhaust_the_parser` |
+| `_is_file` 改回 `Path(where).expanduser().is_file()` | `test_a_path_naming_a_user_that_does_not_exist_is_not_a_crash` |
+
+兩個小地方（不擋收尾）：
+- 新的註解寫「`os.path.expanduser` raises RuntimeError for `~someone-who-does-not-exist`」，其實丟例外的是 `Path.expanduser`，`os.path.expanduser` 會原樣回傳（docstring 裡 `_is_file` 那一段寫對了）；
+- 兩行格式那一行，又加回了「rclone writes `Client-ID = …`」這個註解（T4 說過 rclone 沒有這種格式）。
+
+改一下註解就好。另外，`598981a` 也改了互動模式的結果視窗（新的測試 `test_the_result_window_does_not_promise_a_background_delete_that_is_not_queued`，看起來是 T3-sec6 的 W5），那一部分不在這次的範圍內，之後和 T3 的補看一起看。
