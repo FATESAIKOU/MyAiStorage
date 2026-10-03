@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -242,8 +243,20 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
     """
     wanted = list(dict.fromkeys(ids))   # the same id twice is one job, one line (S2-7)
     drive = store.Drive(paths)
-    staged = store.outbox_ulids(paths)
-    left = store.push_outbox(drive, paths)      # staged writes first: those are the same sessions
+    # The lock, and wait for it: push is the one command whose contract is "it is on
+    # Drive when this returns" (N2). No timeout - one throttled rclone call alone can
+    # take 50 seconds - but Ctrl-C still gets out, and every 10 seconds it says why.
+    held, said_at = None, time.monotonic()
+    while held is None:
+        held = store.hold_upload_lock(paths, blocking=True)
+        if held is None:
+            if time.monotonic() - said_at >= 10:
+                _line("背景上傳中，還在等…")
+                said_at = time.monotonic()
+            time.sleep(0.2)
+    with held:
+        staged = store.outbox_ulids(paths)
+        left = store.push_outbox(drive, paths)   # staged writes first; those are the same sessions
     if left:
         _line(f"outbox 還有 {len(left)} 筆沒上傳成功")
     listing = _listing(drive)            # offline: every id here fails, and says so
@@ -257,6 +270,8 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
             if isinstance(listing, store.StoreError):
                 raise store.StoreError(f"連不上 Drive：{listing}")
             if ulid in staged:
+            if ulid in store.queued_for_trash(paths):   # M5/N10: on its way to the trash
+                raise store.StoreError(f"{agora_id} 正在刪除，不能 push")
                 if ulid in left:
                     raise store.StoreError("還沒上傳成功，仍在 outbox")   # review S2-2
             elif (paths.outbox / ulid).is_dir():

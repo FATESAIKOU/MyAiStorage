@@ -8,12 +8,14 @@
 
 ## 2. 本機完整的一份與批次上傳（負責：impl2）
 
-- [ ] 2.1 `remember` 把原始檔也放進鏡像（同名同大小不複製、原子寫入），清掉被取代的 `raw-*`（spec「本機保留完整的一份」）
-- [ ] 2.2 假 rclone 補上「本機 → Drive 的 `copy --files-from`」與 `delete --files-from`
-- [ ] 2.3 批次上傳：（有更新既有 id 時先列檔）→ 原始檔一次（失敗就整輪結束）→ `session.md` 一次 → 列檔驗 md5 → 刪舊原始檔一次；`.done-` 改名再比對，只刪自己驗過的版本（H1）；前景寫 `.update` 記號（N4）；有記號但 Drive 上沒有的，另存成新的 Session（L7、N5）；`.done-` 的交錯（N6、N7）。`push_outbox` 與 `push session` 都用它；指令開頭的 sync 不在前景上傳、改成啟動背景（N3）；push 等到它的 id 離開 outbox（N2）；`store.queued_for_trash`、push 拒絕佇列裡的、main 開頭的佇列提醒（N10）（spec「一批只連固定幾次 Drive」「只有自己驗過的版本離開 outbox」「背景上傳」）
-- [ ] 2.4 sync 跳過刪除佇列裡的 ULID：不放進索引、不標記；`stage`／`outbox_ulids` 處理 `.done-`
-- [ ] 2.5 import、continue、merge、edit（與 `recover_pending` 的收尾）存完本機就啟動背景並結束，exit 0；啟動失敗 exit 3。import 開頭的同步改成受節流（batch-commands 的 MODIFIED delta）
-- [ ] 2.6 測試：rclone 的呼叫次數與順序；上傳中途 stage 新版本不會遺失（H1）；原始檔那一次失敗時不傳 session.md（M4）；別台在上傳前刪掉的另存成新的 Session、不會被傳回去（L7、N5）；背景失敗之後下一個指令補傳；在這台寫的被刪掉之後救得回來
+- [x] 2.1 `remember` 把原始檔也放進鏡像（同名同大小不複製、原子寫入），清掉被取代的 `raw-*`（spec「本機保留完整的一份」）
+- [x] 2.2 假 rclone 補上「本機 → Drive 的 `copy --files-from`」與 `delete --files-from`（失敗注入 `copyto` 也會對應到新的批次 `copy --files-from`，既有的失敗測試不用改）
+- [x] 2.3 批次上傳：（有更新既有 id 時先列檔）→ 原始檔一次（失敗就整輪結束）→ `session.md` 一次 → 列檔驗 md5 → 刪舊原始檔一次；`.done-` 改名再比對，只刪自己驗過的版本（H1）；前景寫 `.update` 記號（N4）；有記號但 Drive 上沒有的，另存成新的 Session（L7、N5）；`.done-` 的交錯（N6、N7）。`push_outbox` 與 `push session` 都用它；指令開頭的 sync 不在前景上傳、改成啟動背景（N3）；push 等到它的 id 離開 outbox（N2）；`store.queued_for_trash`、push 拒絕佇列裡的、main 開頭的佇列提醒（N10）（spec「一批只連固定幾次 Drive」「只有自己驗過的版本離開 outbox」「背景上傳」）
+- [x] 2.4 sync 跳過刪除佇列裡的 ULID：不放進索引、不標記；`stage`／`outbox_ulids` 處理 `.done-`
+- [x] 2.5 import、continue、merge、edit（與 `recover_pending` 的收尾）存完本機就啟動背景並結束，exit 0；啟動失敗 exit 3。import 開頭的同步改成受節流（batch-commands 的 MODIFIED delta）
+- [x] 2.6 測試：rclone 的呼叫次數與順序；上傳中途 stage 新版本不會遺失（H1）；原始檔那一次失敗時不傳 session.md（M4）；別台在上傳前刪掉的另存成新的 Session、不會被傳回去（L7、N5）；背景失敗之後下一個指令補傳；在這台寫的被刪掉之後救得回來
+- [x] 2.7 review T3-sec2 的 P1、P2 與 Low：P1 補「放開鎖之後再檢查一次」的測試（在 `LOCK_UN` 的那一刻放一筆新的進去；拿掉那段會紅）；P2 迴圈改比對**版本**（outbox 每筆 `session.md` 的 md5）而不是 ULID 集合，配「上傳中又改了同一個」的測試（拿掉版本就紅）；P3 `_save` 與 `push` 都拿 `upload.lock`（push 阻塞、每 10 秒說一次、Ctrl-C 可中斷），`--not-exist` 的刪除佇列拒絕與 main 的提醒一起做（N10，`store.queued_for_trash`）；Low：P4 用真的 pipe 測「讀端在背景還在跑就拿到 EOF」、P5 `kick_uploader` 回傳結果讓 sync 依鎖的狀態選說法、P7 只在沒有人跑時修剪記錄檔、P8 拿不到鎖就寫一句而不是看起來像跑了一輪。**過渡期提醒**：P3 在 2.5 之前 `_save` 與 push 還沒拿鎖，那段時間不要用真的資料跑，見 2.8
+- [x] 2.8 mutation（副本裡做）：M4 原始檔失敗仍傳 session.md、2.1 鏡像不放原始檔、P1 的再檢查、P2 的版本比對、P3 的鎖（四個都紅）。**兩個等價的 mutant 如實記下**：(a) 驗 Drive 前不重新讀 outbox 裡的版本（H1 的 `.done-` 比較）——對我測的情節結果一樣，因為迴圈下一輪的版本比對會補回來；(b) 上一輪回報過的 `close_fds`（Python 的 fd 本來就不可繼承）
 
 ## 3. 背景刪除（負責：impl1，在第 1 節完成之後）
 

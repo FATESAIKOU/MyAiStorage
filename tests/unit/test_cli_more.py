@@ -367,12 +367,36 @@ def test_continue_source_is_the_new_session(env, capsys, tmp_path):  # U-CON-19,
     assert h.agora_of(hdr)["source"]["dir"] == str(work)
 
 
-def test_continue_without_raw_fails(env, capsys, tmp_path):  # U-CON-14, L2/S1
+def test_continue_uses_the_local_raw_and_puts_drive_s_right(env, capsys, tmp_path):
+    """Since the local mirror keeps the whole session (local-first-writes 2.1), a
+    continue no longer has to fetch it - and a damaged copy on Drive is repaired by the
+    upload instead of stopping the work."""
     _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     ulid = parent.split(":")[1]
     raws = list((tmp_path / "remote" / "agora" / "sessions" / ulid).glob("raw-*.json"))
     assert len(raws) == 1
     raws[0].write_bytes(b"tampered")
+
+    code, _, _ = run(capsys, "continue", "session", parent, "--agent", "opencode", "--dir", "/tmp")
+    assert code == 0
+    hdr = store.Index(paths()).header(ulid)
+    on_drive = tmp_path / "remote" / "agora" / "sessions" / ulid
+    # Drive ends up with the raw this session's header names, and the one it replaced
+    # (here: a damaged copy) is cleared in the same round (N7).
+    assert store.md5_file(on_drive / hdr["agora"]["raw"]["file"]) == hdr["agora"]["raw"]["md5"]
+    assert [p.name for p in on_drive.glob("raw-*")] == [hdr["agora"]["raw"]["file"]]
+
+
+def test_continue_fetches_a_raw_it_does_not_have_and_refuses_a_mismatch(env, capsys, tmp_path):
+    """U-CON-14, L2/S1: still true when the raw really is missing here - then it has to
+    come off Drive, and a copy that does not match the header stops the command."""
+    _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    ulid = parent.split(":")[1]
+    hdr = store.Index(paths()).header(ulid)
+    (paths().mirror / ulid / hdr["agora"]["raw"]["file"]).unlink()      # not here any more
+    raws = list((tmp_path / "remote" / "agora" / "sessions" / ulid).glob("raw-*.json"))
+    raws[0].write_bytes(b"tampered")
+
     code, _, _ = run(capsys, "continue", "session", parent, "--agent", "opencode", "--dir", "/tmp")
     assert code != 0
 

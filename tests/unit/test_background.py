@@ -241,6 +241,91 @@ def test_a_session_staged_while_it_runs_still_goes_up(env, monkeypatch):
         assert (env / "agora" / "sessions" / ulid / "session.md").is_file()
 
 
+def test_it_looks_again_after_letting_the_lock_go(env, monkeypatch):
+    """P1: a session that appears in the instant between the last check and the release
+    must still go up in this process, not wait for the next command."""
+    paths = store.Paths.from_env()
+    first = _staged(paths)
+    late = []
+
+    def on_release(paths_):
+        late.append(_staged(paths_))      # in the gap: the last check is already past
+
+    monkeypatch.setattr(fcntl, "flock", _release_hook(on_release))
+    assert background.run(paths) == 0
+    assert late, "the test never reached the release"
+
+    assert not store.outbox_ulids(paths)
+    for ulid in (first, late[0]):
+        assert (env / "agora" / "sessions" / ulid / "session.md").is_file()
+
+
+def _release_hook(do):
+    """A flock that runs `do` the moment the lock is let go - the gap after the last
+    check, which is the one only the look-again can cover."""
+    real = fcntl.flock
+    done = []
+
+    def spy(fd, op, *args):
+        real(fd, op, *args)
+        if op == fcntl.LOCK_UN and not done:
+            done.append(True)
+            do(store.Paths.from_env())
+
+    return spy
+
+
+PROBE = """
+import sys
+sys.path.insert(0, {tests!r})
+from test_background import _staged
+from agora import background, store
+_staged(store.Paths.from_env())
+print(background.start(store.Paths.from_env()))
+"""
+
+
+def test_an_edit_that_lands_mid_upload_is_still_sent_by_this_process(env, monkeypatch):
+    """P2 / spec「上傳中又改了同一個」: the same session, a new version, staged after we
+    sent ours. Comparing ULIDs would call that "nothing new" and leave it for the next
+    command; the version is what tells the two apart."""
+    paths = store.Paths.from_env()
+    paths = store.Paths.from_env()
+    ulid = _staged(paths)
+    header = store.read_entry(paths.outbox / ulid)
+    body2 = "## user\n接著聊的那一段\n"
+    real = store._listing_with_md5
+
+    def listing(drive):
+        first = real(drive)
+        if not getattr(listing, "done", False):
+            listing.done = True      # our version is on Drive; now the edit lands
+            store.stage(paths, header, body2, b'{"x": 2}')
+        return first
+
+    monkeypatch.setattr(store, "_listing_with_md5", listing)
+    assert background.run(paths) == 0
+
+    assert not store.outbox_ulids(paths), "the new version should have gone up too"
+    check = paths.state / "check.md"
+    store.Drive(paths).download(ulid, "session.md", check)
+    assert "接著聊的那一段" in check.read_text(encoding="utf-8")
+
+
+def test_a_reader_of_our_stdout_gets_eof_before_the_background_is_done(env, monkeypatch):
+    """P4: a pipe reading a command's stdout has to reach EOF when the command exits,
+    even though the background it started is still uploading. `capsys` cannot see this -
+    it only catches Python-level writes - so run a real command with a real pipe."""
+    monkeypatch.setenv("FAKE_RCLONE_DELAY", "5")      # the upload is still going...
+    tests = str(Path(__file__).resolve().parent)
+    proc = subprocess.Popen([sys.executable, "-c", PROBE.format(tests=tests)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    out, err = proc.communicate(timeout=60)            # ...and EOF came anyway
+    assert proc.returncode == 0, err
+    assert out.strip() == background.STARTED
+    _wait_until(_uploaded(env), store.Paths.from_env())   # and it did finish afterwards
+
+
 def test_a_log_over_a_megabyte_keeps_only_its_tail(env):
     paths = store.Paths.from_env()
     paths.state.mkdir(parents=True, exist_ok=True)

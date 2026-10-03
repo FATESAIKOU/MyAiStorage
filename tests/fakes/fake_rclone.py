@@ -29,7 +29,15 @@ if os.environ.get("FAKE_RCLONE_DELAY"):     # let a test watch a slow upload hap
 args = sys.argv[1:]
 with open(log, "a") as f:
     f.write(json.dumps(args) + "\n")
-if os.environ.get("FAKE_RCLONE_FAIL") and os.environ["FAKE_RCLONE_FAIL"] in " ".join(args):
+def _should_fail(needle: str) -> bool:
+    if needle in " ".join(args):
+        return True
+    # The batch uploader sends with `copy --files-from` where it used to be one
+    # `copyto` per file, so a test that breaks "copyto" means "break the upload".
+    return needle == "copyto" and "copy" in args and "--files-from" in args
+
+
+if os.environ.get("FAKE_RCLONE_FAIL") and _should_fail(os.environ["FAKE_RCLONE_FAIL"]):
     fail("injected failure")
 
 
@@ -95,13 +103,27 @@ elif cmd == "copyto":
     dst_p.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(src_p, dst_p)
 elif cmd == "copy" and "--files-from" in params:
-    src = resolve(params[0])
-    dst = Path(params[1])
+    # local -> Drive, one call for a whole batch (local-first-writes M4)
+    src = resolve(params[0]) or Path(params[0])
+    dst = resolve(params[1]) or Path(params[1])
     listed = Path(params[params.index("--files-from") + 1]).read_text().split()
     for rel in listed:
-        if (src / rel).exists():
-            (dst / rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src / rel, dst / rel)
+        if not (src / rel).exists():
+            fail(f"source not found: {rel}")
+        (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src / rel, dst / rel)
+elif cmd == "delete" and "--files-from" in params:
+    # the superseded raws, gone in one call
+    dst = resolve(params[0])
+    listed = Path(params[params.index("--files-from") + 1]).read_text().split()
+    for rel in listed:
+        target = dst / rel
+        if target.is_file():
+            target.unlink()
+        parent = target.parent
+        while parent != dst and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
 elif cmd == "copy":          # a local tree up to the remote, same names overwritten (agora sync)
     src, dst = Path(params[0]), resolve(params[1])
     excluded = [params[n + 1] for n, p in enumerate(params) if p == "--exclude"]

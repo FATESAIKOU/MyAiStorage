@@ -51,9 +51,21 @@ def _trim_log(paths: store.Paths) -> None:
     path.write_bytes(tail)
 
 
-def _waiting(paths: store.Paths) -> set[str]:
-    """Everything this process is responsible for: uploads first, then deletions."""
-    return store.outbox_ulids(paths) | store.queued_for_trash(paths)
+def _waiting(paths: store.Paths) -> set[tuple[str, str | None]]:
+    """What is left, as versions: each entry with the md5 of what we would send.
+
+    Comparing ULIDs is not enough (review P2): a session edited while we were sending it
+    stays in the outbox under the same ULID, so "the same set as last time" would read
+    as "it is failing, stop" and leave this round's version to the next command, which
+    the spec does not allow.
+    """
+    versions = set()
+    for ulid in store.outbox_ulids(paths):
+        try:
+            versions.add((ulid, store.md5_file(paths.outbox / ulid / "session.md")))
+        except OSError:
+            versions.add((ulid, None))
+    return versions | {(ulid, "trash") for ulid in store.queued_for_trash(paths)}
 
 
 def upload_once(paths: store.Paths, drive: store.Drive) -> None:
@@ -85,11 +97,14 @@ def _take(paths: store.Paths):
 def run(paths: store.Paths | None = None) -> int:
     """Upload and delete until there is nothing left, then look once more."""
     paths = paths or store.Paths.from_env()
-    print("[agora] 背景上傳開始", flush=True)
+    print("[agora] 背景上傳開始", file=sys.stderr, flush=True)
     while True:
         lock = _take(paths)
         if lock is None:
-            break               # another uploader has it, and it looks again when done
+            # P8: not a run of our own, so no start/finish pair that reads like one.
+            # The holder looks again before it lets go, so ours is its.
+            print("[agora] 已經有一個上傳在跑，這一輪不重來", file=sys.stderr, flush=True)
+            break
         try:
             seen = None
             while (waiting := _waiting(paths)) and waiting != seen:
@@ -101,7 +116,8 @@ def run(paths: store.Paths | None = None) -> int:
         left = _waiting(paths)
         if not left or left == seen:
             break               # empty, or the same ones that just failed: leave them be
-    print(f"[agora] 背景上傳結束，剩下 {len(_waiting(paths))} 筆", flush=True)
+    # stderr, like every progress line: stdout carries the ids and nothing else
+    print(f"[agora] 背景上傳結束，剩下 {len(_waiting(paths))} 筆", file=sys.stderr, flush=True)
     return 0
 
 
@@ -119,7 +135,8 @@ def start(paths: store.Paths | None = None) -> str:
         run(paths)
         return FINISHED if not _waiting(paths) else FAILED
     paths.state.mkdir(parents=True, exist_ok=True)
-    _trim_log(paths)
+    if not store.uploader_is_running(paths):
+        _trim_log(paths)     # P7: rewriting the file under a running uploader loses lines
     try:
         with open(log_path(paths), "ab") as log:
             # env=None: the caller's AGORA_* settings must reach the child, or a test

@@ -229,6 +229,9 @@ def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None) -> Pat
         folder.rename(old)
     tmp.rename(folder)
     shutil.rmtree(old, ignore_errors=True)
+    # An uploader may be comparing `.done-<ULID>` for this one right now (N7): the new
+    # version is newer, so that folder is dropped and it will find nothing left to do.
+    shutil.rmtree(paths.outbox / f".done-{ulid}", ignore_errors=True)
     return folder
 
 
@@ -247,6 +250,68 @@ def queued_for_trash(paths: Paths) -> set[str]:
     return {p.name for p in paths.trash_queue.iterdir() if p.is_file()}
 
 
+def hold_upload_lock(paths: Paths, blocking: bool = False):
+    """The upload lock, or None when somebody else has it.
+
+    One lock for the background, a push and anything else that sends (review M1). The
+    background and sync take it without waiting - if they cannot, somebody is already
+    doing it. `push` waits, because its contract is "it is on Drive when this returns".
+    """
+    from agora import background        # imported here: background imports this module
+    lock_path = background.lock_path(paths)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = open(lock_path, "a+")
+    mode = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+    try:
+        fcntl.flock(lock, mode)
+    except OSError:
+        lock.close()
+        return None
+    return _Held(lock)
+
+
+class _Held:
+    """The lock, and the right to let it go."""
+
+    def __init__(self, lock):
+        self.lock = lock
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.lock, fcntl.LOCK_UN)
+        self.lock.close()
+
+
+def uploader_is_running(paths: Paths) -> bool:
+    """Whether somebody holds the upload lock right now."""
+    held = hold_upload_lock(paths)
+    if held is None:
+        return True
+    held.__exit__()
+    return False
+
+
+def _restore_done(paths: Paths) -> None:
+    """Put back `.done-<ULID>` folders an uploader left behind, so they go again.
+
+    Only when nobody holds the lock (review N6): the interactive mode re-reads the
+    index on every keystroke, and restoring one while the background is comparing it
+    would have the two of them grabbing the same folder.
+    """
+    for done in paths.outbox.glob(".done-*"):
+        ulid = done.name[len(".done-"):]
+        target = paths.outbox / ulid
+        if target.exists():
+            shutil.rmtree(done, ignore_errors=True)   # a newer version is there; sending again is safe
+            continue
+        try:
+            done.rename(target)
+        except OSError:
+            pass       # a stage is swapping it in right now; the next round sees it
+
+
 def outbox_ulids(paths: Paths) -> set[str]:
     if not paths.outbox.exists():
         return set()
@@ -256,6 +321,8 @@ def outbox_ulids(paths: Paths) -> set[str]:
         # Only restore when no stage is in flight for this ULID (its .tmp still exists).
         if not target.exists() and not (paths.outbox / f".tmp-{ulid}").exists():
             old.rename(target)   # a stage crashed mid-swap: keep the previous complete entry
+    if not uploader_is_running(paths):
+        _restore_done(paths)
     return {p.name for p in paths.outbox.iterdir() if p.is_dir() and not p.name.startswith(".")}
 
 
@@ -266,10 +333,25 @@ def index_file(index: "Index", session_md: Path) -> None:
 
 
 def remember(paths: Paths, folder: Path, index: "Index | None" = None) -> None:
-    """Put a session we just wrote into the local mirror and index right away."""
+    """Put a session we just wrote into the local mirror and index right away.
+
+    The whole session, not just the reading version: the raw too, so a session written
+    here can be rescued after another machine deletes it (change local-first-writes,
+    「本機保留完整的一份」). A raw that is already there with the same name and size is
+    left alone - sync calls this for every outbox entry on every run - and the ones the
+    new header replaced are cleaned up, so a session does not keep both versions.
+    """
     mirror = paths.mirror / folder.name
     mirror.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(folder / "session.md", mirror / "session.md")
+    raw = (h.agora_of(read_entry(folder)).get("raw") or {})
+    if (name := raw.get("file")) and (folder / name).is_file():
+        wanted, target = folder / name, mirror / name
+        if not (target.is_file() and target.stat().st_size == wanted.stat().st_size):
+            write_atomic(target, wanted.read_text(encoding="utf-8"))
+        for other in mirror.glob("raw-*"):
+            if other.name != name:
+                other.unlink()
     index_file(index or Index(paths), mirror / "session.md")
 
 
@@ -359,27 +441,175 @@ def mirror_one(paths: Paths, drive: Drive, index: "Index", ulid: str,
     return hdr
 
 
+UPDATE_MARK = ".update"      # written when the session is an existing id (review N4)
+
+
+def mark_update(folder: Path) -> None:
+    """Say that this entry overwrites a session Drive already has.
+
+    Decided by the writer, in the foreground, because by the time an uploader sees the
+    folder `remember` has already put every new session in the index - judging there
+    would treat every fresh import as an update, and those are not on Drive yet, so
+    they would never be sent (review N4).
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / UPDATE_MARK).write_text("", encoding="utf-8")
+
+
+def _is_update(folder: Path) -> bool:
+    return (folder / UPDATE_MARK).exists()
+
+
+def _listing_with_md5(drive: Drive) -> dict:
+    """Drive's file list with md5s, or None when there is no listing to be had."""
+    try:
+        return drive.list_sessions()
+    except StoreError:
+        return None
+
+
+def _copy_batch(drive: Drive, paths: Paths, names: list[str]) -> None:
+    """One rclone for a whole batch: `copy --files-from --no-traverse` (design M4)."""
+    if not names:
+        return
+    listing = paths.state / f".upload-{len(names)}.txt"
+    listing.write_text("\n".join(names) + "\n", encoding="utf-8")
+    try:
+        drive._run("copy", str(paths.outbox), "gdrive:sessions",
+                   "--files-from", str(listing), "--no-traverse", "--ignore-times")
+    finally:
+        listing.unlink(missing_ok=True)
+
+
+def _delete_batch(drive: Drive, paths: Paths, names: list[str]) -> None:
+    """The raws this upload replaced, gone in one call (design M4 step 5)."""
+    if not names:
+        return
+    listing = paths.state / ".upload-delete.txt"
+    listing.write_text("\n".join(names) + "\n", encoding="utf-8")
+    try:
+        drive._run("delete", "gdrive:sessions", "--files-from", str(listing))
+    except StoreError as e:
+        warn(f"清掉被取代的舊原始檔失敗，下次再說：{e}")
+
+
+def upload_batch(drive: Drive, paths: Paths, warn=warn) -> list[str]:
+    """Send the whole outbox in a fixed number of rclone calls (spec「一批只連固定幾次 Drive」).
+
+    raws first, then session.md: a reader tells a version is finished by its session.md,
+    so that order is not negotiable. If the raws call is not clean, no session.md goes
+    up in that round at all (M4). What may leave the outbox is only what this round sent
+    *and* Drive confirms by md5 (H1) - a version staged while we were sending stays.
+
+    Returns the ULIDs still waiting, so the caller can say what did not make it.
+    """
+    say = warn
+    entries = {}
+    for ulid in sorted(outbox_ulids(paths)):
+        folder = paths.outbox / ulid
+        try:
+            entries[ulid] = _entry_md5s(folder)
+        except (OSError, h.HeaderError):
+            quarantine(folder, paths.outbox / ".bad", f"outbox 的 {ulid} 壞了")
+            continue
+
+    updates = [u for u in entries if _is_update(paths.outbox / u)]
+    if updates:
+        # L7: an update needs its id to still be there, or we would put back what
+        # another machine deleted.
+        remote = _listing_with_md5(drive)
+        gone = [u for u in updates if remote is not None and u not in remote]
+        for ulid in gone:
+            say(f"{ulid} 雲端沒有，這筆不傳回去；見 push --not-exist-upload／pull --not-exist-delete")
+        entries = {u: m for u, m in entries.items() if u not in gone}
+        if not entries:
+            return sorted(gone)
+
+    raws = [f"{u}/{n}" for u in entries for n in _raw_names(paths.outbox / u)]
+    session_md5 = {u: m[0] for u, m in entries.items()}
+    if raws:
+        try:
+            _copy_batch(drive, paths, raws)
+        except StoreError as e:
+            say(f"原始檔沒傳好，這一輪不傳 session.md：{e}")
+            return sorted(entries)
+    try:
+        _copy_batch(drive, paths, [f"{u}/session.md" for u in entries])
+    except StoreError as e:
+        say(f"session.md 沒傳好：{e}")
+        return sorted(entries)
+
+    remote = _listing_with_md5(drive) or {}
+    left, replaced = [], []
+    for ulid, (sent_md5, sent_raw) in entries.items():
+        folder = paths.outbox / ulid
+        files = remote.get(ulid) or {}
+        if files.get("session.md") != sent_md5:
+            left.append(ulid)     # not confirmed, or changed underneath us: it stays
+            continue
+        done = paths.outbox / f".done-{ulid}"
+        try:
+            folder.rename(done)                      # H1: compare what is *now* in there
+        except OSError:
+            left.append(ulid)                       # a stage took it; the next round sees it
+            continue
+        now_md5, now_raw = _entry_md5s(done)
+        if now_md5 != sent_md5 or (sent_raw and files.get(_raw_of(done)) != sent_raw):
+            _rename_back(done, folder)              # a newer version: it stays for the next round
+            left.append(ulid)
+            continue
+        for old_raw in _replaced_raws(done, _raw_of(done), files):
+            replaced.append(f"{ulid}/{old_raw}")
+        shutil.rmtree(done, ignore_errors=True)
+    _delete_batch(drive, paths, replaced)
+    return sorted(left)
+
+
+def _entry_md5s(folder: Path) -> tuple[str, str | None]:
+    """(session.md md5, the raw's md5 if the header names one)."""
+    hdr = read_entry(folder)
+    raw = (h.agora_of(hdr).get("raw") or {})
+    name = raw.get("file")
+    got = md5_file(folder / name) if name else None
+    return md5_file(folder / "session.md"), got
+
+
+def _raw_of(folder: Path) -> str | None:
+    try:
+        return (h.agora_of(read_entry(folder)).get("raw") or {}).get("file")
+    except (h.HeaderError, OSError):
+        return None
+
+
+def _replaced_raws(folder: Path, keep: str | None, remote_files: dict) -> list[str]:
+    """The older raws this upload replaced, to clear in one call (N7: only for the
+    entries that actually left the outbox, so a later round can do the rest)."""
+    return [n for n in remote_files
+            if n.startswith("raw-") and n != keep and n not in _raw_names(folder)]
+
+
+def _raw_names(folder: Path) -> list[str]:
+    return sorted(p.name for p in folder.glob("raw-*"))
+
+
+def _rename_back(done: Path, folder: Path) -> None:
+    """Undo the rename before a comparison failed; a newer folder wins (N7)."""
+    if folder.exists():
+        shutil.rmtree(done, ignore_errors=True)
+        return
+    try:
+        done.rename(folder)
+    except OSError:
+        shutil.rmtree(done, ignore_errors=True)
+
+
 def push_outbox(drive: Drive, paths: Paths, warn=warn) -> list[str]:
-    """Push every outbox entry; return the ones that failed (they stay).
+    """Send the outbox in one batch; return the ULIDs still waiting (they stay).
 
     `warn` is where the per-entry failures go when a caller wants its own sink -
     the interactive mode's waiting window, which does not see our stderr (review L5).
     """
-    say = warn
-    failed = []
-    for ulid in sorted(outbox_ulids(paths)):
-        folder = paths.outbox / ulid
-        try:
-            read_entry(folder)
-        except h.HeaderError as e:
-            quarantine(folder, paths.outbox / ".bad", f"outbox 的 {ulid} 壞了：{e}")
-            continue
-        try:
-            push_one(drive, folder)
-        except StoreError as e:
-            say(str(e))
-            failed.append(ulid)
-    return failed
+    return upload_batch(drive, paths, warn=warn)
 
 
 def bad_count(paths: Paths) -> int:
@@ -593,17 +823,22 @@ def continuing(paths: Paths, ulid: str) -> bool:
     return False           # nobody does: what is left of an interrupted one
 
 
-def kick_uploader(paths: Paths) -> None:
+def kick_uploader(paths: Paths) -> str | None:
     """Make sure something is looking after the outbox and the trash queue.
 
     The command that notices them does not send them itself: a sync in the foreground
     is the wait T3 is here to remove, and after a failed upload the first `search` would
     be slow again (review N3). Not being able to start one means one is already running,
     and it looks again before it lets the lock go.
+
+    Returns what the starter said, so the caller can word its reminder by what is
+    actually true: somebody uploading, or nothing running and entries still here
+    (review P5). None when there was nothing to do.
     """
     from agora import background        # imported here: background imports this module
     if outbox_ulids(paths) or queued_for_trash(paths):
-        background.start(paths)
+        return background.start(paths)
+    return None
 
 
 def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
@@ -633,11 +868,18 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
         say(f"連不上 Drive，改查本機索引：{e}")
         return index
     if waiting := outbox_ulids(paths):
-        say(f"背景上傳中，{len(waiting)} 筆")   # L5: not "upload failed"
+        # L5 / review P5: "someone is uploading" while the lock is held; if nothing holds
+        # it and the entries are still here, then nothing is trying and it is a failure.
+        say(f"背景上傳中，{len(waiting)} 筆" if uploader_is_running(paths)
+            else f"outbox 還有 {len(waiting)} 筆沒上傳成功")
     missing = remote is None
     remote = remote or {}
+    # Sessions waiting to be moved to the Drive trash are on their way out: do not pull
+    # them back into the list, and do not call them "deleted on another machine" - they
+    # were deleted here (change local-first-writes 2.4).
+    trashing = queued_for_trash(paths)
     known = index.known()
-    changed = [u for u, f in remote.items() if f.get("session.md")
+    changed = [u for u, f in remote.items() if f.get("session.md") and u not in trashing
                and not (known.get(u) == f["session.md"] and (paths.mirror / u / "session.md").exists())]
     if len(changed) > 1:
         # One rclone run for all of them: each call costs seconds (docs/perf.md).
@@ -672,7 +914,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
         staged = outbox_ulids(paths)
         local = set(known) | set(index.known())
         index.mark_missing(u for u in local - set(remote)
-                           if u not in staged and not continuing(paths, u))
+                           if u not in staged and u not in trashing and not continuing(paths, u))
     _index_outbox(paths, index)
     paths.state.mkdir(parents=True, exist_ok=True)
     stamp.write_text(str(now()))

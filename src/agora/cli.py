@@ -133,16 +133,33 @@ def _updates(args) -> dict:
     return h.user_updates(getattr(args, "header_file", None), getattr(args, "header", []))
 
 
-def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None) -> tuple[str, bool]:
-    """Stage into the outbox, then try to push it now."""
+def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None, *,
+          update: bool = False) -> tuple[str, bool]:
+    """Keep the whole session here, then let the background send it (local-first-writes).
+
+    `update` says this overwrites a session Drive already has - the caller knows, and
+    the uploader cannot tell any more: by the time it looks, `remember` has put every
+    fresh import in the index too, and those are not on Drive yet (review N4).
+
+    The command is done once the session is safe here and a uploader is on its way. Only
+    a uploader that could not start - or, inline, one that did not get through - is a
+    failure, and then it is the old exit 3 with the old words.
+    """
+    from agora import background
     folder = store.stage(paths, hdr, body, raw)
+    if update:
+        store.mark_update(folder)
     store.remember(paths, folder)
-    try:
-        store.push_one(store.Drive(paths), folder)
-    except store.StoreError as e:
-        print(f"[agora] 上傳失敗，已存入 outbox，之後的指令會自動再送：{e}", file=sys.stderr)
-        return hdr["id"], False
-    return hdr["id"], True
+    ulid = folder.name
+    state = background.start(paths)
+    if state == background.STARTED:
+        return hdr["id"], True
+    # Only what this call wrote counts: an entry that never uploads must not turn
+    # someone else's successful import into a failure (review P6).
+    if state == background.FINISHED and ulid not in store.outbox_ulids(paths):
+        return hdr["id"], True
+    print("[agora] 上傳失敗，已存入 outbox，之後的指令會自動再送", file=sys.stderr)
+    return hdr["id"], False
 
 
 def _emit(saved: tuple[str, bool]) -> int:
@@ -279,9 +296,10 @@ def cmd_import(args, paths: store.Paths) -> int:
     ids = [i.strip() for raw in args.external_session_id for i in raw.split(",") if i.strip()]
     if not ids:
         raise InputError("--external-session-id 沒有內容")
-    # Once, never throttled: we must see other machines' imports (S6). The batch
-    # shares this index; _save keeps it current as it goes (review S1-3).
-    index = store.sync(paths)
+    # Once, throttled: a command should not stand in front of Drive just to look for
+    # other machines' imports (S6 relaxed by the local-first-writes batch delta). The
+    # import we are about to write starts the uploader itself.
+    index = store.sync(paths, throttle=True)
     first_bad = 0
     for k, external_id in enumerate(ids, 1):
         _progress("匯入", k, len(ids), external_id)
@@ -320,7 +338,7 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
             hdr = _with_user(old, updates)
             hdr["agora"]["source"] = _source(agent, exported)
             hdr["agora"]["updated_at"] = _now_iso()
-            return _emit(_save(paths, hdr, body, exported.raw))
+            return _emit(_save(paths, hdr, body, exported.raw, update=True))
         # Already continued or merged from: keep the old version and branch (S7).
         parents = [{"id": f"agora:{existing[0]}", "raw_md5": (h.agora_of(old).get("raw") or {}).get("md5")}]
         auto = _auto_header("import", parents, body, title=exported.title, exported=exported, agent=agent,
@@ -561,6 +579,7 @@ def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
     index = store.Index(paths)
     ulid = _ulid_of(record["agora_id"])
     hdr = index.header(ulid) or {}
+    same_id = True            # False once the work has been saved as a session of its own
     # Two signals, either one enough: the marker (this machine already saw it) and
     # Drive right now (F1). A header that is not here at all is the same story - it
     # was deleted here, while the agent worked (F4) - and the work is not lost either.
@@ -572,6 +591,7 @@ def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
         parents = [record.get("parent") or {"id": record["agora_id"], "raw_md5": raw_md5}]
         hdr = _auto_header("continue", parents, body, title=record.get("title") or exported.title,
                            exported=exported, agent=agent, parent_headers=[hdr] if hdr else [])
+        same_id = False        # a new id: Drive has never heard of it, so it is not an update
         how = "被別台機器刪掉了" if was_here else "在這台機器上被刪掉了"
         print(f"[agora] {record['agora_id']} 在你接續的時候{how}，"
               f"這次的對話另存成 {hdr['id']}；原來那個保持被刪掉的狀態", file=sys.stderr)
@@ -593,7 +613,8 @@ def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
                        "author": actor, "last_modified": _now_iso()[:10]}, *sources]
     if not hdr.get("description"):
         hdr["description"] = _description(body)
-    return _save(paths, _with_user(hdr, record.get("header_updates") or {}), body, exported.raw)
+    return _save(paths, _with_user(hdr, record.get("header_updates") or {}), body,
+                 exported.raw, update=same_id)
 
 
 def recover_pending(paths: store.Paths, *, notice_only: bool = False) -> None:
@@ -830,7 +851,7 @@ def cmd_edit(args, paths: store.Paths) -> int:
     # Re-stage with the same raw bytes (same md5, same file name) so the
     # outbox entry is complete; only session.md really changes.
     raw = store.fetch_raw(paths, store.Drive(paths), _ulid_of(agora_id), old) if h.agora_of(old).get("raw") else None
-    return _emit(_save(paths, new, body, raw))
+    return _emit(_save(paths, new, body, raw, update=True))
 
 
 def _edit_in_editor(old: dict) -> dict:
