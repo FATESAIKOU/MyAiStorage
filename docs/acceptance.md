@@ -1,8 +1,8 @@
 # Agora lite 人工驗收清單
 
-給使用者在自己的終端機，一步一步做。涵蓋 T1（指令模式）、T2（互動模式）、T3（先存本機、背景上傳與刪除）。
+給使用者在自己的終端機，一步一步做。涵蓋 T1（指令模式）、T2（互動模式）、T3（先存本機、背景上傳與刪除）、T6（大 Session 的預覽）。
 
-依 HEAD `e3863f0` 之後的行為寫。「應該看到」的字，是 review 在副本裡用假 Drive、假 agent 實際跑出來的。真的 Drive 上，時間會不一樣，字是一樣的。
+依 HEAD `e3863f0` 之後的行為寫；第 16 節（T6，大 Session 的預覽）依 `0ef57f4` 和 ticket `docs/tickets/T6-lazy-preview.md`，捲動的那幾步要等 Y1、Y2 修好。「應該看到」的字，是 review 在副本裡用假 Drive、假 agent 實際跑出來的。真的 Drive 上，時間會不一樣，字是一樣的。
 
 **規則**
 - 只用 Drive 上的 `agora-test`，以及 `/tmp/agora-acc` 底下的目錄。
@@ -72,7 +72,9 @@ python3 -c 'import fcntl,time; f=open("/tmp/agora-acc/state/upload.lock","a"); f
 準備自編的 opencode 對話（**不要匯入**）。在 `/tmp/agora-acc/proj` 跑 `opencode`，說一句話、離開；重複做出下面這些，然後用 `opencode session list` 記下每一個 `ses_…`：
 - s1、s2、s3（第 2 節）
 - s4（第 5 節）
-- s5、s6（第 10 節，互動模式）
+- s5（第 10 節）
+- s6（第 12 節，互動模式）
+- s7、s8、s9、s10（第 16 節，大 Session 的預覽）
 
 背景上傳通常幾秒就做完（自己的 client 每次約 0.7 秒）。表格裡寫「等 10 秒」就夠了。背景的訊息不會出現在終端機，而是寫在 `/tmp/agora-acc/state/upload.log`。
 
@@ -274,17 +276,86 @@ python3 -c 'import fcntl,time; f=open("/tmp/agora-acc/state/upload.lock","a"); f
 | 15.3 | `Tab` 回 Agora 頁 | 那一列的雲端欄是 **「未上傳」** |
 | 15.4 | `q` 離開，等終端機 B 結束。`rm -f /tmp/agora-acc/state/last-sync && agora search session > /dev/null`，等 10 秒，再 `agora` | 那一列變成 **✓** |
 
+## 16. 大 Session 的預覽（T6）
+
+要看的是：很大的 Session，預覽只讀、只排最後一段，所以游標移動很順；往上捲才補前面的。
+
+驗收不能用真實的內容，所以用一支小程式，把**自編的文字**接在 Session 的本機鏡像後面，做出幾 MB 的大 Session。這只改 `/tmp/agora-acc` 裡的檔案，不會傳到 Drive（只要不對它們 push）。
+
+⚠️ **16.10～16.12、16.14 依賴三個修正（review T6）**：impl2 正在修的 Y1、Y2，以及 review 寫這一節時才發現的 **Y6**。修好之前可能看到：
+- 捲到頂之後畫面跳到別處（Y2）；
+- 讀完之後內容重複一次（Y1）；
+- **第二次**捲到頂就直接跳到 Session 的開頭、提示行消失，中間的 `第 N 則` 全部不見（Y6）。
+
+這些是已知的問題，請記下步驟編號，不用停下來。
+
+先建那支小程式（只做一次）：
+
+```bash
+cat > /tmp/agora-acc/grow.py <<'EOF'
+import sys, pathlib
+# 用法：grow.py <檔案> <KB> [new]　把自編的對話接在檔案後面（new：整個檔案重寫）
+path, kb = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+fresh = len(sys.argv) > 3 and sys.argv[3] == "new"
+parts, size, n = [], 0, 0
+while size < kb * 1024:
+    n += 1
+    one = (f"## user\n第 {n} 則：把 CSV 轉成 Markdown 表格，這是驗收用的自編文字。" + "表格" * 150
+           + f"\n\n## assistant\n第 {n} 則的回覆：" + "好的" * 150 + "\n\n")
+    parts.append(one)
+    size += len(one.encode())
+parts.append("## user\n（最後一則）\n")
+path.parent.mkdir(parents=True, exist_ok=True)
+with open(path, "w" if fresh else "a", encoding="utf-8") as f:
+    if not fresh:
+        f.write("\n")
+    f.write("".join(parts))
+print(f"{path.name}：加了 {n} 則，約 {size // 1024} KB")
+EOF
+```
+
+| # | 做 | 應該看到 |
+|---|---|---|
+| 16.1 | `source /tmp/agora-acc/env.sh && agora import session --external-session-id s7,s8,s9 --agent opencode` | 印出三個 id（記為 T1、T2、T3） |
+| 16.2 | 等 10 秒，`ls -A /tmp/agora-acc/state/outbox` | 什麼都沒印（都傳上去了） |
+| 16.3 | `python3 /tmp/agora-acc/grow.py /tmp/agora-acc/cache/sessions/<T1的ULID>/session.md 2000` | `session.md：加了 … 則，約 2000 KB` |
+| 16.4 | `python3 /tmp/agora-acc/grow.py /tmp/agora-acc/cache/sessions/<T2的ULID>/session.md 2000` | 同上 |
+| 16.5 | `python3 /tmp/agora-acc/grow.py /tmp/agora-acc/cache/sessions/<T3的ULID>/session.md 100` | `… 約 100 KB`（小一點，才捲得完） |
+| 16.6 | `python3 /tmp/agora-acc/grow.py /tmp/agora-acc/cache/reading/opencode/<s10 的 ses_…>.md 2000 new` | `… 約 2000 KB`（這是未匯入分頁用的全文快取；s10 **不要**匯入） |
+
+**Agora 分頁**（`agora`，不帶參數）
+
+| # | 做 | 應該看到 |
+|---|---|---|
+| 16.7 | 游標移到 T1，按住 `↓` `↑` 在 T1、T2、T3 和旁邊幾列之間快速移動 | 游標跟得上按鍵，**不卡**。移動時預覽不換；停下來約 0.15 秒後才換成游標那一列 |
+| 16.8 | 停在 T1 | 預覽最下面是 `（最後一則）`；往上一點是 `第 N 則` 這種自編的句子。預覽區最上面有一行 **`↑ 往上捲載入更早的內容（還有約 2000 KB）`**（數字大約就好） |
+| 16.9 | 記下預覽區最上面看得到的 `第 N 則` 是幾號 | 例如 `第 1503 則` |
+| 16.10 | 滑鼠移到右邊的預覽區，用滾輪**往上**捲到頂 | 補上了更早的一段：那一行的 KB 變少（約少 30）。**畫面不跳**：16.9 記下的那一則，還在剛才的位置附近，它上面多了號碼比較小的幾則（依賴 Y2） |
+| 16.11 | 游標移到 T3（約 100 KB），在預覽區一直往上捲到頂，重複幾次 | 每到頂一次，KB 就少一些；最後那一行**消失**。最上面是 T3 原本的第一則（你在 opencode 說的那句話），**沒有** `---`、`title:` 這種標頭 |
+| 16.12 | T3 全部載完後，往下捲到底，再往上捲到頂 | 內容**沒有重複**：`（最後一則）` 只出現一次，最上面還是原本的第一則（依賴 Y1） |
+
+**未匯入分頁**
+
+| # | 做 | 應該看到 |
+|---|---|---|
+| 16.13 | `Tab` 到未匯入頁，游標移到 s10 | 先顯示 `最後一則（…），整份對話載入中…`，很快換成 `整份對話（閱讀版）`。最下面是 `（最後一則）`；最上面有 `↑ 往上捲載入更早的內容（還有約 2000 KB）` |
+| 16.14 | 在預覽區往上捲到頂 | 補上前一段，KB 變少，畫面不跳（依賴 Y2） |
+| 16.15 | 按住 `↓` `↑` 在 s10 和旁邊幾列之間快速移動 | 不卡；停下來才換預覽 |
+| 16.16 | `q` | 離開 |
+
+⚠️ T1、T2、T3 的本機鏡像被加長了，之後**不要**對它們 `push`（會把加長的內容傳到 `agora-test`；傳了也只是測試資料夾，清理時會一起清掉）。
+
 ---
 
 # 第三段：換 claude 接續（選做，有裝 claude 才做）
 
 | # | 做 | 應該看到 |
 |---|---|---|
-| 16.1 | `agora continue session <Q2> --agent claude --dir /tmp/agora-acc/proj`（Q2 是任何一個雲端欄 ✓ 的 Session） | Claude 打開時，畫面上已經有之前的對話（開頭多一則說明：這是轉過來的紀錄） |
-| 16.2 | 說一句自編的話，用 `/exit` 離開 | 印出**同一個** Q2 |
-| 16.3 | 再接一次；送一句話，**在它回覆到一半時按一次 `Ctrl-C`**（只中斷這一輪回覆），再 `/exit` | agora 沒有跟著被中斷，印出 Q2；`agora show session <Q2>` 看得到那一段 |
-| 16.4 | 再接一次；說一句話，`/clear`，再說一句話，`/exit` | `/clear` 之前的照常存回 Q2；另外印一行 `這次接續中用過 /clear，之後的對話在 Claude session <uuid>；要存進 Agora 請另外執行：agora import session --external-session-id <uuid> --agent claude` |
-| 16.5 | 照那一行執行 | 印出新的 `agora:<ULID>` |
+| 17.1 | `agora continue session <Q2> --agent claude --dir /tmp/agora-acc/proj`（Q2 是任何一個雲端欄 ✓ 的 Session） | Claude 打開時，畫面上已經有之前的對話（開頭多一則說明：這是轉過來的紀錄） |
+| 17.2 | 說一句自編的話，用 `/exit` 離開 | 印出**同一個** Q2 |
+| 17.3 | 再接一次；送一句話，**在它回覆到一半時按一次 `Ctrl-C`**（只中斷這一輪回覆），再 `/exit` | agora 沒有跟著被中斷，印出 Q2；`agora show session <Q2>` 看得到那一段 |
+| 17.4 | 再接一次；說一句話，`/clear`，再說一句話，`/exit` | `/clear` 之前的照常存回 Q2；另外印一行 `這次接續中用過 /clear，之後的對話在 Claude session <uuid>；要存進 Agora 請另外執行：agora import session --external-session-id <uuid> --agent claude` |
+| 17.5 | 照那一行執行 | 印出新的 `agora:<ULID>` |
 
 ---
 
@@ -294,6 +365,7 @@ python3 -c 'import fcntl,time; f=open("/tmp/agora-acc/state/upload.lock","a"); f
 |---|---|
 | 2.3：import 3 個的前景時間（`real`） | ___ 秒 |
 | 10.2：push 等了多久（`real`） | ___ 秒 |
+| 16.7、16.15：大 Session 上移動游標的感覺 | 順／卡 |
 
 ## 已知問題（Low，不算驗收失敗）
 
