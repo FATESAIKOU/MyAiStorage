@@ -90,6 +90,7 @@ def run(paths: store.Paths | None = None, *, notices: bool = False) -> int:
             print("[agora] 已經有一個上傳在跑，這一輪不重來", file=sys.stderr, flush=True)
             break
         try:
+            store.restore_done(paths)   # E3: what a crashed uploader left, now that it is ours
             seen = None
             while (waiting := _waiting(paths)) and waiting != seen:
                 seen = waiting  # nothing new since the last round: it is failing, stop

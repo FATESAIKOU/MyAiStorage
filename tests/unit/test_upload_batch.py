@@ -660,3 +660,51 @@ def test_the_uploader_is_started_for_a_waiting_outbox(env, monkeypatch):
 
     store.kick_uploader(paths)
     assert started
+
+def test_a_background_starting_while_a_command_lists_the_outbox_still_sends_it(env, monkeypatch, capsys):
+    """T3-sec3 R6: listing the outbox used to take the upload lock for a moment (to
+    decide whether `.done-` could be restored). A background that tried the lock in
+    that moment read it as "somebody is already running" and quit - but the lister
+    sends nothing, so these sessions waited for the next command, which the spec
+    (「背景上傳」) does not allow. Here the background starts exactly while another
+    command lists the outbox; this round must still send all of them."""
+    paths = store.Paths.from_env()
+    ulids = [_stage(paths, f"第 {i} 個") for i in range(3)]
+    real_hold = store.hold_upload_lock
+    started = []
+
+    def hold(paths_, blocking=False):
+        if started:                           # the background's own calls, and later ones
+            return real_hold(paths_, blocking)
+        started.append(True)
+        held = real_hold(paths_, blocking)    # the lister has the lock right now ...
+        background.run(paths_)                # ... and this is when the background starts
+        return held
+
+    monkeypatch.setattr(store, "hold_upload_lock", hold)
+    store.outbox_ulids(paths)                 # another command reading the outbox
+    if not started:                           # the lister never touched the lock: the
+        started.append(True)                  # background starts with nobody in its way
+        background.run(paths)
+    capsys.readouterr()
+
+    assert store.outbox_ulids(paths) == set()
+    for ulid in ulids:
+        assert (env / "agora" / "sessions" / ulid / "session.md").is_file()
+
+
+def test_the_background_puts_back_what_a_crashed_uploader_renamed_aside(env, capsys):
+    """E3's other half: `.done-<ULID>` left by an uploader that died while comparing is
+    restored by the next background once it has the lock, and sent in that same run."""
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "當掉時改名的")
+    (paths.outbox / ulid).rename(paths.outbox / f".done-{ulid}")
+    assert store.outbox_ulids(paths) == set()      # listing no longer touches it
+
+    background.run(paths)
+    capsys.readouterr()
+
+    assert not (paths.outbox / f".done-{ulid}").exists()
+    assert store.outbox_ulids(paths) == set()
+    assert "當掉時改名的" in (env / "agora" / "sessions" / ulid / "session.md").read_text(
+        encoding="utf-8")

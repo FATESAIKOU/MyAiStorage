@@ -229,7 +229,7 @@ def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None) -> Pat
     # `.done-<ULID>` is left alone (review R1): an uploader may be comparing it right
     # now, and what it holds is a version that was current a moment ago - deleting it
     # loses an edit. Whoever finds `outbox/<ULID>` already there drops it instead:
-    # `_rename_back` while comparing, `_restore_done` when nobody is running.
+    # `_rename_back` while comparing, `restore_done` when the background takes the lock.
     return folder
 
 
@@ -276,18 +276,23 @@ def uploader_is_running(paths: Paths) -> bool:
     return False
 
 
-def _restore_done(paths: Paths) -> None:
+def restore_done(paths: Paths) -> None:
     """Put back `.done-<ULID>` folders an uploader left behind, so they go again.
 
-    Only when nobody holds the lock (review N6): the interactive mode re-reads the
-    index on every keystroke, and restoring one while the background is comparing it
-    would have the two of them grabbing the same folder.
+    Only by whoever has just taken the upload lock - the background, at the start of
+    its run (review N6, T3-size E3): restoring one while another uploader is comparing
+    it would have the two of them grabbing the same folder. It used to run from
+    `outbox_ulids` after a quick try of the lock, and that try is what made a
+    background starting at the same moment think somebody was running (T3-sec3 R6).
     """
+    if not paths.outbox.exists():
+        return
     for done in paths.outbox.glob(".done-*"):
         _put_back(done, paths.outbox / done.name[len(".done-"):])
 
 
 def outbox_ulids(paths: Paths) -> set[str]:
+    """The ULIDs waiting in the outbox. Never touches the upload lock (T3-sec3 R6)."""
     if not paths.outbox.exists():
         return set()
     for old in paths.outbox.glob(".old-*"):
@@ -296,8 +301,6 @@ def outbox_ulids(paths: Paths) -> set[str]:
         # Only restore when no stage is in flight for this ULID (its .tmp still exists).
         if not target.exists() and not (paths.outbox / f".tmp-{ulid}").exists():
             old.rename(target)   # a stage crashed mid-swap: keep the previous complete entry
-    if not uploader_is_running(paths):
-        _restore_done(paths)
     return {p.name for p in paths.outbox.iterdir() if p.is_dir() and not p.name.startswith(".")}
 
 
