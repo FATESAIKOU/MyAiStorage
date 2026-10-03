@@ -320,12 +320,14 @@ def test_an_edit_deleted_elsewhere_is_kept_as_a_session_of_its_own(env, monkeypa
     that would undo their delete behind their back - so it becomes a new Session whose
     parent is the deleted one, and the deleted one stays deleted."""
     paths = use_machine(env, monkeypatch, "here")
-    held = hold_our_lock(paths)      # our own background must not get there first
     (agora_id,) = import_sessions(env, 1)
     ulid = ulid_of(agora_id)
     wait_uploaded(paths)             # the import is on Drive before we start editing
+    held = hold_our_lock(paths)      # and now it is held, so the edit below cannot
+                                     # go up before the other machine deletes it -
+                                     # waiting here would deadlock against our own lock
     code, _, err = run_cli(env, "edit", "session", agora_id,
-                           "--header", f"title={MARK} 改過")
+                           "--header", f"title={MARK} 改過}")
     assert code == 0, err
     assert store.outbox_ulids(paths) == {ulid}, "還沒上傳的新版本在 outbox"
 
