@@ -2696,21 +2696,92 @@ def test_ask_text_modal_tab_does_not_affect_underlying_screen():
             app.call_after_refresh(push_modal)
             await pilot.pause(0.2)
             assert isinstance(app.screen, tui.AskText)
+            modal_focused = app.focused
+            assert modal_focused is not None
 
             # Press tab and shift+tab: must not change app.tab or underlying table focus
             await pilot.press("tab")
             await pilot.pause()
             assert app.tab == "agora"
+            assert app.focused is modal_focused
 
             await pilot.press("shift+tab")
             await pilot.pause()
             assert app.tab == "agora"
+            assert app.focused is modal_focused
 
             # Dismiss modal
             await pilot.press("escape")
             await pilot.pause(0.2)
             assert not isinstance(app.screen, tui.ModalScreen)
             assert app.tab == "agora"
+            assert app.focused is app.query_one("#table")
+    _run(go)
+
+
+def test_filter_open_mouse_click_preview_esc_keeps_focus_and_filter():
+    """R6: When filterbar is open and user clicks on preview pane, Esc leaves focus in preview and filter intact."""
+    app, _ = _app([])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("slash")
+            await pilot.pause()
+            assert app.query_one("#filterbar").has_class("on")
+            assert app.focused is app.query_one("#filter")
+            for ch in "01A":
+                await pilot.press(ch)
+            await pilot.pause(0.1)
+            assert len(app.shown()) == 1
+
+            # Click on preview pane while filterbar is still on
+            await pilot.click("#right")
+            await pilot.pause()
+            assert app.side() == "preview"
+            assert app.focused is app.query_one("#right")
+            assert app.query_one("#filterbar").has_class("on")
+
+            # Press escape while focus is in preview and filterbar is on
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.side() == "preview"
+            assert app.focused is app.query_one("#right")
+            assert app.query_one("#filterbar").has_class("on")
+            assert len(app.shown()) == 1
+    _run(go)
+
+
+def test_ctrl_t_in_filter_toggles_mode_without_changing_filter_text():
+    """In filter input, ctrl+t toggles title/content mode without changing filter text."""
+    app, _ = _app([])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("slash")
+            await pilot.pause()
+            assert not app.content
+            assert "標題" in str(app.query_one("#mode").render())
+
+            for ch in "hello":
+                await pilot.press(ch)
+            await pilot.pause(0.05)
+            assert app.query_one("#filter").value == "hello"
+
+            # Press ctrl+t inside filter input
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            assert app.content is True
+            assert "內文" in str(app.query_one("#mode").render())
+            assert app.query_one("#filter").value == "hello"
+
+            # Press ctrl+t again
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            assert app.content is False
+            assert "標題" in str(app.query_one("#mode").render())
+            assert app.query_one("#filter").value == "hello"
     _run(go)
 
 

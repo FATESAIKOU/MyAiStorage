@@ -1265,24 +1265,20 @@ class AgoraApp(App):
         target = "#table" if self.side() == "preview" else "#right"
         self.query_one(target).focus()
 
-    action_toggle_focus = action_shift_tab
-
-    def action_next_tab(self) -> None:
+    def _change_tab(self, step: int) -> None:
         """[ and ] change page on the list side (spec「按鍵」)."""
         if self.screen is not self.default_screen or self.side() != "list":
             return
-        self.tab = TABS[(TABS.index(self.tab) + 1) % len(TABS)]
+        self.tab = TABS[(TABS.index(self.tab) + step) % len(TABS)]
         self.say("")
         self.show()
         self.refresh_bindings()
 
+    def action_next_tab(self) -> None:
+        self._change_tab(1)
+
     def action_prev_tab(self) -> None:
-        if self.screen is not self.default_screen or self.side() != "list":
-            return
-        self.tab = TABS[(TABS.index(self.tab) - 1) % len(TABS)]
-        self.say("")
-        self.show()
-        self.refresh_bindings()
+        self._change_tab(-1)
 
     def action_mark(self) -> None:
         row = self.current()
