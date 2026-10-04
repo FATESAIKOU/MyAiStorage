@@ -247,6 +247,7 @@ class Preview:
         self.path, self.pinned, self.at = path, pinned, None
         self._chunks: list[str] = [text] if text else []
         self._stat: tuple[int, float] | None = None
+        self._counts: tuple | None = None    # (word, size, mtime, at, total, above) - see counts()
         if path is not None and path.is_file():
             try:
                 st = path.stat()
@@ -277,6 +278,15 @@ class Preview:
         """Whether this is the last message alone, with no file behind it (spec「預覽區搜尋」)."""
         return self.path is None and self.pinned.startswith("最後一則")
 
+    def _file_key(self) -> tuple[int, float] | None:
+        """The file's (size, mtime) now, or None - what the counts are remembered under, so a
+        file that changed under us is counted again (review T2)."""
+        try:
+            st = self.path.stat() if self.path is not None else None
+        except OSError:
+            return None
+        return (st.st_size, st.st_mtime) if st is not None else None
+
     def counts(self, query: str) -> tuple[int, int]:
         """(how many matches the whole session has, how many of them are above what is read).
 
@@ -284,9 +294,16 @@ class Preview:
         both sides are counted by `find_in_lines` - so for every `at`,
         `above + what is on screen == found`, and the k-th match of the session is the
         (k - above)-th one on screen (design「搜尋：計數」, W1).
+
+        Both numbers are remembered for the word, for the file's size and mtime, and for how much
+        has been read: `n` asks again on every press, and reading and counting megabytes each
+        time is what made it slow (review T2).
         """
         if self.path is None or not self.path.is_file():
             return count_in(self.text, query), 0     # the last message: all of it is here
+        key = (query, self._file_key(), self.at)
+        if self._counts is not None and self._counts[:3] == key:
+            return self._counts[3], self._counts[4]
         try:
             raw = self.path.read_bytes()
         except OSError:
@@ -294,10 +311,19 @@ class Preview:
         text = raw.decode("utf-8", "ignore")
         start = _header_end(text)
         found = count_in(text[start:], query)
-        if self.at is None:
-            return found, found        # nothing read yet, so all of it is above
-        at = max(start, len(raw[:self.at].decode("utf-8", "ignore")))   # a byte offset, as characters
-        return found, count_in(text[start:at], query)
+        above = found if self.at is None else count_in(       # nothing read yet: all of it is above
+            text[start:max(start, len(raw[:self.at].decode("utf-8", "ignore")))], query)
+        self._counts = (*key, found, above)
+        return found, above
+
+    def count_loaded(self, query: str, above: int) -> None:
+        """How many matches are above now that more has been read.
+
+        `step` counts what each step brings down, so the file does not have to be read again to
+        know (review T2).
+        """
+        if self._counts is not None and self._counts[0] == query and self._counts[1] == self._file_key():
+            self._counts = (query, self._counts[1], self.at, self._counts[3], above)
 
     def step(self) -> str | None:
         """Read one more step - the tail first, the step above after that.
@@ -348,6 +374,10 @@ class PreviewText(TextArea):
     _suppress_scroll_load = False
     #: The word being searched for; every match on a drawn row gets `MATCH_STYLE`.
     _query = ""
+    #: Bumped whenever what is on screen changes, so a cache of match positions lets go of them.
+    #: TextArea's own caches are keyed by row, scroll and selection - not by content - so there
+    #: is nothing of its own to key on (review T2).
+    content_version = 0
 
     #: Bold and underlined, not a colour: `_render_line` puts the syntax's colours on after
     #: `get_line`, and the cursor line's background on after that, and both would cover a
@@ -428,6 +458,14 @@ class PreviewText(TextArea):
     def action_search_prev(self) -> None:
         self.app.preview_search_prev()
 
+    def load_text(self, text: str) -> None:
+        self.content_version += 1
+        super().load_text(text)
+
+    def edit(self, *args, **kwargs) -> None:
+        self.content_version += 1
+        super().edit(*args, **kwargs)
+
     def set_query(self, query: str) -> None:
         """Highlight every match of `query` from now on.
 
@@ -493,7 +531,7 @@ def agora_preview(paths: store.Paths, index: store.Index, agora_id: str) -> Prev
 
 
 def import_preview(agent, session_id: str, full: bool = False, paths: store.Paths | None = None,
-                   updated: str | None = None) -> Preview:
+                   updated: str | None = None) -> Preview | None:
     """The last message at once; with `full`, the tail of the reading version, kept in the
     cache (5.10). Same rule as the agora side: read a step, not the whole thing (T6)."""
     from agora.agents.base import reading
@@ -510,7 +548,10 @@ def import_preview(agent, session_id: str, full: bool = False, paths: store.Path
             return preview
         last = agent.last_message(session_id)
     except Exception:            # a preview must never take the screen down
-        return Preview(None, "讀不到整份對話" if full else "讀不到這個 session")
+        # The whole conversation that could not be read is nothing to show: the caller keeps
+        # what is on the screen and says so, rather than replacing it with an empty pane
+        # (spec「整份讀取失敗時」, review T3).
+        return None if full else Preview(None, "讀不到這個 session")
     if not last:
         return Preview(None)
     role, text = last
@@ -1027,6 +1068,8 @@ class AgoraApp(App):
         self.note, self.pending_note = "", ""   # 「已換成整份對話」, 「內容已更新」
         self.last_only = False
         self.shown_preview: Preview | None = None
+        self._matches: list[tuple[int, int, int]] = []   # the matches on screen, remembered
+        self._matches_key: tuple | None = None           # by the word and by what is on screen
 
     def compose(self) -> ComposeResult:
         yield Static(id="bar")
@@ -1243,10 +1286,19 @@ class AgoraApp(App):
         try:
             result = import_preview(agent, key.split(":", 1)[1], True, self.paths, updated)
         except Exception:                # whatever happens, the screen must not stay 「載入中」
-            result = Preview(None, "讀不到整份對話")
+            result = None
         self.call_from_thread(self.loaded, key, result)
 
-    def loaded(self, key: str, result: Preview) -> None:
+    def loaded(self, key: str, result: Preview | None) -> None:
+        """The reading version is ready, or it could not be read.
+
+        A failure says so on the line above the pane and changes nothing else: the last message
+        the reader was reading stays, and nothing is cached, so selecting the row again tries the
+        read again (spec「整份讀取失敗時」, review T3).
+        """
+        if result is None:
+            self.query_one("#pinned", Static).update("讀不到整份對話")
+            return
         self.cache[key] = result
         row = self.current()
         if row and row.key == key:
@@ -1356,7 +1408,10 @@ class AgoraApp(App):
             pane.scroll_end(animate=False)
             pane._suppress_scroll_load = False
             if self.query and replaced:
-                self.run_preview_search(self.query, note=note)
+                # Counted and marked again, but nothing is jumped to and nothing is read: the
+                # reader did not ask for the front of the file, and the cursor goes back to the
+                # end where the new content starts (spec R5, review T1).
+                self.run_preview_search(self.query, note=note, jump=False)
 
         self.call_after_refresh(settle)
 
@@ -1445,6 +1500,16 @@ class AgoraApp(App):
         return next((i for i in range(len(loaded) - 1, -1, -1)
                      if (loaded[i][0], loaded[i][1]) < here), None)
 
+    def loaded_matches(self, pane: PreviewText, query: str) -> list[tuple[int, int, int]]:
+        """Every match in what is on screen, in order - remembered for the word and for what the
+        pane is showing, because `n` asks again on every press and walking 100,000 lines is not
+        free (review T2)."""
+        key = (query, pane.content_version)
+        if self._matches_key != key:
+            self._matches = list(find_in_lines(pane.document.lines, query))
+            self._matches_key = key
+        return self._matches
+
     def _load_to(self, pane: PreviewText, preview: Preview, query: str, target: int,
                   above: int, loaded: list) -> tuple[int, list]:
         """Read down until the `target`-th match is on screen: how many are left above, and the
@@ -1463,17 +1528,20 @@ class AgoraApp(App):
             read = True
             above -= count_in(step, query)     # the step's own matches are the ones that came down
         if read:
+            preview.count_loaded(query, above)     # no need to read the file to know this
             self.show_read_text(pane, preview)
-            loaded = list(find_in_lines(pane.document.lines, query))
+            loaded = self.loaded_matches(pane, query)
         return above, loaded
 
-    def run_preview_search(self, query: str, step: int = 0, note: str = "") -> None:
+    def run_preview_search(self, query: str, step: int = 0, note: str = "", jump: bool = True) -> None:
         """Find `query` in the whole session and put the cursor on one of its matches.
 
         `step` is 0 for the first search - the match nearest the cursor, down first and then up,
         and never round to the front of the file, which is where the cursor is furthest from and
         what the reader almost never wants (review R2) - and +1 for `n`, -1 for `N`, which do
-        wrap at the ends.
+        wrap at the ends. With `jump=False` the word is counted and marked and nothing else: the
+        automatic search after the content was replaced leaves the cursor where it is and reads
+        nothing (spec R5, review T1).
 
         Nothing is carried from the file to the screen as an offset: the file says how many
         matches there are and how many are above what is read, the screen says where its own
@@ -1494,9 +1562,14 @@ class AgoraApp(App):
         self.total, self.last_only = total, preview.last_only
         if not total:
             self.which = 0
+            pane.selection = Selection.cursor(pane.cursor_location)   # nothing is the current one
             self.paint_count()
             return
-        loaded = list(find_in_lines(pane.document.lines, query))
+        if not jump:
+            self.which = 0                     # counted and marked; the cursor is left alone
+            self.paint_count()
+            return
+        loaded = self.loaded_matches(pane, query)
         here = pane.cursor_location                     # where the cursor is: the end of the match
         before = pane.selection.start if not pane.selection.is_empty else here
         # How many matches are before the one the cursor is on, and before the cursor itself -

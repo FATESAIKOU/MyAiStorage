@@ -3448,7 +3448,7 @@ def test_the_count_agrees_with_what_is_on_screen_at_every_step(tmp_path):
     preview = tui.Preview(paths.mirror / hdr["id"].split(":")[1] / "session.md")
     preview.step()
 
-    words = ("表格", "最早的表格", "Straße", "STRASSE", "straße", "strasse", "ss", "沒有���字")
+    words = ("表格", "最早的表格", "Straße", "STRASSE", "straße", "strasse", "ss", "沒有這個字")
     steps = 1
     while True:
         for word in words:
@@ -3709,14 +3709,15 @@ def test_a_word_that_is_not_there_says_so_and_leaves_the_cursor_alone():
             pane = app.query_one("#right", tui.PreviewText)
             await pilot.press("tab")
             await pilot.pause()
+            await _search(pilot, "表格")
+            assert _count(app) == "第 3 個／共 3 個"
             where = pane.cursor_location
 
-            await _search(pilot, "沒有這個字")
+            await _search(pilot, "沒有這個字")     # now one that is not there at all
             assert _count(app) == "找不到"
-            assert pane.cursor_location == where
-
-            await _search(pilot, "表格")           # and a word that is there works again
-            assert _count(app) == "第 3 個／共 3 個"
+            assert pane.cursor_location == where, "游標不動"
+            assert pane.selection.is_empty, \
+                "and the match it was on is not still drawn as the current one"
     _run(go)
 
 
@@ -3810,9 +3811,13 @@ def test_the_search_runs_again_when_the_whole_conversation_replaces_the_last_mes
                     break
                 await pilot.pause(0.1)
             await pilot.pause(0.2)
-            assert _count(app) == "第 2 個／共 2 個  已換成整份對話", _count(app)
+            # review T1: the automatic search counts and marks, and leaves the cursor at the end -
+            # the reader did not ask to be taken to the front of the file.
+            assert _count(app) == "共 2 個  已換成整份對話", _count(app)
             pane = app.query_one("#right", tui.PreviewText)
-            assert pane.document.get_line(pane.selection.start[0]) == "回答也有表格"
+            assert pane.cursor_location[0] == pane.document.line_count - 1, "the cursor is at the end"
+            assert pane.selection.is_empty, "and no match is the current one"
+            assert any("underline" in style for _t, style in _drawn(pane, 1)), "both are marked"
     _run(go)
 
 
@@ -3832,7 +3837,7 @@ def test_reading_the_rows_again_searches_again_and_says_the_content_changed():
 
             app.reload()                       # what an action does when it is done
             await pilot.pause(0.5)
-            assert _count(app) == "第 3 個／共 3 個  內容已更新", _count(app)
+            assert _count(app) == "共 3 個  內容已更新", _count(app)
 
             app.clear_preview_search()          # with no search there is nothing to say
             app.reload()
@@ -3848,7 +3853,7 @@ def test_a_whole_conversation_that_cannot_be_read_does_not_stay_on_loading(monke
             raise RuntimeError("no reading version today")
 
     broken = Broken("claude", [Listed("s1", "/tmp/p", "未匯入的", "2026-10-02T00:00:00Z")], last="boom")
-    assert tui.import_preview(broken, "s1", True, None).pinned == "讀不到整份對話"
+    assert tui.import_preview(broken, "s1", True, None) is None, "there is no whole conversation"
     assert tui.import_preview(broken, "s1").pinned == "讀不到這個 session"
 
     real, boom = tui.import_preview, None
@@ -3884,7 +3889,7 @@ def test_benchmark_3mb_search_word_that_is_only_at_the_front():
     body = ("## user\n最早的獨有的字\n\n"
             + one * ((3 * 1024 * 1024) // len(one.encode("utf-8")))
             + "## user\n最後的普通一句話\n")
-    assert 2.5 * (1 << 20) < len(body.encode("utf-8")) <= 3 * (1 << 20)
+    assert 2.9 * (1 << 20) < len(body.encode("utf-8")) <= 3.1 * (1 << 20)
     hdr, app = _search_app(body)
 
     async def go():
@@ -3906,4 +3911,270 @@ def test_benchmark_3mb_search_word_that_is_only_at_the_front():
             pane = app.query_one("#right", tui.PreviewText)
             row = _screen_row(pane, pane.selection.start)
             assert 0 <= row < pane.content_size.height, f"and it is on the screen ({row})"
+    _run(go)
+
+
+def _real_body(mb: int = 3, head: str = "") -> str:
+    """A session in the shape agora writes one: a `## user` / `## assistant` turn, a few short
+    lines each, a fenced block, a blank line - many lines, none of them long.
+
+    This is the shape review T2 measured: a few very long lines are much cheaper to lay out and
+    to search line by line than a real conversation, so the numbers from `_steps_body` are
+    optimistic.
+    """
+    one = ("## user\n幫我看看這個\n我改了第 3 段\n\n"
+           "## assistant\n好，改成這樣\n第 3 段改成：\n\n```python\nprint(1)\n```\n\n")
+    return head + one * ((mb * 1024 * 1024) // len(one.encode("utf-8"))) + "## user\n最後一句話\n"
+
+
+def test_benchmark_3mb_real_format_search_and_n():
+    """T2, on the shape agora really writes: Enter on a word that is only at the front (so the
+    whole file is read and put in once), and three presses of `n` after that.
+
+    There is no absolute number to assert here: `load_text` of 3 MB in this shape is seconds on
+    its own - the same cost `g` pays, and it is printed - and several of us share this machine,
+    so an absolute limit fails on a busy one (review T2 asked for the numbers, not for a stopwatch
+    in the unit tests). What is asserted is that Enter stays in the same league as `g`: it is `g`
+    plus one read and count of the file, and nothing else. The two regressions that matter are
+    guarded without a stopwatch: the quadratic way of reading is `test_benchmark_3mb_g_press` and
+    this test's shape on the cheap body, and the counts being recomputed per key press is
+    `test_the_counts_are_remembered_between_presses`, which counts the reads.
+    """
+    body = _real_body(head="## user\n最早的獨有的字\n\n")
+    assert 2.9 * (1 << 20) < len(body.encode("utf-8")) <= 3.1 * (1 << 20)
+    hdr, other = _hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "真的 3 MB"), _hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "小的", sid="ses_b")
+    paths, _index_ = _index((hdr, body), (other, "## user\n一句話\n"))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            pane = app.query_one("#right", tui.PreviewText)
+            await _focus_pane(app, pilot)
+            await pilot.pause()
+
+            t0 = time.perf_counter()
+            await pilot.press("g")
+            assert await _wait(lambda: not app.cache[hdr["id"]].more(), pilot, tries=1200), \
+                "g never finished reading"
+            g_took = time.perf_counter() - t0
+            print(f"\n[BENCHMARK] real format 3 MB, g: {g_took:.3f} s")
+
+            _go_to_row(app, other["id"])          # a small row, so the preview starts small again
+            await pilot.pause(0.4)
+            _go_to_row(app, hdr["id"])
+            await pilot.pause(0.4)
+            await _focus_pane(app, pilot)
+
+            t0 = time.perf_counter()
+            await _search(pilot, "獨有的字")
+            enter_took = time.perf_counter() - t0
+            assert _count(app) == "第 1 個／共 1 個"
+
+            t0 = time.perf_counter()
+            for _ in range(3):
+                await pilot.press("n")     # no pause between: it is the key press being measured
+            await pilot.pause()
+            n_took = (time.perf_counter() - t0) / 3
+            print(f"[BENCHMARK] real format 3 MB, Enter to the front: {enter_took:.3f} s, "
+                  f"one n: {n_took:.3f} s")
+            assert enter_took <= 4 * g_took + 2, \
+                f"Enter is g plus one read and count of the file: {enter_took:.3f} s vs {g_took:.3f} s"
+    _run(go)
+
+
+def test_the_marks_show_on_a_heading_and_inside_a_code_block():
+    """Low (review 3 (3)): the marks are bold and underline, not a colour, which is why they
+    are still there where tree-sitter or the cursor row would have put a colour of its own.
+
+    Checked on the drawn row, which is the only place the two can be told apart.
+    """
+    body = ("## user\n# 表格的標題\n\n## assistant\n好\n\n"
+            "## user\n```python\nx = '程式裡的表格'\n```\n\n## assistant\n結尾\n")
+    hdr, app = _search_app(body)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            pane = app.query_one("#right", tui.PreviewText)
+            await _focus_pane(app, pilot)
+            await _search(pilot, "表格")
+
+            assert _count(app) == "第 2 個／共 2 個"
+            heading, block = _marked(_drawn(pane, 1)), _marked(_drawn(pane, 8))
+            assert [text for text, _style in heading] == ["表格"], heading
+            assert [text for text, _style in block] == ["表格"], block
+            assert all("bold" in style for _text, style in heading + block)
+    _run(go)
+
+
+def _marked(drawn: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """The segments of a drawn row that carry the search's mark."""
+    return [(text, style) for text, style in drawn if "underline" in style]
+
+
+def test_the_search_runs_again_after_a_reload_without_reading_the_whole_file():
+    """T1 (review): a replaced preview is searched again with the same word, but only counted
+    and marked - the cursor stays at the end and nothing is read that the reader did not ask
+    for (Goals: 只有 `g` 與跳到還沒載入的符合才一次載入; spec R5「游標回到最後一行」)."""
+    hdr, app = _search_app(_real_body(mb=1, head="## user\n最早的獨有的字\n\n"), title="1 MB")
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            pane = app.query_one("#right", tui.PreviewText)
+            await _focus_pane(app, pilot)
+            await _search(pilot, "獨有的字")
+            assert app.cache[hdr["id"]].at == 0, "the reader asked for it: it is all here"
+
+            app.reload()                          # what an action does when it is done
+            await pilot.pause(0.6)
+            assert app.cache[hdr["id"]].at, "reload reads the tail again, and no more than that"
+            assert _count(app) == "共 1 個  內容已更新", "counted again, with no match on screen"
+            assert pane.cursor_location[0] == pane.document.line_count - 1, "the cursor is at the end"
+    _run(go)
+
+
+def test_the_counts_are_remembered_between_presses(monkeypatch):
+    """T2 (review): `n` asks again on every press, so what the file says is remembered for the
+    word, the file's size and mtime, and how much has been read - and the matches on screen for
+    the word and what the pane is showing. Reading megabytes again per key press was the 0.3-0.8
+    second `n`; a file that changed under us is counted again."""
+    body = _real_body(mb=1, head="## user\n最早的獨有的字\n\n")
+    hdr, other = _hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "1 MB"), _hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "小的", sid="ses_b")
+    paths, _index_ = _index((hdr, body), (other, "## user\n一句話\n"))
+    session = paths.mirror / hdr["id"].split(":")[1] / "session.md"
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+    reads, real = [], pathlib.Path.read_bytes
+
+    def counting(self, *a, **kw):
+        if self == session:
+            reads.append(1)
+        return real(self, *a, **kw)
+    monkeypatch.setattr(pathlib.Path, "read_bytes", counting)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            _go_to_row(app, hdr["id"])
+            await pilot.pause(0.4)
+            await _focus_pane(app, pilot)
+            await _search(pilot, "獨有的字")
+            assert len(reads) == 1, f"one read of the file for the whole search: {len(reads)}"
+
+            for _ in range(3):
+                await pilot.press("n")
+                await pilot.pause()
+            assert len(reads) == 1, f"and none for the three n that follow: {len(reads)}"
+            assert not app.cache[hdr["id"]].more(), "one match is all of it: nothing to read"
+    _run(go)
+
+
+def test_the_count_is_remembered_until_the_file_changes(monkeypatch, tmp_path):
+    """T2 (review): the numbers are remembered for the word, the file's size and mtime, and how
+    much has been read - and a file that changed under the preview is counted again."""
+    path = tmp_path / "session.md"
+    path.write_text("## user\n表格\n\n## assistant\n表格\n", encoding="utf-8")
+    preview = tui.Preview(path)
+    preview.step()
+    reads, real = [], pathlib.Path.read_bytes
+
+    def counting(self, *a, **kw):
+        reads.append(self)
+        return real(self, *a, **kw)
+    monkeypatch.setattr(pathlib.Path, "read_bytes", counting)
+
+    for _ in range(3):
+        assert preview.counts("表格") == (2, 0), "a short file: all of it is here"
+    assert len(reads) == 1, f"and the second and the third ask nothing of the file: {len(reads)}"
+
+    time.sleep(0.01)
+    path.write_text("## user\n表格\n\n## assistant\n表格\n表格\n", encoding="utf-8")
+    assert preview.counts("表格") == (3, 0), "a file that changed is counted again"
+    assert len(reads) == 2
+
+
+def test_the_matches_on_screen_are_remembered_until_the_pane_shows_something_else(monkeypatch):
+    """T2 (review): the positions of the matches on screen are remembered for the word and for
+    what the pane is showing - `n` asks again on every press, and walking the loaded lines of a
+    3 MB document is not free. When the content changes they are found again."""
+    hdr, app = _search_app(_three_matches_body())
+    found, real = [], tui.find_in_lines
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            pane = app.query_one("#right", tui.PreviewText)
+
+            def counting(*a, **kw):
+                found.append(1)
+                return real(*a, **kw)
+            monkeypatch.setattr(tui, "find_in_lines", counting)
+
+            first = app.loaded_matches(pane, "表格")
+            for _ in range(3):
+                assert app.loaded_matches(pane, "表格") is first, "the same list, not a new walk"
+            assert len(found) == 1, f"asked four times, walked the document once: {len(found)}"
+
+            pane.load_text(pane.document.text + "\n表格又來了\n")   # what is on screen changed
+            again = app.loaded_matches(pane, "表格")
+            assert len(found) == 2, f"and the positions are found again: {len(found)}"
+            assert "表格" in pane.document.get_line(again[-1][0]), again[-1]
+    _run(go)
+
+
+def test_a_whole_conversation_that_cannot_be_read_keeps_the_last_message_and_tries_again():
+    """T3 (review): the read failed, so the last message stays on the screen with a line saying
+    so - not an empty pane - and nothing is cached, so selecting the row again tries the read
+    again (spec「整份讀取失敗時」)."""
+    class Flaky(FakeAgent):
+        attempts = 0
+
+        def export(self, session_id):
+            Flaky.attempts += 1
+            if Flaky.attempts == 1:
+                raise RuntimeError("no reading version today")
+            return FakeAgent.export(self, session_id)
+
+    agent = Flaky("claude", [Listed("s1", "/tmp/p", "未匯入的", "2026-10-02T00:00:00Z")],
+                  last=("user", "表格的問題"), texts={"s1": ["表格的問題", "回答也有表格"]})
+    app = tui.AgoraApp(store.Paths.from_env(), FakeCli(), agents=[agent], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("]")
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.3)
+            pane = app.query_one("#right", tui.PreviewText)
+            assert "表格的問題" in pane.document.text, "the last message"
+
+            for _ in range(30):
+                if "讀不到整份對話" in str(app.query_one("#pinned", Static).content):
+                    break
+                await pilot.pause(0.1)
+            assert "讀不到整份對話" in str(app.query_one("#pinned", Static).content)
+            assert "載入中" not in str(app.query_one("#pinned", Static).content)
+            assert "表格的問題" in pane.document.text, "and the last message is still on the screen"
+            assert "claude:s1" not in app.cache, "the failure is not cached"
+
+            await pilot.press("[")               # away and back: the read is tried again
+            await pilot.pause(0.3)
+            await pilot.press("]")
+            await pilot.pause(0.3)
+            for _ in range(30):
+                if "整份對話（閱讀版）" in str(app.query_one("#pinned", Static).content):
+                    break
+                await pilot.pause(0.1)
+            assert "整份對話（閱讀版）" in str(app.query_one("#pinned", Static).content), "this time it worked"
+            assert Flaky.attempts >= 2
     _run(go)
