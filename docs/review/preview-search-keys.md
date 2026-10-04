@@ -342,3 +342,108 @@ Agora 頁 `session.md` 讀不到時，預覽也是 `Preview(None)`，搜尋同�
   - 交接的地方已經寫清楚，兩個人不會改到 `tui.py` 的同一段。
 
 這次只改了這份 review（文件）。從 90f27f0 到 e163d5c 只動了 openspec 底下的文件，程式和上一次 commit 時完全一樣（當時 compileall 與完整 unit 560 passed）。工作區裡有 impl1、impl3 還沒 commit 的程式，現在跑 unit 會把它們一起跑進去，所以這次沒有重跑。
+
+---
+
+## 第 1 節程式審查（d52c591、4170b1a）
+
+審的是 impl3 第 1 節「兩套按鍵」的兩個 commit，改到 `tui.py`、`test_tui.py`、`tasks.md`。對照的是 cc1891a 的 spec「按鍵」、design「先有 side()」「按鍵與視窗」（含 R1、R6 的決定），以及 tasks 1.1～1.3。
+
+**結論：可以進第 2 節。行為都符合 spec，沒有 High。** 有 2 個 Medium，都是測試沒有守住的地方：程式現在是對的，但改壞了測試不會紅。另外有 1 個 Medium 是易用性（按鍵列沒有顯示換頁鍵），還有幾個 Low。這些都可以在第 2 節開工時一起補，不用另開一輪。
+
+### PM 指定的五點
+
+**(1) 拿掉 ctrl+t 的 priority 之後，篩選框裡還能切換標題／內文嗎？可以。**
+- Textual 的 `Input` 沒有綁 ctrl+t（`_input.py` 的 BINDINGS 裡沒有這個鍵）。
+- `Input` 只吃「可印出的字元」，ctrl+t 不是，所以按鍵會往上走到 App 的 binding。
+- `check_action` 判斷 `side() == "list"`，篩選框算清單那一邊，所以會放行。
+- 實測（探針測試，見下）：打開篩選框打了 `x`，按 ctrl+t，`app.content` 有切換，篩選框裡的字還是 `x`。
+- 現有的測試都是在**表格**上按 ctrl+t 之後才按 `/`，沒有一個是在篩選框裡按。建議把這個探針加進 `test_tui.py`，因為 placeholder 寫的正是這個用法。
+
+**(2) `_KeysTable`：不需要，建議拿掉（Medium，可以在第 2 節開工時順手做）。**
+- 整個 repo 讀 `KEYS` 的地方只有一處：`paint_keys` 裡的 `KEYS.get((self.tab, side))`。
+- 它特別寫的這些「相容」分支都沒有人用到：
+  - 用裸的 `"agora"`／`"import"` 查；
+  - tuple 的順序反過來（`(side, tab)`）也能查到；
+  - 覆寫 `get`。
+- 而且 `KEYS.get(...) or []` 會把打錯字變成「按鍵列一片空白」，不會報錯。
+- **對第 2、3 節的影響：**
+  - 預覽那一邊的鍵和分頁無關，現在卻要在 `"agora"`、`"import"` 兩份清單裡各加一次，容易漏掉其中一份。
+  - 讀程式的人也得先看懂這個 dict 子類別，才知道要怎麼加列。
+- **建議改成：**
+  - `KEYS = {"list": {"agora": [...], "import": [...]}, "preview": [...]}`；
+  - `paint_keys` 寫成 `KEYS["list"][self.tab] if side == "list" else KEYS["preview"]`，用中括號查，打錯字會直接報錯。
+
+**(3) Enter 的 `primary` 只在 `#table`：✓**
+- 寫的是 `side == "list" and focused.id == "table"`，符合 R1。
+- 在副本裡改成只判斷 `side == "list"`，有 8 個測試會紅（包括篩選框裡按 Enter 的測試）。
+
+**(4) 視窗開著時的 Tab／shift+tab：行為正確，但測試沒有守住（Medium）。**
+- **程式的行為：**
+  - Confirm 視窗裡，Tab 和 shift+tab 分別轉成 `focus_next`、`focus_previous`；
+  - 其他視窗裡，`screen is not default_screen` 時直接 return；
+  - 符合 spec 與 W4。
+- **問題一：AskText 的測試抓不到錯。**
+  - 測試只斷言 `app.tab` 沒有變，但 Tab 現在本來就不會換頁，所以這個斷言永遠成立，等於沒驗。
+  - 在副本裡把「其他視窗 return」那一行拿掉，現有測試**全綠**。但實際行為已經壞了：關掉視窗之後，焦點從表格跑到 `PreviewArea(id='right')`。原因是 Tab 在畫面背後偷偷切換了底下畫面的焦點。
+  - 我寫的探針抓得到：斷言「Tab 之後，焦點還在視窗裡的那個 widget 上」，以及「關掉視窗之後，焦點在 `#table`」。請把這兩個斷言補進 `test_ask_text_modal_tab_does_not_affect_underlying_screen`。
+- **問題二（Low）：Confirm 的測試分不出方向。**
+  - 把 Tab 改成往回走（`focus_previous`），測試也不會紅。
+  - 因為 Confirm 視窗只有 OptionList 和 Checkbox 兩個可以拿焦點的 widget，往前一個和往後一個是同一個。
+  - 這個改壞在實際使用上沒有差別，不用補。但如果以後 Confirm 多了按鈕，測試要改成用三個以上的 widget 來驗。
+
+**(5) 改壞之後測試會不會紅？**
+
+在 `git archive 4170b1a` 的副本裡，一次改壞一處，跑 `test_tui.py`：
+
+| 改壞的地方 | `test_tui.py` | 探針 |
+|---|---|---|
+| `primary` 改成用 `side()` 判斷（R1 退回去） | 8 failed ✓ | |
+| `d`、`m`、`e`、`P` 拿掉 `side` 的判斷 | 2 failed ✓ | |
+| ctrl+t 拿掉「只在清單」 | 1 failed ✓ | |
+| Tab 從篩選框切出去時不收起篩選框 | 1 failed ✓ | |
+| `on_descendant_focus` 改成什麼都不做 | 1 failed ✓（滑鼠點的那個測試） | |
+| 拿掉「其他視窗時 return」 | **全綠 ✗** | 1 failed ✓ |
+| `on_key` 的 Esc 拿掉 `side() == "list"`（R6） | **全綠 ✗** | 1 failed ✓ |
+| Confirm 裡的 Tab 改成往回走 | 全綠（只有兩個 widget，改了也沒差） | — |
+| `]` 設成 priority | 全綠 | 全綠：Textual 讓 Input 先吃可印出的字元，就算設成 priority，在篩選框裡打 `]` 還是打字，所以這樣改其實無害 |
+
+- **R6 的 Esc 為什麼抓不到：**
+  - 現有測試只在「用 Tab 切到預覽區之後」按 Esc，但 Tab 切出去時篩選框已經收起來了，Esc 本來就不會動到篩選。
+  - 篩選框還開著、焦點卻在預覽區的情況，只有**用滑鼠點**預覽區才會出現。我的探針就是這樣測的：點 `#right` 之後按 Esc，焦點仍在預覽區，篩選也還在。
+  - 請把這個情況補進 `test_tab_from_filter_preserves_filter_and_esc_in_preview_does_not_clear_it`，或另寫一個測試。
+
+### 其他
+
+- **Medium：清單那一邊的按鍵列沒有換頁和切焦點的鍵。**
+  - 這次是 BREAKING：Tab 不再換頁，換頁改成 `[`、`]`。但清單那張按鍵表裡沒有 `[ ]` 換頁，也沒有 `Tab` 切焦點。
+  - 使用者只能從 Agora 頁是空的時候那句提示「按 ] 到未匯入」才知道。
+  - 建議清單兩張表都加上 `("[ ]", "換頁")` 和 `("Tab", "切焦點")`。
+- **Low：沒有用到的程式。**
+  - `action_toggle_focus = action_shift_tab` 這個別名，現在沒有任何 binding 用到；
+  - `action_next_tab` 和 `action_prev_tab` 幾乎一模一樣，而且 `check_action` 已經擋過的條件，在函式裡又檢查了一次。可以合成一個 `_change_tab(step)`。
+- **Low：用滑鼠點離開篩選框時，篩選框不會收起來。**
+  - R6 只規定了 Tab：Tab 切出去時篩選框收起來，滑鼠點不會。
+  - 不違反 spec，焦點在預覽區時 Esc 也不會誤清篩選（探針驗過）。但兩種切法的結果不一樣，第 2 節或 4.1 寫文件時要知道這一點。
+- `side()` 會沿著 parent 往上找 id。所以第 2 節把 `#right` 換成 TextArea、或在裡面放子 widget 時，都不用再改 `side()`。✓
+- `test_tui.py` 原本 17 處用 Tab 換頁的地方，都已經改成 `]`。✓
+
+### 給 PM 的清單（請轉告 impl3，可以在第 2 節的第一個 commit 一起做）
+
+1. `KEYS` 改成普通的 dict，預覽那一邊只有一張表，`paint_keys` 用中括號查；拿掉 `_KeysTable`。
+2. `test_ask_text_modal_tab_does_not_affect_underlying_screen` 補上兩個焦點的斷言：Tab 之後焦點仍在視窗裡的 widget；關掉視窗之後焦點在 `#table`。
+3. 補一個 R6 的測試：篩選框開著時用滑鼠點預覽區，按 Esc，焦點仍在預覽區、篩選也還在。
+4. 補一個測試：在篩選框裡按 ctrl+t 會切換標題／內文，篩選框的字不變。
+5. 清單的按鍵列加上 `[ ]` 換頁、`Tab` 切焦點。
+6. （Low）拿掉 `action_toggle_focus` 這個別名，把兩個換頁的 action 合成一個。
+
+### 測試執行
+
+- 探針與改壞的副本都放在 scratchpad，沒有加進 repo：
+  - 探針一共四個：篩選框裡按 ctrl+t、篩選框裡打 `[` 和 `]`、用滑鼠點離開篩選框之後按 Esc、AskText 裡按 Tab；
+  - 在沒改壞的 4170b1a 上，四個都通過。
+- 完整 unit 是在 `git archive HEAD` 的乾淨副本裡跑的：
+  - 那時的 HEAD 已經是 09f6a6b，包含 impl1 對 C1～C4 的修正；
+  - compileall 通過，571 passed；
+  - worktree 裡沒有 commit 的檔案沒有混進來。
+- 沒有跑整合測試。
