@@ -636,3 +636,86 @@ Agora 頁 `session.md` 讀不到時，預覽也是 `Preview(None)`，搜尋同�
 - **完整 unit：** 在 `git archive HEAD`（ba3a9e9，包含 5e61693、0e75284）的乾淨副本裡跑，**單獨跑**、不和別的測試搶 CPU：compileall 通過，**583 passed**。
 - **故意改壞的副本：** 是 12 個平行跑的，所以 benchmark 那個測試的失敗不列入判斷。
 - 沒有跑整合測試。
+
+---
+
+## 2.4 複查（2158aa8、717c468）
+
+這次複查的是 impl2 的 tasks 2.4（2158aa8）和決定顏色的 717c468，對照上一節「第 2 節程式審查」給 PM 的清單 1～5 與 Low。
+
+驗證方式：
+- 都在 `git archive HEAD` 的副本裡做。那時的 HEAD 是 0e67141，已經包含 #25 的 guard。
+- 沒有碰工作區。
+
+**結論：清單 1～5 與 Low 都做到了，可以進第 3 節。**
+- 只有一個沒有測試守著：PgUp 只往上一列（Low），可以順手補。
+- impl2 回報的例外可以接受，理由見下面。
+
+### 逐項
+
+| 項目 | 結果 |
+|---|---|
+| S1 以 code block 結尾不再掛 | ✓ 上一節的六種最短內文都不再丟例外；用 3 MB 假 session 的閱讀版選到那一列也正常。新增兩個測試，其中一個在 `run_test` 裡實際選到那一列 |
+| S2 換 Session 只讀一段 | ✓ 探針：兩個 Session 來回切換，每個都只讀一段（上一節是兩段）。`put_preview` 換內容期間設 `_suppress_scroll_load`，等 refresh 之後再放開 |
+| S3 用 `k` 補前一段 | ✓ 用 `wrapped_document` 換算「畫面上的上一列」。3000 字一行時，游標停在 `(7, 2976)`，也就是上一行的**最後一段**，在畫面第 0 列；原本那一行在第 1 列。短行也一樣 |
+| S3 用 PgUp 補前一段 | ✓ 往上一頁的列數，游標在畫面內 |
+| 測試的斷言 | ✓ 改成 `_screen_row(...) == 1`、游標在畫面第 0 列，不再用 `abs=1`；長行、短行兩種內文都參數化測了 |
+| W10、W11、提示文字、`_build_highlight_map` 的覆寫 | ✓ 各有一個新測試，故意改壞都會紅（見下表） |
+| benchmark 的門檻 | ✓ 改成 5 秒，docstring 寫明「只抓一段一段 insert 的退化；1.5 秒的目標留給 4.2 人工量」 |
+| 顏色 | ✓ `## user` 是 `bold #87afff`，`## assistant` 是 `bold #d787ff`。717c468 把 tasks 2.1 也寫上了；有一個測試會檢查畫出來的樣子，顏色改回 cyan 會紅 |
+| Low：拿掉 `PreviewArea` 別名 | ✓ |
+| Low：BINDINGS 不再展開父類別的 | ✓（並加了測試：只多 4 個鍵，其他是繼承的） |
+| Low：`step()` 回傳的空格旗標 | ✓ 改成回傳 `None`，並加了測試 |
+| Low：`_suppress_scroll_load` 只給測試用 | ✓ 現在是正式程式在用（類別屬性加上註解）；測試 helper 還在設它，用來把畫面擺到頂端而不觸發載入，這樣用是合理的 |
+
+### 故意改壞（`test_tui.py`，一次 6 個平行跑）
+
+| 改壞的地方 | 結果 |
+|---|---|
+| S1 拿掉行號範圍的檢查 | ✓ 2 failed（兩個 code block 結尾的測試） |
+| S2 `put_preview` 不設 suppress | ✓ 換 Session 的測試紅 |
+| S2 放開 suppress 的那一行拿掉（永遠不放開） | ✓ T6 的「捲到頂會補」測試紅 |
+| S3 游標放回上一行的第一段 | ✓ 2 failed（長行的 `k` 與 PgUp） |
+| W10 `_no_header` 改回每一段都套用 | ✓ 1 failed |
+| W11 不檢查檔案有沒有改過 | ✓ 1 failed |
+| 提示文字改回舊的 | ✓ 1 failed |
+| 拿掉 `## user`／`## assistant` 樣式的覆寫 | ✓ 1 failed（檢查畫出來的樣子的那一個） |
+| 顏色改回 cyan | ✓ 2 failed |
+| PgUp 只往上一列 | **✗ 全綠**。單獨跑 PgUp 的測試也是綠的 |
+| `load_all_earlier`（`g`）不設 suppress | ✗ 全綠（impl2 自己回報的例外，見下） |
+
+- **PgUp（Low）：**
+  - 測試只斷言「游標在畫面內、而且行號 > 0」，往上一列也滿足這兩個條件；
+  - 建議加一個斷言：原本那一行在畫面上往下移了大約一頁，例如 `_screen_row(pane, (added, 0)) >= pane.content_size.height - 1`。
+- **與這次無關的旁證：**
+  - 平行跑的時候，`test_the_bar_really_reaches_n_n_before_the_window_goes` 在其中兩個副本失敗過；
+  - 在沒改壞的 HEAD 上單獨跑 5 次都通過。這個測試來自較早的 commit（4581aa4），是機器忙時才會失敗的計時測試，不是這次改出來的；
+  - 只是提醒：以後平行跑 mutation 時，它的失敗不要算進去。
+
+### impl2 回報的例外：可以接受
+
+- `load_all_earlier` 是先 `while preview.more(): preview.step()`，全部讀完才 `load_text`。
+- 所以 `load_text` 把捲動位置歸零、觸發 `watch_scroll_y → load_earlier` 時，`load_earlier` 第一行就是 `if preview is None or not preview.more(): return`，什麼都不會做：不讀檔、不插入、也不會走到 `is_stale()` 的重建。
+- 那裡的 suppress 只是保險，拿掉之後行為完全一樣，所以測試不可能分得出來。這是「等價的改壞」，不是測試漏掉。
+- **建議：** 保留它並在旁邊加一句註解（「`more()` 已經是假，這裡只是保險」），或者乾脆拿掉讓程式更短。兩種都可以，不擋合併。
+
+### `g` 的時間（再量一次）
+
+- 用 3.17 MB 真實格式的內容（impl1 那份假 session 的閱讀版接長），第一次按 `g` 要 **1.66 秒**；上一節量的是 1.55 秒，差別在誤差範圍內。全部載入之後再按 `g` 約 0.1 秒。
+- 只用 2.11 MB 的閱讀版時，上一節量的是 1.02 秒。
+- 還是在 1.5 秒的邊緣，維持上一節的建議：由 PM 在 4.2 實際按一次決定。
+
+### 探針與隔離（對照新規則「測試檔只能放在 repo 的 tests/」與 #25）
+
+- 我的探針都放在 `git archive HEAD` 解開的**副本**裡的 `tests/unit/`，在副本的根目錄跑 pytest。所以會載入副本裡的 repo conftest 與 `_guard`；HEAD 已經包含 #25 的 guard，探針也都通過了它的檢查。
+- 我用一個探針印出環境變數確認過：`HOME`、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR` 都在 pytest 的 `tmp_path` 底下。
+- 探針只額外讀了 `/tmp/agora-trial/home` 裡 impl1 那份假 jsonl（透過 `AGORA_CLAUDE_HOME`），沒有在 repo 外、也沒有在沒有 conftest 的地方跑 pytest。
+- **給 #25 的觀察（不是這張單的問題）：**
+  - conftest 沒有設 `AGORA_RCLONE` 和 `AGORA_FOLDER_NAME`，印出來是 `None`；
+  - 目前 unit 測試不會呼叫 rclone，所以沒有影響；
+  - 但隔離要不要也把這兩個設到假的值，PM 可以順便判斷。
+
+### 測試執行
+
+- **完整 unit：** 在 `git archive HEAD`（0e67141）的乾淨副本裡單獨跑：compileall 通過，**593 passed**。
+- 沒有跑整合測試。
