@@ -8,4 +8,4 @@
 
 - [x] 2.1 review 審（docs/review/ime-kitty-keyboard.md「程式審查」：可以合；C1～C4 已在 09f6a6b 修掉）
 - [x] 2.2 本人在 herdr 的 pane 裡用中文輸入法在篩選框選字（PM 帶）：10-04 用假資料試用環境（cab2ba7）試過，選字後按 Enter 字留下來；同時試過 Tab 切焦點、`[`／`]` 換頁，都對
-- [ ] 2.3 和 `preview-search-keys` 一起開 PR 合進 main（使用者合）；本人試過後 issue #23 照規則關閉
+- [x] 2.3 整合測試 31 passed（7bcf19b）；和 `preview-search-keys`、`guard-under-pytest` 一起開 PR，由使用者合併（合併與 issue #23 的收尾不在這個 change 裡追蹤）

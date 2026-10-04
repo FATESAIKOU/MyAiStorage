@@ -17,4 +17,4 @@
   - conftest 不設 token → `test_background.py` 紅（token 那條路徑被拿掉了）
   - `_repo_conftest_loaded()` 永遠回 True → repo 外的兩個測試都紅
   - 副本裡 HEAD 的 src 跑完整 unit **595 綠**（worktree 裡 impl2 未 commit 的 `tui.py`／`test_tui.py` 沒碰）
-- [ ] 2.2 和 `preview-search-keys`、`ime-kitty-keyboard` 一起開 PR 合進 main（使用者合）；issue #25 照規則關閉
+- [x] 2.2 整合測試 31 passed（7bcf19b，整合測試只在主程序 import `_guard`，不受影響）；和 `preview-search-keys`、`ime-kitty-keyboard` 一起開 PR，由使用者合併（合併與 issue #25 的收尾不在這個 change 裡追蹤）
