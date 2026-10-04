@@ -1,23 +1,23 @@
 ## 1. 兩套按鍵（負責：impl3）
 
-- [ ] 1.1 App 層只留共用的 `tab`／`shift+tab`（切焦點）與 `q`；換頁改成 `[`、`]`，只在清單；`Confirm` 視窗的 Tab 轉交照舊（spec「按鍵」）
-- [ ] 1.2 清單的鍵只在焦點是清單（或它的篩選框）時有效；預覽區的鍵另外綁在預覽區；按鍵列跟著焦點換
-- [ ] 1.3 測試（`run_test` 按鍵驅動）：Tab 切焦點、`]` 只在清單換頁、預覽區按 `d`／`m`／`a` 沒有作用、按鍵列兩邊不同、Confirm 視窗的 Tab 照舊
+- [ ] 1.1 `side()`（依焦點 widget 的 id：`#table`、`#filter` 是清單；`#right` 與 `#search` 是預覽）；`check_action` 改用它；`KEYS` 拆成清單、預覽兩張表，`paint_keys()` 依（分頁, 邊）查表；`on_descendant_focus` 重畫按鍵列（design「先有 side()」）
+- [ ] 1.2 App 層只留 `tab`、`shift+tab`（各自一個 action：Confirm 裡分別往下／往上，其他視窗什麼都不做，沒有視窗時切換兩邊）與 `q`；換頁改成 `[`、`]`；ctrl+t 與其他清單的鍵只在清單；`on_key` 的 Esc 只在焦點是篩選框時處理（spec「按鍵」，design「按鍵與視窗」）
+- [ ] 1.3 測試（`run_test` 按鍵驅動）：Tab／shift+tab 切焦點、`]` 只在清單換頁、預覽區按 `d`／`m`／`a`／ctrl+t 沒有作用、按鍵列兩邊不同且滑鼠點也會換、Confirm 裡 Tab 往下 shift+tab 往上、AskText 裡 Tab 不動底下的畫面、從篩選框按 Tab 篩選照樣生效。`test_tui.py` 裡 17 處用 `"tab"` 換頁的要改成 `]`
 
 ## 2. 預覽區的游標（負責：impl2，第 1 節 commit 之後）
 
-- [ ] 2.1 `pyproject.toml` 改用 `textual[syntax]`；預覽區改成唯讀的 `PreviewText(TextArea)`：原始 Markdown 加上色、游標整行高亮；裝不起來時退回不上色（spec「預覽區的游標與捲動」）
-- [ ] 2.2 沿用 T6 的分段：游標在第 0 行往上或捲到頂時補前一段、游標不跳；`g` 全部載入後到第一行，`G` 到最後；換 Session 時游標在最後一行；pinned 行與「↑ 往上捲…」提示照舊
-- [ ] 2.3 測試：`j`／`k`／`↑`／`↓` 移動、`g` 全部載入且提示消失、`G`、補前一段時游標不跳、換 Session 游標在最後；150 ms 防抖與兩個分頁照舊
+- [ ] 2.1 `pyproject.toml` 改用 `textual[syntax]`（更新 `uv.lock`，記在 commit）；預覽區改成 `PreviewText(TextArea)`，`id="right"`、唯讀、折行、焦點在時才整行高亮；`language="markdown"`，兩種退回不上色的情況（沒有 tree-sitter；有 tree-sitter 但沒有 markdown 語法時 try/except）；`## user`／`## assistant` 沿用原本的顏色（`get_line()`）（spec「預覽區的游標與捲動」，design「改用唯讀的 TextArea」）
+- [ ] 2.2 分段：補一段時記下 `scroll_y` 與折行後的高度、插入 `f"{step}\n"`、還原捲動、`history.clear()`；`k`／`↑`／PgUp 在第 0 行與捲到頂都會補；`g` 先連續 `step()` 再一次放進去；`Preview.text` 改用 list；`_no_header` 只在 `start == 0`；記下大小與 mtime；提示改成提到 `k`／`g`；換 Session 時游標在最後一行（design「分段載入」）
+- [ ] 2.3 測試：`j`／`k`／`↑`／`↓` 移動（短行）、`g` 全部載入且提示消失、`G`、補前一段後 `cursor_screen_offset.y` 不變（不只驗 `cursor_location`）、捲到頂與 PgUp 也會補、兩種退回不上色、焦點離開時不高亮；T6 原本的 Y1、Y2 驗的事要保留；150 ms 防抖與兩個分頁照舊
 
 ## 3. 預覽區搜尋（負責：impl2，第 2 節之後）
 
-- [ ] 3.1 `/` 打開預覽區下方的搜尋框；Enter 在整個檔案上找所有符合（casefold），跳到離游標最近的下一個；`n`／`N` 下一個／上一個並繞回；還沒載入的先載入到那一段；沒有檔案的預覽在記憶體裡找（spec「預覽區搜尋」）
-- [ ] 3.2 標亮：目前那一個用 selection，其他已載入的符合在逐行繪製時標亮；「第 k 個／共 N 個」；`Esc` 清掉；找不到說「找不到」
-- [ ] 3.3 測試：找到並跳過去、`n`／`N` 繞回、跳到還沒載入的地方（自編的數 MB 內文）、`Esc` 清掉、找不到、搜尋框裡打 `n`／`q` 是字不是快捷鍵
+- [ ] 3.1 搜尋框 `#search`：`/` 打開、Enter 送出並回到預覽區、Esc 關掉；同一個比對函式，在檔案上算 N 與 B（從檔頭結束處開始），已載入的在 TextArea 文字裡找；跳到第 k 個時 k ≤ B 就先一次載入；`n`／`N` 從游標往下／往上並繞回（spec「預覽區搜尋」，design「搜尋：計數」）
+- [ ] 3.2 標亮：目前那一個用 selection，其他用 `get_line()` 加前景色與粗體或底線，符合改變時清 `_line_cache` 再 `refresh()`；計數「第 k 個／共 N 個」；找不到；Esc 先關搜尋框、再清標亮；狀態的生命週期（換 Session 清掉、同一個換成整份時重搜並提示、只有最後一則時標明、讀取失敗不卡在載入中）（design「搜尋框與狀態」）
+- [ ] 3.3 測試：不變量（每個 `at`：B＋已載入＝N；內文涵蓋切在 `\n\n`、`\n## `、中文、`ß`、檔頭裡也有）、找到並跳過去、`n`／`N` 繞回、跳到還沒載入的地方（自編的數 MB 內文）、檔頭不算、Esc 兩段、換 Session 清掉、最後一則換成整份後重搜、搜尋框裡打 `n`／`j`／`q` 是字
 
 ## 4. 收尾
 
-- [ ] 4.1 `docs/design.md` 5.9（按鍵表、預覽區）、README 的按鍵、`docs/acceptance.md` 互動模式那一段（負責：impl4）
-- [ ] 4.2 review 審程式；PM 用假資料在 pane 裡按一遍（量大 Session 的搜尋時間）
+- [ ] 4.1 `docs/design.md` 5.9（按鍵表、預覽區）、README 的按鍵、`docs/acceptance.md` 互動模式那一段（負責：impl4，等第 1～3 節完成）
+- [ ] 4.2 review 審程式；PM 用假資料在 pane 裡按一遍，量 3 MB 的 `g` 與跳到第一個符合（上限 1.5 秒）
 - [ ] 4.3 整合測試；開 PR 合進 main（使用者合）
