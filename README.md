@@ -41,6 +41,8 @@ agora <動作> <型態> [session_id] [選項]
 動作是 `search`、`import`、`merge`、`continue`、`delete`、`edit`、`show`、`pull`、`push`；
 型態目前只有 `session`。
 
+不帶參數執行 `agora` 進入互動模式。預設關掉 kitty 鍵盤協定，是為了讓輸入法能選字；只有 `TEXTUAL_DISABLE_KITTY_KEY=1` 會關掉，設成其他任何值（包括空字串）都會打開。
+
 `import`、`delete`、`merge`、`pull`、`push` 一次可以處理多個，處理時在 stderr 逐行印
 `k/N` 進度，stdout 只印 agora id（所以可以直接接管線）。被 Ctrl-C 中斷後，重跑同一個
 指令會接著做：import 略過已匯入的、delete 略過自己刪過的、merge 沿用已寫好的要約、

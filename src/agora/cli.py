@@ -1022,6 +1022,8 @@ def main(argv: list[str] | None = None) -> int:
             build_parser().print_usage(sys.stderr)
             print("[agora] 互動模式只在終端機裡開；指令模式請給動作，例如 agora search session", file=sys.stderr)
             return EXIT_ERROR
+        # 關閉 kitty 鍵盤協定以避免輸入法選字按 Enter 時字消失（issue #23）
+        os.environ.setdefault("TEXTUAL_DISABLE_KITTY_KEY", "1")
         from agora import tui
         return tui.main(store.Paths.from_env())
     args = build_parser().parse_args(argv)
