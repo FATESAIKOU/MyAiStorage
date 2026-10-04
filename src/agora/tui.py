@@ -47,16 +47,41 @@ COLUMNS = {"agora": ("id", "標題", "agent", "更新", "雲端"),
 CLOUD_YES, CLOUD_NO, CLOUD_NEW = "✓", "✗", "未上傳"
 TITLE_MAX = 36                   # the title column is cut here, so the others stay on screen
 AGENT_STYLE = {"opencode": "cyan", "claude": "#ff8700", "merge": "green"}
-#: The key bar, per tab (spec「按鍵」): what a key does here, and only here. The
-#: import tab has no merge, no header, no delete and no push - those are all about
-#: Sessions agora already has.
-KEYS = {
-    "agora": [("空白", "勾選"), ("a", "全選／全不選"), ("enter", "接續"), ("m", "合併"),
-              ("e", "改標頭"), ("d", "刪除"), ("p", "pull"), ("P", "push"),
-              ("/", "篩選（邊打邊篩）"), ("ctrl+t", "標題／內文"), ("q", "離開")],
-    "import": [("空白", "勾選"), ("a", "全選／全不選"), ("enter", "匯入"), ("p", "pull"),
-               ("/", "篩選（邊打邊篩）"), ("ctrl+t", "標題／內文"), ("q", "離開")],
-}
+class _KeysTable(dict):
+    """The key bar, per tab and side (spec「按鍵」, W8)."""
+
+    def __getitem__(self, key):
+        if isinstance(key, tuple) and len(key) == 2:
+            a, b = key
+            if a in self and isinstance(self.get(a), dict) and b in self[a]:
+                return self[a][b]
+            if b in self and isinstance(self.get(b), dict) and a in self[b]:
+                return self[b][a]
+        elif key in ("agora", "import"):
+            return self["list"][key]
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
+#: The key bar, per tab and side (spec「按鍵」): what a key does here, and only here.
+KEYS = _KeysTable({
+    "list": {
+        "agora": [("空白", "勾選"), ("a", "全選／全不選"), ("enter", "接續"), ("m", "合併"),
+                  ("e", "改標頭"), ("d", "刪除"), ("p", "pull"), ("P", "push"),
+                  ("/", "篩選（邊打邊篩）"), ("ctrl+t", "標題／內文"), ("q", "離開")],
+        "import": [("空白", "勾選"), ("a", "全選／全不選"), ("enter", "匯入"), ("p", "pull"),
+                   ("/", "篩選（邊打邊篩）"), ("ctrl+t", "標題／內文"), ("q", "離開")],
+    },
+    "preview": {
+        "agora": [("Tab", "切焦點"), ("q", "離開")],
+        "import": [("Tab", "切焦點"), ("q", "離開")],
+    },
+})
 
 
 # --- what each tab lists -------------------------------------------------------
@@ -751,8 +776,10 @@ class AgoraApp(App):
     OptionList { height: auto; max-height: 8; background: transparent; border: none; }
     """
     BINDINGS = [
-        Binding("tab", "next_tab", "換頁", priority=True),
-        Binding("shift+tab", "toggle_focus", "左右", priority=True),
+        Binding("tab", "tab", "切焦點", priority=True),
+        Binding("shift+tab", "shift_tab", "切焦點", priority=True),
+        Binding("[", "prev_tab", "換頁"),
+        Binding("]", "next_tab", "換頁"),
         Binding("space", "mark", "勾選"),
         Binding("a", "mark_all", "全選／全不選"),
         Binding("enter", "primary", "接續／匯入", priority=True),   # the table would take it for itself
@@ -760,7 +787,7 @@ class AgoraApp(App):
         Binding("e", "edit", "改標頭"),
         Binding("d", "delete", "刪除"),
         Binding("slash", "filter", "篩選"),
-        Binding("ctrl+t", "search_mode", "標題／內文", priority=True),
+        Binding("ctrl+t", "search_mode", "標題／內文"),
         Binding("p", "pull", "pull"),
         Binding("P", "push", "push"),
         Binding("q", "quit", "離開"),
@@ -817,7 +844,7 @@ class AgoraApp(App):
             self.status = "離線：只有本機資料" if "連不上 Drive" in (out or "") else ""
         self.reload()
         if not self.rows["agora"]:
-            self.say("Agora 還沒有 Session：按 Tab 到「未匯入」，空白鍵勾選後按 Enter 匯入")
+            self.say("Agora 還沒有 Session：按 ] 到「未匯入」，空白鍵勾選後按 Enter 匯入")
         self.query_one("#table").focus()
 
     async def setup(self) -> bool:
@@ -912,16 +939,18 @@ class AgoraApp(App):
         return rows[table.cursor_row] if rows and 0 <= table.cursor_row < len(rows) else None
 
     def paint_keys(self) -> None:
-        """The keys that work on this tab, and nothing else (spec「按鍵列」).
-
-        Textual's Footer listed every binding all the time, so the import tab
-        offered `m`, `e`, `d` and `P` - four keys that cannot do anything there.
-        """
+        """The keys that work here, per (tab, side) (spec「按鍵列」, W8)."""
+        side = self.side() or "list"
+        items = KEYS.get((self.tab, side)) or []
         bar = Text(" ")
-        for key, what in KEYS[self.tab]:
+        for key, what in items:
             bar.append(f" {key} ", style="bold #000000 on #00afaf")
             bar.append(f" {what}  ", style="#bcbcbc")
         self.query_one("#keys", Static).update(bar)
+
+    def on_descendant_focus(self, event) -> None:
+        if self.screen is self.default_screen:
+            self.paint_keys()
 
     def paint_bar(self) -> None:
         bar = Text(" agora ", style="bold #000000 on #00afaf")
@@ -1032,39 +1061,68 @@ class AgoraApp(App):
 
     # -- keys --------------------------------------------------------------------
 
+    def side(self) -> str | None:
+        """The side with focus: "list" for #table and #filter; "preview" for #right and #search."""
+        f = self.focused
+        while f is not None:
+            fid = getattr(f, "id", None)
+            if fid in ("table", "filter"):
+                return "list"
+            if fid in ("right", "search"):
+                return "preview"
+            f = getattr(f, "parent", None)
+        return None
+
     def check_action(self, action: str, parameters) -> bool | None:
         """Show only the keys that work here (the key bar follows the tab and the focus)."""
-        in_preview = isinstance(self.focused, VerticalScroll)
-        if action == "primary":          # a priority key: only for the list, or Enter in a window or input breaks
-            return isinstance(self.focused, DataTable)
-        if action in ("merge", "edit", "delete"):
-            return self.tab == "agora" and not in_preview
-        if action == "push":            # only Sessions agora already has (review Q1)
-            return self.tab == "agora" and not in_preview
-        if action in ("mark", "mark_all", "primary", "filter", "pull"):
-            return not in_preview
+        side = self.side()
+        if action == "primary":          # a priority key: only for the table, or Enter in a window or input breaks
+            return side == "list" and getattr(self.focused, "id", None) == "table"
+        if action in ("merge", "edit", "delete", "push"):
+            return side == "list" and self.tab == "agora"
+        if action in ("mark", "mark_all", "filter", "pull", "search_mode", "next_tab", "prev_tab"):
+            return side == "list"
         return True
 
-    def action_next_tab(self) -> None:
-        """Tab changes page - unless a window on top wants it for itself.
-
-        The app's priority bindings are checked before the screen's, so a window
-        cannot take a key away by binding it: the app has to hand it over (review S1).
-        """
+    def action_tab(self) -> None:
+        """Tab moves between list and preview, or forwards in Confirm (spec「按鍵」, W4)."""
         if isinstance(self.screen, Confirm):
             self.screen.action_focus_next()
+            return
+        if self.screen is not self.default_screen:
+            return
+        self.toggle_focus()
+
+    def action_shift_tab(self) -> None:
+        """shift+tab moves between list and preview, or backwards in Confirm (W4)."""
+        if isinstance(self.screen, Confirm):
+            self.screen.action_focus_previous()
+            return
+        if self.screen is not self.default_screen:
+            return
+        self.toggle_focus()
+
+    def toggle_focus(self) -> None:
+        target = "#table" if self.side() == "preview" else "#right"
+        self.query_one(target).focus()
+
+    action_toggle_focus = action_shift_tab
+
+    def action_next_tab(self) -> None:
+        """[ and ] change page on the list side (spec「按鍵」)."""
+        if self.screen is not self.default_screen or self.side() != "list":
             return
         self.tab = TABS[(TABS.index(self.tab) + 1) % len(TABS)]
         self.say("")
         self.show()
         self.refresh_bindings()
 
-    def action_toggle_focus(self) -> None:
-        if isinstance(self.screen, Confirm):
-            self.screen.action_focus_previous()
+    def action_prev_tab(self) -> None:
+        if self.screen is not self.default_screen or self.side() != "list":
             return
-        target = "#right" if self.focused is self.query_one("#table") else "#table"
-        self.query_one(target).focus()
+        self.tab = TABS[(TABS.index(self.tab) - 1) % len(TABS)]
+        self.say("")
+        self.show()
         self.refresh_bindings()
 
     def action_mark(self) -> None:
@@ -1134,7 +1192,7 @@ class AgoraApp(App):
             self.search(text)
 
     def on_key(self, event) -> None:
-        if event.key == "escape" and self.query_one("#filterbar").has_class("on"):
+        if event.key == "escape" and getattr(self.focused, "id", None) == "filter":
             if self._filter_timer is not None:
                 self._filter_timer.stop()
                 self._filter_timer = None

@@ -1,8 +1,8 @@
 ## 1. 兩套按鍵（負責：impl3）
 
-- [ ] 1.1 `side()`（依焦點 widget 的 id：`#table`、`#filter` 是清單；`#right` 與 `#search` 是預覽）；`check_action` 改用它；`KEYS` 拆成清單、預覽兩張表，`paint_keys()` 依（分頁, 邊）查表；`on_descendant_focus` 重畫按鍵列（design「先有 side()」）
-- [ ] 1.2 App 層只留 `tab`、`shift+tab`（各自一個 action：Confirm 裡分別往下／往上，其他視窗什麼都不做，沒有視窗時切換兩邊；從篩選框切出去等同按 Enter，篩選框收起來）與 `q`；換頁改成 `[`、`]`（不設 priority）；ctrl+t 與其他清單的鍵只在清單；Enter 的 `primary` 維持「焦點是 `#table`」才放行（review R1）；`on_key` 的 Esc 只在 `#filterbar` 開著且 `side() == "list"` 時處理（review R6）（spec「按鍵」，design「按鍵與視窗」）
-- [ ] 1.3 測試（`run_test` 按鍵驅動）：Tab／shift+tab 切焦點、`]` 只在清單換頁、預覽區按 `d`／`m`／`a`／ctrl+t 沒有作用、按鍵列兩邊不同且滑鼠點也會換、Confirm 裡 Tab 往下 shift+tab 往上、AskText 裡 Tab 不動底下的畫面、從篩選框按 Tab 篩選照樣生效且篩選框收起來、在篩選框按 Enter 不會開接續或匯入。`test_tui.py` 裡 17 處用 `"tab"` 換頁的要改成 `]`
+- [x] 1.1 `side()`（依焦點 widget 的 id：`#table`、`#filter` 是清單；`#right` 與 `#search` 是預覽）；`check_action` 改用它；`KEYS` 拆成清單、預覽兩張表，`paint_keys()` 依（分頁, 邊）查表；`on_descendant_focus` 重畫按鍵列（design「先有 side()」）
+- [x] 1.2 App 層只留 `tab`、`shift+tab`（各自一個 action：Confirm 裡分別往下／往上，其他視窗什麼都不做，沒有視窗時切換兩邊；從篩選框切出去等同按 Enter，篩選框收起來）與 `q`；換頁改成 `[`、`]`（不設 priority）；ctrl+t 與其他清單的鍵只在清單；Enter 的 `primary` 維持「焦點是 `#table`」才放行（review R1）；`on_key` 的 Esc 只在 `#filterbar` 開著且 `side() == "list"` 時處理（review R6）（spec「按鍵」，design「按鍵與視窗」）
+- [x] 1.3 測試（`run_test` 按鍵驅動）：Tab／shift+tab 切焦點、`]` 只在清單換頁、預覽區按 `d`／`m`／`a`／ctrl+t 沒有作用、按鍵列兩邊不同且滑鼠點也會換、Confirm 裡 Tab 往下 shift+tab 往上、AskText 裡 Tab 不動底下的畫面、從篩選框按 Tab 篩選照樣生效且篩選框收起來、在篩選框按 Enter 不會開接續或匯入。`test_tui.py` 裡 17 處用 `"tab"` 換頁的要改成 `]`
 
 ## 2. 預覽區的游標（負責：impl2，第 1 節 commit 之後）
 

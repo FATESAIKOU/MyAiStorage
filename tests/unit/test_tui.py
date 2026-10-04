@@ -268,7 +268,7 @@ def test_screen_lists_with_column_names_and_switches_tabs():  # feedback 8
             table = app.query_one("#table")
             assert [str(c.label) for c in table.columns.values()][2:] == list(tui.COLUMNS["agora"])
             assert table.row_count == 2
-            await pilot.press("tab")
+            await pilot.press("]")
             await pilot.pause()
             assert app.tab == "import" and table.row_count == 1
             assert [str(c.label) for c in table.columns.values()][2:] == list(tui.COLUMNS["import"])
@@ -343,7 +343,7 @@ def test_content_search_finds_in_agora_and_streams_in_the_import_tab():  # feedb
             await pilot.press("enter")
             await pilot.pause(0.2)
             assert [r.key for r in app.shown()] == ["agora:01AAAAAAAAAAAAAAAAAAAAAAAA"]   # its body has 表格
-            await pilot.press("tab")
+            await pilot.press("]")
             await pilot.pause(0.2)
             assert [r.key for r in app.shown()] == ["claude:s2"]
     _run(go)
@@ -359,7 +359,7 @@ def test_content_search_scans_only_what_the_cache_lacks():
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("tab", "ctrl+t", "slash")
+            await pilot.press("]", "ctrl+t", "slash")
             for ch in "表格":
                 await pilot.press(ch)
             await pilot.press("enter")
@@ -411,7 +411,7 @@ def test_import_runs_one_command_per_agent():
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("tab")                       # 未匯入
+            await pilot.press("]")                       # 未匯入
             await pilot.pause()
             for _ in range(3):
                 await pilot.press("space")
@@ -656,7 +656,7 @@ def test_an_interruption_does_not_start_the_next_command(group_calls, monkeypatc
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("tab")
+            await pilot.press("]")
             await pilot.pause()
             await pilot.press("space", "down", "space", "enter")     # mark both, then import
             await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
@@ -943,7 +943,7 @@ def test_a_failed_segment_keeps_its_own_marks():
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("tab")                          # 未匯入
+            await pilot.press("]")                          # 未匯入
             await pilot.pause()
             await pilot.press("space", "down", "space")        # mark both agents' rows
             assert app.marked == {"opencode:s1", "claude:c1"}
@@ -1037,7 +1037,7 @@ def test_the_key_bar_shows_only_what_works_on_this_tab():
             await pilot.pause()
             keys = " ".join(str(app.query_one("#keys").render()).split())
             assert "m 合併" in keys and "P push" in keys and "enter 接續" in keys
-            await pilot.press("tab")
+            await pilot.press("]")
             await pilot.pause()
             keys = " ".join(str(app.query_one("#keys").render()).split())
             for gone in ("m 合併", "P push", "d 刪除", "e 改標頭"):
@@ -1080,7 +1080,7 @@ def test_the_agora_only_keys_do_nothing_on_the_import_tab():
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("tab")
+            await pilot.press("]")
             await pilot.pause()
             assert not app.check_action("merge", ()) and not app.check_action("delete", ())
             await pilot.press("m", "d", "P")
@@ -1181,7 +1181,7 @@ def test_push_is_not_bound_on_the_import_tab():   # review Q1
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("tab")
+            await pilot.press("]")
             await pilot.pause()
             assert not app.check_action("push", ())
             await pilot.press("P")
@@ -1340,7 +1340,7 @@ def test_import_uses_the_row_under_the_cursor_when_nothing_is_marked():
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("tab")                      # 未匯入
+            await pilot.press("]")                      # 未匯入
             await pilot.pause()
             await pilot.press("down")                     # the second row, un-marked
             await pilot.press("enter")
@@ -1740,7 +1740,7 @@ def _result_of(app, code, *, mark_one=False, action="delete", said=()):
             if mark_one:
                 await pilot.press("space")
             if action == "import":       # Enter on the import tab is 匯入; elsewhere it is 接續
-                await pilot.press("tab")
+                await pilot.press("]")
                 await pilot.pause()
                 await pilot.press("enter")
             else:
@@ -1840,7 +1840,7 @@ def _after_one_import(code=0) -> str:
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            await pilot.press("tab")                       # the import tab
+            await pilot.press("]")                       # the import tab
             await pilot.pause()
             await pilot.press("enter")
             await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
@@ -2505,3 +2505,282 @@ def test_enter_before_the_pause_searches_once_not_twice():
             await pilot.pause(0.5)                 # past the debounce: nothing more
             assert agent.calls == 1, f"計時器應該被停掉，總共搜了 {agent.calls} 次"
     _run(go)
+
+
+# --- preview-search-keys section 1: two sets of keys --------------------------
+
+def test_tab_and_shift_tab_toggle_focus_between_list_and_preview():
+    """Tab and shift+tab toggle focus between list and preview (spec「按鍵」)."""
+    app, _ = _app([])
+
+    async def go():
+        async with app.run_test(size=(120, 20)) as pilot:
+            await pilot.pause()
+            assert app.focused is app.query_one("#table")
+            assert app.side() == "list"
+
+            # Tab switches to preview
+            await pilot.press("tab")
+            assert app.focused is app.query_one("#right")
+            assert app.side() == "preview"
+
+            # Tab switches back to list
+            await pilot.press("tab")
+            assert app.focused is app.query_one("#table")
+            assert app.side() == "list"
+
+            # shift+tab switches to preview
+            await pilot.press("shift+tab")
+            assert app.focused is app.query_one("#right")
+            assert app.side() == "preview"
+
+            # shift+tab switches back to list
+            await pilot.press("shift+tab")
+            assert app.focused is app.query_one("#table")
+            assert app.side() == "list"
+    _run(go)
+
+
+def test_bracket_changes_page_only_on_list_side():
+    """[ ] switches tab only when focus is on the list side (spec「按鍵」)."""
+    app, _ = _app([])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            assert app.focused is app.query_one("#table")
+            assert app.tab == "agora"
+
+            # In list, ] switches to import tab
+            await pilot.press("]")
+            await pilot.pause()
+            assert app.tab == "import"
+
+            # In list, [ switches back to agora tab
+            await pilot.press("[")
+            await pilot.pause()
+            assert app.tab == "agora"
+
+            # Switch focus to preview
+            await pilot.press("tab")
+            assert app.focused is app.query_one("#right")
+            assert app.side() == "preview"
+
+            # In preview, ] and [ do not change tab
+            await pilot.press("]")
+            await pilot.pause()
+            assert app.tab == "agora"
+
+            await pilot.press("[")
+            await pilot.pause()
+            assert app.tab == "agora"
+
+            # Switch back to list, then ] switches tab
+            await pilot.press("tab")
+            assert app.focused is app.query_one("#table")
+            await pilot.press("]")
+            await pilot.pause()
+            assert app.tab == "import"
+    _run(go)
+
+
+def test_preview_side_ignores_list_keys():
+    """List keys (d, m, a, ctrl+t, etc.) do nothing on the preview side (spec「按鍵」)."""
+    app, _ = _app([])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("tab")  # switch to preview
+            assert app.focused is app.query_one("#right")
+            assert app.side() == "preview"
+
+            for act in ("delete", "merge", "mark_all", "search_mode", "mark", "primary", "filter", "pull", "push"):
+                assert not app.check_action(act, ())
+
+            # Press d: no Confirm window opened
+            await pilot.press("d")
+            await pilot.pause()
+            assert not isinstance(app.screen, tui.Confirm)
+            assert not app._last_spawned
+
+            # Press m: no merge window opened
+            await pilot.press("m")
+            await pilot.pause()
+            assert not isinstance(app.screen, tui.Confirm)
+            assert not app._last_spawned
+
+            # Press a: nothing marked
+            await pilot.press("a")
+            await pilot.pause()
+            assert len(app.marked) == 0
+
+            # Press ctrl+t: search mode not changed
+            was_content = app.content
+            await pilot.press("ctrl+t")
+            await pilot.pause()
+            assert app.content == was_content
+    _run(go)
+
+
+def test_key_bar_differs_by_side_and_click_switches():
+    """Key bar differs between list and preview, and mouse click switches it (spec「按鍵列」)."""
+    app, _ = _app([])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            assert app.side() == "list"
+            keys_list = " ".join(str(app.query_one("#keys").render()).split())
+            assert "m 合併" in keys_list and "enter 接續" in keys_list and "q 離開" in keys_list
+
+            # Click on #right to focus preview
+            await pilot.click("#right")
+            await pilot.pause()
+            assert app.side() == "preview"
+            keys_preview = " ".join(str(app.query_one("#keys").render()).split())
+            assert "m 合併" not in keys_preview
+            assert "enter 接續" not in keys_preview
+            assert "Tab 切焦點" in keys_preview and "q 離開" in keys_preview
+
+            # Click on #table to focus list
+            await pilot.click("#table")
+            await pilot.pause()
+            assert app.side() == "list"
+            keys_back = " ".join(str(app.query_one("#keys").render()).split())
+            assert "m 合併" in keys_back and "enter 接續" in keys_back
+    _run(go)
+
+
+def test_confirm_modal_tab_moves_down_and_shift_tab_moves_up():
+    """Confirm dialog: Tab moves down, shift+tab moves up, underlying page untouched (W4)."""
+    app = _marked_app(None)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("p")
+            await pilot.pause()
+            window = app.screen
+            assert isinstance(window, tui.Confirm)
+            from textual.widgets import Checkbox, OptionList
+            assert isinstance(app.focused, OptionList)
+
+            # Tab moves down to Checkbox
+            await pilot.press("tab")
+            await pilot.pause()
+            assert isinstance(app.focused, Checkbox)
+            assert app.tab == "agora"
+
+            # shift+tab moves back up to OptionList
+            await pilot.press("shift+tab")
+            await pilot.pause()
+            assert isinstance(app.focused, OptionList)
+            assert app.tab == "agora"
+    _run(go)
+
+
+def test_ask_text_modal_tab_does_not_affect_underlying_screen():
+    """Modals other than Confirm: Tab and shift+tab do nothing to underlying screen (W4)."""
+    app, _ = _app([])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            assert app.tab == "agora"
+            assert app.focused is app.query_one("#table")
+
+            # Push AskText modal
+            async def push_modal():
+                await app.push_screen(tui.AskText("設定檔路徑", ""))
+            app.call_after_refresh(push_modal)
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, tui.AskText)
+
+            # Press tab and shift+tab: must not change app.tab or underlying table focus
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.tab == "agora"
+
+            await pilot.press("shift+tab")
+            await pilot.pause()
+            assert app.tab == "agora"
+
+            # Dismiss modal
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            assert not isinstance(app.screen, tui.ModalScreen)
+            assert app.tab == "agora"
+    _run(go)
+
+
+def test_tab_from_filter_preserves_filter_and_esc_in_preview_does_not_clear_it():
+    """Tab from filter keeps filter active; Esc in preview does not clear list filter (W4)."""
+    app, _ = _app([])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            # Press slash to open filter
+            await pilot.press("slash")
+            await pilot.pause()
+            assert app.query_one("#filterbar").has_class("on")
+            assert app.focused is app.query_one("#filter")
+            assert app.side() == "list"
+
+            # Type filter
+            for ch in "01A":
+                await pilot.press(ch)
+            await pilot.pause(0.1)
+            assert len(app.shown()) == 1
+
+            # Press tab: switches focus to preview
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.focused is app.query_one("#right")
+            assert app.side() == "preview"
+            # Filterbar is still open and filter still active
+            assert app.query_one("#filterbar").has_class("on")
+            assert len(app.shown()) == 1
+
+            # Press escape while focus is in preview: does NOT clear list filter
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.focused is app.query_one("#right")
+            assert app.query_one("#filterbar").has_class("on")
+            assert len(app.shown()) == 1
+
+            # Tab back to list table
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.focused is app.query_one("#table")
+            assert len(app.shown()) == 1
+
+            # Focus filter again, then press escape: clears filter
+            await pilot.press("slash")
+            await pilot.pause()
+            assert app.focused is app.query_one("#filter")
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not app.query_one("#filterbar").has_class("on")
+            assert app.focused is app.query_one("#table")
+            assert len(app.shown()) == 2
+    _run(go)
+
+
+def test_filter_enter_does_not_trigger_primary():
+    """Enter in filter bar submits/closes filter without triggering primary action (R1)."""
+    app, _ = _app([])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("slash")
+            await pilot.pause()
+            assert app.focused is app.query_one("#filter")
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert not app._last_spawned
+            assert not isinstance(app.screen, tui.Confirm)
+    _run(go)
+
