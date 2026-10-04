@@ -4,7 +4,7 @@
 import 任何測試模組或測試 helper 時，如果使用者真實的目錄可能被碰到，MUST 在 import 當下就擋下（SystemExit），而且 MUST NOT 讀寫任何真實目錄。
 
 - 不在 pytest 裡：`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`AGORA_CONFIG`、`HOME` 都要指到暫存目錄，否則擋下（T8，照舊）。
-- 在 pytest 裡：repo 的 `tests/conftest.py` MUST 已經載入（它負責每個測試的隔離），否則擋下。
+- 在 pytest 裡：repo 的 `tests/conftest.py` MUST 已經載入（它負責每個測試的隔離），或是繼承自載入了它的行程（測試自己開的子行程，連帶繼承它設的暫存 HOME）；否則擋下。
 - 擋下時的訊息 MUST 只有變數名稱或原因，不印出任何路徑、標題或 Session 的內容。
 
 #### Scenario: 在 repo 的 tests 底下用 pytest

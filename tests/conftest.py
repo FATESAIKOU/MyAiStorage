@@ -19,6 +19,13 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 
+# The token `_guard` reads to tell "a pytest run that has this conftest" from "a pytest run
+# of a test file kept outside the repository", where pytest loads no conftest and nothing is
+# isolated (T8). A test's own subprocess inherits this together with the temporary HOME that
+# `isolated_home` sets, so it is under the same isolation and must not be refused; a pytest
+# run of a file somewhere else has neither. Set at import time, never in the user's shell.
+os.environ["AGORA_TESTS_ISOLATED"] = "1"
+
 
 def _real_env() -> dict:
     """The environment the user's own opencode store lives in."""
