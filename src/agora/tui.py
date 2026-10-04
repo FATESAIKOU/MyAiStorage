@@ -36,7 +36,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.geometry import Offset
 from textual.screen import ModalScreen
 from textual.widgets import Checkbox, DataTable, Input, OptionList, ProgressBar, Static, TextArea
-from textual.widgets.text_area import LanguageDoesNotExist, Selection
+from textual.widgets.text_area import Edit, EditResult, LanguageDoesNotExist, Selection
 
 from agora import cache
 from agora import header as h
@@ -462,9 +462,9 @@ class PreviewText(TextArea):
         self.content_version += 1
         super().load_text(text)
 
-    def edit(self, *args, **kwargs) -> None:
+    def edit(self, edit: Edit) -> EditResult:
         self.content_version += 1
-        super().edit(*args, **kwargs)
+        return super().edit(edit)
 
     def set_query(self, query: str) -> None:
         """Highlight every match of `query` from now on.
@@ -1296,11 +1296,12 @@ class AgoraApp(App):
         the reader was reading stays, and nothing is cached, so selecting the row again tries the
         read again (spec「整份讀取失敗時」, review T3).
         """
+        row = self.current()
         if result is None:
-            self.query_one("#pinned", Static).update("讀不到整份對話")
+            if row and row.key == key:            # the reader may have moved on since (review R1)
+                self.query_one("#pinned", Static).update("讀不到整份對話")
             return
         self.cache[key] = result
-        row = self.current()
         if row and row.key == key:
             self.pending_note = "已換成整份對話"
             self.put_preview(result)

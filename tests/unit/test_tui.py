@@ -6,6 +6,7 @@ import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve
 
 import asyncio
 import contextlib
+import inspect
 import json
 import os
 import pathlib
@@ -4178,3 +4179,53 @@ def test_a_whole_conversation_that_cannot_be_read_keeps_the_last_message_and_tri
             assert "整份對話（閱讀版）" in str(app.query_one("#pinned", Static).content), "this time it worked"
             assert Flaky.attempts >= 2
     _run(go)
+
+
+def test_a_read_that_fails_after_the_reader_moved_on_leaves_the_pinned_alone():
+    """R1 (review): the failure says so on the line above the pane - but only while that row is
+    the one on screen. The reader has moved on, and that line now belongs to another row."""
+    gate = threading.Event()
+
+    class Slow(FakeAgent):
+        def export(self, session_id):
+            gate.wait(10)                     # the read is still going when the reader moves
+            raise RuntimeError("no reading version today")
+
+    agent = Slow("claude", [Listed("s1", "/tmp/p", "未匯入的", "2026-10-02T00:00:00Z")],
+                 last=("user", "最後一則的內容"), texts={"s1": ["問", "答"]})
+    mine = _hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "我自己的")
+    paths, _index_ = _index((mine, "## user\\n表格在這裡\\n"))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[agent], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("]")                    # the import tab, and its only row
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.3)
+            assert "最後一則的內容" in app.query_one("#right").document.text
+
+            await pilot.press("[")                    # back to my own session while it is reading
+            await pilot.pause(0.4)
+            assert app.current().key == mine["id"]
+            before = str(app.query_one("#pinned", Static).content)
+            assert "讀不到整份對話" not in before
+
+            gate.set()                               # and now it fails
+            await pilot.pause(0.5)
+            assert str(app.query_one("#pinned", Static).content) == before, "another row's line"
+    _run(go)
+
+
+def test_editing_the_pane_keeps_text_areas_own_answer():
+    """Low (review): `TextArea.edit` answers an `EditResult`, and `insert`, `delete` and
+    `replace` hand that answer straight back to their caller - so the override that counts what
+    the pane is showing has to pass it on, not swallow it."""
+    assert inspect.signature(tui.PreviewText.edit) == inspect.signature(tui.TextArea.edit)
+    pane = tui.PreviewText("## user\\n一句話\\n")
+    before = pane.content_version
+
+    assert isinstance(pane.insert("表格", location=(1, 0)), tui.EditResult)
+
+    assert pane.content_version > before, "and it still counts what is on screen"
