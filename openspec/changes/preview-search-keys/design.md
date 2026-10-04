@@ -58,6 +58,8 @@
   - 沒有 tree-sitter 時 Textual 會退回純文字；有 tree-sitter 但沒有 markdown 的語法時會丟 `LanguageDoesNotExist`，要 try/except 退回 `language=None`（W9）；
   - tree-sitter 的 markdown 只上區塊層級的色（標題、清單、引用、code fence）。
 - `## user`、`## assistant` 的不同顏色，以及搜尋標亮，都在覆寫的 `get_line()` 上加樣式（W6，官方的接點）。
+  - 顏色（PM 10-04 決定）：`## user` 用 bold `#87afff`，`## assistant` 用 bold `#d787ff`。改之前其實沒有替這兩種標題設顏色；cyan、green、`#ff8700` 是清單裡 agent 與合併的顏色，`#ffd75f` 是標記，紅色是錯誤，都避開。
+  - 若要讓這兩行不被 tree-sitter 的 heading 樣式蓋掉而覆寫 `_build_highlight_map`，MUST 跳過 `line_index >= document.line_count` 的行（code fence 的結束點會落在最後一行的下一行，review S1）。
   - 符合改變時要清 `_line_cache`（私有屬性，附註解）再 `refresh()`；
   - 游標行的底色會蓋掉符合的底色，所以符合用前景色加粗體或底線。
 - pinned 行（dir、tags）與「↑ 往上捲…」提示維持在 TextArea 之外的 `Static`，提示改成「↑ 往上捲、按 k 或 g 載入更早的內容（還有約 N KB）」（W13）。
@@ -72,6 +74,8 @@
   - 捲到頂觸發（游標沒動）：原本最上面那一行的螢幕位置完全不變；
   - `k`／`↑`／PgUp 觸發：還原捲動之後，游標移到前一段的最後，再照 TextArea 平常的規則捲到游標看得到為止。原本那一行最多往下移一頁，`k`／`↑` 時剛好一列。
   - 測試驗的是「原本那一行」的螢幕位置，不是游標的。
+- `put_preview`、`load_all_earlier` 換內容與捲動的期間，要設 `_suppress_scroll_load`，到 `call_after_refresh` 之後才放開；否則 `load_text` 把 `scroll_y` 變成 0，會被當成「捲到頂」而多讀一段（review S2）。
+- `k`／`↑`／PgUp 補完之後，游標放在折行後「原本那一行的上一列」，用 `wrapped_document` 換回文件位置；不是上一行的第一段（review S3）。
 - 跳很遠（`g`、跳到還沒載入的符合）：
   - 先只對 `Preview` 連續 `step()`（只讀檔，不碰畫面）；
   - 最後**一次** insert 接好的文字，或 `load_text` 再還原游標與捲動；
@@ -118,6 +122,6 @@
 
 - [`textual[syntax]` 多裝 15 個語言的 grammar] → 只在安裝時多幾 MB；markdown 語法裝不起來就不上色。
 - [原文的 code fence 被切在中間（T6 的 Y3）時，之後全部被染成程式碼的顏色] → 內容不受影響，接受。
-- [`g` 在很大的檔案上仍要一次 `load_text`（3 MB 約 1 秒）] → 是使用者明確要求的動作；4.2 量 3 MB 的 `g` 與跳到第一個符合，上限 1.5 秒。
+- [`g` 在很大的檔案上仍要一次 `load_text`] → 是使用者明確要求的動作。review 實測：3 MB 的 jsonl（閱讀版 2.1 MB）第一次按 `g` 1.02 秒；閱讀版本身 3.17 MB 時 1.55 秒。PM 10-04 決定：以「3 MB 的 Session 檔 ≤ 1.5 秒」為目標，閱讀版 3 MB 約 1.5 秒可以接受；4.2 在 pane 裡再量。單元測試的門檻放寬到 5 秒，只抓平方級的退化（機器忙時絕對時間會不穩）。
 - [使用者習慣 `Tab` 換頁] → 這是使用者自己選的改法；README、`docs/acceptance.md`、按鍵列都要更新。
 - [搜尋框打中文] → 由 change `ime-kitty-keyboard` 修。
