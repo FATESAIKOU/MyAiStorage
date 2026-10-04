@@ -33,7 +33,8 @@ from textual.worker import get_current_worker
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Checkbox, DataTable, Input, OptionList, ProgressBar, Static
+from textual.widgets import Checkbox, DataTable, Input, OptionList, ProgressBar, Static, TextArea
+from textual.widgets.text_area import LanguageDoesNotExist
 
 from agora import cache
 from agora import header as h
@@ -47,41 +48,19 @@ COLUMNS = {"agora": ("id", "標題", "agent", "更新", "雲端"),
 CLOUD_YES, CLOUD_NO, CLOUD_NEW = "✓", "✗", "未上傳"
 TITLE_MAX = 36                   # the title column is cut here, so the others stay on screen
 AGENT_STYLE = {"opencode": "cyan", "claude": "#ff8700", "merge": "green"}
-class _KeysTable(dict):
-    """The key bar, per tab and side (spec「按鍵」, W8)."""
-
-    def __getitem__(self, key):
-        if isinstance(key, tuple) and len(key) == 2:
-            a, b = key
-            if a in self and isinstance(self.get(a), dict) and b in self[a]:
-                return self[a][b]
-            if b in self and isinstance(self.get(b), dict) and a in self[b]:
-                return self[b][a]
-        elif key in ("agora", "import"):
-            return self["list"][key]
-        return super().__getitem__(key)
-
-    def get(self, key, default=None):
-        try:
-            return self[key]
-        except KeyError:
-            return default
-
-
 #: The key bar, per tab and side (spec「按鍵」): what a key does here, and only here.
-KEYS = _KeysTable({
+KEYS = {
     "list": {
-        "agora": [("空白", "勾選"), ("a", "全選／全不選"), ("enter", "接續"), ("m", "合併"),
-                  ("e", "改標頭"), ("d", "刪除"), ("p", "pull"), ("P", "push"),
-                  ("/", "篩選（邊打邊篩）"), ("ctrl+t", "標題／內文"), ("q", "離開")],
-        "import": [("空白", "勾選"), ("a", "全選／全不選"), ("enter", "匯入"), ("p", "pull"),
-                   ("/", "篩選（邊打邊篩）"), ("ctrl+t", "標題／內文"), ("q", "離開")],
+        "agora": [("[ ]", "換頁"), ("Tab", "切焦點"), ("空白", "勾選"), ("a", "全選／全不選"),
+                  ("enter", "接續"), ("m", "合併"), ("e", "改標頭"), ("d", "刪除"),
+                  ("p", "pull"), ("P", "push"), ("/", "篩選（邊打邊篩）"),
+                  ("ctrl+t", "標題／內文"), ("q", "離開")],
+        "import": [("[ ]", "換頁"), ("Tab", "切焦點"), ("空白", "勾選"), ("a", "全選／全不選"),
+                   ("enter", "匯入"), ("p", "pull"), ("/", "篩選（邊打邊篩）"),
+                   ("ctrl+t", "標題／內文"), ("q", "離開")],
     },
-    "preview": {
-        "agora": [("Tab", "切焦點"), ("q", "離開")],
-        "import": [("Tab", "切焦點"), ("q", "離開")],
-    },
-})
+    "preview": [("j/k", "移動"), ("g/G", "最前／最後"), ("Tab", "切焦點"), ("q", "離開")],
+}
 
 
 # --- what each tab lists -------------------------------------------------------
@@ -190,7 +169,7 @@ FILTER_IDLE = 0.3            # content search: this long without a keystroke bef
 PREVIEW_IDLE = 0.15          # the cursor has to rest this long before anything is read
 
 
-def read_tail(path: Path, at: int | None = None, size: int = PREVIEW_CHUNK) -> tuple[str, int]:
+def read_tail(path: Path, at: int | None = None, size: int | None = None) -> tuple[str, int]:
     """(text, where it starts): the `size` bytes of `path` ending at offset `at`.
 
     `at` is an absolute offset - `None` is the end of the file - and the offset handed
@@ -201,6 +180,8 @@ def read_tail(path: Path, at: int | None = None, size: int = PREVIEW_CHUNK) -> t
     is not cut in half, and both ends of what is kept are then just after a newline, so a
     multibyte character cannot be broken either.
     """
+    if size is None:
+        size = PREVIEW_CHUNK
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
@@ -235,7 +216,33 @@ class Preview:
         # `at` is where the part that is already here starts, an absolute offset; None is
         # "nothing read yet". 0 is the beginning of the file, which is how "all of it is
         # here" is told apart from "none of it is" (review Y1).
-        self.path, self.pinned, self.text, self.at = path, pinned, text, None
+        self.path, self.pinned, self.at = path, pinned, None
+        self._chunks: list[str] = [text] if text else []
+        self._stat: tuple[int, float] | None = None
+        if path is not None and path.is_file():
+            try:
+                st = path.stat()
+                self._stat = (st.st_size, st.st_mtime)
+            except OSError:
+                pass
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self._chunks)
+
+    @text.setter
+    def text(self, value: str) -> None:
+        self._chunks = [value] if value else []
+
+    def is_stale(self) -> bool:
+        """Whether the backing file has changed since the preview was first read (W11)."""
+        if self.path is None:
+            return False
+        try:
+            st = self.path.stat()
+            return self._stat is not None and (st.st_size, st.st_mtime) != self._stat
+        except OSError:
+            return False
 
     def step(self) -> str:
         """Read one more step - the tail first, the step above after that.
@@ -247,13 +254,20 @@ class Preview:
         if self.path is None or not self.path.is_file():
             self.at = 0          # nothing to read: all here, and the hint goes for good
             return ""
+        try:
+            st = self.path.stat()
+            if self._stat is None:
+                self._stat = (st.st_size, st.st_mtime)
+        except OSError:
+            pass
         text, start = read_tail(self.path, self.at)
         self.at = start
         if not text:
             return ""
-        step = _no_header(text).strip("\n")
-        self.text = f"{step}\n{self.text}" if self.text else step    # an earlier one goes above
-        return text
+        step = (_no_header(text) if start == 0 else text).strip("\n")
+        if step:
+            self._chunks.insert(0, step)     # an earlier one goes above (W3: list accumulator)
+        return step or (" " if text else "")
 
     def more(self) -> bool:
         """Whether anything above is still unread. Nothing read yet counts as "more".
@@ -264,18 +278,110 @@ class Preview:
         return self.path is not None and self.at != 0
 
     def hint(self) -> str:
-        """The line that says there is more above - gone once it is all here (T6)."""
-        return f"↑ 往上捲載入更早的內容（還有約 {max(1, round((self.at or 0) / 1024))} KB）" \
+        """The line that says there is more above - gone once it is all here (T6, W13)."""
+        return f"↑ 往上捲、按 k 或 g 載入更早的內容（還有約 {max(1, round((self.at or 0) / 1024))} KB）" \
             if self.more() else ""
 
 
-class PreviewArea(VerticalScroll):
-    """The preview pane: reaching its top asks for the part above (T6)."""
+class PreviewText(TextArea):
+    """The preview pane: a read-only TextArea with cursor and syntax highlighting (design 5.9)."""
 
-    def watch_scroll_y(self, above: float, here: float) -> None:
-        super().watch_scroll_y(above, here)      # the container's own: scrollbar, refresh
-        if above > 0 and here == 0 and self.is_attached:
+    BINDINGS = [
+        *TextArea.BINDINGS,
+        Binding("j", "cursor_down", "向下", show=False),
+        Binding("k", "cursor_up", "向上", show=False),
+        Binding("g", "top", "到最前", show=False),
+        Binding("G", "bottom", "到最後", show=False),
+    ]
+
+    def __init__(
+        self,
+        text: str = "",
+        *,
+        id: str | None = None,
+        classes: str | None = None,
+    ) -> None:
+        try:
+            super().__init__(
+                text=text,
+                read_only=True,
+                soft_wrap=True,
+                show_line_numbers=False,
+                language="markdown",
+                id=id,
+                classes=classes,
+            )
+        except LanguageDoesNotExist:
+            super().__init__(
+                text=text,
+                read_only=True,
+                soft_wrap=True,
+                show_line_numbers=False,
+                language=None,
+                id=id,
+                classes=classes,
+            )
+        self.highlight_cursor_line = False
+
+    def on_focus(self) -> None:
+        self.highlight_cursor_line = True
+
+    def on_blur(self) -> None:
+        self.highlight_cursor_line = False
+
+    def action_cursor_up(self, select: bool = False) -> None:
+        if self.cursor_location[0] == 0 and self.get_cursor_up_location() == self.cursor_location:
+            self.app.load_earlier(cursor_up=True)
+            return
+        super().action_cursor_up(select=select)
+
+    def action_cursor_page_up(self) -> None:
+        if self.cursor_location[0] == 0 and self.scroll_y == 0:
+            self.app.load_earlier(cursor_page_up=True)
+            return
+        super().action_cursor_page_up()
+
+    def action_top(self) -> None:
+        self.app.load_all_earlier()
+
+    def action_bottom(self) -> None:
+        last_line = max(0, self.document.line_count - 1)
+        self.move_cursor((last_line, 0))
+        self.scroll_end(animate=False)
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
+        if old_value > 0 and new_value == 0 and self.is_attached and not getattr(self, "_suppress_scroll_load", False):
             self.app.load_earlier()
+
+    def _build_highlight_map(self) -> None:
+        super()._build_highlight_map()
+        # Keep ## user and ## assistant headings in their distinct styles (W6, W9)
+        for line_index in list(self._highlights.keys()):
+            line = self.document.get_line(line_index).strip()
+            if line.startswith("## user") or line.startswith("## assistant"):
+                self._highlights[line_index] = [
+                    (s, e, name) for s, e, name in self._highlights[line_index]
+                    if name != "heading"
+                ]
+
+    def get_line(self, line_index: int) -> Text:
+        line_string = self.document.get_line(line_index)
+        text = Text(line_string, end="", no_wrap=True)
+        stripped = line_string.strip()
+        if stripped.startswith("## user"):
+            text.stylize("bold cyan")
+        elif stripped.startswith("## assistant"):
+            text.stylize("bold green")
+        self._stylize_search_matches(text, line_index, line_string)
+        return text
+
+    def _stylize_search_matches(self, text: Text, line_index: int, line_string: str) -> None:
+        """Hook for Section 3 search highlights."""
+        pass
+
+
+PreviewArea = PreviewText
 
 
 def agora_preview(paths: store.Paths, index: store.Index, agora_id: str) -> Preview:
@@ -753,14 +859,15 @@ class AgoraApp(App):
     #main { layout: horizontal; height: 1fr; }
     #main.narrow { layout: vertical; }
     #left { width: 55%; background: #303030; }
-    #right { width: 1fr; background: #303030; padding: 0 1; }
+    #preview_pane { width: 1fr; background: #303030; padding: 0 1; }
+    #right { width: 100%; height: 1fr; background: transparent; border: none; padding: 0; }
     #main.narrow #left { width: 100%; height: 50%; }
-    #main.narrow #right { width: 100%; height: 1fr; }
-    #left:focus-within, #right:focus { background: #000000; }
+    #main.narrow #preview_pane { width: 100%; height: 1fr; }
+    #left:focus-within, #right:focus, #preview_pane:focus-within { background: #000000; }
     DataTable { background: transparent; }
     DataTable > .datatable--cursor { background: #3a3a3a; text-style: bold; }
     DataTable > .datatable--header { background: transparent; color: #8a8a8a; text-style: bold; }
-    #pinned { color: #8a8a8a; }
+    #pinned, #hint { color: #8a8a8a; height: auto; }
     #filterbar { height: 1; display: none; }
     #filterbar.on { display: block; }
     #mode { width: auto; padding: 0 1; background: #5f0000; }
@@ -818,10 +925,10 @@ class AgoraApp(App):
             with Vertical(id="left"):
                 yield DataTable(id="table", cursor_type="row", zebra_stripes=False,
                                 cursor_foreground_priority="renderable")   # the red bar and agent colours stay
-            with PreviewArea(id="right"):
+            with Vertical(id="preview_pane"):
                 yield Static(id="pinned")
                 yield Static(id="hint")
-                yield Static(id="history")
+                yield PreviewText(id="right")
         yield Static(id="keys")
         with Horizontal(id="filterbar"):
             yield Static("標題", id="mode")
@@ -940,8 +1047,8 @@ class AgoraApp(App):
 
     def paint_keys(self) -> None:
         """The keys that work here, per (tab, side) (spec「按鍵列」, W8)."""
-        side = self.side() or "list"
-        items = KEYS.get((self.tab, side)) or []
+        side = self.side()
+        items = KEYS["list"][self.tab] if side == "list" else KEYS["preview"]
         bar = Text(" ")
         for key, what in items:
             bar.append(f" {key} ", style="bold #000000 on #00afaf")
@@ -1004,7 +1111,7 @@ class AgoraApp(App):
         row = self.current()
         if row is None:
             self.put_preview(Preview(None))
-        elif row.key in self.cache:
+        elif row.key in self.cache and not self.cache[row.key].is_stale():
             self.put_preview(self.cache[row.key])
         elif self.tab == "agora":
             self.cache[row.key] = agora_preview(self.paths, self.index, row.key)
@@ -1026,30 +1133,74 @@ class AgoraApp(App):
         if row and row.key == key:
             self.put_preview(result)
 
-    def load_earlier(self) -> None:
+    def load_earlier(self, cursor_up: bool = False, cursor_page_up: bool = False) -> None:
         """At the top of the pane: one more step above, and stay on the line we were on."""
-        preview = self.cache.get(self.current().key) if self.current() else None
-        if preview is None or not preview.step():
-            return                              # nothing left above, or not ours to read
-        pane = self.query_one("#right", PreviewArea)
-        keep, was = pane.scroll_offset.y, pane.virtual_size.height
+        row = self.current()
+        preview = self.cache.get(row.key) if row else None
+        if preview is None or not preview.more():
+            return
+        if preview.is_stale():
+            if self.tab == "agora":
+                preview = agora_preview(self.paths, self.index, row.key)
+            else:
+                agent = next((a for a in self.agents if a.name == row.agent), None)
+                if agent:
+                    preview = import_preview(agent, row.key.split(":", 1)[1], True, self.paths, row.updated)
+            if preview:
+                self.cache[row.key] = preview
+                self.put_preview(preview)
+            return
+
+        step = preview.step()
+        if not step:
+            return
+        pane = self.query_one("#right", PreviewText)
+        keep_scroll_y = pane.scroll_y
+        was_height = pane.wrapped_document.height
+        pane.insert(f"{step}\n", location=(0, 0), maintain_selection_offset=True)
+        pane.history.clear()
         self.query_one("#hint", Static).update(preview.hint())
-        self.query_one("#history", Static).update(Markdown(preview.text))
 
         def restore() -> None:
-            # The line the reader was on moved down by however much the rendered text
-            # grew above it - rich's line count, not the source's (review Y2).
-            grew = max(0, pane.virtual_size.height - was)
-            pane.scroll_to(y=keep + grew, animate=False)
+            delta = max(0, pane.wrapped_document.height - was_height)
+            if cursor_up:
+                target_row = max(0, pane.cursor_location[0] - 1)
+                pane.move_cursor((target_row, 0))
+                pane.scroll_to(y=max(0, keep_scroll_y + delta - 1), animate=False)
+            elif cursor_page_up:
+                page_height = max(1, pane.content_size.height)
+                target_row = max(0, pane.cursor_location[0] - page_height)
+                pane.move_cursor((target_row, 0))
+                pane.scroll_to(y=max(0, keep_scroll_y + delta - page_height), animate=False)
+            else:
+                pane.scroll_to(y=keep_scroll_y + delta, animate=False)
+
         self.call_after_refresh(restore)
+
+    def load_all_earlier(self) -> None:
+        """Load all earlier chunks and place cursor at the very top (spec「到最前面」, g)."""
+        row = self.current()
+        preview = self.cache.get(row.key) if row else None
+        if preview is None:
+            return
+        if preview.more():
+            while preview.more():
+                preview.step()
+            pane = self.query_one("#right", PreviewText)
+            pane.load_text(preview.text)
+            self.query_one("#hint", Static).update(preview.hint())
+        pane = self.query_one("#right", PreviewText)
+        pane.move_cursor((0, 0))
+        pane.scroll_to(y=0, animate=False)
 
     def put_preview(self, preview: Preview) -> None:
         self.query_one("#pinned", Static).update(preview.pinned)
         self.query_one("#hint", Static).update(preview.hint())
-        # Rendered once by rich and then only scrolled, so a long history scrolls smoothly
-        # (feedback 4, 5). Only what has been read is ever handed to it (T6).
-        self.query_one("#history", Static).update(Markdown(preview.text) if preview.text else "")
-        self.call_after_refresh(self.query_one("#right", PreviewArea).scroll_end, animate=False)
+        pane = self.query_one("#right", PreviewText)
+        pane.load_text(preview.text)
+        last_line = max(0, pane.document.line_count - 1)
+        pane.move_cursor((last_line, 0))
+        self.call_after_refresh(pane.scroll_end, animate=False)
 
     @on(DataTable.RowHighlighted)
     def moved(self) -> None:

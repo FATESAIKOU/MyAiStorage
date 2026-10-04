@@ -2143,7 +2143,7 @@ def test_a_step_is_cut_on_a_boundary_and_breaks_no_character():
 def test_scrolling_to_the_top_adds_the_step_above_and_keeps_the_line():
     """T6: reaching the top reads one more step and puts it above, and the line the
     reader was on stays where it is - which is what the rendered height says, not the
-    source's line count (review Y2)."""
+    source's line count (review Y2, R4)."""
     hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
     paths, index = _index((hdr, _big_body()))
     app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
@@ -2155,22 +2155,21 @@ def test_scrolling_to_the_top_adds_the_step_above_and_keeps_the_line():
             await pilot.pause(0.4)                 # the cursor comes to rest
             first = app.cache[hdr["id"]].text
             assert app.cache[hdr["id"]].more(), "there is more above"
-            pane = app.query_one("#right")
-            was = pane.virtual_size.height
+            pane = app.query_one("#right", tui.PreviewText)
             pane.focus()
-            for _ in range(50):                    # up to the top: it asks for the step above
-                await pilot.press("home")
-                await pilot.pause(0.05)
-                if len(app.cache[hdr["id"]].text) > len(first):
-                    break
+            await pilot.pause()
+            was = pane.wrapped_document.height
+            pane.scroll_to(y=10, animate=False)
+            await pilot.pause(0.05)
+            pane.scroll_to(y=0, animate=False)
             await pilot.pause(0.2)
             assert len(app.cache[hdr["id"]].text) > len(first), "a step was added above"
-            grew = pane.virtual_size.height - was
+            grew = pane.wrapped_document.height - was
             assert grew > 0
-            # The reader was on the top line, so what they were reading is now exactly
-            # `grew` rendered lines further down - not at the top of the new part (Y2).
-            assert pane.scroll_offset.y == pytest.approx(grew, abs=2), \
-                "the line the reader was on has to stay under their eyes"
+            # Review R4: 捲到頂時原本最上面那一行的螢幕位置完全不變 (was at row 0, remains at row 0)
+            original_line_screen_y = grew - pane.scroll_y
+            assert original_line_screen_y == pytest.approx(0, abs=1), \
+                "the line the reader was on has to stay at the same screen position"
     _run(go)
 
 
@@ -2214,12 +2213,12 @@ def test_reaching_the_top_after_everything_is_here_adds_nothing():
             await pilot.pause(0.4)
             text = app.cache[normal["id"]].text
             assert text.count("最後的回答") == 1 and not app.cache[normal["id"]].more()
-            pane = app.query_one("#right")
+            pane = app.query_one("#right", tui.PreviewText)
             pane.focus()
             for _ in range(3):
                 pane.scroll_to(y=3, animate=False)
                 await pilot.pause(0.05)
-                await pilot.press("home")
+                pane.scroll_to(y=0, animate=False)
                 await pilot.pause(0.05)
             assert app.cache[normal["id"]].text.count("最後的回答") == 1
     _run(go)
@@ -2633,6 +2632,7 @@ def test_key_bar_differs_by_side_and_click_switches():
             assert app.side() == "list"
             keys_list = " ".join(str(app.query_one("#keys").render()).split())
             assert "m 合併" in keys_list and "enter 接續" in keys_list and "q 離開" in keys_list
+            assert "[ ] 換頁" in keys_list and "Tab 切焦點" in keys_list
 
             # Click on #right to focus preview
             await pilot.click("#right")
@@ -2805,4 +2805,265 @@ def test_filter_enter_does_not_trigger_primary():
             assert app.focused is app.query_one("#table")
             assert app.check_action("primary", ())
     _run(go)
+
+
+# --- Section 2: PreviewText, cursor, navigation, and loading --------------------
+
+def test_preview_cursor_movement_short_lines():
+    """Scenario: 游標移動 (2.3). Short lines, j/k/up/down moves cursor, and line is highlighted."""
+    lines = [f"## line {i}" for i in range(20)]
+    body = "\n".join(lines) + "\n"
+    hdr = _hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "短行")
+    paths, index = _index((hdr, body))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            pane = app.query_one("#right", tui.PreviewText)
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.focused is pane
+            assert pane.highlight_cursor_line is True
+
+            last_line = pane.document.line_count - 1
+            assert pane.cursor_location[0] == last_line
+
+            await pilot.press("k", "k", "k")
+            await pilot.pause()
+            assert pane.cursor_location[0] == last_line - 3
+
+            await pilot.press("up")
+            await pilot.pause()
+            assert pane.cursor_location[0] == last_line - 4
+
+            await pilot.press("j", "j")
+            await pilot.pause()
+            assert pane.cursor_location[0] == last_line - 2
+
+            await pilot.press("down")
+            await pilot.pause()
+            assert pane.cursor_location[0] == last_line - 1
+    _run(go)
+
+
+def test_preview_g_loads_all_content_and_G_moves_to_end():
+    """Scenario: 到最前面 (2.3). g loads all chunks in one go, cursor at (0, 0), hint goes away. G goes to end."""
+    hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
+    paths, index = _index((hdr, _big_body(3)))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            assert app.cache[hdr["id"]].more()
+            assert "還有約" in str(app.query_one("#hint", tui.Static).content)
+            pane = app.query_one("#right", tui.PreviewText)
+            await pilot.press("tab")
+            await pilot.pause()
+
+            await pilot.press("g")
+            await pilot.pause(0.3)
+            assert not app.cache[hdr["id"]].more(), "all chunks loaded"
+            assert str(app.query_one("#hint", tui.Static).content) == "", "hint is gone"
+            assert pane.cursor_location == (0, 0)
+            assert pane.scroll_y == 0
+
+            await pilot.press("G")
+            await pilot.pause()
+            last_line = pane.document.line_count - 1
+            assert pane.cursor_location[0] == last_line
+    _run(go)
+
+
+def test_prepend_chunk_does_not_jump_when_pressing_k_at_top():
+    """Scenario: 按 k 補前一段不跳 (Review R4).
+    When cursor is at line 0, pressing k loads earlier chunk.
+    Original top line moves down by exactly 1 row on screen, cursor is on the line above it."""
+    hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
+    paths, index = _index((hdr, _big_body()))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            first = app.cache[hdr["id"]].text
+            assert app.cache[hdr["id"]].more()
+            pane = app.query_one("#right", tui.PreviewText)
+            await pilot.press("tab")
+            await pilot.pause()
+
+            # Cleanly position cursor and scroll at (0, 0) for the test setup
+            pane._suppress_scroll_load = True
+            pane.move_cursor((0, 0))
+            pane.scroll_to(y=0, animate=False)
+            await pilot.pause(0.05)
+            pane._suppress_scroll_load = False
+
+            assert pane.cursor_location[0] == 0
+            assert pane.scroll_y == 0
+            was = pane.wrapped_document.height
+            was_lines = pane.document.line_count
+            before_len = len(app.cache[hdr["id"]].text)
+
+            # Press k at line 0
+            await pilot.press("k")
+            await pilot.pause(0.3)
+
+            assert len(app.cache[hdr["id"]].text) > before_len
+            grew = pane.wrapped_document.height - was
+            grew_lines = pane.document.line_count - was_lines
+            assert grew > 0 and grew_lines > 0
+
+            # Review R4: Original line (which was at visual row 0) is now at index `grew`.
+            # Its screen position must be row 1 (moved down by exactly 1 row).
+            original_line_screen_y = grew - pane.scroll_y
+            assert original_line_screen_y == pytest.approx(1, abs=1)
+
+            # Cursor is on the newly inserted line right above the original line
+            assert pane.cursor_location[0] == grew_lines - 1
+            cursor_screen_y = (grew - 1) - pane.scroll_y
+            assert cursor_screen_y == pytest.approx(0, abs=1)
+    _run(go)
+
+
+def test_prepend_chunk_triggers_on_page_up_at_top():
+    """PageUp at line 0 triggers loading earlier chunk."""
+    hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
+    paths, index = _index((hdr, _big_body()))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            first = app.cache[hdr["id"]].text
+            assert app.cache[hdr["id"]].more()
+            pane = app.query_one("#right", tui.PreviewText)
+            await pilot.press("tab")
+            await pilot.pause()
+
+            pane._suppress_scroll_load = True
+            pane.move_cursor((0, 0))
+            pane.scroll_to(y=0, animate=False)
+            await pilot.pause(0.05)
+            pane._suppress_scroll_load = False
+
+            assert pane.cursor_location[0] == 0
+            assert pane.scroll_y == 0
+            before_len = len(app.cache[hdr["id"]].text)
+
+            await pilot.press("pageup")
+            await pilot.pause(0.3)
+            assert len(app.cache[hdr["id"]].text) > before_len, "pageup loaded earlier chunk"
+    _run(go)
+
+
+def test_preview_syntax_fallback_no_tree_sitter(monkeypatch):
+    """When tree-sitter is missing, PreviewText falls back to plain text without error."""
+    from textual.widgets import _text_area
+    monkeypatch.setattr(_text_area, "TREE_SITTER", False)
+    pt = tui.PreviewText("## user\nhello", id="right")
+    assert pt.document is not None
+    assert "## user" in pt.document.text
+
+
+def test_preview_syntax_fallback_language_does_not_exist(monkeypatch):
+    """When tree-sitter is present but markdown grammar is missing, falls back to language=None."""
+    from textual.widgets import _text_area
+    monkeypatch.setattr(_text_area, "TREE_SITTER", True)
+    monkeypatch.setattr(_text_area, "get_language", lambda lang: None)
+    pt = tui.PreviewText("## user\nhello", id="right")
+    assert pt.language is None
+    assert "## user" in pt.document.text
+
+
+def test_preview_highlight_cursor_line_only_when_focused():
+    """W13: cursor line is only highlighted when preview has focus."""
+    hdr = _hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "測試")
+    paths, index = _index((hdr, "## user\nhello\n"))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            pane = app.query_one("#right", tui.PreviewText)
+            assert app.focused is app.query_one("#table")
+            assert pane.highlight_cursor_line is False
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.focused is pane
+            assert pane.highlight_cursor_line is True
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.focused is app.query_one("#table")
+            assert pane.highlight_cursor_line is False
+    _run(go)
+
+
+def test_preview_get_line_user_and_assistant_colors():
+    """## user and ## assistant headings are stylized with bold cyan and bold green."""
+    pt = tui.PreviewText("## user\n第 1 則\n## assistant\n回答\n# 其他\n普通文字", id="right")
+    line0 = pt.get_line(0)
+    line2 = pt.get_line(2)
+    line4 = pt.get_line(4)
+
+    assert any(span.style == "bold cyan" for span in line0.spans)
+    assert any(span.style == "bold green" for span in line2.spans)
+    assert not any(span.style in ("bold cyan", "bold green") for span in line4.spans)
+
+
+def test_preview_staleness_detection(tmp_path):
+    """W11: Preview records file size and mtime and detects staleness."""
+    f = tmp_path / "test.md"
+    f.write_text("hello", encoding="utf-8")
+    p = tui.Preview(f)
+    assert not p.is_stale()
+    time.sleep(0.02)
+    f.write_text("hello world modified", encoding="utf-8")
+    assert p.is_stale()
+
+
+def test_benchmark_3mb_g_press():
+    """Benchmark 3 MB g press time (target <= 1.5 s)."""
+    import time
+    mb = 3
+    one = "## user\n" + "話" * 3000 + "\n\n## assistant\n" + "答" * 3000 + "\n\n"
+    body = one * ((mb * 1024 * 1024) // len(one)) + "## user\n最後一則\n"
+    hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "3MB")
+    paths, index = _index((hdr, body))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            pane = app.query_one("#right", tui.PreviewText)
+            await pilot.press("tab")
+            await pilot.pause()
+
+            t0 = time.perf_counter()
+            await pilot.press("g")
+            for _ in range(50):
+                if not app.cache[hdr["id"]].more():
+                    break
+                await pilot.pause(0.05)
+            t1 = time.perf_counter()
+            elapsed = t1 - t0
+            print(f"\n[BENCHMARK] 3 MB g press time: {elapsed:.3f} s")
+            assert elapsed <= 1.5, f"3 MB g took {elapsed:.3f} s, which exceeds 1.5 s"
+            assert not app.cache[hdr["id"]].more()
+            assert pane.cursor_location == (0, 0)
+    _run(go)
+
 
