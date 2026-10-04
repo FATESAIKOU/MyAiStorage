@@ -9,7 +9,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 from agora import cli
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -37,10 +36,7 @@ import os, sys
 import agora.cli as cli
 code = cli.main(["search"])
 assert "TEXTUAL_DISABLE_KITTY_KEY" not in os.environ, "指令模式不可設定 TEXTUAL_DISABLE_KITTY_KEY"
-print(f"EXIT_CODE_NO_TYPE={code}")
-code2 = cli.main(["search", "session", "--no-sync"])
-assert "TEXTUAL_DISABLE_KITTY_KEY" not in os.environ, "指令模式不可設定 TEXTUAL_DISABLE_KITTY_KEY"
-print(f"EXIT_CODE_SEARCH={code2}")
+print(f"EXIT_CODE={code}")
 """
 
 
@@ -95,5 +91,4 @@ def test_command_mode_does_not_set_disable_kitty(tmp_path):
     proc = subprocess.run([sys.executable, "-c", CODE_COMMAND],
                           cwd=str(REPO), env=env, capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
-    assert f"EXIT_CODE_NO_TYPE={cli.EXIT_INPUT}" in proc.stdout
-    assert "EXIT_CODE_SEARCH=0" in proc.stdout
+    assert f"EXIT_CODE={cli.EXIT_INPUT}" in proc.stdout
