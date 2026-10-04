@@ -8,17 +8,38 @@ out - runs its helpers against the user's real `~/.cache/agora` and
 10-04 a diagnosis printed real sessions' ids and titles into an external model's
 conversation.
 
-So this module refuses to be imported outside pytest unless every directory that
-matters points at a temporary one. Import it first thing in a test module (or in a
-helper the test modules share) and the refusal happens at the import itself.
+Being under pytest is not isolation by itself. pytest loads a conftest for the test
+files *under its own directory*, so on 10-04 a test file kept outside the repository and
+run with `uv run pytest` had no conftest, nothing was isolated, and two fake sessions
+were written into the real cache while this module said nothing. So under pytest it
+refuses unless this repository's own `tests/conftest.py` is loaded; a process that did
+load it is left alone, because what isolates a test is that conftest's `isolated_home`
+fixture and it only runs while a test runs, so at import time the four directories still
+say nothing either way. A subprocess of an isolated run has no conftest of its own but
+inherits the token the conftest leaves behind - and it still has to pass the very same
+four-directory check as outside pytest, because the token says where a process came from,
+never that anyone isolated it. Otherwise exactly as outside pytest: it refuses unless
+every directory that matters points at a temporary one.
+
+Import it first thing in a test module (or in a helper the test modules share) and the
+refusal happens at the import itself, before any helper touches a directory.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 TEMP_ROOTS = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
+
+# The module that isolates every test - `tests/conftest.py`, next to this file.
+CONFTEST = Path(__file__).resolve().with_name("conftest.py")
+
+# What `tests/conftest.py` leaves in the environment when it is imported, so a subprocess
+# of an isolated run can tell where it comes from. Set there, read only here - and on its
+# own it opens nothing: see `_check()`.
+ISOLATED_TOKEN = "AGORA_TESTS_ISOLATED"
 
 
 def _in_temp(value: str | None) -> bool:
@@ -32,11 +53,57 @@ def _in_temp(value: str | None) -> bool:
     return any(path == Path(root) or path.is_relative_to(root) for root in TEMP_ROOTS)
 
 
+def _repo_conftest_loaded() -> bool:
+    """Whether *this* process imported this repository's `tests/conftest.py`.
+
+    Looked up in `sys.modules` by the file each module came from, rather than by a marker
+    the conftest would leave here: what isolates a test is that conftest's `isolated_home`
+    fixture, and it only runs while a test runs, so at import time the environment says
+    nothing about it - and a marker could have been set, or left, by anything. Which module
+    got imported is the one fact nobody can fake by accident. The module *name* is not
+    compared, only the file: pytest imports the conftest as `conftest`, as `tests.conftest`
+    or under another name depending on the import mode, and `sys.modules` holds a module
+    with its `__file__` already set while its body runs - which is what makes this true for
+    the conftest's own `import _guard` too. What an *ancestor* process had is a different
+    question, answered by `ISOLATED_TOKEN` in `_check()`.
+    """
+    for module in tuple(sys.modules.values()):
+        origin = getattr(module, "__file__", None)
+        if not origin:
+            continue
+        try:
+            if Path(origin).resolve() == CONFTEST:
+                return True
+        except (OSError, RuntimeError):
+            continue
+    return False
+
+
 def _check() -> None:
-    # pytest sets this; a plain interpreter does not. Under pytest the conftest has
-    # already isolated everything, and this module has nothing to say.
+    # Under pytest, only this repository's conftest isolates anything, and pytest loads it
+    # for the test files under `tests/` only - a test file kept anywhere else runs unisolated
+    # with this module silent. `PYTEST_VERSION` is no help: pytest hands it down to every
+    # child it starts. So the question is not "is this pytest?" but "did the conftest come
+    # with it?", and having imported it settles that on its own: what isolates a test is that
+    # conftest's `isolated_home` fixture, and it only runs while a test runs, so at import
+    # time - which is when this module decides - the four directories say nothing either way
+    # (design「Decisions」).
     if os.environ.get("PYTEST_VERSION"):
-        return
+        if _repo_conftest_loaded():
+            return
+        # A subprocess of an isolated run has no conftest of its own but inherits this
+        # token, and inherits the temporary HOME with it, so it is worth listening to. It is
+        # still not a licence: the token says where a process came from, not that anyone
+        # isolated it - someone can export one by hand, and one rides along inside a copied
+        # environment (`{**os.environ, "HOME": the real one}`, which is what the integration
+        # tests build). So with only a token, fall through and judge it exactly as outside
+        # pytest instead of returning.
+        if not os.environ.get(ISOLATED_TOKEN):
+            # Same discipline as the message below: the reason only, no path, no title,
+            # nothing from a session.
+            raise SystemExit("[tests] 測試的 helper 只能在隔離的環境用："
+                             "這次 pytest 沒有載入 repo 的 conftest，沒有隔離。"
+                             "請把測試檔放在 repo 的 tests 底下（uv run pytest）。")
     loose = [name for name in ("AGORA_CACHE_DIR", "AGORA_STATE_DIR", "AGORA_CONFIG", "HOME")
              if not _in_temp(os.environ.get(name))]
     if loose:
