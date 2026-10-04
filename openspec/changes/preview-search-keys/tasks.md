@@ -20,6 +20,6 @@
 
 ## 4. 收尾
 
-- [ ] 4.1 `docs/design.md` 5.9（按鍵表、預覽區）、README 的按鍵、`docs/acceptance.md` 互動模式那一段（負責：impl4，等第 1～3 節完成）
-- [ ] 4.2 review 審程式；PM 用假資料在 pane 裡按一遍，量 3 MB 的 Session 檔按 `g` 與跳到第一個符合（目標 1.5 秒；閱讀版 3 MB 約 1.5 秒可接受）；在 kitty 協定關掉的預設狀態（#23 合進來之後）實際按 Tab、shift+tab、`[`、`]`、`G`、`N`（review R7，單元測試測不到終端機的編碼）
+- [x] 4.1 `docs/design.md` 5.9（按鍵表、預覽區）、README 的按鍵、`docs/acceptance.md` 互動模式那一段（負責：impl4，等第 1～3 節完成）
+- [x] 4.2 review 審程式（第 1～3 節、2.4、T1～T3 都審過可以合，見 docs/review/preview-search-keys.md）；PM 用假資料在 pane 裡按一遍（10-04：g 1.40 秒、Enter 跳到最前面 1.33 秒、n／N 約 0.2 秒；Tab、shift+tab、[、]、G、N 在 kitty 關掉的預設狀態都正常；標題顏色正確），量 3 MB 的 Session 檔按 `g` 與跳到第一個符合（目標 1.5 秒；閱讀版 3 MB 約 1.5 秒可接受）；在 kitty 協定關掉的預設狀態（#23 合進來之後）實際按 Tab、shift+tab、`[`、`]`、`G`、`N`（review R7，單元測試測不到終端機的編碼）
 - [ ] 4.3 整合測試；開 PR 合進 main（使用者合）
