@@ -98,3 +98,71 @@ sys.exit(cli.main([]))
 - 1.1 到 1.3 都只動 `cli.py`、一個新的測試檔和 README，和 `preview-search-keys` 要改的 `tui.py` 沒有交集。
 - README 兩個 change 都要改：這邊加一句，那邊改按鍵表。是不同段落，但合 PR 時要注意衝突。
 - 1.2 要照 K2 的寫法；常數名稱照 K1 改。
+
+---
+
+## 程式審查（a85bb80）
+
+審的是 a85bb80 的 `src/agora/cli.py`、`tests/unit/test_ime_kitty.py`、README 與 tasks，對照的是 change 的 spec、tasks，以及上面的 K1～K5。
+
+**結論：可以合。沒有 High，也沒有 Medium。** 下面有 4 個 Low，改不改都不影響合併。
+
+### 對照
+
+- **K1 常數名稱**：測試讀的是 `textual.constants.DISABLE_KITTY_KEY`，tasks 1.2 也改過了。✓
+- **時機**：`cli.py:1025` 在互動模式的分支裡，`from agora import tui` 的前一行做 `os.environ.setdefault(...)`。✓
+- **K2 的子程序測試**：照建議用假的 `agora.tui`，三種情況都有測：
+  - 沒有設定：`DISABLE_KITTY_KEY=1`，而且環境變數是 `1`；
+  - 設成 `0`：常數是 `0`，環境變數仍然是 `0`，有照使用者的設定；
+  - 指令模式：跑了 `search`（不給型態）和 `search session --no-sync` 兩次，之後環境變數都沒有被設。
+  - 互動模式那兩個測試也會檢查「`import agora.cli` 不會帶進 Textual」。✓
+- **K3 README**：寫明「只有 `1` 會關掉；設成其他任何值，包括空字串，都會打開」。✓
+
+### 隔離：不會碰到真實目錄
+
+- 測試檔最上面 import 了 `tests/_guard.py`，在 pytest 以外又沒有隔離時，import 這個檔就會被擋下。
+- 子程序的環境是**從零開始組的**，不是從父程序複製來的，只放了：
+  - `PATH`、`PYTHONPATH`；
+  - `HOME`、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`，都指到 `tmp_path`；
+  - `AGORA_FOLDER_NAME=agora-test`；
+  - `AGORA_RCLONE`，指到包著 `tests/fakes/fake_rclone.py` 的 wrapper。
+- 所以就算父程序的環境沒有隔離，子程序也碰不到真實的目錄。指令模式那次實際執行的 `search session --no-sync` 也只會讀寫 `tmp_path`。
+- 父程序只做了 `from agora import cli`（用來取 `EXIT_INPUT`），這沒有副作用。
+
+### 測試抓得到錯嗎：在副本裡故意改壞四種
+
+都在 `git archive a85bb80` 解開的副本裡改，跑的是 `test_ime_kitty.py`：
+
+| 故意改壞成這樣 | 結果 |
+|---|---|
+| 拿掉 setdefault 那一行 | 1 failed（沒設定的那一個） |
+| 改成 `os.environ[...] = "1"`，會蓋掉使用者的設定 | 1 failed（設成 0 的那一個） |
+| setdefault 移到 `main()` 的最前面（指令模式也會設） | 1 failed（指令模式的那一個） |
+| 在 `cli.py` 最上面 `import textual.constants` | 2 failed（「cli 不能帶進 Textual」的檢查） |
+
+四種都抓得到。
+
+### Low（不擋合併）
+
+- **C1**：`test_ime_kitty.py` 裡的 `import pytest` 沒有用到。
+- **C2**：`cli.py` 新加的註解是中文，但這個檔的其他註解都是英文。建議照周圍的寫法，例如 `# Textual's kitty keyboard protocol makes an IME's Enter erase the chosen word (issue #23)`。
+- **C3：README 那句前後讀起來像矛盾。**
+  - 前面說「預設關掉」，後面說「只有 `=1` 會關掉」，讀的人可能以為沒設定時是打開的。
+  - 建議寫成：「沒有設定時，agora 會自己設成 `1`（關掉）；自己設了就照你的設定：只有 `1` 會關掉，其他任何值（包括空字串）都會打開。」
+  - 另外，tasks 1.3 的字面還是「想打開就設 0」，和 README 的寫法不一樣，可以順手改成一致。
+- **C4：指令模式的第二個呼叫比需要的多。**
+  - `search session --no-sync` 真的跑了一次搜尋，還斷言 exit 0，這讓這個測試和搜尋的行為綁在一起：以後搜尋空索引時的 exit code 一改，這個測試就會紅。
+  - 第一個呼叫（`["search"]`，parse 完馬上回傳）已經足以證明「指令模式不設」。建議拿掉第二個，或者只留「環境變數沒有被設」那個斷言，不要斷言 exit code。
+
+### 還沒做的
+
+- tasks 2.2（本人在 herdr 的 pane 裡用輸入法選字）。spec 的第三個 Scenario 只能用人工驗。
+
+### 測試執行
+
+- `uv run pytest tests/unit/test_ime_kitty.py`：3 passed。
+- **完整 unit 是在 `git archive cc1891a` 的乾淨副本裡跑的：** compileall 通過，563 passed。
+  - 這樣做是為了不把 impl3 還沒 commit 的 `tui.py`、`test_tui.py` 混進來。
+  - 這個副本就是 HEAD，裡面包含 a85bb80。
+  - 跑的時候設了 `PYTHONPATH` 指到副本的 `src`，所以載入的是副本的程式。
+- 沒有跑整合測試。
