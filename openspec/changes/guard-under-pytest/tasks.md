@@ -9,7 +9,7 @@
 
 ## 2. 收尾
 
-- [ ] 2.1 review 審（第一輪：8709271 → `docs/review/guard-under-pytest.md`，5df98ee）
+- [x] 2.1 review 審（docs/review/guard-under-pytest.md：G1 token 單獨放行、G2 uv run 動 .venv，已在 2e06268 修掉；複查可以合）（第一輪：8709271 → `docs/review/guard-under-pytest.md`，5df98ee）
 - [ ] 2.3 review 後的 mutation 驗證（副本，`git archive HEAD` + 本次三個檔）：如下的結果
   - 如實還原成 8709271（token 單獨放行）→ **只有**新增的 token 測試紅，其他三個綠（這就是 G1 要的那個能分辨的測試）
   - 整個 pytest 分支改成 #25 之前的 return → repo 外的兩個測試都紅
