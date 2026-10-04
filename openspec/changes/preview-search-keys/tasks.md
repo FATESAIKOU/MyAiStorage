@@ -6,7 +6,7 @@
 
 ## 2. 預覽區的游標（負責：impl3，第 1 節 commit 之後）
 
-- [x] 2.1 `pyproject.toml` 改用 `textual[syntax]`（更新 `uv.lock`，記在 commit）；預覽區改成 `PreviewText(TextArea)`，`id="right"`、唯讀、折行、焦點在時才整行高亮；`language="markdown"`，兩種退回不上色的情況（沒有 tree-sitter；有 tree-sitter 但沒有 markdown 語法時 try/except）；`## user`／`## assistant` 沿用原本的顏色（`get_line()`）（spec「預覽區的游標與捲動」，design「改用唯讀的 TextArea」）
+- [x] 2.1 `pyproject.toml` 改用 `textual[syntax]`（更新 `uv.lock`，記在 commit）；預覽區改成 `PreviewText(TextArea)`，`id="right"`、唯讀、折行、焦點在時才整行高亮；`language="markdown"`，兩種退回不上色的情況（沒有 tree-sitter；有 tree-sitter 但沒有 markdown 語法時 try/except）；`## user`／`## assistant` 用 bold `#87afff`／bold `#d787ff`（`get_line()`；PM 10-04 決定、本人經 PMO 確認）（spec「預覽區的游標與捲動」，design「改用唯讀的 TextArea」）
 - [x] 2.2 分段：補一段時記下 `scroll_y` 與折行後的高度、插入 `f"{step}\n"`、還原捲動、`history.clear()`；`k`／`↑`／PgUp 在第 0 行與捲到頂都會補；`g` 先連續 `step()` 再一次放進去；`Preview.text` 改用 list；`_no_header` 只在 `start == 0`；記下大小與 mtime；提示改成提到 `k`／`g`；換 Session 時游標在最後一行（design「分段載入」）
 - [x] 2.3 測試：`j`／`k`／`↑`／`↓` 移動（短行）、`g` 全部載入且提示消失、`G`、補前一段不跳（review R4：捲到頂時原本最上面那一行的螢幕位置不變；按 `k` 時原本那一行剛好往下一列；驗的是那一行的螢幕位置，不只驗 `cursor_location`）、捲到頂與 PgUp 也會補、兩種退回不上色、焦點離開時不高亮；T6 原本的 Y1、Y2 驗的事要保留；150 ms 防抖與兩個分頁照舊
 
