@@ -2715,7 +2715,7 @@ def test_ask_text_modal_tab_does_not_affect_underlying_screen():
 
 
 def test_tab_from_filter_preserves_filter_and_esc_in_preview_does_not_clear_it():
-    """Tab from filter keeps filter active; Esc in preview does not clear list filter (W4)."""
+    """Tab from filter closes filterbar, keeps filter active; Esc in preview does not clear list filter (R6)."""
     app, _ = _app([])
 
     async def go():
@@ -2734,36 +2734,55 @@ def test_tab_from_filter_preserves_filter_and_esc_in_preview_does_not_clear_it()
             await pilot.pause(0.1)
             assert len(app.shown()) == 1
 
-            # Press tab: switches focus to preview
+            # Press tab: switches focus to preview, closes filterbar, filter stays active
             await pilot.press("tab")
             await pilot.pause()
             assert app.focused is app.query_one("#right")
             assert app.side() == "preview"
-            # Filterbar is still open and filter still active
-            assert app.query_one("#filterbar").has_class("on")
+            assert not app.query_one("#filterbar").has_class("on")
             assert len(app.shown()) == 1
 
             # Press escape while focus is in preview: does NOT clear list filter
             await pilot.press("escape")
             await pilot.pause()
             assert app.focused is app.query_one("#right")
-            assert app.query_one("#filterbar").has_class("on")
             assert len(app.shown()) == 1
 
-            # Tab back to list table
+            # Tab back to list table: focus is on table
             await pilot.press("tab")
             await pilot.pause()
             assert app.focused is app.query_one("#table")
             assert len(app.shown()) == 1
 
-            # Focus filter again, then press escape: clears filter
+            # Open filter again
             await pilot.press("slash")
             await pilot.pause()
+            assert app.query_one("#filterbar").has_class("on")
             assert app.focused is app.query_one("#filter")
+
+            # Esc while in filter clears filter
             await pilot.press("escape")
             await pilot.pause()
             assert not app.query_one("#filterbar").has_class("on")
             assert app.focused is app.query_one("#table")
+            assert len(app.shown()) == 2
+
+            # Now test Esc when filterbar is on and focus is on table
+            await pilot.press("slash")
+            await pilot.pause()
+            for ch in "01A":
+                await pilot.press(ch)
+            await pilot.pause(0.1)
+            # Focus table while filterbar still has 'on'
+            app.query_one("#table").focus()
+            await pilot.pause()
+            assert app.query_one("#filterbar").has_class("on")
+            assert app.focused is app.query_one("#table")
+            assert app.side() == "list"
+            # Press escape: clears filter because side() == 'list' and filterbar is on
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not app.query_one("#filterbar").has_class("on")
             assert len(app.shown()) == 2
     _run(go)
 
@@ -2778,9 +2797,12 @@ def test_filter_enter_does_not_trigger_primary():
             await pilot.press("slash")
             await pilot.pause()
             assert app.focused is app.query_one("#filter")
+            assert not app.check_action("primary", ())
             await pilot.press("enter")
             await pilot.pause(0.2)
             assert not app._last_spawned
             assert not isinstance(app.screen, tui.Confirm)
+            assert app.focused is app.query_one("#table")
+            assert app.check_action("primary", ())
     _run(go)
 

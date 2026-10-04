@@ -1103,6 +1103,14 @@ class AgoraApp(App):
         self.toggle_focus()
 
     def toggle_focus(self) -> None:
+        if getattr(self.focused, "id", None) == "filter":
+            text = self.query_one("#filter", Input).value.strip()
+            if self._filter_timer is not None:
+                self._filter_timer.stop()
+                self._filter_timer = None
+            self.query_one("#filterbar").remove_class("on")
+            if text != self.text:
+                self.search(text)
         target = "#table" if self.side() == "preview" else "#right"
         self.query_one(target).focus()
 
@@ -1192,7 +1200,7 @@ class AgoraApp(App):
             self.search(text)
 
     def on_key(self, event) -> None:
-        if event.key == "escape" and getattr(self.focused, "id", None) == "filter":
+        if event.key == "escape" and self.query_one("#filterbar").has_class("on") and self.side() == "list":
             if self._filter_timer is not None:
                 self._filter_timer.stop()
                 self._filter_timer = None
