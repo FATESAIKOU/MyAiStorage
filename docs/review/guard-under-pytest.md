@@ -120,3 +120,68 @@ PM 傾向的改法（有 token 時也要求四個變數都在暫存目錄）：
 - 套上 PM 改法的副本：同樣 **594 passed**。
 - 沒有跑整合測試。
 - worktree 裡 impl2 還沒 commit 的 `tui.py`、`test_tui.py` 沒有碰。
+
+---
+
+## 複查（2e06268）
+
+這次複查 impl4 的補強 commit 2e06268，對照上面「給 PM 的清單」1～3。
+
+**結論：三項都做到了，可以合。** 沒有新的問題，只有兩個排版上的小地方。
+
+### 逐項
+
+**1. G1：token 不再單獨放行 ✓**
+- **程式：** 在 pytest 裡，現在的判斷是：
+  - 載入了 conftest → return；
+  - 沒有 token → 擋下（訊息照舊）；
+  - 有 token → **不 return**，往下走和 pytest 以外一樣的四個變數檢查。
+- **文件：** spec「在 pytest 裡」那一條、design 的 Decisions、`_guard.py` 的 docstring 和註解、conftest 的註解，都改成「token 只是來源標記，不是通行證」。
+- **新測試 `test_the_token_alone_does_not_open_the_gate_under_pytest`：**
+  - 子程序的環境只有 `PATH`、`PYTHONPATH` 和 token，四個變數都不設；
+  - 斷言 pytest 失敗、記號檔沒有被寫入、訊息列出四個變數名、訊息裡沒有路徑。
+
+**2. G2：不再用 `uv run` ✓**
+- 改成 `[sys.executable, "-m", "pytest", "-p", "no:cacheprovider", 那個檔]`，抽成 `_run_pytest()`。為了 uv 加在 PATH 前面的那一段也拿掉了。
+- **實測：** 在一個**沒有 `.venv`** 的 `git archive 2e06268` 副本裡跑 `test_guard.py`，4 passed，約 2.4 秒，跑完副本裡**仍然沒有 `.venv`**。
+- 整個 unit 跑完之後，副本裡也沒有 `.venv`。
+- `test_guard.py` 裡已經找不到 `uv`。用同一個直譯器的 pytest，不需要網路。
+- **順帶改進：** `_pytest_env` 的四個 `XDG_*` 原本放在 `home.parent` 底下，現在改到 `tmp_path` 底下，一樣是暫存目錄。
+
+**3. G3、G4 記在 design 的 Risks ✓**
+- 兩條都寫了原因，也寫了「真的要擋可以怎麼做」。
+
+### 故意改壞（`git archive 2e06268` 的副本，跑 `test_guard.py` 與 `test_background.py`）
+
+| 改壞的地方 | 結果 |
+|---|---|
+| **只有 token 就放行**（換回 8709271 的判斷） | ✓ **只有**新測試紅，這就是 G1 要的那個能區分的測試 |
+| 沒有 conftest 時一律往下查四個變數（拿掉「沒有 token 就擋」） | ✓ repo 外的測試紅：它的環境四個變數都在暫存目錄，寬鬆版會放行 |
+| 在 pytest 裡直接 return（退回 #25 之前的樣子） | ✓ repo 外的兩個測試都紅 |
+| conftest 不設 token | ✓ `test_background.py` 的子程序測試紅 |
+| `_repo_conftest_loaded()` 永遠回 True | ✓ repo 外的兩個測試都紅 |
+| 變數檢查的訊息裡加上路徑（cwd） | ✓ 新測試紅（「不印路徑」的斷言） |
+
+impl4 在 tasks 2.3 自己記的 mutation 結果，和我這次量的一致。
+
+tasks 裡寫「review 那句『拿掉 token 那一支 → test_background 紅』改完 G1 之後不再成立」，這個說法正確：
+- 改完之後，「拿掉 token 那一支」等於上表的「寬鬆版」；
+- `test_background.py` 的子程序繼承的四個變數本來就在 `tmp_path`，所以會通過；
+- 改由 repo 外的測試抓到。
+
+### 子程序的環境
+
+- 新測試的環境是從零組的，只有 `PATH`、`PYTHONPATH` 和 token。沒有 HOME，也就沒有任何真實目錄可以碰。
+- 被擋下之前，唯一可能被寫的只有 `tmp_path` 裡的記號檔，斷言它不存在。
+- 原本的兩個子程序測試照舊是從零組的（上一節已確認）。
+
+### 小地方（不擋合併）
+
+- `test_guard.py` 的 `_guard_lines` 後面有三行空行，PEP 8 是兩行。
+- tasks 的「2. 收尾」裡，2.3 排在 2.2 前面，編號順序不對。
+
+### 測試執行
+
+- 完整 unit 在 `git archive HEAD` 的乾淨副本裡跑：那時 HEAD 已經是 9d49bca（impl2 的第 3 節，包含 2e06268）。compileall 通過，**611 passed**，跑完副本裡沒有 `.venv`。
+- 沒有跑整合測試。
+- worktree 裡沒有碰任何檔案。
