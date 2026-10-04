@@ -10,7 +10,7 @@
 - [x] 2.2 分段：補一段時記下 `scroll_y` 與折行後的高度、插入 `f"{step}\n"`、還原捲動、`history.clear()`；`k`／`↑`／PgUp 在第 0 行與捲到頂都會補；`g` 先連續 `step()` 再一次放進去；`Preview.text` 改用 list；`_no_header` 只在 `start == 0`；記下大小與 mtime；提示改成提到 `k`／`g`；換 Session 時游標在最後一行（design「分段載入」）
 - [x] 2.3 測試：`j`／`k`／`↑`／`↓` 移動（短行）、`g` 全部載入且提示消失、`G`、補前一段不跳（review R4：捲到頂時原本最上面那一行的螢幕位置不變；按 `k` 時原本那一行剛好往下一列；驗的是那一行的螢幕位置，不只驗 `cursor_location`）、捲到頂與 PgUp 也會補、兩種退回不上色、焦點離開時不高亮；T6 原本的 Y1、Y2 驗的事要保留；150 ms 防抖與兩個分頁照舊
 
-- [ ] 2.4 review「第 2 節程式審查」的修正（第 3 節之前做）：S1 以 code block 結尾會掛掉（`_build_highlight_map` 跳過超出範圍的行，補測試並在 `run_test` 裡實際選到那一列）；S2 換 Session 只讀一段（`_suppress_scroll_load`，補測試）；S3 `k`／PgUp 補完後游標在折行後的上一列（測試用 `wrapped_document` 算位置、原本那一行 `== 1`）；W10、W11、提示文字各補斷言；`_build_highlight_map` 的覆寫要有測試守著；benchmark 門檻放寬到 5 秒；顏色改成 user `#87afff`、assistant `#d787ff`；Low：拿掉 `PreviewArea` 別名、BINDINGS 不展開、`step()` 不用空格當旗標
+- [x] 2.4 review「第 2 節程式審查」的修正（第 3 節之前做）：S1 以 code block 結尾會掛掉（`_build_highlight_map` 跳過超出範圍的行，補測試並在 `run_test` 裡實際選到那一列）；S2 換 Session 只讀一段（`_suppress_scroll_load`，補測試）；S3 `k`／PgUp 補完後游標在折行後的上一列（測試用 `wrapped_document` 算位置、原本那一行 `== 1`）；W10、W11、提示文字各補斷言；`_build_highlight_map` 的覆寫要有測試守著；benchmark 門檻放寬到 5 秒；顏色改成 user `#87afff`、assistant `#d787ff`；Low：拿掉 `PreviewArea` 別名、BINDINGS 不展開、`step()` 不用空格當旗標
 
 ## 3. 預覽區搜尋（負責：impl3，第 2 節之後）
 

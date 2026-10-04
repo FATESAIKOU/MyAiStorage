@@ -32,6 +32,7 @@ from textual.app import App, ComposeResult
 from textual.worker import get_current_worker
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.geometry import Offset
 from textual.screen import ModalScreen
 from textual.widgets import Checkbox, DataTable, Input, OptionList, ProgressBar, Static, TextArea
 from textual.widgets.text_area import LanguageDoesNotExist
@@ -244,16 +245,18 @@ class Preview:
         except OSError:
             return False
 
-    def step(self) -> str:
+    def step(self) -> str | None:
         """Read one more step - the tail first, the step above after that.
 
-        Empty when there is nothing left, which is how the caller knows the hint can go.
+        The step's text, or `None` when there is nothing above it to read: everything is
+        already here (which is how the caller knows the hint can go), or what was read is
+        blank once its newlines are stripped, and so shows nothing.
         """
         if not self.more():
-            return ""            # everything is already here; there is nothing above it (Y1)
+            return None         # everything is already here; there is nothing above it (Y1)
         if self.path is None or not self.path.is_file():
             self.at = 0          # nothing to read: all here, and the hint goes for good
-            return ""
+            return None
         try:
             st = self.path.stat()
             if self._stat is None:
@@ -263,11 +266,11 @@ class Preview:
         text, start = read_tail(self.path, self.at)
         self.at = start
         if not text:
-            return ""
+            return None
         step = (_no_header(text) if start == 0 else text).strip("\n")
         if step:
             self._chunks.insert(0, step)     # an earlier one goes above (W3: list accumulator)
-        return step or (" " if text else "")
+        return step or None
 
     def more(self) -> bool:
         """Whether anything above is still unread. Nothing read yet counts as "more".
@@ -286,8 +289,11 @@ class Preview:
 class PreviewText(TextArea):
     """The preview pane: a read-only TextArea with cursor and syntax highlighting (design 5.9)."""
 
-    BINDINGS = [
-        *TextArea.BINDINGS,
+    #: Set while the app is replacing what the pane shows and scrolling it: `load_text` puts
+    #: the scroll back at the top, which is not the reader reaching the top (review S2).
+    _suppress_scroll_load = False
+
+    BINDINGS = [   # TextArea's own are inherited; only the keys this pane adds (spec「游標與捲動」)
         Binding("j", "cursor_down", "向下", show=False),
         Binding("k", "cursor_up", "向上", show=False),
         Binding("g", "top", "到最前", show=False),
@@ -351,13 +357,19 @@ class PreviewText(TextArea):
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
-        if old_value > 0 and new_value == 0 and self.is_attached and not getattr(self, "_suppress_scroll_load", False):
+        if old_value > 0 and new_value == 0 and self.is_attached and not self._suppress_scroll_load:
             self.app.load_earlier()
 
     def _build_highlight_map(self) -> None:
         super()._build_highlight_map()
-        # Keep ## user and ## assistant headings in their distinct styles (W6, W9)
+        # Keep ## user and ## assistant headings in their distinct styles (W6, W9): their
+        # own colour goes on in get_line, and it would be covered by the heading style here.
         for line_index in list(self._highlights.keys()):
+            if line_index >= self.document.line_count:
+                # A fenced code block ends one line past the last one, so a session whose last
+                # message ends with ``` has a highlight on a line the document does not have.
+                del self._highlights[line_index]
+                continue
             line = self.document.get_line(line_index).strip()
             if line.startswith("## user") or line.startswith("## assistant"):
                 self._highlights[line_index] = [
@@ -370,18 +382,15 @@ class PreviewText(TextArea):
         text = Text(line_string, end="", no_wrap=True)
         stripped = line_string.strip()
         if stripped.startswith("## user"):
-            text.stylize("bold cyan")
+            text.stylize("bold #87afff")
         elif stripped.startswith("## assistant"):
-            text.stylize("bold green")
+            text.stylize("bold #d787ff")
         self._stylize_search_matches(text, line_index, line_string)
         return text
 
     def _stylize_search_matches(self, text: Text, line_index: int, line_string: str) -> None:
         """Hook for Section 3 search highlights."""
         pass
-
-
-PreviewArea = PreviewText
 
 
 def agora_preview(paths: store.Paths, index: store.Index, agora_id: str) -> Preview:
@@ -1152,7 +1161,7 @@ class AgoraApp(App):
             return
 
         step = preview.step()
-        if not step:
+        if step is None:
             return
         pane = self.query_one("#right", PreviewText)
         keep_scroll_y = pane.scroll_y
@@ -1163,15 +1172,14 @@ class AgoraApp(App):
 
         def restore() -> None:
             delta = max(0, pane.wrapped_document.height - was_height)
-            if cursor_up:
-                target_row = max(0, pane.cursor_location[0] - 1)
-                pane.move_cursor((target_row, 0))
-                pane.scroll_to(y=max(0, keep_scroll_y + delta - 1), animate=False)
-            elif cursor_page_up:
-                page_height = max(1, pane.content_size.height)
-                target_row = max(0, pane.cursor_location[0] - page_height)
-                pane.move_cursor((target_row, 0))
-                pane.scroll_to(y=max(0, keep_scroll_y + delta - page_height), animate=False)
+            if cursor_up or cursor_page_up:
+                # Up moves by a row on the screen, not a line in the file (spec「游標與捲動」):
+                # the row above the cursor's may be the last row of a line that wraps (review S3).
+                rows = 1 if cursor_up else max(1, pane.content_size.height)
+                x, y = pane.wrapped_document.location_to_offset(pane.cursor_location)
+                above = pane.wrapped_document.offset_to_location(Offset(x, max(0, y - rows)))
+                pane.move_cursor(above)
+                pane.scroll_to(y=max(0, keep_scroll_y + delta - rows), animate=False)
             else:
                 pane.scroll_to(y=keep_scroll_y + delta, animate=False)
 
@@ -1183,24 +1191,35 @@ class AgoraApp(App):
         preview = self.cache.get(row.key) if row else None
         if preview is None:
             return
+        pane = self.query_one("#right", PreviewText)
         if preview.more():
             while preview.more():
                 preview.step()
-            pane = self.query_one("#right", PreviewText)
+            pane._suppress_scroll_load = True
             pane.load_text(preview.text)
             self.query_one("#hint", Static).update(preview.hint())
-        pane = self.query_one("#right", PreviewText)
         pane.move_cursor((0, 0))
-        pane.scroll_to(y=0, animate=False)
+
+        def settle() -> None:
+            pane.scroll_to(y=0, animate=False)
+            pane._suppress_scroll_load = False
+
+        self.call_after_refresh(settle)
 
     def put_preview(self, preview: Preview) -> None:
         self.query_one("#pinned", Static).update(preview.pinned)
         self.query_one("#hint", Static).update(preview.hint())
         pane = self.query_one("#right", PreviewText)
+        pane._suppress_scroll_load = True
         pane.load_text(preview.text)
         last_line = max(0, pane.document.line_count - 1)
         pane.move_cursor((last_line, 0))
-        self.call_after_refresh(pane.scroll_end, animate=False)
+
+        def settle() -> None:
+            pane.scroll_end(animate=False)
+            pane._suppress_scroll_load = False
+
+        self.call_after_refresh(settle)
 
     @on(DataTable.RowHighlighted)
     def moved(self) -> None:
