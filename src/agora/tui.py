@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from functools import partial
 from datetime import datetime
 from pathlib import Path
+from typing import Iterator
 
 from rich.markdown import Markdown
 from rich.text import Text
@@ -35,7 +36,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.geometry import Offset
 from textual.screen import ModalScreen
 from textual.widgets import Checkbox, DataTable, Input, OptionList, ProgressBar, Static, TextArea
-from textual.widgets.text_area import LanguageDoesNotExist
+from textual.widgets.text_area import LanguageDoesNotExist, Selection
 
 from agora import cache
 from agora import header as h
@@ -60,7 +61,9 @@ KEYS = {
                    ("enter", "匯入"), ("p", "pull"), ("/", "篩選（邊打邊篩）"),
                    ("ctrl+t", "標題／內文"), ("q", "離開")],
     },
-    "preview": [("j/k", "移動"), ("g/G", "最前／最後"), ("Tab", "切焦點"), ("q", "離開")],
+    "preview": [("j/k", "移動"), ("g/G", "最前／最後"), ("/", "搜尋"), ("n/N", "下一個／上一個"),
+                ("Esc", "清標亮"), ("Tab", "切焦點"), ("q", "離開")],
+    "search": [("Enter", "送出"), ("Esc", "關掉"), ("Tab", "切焦點")],
 }
 
 
@@ -198,12 +201,36 @@ def read_tail(path: Path, at: int | None = None, size: int | None = None) -> tup
     return raw.decode("utf-8", "ignore"), start
 
 
+def _header_end(text: str) -> int:
+    """Where the YAML front matter ends, in characters - the same rule for both the preview
+    and the search over the file, so they cannot count different bodies (W1, W10)."""
+    if not text.startswith("---"):
+        return 0
+    end = text.find("\n---", 3)
+    return text.find("\n", end + 1) + 1 if 0 <= end <= PREVIEW_CHUNK else 0
+
+
 def _no_header(text: str) -> str:
     """The YAML front matter is metadata, not conversation, so it is not previewed."""
-    if not text.startswith("---"):
-        return text
-    end = text.find("\n---", 3)
-    return text[text.find("\n", end + 1) + 1:] if 0 <= end <= PREVIEW_CHUNK else text
+    return text[_header_end(text):]
+
+
+def find_in_lines(lines, query: str) -> Iterator[tuple[int, int, int]]:
+    """Every match of `query` in `lines`, as `(row, start, end)`, line by line, ignoring case.
+
+    The file and the screen both go through this, on decoded text, and nothing is carried from
+    one to the other as an offset - a match is a match on both sides or on neither (W1).
+    """
+    if not query:
+        return
+    for row, line in enumerate(lines):
+        for found in re.finditer(re.escape(query), line, re.IGNORECASE):
+            yield row, found.start(), found.end()
+
+
+def count_in(text: str, query: str) -> int:
+    """How many matches `query` has in `text` - the file's side of the count."""
+    return sum(1 for _ in find_in_lines(text.splitlines(), query))
 
 
 class Preview:
@@ -244,6 +271,33 @@ class Preview:
             return self._stat is not None and (st.st_size, st.st_mtime) != self._stat
         except OSError:
             return False
+
+    @property
+    def last_only(self) -> bool:
+        """Whether this is the last message alone, with no file behind it (spec「預覽區搜尋」)."""
+        return self.path is None and self.pinned.startswith("最後一則")
+
+    def counts(self, query: str) -> tuple[int, int]:
+        """(how many matches the whole session has, how many of them are above what is read).
+
+        The file is read once, the front matter is skipped by the same rule as the preview, and
+        both sides are counted by `find_in_lines` - so for every `at`,
+        `above + what is on screen == found`, and the k-th match of the session is the
+        (k - above)-th one on screen (design「搜尋：計數」, W1).
+        """
+        if self.path is None or not self.path.is_file():
+            return count_in(self.text, query), 0     # the last message: all of it is here
+        try:
+            raw = self.path.read_bytes()
+        except OSError:
+            return 0, 0
+        text = raw.decode("utf-8", "ignore")
+        start = _header_end(text)
+        found = count_in(text[start:], query)
+        if self.at is None:
+            return found, found        # nothing read yet, so all of it is above
+        at = max(start, len(raw[:self.at].decode("utf-8", "ignore")))   # a byte offset, as characters
+        return found, count_in(text[start:at], query)
 
     def step(self) -> str | None:
         """Read one more step - the tail first, the step above after that.
@@ -292,12 +346,22 @@ class PreviewText(TextArea):
     #: Set while the app is replacing what the pane shows and scrolling it: `load_text` puts
     #: the scroll back at the top, which is not the reader reaching the top (review S2).
     _suppress_scroll_load = False
+    #: The word being searched for; every match on a drawn row gets `MATCH_STYLE`.
+    _query = ""
+
+    #: Bold and underlined, not a colour: `_render_line` puts the syntax's colours on after
+    #: `get_line`, and the cursor line's background on after that, and both would cover a
+    #: colour or a background of ours (W6, review (4)).
+    MATCH_STYLE = "bold underline"
 
     BINDINGS = [   # TextArea's own are inherited; only the keys this pane adds (spec「游標與捲動」)
         Binding("j", "cursor_down", "向下", show=False),
         Binding("k", "cursor_up", "向上", show=False),
         Binding("g", "top", "到最前", show=False),
         Binding("G", "bottom", "到最後", show=False),
+        Binding("slash", "search", "搜尋", show=False),
+        Binding("n", "search_next", "下一個", show=False),
+        Binding("N", "search_prev", "上一個", show=False),
     ]
 
     def __init__(
@@ -355,6 +419,25 @@ class PreviewText(TextArea):
         self.move_cursor((last_line, 0))
         self.scroll_end(animate=False)
 
+    def action_search(self) -> None:
+        self.app.open_preview_search()
+
+    def action_search_next(self) -> None:
+        self.app.preview_search_next()
+
+    def action_search_prev(self) -> None:
+        self.app.preview_search_prev()
+
+    def set_query(self, query: str) -> None:
+        """Highlight every match of `query` from now on.
+
+        `_line_cache` is TextArea's own, and its key does not include the highlights, so a row
+        that has already been drawn would keep the old ones unless the cache goes (W6).
+        """
+        self._query = query
+        self._line_cache.clear()
+        self.refresh()
+
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
         if old_value > 0 and new_value == 0 and self.is_attached and not self._suppress_scroll_load:
@@ -389,8 +472,13 @@ class PreviewText(TextArea):
         return text
 
     def _stylize_search_matches(self, text: Text, line_index: int, line_string: str) -> None:
-        """Hook for Section 3 search highlights."""
-        pass
+        """Every match on this row is underlined and bolded - the search's own seam (spec「搜尋」).
+
+        The same matcher as the file's side counts with, so what is marked here is what was
+        counted there.
+        """
+        for _row, start, end in find_in_lines([line_string], self._query):
+            text.stylize(self.MATCH_STYLE, start, end)
 
 
 def agora_preview(paths: store.Paths, index: store.Index, agora_id: str) -> Preview:
@@ -422,7 +510,7 @@ def import_preview(agent, session_id: str, full: bool = False, paths: store.Path
             return preview
         last = agent.last_message(session_id)
     except Exception:            # a preview must never take the screen down
-        return Preview(None, "讀不到這個 session")
+        return Preview(None, "讀不到整份對話" if full else "讀不到這個 session")
     if not last:
         return Preview(None)
     role, text = last
@@ -881,6 +969,10 @@ class AgoraApp(App):
     #filterbar.on { display: block; }
     #mode { width: auto; padding: 0 1; background: #5f0000; }
     #filter { border: none; height: 1; padding: 0; background: #1c1c1c; }
+    #searchbar { height: 1; display: none; }
+    #searchbar.on { display: block; }
+    #search { border: none; width: 1fr; height: 1; padding: 0; background: #1c1c1c; }
+    #count { width: auto; height: 1; padding: 0 1; color: #ffd75f; background: #1c1c1c; }
     #msg { height: 1; color: #ffd75f; }
     #keys { height: 1; background: #1c1c1c; }
     #msg.failed { color: #ff5f5f; }
@@ -927,6 +1019,14 @@ class AgoraApp(App):
         self._stopped = False        # an Esc went through, whatever the exit code says
         self._timer = None                     # the pending "the cursor came to rest" timer
         self._groups: set[int] = set()   # process groups an action started
+        # The search in the preview (spec「預覽區搜尋」): the word, how many matches the whole
+        # session has, which one the cursor is on, and the row it belongs to.
+        self.query, self.total, self.which = "", 0, 0
+        self.search_key: str | None = None
+        self.search_open = False          # the box under the pane is showing
+        self.note, self.pending_note = "", ""   # 「已換成整份對話」, 「內容已更新」
+        self.last_only = False
+        self.shown_preview: Preview | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(id="bar")
@@ -938,6 +1038,9 @@ class AgoraApp(App):
                 yield Static(id="pinned")
                 yield Static(id="hint")
                 yield PreviewText(id="right")
+                with Horizontal(id="searchbar"):
+                    yield Input(id="search", placeholder="搜尋對話內文；Enter 送出；Esc 關掉")
+                    yield Static(id="count")
         yield Static(id="keys")
         with Horizontal(id="filterbar"):
             yield Static("標題", id="mode")
@@ -1022,6 +1125,8 @@ class AgoraApp(App):
         else:
             # Only rows that are gone go; a mark on either tab survives (review M1)
             self.marked &= {r.key for tab in TABS for r in self.rows[tab]}
+        if self.query:
+            self.pending_note = "內容已更新"     # put_preview searches again with it (R5)
         self.cache.clear()
         self.show()
 
@@ -1042,6 +1147,7 @@ class AgoraApp(App):
             table.add_row(Text("▌", style="#585858"), self.tick(row), *cells, key=row.key)
         if keep and keep in {r.key for r in rows}:
             table.move_cursor(row=[r.key for r in rows].index(keep))
+        self.track_row()                    # the rows are new: another row, another session
         self.paint_bar()
         self.paint_keys()
         self.gutter()
@@ -1057,7 +1163,8 @@ class AgoraApp(App):
     def paint_keys(self) -> None:
         """The keys that work here, per (tab, side) (spec「按鍵列」, W8)."""
         side = self.side()
-        items = KEYS["list"][self.tab] if side == "list" else KEYS["preview"]
+        items = (KEYS["list"][self.tab] if side == "list"
+                 else KEYS["search"] if self.search_open else KEYS["preview"])
         bar = Text(" ")
         for key, what in items:
             bar.append(f" {key} ", style="bold #000000 on #00afaf")
@@ -1133,13 +1240,17 @@ class AgoraApp(App):
 
     @work(thread=True, exclusive=True, group="preview")
     def load_full(self, agent, key: str, updated: str | None) -> None:
-        result = import_preview(agent, key.split(":", 1)[1], True, self.paths, updated)
+        try:
+            result = import_preview(agent, key.split(":", 1)[1], True, self.paths, updated)
+        except Exception:                # whatever happens, the screen must not stay 「載入中」
+            result = Preview(None, "讀不到整份對話")
         self.call_from_thread(self.loaded, key, result)
 
     def loaded(self, key: str, result: Preview) -> None:
         self.cache[key] = result
         row = self.current()
         if row and row.key == key:
+            self.pending_note = "已換成整份對話"
             self.put_preview(result)
 
     def load_earlier(self, cursor_up: bool = False, cursor_page_up: bool = False) -> None:
@@ -1195,18 +1306,44 @@ class AgoraApp(App):
         if preview.more():
             while preview.more():
                 preview.step()
-            pane._suppress_scroll_load = True
-            pane.load_text(preview.text)
-            self.query_one("#hint", Static).update(preview.hint())
+            self.show_read_text(pane, preview)
         pane.move_cursor((0, 0))
 
         def settle() -> None:
             pane.scroll_to(y=0, animate=False)
-            pane._suppress_scroll_load = False
 
         self.call_after_refresh(settle)
 
+    def show_read_text(self, pane: PreviewText, preview: Preview) -> None:
+        """Everything read so far goes into the pane in one go (W3).
+
+        The scroll that comes with it is the app's, not the reader's, so it must not be read as
+        reaching the top of the pane (review S2) - hence the flag, let go after the refresh.
+        """
+        pane._suppress_scroll_load = True
+        pane.load_text(preview.text)
+        self.query_one("#hint", Static).update(preview.hint())
+
+        def release() -> None:
+            pane._suppress_scroll_load = False
+
+        self.call_after_refresh(release)
+
     def put_preview(self, preview: Preview) -> None:
+        """What the pane shows for the row under the cursor, and what happens to the search.
+
+        Another session starts clean. The same session with its content replaced is searched
+        again with the same word - the matches have moved - and says which change it was
+        (spec「搜尋狀態的生命週期」, review R5).
+        """
+        row = self.current()
+        key = row.key if row else None
+        replaced = preview is not self.shown_preview
+        self.shown_preview = preview
+        if self.query and key != self.search_key:
+            self.clear_preview_search()
+        note = self.pending_note if self.query else ""
+        self.pending_note = ""
         self.query_one("#pinned", Static).update(preview.pinned)
         self.query_one("#hint", Static).update(preview.hint())
         pane = self.query_one("#right", PreviewText)
@@ -1218,12 +1355,181 @@ class AgoraApp(App):
         def settle() -> None:
             pane.scroll_end(animate=False)
             pane._suppress_scroll_load = False
+            if self.query and replaced:
+                self.run_preview_search(self.query, note=note)
 
         self.call_after_refresh(settle)
+
+    def track_row(self) -> None:
+        """The search belongs to the row it was made on; any other row - or none at all, which
+        is what another tab with no rows of its own looks like - starts clean (spec「搜尋狀態
+        的生命週期」). Called whenever the row under the cursor may have changed."""
+        row = self.current()
+        key = row.key if row else None
+        if key != self.search_key:
+            self.search_key = key
+            if self.query:
+                self.clear_preview_search()
+
+    # -- the search in the preview (spec「預覽區搜尋」) -----------------------------
+
+    def open_preview_search(self) -> None:
+        """`/` on the preview side: the box under the pane, with the focus in it."""
+        self.search_open = True
+        self.query_one("#search", Input).value = ""
+        self.query_one("#searchbar").add_class("on")
+        self.query_one("#search").focus()
+
+    def hide_preview_search(self) -> None:
+        """The box goes, and anything typed in it and not sent goes with it (design「搜尋框與狀態」)."""
+        self.search_open = False
+        self.query_one("#search", Input).value = ""
+        self.paint_count()
+
+    def close_preview_search(self) -> None:
+        """Enter or Esc in the box: it goes and the pane takes the focus back."""
+        self.hide_preview_search()
+        self.query_one("#right").focus()
+
+    def clear_preview_search(self) -> None:
+        """No word, no highlight, no count - and the cursor stays where it is."""
+        self.query, self.total, self.which, self.note, self.last_only = "", 0, 0, "", False
+        pane = self.query_one("#right", PreviewText)
+        pane.set_query("")
+        pane.selection = Selection.cursor(pane.cursor_location)
+        self.paint_count()
+
+    def paint_count(self) -> None:
+        """The line under the pane: which match, how many, and what is being looked at."""
+        if not self.query:
+            text = ""
+        elif not self.total:
+            text = "找不到"
+        elif not self.which:
+            text = f"共 {self.total} 個"       # nowhere to put the cursor: do not claim one
+        else:
+            text = f"第 {self.which} 個／共 {self.total} 個"
+        if text and self.last_only:
+            text += "（只有最後一則）"
+        if text and self.note:
+            text += f"  {self.note}"
+        self.query_one("#count", Static).update(text)
+        self.query_one("#searchbar").set_class(self.search_open or bool(text), "on")
+
+    @on(Input.Submitted, "#search")
+    def preview_search_typed(self, event: Input.Submitted) -> None:
+        """Enter in the box: search, close it, and give the focus back to the pane."""
+        query = event.value.strip()
+        self.close_preview_search()
+        if query:
+            self.run_preview_search(query)
+        else:
+            self.clear_preview_search()
+
+    def preview_search_next(self) -> None:
+        if self.query:
+            self.run_preview_search(self.query, step=1)
+
+    def preview_search_prev(self) -> None:
+        if self.query:
+            self.run_preview_search(self.query, step=-1)
+
+    @staticmethod
+    def _match_from(loaded: list[tuple[int, int, int]], here, down: bool) -> int | None:
+        """Which of the matches on screen the cursor is at or after (`down`), or the one before it.
+
+        The cursor sits at the end of the match it is on, so that match is not the next one.
+        """
+        if down:
+            return next((i for i, m in enumerate(loaded) if (m[0], m[1]) >= here), None)
+        return next((i for i in range(len(loaded) - 1, -1, -1)
+                     if (loaded[i][0], loaded[i][1]) < here), None)
+
+    def _load_to(self, pane: PreviewText, preview: Preview, query: str, target: int,
+                  above: int, loaded: list) -> tuple[int, list]:
+        """Read down until the `target`-th match is on screen: how many are left above, and the
+        matches on screen afterwards.
+
+        The steps are read without touching the screen and go in all at once (W3): a step at a
+        time re-computes the whole syntax tree for every one of them, which is 15-30 s on 3 MB.
+        Nothing is read when the match is already here, and then nothing is put in the pane
+        either - `n` at the end of a big document must not reload it to stay where it was.
+        """
+        read = False
+        while preview.more() and above >= target:
+            step = preview.step()
+            if step is None:
+                break
+            read = True
+            above -= count_in(step, query)     # the step's own matches are the ones that came down
+        if read:
+            self.show_read_text(pane, preview)
+            loaded = list(find_in_lines(pane.document.lines, query))
+        return above, loaded
+
+    def run_preview_search(self, query: str, step: int = 0, note: str = "") -> None:
+        """Find `query` in the whole session and put the cursor on one of its matches.
+
+        `step` is 0 for the first search - the match nearest the cursor, down first and then up,
+        and never round to the front of the file, which is where the cursor is furthest from and
+        what the reader almost never wants (review R2) - and +1 for `n`, -1 for `N`, which do
+        wrap at the ends.
+
+        Nothing is carried from the file to the screen as an offset: the file says how many
+        matches there are and how many are above what is read, the screen says where its own
+        are, and the k-th of the session is the (k - above)-th on screen (design「搜尋：計數」).
+        """
+        row = self.current()
+        # The cache has a session read from its file; the import tab's last message is shown but
+        # not cached - moving off the row and back reads the agent again - so fall back to
+        # whatever was last put on the screen.
+        preview = (self.cache.get(row.key) if row else None) or self.shown_preview
+        pane = self.query_one("#right", PreviewText)
+        if preview is None:
+            self.clear_preview_search()
+            return
+        self.query, self.note = query, note
+        pane.set_query(query)
+        total, above = preview.counts(query)
+        self.total, self.last_only = total, preview.last_only
+        if not total:
+            self.which = 0
+            self.paint_count()
+            return
+        loaded = list(find_in_lines(pane.document.lines, query))
+        here = pane.cursor_location                     # where the cursor is: the end of the match
+        before = pane.selection.start if not pane.selection.is_empty else here
+        # How many matches are before the one the cursor is on, and before the cursor itself -
+        # which is the same thing unless the cursor is inside a match.
+        passed = above + sum(1 for m in loaded if (m[0], m[1]) < before)
+        on = above + sum(1 for m in loaded if (m[0], m[1]) < here)
+        index = self._match_from(loaded, here, down=True) if step >= 0 else None
+        if index is None and step <= 0:       # up means before the match the cursor is on
+            index = self._match_from(loaded, before, down=False)
+        if index is None:
+            # None that way on the screen: the one that way is either still above, and has to be
+            # read, or there is none and it is the far end to wrap to.
+            if step == 0:
+                target = max(passed, 1)
+            elif step > 0:
+                target = on + 1 if on < total else 1
+            else:
+                target = passed or total
+            above, loaded = self._load_to(pane, preview, query, target, above, loaded)
+            index = target - above - 1
+        if not 0 <= index < len(loaded):
+            self.which = 0
+            self.paint_count()
+            return
+        where, start, end = loaded[index]
+        self.which = above + index + 1
+        pane.selection = Selection(start=(where, start), end=(where, end))
+        self.paint_count()
 
     @on(DataTable.RowHighlighted)
     def moved(self) -> None:
         self.gutter()
+        self.track_row()
         self.preview()
 
     def on_resize(self, event) -> None:
@@ -1281,6 +1587,8 @@ class AgoraApp(App):
             self.query_one("#filterbar").remove_class("on")
             if text != self.text:
                 self.search(text)
+        if getattr(self.focused, "id", None) == "search":
+            self.hide_preview_search()
         target = "#table" if self.side() == "preview" else "#right"
         self.query_one(target).focus()
 
@@ -1366,7 +1674,9 @@ class AgoraApp(App):
             self.search(text)
 
     def on_key(self, event) -> None:
-        if event.key == "escape" and self.query_one("#filterbar").has_class("on") and self.side() == "list":
+        if event.key != "escape":
+            return
+        if self.query_one("#filterbar").has_class("on") and self.side() == "list":
             if self._filter_timer is not None:
                 self._filter_timer.stop()
                 self._filter_timer = None
@@ -1375,6 +1685,10 @@ class AgoraApp(App):
             self.query_one("#filterbar").remove_class("on")
             self.query_one("#table").focus()
             self.search("")
+        elif self.search_open:
+            self.close_preview_search()       # Esc in the box: the box goes (spec「預覽區搜尋」)
+        elif self.side() == "preview" and self.query:
+            self.clear_preview_search()       # and then the highlights, the cursor stays put
 
     def search(self, text: str) -> None:
         self.text = text

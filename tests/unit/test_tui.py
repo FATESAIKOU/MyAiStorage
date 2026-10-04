@@ -17,7 +17,7 @@ import time
 
 import pytest
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from agora import header as h
 from agora import cache, store, tui
@@ -3284,8 +3284,8 @@ def test_the_hint_says_that_k_and_g_load_what_is_above():
     assert preview.hint() == ""
 
 
-def test_the_preview_adds_four_keys_and_inherits_the_rest():
-    """PreviewText's own BINDINGS are the four it adds; TextArea's are inherited.
+def test_the_preview_adds_its_own_keys_and_inherits_the_rest():
+    """PreviewText's own BINDINGS are the keys it adds; TextArea's are inherited.
 
     Copying them into the list would do nothing but make every reader wonder which of the two
     copies a key comes from (review Low). The keys TextArea brings are the ones the spec keeps:
@@ -3295,8 +3295,10 @@ def test_the_preview_adds_four_keys_and_inherits_the_rest():
     keys = {key: binding.action for _, binding in pane._bindings
             for key in binding.key.split(",")}
 
-    assert [binding.key for binding in tui.PreviewText.BINDINGS] == ["j", "k", "g", "G"]
+    assert [binding.key for binding in tui.PreviewText.BINDINGS] == ["j", "k", "g", "G",
+                                                                    "slash", "n", "N"]
     for key, action in (("j", "cursor_down"), ("k", "cursor_up"), ("g", "top"), ("G", "bottom"),
+                        ("slash", "search"), ("n", "search_next"), ("N", "search_prev"),
                         ("up", "cursor_up"), ("down", "cursor_down"), ("left", "cursor_left"),
                         ("right", "cursor_right"), ("pageup", "cursor_page_up"),
                         ("pagedown", "cursor_page_down"), ("home", "cursor_line_start"),
@@ -3360,3 +3362,539 @@ def test_benchmark_3mb_g_press():
     _run(go)
 
 
+
+# --- Section 3: the search in the preview ----------------------------------------
+
+
+def _far_body(front: str = "最早的表格", tail: str = "最後的表格", steps: int = 3,
+              middle: str = "") -> str:
+    """A conversation with a line at its very front and one in the last step, and bulk between.
+
+    So a word in the first line is a whole file above the tail that is read first, and a word in
+    the last line is in it - which is what makes "the first search does not load the front" and
+    "jumping to what is not loaded yet" two different things to test.
+    """
+    one = "## user\n" + "話" * 3000 + "\n\n## assistant\n" + "答" * 3000 + "\n\n"
+    return (f"## user\n{front}\n\n" + (f"## user\n{middle}\n\n" if middle else "")
+            + one * ((steps * tui.PREVIEW_CHUNK) // len(one.encode("utf-8")))
+            + f"## user\n{tail}\n")
+
+
+def _three_matches_body() -> str:
+    """One short session with three matches, at rows 4, 7 and 10 - so `n` and `N` have a way to
+    go and both ends to wrap at, all inside the one step that is read."""
+    return ("## user\n先問一句\n\n## assistant\n表格在這裡\n\n## user\n還有表格\n\n"
+            "## assistant\n表格第三次\n\n## user\n結尾\n")
+
+
+def _count(app) -> str:
+    return str(app.query_one("#count", Static).content)
+
+
+def _drawn(pane: tui.PreviewText, row: int) -> list[tuple[str, str]]:
+    """The drawn row as the screen sees it: (text, style) per segment."""
+    return [(seg.text, str(seg.style)) for seg in pane.render_line(_screen_row(pane, (row, 0)))]
+
+
+async def _focus_pane(app, pilot) -> tui.PreviewText:
+    """Tab until the preview pane has the focus - the list may be holding it."""
+    for _ in range(3):
+        if app.focused is app.query_one("#right"):
+            break
+        await pilot.press("tab")
+        await pilot.pause()
+    return app.query_one("#right", tui.PreviewText)
+
+
+async def _search(pilot, word: str) -> None:
+    """`/`, the word, Enter - what a reader does."""
+    await pilot.press("slash")
+    for ch in word:
+        await pilot.press(ch)
+    await pilot.press("enter")
+    await pilot.pause(0.2)
+
+
+def _search_app(body: str, title: str = "搜尋") -> tuple:
+    """An app with one session whose conversation is `body` - the row the cursor starts on."""
+    hdr = _hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", title)
+    paths, _index_ = _index((hdr, body))
+    return hdr, tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+
+
+def test_the_count_agrees_with_what_is_on_screen_at_every_step(tmp_path):
+    """W1: for every `at`, the matches above + the ones on screen == the whole session's.
+
+    Nothing converts an offset anywhere, so this is an invariant of the counting rather than a
+    coincidence - and it has to hold for the awkward bodies too: a step cut on a blank line and
+    one cut on a heading, Chinese, `ß` next to its own upper-case spelling, and a word that is
+    in the front matter as well (spec「預覽區搜尋」, design「搜尋：計數」).
+    """
+    hdr = _hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "有表格的標題")   # the word is in the front matter too
+    body = ("## user\n最早的表格\n\n## assistant\nStraße 與 STRASSE\n\n"
+            + ("## user\n" + "話" * 600 + "\n\n") * 40           # steps cut on \\n\\n
+            + ("## assistant\n" + "答" * 600 + "\n\n") * 30      # and on \\n## 
+            + "## user\n最後的表格\n")
+    paths, _index_ = _index((hdr, body))
+    preview = tui.Preview(paths.mirror / hdr["id"].split(":")[1] / "session.md")
+    preview.step()
+
+    words = ("表格", "最早的表格", "Straße", "STRASSE", "straße", "strasse", "ss", "沒有���字")
+    steps = 1
+    while True:
+        for word in words:
+            total, above = preview.counts(word)
+            on_screen = sum(1 for _ in tui.find_in_lines(preview.text.splitlines(), word))
+            assert above + on_screen == total, \
+                f"{word!r} after {steps} step(s): {above} above + {on_screen} on screen != {total}"
+        if not preview.more():
+            break
+        preview.step()
+        steps += 1
+    assert preview.at == 0 and steps > 2, "and the steps really did walk the whole file"
+    assert preview.counts("表格")[0] == 2, "the front matter is not conversation"
+    assert preview.counts("最早的表格")[0] == 1 and preview.counts("沒有這個字")[0] == 0
+    assert "最早的表格" in preview.text, "the content itself is untouched"
+
+
+def test_the_search_goes_to_the_match_and_marks_the_loaded_ones():
+    """Scenario: 找到並跳過去 (3.3).
+
+    The pane opens with the cursor at the end, so the first search goes up to the match nearest
+    the cursor - the last one in the file (review R2) - and every match on screen is underlined
+    and bolded, not only the one the cursor is on.
+    """
+    hdr, app = _search_app(_three_matches_body())
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            pane = app.query_one("#right", tui.PreviewText)
+            await pilot.press("tab")
+            await pilot.pause()
+            await _search(pilot, "表格")
+
+            assert app.focused is pane, "Enter 送出後焦點回到預覽區"
+            assert _count(app) == "第 3 個／共 3 個", "the one nearest the end is the third"
+            assert not pane.selection.is_empty, "目前那一個用 selection 標"
+            assert pane.document.get_line(pane.selection.start[0]) == "表格第三次"
+            marked = {row for row, _s, _e in tui.find_in_lines(pane.document.lines, "表格")}
+            assert marked == {4, 7, 10}, marked
+            drawn = _drawn(pane, 7)                # a match that is not the current one
+            assert [text for text, _style in drawn][:2] == ["還有", "表格"], drawn
+            assert all("underline" in style for text, style in drawn if text == "表格"), drawn
+            assert all("underline" not in style for text, style in drawn if text == "還有"), drawn
+            # the mark survives the syntax colours and the cursor line: it is not a colour
+            assert any("underline" in style for _t, style in _drawn(pane, 10)), "on the cursor row too"
+            await _search(pilot, "表格在這裡")            # a word inside a line, one match only
+            assert _count(app) == "第 1 個／共 1 個"
+            assert pane.document.get_line(pane.selection.start[0]) == "表格在這裡"
+    _run(go)
+
+
+def test_n_and_walk_to_the_next_and_the_previous_one_wrapping_at_the_ends():
+    """`n` goes on from the cursor, `N` goes back, and at either end it wraps (spec「預覽區搜尋」)."""
+    hdr, app = _search_app(_three_matches_body())
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            pane = app.query_one("#right", tui.PreviewText)
+            await pilot.press("tab")
+            await pilot.pause()
+            await _search(pilot, "表格")
+            assert _count(app) == "第 3 個／共 3 個"
+
+            await pilot.press("n")                       # from the last one, round to the first
+            await pilot.pause()
+            assert _count(app) == "第 1 個／共 3 個"
+            assert pane.document.get_line(pane.selection.start[0]) == "表格在這裡"
+
+            await pilot.press("n")                       # then on to the second
+            await pilot.pause()
+            assert _count(app) == "第 2 個／共 3 個"
+
+            await pilot.press("N")                       # back to the first
+            await pilot.pause()
+            assert _count(app) == "第 1 個／共 3 個"
+            await pilot.press("N")                       # and round to the last
+            await pilot.pause()
+            assert _count(app) == "第 3 個／共 3 個"
+            assert pane.document.get_line(pane.selection.start[0]) == "表格第三次"
+
+            await pilot.press("j")                       # the selection goes, the marks stay
+            await pilot.pause()
+            assert pane.selection.is_empty
+            assert any("underline" in style for _t, style in _drawn(pane, 4))
+    _run(go)
+
+
+def test_the_first_search_takes_the_match_nearest_the_end_and_reads_no_more():
+    """Scenario: 第一次搜尋找離尾端最近的 - and does not load the front for it (review R2)."""
+    hdr, app = _search_app(_far_body())
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            pane = app.query_one("#right", tui.PreviewText)
+            await pilot.press("tab")
+            await pilot.pause()
+            await _search(pilot, "表格")
+
+            assert _count(app) == "第 2 個／共 2 個", "the one at the end is the second"
+            assert pane.document.get_line(pane.selection.start[0]) == "最後的表格"
+            assert len(app.cache[hdr["id"]]._chunks) == 1, "one step is still one step"
+            assert "最早的表格" not in pane.document.text, "and the front is not on screen"
+    _run(go)
+
+
+def test_a_word_only_in_the_unread_part_goes_up_to_the_nearest_of_the_two():
+    """Review R2: the first search goes up to the match nearest the cursor, not to the first one
+    in the file. Both are unread here, and reading down to either reads the whole of it - they
+    are at the front - so what is being tested is which of the two it goes to."""
+    hdr, app = _search_app(_far_body(front="最早的獨有的字", middle="中間的獨有的字",
+                                     tail="最後的普通的一句話"))
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            pane = app.query_one("#right", tui.PreviewText)
+            await _focus_pane(app, pilot)
+            await _search(pilot, "獨有的字")
+
+            assert _count(app) == "第 2 個／共 2 個", "the nearer of the two above"
+            assert pane.document.get_line(pane.selection.start[0]) == "中間的獨有的字"
+            assert app.cache[hdr["id"]].at == 0, "both are at the front, so it read all of it"
+            row = _screen_row(pane, pane.selection.start)
+            assert 0 <= row < pane.content_size.height, f"and it is on the screen ({row})"
+    _run(go)
+
+
+def test_entering_a_word_that_is_only_at_the_front_loads_down_to_it_once():
+    """Scenario: 跳到還沒載入的地方 - one load, not a step at a time (W3)."""
+    hdr, app = _search_app(_far_body(front="最早的獨有的字", tail="最後的普通的一句話"))
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            pane = app.query_one("#right", tui.PreviewText)
+            await pilot.press("tab")
+            await pilot.pause()
+            await _search(pilot, "獨有的字")
+
+            assert _count(app) == "第 1 個／共 1 個"
+            assert pane.document.get_line(pane.selection.start[0]) == "最早的獨有的字"
+            assert app.cache[hdr["id"]].at == 0, "read down to it"
+            assert str(app.query_one("#hint", Static).content) == "", "and there is nothing above it"
+            row = _screen_row(pane, pane.selection.start)
+            assert 0 <= row < pane.content_size.height, f"and it is on the screen ({row})"
+    _run(go)
+
+
+def test_a_word_that_is_only_in_the_front_matter_is_not_found(tmp_path):
+    """Scenario: 檔頭不算 - the front matter is metadata, not conversation."""
+    hdr = _hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "只有檔頭有這個字")
+    paths, _index_ = _index((hdr, "## user\n普通的一句話\n\n## assistant\n回答\n"))
+    path = paths.mirror / hdr["id"].split(":")[1] / "session.md"
+    assert "只有檔頭有這個字" in path.read_text(encoding="utf-8").split("---")[1]
+    preview = tui.Preview(path)
+    preview.step()
+
+    assert preview.counts("只有檔頭有這個字") == (0, 0)
+    assert tui.Preview(path).counts("普通的一句話") == (1, 1)   # the first step is the whole file
+
+
+def test_escape_closes_the_box_first_and_then_only_the_highlights():
+    """Scenario: 清掉標亮 - Esc in the box closes it; Esc again clears the marks, cursor and all."""
+    body = ("## user\n先問一句\n\n## assistant\n表格在這裡\n\n## user\n還有表格\n\n## user\n結尾\n")
+    hdr, app = _search_app(body)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            pane = app.query_one("#right", tui.PreviewText)
+            await pilot.press("tab")
+            await pilot.pause()
+            await _search(pilot, "表格")
+            assert _count(app)
+
+            await pilot.press("slash")
+            await pilot.press("x")
+            await pilot.pause()
+            assert app.focused is app.query_one("#search"), "「/」打開搜尋框並取得焦點"
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.focused is pane, "Esc 關掉搜尋框，焦點回到預覽區"
+            assert _count(app) == "第 2 個／共 2 個", "and the count is still there"
+
+            where = pane.cursor_location
+            await pilot.press("escape")
+            await pilot.pause()
+            assert _count(app) == "", "Esc 清掉標亮與計數"
+            assert app.focused is pane and pane.cursor_location == where, "游標留在原地"
+            assert pane._query == "" and not any("underline" in s for _t, s in _drawn(pane, 4))
+    _run(go)
+
+
+def test_another_session_starts_without_the_search():
+    """Scenario: 換 Session - the highlights and the count go with the row they were made on."""
+    body = "## user\n表格在這裡\n\n## assistant\n回答\n"
+    other = _hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "別的", sid="ses_b")
+    hdr = _hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "有表格的")
+    paths, _index_ = _index((hdr, body), (other, "## user\n沒有表格\n"))
+    app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            _go_to_row(app, hdr["id"])
+            await pilot.pause(0.4)
+            await pilot.press("tab")
+            await pilot.pause()
+            await _search(pilot, "表格")
+            assert _count(app) == "第 1 個／共 1 個"
+
+            await pilot.press("tab")                    # back to the list
+            await pilot.pause()
+            _go_to_row(app, other["id"])
+            await pilot.pause(0.4)
+            assert _count(app) == "", "the count goes with the row"
+            pane = app.query_one("#right", tui.PreviewText)
+            assert pane._query == "" and pane.selection.is_empty
+            assert not any("underline" in s for _t, s in _drawn(pane, 0))
+
+            _go_to_row(app, hdr["id"])            # and back: it starts clean again
+            await pilot.pause(0.4)
+            await _focus_pane(app, pilot)
+            await _search(pilot, "表格")
+            assert _count(app) == "第 1 個／共 1 個"
+            await pilot.press("tab")               # `]` is a list key: back to the list first
+            await pilot.pause()
+            await pilot.press("]")
+            await pilot.pause(0.4)
+            assert _count(app) == "", "another tab is another session"
+    _run(go)
+
+
+def test_a_word_that_is_not_there_says_so_and_leaves_the_cursor_alone():
+    """spec「預覽區搜尋」: 找不到時 MUST 說「找不到」，游標不動."""
+    hdr, app = _search_app(_three_matches_body())
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            pane = app.query_one("#right", tui.PreviewText)
+            await pilot.press("tab")
+            await pilot.pause()
+            where = pane.cursor_location
+
+            await _search(pilot, "沒有這個字")
+            assert _count(app) == "找不到"
+            assert pane.cursor_location == where
+
+            await _search(pilot, "表格")           # and a word that is there works again
+            assert _count(app) == "第 3 個／共 3 個"
+    _run(go)
+
+
+def test_the_letters_in_the_search_box_are_typing():
+    """The box is an input: `n`, `N`, `j`, `k`, `q` and `/` are words, not keys (spec「預覽區搜尋」)."""
+    hdr, app = _search_app(_three_matches_body())
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            await pilot.press("tab")
+            await pilot.pause()
+            await pilot.press("slash")
+            for ch in "nNjkq/表格":
+                await pilot.press(ch)
+            await pilot.pause()
+
+            assert app.focused is app.query_one("#search"), "the box has the focus"
+            assert app.query_one("#search", Input).value == "nNjkq/表格"
+            assert _count(app) == "", "nothing is searched until Enter"
+            assert app.query_one("#right").document.text, "and the app is still here"
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app.query_one("#search", Input).value == "", "Tab 丟掉沒送出的字"
+            assert app.focused is app.query_one("#table")
+            assert not app.query_one("#searchbar").has_class("on"), "and the box goes"
+            await pilot.press("n", "N")             # and on the list side they are not keys
+            await pilot.pause()
+            assert app.focused is app.query_one("#table") and _count(app) == ""
+    _run(go)
+
+
+def test_the_key_bar_says_the_keys_of_the_search_box_while_it_is_open():
+    """spec「按鍵」: the key bar shows only the keys that work where the focus is (W8)."""
+    hdr, app = _search_app(_three_matches_body())
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            await pilot.press("tab")
+            await pilot.pause()
+            bar = str(app.query_one("#keys", Static).content)
+            assert "搜尋" in bar and "n/N" in bar and "清標亮" in bar, bar
+
+            await pilot.press("slash")
+            await pilot.pause()
+            bar = str(app.query_one("#keys", Static).content)
+            assert "送出" in bar and "關掉" in bar, bar
+            assert "n/N" not in bar and "j/k" not in bar, bar
+    _run(go)
+
+
+def test_the_search_runs_again_when_the_whole_conversation_replaces_the_last_message(monkeypatch):
+    """R5: the same session whose content was replaced is searched again with the same word.
+
+    The count first says it is only looking at the last message; when the reading version
+    arrives the matches are counted again and the line says which change it was.
+    """
+    agent = FakeAgent("claude", [Listed("s1", "/tmp/p", "未匯入的", "2026-10-02T00:00:00Z")],
+                      last=("user", "表格的問題"), texts={"s1": ["表格的問題", "回答也有表格"]})
+    gate, real = threading.Event(), agent.export
+
+    def gated(session_id):
+        gate.wait(10)                 # the reading version is built only when the test says so
+        return real(session_id)
+    agent.export = gated
+    paths = store.Paths.from_env()
+    app = tui.AgoraApp(paths, FakeCli(), agents=[agent], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("]")
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.3)
+            assert "載入中" in str(app.query_one("#pinned", Static).content)
+
+            await pilot.press("tab")
+            await pilot.pause()
+            await _search(pilot, "表格")
+            assert _count(app) == "第 1 個／共 1 個（只有最後一則）", _count(app)
+
+            gate.set()
+            for _ in range(30):                    # the reading version is built in a thread
+                if "整份對話" in str(app.query_one("#pinned", Static).content):
+                    break
+                await pilot.pause(0.1)
+            await pilot.pause(0.2)
+            assert _count(app) == "第 2 個／共 2 個  已換成整份對話", _count(app)
+            pane = app.query_one("#right", tui.PreviewText)
+            assert pane.document.get_line(pane.selection.start[0]) == "回答也有表格"
+    _run(go)
+
+
+def test_reading_the_rows_again_searches_again_and_says_the_content_changed():
+    """R5: the same after an action, which re-reads the index and the previews (reload)."""
+    hdr, app = _search_app(_three_matches_body())
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            await pilot.press("tab")
+            await pilot.pause()
+            await _search(pilot, "表格")
+            assert _count(app) == "第 3 個／共 3 個"
+
+            app.reload()                       # what an action does when it is done
+            await pilot.pause(0.5)
+            assert _count(app) == "第 3 個／共 3 個  內容已更新", _count(app)
+
+            app.clear_preview_search()          # with no search there is nothing to say
+            app.reload()
+            await pilot.pause(0.5)
+            assert _count(app) == ""
+    _run(go)
+
+
+def test_a_whole_conversation_that_cannot_be_read_does_not_stay_on_loading(monkeypatch):
+    """spec「預覽區搜尋」: 整份讀取失敗時，畫面 MUST NOT 一直停在「載入中」."""
+    class Broken(FakeAgent):
+        def export(self, session_id):
+            raise RuntimeError("no reading version today")
+
+    broken = Broken("claude", [Listed("s1", "/tmp/p", "未匯入的", "2026-10-02T00:00:00Z")], last="boom")
+    assert tui.import_preview(broken, "s1", True, None).pinned == "讀不到整份對話"
+    assert tui.import_preview(broken, "s1").pinned == "讀不到這個 session"
+
+    real, boom = tui.import_preview, None
+
+    def only_the_full_one(agent, session_id, full=False, paths=None, updated=None):
+        if full:
+            raise RuntimeError("the worker died")
+        return real(agent, session_id, full, paths, updated)
+    monkeypatch.setattr(tui, "import_preview", only_the_full_one)
+    app = tui.AgoraApp(store.Paths.from_env(), FakeCli(), agents=[broken], check_setup=False)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("]")
+            await pilot.pause()
+            await pilot.press("down")
+            for _ in range(30):
+                pinned = str(app.query_one("#pinned", Static).content)
+                if "讀不到整份對話" in pinned:
+                    break
+                await pilot.pause(0.1)
+            assert "讀不到整份對話" in str(app.query_one("#pinned", Static).content)
+            assert "載入中" not in str(app.query_one("#pinned", Static).content)
+    _run(go)
+
+
+def test_benchmark_3mb_search_word_that_is_only_at_the_front():
+    """Enter on a word that is only at the front of a 3 MB session: count the whole file and
+    put it in the pane once (W3). A loose limit, like the `g` one - it is there to catch the
+    quadratic way (a step at a time), not to measure the machine."""
+    one = "## user\n" + "話" * 3000 + "\n\n## assistant\n" + "答" * 3000 + "\n\n"
+    body = ("## user\n最早的獨有的字\n\n"
+            + one * ((3 * 1024 * 1024) // len(one.encode("utf-8")))
+            + "## user\n最後的普通一句話\n")
+    assert 2.5 * (1 << 20) < len(body.encode("utf-8")) <= 3 * (1 << 20)
+    hdr, app = _search_app(body)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("down")
+            await pilot.pause(0.4)
+            assert app.cache[hdr["id"]].more()
+            await pilot.press("tab")
+            await pilot.pause()
+
+            t0 = time.perf_counter()
+            await _search(pilot, "獨有的字")
+            t1 = time.perf_counter()
+            print(f"\n[BENCHMARK] 3 MB search to the front: {t1 - t0:.3f} s")
+            assert t1 - t0 <= 5, f"3 MB search took {t1 - t0:.3f} s, which exceeds 5 s"
+            assert _count(app) == "第 1 個／共 1 個"
+            assert app.cache[hdr["id"]].at == 0, "the whole file was read"
+            pane = app.query_one("#right", tui.PreviewText)
+            row = _screen_row(pane, pane.selection.start)
+            assert 0 <= row < pane.content_size.height, f"and it is on the screen ({row})"
+    _run(go)
