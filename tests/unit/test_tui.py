@@ -3028,7 +3028,11 @@ def test_prepend_chunk_does_not_jump_when_pressing_k_at_top(body):
 
 
 def test_prepend_chunk_triggers_on_page_up_at_top():
-    """PageUp at line 0 triggers loading earlier chunk, and the cursor stays on the screen."""
+    """PageUp at line 0 triggers loading earlier chunk, and it moves a page, not a row.
+
+    The row the cursor was on goes down about a page (spec「補上前一段之後」: 最多往下移一頁),
+    and the cursor lands on the page above it - on the screen, not above it.
+    """
     hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
     paths, index = _index((hdr, _steps_body()))
     app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
@@ -3044,11 +3048,16 @@ def test_prepend_chunk_triggers_on_page_up_at_top():
             await pilot.pause()
             _at_the_top_of_the_pane(pane)
             before_len = len(app.cache[hdr["id"]].text)
+            was_lines = pane.document.line_count
 
             await pilot.press("pageup")
             await pilot.pause(0.3)
             assert len(app.cache[hdr["id"]].text) > before_len, "pageup loaded earlier chunk"
             assert len(app.cache[hdr["id"]]._chunks) == 2, "one page up, one step"
+            added = pane.document.line_count - was_lines
+            was_top = _screen_row(pane, (added, 0))     # the row the cursor was on
+            assert was_top >= pane.content_size.height - 1, \
+                f"a page up pushes it down about a page ({was_top})"
             row = _screen_row(pane, pane.cursor_location)
             assert 0 <= row < pane.content_size.height, \
                 f"a page up is a page of rows on the screen, so the cursor is on it ({row})"
