@@ -1,4 +1,4 @@
-"""The last four MUSTs the review found untested (docs/review/T3-final.md F1-F4).
+"""The last four MUSTs the review found untested (review T3-final, F1-F4).
 
 Only tests here; the code is at HEAD. Each one says what it is holding, and each was
 mutation-checked in a copy: taking the behaviour away has to turn one of them red.

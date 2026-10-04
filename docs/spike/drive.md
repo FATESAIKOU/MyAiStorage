@@ -8,7 +8,7 @@
 的就是自己建立的檔案）。測完 `rclone purge gdrive:agora-test` 收尾，
 `rclone lsf gdrive:` 回到空。
 
-腳本：`spike/drive/drive_probe.sh`（一步一節，每個 rclone 呼叫都包 `timeout 90`，
+腳本：`spike/drive/drive_probe.sh`（2026-10-04 清理時已從 repo 移除，要看請用 `git show fd3ba9f:<路徑>` 從歷史取回）（一步一節，每個 rclone 呼叫都包 `timeout 90`，
 結尾一定 purge）。
 
 ## 結論

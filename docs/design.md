@@ -1,6 +1,6 @@
 # Agora lite 基本設計
 
-第 4 版（2026-10-02）：標頭改成 OKF frontmatter、命令改成「動作 型態 [id] [選項]」、新增 delete 與 edit、拿掉 sync。第 3 版：第 2 版併入 `docs/review/design.md` 的 S1–S10、H1–H7、L1–L4 與 `docs/review/test-plan.md` 的 T1、T2；第 3 版再併入 spike 結果（`docs/spike/`）與第 2 版確認的 N1–N17。
+第 4 版（2026-10-02）：標頭改成 OKF frontmatter、命令改成「動作 型態 [id] [選項]」、新增 delete 與 edit、拿掉 sync。第 3 版：第 2 版併入 design review 的 S1–S10、H1–H7、L1–L4 與 test-plan review 的 T1、T2（審查記錄（2026-10-04 清理時已從 repo 移除，要看請用 `git show fd3ba9f:<路徑>` 從歷史取回））；第 3 版再併入 spike 結果（`docs/spike/`）與第 2 版確認的 N1–N17。
 
 取代期 1 的實作（約 3.2 萬行程式碼，大多在防「AI 住民篡改真本」與「把 git 放在 Drive 上」）。舊實作留在 git 歷史與 main，這個 branch（`agora-lite`）從零開始。
 
@@ -502,4 +502,4 @@ Python（uv）＋ rclone ＋ SQLite FTS5。**`src/` 的程式碼行數只記錄�
 | `agents/claude` | 找 jsonl 與附屬檔、改寫欄位、閱讀版、找出結束後的 session | 350 |
 | `cli` | 六個指令、continue 流程、pending 補存、merge | 400 |
 
-測試照 `docs/review/test-plan.md`。**測試的 helper 只能在 pytest 或隔離的環境裡用**：不在 pytest（沒有 `PYTEST_VERSION`）而且 `AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`AGORA_CONFIG`／`HOME` 有任一個沒指到暫存目錄時，`tests/_guard.py` 在 import 的當下就 `SystemExit`（T8；在那之前有過兩次直接用真的目錄，其中一次把真實 Session 的標題送進了外部模型）。測試用的接縫：`AGORA_FOLDER_NAME`（整合測試設成 `agora-test`）、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`AGORA_RCLONE`、`AGORA_OPENCODE_CMD`、`AGORA_CLAUDE_CMD`、`AGORA_CLAUDE_HOME`、`AGORA_TEST_FAULT`、`AGORA_NOW`。
+測試照當初的 test-plan review（`docs/review/test-plan.md`（2026-10-04 清理時已從 repo 移除，要看請用 `git show fd3ba9f:<路徑>` 從歷史取回）），之後依 `openspec/specs/` 的 Scenario 補。**測試的 helper 只能在 pytest 或隔離的環境裡用**：不在 pytest（沒有 `PYTEST_VERSION`）而且 `AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`AGORA_CONFIG`／`HOME` 有任一個沒指到暫存目錄時，`tests/_guard.py` 在 import 的當下就 `SystemExit`（T8；在那之前有過兩次直接用真的目錄，其中一次把真實 Session 的標題送進了外部模型）。測試用的接縫：`AGORA_FOLDER_NAME`（整合測試設成 `agora-test`）、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`AGORA_RCLONE`、`AGORA_OPENCODE_CMD`、`AGORA_CLAUDE_CMD`、`AGORA_CLAUDE_HOME`、`AGORA_TEST_FAULT`、`AGORA_NOW`。

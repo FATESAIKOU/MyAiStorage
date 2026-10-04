@@ -21,18 +21,16 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from functools import partial
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
-from rich.markdown import Markdown
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.worker import get_current_worker
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical
 from textual.geometry import Offset
 from textual.screen import ModalScreen
 from textual.widgets import Checkbox, DataTable, Input, OptionList, ProgressBar, Static, TextArea

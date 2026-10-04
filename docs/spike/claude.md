@@ -3,7 +3,7 @@
 impl2，2026-10-01。Claude Code 2.1.286。對應 `docs/design.md` 第 7 節與 review S9/S10 追加題。
 測試全在 scratch 目錄 `/tmp/agora-spike-impl2/proj`（git init＋空 commit）用 `claude -p`
 跑自編短對話（「CSV 轉 Markdown 步驟」「燈塔守則」等無害內容）；只碰自己建的 uuid 檔。
-腳本：`spike/claude/`（`resume-copy.sh`、`fork-continue.sh`、`jsonl-shape.py`）。
+腳本：`spike/claude/`（`resume-copy.sh`、`fork-continue.sh`、`jsonl-shape.py`）（2026-10-04 清理時已從 repo 移除，要看請用 `git show fd3ba9f:<路徑>` 從歷史取回）。
 
 ## V2：複製 jsonl 成新 id 再 resume —— 可行
 

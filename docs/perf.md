@@ -1,6 +1,6 @@
 # Agora lite 效能量測
 
-2026-10-02，impl2。腳本 `spike/perf/measure.py`（主）與 `spike/perf/probe_split.py`（拆解冷啟動）。
+2026-10-02，impl2。腳本 `spike/perf/measure.py`（主）與 `spike/perf/probe_split.py`（拆解冷啟動）（2026-10-04 清理時已從 repo 移除，要看請用 `git show fd3ba9f:<路徑>` 從歷史取回）。
 真的 Drive `agora-test`，`AGORA_CONFIG`／`AGORA_CACHE_DIR`／`AGORA_STATE_DIR` 都在暫存目錄，
 `rclone.conf` 是 symlink。對話只有一段自編的 `claude -p`（`--disallowedTools` 放在 prompt 後面）。
 每項跑 3 次取中位數。跑完 purge 掉這次建的 23＋5 個 `sessions/<ULID>`、刪掉自己那個 uuid 的

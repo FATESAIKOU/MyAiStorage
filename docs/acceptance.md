@@ -2,7 +2,7 @@
 
 給使用者在自己的終端機，一步一步做。涵蓋 T1（指令模式）、T2（互動模式）、T3（先存本機、背景上傳與刪除）、T6（大 Session 的預覽）。
 
-依 HEAD `e3863f0` 之後的行為寫；第 16 節（T6，大 Session 的預覽）依 `9c74220`（T6 和它的 Y1、Y2、Y6 修正）和 ticket `docs/tickets/T6-lazy-preview.md`；第 12、16 節的按鍵另外依 change `preview-search-keys`（**`Tab` 不再換頁**，換頁是 `[`／`]`；`Tab`／`shift+tab` 切焦點；預覽區有游標與搜尋整份 Session）。「應該看到」的字，是 review 在副本裡用假 Drive、假 agent 實際跑出來的。真的 Drive 上，時間會不一樣，字是一樣的。
+依 HEAD `e3863f0` 之後的行為寫；第 16 節（T6，大 Session 的預覽）依 `9c74220`（T6 和它的 Y1、Y2、Y6 修正）和 ticket T6（`docs/tickets/T6-lazy-preview.md`（2026-10-04 清理時已從 repo 移除，要看請用 `git show fd3ba9f:<路徑>` 從歷史取回））；第 12、16 節的按鍵另外依 change `preview-search-keys`（**`Tab` 不再換頁**，換頁是 `[`／`]`；`Tab`／`shift+tab` 切焦點；預覽區有游標與搜尋整份 Session）。「應該看到」的字，是 review 在副本裡用假 Drive、假 agent 實際跑出來的。真的 Drive 上，時間會不一樣，字是一樣的。
 
 **規則**
 - 只用 Drive 上的 `agora-test`，以及 `/tmp/agora-acc` 底下的目錄。

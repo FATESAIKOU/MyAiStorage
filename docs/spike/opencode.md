@@ -20,7 +20,7 @@ opencode 的 session 屬於「專案目錄」，在沒有 commit 的資料夾裡
 任何真實 Session 或 MyBrain 內容**。測完 9 個自建 session 已逐一用
 `opencode session delete <id>` 刪掉（不用批次刪）。
 
-腳本：
+腳本（2026-10-04 清理時已從 repo 移除，要看請用 `git show fd3ba9f:<路徑>` 從歷史取回）：
 
 | 檔案 | 用途 |
 |---|---|
@@ -505,7 +505,7 @@ model{providerID,modelID}, summary{diffs}`——**沒有 `path`**（只有 assis
 
 ## code-adapters.md OC1–OC11 的修法（2026-10-02 晚）
 
-`docs/review/code-adapters.md` B 節的十一項。OC11 是 conftest（PM 的檔案），而且
+`docs/review/code-adapters.md`（2026-10-04 清理時已從 repo 移除，要看請用 `git show fd3ba9f:<路徑>` 從歷史取回） B 節的十一項。OC11 是 conftest（PM 的檔案），而且
 PM 已經自己加上了（`XDG_*`／`CLAUDE_CONFIG_DIR` 的 `delenv`，加上單元測試預設把
 `AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD` 指向不存在的路徑），所以這一項不用動。
 

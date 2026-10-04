@@ -1570,7 +1570,7 @@ def test_enter_on_the_confirmation_window_keeps_it_cancelled():   # review W2
     _run(go)
 
 
-# --- PM's own run through the screen (docs/tickets/T2-pm-run.md) ------------
+# --- PM's own run through the screen (ticket T2's PM run) ---------------------
 
 
 def test_the_tick_is_readable_as_text_and_the_line_says_what_it_does():   # Q1

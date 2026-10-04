@@ -193,9 +193,6 @@ class Drive:
         _with_files_from(self, [f"{u}/session.md" for u in ulids], mirror,
                          "copy", "gdrive:sessions", str(mirror), "--no-traverse")
 
-    def delete(self, ulid: str, name: str) -> None:
-        self._run("deletefile", f"gdrive:sessions/{ulid}/{name}")
-
 
 # ---------------------------------------------------------------------------
 # Outbox: a session is written here first and only leaves once Drive has it.
@@ -562,7 +559,6 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         left.extend(u for u in gone if (paths.outbox / u).is_dir())
 
     raws = [f"{u}/{n}" for u in entries for n in _raw_names(paths.outbox / u)]
-    session_md5 = {u: m[0] for u, m in entries.items()}
     if raws:
         try:
             _copy_batch(drive, paths, raws)
