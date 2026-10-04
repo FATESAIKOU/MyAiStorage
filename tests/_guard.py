@@ -12,10 +12,14 @@ Being under pytest is not isolation by itself. pytest loads a conftest for the t
 files *under its own directory*, so on 10-04 a test file kept outside the repository and
 run with `uv run pytest` had no conftest, nothing was isolated, and two fake sessions
 were written into the real cache while this module said nothing. So under pytest it
-refuses unless this repository's own `tests/conftest.py` is loaded - or this process is a
-subprocess of a run that had it, which inherits the conftest's token together with the
-temporary HOME it set. Otherwise exactly as outside pytest: it refuses unless every
-directory that matters points at a temporary one.
+refuses unless this repository's own `tests/conftest.py` is loaded; a process that did
+load it is left alone, because what isolates a test is that conftest's `isolated_home`
+fixture and it only runs while a test runs, so at import time the four directories still
+say nothing either way. A subprocess of an isolated run has no conftest of its own but
+inherits the token the conftest leaves behind - and it still has to pass the very same
+four-directory check as outside pytest, because the token says where a process came from,
+never that anyone isolated it. Otherwise exactly as outside pytest: it refuses unless
+every directory that matters points at a temporary one.
 
 Import it first thing in a test module (or in a helper the test modules share) and the
 refusal happens at the import itself, before any helper touches a directory.
@@ -33,7 +37,8 @@ TEMP_ROOTS = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
 CONFTEST = Path(__file__).resolve().with_name("conftest.py")
 
 # What `tests/conftest.py` leaves in the environment when it is imported, so a subprocess
-# of an isolated run can tell where it comes from. Set there, read only here.
+# of an isolated run can tell where it comes from. Set there, read only here - and on its
+# own it opens nothing: see `_check()`.
 ISOLATED_TOKEN = "AGORA_TESTS_ISOLATED"
 
 
@@ -75,25 +80,30 @@ def _repo_conftest_loaded() -> bool:
 
 
 def _check() -> None:
-    # pytest sets this; a plain interpreter does not. Under pytest only this repository's
-    # conftest isolates anything, and pytest loads it for test files under `tests/` only -
-    # a test file kept anywhere else runs unisolated with this module silent. So under
-    # pytest the question is not "is this pytest?" but "did the conftest come with it?".
+    # Under pytest, only this repository's conftest isolates anything, and pytest loads it
+    # for the test files under `tests/` only - a test file kept anywhere else runs unisolated
+    # with this module silent. `PYTEST_VERSION` is no help: pytest hands it down to every
+    # child it starts. So the question is not "is this pytest?" but "did the conftest come
+    # with it?", and having imported it settles that on its own: what isolates a test is that
+    # conftest's `isolated_home` fixture, and it only runs while a test runs, so at import
+    # time - which is when this module decides - the four directories say nothing either way
+    # (design「Decisions」).
     if os.environ.get("PYTEST_VERSION"):
-        # Two ways to be under an isolated run, and only two: this process imported the
-        # conftest that isolates every test, or a process that had it started this one. A
-        # subprocess inherits the conftest's token along with the temporary HOME it set, so
-        # it is isolated as well - refusing it would only teach people to drop the
-        # isolation instead (a test's own probe subprocess needs it). `PYTEST_VERSION`
-        # proves nothing on its own: pytest hands it down to every child it starts, so a
-        # pytest run of a file outside the repository looks the same from in here.
-        if _repo_conftest_loaded() or os.environ.get(ISOLATED_TOKEN):
+        if _repo_conftest_loaded():
             return
-        # Same rule as below, and the same discipline about the message: the reason only,
-        # no path, no title, nothing from a session.
-        raise SystemExit("[tests] 測試的 helper 只能在隔離的環境用："
-                         "這次 pytest 沒有載入 repo 的 conftest，沒有隔離。"
-                         "請把測試檔放在 repo 的 tests 底下（uv run pytest）。")
+        # A subprocess of an isolated run has no conftest of its own but inherits this
+        # token, and inherits the temporary HOME with it, so it is worth listening to. It is
+        # still not a licence: the token says where a process came from, not that anyone
+        # isolated it - someone can export one by hand, and one rides along inside a copied
+        # environment (`{**os.environ, "HOME": the real one}`, which is what the integration
+        # tests build). So with only a token, fall through and judge it exactly as outside
+        # pytest instead of returning.
+        if not os.environ.get(ISOLATED_TOKEN):
+            # Same discipline as the message below: the reason only, no path, no title,
+            # nothing from a session.
+            raise SystemExit("[tests] 測試的 helper 只能在隔離的環境用："
+                             "這次 pytest 沒有載入 repo 的 conftest，沒有隔離。"
+                             "請把測試檔放在 repo 的 tests 底下（uv run pytest）。")
     loose = [name for name in ("AGORA_CACHE_DIR", "AGORA_STATE_DIR", "AGORA_CONFIG", "HOME")
              if not _in_temp(os.environ.get(name))]
     if loose:

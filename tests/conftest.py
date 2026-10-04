@@ -22,8 +22,10 @@ REPO = Path(__file__).resolve().parent.parent
 # The token `_guard` reads to tell "a pytest run that has this conftest" from "a pytest run
 # of a test file kept outside the repository", where pytest loads no conftest and nothing is
 # isolated (T8). A test's own subprocess inherits this together with the temporary HOME that
-# `isolated_home` sets, so it is under the same isolation and must not be refused; a pytest
-# run of a file somewhere else has neither. Set at import time, never in the user's shell.
+# `isolated_home` sets, so it is under the same isolation; a pytest run of a file somewhere
+# else has neither. Set at import time, never in the user's shell. It is a marker of origin,
+# not a pass: on its own `_guard` still requires the four directories to point at temporary
+# ones, because this token can be exported by hand or ride along in a copied environment.
 os.environ["AGORA_TESTS_ISOLATED"] = "1"
 
 
