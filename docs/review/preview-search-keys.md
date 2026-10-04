@@ -447,3 +447,192 @@ Agora 頁 `session.md` 讀不到時，預覽也是 `Preview(None)`，搜尋同�
   - compileall 通過，571 passed；
   - worktree 裡沒有 commit 的檔案沒有混進來。
 - 沒有跑整合測試。
+
+---
+
+## 第 2 節程式審查（5e61693、0e75284）
+
+這次審查的範圍：
+- **5e61693**：第 2 節「預覽區的游標」，也包含第 1 節清單的 1（拿掉 `_KeysTable`）與 5（清單的按鍵列加上 `[ ]`、`Tab`）；
+- **0e75284**：補第 1 節清單的 2、3、4、6。
+
+對照的是：
+- spec「預覽區的游標與捲動」；
+- design「預覽區改用唯讀的 TextArea」「分段載入接在 TextArea 上」（含 R4）；
+- tasks 2.1～2.3；
+- 前面的 W2、W3、W6、W7、W9～W13。
+
+驗證方式：
+- 都在 `git archive` 的副本裡做；
+- 探針、計時、故意改壞的程式都放在 scratchpad，沒有加進 repo；
+- 沒有碰工作區。
+
+**結論：先不要進第 3 節，先修 1 個 High（會讓程式整個掛掉）和 2 個 Medium。** 其他大致符合規劃。
+
+### High
+
+**S1：最後一則以 code block 結尾的 Session，一打開預覽，整個互動模式就掛掉。**
+- **怎麼發生的：**
+  - `PreviewText._build_highlight_map` 用 `self._highlights.keys()` 逐一取行號，再呼叫 `self.document.get_line(line_index)`（`tui.py:357` 起）；
+  - tree-sitter 的 `fenced_code_block` 節點結束點的行號，會等於 `line_count`，也就是最後一行的下一行；
+  - `Preview` 又會把結尾的換行 `strip` 掉，所以文件只要以收尾的 ```` ``` ```` 結束，就會查到不存在的那一行，丟出 `IndexError`。
+- **實測：**
+  - impl1 做的 3 MB 假 session，轉成閱讀版之後一選到那一列，app 就整個掛掉，traceback 是 `settled → put_preview → load_text → _build_highlight_map → IndexError`；
+  - 用最短的內文重現：`"## assistant\n```python\nprint(1)\n```"` 會掛；以清單、引用、純文字結尾都不會。
+  - assistant 的回答以 code block 結尾很常見，所以這是 High。
+- **修法：**
+  - 跳過 `line_index >= self.document.line_count` 的行；
+  - 或者不覆寫 `_build_highlight_map`，改在 `get_line()` 裡處理標題的顏色（見下面 S6）。
+- **要補的測試：** `PreviewText.load_text("## assistant\n```\nx\n```")` 不能丟例外，而且要在 `run_test` 裡實際選到這一列。
+
+### Medium
+
+**S2：換 Session 時會多讀一段，T6 的「平常只讀尾端」退回去了。**
+- **實測（同一份內文，都在副本裡跑）：**
+
+  | 版本 | 打開時讀的量 | 換到另一個 Session 時讀的量 |
+  |---|---|---|
+  | 改之前（cab2ba7） | 30,698 bytes | 30,698 bytes |
+  | 現在 | 30,698 bytes | **61,402 bytes** |
+
+  回到原本那一列也一樣是兩段。
+- **原因：**
+  - `put_preview` 呼叫 `load_text` 時，捲動位置會從大於 0 變成 0；
+  - `watch_scroll_y` 就把它當成「捲到頂」，呼叫 `load_earlier`，又補了一段，畫面也多做一次插入和捲動還原。
+- **修法：**
+  - `_suppress_scroll_load` 這個旗標本來就在，但正式程式從來沒有設過它，只有測試在設。
+  - 在 `put_preview` 和 `load_all_earlier` 換內容、捲動的期間，把它設起來，等 `call_after_refresh` 之後再放開。
+- **要補的測試：** 換 Session 之後，`len(preview._chunks) == 1`（或者讀的位元組約等於一段）。
+
+**S3：用 `k`／PgUp 補前一段時，如果上一行很長、會折行，游標會跑到畫面外。**
+- **實測（3000 字一行的內文，和測試用的 `_big_body` 一樣）：**
+  - 原本那一行確實往下移了一列，這部分 ✓；
+  - 但游標落在 `(7, 0)`，位置在**畫面第 −124 列**，完全看不到。
+- **原因：**
+  - `restore()` 用 `move_cursor((row - 1, 0))`，把游標放到上一行的**第一段**；
+  - 捲動卻只往上退一列（`delta - 1`）。
+  - 上一行如果折成 h 列，游標就在畫面上面 h − 1 列的地方。
+- **spec 怎麼說：** 「k 一次移動畫面上的一列」。所以游標應該停在上一行的**最後一段**，而不是第一段。
+- **修法：** 用 `pane.wrapped_document` 把「原本那一行的上一列」換回文件位置（例如 `offset_to_location`），游標放在那裡；捲動照樣退一列就對了。PgUp 也是同樣的問題：它拿文件的行數去減頁高，而不是折行後的列數。
+- **為什麼現有測試沒抓到：**
+  - 測試假設每一行只佔一列，用 `(grew - 1) - scroll_y` 算游標在畫面上的位置；
+  - 而且允許 `approx(..., abs=1)` 的誤差。
+- **要改的測試：**
+  - 用 `wrapped_document.location_to_offset(cursor_location)` 算游標的實際位置，斷言它在畫面內；
+  - 原本那一行「剛好往下一列」要斷言 `== 1`，不要用 `abs=1`。因為 `abs=1` 連「完全沒動」（0）都會通過。
+- 短行的內文是對的：原本那一行在第 1 列，游標在第 0 列。
+
+### PM 指定的六點
+
+**(1) 補前一段時，畫面真的不跳嗎？**
+- **捲到頂觸發（游標沒動）：✓**
+  - 探針用短行內文、滑鼠捲到頂，補完之後原本第一行在第 0 列，**完全不變**；
+  - 這個情況由 T6 原本的測試 `test_scrolling_to_the_top_adds_the_step_above_and_keeps_the_line` 守著：把捲動還原拿掉，它會紅。
+- **用 `k` 觸發：**
+  - 短行：剛好往下一列 ✓；
+  - 長行：見 S3。
+  - 測試**有**驗「原本那一行」在畫面上的位置（`grew - scroll_y`），方向是對的，但容許誤差太寬（S3）。
+- **用 PgUp 觸發：** 測試只驗「有補到」，沒有驗畫面位置。可以接受，但 S3 修好後要補一個斷言：游標在畫面內。
+
+**(2) `g` 的做法對，時間在邊緣。**
+- **做法：** `load_all_earlier` 是先只對 `Preview` 連續 `step()`，再 `load_text` 一次 ✓。
+  - 在副本裡改成一段一段 insert，`test_benchmark_3mb_g_press` 會紅（量到 4.5 秒）。
+- **實測（120×30，探針在 pytest 的隔離環境裡跑；只讀了 impl1 那份假 jsonl，是用 claude 轉接器加 `AGORA_CLAUDE_HOME` 讀的）：**
+
+  | 內文 | 第一次按 `g` | 全部載入之後再按 `g` |
+  |---|---|---|
+  | 假 session 的閱讀版：2.11 MB，82,698 行 | **1.02 秒** | 0.09～0.10 秒 |
+  | 同一份接長到 3.17 MB，124,050 行 | **1.55 秒**（目標 1.5，剛好超過） | 0.10 秒 |
+  | 測試用的 `_big_body`：3 MB，每行 3000 字 | 0.51 秒 | — |
+
+  - 第一份 jsonl 是 3.0 MB，但閱讀版只有 2.1 MB。
+  - 測試裡用的是「很少行、每行很長」的內文，比真實內容快得多，所以測試量到的時間太樂觀。
+  - 全部載入之後，在 3 MB 上按 `j` 約 0.22 秒（含一個 frame）。
+  - 這些量測都是在 S1 先修好的狀態下做的：我在探針裡換了一個會檢查行號範圍的 `_build_highlight_map`，否則一打開就掛了。
+- **建議：**
+  - 4.2 由 PM 在 pane 裡用 3 MB 真實格式的內容再量一次；
+  - 如果超過 1.5 秒，可以考慮讓 `_build_highlight_map` 的覆寫不要每一行都去讀文字（S6），或接受 1.5 秒左右。這是 PM 的判斷。
+- **`test_benchmark_3mb_g_press` 會因為機器忙而失敗（Medium／Low）：**
+  - 我同時跑 12 個改壞的副本時，**和 `g` 無關的改壞**也讓它失敗了（量到 1.95～2.3 秒）。
+  - 單元測試裡放絕對時間的門檻，在機器忙的時候（例如同時有幾個隊員在跑測試）會偶爾失敗。
+  - **建議：** 單元測試只抓「平方級」的退化，門檻放寬到 5 秒左右；1.5 秒的目標留給 4.2 的人工量測。或者把它標成 integration／benchmark，平常不跑。
+
+**(3) 兩種退回不上色、焦點離開時不高亮、`## user`／`## assistant` 的顏色**
+- **兩種退回不上色：✓**
+  - 只 catch `LanguageDoesNotExist`；沒有 tree-sitter 時由 Textual 自己退回；兩種情況都有測試；
+  - 把 except 改掉，對應的測試會紅。
+- **焦點離開時不高亮：✓** `on_focus`／`on_blur` 切換高亮；改壞之後有兩個測試會紅。
+- **user／assistant 的顏色：** `get_line()` 給 `## user` 加 bold cyan、`## assistant` 加 bold green ✓，測試會抓到拿掉顏色的改壞。但有兩點：
+  - 覆寫 `_build_highlight_map`，就是為了拿掉這兩行的 tree-sitter `heading` 樣式，讓 `get_line()` 的顏色不被蓋掉。
+    - 把這個覆寫整個拿掉，**現有測試全綠**：測試只檢查 `get_line()` 的回傳值，沒有檢查畫出來的樣子。
+    - 而且這個覆寫就是 S1 掛掉的地方。
+  - 「沿用原本的不同顏色」其實沒有可以沿用的東西：改之前（cab2ba7）的 `tui.py` 沒有替這兩種標題設顏色，rich 的 Markdown 是用同一種樣式畫所有標題。
+    - 這不是錯，但 cyan 是清單裡 opencode 的顏色，綠色是 merge 的顏色，意思會混在一起。
+    - 建議由 PM 決定顏色，順便改 spec 的字面，例如改成「`## user`／`## assistant` 用不同顏色」。
+
+**(4) 給第 3 節搜尋標亮的接點：有，但要注意順序。**
+- 接點是 `get_line()` 的最後一行會呼叫 `_stylize_search_matches(text, line_index, line_string)` ✓。
+- 第 3 節要注意兩件事：
+  - **快取：** 符合改變時，要清 `_line_cache` 再 `refresh()`（W6）。
+  - **樣式會被蓋掉：** TextArea 會在 `get_line()` **之後**才套上語法上色（前景色）和游標行（底色），兩者都會蓋掉 `get_line()` 加的樣式。
+    - 所以標亮如果只改前景色，在標題、code block 裡會被語法上色蓋掉；只改底色，在游標那一行會被蓋掉。
+    - 建議用不會被這兩者蓋掉的屬性，例如 `reverse` 或 `underline` 加 `bold`。第 3 節的測試要檢查畫出來的 Strip，不能只看 `get_line()` 的回傳值。
+
+**(5) 改壞之後測試會不會紅？**
+
+在 `git archive HEAD` 的副本裡，一次改壞一處，跑 `test_tui.py`。表裡不算 benchmark 那個測試，因為它在機器忙時本來就會失敗。
+
+| 改壞的地方 | 結果 |
+|---|---|
+| `k` 觸發時不還原捲動 | ✓ 1 failed |
+| 捲到頂時不還原捲動 | ✓ T6 的測試紅 |
+| `g` 改成一段一段 insert | ✓ 只有 benchmark 抓到（4.5 秒） |
+| 有焦點時也不打開游標行高亮 | ✓ 2 failed |
+| 拿掉 `LanguageDoesNotExist` 的退路 | ✓ 1 failed |
+| 換 Session 時游標放在最前面 | ✓ 2 failed |
+| 拿掉 `## user` 的顏色 | ✓ 1 failed |
+| `_no_header` 改回每一段都套用（W10 退回去） | **✗ 全綠** |
+| `settled()` 不檢查 `is_stale()`（W11 退回去） | **✗ 全綠**（`test_preview_staleness_detection` 只測 `is_stale()` 這個函式本身） |
+| 拿掉 `_build_highlight_map` 的覆寫 | **✗ 全綠**（見 (3)） |
+| 提示改回舊的文字（沒提到 k、g） | **✗ 全綠** |
+| 拿掉 `history.clear()` | ✗ 全綠（Low，只影響記憶體） |
+
+- **W10、W11 沒有任何測試守著。** W10 會影響第 3 節的計數不變量，第 3 節本來就要寫那個不變量測試，但建議現在先補兩個簡單的：
+  - 30 KB 內沒有切點、而且這一段以 `---` 開頭時，內容不會被吃掉；
+  - 檔案改了（大小或 mtime 變了）之後再選到這一列，會重新讀。
+- **提示文字：** 「提到 `k`、`g`」是 spec 的 MUST，要加一行斷言。
+
+**(6) 0e75284 有補齊第 1 節清單的 2、3、4、6 嗎？有。**
+- **2：** AskText 的測試加了兩個斷言：Tab／shift+tab 之後焦點還在視窗裡的 widget，關掉視窗之後焦點在 `#table`。
+  - 在副本裡拿掉「其他視窗時 return」，這個測試現在會紅。
+- **3：** 新增 `test_filter_open_mouse_click_preview_esc_keeps_focus_and_filter`。
+  - 在副本裡拿掉 Esc 的 `side() == "list"` 判斷，這個測試現在會紅。
+- **4：** 新增 `test_ctrl_t_in_filter_toggles_mode_without_changing_filter_text`。
+- **6：** 拿掉了 `action_toggle_focus` 這個別名，兩個換頁的 action 合成 `_change_tab(step)`。
+- **1、5：** 已在 5e61693 做了：
+  - `KEYS` 改成普通的 dict，預覽只有一張表，`paint_keys` 用中括號查；
+  - 清單兩張表都加上了 `[ ]` 換頁和 `Tab` 切焦點。
+
+### Low
+
+- `PreviewArea = PreviewText` 這個別名留著，沒有任何地方用到，可以拿掉。
+- `PreviewText.BINDINGS = [*TextArea.BINDINGS, ...]` 不需要展開：子類別本來就會繼承父類別的 BINDINGS。
+- `_suppress_scroll_load` 現在只有測試在設，等於是在正式程式裡留了一個給測試用的後門。照 S2 改成正式程式自己用，就不是後門了。
+- `Preview.step()` 會回傳 `" "`，表示「有讀到東西，但 strip 之後是空的」。這種用一個空格當旗標的寫法，日後容易被誤用。可以改成回傳 `bool`，或者回傳 `(text, read_any)`。
+
+### 給 PM 的清單（請轉告 impl3，要在第 3 節之前修）
+
+1. **S1（High）：** `_build_highlight_map` 跳過超出文件範圍的行，或者整個改用 `get_line()` 處理；補「以 code block 結尾」的測試。
+2. **S2：** `put_preview`、`load_all_earlier` 換內容的期間，把 `_suppress_scroll_load` 設起來；補「換 Session 只讀一段」的測試。
+3. **S3：** `k`／PgUp 補完之後，游標要放在折行後的上一列；測試用 `wrapped_document` 算出的實際位置來斷言，原本那一行的位置要 `== 1`。
+4. **測試：**
+   - W10、W11、提示文字各補一個斷言；
+   - 讓 `_build_highlight_map` 的覆寫有測試守著（檢查畫出來的樣子，或確認這兩行沒有 `heading` 樣式）；
+   - benchmark 的門檻放寬，或者移出 unit。
+5. **PM 決定：** user／assistant 用什麼顏色，以及 spec「沿用原本的顏色」的字面要不要改；3 MB 的 `g` 1.55 秒算不算合格（4.2 再量一次）。
+
+### 測試執行
+
+- **完整 unit：** 在 `git archive HEAD`（ba3a9e9，包含 5e61693、0e75284）的乾淨副本裡跑，**單獨跑**、不和別的測試搶 CPU：compileall 通過，**583 passed**。
+- **故意改壞的副本：** 是 12 個平行跑的，所以 benchmark 那個測試的失敗不列入判斷。
+- 沒有跑整合測試。
