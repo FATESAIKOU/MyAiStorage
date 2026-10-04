@@ -7,7 +7,7 @@
 
 #### Scenario: 預設關掉 kitty 鍵盤協定
 - **WHEN** 環境變數裡沒有 `TEXTUAL_DISABLE_KITTY_KEY`，執行 `agora` 進入互動模式
-- **THEN** Textual 不啟用 kitty keyboard protocol（`textual.constants.DISABLE_KITTY` 為真）
+- **THEN** Textual 不啟用 kitty keyboard protocol（`textual.constants.DISABLE_KITTY_KEY` 為真）
 
 #### Scenario: 尊重使用者的設定
 - **WHEN** 使用者設了 `TEXTUAL_DISABLE_KITTY_KEY=0` 再執行 `agora`

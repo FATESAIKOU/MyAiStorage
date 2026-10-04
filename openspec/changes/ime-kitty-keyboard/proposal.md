@@ -27,6 +27,6 @@
 
 - 程式：`src/agora/cli.py`，在 `from agora import tui` 之前設定環境變數（`tui.py` 一 import 就載入 Textual，Textual 在 import 時讀這個設定）。
 - 測試：
-  - 單元測試：用子程序，在乾淨的環境裡 import 互動模式之後，`textual.constants.DISABLE_KITTY` 為真；使用者自己設成 `0` 時為假。
+  - 單元測試：用子程序，在乾淨的環境裡 import 互動模式之後，`textual.constants.DISABLE_KITTY_KEY` 為真；使用者自己設成 `0` 時為假。
   - 人工：在 herdr 的 pane 裡用中文輸入法在篩選框選字，無法自動測。
 - 文件：README 加一句。
