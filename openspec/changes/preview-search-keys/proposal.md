@@ -40,7 +40,7 @@
 - 程式：`src/agora/tui.py`。
   - 預覽區從 `VerticalScroll`＋`Static(Markdown)` 改成唯讀的 `TextArea`；
   - 沿用 T6 的分段讀取（`Preview.step`、`read_tail`）；
-  - 新增在檔案上搜尋（不經過已載入的文字）。
+  - 搜尋：在檔案上計數（共幾個、還沒載入的有幾個），已載入的部分在預覽區的文字裡找。
 - 測試：`tests/unit/test_tui.py`（用 `run_test` 按鍵驅動）。
 - 文件：`docs/design.md` 5.9、`docs/acceptance.md` 互動模式那一段、README 的按鍵表。
 - 相關：issue #23（中文輸入法選字）會影響預覽區搜尋框打中文。那張另外處理，這個 change 不依賴它。
