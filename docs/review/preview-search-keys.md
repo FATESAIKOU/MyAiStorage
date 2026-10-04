@@ -1145,3 +1145,38 @@ Agora 頁 `session.md` 讀不到時，預覽也是 `Preview(None)`，搜尋同�
 - **完整 unit：** 在 `git archive HEAD`（83b3541）的乾淨副本裡跑：compileall 通過，**618 passed**。
 - **故意改壞：** 4 處，平行跑。`test_the_bar_really_reaches...` 又在機器忙的時候失敗了一次，和這次的改動無關。
 - 沒有跑整合測試，也沒有碰工作區。
+
+---
+
+## 最後複查（7bcf19b、b1b0472）
+
+**結論：兩個都做到了，沒有新問題。preview-search-keys 這邊我沒有要擋的了。**
+
+### 7bcf19b（impl2：R1 與 `edit()` 的回傳值）✓
+
+- **`loaded(key, None)`：** 現在先取目前這一列，只有 `row.key == key` 時才把 pinned 改成「讀不到整份對話」。成功那一支照舊。
+  - 新測試 `test_a_read_that_fails_after_the_reader_moved_on_leaves_the_pinned_alone`；
+  - 在副本裡拿掉 `row.key == key` 這個檢查，這個測試會紅。
+- **`PreviewText.edit(self, edit: Edit) -> EditResult`：** 現在會 `return super().edit(edit)`，簽名也和 TextArea 一致。
+  - 新測試 `test_editing_the_pane_keeps_text_areas_own_answer`；
+  - 在副本裡拿掉 `return`，這個測試會紅。
+
+### b1b0472（impl4：文件的三處）✓
+
+- **12.12、12.13：**
+  - `d` 只驗「只列出看得到的那一個」，Enter 什麼都不刪；
+  - Tab／shift+tab 改在 `p` 的 `Confirm` 裡驗：有預設不勾的勾選框，焦點預設在「取消」，Tab 到勾選框、shift+tab 回選項，底下的頁面不動。
+  - 這和程式一致：`action_delete` 用的是 `Choose`，`action_pull` 用的是 `Confirm`，而且帶勾選框。
+- **16.20、16.21：** `k` 觸發時「往下移一列」，PgUp 觸發時「往下移約一頁」，分開寫了。和 ac7ea27 的斷言一致。
+- **16.23、16.27 與後面的「關於秒數」：**
+  - 寫明 `grow.py` 的行數少（約 1.8 萬行），量起來通常會比目標快；
+  - 附上 PM 在 pane 實測真實 3 MB jsonl 的數字（`g` 1.40 秒、Enter 跳到最前面 1.33 秒）；
+  - 寫明 3 MB、十幾萬到三十萬行的極端閱讀版約 2～3.5 秒，是可接受的。
+  - 這和 7ef3ff6 (C) 的量測一致。目標的處理方式（極端檔案可以接受）是 PM 的決定，文件已經照著寫。
+- **編號：** 因為插了一步，後面的步驟都往後移了一號。我檢查過 acceptance 裡所有提到 `12.1x`／`16.xx` 的地方，表格外唯一的引用（「關於 16.23、16.27 的秒數」）已經用新的編號，沒有指錯。
+
+### 測試
+
+- **完整 unit：** 在 `git archive HEAD`（7bcf19b）的乾淨副本裡跑：compileall 通過，**620 passed**。
+- **故意改壞：** 2 處，都在副本裡做。
+- worktree 裡沒有跑任何東西：PM 接下來要在那裡跑整合測試。
