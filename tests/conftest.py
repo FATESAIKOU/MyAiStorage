@@ -85,6 +85,9 @@ def isolated_home(tmp_path, monkeypatch, request):
     monkeypatch.setenv("AGORA_CONFIG", str(tmp_path / "config"))
     monkeypatch.setenv("AGORA_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("AGORA_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("A2A_CONFIG", str(tmp_path / "a2a_config" / "config.json"))
+    monkeypatch.setenv("A2A_STATE_DIR", str(tmp_path / "a2a_state"))
+    monkeypatch.setenv("A2A_TOKEN_FILE", str(tmp_path / "a2a_token"))
     # opencode finds its database through XDG_* too; never let a unit test reach it (OC11).
     for var in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR"):
         monkeypatch.delenv(var, raising=False)

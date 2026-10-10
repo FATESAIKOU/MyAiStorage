@@ -1,11 +1,11 @@
 ## 1. 訊息模型與後端介面
 
-- [ ] 1.1 建 `src/angareion/` 套件與 `a2a` console script（`pyproject.toml` 的 packages 與 `[project.scripts]`），`a2a --help` 可用。
-- [ ] 1.2 六欄位訊息模型：`from`／`to`／`channel`／`urgency`／`content`／`attachments`；front matter 序列化與解析、位址與附件驗證（`ref` 或 `inline` 恰好一個）、長度計算。單元測試：往返、缺欄位、內文含 `---`、群組位址、附件上限。
-- [ ] 1.2a 設定與路徑：`~/.config/angareion/config.json`（`channel_repo`、`identity`、`token_file`）、`A2A_CONFIG`／`A2A_STATE_DIR`／`A2A_TOKEN_FILE` 覆寫；`~/.local/state/angareion/` 狀態目錄。
+- [x] 1.1 建 `src/angareion/` 套件與 `a2a` console script（`pyproject.toml` 的 packages 與 `[project.scripts]`），`a2a --help` 可用。
+- [x] 1.2 六欄位訊息模型：`from`／`to`／`channel`／`urgency`／`content`／`attachments`；front matter 序列化與解析、位址與附件驗證（`ref` 或 `inline` 恰好一個）、長度計算。單元測試：往返、缺欄位、內文含 `---`、群組位址、附件上限。
+- [x] 1.2a 設定與路徑：`~/.config/angareion/config.json`（`channel_repo`、`identity`、`token_file`）、`A2A_CONFIG`／`A2A_STATE_DIR`／`A2A_TOKEN_FILE` 覆寫；`~/.local/state/angareion/` 狀態目錄。
 - [ ] 1.3 後端介面（Protocol：`create_channel`／`find_channel`／`post_message`／`list_messages(since, etag)`）與假後端（記憶體實作），給測試與 sidecar 的開發用。
 - [ ] 1.4 GitHub 後端：stdlib HTTP client（transport 可注入假貨）、條件式請求與 ETag、分頁、repo 層 comments 端點、建立 issue、`--new` 檢查。單元測試：304、403＋retry-after、401、`id` 防重複。
-- [ ] 1.5 本機狀態：`since`、`etags`、`acked`、`channels`；刪掉之後能從信道重建；單元測試。
+- [x] 1.5 本機狀態：`since`、`etags`、`acked`、`channels`；刪掉之後能從信道重建；單元測試。
 - [ ] 1.6 token 讀取（`A2A_TOKEN_FILE` 或 `~/.config/angareion/token`，0600）；輸出與例外 MUST NOT 含 token；測試掃 stdout／stderr／log。
 
 ## 2. 指令
@@ -17,8 +17,8 @@
 
 ## 3. 文件與部署設定
 
-- [ ] 3.1 `deploy/angareion/config.example.json`（不含秘密）與 `docs/angareion.md`：六欄位格式與範例、channel 與 issue 的對應、token 建立與輪替、狀態檔位置、群組位址在 v0 的行為。
-- [ ] 3.2 本人的 smoke test 清單（建 private 信道 repo、設 PAT、兩台互送與 ack）；標明只有本人執行、隊員不碰。
+- [x] 3.1 `deploy/angareion/config.example.json`（不含秘密）與 `docs/angareion.md`：六欄位格式與範例、channel 與 issue 的對應、token 建立與輪替、狀態檔位置、群組位址在 v0 的行為。
+- [x] 3.2 本人的 smoke test 清單（建 private 信道 repo、設 PAT、兩台互送與 ack）；標明只有本人執行、隊員不碰。
 
 ## 4. 收尾
 
