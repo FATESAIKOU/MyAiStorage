@@ -4,7 +4,7 @@
 `agora continue session <id> --agent opencode|claude --fork` MUST 先建立一個新 Session，再用它啟動 code agent；原本那個 Session MUST NOT 被改動（內容、header、`updated_at` 都不變）。原本那個在雲端沒有時 MUST 拒絕。
 
 新 Session：
-- 使用者 header MUST 照抄原 Session（`verified` 與 merge 自動填的 `status` 除外），`title` 後面 MUST 加上 `-fork`；`--header title=…` 有給時以它為準。`id` 與 `agora` 區塊 MUST 照新 Session 產生，`agora.relation` 是 `fork`，`agora.parents` 指向原 Session；`sources` 含這次的 agent session 與原 Session。
+- 使用者 header MUST 照抄原 Session（含 `verified`；merge 自動填的 `status` 除外），`title` 後面 MUST 加上 `-fork`；`--header title=…` 有給時以它為準。`id` 與 `agora` 區塊 MUST 照新 Session 產生，`agora.relation` 是 `fork`，`agora.parents` 指向原 Session；`sources` 含這次的 agent session 與原 Session。
 - 對話的最後 MUST 有一則 user 發言「從 <原 id>（<原本的 header>）fork」，以及一則固定的 assistant 回覆；原 Session 以沒有回覆的 user 結尾時，這兩則之前 MUST 先補一則 assistant「（這一段在這裡結束，當時沒有回覆）」。
 - MUST 在 agent 啟動前就存檔；agent 結束後有新內容時，MUST 寫回這個新 Session。
 - 打開 agent 就離開（沒有新內容）時，新 Session MUST 留著，stdout MUST 印它的 id。

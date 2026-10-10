@@ -48,7 +48,7 @@
 ### header：照抄使用者欄位，系統欄位重新產生
 - 照抄：`h.SYSTEM_KEYS`（`id`、`agora`）以外的欄位，扣掉 `FORK_DROP_KEYS`。
 - `FORK_DROP_KEYS`（F6）：
-  - `verified`：等本人決定（已經透過 PMO 詢問）。PM 建議不抄，依據是 design 3.4「`verified` 永遠不自動填」，照抄就等於替 B 自動填了。實作先列在這個常數裡，本人決定後只改這裡。
+  - `verified`：**照抄**（本人 10-10 決定，經 PMO）。PM 原本建議不抄（design 3.4「`verified` 永遠不自動填」），本人選擇照抄：fork 是同一份內容的副本。
   - A 是 merge 出來的時候，`status`（merge 自動填的 `draft`）也拿掉，和「continue 一個 merge 時拿掉 `status`」（5.4）一致。
 - `title`（F5、F8）：
   - `--header title=…` 有給就以它為準，不加 `-fork`（使用者的覆蓋優先於自動欄位，3.5）。
@@ -95,5 +95,5 @@
 - [打開就離開也會留下一個 fork] → 這是 fork 的本意；不要可以 `agora delete`。
 - [A 在 B 還在時刪不掉] → 和 merge 一樣；要刪就一起刪（delete 先刪子 Session）。
 - [同 agent fork 的 `source.created_at` 是 A 第一則的時間，search 與互動模式會把 B 排在 A 的日期；「打開就離開」時，未匯入頁可能誤標「↻」（F17）] → 列入 PM 實跑時觀察。
-- [`verified` 照不照抄] → 等本人決定，實作只改一個常數。
+- [`verified` 照抄到 fork：fork 之後 B 的內容會變，`verified` 仍掛著] → 本人 10-10 的決定；要撤掉時用 `agora edit`。
 - [F1 的 store 規則改到既有的 import→continue／edit 行為] → 這是修 bug；local-first-writes 的 spec 一起改，並補測試。
