@@ -790,27 +790,60 @@ def _fingerprint(record: dict, agent: Agent) -> tuple | None:
     return (main.st_size, main.st_mtime_ns, extra)
 
 
+def _this_runs_rescue(hdr: dict, record: dict, target_ulid: str | None = None) -> bool:
+    """Whether this header is the session this run already saved the conversation as.
+
+    `relation: continue`, this run's agent session as its source, and - where the
+    caller's search does not pin it already - the session it was saved out of among
+    its parents (design P3). Only those, so a branch the user made by importing the
+    same agent session is never mistaken for it.
+    """
+    agora = h.agora_of(hdr)
+    source = agora.get("source") or {}
+    if (agora.get("relation") != "continue"
+            or source.get("agent") != record.get("agent")
+            or source.get("session_id") != record.get("agent_session_id")):
+        return False
+    return target_ulid is None or any(p.get("id") == f"agora:{target_ulid}"
+                                      for p in agora.get("parents") or [])
+
+
 def _saved_as(index: store.Index, record: dict, target_ulid: str) -> str | None:
-    """The session this run already saved the conversation as, if there is one.
+    """The indexed session this run already saved the conversation as, if there is one.
 
     Two paths notice a deletion - the foreground here, and the background uploader's
     L7 - and while Drive cannot be reached neither can see the other's work, so both
     would save a second copy of the same conversation. What a rescue leaves behind is
-    enough to recognise it: `relation: continue`, this run's agent session as its
-    source, and the session it was saved out of among its parents (design P3).
-
-    Only those three, so a branch the user made by importing the same agent session is
-    never mistaken for it. The newest one wins: a session deleted twice is a chain.
+    enough to recognise it (design P3); the newest one wins: a session deleted twice is
+    a chain. The rescue the uploader has only staged so far is `_staged_as`'s part.
     """
     found = None
     for ulid in index.children(target_ulid):
-        hdr = index.header(ulid) or {}
-        agora = h.agora_of(hdr)
-        source = agora.get("source") or {}
-        if (agora.get("relation") == "continue"
-                and source.get("agent") == record["agent"]
-                and source.get("session_id") == record.get("agent_session_id")):
+        if _this_runs_rescue(index.header(ulid) or {}, record):
             found = ulid if found is None else max(found, ulid)   # ULIDs sort by time
+    return found
+
+
+def _staged_as(paths: store.Paths, record: dict, target_ulid: str) -> tuple[str, dict] | None:
+    """`_saved_as` among the sessions that are only staged so far, the outbox included.
+
+    The uploader rescues a deleted session by staging the new one and then indexing it
+    (`store.remember`), and a crash in between - or the moment the uploader spends
+    inside that window - leaves the rescue in the outbox alone. The last write-back has
+    to adopt it there rather than save the same work a second time (design P2, P3). The
+    header comes back with the id: reading it again later could race the uploader.
+    """
+    found = None
+    for ulid in store.waiting_ulids(paths):
+        folder = paths.outbox / ulid
+        if not folder.is_dir():
+            folder = paths.outbox / f".done-{ulid}"
+        try:
+            hdr = store.read_entry(folder)
+        except (h.HeaderError, OSError):
+            continue
+        if _this_runs_rescue(hdr, record, target_ulid) and (found is None or ulid > found[0]):
+            found = (ulid, hdr)
     return found
 
 
@@ -842,7 +875,8 @@ def _write_target(paths: store.Paths, run: "_Run", *, check_drive: bool) -> tupl
     three agree about where the conversation is (design「寫回目標的解析」P2, P3):
 
     1. the session this run already saved the work as, if any - whether or not the
-       original is still around (that is how the uploader's rescue is picked up);
+       original is still around (that is how the uploader's rescue is picked up, indexed
+       or still only staged in the outbox);
     2. otherwise the current target, while it is still here. The periodic write looks
        no further than this machine: another machine's deletion is the background
        uploader's to find, and asking Drive every few minutes costs a whole listing
@@ -854,6 +888,9 @@ def _write_target(paths: store.Paths, run: "_Run", *, check_drive: bool) -> tupl
     index = store.Index(paths)
     ulid = _ulid_of(run.target)
     saved_as = _saved_as(index, run.record, ulid)
+    staged = _staged_as(paths, run.record, ulid)
+    if staged and (saved_as is None or staged[0] > saved_as):
+        return f"agora:{staged[0]}", staged[1], False
     if saved_as and saved_as != ulid:
         return f"agora:{saved_as}", index.header(saved_as) or {}, False
     hdr = index.header(ulid)

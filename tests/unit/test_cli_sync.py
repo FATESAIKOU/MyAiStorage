@@ -266,6 +266,94 @@ def test_a_deletion_mid_run_moves_later_writes_to_the_rescue(env, capsys, monkey
     assert not on_drive(a).exists(), "the deleted one is not pushed back"
 
 
+def test_the_final_write_adopts_an_indexed_rescue_with_nothing_new(env, capsys, monkeypatch):
+    """The uploader rescued A's last version into B and the agent then said nothing
+    more: no periodic round adopts it first, the final write-back has to.
+
+    This is the e2e's shape (tests/integration/test_e2e_sync.py, 途中被刪): what A
+    held at the end is the version the uploader saved as B, and stdout has to name B.
+    """
+    env.speak_rounds = 1
+    env.sleep = 0.35              # one round, then the agent is done
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    real_round = cli._periodic_write
+    done = {"rescued": False}
+
+    def round_then_rescue(run_, agent):
+        real_round(run_, agent)
+        if done["rescued"]:
+            return
+        done["rescued"] = True
+        hdr = store.Index(paths()).header(ulid)
+        raw = (paths().mirror / ulid / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+        body = (paths().mirror / ulid / "session.md").read_text(encoding="utf-8")
+        store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+        shutil.rmtree(on_drive(a))                     # another machine deleted A
+        store.upload_batch(store.Drive(paths()), paths())   # the uploader's L7 rescue, in place
+
+    monkeypatch.setattr(cli, "_periodic_write", round_then_rescue)
+    code, out, err = _continue(capsys, a)
+
+    assert done["rescued"]
+    kept = _extra_sessions(a)
+    assert len(kept) == 1, f"exactly one rescue: {[k['id'] for k in kept]}"
+    b = kept[0]["id"]
+    assert code == 0, err
+    assert out == b, f"the final write named {out}, the rescue is {b}"
+    assert "另存" in err, err
+    assert not on_drive(a).exists(), "the deleted one is not pushed back"
+
+
+def test_the_final_write_adopts_a_rescue_that_is_only_staged(env, capsys, monkeypatch):
+    """The uploader staged the rescue B but has not indexed it yet (or died between the
+    two): the final write-back, with nothing new, still has to find it in the outbox.
+
+    A crash between `stage` and `remember` leaves the new session only in the outbox -
+    `store.remember` runs right after the stage, but that window is real. The last write
+    resolves its target with `check_drive=True` and, before it can call A dead, has to
+    see the work that is already saved as B sitting right there.
+    """
+    env.speak_rounds = 1
+    env.sleep = 0.35              # one round, then the agent is done
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    real_round = cli._periodic_write
+    done = {"rescued": False, "b": None}
+
+    def round_then_rescue_before_indexing(run_, agent):
+        real_round(run_, agent)
+        if done["rescued"]:
+            return
+        done["rescued"] = True
+        hdr = store.Index(paths()).header(ulid)
+        raw = (paths().mirror / ulid / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+        body = (paths().mirror / ulid / "session.md").read_text(encoding="utf-8")
+        store.stage(paths(), hdr, body, raw, update=True, kind="continue")   # the entry being rescued
+        shutil.rmtree(on_drive(a))                     # another machine deleted A
+        remember = store.remember                     # staged, then the uploader stops
+        monkeypatch.setattr(store, "remember", lambda *args, **kwargs: None)
+        try:
+            done["b"] = store._rescue_deleted(paths(), paths().outbox / ulid, ulid,
+                                              lambda _m: None)
+        finally:
+            monkeypatch.setattr(store, "remember", remember)
+        b = done["b"]
+        assert b and (paths().outbox / b).is_dir(), "the rescue has to be waiting in the outbox"
+
+    monkeypatch.setattr(cli, "_periodic_write", round_then_rescue_before_indexing)
+    code, out, err = _continue(capsys, a)
+
+    b = f"agora:{done['b']}"
+    assert done["rescued"] and store.Index(paths()).header(done["b"]) is None, \
+        "nothing indexed it before the final write"
+    assert code == 0, err
+    assert out == b, f"the final write named {out}, the staged rescue is {b}"
+    assert "另存" in err, err
+    assert not on_drive(a).exists(), "the deleted one is not pushed back"
+    assert on_drive(b).joinpath("session.md").is_file(), "the adopted rescue went up"
+
+
 def test_an_offline_deletion_is_adopted_once_the_uploader_frees_it(env, capsys, monkeypatch):
     """Scenario「離線期間被刪」: while Drive cannot be listed the rounds stage updates; when
     the line is back the uploader rescues once, and the following round adopts it."""
