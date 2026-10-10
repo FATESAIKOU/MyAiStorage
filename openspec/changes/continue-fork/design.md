@@ -43,7 +43,7 @@
   - stderr 印「沒有新內容；fork 已存成 agora:B」；
   - exit code 依步驟 6 `_save` 的結果（0 或 3）；
   - **不寫 `unsaved-launches`**：B 的 `agora.source` 就是這個 launch，寫進去會讓未匯入頁永遠跳過它。
-- 有新內容時：照現在印最後寫到的 id；exit code 取兩次存檔裡較差的那一個。
+- 有新內容時：照現在印最後寫到的 id。exit code：最後寫回的就是 B 本身（同一個 ULID，outbox 那一筆已經被寫回的版本取代）時，只看寫回那一次；另存成別的 Session 時，取兩次存檔裡較差的那一個（程式審查 M6，PM 10-10 決定）。
 
 ### header：照抄使用者欄位，系統欄位重新產生
 - 照抄：`h.SYSTEM_KEYS`（`id`、`agora`）以外的欄位，扣掉 `FORK_DROP_KEYS`。

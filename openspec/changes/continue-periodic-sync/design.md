@@ -37,7 +37,7 @@
 2. 沒有的話，原本的目標還在就用它：
    - 定期寫回（`check_drive=False`）只看本機：索引裡有、沒有被標成雲端沒有。**不連 Drive**（P7）：別台的刪除交給背景上傳的 L7 發現，L7 另存之後，下一輪由第 1 步沿用。
    - 最後一次與補存（`check_drive=True`）照現在的 `_finish` 加上 `_lost_in_cloud`。這是最後的檢查點，**內容和上一次相同也要做**（P2）。
-3. 原本的目標被刪了、也沒有另存過，才另存成新的（`relation: continue`，`parents` 指向目前的目標，所以 B 被刪後的 C 指向 B，和 `_rescue_deleted` 往下串的慣例一致）。
+3. 原本的目標被刪了、也沒有另存過，才另存成新的（`relation: continue`，`parents` 指向目前的目標，所以 B 被刪後的 C 指向 B，和 `_rescue_deleted` 往下串的慣例一致）。另存的 Session **帶上原本的使用者 header**（`SYSTEM_KEYS` 以外，含 case、tags、refs、description、verified；原本的 header 還在本機時），再套 `header_updates`。一般 continue 與 fork 都一樣；背景上傳的另存（`_rescue_deleted`）本來就保留 header，兩條路因此一致（程式審查 M9，PM 10-10 決定）。
 
 ### 一次寫回
 - 把 `_finish` 拆成「收」（`collect`）與「寫」（解析目標＋組 header＋`_save`），定期寫回、最後一次、補存都走同一條。
