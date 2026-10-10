@@ -426,6 +426,7 @@ def test_final_write_waits_for_inflight_uploader_to_adopt_rescue(claude_lab, cap
     """If the agent exits while the outbox entry for run.target is in flight and the uploader
     is rescuing it into B, the final write must wait for it to settle and adopt B,
     instead of prematurely minting a duplicate rescue or returning A."""
+    monkeypatch.delenv("AGORA_UPLOAD", raising=False)
     a = _import_claude(capsys)
     ulid = a.split(":")[1]
     _script(claude_lab, monkeypatch, "append:ZZ 第 1 次發言,wait-sync,exit")
