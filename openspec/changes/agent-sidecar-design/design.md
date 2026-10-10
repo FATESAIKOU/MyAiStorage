@@ -91,7 +91,7 @@ sidecar 的範圍有三種切法，**請本人選定之後才實作**；下面�
 | A2A token（#30） | 本人（capability） | **只有 sidecar** | 0600；agent 環境與檔案裡沒有；agent 回報經中繼 |
 | 模型存取 | LLMGateway（本人設定的上游） | LLMGateway；agent 拿「這次准許」對應的存取方式 | sidecar 不持有、不讀、不寫模型金鑰 |
 | worker 的 git 憑證（開 PR） | 本人（capability，worker 既有） | agent 的環境（照 worker 的既有方式） | sidecar 不管、不複製、不記 log；v0 不動它 |
-| Angareion 的 channel repo | 本人 | 只有 sidecar（同上） | worker 上的 agent 沒有 GitHub 存取 |
+| Angareion 的信道 repo | 本人 | 只有 sidecar（同上） | agent MUST NOT 有**信道 repo** 的存取；它開 PR 用的是 worker 既有的 git 憑證（上一列），兩種憑證互不相干 |
 
 - **sidecar ↔ LLMGateway 的溝通**（B／C）：啟動前 sidecar POST 一個「開 agent」申請（worker、角色、coding agent、模型）→ gateway 回准許（含 agent 要用的模型存取方式與效期）或拒絕 → sidecar 照回覆設定 agent 環境並啟動 → 結束／終止後回報。協定細節等 MyPMO 的 LLMGateway 設計出來對齊（見 Open Questions）；sidecar 這一側先做一個 `ModelBroker` 介面（`request_lease`／`release`），開發與測試用假 broker。
 - **agent 回報的中繼**：agent 不能自己連 Angareion（沒有 token）。sidecar 在 `$XDG_RUNTIME_DIR/sidecar.sock` 開一個 unix socket，提供一個 `send` 操作；用 SO_PEERCRED 拿呼叫方的 pid，pid 的 process tree 裡有 registry 的 agent 才接受；sidecar 用該 team 的身分把訊息送進 Angareion。agent 端用一個薄指令（`sidecar say …`）呼叫它。這樣 token 不離開 sidecar，而 team 的回報仍然是它自己的身分。

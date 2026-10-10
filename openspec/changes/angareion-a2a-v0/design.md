@@ -1,3 +1,13 @@
+## 交本人確認的問題
+
+issue #30 原文寫的訊息格式與這份設計有三處不同；**這三處都待本人確認，本人沒同意之前以原文為準**。若照原文，要改的地方是：這份 design 的 D1／D2、`specs/angareion/spec.md` 的〈六欄位訊息與 front matter 表示法〉與它的 Scenario、`tasks.md` 的 1.2／2.1（含單元測試的欄位名與附件形狀）；其餘（後端、收件人、ack／游標、token、指令）不受影響。
+
+| # | issue 原文 | 這份設計 | 理由 |
+|---|---|---|---|
+| 1 | 欄位名 `attachment`（單數） | `attachments`（複數） | 值是陣列，複數名和形狀一致；六欄位、CLI 與 `--json` 都用同一個名字。改成原文只是改字面。 |
+| 2 | 每項是 `[名稱, {怎麼取得，或直接放內文}]`（兩元素陣列） | 每項是 mapping：`name` 加恰好一個 `ref` 或 `inline` | mapping 好讀、可擴充（未來加 `sha256`），「恰好一個」能寫成驗證規則；pair 形狀沒有多任何好處。 |
+| 3 | `subject／channel`（兩個名字並列） | 只用 `channel` 一個欄位名 | 「訊息掛在哪個話題」用 channel 最直，也不和 issue 標題混在一起；`subject` 留給未來真要「一則訊息的標題」時再加。 |
+
 ## Context
 
 - MyAiStorage 目前只有 agora（本機 Session 管理）。Angareion 是新的子系統，見 proposal 的 Why；收信端是 Agent sidecar（#31），人用的端是 PMO 與各 repo 的 PM。
