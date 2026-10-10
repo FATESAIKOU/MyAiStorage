@@ -75,12 +75,24 @@ def models_of(provider: str) -> frozenset[str]:
 def model_chain() -> list[list[str]]:
     """`['-m', model, *extra]` per candidate, in the order they are tried.
 
+    `AGORA_TEST_MODEL`, when it is set, goes first: the person running the
+    integration tests picked it on purpose, and when the free endpoints are out
+    of quota the two in front would only cost a timeout each before their turn.
+    It gets the third-party flags when it is the third-party model; the rest of
+    the chain follows with that model removed - an entry must not be tried twice.
+
     The third is only offered when this machine actually has that provider, so a
     checkout without it does not burn a timeout on it.
     """
     chain = [["-m", PRIMARY], ["-m", FALLBACK]]
     if THIRD_PARTY[0] in models_of(THIRD_PARTY[0].partition("/")[0]):
         chain.append(["-m", THIRD_PARTY[0], *THIRD_PARTY[1]])
+    chosen = os.environ.get("AGORA_TEST_MODEL")
+    if chosen:
+        first = ["-m", chosen]
+        if chosen == THIRD_PARTY[0]:
+            first += THIRD_PARTY[1]
+        chain = [first, *(flags for flags in chain if flags[1] != chosen)]
     return chain
 
 

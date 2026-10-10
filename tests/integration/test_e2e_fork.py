@@ -67,9 +67,6 @@ REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
 REAL_CONF = REAL_HOME / ".config" / "agora" / "rclone.conf"
 OPENCODE_WRAPPER = Path(__file__).parent.parent / "fakes" / "opencode_noninteractive.py"
 CLAUDE_WRAPPER = Path(__file__).parent.parent / "fakes" / "claude_noninteractive.py"
-#: opencode answers through this model first (the PM's call); the wrapper's own
-#: chain is the fallback when it does not.
-MODEL = os.environ.get("AGORA_TEST_MODEL", oc_shim.PRIMARY)
 DISALLOW = "Bash Read Glob Grep Edit Write WebFetch WebSearch Task"
 TIMEOUT = int(os.environ.get("AGORA_TEST_TIMEOUT", "300"))
 
@@ -263,7 +260,8 @@ def seed_claude(state, prompt: str) -> str:
 def seed_opencode(state, ask_text: str, timeout: int = TIMEOUT) -> str:
     """One self-made short dialogue; returns its session id.
 
-    AGORA_TEST_MODEL first, then the wrapper's own free-model chain. A skip
+    The wrapper's chain - AGORA_TEST_MODEL first, then its free models - so the
+    order lives in one place (oc_shim.model_chain, pinned by unit tests). A skip
     that does not say why is a test nobody trusts, so every attempt is kept.
     """
     proj = state["proj"]
@@ -271,9 +269,8 @@ def seed_opencode(state, ask_text: str, timeout: int = TIMEOUT) -> str:
            "OPENCODE_PERMISSION": oc_shim.PERMISSION}
     real = oc_shim.real_opencode()
     assert real is not None, "opencode 不在 PATH 上"
-    attempts = [["-m", MODEL]] + [f for f in oc_shim.model_chain() if f[1] != MODEL]
     failures = []
-    for flags in attempts:
+    for flags in oc_shim.model_chain():
         proc = subprocess.run(
             [real, "run", *flags, "--format", "json", "--title", "e2e-fork",
              ask_text],
