@@ -441,29 +441,31 @@ def script_env(state, *steps: str) -> None:
 
 def test_progress_is_visible_while_the_run_is_still_going(sync):
     """spec「執行中看得到進度」: one round in, Drive already has the first
-    sentence; at the end it has both, under the same id.
+    sentence, and the run is still going; at the end it has both, under the same id.
 
-    The trailing waits hold the agent open past the upload latency: a wait-sync
-    releases on the staged line while Drive follows seconds later, so without
-    them the run would always end before anything lands (and the mid-run read
-    below would be vacuous).
+    The agent holds at a `wait-file` step until the test has really seen the first
+    sentence on Drive: a fixed number of wait-sync rounds only guesses how long the
+    upload takes, and on a rate-limited Drive it guessed wrong (the run ended first).
     """
     id_a = import_session(sync, seed_jsonl(sync, SEED_USER, SEED_ASST), TITLE)
     ulid_a = id_a.split(":", 1)[1]
     names_before = drive_names(sync)
     assert ulid_a in names_before
 
-    script_env(sync, f"append:{FIRST}", "wait-sync", f"append:{SECOND}",
-               *["wait-sync"] * 20, "exit")
+    release = sync["tmp"] / "first-sentence-on-drive"
+    sync["monkeypatch"].setenv("FAKE_SYNC_TIMEOUT", str(int(POLL_TIMEOUT)))
+    script_env(sync, f"append:{FIRST}", f"wait-file:{release}",
+               f"append:{SECOND}", "exit")
     proc, out = start_continue(sync, "continue", "session", id_a,
                                "--agent", "claude", "--dir", str(sync["proj"]),
                                "--sync-period", PERIOD)
-    # Mid-run, and the run still going: the test fails here when the first
-    # upload only lands after the agent is already gone.
+    # Mid-run, and the run still going: the fake is holding at wait-file, so it is
+    # either still running or has failed loudly - never quietly gone.
     landed = poll_until("Drive 上的 A 出現第一句", POLL_TIMEOUT,
                         lambda: (drive_cat(sync, ulid_a) or "").find(FIRST) >= 0
                         and proc.poll() is None)
     assert landed, "定期寫回沒在執行中把第一句傳上 Drive（接續結束才看得到的話，進度就沒意義）"
+    release.touch()   # seen on Drive for real: the agent may say the second sentence now
 
     rc, text = finish_proc(sync, proc, out)
     assert rc == 0, text[-2000:]

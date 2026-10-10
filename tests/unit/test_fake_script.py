@@ -354,6 +354,51 @@ def test_a_wait_sync_without_a_signal_file_is_a_mistake_not_a_hang(tmp_path, mon
     assert "FAKE_SYNC_SIGNAL" in proc.stderr
 
 
+# --- wait-file ---------------------------------------------------------------
+
+
+def test_wait_file_goes_on_when_the_file_appears(tmp_path, monkeypatch):
+    """`wait-file` is for a wait no log line can promise: the caller creates the file
+    the moment it has seen what it was waiting for (the first write-back really on
+    Drive, say), and only then does the fake say the next thing."""
+    workdir, home = claude_env(tmp_path, monkeypatch)
+    path = session_file(workdir, home)
+    release = tmp_path / "seen-what-it-waited-for"
+    proc = run_fake_waiting(CLAUDE_FAKE, ["--resume", SESSION], workdir,
+                            lambda n: release.write_text("seen", encoding="utf-8"),
+                            waits=1,
+                            FAKE_HOME=str(tmp_path / "fake"),
+                            FAKE_AGENT_SCRIPT=f"wait-file:{release},append:ZZ 等到了,exit")
+    assert proc.returncode == 0, proc.stderr
+    assert "ZZ 等到了" in path.read_text(encoding="utf-8")
+
+
+def test_a_wait_file_that_never_comes_fails_instead_of_hanging(tmp_path, monkeypatch):
+    """The same contract as `wait-sync`: a test whose signal never comes sees a
+    failure it can read, not a run that sits there."""
+    workdir, home = claude_env(tmp_path, monkeypatch)
+    path = session_file(workdir, home)
+    before = path.read_bytes()
+    started = time.monotonic()
+    proc = run_fake(CLAUDE_FAKE, ["--resume", SESSION], workdir,
+                    FAKE_HOME=str(tmp_path / "fake"),
+                    FAKE_AGENT_SCRIPT=f"wait-file:{tmp_path / 'never-created'},append:ZZ 說不出來,exit",
+                    FAKE_SYNC_TIMEOUT="1")
+    assert proc.returncode == 2
+    assert "等不到檔案" in proc.stderr
+    assert "1 秒內" in proc.stderr          # the deadline is the one we asked for
+    assert "FAKE-AGENT-END" not in proc.stdout
+    assert time.monotonic() - started < 8   # and it gave up on it
+    assert path.read_bytes() == before
+
+
+def test_a_wait_file_without_a_path_is_a_mistake_not_a_hang(tmp_path, monkeypatch):
+    _home, workdir = opencode_env(tmp_path, monkeypatch)
+    proc = run_fake(OPENCODE_FAKE, ["--session", "seed"], workdir,
+                    FAKE_AGENT_SCRIPT="wait-file:,append:ZZ 不該跑到,exit")
+    assert proc.returncode == 2 and "檔案路徑" in proc.stderr
+
+
 def test_an_unknown_step_says_so_instead_of_doing_nothing(tmp_path, monkeypatch):
     _home, workdir = opencode_env(tmp_path, monkeypatch)
     proc = run_fake(OPENCODE_FAKE, ["--session", "seed"], workdir,

@@ -5,9 +5,11 @@
 
 A step is `append:<text>` (the user says it, the agent answers), `partial` (the
 session is caught mid-write: a half-written line / a message that never finished),
-`wait-sync` (stop and wait for agora to finish a periodic write-back) or `exit`.
-The point is timing: a test needs the conversation to grow *between* two write-backs,
-and a fake that appends one pair and returns cannot say when that happens.
+`wait-sync` (stop and wait for agora to finish a periodic write-back),
+`wait-file:<path>` (stop and wait until that file exists - the caller creates it when
+it has seen something the log cannot tell it) or `exit`. The point is timing: a test
+needs the conversation to grow *between* two write-backs, and a fake that appends one
+pair and returns cannot say when that happens.
 
 `wait-sync` waits for the signal file to record one more completed periodic write-back
 than it did when the step began - FAKE_SYNC_SIGNAL=<path>, which for the periodic
@@ -38,9 +40,10 @@ from pathlib import Path
 START_MARK = "FAKE-AGENT-START"
 END_MARK = "FAKE-AGENT-END"
 ERROR_MARK = "FAKE-AGENT-ERROR"
-#: Printed by `wait-sync` once it has taken the line count it is waiting past, and
-#: before it polls. A caller that adds the write-back line itself waits for this;
-#: adding it any earlier can be counted before the fake even gets here.
+#: Printed by the wait steps - `wait-sync` once it has taken the line count it is
+#: waiting past, `wait-file` before its first look - and before they poll. A caller
+#: that adds the write-back line itself or creates the file waits for this; doing it
+#: any earlier can be counted before the fake even gets here.
 WAIT_MARK = "FAKE-WAITING"
 #: What a completed periodic write-back's line begins with in the signal file; the
 #: only lines `wait-sync` counts (the log may hold a round's other words too).
@@ -74,6 +77,8 @@ def run(script: str, append, partial) -> None:
                 partial()
             elif name == "wait-sync":
                 wait_for_sync()
+            elif name == "wait-file":
+                wait_for_file(text.strip())
             elif name == "exit":
                 break
             else:
@@ -114,6 +119,27 @@ def signal_path() -> Path | None:
     """The file `wait-sync` watches, or None when the environment names none."""
     path = os.environ.get("FAKE_SYNC_SIGNAL")
     return Path(path) if path else None
+
+
+def wait_for_file(path_text: str) -> None:
+    """Block until the named file exists, with the same deadline as `wait-sync`.
+
+    The file is the caller's own signal: a test creates it the moment it has seen what
+    it was waiting for (the first periodic write-back really on Drive, say), which no
+    line in a log can promise. Just as with `wait-sync` the marker comes before the
+    first look, so a caller can tell the fake is at this step; a file that never
+    appears ends the run with a reason instead of hanging.
+    """
+    if not path_text:
+        raise ScriptError("wait-file 要有一個檔案路徑")
+    path = Path(path_text)
+    print(WAIT_MARK, flush=True)
+    seconds = timeout()
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise ScriptError(f"等不到檔案：{seconds:g} 秒內 {path} 沒出現")
+        time.sleep(POLL_SECONDS)
 
 
 def lines(path: Path) -> int:
