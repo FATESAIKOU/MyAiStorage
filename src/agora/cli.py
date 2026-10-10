@@ -959,8 +959,17 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
             parents = [*(from_agora.get("parents") or []),
                        {"id": run.target, "raw_md5": (from_agora.get("raw") or {}).get("md5")}]
         was_here = bool(hdr)
+        # What the user wrote on the session being rescued comes with the work: case,
+        # tags, refs, description, verified and any field of their own. Only the system
+        # fields and the two regenerated ones stay behind (review M9); a merge's
+        # auto-filled `draft` goes the way it goes when a merge is continued (5.4).
+        rescued = {k: v for k, v in hdr.items()
+                   if k not in h.SYSTEM_KEYS and k not in ("generated", "sources")}
+        if h.agora_of(hdr).get("relation") == "merge":
+            rescued.pop("status", None)
         hdr = _auto_header("continue", parents, body, title=record.get("title") or exported.title,
                            exported=exported, agent=agent, parent_headers=[hdr] if hdr else [])
+        hdr = {**hdr, **rescued}
         same_id = False        # a new id: Drive has never heard of it, so it is not an update
         how = "被別台機器刪掉了" if was_here else "在這台機器上被刪掉了"
         note = (f"[agora] {run.target} 在你接續的時候{how}，"
@@ -1236,13 +1245,25 @@ def cmd_continue(args, paths: store.Paths) -> int:
             raise AgentError(f"{agent.name} 啟動之後沒有 session id，這個 fork 沒有存成")
         # Read it back right away: B is what this launch holds, and `before_count` says
         # it should hold exactly what was loaded (F3).
-        exported = _export_launch(agent, launch)
+        try:
+            exported = _export_launch(agent, launch)
+        except Exception as e:
+            # The agent session exists but was never saved as an agora Session: say so,
+            # or the user finds it in the not-imported tab and wonders (review M7).
+            raise AgentError(f"{agent.name} 的 agent session {launch.agent_session_id} 讀不回來（{e}）；"
+                             f"它沒有存成 agora Session，可以不管它") from e
         if exported.message_count != launch.before_count:
             raise AgentError(f"{agent.name} 剛啟動的 Session {launch.agent_session_id} 和匯出來的內容對不上"
-                             f"（{exported.message_count} 則／{launch.before_count} 則），沒有存")
-        fork_hdr = _fork_after_launch(base, agent, exported)
+                             f"（{exported.message_count} 則／{launch.before_count} 則），沒有存；"
+                             f"那個 agent session 可以不管它")
+        # The user's --header is folded in last, or `_fork_after_launch` would overwrite
+        # a given `generated.*` or `sources` (review M4) - and the given title stays
+        # without `-fork` on the B that is saved here, which the write-back may never
+        # touch again (M2).
+        fork_hdr = _with_user(_fork_after_launch(base, agent, exported), updates)
         fork_md5 = store.hashlib.md5(exported.raw).hexdigest()
         saved_fork = _save(paths, fork_hdr, reading(agent, exported.raw), exported.raw)
+        print(f"[agora] fork 已存成 {fork_hdr['id']}", file=sys.stderr)   # M7: the id is out
         record = {
             "agora_id": fork_hdr["id"], "agent": agent.name,     # B, not A: A is not touched
             "agent_session_id": launch.agent_session_id, "dir": launch.cwd,
@@ -1323,8 +1344,16 @@ def cmd_continue(args, paths: store.Paths) -> int:
             return 0 if ok else EXIT_IN_OUTBOX
         print(target)
         return 0 if ok else EXIT_IN_OUTBOX
-    # Two writes for a fork; the id printed is the last one, the exit is the worse one.
-    return _emit(saved if not fork else (saved[0], saved[1] and saved_fork[1]))
+    if not fork:
+        return _emit(saved)
+    if saved[0] == saved_fork[0]:
+        # The write-back landed on B itself: its outbox entry replaced step 6's, so the
+        # later save's answer is the whole truth - the earlier failure is superseded
+        # (review M6). The id printed is the one that is on Drive.
+        return _emit(saved)
+    # The write-back saved the work as another session: both writes matter, or the one
+    # that failed would be forgotten.
+    return _emit((saved[0], saved[1] and saved_fork[1]))
 
 
 CONVERTED_NOTE = ("（以下是從其他 Session 轉過來的對話紀錄。[tool] 開頭的行只是當時工具呼叫的摘要，"

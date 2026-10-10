@@ -160,6 +160,13 @@ def _fork_session():
                 if h.agora_of(hdr).get("relation") == "fork")
 
 
+def _rewrite_header(agora_id, hdr):
+    """Change a session's header by hand: the mirror first, then the index row."""
+    path = paths().mirror / agora_id.split(":")[1] / "session.md"
+    path.write_text(h.dump_document(hdr, body_of(agora_id)), encoding="utf-8")
+    store.index_file(store.Index(paths()), path)
+
+
 # --- the new session, and the original left alone -----------------------------------
 
 def test_fork_makes_a_new_session_and_the_original_is_untouched(env, capsys):
@@ -170,9 +177,10 @@ def test_fork_makes_a_new_session_and_the_original_is_untouched(env, capsys):
     before_doc = document_of(a)
     before_row = index_row(a.split(":")[1])
 
-    code, b, _ = _fork(capsys, a)
+    code, b, err = _fork(capsys, a)
 
     assert code == 0 and b.startswith("agora:") and b != a
+    assert f"fork 已存成 {b}" in err, "M7: the id is said as soon as it is saved"
     hdr = header_of(b)
     assert hdr["title"] == "表格排版-fork"
     assert hdr["case"] == "mybrain:aistorage" and hdr["tags"] == ["ui", "tui"]
@@ -227,7 +235,8 @@ def test_a_session_with_no_title_is_named_after_its_description_or_its_id(env, c
 def test_open_and_leave_keeps_the_fork_and_says_its_id(env, capsys):
     """Scenario「打開就離開」: nothing was said and the fork is still there. Nothing goes
     into `unsaved-launches` - B's source is this launch, so the import tab keeps comparing
-    it (design「沒有新內容時」)."""
+    it (design「沒有新內容時」). M2: the step-6 B is the final one, so its source and its
+    title are the ones saved here, and search lists the two sessions apart."""
     _, a, _ = _import(capsys, "--header", "title=表格排版")
     env.speak = False
     before = document_of(a)
@@ -237,11 +246,15 @@ def test_open_and_leave_keeps_the_fork_and_says_its_id(env, capsys):
     assert code == 0 and b.startswith("agora:") and b != a
     assert f"沒有新內容；fork 已存成 {b}" in err
     assert header_of(b)["title"] == "表格排版-fork"
+    assert h.agora_of(header_of(b))["source"]["session_id"] == env.launched[-1].agent_session_id, \
+        "M12: B's source is this launch, or search would fold the two rows into one"
     assert cli.FORK_READY in body_of(b)
     assert not (paths().state / "unsaved-launches").exists(), \
-        "B's own source is this launch: the import tab must still compare it"
+        "B's own source is this launch, so the import tab must still compare it"
     assert document_of(a) == before
     assert on_drive(b).is_dir() and (on_drive(b) / "session.md").is_file()
+    code, out, err = run(capsys, "search", "session", "--no-sync")
+    assert {line.split()[0] for line in out.splitlines()} == {a, b}, "two rows, no merge"
 
 
 def test_fork_across_agents_converts_the_history_and_appends_the_note(env, capsys):
@@ -301,16 +314,42 @@ def test_forking_a_fork_again_appends_fork_to_the_title(env, capsys):
         "the first fork's turns are part of B's own raw"
 
 
-def test_a_given_title_wins_over_the_suffix_and_stays(env, capsys):
-    """Scenario「指定 title」: the user's title is used as it is, before the write-back
-    and after it."""
+def test_a_given_title_wins_over_the_suffix_and_stays(env, capsys, during_agent):
+    """Scenario「指定 title」: the user's title is used as it is - on the step-6 B that is
+    never written again (M15), in the pending record (M27), and after a write-back."""
     _, a, _ = _import(capsys, "--header", "title=表格排版")
+    env.speak = False
+    seen = {}
 
+    def peek():
+        [record] = [json.loads(p.read_text(encoding="utf-8")) for p in paths().pending.glob("*.json")]
+        seen.update(record)
+
+    during_agent(peek)
     code, b, _ = _fork(capsys, a, "--header", "title=實驗")
 
     assert code == 0 and header_of(b)["title"] == "實驗"
+    assert seen["title"] == "實驗", "the pending record names B the way B is named"
+    assert seen["header_updates"] == {"title": "實驗"}, "and keeps the user's overlay"
     run(capsys, "continue", "session", b, "--agent", "opencode", "--dir", "/tmp")
     assert header_of(b)["title"] == "實驗", "the write-back must not put `-fork` back"
+
+
+def test_the_users_own_generated_and_sources_survive_step_six(env, capsys):
+    """M4: `_fork_after_launch` runs after the user's overlay; a given `generated.*` or
+    `sources` must not be overwritten by the automatic ones - most visibly when the agent
+    is never written back and step 6 is all there is."""
+    _, a, _ = _import(capsys)
+    env.speak = False
+
+    code, b, err = _fork(capsys, a, "--header", "generated.by=human:fatesaikou",
+                         "--header", 'sources=[{id: "mybrain:note", title: "備註"}]')
+
+    assert code == 0, err
+    hdr = header_of(b)
+    assert hdr["generated"]["by"] == "human:fatesaikou", hdr["generated"]
+    assert hdr["sources"] == [{"id": "mybrain:note", "title": "備註"}], \
+        "3.5: the user's overlay is applied last, sources and all"
 
 
 def test_a_fork_whose_session_is_deleted_while_the_agent_runs_saves_the_work(env, capsys, during_agent):
@@ -463,7 +502,8 @@ def test_a_launch_with_no_session_id_saves_nothing(env, capsys, monkeypatch):
 
 def test_a_launch_that_does_not_match_what_was_loaded_saves_nothing(env, capsys, monkeypatch):
     """F3: B is this launch, so the export right after `start_native` has to be exactly
-    what was loaded - otherwise the header would describe a session that is not there."""
+    what was loaded - otherwise the header would describe a session that is not there.
+    M7: the words carry the agent session id and say it was never saved."""
     _, a, _ = _import(capsys)
     original = env.export
 
@@ -477,6 +517,25 @@ def test_a_launch_that_does_not_match_what_was_loaded_saves_nothing(env, capsys,
     code, out, err = _fork(capsys, a)
 
     assert code == 2 and out == "" and "對不上" in err
+    assert env.launched[-1].agent_session_id in err and "可以不管它" in err, \
+        "M7: name the agent session that was left behind"
+    assert _session_ids() == [a]
+
+
+def test_a_launch_agora_cannot_read_back_names_the_leftover_session(env, capsys, monkeypatch):
+    """M7: when the export itself is what fails, the message still names the agent
+    session - otherwise the not-imported tab shows a stranger with no explanation."""
+    _, a, _ = _import(capsys)
+
+    def broken(sid):
+        raise AgentError("opencode export 壞了")
+
+    monkeypatch.setattr(env, "export", broken)
+    code, out, err = _fork(capsys, a)
+
+    assert code == 2 and out == ""
+    assert env.launched[-1].agent_session_id in err
+    assert "讀不回來" in err and "沒有存成 agora Session" in err
     assert _session_ids() == [a]
 
 
@@ -498,6 +557,136 @@ def test_verified_is_copied_into_the_fork(env, capsys):
     assert header_of(b)["verified"] == ["human:fatesaikou"], "and so does B"
     assert f"從 {a}（title: 實驗" in env.sessions[env.launched[-1].agent_session_id][-3], \
         "and the note does not mention it either"
+
+
+def test_status_is_copied_from_a_plain_session(env, capsys):
+    """M04: only a merge's auto-filled `draft` is dropped (5.4); a status the user set on
+    an ordinary session is a user field like any other."""
+    _, a, _ = _import(capsys, "--header", "status=wip")
+
+    _, b, _ = _fork(capsys, a)
+
+    assert header_of(b)["status"] == "wip"
+
+
+def test_the_title_falls_back_to_the_description_then_the_id(env, capsys):
+    """M14, F5: `A.title or A.description or A.id`, and the value is a string before the
+    suffix goes on."""
+    _, a, _ = _import(capsys)
+    hdr = header_of(a)
+    hdr["title"] = None
+    _rewrite_header(a, hdr)
+
+    _, b, _ = _fork(capsys, a)
+
+    assert header_of(b)["title"] == "把 CSV 轉成 Markdown 表格-fork"
+
+    hdr["description"] = None
+    _rewrite_header(a, hdr)
+    _, c, _ = _fork(capsys, a)
+    assert header_of(c)["title"] == f"{a}-fork"
+
+
+def test_an_int_title_from_a_header_file_becomes_a_string(env, capsys, tmp_path):
+    """F5: YAML reads `title: 2026` as a number; the fork's title is a string anyway."""
+    f = tmp_path / "hdr.yaml"
+    f.write_text("title: 2026\n", encoding="utf-8")
+    _, a, err = _import(capsys, "--header-file", str(f))
+    assert header_of(a)["title"] == 2026
+
+    _, b, _ = _fork(capsys, a)
+
+    assert header_of(b)["title"] == "2026-fork"
+
+
+def test_the_launch_is_read_back_with_its_directory_when_the_adapter_takes_one():
+    """M17: claude is told where the launch ran, so the file it just wrote is read
+    instead of a scan over every project; an adapter that takes no hint is called
+    without one."""
+    calls = []
+
+    class Hinted:
+        name = "claude"
+
+        def export(self, session_id, hint_dir=None):
+            calls.append((session_id, hint_dir))
+            return Exported(session_id=session_id, raw=b"{}")
+
+    launch = Launch(argv=[], cwd="/tmp/work", agent_session_id="uuid-1")
+    exported = cli._export_launch(Hinted(), launch)
+    assert calls == [("uuid-1", "/tmp/work")] and exported.session_id == "uuid-1"
+
+    class Plain:
+        name = "opencode"
+
+        def export(self, session_id):
+            calls.append((session_id, None))
+            return Exported(session_id=session_id, raw=b"{}")
+
+    cli._export_launch(Plain(), launch)
+    assert calls[-1] == ("uuid-1", None)
+
+
+def test_a_fork_rescue_carries_the_users_header(env, capsys, during_agent):
+    """M9: the session saved out of a deleted B keeps what the user wrote on B - the
+    fields copied from A and the ones they typed - instead of resetting to the
+    auto-generated header."""
+    _, a, _ = _import(capsys)
+    gone = {}
+
+    def delete_b():
+        gone["id"] = _fork_session()["id"]
+        shutil.rmtree(on_drive(gone["id"]))     # only Drive: the header is still here
+    during_agent(delete_b)
+
+    code, out, err = _fork(capsys, a, "--header", "case=mybrain:aistorage",
+                           "--header", "tags=[實驗]", "--header", "refs=[mybrain:note/x]",
+                           "--header", "description=先做讀取")
+
+    assert code == 0 and out not in (a, gone["id"])
+    hdr = header_of(out)
+    assert hdr["title"] == "把 CSV 轉成 Markdown 表格-fork"
+    assert hdr["case"] == "mybrain:aistorage" and hdr["tags"] == ["實驗"]
+    assert hdr["refs"] == ["mybrain:note/x"] and hdr["description"] == "先做讀取"
+
+
+def test_a_rescued_merge_drops_its_draft_status(env, capsys, during_agent):
+    """M9's exception: a merge's auto-filled `draft` does not come along to the rescue -
+    a continued merge is that conversation now, not a summary (5.4)."""
+    _, a, _ = _import(capsys, "--header", "title=甲")
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    assert header_of(m)["status"] == "draft"
+
+    def delete_m():
+        shutil.rmtree(on_drive(m))             # only Drive: the header is still here
+    during_agent(delete_m)
+
+    code, out, err = run(capsys, "continue", "session", m, "--agent", "opencode", "--dir", "/tmp")
+
+    assert code == 0 and out != m
+    hdr = header_of(out)
+    assert "status" not in hdr and h.agora_of(hdr)["relation"] == "continue"
+
+
+def test_a_continue_rescue_carries_the_users_header(env, capsys, during_agent):
+    """M9, the ordinary continue: a session written back in place carries the same
+    guarantee when it is the one that turns out to be gone."""
+    _, a, _ = _import(capsys, "--header", "case=mybrain:aistorage", "--header", "tags=[實驗]",
+                      "--header", "refs=[mybrain:note/x]",
+                      "--header", "verified=[{by: human:fatesaikou}]")
+
+    def delete_a():
+        shutil.rmtree(on_drive(a))              # only Drive: the header is still here
+    during_agent(delete_a)
+
+    code, out, err = run(capsys, "continue", "session", a, "--agent", "opencode", "--dir", "/tmp")
+
+    assert code == 0 and out != a
+    hdr = header_of(out)
+    assert hdr["case"] == "mybrain:aistorage" and hdr["tags"] == ["實驗"]
+    assert hdr["refs"] == ["mybrain:note/x"] and hdr["verified"] == [{"by": "human:fatesaikou"}]
 
 
 def test_a_fork_refuses_a_session_the_cloud_lost(env, capsys):
@@ -541,26 +730,57 @@ def test_the_exit_code_is_the_worse_of_the_two_writes(env, capsys, monkeypatch):
     assert "接著做完了" in document_of(b)
 
 
-@pytest.mark.parametrize("which", ["the fork", "the write-back"])
-def test_one_failed_save_alone_still_exits_3(env, capsys, monkeypatch, which):
-    """The other write went through, so this is the only reason to answer 3 - and the
-    session is either way whole on Drive."""
+@pytest.mark.parametrize("which,expected", [("the fork", 0), ("the write-back", cli.EXIT_IN_OUTBOX)])
+def test_the_answer_follows_the_last_write_to_b_itself(env, capsys, monkeypatch, which, expected):
+    """M6: the write-back's outbox entry replaces step 6's, so when both land on B the
+    last one's answer is the truth - a fork save that reported failure and was then
+    superseded is not worth an exit 3 (the outbox is empty by then)."""
     _, a, _ = _import(capsys)
     real_save = cli._save
     calls = []
 
     def flaky(paths, hdr, body, raw, **kwargs):
         calls.append(hdr["id"])
+        saved = real_save(paths, hdr, body, raw, **kwargs)
         which_one = (which == "the fork") == (len(calls) == 1)
-        return real_save(paths, hdr, body, raw, update=False) if which_one \
-            else (hdr["id"], False)      # Drive did not take this one, as far as we know
+        return (saved[0], False) if which_one else saved   # "Drive did not take it"
 
     monkeypatch.setattr(cli, "_save", flaky)
     code, b, err = _fork(capsys, a)
 
     assert len(calls) == 2, "a fork writes twice: B, then the conversation after"
-    assert code == cli.EXIT_IN_OUTBOX, "one failed save is enough"
-    assert b.startswith("agora:") and b != a, "and the id is still the last one written"
+    assert calls[0] == calls[1] == b, "both writes land on B itself"
+    assert code == expected, err
+    assert b.startswith("agora:") and b != a, "the id printed is the last one written"
+
+
+def test_a_rescue_to_another_session_takes_the_worse_of_the_two(env, capsys, monkeypatch, during_agent):
+    """M6's other half: the write-back saved the work as C, not B - the two answers are
+    about different sessions, so the one that failed cannot be forgotten."""
+    _, a, _ = _import(capsys)
+    real_save = cli._save
+    calls = []
+    gone = {}
+
+    def delete_b():
+        gone["id"] = _fork_session()["id"]
+        shutil.rmtree(on_drive(gone["id"]))          # another machine deletes B
+    during_agent(delete_b)
+
+    def flaky(paths, hdr, body, raw, **kwargs):
+        saved = real_save(paths, hdr, body, raw, **kwargs)
+        calls.append(saved[0])
+        if len(calls) == 1:                         # step 6's save of B
+            return (saved[0], False)                # reported as not through
+        return saved                                # the rescue's save went through
+
+    monkeypatch.setattr(cli, "_save", flaky)
+    code, out, err = _fork(capsys, a)
+
+    assert len(calls) == 2, "the fork's save and the rescue's"
+    assert out == calls[1] and out not in (a, gone["id"]), "the rescue's id is the answer"
+    assert code == cli.EXIT_IN_OUTBOX, "the fork's failed save is not forgotten"
+    assert header_of(out)["agora"]["relation"] == "continue"
 
 
 def test_fork_is_continue_s_only(env, capsys):
@@ -640,6 +860,98 @@ def test_an_offline_fork_reaches_drive_as_itself(env, capsys, monkeypatch):
     assert sorted(p.name for p in (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions").iterdir()) \
         == sorted([a.split(":")[1], ulid]), "B itself, and nothing saved again"
     assert "接著做完了" in (on_drive(b) / "session.md").read_text(encoding="utf-8")
+
+
+# --- the real adapters through the fork (review probes P1, P2) ----------------------
+# F3's count check and M17's `hint_dir` have no unit test otherwise: the fakes do not
+# have a file to read back. The agents are the fake CLIs; only the adapters are real.
+
+FAKE_CLAUDE = Path(__file__).resolve().parent.parent / "fakes" / "fake_claude.py"
+FAKE_OPENCODE = Path(__file__).resolve().parent.parent / "fakes" / "fake_opencode.py"
+CL_FIX = Path(__file__).resolve().parent.parent / "fixtures" / "claude"
+OC_FIX = Path(__file__).resolve().parent.parent / "fixtures" / "opencode"
+CL_SID = "11111111-2222-4333-8444-555555555555"
+
+
+def _wrapper(tmp_path, name, target):
+    w = tmp_path / name
+    w.write_text(f"#!/bin/sh\nexec {sys.executable} {target} \"$@\"\n")
+    w.chmod(0o755)
+    return w
+
+
+@pytest.mark.parametrize("mode", ["noop", "append"])
+def test_the_real_claude_adapter_forks(env, capsys, tmp_path, monkeypatch, mode):
+    """P1: through cmd_continue with the real adapter, B's raw md5 is the file claude
+    really holds - and the count check did not stop a good launch."""
+    from agora.agents import claude as C
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    home = Path(os.environ["AGORA_CLAUDE_HOME"])
+    proj = home / ".claude" / "projects" / C.encode_project_dir("/tmp/my-proj.v2")
+    proj.mkdir(parents=True)
+    shutil.copy(CL_FIX / "cl-basic.jsonl", proj / f"{CL_SID}.jsonl")
+    monkeypatch.setattr(cli, "load_agent", lambda name: C.ADAPTER)
+    monkeypatch.setenv("AGORA_CLAUDE_CMD", str(_wrapper(tmp_path, "claude", FAKE_CLAUDE)))
+    monkeypatch.setenv("FAKE_HOME", str(tmp_path / "fh"))
+    monkeypatch.setenv("FAKE_AGENT_MODE", mode)
+    work = tmp_path / "work"
+    work.mkdir()
+
+    code, a, err = run(capsys, "import", "session", "--external-session-id", CL_SID,
+                       "--agent", "claude")
+    assert code == 0, err
+    before = document_of(a)
+
+    code, b, err = run(capsys, "continue", "session", a, "--agent", "claude", "--fork",
+                       "--dir", str(work))
+
+    assert code == 0, err
+    assert b != a and b.startswith("agora:")
+    hdr = header_of(b)
+    assert h.agora_of(hdr)["relation"] == "fork"
+    sid = h.agora_of(hdr)["source"]["session_id"]
+    jsonl = home / ".claude" / "projects" / C.encode_project_dir(work) / f"{sid}.jsonl"
+    assert jsonl.is_file(), "the launch wrote its own session"
+    latest = C.ADAPTER.export(sid, hint_dir=str(work))          # M17: found via the dir
+    assert h.agora_of(hdr)["raw"]["md5"] == hashlib.md5(latest.raw).hexdigest()
+    assert document_of(a) == before
+    if mode == "noop":
+        assert "沒有新內容；fork 已存成" in err
+    else:
+        assert "ZZSAY" in document_of(b)
+
+
+@pytest.mark.parametrize("mode", ["noop", "append"])
+def test_the_real_opencode_adapter_forks(env, capsys, tmp_path, monkeypatch, mode):
+    """P2: the same path through opencode's own import/export round trip."""
+    from agora.agents import opencode as oc
+    fh = tmp_path / "fh"
+    (fh / "opencode-sessions").mkdir(parents=True)
+    shutil.copyfile(OC_FIX / "oc-basic.json", fh / "opencode-sessions" / "default.json")
+    monkeypatch.setenv("FAKE_HOME", str(fh))
+    monkeypatch.setenv("AGORA_OPENCODE_CMD", str(_wrapper(tmp_path, "opencode", FAKE_OPENCODE)))
+    monkeypatch.setenv("FAKE_AGENT_MODE", mode)
+    monkeypatch.setattr(cli, "load_agent", lambda name: oc.ADAPTER)
+    work = tmp_path / "work"
+    work.mkdir()
+
+    code, a, err = run(capsys, "import", "session", "--external-session-id", "default",
+                       "--agent", "opencode")
+    assert code == 0, err
+    before = document_of(a)
+
+    code, b, err = run(capsys, "continue", "session", a, "--agent", "opencode", "--fork",
+                       "--dir", str(work))
+
+    assert code == 0, err
+    assert b != a
+    hdr = header_of(b)
+    assert h.agora_of(hdr)["relation"] == "fork"
+    assert document_of(a) == before
+    body = document_of(b)
+    assert "fork" in body
+    if mode == "append":
+        assert "ZZAPPEND" in body
 
 
 # --- the shared fakes answer the whole protocol (C12) ---------------------------------
