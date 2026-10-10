@@ -9,11 +9,14 @@ session is caught mid-write: a half-written line / a message that never finished
 The point is timing: a test needs the conversation to grow *between* two write-backs,
 and a fake that appends one pair and returns cannot say when that happens.
 
-`wait-sync` watches a file and waits for one more complete line in it -
-FAKE_SYNC_SIGNAL=<path>, which for the periodic write-back is `<state>/continue.log`
-(the wrapper hides the path, so a test sets it from what it handed agora). It gives
-up after FAKE_SYNC_TIMEOUT seconds (10 by default) rather than hanging: a test whose
-write-back never comes should fail, not sit there.
+`wait-sync` waits for the signal file to hold one more complete line than it did
+when the step began - FAKE_SYNC_SIGNAL=<path>, which for the periodic write-back is
+`<state>/continue.log`. Just after it takes that count it prints WAIT_MARK
+(`FAKE-WAITING`) and only then polls, so a caller that has to add the line can wait
+for the marker: a line added after it is always one the fake has not counted yet,
+which a sleep cannot promise. It gives up after FAKE_SYNC_TIMEOUT seconds (10 by
+default) with a reason on stderr rather than hanging: a test whose write-back never
+comes should fail, not sit there.
 
 START_MARK and END_MARK go to stdout around everything else, so a test that sends
 agora's stdout and stderr to one file can tell that nothing of agora's appeared
@@ -32,6 +35,10 @@ from pathlib import Path
 START_MARK = "FAKE-AGENT-START"
 END_MARK = "FAKE-AGENT-END"
 ERROR_MARK = "FAKE-AGENT-ERROR"
+#: Printed by `wait-sync` once it has taken the line count it is waiting past, and
+#: before it polls. A caller that adds the write-back line itself waits for this;
+#: adding it any earlier can be counted before the fake even gets here.
+WAIT_MARK = "FAKE-WAITING"
 
 DEFAULT_WAIT_SECONDS = 10.0
 POLL_SECONDS = 0.02
@@ -71,26 +78,36 @@ def run(script: str, append, partial) -> None:
     print(END_MARK, flush=True)
 
 
-def wait_for_sync() -> int:
-    """Block until the signal file has one more line than when this was called.
+def wait_for_sync() -> None:
+    """Block until the signal file has one more complete line than it had just now.
 
-    Returns the number of lines it waited for (always 1 - the point is that it
-    waited at all), so a caller can say so if it wants to.
+    The count is taken first and only then announced, so a caller that waits for
+    WAIT_MARK and writes the line from there cannot land before the count - which is
+    the race that made this flaky: a caller sleeping a fixed time could write the
+    line while the fake was still starting up, and the wait then had nothing left to
+    wait for. Polling with a deadline, never a sleep-and-hope: whole lines only, so a
+    half-written one at the end does not count, and a write-back that never comes
+    ends the run with a reason on stderr instead of hanging it.
     """
-    path = os.environ.get("FAKE_SYNC_SIGNAL")
-    if not path:
+    path = signal_path()
+    if path is None:
         raise ScriptError("wait-sync 要有 FAKE_SYNC_SIGNAL 指到一個檔案"
                           "（agora 每做完一次寫回會在那裡加一行）")
-    target = Path(path)
-    before = lines(target)
+    before = lines(path)
+    print(WAIT_MARK, flush=True)
     seconds = timeout()
     deadline = time.monotonic() + seconds
-    while lines(target) <= before:
+    while lines(path) <= before:
         if time.monotonic() >= deadline:
-            raise ScriptError(f"等不到寫回：{seconds:g} 秒內 {path} 沒有變多一行"
+            raise ScriptError(f"等不到寫回：{seconds:g} 秒內 {path} 沒有多一行"
                               f"（還是 {before} 行）")
         time.sleep(POLL_SECONDS)
-    return 1
+
+
+def signal_path() -> Path | None:
+    """The file `wait-sync` watches, or None when the environment names none."""
+    path = os.environ.get("FAKE_SYNC_SIGNAL")
+    return Path(path) if path else None
 
 
 def lines(path: Path) -> int:

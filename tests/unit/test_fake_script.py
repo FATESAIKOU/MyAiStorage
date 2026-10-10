@@ -91,25 +91,49 @@ def parsed(path: Path) -> list[dict]:
     return out
 
 
-def append_lines(signal: Path, count: int, delay: float, gap: float = 0.2) -> threading.Thread:
-    """Someone else adding to the signal file, the way agora's continue.log does.
+def run_fake_waiting(fake: Path, argv: list[str], cwd: Path, feed, waits: int,
+                     **extra) -> subprocess.CompletedProcess:
+    """Run the fake and answer its `wait-sync` steps from here.
 
-    `delay` has to outlast the fake's own start-up (a python that imports agora takes
-    a moment), or the lines land before the fake starts counting and it waits for a
-    write-back that has already happened.
+    Each time the fake has taken the line count it is waiting past, it says
+    FAKE-WAITING and then polls; only after reading that marker does `feed(n)` run
+    (n starting at 1), so the line it adds is always one the fake has not counted yet.
+    That is the point: a fixed sleep cannot promise it, because the fake's own
+    start-up is what the sleep is racing, and under load the line can land before the
+    count.
     """
+    wrapper = cwd / f"wrapper-{fake.stem}"
+    wrapper.write_text(f'#!/bin/sh\nexec {sys.executable} {fake} "$@"\n')
+    wrapper.chmod(0o755)
+    proc = subprocess.Popen([str(wrapper), *argv], cwd=str(cwd), text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env={**os.environ, **extra})
+    said: list[str] = []
+    fed = 0
+    try:
+        for line in proc.stdout:
+            said.append(line)
+            if line.strip() == "FAKE-WAITING":
+                fed += 1
+                feed(fed)
+        errors = proc.stderr.read()
+        code = proc.wait(timeout=60)
+    except BaseException:                       # a broken test must not leave it running
+        proc.kill()
+        proc.wait()
+        raise
+    assert fed == waits, f"the fake announced {fed} waits, the test fed {waits}: {''.join(said)}"
+    return subprocess.CompletedProcess(proc.args, code, "".join(said), errors)
 
-    def go():
-        time.sleep(delay)
-        for n in range(count):
-            with open(signal, "a", encoding="utf-8") as f:
-                f.write(f"[agora] 第 {n + 1} 次寫回\n")
-                f.flush()
-            time.sleep(gap)
 
-    thread = threading.Thread(target=go, daemon=True)
-    thread.start()
-    return thread
+def add_line(signal: Path) -> float:
+    """Someone else adding to the signal file, the way agora's continue.log does;
+    returns when the line landed, so a test can say the fake was still running."""
+    count = signal.read_text(encoding="utf-8").count("\n") if signal.exists() else 0
+    with open(signal, "a", encoding="utf-8") as f:
+        f.write(f"[agora] 第 {count + 1} 次寫回\n")
+        f.flush()
+    return time.monotonic()
 
 
 # --- markers, and no script means no script ---------------------------------
@@ -256,14 +280,17 @@ def test_opencode_partial_leaves_a_running_tool_call(tmp_path, monkeypatch):
 
 
 def test_claude_waits_for_a_line_before_it_says_the_next_thing(tmp_path, monkeypatch):
+    """`wait-sync` is what lets a test move the conversation between write-backs: the
+    fake announces it is waiting, the test adds the line, and only then does the fake
+    go on to say the next thing."""
     workdir, home = claude_env(tmp_path, monkeypatch)
     path = session_file(workdir, home)
     signal = tmp_path / "continue.log"
-    append_lines(signal, 1, 1.0)
-    proc = run_fake(CLAUDE_FAKE, ["--resume", SESSION], workdir,
-                    FAKE_HOME=str(tmp_path / "fake"),
-                    FAKE_AGENT_SCRIPT="append:ZZ 第一句,wait-sync,append:ZZ 第二句,exit",
-                    FAKE_SYNC_SIGNAL=str(signal))
+    proc = run_fake_waiting(CLAUDE_FAKE, ["--resume", SESSION], workdir,
+                            lambda n: add_line(signal), waits=1,
+                            FAKE_HOME=str(tmp_path / "fake"),
+                            FAKE_AGENT_SCRIPT="append:ZZ 第一句,wait-sync,append:ZZ 第二句,exit",
+                            FAKE_SYNC_SIGNAL=str(signal))
     assert proc.returncode == 0, proc.stderr
     text = path.read_text(encoding="utf-8")
     assert text.index("ZZ 第一句") < text.index("ZZ 第二句")
@@ -273,29 +300,28 @@ def test_claude_waits_for_a_line_before_it_says_the_next_thing(tmp_path, monkeyp
 def test_opencode_waits_for_a_line_too(tmp_path, monkeypatch):
     home, workdir = opencode_env(tmp_path, monkeypatch)
     signal = tmp_path / "continue.log"
-    append_lines(signal, 1, 1.0)
-    proc = run_fake(OPENCODE_FAKE, ["--session", "seed"], workdir,
-                    FAKE_AGENT_SCRIPT="wait-sync,append:ZZ 等到了才說,exit",
-                    FAKE_SYNC_SIGNAL=str(signal))
+    proc = run_fake_waiting(OPENCODE_FAKE, ["--session", "seed"], workdir,
+                            lambda n: add_line(signal), waits=1,
+                            FAKE_AGENT_SCRIPT="wait-sync,append:ZZ 等到了才說,exit",
+                            FAKE_SYNC_SIGNAL=str(signal))
     assert proc.returncode == 0, proc.stderr
     payload = json.loads((home / "opencode-sessions" / "seed.json").read_text())
     assert payload["messages"][-2]["parts"][0]["text"] == "ZZ 等到了才說"
 
 
 def test_each_wait_sync_waits_for_its_own_line(tmp_path, monkeypatch):
-    """Two write-backs, two waits: counting from when each wait starts is what makes
-    the second one wait for the second line instead of returning at once."""
+    """Two write-backs, two waits: the second wait does not ride on the first line's
+    coattails - with only one line written, the run would not have got past its
+    second wait, let alone said its last word."""
     home, workdir = opencode_env(tmp_path, monkeypatch)
     signal = tmp_path / "continue.log"
-    signal.write_text("[agora] 啟動\n", encoding="utf-8")
-    append_lines(signal, 2, 1.0)
-    started = time.monotonic()
-    proc = run_fake(OPENCODE_FAKE, ["--session", "seed"], workdir,
-                    FAKE_AGENT_SCRIPT="wait-sync,append:ZZ 一,wait-sync,append:ZZ 二,exit",
-                    FAKE_SYNC_SIGNAL=str(signal))
-    elapsed = time.monotonic() - started
+    arrived: list[float] = []
+    proc = run_fake_waiting(OPENCODE_FAKE, ["--session", "seed"], workdir,
+                            lambda n: arrived.append(add_line(signal)), waits=2,
+                            FAKE_AGENT_SCRIPT="wait-sync,append:ZZ 一,wait-sync,append:ZZ 二,exit",
+                            FAKE_SYNC_SIGNAL=str(signal))
     assert proc.returncode == 0, proc.stderr
-    assert elapsed >= 1.1          # ~1 s to start, then 0.2 s for the second line
+    assert len(arrived) == 2                       # one line per wait, no more
     payload = json.loads((home / "opencode-sessions" / "seed.json").read_text())
     assert payload["messages"][-2]["parts"][0]["text"] == "ZZ 二"
 
