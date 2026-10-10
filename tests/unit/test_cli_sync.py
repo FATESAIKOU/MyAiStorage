@@ -434,6 +434,43 @@ def test_an_offline_fork_keeps_writing_to_itself(claude_lab, capsys, monkeypatch
 
 # --- the second continue on the same session --------------------------------------
 
+def test_a_foreground_rescue_clears_the_old_target_out_of_the_outbox(env, capsys, monkeypatch):
+    """T1b / R6: the round that rescues X into Y takes X's outbox entry with it -
+    otherwise the next upload meets「.update 而 Drive 沒有」again and saves a second
+    session Y2 out of the same work.
+
+    The run speaks with a session of its own (ses_b), not X's source (ses_a), so the
+    uploader cannot adopt Y as X's rescue the way it does when the two match - this
+    is the common first-rescue shape, and without the cleanup it mints Y2."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    hdr = header_of(a)
+    raw = (paths().mirror / ulid / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    body = document_of(a).split("\n---\n", 1)[1]
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")   # queued .update
+    import shutil
+    shutil.rmtree(on_drive(a))              # another machine deletes it
+    env.sessions["ses_b"] = ["另一段對話", "好"]
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_b", "parent": {"id": a, "raw_md5": None}}
+    run_obj = cli._Run(paths(), record)
+    exported = cli.load_agent("opencode").export("ses_b")
+
+    saved, target, _note = cli._write_one(paths(), run_obj, exported,
+                                          cli.load_agent("opencode"), check_drive=True)
+
+    assert saved is not None and target != a, "the work moved to a session of its own"
+    assert [p["id"] for p in h.agora_of(header_of(target))["parents"]] == [a]
+    assert h.agora_of(header_of(target))["source"]["session_id"] == "ses_b"
+    assert not (paths().outbox / ulid).exists(), "the rescued entry goes with the rescue"
+    for prefix in (".done-", ".old-", ".tmp-"):
+        assert not (paths().outbox / f"{prefix}{ulid}").exists(), \
+            f"the rescue takes {prefix}{ulid} too"
+    left = store.upload_batch(store.Drive(paths()), paths())
+    names = sorted(p.name for p in (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions").iterdir())
+    assert left == [] and names == [target.split(":")[1]], f"one rescue, not two: {names}"
+
+
 def test_a_second_continue_is_refused_while_the_first_still_holds_the_lock(env, capsys):
     """Scenario「同一台機器再接續一次」: the pending lock is the answer, not the file."""
     _, a, _ = _import(capsys)
