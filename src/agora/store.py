@@ -465,6 +465,27 @@ def _is_update(folder: Path) -> bool:
     return (folder / UPDATE_MARK).exists()
 
 
+def never_confirmed(paths: Paths, ulid: str) -> bool:
+    """Whether Drive has never confirmed this id (change local-first-writes,
+    「寫回還沒被 Drive 確認過的 Session 不算更新既有 id」).
+
+    An outbox entry without `.update` is one nobody ever said Drive already had, and
+    still being there is the rest of the answer: it never got there. Writing such a
+    session back - a continue's `_finish`, an `edit`, an import that updates the same
+    id - is still a *new* session, and marking it `.update` sent the uploader looking
+    for an id Drive never heard of, which it then saved as a session of its own
+    (design「還沒被 Drive 確認過的 Session，寫回時不算更新既有 id」).
+
+    A `.done-<ULID>` next to it means an uploader is comparing that very id right now,
+    and then we cannot tell what Drive has: no exemption. This is read before `stage`,
+    which swaps the entry for a fresh folder that never has the marker.
+    """
+    folder = paths.outbox / ulid
+    if not folder.is_dir() or (paths.outbox / f".done-{ulid}").exists():
+        return False
+    return not _is_update(folder)
+
+
 def _listing_with_md5(drive: Drive):
     """Drive's file list with md5s, or the error that stopped us.
 

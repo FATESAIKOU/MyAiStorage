@@ -146,6 +146,10 @@ def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None, *,
     failure, and then it is the old exit 3 with the old words.
     """
     from agora import background
+    # change local-first-writes「還沒被 Drive 確認過的」: what is still waiting in the outbox
+    # unmarked is a session Drive has never confirmed, so writing it back is still new.
+    # Read before `stage`, which would leave a fresh folder that never has the marker.
+    update = update and not store.never_confirmed(paths, _ulid_of(hdr["id"]))
     folder = store.stage(paths, hdr, body, raw)
     if update:
         store.mark_update(folder, kind)
