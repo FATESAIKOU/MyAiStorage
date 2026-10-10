@@ -33,7 +33,10 @@
 
 ### 寫回目標的解析：定期、最後一次、補存三處共用（P2、P3、P14）
 `_write_target(paths, index, record, *, check_drive)` 回傳「這次要寫到哪個 id、是不是要另存」：
-1. 先在索引找**已經另存過的**：`agora.source` 是這次的 (agent, agent_session_id)、`relation` 是 `continue`、`parents` 含 record 目前的目標 id、雲端有（`cloud_has`）的 Session，取最新的一個。找到就沿用它，不論原本那個還在不在。這包括背景上傳 L7 另存的 Y 和前景另存的 B。限定 relation 與 parents，是為了不認到使用者自己 import 同一個 agent session 產生的分岔。
+1. 先找**已經另存過的**，兩處都找：
+   - **索引**：`agora.source` 是這次的 (agent, agent_session_id)、`relation` 是 `continue`、`parents` 含 record 目前的目標 id、雲端有（`cloud_has`）的 Session，取最新的一個。這包括背景上傳 L7 另存的 Y 和前景另存的 B。
+   - **outbox**（含上傳器正在比對的 `.done-`）：同一組三個記號（`relation: continue`、`source` 是這次的 agent session、`parents` 含目前的目標），找**只 staged、還沒被 `store.remember` 索引**的另存——uploader 是 stage 完才 remember，那個窗口裡（或 crash 在裡面）rescue 只在 outbox。`_staged_as` 把 header 一起讀回來，之後不再讀它一次（免得和上傳器搶檔案）。
+   - 兩邊都有時取 ULID 較新的那一個。找到就沿用它，不論原本那個還在不在。限定 relation 與 parents，是為了不認到使用者自己 import 同一個 agent session 產生的分岔。
 2. 沒有的話，原本的目標還在就用它：
    - 定期寫回（`check_drive=False`）只看本機：索引裡有、沒有被標成雲端沒有。**不連 Drive**（P7）：別台的刪除交給背景上傳的 L7 發現，L7 另存之後，下一輪由第 1 步沿用。
    - 最後一次與補存（`check_drive=True`）照現在的 `_finish` 加上 `_lost_in_cloud`。這是最後的檢查點，**內容和上一次相同也要做**（P2）。
@@ -52,9 +55,9 @@
 - 照「寫回目標的解析」（`check_drive=True`）：
   - 有新內容：寫；
   - 沒有新內容、目標也還在：不 stage，但照樣 `background.start`（踢一下上傳），exit 依它的結果照 `_save` 的規則給 0 或 3，並印對應的訊息；
-  - 沒有新內容、但目標被刪了而且沒有另存過：照樣另存（工作不能只留在被刪的 Session 裡）。
+  - 沒有新內容、但目標被刪了而且沒有另存過：照樣另存（工作不能只留在被刪的 Session 裡）。「已經另存過」包含還只在 outbox 的：沿用時直接拿讀回來的那個 header 寫到它。
 - 最後印出：
-  - stdout：最後寫到的 id；
+  - stdout：最後寫到的 id（沿用背景另存的 Y、或還只在 outbox 的 staged rescue 時，就是沿用後的那個 id）；
   - stderr：途中另存過的說明（含沿用背景另存的 Y 的情況），以及「定期寫回失敗 N 次，見 `<state>/continue.log`」（N > 0 時）。
 - 整段都沒有任何寫回才記 `unsaved-launches`；fork 不記（`continue-fork`）。
 
@@ -104,4 +107,5 @@
 - [接續中不做 sync，別台在接續期間改的 header（title、tags）會每 5 分鐘被本機的舊版蓋回去（原本只在結束時蓋一次）] → 接受，寫進文件。
 - [斷電後被截斷的 raw 可能被當成完成版上傳] → stage 加 fsync；上傳端比對 header 的 raw md5 另開工單。
 - [存在檢查與 copy 之間還剩一個呼叫的窗口] → `.update` 的 entry 在 copy 前一刻再列一次檔、不在就地另存，窗口從「整個 raws 批次」縮到「這一次列檔＋幾次 copy」。落在這個窗口裡的刪除會讓 copy 把資料夾重新建立，所以確認階段會比對：這一輪自己什麼都沒刪，而列檔時還在的檔案不見了，那就是資料夾被刪掉又寫回去——**把剛寫回去的資料夾清掉（維持別台的刪除）並另存成新的 Session**。殘留：entry 指名的 raw 與 Drive 上那一份同名時（例如只改標頭的 `edit`，raw 一個 byte 沒變）重建前後的檔案集合一樣，看不出來；這種寫回不常見，而且內容還在 outbox 裡，下一輪由 L7 的既有規則處理。
+- [最終寫回可能把「copy 復活中的 A」當成還活著] → 別台的刪除正好落在背景 copy 的窗口時，copy 會把 A 的資料夾重建；那一刻若做最後一次寫回，它會看到 A、判它還活著、印出 A，背景隨後才 purge A 並另存成 B——工作不會丟（B 會做出來，之後的寫回都到 B），但 stdout 指的 id 之後就沒了，spec「途中被刪」的「結束時印出另存的說明」在這個交錯下不會發生。機率低：要刪除正好落在 copy 窗口、agent 又正好在那瞬間結束。**PM 10-11 決定接受、不對調 purge／另存順序**：先另存再 purge 只把窗口縮掉一次 purge、關不掉，還會改變 crash 的語意（先另存再 purge：crash 會同時留下 B 和沒被維持刪除的 A）。
 - [never_confirmed 在 import 的 entry 還沒送出就 continue 時會自我延續] → 鄰近風險，這次不修：只要 A 的 outbox entry 在某個 `_save` 當下是沒記號的（例如 import 自己的 entry 還沒上傳完、continue 就開始），之後每輪都會寫出沒記號的新版，上傳器就一直把它當新建直接傳。目前的整合測試在 continue 之前等 entry 排空，所以走不到這條；**不要**用「在 index 裡就不算 never_confirmed」去堵——那會讓 F1（離線 import 的新 Session 寫回時被誤判成被別台刪掉）回來。

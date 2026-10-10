@@ -147,7 +147,7 @@ Mac:
 
 - **outbox**：上傳失敗時留在這裡。`sync` 一律**先推再拉**；每個指令開始時，outbox 不是空的就印一行提示。
 - **pending**：continue-session 啟動 agent **之前**寫一份 `{agora_id, parent, agent, agent_session_id, dir, started_at, before_count}`，建立時就已經上鎖（`flock`），並把鎖用 `pass_fds` 交給 agent 一起持有（C1、C3）。agent 結束後收尾成功才刪。任何 agora 指令開始時檢查 pending：**拿得到 flock**（表示 agora **和** agent 都已經不在了）才補做收尾；`--no-sync` 時只提示不補存；`agora_id` 事先決定，所以補存是冪等的（N2）。
-- 上傳失敗、留在 outbox 時 exit code 是 3；outbox 裡的 Session 在這台機器上照樣搜得到（N13）。
+- 留在 outbox 的 Session 在這台機器上照樣搜得到（N13）。exit code 是 3 只在**背景上傳器起不來**（或 `AGORA_UPLOAD=inline` 時這一輪沒送完）時給；起得來就 exit 0，東西還在 outbox 是背景的事（4.1）。
 - 壞掉的本機檔案（pending 不是合法 JSON、outbox 缺 session.md、header 的 YAML 壞了）移到 `.bad/`，不刪、不讓其他指令跟著壞；Drive 上的壞檔只跳過（C2）。
 - header 沒有 `raw` 的 session.md（merge）本身就是完整的；讀的一方比對 raw 用的是 `lsjson --hash` 列出的 md5，不下載 raw（N5、N11）。
 
@@ -303,12 +303,12 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
    - B 在啟動 agent 之前就先存檔（和 import 同一形狀）。agent 結束、沒有新內容時，B 照樣留著：stdout 印 B 的 id，exit 0。B 在接續途中被刪掉、有新內容時，照第 6 點的規則另存。
    - A 有 fork 出來的孩子不算分岔：再匯入 A 的來源時，A 仍然原地更新（5.2 的 S7）。
 8. **接續期間定期寫回**：agent 還在跑時，每隔 `--sync-period` 分鐘把目前的整份對話寫回接續的那個 Session（`--fork` 一樣適用：寫到 B；其他動作給了也被忽略）。沒給就是 5 分鐘；`0` 就是不自動同步，只有 agent 結束時的寫回。接受小數（`0.5` 是 30 秒）；負數或不是數字在開 agent 之前就拒絕（exit 1）。和上一次成功寫回（或啟動時載入的內容）比，沒有新內容就不寫、不 stage。
-   - 定期寫回**不連 Drive**：只看本機索引，目標還在就寫；別台的刪除交給背景上傳發現，背景另存之後，下一輪寫回就沿用那個新 Session。途中被刪、背景另存、最後一次、補存，同一段工作只會多出**一個**新 Session，之後的寫回都寫到它。
-   - 最後一次寫回照原本的規則，但一定先確認目標還在：和上一輪相同就不必再寫（但仍踢一下背景上傳，exit 照 0／3 的規則給），目標被刪了就照樣另存（工作不能只留在被刪的 Session 裡）。
+   - 定期寫回**不連 Drive**：只看本機索引，目標還在就寫；別台的刪除交給背景上傳發現，背景另存之後，下一輪寫回就沿用那個新 Session。**沿用的搜尋不只在索引**：索引以外，也在 outbox（含上傳器正在比對的 `.done-`）找「只 staged、還沒被 `store.remember` 索引」的另存——同樣是 `relation: continue`、`source` 是這次的 agent session、`parents` 含目前的目標；兩邊都有時取 ULID 較新的那個。途中被刪、背景另存、最後一次、補存，同一段工作只會多出**一個**新 Session，之後的寫回都寫到它。
+   - 最後一次寫回照原本的規則，但一定先確認目標還在：和上一輪相同就不必再寫（但仍踢一下背景上傳，exit 照 0／3 的規則給），目標被刪了就照樣另存（工作不能只留在被刪的 Session 裡）；沿用到的另存如果還只在 outbox（stage 完、還沒索引），讀它的 header 直接寫到它，stdout 印的就是沿用後的那個 id。
    - **靜音**：定期寫回在終端機不印任何東西、也不讀鍵盤（rclone 與 `opencode export` 的 stdin 都是 DEVNULL；rclone 加 `--ask-password=false`）。訊息寫到 `<state>/continue.log`（每行有時間與 Session id，大小上限和 `upload.log` 一樣）；失敗只記數、不中斷 agent，下一輪再試。agent 結束後，有失敗過就印「定期寫回失敗 N 次，見 `<state>/continue.log`」。
    - **同一台機器不能同時接續同一個 Session**：`continue` 一開頭，目標正在接續中（`pending/<ULID>.json` 的鎖有人拿著）就拒絕，exit 1。`--fork` 的目標是新的，不受影響；被 fork 的 A 正在接續中也可以 fork（A 不會被寫）。
    - 目標換到另存的新 Session 時，pending 改名跟著換（`pending/A.json` → `pending/B.json`，鎖跟著走）；結束時刪掉的是目前的那一份。
-   - 接受的代價：**跨機器同時接續同一個 Session 是後寫的贏**（Drive 上的版本每幾分鐘換成另一段對話；很少見，不另做衝突偵測）；**接續中別台改的 header（title、tags）會被本機的舊版蓋回去**（原本只在結束時蓋一次，現在每幾分鐘蓋一次）；**每次有變化就上一份完整的 raw，被取代的進 Drive 垃圾桶留 30 天**（先留著當安全網）。
+   - 接受的代價：**跨機器同時接續同一個 Session 是後寫的贏**（Drive 上的版本每幾分鐘換成另一段對話；很少見，不另做衝突偵測）；**接續中別台改的 header（title、tags）會被本機的舊版蓋回去**（原本只在結束時蓋一次，現在每幾分鐘蓋一次）；**每次有變化就上一份完整的 raw，被取代的進 Drive 垃圾桶留 30 天**（先留著當安全網）；**最終寫回偶爾會把「copy 復活中的 A」當成還活著**——別台的刪除正好落在背景 copy 的窗口時，copy 把 A 的資料夾重建，那一刻做最後一次寫回會看到 A、印出 A；背景隨後仍 purge A 並另存成 B（工作不會丟，之後的寫回都到 B），只是 stdout 指的 id 之後就沒了，結束時也不會印另存的說明。刪除落在 copy 窗口、agent 又正好在那一瞬結束才踩到，機率低；不對調 purge／另存的順序（只縮窗不關窗，且改變 crash 的語意）（PM 10-11 決定）。
 Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之後那個 session 要用的 import 指令。
 
 ### 5.6 delete
