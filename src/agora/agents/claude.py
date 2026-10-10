@@ -25,7 +25,7 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
-from agora.agents.base import (AgentError, Exported, Launch, Listed, Turns, agent_cmd,
+from agora.agents.base import (AgentError, Exported, Launch, Listed, NO_REPLY, Turns, agent_cmd,
                                iso_utc, summarize_timeout, tool_line, warn)
 from agora.store import normalize
 
@@ -395,7 +395,7 @@ PLACEHOLDER_ID = "SESSION-PLACEHOLDER"   # start_native replaces it
 PLACEHOLDER_CWD = "CWD-PLACEHOLDER"
 
 
-def _native_lines(turns: Turns) -> list[str]:
+def _native_lines(turns: Turns, parent: str | None = None) -> list[str]:
     """Turns → Claude jsonl lines, one line per turn, in the order given.
 
     cli hands us turns that already start with the user, strictly alternate
@@ -403,9 +403,12 @@ def _native_lines(turns: Turns) -> list[str]:
     them out. Each line's uuid/parentUuid chain is what lets `claude --resume`
     pick the conversation up (spike V2); sessionId and cwd are placeholders
     that start_native rewrites to the new session's.
+
+    `parent` is the uuid the first line hangs off - None for a conversation built
+    from scratch, the last real line's uuid when appending to one (F4).
     """
     base = datetime.now(timezone.utc).replace(microsecond=0)
-    lines, parent = [], None
+    lines = []
     for i, (role, texts) in enumerate(turns):
         uuid_ = str(uuid.uuid4())
         lines.append(json.dumps({
@@ -418,6 +421,82 @@ def _native_lines(turns: Turns) -> list[str]:
         }, ensure_ascii=False))
         parent = uuid_
     return lines
+
+
+def _leaf_uuid(main: list[str]) -> str | None:
+    """The uuid a new line has to hang off: the last line that has one and is not
+    a sidechain (F4).
+
+    Not the last line. A session file ends with bookkeeping - `summary`,
+    `queue-operation`, `last-prompt`, `cost-state`, `mode` - and those carry no
+    uuid, so the tail of the file is not where the conversation is. `claude
+    --resume` walks parentUuid back from the newest leaf, so a chain hung off
+    the wrong line leaves the agent looking at a conversation that has none of A
+    in it, and nothing says so. Sidechain lines are a subagent's own branch
+    (`isSidechain: true`): the main thread never continues them.
+    """
+    for line in reversed(main):
+        if not line.strip():
+            continue
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(o, dict) or o.get("isSidechain") is True:
+            continue
+        if isinstance(o.get("uuid"), str) and o["uuid"].strip():
+            return o["uuid"]
+    return None
+
+
+def _tool_use_id(block: object) -> str | None:
+    """The tool this block calls, or None for anything that is not a call.
+
+    `tool_use` and the server-side `…_tool_use` both count (CL10's shapes); the
+    matching `tool_result` / `…_tool_result` names it through `tool_use_id`.
+    """
+    if not isinstance(block, dict):
+        return None
+    kind = str(block.get("type") or "")
+    return block.get("id") if kind == "tool_use" or kind.endswith("_tool_use") else None
+
+
+def _tool_result_id(block: object) -> str | None:
+    """The tool this block answers, or None for anything that is not an answer."""
+    if not isinstance(block, dict):
+        return None
+    kind = str(block.get("type") or "")
+    return block.get("tool_use_id") if kind == "tool_result" or kind.endswith("_tool_result") else None
+
+
+def _asked_without_an_answer(objs: list[dict]) -> bool:
+    """Whether the session ends on a question nobody answered (design 5.4 W1).
+
+    Two ways that happens: the reading version's last turn is a user turn with no
+    reply after it, or the conversation stopped on an assistant `tool_use` whose
+    `tool_result` never came because the run was killed mid-tool. Either way the
+    next thing said lands on top of that question and reads as its answer, so
+    `append_native` writes a stand-in reply first.
+
+    Decided on the reading version's own turns, so it agrees with what `turns()`
+    hands the caller: a tool_result line or a local command says nothing and does
+    not count as the turn before the end.
+    """
+    turns = _turns(objs)
+    if turns and turns[-1][0] == "user":
+        return True
+    answered = {_tool_result_id(block)
+                for o in objs
+                if isinstance(message := o.get("message"), dict)
+                and isinstance(content := message.get("content"), list)
+                for block in content}
+    for o in reversed(objs):
+        if o.get("type") != "assistant" or _is_noise(o) or _assistant_lines(o) is None:
+            continue                     # noise and thinking-only lines are not turns
+        content = (o.get("message") or {}).get("content")
+        return any(_tool_use_id(block) is not None and _tool_use_id(block) not in answered
+                   for block in content if isinstance(content, list))
+    return False
 
 
 class ClaudeAgent:
@@ -436,6 +515,25 @@ class ClaudeAgent:
         """Turns (from any agent, or a merge of several) → a Claude jsonl raw
         that start_native can load directly (design v5 5.4)."""
         return _pack_raw(_native_lines(turns), {})
+
+    def append_native(self, raw: bytes, turns: Turns) -> bytes:
+        """A's own jsonl with `turns` chained to the end of it (F4).
+
+        A same-agent fork loads A's file as it is - every tool call, every prefix -
+        so the two turns that say what this session is fork of cannot go through
+        `native()`: that would rebuild the conversation and drop what a rebuild
+        cannot express. So A's lines are kept exactly as they are (they are already
+        strings, not objects - nothing is re-encoded, not even the whitespace) and
+        new ones are written after the last one that belongs to the main thread.
+        `sessionId` and `cwd` on the new lines are the same placeholders `native()`
+        writes, so `start_native` rewrites them by the same rule (review CL7) when
+        it gives the fork its own session id and directory.
+        """
+        main, aux = _unpack_raw(raw)
+        extra = list(turns)
+        if _asked_without_an_answer(_parse_all(main)):
+            extra.insert(0, ("assistant", [NO_REPLY]))
+        return _pack_raw(main + _native_lines(extra, parent=_leaf_uuid(main)), aux)
 
     def start_native(self, raw: bytes, workdir: Path) -> Launch:
         main, aux = _unpack_raw(raw)

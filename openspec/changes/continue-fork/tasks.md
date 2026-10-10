@@ -1,7 +1,7 @@
 ## 1. 實作（負責：impl1）
 
-- [ ] 1.1 store／`_save`：寫回一個還沒被 Drive 確認過的 Session 不標 `.update`（design「還沒被 Drive 確認過的 Session」）；補測試：離線 fork 之後上傳、既有的離線 import → continue／edit 不再另存
-- [ ] 1.2 `Agent` Protocol 新增 `append_native(raw, turns)`；claude（接在最後一個有 uuid、非 sidechain 的行之後；結尾是 user 或 tool_use 先補 `NO_REPLY`；`sessionId`／`cwd` 照 start_native 的規則）與 opencode（先套用 revert、抄 model／agent／providerID／modelID）各自實作；所有 FakeAgent 補上。轉接器層級測試（cl-basic、oc-basic）：鏈接得上、`turns(append_native(raw, t)) == turns(raw) + t`、原本的行一個 byte 不變、`before_count` 多 2
+- [x] 1.1 store／`_save`：寫回一個還沒被 Drive 確認過的 Session 不標 `.update`（design「還沒被 Drive 確認過的 Session」）；補測試：離線 fork 之後上傳、既有的離線 import → continue／edit 不再另存（`store.never_confirmed`，測試在 test_writes_final.py；離線 fork 之後上傳隨 1.3 的 fork 一起補）
+- [x] 1.2 `Agent` Protocol 新增 `append_native(raw, turns)`；claude（接在最後一個有 uuid、非 sidechain 的行之後；結尾是 user 或 tool_use 先補 `NO_REPLY`；`sessionId`／`cwd` 照 start_native 的規則）與 opencode（先套用 revert、抄 model／agent／providerID／modelID）各自實作；所有 FakeAgent 補上。轉接器層級測試（cl-basic、oc-basic）：鏈接得上、`turns(append_native(raw, t)) == turns(raw) + t`、原本的行一個 byte 不變、`before_count` 多 2（`agents/base.py` 的 `NO_REPLY` 常數、`claude._leaf_uuid`／`_asked_without_an_answer`、`opencode._apply_revert`／`_role_fields`；測試在 test_agent_claude.py／test_agent_opencode.py。其他測試檔裡的 FakeAgent 還沒補，見回報）
 - [ ] 1.3 `cmd_continue --fork`：照 design「流程」的 8 步（先驗 header → 組 raw 接 fork 兩則 → start_native → export → 建 B 並 `_save(update=False)` → pending → agent → `_finish`）；`FORK_NOTE`／`FORK_READY`、`FORK_DROP_KEYS`；title 規則；`sources` 含 A；A 雲端沒有就拒絕；`--fork` 只給 continue
 - [ ] 1.4 打開就離開：印 B 的 id、訊息、exit 依步驟 6、不寫 `unsaved-launches`；有新內容時 exit 取較差的；pending 記錄的欄位（`fork`、`saved_md5` 等，design「pending 記錄」）
 - [ ] 1.5 import 的 S7：fork 子 Session 不觸發另建；continue／merge 子 Session 照舊

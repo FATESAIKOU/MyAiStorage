@@ -349,6 +349,7 @@ def test_module_exposes_the_adapter_cli_imports():
 
     assert oc.ADAPTER.name == "opencode"
     assert isinstance(agora.cli.load_agent("opencode"), oc.OpencodeAgent)
+    assert hasattr(oc.ADAPTER, "append_native")
 
 
 def test_never_touches_the_real_opencode_storage(fake, workdir):
@@ -559,6 +560,200 @@ def test_an_attachment_opencode_inlined_produces_no_line(fake):
     assert "ZZCOMPACT" not in body and "ZZSUBTASK" not in body
     assert "ZZTASKOUT" not in body
     assert "[tool] task" in body        # the call itself is one line, per D6
+
+
+# --- append_native (F4: the fork goes on A's own conversation) --------------
+
+FORK = [("user", ["ZZFORK 從 agora:01ABC（title: 表格排版）fork"]),
+        ("assistant", ["ZZFORK 知道了，等你的指示。"])]
+
+
+def unreverted() -> bytes:
+    """oc-basic without its undo pointer: a session nobody undid anything in."""
+    payload = json.loads(raw())
+    payload["info"].pop("revert")
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def test_append_native_puts_the_fork_turns_after_a(fake):
+    raw_bytes = unreverted()
+    out = oc.ADAPTER.append_native(raw_bytes, FORK)
+    assert oc.ADAPTER.turns(out) == oc.ADAPTER.turns(raw_bytes) + FORK
+
+
+def test_append_native_changes_no_existing_message(fake):
+    """A's messages are carried over as they are - the export is JSON, so what has
+    to stay identical is the content of every message and part, not its formatting."""
+    before = json.loads(unreverted())["messages"]
+    after = json.loads(oc.ADAPTER.append_native(unreverted(), FORK))["messages"]
+    assert json.dumps(after[:len(before)], sort_keys=True, ensure_ascii=False) == \
+        json.dumps(before, sort_keys=True, ensure_ascii=False)
+    assert [m["info"]["role"] for m in after] == \
+        ["user", "assistant", "user", "assistant", "user", "assistant"]
+
+
+def test_append_native_links_the_first_assistant_onto_a(fake):
+    """opencode refuses an assistant message whose parentID is null (that is how
+    /undo finds what to drop), so the fork's reply answers A's last message."""
+    after = json.loads(oc.ADAPTER.append_native(unreverted(), FORK))["messages"]
+    assert "parentID" not in after[-2]["info"]                    # the fork note is a user turn
+    assert after[-1]["info"]["parentID"] == after[-2]["info"]["id"]
+
+
+def test_append_native_hangs_a_leading_assistant_turn_onto_a(fake):
+    """The caller sends user first, but an assistant turn that comes first still has
+    to point at A's last message - a null parentID is a payload opencode refuses."""
+    after = json.loads(oc.ADAPTER.append_native(
+        unreverted(), [("assistant", ["ZZFORK 直接回覆"])]))["messages"]
+    assert after[-1]["info"]["parentID"] == after[-2]["info"]["id"]
+    assert after[-2]["info"]["id"] == "msg_ZZSRCID0000000000000004"
+
+
+def test_append_native_picks_ids_a_session_of_its_own_cannot_have(fake, workdir):
+    """native() writes msg_agora…/prt_agora…; a session that already has such ids
+    would end up with two rows under one id, and `reidentify` maps ids one to one."""
+    payload = json.loads(unreverted())
+    for n, message in enumerate(payload["messages"]):
+        message["info"]["id"] = f"msg_agora{n}"
+        for p, part in enumerate(message["parts"]):
+            part["id"] = f"prt_agora{n}-{p}"
+    before = {m["info"]["id"] for m in payload["messages"]} | \
+             {p["id"] for m in payload["messages"] for p in m["parts"]}
+    forked = json.dumps(payload).encode()
+    after = json.loads(oc.ADAPTER.append_native(forked, FORK))["messages"]
+    ids = [m["info"]["id"] for m in after] + [p["id"] for m in after for p in m["parts"]]
+    assert len(set(ids)) == len(ids)
+    assert {i for i in ids if i not in before} == \
+        {f"msg_agoraa{n}" for n in (0, 1)} | {f"prt_agoraa{n}-0" for n in (0, 1)}
+    # and it still loads: one row per message, none of them merged away
+    assert oc.ADAPTER.start_native(oc.ADAPTER.append_native(forked, FORK),
+                                   workdir).before_count == len(after)
+
+
+def test_append_native_copies_the_model_a_was_using(fake):
+    """F4: opencode reads the bare model off assistant messages, so an appended one
+    with no model would make `_last_model()` stop at ours - the Session would record
+    no model at all, and opencode could come back on a model A never used."""
+    payload = json.loads(oc.ADAPTER.append_native(unreverted(), FORK))
+    last_user = [m for m in json.loads(unreverted())["messages"]
+                 if m["info"]["role"] == "user"][-1]["info"]
+    last_assistant = [m for m in json.loads(unreverted())["messages"]
+                      if m["info"]["role"] == "assistant"][-1]["info"]
+    assert payload["messages"][-2]["info"]["model"] == last_user["model"]
+    assert payload["messages"][-1]["info"]["modelID"] == last_assistant["modelID"]
+    assert payload["messages"][-1]["info"]["providerID"] == last_assistant["providerID"]
+    assert payload["messages"][-1]["info"]["agent"] == last_assistant["agent"]
+    # the point of copying: _last_model still answers with A's model, not with nothing
+    assert oc._last_model(payload) == "muse-spark-1.3-contributor-free"
+
+
+def test_append_native_gives_every_new_id_one_nothing_else_has(fake):
+    before = json.loads(unreverted())["messages"]
+    taken = {m["info"]["id"] for m in before} | {p["id"] for m in before for p in m["parts"]}
+    after = json.loads(oc.ADAPTER.append_native(unreverted(), FORK))["messages"]
+    ids = [m["info"]["id"] for m in after] + [p["id"] for m in after for p in m["parts"]]
+    assert len(set(ids)) == len(ids)
+    fresh = {m["info"]["id"] for m in after[len(before):]} | \
+            {p["id"] for m in after[len(before):] for p in m["parts"]}
+    assert not fresh & taken
+
+
+def test_append_native_gives_every_new_message_a_later_time(fake):
+    """opencode orders messages by time.created, so the fork's turns have to land
+    after everything A has - earlier and they are read before it."""
+    before = json.loads(unreverted())["messages"]
+    after = json.loads(oc.ADAPTER.append_native(unreverted(), FORK))["messages"]
+    latest = max(oc._created_ms(m["info"]) for m in before)
+    times = [m["info"]["time"]["created"] for m in after[len(before):]]
+    assert times == sorted(times) and all(at > latest for at in times)
+
+
+def test_append_native_applies_the_undo_first(fake):
+    """OC6, and the reason it matters here: while `info.revert` is there opencode
+    hides everything after it and deletes it when the user first speaks. The fork's
+    two turns would be exactly there - invisible when the agent opens, gone after
+    the first reply. So the undone messages and the pointer go before anything is
+    added (what opencode's own SessionRevert.cleanup does: the messages from
+    messageID on, or from the one after it when there is a partID)."""
+    payload = json.loads(oc.ADAPTER.append_native(raw(), FORK))
+    assert "revert" not in payload["info"]
+    ids = [m["info"]["id"] for m in payload["messages"]]
+    assert ids[:2] == ["msg_ZZSRCID0000000000000001", "msg_ZZSRCID0000000000000002"]
+    assert "msg_ZZSRCID0000000000000003" not in json.dumps(payload)
+    # and the parts of the revert message stop before the one it pointed at
+    assert [p["id"] for p in payload["messages"][1]["parts"]] == \
+        ["prt_ZZSRCID0000000000000010", "prt_ZZSRCID0000000000000011",
+         "prt_ZZSRCID0000000000000012"]
+    # the fork's turns sit right behind what survived, and chain to each other
+    assert [m["info"]["role"] for m in payload["messages"][2:]] == ["user", "assistant"]
+    assert "parentID" not in payload["messages"][2]["info"]
+    assert payload["messages"][3]["info"]["parentID"] == payload["messages"][2]["info"]["id"]
+
+
+def test_append_native_leaves_a_itself_untouched(fake, workdir):
+    """The undo is applied to the copy that gets imported; A is the user's own
+    session and they may still un-undo in it."""
+    before = (fake / "opencode-sessions" / "default.json").read_bytes()
+    out = oc.ADAPTER.append_native(raw(), FORK)
+    assert json.loads(out)["info"].get("revert") is None
+    oc.ADAPTER.start_native(out, workdir)
+    assert (fake / "opencode-sessions" / "default.json").read_bytes() == before
+
+
+def test_append_native_stands_in_for_an_unanswered_question(fake):
+    raw_bytes = unreverted()
+    trimmed = json.loads(raw_bytes)
+    del trimmed["messages"][-1]            # the session now ends on a user turn
+    raw_bytes = json.dumps(trimmed, ensure_ascii=False).encode("utf-8")
+    assert oc.ADAPTER.turns(raw_bytes)[-1][0] == "user"
+    assert oc.ADAPTER.turns(oc.ADAPTER.append_native(raw_bytes, FORK)) == \
+        oc.ADAPTER.turns(raw_bytes) + [("assistant", [base.NO_REPLY])] + FORK
+
+
+def test_append_native_of_an_undo_point_that_is_not_there_only_clears_it(fake):
+    """A pointer at a message the export does not have removes nothing (that is what
+    opencode does with it too); what must not happen is keeping the pointer, which
+    would hide everything after it."""
+    payload = json.loads(raw())
+    payload["info"]["revert"]["messageID"] = "msg_ZZNOTHERE00000000000000"
+    out = oc.ADAPTER.append_native(json.dumps(payload).encode(), FORK)
+    assert "revert" not in json.loads(out)["info"]
+    assert len(json.loads(out)["messages"]) == 6
+
+
+def test_start_native_counts_the_turns_the_fork_added(fake, workdir):
+    """before_count is how `collect` tells "the user said something" from "they
+    opened it and left", so the fork's turns have to be in it from the start."""
+    raw_bytes = unreverted()
+    before = oc.ADAPTER.start_native(raw_bytes, workdir).before_count
+    launch = oc.ADAPTER.start_native(oc.ADAPTER.append_native(raw_bytes, FORK), workdir)
+    assert launch.before_count == before + len(FORK)
+    landed = stored(fake, launch.agent_session_id)
+    assert [m["info"]["role"] for m in landed["messages"]] == \
+        ["user", "assistant", "user", "assistant", "user", "assistant"]
+    assert "ZZFORK" in base.format_reading(oc.ADAPTER.turns(
+        json.dumps(landed, ensure_ascii=False).encode("utf-8")))
+
+
+def test_start_native_of_a_reverted_fork_counts_the_survivors(fake, workdir):
+    launch = oc.ADAPTER.start_native(oc.ADAPTER.append_native(raw(), FORK), workdir)
+    assert launch.before_count == 4        # two survivors and the two fork turns
+
+
+def test_collect_of_a_fork_says_nothing_when_the_user_says_nothing(fake, workdir, monkeypatch):
+    monkeypatch.setenv("FAKE_AGENT_MODE", "noop")
+    launch = oc.ADAPTER.start_native(oc.ADAPTER.append_native(unreverted(), FORK), workdir)
+    assert oc.ADAPTER.collect(launch) is None
+
+
+def test_collect_of_a_fork_returns_what_the_user_added(fake, workdir, monkeypatch):
+    monkeypatch.setenv("FAKE_AGENT_MODE", "append")
+    launch = oc.ADAPTER.start_native(oc.ADAPTER.append_native(unreverted(), FORK), workdir)
+    subprocess.run(launch.argv, cwd=launch.cwd, check=True, capture_output=True)
+    exported = oc.ADAPTER.collect(launch)
+    assert exported is not None
+    assert exported.message_count == launch.before_count + 2
+    assert "ZZAPPEND" in base.reading(oc.ADAPTER, exported.raw)
 
 
 # --- the loaded session is verified and the wreckage goes -----------------

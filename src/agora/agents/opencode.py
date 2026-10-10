@@ -41,7 +41,7 @@ import time
 
 from agora.store import normalize
 
-from .base import (AgentError, Exported, Launch, Listed, Turns, agent_cmd, env_seconds,
+from .base import (AgentError, Exported, Launch, Listed, NO_REPLY, Turns, agent_cmd, env_seconds,
                    iso_utc, summarize_timeout, tool_line, warn)
 
 # Id layout. Fixed width: a truncated ordinal is what made phase 1 import eight
@@ -361,6 +361,89 @@ def _iso(ms: int | None) -> str | None:
     return iso_utc(ms / 1000) if isinstance(ms, int) else None
 
 
+def _apply_revert(payload: dict) -> None:
+    """Apply `info.revert` and clear it: what opencode does before its next prompt.
+
+    Read off the 1.18.34 binary (`SessionRevert.cleanup`): the messages from
+    `messageID` on are dropped - from the one *after* it when there is a `partID`,
+    which is then the last part that stays of its own message - and the pointer is
+    cleared afterwards. A `messageID` that is not in the export removes nothing;
+    only the pointer goes.
+
+    Why the fork's copy has to have it applied before anything is added (F4): while
+    the pointer is there opencode hides everything after it, and the first thing the
+    user says deletes those messages for good. The two turns that say what this
+    session is a fork of would be sitting exactly there - invisible when the agent
+    opens, gone after the first reply, leaving a fork whose last exchange was cut
+    off. A itself is not touched: this is the copy that gets imported, and in A the
+    user can still undo, or un-undo, as they please.
+    """
+    info = payload.get("info")
+    revert = info.get("revert") if isinstance(info, dict) else None
+    if not isinstance(revert, dict):
+        return
+    messages = _payload_messages(payload)
+    found = next((n for n, message in enumerate(messages)
+                  if str((message.get("info") or {}).get("id")) == str(revert.get("messageID"))), -1)
+    if found >= 0:
+        part_id = revert.get("partID")
+        del messages[found + (1 if part_id else 0):]
+        if part_id and isinstance(messages[found].get("parts"), list):
+            parts = messages[found]["parts"]
+            cut = next((n for n, part in enumerate(parts)
+                        if isinstance(part, dict) and part.get("id") == part_id), -1)
+            if cut >= 0:
+                del parts[cut:]
+    info.pop("revert", None)   # the copy has nothing left to undo
+
+
+def _role_fields(payload: dict) -> dict[str, dict]:
+    """Per role, the fields a new message of that role has to copy: `agent` and the
+    model. A user message nests the model (`model`), an assistant message carries it
+    beside the message (`providerID` / `modelID`) - that split is opencode's, so each
+    role reads its own shape off its own last message (F4).
+
+    Without this the fork's assistant answers with an empty model: `_last_model()`
+    stops at the last assistant message, so the Session would record no model at all,
+    and opencode could come back on a model this session never used.
+    """
+    fields: dict[str, dict] = {"user": {}, "assistant": {}}
+    for message in reversed(_payload_messages(payload)):
+        info = message.get("info")
+        if not isinstance(info, dict):
+            continue
+        role = info.get("role")
+        if role not in fields or fields[role]:
+            continue
+        picked = fields[role]
+        if isinstance(info.get("agent"), str) and info["agent"]:
+            picked["agent"] = info["agent"]
+        if role == "user":
+            model = info.get("model")
+            if isinstance(model, dict):
+                picked["model"] = json.loads(json.dumps(model))   # a copy, not the original
+        else:
+            for key in ("providerID", "modelID"):
+                if isinstance(info.get(key), str) and info[key]:
+                    picked[key] = info[key]
+    return fields
+
+
+def _unused_stem(messages: list[dict]) -> str:
+    """An id stem nothing in this payload uses.
+
+    `reidentify` maps every id to a new one, so two rows sharing an id would share
+    the new one too and one of them would come out pointing at the other.
+    """
+    taken = {str((message.get("info") or {}).get("id")) for message in messages}
+    taken |= {str(part.get("id")) for message in messages
+              for part in (message.get("parts") or []) if isinstance(part, dict)}
+    stem = "agora"
+    while any(value.startswith(("msg_", "prt_")) and stem in value for value in taken):
+        stem += "a"
+    return stem
+
+
 def _said(blob: str) -> str | None:
     """The text one part blob holds, if it is text the session said.
 
@@ -605,6 +688,58 @@ class OpencodeAgent:
                 for n, line in enumerate(body)]})
             previous = message_id
         payload = {"info": _session_info(created), "messages": messages}
+        return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    def append_native(self, raw: bytes, turns: Turns) -> bytes:
+        """A's own export with `turns` added as new messages (F4).
+
+        A same-agent fork loads A's session as it is, so the fork's two turns cannot
+        go through `native()`: that rebuilds the conversation out of its reading
+        version and loses every tool call. So this is A's payload, copied, with the
+        undo pointer applied first (so the fork does not inherit a tail opencode
+        would hide and then delete) and the turns appended as ordinary messages -
+        chained to A's last one, carrying the model A was using, and visible plain
+        text like everything else `native()` writes.
+        """
+        payload = self._read(raw)
+        _apply_revert(payload)
+        messages = _payload_messages(payload)
+        body = [(role, [line for line in lines if line.strip()]) for role, lines in turns
+                if role in ("user", "assistant") and any(line.strip() for line in lines)]
+        said = [m for m in messages
+                if (m.get("info") or {}).get("role") in ("user", "assistant")]
+        if body and said and (said[-1].get("info") or {}).get("role") == "user":
+            body.insert(0, ("assistant", [NO_REPLY]))   # W1: A's last question stays unanswered
+        fields = _role_fields(payload)
+        session_id = str((payload.get("info") or {}).get("id") or PLACEHOLDER_ID)
+        stem = _unused_stem(messages)
+        previous = str((said[-1].get("info") or {}).get("id") or "") if said else ""
+        first = max(int(time.time() * 1000),
+                    1 + max((_created_ms(m.get("info") or {}) for m in messages), default=0))
+        for position, (role, lines) in enumerate(body):
+            at = first + position
+            message_id = f"msg_{stem}{position}"
+            copied = fields.get(role) or {}
+            info = {"id": message_id, "sessionID": session_id, "role": role,
+                    "time": {"created": at}, "agent": copied.get("agent", "build"),
+                    "model": copied.get("model") or {"providerID": "opencode", "modelID": ""}}
+            if role == "assistant":
+                # the same fields native() writes, which import insists on (each one
+                # missing is "Missing key at [...]" and the payload is refused)
+                info.update({"parentID": previous, "mode": "build", "finish": "stop",
+                             "providerID": copied.get("providerID", "opencode"),
+                             "modelID": copied.get("modelID", ""), "cost": 0,
+                             "path": {"cwd": "", "root": ""},
+                             "tokens": {"total": 0, "input": 0, "output": 0, "reasoning": 0,
+                                        "cache": {"read": 0, "write": 0}}})
+                info["time"]["completed"] = at
+            else:
+                info["summary"] = {"diffs": []}
+            messages.append({"info": info, "parts": [
+                {"id": f"prt_{stem}{position}-{n}", "sessionID": session_id,
+                 "messageID": message_id, "type": "text", "text": line}
+                for n, line in enumerate(lines)]})
+            previous = message_id
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     def list_sessions(self) -> list[Listed]:

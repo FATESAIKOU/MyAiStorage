@@ -22,6 +22,13 @@ TOOL_SUMMARY_MAX = 200
 #: enough for a free model to answer one (was in opencode.py, review B1).
 SUMMARIZE_TIMEOUT = 600
 
+#: The stand-in answer an adapter puts in when the session it loads ends with a
+#: question nobody answered (a user turn, or a tool_use whose result never came),
+#: so the next thing that is said is not read as the answer to it (design 5.4 W1).
+#: cli has the same string for the cross-agent path; this is the copy the adapters
+#: may use, so `append_native` does not have to be told which text to write.
+NO_REPLY = "（這一段在這裡結束，當時沒有回覆）"
+
 Turns = list[tuple[str, list[str]]]   # [(role, lines)]; role is "user" or "assistant"
 
 
@@ -70,6 +77,21 @@ class Agent(Protocol):
 
     def native(self, turns: Turns) -> bytes:
         """Build this agent's raw from shared turns, so a merged or other-agent session loads natively."""
+
+    def append_native(self, raw: bytes, turns: Turns) -> bytes:
+        """`raw` (this agent's own format, unchanged) with `turns` hung off its end.
+
+        The same-agent fork: A's raw loads as it is, tool calls and all (design
+        5.4 point 2), so the two turns that say what the fork is cannot go through
+        `native()` - that rebuilds the conversation and loses everything a rebuild
+        cannot express. The contract:
+          - `turns(result)` is `turns(raw)` plus, if A ended with a question
+            nobody answered, one assistant `NO_REPLY`, plus `turns`;
+          - nothing in `raw` is rewritten - not one line, not one byte - and the
+            sidecar (claude's `aux`) is handed on untouched;
+          - the new turns are chained to A's last real line, so the agent picks the
+            whole conversation up again rather than only the tail.
+        """
 
     def list_sessions(self) -> list[Listed]:
         """Every session of this agent on this machine, across all projects (design 5.9). Read only."""
