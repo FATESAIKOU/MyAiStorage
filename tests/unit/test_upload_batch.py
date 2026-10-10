@@ -901,14 +901,17 @@ def test_an_uploader_that_finds_an_adopted_rescue_mints_nothing(env):
     y = _rescue_child(paths, ulid)
     import shutil
     shutil.rmtree(env / "agora" / "sessions" / ulid)              # another machine deletes X
+    said: list[str] = []
 
-    assert store.upload_batch(store.Drive(paths), paths) == []
+    assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == []
 
     assert not (env / "agora" / "sessions" / ulid).exists(), "X 沒有被傳回去"
     names = sorted(p.name for p in (env / "agora" / "sessions").iterdir() if p.is_dir())
     assert names == [y], f"沿用已有的另存，不該再建一個：{names}"
     assert "已另存的那份" in (env / "agora" / "sessions" / y / "session.md").read_text(
         encoding="utf-8")
+    assert any(f"沿用已另存的 {y}" in s for s in said), \
+        f"沿用也要留一句話在 log，不然下次查不到這筆去哪了：{said}"
 
 
 def test_replaced_remote_raws_are_deleted_even_when_the_entry_still_holds_them(env, monkeypatch):
@@ -951,6 +954,72 @@ def test_replaced_remote_raws_are_deleted_even_when_the_entry_still_holds_them(e
 
     on_drive = sorted(p.name for p in (env / "agora" / "sessions" / ulid).iterdir())
     assert on_drive == sorted([named, "session.md"]), on_drive
+
+
+def test_an_update_round_decides_from_a_late_listing(env, monkeypatch):
+    """The round's decision about updates comes from listings, and the last word is
+    the re-check right before the copies: a purge between the first listing and the
+    copies must still meet a rescue, not a blind send (review resurrect). So an
+    update round lists sessions twice before copying (existence, re-check) plus the
+    confirmation afterwards - no more, no fewer."""
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "原本的")
+    assert store.upload_batch(store.Drive(paths), paths) == []   # confirmed
+    folder = store.stage(paths, _kept_header(ulid, "改過了"), "## user\n改過了\n", b'{"v": 2}')
+    store.remember(paths, folder)
+    store.mark_update(folder)
+    seen = []
+    real = store.Drive._run
+
+    def spy(self, *args, **kwargs):
+        if args and args[0] == "lsjson" and "gdrive:sessions" in args:
+            seen.append(list(args))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(store.Drive, "_run", spy)
+    said: list[str] = []
+    assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == []
+    assert len(seen) == 3, f"existence, re-check, confirmation: {seen}"
+    assert any(f"存在檢查 {ulid}：還在" in s for s in said), said
+    assert any("本輪送出的 session.md" in s and ulid in s for s in said), said
+
+
+def test_an_update_deleted_under_the_copies_is_taken_down_again(env, monkeypatch):
+    """resurrect: the re-check saw A, another machine deleted it while this round's
+    copies were in flight, and the session.md copy re-created the folder. The
+    confirmation sees files that were there a moment ago and are now gone - files
+    this round never deleted - so it takes the re-created folder down again and keeps
+    the work as a session of its own. Without that, A is alive on Drive again and
+    nothing will ever notice.
+
+    The fake purges A right after the raws copy landed (FAKE_RCLONE_PURGE_AFTER), so
+    the deletion falls exactly between the re-check and the session.md copy.
+    """
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "原本的")
+    assert store.upload_batch(store.Drive(paths), paths) == []   # A is on Drive
+    folder = store.stage(paths, _kept_header(ulid, "改過了"), "## user\n改過了\n", b'{"v": 2}')
+    store.remember(paths, folder)
+    store.mark_update(folder)
+    drive = store.Drive(paths)
+    trigger = env.parent / "purge-after.json"
+    trigger.write_text(json.dumps({"after": "raw-", "purge": f"sessions/{ulid}"}),
+                       encoding="utf-8")
+    monkeypatch.setenv("FAKE_RCLONE_PURGE_AFTER", str(trigger))
+    said: list[str] = []
+
+    left = store.upload_batch(drive, paths, warn=said.append)
+
+    assert not trigger.exists(), "the purge hook never fired - the test proved nothing"
+    assert not (env / "agora" / "sessions" / ulid).exists(), "A 被刪掉後又被留在 Drive 上"
+    assert any("copy 期間被別台刪掉" in s for s in said), said
+    (new,) = store.outbox_ulids(paths)      # Y is staged, for the next pass
+    assert new != ulid and left == [new], f"該只多出一個另存的 Session：{left}"
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    hdr, body = h.split_document(
+        (env / "agora" / "sessions" / new / "session.md").read_text(encoding="utf-8"))
+    assert [p["id"] for p in h.agora_of(hdr)["parents"]] == [f"agora:{ulid}"]
+    assert "改過了" in body
 
 
 def test_two_stages_between_the_list_and_the_copy_still_send(env, monkeypatch):

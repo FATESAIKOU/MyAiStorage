@@ -621,6 +621,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
             continue
 
     updates = [u for u in entries if _is_update(paths.outbox / u)]
+    again = None                 # the listing the confirmation compares against (resurrect)
     if updates:
         # L7: an update needs its id to still be there, or we would put back what
         # another machine deleted.
@@ -637,6 +638,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         gone = [u for u in updates if remote is not None and u not in remote]
         rescued = {}
         for ulid in gone:
+            say(f"存在檢查 {ulid}：不在了")
             rescued[ulid] = _rescue_deleted(paths, paths.outbox / ulid, ulid, say, notices)
         entries = {u: m for u, m in entries.items() if u not in gone}
         # Y went into the outbox while we were here: this round takes it too, so a
@@ -670,12 +672,15 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         elif isinstance(again, dict):
             for ulid in [u for u in updates if u in entries]:
                 if ulid not in again:
+                    say(f"存在檢查 {ulid}：不在了")
                     new_id = _rescue_deleted(paths, paths.outbox / ulid, ulid, say, notices)
                     entries.pop(ulid, None)
                     if new_id and new_id not in entries and (paths.outbox / new_id).exists():
                         entries[new_id] = _entry_md5s(paths.outbox / new_id)
                     if (paths.outbox / ulid).is_dir():
                         left.append(ulid)
+                else:
+                    say(f"存在檢查 {ulid}：還在，這一輪送出")
         # None: Drive has no sessions/ at all - not evidence of a deletion (N12).
 
     # The raw each entry names, as read with its md5s - not every raw-* in the
@@ -690,11 +695,14 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         except StoreError as e:
             say(f"原始檔沒傳好，這一輪不傳 session.md：{e}")
             return sorted(set(entries) | set(left))
-    try:
-        _copy_batch(drive, paths, [f"{u}/session.md" for u in entries])
-    except StoreError as e:
-        say(f"session.md 沒傳好：{e}")
-        return sorted(set(entries) | set(left))
+        say(f"本輪送出的原始檔：{', '.join(sorted({r.split('/', 1)[0] for r in raws}))}")
+    if entries:
+        try:
+            _copy_batch(drive, paths, [f"{u}/session.md" for u in entries])
+        except StoreError as e:
+            say(f"session.md 沒傳好：{e}")
+            return sorted(set(entries) | set(left))
+        say(f"本輪送出的 session.md：{', '.join(sorted(entries))}")
 
     remote = _listing_with_md5(drive)
     if not isinstance(remote, dict):
@@ -706,6 +714,24 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         if files.get("session.md") != sent_md5:
             left.append(ulid)     # not confirmed, or changed underneath us: it stays
             continue
+        if ulid in updates and isinstance(again, dict):
+            before = again.get(ulid) or {}
+            if any(n != "session.md" and n not in files for n in before):
+                # This round deleted nothing, yet files the folder had a moment ago are
+                # gone: only a real deletion does that, and the copies just landed on
+                # the folder it re-created (review resurrect). Another machine's delete
+                # stands - take our copy down, and keep the work as a session of its own.
+                say(f"{ulid} copy 期間被別台刪掉，剛寫回去的資料夾已清掉")
+                try:
+                    drive._run("purge", f"gdrive:sessions/{ulid}")
+                except StoreError as e:
+                    say(f"{ulid} 清掉剛寫回去的資料夾失敗：{e}")
+                new_id = _rescue_deleted(paths, folder, ulid, say, notices)
+                if new_id and new_id not in entries and (paths.outbox / new_id).exists():
+                    left.append(new_id)          # Y goes up on the next pass
+                if (paths.outbox / ulid).is_dir():
+                    left.append(ulid)
+                continue
         done = paths.outbox / f".done-{ulid}"
         try:
             folder.rename(done)                      # H1: compare what is *now* in there
@@ -773,6 +799,10 @@ def _rescue_deleted(paths: Paths, folder: Path, ulid: str, say, notices: bool = 
                     and csource.get("agent") == source.get("agent")
                     and csource.get("session_id") == source.get("session_id")):
                 shutil.rmtree(done, ignore_errors=True)
+                line = f"{ulid} 已被別台刪除，這次的修改沿用已另存的 {child}"
+                if notices:
+                    _notice(paths, line)
+                say(line)
                 return child
     new_ulid = h.new_ulid()
     new_hdr = copy.deepcopy(hdr)

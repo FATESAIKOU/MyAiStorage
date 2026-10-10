@@ -9,14 +9,17 @@ session is caught mid-write: a half-written line / a message that never finished
 The point is timing: a test needs the conversation to grow *between* two write-backs,
 and a fake that appends one pair and returns cannot say when that happens.
 
-`wait-sync` waits for the signal file to hold one more complete line than it did
-when the step began - FAKE_SYNC_SIGNAL=<path>, which for the periodic write-back is
-`<state>/continue.log`. Just after it takes that count it prints WAIT_MARK
-(`FAKE-WAITING`) and only then polls, so a caller that has to add the line can wait
-for the marker: a line added after it is always one the fake has not counted yet,
-which a sleep cannot promise. It gives up after FAKE_SYNC_TIMEOUT seconds (10 by
-default) with a reason on stderr rather than hanging: a test whose write-back never
-comes should fail, not sit there.
+`wait-sync` waits for the signal file to record one more completed periodic write-back
+than it did when the step began - FAKE_SYNC_SIGNAL=<path>, which for the periodic
+write-back is `<state>/continue.log`. A round leaves one line beginning with
+`定期寫回：` there whether it wrote or skipped, and only those lines count: a round's
+other words (the uploader's own, in the foreground switch) arrive while it works, and
+a wait released by them would be a wait satisfied by a round that had not finished.
+Just after it takes that count it prints WAIT_MARK (`FAKE-WAITING`) and only then
+polls, so a caller that has to add the line can wait for the marker: a line added
+after it is always one the fake has not counted yet, which a sleep cannot promise. It
+gives up after FAKE_SYNC_TIMEOUT seconds (10 by default) with a reason on stderr
+rather than hanging: a test whose write-back never comes should fail, not sit there.
 
 START_MARK and END_MARK go to stdout around everything else, so a test that sends
 agora's stdout and stderr to one file can tell that nothing of agora's appeared
@@ -39,6 +42,9 @@ ERROR_MARK = "FAKE-AGENT-ERROR"
 #: before it polls. A caller that adds the write-back line itself waits for this;
 #: adding it any earlier can be counted before the fake even gets here.
 WAIT_MARK = "FAKE-WAITING"
+#: What a completed periodic write-back's line begins with in the signal file; the
+#: only lines `wait-sync` counts (the log may hold a round's other words too).
+ROUND_MARK = "定期寫回"
 
 DEFAULT_WAIT_SECONDS = 10.0
 POLL_SECONDS = 0.02
@@ -100,7 +106,7 @@ def wait_for_sync() -> None:
     while lines(path) <= before:
         if time.monotonic() >= deadline:
             raise ScriptError(f"等不到寫回：{seconds:g} 秒內 {path} 沒有多一行"
-                              f"（還是 {before} 行）")
+                              f"（還是 {before} 次）")
         time.sleep(POLL_SECONDS)
 
 
@@ -111,11 +117,19 @@ def signal_path() -> Path | None:
 
 
 def lines(path: Path) -> int:
-    """How many complete lines the signal file holds; 0 while there is no file."""
+    """How many completed write-backs the signal file records; 0 while there is no file.
+
+    Only whole lines that begin a write-back's line (`ROUND_MARK`) count: half-written
+    ones at the end are not a write-back yet, and a round's other words are not one at
+    all. Whoever adds a line to move a `wait-sync` along has to write one of these.
+    """
     try:
-        return path.read_bytes().count(b"\n")
+        text = path.read_text(encoding="utf-8")
     except OSError:
         return 0
+    if not text.endswith("\n"):                  # a line still being written does not count
+        text = text[:text.rfind("\n") + 1]
+    return sum(1 for line in text.splitlines() if ROUND_MARK in line)
 
 
 def timeout() -> float:

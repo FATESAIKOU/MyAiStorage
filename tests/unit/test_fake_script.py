@@ -131,7 +131,7 @@ def add_line(signal: Path) -> float:
     returns when the line landed, so a test can say the fake was still running."""
     count = signal.read_text(encoding="utf-8").count("\n") if signal.exists() else 0
     with open(signal, "a", encoding="utf-8") as f:
-        f.write(f"[agora] 第 {count + 1} 次寫回\n")
+        f.write(f"[agora] 定期寫回：第 {count + 1} 次\n")
         f.flush()
     return time.monotonic()
 
@@ -364,15 +364,22 @@ def test_an_unknown_step_says_so_instead_of_doing_nothing(tmp_path, monkeypatch)
 # --- the counter itself ------------------------------------------------------
 
 
-def test_lines_counts_whole_lines_and_survives_no_file(tmp_path):
+def test_lines_counts_whole_write_backs_and_survives_no_file(tmp_path):
     sys.path.insert(0, str(FAKES))
     import _script
 
     missing = tmp_path / "nothing-here.log"
     assert _script.lines(missing) == 0
     present = tmp_path / "continue.log"
-    present.write_bytes(b"one\ntwo\nthree\nhalf")
-    assert _script.lines(present) == 3       # the unfinished last line does not count
+    present.write_text("one\n[agora] 定期寫回：第 1 次\n[agora] 定期寫回：第 2 次\nhalf",
+                       encoding="utf-8")
+    assert _script.lines(present) == 2       # the unfinished last line does not count
+    # a round's own words are not a completed write-back (the foreground switch puts
+    # the uploader's lines in this same file)
+    other = tmp_path / "continue2.log"
+    other.write_text("[agora] 背景上傳開始\nrandom\n[agora] 定期寫回：失敗（第 1 次）\n",
+                     encoding="utf-8")
+    assert _script.lines(other) == 1
 
 
 if __name__ == "__main__":
