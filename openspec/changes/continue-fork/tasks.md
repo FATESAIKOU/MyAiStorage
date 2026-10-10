@@ -11,7 +11,7 @@
 
 ## 2. 收尾
 
-- [ ] 2.1 `docs/design.md` 3.4（relation 加 fork）、5.4 第 2 點與第 6 點、5.6；README 的 continue 加 `--fork`
-- [ ] 2.2 review 審程式
-- [ ] 2.3 PM 用假資料實跑一次 fork（同 agent、跨 agent、打開就離開、離線），觀察排序日期與「↻」（F17）
+- [x] 2.1 `docs/design.md` 3.4（relation 加 fork）、5.4 第 2 點與第 6 點、5.6；README 的 continue 加 `--fork`（impl3：51a9863；verified 照抄的字面 241ebb9）
+- [x] 2.2 review 審程式（動手前審設計 F1～F18；程式審查 C1～C12、M1～M9（Claude 子代理）；修正複查 arch：continue-fork-code-3，沒有未修的 High／Medium；Low 的兩個測試缺口已補 322c2ec）
+- [x] 2.3 PM 用假資料實跑一次 fork（同 agent、跨 agent、打開就離開、離線），觀察排序日期與「↻」（F17）（PM 10-10 用 /tmp/agora-trial2 假資料＋假 agent：同 agent fork 的 B 標題加 -fork、relation fork、parents／sources 含 A、對話最後是 fork 說明與新的一句，A 的 md5 不變；打開就離開印 B 的 id、不寫 unsaved-launches；跨 agent 照樣建 B；離線 fork 恢復後 push，B 本身上 Drive、沒有另存。排序日期與「↻」在假資料上看不出差異，留待本人實用時觀察）
 - [ ] 2.4 和 `continue-periodic-sync` 一起開 PR（本人 merge）
