@@ -390,6 +390,16 @@ def test_an_offline_fork_keeps_writing_to_itself(env, capsys, monkeypatch):
     monkeypatch.delenv("FAKE_RCLONE_FAIL")
     assert code == cli.EXIT_IN_OUTBOX and b != a
     assert "ZZ 第 1 次發言" in document_of(b), "a round wrote the fork while offline"
+    # N2: stdout's id is the fork itself, not a session rescued later - and no second
+    # new session exists anywhere, not even one that never reached Drive. Drive alone
+    # cannot say this: while the copies fail, neither B nor a rescue of it is up there.
+    hdr_b = header_of(b)
+    assert h.agora_of(hdr_b)["relation"] == "fork", "stdout 印的就該是 fork 出來的 B"
+    assert [p["id"] for p in h.agora_of(hdr_b)["parents"]] == [a]
+    others = _extra_sessions(a)
+    assert [hdr["id"] for hdr in others] == [b], "index 裡只有 A 和 B，沒有第二個新 Session"
+    assert not [hdr for hdr in others if h.agora_of(hdr).get("relation") == "continue"], \
+        "B 沒有被另存成 continue"
     assert store.upload_batch(store.Drive(paths()), paths()) == []
     kept = sorted(p.name for p in (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions").iterdir())
     assert kept == sorted({a.split(":")[1], b.split(":")[1]}), "the fork itself, nothing rescued"
