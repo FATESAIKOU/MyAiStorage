@@ -108,6 +108,33 @@ def write_atomic(path: Path, text: str) -> None:
         Path(tmp).unlink(missing_ok=True)   # gone on success; a leftover never clutters
 
 
+def _write_file(path: Path, data: bytes) -> None:
+    """Write a file and get it onto the disk before anyone reads it back.
+
+    A periodic write-back stages a session every few minutes for hours on end; a power
+    cut in the middle of one used to be able to leave a `session.md` that is short but
+    whole-looking, and that is exactly the version Drive would then be sent.
+    """
+    with open(path, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _fsync_dir(path: Path) -> None:
+    """Make a rename or a removal durable: the directory entry is a write of its own."""
+    try:
+        fd = os.open(path, getattr(os, "O_DIRECTORY", os.O_RDONLY))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass          # a filesystem that will not sync a directory (some network mounts)
+    finally:
+        os.close(fd)
+
+
 def _md5(entry: dict) -> str:
     """The md5 Drive reported for a file, or "" when it has none."""
     return (entry.get("Hashes") or {}).get("md5", "")
@@ -125,11 +152,16 @@ class Drive:
         self.settings = json.loads(self.settings_file.read_text()) if self.settings_file.exists() else {}
 
     def _run(self, *args: str, root: bool = True) -> str:
-        cmd = [self.rclone, "--config", str(self.conf)]
+        cmd = [self.rclone, "--config", str(self.conf), "--ask-password=false"]
         if root:
             cmd += ["--drive-root-folder-id", self.folder_id()]
         try:
-            proc = subprocess.run(cmd + list(args), capture_output=True, text=True)
+            # DEVNULL, and never a prompt: a periodic write-back runs while the agent
+            # owns the terminal, and rclone waiting for a password to be typed would
+            # fight the agent for the keyboard - or hang until the write-back's own
+            # timeout, holding the session back (design「不弄亂 agent 的畫面」, P9/P15).
+            proc = subprocess.run(cmd + list(args), capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL)
         except OSError as e:   # rclone missing or not executable: a Drive problem, not a bad file (R1)
             raise StoreError(f"叫不起 rclone（{self.rclone}）：{e}") from None
         if proc.returncode != 0:
@@ -199,8 +231,18 @@ class Drive:
 # ---------------------------------------------------------------------------
 
 
-def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None) -> Path:
-    """Write a complete session into the outbox and return its folder."""
+def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None, *,
+          update: bool = False, kind: str = "") -> Path:
+    """Write a complete session into the outbox and return its folder.
+
+    `update`／`kind` say what `mark_update` says, and are written into the folder that
+    is about to go in, before the swap: the uploader reads the outbox whenever it likes,
+    and a version that was in there for the moment between this call and a later
+    `mark_update` looked like a new session Drive had never heard of (design
+    「store 的小修」P13). Callers that decide whether this is an update at all have to ask
+    `never_confirmed` *before* calling this: afterwards the answer is always "yes", the
+    fresh folder having no marker.
+    """
     ulid = header["id"].split(":", 1)[1]
     paths.outbox.mkdir(parents=True, exist_ok=True)
     folder = paths.outbox / ulid
@@ -210,11 +252,14 @@ def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None) -> Pat
     if raw_bytes is not None:
         md5 = hashlib.md5(raw_bytes).hexdigest()
         name = f"raw-{md5[:12]}.json"
-        (tmp / name).write_bytes(raw_bytes)
+        _write_file(tmp / name, raw_bytes)
         header.setdefault("agora", {})["raw"] = {"file": name, "md5": md5, "size": len(raw_bytes)}
     else:
         header.setdefault("agora", {}).pop("raw", None)
-    (tmp / "session.md").write_text(h.dump_document(header, body), encoding="utf-8")
+    _write_file(tmp / "session.md", h.dump_document(header, body).encode("utf-8"))
+    if update:
+        mark_update(tmp, kind)          # into the folder that is about to go in, not the one that is there
+    _fsync_dir(tmp)                    # the files and the names pointing at them
     # Swap in whole, so a crash never leaves an outbox entry without session.md
     # (C4): the old entry is renamed aside, the new one moved in, then the old removed (R6).
     old = paths.outbox / f".old-{ulid}"
@@ -227,6 +272,7 @@ def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None) -> Pat
     # now, and what it holds is a version that was current a moment ago - deleting it
     # loses an edit. Whoever finds `outbox/<ULID>` already there drops it instead:
     # `_rename_back` while comparing, `restore_done` when the background takes the lock.
+    _fsync_dir(paths.outbox)            # the rename itself, and the entry it removed
     return folder
 
 
@@ -448,9 +494,13 @@ def mark_update(folder: Path, kind: str = "") -> None:
     they would never be sent (review N4). The kind matters only if that session is gone
     by the time we send: the edit is then saved as a session of its own, and what it is
     depends on which command wrote it (review G2).
+
+    `stage(..., update=True, kind=...)` writes the same thing before the swap, so a
+    caller that already knows does not have to come back for it (P13); this stays for
+    the callers that decide afterwards.
     """
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / UPDATE_MARK).write_text(kind, encoding="utf-8")
+    _write_file(folder / UPDATE_MARK, kind.encode("utf-8"))
 
 
 def update_kind(folder: Path) -> str:

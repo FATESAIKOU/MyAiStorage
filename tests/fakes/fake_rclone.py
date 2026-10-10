@@ -4,12 +4,18 @@
 The "remote" is the folder $FAKE_REMOTE. Folder IDs are just folder names.
 Every call is appended to $FAKE_REMOTE/../calls.log. FAKE_RCLONE_FAIL=<text>
 makes any call whose arguments contain <text> fail with rc=1.
+
+FAKE_RCLONE_RECORD_STDIN=1 also appends what stdin was to
+$FAKE_REMOTE/../stdin.log: `/dev/null` when the caller opened it on the void,
+`fifo` when it inherited one (a pipe the test is holding open, so a child that
+tried to read would block), `closed`, or `other` (a terminal, a file).
 """
 
 import hashlib
 import json
 import os
 import shutil
+import stat
 import sys
 from pathlib import Path
 
@@ -29,6 +35,24 @@ if os.environ.get("FAKE_RCLONE_DELAY"):     # let a test watch a slow upload hap
 args = sys.argv[1:]
 with open(log, "a") as f:
     f.write(json.dumps(args) + "\n")
+
+
+def stdin_kind():
+    """What fd 0 is, for FAKE_RCLONE_RECORD_STDIN: the point is that it is never the
+    terminal the agent is using, and never something that could be read from."""
+    try:
+        if os.path.samefile(0, "/dev/null"):
+            return "/dev/null"
+        return "fifo" if stat.S_ISFIFO(os.fstat(0).st_mode) else "other"
+    except OSError:
+        return "closed"
+
+
+if os.environ.get("FAKE_RCLONE_RECORD_STDIN"):
+    with open(remote.parent / "stdin.log", "a") as f:
+        f.write(json.dumps({"stdin": stdin_kind(), "args": args}) + "\n")
+
+
 def _should_fail(needle: str) -> bool:
     if needle in " ".join(args):
         return True
@@ -68,6 +92,9 @@ while i < len(args):
     if args[i] == "--drive-root-folder-id":
         root = remote / args[i + 1]
         i += 2
+        continue
+    if args[i].startswith("--ask-password="):     # a global flag the real rclone takes; not a command
+        i += 1
         continue
     rest.append(args[i])
     i += 1

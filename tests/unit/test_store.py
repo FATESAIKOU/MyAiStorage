@@ -297,3 +297,107 @@ def test_a_purge_that_fails_and_a_listing_that_fails_forgets_nothing(remote):  #
         else:
             os.environ["FAKE_RCLONE_FAIL"] = monkey
     assert store.Index(paths).header(ulid) is not None
+
+
+# --- continue-periodic-sync, the store part (tasks 1.5 / 1.7, P13 / P17) ---------
+
+
+def test_the_marker_is_in_the_entry_before_it_is_swapped_in(remote, monkeypatch):
+    """P13: the uploader reads the outbox whenever it likes, and `stage` used to publish
+    a version first and only then be told what it was. An uploader in between saw a
+    session with no marker - one it had no reason to look for on Drive - and saved it
+    under a new id. So the marker goes into the folder that is about to go in, and the
+    old two-step call keeps working for callers that decide afterwards.
+    """
+    paths = store.Paths.from_env()
+    hdr = _header()
+    ulid = hdr["id"].split(":", 1)[1]
+    seen = []
+    real = store.mark_update
+
+    def spy(folder, kind=""):
+        written = real(folder, kind)          # what the entry looks like once it is written
+        seen.append({"folder": folder.name, "entries": sorted(p.name for p in folder.iterdir()),
+                     "published": (paths.outbox / ulid).exists()})
+        return written
+
+    monkeypatch.setattr(store, "mark_update", spy)
+    folder = store.stage(paths, hdr, "## user\nCSV\n", b"{}", update=True, kind="continue")
+
+    assert [s["folder"] for s in seen] == [f".tmp-{ulid}"], seen   # not the one already there
+    assert not any(s["published"] for s in seen), seen             # nothing of this was out yet
+    assert ".update" in seen[0]["entries"], seen                   # and it already had it
+    assert store._is_update(folder), "swap in whole, marker and all"
+    assert store.update_kind(folder) == "continue", "the kind travels with the marker"
+    assert not store.never_confirmed(paths, ulid), \
+        "Drive has this id (continue-fork 1.1): the entry says so right away"
+    assert store.upload_batch(store.Drive(paths), paths) == []
+
+
+def test_a_version_that_is_not_an_update_carries_no_marker(remote):
+    """The other side of the same swap: a whole new folder comes in, so the previous
+    write's marker cannot ride along - and `never_confirmed` goes back to saying the
+    session is one Drive has never confirmed."""
+    paths = store.Paths.from_env()
+    hdr = _header()
+    ulid = hdr["id"].split(":", 1)[1]
+    store.stage(paths, hdr, "## user\nCSV\n", b'{"x": 1}', update=True, kind="continue")
+
+    folder = store.stage(paths, hdr, "## user\n第二版\n", b'{"x": 2}')
+
+    assert not store._is_update(folder), "換進去的是整個資料夾，舊的標記不會跟著"
+    assert store.update_kind(folder) == ""
+    assert store.never_confirmed(paths, ulid)
+
+
+def test_stage_fsyncs_the_files_it_writes_and_the_folders_around_them(remote, monkeypatch):
+    """P17: a periodic write-back stages a session every few minutes for hours on end. A
+    power cut used to be able to leave a `session.md` that was short but whole-looking -
+    and that is the version Drive would be sent. So the bytes, the names pointing at them
+    and the rename itself all have to reach the disk.
+    """
+    paths = store.Paths.from_env()
+    seen, synced = [], []
+    real_file, real_dir, real_fsync = store._write_file, store._fsync_dir, os.fsync
+    monkeypatch.setattr(store, "_write_file",
+                        lambda p, data: (seen.append(("file", Path(p))), real_file(p, data))[1])
+    monkeypatch.setattr(store, "_fsync_dir", lambda p: (seen.append(("dir", Path(p))), real_dir(p))[1])
+    monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(fd), real_fsync(fd))[1])
+
+    hdr = _header()
+    folder = store.stage(paths, hdr, "## user\nCSV\n", b'{"x": 1}', update=True, kind="continue")
+
+    tmp = paths.outbox / f".tmp-{folder.name}"
+    raw_name = h.agora_of(hdr)["raw"]["file"]
+    assert {p.name for kind, p in seen if kind == "file" and p.parent == tmp} == \
+        {"session.md", raw_name, store.UPDATE_MARK}, seen
+    assert ("dir", tmp) in seen, "the files, and the names pointing at them, before the swap"
+    assert ("dir", paths.outbox) in seen, "and the rename that put them in the outbox"
+    assert len(synced) == len(seen), "each of those really reached the disk, not just the call"
+
+
+def test_rclone_never_inherits_the_terminal_and_never_asks_for_a_password(remote, monkeypatch):
+    """P9 / P15: a periodic write-back runs while the agent owns the terminal. rclone must
+    not sit there waiting for somebody to type a password - and must not get the keyboard
+    in the first place.
+
+    fd 0 is a pipe the test holds open and never writes to, so a child that tried to read
+    would block; with the fix the child is given `/dev/null` instead and says so.
+    """
+    paths = store.Paths.from_env()
+    monkeypatch.setenv("FAKE_RCLONE_RECORD_STDIN", "1")
+    read_fd, write_fd = os.pipe()
+    saved = os.dup(0)
+    os.dup2(read_fd, 0)
+    try:
+        _save(paths, _header())
+    finally:
+        os.dup2(saved, 0)
+        for fd in (saved, read_fd, write_fd):
+            os.close(fd)
+
+    log = remote.parent / "stdin.log"
+    lines = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert lines, "there was at least one rclone call"
+    assert {line["stdin"] for line in lines} == {"/dev/null"}, lines
+    assert all("--ask-password=false" in line["args"] for line in lines), lines
