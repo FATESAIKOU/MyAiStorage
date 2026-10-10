@@ -1,0 +1,9 @@
+{
+  "channel_repo": "owner-org/a2a-channel",
+  "identity": {
+    "repo": "owner-org/worker-team",
+    "role": "team-pm",
+    "name": "worker-1"
+  },
+  "token_file": "~/.config/angareion/token"
+}
