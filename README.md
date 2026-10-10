@@ -104,6 +104,9 @@ agora merge session agora:01K6…, agora:01K7…, agora:01K8…
 agora continue session agora:01K6… --agent opencode
 agora continue session agora:01K8… --agent claude --dir ~/proj
 
+# 接續期間每幾分鐘自動寫回（預設 5 分鐘；0 ＝ 只在結束時寫回；小數可）
+agora continue session agora:01K6… --agent opencode --sync-period 1
+
 # 從同一點分岔：先複製出新 Session 再開 agent，原本那個不動，寫回都寫到新的那個
 agora continue session agora:01K6… --agent opencode --fork
 
