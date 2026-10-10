@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
+import copy
 import json
 import os
 import shutil
@@ -147,6 +148,11 @@ def _continue(capsys, agora_id, *extra):
                "--sync-period", SECONDS, *extra)
 
 
+def _continue_claude(capsys, lab, agora_id, *extra):
+    return run(capsys, "continue", "session", agora_id, "--agent", "claude",
+               "--dir", str(lab["work"]), "--sync-period", SECONDS, *extra)
+
+
 def _stage_spy(monkeypatch):
     """Record the (id, body) of every version actually staged, in order."""
     staged = []
@@ -266,23 +272,27 @@ def test_a_deletion_mid_run_moves_later_writes_to_the_rescue(env, capsys, monkey
     assert not on_drive(a).exists(), "the deleted one is not pushed back"
 
 
-def test_the_final_write_adopts_an_indexed_rescue_with_nothing_new(env, capsys, monkeypatch):
+def test_the_final_write_adopts_an_indexed_rescue_with_nothing_new(claude_lab, capsys, monkeypatch, tmp_path):
     """The uploader rescued A's last version into B and the agent then said nothing
     more: no periodic round adopts it first, the final write-back has to.
 
     This is the e2e's shape (tests/integration/test_e2e_sync.py, 途中被刪): what A
     held at the end is the version the uploader saved as B, and stdout has to name B.
+    The agent is the scripted fake, held at `wait-file` until the round below really
+    rescued: a fixed sleep only guesses that the round wins the race.
     """
-    env.speak_rounds = 1
-    env.sleep = 0.35              # one round, then the agent is done
-    _, a, _ = _import(capsys)
+    a = _import_claude(capsys)
     ulid = a.split(":")[1]
+    release = tmp_path / "rescue-done"
+    _script(claude_lab, monkeypatch, f"append:ZZ 第 1 次發言,wait-file:{release},exit")
     real_round = cli._periodic_write
     done = {"rescued": False}
 
     def round_then_rescue(run_, agent):
         real_round(run_, agent)
-        if done["rescued"]:
+        if done["rescued"] or not run_.wrote:
+            # Nothing of this run has reached A yet: a rescue staged now would carry
+            # the *import's* source, not this run's, and is not the one being tested.
             return
         done["rescued"] = True
         hdr = store.Index(paths()).header(ulid)
@@ -291,9 +301,10 @@ def test_the_final_write_adopts_an_indexed_rescue_with_nothing_new(env, capsys, 
         store.stage(paths(), hdr, body, raw, update=True, kind="continue")
         shutil.rmtree(on_drive(a))                     # another machine deleted A
         store.upload_batch(store.Drive(paths()), paths())   # the uploader's L7 rescue, in place
+        release.touch()                                # rescued for real: the agent may leave
 
     monkeypatch.setattr(cli, "_periodic_write", round_then_rescue)
-    code, out, err = _continue(capsys, a)
+    code, out, err = _continue_claude(capsys, claude_lab, a)
 
     assert done["rescued"]
     kept = _extra_sessions(a)
@@ -305,25 +316,28 @@ def test_the_final_write_adopts_an_indexed_rescue_with_nothing_new(env, capsys, 
     assert not on_drive(a).exists(), "the deleted one is not pushed back"
 
 
-def test_the_final_write_adopts_a_rescue_that_is_only_staged(env, capsys, monkeypatch):
+def test_the_final_write_adopts_a_rescue_that_is_only_staged(claude_lab, capsys, monkeypatch, tmp_path):
     """The uploader staged the rescue B but has not indexed it yet (or died between the
     two): the final write-back, with nothing new, still has to find it in the outbox.
 
     A crash between `stage` and `remember` leaves the new session only in the outbox -
     `store.remember` runs right after the stage, but that window is real. The last write
     resolves its target with `check_drive=True` and, before it can call A dead, has to
-    see the work that is already saved as B sitting right there.
+    see the work that is already saved as B sitting right there. The scripted fake is
+    held at `wait-file` until the round below really staged the rescue.
     """
-    env.speak_rounds = 1
-    env.sleep = 0.35              # one round, then the agent is done
-    _, a, _ = _import(capsys)
+    a = _import_claude(capsys)
     ulid = a.split(":")[1]
+    release = tmp_path / "rescue-done"
+    _script(claude_lab, monkeypatch, f"append:ZZ 第 1 次發言,wait-file:{release},exit")
     real_round = cli._periodic_write
     done = {"rescued": False, "b": None}
 
     def round_then_rescue_before_indexing(run_, agent):
         real_round(run_, agent)
-        if done["rescued"]:
+        if done["rescued"] or not run_.wrote:
+            # Same as above: the rescued entry has to be one this run wrote, or its
+            # source is the import's and the three marks cannot match.
             return
         done["rescued"] = True
         hdr = store.Index(paths()).header(ulid)
@@ -340,18 +354,127 @@ def test_the_final_write_adopts_a_rescue_that_is_only_staged(env, capsys, monkey
             monkeypatch.setattr(store, "remember", remember)
         b = done["b"]
         assert b and (paths().outbox / b).is_dir(), "the rescue has to be waiting in the outbox"
+        release.touch()                                # staged for real: the agent may leave
 
     monkeypatch.setattr(cli, "_periodic_write", round_then_rescue_before_indexing)
-    code, out, err = _continue(capsys, a)
+    code, out, err = _continue_claude(capsys, claude_lab, a)
 
     b = f"agora:{done['b']}"
     assert done["rescued"] and store.Index(paths()).header(done["b"]) is None, \
         "nothing indexed it before the final write"
+    kept = sorted(p.name for p in on_drive(a).parent.iterdir())
+    assert kept == [done["b"]], f"exactly one rescue exists: {kept}"
     assert code == 0, err
     assert out == b, f"the final write named {out}, the staged rescue is {b}"
     assert "另存" in err, err
     assert not on_drive(a).exists(), "the deleted one is not pushed back"
     assert on_drive(b).joinpath("session.md").is_file(), "the adopted rescue went up"
+
+
+# --- the staged rescue's own rules (review L1, L2) ----------------------------------
+
+def _record(a: str, source_id: str = "ses_a") -> dict:
+    """The pending record a continue of A would hold."""
+    return {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+            "agent_session_id": source_id, "parent": {"id": a, "raw_md5": None}}
+
+
+def _stage_rescue(a: str, *, new_id: str | None = None, parents: list | None = None,
+                  source_id: str = "ses_a") -> str:
+    """An uploader's rescue of A as it is between `stage` and `remember`: in the outbox."""
+    ulid = a.split(":")[1]
+    hdr = copy.deepcopy(store.Index(paths()).header(ulid))
+    new = new_id or h.new_ulid()
+    hdr["id"] = f"agora:{new}"
+    agora = h.agora_of(hdr)
+    agora["relation"] = "continue"
+    agora["parents"] = [{"id": a}] if parents is None else parents
+    agora["source"] = {"agent": "opencode", "session_id": source_id}
+    agora.pop("raw", None)
+    store.stage(paths(), hdr, "ZZ 另存的話", None)
+    return new
+
+
+def test_the_newest_staged_rescue_wins(env, capsys):
+    """design P3: rescues of the same conversation are a chain, and the newest one is
+    where the work is - the same rule the index path already applies."""
+    _, a, _ = _import(capsys)
+    older, newer = sorted([h.new_ulid(), h.new_ulid()])
+    _stage_rescue(a, new_id=newer)      # newest first: "first found wins" has to be red too
+    _stage_rescue(a, new_id=older)
+
+    found = cli._staged_as(paths(), _record(a), a.split(":")[1])
+
+    assert found is not None and found[0] == newer, \
+        f"the newer staged rescue wins: {found and found[0]}"
+
+
+def test_a_staged_rescue_of_another_target_is_not_adopted(env, capsys):
+    """The three marks hold together: the same relation and source out of a *different*
+    branch of that agent session is not this target's rescue."""
+    _, a, _ = _import(capsys)
+    _stage_rescue(a, parents=[{"id": f"agora:{h.new_ulid()}"}])
+
+    found = cli._staged_as(paths(), _record(a), a.split(":")[1])
+
+    assert found is None, "parents have to name the target this run is resolving"
+
+
+def test_a_staged_rescue_set_aside_as_done_is_adopted(env, capsys):
+    """An uploader comparing the rescue has it as `.done-<ULID>` right then - or died
+    between the rename and the compare: the resolver reads it where it lies."""
+    _, a, _ = _import(capsys)
+    b = _stage_rescue(a)
+    shutil.move(str(paths().outbox / b), str(paths().outbox / f".done-{b}"))
+
+    found = cli._staged_as(paths(), _record(a), a.split(":")[1])
+
+    assert found is not None and found[0] == b
+
+
+def test_an_unreadable_outbox_entry_does_not_stop_the_staged_rescue(env, capsys):
+    """One broken entry is not the round's end (the uploader's own rule): the resolver
+    reads past it and still finds the rescue that is readable."""
+    _, a, _ = _import(capsys)
+    broken = paths().outbox / "01K6BADBADBADBADBADBADBADD"
+    broken.mkdir(parents=True)
+    (broken / "session.md").write_text("這不是一份文件", encoding="utf-8")
+    b = _stage_rescue(a)
+
+    found = cli._staged_as(paths(), _record(a), a.split(":")[1])
+
+    assert found is not None and found[0] == b, "the readable rescue is still found"
+
+
+def test_a_periodic_write_adopts_a_staged_rescue(env, capsys):
+    """`check_drive=False` must not make the staged rescue invisible: the periodic
+    round resolves the target the same way, so it does not read the work as A's."""
+    _, a, _ = _import(capsys)
+    b = _stage_rescue(a)
+    run_obj = cli._Run(paths(), _record(a))
+
+    saved, target, _note = cli._write_one(paths(), run_obj, None,
+                                          cli.load_agent("opencode"), check_drive=False)
+
+    assert saved is None, "nothing new: the adopted rescue is not written twice"
+    assert target == f"agora:{b}"
+
+
+def test_a_rescue_with_broken_parents_does_not_break_the_final_write(env, capsys):
+    """`h.validate` does not look inside `parents`, so a header can carry a non-dict
+    there: it has to read as "not this run's rescue", not as an AttributeError out of
+    the final write (review L1). A is gone, so the work still gets a rescue of its own."""
+    _, a, _ = _import(capsys)
+    broken = _stage_rescue(a, parents=[f"agora:{h.new_ulid()}"])
+    shutil.rmtree(on_drive(a))                     # A is gone from Drive
+    run_obj = cli._Run(paths(), _record(a))
+
+    saved, target, _note = cli._write_one(paths(), run_obj, None,
+                                          cli.load_agent("opencode"), check_drive=True)
+
+    assert target != f"agora:{broken}", "a malformed parents list is not adopted"
+    assert saved is not None and saved[0] == target, "the work is still rescued"
+    assert [p["id"] for p in h.agora_of(header_of(target))["parents"]] == [a]
 
 
 def test_an_offline_deletion_is_adopted_once_the_uploader_frees_it(env, capsys, monkeypatch):

@@ -804,8 +804,9 @@ def _this_runs_rescue(hdr: dict, record: dict, target_ulid: str | None = None) -
             or source.get("agent") != record.get("agent")
             or source.get("session_id") != record.get("agent_session_id")):
         return False
-    return target_ulid is None or any(p.get("id") == f"agora:{target_ulid}"
-                                      for p in agora.get("parents") or [])
+    return target_ulid is None or any(
+        isinstance(p, dict) and p.get("id") == f"agora:{target_ulid}"
+        for p in agora.get("parents") or [])
 
 
 def _saved_as(index: store.Index, record: dict, target_ulid: str) -> str | None:
