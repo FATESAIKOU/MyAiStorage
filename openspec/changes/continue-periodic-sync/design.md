@@ -22,7 +22,12 @@
 
 ### 等待迴圈放在主執行緒（P9）
 - `subprocess.run` 換成 `Popen`（`pass_fds`、`preexec_fn`、`cwd`、`env` 的 `PWD` 照舊），主執行緒 `proc.wait(timeout=間隔)`；逾時就做一次定期寫回，再繼續等。`wait(timeout)` 在 POSIX 上每 50 ms 內輪詢一次，跑幾個小時可以接受。
-- 間隔預設 300 秒。`AGORA_CONTINUE_SYNC_SECONDS` 給測試用，接受小數，下限 0.1（更小或讀不懂就用 0.1），寫進 design 的測試接縫清單。
+- 間隔由 `--sync-period <分鐘>` 決定（本人 10-10 決定）：
+  - 沒給就是 5；給 0 就不自動同步（等待迴圈退回成單純等 agent 結束，只有最後一次寫回）；
+  - 接受整數或小數（例如 0.5 是 30 秒），負數或不是數字就 `InputError`（exit 1），在開 agent 之前就擋下；
+  - 大於 0 時換算成秒，下限 0.1 秒（避免連續不停地寫回）；
+  - 測試直接用很小的小數（例如 `--sync-period 0.005`），不另設環境變數。
+  - `--fork` 也適用；其他動作給了也被忽略（和 `--dir` 一樣）。
 - **agent 還活著時，迴圈不能離開**：定期寫回吞掉 `Exception`；迴圈本身遇到其他例外時，不殺 agent，先 `proc.wait()` 等它結束再把例外丟出去（`subprocess.run` 原本會 kill 子程序，換成 Popen 之後由我們決定）。
 - SIGINT 照舊：agora 忽略、agent 用預設；定期寫回期間叫的子程序也繼承忽略，Ctrl-C 不會殺到它們。
 
@@ -73,6 +78,11 @@
   - A 不再算接續中，sync 會把 A 標成雲端沒有（它本來就是）；
   - session-sync 的「正在接續中＝`pending/<ULID>.json` 的鎖有人拿著」字面仍然成立（ULID 是目前的目標），不需要改 spec。
 - `cmd_continue` 結束時 unlink 的是目前的路徑。`recover_pending` 讀到的 record 的 `agora_id` 仍是 A，靠「寫回目標的解析」找到 B。
+
+### 互動模式：接續前確認同步間隔（本人 10-10 決定）
+- Agora 頁按 Enter 接續時，選完 agent 與工作目錄之後，多一個輸入框（沿用 `AskText`）：標題「自動同步間隔（分鐘，0 ＝ 不自動同步）」，預設值 5。
+- Enter 確認：是不小於 0 的數字就把 `--sync-period <值>` 加進 continue 的參數；不是的話留在輸入框、說明要填數字。Esc 取消整個接續。
+- 輸入框照第 1 節的按鍵規則：視窗裡 Tab／shift+tab 不動底下的畫面。
 
 ### 同一台機器上不能同時接續同一個 Session（P5）
 - `cmd_continue` 一開頭，目標 `store.continuing(target)` 為真就拒絕（exit 1，「正在接續中，等它結束」）。現在第二個接續會用 rename 蓋掉第一個的 pending，第一個結束時刪到第二個的、第二個結束時 exit 2，這是既有的 bug。

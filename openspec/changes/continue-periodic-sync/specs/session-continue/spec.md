@@ -1,7 +1,9 @@
 ## ADDED Requirements
 
 ### Requirement: 接續期間定期寫回
-`agora continue`（含 `--fork`）啟動 agent 之後，agent 執行期間 MUST 每 5 分鐘把 agent 目前的整份對話寫回接續的那個 Session，並和其他寫入一樣先存在本機、再由背景上傳到 Google Drive。
+`agora continue`（含 `--fork`）啟動 agent 之後，agent 執行期間 MUST 每隔 `--sync-period` 分鐘把 agent 目前的整份對話寫回接續的那個 Session，並和其他寫入一樣先存在本機、再由背景上傳到 Google Drive。
+
+- `--sync-period` 是一個不小於 0 的數字，單位是分鐘（可以是小數）；沒給時 MUST 是 5；是 0 時 MUST NOT 自動同步，只在 agent 結束時寫回。負數或不是數字時 MUST 在開 agent 之前就拒絕（exit 1）。
 
 - 和上一次寫回（或啟動時載入的內容）相比沒有新內容時，MUST NOT 寫。
 - agent 結束時 MUST 照原本的規則做最後一次寫回。和最後一次定期寫回相同時不必再寫，但 MUST 照樣確認那個 Session 還在；被刪了就照接續的規則另存。
@@ -11,7 +13,7 @@
 - 接續途中 Session 被刪掉時（不論是這次接續發現、還是背景上傳發現），同一段工作 MUST 只另存成一個新的 Session；之後的寫回（含最後一次與補存）MUST 寫到這個新的 Session。
 
 #### Scenario: 執行中看得到進度
-- **WHEN** 用 `agora continue` 接續 Session A，在 agent 裡持續對話，經過一次定期寫回並上傳完成
+- **WHEN** 用 `agora continue`（沒給 `--sync-period`）接續 Session A，在 agent 裡持續對話超過 5 分鐘，經過一次定期寫回並上傳完成
 - **THEN** 不等 agent 結束，A 在本機與 Drive 上就已經是包含新對話的版本
 
 #### Scenario: 沒有新內容不寫
@@ -37,6 +39,18 @@
 #### Scenario: agora 被強制結束
 - **WHEN** 定期寫回並上傳完成之後，agora 與 agent 都被強制結束
 - **THEN** Drive 上已經有那一次定期寫回的內容；下一個指令的補存寫到同一個 Session（途中另存過的話寫到另存的那個）
+
+#### Scenario: 指定間隔
+- **WHEN** `agora continue session A --agent claude --sync-period 1`
+- **THEN** 每 1 分鐘定期寫回一次
+
+#### Scenario: 不自動同步
+- **WHEN** `--sync-period 0`
+- **THEN** agent 執行期間不做任何定期寫回，結束時照原本的規則寫回
+
+#### Scenario: 不合法的間隔
+- **WHEN** `--sync-period -1` 或 `--sync-period abc`
+- **THEN** 不開 agent，exit 1，說明要給不小於 0 的分鐘數
 
 ### Requirement: 同一台機器上不能同時接續同一個 Session
 一個 Session 正在接續中（這台機器上有另一個 `agora continue` 正在寫回它）時，再對它 `agora continue`（不含 `--fork`）MUST 被拒絕（exit 1），說明它正在接續中。對它 `--fork` 不受影響。
