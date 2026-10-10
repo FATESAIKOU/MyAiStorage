@@ -527,11 +527,18 @@ def never_confirmed(paths: Paths, ulid: str) -> bool:
     (design「還沒被 Drive 確認過的 Session，寫回時不算更新既有 id」).
 
     A `.done-<ULID>` next to it means an uploader is comparing that very id right now,
-    and then we cannot tell what Drive has: no exemption. This is read before `stage`,
-    which swaps the entry for a fresh folder that never has the marker.
+    and then we cannot tell what Drive has: no exemption. `.old-<ULID>` is the entry too:
+    `stage` renames the old one aside for a moment before moving the new one in, so during
+    a swap - or after a stage that died in that window - `outbox/<ULID>` alone is not the
+    whole answer, and reading it that way brought the bug back (C11). This is read before
+    `stage`, which swaps the entry for a fresh folder that never has the marker.
     """
+    if (paths.outbox / f".done-{ulid}").exists():
+        return False                     # somebody is comparing this id right now
     folder = paths.outbox / ulid
-    if not folder.is_dir() or (paths.outbox / f".done-{ulid}").exists():
+    if not folder.is_dir():
+        folder = paths.outbox / f".old-{ulid}"
+    if not folder.is_dir():
         return False
     return not _is_update(folder)
 
