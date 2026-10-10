@@ -378,8 +378,13 @@ def oc_message(message_id: str, role: str, *, at: int, parts: list[dict],
     info: dict = {"id": message_id, "sessionID": OC_SID, "role": role,
                   "time": {"created": at}, "agent": "build"}
     if role == "user":
-        info["model"] = {"id": OC_MODEL, "providerID": OC_PROVIDER}
-        info["summary"] = {}
+        # What 1.18.35's `opencode import` insists on (measured 10-10 against the
+        # real binary): a user message carries `model: {providerID, modelID}` and
+        # `summary: {diffs: []}`. The 1.18.34-era fixture shape this builder was
+        # copied from - `model: {id, providerID}`, `summary: {}` - is refused with
+        # "Missing key". native() already writes both; a hand-made session has to.
+        info["model"] = {"providerID": OC_PROVIDER, "modelID": OC_MODEL}
+        info["summary"] = {"diffs": []}
     else:
         info.update({"parentID": parent, "mode": "build", "finish": "stop",
                      "providerID": OC_PROVIDER, "modelID": OC_MODEL, "cost": 0,
@@ -423,9 +428,16 @@ def reverted_export() -> dict:
                 {"id": named, "sessionID": OC_SID, "messageID": msg2, "type": "tool",
                  "callID": f"call_{OC_SID}b2", "tool": "read",
                  "time": {"start": base + 1300, "end": base + 1400},
+                 # 1.18.35's import schema (measured): a tool part's state needs
+                 # title, metadata and time - the 1.18.34 shape had none of them.
+                 # The values are self-made; import checks their presence, and a
+                 # real 1.18.35 export carries the same three keys.
                  "state": {"status": "completed",
                            "input": {"filePath": f"/tmp/agora-it-fork/{TOOL_MARK} 步驟.md"},
-                           "output": "ZZTOOLOUT 三個步驟"}}]),
+                           "output": "ZZTOOLOUT 三個步驟",
+                           "title": f"read {TOOL_MARK} 步驟.md",
+                           "metadata": {},
+                           "time": {"start": base + 1300, "end": base + 1400}}}]),
             oc_message(msg3, "user", at=base + 2000,
                        parts=[text_part(f"prt_{OC_SID}c1", msg3,
                                         f"{UNDONE_MARK} 這一句會被 undo 掉。")]),
