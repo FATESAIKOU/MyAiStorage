@@ -257,9 +257,18 @@ def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None, *,
     else:
         header.setdefault("agora", {}).pop("raw", None)
     if folder.is_dir():
-        for p in folder.glob("raw-*"):
-            if not (tmp / p.name).exists():
-                shutil.copyfile(p, tmp / p.name)
+        # The raw the entry being replaced names comes along, and only that one: an
+        # uploader may have built its list from that entry a moment ago, and rclone
+        # reading it after this swap would otherwise stop the whole batch on
+        # `source not found` (review T2). Older raws stay behind - nobody's list names
+        # them any more, and carrying every version made each round's entry one raw
+        # bigger and each pass send them all again (review N1).
+        previous = _named_raw(folder)
+        if previous and not (tmp / previous).exists():
+            try:
+                shutil.copyfile(folder / previous, tmp / previous)
+            except OSError:
+                pass                    # claimed by an uploader meanwhile: nothing to keep
     _write_file(tmp / "session.md", h.dump_document(header, body).encode("utf-8"))
     if update:
         mark_update(tmp, kind)          # into the folder that is about to go in, not the one that is there
@@ -640,7 +649,11 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         #「.update 而 Drive 沒有」again - and Y goes up in this one (V1).
         left.extend(u for u in gone if (paths.outbox / u).is_dir())
 
-    raws = [f"{u}/{n}" for u in entries for n in _raw_names(paths.outbox / u)]
+    # The raw each entry names, as read with its md5s - not every raw-* in the
+    # folder: the one `stage` carried over from the previous version is only there
+    # for a list built before the swap, and sending it again is what made each pass
+    # grow (review N1).
+    raws = [f"{u}/{name}" for u, (_, name, _) in entries.items() if name]
     raws = [r for r in raws if (paths.outbox / r).is_file()]
     if raws:
         try:
@@ -798,8 +811,16 @@ def _replaced_raws(folder: Path, keep: str | None, remote_files: dict) -> list[s
             if n.startswith("raw-") and n != keep]
 
 
-def _raw_names(folder: Path) -> list[str]:
-    return sorted(p.name for p in folder.glob("raw-*"))
+def _named_raw(folder: Path) -> str | None:
+    """The raw this entry's session.md points at, or None (no entry, no raw, unreadable).
+
+    An entry may also hold the raw of the version it replaced (`stage` keeps that one
+    for an uploader that listed it a moment ago); this is the one that belongs to it.
+    """
+    try:
+        return (h.agora_of(read_entry(folder)).get("raw") or {}).get("file")
+    except h.HeaderError:
+        return None
 
 
 def _put_back(done: Path, folder: Path) -> None:

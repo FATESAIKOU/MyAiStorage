@@ -794,3 +794,82 @@ def test_a_set_aside_version_that_cannot_be_put_back_is_kept(env, monkeypatch):
     store._put_back(done, paths.outbox / ulid)
     assert (done / "session.md").is_file()
     assert ulid in store.waiting_ulids(paths)
+
+
+# --- N1: the entry does not grow ---------------------------------------------------
+
+
+def _entry_raw(paths, ulid: str) -> str:
+    return h.agora_of(store.read_entry(paths.outbox / ulid))["raw"]["file"]
+
+
+def test_an_entry_staged_round_after_round_keeps_at_most_two_raws(env):
+    """N1: five rounds while nothing gets through (the arch probe counted 1, 2, 3,
+    4): the entry holds its own raw and the one before it, never the whole history."""
+    paths = store.Paths.from_env()
+    hdr = _header()
+    folder = None
+    names = []
+    for i in range(5):
+        folder = store.stage(paths, hdr, f"## user\n第 {i} 輪\n", f'{{"round": {i}}}'.encode(),
+                             update=True, kind="continue")
+        names.append(_entry_raw(paths, folder.name))
+
+    kept = sorted(p.name for p in folder.glob("raw-*"))
+    assert kept == sorted(names[-2:]), kept
+    assert store._is_update(folder), "the marker still goes in with the swap"
+
+
+def test_a_pass_sends_only_the_raw_the_entry_names(env, monkeypatch):
+    """N1: the carried-over raw is for a list built before the swap - it is not sent
+    again, and Drive ends with the one raw session.md points at."""
+    paths = store.Paths.from_env()
+    hdr = _header()
+    store.stage(paths, hdr, "## user\n第一版\n", b'{"v": 1}')
+    folder = store.stage(paths, hdr, "## user\n第二版\n", b'{"v": 2}')
+    ulid = folder.name
+    named = _entry_raw(paths, ulid)
+    assert len(list(folder.glob("raw-*"))) == 2, "the previous raw came along"
+    batches = _record_batches(monkeypatch)
+
+    assert store.upload_batch(store.Drive(paths), paths) == []
+
+    raws = [names for cmd, names in batches if cmd == "copy" and any("/raw-" in n for n in names)]
+    assert raws == [[f"{ulid}/{named}"]], batches
+    on_drive = sorted(p.name for p in (env / "agora" / "sessions" / ulid).iterdir())
+    assert on_drive == sorted([named, "session.md"])
+
+
+def test_a_stage_between_the_list_and_the_raw_copy_does_not_stop_the_batch(env, monkeypatch):
+    """T2 (review R3): the list names the raw of the version read at the start; a round
+    staging the next version before rclone reads it must not turn into `source not
+    found` and a round with no session.md at all."""
+    paths = store.Paths.from_env()
+    hdr = _header()
+    folder = store.stage(paths, hdr, "## user\n第一版\n", b'{"v": 1}')
+    first_raw = _entry_raw(paths, folder.name)
+    real_copy = store._copy_batch
+    staged = {"done": False}
+
+    def stage_then_copy(drive, paths_, names):
+        if not staged["done"] and any("/raw-" in n for n in names):
+            staged["done"] = True
+            store.stage(paths_, hdr, "## user\n第二版\n", b'{"v": 2}')   # the next round
+        return real_copy(drive, paths_, names)
+
+    monkeypatch.setattr(store, "_copy_batch", stage_then_copy)
+    said: list[str] = []
+
+    left = store.upload_batch(store.Drive(paths), paths, warn=said.append)
+
+    assert staged["done"]
+    assert not any("原始檔沒傳好" in s for s in said), said
+    assert (env / "agora" / "sessions" / folder.name / first_raw).is_file()
+    # the version this round read is not the one in the folder any more, so it stays
+    # until a round confirms what it read
+    assert left == [folder.name]
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    doc = (env / "agora" / "sessions" / folder.name / "session.md").read_text(encoding="utf-8")
+    assert "第二版" in doc
+    raw = h.agora_of(h.split_document(doc)[0])["raw"]["file"]
+    assert (env / "agora" / "sessions" / folder.name / raw).is_file()
