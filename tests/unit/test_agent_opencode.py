@@ -17,6 +17,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -632,13 +633,14 @@ def test_append_native_links_the_first_assistant_onto_a(fake):
     assert after[-1]["info"]["parentID"] == after[-2]["info"]["id"]
 
 
-def test_append_native_hangs_a_leading_assistant_turn_onto_a(fake):
+def test_append_native_hangs_a_leading_assistant_turn_onto_the_question(fake):
     """The caller sends user first, but an assistant turn that comes first still has
-    to point at A's last message - a null parentID is a payload opencode refuses."""
+    to point at a message of A - a null parentID is a payload opencode refuses - and
+    the one it answers is A's last question, not whatever line happens to be last."""
     after = json.loads(oc.ADAPTER.append_native(
         unreverted(), [("assistant", ["ZZFORK 直接回覆"])]))["messages"]
-    assert after[-1]["info"]["parentID"] == after[-2]["info"]["id"]
-    assert after[-2]["info"]["id"] == "msg_ZZSRCID0000000000000004"
+    assert after[-1]["info"]["parentID"] == "msg_ZZSRCID0000000000000003"   # the last user
+    assert after[-1]["info"]["parentID"] != after[-2]["info"]["id"]
 
 
 def test_append_native_picks_ids_a_session_of_its_own_cannot_have(fake, workdir):
@@ -740,6 +742,118 @@ def test_append_native_stands_in_for_an_unanswered_question(fake):
     assert oc.ADAPTER.turns(raw_bytes)[-1][0] == "user"
     assert oc.ADAPTER.turns(oc.ADAPTER.append_native(raw_bytes, FORK)) == \
         oc.ADAPTER.turns(raw_bytes) + [("assistant", [base.NO_REPLY])] + FORK
+
+
+def aborted() -> bytes:
+    """oc-basic as it looks after the user pressed Esc: their last question, and the
+    assistant turn that never answered it - an `error`, and nothing but a step
+    marker. The answer that came before it is gone, because that is the shape this is
+    about: the aborted turn is the *last* message."""
+    payload = json.loads(unreverted())
+    del payload["messages"][-1]            # the answered assistant
+    payload["messages"].append({
+        "info": {"id": "msg_ZZABORTED0000000000000", "sessionID": "ses_ZZSRCID0000000000000000AA",
+                 "role": "assistant", "parentID": "msg_ZZSRCID0000000000000003",
+                 "time": {"created": 1790214300000},
+                 "error": {"name": "AbortedError", "data": {"message": "ZZ 中斷了"}}},
+        "parts": [{"id": "prt_ZZABORTED0000000000000", "sessionID": "ses_ZZSRCID0000000000000000AA",
+                   "messageID": "msg_ZZABORTED0000000000000", "type": "step-start",
+                   "snapshot": "0f1e2d3"}]})
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def test_append_native_stands_in_for_a_question_an_abort_left_open(fake):
+    """The reading version drops the aborted assistant (it has no lines), so A's last
+    turn is still the user's question. Deciding on the last *message* instead would
+    see an assistant and write nothing - and the reading version of the fork would
+    then run the user's question straight into the fork note, one turn."""
+    raw_bytes = aborted()
+    # turns() still lists the aborted assistant (it is a message); the reading
+    # version is merge_turns over those, and it drops a turn with no lines
+    assert base.merge_turns(oc.ADAPTER.turns(raw_bytes))[-1][0] == "user"
+    out = oc.ADAPTER.append_native(raw_bytes, FORK)
+    assert oc.ADAPTER.turns(out) == \
+        oc.ADAPTER.turns(raw_bytes) + [("assistant", [base.NO_REPLY])] + FORK
+    reading = base.format_reading(oc.ADAPTER.turns(out))
+    assert reading.index(base.NO_REPLY) < reading.index(FORK[0][1][0])
+    assert reading.index("第二步裡的引號欄位") < reading.index(base.NO_REPLY)
+
+
+def test_that_stand_in_reply_answers_the_question_not_the_abort(fake):
+    """The assistant it hangs off is the user's last message: the line after it is the
+    aborted assistant, which nothing should carry on from."""
+    messages = json.loads(oc.ADAPTER.append_native(aborted(), FORK))["messages"]
+    added = messages[-3:]
+    assert [m["info"]["role"] for m in added] == ["assistant", "user", "assistant"]
+    assert added[0]["info"]["parentID"] == "msg_ZZSRCID0000000000000003"
+    assert added[0]["info"]["parentID"] != "msg_ZZABORTED0000000000000"
+    assert added[2]["info"]["parentID"] == added[1]["info"]["id"]
+
+
+def test_append_native_copies_the_mode_a_was_in(fake):
+    """`agent: plan` with `mode: build` is a shape opencode has no reason to be
+    handed: the mode says how the assistant ran, and the fork's reply runs the same
+    way A's last one did."""
+    payload = json.loads(unreverted())
+    for message in payload["messages"]:
+        if message["info"]["role"] == "assistant":
+            message["info"]["agent"] = message["info"]["mode"] = "plan"
+    after = json.loads(oc.ADAPTER.append_native(
+        json.dumps(payload).encode(), FORK))["messages"]
+    assert after[-1]["info"]["mode"] == "plan" and after[-1]["info"]["agent"] == "plan"
+
+
+def test_the_mode_falls_back_to_the_agent_a_used(fake):
+    """Not every session carries `mode` on its assistant messages. What the agent
+    name says is the better guess than a hardcoded build."""
+    payload = json.loads(unreverted())
+    for message in payload["messages"]:
+        if message["info"]["role"] == "assistant":
+            message["info"]["agent"] = "plan"
+            message["info"].pop("mode", None)
+    after = json.loads(oc.ADAPTER.append_native(
+        json.dumps(payload).encode(), FORK))["messages"]
+    assert after[-1]["info"]["mode"] == "plan"
+
+
+def test_append_native_copies_the_last_user_s_model_not_the_first(fake):
+    """The two user turns of the fixture share a model, so a copy taken from the first
+    one would look right; sessions where the user switched models are the case that
+    matters."""
+    payload = json.loads(unreverted())
+    users = [m for m in payload["messages"] if m["info"]["role"] == "user"]
+    users[0]["info"]["model"] = {"id": "zz-old-model", "providerID": "other"}
+    users[-1]["info"]["model"] = {"id": "zz-new-model", "providerID": "other"}
+    after = json.loads(oc.ADAPTER.append_native(
+        json.dumps(payload).encode(), FORK))["messages"]
+    assert after[-2]["info"]["model"] == {"id": "zz-new-model", "providerID": "other"}
+
+
+def test_append_native_copies_the_model_of_the_messages_that_survived_the_undo(fake):
+    """With a revert, the last assistant is not the one the export ends with - it is
+    the last one left after the undo, and that is whose model the fork copies."""
+    payload = json.loads(raw())
+    assert payload["messages"][-1]["info"]["modelID"] == "muse-spark-1.3-contributor-free"
+    payload["messages"][-1]["info"]["modelID"] = "zz-undone-model"
+    after = json.loads(oc.ADAPTER.append_native(json.dumps(payload).encode(), FORK))
+    appended = after["messages"][-1]["info"]
+    assert appended["modelID"] == "space-bunny-free"        # the surviving assistant
+    assert oc._last_model(after) == "space-bunny-free"
+
+
+def test_append_native_comes_after_a_session_dated_in_the_future(fake):
+    """Another machine's clock runs fast, or a session was imported from one that
+    does: opencode orders messages by time.created, so the fork's turns land before A
+    and are read before it."""
+    payload = json.loads(unreverted())
+    tomorrow = int(time.time() * 1000) + 24 * 3600 * 1000
+    for n, message in enumerate(payload["messages"]):
+        message["info"].setdefault("time", {})["created"] = tomorrow + n
+    raw_bytes = json.dumps(payload).encode()
+    after = json.loads(oc.ADAPTER.append_native(raw_bytes, FORK))["messages"]
+    times = [m["info"]["time"]["created"] for m in after]
+    assert times[-2:] == sorted(times[-2:])
+    assert min(times[-2:]) > max(m["info"]["time"]["created"] for m in after[:-2])
 
 
 def test_append_native_of_an_undo_point_that_is_not_there_only_clears_it(fake):

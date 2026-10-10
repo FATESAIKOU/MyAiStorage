@@ -448,6 +448,87 @@ def test_append_native_leaves_a_answered_tool_use_alone(claude_env):
     assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == C.ADAPTER.turns(raw) + FORK
 
 
+def test_append_native_stands_in_when_only_the_first_of_two_tools_came_back(claude_env):
+    """Claude writes a line per content block, so a turn that calls two tools is two
+    lines and the line after them can hold the *first* call's result. The unfinished
+    one is still a question, and looking only at the last line would miss it."""
+    raw = C._pack_raw([
+        '{"type": "user", "sessionId": "s", "uuid": "u2", "parentUuid": null,'
+        ' "isSidechain": false, "message": {"role": "user", "content": "ZZ 兩件事"}}',
+        '{"type": "assistant", "sessionId": "s", "uuid": "u3", "parentUuid": "u2",'
+        ' "isSidechain": false, "message": {"role": "assistant", "content": ['
+        '{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}},'
+        '{"type": "tool_use", "id": "toolu_2", "name": "Bash", "input": {"command": "cat"}}]}}',
+        '{"type": "user", "sessionId": "s", "uuid": "u4", "parentUuid": "u3",'
+        ' "isSidechain": false, "message": {"role": "user", "content": ['
+        '{"type": "tool_result", "tool_use_id": "toolu_1", "content": "a.csv"}]}}',
+    ], {})
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == \
+        C.ADAPTER.turns(raw) + [("assistant", [base.NO_REPLY])] + FORK
+
+
+def test_append_native_leaves_both_tools_answered(claude_env):
+    """The other half of the pair: two calls, two results, nothing outstanding."""
+    raw = C._pack_raw([
+        '{"type": "user", "sessionId": "s", "uuid": "u2", "parentUuid": null,'
+        ' "isSidechain": false, "message": {"role": "user", "content": "ZZ 兩件事"}}',
+        '{"type": "assistant", "sessionId": "s", "uuid": "u3", "parentUuid": "u2",'
+        ' "isSidechain": false, "message": {"role": "assistant", "content": ['
+        '{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}},'
+        '{"type": "tool_use", "id": "toolu_2", "name": "Bash", "input": {"command": "cat"}}]}}',
+        '{"type": "user", "sessionId": "s", "uuid": "u4", "parentUuid": "u3",'
+        ' "isSidechain": false, "message": {"role": "user", "content": ['
+        '{"type": "tool_result", "tool_use_id": "toolu_1", "content": "a.csv"},'
+        '{"type": "tool_result", "tool_use_id": "toolu_2", "content": "x"}]}}',
+    ], {})
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == C.ADAPTER.turns(raw) + FORK
+
+
+def test_an_old_unanswered_tool_call_is_not_this_session_s_business(claude_env):
+    """The collection starts at the last turn that said something: a tool_use from
+    three exchanges ago has not been answered, but the conversation moved on since,
+    and the fork is not standing in for it."""
+    raw = tool_raw(answered=False)
+    raw = C._pack_raw(main_lines(raw) + [
+        json.dumps({"type": "user", "sessionId": "s", "uuid": "u5", "parentUuid": "u4",
+                    "isSidechain": False, "message": {"role": "user", "content": "ZZ 換個話題"}},
+                   ensure_ascii=False),
+        json.dumps({"type": "assistant", "sessionId": "s", "uuid": "u6", "parentUuid": "u5",
+                    "isSidechain": False, "message": {"role": "assistant", "content": [
+                        {"type": "text", "text": "ZZ 好啊"}]}}, ensure_ascii=False),
+    ], {})
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == C.ADAPTER.turns(raw) + FORK
+
+
+def test_append_native_ignores_a_line_type_it_does_not_know(claude_env):
+    """A real session file ends with bookkeeping this version has never heard of
+    (`progress`, `custom-title`). `_turns` calls those `[skip …]`, and the cross-agent
+    path drops them before deciding - so a fork must not read them as the user asking
+    something again after the agent already answered."""
+    raw = repacked(C.ADAPTER.export(SID).raw, [], drop="b4444444-2222-4333-8444-555555555555")
+    raw = C._pack_raw(main_lines(raw) + [
+        '{"type": "progress", "sessionId": "s", "uuid": "p1", "parentUuid": "u9"}',
+        '{"type": "custom-title", "sessionId": "s", "title": "ZZ"}',
+    ], {})
+    assert ("user", ["[skip progress]"]) in C.ADAPTER.turns(raw)
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == C.ADAPTER.turns(raw) + FORK
+
+
+def test_append_native_stands_in_when_the_last_turn_only_thought_about_it(claude_env):
+    """A run cut short mid-thought leaves an assistant line with a thinking block and
+    nothing else. The reading version has no such turn, so the user's question is the
+    last one - and the fork's first line must not be read as its answer."""
+    raw = C._pack_raw([
+        '{"type": "user", "sessionId": "s", "uuid": "u2", "parentUuid": null,'
+        ' "isSidechain": false, "message": {"role": "user", "content": "ZZ 繼續"}}',
+        '{"type": "assistant", "sessionId": "s", "uuid": "u3", "parentUuid": "u2",'
+        ' "isSidechain": false, "message": {"role": "assistant", "content": ['
+        '{"type": "thinking", "thinking": "ZZ 想到一半"}]}}',
+    ], {})
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == \
+        C.ADAPTER.turns(raw) + [("assistant", [base.NO_REPLY])] + FORK
+
+
 def test_append_native_changes_nothing_a_wrote(claude_env):
     """Not one byte of A's lines: they are carried over as the strings they are,
     not re-encoded, and the sidecar is handed on untouched (the new session gets its

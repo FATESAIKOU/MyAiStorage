@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 from agora.agents.base import (AgentError, Exported, Launch, Listed, NO_REPLY, Turns, agent_cmd,
-                               iso_utc, summarize_timeout, tool_line, warn)
+                               iso_utc, merge_turns, summarize_timeout, tool_line, warn)
 from agora.store import normalize
 
 FORMAT = "claude-jsonl/1"
@@ -472,31 +472,74 @@ def _tool_result_id(block: object) -> str | None:
 def _asked_without_an_answer(objs: list[dict]) -> bool:
     """Whether the session ends on a question nobody answered (design 5.4 W1).
 
-    Two ways that happens: the reading version's last turn is a user turn with no
-    reply after it, or the conversation stopped on an assistant `tool_use` whose
-    `tool_result` never came because the run was killed mid-tool. Either way the
-    next thing said lands on top of that question and reads as its answer, so
-    `append_native` writes a stand-in reply first.
+    One rule, the same one `cli._converted_turns` uses for another agent's session:
+    take the reading version's turns, drop the `[skip …]` lines, and look at what is
+    last. A user turn last means the question is still open, and the fork's first
+    line would land on it and read as its answer.
 
-    Decided on the reading version's own turns, so it agrees with what `turns()`
-    hands the caller: a tool_result line or a local command says nothing and does
-    not count as the turn before the end.
+    Deciding it on the reading version rather than on the last line is what keeps the
+    two adapters and the cross-agent path agreeing. Three shapes the reading version
+    has already collapsed, all of which mean the same thing here:
+
+    - a line type `turns()` does not know becomes `[skip widget]` - the bookkeeping
+      a real session file ends with (`progress`, `custom-title`) lands this way, and
+      it is not the user speaking again;
+    - a user line that only carries tool results says nothing, so an assistant that
+      answered is still the last thing said;
+    - an assistant line with only a thinking block is dropped entirely, so a run that
+      was cut short mid-thought leaves the user's question as the last turn.
+
+    The other shape is a `tool_use` that never got its `tool_result` (F4). Parallel
+    calls are why that looks further back than one line: claude writes a line per
+    content block, so a turn that calls two tools is two lines, and the line after
+    the last one may hold the result of the *first* call. So every `tool_use` from
+    the last turn that said something on is collected, and the ones with a matching
+    `tool_result` are taken back out.
+
+    What goes in is a stand-in reply, not a `tool_result`: an unpaired `tool_use` is
+    something the API may refuse outright, and what settles that is what a real
+    `claude --resume` does with it (tasks 1.7).
     """
-    turns = _turns(objs)
-    if turns and turns[-1][0] == "user":
+    said = merge_turns([(role, [line for line in lines if not line.startswith("[skip ")])
+                        for role, lines in _turns(objs)])
+    if said and said[-1][0] == "user":
         return True
-    answered = {_tool_result_id(block)
-                for o in objs
-                if isinstance(message := o.get("message"), dict)
-                and isinstance(content := message.get("content"), list)
-                for block in content}
-    for o in reversed(objs):
-        if o.get("type") != "assistant" or _is_noise(o) or _assistant_lines(o) is None:
-            continue                     # noise and thinking-only lines are not turns
-        content = (o.get("message") or {}).get("content")
-        return any(_tool_use_id(block) is not None and _tool_use_id(block) not in answered
-                   for block in content if isinstance(content, list))
-    return False
+    return _left_a_tool_waiting(objs)
+
+
+def _left_a_tool_waiting(objs: list[dict]) -> bool:
+    """Whether the last exchange asked for a tool call that never came back.
+
+    Only the last exchange: an unanswered `tool_use` from three exchanges ago is not
+    something the fork has to answer - the conversation has moved on since.
+    """
+    answered = set()
+    asked = set()
+    for o in _from_the_last_question(objs):
+        message = o.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in content if isinstance(content, list) else []:
+            if _tool_result_id(block) is not None:
+                answered.add(_tool_result_id(block))
+            elif _tool_use_id(block) is not None:
+                asked.add(_tool_use_id(block))
+    return bool(asked - answered)
+
+
+def _from_the_last_question(objs: list[dict]) -> list[dict]:
+    """The lines from the last turn that said something on - the whole file when
+    there is none. "Said" is the reading version's own word for it: text or a tool
+    call, not a `[skip …]` line, not noise, not a tool result with no words."""
+    def said(o: dict) -> bool:
+        lines = _user_lines(o) if o.get("type") == "user" else _assistant_lines(o)
+        return bool(lines) and any(not line.startswith("[skip ") for line in lines)
+
+    start = 0
+    for index in reversed(range(len(objs))):
+        if objs[index].get("type") in ("user", "assistant") and said(objs[index]):
+            start = index
+            break
+    return objs[start:]
 
 
 class ClaudeAgent:

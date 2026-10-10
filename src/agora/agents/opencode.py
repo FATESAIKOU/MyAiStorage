@@ -2,11 +2,14 @@
 
     import session --agent opencode -> export()
     continue: the CLI hands over raws -> turns() / native() -> start_native()
+    continue --fork: the CLI hands over A's own raw + two turns -> append_native()
 
-Two directions only (design v5): `turns` splits this format into the shared
-`[(role, lines)]`, and `native` builds this format back from them, so a merged
-or other-agent session still opens with its history on screen. The reading
-version is `base.reading(agent, raw)` — this module has nothing for it.
+Three directions (design v5, plus F4): `turns` splits this format into the shared
+`[(role, lines)]`; `native` builds this format back from them, so a merged or
+other-agent session still opens with its history on screen; `append_native` adds
+turns to a session *in this format* - a same-agent fork, where A's session is loaded
+as it is and a rebuild would lose every tool call. The reading version is
+`base.reading(agent, raw)` — this module has nothing for it.
 
 Loading a session means writing a new one: re-identify every id, `opencode
 import` in the target directory, then `opencode --session <new id>`. Five things
@@ -42,7 +45,7 @@ import time
 from agora.store import normalize
 
 from .base import (AgentError, Exported, Launch, Listed, NO_REPLY, Turns, agent_cmd, env_seconds,
-                   iso_utc, summarize_timeout, tool_line, warn)
+                   iso_utc, merge_turns, summarize_timeout, tool_line, warn)
 
 # Id layout. Fixed width: a truncated ordinal is what made phase 1 import eight
 # messages and get one, silently.
@@ -364,11 +367,14 @@ def _iso(ms: int | None) -> str | None:
 def _apply_revert(payload: dict) -> None:
     """Apply `info.revert` and clear it: what opencode does before its next prompt.
 
-    Read off the 1.18.34 binary (`SessionRevert.cleanup`): the messages from
-    `messageID` on are dropped - from the one *after* it when there is a `partID`,
-    which is then the last part that stays of its own message - and the pointer is
-    cleared afterwards. A `messageID` that is not in the export removes nothing;
-    only the pointer goes.
+    Read off the 1.18.34 binary (`SessionRevert.cleanup`), which does this in that
+    order: the messages from `messageID` on are dropped - from the one *after* it
+    when there is a `partID` - then, when there is a `partID`, that message's own
+    parts are cut at it, so the part it names goes too and only what came before it
+    stays; then the pointer is cleared. A `messageID` that is not in the export
+    removes nothing; only the pointer goes. **tasks 1.7** is to confirm this against
+    a real session, and to change this function if the real thing differs - the
+    wording here and the code below are kept in step on purpose.
 
     Why the fork's copy has to have it applied before anything is added (F4): while
     the pointer is there opencode hides everything after it, and the first thing the
@@ -398,14 +404,17 @@ def _apply_revert(payload: dict) -> None:
 
 
 def _role_fields(payload: dict) -> dict[str, dict]:
-    """Per role, the fields a new message of that role has to copy: `agent` and the
-    model. A user message nests the model (`model`), an assistant message carries it
-    beside the message (`providerID` / `modelID`) - that split is opencode's, so each
-    role reads its own shape off its own last message (F4).
+    """Per role, the fields a new message of that role has to copy: `agent`, the
+    model, and (for an assistant) the mode it ran in. A user message nests the model
+    (`model`), an assistant message carries it beside the message (`providerID` /
+    `modelID`) - that split is opencode's, so each role reads its own shape off its
+    own last message (F4).
 
     Without this the fork's assistant answers with an empty model: `_last_model()`
     stops at the last assistant message, so the Session would record no model at all,
-    and opencode could come back on a model this session never used.
+    and opencode could come back on a model this session never used. `mode` comes
+    along for the same reason: an assistant that says `agent: plan` and `mode: build`
+    is a shape opencode has no reason to have been given.
     """
     fields: dict[str, dict] = {"user": {}, "assistant": {}}
     for message in reversed(_payload_messages(payload)):
@@ -416,8 +425,9 @@ def _role_fields(payload: dict) -> dict[str, dict]:
         if role not in fields or fields[role]:
             continue
         picked = fields[role]
-        if isinstance(info.get("agent"), str) and info["agent"]:
-            picked["agent"] = info["agent"]
+        for key in ("agent", "mode"):
+            if isinstance(info.get(key), str) and info[key]:
+                picked[key] = info[key]
         if role == "user":
             model = info.get("model")
             if isinstance(model, dict):
@@ -710,8 +720,13 @@ class OpencodeAgent:
         version and loses every tool call. So this is A's payload, copied, with the
         undo pointer applied first (so the fork does not inherit a tail opencode
         would hide and then delete) and the turns appended as ordinary messages -
-        chained to A's last one, carrying the model A was using, and visible plain
-        text like everything else `native()` writes.
+        chained to A's last one, carrying the model and mode A was using, and visible
+        plain text like everything else `native()` writes.
+
+        The one place this is not `raw` plus `turns`: applying the undo *removes*
+        messages, so for a session the user undid something in, the result reads as
+        that session as the user sees it now - the undone exchange is not in the
+        fork, and neither is it in A (design「接在原生 raw 後面」).
         """
         payload = self._read(raw)
         _apply_revert(payload)
@@ -720,12 +735,22 @@ class OpencodeAgent:
                 if role in ("user", "assistant") and any(line.strip() for line in lines)]
         said = [m for m in messages
                 if (m.get("info") or {}).get("role") in ("user", "assistant")]
-        if body and said and (said[-1].get("info") or {}).get("role") == "user":
-            body.insert(0, ("assistant", [NO_REPLY]))   # W1: A's last question stays unanswered
+        last_question = next((m for m in reversed(said)
+                              if (m.get("info") or {}).get("role") == "user"), None)
+        # W1, on the same rule the claude adapter and cli._converted_turns use: what
+        # the reading version is about to show. Not the last message - an interrupted
+        # run or a provider error leaves an assistant with nothing in it (only
+        # step-start), which turns() drops, and the turn before it is still the user's
+        # open question. Decided on the message role the fork note would be glued to.
+        spoken = merge_turns(self.turns(json.dumps(payload, ensure_ascii=False).encode("utf-8")))
+        if body and spoken and spoken[-1][0] == "user":
+            body.insert(0, ("assistant", [NO_REPLY]))
         fields = _role_fields(payload)
         session_id = str((payload.get("info") or {}).get("id") or PLACEHOLDER_ID)
         stem = _unused_stem(messages)
-        previous = str((said[-1].get("info") or {}).get("id") or "") if said else ""
+        # the stand-in answers the question, so it hangs off that message: the one
+        # before it may be the empty assistant, which nothing should continue
+        previous = str((last_question or {}).get("info", {}).get("id") or "") if last_question else ""
         first = max(int(time.time() * 1000),
                     1 + max((_created_ms(m.get("info") or {}) for m in messages), default=0))
         for position, (role, lines) in enumerate(body):
@@ -738,7 +763,9 @@ class OpencodeAgent:
             if role == "assistant":
                 # the same fields native() writes, which import insists on (each one
                 # missing is "Missing key at [...]" and the payload is refused)
-                info.update({"parentID": previous, "mode": "build", "finish": "stop",
+                info.update({"parentID": previous,
+                             "mode": copied.get("mode") or copied.get("agent") or "build",
+                             "finish": "stop",
                              "providerID": copied.get("providerID", "opencode"),
                              "modelID": copied.get("modelID", ""), "cost": 0,
                              "path": {"cwd": "", "root": ""},
@@ -751,7 +778,8 @@ class OpencodeAgent:
                 {"id": f"prt_{stem}{position}-{n}", "sessionID": session_id,
                  "messageID": message_id, "type": "text", "text": line}
                 for n, line in enumerate(lines)]})
-            previous = message_id
+            if role == "user":
+                previous = message_id
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     def list_sessions(self) -> list[Listed]:
