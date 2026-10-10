@@ -480,11 +480,11 @@ def test_a_launch_that_does_not_match_what_was_loaded_saves_nothing(env, capsys,
     assert _session_ids() == [a]
 
 
-def test_verified_is_not_copied_into_the_fork(env, capsys):
-    """design 3.4 says `verified` is never filled in automatically. A is the user's own
-    decision, so copying it would be agora deciding for the fork (F6). The list is a
-    constant so the person's answer only has to change that one line."""
-    assert "verified" in cli.FORK_DROP_KEYS
+def test_verified_is_copied_into_the_fork(env, capsys):
+    """The person's own 10-10 call: a fork is the same work under a new id, so B keeps
+    A's `verified` instead of silently dropping it (only a merge's auto-filled `status`
+    is still dropped)."""
+    assert "verified" not in cli.FORK_DROP_KEYS
     _, a, _ = _import(capsys, "--header", "title=實驗")
     hdr = header_of(a)
     hdr["verified"] = ["human:fatesaikou"]
@@ -495,7 +495,7 @@ def test_verified_is_not_copied_into_the_fork(env, capsys):
     _, b, _ = _fork(capsys, a)
 
     assert header_of(a)["verified"] == ["human:fatesaikou"], "A still says so"
-    assert "verified" not in header_of(b)
+    assert header_of(b)["verified"] == ["human:fatesaikou"], "and so does B"
     assert f"從 {a}（title: 實驗" in env.sessions[env.launched[-1].agent_session_id][-3], \
         "and the note does not mention it either"
 

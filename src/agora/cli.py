@@ -871,11 +871,12 @@ MERGE_NOTE = ("（以下是由 {by} 自動寫成的 merge 要約與來源清單�
 MERGE_READY = "（讀完了要約與來源清單，等你的指示。）"
 FORK_NOTE = "從 {id}（{header}）fork"
 FORK_READY = "（知道了：這是從上面那個 Session 分出來的新 Session，原本那個不會被改動。等你的指示。）"
-# The user's header is copied; these are not (design「header」). `verified` is the person's
-# call: design 3.4 says it is never filled in automatically, and copying it would fill it
-# in for the fork. `status` only when A is a merge, whose `draft` the merge put there itself
-# - the same rule as continuing a merge (5.4).
-FORK_DROP_KEYS = ("verified",)
+# The user's header is copied; these are not (design「header」). `verified` is copied
+# as it is (the person's own 10-10 call): a fork is the same work under a new id, and
+# dropping it would silently un-verify what was verified. `status` only when A is a
+# merge, whose `draft` the merge put there itself - the same rule as continuing a
+# merge (5.4).
+FORK_DROP_KEYS = ()
 FORK_DROP_KEYS_MERGE = ("status",)
 FORK_NOTE_FIELDS = ("title", "description", "case", "tags", "refs")
 
