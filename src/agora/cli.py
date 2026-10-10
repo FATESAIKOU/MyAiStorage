@@ -706,6 +706,7 @@ class _Run:
         self.wrote = False            # anything staged at all, this whole run
         self.target = record["agora_id"]
         self.first_note: str | None = None    # the first move's explanation, for the summary
+        self.logger = None
 
 
 class _LogWriter:
@@ -863,7 +864,7 @@ def _follow(run: "_Run", target_id: str, *, note: bool = True) -> str | None:
     frm, run.target = run.target, target_id
     if run.pending is not None:
         run.pending = _move_pending(run.pending, run.lock, run.record, target_id)
-    if hasattr(run, "logger") and run.logger is not None:
+    if run.logger is not None:
         run.logger.tag = run.target
     if not note or run.first_note is not None:
         return None
@@ -1149,22 +1150,21 @@ def _wait_target_settled(paths: store.Paths, run: "_Run", timeout: float = 15.0)
     if not store.uploader_is_running(paths):
         from agora import background
         background.start(paths)
+    idx = store.Index(paths)
     deadline = time.monotonic() + timeout
     saw_running = store.uploader_is_running(paths)
     start_time = time.monotonic()
     while time.monotonic() < deadline:
-        idx = store.Index(paths)
-        rescue = _saved_as(idx, run.record, ulid) or _staged_as(paths, run.record, ulid)
+        if ulid not in store.waiting_ulids(paths):
+            return
+        if _staged_as(paths, run.record, ulid) or _saved_as(idx, run.record, ulid):
+            return
         running = store.uploader_is_running(paths)
         if running:
             saw_running = True
         elif saw_running or (time.monotonic() - start_time > 2.0):
             return
-        if rescue and not running:
-            return
-        if ulid not in store.waiting_ulids(paths) and not running:
-            return
-        time.sleep(0.05)
+        time.sleep(0.1)
 
 
 def _final_write(run: "_Run", agent: Agent) -> tuple[tuple[str, bool] | None, str, str | None]:

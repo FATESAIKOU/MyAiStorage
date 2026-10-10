@@ -415,9 +415,11 @@ def test_a_rescue_the_uploader_remembered_carries_the_rest_of_the_run(claude_lab
     assert done["pending"][-1] == f"{b.split(':')[1]}.json", \
         f"the pending record followed the rescue: {done['pending']}"
     log_lines = (paths().state / "continue.log").read_text(encoding="utf-8").splitlines()
-    quiet_lines = [l for l in log_lines if "定期寫回：沒有新內容" in l]
-    assert quiet_lines, "there are quiet rounds in continue.log"
-    assert all(b in l for l in quiet_lines), f"quiet round prefixes followed rescue to {b}: {quiet_lines}"
+    move_idx = next((i for i, l in enumerate(log_lines) if f"之前已另存成 {b}" in l), None)
+    assert move_idx is not None, f"move note was logged in continue.log: {log_lines}"
+    quiet_after = [l for l in log_lines[move_idx:] if "定期寫回：沒有新內容" in l]
+    assert quiet_after, f"there are quiet rounds after rescue in continue.log: {log_lines}"
+    assert all(b in l for l in quiet_after), f"quiet round prefixes followed rescue to {b}: {quiet_after}"
 
 
 def test_final_write_waits_for_inflight_uploader_to_adopt_rescue(claude_lab, capsys, monkeypatch):
@@ -460,6 +462,35 @@ def test_final_write_waits_for_inflight_uploader_to_adopt_rescue(claude_lab, cap
     assert "另存" in err, err
 
 
+def test_final_write_does_not_block_full_timeout_on_normal_upload_or_offline(claude_lab, capsys, monkeypatch):
+    """Review M1 / item 6: _wait_target_settled does not block for the 15s timeout:
+    1. when A's upload is normal, it returns as soon as A leaves waiting_ulids;
+    2. when offline (copy fails), the uploader stops and it returns quickly leaving entry in outbox.
+    """
+    monkeypatch.delenv("AGORA_UPLOAD", raising=False)
+
+    # 1. Normal upload: detached uploader finishes and A leaves outbox well under 15s
+    a = _import_claude(capsys)
+    _script(claude_lab, monkeypatch, "append:ZZ 正常上傳,wait-sync,exit")
+    t0 = time.monotonic()
+    code, out, err = _continue_claude(capsys, claude_lab, a)
+    normal_duration = time.monotonic() - t0
+    assert code == 0, err
+    assert out == a
+    assert normal_duration < 5.0, f"normal upload took too long: {normal_duration}s"
+
+    # 2. Offline / copy failure: uploader fails and stops, returns quickly without hanging for 15s
+    a2 = _import_claude(capsys)
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")
+    _script(claude_lab, monkeypatch, "append:ZZ 離線失敗,wait-sync,exit")
+    t0 = time.monotonic()
+    code, out, err = _continue_claude(capsys, claude_lab, a2)
+    offline_duration = time.monotonic() - t0
+    assert out == a2
+    assert offline_duration < 5.0, f"offline run took too long: {offline_duration}s"
+    assert a2.split(":")[1] in store.outbox_ulids(paths()), "unsent entry remains in outbox"
+
+
 def test_subprocess_mid_run_rescue_interleaving(claude_lab, capsys, monkeypatch, tmp_path):
     """The e2e's interleaving in a subprocess: mid-run the uploader rescues A into B,
     followed by quiet rounds and the final write. Terminal output must name B."""
@@ -469,13 +500,15 @@ def test_subprocess_mid_run_rescue_interleaving(claude_lab, capsys, monkeypatch,
     monkeypatch.delenv("AGORA_UPLOAD", raising=False)
 
     _script(claude_lab, monkeypatch,
-            f"append:ZZ 第 1 句,wait-sync,append:ZZ 第 2 句,wait-sync,append:ZZ 第 3 句,wait-sync,wait-sync,exit")
+            f"append:ZZ 第 1 句,wait-sync,append:ZZ 第 2 句,wait-sync,append:ZZ 第 3 句,wait-sync,exit")
     terminal = tmp_path / "terminal.txt"
     fd = os.open(terminal, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    env = dict(os.environ)
+    env["FAKE_RCLONE_DELAY"] = "0.2"
     proc = subprocess.Popen(
         [sys.executable, "-m", "agora.cli", "continue", "session", a, "--agent", "claude",
          "--dir", str(claude_lab["work"]), "--sync-period", "0.01"],
-        stdout=fd, stderr=fd, stdin=subprocess.DEVNULL, env=dict(os.environ),
+        stdout=fd, stderr=fd, stdin=subprocess.DEVNULL, env=env,
         cwd=str(tmp_path))
     # Wait for the second sentence to reach Drive
     _wait_for(lambda: on_drive(a).joinpath("session.md").is_file() and
