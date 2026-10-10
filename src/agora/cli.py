@@ -31,6 +31,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -862,6 +863,8 @@ def _follow(run: "_Run", target_id: str, *, note: bool = True) -> str | None:
     frm, run.target = run.target, target_id
     if run.pending is not None:
         run.pending = _move_pending(run.pending, run.lock, run.record, target_id)
+    if hasattr(run, "logger") and run.logger is not None:
+        run.logger.tag = run.target
     if not note or run.first_note is not None:
         return None
     run.first_note = (f"[agora] {frm} 已經沒有了，之前已另存成 {target_id}，"
@@ -1080,7 +1083,8 @@ def _periodic_write(run: "_Run", agent: Agent) -> None:
     happened without reading the terminal the agent owns.
     """
     try:
-        with _quiet(run.paths, run.target):
+        with _quiet(run.paths, run.target) as writer:
+            run.logger = writer
             try:
                 exported = _collect_new(run, agent)
                 saved, target, _note = _write_one(run.paths, run, exported, agent,
@@ -1105,6 +1109,8 @@ def _periodic_write(run: "_Run", agent: Agent) -> None:
             print(f"[agora] 定期寫回：{outcome}", file=sys.stderr)
     except Exception:                # the log itself is broken: stay silent, keep going
         run.failures += 1
+    finally:
+        run.logger = None
 
 
 def _wait_agent(proc, run: "_Run", agent: Agent, interval: float) -> bool:
@@ -1129,6 +1135,38 @@ def _wait_agent(proc, run: "_Run", agent: Agent, interval: float) -> bool:
     return said_writing
 
 
+def _wait_target_settled(paths: store.Paths, run: "_Run", timeout: float = 15.0) -> None:
+    """Wait for in-flight upload of run.target to settle (review M1).
+
+    If an earlier round staged an update for run.target into outbox, and the background
+    uploader is running, the fate of run.target is undecided: another machine may have
+    deleted it, in which case the uploader rescues it into B. Deciding the final target
+    before that in-flight upload settles would race the uploader and print the wrong id.
+    """
+    ulid = _ulid_of(run.target)
+    if ulid not in store.waiting_ulids(paths):
+        return
+    if not store.uploader_is_running(paths):
+        from agora import background
+        background.start(paths)
+    deadline = time.monotonic() + timeout
+    saw_running = store.uploader_is_running(paths)
+    start_time = time.monotonic()
+    while time.monotonic() < deadline:
+        idx = store.Index(paths)
+        rescue = _saved_as(idx, run.record, ulid) or _staged_as(paths, run.record, ulid)
+        running = store.uploader_is_running(paths)
+        if running:
+            saw_running = True
+        elif saw_running or (time.monotonic() - start_time > 2.0):
+            return
+        if rescue and not running:
+            return
+        if ulid not in store.waiting_ulids(paths) and not running:
+            return
+        time.sleep(0.05)
+
+
 def _final_write(run: "_Run", agent: Agent) -> tuple[tuple[str, bool] | None, str, str | None]:
     """The last write-back: collect, resolve the target even when quiet (design P2).
 
@@ -1137,6 +1175,7 @@ def _final_write(run: "_Run", agent: Agent) -> tuple[tuple[str, bool] | None, st
     confirmed; a missing one still gets rescued.
     """
     exported = _collect_new(run, agent)
+    _wait_target_settled(run.paths, run)
     return _write_one(run.paths, run, exported, agent, check_drive=True)
 
 

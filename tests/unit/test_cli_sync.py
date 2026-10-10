@@ -371,6 +371,128 @@ def test_the_final_write_adopts_a_rescue_that_is_only_staged(claude_lab, capsys,
     assert on_drive(b).joinpath("session.md").is_file(), "the adopted rescue went up"
 
 
+def test_a_rescue_the_uploader_remembered_carries_the_rest_of_the_run(claude_lab, capsys, monkeypatch):
+    """The e2e's interleaving (sync-8c5d87a-rescue): mid-run the uploader rescues the
+    version A has into B - on Drive, remembered, out of the outbox - and the agent then
+    says nothing more. The rounds after it and the last write-back still have to move
+    to B, not keep resolving to A until the end.
+
+    The rescue runs in a process of its own, the way the detached uploader does: its
+    `remember` reaches the index from outside this process. The scripted fake waits
+    for four rounds, so several empty rounds and the final write follow the rescue.
+    """
+    a = _import_claude(capsys)
+    ulid = a.split(":")[1]
+    _script(claude_lab, monkeypatch, "append:ZZ 第 1 次發言" + ",wait-sync" * 4 + ",exit")
+    real_round = cli._periodic_write
+    done = {"rescued": False, "tags": [], "pending": []}
+
+    def round_then_rescue(run_, agent):
+        real_round(run_, agent)
+        done["tags"].append(run_.target)
+        done["pending"].append(run_.pending.name if run_.pending else None)
+        if done["rescued"] or not run_.wrote:
+            return
+        done["rescued"] = True
+        hdr = store.Index(paths()).header(ulid)
+        raw = (paths().mirror / ulid / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+        body = (paths().mirror / ulid / "session.md").read_text(encoding="utf-8")
+        store.stage(paths(), hdr, body, raw, update=True, kind="continue")   # the third round's entry
+        shutil.rmtree(on_drive(a))                     # another machine deleted A
+        subprocess.run([sys.executable, "-m", "agora.background"],             # the uploader, its own process
+                       env=dict(os.environ), check=True)
+
+    monkeypatch.setattr(cli, "_periodic_write", round_then_rescue)
+    code, out, err = _continue_claude(capsys, claude_lab, a)
+
+    assert done["rescued"]
+    kept = _extra_sessions(a)
+    assert len(kept) == 1, f"exactly one rescue: {[k['id'] for k in kept]}"
+    b = kept[0]["id"]
+    assert code == 0, err
+    assert out == b, f"the final write named {out}, the rescue is {b}"
+    assert done["tags"][-1] == b, f"the quiet rounds stay on {done['tags']}, the rescue is {b}"
+    assert done["pending"][-1] == f"{b.split(':')[1]}.json", \
+        f"the pending record followed the rescue: {done['pending']}"
+    log_lines = (paths().state / "continue.log").read_text(encoding="utf-8").splitlines()
+    quiet_lines = [l for l in log_lines if "定期寫回：沒有新內容" in l]
+    assert quiet_lines, "there are quiet rounds in continue.log"
+    assert all(b in l for l in quiet_lines), f"quiet round prefixes followed rescue to {b}: {quiet_lines}"
+
+
+def test_final_write_waits_for_inflight_uploader_to_adopt_rescue(claude_lab, capsys, monkeypatch):
+    """If the agent exits while the outbox entry for run.target is in flight and the uploader
+    is rescuing it into B, the final write must wait for it to settle and adopt B,
+    instead of prematurely minting a duplicate rescue or returning A."""
+    a = _import_claude(capsys)
+    ulid = a.split(":")[1]
+    _script(claude_lab, monkeypatch, "append:ZZ 第 1 次發言,wait-sync,exit")
+    real_round = cli._periodic_write
+    done = {"staged": False}
+
+    def round_then_delay_uploader(run_, agent):
+        real_round(run_, agent)
+        if done["staged"] or not run_.wrote:
+            return
+        done["staged"] = True
+        hdr = store.Index(paths()).header(ulid)
+        raw = (paths().mirror / ulid / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+        body = (paths().mirror / ulid / "session.md").read_text(encoding="utf-8")
+        store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+        import threading
+        def delayed_uploader():
+            time.sleep(0.15)
+            shutil.rmtree(on_drive(a), ignore_errors=True)
+            subprocess.run([sys.executable, "-m", "agora.background"], env=dict(os.environ), check=True)
+        t = threading.Thread(target=delayed_uploader)
+        done["thread"] = t
+        t.start()
+
+    monkeypatch.setattr(cli, "_periodic_write", round_then_delay_uploader)
+    code, out, err = _continue_claude(capsys, claude_lab, a)
+    assert done["staged"]
+    done["thread"].join()
+    kept = _extra_sessions(a)
+    assert len(kept) == 1, f"exactly one rescue: {[k['id'] for k in kept]}"
+    b = kept[0]["id"]
+    assert code == 0, err
+    assert out == b, f"out was {out}, expected {b}"
+    assert "另存" in err, err
+
+
+def test_subprocess_mid_run_rescue_interleaving(claude_lab, capsys, monkeypatch, tmp_path):
+    """The e2e's interleaving in a subprocess: mid-run the uploader rescues A into B,
+    followed by quiet rounds and the final write. Terminal output must name B."""
+    monkeypatch.setenv("AGORA_UPLOAD", "inline")
+    a = _import_claude(capsys)
+    ulid = a.split(":")[1]
+    monkeypatch.delenv("AGORA_UPLOAD", raising=False)
+
+    _script(claude_lab, monkeypatch,
+            f"append:ZZ 第 1 句,wait-sync,append:ZZ 第 2 句,wait-sync,append:ZZ 第 3 句,wait-sync,wait-sync,exit")
+    terminal = tmp_path / "terminal.txt"
+    fd = os.open(terminal, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "agora.cli", "continue", "session", a, "--agent", "claude",
+         "--dir", str(claude_lab["work"]), "--sync-period", "0.01"],
+        stdout=fd, stderr=fd, stdin=subprocess.DEVNULL, env=dict(os.environ),
+        cwd=str(tmp_path))
+    # Wait for the second sentence to reach Drive
+    _wait_for(lambda: on_drive(a).joinpath("session.md").is_file() and
+                      "ZZ 第 2 句" in (on_drive(a) / "session.md").read_text(encoding="utf-8"),
+              timeout=20.0, what="sentence 2 on drive")
+    # Delete A on Drive
+    shutil.rmtree(on_drive(a), ignore_errors=True)
+    assert proc.wait(timeout=60) == 0
+    os.close(fd)
+    text = terminal.read_text(encoding="utf-8")
+    last_line = [l.strip() for l in text.splitlines() if l.strip().startswith("agora:")][-1]
+    kept = _extra_sessions(a)
+    assert len(kept) == 1, f"extra sessions: {[k['id'] for k in kept]}, text={text}"
+    b = kept[0]["id"]
+    assert last_line == b, f"printed {last_line}, rescue is {b}, text={text}"
+
+
 # --- the staged rescue's own rules (review L1, L2) ----------------------------------
 
 def _record(a: str, source_id: str = "ses_a") -> dict:
