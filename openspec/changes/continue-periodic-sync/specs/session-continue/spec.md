@@ -10,9 +10,6 @@
 - 讀到 agent 寫到一半的內容時，MUST NOT 把 Session 寫壞。
 - 接續途中 Session 被刪掉時（不論是這次接續發現、還是背景上傳發現），同一段工作 MUST 只另存成一個新的 Session；之後的寫回（含最後一次與補存）MUST 寫到這個新的 Session。
 
-### Requirement: 同一台機器上不能同時接續同一個 Session
-一個 Session 正在接續中（這台機器上有另一個 `agora continue` 正在寫回它）時，再對它 `agora continue`（不含 `--fork`）MUST 被拒絕（exit 1），說明它正在接續中。對它 `--fork` 不受影響。
-
 #### Scenario: 執行中看得到進度
 - **WHEN** 用 `agora continue` 接續 Session A，在 agent 裡持續對話，經過一次定期寫回並上傳完成
 - **THEN** 不等 agent 結束，A 在本機與 Drive 上就已經是包含新對話的版本
@@ -40,6 +37,9 @@
 #### Scenario: agora 被強制結束
 - **WHEN** 定期寫回並上傳完成之後，agora 與 agent 都被強制結束
 - **THEN** Drive 上已經有那一次定期寫回的內容；下一個指令的補存寫到同一個 Session（途中另存過的話寫到另存的那個）
+
+### Requirement: 同一台機器上不能同時接續同一個 Session
+一個 Session 正在接續中（這台機器上有另一個 `agora continue` 正在寫回它）時，再對它 `agora continue`（不含 `--fork`）MUST 被拒絕（exit 1），說明它正在接續中。對它 `--fork` 不受影響。
 
 #### Scenario: 同一台機器再接續一次
 - **WHEN** A 正在接續中，在另一個終端機 `agora continue session A --agent claude`
