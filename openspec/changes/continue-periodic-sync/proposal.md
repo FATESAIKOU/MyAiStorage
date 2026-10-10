@@ -9,6 +9,8 @@
 - agent 結束時照現在的流程做最後一次寫回；和最後一次定期寫回相同就不再寫。
 - 定期寫回期間 agora 不在終端機印任何東西（終端機是 agent 的），訊息記到 log 檔。
 - 適用 `--fork` 出來的 Session（#29）。
+- 「寫回目標」由一個解析函式決定，定期、最後一次、補存共用：途中被刪（不論前景或背景上傳發現）時，同一段工作只另存一次。
+- 同一台機器上，同一個 Session 不能同時接續兩次（現在會互相蓋掉 pending，是既有的 bug）。
 
 ## Capabilities
 
@@ -18,10 +20,10 @@
 
 ### Modified Capabilities
 
-- `session-continue`：新增「接續期間定期寫回」。
+- `session-continue`：新增「接續期間定期寫回」「同一台機器上不能同時接續同一個 Session」。
 
 ## Impact
 
-- 程式：`src/agora/cli.py`（`cmd_continue` 的等待迴圈、抽出可重複呼叫的寫回、pending 記錄的更新）；可能動到 `src/agora/agents/claude.py`（警告改成可以靜音）。
+- 程式：`src/agora/cli.py`（`cmd_continue` 的等待迴圈、寫回目標的解析、可重複呼叫的寫回、pending 的改名）；`src/agora/store.py`（`stage` 先寫好 `.update`、fsync、`Drive._run` 的 stdin）；`src/agora/agents/opencode.py`（`opencode export` 的 stdin）；`tests/fakes/`（scripted 模式）。依賴 change `continue-fork` 的 `store.never_confirmed`。
 - 測試：單元測試用假 agent 與很短的間隔；整合測試補一個（只用 `agora-test`）。
 - 文件：`docs/design.md` 5.4、README 的 continue。
