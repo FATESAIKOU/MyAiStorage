@@ -595,20 +595,20 @@ def test_continue_hands_the_pending_lock_to_the_agent(env, capsys, monkeypatch):
     import fcntl
     _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     seen = {}
-    real_run = cli.subprocess.run
+    real_popen = cli.subprocess.Popen
 
     def spy(argv, **kwargs):
-        if argv != ["true"]:                     # rclone calls go through untouched
-            return real_run(argv, **kwargs)
+        if argv != ["true"]:                     # anything else goes through untouched
+            return real_popen(argv, **kwargs)
         paths = store.Paths.from_env()
         [pending] = list(paths.pending.glob("*.json"))
         seen["fds"] = kwargs.get("pass_fds")
         with open(pending) as f:                 # locked while the agent runs
             with pytest.raises(BlockingIOError):
                 fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return real_run(argv, **kwargs)
+        return real_popen(argv, **kwargs)
 
-    monkeypatch.setattr(cli.subprocess, "run", spy)
+    monkeypatch.setattr(cli.subprocess, "Popen", spy)
     code, _, _ = run(capsys, "continue", "session", parent, "--agent", "opencode", "--dir", "/tmp")
     assert code == 0 and seen["fds"] and len(seen["fds"]) == 1
 
@@ -616,15 +616,15 @@ def test_continue_hands_the_pending_lock_to_the_agent(env, capsys, monkeypatch):
 def test_agent_runs_with_pwd_set_to_the_workdir(env, capsys, monkeypatch, tmp_path):  # opencode reads PWD
     _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     seen = {}
-    real_run = cli.subprocess.run
+    real_popen = cli.subprocess.Popen
 
     def spy(argv, **kwargs):
         if argv == ["true"]:
             seen["pwd"] = kwargs["env"]["PWD"]
             seen["cwd"] = kwargs["cwd"]
-        return real_run(argv, **kwargs)
+        return real_popen(argv, **kwargs)
 
-    monkeypatch.setattr(cli.subprocess, "run", spy)
+    monkeypatch.setattr(cli.subprocess, "Popen", spy)
     monkeypatch.chdir(tmp_path)
     work = tmp_path / "other"
     work.mkdir()

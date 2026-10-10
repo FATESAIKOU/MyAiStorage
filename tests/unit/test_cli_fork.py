@@ -101,14 +101,14 @@ def env(tmp_path, monkeypatch):
 def during_agent(monkeypatch):
     """Run something while the agent process is up (argv ["true"] is the fake's)."""
     def run(callback):
-        real = cli.subprocess.run
+        real = cli.subprocess.Popen
 
         def spy(argv, **kwargs):
             if argv == ["true"]:
                 callback()
             return real(argv, **kwargs)
 
-        monkeypatch.setattr(cli.subprocess, "run", spy)
+        monkeypatch.setattr(cli.subprocess, "Popen", spy)
     return run
 
 

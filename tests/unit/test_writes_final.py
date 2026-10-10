@@ -64,8 +64,13 @@ def _marks(monkeypatch) -> list[str]:
 
     def spy(folder, kind=""):
         # `kind` is the write's sort, added for G2: it only matters if the session is
-        # gone by the time it is sent (a continue's rescue is a continue)
-        marked.append(folder.name)
+        # gone by the time it is sent (a continue's rescue is a continue).
+        # Since the one-step stage, the mark lands on the tmp folder that is about to
+        # go in, not the one already there - the ULID is what the decision is about.
+        name = folder.name
+        if name.startswith(".tmp-"):
+            name = name[len(".tmp-"):]
+        marked.append(name)
         return real(folder, kind)
     monkeypatch.setattr(store, "mark_update", spy)
     return marked
