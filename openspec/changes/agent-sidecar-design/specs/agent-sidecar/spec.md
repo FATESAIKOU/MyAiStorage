@@ -79,7 +79,7 @@ sidecar MUST NOT 持有、讀取或寫下任何模型供應商的金鑰。要啟
 - **THEN** 沒有模型供應商的金鑰；agent 的存取來自 LLMGateway 的准許
 
 ### Requirement: 以一個 shared-config 單元分發
-sidecar MUST 以 MyLinuxPool 的一個 shared-config 單元（`shared-configs/agent-sidecar/`）分發；任何 profile 都可以帶它，MUST NOT 要求新增 profile。install.sh MUST 冪等、重跑結果一樣；`--check` MUST 驗證：單元檔案與安裝結果一致、依賴（tmux、Python）在、設定與 A2A token 能讀信道（讀得到算成立；讀不到是確定不成立或無法確認，照 MyLinuxPool 的三態規則回報），MUST NOT 在檢查不過時假裝健康。
+sidecar MUST 以 MyLinuxPool 的一個 shared-config 單元（`shared-configs/agent-sidecar/`）分發；任何 profile 都可以帶它，MUST NOT 要求新增 profile。install.sh MUST 冪等、重跑結果一樣；`--check` MUST 驗證：單元檔案與安裝結果一致、依賴（herdr、Python）在、herdr server 可達、設定與 A2A token 能讀信道（讀得到算成立；讀不到是確定不成立或無法確認，照 MyLinuxPool 的三態規則回報），MUST NOT 在檢查不過時假裝健康。
 
 #### Scenario: 安裝
 - **WHEN** 在帶了這個單元的 worker 上跑 install.sh，再跑 `install.sh --check`
