@@ -180,7 +180,9 @@ def test_fork_makes_a_new_session_and_the_original_is_untouched(env, capsys):
     code, b, err = _fork(capsys, a)
 
     assert code == 0 and b.startswith("agora:") and b != a
-    assert f"fork 已存成 {b}" in err, "M7: the id is said as soon as it is saved"
+    # R2: the exact step-6 line, not the phrase - `沒有新內容；fork 已存成 …` at the end
+    # would satisfy a bare substring and leave this line untested (review F7).
+    assert f"[agora] fork 已存成 {b}" in err, "M7: the id is said as soon as it is saved"
     hdr = header_of(b)
     assert hdr["title"] == "表格排版-fork"
     assert hdr["case"] == "mybrain:aistorage" and hdr["tags"] == ["ui", "tui"]
@@ -244,6 +246,9 @@ def test_open_and_leave_keeps_the_fork_and_says_its_id(env, capsys):
     code, b, err = _fork(capsys, a)
 
     assert code == 0 and b.startswith("agora:") and b != a
+    # R2: the step-6 line itself. The end-of-run line below also says `fork 已存成`, so
+    # only the exact `[agora] `-prefixed form pins the one printed at step 6.
+    assert f"[agora] fork 已存成 {b}" in err, "M7: B's id is said as soon as it is saved"
     assert f"沒有新內容；fork 已存成 {b}" in err
     assert header_of(b)["title"] == "表格排版-fork"
     assert h.agora_of(header_of(b))["source"]["session_id"] == env.launched[-1].agent_session_id, \
@@ -628,21 +633,30 @@ def test_the_launch_is_read_back_with_its_directory_when_the_adapter_takes_one()
 
 
 def test_a_fork_rescue_carries_the_users_header(env, capsys, during_agent):
-    """M9: the session saved out of a deleted B keeps what the user wrote on B - the
-    fields copied from A and the ones they typed - instead of resetting to the
-    auto-generated header."""
-    _, a, _ = _import(capsys)
-    gone = {}
+    """M9 (R3): the session saved out of a deleted B keeps the user's fields from B's own
+    header - here the ones the fork copied off A - instead of resetting to the
+    auto-generated header.
+
+    Deliberately no `--header` on the fork: the record's `header_updates` is empty, so
+    `_save`'s overlay cannot supply these and only the rescue's merge of the old header
+    can (the review's F4 mutation has to make this red)."""
+    _, a, _ = _import(capsys, "--header", "case=mybrain:aistorage",
+                      "--header", "tags=[實驗]", "--header", "refs=[mybrain:note/x]",
+                      "--header", "description=先做讀取")
+    gone, seen = {}, {}
 
     def delete_b():
+        [record] = [json.loads(p.read_text(encoding="utf-8"))
+                    for p in paths().pending.glob("*.json")]
+        seen["header_updates"] = record["header_updates"]
         gone["id"] = _fork_session()["id"]
         shutil.rmtree(on_drive(gone["id"]))     # only Drive: the header is still here
     during_agent(delete_b)
 
-    code, out, err = _fork(capsys, a, "--header", "case=mybrain:aistorage",
-                           "--header", "tags=[實驗]", "--header", "refs=[mybrain:note/x]",
-                           "--header", "description=先做讀取")
+    code, out, err = _fork(capsys, a)
 
+    assert seen["header_updates"] == {}, \
+        "使用者這次沒有下 --header；這條路不靠 updates，只能靠從舊 header 抄"
     assert code == 0 and out not in (a, gone["id"])
     hdr = header_of(out)
     assert hdr["title"] == "把 CSV 轉成 Markdown 表格-fork"
