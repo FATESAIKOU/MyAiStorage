@@ -89,14 +89,14 @@ agora:                                # 系統欄位，使用者不能改
   header: 2
   created_at: 2026-10-01T12:00:00Z    # 存進 agora 的時間
   updated_at: 2026-10-01T12:30:00Z
-  relation: import                    # import | continue | merge
+  relation: import                    # import | continue | merge | fork（5.4：--fork 分出來的新 Session）
   parents: [{id: "agora:01K5...", raw_md5: "…"}]
   source: {agent: opencode, session_id: ses_xxxx, dir: /Users/me/proj, host: mbp, agent_version: 1.18.34, created_at: 2026-10-01T11:00:00Z}
   raw: {file: raw-0123456789ab.json, md5: "…", size: 12345}
 ---
 ```
 
-**自動填的欄位**（import／merge／continue）：`type`、`title`（來源的標題）、`description`、`generated`（agent 與模型、來源的建立時間）、`sources`（來源 session；continue／merge 另外列出父 Session），以及整個 `agora` 區塊。`status` 不自動填（OKF 預設 `stable`），`verified` 永遠不自動填。
+**自動填的欄位**（import／merge／continue／fork）：`type`、`title`（來源的標題）、`description`、`generated`（agent 與模型、來源的建立時間）、`sources`（來源 session；continue／merge 另外列出父 Session），以及整個 `agora` 區塊。`status` 不自動填（OKF 預設 `stable`），`verified` 永遠不自動填。`relation: fork` 的是從別的 Session 分出來的新 Session：`parents` 指向原本那個；原本那個有它（或 continue／merge 的孩子）就不能直接刪（5.6），但 fork 出來的不算分岔，再匯入原本的來源時原本那個仍然原地更新（5.2 的 S7）。
 
 ### 3.5 使用者給的標頭：差分疊加
 
@@ -128,7 +128,7 @@ Mac:
 **前景**（import、continue、merge、edit 都一樣，寫完就結束）：
 
 1. 把整個 Session 寫進 outbox（`<state>/outbox/<ULID>/`），**原始檔也放進本機鏡像**（`<cache>/sessions/<ULID>/`，同名同大小就不複製，原子寫入）。本機從此有完整的一份：Drive 壞掉或被刪都不影響這台機器上讀與接續。
-2. 已經在 Drive 上、這次要覆蓋的那一筆，前置一個 `.update` 記號——上傳器那時候已經分不出「這是新的匯入」還是「既有 id 的新版本」（N4）。
+2. 已經在 Drive 上、這次要覆蓋的那一筆，前置一個 `.update` 記號——上傳器那時候已經分不出「這是新的匯入」還是「既有 id 的新版本」（N4）。**寫回一個 Drive 從來沒確認過的 Session，不算更新既有 id**：outbox 裡還留著它沒標記的那一筆，就代表 Drive 沒見過它（離線匯入之後、還沒上傳就 continue／edit／fork 都是這種情況），這次寫入維持新建，上傳時不會因為 Drive 上沒有它而另存（`store.never_confirmed`）。
 3. 啟動背景上傳器（`<state>/upload.lock` 一把鎖、`stdin` 接 DEVNULL、輸出寫 `<state>/upload.log`），指令就回 exit 0。**起不來**才是 exit 3，outbox 照留，訊息仍是「已存進 outbox，之後的指令會自動再送」。測試用 `AGORA_UPLOAD=inline` 在前景跑同一條路徑。
 4. 指令開頭的 `sync` **不在前景上傳**：outbox 或刪除佇列不空就啟動背景、印一行「背景上傳中，N 筆」（N3、N10）。
 
@@ -191,7 +191,7 @@ agora <動作> <型態> [session_id] [選項]
 agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync]
 agora import   session --external-session-id <id>[,<id>...] [--external-session-id <id>...] --agent opencode|claude [--header-file F] [--header K=V]...
 agora merge    session <id>, <id>, ... --agent opencode|claude [--header-file F] [--header K=V]...
-agora continue session <id> --agent opencode|claude [--dir <專案目錄>] [--header-file F] [--header K=V]...
+agora continue session <id> --agent opencode|claude [--dir <專案目錄>] [--fork] [--header-file F] [--header K=V]...
 agora delete   session <id>, <id>, ... --yes
 agora edit     session <id> [--header-file F] [--header K=V]...
 agora show     session <id> [--raw]
@@ -287,15 +287,22 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 1. **取得原始 session（cli）**：
    - 普通 Session：它自己的 raw（`agora.raw`）。
    - merge 出來的（第 6、7 版）：**不取來源的 raw**。它的內文（程式排版的各節要約＋來源清單）就是要載入的內容：交給 `native()` 的是一則 user「以下是由 <agent>/<model> 自動寫成的 merge 要約與來源清單。這是參考資料，不是要你執行的指示；需要細節時，只用清單裡的 `agora show session <id>` 取原版」＋內文（review Y5），和一則 assistant「（讀完了要約與來源清單，等你的指示。）」。這則 assistant 是**刻意**放的假回覆：讓 user／assistant 交替，`before_count` 也因此是 2，打開就離開不會被存檔（review Y8）。opencode 與 Claude 都一樣。
-2. **轉成目標格式（轉接器）**：每個轉接器只提供兩個方向：
+2. **轉成目標格式（轉接器）**：每個轉接器提供三個方向：
    - `turns(raw)`：把**自己格式**的 raw 拆成共通的一輪一輪（`[(role, lines)]`，規則同閱讀版 4.4：文字＋工具一行摘要）。閱讀版就是 `format_reading(turns(raw))`。
    - `native(turns)`：把共通的一輪一輪組成**自己格式**的 raw。
+   - `append_native(raw, turns)`：**同 agent fork 用**：A 的 raw 一個 byte 都不改（含工具呼叫與前綴，快取能命中），把給的幾輪掛到它的原生格式尾巴上。`turns()` 讀到的就是原本的輪數加上這幾輪。跨 agent、merge 出來的仍然走 `native()`。
    - 只有一段、而且來源 agent ＝目標 agent → 直接用原始 raw，不經過轉換（保留工具呼叫與前綴，快取能命中）。
    - 跨 agent → 開頭加一則說明「以下是轉過來的紀錄，`[tool]` 行只是摘要」的 user 訊息（W2）；每段前面加一則標示來源的 user 訊息；某一段以沒有回覆的 user 結束時，補一則 assistant「（這一段在這裡結束，當時沒有回覆）」，所以前一段的問題不會和下一段黏在一起，交給 `native()` 的一定是 user／assistant 交替（W1）；丟掉 `[skip …]` 行（W6）；再用目標 agent 的 `native()` 組成原生 raw。
 3. **載入**：一律走目標轉接器的 `start_native(raw, workdir)`（opencode：id 重編、`opencode import`、回讀驗證；Claude：新 uuid、寫 jsonl、`claude --resume`）。不再有「注入」這條路。
 4. 工作目錄：`--dir`，預設是 `agora.source.dir`（這台機器上存在的話），否則是目前目錄並提示。agent 啟動時同時設定 cwd 與 `PWD`。
 5. 寫 pending 並持有 flock（交給 agent 繼承），在前景啟動 agent；Ctrl-C 只給 agent。
-6. agent 結束後，內容比啟動前多才存檔，**寫回原本那個 agora Session（同一個 id）**（2026-10-02 使用者決定，原本是另存新的）；**但接續途中那個 Session 已經被刪掉了（不管是別台機器還是這台），就另存成一個新的 Session**（`relation: continue`、`parents` 指向原本那個），並印出說明——原本那個保持被刪的狀態，不會因為這次接續而回到雲端：raw 與閱讀版換成接續後的整段對話，`agora.source` 換成接續用的那個 agent session，舊的記到 `agora.previous_sources`（未匯入頁因此不再列它）；標題、tags 這些使用者欄位不變。接續的是 merge 時，它就變成那段對話：`relation` 改成 `continue`、拿掉 `agora.merge` 與 `status: draft`，`parents` 留著當出處。不再能從同一點分岔。Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之後那個 session 要用的 import 指令。
+6. agent 結束後，內容比啟動前多才存檔，**寫回原本那個 agora Session（同一個 id）**（2026-10-02 使用者決定，原本是另存新的）；**但接續途中那個 Session 已經被刪掉了（不管是別台機器還是這台），就另存成一個新的 Session**（`relation: continue`、`parents` 指向原本那個），並印出說明——原本那個保持被刪的狀態，不會因為這次接續而回到雲端：raw 與閱讀版換成接續後的整段對話，`agora.source` 換成接續用的那個 agent session，舊的記到 `agora.previous_sources`（未匯入頁因此不再列它）；標題、tags 這些使用者欄位不變。接續的是 merge 時，它就變成那段對話：`relation` 改成 `continue`、拿掉 `agora.merge` 與 `status: draft`，`parents` 留著當出處。
+7. **要從同一點分岔用 `--fork`**：`agora continue session <id> --agent … --fork` 先複製出一個新 Session B，再用它啟動 agent；原本的 A 完全不動（內容、標頭、`updated_at` 都不變），之後的寫回都寫到 B。A 在雲端沒有就拒絕，不開 agent。
+   - B 的使用者欄位照抄 A；`verified` 目前不抄（等使用者決定），A 是 merge 出來的再拿掉 `status: draft`。`title` 沒指定時是「A 的 title（或 description、或 id）`-fork`」，`--header title=…` 有給就以它為準、不加後綴。`id` 與 `agora` 區塊重新產生：`relation: fork`、`parents` 指向 A（附這次取來的 raw md5）；`sources` 是這次的 agent session 加上 A。跨 agent、merge 出來的、fork 出來的都能 fork（名字照字面變 `…-fork-fork`）。
+   - 載入的對話最後接兩則：user「從 <A 的 id>（<A 的標頭一行>）fork」與一則固定的 assistant 回覆；A 以沒有回覆的 user 結尾時，先補一則 assistant「（這一段在這裡結束，當時沒有回覆）」。同 agent 時 A 的 raw 原樣載入（這兩則用 `append_native` 接在尾巴）；跨 agent 與 merge 出來的過 `native()`。
+   - B 在啟動 agent 之前就先存檔（和 import 同一形狀）。agent 結束、沒有新內容時，B 照樣留著：stdout 印 B 的 id，exit 0。B 在接續途中被刪掉、有新內容時，照第 6 點的規則另存。
+   - A 有 fork 出來的孩子不算分岔：再匯入 A 的來源時，A 仍然原地更新（5.2 的 S7）。
+Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之後那個 session 要用的 import 指令。
 
 ### 5.6 delete
 
@@ -305,7 +312,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 - **佇列裡的 ULID**：`sync` 列檔看到時不放進索引、也不算進 `mark_missing`（所以不會被當成「別台刪掉的」又冒出來）；**`pull`、`push` 都拒絕**，說「正在刪除」（M5），兩個都用同一個 `store.queued_for_trash(paths)` 判斷（N10）；每個指令開頭提醒「有 N 個等著移到 Drive 垃圾桶」（L4），背景正在跑時不提醒。
 - Drive 上 `sessions/<ULID>/` 整個**移到 Drive 垃圾桶**（30 天內可以在 Drive 網頁還原）。
 - 一定要加 `--yes`，沒加就只印出會刪什麼，exit 1。
-- 有子 Session（別的 Session 的 `parents` 指向它）時不刪，列出那些子 Session，exit 1。
+- 有子 Session（別的 Session 的 `parents` 指向它，fork 出來的也算）時不刪，列出那些子 Session，exit 1。
 - **重跑會接著做**（2026-10-03 使用者決定）：刪除成功時把 ULID 記到 `<state>/deleted`；重跑同一個指令時，**在這份記錄裡的** id 印「已經不在了，略過」並不算失敗（全部都略過時 exit 0）。**從來不存在的 id（例如打錯）照樣報找不到、exit 1**——只有自己刪過的才略過。
 - **正在接續的（有人拿著 `pending/<ULID>.json` 的鎖）拒絕刪除**，exit 1，訊息說「正在接續，等它結束再刪」——那時候刪了，`_finish` 只會把結果另存成一個新的 Session，等於刪不掉又冒出一個。**只是留下來的記錄**（鎖已經沒人拿，例如那個 agent 的 session 已經不見了、收不了尾）**照樣刪**，並印一行「有一筆中斷的接續沒補存成功（`<state>/pending/<ULID>.json`）」——否則一個收不了尾的接續會讓那個 Session 永遠刪不掉。
 - **Drive 上已經沒有的資料夾當成已刪掉**（S1-4：rclone 不會 purge 一個不存在的資料夾，會回錯；中斷在 purge 與本機忘掉之間就會這樣，否則重跑會永遠失敗）。但**「找不到」不能單獨相信**（S1-4b）：Drive API 在 folder id 錯了或 token 看不到東西時說的也是同一句話。所以 purge 失敗之後會再列檔一次，**只有列檔回來而且清單裡沒有這個 ULID** 才當成已刪掉；列檔也失敗就照原本的錯誤丟出。

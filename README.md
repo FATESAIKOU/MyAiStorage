@@ -104,6 +104,9 @@ agora merge session agora:01K6…, agora:01K7…, agora:01K8…
 agora continue session agora:01K6… --agent opencode
 agora continue session agora:01K8… --agent claude --dir ~/proj
 
+# 從同一點分岔：先複製出新 Session 再開 agent，原本那個不動，寫回都寫到新的那個
+agora continue session agora:01K6… --agent opencode --fork
+
 # 改標頭：給 --header／--header-file 就直接疊加；都不給就用 $EDITOR 打開
 agora edit session agora:01K6… --header 'tags=[csv, 表格]' --header 'status=stable'
 agora edit session agora:01K6…
