@@ -9,7 +9,7 @@
 - [ ] 1.7 store：`stage` 在 tmp 資料夾裡先寫好 `.update`；定期寫回的 stage 與 pending 做 fsync（**stage 部分已完成**：`stage(..., update=, kind=)` 在 tmp 裡先寫好 `.update` 再整個換進去，stage 寫的檔案與資料夾都 fsync；`mark_update` 保留給事後才決定的呼叫端；pending 的寫入在 cli.py，待 cli 那邊；測試在 test_store.py）
 - [x] 1.8 fakes：`fake_claude.py`／`fake_opencode.py` 加 scripted 模式（說一句 → 等一輪寫回 → 寫半行 → 再說一句 → 離開），「等一輪寫回」輪詢 continue.log 或假 remote，設逾時；新的 `AGORA_TEST_FAULT` 點 `after-periodic-write`（scripted 模式已完成：`FAKE_AGENT_SCRIPT=append:…,wait-sync,partial,…,exit`，`wait-sync` 輪詢 `FAKE_SYNC_SIGNAL` 指向的檔案、逾時 `FAKE_SYNC_TIMEOUT`（預設 10 秒）就 exit 2，開始／結束各印 `FAKE-AGENT-START`／`FAKE-AGENT-END`；`partial` 在 claude 是寫到一半的行、在 opencode 是還在跑的 tool part；測試在 tests/unit/test_fake_script.py。**`AGORA_TEST_FAULT` 的 `after-periodic-write` 沒做**：那是 store／cli 的接縫，不在這次改的檔案裡）
 - [ ] 1.9 單元測試：spec 的八個 Scenario；fork 出來的 Session 在離線時定期寫回；`.done-B` 正在比對時又寫一次；間隔下限；fd 1／2 的測試（子程序跑 `python -m agora.cli continue …`，`AGORA_CLAUDE_CMD` 指向假 agent，stdout 與 stderr 導到同一個 O_APPEND 檔，假 agent 在開始與結束各印一個標記，斷言兩個標記之間沒有 agora 的輸出）；從互動模式接續時的 redirect
-- [ ] 1.11 互動模式：Agora 頁接續時，選完 agent 與工作目錄後用 `AskText` 問同步間隔（預設 5），驗證後把 `--sync-period` 加進 `argv_for("continue", …)`；填錯留在輸入框、Esc 取消；測試照 interactive-mode delta 的四個 Scenario（`run_test` 按鍵驅動）
+- [x] 1.11 互動模式：Agora 頁接續時，選完 agent 與工作目錄後用 `AskText` 問同步間隔（預設 5），驗證後把 `--sync-period` 加進 `argv_for("continue", …)`；填錯留在輸入框、Esc 取消；測試照 interactive-mode delta 的四個 Scenario（`run_test` 按鍵驅動）（已完成：`AskText` 加了選用的 `check`，填錯時視窗留著、顯示 `⚠ 請填不小於 0 的數字…`；沒有 `check` 的呼叫端（工作目錄、client 設定檔）多一個 `Static` 都沒有，行為照舊。`argv_for(..., sync_period=None)` 不給就不加旗標，給 0 也照加。測試在 tests/unit/test_tui.py，13 個 mutation 都抓得到。指令模式那側是 impl1 的）
 - [ ] 1.10 整合測試補一個（只用 `agora-test`；短間隔，假 agent＋真的 Drive，或真的 agent）
 
 ## 2. 收尾

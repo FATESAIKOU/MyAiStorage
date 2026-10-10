@@ -1246,6 +1246,149 @@ def test_continuing_a_session_the_cloud_lost_is_refused_on_screen():   # spec 3.
     _run(go)
 
 
+# --- 接續前確認同步間隔（spec interactive-mode「接續前確認同步間隔」）---------
+
+
+def _continue(app, typed=None, *, escape=False, tab=False):
+    """Press Enter through the whole continue flow, and report what it came to.
+
+    `outside` is replaced - it hands the terminal to a real command and reads a line
+    back, which no test can do. Everything before it is driven by keys, because the
+    order and the windows are what this change is about. `typed` replaces what is in
+    the period box, which starts on the default.
+    """
+    ran: list[list[str]] = []
+    app.outside = lambda argv: ran.append(argv) or 0
+    seen: dict = {}
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("enter")                       # 接續
+            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
+            await pilot.press("enter")                       # opencode
+            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
+            await pilot.press("enter")                       # 在這裡開
+            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            seen["title"] = app.screen.title_
+            seen["offered"] = str(app.screen.query_one(Input).value)
+            if tab:                                   # the window's own key rule (W4)
+                await pilot.press("tab")
+                await pilot.pause()
+                seen["tab_kept"] = app.tab == "agora"
+            if typed is not None:
+                for _ in str(tui.SYNC_PERIOD_DEFAULT):  # clear what was offered
+                    await pilot.press("backspace")
+                await pilot.press(*typed)
+            await pilot.press("escape" if escape else "enter")
+            await pilot.pause()
+            asking = isinstance(app.screen, tui.AskText)
+            seen["still_asking"] = asking
+            seen["problem"] = str(app.screen.query_one("#ask-problem", Static).render()) if asking else ""
+            seen["back_to_the_list"] = not isinstance(app.screen, tui.ModalScreen)
+    _run(go)
+    return {"ran": ran, **seen}
+
+
+def test_the_period_box_offers_five_minutes_and_enter_uses_it():
+    """Scenario 用預設值: the box appears after the agent and the directory, says what
+    it is for, and Enter continues with --sync-period 5."""
+    app, _ = _app([])
+    out = _continue(app, tab=True)
+    assert out["title"] == tui.SYNC_PERIOD_TITLE
+    assert out["offered"] == "5"
+    assert out["tab_kept"]                     # Tab does not move the table under it
+    argv = out["ran"][0]
+    assert argv[:2] == ["continue", "session"] and argv[argv.index("--sync-period") + 1] == "5"
+
+
+def test_zero_in_the_box_means_never_sync_on_your_own():
+    """Scenario 改成不自動同步: 0 is an answer, and it is passed on as 0 rather than
+    left out for the command to decide."""
+    app, _ = _app([])
+    argv = _continue(app, typed="0")["ran"][0]
+    assert argv[argv.index("--sync-period") + 1] == "0"
+
+
+def test_a_value_that_is_not_a_number_keeps_the_box_and_opens_no_agent():
+    """Scenario 填錯: the window stays with what was typed, says what a number looks
+    like, and nothing was handed to the command mode."""
+    app, _ = _app([])
+    out = _continue(app, typed="abc")
+    assert out["ran"] == []
+    assert out["still_asking"] and "不小於 0 的數字" in out["problem"]
+
+
+def test_escape_at_the_period_box_cancels_the_whole_continue():
+    """Scenario 取消: no agent, and the list is where the user was."""
+    app, _ = _app([])
+    out = _continue(app, escape=True)
+    assert out["ran"] == [] and out["back_to_the_list"]
+
+
+def test_a_later_press_can_still_fix_what_was_typed():
+    """The box is not a dead end: what was typed is still there to edit."""
+    app, _ = _app([])
+    ran: list[list[str]] = []
+    app.outside = lambda argv: ran.append(argv) or 0
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            await pilot.press("backspace", "a", "b", "c", "enter")
+            await pilot.pause()
+            assert isinstance(app.screen, tui.AskText), "the box is still up"
+            await pilot.press("backspace", "backspace", "backspace", "0", "enter")
+            await pilot.pause()
+    _run(go)
+    assert ran and ran[0][ran[0].index("--sync-period") + 1] == "0"
+
+
+def test_what_counts_as_a_sync_period():
+    assert tui.sync_period_problem("5") is None
+    assert tui.sync_period_problem(" 0.5 ") is None          # half a minute is 30 seconds
+    assert tui.sync_period_problem("0") is None
+    for bad in ("", "abc", "-1", "-0.5", "5 分", "nan", "inf"):
+        assert tui.sync_period_problem(bad) == tui.SYNC_PERIOD_PROBLEM, bad
+
+
+def test_a_plain_ask_text_gains_nothing_from_the_check():
+    """The check is opt-in. The windows that did not ask for one must look the same
+    and take anything: the working directory, for one, is text, not a number."""
+    app, _ = _app([])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+
+            async def push():
+                await app.push_screen(tui.AskText("工作目錄", "/tmp"))
+            app.call_after_refresh(push)
+            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            await pilot.pause()
+            assert not list(app.screen.query("#ask-problem"))   # no extra line
+            await pilot.press("a", "b", "c", "enter")           # not a number, and fine
+            await _wait(lambda: not isinstance(app.screen, tui.AskText), pilot)
+    _run(go)
+
+
+def test_the_period_flag_is_only_there_when_there_is_an_answer():
+    rows = [tui.Row("agora:a", ["a"], "a")]
+    assert tui.argv_for("continue", rows, "opencode", "/w") == [
+        ["continue", "session", "agora:a", "--agent", "opencode", "--dir", "/w"]]
+    assert tui.argv_for("continue", rows, "opencode", "/w", "0.5") == [
+        ["continue", "session", "agora:a", "--agent", "opencode", "--dir", "/w",
+         "--sync-period", "0.5"]]
+    # nothing else takes one
+    assert "--sync-period" not in tui.argv_for("merge", rows, "claude", None, "5")[0]
+
+
 def test_editing_a_session_the_cloud_lost_is_refused_too():
     paths, _ = _index((_hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "被刪了", sid="s1"), "## user\\nx\\n"))
     store.Index(paths).mark_missing(["01AAAAAAAAAAAAAAAAAAAAAAAA"])
