@@ -432,6 +432,33 @@ def test_an_offline_fork_keeps_writing_to_itself(claude_lab, capsys, monkeypatch
     assert "ZZ 第 1 次發言" in on_drive(b).joinpath("session.md").read_text(encoding="utf-8")
 
 
+def test_a_periodic_round_uploads_while_the_agent_is_still_running(env, capsys, monkeypatch):
+    """The e2e progress shape, detached: one periodic round over a confirmed session,
+    and the new sentence is on Drive without the agent having left. No agent process
+    runs here at all - that is the point: the round stages, the background sends,
+    and Drive has it on its own."""
+    monkeypatch.delenv("AGORA_UPLOAD", raising=False)   # detached, like the e2e
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    assert store.upload_batch(store.Drive(paths()), paths()) == []
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a, "raw_md5": "x"}}
+    run_obj = cli._Run(paths(), record)
+
+    cli._periodic_write(run_obj, cli.load_agent("opencode"))
+
+    doc = Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions" / ulid / "session.md"
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        try:
+            if "ZZ 第 1 次發言" in doc.read_text(encoding="utf-8"):
+                return
+        except OSError:
+            pass
+        time.sleep(0.2)
+    raise AssertionError("定期寫回一次之後，Drive 上還沒有第一句")
+
+
 # --- the second continue on the same session --------------------------------------
 
 def test_a_foreground_rescue_clears_the_old_target_out_of_the_outbox(env, capsys, monkeypatch):

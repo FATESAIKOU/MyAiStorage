@@ -438,3 +438,30 @@ def test_one_session_that_cannot_be_deleted_does_not_hold_up_the_next(env, monke
     assert background.run(paths) == 0
     assert store.queued_for_trash(paths) == {stuck}
     assert not (env / "agora" / "sessions" / after).exists(), "the one behind it still went"
+
+
+def test_a_periodic_write_back_lands_on_drive_while_the_agent_is_still_running(env):
+    """The e2e progress shape, detached: A confirmed on Drive, one periodic-style
+    write-back staged over it the way `_save` does (update, remember, start the
+    background), and the new sentence is on Drive without anyone waiting for an
+    agent to leave. No agent runs here at all - that is the point: the upload has
+    to happen on its own."""
+    paths = store.Paths.from_env()
+    ulid = _staged(paths)
+    assert store.upload_batch(store.Drive(paths), paths) == []   # A confirmed
+    hdr = store.Index(paths).header(ulid)
+    hdr["title"] = "第一句之後"
+    body = "## user\nZZPROGRESS 第一句\n"
+
+    saved, ok = cli._save(paths, hdr, body, b'{"v": 2}', update=True, kind="continue")
+
+    assert saved == f"agora:{ulid}" and ok, "the write-back is staged and handed off"
+    doc = env / "agora" / "sessions" / ulid / "session.md"
+
+    def landed(_paths):
+        try:
+            return "ZZPROGRESS 第一句" in doc.read_text(encoding="utf-8")
+        except OSError:
+            return False
+    landed.__name__ = "the new sentence on Drive"
+    _wait_until(landed, paths, timeout=60.0)
