@@ -760,9 +760,13 @@ class AskText(ModalScreen):
     `check` is optional and is what makes this a question with an answer it can
     refuse: it is called with what was typed and returns None to go ahead, or the
     line to show instead of closing. Then the window stays open with the text still
-    in it, because the user is one edit away from a value that works (design「互動
-    模式：接續前確認同步間隔」). Without `check` nothing is added to the window and
-    every other caller sees exactly what it saw before.
+    in it - the Input keeps what was typed and is focused again, so the user is one
+    edit away from a value that works (design「互動模式：接續前確認同步間隔」).
+    Without `check` nothing is added to the window and every other caller sees
+    exactly what it saw before.
+
+    The box takes the focus from `App.AUTO_FOCUS`, which is what focuses the first
+    focusable widget on a new screen; nothing here has to ask for it.
     """
     BINDINGS = [Binding("escape", "dismiss(None)", "取消")]
 
@@ -778,9 +782,6 @@ class AskText(ModalScreen):
                 yield Static("", id="ask-problem", classes="note")
             # Nothing to choose between here: Enter submits what was typed (review E3)
             yield Static("Enter 確定   Esc 取消", classes="hint")
-
-    def on_mount(self) -> None:
-        self.query_one(Input).focus()
 
     @on(Input.Submitted)
     def done(self, event: Input.Submitted) -> None:

@@ -1279,7 +1279,8 @@ def _continue(app, typed=None, *, escape=False, tab=False):
             if typed is not None:
                 for _ in str(tui.SYNC_PERIOD_DEFAULT):  # clear what was offered
                     await pilot.press("backspace")
-                await pilot.press(*typed)
+                if typed:
+                    await pilot.press(*["space" if ch == " " else ch for ch in typed])
             await pilot.press("escape" if escape else "enter")
             await pilot.pause()
             asking = isinstance(app.screen, tui.AskText)
@@ -1295,7 +1296,7 @@ def test_the_period_box_offers_five_minutes_and_enter_uses_it():
     it is for, and Enter continues with --sync-period 5."""
     app, _ = _app([])
     out = _continue(app, tab=True)
-    assert out["title"] == tui.SYNC_PERIOD_TITLE
+    assert "分鐘" in out["title"] and "0 ＝ 不自動同步" in out["title"]
     assert out["offered"] == "5"
     assert out["tab_kept"]                     # Tab does not move the table under it
     argv = out["ran"][0]
@@ -1326,6 +1327,24 @@ def test_escape_at_the_period_box_cancels_the_whole_continue():
     assert out["ran"] == [] and out["back_to_the_list"]
 
 
+def test_an_emptied_box_is_not_zero():
+    """Nothing is not 0. `""` is not a number, so it stays in the box like any other
+    refusal - reading it as "take the default" would be a different answer from the
+    one the user gave (review T2)."""
+    app, _ = _app([])
+    out = _continue(app, typed="")
+    assert out["ran"] == [] and out["still_asking"]
+    assert "不小於 0 的數字" in out["problem"]
+
+
+def test_only_whitespace_is_not_a_number_either():
+    """`float(" ")` raises, and the box must treat it the same way (review T2)."""
+    app, _ = _app([])
+    out = _continue(app, typed="   ")
+    assert out["ran"] == [] and out["still_asking"]
+    assert "不小於 0 的數字" in out["problem"]
+
+
 def test_a_later_press_can_still_fix_what_was_typed():
     """The box is not a dead end: what was typed is still there to edit."""
     app, _ = _app([])
@@ -1344,6 +1363,8 @@ def test_a_later_press_can_still_fix_what_was_typed():
             await pilot.press("backspace", "a", "b", "c", "enter")
             await pilot.pause()
             assert isinstance(app.screen, tui.AskText), "the box is still up"
+            assert str(app.screen.query_one(Input).value) == "abc", \
+                "what was typed is still there to edit"
             await pilot.press("backspace", "backspace", "backspace", "0", "enter")
             await pilot.pause()
     _run(go)
