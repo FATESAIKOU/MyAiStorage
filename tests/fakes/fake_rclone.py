@@ -9,6 +9,14 @@ FAKE_RCLONE_RECORD_STDIN=1 also appends what stdin was to
 $FAKE_REMOTE/../stdin.log: `/dev/null` when the caller opened it on the void,
 `fifo` when it inherited one (a pipe the test is holding open, so a child that
 tried to read would block), `closed`, or `other` (a terminal, a file).
+
+FAKE_RCLONE_PURGE_AFTER=<file>: another machine deletes a folder *now*. The file
+holds {"after": <needle>, "purge": <path under the folder id>}. The first call
+matching the needle (matched the way FAKE_RCLONE_FAIL matches, listing included)
+does its own work first, then that folder goes, and the file goes with it - one
+shot. A test can put a deletion exactly between two of the uploader's calls, e.g.
+right after the listing that decided an update's id was still there, without
+racing a sleep.
 """
 
 import hashlib
@@ -180,4 +188,22 @@ elif cmd == "purge":
     shutil.rmtree(target)
 else:
     fail(f"fake rclone does not support {cmd}")
+
+
+def purge_after():
+    """Another machine's delete, placed exactly between two calls (see the docstring)."""
+    trigger = os.environ.get("FAKE_RCLONE_PURGE_AFTER")
+    if not trigger:
+        return
+    try:
+        spec = json.loads(Path(trigger).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not _should_fail(spec["after"]):
+        return
+    Path(trigger).unlink(missing_ok=True)   # one shot, before the work below
+    shutil.rmtree(root / spec["purge"], ignore_errors=True)
+
+
+purge_after()
 snapshot()

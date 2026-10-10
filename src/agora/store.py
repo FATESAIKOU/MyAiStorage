@@ -649,6 +649,35 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         #「.update 而 Drive 沒有」again - and Y goes up in this one (V1).
         left.extend(u for u in gone if (paths.outbox / u).is_dir())
 
+    if any(u in entries for u in updates):
+        # The listing above decided these ids were still there, but the copies below
+        # only land after a whole batch of them - and another machine may delete one
+        # in between, which would put the session back (review resurrect). So look
+        # once more, right here, and rescue on the spot whatever is already gone;
+        # the window shrinks to this one listing plus the copies, which are small
+        # and fast now that a pass sends only what each entry names (review N1).
+        # What is still left over - one call between this look and the copies - is
+        # written down in the design's Risks; the next round's L7 catches it.
+        again = _listing_with_md5(drive)
+        if isinstance(again, StoreError):
+            # Same rule as above (V6): a listing that fails is not seeing it there
+            # either, so the updates wait for a round that can see.
+            pending = [u for u in updates if u in entries]
+            say(f"上傳前再列一次 Drive 失敗，{len(pending)} 筆更新留在 outbox 等下一次：{again}")
+            for u in pending:
+                entries.pop(u)
+                left.append(u)
+        elif isinstance(again, dict):
+            for ulid in [u for u in updates if u in entries]:
+                if ulid not in again:
+                    new_id = _rescue_deleted(paths, paths.outbox / ulid, ulid, say, notices)
+                    entries.pop(ulid, None)
+                    if new_id and new_id not in entries and (paths.outbox / new_id).exists():
+                        entries[new_id] = _entry_md5s(paths.outbox / new_id)
+                    if (paths.outbox / ulid).is_dir():
+                        left.append(ulid)
+        # None: Drive has no sessions/ at all - not evidence of a deletion (N12).
+
     # The raw each entry names, as read with its md5s - not every raw-* in the
     # folder: the one `stage` carried over from the previous version is only there
     # for a list built before the swap, and sending it again is what made each pass

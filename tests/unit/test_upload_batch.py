@@ -873,3 +873,44 @@ def test_a_stage_between_the_list_and_the_raw_copy_does_not_stop_the_batch(env, 
     assert "第二版" in doc
     raw = h.agora_of(h.split_document(doc)[0])["raw"]["file"]
     assert (env / "agora" / "sessions" / folder.name / raw).is_file()
+
+
+# --- the listing->copy window --------------------------------------------------
+
+
+def test_an_update_deleted_between_the_listing_and_the_copy_is_rescued_not_sent(env, monkeypatch):
+    """The resurrect race (review resurrect): the round's listing saw A, another machine
+    deletes A, then the copies land. Without a look right before the copies, the batch
+    puts A back and no rescue ever happens; with it, A stays deleted and the work goes
+    up as a session of its own.
+
+    Deterministic: the fake itself purges A the moment the round's listing returns
+    (FAKE_RCLONE_PURGE_AFTER, one shot), and every call is slow, so the shape is the
+    real slow-upload one without racing a sleep.
+    """
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "原本的")
+    assert store.upload_batch(store.Drive(paths), paths) == []   # A is on Drive
+    folder = store.stage(paths, _kept_header(ulid, "改過了"), "## user\n改過了\n", b'{"v": 2}')
+    store.remember(paths, folder)
+    store.mark_update(folder)                     # whoever updates an id marks it
+    drive = store.Drive(paths)                    # folder id cached: no calls below
+    trigger = env.parent / "purge-after.json"
+    trigger.write_text(json.dumps({"after": "lsjson", "purge": f"sessions/{ulid}"}),
+                       encoding="utf-8")
+    monkeypatch.setenv("FAKE_RCLONE_PURGE_AFTER", str(trigger))
+    monkeypatch.setenv("FAKE_RCLONE_DELAY", "0.5")
+    said: list[str] = []
+
+    left = store.upload_batch(drive, paths, warn=said.append)
+
+    assert left == [], f"沒東西該留在 outbox：{left}"
+    assert not trigger.exists(), "the purge hook never fired - the test proved nothing"
+    assert not (env / "agora" / "sessions" / ulid).exists(), "A 被刪掉後又被傳回去了"
+    assert any("已被別台刪除" in s for s in said), said
+    new_ids = sorted(p.name for p in (env / "agora" / "sessions").iterdir() if p.is_dir())
+    assert len(new_ids) == 1 and new_ids[0] != ulid, new_ids
+    text = (env / "agora" / "sessions" / new_ids[0] / "session.md").read_text(encoding="utf-8")
+    new_hdr, body = h.split_document(text)
+    assert [p["id"] for p in h.agora_of(new_hdr)["parents"]] == [f"agora:{ulid}"]
+    assert new_hdr["title"] == "改過了" and "改過了" in body, "另存的是這次改過的那一份"
