@@ -185,19 +185,27 @@ def test_a_round_writes_while_the_agent_is_still_running(env, capsys, monkeypatc
 
 def test_nothing_new_is_not_written(env, capsys, monkeypatch):
     """Scenario「沒有新內容不寫」: one round answers, the rest have nothing, so exactly
-    one version is staged and the later rounds say so in the log."""
+    one version is staged and the later rounds say so in the log.
+
+    The rounds are driven directly, not slept through: under load a fixed sleep can
+    end before the second round ever runs, and then "more than one round ran" is a
+    wish about the scheduler rather than an assertion about the code."""
     env.speak_rounds = 1
-    env.sleep = 2.0               # long enough for the first round's upload plus another
     _, a, _ = _import(capsys)
     staged = _stage_spy(monkeypatch)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a, "raw_md5": None}}
+    run_obj = cli._Run(paths(), record)
+    agent = cli.load_agent("opencode")
 
-    code, out, _ = _continue(capsys, a)
+    for _ in range(3):
+        cli._periodic_write(run_obj, agent)
 
-    assert code == 0 and out == a
     assert len(staged) == 1, [s[1][:40] for s in staged]
+    assert "ZZ 第 1 次發言" in staged[0][1], "the one stage is the answering round"
     rounds = [line for line in log_text().splitlines() if "定期寫回" in line]
-    assert len(rounds) >= 2, f"more than one round has to have run: {rounds}"
-    assert any("沒有新內容" in line for line in rounds), rounds
+    assert len(rounds) == 3, f"three rounds ran: {rounds}"
+    assert "已寫回" in rounds[0] and all("沒有新內容" in line for line in rounds[1:]), rounds
     assert (paths().outbox / a.split(":")[1]).exists() is False, "nothing left waiting"
 
 
@@ -378,17 +386,34 @@ def test_the_redirect_is_put_back_when_the_agent_is_done(env, capsys, monkeypatc
 
 # --- a fork's own session, offline -------------------------------------------------
 
-def test_an_offline_fork_keeps_writing_to_itself(env, capsys, monkeypatch):
+def test_an_offline_fork_keeps_writing_to_itself(claude_lab, capsys, monkeypatch, tmp_path):
     """The fork's session is unconfirmed from the start; rounds write to it and the
-    uploader's "Drive never had it" rule keeps every version new (continue-fork F1)."""
-    _, a, _ = _import(capsys)
-    env.sleep = 1.5
+    uploader's "Drive never had it" rule keeps every version new (continue-fork F1).
+
+    The agent is scripted, not slept: every wait-sync releases on a round's log line,
+    so the run holds the terminal across write-backs however slow the machine is -
+    a fixed sleep can end before a round ever runs under load."""
+    a = _import_claude(capsys)
+    _script(claude_lab, monkeypatch, "append:ZZ 第 1 次發言,wait-sync,wait-sync,exit")
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")
+    terminal = tmp_path / "terminal.txt"
+    fd = os.open(terminal, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "agora.cli", "continue", "session", a, "--agent", "claude",
+             "--dir", str(claude_lab["work"]), "--sync-period", SECONDS, "--fork"],
+            stdout=fd, stderr=fd, stdin=subprocess.DEVNULL, env=dict(os.environ),
+            cwd=str(tmp_path))
+        assert proc.wait(timeout=120) == cli.EXIT_IN_OUTBOX
+    finally:
+        os.close(fd)
 
-    code, b, err = _continue(capsys, a, "--fork")
-
-    monkeypatch.delenv("FAKE_RCLONE_FAIL")
-    assert code == cli.EXIT_IN_OUTBOX and b != a
+    text = terminal.read_text(encoding="utf-8")
+    ids = [t for t in text.split() if t.startswith("agora:") and len(t) == len("agora:") + 26]
+    assert ids, "the fork printed no agora id"
+    b = ids[0]
+    assert b != a
+    assert "FAKE-AGENT-ERROR" not in text, text[-500:]
     assert "ZZ 第 1 次發言" in document_of(b), "a round wrote the fork while offline"
     # N2: stdout's id is the fork itself, not a session rescued later - and no second
     # new session exists anywhere, not even one that never reached Drive. Drive alone
@@ -400,6 +425,7 @@ def test_an_offline_fork_keeps_writing_to_itself(env, capsys, monkeypatch):
     assert [hdr["id"] for hdr in others] == [b], "index 裡只有 A 和 B，沒有第二個新 Session"
     assert not [hdr for hdr in others if h.agora_of(hdr).get("relation") == "continue"], \
         "B 沒有被另存成 continue"
+    monkeypatch.delenv("FAKE_RCLONE_FAIL")
     assert store.upload_batch(store.Drive(paths()), paths()) == []
     kept = sorted(p.name for p in (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions").iterdir())
     assert kept == sorted({a.split(":")[1], b.split(":")[1]}), "the fork itself, nothing rescued"
