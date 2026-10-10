@@ -543,8 +543,20 @@ def test_a_session_deleted_mid_run_is_rescued_exactly_once(sync):
     gone = False
     for _ in range(3):
         purge_ulid(sync, ulid_a)
-        if poll_until(f"{id_a} 從 Drive 消失", 30.0,
-                      lambda: ulid_a not in drive_names(sync), step=1.0):
+        # Two consecutive absences, not one: a copy already in flight when the
+        # first look happens can still land afterwards and bring A back, and a
+        # single sighting would call that "deleted" too early.
+        quiet = 0
+
+        def _stayed_gone() -> bool:
+            nonlocal quiet
+            if ulid_a not in drive_names(sync):
+                quiet += 1
+            else:
+                quiet = 0
+            return quiet >= 2
+
+        if poll_until(f"{id_a} 連續兩次從 Drive 消失", 30.0, _stayed_gone, step=1.0):
             gone = True
             break
         time.sleep(2.0)

@@ -103,3 +103,5 @@
 - [中途快照停在工具呼叫中間] → 接受；最後一次會整份覆蓋。
 - [接續中不做 sync，別台在接續期間改的 header（title、tags）會每 5 分鐘被本機的舊版蓋回去（原本只在結束時蓋一次）] → 接受，寫進文件。
 - [斷電後被截斷的 raw 可能被當成完成版上傳] → stage 加 fsync；上傳端比對 header 的 raw md5 另開工單。
+- [存在檢查與 copy 之間還剩一個呼叫的窗口] → `.update` 的 entry 在 copy 前一刻再列一次檔、不在就地另存，窗口從「整個 raws 批次」縮到「這一次列檔＋幾次 copy」；再小的窗口（列檔回來之後、copy 落地之前被刪）仍然會把 Session 傳回去，靠下一輪的 L7 發現並另存。整合測試的 purge 迴圈因此要連續兩次看到「不在」才算刪掉，否則在途的 copy 會騙過它。
+- [never_confirmed 在 import 的 entry 還沒送出就 continue 時會自我延續] → 鄰近風險，這次不修：只要 A 的 outbox entry 在某個 `_save` 當下是沒記號的（例如 import 自己的 entry 還沒上傳完、continue 就開始），之後每輪都會寫出沒記號的新版，上傳器就一直把它當新建直接傳。目前的整合測試在 continue 之前等 entry 排空，所以走不到這條；**不要**用「在 index 裡就不算 never_confirmed」去堵——那會讓 F1（離線 import 的新 Session 寫回時被誤判成被別台刪掉）回來。
