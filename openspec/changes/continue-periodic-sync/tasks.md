@@ -1,6 +1,6 @@
 ## 1. 實作（在 continue-fork 合進這個分支之後）
 
-- [ ] 1.1 量測（真的 opencode 與 claude，只用 `agora-test`，短間隔）：`opencode export` 的一致性、閒置時兩次 export 是否 byte 相同、和正在跑的 TUI 同時 export 的副作用；Claude 閒置時會不會 append 非訊息的行；典型的 raw 大小。結果寫進 design 的「讀到一半不能寫壞」與 Risks，再定「沒有新內容」的判斷
+- [x] 1.1 量測（PM 10-10，`tests/integration/test_sync_measure.py`，結果寫在 design「讀到一半不能寫壞」）（真的 opencode 與 claude，只用 `agora-test`，短間隔）：`opencode export` 的一致性、閒置時兩次 export 是否 byte 相同、和正在跑的 TUI 同時 export 的副作用；Claude 閒置時會不會 append 非訊息的行；典型的 raw 大小。結果寫進 design 的「讀到一半不能寫壞」與 Risks，再定「沒有新內容」的判斷
 - [ ] 1.2 `cmd_continue`：`Popen`＋`wait(timeout)` 迴圈；`--sync-period <分鐘>`（預設 5、0 ＝ 不自動同步、小數可、負數或非數字在開 agent 前 exit 1、換算後下限 0.1 秒；不另設環境變數）；agent 還活著時迴圈不離開；SIGINT 行為不變；一開頭同機正在接續中就拒絕（fork 除外）
 - [ ] 1.3 把 `_finish` 拆成「收」與「寫」；`_write_target`（三步，定期 `check_drive=False`、最後一次與補存 `check_drive=True`）；update 照 `same_id` 加 `never_confirmed`；md5 只在 `_save` 成功後記；Claude 的大小／mtime 預檢；`previous_sources` 去重
 - [ ] 1.4 最後一次：沒有新內容仍確認目標、被刪就另存；沒寫時仍踢上傳並照規則給 0／3；印出寫到的 id、另存說明、失敗次數；寫回還在跑時先印「正在寫回…」；`unsaved-launches` 規則

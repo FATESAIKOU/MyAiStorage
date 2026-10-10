@@ -6,7 +6,7 @@
 - [x] 1.4 打開就離開：印 B 的 id、訊息、exit 依步驟 6、不寫 `unsaved-launches`；有新內容時 exit 取較差的；pending 記錄的欄位（`fork`、`saved_md5` 等，design「pending 記錄」）
 - [x] 1.5 import 的 S7：fork 子 Session 不觸發另建；continue／merge 子 Session 照舊
 - [x] 1.6 單元測試：spec 的九個 Scenario；A 的 session.md 與索引列 byte 不變；`FORK_NOTE` 的格式；對 B 再 continue／merge
-- [ ] 1.7 用真的 claude 實測：A 以 tool_use 結尾時 fork 之後 `--resume` 是否被拒絕（結果記在這裡）；用真的 opencode 實測 revert 與 model
+- [ ] 1.7（claude 部分已完成：PM 10-10 跑 `tests/integration/test_fork_real.py`，A 以沒回覆的 tool_use 結尾、以及平行 tool_use 第一個沒結果時，fork 之後 `claude --resume -p` 都 rc=0 正常回覆，所以只補 NO_REPLY 文字就夠，不需要補 tool_result；最後一個 uuid 行不是對話行時看得到 A 的第一則。opencode 的 revert 兩個測試卡在 `opencode import` 的「Missing key summary.diffs」，查明中）用真的 claude 實測：A 以 tool_use 結尾時 fork 之後 `--resume` 是否被拒絕（結果記在這裡）；用真的 opencode 實測 revert 與 model
 - [ ] 1.8 整合測試：claude 與 opencode 各補一個 fork（只用 `agora-test`）
 
 ## 2. 收尾

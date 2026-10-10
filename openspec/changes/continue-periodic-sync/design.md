@@ -60,7 +60,11 @@
 
 ### 讀到一半不能寫壞（P10）
 - Claude：`_split_lines` 會丟掉寫到一半的最後一行（review S10）；其他行壞掉會丟 `AgentError`。
-- opencode：`opencode export` 的一致性、閒置時兩次 export 是否 byte 相同、和正在跑的 TUI 同時 export 的副作用、Claude 閒置時會不會 append 非訊息的行，**都還沒量過**。tasks 1.1 先用真的 agent 量，結果寫進這份 design 之後才承諾「沒有新內容就不寫」。
+- 量測（tasks 1.1，PM 10-10 用真的 agent 跑 `tests/integration/test_sync_measure.py`，493b2ea）：
+  - opencode 閒置時兩次 `opencode export` byte 相同；另一輪對話進行中並行 export 6 次，0 次失敗或讀不出來（每次 0.5～1 秒）；
+  - Claude 閒置 20 秒，jsonl 的大小、行數、mtime 都沒變，沒有 append 非訊息的行；
+  - 所以「raw 的 md5 相同就是沒有新內容」成立，Claude 的大小／mtime 預檢也成立。
+  - 測試用的短 Session：opencode 匯出 4.7～7.6 KB，Claude jsonl 約 106 KB（20 行，大部分是系統行）。
 - 中途快照：定期寫回可能停在工具呼叫中間（Claude 有 tool_use 沒 tool_result；opencode 有 running 的 tool part）。這個版本會上 Drive，別台拿去 continue／merge／fork 時看到的是停在中間的對話。接受，寫進 Risks；最後一次寫回會整份覆蓋。fork 的 `append_native` 已經處理「結尾是沒有回答的 tool_use」。
 - 定期寫回的任何例外都吞掉、記 log、計數，下一輪再試；agent 照樣跑。
 
