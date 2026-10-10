@@ -21,8 +21,16 @@ FAKE_AGENT_MODE:
     append      add one user + one assistant message to the session
     noop        change nothing
     crash       exit 2
-    sleep:<n>   sleep <n> seconds first, then behave as append
+    sleep:<n>   sleep n seconds first, then behave as append
     ignore-int  ignore SIGINT while sleeping, then append
+FAKE_AGENT_SCRIPT=append:第一句,wait-sync,partial,wait-sync,append:第二句,exit
+               play that script instead of FAKE_AGENT_MODE (see _script.py): say
+               something, wait for a periodic write-back, leave the session caught
+               mid-message, say something else, leave. FAKE_SYNC_SIGNAL names the
+               file `wait-sync` watches for one more line in. Only for a call that
+               names a session - a headless `run` (summarize) is untouched.
+FAKE_OPENCODE_PROBE_STDIN=<path>  on export, write whatever is on stdin to that
+                         file: what proves our export is not reading the terminal
 FAKE_OPENCODE_FAIL=export|import|delete  make that subcommand exit 1
 FAKE_OPENCODE_DROP=<n>   import the payload but keep only the first <n> messages
                          (simulates opencode's silent onConflictDoNothing)
@@ -41,6 +49,9 @@ from pathlib import Path
 import signal
 import sys
 import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _script  # the FAKE_AGENT_SCRIPT player, shared with fake_claude
 
 HOME = Path(os.environ.get("FAKE_HOME", os.environ["HOME"]))
 STORE = HOME / "opencode-sessions"
@@ -83,6 +94,10 @@ def save(session_id: str, payload: dict):
 
 
 def act(session_id: str):
+    script = os.environ.get("FAKE_AGENT_SCRIPT")
+    if script:
+        act_scripted(session_id, script)   # the script replaces FAKE_AGENT_MODE
+        return
     mode = os.environ.get("FAKE_AGENT_MODE", "noop")
     head, _, tail = mode.partition(":")
     if head == "sleep":
@@ -96,6 +111,10 @@ def act(session_id: str):
         sys.exit(2)
     if head != "append":
         return
+    say(session_id, "ZZAPPEND 使用者又問了一句。")
+
+
+def say(session_id: str, text: str) -> None:
     payload = load(session_id)
     now = int(time.time() * 1000)
     base = len(payload["messages"])
@@ -104,7 +123,7 @@ def act(session_id: str):
                   "time": {"created": now}},
          "parts": [{"id": f"prt_FAKE{base:04d}a", "sessionID": session_id,
                     "messageID": f"msg_FAKE{base:04d}a", "type": "text",
-                    "text": "ZZAPPEND 使用者又問了一句。"}]},
+                    "text": text}]},
         {"info": {"id": f"msg_FAKE{base:04d}b", "sessionID": session_id, "role": "assistant",
                   "parentID": f"msg_FAKE{base:04d}a", "time": {"created": now + 1},
                   "providerID": "opencode",
@@ -116,9 +135,51 @@ def act(session_id: str):
     save(session_id, payload)
 
 
+def mid_message(session_id: str) -> None:
+    """What a session looks like while a tool is still running: the call is there,
+    its state says `running`, there is no output and no `time.completed`.
+
+    The reading version turns it into one `[tool] …` line, so a write-back that lands
+    here is a conversation stopped in the middle of a tool call - which the fork path
+    has to cope with, and the next write-back overwrites whole (design「讀到一半不能
+    寫壞」).
+    """
+    payload = load(session_id)
+    now = int(time.time() * 1000)
+    base = len(payload["messages"])
+    message_id = f"msg_FAKEPART{base:04d}"
+    previous = next((m["info"]["id"] for m in reversed(payload["messages"])
+                     if m.get("info", {}).get("role") == "user"), "")
+    payload["messages"].append({
+        "info": {"id": message_id, "sessionID": session_id, "role": "assistant",
+                 "parentID": previous, "time": {"created": now},
+                 "providerID": "opencode",
+                 "modelID": os.environ.get("FAKE_OPENCODE_MODEL", "space-bunny-free")},
+        "parts": [{"id": f"prt_FAKEPART{base:04d}", "sessionID": session_id,
+                   "messageID": message_id, "type": "tool",
+                   "callID": f"call_FAKEPART{base:04d}", "tool": "bash",
+                   "time": {"start": now},
+                   "state": {"status": "running",
+                             "input": {"command": "sleep 3600"}}}]})
+    save(session_id, payload)
+
+
+def act_scripted(session_id: str, script: str) -> None:
+    _script.run(script,
+                lambda text: say(session_id, text),
+                lambda: mid_message(session_id))
+
+
 def do_export(params: list[str]):
     if os.environ.get("FAKE_OPENCODE_FAIL") == "export":
         die("injected export failure")
+    probe = os.environ.get("FAKE_OPENCODE_PROBE_STDIN")
+    if probe:
+        # Read whatever is on stdin - an empty read means our caller gave us
+        # /dev/null, which is what an export must get: during a periodic write-back
+        # the terminal belongs to the agent, and a read there eats the user's line.
+        with open(probe, "a") as f:
+            f.write(sys.stdin.read())
     session_id = params[0]
     if os.environ.get("FAKE_OPENCODE_EXPORT_SCOPE") == "project":
         # An opencode that only knows the current project's sessions - what

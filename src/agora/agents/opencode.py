@@ -510,14 +510,22 @@ class OpencodeAgent:
 
     def _run(self, argv: list[str], cwd: Path | str | None = None,
              stdout: int | None = None,
-             env: dict | None = None) -> subprocess.CompletedProcess:
+             env: dict | None = None,
+             stdin: int | None = None) -> subprocess.CompletedProcess:
         """Every call gets a deadline (OC7) and reports it as an AgentError, so a
-        wedged opencode becomes a retryable failure instead of a hung command."""
+        wedged opencode becomes a retryable failure instead of a hung command.
+
+        `stdin` is DEVNULL wherever a child of ours could otherwise reach for the
+        terminal - the periodic write-back runs while the agent owns it (design
+        「不弄亂 agent 的畫面」). Left alone it inherits our stdin, and a read there
+        eats the user's next line.
+        """
         seconds = env_seconds("AGORA_OPENCODE_TIMEOUT", DEFAULT_CLI_TIMEOUT)
         child_env = {**os.environ, **env} if env else None
         try:
             return subprocess.run(argv, cwd=str(cwd) if cwd else None, timeout=seconds,
                                   env=child_env,
+                                  **({"stdin": stdin} if stdin is not None else {}),
                                   **({"stdout": stdout, "stderr": subprocess.PIPE}
                                      if stdout is not None else {"capture_output": True}))
         except subprocess.TimeoutExpired:
@@ -531,12 +539,16 @@ class OpencodeAgent:
         directory (measured, including when the session's own project directory no
         longer exists) - but when it is given, $PWD goes with it, because opencode
         reads the project from $PWD.
+
+        stdin is /dev/null: an export is ours, not the user's, and during a periodic
+        write-back the terminal belongs to the agent - a child that read there would
+        take the line the user is typing (design「不弄亂 agent 的畫面」).
         """
         with tempfile.TemporaryDirectory(prefix="agora-opencode-") as tmp:
             target = Path(tmp) / "export.json"
             with open(target, "wb") as out:
                 proc = self._run([agent_cmd(self.name), "export", session_id],
-                                 cwd=cwd, stdout=out,
+                                 cwd=cwd, stdout=out, stdin=subprocess.DEVNULL,
                                  env={"PWD": str(cwd)} if cwd else None)
             if proc.returncode != 0:
                 message = _err(proc)

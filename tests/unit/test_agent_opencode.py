@@ -11,6 +11,7 @@ import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve
 
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import shutil
 import sqlite3
@@ -350,6 +351,37 @@ def test_module_exposes_the_adapter_cli_imports():
     assert oc.ADAPTER.name == "opencode"
     assert isinstance(agora.cli.load_agent("opencode"), oc.OpencodeAgent)
     assert hasattr(oc.ADAPTER, "append_native")
+
+
+# --- the export must not touch the terminal (design「不弄亂 agent 的畫面」) ---
+
+
+@contextmanager
+def stdin_saying(text: str):
+    """This process's stdin, saying `text`, for the length of the block."""
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, text.encode())
+    os.close(write_fd)
+    saved = os.dup(0)
+    try:
+        os.dup2(read_fd, 0)
+        yield
+    finally:
+        os.dup2(saved, 0)
+        os.close(saved)
+        os.close(read_fd)
+
+
+def test_an_export_cannot_read_the_terminal(fake, monkeypatch):
+    """A periodic write-back happens while the agent owns the terminal. An export
+    that inherited our stdin would take the line the user is typing, so it is given
+    /dev/null - and the fake proves it by reading whatever arrived."""
+    probe = fake / "export-stdin.log"
+    monkeypatch.setenv("FAKE_OPENCODE_PROBE_STDIN", str(probe))
+    with stdin_saying("ZZTYPED 使用者正在打的一行\n"):
+        exported = oc.ADAPTER.export("default")
+    assert exported.session_id == "ses_ZZSRCID0000000000000000AA"
+    assert probe.read_text() == ""      # /dev/null, not the terminal
 
 
 def test_never_touches_the_real_opencode_storage(fake, workdir):
