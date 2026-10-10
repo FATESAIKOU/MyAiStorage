@@ -215,7 +215,7 @@ def _lost_in_cloud(paths: store.Paths, agora_id: str) -> bool:
     deleted.
     """
     ulid = _ulid_of(agora_id)
-    if ulid in store.waiting_ulids(paths):
+    if ulid in store.waiting_ulids(paths) and store.never_confirmed(paths, ulid):
         return False               # not up yet: ours, not another machine's delete
     try:
         remote = store.Drive(paths).list_sessions()
@@ -974,6 +974,9 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
         how = "被別台機器刪掉了" if was_here else "在這台機器上被刪掉了"
         note = (f"[agora] {run.target} 在你接續的時候{how}，"
                 f"這次的對話另存成 {hdr['id']}；原來那個保持被刪掉的狀態")
+        old_ulid = _ulid_of(run.target)
+        for prefix in ("", ".done-", ".old-", ".tmp-"):
+            shutil.rmtree(paths.outbox / f"{prefix}{old_ulid}", ignore_errors=True)
     agora = h.agora_of(hdr)
     old = agora.get("source") or {}
     if old.get("session_id") and old.get("session_id") != exported.session_id:
@@ -1049,7 +1052,13 @@ def _periodic_write(run: "_Run", agent: Agent) -> None:
                 outcome = f"失敗（第 {run.failures} 次）：{e}"
             else:
                 if saved is None:
-                    outcome = "沒有新內容"
+                    if store.outbox_ulids(run.paths) and not store.uploader_is_running(run.paths):
+                        from agora import background
+                        run.failures += 1
+                        outcome = f"沒有新內容（上傳未完成，第 {run.failures} 次）"
+                        background.start(run.paths)
+                    else:
+                        outcome = "沒有新內容"
                 elif saved[1]:
                     outcome = f"已寫回 {target}"
                 else:                # staged here, but it did not reach the outbox's exit

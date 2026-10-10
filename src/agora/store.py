@@ -256,6 +256,10 @@ def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None, *,
         header.setdefault("agora", {})["raw"] = {"file": name, "md5": md5, "size": len(raw_bytes)}
     else:
         header.setdefault("agora", {}).pop("raw", None)
+    if folder.is_dir():
+        for p in folder.glob("raw-*"):
+            if not (tmp / p.name).exists():
+                shutil.copyfile(p, tmp / p.name)
     _write_file(tmp / "session.md", h.dump_document(header, body).encode("utf-8"))
     if update:
         mark_update(tmp, kind)          # into the folder that is about to go in, not the one that is there
@@ -629,7 +633,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         # Y went into the outbox while we were here: this round takes it too, so a
         # foreground `push` ends with the edit in Drive rather than still waiting.
         for ulid, new_id in rescued.items():
-            if new_id and new_id not in entries:
+            if new_id and new_id not in entries and (paths.outbox / new_id).exists():
                 entries[new_id] = _entry_md5s(paths.outbox / new_id)
         # X still in the outbox was not rescued: an edit landed while we were reading it,
         # or we could not read it. Either way it is still waiting - the next round meets
@@ -637,6 +641,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         left.extend(u for u in gone if (paths.outbox / u).is_dir())
 
     raws = [f"{u}/{n}" for u in entries for n in _raw_names(paths.outbox / u)]
+    raws = [r for r in raws if (paths.outbox / r).is_file()]
     if raws:
         try:
             _copy_batch(drive, paths, raws)
@@ -714,6 +719,19 @@ def _rescue_deleted(paths: Paths, folder: Path, ulid: str, say, notices: bool = 
         say(f"{ulid} 雲端沒有，而且讀不出這筆（{e}）；留在 outbox 等你處理")
         _put_back(done, folder)
         return None
+    index = Index(paths)
+    agora = h.agora_of(hdr)
+    source = agora.get("source") or {}
+    if source.get("session_id"):
+        for child in index.children(ulid):
+            chdr = index.header(child) or {}
+            cagora = h.agora_of(chdr)
+            csource = cagora.get("source") or {}
+            if (cagora.get("relation") == "continue"
+                    and csource.get("agent") == source.get("agent")
+                    and csource.get("session_id") == source.get("session_id")):
+                shutil.rmtree(done, ignore_errors=True)
+                return child
     new_ulid = h.new_ulid()
     new_hdr = copy.deepcopy(hdr)
     # A continue is the one write that is a relation of its own; an edit is not, and
@@ -777,7 +795,7 @@ def _replaced_raws(folder: Path, keep: str | None, remote_files: dict) -> list[s
     """The older raws this upload replaced, to clear in one call (N7: only for the
     entries that actually left the outbox, so a later round can do the rest)."""
     return [n for n in remote_files
-            if n.startswith("raw-") and n != keep and n not in _raw_names(folder)]
+            if n.startswith("raw-") and n != keep]
 
 
 def _raw_names(folder: Path) -> list[str]:

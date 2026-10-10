@@ -187,7 +187,7 @@ def test_nothing_new_is_not_written(env, capsys, monkeypatch):
     """Scenario「沒有新內容不寫」: one round answers, the rest have nothing, so exactly
     one version is staged and the later rounds say so in the log."""
     env.speak_rounds = 1
-    env.sleep = 1.6               # long enough for the first round's upload plus another
+    env.sleep = 2.0               # long enough for the first round's upload plus another
     _, a, _ = _import(capsys)
     staged = _stage_spy(monkeypatch)
 
@@ -382,7 +382,7 @@ def test_an_offline_fork_keeps_writing_to_itself(env, capsys, monkeypatch):
     """The fork's session is unconfirmed from the start; rounds write to it and the
     uploader's "Drive never had it" rule keeps every version new (continue-fork F1)."""
     _, a, _ = _import(capsys)
-    env.sleep = 0.85
+    env.sleep = 1.5
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")
 
     code, b, err = _continue(capsys, a, "--fork")
@@ -391,7 +391,7 @@ def test_an_offline_fork_keeps_writing_to_itself(env, capsys, monkeypatch):
     assert code == cli.EXIT_IN_OUTBOX and b != a
     assert "ZZ 第 1 次發言" in document_of(b), "a round wrote the fork while offline"
     assert store.upload_batch(store.Drive(paths()), paths()) == []
-    kept = [p.name for p in (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions").iterdir()]
+    kept = sorted(p.name for p in (Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions").iterdir())
     assert kept == sorted({a.split(":")[1], b.split(":")[1]}), "the fork itself, nothing rescued"
     assert "ZZ 第 1 次發言" in on_drive(b).joinpath("session.md").read_text(encoding="utf-8")
 
@@ -601,3 +601,109 @@ def test_a_hard_kill_leaves_the_work_and_the_recovery_writes_it_back(claude_lab,
     # under a new id because "nobody wrote the pending one back".
     assert "ZZKILL 第一句" in document_of(a)
     assert len(_extra_sessions(a)) == 0, "the recovery did not invent a second session"
+
+
+def test_final_write_rescues_when_target_queued_in_outbox_and_deleted_on_drive(env, capsys, monkeypatch):
+    """T1 / T4: target has a queued .update in outbox, and Drive lost it.
+    The final write-back must check Drive (not short-circuit), rescue into a new ID,
+    print the new ID, and not duplicate rescues."""
+    env.speak_rounds = 1
+    env.sleep = 0.5
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+
+    real_round = cli._periodic_write
+    deleted = {"done": False}
+
+    def round_then_queue_and_delete(run_, agent):
+        real_round(run_, agent)
+        if not deleted["done"]:
+            deleted["done"] = True
+            hdr = store.Index(paths()).header(ulid)
+            raw = (paths().mirror / ulid / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+            body = (paths().mirror / ulid / "session.md").read_text(encoding="utf-8")
+            store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+            assert ulid in store.outbox_ulids(paths())
+            shutil.rmtree(on_drive(a))
+            # store.sync(paths()) is NOT called
+
+    monkeypatch.setattr(cli, "_periodic_write", round_then_queue_and_delete)
+    code, out, err = _continue(capsys, a)
+
+    assert deleted["done"]
+    assert code == 0
+    assert out != a, f"expected rescued id, got {out}"
+    kept = _extra_sessions(a)
+    assert len(kept) == 1, f"expected exactly 1 rescue session, got {[k['id'] for k in kept]}"
+    assert kept[0]["id"] == out
+    assert [p["id"] for p in h.agora_of(kept[0])["parents"]] == [a]
+    assert "另存" in err
+
+
+def test_write_one_writes_when_moved_here_even_if_md5_unchanged(env, capsys):
+    """T6: when target moved, write must not be skipped even if raw md5 matches last_md5."""
+    _, a, _ = _import(capsys)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a, "raw_md5": "x"}}
+    run_obj = cli._Run(paths(), record)
+    agent = cli.load_agent("opencode")
+    exported = agent.export("ses_a")
+    md5 = store.hashlib.md5(exported.raw).hexdigest()
+    run_obj.last_md5 = md5
+
+    saved, target, _ = cli._write_one(paths(), run_obj, exported, agent, check_drive=False)
+    assert saved is None
+
+    child_id = f"agora:{h.new_ulid()}"
+    child_hdr = {
+        "id": child_id, "type": "session", "title": "child",
+        "agora": {"header": h.HEADER_VERSION, "created_at": "2026-10-10T00:00:00Z",
+                  "updated_at": "2026-10-10T00:00:00Z", "relation": "continue",
+                  "parents": [{"id": a, "raw_md5": "x"}],
+                  "source": {"agent": "opencode", "session_id": "ses_a"}},
+    }
+    store.Index(paths()).put(child_id.split(":")[1], "dummy", child_hdr, "dummy body")
+    saved2, target2, _ = cli._write_one(paths(), run_obj, exported, agent, check_drive=False)
+    assert saved2 is not None, "write must not be skipped when target moved"
+    assert target2 == child_id
+
+
+def test_periodic_write_counts_exception_failure(env, capsys, monkeypatch):
+    """T7: when an exception happens in _periodic_write, run.failures is incremented."""
+    _, a, _ = _import(capsys)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a, "raw_md5": "x"}}
+    run_obj = cli._Run(paths(), record)
+    agent = cli.load_agent("opencode")
+
+    def broken_collect(launch):
+        raise RuntimeError("collect failed")
+
+    monkeypatch.setattr(agent, "collect", broken_collect)
+    assert run_obj.failures == 0
+    cli._periodic_write(run_obj, agent)
+    assert run_obj.failures == 1
+    assert "失敗（第 1 次）" in log_text()
+
+
+def test_follow_updates_run_target():
+    """T8: _follow updates run.target to the new target ID."""
+    record = {"agora_id": "agora:01M4AAA", "agent": "opencode", "dir": "/tmp"}
+    run_obj = cli._Run(paths(), record)
+    assert run_obj.target == "agora:01M4AAA"
+    cli._follow(run_obj, "agora:01M4BBB")
+    assert run_obj.target == "agora:01M4BBB"
+
+
+def test_periodic_write_detects_unuploaded_items_when_uploader_idle(env, capsys, monkeypatch):
+    """T5: when outbox has unuploaded items and uploader is idle, foreground notices and counts failure."""
+    _, a, _ = _import(capsys)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a, "raw_md5": "x"}}
+    run_obj = cli._Run(paths(), record)
+    agent = cli.load_agent("opencode")
+    (paths().outbox / a.split(":")[1]).mkdir(parents=True, exist_ok=True)
+    env.speak_rounds = 0
+    cli._periodic_write(run_obj, agent)
+    assert run_obj.failures >= 1
+    assert "上傳未完成" in log_text()
