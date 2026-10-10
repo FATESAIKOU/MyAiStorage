@@ -449,9 +449,8 @@ def test_append_native_leaves_a_answered_tool_use_alone(claude_env):
 
 
 def test_append_native_stands_in_when_only_the_first_of_two_tools_came_back(claude_env):
-    """Claude writes a line per content block, so a turn that calls two tools is two
-    lines and the line after them can hold the *first* call's result. The unfinished
-    one is still a question, and looking only at the last line would miss it."""
+    """Two calls in one turn, the first one's result home and the second one's not:
+    the unfinished one is still a question."""
     raw = C._pack_raw([
         '{"type": "user", "sessionId": "s", "uuid": "u2", "parentUuid": null,'
         ' "isSidechain": false, "message": {"role": "user", "content": "ZZ 兩件事"}}',
@@ -465,6 +464,54 @@ def test_append_native_stands_in_when_only_the_first_of_two_tools_came_back(clau
     ], {})
     assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == \
         C.ADAPTER.turns(raw) + [("assistant", [base.NO_REPLY])] + FORK
+
+
+def test_two_tool_lines_with_the_second_answered_and_the_first_not(claude_env):
+    """The same shape the first of the pair, in the order a real run writes them: two
+    lines of tool_use, and the result that came back is the second one's.
+
+    Starting the collection at the last line that said something would begin at the
+    second tool_use, see its result, and call the turn finished - while the first call
+    is still unanswered (review M1).
+    """
+    raw = C._pack_raw([
+        '{"type": "user", "sessionId": "s", "uuid": "u2", "parentUuid": null,'
+        ' "isSidechain": false, "message": {"role": "user", "content": "ZZ 兩件事"}}',
+        '{"type": "assistant", "sessionId": "s", "uuid": "u3", "parentUuid": "u2",'
+        ' "isSidechain": false, "message": {"role": "assistant", "content": ['
+        '{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"path": "a"}}]}}',
+        '{"type": "assistant", "sessionId": "s", "uuid": "u4", "parentUuid": "u3",'
+        ' "isSidechain": false, "message": {"role": "assistant", "content": ['
+        '{"type": "tool_use", "id": "toolu_2", "name": "Grep", "input": {"q": "b"}}]}}',
+        '{"type": "user", "sessionId": "s", "uuid": "u5", "parentUuid": "u4",'
+        ' "isSidechain": false, "message": {"role": "user", "content": ['
+        '{"type": "tool_result", "tool_use_id": "toolu_2", "content": "b.txt"}]}}',
+    ], {})
+    # the tool_use calls really are two lines, and the result names the second one
+    assert [lines for role, lines in C.ADAPTER.turns(raw) if role == "assistant"] == \
+        [["[tool] Read {'path': 'a'}"], ["[tool] Grep {'q': 'b'}"]]
+    added = objects(C.ADAPTER.append_native(raw, FORK))[len(objects(raw)):]
+    assert added[0]["message"]["content"][0]["text"] == base.NO_REPLY
+    assert added[0]["parentUuid"] == "u5"          # hangs off the line that came last
+
+
+def test_both_tools_answered_in_two_lines_needs_no_stand_in(claude_env):
+    """The other half of that pair: both results are home, so nothing is outstanding."""
+    raw = C._pack_raw([
+        '{"type": "user", "sessionId": "s", "uuid": "u2", "parentUuid": null,'
+        ' "isSidechain": false, "message": {"role": "user", "content": "ZZ 兩件事"}}',
+        '{"type": "assistant", "sessionId": "s", "uuid": "u3", "parentUuid": "u2",'
+        ' "isSidechain": false, "message": {"role": "assistant", "content": ['
+        '{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"path": "a"}}]}}',
+        '{"type": "assistant", "sessionId": "s", "uuid": "u4", "parentUuid": "u3",'
+        ' "isSidechain": false, "message": {"role": "assistant", "content": ['
+        '{"type": "tool_use", "id": "toolu_2", "name": "Grep", "input": {"q": "b"}}]}}',
+        '{"type": "user", "sessionId": "s", "uuid": "u5", "parentUuid": "u4",'
+        ' "isSidechain": false, "message": {"role": "user", "content": ['
+        '{"type": "tool_result", "tool_use_id": "toolu_2", "content": "b.txt"},'
+        '{"type": "tool_result", "tool_use_id": "toolu_1", "content": "a.txt"}]}}',
+    ], {})
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == C.ADAPTER.turns(raw) + FORK
 
 
 def test_append_native_leaves_both_tools_answered(claude_env):

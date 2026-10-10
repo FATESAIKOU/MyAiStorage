@@ -491,14 +491,14 @@ def _asked_without_an_answer(objs: list[dict]) -> bool:
 
     The other shape is a `tool_use` that never got its `tool_result` (F4). Parallel
     calls are why that looks further back than one line: claude writes a line per
-    content block, so a turn that calls two tools is two lines, and the line after
-    the last one may hold the result of the *first* call. So every `tool_use` from
-    the last turn that said something on is collected, and the ones with a matching
-    `tool_result` are taken back out.
+    content block, so a turn that calls two tools is two lines and the line after
+    them holds whichever result arrived first - so every `tool_use` from the last
+    question on is collected, and the ones with a matching `tool_result` are taken
+    back out.
 
-    What goes in is a stand-in reply, not a `tool_result`: an unpaired `tool_use` is
-    something the API may refuse outright, and what settles that is what a real
-    `claude --resume` does with it (tasks 1.7).
+    What goes in is a stand-in reply, not a `tool_result`. Measured on a real session
+    that ends on an unanswered `tool_use` (tasks 1.7): the fork resumes on the
+    stand-in alone, and the API does not refuse the unpaired call.
     """
     said = merge_turns([(role, [line for line in lines if not line.startswith("[skip ")])
                         for role, lines in _turns(objs)])
@@ -515,7 +515,7 @@ def _left_a_tool_waiting(objs: list[dict]) -> bool:
     """
     answered = set()
     asked = set()
-    for o in _from_the_last_question(objs):
+    for o in _after_the_last_question(objs):
         message = o.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         for block in content if isinstance(content, list) else []:
@@ -526,20 +526,29 @@ def _left_a_tool_waiting(objs: list[dict]) -> bool:
     return bool(asked - answered)
 
 
-def _from_the_last_question(objs: list[dict]) -> list[dict]:
-    """The lines from the last turn that said something on - the whole file when
-    there is none. "Said" is the reading version's own word for it: text or a tool
-    call, not a `[skip …]` line, not noise, not a tool result with no words."""
+def _after_the_last_question(objs: list[dict]) -> list[dict]:
+    """The lines that follow the last thing the user said - the whole file when there
+    is none.
+
+    Starting at the question and not at the last line that said anything is what a
+    parallel tool call needs: claude writes one line per content block, so a turn
+    that calls two tools is two lines, and the results come back in whichever order
+    they finish. Starting at the last line would begin at the *second* tool_use and
+    never see the first one, so a turn whose first call never came back would look
+    finished.
+
+    "Said" is the reading version's own word for it - text, not a `[skip …]` line,
+    not noise, and not a user line that carries nothing but tool results (that is the
+    results coming home, not the user asking again).
+    """
     def said(o: dict) -> bool:
         lines = _user_lines(o) if o.get("type") == "user" else _assistant_lines(o)
         return bool(lines) and any(not line.startswith("[skip ") for line in lines)
 
-    start = 0
     for index in reversed(range(len(objs))):
-        if objs[index].get("type") in ("user", "assistant") and said(objs[index]):
-            start = index
-            break
-    return objs[start:]
+        if objs[index].get("type") == "user" and said(objs[index]):
+            return objs[index + 1:]
+    return objs
 
 
 class ClaudeAgent:

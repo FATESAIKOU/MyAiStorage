@@ -790,6 +790,37 @@ def test_that_stand_in_reply_answers_the_question_not_the_abort(fake):
     assert added[2]["info"]["parentID"] == added[1]["info"]["id"]
 
 
+def only_unknown_parts() -> bytes:
+    """A session that ends on an assistant whose only content is a part type this
+    version has never heard of - a provider error's `retry`, or whatever the next
+    opencode adds. The reading version calls it `[skip retry]`, and the cross-agent
+    path drops those lines before deciding, so this adapter must too (review M3)."""
+    payload = json.loads(unreverted())
+    del payload["messages"][-1]                     # the assistant that answered
+    payload["messages"].append({
+        "info": {"id": "msg_ZZRETRY000000000000000", "sessionID": "ses_ZZSRCID0000000000000000AA",
+                 "role": "assistant", "parentID": "msg_ZZSRCID0000000000000003",
+                 "time": {"created": 1790214300000},
+                 "error": {"name": "ProviderError", "data": {"message": "ZZ -provider-出錯"}}},
+        "parts": [{"id": "prt_ZZRETRY000000000000000", "sessionID": "ses_ZZSRCID0000000000000000AA",
+                   "messageID": "msg_ZZRETRY000000000000000", "type": "retry",
+                   "attempt": 1}]})
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def test_append_native_ignores_an_assistant_of_only_unknown_parts(fake):
+    """Same rule as the claude adapter and the cross-agent path: a `[skip …]` line is
+    not the user speaking again. Without this the fork note would be glued to a
+    question the model never saw answered either."""
+    raw_bytes = only_unknown_parts()
+    assert oc.ADAPTER.turns(raw_bytes)[-1] == ("assistant", ["[skip retry]"])
+    out = oc.ADAPTER.append_native(raw_bytes, FORK)
+    assert oc.ADAPTER.turns(out) == \
+        oc.ADAPTER.turns(raw_bytes) + [("assistant", [base.NO_REPLY])] + FORK
+    reading = base.format_reading(oc.ADAPTER.turns(out))
+    assert reading.index(base.NO_REPLY) < reading.index(FORK[0][1][0])
+
+
 def test_append_native_copies_the_mode_a_was_in(fake):
     """`agent: plan` with `mode: build` is a shape opencode has no reason to be
     handed: the mode says how the assistant ran, and the fork's reply runs the same

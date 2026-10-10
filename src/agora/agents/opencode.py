@@ -738,11 +738,14 @@ class OpencodeAgent:
         last_question = next((m for m in reversed(said)
                               if (m.get("info") or {}).get("role") == "user"), None)
         # W1, on the same rule the claude adapter and cli._converted_turns use: what
-        # the reading version is about to show. Not the last message - an interrupted
-        # run or a provider error leaves an assistant with nothing in it (only
-        # step-start), which turns() drops, and the turn before it is still the user's
-        # open question. Decided on the message role the fork note would be glued to.
-        spoken = merge_turns(self.turns(json.dumps(payload, ensure_ascii=False).encode("utf-8")))
+        # the reading version is about to show, once its `[skip …]` lines are gone.
+        # Not the last message - an interrupted run or a provider error leaves an
+        # assistant with nothing in it (only step-start, or a retry part this version
+        # does not know), which the reading version drops, and the turn before it is
+        # still the user's open question.
+        spoken = merge_turns([(role, [line for line in lines if not line.startswith("[skip ")])
+                              for role, lines in self.turns(
+                                  json.dumps(payload, ensure_ascii=False).encode("utf-8"))])
         if body and spoken and spoken[-1][0] == "user":
             body.insert(0, ("assistant", [NO_REPLY]))
         fields = _role_fields(payload)
