@@ -632,7 +632,9 @@ def test_the_terminal_stays_quiet_while_the_agent_runs(sync):
     between = [line for line in lines[start + 1:end] if line.strip()]
     assert not any(line.lstrip().startswith("[agora]") for line in between), \
         f"agent 執行中終端機出現了 agora 的輸出：{between[:5]}"
-    assert between == [], \
+    # Since abce8ef the scripted fake prints FAKE-WAITING when a wait-sync step
+    # starts polling: that is the agent's own mark, not agora's output.
+    assert all(line.strip() == "FAKE-WAITING" for line in between), \
         f"起止標記之間該只有假 agent 自己的標記，卻多了：{between[:5]}"
 
     continue_log = sync["paths"].state / "continue.log"
