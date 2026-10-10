@@ -22,7 +22,7 @@ from textual.widgets import Input, Static
 
 from agora import header as h
 from agora import cache, store, tui
-from agora.agents.base import Exported, Listed
+from agora.agents.base import NO_REPLY, Exported, Listed
 
 
 def _hdr(ulid: str, title: str, relation: str = "import", agent: str | None = "opencode", sid: str = "ses_a") -> dict:
@@ -64,6 +64,18 @@ class FakeAgent:
     def turns(self, raw):
         msgs = json.loads(raw)["m"]
         return [("user" if i % 2 == 0 else "assistant", [m]) for i, m in enumerate(msgs)]
+
+    def append_native(self, raw, turns):
+        """The raw as it is, with `turns` hung on the end (Agent protocol, e080004).
+
+        The interactive mode never forks (F12), but every fake that stands in for an
+        agent answers the whole protocol, so one that does not is a trap for later.
+        """
+        msgs = list(json.loads(raw)["m"])
+        if len(msgs) % 2:          # the user turn sits at the odd position: unanswered
+            msgs.append(NO_REPLY)
+        msgs += ["\n".join(lines) for _role, lines in turns]
+        return json.dumps({"m": msgs}, ensure_ascii=False).encode()
 
     def search_text(self, keyword, only=None):
         self.searched = only

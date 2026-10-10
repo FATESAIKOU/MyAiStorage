@@ -48,6 +48,18 @@ class FakeAgent:
         return json.dumps({"id": "synth", "m": ["\n".join(lines) for _role, lines in turns]},
                           ensure_ascii=False).encode()
 
+    def append_native(self, raw, turns):
+        """The raw as it is, with `turns` hung on the end (Agent protocol, e080004).
+
+        This fake files the user turn at the odd position, so an odd count is a question
+        nobody answered: the stand-in reply goes in first, as an adapter does.
+        """
+        msgs = list(json.loads(raw)["m"])
+        if len(msgs) % 2:
+            msgs.append(cli.NO_REPLY)
+        msgs += ["\n".join(lines) for _role, lines in turns]
+        return json.dumps({"id": "appended", "m": msgs}, ensure_ascii=False).encode()
+
     def summarize(self, prompt, workdir):
         self.prompts.append((prompt, workdir))
         if self.answers:
