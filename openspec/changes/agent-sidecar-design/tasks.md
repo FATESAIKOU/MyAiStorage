@@ -17,7 +17,7 @@
 - [ ] 3.3 Angareion 收信迴圈（用 angareion 的程式介面）＋佇列＋依 urgency 投遞＋ack；假後端測試（含 304、重啟恢復、去重）。
 - [ ] 3.4 啟動與終止 team：home Session 的 `continue --fork --sync-period`、harness 載入、結束後存回／匯出；假 agora、假 agent 的單元測試。
 - [ ] 3.5 回報中繼：unix socket ＋ `SO_PEERCRED` 驗身分、`sidecar say` 薄指令；測試確認 agent 環境沒有 A2A token、送出的 `from` 是 team 身分。
-- [ ] 3.6 `ModelBroker` 介面與假 broker；真接 LLMGateway 等 2.1。
+- [x] 3.6 `ModelBroker` 介面與假 broker；真接 LLMGateway 等 2.1。
 
 ## 4. 分發（改動在 MyLinuxPool，照它的規則）
 
