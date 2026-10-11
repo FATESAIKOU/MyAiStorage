@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
 import sys
 import time
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from angareion.backend import (
     AuthenticationError,
@@ -38,7 +39,7 @@ from angareion.messages import (
     serialize_message,
     validate_address,
 )
-from angareion.state import LocalState
+from angareion.state import LocalState, identity_slug
 
 
 def parse_address(addr_str: str) -> dict[str, Any]:
@@ -93,10 +94,11 @@ def parse_address(addr_str: str) -> dict[str, Any]:
 
 
 class RateLimiter:
-    """Sliding-window rate limiter (80/min, 500/hour) with state in state_dir."""
+    """Sliding-window rate limiter (80/min, 500/hour) with state in state_dir and flock."""
 
-    def __init__(self, state_dir: Path):
+    def __init__(self, state_dir: Path, sleeper: Callable[[float], None] = time.sleep):
         self.state_file = state_dir / "rate_limit.json"
+        self.sleeper = sleeper
 
     def _load_history(self) -> list[float]:
         if self.state_file.is_file():
@@ -113,45 +115,65 @@ class RateLimiter:
         self.state_file.write_text(json.dumps(history) + "\n", encoding="utf-8")
 
     def acquire(self, max_wait: float = 10.0) -> None:
-        """Check limits (80/min, 500/hour). Wait if wait <= max_wait; else raise RateLimitError."""
-        now = time.time()
-        history = [t for t in self._load_history() if now - t < 3600.0]
+        """Check limits (80/min, 500/hour) with file locking (fcntl.flock)."""
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.state_file, "a+", encoding="utf-8") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                content = f.read().strip()
+                history: list[float] = []
+                if content:
+                    try:
+                        data = json.loads(content)
+                        if isinstance(data, list):
+                            history = [float(x) for x in data]
+                    except Exception:
+                        history = []
 
-        # 1-minute window (limit: 80)
-        recent_1m = [t for t in history if now - t < 60.0]
-        if len(recent_1m) >= 80:
-            oldest_in_window = min(recent_1m)
-            wait_needed = 60.0 - (now - oldest_in_window)
-            if wait_needed > 0:
-                if wait_needed <= max_wait:
-                    sys.stderr.write(f"Rate throttle: waiting {wait_needed:.1f}s before sending...\n")
-                    time.sleep(wait_needed)
-                    now = time.time()
-                    history = [t for t in history if now - t < 3600.0]
-                else:
-                    raise RateLimitError(
-                        f"Rate limit exceeded (80 messages/min). Required wait {wait_needed:.1f}s exceeds limit of {max_wait}s.",
-                        retry_after=int(wait_needed),
-                    )
+                now = time.time()
+                history = [t for t in history if now - t < 3600.0]
 
-        # 1-hour window (limit: 500)
-        if len(history) >= 500:
-            oldest_in_window = min(history)
-            wait_needed = 3600.0 - (now - oldest_in_window)
-            if wait_needed > 0:
-                if wait_needed <= max_wait:
-                    sys.stderr.write(f"Rate throttle: waiting {wait_needed:.1f}s before sending...\n")
-                    time.sleep(wait_needed)
-                    now = time.time()
-                    history = [t for t in history if now - t < 3600.0]
-                else:
-                    raise RateLimitError(
-                        f"Rate limit exceeded (500 messages/hour). Required wait {wait_needed:.1f}s exceeds limit of {max_wait}s.",
-                        retry_after=int(wait_needed),
-                    )
+                # 1-minute window (limit: 80)
+                recent_1m = [t for t in history if now - t < 60.0]
+                if len(recent_1m) >= 80:
+                    oldest_in_window = min(recent_1m)
+                    wait_needed = 60.0 - (now - oldest_in_window)
+                    if wait_needed > 0:
+                        if wait_needed <= max_wait:
+                            sys.stderr.write(f"Rate throttle: waiting {wait_needed:.1f}s before sending...\n")
+                            self.sleeper(wait_needed)
+                            now = time.time()
+                            history = [t for t in history if now - t < 3600.0]
+                        else:
+                            raise RateLimitError(
+                                f"Rate limit exceeded (80 messages/min). Required wait {wait_needed:.1f}s exceeds limit of {max_wait}s.",
+                                retry_after=int(wait_needed),
+                            )
 
-        history.append(now)
-        self._save_history(history)
+                # 1-hour window (limit: 500)
+                if len(history) >= 500:
+                    oldest_in_window = min(history)
+                    wait_needed = 3600.0 - (now - oldest_in_window)
+                    if wait_needed > 0:
+                        if wait_needed <= max_wait:
+                            sys.stderr.write(f"Rate throttle: waiting {wait_needed:.1f}s before sending...\n")
+                            self.sleeper(wait_needed)
+                            now = time.time()
+                            history = [t for t in history if now - t < 3600.0]
+                        else:
+                            raise RateLimitError(
+                                f"Rate limit exceeded (500 messages/hour). Required wait {wait_needed:.1f}s exceeds limit of {max_wait}s.",
+                                retry_after=int(wait_needed),
+                            )
+
+                history.append(now)
+                f.seek(0)
+                f.truncate()
+                f.write(json.dumps(history) + "\n")
+                f.flush()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def get_backend(config: Config) -> Backend:
@@ -162,7 +184,13 @@ def get_backend(config: Config) -> Backend:
     return GitHubBackend.from_config(config)
 
 
-def cmd_send(args: argparse.Namespace, config: Config, backend: Backend, token: str = "") -> int:
+def cmd_send(
+    args: argparse.Namespace,
+    config: Config,
+    backend: Backend,
+    token: str = "",
+    sleeper: Callable[[float], None] = time.sleep,
+) -> int:
     """Handle `a2a send` subcommand."""
     # 1. Parse 'to' address
     try:
@@ -269,7 +297,7 @@ def cmd_send(args: argparse.Namespace, config: Config, backend: Backend, token: 
             return 1
 
     # 7. Rate throttle
-    rate_limiter = RateLimiter(config.state_dir)
+    rate_limiter = RateLimiter(config.state_dir, sleeper=sleeper)
     try:
         rate_limiter.acquire(max_wait=10.0)
     except RateLimitError as e:
@@ -280,16 +308,12 @@ def cmd_send(args: argparse.Namespace, config: Config, backend: Backend, token: 
     try:
         backend.post_message(args.channel, msg)
     except RateLimitError as e:
-        if e.retry_after <= 10:
-            sys.stderr.write(f"Rate limit hit, retrying in {e.retry_after}s...\n")
-            time.sleep(e.retry_after)
-            try:
-                backend.post_message(args.channel, msg)
-            except BackendError as e_inner:
-                sys.stderr.write(f"Error: {mask_token(str(e_inner), token)}\n")
-                return 2
-        else:
-            sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
+        sys.stderr.write(f"Rate limit hit, retrying in {e.retry_after}s...\n")
+        sleeper(float(e.retry_after))
+        try:
+            backend.post_message(args.channel, msg)
+        except BackendError as e_inner:
+            sys.stderr.write(f"Error: {mask_token(str(e_inner), token)}\n")
             return 2
     except (ChannelNotFoundError, MessageValidationError, ValueError) as e:
         sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
@@ -318,7 +342,7 @@ def cmd_inbox(args: argparse.Namespace, config: Config, backend: Backend, token:
     state = LocalState.load_or_create(config.state_dir, identity)
 
     # We maintain a cached message history in state_dir for rapid 304 polling
-    cache_file = config.state_dir / f"{state.identity_slug(identity) if hasattr(state, 'identity_slug') else 'inbox'}_cache.json"
+    cache_file = config.state_dir / f"{identity_slug(identity)}_cache.json"
     cached_messages_dict: dict[str, dict[str, Any]] = {}
     if cache_file.is_file():
         try:
@@ -326,7 +350,7 @@ def cmd_inbox(args: argparse.Namespace, config: Config, backend: Backend, token:
         except Exception:
             cached_messages_dict = {}
 
-    etag = state.etags.get("messages")
+    etag = state.etags.get("messages") if cached_messages_dict else None
     # If we have no cached messages, query since=None to ensure complete rebuild
     since_query = state.since if cached_messages_dict else None
 
@@ -494,7 +518,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None, backend: Backend | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    backend: Backend | None = None,
+    sleeper: Callable[[float], None] | None = None,
+) -> int:
     """Main entrypoint for the `a2a` command."""
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -503,6 +531,7 @@ def main(argv: Sequence[str] | None = None, backend: Backend | None = None) -> i
         parser.print_help(sys.stderr)
         return 1
 
+    active_sleeper = sleeper or time.sleep
     token_for_masking = ""
     try:
         config = load_config()
@@ -524,7 +553,7 @@ def main(argv: Sequence[str] | None = None, backend: Backend | None = None) -> i
 
     try:
         if args.subcommand == "send":
-            return cmd_send(args, config, active_backend, token=token_for_masking)
+            return cmd_send(args, config, active_backend, token=token_for_masking, sleeper=active_sleeper)
         elif args.subcommand == "inbox":
             return cmd_inbox(args, config, active_backend, token=token_for_masking)
         elif args.subcommand == "ack":
