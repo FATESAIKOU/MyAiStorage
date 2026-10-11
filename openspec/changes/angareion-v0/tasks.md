@@ -1,7 +1,7 @@
 ## 1. 移植與改名（負責：agy，各自的 worktree）
 
-- [ ] 1.1 從 branch `aicompany-p1` 移植可以沿用的：`src/angareion/messages.py`（訊息模型）、`github.py`（HTTP transport、ETag、分頁、`mask_token`）、`config.py` 的 token 讀取（只限擁有者權限）；拿掉 ack、`RateLimiter`、`rebuild_from_backend`、`a2a` 指令
-- [ ] 1.2 改名：console script `angareion`、環境變數 `ANGAREION_CONFIG`／`ANGAREION_STATE_DIR`／`ANGAREION_TOKEN_FILE`、設定與狀態目錄 `angareion`；`tests/conftest.py` 把 `ANGAREION_*` 指到暫存目錄
+- [x] 1.1 從 branch `aicompany-p1` 移植可以沿用的：`src/angareion/messages.py`（訊息模型）、`github.py`（HTTP transport、ETag、分頁、`mask_token`）、`config.py` 的 token 讀取（只限擁有者權限）；拿掉 ack、`RateLimiter`、`rebuild_from_backend`、`a2a` 指令
+- [x] 1.2 改名：console script `angareion`、環境變數 `ANGAREION_CONFIG`／`ANGAREION_STATE_DIR`／`ANGAREION_TOKEN_FILE`、設定與狀態目錄 `angareion`；`tests/conftest.py` 把 `ANGAREION_*` 指到暫存目錄
 
 ## 2. 四個介面
 

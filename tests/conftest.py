@@ -85,6 +85,12 @@ def isolated_home(tmp_path, monkeypatch, request):
     monkeypatch.setenv("AGORA_CONFIG", str(tmp_path / "config"))
     monkeypatch.setenv("AGORA_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("AGORA_STATE_DIR", str(tmp_path / "state"))
+    # Angareion reads nothing but these three (change angareion-v0, tasks 1.2):
+    # point them at the temporary directory so no test can reach the real
+    # ~/.config/angareion or the real token.
+    monkeypatch.setenv("ANGAREION_CONFIG", str(tmp_path / "angareion" / "config.json"))
+    monkeypatch.setenv("ANGAREION_STATE_DIR", str(tmp_path / "angareion-state"))
+    monkeypatch.setenv("ANGAREION_TOKEN_FILE", str(tmp_path / "angareion" / "token"))
     # opencode finds its database through XDG_* too; never let a unit test reach it (OC11).
     for var in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR"):
         monkeypatch.delenv(var, raising=False)
