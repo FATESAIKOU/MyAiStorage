@@ -22,6 +22,7 @@ from angareion.config import (
     load_token,
     mask_token,
 )
+from angareion.github import GitHubBackend, HttpTransport, HttpResponse
 from angareion.messages import Message
 
 __version__ = "0.1.0"
@@ -34,6 +35,9 @@ __all__ = [
     "Config",
     "ConfigError",
     "FakeBackend",
+    "GitHubBackend",
+    "HttpResponse",
+    "HttpTransport",
     "Message",
     "MessageListResult",
     "RateLimitError",
