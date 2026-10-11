@@ -24,7 +24,7 @@ class TokenMissingError(TokenError):
 
 
 class TokenPermissionError(TokenError):
-    """Raised when token file has invalid permissions (not 0600)."""
+    """Raised when token file has invalid permissions (not owner-only readable)."""
 
 
 def get_config_path() -> Path:
@@ -125,10 +125,15 @@ def save_config(config: Config, path: Path | str | None = None) -> None:
 
 
 def load_token(token_source: Config | Path | str | None = None) -> str:
-    """Read fine-grained PAT from file with 0600 mode requirement.
+    """Read fine-grained PAT from file with an owner-only mode requirement.
+
+    Accepts 0600 and 0400 (read-only mounts): group/other must have no
+    permission bits at all and the owner must be able to read. 0640, 0644,
+    0444 and the like are still rejected.
 
     Raises TokenMissingError if the file is absent.
-    Raises TokenPermissionError if the file permissions are not 0600 on POSIX.
+    Raises TokenPermissionError if group/other have any permission bits or
+    the owner cannot read on POSIX.
     Raises TokenError if the token file is empty or unreadable.
     """
     if isinstance(token_source, Config):
@@ -148,9 +153,10 @@ def load_token(token_source: Config | Path | str | None = None) -> str:
     if os.name == "posix":
         st = p.stat()
         mode = st.st_mode & 0o777
-        if mode != 0o600:
+        if mode & 0o077 or not mode & 0o400:
             raise TokenPermissionError(
-                f"Token file permissions must be 0600 (owner read/write only, got {oct(mode)}): {p}"
+                f"Token file permissions must be owner-only with owner read "
+                f"(0600 or 0400, got {oct(mode)}): {p}"
             )
 
     try:

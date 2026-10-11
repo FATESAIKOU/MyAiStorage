@@ -62,8 +62,8 @@ def test_load_token_missing_file_raises_error(tmp_path):
     assert "0600" in msg
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions required for 0600 check")
-@pytest.mark.parametrize("bad_mode", [0o644, 0o666, 0o777, 0o700, 0o400])
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions required for owner-only check")
+@pytest.mark.parametrize("bad_mode", [0o644, 0o666, 0o777, 0o640, 0o444, 0o440])
 def test_load_token_invalid_permissions_raises_error(tmp_path, bad_mode):
     token_file = tmp_path / f"token_{oct(bad_mode)}"
     _create_token_file(token_file, "ghp_PERM_TEST_TOKEN", mode=bad_mode)
@@ -72,7 +72,7 @@ def test_load_token_invalid_permissions_raises_error(tmp_path, bad_mode):
         load_token(token_file)
 
     msg = str(exc_info.value)
-    assert "permissions must be 0600" in msg
+    assert "owner-only" in msg
     assert oct(bad_mode) in msg
 
 

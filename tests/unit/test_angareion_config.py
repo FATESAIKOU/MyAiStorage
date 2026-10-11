@@ -10,10 +10,12 @@ import pytest
 from angareion.config import (
     Config,
     ConfigError,
+    TokenPermissionError,
     get_config_path,
     get_default_token_path,
     get_state_dir,
     load_config,
+    load_token,
     save_config,
 )
 
@@ -86,3 +88,26 @@ def test_config_validation_failures(tmp_path):
     bad_cfg.write_text(json.dumps({"channel_repo": "owner/repo"}), encoding="utf-8")
     with pytest.raises(ConfigError, match="Invalid identity"):
         load_config(bad_cfg)
+
+
+def _token_file(tmp_path, mode: int) -> Path:
+    p = tmp_path / f"token-{oct(mode)}"
+    p.write_text("ghp_FAKE_TOKEN_FOR_MODE_TEST\n", encoding="utf-8")
+    p.chmod(mode)
+    return p
+
+
+def test_load_token_accepts_0600(tmp_path):
+    assert load_token(_token_file(tmp_path, 0o600)) == "ghp_FAKE_TOKEN_FOR_MODE_TEST"
+
+
+def test_load_token_accepts_readonly_0400(tmp_path):
+    """Read-only mounts (/run/mlp-secrets is 0400): owner-only still holds."""
+    assert load_token(_token_file(tmp_path, 0o400)) == "ghp_FAKE_TOKEN_FOR_MODE_TEST"
+
+
+def test_load_token_rejects_group_readable_0440(tmp_path):
+    p = _token_file(tmp_path, 0o440)
+    with pytest.raises(TokenPermissionError) as excinfo:
+        load_token(p)
+    assert "ghp_FAKE_TOKEN_FOR_MODE_TEST" not in str(excinfo.value)
