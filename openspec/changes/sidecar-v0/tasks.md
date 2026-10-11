@@ -18,7 +18,7 @@
   - [x] 2.7.2 H2＋M4：只有 scheduler 執行緒改變 agent 狀態（`GET` 讀最後狀態）、每個 agent 同時只有一個狀態轉移（busy）
   - [x] 2.7.3 M1：`close` 遇到 `starting` 記 `closing`，open 完成後立刻 stop 並回報 exited
   - [x] 2.7.4 M2：`JobRegistry` 執行緒安全（1～2 秒併發測試）
-  - [ ] 2.7.5 M3：換把中途失敗 → waiting-quota＋`now + retry_interval` job＋log；一人的錯不影響別人
+  - [x] 2.7.5 M3：換把中途失敗 → waiting-quota＋`now + retry_interval` job＋log；一人的錯不影響別人
   - [ ] 2.7.6 M5：shutdown 先進入關閉中（open／poke／新 job 503）、停 scheduler、再逐一 close
   - [ ] 2.7.7 M6：補 U15（未部署不是重開候選）、U23（解除時刻已過 → `now + retry_interval`）測試
   - [ ] 2.7.8 L1／L3／L4／L5：driver 呼叫在鎖外、`every` 不補跑、本文 1 MB → 413、open 第一則輸入排隊不失敗

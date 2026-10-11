@@ -136,6 +136,7 @@ class FakeSessionStore:
     def __init__(self) -> None:
         self.sessions: dict[str, dict[str, Any]] = {}
         self.starts: list[dict[str, Any]] = []
+        self.fail_start: Exception | None = None  # raise from start(), for M3
         self._counter = 0
 
     def seed(
@@ -156,6 +157,9 @@ class FakeSessionStore:
         env: dict[str, str],
         merge_env: dict[str, str] | None = None,
     ) -> RunningSession:
+        if self.fail_start is not None:
+            error, self.fail_start = self.fail_start, None
+            raise error
         self._counter += 1
         ids = list(ids)
         if mode == "new":

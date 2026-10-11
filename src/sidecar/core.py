@@ -551,8 +551,36 @@ class SidecarCore:
                 self._flush_pending(rec)
 
     def _quota_exhausted(self, rec: AgentRecord, st: DriverState, now: float | None = None) -> None:
-        """D4: register the cooldown, then switch subscription or wait."""
+        """D4: register the cooldown, then switch subscription or wait.
+
+        Any failure while swapping lands the agent in waiting-quota with a
+        `now + retry_interval` job instead of vanishing (M3): the agent is
+        stopped if the failure came before the stop, and none of this reaches
+        the HTTP response or another agent.
+        """
         now = self._now() if now is None else now
+        state = {"stopped": False}
+        try:
+            self._swap(rec, st, now, state)
+        except Exception:
+            logger.exception(
+                "agent %s: the swap failed; waiting for the retry job", rec.id
+            )
+            if not state["stopped"]:
+                self._stop_quietly(rec)
+            self._wait_quota(rec, now, reopen_at=now + self._retry_interval)
+
+    def _stop_quietly(self, rec: AgentRecord) -> None:
+        try:
+            with self._lock:
+                driver = self._drivers.get(rec.agent)
+                handle = rec.handle
+            if handle is not None and driver is not None:
+                driver.stop(handle, graceful=True, timeout=self._close_timeout)
+        except Exception:
+            logger.exception("agent %s: stopping after the failed swap failed", rec.id)
+
+    def _swap(self, rec: AgentRecord, st: DriverState, now: float, state: dict) -> None:
         window = st.window if st.window in WINDOWS else "5h"
         if st.window not in WINDOWS:
             logger.warning(
@@ -600,6 +628,7 @@ class SidecarCore:
         # Stop first, let agora write the last conversation back (D4/D6).
         if rec.handle is not None and driver is not None:
             driver.stop(rec.handle, graceful=True, timeout=self._close_timeout)
+        state["stopped"] = True
         with self._lock:
             self._clear_pending(rec)
 

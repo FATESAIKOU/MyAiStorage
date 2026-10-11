@@ -310,6 +310,35 @@ def test_failed_cooldown_never_picks_the_same_id_back(tmp_path):
     assert source.cooldowns[0][0] == source.cooldowns[1][0] == "claude-personal"
 
 
+def test_swap_failure_goes_waiting_quota_with_a_retry_job(tmp_path):
+    """M3 scenario: store.start blows up after the stop; the agent retries later."""
+    core, driver, store, _source, clock, workdir = rig(tmp_path, retry_interval=300.0)
+    store.seed("agora:A")
+    core.open("t1", "claude-code", workdir, {"mode": "continue", "from": "agora:A"},
+              subscription={"id": "claude-personal"}, input="go")
+    core.open("t2", "claude-code", workdir, {"mode": "new"})  # the bystander
+    first = driver.handles[0]
+    driver.force_state(first, "quota_exhausted", window="5h", resets_at=iso(clock.t + 3600))
+    store.fail_start = RuntimeError("agora blew up")
+
+    core.tick()
+
+    rec = core.get("t1")
+    assert rec.state == STATE_WAITING_QUOTA
+    assert rec.reopen_at == clock.t + 300.0
+    jobs = core.list_jobs()
+    assert len(jobs) == 1 and jobs[0].auto is True
+    assert jobs[0].args["session"] == {"mode": "continue", "from": "agora:A"}
+    assert driver.stop_calls == [(first, True, 30.0)]  # stopped exactly once
+    assert core.get("t2").state == STATE_IDLE          # the bystander is untouched
+
+    # 到時重開成功，t1 回到 running
+    clock.t = 1000.0 + 300.0
+    core.tick()
+    assert core.get("t1").state in (STATE_IDLE, STATE_RUNNING)
+    assert core.list_jobs() == []
+
+
 def test_llmgateway_unreachable_during_swap_waits_with_a_retry_job(tmp_path):
     core, driver, store, source, clock, workdir = rig(tmp_path, retry_interval=300.0)
     _open_and_exhaust(core, driver, store, source, clock, workdir)
