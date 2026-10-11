@@ -18,7 +18,7 @@ import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Mapping
 
 from .jobs import Job, JobRegistry
 from .protocols import (
@@ -38,7 +38,6 @@ from .protocols import (
     AgentNotFoundError,
     AgentNotRunningError,
     BadRequestError,
-    ConflictError,
     DriverState,
     GatewayUnreachableError,
     IdConflictError,
