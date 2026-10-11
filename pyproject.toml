@@ -12,6 +12,7 @@ dependencies = [
 [project.scripts]
 agora = "agora.cli:main"
 a2a = "angareion.cli:main"
+sidecar = "sidecar.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
@@ -21,7 +22,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agora", "src/angareion"]
+packages = ["src/agora", "src/angareion", "src/sidecar"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]
