@@ -8,7 +8,7 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** agent 這一輪被打斷，接著收到那句話，停在提示處
 
 ### Requirement: 開啟
-`open` MUST 收：呼叫方給的 `id`、agent 種類、工作目錄（存在的絕對路徑，不存在 MUST 回 400，sidecar MUST NOT 建目錄）、繼承的 Session（new／continue／fork／merge；merge 可帶選填的 `by`，預設是 agent 種類）；subscription 的 id 與第一則輸入 MUST 是選填（subscription 省略時，sidecar 依挑選規則自己挑一個現在能用的）。呼叫方指定的 subscription 在冷卻中時 MUST 照辦。`id` 對應的 agent 還在 starting／running／idle 時 MUST 拒絕；在 waiting-quota 或 exited 時 MUST 用同一個 id 重開，waiting-quota 的自動重開 job MUST 一併刪掉。sidecar MUST 自己向 subscription 來源取得詳細資料（呼叫方不傳 key），把它轉成 agent 的環境變數，放在子行程的環境裡；這些值 MUST NOT 出現在命令列、log 或任何檔案。開出來的 Session MUST 在 agora 標頭的 tags 附加 `sidecar:<id>`，原有的 tags MUST NOT 被取代。
+`open` MUST 收：呼叫方給的 `id`、agent 種類、工作目錄（存在的絕對路徑，不存在 MUST 回 400，sidecar MUST NOT 建目錄）、繼承的 Session（new／continue／fork／merge；merge 可帶選填的 `by`，預設是 agent 種類）；subscription 的 id 與第一則輸入 MUST 是選填（subscription 省略時，sidecar 依挑選規則自己挑一個現在能用的）。呼叫方指定的 subscription 在冷卻中時 MUST 照辦。`id` 對應的 agent 還在 starting／running／idle 時 MUST 拒絕；在 waiting-quota 或 exited 時 MUST 用同一個 id 重開，waiting-quota 的自動重開 job MUST 一併刪掉。sidecar MUST 自己向 subscription 來源取得詳細資料（呼叫方不傳 key；merge 的 `by` 與 agent 種類不同時，替 `by` 另外用挑選規則挑一把），把它轉成 agent 的環境變數，放在子行程的環境裡；這些值 MUST NOT 出現在命令列、log 或任何檔案。開出來的 Session MUST 在 agora 標頭的 tags 附加 `sidecar:<id>`，原有的 tags MUST NOT 被取代。
 
 #### Scenario: fork 一個 team 的 home Session
 - **WHEN** `open`（id=t1、claude-code、fork 自 H、subscription=claude-personal、第一則輸入「讀 channel X」）
@@ -43,8 +43,12 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** 回 503 `gateway_unreachable`，什麼都沒開、沒有掛 job
 
 #### Scenario: merge 指定要約的 agent
-- **WHEN** `open` 的 session 是 `merge`、`by` 是 opencode、agent 是 claude-code
-- **THEN** 要約用 opencode 寫，環境變數來自 subscription；之後以 claude-code 接續那個新 Session
+- **WHEN** `open` 的 session 是 `merge`、`by` 是 opencode、agent 是 claude-code，subscription 指定 claude-personal
+- **THEN** 另外替 opencode 用 `Selector` 挑一把（經 `get(id, opencode)`），要約用 opencode 寫、環境變數來自那一把；之後以 claude-personal 的 claude-code 接續那個新 Session
+
+#### Scenario: merge 的要約沒有可用的 subscription
+- **WHEN** `by` 的種類沒有任何能用的 subscription
+- **THEN** 回 409 `no_subscription_for_merge`，什麼都沒開
 
 #### Scenario: 工作目錄不存在
 - **WHEN** `open` 的 `workdir` 不存在

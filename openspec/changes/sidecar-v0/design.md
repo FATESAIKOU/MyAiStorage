@@ -46,7 +46,7 @@ agent 清單、job 清單只在記憶體。sidecar 收到 SIGTERM 時，先對�
 
 LLMGateway 的共通 JSON 欄位以 LLMGateway 的 `gateway-v0` 規格（`specs/subscription-registry`）為準：`schema`／`id`／`provider`／`kind`／`agents`／`priority`／`models`／`endpoint`／`key`／`cooldown`／`available`。`schema` 比 sidecar 認得的更高時拒絕並說明，不默默解析。
 
-**open 的流程**：有給 `subscription` 就用它的 id（**指定的在冷卻中也照辦**，由呼叫方決定；一開起來用完就走下面的換把）；沒給就 `list` → `Selector.choose`。然後 `get(id, agent)` → `AgentDriver.env_for` →（merge 時以同一個 env 跑 `agora merge --agent <by>`）→ `SessionStore.start` → `launch`。
+**open 的流程**：有給 `subscription` 就用它的 id（**指定的在冷卻中也照辦**，由呼叫方決定；一開起來用完就走下面的換把）；沒給就 `list` → `Selector.choose`。然後 `get(id, agent)` → `AgentDriver.env_for` →（merge 時先做要約，見 D5）→ `SessionStore.start` → `launch`。
 
 **LLMGateway 的錯誤怎麼處理**
 
@@ -80,7 +80,9 @@ LLMGateway 的共通 JSON 欄位以 LLMGateway 的 `gateway-v0` 規格（`specs/
 
 ### D5 Session 與 tag
 
-- open 的 `session.mode`：`continue`、`fork`、`merge` 都經 `agora continue … --headless`（`merge` 先用 `agora merge --agent <by>` 做出新的 Session 再 continue；摘要是呼叫模型的，所以 `by` 的種類用同一個 subscription 的 env，不用機器上自己的登入）。
+- open 的 `session.mode`：`continue`、`fork`、`merge` 都經 `agora continue … --headless`（`merge` 先用 `agora merge --agent <by>` 做出新的 Session 再 continue；摘要是呼叫模型的，所以要約的 env 一律來自 subscription，不用機器上自己的登入）。
+  - `by` 與 `agent` 同種類：用 open 的那把 subscription 的 env。
+  - `by` 與 `agent` 不同種類：替 `by` 的種類另外用 `Selector` 挑一把（`list` → `choose(by, …)`），經 `get(id, by)` 取得，用 `by` 的 driver 的 `env_for` 跑 `agora merge --agent <by>`；open 指定的 subscription 只用在 `agent`。錯誤同 D4 的表（403／404／409／unreachable 都使 open 失敗、什麼都沒開）；`by` 的種類沒有任何能用的候選時回 409 `no_subscription_for_merge`。
 - **`new`**（agora 沒有「新建一個空 Session 再開 agent」的指令，這是 v0 的做法，PM 確認中）：sidecar 直接開 agent（沒有 agora 行程），agent 的 session id 從事件取得；每 `sync_period` 分鐘與 close／換把時用 `agora import session --external-session-id <id> --agent … --add-tag sidecar:<id>` 存進 agora（再次 import 是原地更新）。第一次存進去之後，`status.session` 才有 agora id；之後換把照 `continue` 那個 agora id 走。
 - **tag**：每個 open 出來的 Session 在標頭的 `tags` **附加** `sidecar:<id>`（本人 Q7）。附加不是取代：agora 的 `--header tags=…` 是整個取代（`overlay` 對 list 的語意），所以 agora 要提供附加的選項 `--add-tag <tag>`（可重複；`continue`、`fork`、`import` 都有；見 `session-continue` 的 delta）。不 fork 的 `continue` 會把 tag 加在原 Session 上，這是預期的。sidecar 本身不讀這個 tag；用途是人或程式在 agora 上查得到。
 - **新 Session 的 id**：`--headless` 時 stdout 屬於 agent，所以 agora 在 stderr 印一行 `agora-session <id>`（只有這一行有固定格式）；sidecar 讀它設定 `status.session`。
