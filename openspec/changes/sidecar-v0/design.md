@@ -65,7 +65,7 @@ agent 清單、job 清單只在記憶體。sidecar 結束時先對每個 agent �
 
 ### D7 設定
 
-- `~/.config/sidecar/config.json`（`SIDECAR_CONFIG` 可覆寫）：`port`、`subscription_source`（`llmgateway`＋連線設定，或 `file`＋路徑）、`agents`（各種類的執行檔路徑與額外參數）、`sync_period`（分鐘，預設 5）。
+- `~/.config/sidecar/config.json`（`SIDECAR_CONFIG` 可覆寫）：`port`（預設 8471；不在程式裡寫死，MyLinuxPool 的 `--check` 從設定讀）、`subscription_source`（`llmgateway`＋連線設定，或 `file`＋路徑）、`agents`（各種類的執行檔路徑與額外參數）、`sync_period`（分鐘，預設 5）。
 - 不含任何秘密。LLMGateway 的連線憑證由 `lgw connect` 自己處理。
 
 ### D8 版本與健康檢查（MyLinuxPool 的 `install.sh --check` 用）
