@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from angareion.backend import Cursor, Target
-from angareion.config import get_state_dir, identity_slug
+from angareion.config import identity_slug
 
 
 def cursor_file_path(state_dir: Path | str, identity: dict[str, Any]) -> Path:
