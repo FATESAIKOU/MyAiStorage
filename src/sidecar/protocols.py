@@ -389,6 +389,16 @@ class SessionStore(Protocol):
         """
         ...
 
+    def import_external(self, *, external_id: str, agent: str, tag: str) -> str:
+        """Store an agent's own session in agora (`agora import`, D5/3.5).
+
+        Used by `new` mode: there is no agora process, so the conversation is
+        imported periodically, and again on close and before a swap.  A
+        re-import of the same external id updates it in place.  Returns the
+        agora Session id; raises on failure.
+        """
+        ...
+
 
 @runtime_checkable
 class SubscriptionSource(Protocol):

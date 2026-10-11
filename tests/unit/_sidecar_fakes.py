@@ -148,10 +148,25 @@ class FakeSessionStore:
     def __init__(self) -> None:
         self.sessions: dict[str, dict[str, Any]] = {}
         self.starts: list[dict[str, Any]] = []
+        self.imports: list[dict[str, Any]] = []
         self.fail_start: Exception | None = None  # raise from start(), for M3
+        self.fail_import: Exception | None = None  # raise from import_external(), for 3.5
         self.start_gate: threading.Event | None = None  # block inside start(), for N1
         self.start_entered = threading.Event()
         self._counter = 0
+        self._imported_ids: dict[str, str] = {}
+
+    def import_external(self, *, external_id: str, agent: str, tag: str) -> str:
+        if self.fail_import is not None:
+            error, self.fail_import = self.fail_import, None
+            raise error
+        self.imports.append({"external_id": external_id, "agent": agent, "tag": tag})
+        agora_id = self._imported_ids.setdefault(
+            external_id, f"agora:imported-{len(self._imported_ids) + 1}"
+        )
+        entry = self.sessions.setdefault(agora_id, {"tags": set(), "messages": []})
+        entry["tags"].add(tag)
+        return agora_id
 
     def seed(
         self, agora_id: str, *, tags: tuple[str, ...] = (), messages: tuple[str, ...] = ()

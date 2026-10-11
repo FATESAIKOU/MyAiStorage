@@ -30,6 +30,7 @@ def build_core(config: Config) -> SidecarCore:
         retry_interval=config.retry_interval,
         poke_queue_timeout=config.poke_queue_timeout,
         close_timeout=config.close_timeout,
+        sync_period=config.sync_period * 60.0,  # `new` mode's import period (D5)
     )
 
 
@@ -60,7 +61,11 @@ def default_session_store(config: Config) -> Any | None:
     (`agora merge` has its own budget: a summarizer round trip is not a
     `close_timeout` thing - see the report.)
     """
-    return AgoraSessionStore(sync_period=config.sync_period, start_timeout=config.close_timeout)
+    return AgoraSessionStore(
+        sync_period=config.sync_period,
+        start_timeout=config.close_timeout,
+        import_timeout=config.close_timeout,
+    )
 
 
 def build_subscription_source(config: Config) -> Any | None:

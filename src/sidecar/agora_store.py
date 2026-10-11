@@ -39,6 +39,7 @@ AGORA_AGENT_NAMES = {"claude-code": "claude", "opencode": "opencode"}
 
 START_TIMEOUT = 60.0
 MERGE_TIMEOUT = 900.0  # one summarizer round trip can take minutes (D5)
+IMPORT_TIMEOUT = 60.0  # local files + a background upload starts; bounded (N2)
 STDERR_TAIL = 500  # kept lines, for error messages and debugging
 ERROR_TAIL_CHARS = 500
 
@@ -184,12 +185,50 @@ class AgoraSessionStore:
         sync_period: float | None = None,
         start_timeout: float = START_TIMEOUT,
         merge_timeout: float = MERGE_TIMEOUT,
+        import_timeout: float = IMPORT_TIMEOUT,
     ) -> None:
         #: argv prefix; production is `python -m agora.cli`, tests inject a fake.
         self._command = list(command or [sys.executable, "-m", "agora.cli"])
         self._sync_period = sync_period
         self._start_timeout = start_timeout
         self._merge_timeout = merge_timeout
+        self._import_timeout = import_timeout
+
+    def import_external(self, *, external_id: str, agent: str, tag: str) -> str:
+        """`agora import session --external-session-id … --add-tag …` (D5/3.5)."""
+        agora_agent = AGORA_AGENT_NAMES.get(agent)
+        if agora_agent is None:
+            raise AgoraSessionError(f"unsupported agent kind {agent!r}")
+        argv = [
+            *self._command,
+            "import", "session",
+            "--external-session-id", external_id,
+            "--agent", agora_agent,
+            "--add-tag", tag,
+        ]
+        try:
+            proc = subprocess.run(
+                argv,
+                env=child_env({}),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self._import_timeout,
+            )
+        except OSError as e:
+            raise AgoraSessionError(f"cannot run agora import: {e}") from e
+        except subprocess.TimeoutExpired:
+            raise AgoraSessionError(
+                f"agora import timed out after {self._import_timeout:g}s"
+            ) from None
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "").strip()[-ERROR_TAIL_CHARS:]
+            raise AgoraSessionError(f"agora import failed (rc={proc.returncode}): {tail}")
+        agora_id = _last_agora_id(proc.stdout or "")
+        if agora_id is None:
+            raise AgoraSessionError("agora import printed no Session id")
+        return agora_id
 
     def start(
         self,

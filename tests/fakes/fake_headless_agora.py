@@ -53,6 +53,15 @@ if argv[:1] == ["merge"]:
     print(os.environ.get("FAKE_AGORA_MERGE_ID", "agora:FAKEMERGED000000000000000"))
     sys.exit(0)
 
+if argv[:1] == ["import"]:
+    if os.environ.get("FAKE_AGORA_IMPORT_FAIL"):
+        print("fake import failure", file=sys.stderr)
+        sys.exit(1)
+    if os.environ.get("FAKE_AGORA_IMPORT_HANG"):
+        time.sleep(60)
+    print(os.environ.get("FAKE_AGORA_IMPORT_ID", "agora:FAKEIMPORTED00000000001"))
+    sys.exit(0)
+
 if not (argv[:1] == ["continue"] and argv[1:2] == ["session"]):
     print(f"fake agora does not support {argv}", file=sys.stderr)
     sys.exit(2)

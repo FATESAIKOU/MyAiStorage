@@ -190,6 +190,30 @@ def test_merge_timeout_is_bounded(tmp_path, monkeypatch):
     assert "timed out" in str(excinfo.value)
 
 
+def test_import_external_runs_agora_import(store):
+    built, fh, _workdir = store
+    agora_id = built.import_external(external_id="ses_claude_1", agent="claude-code",
+                                     tag="sidecar:t1")
+    argv = args_log(fh)[-1]
+    assert argv == ["import", "session", "--external-session-id", "ses_claude_1",
+                    "--agent", "claude", "--add-tag", "sidecar:t1"]
+    assert agora_id == "agora:FAKEIMPORTED00000000001"
+
+
+def test_import_external_failure_and_timeout_are_errors(tmp_path, monkeypatch):
+    fh = tmp_path / "fh"
+    monkeypatch.setenv("FAKE_HOME", str(fh))
+    built = AgoraSessionStore(command=[sys.executable, str(FAKE_AGORA)], import_timeout=0.3)
+    monkeypatch.setenv("FAKE_AGORA_IMPORT_FAIL", "1")
+    with pytest.raises(AgoraSessionError):
+        built.import_external(external_id="X", agent="claude-code", tag="t")
+    monkeypatch.delenv("FAKE_AGORA_IMPORT_FAIL")
+    monkeypatch.setenv("FAKE_AGORA_IMPORT_HANG", "1")
+    with pytest.raises(AgoraSessionError) as excinfo:
+        built.import_external(external_id="X", agent="claude-code", tag="t")
+    assert "timed out" in str(excinfo.value)
+
+
 def test_unknown_agent_and_mode_are_refused(store):
     built, fh, workdir = store
     with pytest.raises(AgoraSessionError):
