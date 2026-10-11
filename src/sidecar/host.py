@@ -144,12 +144,88 @@ class AgentHost:
                     return "working"
             except HerdrError:
                 pass
+        elif kind == "claude":
+            try:
+                screen = self.herdr.agent_read(agent_name, source="recent-unwrapped", lines=15)
+                if "esc to interrupt" in screen:
+                    return "working"
+            except HerdrError:
+                pass
 
         return status
 
-    def send_prompt(self, agent_name: str, text: str) -> dict[str, Any]:
-        """Atomically send prompt text to agent without --wait."""
+    def is_working(self, agent_name: str) -> bool:
+        """Check whether the agent is actively running a turn."""
+        rec = self.registry.get_by_name(agent_name)
+        kind = rec.agent_kind if rec else "opencode"
+        indicator = "esc to interrupt" if kind == "claude" else "esc interrupt"
+        try:
+            screen = self.herdr.agent_read(agent_name, source="recent-unwrapped", lines=15)
+            if indicator in screen:
+                return True
+        except Exception:
+            pass
+        status = self.get_agent_status(agent_name, agent_kind=kind)
+        return status == "working"
+
+    def interrupt(self, agent_name: str, timeout: float = 5.0) -> bool:
+        """Interrupt an actively running turn using esc keys without killing the agent.
+
+        D3 spike:
+        - If not working: does not send esc, returns True immediately.
+        - claude: send 'esc' 1 time (shows 'Interrupted · What should Claude do instead?').
+        - opencode: send 'esc' 2 times (first time only shows 'esc again to interrupt').
+        - wait until working indicator ('esc to interrupt' / 'esc interrupt') disappears from screen.
+        """
+        if not self.is_working(agent_name):
+            return True
+
+        rec = self.registry.get_by_name(agent_name)
+        kind = rec.agent_kind if rec else "opencode"
+        indicator = "esc to interrupt" if kind == "claude" else "esc interrupt"
+
+        if kind == "claude":
+            self.herdr.agent_send_keys(agent_name, "esc")
+        else:
+            self.herdr.agent_send_keys(agent_name, "esc")
+            self.herdr.agent_send_keys(agent_name, "esc")
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                screen = self.herdr.agent_read(agent_name, source="recent-unwrapped", lines=15)
+                if indicator not in screen:
+                    return True
+            except Exception:
+                return True
+            time.sleep(0.02)
+
+        return False
+
+    def send_prompt(
+        self,
+        agent_name: str,
+        text: str,
+        interrupt_if_working: bool = False,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Atomically send prompt text to agent without --wait.
+
+        If interrupt_if_working is True and the agent is actively working,
+        interrupts via esc before sending the prompt.
+        """
+        if interrupt_if_working:
+            self.interrupt(agent_name, timeout=timeout)
         return self.herdr.agent_prompt(agent_name, text, wait=False)
+
+    def interrupt_and_prompt(
+        self,
+        agent_name: str,
+        text: str,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Interrupt active turn if working and submit prompt."""
+        return self.send_prompt(agent_name, text, interrupt_if_working=True, timeout=timeout)
 
     def recover_agents(self) -> list[AgentRecord]:
         """Compare active registry records against herdr agent list after restart."""

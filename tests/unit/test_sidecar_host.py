@@ -270,3 +270,53 @@ def test_start_agent_with_worktree(tmp_path):
     assert rec.status == "running"
     call_names = [c[0] for c in fake_herdr.calls]
     assert "worktree_create" in call_names
+
+
+def test_interrupt_and_prompt_behavior(tmp_path):
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg)
+
+    # 1. Opencode: sends esc twice and waits for indicator disappearance
+    host.start_agent("team-oc", "agora:01JOC", "opencode", "oc-worker")
+    fake_herdr.agent_outputs["oc-worker"] = "Writing code...\nesc interrupt"
+
+    real_send_keys = fake_herdr.agent_send_keys
+    esc_counts: dict[str, int] = {"oc-worker": 0, "claude-worker": 0}
+
+    def spy_send_keys(target, *keys):
+        res = real_send_keys(target, *keys)
+        if "esc" in keys:
+            esc_counts[target] = esc_counts.get(target, 0) + 1
+            if target == "oc-worker" and esc_counts[target] >= 2:
+                fake_herdr.agent_outputs[target] = "Ready for prompt > "
+            elif target == "claude-worker" and esc_counts[target] >= 1:
+                fake_herdr.agent_outputs[target] = "Interrupted · What should Claude do instead?"
+        return res
+
+    fake_herdr.agent_send_keys = spy_send_keys
+
+    host.interrupt_and_prompt("oc-worker", "urgent input for oc")
+    assert esc_counts["oc-worker"] == 2
+    assert ("oc-worker", "urgent input for oc") in fake_herdr.prompts
+    # Verify ctrl+c was never sent
+    assert not any("ctrl+c" in k[1] for k in fake_herdr.sent_keys if k[0] == "oc-worker")
+
+    # 2. Claude: sends esc once and waits for indicator disappearance
+    host.start_agent("team-cl", "agora:01JCL", "claude", "claude-worker")
+    fake_herdr.agent_outputs["claude-worker"] = "Generating reply...\nesc to interrupt"
+
+    host.interrupt_and_prompt("claude-worker", "urgent input for claude")
+    assert esc_counts["claude-worker"] == 1
+    assert ("claude-worker", "urgent input for claude") in fake_herdr.prompts
+    assert not any("ctrl+c" in k[1] for k in fake_herdr.sent_keys if k[0] == "claude-worker")
+
+    # 3. Idle agent: does not send esc at all
+    host.start_agent("team-idle", "agora:01JIDLE", "opencode", "idle-worker")
+    fake_herdr.agent_outputs["idle-worker"] = "Ready > "
+    fake_herdr.agents["idle-worker"]["agent_status"] = "idle"
+
+    host.interrupt_and_prompt("idle-worker", "normal message")
+    assert esc_counts.get("idle-worker", 0) == 0
+    assert ("idle-worker", "normal message") in fake_herdr.prompts
