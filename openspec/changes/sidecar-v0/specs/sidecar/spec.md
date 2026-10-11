@@ -8,18 +8,22 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** agent 這一輪被打斷，接著收到那句話，停在提示處
 
 ### Requirement: 開啟
-`open` MUST 收：呼叫方給的 `id`（在這個 sidecar 裡唯一，重複時拒絕）、agent 種類、工作目錄、繼承的 Session（new／continue／fork／merge）、subscription 的 id；第一則輸入 MUST 是選填。sidecar MUST 自己向 subscription 來源取得詳細資料（呼叫方不傳 key），把它轉成 agent 的環境變數，放在子行程的環境裡；這些值 MUST NOT 出現在命令列、log 或任何檔案。開出來的 Session MUST 在 agora 標頭的 tags 加上 `sidecar:<id>`。
+`open` MUST 收：呼叫方給的 `id`、agent 種類、工作目錄、繼承的 Session（new／continue／fork／merge）；subscription 的 id 與第一則輸入 MUST 是選填（subscription 省略時，sidecar 依挑選規則自己挑一個現在能用的）。`id` 對應的 agent 還在 starting／running／idle 時 MUST 拒絕；在 waiting-quota 或 exited 時 MUST 用同一個 id 重開。sidecar MUST 自己向 subscription 來源取得詳細資料（呼叫方不傳 key），把它轉成 agent 的環境變數，放在子行程的環境裡；這些值 MUST NOT 出現在命令列、log 或任何檔案。開出來的 Session MUST 在 agora 標頭的 tags 加上 `sidecar:<id>`。
 
 #### Scenario: fork 一個 team 的 home Session
 - **WHEN** `open`（id=t1、claude-code、fork 自 H、subscription=claude-personal、第一則輸入「讀 channel X」）
 - **THEN** agora 上多一個從 H fork 出來、tags 含 `sidecar:t1` 的 Session；agent 在它上面開著，收到第一則輸入；H 不變
 
 #### Scenario: id 重複
-- **WHEN** 已經有 t1 時再 `open` id=t1
+- **WHEN** t1 正在跑時再 `open` id=t1
 - **THEN** 被拒絕（HTTP 409），什麼都沒開
 
+#### Scenario: 重開已結束的 id
+- **WHEN** t1 已經 exited，再 `open` id=t1（continue 它的 Session）
+- **THEN** t1 重新開起來，接著同一個 Session
+
 ### Requirement: 關閉
-`close` MUST 先把 agent 的對話寫回 agora，再結束 agent（先溫和，逾時再強制）。
+`close` MUST 先溫和停下 agent，再把最後的對話寫回 agora；溫和停不下來時，逾時後強制結束，再寫回。
 
 #### Scenario: 關閉
 - **WHEN** 對 t1 `close`
@@ -47,7 +51,7 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** 到時 sidecar 開那個 agent；`GET /jobs` 在那之前看得到這個 job
 
 ### Requirement: 額度用完自動換把
-agent 回報額度用完時，sidecar MUST 向 subscription 來源登錄冷卻（窗與重置時刻），再從一覽挑一個現在能用、而且支援這個 agent 種類的 subscription（挑法是可替換的介面，預設照 priority）；挑到就寫回 agora、用 continue 同一個 Session 以新的 subscription 重開，id 不變。全部冷卻時 MUST 寫回、停下、狀態標 waiting-quota，並自動掛一個在最早解除冷卻的時刻重開（continue 同一個 Session）的 job。
+agent 回報額度用完時，sidecar MUST 向 subscription 來源登錄冷卻（窗只有 5h 與 1w 兩種，加上重置時刻），再從一覽挑一個現在能用、而且支援這個 agent 種類的 subscription（挑法是可替換的介面，預設照 priority）；挑到就停下 agent、寫回 agora、用 continue 同一個 Session 以新的 subscription 重開，id 不變。全部冷卻時 MUST 停下、寫回、狀態標 waiting-quota，並自動掛一個在最早解除冷卻的時刻 open 同一個 id（continue 同一個 Session、不指定 subscription）的 job。
 
 #### Scenario: 換到另一把
 - **WHEN** t1 用 claude-personal 時額度用完，claude-company 現在能用
