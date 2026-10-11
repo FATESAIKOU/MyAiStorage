@@ -44,5 +44,6 @@
 
 ## 4. 收尾
 
-- [ ] 4.1 完整 unit 綠；非作者審查（Muse Spark 1.3 xhigh）
-- [ ] 4.2 開 PR（b，PMO 先跟本人說明再 merge）；本人 smoke test 驗收
+- [x] 4.1 完整 unit 綠（987 passed）；非作者審查（Claude Sonnet，本人的審查白名單；`docs/review/angareion-v0.md`，兩輪＋最後確認）
+- [x] 4.2 開 PR（b，PMO 先跟本人說明再 merge）
+- [ ] 4.3 本人 smoke test 驗收（`docs/angareion.md` 的「本人的 smoke test」）
