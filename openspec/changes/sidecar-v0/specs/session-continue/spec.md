@@ -65,3 +65,11 @@ Session 存好、agent 開起來之前，agora MUST 在 stderr 印下面的固�
 #### Scenario: import 時附加
 - **WHEN** `agora import session --external-session-id X --agent claude --add-tag sidecar:t1`
 - **THEN** 匯入的 Session 的 tags 含 `sidecar:t1`
+
+### Requirement: 子行程啟動前收到 SIGTERM
+headless 的 agora 行程收到 SIGTERM 時，即使 agent 子行程還沒有被建立，MUST NOT 以未處理的例外離開：MUST 記下收到終止，在子行程建立之後立刻轉送（或不啟動它），並仍然做最後一次寫回、放鎖後以 0 離開。
+
+#### Scenario: 子行程建立前的 SIGTERM
+- **WHEN** `agora continue … --headless` 在安裝 SIGTERM 處理之後、建立 agent 子行程之前收到 SIGTERM
+- **THEN** 沒有 `UnboundLocalError` 之類的例外；agora 不留下被鎖住的 Session，exit 0
+

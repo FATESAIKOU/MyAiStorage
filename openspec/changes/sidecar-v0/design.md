@@ -21,7 +21,7 @@
 | status | `GET /agents`、`GET /agents/{id}` | — | 只列它開的：`id`、`agent`、`session`（目前跑的那個 agora id；fork／merge 之後是新的那個，換把後不變）、`subscription`（id）、`state`（`starting`／`running`／`idle`／`waiting-quota`／`exited`）、`reopen_at`（只在 `waiting-quota` 而且有自動重開 job 時，否則 null）、`started_at`、`exit`；不含 key。**讀記憶體裡最後一次的狀態**（最多晚一個 tick），不觸發任何狀態轉移、不做網路操作（D2） |
 | poke | `POST /agents/{id}/poke` | `text`、`interrupt`（選填，預設 false） | 送一則輸入；`interrupt` 先打斷這一輪。id 不存在回 404；`exited`／`waiting-quota` 回 409（不排隊）；`starting` 時排隊，起來之後再送，逾時（設定 `poke_queue_timeout`，預設 30 秒）回 409 |
 
-- 定時：`POST /jobs {"action", "args", "at"}`；輪詢：`POST /jobs {"action", "args", "every", "until"?}`；`GET /jobs`、`DELETE /jobs/{id}`。`action` 只能是上面四個之一（否則 400），`args` 和直接呼叫時相同；`at` 在過去回 400。
+- 定時：`POST /jobs {"action", "args", "at"}`；輪詢：`POST /jobs {"action", "args", "every", "until"?}`；`GET /jobs`、`DELETE /jobs/{id}`。`action` 只能是上面四個之一（否則 400），`args` 和直接呼叫時相同；`at` 在過去回 400。**帶 `session.mode == "merge"` 的 `open` 不能出現在 job 裡**（`POST /jobs` 回 400 `merge_not_allowed_in_job`）：merge 要呼叫模型、可能數分鐘（D3），在 scheduler 執行緒裡跑會卡住所有 agent；merge 只能由 `POST /agents` 直接呼叫。
 - `GET /jobs` 每筆有 `id`、`action`、`args`、`at` 或 `every`／`until`、`last_run`（時刻）、`last_error`（錯誤碼與訊息，不含 key；沒有錯誤是 null）。job 失敗不自動重試，除了 D4 的自動重開 job。
 - 只綁 `127.0.0.1`（埠由設定給），不做認證（本人 Q5）。遠端控制者自己用隧道連進來。
 - 請求本文上限 1 MB，超過回 413。
@@ -36,8 +36,9 @@ agent 清單、job 清單只在記憶體。重啟從空的開始，不找回（�
 
 - **只有 scheduler 執行緒改變 agent 的狀態**：刷新（問 driver 現況）、換把、自動重開、job 的執行都在它那裡做。HTTP 執行緒只做三件事：讀記憶體裡最後一次的狀態（`GET /agents`）、把請求排給 scheduler 或直接呼叫 driver（`close`、`poke`、`open` 的前置），以及登記／刪除 job。所以 `GET /agents` 不會因為換把的網路操作（SSH）而卡住，MyLinuxPool 的健康檢查也不會。
 - **每個 agent 同一時間只有一個狀態轉移在進行**（每個 id 一把鎖或一個 `busy` 旗標）：兩個執行緒（或同一個 tick 內兩次）同時看到「額度用完」，只有一個進去換把，另一個看到 `busy` 就直接回去。換把中的 agent 不會被第二次停掉。
-- **`closing`（close 遇到轉移）**：`close` 遇到 `starting` 或 `busy` 的 agent，只記下 `closing` 並回 200；轉移的執行緒在寫回新 handle 之前檢查它：看到就停掉剛啟動的行程、標 `exited`、不再 `starting`。scheduler 刷新時，ACTIVE 狀態的 agent 看到 `closing`（例如 `driver.state` 暫時失敗而漏了 open 的檢查）也停下並標 `exited`。所以任何情況下，被關閉的 agent 不會復活，也不會留下行程。
-- **v0 只有一個 scheduler 執行緒**：一個 agent 的換把（網路加 stop，可能數十秒）會延遲其他 agent 的刷新、排隊中的 poke（逾時 30 秒）與 job。這是 v0 接受的取捨；之後可以每個 agent 的轉移各開一個工作執行緒（`busy` 已經是每個 agent 一個）。
+- **`close` 占用轉移**：`close` 在**同一個鎖內**檢查並設 `busy = True`（占用這個 agent 的轉移）再去停下行程，結束才釋放；所以 close 進行中，scheduler 不會對同一個 agent 開始換把或刷新（否則 close 還在 stop 時換把才開始，會讓已關閉的 agent 復活）。
+- **`closing`（close 遇到轉移）**：`close` 遇到 `starting` 或已經 `busy`（轉移進行中）的 agent，只記下 `closing` 並回 200；轉移的執行緒在寫回新 handle 之前檢查它：看到就停掉剛啟動的行程、標 `exited`、不再 `starting`。scheduler 刷新時，ACTIVE 狀態的 agent 看到 `closing`（例如 `driver.state` 暫時失敗而漏了 open 的檢查）也停下並標 `exited`。所以任何情況下，被關閉的 agent 不會復活，也不會留下行程。
+- **v0 只有一個 scheduler 執行緒**：一個 agent 的換把（網路加 stop，可能數十秒）會延遲其他 agent 的刷新、排隊中的 poke（逾時 30 秒）與 job。`new` 模式的 periodic import（D5，每個到期的 agent 最多 `close_timeout` 秒）也在這個執行緒裡做，多個 `new` agent 時同樣延遲其他 agent。這是 v0 接受的取捨（`docs/sidecar.md` 寫明）；之後可以每個 agent 的轉移各開一個工作執行緒（`busy` 已經是每個 agent 一個）。
 - 一個 agent 的錯誤（driver 丟例外、agora 失敗）只影響它自己：該 agent 的轉移失敗走 D4 的 `waiting-quota` 重試，其他 agent 的狀態與 `GET /agents` 不受影響。
 - **driver 與 store 的呼叫一律在鎖外**（`send`、`interrupt`、`stop`、`launch`、`SessionStore.start` 都可能阻塞）；鎖只保護記憶體裡的表。
 - job 清單（`JobRegistry`）是執行緒安全的（HTTP 執行緒新增、刪除、列出，scheduler 執行緒取出到期的與重排，不會互相打斷或重複 id）。
@@ -49,7 +50,7 @@ agent 清單、job 清單只在記憶體。重啟從空的開始，不找回（�
 3. 對每個 agent 逐一 close（停下、寫回 agora；`new` 模式先 import，D5）。
 4. 全部做完才結束。被強制殺掉就什麼都不留。
 
-逐一 close 最壞要 `close_timeout × agent 數` 秒，所以 supervisor（MyLinuxPool 的單元）的 kill timeout MUST 大於這個值（`docs/sidecar.md` 寫明；預設 30 秒 × 同時的 agent 數）。
+逐一 close 的最壞時間：一般 agent 是 `close_timeout + 5` 秒（溫和停下的 `close_timeout`，加強制結束後等待的 5 秒）；`new` 模式是 `close_timeout × 2 + 5`（import → stop → import，每個 import 的逾時不超過 `close_timeout`，D3）。所以 supervisor（MyLinuxPool 的單元）的 kill timeout MUST 大於「各 agent 的最壞時間加總」（`docs/sidecar.md` 寫明；預設 `close_timeout` 30 秒，一般 35 秒、`new` 65 秒，乘以同時的 agent 數）。
 
 ### D3 內部介面（介面和實作分開）
 
@@ -62,7 +63,7 @@ agent 清單、job 清單只在記憶體。重啟從空的開始，不找回（�
 
 - 「subscription 要變成 agent 的哪些環境變數」與「怎麼看出額度用完」都是 `AgentDriver` 的知識（和 LLMGateway PM 一致：共通 JSON 裡沒有 `launch`）。driver 自己解析事件；`lgw.signals` 只是選用，**不是義務**（driver 看到的是 CLI 事件不是 HTTP 回應，多半用不到）。
 - 環境變數只放在子行程的環境，不上命令列，不寫進任何 log 或檔案。
-- **逾時契約**：`AgentDriver` 與 `SessionStore` 的**每一個呼叫**（`launch`、`send`、`interrupt`、`state`、`stop`、`SessionStore.start`）MUST 在 `close_timeout` 以內回來，逾時由實作自己處理（內部逾時，丟錯誤或回失敗），不能無限期阻塞——否則進行中的 tick 會卡住 SIGTERM（D2）。`LLMGatewaySource` 同樣：`lgw.connect` 與 `lgw.client` 有預設逾時（15 秒、10 秒），一次邏輯操作的總時間有上限。實作與測試要各自驗證（tasks 3.x）。
+- **逾時契約（適用 shutdown 路徑上的呼叫）**：close／換把／shutdown 會走到的呼叫——`AgentDriver.stop`、`send`、`interrupt`、`state`，以及 `new` 模式的 `import_external`——MUST 在 `close_timeout` 以內回來（`stop` 在逾時後強制結束再多等最多 5 秒，所以是 `close_timeout + 5`），逾時由實作自己處理（內部逾時，丟錯誤或回失敗），不能無限期阻塞——否則進行中的 tick 會卡住 SIGTERM（D2）。`launch` 與 `SessionStore.start` 只在 open 與換把時呼叫、不在 shutdown 路徑上，各有自己有上限的逾時（等 agora 印出固定行 60 秒、opencode 開始聽 15 秒）；**merge 是例外**：`agora merge` 要呼叫模型，上限 15 分鐘，只在 `POST /agents` 的直接呼叫裡跑（D1：不能在 job 裡）。`LLMGatewaySource` 同樣：`lgw.connect` 與 `lgw.client` 有預設逾時（15 秒、10 秒），一次邏輯操作的總時間有上限。實作與測試要各自驗證（tasks 3.x）。
 - **driver 組出子行程的完整環境**，不是在 sidecar 自己的環境上疊加：父行程（sidecar）環境裡的 `ANTHROPIC_*`、`OPENAI_*` 之類的憑證與端點變數 MUST NOT 漏進子行程；只保留 driver 明確列出的少數必要變數（`PATH`、`HOME`、`LANG` 等）加上 `env_for` 給的。因此 `env_for` 不需要另外的 `unset` 通道。測試：父行程設了 `ANTHROPIC_API_KEY`，子行程的環境裡沒有。
 - agent 種類 `claude-code`／`opencode` 對 agora 的 `--agent` 是 `claude`／`opencode`，對應表在 `AgoraSessionStore`。
 
@@ -81,7 +82,7 @@ LLMGateway 的共通 JSON 欄位以 LLMGateway 的 `gateway-v0` 規格（`specs/
 | `get` 409 `not_deployed` | 呼叫方指定的：409 `not_deployed`；`Selector` 挑的：換下一個候選，全部不行才回 409 | 換下一個候選；沒有就走「沒有」那一支 |
 | unreachable（`list`／`get`／`cooldown` 任一個；含連線程式進入時的 `Unavailable`，D7） | 503 `gateway_unreachable`，什麼都沒開、不掛 job、不重試 | `stop`＋寫回、`waiting-quota`，掛一個 `now + retry_interval`（設定，預設 5 分鐘）的 open job；到時還是 unreachable 就再掛一次 |
 | `open` 省略 `subscription`，`list` 裡沒有任何能用的候選（或全部 `get` 都被拒） | 409 `no_subscription`，什麼都沒開 | —（走「全部冷卻」那一支） |
-| 換把途中任何一步失敗（`get` 之後的 `stop`、`SessionStore.start`、`launch` 丟例外或失敗） | — | `waiting-quota`，掛一個 `now + retry_interval` 的 open job（同 unreachable），log 原因；不影響其他 agent，也不讓任何 HTTP 回應變成 500 |
+| 換把途中任何一步失敗（`get` 之後的 `stop`、`SessionStore.start`、`launch` 丟例外或失敗） | — | `waiting-quota`，掛一個 `now + retry_interval` 的 open job（同 unreachable），log 原因；不影響其他 agent，也不讓任何 HTTP 回應變成 500。**換把失敗 MUST 設退避**（`swap_retry_at = now + retry_interval`）：到時間之前，scheduler 的刷新不再對這個 agent 重新進入換把（不會每個 tick 再登錄一次 cooldown、再 list 一次） |
 
 404 刻意不用在 subscription 不存在上：`/agents/{id}` 的 404 已經是「沒有這個 agent」。
 
@@ -114,7 +115,9 @@ LLMGateway 的共通 JSON 欄位以 LLMGateway 的 `gateway-v0` 規格（`specs/
   - `by` 與 `agent` 不同種類：替 `by` 的種類另外用 `Selector` 挑一把（`list` → `choose(by, …)`），經 `get(id, by)` 取得，用 `by` 的 driver 的 `env_for` 跑 `agora merge --agent <by>`；open 指定的 subscription 只用在 `agent`。錯誤同 D4 的表（403／404／409／unreachable 都使 open 失敗、什麼都沒開）；`by` 的種類沒有任何能用的候選時回 409 `no_subscription_for_merge`。
 - **`new`**（agora 沒有「新建一個空 Session 再開 agent」的指令，這是 v0 的做法，已由 PM 確認）：sidecar 直接開 agent（沒有 agora 行程），agent 的 session id 從事件取得；每 `sync_period` 分鐘用 `agora import session --external-session-id <id> --agent … --add-tag sidecar:<id>` 存進 agora（再次 import 是原地更新）。第一次存進去之後，`status.session` 才有 agora id。
   - **close 與換把時一律先 import**：先 import（得到 agora id，已經有的就是原地更新）→ 再 `stop`（溫和）→ 再 import 一次（原地更新，寫回停下之前最後的對話）→ `close` 到此結束；換把則接著 `continue` 那個 agora id（之後走一般的 headless 路徑，不再是 `new`）。因此 `new` 的 agent 在任何情況下被停下之前，都已經有 agora id；沒有「停下卻沒有 Session 可接」的情形。
-  - import 失敗（agora 或網路）時：換把走 D4 的失敗那一支（`waiting-quota`＋重試 job，**不 stop**，agent 維持原狀）；close 回 `exited` 之前要在回應裡說明沒有寫回（`exit.reason`）。
+  - **換把前的 import 失敗（agora 或網路）**：**照樣 stop**——對話仍在 agent 自己的 session 檔裡（Claude 的 `~/.claude/projects/…`、opencode 的資料庫），沒有丟——標 `waiting-quota`、記住 `external_session_id`（以及已知的 `agora id`，如果有）。**由 scheduler 每 `retry_interval` 重試 import**（`GET /agents` 的 `reopen_at` 在這段期間是下一次重試的時刻）；import 成功後才掛一般的自動重開 job（D4：`continue` 那個 agora id、算出的解除時刻）。這段期間不會每個 tick 重新換把（D4 的退避）。
+  - close 回 `exited` 之前如果 import 失敗，要在回應裡說明沒有寫回（`exit.reason`）；close 不重試（agent 仍然被停下）。
+  - 還沒跑過任何一輪（沒有 `external_session_id`）就額度用完：stop、`waiting-quota`、沒有 job（沒有東西可以接，控制者決定）。
 - **tag**：每個 open 出來的 Session 在標頭的 `tags` **附加** `sidecar:<id>`（本人 Q7）。附加不是取代：agora 的 `--header tags=…` 是整個取代（`overlay` 對 list 的語意），所以 agora 要提供附加的選項 `--add-tag <tag>`（可重複；`continue`、`fork`、`import` 都有；見 `session-continue` 的 delta）。不 fork 的 `continue` 會把 tag 加在原 Session 上，這是預期的。sidecar 本身不讀這個 tag；用途是人或程式在 agora 上查得到。
 - **固定格式的 stderr 行**：`--headless` 時 stdout 屬於 agent，所以 agora 在 stderr 印固定格式的行（依前綴解析，不依順序）：`agora-session <id>`（agora 的 Session id；新 Session 的 id 就在這裡，sidecar 讀它設定 `status.session`）、`agora-agent-session <id>`（agent 自己的 session id，例如 opencode 的 `ses_…`；`OpenCodeDriver` 要用它對正確的 session 送 HTTP，`session-continue` 的 delta）、`agora-port <埠>`（opencode）。
 - 記憶同步：agent 跑著時由 agora 定期寫回；close 與換把時 agora 在結束時寫回；任何人隨時能直接用 agora。
@@ -134,12 +137,12 @@ LLMGateway 的共通 JSON 欄位以 LLMGateway 的 `gateway-v0` 規格（`specs/
   - `rateLimitType` 不在官方型別裡，實測有 `five_hour`；第三方整理的值還有 `seven_day`、`seven_day_opus`、`seven_day_sonnet`、`overage`（未經官方確認）。窗對應只認 `five_hour`→`5h`、`seven_day`→`1w`；其他值當 `5h`、不帶 `resets_at`，並 log 一行。
   - 重置時刻取 `resetsAt`（epoch 秒），不必解析畫面文字。官方型別另有 `errorCode: "credits_required"`（claude.ai 訂閱的內含額度用完，要買額外額度才能繼續）：當作用完，窗口以 `rateLimitType` 為準，沒有就 `5h`。
   - 事件裡還有 `overageStatus` 之類的欄位；已知有回報「`status: allowed` 但 `overageStatus: rejected` 時 `claude -p` 的 `result` 是空的」（claude-code 的 issue，已關閉）。driver 只認 `status` 與輔助訊號，不因 `overageStatus` 換把。
-  - 輔助訊號：`system/api_retry`（`error: rate_limit`）與 `result` 文字以 `You've hit your` 開頭（LLMGateway 的 quota-signals 研究）。
-  - **kind 是 `api-key`**（例如 OpenRouter 經 `ANTHROPIC_BASE_URL`）時不會有 `rate_limit_event`，輔助訊號就是唯一的訊號，也沒有窗口與重置時刻：窗口 `5h`、不帶 `resets_at`。
+  - **輔助訊號只在 `kind == api-key`（沒有 `rate_limit_event`）時使用**；`kind == claude-subscription` 一律只看 `rate_limit_event` 的 `rejected`／`credits_required`。api-key 類的輔助訊號是唯一的訊號，也沒有窗口與重置時刻：窗口 `5h`、不帶 `resets_at`。
+  - **條件不能太寬**：Claude 對 429 的短暫速率限制會自己重試，一次 `system/api_retry`（`error: rate_limit`）不是額度用完。要等**重試用盡**（`attempt >= max_retries`）或**該回合以 `is_error: true` 的 `result` 結束**，才算；`result` 文字以 `You've hit your` 開頭也**要同時 `is_error: true`**（一般回覆碰巧以這句話開頭不算）。暫時性 429 之後回合成功 MUST NOT 標額度。
 
 **opencode 1.18.35**：`opencode serve --hostname 127.0.0.1 --port <埠>`（工作目錄設成 agent 的工作目錄；opencode 依目錄分專案）。埠由 sidecar 分配（取一個空的），經 agora 的 `--headless-port` 交給 opencode（opencode 的 headless 必填，沒給 agora exit 1、什麼都不開）；agora 在 stderr 印 `agora-port <埠>`——**印出時 server 還沒有開始聽**（先印、再開 agent），所以 `OpenCodeDriver` 要自己 poll 到埠連得上才送，逾時當作啟動失敗；session id 用 agora 印的 `agora-agent-session <id>`，不要自己去猜。
-- 送：`POST /session/{id}/message`（這個呼叫會等到這一輪做完才回，所以 driver 在背景送、用事件看狀態）。
-- 狀態：`GET /event`（SSE）的 `session.status`：`busy`→`idle`，另有 `session.idle`；`GET /session/status` 可以直接查。
+- 送：`POST /session/{id}/message`（這個呼叫會等到這一輪做完才回，所以 driver 在**背景執行緒**送）。這個呼叫的逾時 MUST 是長逾時（上限 1 小時；不是一般請求的 10 秒，否則長回合會被切斷）；**`prompt_async` 與 `GET /session/status` 對閒置 session 的形狀由 PM 在 3.4 實機確認後再定**（binary 裡有 `prompt_async` 這個路由）。
+- **狀態來源**：背景送出的執行緒在跑＝`running`，結束＝`idle`（不依賴 `/session/status` 的 map 裡有沒有這個 session）；`GET /session/status` 與事件只用來偵測 `retry`（額度）。送出結束時回應的 `info.error` 或非 2xx MUST 寫進 `last_error`／`exit.reason`（不含 key），不是只 log。
 - 中斷：`POST /session/{id}/abort`，之後狀態變 `idle`。
 - 接續：對 server 用同一個 session id 送就是接續。
 - **額度（實測，Zen 免費額度用完時）**：`session.status` 變成 `{"type": "retry", "message": "Free usage exceeded…", "action": {"reason": "free_tier_limit", …}, "next": <epoch 毫秒>}`。
@@ -153,7 +156,7 @@ LLMGateway 的共通 JSON 欄位以 LLMGateway 的 `gateway-v0` 規格（`specs/
 - 輸出只有 `env`（沒有 `unset`）；子行程的環境由 driver 以 `subproc.child_env`（允許清單＋`env_for` 的輸出）組出，父行程的 `ANTHROPIC_*`、`OPENAI_*`、`OPENCODE_*` 等不進去（實測：假 provider 看到的 key 等於 subscription 的 key、不等於父行程的值）。因此「關自動更新與關模型清單」的變數 MUST 由 `env_for` 自己放進輸出。
 - 沒有可用的模型來源時 `env_for` MUST 丟錯，open 回 4xx（`no_model`），MUST NOT 讓 agent 自己挑預設模型。
 - 真的 HOME 下，使用者自己的設定會被合併（opencode 的 `~/.config/opencode/opencode.json`、Claude 的 `~/.claude`）；這次 MUST NOT 設 `OPENCODE_PURE`／`OPENCODE_DISABLE_PROJECT_CONFIG`，由 tasks 3.4 的 PM 實機確認（`docs/sidecar.md` 註明）。
-- 驅動錯誤（起不來、HTTP 500 沒有可讀原因）的訊息 MUST 帶子行程 stderr 的末幾行（遮掉 key 與任何 `env_for` 給的值），不要只有「500」。
+- 驅動錯誤（起不來、HTTP 500 沒有可讀原因）的訊息 MUST 帶子行程 stderr 的**最新**末幾行（含啟動之後才印出的，不是啟動當下的快照），不要只有「500」。**只遮真正的秘密**：subscription 的 `key`，以及 `OPENCODE_CONFIG_CONTENT` 裡的 `apiKey` 值；`env_for` 輸出的其他值（`DISABLE_AUTOUPDATER=1`、模型名、endpoint）不是秘密，不遮（否則 `code 1` 會被遮成 `code <masked>`）。
 - 打真 binary 的 loopback 測試 MUST NOT 放進預設的 unit（macOS 的 Keychain 不受隔離的 HOME 影響，而且會有對外流量）：放 `tests/integration/`，或要設 `SIDECAR_REAL_AGENT_TESTS=1` 才跑，預設 skip。`env_for` 的輸出用純單元測試驗。
 
 **opencode**（`OpenCodeDriver.env_for`）
@@ -228,5 +231,7 @@ LLMGateway 的共通 JSON 欄位以 LLMGateway 的 `gateway-v0` 規格（`specs/
 - [agent 的 CLI 介面隨版本變動] → driver 是實作，版本和 sidecar 一起釘在 worker 映像裡。
 - [Claude 的 `rejected` 與 opencode 的額度類 reason 只觀察到少數值] → 未知值只 log 不換把；第一次真實用完時把原事件貼回 D6（tasks 3.4）。
 - [`new` 模式不經 agora 行程] → 定期 import 之間若被強制殺掉，最多掉一個 `sync_period` 的對話（PM 已確認）；close 與換把一律先 import。
-- [逐一 close 的時間] → 最壞 `close_timeout × agent 數`；supervisor 的 kill timeout 要更大（D2）。
+- [逐一 close 的時間] → 一般 agent 最壞 `close_timeout + 5`、`new` 模式 `close_timeout × 2 + 5`；supervisor 的 kill timeout 要大於加總（D2）。
+- [`AgoraSessionStore` 以 `python -m agora.cli` 開 agora，`child_env` 的允許清單沒有 `PYTHONPATH`] → 用 `uv tool install` 裝的沒問題；從原始碼目錄開發時要用 `command` 設定指定 agora 的路徑（`docs/sidecar.md` 寫明；找不到模組時給明確的訊息）。
+- [單一 scheduler 執行緒做 periodic import] → 多個 `new` agent 時延遲其他 agent 的刷新（D2，`docs/sidecar.md` 寫明）。
 - [`sidecar run` 在 tasks 3.x 之前開不了任何 agent（沒有 driver、沒有 store）] → `docs/sidecar.md`（tasks 4.1）要寫明；`GET /agents` 仍會回應，所以健康檢查會過，但 `POST /agents` 回 400 `unsupported agent kind`。
