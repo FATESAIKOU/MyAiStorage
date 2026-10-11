@@ -8,7 +8,7 @@
 - [ ] 2.1 跟 MyPMO 的 LLMGateway 設計對齊租用介面（申請／准許的欄位、agent 的模型存取怎麼交、回報時機），把協定寫回 design 的 D6；在此之前 sidecar 用 `ModelBroker` 的假 broker。
 - [ ] 2.2 跟 Atelier（#32）對齊 harness 的格式、位置與載入點。
 - [ ] 2.3 跟 MyLinuxPool 對齊：`shared-configs/agent-sidecar/` 的 unit 欄位、`--check` 的三態判準、herdr server 由誰拉起／session 命名／版本（#47）。
-- [ ] 2.4 spike：用 herdr 在 opencode 與 claude 上實測「執行中 `agent prompt`」（排隊、丟掉、或要 `send-keys ctrl+c`；opencode 另外看畫面最下面一行的 esc interrupt）；把結果寫回 design 的 D3 並定案機制。
+- [x] 2.4 spike：用 herdr 在 opencode 與 claude 上實測「執行中 `agent prompt`」（排隊、丟掉、或要 `send-keys ctrl+c`；opencode 另外看畫面最下面一行的 esc interrupt）；把結果寫回 design 的 D3 並定案機制。 → 2026-10-11 PM 實測：執行中的 `agent prompt` 兩者都排隊（不丟）；緊急要先 `send-keys esc`（claude 1 次、opencode 2 次）再送，不用 ctrl+c。寫回 design D3
 
 ## 3. 實作 v0（本人選定範圍之後）
 

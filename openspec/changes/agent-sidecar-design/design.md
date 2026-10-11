@@ -91,7 +91,11 @@ sidecar 的範圍有三種切法，**請本人選定之後才實作**；下面�
 
 ### D3 投遞政策：urgency 兩段、ack 在投遞後
 
-- `urgency` ≥ 8：**立刻**送進 agent 的輸入（`herdr agent prompt <name> <text>`，成為它下一輪的 user turn）。agent 正在跑一輪時，先把訊息送進去讓它排隊；**若實測 agent 不排隊而是吃掉/丟掉**，退回「先用 `herdr agent send-keys <name> ctrl+c` 讓它收掉這一輪、回到提示再送」——這條用 spike 在 opencode 與 claude 各驗一次，結果寫回 design（見 tasks 2.4）。
+- `urgency` ≥ 8：**打斷這一輪再送**。spike 結果（2026-10-11，PM 在 herdr 實測；opencode 1.18.35／Nemotron 3 Ultra Free、Claude Code／haiku）：
+  - agent 正在跑一輪時 `herdr agent prompt` **會排隊、不會丟**：opencode 在輸入框標 `QUEUED`，claude 顯示「Press up to edit queued messages」；這一輪結束後兩者都自動處理排隊的那則。所以單靠 `agent prompt` 是「下一輪」而不是「立刻」。
+  - 要立刻：先 `herdr agent send-keys <name> esc` 中斷這一輪——**claude 一次**（顯示「Interrupted · What should Claude do instead?」）、**opencode 兩次**（第一次只顯示「esc again to interrupt」）——確認畫面回到提示（claude 的「esc to interrupt」、opencode 的「esc interrupt」消失），再 `agent prompt`。實測從送出到回覆 2～3 秒。
+  - **不用 ctrl+c 打斷**：在這兩個 TUI 裡 ctrl+c 可能直接結束 agent（那是 D4「終止」的第一步，不是打斷）。
+  - 不打斷、只想讓它下一輪處理的訊息（例如 urgency 低但 agent 正好在跑），直接 `agent prompt` 讓它排隊即可。
 - `urgency` < 8：進持久佇列；在下一次 hand-off 送出。v0 保證的 hand-off ＝ agent 程序結束後、下一次啟動時。做法：佇列裡的訊息排序好，agent 一啟動（herdr 偵測到、prompt 出現）就用 `herdr agent prompt` 依序送出。
 - 同一批依 `urgency` 高到低、同 `urgency` 依 `at` 舊到新。
 - **投遞成功才 ack**：訊息進了 agent 的輸入才 `a2a ack`。語意是「已交付」，不是「已完成」；完成的訊號是 team 後來的回報訊息。
