@@ -63,6 +63,10 @@ class Backend(Protocol):
         """Find the issue number for a channel name, or None if not found."""
         ...
 
+    def list_channels(self) -> list[tuple[str, int]]:
+        """List all known (channel_name, issue_number) pairs."""
+        ...
+
     def post_message(self, channel: str, message: Message) -> str:
         """Post a message to a channel. Returns comment URL or identifier."""
         ...

@@ -13,6 +13,7 @@ import pytest
 from angareion.backend import (
     AuthenticationError,
     Backend,
+    BackendError,
     ChannelNotFoundError,
     RateLimitError,
 )
@@ -305,3 +306,136 @@ def test_token_never_appears_in_exception_messages():
         err_str = str(e)
         assert secret_token not in err_str
         assert "***" in err_str
+
+
+def test_list_channels_raises_backend_error_on_http_error():
+    transport = FakeTransport()
+    transport.set_route(
+        "GET",
+        "https://api.github.com/repos/owner/repo/issues?state=all&per_page=100",
+        HttpResponse(500, {}, b'{"message": "Internal Server Error"}'),
+    )
+    backend = GitHubBackend("owner/repo", token="token123", transport=transport)
+    with pytest.raises(BackendError, match="HTTP 500"):
+        backend.list_channels()
+
+
+def test_list_messages_pagination_subsequent_page_failure_raises_backend_error():
+    msg1 = _make_msg(content="page 1 msg", msg_id="01MSG_P1")
+    c1 = [{"id": 1, "body": serialize_message(msg1), "issue_url": "https://api.github.com/repos/owner/repo/issues/1"}]
+    page1_url = "https://api.github.com/repos/owner/repo/issues/comments?per_page=100"
+    page2_url = "https://api.github.com/repos/owner/repo/issues/comments?per_page=100&page=2"
+
+    transport = FakeTransport()
+    transport.set_route(
+        "GET",
+        page1_url,
+        HttpResponse(
+            200,
+            {"etag": 'W/"p1"', "link": f'<{page2_url}>; rel="next"'},
+            json.dumps(c1).encode("utf-8"),
+        ),
+    )
+    transport.set_route(
+        "GET",
+        page2_url,
+        HttpResponse(500, {}, b'{"message": "Internal Server Error"}'),
+    )
+
+    backend = GitHubBackend("owner/repo", token="token123", transport=transport)
+    with pytest.raises(BackendError, match="HTTP 500"):
+        backend.list_messages()
+
+
+def test_post_message_body_mentioning_id_does_not_swallow_new_message():
+    target_msg = _make_msg(channel="phase-1", msg_id="01TARGET_MSG_ID", content="Actual target message")
+    other_msg = _make_msg(
+        channel="phase-1",
+        msg_id="01OTHER_MSG_ID",
+        content="Discussing another message: id: 01TARGET_MSG_ID in body text",
+    )
+    serialized_other = serialize_message(other_msg)
+
+    transport = FakeTransport()
+    transport.set_route(
+        "GET",
+        "https://api.github.com/repos/owner/repo/issues?state=all&per_page=100",
+        HttpResponse(200, {}, json.dumps([{"number": 10, "title": "phase-1"}]).encode("utf-8")),
+    )
+    # Existing comments has a comment mentioning 01TARGET_MSG_ID in body, but front matter id is 01OTHER_MSG_ID
+    existing_comments = [
+        {
+            "id": 501,
+            "body": serialized_other,
+            "html_url": "https://github.com/owner/repo/issues/10#issuecomment-501",
+        }
+    ]
+    transport.set_route(
+        "GET",
+        "https://api.github.com/repos/owner/repo/issues/10/comments?per_page=30",
+        HttpResponse(200, {}, json.dumps(existing_comments).encode("utf-8")),
+    )
+    # Expected POST for the actual target message
+    transport.set_route(
+        "POST",
+        "https://api.github.com/repos/owner/repo/issues/10/comments",
+        HttpResponse(201, {}, json.dumps({"html_url": "https://github.com/owner/repo/issues/10#issuecomment-502"}).encode("utf-8")),
+    )
+
+    backend = GitHubBackend("owner/repo", token="token123", transport=transport)
+    url = backend.post_message("phase-1", target_msg)
+    assert url == "https://github.com/owner/repo/issues/10#issuecomment-502"
+    post_requests = [r for r in transport.recorded_requests if r["method"] == "POST"]
+    assert len(post_requests) == 1
+
+
+def test_post_message_duplicate_detection_locates_last_page_when_over_30_comments():
+    msg_35 = _make_msg(channel="phase-1", msg_id="01MSG_NUM_35", content="Message 35")
+    serialized_35 = serialize_message(msg_35)
+
+    transport = FakeTransport()
+    transport.set_route(
+        "GET",
+        "https://api.github.com/repos/owner/repo/issues?state=all&per_page=100",
+        HttpResponse(200, {}, json.dumps([{"number": 10, "title": "phase-1"}]).encode("utf-8")),
+    )
+    # Page 1 has 30 older comments
+    older_comments = [
+        {
+            "id": i,
+            "body": serialize_message(_make_msg(channel="phase-1", msg_id=f"01OLD_MSG_{i}", content=f"Old {i}")),
+            "html_url": f"https://github.com/owner/repo/issues/10#issuecomment-{i}",
+        }
+        for i in range(1, 31)
+    ]
+    last_page_url = "https://api.github.com/repos/owner/repo/issues/10/comments?per_page=30&page=2"
+    transport.set_route(
+        "GET",
+        "https://api.github.com/repos/owner/repo/issues/10/comments?per_page=30",
+        HttpResponse(
+            200,
+            {"link": f'<{last_page_url}>; rel="last", <{last_page_url}>; rel="next"'},
+            json.dumps(older_comments).encode("utf-8"),
+        ),
+    )
+    # Page 2 has comments 31 to 35, including msg_35
+    page2_comments = [
+        {
+            "id": 35,
+            "body": serialized_35,
+            "html_url": "https://github.com/owner/repo/issues/10#issuecomment-35",
+        }
+    ]
+    transport.set_route(
+        "GET",
+        last_page_url,
+        HttpResponse(200, {}, json.dumps(page2_comments).encode("utf-8")),
+    )
+
+    backend = GitHubBackend("owner/repo", token="token123", transport=transport)
+    url = backend.post_message("phase-1", msg_35)
+    # Should find msg_35 on the last page and NOT issue a POST
+    assert url == "https://github.com/owner/repo/issues/10#issuecomment-35"
+    post_requests = [r for r in transport.recorded_requests if r["method"] == "POST"]
+    assert len(post_requests) == 0
+

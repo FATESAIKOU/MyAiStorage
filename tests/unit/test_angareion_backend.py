@@ -43,6 +43,17 @@ def test_backend_protocol_conformance():
     assert isinstance(fake, Backend)
 
 
+def test_backend_protocol_requires_list_channels():
+    class IncompleteBackend:
+        def create_channel(self, channel: str) -> int: ...
+        def find_channel(self, channel: str) -> int | None: ...
+        def post_message(self, channel: str, message: Message) -> str: ...
+        def list_messages(self, since=None, etag=None) -> MessageListResult: ...
+
+    assert not isinstance(IncompleteBackend(), Backend)
+    assert isinstance(FakeBackend(), Backend)
+
+
 def test_create_and_find_channel():
     backend = FakeBackend()
     assert backend.find_channel("topic-1") is None

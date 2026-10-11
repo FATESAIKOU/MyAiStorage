@@ -69,12 +69,22 @@ class DefaultHttpTransport:
             raise BackendError(f"Network error connecting to GitHub: {e.reason}") from e
 
 
-def _extract_next_link(link_header: str | None) -> str | None:
-    """Extract next page URL from Link header."""
+def _extract_link(link_header: str | None, rel: str = "next") -> str | None:
+    """Extract page URL with specified rel from Link header."""
     if not link_header:
         return None
-    match = re.search(r'<([^>]+)>;\s*rel="next"', link_header)
+    match = re.search(r'<([^>]+)>;\s*rel="' + re.escape(rel) + r'"', link_header)
     return match.group(1) if match else None
+
+
+def _extract_next_link(link_header: str | None) -> str | None:
+    """Extract next page URL from Link header."""
+    return _extract_link(link_header, "next")
+
+
+def _extract_last_link(link_header: str | None) -> str | None:
+    """Extract last page URL from Link header."""
+    return _extract_link(link_header, "last")
 
 
 class GitHubBackend:
@@ -217,7 +227,7 @@ class GitHubBackend:
         while url:
             resp = self._request("GET", url, headers=self._headers())
             if resp.status >= 400:
-                break
+                raise BackendError(f"Failed to list channels: HTTP {resp.status}")
             issues = resp.json()
             for issue in issues:
                 if "pull_request" in issue:
@@ -257,14 +267,24 @@ class GitHubBackend:
         # Idempotency check: check recent comments for the same message id
         recent_url = f"repos/{self.owner}/{self.repo}/issues/{issue_number}/comments?per_page=30"
         resp_recent = self._request("GET", recent_url, headers=self._headers())
+        comments_to_check: list[dict[str, Any]] = []
         if resp_recent.status == 200:
-            for c in resp_recent.json():
-                body = c.get("body", "")
-                if f"id: {msg_obj.id}" in body or f'id: "{msg_obj.id}"' in body:
-                    comment_url = c.get("html_url", "")
-                    setattr(msg_obj, "issue_number", issue_number)
-                    setattr(msg_obj, "comment_url", comment_url)
-                    return comment_url
+            link_header = resp_recent.headers.get("link")
+            last_url = _extract_last_link(link_header)
+            if last_url:
+                resp_last = self._request("GET", last_url, headers=self._headers())
+                if resp_last.status == 200:
+                    comments_to_check.extend(resp_last.json())
+            comments_to_check.extend(resp_recent.json())
+
+        for c in comments_to_check:
+            body = c.get("body", "")
+            parsed = parse_message(body)
+            if parsed is not None and parsed.id == msg_obj.id:
+                comment_url = c.get("html_url", "")
+                setattr(msg_obj, "issue_number", issue_number)
+                setattr(msg_obj, "comment_url", comment_url)
+                return comment_url
 
         # Post comment to issue
         post_url = f"repos/{self.owner}/{self.repo}/issues/{issue_number}/comments"
@@ -308,7 +328,9 @@ class GitHubBackend:
             if url != first_url:
                 current_resp = self._request("GET", url, headers=self._headers())
                 if current_resp.status >= 400:
-                    break
+                    raise BackendError(
+                        f"Failed to list messages (page fetch failed): HTTP {current_resp.status}"
+                    )
 
             comments = current_resp.json()
             for comment in comments:
