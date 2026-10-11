@@ -1,4 +1,4 @@
-"""Unit tests for GitHubIssuesBackend: fake transport only, no network (D2)."""
+"""Unit tests for GitHubIssuesBackend: fake transport only, no network (D2/D4)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from angareion.backend import (
     ChannelNotFoundError,
     Cursor,
     Target,
-    address_matches_identity,
 )
 from angareion.config import Config
 from angareion.github import (
@@ -28,7 +27,7 @@ from angareion.github import (
 )
 from angareion.messages import Message, parse_message, serialize_message
 
-ISSUES_URL = "https://api.github.com/repos/owner/repo/issues?state=all&per_page=100"
+ISSUES_URL = "https://api.github.com/repos/owner/repo/issues?state=all&sort=created&direction=asc&per_page=100"
 CHANNEL_COMMENTS_URL = "https://api.github.com/repos/owner/repo/issues/10/comments?per_page=100"
 REPO_COMMENTS_URL = "https://api.github.com/repos/owner/repo/issues/comments?per_page=100"
 
@@ -50,10 +49,17 @@ def _make_msg(
     )
 
 
-def _comment(msg: Message, *, issue_number: int = 10, comment_id: int = 101) -> dict[str, Any]:
+def _comment(
+    msg: Message,
+    *,
+    issue_number: int = 10,
+    comment_id: int = 101,
+    created_at: str = "2026-10-10T12:00:00Z",
+) -> dict[str, Any]:
     return {
         "id": comment_id,
         "body": serialize_message(msg),
+        "created_at": created_at,
         "html_url": f"https://github.com/owner/repo/issues/{issue_number}#issuecomment-{comment_id}",
         "issue_url": f"https://api.github.com/repos/owner/repo/issues/{issue_number}",
     }
@@ -75,9 +81,10 @@ class FakeTransport:
         url: str,
         headers: dict[str, str] | None = None,
         body: bytes | None = None,
+        timeout: float | None = None,
     ) -> HttpResponse:
         self.recorded_requests.append(
-            {"method": method, "url": url, "headers": headers or {}, "body": body}
+            {"method": method, "url": url, "headers": headers or {}, "body": body, "timeout": timeout}
         )
         key = (method, url)
         if key in self.routes:
@@ -90,10 +97,6 @@ class FakeTransport:
 
 def _issues_route(transport: FakeTransport, issues: list[dict[str, Any]]) -> None:
     transport.set_route("GET", ISSUES_URL, HttpResponse(200, {}, json.dumps(issues).encode("utf-8")))
-
-
-def _json(resp: HttpResponse) -> Any:
-    return json.loads(resp.body.decode("utf-8"))
 
 
 def test_github_backend_conforms_to_protocol():
@@ -135,7 +138,7 @@ def test_create_and_find_channel():
     assert backend.find_channel("new-topic") == 55
 
     post = [r for r in transport.recorded_requests if r["method"] == "POST"][0]
-    payload = _json(HttpResponse(200, {}, post["body"]))
+    payload = json.loads(post["body"].decode("utf-8"))
     assert payload["title"] == "new-topic"
     assert parse_channel_members(payload["body"]) == members
 
@@ -159,16 +162,16 @@ def test_channel_body_parsing_tolerates_foreign_bodies():
 
 
 def test_duplicate_channel_names_resolve_to_the_oldest_issue():
-    """L4: same-name issues (newest first in the listing) converge on the oldest."""
+    """L4/D2: issues are listed oldest first; the first title match wins and the scan stops."""
     transport = FakeTransport()
     _issues_route(transport, [
-        {"number": 12, "title": "topic", "body": ""},  # newest first
-        {"number": 7, "title": "topic", "body": serialize_channel_body("topic", [])},
+        {"number": 3, "title": "topic", "body": serialize_channel_body("topic", [])},
+        {"number": 7, "title": "topic", "body": ""},
     ])
 
     backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
-    assert backend.find_channel("topic") == 7
-    assert backend.create_channel("topic", []).number == 7
+    assert backend.find_channel("topic") == 3
+    assert backend.create_channel("topic", []).number == 3
     assert [r for r in transport.recorded_requests if r["method"] == "POST"] == []
 
 
@@ -178,15 +181,15 @@ def test_create_channel_race_rescans_and_returns_the_older_issue():
             self.list_calls = 0
             self.posts = 0
 
-        def request(self, method, url, headers=None, body=None):
-            if method == "GET" and url.endswith("/issues?state=all&per_page=100"):
+        def request(self, method, url, headers=None, body=None, timeout=None):
+            if method == "GET" and "/issues?" in url:
                 self.list_calls += 1
                 if self.list_calls == 1:
                     return HttpResponse(200, {}, b"[]")
                 # The racing process's issue (4) is older than ours (5).
                 return HttpResponse(200, {}, json.dumps([
-                    {"number": 5, "title": "topic", "body": ""},
                     {"number": 4, "title": "topic", "body": serialize_channel_body("topic", [])},
+                    {"number": 5, "title": "topic", "body": ""},
                 ]).encode("utf-8"))
             if method == "POST" and url.endswith("/repos/owner/repo/issues"):
                 self.posts += 1
@@ -216,7 +219,7 @@ def test_send_posts_comment_and_returns_message_id():
     assert backend.send("general", msg) == "01MSG001"
 
     post = [r for r in transport.recorded_requests if r["method"] == "POST"][0]
-    body = _json(HttpResponse(200, {}, post["body"]))["body"]
+    body = json.loads(post["body"].decode("utf-8"))["body"]
     parsed = parse_message(body, strict=True)
     assert parsed is not None
     assert parsed.id == "01MSG001"
@@ -241,14 +244,14 @@ def test_send_401_is_authentication_error():
         backend.send("general", _make_msg())
 
 
-def test_check_uses_in_memory_etag_and_never_touches_the_cursor():
+def test_check_uses_in_memory_etag_for_a_single_page_and_never_touches_the_cursor():
     secret_token = "ghp_FAKE_CHECK_TOKEN_123"
 
     class ETagTransport:
         def __init__(self):
             self.comments_headers: list[dict[str, str]] = []
 
-        def request(self, method, url, headers=None, body=None):
+        def request(self, method, url, headers=None, body=None, timeout=None):
             if "/issues/10/comments" in url:
                 self.comments_headers.append(dict(headers or {}))
                 if headers and headers.get("If-None-Match") == 'W/"etag-1"':
@@ -259,10 +262,10 @@ def test_check_uses_in_memory_etag_and_never_touches_the_cursor():
     transport = ETagTransport()
     backend = GitHubIssuesBackend("owner/repo", token=secret_token, transport=transport)
     target = Target(channel="general")
-    cursor = Cursor(at="2026-10-10T12:00:00+00:00", id="01AAAA")
+    cursor = Cursor(position="100", at="2026-10-10T10:00:00Z", seen=["100"])
 
     assert backend.check(target, cursor) is False
-    assert cursor == Cursor(at="2026-10-10T12:00:00+00:00", id="01AAAA")
+    assert cursor == Cursor(position="100", at="2026-10-10T10:00:00Z", seen=["100"])
     assert backend.check(target, cursor) is False
 
     assert transport.comments_headers[0].get("If-None-Match") is None
@@ -271,49 +274,132 @@ def test_check_uses_in_memory_etag_and_never_touches_the_cursor():
     assert backend._check_etags[target.key()] == 'W/"etag-1"'
 
 
-def test_check_finds_new_message_after_cursor():
-    old = _make_msg(msg_id="01AAAA", at="2026-10-10T10:00:00+00:00")
-    new = _make_msg(msg_id="01BBBB", at="2026-10-10T11:00:00+00:00")
+def test_check_finds_new_message_past_the_position():
     transport = FakeTransport()
     _issues_route(transport, [{"number": 10, "title": "general", "body": ""}])
-    transport.set_route("GET", CHANNEL_COMMENTS_URL, HttpResponse(200, {}, json.dumps([_comment(old), _comment(new)]).encode("utf-8")))
+    transport.set_route(
+        "GET",
+        CHANNEL_COMMENTS_URL,
+        HttpResponse(200, {}, json.dumps([_comment(_make_msg(msg_id="01BBBB"), comment_id=101, created_at="2026-10-10T10:00:05Z")]).encode("utf-8")),
+    )
 
     backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
     target = Target(channel="general")
 
-    assert backend.check(target, Cursor(at=old.at, id=old.id)) is True
-    assert backend.check(target, Cursor(at=new.at, id=new.id)) is False
+    assert backend.check(target, Cursor(position="100", at="2026-10-10T10:00:00Z", seen=["100"])) is True
+    assert backend.check(target, Cursor(position="101", at="2026-10-10T10:00:05Z", seen=["101"])) is False
 
-    # A `since` query parameter is sent when the cursor carries a timestamp.
+    # The since query uses at - margin (D4), quoted, for a local cursor.
     comments_get = [r for r in transport.recorded_requests if "/issues/10/comments" in r["url"]][0]
-    assert "since=2026-10-10T10%3A00%3A00%2B00%3A00" in comments_get["url"]
+    assert "since=2026-10-10T09%3A59%3A00Z" in comments_get["url"]
 
 
 def test_check_to_me_uses_the_repo_level_listing_and_filters_recipient():
     me = {"repo": "owner-org/worker", "role": "worker"}
-    mine = _make_msg(msg_id="01AAAA", at="2026-10-10T10:00:00+00:00", to=me)
-    other = _make_msg(msg_id="01BBBB", at="2026-10-10T11:00:00+00:00",
-                      to={"repo": "owner-org/other", "role": "worker"})
+    mine = _make_msg(msg_id="01AAAA", to=me)
+    other = _make_msg(msg_id="01BBBB", to={"repo": "owner-org/other", "role": "worker"})
     transport = FakeTransport()
-    transport.set_route("GET", REPO_COMMENTS_URL, HttpResponse(200, {}, json.dumps([_comment(mine), _comment(other)]).encode("utf-8")))
+    transport.set_route(
+        "GET",
+        REPO_COMMENTS_URL,
+        HttpResponse(200, {}, json.dumps([
+            _comment(mine, comment_id=50, created_at="2026-10-10T10:00:00Z"),
+            _comment(other, comment_id=60, created_at="2026-10-10T11:00:00Z"),
+        ]).encode("utf-8")),
+    )
 
     backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
     target = Target(recipient=me)
 
     assert backend.check(target, Cursor()) is True
-    # `other` is newer than `mine`, but it is not addressed to me: not new for me.
-    assert backend.check(target, Cursor(at=mine.at, id=mine.id)) is False
-    assert backend.check(target, Cursor(at=other.at, id=other.id)) is False
+    # comment 60 is newer but not addressed to me: not new for me.
+    assert backend.check(target, Cursor(position="50", at="2026-10-10T10:00:00Z", seen=["50"])) is False
+    assert backend.check(target, Cursor(position="60", at="2026-10-10T11:00:00Z", seen=["60"])) is False
 
     urls = [r["url"] for r in transport.recorded_requests]
     assert urls and all("/issues/comments" in u for u in urls)
     assert all("/issues/10/comments" not in u for u in urls)
 
 
-def test_read_parses_paginates_and_keeps_same_second_messages():
-    same_second = "2026-10-10T12:00:00+00:00"
-    msg_a = _make_msg(channel="general", msg_id="01AAAA", at=same_second, content="A")
-    msg_b = _make_msg(channel="general", msg_id="01BBBB", at=same_second, content="B")
+def test_check_does_not_trust_a_multi_page_etag():
+    """M1: page 1 unchanged, my message on page 2: check must still say True."""
+    me = {"repo": "owner-org/worker", "role": "worker"}
+    page2_url = REPO_COMMENTS_URL + "&page=2"
+    others_page1 = [
+        _comment(_make_msg(msg_id=f"01OTHER{i:02d}", to={"repo": "owner-org/other", "role": "worker"}),
+                 comment_id=100 + i, created_at=f"2026-10-10T10:00:{i:02d}Z")
+        for i in range(20)
+    ]
+    mine = _comment(_make_msg(msg_id="01MINE", to=me), comment_id=200, created_at="2026-10-10T11:00:00Z")
+
+    class MultiPageTransport:
+        def __init__(self):
+            self.state = 1  # 1: page 2 has nothing; 2: page 2 has my message
+            self.if_none_match: list[str | None] = []
+
+        def request(self, method, url, headers=None, body=None, timeout=None):
+            if url.startswith(REPO_COMMENTS_URL) and "page=2" in url:
+                page2 = [mine] if self.state == 2 else []
+                return HttpResponse(200, {}, json.dumps(page2).encode("utf-8"))
+            if url.startswith(REPO_COMMENTS_URL):
+                self.if_none_match.append((headers or {}).get("If-None-Match"))
+                return HttpResponse(200, {"etag": 'W/"page1-unchanged"', "link": f'<{page2_url}>; rel="next"'},
+                                    json.dumps(others_page1).encode("utf-8"))
+            return HttpResponse(404, {}, b'{"message": "Not Found"}')
+
+    transport = MultiPageTransport()
+    backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
+    target = Target(recipient=me)
+    cursor = Cursor(position="100", at="2026-10-10T10:00:00Z", seen=["100"])
+
+    assert backend.check(target, cursor) is False
+    transport.state = 2
+    assert backend.check(target, cursor) is True
+    # Multi-page: no If-None-Match was ever sent, and no ETag was kept.
+    assert all(value is None for value in transport.if_none_match)
+    assert backend._check_etags[target.key()] is None
+
+
+def test_check_moves_the_scan_window_forward_within_one_process():
+    """D2 rule 3: after a scan, the next query starts at the scanned time - margin."""
+    transport = FakeTransport()
+    _issues_route(transport, [{"number": 10, "title": "general", "body": ""}])
+    transport.set_route(
+        "GET",
+        CHANNEL_COMMENTS_URL,
+        HttpResponse(200, {"etag": 'W/"e"'}, json.dumps([
+            _comment(_make_msg(msg_id="01AAAA"), comment_id=100, created_at="2026-10-10T12:00:00Z"),
+        ]).encode("utf-8")),
+    )
+
+    backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
+    target = Target(channel="general")
+    cursor = Cursor(position="100", at="2026-10-10T09:00:00Z", seen=["100"])
+
+    assert backend.check(target, cursor) is False
+    assert backend._scan_since[target.key()] == "2026-10-10T11:59:00Z"
+    assert backend.check(target, cursor) is False
+
+    urls = [r["url"] for r in transport.recorded_requests if "/issues/10/comments" in r["url"]]
+    assert "since=2026-10-10T08%3A59%3A00Z" in urls[0]  # cursor at - margin
+    assert "since=2026-10-10T11%3A59%3A00Z" in urls[1]  # scanned time - margin (scan_since wins)
+
+
+def test_check_passes_its_timeout_budget_to_the_transport():
+    transport = FakeTransport()
+    _issues_route(transport, [{"number": 10, "title": "general", "body": ""}])
+    transport.set_route("GET", CHANNEL_COMMENTS_URL, HttpResponse(200, {}, b"[]"))
+
+    backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
+    assert backend.check(Target(channel="general"), Cursor(), timeout=7.5) is False
+
+    comments_get = [r for r in transport.recorded_requests if "/issues/10/comments" in r["url"]][0]
+    assert comments_get["timeout"] == 7.5
+
+
+def test_read_parses_paginates_and_returns_the_backend_cursor():
+    msg_a = _make_msg(channel="general", msg_id="01AAAA", content="A")
+    msg_b = _make_msg(channel="general", msg_id="01BBBB", content="B")
     page2_url = CHANNEL_COMMENTS_URL + "&page=2"
 
     transport = FakeTransport()
@@ -322,32 +408,106 @@ def test_read_parses_paginates_and_keeps_same_second_messages():
         "GET",
         CHANNEL_COMMENTS_URL,
         HttpResponse(200, {"link": f'<{page2_url}>; rel="next"'},
-                     json.dumps([{"id": 1, "body": "not a message"}, _comment(msg_a)]).encode("utf-8")),
+                     json.dumps([{"id": 1, "body": "not a message"},
+                                 _comment(msg_a, comment_id=10, created_at="2026-10-10T12:00:00Z")]).encode("utf-8")),
     )
     transport.set_route(
         "GET",
         page2_url,
-        HttpResponse(200, {}, json.dumps([_comment(msg_b)]).encode("utf-8")),
+        HttpResponse(200, {}, json.dumps([_comment(msg_b, comment_id=11, created_at="2026-10-10T12:00:01Z")]).encode("utf-8")),
     )
 
     backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
     target = Target(channel="general")
 
-    # Read everything: both messages, oldest first.
     res = backend.read(target, Cursor())
+    assert [m.id for m in res.messages] == ["01AAAA", "01BBBB"]  # arrival order
+    assert res.cursor == Cursor(position="11", at="2026-10-10T12:00:01Z", seen=["10", "11"])
+    assert res.messages[0].received_at == "2026-10-10T12:00:00Z"
+    assert getattr(res.messages[0], "issue_number") == 10
+
+
+def test_read_ignores_the_sender_time_and_uses_the_backend_position():
+    """Sender clocks, timezones and ULIDs decide nothing; backend arrival does."""
+    slow_clock = _make_msg(msg_id="01AAAA", at="2026-10-10T08:00:00+00:00")      # two hours behind
+    other_tz = _make_msg(msg_id="01BBBB", at="2026-10-10T17:00:00+09:00")      # same instant, weird string
+    transport = FakeTransport()
+    _issues_route(transport, [{"number": 10, "title": "general", "body": ""}])
+    transport.set_route(
+        "GET",
+        CHANNEL_COMMENTS_URL,
+        HttpResponse(200, {}, json.dumps([
+            _comment(slow_clock, comment_id=100, created_at="2026-10-10T12:00:00Z"),
+            _comment(other_tz, comment_id=101, created_at="2026-10-10T12:00:01Z"),
+        ]).encode("utf-8")),
+    )
+
+    backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
+    res = backend.read(Target(channel="general"), Cursor(position="99", at="2026-10-10T12:00:10Z", seen=["99"]))
     assert [m.id for m in res.messages] == ["01AAAA", "01BBBB"]
-    assert res.cursor == Cursor(at=same_second, id="01BBBB")
+    assert res.cursor == Cursor(position="101", at="2026-10-10T12:00:01Z", seen=["100", "101"])
 
-    # Read again from the returned cursor: nothing, even though the server
-    # listing still contains both comments (an edited comment must not return).
-    again = backend.read(target, res.cursor)
-    assert again.messages == []
-    assert again.cursor == res.cursor
 
-    # A cursor at the first message still delivers the second one: same second,
-    # larger ULID.
-    just_b = backend.read(target, Cursor(at=same_second, id="01AAAA"))
-    assert [m.id for m in just_b.messages] == ["01BBBB"]
+def test_read_edited_comment_does_not_come_back():
+    msg = _make_msg(msg_id="01AAAA", content="original")
+    transport = FakeTransport()
+    _issues_route(transport, [{"number": 10, "title": "general", "body": ""}])
+    transport.set_route(
+        "GET",
+        CHANNEL_COMMENTS_URL,
+        HttpResponse(200, {}, json.dumps([_comment(msg, comment_id=10, created_at="2026-10-10T12:00:00Z")]).encode("utf-8")),
+    )
+    cursor = Cursor(position="10", at="2026-10-10T12:00:00Z", seen=["10"])
+
+    backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
+    res = backend.read(Target(channel="general"), cursor)
+    assert res.messages == []  # the edited comment reappears in the listing but is not new
+    assert res.cursor == cursor
+
+
+def test_read_delivers_a_late_smaller_id_within_the_window():
+    already_read = _make_msg(msg_id="01READ")
+    lagging = _make_msg(msg_id="01LAG")
+    transport = FakeTransport()
+    _issues_route(transport, [{"number": 10, "title": "general", "body": ""}])
+    transport.set_route(
+        "GET",
+        CHANNEL_COMMENTS_URL,
+        # The since query (at - margin) lists the already-read comment 100 too.
+        HttpResponse(200, {}, json.dumps([
+            _comment(lagging, comment_id=99, created_at="2026-10-10T12:00:30Z"),
+            _comment(already_read, comment_id=100, created_at="2026-10-10T12:01:00Z"),
+        ]).encode("utf-8")),
+    )
+    cursor = Cursor(position="100", at="2026-10-10T12:01:00Z", seen=["100"])
+
+    backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
+    res = backend.read(Target(channel="general"), cursor)
+    assert [m.id for m in res.messages] == ["01LAG"]
+    assert res.cursor.position == "100"  # never backwards
+    assert res.cursor.at == "2026-10-10T12:01:00Z"
+    assert set(res.cursor.seen) == {"99", "100"}
+
+
+def test_read_with_since_is_inclusive_and_moves_nothing():
+    msg = _make_msg(msg_id="01AAAA")
+    transport = FakeTransport()
+    _issues_route(transport, [{"number": 10, "title": "general", "body": ""}])
+    transport.set_route(
+        "GET",
+        CHANNEL_COMMENTS_URL,
+        HttpResponse(200, {}, json.dumps([_comment(msg, comment_id=10, created_at="2026-10-10T12:00:00Z")]).encode("utf-8")),
+    )
+
+    backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
+    since_cursor = Cursor(at="2026-10-10T12:00:00Z")
+    res = backend.read(Target(channel="general"), since_cursor)
+
+    assert [m.id for m in res.messages] == ["01AAAA"]
+    assert res.cursor == since_cursor  # a --since read returns the cursor untouched
+    # The since query uses the time as-is (no margin): inclusive boundary.
+    comments_get = [r for r in transport.recorded_requests if "/issues/10/comments" in r["url"]][0]
+    assert "since=2026-10-10T12%3A00%3A00Z" in comments_get["url"]
 
 
 def test_read_channel_not_found():
@@ -379,7 +539,7 @@ def test_token_never_appears_in_exception_messages():
     secret_token = "ghp_VERY_SECRET_PAT_987654321"
 
     class ErrorTransport:
-        def request(self, method, url, headers=None, body=None):
+        def request(self, method, url, headers=None, body=None, timeout=None):
             raise urllib.error.URLError(f"Connection failed with token {secret_token}")
 
     backend = GitHubIssuesBackend("owner/repo", token=secret_token, transport=ErrorTransport())
@@ -387,11 +547,6 @@ def test_token_never_appears_in_exception_messages():
         backend.read(Target(recipient={"repo": "a", "role": "b"}), Cursor())
     assert secret_token not in str(excinfo.value)
     assert "***" in str(excinfo.value)
-
-
-def test_address_matching_helper_is_used_by_backend_filters():
-    me = {"repo": "owner-org/worker", "role": "worker"}
-    assert address_matches_identity(_make_msg(to=me).to, me)
 
 
 def test_requests_carry_authorization_and_api_headers():
@@ -459,6 +614,10 @@ def test_default_transport_passes_a_fixed_socket_timeout(monkeypatch):
     assert HTTP_TIMEOUT_SECONDS == 30.0
     assert calls == [30.0]
 
+    # An explicit per-request budget overrides the fixed timeout.
+    transport.request("GET", "https://api.github.com/x", timeout=3.5)
+    assert calls == [30.0, 3.5]
+
 
 def test_default_transport_timeout_becomes_backend_error(monkeypatch):
     from angareion.github import DefaultHttpTransport
@@ -504,8 +663,6 @@ def test_default_transport_refuses_to_follow_redirects(monkeypatch):
 
 
 def test_next_page_link_outside_the_base_url_is_refused():
-    from angareion.github import HttpResponse
-
     msg = _make_msg(msg_id="01AAAA")
     evil_page2 = "https://evil.example/repos/owner/repo/issues/comments?per_page=100&page=2"
     transport = FakeTransport()

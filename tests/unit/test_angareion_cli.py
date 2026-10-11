@@ -60,6 +60,8 @@ def _seed_message(
     at: str = "2026-10-10T12:00:00+00:00",
     content: str = "Task for worker",
     to: dict | None = None,
+    comment_id: int | None = None,
+    created_at: str | None = None,
 ) -> Message:
     message = Message(
         from_={"repo": "owner-org/team", "role": "PM"},
@@ -69,7 +71,7 @@ def _seed_message(
         id=msg_id,
         at=at,
     )
-    backend.send(channel, message)
+    backend.deliver(channel, message, comment_id=comment_id, created_at=created_at)
     return message
 
 
@@ -232,7 +234,8 @@ def test_send_with_attachments(cli_env, capsys):
 
 
 def test_read_prints_messages_and_advances_the_cursor(cli_env, capsys):
-    _seed_message(cli_env["backend"], msg_id="01AAAA00000000000000000000")
+    _seed_message(cli_env["backend"], msg_id="01AAAA00000000000000000000",
+                  comment_id=1, created_at="2026-10-10T12:00:05Z")
 
     ret = main(["read", "--channel", "general"], backend=cli_env["backend"])
     assert ret == 0
@@ -241,13 +244,14 @@ def test_read_prints_messages_and_advances_the_cursor(cli_env, capsys):
     assert "Task for worker" in captured.out
     assert "<owner-org/team×PM>" in captured.out
     assert "channel: general" in captured.out
+    assert "(received 2026-10-10T12:00:05Z)" in captured.out
     assert captured.err == ""
 
     # The local cursor moved: the same message does not come back.
     cursor_file = cli_env["state_dir"] / "cursor-owner-org_worker__worker.json"
     assert cursor_file.is_file()
     stored = json.loads(cursor_file.read_text(encoding="utf-8"))
-    assert stored == {"channel:general": {"at": "2026-10-10T12:00:00+00:00", "id": "01AAAA00000000000000000000"}}
+    assert stored == {"channel:general": {"position": "1", "at": "2026-10-10T12:00:05Z", "seen": ["1"]}}
 
     ret2 = main(["read", "--channel", "general"], backend=cli_env["backend"])
     assert ret2 == 0
@@ -255,7 +259,8 @@ def test_read_prints_messages_and_advances_the_cursor(cli_env, capsys):
 
 
 def test_read_json_output(cli_env, capsys):
-    _seed_message(cli_env["backend"], msg_id="01AAAA00000000000000000000")
+    _seed_message(cli_env["backend"], msg_id="01AAAA00000000000000000000",
+                  comment_id=1, created_at="2026-10-10T12:00:05Z")
 
     ret = main(["read", "--channel", "general", "--json"], backend=cli_env["backend"])
     assert ret == 0
@@ -264,14 +269,18 @@ def test_read_json_output(cli_env, capsys):
     assert data[0]["id"] == "01AAAA00000000000000000000"
     assert data[0]["content"] == "Task for worker"
     assert data[0]["from"] == {"repo": "owner-org/team", "role": "PM"}
+    # The backend's time is in every read message (D1), distinct from the sender's at.
+    assert data[0]["received_at"] == "2026-10-10T12:00:05Z"
 
 
 def test_read_with_since_does_not_touch_the_cursor(cli_env, capsys):
-    _seed_message(cli_env["backend"], msg_id="01AAAA00000000000000000000", at="2026-10-10T12:00:00+00:00")
-    _seed_message(cli_env["backend"], msg_id="01BBBB00000000000000000000", at="2026-10-10T12:00:01+00:00")
+    _seed_message(cli_env["backend"], msg_id="01AAAA00000000000000000000",
+                  comment_id=1, created_at="2026-10-10T12:00:00Z")
+    _seed_message(cli_env["backend"], msg_id="01BBBB00000000000000000000",
+                  comment_id=2, created_at="2026-10-10T12:00:01Z")
 
     ret = main(
-        ["read", "--channel", "general", "--since", "2026-10-10T12:00:00+00:00", "--json"],
+        ["read", "--channel", "general", "--since", "2026-10-10T12:00:01Z", "--json"],
         backend=cli_env["backend"],
     )
     assert ret == 0
@@ -418,9 +427,9 @@ def test_readonly_token_0400_works_end_to_end(cli_env, capsys):
         def __init__(self):
             self.requests = []
 
-        def request(self, method, url, headers=None, body=None):
+        def request(self, method, url, headers=None, body=None, timeout=None):
             self.requests.append((method, url))
-            if url.endswith("/issues?state=all&per_page=100"):
+            if "/issues?" in url:
                 return HttpResponse(200, {}, b"[]")
             if method == "POST" and url.endswith("/repos/owner-org/channel-repo/issues"):
                 return HttpResponse(201, {}, json.dumps({"number": 3, "title": "fresh", "body": ""}).encode("utf-8"))
@@ -508,7 +517,7 @@ class MiniGitHub:
         self._next_issue = 1
         self._next_comment = 1
 
-    def request(self, method, url, headers=None, body=None):
+    def request(self, method, url, headers=None, body=None, timeout=None):
         import urllib.parse
 
         parsed = urllib.parse.urlparse(url)
@@ -516,7 +525,8 @@ class MiniGitHub:
         params = urllib.parse.parse_qs(parsed.query)
 
         if method == "GET" and path.endswith("/issues"):
-            return HttpResponse(200, {}, json.dumps(list(self.issues.values())).encode("utf-8"))
+            issues = sorted(self.issues.values(), key=lambda issue: issue["number"])
+            return HttpResponse(200, {}, json.dumps(issues).encode("utf-8"))
 
         if method == "POST" and path.endswith("/issues"):
             payload = json.loads(body.decode("utf-8"))
@@ -534,12 +544,14 @@ class MiniGitHub:
         elif method == "POST" and path.endswith("/comments"):
             number = int(path.split("/issues/")[1].split("/")[0])
             payload = json.loads(body.decode("utf-8"))
+            created_at = f"2026-10-10T12:00:{self._next_comment:02d}Z"
             comment = {
                 "id": self._next_comment,
                 "body": payload["body"],
+                "created_at": created_at,
+                "updated_at": created_at,
                 "html_url": f"https://github.com/owner-org/channel-repo/issues/{number}#issuecomment-{self._next_comment}",
                 "issue_url": f"https://api.github.com/repos/owner-org/channel-repo/issues/{number}",
-                "updated_at": "2026-10-10T12:00:00Z",
                 "_issue_number": number,
             }
             self._next_comment += 1
@@ -594,7 +606,7 @@ def test_backend_http_error_exits_2_without_retry_and_without_the_token(cli_env,
         def __init__(self):
             self.calls = 0
 
-        def request(self, method, url, headers=None, body=None):
+        def request(self, method, url, headers=None, body=None, timeout=None):
             self.calls += 1
             return HttpResponse(403, {"retry-after": "60"}, b'{"message": "secondary rate limit"}')
 
@@ -610,8 +622,8 @@ def test_backend_http_error_exits_2_without_retry_and_without_the_token(cli_env,
 
 def test_non_json_backend_response_exits_2(cli_env, capsys):
     class HtmlTransport:
-        def request(self, method, url, headers=None, body=None):
-            if url.endswith("/issues?state=all&per_page=100"):
+        def request(self, method, url, headers=None, body=None, timeout=None):
+            if "/issues?" in url:
                 return HttpResponse(200, {}, json.dumps([{"number": 1, "title": "general", "body": ""}]).encode("utf-8"))
             return HttpResponse(200, {}, b"<html>proxy login page</html>")
 
@@ -637,7 +649,7 @@ def test_transport_timeout_exits_2_without_waiting_out_the_timeout(cli_env, caps
         def __init__(self, exc):
             self.exc = exc
 
-        def request(self, method, url, headers=None, body=None):
+        def request(self, method, url, headers=None, body=None, timeout=None):
             raise self.exc
 
     def forbidden_sleep(seconds):

@@ -115,7 +115,12 @@ def _format_message(message: Message) -> str:
     sender_str = f"{sender.get('repo')}×{sender.get('role')}"
     if sender.get("name"):
         sender_str += f" ({sender['name']})"
-    lines = [f"[{message.urgency}] {message.id} {message.at} <{sender_str}> channel: {message.channel}"]
+    header = f"[{message.urgency}] {message.id} {message.at}"
+    received_at = getattr(message, "received_at", None)
+    if received_at:
+        header += f" (received {received_at})"
+    header += f" <{sender_str}> channel: {message.channel}"
+    lines = [header]
     body = message.content.rstrip("\n")
     if body:
         lines.extend("  " + line for line in body.splitlines())
@@ -123,6 +128,22 @@ def _format_message(message: Message) -> str:
         kinds = [f"{att.get('name')} ({'ref' if 'ref' in att else 'inline'})" for att in message.attachments]
         lines.append("  attachments: " + ", ".join(kinds))
     return "\n".join(lines) + "\n"
+
+
+def _message_for_output(message: Message) -> dict[str, Any]:
+    """The message as a dict for `--json`, plus the backend's received_at (D1)."""
+    data = message_to_dict(message)
+    data["received_at"] = getattr(message, "received_at", None)
+    return data
+
+
+def _report_old_cursors(app: Angareion) -> None:
+    """Say once per run when an old-format ({at, id}) cursor was dropped (D4)."""
+    for key in sorted(app.cursors.dropped_old_format):
+        sys.stderr.write(
+            f"Notice: cursor for '{key}' was in the old (at, id) format and cannot be translated; "
+            "reading that target from the start. The file is rewritten in the new format.\n"
+        )
 
 
 def _build_attachments(args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -233,6 +254,7 @@ def cmd_wait(
 
     target = _target_from_args(args, config)
     found = app.wait(target, args.timeout, poll_interval=POLL_INTERVAL_SECONDS, sleeper=sleeper, clock=clock)
+    _report_old_cursors(app)
     if found:
         return EXIT_OK
     sys.stderr.write("Timed out with no new messages.\n")
@@ -244,7 +266,7 @@ def cmd_read(args: argparse.Namespace, config: Config, app: Angareion, token: st
     batch = app.read(target, since=args.since)
 
     if args.json:
-        sys.stdout.write(json.dumps([message_to_dict(m) for m in batch.messages], indent=2, ensure_ascii=False) + "\n")
+        sys.stdout.write(json.dumps([_message_for_output(m) for m in batch.messages], indent=2, ensure_ascii=False) + "\n")
     else:
         for message in batch.messages:
             sys.stdout.write(_format_message(message))
@@ -252,6 +274,7 @@ def cmd_read(args: argparse.Namespace, config: Config, app: Angareion, token: st
     # Only now that every message reached stdout may the cursor move (L2):
     # a closed pipe (| head) must not swallow the messages for the next read.
     batch.commit()
+    _report_old_cursors(app)
     return EXIT_OK
 
 

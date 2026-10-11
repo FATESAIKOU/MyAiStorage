@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 import json
 import re
 from typing import Any, Protocol
@@ -12,6 +13,7 @@ import urllib.request
 import yaml
 
 from angareion.backend import (
+    CURSOR_SEEN_MARGIN_SECONDS,
     AuthenticationError,
     BackendError,
     Channel,
@@ -20,7 +22,11 @@ from angareion.backend import (
     ReadResult,
     Target,
     address_matches_identity,
-    is_message_after_cursor,
+    advance_cursor,
+    comment_is_new,
+    cursor_since,
+    format_backend_time,
+    parse_backend_time,
 )
 from angareion.config import Config, load_token, mask_token
 from angareion.messages import (
@@ -33,6 +39,7 @@ from angareion.messages import (
 
 USER_AGENT = "Angareion/0.1.0"
 HTTP_TIMEOUT_SECONDS = 30.0
+ISSUES_PAGE = "repos/{owner}/{repo}/issues?state=all&sort=created&direction=asc&per_page=100"
 
 
 class HttpResponse:
@@ -56,6 +63,7 @@ class HttpTransport(Protocol):
         url: str,
         headers: dict[str, str] | None = None,
         body: bytes | None = None,
+        timeout: float | None = None,
     ) -> HttpResponse:
         ...
 
@@ -86,20 +94,22 @@ class DefaultHttpTransport:
         url: str,
         headers: dict[str, str] | None = None,
         body: bytes | None = None,
+        timeout: float | None = None,
     ) -> HttpResponse:
+        effective_timeout = self.timeout if timeout is None else timeout
         req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
         try:
-            with self._opener.open(req, timeout=self.timeout) as resp:
+            with self._opener.open(req, timeout=effective_timeout) as resp:
                 headers_dict = {str(k).lower(): str(v) for k, v in resp.headers.items()}
                 return HttpResponse(resp.status, headers_dict, resp.read())
         except urllib.error.HTTPError as e:
             headers_dict = {str(k).lower(): str(v) for k, v in e.headers.items()}
             return HttpResponse(e.code, headers_dict, e.read())
         except TimeoutError as e:
-            raise BackendError(f"HTTP request timed out after {self.timeout:.0f}s") from e
+            raise BackendError(f"HTTP request timed out after {effective_timeout:.0f}s") from e
         except urllib.error.URLError as e:
             if isinstance(e.reason, TimeoutError):
-                raise BackendError(f"HTTP request timed out after {self.timeout:.0f}s") from e
+                raise BackendError(f"HTTP request timed out after {effective_timeout:.0f}s") from e
             raise BackendError(f"Network error connecting to GitHub: {e.reason}") from e
 
 
@@ -166,6 +176,9 @@ class GitHubIssuesBackend:
         self._issues_cache: dict[str, dict[str, Any]] = {}
         self._channel_numbers: dict[str, int] = {}
         self._check_etags: dict[str, str | None] = {}
+        # wait-process-only scan window (D2 rule 3): the newest backend time
+        # already scanned, minus the margin. Never part of the cursor.
+        self._scan_since: dict[str, str] = {}
 
     @classmethod
     def from_config(
@@ -204,6 +217,8 @@ class GitHubIssuesBackend:
         path_or_url: str,
         headers: dict[str, str] | None = None,
         data: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> HttpResponse:
         if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
             url = path_or_url
@@ -216,7 +231,7 @@ class GitHubIssuesBackend:
             req_headers["Content-Type"] = "application/json"
 
         try:
-            resp = self.transport.request(method, url, headers=req_headers, body=body_bytes)
+            resp = self.transport.request(method, url, headers=req_headers, body=body_bytes, timeout=timeout)
         except Exception as e:
             raise BackendError(f"HTTP request failed: {self._mask(str(e))}") from e
 
@@ -255,17 +270,19 @@ class GitHubIssuesBackend:
                 f"GitHub returned a non-JSON response while {context} (HTTP {resp.status})"
             ) from e
 
-    def _list_issues(self) -> list[dict[str, Any]]:
-        """Every issue (newest first, as GitHub lists them); caches titles.
+    def _find_issue(self, name: str, *, timeout: float | None = None) -> dict[str, Any] | None:
+        """The oldest issue with this channel name, or None (D2).
 
-        GitHub lists newest first, so the write-through of `_issues_cache`
-        leaves the *oldest* issue for a duplicated title — the one that wins
-        (L4). Pull requests and entries without a title/number are skipped.
+        Issues are listed oldest first (`sort=created&direction=asc`); the
+        first title match is therefore the oldest and wins, and the scan stops
+        there. Pull requests and entries without a title/number are skipped.
         """
-        issues: list[dict[str, Any]] = []
-        url: str | None = f"repos/{self.owner}/{self.repo}/issues?state=all&per_page=100"
+        if name in self._issues_cache:
+            return self._issues_cache[name]
+
+        url: str | None = ISSUES_PAGE.format(owner=self.owner, repo=self.repo)
         while url:
-            resp = self._request("GET", url, headers=self._headers())
+            resp = self._request("GET", url, headers=self._headers(), timeout=timeout)
             if resp.status >= 400:
                 raise BackendError(f"Failed to list issues: HTTP {resp.status}")
 
@@ -276,22 +293,14 @@ class GitHubIssuesBackend:
                 number = issue.get("number")
                 if not title or not number:
                     continue
-                issues.append(issue)
-                self._issues_cache[title] = issue
-                self._channel_numbers[title] = number
+                self._issues_cache.setdefault(title, issue)
+                self._channel_numbers.setdefault(title, number)
+                if title == name:
+                    return issue
 
             url = self._next_page_url(resp)
-        return issues
 
-    def _find_issue(self, name: str) -> dict[str, Any] | None:
-        """The issue JSON for a channel name, or None."""
-        if name in self._issues_cache:
-            return self._issues_cache[name]
-
-        self._list_issues()
-
-        if name in self._issues_cache:
-            return self._issues_cache[name]
+        # A comment may have taught us the number before the listing catches up.
         number = self._channel_numbers.get(name)
         if number is not None:
             return {"title": name, "number": number, "body": ""}
@@ -358,73 +367,116 @@ class GitHubIssuesBackend:
             raise BackendError(f"Failed to send to channel '{channel}': HTTP {resp.status}")
         return message.id
 
-    def _listing_url(self, target: Target, cursor: Cursor) -> str:
+    def _listing_url(self, target: Target, *, since: str | None = None, timeout: float | None = None) -> str:
         if target.channel is not None:
-            issue = self._find_issue(target.channel)
+            issue = self._find_issue(target.channel, timeout=timeout)
             if issue is None:
                 raise ChannelNotFoundError(f"Channel '{target.channel}' does not exist")
             url = f"repos/{self.owner}/{self.repo}/issues/{issue['number']}/comments?per_page=100"
         else:
             url = f"repos/{self.owner}/{self.repo}/issues/comments?per_page=100"
-        if cursor.at:
-            url += f"&since={urllib.parse.quote(cursor.at, safe='')}"
+        if since:
+            url += f"&since={urllib.parse.quote(since, safe='')}"
         return url
 
-    def _is_new_for_target(self, message: Message, target: Target, cursor: Cursor) -> bool:
-        if not is_message_after_cursor(message, cursor):
-            return False
-        if target.recipient is not None and not address_matches_identity(message.to, target.recipient):
-            return False
-        return True
+    def _is_in_scope(self, message: Message, target: Target) -> bool:
+        """A comment on the channel issue, or one addressed to me (D4)."""
+        if target.channel is not None:
+            return True
+        return address_matches_identity(message.to, target.recipient or {})
 
-    def _page_has_new(self, comments: list[dict[str, Any]], target: Target, cursor: Cursor) -> bool:
-        for comment in comments:
-            parsed = parse_message(comment.get("body", ""))
-            if parsed is not None and self._is_new_for_target(parsed, target, cursor):
-                return True
-        return False
+    def _comment_meta(self, comment: dict[str, Any]) -> tuple[int, str] | None:
+        """(comment id, created_at) of a comment, or None when unusable."""
+        created_at = str(comment.get("created_at") or "")
+        try:
+            comment_id = int(comment["id"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not created_at:
+            return None
+        try:
+            parse_backend_time(created_at)
+        except ValueError:
+            return None
+        return comment_id, created_at
 
-    def check(self, target: Target, cursor: Cursor) -> bool:
-        """Whether there is anything new, with an in-process ETag if we have one.
+    def check(self, target: Target, cursor: Cursor, *, timeout: float | None = None) -> bool:
+        """Whether there is anything new, without trusting a multi-page ETag (D2/M1).
 
-        The ETag lives for one process only (`wait` polls in one process); the
-        cursor file never learns it, so a later `read` cannot be skipped by a
-        304. A 304 means nothing changed since the last poll: no new messages.
+        The ETag lives in this process's memory only, and is stored and used
+        only when the response had no next page: it speaks for page 1 alone,
+        so a new comment on page 2 would never move it and a 304 would hide
+        it. Within one process, `scan_since` moves the query window forward
+        past what was already scanned.
         """
-        url = self._listing_url(target, cursor)
         key = target.key()
-        resp = self._request("GET", url, headers=self._headers(etag=self._check_etags.get(key)))
+        since = cursor_since(cursor)
+        scan_since = self._scan_since.get(key)
+        if scan_since is not None and (since is None or scan_since > since):
+            since = scan_since
+
+        url = self._listing_url(target, since=since, timeout=timeout)
+        resp = self._request("GET", url, headers=self._headers(etag=self._check_etags.get(key)), timeout=timeout)
         if resp.status == 304:
             return False
         if resp.status >= 400:
             raise BackendError(f"Failed to check for new messages: HTTP {resp.status}")
 
-        self._check_etags[key] = resp.headers.get("etag") or None
-        if self._page_has_new(self._json(resp, "checking for new messages"), target, cursor):
-            return True
+        next_url = self._next_page_url(resp)
+        if next_url is None:
+            self._check_etags[key] = resp.headers.get("etag") or None
+        else:
+            # M1: the ETag only covers page 1; never trust it when the listing
+            # spans pages, or a page-2 comment is invisible until page 1 moves.
+            self._check_etags[key] = None
 
-        while (next_url := self._next_page_url(resp)):
-            resp = self._request("GET", next_url, headers=self._headers())
+        found = False
+        while True:
+            page_newest: str | None = None
+            for comment in self._json(resp, "checking for new messages"):
+                parsed = parse_message(comment.get("body", ""))
+                if parsed is None or not self._is_in_scope(parsed, target):
+                    continue
+                meta = self._comment_meta(comment)
+                if meta is None:
+                    continue
+                comment_id, created_at = meta
+                if page_newest is None or parse_backend_time(created_at) > parse_backend_time(page_newest):
+                    page_newest = created_at
+                if comment_is_new(comment_id, created_at, cursor):
+                    found = True
+
+            if page_newest is not None:
+                self._scan_since[key] = format_backend_time(
+                    parse_backend_time(page_newest) - timedelta(seconds=CURSOR_SEEN_MARGIN_SECONDS)
+                )
+            if found:
+                return True
+            if next_url is None:
+                return False
+            resp = self._request("GET", next_url, headers=self._headers(), timeout=timeout)
             if resp.status >= 400:
                 raise BackendError(f"Failed to check for new messages (page fetch failed): HTTP {resp.status}")
-            if self._page_has_new(self._json(resp, "checking for new messages"), target, cursor):
-                return True
-        return False
+            next_url = self._next_page_url(resp)
 
     def read(self, target: Target, cursor: Cursor) -> ReadResult:
         """Read the messages after the cursor, oldest first, pages included.
 
-        Messages are deduplicated by id and filtered against the (at, id)
-        cursor boundary; an edited already-read comment therefore does not
-        come back, and two messages in the same second both get through.
+        "New" is decided by the backend's arrival position and time (D4), and
+
+        the returned cursor carries the biggest position seen, its backend
+        time, and the ids read within the margin window. A `--since` cursor
+        (time only) returns the comments at or after that time and moves
+        nothing.
         """
-        url: str | None = self._listing_url(target, cursor)
+        since = cursor_since(cursor)
+        url: str | None = self._listing_url(target, since=since)
         resp = self._request("GET", url, headers=self._headers())
         if resp.status >= 400:
             raise BackendError(f"Failed to read messages: HTTP {resp.status}")
 
-        seen_ids: set[str] = set()
-        collected: list[Message] = []
+        entries: list[tuple[int, str]] = []
+        matched: list[tuple[int, Message]] = []
 
         while url:
             if resp.status >= 400:
@@ -432,12 +484,17 @@ class GitHubIssuesBackend:
 
             for comment in self._json(resp, "reading messages"):
                 parsed = parse_message(comment.get("body", ""))
-                if parsed is None or parsed.id in seen_ids:
+                if parsed is None or not self._is_in_scope(parsed, target):
                     continue
-                seen_ids.add(parsed.id)
-                if not self._is_new_for_target(parsed, target, cursor):
+                meta = self._comment_meta(comment)
+                if meta is None:
+                    continue
+                comment_id, created_at = meta
+                entries.append((comment_id, created_at))
+                if not comment_is_new(comment_id, created_at, cursor):
                     continue
 
+                setattr(parsed, "received_at", created_at)
                 issue_url = comment.get("issue_url", "")
                 if issue_url:
                     match = re.search(r"/issues/(\d+)", str(issue_url))
@@ -449,16 +506,15 @@ class GitHubIssuesBackend:
                 if comment_url:
                     setattr(parsed, "comment_url", comment_url)
 
-                collected.append(parsed)
+                matched.append((comment_id, parsed))
 
             url = self._next_page_url(resp)
             if url:
                 resp = self._request("GET", url, headers=self._headers())
 
-        collected.sort(key=lambda m: (m.at, m.id))
-        if collected:
-            last = collected[-1]
-            new_cursor = Cursor(at=last.at, id=last.id)
-        else:
-            new_cursor = Cursor(at=cursor.at, id=cursor.id)
-        return ReadResult(collected, new_cursor)
+        matched.sort(key=lambda pair: pair[0])
+        messages = [message for _, message in matched]  # oldest arrival first
+
+        if cursor.position is None and cursor.at is not None:
+            return ReadResult(messages, cursor)  # `--since`: the local cursor must not move
+        return ReadResult(messages, advance_cursor(cursor, entries))

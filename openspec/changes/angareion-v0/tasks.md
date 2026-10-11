@@ -28,6 +28,15 @@
 - [x] 補漏抓測試：token 讀取順序；請求 headers（Authorization／Accept／X-GitHub-Api-Version）
 - [x] 文件：opencode 讀 skill 位置的 spike 結論；SKILL.md 補 exit 2 與回覆位址兩行
 
+## 3.4 審查修正（第二批：游標、check 多頁、--since）
+
+- [x] merge `angareion-v0`（26ad009：新 D2／D4、spec Scenario）；tasks.md 保留本分支打勾與 3.3、2.4 用新措辭
+- [x] 游標照新 D4：`position`（留言 id）／`at`（`created_at`）／`seen`（at−60s 視窗內已讀 id）；新舊只看後端，不用寄件者的 at／id；舊格式游標當成沒有並在 stderr 說明一次
+- [x] M1：`check` 只在單頁時信任 ETag；多頁照樣掃、`scan_since` 只在行程記憶體
+- [x] `--since` 含邊界（後端時刻 >=）；`read` 每則輸出帶 `received_at`
+- [ ] 每個新 Scenario 都有測試，副本改壞驗證會紅
+- [ ] docs 游標一節與 `--since` 說明、SKILL 的 wait 說明改成新語意
+
 ## 4. 收尾
 
 - [ ] 4.1 完整 unit 綠；非作者審查（Muse Spark 1.3 xhigh）

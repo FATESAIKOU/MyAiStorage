@@ -1,8 +1,8 @@
-"""Local cursor state (D4): per target, the last read message's (at, id).
+"""Local cursor state (D4): per target, the backend's position/at/seen.
 
 Nothing else lives here — no message cache, no acks. Deleting the file means
-reading from the start. The ETag used by `check` is *not* stored: it lives in
-the backend instance for one process, so `wait` never writes the cursor.
+reading from the start. ETag and scan_since are not part of the cursor: they
+live in the backend instance for one process (D2).
 """
 
 from __future__ import annotations
@@ -36,6 +36,9 @@ class CursorStore:
                 raise ValueError("CursorStore needs either path, or state_dir and identity")
             path = cursor_file_path(Path(state_dir), identity)
         self.path = Path(path)
+        # Targets whose entry was in the old ({at, id}) format: they are treated
+        # as never read, and the CLI tells the user once per run.
+        self.dropped_old_format: set[str] = set()
 
     def _load(self) -> dict[str, Cursor]:
         if not self.path.is_file():
@@ -48,8 +51,20 @@ class CursorStore:
             return {}
         cursors: dict[str, Cursor] = {}
         for key, value in data.items():
-            if isinstance(value, dict):
-                cursors[key] = Cursor(at=value.get("at"), id=value.get("id"))
+            if not isinstance(value, dict):
+                continue
+            if "position" not in value and "id" in value:
+                # The pre-review format stored the sender's at/id; without a
+                # backend position it cannot be translated, so read from the
+                # start and say so once.
+                self.dropped_old_format.add(key)
+                continue
+            seen = value.get("seen")
+            cursors[key] = Cursor(
+                position=value.get("position"),
+                at=value.get("at"),
+                seen=[str(item) for item in seen if isinstance(item, str)] if isinstance(seen, list) else [],
+            )
         return cursors
 
     def cursor_for(self, target: Target) -> Cursor:
@@ -60,7 +75,10 @@ class CursorStore:
         """Store the cursor for a target, atomically."""
         cursors = self._load()
         cursors[target.key()] = cursor
-        payload = {key: {"at": c.at, "id": c.id} for key, c in cursors.items()}
+        payload = {
+            key: {"position": c.position, "at": c.at, "seen": list(c.seen)}
+            for key, c in cursors.items()
+        }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # L6: a unique temp file in the same directory, so two processes
         # reading at the same time cannot overwrite each other's in-flight file.

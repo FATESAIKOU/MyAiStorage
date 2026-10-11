@@ -37,14 +37,15 @@ class Angareion:
     def send(self, channel: str, message: Message) -> str:
         return self.backend.send(channel, message)
 
-    def check(self, target: Target) -> bool:
+    def check(self, target: Target, *, timeout: float | None = None) -> bool:
         """Whether the backend has anything new for the target right now.
 
         Uses the local cursor but never writes it (the spec: waiting must not
         move the cursor). Any ETag used for conditional requests lives in the
-        backend instance, for this process only.
+        backend instance, for this process only. `timeout` is an optional
+        budget for the backend's own network requests.
         """
-        return self.backend.check(target, self.cursors.cursor_for(target))
+        return self.backend.check(target, self.cursors.cursor_for(target), timeout=timeout)
 
     def wait(
         self,
@@ -59,14 +60,19 @@ class Angareion:
 
         `timeout=0` checks once and returns (non-blocking). A positive timeout
         waits at most that many seconds, polling every `poll_interval` seconds;
-        `None` waits forever.
+        `None` waits forever. Each check gets the remaining time (at least one
+        second) as its network budget, so a hung request cannot overshoot the
+        timeout by much.
         """
         if timeout is not None and timeout <= 0:
-            return self.check(target)
+            return self.check(target, timeout=1.0)
 
         deadline = None if timeout is None else clock() + timeout
         while True:
-            if self.check(target):
+            budget = None
+            if deadline is not None:
+                budget = max(1.0, deadline - clock())
+            if self.check(target, timeout=budget):
                 return True
             if deadline is None:
                 sleeper(poll_interval)

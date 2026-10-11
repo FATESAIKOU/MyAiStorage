@@ -31,15 +31,17 @@ def _make_msg(
 
 
 class CountingBackend(FakeBackend):
-    """FakeBackend that counts check calls, to pin the polling behaviour."""
+    """FakeBackend that counts check calls and records the timeout budgets."""
 
     def __init__(self):
         super().__init__()
         self.check_calls = 0
+        self.check_timeouts: list[float | None] = []
 
-    def check(self, target, cursor):
+    def check(self, target, cursor, *, timeout=None):
         self.check_calls += 1
-        return super().check(target, cursor)
+        self.check_timeouts.append(timeout)
+        return super().check(target, cursor, timeout=timeout)
 
 
 def _app(tmp_path, backend=None):
@@ -57,6 +59,8 @@ def test_wait_timeout_zero_checks_once_and_returns_false_when_empty(tmp_path):
 
     assert app.wait(Target(channel="general"), 0, sleeper=forbidden, clock=forbidden) is False
     assert backend.check_calls == 1
+    # Non-blocking: one check, with the design's minimum one-second network budget.
+    assert backend.check_timeouts == [1.0]
 
 
 def test_wait_timeout_zero_returns_true_with_new_message(tmp_path):
@@ -130,6 +134,8 @@ def test_wait_times_out_without_sleeping_past_the_deadline(tmp_path):
     assert sleeps == [15.0, 15.0, 1.0]
     # Checks at 0s, 15s, 30s and once more at the deadline itself.
     assert backend.check_calls == 4
+    # Each check gets the remaining time as its network budget, never below 1s.
+    assert backend.check_timeouts == [31.0, 16.0, 1.0, 1.0]
     assert not app.cursors.path.exists()
 
 
@@ -164,10 +170,10 @@ def test_default_poll_interval_is_fifteen_seconds():
 def test_read_uses_the_local_cursor_and_advances_it(tmp_path):
     backend = FakeBackend()
     backend.create_channel("general", [])
-    first = _make_msg(msg_id="01AAAA", at="2026-10-10T12:00:00+00:00")
-    second = _make_msg(msg_id="01BBBB", at="2026-10-10T12:00:01+00:00")
-    backend.send("general", first)
-    backend.send("general", second)
+    first = _make_msg(msg_id="01AAAA")
+    second = _make_msg(msg_id="01BBBB")
+    backend.deliver("general", first, comment_id=1, created_at="2026-10-10T12:00:00Z")
+    backend.deliver("general", second, comment_id=2, created_at="2026-10-10T12:00:01Z")
     app = _app(tmp_path, backend)
     target = Target(channel="general")
 
@@ -175,7 +181,11 @@ def test_read_uses_the_local_cursor_and_advances_it(tmp_path):
     assert [m.id for m in batch.messages] == ["01AAAA", "01BBBB"]
     batch.commit()
     stored = json.loads(app.cursors.path.read_text(encoding="utf-8"))
-    assert stored == {"channel:general": {"at": second.at, "id": "01BBBB"}}
+    entry = stored["channel:general"]
+    assert set(entry) == {"position", "at", "seen"}
+    assert entry["position"] == "2"
+    assert entry["at"] == "2026-10-10T12:00:01Z"
+    assert entry["seen"] == ["1", "2"]
 
     # Nothing new the second time.
     assert app.read(target).messages == []
@@ -200,26 +210,30 @@ def test_read_only_advances_the_cursor_when_commit_is_called(tmp_path):
     assert app.cursors.path.exists()
 
 
-def test_read_with_since_does_not_touch_the_local_cursor(tmp_path):
+def test_read_with_since_is_inclusive_on_the_backend_time(tmp_path):
     backend = FakeBackend()
     backend.create_channel("general", [])
-    backend.send("general", _make_msg(msg_id="01AAAA", at="2026-10-10T12:00:00+00:00"))
-    backend.send("general", _make_msg(msg_id="01BBBB", at="2026-10-10T12:00:01+00:00"))
+    backend.deliver("general", _make_msg(msg_id="01AAAA"), comment_id=1, created_at="2026-10-10T12:00:00Z")
+    backend.deliver("general", _make_msg(msg_id="01BBBB"), comment_id=2, created_at="2026-10-10T12:00:01Z")
     app = _app(tmp_path, backend)
     target = Target(channel="general")
 
-    batch = app.read(target, since="2026-10-10T12:00:00+00:00")
-    assert [m.id for m in batch.messages] == ["01BBBB"]
+    # Inclusive: the message recorded exactly at the given time comes back.
+    batch = app.read(target, since="2026-10-10T12:00:00Z")
+    assert [m.id for m in batch.messages] == ["01AAAA", "01BBBB"]
     batch.commit()
-    assert not app.cursors.path.exists()
+    assert not app.cursors.path.exists()  # `--since` never touches the local cursor
+
+    # A later boundary excludes the earlier message.
+    assert [m.id for m in app.read(target, since="2026-10-10T12:00:01Z").messages] == ["01BBBB"]
 
 
 def test_read_to_me_spans_channels_with_its_own_cursor(tmp_path):
     backend = FakeBackend()
     backend.create_channel("general", [])
     backend.create_channel("other", [])
-    backend.send("general", _make_msg(channel="general", msg_id="01AAAA"))
-    backend.send("other", _make_msg(channel="other", msg_id="01BBBB"))
+    backend.deliver("general", _make_msg(channel="general", msg_id="01AAAA"), comment_id=1, created_at="2026-10-10T10:00:00Z")
+    backend.deliver("other", _make_msg(channel="other", msg_id="01BBBB"), comment_id=2, created_at="2026-10-10T10:01:00Z")
     app = _app(tmp_path, backend)
     target = Target(recipient=IDENTITY)
 
@@ -228,3 +242,4 @@ def test_read_to_me_spans_channels_with_its_own_cursor(tmp_path):
     batch.commit()
     stored = json.loads(app.cursors.path.read_text(encoding="utf-8"))
     assert set(stored) == {"to:owner-org_worker__worker"}
+    assert stored["to:owner-org_worker__worker"]["position"] == "2"
