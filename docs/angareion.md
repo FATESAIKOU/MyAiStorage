@@ -111,9 +111,9 @@ token 不會出現在任何輸出、log 或錯誤訊息裡（有出現會被遮�
 
 `wait` 是每 15 秒用條件式請求問一次；GitHub 沒有推播，304 不耗額度。被 GitHub 次級限制打到時就照 HTTP 回應失敗（exit 2），不自動重試。
 
-## TODO（給 PM）
+## 說明檔的位置（spike 結論）
 
-- opencode 讀說明檔的位置還沒確認（Claude Code 是 `~/.claude/skills/angareion/SKILL.md`）。確認後補進下面「給 MyLinuxPool 的需求」那一節。
+放一份在 `~/.claude/skills/angareion/SKILL.md` 就同時給 Claude Code 與 opencode：opencode 1.18.35 會自動讀 `~/.claude/skills/` 與 `~/.agents/skills/`（以隔離的 HOME／XDG 目錄實測 `opencode debug skill` 得到）。映像或 supervisor 不要設 `OPENCODE_DISABLE_EXTERNAL_SKILLS` 或 `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS`，設了 opencode 就不會載入它。
 
 ## 給 MyLinuxPool 的需求
 
@@ -132,5 +132,5 @@ token 不會出現在任何輸出、log 或錯誤訊息裡（有出現會被遮�
 - 來源：本 repo 的 `skills/angareion/SKILL.md`。
 - 建映像時用 tool-pins 裡裝 `angareion` 的同一個 sha 取這個檔（版本和指令一致），放到各 agent 讀得到的位置：
   - Claude Code：`~/.claude/skills/angareion/SKILL.md`；
-  - opencode：實作時確認後在這裡補上。
+  - opencode：同一份就能讀到——opencode 1.18.35 會自動讀 `~/.claude/skills/` 與 `~/.agents/skills/`；映像或 supervisor 不要設 `OPENCODE_DISABLE_EXTERNAL_SKILLS` 或 `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS`。
 - profile 指定要哪些能力；沒有選 Angareion 能力的 profile 不會有 token 與說明檔。

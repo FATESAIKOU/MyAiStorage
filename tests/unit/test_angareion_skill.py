@@ -38,6 +38,12 @@ def test_skill_doc_says_what_to_do_with_high_urgency():
     assert "7 以上先處理" in text
 
 
+def test_skill_doc_explains_exit_2_retry_and_reply_address():
+    text = _text()
+    assert "exit 2" in text and "稍等" in text  # wait exit 2 is a transient backend error: retry
+    assert "repo×role" in text  # the reply address is the repo×role in the message header
+
+
 def test_skill_doc_contains_no_secrets_or_private_info():
     text = _text()
     assert not re.search(r"ghp_[A-Za-z0-9]", text)
