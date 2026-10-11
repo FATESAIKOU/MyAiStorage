@@ -46,7 +46,7 @@ def test_start_team_reads_config_and_loads_harness(tmp_path):
     reg = Registry(state_dir)
     host = AgentHost(fake_herdr, reg, config=cfg)
 
-    rec = host.start_team("worker-team")
+    rec = host.start_team("worker-team", fork_timeout_ms=0)
 
     assert rec.status == "running"
     assert rec.identity == "worker-team"
@@ -94,7 +94,7 @@ def test_terminate_team_escalates_and_marks_terminated(tmp_path):
         signals.append(sig)
 
     host = AgentHost(fake_herdr, reg, config=cfg, kill_pg_func=mock_kill_pg)
-    rec = host.start_team("worker-team")
+    rec = host.start_team("worker-team", fork_timeout_ms=0)
 
     # Terminate team
     res = host.terminate_team("worker-team", timeout_stage=0.01)
@@ -141,7 +141,7 @@ def test_start_team_default_sync_period_is_5_minutes(tmp_path):
     reg = Registry(state_dir)
     host = AgentHost(fake_herdr, reg, config=cfg)
 
-    host.start_team("worker-team")
+    host.start_team("worker-team", fork_timeout_ms=0)
 
     pane_run_call = next(c for c in fake_herdr.calls if c[0] == "pane_run")
     assert pane_run_call[1][1] == (
@@ -191,7 +191,7 @@ def test_start_team_waits_for_prompt_then_harness_then_hand_off(tmp_path):
     assert receiver.poll_once() == 1
     assert queue.count("worker-team") == 1
 
-    rec = host.start_team("worker-team", receiver=receiver)
+    rec = host.start_team("worker-team", receiver=receiver, fork_timeout_ms=0)
 
     # Prompt wait happened before the harness went in.
     call_names = [c[0] for c in fake_herdr.calls]
@@ -227,7 +227,7 @@ def test_start_team_fork_carries_identity_and_message_headers(tmp_path):
     reg = Registry(state_dir)
     host = AgentHost(fake_herdr, reg, config=cfg)
 
-    host.start_team("worker-team", trigger_message_id="msg_trigger_1")
+    host.start_team("worker-team", trigger_message_id="msg_trigger_1", fork_timeout_ms=0)
 
     pane_run_call = next(c for c in fake_herdr.calls if c[0] == "pane_run")
     assert pane_run_call[1][1] == (
@@ -237,9 +237,43 @@ def test_start_team_fork_carries_identity_and_message_headers(tmp_path):
 
     # Without a triggering message only the identity header is carried.
     fake_herdr.calls.clear()
-    host.start_team("worker-team")
+    host.start_team("worker-team", fork_timeout_ms=0)
     pane_run_call = next(c for c in fake_herdr.calls if c[0] == "pane_run")
     assert pane_run_call[1][1] == (
         "agora continue session agora:01JTEAMHOME --agent opencode --fork --sync-period 5"
         " --header sidecar.identity=worker-team"
     )
+
+
+def test_start_team_quotes_wire_values_in_shell_command(tmp_path):
+    """batch3: wire values (message ids) are shell-quoted into one word."""
+    import shlex as _shlex
+
+    state_dir = tmp_path / "state"
+    cfg = SidecarConfig(
+        config_path=tmp_path / "config.json",
+        state_dir=state_dir,
+        identities=["worker-team"],
+        teams={
+            "worker-team": {
+                "agent": "opencode",
+                "home_session": "agora:01JTEAMHOME",
+            }
+        },
+    )
+
+    fake_herdr = FakeHerdrClient()
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg, config=cfg)
+
+    evil = "msg x; rm -rf /tmp/pwn $(evil)"
+    host.start_team("worker-team", trigger_message_id=evil, fork_timeout_ms=0)
+
+    pane_run_call = next(c for c in fake_herdr.calls if c[0] == "pane_run")
+    cmd = pane_run_call[1][1]
+    assert _shlex.split(cmd) == [
+        "agora", "continue", "session", "agora:01JTEAMHOME",
+        "--agent", "opencode", "--fork", "--sync-period", "5",
+        "--header", "sidecar.identity=worker-team",
+        "--header", f"sidecar.message={evil}",
+    ]

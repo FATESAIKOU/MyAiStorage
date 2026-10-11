@@ -254,7 +254,8 @@ def _report_check(checks: list[dict], exit_code: int, as_json: bool) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sidecar", description="Agent Sidecar supervisor CLI")
     parser.add_argument("--config", "-c", help="Path to config.json (overrides SIDECAR_CONFIG)")
-    parser.add_argument("--version", "-V", action="version", version=sidecar_version_string())
+    parser.add_argument("--version", "-V", action="version", version=sidecar_version_string(),
+                        help="Print the installed commit sha (or the package version when the sha is unknown) and exit")
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
     status_parser = subparsers.add_parser("status", help="Show sidecar status and running agents")
@@ -277,7 +278,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--once", action="store_true", help="Run a single poll+recover cycle and exit")
     run_parser.set_defaults(func=cmd_run)
 
-    check_parser = subparsers.add_parser("check", help="Verify sidecar health (exit 0 ok, 1 fail, 2 unknown)")
+    check_parser = subparsers.add_parser(
+        "check",
+        help="Verify sidecar health (exit 0 ok, 1 fail, 2 unknown)",
+        description="Verify sidecar health: config, owner-only token, herdr server, channel readability.",
+        epilog="Exit codes: 0 when every check passes; 1 when any check definitely fails "
+        "(a definite failure wins over unknowns); 2 when nothing failed but something "
+        "could not be confirmed (herdr unreachable, 5xx, connection errors).",
+    )
     check_parser.add_argument("--json", action="store_true", help="Output check results as JSON")
     check_parser.set_defaults(func=cmd_check)
 

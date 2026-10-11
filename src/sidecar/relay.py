@@ -156,8 +156,9 @@ class AngareionRelaySender:
         addr = self.team_addresses.get(from_identity)
         if not isinstance(addr, dict) or not addr.get("repo") or not addr.get("role"):
             raise ValueError(
-                f"No full address {{repo, role, name}} configured for team "
-                f"'{from_identity}': refusing to report"
+                f"Team '{from_identity}' has no usable address "
+                "(repo and role are required, name is optional): "
+                "refusing to report"
             )
         return dict(addr)
 
@@ -307,10 +308,14 @@ class RelayServer:
             os.chmod(self.socket_path, 0o600)
         except OSError:
             pass
-        # L6: tighten the socket directory as well (best effort: the path may
-        # be user-configured).
+        # L6/3.12: tighten the socket directory, but only when it is the
+        # default state dir. A user-configured path (e.g. straight under a
+        # shared directory) is left alone.
         try:
-            os.chmod(self.socket_path.parent, 0o700)
+            from sidecar.config import get_default_state_dir
+
+            if self.socket_path.parent.resolve() == get_default_state_dir().resolve():
+                os.chmod(self.socket_path.parent, 0o700)
         except OSError:
             pass
 

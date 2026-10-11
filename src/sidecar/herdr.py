@@ -302,6 +302,7 @@ class FakeHerdrClient:
         self.pane_outputs: dict[str, list[str]] = {}
         self.agent_outputs: dict[str, str] = {}
         self.process_infos: dict[str, dict[str, Any]] = {}
+        self.agent_kinds: dict[str, str] = {}
         self.closed_panes: set[str] = set()
         self.sent_keys: list[tuple[str, tuple[str, ...]]] = []
         self.prompts: list[tuple[str, str]] = []
@@ -388,15 +389,22 @@ class FakeHerdrClient:
     def agent_get(self, target: str) -> dict[str, Any]:
         self.calls.append(("agent_get", (target,), {}))
         agent = self.agents.get(target)
+        resolved_name = target
         if not agent:
             # Check by pane_id
-            for a in self.agents.values():
+            for name, a in self.agents.items():
                 if a.get("pane_id") == target:
                     agent = a
+                    resolved_name = name
                     break
         if not agent:
             raise HerdrError(["agent", "get"], 1, f"Agent '{target}' not found")
-        return {"id": "cli:agent:get", "result": {"agent": agent}}
+        data = dict(agent)
+        # Real herdr reports the detected kind in the `agent` field; tests
+        # set it via agent_kinds. Absent means "unknown", not a mismatch.
+        if resolved_name in self.agent_kinds:
+            data["agent"] = self.agent_kinds[resolved_name]
+        return {"id": "cli:agent:get", "result": {"agent": data}}
 
     def agent_read(
         self,

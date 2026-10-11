@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import secrets
+import shlex
 import signal
 import time
 from pathlib import Path
@@ -25,11 +26,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Best-effort "agent TUI is up" signal for pane wait-output before sending
-# the harness (D4). wait-output can only match text appearing, so we wait for
-# any rendered output; kind-specific readiness is checked via agent_read
-# (is_working / get_agent_status) elsewhere.
+# Liveness gate for pane wait-output: any rendered output proves the process
+# is alive. Readiness (can it take input) is decided by agent get below.
 PROMPT_WAIT_REGEX = r"\S"
+
+# Polling steps for readiness and fork-id capture.
+READY_POLL_INTERVAL = 0.5
+FORK_POLL_INTERVAL = 1.0
+# Scrollback window for the fork announcement (it prints before the TUI).
+FORK_READ_LINES = 200
 
 # agora continue --fork prints the new session id into the pane on startup
 # ("[agora] fork 已存成 <id>"); sidecar parses it to track the task session.
@@ -83,6 +88,103 @@ class AgentHost:
                     "agent sidecar cannot run nested inside a herdr pane."
                 )
 
+    def wait_for_ready(
+        self,
+        agent_name: str,
+        pane_id: str,
+        agent_kind: str,
+        timeout_ms: int | float = 60000,
+        poll_interval: float = READY_POLL_INTERVAL,
+    ) -> None:
+        """Wait until an agent is ready to receive input (D10, 3.12).
+
+        Pane output only proves liveness; readiness means `herdr agent get`
+        reports the expected agent kind (claude/opencode) and idle status.
+        Raises RuntimeError on timeout. A missing kind field (older herdr,
+        test doubles) skips only the kind check, never the idle check.
+        """
+        try:
+            self.herdr.pane_wait_output(
+                pane_id, regex=PROMPT_WAIT_REGEX, timeout_ms=timeout_ms
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Agent '{agent_name}' showed no output in time: {e}"
+            ) from e
+
+        deadline = time.monotonic() + float(timeout_ms) / 1000.0
+        last_kind: Any = "<unknown>"
+        last_status: Any = "<unknown>"
+        while True:
+            try:
+                info = self.herdr.agent_get(agent_name).get("result", {}).get("agent", {})
+            except Exception as e:
+                info = {}
+                last_kind = f"<agent get failed: {e}>"
+                last_status = "<unknown>"
+            else:
+                last_kind = info.get("agent")
+                last_status = info.get("agent_status")
+            kind_ok = last_kind is None or last_kind == agent_kind
+            if kind_ok and last_status == "idle":
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Agent '{agent_name}' not ready in time: last kind={last_kind!r} "
+                    f"status={last_status!r} (expected {agent_kind}/idle)"
+                )
+            self._sleep(poll_interval)
+
+    def poll_fork_session(
+        self,
+        agent_name: str,
+        timeout_ms: int | float | None = None,
+        poll_interval: float = FORK_POLL_INTERVAL,
+    ) -> str | None:
+        """Poll the pane until agora's fork announcement appears (D10, 3.12).
+
+        Returns the forked Session id, or None on timeout (export then falls
+        back to home). timeout_ms=None reads once without waiting.
+        """
+        if timeout_ms is None:
+            try:
+                screen = self.herdr.agent_read(
+                    agent_name, source="recent-unwrapped", lines=FORK_READ_LINES
+                )
+            except Exception as e:
+                logger.warning(
+                    "Could not read pane output for fork session id of '%s': %s",
+                    agent_name,
+                    e,
+                )
+                return None
+            match = _FORK_SESSION_RE.search(screen or "")
+            return match.group(1) if match else None
+
+        deadline = time.monotonic() + float(timeout_ms) / 1000.0
+        while True:
+            try:
+                screen = self.herdr.agent_read(
+                    agent_name, source="recent-unwrapped", lines=FORK_READ_LINES
+                )
+            except Exception as e:
+                logger.warning(
+                    "Could not read pane output for fork session id of '%s': %s",
+                    agent_name,
+                    e,
+                )
+                screen = ""
+            match = _FORK_SESSION_RE.search(screen or "")
+            if match:
+                return match.group(1)
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "Fork session id never appeared for '%s'; export falls back to home",
+                    agent_name,
+                )
+                return None
+            self._sleep(poll_interval)
+
     def start_agent(
         self,
         identity: str,
@@ -97,12 +199,17 @@ class AgentHost:
         env: dict[str, str] | None = None,
         wait_timeout_ms: int | None = 60000,
         headers: dict[str, str] | None = None,
+        fork_timeout_ms: int | None = None,
+        ready_poll_interval: float = READY_POLL_INTERVAL,
+        fork_poll_interval: float = FORK_POLL_INTERVAL,
     ) -> AgentRecord:
         """Start an agent inside herdr running 'agora continue'.
 
         sync_period is in minutes, passed through verbatim to agora's
         --sync-period (D10). env=None means no extra environment, never the
-        sidecar process environment (D6/M2).
+        sidecar process environment (D6/M2). fork_timeout_ms=None reads the
+        pane once for the fork announcement; a timeout polls until it
+        appears (D10, 3.12).
         """
         if not agent_name:
             suffix = secrets.token_hex(3)
@@ -125,7 +232,9 @@ class AgentHost:
         tab_id = res["result"]["tab"]["tab_id"]
         pane_id = res["result"]["root_pane"]["pane_id"]
 
-        # Build agora continue command
+        # Build agora continue command. Every interpolated value comes from
+        # config or the wire (message ids), so quote each word: pane_run
+        # executes this through a shell (batch3 review: shell injection).
         cmd_parts = ["agora", "continue", "session", agora_session, "--agent", agent_kind]
         if fork:
             cmd_parts.append("--fork")
@@ -135,7 +244,7 @@ class AgentHost:
         if fork and headers:
             for key, value in headers.items():
                 cmd_parts.extend(["--header", f"{key}={value}"])
-        cmd_str = " ".join(cmd_parts)
+        cmd_str = shlex.join(cmd_parts)
 
         # Launch command in pane
         self.herdr.pane_run(pane_id, cmd_str)
@@ -143,18 +252,20 @@ class AgentHost:
         # Name agent in pane
         self.herdr.agent_rename(pane_id, agent_name)
 
-        # D4/M3: wait until the agent TUI shows output (prompt is up) before
-        # sending anything. On timeout, record the evidence and fail loudly
-        # instead of sending the harness into the void.
+        # D4/M3/D10-3.12: wait until the agent is ready before sending
+        # anything. On timeout, record the evidence and fail loudly instead
+        # of sending the harness into the void.
         if wait_timeout_ms is not None:
             try:
-                self.herdr.pane_wait_output(
-                    pane_id, regex=PROMPT_WAIT_REGEX, timeout_ms=wait_timeout_ms
+                self.wait_for_ready(
+                    agent_name,
+                    pane_id,
+                    agent_kind,
+                    timeout_ms=wait_timeout_ms,
+                    poll_interval=ready_poll_interval,
                 )
             except Exception as e:
-                logger.warning(
-                    "Agent '%s' did not show a prompt in time: %s", agent_name, e
-                )
+                logger.warning("Agent '%s' did not become ready in time: %s", agent_name, e)
                 log_path = str(self.registry.state_dir / "agents" / agent_id / "log")
                 self.registry.register(
                     AgentRecord(
@@ -169,30 +280,19 @@ class AgentHost:
                         status="starting",
                         log_path=log_path,
                         updated_at=now_iso(),
-                        exit_reason=f"prompt wait failed: {e}",
+                        exit_reason=f"readiness wait failed: {e}",
                     )
                 )
-                raise RuntimeError(
-                    f"Agent '{agent_name}' did not show a prompt in time: {e}"
-                ) from e
-
-        # L3: with --fork the task dialogue goes to a new Session. Capture
-        # its id from the pane output so export points at the fork, not home.
+                raise
+        # 3.12/D10: the fork announcement only prints after Drive sync,
+        # export and saving, seconds after the first output. Poll for it.
         forked_session: str | None = None
         if fork:
-            try:
-                launch_screen = self.herdr.agent_read(
-                    agent_name, source="recent-unwrapped", lines=50
-                )
-                match = _FORK_SESSION_RE.search(launch_screen or "")
-                if match:
-                    forked_session = match.group(1)
-            except Exception as e:
-                logger.warning(
-                    "Could not read pane output for fork session id of '%s': %s",
-                    agent_name,
-                    e,
-                )
+            forked_session = self.poll_fork_session(
+                agent_name,
+                timeout_ms=fork_timeout_ms,
+                poll_interval=fork_poll_interval,
+            )
 
         # Harness loading if provided
         if harness_content:
@@ -227,6 +327,7 @@ class AgentHost:
         extra_env: dict[str, str] | None = None,
         receiver: Receiver | None = None,
         trigger_message_id: str | None = None,
+        fork_timeout_ms: int | None = 60000,
     ) -> AgentRecord:
         """Start a team task using the configured home session, agent kind, and harness.
 
@@ -281,6 +382,7 @@ class AgentHost:
             harness_content=harness_content,
             env=env,
             headers=fork_headers,
+            fork_timeout_ms=fork_timeout_ms,
         )
 
         if receiver is not None:

@@ -262,7 +262,7 @@ def test_angareion_relay_sender_requires_full_team_address():
     backend.create_channel("general")
     sender = AngareionRelaySender(backend, default_channel="general")
 
-    with pytest.raises(ValueError, match="No full address"):
+    with pytest.raises(ValueError, match="repo and role are required"):
         sender.send(
             from_identity="unconfigured-team",
             to_identity="pmo",
@@ -406,3 +406,39 @@ def test_receiver_delivery_failure_stays_queued_and_logs(tmp_path, monkeypatch, 
     assert "delivery failed" in caplog.text
     all_msgs = backend.list_messages().messages
     assert not any(m.ack == msg.id for m in all_msgs)
+
+
+def test_deliver_hand_off_defers_when_agent_working(tmp_path, caplog):
+    """3.12: hand-off requires an idle agent; a working one keeps its queue."""
+    backend = FakeBackend()
+    backend.create_channel("general")
+
+    state_dir = tmp_path / "state"
+    cfg = SidecarConfig(
+        config_path=tmp_path / "config.json",
+        state_dir=state_dir,
+        identities=["worker-team"],
+    )
+
+    fake_herdr = FakeHerdrClient()
+    reg = Registry(state_dir)
+    queue = MessageQueue(state_dir)
+    host = AgentHost(fake_herdr, reg, config=cfg, sleeper=lambda _: None)
+    receiver = Receiver(backend, cfg, reg, queue, host)
+
+    rec = host.start_agent("worker-team", "agora:01JTEST", "opencode", "worker-1")
+    fake_herdr.agent_kinds["worker-1"] = "opencode"
+    fake_herdr.agents["worker-1"]["agent_status"] = "working"
+    queue.enqueue("worker-team", {"id": "m1", "content": "wait your turn",
+                                  "channel": "general",
+                                  "from": {"repo": "pmo", "role": "PM"}})
+
+    with caplog.at_level("WARNING", logger="sidecar.receiver"):
+        delivered = receiver.deliver_hand_off(
+            "worker-team", "worker-1",
+            wait_timeout_ms=50, ready_poll_interval=0.01,
+        )
+
+    assert delivered == 0
+    assert queue.count("worker-team") == 1
+    assert "not ready" in caplog.text

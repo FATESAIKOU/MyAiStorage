@@ -373,3 +373,93 @@ def test_fake_agora_client_filter_matching():
     rows = agora.search_sessions(["sidecar.identity=team-a"])
     assert [r["id"] for r in rows] == ["agora:01JA"]
     assert rows[0]["message"] == "m1"
+
+
+def test_check_herdr_non_dict_status_is_unknown(tmp_path):
+    """batch3: an unparseable herdr status is unknown, not a failure."""
+    config = _healthy_config(tmp_path)
+
+    class WeirdHerdr(FakeHerdrClient):
+        def status_server(self):
+            return "running-ish"
+
+    items, exit_code = run_checks(
+        config, WeirdHerdr(), _ok_backend_factory(_fake_backend_with_channels("general"))
+    )
+    assert exit_code == 2
+    assert next(i for i in items if i.name == "herdr").status == "unknown"
+
+
+def test_check_channel_404_is_exit_1(tmp_path):
+    """batch3: a definitive client error (404) fails the check."""
+    config = _healthy_config(tmp_path)
+
+    class GoneBackend(FakeBackend):
+        def list_channels(self):
+            raise BackendError("Failed to list channels: HTTP 404")
+
+    items, exit_code = run_checks(config, FakeHerdrClient(), _ok_backend_factory(GoneBackend()))
+    assert exit_code == 1
+    assert next(i for i in items if i.name == "channel").status == "fail"
+
+
+def test_check_backend_factory_error_is_unknown(tmp_path):
+    """batch3: when the backend itself cannot be built, the channel is unknown."""
+    config = _healthy_config(tmp_path)
+
+    def boom_factory(channel_repo, token):
+        raise RuntimeError("transport misconfigured")
+
+    items, exit_code = run_checks(config, FakeHerdrClient(), boom_factory)
+    assert exit_code == 2
+    assert next(i for i in items if i.name == "channel").status == "unknown"
+
+
+def test_check_fail_beats_unknown_precedence(tmp_path):
+    """batch3: a definite failure wins over unknowns (documented in --help)."""
+    config = _healthy_config(tmp_path, token_mode=0o644)
+    herdr = FakeHerdrClient()
+    herdr.next_server_error = HerdrError(["herdr", "status"], 1, "no server at socket")
+    items, exit_code = run_checks(
+        config, herdr, _ok_backend_factory(_fake_backend_with_channels("general"))
+    )
+    assert exit_code == 1
+    assert next(i for i in items if i.name == "token").status == "fail"
+    assert next(i for i in items if i.name == "herdr").status == "unknown"
+
+
+def test_check_help_documents_precedence_and_version_fallback(capsys):
+    """batch3: --help states the exit-code precedence and sha fallback."""
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["check", "--help"])
+    assert exc.value.code == 0
+    text = capsys.readouterr().out
+    assert "1 when any check definitely fails" in text
+    assert "2 when nothing failed but something" in text
+
+    with pytest.raises(SystemExit) as exc2:
+        build_parser().parse_args(["--help"])
+    assert exc2.value.code == 0
+    top = " ".join(capsys.readouterr().out.split())
+    assert "or the package version when the sha is unknown" in top
+
+
+def test_real_herdr_client_tab_create_carries_session(monkeypatch):
+    """batch3: every herdr call carries the global --session option."""
+    captured: list[list[str]] = []
+
+    def mock_run(cmd, capture_output=True, text=True, env=None):
+        captured.append(cmd)
+        return subprocess.CompletedProcess(
+            cmd, returncode=0,
+            stdout='{"result": {"tab": {"tab_id": "w1:t1"}, "root_pane": {"pane_id": "w1:p1"}}}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    client = RealHerdrClient(session="worker")
+    client.tab_create(cwd="/tmp", env={"K": "V"})
+    assert captured[-1] == [
+        "herdr", "--session", "worker", "tab", "create",
+        "--cwd", "/tmp", "--env", "K=V", "--no-focus",
+    ]

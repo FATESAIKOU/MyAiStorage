@@ -547,7 +547,7 @@ def test_start_agent_prompt_wait_timeout_registers_and_raises(tmp_path, monkeypa
 
     monkeypatch.setattr(fake_herdr, "pane_wait_output", boom_wait)
 
-    with pytest.raises(RuntimeError, match="did not show a prompt"):
+    with pytest.raises(RuntimeError, match="showed no output"):
         host.start_agent(
             identity="team-worker",
             agora_session="agora:01JHOME",
@@ -561,7 +561,7 @@ def test_start_agent_prompt_wait_timeout_registers_and_raises(tmp_path, monkeypa
     rec = reg.get_by_name("slow-worker")
     assert rec is not None
     assert rec.status == "starting"
-    assert "prompt wait failed" in (rec.exit_reason or "")
+    assert "readiness wait failed" in (rec.exit_reason or "")
 
 
 def test_recover_agents_herdr_down_leaves_registry_untouched(tmp_path, monkeypatch, caplog):
@@ -614,6 +614,147 @@ def test_recover_agents_process_info_failure_keeps_agent_status(tmp_path, monkey
     assert [r.agent_id for r in recovered] == [rec_ok.agent_id]
     assert reg.get(rec_flaky.agent_id).status == "running"
     assert "leaving status unchanged" in caplog.text
+
+
+def test_wait_for_ready_requires_matching_kind_and_idle(tmp_path, monkeypatch):
+    """3.12/D10: readiness is herdr recognizing the expected kind plus idle."""
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg, sleeper=lambda _: None)
+
+    rec = host.start_agent(
+        identity="team-worker",
+        agora_session="agora:01JHOME",
+        agent_kind="opencode",
+        agent_name="ready-worker",
+    )
+    assert rec.status == "running"
+    get_calls = [c for c in fake_herdr.calls if c[0] == "agent_get"]
+    assert any(c[1][0] == "ready-worker" for c in get_calls)
+
+
+def test_wait_for_ready_rejects_wrong_kind(tmp_path, monkeypatch):
+    """A pane detected as another agent kind never counts as ready."""
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg, sleeper=lambda _: None)
+
+    fake_herdr.agent_kinds["picky-worker"] = "claude"
+    fake_herdr.agents["picky-worker"] = {
+        "name": "picky-worker",
+        "pane_id": "w1:p1",
+        "agent_status": "idle",
+        "cwd": "/tmp",
+    }
+    with pytest.raises(RuntimeError, match="not ready in time.*'claude'.*'idle'"):
+        host.wait_for_ready(
+            "picky-worker", "w1:p1", "opencode",
+            timeout_ms=50, poll_interval=0.01,
+        )
+
+
+def test_wait_for_ready_waits_for_idle_transition(tmp_path, monkeypatch):
+    """An agent that settles from working to idle becomes ready."""
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg, sleeper=lambda _: None)
+
+    fake_herdr.agent_kinds["settling-worker"] = "opencode"
+    fake_herdr.agents["settling-worker"] = {
+        "name": "settling-worker",
+        "pane_id": "w1:p9",
+        "agent_status": "working",
+        "cwd": "/tmp",
+    }
+    reads = {"count": 0}
+    real_get = fake_herdr.agent_get
+
+    def flipping_get(target):
+        reads["count"] += 1
+        if reads["count"] >= 3:
+            fake_herdr.agents["settling-worker"]["agent_status"] = "idle"
+        return real_get(target)
+
+    monkeypatch.setattr(fake_herdr, "agent_get", flipping_get)
+    host.wait_for_ready(
+        "settling-worker", "w1:p9", "opencode",
+        timeout_ms=5000, poll_interval=0.01,
+    )
+    assert reads["count"] >= 3
+
+
+def test_wait_for_ready_timeout_when_get_keeps_failing(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg, sleeper=lambda _: None)
+
+    def boom_get(target):
+        raise HerdrError(["agent", "get"], 1, "gone")
+
+    monkeypatch.setattr(fake_herdr, "agent_get", boom_get)
+    with pytest.raises(RuntimeError, match="not ready in time"):
+        host.wait_for_ready(
+            "ghost-worker", "w1:p1", "opencode",
+            timeout_ms=50, poll_interval=0.01,
+        )
+
+
+def test_poll_fork_session_finds_late_announcement(tmp_path, monkeypatch):
+    """3.12/D10: the fork line arrives seconds after the first output; the
+    capture polls until it appears (two-stage fake output)."""
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg, sleeper=lambda _: None)
+
+    stages = [
+        "[agora] 工作目錄 /workspace/team\n",
+        "[agora] 工作目錄 /workspace/team\n",
+        "[agora] fork 已存成 agora:01JLATE123\nopencode TUI ready > ",
+    ]
+    calls = {"count": 0}
+
+    def staged_read(target, **kwargs):
+        calls["count"] += 1
+        idx = min(calls["count"] - 1, len(stages) - 1)
+        return stages[idx]
+
+    monkeypatch.setattr(fake_herdr, "agent_read", staged_read)
+
+    found = host.poll_fork_session("late-worker", timeout_ms=5000, poll_interval=0.01)
+    assert found == "agora:01JLATE123"
+    assert calls["count"] >= 3
+
+
+def test_poll_fork_session_timeout_falls_back_to_home(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg, sleeper=lambda _: None)
+
+    fake_herdr.agent_outputs["quiet-worker"] = "[agora] 工作目錄 /x\n"
+    rec = host.start_agent(
+        identity="team-worker",
+        agora_session="agora:01JHOME",
+        agent_kind="opencode",
+        agent_name="quiet-worker",
+        fork=True,
+        fork_timeout_ms=50,
+        fork_poll_interval=0.01,
+    )
+    assert rec.status == "running"
+    assert rec.extra is None
+    assert host.export_agent_session("quiet-worker") == "agora:01JHOME"
 
 
 def test_export_returns_forked_session_not_home(tmp_path, monkeypatch):

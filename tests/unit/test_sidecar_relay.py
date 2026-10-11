@@ -381,23 +381,45 @@ def test_relay_server_replaces_stale_socket_file(tmp_path, short_sock_path):
         server.stop()
 
 
-def test_relay_socket_and_dir_permissions(tmp_path, short_sock_path):
-    """L6: socket is 0600 and its directory is tightened to 0700."""
+def test_relay_socket_and_dir_permissions(tmp_path, monkeypatch, short_sock_path):
+    """L6/3.12: socket is 0600 always; the directory is tightened to 0700
+    only when it is the default state dir, never a custom path."""
+    import shutil as _shutil
     import stat as _stat
+    import tempfile as _tempfile
 
-    sock_path = short_sock_path
-    sock_path.parent.chmod(0o755)
+    # Custom directory: permissions left alone.
+    short_sock_path.parent.chmod(0o755)
     state_dir = tmp_path / "state"
     reg = Registry(state_dir)
     server = RelayServer(
-        socket_path=sock_path, registry=reg, sender=FakeRelaySender()
+        socket_path=short_sock_path, registry=reg, sender=FakeRelaySender()
     )
     try:
         server.start()
-        assert _stat.S_IMODE(sock_path.stat().st_mode) == 0o600
-        assert _stat.S_IMODE(sock_path.parent.stat().st_mode) == 0o700
+        assert _stat.S_IMODE(short_sock_path.stat().st_mode) == 0o600
+        assert _stat.S_IMODE(short_sock_path.parent.stat().st_mode) == 0o755
     finally:
         server.stop()
+
+    # Default state dir: tightened to 0700.
+    home = Path(_tempfile.mkdtemp(prefix="sch_", dir="/tmp"))
+    monkeypatch.setenv("HOME", str(home))
+    try:
+        default_sock = home / ".local" / "state" / "sidecar" / "t.sock"
+        default_sock.parent.mkdir(parents=True, exist_ok=True)
+        default_sock.parent.chmod(0o755)
+        server2 = RelayServer(
+            socket_path=default_sock, registry=reg, sender=FakeRelaySender()
+        )
+        try:
+            server2.start()
+            assert _stat.S_IMODE(default_sock.stat().st_mode) == 0o600
+            assert _stat.S_IMODE(default_sock.parent.stat().st_mode) == 0o700
+        finally:
+            server2.stop()
+    finally:
+        _shutil.rmtree(home, ignore_errors=True)
 
 
 def test_relay_invalid_json_gets_error_response(tmp_path, short_sock_path):
@@ -427,5 +449,35 @@ def test_relay_invalid_json_gets_error_response(tmp_path, short_sock_path):
             assert res["ok"] is False
         finally:
             s.close()
+    finally:
+        server.stop()
+
+
+def test_relay_sender_failure_gets_error_response(tmp_path, short_sock_path):
+    """L7/3.12: when the relay sender blows up, the caller gets an explicit
+    error response, never an empty (silent) one."""
+    sock_path = short_sock_path
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    _register_running_agent(reg, state_dir, pids=[os.getpid()])
+
+    class BoomSender(FakeRelaySender):
+        def send(self, from_identity, to_identity, content, urgency=5, extra=None):
+            raise RuntimeError("angareion is away")
+
+    server = RelayServer(
+        socket_path=sock_path,
+        registry=reg,
+        sender=BoomSender(),
+        herdr=FakeHerdrClient(),
+    )
+    server.start()
+    try:
+        with pytest.raises(RuntimeError, match="angareion is away"):
+            send_relay_message(
+                content="Report that cannot go out",
+                to="pmo",
+                socket_path=sock_path,
+            )
     finally:
         server.stop()

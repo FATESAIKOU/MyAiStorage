@@ -9,7 +9,7 @@ from typing import Any
 from angareion.backend import Backend
 from angareion.messages import Message
 from sidecar.config import SidecarConfig
-from sidecar.host import PROMPT_WAIT_REGEX, AgentHost
+from sidecar.host import AgentHost
 from sidecar.queue import MessageQueue
 from sidecar.registry import Registry
 from sidecar.seen import SeenStore
@@ -171,11 +171,12 @@ class Receiver:
         identity: str,
         agent_name: str,
         wait_timeout_ms: int | None = 60000,
+        ready_poll_interval: float = 0.5,
     ) -> int:
         """Deliver queued messages upon agent startup/hand-off in priority order.
 
-        Waits for the agent prompt to appear first (M3), like the harness:
-        on timeout nothing is sent and the messages stay queued.
+        Waits for the agent to be ready first (M3/D10-3.12): on timeout
+        nothing is sent and the messages stay queued.
         """
         messages = self.queue.peek(identity)
         if not messages:
@@ -184,14 +185,16 @@ class Receiver:
         rec = self.registry.get_by_name(agent_name)
         if rec is not None and wait_timeout_ms is not None:
             try:
-                self.host.herdr.pane_wait_output(
+                self.host.wait_for_ready(
+                    agent_name,
                     rec.herdr_pane_id,
-                    regex=PROMPT_WAIT_REGEX,
+                    rec.agent_kind,
                     timeout_ms=wait_timeout_ms,
+                    poll_interval=ready_poll_interval,
                 )
             except Exception as e:
                 logger.warning(
-                    "Hand-off to '%s' deferred: prompt did not appear: %s",
+                    "Hand-off to '%s' deferred: agent not ready: %s",
                     agent_name,
                     e,
                 )
