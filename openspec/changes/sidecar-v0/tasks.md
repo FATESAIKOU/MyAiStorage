@@ -25,6 +25,7 @@
 
 ## 3. agent driver 與 agora（spike 之後依 D6 的結論）
 
+- [x] 3.0 `AgoraSessionStore`（sidecar 側，PM 新開）：continue／fork／merge 經 `agora continue … --headless`（merge 先 `agora merge --agent <by>`）、`--add-tag sidecar:<id>`、依前綴讀 stderr 的 `agora-session`／`agora-port`／`agora-agent-session`、close 用 SIGTERM 溫和停並等寫回；env 不出現在命令列；所有子行程呼叫有逾時
 - [ ] 3.1 `ClaudeCodeDriver`：額度只認 `status == rejected`（未知值 log 原事件、當沒用完）、`rateLimitType` 的對應、api-key 類只靠輔助訊號、`credits_required`；`resets_at` 轉成 RFC 3339 UTC
 - [ ] 3.2 `OpenCodeDriver`：額度類 reason 白名單（設定 `quota_reasons`）、`next`（毫秒）的轉換與窗口的單一規則（> 5 小時＋5 分鐘 → `1w`，否則 `5h`）；**在 opencode 1.18.35 上驗證 key 與 baseURL 的給法**（例如 `OPENCODE_CONFIG_CONTENT`），結果寫回 D6
 - [x] 3.3 agora：`continue --headless`、`--headless-port`、`--add-tag`（`continue`／`import`）、stderr 的 `agora-session`／`agora-port`、SIGTERM 的溫和停下，與測試（fake agent 的 headless 模式）

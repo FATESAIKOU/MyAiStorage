@@ -1,15 +1,16 @@
 """Default wiring for `sidecar run` (design D7).
 
-The agent drivers (tasks 3.1/3.2) and the agora session store (task 3.3) are
-not part of this change's section 2, so `default_drivers` and
-`default_session_store` are the seams those tasks fill; until then the daemon
-runs and `GET /agents` answers, but no agent kind can be opened.
+The agent drivers (tasks 3.1/3.2) are the remaining seams; the session store
+is real from task 3.0 on (`agora continue --headless`).  Until the driver
+modules land, `default_drivers` is empty, so the daemon runs and `GET /agents`
+answers, but no agent kind can be opened (design D8 / review L6).
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from .agora_store import AgoraSessionStore
 from .config import Config
 from .core import SidecarCore
 from .protocols import ConfigError
@@ -36,8 +37,8 @@ def default_drivers(config: Config) -> dict[str, Any]:
 
 
 def default_session_store(config: Config) -> Any | None:
-    """Task 3.3 (AgoraSessionStore) lands here."""
-    return None
+    """The real store (task 3.0): spawns `agora continue --headless`."""
+    return AgoraSessionStore(sync_period=config.sync_period)
 
 
 def build_subscription_source(config: Config) -> Any | None:
