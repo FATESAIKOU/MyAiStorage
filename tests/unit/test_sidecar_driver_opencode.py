@@ -22,9 +22,12 @@ import pytest
 from sidecar.agora_store import AgoraProcess
 from sidecar.drivers.opencode import OpenCodeDriver
 from sidecar.protocols import (
+    DRIVER_EXITED,
     DRIVER_IDLE,
     DRIVER_QUOTA_EXHAUSTED,
     DRIVER_RUNNING,
+    BadRequestError,
+    NoModelError,
     RunningSession,
     Subscription,
     iso,
@@ -110,19 +113,83 @@ def set_status(fh: Path, payload: dict) -> None:
     (fh / "fake-oc-status.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
-# --- env_for (ASSUMPTION reported) ---------------------------------------------
+# --- env_for (spike-verified rules) --------------------------------------------
 
 
-def test_env_for_puts_key_and_endpoint_in_opencode_config(driver):
+def test_env_for_maps_provider_and_model(driver):
     env = driver.env_for(Subscription(
         id="zen", provider="opencode-zen", kind="api-key",
         key=SECRET, endpoint="https://example.invalid",
+        models={"default": "z-model", "allow": ["*"]},
     ))
     config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-    assert config == {"provider": {"opencode-zen": {"options": {
-        "apiKey": SECRET, "baseURL": "https://example.invalid",
-    }}}}
-    assert driver.env_for(Subscription(id="x", key=None)) == {}
+    assert config == {
+        "provider": {"opencode": {
+            "options": {"apiKey": SECRET, "baseURL": "https://example.invalid"},
+            "models": {"z-model": {"name": "z-model"}},
+        }},
+        "model": "opencode/z-model",
+        "small_model": "opencode/z-model",
+    }
+    assert env["OPENCODE_DISABLE_AUTOUPDATE"] == "1"
+    assert env["OPENCODE_DISABLE_MODELS_FETCH"] == "1"
+
+
+def test_env_for_model_falls_back_to_allow_and_refuses(driver):
+    env = driver.env_for(Subscription(
+        id="or", provider="openrouter", kind="api-key", key="k",
+        models={"allow": ["*", "concrete-model"]},
+    ))
+    assert json.loads(env["OPENCODE_CONFIG_CONTENT"])["model"] == "openrouter/concrete-model"
+
+    with pytest.raises(NoModelError):
+        driver.env_for(Subscription(id="x", provider="openrouter",
+                                    models={"allow": ["*", "org/*"]}))
+    with pytest.raises(BadRequestError):
+        driver.env_for(Subscription(id="y", provider="anthropic",
+                                    models={"default": "m"}))  # no mapped opencode id
+
+
+def test_first_response_is_verified_against_the_chosen_model(driver, serve, tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("FAKE_OC_MESSAGE_PROVIDER", "opencode")
+    monkeypatch.setenv("FAKE_OC_MESSAGE_MODEL", "wrong-model")
+    proc, port = serve()
+    env = driver.env_for(Subscription(
+        id="zen", provider="opencode-zen", kind="api-key", key=SECRET,
+        models={"default": "z-model"},
+    ))
+    handle = driver.launch(
+        RunningSession("agora:A", AgoraProcess(proc=proc, port=port, agent_session_id="ses_A")),
+        env, str(tmp_path),
+    )
+    with caplog.at_level(logging.ERROR):
+        driver.send(handle, "hi")
+        wait_until(lambda: "model mismatch" in caplog.text)
+    driver.stop(handle, graceful=False, timeout=5)
+    state = driver.state(handle)
+    assert state.kind == DRIVER_EXITED
+    assert "model mismatch" in (state.reason or "")
+
+
+def test_a_matching_first_response_does_not_complain(driver, serve, tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("FAKE_OC_MESSAGE_PROVIDER", "opencode")
+    monkeypatch.setenv("FAKE_OC_MESSAGE_MODEL", "z-model")
+    proc, port = serve()
+    env = driver.env_for(Subscription(
+        id="zen", provider="opencode-zen", kind="api-key", key=SECRET,
+        models={"default": "z-model"},
+    ))
+    handle = driver.launch(
+        RunningSession("agora:A", AgoraProcess(proc=proc, port=port, agent_session_id="ses_A")),
+        env, str(tmp_path),
+    )
+    with caplog.at_level(logging.ERROR):
+        driver.send(handle, "hi")
+        wait_until(lambda: [c for c in calls(tmp_path / "fh")
+                            if c["path"].endswith("/message")])
+        time.sleep(0.2)
+    assert "model mismatch" not in caplog.text
+    driver.stop(handle, graceful=False, timeout=5)
 
 
 # --- attach: status lookup, send, abort ----------------------------------------

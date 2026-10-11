@@ -91,6 +91,10 @@ class SubscriptionNotFoundError(BadRequestError):
     code = "subscription_not_found"
 
 
+class NoModelError(BadRequestError):
+    code = "no_model"
+
+
 class NotFoundError(SidecarError):
     status = 404
     code = "not_found"

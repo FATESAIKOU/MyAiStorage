@@ -77,6 +77,10 @@ class AgoraProcess:
     def pid(self) -> int:
         return self.proc.pid
 
+    @property
+    def returncode(self) -> int | None:
+        return self.proc.returncode
+
     def poll(self) -> int | None:
         return self.proc.poll()
 

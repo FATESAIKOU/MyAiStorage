@@ -73,6 +73,34 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(404, {})
 
+    def _message_response(self) -> dict:
+        """What POST /session/<id>/message answers: an info block naming the model.
+
+        By default it echoes `OPENCODE_CONFIG_CONTENT`'s model (so a correct
+        driver sees a match); FAKE_OC_MESSAGE_PROVIDER/FAKE_OC_MESSAGE_MODEL
+        override it, to force a mismatch.
+        """
+        info = None
+        raw = os.environ.get("OPENCODE_CONFIG_CONTENT")
+        if raw:
+            try:
+                config = json.loads(raw)
+                model = config.get("model", "")
+                if isinstance(model, str) and "/" in model:
+                    provider, _, model_id = model.partition("/")
+                    info = {"providerID": provider, "modelID": model_id}
+            except ValueError:
+                pass
+        if os.environ.get("FAKE_OC_MESSAGE_PROVIDER") or os.environ.get("FAKE_OC_MESSAGE_MODEL"):
+            info = {
+                "providerID": os.environ.get("FAKE_OC_MESSAGE_PROVIDER", "someone"),
+                "modelID": os.environ.get("FAKE_OC_MESSAGE_MODEL", "something"),
+            }
+        response: dict = {"ok": True}
+        if info:
+            response["info"] = info
+        return response
+
     def do_POST(self) -> None:  # noqa: N802
         if HANG:
             time.sleep(60)
@@ -88,7 +116,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"id": os.environ.get("FAKE_OC_SESSION", "ses_createdfake00001")})
         elif path.endswith("/message"):
             time.sleep(float(os.environ.get("FAKE_OC_ROUND_SECONDS", "0.05")))
-            self._json(200, {"ok": True})
+            self._json(200, self._message_response())
         elif path.endswith("/abort"):
             self._json(200, {})
         else:

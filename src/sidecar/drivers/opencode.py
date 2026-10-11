@@ -47,7 +47,9 @@ from ..protocols import (
     DRIVER_IDLE,
     DRIVER_QUOTA_EXHAUSTED,
     DRIVER_RUNNING,
+    BadRequestError,
     DriverState,
+    NoModelError,
     RunningSession,
     Subscription,
     iso,
@@ -61,6 +63,33 @@ FIVE_HOURS_PLUS_SLACK = 5 * 3600 + 300  # D6's single window rule
 POLL_TIMEOUT = 15.0
 HTTP_TIMEOUT = 10.0
 STATUS_TIMEOUT = 2.0
+
+#: LLMGateway's `provider` -> opencode's provider id (D6, verified by the
+#: spike for opencode-zen/openrouter; ollama-cloud is still to be confirmed).
+OPENCODE_PROVIDER_IDS = {
+    "opencode-zen": "opencode",
+    "openrouter": "openrouter",
+    "ollama-cloud": "ollama-cloud",
+}
+
+
+def pick_model(subscription: Subscription) -> str:
+    """`models.default`, else the first concrete entry of `models.allow`.
+
+    No usable source means refuse - never let the agent pick its own default
+    (D6: it may hit an image-preview model or the public Zen models).
+    """
+    models = subscription.models or {}
+    default = models.get("default")
+    if isinstance(default, str) and default:
+        return default
+    for allowed in models.get("allow") or []:
+        if isinstance(allowed, str) and allowed and "*" not in allowed:
+            return allowed
+    raise NoModelError(
+        f"subscription {subscription.id!r} names no usable model "
+        "(models.default or a concrete models.allow entry)"
+    )
 
 
 class OpenCodeDriverError(RuntimeError):
@@ -76,6 +105,9 @@ class OpenCodeHandle:
     state: DriverState = field(default_factory=lambda: DriverState(kind=DRIVER_RUNNING))
     quota: DriverState | None = None
     stopped: bool = False
+    expected_provider: str | None = None  # what env_for told opencode to use
+    expected_model: str | None = None
+    model_mismatch: str | None = None  # the first response used something else
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -104,19 +136,39 @@ class OpenCodeDriver:
     # -- AgentDriver ------------------------------------------------------
 
     def env_for(self, subscription: Subscription) -> dict[str, str]:
-        """ASSUMPTION: key/baseURL ride in `OPENCODE_CONFIG_CONTENT` (D6)."""
+        """Per D6's verified rules: mapped provider id, model mandatory.
+
+        ASSUMPTION verified by the architect's spike on the real binary:
+        key/baseURL ride in `OPENCODE_CONFIG_CONTENT`, the provider id is
+        mapped (`opencode-zen` -> `opencode`), `model`/`small_model` are both
+        set, the chosen model is declared, and the auto-update/model-fetch
+        switches are ours to set (child_env drops the parent's OPENCODE_*).
+        """
+        provider_id = OPENCODE_PROVIDER_IDS.get(subscription.provider or "")
+        if provider_id is None:
+            raise BadRequestError(
+                f"LLMGateway provider {subscription.provider!r} has no opencode provider id"
+            )
+        model = pick_model(subscription)
         options: dict[str, str] = {}
         if subscription.key:
             options["apiKey"] = subscription.key
         if subscription.endpoint:
             options["baseURL"] = subscription.endpoint
-        if not options:
-            return {}
-        provider = subscription.provider or "opencode"
+        config = {
+            "provider": {
+                provider_id: {
+                    "options": options,
+                    "models": {model: {"name": model}},
+                }
+            },
+            "model": f"{provider_id}/{model}",
+            "small_model": f"{provider_id}/{model}",
+        }
         return {
-            "OPENCODE_CONFIG_CONTENT": json.dumps(
-                {"provider": {provider: {"options": options}}}
-            )
+            "OPENCODE_CONFIG_CONTENT": json.dumps(config),
+            "OPENCODE_DISABLE_AUTOUPDATE": "1",
+            "OPENCODE_DISABLE_MODELS_FETCH": "1",
         }
 
     def launch(self, session: RunningSession | None, env: dict[str, str], workdir: str) -> OpenCodeHandle:
@@ -152,6 +204,7 @@ class OpenCodeDriver:
                 agent_session_id=getattr(process, "agent_session_id", None),
             )
             self._wait_listening(handle)
+        handle.expected_provider, handle.expected_model = _expected_model(env)
         return handle
 
     def send(self, handle: OpenCodeHandle, text: str) -> None:
@@ -191,8 +244,11 @@ class OpenCodeDriver:
         if handle.proc.poll() is not None:
             code = handle.proc.returncode
             with handle.lock:
-                handle.state = DriverState(kind=DRIVER_EXITED, code=code,
-                                           reason="opencode exited")
+                handle.state = DriverState(
+                    kind=DRIVER_EXITED,
+                    code=code,
+                    reason=handle.model_mismatch or "opencode exited",
+                )
                 return handle.state
         try:
             data = self._request(handle, "GET", "/session/status", timeout=self._status_timeout)
@@ -219,7 +275,10 @@ class OpenCodeDriver:
                 code = None
         with handle.lock:
             if handle.quota is None:
-                handle.state = DriverState(kind=DRIVER_EXITED, code=code, reason="stopped")
+                handle.state = DriverState(
+                    kind=DRIVER_EXITED, code=code,
+                    reason=handle.model_mismatch or "stopped",
+                )
 
     def external_session_id(self, handle: OpenCodeHandle) -> str | None:
         with handle.lock:
@@ -255,9 +314,41 @@ class OpenCodeDriver:
 
     def _send_round(self, handle: OpenCodeHandle, session_id: str, body: dict[str, Any]) -> None:
         try:
-            self._request(handle, "POST", f"/session/{session_id}/message", body=body)
+            data = self._request(handle, "POST", f"/session/{session_id}/message", body=body)
         except OpenCodeDriverError as e:
             logger.warning("opencode: sending a message failed: %s", e)
+            return
+        self._verify_first_response(handle, data)
+
+    def _verify_first_response(self, handle: OpenCodeHandle, data: Any) -> None:
+        """The first response must name the provider/model env_for picked (D6).
+
+        A mismatch is logged and carried into `exit.reason`; it is never
+        treated as normal operation.
+        """
+        if handle.expected_model is None or handle.model_mismatch is not None:
+            return
+        info = None
+        if isinstance(data, dict):
+            if isinstance(data.get("info"), dict):
+                info = data["info"]
+            elif "providerID" in data or "modelID" in data:
+                info = data
+        if not isinstance(info, dict):
+            return  # nothing to compare against; not an error by itself
+        provider = info.get("providerID")
+        model = info.get("modelID")
+        if (provider and provider != handle.expected_provider) or (
+            model and model != handle.expected_model
+        ):
+            note = (
+                f"model mismatch: opencode answered providerID={provider!r} "
+                f"modelID={model!r}, expected "
+                f"{handle.expected_provider}/{handle.expected_model}"
+            )
+            with handle.lock:
+                handle.model_mismatch = note
+            logger.error("opencode: %s", note)
 
     def _request(
         self,
@@ -336,6 +427,23 @@ def _window_and_resets(next_ms: Any) -> tuple[str, str | None]:
     seconds = float(next_ms) / 1000.0
     window = "1w" if seconds - time.time() > FIVE_HOURS_PLUS_SLACK else "5h"
     return window, iso(seconds)
+
+
+def _expected_model(env: dict[str, str]) -> tuple[str | None, str | None]:
+    """The provider/model env_for asked for, read back out of its config."""
+    raw = env.get("OPENCODE_CONFIG_CONTENT")
+    if not raw:
+        return None, None
+    try:
+        config = json.loads(raw)
+    except ValueError:
+        return None, None
+    model = config.get("model") if isinstance(config, dict) else None
+    if isinstance(model, str) and "/" in model:
+        provider, _, model_id = model.partition("/")
+        if provider and model_id:
+            return provider, model_id
+    return None, None
 
 
 def _free_port() -> int:

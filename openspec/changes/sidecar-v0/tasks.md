@@ -33,6 +33,11 @@
 - [x] 3.1 `ClaudeCodeDriver`：額度只認 `status == rejected`（未知值 log 原事件、當沒用完）、`rateLimitType` 的對應、api-key 類只靠輔助訊號、`credits_required`；`resets_at` 轉成 RFC 3339 UTC
 - [x] 3.2 `OpenCodeDriver`：額度類 reason 白名單（設定 `quota_reasons`）、`next`（毫秒）的轉換與窗口的單一規則（> 5 小時＋5 分鐘 → `1w`，否則 `5h`）；**在 opencode 1.18.35 上驗證 key 與 baseURL 的給法**（例如 `OPENCODE_CONFIG_CONTENT`），結果寫回 D6
 - [x] 3.3 agora：`continue --headless`、`--headless-port`、`--add-tag`（`continue`／`import`）、stderr 的 `agora-session`／`agora-port`、SIGTERM 的溫和停下，與測試（fake agent 的 headless 模式）
+- [ ] 3.6 `env_for` 與 driver 錯誤的 spike 修正（架構師的 drivers spike；PM 派）
+  - [x] 3.6.1 `OpenCodeDriver.env_for`：provider id 對應表；`model`／`small_model` 必設（無來源丟 `no_model`）；宣告 `provider.<id>.models`；`OPENCODE_DISABLE_AUTOUPDATE`／`OPENCODE_DISABLE_MODELS_FETCH`；首次回應核對 providerID／modelID
+  - [ ] 3.6.2 `ClaudeCodeDriver.env_for`：非 anthropic 的 api-key 用 `ANTHROPIC_AUTH_TOKEN`＋`ANTHROPIC_API_KEY=""`；`models.default` 設 `ANTHROPIC_MODEL`＋`ANTHROPIC_SMALL_FAST_MODEL`；`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`／`DISABLE_AUTOUPDATER`
+  - [ ] 3.6.3 driver 的錯誤訊息帶子行程 stderr 末幾行（遮掉 key 與 `env_for` 的值）
+  - [ ] 3.6.4 打真 binary 的 loopback 測試放 `tests/integration/`（`SIDECAR_REAL_AGENT_TESTS=1` 才跑，預設 skip）
 - [ ] 3.4 PM 在 Mac 上用真的 agent 跑一次：open（fork）→ poke → poke＋中斷 → close；換把用 `FileSubscriptionSource` 模擬；**找一次真的額度用完，把原事件（去掉秘密）貼回 D6**，確認 `rejected` 與 opencode 的 reason
 - [x] 3.5 `new` 模式（D5，PM 確認中）：不經 agora 行程，用 `agora import --add-tag` 定期與 close 時存進 agora
 
