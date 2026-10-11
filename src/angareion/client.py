@@ -3,13 +3,25 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from angareion.backend import ChannelBackend, Channel, Cursor, Target
 from angareion.messages import Message
 from angareion.state import CursorStore
 
 POLL_INTERVAL_SECONDS = 15.0
+
+
+class ReadBatch(NamedTuple):
+    """New messages plus `commit()`, which moves the local cursor.
+
+    Reading and committing are two steps so the caller can print the messages
+    first: if stdout breaks, the cursor stays where it was (L2) and the next
+    read yields the messages again.
+    """
+
+    messages: list[Message]
+    commit: Callable[[], None]
 
 
 class Angareion:
@@ -64,15 +76,22 @@ class Angareion:
                 return False
             sleeper(min(poll_interval, remaining))
 
-    def read(self, target: Target, since: str | None = None) -> list[Message]:
-        """Read new messages (oldest first).
+    def read(self, target: Target, since: str | None = None) -> ReadBatch:
+        """Read new messages (oldest first) and return them with a commit.
 
-        Without `since`, starts after the local cursor and advances it; with
-        `since`, reads after that timestamp and leaves the local cursor alone.
+        Without `since`, starts after the local cursor; `commit()` advances it.
+        With `since`, reads after that timestamp and `commit()` does nothing.
+
+        The caller must call `commit()` — and only after the messages have
+        actually been delivered (printed and flushed) — so a broken stdout
+        does not lose them.
         """
         use_local_cursor = since is None
         cursor = self.cursors.cursor_for(target) if use_local_cursor else Cursor(at=since)
         result = self.backend.read(target, cursor)
-        if use_local_cursor:
-            self.cursors.save(target, result.cursor)
-        return result.messages
+
+        def commit() -> None:
+            if use_local_cursor:
+                self.cursors.save(target, result.cursor)
+
+        return ReadBatch(result.messages, commit)

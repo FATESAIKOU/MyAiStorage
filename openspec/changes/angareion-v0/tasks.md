@@ -19,7 +19,7 @@
 
 - [x] M2 `DefaultHttpTransport` 加 30 秒 socket 逾時；逾時轉 `BackendError`（exit 2）
 - [x] L1 後端非 JSON 回應轉 `BackendError`（exit 2）；CLI 不再接一般 `ValueError`
-- [ ] L2 `read` 先輸出（flush 成功）再存游標；`BrokenPipeError` 時游標不前進
+- [x] L2 `read` 先輸出（flush 成功）再存游標；`BrokenPipeError` 時游標不前進
 - [ ] L3 Link 的下一頁網址須以 `base_url` 開頭，否則後端錯誤；不跟隨轉址
 - [ ] L5 `send` 只接受 `--body TEXT` 或 `--body -`；沒給 `--body` exit 1（更新 docs 與 SKILL）
 - [ ] L6 游標暫存檔用 `tempfile` 同目錄唯一檔名再 `os.replace`

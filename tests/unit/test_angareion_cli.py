@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
 import json
+import sys
 
 import pytest
 
@@ -266,6 +267,38 @@ def test_read_unknown_channel_exits_1(cli_env, capsys):
     ret = main(["read", "--channel", "nowhere"], backend=cli_env["backend"])
     assert ret == 1
     assert "does not exist" in capsys.readouterr().err
+
+
+def test_read_keeps_the_cursor_when_stdout_breaks(cli_env, capsys, monkeypatch):
+    """`angareion read | head`: stdout closing early must not consume the messages (L2)."""
+    _seed_message(cli_env["backend"], msg_id="01AAAA00000000000000000000")
+    cursor_file = cli_env["state_dir"] / "cursor-owner-org_worker__worker.json"
+    real_stdout = sys.stdout
+
+    class BrokenStdout:
+        def write(self, text):
+            raise BrokenPipeError()
+
+        def flush(self):
+            raise BrokenPipeError()
+
+        def isatty(self):
+            return False
+
+        def fileno(self):
+            raise OSError("no fileno under pytest capture")
+
+    monkeypatch.setattr(sys, "stdout", BrokenStdout())
+    ret = main(["read", "--channel", "general"], backend=cli_env["backend"])
+    assert ret == 1
+    assert "cursor was not advanced" in capsys.readouterr().err
+    assert not cursor_file.exists()
+
+    # stdout back: the message is still there for the next read.
+    monkeypatch.setattr(sys, "stdout", real_stdout)
+    assert main(["read", "--channel", "general", "--json"], backend=cli_env["backend"]) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01AAAA00000000000000000000"]
+    assert cursor_file.exists()
 
 
 def test_wait_timeout_zero_without_new_messages_exits_3(cli_env, capsys):

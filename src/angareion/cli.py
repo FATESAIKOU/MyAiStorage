@@ -237,13 +237,17 @@ def cmd_wait(
 
 def cmd_read(args: argparse.Namespace, config: Config, app: Angareion, token: str) -> int:
     target = _target_from_args(args, config)
-    messages = app.read(target, since=args.since)
+    batch = app.read(target, since=args.since)
 
     if args.json:
-        sys.stdout.write(json.dumps([message_to_dict(m) for m in messages], indent=2, ensure_ascii=False) + "\n")
+        sys.stdout.write(json.dumps([message_to_dict(m) for m in batch.messages], indent=2, ensure_ascii=False) + "\n")
     else:
-        for message in messages:
+        for message in batch.messages:
             sys.stdout.write(_format_message(message))
+    sys.stdout.flush()
+    # Only now that every message reached stdout may the cursor move (L2):
+    # a closed pipe (| head) must not swallow the messages for the next read.
+    batch.commit()
     return EXIT_OK
 
 
@@ -359,6 +363,18 @@ def main(
     except BackendError as e:
         sys.stderr.write(f"Error: {mask_token(str(e), token_for_masking)}\n")
         return EXIT_BACKEND
+    except BrokenPipeError:
+        # stdout (a pipe like `| head`) closed before the messages were out.
+        # The cursor was not advanced; keep the interpreter from complaining
+        # about the broken pipe on shutdown.
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+            os.close(devnull)
+        except Exception:
+            pass
+        sys.stderr.write("Error: stdout was closed before the messages were written; the cursor was not advanced.\n")
+        return EXIT_USAGE
     except Exception as e:
         sys.stderr.write(f"Error: {mask_token(f'Unexpected error: {e}', token_for_masking)}\n")
         return EXIT_BACKEND

@@ -171,15 +171,33 @@ def test_read_uses_the_local_cursor_and_advances_it(tmp_path):
     app = _app(tmp_path, backend)
     target = Target(channel="general")
 
-    assert [m.id for m in app.read(target)] == ["01AAAA", "01BBBB"]
+    batch = app.read(target)
+    assert [m.id for m in batch.messages] == ["01AAAA", "01BBBB"]
+    batch.commit()
     stored = json.loads(app.cursors.path.read_text(encoding="utf-8"))
     assert stored == {"channel:general": {"at": second.at, "id": "01BBBB"}}
 
     # Nothing new the second time.
-    assert app.read(target) == []
+    assert app.read(target).messages == []
 
     # And it stays that way while nothing arrives.
     assert app.check(target) is False
+
+
+def test_read_only_advances_the_cursor_when_commit_is_called(tmp_path):
+    """Printing happens between read and commit: a broken stdout must not skip messages (L2)."""
+    backend = FakeBackend()
+    backend.create_channel("general", [])
+    backend.send("general", _make_msg(msg_id="01AAAA"))
+    app = _app(tmp_path, backend)
+    target = Target(channel="general")
+
+    batch = app.read(target)
+    assert [m.id for m in batch.messages] == ["01AAAA"]
+    assert not app.cursors.path.exists()  # not committed yet: the caller still has to print
+
+    batch.commit()
+    assert app.cursors.path.exists()
 
 
 def test_read_with_since_does_not_touch_the_local_cursor(tmp_path):
@@ -190,8 +208,9 @@ def test_read_with_since_does_not_touch_the_local_cursor(tmp_path):
     app = _app(tmp_path, backend)
     target = Target(channel="general")
 
-    messages = app.read(target, since="2026-10-10T12:00:00+00:00")
-    assert [m.id for m in messages] == ["01BBBB"]
+    batch = app.read(target, since="2026-10-10T12:00:00+00:00")
+    assert [m.id for m in batch.messages] == ["01BBBB"]
+    batch.commit()
     assert not app.cursors.path.exists()
 
 
@@ -204,6 +223,8 @@ def test_read_to_me_spans_channels_with_its_own_cursor(tmp_path):
     app = _app(tmp_path, backend)
     target = Target(recipient=IDENTITY)
 
-    assert [m.id for m in app.read(target)] == ["01AAAA", "01BBBB"]
+    batch = app.read(target)
+    assert [m.id for m in batch.messages] == ["01AAAA", "01BBBB"]
+    batch.commit()
     stored = json.loads(app.cursors.path.read_text(encoding="utf-8"))
     assert set(stored) == {"to:owner-org_worker__worker"}
