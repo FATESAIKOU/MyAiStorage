@@ -43,7 +43,7 @@
 
 ## 4. 文件與收尾
 
-- [ ] 4.1 `docs/sidecar.md`：HTTP 介面、設定、連線設定檔（欄位、原子改寫、worker 上由 MyLinuxPool 的單元從 `gateway.json` 產生、known_hosts 放 state 目錄 0600）、在 Mac 與 worker 上怎麼跑（worker 由 MyLinuxPool 的 supervisor 拉起 `sidecar run`）
-- [ ] 4.2 `sidecar --version` 印安裝時的 git sha（design D8）；從 branch `aicompany-p1` 可沿用的只有三段終止的做法，其餘（herdr、收信迴圈、中繼、佇列、check）不移植
+- [x] 4.1 `docs/sidecar.md`：HTTP 介面、設定、連線設定檔（欄位、原子改寫、worker 上由 MyLinuxPool 的單元從 `gateway.json` 產生、known_hosts 放 state 目錄 0600）、在 Mac 與 worker 上怎麼跑（worker 由 MyLinuxPool 的 supervisor 拉起 `sidecar run`）
+- [x] 4.2 `sidecar --version` 印安裝時的 git sha（design D8）；從 branch `aicompany-p1` 可沿用的只有三段終止的做法，其餘（herdr、收信迴圈、中繼、佇列、check）不移植
 - [ ] 4.3 完整 unit 綠；非作者審查（Muse Spark 1.3 xhigh）
 - [ ] 4.4 開 PR（b，PMO 先跟本人說明再 merge）
