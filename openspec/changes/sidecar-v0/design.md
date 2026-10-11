@@ -113,7 +113,7 @@ LLMGateway 的共通 JSON 欄位以 LLMGateway 的 `gateway-v0` 規格（`specs/
   - **close 與換把時一律先 import**：先 import（得到 agora id，已經有的就是原地更新）→ 再 `stop`（溫和）→ 再 import 一次（原地更新，寫回停下之前最後的對話）→ `close` 到此結束；換把則接著 `continue` 那個 agora id（之後走一般的 headless 路徑，不再是 `new`）。因此 `new` 的 agent 在任何情況下被停下之前，都已經有 agora id；沒有「停下卻沒有 Session 可接」的情形。
   - import 失敗（agora 或網路）時：換把走 D4 的失敗那一支（`waiting-quota`＋重試 job，**不 stop**，agent 維持原狀）；close 回 `exited` 之前要在回應裡說明沒有寫回（`exit.reason`）。
 - **tag**：每個 open 出來的 Session 在標頭的 `tags` **附加** `sidecar:<id>`（本人 Q7）。附加不是取代：agora 的 `--header tags=…` 是整個取代（`overlay` 對 list 的語意），所以 agora 要提供附加的選項 `--add-tag <tag>`（可重複；`continue`、`fork`、`import` 都有；見 `session-continue` 的 delta）。不 fork 的 `continue` 會把 tag 加在原 Session 上，這是預期的。sidecar 本身不讀這個 tag；用途是人或程式在 agora 上查得到。
-- **新 Session 的 id**：`--headless` 時 stdout 屬於 agent，所以 agora 在 stderr 印一行 `agora-session <id>`（只有這一行有固定格式）；sidecar 讀它設定 `status.session`。
+- **固定格式的 stderr 行**：`--headless` 時 stdout 屬於 agent，所以 agora 在 stderr 印固定格式的行（依前綴解析，不依順序）：`agora-session <id>`（agora 的 Session id；新 Session 的 id 就在這裡，sidecar 讀它設定 `status.session`）、`agora-agent-session <id>`（agent 自己的 session id，例如 opencode 的 `ses_…`；`OpenCodeDriver` 要用它對正確的 session 送 HTTP，`session-continue` 的 delta）、`agora-port <埠>`（opencode）。
 - 記憶同步：agent 跑著時由 agora 定期寫回；close 與換把時 agora 在結束時寫回；任何人隨時能直接用 agora。
 
 ### D6 agent 的開法（spike 已做，2026-10-11 PM 實測）
@@ -134,7 +134,7 @@ LLMGateway 的共通 JSON 欄位以 LLMGateway 的 `gateway-v0` 規格（`specs/
   - 輔助訊號：`system/api_retry`（`error: rate_limit`）與 `result` 文字以 `You've hit your` 開頭（LLMGateway 的 quota-signals 研究）。
   - **kind 是 `api-key`**（例如 OpenRouter 經 `ANTHROPIC_BASE_URL`）時不會有 `rate_limit_event`，輔助訊號就是唯一的訊號，也沒有窗口與重置時刻：窗口 `5h`、不帶 `resets_at`。
 
-**opencode 1.18.35**：`opencode serve --hostname 127.0.0.1 --port <埠>`（工作目錄設成 agent 的工作目錄；opencode 依目錄分專案）。埠由 sidecar 分配（取一個空的），經 agora 的 `--headless-port` 交給 opencode；agora 在 stderr 印 `agora-port <埠>` 確認。
+**opencode 1.18.35**：`opencode serve --hostname 127.0.0.1 --port <埠>`（工作目錄設成 agent 的工作目錄；opencode 依目錄分專案）。埠由 sidecar 分配（取一個空的），經 agora 的 `--headless-port` 交給 opencode（opencode 的 headless 必填，沒給 agora exit 1、什麼都不開）；agora 在 stderr 印 `agora-port <埠>`——**印出時 server 還沒有開始聽**（先印、再開 agent），所以 `OpenCodeDriver` 要自己 poll 到埠連得上才送，逾時當作啟動失敗；session id 用 agora 印的 `agora-agent-session <id>`，不要自己去猜。
 - 送：`POST /session/{id}/message`（這個呼叫會等到這一輪做完才回，所以 driver 在背景送、用事件看狀態）。
 - 狀態：`GET /event`（SSE）的 `session.status`：`busy`→`idle`，另有 `session.idle`；`GET /session/status` 可以直接查。
 - 中斷：`POST /session/{id}/abort`，之後狀態變 `idle`。
