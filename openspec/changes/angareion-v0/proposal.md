@@ -16,7 +16,8 @@ AiCompany 期 1 需要一個讓 agent、程式或人「上 Slack 留言、讀留
 - 新增 `angareion` 指令與函式庫（`src/angareion/`）：`channel create`、`send`、`wait`、`read` 四個子命令，對應四個介面。
 - 後端介面 `ChannelBackend`（同樣四個動作）與實作 `GitHubIssuesBackend`。
 - 訊息格式：六欄位（`from`／`to`／`channel`／`urgency`／`content`／`attachments`）加 `id`、`at`，以 front matter 存在 GitHub 留言裡。
-- 「讀到哪」是讀的人自己的游標（本機），不在信道上留 ack。
+- 「讀到哪」是讀的人自己的游標（本機），不在信道上留 ack；新舊只看後端的到達位置與時間，不用寄件者的 `at`／`id`（和後端無關的游標，GitHub 實作對應到留言 id 與 `created_at`）。
+- `send` 的內文只來自 `--body <文字>` 或 `--body -`；HTTP 有固定逾時，逾時與回應解析失敗都是後端錯誤（exit 2）；同名 channel 以最舊的為準。
 - token：`ANGAREION_TOKEN_FILE` 指定的檔案，檔案只能擁有者有權限（0400 或 0600）。
 - agent 用的說明檔（skill）：`skills/angareion/SKILL.md`；怎麼放到 agent 讀得到的位置由使用它的環境負責（需求寫在 `docs/angareion.md` 的「給 MyLinuxPool 的需求」）。
 
