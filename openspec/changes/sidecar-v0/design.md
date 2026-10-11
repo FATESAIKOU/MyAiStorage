@@ -79,6 +79,7 @@ agent 清單、job 清單只在記憶體。sidecar 結束時先對每個 agent �
 
 - `~/.config/sidecar/config.json`（`SIDECAR_CONFIG` 可覆寫）：`port`（預設 8471；不在程式裡寫死，MyLinuxPool 的 `--check` 從設定讀）、`subscription_source`（`llmgateway`＋連線設定，或 `file`＋路徑）、`agents`（各種類的執行檔路徑與額外參數）、`sync_period`（分鐘，預設 5）。
 - 不含任何秘密。LLMGateway 的連線憑證由 `lgw connect` 自己處理。
+- LLMGateway 的客戶端：依賴 LLMGateway 的 `lgw`（只用標準函式庫、只含 client／connect／signals），放在 extra：`gateway = ["lgw @ git+https://github.com/FATESAIKOU/LLMGateway@lgw-v0.1.0"]`，只用 agora 的人不會裝到；worker 的 tool-pins 裝這個 extra。每次操作才 `with lgw.connect.connect(cfg) as base_url`，用完就關（不長期持有、不自己重連，和 LLMGateway PM 確認過）；`lgw.client` 連不上回 `unreachable=True`，sidecar 當「無法確認，下次再試」。
 
 ### D8 版本與健康檢查（MyLinuxPool 的 `install.sh --check` 用）
 

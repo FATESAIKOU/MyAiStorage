@@ -10,7 +10,7 @@
 - [ ] 2.2 內部介面：`AgentDriver`、`SessionStore`、`SubscriptionSource`、`Selector`（`PrioritySelector`）；假實作給測試用
 - [ ] 2.3 open／close／status／poke 的流程（design D1、D4、D5）；結束時先 close 全部
 - [ ] 2.4 換把與自動重開 job（D4）
-- [ ] 2.5 `FileSubscriptionSource`（本機開發）與 `LLMGatewaySource`（經 `lgw connect`，和 LLMGateway PM 對齊）
+- [ ] 2.5 `FileSubscriptionSource`（本機開發）與 `LLMGatewaySource`（extra `gateway` 依賴 `lgw` 的固定 tag；每次操作才 `lgw.connect.connect`；見 design D7）
 - [ ] 2.6 測試：spec 的每個 Scenario（假實作，不開真的 agent、不連網）；環境變數不出現在命令列與 log；每項在副本改壞確認會紅
 
 ## 3. agent driver 與 agora（spike 之後依 D6 的結論）
