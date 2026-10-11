@@ -24,7 +24,7 @@
 - [x] L5 `send` 只接受 `--body TEXT` 或 `--body -`；沒給 `--body` exit 1（更新 docs 與 SKILL）
 - [x] L6 游標暫存檔用 `tempfile` 同目錄唯一檔名再 `os.replace`
 - [x] L4 同名 channel 最舊者勝出；`create_channel` 建完再查一次（競態）
-- [ ] L7 YAML 解析成 datetime/date 的 `at` 轉回 ISO 字串再驗證
+- [x] L7 YAML 解析成 datetime/date 的 `at` 轉回 ISO 字串再驗證
 - [ ] 補漏抓測試：token 讀取順序；請求 headers（Authorization／Accept／X-GitHub-Api-Version）
 - [ ] 文件：opencode 讀 skill 位置的 spike 結論；SKILL.md 補 exit 2 與回覆位址兩行
 

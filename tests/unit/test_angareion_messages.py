@@ -114,6 +114,26 @@ def test_content_with_horizontal_rule_delimiters():
     assert parsed.content == body
 
 
+def test_unquoted_yaml_timestamp_at_is_accepted():
+    """L7: YAML turns an unquoted timestamp into datetime; that must parse, not reject."""
+    text = (
+        "---\nangareion: 1\nid: 01JABC\nat: 2026-10-10T12:00:00+00:00\n"
+        "from: {repo: a, role: b}\nto: {repo: c, role: d}\nchannel: x\nurgency: 5\n"
+        "attachments: []\n---\nbody"
+    )
+    parsed = parse_message(text, strict=True)
+    assert parsed is not None
+    assert isinstance(parsed.at, str)
+    assert parsed.at == "2026-10-10T12:00:00+00:00"
+    assert parsed.content == "body"
+
+    # A bare date becomes a `date` object; the ISO string survives too.
+    date_only = text.replace("2026-10-10T12:00:00+00:00", "2026-10-10")
+    parsed_date = parse_message(date_only, strict=True)
+    assert parsed_date is not None
+    assert parsed_date.at == "2026-10-10"
+
+
 def test_missing_required_fields():
     msg = Message(
         from_={"repo": "owner-org/repo-channel", "role": "PM"},

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import os
 import time
 from typing import Any
@@ -235,10 +235,18 @@ def parse_message(text: str, *, strict: bool = False) -> Message | None:
         if missing:
             raise MessageValidationError(f"Missing required front matter fields: {sorted(missing)}")
 
+        at = data["at"]
+        # L7: YAML parses an unquoted timestamp into datetime/date; turn it
+        # back into an ISO 8601 string instead of rejecting a valid message.
+        if isinstance(at, datetime):
+            at = at.isoformat()
+        elif isinstance(at, date):
+            at = at.isoformat()
+
         msg = Message(
             angareion=data["angareion"],
             id=data["id"],
-            at=data["at"],
+            at=at,
             from_=data["from"],
             to=data["to"],
             channel=data["channel"],
