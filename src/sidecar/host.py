@@ -124,6 +124,77 @@ class AgentHost:
         self.registry.register(record)
         return record
 
+    def start_team(
+        self,
+        identity: str,
+        agora_session: str | None = None,
+        fork: bool = True,
+        sync_period: int | float | None = None,
+        cwd: Path | str | None = None,
+        worktree: bool = False,
+        extra_env: dict[str, str] | None = None,
+    ) -> AgentRecord:
+        """Start a team task using the configured home session, agent kind, and harness.
+
+        Per D4:
+        - base command: 'agora continue session <home> --agent <agent> --fork --sync-period <N>'
+        - harness: load raw verbatim content as first input (Atelier seam)
+        - isolate via --fork
+        """
+        team_cfg = self.config.teams.get(identity, {}) if self.config else {}
+
+        home = agora_session or team_cfg.get("home_session")
+        if not home:
+            raise ValueError(f"No home session configured for team '{identity}'")
+
+        agent_kind = team_cfg.get("agent", "opencode")
+        harness_path = team_cfg.get("harness_path")
+        harness_content = None
+        if harness_path:
+            hp = Path(harness_path)
+            if hp.is_file():
+                harness_content = hp.read_text(encoding="utf-8")
+
+        sp = sync_period if sync_period is not None else team_cfg.get("sync_period", 300)
+        team_cwd = cwd or team_cfg.get("cwd")
+        env = dict(team_cfg.get("env", {}))
+        if extra_env:
+            env.update(extra_env)
+
+        return self.start_agent(
+            identity=identity,
+            agora_session=home,
+            agent_kind=agent_kind,
+            fork=fork,
+            sync_period=sp,
+            cwd=team_cwd,
+            worktree=worktree,
+            harness_content=harness_content,
+            env=env,
+        )
+
+    def terminate_team(self, identity: str, timeout_stage: float = 5.0) -> bool:
+        """Terminate all active agents running for the given team/identity."""
+        active = [a for a in self.registry.list_agents(status="running") if a.identity == identity]
+        if not active:
+            return False
+        success = True
+        for rec in active:
+            if not self.terminate_agent(rec.agent_id, timeout_stage=timeout_stage):
+                success = False
+        return success
+
+    def export_agent_session(self, agent_target: str) -> str | None:
+        """Return the Agora session ID where this agent's session is stored.
+
+        Per D4: conversations started with 'agora continue' are automatically
+        written back by continue itself. Sidecar does not assemble raw session files.
+        """
+        rec = self.registry.get(agent_target) or self.registry.get_by_name(agent_target)
+        if not rec:
+            return None
+        return rec.agora_session
+
     def get_agent_status(self, agent_name: str, agent_kind: str | None = None) -> str:
         """Read agent status, verifying opencode terminal output for 'esc interrupt'."""
         try:

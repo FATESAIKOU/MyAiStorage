@@ -15,7 +15,7 @@
 - [x] 3.1 sidecar 骨架：設定檔、registry（原子寫、重啟恢復）、持久佇列、`sidecar status`；單元測試。
 - [x] 3.2 agent 宿主：用 herdr 開（`tab create`／`pane run` 跑 `agora continue`、`agent rename` 命名）、送字（`agent prompt`）、讀狀態（`agent get`／`agent read`，opencode 看畫面最下面一行的 esc interrupt）、等輸出（`pane wait-output`）、任務 checkout（`worktree`）、重啟後用 `agent list` 找回、三段 escalate 終止；不可巢狀（清掉 `HERDR_ENV`）。herdr 包成薄 client，單元測試注入假 client。
 - [ ] 3.3 Angareion 收信迴圈（用 angareion 的程式介面）＋佇列＋依 urgency 投遞＋ack；假後端測試（含 304、重啟恢復、去重）。
-- [ ] 3.4 啟動與終止 team：home Session 的 `continue --fork --sync-period`、harness 載入、結束後存回／匯出；假 agora、假 agent 的單元測試。
+- [x] 3.4 啟動與終止 team：home Session 的 `continue --fork --sync-period`、harness 載入、結束後存回／匯出；假 agora、假 agent 的單元測試。
 - [ ] 3.5 回報中繼：unix socket ＋ `SO_PEERCRED` 驗身分、`sidecar say` 薄指令；測試確認 agent 環境沒有 A2A token、送出的 `from` 是 team 身分。
 - [x] 3.6 `ModelBroker` 介面與假 broker；真接 LLMGateway 等 2.1。
 
