@@ -129,6 +129,7 @@ class AgentRecord:
     exit: dict[str, Any] | None = None
     reopen_at: float | None = None
     reopen_job: str | None = None
+    busy: bool = False  # a state transition is in flight for this agent (D2)
     pending: list[PendingPoke] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -364,7 +365,7 @@ class SidecarCore:
         return rec
 
     def get(self, id: str) -> AgentRecord:
-        self.refresh_states()
+        """The last known state; GET never triggers a transition (D2/M4)."""
         with self._lock:
             rec = self._agents.get(id)
         if rec is None:
@@ -372,7 +373,7 @@ class SidecarCore:
         return rec
 
     def list_agents(self) -> list[AgentRecord]:
-        self.refresh_states()
+        """The last known list; GET never triggers a transition (D2/M4)."""
         with self._lock:
             return list(self._agents.values())
 
@@ -466,11 +467,18 @@ class SidecarCore:
     # --- state watching ---------------------------------------------------
 
     def refresh_states(self, now: float | None = None) -> None:
-        """Ask every running driver for its state and apply what it says."""
+        """Ask every running driver for its state and apply what it says.
+
+        The scheduler thread is the only caller (D2/M4); one agent's failure
+        is logged and confined to that agent, never raised to the caller.
+        """
         with self._lock:
             records = list(self._agents.values())
         for rec in records:
-            self._refresh_one(rec, now)
+            try:
+                self._refresh_one(rec, now)
+            except Exception:
+                logger.exception("agent %s: state transition failed", rec.id)
 
     def _refresh_one(self, rec: AgentRecord, now: float | None = None) -> None:
         with self._lock:
@@ -489,7 +497,17 @@ class SidecarCore:
             if self._agents.get(rec.id) is not rec or rec.handle is not handle:
                 return  # replaced or switched while the driver was answering
         if st.kind == DRIVER_QUOTA_EXHAUSTED:
-            self._quota_exhausted(rec, st, now)
+            # One transition per agent at a time: if another thread is already
+            # swapping it, this observation is stale (D2/H2).
+            with self._lock:
+                if rec.busy:
+                    return
+                rec.busy = True
+            try:
+                self._quota_exhausted(rec, st, now)
+            finally:
+                with self._lock:
+                    rec.busy = False
         elif st.kind == DRIVER_EXITED:
             with self._lock:
                 rec.state = STATE_EXITED

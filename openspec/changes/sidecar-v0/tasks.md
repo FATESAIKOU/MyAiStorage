@@ -15,7 +15,7 @@
 
 - [ ] 2.7 審查修正（架構師核對報告 `docs/review/sidecar-v0-core.md`；openspec 71247fc）
   - [x] 2.7.1 H1：`LLMGatewaySource` 改吃 lgw `Result`（ok／status／data／error／unreachable），對應表照 D7；`operation()` 接住進入 `with` 時的 `Unavailable`；假替身換成同欄位的 Result-like dataclass；加 `importorskip("lgw")` 的 loopback 整合測試
-  - [ ] 2.7.2 H2＋M4：只有 scheduler 執行緒改變 agent 狀態（`GET` 讀最後狀態）、每個 agent 同時只有一個狀態轉移（busy）
+  - [x] 2.7.2 H2＋M4：只有 scheduler 執行緒改變 agent 狀態（`GET` 讀最後狀態）、每個 agent 同時只有一個狀態轉移（busy）
   - [ ] 2.7.3 M1：`close` 遇到 `starting` 記 `closing`，open 完成後立刻 stop 並回報 exited
   - [ ] 2.7.4 M2：`JobRegistry` 執行緒安全（1～2 秒併發測試）
   - [ ] 2.7.5 M3：換把中途失敗 → waiting-quota＋`now + retry_interval` job＋log；一人的錯不影響別人

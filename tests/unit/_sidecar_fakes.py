@@ -67,6 +67,8 @@ class FakeAgentDriver:
         self.launches: list[tuple[RunningSession | None, dict[str, str], str]] = []
         self.handles: list[FakeHandle] = []
         self.stop_calls: list[tuple[FakeHandle, bool, float]] = []
+        self.state_calls = 0
+        self.state_fails = False  # raise from state(), for the isolation tests
         self.launch_gate: threading.Event | None = None
         self.launch_started = threading.Event()
 
@@ -103,6 +105,9 @@ class FakeAgentDriver:
         handle.state = DriverState(kind=DRIVER_IDLE)
 
     def state(self, handle: FakeHandle) -> DriverState:
+        self.state_calls += 1
+        if self.state_fails:
+            raise RuntimeError("fake driver state exploded")
         if handle.stopped and handle.state.kind != DRIVER_EXITED:
             return DriverState(kind=DRIVER_EXITED, code=0, reason="stopped")
         return handle.state
@@ -207,6 +212,7 @@ class FakeSubscriptionSource:
         self.get_errors: dict[str, str] = {}
         self.cooldown_results: list[Any] = []
         self.cooldown_unreachable = False
+        self.cooldown_delay = 0.0  # slow cooldown, for the concurrency tests (H2)
         self.operations = 0  # one logical operation = one source.operation()
 
     def operation(self) -> Any:
@@ -249,6 +255,10 @@ class FakeSubscriptionSource:
 
     def cooldown(self, subscription_id: str, window: str, resets_at: str | None) -> Any:
         self.cooldowns.append((subscription_id, window, resets_at))
+        if self.cooldown_delay:
+            import time
+
+            time.sleep(self.cooldown_delay)
         if self.cooldown_results:
             scripted = self.cooldown_results.pop(0)
             if scripted is not None:

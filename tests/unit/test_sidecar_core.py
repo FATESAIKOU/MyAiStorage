@@ -33,9 +33,11 @@ from sidecar.protocols import (
     STATE_EXITED,
     STATE_IDLE,
     STATE_RUNNING,
+    STATE_STARTING,
     SubscriptionNotAllowedError,
     SubscriptionNotFoundError,
     WorkdirNotFoundError,
+    iso,
 )
 
 
@@ -346,6 +348,7 @@ def test_poke_without_interrupt_waits_for_the_round(tmp_path):
     assert handle.queued == ["第二則"]
     handle.finish_round()
     assert handle.inbox == ["第一輪", "第二則"]
+    core.tick()  # the scheduler is what learns about the round ending (M4)
     assert core.get("t1").state == STATE_IDLE
 
 
@@ -429,10 +432,83 @@ def test_driver_reported_exit_shows_up_in_status(tmp_path):
     core.open("t1", "claude-code", workdir, {"mode": "new"})
     driver.force_state(driver.handles[0], DRIVER_EXITED, code=3, reason="crashed")
 
+    core.tick()  # the scheduler observes the exit; GET only reads the cache
     rec = core.get("t1")
 
     assert rec.state == STATE_EXITED
     assert rec.exit == {"code": 3, "reason": "crashed"}
+
+
+# --- scheduler-only transitions and one transition per agent (D2/M4, H2) -----
+
+
+def test_get_never_triggers_a_transition_or_a_driver_call(tmp_path):
+    """Scenario GET /agents 不觸發換把: the response is the last known state."""
+    core, driver, store, source, _clock, workdir = rig(tmp_path)
+    store.seed("agora:A")
+    core.open("t1", "claude-code", workdir, {"mode": "continue", "from": "agora:A"},
+              input="go")
+    first = driver.handles[0]
+    driver.force_state(first, "quota_exhausted", window="5h", resets_at=None)
+    state_calls = driver.state_calls
+
+    listed = core.list_agents()
+    got = core.get("t1")
+
+    assert driver.state_calls == state_calls  # GET never asked the driver
+    assert source.cooldowns == [] and driver.stop_calls == []
+    assert [rec.id for rec in listed] == ["t1"]
+    assert got.state == STATE_RUNNING and got.subscription == "claude-personal"
+    assert len(driver.launches) == 1
+
+    core.tick()  # the scheduler's next beat is what swaps
+    assert [c[0] for c in source.cooldowns] == ["claude-personal"]
+    assert core.get("t1").subscription == "claude-company"
+
+
+def test_two_threads_seeing_quota_swap_only_once(tmp_path):
+    """H2 scenario: a slow cooldown, two concurrent refreshes, one swap."""
+    core, driver, store, source, clock, workdir = rig(tmp_path)
+    source.cooldown_delay = 0.4
+    store.seed("agora:A")
+    core.open("t1", "claude-code", workdir, {"mode": "continue", "from": "agora:A"},
+              subscription={"id": "claude-personal"}, input="go")
+    first = driver.handles[0]
+    driver.force_state(first, "quota_exhausted", window="5h", resets_at=iso(clock.t + 3600))
+
+    threads = [threading.Thread(target=core.refresh_states) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+
+    assert [c[0] for c in source.cooldowns] == ["claude-personal"]  # registered once
+    assert driver.stop_calls == [(first, True, 30.0)]              # stopped once
+    assert len(driver.launches) == 2                               # one new process
+    rec = core.get("t1")
+    assert rec.subscription == "claude-company"
+    assert rec.state in (STATE_IDLE, STATE_RUNNING)
+    assert core.list_jobs() == []
+
+
+def test_one_agents_driver_failure_does_not_stop_the_others(tmp_path):
+    opencode = F.FakeAgentDriver("opencode")
+    subs = F.default_subscriptions() + [
+        F.Subscription(id="zen", agents=("opencode",), key="key-zen", available=True)
+    ]
+    core, driver, _store, _source, _clock, workdir = rig(
+        tmp_path, subs=subs, extra_drivers={"opencode": opencode}
+    )
+    core.open("t1", "claude-code", workdir, {"mode": "new"})
+    core.open("t2", "opencode", workdir, {"mode": "new"})
+    driver.state_fails = True
+    opencode.force_state(opencode.handles[0], DRIVER_RUNNING)
+
+    core.tick()  # t1's driver blows up; t2 must still be refreshed
+
+    assert core.get("t1").state in (STATE_STARTING, STATE_IDLE)  # unchanged, no crash
+    assert core.get("t2").state == STATE_RUNNING
+    assert [rec.id for rec in core.list_agents()] == ["t1", "t2"]
 
 
 # --- shutdown (design D2: SIGTERM 先 close 全部) ------------------------------
