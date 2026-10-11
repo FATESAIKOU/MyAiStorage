@@ -160,6 +160,7 @@ v0 不做：外來 agent 發現、暫停／恢復、C 的記憶管理（session 
 - **身分是完整的 Angareion 位址**：設定裡每個 team 的身分寫成 `{repo, role, name}`（`repo`、`role` 必填）；中繼送出的 `from` 就是它，不寫死成 `repo: "sidecar"`。
 - **urgency 是 0～9**（Angareion spec）；`sidecar say` 與中繼只收 0～9，超出範圍回錯誤，不靜默丟掉。
 - **sidecar 不自己建頻道**：中繼送出時頻道不存在就回錯誤；信道 repo 來自設定（`channel_repo`），不寫死。
+- **LLMGateway 的方向（本人 2026-10-11 定，經 PMO；正式介面由 LLMGateway 的 session 草擬後來對齊，v0 仍用假 broker）**：所有 LLM key 只放在 LLMGateway。sidecar 向它租用，拿到「要設給 agent 的環境變數」（例如 Claude Code 的 `CLAUDE_CODE_OAUTH_TOKEN`，由 Claude Code 直連 Anthropic）後啟動 agent；額度用完時 sidecar 回報冷卻與重置時間、再租下一把，換那一把重開 agent，用 `agora continue` 接回原本的 Session。sidecar 不保存 key，租約結束就丟掉；租約給的環境變數是 agent 環境白名單唯一的附加來源，MUST NOT 寫進 log、registry 或任何檔案。`ModelBroker` 的 `request_lease` 回傳值之後會改成帶這組環境變數與效期。
 - **agent 的環境是白名單**：`start_agent` 不帶 `env` 時給空的附加環境，絕不把 sidecar 自己的整個環境（可能含 A2A token）傳給 pane；文件同時建議 token 只放檔案、不 export 到登入環境（herdr server 繼承的環境 sidecar 擋不住）。
 
 ## Risks / Trade-offs
