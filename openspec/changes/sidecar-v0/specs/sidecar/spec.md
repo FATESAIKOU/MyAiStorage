@@ -8,7 +8,7 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** agent 這一輪被打斷，接著收到那句話，停在提示處
 
 ### Requirement: 開啟
-`open` MUST 收：呼叫方給的 `id`、agent 種類、工作目錄（存在的絕對路徑，不存在 MUST 回 400，sidecar MUST NOT 建目錄）、繼承的 Session（new／continue／fork／merge；merge 可帶選填的 `by`，預設是 agent 種類）；subscription 的 id 與第一則輸入 MUST 是選填（subscription 省略時，sidecar 依挑選規則自己挑一個現在能用的）。呼叫方指定的 subscription 在冷卻中時 MUST 照辦。`id` 對應的 agent 還在 starting／running／idle 時 MUST 拒絕；在 waiting-quota 或 exited 時 MUST 用同一個 id 重開，waiting-quota 的自動重開 job MUST 一併刪掉。sidecar MUST 自己向 subscription 來源取得詳細資料（呼叫方不傳 key；merge 的 `by` 與 agent 種類不同時，替 `by` 另外用挑選規則挑一把），把它轉成 agent 的環境變數，放在子行程的環境裡；這些值 MUST NOT 出現在命令列、log 或任何檔案。開出來的 Session MUST 在 agora 標頭的 tags 附加 `sidecar:<id>`，原有的 tags MUST NOT 被取代。
+`open` MUST 收：呼叫方給的 `id`、agent 種類、工作目錄（存在的絕對路徑，不存在 MUST 回 400，sidecar MUST NOT 建目錄）、繼承的 Session（new／continue／fork／merge；merge 可帶選填的 `by`，預設是 agent 種類）；subscription 的 id 與第一則輸入 MUST 是選填（subscription 省略時，sidecar 依挑選規則自己挑一個現在能用的）。呼叫方指定的 subscription 在冷卻中時 MUST 照辦。`id` 對應的 agent 還在 starting／running／idle 時 MUST 拒絕；在 waiting-quota 或 exited 時 MUST 用同一個 id 重開，waiting-quota 的自動重開 job MUST 一併刪掉。sidecar MUST 自己向 subscription 來源取得詳細資料（呼叫方不傳 key；merge 的 `by` 與 agent 種類不同時，替 `by` 另外用挑選規則挑一把），把它轉成 agent 的環境變數，放在子行程的環境裡；這些值 MUST NOT 出現在命令列、log 或任何檔案。開出來的 Session MUST 在 agora 標頭的 tags 附加 `sidecar:<id>`，原有的 tags MUST NOT 被取代。第一則輸入 MUST 排進該 agent 的佇列（等它起來再送），MUST NOT 因為它而讓 open 失敗；省略 subscription 而且沒有任何能用的候選時 MUST 回 409 `no_subscription`。
 
 #### Scenario: fork 一個 team 的 home Session
 - **WHEN** `open`（id=t1、claude-code、fork 自 H、subscription=claude-personal、第一則輸入「讀 channel X」）
@@ -66,7 +66,7 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** 回 404
 
 ### Requirement: 搜集狀態
-`status` MUST 只列這個 sidecar 開的 agent：id、agent 種類、agora Session（目前跑的那個）、subscription id、狀態（starting／running／idle／waiting-quota／exited）、開始時間；waiting-quota 而且有自動重開 job 時附預定重開的時刻（`reopen_at`），否則是 null。MUST NOT 含任何 key。
+`status` MUST 只列這個 sidecar 開的 agent：id、agent 種類、agora Session（目前跑的那個）、subscription id、狀態（starting／running／idle／waiting-quota／exited）、開始時間；waiting-quota 而且有自動重開 job 時附預定重開的時刻（`reopen_at`），否則是 null。MUST NOT 含任何 key。`status` MUST 讀記憶體裡最後一次的狀態（最多晚一個 tick），MUST NOT 因為被查詢而觸發任何狀態轉移或網路操作。
 
 #### Scenario: 不列別人的
 - **WHEN** 同一台機器上有一個不是 sidecar 開的 Claude Code
@@ -92,7 +92,7 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** 起來之後收到那則文字；逾時還沒起來則回 409
 
 ### Requirement: 三種外部控制形式
-控制者 MUST 能用 HTTP 以三種形式下四個動作：立即（直接呼叫）、定時（job 的 `at`）、輪詢（job 的 `every`，可設 `until`）。job 的動作 MUST 只能是四個動作之一，否則 MUST 回 400；`at` 在過去 MUST 回 400。`GET /jobs` 的每一筆 MUST 有 `last_run` 與 `last_error`（不含 key）。HTTP MUST 只綁本機（127.0.0.1），不做認證。
+控制者 MUST 能用 HTTP 以三種形式下四個動作：立即（直接呼叫）、定時（job 的 `at`）、輪詢（job 的 `every`，可設 `until`）。job 的動作 MUST 只能是四個動作之一，否則 MUST 回 400；`at` 在過去 MUST 回 400。`GET /jobs` 的每一筆 MUST 有 `last_run` 與 `last_error`（不含 key）。HTTP MUST 只綁本機（127.0.0.1），不做認證。請求本文超過 1 MB MUST 回 413。`every` 的下一次執行時刻 MUST 是「上一次預定時刻加 every」與「現在」中較晚的，MUST NOT 在停頓之後補跑。
 
 #### Scenario: 定時開啟
 - **WHEN** 掛一個 job：`at` 明天 9:00、動作 `open`
@@ -134,7 +134,7 @@ agent 回報額度用完時，sidecar MUST 向 subscription 來源登錄冷卻�
 - **THEN** 不會挑回 claude-personal；有其他能用的就換過去，沒有就走全部冷卻
 
 #### Scenario: 重置時刻被拒絕時去掉重送
-- **WHEN** driver 給的 `resets_at` 被 LLMGateway 以 400 拒絕
+- **WHEN** driver 給的 `resets_at` 被 LLMGateway 以 `invalid_resets_at` 或 `resets_at_out_of_range` 拒絕
 - **THEN** sidecar 不帶 `resets_at` 重送一次
 
 #### Scenario: 無法確認
@@ -181,3 +181,132 @@ agent 種類（Claude Code、opencode）、Session 保存處（agora）、subscr
 #### Scenario: 環境變數不出現在命令列與 log
 - **WHEN** 用假的 subscription（key 是一個可辨認的字串）開一個 agent
 - **THEN** 該字串只出現在子行程的環境；命令列、sidecar 的 log、任何檔案裡都找不到
+
+### Requirement: 狀態只由 scheduler 改變，每個 agent 同時只有一個轉移
+agent 的狀態轉移（刷新、換把、自動重開、job 的執行）MUST 只在 scheduler 執行緒做；HTTP 執行緒 MUST NOT 觸發它們。每個 agent 同一時間 MUST 只有一個狀態轉移在進行；一個 agent 的錯誤 MUST NOT 影響其他 agent 的 `status`，也 MUST NOT 讓 `GET /agents` 回 500。`JobRegistry` MUST 是執行緒安全的。driver 與 store 的呼叫 MUST 在鎖外進行。
+
+#### Scenario: GET /agents 不觸發換把
+- **WHEN** driver 已經回報 t1 額度用完，控制者在 scheduler 的下一個 tick 之前呼叫 `GET /agents`
+- **THEN** 回應是上一次的狀態（t1 仍是 running 或 idle）；沒有任何 `cooldown`、`list`、`get` 或 `stop` 被呼叫；之後的 tick 才換把
+
+#### Scenario: 兩個執行緒同時看到額度用完只換一次
+- **WHEN** t1 額度用完，兩個執行緒同時對它做狀態刷新，而 `cooldown` 要花 0.4 秒
+- **THEN** `cooldown` 只登錄一次、`stop` 只一次、`continue` 只開一個新行程；t1 最後是 running（或 idle）在新的 subscription 上，沒有被第二次停掉
+
+#### Scenario: 一個 agent 的錯誤不影響別的
+- **WHEN** t1 的換把途中 `SessionStore.start` 丟例外，t2 正常在跑
+- **THEN** `GET /agents` 回 200，t2 照常列出；t1 是 waiting-quota
+
+#### Scenario: /jobs 併發不出錯
+- **WHEN** 數個執行緒同時對 `/jobs` 做 `POST`、`GET`、`DELETE`，scheduler 同時在 tick，持續 2 秒
+- **THEN** 沒有任何 500 或例外；job 的 id 沒有重複；`GET /jobs` 每次都回完整的清單
+
+#### Scenario: every 停頓之後不補跑
+- **WHEN** 一個 `every` 600 的 job，scheduler 停了 3000 秒後恢復
+- **THEN** 只補執行一次，下一次是現在加上（到下一個預定點的）餘數，不是連續執行 5 次
+
+#### Scenario: 本文太大
+- **WHEN** `POST /agents` 的本文是 2 MB
+- **THEN** 回 413，什麼都沒開
+
+### Requirement: 關閉遇到 starting
+`close` 遇到還在 `starting`（open 進行中）的 agent 時 MUST 記下 `closing`，open 完成後 MUST 立刻停下那個行程；`close` 的回應 MUST 照常（不回 409），最後的狀態 MUST 是 `exited`，而且行程確實被停掉、沒有殘留。
+
+#### Scenario: 關閉遇到 starting
+- **WHEN** `open` 還在啟動 agent（`launch` 還沒回來）時，對同一個 id `close`，之後啟動完成
+- **THEN** `close` 回 200；`status` 最後是 exited；那個剛啟動的行程被停掉（`stop` 被呼叫一次），沒有殘留
+
+### Requirement: 結束時先擋新請求再逐一關閉
+sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`POST /jobs` MUST 回 503；到期的 job MUST NOT 再執行（不會再開 agent）；停掉 scheduler 之後才逐一 close 每個 agent，全部做完才結束。`docs/sidecar.md` MUST 寫明 supervisor 的 kill timeout 要大於 `close_timeout × agent 數`。
+
+#### Scenario: 關閉中到期的 job 不會再開 agent
+- **WHEN** sidecar 進入關閉中的同時，一個 `open` 的 job 剛好到期
+- **THEN** 那個 job 沒有執行，沒有新的 agent 被開；`GET /jobs` 看得到它還在（或 `last_error` 是 503），sidecar 結束
+
+#### Scenario: 關閉中的新請求
+- **WHEN** 關閉進行中收到 `POST /agents`
+- **THEN** 回 503 `shutting_down`，什麼都沒開
+
+### Requirement: 換把中途失敗
+換把途中任何一步失敗（停下之後的 `SessionStore.start`、`launch`、`get` 之後的任何例外）時，agent MUST 走 `waiting-quota`，MUST 掛一個 `now + retry_interval` 的 open job，MUST log 原因（不含 key），MUST NOT 讓 HTTP 回應變成 500，也 MUST NOT 影響其他 agent。
+
+#### Scenario: 換把中途失敗
+- **WHEN** t1 額度用完，已經挑到下一把並停下，但 `SessionStore.start` 失敗
+- **THEN** t1 是 waiting-quota，`reopen_at` 是現在加 `retry_interval`，`GET /jobs` 有對應的 open job；到時重開成功，t1 回到 running
+
+### Requirement: lgw 回應的對應
+`LLMGatewaySource` MUST 把 `lgw.client` 的 `Result` 與 `lgw.connect` 的例外依下表對應；MUST NOT 把 `ok=False` 當成功；進入 `with lgw.connect.connect(...)` 時的例外 MUST 在來源內轉成 `Unreachable`，MUST NOT 穿出去：
+
+| lgw | 回覆 |
+|---|---|
+| `ok` | 值 |
+| `unreachable=True`、`Unavailable`、`load_config` 的 `OSError`／`ConfigError` | `Unreachable`（只寫種類，不寫 `data`） |
+| `status` 403／404／409 | `agent_not_allowed`／`not_found`／`not_deployed` |
+| `status` 400 | `SourceError(error 碼)`：只有 `invalid_resets_at`／`resets_at_out_of_range` 讓 `resets_at` 去掉重送；`bad_request`、`invalid_window` 不重送 |
+| `status` 413 | `SourceError("body_too_large")` |
+| `error` 是 `bad_response`，或其他沒列出的 `status` | `Unreachable` |
+
+#### Scenario: 403
+- **WHEN** `get(id, "opencode")` 對只允許 claude-code 的 subscription，lgw 回 `ok=False, status=403, error="agent_not_allowed"`
+- **THEN** `SourceError("agent_not_allowed")`；open 回 400 `subscription_not_allowed`
+
+#### Scenario: 404 與 409
+- **WHEN** lgw 對 `get` 回 `status=404`，另一次回 `status=409, error="not_deployed"`
+- **THEN** 分別是 `not_found`（open 400 `subscription_not_found`）與 `not_deployed`（open 409 `not_deployed`）
+
+#### Scenario: cooldown 的 resets_at 被拒絕
+- **WHEN** `cooldown(id, "5h", resets_at)` 回 `ok=False, status=400, error="resets_at_out_of_range"`（或 `invalid_resets_at`）
+- **THEN** 回覆是 `SourceError`（不是成功）；換把去掉 `resets_at` 重送一次
+
+#### Scenario: 其他的 400 不重送
+- **WHEN** `cooldown` 回 `ok=False, status=400, error="invalid_window"`
+- **THEN** 回覆是 `SourceError("invalid_window")`；不重送；換把仍排除剛用完的那一把繼續
+
+#### Scenario: 回覆不是 JSON 物件
+- **WHEN** lgw 回 `error="bad_response"`
+- **THEN** 當作 `Unreachable`，走重試；不是成功
+
+#### Scenario: list 的形狀
+- **WHEN** lgw 的 `list()` 回 `ok=True, data={"schema": 1, "subscriptions": [...]}`
+- **THEN** 轉成 `Subscription` 的列表（不含 key）；`get` 的 `data` 是平的一筆，含 key
+
+#### Scenario: 連不上
+- **WHEN** lgw 回 `unreachable=True`
+- **THEN** `Unreachable`；open 回 503 `gateway_unreachable`
+
+#### Scenario: 進入 with 時 Unavailable
+- **WHEN** `lgw.connect.connect(cfg)` 在進入 `with` 時丟 `Unavailable("timeout")`
+- **THEN** 來源回 `Unreachable`，沒有例外穿出去；open 回 503（不是 500），換把走 `waiting-quota` 與重試 job
+
+### Requirement: 自動重開的候選與時刻
+自動重開的候選 MUST 只有「支援這個 agent 種類而且 key 已部署」的 subscription；沒有部署 key 的（`available` 為 false 而且兩個窗口都沒在冷卻）MUST NOT 是候選。算出的解除時刻已過但候選仍不可用時，`at` MUST 是 `now + retry_interval`，MUST NOT 每個 tick 重掛。
+
+#### Scenario: 未部署的不是候選
+- **WHEN** t1 額度用完，唯一其他的 claude-code subscription 沒有部署 key（`available` false、兩個窗口都沒冷卻）
+- **THEN** 沒有候選：t1 是 waiting-quota，`reopen_at` 是 null，`GET /jobs` 沒有自動重開的 job
+
+#### Scenario: 解除時刻已過仍不可用
+- **WHEN** 自動重開的 job 到時，`list` 仍回 claude-personal 冷卻（`until` 在 30 秒前）
+- **THEN** 新掛的 job 的 `at` 是現在加 `retry_interval`，不是過去的時刻，也不是每個 tick 重掛
+
+### Requirement: new 模式的換把與關閉先 import
+`new` 模式（沒有 agora 行程）的 agent 在 close 與換把時 MUST 先用 `agora import` 存進 agora（拿到 agora id，已有的就是原地更新），再停下（溫和），再 import 一次寫回最後的對話；換把接著 `continue` 那個 agora id。import 失敗時換把 MUST NOT stop agent。
+
+#### Scenario: new 模式換把先 import
+- **WHEN** t1 是 `new` 模式、`status.session` 還是 null，額度用完且有可用的下一把
+- **THEN** 順序是：import（取得 agora id）→ stop → import → `continue` 那個 agora id；`status.session` 變成那個 id，tags 含 `sidecar:t1`
+
+#### Scenario: new 模式 close
+- **WHEN** 對 `new` 模式的 t1 `close`
+- **THEN** 先 import 再停下再 import；agora 上有這個 Session；`status` 是 exited
+
+#### Scenario: import 失敗時不停下
+- **WHEN** `new` 模式換把前的 import 失敗
+- **THEN** agent 沒有被 stop，仍在原本的狀態；掛一個 `now + retry_interval` 的重試 job，log 原因
+
+### Requirement: 沒有 driver 時開不了 agent
+在 driver 與 session store 實作之前，`sidecar run` MUST 仍然啟動、`GET /agents` MUST 有回應（健康檢查過），但 `POST /agents` MUST 回 400 `unsupported agent kind`；`docs/sidecar.md` MUST 說明這一點。
+
+#### Scenario: 沒有 driver
+- **WHEN** 沒有註冊任何 agent 種類的 `sidecar run`，`POST /agents`
+- **THEN** 回 400 `unsupported agent kind`；`GET /agents` 回 200 與空清單
