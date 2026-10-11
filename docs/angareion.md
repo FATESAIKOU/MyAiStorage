@@ -108,7 +108,7 @@ attachments:
     - 嚴禁勾選 Contents、Actions、Pull requests、Administration 或其他權限。
 
 ### Token 本機存放
-- 預設存放於 `~/.config/angareion/token`，檔案權限必須為 `0600`。
+- 預設存放於 `~/.config/angareion/token`，檔案權限必須為 owner-only（`0600`，或唯讀掛載上的 `0400`；group/other 不得有任何位元且 owner 須可讀，`0640`／`0644` 會被拒絕）。
 - 可透過環境變數 `A2A_TOKEN_FILE` 指定其他路徑。
 - 程式讀取時若檔案不存在或權限錯誤，回報清楚錯誤並 exit 2；輸出與例外中絕不印出 token 內容。
 
@@ -208,17 +208,28 @@ a2a ack 01JABCDE0123456789ABCDEF00 [--note "已完成處理"]
 > **以下測試涉及真實 GitHub repo 與真實 Token，僅供本人（專案擁有者）親自驗收執行。隊員（AI）嚴禁執行、嚴禁接觸真實憑證。**
 
 ### 準備工作
-1. **建立 Private 信道 Repo**：在 GitHub 上建立一個新的 private repository（例如 `owner-org/a2a-channel-smoke`）。
-2. **生成 Fine-grained PAT**：
-   - 僅授權該 private repo。
-   - 僅開啟 `Issues: Read and write` 權限。
-3. **準備兩台測試環境（或兩個隔離工作目錄 A 與 B）**：
-   - 環境 A 設定：
-     - 身分：`{repo: "owner-org/team-a", role: "worker", name: "node-a"}`
-     - 建立 `~/.config/angareion/config.json` 與 `token`。
-   - 環境 B 設定：
-     - 身分：`{repo: "owner-org/team-b", role: "worker", name: "node-b"}`
-     - 建立對應之 `config.json` 與 `token`。
+1. **[本人] 建立 Private 信道 Repo**：在 GitHub 上建立一個新的 private repository（例如 `owner-org/a2a-channel-smoke`）。記下 `owner/repo`，下面兩邊 config 的 `channel_repo` 都填它。
+2. **[本人] 生成 Fine-grained PAT**（細步驟見 §5「Token 建立、安全邊界與輪替步驟」）：
+   - **Repository access**：Only select repositories → 只選步驟 1 的 repo。
+   - **Permissions**：只開 `Issues: Read and write`（會自動帶 `Metadata: Read`）；嚴禁 Contents、Actions、Pull requests、Administration。
+3. **準備兩個測試環境 A 與 B**（兩台機器，或同一台機器上兩個隔離目錄；同一台時兩邊的 `A2A_CONFIG`／`A2A_STATE_DIR`／`A2A_TOKEN_FILE` 必須指向不同路徑，否則會共用設定與狀態）：
+   - 環境 A 的 `config.json`：
+     ```json
+     {
+       "channel_repo": "owner-org/a2a-channel-smoke",
+       "identity": {"repo": "owner-org/team-a", "role": "worker", "name": "node-a"},
+       "token_file": "~/.config/angareion/token-a"
+     }
+     ```
+   - 環境 B 的 `config.json`：同上，`identity` 換成 `{"repo": "owner-org/team-b", "role": "worker", "name": "node-b"}`，`token_file` 換另一個路徑。
+4. **[本人] 放置 token 並鎖權限**（兩邊各做一次；`token-a`／`token-b` 可填同一個 PAT）：
+   ```bash
+   install -m 0600 /dev/null ~/.config/angareion/token-a
+   cat > ~/.config/angareion/token-a   # 貼上 PAT，Ctrl-D 結束
+   chmod 0600 ~/.config/angareion/token-a
+   ls -l ~/.config/angareion/token-a
+   ```
+   - 預期：最後看到 `-rw-------`（Linux/macOS 通用；唯讀掛載上 `-r--------` 也可，見 §5）。權限不對 `a2a` 會直接 exit 2（stderr 會說權限錯誤，不會印出 token）。
 
 ### 驗收步驟
 1. **[環境 A] 建立新話題並發信**：
@@ -230,18 +241,20 @@ a2a ack 01JABCDE0123456789ABCDEF00 [--note "已完成處理"]
      --body "Smoke test ping from node A"
    ```
    - 驗證：stdout 印出 `<id> smoke-test-channel`，Exit code 0；GitHub 信道 repo 出現新 Issue「smoke-test-channel」與一則含 front matter 的留言。
+   - 失敗：exit 1 看 stderr（參數或 channel 問題）；exit 2 看 stderr（後端或 token 問題，token 已遮罩）＋回頭檢查準備 4 的權限與準備 2 的 PAT 範圍。
 
 2. **[環境 B] 讀取信箱**：
    ```bash
    a2a inbox
    ```
    - 驗證：成功列出環境 A 發送的訊息，顯示對應的 `id`、`from`、內文。
+   - 失敗：列出來是空的 → 先確認環境 B config 的 `identity`（`repo`＋`role` 才參與匹配）與步驟 1 的 `--to` 對得上；再直接開 GitHub Issue 頁確認留言到底有沒有（有留言但 inbox 空＝身分不對）。
 
 3. **[環境 B] 確認回執 (Ack)**：
    ```bash
    a2a ack <剛才收到的 id> --note "Node B received successfully"
    ```
-   - 驗證：Exit code 0；GitHub 上該 Issue 出現一則含 `ack: <id>` 的確認留言。
+   - 驗證：Exit code 0；GitHub 上該 Issue 出現一則含 `ack: <id>` 的確認留言。已 ack 過再 ack 一次不會重貼，exit 0。
 
 4. **[環境 B] 驗證收件匣已清空**：
    ```bash
@@ -256,7 +269,8 @@ a2a ack 01JABCDE0123456789ABCDEF00 [--note "已完成處理"]
      --channel smoke-test-channel \
      --body "Smoke test reply from node B"
    ```
-   - 驗證：Exit code 0；留言追加在同一個 Issue 底下。
+   - 驗證：Exit code 0；留言追加在同一個 Issue 底下（不再建新 Issue，因為沒帶 `--new`）。
+   - 失敗：若它建了第二個同名 Issue，`a2a inbox` 會輸出警告（競爭條件，見 §2）。
 
 6. **[環境 A] 讀取並 Ack 反向訊息**：
    ```bash
@@ -264,3 +278,11 @@ a2a ack 01JABCDE0123456789ABCDEF00 [--note "已完成處理"]
    a2a ack <環境 B 的訊息 id>
    ```
    - 驗證：環境 A 讀取成功並完成 ack，雙向通訊驗證完畢。
+
+7. **[環境 A] 刪掉本機狀態後重建**（狀態檔只是快取，真值永遠在信道上，見 §4）：
+   ```bash
+   rm -rf ~/.local/state/angareion   # 同一台多環境時刪該環境的 A2A_STATE_DIR
+   a2a inbox --all
+   ```
+   - 驗證：退回完整掃描後，之前收過的訊息與 ack 記錄完整回來（`--all` 看得到已 ack 者；普通 `a2a inbox` 未 ack 清單與刪除前一致，不多不少）。
+   - 失敗：exit 2 看 stderr（多半是 token 或網路）；若重建後少了訊息，把 `--all` 輸出與 GitHub Issue 頁逐則對照後回報 PM（這是資料遺失級問題）。
