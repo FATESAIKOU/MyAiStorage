@@ -92,7 +92,7 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** 起來之後收到那則文字；逾時還沒起來則回 409
 
 ### Requirement: 三種外部控制形式
-控制者 MUST 能用 HTTP 以三種形式下四個動作：立即（直接呼叫）、定時（job 的 `at`）、輪詢（job 的 `every`，可設 `until`）。job 的動作 MUST 只能是四個動作之一，否則 MUST 回 400；`at` 在過去 MUST 回 400。`GET /jobs` 的每一筆 MUST 有 `last_run` 與 `last_error`（不含 key）。HTTP MUST 只綁本機（127.0.0.1），不做認證。請求本文超過 1 MB MUST 回 413。`every` 的下一次執行時刻 MUST 是原本節奏上第一個晚於現在的預定點，MUST NOT 在停頓之後補跑（只補執行一次，之後照原本節奏）。
+控制者 MUST 能用 HTTP 以三種形式下四個動作：立即（直接呼叫）、定時（job 的 `at`）、輪詢（job 的 `every`，可設 `until`）。job 的動作 MUST 只能是四個動作之一，否則 MUST 回 400；帶 `session.mode == "merge"` 的 `open` MUST NOT 出現在 job 裡（回 400 `merge_not_allowed_in_job`）；`at` 在過去 MUST 回 400。`GET /jobs` 的每一筆 MUST 有 `last_run` 與 `last_error`（不含 key）。HTTP MUST 只綁本機（127.0.0.1），不做認證。請求本文超過 1 MB MUST 回 413。`every` 的下一次執行時刻 MUST 是原本節奏上第一個晚於現在的預定點，MUST NOT 在停頓之後補跑（只補執行一次，之後照原本節奏）。
 
 #### Scenario: 定時開啟
 - **WHEN** 掛一個 job：`at` 明天 9:00、動作 `open`
@@ -373,3 +373,78 @@ sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`PO
 #### Scenario: 驅動錯誤帶 stderr 末幾行
 - **WHEN** agent 行程啟動失敗或模型請求以沒有原因的 HTTP 500 失敗
 - **THEN** 錯誤訊息帶子行程 stderr 的末幾行，其中 key 與 `env_for` 給的值被遮掉
+
+### Requirement: close 占用轉移
+`close` MUST 在同一個鎖內檢查並占用 agent 的 `busy`（轉移）再停下行程；已經 `busy` 時才記 `closing`。close 進行中，scheduler MUST NOT 對同一個 agent 開始換把或刷新。
+
+#### Scenario: close 先到、之後換把
+- **WHEN** 對 t1 `close`，而它的 `stop` 還沒有結束時，driver 回報額度用完、scheduler 刷新
+- **THEN** 刷新不會對 t1 換把；`close` 結束後 `status` 是 exited，而且沒有任何仍活著的行程（所有 handle 都被停掉）
+
+### Requirement: new 模式換把前 import 失敗
+`new` 模式的 agent 額度用完而換把前的 `agora import` 失敗時，MUST 照樣停下 agent，標 `waiting-quota`、記住 `external_session_id`，由 scheduler 每 `retry_interval` 重試 import；import 成功後 MUST 才掛一般的自動重開 job。換把失敗後，scheduler MUST NOT 在退避時間之前再次進入換把（不會每個 tick 登錄 cooldown、list、import）。
+
+#### Scenario: import 失敗後停下並重試
+- **WHEN** `new` 模式的 n1 額度用完，`import_external` 一律失敗，連續 5 次 scheduler 刷新（都在 `retry_interval` 之內）
+- **THEN** n1 被停下、狀態 waiting-quota；`cooldown` 只登錄一次、`list` 只一次、`import_external` 只一次；沒有自動重開的 job
+
+#### Scenario: 重試 import 成功後掛 job
+- **WHEN** 上面的 n1 在 `retry_interval` 之後 import 成功（回 agora id）
+- **THEN** 掛一個一般的自動重開 job（continue 那個 agora id、算出的解除時刻）；`status.session` 變成那個 id；沒有其他的 import 或換把動作被重複執行
+
+#### Scenario: 還沒跑過任何一輪
+- **WHEN** `new` 模式的 n2 還沒有 `external_session_id` 就額度用完
+- **THEN** 停下、waiting-quota、沒有 job
+
+### Requirement: Claude 額度的輔助訊號
+`ClaudeCodeDriver` 的輔助訊號（`system/api_retry` 的 `rate_limit`、`result` 文字）MUST 只在 `kind == api-key` 時使用；`api_retry` MUST 在重試用盡（`attempt >= max_retries`）或該回合以 `is_error: true` 的 `result` 結束時才算額度用完；`result` 文字 MUST 同時 `is_error: true` 才算。`kind == claude-subscription` MUST 只看 `rate_limit_event`。
+
+#### Scenario: 暫時性 429 之後成功
+- **WHEN** api-key 類的一個回合出現一次 `api_retry`（`attempt 1/10`），之後 `result` 是 `is_error: false` 的成功
+- **THEN** driver 的狀態不是額度用完；沒有登錄 cooldown，agent 沒有被停下
+
+#### Scenario: 重試用盡
+- **WHEN** api-key 類的 `api_retry` 出現 `attempt 10/10`，之後 `result` 是 `is_error: true`
+- **THEN** 視為額度用完（窗口 5h、不帶 `resets_at`）
+
+#### Scenario: 文字巧合
+- **WHEN** 一個回合的 `result` 是 `is_error: false`、文字是「You've hit your goal of five tests.」
+- **THEN** 不算額度用完
+
+#### Scenario: 訂閱類不看輔助訊號
+- **WHEN** `kind == claude-subscription` 的回合出現 `api_retry` rate_limit 與以 `You've hit your` 開頭的 `is_error: true` 的 result，但沒有 `rejected` 的 `rate_limit_event`
+- **THEN** 不算額度用完
+
+### Requirement: opencode 的送出與狀態
+`OpenCodeDriver` 的 `POST /session/{id}/message` MUST 在背景執行緒用長逾時（上限 1 小時）；狀態 MUST 以背景送出是否在跑為準（跑＝running、結束＝idle）；`/session/status` MUST 只用來偵測 `retry`。送出結束時回應的 `info.error` 或非 2xx MUST 寫進 `last_error`／`exit.reason`，不是只 log。
+
+#### Scenario: 長回合不被切斷、結束後 idle
+- **WHEN** 一個回合要 30 秒（超過一般請求的 10 秒逾時），`/session/status` 的 map 一直不含這個 session
+- **THEN** 回合期間 `status` 是 running；回合結束後是 idle；請求沒有被逾時切斷
+
+#### Scenario: 回應帶 info.error
+- **WHEN** 回應是 HTTP 200 但 `info.error` 有內容（例如 provider 的授權錯誤），或回應是 HTTP 500
+- **THEN** `status` 的 `exit.reason` 或 `GET /jobs` 的 `last_error` 帶那個錯誤（不含 key）；狀態不是永遠的 running
+
+### Requirement: 錯誤訊息的遮罩與 stderr
+driver 與 store 的錯誤訊息 MUST 帶子行程 stderr 的最新末幾行（包含啟動之後才印出的）；遮罩 MUST 只遮真正的秘密（key 與 `OPENCODE_CONFIG_CONTENT` 裡的 `apiKey`），MUST NOT 遮 `env_for` 的非秘密值。driver 的例外（agent 已結束時 `send` 失敗）MUST 轉成 `409 agent_not_running` 並把狀態標 exited，MUST NOT 變成 500。
+
+#### Scenario: 數字不被遮掉
+- **WHEN** 子行程 stderr 的末幾行是「agent exited with code 1 after 12 retries」，env 含 `DISABLE_AUTOUPDATER=1` 與 key `K-SECRET`
+- **THEN** 錯誤訊息裡 `code 1`、`12` 原樣保留；`K-SECRET` 被遮掉
+
+#### Scenario: 啟動之後的 stderr
+- **WHEN** agora 啟動後才在 stderr 印出一行錯誤，之後 driver 的請求失敗
+- **THEN** 錯誤訊息的 stderr 末幾行含這一行
+
+#### Scenario: poke 已結束的 agent
+- **WHEN** agent 行程剛結束、scheduler 還沒刷新時對它 `poke`
+- **THEN** 回 409 `agent_not_running`，不是 500；狀態標 exited
+
+### Requirement: 帶 merge 的 open 不能是 job
+`POST /jobs` 的 `open` 帶 `session.mode == "merge"` MUST 回 400 `merge_not_allowed_in_job`。
+
+#### Scenario: job 帶 merge
+- **WHEN** `POST /jobs {"action": "open", "args": {…, "session": {"mode": "merge", "from": ["agora:A", "agora:B"]}}, "at": …}`
+- **THEN** 回 400 `merge_not_allowed_in_job`，沒有掛任何 job；同樣的內容用 `POST /agents` 直接呼叫仍可行
+
