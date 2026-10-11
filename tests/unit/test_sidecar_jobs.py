@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401
 
+import threading
+import time
+
 import pytest
 
 import _sidecar_fakes as F
@@ -151,6 +154,68 @@ def test_a_failed_job_is_recorded_and_dropped(tmp_path):
     }
     assert len(driver.launches) == 1
     assert core.get("t1").state == STATE_RUNNING
+
+
+def test_every_job_does_not_replay_missed_rounds(tmp_path):
+    """L3 scenario: a paused scheduler catches up exactly once, aligned."""
+    core, _driver, _store, _source, clock, workdir = rig(tmp_path)
+    core.open("t1", "claude-code", workdir, {"mode": "new"})
+    job = core.add_job("poke", {"id": "t1", "text": "poll"}, every=600)
+    handle = core.get("t1").handle
+
+    clock.advance(3000)
+    core.tick()
+
+    assert handle.inbox == ["poll"]  # one catch-up, not five
+    assert job.last_run == clock.t
+    assert job.next_run_at == 1000.0 + 3600  # aligned to the original schedule
+    clock.advance(1)
+    core.tick()
+    assert handle.inbox == ["poll"]  # not due yet
+    assert [j.id for j in core.list_jobs()] == [job.id]
+
+
+def test_jobs_survive_concurrent_readers_writers_and_ticks(tmp_path):
+    """M6 scenario: HTTP threads and the scheduler pound /jobs for two seconds."""
+    core, _driver, _store, _source, _clock, workdir = rig(tmp_path)
+    core.open("t1", "claude-code", workdir, {"mode": "new"})
+    errors: list = []
+    stop = threading.Event()
+
+    def writer(n: int) -> None:
+        try:
+            while not stop.is_set():
+                job = core.add_job("poke", {"id": "t1", "text": f"x{n}"}, every=3600)
+                core.delete_job(job.id)
+        except Exception as e:  # noqa: BLE001 - the test's whole point is to see it
+            errors.append(e)
+
+    def reader() -> None:
+        try:
+            while not stop.is_set():
+                core.list_jobs()
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    def ticker() -> None:
+        try:
+            while not stop.is_set():
+                core.tick()
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=writer, args=(n,)) for n in range(2)]
+    threads += [threading.Thread(target=reader), threading.Thread(target=ticker)]
+    for thread in threads:
+        thread.start()
+    time.sleep(1.5)
+    stop.set()
+    for thread in threads:
+        thread.join(5)
+
+    assert errors == []
+    ids = [job.id for job in core.list_jobs()]
+    assert len(ids) == len(set(ids))  # no duplicate ids
 
 
 def test_time_and_duration_parsing():

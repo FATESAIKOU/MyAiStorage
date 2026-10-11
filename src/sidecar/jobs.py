@@ -11,7 +11,8 @@ GET /jobs and deletable through DELETE /jobs/{id}.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+import threading
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -81,9 +82,16 @@ class Job:
 
 
 class JobRegistry:
-    """The in-memory job list; the core drives it with tick(now)."""
+    """The in-memory job list; the core drives it with tick(now).
+
+    HTTP threads add/delete/list jobs while the scheduler thread takes the due
+    ones and reschedules them, so every method takes the registry's own lock
+    (leaf lock: it is never held while another lock is taken).  The list
+    returned by `list()`/`due()` is a copy.
+    """
 
     def __init__(self) -> None:
+        self._lock = threading.RLock()
         self._jobs: dict[str, Job] = {}
         self._counter = 0
 
@@ -108,41 +116,58 @@ class JobRegistry:
             raise BadRequestError("every must be positive")
         if until is not None and every is None:
             raise BadRequestError("until only makes sense with every")
-        self._counter += 1
-        job = Job(
-            id=f"job-{self._counter}",
-            action=action,
-            args=dict(args),
-            at=at,
-            every=every,
-            until=until,
-            created_at=now,
-            next_run_at=at if at is not None else now + every,
-            auto=auto,
-        )
-        self._jobs[job.id] = job
-        return job
+        with self._lock:
+            self._counter += 1
+            job = Job(
+                id=f"job-{self._counter}",
+                action=action,
+                args=dict(args),
+                at=at,
+                every=every,
+                until=until,
+                created_at=now,
+                next_run_at=at if at is not None else now + every,
+                auto=auto,
+            )
+            self._jobs[job.id] = job
+            return job
 
     def get(self, job_id: str) -> Job | None:
-        return self._jobs.get(job_id)
+        with self._lock:
+            return self._jobs.get(job_id)
 
     def delete(self, job_id: str) -> bool:
-        return self._jobs.pop(job_id, None) is not None
+        with self._lock:
+            return self._jobs.pop(job_id, None) is not None
 
     def list(self) -> list[Job]:
-        return list(self._jobs.values())
+        with self._lock:
+            return list(self._jobs.values())
 
     def due(self, now: float) -> list[Job]:
-        return [job for job in self._jobs.values() if job.next_run_at <= now]
+        with self._lock:
+            return [job for job in self._jobs.values() if job.next_run_at <= now]
 
     def finish(self, job: Job, now: float) -> None:
-        """After a run: drop one-shots, reschedule `every` jobs under `until`."""
-        if job.every is None:
-            self._jobs.pop(job.id, None)
-            return
-        nxt = job.next_run_at + job.every
-        if job.until is not None and nxt > job.until:
-            self._jobs.pop(job.id, None)
-            return
-        if self._jobs.get(job.id) is job:
-            job.next_run_at = nxt
+        """After a run: drop one-shots, reschedule `every` jobs under `until`.
+
+        A paused scheduler must not replay missed rounds: the next run is the
+        later of the scheduled moment and `now`, aligned to the original
+        schedule (`現在加上到下一個預定點的餘數`), so it happens once.
+        """
+        with self._lock:
+            if job.every is None:
+                self._jobs.pop(job.id, None)
+                return
+            nxt = job.next_run_at + job.every
+            if nxt <= now:
+                missed = now - job.next_run_at
+                remainder = job.every - (missed % job.every)
+                if remainder <= 0:
+                    remainder += job.every
+                nxt = now + remainder
+            if job.until is not None and nxt > job.until:
+                self._jobs.pop(job.id, None)
+                return
+            if self._jobs.get(job.id) is job:
+                job.next_run_at = nxt
