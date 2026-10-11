@@ -6,7 +6,7 @@
 - [x] 1.3 後端介面（Protocol：`create_channel`／`find_channel`／`post_message`／`list_messages(since, etag)`）與假後端（記憶體實作），給測試與 sidecar 的開發用。
 - [x] 1.4 GitHub 後端：stdlib HTTP client（transport 可注入假貨）、條件式請求與 ETag、分頁、repo 層 comments 端點、建立 issue、`--new` 檢查。單元測試：304、403＋retry-after、401、`id` 防重複。
 - [x] 1.5 本機狀態：`since`、`etags`、`acked`、`channels`；刪掉之後能從信道重建；單元測試。
-- [x] 1.6 token 讀取（`A2A_TOKEN_FILE` 或 `~/.config/angareion/token`，0600）；輸出與例外 MUST NOT 含 token；測試掃 stdout／stderr／log。
+- [x] 1.6 token 讀取（`A2A_TOKEN_FILE` 或 `~/.config/angareion/token`，只有擁有者有權限：0400／0600；2026-10-11 PM 決定接受 0400，因為 worker 的憑證以 0400 唯讀掛載，db74b55）；輸出與例外 MUST NOT 含 token；測試掃 stdout／stderr／log。
 
 ## 2. 指令
 

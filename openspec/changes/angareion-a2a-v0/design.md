@@ -100,7 +100,7 @@ attachments:
 ### D8 token 與能力邊界
 
 - 憑證是本人設定的 **細粒度 PAT**：只勾信道 repo 的 `Issues: Read and write`（`Metadata: Read` 由 GitHub 必附），不給 Contents／Actions／其他 repo。
-- 存放：預設 `~/.config/angareion/token`（0600）；可用 `A2A_TOKEN_FILE` 指向別處。程式不列印、不記 log、不放進錯誤訊息，只在對 `api.github.com` 的 `Authorization` 標頭出現。
+- 存放：預設 `~/.config/angareion/token`（只有擁有者有權限：0400 或 0600；worker 上是 `/run/mlp-secrets/angareion-token`，0400 唯讀掛載，2026-10-11 PM 決定）；可用 `A2A_TOKEN_FILE` 指向別處。程式不列印、不記 log、不放進錯誤訊息，只在對 `api.github.com` 的 `Authorization` 標頭出現。
 - 隊員（AI）開發與測試 MUST NOT 拿到 token、MUST NOT 連真信道；GitHub 後端的測試注入假 transport（把 request 收下來、回預設回應），單元測試不開網路。
 - 設定檔：`~/.config/angareion/config.json`：`channel_repo`、`identity`（預設 `from`）、`token_file`；`A2A_CONFIG`、`A2A_STATE_DIR` 可覆寫（給測試與多身分機器用）。範例（不含秘密）放 MyAiStorage。
 - 輪替步驟寫進文件：GitHub 上重建 PAT → 換檔案 → 舊的撤銷；信道 repo 的存取只經過這一個檔案。
@@ -123,14 +123,14 @@ attachments:
 - [兩個寄件者同時建同名 channel 會開兩個 issue] → v0 單一操作者接受；`inbox` 印警告；期 2 在後端介面加 unique 檢查。
 - [issue 標題被人工改掉，channel 對應失效] → 以訊息裡的 `channel` 為正本，從留言重建對應；文件寫明「改標題會讓對應重建，不建議」。
 - [GitHub 是第三方，信道的內容對 GitHub 可見] → 私人 repo、不放秘密；真正的秘密走本人設定的 capability，不進訊息。
-- [token 洩漏的爆炸半徑＝一個 private repo 的 issues] → 範圍只勾 issues、只放本機 0600、不進 agent 環境（#31）；輪替步驟文件化。
+- [token 洩漏的爆炸半徑＝一個 private repo 的 issues] → 範圍只勾 issues、只放本機、只有擁有者有權限（0400／0600）、不進 agent 環境（#31）；輪替步驟文件化。
 - [留言端點的 `since` 以更新時間計，人工編輯舊留言會讓它再出現] → 以 `id` 去重，重複的忽略。
 - [500 次／時的發文上限在大量派工時可能不夠] → 本機節流＋等待／拒絕；真的不夠時是期 2 換後端的訊號（介面已包好）。
 - [front matter 在 GitHub 網頁上會被當成普通文字] → 接受；audit 的原始形狀比網頁美觀重要（issue 原文就指定 front matter）。
 
 ## Migration Plan
 
-1. 本人建立 private 信道 repo 與細粒度 PAT，放到 `~/.config/angareion/token`（0600），設定 `channel_repo`。
+1. 本人建立 private 信道 repo 與細粒度 PAT，放到 `~/.config/angareion/token`（0600；worker 上是 0400 的唯讀掛載），設定 `channel_repo`。
 2. 用 `a2a send --new` 送第一則、在另一台 `a2a inbox` 讀到、`a2a ack`，完成 smoke test（本人執行，隊員不執行）。
 3. 回滾：本 change 不改任何既有行為；不想要就停用（不跑 `a2a`、撤銷 PAT、封存 repo）。
 

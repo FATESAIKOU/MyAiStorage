@@ -110,7 +110,7 @@ v0 的後端 MUST 是 private GitHub repo：
 - **THEN** `a2a inbox` 不把它算進任何人的未 ack 清單，也不因為它讓解析失敗
 
 ### Requirement: token 的範圍與保管
-Angareion MUST 只用一種憑證連後端：一個範圍只有信道 repo 的「Issues: read and write」的細粒度 token（由本人自己設定與放置，不經 AI、不進版控）。程式 MUST 從本機檔案或環境變數讀 token（檔案權限 0600），MUST NOT 把 token 寫進任何輸出、log、錯誤訊息或訊息內容，也 MUST NOT 把它送往 api.github.com 以外的位置。token 缺少或無效時 MUST 以清楚訊息失敗（exit 2，不猜、不改任何東西）。
+Angareion MUST 只用一種憑證連後端：一個範圍只有信道 repo 的「Issues: read and write」的細粒度 token（由本人自己設定與放置，不經 AI、不進版控）。程式 MUST 從本機檔案或環境變數讀 token（檔案 MUST 只有擁有者有權限：0400 或 0600，group／other 有任何權限位元就拒絕），MUST NOT 把 token 寫進任何輸出、log、錯誤訊息或訊息內容，也 MUST NOT 把它送往 api.github.com 以外的位置。token 缺少或無效時 MUST 以清楚訊息失敗（exit 2，不猜、不改任何東西）。
 
 #### Scenario: token 檔案不存在
 - **WHEN** 執行 `a2a inbox` 而 token 檔不存在
