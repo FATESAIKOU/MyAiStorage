@@ -115,6 +115,12 @@ def test_advance_cursor_keeps_position_and_recomputes_seen():
     assert lagging.at == "2026-10-10T12:01:00Z"
     assert set(lagging.seen) == {"99", "100"}
 
+    # Even a response that only lists older comments must not pull the position back.
+    older_only = advance_cursor(cursor, [(50, "2026-10-10T12:00:30Z")])
+    assert older_only.position == "100"
+    assert older_only.at == "2026-10-10T12:01:00Z"
+    assert older_only.seen == ["50"]
+
     # An old comment far outside the window drops out of seen.
     old = advance_cursor(cursor, [(100, "2026-10-10T12:01:00Z"), (50, "2026-10-10T10:00:00Z")])
     assert set(old.seen) == {"100"}

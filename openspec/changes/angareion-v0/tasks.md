@@ -34,7 +34,7 @@
 - [x] 游標照新 D4：`position`（留言 id）／`at`（`created_at`）／`seen`（at−60s 視窗內已讀 id）；新舊只看後端，不用寄件者的 at／id；舊格式游標當成沒有並在 stderr 說明一次
 - [x] M1：`check` 只在單頁時信任 ETag；多頁照樣掃、`scan_since` 只在行程記憶體
 - [x] `--since` 含邊界（後端時刻 >=）；`read` 每則輸出帶 `received_at`
-- [ ] 每個新 Scenario 都有測試，副本改壞驗證會紅
+- [x] 每個新 Scenario 都有測試，副本改壞驗證會紅
 - [ ] docs 游標一節與 `--since` 說明、SKILL 的 wait 說明改成新語意
 
 ## 4. 收尾

@@ -429,17 +429,17 @@ def test_read_parses_paginates_and_returns_the_backend_cursor():
 
 def test_read_ignores_the_sender_time_and_uses_the_backend_position():
     """Sender clocks, timezones and ULIDs decide nothing; backend arrival does."""
-    slow_clock = _make_msg(msg_id="01AAAA", at="2026-10-10T08:00:00+00:00")      # two hours behind
-    other_tz = _make_msg(msg_id="01BBBB", at="2026-10-10T17:00:00+09:00")      # same instant, weird string
+    ahead_clock = _make_msg(msg_id="01AAAA", at="2026-10-10T23:00:00+00:00")     # sender clock far ahead
+    other_tz = _make_msg(msg_id="01BBBB", at="2026-10-10T01:00:00+09:00")      # smaller string, earlier instant
     transport = FakeTransport()
     _issues_route(transport, [{"number": 10, "title": "general", "body": ""}])
     transport.set_route(
         "GET",
         CHANNEL_COMMENTS_URL,
-        HttpResponse(200, {}, json.dumps([
-            _comment(slow_clock, comment_id=100, created_at="2026-10-10T12:00:00Z"),
-            _comment(other_tz, comment_id=101, created_at="2026-10-10T12:00:01Z"),
-        ]).encode("utf-8")),
+            HttpResponse(200, {}, json.dumps([
+                _comment(ahead_clock, comment_id=100, created_at="2026-10-10T12:00:00Z"),
+                _comment(other_tz, comment_id=101, created_at="2026-10-10T12:00:01Z"),
+            ]).encode("utf-8")),
     )
 
     backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)

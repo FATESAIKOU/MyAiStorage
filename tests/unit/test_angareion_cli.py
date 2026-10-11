@@ -460,23 +460,10 @@ def test_channel_create_without_a_name_is_usage_error(cli_env, capsys):
     assert capsys.readouterr().err != ""
 
 
-def test_read_same_second_messages_reach_the_reader(cli_env, capsys):
-    """Two messages in the same second: reading the first must not swallow the second."""
-    same_second = "2026-10-10T12:00:00+00:00"
-    backend = cli_env["backend"]
-    _seed_message(backend, msg_id="01AAAA00000000000000000000", at=same_second)
-
-    assert main(["read", "--channel", "general", "--json"], backend=backend) == 0
-    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01AAAA00000000000000000000"]
-
-    _seed_message(backend, msg_id="01BBBB00000000000000000000", at=same_second)
-    assert main(["read", "--channel", "general", "--json"], backend=backend) == 0
-    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01BBBB00000000000000000000"]
-
-
 def test_read_does_not_return_an_edited_message_again(cli_env, capsys):
-    """An edited already-read comment (same id and at) must not come back as new."""
-    message = _seed_message(cli_env["backend"], msg_id="01AAAA00000000000000000000")
+    """An edited already-read comment (same backend id and time) must not come back as new."""
+    message = _seed_message(cli_env["backend"], msg_id="01AAAA00000000000000000000",
+                            comment_id=1, created_at="2026-10-10T12:00:00Z")
 
     assert main(["read", "--channel", "general", "--json"], backend=cli_env["backend"]) == 0
     assert len(json.loads(capsys.readouterr().out)) == 1
@@ -632,6 +619,180 @@ def test_non_json_backend_response_exits_2(cli_env, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "non-JSON" in captured.err
+
+
+def test_read_same_second_smaller_ulid_is_delivered(cli_env, capsys):
+    """The spec scenario: sender ULIDs in the same second decide nothing; the backend does."""
+    backend = cli_env["backend"]
+    _seed_message(backend, msg_id="01ZZZZ00000000000000000000",
+                  comment_id=100, created_at="2026-10-10T03:00:00Z")
+
+    assert main(["read", "--channel", "general", "--json"], backend=backend) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01ZZZZ00000000000000000000"]
+
+    # A later message in the same second with a smaller sender ULID must arrive.
+    _seed_message(backend, msg_id="01AAAA00000000000000000000",
+                  comment_id=101, created_at="2026-10-10T03:00:00Z")
+    assert main(["wait", "--channel", "general", "--timeout", "0"], backend=backend) == 0
+    capsys.readouterr()
+
+    assert main(["read", "--channel", "general", "--json"], backend=backend) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01AAAA00000000000000000000"]
+
+
+def test_read_delivers_a_message_from_a_slow_senders_clock(cli_env, capsys):
+    """The sender's at may be hours behind; the backend time decides."""
+    backend = cli_env["backend"]
+    _seed_message(backend, msg_id="01SLOW00000000000000000000",
+                  at="2026-10-10T01:00:00+00:00",  # two hours behind
+                  comment_id=100, created_at="2026-10-10T03:00:10Z")
+
+    assert main(["wait", "--channel", "general", "--timeout", "0"], backend=backend) == 0
+    capsys.readouterr()
+    assert main(["read", "--channel", "general", "--json"], backend=backend) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert [m["id"] for m in data] == ["01SLOW00000000000000000000"]
+    assert data[0]["received_at"] == "2026-10-10T03:00:10Z"
+
+
+def test_read_delivers_a_message_with_a_different_sender_timezone(cli_env, capsys):
+    backend = cli_env["backend"]
+    _seed_message(backend, msg_id="01TZ0000000000000000000000",
+                  at="2026-10-10T12:00:00+09:00",
+                  comment_id=100, created_at="2026-10-10T03:00:10Z")
+
+    assert main(["wait", "--channel", "general", "--timeout", "0"], backend=backend) == 0
+    capsys.readouterr()
+    assert main(["read", "--channel", "general", "--json"], backend=backend) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01TZ0000000000000000000000"]
+
+
+def test_read_delivers_a_replication_lagging_smaller_id(cli_env, capsys):
+    """A comment that shows up after a bigger one (smaller id) must still arrive, once."""
+    backend = cli_env["backend"]
+    _seed_message(backend, msg_id="01READ00000000000000000000",
+                  comment_id=100, created_at="2026-10-10T12:00:10Z")
+    assert main(["read", "--channel", "general", "--json"], backend=backend) == 0
+    assert len(json.loads(capsys.readouterr().out)) == 1
+
+    _seed_message(backend, msg_id="01LAG000000000000000000000",
+                  comment_id=99, created_at="2026-10-10T12:00:05Z")
+    assert main(["wait", "--channel", "general", "--timeout", "0"], backend=backend) == 0
+    capsys.readouterr()
+    assert main(["read", "--channel", "general", "--json"], backend=backend) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01LAG000000000000000000000"]
+
+    # And it does not come back again.
+    assert main(["read", "--channel", "general", "--json"], backend=backend) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_read_since_is_inclusive_and_keeps_the_cursor(cli_env, capsys):
+    backend = cli_env["backend"]
+    _seed_message(backend, msg_id="01A000000000000000000000000",
+                  comment_id=1, created_at="2026-10-10T03:00:00Z")
+    _seed_message(backend, msg_id="01B000000000000000000000000",
+                  comment_id=2, created_at="2026-10-10T03:00:00Z")
+
+    assert main(
+        ["read", "--channel", "general", "--since", "2026-10-10T03:00:00Z", "--json"],
+        backend=backend,
+    ) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert [m["id"] for m in data] == ["01A000000000000000000000000", "01B000000000000000000000000"]
+    assert all(m["received_at"] == "2026-10-10T03:00:00Z" for m in data)
+    assert not (cli_env["state_dir"] / "cursor-owner-org_worker__worker.json").exists()
+
+
+def test_old_format_cursor_is_reported_and_read_from_the_start(cli_env, capsys):
+    """A pre-review {at, id} cursor cannot be translated: no cursor, plus a notice."""
+    backend = cli_env["backend"]
+    _seed_message(backend, msg_id="01AAAA00000000000000000000",
+                  comment_id=7, created_at="2026-10-10T12:00:00Z")
+    cursor_file = cli_env["state_dir"] / "cursor-owner-org_worker__worker.json"
+    cursor_file.parent.mkdir(parents=True, exist_ok=True)
+    cursor_file.write_text(
+        json.dumps({"channel:general": {"at": "2026-10-10T12:00:00+00:00", "id": "01AAAA00000000000000000000"}}),
+        encoding="utf-8",
+    )
+
+    assert main(["read", "--channel", "general", "--json"], backend=backend) == 0
+    captured = capsys.readouterr()
+    assert [m["id"] for m in json.loads(captured.out)] == ["01AAAA00000000000000000000"]  # from the start
+    assert "old (at, id) format" in captured.err
+
+    # The file was rewritten in the new format, so the next run is quiet.
+    stored = json.loads(cursor_file.read_text(encoding="utf-8"))
+    assert stored["channel:general"]["position"] == "7"
+    assert main(["read", "--channel", "general", "--json"], backend=backend) == 0
+    captured2 = capsys.readouterr()
+    assert json.loads(captured2.out) == []
+    assert captured2.err == ""
+
+
+def test_wait_scans_page_two_when_page_one_is_unchanged(cli_env, capsys):
+    """M1 at the CLI: a wait must see a page-2 message even though page 1 never changed."""
+    me = {"repo": "owner-org/worker", "role": "worker"}
+    page2_url = "https://api.github.com/repos/owner-org/channel-repo/issues/comments?per_page=100&page=2"
+    others = [
+        {
+            "id": 100 + i,
+            "body": json.dumps({"not": "a message"}),
+            "created_at": f"2026-10-10T03:00:{i:02d}Z",
+            "updated_at": f"2026-10-10T03:00:{i:02d}Z",
+            "issue_url": "https://api.github.com/repos/owner-org/channel-repo/issues/1",
+        }
+        for i in range(20)
+    ]
+
+    class MultiPageTransport:
+        def __init__(self):
+            self.page2_has_mine = False
+            self.if_none_match: list[str | None] = []
+
+        def request(self, method, url, headers=None, body=None, timeout=None):
+            if url.startswith("https://api.github.com/repos/owner-org/channel-repo/issues?"):
+                return HttpResponse(200, {}, json.dumps([{"number": 1, "title": "general", "body": ""}]).encode("utf-8"))
+            if url == page2_url:
+                page2 = []
+                if self.page2_has_mine:
+                    from angareion.messages import Message
+                    from angareion.github import serialize_message
+                    msg = Message(
+                        from_={"repo": "owner-org/team", "role": "PM"}, to=me, channel="general",
+                        content="mine", id="01MINE00000000000000000000", at="2026-10-10T03:01:00+00:00",
+                    )
+                    page2 = [{
+                        "id": 500, "body": serialize_message(msg), "created_at": "2026-10-10T03:01:00Z",
+                        "updated_at": "2026-10-10T03:01:00Z",
+                        "issue_url": "https://api.github.com/repos/owner-org/channel-repo/issues/1",
+                        "html_url": "https://github.com/owner-org/channel-repo/issues/1#issuecomment-500",
+                    }]
+                return HttpResponse(200, {}, json.dumps(page2).encode("utf-8"))
+            if url.startswith("https://api.github.com/repos/owner-org/channel-repo/issues/comments"):
+                self.if_none_match.append((headers or {}).get("If-None-Match"))
+                return HttpResponse(200, {"etag": 'W/"unchanged-page-1"', "link": f'<{page2_url}>; rel="next"'},
+                                    json.dumps(others).encode("utf-8"))
+            return HttpResponse(404, {}, b'{"message": "Not Found"}')
+
+    transport = MultiPageTransport()
+    clock = {"now": 1000.0}
+    sleeps: list[float] = []
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+        transport.page2_has_mine = True  # the new message arrives while we wait
+
+    ret = main(
+        ["wait", "--timeout", "600"],
+        transport=transport,
+        sleeper=sleeper,
+        clock=lambda: clock["now"],
+    )
+    assert ret == 0
+    assert sleeps == [15.0]
+    assert all(value is None for value in transport.if_none_match)  # never trusted the page-1 ETag
 
 
 def test_unexpected_value_error_from_a_backend_is_exit_2(cli_env, capsys):
