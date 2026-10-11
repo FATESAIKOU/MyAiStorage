@@ -146,3 +146,74 @@
 4. **M6**：補 U15、U23 兩個測試。
 5. L1～L6 順手；D3／D4 的文字更新（dataclass、`merge_env`、`no_subscription`、去掉 `unset`）。
 6. 問 LLMGateway PM 四個問題；他們 tag 之後把 `gateway` extra 加進 pyproject。
+
+---
+
+## 複審（第二輪）
+
+- 對象：`sidecar-v0-agy4`，`55c0579` 之後的 `e24c461`..`0b85998`；`git archive` 到 `/tmp/s31b`，突變與探測都在副本或 `/tmp`；lgw 用 `git archive impl/v4-connect lgw` 解到 `/tmp/lgwv4`，只用 `PYTHONPATH` 指過去，沒有安裝、沒有改 LLMGateway 的 repo。
+- 基準：副本上 `-k sidecar` 107 passed、1 skipped（我的環境多一個 sidecar 測試；skip 的是需要 `lgw` 的 loopback，下面單獨跑）。
+
+### 結論
+
+**修一個 High（N1）與一個 Medium（N2）之後，可以接著做第 3 節；其餘不擋。** 上一輪的 H1、H2、M1～M6、L1～L5 都真的修了，併發那幾個突變現在都紅；但「關閉」與「換把」之間還有一個競態會讓已關閉的 agent 復活，而且 SIGTERM 的 `join()` 沒有逾時、「所有呼叫都有逾時」目前並不成立。
+
+### 上一輪問題的狀態
+
+| 項目 | 狀態 | 依據 |
+|---|---|---|
+| H1 lgw 接點 | **已修，真 lgw 驗證綠** | 用 `impl/v4-connect` 的真 `lgw/client.py`、`lgw/connect.py` 跑 `test_sidecar_lgw_loopback.py`（`importorskip` 的那個）：**2 passed**。 |
+| H2＋M4 一次一個轉移、GET 不換把 | **已修** | `rec.busy`＋`finally` 釋放；突變 `busy` 不檢查 → 紅（`test_two_threads_seeing_quota_swap_only_once`）；`GET` 又去刷新 → 紅（`test_get_never_triggers_a_transition_or_a_driver_call`）。busy 從不釋放這個突變**沒紅**（見 N5）。 |
+| M1 close 遇 starting | **已修（但見 N1、N4）** | `closing` 旗標＋open 完成後再檢查；兩個突變（忘記設旗標、open 不看旗標）都紅。 |
+| M2 JobRegistry 鎖 | **已修** | 突變「全部不上鎖」→ `test_jobs_survive_concurrent_readers_writers_and_ticks` 紅。 |
+| M3 換把中途失敗 | **已修** | `_quota_exhausted` 外層 try/except 走 `_wait_quota(now+retry)`；突變拿掉 → 紅。 |
+| M5 shutdown 順序 | **大致已修（見 N2）** | `begin_shutdown`→join scheduler→逐一 close；`tick` 在關閉中不動、`open`／`poke`／`/jobs` 回 503；突變各自轉紅。 |
+| M6 U15／U23 | **已補** | 未部署不是候選（突變 `is_deployed` 永遠 True → 4 個紅）；解除時刻已過 → `now+retry`（突變 → 紅）。 |
+| L1～L5 | **已修** | driver 呼叫在鎖外；every 不補跑（見下 #1）；413；open 的第一則輸入走佇列不失敗。 |
+
+### 新的問題
+
+**High**
+
+- **N1　`close` 與換把同時發生：agent 會在被關閉之後復活。**
+  - 位置：`core.py:332-362`（`close` 只在 `STARTING` 時看 `closing`，沒看 `busy`／正在換把）與 `:659-678`（`_swap` 在 stop 之後 `store.start`＋`launch`，寫回 `rec.handle`、`state=STARTING` 前只檢查 `self._agents.get(rec.id) is rec`）。
+  - 實測（`store.start` 用 `Event` 閘住，`refresh_states` 在另一個執行緒做換把；換把停在 stop 之後、relaunch 之前時呼叫 `close`）：`close` 回 `exited`；放行後 `get` 是 **`running`**，`driver.handles` 有 2 個、最新那個**沒被 stop**——被關閉的 agent 又開了，控制者以為它已經結束。
+  - 為什麼是 High：close 就是為了讓它停下（含額度與資源的考量）；而且 shutdown 的 `close` 也走同一條路，SIGTERM 之後還可能留下行程。
+  - 建議：`close` 要看 `rec.busy`（一個轉移進行中）：設 `rec.closing = True` 然後**由換把的那個執行緒在寫回之前檢查**——`_swap` 在 `store.start`／`launch` 之後、寫回 `rec.handle` 之前（還有 stop 之前）檢查 `rec.closing`，是的話就 stop 剛啟動的 handle、標 exited，不再 `STARTING`。`close` 本身遇到 busy 時回 200（最後是 exited，同 starting 的做法）。補測試（就是我的探測）。
+
+**Medium**
+
+- **N2　SIGTERM 的 `scheduler.join()` 沒有逾時；「所有 driver／lgw／store 呼叫都有逾時」目前不成立（也還無從驗證）。**
+  - 位置：`cli.py:106`（`scheduler.join()`）、`protocols.py` 的 `AgentDriver`／`SessionStore`（D3）。
+  - 逐項：lgw 成立（`connect(cfg, timeout=15)` 與 `Client(timeout=10)`，一次換把最多約 15＋10×(2＋候選數) 秒）；`driver.stop(timeout=close_timeout)` 有；**`driver.launch`、`send`、`interrupt`、`state`、`SessionStore.start` 的契約都沒有逾時**，而它們的真實作（3.0 AgoraSessionStore、3.1／3.2 driver）還不存在。`launch`（等 opencode 的埠）與 `start`（等 `agora-session` 那一行）正是會卡的地方。
+  - 後果：進行中的那一次 tick 若卡在其中一個，SIGTERM 就卡住；supervisor 的 kill timeout 一到就 SIGKILL，**所有 agent 沒有被 close 就成了孤兒**。
+  - 建議：(a) `join(timeout=close_timeout + 5)`，逾時就記 log 並繼續做逐一 close（每個 close 的 stop 有自己的逾時）；(b) D3 補一句「driver 與 store 的每個呼叫 MUST 在 `close_timeout` 以內回來（自己內部逾時）」，3.x 的實作與測試要驗；(c) 不要把「全部有逾時」當成已成立寫進文件。
+- **N3　`new` 模式在 3.5 做出來之前遇到額度用完，agent 會被停掉而且沒有 job**（`core.py:650-658`：`session_id is None` → 已經 stop → `_wait_quota` 沒有 session 可接 → 不掛 job）。#8 說明「屬 3.5」，我同意順序，但這段時間 `new` 是個會靜默弄丟工作的路徑。建議：3.5 之前 `open` 的 `session.mode == "new"` 直接 400（`new_mode_not_ready`，或在設定開關預設關），3.5 完成再放開。
+
+**Low**
+
+- **N4　`closing` 在 `driver.state` 暫時失敗時會被吃掉。** 實測：open 期間 `driver.state` 丟一次例外 → 狀態停在 `starting`，`close` 設了 `closing`；之後 `refresh` 看到 running/idle，沒有人看 `closing`：結果是 `idle` 且**沒有被 stop**。修法：`_refresh_one` 在 ACTIVE 狀態遇到 `rec.closing` 時就 `_stop_and_exit`（和 N1 一起做）。
+- **N5　突變「`busy` 從不釋放」沒有紅。** 後果（若真的發生）是這個 agent 之後的額度事件永遠被忽略。補一個測試：換把完成之後再觸發一次額度用完，仍會換。
+- **N6　`test_body_too_large_is_a_413` 不穩定（我的環境約三分之一會失敗）。** 它只 `recv(65536)` 一次，而 `send_response`／`end_headers`／body 是分開寫的，偶爾只收到標頭。改成讀到連線關閉。
+- **N7　只有一個 scheduler 執行緒，一個 agent 的換把（網路加 stop，數十秒）會延遲其他 agent 的刷新、佇列中的 poke（30 秒逾時）與 job。** v0 可以接受（D2 如此），文件寫一句；之後可以每個 agent 的轉移各開一個工作執行緒（`busy` 已經是每個 agent 一個）。
+- **N8　（我的筆誤）design D1 的「`every` 的下一次是 `max(上一次預定時刻 + every, 現在)`」寫得不準，impl3 的對齊版才符合 spec 的「只補一次，之後照原節奏」**（見下 #1）。請讓我把 D1 那句改成「下一次是原本節奏上第一個晚於現在的預定點」。
+
+### impl3 自己判斷的 8 點
+
+| # | 判斷 | 理由 |
+|---|---|---|
+| 1 | **可以接受（它對，我的公式寫錯了）** | `max(prev+every, now)` 在停頓後會在下一個 tick 立刻再跑一次（`nxt=now`，緊接著 now），再照節奏走，等於補跑兩次。impl3 的「現在＋到下一個預定點的餘數」只跑一次且維持原節奏，符合 spec 的 Scenario。見 N8。 |
+| 2 | **可以接受** | 已部署且沒冷卻的候選現在就能用，解除時刻是 now；若實際還是挑不到（cooldown 登錄失敗又沒別把），走「過去的時刻 → now+retry」，不會每個 tick 重掛。 |
+| 3 | **不接受現在的寫法（N2）** | join 沒逾時，加上 driver／store 的契約沒有逾時，SIGTERM 可能卡住；改成有逾時的 join，並把「呼叫都在 `close_timeout` 內」寫進 D3 與 3.x 的測試。 |
+| 4 | **可以接受** | HTTP 的 `GET` 只是 `core.list_agents`／`get` 的薄包裝，core 層的測試涵蓋（突變 `GET` 去刷新紅）；HTTP 層若再加一個「GET 後沒有 driver 呼叫」更好，非必要。 |
+| 5 | **可以接受（我補驗了）** | 我用真的 `lgw`（`impl/v4-connect` 的 `git archive`）跑 loopback 測試：2 passed。建議 CI／tool-pins 裝 `gateway` extra 後這個測試不再 skip。 |
+| 6 | **可以接受，但不夠（N1、N4）** | 「open 在 refresh 後再檢查一次 closing」只關掉 open 與 close 之間的競態，沒有涵蓋換把與 close。 |
+| 7 | **可以接受** | 拆成外層 try/except 與 `_swap` 是對的：失敗路徑集中、`state["stopped"]` 讓補救時知道要不要再 stop。 |
+| 8 | **可以接受（附 N3）** | 順序合理；在 3.5 之前把 `new` 擋掉。 |
+
+### 建議順序
+
+1. N1（close 與換把）＋N4（`closing` 在刷新時也要處理），補我的探測當測試。
+2. N2（join 逾時、D3 補逾時契約）；N3（`new` 在 3.5 前擋掉）。
+3. N5、N6 兩個測試修補；N7、N8 文件。
+4. 然後接著做第 3 節（3.0 AgoraSessionStore、3.1／3.2 driver、3.5 `new` 的 import）。
