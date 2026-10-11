@@ -10,10 +10,10 @@
 
 ## 2. 指令
 
-- [ ] 2.1 `a2a send`：`--to`／`--channel`／`--new`／`--urgency`／`--from`／`--id`／`--attach`／`--ref`／`--body`；stdout 只印 `id` 與 channel；重複 `id` 檢查；速率節流（80 次／分、500 次／時）與等待重試。
-- [ ] 2.2 `a2a inbox`：未 ack、依 `at` 再由舊到新、`--json`、`--all`、`--identity`；游標與 ETag；沒有新訊息 exit 0。
-- [ ] 2.3 `a2a ack`：多則、`--note`、已 ack 不重貼。
-- [ ] 2.4 CLI 層測試：三個子指令的 exit code 0／1／2 與 stdout／stderr 分離；錯誤訊息不含秘密。
+- [x] 2.1 `a2a send`：`--to`／`--channel`／`--new`／`--urgency`／`--from`／`--id`／`--attach`／`--ref`／`--body`；stdout 只印 `id` 與 channel；重複 `id` 檢查；速率節流（80 次／分、500 次／時）與等待重試。
+- [x] 2.2 `a2a inbox`：未 ack、依 `at` 再由舊到新、`--json`、`--all`、`--identity`；游標與 ETag；沒有新訊息 exit 0。
+- [x] 2.3 `a2a ack`：多則、`--note`、已 ack 不重貼。
+- [x] 2.4 CLI 層測試：三個子指令的 exit code 0／1／2 與 stdout／stderr 分離；錯誤訊息不含秘密。
 
 ## 3. 文件與部署設定
 
