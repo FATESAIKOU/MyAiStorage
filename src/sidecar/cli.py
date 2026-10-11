@@ -7,12 +7,42 @@ import json
 import sys
 from typing import Sequence
 
+from sidecar import __version__ as _pkg_version
 from sidecar.config import load_config
 from sidecar.queue import MessageQueue
 from sidecar.registry import Registry
 
 
-def cmd_status(args: argparse.Namespace) -> int:
+def sidecar_version_string() -> str:
+    """Human-readable version: installed sha, else package version (D11)."""
+    sha = installed_sha()
+    if sha:
+        return f"sidecar {sha}"
+    return f"sidecar {_pkg_version} (install sha unknown)"
+
+
+def installed_sha() -> str | None:
+    """Commit sha this install came from (PEP 610 direct_url), if any."""
+    try:
+        from importlib import metadata
+
+        dist = metadata.distribution("agora")
+        text = dist.read_text("direct_url.json")
+    except Exception:
+        return None
+    if not text:
+        return None
+    try:
+        info = json.loads(text)
+    except ValueError:
+        return None
+    vcs = info.get("vcs_info") or {}
+    return vcs.get("commit_id") or None
+
+
+def cmd_status(args: argparse.Namespace, agora_client=None) -> int:
+    from sidecar.agora import LibraryAgoraClient
+
     config = load_config(args.config)
     registry = Registry(config.state_dir)
     queue = MessageQueue(config.state_dir)
@@ -25,6 +55,16 @@ def cmd_status(args: argparse.Namespace) -> int:
     identities = set(config.identities) | set(queue.list_identities())
     for ident in sorted(identities):
         queue_counts[ident] = queue.count(ident)
+
+    # 3.9/D11: fork sessions on agora that belong to our identities.
+    agora_client = agora_client or LibraryAgoraClient()
+    agora_forks: list[dict] = []
+    agora_forks_error: str | None = None
+    try:
+        for ident in sorted(config.identities):
+            agora_forks.extend(agora_client.search_sessions([f"sidecar.identity={ident}"]))
+    except Exception as e:
+        agora_forks_error = str(e)
 
     status_data = {
         "status": "ok",
@@ -39,6 +79,8 @@ def cmd_status(args: argparse.Namespace) -> int:
             "list": [a.to_dict() for a in all_agents],
         },
         "queues": queue_counts,
+        "agora_forks": agora_forks,
+        "agora_forks_error": agora_forks_error,
     }
 
     if args.json:
@@ -56,6 +98,14 @@ def cmd_status(args: argparse.Namespace) -> int:
     print("  Queues:")
     for ident, cnt in queue_counts.items():
         print(f"    - {ident}: {cnt} queued")
+    print("  Agora forks:")
+    if agora_forks_error is not None:
+        print(f"    - unavailable: {agora_forks_error}")
+    elif not agora_forks:
+        print("    - (none)")
+    for f in agora_forks:
+        state = "active" if f.get("active") else "idle"
+        print(f"    - [{state}] {f.get('id')} (identity={f.get('identity')}, message={f.get('message')}, title={f.get('title')})")
 
     return 0
 
@@ -121,7 +171,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     registry = Registry(config.state_dir)
     queue = MessageQueue(config.state_dir)
     try:
-        host = AgentHost(RealHerdrClient(), registry, config=config)
+        # 3.8/D11: every herdr call carries the configured session name
+        # (RealHerdrClient prepends the global --session option).
+        host = AgentHost(RealHerdrClient(session=config.herdr_session), registry, config=config)
     except RuntimeError as e:
         sys.stderr.write(f"Error: {e}\n")
         return 1
@@ -157,9 +209,52 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 0
 
 
+def cmd_check(args: argparse.Namespace) -> int:
+    """Health verification with three-state exit codes (D11, task 3.7)."""
+    from sidecar.check import load_config_for_check, run_checks
+    from sidecar.herdr import RealHerdrClient
+
+    try:
+        config = load_config_for_check(args.config)
+    except Exception as e:
+        return _report_check(
+            [{"name": "config", "status": "fail", "reason": f"config unreadable: {e}"}],
+            1,
+            args.json,
+        )
+
+    from angareion.github import GitHubBackend
+
+    def backend_factory(channel_repo: str, token: str):
+        return GitHubBackend(channel_repo=channel_repo, token=token)
+
+    items, exit_code = run_checks(
+        config,
+        RealHerdrClient(session=config.herdr_session),
+        backend_factory,
+    )
+    return _report_check([i.to_dict() for i in items], exit_code, args.json)
+
+
+def _report_check(checks: list[dict], exit_code: int, as_json: bool) -> int:
+    if as_json:
+        print(json.dumps(
+            {"ok": exit_code == 0, "exit": exit_code, "checks": checks},
+            indent=2,
+            ensure_ascii=False,
+        ))
+        return exit_code
+    for c in checks:
+        mark = {"ok": "ok", "fail": "FAIL", "unknown": "UNKNOWN"}.get(c["status"], "?")
+        print(f"{mark} {c['name']}: {c['reason']}")
+    print(f"sidecar check: {'ok' if exit_code == 0 else 'FAIL' if exit_code == 1 else 'UNKNOWN'} (exit {exit_code})")
+    return exit_code
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sidecar", description="Agent Sidecar supervisor CLI")
     parser.add_argument("--config", "-c", help="Path to config.json (overrides SIDECAR_CONFIG)")
+    parser.add_argument("--version", "-V", action="version", version=sidecar_version_string())
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
     status_parser = subparsers.add_parser("status", help="Show sidecar status and running agents")
@@ -181,6 +276,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--recover-interval", type=float, default=300.0, help="Seconds between herdr recover/heartbeat passes (default: 300)")
     run_parser.add_argument("--once", action="store_true", help="Run a single poll+recover cycle and exit")
     run_parser.set_defaults(func=cmd_run)
+
+    check_parser = subparsers.add_parser("check", help="Verify sidecar health (exit 0 ok, 1 fail, 2 unknown)")
+    check_parser.add_argument("--json", action="store_true", help="Output check results as JSON")
+    check_parser.set_defaults(func=cmd_check)
 
     return parser
 

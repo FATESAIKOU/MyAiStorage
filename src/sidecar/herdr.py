@@ -103,6 +103,10 @@ class HerdrClient(Protocol):
 
     def pane_close(self, pane_id: str) -> dict[str, Any]: ...
 
+    def status_server(self) -> dict[str, Any]:
+        """Show running server status (`herdr status server --json`)."""
+        ...
+
 
 class RealHerdrClient:
     """Subprocess-based client calling herdr subcommands."""
@@ -281,6 +285,9 @@ class RealHerdrClient:
     def pane_close(self, pane_id: str) -> dict[str, Any]:
         return self._run(["pane", "close", pane_id])
 
+    def status_server(self) -> dict[str, Any]:
+        return self._run(["status", "server", "--json"])
+
 
 class FakeHerdrClient:
     """In-memory mock Herdr client for testing without a real herdr server."""
@@ -298,6 +305,13 @@ class FakeHerdrClient:
         self.closed_panes: set[str] = set()
         self.sent_keys: list[tuple[str, tuple[str, ...]]] = []
         self.prompts: list[tuple[str, str]] = []
+        self.server_status: dict[str, Any] = {
+            "status": "running",
+            "running": True,
+            "version": "0.0.0-fake",
+            "compatible": True,
+        }
+        self.next_server_error: Exception | None = None
 
     def tab_create(
         self,
@@ -442,3 +456,12 @@ class FakeHerdrClient:
         for name in to_del:
             self.agents.pop(name, None)
         return {"id": "cli:pane:close", "result": {"closed": pane_id}}
+
+    def status_server(self) -> dict[str, Any]:
+        """Fake `herdr status server --json` (D11 check uses running/compatible)."""
+        self.calls.append(("status_server", (), {}))
+        if self.next_server_error is not None:
+            err = self.next_server_error
+            self.next_server_error = None
+            raise err
+        return dict(self.server_status)

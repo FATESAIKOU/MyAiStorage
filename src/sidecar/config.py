@@ -32,6 +32,7 @@ class SidecarConfig:
     teams: dict[str, dict[str, Any]] = field(default_factory=dict)
     llm_gateway: str | None = None
     channel_repo: str | None = None
+    herdr_session: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     def verify_token_permissions(self) -> bool:
@@ -67,6 +68,7 @@ def load_config(path: Path | str | None = None) -> SidecarConfig:
     teams = dict(data.get("teams", {}))
     llm_gateway = data.get("llm_gateway")
     channel_repo = data.get("channel_repo")
+    herdr_session = data.get("herdr_session")
 
     return SidecarConfig(
         config_path=config_path,
@@ -76,5 +78,6 @@ def load_config(path: Path | str | None = None) -> SidecarConfig:
         teams=teams,
         llm_gateway=llm_gateway,
         channel_repo=channel_repo,
+        herdr_session=herdr_session,
         raw=data,
     )

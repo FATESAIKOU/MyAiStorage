@@ -96,6 +96,7 @@ class AgentHost:
         harness_content: str | None = None,
         env: dict[str, str] | None = None,
         wait_timeout_ms: int | None = 60000,
+        headers: dict[str, str] | None = None,
     ) -> AgentRecord:
         """Start an agent inside herdr running 'agora continue'.
 
@@ -130,6 +131,10 @@ class AgentHost:
             cmd_parts.append("--fork")
         if sync_period is not None:
             cmd_parts.extend(["--sync-period", str(sync_period)])
+        # 3.9/D11: fork sessions carry which team and which message they are for.
+        if fork and headers:
+            for key, value in headers.items():
+                cmd_parts.extend(["--header", f"{key}={value}"])
         cmd_str = " ".join(cmd_parts)
 
         # Launch command in pane
@@ -221,6 +226,7 @@ class AgentHost:
         worktree: bool = False,
         extra_env: dict[str, str] | None = None,
         receiver: Receiver | None = None,
+        trigger_message_id: str | None = None,
     ) -> AgentRecord:
         """Start a team task using the configured home session, agent kind, and harness.
 
@@ -230,6 +236,8 @@ class AgentHost:
         - harness: load raw verbatim content as first input (Atelier seam),
           only after the agent prompt appears (M3)
         - isolate via --fork
+        Per D11 (3.9): fork sessions carry --header sidecar.identity=<role>
+        and, when known, --header sidecar.message=<triggering message id>.
         When a receiver is given (the resident `sidecar run` loop owns it),
         queued low-urgency messages for this identity are handed off right
         after the harness (H2/D10).
@@ -254,6 +262,14 @@ class AgentHost:
         if extra_env:
             env.update(extra_env)
 
+        fork_headers: dict[str, str] | None = None
+        if fork:
+            team_identity = team_cfg.get("identity") or {}
+            role = team_identity.get("role") or identity
+            fork_headers = {"sidecar.identity": str(role)}
+            if trigger_message_id:
+                fork_headers["sidecar.message"] = str(trigger_message_id)
+
         rec = self.start_agent(
             identity=identity,
             agora_session=home,
@@ -264,6 +280,7 @@ class AgentHost:
             worktree=worktree,
             harness_content=harness_content,
             env=env,
+            headers=fork_headers,
         )
 
         if receiver is not None:

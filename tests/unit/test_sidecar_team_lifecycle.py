@@ -53,10 +53,12 @@ def test_start_team_reads_config_and_loads_harness(tmp_path):
     assert rec.agora_session == "agora:01JTEAMHOME"
     assert rec.agent_kind == "opencode"
 
-    # Verify agora continue command generated (sync_period is minutes, D10)
+    # Verify agora continue command generated (sync_period is minutes, D10;
+    # fork sessions carry the team identity header, D11/3.9)
     pane_run_call = next(c for c in fake_herdr.calls if c[0] == "pane_run")
     assert pane_run_call[1][1] == (
         "agora continue session agora:01JTEAMHOME --agent opencode --fork --sync-period 10"
+        " --header sidecar.identity=worker-team"
     )
 
     # Verify harness was passed verbatim as first input
@@ -144,6 +146,7 @@ def test_start_team_default_sync_period_is_5_minutes(tmp_path):
     pane_run_call = next(c for c in fake_herdr.calls if c[0] == "pane_run")
     assert pane_run_call[1][1] == (
         "agora continue session agora:01JTEAMHOME --agent opencode --fork --sync-period 5"
+        " --header sidecar.identity=worker-team"
     )
 
 
@@ -202,3 +205,41 @@ def test_start_team_waits_for_prompt_then_harness_then_hand_off(tmp_path):
     assert queue.count("worker-team") == 0
     all_msgs = backend.list_messages().messages
     assert any(m.ack == msg.id for m in all_msgs)
+
+
+def test_start_team_fork_carries_identity_and_message_headers(tmp_path):
+    """3.9/D11: fork sessions carry sidecar.identity and sidecar.message."""
+    state_dir = tmp_path / "state"
+    cfg = SidecarConfig(
+        config_path=tmp_path / "config.json",
+        state_dir=state_dir,
+        identities=["worker-team"],
+        teams={
+            "worker-team": {
+                "agent": "opencode",
+                "home_session": "agora:01JTEAMHOME",
+                "identity": {"repo": "worker", "role": "worker-team", "name": "opencode-1"},
+            }
+        },
+    )
+
+    fake_herdr = FakeHerdrClient()
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg, config=cfg)
+
+    host.start_team("worker-team", trigger_message_id="msg_trigger_1")
+
+    pane_run_call = next(c for c in fake_herdr.calls if c[0] == "pane_run")
+    assert pane_run_call[1][1] == (
+        "agora continue session agora:01JTEAMHOME --agent opencode --fork --sync-period 5"
+        " --header sidecar.identity=worker-team --header sidecar.message=msg_trigger_1"
+    )
+
+    # Without a triggering message only the identity header is carried.
+    fake_herdr.calls.clear()
+    host.start_team("worker-team")
+    pane_run_call = next(c for c in fake_herdr.calls if c[0] == "pane_run")
+    assert pane_run_call[1][1] == (
+        "agora continue session agora:01JTEAMHOME --agent opencode --fork --sync-period 5"
+        " --header sidecar.identity=worker-team"
+    )
