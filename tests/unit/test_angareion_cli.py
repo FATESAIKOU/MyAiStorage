@@ -545,6 +545,28 @@ def test_backend_http_error_exits_2_without_retry_and_without_the_token(cli_env,
     assert transport.calls == 1  # no automatic retry
 
 
+def test_non_json_backend_response_exits_2(cli_env, capsys):
+    class HtmlTransport:
+        def request(self, method, url, headers=None, body=None):
+            if url.endswith("/issues?state=all&per_page=100"):
+                return HttpResponse(200, {}, json.dumps([{"number": 1, "title": "general", "body": ""}]).encode("utf-8"))
+            return HttpResponse(200, {}, b"<html>proxy login page</html>")
+
+    ret = main(["read", "--channel", "general"], transport=HtmlTransport())
+    assert ret == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "non-JSON" in captured.err
+
+
+def test_unexpected_value_error_from_a_backend_is_exit_2(cli_env, capsys):
+    """A ValueError out of a backend is a backend error (2), not input (1)."""
+    cli_env["backend"].next_error = ValueError("boom from a backend")
+    ret = main(["read", "--channel", "general"], backend=cli_env["backend"])
+    assert ret == 2
+    assert "boom from a backend" in capsys.readouterr().err
+
+
 def test_transport_timeout_exits_2_without_waiting_out_the_timeout(cli_env, capsys):
     import socket
 

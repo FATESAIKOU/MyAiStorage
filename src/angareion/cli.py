@@ -351,7 +351,9 @@ def main(
         # A missing channel is an input error, not a backend failure.
         sys.stderr.write(f"Error: {mask_token(str(e), token_for_masking)}\n")
         return EXIT_USAGE
-    except (MessageValidationError, ValueError) as e:
+    except MessageValidationError as e:
+        # A parse-level ValueError from a backend is converted to BackendError
+        # inside the backend (L1); only input validation exits 1 here.
         sys.stderr.write(f"Error: {mask_token(str(e), token_for_masking)}\n")
         return EXIT_USAGE
     except BackendError as e:

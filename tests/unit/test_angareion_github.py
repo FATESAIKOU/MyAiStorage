@@ -350,6 +350,18 @@ def test_address_matching_helper_is_used_by_backend_filters():
     assert address_matches_identity(_make_msg(to=me).to, me)
 
 
+def test_non_json_response_becomes_backend_error():
+    transport = FakeTransport()
+    _issues_route(transport, [{"number": 10, "title": "general", "body": ""}])
+    transport.set_route("GET", CHANNEL_COMMENTS_URL, HttpResponse(200, {}, b"<html>proxy login</html>"))
+
+    backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
+    with pytest.raises(BackendError, match="non-JSON"):
+        backend.read(Target(channel="general"), Cursor())
+    with pytest.raises(BackendError, match="HTTP 200"):
+        backend.check(Target(channel="general"), Cursor())
+
+
 def test_default_transport_passes_a_fixed_socket_timeout(monkeypatch):
     import urllib.request
 

@@ -223,6 +223,15 @@ class GitHubIssuesBackend:
         issue = self._find_issue(name)
         return issue["number"] if issue is not None else None
 
+    def _json(self, resp: HttpResponse, context: str) -> Any:
+        """Parse a response body; a non-JSON body (a proxy login page, say) is a backend error (L1)."""
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise BackendError(
+                f"GitHub returned a non-JSON response while {context} (HTTP {resp.status})"
+            ) from e
+
     def _find_issue(self, name: str) -> dict[str, Any] | None:
         """The issue JSON for a channel name, or None; paginated and cached."""
         if name in self._issues_cache:
@@ -234,7 +243,7 @@ class GitHubIssuesBackend:
             if resp.status >= 400:
                 raise BackendError(f"Failed to find channel '{name}': HTTP {resp.status}")
 
-            for issue in resp.json():
+            for issue in self._json(resp, "listing issues"):
                 if "pull_request" in issue:
                     continue
                 title = issue.get("title")
@@ -274,7 +283,7 @@ class GitHubIssuesBackend:
         if resp.status not in (200, 201):
             raise BackendError(f"Failed to create channel '{name}': HTTP {resp.status}")
 
-        data = resp.json()
+        data = self._json(resp, f"creating channel '{name}'")
         channel = Channel(name=name, number=data["number"], members=list(members))
         self._issues_cache[name] = {"title": name, "number": channel.number, "body": data.get("body", "")}
         self._channel_numbers[name] = channel.number
@@ -344,14 +353,14 @@ class GitHubIssuesBackend:
             raise BackendError(f"Failed to check for new messages: HTTP {resp.status}")
 
         self._check_etags[key] = resp.headers.get("etag") or None
-        if self._page_has_new(resp.json(), target, cursor):
+        if self._page_has_new(self._json(resp, "checking for new messages"), target, cursor):
             return True
 
         while (next_url := _extract_link(resp.headers.get("link"))):
             resp = self._request("GET", next_url, headers=self._headers())
             if resp.status >= 400:
                 raise BackendError(f"Failed to check for new messages (page fetch failed): HTTP {resp.status}")
-            if self._page_has_new(resp.json(), target, cursor):
+            if self._page_has_new(self._json(resp, "checking for new messages"), target, cursor):
                 return True
         return False
 
@@ -374,7 +383,7 @@ class GitHubIssuesBackend:
             if resp.status >= 400:
                 raise BackendError(f"Failed to read messages (page fetch failed): HTTP {resp.status}")
 
-            for comment in resp.json():
+            for comment in self._json(resp, "reading messages"):
                 parsed = parse_message(comment.get("body", ""))
                 if parsed is None or parsed.id in seen_ids:
                     continue
