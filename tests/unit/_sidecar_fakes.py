@@ -1,23 +1,29 @@
 """In-memory fakes for the sidecar seams (change sidecar-v0, tasks 2.2-2.6).
 
 These stand in for Claude Code / opencode drivers, for agora's session store,
-for LLMGateway and for its transport, so every unit test runs without opening
-a real agent, touching Drive or touching the network.
+for LLMGateway (connect + client) and for its subscription source, so every
+unit test runs without opening a real agent, touching Drive or touching the
+network.
 """
 
 from __future__ import annotations
 
 import copy
-from typing import Any
+import json
+import threading
+from contextlib import contextmanager, nullcontext
+from pathlib import Path
+from typing import Any, Iterator
 
 from sidecar.protocols import (
     DRIVER_EXITED,
     DRIVER_IDLE,
     DRIVER_RUNNING,
     DriverState,
-    PreparedSession,
+    RunningSession,
+    SourceError,
     Subscription,
-    SubscriptionError,
+    Unreachable,
 )
 
 
@@ -35,7 +41,7 @@ class FakeClock:
 class FakeHandle:
     """One fake agent process: an inbox, an interrupt counter, a state."""
 
-    def __init__(self, session: PreparedSession) -> None:
+    def __init__(self, session: RunningSession | None) -> None:
         self.session = session
         self.state = DriverState(kind=DRIVER_IDLE)
         self.inbox: list[str] = []
@@ -57,9 +63,11 @@ class FakeAgentDriver:
 
     def __init__(self, name: str = "claude-code") -> None:
         self.name = name
-        self.launches: list[tuple[PreparedSession, dict[str, str], str]] = []
+        self.launches: list[tuple[RunningSession | None, dict[str, str], str]] = []
         self.handles: list[FakeHandle] = []
-        self.stop_calls: list[tuple[FakeHandle, bool]] = []
+        self.stop_calls: list[tuple[FakeHandle, bool, float]] = []
+        self.launch_gate: threading.Event | None = None
+        self.launch_started = threading.Event()
 
     # -- AgentDriver ------------------------------------------------------
 
@@ -71,7 +79,10 @@ class FakeAgentDriver:
             env["FAKE_AGENT_ENDPOINT"] = subscription.endpoint
         return env
 
-    def launch(self, session: PreparedSession, env: dict[str, str], workdir: str) -> FakeHandle:
+    def launch(self, session: RunningSession | None, env: dict[str, str], workdir: str) -> FakeHandle:
+        self.launch_started.set()
+        if self.launch_gate is not None:
+            self.launch_gate.wait(timeout=5)
         handle = FakeHandle(session)
         self.launches.append((session, dict(env), workdir))
         self.handles.append(handle)
@@ -95,8 +106,10 @@ class FakeAgentDriver:
             return DriverState(kind=DRIVER_EXITED, code=0, reason="stopped")
         return handle.state
 
-    def stop(self, handle: FakeHandle, *, graceful: bool = True, timeout: float = 10.0) -> None:
-        self.stop_calls.append((handle, graceful))
+    def stop(
+        self, handle: FakeHandle, *, graceful: bool = True, timeout: float = 30.0
+    ) -> None:
+        self.stop_calls.append((handle, graceful, timeout))
         handle.stopped = True
         handle.busy = False
         handle.state = DriverState(kind=DRIVER_EXITED, code=0, reason="closed")
@@ -108,19 +121,20 @@ class FakeAgentDriver:
 
     def external_handle(self) -> FakeHandle:
         """An agent this sidecar did not open (must never show up in status)."""
-        return FakeHandle(PreparedSession(agora_id="agora:not-ours", mode="new"))
+        return FakeHandle(RunningSession(session_id="agora:not-ours"))
 
 
 class FakeSessionStore:
-    """SessionStore double; keeps a tiny in-memory agora."""
+    """SessionStore double; keeps a tiny in-memory agora.  No sync (D3)."""
 
     def __init__(self) -> None:
         self.sessions: dict[str, dict[str, Any]] = {}
         self.starts: list[dict[str, Any]] = []
-        self.syncs: list[str] = []
         self._counter = 0
 
-    def seed(self, agora_id: str, *, tags: tuple[str, ...] = (), messages: tuple[str, ...] = ()) -> str:
+    def seed(
+        self, agora_id: str, *, tags: tuple[str, ...] = (), messages: tuple[str, ...] = ()
+    ) -> str:
         self.sessions[agora_id] = {"tags": set(tags), "messages": list(messages)}
         return agora_id
 
@@ -129,51 +143,75 @@ class FakeSessionStore:
         *,
         mode: str,
         ids: Any,
+        by: str,
         agent: str,
         workdir: str,
         tag: str,
-    ) -> PreparedSession:
+        env: dict[str, str],
+        merge_env: dict[str, str] | None = None,
+    ) -> RunningSession:
         self._counter += 1
         ids = list(ids)
         if mode == "new":
-            agora_id = f"agora:new-{self._counter}"
+            session_id = f"agora:new-{self._counter}"
         elif mode == "continue":
-            agora_id = ids[0]
+            session_id = ids[0]
         elif mode == "fork":
-            agora_id = f"{ids[0]}-fork"
+            session_id = f"{ids[0]}-fork"
+            # A fork copies the base Session's tags (the spec: 原有的 tags 保留).
+            if session_id not in self.sessions:
+                base = self.sessions.get(ids[0], {"tags": set(), "messages": []})
+                self.sessions[session_id] = {
+                    "tags": set(base["tags"]),
+                    "messages": list(base["messages"]),
+                }
         elif mode == "merge":
-            agora_id = f"agora:merged-{self._counter}"
+            session_id = f"agora:merged-{self._counter}"
         else:
             raise AssertionError(f"unknown mode {mode!r}")
-        entry = self.sessions.setdefault(agora_id, {"tags": set(), "messages": []})
+        entry = self.sessions.setdefault(session_id, {"tags": set(), "messages": []})
         entry["tags"].add(tag)
         self.starts.append(
             {
                 "mode": mode,
                 "ids": ids,
+                "by": by,
                 "agent": agent,
                 "workdir": workdir,
                 "tag": tag,
-                "agora_id": agora_id,
+                "env": dict(env),
+                "merge_env": None if merge_env is None else dict(merge_env),
+                "session_id": session_id,
             }
         )
-        argv = ("fake-agora", "continue", agora_id, "--agent", agent, "--headless", "--tag", tag)
-        return PreparedSession(agora_id=agora_id, mode=mode, ids=tuple(ids), argv=argv)
-
-    def sync(self, session: PreparedSession) -> None:
-        self.syncs.append(session.agora_id)
+        return RunningSession(session_id=session_id, process=f"fake-process:{session_id}")
 
 
 class FakeSubscriptionSource:
-    """SubscriptionSource double; cooldowns are in memory only."""
+    """SubscriptionSource double: values in, values out, no exceptions (D3).
+
+    Failures are scripted per call: `list_unreachable`, `get_errors`,
+    `get_unreachable`, `cooldown_results` (popped per call; None means OK).
+    """
 
     def __init__(self, subscriptions: Any = ()) -> None:
         self._subs: dict[str, Subscription] = {}
         for sub in subscriptions:
             self._subs[sub.id] = sub
-        self.cooldowns: list[tuple[str, str, float]] = []
+        self.cooldowns: list[tuple[str, str, str | None]] = []
         self.lists = 0
         self.gets: list[tuple[str, str]] = []
+        self.list_unreachable: str | None = None
+        self.get_unreachable = False
+        self.get_errors: dict[str, str] = {}
+        self.cooldown_results: list[Any] = []
+        self.cooldown_unreachable = False
+        self.operations = 0  # one logical operation = one source.operation()
+
+    def operation(self) -> Any:
+        """Counts logical operations so tests can assert one per open/swap (S1)."""
+        self.operations += 1
+        return nullcontext(self)
 
     def add(self, sub: Subscription) -> Subscription:
         self._subs[sub.id] = sub
@@ -182,8 +220,10 @@ class FakeSubscriptionSource:
     def set_available(self, subscription_id: str, available: bool) -> None:
         self._subs[subscription_id].available = available
 
-    def list(self) -> list[Subscription]:
+    def list(self) -> list[Subscription] | Unreachable:
         self.lists += 1
+        if self.list_unreachable:
+            return Unreachable(self.list_unreachable)
         out = []
         for sub in self._subs.values():
             row = copy.copy(sub)
@@ -192,21 +232,33 @@ class FakeSubscriptionSource:
             out.append(row)
         return out
 
-    def get(self, subscription_id: str, agent: str) -> Subscription:
+    def get(self, subscription_id: str, agent: str) -> Subscription | SourceError | Unreachable:
         self.gets.append((subscription_id, agent))
+        if self.get_unreachable:
+            return Unreachable("fake get cannot reach the gateway")
+        code = self.get_errors.get(subscription_id)
+        if code:
+            return SourceError(code)
         sub = self._subs.get(subscription_id)
         if sub is None:
-            raise SubscriptionError(f"unknown subscription {subscription_id!r}")
+            return SourceError("not_found")
         if agent not in sub.agents:
-            raise SubscriptionError(f"subscription {subscription_id!r} does not allow {agent!r}")
+            return SourceError("agent_not_allowed")
         return copy.copy(sub)
 
-    def cooldown(self, subscription_id: str, window: str, resets_at: float) -> None:
-        self.cooldowns.append((subscription_id, window, float(resets_at)))
+    def cooldown(self, subscription_id: str, window: str, resets_at: str | None) -> Any:
+        self.cooldowns.append((subscription_id, window, resets_at))
+        if self.cooldown_results:
+            scripted = self.cooldown_results.pop(0)
+            if scripted is not None:
+                return scripted
+        elif self.cooldown_unreachable:
+            return Unreachable("fake cooldown cannot reach the gateway")
         sub = self._subs.get(subscription_id)
         if sub is not None:
             sub.available = False
-            sub.cooldown = {**sub.cooldown, window: float(resets_at)}
+            sub.cooldown = {**sub.cooldown, window: resets_at}
+        return None
 
 
 def claude_subscription(
@@ -216,7 +268,7 @@ def claude_subscription(
     priority: int = 10,
     available: bool = True,
     agents: tuple[str, ...] = ("claude-code",),
-    cooldown: dict[str, float | None] | None = None,
+    cooldown: dict[str, str | None] | None = None,
 ) -> Subscription:
     return Subscription(
         id=subscription_id,
@@ -237,19 +289,113 @@ def default_subscriptions() -> list[Subscription]:
     ]
 
 
-class FakeTransport:
-    """LLMGatewayTransport double: canned answers, recorded calls, injectable errors."""
+# --- lgw.connect / lgw.client doubles (task 2.5) -------------------------------
 
-    def __init__(self, responses: dict[str, Any] | None = None) -> None:
-        self.responses = responses or {}
-        self.errors: dict[str, Exception] = {}
+
+class FakeConfigError(Exception):
+    """Stands in for lgw.connect.ConfigError."""
+
+
+class FakeGatewayClient:
+    """lgw.client double: canned answers, recorded calls, injectable failures.
+
+    Answers follow the seam documented in `sources.LLMGatewaySource`:
+    success = data, `{"unreachable": true}` or `{"error": {"code": ...}}`.
+    """
+
+    def __init__(
+        self,
+        *,
+        rows: Any = (),
+        get_row: dict[str, Any] | None = None,
+        list_unreachable: bool = False,
+        unreachable: bool = False,
+        error_code: str | None = None,
+    ) -> None:
+        self.rows = list(rows)
+        self.get_row = get_row
+        self.list_unreachable = list_unreachable
+        self.unreachable = unreachable
+        self.error_code = error_code
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.base_url: str | None = None  # set by the factory
 
-    def call(self, op: str, payload: dict[str, Any]) -> dict[str, Any]:
-        self.calls.append((op, dict(payload)))
-        if op in self.errors:
-            raise self.errors[op]
-        response = self.responses.get(op)
-        if callable(response):
-            return response(payload)
-        return response
+    def _maybe_fail(self) -> dict[str, Any] | None:
+        if self.unreachable:
+            return {"unreachable": True, "reason": "fake client cannot reach the gateway"}
+        if self.error_code:
+            return {"error": {"code": self.error_code, "message": "fake refusal"}}
+        return None
+
+    def list(self) -> dict[str, Any]:
+        self.calls.append(("list", {}))
+        if self.list_unreachable:
+            return {"unreachable": True, "reason": "fake list cannot reach the gateway"}
+        failure = self._maybe_fail()
+        if failure:
+            return failure
+        return {"subscriptions": copy.deepcopy(self.rows)}
+
+    def get(self, subscription_id: str, agent: str) -> dict[str, Any]:
+        self.calls.append(("get", {"id": subscription_id, "agent": agent}))
+        failure = self._maybe_fail()
+        if failure:
+            return failure
+        row = copy.deepcopy(self.get_row)
+        if row is None:
+            return {"error": {"code": "not_found", "message": "fake unknown id"}}
+        return {"subscription": row}
+
+    def cooldown(self, subscription_id: str, window: str, resets_at: str | None) -> dict[str, Any]:
+        self.calls.append(
+            ("cooldown", {"id": subscription_id, "window": window, "resets_at": resets_at})
+        )
+        failure = self._maybe_fail()
+        if failure:
+            return failure
+        return {"ok": True}
+
+
+class FakeConnect:
+    """lgw.connect double: load_config(path) + connect(cfg) context manager.
+
+    `load_config` reads the real file every time, so a test can atomically
+    rewrite it between operations and watch the next operation pick it up.
+    """
+
+    ConfigError = FakeConfigError
+
+    def __init__(self, *, base_url: str = "fake://gateway", bad_paths: Any = ()) -> None:
+        self.base_url = base_url
+        self.bad_paths = {str(p) for p in bad_paths}
+        self.configs: list[str] = []
+        self.opens: list[dict[str, Any]] = []
+        self.closed = 0
+
+    def load_config(self, path: str | Path) -> dict[str, Any]:
+        path = str(path)
+        self.configs.append(path)
+        if path in self.bad_paths:
+            raise FakeConfigError(f"bad connect file {path}")
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+
+    @contextmanager
+    def connect(self, cfg: dict[str, Any]) -> Iterator[str]:
+        self.opens.append(dict(cfg))
+        try:
+            yield cfg.get("base_url", self.base_url)
+        finally:
+            self.closed += 1
+
+
+class FakeClientFactory:
+    """Hands one FakeGatewayClient to every connection, recording base_urls."""
+
+    def __init__(self, client: FakeGatewayClient) -> None:
+        self.client = client
+        self.base_urls: list[str] = []
+
+    def __call__(self, base_url: str) -> FakeGatewayClient:
+        self.base_urls.append(base_url)
+        self.client.base_url = base_url
+        return self.client

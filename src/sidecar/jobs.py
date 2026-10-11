@@ -1,15 +1,17 @@
-"""Scheduled actions: `at` (one-shot) and `every` (polling, optional `until`).
+"""Job scheduling: `at` (one-shot) and `every` (polling, optional `until`).
 
 Jobs live only in memory (design D2) and their action is always one of the
-four external actions (design D1).  The auto-reopen job that D4 creates when
-every subscription is cooling down is the same kind of job: visible in
+four external actions (design D1).  Each job remembers its last run and the
+last error (code + message, never a secret) so GET /jobs can show why a
+scheduled action did not happen (Q7).  The auto-reopen job that D4 creates
+when every subscription is cooling down is the same kind of job: visible in
 GET /jobs and deletable through DELETE /jobs/{id}.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -60,6 +62,8 @@ class Job:
     created_at: float = 0.0
     next_run_at: float = 0.0
     auto: bool = False  # created by the quota machinery, not by a caller
+    last_run: float | None = None
+    last_error: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +75,8 @@ class Job:
             "until": iso(self.until),
             "next_run_at": iso(self.next_run_at),
             "auto": self.auto,
+            "last_run": iso(self.last_run),
+            "last_error": self.last_error,
         }
 
 

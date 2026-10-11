@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from .jobs import parse_duration, parse_time
-from .protocols import BadRequestError, NotFoundError, SidecarError
+from .protocols import BadRequestError, JobNotFoundError, NotFoundError, SidecarError
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +47,12 @@ class ControlHandler(BaseHTTPRequestHandler):
         try:
             status, payload = self._route(method)
         except SidecarError as e:
-            self._send_json(e.status, {"error": str(e)})
+            self._send_json(e.status, {"error": {"code": e.code, "message": str(e)}})
         except Exception as e:  # never kill a thread silently
             logger.exception("unhandled control-plane error")
-            self._send_json(500, {"error": f"{type(e).__name__}: {e}"})
+            self._send_json(
+                500, {"error": {"code": "internal_error", "message": f"{type(e).__name__}: {e}"}}
+            )
         else:
             self._send_json(status, payload)
 
@@ -106,7 +108,7 @@ class ControlHandler(BaseHTTPRequestHandler):
 
         if len(parts) == 2 and parts[0] == "jobs" and method == "DELETE":
             if not core.delete_job(parts[1]):
-                raise NotFoundError(f"unknown job {parts[1]!r}")
+                raise JobNotFoundError(f"unknown job {parts[1]!r}")
             return 204, None
 
         raise NotFoundError("no such route")

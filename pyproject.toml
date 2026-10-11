@@ -13,6 +13,10 @@ dependencies = [
 agora = "agora.cli:main"
 sidecar = "sidecar.cli:main"
 
+# The LLMGatewaySource extra (design D7) lands once LLMGateway tags lgw-v0.1.0:
+# gateway = ["lgw @ git+https://github.com/FATESAIKOU/LLMGateway@lgw-v0.1.0"]
+# Until then LLMGatewaySource is tested with injected connect/client doubles.
+
 [dependency-groups]
 dev = ["pytest>=8"]
 

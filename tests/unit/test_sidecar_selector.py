@@ -35,9 +35,15 @@ def test_choose_skips_unavailable_and_wrong_agent():
     )
 
 
-def test_ties_keep_source_order():
+def test_equal_priority_sorts_by_id():
     selector = PrioritySelector()
-    assert selector.choose("claude-code", [sub("first"), sub("second")]) == "first"
+    assert selector.choose("claude-code", [sub("b"), sub("a")]) == "a"
+
+
+def test_excluded_ids_are_not_candidates():
+    selector = PrioritySelector()
+    assert selector.choose("claude-code", [sub("a"), sub("b")], exclude=["a"]) == "b"
+    assert selector.choose("claude-code", [sub("a")], exclude=["a"]) is None
 
 
 def test_fakes_satisfy_the_protocols():

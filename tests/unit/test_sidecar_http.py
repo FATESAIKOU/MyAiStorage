@@ -1,7 +1,8 @@
 """The HTTP control plane (change sidecar-v0, tasks 2.1/2.6).
 
 The server binds 127.0.0.1 only and speaks the four actions plus /jobs; the
-agents behind it are the in-memory fakes.
+agents behind it are the in-memory fakes.  Errors answer
+{"error": {"code", "message"}} with the D1/D4 codes.
 """
 
 from __future__ import annotations
@@ -45,7 +46,9 @@ def _serve(core):
 
 
 @pytest.fixture
-def control():
+def control(tmp_path):
+    workdir = tmp_path / "work"
+    workdir.mkdir()
     clock = F.FakeClock(1000.0)
     driver = F.FakeAgentDriver("claude-code")
     store = F.FakeSessionStore()
@@ -56,39 +59,36 @@ def control():
     server, thread = _serve(core)
     base = f"http://127.0.0.1:{server.server_address[1]}"
     try:
-        yield base, server, core, driver, store, source, clock
+        yield base, server, core, driver, store, source, clock, str(workdir)
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
 
 
+def _open_args(workdir, **extra):
+    args = {"id": "t1", "agent": "claude-code", "workdir": workdir, "session": {"mode": "new"}}
+    args.update(extra)
+    return args
+
+
 def test_binds_loopback_only(control):
-    _base, server, _core, _driver, _store, _source, _clock = control
+    _base, server, _core, _driver, _store, _source, _clock, _workdir = control
     assert server.server_address[0] == "127.0.0.1"
 
 
 def test_open_status_poke_close_roundtrip(control):
-    base, _server, core, driver, store, _source, _clock = control
+    base, _server, _core, driver, store, _source, _clock, workdir = control
 
     status, body = call(
-        base,
-        "POST",
-        "/agents",
-        {
-            "id": "t1",
-            "agent": "claude-code",
-            "workdir": "/w",
-            "session": {"mode": "new"},
-            "subscription": {"id": "claude-personal"},
-            "input": "hello",
-        },
+        base, "POST", "/agents", _open_args(workdir, input="hello")
     )
     assert status == 201
     assert body["id"] == "t1"
     assert body["state"] == "running"
     assert body["subscription"] == "claude-personal"
-    assert body["session"].startswith("agora:")
+    assert body["session"] is None  # `new` has no agora id yet (D5)
+    assert body["reopen_at"] is None
     assert body["exit"] is None
 
     status, body = call(base, "GET", "/agents")
@@ -106,32 +106,52 @@ def test_open_status_poke_close_roundtrip(control):
     status, body = call(base, "POST", "/agents/t1/close")
     assert status == 200
     assert body["state"] == "exited"
-    assert store.syncs == [body["session"]]
+    assert driver.stop_calls  # the agent was stopped before the answer
 
 
 def test_duplicate_id_is_a_409(control):
-    base, _server, _core, driver, _store, _source, _clock = control
-    payload = {"id": "t1", "agent": "claude-code", "workdir": "/w", "session": {"mode": "new"}}
-    assert call(base, "POST", "/agents", payload)[0] == 201
-    status, body = call(base, "POST", "/agents", payload)
+    base, _server, _core, driver, _store, _source, _clock, workdir = control
+    assert call(base, "POST", "/agents", _open_args(workdir))[0] == 201
+    status, body = call(base, "POST", "/agents", _open_args(workdir))
     assert status == 409
-    assert "already exists" in body["error"]
+    assert body["error"]["code"] == "id_conflict"
     assert len(driver.launches) == 1
 
 
-def test_missing_and_bad_requests(control):
-    base, _server, _core, _driver, _store, _source, _clock = control
+def test_missing_and_bad_requests_use_the_named_codes(control):
+    base, _server, _core, driver, _store, _source, _clock, workdir = control
+
     status, body = call(base, "GET", "/agents/nope")
-    assert status == 404 and "unknown agent" in body["error"]
+    assert status == 404 and body["error"]["code"] == "agent_not_found"
 
-    status, _body = call(base, "POST", "/agents/t1/poke", {"text": "x"})
-    assert status == 404  # t1 does not exist
+    status, body = call(base, "POST", "/agents", _open_args("/no/such/dir"))
+    assert status == 400 and body["error"]["code"] == "workdir_not_found"
 
-    status, _body = call(base, "POST", "/agents", {"id": "t1"})
-    assert status == 400  # agent/workdir/session missing
+    status, body = call(base, "POST", "/agents", {"id": "t1"})
+    assert status == 400 and body["error"]["code"] == "invalid_request"
 
-    status, _body = call(base, "POST", "/agents", {})  # empty JSON object
-    assert status == 400
+    status, body = call(
+        base, "POST", "/agents", _open_args(workdir, subscription={"id": "nope"})
+    )
+    assert status == 400 and body["error"]["code"] == "subscription_not_found"
+
+    _source.get_errors["claude-personal"] = "agent_not_allowed"
+    status, body = call(
+        base, "POST", "/agents", _open_args(workdir, subscription={"id": "claude-personal"})
+    )
+    assert status == 400 and body["error"]["code"] == "subscription_not_allowed"
+
+    _source.get_errors["claude-personal"] = "not_deployed"
+    status, body = call(
+        base, "POST", "/agents", _open_args(workdir, subscription={"id": "claude-personal"})
+    )
+    assert status == 409 and body["error"]["code"] == "not_deployed"
+
+    _source.get_errors.clear()
+    _source.list_unreachable = "tunnel down"
+    status, body = call(base, "POST", "/agents", _open_args(workdir))
+    assert status == 503 and body["error"]["code"] == "gateway_unreachable"
+    assert driver.launches == []  # nothing was opened
 
     request = urllib.request.Request(base + "/agents", data=b"{not json", method="POST")
     with pytest.raises(urllib.error.HTTPError) as excinfo:
@@ -142,40 +162,39 @@ def test_missing_and_bad_requests(control):
     assert status == 501  # no PUT handler in stdlib's BaseHTTPRequestHandler
 
 
+def test_poke_on_an_exited_agent_is_a_409(control):
+    base, _server, _core, _driver, _store, _source, _clock, workdir = control
+    call(base, "POST", "/agents", _open_args(workdir))
+    call(base, "POST", "/agents/t1/close")
+    status, body = call(base, "POST", "/agents/t1/poke", {"text": "hi"})
+    assert status == 409 and body["error"]["code"] == "agent_not_running"
+    status, body = call(base, "POST", "/agents/nope/poke", {"text": "hi"})
+    assert status == 404 and body["error"]["code"] == "agent_not_found"
+
+
 def test_jobs_crud_and_at_execution(control):
-    base, _server, core, _driver, _store, _source, clock = control
+    base, _server, core, _driver, _store, _source, clock, workdir = control
     status, job = call(
-        base,
-        "POST",
-        "/jobs",
-        {
-            "action": "open",
-            "args": {"id": "t1", "agent": "claude-code", "workdir": "/w", "session": {"mode": "new"}},
-            "at": clock.t + 60,
-        },
+        base, "POST", "/jobs",
+        {"action": "open", "args": _open_args(workdir), "at": clock.t + 60},
     )
     assert status == 201
     assert job["auto"] is False
     assert job["at"] == "1970-01-01T00:17:40Z"  # 1060 epoch
+    assert job["last_run"] is None and job["last_error"] is None
 
     status, body = call(base, "GET", "/jobs")
     assert status == 200 and [j["id"] for j in body["jobs"]] == [job["id"]]
 
     status, _body = call(base, "DELETE", f"/jobs/{job['id']}")
     assert status == 204
-    status, _body = call(base, "DELETE", f"/jobs/{job['id']}")
-    assert status == 404
+    status, body = call(base, "DELETE", f"/jobs/{job['id']}")
+    assert status == 404 and body["error"]["code"] == "job_not_found"
 
     # And an at job really opens the agent when its moment comes.
     status, _job = call(
-        base,
-        "POST",
-        "/jobs",
-        {
-            "action": "open",
-            "args": {"id": "t1", "agent": "claude-code", "workdir": "/w", "session": {"mode": "new"}},
-            "at": clock.t + 60,
-        },
+        base, "POST", "/jobs",
+        {"action": "open", "args": _open_args(workdir), "at": clock.t + 60},
     )
     assert status == 201
     clock.advance(60)
@@ -185,34 +204,64 @@ def test_jobs_crud_and_at_execution(control):
 
 
 def test_job_every_with_until_and_iso_at(control):
-    base, _server, _core, _driver, _store, _source, clock = control
+    base, _server, _core, _driver, _store, _source, clock, workdir = control
     status, job = call(
         base, "POST", "/jobs",
-        {"action": "poke", "args": {"id": "t1", "text": "x"}, "every": "5m", "until": "2030-01-01T00:00:00Z"},
+        {"action": "poke", "args": {"id": "t1", "text": "x"}, "every": "5m",
+         "until": "2030-01-01T00:00:00Z"},
     )
     assert status == 201
     assert job["every"] == 300.0
 
     status, job = call(
         base, "POST", "/jobs",
-        {"action": "open", "args": {"id": "t2", "agent": "claude-code", "workdir": "/w", "session": {"mode": "new"}},
-         "at": "1970-01-01T00:16:40Z"},
+        {"action": "open", "args": _open_args(workdir), "at": "1970-01-01T00:16:40Z"},
     )
     assert status == 201
     assert job["next_run_at"] == "1970-01-01T00:16:40Z"
 
 
 def test_job_validation_is_a_400(control):
-    base, _server, _core, _driver, _store, _source, _clock = control
+    base, _server, _core, _driver, _store, _source, clock, workdir = control
+    args = _open_args(workdir)
     assert call(base, "POST", "/jobs", {"action": "pause", "args": {}})[0] == 400
-    assert call(base, "POST", "/jobs", {"action": "open", "args": {}, "at": 1, "every": 60})[0] == 400
-    assert call(base, "POST", "/jobs", {"action": "open", "args": {}})[0] == 400
+    assert call(base, "POST", "/jobs", {"action": "open", "args": args, "at": 1, "every": 60})[0] == 400
+    assert call(base, "POST", "/jobs", {"action": "open", "args": args})[0] == 400
     assert call(base, "POST", "/jobs", {"action": "poke", "args": {"id": "t1"}, "every": 60})[0] == 400
-    assert call(base, "POST", "/jobs", {"action": "open", "args": {}, "at": "tomorrow"})[0] == 400
+    assert call(base, "POST", "/jobs", {"action": "open", "args": args, "at": "tomorrow"})[0] == 400
+    # at in the past is refused (D1)
+    status, body = call(base, "POST", "/jobs", {"action": "open", "args": args, "at": clock.t - 1})
+    assert status == 400 and body["error"]["code"] == "invalid_request"
 
 
-def test_no_response_ever_carries_the_subscription_key():
+def test_failed_job_keeps_last_run_and_last_error(control):
+    base, _server, core, _driver, _store, _source, clock, workdir = control
+    call(base, "POST", "/agents", _open_args(workdir))  # t1 is running
+    status, job = call(
+        base, "POST", "/jobs",
+        {"action": "open", "args": _open_args(workdir), "every": 60},
+    )
+    assert status == 201
+
+    clock.advance(60)
+    core.tick()
+
+    status, body = call(base, "GET", "/jobs")
+    row = body["jobs"][0]
+    assert row["id"] == job["id"]
+    assert row["last_run"] == "1970-01-01T00:17:40Z"  # 1060 epoch
+    assert row["last_error"] == {
+        "status": 409,
+        "code": "id_conflict",
+        "message": "agent 't1' already exists in state idle",
+    }
+    assert "key" not in json.dumps(row)
+
+
+def test_no_response_ever_carries_the_subscription_key(tmp_path):
     secret = "HTTP-SECRET-KEY"
+    workdir = tmp_path / "work"
+    workdir.mkdir()
     clock = F.FakeClock(1000.0)
     driver = F.FakeAgentDriver("claude-code")
     store = F.FakeSessionStore()
@@ -226,16 +275,16 @@ def test_no_response_ever_carries_the_subscription_key():
         seen = []
         status, body = call(
             base, "POST", "/agents",
-            {"id": "t1", "agent": "claude-code", "workdir": "/w", "session": {"mode": "new"},
-             "subscription": {"id": "claude-personal"}, "input": "go"},
+            {"id": "t1", "agent": "claude-code", "workdir": str(workdir),
+             "session": {"mode": "new"}, "subscription": {"id": "claude-personal"},
+             "input": "go"},
         )
         seen.append(json.dumps(body))
         assert status == 201
-        status, body = call(base, "GET", "/agents")
-        seen.append(json.dumps(body))
-        status, body = call(base, "GET", "/agents/t1")
-        seen.append(json.dumps(body))
-        status, body = call(base, "POST", "/agents/t1/close")
+        for method, path in (("GET", "/agents"), ("GET", "/agents/t1"), ("GET", "/jobs")):
+            _status, body = call(base, method, path)
+            seen.append(json.dumps(body))
+        _status, body = call(base, "POST", "/agents/t1/close")
         seen.append(json.dumps(body))
         assert secret not in "\n".join(seen)
         assert body["subscription"] == "claude-personal"  # the id is fine to show

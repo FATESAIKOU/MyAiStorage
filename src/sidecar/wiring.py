@@ -23,6 +23,10 @@ def build_core(config: Config) -> SidecarCore:
         store=default_session_store(config),
         subscriptions=build_subscription_source(config),
         selector=PrioritySelector(),
+        resume_prompt=config.resume_prompt,
+        retry_interval=config.retry_interval,
+        poke_queue_timeout=config.poke_queue_timeout,
+        close_timeout=config.close_timeout,
     )
 
 
@@ -47,7 +51,7 @@ def build_subscription_source(config: Config) -> Any | None:
             raise ConfigError("subscription_source kind=file needs a 'path'")
         return FileSubscriptionSource(path)
     if kind == "llmgateway":
-        # TODO(task 2.5): build with the `lgw connect` transport once the two
-        # sides are aligned; until then this fails loudly (see sources.py).
+        # The real connection comes from lgw's `connect` (the `gateway` extra);
+        # without it every operation answers Unreachable with a clear message.
         return connect_llmgateway(config)
     raise ConfigError(f"unknown subscription_source kind {kind!r}")
