@@ -129,7 +129,22 @@
 
 ## 4. 要本人決定的事
 
-v3 留下的 Q1（sidecar 依 id 自己 `get`）、Q4（agent 用程式化模式開）、Q5（HTTP 只綁本機＋控制 token）、Q6（agent 讀得到信道 token）照舊，由 PMO 一起問。v4 新增：
+v3 留下的 Q1（sidecar 依 id 自己 `get`）、Q4（agent 用程式化模式開）、Q5（HTTP 只綁本機＋控制 token；**本人的回答是不做認證，見下一節**）、Q6（agent 讀得到信道 token）照舊，由 PMO 一起問。v4 新增：
 
 - **Q7 agora 的 tag `sidecar:<id>` 留不留**：建議留（不增加介面；人或程式能在 agora 上查到 Session 是哪個 id 開的）。不需要就拿掉。
 - **Q8 自動重開時挑哪一把**：建議屆時重新 `list`、照 `priority` 挑（冷卻期間別的 subscription 可能恢復得更早）。
+
+---
+
+## 5. 本人的回答（10-11）
+
+| 題 | 本人的回答 |
+|---|---|
+| Q1 誰去拿 key | sidecar 依 subscription 的 id 自己 `get`；key 不經過控制者 |
+| Q4 agent 的開法 | 程式化模式（已 spike：Claude Code stream-json、opencode server） |
+| Q5 誰可以呼叫 sidecar | HTTP 只綁本機，**不做認證** |
+| Q6 agent 用信道的憑證 | Angareion 只定 token 檔的位置與讀法；token 由 MyLinuxPool 的能力分發 |
+| Q7 agora 的 tag | 留 `sidecar:<id>` |
+| Q8 挑哪一把 | `Selector` 可替換，預設照 `priority` |
+
+2026-10-12 的實作文件（`openspec/changes/sidecar-v0/`）已照這些回答與交叉核對（`docs/review/v4-consistency.md`）修訂；和上面各節不同之處以 change 為準。
