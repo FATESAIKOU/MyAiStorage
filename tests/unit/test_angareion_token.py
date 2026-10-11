@@ -15,6 +15,8 @@ from angareion.config import (
     TokenError,
     TokenMissingError,
     TokenPermissionError,
+    get_default_token_path,
+    load_config,
     load_token,
     mask_token,
 )
@@ -51,6 +53,46 @@ def test_load_token_via_env_var(tmp_path, monkeypatch):
     token_file = _create_token_file(tmp_path / "env_token", "ghp_ENV_TOKEN_XYZ", mode=0o600)
     monkeypatch.setenv("ANGAREION_TOKEN_FILE", str(token_file))
     assert load_token() == "ghp_ENV_TOKEN_XYZ"
+
+
+def test_token_file_precedence_env_then_config_then_default(tmp_path, monkeypatch):
+    """The review's missing test: ANGAREION_TOKEN_FILE beats the config; the default is last."""
+    import json
+
+    env_token = _create_token_file(tmp_path / "env-token", "ghp_FROM_ENV", mode=0o600)
+    config_token = _create_token_file(tmp_path / "configured-token", "ghp_FROM_CONFIG", mode=0o600)
+    config_file = tmp_path / "config.json"
+
+    config_file.write_text(
+        json.dumps({
+            "channel_repo": "owner/repo",
+            "identity": {"repo": "owner-org/team", "role": "PM"},
+            "token_file": str(config_token),
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANGAREION_CONFIG", str(config_file))
+
+    # Both exist: ANGAREION_TOKEN_FILE wins.
+    monkeypatch.setenv("ANGAREION_TOKEN_FILE", str(env_token))
+    assert load_config().token_file == env_token
+    assert load_token(load_config()) == "ghp_FROM_ENV"
+
+    # No env override: the configured token_file is used.
+    monkeypatch.delenv("ANGAREION_TOKEN_FILE")
+    assert load_config().token_file == config_token
+    assert load_token(load_config()) == "ghp_FROM_CONFIG"
+
+    # Neither: the default path (under the isolated HOME) is used.
+    config_file.write_text(
+        json.dumps({
+            "channel_repo": "owner/repo",
+            "identity": {"repo": "owner-org/team", "role": "PM"},
+        }),
+        encoding="utf-8",
+    )
+    assert load_config().token_file == get_default_token_path()
+    assert str(load_config().token_file).endswith(".config/angareion/token")
 
 
 def test_load_token_missing_file_raises_error(tmp_path):

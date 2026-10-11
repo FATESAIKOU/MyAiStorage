@@ -394,6 +394,29 @@ def test_address_matching_helper_is_used_by_backend_filters():
     assert address_matches_identity(_make_msg(to=me).to, me)
 
 
+def test_requests_carry_authorization_and_api_headers():
+    """The review's missing test: every request carries the API headers and the token."""
+    secret = "ghp_FAKE_HEADER_TOKEN_42"
+    transport = FakeTransport()
+    _issues_route(transport, [{"number": 10, "title": "general", "body": ""}])
+    transport.set_route(
+        "POST",
+        CHANNEL_COMMENTS_URL,
+        HttpResponse(201, {}, json.dumps({"html_url": "https://github.com/owner/repo/issues/10#issuecomment-1"}).encode("utf-8")),
+    )
+
+    backend = GitHubIssuesBackend("owner/repo", token=secret, transport=transport)
+    backend.send("general", _make_msg())
+
+    assert len(transport.recorded_requests) == 2  # the issues listing and the comment POST
+    for request in transport.recorded_requests:
+        headers = request["headers"]
+        assert headers["Accept"] == "application/vnd.github+json"
+        assert headers["X-GitHub-Api-Version"] == "2022-11-28"
+        assert headers["User-Agent"] == "Angareion/0.1.0"
+        assert headers["Authorization"] == f"Bearer {secret}"
+
+
 def test_non_json_response_becomes_backend_error():
     transport = FakeTransport()
     _issues_route(transport, [{"number": 10, "title": "general", "body": ""}])
