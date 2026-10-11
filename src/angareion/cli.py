@@ -15,6 +15,7 @@ from angareion.backend import (
     ChannelBackend,
     ChannelNotFoundError,
     Target,
+    parse_backend_time,
 )
 from angareion.client import POLL_INTERVAL_SECONDS, Angareion
 from angareion.config import (
@@ -262,6 +263,18 @@ def cmd_wait(
 
 
 def cmd_read(args: argparse.Namespace, config: Config, app: Angareion, token: str) -> int:
+    if args.since is not None:
+        # L-1: a bad --since is an input error (exit 1) with a format hint, not
+        # a backend surprise later on.
+        try:
+            parse_backend_time(args.since)
+        except ValueError:
+            sys.stderr.write(
+                "Error: --since must be an RFC 3339 timestamp such as "
+                f"2026-10-12T03:00:00Z, got '{args.since}'\n"
+            )
+            return EXIT_USAGE
+
     target = _target_from_args(args, config)
     batch = app.read(target, since=args.since)
 

@@ -302,6 +302,17 @@ def test_read_to_me_sees_messages_from_every_channel(cli_env, capsys):
     assert [m["id"] for m in data] == ["01AAAA00000000000000000000", "01BBBB00000000000000000000"]
 
 
+def test_read_since_must_be_rfc3339(cli_env, capsys):
+    """L-1: `--since yesterday` is an input error (1) with the expected format, not a backend error."""
+    ret = main(["read", "--channel", "general", "--since", "yesterday"], backend=cli_env["backend"])
+    assert ret == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "RFC 3339" in captured.err
+    assert "2026-10-12T03:00:00Z" in captured.err
+    assert not (cli_env["state_dir"] / "cursor-owner-org_worker__worker.json").exists()
+
+
 def test_read_unknown_channel_exits_1(cli_env, capsys):
     ret = main(["read", "--channel", "nowhere"], backend=cli_env["backend"])
     assert ret == 1
