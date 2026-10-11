@@ -75,6 +75,8 @@ class FakeAgentDriver:
         self.send_started = threading.Event()
         self.launch_gate: threading.Event | None = None
         self.launch_started = threading.Event()
+        self.stop_gate: threading.Event | None = None
+        self.stop_started = threading.Event()
 
     # -- AgentDriver ------------------------------------------------------
 
@@ -127,6 +129,9 @@ class FakeAgentDriver:
     def stop(
         self, handle: FakeHandle, *, graceful: bool = True, timeout: float = 30.0
     ) -> None:
+        self.stop_started.set()
+        if self.stop_gate is not None:
+            self.stop_gate.wait(timeout=5)
         self.stop_calls.append((handle, graceful, timeout))
         handle.stopped = True
         handle.busy = False

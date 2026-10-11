@@ -373,22 +373,27 @@ class SidecarCore:
                 rec.closing = True
                 self._clear_pending(rec)
                 return rec
+            rec.busy = True
             driver = self._drivers.get(rec.agent)
             handle = rec.handle
             waiting = rec.state == STATE_WAITING_QUOTA
             self._clear_pending(rec)
-        if rec.new_mode:
-            return self._close_new_mode(rec, driver, handle, waiting=waiting)
-        if waiting:
-            final = DriverState(kind=DRIVER_EXITED, reason="closed without a running agent")
-        else:
-            final = self._stop_handle(handle, driver)
-        with self._lock:
-            rec.state = STATE_EXITED
-            rec.exit = {"code": final.code, "reason": final.reason or "closed"}
-            rec.reopen_at = None
-            rec.reopen_job = None
-        return rec
+        try:
+            if rec.new_mode:
+                return self._close_new_mode(rec, driver, handle, waiting=waiting)
+            if waiting:
+                final = DriverState(kind=DRIVER_EXITED, reason="closed without a running agent")
+            else:
+                final = self._stop_handle(handle, driver)
+            with self._lock:
+                rec.state = STATE_EXITED
+                rec.exit = {"code": final.code, "reason": final.reason or "closed"}
+                rec.reopen_at = None
+                rec.reopen_job = None
+            return rec
+        finally:
+            with self._lock:
+                rec.busy = False
 
     def poke(self, id: str, text: str, interrupt: bool = False) -> AgentRecord:
         self._refuse_if_closing()
@@ -557,13 +562,13 @@ class SidecarCore:
 
     def _refresh_one(self, rec: AgentRecord, now: float | None = None) -> None:
         with self._lock:
+            if rec.busy:
+                return
             if rec.state not in ACTIVE_STATES or rec.handle is None:
                 return
             if rec.closing:
                 # close landed while a transition was in flight (M1/N1/N4): this
                 # refresh is the one that stops the process and marks exited.
-                if rec.busy:
-                    return
                 rec.busy = True
                 closing = True
             else:

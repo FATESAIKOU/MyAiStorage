@@ -376,6 +376,35 @@ def test_close_during_a_swap_stops_the_fresh_handle(tmp_path):
     assert core.list_jobs() == []  # no reopen job for a closed agent
 
 
+def test_close_held_in_stop_prevents_swap_and_leaves_no_live_process(tmp_path):
+    """H1 scenario close 先到、之後換把: close claims busy; driver reports quota during stop."""
+    core, driver, store, _source, clock, workdir = rig(tmp_path)
+    store.seed("agora:A")
+    core.open("t1", "claude-code", workdir, {"mode": "continue", "from": "agora:A"},
+              subscription={"id": "claude-personal"}, input="go")
+    first = driver.handles[0]
+    driver.stop_gate = threading.Event()
+
+    closing = threading.Thread(target=lambda: core.close("t1"))
+    closing.start()
+    assert driver.stop_started.wait(2)  # close is in flight, held inside driver.stop
+
+    # Driver reports quota and scheduler ticks while close is stopped in the gate
+    driver.force_state(first, "quota_exhausted", window="5h", resets_at=iso(clock.t + 3600))
+    core.tick()
+
+    # Release stop gate and wait for close to finish
+    driver.stop_gate.set()
+    closing.join(5)
+
+    rec = core.get("t1")
+    assert rec.state == STATE_EXITED
+    # No swap was triggered while close held busy: exactly 1 handle, and it is stopped
+    assert len(driver.handles) == 1
+    assert driver.handles[0].stopped is True
+    assert core.list_jobs() == []
+
+
 def test_busy_is_released_after_a_swap_allowing_another(tmp_path):
     """N5 scenario 換把完成後仍能再換: the second quota event is not ignored."""
     extra = F.claude_subscription("claude-extra", key="key-extra", priority=30)

@@ -40,6 +40,16 @@
   - [x] 3.6.4 打真 binary 的 loopback 測試放 `tests/integration/`（`SIDECAR_REAL_AGENT_TESTS=1` 才跑，預設 skip）
 - [ ] 3.4 PM 在 Mac 上用真的 agent 跑一次：open（fork）→ poke → poke＋中斷 → close；換把用 `FileSubscriptionSource` 模擬；**找一次真的額度用完，把原事件（去掉秘密）貼回 D6**，確認 `rejected` 與 opencode 的 reason
 - [x] 3.5 `new` 模式（D5，PM 確認中）：不經 agora 行程，用 `agora import --add-tag` 定期與 close 時存進 agora
+- [ ] 3.7 審查修正（架構師第 3 節審查；docs/review/sidecar-v0-section3.md）
+  - [x] 3.7.1 H1：close 在同一個鎖內設 busy，stop 做完才釋放；_refresh_one 略過 busy
+  - [ ] 3.7.2 M1：Claude 輔助訊號限 api-key、api_retry 等重試用盡或 is_error、文字要求 is_error
+  - [ ] 3.7.3 M3：只遮真正的秘密（key 與 config 內 apiKey），不遮 1／模型名／endpoint
+  - [ ] 3.7.4 M5：AgoraProcess 持有 pump deque 或 callable 取最新末幾行
+  - [ ] 3.7.5 L1：poke 時 driver 例外轉 409 agent_not_running 並標 exited
+  - [ ] 3.7.6 L3：agora 3.3 SIGTERM handler 在 Popen 前抵達記旗標，Popen 後轉送
+  - [ ] 3.7.7 H2：new 模式換把前 import 失敗也 stop、標 waiting-quota、scheduler 重試 import 後掛 job
+  - [ ] 3.7.8 M2：OpenCodeDriver 長逾時、狀態以背景送出在跑為準、錯誤寫進 exit.reason
+  - [ ] 3.7.9 M4：import 逾時 ≤ close_timeout、job open 禁 merge、docs/sidecar.md 修正公式與 L2/L4
 
 ## 4. 文件與收尾
 
