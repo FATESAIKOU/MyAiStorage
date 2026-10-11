@@ -92,7 +92,7 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** 起來之後收到那則文字；逾時還沒起來則回 409
 
 ### Requirement: 三種外部控制形式
-控制者 MUST 能用 HTTP 以三種形式下四個動作：立即（直接呼叫）、定時（job 的 `at`）、輪詢（job 的 `every`，可設 `until`）。job 的動作 MUST 只能是四個動作之一，否則 MUST 回 400；`at` 在過去 MUST 回 400。`GET /jobs` 的每一筆 MUST 有 `last_run` 與 `last_error`（不含 key）。HTTP MUST 只綁本機（127.0.0.1），不做認證。請求本文超過 1 MB MUST 回 413。`every` 的下一次執行時刻 MUST 是「上一次預定時刻加 every」與「現在」中較晚的，MUST NOT 在停頓之後補跑。
+控制者 MUST 能用 HTTP 以三種形式下四個動作：立即（直接呼叫）、定時（job 的 `at`）、輪詢（job 的 `every`，可設 `until`）。job 的動作 MUST 只能是四個動作之一，否則 MUST 回 400；`at` 在過去 MUST 回 400。`GET /jobs` 的每一筆 MUST 有 `last_run` 與 `last_error`（不含 key）。HTTP MUST 只綁本機（127.0.0.1），不做認證。請求本文超過 1 MB MUST 回 413。`every` 的下一次執行時刻 MUST 是原本節奏上第一個晚於現在的預定點，MUST NOT 在停頓之後補跑（只補執行一次，之後照原本節奏）。
 
 #### Scenario: 定時開啟
 - **WHEN** 掛一個 job：`at` 明天 9:00、動作 `open`
@@ -209,15 +209,27 @@ agent 的狀態轉移（刷新、換把、自動重開、job 的執行）MUST �
 - **WHEN** `POST /agents` 的本文是 2 MB
 - **THEN** 回 413，什麼都沒開
 
-### Requirement: 關閉遇到 starting
-`close` 遇到還在 `starting`（open 進行中）的 agent 時 MUST 記下 `closing`，open 完成後 MUST 立刻停下那個行程；`close` 的回應 MUST 照常（不回 409），最後的狀態 MUST 是 `exited`，而且行程確實被停掉、沒有殘留。
+### Requirement: 關閉遇到 starting 或轉移中
+`close` 遇到還在 `starting`（open 進行中）或正在做狀態轉移（`busy`，例如換把中）的 agent 時 MUST 記下 `closing`、回 200（不回 409）；做轉移的執行緒在寫回新的 handle 之前 MUST 檢查 `closing`，看到就停下剛啟動的行程並標 `exited`；scheduler 刷新時 ACTIVE 狀態的 agent 看到 `closing` MUST 停下並標 `exited`。最後的狀態 MUST 是 `exited`，行程確實被停掉、沒有殘留，也 MUST NOT 因為換把而復活。
 
 #### Scenario: 關閉遇到 starting
 - **WHEN** `open` 還在啟動 agent（`launch` 還沒回來）時，對同一個 id `close`，之後啟動完成
 - **THEN** `close` 回 200；`status` 最後是 exited；那個剛啟動的行程被停掉（`stop` 被呼叫一次），沒有殘留
 
+#### Scenario: 關閉與換把同時
+- **WHEN** t1 的換把進行中（舊的已經停下、`SessionStore.start` 還沒回來），對 t1 `close`，之後換把的新行程啟動完成
+- **THEN** `close` 回 200；新行程被停掉（`stop` 被呼叫），`status` 最後是 exited，不是 running／starting；`driver` 沒有留下沒被停的 handle
+
+#### Scenario: 刷新時看到 closing
+- **WHEN** t1 的 open 期間 `driver.state` 暫時丟了一次例外（狀態停在 starting），這時對 t1 `close`，之後 scheduler 刷新、driver 回 running
+- **THEN** 這次刷新停下 t1 的行程並標 exited；不會留下一個 `idle` 卻已被關閉的 agent
+
+#### Scenario: 換把完成後仍能再換
+- **WHEN** t1 換把成功之後又回報額度用完
+- **THEN** 會再換一次（上一次轉移的 `busy` 已經釋放）
+
 ### Requirement: 結束時先擋新請求再逐一關閉
-sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`POST /jobs` MUST 回 503；到期的 job MUST NOT 再執行（不會再開 agent）；停掉 scheduler 之後才逐一 close 每個 agent，全部做完才結束。`docs/sidecar.md` MUST 寫明 supervisor 的 kill timeout 要大於 `close_timeout × agent 數`。
+sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`POST /jobs` MUST 回 503；到期的 job MUST NOT 再執行（不會再開 agent）；停掉 scheduler（`join` 有逾時：`close_timeout` 加 5 秒；逾時只記 log）之後才逐一 close 每個 agent，全部做完才結束。scheduler 的某一次 tick 卡住 MUST NOT 讓 SIGTERM 卡住或讓 agent 成為孤兒。`docs/sidecar.md` MUST 寫明 supervisor 的 kill timeout 要大於 `close_timeout × agent 數`。
 
 #### Scenario: 關閉中到期的 job 不會再開 agent
 - **WHEN** sidecar 進入關閉中的同時，一個 `open` 的 job 剛好到期
@@ -226,6 +238,10 @@ sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`PO
 #### Scenario: 關閉中的新請求
 - **WHEN** 關閉進行中收到 `POST /agents`
 - **THEN** 回 503 `shutting_down`，什麼都沒開
+
+#### Scenario: scheduler 卡住時 SIGTERM 照樣關閉
+- **WHEN** scheduler 正在做的那一次 tick 卡在一個不回來的呼叫上，sidecar 收到 SIGTERM
+- **THEN** 等 `close_timeout + 5` 秒後記 log，仍逐一 close 每個 agent 並結束；沒有 agent 因此沒被關閉
 
 ### Requirement: 換把中途失敗
 換把途中任何一步失敗（停下之後的 `SessionStore.start`、`launch`、`get` 之後的任何例外）時，agent MUST 走 `waiting-quota`，MUST 掛一個 `now + retry_interval` 的 open job，MUST log 原因（不含 key），MUST NOT 讓 HTTP 回應變成 500，也 MUST NOT 影響其他 agent。
