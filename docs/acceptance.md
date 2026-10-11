@@ -258,6 +258,8 @@ python3 -c 'import fcntl,time; f=open("/tmp/agora-acc/state/upload.lock","a"); f
 | 12.15 | `Tab` 回清單，`Esc` | 篩選清掉、篩選框收起，焦點在清單；「另有 1 個…」也消失。12.11 勾的兩列**還勾著** |
 | 12.16 | `/`，打 `q` | 篩選框裡出現 `q`（前面還有剛才那個字），**沒有離開**互動模式；篩選邊打邊生效，看得到的列變很少或沒有。按 `Esc` 收掉 |
 | 12.17 | 游標移到 Q（✓ 的那一列），`Enter`；選完 agent 與工作目錄 | 多一個輸入框「自動同步間隔（分鐘，0 ＝ 不自動同步）」，裡面是 `5`；`Esc` → 回到清單，沒有開 agent |
+| 12.18 | 游標在 Q，`Enter`；跳出選 agent 視窗，下方有 `[ ] fork：複製成新的 Session 再接續`；按 `Tab` 移到勾選框，按 `空白` 勾選，說明變成「會多一個 …-fork 的新 Session，原本的不動」；按 `Enter` 確定，工作目錄與間隔都直接按 `Enter`。在 opencode 說一句自編的話後離開 | Agora 清單最上方多出一個 title 加了 `-fork` 的新 Session，原本的 Q 保持不動 |
+| 12.19 | 另開終端機執行 `agora continue session <Q> --agent opencode`（讓 Q 處於正在接續中狀態）；回到互動模式，游標在 Q，按 `Enter`；選 agent 視窗不勾 fork 直接按 `Enter` | 跳出「不能接續」說明視窗（內容提及正在接續中、要分岔請勾 fork）；按任意鍵回到清單，沒有問工作目錄也沒有開 agent。（驗收完後把另一個終端機的 opencode 關掉） |
 
 ## 13. 合併、中斷、沿用
 

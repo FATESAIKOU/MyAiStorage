@@ -1265,7 +1265,7 @@ def _continue(app, typed=None, *, escape=False, tab=False):
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             await pilot.press("enter")                       # 接續
-            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
+            await _wait(lambda: isinstance(app.screen, (tui.Choose, tui.Confirm)), pilot)
             await pilot.press("enter")                       # opencode
             await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
             await pilot.press("enter")                       # 在這裡開
@@ -1355,7 +1355,7 @@ def test_a_later_press_can_still_fix_what_was_typed():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
+            await _wait(lambda: isinstance(app.screen, (tui.Choose, tui.Confirm)), pilot)
             await pilot.press("enter")
             await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
             await pilot.press("enter")
@@ -1408,6 +1408,168 @@ def test_the_period_flag_is_only_there_when_there_is_an_answer():
          "--sync-period", "0.5"]]
     # nothing else takes one
     assert "--sync-period" not in tui.argv_for("merge", rows, "claude", None, "5")[0]
+
+
+def test_argv_for_continue_fork():
+    rows = [tui.Row("agora:a", ["a"], "a")]
+    assert tui.argv_for("continue", rows, "claude", "/w", "5", fork=False) == [
+        ["continue", "session", "agora:a", "--agent", "claude", "--dir", "/w", "--sync-period", "5"]
+    ]
+    assert tui.argv_for("continue", rows, "claude", "/w", "5", fork=True) == [
+        ["continue", "session", "agora:a", "--agent", "claude", "--dir", "/w", "--sync-period", "5", "--fork"]
+    ]
+
+
+def test_continue_default_unticked_does_not_pass_fork():
+    """Scenario: 預設不 fork: unticked by default, argv has no --fork."""
+    app, _ = _app([])
+    ran = []
+    app.outside = lambda argv: ran.append(argv) or 0
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            assert isinstance(app.screen, tui.Confirm)
+            assert "接續原本這個 Session" in app.screen.note
+            assert not app.screen.picked
+            await pilot.press("enter")                       # confirms default agent (opencode), unticked fork
+            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
+            await pilot.press("enter")                       # workdir
+            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            await pilot.press("enter")                       # sync period
+            await pilot.pause()
+    _run(go)
+    assert len(ran) == 1
+    argv = ran[0]
+    assert "--fork" not in argv
+    assert argv[:4] == ["continue", "session", "agora:01BBBBBBBBBBBBBBBBBBBBBBBB", "--agent"]
+
+
+def test_continue_ticked_fork_with_space_passes_fork_flag():
+    """Scenario: 勾 fork: ticking with space updates note_on, Enter continues with --fork."""
+    app, _ = _app([])
+    ran = []
+    app.outside = lambda argv: ran.append(argv) or 0
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            assert isinstance(app.screen, tui.Confirm)
+            # Focus checkbox, tick with space
+            await pilot.press("tab")
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.pause()
+            assert app.screen.picked
+            effect = str(app.screen.query_one("#effect", Static).render())
+            assert "會多一個 第二個-fork 的新 Session，原本的不動" in effect
+            await pilot.press("enter")                       # confirm
+            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
+            await pilot.press("enter")                       # workdir
+            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            await pilot.press("enter")                       # sync period
+            await pilot.pause()
+    _run(go)
+    assert len(ran) == 1
+    argv = ran[0]
+    assert argv[-1] == "--fork"
+
+
+def test_continue_already_continuing_without_fork_is_refused_early(monkeypatch):
+    """Scenario: 正在接續中、沒勾 fork: Tell explains it is continuing, does not ask dir or run agent."""
+    app, _ = _app([])
+    ran = []
+    app.outside = lambda argv: ran.append(argv) or 0
+    monkeypatch.setattr(store, "continuing", lambda paths, ulid: True)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            await pilot.press("enter")                       # unticked fork
+            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert isinstance(app.screen, tui.Tell)
+            assert app.screen.title_ == "✗ 不能接續"
+            lines_text = "\n".join(app.screen.lines)
+            assert "正在接續中，等它結束再接續；要分岔請在選 agent 的視窗勾 fork" in lines_text
+            assert "agora:01BBBBBBBBBBBBBBBBBBBBBBBB" in lines_text
+            await pilot.press("enter")                       # close Tell
+            await pilot.pause()
+            assert not isinstance(app.screen, tui.ModalScreen)
+    _run(go)
+    assert ran == []
+
+
+def test_continue_already_continuing_with_fork_proceeds_normally(monkeypatch):
+    """Scenario: 正在接續中、勾了 fork: continuing check bypassed, proceeds to workdir and --fork."""
+    app, _ = _app([])
+    ran = []
+    app.outside = lambda argv: ran.append(argv) or 0
+    monkeypatch.setattr(store, "continuing", lambda paths, ulid: True)
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            await pilot.press("tab")
+            await pilot.press("space")
+            await pilot.press("enter")                       # ticks fork and confirms
+            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)  # asked dir
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)  # asked period
+            await pilot.press("enter")
+            await pilot.pause()
+    _run(go)
+    assert len(ran) == 1
+    assert ran[0][-1] == "--fork"
+
+
+def test_continue_escape_at_agent_confirm_cancels_and_does_nothing():
+    """Scenario: Esc: Esc in Confirm dismisses (None, False), cancels whole continue."""
+    app, _ = _app([])
+    ran = []
+    app.outside = lambda argv: ran.append(argv) or 0
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, tui.ModalScreen)
+            assert app.tab == "agora"
+    _run(go)
+    assert ran == []
+
+
+def test_continue_confirm_tab_and_shift_tab_do_not_switch_app_tab():
+    """Tab and shift+tab only move between list and checkbox in Confirm, not switching app tabs."""
+    app, _ = _app([])
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            screen = app.screen
+            assert screen.focused == screen.query_one("OptionList")
+            await pilot.press("tab")
+            await pilot.pause()
+            assert screen.focused == screen.query_one("#extra")
+            assert app.tab == "agora"                        # did not switch to import
+            await pilot.press("shift+tab")
+            await pilot.pause()
+            assert screen.focused == screen.query_one("OptionList")
+            assert app.tab == "agora"
+            await pilot.press("escape")
+    _run(go)
 
 
 def test_editing_a_session_the_cloud_lost_is_refused_too():
