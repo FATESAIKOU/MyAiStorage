@@ -25,6 +25,8 @@
 
 - [ ] 3.10 ModelBroker 改成 LLMGateway 的租用形狀（env／unset／subscription、拒絕的 reason／earliest_reset、report_exhausted、renew）與額度用完的偵測、換把重開；env 不放命令列（D10）。等 LLMGateway 的 v0 scope 由本人確認、欄位定案後才做；request_lease 留 preferred_models／floor 的擴充點（D10，v0 不實作選擇邏輯）
 
+- [ ] 3.11 `sidecar agent run claude|opencode`（Mac 與 worker 共用的前景入口，跑同一段開 agent／監看／換把程序；D10「換把程序只有一份」）。和 LLMGateway 的交接點是它的 tasks 2.4；依賴 3.10 與 lgw 的固定 ref
+
 ## 4. 分發（改動在 MyLinuxPool，照它的規則；由 MyLinuxPool PM 負責，MyLinuxPool#52）
 
 - [ ] 4.1 `shared-configs/agent-sidecar/`：`unit.json`、`install.sh`（自帶 venv、systemd user unit、`--check`：檔案、herdr／Python 依賴、herdr server 可達、設定、token 能讀信道）、`files/`（unit 與範例設定）、`tests/`。
