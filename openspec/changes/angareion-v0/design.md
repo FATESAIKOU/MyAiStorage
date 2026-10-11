@@ -30,7 +30,7 @@
 - **對外的 `wait`＝在後端的 `check` 上輪詢**：`--timeout 0` 就是呼叫 `check` 一次（不阻塞）；給了逾時或不給，就每 15 秒呼叫一次 `check`，直到有新訊息或逾時（阻塞）。後端只要提供「現在有沒有」，阻塞由函式庫層處理；所以對外仍是四個動作。
 - `GitHubIssuesBackend`：信道是一個 private repo；channel＝issue（標題是 channel 名，內文 front matter 記成員）；訊息＝issue 的留言。
   - 「寄給我的」：repo 層的留言列表（`/repos/{owner}/{repo}/issues/comments?since=…`），一次就涵蓋所有 channel，再依 `to` 過濾。
-  - `check`：條件式請求（`If-None-Match`／ETag），304 就是沒有；不耗 GitHub 的額度。
+  - `check`：條件式請求（`If-None-Match`／ETag），304 就是沒有；不耗 GitHub 的額度。ETag **只放在這次 `wait` 行程的記憶體**，不寫進游標（否則 `wait` 會動到游標，下一次 `read` 會因為 304 漏讀）。
   - 阻塞等待時每 15 秒查一次（固定間隔，不另做限流）。
 - v1 的 GitHub 後端（HTTP transport 可注入、ETag、分頁、`mask_token`）移植過來；拿掉 ack、`RateLimiter`、`rebuild_from_backend`。
 
@@ -41,18 +41,19 @@
 
 ### D4 游標與本機狀態
 
-- 只有游標：`~/.local/state/angareion/cursor-<身分>.json`（`ANGAREION_STATE_DIR` 可覆寫），內容是每個目標最後讀到的時刻與 ETag。刪掉就從頭讀；不需要從信道重建別的東西。
+- 只有游標：`~/.local/state/angareion/cursor-<身分>.json`（`ANGAREION_STATE_DIR` 可覆寫），內容是每個目標最後讀到的那則訊息的 `id`（ULID）與 `at`。刪掉就從頭讀；不需要從信道重建別的東西。
+- GitHub 的 `since` 是秒級、含邊界、依 `updated_at`（留言被編輯也會再出現）。所以 `read` 以游標的 `at` 當 `since` 去查，再**依訊息 `id` 去重**（已經讀過的 id 不再回傳；同一秒的多則都要讀到）。ETag 不屬於游標（D2）。
 
 ### D5 設定與 token
 
 - 設定：`~/.config/angareion/config.json`（`ANGAREION_CONFIG` 可覆寫）：`channel_repo`、`identity`、`token_file`。
-- token 的位置，依序：`ANGAREION_TOKEN_FILE` → 設定的 `token_file` → `~/.config/angareion/token`。檔案只能擁有者有權限（0400 或 0600），否則拒絕（exit 2）。Angareion 不寫死任何路徑；worker 上由 MyLinuxPool 的 Angareion 能力以 env 設 `ANGAREION_TOKEN_FILE` 指到池掛進來的 secret 檔（`/run/mlp-secrets/<GitHub secret 名>`，0400、uid 1000，檔名照池的規則，由本人命名）。
+- token 的位置，依序：`ANGAREION_TOKEN_FILE` → 設定的 `token_file` → `~/.config/angareion/token`。檔案只能擁有者有權限（0400 或 0600），否則拒絕（exit 2）。Angareion 不寫死任何環境專屬的路徑；由外部以 `ANGAREION_TOKEN_FILE` 指定（worker 上怎麼做見 `docs/angareion.md` 的「給 MyLinuxPool 的需求」）。第二、三層只是方便本機使用的實作細節，不是介面的一部分。
 - token 不出現在任何輸出、log、錯誤訊息；v1 的 `load_token`、`mask_token` 移植過來。
 
 ### D6 給 agent 的說明（skill）
 
 - `skills/angareion/SKILL.md`：什麼時候用、四個指令的用法、身分與 channel、閒著時用 `angareion wait --timeout <秒>` 阻塞地等（不耗模型額度）、收到 urgency 高的訊息怎麼辦。
-- 怎麼送到 agent：MyLinuxPool 建映像時，用 tool-pins 裡同一個 sha 取 repo 的 `skills/angareion/SKILL.md`（版本和裝的 `angareion` 一致），放到各 agent 讀得到的位置（Claude Code 是 `~/.claude/skills/angareion/SKILL.md`；opencode 的位置在實作時確認後寫進 `docs/angareion.md`）。Angareion 不為此加子指令，對外仍只有四個介面。
+- 怎麼送到 agent 是使用它的環境的事（需求在 `docs/angareion.md`）。Angareion 不為此加子指令，對外仍只有四個介面。
 
 ## Risks / Trade-offs
 
