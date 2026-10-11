@@ -6,7 +6,7 @@ AiCompany 期 1 需要一個讓 agent、程式或人「上 Slack 留言、讀留
 - 只有四個介面：建 channel、送訊息、確認有沒有新訊息（可以阻塞地等，也可以不阻塞直接回）、讀訊息；
 - 把後端抽象起來，這次用 GitHub API＋Issues 實作；
 - 現在不做限流；
-- Angareion 獨立：設計裡不提 sidecar，sidecar 也不依賴它；
+- Angareion 是獨立的工具，不依賴其他元件；
 - agent 用的 Angareion 能力（指令＋說明）與信道 token 由 MyLinuxPool 的「Angareion 能力」分發，profile 指定要哪些能力；Angareion 只定 token 檔的位置與讀法。
 
 這個 change 取代 v1 的 `angareion-a2a-v0`（只在 branch `aicompany-p1`，沒合進 main）。v1 寫好的程式可以沿用的就移植（訊息模型、GitHub 後端、token 讀取）。

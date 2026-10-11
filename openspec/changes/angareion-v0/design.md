@@ -6,7 +6,7 @@
 
 **Goals：** 四個介面（必要而且只有這些）；後端可以替換；token 不外洩；agent 閒著時能阻塞地等新訊息而不耗模型額度。
 
-**Non-Goals：** 限流、ack、已讀回條、群組成員管理、推播、和 sidecar 的任何整合。
+**Non-Goals：** 限流、ack、已讀回條、群組成員管理、推播、和其他元件的整合。
 
 ## Decisions
 
@@ -26,10 +26,11 @@
 
 ### D2 後端介面與 GitHub Issues 實作
 
-- `ChannelBackend`（Protocol）：`create_channel(name, members) → Channel`、`send(channel, message) → id`、`has_new(target, cursor) → bool`、`read(target, cursor) → (messages, cursor)`。`wait` 的阻塞是 CLI／函式庫層用 `has_new` 輪詢做的，後端只要提供「現在有沒有」。
+- `ChannelBackend`（Protocol）就是那四個動作：`create_channel(name, members) → Channel`、`send(channel, message) → id`、`check(target, cursor) → bool`（確認有沒有新訊息）、`read(target, cursor) → (messages, cursor)`。
+- **對外的 `wait`＝在後端的 `check` 上輪詢**：`--timeout 0` 就是呼叫 `check` 一次（不阻塞）；給了逾時或不給，就每 15 秒呼叫一次 `check`，直到有新訊息或逾時（阻塞）。後端只要提供「現在有沒有」，阻塞由函式庫層處理；所以對外仍是四個動作。
 - `GitHubIssuesBackend`：信道是一個 private repo；channel＝issue（標題是 channel 名，內文 front matter 記成員）；訊息＝issue 的留言。
   - 「寄給我的」：repo 層的留言列表（`/repos/{owner}/{repo}/issues/comments?since=…`），一次就涵蓋所有 channel，再依 `to` 過濾。
-  - `has_new`：條件式請求（`If-None-Match`／ETag），304 就是沒有；不耗 GitHub 的額度。
+  - `check`：條件式請求（`If-None-Match`／ETag），304 就是沒有；不耗 GitHub 的額度。
   - 阻塞等待時每 15 秒查一次（固定間隔，不另做限流）。
 - v1 的 GitHub 後端（HTTP transport 可注入、ETag、分頁、`mask_token`）移植過來；拿掉 ack、`RateLimiter`、`rebuild_from_backend`。
 

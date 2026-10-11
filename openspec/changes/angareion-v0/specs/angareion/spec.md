@@ -33,7 +33,7 @@ Angareion 對外 MUST 只有四個介面：建 channel、送訊息、確認有�
 - **THEN** exit 1，什麼都沒送
 
 ### Requirement: 後端可以替換
-四個介面 MUST 經由一個後端介面（建 channel、送、現在有沒有新的、讀）實作；這次的實作是 GitHub API＋Issues（channel＝issue、訊息＝留言）。換後端時，指令與訊息格式 MUST NOT 改變。
+四個介面 MUST 經由一個後端介面實作，後端也是那四個動作（建 channel、送、確認有沒有新訊息、讀）；對外的 `wait` 是在後端「確認有沒有新訊息」上輪詢（不阻塞＝確認一次）；這次的實作是 GitHub API＋Issues（channel＝issue、訊息＝留言）。換後端時，指令與訊息格式 MUST NOT 改變。
 
 #### Scenario: 用假後端
 - **WHEN** 測試以記憶體裡的假後端執行四個指令
