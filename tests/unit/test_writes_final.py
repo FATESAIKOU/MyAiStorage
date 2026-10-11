@@ -15,6 +15,11 @@ mutation-checked in a copy: taking the behaviour away has to turn one of them re
   is uploading, 「N 筆沒上傳成功」when nobody is and they are still there.
 * **F4** - the sync in front of a batch import is throttled: two imports inside five
   minutes list Drive once.
+
+And, from change `continue-fork` (tasks 1.1, F1 there), the other half of the same
+rule: a session **Drive has never confirmed** - still waiting in the outbox, unmarked -
+stays new when it is written back, so it goes up as itself instead of being saved under
+a new id as though another machine had deleted it.
 """
 
 from __future__ import annotations
@@ -59,8 +64,13 @@ def _marks(monkeypatch) -> list[str]:
 
     def spy(folder, kind=""):
         # `kind` is the write's sort, added for G2: it only matters if the session is
-        # gone by the time it is sent (a continue's rescue is a continue)
-        marked.append(folder.name)
+        # gone by the time it is sent (a continue's rescue is a continue).
+        # Since the one-step stage, the mark lands on the tmp folder that is about to
+        # go in, not the one already there - the ULID is what the decision is about.
+        name = folder.name
+        if name.startswith(".tmp-"):
+            name = name[len(".tmp-"):]
+        marked.append(name)
         return real(folder, kind)
     monkeypatch.setattr(store, "mark_update", spy)
     return marked
@@ -299,3 +309,252 @@ def test_the_lock_is_free_after_the_background_and_after_asking_about_it(env, ca
     again = store.hold_upload_lock(paths)
     assert again is not None, "uploader_is_running 問完沒有放開上傳鎖"
     again.close()
+
+
+# --- change continue-fork 1.1: what Drive has never confirmed is still new ------
+
+
+def _drive() -> Path:
+    """The fake Drive's root. `env` here is test_cli's fixture, which is the agent."""
+    return Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions"
+
+
+def test_writing_back_a_session_drive_never_had_goes_up_as_itself(env, capsys, monkeypatch, tmp_path):
+    """local-first-writes MODIFIED「寫回還沒被 Drive 確認過的 Session 不算更新既有 id」.
+
+    Offline: import X, edit X, continue X - all three while X is still waiting in the
+    outbox and Drive has never heard of it. Then let the upload through. Marking those
+    writes `.update` sent the uploader looking for an id that was never there, so it
+    saved X's work as a session of its own and X never reached Drive at all. What has
+    to be on Drive is X, with the edit and the continue in it - no other session, and
+    nothing said about another machine having deleted anything.
+
+    Another session is on Drive first, so the listing the uploader compares against is
+    a complete one: with an empty Drive there is no `sessions/` to list, `list_sessions`
+    answers None, and「Drive 上沒有它」is not evidence of anything (N12) - the rescue
+    would never even be reached.
+    """
+    from agora import header as h
+
+    paths = store.Paths.from_env()
+    env.sessions["ses_b"] = ["另一個來源", "好"]
+    _, other, _ = _import(capsys, "ses_b")
+    assert (_drive() / other.split(":")[1]).is_dir(), "Drive 先有別的 Session"
+
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")            # offline from here on
+    code, out, _ = _import(capsys)
+    ulid = out.split(":")[1]
+    assert code == 3, "offline: the import is safe in the outbox, and says so"
+    assert ulid in store.outbox_ulids(paths)
+
+    code, _, err = run(capsys, "edit", "session", out, "--header", "title=離線時改的")
+    assert code == 3, err
+    code, same, err = run(capsys, "continue", "session", out, "--agent", "opencode",
+                          "--dir", str(tmp_path))
+    assert code == 3, err
+    assert same == out, "continue 寫回同一個 id"
+    assert env.launched, "the agent really ran"
+    assert ulid in store.outbox_ulids(paths)
+
+    monkeypatch.delenv("FAKE_RCLONE_FAIL")
+    capsys.readouterr()
+    left = store.upload_batch(store.Drive(paths), paths)
+    err = capsys.readouterr().err
+
+    assert left == [], f"沒東西該留在 outbox：{left}"
+    assert "已被別台刪除" not in err, f"Drive 從來沒有 X，不該說它被別台刪掉：{err}"
+    assert store.take_notices(paths) == [], "沒有別存，就沒有下一次要說的事"
+    on_drive = sorted(p.name for p in _drive().iterdir() if p.is_dir())
+    assert on_drive == sorted([ulid, other.split(":")[1]]), \
+        f"Drive 上應該就是 X 本身加本來就在的那個，沒有另存：{on_drive}"
+    text = (_drive() / ulid / "session.md").read_text(encoding="utf-8")
+    hdr, body = h.split_document(text)
+    assert hdr["id"] == f"agora:{ulid}", "上傳的是 X 本身"
+    assert hdr["title"] == "離線時改的" and "接著做完了" in body, "離線期間的兩次寫回都在"
+    assert [p["id"] for p in h.agora_of(hdr).get("parents") or []] == [], "X 沒有另存成別的"
+
+
+def test_a_session_drive_really_lost_is_still_saved_as_a_new_one(env, capsys, monkeypatch):
+    """The other half of that rule, and the one it must not take away: an id Drive had
+    and lost is an update, and an update whose id is gone is saved under a new one.
+
+    X is on Drive, an edit of it is staged while we cannot reach Drive, another machine
+    deletes X there, and then the upload goes through. Nothing in the outbox says X was
+    never confirmed - there is no entry for it at all - so the marker is written and the
+    rescue runs, exactly as before.
+    """
+    import shutil
+    from agora import header as h
+
+    paths = store.Paths.from_env()
+    _, out, _ = _import(capsys)
+    ulid = out.split(":")[1]
+    assert (_drive() / ulid).is_dir()
+
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")
+    code, _, err = run(capsys, "edit", "session", out, "--header", "title=改過了")
+    assert code == 3, err
+    assert store._is_update(paths.outbox / ulid), "Drive 有過這個 id，edit 要放 .update"
+
+    shutil.rmtree(_drive() / ulid)                             # another machine deletes it
+    monkeypatch.delenv("FAKE_RCLONE_FAIL")
+    capsys.readouterr()
+
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    err = capsys.readouterr().err
+    assert "已被別台刪除" in err, f"真的被刪掉的還是該另存：{err}"
+    assert not (_drive() / ulid).exists(), "X 沒有被傳回去"
+    new_ids = sorted(p.name for p in _drive().iterdir() if p.is_dir())
+    assert len(new_ids) == 1 and new_ids[0] != ulid
+    hdr, _ = h.split_document(
+        (_drive() / new_ids[0] / "session.md").read_text(encoding="utf-8"))
+    assert [p["id"] for p in h.agora_of(hdr)["parents"]] == [f"agora:{ulid}"]
+    assert hdr["title"] == "改過了", "另存的是這次改過的那一份"
+
+
+def test_two_offline_writes_then_a_later_delete_still_rescues(env, capsys, monkeypatch):
+    """C3: the second write is the one the rule could get wrong.
+
+    X is on Drive; while we cannot reach it, two writes land on it. The second one finds
+    an X sitting in the outbox - so "there is an entry, so Drive has it" is exactly the
+    reasoning that would exempt it, put it back on Drive, and quietly undo another
+    machine's deletion. The entry says what it is, and it says Drive has this id, so the
+    rescue still happens.
+    """
+    import shutil
+    from agora import header as h
+
+    paths = store.Paths.from_env()
+    _, out, _ = _import(capsys)
+    ulid = out.split(":")[1]
+
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")
+    for title in ("第一次改", "第二次改"):
+        code, _, err = run(capsys, "edit", "session", out, "--header", f"title={title}")
+        assert code == 3, err
+        assert store._is_update(paths.outbox / ulid), \
+            f"outbox 裡已經有 X（{title}）：Drive 本來就有這個 id，不該被當成還沒確認過"
+
+    shutil.rmtree(_drive() / ulid)                             # another machine deletes it
+    monkeypatch.delenv("FAKE_RCLONE_FAIL")
+    capsys.readouterr()
+
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    err = capsys.readouterr().err
+    assert "已被別台刪除" in err, f"被刪掉的 X 還是要另存，不能傳回去：{err}"
+    assert not (_drive() / ulid).exists(), "X 沒有被傳回去，別台的刪除沒有被撤銷"
+    new_ids = sorted(p.name for p in _drive().iterdir() if p.is_dir())
+    assert len(new_ids) == 1 and new_ids[0] != ulid, new_ids
+    hdr, _ = h.split_document(
+        (_drive() / new_ids[0] / "session.md").read_text(encoding="utf-8"))
+    assert [p["id"] for p in h.agora_of(hdr)["parents"]] == [f"agora:{ulid}"]
+    assert hdr["title"] == "第二次改", "另存的是最後寫到的那一份"
+
+
+def test_an_offline_import_updated_in_place_goes_up_as_itself(env, capsys, monkeypatch):
+    """C4: the same rule on the third road into `_save` - an import whose agent session
+    moved on, written back over the id the first import made.
+
+    Nothing about this one looks like a fresh session: same ULID, same source, and by now
+    the outbox has an entry for it. But Drive has never confirmed it, so it goes up as X,
+    and it is X with the new messages - not a second copy saved under a new id.
+    """
+    from agora import header as h
+
+    paths = store.Paths.from_env()
+    env.sessions["ses_b"] = ["另一個來源", "好"]
+    _, other, _ = _import(capsys, "ses_b")                    # Drive has to have a listing
+
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")
+    _, out, _ = _import(capsys, "ses_a")
+    ulid = out.split(":")[1]
+    env.sessions["ses_a"].append("來源端又多了一則")            # the agent session moved on
+    code, again, err = _import(capsys, "ses_a")
+
+    assert code == 3, err
+    assert again == out, "同一個來源原地更新，還是同一個 id"
+    monkeypatch.delenv("FAKE_RCLONE_FAIL")
+    capsys.readouterr()
+    left = store.upload_batch(store.Drive(paths), paths)
+    err = capsys.readouterr().err
+
+    assert left == [], f"沒東西該留在 outbox：{left}"
+    assert "已被別台刪除" not in err, f"Drive 從來沒有 X，不該說它被別台刪掉：{err}"
+    on_drive = sorted(p.name for p in _drive().iterdir() if p.is_dir())
+    assert on_drive == sorted([ulid, other.split(":")[1]]), \
+        f"Drive 上應該就是 X 本身加本來就在的那個，沒有另存：{on_drive}"
+    text = (_drive() / ulid / "session.md").read_text(encoding="utf-8")
+    hdr, body = h.split_document(text)
+    assert hdr["id"] == f"agora:{ulid}", "上傳的是 X 本身"
+    assert "來源端又多了一則" in body, "X 是最新的那份"
+
+
+def test_a_write_that_lands_while_the_entry_is_being_swapped_in(env, monkeypatch):
+    """C11: `stage` renames the old entry aside and only then moves the new one in, so
+    for a moment there is no `outbox/<ULID>` at all. A second writer asking in that window
+    used to be told「Drive 從來沒有 X」and marked `.update` - the very bug the rule exists
+    to stop, back on a #28 periodic write-back racing an `edit` in another terminal. The
+    entry being swapped in is the answer, and it is still in the outbox under `.old-`.
+
+    Asked at the instant the rename happened - between the two renames, not after the
+    swap - because after it there is an entry again and the question is answered the
+    ordinary way.
+    """
+    from agora import header as h
+
+    paths = store.Paths.from_env()
+    hdr = {"type": "Session", "title": "換資料夾", "tags": [], "id": f"agora:{h.new_ulid()}",
+           "refs": [], "case": None,
+           "agora": {"header": 2, "created_at": "2026-10-02T00:00:00Z",
+                     "updated_at": "2026-10-02T00:00:00Z", "relation": "import", "parents": [],
+                     "source": {"agent": "opencode", "session_id": "ses_a",
+                                "created_at": "2026-10-01T00:00:00Z"}}}
+    ulid = hdr["id"].split(":")[1]
+    store.stage(paths, hdr, "## user\n第一版\n", b'{"v": 1}')
+    assert store.never_confirmed(paths, ulid)
+
+    asked: list[bool] = []
+    real_rename = Path.rename
+
+    def rename_and_ask(self, target):
+        moved = real_rename(self, target)
+        if self.name == ulid and Path(target).name == f".old-{ulid}":
+            asked.append(store.never_confirmed(paths, ulid))    # the instant in between
+        return moved
+
+    monkeypatch.setattr(Path, "rename", rename_and_ask)
+    store.stage(paths, hdr, "## user\n第二版\n", b'{"v": 2}')
+
+    assert asked == [True], "換資料夾的那一瞬間，X 還在 outbox 裡（換名），不是沒有了"
+    assert (paths.outbox / ulid).is_dir() and store.never_confirmed(paths, ulid)
+
+    # and the other half: an entry that says Drive has this id is still an update there
+    store.mark_update(paths.outbox / ulid)
+    asked.clear()
+    store.stage(paths, hdr, "## user\n第三版\n", b'{"v": 3}')
+    assert asked == [False], "那個換名中的項目說了 Drive 有這個 id，就不能豁免"
+
+def test_never_confirmed_is_only_about_an_entry_nobody_claimed(env):
+    """What `never_confirmed` answers, one condition at a time.
+
+    Every one of the three is load-bearing: the marker is what says Drive already had
+    this id, `.done-<ULID>` says somebody is confirming it right now (and then we cannot
+    tell), and an id with no entry here has been confirmed already - or was never ours.
+    """
+    from agora import header as h
+
+    paths = store.Paths.from_env()
+    fresh = _stage_one(paths, "Drive 從來沒有")
+    assert store.never_confirmed(paths, fresh), "outbox 裡沒標成更新的，就是還沒確認過的"
+
+    claimed = _stage_one(paths, "已經標成更新")
+    store.mark_update(paths.outbox / claimed)
+    assert not store.never_confirmed(paths, claimed), "有人說過 Drive 有這個 id"
+
+    comparing = _stage_one(paths, "上傳程序正在比對")
+    (paths.outbox / f".done-{comparing}").mkdir()
+    assert not store.never_confirmed(paths, comparing), \
+        "有人正在比對這個 id，就不能說它還沒被確認過"
+
+    assert not store.never_confirmed(paths, h.new_ulid()), \
+        "outbox 裡沒有這個 id：早就被確認過了，或者從來不是這裡的"

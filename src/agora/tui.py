@@ -556,15 +556,26 @@ def import_preview(agent, session_id: str, full: bool = False, paths: store.Path
     return Preview(None, f"最後一則（{role}），整份對話載入中…", f"## {role}\n{text}")
 
 
-def argv_for(action: str, rows: list[Row], agent: str | None, workdir: str | None) -> list[list[str]]:
-    """The command-mode invocations an action stands for."""
+def argv_for(action: str, rows: list[Row], agent: str | None, workdir: str | None,
+             sync_period: str | None = None, fork: bool = False) -> list[list[str]]:
+    """The command-mode invocations an action stands for.
+
+    `sync_period` is the answer to the question the interactive mode asks before it
+    continues anything, in the user's own text. It is always passed on when there is
+    one - including 0, which is a real answer ("never sync on your own") and not the
+    same thing as leaving the command to decide (design「互動模式：接續前確認同步
+    間隔」). `fork` says whether to duplicate the session first (--fork), chosen in the
+    continue window (design「tui-continue-fork」).
+    """
     if action == "import":
         # One command for every session of that agent: the command mode syncs once
         # and imports them one by one, with a k/N line for each (T1 R2).
         return [["import", "session", "--agent", rows[0].agent,
                  *[a for r in rows for a in ("--external-session-id", r.key.split(":", 1)[1])]]]
     first = rows[0].key if rows else ""
-    return {"continue": [["continue", "session", first, "--agent", agent, "--dir", workdir]],
+    return {"continue": [["continue", "session", first, "--agent", agent, "--dir", workdir,
+                          *(["--sync-period", sync_period] if sync_period is not None else []),
+                          *(["--fork"] if fork else [])]],
             "merge": [["merge", "session", *[r.key for r in rows], "--agent", agent]],
             "edit": [["edit", "session", first]],
             "delete": [["delete", "session", *[r.key for r in rows], "--yes"]],
@@ -721,22 +732,67 @@ class Choose(ModalScreen):
         self.dismiss(event.option_index)
 
 
+#: How often `agora continue` writes the conversation back while the agent runs, in
+#: minutes - what the interactive mode offers when the user just presses Enter (the
+#: person's 10-10 decision, design「互動模式：接續前確認同步間隔」). 0 is an answer, not
+#: an absence, so the value always travels to the command mode.
+SYNC_PERIOD_DEFAULT = 5
+SYNC_PERIOD_TITLE = "自動同步間隔（分鐘，0 ＝ 不自動同步）"
+SYNC_PERIOD_PROBLEM = "⚠ 請填不小於 0 的數字（分鐘；0 ＝ 不自動同步）"
+
+
+def sync_period_problem(value: str) -> str | None:
+    """Why this cannot be a sync period, or None when it can (0.5 is 30 seconds).
+
+    Anything `float()` reads that is at least 0 and finite. Written as a range rather
+    than `< 0` because `nan` and `inf` parse too, and neither belongs in a value the
+    command mode is about to multiply by 60. The command mode checks it again for
+    itself (1.2); this only keeps the agent from being opened on nonsense.
+    """
+    try:
+        minutes = float(value.strip())
+    except ValueError:
+        return SYNC_PERIOD_PROBLEM
+    return None if 0 <= minutes < float("inf") else SYNC_PERIOD_PROBLEM
+
+
 class AskText(ModalScreen):
+    """One line of text, submitted with Enter.
+
+    `check` is optional and is what makes this a question with an answer it can
+    refuse: it is called with what was typed and returns None to go ahead, or the
+    line to show instead of closing. Then the window stays open with the text still
+    in it - the Input keeps what was typed and is focused again, so the user is one
+    edit away from a value that works (design「互動模式：接續前確認同步間隔」).
+    Without `check` nothing is added to the window and every other caller sees
+    exactly what it saw before.
+
+    The box takes the focus from `App.AUTO_FOCUS`, which is what focuses the first
+    focusable widget on a new screen; nothing here has to ask for it.
+    """
     BINDINGS = [Binding("escape", "dismiss(None)", "取消")]
 
-    def __init__(self, title: str, text: str):
+    def __init__(self, title: str, text: str, check=None):
         super().__init__()
-        self.title_, self.text = title, text
+        self.title_, self.text, self.check = title, text, check
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="box"):
             yield Static(self.title_, classes="box-title")
             yield Input(self.text)
+            if self.check is not None:
+                yield Static("", id="ask-problem", classes="note")
             # Nothing to choose between here: Enter submits what was typed (review E3)
             yield Static("Enter 確定   Esc 取消", classes="hint")
 
     @on(Input.Submitted)
     def done(self, event: Input.Submitted) -> None:
+        if self.check is not None:
+            problem = self.check(event.value)
+            if problem:
+                self.query_one("#ask-problem", Static).update(problem)
+                self.query_one(Input).focus()      # still typing, with what they wrote
+                return
         self.dismiss(event.value)
 
 
@@ -2002,15 +2058,49 @@ class AgoraApp(App):
         row = self.current()
         if await self._refuse(row, "接續"):
             return
-        pick = await self.push_screen_wait(Choose("用哪個 agent 接續？", ["opencode", "claude"]))
-        if pick is None:
+        # Imported here to avoid a circular import with cli.
+        from agora.cli import _ulid_of
+        ulid = _ulid_of(row.key)
+        title = (self.index.header(ulid) or {}).get("title") or (row.cells[1] if len(row.cells) > 1 else row.key) or row.key
+        ans = await self.push_screen_wait(Confirm(
+            "用哪個 agent 接續？", ["opencode", "claude"],
+            note="接續原本這個 Session",
+            extra="fork：複製成新的 Session 再接續",
+            note_on=f"會多一個 {title}-fork 的新 Session，原本的不動",
+        ))
+        if ans is None or ans[0] is None:
+            return
+        pick, fork = ans
+        if not fork and store.continuing(self.paths, ulid):
+            await self.push_screen_wait(Tell(
+                "不能接續",
+                f"{row.key} 正在接續中，等它結束再接續；要分岔請在選 agent 的視窗勾 fork",
+                ok=False,
+            ))
             return
         workdir = await self.ask_dir(row)
         if workdir is None:
             return
-        code = self.outside(argv_for("continue", [row], ("opencode", "claude")[pick], workdir)[0])
+        period = await self.ask_sync_period()
+        if period is None:
+            return                     # Esc at the question cancels the whole continue
+        code = self.outside(argv_for("continue", [row], ("opencode", "claude")[pick], workdir,
+                                     period, fork=fork)[0])
         self.reload()
         self.say("完成" if code == 0 else "接續沒有成功，訊息在上一個畫面", failed=code != 0)
+
+    async def ask_sync_period(self) -> str | None:
+        """How often to write the conversation back while the agent runs, in minutes.
+
+        Asked before the agent is opened rather than left to the command's default,
+        because 0 - never sync on your own - is a real answer and an absent flag is
+        not the same thing (design「互動模式：接續前確認同步間隔」). Esc means the whole
+        continue is off; a value that is not a number keeps the window open with the
+        reason on it.
+        """
+        typed = await self.push_screen_wait(AskText(
+            SYNC_PERIOD_TITLE, str(SYNC_PERIOD_DEFAULT), check=sync_period_problem))
+        return typed.strip() if isinstance(typed, str) else None
 
     async def ask_dir(self, row: Row) -> str | None:
         """Where to open the agent: the source's directory when it exists here, and always changeable (review T7)."""

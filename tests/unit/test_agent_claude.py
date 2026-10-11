@@ -317,6 +317,352 @@ def test_native_of_empty_turns_is_still_valid(claude_env):
     assert doc["main"] == [] and C.ADAPTER.turns(C.ADAPTER.native([])) == []
 
 
+# --- append_native (F4: the fork goes on A's own conversation) --------------
+
+FORK = [("user", ["ZZFORK 從 agora:01ABC（title: 表格排版）fork"]),
+        ("assistant", ["ZZFORK 知道了，等你的指示。"])]
+
+#: what a session file really ends with: bookkeeping, and not one of these lines
+#: has a uuid (design「接在原生 raw 後面」).
+BOOKKEEPING = ['{"type": "summary", "sessionId": "s", "summary": "尾部的簿記"}',
+               '{"type": "last-prompt", "sessionId": "s", "lastPrompt": "x", "leafUuid": "u7"}',
+               '{"type": "cost-state", "sessionId": "s", "totalCostUSD": 0.02}',
+               '{"type": "mode", "sessionId": "s", "mode": "default"}']
+
+
+def unpack(raw: bytes) -> dict:
+    return json.loads(raw.decode("utf-8"))
+
+
+def main_lines(raw: bytes) -> list[str]:
+    return unpack(raw)["main"]
+
+
+def objects(raw: bytes) -> list[dict]:
+    return [json.loads(line) for line in main_lines(raw)]
+
+
+def walked_back(line: dict, by_uuid: dict) -> list[str]:
+    """The uuids `claude --resume` follows, newest first, as far back as it goes."""
+    seen, current = [], line.get("uuid")
+    while current and current not in seen:
+        seen.append(current)
+        parent = by_uuid.get(current)
+        current = parent.get("parentUuid") if isinstance(parent, dict) else None
+    return seen
+
+
+def repacked(raw: bytes, extra_lines: list[str], drop: str | None = None) -> bytes:
+    lines = [line for line in main_lines(raw)
+             if drop is None or json.loads(line).get("uuid") != drop]
+    return C._pack_raw(lines + extra_lines, unpack(raw)["aux"])
+
+
+def added(out: bytes, original: bytes) -> list[dict]:
+    """The lines `append_native` added, in order (the stand-in reply is one of them)."""
+    return objects(out)[len(main_lines(original)):]
+
+
+def test_append_native_hangs_the_new_turns_off_the_last_uuid_line(claude_env):
+    """F4, the part that fails silently: the anchor is the last line that has a
+    uuid, not the last line. A real file ends with summary / last-prompt /
+    cost-state / mode, and `--resume` walks parentUuid back from the newest leaf -
+    hang the fork off the tail and the agent opens a conversation with none of A in
+    it, and nothing says so."""
+    raw = repacked(C.ADAPTER.export(SID).raw, BOOKKEEPING)
+    last_line_of_a = objects(raw)[-len(BOOKKEEPING) - 1]
+    assert last_line_of_a["type"] == "user"        # A ends on a question
+    added_lines = added(C.ADAPTER.append_native(raw, FORK), raw)
+    assert added_lines[0]["parentUuid"] == last_line_of_a["uuid"]
+    assert added_lines[0]["message"]["content"][0]["text"] == base.NO_REPLY
+
+
+def test_append_native_chains_back_to_the_first_line_of_a(claude_env):
+    """The walk itself: from the newest leaf, every parentUuid back to A's first
+    line resolves, so the fork's turns sit on the whole conversation and not on a
+    fragment of it."""
+    raw = repacked(C.ADAPTER.export(SID).raw, BOOKKEEPING)
+    out = C.ADAPTER.append_native(raw, FORK)
+    lines, added_lines = objects(out), added(out, raw)
+    by_uuid = {o["uuid"]: o for o in lines if "uuid" in o}
+    walked = walked_back(lines[-1], by_uuid)
+    assert walked[-1] == objects(raw)[0]["uuid"]
+    assert len(walked) == len({o["uuid"] for o in lines if "uuid" in o})
+    assert walked[:len(added_lines)] == [o["uuid"] for o in reversed(added_lines)]
+    assert walked[len(added_lines)] == objects(raw)[-len(BOOKKEEPING) - 1]["uuid"]
+
+
+def test_append_native_chains_the_turns_to_each_other(claude_env):
+    raw = repacked(C.ADAPTER.export(SID).raw, BOOKKEEPING, drop="b4444444-2222-4333-8444-555555555555")
+    added_lines = added(C.ADAPTER.append_native(raw, FORK), raw)
+    assert len(added_lines) == len(FORK)          # no stand-in reply this time
+    assert [o["type"] for o in added_lines] == ["user", "assistant"]
+    assert added_lines[1]["parentUuid"] == added_lines[0]["uuid"]
+    assert added_lines[0]["isSidechain"] is False
+
+
+def test_append_native_stands_in_for_a_question_nobody_answered(claude_env):
+    """W1: the fixture ends on the compact-summary user turn, so A's last question
+    is still open. Without a stand-in reply the fork's own first line would land on
+    it and read as its answer."""
+    raw = C.ADAPTER.export(SID).raw
+    assert C.ADAPTER.turns(raw)[-1][0] == "user"
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == \
+        C.ADAPTER.turns(raw) + [("assistant", [base.NO_REPLY])] + FORK
+
+
+def test_append_native_adds_no_stand_in_reply_when_a_ends_with_an_answer(claude_env):
+    raw = repacked(C.ADAPTER.export(SID).raw, [], drop="b4444444-2222-4333-8444-555555555555")
+    assert C.ADAPTER.turns(raw)[-1][0] == "assistant"
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == C.ADAPTER.turns(raw) + FORK
+
+
+def tool_raw(*, answered: bool) -> bytes:
+    """A session that stopped on a tool call, and whether the result ever came."""
+    asked = {"type": "assistant", "sessionId": "s", "uuid": "u3", "parentUuid": "u2",
+             "isSidechain": False, "message": {"role": "assistant", "content": [
+                 {"type": "text", "text": "ZZ 我查一下"},
+                 {"type": "tool_use", "id": "toolu_9", "name": "Bash",
+                  "input": {"command": "ls"}}]}}
+    answered_line = {"type": "user", "sessionId": "s", "uuid": "u4", "parentUuid": "u3",
+                     "isSidechain": False, "message": {"role": "user", "content": [
+                         {"type": "tool_result", "tool_use_id": "toolu_9", "content": "a.csv"}]}}
+    main = ['{"type": "user", "sessionId": "s", "uuid": "u2", "parentUuid": null,'
+            ' "isSidechain": false, "message": {"role": "user", "content": "ZZ 看一下檔案"}}',
+            json.dumps(asked, ensure_ascii=False)]
+    if answered:
+        main.append(json.dumps(answered_line, ensure_ascii=False))
+    return C._pack_raw(main, {})
+
+
+def test_append_native_stands_in_for_a_tool_use_that_never_came_back(claude_env):
+    """A run killed mid-tool leaves a tool_use with no tool_result: the same trap as
+    an unanswered question, and the same stand-in reply in front of the fork."""
+    raw = tool_raw(answered=False)
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == \
+        C.ADAPTER.turns(raw) + [("assistant", [base.NO_REPLY])] + FORK
+
+
+def test_append_native_leaves_a_answered_tool_use_alone(claude_env):
+    raw = tool_raw(answered=True)
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == C.ADAPTER.turns(raw) + FORK
+
+
+def test_append_native_stands_in_when_only_the_first_of_two_tools_came_back(claude_env):
+    """Two calls in one turn, the first one's result home and the second one's not:
+    the unfinished one is still a question."""
+    raw = C._pack_raw([
+        '{"type": "user", "sessionId": "s", "uuid": "u2", "parentUuid": null,'
+        ' "isSidechain": false, "message": {"role": "user", "content": "ZZ 兩件事"}}',
+        '{"type": "assistant", "sessionId": "s", "uuid": "u3", "parentUuid": "u2",'
+        ' "isSidechain": false, "message": {"role": "assistant", "content": ['
+        '{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}},'
+        '{"type": "tool_use", "id": "toolu_2", "name": "Bash", "input": {"command": "cat"}}]}}',
+        '{"type": "user", "sessionId": "s", "uuid": "u4", "parentUuid": "u3",'
+        ' "isSidechain": false, "message": {"role": "user", "content": ['
+        '{"type": "tool_result", "tool_use_id": "toolu_1", "content": "a.csv"}]}}',
+    ], {})
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == \
+        C.ADAPTER.turns(raw) + [("assistant", [base.NO_REPLY])] + FORK
+
+
+def test_two_tool_lines_with_the_second_answered_and_the_first_not(claude_env):
+    """The same shape the first of the pair, in the order a real run writes them: two
+    lines of tool_use, and the result that came back is the second one's.
+
+    Starting the collection at the last line that said something would begin at the
+    second tool_use, see its result, and call the turn finished - while the first call
+    is still unanswered (review M1).
+    """
+    raw = C._pack_raw([
+        '{"type": "user", "sessionId": "s", "uuid": "u2", "parentUuid": null,'
+        ' "isSidechain": false, "message": {"role": "user", "content": "ZZ 兩件事"}}',
+        '{"type": "assistant", "sessionId": "s", "uuid": "u3", "parentUuid": "u2",'
+        ' "isSidechain": false, "message": {"role": "assistant", "content": ['
+        '{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"path": "a"}}]}}',
+        '{"type": "assistant", "sessionId": "s", "uuid": "u4", "parentUuid": "u3",'
+        ' "isSidechain": false, "message": {"role": "assistant", "content": ['
+        '{"type": "tool_use", "id": "toolu_2", "name": "Grep", "input": {"q": "b"}}]}}',
+        '{"type": "user", "sessionId": "s", "uuid": "u5", "parentUuid": "u4",'
+        ' "isSidechain": false, "message": {"role": "user", "content": ['
+        '{"type": "tool_result", "tool_use_id": "toolu_2", "content": "b.txt"}]}}',
+    ], {})
+    # the tool_use calls really are two lines, and the result names the second one
+    assert [lines for role, lines in C.ADAPTER.turns(raw) if role == "assistant"] == \
+        [["[tool] Read {'path': 'a'}"], ["[tool] Grep {'q': 'b'}"]]
+    added = objects(C.ADAPTER.append_native(raw, FORK))[len(objects(raw)):]
+    assert added[0]["message"]["content"][0]["text"] == base.NO_REPLY
+    assert added[0]["parentUuid"] == "u5"          # hangs off the line that came last
+
+
+def test_both_tools_answered_in_two_lines_needs_no_stand_in(claude_env):
+    """The other half of that pair: both results are home, so nothing is outstanding."""
+    raw = C._pack_raw([
+        '{"type": "user", "sessionId": "s", "uuid": "u2", "parentUuid": null,'
+        ' "isSidechain": false, "message": {"role": "user", "content": "ZZ 兩件事"}}',
+        '{"type": "assistant", "sessionId": "s", "uuid": "u3", "parentUuid": "u2",'
+        ' "isSidechain": false, "message": {"role": "assistant", "content": ['
+        '{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"path": "a"}}]}}',
+        '{"type": "assistant", "sessionId": "s", "uuid": "u4", "parentUuid": "u3",'
+        ' "isSidechain": false, "message": {"role": "assistant", "content": ['
+        '{"type": "tool_use", "id": "toolu_2", "name": "Grep", "input": {"q": "b"}}]}}',
+        '{"type": "user", "sessionId": "s", "uuid": "u5", "parentUuid": "u4",'
+        ' "isSidechain": false, "message": {"role": "user", "content": ['
+        '{"type": "tool_result", "tool_use_id": "toolu_2", "content": "b.txt"},'
+        '{"type": "tool_result", "tool_use_id": "toolu_1", "content": "a.txt"}]}}',
+    ], {})
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == C.ADAPTER.turns(raw) + FORK
+
+
+def test_append_native_leaves_both_tools_answered(claude_env):
+    """The other half of the pair: two calls, two results, nothing outstanding."""
+    raw = C._pack_raw([
+        '{"type": "user", "sessionId": "s", "uuid": "u2", "parentUuid": null,'
+        ' "isSidechain": false, "message": {"role": "user", "content": "ZZ 兩件事"}}',
+        '{"type": "assistant", "sessionId": "s", "uuid": "u3", "parentUuid": "u2",'
+        ' "isSidechain": false, "message": {"role": "assistant", "content": ['
+        '{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}},'
+        '{"type": "tool_use", "id": "toolu_2", "name": "Bash", "input": {"command": "cat"}}]}}',
+        '{"type": "user", "sessionId": "s", "uuid": "u4", "parentUuid": "u3",'
+        ' "isSidechain": false, "message": {"role": "user", "content": ['
+        '{"type": "tool_result", "tool_use_id": "toolu_1", "content": "a.csv"},'
+        '{"type": "tool_result", "tool_use_id": "toolu_2", "content": "x"}]}}',
+    ], {})
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == C.ADAPTER.turns(raw) + FORK
+
+
+def test_an_old_unanswered_tool_call_is_not_this_session_s_business(claude_env):
+    """The collection starts at the last turn that said something: a tool_use from
+    three exchanges ago has not been answered, but the conversation moved on since,
+    and the fork is not standing in for it."""
+    raw = tool_raw(answered=False)
+    raw = C._pack_raw(main_lines(raw) + [
+        json.dumps({"type": "user", "sessionId": "s", "uuid": "u5", "parentUuid": "u4",
+                    "isSidechain": False, "message": {"role": "user", "content": "ZZ 換個話題"}},
+                   ensure_ascii=False),
+        json.dumps({"type": "assistant", "sessionId": "s", "uuid": "u6", "parentUuid": "u5",
+                    "isSidechain": False, "message": {"role": "assistant", "content": [
+                        {"type": "text", "text": "ZZ 好啊"}]}}, ensure_ascii=False),
+    ], {})
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == C.ADAPTER.turns(raw) + FORK
+
+
+def test_append_native_ignores_a_line_type_it_does_not_know(claude_env):
+    """A real session file ends with bookkeeping this version has never heard of
+    (`progress`, `custom-title`). `_turns` calls those `[skip …]`, and the cross-agent
+    path drops them before deciding - so a fork must not read them as the user asking
+    something again after the agent already answered."""
+    raw = repacked(C.ADAPTER.export(SID).raw, [], drop="b4444444-2222-4333-8444-555555555555")
+    raw = C._pack_raw(main_lines(raw) + [
+        '{"type": "progress", "sessionId": "s", "uuid": "p1", "parentUuid": "u9"}',
+        '{"type": "custom-title", "sessionId": "s", "title": "ZZ"}',
+    ], {})
+    assert ("user", ["[skip progress]"]) in C.ADAPTER.turns(raw)
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == C.ADAPTER.turns(raw) + FORK
+
+
+def test_append_native_stands_in_when_the_last_turn_only_thought_about_it(claude_env):
+    """A run cut short mid-thought leaves an assistant line with a thinking block and
+    nothing else. The reading version has no such turn, so the user's question is the
+    last one - and the fork's first line must not be read as its answer."""
+    raw = C._pack_raw([
+        '{"type": "user", "sessionId": "s", "uuid": "u2", "parentUuid": null,'
+        ' "isSidechain": false, "message": {"role": "user", "content": "ZZ 繼續"}}',
+        '{"type": "assistant", "sessionId": "s", "uuid": "u3", "parentUuid": "u2",'
+        ' "isSidechain": false, "message": {"role": "assistant", "content": ['
+        '{"type": "thinking", "thinking": "ZZ 想到一半"}]}}',
+    ], {})
+    assert C.ADAPTER.turns(C.ADAPTER.append_native(raw, FORK)) == \
+        C.ADAPTER.turns(raw) + [("assistant", [base.NO_REPLY])] + FORK
+
+
+def test_append_native_changes_nothing_a_wrote(claude_env):
+    """Not one byte of A's lines: they are carried over as the strings they are,
+    not re-encoded, and the sidecar is handed on untouched (the new session gets its
+    own copy of it in start_native)."""
+    raw = C.ADAPTER.export(SID).raw
+    before = unpack(raw)
+    after = unpack(C.ADAPTER.append_native(raw, FORK))
+    assert before["aux"] and after["aux"] == before["aux"]
+    assert after["format"] == before["format"]
+    assert after["main"][:len(before["main"])] == before["main"]
+    assert len(after["main"]) == len(before["main"]) + len(FORK) + 1
+
+
+def test_append_native_keeps_a_line_that_is_not_in_our_own_json_shape(claude_env):
+    """The fixture happens to be written the way `json.dumps` writes, so re-encoding
+    it would change nothing and the test above would pass either way. A line in any
+    other shape - compact separators, its own key order - is the one that tells."""
+    original = ('{"type":"user","sessionId":"s","uuid":"u1","parentUuid":null,'
+                '"cwd":"/tmp/x","isSidechain":false,"message":{"role":"user",'
+                '"content":"ZZ 原本的樣子"}}')
+    raw = C._pack_raw([original], {})
+    out = unpack(C.ADAPTER.append_native(raw, FORK))["main"]
+    assert out[0] == original
+    assert json.loads(out[1])["parentUuid"] == "u1"
+
+
+def test_append_native_skips_a_sidechain_line_as_the_anchor(claude_env):
+    """A subagent's branch (`isSidechain: true`) is its own conversation: the main
+    thread never continues it, so it is not where the fork hangs off."""
+    raw = repacked(C.ADAPTER.export(SID).raw, [json.dumps(
+        {"type": "assistant", "sessionId": "s", "uuid": "sub-1", "parentUuid": "u9",
+         "isSidechain": True, "message": {"role": "assistant", "content": [
+             {"type": "text", "text": "ZZ 子代理的話"}]}}, ensure_ascii=False)])
+    anchor = objects(raw)[-2]["uuid"]
+    assert anchor != "sub-1"
+    added_lines = added(C.ADAPTER.append_native(raw, FORK), raw)
+    assert added_lines[0]["parentUuid"] == anchor
+
+
+def test_append_native_of_a_session_with_no_uuid_starts_the_chain(claude_env):
+    raw = C._pack_raw(BOOKKEEPING, {})
+    added_lines = added(C.ADAPTER.append_native(raw, FORK), raw)
+    assert added_lines[0]["parentUuid"] is None
+    assert added_lines[1]["parentUuid"] == added_lines[0]["uuid"]
+
+
+def test_start_native_counts_the_turns_the_fork_added(claude_env, tmp_path):
+    """before_count is what tells `collect` whether the user said anything, so the
+    fork's turns have to be in it already - otherwise opening and leaving would look
+    like a new conversation."""
+    workdir = (tmp_path / "proj").resolve()
+    workdir.mkdir()
+    raw = C.ADAPTER.export(SID).raw
+    before = C.ADAPTER.start_native(raw, workdir).before_count
+    launch = C.ADAPTER.start_native(C.ADAPTER.append_native(raw, FORK), workdir)
+    assert launch.before_count == before + len(FORK) + 1
+    lines = [json.loads(line) for line in
+             (claude_env["home"] / ".claude" / "projects" / C.encode_project_dir(workdir)
+              / f"{launch.agent_session_id}.jsonl").read_text(encoding="utf-8").splitlines()]
+    # the placeholders native() writes are rewritten by the same rule as everywhere else
+    assert all(o["sessionId"] == launch.agent_session_id for o in lines)
+    assert all(o["cwd"] == str(workdir) for o in lines if "cwd" in o)
+    assert len(lines) == len(objects(C.ADAPTER.append_native(raw, FORK)))
+
+
+def test_collect_of_a_fork_says_nothing_when_the_user_says_nothing(claude_env, tmp_path):
+    workdir = (tmp_path / "proj").resolve()
+    workdir.mkdir()
+    launch = C.ADAPTER.start_native(
+        C.ADAPTER.append_native(C.ADAPTER.export(SID).raw, FORK), workdir)
+    assert C.ADAPTER.collect(launch) is None
+
+
+def test_collect_of_a_fork_returns_what_the_user_added(claude_env, tmp_path):
+    workdir = (tmp_path / "proj").resolve()
+    workdir.mkdir()
+    launch = C.ADAPTER.start_native(
+        C.ADAPTER.append_native(C.ADAPTER.export(SID).raw, FORK), workdir)
+    env = {**os.environ, "FAKE_AGENT_MODE": "append"}
+    subprocess.run([str(claude_env["wrapper"]), "--resume", launch.agent_session_id,
+                    "-p", "ZZSAY 再補一句"], cwd=str(workdir), env=env, check=True,
+                   capture_output=True, text=True)
+    got = C.ADAPTER.collect(launch)
+    assert got is not None and got.message_count == launch.before_count + 2
+    assert "ZZSAY" in base.format_reading(C.ADAPTER.turns(got.raw))
+
+
 # --- start_native / collect (U-CON-04, U-CON-05) -------------------------------
 
 def test_start_native_rewrites_ids_and_cwd(claude_env, tmp_path):
@@ -837,6 +1183,7 @@ def test_adapter_surface():
     assert hasattr(C.ADAPTER, "search_text")
     assert hasattr(C.ADAPTER, "turns")
     assert hasattr(C.ADAPTER, "native")
+    assert hasattr(C.ADAPTER, "append_native")
     assert hasattr(C.ADAPTER, "start_native")
     assert hasattr(C.ADAPTER, "collect")
     assert not hasattr(C.ADAPTER, "reading")          # gone in design v5

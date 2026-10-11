@@ -108,6 +108,33 @@ def write_atomic(path: Path, text: str) -> None:
         Path(tmp).unlink(missing_ok=True)   # gone on success; a leftover never clutters
 
 
+def _write_file(path: Path, data: bytes) -> None:
+    """Write a file and get it onto the disk before anyone reads it back.
+
+    A periodic write-back stages a session every few minutes for hours on end; a power
+    cut in the middle of one used to be able to leave a `session.md` that is short but
+    whole-looking, and that is exactly the version Drive would then be sent.
+    """
+    with open(path, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _fsync_dir(path: Path) -> None:
+    """Make a rename or a removal durable: the directory entry is a write of its own."""
+    try:
+        fd = os.open(path, getattr(os, "O_DIRECTORY", os.O_RDONLY))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass          # a filesystem that will not sync a directory (some network mounts)
+    finally:
+        os.close(fd)
+
+
 def _md5(entry: dict) -> str:
     """The md5 Drive reported for a file, or "" when it has none."""
     return (entry.get("Hashes") or {}).get("md5", "")
@@ -125,11 +152,16 @@ class Drive:
         self.settings = json.loads(self.settings_file.read_text()) if self.settings_file.exists() else {}
 
     def _run(self, *args: str, root: bool = True) -> str:
-        cmd = [self.rclone, "--config", str(self.conf)]
+        cmd = [self.rclone, "--config", str(self.conf), "--ask-password=false"]
         if root:
             cmd += ["--drive-root-folder-id", self.folder_id()]
         try:
-            proc = subprocess.run(cmd + list(args), capture_output=True, text=True)
+            # DEVNULL, and never a prompt: a periodic write-back runs while the agent
+            # owns the terminal, and rclone waiting for a password to be typed would
+            # fight the agent for the keyboard - or hang until the write-back's own
+            # timeout, holding the session back (design「不弄亂 agent 的畫面」, P9/P15).
+            proc = subprocess.run(cmd + list(args), capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL)
         except OSError as e:   # rclone missing or not executable: a Drive problem, not a bad file (R1)
             raise StoreError(f"叫不起 rclone（{self.rclone}）：{e}") from None
         if proc.returncode != 0:
@@ -199,8 +231,18 @@ class Drive:
 # ---------------------------------------------------------------------------
 
 
-def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None) -> Path:
-    """Write a complete session into the outbox and return its folder."""
+def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None, *,
+          update: bool = False, kind: str = "") -> Path:
+    """Write a complete session into the outbox and return its folder.
+
+    `update`／`kind` say what `mark_update` says, and are written into the folder that
+    is about to go in, before the swap: the uploader reads the outbox whenever it likes,
+    and a version that was in there for the moment between this call and a later
+    `mark_update` looked like a new session Drive had never heard of (design
+    「store 的小修」P13). Callers that decide whether this is an update at all have to ask
+    `never_confirmed` *before* calling this: afterwards the answer is always "yes", the
+    fresh folder having no marker.
+    """
     ulid = header["id"].split(":", 1)[1]
     paths.outbox.mkdir(parents=True, exist_ok=True)
     folder = paths.outbox / ulid
@@ -210,11 +252,27 @@ def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None) -> Pat
     if raw_bytes is not None:
         md5 = hashlib.md5(raw_bytes).hexdigest()
         name = f"raw-{md5[:12]}.json"
-        (tmp / name).write_bytes(raw_bytes)
+        _write_file(tmp / name, raw_bytes)
         header.setdefault("agora", {})["raw"] = {"file": name, "md5": md5, "size": len(raw_bytes)}
     else:
         header.setdefault("agora", {}).pop("raw", None)
-    (tmp / "session.md").write_text(h.dump_document(header, body), encoding="utf-8")
+    if folder.is_dir():
+        # The raw the entry being replaced names comes along, and only that one: an
+        # uploader may have built its list from that entry a moment ago, and rclone
+        # reading it after this swap would otherwise stop the whole batch on
+        # `source not found` (review T2). Older raws stay behind - nobody's list names
+        # them any more, and carrying every version made each round's entry one raw
+        # bigger and each pass send them all again (review N1).
+        previous = _named_raw(folder)
+        if previous and not (tmp / previous).exists():
+            try:
+                shutil.copyfile(folder / previous, tmp / previous)
+            except OSError:
+                pass                    # claimed by an uploader meanwhile: nothing to keep
+    _write_file(tmp / "session.md", h.dump_document(header, body).encode("utf-8"))
+    if update:
+        mark_update(tmp, kind)          # into the folder that is about to go in, not the one that is there
+    _fsync_dir(tmp)                    # the files and the names pointing at them
     # Swap in whole, so a crash never leaves an outbox entry without session.md
     # (C4): the old entry is renamed aside, the new one moved in, then the old removed (R6).
     old = paths.outbox / f".old-{ulid}"
@@ -227,6 +285,7 @@ def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None) -> Pat
     # now, and what it holds is a version that was current a moment ago - deleting it
     # loses an edit. Whoever finds `outbox/<ULID>` already there drops it instead:
     # `_rename_back` while comparing, `restore_done` when the background takes the lock.
+    _fsync_dir(paths.outbox)            # the rename itself, and the entry it removed
     return folder
 
 
@@ -448,9 +507,13 @@ def mark_update(folder: Path, kind: str = "") -> None:
     they would never be sent (review N4). The kind matters only if that session is gone
     by the time we send: the edit is then saved as a session of its own, and what it is
     depends on which command wrote it (review G2).
+
+    `stage(..., update=True, kind=...)` writes the same thing before the swap, so a
+    caller that already knows does not have to come back for it (P13); this stays for
+    the callers that decide afterwards.
     """
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / UPDATE_MARK).write_text(kind, encoding="utf-8")
+    _write_file(folder / UPDATE_MARK, kind.encode("utf-8"))
 
 
 def update_kind(folder: Path) -> str:
@@ -463,6 +526,34 @@ def update_kind(folder: Path) -> str:
 
 def _is_update(folder: Path) -> bool:
     return (folder / UPDATE_MARK).exists()
+
+
+def never_confirmed(paths: Paths, ulid: str) -> bool:
+    """Whether Drive has never confirmed this id (change local-first-writes,
+    「寫回還沒被 Drive 確認過的 Session 不算更新既有 id」).
+
+    An outbox entry without `.update` is one nobody ever said Drive already had, and
+    still being there is the rest of the answer: it never got there. Writing such a
+    session back - a continue's `_finish`, an `edit`, an import that updates the same
+    id - is still a *new* session, and marking it `.update` sent the uploader looking
+    for an id Drive never heard of, which it then saved as a session of its own
+    (design「還沒被 Drive 確認過的 Session，寫回時不算更新既有 id」).
+
+    A `.done-<ULID>` next to it means an uploader is comparing that very id right now,
+    and then we cannot tell what Drive has: no exemption. `.old-<ULID>` is the entry too:
+    `stage` renames the old one aside for a moment before moving the new one in, so during
+    a swap - or after a stage that died in that window - `outbox/<ULID>` alone is not the
+    whole answer, and reading it that way brought the bug back (C11). This is read before
+    `stage`, which swaps the entry for a fresh folder that never has the marker.
+    """
+    if (paths.outbox / f".done-{ulid}").exists():
+        return False                     # somebody is comparing this id right now
+    folder = paths.outbox / ulid
+    if not folder.is_dir():
+        folder = paths.outbox / f".old-{ulid}"
+    if not folder.is_dir():
+        return False
+    return not _is_update(folder)
 
 
 def _listing_with_md5(drive: Drive):
@@ -530,6 +621,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
             continue
 
     updates = [u for u in entries if _is_update(paths.outbox / u)]
+    again = None                 # the listing the confirmation compares against (resurrect)
     if updates:
         # L7: an update needs its id to still be there, or we would put back what
         # another machine deleted.
@@ -546,30 +638,71 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         gone = [u for u in updates if remote is not None and u not in remote]
         rescued = {}
         for ulid in gone:
+            say(f"存在檢查 {ulid}：不在了")
             rescued[ulid] = _rescue_deleted(paths, paths.outbox / ulid, ulid, say, notices)
         entries = {u: m for u, m in entries.items() if u not in gone}
         # Y went into the outbox while we were here: this round takes it too, so a
         # foreground `push` ends with the edit in Drive rather than still waiting.
         for ulid, new_id in rescued.items():
-            if new_id and new_id not in entries:
+            if new_id and new_id not in entries and (paths.outbox / new_id).exists():
                 entries[new_id] = _entry_md5s(paths.outbox / new_id)
         # X still in the outbox was not rescued: an edit landed while we were reading it,
         # or we could not read it. Either way it is still waiting - the next round meets
         #「.update 而 Drive 沒有」again - and Y goes up in this one (V1).
         left.extend(u for u in gone if (paths.outbox / u).is_dir())
 
-    raws = [f"{u}/{n}" for u in entries for n in _raw_names(paths.outbox / u)]
+    if any(u in entries for u in updates):
+        # The listing above decided these ids were still there, but the copies below
+        # only land after a whole batch of them - and another machine may delete one
+        # in between, which would put the session back (review resurrect). So look
+        # once more, right here, and rescue on the spot whatever is already gone;
+        # the window shrinks to this one listing plus the copies, which are small
+        # and fast now that a pass sends only what each entry names (review N1).
+        # What is still left over - one call between this look and the copies - is
+        # written down in the design's Risks; the next round's L7 catches it.
+        again = _listing_with_md5(drive)
+        if isinstance(again, StoreError):
+            # Same rule as above (V6): a listing that fails is not seeing it there
+            # either, so the updates wait for a round that can see.
+            pending = [u for u in updates if u in entries]
+            say(f"上傳前再列一次 Drive 失敗，{len(pending)} 筆更新留在 outbox 等下一次：{again}")
+            for u in pending:
+                entries.pop(u)
+                left.append(u)
+        elif isinstance(again, dict):
+            for ulid in [u for u in updates if u in entries]:
+                if ulid not in again:
+                    say(f"存在檢查 {ulid}：不在了")
+                    new_id = _rescue_deleted(paths, paths.outbox / ulid, ulid, say, notices)
+                    entries.pop(ulid, None)
+                    if new_id and new_id not in entries and (paths.outbox / new_id).exists():
+                        entries[new_id] = _entry_md5s(paths.outbox / new_id)
+                    if (paths.outbox / ulid).is_dir():
+                        left.append(ulid)
+                else:
+                    say(f"存在檢查 {ulid}：還在，這一輪送出")
+        # None: Drive has no sessions/ at all - not evidence of a deletion (N12).
+
+    # The raw each entry names, as read with its md5s - not every raw-* in the
+    # folder: the one `stage` carried over from the previous version is only there
+    # for a list built before the swap, and sending it again is what made each pass
+    # grow (review N1).
+    raws = [f"{u}/{name}" for u, (_, name, _) in entries.items() if name]
+    raws = [r for r in raws if (paths.outbox / r).is_file()]
     if raws:
         try:
             _copy_batch(drive, paths, raws)
         except StoreError as e:
             say(f"原始檔沒傳好，這一輪不傳 session.md：{e}")
             return sorted(set(entries) | set(left))
-    try:
-        _copy_batch(drive, paths, [f"{u}/session.md" for u in entries])
-    except StoreError as e:
-        say(f"session.md 沒傳好：{e}")
-        return sorted(set(entries) | set(left))
+        say(f"本輪送出的原始檔：{', '.join(sorted({r.split('/', 1)[0] for r in raws}))}")
+    if entries:
+        try:
+            _copy_batch(drive, paths, [f"{u}/session.md" for u in entries])
+        except StoreError as e:
+            say(f"session.md 沒傳好：{e}")
+            return sorted(set(entries) | set(left))
+        say(f"本輪送出的 session.md：{', '.join(sorted(entries))}")
 
     remote = _listing_with_md5(drive)
     if not isinstance(remote, dict):
@@ -581,6 +714,24 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         if files.get("session.md") != sent_md5:
             left.append(ulid)     # not confirmed, or changed underneath us: it stays
             continue
+        if ulid in updates and isinstance(again, dict):
+            before = again.get(ulid) or {}
+            if any(n != "session.md" and n not in files for n in before):
+                # This round deleted nothing, yet files the folder had a moment ago are
+                # gone: only a real deletion does that, and the copies just landed on
+                # the folder it re-created (review resurrect). Another machine's delete
+                # stands - take our copy down, and keep the work as a session of its own.
+                say(f"{ulid} copy 期間被別台刪掉，剛寫回去的資料夾已清掉")
+                try:
+                    drive._run("purge", f"gdrive:sessions/{ulid}")
+                except StoreError as e:
+                    say(f"{ulid} 清掉剛寫回去的資料夾失敗：{e}")
+                new_id = _rescue_deleted(paths, folder, ulid, say, notices)
+                if new_id and new_id not in entries and (paths.outbox / new_id).exists():
+                    left.append(new_id)          # Y goes up on the next pass
+                if (paths.outbox / ulid).is_dir():
+                    left.append(ulid)
+                continue
         done = paths.outbox / f".done-{ulid}"
         try:
             folder.rename(done)                      # H1: compare what is *now* in there
@@ -636,6 +787,23 @@ def _rescue_deleted(paths: Paths, folder: Path, ulid: str, say, notices: bool = 
         say(f"{ulid} 雲端沒有，而且讀不出這筆（{e}）；留在 outbox 等你處理")
         _put_back(done, folder)
         return None
+    index = Index(paths)
+    agora = h.agora_of(hdr)
+    source = agora.get("source") or {}
+    if source.get("session_id"):
+        for child in index.children(ulid):
+            chdr = index.header(child) or {}
+            cagora = h.agora_of(chdr)
+            csource = cagora.get("source") or {}
+            if (cagora.get("relation") == "continue"
+                    and csource.get("agent") == source.get("agent")
+                    and csource.get("session_id") == source.get("session_id")):
+                shutil.rmtree(done, ignore_errors=True)
+                line = f"{ulid} 已被別台刪除，這次的修改沿用已另存的 {child}"
+                if notices:
+                    _notice(paths, line)
+                say(line)
+                return child
     new_ulid = h.new_ulid()
     new_hdr = copy.deepcopy(hdr)
     # A continue is the one write that is a relation of its own; an edit is not, and
@@ -699,11 +867,19 @@ def _replaced_raws(folder: Path, keep: str | None, remote_files: dict) -> list[s
     """The older raws this upload replaced, to clear in one call (N7: only for the
     entries that actually left the outbox, so a later round can do the rest)."""
     return [n for n in remote_files
-            if n.startswith("raw-") and n != keep and n not in _raw_names(folder)]
+            if n.startswith("raw-") and n != keep]
 
 
-def _raw_names(folder: Path) -> list[str]:
-    return sorted(p.name for p in folder.glob("raw-*"))
+def _named_raw(folder: Path) -> str | None:
+    """The raw this entry's session.md points at, or None (no entry, no raw, unreadable).
+
+    An entry may also hold the raw of the version it replaced (`stage` keeps that one
+    for an uploader that listed it a moment ago); this is the one that belongs to it.
+    """
+    try:
+        return (h.agora_of(read_entry(folder)).get("raw") or {}).get("file")
+    except h.HeaderError:
+        return None
 
 
 def _put_back(done: Path, folder: Path) -> None:

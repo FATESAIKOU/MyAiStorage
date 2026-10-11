@@ -118,6 +118,9 @@ python3 -c 'import fcntl,time; f=open("/tmp/agora-acc/state/upload.lock","a"); f
 | 4.3 | `agora show session <A> \| tail -5` | 看得到 4.2 說的那句話 |
 | 4.4 | 等 10 秒，`ls /tmp/agora-acc/cache/sessions/<A的ULID>/ \| grep -c '^raw-'` | `1`（只留新的原始檔） |
 | 4.5 | 再做一次 4.1，打開之後**什麼都不說**就離開 | stderr `[agora] 這次沒有新內容，沒有存` |
+| 4.6 | `agora continue session <A> --agent opencode --dir /tmp/agora-acc/proj --sync-period 0.05` | opencode 打開（約 3 秒寫回一次） |
+| 4.7 | 在 opencode 說一句自編的話；**不離開**。另開終端機，先 `source /tmp/agora-acc/env.sh`，`agora show session <A> \| tail -5` | 幾秒後就看得到剛才那句話（不等 agent 結束） |
+| 4.8 | 同一個終端機：`sh /tmp/agora-acc/drive.sh <A的ULID> session.md \| tail -5` | Drive 上也是剛才那句話。回到 opencode，離開；印出的還是同一個 A |
 
 ## 5. import 完馬上 edit，不會遺失
 
@@ -254,6 +257,9 @@ python3 -c 'import fcntl,time; f=open("/tmp/agora-acc/state/upload.lock","a"); f
 | 12.14 | `/`（篩選框帶著剛才那個字打開），按 `Tab` | 篩選框收起，焦點移到預覽區；清單**仍然**照那個字篩選（「另有 1 個勾選被篩選掉」還在） |
 | 12.15 | `Tab` 回清單，`Esc` | 篩選清掉、篩選框收起，焦點在清單；「另有 1 個…」也消失。12.11 勾的兩列**還勾著** |
 | 12.16 | `/`，打 `q` | 篩選框裡出現 `q`（前面還有剛才那個字），**沒有離開**互動模式；篩選邊打邊生效，看得到的列變很少或沒有。按 `Esc` 收掉 |
+| 12.17 | 游標移到 Q（✓ 的那一列），`Enter`；選完 agent 與工作目錄 | 多一個輸入框「自動同步間隔（分鐘，0 ＝ 不自動同步）」，裡面是 `5`；`Esc` → 回到清單，沒有開 agent |
+| 12.18 | 游標在 Q，`Enter`；跳出選 agent 視窗，下方有 `[ ] fork：複製成新的 Session 再接續`；按 `Tab` 移到勾選框，按 `空白` 勾選，說明變成「會多一個 …-fork 的新 Session，原本的不動」；按 `Enter` 確定，工作目錄與間隔都直接按 `Enter`。在 opencode 說一句自編的話後離開。要選 claude 時，先在選項清單按 ↓ 再按 Tab 到勾選框（勾選框上按 Enter 送出的是目前高亮的 agent） | Agora 清單最上方多出一個 title 加了 `-fork` 的新 Session，原本的 Q 保持不動 |
+| 12.19 | 另開終端機執行 `agora continue session <Q> --agent opencode`（讓 Q 處於正在接續中狀態）；回到互動模式，游標在 Q，按 `Enter`；選 agent 視窗不勾 fork 直接按 `Enter` | 跳出「不能接續」說明視窗（內容提及正在接續中、要分岔請勾 fork）；按任意鍵回到清單，沒有問工作目錄也沒有開 agent。（驗收完後把另一個終端機的 opencode 關掉） |
 
 ## 13. 合併、中斷、沿用
 

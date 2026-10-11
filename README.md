@@ -57,7 +57,7 @@ agora <動作> <型態> [session_id] [選項]
 | `a` | 全選切換 |
 | `/` | 篩選（id、agent、標題、目錄） |
 | `ctrl+t` | 篩選切換「標題／內文」 |
-| `Enter` | 接續（Agora 頁）／匯入（未匯入頁）。篩選框裡的 Enter 只收掉篩選框 |
+| `Enter` | 接續（Agora 頁：可選 agent 與是否 fork，顯示工作目錄，確認同步間隔）／匯入（未匯入頁）。篩選框裡的 Enter 只收掉篩選框 |
 | `m` `e` `d` `p` `P` | 合併／改標頭／刪除／pull／push |
 | `Esc` | 篩選框開著時：清掉篩選、收起篩選框 |
 | `Tab` `shift+tab` | 切到另一邊（清單 ⇄ 預覽區；兩個鍵都一樣）。從篩選框切出去等同按 `Enter`：篩選框收起來，篩選照樣生效 |
@@ -103,6 +103,12 @@ agora merge session agora:01K6…, agora:01K7…, agora:01K8…
 # 接著做（agent 結束時自動存回，印出新的 agora id）
 agora continue session agora:01K6… --agent opencode
 agora continue session agora:01K8… --agent claude --dir ~/proj
+
+# 接續期間每幾分鐘自動寫回（預設 5 分鐘；0 ＝ 只在結束時寫回；小數可）
+agora continue session agora:01K6… --agent opencode --sync-period 1
+
+# 從同一點分岔：先複製出新 Session 再開 agent，原本那個不動，寫回都寫到新的那個
+agora continue session agora:01K6… --agent opencode --fork
 
 # 改標頭：給 --header／--header-file 就直接疊加；都不給就用 $EDITOR 打開
 agora edit session agora:01K6… --header 'tags=[csv, 表格]' --header 'status=stable'
