@@ -177,7 +177,7 @@ v0 不做：外來 agent 發現、暫停／恢復、C 的記憶管理（session 
 
 ### D11 worker 端的接法（2026-10-11 與 MyLinuxPool PM 對齊，MyLinuxPool#52 負責分發）
 
-- **成品與版本**：Python 套件（和 agora、a2a 同一個 distribution）。`uv tool install git+https://github.com/FATESAIKOU/MyAiStorage@<sha>`，以 worker（uid 1000）身分在**建映像時**安裝（managed Python 也在那時下載，容器啟動不必連網）。sha 與 uv 版本只寫在 `shared-configs/agent-sidecar/` 單元裡一處，Dockerfile 從單元讀。sidecar 合進 main 之後才給正式 sha。
+- **成品與版本**：Python 套件（和 agora、a2a 同一個 distribution）。`uv tool install git+https://github.com/FATESAIKOU/MyAiStorage@<sha>`，以 worker（uid 1000）身分在**建映像時**安裝（managed Python 也在那時下載，容器啟動不必連網）。sha 與 uv 版本只寫一處：因為 agora 與 sidecar 是同一個 distribution，沿用 MyLinuxPool#51 的 `shared-configs/agora/tool-pins`（不在 agent-sidecar 單元另寫一份），Dockerfile 從那裡讀。sidecar 合進 main 之後才給正式 sha。
 - **啟動**：容器沒有 systemd。entrypoint 在 `exec su worker -c pool-tunnel` 之前，用 `su worker -c 'setsid sidecar-supervise.sh &'` 把單元提供的 supervisor 放到背景；supervisor 先拉起 headless herdr server（session 名固定 `worker`），再跑 `sidecar run`，崩潰時退避重啟（5 秒起、上限 60 秒），log 在 `~/.local/state/sidecar/`。
 - **herdr**：sidecar 的設定帶 herdr 的 session 名（`worker`），呼叫 herdr 時指定；supervisor 不在 pane 裡，環境沒有 `HERDR_ENV`。
 - **憑證**：A2A token 在 `/run/mlp-secrets/angareion-token`（0400、uid 1000，唯讀掛載），設定的 `token_file` 指到它。Angareion 的 token 檢查接受「只有擁有者有權限」（0400、0600）。
