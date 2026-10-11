@@ -185,9 +185,17 @@ def test_jobs_survive_concurrent_readers_writers_and_ticks(tmp_path):
     def writer(n: int) -> None:
         try:
             while not stop.is_set():
-                job = core.add_job("poke", {"id": "t1", "text": f"x{n}"}, every=3600)
-                core.delete_job(job.id)
+                core.add_job("poke", {"id": "t1", "text": f"x{n}"}, every=3600)
         except Exception as e:  # noqa: BLE001 - the test's whole point is to see it
+            errors.append(e)
+
+    def deleter() -> None:
+        try:
+            while not stop.is_set():
+                jobs = core.list_jobs()
+                if jobs:
+                    core.delete_job(jobs[0].id)
+        except Exception as e:  # noqa: BLE001
             errors.append(e)
 
     def reader() -> None:
@@ -205,7 +213,8 @@ def test_jobs_survive_concurrent_readers_writers_and_ticks(tmp_path):
             errors.append(e)
 
     threads = [threading.Thread(target=writer, args=(n,)) for n in range(2)]
-    threads += [threading.Thread(target=reader), threading.Thread(target=ticker)]
+    threads += [threading.Thread(target=deleter), threading.Thread(target=reader),
+                threading.Thread(target=ticker)]
     for thread in threads:
         thread.start()
     time.sleep(1.5)
