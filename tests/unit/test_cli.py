@@ -375,7 +375,8 @@ def test_import_exit_code_is_the_first_non_zero(env, capsys, monkeypatch):  # re
     env.sessions["ses_c"] = ["第三段", "好"]
     codes = {"ses_b": cli.EXIT_IN_OUTBOX, "ses_nope": cli.EXIT_ERROR}
     monkeypatch.setattr(cli, "_import_one",
-                        lambda agent, ext, upd, paths, index: _fake_one(env, ext, codes))
+                        lambda agent, ext, upd, paths, index, add_tags=None:
+                        _fake_one(env, ext, codes))
     code, _, _ = run(capsys, "import", "session",
                      "--external-session-id", "ses_b,ses_nope,ses_c", "--agent", "opencode")
     assert code == cli.EXIT_IN_OUTBOX, "the first non-zero, not the last"

@@ -6,6 +6,8 @@
 $AGORA_CLAUDE_HOME/.claude/projects/<encoded pwd>/<id>.jsonl, unless
 FAKE_AGENT_MODE=noop. Every call appends its argv + pwd to
 $FAKE_HOME/claude-args.log / claude-cwd.log.
+--input-format stream-json (headless) also drains stdin into
+$FAKE_HOME/claude-stream.log, so a test can prove the pipe is the caller's.
 
 With FAKE_AGENT_SCRIPT set, --resume plays that script instead (say something, wait
 for a periodic write-back, leave a half-written line, say something else, leave) -
@@ -65,6 +67,14 @@ if "-p" in args and "--resume" not in args and "--session-id" not in args:
 
 if "--resume" in args:
     sid = args[args.index("--resume") + 1]
+    if "--input-format" in args and not sys.stdin.isatty():
+        # Headless (`agora continue --headless`, design D6): the caller writes
+        # stream-json user messages on stdin; consume them (until EOF) and log
+        # them, so a test can prove the pipe really belongs to the caller.
+        # A terminal is not a stream-json pipe, so leave that case alone.
+        with open(fake_home / "claude-stream.log", "a") as f:
+            for line in sys.stdin:
+                f.write(line)
     path = (Path(os.environ["AGORA_CLAUDE_HOME"]) / ".claude" / "projects"
             / encode(os.getcwd()) / f"{sid}.jsonl")
     script = os.environ.get("FAKE_AGENT_SCRIPT")

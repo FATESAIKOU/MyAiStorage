@@ -587,7 +587,8 @@ class ClaudeAgent:
             extra.insert(0, ("assistant", [NO_REPLY]))
         return _pack_raw(main + _native_lines(extra, parent=_leaf_uuid(main)), aux)
 
-    def start_native(self, raw: bytes, workdir: Path) -> Launch:
+    def start_native(self, raw: bytes, workdir: Path, *, headless: bool = False,
+                     headless_port: int | None = None) -> Launch:
         main, aux = _unpack_raw(raw)
         new_id = str(uuid.uuid4())
         workdir_str = str(workdir)
@@ -601,8 +602,18 @@ class ClaudeAgent:
                 joined = "\n".join(_rewrite_lines(_split_lines(text, rel), new_id, workdir_str))
                 return joined + "\n" if joined and text.endswith("\n") else joined
             _unpack_aux(aux, sidecar, rewrite=rewrite)
-        return Launch(argv=[agent_cmd("claude"), "--resume", new_id],
-                      cwd=workdir_str, agent_session_id=new_id,
+        if headless:
+            # The programmatic mode the spike pinned (design D6): stream-json in
+            # and out, verbose is what makes the stream usable, and the fixed
+            # setting keeps claude from auto-continuing past a usage limit by
+            # itself (sidecar decides the swap).
+            argv = [agent_cmd("claude"), "-p",
+                    "--input-format", "stream-json", "--output-format", "stream-json",
+                    "--verbose", "--resume", new_id,
+                    "--settings", '{"autoContinueAtUsageLimit": false}']
+        else:
+            argv = [agent_cmd("claude"), "--resume", new_id]
+        return Launch(argv=argv, cwd=workdir_str, agent_session_id=new_id,
                       before_count=_count_messages(_parse_all(rewritten)))
 
     def list_sessions(self) -> list[Listed]:

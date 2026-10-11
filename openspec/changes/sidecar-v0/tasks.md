@@ -17,7 +17,7 @@
 
 - [ ] 3.1 `ClaudeCodeDriver`
 - [ ] 3.2 `OpenCodeDriver`
-- [ ] 3.3 agora：`continue --headless`（D6 的 a）與測試（fake agent 的 headless 模式）
+- [x] 3.3 agora：`continue --headless`（D6 的 a）與測試（fake agent 的 headless 模式）
 - [ ] 3.4 PM 在 Mac 上用真的 agent 跑一次：open（fork）→ poke → poke＋中斷 → close；換把用 `FileSubscriptionSource` 模擬
 
 ## 4. 文件與收尾
