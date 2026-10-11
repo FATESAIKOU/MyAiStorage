@@ -169,6 +169,36 @@ def _extra_sessions(agora_id):
     return [hdr for _u, hdr, _s in store.Index(paths()).search([]) if hdr["id"] != agora_id]
 
 
+def _wait_for(condition, timeout=30.0, what="condition"):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if condition():
+            return
+        time.sleep(0.05)
+    pytest.fail(f"waited {timeout:g}s for {what}")
+
+
+@pytest.fixture
+def clean_subprocesses(monkeypatch):
+    """Ensure any subprocess.Popen spawned during detached uploader tests is reaped."""
+    procs: list[subprocess.Popen] = []
+    real_popen = subprocess.Popen
+
+    def spy_popen(*args, **kwargs):
+        p = real_popen(*args, **kwargs)
+        procs.append(p)
+        return p
+
+    monkeypatch.setattr(subprocess, "Popen", spy_popen)
+    yield
+    for p in procs:
+        try:
+            p.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+
+
 # --- the spec's scenarios ---------------------------------------------------------
 
 def test_a_round_writes_while_the_agent_is_still_running(env, capsys, monkeypatch):
@@ -422,7 +452,7 @@ def test_a_rescue_the_uploader_remembered_carries_the_rest_of_the_run(claude_lab
     assert all(b in l for l in quiet_after), f"quiet round prefixes followed rescue to {b}: {quiet_after}"
 
 
-def test_final_write_waits_for_inflight_uploader_to_adopt_rescue(claude_lab, capsys, monkeypatch):
+def test_final_write_waits_for_inflight_uploader_to_adopt_rescue(claude_lab, capsys, monkeypatch, clean_subprocesses):
     """If the agent exits while the outbox entry for run.target is in flight and the uploader
     is rescuing it into B, the final write must wait for it to settle and adopt B,
     instead of prematurely minting a duplicate rescue or returning A."""
@@ -447,14 +477,15 @@ def test_final_write_waits_for_inflight_uploader_to_adopt_rescue(claude_lab, cap
             time.sleep(0.15)
             shutil.rmtree(on_drive(a), ignore_errors=True)
             subprocess.run([sys.executable, "-m", "agora.background"], env=dict(os.environ), check=True)
-        t = threading.Thread(target=delayed_uploader)
+        t = threading.Thread(target=delayed_uploader, daemon=True)
         done["thread"] = t
         t.start()
 
     monkeypatch.setattr(cli, "_periodic_write", round_then_delay_uploader)
     code, out, err = _continue_claude(capsys, claude_lab, a)
     assert done["staged"]
-    done["thread"].join()
+    done["thread"].join(timeout=30.0)
+    _wait_for(lambda: not store.uploader_is_running(paths()), timeout=10.0, what="uploader finished")
     kept = _extra_sessions(a)
     assert len(kept) == 1, f"exactly one rescue: {[k['id'] for k in kept]}"
     b = kept[0]["id"]
@@ -463,7 +494,7 @@ def test_final_write_waits_for_inflight_uploader_to_adopt_rescue(claude_lab, cap
     assert "另存" in err, err
 
 
-def test_final_write_does_not_block_full_timeout_on_normal_upload_or_offline(claude_lab, capsys, monkeypatch):
+def test_final_write_does_not_block_full_timeout_on_normal_upload_or_offline(claude_lab, capsys, monkeypatch, clean_subprocesses):
     """Review M1 / item 6: _wait_target_settled does not block for the 15s timeout:
     1. when A's upload is normal, it returns as soon as A leaves waiting_ulids;
     2. when offline (copy fails), the uploader stops and it returns quickly leaving entry in outbox.
@@ -479,6 +510,7 @@ def test_final_write_does_not_block_full_timeout_on_normal_upload_or_offline(cla
     assert code == 0, err
     assert out == a
     assert normal_duration < 5.0, f"normal upload took too long: {normal_duration}s"
+    _wait_for(lambda: not store.uploader_is_running(paths()), timeout=10.0, what="part 1 uploader finished")
 
     # 2. Offline / copy failure: uploader fails and stops, returns quickly without hanging for 15s
     a2 = _import_claude(capsys)
@@ -490,9 +522,10 @@ def test_final_write_does_not_block_full_timeout_on_normal_upload_or_offline(cla
     assert out == a2
     assert offline_duration < 5.0, f"offline run took too long: {offline_duration}s"
     assert a2.split(":")[1] in store.outbox_ulids(paths()), "unsent entry remains in outbox"
+    _wait_for(lambda: not store.uploader_is_running(paths()), timeout=10.0, what="part 2 uploader finished")
 
 
-def test_subprocess_mid_run_rescue_interleaving(claude_lab, capsys, monkeypatch, tmp_path):
+def test_subprocess_mid_run_rescue_interleaving(claude_lab, capsys, monkeypatch, tmp_path, clean_subprocesses):
     """The e2e's interleaving in a subprocess: mid-run the uploader rescues A into B,
     followed by quiet rounds and the final write. Terminal output must name B."""
     monkeypatch.setenv("AGORA_UPLOAD", "inline")
@@ -519,6 +552,7 @@ def test_subprocess_mid_run_rescue_interleaving(claude_lab, capsys, monkeypatch,
     shutil.rmtree(on_drive(a), ignore_errors=True)
     assert proc.wait(timeout=60) == 0
     os.close(fd)
+    _wait_for(lambda: not store.uploader_is_running(paths()), timeout=10.0, what="subprocess uploader finished")
     text = terminal.read_text(encoding="utf-8")
     last_line = [l.strip() for l in text.splitlines() if l.strip().startswith("agora:")][-1]
     kept = _extra_sessions(a)
@@ -799,7 +833,7 @@ def test_an_offline_fork_keeps_writing_to_itself(claude_lab, capsys, monkeypatch
     assert "ZZ 第 1 次發言" in on_drive(b).joinpath("session.md").read_text(encoding="utf-8")
 
 
-def test_a_periodic_round_uploads_while_the_agent_is_still_running(env, capsys, monkeypatch):
+def test_a_periodic_round_uploads_while_the_agent_is_still_running(env, capsys, monkeypatch, clean_subprocesses):
     """The e2e progress shape, detached: one periodic round over a confirmed session,
     and the new sentence is on Drive without the agent having left. No agent process
     runs here at all - that is the point: the round stages, the background sends,
@@ -819,6 +853,7 @@ def test_a_periodic_round_uploads_while_the_agent_is_still_running(env, capsys, 
     while time.monotonic() < deadline:
         try:
             if "ZZ 第 1 次發言" in doc.read_text(encoding="utf-8"):
+                _wait_for(lambda: not store.uploader_is_running(paths()), timeout=10.0, what="uploader finished")
                 return
         except OSError:
             pass
@@ -1023,15 +1058,6 @@ def test_nothing_of_agoras_reaches_the_agents_terminal(claude_lab, capsys, monke
     assert "FAKE-AGENT-ERROR" not in text, text
     assert "最後一行不完整" in log_text(), "the half-written line was read and logged"
     assert text[end:].strip(), "the final words did come back after the agent ended"
-
-
-def _wait_for(condition, timeout=30.0, what="condition"):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if condition():
-            return
-        time.sleep(0.05)
-    pytest.fail(f"waited {timeout:g}s for {what}")
 
 
 def test_a_hard_kill_leaves_the_work_and_the_recovery_writes_it_back(claude_lab, capsys, monkeypatch, tmp_path):
