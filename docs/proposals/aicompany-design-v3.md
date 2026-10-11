@@ -103,7 +103,7 @@
 | 介面 | 回傳 |
 |---|---|
 | `list` | 每個 subscription 的共通 JSON，**不含 `key`**：含 `agents`、`priority`、**`available`（現在能不能用）**、各窗（5h、1w）冷卻到何時 |
-| `get(id)` | 共通 JSON（見下）；含 key |
+| `get(id, agent)` | 共通 JSON（見下）；含 key。`agent` 不在該筆的 `agents` 裡就拒絕 |
 | `cooldown(id, window: 5h／1w, resets_at)` | 登錄這一把在這個窗冷卻到何時（過了自動解除；過去或超過 8 天的時間拒收） |
 
 共通 JSON（**和 LLMGateway PM 一起定**；以它 10-11 晚的草案為底，拿掉 `launch`）：
@@ -127,7 +127,8 @@
 - `list` 回同樣的形狀但沒有 `key`，誰都能看；`get` 才有 `key`。
 - `agents`：這把可以給哪些 agent 種類（條款限制，例如 Claude 訂閱只給 claude-code；`get` 也只在請求的 agent 種類符合時才回 key）。
 - `priority`：預設的挑選順序（小的先）。`available`＝兩個窗都沒在冷卻、而且 key 有部署。
-- **和 LLMGateway PM 還沒一致的一點**：它的草案另有 `launch`（以 agent 種類為鍵，列出要設的環境變數，例如 Claude Code 的 `CLAUDE_CODE_OAUTH_TOKEN`）。本提案建議**不放**：「這把 key 要變成 agent 的哪些環境變數」放在 sidecar 的 `AgentDriver.env_for`。理由是環境變數的名字跟著 agent 的版本變，而 agent 的版本和 sidecar 一起釘在 worker 映像裡；放在 LLMGateway，兩邊版本就可能對不上。這樣 schema 也只剩共通的 key、endpoint 等。兩邊談不攏就請本人選。
+- **和 LLMGateway PM 一致（10-11 晚）**：schema 沒有 `launch`。「這把 key 要變成 agent 的哪些環境變數」放在 sidecar 的 `AgentDriver.env_for`，因為環境變數的名字跟著 agent 的版本變，而 agent 的版本和 sidecar 一起釘在 worker 映像裡。LLMGateway 只回共通欄位。
+- 條款守門：`get` 必須帶 `agent=claude-code|opencode`，不在該筆的 `agents` 裡就回 403 `agent_not_allowed`（不是新介面，只是 `get` 的必填參數）；sidecar 呼叫時帶自己要開的種類。
 - sidecar 的 `open` 收這個物件；只給 `{"id": …}` 時，sidecar 自己向 LLMGateway `get` 補齊（見第 4 節 Q1）。
 
 ---
@@ -138,7 +139,7 @@
 
 1. 控制者 → Angareion：`send`（工作內容，寫在 channel X）。
 2. 控制者 → sidecar：`open`（id=`team-a-0042`、claude-code、fork 自 team 的 home Session、subscription=`{"id": "claude-personal"}`、第一則輸入「用 angareion 讀 channel X」）。
-3. sidecar → LLMGateway：`get(claude-personal)` → 共通 JSON。
+3. sidecar → LLMGateway：`get(claude-personal, agent=claude-code)` → 共通 JSON。
 4. sidecar → agora：fork home Session，打 tag `sidecar:team-a-0042` → agent 用的 session。
 5. sidecar → AgentDriver：`env_for` → `launch`（子行程，env 在環境裡）。
 6. sidecar → agent：送第一則輸入。
@@ -157,7 +158,7 @@
 1. AgentDriver → sidecar：`state` ＝ 額度用完（窗：5h 或 1w、重置時刻）。
 2. sidecar → LLMGateway：`cooldown(這一把, 窗, 重置時刻)`。
 3. sidecar → LLMGateway：`list` → 挑 `available` 而且 `agents` 包含這個 agent 種類的，照 `priority` 取第一個（第 4 節 Q2）。
-4. 有的話：sidecar → `get(那一把)` → AgentDriver `stop`（溫和）→ agora 寫回 → agora `continue` 同一個 Session → `launch`（新的 env）。id 不變、tag 不變。
+4. 有的話：sidecar → `get(那一把, agent=這個種類)` → AgentDriver `stop`（溫和）→ agora 寫回 → agora `continue` 同一個 Session → `launch`（新的 env）。id 不變、tag 不變。
 5. 沒有的話：`stop` → 寫回；狀態記成 `waiting-quota`，附最早解除冷卻的時刻。要不要到時間自動重開，見第 4 節 Q2。
 
 ### 3.4 定時與輪詢
