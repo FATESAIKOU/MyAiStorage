@@ -12,7 +12,7 @@
 2. sidecar 的定位：登錄（開啟）時就用 id，並善用 agora 標頭的自訂 tags。
 3. 相依只有 **sidecar → agora**、**sidecar → LLMGateway**；Angareion 獨立。
 4. LLMGateway 只要三個介面：列出 subscription 一覽（含冷卻：現在能不能用）、取得某個 subscription 的詳細資料（共通 JSON：key、endpoint 等）、登錄冷卻（5 小時／1 週）。**sidecar 開 agent 直接吃這個共通 JSON。**
-5. sidecar 怎麼連 LLMGateway：PMO 調研中，本提案不定。
+5. sidecar 怎麼連 LLMGateway（PMO 10-11 晚的調研結果）：sidecar 一律連 `http://127.0.0.1:8480`，由隧道轉到 LLMGateway（worker 由 pool-tunnel 加掛轉送、Mac 由 `mlp fwd`）；讀取用 token 的檔案路徑由 `LLMGATEWAY_TOKEN_FILE` 指定。
 
 ---
 
@@ -92,7 +92,7 @@
 |---|---|---|
 | `AgentDriver` | `env_for(subscription) → env／unset`、`launch(env, session)`、`send(text)`、`interrupt()`、`state() → running／idle／exited／額度用完（含重置時刻、是哪個窗：5h／1w）`、`stop(溫和／強制)` | `ClaudeCodeDriver`、`OpenCodeDriver` |
 | `SessionStore` | `prepare(模式, ids, tag) → agent 用的 session`、`sync(session)`、`find(tag)` | `AgoraSessionStore`（`agora` 指令） |
-| `SubscriptionSource` | `list() → 一覽（不含 key）`、`get(name) → 共通 JSON`、`cooldown(name, 窗, 到何時)` | `LLMGatewaySource`（連法等 PMO 調研）；本機開發可用「讀一個 JSON 檔」的實作 |
+| `SubscriptionSource` | `list() → 一覽（不含 key）`、`get(id, agent) → 共通 JSON`、`cooldown(id, 窗, 重置時刻)` | `LLMGatewaySource`（連 `http://127.0.0.1:8480`、token 檔由 `LLMGATEWAY_TOKEN_FILE` 指定）；本機開發可用「讀一個 JSON 檔」的實作 |
 
 - 「這個 subscription 要變成 agent 的哪些環境變數」是 `AgentDriver` 的知識（例如 Claude Code 用訂閱 token 或 API key、opencode 用它的 provider 設定）。LLMGateway 不必知道 agent 種類。
 - 「怎麼看出額度用完」也是 `AgentDriver` 的知識。
