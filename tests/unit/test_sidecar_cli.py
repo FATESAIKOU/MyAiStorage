@@ -142,7 +142,7 @@ def test_build_core_wires_the_file_source_and_hides_the_agent_seams(tmp_path):
     workdir = tmp_path / "work"
     workdir.mkdir()
     core = build_core(Config(subscription_source={"kind": "file", "path": str(subs_path)}))
-    # An agent kind with no registered driver is refused (3.2 adds opencode).
+    # An agent kind with no registered driver is refused.
     with pytest.raises(BadRequestError):
         core.open("t1", "not-an-agent", str(workdir), {"mode": "new"})
 

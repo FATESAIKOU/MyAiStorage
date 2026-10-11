@@ -1,0 +1,350 @@
+"""opencode driver: the server mode (task 3.2, design D6).
+
+The agent process is `opencode serve --hostname 127.0.0.1 --port <port>` -
+either the one `agora continue --headless` started (the store read the port
+and the `ses_…` session id from agora's fixed stderr lines) or, for `new`
+mode, one this driver starts itself (it then creates the session with
+`POST /session`).
+
+The `agora-port` line is printed before the server listens, so `launch` polls
+the port until it accepts a connection (`poll_timeout`); talking to the agent
+is HTTP on 127.0.0.1 with every request carrying a timeout:
+
+- send: `POST /session/{id}/message` (the call returns only when the round is
+  done, so it runs in a background thread), body
+  `{"parts": [{"type": "text", "text": ...}]}`;
+- state: `GET /session/status`, looked up by session id (the answer may be
+  keyed by id or be the status object itself);
+- interrupt: `POST /session/{id}/abort`.
+
+Quota exhaustion is `{"type": "retry", "action": {"reason": …}, "next": …}`
+with `reason` in the configured whitelist (`quota_reasons`, default only the
+observed `free_tier_limit`); other `retry` reasons are logged and the state
+stays `running`.  `next` is epoch milliseconds -> RFC 3339 UTC; the window
+follows one rule: more than 5 hours plus 5 minutes away is `1w`, otherwise
+`5h`; no `next` (or not a time) is `5h` without `resets_at`.
+
+The key and baseURL reach opencode through `OPENCODE_CONFIG_CONTENT` (the
+gateway-v0 design lists this mapping as an open question; the architect
+verifies it on real opencode - ASSUMPTION reported to the PM).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import socket
+import subprocess
+import threading
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from typing import Any, Sequence
+
+from ..protocols import (
+    DRIVER_EXITED,
+    DRIVER_IDLE,
+    DRIVER_QUOTA_EXHAUSTED,
+    DRIVER_RUNNING,
+    DriverState,
+    RunningSession,
+    Subscription,
+    iso,
+)
+from ..subproc import child_env, terminate_process
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_QUOTA_REASONS = ("free_tier_limit",)
+FIVE_HOURS_PLUS_SLACK = 5 * 3600 + 300  # D6's single window rule
+POLL_TIMEOUT = 15.0
+HTTP_TIMEOUT = 10.0
+STATUS_TIMEOUT = 2.0
+
+
+class OpenCodeDriverError(RuntimeError):
+    """opencode could not be started or talked to."""
+
+
+@dataclass
+class OpenCodeHandle:
+    proc: Any
+    port: int
+    session_id: str | None = None  # the agora Session id, when known
+    agent_session_id: str | None = None  # the `ses_…` the HTTP calls need
+    state: DriverState = field(default_factory=lambda: DriverState(kind=DRIVER_RUNNING))
+    quota: DriverState | None = None
+    stopped: bool = False
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+class OpenCodeDriver:
+    """AgentDriver for `opencode`."""
+
+    name = "opencode"
+
+    def __init__(
+        self,
+        *,
+        command: str | Sequence[str] = "opencode",
+        extra_args: Sequence[str] = (),
+        quota_reasons: Sequence[str] = DEFAULT_QUOTA_REASONS,
+        poll_timeout: float = POLL_TIMEOUT,
+        http_timeout: float = HTTP_TIMEOUT,
+    ) -> None:
+        self._command = [command] if isinstance(command, str) else list(command)
+        self._extra_args = list(extra_args)
+        self._quota_reasons = tuple(quota_reasons)
+        self._poll_timeout = poll_timeout
+        self._http_timeout = http_timeout
+
+    # -- AgentDriver ------------------------------------------------------
+
+    def env_for(self, subscription: Subscription) -> dict[str, str]:
+        """ASSUMPTION: key/baseURL ride in `OPENCODE_CONFIG_CONTENT` (D6)."""
+        options: dict[str, str] = {}
+        if subscription.key:
+            options["apiKey"] = subscription.key
+        if subscription.endpoint:
+            options["baseURL"] = subscription.endpoint
+        if not options:
+            return {}
+        provider = subscription.provider or "opencode"
+        return {
+            "OPENCODE_CONFIG_CONTENT": json.dumps(
+                {"provider": {provider: {"options": options}}}
+            )
+        }
+
+    def launch(self, session: RunningSession | None, env: dict[str, str], workdir: str) -> OpenCodeHandle:
+        if session is None:
+            port = _free_port()
+            argv = [
+                *self._command, "serve",
+                "--hostname", "127.0.0.1", "--port", str(port),
+                *self._extra_args,
+            ]
+            try:
+                proc = subprocess.Popen(
+                    argv, cwd=workdir, env=child_env(env),
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+                )
+            except OSError as e:
+                raise OpenCodeDriverError(f"cannot start opencode: {e}") from e
+            handle = OpenCodeHandle(proc=proc, port=port)
+            threading.Thread(target=_drain_pipe, args=(proc.stdout, "stdout"), daemon=True).start()
+            threading.Thread(target=_drain_pipe, args=(proc.stderr, "stderr"), daemon=True).start()
+            self._wait_listening(handle)
+            handle.agent_session_id = self._create_session(handle)
+        else:
+            process = session.process
+            port = getattr(process, "port", None)
+            if not isinstance(port, int):
+                raise OpenCodeDriverError("the session process has no opencode port")
+            handle = OpenCodeHandle(
+                proc=process,
+                port=port,
+                session_id=session.session_id,
+                agent_session_id=getattr(process, "agent_session_id", None),
+            )
+            self._wait_listening(handle)
+        return handle
+
+    def send(self, handle: OpenCodeHandle, text: str) -> None:
+        # The HTTP call blocks until the round is over (D6), so it goes to a
+        # background thread; the caller only learns "running" from it.
+        with handle.lock:
+            if handle.stopped:
+                raise OpenCodeDriverError("opencode is stopped")
+            if handle.quota is None:
+                handle.state = DriverState(kind=DRIVER_RUNNING)
+            session_id = handle.agent_session_id
+        if session_id is None:
+            raise OpenCodeDriverError("no opencode session id to send to")
+        body = {"parts": [{"type": "text", "text": text}]}
+        thread = threading.Thread(
+            target=self._send_round,
+            args=(handle, session_id, body),
+            daemon=True,
+        )
+        thread.start()
+
+    def interrupt(self, handle: OpenCodeHandle) -> None:
+        with handle.lock:
+            session_id = handle.agent_session_id
+        if session_id is None:
+            raise OpenCodeDriverError("no opencode session id to abort")
+        self._request(handle, "POST", f"/session/{session_id}/abort", body={})
+        with handle.lock:
+            if handle.quota is None:
+                handle.state = DriverState(kind=DRIVER_IDLE)
+
+    def state(self, handle: OpenCodeHandle) -> DriverState:
+        with handle.lock:
+            if handle.quota is not None:
+                return handle.quota
+            session_id = handle.agent_session_id
+        if handle.proc.poll() is not None:
+            code = handle.proc.returncode
+            with handle.lock:
+                handle.state = DriverState(kind=DRIVER_EXITED, code=code,
+                                           reason="opencode exited")
+                return handle.state
+        try:
+            data = self._request(handle, "GET", "/session/status", timeout=STATUS_TIMEOUT)
+        except OpenCodeDriverError:
+            return handle.state  # cannot tell right now: keep the last known
+        status = _status_for(data, session_id)
+        if status is not None:
+            self._apply_status(handle, status)
+        return handle.state
+
+    def stop(self, handle: OpenCodeHandle, *, graceful: bool = True, timeout: float = 30.0) -> None:
+        with handle.lock:
+            handle.stopped = True
+        if graceful:
+            code = terminate_process(handle.proc, timeout=timeout)
+        else:
+            try:
+                handle.proc.kill()
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                code = handle.proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                code = None
+        with handle.lock:
+            if handle.quota is None:
+                handle.state = DriverState(kind=DRIVER_EXITED, code=code, reason="stopped")
+
+    def external_session_id(self, handle: OpenCodeHandle) -> str | None:
+        with handle.lock:
+            return handle.agent_session_id
+
+    # -- internals --------------------------------------------------------
+
+    def _wait_listening(self, handle: OpenCodeHandle) -> None:
+        """The `agora-port` line does not mean listening yet (b8ab0f0)."""
+        deadline = time.monotonic() + self._poll_timeout
+        while time.monotonic() < deadline:
+            if handle.proc.poll() is not None:
+                raise OpenCodeDriverError(
+                    f"opencode exited before listening (rc={handle.proc.returncode})"
+                )
+            try:
+                with socket.create_connection(("127.0.0.1", handle.port), timeout=0.5):
+                    return
+            except OSError:
+                time.sleep(0.05)
+        terminate_process(handle.proc, timeout=5.0)
+        raise OpenCodeDriverError(
+            f"opencode never listened on 127.0.0.1:{handle.port} "
+            f"within {self._poll_timeout:g}s"
+        )
+
+    def _create_session(self, handle: OpenCodeHandle) -> str:
+        data = self._request(handle, "POST", "/session", body={})
+        session_id = data.get("id") if isinstance(data, dict) else None
+        if not isinstance(session_id, str) or not session_id:
+            raise OpenCodeDriverError("opencode did not answer a session id")
+        return session_id
+
+    def _send_round(self, handle: OpenCodeHandle, session_id: str, body: dict[str, Any]) -> None:
+        try:
+            self._request(handle, "POST", f"/session/{session_id}/message", body=body)
+        except OpenCodeDriverError as e:
+            logger.warning("opencode: sending a message failed: %s", e)
+
+    def _request(
+        self,
+        handle: OpenCodeHandle,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        url = f"http://127.0.0.1:{handle.port}{path}"
+        data = None
+        headers = {"Accept": "application/json"}
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(url, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout or self._http_timeout) as response:
+                raw = response.read()
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            raise OpenCodeDriverError(f"{method} {path} failed: {e}") from e
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return {}
+
+    def _apply_status(self, handle: OpenCodeHandle, status: dict[str, Any]) -> None:
+        kind = status.get("type")
+        if kind == "retry":
+            reason = (status.get("action") or {}).get("reason")
+            if reason in self._quota_reasons:
+                window, resets_at = _window_and_resets(status.get("next"))
+                with handle.lock:
+                    if handle.quota is None:
+                        handle.quota = DriverState(
+                            kind=DRIVER_QUOTA_EXHAUSTED,
+                            window=window,
+                            resets_at=resets_at,
+                            reason=f"retry {reason!r}",
+                        )
+            else:
+                logger.warning(
+                    "opencode: retry with non-quota reason %r; staying running",
+                    reason,
+                )
+            return
+        if kind == "busy":
+            with handle.lock:
+                if handle.quota is None:
+                    handle.state = DriverState(kind=DRIVER_RUNNING)
+        elif kind == "idle":
+            with handle.lock:
+                if handle.quota is None:
+                    handle.state = DriverState(kind=DRIVER_IDLE)
+        # unknown types: keep the last known state
+
+
+def _status_for(data: Any, session_id: str | None) -> dict[str, Any] | None:
+    """The status object for our session; the answer may be keyed or flat."""
+    if not isinstance(data, dict):
+        return None
+    if session_id and isinstance(data.get(session_id), dict):
+        return data[session_id]
+    if "type" in data:
+        return data
+    return None
+
+
+def _window_and_resets(next_ms: Any) -> tuple[str, str | None]:
+    """opencode gives one instant in epoch milliseconds (D6's single rule)."""
+    if not isinstance(next_ms, (int, float)) or isinstance(next_ms, bool):
+        return "5h", None
+    seconds = float(next_ms) / 1000.0
+    window = "1w" if seconds - time.time() > FIVE_HOURS_PLUS_SLACK else "5h"
+    return window, iso(seconds)
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _drain_pipe(pipe: Any, name: str) -> None:
+    try:
+        for line in pipe:
+            logger.debug("opencode %s: %s", name, line.rstrip("\n"))
+    except (OSError, ValueError):
+        pass

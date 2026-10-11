@@ -14,6 +14,7 @@ from .agora_store import AgoraSessionStore
 from .config import Config
 from .core import SidecarCore
 from .drivers.claude_code import ClaudeCodeDriver
+from .drivers.opencode import OpenCodeDriver
 from .protocols import ConfigError
 from .selectors import PrioritySelector
 from .sources import FileSubscriptionSource, connect_llmgateway
@@ -35,10 +36,16 @@ def build_core(config: Config) -> SidecarCore:
 def default_drivers(config: Config) -> dict[str, Any]:
     """The real drivers, built from the config's `agents` section."""
     claude = config.agents.get("claude-code")
+    opencode = config.agents.get("opencode")
     return {
         "claude-code": ClaudeCodeDriver(
             command=(claude.command if claude is not None and claude.command else "claude"),
             extra_args=(claude.extra_args if claude is not None else ()),
+        ),
+        "opencode": OpenCodeDriver(
+            command=(opencode.command if opencode is not None and opencode.command else "opencode"),
+            extra_args=(opencode.extra_args if opencode is not None else ()),
+            quota_reasons=config.quota_reasons,
         ),
     }
 
