@@ -211,3 +211,24 @@
 
 - `docs/angareion.md` 與實作一致：游標三欄位、新舊的判斷、`--since` 含邊界與 `received_at`、`--body` 規則、opencode 的 skill 位置、「給 MyLinuxPool 的需求」。只缺 L-3、L-4 的兩行。
 - `SKILL.md` 與實作一致：`--body` 一定要給、`--since` 說明、`wait` exit 2 要稍等再試、「新舊看後端的到達順序」。夠 agent 用。
+
+---
+
+## 最後確認
+
+- 對象：`angareion-v0-agy1` 的 `78d44e3`、`590a840`、`8959307`、`d2c4bda`（最新 `d2c4bda`）；`git archive` 到 `/tmp/a30c`，只讀、突變在副本。
+- 基準：`-k "angareion or skill"` 151 passed（和 impl1 回報一致）。
+
+### 結論：**可以合併。**
+
+| 項目 | 結果 | 實測 |
+|---|---|---|
+| W1 的上下限 | **照建議** | 假 transport 記下傳給請求的逾時：`wait(600)` 最大 30.0、最小 5.0（41 次 poll）；`wait(40)` 是 5／10／25／30；`wait(3)` 是 5.0。常數 `CHECK_TIMEOUT_CAP_SECONDS`、`CHECK_TIMEOUT_FLOOR_SECONDS` 在 `client.py`。 |
+| `--timeout 0` | **照建議** | 傳下去的是 `None`，由 transport 用它的預設 30 秒；沒有再被壓成 1 秒。（不阻塞的「查一次」在慢網路下不會誤判 exit 2。） |
+| L-1 `--since` | **照建議** | `--since yesterday` → exit 1，訊息「--since must be an RFC 3339 timestamp such as 2026-10-12T03:00:00Z, got 'yesterday'」；合法的時間 → exit 0。 |
+| L-2 同名 | **照建議** | 同一次列表裡 `b` 有編號 2 與 9：先找 `c`（掃完整頁）再找 `b` → 2（最舊）。 |
+| design D2 那句 | **和程式一致** | 「`wait --timeout N` 時再取 min(30 秒, max(5 秒, 剩餘時間))；`--timeout 0` 用預設 30 秒；逾時是 exit 2、不重試」，與 `client.py:72-80` 相同；順帶：下限 5 秒表示最後一次 poll 最多會比 `N` 多出約 5 秒，設計已寫「不會超過 N 太多」。 |
+| 新問題 | **沒有** | 我另外改壞四處：移除 30 秒上限（2 個測試紅）、下限改成 0.5（2 紅）、`--timeout 0` 傳 1 秒（1 紅）、不檢查 `--since`（1 紅）。其餘行為與上一輪相同。 |
+
+殘留（不擋合併，記錄用）：
+- 一次 `wait` 的總時間誤差最多約 5 秒（下限）加上一次 poll 的 30 秒 socket 逾時是「每個 socket 操作」而不是整個請求；慢速滴灌的回應理論上可以拖得更久。v0 接受。
