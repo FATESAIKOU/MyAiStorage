@@ -1550,12 +1550,16 @@ def test_continue_escape_at_agent_confirm_cancels_and_does_nothing():
 
 
 def test_continue_confirm_tab_and_shift_tab_do_not_switch_app_tab():
-    """Tab and shift+tab only move between list and checkbox in Confirm, not switching app tabs."""
+    """Tab and shift+tab only move between list and checkbox in Confirm, not switching app tabs or table focus."""
     app, _ = _app([])
 
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
+            assert app.tab == "agora"
+            assert app.focused is app.query_one("#table")
+
+            # 1. Tab inside Confirm moves focus to checkbox, underlying table focus unaffected
             await pilot.press("enter")
             await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
             screen = app.screen
@@ -1564,11 +1568,29 @@ def test_continue_confirm_tab_and_shift_tab_do_not_switch_app_tab():
             await pilot.pause()
             assert screen.focused == screen.query_one("#extra")
             assert app.tab == "agora"                        # did not switch to import
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            assert not isinstance(app.screen, tui.ModalScreen)
+            assert app.tab == "agora"
+            assert app.focused is app.query_one("#table")
+
+            # 2. shift+tab inside Confirm moves focus backwards, underlying table focus unaffected
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            screen = app.screen
+            assert screen.focused == screen.query_one("OptionList")
+            await pilot.press("tab")
+            await pilot.pause()
+            assert screen.focused == screen.query_one("#extra")
             await pilot.press("shift+tab")
             await pilot.pause()
             assert screen.focused == screen.query_one("OptionList")
             assert app.tab == "agora"
             await pilot.press("escape")
+            await pilot.pause(0.2)
+            assert not isinstance(app.screen, tui.ModalScreen)
+            assert app.tab == "agora"
+            assert app.focused is app.query_one("#table")
     _run(go)
 
 

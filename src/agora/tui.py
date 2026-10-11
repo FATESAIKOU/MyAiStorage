@@ -2058,6 +2058,7 @@ class AgoraApp(App):
         row = self.current()
         if await self._refuse(row, "接續"):
             return
+        # Imported here to avoid a circular import with cli.
         from agora.cli import _ulid_of
         ulid = _ulid_of(row.key)
         title = (self.index.header(ulid) or {}).get("title") or (row.cells[1] if len(row.cells) > 1 else row.key) or row.key
