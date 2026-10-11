@@ -44,6 +44,12 @@ def test_skill_doc_explains_exit_2_retry_and_reply_address():
     assert "repo×role" in text  # the reply address is the repo×role in the message header
 
 
+def test_skill_doc_explains_backend_order_and_since_cursor():
+    text = _text()
+    assert "到達順序" in text   # newness follows the backend, not the sender's clock
+    assert "received_at" in text  # --since takes the backend time that read prints
+
+
 def test_skill_doc_contains_no_secrets_or_private_info():
     text = _text()
     assert not re.search(r"ghp_[A-Za-z0-9]", text)

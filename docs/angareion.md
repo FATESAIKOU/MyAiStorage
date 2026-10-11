@@ -16,8 +16,8 @@ Angareion 是讓 agent、程式或人「留言、讀留言」的獨立工具。�
 - **目標**：給 `--channel <ch>` 就是那個 channel 的全部訊息；不給就是「寄給我的」（所有 channel 裡 `to` 是自己身分的訊息）。
 - **`send` 的內文**：一定要給 `--body <文字>`；`--body -` 讀 stdin（多行內文用這個）。沒給 `--body` 就 exit 1——不會自動讀管線，免得卡在沒資料的 stdin 上。
 - **`wait` 的等法**：`--timeout 0` 查一次就回（不阻塞）；`--timeout N` 最多等 N 秒，每 15 秒查一次；不給就一直等。等待期間不動游標——`wait` exit 0 之後，下一次 `read` 還是讀得到那則訊息。
-- **`read --since`**：照給的時刻讀，不動本機游標（給程式自己管）；不給 `--since` 時從本機游標之後讀起，讀到的最後一則成為新游標。游標檔刪掉就從頭讀起。
-- **`read` 的輸出**：預設是給人看的格式（`[urgency] id at <寄件者> channel: 名稱` 加縮排的內文與附件清單）；`--json` 印一個 JSON 陣列，欄位就是下面的訊息格式。
+- **`read --since`**：`--since` 是**後端記錄的時刻**（RFC 3339，例如 `2026-10-12T03:00:00Z`），含邊界——後端時刻不早於它的訊息都會回傳，同一秒的可能重複收到，由呼叫方用訊息 `id` 去重。給了 `--since` 不動本機游標（給程式自己管）；不給 `--since` 時從本機游標之後讀起，讀到的最後一則成為新游標。游標檔刪掉就從頭讀起。
+- **`read` 的輸出**：每則都帶 **`received_at`**——後端記錄的時刻，不是寄件者填的 `at`（程式要接 `--since` 就用它）。預設是給人看的格式（`[urgency] id at (received received_at) <寄件者> channel: 名稱` 加縮排的內文與附件清單）；`--json` 印一個 JSON 陣列，欄位就是下面的訊息格式再加 `received_at`。
 - **位址寫法**：`repo=owner/team,role=pm,name=小明`、`owner/team×pm`、`owner/team:pm`，或 JSON `{"repo": "owner/team", "role": "pm"}`。`name` 只是顯示用，不比對。
 - **群組位址**（`group=…`）在 v0 會被拒絕（exit 1），身分也不可以是群組。
 
@@ -56,27 +56,32 @@ attachments: []
 ```
 
 - `angareion: 1` 是格式版本，解析器不認得的版本會忽略（當成不是訊息）。
-- `id` 是寄件者產生的 ULID；`at` 是含時區的 ISO 8601。
+- `id` 是寄件者產生的 ULID；`at` 是含時區的 ISO 8601。這兩個只用來辨識與顯示——**新舊不是用它們判斷的**（見下面的游標）：寄件者的時鐘、時區、ULID 順序都不會讓訊息漏掉或重複。
 - `urgency` 是 0～9 的整數，預設 5。
 - `attachments` 每項是 `{"name": …, "ref": …}`（連結）或 `{"name": …, "inline": …}`（小檔的內容），兩者恰有一個。指令上的 `--ref NAME=LOCATOR` 產生 `ref`、`--attach NAME=PATH` 把檔案內容讀進來產生 `inline`。
 - 一則訊息（含 front matter）上限 65536 字元。
 
 ### 游標（讀到哪）
 
-「讀到哪」是讀的人自己的本機狀態，不在信道上留任何記號：
+「讀到哪」是讀的人自己的本機狀態，不在信道上留任何記號。**新舊只看後端**：訊息的 `at` 與 `id`（ULID）是寄件者的機器產生的，時鐘、時區、到達順序都不保證和後端一致，所以不用它們判斷；游標的三個欄位都是後端的東西：
 
 - 檔案：`~/.local/state/angareion/cursor-<身分>.json`（`ANGAREION_STATE_DIR` 可覆寫）。`<身分>` 是 `repo` 與 `role` 把 `/`、`:` 換成 `_` 再接起來。
-- 內容是每個目標一筆，值是「最後讀到的那一則」的 `at` 與 `id`：
+- 每個目標一筆：
 
   ```json
   {
-    "channel:general": {"at": "2026-10-12T03:00:00.123456+00:00", "id": "01JX2M3N…"},
-    "to:owner_worker__worker": {"at": "2026-10-12T03:05:00+00:00", "id": "01JX2M3N…"}
+    "channel:general": {"position": "104", "at": "2026-10-12T03:00:05Z", "seen": ["102", "103", "104"]},
+    "to:owner_worker__worker": {"position": "98", "at": "2026-10-12T03:05:00Z", "seen": ["98"]}
   }
   ```
 
-- 新訊息的判斷是嚴格晚於 `(at, id)`：同一秒的兩則靠 ULID 分先後，兩則都讀得到；已讀過的留言就算在 GitHub 上被編輯（`updated_at` 變新）也不會被當成新訊息再回傳。
-- GitHub 的 ETag 只存在單次 `wait` 行程的記憶體裡（用條件式請求問「有沒有變」），**不寫進游標檔**：`wait` 不會動到游標，之後的 `read` 也不會被 304 跳過。
+  - `position`：後端給的**到達位置**（不透明；GitHub 是留言 id，十進位字串）。
+  - `at`：後端記錄的時刻（RFC 3339，UTC）——最後讀到那則的。
+  - `seen`：`at` 前 60 秒以內、已經讀過的後端識別（不透明；GitHub 是留言 id）。超過視窗的就丟掉。
+
+- 一則留言「新」的條件：它的留言 id 大於 `position`，**或者**它的 `created_at` 不早於 `at − 60 秒` 而且 id 不在 `seen` 裡。後者容納 GitHub 偶爾的複寫延遲（較小的 id 比較大的 id 晚出現）；已讀過的留言就算被編輯（`updated_at` 變新）也不會再被當成新訊息。查詢用的 `since` 是 `at − 60 秒`。
+- 舊格式的游標（v0 早期存的 `{at, id}`，寄件者的 at 與 ULID）沒有後端位置，無法換算：讀到時**當成沒有游標**、從頭讀起，而且每次執行會在 stderr 說一次，檔案會改寫成新格式。
+- GitHub 的 ETag 與掃描視窗（`scan_since`）只存在單次 `wait` 行程的記憶體裡，**不寫進游標檔**：`wait` 不會動到游標，之後的 `read` 也不會被 304 跳過。回應有下一頁時不用 ETag（它只代表第 1 頁）。
 - 刪掉游標檔就等於從頭讀；沒有其他本機狀態。
 
 ## 設定與 token
@@ -109,7 +114,7 @@ token 不會出現在任何輸出、log 或錯誤訊息裡（有出現會被遮�
 6. 用另一個身分（另一台機器或另一個設定目錄）`angareion send --channel general --to 'repo=owner/worker,role=worker' --body 'hello'` → 印訊息 id。
 7. `angareion wait --channel general --timeout 0` → 有新訊息 exit 0；`angareion read` → 看到那則訊息；再 `angareion read` 一次 → 什麼都沒有。游標檔刪掉再 `read` → 從頭看到所有訊息。
 
-`wait` 是每 15 秒用條件式請求問一次；GitHub 沒有推播，304 不耗額度。被 GitHub 次級限制打到時就照 HTTP 回應失敗（exit 2），不自動重試。
+`wait` 是每 15 秒問一次；GitHub 沒有推播，304 不耗額度（只在回應單頁時用 ETag；行程內把已掃過的視窗往前推，不重掃）。被 GitHub 次級限制打到時就照 HTTP 回應失敗（exit 2），不自動重試。
 
 ## 說明檔的位置（spike 結論）
 
