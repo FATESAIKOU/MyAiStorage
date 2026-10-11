@@ -35,4 +35,4 @@ AiCompany 期 1 需要一個讓 agent、程式或人「上 Slack 留言、讀留
 - 程式：`src/angareion/`、`pyproject.toml`（console script `angareion`、套件 `src/angareion`）。
 - 測試：`tests/unit/test_angareion_*.py`；`tests/conftest.py` 把 `ANGAREION_*` 指到暫存目錄；不連網。
 - 文件：`docs/angareion.md`（格式、四個指令、token 的放置與輪替、本人的 smoke test）、`skills/angareion/SKILL.md`。
-- 其他專案：MyLinuxPool 的 Angareion 能力（token 檔放在 `/run/mlp-secrets/angareion-token`，0400；skill 檔放在各 agent 讀得到的位置）。
+- 其他專案：MyLinuxPool 的 Angareion 能力（以 env 設 `ANGAREION_TOKEN_FILE` 指到池的 secret 檔；建映像時用 tool-pins 的同一個 sha 取 `skills/angareion/SKILL.md`，放到各 agent 讀得到的位置）。

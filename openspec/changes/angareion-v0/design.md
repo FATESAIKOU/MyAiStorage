@@ -45,13 +45,13 @@
 ### D5 設定與 token
 
 - 設定：`~/.config/angareion/config.json`（`ANGAREION_CONFIG` 可覆寫）：`channel_repo`、`identity`、`token_file`。
-- token 的位置，依序：`ANGAREION_TOKEN_FILE` → 設定的 `token_file` → `~/.config/angareion/token`。檔案只能擁有者有權限（0400 或 0600），否則拒絕（exit 2）。worker 上由 MyLinuxPool 的 Angareion 能力放在 `/run/mlp-secrets/angareion-token`（0400、uid 1000），並設 `ANGAREION_TOKEN_FILE`。
+- token 的位置，依序：`ANGAREION_TOKEN_FILE` → 設定的 `token_file` → `~/.config/angareion/token`。檔案只能擁有者有權限（0400 或 0600），否則拒絕（exit 2）。Angareion 不寫死任何路徑；worker 上由 MyLinuxPool 的 Angareion 能力以 env 設 `ANGAREION_TOKEN_FILE` 指到池掛進來的 secret 檔（`/run/mlp-secrets/<GitHub secret 名>`，0400、uid 1000，檔名照池的規則，由本人命名）。
 - token 不出現在任何輸出、log、錯誤訊息；v1 的 `load_token`、`mask_token` 移植過來。
 
 ### D6 給 agent 的說明（skill）
 
 - `skills/angareion/SKILL.md`：什麼時候用、四個指令的用法、身分與 channel、閒著時用 `angareion wait --timeout <秒>` 阻塞地等（不耗模型額度）、收到 urgency 高的訊息怎麼辦。
-- 放到哪裡由 MyLinuxPool 的 Angareion 能力決定（例如 Claude Code 的 `~/.claude/skills/angareion/SKILL.md`；opencode 的位置在實作時確認後寫進 `docs/angareion.md`）。
+- 怎麼送到 agent：MyLinuxPool 建映像時，用 tool-pins 裡同一個 sha 取 repo 的 `skills/angareion/SKILL.md`（版本和裝的 `angareion` 一致），放到各 agent 讀得到的位置（Claude Code 是 `~/.claude/skills/angareion/SKILL.md`；opencode 的位置在實作時確認後寫進 `docs/angareion.md`）。Angareion 不為此加子指令，對外仍只有四個介面。
 
 ## Risks / Trade-offs
 
