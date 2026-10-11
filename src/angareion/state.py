@@ -8,7 +8,9 @@ the backend instance for one process, so `wait` never writes the cursor.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from angareion.backend import Cursor, Target
@@ -60,6 +62,16 @@ class CursorStore:
         cursors[target.key()] = cursor
         payload = {key: {"at": c.at, "id": c.id} for key, c in cursors.items()}
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_file = self.path.with_suffix(".tmp")
-        tmp_file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        tmp_file.replace(self.path)
+        # L6: a unique temp file in the same directory, so two processes
+        # reading at the same time cannot overwrite each other's in-flight file.
+        fd, tmp_name = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp", dir=self.path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(payload, indent=2) + "\n")
+            os.replace(tmp_name, self.path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise

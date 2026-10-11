@@ -60,3 +60,20 @@ def test_deleting_the_file_means_reading_from_the_start(tmp_path):
     store.save(target, Cursor(at="2026-10-10T12:00:00+00:00", id="01AAAA"))
     store.path.unlink()
     assert store.cursor_for(target) == Cursor()
+
+
+def test_save_uses_a_unique_temp_file_in_the_same_directory(tmp_path):
+    """L6: a fixed .tmp name would let two processes clobber each other's in-flight file."""
+    store = CursorStore(tmp_path, {"repo": "owner-org/team", "role": "PM"})
+    target = Target(channel="general")
+
+    other_process = store.path.with_suffix(".tmp")
+    other_process.write_text("another process's in-flight cursor", encoding="utf-8")
+
+    store.save(target, Cursor(at="2026-10-10T12:00:00+00:00", id="01AAAA"))
+
+    assert other_process.read_text(encoding="utf-8") == "another process's in-flight cursor"
+    assert store.cursor_for(target) == Cursor(at="2026-10-10T12:00:00+00:00", id="01AAAA")
+    # Our own temp file is gone: just the cursor and the other process's file remain.
+    leftovers = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(store.path.stem))
+    assert leftovers == sorted([store.path.name, other_process.name])
