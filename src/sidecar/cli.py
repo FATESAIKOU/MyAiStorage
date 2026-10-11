@@ -99,9 +99,14 @@ def run(config: Config, stop_event: threading.Event | None = None) -> int:
             server.handle_request()
     finally:
         stop.set()
+        # Shutting down (D2/M5): refuse new work, wait for the scheduler's
+        # current beat, then close every agent - only after all of them are
+        # stopped does the process leave.
+        core.begin_shutdown()
+        scheduler.join(timeout=5)
         server.server_close()
         try:
-            core.shutdown()  # stop every agent gracefully before leaving (D2)
+            core.shutdown()
         except Exception:
             logger.exception("shutdown failed")
     return 0

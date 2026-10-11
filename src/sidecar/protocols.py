@@ -137,6 +137,10 @@ class GatewayUnreachableError(UnavailableError):
     code = "gateway_unreachable"
 
 
+class ShuttingDownError(UnavailableError):
+    code = "shutting_down"
+
+
 class ConfigError(SidecarError):
     status = 500
     code = "config_error"

@@ -48,6 +48,7 @@ from .protocols import (
     RunningSession,
     SidecarError,
     SourceError,
+    ShuttingDownError,
     Subscription,
     SubscriptionNotAllowedError,
     SubscriptionNotFoundError,
@@ -177,6 +178,7 @@ class SidecarCore:
         self._cond = threading.Condition(self._lock)
         self._agents: dict[str, AgentRecord] = {}
         self._jobs = JobRegistry()
+        self._closing = False  # set by begin_shutdown; blocks new work (D2/M5)
 
     # --- the four actions -------------------------------------------------
 
@@ -190,6 +192,7 @@ class SidecarCore:
         input: str | None = None,
     ) -> AgentRecord:
         valid_id(id)
+        self._refuse_if_closing()
         if not isinstance(agent, str) or not agent:
             raise BadRequestError("agent must be a non-empty string")
         if not isinstance(workdir, str) or not workdir:
@@ -358,6 +361,7 @@ class SidecarCore:
         return rec
 
     def poke(self, id: str, text: str, interrupt: bool = False) -> AgentRecord:
+        self._refuse_if_closing()
         if not isinstance(text, str) or not text:
             raise BadRequestError("text must be a non-empty string")
         with self._cond:
@@ -420,6 +424,7 @@ class SidecarCore:
         every: float | None = None,
         until: float | None = None,
     ) -> Job:
+        self._refuse_if_closing()
         if action not in ACTIONS:
             raise BadRequestError(f"action must be one of {', '.join(ACTIONS)}")
         if not isinstance(args, dict):
@@ -464,6 +469,8 @@ class SidecarCore:
 
     def tick(self, now: float | None = None) -> None:
         """One scheduler beat: observe agents, then run whatever is due."""
+        if self._closing:
+            return  # no transitions, no jobs, while shutting down (D2/M5)
         now = self._now() if now is None else now
         self.refresh_states(now)
         for job in self._jobs.due(now):
@@ -796,8 +803,24 @@ class SidecarCore:
 
     # --- lifecycle --------------------------------------------------------
 
+    def begin_shutdown(self) -> None:
+        """Enter shutting down: new open/poke/jobs answer 503, ticks do nothing.
+
+        Called before the scheduler is stopped; the caller then joins it and
+        calls `shutdown()` to close every agent (D2/M5).
+        """
+        with self._lock:
+            self._closing = True
+
+    def _refuse_if_closing(self) -> None:
+        with self._lock:
+            closing = self._closing
+        if closing:
+            raise ShuttingDownError("sidecar is shutting down")
+
     def shutdown(self) -> None:
         """Stop every agent gracefully before the daemon goes away (design D2)."""
+        self.begin_shutdown()
         with self._lock:
             ids = [r.id for r in self._agents.values() if r.state != STATE_EXITED]
         for agent_id in ids:

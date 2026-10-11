@@ -34,6 +34,7 @@ from sidecar.protocols import (
     STATE_IDLE,
     STATE_RUNNING,
     STATE_STARTING,
+    ShuttingDownError,
     SubscriptionNotAllowedError,
     SubscriptionNotFoundError,
     WorkdirNotFoundError,
@@ -551,6 +552,35 @@ def test_shutdown_closes_every_open_agent(tmp_path):
     assert core.get("t1").state == STATE_EXITED
     assert core.get("t2").state == STATE_EXITED
     assert len(driver.stop_calls) == 2  # t2 was already closed; no second stop
+
+
+def test_shutdown_refuses_new_work_and_skips_due_jobs(tmp_path):
+    """M5 scenarios: 503 for new work; a due job does not open an agent."""
+    core, driver, _store, _source, clock, workdir = rig(tmp_path)
+    core.open("t1", "claude-code", workdir, {"mode": "new"}, input="go")
+    due = core.add_job(
+        "open",
+        {"id": "t2", "agent": "claude-code", "workdir": workdir, "session": {"mode": "new"}},
+        at=clock.t + 1,
+    )
+
+    core.begin_shutdown()
+
+    with pytest.raises(ShuttingDownError):
+        core.open("t3", "claude-code", workdir, {"mode": "new"})
+    with pytest.raises(ShuttingDownError):
+        core.poke("t1", "hi")
+    with pytest.raises(ShuttingDownError):
+        core.add_job("poke", {"id": "t1", "text": "x"}, every=60)
+    clock.advance(1)
+    core.tick()  # the due job must not run while shutting down
+
+    assert [rec.id for rec in core.list_agents()] == ["t1"]
+    assert [job.id for job in core.list_jobs()] == [due.id]  # still visible
+
+    core.shutdown()
+    assert core.get("t1").state == STATE_EXITED
+    assert len(driver.stop_calls) == 1
 
 
 # --- volatile state (spec: 重啟) ---------------------------------------------

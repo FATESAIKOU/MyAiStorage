@@ -258,6 +258,22 @@ def test_failed_job_keeps_last_run_and_last_error(control):
     assert "key" not in json.dumps(row)
 
 
+def test_shutting_down_refuses_new_work(control):
+    """M5 scenario 關閉中的新請求: POST /agents answers 503 shutting_down."""
+    base, _server, core, _driver, _store, _source, _clock, workdir = control
+    core.begin_shutdown()
+
+    status, body = call(base, "POST", "/agents", _open_args(workdir))
+    assert status == 503 and body["error"]["code"] == "shutting_down"
+    status, _body = call(
+        base, "POST", "/jobs",
+        {"action": "poke", "args": {"id": "t1", "text": "x"}, "every": 60},
+    )
+    assert status == 503
+    status, body = call(base, "GET", "/agents")  # health still answers
+    assert status == 200 and body["agents"] == []
+
+
 def test_no_response_ever_carries_the_subscription_key(tmp_path):
     secret = "HTTP-SECRET-KEY"
     workdir = tmp_path / "work"
