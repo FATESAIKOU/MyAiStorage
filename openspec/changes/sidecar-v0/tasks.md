@@ -25,7 +25,7 @@
   - [x] 2.7.9 N1＋N4：close 遇到 `busy` 記 `closing`；`_swap` 在 stop 前與新 handle 寫回前看到 `closing` 就停新行程、標 exited；`_refresh_one` 在 ACTIVE 看到 `closing` 也停並標 exited（架構師探測成測試）
   - [x] 2.7.10 N2：cli `scheduler.join(timeout=close_timeout+5)`（逾時記 log 照樣 close）；driver／store 每個呼叫都有內部逾時（≤ close_timeout）＋逾時測試
   - [x] 2.7.11 N5：換把完成後 `busy` 有釋放、再觸發額度用完仍會換的測試
-  - [ ] 2.7.12 N6：413 測試改成讀到連線關閉（在 3.1 的 commit `c95d268` 內已改好）：driver 呼叫在鎖外、`every` 不補跑、本文 1 MB → 413、open 第一則輸入排隊不失敗
+  - [x] 2.7.12 N6：413 測試改成讀到連線關閉（在 3.1 的 commit `c95d268` 內已改好）：driver 呼叫在鎖外、`every` 不補跑、本文 1 MB → 413、open 第一則輸入排隊不失敗
 
 ## 3. agent driver 與 agora（spike 之後依 D6 的結論）
 
