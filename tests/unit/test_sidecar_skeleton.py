@@ -11,6 +11,7 @@ from sidecar.cli import main
 from sidecar.config import SidecarConfig, get_default_config_path, get_default_state_dir, load_config
 from sidecar.queue import MessageQueue
 from sidecar.registry import AgentRecord, Registry
+from sidecar.seen import SeenStore
 
 
 def test_config_defaults_and_env_overrides(tmp_path, monkeypatch):
@@ -369,4 +370,30 @@ def test_queue_corrupt_file_backup(tmp_path):
     assert q.enqueue(ident, {"id": "m1", "urgency": 5, "content": "fresh"}) is True
     assert q.count(ident) == 1
     assert len(list(queue_dir.glob(f"{qfile.name}.corrupt-*"))) == 1
+
+
+def test_seen_corrupt_file_backup(tmp_path):
+    """L7: a corrupt seen.json is renamed to a .corrupt- backup, not lost."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    seen_file = state_dir / "seen.json"
+    seen_file.write_text("not json at all", encoding="utf-8")
+
+    store = SeenStore(state_dir)
+    assert store.has("anything") is False
+
+    corrupt_files = list(state_dir.glob("seen.json.corrupt-*"))
+    assert len(corrupt_files) == 1
+    assert corrupt_files[0].read_text(encoding="utf-8") == "not json at all"
+    assert not seen_file.exists()
+
+    # Fresh writes work and keep the backup.
+    store.add("msg-1")
+    assert store.has("msg-1") is True
+    assert seen_file.is_file()
+    assert len(list(state_dir.glob("seen.json.corrupt-*"))) == 1
+
+    # Restart recovery: ids survive a reload.
+    store2 = SeenStore(state_dir)
+    assert store2.has("msg-1") is True
 

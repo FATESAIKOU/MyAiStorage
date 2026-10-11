@@ -436,6 +436,7 @@ class FakeHerdrClient:
         self.calls.append(("pane_close", (pane_id,), {}))
         self.closed_panes.add(pane_id)
         self.panes.pop(pane_id, None)
+        self.process_infos.pop(pane_id, None)
         # Clear any agent tied to this pane
         to_del = [name for name, a in self.agents.items() if a.get("pane_id") == pane_id]
         for name in to_del:

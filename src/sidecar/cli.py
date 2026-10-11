@@ -127,7 +127,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     receiver = Receiver(backend, config, registry, queue, host)
-    sender = AngareionRelaySender(backend, default_channel=args.channel)
+    # L8/D10: relayed reports carry each team's full address from config.
+    team_addresses = {
+        identity: team.get("identity")
+        for identity, team in config.teams.items()
+        if isinstance(team.get("identity"), dict)
+    }
+    sender = AngareionRelaySender(
+        backend, default_channel=args.channel, team_addresses=team_addresses
+    )
     sock_path = args.sock if args.sock else get_default_sock_path()
     server = RelayServer(
         socket_path=sock_path,
@@ -161,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     say_parser = subparsers.add_parser("say", help="Report a message to Angareion via sidecar relay")
     say_parser.add_argument("message", help="Message content to report")
     say_parser.add_argument("--to", "-t", default="pmo", help="Recipient identity (default: pmo)")
-    say_parser.add_argument("--urgency", "-u", type=int, default=5, help="Urgency level (0-10, default: 5)")
+    say_parser.add_argument("--urgency", "-u", type=int, default=5, help="Urgency level (0-9, default: 5)")
     say_parser.add_argument("--sock", "-s", help="Path to relay socket (overrides SIDECAR_SOCK)")
     say_parser.add_argument("--json", action="store_true", help="Output result as JSON")
     say_parser.set_defaults(func=cmd_say)

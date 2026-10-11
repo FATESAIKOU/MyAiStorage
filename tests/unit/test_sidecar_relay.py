@@ -16,6 +16,7 @@ from sidecar.registry import AgentRecord, Registry
 from sidecar.relay import (
     FakeRelaySender,
     RelayServer,
+    authenticate_peer,
     get_peer_pid,
     send_relay_message,
 )
@@ -225,3 +226,206 @@ def test_agent_environment_isolation_no_a2a_token(tmp_path, monkeypatch):
     # The agent environment passed to herdr MUST NOT contain A2A tokens
     assert "A2A_TOKEN" not in passed_env
     assert "A2A_TOKEN_FILE" not in passed_env
+
+
+def _register_running_agent(reg, state_dir, identity="team-worker", pids=None):
+    rec = AgentRecord(
+        agent_id=f"ag_{identity}",
+        identity=identity,
+        agora_session="agora:01JRELAY",
+        agent_kind="opencode",
+        herdr_tab_id="w1:t1",
+        herdr_pane_id="w1:p1",
+        agent_name=f"{identity}-worker",
+        started_at="2026-10-11T12:00:00Z",
+        status="running",
+        log_path=str(state_dir / "log"),
+        updated_at="2026-10-11T12:00:00Z",
+        extra={"pids": pids} if pids is not None else None,
+    )
+    reg.register(rec)
+    return rec
+
+
+def test_authenticate_peer_rejects_foreground_pgid_1(tmp_path):
+    """L1: when the pane's foreground pgid is 1, no process is admitted,
+    not even one whose ancestor chain (always ending at 1) intersects."""
+    import os as _os
+
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    _register_running_agent(reg, state_dir)
+
+    fake_herdr = FakeHerdrClient()
+    fake_herdr.process_infos["w1:p1"] = {
+        "foreground_process_group_id": 1,
+        "shell_pid": 1,
+        "foreground_processes": [{"pid": 1}],
+        "pane_id": "w1:p1",
+    }
+
+    # An unrelated local process must not authenticate through pid 1.
+    assert authenticate_peer(_os.getpid(), reg, herdr=fake_herdr) is None
+    assert authenticate_peer(1, reg, herdr=fake_herdr) is None
+
+
+def test_relay_rejects_out_of_range_urgency(tmp_path, short_sock_path):
+    """L2/D10: urgency outside 0-9 is an explicit error, not a silent drop."""
+    import socket as _socket
+
+    sock_path = short_sock_path
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    _register_running_agent(reg, state_dir, pids=[os.getpid()])
+
+    server = RelayServer(
+        socket_path=sock_path,
+        registry=reg,
+        sender=FakeRelaySender(),
+        herdr=FakeHerdrClient(),
+    )
+    server.start()
+
+    def raw_request(payload: dict) -> dict:
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        try:
+            s.connect(str(sock_path))
+            s.sendall(json.dumps(payload).encode("utf-8"))
+            raw = s.recv(65536)
+            assert raw, "server must answer, never stay silent"
+            return json.loads(raw.decode("utf-8"))
+        finally:
+            s.close()
+
+    try:
+        for bad in (10, -1, 99):
+            res = raw_request({"content": "out of range", "urgency": bad})
+            assert res["ok"] is False
+            assert "urgency" in res["error"]
+
+        ok = raw_request({"content": "in range", "urgency": 9})
+        assert ok["ok"] is True
+    finally:
+        server.stop()
+
+
+def test_send_relay_message_rejects_out_of_range_urgency_client_side(short_sock_path):
+    """L2: the client refuses out-of-range urgency without touching the socket."""
+    with pytest.raises(ValueError, match="urgency must be an integer between 0 and 9"):
+        send_relay_message(content="x", urgency=10, socket_path=short_sock_path)
+    with pytest.raises(ValueError, match="urgency must be an integer between 0 and 9"):
+        send_relay_message(content="x", urgency=-1, socket_path=short_sock_path)
+
+
+def test_say_urgency_help_says_0_to_9(capsys):
+    """L2/D10: CLI documents the Angareion 0-9 range."""
+    from sidecar.cli import build_parser
+
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["say", "--help"])
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--urgency" in help_text
+    assert "0-9" in help_text
+    assert "0-10" not in help_text
+
+
+def test_relay_server_refuses_live_socket_takeover(tmp_path, short_sock_path):
+    """L5: starting a second server on a live socket raises instead of
+    stealing it; the first server keeps serving."""
+    import os as _os
+
+    sock_path = short_sock_path
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    _register_running_agent(reg, state_dir, pids=[_os.getpid()])
+
+    sender_a = FakeRelaySender()
+    server_a = RelayServer(
+        socket_path=sock_path, registry=reg, sender=sender_a, herdr=FakeHerdrClient()
+    )
+    server_a.start()
+
+    server_b = RelayServer(
+        socket_path=sock_path,
+        registry=reg,
+        sender=FakeRelaySender(),
+        herdr=FakeHerdrClient(),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="already served by a live server"):
+            server_b.start()
+
+        res = send_relay_message(content="still A", to="pmo", socket_path=sock_path)
+        assert res["content"] == "still A"
+        assert len(sender_a.sent) == 1
+    finally:
+        server_a.stop()
+        server_b.stop()
+
+
+def test_relay_server_replaces_stale_socket_file(tmp_path, short_sock_path):
+    """L5: a stale (non-served) file at the socket path is replaced."""
+    sock_path = short_sock_path
+    sock_path.write_text("leftover", encoding="utf-8")
+
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    server = RelayServer(
+        socket_path=sock_path, registry=reg, sender=FakeRelaySender()
+    )
+    try:
+        server.start()
+        assert sock_path.exists()
+    finally:
+        server.stop()
+
+
+def test_relay_socket_and_dir_permissions(tmp_path, short_sock_path):
+    """L6: socket is 0600 and its directory is tightened to 0700."""
+    import stat as _stat
+
+    sock_path = short_sock_path
+    sock_path.parent.chmod(0o755)
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    server = RelayServer(
+        socket_path=sock_path, registry=reg, sender=FakeRelaySender()
+    )
+    try:
+        server.start()
+        assert _stat.S_IMODE(sock_path.stat().st_mode) == 0o600
+        assert _stat.S_IMODE(sock_path.parent.stat().st_mode) == 0o700
+    finally:
+        server.stop()
+
+
+def test_relay_invalid_json_gets_error_response(tmp_path, short_sock_path):
+    """L7: malformed payloads get an explicit error, never silence."""
+    import socket as _socket
+
+    sock_path = short_sock_path
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    _register_running_agent(reg, state_dir, pids=[os.getpid()])
+
+    server = RelayServer(
+        socket_path=sock_path,
+        registry=reg,
+        sender=FakeRelaySender(),
+        herdr=FakeHerdrClient(),
+    )
+    server.start()
+    try:
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        try:
+            s.connect(str(sock_path))
+            s.sendall(b"this is not json{{{")
+            raw = s.recv(65536)
+            assert raw, "server must answer, never stay silent"
+            res = json.loads(raw.decode("utf-8"))
+            assert res["ok"] is False
+        finally:
+            s.close()
+    finally:
+        server.stop()

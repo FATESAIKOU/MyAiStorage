@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 # (is_working / get_agent_status) elsewhere.
 PROMPT_WAIT_REGEX = r"\S"
 
+# agora continue --fork prints the new session id into the pane on startup
+# ("[agora] fork 已存成 <id>"); sidecar parses it to track the task session.
+_FORK_SESSION_RE = re.compile(r"fork 已存成 (\S+)")
+
 
 def _sanitize_agent_name(raw: str) -> str:
     cleaned = re.sub(r"[^a-z0-9_-]", "-", raw.lower()).strip("-_")
@@ -167,6 +171,24 @@ class AgentHost:
                     f"Agent '{agent_name}' did not show a prompt in time: {e}"
                 ) from e
 
+        # L3: with --fork the task dialogue goes to a new Session. Capture
+        # its id from the pane output so export points at the fork, not home.
+        forked_session: str | None = None
+        if fork:
+            try:
+                launch_screen = self.herdr.agent_read(
+                    agent_name, source="recent-unwrapped", lines=50
+                )
+                match = _FORK_SESSION_RE.search(launch_screen or "")
+                if match:
+                    forked_session = match.group(1)
+            except Exception as e:
+                logger.warning(
+                    "Could not read pane output for fork session id of '%s': %s",
+                    agent_name,
+                    e,
+                )
+
         # Harness loading if provided
         if harness_content:
             self.herdr.agent_prompt(agent_name, harness_content)
@@ -184,6 +206,7 @@ class AgentHost:
             status="running",
             log_path=log_path,
             updated_at=now_iso(),
+            extra={"forked_session": forked_session} if forked_session else None,
         )
         self.registry.register(record)
         return record
@@ -273,10 +296,13 @@ class AgentHost:
 
         Per D4: conversations started with 'agora continue' are automatically
         written back by continue itself. Sidecar does not assemble raw session files.
+        With --fork the dialogue lives in the forked Session (L3), not home.
         """
         rec = self.registry.get(agent_target) or self.registry.get_by_name(agent_target)
         if not rec:
             return None
+        if rec.extra and rec.extra.get("forked_session"):
+            return rec.extra["forked_session"]
         return rec.agora_session
 
     def get_agent_status(self, agent_name: str, agent_kind: str | None = None) -> str:
@@ -509,5 +535,24 @@ class AgentHost:
         except HerdrError:
             pass
 
+        # L4: verify the process is really gone before reporting success.
+        # A survivor (D-state, unkillable) must not be recorded as terminated.
+        if self._pane_has_foreground(pane_id):
+            logger.warning(
+                "Agent '%s' still has a foreground process after SIGKILL; "
+                "not marking terminated",
+                agent_name,
+            )
+            return False
+
         self.registry.update_status(rec.agent_id, "terminated", exit_reason="SIGKILL escalation")
         return True
+
+    def _pane_has_foreground(self, pane_id: str) -> bool:
+        """Best-effort check whether a pane still has a foreground process."""
+        try:
+            info = self.herdr.pane_process_info(pane_id)
+        except Exception:
+            return False
+        pgid = info.get("foreground_process_group_id")
+        return bool(pgid and pgid > 0)

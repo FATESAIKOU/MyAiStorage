@@ -172,6 +172,7 @@ def test_three_stage_escalation_termination(tmp_path, monkeypatch):
 
     host = AgentHost(fake_herdr, reg, kill_pg_func=mock_kill_pg)
     rec = host.start_agent("team-worker", "agora:01J1", "opencode", "victim")
+    pgid = fake_herdr.process_infos[rec.herdr_pane_id]["foreground_process_group_id"]
 
     # Case 1: Agent survives ctrl+c, survives SIGTERM, killed by SIGKILL
     alive_states = {"calls": 0}
@@ -188,7 +189,6 @@ def test_three_stage_escalation_termination(tmp_path, monkeypatch):
     assert any(k[1] == ("ctrl+c",) for k in fake_herdr.sent_keys)
 
     # Check signals sent: SIGTERM followed by SIGKILL
-    pgid = fake_herdr.process_infos[rec.herdr_pane_id]["foreground_process_group_id"]
     assert (pgid, signal.SIGTERM) in signals_sent
     assert (pgid, signal.SIGKILL) in signals_sent
 
@@ -614,4 +614,84 @@ def test_recover_agents_process_info_failure_keeps_agent_status(tmp_path, monkey
     assert [r.agent_id for r in recovered] == [rec_ok.agent_id]
     assert reg.get(rec_flaky.agent_id).status == "running"
     assert "leaving status unchanged" in caplog.text
+
+
+def test_export_returns_forked_session_not_home(tmp_path, monkeypatch):
+    """L3: with --fork the dialogue lives in the forked Session; export
+    returns it, not the team's home Session."""
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg)
+
+    # agora continue --fork announces the new session id on startup.
+    fake_herdr.agent_outputs["fork-worker"] = (
+        "[agora] fork 已存成 agora:01JFORK123\nopencode TUI ready > "
+    )
+    rec = host.start_agent(
+        identity="team-worker",
+        agora_session="agora:01JHOME",
+        agent_kind="opencode",
+        agent_name="fork-worker",
+        fork=True,
+    )
+
+    assert host.export_agent_session(rec.agent_name) == "agora:01JFORK123"
+    # Lookup by id works too.
+    assert host.export_agent_session(rec.agent_id) == "agora:01JFORK123"
+
+    # No fork announcement on the pane: home is the fallback.
+    rec2 = host.start_agent(
+        identity="team-worker",
+        agora_session="agora:01JHOME",
+        agent_kind="opencode",
+        agent_name="plain-worker",
+        fork=True,
+    )
+    assert host.export_agent_session(rec2.agent_name) == "agora:01JHOME"
+    assert host.export_agent_session("no-such-agent") is None
+
+
+def test_terminate_agent_sigkill_verifies_process_gone(tmp_path, monkeypatch):
+    """L4: after SIGKILL the process must really be gone; a survivor is not
+    recorded as terminated and the call reports failure."""
+    import signal as _signal
+
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+
+    class UnkillableHerdr(FakeHerdrClient):
+        def pane_close(self, pane_id: str):
+            self.calls.append(("pane_close", (pane_id,), {}))
+            self.closed_panes.add(pane_id)
+            # Pane UI goes away but the process survives (D-state, etc.).
+
+    fake_herdr = UnkillableHerdr()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+
+    signals: list[int] = []
+    host = AgentHost(fake_herdr, reg, kill_pg_func=lambda pgid, sig: signals.append(sig))
+
+    rec = host.start_agent("team-worker", "agora:01J1", "opencode", "survivor")
+
+    res = host.terminate_agent("survivor", timeout_stage=0.01, check_alive_func=lambda _: True)
+    assert res is False
+    assert _signal.SIGKILL in signals
+    # Honestly still running, not terminated.
+    assert reg.get(rec.agent_id).status == "running"
+
+
+def test_terminate_agent_sigkill_success_when_process_gone(tmp_path, monkeypatch):
+    """L4: the normal path (process really gone) still reports success."""
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg)
+
+    rec = host.start_agent("team-worker", "agora:01J1", "opencode", "mortal")
+    res = host.terminate_agent("mortal", timeout_stage=0.01, check_alive_func=lambda _: True)
+    assert res is True
+    assert reg.get(rec.agent_id).status == "terminated"
 

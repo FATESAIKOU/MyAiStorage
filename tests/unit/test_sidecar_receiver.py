@@ -208,7 +208,12 @@ def test_angareion_relay_sender_integration():
     backend = FakeBackend()
     backend.create_channel("general")
 
-    sender = AngareionRelaySender(backend, default_channel="general")
+    team_addresses = {
+        "team-worker": {"repo": "worker", "role": "worker-team", "name": "opencode-1"},
+    }
+    sender = AngareionRelaySender(
+        backend, default_channel="general", team_addresses=team_addresses
+    )
     res = sender.send(
         from_identity="team-worker",
         to_identity="pmo",
@@ -223,7 +228,47 @@ def test_angareion_relay_sender_integration():
     all_msgs = backend.list_messages().messages
     assert len(all_msgs) == 1
     assert all_msgs[0].content == "Report via Angareion backend"
-    assert all_msgs[0].from_ == {"repo": "sidecar", "role": "team-worker"}
+    # L8/D10: from is the team's full configured address, not repo sidecar.
+    assert all_msgs[0].from_ == {"repo": "worker", "role": "worker-team", "name": "opencode-1"}
+
+
+def test_angareion_relay_sender_refuses_missing_channel():
+    """L8: the relay never creates channels; a missing one is an error."""
+    from angareion.backend import ChannelNotFoundError
+
+    backend = FakeBackend()
+    sender = AngareionRelaySender(
+        backend,
+        default_channel="no-such-channel",
+        team_addresses={"team-worker": {"repo": "worker", "role": "worker-team"}},
+    )
+
+    with pytest.raises(ChannelNotFoundError, match="does not exist"):
+        sender.send(
+            from_identity="team-worker",
+            to_identity="pmo",
+            content="Nowhere to go",
+            urgency=5,
+        )
+
+    # Nothing was auto-created.
+    assert backend.find_channel("no-such-channel") is None
+    assert backend.list_messages().messages == []
+
+
+def test_angareion_relay_sender_requires_full_team_address():
+    """L8: without a configured full address the relay refuses to report."""
+    backend = FakeBackend()
+    backend.create_channel("general")
+    sender = AngareionRelaySender(backend, default_channel="general")
+
+    with pytest.raises(ValueError, match="No full address"):
+        sender.send(
+            from_identity="unconfigured-team",
+            to_identity="pmo",
+            content="Who am I",
+            urgency=5,
+        )
 
 
 def test_receiver_enqueue_failure_does_not_mark_seen(tmp_path, monkeypatch):

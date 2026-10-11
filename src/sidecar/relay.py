@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import struct
@@ -12,8 +13,11 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from angareion.backend import ChannelNotFoundError
 from sidecar.herdr import HerdrClient
 from sidecar.registry import AgentRecord, Registry
+
+logger = logging.getLogger(__name__)
 
 
 def get_default_sock_path() -> Path:
@@ -131,11 +135,31 @@ class FakeRelaySender:
 
 
 class AngareionRelaySender:
-    """RelaySender implementation that dispatches to an Angareion Backend."""
+    """RelaySender implementation that dispatches to an Angareion Backend.
 
-    def __init__(self, backend: Any, default_channel: str = "general") -> None:
+    Per D10: the report's `from` is the team's full address
+    ({repo, role, name}) taken from the sidecar config, never a hardcoded
+    repo; a missing channel is an error, never auto-created.
+    """
+
+    def __init__(
+        self,
+        backend: Any,
+        default_channel: str = "general",
+        team_addresses: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         self.backend = backend
         self.default_channel = default_channel
+        self.team_addresses = dict(team_addresses or {})
+
+    def _from_address(self, from_identity: str) -> dict[str, Any]:
+        addr = self.team_addresses.get(from_identity)
+        if not isinstance(addr, dict) or not addr.get("repo") or not addr.get("role"):
+            raise ValueError(
+                f"No full address {{repo, role, name}} configured for team "
+                f"'{from_identity}': refusing to report"
+            )
+        return dict(addr)
 
     def send(
         self,
@@ -147,12 +171,16 @@ class AngareionRelaySender:
     ) -> dict[str, Any]:
         from angareion.messages import Message
 
-        channel = (extra or {}).get("channel", self.default_channel)
-        if hasattr(self.backend, "find_channel") and hasattr(self.backend, "create_channel"):
-            if self.backend.find_channel(channel) is None:
-                self.backend.create_channel(channel)
+        from_addr = self._from_address(from_identity)
 
-        from_addr = {"repo": "sidecar", "role": from_identity}
+        channel = (extra or {}).get("channel", self.default_channel)
+        if hasattr(self.backend, "find_channel"):
+            if self.backend.find_channel(channel) is None:
+                raise ChannelNotFoundError(
+                    f"Channel '{channel}' does not exist; "
+                    "sidecar never creates channels"
+                )
+
         to_addr = {"repo": "pmo", "role": to_identity}
         msg = Message(
             from_=from_addr,
@@ -178,7 +206,14 @@ def authenticate_peer(
     herdr: HerdrClient | None = None,
     checker: Callable[[int, AgentRecord], bool] | None = None,
 ) -> AgentRecord | None:
-    """Authenticate that peer_pid belongs to a running agent's process tree."""
+    """Authenticate that peer_pid belongs to a running agent's process tree.
+
+    Pids 0 and 1 (kernel / init) are never valid evidence on either side:
+    every ancestor chain ends at 1, so accepting it would admit any local
+    process (L1).
+    """
+    if peer_pid <= 1:
+        return None
     running_agents = registry.list_agents(status="running")
     if not running_agents:
         return None
@@ -189,7 +224,7 @@ def authenticate_peer(
                 return rec
         return None
 
-    ancestors = get_process_ancestors(peer_pid)
+    ancestors = {p for p in get_process_ancestors(peer_pid) if p > 1}
 
     for rec in running_agents:
         target_pids: set[int] = set()
@@ -197,18 +232,18 @@ def authenticate_peer(
         if herdr is not None:
             try:
                 info = herdr.pane_process_info(rec.herdr_pane_id)
-                if info.get("shell_pid"):
+                if info.get("shell_pid") and info["shell_pid"] > 1:
                     target_pids.add(info["shell_pid"])
-                if info.get("foreground_process_group_id"):
+                if info.get("foreground_process_group_id") and info["foreground_process_group_id"] > 1:
                     target_pids.add(info["foreground_process_group_id"])
                 for p in info.get("foreground_processes", []):
-                    if p.get("pid"):
+                    if p.get("pid") and p["pid"] > 1:
                         target_pids.add(p["pid"])
             except Exception:
                 pass
 
         if rec.extra and isinstance(rec.extra.get("pids"), list):
-            target_pids.update(rec.extra["pids"])
+            target_pids.update(p for p in rec.extra["pids"] if isinstance(p, int) and p > 1)
 
         if ancestors & target_pids:
             return rec
@@ -234,6 +269,7 @@ class RelayServer:
         self._server_sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._running = False
+        self._owns_socket = False
 
     def start(self) -> None:
         if self._running:
@@ -241,19 +277,46 @@ class RelayServer:
 
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
         if self.socket_path.exists():
-            self.socket_path.unlink()
+            # L5: never unlink first. If a live server answers on this path,
+            # refuse to steal its socket; only a stale file may be replaced.
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.connect(str(self.socket_path))
+            except OSError:
+                self.socket_path.unlink()
+            else:
+                raise RuntimeError(
+                    f"Sidecar relay socket {self.socket_path} is already "
+                    "served by a live server; refusing to take over"
+                )
+            finally:
+                probe.close()
 
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(str(self.socket_path))
-        srv.listen(16)
-        # Allow processes of same worker user to connect
         try:
-            os.chmod(self.socket_path, 0o666)
+            srv.bind(str(self.socket_path))
+        except OSError as e:
+            srv.close()
+            raise RuntimeError(
+                f"Cannot bind sidecar relay socket {self.socket_path}: {e}"
+            ) from e
+        srv.listen(16)
+        # L6: owner-only socket; peer authentication is the only gate, so keep
+        # it closed to other local users.
+        try:
+            os.chmod(self.socket_path, 0o600)
+        except OSError:
+            pass
+        # L6: tighten the socket directory as well (best effort: the path may
+        # be user-configured).
+        try:
+            os.chmod(self.socket_path.parent, 0o700)
         except OSError:
             pass
 
         self._server_sock = srv
         self._running = True
+        self._owns_socket = True
 
         self._thread = threading.Thread(target=self._serve_loop, daemon=True)
         self._thread.start()
@@ -267,11 +330,14 @@ class RelayServer:
                 pass
             self._server_sock = None
 
-        if self.socket_path.exists():
+        # Only unlink a socket this server actually bound (L5: a refused
+        # second server must not remove the live server's socket).
+        if self._owns_socket and self.socket_path.exists():
             try:
                 self.socket_path.unlink()
             except OSError:
                 pass
+        self._owns_socket = False
 
         if self._thread:
             self._thread.join(timeout=1.0)
@@ -321,24 +387,39 @@ class RelayServer:
 
                 content = req.get("content") or req.get("message")
                 to_identity = req.get("to", "pmo")
-                urgency = int(req.get("urgency", 5))
+                try:
+                    urgency = int(req.get("urgency", 5))
+                except (TypeError, ValueError):
+                    self._send_json(conn, {"ok": False, "error": "urgency must be an integer between 0 and 9"})
+                    return
+
+                # L2/D10: urgency is 0-9 (Angareion spec). Out of range is an
+                # explicit error, never silently dropped.
+                if isinstance(req.get("urgency", 5), bool) or not 0 <= urgency <= 9:
+                    self._send_json(conn, {"ok": False, "error": f"urgency must be between 0 and 9, got {req.get('urgency')}"})
+                    return
 
                 if not content:
                     self._send_json(conn, {"ok": False, "error": "Missing message content"})
                     return
 
                 # Send using the verified agent's identity as 'from'
-                res = self.sender.send(
-                    from_identity=agent.identity,
-                    to_identity=to_identity,
-                    content=content,
-                    urgency=urgency,
-                    extra={"agent_id": agent.agent_id, "caller_pid": peer_pid},
-                )
+                try:
+                    res = self.sender.send(
+                        from_identity=agent.identity,
+                        to_identity=to_identity,
+                        content=content,
+                        urgency=urgency,
+                        extra={"agent_id": agent.agent_id, "caller_pid": peer_pid},
+                    )
+                except Exception as e:
+                    logger.warning("Relay send failed for agent '%s': %s", agent.identity, e)
+                    self._send_json(conn, {"ok": False, "error": str(e)})
+                    return
 
                 self._send_json(conn, {"ok": True, "result": res})
         except Exception:
-            pass
+            logger.exception("Unexpected error handling relay connection")
 
     def _send_json(self, conn: socket.socket, payload: dict[str, Any]) -> None:
         try:
@@ -355,6 +436,8 @@ def send_relay_message(
     socket_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Client function used by 'sidecar say' to send a message through the relay socket."""
+    if isinstance(urgency, bool) or not isinstance(urgency, int) or not 0 <= urgency <= 9:
+        raise ValueError(f"urgency must be an integer between 0 and 9, got {urgency!r}")
     sock_p = Path(socket_path) if socket_path else get_default_sock_path()
     if not sock_p.exists():
         raise RuntimeError(f"Sidecar relay socket not found at {sock_p}")
