@@ -27,6 +27,8 @@
 
 - [ ] 3.11 `sidecar agent run claude|opencode`（Mac 與 worker 共用的前景入口，跑同一段開 agent／監看／換把程序；D10「換把程序只有一份」）。和 LLMGateway 的交接點是它的 tasks 2.4；依賴 3.10 與 lgw 的固定 ref
 
+- [ ] 3.12 第二批複查的修正與編排（D10）：準備好的判斷改成 herdr 認出 agent 種類且 idle；fork id 輪詢擷取（加一條「輸出分兩段出現」的測試）；`sidecar run` 收到信且該身分沒有在跑的 agent 就 `start_team`；SIGTERM 收乾淨；心跳落檔包例外；退避上限 300 秒；收進 L7 的 sender 失敗探針；L6 只對預設 state 目錄 chmod；`_from_address` 錯誤字樣對齊（repo、role 必填）
+
 ## 4. 分發（改動在 MyLinuxPool，照它的規則；由 MyLinuxPool PM 負責，MyLinuxPool#52）
 
 - [ ] 4.1 `shared-configs/agent-sidecar/`：`unit.json`、`install.sh`（自帶 venv、systemd user unit、`--check`：檔案、herdr／Python 依賴、herdr server 可達、設定、token 能讀信道）、`files/`（unit 與範例設定）、`tests/`。
