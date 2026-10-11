@@ -23,7 +23,7 @@
 - [ ] 3.8 設定帶 herdr 的 session 名，herdr client 呼叫時指定（D11）
 - [ ] 3.9 fork 出來的 Session 帶 `sidecar.identity`、`sidecar.message` 標頭；`sidecar status` 列出 agora 上屬於自己身分、還沒結束的 fork Session（D11「容器重建後以 agora 為準」）
 
-- [ ] 3.10 ModelBroker 改成 LLMGateway 的租用形狀（env／unset／subscription、拒絕的 reason／earliest_reset、report_exhausted、renew）與額度用完的偵測、換把重開；env 不放命令列（D10）。等 LLMGateway 的 v0 scope 由本人確認、欄位定案後才做
+- [ ] 3.10 ModelBroker 改成 LLMGateway 的租用形狀（env／unset／subscription、拒絕的 reason／earliest_reset、report_exhausted、renew）與額度用完的偵測、換把重開；env 不放命令列（D10）。等 LLMGateway 的 v0 scope 由本人確認、欄位定案後才做；request_lease 留 preferred_models／floor 的擴充點（D10，v0 不實作選擇邏輯）
 
 ## 4. 分發（改動在 MyLinuxPool，照它的規則；由 MyLinuxPool PM 負責，MyLinuxPool#52）
 
