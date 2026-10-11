@@ -48,6 +48,8 @@ if argv[:1] == ["merge"]:
     if os.environ.get("FAKE_AGORA_MERGE_FAIL"):
         print("fake merge failure", file=sys.stderr)
         sys.exit(1)
+    if os.environ.get("FAKE_AGORA_MERGE_HANG"):
+        time.sleep(60)
     print(os.environ.get("FAKE_AGORA_MERGE_ID", "agora:FAKEMERGED000000000000000"))
     sys.exit(0)
 

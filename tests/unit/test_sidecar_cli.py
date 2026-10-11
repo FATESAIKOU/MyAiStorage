@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401
 
 import json
+import logging
 import socket
 import threading
 import time
@@ -12,8 +13,10 @@ import urllib.request
 
 import pytest
 
+import _sidecar_fakes as F
 from sidecar import cli
 from sidecar.config import Config, load_config
+from sidecar.core import SidecarCore
 from sidecar.protocols import BadRequestError, ConfigError
 from sidecar.wiring import build_core
 
@@ -209,6 +212,20 @@ def _wait_for_agents(base: str, timeout: float = 5.0):
             time.sleep(0.05)
 
 
+def _wait_for_response(base: str, timeout: float = 5.0) -> None:
+    """Wait until the daemon answers GET /agents at all (any body)."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with urllib.request.urlopen(base + "/agents", timeout=1) as response:
+                assert response.status == 200
+                return
+        except OSError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.05)
+
+
 def test_run_serves_agents_and_stops_cleanly():
     port = _free_port()
     stop = threading.Event()
@@ -222,3 +239,44 @@ def test_run_serves_agents_and_stops_cleanly():
         stop.set()
         thread.join(timeout=5)
     assert not thread.is_alive()
+
+
+def test_run_gives_up_on_a_hung_scheduler_and_still_closes(tmp_path, monkeypatch, caplog):
+    """N2 scenario: a wedged tick must not keep SIGTERM (or the agents) stuck."""
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    clock = F.FakeClock()
+    driver = F.FakeAgentDriver("claude-code")
+    core = SidecarCore(
+        drivers={"claude-code": driver},
+        store=F.FakeSessionStore(),
+        subscriptions=F.FakeSubscriptionSource(F.default_subscriptions()),
+        now=clock,
+    )
+    core.open("t1", "claude-code", str(workdir), {"mode": "new"})
+    monkeypatch.setattr(cli, "build_core", lambda config: core)
+
+    def hung_scheduler(core_, stop, interval=1.0):
+        while True:  # ignores the stop event, like a tick stuck in a call
+            time.sleep(0.5)
+
+    monkeypatch.setattr(cli, "_scheduler_loop", hung_scheduler)
+    port = _free_port()
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=cli.run,
+        args=(Config(port=port, close_timeout=0.2),),
+        kwargs={"stop_event": stop},
+        daemon=True,
+    )
+    with caplog.at_level(logging.WARNING):
+        thread.start()
+        try:
+            _wait_for_response(f"http://127.0.0.1:{port}")
+            stop.set()
+        finally:
+            thread.join(timeout=0.2 + 5 + 3)
+    assert not thread.is_alive()
+    assert "scheduler still busy" in caplog.text
+    assert core.get("t1").state == "exited"  # the agents were closed anyway
+    assert len(driver.stop_calls) == 1

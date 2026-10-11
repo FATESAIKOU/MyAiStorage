@@ -259,6 +259,35 @@ def test_retry_with_a_non_quota_reason_stays_running(driver, serve, tmp_path, ca
     driver.stop(handle, graceful=False, timeout=5)
 
 
+def test_state_send_and_interrupt_are_bounded(tmp_path, monkeypatch, serve):
+    """N2: every HTTP call has an internal timeout, so a tick cannot hang."""
+    monkeypatch.setenv("FAKE_HOME", str(tmp_path / "fh"))
+    monkeypatch.setenv("FAKE_OC_HANG", "1")  # the fake never answers
+    driver = OpenCodeDriver(
+        command=[sys.executable, str(FAKE_SERVE)],
+        poll_timeout=5.0, http_timeout=0.3, status_timeout=0.3,
+    )
+    proc, port = serve()
+    handle = driver.launch(
+        RunningSession("agora:A", AgoraProcess(proc=proc, port=port, agent_session_id="ses_A")),
+        {}, str(tmp_path),
+    )
+    start = time.monotonic()
+    state = driver.state(handle)
+    assert time.monotonic() - start < 3  # bounded by status_timeout
+    assert state.kind == DRIVER_RUNNING  # the last known state is kept
+
+    start = time.monotonic()
+    driver.send(handle, "x")  # fires in the background
+    assert time.monotonic() - start < 1
+
+    start = time.monotonic()
+    with pytest.raises(Exception):
+        driver.interrupt(handle)  # bounded by http_timeout
+    assert time.monotonic() - start < 3
+    driver.stop(handle, graceful=False, timeout=5)
+
+
 # --- new mode ------------------------------------------------------------------
 
 

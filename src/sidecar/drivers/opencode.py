@@ -92,12 +92,14 @@ class OpenCodeDriver:
         quota_reasons: Sequence[str] = DEFAULT_QUOTA_REASONS,
         poll_timeout: float = POLL_TIMEOUT,
         http_timeout: float = HTTP_TIMEOUT,
+        status_timeout: float = STATUS_TIMEOUT,
     ) -> None:
         self._command = [command] if isinstance(command, str) else list(command)
         self._extra_args = list(extra_args)
         self._quota_reasons = tuple(quota_reasons)
         self._poll_timeout = poll_timeout
         self._http_timeout = http_timeout
+        self._status_timeout = status_timeout
 
     # -- AgentDriver ------------------------------------------------------
 
@@ -193,7 +195,7 @@ class OpenCodeDriver:
                                            reason="opencode exited")
                 return handle.state
         try:
-            data = self._request(handle, "GET", "/session/status", timeout=STATUS_TIMEOUT)
+            data = self._request(handle, "GET", "/session/status", timeout=self._status_timeout)
         except OpenCodeDriverError:
             return handle.state  # cannot tell right now: keep the last known
         status = _status_for(data, session_id)

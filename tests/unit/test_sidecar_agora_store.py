@@ -176,6 +176,20 @@ def test_refusing_sigterm_escalates_to_sigkill(tmp_path, monkeypatch):
     assert not (fh / "agora-stopped").exists()  # SIGKILL never writes back (D6)
 
 
+def test_merge_timeout_is_bounded(tmp_path, monkeypatch):
+    """N2: a hung `agora merge` returns within merge_timeout, not forever."""
+    fh = tmp_path / "fh"
+    monkeypatch.setenv("FAKE_HOME", str(fh))
+    monkeypatch.setenv("FAKE_AGORA_MERGE_HANG", "1")
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    built = AgoraSessionStore(command=[sys.executable, str(FAKE_AGORA)], merge_timeout=0.3)
+    with pytest.raises(AgoraSessionError) as excinfo:
+        built.start(mode="merge", ids=["agora:A", "agora:B"], by="opencode",
+                    agent="claude-code", workdir=str(workdir), tag="tag", env={})
+    assert "timed out" in str(excinfo.value)
+
+
 def test_unknown_agent_and_mode_are_refused(store):
     built, fh, workdir = store
     with pytest.raises(AgoraSessionError):

@@ -46,13 +46,21 @@ def default_drivers(config: Config) -> dict[str, Any]:
             command=(opencode.command if opencode is not None and opencode.command else "opencode"),
             extra_args=(opencode.extra_args if opencode is not None else ()),
             quota_reasons=config.quota_reasons,
+            poll_timeout=config.close_timeout,  # the wait for the port is bounded (N2)
+            http_timeout=config.close_timeout,
         ),
     }
 
 
 def default_session_store(config: Config) -> Any | None:
-    """The real store (task 3.0): spawns `agora continue --headless`."""
-    return AgoraSessionStore(sync_period=config.sync_period)
+    """The real store (task 3.0): spawns `agora continue --headless`.
+
+    `start_timeout` is the time the fixed stderr line gets; bounding it by
+    close_timeout keeps a hung `agora continue` from wedging a tick (N2).
+    (`agora merge` has its own budget: a summarizer round trip is not a
+    `close_timeout` thing - see the report.)
+    """
+    return AgoraSessionStore(sync_period=config.sync_period, start_timeout=config.close_timeout)
 
 
 def build_subscription_source(config: Config) -> Any | None:

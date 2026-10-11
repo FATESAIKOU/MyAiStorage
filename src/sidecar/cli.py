@@ -103,7 +103,16 @@ def run(config: Config, stop_event: threading.Event | None = None) -> int:
         # current beat, then close every agent - only after all of them are
         # stopped does the process leave.
         core.begin_shutdown()
-        scheduler.join()  # wait for the in-flight beat; every driver/lgw call is bounded
+        # Wait for the in-flight beat, but never forever (D2/N2): a tick that
+        # hangs must not leave the agents orphans when the supervisor's kill
+        # timeout fires - close them anyway.
+        join_timeout = config.close_timeout + 5.0
+        scheduler.join(timeout=join_timeout)
+        if scheduler.is_alive():
+            logger.warning(
+                "scheduler still busy after %.0fs; closing the agents anyway",
+                join_timeout,
+            )
         server.server_close()
         try:
             core.shutdown()

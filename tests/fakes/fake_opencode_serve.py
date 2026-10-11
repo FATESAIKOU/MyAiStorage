@@ -38,6 +38,7 @@ with open(home / "fake-oc-env-names.log", "a", encoding="utf-8") as f:
 
 calls = home / "fake-oc-calls.log"
 status_file = home / "fake-oc-status.json"
+HANG = os.environ.get("FAKE_OC_HANG")  # sleep in every handler (timeout tests, N2)
 
 
 def log_call(entry: dict) -> None:
@@ -60,6 +61,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self) -> None:  # noqa: N802
+        if HANG:
+            time.sleep(60)
         log_call({"method": "GET", "path": self.path})
         if self.path.rstrip("/").endswith("/session/status"):
             try:
@@ -71,6 +74,8 @@ class Handler(BaseHTTPRequestHandler):
         self._json(404, {})
 
     def do_POST(self) -> None:  # noqa: N802
+        if HANG:
+            time.sleep(60)
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         try:
