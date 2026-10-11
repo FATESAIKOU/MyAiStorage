@@ -304,7 +304,8 @@ class SidecarCore:
             self._stop_and_exit(placeholder)
             return placeholder
         if input is not None:
-            self.poke(id, input)
+            # The first input queues and never fails this open (L5).
+            self._enqueue_poke(placeholder, input)
         return placeholder
 
     def _stop_and_exit(self, rec: AgentRecord) -> AgentRecord:
@@ -394,10 +395,15 @@ class SidecarCore:
                 raise AgentNotRunningError(f"agent {id!r} is {rec.state}; poke needs it running")
             driver = self._drivers.get(rec.agent)
             handle = rec.handle
-            if interrupt:
-                driver.interrupt(handle)
-            driver.send(handle, text)
-            rec.state = STATE_RUNNING
+        # The driver call happens outside the lock (L1): a slow send must not
+        # freeze status.  A concurrent close may stop the handle in between;
+        # that surfaces here as the driver's own error.
+        if interrupt:
+            driver.interrupt(handle)
+        driver.send(handle, text)
+        with self._lock:
+            if self._agents.get(id) is rec:
+                rec.state = STATE_RUNNING
         return rec
 
     def get(self, id: str) -> AgentRecord:
@@ -555,7 +561,7 @@ class SidecarCore:
         elif st.kind in (DRIVER_RUNNING, DRIVER_IDLE):
             with self._lock:
                 rec.state = st.kind
-                self._flush_pending(rec)
+            self._flush_pending(rec)  # driver calls outside the lock (L1)
 
     def _quota_exhausted(self, rec: AgentRecord, st: DriverState, now: float | None = None) -> None:
         """D4: register the cooldown, then switch subscription or wait.
@@ -780,21 +786,53 @@ class SidecarCore:
             if self._agents.get(rec.id) is rec:
                 rec.state = STATE_RUNNING
 
-    def _flush_pending(self, rec: AgentRecord) -> None:
-        """Send queued pokes now that the agent is up (lock held)."""
+    def _enqueue_poke(self, rec: AgentRecord, text: str, interrupt: bool = False) -> None:
+        """Queue a poke and try to deliver it right away (open's first input, L5).
+
+        Never waits and never fails the caller: if the agent is still starting,
+        the item stays queued until a refresh sees it up.
+        """
+        with self._cond:
+            rec.pending.append(
+                PendingPoke(
+                    text=text,
+                    interrupt=interrupt,
+                    deadline=time.monotonic() + self._poke_queue_timeout,
+                )
+            )
+        self._flush_pending(rec)
+
+    def _take_pending(self, rec: AgentRecord) -> tuple[Any, Any, list[PendingPoke]] | None:
+        """Move the flushable pending items out (lock held)."""
         if not rec.pending or rec.state not in (STATE_RUNNING, STATE_IDLE):
-            return
+            return None
         if rec.handle is None:
-            return
+            return None
         driver = self._drivers.get(rec.agent)
+        if driver is None:
+            return None
         items, rec.pending = rec.pending, []
-        for item in items:
-            if item.interrupt:
-                driver.interrupt(rec.handle)
-            driver.send(rec.handle, item.text)
-            item.sent = True
-        rec.state = STATE_RUNNING
-        self._cond.notify_all()
+        return driver, rec.handle, items
+
+    def _flush_pending(self, rec: AgentRecord) -> None:
+        """Send queued pokes now that the agent is up; driver calls are outside
+        the lock (L1) and waiters are woken either way."""
+        with self._lock:
+            taken = self._take_pending(rec)
+        if taken is None:
+            return
+        driver, handle, items = taken
+        try:
+            for item in items:
+                if item.interrupt:
+                    driver.interrupt(handle)
+                driver.send(handle, item.text)
+                item.sent = True
+        finally:
+            with self._lock:
+                if self._agents.get(rec.id) is rec and rec.state in (STATE_RUNNING, STATE_IDLE):
+                    rec.state = STATE_RUNNING
+                self._cond.notify_all()
 
     def _clear_pending(self, rec: AgentRecord) -> None:
         """Drop queued pokes (the agent is gone); waiters see sent=False (lock held)."""

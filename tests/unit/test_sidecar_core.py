@@ -24,6 +24,7 @@ from sidecar.protocols import (
     BadRequestError,
     DRIVER_EXITED,
     DRIVER_RUNNING,
+    DriverState,
     GatewayUnreachableError,
     IdConflictError,
     NoSubscriptionError,
@@ -534,6 +535,48 @@ def test_one_agents_driver_failure_does_not_stop_the_others(tmp_path):
     assert core.get("t1").state in (STATE_STARTING, STATE_IDLE)  # unchanged, no crash
     assert core.get("t2").state == STATE_RUNNING
     assert [rec.id for rec in core.list_agents()] == ["t1", "t2"]
+
+
+def test_a_slow_send_does_not_hold_the_core_lock(tmp_path):
+    """L1: a blocking driver.send must not freeze status/list."""
+    core, driver, _store, _source, _clock, workdir = rig(tmp_path)
+    core.open("t1", "claude-code", workdir, {"mode": "new"})
+    gate = threading.Event()
+    driver.send_gate = gate
+    driver.send_started.clear()
+
+    sender = threading.Thread(target=lambda: core.poke("t1", "slow"))
+    sender.start()
+    assert driver.send_started.wait(2)
+
+    done: list = []
+    reader = threading.Thread(target=lambda: done.append(core.list_agents()))
+    reader.start()
+    reader.join(1.0)
+    blocked = not done
+
+    gate.set()
+    sender.join(5)
+    reader.join(5)
+
+    assert not blocked, "a slow driver.send held the core lock"
+    assert [rec.id for rec in done[0]] == ["t1"]
+
+
+def test_open_with_input_never_fails_while_starting(tmp_path):
+    """L5: the first input queues; it does not make open time out."""
+    core, driver, _store, _source, _clock, workdir = rig(tmp_path, poke_queue_timeout=0.05)
+    driver.launch_state = DriverState(kind="starting")  # not up yet
+
+    rec = core.open("t1", "claude-code", workdir, {"mode": "new"}, input="hello")
+
+    assert rec.state == STATE_STARTING
+    assert driver.handles[0].inbox == []  # queued, and open did not fail
+
+    driver.launch_state = None  # the agent comes up
+    core.tick()
+    assert driver.handles[0].inbox == ["hello"]
+    assert core.get("t1").state == STATE_RUNNING
 
 
 # --- shutdown (design D2: SIGTERM 先 close 全部) ------------------------------

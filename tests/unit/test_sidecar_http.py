@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401
 
 import json
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -256,6 +257,25 @@ def test_failed_job_keeps_last_run_and_last_error(control):
         "message": "agent 't1' already exists in state idle",
     }
     assert "key" not in json.dumps(row)
+
+
+def test_body_too_large_is_a_413(control):
+    """L4 scenario: a declared body over 1 MB is refused before it is read."""
+    base, _server, _core, _driver, _store, _source, _clock, _workdir = control
+    host, port = base.split("//", 1)[1].split("/", 1)[0].rsplit(":", 1)
+    port = int(port)
+    # Declare a 2 MB body without sending it: the answer must come first.
+    with socket.create_connection((host, port), timeout=5) as sock:
+        sock.sendall(
+            b"POST /agents HTTP/1.0\r\nHost: sidecar\r\nContent-Length: 2000000\r\n\r\n"
+        )
+        raw = sock.recv(65536)
+    assert b" 413 " in raw.split(b"\r\n", 1)[0]
+    body = raw.split(b"\r\n\r\n", 1)[1]
+    assert json.loads(body)["error"]["code"] == "body_too_large"
+
+    status, payload = call(base, "GET", "/agents")  # nothing was opened
+    assert status == 200 and payload["agents"] == []
 
 
 def test_shutting_down_refuses_new_work(control):

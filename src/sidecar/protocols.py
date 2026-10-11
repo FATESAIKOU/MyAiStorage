@@ -74,6 +74,11 @@ class BadRequestError(SidecarError):
     code = "invalid_request"
 
 
+class PayloadTooLargeError(SidecarError):
+    status = 413
+    code = "body_too_large"
+
+
 class WorkdirNotFoundError(BadRequestError):
     code = "workdir_not_found"
 
@@ -319,6 +324,9 @@ class AgentDriver(Protocol):
         """The child-process environment for this subscription (design D3).
 
         The returned dict is the only place subscription values may appear.
+        The driver builds the child's *complete* environment from it (PATH,
+        HOME, LANG plus these); the sidecar's own `ANTHROPIC_*` / `OPENAI_*`
+        variables must not leak into the child.
         """
         ...
 

@@ -13,11 +13,18 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from .jobs import parse_duration, parse_time
-from .protocols import BadRequestError, JobNotFoundError, NotFoundError, SidecarError
+from .protocols import (
+    BadRequestError,
+    JobNotFoundError,
+    NotFoundError,
+    PayloadTooLargeError,
+    SidecarError,
+)
 
 logger = logging.getLogger(__name__)
 
 HOST = "127.0.0.1"
+MAX_BODY_BYTES = 1024 * 1024  # request bodies over 1 MB are a 413 (L4)
 
 
 class ControlServer(ThreadingHTTPServer):
@@ -116,9 +123,18 @@ class ControlHandler(BaseHTTPRequestHandler):
     # --- plumbing ---------------------------------------------------------
 
     def _read_json(self) -> dict[str, Any]:
-        length = self.headers.get("Content-Length") or "0"
+        raw_length = self.headers.get("Content-Length") or "0"
         try:
-            raw = self.rfile.read(int(length))
+            length = int(raw_length)
+        except ValueError as e:
+            raise BadRequestError(f"bad Content-Length: {raw_length!r}") from e
+        if length > MAX_BODY_BYTES:
+            # Reject by the declared size, before pulling the body in (L4).
+            raise PayloadTooLargeError(
+                f"request body is larger than {MAX_BODY_BYTES} bytes"
+            )
+        try:
+            raw = self.rfile.read(length)
         except (ValueError, OSError) as e:
             raise BadRequestError(f"cannot read the request body: {e}") from e
         if not raw:

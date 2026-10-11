@@ -69,6 +69,9 @@ class FakeAgentDriver:
         self.stop_calls: list[tuple[FakeHandle, bool, float]] = []
         self.state_calls = 0
         self.state_fails = False  # raise from state(), for the isolation tests
+        self.launch_state: DriverState | None = None  # what state() reports first
+        self.send_gate: threading.Event | None = None  # block send(), for L1
+        self.send_started = threading.Event()
         self.launch_gate: threading.Event | None = None
         self.launch_started = threading.Event()
 
@@ -92,6 +95,9 @@ class FakeAgentDriver:
         return handle
 
     def send(self, handle: FakeHandle, text: str) -> None:
+        self.send_started.set()
+        if self.send_gate is not None:
+            self.send_gate.wait(timeout=5)
         if handle.busy:
             handle.queued.append(text)
         else:
@@ -110,6 +116,8 @@ class FakeAgentDriver:
             raise RuntimeError("fake driver state exploded")
         if handle.stopped and handle.state.kind != DRIVER_EXITED:
             return DriverState(kind=DRIVER_EXITED, code=0, reason="stopped")
+        if self.launch_state is not None:
+            return self.launch_state  # e.g. a driver that is not up yet (L5)
         return handle.state
 
     def stop(

@@ -21,7 +21,7 @@
   - [x] 2.7.5 M3：換把中途失敗 → waiting-quota＋`now + retry_interval` job＋log；一人的錯不影響別人
   - [x] 2.7.6 M5：shutdown 先進入關閉中（open／poke／新 job 503）、停 scheduler、再逐一 close
   - [x] 2.7.7 M6：補 U15（未部署不是重開候選）、U23（解除時刻已過 → `now + retry_interval`）測試
-  - [ ] 2.7.8 L1／L3／L4／L5：driver 呼叫在鎖外、`every` 不補跑、本文 1 MB → 413、open 第一則輸入排隊不失敗
+  - [x] 2.7.8 L1／L3／L4／L5：driver 呼叫在鎖外、`every` 不補跑、本文 1 MB → 413、open 第一則輸入排隊不失敗
 
 ## 3. agent driver 與 agora（spike 之後依 D6 的結論）
 
