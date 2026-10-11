@@ -196,3 +196,63 @@
 3. **轉交 agy4**：H1、H2（方向定了就動）；M1（seen/queue 順序對調＋測試）、M2（`env=None` 視同空＋測試＋文件加不 export）、M3（等 prompt 再送 harness／hand-off）、M4（herdr 連不上不改 registry＋log）；L1～L8 與 (c) D-系列擇期（D-run、D-from 建議 5.1 之前定）。
 4. **確認事項**：L8 的 from/repo 映射（`repo: sidecar` 是否就是 PMO 要認的形狀）、`urgency` 上限到底是 9 還是 10（CLI 寫 0-10、Angareion 只到 9）。
 5. 合併條件建議：H1、H2 修完＋測試跟上後合入；M/L 可開後續工單（#31 的子 issue）追。
+
+---
+
+## 複查（2026-10-11：`53b71b6` H1/H2/M1-M4＋run loop、`7846144` L1-L8；以 D10 為準）
+
+- **複查者**：Muse Spark。方法同上：worktree 只讀；每項在副本 `/tmp/sidecar-rc2`（`git archive HEAD`）改回修前形狀跑對應測試；探針只放副本 `tests/unit/test_rc2_probe.py`、`test_rc2b_probe.py`；不連網、不碰真 herdr。Baseline（worktree）：sidecar 七檔 **69 passed**。
+- **結論：H1/H2/M1-M4 與 L1-L6/L8 全部改壞會紅（約 20 個紅點，見下表）；L7 的 sender-failure 回錯誤一小片沒被釘住（附可直接收的探針）；新判一個 Medium（L3 的 fork 擷取在真實時序下幾乎一定抓空）與若干 Low。impl1「約 20 個 mutation 都紅」基本屬實。**
+
+### 複查改壞結果表
+
+| 項 | 改壞方式 | 結果 |
+|---|---|---|
+| H1 預設改 5 分鐘 | `start_agent`／`start_team` 預設改回 300 | `test_start_agent_default_sync_period_is_5_minutes`、`test_start_team_default_sync_period_is_5_minutes` **雙紅** |
+| H2 hand-off 接線 | 刪掉 `start_team` 的 `deliver_hand_off` 呼叫 | `test_start_team_waits_for_prompt_then_harness_then_hand_off` **紅** |
+| M1 先 enqueue 再記 seen | 順序調回 | `test_receiver_enqueue_failure_does_not_mark_seen` **紅** |
+| M2 `env=None` 給空 | 改回 `sanitize_herdr_env(env)` | `test_start_agent_env_none_does_not_inherit_process_env` **紅** |
+| M3 等 prompt | 整段 wait 拿掉 | 3 條（host×2＋team hand-off）**三紅** |
+| M4 herdr 壞掉不動 registry | 回到空集合／`alive=False` | 2 條 **雙紅** |
+| last_since 游標 | 拿掉追蹤 | `test_receiver_last_since_cursor_filters_old_messages` **紅** |
+| L1 認證擋 `<=1` | 六處過濾拿掉 | `test_authenticate_peer_rejects_foreground_pgid_1` **紅** |
+| L2 urgency 0-9 三處 | server／client／help 改回 | 3 條 **三紅** |
+| L3 fork id 擷取 | 整段拿掉 | `test_export_returns_forked_session_not_home` **紅** |
+| L4 SIGKILL 後驗證 | 拿掉 | survivor 那條紅、正常路徑照舊綠（正確分流） |
+| L5 拒搶 socket | 回到先 unlink | takeover 紅、stale 替換照舊綠（正確分流） |
+| L6 0600＋目錄 0700 | 回到 0666 | `test_relay_socket_and_dir_permissions` **紅** |
+| L8 完整位址＋不自建頻道 | 回到寫死 repo＋自建 | 2 條 **雙紅** |
+| L7 sender 失敗回錯誤 | 拿掉 try／error JSON | **13 條全綠**——這片沒被釘住（見下） |
+
+### 新判 Medium 1：L3 的 fork 擷取在真實時序下幾乎一定抓空（測試看不出來）
+
+- `start_agent` 的順序是 `pane_run` → `agent_rename` → M3 等待（`\S`）→ L3 讀屏（`agent_read lines=50`）→ 送 harness。
+- 但 agora 本體的輸出順序是：`[agora] 工作目錄`（`src/agora/cli.py:1302`，fetch／export／fork-save 之前）→ `[agora] fork 已存成`（`:1352`，export＋存檔之後、開 agent 之前）→ agent TUI 慢慢起來。且 `pane run` 的 shell echo 本身就含非空白字。
+- 所以 `\S` 等待幾乎立刻成立（早則 shell echo，晚則工作目錄行），而 L3 的讀屏緊接在後——**一定跑在 fork 行印出之前**（中間隔著 Drive 同步、export、存檔，全是秒級 I/O）。生產環境下 `forked_session` 幾乎永遠是 None，export 照舊回 home：L3 修了等於沒修。現有測試看不出來，因為 fake 的輸出是預先塞好的。
+- 今天 `export_agent_session` 在 `src/` 無呼叫者，爆炸半徑是零；但「修了個不會動的」比沒修更糟（以為好了）。
+- 建議：fork 啟動時改成**輪詢**讀屏找 fork 正則（沿用 `wait_timeout_ms` 額度，找到就停）——既證明 agora 走過 fork-save，又讓擷取可靠；順便把這段時序寫一條 fake 版測試（輸出分兩段出現：先工作目錄行、後 fork 行）。
+
+### impl1 自定的三件事是否恰當
+
+- **(a) `pane wait-output --regex '\S'` 當「prompt 出現」：不恰當，只能算 liveness，不算 readiness。** 證據如上：agora 自己的啟動輸出（乃至 shell echo）先滿足它，TUI 是否起來、輸入能不能收，它一概不保證；D3 spike 只證明「跑起來後 prompt 會排隊」，沒測過「TUI 還沒起來时的 prompt 去向」。較可靠的作法（都用現有接縫）：`\S` 留著當第一道，後面加一道——fork 啟動就輪詢 fork 行（如上）；一般情況可再等 `agent get` 進入已知狀態或 kind-specific 的就緒字樣（字樣要先在 worker herdr 上 spike 量，opencode／claude 開機畫面是什麼，repo 裡沒有）。在那之前，文件應誠實寫「`\S` 只保證畫面非空」，別寫「prompt 出現」。
+- **(b) `teams.<id>.identity` 完整位址：恰當。** D10 明定；`cmd_run` 從 config 組 `team_addresses`，缺了在送出當下明確拒絕（有測試）；`from` 實測就是配好的 `{repo, role, name}`。小 nit：`_from_address` 的錯誤字寫 `{repo, role, name}`，實際只要求 repo＋role（name 可無），字樣對一下。
+- **(c) run 預設 30s 輪詢／300s 找回：恰當。** 30s 配 ETag／304＋超限退避，對 GitHub 次級限制很鬆；300s 的找回頻率下，死掉的 agent 最多以 running 留 5 分鐘，期間投遞失敗是 per-message 接住並留佇列、認證看的是 live process-info 而不是 registry，所以陳舊 registry 既送不進去也認不過。心跳 5 分鐘粒度符合 D5「心跳是 `updated_at`」（沒定頻率）。單 worker 單 sidecar，不需 jitter。
+
+### run 迴圈（任務 3）：例外、SIGTERM、節流
+
+- **例外隔離：基本成立，漏一處。** `poll_once` 的後端錯（RateLimit／BackendError／Exception）都接住記 log 下輪再試；單則投遞失敗 per-message 接住留佇列；recover 包住；壞一個身分的佇列檔只影響它自己（讀壞就備份清空）。漏的是**心跳那兩行在 try 之外**（`run.py` recover 區段）：`registry.touch`（落檔 I/O）一丟錯 daemon 直接死——探針證實（`test_rc2b_probe.py`，`touch` 丟 `OSError` 穿透 `run_loop`）。修法：那兩行也包進 try（Low，一行）。
+- **SIGTERM 收不乾淨。** `run.py` 無 signal handler，`cmd_run` 只接 `KeyboardInterrupt`；systemd／supervisor 送的 SIGTERM 讓行程直接死，`finally` 跑不到，**socket 檔留在原地**——探針證實（子行程跑 `run_loop`，SIGTERM 後 exit=-15、socket 檔還在）。重啟靠 L5 認 live／換 stale 檔接得上，飛行中的投遞靠 at-least-once 下次重送，所以是整潔問題不是安全問題。修法：裝 SIGTERM handler 轉成優雅退出（走現有 finally 關 relay＋unlink），Low。
+- **節流：有照 Angareion 的節流走。** 靜默期靠 ETag／304（`Receiver` 的 etag＋本次補上的 `last_since`）；被 429／403 時 `run_loop` 睡滿 `retry_after` 再試（有測試）。小字：單次退避不封頂——server 若回幾千秒，心跳／找回跟著停擺；可考慮單次上限（例如 300s），不夠下輪再退（Low）。
+
+### 安全（任務 4）：M2 白名單、L1 認證、L6 socket
+
+- **M2：對它要擋的威脅成立。** `env=None`→`{}`（有測試）、team env 只過 operator 配的鍵並扣掉 `HERDR_*`；pane 側 `if env:` 空就不送 `--env`。真正的白名單語意（D10 租約 env 是「唯一的附加來源」）要等租約 plumbing，那是後續工作；現階段「行程環境（含 A2A token）永不進 pane」已守住。附帶：`worktree=True` 那條路根本不傳 env（`worktree_create` 無 env 參數），team env 會被靜默丟掉——舊 behavior，順手面提一句（Low）。
+- **L1：修法正確，殘留是 pid 認證固有的。** `<=1` 兩邊都擋（改壞會紅，已驗）；剩下 TOCTOU／PID 重用是此類機制的原生成本，接受。
+- **L6：修法正確，收尾建議把目錄 chmod 收斂一點。** socket 0600＋目錄 0700 都有測試釘住；但目錄 chmod 是無條件的——`SIDECAR_SOCK` 若指到共享目錄直下（如 `/tmp/s.sock`，非 root 跑會 EPERM 沒事；指到自家目錄則會把該目錄改成 0700）。建議只對預設 state dir 底下做，或文件寫明「socket 不要直放共享目錄」（Low）。
+
+### 給 PM 的清單
+
+1. **先修再合**：Medium 的 L3 時序（fork 行輪詢＋一條分段輸出測試）；Low 的心跳 try、SIGTERM handler 可同批（一眼大小）。
+2. **impl1 的 L7 缺口**：sender 失敗回錯誤那片沒測試釘——探針（副本 `test_rc2_probe.py::test_probe_relay_sender_failure_gets_error_response`，修法在紅、拿掉紅）可直接收進 repo。
+3. **要 PM 定的**：(a) 的 TUI-ready 字樣 spike（worker herdr 上量 opencode／claude 開機畫面）做不做、何時做；daemon 起 team 的 orchestrator（run loop 裡沒人呼叫 `start_team`——H2 接的是「被叫時」的線，5.1 的「收到→啟動 team」還缺一段）歸哪個任務。
+4. **確認事項**：L8 的 `_from_address` 錯誤字 `{repo, role, name}` vs 實際只驗 repo＋role；L6 目錄 chmod 的範圍；退避睡眠要不要封頂。
