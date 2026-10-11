@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class SeenStore:
@@ -27,7 +31,14 @@ class SeenStore:
                 self._seen = set(data)
             elif isinstance(data, dict) and "seen" in data:
                 self._seen = set(data["seen"])
-        except Exception:
+        except Exception as e:
+            logger.warning("Corrupt seen file detected at %s: %s", self.seen_file, e)
+            try:
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+                corrupt_path = self.seen_file.with_name(f"{self.seen_file.name}.corrupt-{timestamp}")
+                self.seen_file.rename(corrupt_path)
+            except Exception as re_err:
+                logger.error("Failed to rename corrupt seen file %s: %s", self.seen_file, re_err)
             self._seen = set()
         return self._seen
 

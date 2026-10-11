@@ -3,9 +3,22 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import urllib.parse
+
+logger = logging.getLogger(__name__)
+
+
+def _encode_identity(identity: str) -> str:
+    return urllib.parse.quote(identity, safe="")
+
+
+def _decode_identity(stem: str) -> str:
+    return urllib.parse.unquote(stem)
 
 
 def _sort_key(msg: dict[str, Any]) -> tuple[int, str]:
@@ -21,7 +34,8 @@ class MessageQueue:
         self.queue_dir = self.state_dir / "queue"
 
     def _queue_file(self, identity: str) -> Path:
-        return self.queue_dir / f"{identity}.json"
+        safe_name = _encode_identity(identity)
+        return self.queue_dir / f"{safe_name}.json"
 
     def _load_raw(self, identity: str) -> list[dict[str, Any]]:
         qfile = self._queue_file(identity)
@@ -34,14 +48,22 @@ class MessageQueue:
                 return data
             if isinstance(data, dict) and "messages" in data:
                 return list(data["messages"])
-        except Exception:
+            raise ValueError(f"Invalid queue structure in {qfile}")
+        except Exception as e:
+            logger.warning("Corrupt queue file detected at %s: %s", qfile, e)
+            try:
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+                corrupt_path = qfile.with_name(f"{qfile.name}.corrupt-{timestamp}")
+                qfile.rename(corrupt_path)
+            except Exception as re_err:
+                logger.error("Failed to rename corrupt queue file %s: %s", qfile, re_err)
             return []
-        return []
 
     def _save_raw(self, identity: str, messages: list[dict[str, Any]]) -> None:
         self.queue_dir.mkdir(parents=True, exist_ok=True)
-        qfile = self._queue_file(identity)
-        tmp_file = self.queue_dir / f".tmp-{identity}.json"
+        safe_name = _encode_identity(identity)
+        qfile = self.queue_dir / f"{safe_name}.json"
+        tmp_file = self.queue_dir / f".tmp-{safe_name}.json"
         payload = {"identity": identity, "messages": messages}
         with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -106,6 +128,6 @@ class MessageQueue:
             return []
         res = []
         for p in self.queue_dir.glob("*.json"):
-            if not p.name.startswith("."):
-                res.append(p.stem)
+            if not p.name.startswith(".") and ".corrupt-" not in p.name:
+                res.append(_decode_identity(p.stem))
         return sorted(res)

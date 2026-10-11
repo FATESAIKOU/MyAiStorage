@@ -240,3 +240,103 @@ def test_cli_status_text_and_json(tmp_path, capsys, monkeypatch):
     assert "Sidecar Status:" in out_text
     assert "1 running / 1 total" in out_text
     assert "team-gamma: 1 queued" in out_text
+
+
+def test_queue_identity_with_special_characters_encoded(tmp_path):
+    state_dir = tmp_path / "state"
+    q = MessageQueue(state_dir)
+
+    identities = [
+        "owner-org/worker-team",
+        "repo:role",
+        "nested/path/to/org:sub-role",
+    ]
+
+    for ident in identities:
+        msg = {
+            "id": f"msg-{ident}",
+            "urgency": 7,
+            "content": f"hello for {ident}",
+        }
+        assert q.enqueue(ident, msg) is True
+        assert q.count(ident) == 1
+        assert q.peek(ident)[0]["id"] == f"msg-{ident}"
+
+    # Verify no raw slashes caused nested directories under queue/
+    queue_dir = state_dir / "queue"
+    assert not (queue_dir / "owner-org").exists()
+    assert not (queue_dir / "nested").exists()
+
+    # list_identities decodes back to exact identity names
+    listed = q.list_identities()
+    assert listed == sorted(identities)
+
+    # Pop and remove work with special character identities
+    popped = q.pop("owner-org/worker-team")
+    assert popped["id"] == "msg-owner-org/worker-team"
+    assert q.count("owner-org/worker-team") == 0
+
+
+def test_registry_corrupt_file_backup(tmp_path):
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    reg_file = state_dir / "registry.json"
+
+    # Write corrupt JSON
+    reg_file.write_text("{broken json: 123", encoding="utf-8")
+
+    reg = Registry(state_dir)
+    # Corrupt file reset to empty records
+    assert reg.list_agents() == []
+
+    # Corrupt backup file created
+    corrupt_files = list(state_dir.glob("registry.json.corrupt-*"))
+    assert len(corrupt_files) == 1
+    assert corrupt_files[0].read_text(encoding="utf-8") == "{broken json: 123"
+    # Original corrupt file is replaced / removed
+    assert not reg_file.exists()
+
+    # Saving new record creates new valid registry.json and keeps backup
+    rec = AgentRecord(
+        agent_id="ag_valid",
+        identity="team-1",
+        agora_session="agora:01JVALID",
+        agent_kind="opencode",
+        herdr_tab_id="w1:t1",
+        herdr_pane_id="w1:p1",
+        agent_name="valid-worker",
+        started_at="2026-10-11T12:00:00Z",
+        status="running",
+        log_path=str(state_dir / "log"),
+        updated_at="2026-10-11T12:00:00Z",
+    )
+    reg.register(rec)
+    assert reg_file.is_file()
+    assert len(list(state_dir.glob("registry.json.corrupt-*"))) == 1
+
+
+def test_queue_corrupt_file_backup(tmp_path):
+    state_dir = tmp_path / "state"
+    queue_dir = state_dir / "queue"
+    queue_dir.mkdir(parents=True, exist_ok=True)
+
+    ident = "owner/team"
+    q = MessageQueue(state_dir)
+    qfile = q._queue_file(ident)
+
+    # Write corrupt JSON
+    qfile.write_text("invalid json content", encoding="utf-8")
+
+    assert q.peek(ident) == []
+    assert q.count(ident) == 0
+
+    # Backup file exists in queue_dir
+    corrupt_files = list(queue_dir.glob(f"{qfile.name}.corrupt-*"))
+    assert len(corrupt_files) == 1
+    assert corrupt_files[0].read_text(encoding="utf-8") == "invalid json content"
+
+    # Subsequent enqueue creates clean queue file and keeps backup
+    assert q.enqueue(ident, {"id": "m1", "urgency": 5, "content": "fresh"}) is True
+    assert q.count(ident) == 1
+    assert len(list(queue_dir.glob(f"{qfile.name}.corrupt-*"))) == 1
+

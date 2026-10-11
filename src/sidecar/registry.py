@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def now_iso() -> str:
@@ -73,8 +76,17 @@ class Registry:
                 for aid, entry in agents_data.items():
                     if isinstance(entry, dict):
                         records[aid] = AgentRecord.from_dict(entry)
+            else:
+                raise ValueError("Registry JSON root must be an object")
             self._records = records
-        except Exception:
+        except Exception as e:
+            logger.warning("Corrupt registry file detected at %s: %s", self.registry_file, e)
+            try:
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+                corrupt_path = self.registry_file.with_name(f"{self.registry_file.name}.corrupt-{timestamp}")
+                self.registry_file.rename(corrupt_path)
+            except Exception as re_err:
+                logger.error("Failed to rename corrupt registry file %s: %s", self.registry_file, re_err)
             self._records = {}
         return self._records
 

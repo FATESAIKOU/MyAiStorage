@@ -8,6 +8,7 @@ import pytest
 
 from sidecar.herdr import (
     FakeHerdrClient,
+    HerdrError,
     check_nesting_env,
     sanitize_herdr_env,
 )
@@ -320,3 +321,146 @@ def test_interrupt_and_prompt_behavior(tmp_path):
     host.interrupt_and_prompt("idle-worker", "normal message")
     assert esc_counts.get("idle-worker", 0) == 0
     assert ("idle-worker", "normal message") in fake_herdr.prompts
+
+
+def test_termination_waits_full_timeout_stage_without_clamping(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+
+    sleep_calls: list[float] = []
+
+    def mock_sleeper(duration: float) -> None:
+        sleep_calls.append(duration)
+
+    host = AgentHost(fake_herdr, reg, sleeper=mock_sleeper)
+    host.start_agent("team-term", "agora:01JTERM", "opencode", "victim-agent")
+
+    # Keep alive through stage 1 and stage 2 to verify both sleeps
+    res = host.terminate_agent("victim-agent", timeout_stage=5.0, check_alive_func=lambda _: True)
+    assert res is True
+    # Must wait full 5.0 seconds per stage, not clamped to 0.05
+    assert sleep_calls == [5.0, 5.0]
+
+    # Test custom timeout_stage=3.5
+    sleep_calls.clear()
+    host.start_agent("team-term2", "agora:01JTERM2", "opencode", "victim-agent-2")
+    res2 = host.terminate_agent("victim-agent-2", timeout_stage=3.5, check_alive_func=lambda _: True)
+    assert res2 is True
+    assert sleep_calls == [3.5, 3.5]
+
+
+def test_is_working_only_checks_tail_lines_ignoring_historical_dialogue(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg)
+
+    # 1. Opencode with historical text containing "esc interrupt" in line 2
+    host.start_agent("team-oc", "agora:01JOC", "opencode", "oc-worker")
+    fake_herdr.agents["oc-worker"]["agent_status"] = "idle"
+
+    historical_screen = (
+        "User: Explain what 'esc interrupt' means in this tool.\n"
+        "Assistant: In opencode, 'esc interrupt' is a keybinding indicator.\n"
+        "User: Got it, thank you.\n"
+        "Assistant: You're welcome!\n"
+        "Ready for user prompt > \n"
+    )
+    fake_herdr.agent_outputs["oc-worker"] = historical_screen
+
+    # Historical dialogue must not cause False Positive
+    assert host.is_working("oc-worker") is False
+    assert host.get_agent_status("oc-worker") == "idle"
+
+    # When "esc interrupt" is actually in the bottom status line (tail)
+    active_screen = historical_screen + "Thinking and writing response...\nesc interrupt · 5.2k\n"
+    fake_herdr.agent_outputs["oc-worker"] = active_screen
+    assert host.is_working("oc-worker") is True
+    assert host.get_agent_status("oc-worker") == "working"
+
+    # 2. Claude with historical text containing "esc to interrupt"
+    host.start_agent("team-cl", "agora:01JCL", "claude", "cl-worker")
+    fake_herdr.agents["cl-worker"]["agent_status"] = "idle"
+    cl_historical = (
+        "User: How to interrupt Claude?\n"
+        "Assistant: Press esc to interrupt.\n"
+        "User: Thanks for the explanation.\n"
+        "Assistant: Glad to help!\n"
+        "Claude is waiting for prompt > \n"
+    )
+    fake_herdr.agent_outputs["cl-worker"] = cl_historical
+    assert host.is_working("cl-worker") is False
+    assert host.get_agent_status("cl-worker") == "idle"
+
+    cl_active = cl_historical + "Generating reply...\nesc to interrupt\n"
+    fake_herdr.agent_outputs["cl-worker"] = cl_active
+    assert host.is_working("cl-worker") is True
+    assert host.get_agent_status("cl-worker") == "working"
+
+
+def test_interrupt_reports_failure_on_exception_or_timeout(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+
+    # Use fast clock so timeout expires immediately
+    host = AgentHost(fake_herdr, reg, sleeper=lambda _: None)
+    host.start_agent("team-int", "agora:01JINT", "opencode", "broken-worker")
+    fake_herdr.agent_outputs["broken-worker"] = "Writing code...\nesc interrupt"
+
+    # Simulate agent that is working, but during interrupt wait loop read fails
+    read_calls = {"count": 0}
+
+    def flakey_read(target, **kwargs):
+        read_calls["count"] += 1
+        if read_calls["count"] == 1:
+            return "Writing code...\nesc interrupt"
+        raise HerdrError(["agent", "read"], 1, "Pane communication error")
+
+    fake_herdr.agent_read = flakey_read
+
+    # interrupt must return False when read fails during wait loop (not return True)
+    res = host.interrupt("broken-worker", timeout=0.01)
+    assert res is False
+
+    # Also test send_prompt when indicator never clears (timeouts)
+    read_calls["count"] = 0
+    fake_herdr.agent_read = lambda target, **kw: "Writing code...\nesc interrupt"
+    with pytest.raises(RuntimeError, match="Failed to interrupt agent 'broken-worker'"):
+        host.send_prompt("broken-worker", "failed delivery message", interrupt_if_working=True, timeout=0.01)
+
+    assert ("broken-worker", "failed delivery message") not in fake_herdr.prompts
+
+
+def test_recover_agents_verifies_foreground_process_group(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg)
+
+    rec_done = host.start_agent("team-done", "agora:01JDONE", "opencode", "agent-done")
+    rec_alive = host.start_agent("team-alive", "agora:01JALIVE", "claude", "agent-alive")
+
+    # In herdr agent_list, both names are present
+    assert "agent-done" in fake_herdr.agents
+    assert "agent-alive" in fake_herdr.agents
+
+    # But agent-done pane has no foreground process (pgid=0 or None)
+    fake_herdr.process_infos[rec_done.herdr_pane_id]["foreground_process_group_id"] = 0
+    fake_herdr.process_infos[rec_alive.herdr_pane_id]["foreground_process_group_id"] = 5555
+
+    recovered = host.recover_agents()
+    # Only agent-alive is recovered
+    assert len(recovered) == 1
+    assert recovered[0].agent_id == rec_alive.agent_id
+
+    # agent-done is marked exited due to lack of foreground process
+    done_record = reg.get(rec_done.agent_id)
+    assert done_record.status == "exited"
+    assert done_record.exit_reason == "no foreground process in pane on restart"
+

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import secrets
 import signal
@@ -18,12 +19,22 @@ from sidecar.herdr import (
 )
 from sidecar.registry import AgentRecord, Registry, now_iso
 
+logger = logging.getLogger(__name__)
+
 
 def _sanitize_agent_name(raw: str) -> str:
     cleaned = re.sub(r"[^a-z0-9_-]", "-", raw.lower()).strip("-_")
     if not cleaned or not cleaned[0].isalpha():
         cleaned = f"a-{cleaned}" if cleaned else "agent"
     return cleaned[:32]
+
+
+def _has_indicator_in_tail(screen: str, indicator: str, tail_lines: int = 3) -> bool:
+    lines = [line.strip() for line in screen.splitlines() if line.strip()]
+    if not lines:
+        return False
+    tail = lines[-tail_lines:]
+    return any(indicator in line for line in tail)
 
 
 def default_kill_pg(pgid: int, sig: int) -> None:
@@ -42,11 +53,13 @@ class AgentHost:
         config: SidecarConfig | None = None,
         reject_nested: bool = True,
         kill_pg_func: Callable[[int, int], None] | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> None:
         self.herdr = herdr
         self.registry = registry
         self.config = config
         self.kill_pg = kill_pg_func or default_kill_pg
+        self._sleep = sleeper or time.sleep
 
         if reject_nested:
             nested = check_nesting_env()
@@ -196,7 +209,7 @@ class AgentHost:
         return rec.agora_session
 
     def get_agent_status(self, agent_name: str, agent_kind: str | None = None) -> str:
-        """Read agent status, verifying opencode terminal output for 'esc interrupt'."""
+        """Read agent status, verifying opencode/claude status bar for interrupt indicator."""
         try:
             res = self.herdr.agent_get(agent_name)
             agent_info = res.get("result", {}).get("agent", {})
@@ -210,15 +223,15 @@ class AgentHost:
         if kind == "opencode":
             try:
                 screen = self.herdr.agent_read(agent_name, source="recent-unwrapped", lines=15)
-                # D2a / D8: for opencode, presence of 'esc interrupt' means it's working
-                if "esc interrupt" in screen:
+                # D2a / D8: for opencode, presence of 'esc interrupt' in status bar means it's working
+                if _has_indicator_in_tail(screen, "esc interrupt", tail_lines=3):
                     return "working"
             except HerdrError:
                 pass
         elif kind == "claude":
             try:
                 screen = self.herdr.agent_read(agent_name, source="recent-unwrapped", lines=15)
-                if "esc to interrupt" in screen:
+                if _has_indicator_in_tail(screen, "esc to interrupt", tail_lines=3):
                     return "working"
             except HerdrError:
                 pass
@@ -232,7 +245,7 @@ class AgentHost:
         indicator = "esc to interrupt" if kind == "claude" else "esc interrupt"
         try:
             screen = self.herdr.agent_read(agent_name, source="recent-unwrapped", lines=15)
-            if indicator in screen:
+            if _has_indicator_in_tail(screen, indicator, tail_lines=3):
                 return True
         except Exception:
             pass
@@ -265,11 +278,11 @@ class AgentHost:
         while time.monotonic() < deadline:
             try:
                 screen = self.herdr.agent_read(agent_name, source="recent-unwrapped", lines=15)
-                if indicator not in screen:
+                if not _has_indicator_in_tail(screen, indicator, tail_lines=3):
                     return True
-            except Exception:
-                return True
-            time.sleep(0.02)
+            except Exception as e:
+                logger.warning("Error reading agent screen during interrupt: %s", e)
+            self._sleep(0.02)
 
         return False
 
@@ -286,7 +299,8 @@ class AgentHost:
         interrupts via esc before sending the prompt.
         """
         if interrupt_if_working:
-            self.interrupt(agent_name, timeout=timeout)
+            if not self.interrupt(agent_name, timeout=timeout):
+                raise RuntimeError(f"Failed to interrupt agent '{agent_name}' before sending prompt")
         return self.herdr.agent_prompt(agent_name, text, wait=False)
 
     def interrupt_and_prompt(
@@ -299,7 +313,7 @@ class AgentHost:
         return self.send_prompt(agent_name, text, interrupt_if_working=True, timeout=timeout)
 
     def recover_agents(self) -> list[AgentRecord]:
-        """Compare active registry records against herdr agent list after restart."""
+        """Compare active registry records against herdr agent list and pane process info after restart."""
         self.registry.load()
         active_records = self.registry.list_agents(status="running")
         if not active_records:
@@ -313,13 +327,29 @@ class AgentHost:
 
         recovered = []
         for rec in active_records:
-            if rec.agent_name in live_names:
+            if rec.agent_name not in live_names:
+                self.registry.update_status(
+                    rec.agent_id,
+                    "exited",
+                    exit_reason="not found in herdr agent list on restart",
+                )
+                continue
+
+            alive = False
+            try:
+                proc_info = self.herdr.pane_process_info(rec.herdr_pane_id)
+                pgid = proc_info.get("foreground_process_group_id")
+                alive = bool(pgid and pgid > 0)
+            except Exception:
+                alive = False
+
+            if alive:
                 recovered.append(rec)
             else:
                 self.registry.update_status(
                     rec.agent_id,
                     "exited",
-                    exit_reason="not found in herdr agent list on restart",
+                    exit_reason="no foreground process in pane on restart",
                 )
         return recovered
 
@@ -328,6 +358,7 @@ class AgentHost:
         agent_target: str,
         timeout_stage: float = 5.0,
         check_alive_func: Callable[[str], bool] | None = None,
+        sleeper: Callable[[float], None] | None = None,
     ) -> bool:
         """Three-stage escalation termination: ctrl+c -> SIGTERM -> SIGKILL -> pane close."""
         rec = self.registry.get(agent_target) or self.registry.get_by_name(agent_target)
@@ -336,6 +367,7 @@ class AgentHost:
 
         agent_name = rec.agent_name
         pane_id = rec.herdr_pane_id
+        sleep_fn = sleeper or self._sleep
 
         def is_alive() -> bool:
             if check_alive_func:
@@ -353,7 +385,7 @@ class AgentHost:
         except HerdrError:
             pass
 
-        time.sleep(min(timeout_stage, 0.05))
+        sleep_fn(timeout_stage)
         if not is_alive():
             try:
                 self.herdr.pane_close(pane_id)
@@ -371,7 +403,7 @@ class AgentHost:
         except Exception:
             pass
 
-        time.sleep(min(timeout_stage, 0.05))
+        sleep_fn(timeout_stage)
         if not is_alive():
             try:
                 self.herdr.pane_close(pane_id)
