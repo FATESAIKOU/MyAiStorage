@@ -86,7 +86,7 @@ def attach(driver, tmp_path, monkeypatch):
     """Attach to a fake claude process already running with --resume."""
     procs: list[subprocess.Popen] = []
 
-    def _attach(*, scenario: str = "ok"):
+    def _attach(*, scenario: str = "ok", is_api_key: bool = False, env: dict[str, str] | None = None):
         monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", scenario)
         proc = subprocess.Popen(
             [sys.executable, str(FAKE), "--resume", RESUME],
@@ -98,7 +98,13 @@ def attach(driver, tmp_path, monkeypatch):
             session_id="agora:A",
             process=AgoraProcess(proc=proc, agent_session_id=RESUME),
         )
-        return driver.launch(session, {}, str(tmp_path))
+        if env is not None:
+            launch_env = env
+        elif is_api_key:
+            launch_env = {"ANTHROPIC_API_KEY": SECRET}
+        else:
+            launch_env = {"CLAUDE_CODE_OAUTH_TOKEN": SECRET}
+        return driver.launch(session, launch_env, str(tmp_path))
 
     yield _attach
     for proc in procs:
@@ -306,10 +312,20 @@ def test_credits_required_is_exhaustion(driver, attach):
 
 
 def test_api_retry_rate_limit_is_exhaustion(driver, attach):
-    handle = attach(scenario="quota_api_retry")
+    handle = attach(scenario="quota_api_retry", is_api_key=True)
     driver.send(handle, "go")
     state = wait_for(driver, handle, DRIVER_QUOTA_EXHAUSTED)
     assert state.window == "5h" and state.resets_at is None
+    driver.stop(handle, graceful=False, timeout=5)
+
+
+def test_transient_api_retry_does_not_mark_quota(driver, attach):
+    """M1: a single 429 followed by a successful round is not quota exhaustion."""
+    handle = attach(scenario="quota_api_retry_transient", is_api_key=True)
+    driver.send(handle, "go")
+    state = wait_for(driver, handle, DRIVER_IDLE)
+    assert state.kind == DRIVER_IDLE
+    assert handle.quota is None
     driver.stop(handle, graceful=False, timeout=5)
 
 
@@ -321,8 +337,27 @@ def test_api_retry_other_error_is_not_exhaustion(driver, attach):
 
 
 def test_result_text_youve_hit_your_is_exhaustion(driver, attach):
-    handle = attach(scenario="quota_hit_your")
+    handle = attach(scenario="quota_hit_your", is_api_key=True)
     driver.send(handle, "go")
     state = wait_for(driver, handle, DRIVER_QUOTA_EXHAUSTED)
     assert state.window == "5h" and state.resets_at is None
+    driver.stop(handle, graceful=False, timeout=5)
+
+
+def test_result_text_coincidence_does_not_mark_quota(driver, attach):
+    """M1: text starting with You've hit your but is_error is False is not quota."""
+    handle = attach(scenario="result_hit_your_coincidence", is_api_key=True)
+    driver.send(handle, "go")
+    state = wait_for(driver, handle, DRIVER_IDLE)
+    assert state.kind == DRIVER_IDLE
+    assert handle.quota is None
+    driver.stop(handle, graceful=False, timeout=5)
+
+
+def test_subscription_ignores_auxiliary_signals(driver, attach):
+    """M1: claude-subscription ignores api_retry and result text without rate_limit_event."""
+    handle = attach(scenario="quota_api_retry", is_api_key=False)
+    driver.send(handle, "go")
+    wait_until(lambda: handle.state.kind == DRIVER_IDLE or handle.quota is not None)
+    assert handle.quota is None
     driver.stop(handle, graceful=False, timeout=5)

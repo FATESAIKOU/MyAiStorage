@@ -95,13 +95,23 @@ def answer() -> None:
               "rate_limit_info": {"status": "allowed", "errorCode": "credits_required",
                                   "rateLimitType": "seven_day", "resetsAt": RESETS}})
     elif scenario == "quota_api_retry":
-        emit({"type": "system", "subtype": "api_retry", "error": "rate_limit"})
+        emit({"type": "system", "subtype": "api_retry", "error": "rate_limit",
+              "attempt": 10, "max_retries": 10})
+        emit({"type": "result", "subtype": "error_during_execution", "is_error": True,
+              "result": "Rate limit exceeded"})
+    elif scenario == "quota_api_retry_transient":
+        emit({"type": "system", "subtype": "api_retry", "error": "rate_limit",
+              "attempt": 1, "max_retries": 10})
+        emit({"type": "result", "subtype": "success", "is_error": False, "result": "done"})
     elif scenario == "api_retry_other":
         emit({"type": "system", "subtype": "api_retry", "error": "connection"})
-        emit({"type": "result", "subtype": "success", "result": "done"})
+        emit({"type": "result", "subtype": "success", "is_error": False, "result": "done"})
     elif scenario == "quota_hit_your":
-        emit({"type": "result", "subtype": "success",
+        emit({"type": "result", "subtype": "error_during_execution", "is_error": True,
               "result": "You've hit your limit · resets at 3pm"})
+    elif scenario == "result_hit_your_coincidence":
+        emit({"type": "result", "subtype": "success", "is_error": False,
+              "result": "You've hit your goal of five tests."})
 
 
 for raw in sys.stdin:

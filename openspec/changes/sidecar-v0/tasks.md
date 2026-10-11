@@ -42,7 +42,7 @@
 - [x] 3.5 `new` 模式（D5，PM 確認中）：不經 agora 行程，用 `agora import --add-tag` 定期與 close 時存進 agora
 - [ ] 3.7 審查修正（架構師第 3 節審查；docs/review/sidecar-v0-section3.md）
   - [x] 3.7.1 H1：close 在同一個鎖內設 busy，stop 做完才釋放；_refresh_one 略過 busy
-  - [ ] 3.7.2 M1：Claude 輔助訊號限 api-key、api_retry 等重試用盡或 is_error、文字要求 is_error
+  - [x] 3.7.2 M1：Claude 輔助訊號限 api-key、api_retry 等重試用盡或 is_error、文字要求 is_error
   - [ ] 3.7.3 M3：只遮真正的秘密（key 與 config 內 apiKey），不遮 1／模型名／endpoint
   - [ ] 3.7.4 M5：AgoraProcess 持有 pump deque 或 callable 取最新末幾行
   - [ ] 3.7.5 L1：poke 時 driver 例外轉 409 agent_not_running 並標 exited

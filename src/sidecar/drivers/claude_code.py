@@ -71,6 +71,8 @@ class ClaudeHandle:
     secrets: tuple[str, ...] = ()  # env_for values, for masking error tails
     lock: threading.Lock = field(default_factory=threading.Lock)
     reader: threading.Thread | None = None
+    is_api_key: bool = False
+    had_rate_limit_retry: bool = False
 
 
 class ClaudeCodeDriver:
@@ -156,6 +158,10 @@ class ClaudeCodeDriver:
                 session_id=session.session_id,
                 agent_session_id=getattr(session.process, "agent_session_id", None),
             )
+        handle.is_api_key = (
+            ("ANTHROPIC_API_KEY" in env or "ANTHROPIC_AUTH_TOKEN" in env)
+            and "CLAUDE_CODE_OAUTH_TOKEN" not in env
+        )
         handle.secrets = tuple(value for value in env.values() if value)
         handle.reader = threading.Thread(target=self._read_events, args=(handle,), daemon=True)
         handle.reader.start()
@@ -258,14 +264,28 @@ class ClaudeCodeDriver:
             self._on_rate_limit(handle, event)
             return
         if etype == "system" and event.get("subtype") == "api_retry":
-            if event.get("error") == "rate_limit":
-                self._mark_quota(handle, "5h", None, "api_retry rate_limit")
+            if handle.is_api_key and event.get("error") == "rate_limit":
+                handle.had_rate_limit_retry = True
+                attempt = event.get("attempt")
+                max_retries = event.get("max_retries")
+                if (
+                    attempt is not None
+                    and max_retries is not None
+                    and attempt >= max_retries
+                ):
+                    self._mark_quota(handle, "5h", None, "api_retry rate_limit exhausted")
             return
         if etype == "result":
+            is_error = bool(event.get("is_error", False))
             text = event.get("result")
-            if isinstance(text, str) and text.startswith("You've hit your"):
-                self._mark_quota(handle, "5h", None, "result text")
-                return
+            if handle.is_api_key:
+                if is_error and isinstance(text, str) and text.startswith("You've hit your"):
+                    self._mark_quota(handle, "5h", None, "result text")
+                    return
+                if is_error and handle.had_rate_limit_retry:
+                    self._mark_quota(handle, "5h", None, "api_retry rate_limit exhausted")
+                    return
+            handle.had_rate_limit_retry = False
             with handle.lock:
                 if handle.quota is None:
                     handle.state = DriverState(kind=DRIVER_IDLE)
