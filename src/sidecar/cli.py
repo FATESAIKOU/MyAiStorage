@@ -103,7 +103,7 @@ def run(config: Config, stop_event: threading.Event | None = None) -> int:
         # current beat, then close every agent - only after all of them are
         # stopped does the process leave.
         core.begin_shutdown()
-        scheduler.join(timeout=5)
+        scheduler.join()  # wait for the in-flight beat; every driver/lgw call is bounded
         server.server_close()
         try:
             core.shutdown()
