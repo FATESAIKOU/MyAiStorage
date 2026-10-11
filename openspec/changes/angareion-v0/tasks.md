@@ -5,7 +5,7 @@
 
 ## 2. 四個介面
 
-- [ ] 2.1 `ChannelBackend`（create_channel／send／check／read）與記憶體假後端；`GitHubIssuesBackend`（channel＝issue、訊息＝留言、「寄給我的」用 repo 層留言列表、`check` 用 ETag 條件式請求）
+- [x] 2.1 `ChannelBackend`（create_channel／send／check／read）與記憶體假後端；`GitHubIssuesBackend`（channel＝issue、訊息＝留言、「寄給我的」用 repo 層留言列表、`check` 用 ETag 條件式請求）
 - [ ] 2.2 函式庫層的 `wait`（在 `check` 上輪詢：timeout 0 呼叫一次，否則 15 秒間隔直到有新的或逾時）與 `read`（游標）；游標檔（D4）
 - [ ] 2.3 四個子命令與結束碼（D1）；stdout／stderr 分離
 - [ ] 2.4 測試：spec 的每個 Scenario（假後端、假 transport、不連網）；token 不出現在任何輸出；每項在副本改壞確認會紅
