@@ -175,6 +175,23 @@ def test_duplicate_channel_names_resolve_to_the_oldest_issue():
     assert [r for r in transport.recorded_requests if r["method"] == "POST"] == []
 
 
+def test_one_scan_caches_the_oldest_of_other_duplicated_titles_too():
+    """L-2: the cache must keep the oldest for *every* duplicated title, not only the target's."""
+    transport = FakeTransport()
+    _issues_route(transport, [
+        {"number": 5, "title": "beta", "body": ""},  # oldest first (ascending)
+        {"number": 7, "title": "beta", "body": ""},
+        {"number": 9, "title": "alpha", "body": ""},
+    ])
+    backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
+
+    assert backend.find_channel("alpha") == 9  # this scan walks past both beta entries
+    # The same process looks beta up from that scan's cache: still the oldest.
+    assert backend.find_channel("beta") == 5
+    list_calls = [r for r in transport.recorded_requests if "/issues?" in r["url"]]
+    assert len(list_calls) == 1  # the second lookup did not re-list
+
+
 def test_create_channel_race_rescans_and_returns_the_older_issue():
     class RaceTransport:
         def __init__(self):
