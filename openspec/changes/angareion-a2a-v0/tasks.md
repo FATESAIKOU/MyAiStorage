@@ -22,5 +22,5 @@
 
 ## 4. 收尾
 
-- [ ] 4.1 `uv run python -m compileall -q src` 與完整 unit 綠；conftest 把 `A2A_*` 指到 tmp，測試不連網、不碰真信道。
+- [x] 4.1 `uv run python -m compileall -q src` 與完整 unit 綠；conftest 把 `A2A_*` 指到 tmp，測試不連網、不碰真信道。
 - [ ] 4.2 review（arch）與本人驗收；歸檔時把 spec 併進 `openspec/specs/angareion/`。
