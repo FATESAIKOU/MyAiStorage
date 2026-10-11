@@ -7,7 +7,7 @@
 
 ## 2. 收尾
 
-- [ ] 2.1 非作者審查（agy3，Gemini 3.8 Flash）：對照 spec／design，改壞驗證
-- [ ] 2.2 PM 用假資料在 pane 裡按一遍（試用環境，fake agent），確認勾 fork 會多一個 `-fork` 的 Session、原本的不動
-- [ ] 2.3 完整 unit 全綠；整合測試只在需要時跑，只用 `agora-test`（這次只改 TUI，指令模式的 fork 已有整合測試）
-- [ ] 2.4 開 PR（本人授權後才合；PMO 會先問本人）
+- [x] 2.1 非作者審查（agy3，Gemini 3.8 Flash，`docs/review/tui-continue-fork.md`，e788bac）：可以合；M1（視窗裡 Tab 的測試抓不到冒泡）與 L1、L2 由 agy1 在 4afc542 修掉，PM 在副本重做 M1 的改壞，確認測試會紅
+- [x] 2.2 PM 用假資料在 pane 裡按一遍（隔離的試用環境、假 rclone、`tests/fakes/fake_claude.py`，fbd4598）：勾 fork 多一個 `<title>-fork`（relation fork、parent 指向原本那個），原本的不動；不勾照常接續原本那個、不多出 Session；Esc 什麼都不做；說明文字隨勾選改變
+- [x] 2.3 完整 unit（4afc542）：835 passed、1 failed——失敗的是 10-03 起就有的計時測試 `test_the_bar_really_reaches_n_n_before_the_window_goes`（機器忙時偶爾失敗，10-04 的審查記錄過；這次的改動沒有碰到它），單獨重跑 5 次都通過。整合測試沒有跑：這次只改 TUI，交給指令模式的 argv 和 `continue --fork` 相同，指令模式的 fork 已有整合測試，PM 的 pane 實跑也走完了整條流程
+- [x] 2.4 開 PR，由使用者授權後才合（PMO 會先問本人；合併與 issue #36 的收尾不在這個 change 裡追蹤）
