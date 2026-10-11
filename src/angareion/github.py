@@ -32,6 +32,7 @@ from angareion.messages import (
 )
 
 USER_AGENT = "Angareion/0.1.0"
+HTTP_TIMEOUT_SECONDS = 30.0
 
 
 class HttpResponse:
@@ -60,7 +61,14 @@ class HttpTransport(Protocol):
 
 
 class DefaultHttpTransport:
-    """Standard library urllib HTTP transport."""
+    """Standard library urllib HTTP transport with a fixed socket timeout (M2).
+
+    A half-open connection (NAT, after sleep) must not hang `wait` past its
+    `--timeout`; the request times out and the caller sees a BackendError.
+    """
+
+    def __init__(self, timeout: float = HTTP_TIMEOUT_SECONDS):
+        self.timeout = timeout
 
     def request(
         self,
@@ -71,13 +79,17 @@ class DefaultHttpTransport:
     ) -> HttpResponse:
         req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 headers_dict = {str(k).lower(): str(v) for k, v in resp.headers.items()}
                 return HttpResponse(resp.status, headers_dict, resp.read())
         except urllib.error.HTTPError as e:
             headers_dict = {str(k).lower(): str(v) for k, v in e.headers.items()}
             return HttpResponse(e.code, headers_dict, e.read())
+        except TimeoutError as e:
+            raise BackendError(f"HTTP request timed out after {self.timeout:.0f}s") from e
         except urllib.error.URLError as e:
+            if isinstance(e.reason, TimeoutError):
+                raise BackendError(f"HTTP request timed out after {self.timeout:.0f}s") from e
             raise BackendError(f"Network error connecting to GitHub: {e.reason}") from e
 
 

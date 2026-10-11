@@ -348,3 +348,54 @@ def test_token_never_appears_in_exception_messages():
 def test_address_matching_helper_is_used_by_backend_filters():
     me = {"repo": "owner-org/worker", "role": "worker"}
     assert address_matches_identity(_make_msg(to=me).to, me)
+
+
+def test_default_transport_passes_a_fixed_socket_timeout(monkeypatch):
+    import urllib.request
+
+    from angareion.github import HTTP_TIMEOUT_SECONDS, DefaultHttpTransport
+
+    calls = []
+
+    class OkResponse:
+        status = 200
+        headers = {}
+
+        def read(self):
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(timeout)
+        return OkResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert DefaultHttpTransport().request("GET", "https://api.github.com/x").status == 200
+    assert HTTP_TIMEOUT_SECONDS == 30.0
+    assert calls == [30.0]
+
+
+def test_default_transport_timeout_becomes_backend_error(monkeypatch):
+    import urllib.request
+
+    from angareion.github import DefaultHttpTransport
+
+    def timed_out(req, timeout=None):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(urllib.request, "urlopen", timed_out)
+    with pytest.raises(BackendError, match="timed out"):
+        DefaultHttpTransport().request("GET", "https://api.github.com/x")
+
+    def url_error_wrapping_timeout(req, timeout=None):
+        raise urllib.error.URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", url_error_wrapping_timeout)
+    with pytest.raises(BackendError, match="timed out"):
+        DefaultHttpTransport().request("GET", "https://api.github.com/x")

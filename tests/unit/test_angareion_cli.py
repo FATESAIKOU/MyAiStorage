@@ -543,3 +543,30 @@ def test_backend_http_error_exits_2_without_retry_and_without_the_token(cli_env,
     assert TOKEN not in captured.err
     assert TOKEN not in captured.out
     assert transport.calls == 1  # no automatic retry
+
+
+def test_transport_timeout_exits_2_without_waiting_out_the_timeout(cli_env, capsys):
+    import socket
+
+    class TimeoutTransport:
+        def __init__(self, exc):
+            self.exc = exc
+
+        def request(self, method, url, headers=None, body=None):
+            raise self.exc
+
+    def forbidden_sleep(seconds):
+        raise AssertionError("a backend timeout must surface, not sleep past the --timeout")
+
+    clock = {"now": 1000.0}
+    for exc in (TimeoutError("timed out"), socket.timeout("timed out")):
+        ret = main(
+            ["wait", "--channel", "general", "--timeout", "600"],
+            transport=TimeoutTransport(exc),
+            sleeper=forbidden_sleep,
+            clock=lambda: clock["now"],
+        )
+        assert ret == 2
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "timed out" in captured.err
