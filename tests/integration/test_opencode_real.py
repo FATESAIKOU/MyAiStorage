@@ -272,7 +272,10 @@ def test_real_summarize_answers_and_cleans_up_after_itself(project, isolated_sto
     subprocess.run(["git", "-c", "user.email=agora@example.invalid",
                     "-c", "user.name=agora", "commit", "-q", "--allow-empty",
                     "-m", "init"], cwd=workdir, check=True)
-    monkeypatch.setenv("AGORA_OPENCODE_MODEL", agent.PRIMARY)
+    # The same override the wrapper honors: AGORA_TEST_MODEL, when the person
+    # running the tests set one, before the free endpoint.
+    monkeypatch.setenv("AGORA_OPENCODE_MODEL",
+                       os.environ.get("AGORA_TEST_MODEL", agent.PRIMARY))
 
     prompt = ("以下是材料，請寫一段三行的要約給之後接手的人，只輸出要約本身：\n"
               "ZZMATERIAL 我們決定用 Markdown 表格輸出；ZZMATERIAL 未解決的是欄位對齊。")

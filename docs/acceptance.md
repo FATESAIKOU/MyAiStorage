@@ -118,6 +118,9 @@ python3 -c 'import fcntl,time; f=open("/tmp/agora-acc/state/upload.lock","a"); f
 | 4.3 | `agora show session <A> \| tail -5` | 看得到 4.2 說的那句話 |
 | 4.4 | 等 10 秒，`ls /tmp/agora-acc/cache/sessions/<A的ULID>/ \| grep -c '^raw-'` | `1`（只留新的原始檔） |
 | 4.5 | 再做一次 4.1，打開之後**什麼都不說**就離開 | stderr `[agora] 這次沒有新內容，沒有存` |
+| 4.6 | `agora continue session <A> --agent opencode --dir /tmp/agora-acc/proj --sync-period 0.05` | opencode 打開（約 3 秒寫回一次） |
+| 4.7 | 在 opencode 說一句自編的話；**不離開**。另開終端機，先 `source /tmp/agora-acc/env.sh`，`agora show session <A> \| tail -5` | 幾秒後就看得到剛才那句話（不等 agent 結束） |
+| 4.8 | 同一個終端機：`sh /tmp/agora-acc/drive.sh <A的ULID> session.md \| tail -5` | Drive 上也是剛才那句話。回到 opencode，離開；印出的還是同一個 A |
 
 ## 5. import 完馬上 edit，不會遺失
 
@@ -254,6 +257,7 @@ python3 -c 'import fcntl,time; f=open("/tmp/agora-acc/state/upload.lock","a"); f
 | 12.14 | `/`（篩選框帶著剛才那個字打開），按 `Tab` | 篩選框收起，焦點移到預覽區；清單**仍然**照那個字篩選（「另有 1 個勾選被篩選掉」還在） |
 | 12.15 | `Tab` 回清單，`Esc` | 篩選清掉、篩選框收起，焦點在清單；「另有 1 個…」也消失。12.11 勾的兩列**還勾著** |
 | 12.16 | `/`，打 `q` | 篩選框裡出現 `q`（前面還有剛才那個字），**沒有離開**互動模式；篩選邊打邊生效，看得到的列變很少或沒有。按 `Esc` 收掉 |
+| 12.17 | 游標移到 Q（✓ 的那一列），`Enter`；選完 agent 與工作目錄 | 多一個輸入框「自動同步間隔（分鐘，0 ＝ 不自動同步）」，裡面是 `5`；`Esc` → 回到清單，沒有開 agent |
 
 ## 13. 合併、中斷、沿用
 

@@ -5,7 +5,7 @@
     agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync]
     agora import   session --external-session-id <id> --agent opencode|claude [--header-file F] [--header K=V]...
     agora merge    session <id>, <id>, ... [--header-file F] [--header K=V]...
-    agora continue session <id> --agent opencode|claude [--dir <dir>] [--header-file F] [--header K=V]...
+    agora continue session <id> --agent opencode|claude [--dir <dir>] [--fork] [--header-file F] [--header K=V]...
     agora delete   session <id> --yes
     agora edit     session <id> [--header-file F] [--header K=V]...
     agora show     session <id> [--raw]
@@ -16,9 +16,12 @@ Every write prints the agora id first, so outputs chain into the next command.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import importlib
+import inspect
 import json
+import math
 import os
 import re
 import shlex
@@ -28,6 +31,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,7 +39,7 @@ import jsonschema
 
 from agora import header as h
 from agora import store
-from agora.agents.base import Agent, AgentError, Exported, Launch, merge_turns, reading
+from agora.agents.base import NO_REPLY, Agent, AgentError, Exported, Launch, merge_turns, reading
 
 AGENTS = ("opencode", "claude")
 TYPES = ("session",)
@@ -44,6 +48,10 @@ EXIT_ERROR = 2       # header, Drive, agent or unexpected error (argparse usage 
 EXIT_IN_OUTBOX = 3   # saved locally, not on Drive yet (N13)
 DESCRIPTION_MAX = 80
 ACTOR = {"opencode": "opencode", "claude": "claude-code"}   # OKF actor prefix per agent
+SYNC_PERIOD_MINUTES = 5.0   # --sync-period when the user does not give one
+SYNC_MINIMUM_SECONDS = 0.1  # a floor, so a tiny period cannot turn the wait into a write loop
+CONTINUE_LOG = "continue.log"
+LOG_MAX = 1 << 20         # the same ceiling upload.log has (design「不弄亂 agent 的畫面」P15)
 
 
 class InputError(Exception):
@@ -145,21 +153,32 @@ def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None, *,
     a uploader that could not start - or, inline, one that did not get through - is a
     failure, and then it is the old exit 3 with the old words.
     """
-    from agora import background
-    folder = store.stage(paths, hdr, body, raw)
-    if update:
-        store.mark_update(folder, kind)
+    # change local-first-writes「還沒被 Drive 確認過的」: what is still waiting in the outbox
+    # unmarked is a session Drive has never confirmed, so writing it back is still new.
+    # Read before `stage`, which would leave a fresh folder that never has the marker.
+    update = update and not store.never_confirmed(paths, _ulid_of(hdr["id"]))
+    folder = store.stage(paths, hdr, body, raw, update=update, kind=kind)
     store.remember(paths, folder)
-    ulid = folder.name
+    return hdr["id"], _uploaded(paths, folder.name)
+
+
+def _uploaded(paths: store.Paths, ulid: str) -> bool:
+    """Hand the outbox to an uploader and say whether it is on its way.
+
+    The last write-back of a continue stages nothing when there is nothing new, and it
+    still has to answer the same way: an entry that has been waiting because the uploader
+    could not start is a failure to report, not a quiet success (design「最後一次」P8).
+    """
+    from agora import background
     state = background.start(paths)
     if state == background.STARTED:
-        return hdr["id"], True
+        return True
     # Only what this call wrote counts: an entry that never uploads must not turn
     # someone else's successful import into a failure (review P6).
     if state == background.FINISHED and ulid not in store.outbox_ulids(paths):
-        return hdr["id"], True
+        return True
     print("[agora] 上傳失敗，已存入 outbox，之後的指令會自動再送", file=sys.stderr)
-    return hdr["id"], False
+    return False
 
 
 def _emit(saved: tuple[str, bool]) -> int:
@@ -197,7 +216,7 @@ def _lost_in_cloud(paths: store.Paths, agora_id: str) -> bool:
     deleted.
     """
     ulid = _ulid_of(agora_id)
-    if ulid in store.waiting_ulids(paths):
+    if ulid in store.waiting_ulids(paths) and store.never_confirmed(paths, ulid):
         return False               # not up yet: ours, not another machine's delete
     try:
         remote = store.Drive(paths).list_sessions()
@@ -356,7 +375,7 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
         if unchanged and not updates:
             print(f"agora:{existing[0]}")
             return 0
-        if unchanged or not index.children(existing[0]):
+        if unchanged or not _branched(index, existing[0]):
             hdr = _with_user(old, updates)
             hdr["agora"]["source"] = _source(agent, exported)
             hdr["agora"]["updated_at"] = _now_iso()
@@ -368,6 +387,19 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
     else:
         auto = _auto_header("import", [], body, title=exported.title, exported=exported, agent=agent)
     return _emit(_save(paths, _with_user(auto, updates), body, exported.raw))
+
+
+def _branched(index: store.Index, ulid: str) -> bool:
+    """Whether a session has branched: it has a child that is not a fork (F9).
+
+    A fork is a copy that took its own source with it, so A is still the main line and
+    importing A's source again updates A where it is. A continue or a merge moved the
+    conversation on, and the old version is kept as the start of another line (S7).
+    """
+    for child in index.children(ulid):
+        if h.agora_of(index.header(child) or {}).get("relation") != "fork":
+            return True
+    return False
 
 
 SUMMARY_PROMPT_VERSION = 3
@@ -576,6 +608,48 @@ def _require_sections(agora_id: str, agora: dict) -> None:
                          + " ".join(p["id"] for p in agora.get("parents") or []) + " --agent opencode|claude")
 
 
+def _sync_interval_seconds(args) -> float | None:
+    """How long the agent runs between periodic write-backs, in seconds; None turns
+    the wait loop back into a plain wait for the agent to end (design「等待迴圈」).
+
+    `--sync-period` is minutes, default 5, and takes fractions (0.5 is 30 seconds).
+    A negative number or something that is not a number is refused before the agent
+    is opened (exit 1); anything above zero is still given a floor, so a tiny period
+    cannot turn the wait into a write-back loop that never waits.
+    """
+    raw = getattr(args, "sync_period", None)
+    if raw is None:
+        minutes = SYNC_PERIOD_MINUTES
+    else:
+        try:
+            minutes = float(raw)
+        except (TypeError, ValueError):
+            minutes = float("nan")
+        if not math.isfinite(minutes) or minutes < 0:
+            raise InputError(f"--sync-period 要給不小於 0 的分鐘數：{raw!r}")
+    if minutes == 0:
+        return None
+    return max(minutes * 60.0, SYNC_MINIMUM_SECONDS)
+
+
+def _fsync_dir(path: Path) -> None:
+    """Make a rename durable: the directory entry is a write of its own (design P17).
+
+    `store` keeps the same helper private; the pending record is written here, so the
+    sync lives with the write.
+    """
+    try:
+        fd = os.open(path, getattr(os, "O_DIRECTORY", os.O_RDONLY))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass          # a filesystem that will not sync a directory (some network mounts)
+    finally:
+        os.close(fd)
+
+
 def _write_pending(paths: store.Paths, record: dict):
     """Create the pending record already locked, so nobody can grab it in between (C3)."""
     paths.pending.mkdir(parents=True, exist_ok=True)
@@ -585,43 +659,374 @@ def _write_pending(paths: store.Paths, record: dict):
     fcntl.flock(lock, fcntl.LOCK_EX)
     lock.write(json.dumps(record, ensure_ascii=False, indent=2))
     lock.flush()
+    os.fsync(lock.fileno())      # the record is the only thing a crash leaves behind (design P17)
     os.rename(tmp, path)                         # appears already locked
+    _fsync_dir(paths.pending)                    # and the name pointing at it
     return path, lock
 
 
-def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
-    """Write what the agent produced back into the session it continued (design 5.4); None if nothing new."""
-    agent = load_agent(record["agent"])
-    launch = Launch(argv=[], cwd=record["dir"], agent_session_id=record.get("agent_session_id"),
-                    before_count=record.get("before_count", 0))
-    exported = agent.collect(launch)
-    if exported is None:
+def _move_pending(path: Path, lock, record: dict, new_id: str) -> Path:
+    """Follow the work to the session it was saved as (design「pending」P4).
+
+    Only the file's name moves: the record inside keeps the id it started with, and the
+    write resolves the target again every time (design「寫回目標的解析」). What the name
+    buys is that `store.continuing()` follows - so `delete`, `pull --not-exist-delete`
+    and sync's "not deleted while continuing" all see the session that is really being
+    written, and the one that is really gone stops looking busy.
+
+    The lock is on the inode, which a rename does not replace, so the agent that
+    inherited it still holds the file that is now under the new name.
+    """
+    new_path = path.with_name(f"{_ulid_of(new_id)}.json")
+    os.rename(path, new_path)
+    _fsync_dir(path.parent)
+    return new_path
+
+
+class _Run:
+    """What one `agora continue` remembers between its write-backs.
+
+    `last_md5` is the raw md5 of the last version that actually reached the outbox, so
+    "nothing new" compares against something real rather than against what we meant to
+    write (design P8: it is only recorded after `_save` comes back). `fingerprint`
+    is claude's cheap "did the file move" mark; `failures` counts the periodic rounds
+    that raised; `first_note` is the first move's explanation, for the final summary.
+    """
+
+    def __init__(self, paths: store.Paths, record: dict, *, pending=None, lock=None,
+                 last_md5: str | None = None):
+        self.paths = paths
+        self.record = record
+        self.pending = pending        # current path; renamed when the target moves
+        self.lock = lock
+        self.last_md5 = last_md5 if last_md5 is not None else record.get("saved_md5")
+        self.fingerprint = None
+        self.collect_failed = False
+        self.failures = 0
+        self.wrote = False            # anything staged at all, this whole run
+        self.target = record["agora_id"]
+        self.first_note: str | None = None    # the first move's explanation, for the summary
+        self.logger = None
+
+
+class _LogWriter:
+    """A file-like object that stamps every line and appends it to continue.log.
+
+    Each line carries the time and the session it is about, so a log nobody was told
+    to read still says what happened and to what (design「不弄亂 agent 的畫面」P15).
+    Partial lines wait for their newline; they never count as lines for anyone
+    polling the file.
+    """
+
+    def __init__(self, path: Path, tag: str):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if path.stat().st_size > LOG_MAX:
+                path.write_bytes(b"")        # over the ceiling the log starts again
+        except OSError:
+            pass
+        self._f = open(path, "a", encoding="utf-8")
+        self.tag = tag
+        self._buf = ""
+
+    def write(self, text: str):
+        self._buf += text
+        wrote = False
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self._f.write(f"{stamp} {self.tag} {line}\n")
+            wrote = True
+        if wrote:
+            # A complete round has to be readable by anyone polling the log the moment
+            # it finishes - the scripted fake agent's `wait-sync` is exactly that.
+            self._f.flush()
+
+    def flush(self):
+        if self._buf:
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self._f.write(f"{stamp} {self.tag} {self._buf}\n")
+            self._buf = ""
+        self._f.flush()
+
+    def close(self):
+        try:
+            self.flush()
+        finally:
+            self._f.close()
+
+
+@contextlib.contextmanager
+def _quiet(paths: store.Paths, tag: str):
+    """Send this stretch's stdout/stderr to continue.log instead of the terminal.
+
+    The agent owns the terminal while it runs; nothing said here may reach it, and
+    nothing here may read from it either (design「不弄亂 agent 的畫面」). The wrapped
+    writer stamps every line so the log says when and about which session.
+    """
+    writer = _LogWriter(paths.state / CONTINUE_LOG, tag)
+    try:
+        with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
+            yield writer
+    finally:
+        writer.close()
+
+
+def _fingerprint(record: dict, agent: Agent) -> tuple | None:
+    """A cheap "did the session move" for claude: the jsonl and sidecar sizes and
+    mtimes (design「一次寫回」P6). None when there is nothing cheap to ask - opencode
+    always exports - or when the file cannot be read, in which case the export is the
+    thing that will say so.
+    """
+    if agent.name != "claude":
         return None
-    body = reading(agent, exported.raw)
+    from agora.agents import claude
+    try:
+        path = claude.find_jsonl(record.get("agent_session_id") or "", record.get("dir"))
+        main = path.stat()
+        sidecar = path.parent / path.stem
+        extra = tuple(sorted((f.stat().st_size, f.stat().st_mtime_ns)
+                             for f in sidecar.iterdir())) if sidecar.is_dir() else ()
+    except (OSError, AgentError):
+        return None
+    return (main.st_size, main.st_mtime_ns, extra)
+
+
+def _this_runs_rescue(hdr: dict, record: dict, target_ulid: str | None = None) -> bool:
+    """Whether this header is the session this run already saved the conversation as.
+
+    `relation: continue`, this run's agent session as its source, and - where the
+    caller's search does not pin it already - the session it was saved out of among
+    its parents (design P3). Only those, so a branch the user made by importing the
+    same agent session is never mistaken for it.
+    """
+    agora = h.agora_of(hdr)
+    source = agora.get("source") or {}
+    if (agora.get("relation") != "continue"
+            or source.get("agent") != record.get("agent")
+            or source.get("session_id") != record.get("agent_session_id")):
+        return False
+    return target_ulid is None or any(
+        isinstance(p, dict) and p.get("id") == f"agora:{target_ulid}"
+        for p in agora.get("parents") or [])
+
+
+def _saved_as(index: store.Index, record: dict, target_ulid: str) -> str | None:
+    """The indexed session this run already saved the conversation as, if there is one.
+
+    Two paths notice a deletion - the foreground here, and the background uploader's
+    L7 - and while Drive cannot be reached neither can see the other's work, so both
+    would save a second copy of the same conversation. What a rescue leaves behind is
+    enough to recognise it (design P3); the newest one wins: a session deleted twice is
+    a chain. The rescue the uploader has only staged so far is `_staged_as`'s part.
+    """
+    found = None
+    for ulid in index.children(target_ulid):
+        if _this_runs_rescue(index.header(ulid) or {}, record):
+            found = ulid if found is None else max(found, ulid)   # ULIDs sort by time
+    return found
+
+
+def _staged_as(paths: store.Paths, record: dict, target_ulid: str) -> tuple[str, dict] | None:
+    """`_saved_as` among the sessions that are only staged so far, the outbox included.
+
+    The uploader rescues a deleted session by staging the new one and then indexing it
+    (`store.remember`), and a crash in between - or the moment the uploader spends
+    inside that window - leaves the rescue in the outbox alone. The last write-back has
+    to adopt it there rather than save the same work a second time (design P2, P3). The
+    header comes back with the id: reading it again later could race the uploader.
+    """
+    found = None
+    for ulid in store.waiting_ulids(paths):
+        folder = paths.outbox / ulid
+        if not folder.is_dir():
+            folder = paths.outbox / f".done-{ulid}"
+        try:
+            hdr = store.read_entry(folder)
+        except (h.HeaderError, OSError):
+            continue
+        if _this_runs_rescue(hdr, record, target_ulid) and (found is None or ulid > found[0]):
+            found = (ulid, hdr)
+    return found
+
+
+def _follow(run: "_Run", target_id: str, *, note: bool = True) -> str | None:
+    """The target moved: follow it with the pending file, remember to say so once.
+
+    The pending record's content keeps the id it started with - only the file's name
+    moves - and every write resolves the target again, so following is just the name
+    (design「pending」P4). With `note`, this is a move to a session saved earlier, and
+    the explanation is returned once, for the round's own words; `note=False` is the
+    caller's own rescue, whose message it already holds.
+    """
+    if _ulid_of(target_id) == _ulid_of(run.target):
+        return None
+    frm, run.target = run.target, target_id
+    if run.pending is not None:
+        run.pending = _move_pending(run.pending, run.lock, run.record, target_id)
+    if run.logger is not None:
+        run.logger.tag = run.target
+    if not note or run.first_note is not None:
+        return None
+    run.first_note = (f"[agora] {frm} 已經沒有了，之前已另存成 {target_id}，"
+                      f"這次的對話寫到該處；原來那個保持被刪掉的狀態")
+    return run.first_note
+
+
+def _write_target(paths: store.Paths, run: "_Run", *, check_drive: bool) -> tuple[str, dict, bool]:
+    """Which session this write goes to, and whether it is a new one.
+
+    One resolver for the periodic write-back, the last one and the recovery, so all
+    three agree about where the conversation is (design「寫回目標的解析」P2, P3):
+
+    1. the session this run already saved the work as, if any - whether or not the
+       original is still around (that is how the uploader's rescue is picked up, indexed
+       or still only staged in the outbox);
+    2. otherwise the current target, while it is still here. The periodic write looks
+       no further than this machine: another machine's deletion is the background
+       uploader's to find, and asking Drive every few minutes costs a whole listing
+       for a session that is almost certainly still there (design P7). The last write
+       and the recovery do ask, and skip nothing because the content did not change (P2).
+    3. otherwise the work becomes a session of its own, pointing at the one that is
+       gone - the conversation is the user's work and does not go away with it.
+    """
     index = store.Index(paths)
-    ulid = _ulid_of(record["agora_id"])
-    hdr = index.header(ulid) or {}
+    ulid = _ulid_of(run.target)
+    saved_as = _saved_as(index, run.record, ulid)
+    staged = _staged_as(paths, run.record, ulid)
+    if staged and (saved_as is None or staged[0] > saved_as):
+        return f"agora:{staged[0]}", staged[1], False
+    if saved_as and saved_as != ulid:
+        return f"agora:{saved_as}", index.header(saved_as) or {}, False
+    hdr = index.header(ulid)
+    gone = hdr is None or not index.cloud_has(ulid)
+    if not gone and check_drive:
+        # Two signals, either one enough: the marker (this machine already saw it) and
+        # Drive right now (F1). A header that is not here at all is the same story - it
+        # was deleted here, while the agent worked (F4) - and the work is not lost either.
+        gone = _lost_in_cloud(paths, run.target)
+    if not gone:
+        return run.target, hdr, False
+    return run.target, hdr or {}, True
+
+
+def _say_note(run: "_Run", note: str | None) -> None:
+    """Say a rescue or a move now: a periodic round logs it, the final write shows it.
+
+    Called where the words are true - inside `_quiet` while the agent runs, on the
+    terminal once it has ended - so the same explanation never has to be stored twice.
+    """
+    if not note:
+        return
+    print(note, file=sys.stderr)
+    if run.first_note is None:
+        run.first_note = note
+
+
+def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent: Agent, *,
+               check_drive: bool) -> tuple[tuple[str, bool] | None, str, str | None]:
+    """Write one version of the conversation back.
+
+    Returns (what `_save` answered or None, where the conversation now lives, the move
+    explanation if this round moved it). Nothing is staged when the bytes are the ones
+    already written to the session they would go to (spec「沒有新內容不寫」) - unless the
+    target is new, in which case even identical bytes still need a live session (P2).
+    """
+    record = run.record
+    target_id, hdr, is_new = _write_target(paths, run, check_drive=check_drive)
+    was = run.target
+    note = _follow(run, target_id)
+    _say_note(run, note)
+    moved_here = run.target != was
+    if exported is None:
+        if not is_new:
+            return None, target_id, note
+        # Nothing new was said, but the session it was in is gone: the work still has to
+        # be kept somewhere alive (design「最後一次」P2).
+        exported = Exported(session_id=record["agent_session_id"],
+                            raw=_last_raw(paths, run) or b"", title=record.get("title"))
+    md5 = store.hashlib.md5(exported.raw).hexdigest()
+    # Same bytes, same place, and the target did not just move: the stage is skipped.
+    # A move always writes - the adopted session may hold an older copy than the last
+    # one staged, and skipping would leave it stale while the gone session's outbox
+    # entry gets rescued a second time (design P3 converges on newest-wins either way,
+    # but writing here keeps the adopted copy current).
+    if md5 == run.last_md5 and not is_new and not moved_here:
+        return None, target_id, note
+    saved, create_note = _save_continue(paths, run, agent, exported, target_id=target_id,
+                                        hdr=hdr, is_new=is_new)
+    run.last_md5 = md5      # P8: only after `_save` came back
+    run.wrote = True
+    _follow(run, saved[0], note=False)
+    _say_note(run, create_note)
+    return saved, saved[0], note or create_note
+
+
+def _last_raw(paths: store.Paths, run: "_Run") -> bytes | None:
+    """The raw of the last version that was written, when the session still has one."""
+    ulid = _ulid_of(run.target)
+    name = ((store.Index(paths).header(ulid) or {}).get("agora") or {}).get("raw") or {}
+    local = paths.mirror / ulid / name.get("file", "")
+    try:
+        return local.read_bytes()
+    except OSError:
+        return None
+
+
+def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Exported, *,
+                   target_id: str, hdr: dict, is_new: bool) -> tuple[tuple[str, bool], str | None]:
+    """Put one version of the conversation into the session the resolver chose.
+
+    Returns what `_save` answered and the rescue explanation, if this call moved the
+    work into a session of its own. The explanation is returned, not printed: the
+    caller prints it where this round's own words go (the log file mid-run, the
+    terminal at the end).
+    """
+    record = run.record
+    body = reading(agent, exported.raw)
+    note = None
     same_id = True            # False once the work has been saved as a session of its own
-    # Two signals, either one enough: the marker (this machine already saw it) and
-    # Drive right now (F1). A header that is not here at all is the same story - it
-    # was deleted here, while the agent worked (F4) - and the work is not lost either.
-    if not hdr or not index.cloud_has(ulid) or _lost_in_cloud(paths, record["agora_id"]):
+    if is_new:
         # The conversation is the user's work and does not go away with the session:
         # it becomes a session of its own and points back at the one that is gone.
+        if run.target == record["agora_id"] and record.get("parent"):
+            # First rescue, from the session this run continued: the record knows what
+            # was continued from (C9), even when that id itself was never here (F4).
+            parents = [record["parent"]]
+        else:
+            # Rescued before and adopted, and that one is gone too: chain the rescues
+            # the way `_rescue_deleted` does, so a session saved twice is still found
+            # through the first one (design P14).
+            from_agora = h.agora_of(hdr)
+            parents = [*(from_agora.get("parents") or []),
+                       {"id": run.target, "raw_md5": (from_agora.get("raw") or {}).get("md5")}]
         was_here = bool(hdr)
-        raw_md5 = ((h.agora_of(hdr).get("raw") or {}).get("md5")) if hdr else None
-        parents = [record.get("parent") or {"id": record["agora_id"], "raw_md5": raw_md5}]
+        # What the user wrote on the session being rescued comes with the work: case,
+        # tags, refs, description, verified and any field of their own. Only the system
+        # fields and the two regenerated ones stay behind (review M9); a merge's
+        # auto-filled `draft` goes the way it goes when a merge is continued (5.4).
+        rescued = {k: v for k, v in hdr.items()
+                   if k not in h.SYSTEM_KEYS and k not in ("generated", "sources")}
+        if h.agora_of(hdr).get("relation") == "merge":
+            rescued.pop("status", None)
         hdr = _auto_header("continue", parents, body, title=record.get("title") or exported.title,
                            exported=exported, agent=agent, parent_headers=[hdr] if hdr else [])
+        hdr = {**hdr, **rescued}
         same_id = False        # a new id: Drive has never heard of it, so it is not an update
         how = "被別台機器刪掉了" if was_here else "在這台機器上被刪掉了"
-        print(f"[agora] {record['agora_id']} 在你接續的時候{how}，"
-              f"這次的對話另存成 {hdr['id']}；原來那個保持被刪掉的狀態", file=sys.stderr)
+        note = (f"[agora] {run.target} 在你接續的時候{how}，"
+                f"這次的對話另存成 {hdr['id']}；原來那個保持被刪掉的狀態")
+        old_ulid = _ulid_of(run.target)
+        for prefix in ("", ".done-", ".old-", ".tmp-"):
+            shutil.rmtree(paths.outbox / f"{prefix}{old_ulid}", ignore_errors=True)
     agora = h.agora_of(hdr)
     old = agora.get("source") or {}
     if old.get("session_id") and old.get("session_id") != exported.session_id:
-        # the agent session it came from is not "not imported" now: the import tab leaves it out
-        agora.setdefault("previous_sources", []).append(f"{old.get('agent')}:{old['session_id']}")
+        # the agent session it came from is not "not imported" now: the import tab leaves
+        # it out. Listed once each: a write-back every few minutes would otherwise append
+        # the same id again and again (design「一次寫回」P5).
+        previous = [s for s in agora.setdefault("previous_sources", []) if s != f"{old.get('agent')}:{old['session_id']}"]
+        agora["previous_sources"] = [*previous, f"{old.get('agent')}:{old['session_id']}"]
     if agora.get("relation") == "merge":   # a continued merge is that conversation now, not its summary
         agora["relation"] = "continue"
         agora.pop("merge", None)
@@ -638,8 +1043,140 @@ def _finish(paths: store.Paths, record: dict) -> tuple[str, bool] | None:
     # `kind`: a continue is the one write that is a relation of its own, and if this
     # session is gone by the time it goes up the work is saved as a session of its own -
     # as a continue, not as whatever X was (review G2)
-    return _save(paths, _with_user(hdr, record.get("header_updates") or {}), body,
-                 exported.raw, update=same_id, kind="continue")
+    return (_save(paths, _with_user(hdr, record.get("header_updates") or {}), body,
+                  exported.raw, update=same_id, kind="continue"), note)
+
+
+def _launch_of(record: dict) -> Launch:
+    """How to read the agent session back, without running anything."""
+    return Launch(argv=[], cwd=record["dir"], agent_session_id=record.get("agent_session_id"),
+                  before_count=record.get("before_count", 0))
+
+
+def _collect_new(run: "_Run", agent: Agent) -> Exported | None:
+    """Collect, unless the cheap precheck says the session file did not move.
+
+    The fingerprint is refreshed whenever a collect runs, win or lose: after a
+    failure it is cleared so the next round looks again instead of skipping
+    forever on a stale mark.
+    """
+    record = run.record
+    mark = _fingerprint(record, agent)
+    if mark is not None and mark == run.fingerprint and not run.collect_failed:
+        return None
+    try:
+        exported = agent.collect(_launch_of(record))
+    except Exception:
+        run.collect_failed = True
+        run.fingerprint = None
+        raise
+    run.collect_failed = False
+    run.fingerprint = mark
+    return exported
+
+
+def _periodic_write(run: "_Run", agent: Agent) -> None:
+    """One write-back round while the agent runs; failures are counted, never raised.
+
+    The agent must not stop because Drive was unreachable for a minute (design「讀到
+    一半不能寫壞」). Everything said here goes to continue.log, and every round leaves
+    exactly one line there - written or skipped - so a waiter can tell a round
+    happened without reading the terminal the agent owns.
+    """
+    try:
+        with _quiet(run.paths, run.target) as writer:
+            run.logger = writer
+            try:
+                exported = _collect_new(run, agent)
+                saved, target, _note = _write_one(run.paths, run, exported, agent,
+                                                  check_drive=False)
+            except Exception as e:   # read, stage or upload trouble: next round retries
+                run.failures += 1
+                outcome = f"失敗（第 {run.failures} 次）：{e}"
+            else:
+                if saved is None:
+                    if store.outbox_ulids(run.paths) and not store.uploader_is_running(run.paths):
+                        from agora import background
+                        run.failures += 1
+                        outcome = f"沒有新內容（上傳未完成，第 {run.failures} 次）"
+                        background.start(run.paths)
+                    else:
+                        outcome = "沒有新內容"
+                elif saved[1]:
+                    outcome = f"已寫回 {target}"
+                else:                # staged here, but it did not reach the outbox's exit
+                    run.failures += 1
+                    outcome = f"已寫回 {target}，但上傳失敗（第 {run.failures} 次）"
+            print(f"[agora] 定期寫回：{outcome}", file=sys.stderr)
+    except Exception:                # the log itself is broken: stay silent, keep going
+        run.failures += 1
+    finally:
+        run.logger = None
+
+
+def _wait_agent(proc, run: "_Run", agent: Agent, interval: float) -> bool:
+    """Wait for the agent, writing back every `interval` seconds.
+
+    Returns whether the agent ended while a round was still writing (design P7): the
+    terminal is ours again at that point, so the caller says why it stays quiet a
+    little longer. The loop never leaves while the agent is alive, and never kills
+    it: an exception here waits first (design P9a) - the caller does that part.
+    """
+    said_writing = False
+    while True:
+        try:
+            proc.wait(timeout=interval)
+            return said_writing
+        except subprocess.TimeoutExpired:
+            pass
+        _periodic_write(run, agent)
+        store._fault("after-periodic-write")
+        if not said_writing and proc.poll() is not None:
+            said_writing = True
+    return said_writing
+
+
+def _wait_target_settled(paths: store.Paths, run: "_Run", timeout: float = 15.0) -> None:
+    """Wait for in-flight upload of run.target to settle (review M1).
+
+    If an earlier round staged an update for run.target into outbox, and the background
+    uploader is running, the fate of run.target is undecided: another machine may have
+    deleted it, in which case the uploader rescues it into B. Deciding the final target
+    before that in-flight upload settles would race the uploader and print the wrong id.
+    """
+    ulid = _ulid_of(run.target)
+    if ulid not in store.waiting_ulids(paths):
+        return
+    if not store.uploader_is_running(paths):
+        from agora import background
+        background.start(paths)
+    idx = store.Index(paths)
+    deadline = time.monotonic() + timeout
+    saw_running = store.uploader_is_running(paths)
+    start_time = time.monotonic()
+    while time.monotonic() < deadline:
+        if ulid not in store.waiting_ulids(paths):
+            return
+        if _staged_as(paths, run.record, ulid) or _saved_as(idx, run.record, ulid):
+            return
+        running = store.uploader_is_running(paths)
+        if running:
+            saw_running = True
+        elif saw_running or (time.monotonic() - start_time > 2.0):
+            return
+        time.sleep(0.1)
+
+
+def _final_write(run: "_Run", agent: Agent) -> tuple[tuple[str, bool] | None, str, str | None]:
+    """The last write-back: collect, resolve the target even when quiet (design P2).
+
+    Returns (what `_save` answered or None, where the conversation now lives, the move
+    explanation if this final round moved it). A quiet agent still gets its target
+    confirmed; a missing one still gets rescued.
+    """
+    exported = _collect_new(run, agent)
+    _wait_target_settled(run.paths, run)
+    return _write_one(run.paths, run, exported, agent, check_drive=True)
 
 
 def recover_pending(paths: store.Paths, *, notice_only: bool = False) -> None:
@@ -676,14 +1213,68 @@ def recover_pending(paths: store.Paths, *, notice_only: bool = False) -> None:
             except (json.JSONDecodeError, KeyError, UnicodeDecodeError, TypeError) as e:
                 store.quarantine(path, paths.pending / ".bad", f"pending {path.name} 壞了：{e}")
                 continue
+            run = _Run(paths, record, pending=path, lock=None)
             try:
-                saved = _finish(paths, record)
+                saved, _, _ = _final_write(run, load_agent(record["agent"]))
             except Exception as e:   # a bug or outage while finishing: keep the record and retry (R4)
                 print(f"[agora] 補存 {path.stem} 失敗，下次再試：{e}", file=sys.stderr)
                 continue
-            path.unlink(missing_ok=True)
+            run.pending.unlink(missing_ok=True)   # the current path: a rescue may have renamed it
         if saved:
             print(f"[agora] 補存了中斷的接續：{saved[0]}", file=sys.stderr)
+
+
+def _fork_base(parent: dict, source_id: str, parent_md5: str | None, updates: dict) -> dict:
+    """The session a fork makes, before the agent has said anything (design「流程」2).
+
+    Everything that does not need the agent's data: the user's header copied, a new id,
+    `relation: fork`, `parents` pointing at the original, and A itself as a source. The
+    user's own `--header` is applied and checked here, so a header this version does not
+    know fails before an agent session is opened and left behind (F16).
+    """
+    drop = set(FORK_DROP_KEYS)
+    if h.agora_of(parent).get("relation") == "merge":
+        drop |= set(FORK_DROP_KEYS_MERGE)
+    hdr = {k: v for k, v in parent.items() if k not in h.SYSTEM_KEYS and k not in drop}
+    hdr["id"] = f"agora:{h.new_ulid(int(store.now() * 1000))}"
+    hdr["title"] = _fork_title(parent, source_id)
+    stamp = _now_iso()
+    hdr["agora"] = {"header": h.HEADER_VERSION, "created_at": stamp, "updated_at": stamp,
+                    "relation": "fork", "parents": [{"id": source_id, "raw_md5": parent_md5}]}
+    # Where A came from stays in A: B points at A (design「header」).
+    hdr["sources"] = [{"id": source_id, "title": parent.get("title") or source_id,
+                       "last_modified": str(h.agora_of(parent).get("updated_at") or "")[:10]}]
+    return _with_user(hdr, updates)
+
+
+def _fork_title(parent: dict, source_id: str) -> str:
+    """`A-fork`, named after whatever A has to name it. `--header title=…` wins over this
+    (the user's overlay is applied on top), and never gets the suffix."""
+    return f"{parent.get('title') or parent.get('description') or source_id}-fork"
+
+
+def _fork_after_launch(base: dict, agent: Agent, exported: Exported) -> dict:
+    """The same header once the agent session exists: B is an import of this launch, so
+    `source`, `generated` and the first `sources` entry describe that session (design「流程」6)."""
+    hdr = dict(base)
+    actor = _actor(agent.name, exported.model)
+    hdr["generated"] = {"by": actor, "at": exported.created_at or _now_iso()}
+    hdr["agora"] = {**base["agora"], "source": _source(agent, exported)}
+    hdr["sources"] = [{"id": f"{agent.name}:{exported.session_id}", "title": f"{agent.name} session",
+                       "author": actor, "last_modified": _now_iso()[:10]},
+                      *(base.get("sources") or [])]
+    return hdr
+
+
+def _export_launch(agent: Agent, launch: Launch) -> Exported:
+    """Read back the session the launch just created.
+
+    claude takes the directory it was started in, so the file it just wrote is read
+    instead of a scan over every project; the others export by id alone.
+    """
+    if "hint_dir" in inspect.signature(agent.export).parameters:
+        return agent.export(launch.agent_session_id, hint_dir=launch.cwd)
+    return agent.export(launch.agent_session_id)
 
 
 def cmd_continue(args, paths: store.Paths) -> int:
@@ -696,34 +1287,93 @@ def cmd_continue(args, paths: store.Paths) -> int:
     _refuse_if_gone(paths, index, source_id)  # T1 3.3: no agent is opened for it
     parent = _header_for(index, source_id)
     agora = h.agora_of(parent)
+    fork = bool(getattr(args, "fork", False))
+    if not fork and store.continuing(paths, _ulid_of(source_id)):
+        # This machine is already writing this session back; a second run would
+        # overwrite its pending record and then delete it when the first one ends
+        # (design「同一台機器上不能同時接續同一個 Session」P5). A fork writes a new
+        # session, so it is not affected.
+        raise InputError(f"{source_id} 正在接續中，等它結束再接續（要分岔請用 --fork）")
+    interval = _sync_interval_seconds(args)
     src = agora.get("source") or {}
     src_dir = src.get("dir") if src.get("dir") and Path(src["dir"]).is_dir() else None
     workdir = Path(args.dir or src_dir or os.getcwd()).expanduser().resolve()   # C5
     fallback = not args.dir and not src_dir
     print(f"[agora] 工作目錄：{workdir}" + ("（來源沒有記錄目錄，用目前目錄；要換地方請加 --dir）" if fallback else ""),
           file=sys.stderr)
+    fork_turns = _fork_turns(source_id, parent) if fork else []
     # ① what to load, ② the target adapter builds its own format, ③ one way to load it (design 5.4).
     if agora.get("relation") == "merge":   # its sections and list of sources, never the sources' raws
         _require_sections(source_id, agora)
         parent_md5 = None
         lines = [line for line in _body_for(paths, source_id).splitlines() if line.strip()]
-        note = MERGE_NOTE.format(by=agora["merge"].get("by"))
-        raw = agent.native([("user", [note, *lines]), ("assistant", [MERGE_READY])])   # a deliberate stand-in reply
+        # a deliberate stand-in reply, then what this fork is (design「接在原生 raw 後面」)
+        merge_turn = [("user", [MERGE_NOTE.format(by=agora["merge"].get("by")), *lines]),
+                      ("assistant", [MERGE_READY])]
     else:
         own = store.fetch_raw(paths, store.Drive(paths), _ulid_of(source_id), parent)
         parent_md5 = store.hashlib.md5(own).hexdigest()   # what we really continued from (C9)
-        raw = own if src.get("agent") == agent.name else agent.native(
-            _converted_turns(src.get("agent"), source_id, own))
+        merge_turn = None
+    base = _fork_base(parent, source_id, parent_md5, updates) if fork else None   # F16
+    if merge_turn is not None:
+        raw = agent.native(merge_turns([*merge_turn, *fork_turns]))
+    elif src.get("agent") != agent.name:
+        raw = agent.native(merge_turns([*_converted_turns(src.get("agent"), source_id, own), *fork_turns]))
+    elif fork:
+        # same agent: A's own raw, unconverted (tool calls and prefixes intact, so the
+        # cache still hits), with the fork's two turns appended to it (design 5.4).
+        raw = agent.append_native(own, fork_turns)
+    else:
+        raw = own
     launch = agent.start_native(raw, workdir)
-    record = {
-        "agora_id": source_id, "agent": agent.name,     # written back in place (design 5.4, user's call)
-        "agent_session_id": launch.agent_session_id, "dir": launch.cwd,
-        "parent": {"id": source_id, "raw_md5": parent_md5},
-        "parent_headers": [{"id": source_id, "title": parent.get("title"), "agora": {"updated_at": agora.get("updated_at")}}],
-        "title": parent.get("title"), "before_count": launch.before_count,
-        "started_at": _now_iso(), "header_updates": updates,
-    }
+    if fork:
+        if not launch.agent_session_id:
+            raise AgentError(f"{agent.name} 啟動之後沒有 session id，這個 fork 沒有存成")
+        # Read it back right away: B is what this launch holds, and `before_count` says
+        # it should hold exactly what was loaded (F3).
+        try:
+            exported = _export_launch(agent, launch)
+        except Exception as e:
+            # The agent session exists but was never saved as an agora Session: say so,
+            # or the user finds it in the not-imported tab and wonders (review M7).
+            raise AgentError(f"{agent.name} 的 agent session {launch.agent_session_id} 讀不回來（{e}）；"
+                             f"它沒有存成 agora Session，可以不管它") from e
+        if exported.message_count != launch.before_count:
+            raise AgentError(f"{agent.name} 剛啟動的 Session {launch.agent_session_id} 和匯出來的內容對不上"
+                             f"（{exported.message_count} 則／{launch.before_count} 則），沒有存；"
+                             f"那個 agent session 可以不管它")
+        # The user's --header is folded in last, or `_fork_after_launch` would overwrite
+        # a given `generated.*` or `sources` (review M4) - and the given title stays
+        # without `-fork` on the B that is saved here, which the write-back may never
+        # touch again (M2).
+        fork_hdr = _with_user(_fork_after_launch(base, agent, exported), updates)
+        fork_md5 = store.hashlib.md5(exported.raw).hexdigest()
+        saved_fork = _save(paths, fork_hdr, reading(agent, exported.raw), exported.raw)
+        print(f"[agora] fork 已存成 {fork_hdr['id']}", file=sys.stderr)   # M7: the id is out
+        record = {
+            "agora_id": fork_hdr["id"], "agent": agent.name,     # B, not A: A is not touched
+            "agent_session_id": launch.agent_session_id, "dir": launch.cwd,
+            "parent": {"id": fork_hdr["id"], "raw_md5": fork_md5},
+            "title": fork_hdr["title"], "before_count": launch.before_count,
+            "started_at": _now_iso(), "header_updates": updates,
+            "fork": True, "saved_md5": fork_md5,
+        }
+    else:
+        saved_fork = None
+        record = {
+            "agora_id": source_id, "agent": agent.name,     # written back in place (design 5.4, user's call)
+            "agent_session_id": launch.agent_session_id, "dir": launch.cwd,
+            "parent": {"id": source_id, "raw_md5": parent_md5},
+            "parent_headers": [{"id": source_id, "title": parent.get("title"), "agora": {"updated_at": agora.get("updated_at")}}],
+            "title": parent.get("title"), "before_count": launch.before_count,
+            "started_at": _now_iso(), "header_updates": updates,
+            # the baseline "nothing new" compares against: what was just loaded (design P8)
+            "saved_md5": store.hashlib.md5(raw).hexdigest(),
+        }
     pending, lock = _write_pending(paths, record)
+    run = _Run(paths, record, pending=pending, lock=lock)
+    if fork:
+        run.wrote = True          # step 6 already staged B
     store._fault("before-agent-launch")
     # Ctrl-C belongs to the agent. The child gets the default handler back
     # before exec, otherwise it would inherit the ignore (N1). The child also
@@ -732,30 +1382,103 @@ def cmd_continue(args, paths: store.Paths) -> int:
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         # opencode reads PWD, not the real cwd, to pick the project (impl1).
-        subprocess.run(launch.argv, cwd=launch.cwd, env={**os.environ, "PWD": launch.cwd},
-                       pass_fds=(lock.fileno(),),
-                       preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+        proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env={**os.environ, "PWD": launch.cwd},
+                                pass_fds=(lock.fileno(),),
+                                preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+        if interval is None:
+            proc.wait()           # --sync-period 0: just wait, only the final write-back
+            said_writing = False
+        else:
+            try:
+                said_writing = _wait_agent(proc, run, agent, interval)
+            except BaseException:
+                # Never leave while the agent is alive, and never kill it: wait first,
+                # then let the exception go (design P9a).
+                proc.wait()
+                raise
+            if said_writing:
+                print("[agora] 正在寫回…", file=sys.stderr)
     finally:
         signal.signal(signal.SIGINT, previous)
     store._fault("before-finalize")
-    saved = _finish(paths, record)
-    pending.unlink()
+    saved, target, final_note = _final_write(run, agent)
+    run.pending.unlink()          # the current path: a rescue may have renamed it
     lock.close()
+    if run.first_note is not None and final_note is None:
+        # The move happened mid-run; its explanation went to the log, so say it again
+        # where the person will see it (design「最後一次」).
+        print(run.first_note, file=sys.stderr)
+    if run.failures:
+        print(f"[agora] 定期寫回失敗 {run.failures} 次，見 {paths.state / CONTINUE_LOG}",
+              file=sys.stderr)
     if saved is None:
-        # the agent still holds the copy agora loaded; the import tab leaves it out (review T5)
-        with open(paths.state / "unsaved-launches", "a", encoding="utf-8") as f:
-            f.write(f"{agent.name}:{launch.agent_session_id}\n")
-        print("[agora] 這次沒有新內容，沒有存", file=sys.stderr)
-        return 0
-    return _emit(saved)
+        # Nothing staged this call, but an entry may still be waiting from an earlier
+        # round: kick the uploader and answer by it (design「最後一次」P8).
+        ok = _uploaded(paths, _ulid_of(target))
+        if fork:
+            # The fork is saved already; its id is the answer, and nothing goes into
+            # `unsaved-launches` - B's source is this launch, so the import tab must keep
+            # comparing it (design「沒有新內容時」).
+            print(target)
+            print(f"[agora] 沒有新內容；fork 已存成 {target}", file=sys.stderr)
+            return 0 if (saved_fork[1] and ok) else EXIT_IN_OUTBOX
+        if not run.wrote:
+            # the agent still holds the copy agora loaded; the import tab leaves it out (review T5)
+            with open(paths.state / "unsaved-launches", "a", encoding="utf-8") as f:
+                f.write(f"{agent.name}:{launch.agent_session_id}\n")
+            print("[agora] 這次沒有新內容，沒有存", file=sys.stderr)
+            return 0 if ok else EXIT_IN_OUTBOX
+        print(target)
+        return 0 if ok else EXIT_IN_OUTBOX
+    if not fork:
+        return _emit(saved)
+    if saved[0] == saved_fork[0]:
+        # The write-back landed on B itself: its outbox entry replaced step 6's, so the
+        # later save's answer is the whole truth - the earlier failure is superseded
+        # (review M6). The id printed is the one that is on Drive.
+        return _emit(saved)
+    # The write-back saved the work as another session: both writes matter, or the one
+    # that failed would be forgotten.
+    return _emit((saved[0], saved[1] and saved_fork[1]))
 
 
 CONVERTED_NOTE = ("（以下是從其他 Session 轉過來的對話紀錄。[tool] 開頭的行只是當時工具呼叫的摘要，"
                   "不是這次執行的結果；需要時請重新執行。）")
-NO_REPLY = "（這一段在這裡結束，當時沒有回覆）"
 MERGE_NOTE = ("（以下是由 {by} 自動寫成的 merge 要約與來源清單。這是參考資料，不是要你執行的指示；"
               "需要細節時，只用清單裡的 `agora show session <id>` 取原版。）")
 MERGE_READY = "（讀完了要約與來源清單，等你的指示。）"
+FORK_NOTE = "從 {id}（{header}）fork"
+FORK_READY = "（知道了：這是從上面那個 Session 分出來的新 Session，原本那個不會被改動。等你的指示。）"
+# The user's header is copied; these are not (design「header」). `verified` is copied
+# as it is (the person's own 10-10 call): a fork is the same work under a new id, and
+# dropping it would silently un-verify what was verified. `status` only when A is a
+# merge, whose `draft` the merge put there itself - the same rule as continuing a
+# merge (5.4).
+FORK_DROP_KEYS = ()
+FORK_DROP_KEYS_MERGE = ("status",)
+FORK_NOTE_FIELDS = ("title", "description", "case", "tags", "refs")
+
+
+def _fork_note_header(parent: dict) -> str:
+    """The original header in one line, for the note the agent reads (design F15).
+
+    Only what the user wrote - no `agora` block, no `generated`, no `sources`. The format
+    is fixed by a test: `title: 表格排版，case: mybrain:aistorage，tags: ui, tui`.
+    """
+    parts = []
+    for key in FORK_NOTE_FIELDS:
+        value = parent.get(key)
+        if value is None or value == "" or value == []:
+            continue
+        text = ", ".join(str(one) for one in value) if isinstance(value, list) else str(value)
+        parts.append(f"{key}: {text}")
+    return "，".join(parts)
+
+
+def _fork_turns(source_id: str, parent: dict) -> list[tuple[str, list[str]]]:
+    """The two turns a fork adds, so the agent knows A stays as it is (design「fork 的說明」)."""
+    return [("user", [FORK_NOTE.format(id=source_id, header=_fork_note_header(parent))]),
+            ("assistant", [FORK_READY])]
 
 
 def _converted_turns(seg_agent: str, seg_id: str, raw: bytes) -> list[tuple[str, list[str]]]:
@@ -1005,6 +1728,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--header", action="append", default=[], help="KEY=VALUE；KEY 可以用點路徑，VALUE 用 YAML 解析")
     p.add_argument("--header-file", help="YAML 標頭檔，先套用，再套 --header")
     p.add_argument("--dir", help="continue：在哪個專案目錄開 agent")
+    p.add_argument("--fork", action="store_true",
+                   help="continue：先複製出新 Session 再用它開 agent，原本那個不動")
+    p.add_argument("--sync-period", default=None,
+                   help="continue：每幾分鐘自動寫回一次（預設 5；0 就只在結束時寫回）")
     p.add_argument("--yes", action="store_true", help="delete：確定要移到 Drive 垃圾桶")
     p.add_argument("--raw", action="store_true", help="show：印出原始匯出")
     p.add_argument("--no-sync", action="store_true", help="search：不連 Drive，只查本機索引")

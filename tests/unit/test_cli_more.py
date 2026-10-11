@@ -65,6 +65,14 @@ class FakeAgent:
         msgs = [lines[0] for _role, lines in turns if lines]
         return json.dumps({"id": "native", "m": msgs}, ensure_ascii=False).encode()
 
+    def append_native(self, raw, turns):
+        """The raw as it is, with `turns` hung on the end (Agent protocol, e080004)."""
+        msgs = list(json.loads(raw)["m"])
+        if len(msgs) % 2:          # the user turn sits at the odd position: unanswered
+            msgs.append(cli.NO_REPLY)
+        msgs += [lines[0] for _role, lines in turns if lines]
+        return json.dumps({"id": "appended", "m": msgs}, ensure_ascii=False).encode()
+
     def summarize(self, prompt, workdir):
         return json.dumps({"purpose": "合併要約", "decisions": [], "progress": "進行中",
                            "open_questions": []}, ensure_ascii=False), "fake-model"
