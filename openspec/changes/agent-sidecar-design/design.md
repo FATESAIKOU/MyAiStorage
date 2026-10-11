@@ -62,6 +62,8 @@ sidecar 的範圍有三種切法，**請本人選定之後才實作**；下面�
 
 ### D1 程式模型：一個 worker 一個常駐 process，systemd user unit
 
+> worker 容器沒有 systemd：啟動方式以 D11 為準（entrypoint 拉起 supervisor）。
+
 - 程式在 MyAiStorage：`src/sidecar/`、console script `sidecar`（跟 agora、angareion 同一個 repo、同一種安裝方式）。
 - 一個 worker 跑一個 sidecar process（systemd user unit `agent-sidecar.service`），設定裡列它服務的身分（team／角色）清單；不為每個 team 開一個 process（一個 worker 的狀態集中一處，重啟一次全部恢復）。
 - A2A 收發用 angareion 的**程式介面**（同 repo 直接 import），不是 subprocess 呼叫 `a2a`（少一層解析、錯誤處理一致）；`a2a` 指令照舊給人用。
@@ -132,6 +134,8 @@ sidecar 的範圍有三種切法，**請本人選定之後才實作**；下面�
 
 ### D7 分發：MyLinuxPool 的一個 shared-config 單元
 
+> 安裝時機、啟動、健康檢查的細節以 D11 為準（和 MyLinuxPool#52 對齊後的版本）。
+
 - `shared-configs/agent-sidecar/`（MyLinuxPool 的規則）：
   - `unit.json`：描述、`provides`；**不是一個 profile**——任何 profile（worker、provider、gateway）都可以把它列進 shared-configs，profile 仍是部門。
   - `install.sh`：把 sidecar 裝進 `~/.local/share/agent-sidecar/`（自帶 venv，從 MyAiStorage 的 pinned ref 安裝，不碰系統 Python）；systemd user unit 放 `~/.config/systemd/user/`；`--check` 驗：單元檔案與安裝結果一致、依賴（herdr、Python）在、herdr server 可達（`herdr status server --json`）、設定可讀、A2A token 能讀信道（打一次 `GET`；200／304 算通，401／403 算不通，5xx 回「無法確認」）。冪等、重跑一樣。
@@ -162,6 +166,19 @@ v0 不做：外來 agent 發現、暫停／恢復、C 的記憶管理（session 
 - **sidecar 不自己建頻道**：中繼送出時頻道不存在就回錯誤；信道 repo 來自設定（`channel_repo`），不寫死。
 - **LLMGateway 的方向（本人 2026-10-11 定，經 PMO；正式介面由 LLMGateway 的 session 草擬後來對齊，v0 仍用假 broker）**：所有 LLM key 只放在 LLMGateway。sidecar 向它租用，拿到「要設給 agent 的環境變數」（例如 Claude Code 的 `CLAUDE_CODE_OAUTH_TOKEN`，由 Claude Code 直連 Anthropic）後啟動 agent；額度用完時 sidecar 回報冷卻與重置時間、再租下一把，換那一把重開 agent，用 `agora continue` 接回原本的 Session。sidecar 不保存 key，租約結束就丟掉；租約給的環境變數是 agent 環境白名單唯一的附加來源，MUST NOT 寫進 log、registry 或任何檔案。`ModelBroker` 的 `request_lease` 回傳值之後會改成帶這組環境變數與效期。
 - **agent 的環境是白名單**：`start_agent` 不帶 `env` 時給空的附加環境，絕不把 sidecar 自己的整個環境（可能含 A2A token）傳給 pane；文件同時建議 token 只放檔案、不 export 到登入環境（herdr server 繼承的環境 sidecar 擋不住）。
+
+### D11 worker 端的接法（2026-10-11 與 MyLinuxPool PM 對齊，MyLinuxPool#52 負責分發）
+
+- **成品與版本**：Python 套件（和 agora、a2a 同一個 distribution）。`uv tool install git+https://github.com/FATESAIKOU/MyAiStorage@<sha>`，以 worker（uid 1000）身分在**建映像時**安裝（managed Python 也在那時下載，容器啟動不必連網）。sha 與 uv 版本只寫在 `shared-configs/agent-sidecar/` 單元裡一處，Dockerfile 從單元讀。sidecar 合進 main 之後才給正式 sha。
+- **啟動**：容器沒有 systemd。entrypoint 在 `exec su worker -c pool-tunnel` 之前，用 `su worker -c 'setsid sidecar-supervise.sh &'` 把單元提供的 supervisor 放到背景；supervisor 先拉起 headless herdr server（session 名固定 `worker`），再跑 `sidecar run`，崩潰時退避重啟（5 秒起、上限 60 秒），log 在 `~/.local/state/sidecar/`。
+- **herdr**：sidecar 的設定帶 herdr 的 session 名（`worker`），呼叫 herdr 時指定；supervisor 不在 pane 裡，環境沒有 `HERDR_ENV`。
+- **憑證**：A2A token 在 `/run/mlp-secrets/angareion-token`（0400、uid 1000，唯讀掛載），設定的 `token_file` 指到它。Angareion 的 token 檢查接受「只有擁有者有權限」（0400、0600）。
+- **健康檢查**：`sidecar --version`（印出 sha）與 `sidecar check [--json]`。`check` 驗：設定可讀、token 檔存在且只有擁有者有權限、herdr server running 且 compatible、token 能讀信道（一次 GET）。回傳碼三態（MyLinuxPool 的規則）：**0 成立；1 確定不成立**（401／403、token 檔不存在或權限不對、設定壞掉、herdr 不相容）；**2 無法確認**（5xx、連不上）。JSON 裡每一項寫結果與原因（不含秘密）。單元的 `install.sh --check` ＝ 版本比對＋`sidecar check --json`。
+- **容器重建後以 agora 為準**：`~/.local/state` 不在 volume 上，容器重建就沒了（herdr server 與 agent 也一起沒了）。所以：
+  - sidecar 用 `--fork` 開出來的 Session 要帶可以找回的標頭（例如 `--header sidecar.identity=<role>`、`--header sidecar.message=<觸發它的訊息 id>`），讓「哪個 team、哪件事」記在 agora 上，不只在本機 registry；
+  - Angareion 的本機狀態本來就能從信道重建（#30）；已 ack 的訊息不會重送；
+  - v0：重建後不自動接續做到一半的 Session，`sidecar status` 列出 agora 上屬於自己身分、還沒結束的 fork Session，讓人或下一則訊息決定是否接續；自動接續留到之後。
+- 這個單元不是能力；只放進會跑 team 的 worker profile。「依賴 A2A token」由 `--check` 表達（token 檔不存在回 1 並寫明原因）。
 
 ## Risks / Trade-offs
 

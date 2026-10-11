@@ -19,7 +19,11 @@
 - [x] 3.5 回報中繼：unix socket ＋ `SO_PEERCRED` 驗身分、`sidecar say` 薄指令；測試確認 agent 環境沒有 A2A token、送出的 `from` 是 team 身分。
 - [x] 3.6 `ModelBroker` 介面與假 broker；真接 LLMGateway 等 2.1。
 
-## 4. 分發（改動在 MyLinuxPool，照它的規則）
+- [ ] 3.7 `sidecar --version`（印出安裝的 sha）與 `sidecar check [--json]`：三態回傳碼 0／1／2（design D11），每項結果與原因寫進 JSON、不含秘密；單元測試涵蓋三態
+- [ ] 3.8 設定帶 herdr 的 session 名，herdr client 呼叫時指定（D11）
+- [ ] 3.9 fork 出來的 Session 帶 `sidecar.identity`、`sidecar.message` 標頭；`sidecar status` 列出 agora 上屬於自己身分、還沒結束的 fork Session（D11「容器重建後以 agora 為準」）
+
+## 4. 分發（改動在 MyLinuxPool，照它的規則；由 MyLinuxPool PM 負責，MyLinuxPool#52）
 
 - [ ] 4.1 `shared-configs/agent-sidecar/`：`unit.json`、`install.sh`（自帶 venv、systemd user unit、`--check`：檔案、herdr／Python 依賴、herdr server 可達、設定、token 能讀信道）、`files/`（unit 與範例設定）、`tests/`。
 - [ ] 4.2 在一個 worker profile 上安裝與 `--check`；改 profile 的 shared-configs 清單（不是新增 profile）；記錄結果。
