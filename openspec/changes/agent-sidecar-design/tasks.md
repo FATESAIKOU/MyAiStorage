@@ -27,5 +27,5 @@
 ## 5. 驗收與文件
 
 - [ ] 5.1 端到端驗收（本人在一台 worker 上）：PMO 送一則 → sidecar 收 → 啟動 team → team 回報 → PMO 收到；另外各做一次終止與 sidecar 重啟。
-- [ ] 5.2 文件：安裝、設定、憑證（token 放置與輪替）、狀態與 log 位置、與 LLMGateway／Atelier 的邊界。
+- [x] 5.2 文件：安裝、設定、憑證（token 放置與輪替）、狀態與 log 位置、與 LLMGateway／Atelier 的邊界。
 - [ ] 5.3 review（arch）與本人驗收；spec 歸檔。
