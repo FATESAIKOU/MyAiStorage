@@ -21,7 +21,7 @@
 - [x] L1 後端非 JSON 回應轉 `BackendError`（exit 2）；CLI 不再接一般 `ValueError`
 - [x] L2 `read` 先輸出（flush 成功）再存游標；`BrokenPipeError` 時游標不前進
 - [x] L3 Link 的下一頁網址須以 `base_url` 開頭，否則後端錯誤；不跟隨轉址
-- [ ] L5 `send` 只接受 `--body TEXT` 或 `--body -`；沒給 `--body` exit 1（更新 docs 與 SKILL）
+- [x] L5 `send` 只接受 `--body TEXT` 或 `--body -`；沒給 `--body` exit 1（更新 docs 與 SKILL）
 - [ ] L6 游標暫存檔用 `tempfile` 同目錄唯一檔名再 `os.replace`
 - [ ] L4 同名 channel 最舊者勝出；`create_channel` 建完再查一次（競態）
 - [ ] L7 YAML 解析成 datetime/date 的 `at` 轉回 ISO 字串再驗證

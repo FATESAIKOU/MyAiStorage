@@ -22,7 +22,7 @@ angareion wait [--channel <ch>] [--timeout <秒>]     # 確認有沒有新訊息
 angareion read [--channel <ch>] [--json]             # 讀新訊息，由舊到新
 ```
 
-- 多行內文用 `--body -` 從 stdin 餵，或把文字用管線接進去。
+- 多行內文用 `--body -` 從 stdin 餵；`--body` 一定要給（沒給會 exit 1，不會自動讀管線）。
 - 位址寫成 `repo=owner/team,role=pm`（要顯示名字再加 `,name=小明`）。不確定對方位址時先問，不要猜。
 - 不給 `--channel` 時，`wait`／`read` 的目標是「所有 channel 裡寄給我的訊息」。
 - `read` 會把你的本機游標往前推，同一則不會讀第二次；`read --json` 給程式解析用。

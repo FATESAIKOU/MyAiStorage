@@ -149,11 +149,15 @@ def _build_attachments(args: argparse.Namespace) -> list[dict[str, Any]]:
 
 
 def _read_body(args: argparse.Namespace) -> str:
-    if args.body is not None and args.body != "-":
-        return args.body
-    if args.body == "-" or not sys.stdin.isatty():
+    # L5: only --body TEXT or an explicit `--body -` reads stdin. Piped stdin
+    # that nobody wrote to (an agent's child process) must not swallow the run.
+    if args.body is None:
+        raise MessageValidationError(
+            "no message body: pass --body <text>, or --body - to read the text on stdin"
+        )
+    if args.body == "-":
         return sys.stdin.read()
-    raise MessageValidationError("no message body: pass --body <text> or pipe the text on stdin")
+    return args.body
 
 
 def cmd_channel_create(args: argparse.Namespace, config: Config, app: Angareion, token: str) -> int:
@@ -275,7 +279,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("--ref", action="append", default=[], metavar="NAME=LOCATOR",
                         help="Attach a reference or link (repeatable).")
     p_send.add_argument("--body", metavar="TEXT",
-                        help="Message text; '-' or omitted with piped stdin reads stdin.")
+                        help="Message text; '-' reads the text on stdin. Required.")
 
     p_wait = subparsers.add_parser("wait", help="Wait for new messages: exit 0, or 3 on timeout.")
     p_wait.add_argument("--channel", help="Channel to watch; default: everything addressed to me.")

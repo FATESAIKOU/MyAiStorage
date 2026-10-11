@@ -154,6 +154,36 @@ def test_send_prints_only_the_message_id(cli_env, capsys):
     assert messages[0].to == {"repo": "owner-org/worker", "role": "worker"}
 
 
+def test_send_without_body_is_usage_error(cli_env, capsys, monkeypatch):
+    """No --body, even with open stdin: nothing is sent (L5)."""
+    import io
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    ret = main(
+        ["send", "--channel", "general", "--to", "repo=owner-org/worker,role=worker"],
+        backend=cli_env["backend"],
+    )
+    assert ret == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--body" in captured.err
+    assert cli_env["backend"].read(Target(channel="general"), Cursor()).messages == []
+
+
+def test_send_body_dash_reads_stdin(cli_env, capsys, monkeypatch):
+    import io
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("body from stdin"))
+    ret = main(
+        ["send", "--channel", "general", "--to", "repo=owner-org/worker,role=worker", "--body", "-"],
+        backend=cli_env["backend"],
+    )
+    assert ret == 0
+    capsys.readouterr()
+    messages = cli_env["backend"].read(Target(channel="general"), Cursor()).messages
+    assert messages[0].content == "body from stdin"
+
+
 def test_send_urgency_out_of_range_sends_nothing(cli_env, capsys):
     ret = main(
         ["send", "--channel", "general", "--to", "repo=owner-org/worker,role=worker",

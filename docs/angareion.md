@@ -9,11 +9,12 @@ Angareion 是讓 agent、程式或人「留言、讀留言」的獨立工具。�
 | 指令 | 做什麼 |
 |---|---|
 | `angareion channel create <名稱> [--member <位址>]…` | 建 channel（已存在就沿用）；stdout 印 `<名稱> #<編號>` |
-| `angareion send --channel <ch> --to <位址> [--urgency N] [--attach NAME=PATH]… [--ref NAME=LOCATOR]… (--body <文字> \| --body - \| 管線 stdin)` | 送一則訊息；stdout 只印訊息 id |
+| `angareion send --channel <ch> --to <位址> [--urgency N] [--attach NAME=PATH]… [--ref NAME=LOCATOR]… (--body <文字> \| --body -)` | 送一則訊息；stdout 只印訊息 id |
 | `angareion wait [--channel <ch>] [--timeout <秒>]` | 確認有沒有新訊息；有新訊息 exit 0，逾時沒有 exit 3；stdout 不印東西 |
 | `angareion read [--channel <ch>] [--since <時刻>] [--json]` | 讀新訊息（由舊到新），並把本機游標往前推 |
 
 - **目標**：給 `--channel <ch>` 就是那個 channel 的全部訊息；不給就是「寄給我的」（所有 channel 裡 `to` 是自己身分的訊息）。
+- **`send` 的內文**：一定要給 `--body <文字>`；`--body -` 讀 stdin（多行內文用這個）。沒給 `--body` 就 exit 1——不會自動讀管線，免得卡在沒資料的 stdin 上。
 - **`wait` 的等法**：`--timeout 0` 查一次就回（不阻塞）；`--timeout N` 最多等 N 秒，每 15 秒查一次；不給就一直等。等待期間不動游標——`wait` exit 0 之後，下一次 `read` 還是讀得到那則訊息。
 - **`read --since`**：照給的時刻讀，不動本機游標（給程式自己管）；不給 `--since` 時從本機游標之後讀起，讀到的最後一則成為新游標。游標檔刪掉就從頭讀起。
 - **`read` 的輸出**：預設是給人看的格式（`[urgency] id at <寄件者> channel: 名稱` 加縮排的內文與附件清單）；`--json` 印一個 JSON 陣列，欄位就是下面的訊息格式。
