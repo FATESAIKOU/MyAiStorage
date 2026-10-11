@@ -142,10 +142,9 @@ def test_build_core_wires_the_file_source_and_hides_the_agent_seams(tmp_path):
     workdir = tmp_path / "work"
     workdir.mkdir()
     core = build_core(Config(subscription_source={"kind": "file", "path": str(subs_path)}))
-    # The drivers/session store of tasks 3.1-3.3 are not part of this change yet,
-    # so the daemon runs but cannot open an agent.
+    # An agent kind with no registered driver is refused (3.2 adds opencode).
     with pytest.raises(BadRequestError):
-        core.open("t1", "claude-code", str(workdir), {"mode": "new"})
+        core.open("t1", "not-an-agent", str(workdir), {"mode": "new"})
 
 
 def test_build_core_wires_llmgateway_without_the_extra_installed(tmp_path):

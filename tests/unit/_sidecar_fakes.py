@@ -44,6 +44,7 @@ class FakeHandle:
 
     def __init__(self, session: RunningSession | None) -> None:
         self.session = session
+        self.agent_session_id: str | None = None  # what events would have told us (D5)
         self.state = DriverState(kind=DRIVER_IDLE)
         self.inbox: list[str] = []
         self.queued: list[str] = []  # sent while a round was running
@@ -119,6 +120,9 @@ class FakeAgentDriver:
         if self.launch_state is not None:
             return self.launch_state  # e.g. a driver that is not up yet (L5)
         return handle.state
+
+    def external_session_id(self, handle: FakeHandle) -> str | None:
+        return handle.agent_session_id
 
     def stop(
         self, handle: FakeHandle, *, graceful: bool = True, timeout: float = 30.0

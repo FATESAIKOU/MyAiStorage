@@ -1,9 +1,9 @@
 """Default wiring for `sidecar run` (design D7).
 
-The agent drivers (tasks 3.1/3.2) are the remaining seams; the session store
-is real from task 3.0 on (`agora continue --headless`).  Until the driver
-modules land, `default_drivers` is empty, so the daemon runs and `GET /agents`
-answers, but no agent kind can be opened (design D8 / review L6).
+The session store is real from task 3.0 (`agora continue --headless`) and the
+drivers land per task: 3.1 registers `claude-code` (3.2 will add `opencode`).
+An agent kind with no driver is refused with 400 `unsupported agent kind`
+(design D8 / review L6).
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from typing import Any
 from .agora_store import AgoraSessionStore
 from .config import Config
 from .core import SidecarCore
+from .drivers.claude_code import ClaudeCodeDriver
 from .protocols import ConfigError
 from .selectors import PrioritySelector
 from .sources import FileSubscriptionSource, connect_llmgateway
@@ -32,8 +33,14 @@ def build_core(config: Config) -> SidecarCore:
 
 
 def default_drivers(config: Config) -> dict[str, Any]:
-    """Task 3.1 (ClaudeCodeDriver) and task 3.2 (OpenCodeDriver) land here."""
-    return {}
+    """The real drivers, built from the config's `agents` section."""
+    claude = config.agents.get("claude-code")
+    return {
+        "claude-code": ClaudeCodeDriver(
+            command=(claude.command if claude is not None and claude.command else "claude"),
+            extra_args=(claude.extra_args if claude is not None else ()),
+        ),
+    }
 
 
 def default_session_store(config: Config) -> Any | None:

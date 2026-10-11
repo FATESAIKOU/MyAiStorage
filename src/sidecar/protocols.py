@@ -344,6 +344,15 @@ class AgentDriver(Protocol):
 
     def state(self, handle: Any) -> DriverState: ...
 
+    def external_session_id(self, handle: Any) -> str | None:
+        """The agent's own session id, when it is known (D5's `new` import).
+
+        For `new` mode the sidecar stores the conversation in agora with
+        `agora import --external-session-id <this>`; None until the driver has
+        seen it in the agent's events.
+        """
+        ...
+
     def stop(self, handle: Any, *, graceful: bool = True, timeout: float = 30.0) -> None:
         """Stop the agent: SIGTERM to the agora process, escalate after `timeout`.
 

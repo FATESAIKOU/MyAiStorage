@@ -269,7 +269,16 @@ def test_body_too_large_is_a_413(control):
         sock.sendall(
             b"POST /agents HTTP/1.0\r\nHost: sidecar\r\nContent-Length: 2000000\r\n\r\n"
         )
-        raw = sock.recv(65536)
+        sock.settimeout(5)
+        raw = b""
+        try:
+            while True:  # HTTP/1.0: the server closes once the answer is written
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                raw += chunk
+        except socket.timeout:
+            pass
     assert b" 413 " in raw.split(b"\r\n", 1)[0]
     body = raw.split(b"\r\n\r\n", 1)[1]
     assert json.loads(body)["error"]["code"] == "body_too_large"

@@ -79,6 +79,17 @@ class AgoraProcess:
     def poll(self) -> int | None:
         return self.proc.poll()
 
+    # Popen-shaped delegations, so `subproc.terminate_process` can take either
+    # a raw Popen or this wrapper.
+    def send_signal(self, sig: int) -> None:
+        self.proc.send_signal(sig)
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.proc.wait(timeout=timeout)
+
+    def kill(self) -> None:
+        self.proc.kill()
+
     def terminate(self, *, timeout: float) -> int | None:
         """The D6 gentle stop; returns the exit code (None if unkillable)."""
         from .subproc import terminate_process
