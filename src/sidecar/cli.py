@@ -79,6 +79,76 @@ def cmd_say(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_run(args: argparse.Namespace) -> int:
+    """Resident daemon entry (D10, D-run): poll + relay + recover/heartbeat."""
+    import os
+
+    from sidecar.config import load_config
+    from sidecar.herdr import RealHerdrClient
+    from sidecar.host import AgentHost
+    from sidecar.queue import MessageQueue
+    from sidecar.receiver import Receiver
+    from sidecar.registry import Registry
+    from sidecar.relay import (
+        AngareionRelaySender,
+        RelayServer,
+        get_default_sock_path,
+    )
+    from sidecar.run import run_loop
+
+    config = load_config(args.config)
+
+    if not config.channel_repo:
+        sys.stderr.write("Error: channel_repo is not configured (sidecar config.json)\n")
+        return 1
+
+    if os.environ.get("A2A_BACKEND", "").lower() == "fake":
+        from angareion.backend import FakeBackend
+        backend = FakeBackend()
+    else:
+        if not config.a2a_token_path:
+            sys.stderr.write("Error: a2a_token_path is not configured (sidecar config.json)\n")
+            return 1
+        from angareion.config import TokenError, load_token
+        from angareion.github import GitHubBackend
+        try:
+            token = load_token(config.a2a_token_path)
+        except TokenError as e:
+            sys.stderr.write(f"Error: {e}\n")
+            return 1
+        backend = GitHubBackend(channel_repo=config.channel_repo, token=token)
+
+    registry = Registry(config.state_dir)
+    queue = MessageQueue(config.state_dir)
+    try:
+        host = AgentHost(RealHerdrClient(), registry, config=config)
+    except RuntimeError as e:
+        sys.stderr.write(f"Error: {e}\n")
+        return 1
+
+    receiver = Receiver(backend, config, registry, queue, host)
+    sender = AngareionRelaySender(backend, default_channel=args.channel)
+    sock_path = args.sock if args.sock else get_default_sock_path()
+    server = RelayServer(
+        socket_path=sock_path,
+        registry=registry,
+        sender=sender,
+        herdr=host.herdr,
+    )
+
+    try:
+        return run_loop(
+            receiver=receiver,
+            registry=registry,
+            relay_server=server,
+            poll_interval=args.poll_interval,
+            recover_interval=args.recover_interval,
+            max_cycles=1 if args.once else None,
+        )
+    except KeyboardInterrupt:
+        return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sidecar", description="Agent Sidecar supervisor CLI")
     parser.add_argument("--config", "-c", help="Path to config.json (overrides SIDECAR_CONFIG)")
@@ -95,6 +165,14 @@ def build_parser() -> argparse.ArgumentParser:
     say_parser.add_argument("--sock", "-s", help="Path to relay socket (overrides SIDECAR_SOCK)")
     say_parser.add_argument("--json", action="store_true", help="Output result as JSON")
     say_parser.set_defaults(func=cmd_say)
+
+    run_parser = subparsers.add_parser("run", help="Run the resident sidecar daemon (poll + relay + recover)")
+    run_parser.add_argument("--sock", "-s", help="Path to relay socket (overrides SIDECAR_SOCK)")
+    run_parser.add_argument("--channel", default="general", help="Default Angareion channel for relayed reports")
+    run_parser.add_argument("--poll-interval", type=float, default=30.0, help="Seconds between inbox polls (default: 30)")
+    run_parser.add_argument("--recover-interval", type=float, default=300.0, help="Seconds between herdr recover/heartbeat passes (default: 300)")
+    run_parser.add_argument("--once", action="store_true", help="Run a single poll+recover cycle and exit")
+    run_parser.set_defaults(func=cmd_run)
 
     return parser
 

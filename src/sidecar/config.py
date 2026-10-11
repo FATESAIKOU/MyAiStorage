@@ -31,6 +31,7 @@ class SidecarConfig:
     identities: list[str] = field(default_factory=list)
     teams: dict[str, dict[str, Any]] = field(default_factory=dict)
     llm_gateway: str | None = None
+    channel_repo: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     def verify_token_permissions(self) -> bool:
@@ -65,6 +66,7 @@ def load_config(path: Path | str | None = None) -> SidecarConfig:
     identities = list(data.get("identities", []))
     teams = dict(data.get("teams", {}))
     llm_gateway = data.get("llm_gateway")
+    channel_repo = data.get("channel_repo")
 
     return SidecarConfig(
         config_path=config_path,
@@ -73,5 +75,6 @@ def load_config(path: Path | str | None = None) -> SidecarConfig:
         identities=identities,
         teams=teams,
         llm_gateway=llm_gateway,
+        channel_repo=channel_repo,
         raw=data,
     )

@@ -1,4 +1,4 @@
-"""Unit tests for team lifecycle (Task 3.4, Design D4)."""
+"""Unit tests for team lifecycle (Task 3.4, Design D4, D10)."""
 
 from __future__ import annotations
 
@@ -6,9 +6,13 @@ from pathlib import Path
 
 import pytest
 
+from angareion.backend import FakeBackend
+from angareion.messages import Message
 from sidecar.config import SidecarConfig
 from sidecar.herdr import FakeHerdrClient
 from sidecar.host import AgentHost
+from sidecar.queue import MessageQueue
+from sidecar.receiver import Receiver
 from sidecar.registry import Registry
 
 
@@ -32,7 +36,7 @@ def test_start_team_reads_config_and_loads_harness(tmp_path):
                 "agent": "opencode",
                 "home_session": "agora:01JTEAMHOME",
                 "harness_path": str(harness_file),
-                "sync_period": 600,
+                "sync_period": 10,
                 "cwd": "/workspace/team",
             }
         },
@@ -49,10 +53,10 @@ def test_start_team_reads_config_and_loads_harness(tmp_path):
     assert rec.agora_session == "agora:01JTEAMHOME"
     assert rec.agent_kind == "opencode"
 
-    # Verify agora continue command generated
+    # Verify agora continue command generated (sync_period is minutes, D10)
     pane_run_call = next(c for c in fake_herdr.calls if c[0] == "pane_run")
     assert pane_run_call[1][1] == (
-        "agora continue session agora:01JTEAMHOME --agent opencode --fork --sync-period 600"
+        "agora continue session agora:01JTEAMHOME --agent opencode --fork --sync-period 10"
     )
 
     # Verify harness was passed verbatim as first input
@@ -114,3 +118,87 @@ def test_start_team_missing_home_session_raises(tmp_path):
 
     with pytest.raises(ValueError, match="No home session configured"):
         host.start_team("no-home-team")
+
+
+def test_start_team_default_sync_period_is_5_minutes(tmp_path):
+    """D10: sync_period is minutes, default 5, passed through verbatim."""
+    state_dir = tmp_path / "state"
+    cfg = SidecarConfig(
+        config_path=tmp_path / "config.json",
+        state_dir=state_dir,
+        identities=["worker-team"],
+        teams={
+            "worker-team": {
+                "agent": "opencode",
+                "home_session": "agora:01JTEAMHOME",
+            }
+        },
+    )
+
+    fake_herdr = FakeHerdrClient()
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg, config=cfg)
+
+    host.start_team("worker-team")
+
+    pane_run_call = next(c for c in fake_herdr.calls if c[0] == "pane_run")
+    assert pane_run_call[1][1] == (
+        "agora continue session agora:01JTEAMHOME --agent opencode --fork --sync-period 5"
+    )
+
+
+def test_start_team_waits_for_prompt_then_harness_then_hand_off(tmp_path):
+    """H2/D10: start_team waits for the prompt, sends harness first, then
+    deliver_hand_off flushes queued low-urgency messages."""
+    harness_file = tmp_path / "harness.md"
+    harness_file.write_text("## Team Harness\n", encoding="utf-8")
+
+    backend = FakeBackend()
+    backend.create_channel("general")
+
+    state_dir = tmp_path / "state"
+    cfg = SidecarConfig(
+        config_path=tmp_path / "config.json",
+        state_dir=state_dir,
+        identities=["worker-team"],
+        teams={
+            "worker-team": {
+                "agent": "opencode",
+                "home_session": "agora:01JTEAMHOME",
+                "harness_path": str(harness_file),
+            }
+        },
+    )
+
+    fake_herdr = FakeHerdrClient()
+    reg = Registry(state_dir)
+    queue = MessageQueue(state_dir)
+    host = AgentHost(fake_herdr, reg, config=cfg)
+    receiver = Receiver(backend, cfg, reg, queue, host)
+
+    # A low-urgency message arrives while no agent runs: stays queued.
+    msg = Message(
+        from_={"repo": "pmo", "role": "PM"},
+        to={"repo": "worker", "role": "worker-team"},
+        channel="general",
+        urgency=3,
+        content="Routine work item",
+    )
+    backend.post_message("general", msg)
+    assert receiver.poll_once() == 1
+    assert queue.count("worker-team") == 1
+
+    rec = host.start_team("worker-team", receiver=receiver)
+
+    # Prompt wait happened before the harness went in.
+    call_names = [c[0] for c in fake_herdr.calls]
+    first_wait = call_names.index("pane_wait_output")
+    first_prompt = call_names.index("agent_prompt")
+    assert first_wait < first_prompt
+
+    # Harness first, hand-off second; queue drained and acked.
+    assert fake_herdr.prompts[0] == (rec.agent_name, "## Team Harness\n")
+    assert fake_herdr.prompts[1] == (rec.agent_name, "Routine work item")
+    assert queue.count("worker-team") == 0
+    all_msgs = backend.list_messages().messages
+    assert any(m.ack == msg.id for m in all_msgs)

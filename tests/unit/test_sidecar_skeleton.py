@@ -71,6 +71,36 @@ def test_config_loading_and_token_permissions(tmp_path):
     assert cfg.verify_token_permissions() is False
 
 
+def test_config_channel_repo_and_team_identity_address(tmp_path):
+    cfg_file = tmp_path / "config.json"
+    state_dir = tmp_path / "state"
+    cfg_data = {
+        "state_dir": str(state_dir),
+        "channel_repo": "owner-org/channel-repo",
+        "identities": ["worker-team"],
+        "teams": {
+            "worker-team": {
+                "agent": "opencode",
+                "home_session": "agora:01JALPHA",
+                "identity": {"repo": "worker", "role": "worker-team", "name": "opencode-1"},
+            }
+        },
+    }
+    cfg_file.write_text(json.dumps(cfg_data))
+
+    cfg = load_config(cfg_file)
+    assert cfg.channel_repo == "owner-org/channel-repo"
+    assert cfg.teams["worker-team"]["identity"] == {
+        "repo": "worker",
+        "role": "worker-team",
+        "name": "opencode-1",
+    }
+
+    # Absent channel_repo stays None (resident `sidecar run` refuses to start).
+    cfg_file.write_text(json.dumps({"state_dir": str(state_dir)}))
+    assert load_config(cfg_file).channel_repo is None
+
+
 def test_registry_atomic_persistence_and_restart_recovery(tmp_path):
     state_dir = tmp_path / "state"
     reg1 = Registry(state_dir)

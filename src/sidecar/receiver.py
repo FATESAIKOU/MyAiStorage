@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
 from angareion.backend import Backend
 from angareion.messages import Message
 from sidecar.config import SidecarConfig
-from sidecar.host import AgentHost
+from sidecar.host import PROMPT_WAIT_REGEX, AgentHost
 from sidecar.queue import MessageQueue
 from sidecar.registry import Registry
 from sidecar.seen import SeenStore
+
+logger = logging.getLogger(__name__)
 
 
 def _match_identity(to_addr: Any, identities: list[str]) -> str | None:
@@ -59,9 +62,11 @@ class Receiver:
     def poll_once(self) -> int:
         """Execute one poll cycle.
 
-        1. Fetches messages via backend with ETag/304 conditional query.
+        1. Fetches messages via backend with ETag/304 conditional query,
+           filtered by last_since cursor when available.
         2. Filters out acks, duplicates (seen.json), and messages not targeting this sidecar.
-        3. Enqueues new messages into persistent queue first.
+        3. Enqueues new messages into persistent queue first, and only then
+           marks them seen (M1: crashing between the two must not lose mail).
         4. Delivers to agent if eligible:
            - urgency >= 8: interrupts active turn or prompts immediately.
            - urgency < 8: if agent is currently running, prompts to queue in input;
@@ -77,6 +82,7 @@ class Receiver:
         if not messages:
             return 0
 
+        batch_max_at: str | None = None
         processed = 0
         for msg in messages:
             # Skip ack messages
@@ -91,9 +97,6 @@ class Receiver:
             if not target_identity:
                 continue
 
-            # Mark as seen so we don't duplicate
-            self.seen.add(msg.id)
-
             msg_dict = {
                 "id": msg.id,
                 "from": msg.from_,
@@ -104,9 +107,14 @@ class Receiver:
                 "content": msg.content,
             }
 
-            # 1. Enqueue to persistent queue first
+            # 1. Enqueue to persistent queue first; mark seen only after the
+            # queue write succeeded, so a crash in between leaves the message
+            # to be redelivered (at-least-once) instead of lost.
             self.queue.enqueue(target_identity, msg_dict)
+            self.seen.add(msg.id)
             processed += 1
+            if msg.at and (batch_max_at is None or msg.at > batch_max_at):
+                batch_max_at = msg.at
 
             # 2. Check for active agent
             active_agents = [a for a in self.registry.list_agents(status="running") if a.identity == target_identity]
@@ -122,8 +130,14 @@ class Receiver:
                         # Delivery succeeded: remove from queue and ack
                         self.queue.remove(target_identity, msg.id)
                         self._ack_message(msg.channel, msg.id, msg.from_, target_identity)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(
+                            "High-urgency delivery failed for message %s to '%s': %s "
+                            "(message stays queued)",
+                            msg.id,
+                            agent.agent_name,
+                            e,
+                        )
             else:
                 # urgency < 8
                 if active_agents:
@@ -133,19 +147,55 @@ class Receiver:
                         self.host.send_prompt(agent.agent_name, msg.content)
                         self.queue.remove(target_identity, msg.id)
                         self._ack_message(msg.channel, msg.id, msg.from_, target_identity)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(
+                            "Low-urgency delivery failed for message %s to '%s': %s "
+                            "(message stays queued)",
+                            msg.id,
+                            agent.agent_name,
+                            e,
+                        )
                 else:
                     # Agent not currently running: remains in persistent queue for next hand-off
                     pass
 
+        if batch_max_at is not None and (
+            self.last_since is None or batch_max_at > self.last_since
+        ):
+            self.last_since = batch_max_at
+
         return processed
 
-    def deliver_hand_off(self, identity: str, agent_name: str) -> int:
-        """Deliver queued messages upon agent startup/hand-off in priority order."""
+    def deliver_hand_off(
+        self,
+        identity: str,
+        agent_name: str,
+        wait_timeout_ms: int | None = 60000,
+    ) -> int:
+        """Deliver queued messages upon agent startup/hand-off in priority order.
+
+        Waits for the agent prompt to appear first (M3), like the harness:
+        on timeout nothing is sent and the messages stay queued.
+        """
         messages = self.queue.peek(identity)
         if not messages:
             return 0
+
+        rec = self.registry.get_by_name(agent_name)
+        if rec is not None and wait_timeout_ms is not None:
+            try:
+                self.host.herdr.pane_wait_output(
+                    rec.herdr_pane_id,
+                    regex=PROMPT_WAIT_REGEX,
+                    timeout_ms=wait_timeout_ms,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Hand-off to '%s' deferred: prompt did not appear: %s",
+                    agent_name,
+                    e,
+                )
+                return 0
 
         delivered = 0
         for m in list(messages):
@@ -159,7 +209,13 @@ class Receiver:
                 self.queue.remove(identity, msg_id)
                 self._ack_message(channel, msg_id, from_addr, identity)
                 delivered += 1
-            except Exception:
+            except Exception as e:
+                logger.warning(
+                    "Hand-off delivery of message %s to '%s' failed: %s",
+                    msg_id,
+                    agent_name,
+                    e,
+                )
                 break
 
         return delivered

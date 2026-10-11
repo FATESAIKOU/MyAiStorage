@@ -8,7 +8,7 @@ import secrets
 import signal
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from sidecar.config import SidecarConfig
 from sidecar.herdr import (
@@ -19,7 +19,17 @@ from sidecar.herdr import (
 )
 from sidecar.registry import AgentRecord, Registry, now_iso
 
+if TYPE_CHECKING:
+    from sidecar.receiver import Receiver
+
 logger = logging.getLogger(__name__)
+
+
+# Best-effort "agent TUI is up" signal for pane wait-output before sending
+# the harness (D4). wait-output can only match text appearing, so we wait for
+# any rendered output; kind-specific readiness is checked via agent_read
+# (is_working / get_agent_status) elsewhere.
+PROMPT_WAIT_REGEX = r"\S"
 
 
 def _sanitize_agent_name(raw: str) -> str:
@@ -76,13 +86,19 @@ class AgentHost:
         agent_kind: str,
         agent_name: str | None = None,
         fork: bool = True,
-        sync_period: int | float | None = 300,
+        sync_period: int | float | None = 5,
         cwd: Path | str | None = None,
         worktree: bool = False,
         harness_content: str | None = None,
         env: dict[str, str] | None = None,
+        wait_timeout_ms: int | None = 60000,
     ) -> AgentRecord:
-        """Start an agent inside herdr running 'agora continue'."""
+        """Start an agent inside herdr running 'agora continue'.
+
+        sync_period is in minutes, passed through verbatim to agora's
+        --sync-period (D10). env=None means no extra environment, never the
+        sidecar process environment (D6/M2).
+        """
         if not agent_name:
             suffix = secrets.token_hex(3)
             agent_name = _sanitize_agent_name(f"{identity}-{suffix}")
@@ -91,8 +107,10 @@ class AgentHost:
 
         agent_id = f"ag_{int(time.time())}_{secrets.token_hex(4)}"
 
-        # Strip any herdr nesting variables
-        clean_env = sanitize_herdr_env(env)
+        # Strip any herdr nesting variables. None means an empty extra
+        # environment: never inherit the sidecar process environment, which
+        # may contain the A2A token (D6).
+        clean_env = sanitize_herdr_env(env if env is not None else {})
 
         if worktree:
             res = self.herdr.worktree_create(cwd=cwd, focus=False)
@@ -115,6 +133,39 @@ class AgentHost:
 
         # Name agent in pane
         self.herdr.agent_rename(pane_id, agent_name)
+
+        # D4/M3: wait until the agent TUI shows output (prompt is up) before
+        # sending anything. On timeout, record the evidence and fail loudly
+        # instead of sending the harness into the void.
+        if wait_timeout_ms is not None:
+            try:
+                self.herdr.pane_wait_output(
+                    pane_id, regex=PROMPT_WAIT_REGEX, timeout_ms=wait_timeout_ms
+                )
+            except Exception as e:
+                logger.warning(
+                    "Agent '%s' did not show a prompt in time: %s", agent_name, e
+                )
+                log_path = str(self.registry.state_dir / "agents" / agent_id / "log")
+                self.registry.register(
+                    AgentRecord(
+                        agent_id=agent_id,
+                        identity=identity,
+                        agora_session=agora_session,
+                        agent_kind=agent_kind,
+                        herdr_tab_id=tab_id,
+                        herdr_pane_id=pane_id,
+                        agent_name=agent_name,
+                        started_at=now_iso(),
+                        status="starting",
+                        log_path=log_path,
+                        updated_at=now_iso(),
+                        exit_reason=f"prompt wait failed: {e}",
+                    )
+                )
+                raise RuntimeError(
+                    f"Agent '{agent_name}' did not show a prompt in time: {e}"
+                ) from e
 
         # Harness loading if provided
         if harness_content:
@@ -146,13 +197,19 @@ class AgentHost:
         cwd: Path | str | None = None,
         worktree: bool = False,
         extra_env: dict[str, str] | None = None,
+        receiver: Receiver | None = None,
     ) -> AgentRecord:
         """Start a team task using the configured home session, agent kind, and harness.
 
         Per D4:
         - base command: 'agora continue session <home> --agent <agent> --fork --sync-period <N>'
-        - harness: load raw verbatim content as first input (Atelier seam)
+          where <N> is minutes, passed through verbatim (D10, default 5)
+        - harness: load raw verbatim content as first input (Atelier seam),
+          only after the agent prompt appears (M3)
         - isolate via --fork
+        When a receiver is given (the resident `sidecar run` loop owns it),
+        queued low-urgency messages for this identity are handed off right
+        after the harness (H2/D10).
         """
         team_cfg = self.config.teams.get(identity, {}) if self.config else {}
 
@@ -168,13 +225,13 @@ class AgentHost:
             if hp.is_file():
                 harness_content = hp.read_text(encoding="utf-8")
 
-        sp = sync_period if sync_period is not None else team_cfg.get("sync_period", 300)
+        sp = sync_period if sync_period is not None else team_cfg.get("sync_period", 5)
         team_cwd = cwd or team_cfg.get("cwd")
         env = dict(team_cfg.get("env", {}))
         if extra_env:
             env.update(extra_env)
 
-        return self.start_agent(
+        rec = self.start_agent(
             identity=identity,
             agora_session=home,
             agent_kind=agent_kind,
@@ -185,6 +242,20 @@ class AgentHost:
             harness_content=harness_content,
             env=env,
         )
+
+        if receiver is not None:
+            try:
+                receiver.deliver_hand_off(identity, rec.agent_name)
+            except Exception as e:
+                logger.warning(
+                    "Hand-off delivery failed for team '%s' agent '%s': %s "
+                    "(messages stay queued for the next hand-off)",
+                    identity,
+                    rec.agent_name,
+                    e,
+                )
+
+        return rec
 
     def terminate_team(self, identity: str, timeout_stage: float = 5.0) -> bool:
         """Terminate all active agents running for the given team/identity."""
@@ -313,7 +384,11 @@ class AgentHost:
         return self.send_prompt(agent_name, text, interrupt_if_working=True, timeout=timeout)
 
     def recover_agents(self) -> list[AgentRecord]:
-        """Compare active registry records against herdr agent list and pane process info after restart."""
+        """Compare active registry records against herdr agent list and pane process info after restart.
+
+        Fail-closed (M4): when herdr is temporarily unreachable, the registry
+        is left untouched so live agents are not mass-marked exited.
+        """
         self.registry.load()
         active_records = self.registry.list_agents(status="running")
         if not active_records:
@@ -322,8 +397,11 @@ class AgentHost:
         try:
             live_agents = self.herdr.agent_list()
             live_names = {a.get("name") for a in live_agents if a.get("name")}
-        except HerdrError:
-            live_names = set()
+        except Exception as e:
+            logger.warning(
+                "herdr agent list unavailable; leaving registry untouched: %s", e
+            )
+            return []
 
         recovered = []
         for rec in active_records:
@@ -335,13 +413,18 @@ class AgentHost:
                 )
                 continue
 
-            alive = False
             try:
                 proc_info = self.herdr.pane_process_info(rec.herdr_pane_id)
-                pgid = proc_info.get("foreground_process_group_id")
-                alive = bool(pgid and pgid > 0)
-            except Exception:
-                alive = False
+            except Exception as e:
+                logger.warning(
+                    "herdr pane process-info unavailable for agent '%s'; "
+                    "leaving status unchanged: %s",
+                    rec.agent_name,
+                    e,
+                )
+                continue
+            pgid = proc_info.get("foreground_process_group_id")
+            alive = bool(pgid and pgid > 0)
 
             if alive:
                 recovered.append(rec)

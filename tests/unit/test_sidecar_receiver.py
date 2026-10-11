@@ -224,3 +224,140 @@ def test_angareion_relay_sender_integration():
     assert len(all_msgs) == 1
     assert all_msgs[0].content == "Report via Angareion backend"
     assert all_msgs[0].from_ == {"repo": "sidecar", "role": "team-worker"}
+
+
+def test_receiver_enqueue_failure_does_not_mark_seen(tmp_path, monkeypatch):
+    """M1: crashing between queue write and seen-mark must not lose mail.
+    The message is neither queued nor seen, so the next poll redelivers it."""
+    backend = FakeBackend()
+    backend.create_channel("general")
+
+    state_dir = tmp_path / "state"
+    cfg = SidecarConfig(
+        config_path=tmp_path / "config.json",
+        state_dir=state_dir,
+        identities=["worker-team"],
+    )
+
+    fake_herdr = FakeHerdrClient()
+    reg = Registry(state_dir)
+    queue = MessageQueue(state_dir)
+    host = AgentHost(fake_herdr, reg, config=cfg)
+    receiver = Receiver(backend, cfg, reg, queue, host)
+
+    msg = Message(
+        from_={"repo": "pmo", "role": "PM"},
+        to={"repo": "worker", "role": "worker-team"},
+        channel="general",
+        urgency=4,
+        content="Must survive the crash window",
+    )
+    backend.post_message("general", msg)
+
+    def boom_enqueue(identity, message):
+        raise OSError("disk full in the crash window")
+
+    monkeypatch.setattr(queue, "enqueue", boom_enqueue)
+
+    with pytest.raises(OSError, match="disk full"):
+        receiver.poll_once()
+
+    assert queue.count("worker-team") == 0
+    assert not receiver.seen.has(msg.id)
+
+    # Restart with a healthy queue on the same state dir: redelivery works.
+    reg2 = Registry(state_dir)
+    queue2 = MessageQueue(state_dir)
+    host2 = AgentHost(fake_herdr, reg2, config=cfg)
+    receiver2 = Receiver(backend, cfg, reg2, queue2, host2)
+
+    assert receiver2.poll_once() == 1
+    assert queue2.count("worker-team") == 1
+
+
+def test_receiver_last_since_cursor_filters_old_messages(tmp_path):
+    """last_since advances past enqueued messages so later polls only see
+    what is new (backend-side since filtering)."""
+    backend = FakeBackend()
+    backend.create_channel("general")
+
+    state_dir = tmp_path / "state"
+    cfg = SidecarConfig(
+        config_path=tmp_path / "config.json",
+        state_dir=state_dir,
+        identities=["worker-team"],
+    )
+
+    fake_herdr = FakeHerdrClient()
+    reg = Registry(state_dir)
+    queue = MessageQueue(state_dir)
+    host = AgentHost(fake_herdr, reg, config=cfg)
+    receiver = Receiver(backend, cfg, reg, queue, host)
+
+    msg1 = Message(
+        from_={"repo": "pmo", "role": "PM"},
+        to={"repo": "worker", "role": "worker-team"},
+        channel="general",
+        urgency=2,
+        content="first",
+        at="2026-10-11T10:00:00+00:00",
+    )
+    backend.post_message("general", msg1)
+    assert receiver.poll_once() == 1
+    assert receiver.last_since == "2026-10-11T10:00:00+00:00"
+
+    msg2 = Message(
+        from_={"repo": "pmo", "role": "PM"},
+        to={"repo": "worker", "role": "worker-team"},
+        channel="general",
+        urgency=2,
+        content="second",
+        at="2026-10-11T11:00:00+00:00",
+    )
+    backend.post_message("general", msg2)
+    assert receiver.poll_once() == 1
+    assert receiver.last_since == "2026-10-11T11:00:00+00:00"
+    assert queue.count("worker-team") == 2
+
+
+def test_receiver_delivery_failure_stays_queued_and_logs(tmp_path, monkeypatch, caplog):
+    """A failed prompt delivery keeps the message queued and logs a warning."""
+    backend = FakeBackend()
+    backend.create_channel("general")
+
+    state_dir = tmp_path / "state"
+    cfg = SidecarConfig(
+        config_path=tmp_path / "config.json",
+        state_dir=state_dir,
+        identities=["worker-team"],
+    )
+
+    fake_herdr = FakeHerdrClient()
+    reg = Registry(state_dir)
+    queue = MessageQueue(state_dir)
+    host = AgentHost(fake_herdr, reg, config=cfg)
+
+    rec = host.start_agent("worker-team", "agora:01JTEST", "opencode", "worker-1")
+
+    def boom_prompt(agent_name, text, **kwargs):
+        raise RuntimeError("pane gone")
+
+    monkeypatch.setattr(host, "send_prompt", boom_prompt)
+    receiver = Receiver(backend, cfg, reg, queue, host)
+
+    msg = Message(
+        from_={"repo": "pmo", "role": "PM"},
+        to={"repo": "worker", "role": "worker-team"},
+        channel="general",
+        urgency=3,
+        content="Undeliverable for now",
+    )
+    backend.post_message("general", msg)
+
+    with caplog.at_level("WARNING", logger="sidecar.receiver"):
+        assert receiver.poll_once() == 1
+
+    assert queue.count("worker-team") == 1
+    assert "delivery failed" in caplog.text
+    all_msgs = backend.list_messages().messages
+    assert not any(m.ack == msg.id for m in all_msgs)

@@ -63,7 +63,7 @@ def test_start_agent_launches_agora_continue_and_registers(tmp_path, monkeypatch
         agent_kind="opencode",
         agent_name="impl1",
         fork=True,
-        sync_period=300,
+        sync_period=5,
         cwd="/workspace/repo",
         harness_content="## Harness Instructions\nDo work.",
     )
@@ -86,7 +86,7 @@ def test_start_agent_launches_agora_continue_and_registers(tmp_path, monkeypatch
     pane_run_call = next(c for c in fake_herdr.calls if c[0] == "pane_run")
     assert pane_run_call[1][0] == "w1:p1"
     cmd = pane_run_call[1][1]
-    assert cmd == "agora continue session agora:01JHOMESESSION --agent opencode --fork --sync-period 300"
+    assert cmd == "agora continue session agora:01JHOMESESSION --agent opencode --fork --sync-period 5"
 
     # Check harness was prompted
     prompt_call = next(c for c in fake_herdr.calls if c[0] == "agent_prompt")
@@ -463,4 +463,155 @@ def test_recover_agents_verifies_foreground_process_group(tmp_path, monkeypatch)
     done_record = reg.get(rec_done.agent_id)
     assert done_record.status == "exited"
     assert done_record.exit_reason == "no foreground process in pane on restart"
+
+
+def test_start_agent_default_sync_period_is_5_minutes(tmp_path, monkeypatch):
+    """H1/D10: default sync_period is 5 (minutes), passed through verbatim."""
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg)
+
+    host.start_agent(
+        identity="team-worker",
+        agora_session="agora:01JHOME",
+        agent_kind="opencode",
+        agent_name="default-sync",
+    )
+
+    pane_run_call = next(c for c in fake_herdr.calls if c[0] == "pane_run")
+    assert pane_run_call[1][1] == (
+        "agora continue session agora:01JHOME --agent opencode --fork --sync-period 5"
+    )
+
+
+def test_start_agent_env_none_does_not_inherit_process_env(tmp_path, monkeypatch):
+    """M2/D6: env=None gives an empty extra environment, never the sidecar
+    process environment (which may hold A2A_TOKEN)."""
+    monkeypatch.setenv("A2A_TOKEN", "super-secret-token")
+    monkeypatch.setenv("SOME_OTHER_SECRET", "shh")
+
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg)
+
+    host.start_agent(
+        identity="team-worker",
+        agora_session="agora:01JENV",
+        agent_kind="opencode",
+        agent_name="no-env-worker",
+    )
+
+    tab_create_call = next(c for c in fake_herdr.calls if c[0] == "tab_create")
+    passed_env = tab_create_call[1][2]
+    assert passed_env == {}
+    assert "A2A_TOKEN" not in passed_env
+
+
+def test_start_agent_waits_for_prompt_before_harness(tmp_path, monkeypatch):
+    """M3/D4: harness goes in only after pane wait-output sees the prompt."""
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg)
+
+    rec = host.start_agent(
+        identity="team-worker",
+        agora_session="agora:01JHOME",
+        agent_kind="opencode",
+        agent_name="waited-worker",
+        harness_content="## Harness\n",
+    )
+
+    assert rec.status == "running"
+    call_names = [c[0] for c in fake_herdr.calls]
+    assert call_names.index("pane_wait_output") < call_names.index("agent_prompt")
+    wait_call = next(c for c in fake_herdr.calls if c[0] == "pane_wait_output")
+    assert wait_call[1][0] == rec.herdr_pane_id
+
+
+def test_start_agent_prompt_wait_timeout_registers_and_raises(tmp_path, monkeypatch):
+    """M3: when the prompt never appears, fail loudly and leave evidence in
+    the registry instead of sending the harness into the void."""
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg)
+
+    def boom_wait(*args, **kwargs):
+        raise HerdrError(["pane", "wait-output"], 1, "timeout waiting for output")
+
+    monkeypatch.setattr(fake_herdr, "pane_wait_output", boom_wait)
+
+    with pytest.raises(RuntimeError, match="did not show a prompt"):
+        host.start_agent(
+            identity="team-worker",
+            agora_session="agora:01JHOME",
+            agent_kind="opencode",
+            agent_name="slow-worker",
+            harness_content="## Harness\n",
+        )
+
+    # Harness was never sent, but the attempt is recorded.
+    assert ("slow-worker", "## Harness\n") not in fake_herdr.prompts
+    rec = reg.get_by_name("slow-worker")
+    assert rec is not None
+    assert rec.status == "starting"
+    assert "prompt wait failed" in (rec.exit_reason or "")
+
+
+def test_recover_agents_herdr_down_leaves_registry_untouched(tmp_path, monkeypatch, caplog):
+    """M4: when herdr is unreachable, recover changes nothing in the registry."""
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg)
+
+    rec = host.start_agent("team-1", "agora:01J1", "opencode", "agent-one")
+
+    def boom_list():
+        raise HerdrError(["agent", "list"], 1, "herdr server unreachable")
+
+    monkeypatch.setattr(fake_herdr, "agent_list", boom_list)
+
+    with caplog.at_level("WARNING", logger="sidecar.host"):
+        recovered = host.recover_agents()
+
+    assert recovered == []
+    assert reg.get(rec.agent_id).status == "running"
+    assert "leaving registry untouched" in caplog.text
+
+
+def test_recover_agents_process_info_failure_keeps_agent_status(tmp_path, monkeypatch, caplog):
+    """M4: a single pane_process_info failure keeps that agent's status for
+    the next recover pass instead of marking it exited."""
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    fake_herdr = FakeHerdrClient()
+    state_dir = tmp_path / "state"
+    reg = Registry(state_dir)
+    host = AgentHost(fake_herdr, reg)
+
+    rec_flaky = host.start_agent("team-1", "agora:01J1", "opencode", "agent-flaky")
+    rec_ok = host.start_agent("team-2", "agora:01J2", "claude", "agent-ok")
+
+    real_info = fake_herdr.pane_process_info
+
+    def flaky_info(pane_id):
+        if pane_id == rec_flaky.herdr_pane_id:
+            raise HerdrError(["pane", "process-info"], 1, "transient failure")
+        return real_info(pane_id)
+
+    monkeypatch.setattr(fake_herdr, "pane_process_info", flaky_info)
+
+    with caplog.at_level("WARNING", logger="sidecar.host"):
+        recovered = host.recover_agents()
+
+    assert [r.agent_id for r in recovered] == [rec_ok.agent_id]
+    assert reg.get(rec_flaky.agent_id).status == "running"
+    assert "leaving status unchanged" in caplog.text
 

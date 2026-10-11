@@ -134,3 +134,12 @@ class Registry:
             rec.exit_reason = exit_reason
         self.save()
         return True
+
+    def touch(self, agent_id: str) -> bool:
+        """Refresh updated_at heartbeat for a running agent (D5, D-run)."""
+        rec = self._records.get(agent_id)
+        if not rec:
+            return False
+        rec.updated_at = now_iso()
+        self.save()
+        return True
