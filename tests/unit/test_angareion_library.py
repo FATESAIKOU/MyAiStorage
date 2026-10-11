@@ -59,8 +59,57 @@ def test_wait_timeout_zero_checks_once_and_returns_false_when_empty(tmp_path):
 
     assert app.wait(Target(channel="general"), 0, sleeper=forbidden, clock=forbidden) is False
     assert backend.check_calls == 1
-    # Non-blocking: one check, with the design's minimum one-second network budget.
-    assert backend.check_timeouts == [1.0]
+    # Non-blocking: one check with the backend's own default timeout (30s), not a tiny one.
+    assert backend.check_timeouts == [None]
+
+
+def test_wait_caps_each_network_budget_at_thirty_seconds(tmp_path):
+    """A long --timeout must not hand the backend an hour-long request budget (W1)."""
+    from angareion.client import CHECK_TIMEOUT_CAP_SECONDS, CHECK_TIMEOUT_FLOOR_SECONDS
+
+    backend = CountingBackend()
+    backend.create_channel("general", [])
+    app = _app(tmp_path, backend)
+
+    clock = {"now": 1000.0}
+    sleeps: list[float] = []
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    assert app.wait(
+        Target(channel="general"),
+        600,
+        sleeper=sleeper,
+        clock=lambda: clock["now"],
+    ) is False
+    assert CHECK_TIMEOUT_CAP_SECONDS == 30.0
+    assert CHECK_TIMEOUT_FLOOR_SECONDS == 5.0
+    assert backend.check_timeouts[0] == 30.0
+    assert all(budget is None or budget <= 30.0 for budget in backend.check_timeouts)
+
+
+def test_wait_gives_a_short_remaining_time_five_seconds(tmp_path):
+    backend = CountingBackend()
+    backend.create_channel("general", [])
+    app = _app(tmp_path, backend)
+
+    clock = {"now": 1000.0}
+    sleeps: list[float] = []
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    assert app.wait(
+        Target(channel="general"),
+        2.0,
+        sleeper=sleeper,
+        clock=lambda: clock["now"],
+    ) is False
+    assert backend.check_timeouts == [5.0, 5.0]  # remaining 2s and 0s both floor at 5
+    assert sleeps == [2.0]
 
 
 def test_wait_timeout_zero_returns_true_with_new_message(tmp_path):
@@ -134,8 +183,8 @@ def test_wait_times_out_without_sleeping_past_the_deadline(tmp_path):
     assert sleeps == [15.0, 15.0, 1.0]
     # Checks at 0s, 15s, 30s and once more at the deadline itself.
     assert backend.check_calls == 4
-    # Each check gets the remaining time as its network budget, never below 1s.
-    assert backend.check_timeouts == [31.0, 16.0, 1.0, 1.0]
+    # Each check's network budget is min(30s, max(5s, remaining)) (W1).
+    assert backend.check_timeouts == [30.0, 16.0, 5.0, 5.0]
     assert not app.cursors.path.exists()
 
 

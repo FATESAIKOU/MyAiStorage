@@ -10,6 +10,10 @@ from angareion.messages import Message
 from angareion.state import CursorStore
 
 POLL_INTERVAL_SECONDS = 15.0
+# wait bounds each check's network budget to [5s, 30s]: slow networks still get
+# a fair try, and a half-open connection never hangs a poll much past its time.
+CHECK_TIMEOUT_FLOOR_SECONDS = 5.0
+CHECK_TIMEOUT_CAP_SECONDS = 30.0
 
 
 class ReadBatch(NamedTuple):
@@ -58,20 +62,21 @@ class Angareion:
     ) -> bool:
         """Block until the target has a new message; True, or False on timeout.
 
-        `timeout=0` checks once and returns (non-blocking). A positive timeout
-        waits at most that many seconds, polling every `poll_interval` seconds;
-        `None` waits forever. Each check gets the remaining time (at least one
-        second) as its network budget, so a hung request cannot overshoot the
-        timeout by much.
+        `timeout=0` checks once and returns (non-blocking), with the backend's
+        own default request timeout. A positive timeout waits at most that
+        many seconds, polling every `poll_interval` seconds; `None` waits
+        forever. Each check's network budget is min(30s, max(5s, remaining)),
+        so a hung request fails after at most 30 seconds and a short remaining
+        time still gets a fair 5 seconds.
         """
         if timeout is not None and timeout <= 0:
-            return self.check(target, timeout=1.0)
+            return self.check(target)
 
         deadline = None if timeout is None else clock() + timeout
         while True:
             budget = None
             if deadline is not None:
-                budget = max(1.0, deadline - clock())
+                budget = min(CHECK_TIMEOUT_CAP_SECONDS, max(CHECK_TIMEOUT_FLOOR_SECONDS, deadline - clock()))
             if self.check(target, timeout=budget):
                 return True
             if deadline is None:
