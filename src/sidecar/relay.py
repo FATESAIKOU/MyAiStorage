@@ -130,6 +130,48 @@ class FakeRelaySender:
         return msg
 
 
+class AngareionRelaySender:
+    """RelaySender implementation that dispatches to an Angareion Backend."""
+
+    def __init__(self, backend: Any, default_channel: str = "general") -> None:
+        self.backend = backend
+        self.default_channel = default_channel
+
+    def send(
+        self,
+        from_identity: str,
+        to_identity: str,
+        content: str,
+        urgency: int = 5,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        from angareion.messages import Message
+
+        channel = (extra or {}).get("channel", self.default_channel)
+        if hasattr(self.backend, "find_channel") and hasattr(self.backend, "create_channel"):
+            if self.backend.find_channel(channel) is None:
+                self.backend.create_channel(channel)
+
+        from_addr = {"repo": "sidecar", "role": from_identity}
+        to_addr = {"repo": "pmo", "role": to_identity}
+        msg = Message(
+            from_=from_addr,
+            to=to_addr,
+            channel=channel,
+            urgency=urgency,
+            content=content,
+        )
+        self.backend.post_message(channel, msg)
+        return {
+            "id": msg.id,
+            "from": from_identity,
+            "to": to_identity,
+            "channel": channel,
+            "content": content,
+            "urgency": urgency,
+        }
+
+
 def authenticate_peer(
     peer_pid: int,
     registry: Registry,
