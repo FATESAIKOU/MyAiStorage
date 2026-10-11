@@ -142,3 +142,72 @@
 3. 補三個漏抓的測試（check 多頁、token 順序、Authorization header）與 H1、L1、M2 的測試。
 4. L1、L2、L5 順手修；L3、L4、L6、L7 可以排後。
 5. 補 `docs/angareion.md` 的 opencode 位置，並更新 `SKILL.md` 的兩行。
+
+---
+
+## 複審（第二輪）
+
+- 對象：分支 `angareion-v0-agy1`，`5c667d2` 之後的 `0a4d739`..`e3a3a12`（含 merge `84b6ac2`）；`git archive` 解到 `/tmp/a30b` 審查，突變與探測都在副本或 `/tmp`。
+- 基準：副本上 `-k "angareion or skill"` 147 passed（和 impl1 回報一致）。
+- 審查者：架構師（Claude Sonnet 5.5）。
+
+### 結論
+
+**修完一個 Medium（W1，`wait` 的網路預算沒有 30 秒上限）即可合併；其餘是 Low，可以之後做。** 上一輪的 H1、M1、M2、L1～L7 都修好了、測試也抓得到；新游標和 D4 一致，我沒有找到新的漏讀或重複。
+
+### 上一輪問題的狀態
+
+| 項目 | 狀態 | 依據 |
+|---|---|---|
+| H1 游標用寄件者的 `at`／ULID | **已修** | 探測（FakeBackend 與假 GitHub transport）：同一秒後到、ULID 較小 → 讀到；寄件者時鐘慢 → 讀到；`at` 時區不同 → 讀到；複寫延遲 30 秒（較小的 id 後出現）→ 讀到、之後不重複；延遲 10 分鐘 → 讀不到（設計接受的邊界）；多頁讀完後重讀為空、新增一則只收到那一則 |
+| M1 check 多頁與 ETag | **已修** | 回應有下一頁時不記 ETag；`scan_since` 只在記憶體；突變 R01（不看下一頁）與 R05（多頁仍用 ETag）都紅 |
+| M2 HTTP 沒有逾時 | **已修（但見 W1）** | transport 預設 30 秒，逾時是 `BackendError`（exit 2）；突變 R14 紅 |
+| L1 非 JSON 回應 | **已修** | exit 2；突變 R13 紅 |
+| L2 先存游標再印出 | **已修** | 實測：stdout 斷掉 → exit 1、游標檔沒寫、再讀一次仍收到那則 |
+| L3 轉址與下一頁網址 | **已修** | 不跟隨 3xx、下一頁網址必須在 base_url 底下；突變 R08、R12 紅 |
+| L4 同名 channel | **已修（附 L-2）** | 升冪列出、第一個符合就停；create 之後再查一次 |
+| L5 `send` 沒給 `--body` | **已修** | exit 1，不讀管線 |
+| L6 游標暫存檔名 | **已修** | `mkstemp` 在同目錄＋`os.replace` |
+| L7 YAML 時間戳 `at` | **已修** | 有測試（impl1 的 dee2761） |
+| 上次漏抓的 3 個突變 | **現在都紅** | R01 check 不看下一頁、R02 token 順序（設定先於 env）、R03 不送 `Authorization`，各被 1～2 個測試抓到 |
+
+### 新游標的語意檢查（D4）
+
+- `comment_is_new`：id 大於 `position`，或（`created_at` 不早於 `at − 60 秒` 而且 id 不在 `seen`）。
+- 「`seen` 只用這次回應重算」**正確**：GitHub 的 `since` 依 `updated_at` 且 `updated_at ≥ created_at`，所以 `since = at − 60 秒` 的回應一定包含所有 `created_at` 落在視窗內的留言；視窗內讀過的 id 因此不會漏進 `seen`，視窗外的丟掉也不會再被當成新的（id ≤ `position` 且 `created_at` 早於邊界）。被編輯的舊留言（`updated_at` 新、`created_at` 舊）不會再出現——有測試，突變 R04（忽略 `seen`）紅 17 個。
+- `position` 不倒退（R06 紅）；「寄給我的」只用寄給我的留言算 `position`，不理別人的訊息（正確：全域留言 id 單調，不影響）。
+- `--since`（只有時間）含邊界（R10 紅），且不動本機游標。
+- 設計接受的邊界（不是缺陷）：留言延遲超過 60 秒才出現會漏（探測 `lag 10 min`）。
+
+### 問題
+
+**Medium**
+
+- **W1　`wait` 傳給每次請求的網路預算沒有 30 秒上限，等於把上一輪的 M2 在有限逾時下又打開了。**
+  - 位置：`client.py:73-75`（`budget = max(1.0, deadline - clock())`，直接傳進 `backend.check(timeout=…)`）、`github.py:99`（`effective_timeout = self.timeout if timeout is None else timeout`）。design D2 寫的是「剩餘時間（至少 1 秒）與 30 秒中**較小的**」。
+  - 實測（假 transport 記下每次的 `timeout` 參數）：`wait --timeout 600` 時，傳下去的 socket 逾時依序是 600、585、570…秒（每次 poll 都是剩餘時間），**不是 ≤ 30**。半開連線會卡住「剩餘時間」那麼久才變成 exit 2（`--timeout 3600` 就是一小時），而不是 30 秒後失敗再重試。不給 `--timeout` 才走預設的 30 秒。
+  - 同一處的另一端：`wait --timeout 0`（不阻塞的「查一次」）與最後幾秒的那次 poll 預算只有 **1 秒**（`wait(0)` 實測 `[1.0]`）。GitHub 經 proxy 或慢一點的網路下 1 秒很容易逾時，變成 exit 2 而不是 exit 0／3，不阻塞的查詢因此不穩。
+  - 建議：`budget = min(30.0, max(5.0, remaining))`；`--timeout 0` 用預設的 30 秒。測試：斷言 `wait(600)` 傳下去的逾時 ≤ 30；`wait(0)` 傳下去的不是 1 秒。design 的「至少 1 秒」也一併改成 5 秒（或說明理由）。
+
+**Low**
+
+- **L-1　`read --since` 給了不是時間的字串，exit 2 且訊息是「Unexpected error: Invalid isoformat string」。** 實測 `--since yesterday`。這是輸入錯誤，應該 exit 1，並說明要 RFC 3339（例如 `2026-10-12T03:00:00Z`）。在 CLI 解析 `--since` 的地方驗證即可。
+- **L-2　突變 R09（同名 issue 的快取改成後者覆蓋前者）沒有紅。** 目標名稱本身因為「第一個符合就停」所以仍是最舊的；但同一次列表裡**別的**名稱若也有重複，快取會留下較新的，之後在同一個行程用到那個名稱時就不是最舊的。實際影響小（一個 CLI 行程通常只用一個 channel），補一個「列表裡另一個名稱有重複，之後解析那個名稱仍取最舊」的測試即可。
+- **L-3　舊格式游標被丟掉後，下一次 `read` 會把整個歷史當成新訊息再讀一次。** 設計上說得通（舊游標存的是寄件者的 `at`／ULID，無法換算成後端位置），stderr 也會說一次；agent 看到一批舊訊息會困惑。v0 還沒有發布，影響只在 impl1 與 PM 自己的測試環境；`docs/angareion.md` 加一行「升級後第一次 `read` 會重讀」即可。
+- **L-4　`docs/angareion.md` 沒有提到 HTTP 逾時（30 秒）與「不跟隨轉址」。** 屬於行為，寫一行比較好找。
+
+### impl1 自己判斷的 6 點
+
+| # | 做法 | 判斷 | 理由 |
+|---|---|---|---|
+| 1 | 舊格式游標當成沒有游標、從頭讀，stderr 說一次，下次 save 改寫 | **可以接受（附 L-3）** | 舊游標無法換算；一次性。 |
+| 2 | `seen` 只用這次回應裡、`at − 60s` 內的 id 重算 | **可以接受** | 回應涵蓋視窗內的全部（`updated_at ≥ created_at`），見上面的語意檢查；突變 R04、R07（視窗 0）都紅。 |
+| 3 | `position` 取回應裡符合目標的訊息的最大留言 id、不倒退；`read` 依留言 id 排序 | **可以接受** | 正是 D4 寫的；R06 紅。 |
+| 4 | issue 列表升冪早停、`wait` 把剩餘時間當每次 check 的網路預算 | **前半可以接受；後半要修（W1）** | 預算的**上限**（30 秒）與**下限**（1 秒太小）都不對。 |
+| 5 | 2／3／4 合成一個 commit | **可以接受** | 只是歷史的整齊度，不影響審查。 |
+| 6 | L2 的 BrokenPipe 回 exit 1；L3 只擋 301/302/303/307/308（304 放行）；L4 POST 後多一次列表請求 | **可以接受** | 實測 BrokenPipe 後游標沒動、再讀仍收到；304 是 `check` 的正常回應；多一次請求就是 D2 要的「create 之後再查一次」。 |
+
+### 文件與 SKILL
+
+- `docs/angareion.md` 與實作一致：游標三欄位、新舊的判斷、`--since` 含邊界與 `received_at`、`--body` 規則、opencode 的 skill 位置、「給 MyLinuxPool 的需求」。只缺 L-3、L-4 的兩行。
+- `SKILL.md` 與實作一致：`--body` 一定要給、`--since` 說明、`wait` exit 2 要稍等再試、「新舊看後端的到達順序」。夠 agent 用。
