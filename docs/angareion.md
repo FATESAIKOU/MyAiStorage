@@ -80,7 +80,7 @@ attachments: []
   - `seen`：`at` 前 60 秒以內、已經讀過的後端識別（不透明；GitHub 是留言 id）。超過視窗的就丟掉。
 
 - 一則留言「新」的條件：它的留言 id 大於 `position`，**或者**它的 `created_at` 不早於 `at − 60 秒` 而且 id 不在 `seen` 裡。後者容納 GitHub 偶爾的複寫延遲（較小的 id 比較大的 id 晚出現）；已讀過的留言就算被編輯（`updated_at` 變新）也不會再被當成新訊息。查詢用的 `since` 是 `at − 60 秒`。
-- 舊格式的游標（v0 早期存的 `{at, id}`，寄件者的 at 與 ULID）沒有後端位置，無法換算：讀到時**當成沒有游標**、從頭讀起，而且每次執行會在 stderr 說一次，檔案會改寫成新格式。
+- 舊格式的游標（v0 早期存的 `{at, id}`，寄件者的 at 與 ULID）沒有後端位置，無法換算：讀到時**當成沒有游標**、從頭讀起，而且每次執行會在 stderr 說一次，檔案會改寫成新格式。升級後第一次 `read` 會把整個歷史當成新訊息重讀一次。
 - GitHub 的 ETag 與掃描視窗（`scan_since`）只存在單次 `wait` 行程的記憶體裡，**不寫進游標檔**：`wait` 不會動到游標，之後的 `read` 也不會被 304 跳過。回應有下一頁時不用 ETag（它只代表第 1 頁）。
 - 刪掉游標檔就等於從頭讀；沒有其他本機狀態。
 
@@ -114,7 +114,7 @@ token 不會出現在任何輸出、log 或錯誤訊息裡（有出現會被遮�
 6. 用另一個身分（另一台機器或另一個設定目錄）`angareion send --channel general --to 'repo=owner/worker,role=worker' --body 'hello'` → 印訊息 id。
 7. `angareion wait --channel general --timeout 0` → 有新訊息 exit 0；`angareion read` → 看到那則訊息；再 `angareion read` 一次 → 什麼都沒有。游標檔刪掉再 `read` → 從頭看到所有訊息。
 
-`wait` 是每 15 秒問一次；GitHub 沒有推播，304 不耗額度（只在回應單頁時用 ETag；行程內把已掃過的視窗往前推，不重掃）。被 GitHub 次級限制打到時就照 HTTP 回應失敗（exit 2），不自動重試。
+`wait` 是每 15 秒問一次；GitHub 沒有推播，304 不耗額度（只在回應單頁時用 ETag；行程內把已掃過的視窗往前推，不重掃）。每個 HTTP 請求的逾時是 30 秒（`wait` 每次 check 的網路預算取 min(30 秒, max(5 秒, 剩餘時間))）；**不跟隨轉址**。被 GitHub 次級限制打到時就照 HTTP 回應失敗（exit 2），不自動重試。
 
 ## 說明檔的位置（spike 結論）
 
