@@ -60,6 +60,25 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_say(args: argparse.Namespace) -> int:
+    from sidecar.relay import send_relay_message
+    try:
+        res = send_relay_message(
+            content=args.message,
+            to=args.to,
+            urgency=args.urgency,
+            socket_path=args.sock,
+        )
+        if args.json:
+            print(json.dumps({"ok": True, "result": res}, indent=2, ensure_ascii=False))
+        else:
+            print(f"Sent message to {args.to} (from {res.get('from', 'agent')}, id={res.get('id', '')})")
+        return 0
+    except Exception as e:
+        sys.stderr.write(f"Error sending message: {e}\n")
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sidecar", description="Agent Sidecar supervisor CLI")
     parser.add_argument("--config", "-c", help="Path to config.json (overrides SIDECAR_CONFIG)")
@@ -68,6 +87,14 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser("status", help="Show sidecar status and running agents")
     status_parser.add_argument("--json", action="store_true", help="Output status as JSON")
     status_parser.set_defaults(func=cmd_status)
+
+    say_parser = subparsers.add_parser("say", help="Report a message to Angareion via sidecar relay")
+    say_parser.add_argument("message", help="Message content to report")
+    say_parser.add_argument("--to", "-t", default="pmo", help="Recipient identity (default: pmo)")
+    say_parser.add_argument("--urgency", "-u", type=int, default=5, help="Urgency level (0-10, default: 5)")
+    say_parser.add_argument("--sock", "-s", help="Path to relay socket (overrides SIDECAR_SOCK)")
+    say_parser.add_argument("--json", action="store_true", help="Output result as JSON")
+    say_parser.set_defaults(func=cmd_say)
 
     return parser
 
