@@ -60,15 +60,25 @@ class HttpTransport(Protocol):
         ...
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse to follow redirects: Authorization must not travel to another host (L3)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class DefaultHttpTransport:
     """Standard library urllib HTTP transport with a fixed socket timeout (M2).
 
     A half-open connection (NAT, after sleep) must not hang `wait` past its
     `--timeout`; the request times out and the caller sees a BackendError.
+    Redirects are not followed (L3): the 3xx response is surfaced and the
+    backend turns it into an error.
     """
 
     def __init__(self, timeout: float = HTTP_TIMEOUT_SECONDS):
         self.timeout = timeout
+        self._opener = urllib.request.build_opener(_NoRedirectHandler())
 
     def request(
         self,
@@ -79,7 +89,7 @@ class DefaultHttpTransport:
     ) -> HttpResponse:
         req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with self._opener.open(req, timeout=self.timeout) as resp:
                 headers_dict = {str(k).lower(): str(v) for k, v in resp.headers.items()}
                 return HttpResponse(resp.status, headers_dict, resp.read())
         except urllib.error.HTTPError as e:
@@ -216,7 +226,20 @@ class GitHubIssuesBackend:
             raise BackendError(
                 "GitHub API refused the request (HTTP 403; secondary rate limit?); not retrying"
             )
+        if resp.status in (301, 302, 303, 307, 308):
+            raise BackendError(
+                f"GitHub API redirected the request (HTTP {resp.status}); not following"
+            )
         return resp
+
+    def _next_page_url(self, resp: HttpResponse) -> str | None:
+        """The Link header's next-page URL, which must stay on our API host (L3)."""
+        url = _extract_link(resp.headers.get("link"))
+        if url is not None and not url.startswith(self.base_url + "/"):
+            raise BackendError(
+                f"Refusing a pagination link outside {self.base_url} (different host)"
+            )
+        return url
 
     def find_channel(self, name: str) -> int | None:
         """The issue number for a channel name, or None if it does not exist."""
@@ -252,7 +275,7 @@ class GitHubIssuesBackend:
                     self._issues_cache[title] = issue
                     self._channel_numbers[title] = number
 
-            url = _extract_link(resp.headers.get("link"))
+            url = self._next_page_url(resp)
 
         if name in self._issues_cache:
             return self._issues_cache[name]
@@ -356,7 +379,7 @@ class GitHubIssuesBackend:
         if self._page_has_new(self._json(resp, "checking for new messages"), target, cursor):
             return True
 
-        while (next_url := _extract_link(resp.headers.get("link"))):
+        while (next_url := self._next_page_url(resp)):
             resp = self._request("GET", next_url, headers=self._headers())
             if resp.status >= 400:
                 raise BackendError(f"Failed to check for new messages (page fetch failed): HTTP {resp.status}")
@@ -404,7 +427,7 @@ class GitHubIssuesBackend:
 
                 collected.append(parsed)
 
-            url = _extract_link(resp.headers.get("link"))
+            url = self._next_page_url(resp)
             if url:
                 resp = self._request("GET", url, headers=self._headers())
 

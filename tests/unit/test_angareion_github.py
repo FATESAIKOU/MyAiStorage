@@ -363,8 +363,6 @@ def test_non_json_response_becomes_backend_error():
 
 
 def test_default_transport_passes_a_fixed_socket_timeout(monkeypatch):
-    import urllib.request
-
     from angareion.github import HTTP_TIMEOUT_SECONDS, DefaultHttpTransport
 
     calls = []
@@ -382,32 +380,75 @@ def test_default_transport_passes_a_fixed_socket_timeout(monkeypatch):
         def __exit__(self, *args):
             return False
 
-    def fake_urlopen(req, timeout=None):
+    transport = DefaultHttpTransport()
+
+    def fake_open(req, timeout=None):
         calls.append(timeout)
         return OkResponse()
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport._opener, "open", fake_open)
 
-    assert DefaultHttpTransport().request("GET", "https://api.github.com/x").status == 200
+    assert transport.request("GET", "https://api.github.com/x").status == 200
     assert HTTP_TIMEOUT_SECONDS == 30.0
     assert calls == [30.0]
 
 
 def test_default_transport_timeout_becomes_backend_error(monkeypatch):
-    import urllib.request
-
     from angareion.github import DefaultHttpTransport
+
+    transport = DefaultHttpTransport()
 
     def timed_out(req, timeout=None):
         raise TimeoutError("timed out")
 
-    monkeypatch.setattr(urllib.request, "urlopen", timed_out)
+    monkeypatch.setattr(transport._opener, "open", timed_out)
     with pytest.raises(BackendError, match="timed out"):
-        DefaultHttpTransport().request("GET", "https://api.github.com/x")
+        transport.request("GET", "https://api.github.com/x")
 
     def url_error_wrapping_timeout(req, timeout=None):
         raise urllib.error.URLError(TimeoutError("timed out"))
 
-    monkeypatch.setattr(urllib.request, "urlopen", url_error_wrapping_timeout)
+    monkeypatch.setattr(transport._opener, "open", url_error_wrapping_timeout)
     with pytest.raises(BackendError, match="timed out"):
-        DefaultHttpTransport().request("GET", "https://api.github.com/x")
+        transport.request("GET", "https://api.github.com/x")
+
+
+def test_default_transport_refuses_to_follow_redirects(monkeypatch):
+    import urllib.error
+
+    from angareion.github import DefaultHttpTransport, _NoRedirectHandler
+
+    handler = _NoRedirectHandler()
+    assert handler.redirect_request(None, None, 302, "Found", {}, "https://evil.example/") is None
+
+    def redirecting_open(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 302, "Found", {"Location": "https://evil.example/"}, None)
+
+    transport = DefaultHttpTransport()
+    monkeypatch.setattr(transport._opener, "open", redirecting_open)
+
+    # The redirect is surfaced, not followed …
+    assert transport.request("GET", "https://api.github.com/repos/owner/repo/issues").status == 302
+
+    # … and the backend turns it into an error instead of parsing the body.
+    backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
+    with pytest.raises(BackendError, match="redirect"):
+        backend.read(Target(recipient={"repo": "a", "role": "b"}), Cursor())
+
+
+def test_next_page_link_outside_the_base_url_is_refused():
+    from angareion.github import HttpResponse
+
+    msg = _make_msg(msg_id="01AAAA")
+    evil_page2 = "https://evil.example/repos/owner/repo/issues/comments?per_page=100&page=2"
+    transport = FakeTransport()
+    _issues_route(transport, [{"number": 10, "title": "general", "body": ""}])
+    transport.set_route(
+        "GET",
+        CHANNEL_COMMENTS_URL,
+        HttpResponse(200, {"link": f'<{evil_page2}>; rel="next"'}, json.dumps([_comment(msg)]).encode("utf-8")),
+    )
+
+    backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
+    with pytest.raises(BackendError, match="pagination link"):
+        backend.read(Target(channel="general"), Cursor())
