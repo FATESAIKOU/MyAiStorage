@@ -257,6 +257,8 @@ def test_check_to_me_uses_the_repo_level_listing_and_filters_recipient():
     target = Target(recipient=me)
 
     assert backend.check(target, Cursor()) is True
+    # `other` is newer than `mine`, but it is not addressed to me: not new for me.
+    assert backend.check(target, Cursor(at=mine.at, id=mine.id)) is False
     assert backend.check(target, Cursor(at=other.at, id=other.id)) is False
 
     urls = [r["url"] for r in transport.recorded_requests]

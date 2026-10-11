@@ -381,3 +381,165 @@ def test_backend_error_masks_the_token(cli_env, capsys):
     assert TOKEN not in captured.err
     assert "***" in captured.err
     assert captured.out == ""
+
+
+def test_channel_create_without_a_name_is_usage_error(cli_env, capsys):
+    assert main(["channel", "create"], backend=cli_env["backend"]) == 1
+    assert capsys.readouterr().err != ""
+
+
+def test_read_same_second_messages_reach_the_reader(cli_env, capsys):
+    """Two messages in the same second: reading the first must not swallow the second."""
+    same_second = "2026-10-10T12:00:00+00:00"
+    backend = cli_env["backend"]
+    _seed_message(backend, msg_id="01AAAA00000000000000000000", at=same_second)
+
+    assert main(["read", "--channel", "general", "--json"], backend=backend) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01AAAA00000000000000000000"]
+
+    _seed_message(backend, msg_id="01BBBB00000000000000000000", at=same_second)
+    assert main(["read", "--channel", "general", "--json"], backend=backend) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01BBBB00000000000000000000"]
+
+
+def test_read_does_not_return_an_edited_message_again(cli_env, capsys):
+    """An edited already-read comment (same id and at) must not come back as new."""
+    message = _seed_message(cli_env["backend"], msg_id="01AAAA00000000000000000000")
+
+    assert main(["read", "--channel", "general", "--json"], backend=cli_env["backend"]) == 0
+    assert len(json.loads(capsys.readouterr().out)) == 1
+
+    message.content = "edited after being read"  # the GitHub updated_at moved; id and at did not
+    assert main(["read", "--channel", "general", "--json"], backend=cli_env["backend"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_wait_without_timeout_blocks_until_a_message_arrives(cli_env, capsys):
+    backend = cli_env["backend"]
+    clock = {"now": 1000.0}
+    sleeps: list[float] = []
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+        if len(sleeps) == 2:
+            _seed_message(backend)
+
+    ret = main(
+        ["wait", "--channel", "general"],  # no --timeout: wait forever
+        backend=backend,
+        sleeper=sleeper,
+        clock=lambda: clock["now"],
+    )
+    assert ret == 0
+    assert sleeps == [15.0, 15.0]
+    assert not (cli_env["state_dir"] / "cursor-owner-org_worker__worker.json").exists()
+
+
+class MiniGitHub:
+    """A tiny stateful GitHub Issues + comments API for one repo; no network."""
+
+    def __init__(self):
+        self.issues: dict[int, dict] = {}
+        self.comments: list[dict] = []
+        self._next_issue = 1
+        self._next_comment = 1
+
+    def request(self, method, url, headers=None, body=None):
+        import urllib.parse
+
+        parsed = urllib.parse.urlparse(url)
+        path = parsed.path
+        params = urllib.parse.parse_qs(parsed.query)
+
+        if method == "GET" and path.endswith("/issues"):
+            return HttpResponse(200, {}, json.dumps(list(self.issues.values())).encode("utf-8"))
+
+        if method == "POST" and path.endswith("/issues"):
+            payload = json.loads(body.decode("utf-8"))
+            number = self._next_issue
+            self._next_issue += 1
+            issue = {"number": number, "title": payload["title"], "body": payload.get("body", "")}
+            self.issues[number] = issue
+            return HttpResponse(201, {}, json.dumps(issue).encode("utf-8"))
+
+        if method == "GET" and path.endswith("/issues/comments"):
+            comments = list(self.comments)
+        elif method == "GET" and "/issues/" in path and path.endswith("/comments"):
+            number = int(path.split("/issues/")[1].split("/")[0])
+            comments = [c for c in self.comments if c["_issue_number"] == number]
+        elif method == "POST" and path.endswith("/comments"):
+            number = int(path.split("/issues/")[1].split("/")[0])
+            payload = json.loads(body.decode("utf-8"))
+            comment = {
+                "id": self._next_comment,
+                "body": payload["body"],
+                "html_url": f"https://github.com/owner-org/channel-repo/issues/{number}#issuecomment-{self._next_comment}",
+                "issue_url": f"https://api.github.com/repos/owner-org/channel-repo/issues/{number}",
+                "updated_at": "2026-10-10T12:00:00Z",
+                "_issue_number": number,
+            }
+            self._next_comment += 1
+            self.comments.append(comment)
+            return HttpResponse(201, {}, json.dumps(comment).encode("utf-8"))
+        else:
+            return HttpResponse(404, {}, b'{"message": "Not Found"}')
+
+        since = params.get("since")
+        if since:
+            comments = [c for c in comments if c["updated_at"] >= since[0]]
+        return HttpResponse(200, {}, json.dumps(comments).encode("utf-8"))
+
+
+def test_four_commands_over_the_github_backend_without_network(cli_env, capsys):
+    """The four commands behave the same over GitHubIssuesBackend (fake transport)."""
+    transport = MiniGitHub()
+
+    assert main(
+        ["channel", "create", "phase-1", "--member", "repo=owner-org/worker,role=worker"],
+        transport=transport,
+    ) == 0
+    assert capsys.readouterr().out == "phase-1 #1\n"
+
+    assert main(
+        ["send", "--channel", "phase-1", "--to", "repo=owner-org/worker,role=worker", "--body", "hello"],
+        transport=transport,
+    ) == 0
+    message_id = capsys.readouterr().out.strip()
+    assert len(message_id) == 26
+
+    assert main(["wait", "--channel", "phase-1", "--timeout", "0"], transport=transport) == 0
+    capsys.readouterr()
+
+    assert main(["read", "--channel", "phase-1", "--json"], transport=transport) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert [m["id"] for m in data] == [message_id]
+
+    # Nothing new: read is empty and wait times out (a fresh process has no ETag yet).
+    assert main(["read", "--channel", "phase-1", "--json"], transport=transport) == 0
+    assert json.loads(capsys.readouterr().out) == []
+    assert main(["wait", "--channel", "phase-1", "--timeout", "0"], transport=transport) == 3
+    capsys.readouterr()
+
+    # "To me" has its own fresh cursor, so the same message is visible there.
+    assert main(["read", "--json"], transport=transport) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == [message_id]
+
+
+def test_backend_http_error_exits_2_without_retry_and_without_the_token(cli_env, capsys):
+    class ErrorTransport:
+        def __init__(self):
+            self.calls = 0
+
+        def request(self, method, url, headers=None, body=None):
+            self.calls += 1
+            return HttpResponse(403, {"retry-after": "60"}, b'{"message": "secondary rate limit"}')
+
+    transport = ErrorTransport()
+    ret = main(["wait", "--channel", "general", "--timeout", "0"], transport=transport)
+    assert ret == 2
+    captured = capsys.readouterr()
+    assert "403" in captured.err
+    assert TOKEN not in captured.err
+    assert TOKEN not in captured.out
+    assert transport.calls == 1  # no automatic retry

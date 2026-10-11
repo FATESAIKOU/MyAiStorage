@@ -52,7 +52,10 @@ def test_wait_timeout_zero_checks_once_and_returns_false_when_empty(tmp_path):
     backend.create_channel("general", [])
     app = _app(tmp_path, backend)
 
-    assert app.wait(Target(channel="general"), 0) is False
+    def forbidden(*_args):
+        raise AssertionError("timeout 0 must neither sleep nor consult the clock")
+
+    assert app.wait(Target(channel="general"), 0, sleeper=forbidden, clock=forbidden) is False
     assert backend.check_calls == 1
 
 
