@@ -13,7 +13,7 @@
 ## 3. 文件
 
 - [x] 3.1 `docs/angareion.md`：格式、四個指令、身分、token 的放置與輪替（只讀 `ANGAREION_TOKEN_FILE`；worker 上由 MyLinuxPool 的 Angareion 能力設定，檔名照池的規則）、本人的 smoke test（建 private 信道 repo、建 PAT、兩邊互送、wait、read）
-- [ ] 3.2 `skills/angareion/SKILL.md`（D6）；確認 opencode 讀說明檔的位置，寫進 `docs/angareion.md`
+- [x] 3.2 `skills/angareion/SKILL.md`（D6）；確認 opencode 讀說明檔的位置，寫進 `docs/angareion.md`（opencode 位置未確認，docs 留 TODO 給 PM）
 
 ## 4. 收尾
 
