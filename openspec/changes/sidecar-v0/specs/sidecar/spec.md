@@ -326,3 +326,50 @@ sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`PO
 #### Scenario: 沒有 driver
 - **WHEN** 沒有註冊任何 agent 種類的 `sidecar run`，`POST /agents`
 - **THEN** 回 400 `unsupported agent kind`；`GET /agents` 回 200 與空清單
+
+### Requirement: driver 的 env_for 規則
+`env_for` MUST 依 design D6 的「`env_for` 規則」產生子行程的環境，並以純單元測試驗證輸出（不啟動真的 agent）。沒有可用的模型來源時 MUST 拒絕（open 回 400 `no_model`），MUST NOT 讓 agent 自己挑預設模型。打真 binary 的測試 MUST NOT 在預設的 unit 裡跑（預設 skip，`tests/integration/` 或 `SIDECAR_REAL_AGENT_TESTS=1`）。
+
+#### Scenario: opencode 的 Zen provider id
+- **WHEN** `OpenCodeDriver.env_for` 收到 `provider="opencode-zen"`、`models.default="big-pickle"` 的 subscription
+- **THEN** `OPENCODE_CONFIG_CONTENT` 的 provider 鍵是 `opencode`（不是 `opencode-zen`），`model` 與 `small_model` 都是 `opencode/big-pickle`
+
+#### Scenario: opencode 的 provider 對應不到
+- **WHEN** `provider` 是對應表裡沒有的名稱
+- **THEN** `env_for` 丟錯，open 回 4xx，什麼都沒開（不用原名猜）
+
+#### Scenario: opencode 沒有模型來源
+- **WHEN** subscription 的 `models.default` 是 null，`models.allow` 只有 `["*:free"]`（只有萬用字元）
+- **THEN** open 回 400 `no_model`，什麼都沒開
+
+#### Scenario: opencode 用 allow 的第一個明確模型
+- **WHEN** `models.default` 是 null，`models.allow` 是 `["*:free", "acme/spike-model"]`
+- **THEN** `model` 與 `small_model` 都是 `openrouter/acme/spike-model`，`provider.openrouter.models` 宣告了 `acme/spike-model`
+
+#### Scenario: opencode 的環境變數
+- **WHEN** 任何 `OpenCodeDriver.env_for` 的輸出
+- **THEN** 含 `OPENCODE_DISABLE_AUTOUPDATE=1` 與 `OPENCODE_DISABLE_MODELS_FETCH=1`；apiKey 與 baseURL 只在 `OPENCODE_CONFIG_CONTENT` 裡，不在命令列
+
+#### Scenario: opencode 首次回應的模型不符
+- **WHEN** 第一則回應的 `info.providerID`／`modelID` 不是選出的那一組
+- **THEN** 視為錯誤：`exit.reason` 與 log 說明期望與實際（不含 key），不當作正常運作
+
+#### Scenario: Claude 的 Anthropic 訂閱與 api-key
+- **WHEN** `ClaudeCodeDriver.env_for` 收到 `kind=claude-subscription`；另一次收到 `provider="anthropic"`、`kind=api-key`
+- **THEN** 前者輸出 `CLAUDE_CODE_OAUTH_TOKEN`，後者輸出 `ANTHROPIC_API_KEY`；兩者都含 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` 與 `DISABLE_AUTOUPDATER=1`
+
+#### Scenario: Claude 的非 Anthropic api-key
+- **WHEN** `provider="openrouter"`、`kind=api-key`、`endpoint="https://…"`、`models.default="acme/model-x"`
+- **THEN** 輸出 `ANTHROPIC_AUTH_TOKEN=<key>`、`ANTHROPIC_API_KEY=""`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL` 與 `ANTHROPIC_SMALL_FAST_MODEL`（都是 `acme/model-x`）
+
+#### Scenario: Claude 的非 Anthropic provider 沒有模型來源
+- **WHEN** `provider="openrouter"`、`kind=api-key`，`models.default` 是 null 而 `allow` 只有萬用字元
+- **THEN** open 回 400 `no_model`
+
+#### Scenario: 父行程的憑證不進子行程
+- **WHEN** 父行程的環境有 `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、`OPENCODE_CONFIG_CONTENT`，開一個 agent
+- **THEN** 子行程的環境裡沒有這些（只有 `env_for` 給的），子行程的環境變數不出現在命令列、log 或 `status`
+
+#### Scenario: 驅動錯誤帶 stderr 末幾行
+- **WHEN** agent 行程啟動失敗或模型請求以沒有原因的 HTTP 500 失敗
+- **THEN** 錯誤訊息帶子行程 stderr 的末幾行，其中 key 與 `env_for` 給的值被遮掉

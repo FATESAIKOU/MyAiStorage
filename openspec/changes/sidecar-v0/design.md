@@ -145,7 +145,36 @@ LLMGateway 的共通 JSON 欄位以 LLMGateway 的 `gateway-v0` 規格（`specs/
 - **額度（實測，Zen 免費額度用完時）**：`session.status` 變成 `{"type": "retry", "message": "Free usage exceeded…", "action": {"reason": "free_tier_limit", …}, "next": <epoch 毫秒>}`。
   - **額度用完＝`retry` 且 `action.reason` 在白名單內**。白名單放設定（`quota_reasons`，預設只有觀察到的 `free_tier_limit`；之後只改設定就能加）。`retry` 也用在暫時性錯誤（連線、過載），那些 `next` 只有幾秒；不在白名單的 `retry` 只 log，狀態維持 `running`，不換把。
   - 重置時刻取 `next`（毫秒，轉成 RFC 3339 UTC）。opencode 只給一個時刻，不分窗。**窗口對應是單一規則**：`next` 距現在大於 5 小時加 5 分鐘 → `1w`；否則 → `5h`。理由：5h 窗口的重置不可能超過 5 小時以外，所以超過就只能是 1w；反過來不超過不保證是 5h（1w 的最後幾小時也會落在這裡），但標錯幾乎無害——冷卻以 `until` 為準，窗口名稱只影響「沒給 `resets_at` 時的預設長度」與「同窗口取較晚的」。沒有 `next` 或不是時間：窗口 `5h`、不帶 `resets_at`。
-- 還要在 opencode 1.18.35 上驗證的：key 與 baseURL 的給法（例如 `OPENCODE_CONFIG_CONTENT`，LLMGateway gateway-v0 的 design 把它列為 Open Question），列在 tasks 3.2。
+- key 與 baseURL 的給法已在真 binary 上驗證（spike，2026-10-12，`docs/review/sidecar-v0-drivers-spike.md`），規則見下面「`env_for` 規則」。
+
+**`env_for` 規則（在真的 opencode 1.18.35 與 Claude Code 2.1.296 上驗證過）**
+
+兩個 driver 共通：
+- 輸出只有 `env`（沒有 `unset`）；子行程的環境由 driver 以 `subproc.child_env`（允許清單＋`env_for` 的輸出）組出，父行程的 `ANTHROPIC_*`、`OPENAI_*`、`OPENCODE_*` 等不進去（實測：假 provider 看到的 key 等於 subscription 的 key、不等於父行程的值）。因此「關自動更新與關模型清單」的變數 MUST 由 `env_for` 自己放進輸出。
+- 沒有可用的模型來源時 `env_for` MUST 丟錯，open 回 4xx（`no_model`），MUST NOT 讓 agent 自己挑預設模型。
+- 真的 HOME 下，使用者自己的設定會被合併（opencode 的 `~/.config/opencode/opencode.json`、Claude 的 `~/.claude`）；這次 MUST NOT 設 `OPENCODE_PURE`／`OPENCODE_DISABLE_PROJECT_CONFIG`，由 tasks 3.4 的 PM 實機確認（`docs/sidecar.md` 註明）。
+- 驅動錯誤（起不來、HTTP 500 沒有可讀原因）的訊息 MUST 帶子行程 stderr 的末幾行（遮掉 key 與任何 `env_for` 給的值），不要只有「500」。
+- 打真 binary 的 loopback 測試 MUST NOT 放進預設的 unit（macOS 的 Keychain 不受隔離的 HOME 影響，而且會有對外流量）：放 `tests/integration/`，或要設 `SIDECAR_REAL_AGENT_TESTS=1` 才跑，預設 skip。`env_for` 的輸出用純單元測試驗。
+
+**opencode**（`OpenCodeDriver.env_for`）
+- 輸出 `OPENCODE_CONFIG_CONTENT`、`OPENCODE_DISABLE_AUTOUPDATE=1`、`OPENCODE_DISABLE_MODELS_FETCH=1`。config 的形狀：
+  ```json
+  {"provider": {"<opencode provider id>": {"options": {"apiKey": "<key>", "baseURL": "<endpoint>"},
+                                           "models": {"<model-id>": {"name": "<model-id>"}}}},
+   "model": "<provider id>/<model-id>", "small_model": "<provider id>/<model-id>"}
+  ```
+- **provider id 對應表**（LLMGateway 的 `provider` → opencode 的 provider id）：`opencode-zen`→`opencode`、`openrouter`→`openrouter`、`ollama-cloud`→`ollama-cloud`（最後一個沒在真 binary 上驗，3.4 確認）。對應不到的 MUST 丟錯，MUST NOT 用原名。
+- **`model` 與 `small_model` 必設**，兩個設同一個值（否則 opencode 自己挑，實測會挑到圖像預覽模型，而且每則訊息多一次標題請求用 small model）。來源依序：`subscription.models.default` → `models.allow` 裡第一個不含萬用字元的 → 沒有就拒絕（`no_model`）。
+- **宣告 `provider.<id>.models`**：選出的模型 id 一定放進去（不在 opencode 內建登錄的模型不宣告會 500）。
+- config 裡的 `apiKey` 優先於 opencode 已儲存的登入（實測），不需要 `OPENCODE_AUTH_CONTENT`。
+- **首次回應核對**：第一則訊息的回應 `info.providerID`／`info.modelID` MUST 等於選出的（`provider id`、`model-id`）；不是就視為錯誤（log 與 `exit.reason`），不當作正常運作。
+
+**Claude Code**（`ClaudeCodeDriver.env_for`）
+- `kind=claude-subscription`：`CLAUDE_CODE_OAUTH_TOKEN=<key>`。
+- `kind=api-key`：`provider == "anthropic"` 用 `ANTHROPIC_API_KEY=<key>`（送 `x-api-key`）；其他 provider（例如 OpenRouter）用 `ANTHROPIC_AUTH_TOKEN=<key>` 加 `ANTHROPIC_API_KEY=""`（只送 `Authorization: Bearer`，和 LLMGateway design 決定 7 一致）。
+- `endpoint` 有值時 `ANTHROPIC_BASE_URL=<endpoint>`。
+- `models.default` 有值時 `ANTHROPIC_MODEL` 與 `ANTHROPIC_SMALL_FAST_MODEL` 都設成它；沒有 default 的 Anthropic 訂閱不設（用 Claude 的預設）。非 Anthropic 的 provider 沒有 default 時依 opencode 同樣的順序找（`allow` 第一個不含萬用字元的），沒有就拒絕（`no_model`）。
+- 一律輸出 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`、`DISABLE_AUTOUPDATER=1`。
 
 **agora 的接法：選 (a)**——`agora continue` 加一個 `--headless`：照常準備 Session（continue／fork）、上鎖、定期寫回、結束時寫回，只是用上面的程式化模式開 agent，stdio 直接交給 agent（agora 自己在 agent 跑著時不寫 stdout，說明都寫 stderr）。sidecar 開 `agora continue … --headless` 這個行程，透過它的 stdio（Claude Code）或 opencode 的埠和 agent 說話。這樣接續、fork、寫回、同一個 Session 不能同時接續的鎖，都沿用 continue 已經測好的邏輯；agora 只多幾個選項（`--headless`、`--headless-port`、`--add-tag`）。
 - **停下**：溫和停＝對 agora 行程送 SIGTERM，agora 轉給 agent、等它結束、做最後一次寫回、放鎖後退出（Claude 也可以先關 stdin）。逾時才 SIGKILL agora（`close_timeout`，預設 30 秒）；SIGKILL 的後果是不做最後一次寫回（最多掉一個 `sync_period` 的對話；鎖是 `flock`，行程沒了就釋放），所以先 SIGTERM。
