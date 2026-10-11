@@ -463,6 +463,7 @@ def test_auto_reopen_that_fails_recomputes_and_rehangs(tmp_path):
 
 
 def test_no_candidate_means_no_job_and_null_reopen_at(tmp_path):
+    """U15 scenario: an undeployed row is not a reopen candidate at all."""
     personal = F.claude_subscription("claude-personal", key="key-personal")
     company = F.claude_subscription(
         "claude-company", key=None, available=False, cooldown={}
@@ -478,6 +479,40 @@ def test_no_candidate_means_no_job_and_null_reopen_at(tmp_path):
     assert rec.reopen_at is None
     assert rec.to_dict()["reopen_at"] is None
     assert core.list_jobs() == []
+
+
+def test_a_past_lift_becomes_now_plus_retry(tmp_path):
+    """U23 scenario: until already passed but still unusable -> not every tick."""
+    clock = F.FakeClock(1000.0)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    workdir = str(workdir)
+    personal = F.claude_subscription("claude-personal", key="key-personal")
+    company = F.claude_subscription(
+        "claude-company", key="key-company", priority=20,
+        available=False, cooldown={"5h": iso(clock.t - 30)},  # lifted 30s ago
+    )
+    driver = F.FakeAgentDriver("claude-code")
+    store = F.FakeSessionStore()
+    source = F.FakeSubscriptionSource([personal, company])
+    core = SidecarCore(
+        drivers={"claude-code": driver}, store=store, subscriptions=source, now=clock,
+        retry_interval=300.0,
+    )
+    _open_and_exhaust(
+        core, driver, store, source, clock, workdir, resets_at=iso(clock.t - 5)
+    )
+
+    core.tick()
+
+    rec = core.get("t1")
+    assert rec.state == STATE_WAITING_QUOTA
+    assert rec.reopen_at == clock.t + 300.0  # now + retry_interval, not a past time
+    jobs = core.list_jobs()
+    assert len(jobs) == 1 and jobs[0].next_run_at == clock.t + 300.0
+    clock.advance(1)
+    core.tick()
+    assert len(core.list_jobs()) == 1  # not re-hung on every tick
 
 
 def test_deleting_the_auto_job_nulls_reopen_at(tmp_path):

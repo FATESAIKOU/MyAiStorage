@@ -698,7 +698,7 @@ class SidecarCore:
             rec.reopen_at = None
             rec.reopen_job = None
         if reopen_at is None and subs is not None:
-            reopen_at = self._earliest_lift(rec.agent, subs)
+            reopen_at = self._earliest_lift(rec.agent, subs, now=now)
         if reopen_at is not None and reopen_at <= now:
             # The computed lift is already in the past but nothing is usable
             # (e.g. LLMGateway still reports cooling): retry at the fixed
@@ -748,13 +748,15 @@ class SidecarCore:
             return
         self._wait_quota(rec, now, subs=subs)
 
-    def _earliest_lift(self, agent: str, subs: list[Subscription]) -> float | None:
+    def _earliest_lift(self, agent: str, subs: list[Subscription], *, now: float) -> float | None:
         """The earliest moment a usable candidate stops cooling (D4/M3).
 
-        Candidates: `agents` contains the kind and the key is deployed.  A
-        candidate's lift is the later of its two windows' `until`; the job's
-        `at` is the earliest lift.  Only `agents`/`cooldown` are consulted,
-        never the Selector.
+        Candidates: `agents` contains the kind and the key is deployed; a row
+        that says unavailable with no window cooling is "not deployed" and is
+        not a candidate at all.  A candidate's lift is the later of its two
+        windows' `until`; a deployed candidate with no cooling at all is
+        usable now, so its lift is `now`.  Only `agents`/`cooldown` are
+        consulted, never the Selector.
         """
         lifts = []
         for sub in subs:
@@ -762,8 +764,7 @@ class SidecarCore:
                 continue
             untils = [epoch(sub.cooldown.get(w)) for w in WINDOWS if sub.cooldown.get(w)]
             untils = [t for t in untils if t is not None]
-            if untils:
-                lifts.append(max(untils))
+            lifts.append(max(untils) if untils else now)
         return min(lifts) if lifts else None
 
     def _send_resume(self, rec: AgentRecord) -> None:
