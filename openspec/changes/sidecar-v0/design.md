@@ -129,7 +129,7 @@ LLMGateway 的共通 JSON 欄位以 LLMGateway 的 `gateway-v0` 規格（`specs/
   - `sync_period`（分鐘，預設 5）；
   - `resume_prompt`、`retry_interval`（預設 5 分鐘）、`poke_queue_timeout`（預設 30 秒）、`close_timeout`（預設 30 秒）、`quota_reasons`（opencode 的額度類 reason 白名單）。
 - 不含任何秘密。
-- **LLMGateway 的連線設定**放在獨立的檔案 `gateway-connect.json`，欄位對應 LLMGateway 的 `lgw.connect.ConnectConfig`（名稱照 LLMGateway 的規格：`jumps`、`rendezvous`、`identity`、`known_hosts`、`remote_api`…）。
+- **LLMGateway 的連線設定**放在獨立的檔案 `gateway-connect.json`，**格式由 LLMGateway 的 lgw 擁有**（lgw-v0.1.0：`{"schema": 1, "rendezvous", "jumps"?, "identity", "host_keys" 或 "known_hosts", "remote_api"?}`，說明在 `lgw/connect.py` 的模組 docstring）；sidecar 每次操作呼叫 `lgw.connect.load_config(path)`（每次重讀、不快取），**不自己解析欄位**；格式錯時 lgw 丟 `ConfigError`，sidecar 當「無法確認」處理（open 回 503）。worker 上建議用 `host_keys`，整份設定自成一檔。
   - sidecar **每一次** LLMGateway 操作都重新讀這個檔，不快取；檔案由外部以原子方式改寫（寫暫存檔再 rename）。理由：LLMGateway rotate 時 worker 上的連線資訊會變，而重啟 sidecar 會殺掉它開的 agent（狀態揮發、agent 是子行程），所以不靠重啟也不靠 SIGHUP。
   - worker 上由 MyLinuxPool 的單元從它的 `gateway.json` 產生這個檔（含 sidecar 專用的 `known_hosts`，放 sidecar 的 state 目錄、0600）；sidecar 不讀 MyLinuxPool 的任何檔。Mac 上手寫。
   - 讀不到或格式錯誤時，該次操作當 unreachable 處理（D4 的表）並 log 原因，不丟例外。
