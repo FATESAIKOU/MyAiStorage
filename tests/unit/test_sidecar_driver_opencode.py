@@ -192,6 +192,28 @@ def test_a_matching_first_response_does_not_complain(driver, serve, tmp_path, mo
     driver.stop(handle, graceful=False, timeout=5)
 
 
+def test_opencode_errors_carry_the_masked_stderr_tail(tmp_path, monkeypatch, serve, caplog):
+    """3.6.3: an HTTP 500 with no readable reason still carries stderr, masked."""
+    monkeypatch.setenv("FAKE_HOME", str(tmp_path / "fh"))
+    monkeypatch.setenv("FAKE_OC_STDERR_ECHO", "OPENCODE_CONFIG_CONTENT")
+    monkeypatch.setenv("FAKE_OC_MESSAGE_500", "1")
+    driver = OpenCodeDriver(command=[sys.executable, str(FAKE_SERVE)],
+                            poll_timeout=5.0, http_timeout=5.0)
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    env = driver.env_for(Subscription(id="zen", provider="opencode-zen", kind="api-key",
+                                      key=SECRET, models={"default": "z"}))
+    handle = driver.launch(None, env, str(workdir))
+    try:
+        with caplog.at_level(logging.WARNING):
+            driver.send(handle, "hi")  # the failure is logged by the background round
+            wait_until(lambda: "HTTP 500" in caplog.text)
+        assert "<masked>" in caplog.text  # the config's key never appears raw
+        assert SECRET not in caplog.text
+    finally:
+        driver.stop(handle, graceful=False, timeout=5)
+
+
 # --- attach: status lookup, send, abort ----------------------------------------
 
 

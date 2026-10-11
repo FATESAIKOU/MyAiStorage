@@ -43,6 +43,13 @@ if "--resume" in argv:
 session_id = session_id or "11111111-2222-4333-8444-666666666666"
 
 scenario = os.environ.get("FAKE_CLAUDE_SCENARIO", "ok")
+if os.environ.get("FAKE_CLAUDE_STDERR_ECHO"):
+    # Print the named env var on stderr at startup (driver tail tests, 3.6.3).
+    value = os.environ.get(os.environ["FAKE_CLAUDE_STDERR_ECHO"], "")
+    print(f"fake claude: {os.environ['FAKE_CLAUDE_STDERR_ECHO']}={value}",
+          file=sys.stderr, flush=True)
+if scenario == "die":
+    sys.exit(2)
 RESETS = 4102444800  # 2100-01-01T00:00:00Z
 
 

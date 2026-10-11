@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from sidecar.agora_store import AgoraProcess
-from sidecar.drivers.claude_code import ClaudeCodeDriver
+from sidecar.drivers.claude_code import ClaudeCodeDriver, ClaudeDriverError
 from sidecar.protocols import (
     DRIVER_IDLE,
     DRIVER_QUOTA_EXHAUSTED,
@@ -229,6 +229,25 @@ def test_stop_kills_the_process_and_reports_exited(driver, attach):
     driver.stop(handle, graceful=True, timeout=5)
     assert handle.proc.poll() is not None
     assert driver.state(handle).kind == "exited"
+
+
+def test_claude_errors_carry_the_masked_stderr_tail(driver, tmp_path, monkeypatch):
+    """3.6.3: a write against a dead process reports its stderr, keys masked."""
+    monkeypatch.setenv("FAKE_CLAUDE_STDERR_ECHO", "CLAUDE_CODE_OAUTH_TOKEN")
+    monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "die")
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    handle = driver.launch(None, {"CLAUDE_CODE_OAUTH_TOKEN": SECRET}, str(workdir))
+    try:
+        wait_until(lambda: handle.proc.poll() is not None)  # it died at startup
+        with pytest.raises(ClaudeDriverError) as excinfo:
+            driver.send(handle, "hi")
+        message = str(excinfo.value)
+        assert "fake claude" in message  # the child's stderr really came through
+        assert "<masked>" in message
+        assert SECRET not in message
+    finally:
+        driver.stop(handle, graceful=False, timeout=5)
 
 
 # --- quota events --------------------------------------------------------------

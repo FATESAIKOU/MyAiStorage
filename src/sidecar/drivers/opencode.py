@@ -39,6 +39,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -54,7 +55,7 @@ from ..protocols import (
     iso,
 )
 from ..subproc import child_env, terminate_process
-from .common import pick_model
+from .common import pick_model, stderr_excerpt
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,8 @@ class OpenCodeHandle:
     expected_provider: str | None = None  # what env_for told opencode to use
     expected_model: str | None = None
     model_mismatch: str | None = None  # the first response used something else
+    stderr_tail: deque = field(default_factory=lambda: deque(maxlen=20))
+    secrets: tuple[str, ...] = ()  # env_for values, for masking error tails
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -169,8 +172,8 @@ class OpenCodeDriver:
             except OSError as e:
                 raise OpenCodeDriverError(f"cannot start opencode: {e}") from e
             handle = OpenCodeHandle(proc=proc, port=port)
-            threading.Thread(target=_drain_pipe, args=(proc.stdout, "stdout"), daemon=True).start()
-            threading.Thread(target=_drain_pipe, args=(proc.stderr, "stderr"), daemon=True).start()
+            threading.Thread(target=_drain_pipe, args=(proc.stdout, handle, "stdout"), daemon=True).start()
+            threading.Thread(target=_drain_pipe, args=(proc.stderr, handle, "stderr"), daemon=True).start()
             self._wait_listening(handle)
             handle.agent_session_id = self._create_session(handle)
         else:
@@ -186,6 +189,7 @@ class OpenCodeDriver:
             )
             self._wait_listening(handle)
         handle.expected_provider, handle.expected_model = _expected_model(env)
+        handle.secrets = tuple(value for value in env.values() if value)
         return handle
 
     def send(self, handle: OpenCodeHandle, text: str) -> None:
@@ -274,6 +278,7 @@ class OpenCodeDriver:
             if handle.proc.poll() is not None:
                 raise OpenCodeDriverError(
                     f"opencode exited before listening (rc={handle.proc.returncode})"
+                    f"{self._tail(handle)}"
                 )
             try:
                 with socket.create_connection(("127.0.0.1", handle.port), timeout=0.5):
@@ -283,7 +288,7 @@ class OpenCodeDriver:
         terminate_process(handle.proc, timeout=5.0)
         raise OpenCodeDriverError(
             f"opencode never listened on 127.0.0.1:{handle.port} "
-            f"within {self._poll_timeout:g}s"
+            f"within {self._poll_timeout:g}s{self._tail(handle)}"
         )
 
     def _create_session(self, handle: OpenCodeHandle) -> str:
@@ -350,14 +355,24 @@ class OpenCodeDriver:
         try:
             with urllib.request.urlopen(request, timeout=timeout or self._http_timeout) as response:
                 raw = response.read()
+        except urllib.error.HTTPError as e:
+            raise OpenCodeDriverError(
+                f"{method} {path}: HTTP {e.code}{self._tail(handle)}"
+            ) from e
         except (urllib.error.URLError, OSError, ValueError) as e:
-            raise OpenCodeDriverError(f"{method} {path} failed: {e}") from e
+            raise OpenCodeDriverError(
+                f"{method} {path} failed: {e}{self._tail(handle)}"
+            ) from e
         if not raw:
             return {}
         try:
             return json.loads(raw)
         except ValueError:
             return {}
+
+    def _tail(self, handle: OpenCodeHandle) -> str:
+        """The child's stderr tail, keys masked (D6)."""
+        return stderr_excerpt(handle.proc, handle.stderr_tail, handle.secrets)
 
     def _apply_status(self, handle: OpenCodeHandle, status: dict[str, Any]) -> None:
         kind = status.get("type")
@@ -433,9 +448,13 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def _drain_pipe(pipe: Any, name: str) -> None:
+def _drain_pipe(pipe: Any, handle: OpenCodeHandle, name: str) -> None:
     try:
         for line in pipe:
-            logger.debug("opencode %s: %s", name, line.rstrip("\n"))
+            text = line.rstrip("\n")
+            if name == "stderr":
+                with handle.lock:
+                    handle.stderr_tail.append(text)
+            logger.debug("opencode %s: %s", name, text)
     except (OSError, ValueError):
         pass

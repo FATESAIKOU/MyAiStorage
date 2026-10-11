@@ -31,6 +31,7 @@ import logging
 import subprocess
 import threading
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -45,7 +46,7 @@ from ..protocols import (
     iso,
 )
 from ..subproc import child_env, terminate_process
-from .common import pick_model
+from .common import pick_model, stderr_excerpt
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,8 @@ class ClaudeHandle:
     state: DriverState = field(default_factory=lambda: DriverState(kind=DRIVER_IDLE))
     quota: DriverState | None = None  # sticky: only a new handle clears it
     stopped: bool = False
+    stderr_tail: deque = field(default_factory=lambda: deque(maxlen=20))
+    secrets: tuple[str, ...] = ()  # env_for values, for masking error tails
     lock: threading.Lock = field(default_factory=threading.Lock)
     reader: threading.Thread | None = None
 
@@ -146,13 +149,14 @@ class ClaudeCodeDriver:
             except OSError as e:
                 raise ClaudeDriverError(f"cannot start claude: {e}") from e
             handle = ClaudeHandle(proc=proc)
-            threading.Thread(target=_drain_stderr, args=(proc,), daemon=True).start()
+            threading.Thread(target=_drain_stderr, args=(proc, handle), daemon=True).start()
         else:
             handle = ClaudeHandle(
                 proc=session.process,
                 session_id=session.session_id,
                 agent_session_id=getattr(session.process, "agent_session_id", None),
             )
+        handle.secrets = tuple(value for value in env.values() if value)
         handle.reader = threading.Thread(target=self._read_events, args=(handle,), daemon=True)
         handle.reader.start()
         return handle
@@ -213,7 +217,11 @@ class ClaudeCodeDriver:
                 handle.proc.stdin.write(line + "\n")
                 handle.proc.stdin.flush()
         except (BrokenPipeError, OSError, ValueError) as e:
-            raise ClaudeDriverError(f"cannot write to claude: {e}") from e
+            raise ClaudeDriverError(f"cannot write to claude: {e}{self._tail(handle)}") from e
+
+    def _tail(self, handle: ClaudeHandle) -> str:
+        """The child's stderr tail, keys masked (D6)."""
+        return stderr_excerpt(handle.proc, handle.stderr_tail, handle.secrets)
 
     def _read_events(self, handle: ClaudeHandle) -> None:
         try:
@@ -312,10 +320,13 @@ class ClaudeCodeDriver:
                 )
 
 
-def _drain_stderr(proc: Any) -> None:
-    """Keep a directly spawned claude's stderr from filling up."""
+def _drain_stderr(proc: Any, handle: ClaudeHandle) -> None:
+    """Keep a directly spawned claude's stderr from filling up, tail kept."""
     try:
         for line in proc.stderr:
-            logger.debug("claude: %s", line.rstrip("\n"))
+            text = line.rstrip("\n")
+            with handle.lock:
+                handle.stderr_tail.append(text)
+            logger.debug("claude: %s", text)
     except (OSError, ValueError):
         pass

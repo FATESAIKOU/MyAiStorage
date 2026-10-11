@@ -39,6 +39,11 @@ with open(home / "fake-oc-env-names.log", "a", encoding="utf-8") as f:
 calls = home / "fake-oc-calls.log"
 status_file = home / "fake-oc-status.json"
 HANG = os.environ.get("FAKE_OC_HANG")  # sleep in every handler (timeout tests, N2)
+if os.environ.get("FAKE_OC_STDERR_ECHO"):
+    # Print the named env var on stderr at startup (driver tail tests, 3.6.3).
+    value = os.environ.get(os.environ["FAKE_OC_STDERR_ECHO"], "")
+    print(f"fake-opencode: {os.environ['FAKE_OC_STDERR_ECHO']}={value}",
+          file=sys.stderr, flush=True)
 
 
 def log_call(entry: dict) -> None:
@@ -115,6 +120,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.endswith("/session"):
             self._json(200, {"id": os.environ.get("FAKE_OC_SESSION", "ses_createdfake00001")})
         elif path.endswith("/message"):
+            if os.environ.get("FAKE_OC_MESSAGE_500"):
+                self._json(500, {"error": "no readable reason"})
+                return
             time.sleep(float(os.environ.get("FAKE_OC_ROUND_SECONDS", "0.05")))
             self._json(200, self._message_response())
         elif path.endswith("/abort"):
