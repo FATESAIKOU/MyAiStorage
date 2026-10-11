@@ -12,6 +12,7 @@ import copy
 import json
 import threading
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -296,11 +297,31 @@ class FakeConfigError(Exception):
     """Stands in for lgw.connect.ConfigError."""
 
 
-class FakeGatewayClient:
-    """lgw.client double: canned answers, recorded calls, injectable failures.
+class FakeUnavailable(Exception):
+    """Stands in for lgw.connect.Unavailable (raised when entering the with)."""
 
-    Answers follow the seam documented in `sources.LLMGatewaySource`:
-    success = data, `{"unreachable": true}` or `{"error": {"code": ...}}`.
+    def __init__(self, kind: str = "timeout") -> None:
+        super().__init__(kind)
+        self.kind = kind
+
+
+@dataclass
+class FakeResult:
+    """lgw.client.Result-shaped answer: exactly the real fields (review H1)."""
+
+    ok: bool = True
+    status: int = 200
+    data: Any = None
+    error: str | None = None
+    unreachable: bool = False
+
+
+class FakeGatewayClient:
+    """lgw.client double: Result-shaped answers, recorded calls, scripted failures.
+
+    `results` overrides a whole operation with a `FakeResult` (or a callable
+    taking the payload and returning one).  Defaults: `list` answers the rows,
+    `get` answers `get_row` (404 when it is None), `cooldown` answers success.
     """
 
     def __init__(
@@ -308,52 +329,39 @@ class FakeGatewayClient:
         *,
         rows: Any = (),
         get_row: dict[str, Any] | None = None,
-        list_unreachable: bool = False,
-        unreachable: bool = False,
-        error_code: str | None = None,
+        results: dict[str, Any] | None = None,
     ) -> None:
         self.rows = list(rows)
         self.get_row = get_row
-        self.list_unreachable = list_unreachable
-        self.unreachable = unreachable
-        self.error_code = error_code
+        self.results = dict(results or {})
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.base_url: str | None = None  # set by the factory
 
-    def _maybe_fail(self) -> dict[str, Any] | None:
-        if self.unreachable:
-            return {"unreachable": True, "reason": "fake client cannot reach the gateway"}
-        if self.error_code:
-            return {"error": {"code": self.error_code, "message": "fake refusal"}}
-        return None
+    def _answer(self, op: str, payload: dict[str, Any]) -> FakeResult:
+        self.calls.append((op, dict(payload)))
+        scripted = self.results.get(op)
+        if callable(scripted):
+            return scripted(payload)
+        if scripted is not None:
+            return scripted
+        if op == "list":
+            return FakeResult(data={"schema": 1, "subscriptions": copy.deepcopy(self.rows)})
+        if op == "get":
+            if self.get_row is None:
+                return FakeResult(ok=False, status=404, error="not_found")
+            return FakeResult(data=copy.deepcopy(self.get_row))
+        return FakeResult(data={})
 
-    def list(self) -> dict[str, Any]:
-        self.calls.append(("list", {}))
-        if self.list_unreachable:
-            return {"unreachable": True, "reason": "fake list cannot reach the gateway"}
-        failure = self._maybe_fail()
-        if failure:
-            return failure
-        return {"subscriptions": copy.deepcopy(self.rows)}
+    def list(self) -> FakeResult:
+        return self._answer("list", {})
 
-    def get(self, subscription_id: str, agent: str) -> dict[str, Any]:
-        self.calls.append(("get", {"id": subscription_id, "agent": agent}))
-        failure = self._maybe_fail()
-        if failure:
-            return failure
-        row = copy.deepcopy(self.get_row)
-        if row is None:
-            return {"error": {"code": "not_found", "message": "fake unknown id"}}
-        return {"subscription": row}
+    def get(self, subscription_id: str, agent: str) -> FakeResult:
+        return self._answer("get", {"id": subscription_id, "agent": agent})
 
-    def cooldown(self, subscription_id: str, window: str, resets_at: str | None) -> dict[str, Any]:
-        self.calls.append(
-            ("cooldown", {"id": subscription_id, "window": window, "resets_at": resets_at})
+    def cooldown(self, subscription_id: str, window: str, resets_at: str | None) -> FakeResult:
+        return self._answer(
+            "cooldown", {"id": subscription_id, "window": window, "resets_at": resets_at}
         )
-        failure = self._maybe_fail()
-        if failure:
-            return failure
-        return {"ok": True}
 
 
 class FakeConnect:
@@ -361,13 +369,22 @@ class FakeConnect:
 
     `load_config` reads the real file every time, so a test can atomically
     rewrite it between operations and watch the next operation pick it up.
+    `fail_enter` makes the *entering* of the `with` raise a FakeUnavailable
+    (once, then it clears) - the real error shape H1 covers.
     """
 
     ConfigError = FakeConfigError
 
-    def __init__(self, *, base_url: str = "fake://gateway", bad_paths: Any = ()) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str = "fake://gateway",
+        bad_paths: Any = (),
+        fail_enter: Exception | None = None,
+    ) -> None:
         self.base_url = base_url
         self.bad_paths = {str(p) for p in bad_paths}
+        self.fail_enter = fail_enter
         self.configs: list[str] = []
         self.opens: list[dict[str, Any]] = []
         self.closed = 0
@@ -382,6 +399,9 @@ class FakeConnect:
     @contextmanager
     def connect(self, cfg: dict[str, Any]) -> Iterator[str]:
         self.opens.append(dict(cfg))
+        if self.fail_enter is not None:
+            error, self.fail_enter = self.fail_enter, None
+            raise error
         try:
             yield cfg.get("base_url", self.base_url)
         finally:

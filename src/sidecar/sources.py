@@ -1,4 +1,4 @@
-"""SubscriptionSource implementations (design D3/D4/D7, task 2.5).
+"""SubscriptionSource implementations (design D3/D4/D7, task 2.5; review H1).
 
 `FileSubscriptionSource` is for local development: one JSON file in the common
 JSON shape LLMGateway and sidecar share.  It accepts either a bare list of
@@ -10,6 +10,19 @@ exception (D3).  One logical operation (one open, one swap) runs inside a
 single `with lgw.connect.connect(cfg)`; the connect file is re-read for every
 operation and never cached (D7), because LLMGateway may rotate the connection
 information while the daemon keeps running.
+
+lgw's real interface (lgw-v0.1.0, design D7):
+
+* `lgw.client.Client(base_url, timeout=10)`; `list()` / `get(id, agent)` /
+  `cooldown(id, window, resets_at=None)` all answer
+  `Result(ok, status, data, error, unreachable)` and never raise.
+  `list` data is `{schema, subscriptions: [...]}`; `get` data is the row
+  itself (flat, with `key`); a successful cooldown is 204.  `Result.error` is
+  a stable code string (`agent_not_allowed`, `invalid_resets_at`, ...).
+* `lgw.connect.load_config(path)` raises `OSError` / `ConfigError`;
+  `lgw.connect.connect(cfg)` raises `lgw.connect.Unavailable` - but only when
+  the `with` is entered, so `operation()` must catch exceptions from
+  `__enter__` too, not just from building the context manager.
 
 The real `lgw` lives in the optional `gateway` extra; without it every
 operation answers Unreachable with a message saying to install the extra.
@@ -122,24 +135,15 @@ class FileSubscriptionSource:
         return sub
 
 
-class LLMGatewayTransport(Protocol):
-    """The wire to LLMGateway; the real one is `lgw connect` (task 2.5, D7).
-
-    One `with transport.operation() as source:` is one logical operation; the
-    yielded source implements the SubscriptionSource methods.
-    """
-
-    def operation(self) -> Any: ...
-
-
 class LLMGatewaySource:
     """SubscriptionSource over LLMGateway's connector (design D7, task 2.5).
 
     `connect` and `client_factory` are injectable so tests can run without the
     `lgw` extra: `connect` must look like `lgw.connect` (`load_config(path)`
-    and a `connect(cfg)` context manager yielding the gateway URL), and
-    `client_factory(base_url)` must return an `lgw.client`-like object with
-    list/get/cooldown answering JSON objects.
+    and a `connect(cfg)` context manager yielding the gateway URL; exceptions
+    may come from entering the `with`), and `client_factory(base_url)` must
+    return an `lgw.client.Client`-like object whose list/get/cooldown answer
+    `Result`-shaped objects (`ok`, `status`, `data`, `error`, `unreachable`).
     """
 
     def __init__(
@@ -170,7 +174,13 @@ class LLMGatewaySource:
 
     @contextmanager
     def operation(self) -> Iterator[Any]:
-        """One connection for one logical operation; config re-read each time."""
+        """One connection for one logical operation; config re-read each time.
+
+        Anything that stops the operation from starting - a missing lgw, an
+        unreadable/invalid connect file, or an `Unavailable` raised while
+        *entering* the connection - becomes an `Unreachable`; no exception
+        escapes here.
+        """
         connect = self._connect
         client_factory = self._client_factory
         if connect is None or client_factory is None:
@@ -183,20 +193,39 @@ class LLMGatewaySource:
                 return
         try:
             cfg = connect.load_config(self.connect_file)  # never cached (D7)
+            ctx = connect.connect(cfg)
         except Exception as e:
-            reason = f"cannot read the LLMGateway connect file {self.connect_file}: {e}"
+            reason = f"cannot read the LLMGateway connect file {self.connect_file}: {_kind(e)}"
             logger.warning("%s", reason)
             yield _UnreachableSource(Unreachable(reason))
             return
         try:
-            ctx = connect.connect(cfg)
+            base_url = ctx.__enter__()  # Unavailable is raised here, not above
         except Exception as e:
-            reason = f"cannot connect to LLMGateway: {e}"
+            reason = f"cannot connect to LLMGateway: {_kind(e)}"
             logger.warning("%s", reason)
             yield _UnreachableSource(Unreachable(reason))
             return
-        with ctx as base_url:
+        try:
             yield _BoundSource(client_factory(base_url))
+        finally:
+            try:
+                ctx.__exit__(None, None, None)
+            except Exception:
+                logger.warning("closing the LLMGateway connection failed", exc_info=True)
+
+
+def _kind(exc: BaseException) -> str:
+    """The kind of a connection exception, without any of its output (D7).
+
+    `lgw.connect.Unavailable` carries `kind` (`ssh_missing`, `timeout`, ...);
+    for anything else the class name is the least we can say without leaking
+    ssh output or file contents.
+    """
+    kind = getattr(exc, "kind", None)
+    if isinstance(kind, str) and kind:
+        return kind
+    return type(exc).__name__
 
 
 def _import_lgw() -> tuple[Any, Any]:
@@ -204,8 +233,6 @@ def _import_lgw() -> tuple[Any, Any]:
     from lgw import client as lgw_client  # type: ignore[import-not-found]
     from lgw import connect as lgw_connect  # type: ignore[import-not-found]
 
-    # TODO(task 2.5): confirm the actual lgw.client constructor with the
-    # LLMGateway PM; until then the injected test doubles are the contract.
     return lgw_connect, lgw_client.Client
 
 
@@ -226,17 +253,18 @@ class _UnreachableSource:
 
 
 class _BoundSource:
-    """SubscriptionSource over one connected lgw.client-like object."""
+    """SubscriptionSource over one connected lgw.client-like object (D7 table)."""
 
     def __init__(self, client: Any) -> None:
         self._client = client
 
     def list(self) -> list[Subscription] | Unreachable:
-        data = self._client.list()
-        failure = _failure(data)
+        result = self._client.list()
+        failure = _failure(result)
         if failure is not None:
             return failure
-        rows = data.get("subscriptions", data) if isinstance(data, dict) else data
+        data = getattr(result, "data", None)
+        rows = data.get("subscriptions") if isinstance(data, dict) else None
         if not isinstance(rows, list):
             return Unreachable("LLMGateway list answered something unexpected")
         try:
@@ -246,19 +274,21 @@ class _BoundSource:
             return Unreachable(str(e))
 
     def get(self, subscription_id: str, agent: str) -> Subscription | SourceError | Unreachable:
-        data = self._client.get(subscription_id, agent)
-        failure = _failure(data)
+        result = self._client.get(subscription_id, agent)
+        failure = _failure(result)
         if failure is not None:
             return failure
-        row = data.get("subscription", data) if isinstance(data, dict) else data
+        row = getattr(result, "data", None)
+        if not isinstance(row, dict):
+            return Unreachable("LLMGateway get answered something unexpected")
         try:
             sub = Subscription.from_json(row, with_key=True)
         except SidecarError as e:
             logger.warning("LLMGateway get: %s", e)
             return Unreachable(str(e))
         if agent not in sub.agents:
-            # The gateway enforces this too (403 agent_not_allowed); failing
-            # here as well turns a silent misconfiguration into a clear error.
+            # The gateway enforces this too; failing here turns a silent
+            # misconfiguration into a clear error.
             return SourceError("agent_not_allowed")
         return sub
 
@@ -267,24 +297,36 @@ class _BoundSource:
     ) -> None | SourceError | Unreachable:
         if window not in WINDOWS:
             return SourceError("invalid_window")
-        data = self._client.cooldown(subscription_id, window, resets_at)
-        return _failure(data)
+        result = self._client.cooldown(subscription_id, window, resets_at)
+        return _failure(result)
 
 
-def _failure(data: Any) -> SourceError | Unreachable | None:
-    if not isinstance(data, dict):
+def _failure(result: Any) -> SourceError | Unreachable | None:
+    """The D7 mapping from an lgw Result to our answer; None means success.
+
+    `ok=False` is never success; unknown statuses are Unreachable (cannot
+    tell), never a silent success and never a fabricated error code.
+    """
+    if getattr(result, "unreachable", False):
+        return Unreachable("LLMGateway cannot be reached")
+    if getattr(result, "ok", False):
         return None
-    if data.get("unreachable"):
-        return Unreachable(str(data.get("reason") or "LLMGateway cannot be reached"))
-    error = data.get("error")
-    if isinstance(error, dict) and error.get("code"):
-        message = error.get("message")
-        return SourceError(str(error["code"]), None if message is None else str(message))
-    if isinstance(error, str) and error:
-        return SourceError(error)
-    if data.get("ok") is False:
-        return SourceError("refused")
-    return None
+    status = getattr(result, "status", None)
+    error = getattr(result, "error", None)
+    if status == 403:
+        return SourceError("agent_not_allowed")
+    if status == 404:
+        return SourceError("not_found")
+    if status == 409:
+        return SourceError("not_deployed")
+    if status == 413:
+        return SourceError("body_too_large")
+    if status == 400:
+        code = error if isinstance(error, str) and error else "bad_request"
+        return SourceError(code)
+    if error == "bad_response":
+        return Unreachable("LLMGateway answered something that is not a JSON object")
+    return Unreachable(f"LLMGateway answered status {status!r} ({error!r})")
 
 
 def connect_llmgateway(config: Any) -> LLMGatewaySource:
