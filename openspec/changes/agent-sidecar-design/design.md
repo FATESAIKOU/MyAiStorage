@@ -165,6 +165,8 @@ v0 不做：外來 agent 發現、暫停／恢復、C 的記憶管理（session 
 - **urgency 是 0～9**（Angareion spec）；`sidecar say` 與中繼只收 0～9，超出範圍回錯誤，不靜默丟掉。
 - **sidecar 不自己建頻道**：中繼送出時頻道不存在就回錯誤；信道 repo 來自設定（`channel_repo`），不寫死。
 - **LLMGateway 的方向（本人 2026-10-11 定，經 PMO；正式介面由 LLMGateway 的 session 草擬後來對齊，v0 仍用假 broker）**：所有 LLM key 只放在 LLMGateway。sidecar 向它租用，拿到「要設給 agent 的環境變數」（例如 Claude Code 的 `CLAUDE_CODE_OAUTH_TOKEN`，由 Claude Code 直連 Anthropic）後啟動 agent；額度用完時 sidecar 回報冷卻與重置時間、再租下一把，換那一把重開 agent，用 `agora continue` 接回原本的 Session。sidecar 不保存 key，租約結束就丟掉；租約給的環境變數是 agent 環境白名單唯一的附加來源，MUST NOT 寫進 log、registry 或任何檔案。`ModelBroker` 的 `request_lease` 回傳值之後會改成帶這組環境變數與效期。
+- **租用介面（2026-10-11 與 LLMGateway PM 對齊，LLMGateway PR #9 草案）**：`request_lease(worker, role, agent: claude-code|opencode, model?, subscription?, purpose?)` → `{lease_id, subscription, env, unset, expires_at}` 或拒絕 `{reason: all_cooling|cap_reached|not_allowed, earliest_reset?}`；`report_exhausted(lease_id, signal, resets_at?)` 回下一張租約或拒絕；`renew`（sidecar run 每小時）、`release`；`report_usage` v0 不做。額度用完的偵測在 sidecar（讀畫面比對 Claude Code 的 limit 訊息與 opencode 的 402／429，解析重置時間）；換把：安全結束 agent → 套新的 env／unset → 重開 → `agora continue` 接回。跑得好好的 agent 不因冷卻結束而換回。
+- **租約的環境變數不放命令列**：`pane run` 的命令列會出現在 ps 與 herdr 的 pane 資訊裡，所以 env 寫進 0600 的暫存檔，由 pane 的命令讀進環境後立刻刪掉；`unset` 的變數在啟動命令裡明確去掉。`herdr tab create --env` 會不會把值存進 herdr 狀態要先實測再決定能不能用。
 - **agent 的環境是白名單**：`start_agent` 不帶 `env` 時給空的附加環境，絕不把 sidecar 自己的整個環境（可能含 A2A token）傳給 pane；文件同時建議 token 只放檔案、不 export 到登入環境（herdr server 繼承的環境 sidecar 擋不住）。
 
 ### D11 worker 端的接法（2026-10-11 與 MyLinuxPool PM 對齊，MyLinuxPool#52 負責分發）
