@@ -319,6 +319,30 @@ def test_close_is_idempotent_on_an_exited_agent(tmp_path):
     assert len(driver.stop_calls) == 1
 
 
+def test_close_while_starting_stops_the_agent_once_it_comes_up(tmp_path):
+    """M1 scenario: close during open's launch is remembered, not refused."""
+    core, driver, _store, _source, _clock, workdir = rig(tmp_path)
+    gate = threading.Event()
+    driver.launch_gate = gate
+    opened: list = []
+    thread = threading.Thread(
+        target=lambda: opened.append(core.open("t1", "claude-code", workdir, {"mode": "new"}))
+    )
+    thread.start()
+    assert driver.launch_started.wait(2)
+
+    rec = core.close("t1")
+
+    assert rec.state == STATE_STARTING  # close does not 409 and does not lie
+    gate.set()
+    thread.join(5)
+    final = opened[0]
+    assert final.state == STATE_EXITED
+    assert core.get("t1").state == STATE_EXITED
+    assert driver.stop_calls == [(driver.handles[0], True, 30.0)]  # exactly once
+    assert driver.handles[0].stopped  # no process left behind
+
+
 # --- poke (spec: 暫停就是戳加中斷 / 不打斷 / starting 排隊) ---------------------
 
 

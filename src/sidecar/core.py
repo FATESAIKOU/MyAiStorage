@@ -130,6 +130,7 @@ class AgentRecord:
     reopen_at: float | None = None
     reopen_job: str | None = None
     busy: bool = False  # a state transition is in flight for this agent (D2)
+    closing: bool = False  # close arrived while starting; open finishes the stop (M1)
     pending: list[PendingPoke] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -292,9 +293,37 @@ class SidecarCore:
                 if existing is not None:
                     existing.reopen_job = None
         self._refresh_one(placeholder)
+        with self._lock:
+            closed_early = placeholder.closing and placeholder.state != STATE_EXITED
+        if closed_early:
+            # close arrived while this open was still launching (M1): stop the
+            # process we just started and report it exited.
+            self._stop_and_exit(placeholder)
+            return placeholder
         if input is not None:
             self.poke(id, input)
         return placeholder
+
+    def _stop_and_exit(self, rec: AgentRecord) -> AgentRecord:
+        """Stop the handle and mark exited; used by close and the M1 race path."""
+        with self._lock:
+            driver = self._drivers.get(rec.agent)
+            handle = rec.handle
+        final = self._stop_handle(handle, driver)
+        with self._lock:
+            rec.state = STATE_EXITED
+            rec.exit = {"code": final.code, "reason": final.reason or "closed"}
+            rec.reopen_at = None
+            rec.reopen_job = None
+        return rec
+
+    def _stop_handle(self, handle: Any, driver: Any) -> DriverState:
+        if handle is None or driver is None:
+            return DriverState(kind=DRIVER_EXITED, reason="closed without a running agent")
+        # Gentle stop: the agora process forwards to the agent, writes the
+        # last conversation back on its way out, then releases the lock (D6).
+        driver.stop(handle, graceful=True, timeout=self._close_timeout)
+        return driver.state(handle)
 
     def close(self, id: str) -> AgentRecord:
         with self._lock:
@@ -307,17 +336,20 @@ class SidecarCore:
                 rec.reopen_at = None
             if rec.state == STATE_EXITED:
                 return rec
+            if rec.state == STATE_STARTING:
+                # The launch is still in flight and there is no handle yet:
+                # remember the close, let open do the stop when it lands (M1).
+                rec.closing = True
+                self._clear_pending(rec)
+                return rec
             driver = self._drivers.get(rec.agent)
             handle = rec.handle
             waiting = rec.state == STATE_WAITING_QUOTA
             self._clear_pending(rec)
-        if waiting or handle is None or driver is None:
+        if waiting:
             final = DriverState(kind=DRIVER_EXITED, reason="closed without a running agent")
         else:
-            # Gentle stop: the agora process forwards to the agent, writes the
-            # last conversation back on its way out, then releases the lock (D6).
-            driver.stop(handle, graceful=True, timeout=self._close_timeout)
-            final = driver.state(handle)
+            final = self._stop_handle(handle, driver)
         with self._lock:
             rec.state = STATE_EXITED
             rec.exit = {"code": final.code, "reason": final.reason or "closed"}
