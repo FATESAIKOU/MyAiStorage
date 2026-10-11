@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 from pathlib import Path
+import time
 import pytest
 
 from angareion.backend import BackendError, FakeBackend, RateLimitError
@@ -441,3 +442,66 @@ def test_rate_limit_file_uses_flock(cli_env, monkeypatch):
     assert fcntl.LOCK_EX in calls
     assert fcntl.LOCK_UN in calls
     assert calls.index(fcntl.LOCK_EX) < calls.index(fcntl.LOCK_UN)
+
+
+def test_rate_limit_sleep_happens_outside_lock(cli_env, monkeypatch, capsys):
+    """L3: acquire must not sleep while holding LOCK_EX, or a concurrent send
+    blocks on the lock for the whole wait instead of just the read-modify-write."""
+    events: list[str] = []
+    real_flock = fcntl.flock
+
+    def spy_flock(fd, op):
+        events.append("lock" if op == fcntl.LOCK_EX else "unlock")
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(fcntl, "flock", spy_flock)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(time, "time", lambda: clock["now"])
+
+    def fake_sleep(s):
+        events.append("sleep")
+        clock["now"] += s
+
+    state_dir = cli_env["config"].state_dir
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "rate_limit.json").write_text(json.dumps([999.0] * 80))
+    limiter = RateLimiter(state_dir, sleeper=fake_sleep)
+    limiter.acquire(max_wait=60.0)
+
+    assert "sleep" in events
+    depth = 0
+    for e in events:
+        if e == "lock":
+            depth += 1
+        elif e == "unlock":
+            depth -= 1
+        elif e == "sleep":
+            assert depth == 0, f"slept while holding the lock: {events}"
+    capsys.readouterr()
+    # The 80 old entries are 60s old after the sleep: out of the 1-minute
+    # window but kept by the 1-hour one; the new entry uses the post-sleep
+    # clock, not the pre-sleep one.
+    assert json.loads((state_dir / "rate_limit.json").read_text()) == [999.0] * 80 + [1059.0]
+
+
+def test_empty_inbox_leaves_no_cache_file(cli_env, capsys):
+    """L3: an empty channel writes no `{}` cache file; the next inbox still
+    lists empty (a missing cache always means a full fetch)."""
+    backend = cli_env["backend"]
+    state_dir = cli_env["config"].state_dir
+
+    ret = main(
+        ["inbox", "--identity", "repo=owner-org/worker,role=team-a", "--json"],
+        backend=backend,
+    )
+    assert ret == 0
+    assert json.loads(capsys.readouterr().out) == []
+    assert list(state_dir.glob("*_cache.json")) == []
+
+    ret2 = main(
+        ["inbox", "--identity", "repo=owner-org/worker,role=team-a", "--json"],
+        backend=backend,
+    )
+    assert ret2 == 0
+    assert json.loads(capsys.readouterr().out) == []
+    assert list(state_dir.glob("*_cache.json")) == []

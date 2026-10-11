@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, Protocol
 import urllib.error
@@ -17,6 +18,9 @@ from angareion.backend import (
 )
 from angareion.config import Config, load_token, mask_token
 from angareion.messages import Message, parse_message, serialize_message
+
+
+logger = logging.getLogger(__name__)
 
 
 class HttpResponse:
@@ -264,7 +268,17 @@ class GitHubBackend:
                 f"Message channel '{msg_obj.channel}' does not match target channel '{channel}'"
             )
 
-        # Idempotency check: check recent comments for the same message id
+        # Idempotency check: check recent comments for the same message id.
+        #
+        # Boundary (accepted for v0): only the first page (per_page=30) and the
+        # last page are fetched. A resend of an id that has been pushed to a
+        # middle page (61+ comments on the channel) is not found here and will
+        # be posted again, strictly speaking against "an id already on the
+        # channel counts as success". That shape needs 60+ comments plus a
+        # manual resend of an old id — timeout retries always land on the last
+        # page, which is covered. Walking back from the last page would cost
+        # extra paginated requests on every send, on the same rate-limited
+        # path the 403 retry defends, so v0 documents the boundary instead.
         recent_url = f"repos/{self.owner}/{self.repo}/issues/{issue_number}/comments?per_page=30"
         resp_recent = self._request("GET", recent_url, headers=self._headers())
         comments_to_check: list[dict[str, Any]] = []
@@ -275,6 +289,15 @@ class GitHubBackend:
                 resp_last = self._request("GET", last_url, headers=self._headers())
                 if resp_last.status == 200:
                     comments_to_check.extend(resp_last.json())
+                else:
+                    # The dedup window just shrank to the first page: say so
+                    # (page URL and status only — never any secret), or the
+                    # duplicate post that may follow is a mystery.
+                    logger.warning(
+                        "Angareion dedup check: last-page fetch failed "
+                        f"(HTTP {resp_last.status}) for {last_url}; "
+                        "falling back to the first page only, a retry may repost."
+                    )
             comments_to_check.extend(resp_recent.json())
 
         for c in comments_to_check:

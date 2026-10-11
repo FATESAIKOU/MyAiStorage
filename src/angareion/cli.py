@@ -100,23 +100,26 @@ class RateLimiter:
         self.state_file = state_dir / "rate_limit.json"
         self.sleeper = sleeper
 
-    def _load_history(self) -> list[float]:
-        if self.state_file.is_file():
-            try:
-                data = json.loads(self.state_file.read_text(encoding="utf-8"))
-                if isinstance(data, list):
-                    return [float(x) for x in data]
-            except Exception:
-                pass
-        return []
-
-    def _save_history(self, history: list[float]) -> None:
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        self.state_file.write_text(json.dumps(history) + "\n", encoding="utf-8")
-
     def acquire(self, max_wait: float = 10.0) -> None:
-        """Check limits (80/min, 500/hour) with file locking (fcntl.flock)."""
+        """Check limits (80/min, 500/hour) with file locking (fcntl.flock).
+
+        The wait, if any, happens outside the lock: each pass takes the lock
+        only to read the history and decide (record now / wait N seconds /
+        raise), releases it, and — after sleeping — reads again. A concurrent
+        sender therefore only ever blocks on the short read-modify-write,
+        never on our whole wait.
+        """
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        while True:
+            wait_needed = self._decide_under_lock(max_wait)
+            if wait_needed is None:
+                return
+            sys.stderr.write(f"Rate throttle: waiting {wait_needed:.1f}s before sending...\n")
+            self.sleeper(wait_needed)
+
+    def _decide_under_lock(self, max_wait: float) -> float | None:
+        """One locked pass: prune the history, then record now (None), name a
+        wait in seconds, or raise RateLimitError when the wait exceeds max_wait."""
         with open(self.state_file, "a+", encoding="utf-8") as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             try:
@@ -141,15 +144,11 @@ class RateLimiter:
                     wait_needed = 60.0 - (now - oldest_in_window)
                     if wait_needed > 0:
                         if wait_needed <= max_wait:
-                            sys.stderr.write(f"Rate throttle: waiting {wait_needed:.1f}s before sending...\n")
-                            self.sleeper(wait_needed)
-                            now = time.time()
-                            history = [t for t in history if now - t < 3600.0]
-                        else:
-                            raise RateLimitError(
-                                f"Rate limit exceeded (80 messages/min). Required wait {wait_needed:.1f}s exceeds limit of {max_wait}s.",
-                                retry_after=int(wait_needed),
-                            )
+                            return wait_needed
+                        raise RateLimitError(
+                            f"Rate limit exceeded (80 messages/min). Required wait {wait_needed:.1f}s exceeds limit of {max_wait}s.",
+                            retry_after=int(wait_needed),
+                        )
 
                 # 1-hour window (limit: 500)
                 if len(history) >= 500:
@@ -157,21 +156,18 @@ class RateLimiter:
                     wait_needed = 3600.0 - (now - oldest_in_window)
                     if wait_needed > 0:
                         if wait_needed <= max_wait:
-                            sys.stderr.write(f"Rate throttle: waiting {wait_needed:.1f}s before sending...\n")
-                            self.sleeper(wait_needed)
-                            now = time.time()
-                            history = [t for t in history if now - t < 3600.0]
-                        else:
-                            raise RateLimitError(
-                                f"Rate limit exceeded (500 messages/hour). Required wait {wait_needed:.1f}s exceeds limit of {max_wait}s.",
-                                retry_after=int(wait_needed),
-                            )
+                            return wait_needed
+                        raise RateLimitError(
+                            f"Rate limit exceeded (500 messages/hour). Required wait {wait_needed:.1f}s exceeds limit of {max_wait}s.",
+                            retry_after=int(wait_needed),
+                        )
 
                 history.append(now)
                 f.seek(0)
                 f.truncate()
                 f.write(json.dumps(history) + "\n")
                 f.flush()
+                return None
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
@@ -387,8 +383,12 @@ def cmd_inbox(args: argparse.Namespace, config: Config, backend: Backend, token:
             }
 
         state.save()
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text(json.dumps(cached_messages_dict, indent=2) + "\n", encoding="utf-8")
+        if cached_messages_dict:
+            # An empty channel leaves no cache file: {} is falsy, so the next
+            # inbox fetches full (etag/since None) either way — writing it
+            # would only buy a 200 that says "still empty".
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(json.dumps(cached_messages_dict, indent=2) + "\n", encoding="utf-8")
 
     # Filter messages for current recipient identity
     target_repo = identity.get("repo")

@@ -6,6 +6,7 @@ Tests use mock/injected HttpTransport without external network access.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 import urllib.error
 import pytest
@@ -438,4 +439,127 @@ def test_post_message_duplicate_detection_locates_last_page_when_over_30_comment
     assert url == "https://github.com/owner/repo/issues/10#issuecomment-35"
     post_requests = [r for r in transport.recorded_requests if r["method"] == "POST"]
     assert len(post_requests) == 0
+
+
+def test_post_message_last_page_failure_warns_and_falls_back(caplog):
+    """L1: a failing last-page fetch logs a warning (page + status, no secret)
+    and the post still goes out on the first-page-only check."""
+    target = _make_msg(channel="phase-1", msg_id="01RETRY_MSG", content="Retry me")
+    transport = FakeTransport()
+    transport.set_route(
+        "GET",
+        "https://api.github.com/repos/owner/repo/issues?state=all&per_page=100",
+        HttpResponse(200, {}, json.dumps([{"number": 10, "title": "phase-1"}]).encode("utf-8")),
+    )
+    last_page_url = "https://api.github.com/repos/owner/repo/issues/10/comments?per_page=30&page=2"
+    transport.set_route(
+        "GET",
+        "https://api.github.com/repos/owner/repo/issues/10/comments?per_page=30",
+        HttpResponse(
+            200,
+            {"link": f'<{last_page_url}>; rel="last"'},
+            json.dumps([]).encode("utf-8"),
+        ),
+    )
+    transport.set_route(
+        "GET",
+        last_page_url,
+        HttpResponse(500, {}, b'{"message": "Internal Server Error"}'),
+    )
+    transport.set_route(
+        "POST",
+        "https://api.github.com/repos/owner/repo/issues/10/comments",
+        HttpResponse(201, {}, json.dumps({"html_url": "https://github.com/owner/repo/issues/10#issuecomment-9"}).encode("utf-8")),
+    )
+
+    backend = GitHubBackend("owner/repo", token="token123", transport=transport)
+    with caplog.at_level(logging.WARNING, logger="angareion.github"):
+        url = backend.post_message("phase-1", target)
+
+    assert url == "https://github.com/owner/repo/issues/10#issuecomment-9"
+    assert "500" in caplog.text
+    assert last_page_url in caplog.text
+    assert "token123" not in caplog.text
+    post_requests = [r for r in transport.recorded_requests if r["method"] == "POST"]
+    assert len(post_requests) == 1
+
+
+def test_post_message_middle_page_id_is_not_found_v0_boundary():
+    """L2 boundary (accepted for v0): only page 1 + last page are consulted.
+
+    With 65 comments across 3 pages, an id sitting on the middle page is not
+    found and gets posted again. This pins the documented boundary: consulting
+    more pages must flip this test, deliberately, along with the comment.
+    """
+    target = _make_msg(channel="phase-1", msg_id="01MIDDLE_MSG", content="Old middle message")
+
+    transport = FakeTransport()
+    transport.set_route(
+        "GET",
+        "https://api.github.com/repos/owner/repo/issues?state=all&per_page=100",
+        HttpResponse(200, {}, json.dumps([{"number": 10, "title": "phase-1"}]).encode("utf-8")),
+    )
+    page2_url = "https://api.github.com/repos/owner/repo/issues/10/comments?per_page=30&page=2"
+    page3_url = "https://api.github.com/repos/owner/repo/issues/10/comments?per_page=30&page=3"
+    # The target id lives only on the middle page, which nothing ever fetches.
+    # (It has an explicit route so a future "consult more pages" change would
+    # find it there instead of hanging on FakeTransport's prefix fallback.)
+    transport.set_route(
+        "GET",
+        page2_url,
+        HttpResponse(
+            200,
+            {},
+            json.dumps([{
+                "id": 45,
+                "body": serialize_message(target),
+                "html_url": "https://github.com/owner/repo/issues/10#issuecomment-45",
+            }]).encode("utf-8"),
+        ),
+    )
+    page1_comments = [
+        {
+            "id": i,
+            "body": serialize_message(_make_msg(channel="phase-1", msg_id=f"01P1_MSG_{i}", content=f"Page1 {i}")),
+            "html_url": f"https://github.com/owner/repo/issues/10#issuecomment-{i}",
+        }
+        for i in range(1, 31)
+    ]
+    transport.set_route(
+        "GET",
+        "https://api.github.com/repos/owner/repo/issues/10/comments?per_page=30",
+        HttpResponse(
+            200,
+            {"link": f'<{page2_url}>; rel="next", <{page3_url}>; rel="last"'},
+            json.dumps(page1_comments).encode("utf-8"),
+        ),
+    )
+    # The middle page is never fetched, so its contents do not matter here.
+    page3_comments = [
+        {
+            "id": 60 + i,
+            "body": serialize_message(_make_msg(channel="phase-1", msg_id=f"01P3_MSG_{i}", content=f"Page3 {i}")),
+            "html_url": f"https://github.com/owner/repo/issues/10#issuecomment-{60 + i}",
+        }
+        for i in range(5)
+    ]
+    transport.set_route(
+        "GET",
+        page3_url,
+        HttpResponse(200, {}, json.dumps(page3_comments).encode("utf-8")),
+    )
+    transport.set_route(
+        "POST",
+        "https://api.github.com/repos/owner/repo/issues/10/comments",
+        HttpResponse(201, {}, json.dumps({"html_url": "https://github.com/owner/repo/issues/10#issuecomment-66"}).encode("utf-8")),
+    )
+
+    backend = GitHubBackend("owner/repo", token="token123", transport=transport)
+    url = backend.post_message("phase-1", target)
+    # The middle-page id is missed: the message goes out again.
+    assert url == "https://github.com/owner/repo/issues/10#issuecomment-66"
+    post_requests = [r for r in transport.recorded_requests if r["method"] == "POST"]
+    assert len(post_requests) == 1
+    fetched = [r["url"] for r in transport.recorded_requests if r["method"] == "GET"]
+    assert page2_url not in fetched
 
