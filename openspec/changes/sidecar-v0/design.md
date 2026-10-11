@@ -68,6 +68,11 @@ agent 清單、job 清單只在記憶體。sidecar 結束時先對每個 agent �
 - `~/.config/sidecar/config.json`（`SIDECAR_CONFIG` 可覆寫）：`port`、`subscription_source`（`llmgateway`＋連線設定，或 `file`＋路徑）、`agents`（各種類的執行檔路徑與額外參數）、`sync_period`（分鐘，預設 5）。
 - 不含任何秘密。LLMGateway 的連線憑證由 `lgw connect` 自己處理。
 
+### D8 版本與健康檢查（MyLinuxPool 的 `install.sh --check` 用）
+
+- `sidecar --version`：印出安裝時的 git sha（`uv tool install git+…@<sha>` 的套件中繼資料 `direct_url.json` 裡的 commit；從原始碼目錄跑時印套件版本並註明）。這是指令列的旗標，不是給 agent 的指示。
+- 健康檢查不另加端點：`GET /agents`（status）有回應就是「在跑」，連不上就是「沒在跑」。對外仍只有四個動作。
+
 ## Risks / Trade-offs
 
 - [程式化模式沒有 TUI 可看] → 人看進度用 agora 的 Session 或 sidecar 的 log；之後若要，人可以另外用 herdr 管。
