@@ -348,6 +348,58 @@ def test_swap_failure_goes_waiting_quota_with_a_retry_job(tmp_path):
     assert core.list_jobs() == []
 
 
+def test_close_during_a_swap_stops_the_fresh_handle(tmp_path):
+    """N1 scenario 關閉與換把同時: close during the swap, the new process dies too."""
+    core, driver, store, _source, clock, workdir = rig(tmp_path)
+    store.seed("agora:A")
+    core.open("t1", "claude-code", workdir, {"mode": "continue", "from": "agora:A"},
+              subscription={"id": "claude-personal"}, input="go")
+    first = driver.handles[0]
+    driver.force_state(first, "quota_exhausted", window="5h", resets_at=iso(clock.t + 3600))
+    store.start_gate = threading.Event()
+
+    swapping = threading.Thread(target=core.tick)
+    swapping.start()
+    assert store.start_entered.wait(2)  # old handle stopped; relaunch is gated
+
+    rec = core.close("t1")
+
+    assert rec.state != STATE_EXITED  # close answers 200; the transition ends it
+    store.start_gate.set()
+    swapping.join(5)
+
+    rec = core.get("t1")
+    assert rec.state == STATE_EXITED
+    fresh = driver.handles[-1]
+    assert fresh is not first and fresh.stopped
+    assert [c for c in driver.stop_calls if c[0] is fresh] == [(fresh, True, 30.0)]
+    assert core.list_jobs() == []  # no reopen job for a closed agent
+
+
+def test_busy_is_released_after_a_swap_allowing_another(tmp_path):
+    """N5 scenario 換把完成後仍能再換: the second quota event is not ignored."""
+    extra = F.claude_subscription("claude-extra", key="key-extra", priority=30)
+    core, driver, store, _source, clock, workdir = rig(
+        tmp_path, subs=F.default_subscriptions() + [extra]
+    )
+    store.seed("agora:A")
+    core.open("t1", "claude-code", workdir, {"mode": "continue", "from": "agora:A"},
+              subscription={"id": "claude-personal"}, input="go")
+    driver.force_state(driver.handles[0], "quota_exhausted", window="5h",
+                       resets_at=iso(clock.t + 3600))
+    core.tick()
+    assert core.get("t1").subscription == "claude-company"
+
+    second = driver.handles[-1]
+    driver.force_state(second, "quota_exhausted", window="5h", resets_at=iso(clock.t + 7200))
+    core.tick()
+
+    rec = core.get("t1")
+    assert rec.subscription == "claude-extra"  # it swapped again
+    assert rec.state in (STATE_IDLE, STATE_RUNNING)
+    assert len(driver.stop_calls) == 2
+
+
 def test_llmgateway_unreachable_during_swap_waits_with_a_retry_job(tmp_path):
     core, driver, store, source, clock, workdir = rig(tmp_path, retry_interval=300.0)
     _open_and_exhaust(core, driver, store, source, clock, workdir)

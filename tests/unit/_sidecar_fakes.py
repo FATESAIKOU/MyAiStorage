@@ -149,6 +149,8 @@ class FakeSessionStore:
         self.sessions: dict[str, dict[str, Any]] = {}
         self.starts: list[dict[str, Any]] = []
         self.fail_start: Exception | None = None  # raise from start(), for M3
+        self.start_gate: threading.Event | None = None  # block inside start(), for N1
+        self.start_entered = threading.Event()
         self._counter = 0
 
     def seed(
@@ -172,6 +174,9 @@ class FakeSessionStore:
         if self.fail_start is not None:
             error, self.fail_start = self.fail_start, None
             raise error
+        self.start_entered.set()
+        if self.start_gate is not None:
+            self.start_gate.wait(timeout=5)
         self._counter += 1
         ids = list(ids)
         if mode == "new":

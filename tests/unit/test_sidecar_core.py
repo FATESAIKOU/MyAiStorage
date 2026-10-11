@@ -345,6 +345,26 @@ def test_close_while_starting_stops_the_agent_once_it_comes_up(tmp_path):
     assert driver.handles[0].stopped  # no process left behind
 
 
+def test_a_refresh_sees_closing_and_stops(tmp_path):
+    """N4 scenario 刷新時看到 closing: a missed open check is caught later."""
+    core, driver, _store, _source, _clock, workdir = rig(tmp_path)
+    driver.launch_state = DriverState(kind="starting")  # open's refresh cannot settle
+    core.open("t1", "claude-code", workdir, {"mode": "new"})
+    driver.state_fails = True
+    core.tick()  # the refresh fails; state stays starting
+
+    rec = core.close("t1")
+    assert rec.closing and rec.state == STATE_STARTING
+
+    driver.state_fails = False
+    driver.launch_state = None
+    core.tick()  # the next refresh sees closing in ACTIVE and stops it
+
+    assert core.get("t1").state == STATE_EXITED
+    assert len(driver.stop_calls) == 1
+    assert driver.handles[0].stopped
+
+
 # --- poke (spec: 暫停就是戳加中斷 / 不打斷 / starting 排隊) ---------------------
 
 

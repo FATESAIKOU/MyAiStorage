@@ -321,6 +321,20 @@ class SidecarCore:
             rec.reopen_job = None
         return rec
 
+    def _closing_requested(self, rec: AgentRecord) -> bool:
+        with self._lock:
+            return rec.closing and self._agents.get(rec.id) is rec
+
+    def _set_exited(self, rec: AgentRecord, *, reason: str = "closed during a transition") -> None:
+        """Mark exited without another stop; the handle was already stopped."""
+        with self._lock:
+            if self._agents.get(rec.id) is not rec:
+                return
+            rec.state = STATE_EXITED
+            rec.exit = {"code": None, "reason": reason}
+            rec.reopen_at = None
+            rec.reopen_job = None
+
     def _stop_handle(self, handle: Any, driver: Any) -> DriverState:
         if handle is None or driver is None:
             return DriverState(kind=DRIVER_EXITED, reason="closed without a running agent")
@@ -340,9 +354,9 @@ class SidecarCore:
                 rec.reopen_at = None
             if rec.state == STATE_EXITED:
                 return rec
-            if rec.state == STATE_STARTING:
-                # The launch is still in flight and there is no handle yet:
-                # remember the close, let open do the stop when it lands (M1).
+            if rec.state == STATE_STARTING or rec.busy:
+                # The launch or a state transition (e.g. a swap) is in flight:
+                # remember the close, let that thread do the stop (M1/N1).
                 rec.closing = True
                 self._clear_pending(rec)
                 return rec
@@ -529,8 +543,24 @@ class SidecarCore:
         with self._lock:
             if rec.state not in ACTIVE_STATES or rec.handle is None:
                 return
+            if rec.closing:
+                # close landed while a transition was in flight (M1/N1/N4): this
+                # refresh is the one that stops the process and marks exited.
+                if rec.busy:
+                    return
+                rec.busy = True
+                closing = True
+            else:
+                closing = False
             driver = self._drivers.get(rec.agent)
             handle = rec.handle
+        if closing:
+            try:
+                self._stop_and_exit(rec)
+            finally:
+                with self._lock:
+                    rec.busy = False
+            return
         if driver is None:
             return
         try:
@@ -638,6 +668,11 @@ class SidecarCore:
                         break
                     exclude.add(sid)  # 403/404/409: unusable, try the next one
 
+        if self._closing_requested(rec):
+            # close landed before the stop: stop now and stay exited (N1).
+            self._stop_and_exit(rec)
+            state["stopped"] = True
+            return
         # Stop first, let agora write the last conversation back (D4/D6).
         if rec.handle is not None and driver is not None:
             driver.stop(rec.handle, graceful=True, timeout=self._close_timeout)
@@ -666,6 +701,12 @@ class SidecarCore:
                 env=env,
             )
             handle = driver.launch(running, env, rec.workdir)
+            if self._closing_requested(rec):
+                # close landed while we were relaunching: stop the fresh
+                # process and do not put it into service (N1).
+                self._stop_handle(handle, driver)
+                self._set_exited(rec)
+                return
             with self._lock:
                 if self._agents.get(rec.id) is not rec:
                     return
@@ -675,6 +716,11 @@ class SidecarCore:
                 rec.state = STATE_STARTING
                 rec.reopen_at = None
                 rec.reopen_job = None
+            if self._closing_requested(rec):
+                # The tiny window after the write: same treatment.
+                self._stop_handle(handle, driver)
+                self._set_exited(rec)
+                return
             self._refresh_one(rec, now)
             self._send_resume(rec)
             return
@@ -699,6 +745,14 @@ class SidecarCore:
         """Go waiting-quota and hang the auto-reopen job (D4/M3)."""
         with self._lock:
             if self._agents.get(rec.id) is not rec:
+                return
+            if rec.closing:
+                # close landed after the stop, before the wait: stay exited
+                # instead of waiting for a reopen nobody wants (N1).
+                rec.state = STATE_EXITED
+                rec.exit = {"code": None, "reason": "closed during a transition"}
+                rec.reopen_at = None
+                rec.reopen_job = None
                 return
             rec.state = STATE_WAITING_QUOTA
             rec.reopen_at = None
