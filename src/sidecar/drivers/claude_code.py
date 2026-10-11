@@ -45,6 +45,7 @@ from ..protocols import (
     iso,
 )
 from ..subproc import child_env, terminate_process
+from .common import pick_model
 
 logger = logging.getLogger(__name__)
 
@@ -86,20 +87,45 @@ class ClaudeCodeDriver:
     # -- AgentDriver ------------------------------------------------------
 
     def env_for(self, subscription: Subscription) -> dict[str, str]:
-        """The subscription as Claude Code's environment (assumptions reported).
+        """The subscription as Claude Code's environment (D6, spike-verified).
 
-        A claude.ai subscription's key goes to `CLAUDE_CODE_OAUTH_TOKEN`; an
-        api-key subscription's to `ANTHROPIC_API_KEY`.  `endpoint`, when set,
-        overrides `ANTHROPIC_BASE_URL`.
+        - a claude.ai subscription's key goes to `CLAUDE_CODE_OAUTH_TOKEN`;
+        - an `anthropic` api-key goes to `ANTHROPIC_API_KEY` (x-api-key);
+        - any other provider's api-key goes to `ANTHROPIC_AUTH_TOKEN` with an
+          empty `ANTHROPIC_API_KEY`, so Claude sends only `Authorization:
+          Bearer` (LLMGateway decision 7);
+        - `models.default`, when set, becomes both `ANTHROPIC_MODEL` and
+          `ANTHROPIC_SMALL_FAST_MODEL`; a non-Anthropic provider without a
+          default falls back to `models.allow`'s first concrete entry or is
+          refused (`no_model`); an Anthropic subscription without a default
+          keeps Claude's own;
+        - the non-essential-traffic and auto-updater switches are ours to set
+          (`child_env` drops the parent's `ANTHROPIC_*`).
         """
+        provider = subscription.provider or "anthropic"
         env: dict[str, str] = {}
-        if subscription.key:
-            if subscription.kind == "api-key":
-                env["ANTHROPIC_API_KEY"] = subscription.key
+        if subscription.kind == "api-key":
+            if provider == "anthropic":
+                if subscription.key:
+                    env["ANTHROPIC_API_KEY"] = subscription.key
             else:
-                env["CLAUDE_CODE_OAUTH_TOKEN"] = subscription.key
+                if subscription.key:
+                    env["ANTHROPIC_AUTH_TOKEN"] = subscription.key
+                env["ANTHROPIC_API_KEY"] = ""  # bearer only, never x-api-key
+        elif subscription.key:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = subscription.key
         if subscription.endpoint:
             env["ANTHROPIC_BASE_URL"] = subscription.endpoint
+        default = (subscription.models or {}).get("default")
+        if isinstance(default, str) and default:
+            env["ANTHROPIC_MODEL"] = default
+            env["ANTHROPIC_SMALL_FAST_MODEL"] = default
+        elif provider != "anthropic":
+            model = pick_model(subscription)
+            env["ANTHROPIC_MODEL"] = model
+            env["ANTHROPIC_SMALL_FAST_MODEL"] = model
+        env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+        env["DISABLE_AUTOUPDATER"] = "1"
         return env
 
     def launch(self, session: RunningSession | None, env: dict[str, str], workdir: str) -> ClaudeHandle:

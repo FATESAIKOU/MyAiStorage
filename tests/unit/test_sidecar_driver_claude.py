@@ -24,6 +24,7 @@ from sidecar.protocols import (
     DRIVER_IDLE,
     DRIVER_QUOTA_EXHAUSTED,
     DRIVER_RUNNING,
+    NoModelError,
     RunningSession,
     Subscription,
     iso,
@@ -106,16 +107,51 @@ def attach(driver, tmp_path, monkeypatch):
             proc.wait(timeout=5)
 
 
-# --- env_for (assumptions reported) -------------------------------------------
+# --- env_for (spike-verified rules) -------------------------------------------
 
 
-def test_env_for_maps_api_key_and_subscription(driver):
-    assert driver.env_for(Subscription(
-        id="a", kind="api-key", key=SECRET, endpoint="https://example.invalid"
-    )) == {"ANTHROPIC_API_KEY": SECRET, "ANTHROPIC_BASE_URL": "https://example.invalid"}
-    assert driver.env_for(Subscription(
-        id="b", kind="claude-subscription", key=SECRET
-    )) == {"CLAUDE_CODE_OAUTH_TOKEN": SECRET}
+def test_env_for_rules(driver):
+    switches = {
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "DISABLE_AUTOUPDATER": "1",
+    }
+    # anthropic api-key -> x-api-key
+    anthropic = driver.env_for(Subscription(
+        id="a", provider="anthropic", kind="api-key", key=SECRET
+    ))
+    assert anthropic == {"ANTHROPIC_API_KEY": SECRET, **switches}
+
+    # other providers' api-key -> bearer only (LLMGateway decision 7)
+    openrouter = driver.env_for(Subscription(
+        id="b", provider="openrouter", kind="api-key", key=SECRET,
+        endpoint="https://example.invalid", models={"default": "acme/model"},
+    ))
+    assert openrouter == {
+        "ANTHROPIC_AUTH_TOKEN": SECRET,
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_BASE_URL": "https://example.invalid",
+        "ANTHROPIC_MODEL": "acme/model",
+        "ANTHROPIC_SMALL_FAST_MODEL": "acme/model",
+        **switches,
+    }
+
+    # a subscription keeps Claude's own default model
+    subscription = driver.env_for(Subscription(
+        id="c", provider="anthropic", kind="claude-subscription", key=SECRET
+    ))
+    assert subscription == {"CLAUDE_CODE_OAUTH_TOKEN": SECRET, **switches}
+
+    # non-anthropic without a default: allow's first concrete entry
+    fallback = driver.env_for(Subscription(
+        id="d", provider="openrouter", kind="api-key", key="k",
+        models={"allow": ["*", "concrete-model"]},
+    ))
+    assert fallback["ANTHROPIC_MODEL"] == "concrete-model"
+    with pytest.raises(NoModelError):
+        driver.env_for(Subscription(
+            id="e", provider="openrouter", kind="api-key", key="k",
+            models={"allow": ["*", "org/*"]},
+        ))
 
 
 # --- the stream-json round trip -----------------------------------------------

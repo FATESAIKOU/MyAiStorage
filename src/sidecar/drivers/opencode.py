@@ -49,12 +49,12 @@ from ..protocols import (
     DRIVER_RUNNING,
     BadRequestError,
     DriverState,
-    NoModelError,
     RunningSession,
     Subscription,
     iso,
 )
 from ..subproc import child_env, terminate_process
+from .common import pick_model
 
 logger = logging.getLogger(__name__)
 
@@ -71,25 +71,6 @@ OPENCODE_PROVIDER_IDS = {
     "openrouter": "openrouter",
     "ollama-cloud": "ollama-cloud",
 }
-
-
-def pick_model(subscription: Subscription) -> str:
-    """`models.default`, else the first concrete entry of `models.allow`.
-
-    No usable source means refuse - never let the agent pick its own default
-    (D6: it may hit an image-preview model or the public Zen models).
-    """
-    models = subscription.models or {}
-    default = models.get("default")
-    if isinstance(default, str) and default:
-        return default
-    for allowed in models.get("allow") or []:
-        if isinstance(allowed, str) and allowed and "*" not in allowed:
-            return allowed
-    raise NoModelError(
-        f"subscription {subscription.id!r} names no usable model "
-        "(models.default or a concrete models.allow entry)"
-    )
 
 
 class OpenCodeDriverError(RuntimeError):
