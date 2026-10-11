@@ -12,6 +12,16 @@ from angareion.backend import (
     MessageListResult,
     RateLimitError,
 )
+from angareion.config import (
+    Config,
+    ConfigError,
+    TokenError,
+    TokenMissingError,
+    TokenPermissionError,
+    load_config,
+    load_token,
+    mask_token,
+)
 from angareion.messages import Message
 
 __version__ = "0.1.0"
@@ -21,8 +31,16 @@ __all__ = [
     "BackendError",
     "ChannelAlreadyExistsError",
     "ChannelNotFoundError",
+    "Config",
+    "ConfigError",
     "FakeBackend",
     "Message",
     "MessageListResult",
     "RateLimitError",
+    "TokenError",
+    "TokenMissingError",
+    "TokenPermissionError",
+    "load_config",
+    "load_token",
+    "mask_token",
 ]

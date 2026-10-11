@@ -15,6 +15,18 @@ class ConfigError(ValueError):
     """Raised when configuration is invalid or missing."""
 
 
+class TokenError(ConfigError):
+    """Base error for token issues."""
+
+
+class TokenMissingError(TokenError):
+    """Raised when token file does not exist."""
+
+
+class TokenPermissionError(TokenError):
+    """Raised when token file has invalid permissions (not 0600)."""
+
+
 def get_config_path() -> Path:
     """Return path to config.json, honoring A2A_CONFIG environment variable."""
     env = os.environ.get("A2A_CONFIG")
@@ -110,3 +122,50 @@ def save_config(config: Config, path: Path | str | None = None) -> None:
     config_path = Path(path) if path is not None else config.config_file
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(config.to_dict(), indent=2) + "\n", encoding="utf-8")
+
+
+def load_token(token_source: Config | Path | str | None = None) -> str:
+    """Read fine-grained PAT from file with 0600 mode requirement.
+
+    Raises TokenMissingError if the file is absent.
+    Raises TokenPermissionError if the file permissions are not 0600 on POSIX.
+    Raises TokenError if the token file is empty or unreadable.
+    """
+    if isinstance(token_source, Config):
+        p = token_source.token_file
+    elif token_source is None:
+        p = get_default_token_path()
+    else:
+        p = Path(os.path.expanduser(str(token_source)))
+
+    if not p.is_file():
+        raise TokenMissingError(
+            f"Token file not found: {p}. "
+            "Please create a GitHub Fine-grained Personal Access Token with "
+            "'Issues: Read and write' permissions and save it with 0600 permissions."
+        )
+
+    if os.name == "posix":
+        st = p.stat()
+        mode = st.st_mode & 0o777
+        if mode != 0o600:
+            raise TokenPermissionError(
+                f"Token file permissions must be 0600 (owner read/write only, got {oct(mode)}): {p}"
+            )
+
+    try:
+        token = p.read_text(encoding="utf-8").strip()
+    except Exception as e:
+        raise TokenError(f"Failed to read token file {p}: {type(e).__name__}") from e
+
+    if not token:
+        raise TokenError(f"Token file is empty: {p}")
+
+    return token
+
+
+def mask_token(text: str, token: str) -> str:
+    """Mask any occurrences of token in text with asterisks."""
+    if not token:
+        return text
+    return text.replace(token, "***")
