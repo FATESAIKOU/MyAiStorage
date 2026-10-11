@@ -106,7 +106,7 @@ Sidecar 位於 `MyAiStorage` repo 內的 `src/sidecar/`，提供 console script 
 | 欄位名稱 | 型態 | 必要性 | 說明 |
 |---|---|---|---|
 | `state_dir` | 字串 | 選填 | 狀態與日誌根目錄。預設為 `~/.local/state/sidecar`（可由 `SIDECAR_STATE_DIR` 覆寫）。 |
-| `a2a_token_path` | 字串 | 選填/建議 | A2A 通訊用的 GitHub Fine-grained PAT 檔案路徑。必須具備 POSIX `0600` 權限。token 檔由本人放置，隊員不碰。 |
+| `a2a_token_path` | 字串 | 選填/建議 | A2A 通訊用的 GitHub Fine-grained PAT 檔案路徑。權限 owner-only（`0600` 或 `0400`；`0440`／`0644` 等拒絕，規則見 angareion §5）。worker 上填 `/run/mlp-secrets/angareion-token`（`0400` 唯讀掛載）。token 檔由本人放置，隊員不碰。 |
 | `channel_repo` | 字串 | 必填 | Angareion 信道 repo（例如 `"owner-org/a2a-channel"`）。中繼送出時頻道不存在直接回錯誤，不自動建（D10）。 |
 | `identities` | 位址陣列 | 必填 | 此 worker 負責接收與監聽的身分清單；每個身分是完整的 Angareion 位址 `{repo, role, name}`（`repo`、`role` 必填，`name` 選填；收信匹配只比對 `repo`＋`role`）（D10）。 |
 | `teams` | 物件 | 必填 | 各 team 的執行設定映射表（key 為 team 身分；D10 接線實作中，鍵的字面寫法待與實作 commit 對字後定稿）。中繼送出的 `from` 就是該 team 的完整位址，不再寫死（D10）。 |
@@ -150,7 +150,7 @@ Sidecar 位於 `MyAiStorage` repo 內的 `src/sidecar/`，提供 console script 
 
 ### A2A Token
 - **集中持有原則**：A2A Token 僅由 Sidecar 本身持有並讀取。token 檔由本人親自放置與輪替，隊員不碰、不讀（本 repo 是 public，憑證不進版控）。
-- **儲存與權限**：存放在 `~/.config/sidecar/token`（或設定指定的路徑）。檔案權限要求 owner-only（`0600`，或唯讀掛載的 `0400`；group/other 不得有任何位元）。`SidecarConfig.verify_token_permissions()` 會進行權限校驗。
+- **儲存與權限**：存放在 `~/.config/sidecar/token`（或 `a2a_token_path` 指定的路徑）。檔案權限要求 owner-only（`0600` 或 `0400`；`0440`／`0644` 等拒絕，規則見 angareion §5）。`SidecarConfig.verify_token_permissions()` 會進行權限校驗。worker 上的憑證是平台唯讀掛載的 `/run/mlp-secrets/angareion-token`（`0400`），`a2a_token_path` 指過去即可，不手動寫入或 chmod。
 - **隔離防護**：
   - Sidecar 透過 herdr 啟動 agent 時，傳給 pane 的環境只來自 `teams.<id>.env`（白名單）；不帶 `env` 時給空的附加環境，**絕不把 Sidecar 自己的整個行程環境（含 A2A Token）傳給 agent**（D10）。
   - token 只放檔案，**不 export 到登入環境**：herdr server 繼承來的環境變數 Sidecar 擋不住，export 了等於每個 pane 都有（D10）。
@@ -163,9 +163,10 @@ Sidecar 位於 `MyAiStorage` repo 內的 `src/sidecar/`，提供 console script 
      echo -n "github_pat_NEW_TOKEN_VALUE" > ~/.config/sidecar/token
      chmod 0600 ~/.config/sidecar/token
      ```
-  3. 重啟 Sidecar 服務（`systemctl --user restart agent-sidecar`）或等待下一個請求自動載入。
-  4. 確認 `sidecar status` 顯示 `Token: 0600 ok` 且能正常收信。
-  5. 撤銷 GitHub 上的舊 PAT。
+   3. 重啟 Sidecar 服務（`systemctl --user restart agent-sidecar`）或等待下一個請求自動載入。
+   4. 確認 `sidecar status` 顯示 `Token: 0600 ok` 且能正常收信。
+   5. 撤銷 GitHub 上的舊 PAT。
+   （worker 上 `/run/mlp-secrets/angareion-token` 由平台掛載提供，輪替走平台流程，不手動覆寫。）
 
 ### 模型憑證邊界
 - Sidecar 與 Agent **完全不持有、不讀取、不寫入任何模型供應商金鑰**（如 `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`）。
@@ -303,14 +304,19 @@ Sidecar 位於 `MyAiStorage` repo 內的 `src/sidecar/`，提供 console script 
    - 預期：`python -m sidecar.cli status` 不報設定錯誤（服務還沒起沒關係）。
 
 3. **[本人] 放置 token 並鎖權限**：
+   worker 上 `a2a_token_path` 指 `/run/mlp-secrets/angareion-token`（`0400` 唯讀掛載，見 §4），只確認存在，不手動寫入或 chmod：
+   ```bash
+   ls -l /run/mlp-secrets/angareion-token
+   ```
+   自管檔案才走寫入流程：
    ```bash
    install -m 0600 /dev/null ~/.config/sidecar/token
    cat > ~/.config/sidecar/token   # 貼上 Fine-grained PAT（僅信道 repo 的 Issues: Read and write），Ctrl-D 結束
    chmod 0600 ~/.config/sidecar/token
    ls -l ~/.config/sidecar/token
    ```
-   - 預期：最後看到 `-rw-------`（Linux/macOS 通用）。token 只放檔案、不 export（§4）。
-   - 失敗：`sidecar status` 的 `Token:` 不是 `0600 ok` → 權限或路徑錯；先修好再往下。
+   - 預期：掛載路徑看到 `-r--------`，自管檔案看到 `-rw-------`（Linux/macOS 通用）。token 只放檔案、不 export（§4）。
+   - 失敗：`sidecar status` 的 `Token:` 不是 `0600 ok` → 權限或路徑錯（`0440`／`0644` 等會被拒）；先修好再往下。
 
 4. **[本人] 預建回報 channel**（中繼不自動建頻道，不存在會回錯誤）：
    ```bash

@@ -108,8 +108,9 @@ attachments:
     - 嚴禁勾選 Contents、Actions、Pull requests、Administration 或其他權限。
 
 ### Token 本機存放
-- 預設存放於 `~/.config/angareion/token`，檔案權限必須為 owner-only（`0600`，或唯讀掛載上的 `0400`；group/other 不得有任何位元且 owner 須可讀，`0640`／`0644` 會被拒絕）。
-- 可透過環境變數 `A2A_TOKEN_FILE` 指定其他路徑。
+- 預設存放於 `~/.config/angareion/token`；可用設定 `token_file` 或環境變數 `A2A_TOKEN_FILE` 指定其他路徑。
+- 權限規則（`load_token`）：owner-only——group/other 不得有任何位元（`mode & 0o077 == 0`）且 owner 須可讀。`0600` 與 `0400` 通過；`0440`／`0644`（以及 `0640`／`0444` 等）拒絕。
+- worker 上的憑證由平台以唯讀掛載提供：`/run/mlp-secrets/angareion-token`（`0400`）。`token_file` 指過去即可；唯讀掛載改不了權限，本人不手動寫入或 chmod，只確認存在。
 - 程式讀取時若檔案不存在或權限錯誤，回報清楚錯誤並 exit 2；輸出與例外中絕不印出 token 內容。
 
 ### Token 輪替步驟
@@ -223,13 +224,14 @@ a2a ack 01JABCDE0123456789ABCDEF00 [--note "已完成處理"]
      ```
    - 環境 B 的 `config.json`：同上，`identity` 換成 `{"repo": "owner-org/team-b", "role": "worker", "name": "node-b"}`，`token_file` 換另一個路徑。
 4. **[本人] 放置 token 並鎖權限**（兩邊各做一次；`token-a`／`token-b` 可填同一個 PAT）：
+   worker 上直接用平台掛載的 `/run/mlp-secrets/angareion-token`（`0400`，見 §5），跳過寫入與 chmod，只 `ls -l` 確認是 `-r--------`。自管檔案才走下面流程：
    ```bash
    install -m 0600 /dev/null ~/.config/angareion/token-a
    cat > ~/.config/angareion/token-a   # 貼上 PAT，Ctrl-D 結束
    chmod 0600 ~/.config/angareion/token-a
    ls -l ~/.config/angareion/token-a
    ```
-   - 預期：最後看到 `-rw-------`（Linux/macOS 通用；唯讀掛載上 `-r--------` 也可，見 §5）。權限不對 `a2a` 會直接 exit 2（stderr 會說權限錯誤，不會印出 token）。
+   - 預期：最後看到 `-rw-------`（Linux/macOS 通用）。權限不對（`0440`／`0644` 等）`a2a` 會直接 exit 2（stderr 會說權限錯誤，不會印出 token）。
 
 ### 驗收步驟
 1. **[環境 A] 建立新話題並發信**：
