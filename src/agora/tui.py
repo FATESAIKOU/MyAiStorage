@@ -557,14 +557,15 @@ def import_preview(agent, session_id: str, full: bool = False, paths: store.Path
 
 
 def argv_for(action: str, rows: list[Row], agent: str | None, workdir: str | None,
-             sync_period: str | None = None) -> list[list[str]]:
+             sync_period: str | None = None, fork: bool = False) -> list[list[str]]:
     """The command-mode invocations an action stands for.
 
     `sync_period` is the answer to the question the interactive mode asks before it
     continues anything, in the user's own text. It is always passed on when there is
     one - including 0, which is a real answer ("never sync on your own") and not the
     same thing as leaving the command to decide (design「互動模式：接續前確認同步
-    間隔」).
+    間隔」). `fork` says whether to duplicate the session first (--fork), chosen in the
+    continue window (design「tui-continue-fork」).
     """
     if action == "import":
         # One command for every session of that agent: the command mode syncs once
@@ -573,7 +574,8 @@ def argv_for(action: str, rows: list[Row], agent: str | None, workdir: str | Non
                  *[a for r in rows for a in ("--external-session-id", r.key.split(":", 1)[1])]]]
     first = rows[0].key if rows else ""
     return {"continue": [["continue", "session", first, "--agent", agent, "--dir", workdir,
-                          *(["--sync-period", sync_period] if sync_period is not None else [])]],
+                          *(["--sync-period", sync_period] if sync_period is not None else []),
+                          *(["--fork"] if fork else [])]],
             "merge": [["merge", "session", *[r.key for r in rows], "--agent", agent]],
             "edit": [["edit", "session", first]],
             "delete": [["delete", "session", *[r.key for r in rows], "--yes"]],
@@ -2056,8 +2058,25 @@ class AgoraApp(App):
         row = self.current()
         if await self._refuse(row, "接續"):
             return
-        pick = await self.push_screen_wait(Choose("用哪個 agent 接續？", ["opencode", "claude"]))
-        if pick is None:
+        # Imported here to avoid a circular import with cli.
+        from agora.cli import _ulid_of
+        ulid = _ulid_of(row.key)
+        title = (self.index.header(ulid) or {}).get("title") or (row.cells[1] if len(row.cells) > 1 else row.key) or row.key
+        ans = await self.push_screen_wait(Confirm(
+            "用哪個 agent 接續？", ["opencode", "claude"],
+            note="接續原本這個 Session",
+            extra="fork：複製成新的 Session 再接續",
+            note_on=f"會多一個 {title}-fork 的新 Session，原本的不動",
+        ))
+        if ans is None or ans[0] is None:
+            return
+        pick, fork = ans
+        if not fork and store.continuing(self.paths, ulid):
+            await self.push_screen_wait(Tell(
+                "不能接續",
+                f"{row.key} 正在接續中，等它結束再接續；要分岔請在選 agent 的視窗勾 fork",
+                ok=False,
+            ))
             return
         workdir = await self.ask_dir(row)
         if workdir is None:
@@ -2066,7 +2085,7 @@ class AgoraApp(App):
         if period is None:
             return                     # Esc at the question cancels the whole continue
         code = self.outside(argv_for("continue", [row], ("opencode", "claude")[pick], workdir,
-                                     period)[0])
+                                     period, fork=fork)[0])
         self.reload()
         self.say("完成" if code == 0 else "接續沒有成功，訊息在上一個畫面", failed=code != 0)
 
