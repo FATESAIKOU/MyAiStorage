@@ -255,27 +255,40 @@ class GitHubIssuesBackend:
                 f"GitHub returned a non-JSON response while {context} (HTTP {resp.status})"
             ) from e
 
-    def _find_issue(self, name: str) -> dict[str, Any] | None:
-        """The issue JSON for a channel name, or None; paginated and cached."""
-        if name in self._issues_cache:
-            return self._issues_cache[name]
+    def _list_issues(self) -> list[dict[str, Any]]:
+        """Every issue (newest first, as GitHub lists them); caches titles.
 
+        GitHub lists newest first, so the write-through of `_issues_cache`
+        leaves the *oldest* issue for a duplicated title — the one that wins
+        (L4). Pull requests and entries without a title/number are skipped.
+        """
+        issues: list[dict[str, Any]] = []
         url: str | None = f"repos/{self.owner}/{self.repo}/issues?state=all&per_page=100"
         while url:
             resp = self._request("GET", url, headers=self._headers())
             if resp.status >= 400:
-                raise BackendError(f"Failed to find channel '{name}': HTTP {resp.status}")
+                raise BackendError(f"Failed to list issues: HTTP {resp.status}")
 
             for issue in self._json(resp, "listing issues"):
                 if "pull_request" in issue:
                     continue
                 title = issue.get("title")
                 number = issue.get("number")
-                if title and number:
-                    self._issues_cache[title] = issue
-                    self._channel_numbers[title] = number
+                if not title or not number:
+                    continue
+                issues.append(issue)
+                self._issues_cache[title] = issue
+                self._channel_numbers[title] = number
 
             url = self._next_page_url(resp)
+        return issues
+
+    def _find_issue(self, name: str) -> dict[str, Any] | None:
+        """The issue JSON for a channel name, or None."""
+        if name in self._issues_cache:
+            return self._issues_cache[name]
+
+        self._list_issues()
 
         if name in self._issues_cache:
             return self._issues_cache[name]
@@ -284,6 +297,13 @@ class GitHubIssuesBackend:
             return {"title": name, "number": number, "body": ""}
         return None
 
+    def _channel_from_issue(self, name: str, issue: dict[str, Any]) -> Channel:
+        return Channel(
+            name=name,
+            number=issue["number"],
+            members=parse_channel_members(issue.get("body") or ""),
+        )
+
     def create_channel(self, name: str, members: list[dict[str, Any]]) -> Channel:
         """Create a channel issue, or return the existing one (idempotent)."""
         if not name or not isinstance(name, str):
@@ -291,11 +311,7 @@ class GitHubIssuesBackend:
 
         existing = self._find_issue(name)
         if existing is not None:
-            return Channel(
-                name=name,
-                number=existing["number"],
-                members=parse_channel_members(existing.get("body") or ""),
-            )
+            return self._channel_from_issue(name, existing)
 
         resp = self._request(
             "POST",
@@ -305,8 +321,16 @@ class GitHubIssuesBackend:
         )
         if resp.status not in (200, 201):
             raise BackendError(f"Failed to create channel '{name}': HTTP {resp.status}")
-
         data = self._json(resp, f"creating channel '{name}'")
+
+        # L4 race: a concurrent process may have created the same channel first.
+        # Re-scan; the oldest same-name issue (smallest number) wins for everyone,
+        # whoever created it.
+        fresh = self._find_issue(name)
+        if fresh is not None:
+            return self._channel_from_issue(name, fresh)
+
+        # The listing can also lag right behind our own write; use the POST reply.
         channel = Channel(name=name, number=data["number"], members=list(members))
         self._issues_cache[name] = {"title": name, "number": channel.number, "body": data.get("body", "")}
         self._channel_numbers[name] = channel.number

@@ -158,6 +158,50 @@ def test_channel_body_parsing_tolerates_foreign_bodies():
     assert serialize_channel_body("c", []).startswith("---\nangareion: 1\n")
 
 
+def test_duplicate_channel_names_resolve_to_the_oldest_issue():
+    """L4: same-name issues (newest first in the listing) converge on the oldest."""
+    transport = FakeTransport()
+    _issues_route(transport, [
+        {"number": 12, "title": "topic", "body": ""},  # newest first
+        {"number": 7, "title": "topic", "body": serialize_channel_body("topic", [])},
+    ])
+
+    backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
+    assert backend.find_channel("topic") == 7
+    assert backend.create_channel("topic", []).number == 7
+    assert [r for r in transport.recorded_requests if r["method"] == "POST"] == []
+
+
+def test_create_channel_race_rescans_and_returns_the_older_issue():
+    class RaceTransport:
+        def __init__(self):
+            self.list_calls = 0
+            self.posts = 0
+
+        def request(self, method, url, headers=None, body=None):
+            if method == "GET" and url.endswith("/issues?state=all&per_page=100"):
+                self.list_calls += 1
+                if self.list_calls == 1:
+                    return HttpResponse(200, {}, b"[]")
+                # The racing process's issue (4) is older than ours (5).
+                return HttpResponse(200, {}, json.dumps([
+                    {"number": 5, "title": "topic", "body": ""},
+                    {"number": 4, "title": "topic", "body": serialize_channel_body("topic", [])},
+                ]).encode("utf-8"))
+            if method == "POST" and url.endswith("/repos/owner/repo/issues"):
+                self.posts += 1
+                return HttpResponse(201, {}, json.dumps({"number": 5, "title": "topic", "body": ""}).encode("utf-8"))
+            return HttpResponse(404, {}, b'{"message": "Not Found"}')
+
+    transport = RaceTransport()
+    backend = GitHubIssuesBackend("owner/repo", token="token123", transport=transport)
+    channel = backend.create_channel("topic", [])
+
+    assert channel.number == 4  # the older issue wins, not the one we just created (5)
+    assert transport.posts == 1
+    assert transport.list_calls == 2  # initial lookup plus the post-create re-scan
+
+
 def test_send_posts_comment_and_returns_message_id():
     msg = _make_msg(channel="general", content="Parsed body", msg_id="01MSG001")
     transport = FakeTransport()
