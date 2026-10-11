@@ -1,7 +1,7 @@
 ## 1. 本人裁定（先做）
 
-- [ ] 1.1 把 design 第一節「交本人選的問題」的 A／B／C 交本人選定；記錄選擇與理由。
-- [ ] 1.2 依選擇更新本 change 的 `specs/agent-sidecar/spec.md`：選 A 就把「啟動與終止 team」改寫成對應的 v0、選 B 維持現狀、選 C 再加記憶的 requirement；`openspec validate --strict` 要過。
+- [x] 1.1 把 design 第一節「交本人選的問題」的 A／B／C 交本人選定；記錄選擇與理由。→ 本人 10-11 選 **B**（MyPMO#47），記在 design「交本人選的問題」開頭
+- [x] 1.2 依選擇更新本 change 的 `specs/agent-sidecar/spec.md`：選 A 就把「啟動與終止 team」改寫成對應的 v0、選 B 維持現狀、選 C 再加記憶的 requirement；`openspec validate --strict` 要過。→ 選 B，spec 維持現狀
 
 ## 2. 對齊外部依賴
 
