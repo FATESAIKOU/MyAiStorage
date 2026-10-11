@@ -152,6 +152,16 @@ sidecar 的範圍有三種切法，**請本人選定之後才實作**；下面�
 v0 做：收 Angareion（含輪詢與節流，用 angareion）、佇列、依 urgency 投遞、ack、啟動／終止 team、registry／status、harness 載入、分發單元。
 v0 不做：外來 agent 發現、暫停／恢復、C 的記憶管理（session 選擇、壓縮、歸檔）、presence、multi-worker。
 
+### D10 審查後的決定（PM，2026-10-11，第二批審查 docs/review/agent-sidecar-batch2.md）
+
+- **sync_period 的單位是分鐘**，和 agora 的 `--sync-period` 相同：設定 `teams.<id>.sync_period` 是分鐘、預設 5，組命令時原樣帶給 agora，不換算。
+- **常駐入口 `sidecar run`**（systemd unit 的 ExecStart）：把收信輪詢（每個身分，照 Angareion 的節流）、回報中繼（RelayServer）、定期對照 herdr 找回 agent 並更新 registry 的 `updated_at`（心跳）接成一個迴圈；`Receiver` 在這裡建立，交給啟動 team 的流程用。
+- **hand-off 的接線**：`start_team` 等 agent 的 prompt 出現（`pane wait-output`／`agent wait`）後，先送 harness，再呼叫 `deliver_hand_off` 把佇列裡屬於這個身分的低緊急度訊息依序送出。
+- **身分是完整的 Angareion 位址**：設定裡每個 team 的身分寫成 `{repo, role, name}`（`repo`、`role` 必填）；中繼送出的 `from` 就是它，不寫死成 `repo: "sidecar"`。
+- **urgency 是 0～9**（Angareion spec）；`sidecar say` 與中繼只收 0～9，超出範圍回錯誤，不靜默丟掉。
+- **sidecar 不自己建頻道**：中繼送出時頻道不存在就回錯誤；信道 repo 來自設定（`channel_repo`），不寫死。
+- **agent 的環境是白名單**：`start_agent` 不帶 `env` 時給空的附加環境，絕不把 sidecar 自己的整個環境（可能含 A2A token）傳給 pane；文件同時建議 token 只放檔案、不 export 到登入環境（herdr server 繼承的環境 sidecar 擋不住）。
+
 ## Risks / Trade-offs
 
 - [agent 的 TUI 行為版本相依：執行中送字可能被吃掉或需要 Ctrl-C] → 實作前先在 opencode 與 claude 各做一次 spike（tasks 2.4）；不成立時把高緊急度的機制換成「Ctrl-C 後再送」，或把 v0 的投遞降為 hand-off-only 並回報本人。
