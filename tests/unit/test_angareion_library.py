@@ -1,0 +1,206 @@
+"""Unit tests for the library layer: wait polls check, read moves the cursor (D2/D4)."""
+
+from __future__ import annotations
+
+import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
+
+import json
+
+from angareion.backend import Cursor, FakeBackend, Target
+from angareion.client import POLL_INTERVAL_SECONDS, Angareion
+from angareion.messages import Message
+from angareion.state import CursorStore
+
+IDENTITY = {"repo": "owner-org/worker", "role": "worker"}
+
+
+def _make_msg(
+    channel: str = "general",
+    msg_id: str = "01AAAA",
+    at: str = "2026-10-10T12:00:00+00:00",
+    to: dict | None = None,
+) -> Message:
+    return Message(
+        from_={"repo": "owner-org/team", "role": "PM"},
+        to=to or IDENTITY,
+        channel=channel,
+        content="hello",
+        id=msg_id,
+        at=at,
+    )
+
+
+class CountingBackend(FakeBackend):
+    """FakeBackend that counts check calls, to pin the polling behaviour."""
+
+    def __init__(self):
+        super().__init__()
+        self.check_calls = 0
+
+    def check(self, target, cursor):
+        self.check_calls += 1
+        return super().check(target, cursor)
+
+
+def _app(tmp_path, backend=None):
+    store = CursorStore(tmp_path, IDENTITY)
+    return Angareion(backend or FakeBackend(), store)
+
+
+def test_wait_timeout_zero_checks_once_and_returns_false_when_empty(tmp_path):
+    backend = CountingBackend()
+    backend.create_channel("general", [])
+    app = _app(tmp_path, backend)
+
+    assert app.wait(Target(channel="general"), 0) is False
+    assert backend.check_calls == 1
+
+
+def test_wait_timeout_zero_returns_true_with_new_message(tmp_path):
+    backend = CountingBackend()
+    backend.create_channel("general", [])
+    backend.send("general", _make_msg())
+    app = _app(tmp_path, backend)
+
+    assert app.wait(Target(channel="general"), 0) is True
+    assert backend.check_calls == 1
+
+
+def test_wait_timeout_zero_does_not_create_a_cursor_file(tmp_path):
+    backend = FakeBackend()
+    backend.create_channel("general", [])
+    app = _app(tmp_path, backend)
+
+    app.wait(Target(channel="general"), 0)
+    assert not app.cursors.path.exists()
+
+
+def test_wait_polls_until_a_message_arrives(tmp_path):
+    backend = FakeBackend()
+    backend.create_channel("general", [])
+    app = _app(tmp_path, backend)
+
+    clock = {"now": 1000.0}
+    sleeps: list[float] = []
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+        if len(sleeps) == 2:
+            backend.send("general", _make_msg())
+
+    result = app.wait(
+        Target(channel="general"),
+        600,
+        poll_interval=15.0,
+        sleeper=sleeper,
+        clock=lambda: clock["now"],
+    )
+
+    assert result is True
+    assert sleeps == [15.0, 15.0]
+    assert not app.cursors.path.exists()  # waiting must not write the cursor
+
+
+def test_wait_times_out_without_sleeping_past_the_deadline(tmp_path):
+    backend = CountingBackend()
+    backend.create_channel("general", [])
+    app = _app(tmp_path, backend)
+
+    clock = {"now": 1000.0}
+    sleeps: list[float] = []
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    result = app.wait(
+        Target(channel="general"),
+        31.0,
+        poll_interval=15.0,
+        sleeper=sleeper,
+        clock=lambda: clock["now"],
+    )
+
+    assert result is False
+    assert clock["now"] == 1031.0  # not a second longer
+    assert sleeps == [15.0, 15.0, 1.0]
+    # Checks at 0s, 15s, 30s and once more at the deadline itself.
+    assert backend.check_calls == 4
+    assert not app.cursors.path.exists()
+
+
+def test_wait_without_timeout_blocks_until_a_message_arrives(tmp_path):
+    backend = FakeBackend()
+    backend.create_channel("general", [])
+    app = _app(tmp_path, backend)
+
+    clock = {"now": 1000.0}
+    sleeps: list[float] = []
+
+    def sleeper(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["now"] += seconds
+        if len(sleeps) == 3:
+            backend.send("general", _make_msg())
+
+    assert app.wait(
+        Target(channel="general"),
+        None,
+        poll_interval=15.0,
+        sleeper=sleeper,
+        clock=lambda: clock["now"],
+    ) is True
+    assert sleeps == [15.0, 15.0, 15.0]
+
+
+def test_default_poll_interval_is_fifteen_seconds():
+    assert POLL_INTERVAL_SECONDS == 15.0
+
+
+def test_read_uses_the_local_cursor_and_advances_it(tmp_path):
+    backend = FakeBackend()
+    backend.create_channel("general", [])
+    first = _make_msg(msg_id="01AAAA", at="2026-10-10T12:00:00+00:00")
+    second = _make_msg(msg_id="01BBBB", at="2026-10-10T12:00:01+00:00")
+    backend.send("general", first)
+    backend.send("general", second)
+    app = _app(tmp_path, backend)
+    target = Target(channel="general")
+
+    assert [m.id for m in app.read(target)] == ["01AAAA", "01BBBB"]
+    stored = json.loads(app.cursors.path.read_text(encoding="utf-8"))
+    assert stored == {"channel:general": {"at": second.at, "id": "01BBBB"}}
+
+    # Nothing new the second time.
+    assert app.read(target) == []
+
+    # And it stays that way while nothing arrives.
+    assert app.check(target) is False
+
+
+def test_read_with_since_does_not_touch_the_local_cursor(tmp_path):
+    backend = FakeBackend()
+    backend.create_channel("general", [])
+    backend.send("general", _make_msg(msg_id="01AAAA", at="2026-10-10T12:00:00+00:00"))
+    backend.send("general", _make_msg(msg_id="01BBBB", at="2026-10-10T12:00:01+00:00"))
+    app = _app(tmp_path, backend)
+    target = Target(channel="general")
+
+    messages = app.read(target, since="2026-10-10T12:00:00+00:00")
+    assert [m.id for m in messages] == ["01BBBB"]
+    assert not app.cursors.path.exists()
+
+
+def test_read_to_me_spans_channels_with_its_own_cursor(tmp_path):
+    backend = FakeBackend()
+    backend.create_channel("general", [])
+    backend.create_channel("other", [])
+    backend.send("general", _make_msg(channel="general", msg_id="01AAAA"))
+    backend.send("other", _make_msg(channel="other", msg_id="01BBBB"))
+    app = _app(tmp_path, backend)
+    target = Target(recipient=IDENTITY)
+
+    assert [m.id for m in app.read(target)] == ["01AAAA", "01BBBB"]
+    stored = json.loads(app.cursors.path.read_text(encoding="utf-8"))
+    assert set(stored) == {"to:owner-org_worker__worker"}
