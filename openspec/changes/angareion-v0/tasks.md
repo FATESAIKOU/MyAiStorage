@@ -8,12 +8,12 @@
 - [x] 2.1 `ChannelBackend`（create_channel／send／check／read）與記憶體假後端；`GitHubIssuesBackend`（channel＝issue、訊息＝留言、「寄給我的」用 repo 層留言列表、`check` 用 ETag 條件式請求）
 - [x] 2.2 函式庫層的 `wait`（在 `check` 上輪詢：timeout 0 呼叫一次，否則 15 秒間隔直到有新的或逾時）與 `read`（游標）；游標檔（D4）
 - [x] 2.3 四個子命令與結束碼（D1）；stdout／stderr 分離
-- [x] 2.4 測試：spec 的每個 Scenario（假後端、假 transport、不連網）；token 不出現在任何輸出；每項在副本改壞確認會紅
+- [x] 2.4 測試：spec 的每個 Scenario（假後端、假 transport、不連網），含同一秒兩則、被編輯的留言不重複、`wait` 不動游標；token 不出現在任何輸出；每項在副本改壞確認會紅
 
 ## 3. 文件
 
 - [x] 3.1 `docs/angareion.md`：格式、四個指令、身分、token 的放置與輪替（只讀 `ANGAREION_TOKEN_FILE`；worker 上由 MyLinuxPool 的 Angareion 能力設定，檔名照池的規則）、本人的 smoke test（建 private 信道 repo、建 PAT、兩邊互送、wait、read）
-- [x] 3.2 `skills/angareion/SKILL.md`（D6）；確認 opencode 讀說明檔的位置，寫進 `docs/angareion.md`（opencode 位置未確認，docs 留 TODO 給 PM）
+- [x] 3.2 `skills/angareion/SKILL.md`（D6）；確認 opencode 讀說明檔的位置，寫進 `docs/angareion.md`（opencode 位置未確認，docs 留 TODO 給 PM；第一批補上 spike 結論）
 
 ## 3.3 審查修正（第一批：和游標無關）
 
