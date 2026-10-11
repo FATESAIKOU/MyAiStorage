@@ -31,7 +31,7 @@ agent 清單、job 清單只在記憶體。sidecar 結束時先對每個 agent �
 | 介面 | 動作 | 實作 |
 |---|---|---|
 | `AgentDriver` | `env_for(subscription) → env、unset`、`launch(session, env, workdir) → handle`、`send(handle, text)`、`interrupt(handle)`、`state(handle) → running／idle／exited／quota_exhausted(window, resets_at)`、`stop(handle, graceful)` | `ClaudeCodeDriver`、`OpenCodeDriver` |
-| `SessionStore` | `prepare(mode, ids, agent, tag) → session`、`sync(session)` | `AgoraSessionStore`（呼叫 `agora`） |
+| `SessionStore` | `start(mode, ids, agent, workdir, tag) → 交給 driver 的行程`（`agora continue --headless`）、`sync`（由 continue 定期與結束時做） | `AgoraSessionStore`（呼叫 `agora`） |
 | `SubscriptionSource` | `list()`、`get(id, agent)`、`cooldown(id, window（5h／1w）, resets_at)` | `LLMGatewaySource`（經 LLMGateway 的 `lgw connect`）、`FileSubscriptionSource`（本機開發：讀一個 JSON 檔） |
 | `Selector` | `choose(agent, subscriptions) → id 或 None` | `PrioritySelector`：`available` 且 `agents` 含這個種類，照 `priority` 取第一個。之後換成外部注入的函式時，sidecar 本體不改（本人 Q8 補充） |
 
@@ -54,16 +54,26 @@ agent 清單、job 清單只在記憶體。sidecar 結束時先對每個 agent �
 - 每個 open 出來的 Session 在 agora 標頭的 `tags` 加 `sidecar:<id>`（本人 Q7：保留）。sidecar 本身不讀這個 tag；用途是人或程式在 agora 上查得到。
 - 記憶同步：agent 跑著時由 agora 定期寫回；close 與換把前寫回一次；任何人隨時能直接用 agora。
 
-### D6 agent 的開法（先 spike，本人 Q4）
+### D6 agent 的開法（spike 已做，2026-10-11 PM 實測）
 
-- 用程式化模式，不開 TUI：Claude Code 的 stream-json（`claude -p --input-format stream-json --output-format stream-json --resume <id>`，stdin 送訊息、stdout 讀結構化事件）；opencode 的 server（`opencode serve`，HTTP API 送訊息、中斷、讀事件）。
-- spike 要回答：
-  1. 兩者怎麼開在一個指定的 Session 上（resume）、怎麼送第二則輸入、怎麼中斷這一輪、怎麼從事件看出 running／idle、額度用完時的訊號長什麼樣（含重置時刻）；
-  2. agora 的接法，二選一：
-     (a) 讓 `agora continue` 多一個「用程式化模式開 agent」的選項，sidecar 透過它的 stdio（或 opencode 的埠）和 agent 說話，定期寫回與結束寫回照舊由 continue 負責；
-     (b) agora 提供「準備好 Session、不開 agent」與「把 agent 的 session 寫回」兩個指令，sidecar 自己開 agent、自己定期呼叫寫回。
-  spike 結果寫回本節，定案後才實作 agora 的改動與兩個 driver。
-- Claude Code 開啟時用 `--settings` 關掉 autoContinueAtUsageLimit（額度用完時要停下來讓 sidecar 換把）。
+用程式化模式，不開 TUI。
+
+**Claude Code 2.1.296**：`claude -p --input-format stream-json --output-format stream-json --verbose --resume <id> --settings '{"autoContinueAtUsageLimit": false}'`
+- 送：stdin 一行一則 `{"type": "user", "message": {"role": "user", "content": …}}`，同一個行程可以一直送下去（多輪）。
+- 狀態：送出後到 `result` 事件之前是 running；`result` 之後是 idle。
+- 中斷：stdin 寫 `{"type": "control_request", "request_id": …, "request": {"subtype": "interrupt"}}`，0.2 秒內回 `control_response` 與 `result`（`error_during_execution`），之後照常可以再送。
+- 結束：關掉 stdin，行程以 0 結束。
+- 接續：另開一個行程 `--resume <同一個 session id>`，對話接得上（實測記得前面說過的字）。
+- **額度**：每一輪都有 `rate_limit_event`，帶 `rate_limit_info.status`（實測 `allowed`）、`rateLimitType`（如 `five_hour`）、`resetsAt`（epoch 秒），以及 `unifiedWindows.five_hour／seven_day` 各自的 `utilization` 與 `resetsAt`。窗對應：`five_hour`→`5h`、`seven_day`→`1w`。**額度用完＝`status` 不是 `allowed`**（實際值推測是 `rejected`，沒辦法刻意用完來確認）；重置時刻直接取 `resetsAt`，不必解析畫面文字。輔助訊號：`system/api_retry`（`error: rate_limit`）與 `result` 文字以 `You've hit your` 開頭（LLMGateway 的 quota-signals 研究）。
+
+**opencode 1.18.35**：`opencode serve --hostname 127.0.0.1 --port <埠>`（工作目錄設成 agent 的工作目錄；opencode 依目錄分專案）
+- 送：`POST /session/{id}/message`（這個呼叫會等到這一輪做完才回，所以 driver 在背景送、用事件看狀態）。
+- 狀態：`GET /event`（SSE）的 `session.status`：`busy`→`idle`，另有 `session.idle`；`GET /session/status` 可以直接查。
+- 中斷：`POST /session/{id}/abort`，之後狀態變 `idle`。
+- 接續：對 server 用同一個 session id 送就是接續。
+- **額度（實測，Zen 免費額度用完時）**：`session.status` 變成 `{"type": "retry", "message": "Free usage exceeded…", "action": {"reason": "free_tier_limit", …}, "next": <epoch 毫秒>}`。**額度用完＝`retry` 且 `action.reason` 是額度類**；重置時刻取 `next`。opencode 只給一個時刻，不分窗；driver 依 subscription 的種類決定登錄 `5h` 或 `1w`（距離重置超過 5 小時就當 `1w`）。
+
+**agora 的接法：選 (a)**——`agora continue` 加一個 `--headless`：照常準備 Session（continue／fork）、上鎖、定期寫回、結束時寫回，只是用上面的程式化模式開 agent，stdio 直接交給 agent（agora 自己在 agent 跑著時不寫 stdout，說明都寫 stderr）。sidecar 開 `agora continue … --headless` 這個行程，透過它的 stdio（Claude Code）或 agent 印出的埠（opencode）和 agent 說話。這樣接續、fork、寫回、同一個 Session 不能同時接續的鎖，都沿用 continue 已經測好的邏輯；agora 只多一個選項（不必做 (b) 的兩個新指令）。`merge` 先用 `agora merge` 做出新的 Session，再 `continue --headless`。
 
 ### D7 設定
 

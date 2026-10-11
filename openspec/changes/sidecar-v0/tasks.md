@@ -1,8 +1,8 @@
 ## 1. spike（PM，先做；本人 Q4）
 
-- [ ] 1.1 Claude Code 程式化模式：在指定 Session 上開（resume）、送第二則輸入、中斷這一輪、從事件看出 running／idle／結束、額度用完的訊號與重置時刻、`--settings` 關掉 autoContinueAtUsageLimit
-- [ ] 1.2 opencode server 模式：同上（開在指定 Session、送、中斷、狀態事件、額度用完的錯誤）
-- [ ] 1.3 agora 的接法二選一（design D6 的 a／b），結果寫回 design D6，必要時補 `session-continue` 的 delta 與 tasks 第 3 節
+- [x] 1.1 Claude Code 程式化模式：在指定 Session 上開（resume）、送第二則輸入、中斷這一輪、從事件看出 running／idle／結束、額度用完的訊號與重置時刻、`--settings` 關掉 autoContinueAtUsageLimit
+- [x] 1.2 opencode server 模式：同上（開在指定 Session、送、中斷、狀態事件、額度用完的錯誤）
+- [x] 1.3 agora 的接法二選一（design D6 的 a／b），結果寫回 design D6，必要時補 `session-continue` 的 delta 與 tasks 第 3 節
 
 ## 2. sidecar 本體（負責：agy，各自的 worktree）
 
@@ -17,7 +17,7 @@
 
 - [ ] 3.1 `ClaudeCodeDriver`
 - [ ] 3.2 `OpenCodeDriver`
-- [ ] 3.3 agora 的改動（D6 的 a 或 b）與測試
+- [ ] 3.3 agora：`continue --headless`（D6 的 a）與測試（fake agent 的 headless 模式）
 - [ ] 3.4 PM 在 Mac 上用真的 agent 跑一次：open（fork）→ poke → poke＋中斷 → close；換把用 `FileSubscriptionSource` 模擬
 
 ## 4. 文件與收尾
