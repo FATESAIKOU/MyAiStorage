@@ -1479,12 +1479,60 @@ def test_continue_ticked_fork_with_space_passes_fork_flag():
     assert argv[-1] == "--fork"
 
 
+def test_continue_fork_hint_uses_description_when_title_missing():
+    """Low: header 沒有 title、有 description 時，fork 提示用 description（和 cli._fork_title 同一順序）."""
+    from agora import cli as cli_mod
+    hdr_b = _hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "第二個", sid="ses_2")
+    hdr_b["title"] = None
+    hdr_b["description"] = "表格的描述"
+    paths, _ = _index((_hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "第一個", sid="ses_1"), "## user\n表格的問題\n"),
+                      (hdr_b, "## user\n別的\n"))
+    cli = FakeCli()
+    app = tui.AgoraApp(paths, cli, agents=[], check_setup=False)
+    app.spawn, started = _spawn()
+    app._last_spawned = started
+    ran = []
+    app.outside = lambda argv: ran.append(argv) or 0
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            assert isinstance(app.screen, tui.Confirm)
+            await pilot.press("tab")
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.pause()
+            assert app.screen.picked
+            effect = str(app.screen.query_one("#effect", Static).render())
+            expected = cli_mod._fork_title(hdr_b, "agora:01BBBBBBBBBBBBBBBBBBBBBBBB")
+            assert expected == "表格的描述-fork"
+            assert f"會多一個 {expected} 的新 Session，原本的不動" in effect
+            await pilot.press("enter")                       # confirm
+            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
+            await pilot.press("enter")                       # workdir
+            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            await pilot.press("enter")                       # sync period
+            await pilot.pause()
+    _run(go)
+    assert len(ran) == 1
+    assert ran[0][-1] == "--fork"
+
+
 def test_continue_already_continuing_without_fork_is_refused_early(monkeypatch):
     """Scenario: 正在接續中、沒勾 fork: Tell explains it is continuing, does not ask dir or run agent."""
     app, _ = _app([])
     ran = []
     app.outside = lambda argv: ran.append(argv) or 0
-    monkeypatch.setattr(store, "continuing", lambda paths, ulid: True)
+    seen: list[str] = []
+
+    def fake_continuing(paths, got):
+        seen.append(got)
+        assert got == "01BBBBBBBBBBBBBBBBBBBBBBBB", f"continuing 要收 ulid，不是 row.key：{got!r}"
+        return True
+
+    monkeypatch.setattr(store, "continuing", fake_continuing)
 
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
@@ -1503,6 +1551,7 @@ def test_continue_already_continuing_without_fork_is_refused_early(monkeypatch):
             assert not isinstance(app.screen, tui.ModalScreen)
     _run(go)
     assert ran == []
+    assert seen == ["01BBBBBBBBBBBBBBBBBBBBBBBB"]
 
 
 def test_continue_already_continuing_with_fork_proceeds_normally(monkeypatch):
@@ -1510,7 +1559,14 @@ def test_continue_already_continuing_with_fork_proceeds_normally(monkeypatch):
     app, _ = _app([])
     ran = []
     app.outside = lambda argv: ran.append(argv) or 0
-    monkeypatch.setattr(store, "continuing", lambda paths, ulid: True)
+    calls: list[str] = []
+
+    def fake_continuing(paths, got):
+        calls.append(got)
+        assert got == "01BBBBBBBBBBBBBBBBBBBBBBBB", f"continuing 要收 ulid，不是 row.key：{got!r}"
+        return True
+
+    monkeypatch.setattr(store, "continuing", fake_continuing)
 
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
@@ -1528,6 +1584,54 @@ def test_continue_already_continuing_with_fork_proceeds_normally(monkeypatch):
     _run(go)
     assert len(ran) == 1
     assert ran[0][-1] == "--fork"
+    assert calls == [], "勾了 fork 就不該再問 continuing"
+
+
+def test_continue_pending_lock_held_by_another_process_is_refused_early():
+    """Medium: 不 mock: 另一個行程持有 pending/<ulid>.json 的鎖時，不勾 fork 會提早擋下。
+
+    真實的 continuing 只認 bare ulid 的檔名；若程式把 row.key（agora:<ULID>）
+    傳進去，這裡的鎖永遠對不上，擋下就不會觸發。
+    """
+    app, _ = _app([])
+    ran = []
+    app.outside = lambda argv: ran.append(argv) or 0
+    ulid = "01BBBBBBBBBBBBBBBBBBBBBBBB"
+    paths = app.paths
+    paths.pending.mkdir(parents=True, exist_ok=True)
+    pending_file = paths.pending / f"{ulid}.json"
+    pending_file.write_text("{}", encoding="utf-8")
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl, sys, time; f = open(sys.argv[1]);"
+         " fcntl.flock(f, fcntl.LOCK_EX); time.sleep(30)",
+         str(pending_file)])
+    try:
+        deadline = time.time() + 10
+        while not store.continuing(paths, ulid):
+            assert time.time() < deadline, "另一個行程沒有拿到 pending 檔的鎖"
+            time.sleep(0.05)
+
+        async def go():
+            async with app.run_test(size=(120, 30)) as pilot:
+                await pilot.pause()
+                await pilot.press("enter")
+                await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+                await pilot.press("enter")                       # unticked fork
+                await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+                assert isinstance(app.screen, tui.Tell)
+                assert app.screen.title_ == "✗ 不能接續"
+                lines_text = "\n".join(app.screen.lines)
+                assert "正在接續中，等它結束再接續；要分岔請在選 agent 的視窗勾 fork" in lines_text
+                assert "agora:01BBBBBBBBBBBBBBBBBBBBBBBB" in lines_text
+                await pilot.press("enter")                       # close Tell
+                await pilot.pause()
+                assert not isinstance(app.screen, tui.ModalScreen)
+        _run(go)
+        assert ran == []
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
 
 
 def test_continue_escape_at_agent_confirm_cancels_and_does_nothing():
