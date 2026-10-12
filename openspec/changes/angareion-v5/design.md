@@ -21,7 +21,7 @@ v0（`openspec/specs/angareion/spec.md`）的介面帶著 GitHub 的形狀：`ch
 ## Decisions
 
 ### 1. 位址＝agent 名字串
-`from`、`to`、個人設定檔的 `identity` 一律是 `<repo 名>-<pm|arch|impl|test>[-<id>]`（例 `MyLinuxPool-impl-2`、`LLMGateway-pm`）。**文法（審查 M7 定案）**：`^[A-Za-z0-9][A-Za-z0-9._]*-(pm|arch|impl|test)(-[A-Za-z0-9_.]+)?$`；解析由右而左——先取可省的 `-<id>`（`[A-Za-z0-9_.]+`）、再取角色字，左邊剩下的都是 repo 名（repo 名裡的 `-` 靠右側的角色字解析，例 `my-repo-impl-2` → repo `my-repo`、角色 `impl`、id `2`）；角色字只有小寫的 `pm|arch|impl|test`（大小寫有別）。`messages.validate_address` 改用這個文法；`cli.parse_address` 不再解析 `repo=`／`×`／`:` 形狀（也不再有 JSON 位址）；游標檔名（`identity_slug`）與顯示格式（`<repo×role>` → `<agent 名>`）跟著換。替代方案（保留舊形狀、另加對應表）被否決：v5 要求介面不出現 repo／issue 概念。
+`from`、`to`、個人設定檔的 `identity` 一律是 `<repo 名>-<pm|arch|impl|test>[-<id>]`（例 `MyLinuxPool-impl-2`、`LLMGateway-pm`）。**文法（審查 M7；複審 M1 修正）**：驗證用的正規式是 `^[A-Za-z0-9][A-Za-z0-9._-]*-(pm|arch|impl|test)(-[A-Za-z0-9_.]+)?$`（repo 段含 `-`）；**驗證與解析是兩步**——regex 只驗整體形狀，「由右而左取出 id 與角色字」是另外寫的解析步驟：先取可省的 `-<id>`（`[A-Za-z0-9_.]+`）、再取最右邊符合角色字的位置（`pm|arch|impl|test`），左邊剩下的都是 repo 名（例 `my-repo-impl-2` → repo `my-repo`、角色 `impl`、id `2`）。角色字只有小寫的 `pm|arch|impl|test`（大小寫有別）。`messages.validate_address` 改用這個文法；`cli.parse_address` 不再解析 `repo=`／`×`／`:` 形狀（也不再有 JSON 位址）；游標檔名（`identity_slug`）與顯示格式（`<repo×role>` → `<agent 名>`）跟著換。替代方案（保留舊形狀、另加對應表）被否決：v5 要求介面不出現 repo／issue 概念。
 
 ### 2. 無 `to`＝廣播，算進「寄給我的」（本人已確認）
 `send` 不給 `--to` 時訊息沒有 `to` 欄（front matter 省略）；`wait`／`read` 不給 `--channel` 時，「寄給我的」＝`to` 是自己 agent 名 **或沒有 `to`** 的訊息。本人 2026-10-12 裁定：廣播算進「寄給我的」。理由：第一期 channel 全公開，廣播就是給所有隊員的；等信的 agent 不該漏掉它。
@@ -37,7 +37,7 @@ v0（`openspec/specs/angareion/spec.md`）的介面帶著 GitHub 的形狀：`ch
 
 ### 6. `channel create` 的三步流程（本人裁定）
 1. **後端開實體**（angareion）：在 backend 設定的 repo 開一個 issue（標題＝channel 名；本文不含成員）。要用的 backend：設定檔裡只有一個時就用它；多個時 MUST 用 `--backend <名>` 指定（沒給 exit 1；名不存在 exit 1）。開失敗（網路、403、5xx）→ exit 2，什麼都沒註冊。
-2. **送註冊**（angareion）：在 MyAiStorage 的註冊簿 issue 留一則 `{action: register, channel, backend, issue}` 的一行 JSON 留言（格式見 §9／§10）。留言送出失敗時以短間隔重試 2 次（最多 3 次嘗試），仍失敗→ exit 2（第 1 步的實體留著，見 Risks）。
+2. **送註冊**（angareion）：留言之前 MUST 先查一次實體（GET 該 issue；存在而且標題等於 channel 名，否則 exit 2、不留留言）；然後在 MyAiStorage 的註冊簿 issue 留一則 `{action: register, channel, backend, issue}` 的一行 JSON 留言（格式見 §9／§10）。留言送出失敗時以短間隔重試 2 次（最多 3 次嘗試），仍失敗→ exit 2（第 1 步的實體留著，見 Risks）。
 3. **落地**（註冊簿重建 workflow）：讀整串留言、依 §9 的規則重建，把對應 commit 進 main 的 `config/angareion/channels.json`（§10）。
 
 - **落地等待（審查 M4）**：第 2 步送出成功後，輪詢 fetch 到對應出現（上限 2 分鐘）；出現或逾時都印 channel 名、exit 0（逾時在 stderr 印提示「還沒看到對應」）。`channel delete` 不等待（送出註銷即 exit 0）。
@@ -62,7 +62,7 @@ v0（`openspec/specs/angareion/spec.md`）的介面帶著 GitHub 的形狀：`ch
   }
   ```
 
-  由註冊簿重建 workflow 維護（§9／§10）；是 channel 解析的唯一依據（查無＝channel 不存在，exit 1）；angareion MUST NOT 寫它。
+  由註冊簿重建 workflow 維護（§9／§10）；是 channel 解析的唯一依據（查無＝channel 不存在，exit 1）；angareion MUST NOT 寫它。**這檔是機器產物**（整串留言重建的輸出）：人工改會被下一次重建還原，MUST NOT 手改（複審 L5）。
 - **backends.json**（backend 本身的設定）：
 
   ```json
@@ -77,27 +77,28 @@ v0（`openspec/specs/angareion/spec.md`）的介面帶著 GitHub 的形狀：`ch
   `type` 目前只有 `github`（未知 type＝設定錯誤，exit 2）；更新走 PR（AiStorage PM 審查＋merge，d 等級；頻率約每個 a/b 專案一次）。
 - **格式細節**：UTF-8、2 格縮排、key 排序、檔尾換行（diff 整齊）；workflow 寫入時保留未知欄位，只動自己那一筆。
 
-### 9. workflow 的規則：重建、輸入、回報（定案；依本人 2026-10-12 14:3x 裁定改寫）
-- **觸發與重建**：workflow 在註冊簿 issue 的 `issue_comment` 上觸發（§10）；每次 run 讀整串留言、依時間序套用（重建）成最終對應，寫回 main 的 `channels.json`；結果與 main 相同就不 commit。重建是冪等的——手動重跑（`workflow_dispatch`）安全。
+### 9. workflow 的規則：重建、輸入、回報（定案；複審 H1／H2 調整）
+- **觸發與重建**：workflow 在註冊簿 issue 的 `issue_comment` 上觸發（觸發層 MUST 擋 Bot，§10），另加 `schedule`（每天一次）當保險；每次 run 用 `GET /repos/{owner}/{repo}/issues/{n}/comments?per_page=100` 讀整串留言（MUST 翻完所有頁）、依時間序套用（重建）成最終對應，寫回 main 的 `channels.json`；結果與 main 相同就不 commit。重建是冪等的——手動重跑（`workflow_dispatch`）安全；被取消的 run 不遺失（下一段）。
 - **留言格式（定案）**：一行 JSON——`{"schema": 1, "action": "register"|"unregister", "channel": "<名>", "backend": "<backend 名>", "issue": <編號>}`。不是這個形狀的留言（含 workflow 自己的回報）一律忽略。
 - **套用規則**：`register`——名字沒有對應就加上；已對應同一個實體＝重複註冊（成功、no-op）；已對應不同實體＝**不覆蓋**（no-op）＋在註冊簿上回報。`unregister`——只移除指向同一個實體的對應；已經沒有、或指到別的實體＝no-op＋回報。先到者為準（依留言時間序）。
 - **併發**：`concurrency: { group: angareion-channels, cancel-in-progress: true }`——新的取消舊的；因為每次都從整串留言重建，被取消的 run **不遺失任何效果**（下一次 run 涵蓋全部留言）。
 - **寫入**：以 main 的最新版本（sha）為底；被拒就重讀重試（上限 5 次）——並行的人工編輯、backend PR 的插入也擋得住。
-- **授權（定案）**：只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言；其他留言 MUST 忽略（不採計、不影響重建）。不另外採計 token 帳號——接上 Angareion 的機器都用本人帳號的信道 token（留言的作者身分就是本人）。
-- **輸入（審查 H2；保留）**：留言內容 MUST 只經環境變數交給腳本，MUST NOT 用 `${{ }}` 插進 shell；JSON MUST 嚴格解析。每個留言 MUST 先驗：channel 名（§4 的正規式）→ backend 名存在（在 `backends.json`）→ 實體存在（issue 在該 backend 的 repo）而且標題等於 channel 名。任何一項不符 MUST 跳過該留言、在註冊簿上回報，MUST NOT 影響其他留言的重建。（防注入與驗證不是授權，照做。）
-- **回報**：無法套用或驗證失敗的留言，workflow MUST 在註冊簿上回報（引用那則留言）；回報留言不參與重建。
+- **授權（定案）**：只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言；其他留言 MUST 忽略（不採計、不影響重建，也**不回報**——複審 H1）。重建腳本 MUST 再驗一次（手動重跑與日後重建都會重讀整串）。不另外採計 token 帳號——接上 Angareion 的機器都用本人帳號的信道 token（留言的作者身分就是本人）。
+- **輸入（複審 H2 調整）**：留言內容 MUST 只經環境變數交給腳本，MUST NOT 用 `${{ }}` 插進 shell；JSON MUST 嚴格解析。重建時每個留言 MUST **只驗留言本身**：channel 名（§4 的正規式）、backend 名存在（在 `backends.json`）、`author_association` 在採計清單；**MUST NOT 查 backend 的 issue**——標題被改、issue 被刪、API 暫時失敗都不會讓對應下架（issue 的存在與標題在 channel create 的用戶端驗，§6）。不符的留言 MUST 跳過並在註冊簿上回報（非授權作者不回報，見上），MUST NOT 影響其他留言的重建。（防注入與驗證不是授權，照做。）
+- **回報**：無法套用或驗證失敗的留言（授權作者），workflow MUST 在註冊簿上用**純文字**回報（引用那則留言；內容 MUST NOT 是可被解析成 action 的一行 JSON——複審 L4）；回報留言不參與重建，而且它的作者是 Bot、被觸發層擋掉、不會觸發新 run（§10）。
 - 更新邏輯放 repo 內的小腳本（可單元測試；路徑實作時定），workflow 只負責觸發、權限與回報。
 
-### 10. 註冊簿 issue 與 token 權限（定案 2026-10-12 14:3x）
-- **註冊簿 issue**：MyAiStorage 上一張**長期存在**（不關閉）的 issue，帶正確的 `層級:`／`狀態:` label（實際值開 issue 時定；目的是不被 MyPMO 的每日檢查列為樹外）。它是 channel 對應的請求入口：`channel create`／`channel delete` 各在上面留一則留言（格式見 §9），留言公開可稽核；置頂留言寫明格式與規則。
-- **觸發**：workflow `on: issue_comment`（限這張 issue）——不需要 label 過濾、不需要每個請求開一張 issue；`workflow_dispatch` 可手動重跑（§9）。drain／`schedule` sweep 不需要（重建已涵蓋）。
-- **token 權限（定案）**：信道的細粒度 PAT——**Repositories** 勾「各 backend 的 repo」＋`MyAiStorage`；**Permissions**：`Issues: Read and write`（backend repo 的 Issues 讀寫＝訊息留言；MyAiStorage 只用來在註冊簿 issue 留言）。不需要 Actions／Contents 等其他權限。
-- **授權（定案）**：MyAiStorage 是 public（任何人都能留言），workflow MUST 只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言；其他留言 MUST 忽略（不採計、不影響重建）。
+### 10. 註冊簿 issue、觸發與 token 權限（定案；複審 H1／M2／M3／L1／L2 調整）
+- **註冊簿 issue**：MyAiStorage 上一張**長期存在**（不關閉）的 issue，label 定為 `層級:d`＋`狀態:進行中`（d 不佔 b／c 的同時進行額度；有 label 不會被列「樹外」——與「工單做完 completed 關閉」的慣例不同，見 Risks）。它是 channel 對應的請求入口：`channel create`／`channel delete` 各在上面留一則留言（格式見 §9），留言公開可稽核；置頂留言寫明格式與規則。
+- **觸發**：workflow `on: issue_comment`（限這張 issue，`workflow_dispatch` 可手動重跑），觸發層 MUST 用 `if` 擋掉 Bot（`github.event.comment.user.type != 'Bot'`，或明確排除 `github-actions[bot]`）——workflow 自己的回報留言因此不會再觸發新的 run（不會空轉）。另加 `schedule`（每天一次）重建當保險（複審 M3）；drain 不需要（重建已涵蓋）。
+- **workflow 的權限（複審 L1）**：`permissions:` MUST 至少 `contents: write`（commit 進 main）與 `issues: write`（在註冊簿回報留言）。
+- **token 權限（定案；複審 M2）**：信道的細粒度 PAT——**Repositories** 勾「各 backend 的 repo」＋`MyAiStorage`；**Permissions**：`Issues: Read and write`（backend repo 的 Issues：讀 issue 與留言＝訊息；MyAiStorage 只用來在註冊簿 issue 留言）。不需要 Actions／Contents 等其他權限。MyAiStorage 的 clone／fetch 走**匿名 HTTPS**（public repo、不用這把 token，§11）；workflow 推送 main 用的是 repo 自己的 `GITHUB_TOKEN`，與信道 token 無關。
+- **授權（定案）**：MyAiStorage 是 public（任何人都能留言），workflow MUST 只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言；其他留言 MUST 忽略（不採計、不影響重建，也**不回報**——不回報就不會產生新留言）。重建腳本 MUST 再驗一次（觸發層的 `if` 只擋 Bot，授權仍由腳本驗——手動重跑與日後重建都重讀整串）。
 - **前置（環境）**：MyAiStorage 的 main 要允許 workflow 用 `GITHUB_TOKEN` 直推（分支保護／bypass 名單）；實作前確認一次。
 
 ### 11. 讀取與 pull（定案；審查 M4／L4）
 - angareion 只讀本機複本（MyAiStorage 的 clone）。個人設定：`config_dir`（clone 路徑）、`registry_repo`（註冊簿 issue 的 `owner/repo`）、`registry_issue`（註冊簿 issue 的編號）、`config_pull_interval`（秒，預設 900；0＝不按週期拉——查無與 create 等待的事件驅動 fetch 仍會做，見下）。
-- 更新用 `git fetch`、讀檔用 `git show origin/main:<路徑>`——不依賴工作樹（本機改動、detached HEAD 都無妨）；逾時 20 秒、flock 一個鎖檔避免同機並行。新鮮度＝clone 裡 `FETCH_HEAD` 的 mtime（沒有就視為很久以前）；第一次的 clone 由佈署做（複本不存在＝exit 2）。
+- 更新用 `git fetch`、讀檔用 `git show origin/main:<路徑>`——不依賴工作樹（本機改動、detached HEAD 都無妨）；逾時 20 秒、flock 一個鎖檔避免同機並行。**clone 與 fetch 走匿名 HTTPS**（MyAiStorage 是 public、不用 token——複審 M2）。新鮮度＝clone 裡 `FETCH_HEAD` 的 mtime（沒有就視為很久以前）；第一次的 clone 由佈署做（複本不存在＝exit 2）。
 - 每個要用設定檔的指令一開始，若上次 fetch 超過 `config_pull_interval` 就 fetch 一次；`wait` 的輪詢中 MUST NOT fetch。
 - **查無 channel 時（審查 M4）**：忽略 `config_pull_interval`、先 fetch 一次再判斷（距上次 fetch 不到 30 秒就跳過，避免連續操作連發）；`channel create` 送出成功後輪詢 fetch 到對應出現（上限 2 分鐘），逾時印提示但 exit 0。
 - fetch 失敗（離線、權限）→ stderr 警告一次、沿用目前的複本，指令照常（exit code 不因此改變）；複本不存在或 JSON 壞掉才 exit 2。也可以另外用 cron／systemd 拉（無害）。
@@ -128,11 +129,18 @@ v0（`openspec/specs/angareion/spec.md`）的介面帶著 GitHub 的形狀：`ch
 - workflow 的 sha 樂觀鎖重試上限 5 次（§9）。
 - `config_dir`／`registry_repo`／`registry_issue` 個人設定（§11）。
 - 同名 `channel create` exit 1（§6）。
+- `workflow_dispatch` 手動重跑與每天一次的 `schedule` 重建（§9／§10）。
+- 「issue 存在且標題等於 channel 名」的檢查放在 channel create 用戶端（§6；複審 H2 從 workflow 移過來）。
+- create 的 2 分鐘等待上限、查無時 30 秒最短 fetch 間隔（§6／§11）。
+- 註冊簿的置頂留言，以及 `issue_comment` 只限單一註冊簿 issue 的觸發條件（§10）。
 
 ## Risks / Trade-offs
 
 - [workflow 直接寫 main（不經 PR）] → 沒有審查關卡：緩解＝每次變更都有 workflow run、commit 與註冊簿的留言；同名不覆蓋（先到者為準）；權限最小；backend 設定仍走 PR。
-- [註冊依賴 GitHub Actions] → workflow 掛掉時對應不會落地（create 已 exit 0）：緩解＝每次 run 都從整串留言重建（下一次 run 補上）、手動重跑安全；本機複本落後時 create 的同名檢查可能誤放行：權威在重建（先到者為準）。
+- [註冊依賴 GitHub Actions] → workflow 掛掉時對應不會落地（create 已 exit 0）：緩解＝每次 run 都從整串留言重建（下一次觸發補上；另有每天一次的 `schedule` 與手動重跑）。**run 硬失敗（腳本錯誤、讀留言 API 失敗、被手動取消）而且之後沒有新留言時，那則留言要等到下一次 `schedule` 才會套用**（複審 M3）；本機複本落後時 create 的同名檢查可能誤放行：權威在重建（先到者為準）。
+- [授權降級] → 舊留言的作者若從 `OWNER`／`MEMBER`／`COLLABORATOR` 被降級，下次重建不再採計、對應會消失（複審 H2）：第一期所有留言都是本人帳號，不另外處理。
+- [channels.json 被手改] → 它是重建的輸出（機器產物）：人工改會被下一次重建還原；MUST NOT 手改（§8；複審 L5）。
+- [註冊簿不關閉] → 一張長期 `層級:d`＋`狀態:進行中` 的 issue（d 不佔 b／c 額度；與「工單做完 completed 關閉」的慣例不同、不會被自動關）（§10；複審 L2）。
 - [create 不是原子操作] → 第 1 步成功、第 2 步失敗會留一個沒有對應的實體（孤兒）：緩解＝重試 2 次；孤兒不影響操作（解析只認設定檔）、介面不提它，之後可人工清理。
 - [併發的 run 取消] → 新的 run 會取消舊的（`cancel-in-progress`）：因為每次都從整串留言重建，被取消的不遺失任何效果；寫回用 sha 樂觀鎖（§9）。
 - [同名競爭的輸家] → 輸家 `channel create` exit 0、看不到衝突，只有註冊簿上的回報留言看得到結果（重建先到者為準）；不加 `--wait`（審查 M5）。
@@ -147,4 +155,6 @@ v0（`openspec/specs/angareion/spec.md`）的介面帶著 GitHub 的形狀：`ch
 
 ## Open Questions
 
-沒有未定項目。（§10 的授權已由本人裁定：只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言；PR #41 已用 merge commit `95a7641` 合併、v5 以 `angareion-v0` 為 base 堆疊——見上節。）
+1. **註冊簿 issue 的遷移（複審 L6；第一期可接受）**：`registry_issue` 是每台機器各自填的編號；註冊簿若被關閉、換號或重建，各機器要怎麼被告知、怎麼遷移，沒定。
+
+（§10 的授權已由本人裁定：只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言；PR #41 已用 merge commit `95a7641` 合併、v5 以 `angareion-v0` 為 base 堆疊——見上節。）

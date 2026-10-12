@@ -18,7 +18,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: 五個介面
-Angareion 對外 MUST 只有五個介面：建 channel、刪 channel、送訊息、確認有沒有新訊息、讀訊息；指令分別是 `angareion channel create`、`angareion channel delete`、`angareion send`、`angareion wait`、`angareion read`。MUST NOT 有 ack、已讀回條或限流。channel 名 MUST 是英文名（非空的 ASCII 字母、數字、`-`、`_`）；介面（參數、stdout、stderr、錯誤訊息）MUST NOT 出現 GitHub repo／issue 的概念。第一期 channel 對所有隊員公開，沒有成員設定：`channel create` MUST NOT 收 `--member`。`send` 的 `--channel` 必填、`--to` 選填（不給＝發到整個 channel）。`channel create` 與 `channel delete` 的 stdout MUST 只印 channel 名。`channel create` MUST 在送出註冊留言後輪詢 fetch 到對應出現為止（上限 2 分鐘；逾時 MUST 在 stderr 印提示、仍 exit 0）；`channel delete` MUST NOT 等落地（送出註銷留言成功即 exit 0）。（註冊簿與重建見 `angareion/channel-config` 與 design §9／§10。）
+Angareion 對外 MUST 只有五個介面：建 channel、刪 channel、送訊息、確認有沒有新訊息、讀訊息；指令分別是 `angareion channel create`、`angareion channel delete`、`angareion send`、`angareion wait`、`angareion read`。MUST NOT 有 ack、已讀回條或限流。channel 名 MUST 是英文名（非空的 ASCII 字母、數字、`-`、`_`）；介面（參數、stdout、stderr、錯誤訊息）MUST NOT 出現 GitHub repo／issue 的概念。第一期 channel 對所有隊員公開，沒有成員設定：`channel create` MUST NOT 收 `--member`。`send` 的 `--channel` 必填、`--to` 選填（不給＝發到整個 channel）。`channel create` 與 `channel delete` 的 stdout MUST 只印 channel 名。`channel create` MUST 在送出註冊留言前先確認後端實體（存在而且標題等於 channel 名；不符 MUST exit 2、什麼都沒註冊——複審 H2），留言後 MUST 輪詢 fetch 到對應出現為止（上限 2 分鐘；逾時 MUST 在 stderr 印提示、仍 exit 0）；`channel delete` MUST NOT 等落地（送出註銷留言成功即 exit 0）。（註冊簿與重建見 `angareion/channel-config` 與 design §9／§10。）
 
 #### Scenario: 送出並讀到
 - **WHEN** A 對 channel X 送一則 `to` 是 B 的訊息，B 執行 `angareion read`
@@ -51,6 +51,10 @@ Angareion 對外 MUST 只有五個介面：建 channel、刪 channel、送訊息
 #### Scenario: 建 channel 的後端開實體失敗
 - **WHEN** 第 1 步（在 backend 的 repo 開實體）失敗（網路、403、5xx）
 - **THEN** exit 2，什麼都沒註冊；介面不提後端細節
+
+#### Scenario: 建 channel 的用戶端驗證（複審 H2）
+- **WHEN** 第 1 步開好實體後，用戶端 GET 到它的標題不是 channel 名（或查不到那個 issue）
+- **THEN** exit 2，不留註冊留言、什麼都沒註冊
 
 #### Scenario: 刪 channel 的關實體失敗
 - **WHEN** `angareion channel delete X` 的第 2 步（關實體）失敗（不是 404）
@@ -135,7 +139,7 @@ Angareion 對外 MUST 只有五個介面：建 channel、刪 channel、送訊息
 - **THEN** 每則訊息都有 `received_at`，它是後端記錄的時刻，不是寄件者的 `at`
 
 ### Requirement: 訊息格式
-一則訊息 MUST 有 `from`、`to`、`channel`、`urgency`（0～9 的整數，預設 5）、`content`、`attachments`，加上寄件者產生的 `id`（ULID）與 `at`（含時區）；`id` 與 `at` 只用來辨識與顯示，MUST NOT 用來判斷新舊。`from`、`to` 與自己的身分 MUST 是 agent 名：文法 `^[A-Za-z0-9][A-Za-z0-9._]*-(pm|arch|impl|test)(-[A-Za-z0-9_.]+)?$`，由右而左解析（先取可省的 `-<id>`、再取角色字，左邊剩下的都是 repo 名——repo 名裡的 `-` 靠右側的角色字解析；角色字只有小寫的 `pm|arch|impl|test`；例 `MyLinuxPool-impl-2`、`LLMGateway-pm`、`my-repo-impl-2`；同角色只有一個時省略 id）；`to` 選填（不給＝發到整個 channel）。`--json` 輸出的 `from`／`to` 也是這個字串。不做嚴格的身分認證（任何人可以用任何名字送）。送出時內文 MUST 來自 `--body <文字>` 或 `--body -`（stdin），沒給 `--body` MUST exit 1。
+一則訊息 MUST 有 `from`、`to`、`channel`、`urgency`（0～9 的整數，預設 5）、`content`、`attachments`，加上寄件者產生的 `id`（ULID）與 `at`（含時區）；`id` 與 `at` 只用來辨識與顯示，MUST NOT 用來判斷新舊。`from`、`to` 與自己的身分 MUST 是 agent 名：驗證用的正規式是 `^[A-Za-z0-9][A-Za-z0-9._-]*-(pm|arch|impl|test)(-[A-Za-z0-9_.]+)?$`（repo 段含 `-`；複審 M1）；**驗證與解析是兩步**——regex 只驗整體形狀，另做由右而左的解析（先取可省的 `-<id>`、再取最右邊的角色字，左邊剩下的都是 repo 名；例 `MyLinuxPool-impl-2`、`LLMGateway-pm`、`my-repo-impl-2` → repo `my-repo`、角色 `impl`、id `2`；同角色只有一個時省略 id；角色字只有小寫的 `pm|arch|impl|test`）；`to` 選填（不給＝發到整個 channel）。`--json` 輸出的 `from`／`to` 也是這個字串。不做嚴格的身分認證（任何人可以用任何名字送）。送出時內文 MUST 來自 `--body <文字>` 或 `--body -`（stdin），沒給 `--body` MUST exit 1。
 
 #### Scenario: urgency 超出範圍
 - **WHEN** `angareion send --channel X --urgency 12 --body hi`
@@ -151,7 +155,7 @@ Angareion 對外 MUST 只有五個介面：建 channel、刪 channel、送訊息
 
 #### Scenario: 位址文法（接受）
 - **WHEN** `--to` 依序給 `LLMGateway-pm`、`MyLinuxPool-impl-2`、`my-repo-impl-2`、`repo_1.2-arch`
-- **THEN** 都接受（照常送出；stdout 印訊息 id）
+- **THEN** 都接受（照常送出；stdout 印訊息 id）；`my-repo-impl-2` 由右而左解析成 repo `my-repo`、角色 `impl`、id `2`
 
 #### Scenario: 位址文法（拒絕）
 - **WHEN** `--to` 給 `myrepo-dev`（角色不在清單）、`MyRepo-PM`（角色字大小寫有別）、`-pm`（repo 是空的）、`foo-impl-`（id 段空）、`foo-impl-2!`（非法字元）
@@ -170,7 +174,7 @@ Angareion 對外 MUST 只有五個介面：建 channel、刪 channel、送訊息
 - **THEN** exit 1，stderr 說明 channel 不存在；什麼都沒送、什麼都沒改
 
 ### Requirement: token 的位置與讀法
-token 檔的位置 MUST 能由 `ANGAREION_TOKEN_FILE` 指定（優先於其他來源）；沒有設定時用設定檔的 `token_file` 或預設位置（實作細節，見 design）。檔案 MUST 只有擁有者有權限（0400 或 0600），否則 MUST 拒絕（exit 2）。token MUST NOT 出現在任何輸出、log、錯誤訊息或訊息內容裡。token 的權限範圍見 design §10（定案）：各 backend 的 repo 與 `MyAiStorage` 的 `Issues: Read and write`；檔案的位置與權限規則不變。
+token 檔的位置 MUST 能由 `ANGAREION_TOKEN_FILE` 指定（優先於其他來源）；沒有設定時用設定檔的 `token_file` 或預設位置（實作細節，見 design）。檔案 MUST 只有擁有者有權限（0400 或 0600），否則 MUST 拒絕（exit 2）。token MUST NOT 出現在任何輸出、log、錯誤訊息或訊息內容裡。token 的權限範圍見 design §10（定案；複審 M2）：各 backend 的 repo 與 `MyAiStorage` 的 `Issues: Read and write`（backend repo＝讀 issue 與留言；MyAiStorage 只用來在註冊簿 issue 留言）；MyAiStorage 的 clone／fetch 走匿名 HTTPS、不用 token；workflow 推送 main 用的是 repo 的 `GITHUB_TOKEN`。檔案的位置與權限規則不變。
 
 #### Scenario: 權限太寬
 - **WHEN** token 檔的權限是 0644

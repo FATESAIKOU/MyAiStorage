@@ -8,8 +8,8 @@
 - 第一期 channel 對所有隊員公開：**拿掉 `--member`**（`channel create` 不再收成員；後端不再存成員）。
 - `send`：`--channel` 必填維持，收件人 `--to` 改為**選填**（不給＝發到整個 channel；廣播算進「寄給我的」）。
 - 收件人／寄件人／身分改用共通 agent 命名 `<repo 名>-<pm|arch|impl|test>[-<id>]`。
-- **channel 設定檔**（`config/angareion/channels.json`：channel 名 → backend 實體）由註冊簿重建 workflow 直接更新 main（`issue_comment` 觸發、整串留言重建；channel 自由建立，不走 PR）；**backend 設定檔**（`config/angareion/backends.json`：backend 本身的設定）走 PR（AiStorage PM 審查＋merge，d 等級）。
-- `channel create`／`channel delete` 的三步流程、同名與並發的處理、workflow 的輸入驗證與回報（見 design §6、§7、§9）；`channel create` 送出留言後輪詢 fetch 等對應出現（上限 2 分鐘，逾時提示、exit 0），`channel delete` 不等待；查無 channel 時先 fetch 一次再判斷（design §11）。
+- **channel 設定檔**（`config/angareion/channels.json`：channel 名 → backend 實體）由註冊簿重建 workflow 直接更新 main（`issue_comment`＋每天一次 `schedule` 觸發、觸發層擋 Bot、整串留言重建；channel 自由建立，不走 PR；這檔是機器產物、不手改）；**backend 設定檔**（`config/angareion/backends.json`：backend 本身的設定）走 PR（AiStorage PM 審查＋merge，d 等級）。
+- `channel create`／`channel delete` 的三步流程、同名與並發的處理、workflow 的輸入驗證與回報（見 design §6、§7、§9）；重建時只驗留言本身（不查 backend 的 issue——標題被改、issue 被刪都不會下架），issue 的存在與標題在 create 用戶端驗（design §6／§9）；`channel create` 送出留言後輪詢 fetch 等對應出現（上限 2 分鐘，逾時提示、exit 0），`channel delete` 不等待；查無 channel 時先 fetch 一次再判斷（design §11）。
 - 註冊簿重建（`issue_comment`、整串留言重建、`concurrency`＋`cancel-in-progress`）、token 權限（各 backend repo＋MyAiStorage 的 `Issues: Read and write`）與授權（只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言）都已定案（design §9／§10）。
 - `docs/angareion.md` 與 `skills/angareion/SKILL.md` 的改寫點列在 design §13，不在這個 change 改。
 
@@ -17,7 +17,7 @@
 
 ### New Capabilities
 
-- `angareion/channel-config`：兩個設定檔的格式與位置、註冊簿重建 workflow 的契約（留言格式、整串留言重建、併發與取消、授權、輸入驗證、回報、sha 樂觀鎖）、讀取（`git fetch` 讀 `origin/main`、查無先拉、失敗沿用）。
+- `angareion/channel-config`：兩個設定檔的格式與位置、註冊簿重建 workflow 的契約（留言格式、整串留言重建含分頁、併發與取消、授權、輸入驗證、回報、sha 樂觀鎖、每天一次 `schedule`）、讀取（`git fetch` 讀 `origin/main`（匿名 HTTPS）、查無先拉、失敗沿用）。
 
 ### Modified Capabilities
 

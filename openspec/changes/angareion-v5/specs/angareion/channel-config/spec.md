@@ -5,7 +5,7 @@ channel 名與 backend 實體的對應、以及 backend 本身的設定，放在
 ## ADDED Requirements
 
 ### Requirement: channel 設定檔
-channel 名到 backend 實體的對應 MUST 寫在 MyAiStorage repo 的 `config/angareion/channels.json`（路徑已定案）：JSON、版本欄（`version`）、`channels` 對應表；每筆是 `{"backend": <backend 名>, "issue": <編號>}`（repo 不重寫，在 backend 設定裡）。`send`／`read`／`wait` 與 `channel create`／`channel delete` MUST 經這個檔解析；名字不在檔裡 MUST 視為 channel 不存在（exit 1）。angareion MUST NOT 直接寫這個檔（只有 workflow 寫，見下面的 requirement）。
+channel 名到 backend 實體的對應 MUST 寫在 MyAiStorage repo 的 `config/angareion/channels.json`（路徑已定案）：JSON、版本欄（`version`）、`channels` 對應表；每筆是 `{"backend": <backend 名>, "issue": <編號>}`（repo 不重寫，在 backend 設定裡）。`send`／`read`／`wait` 與 `channel create`／`channel delete` MUST 經這個檔解析；名字不在檔裡 MUST 視為 channel 不存在（exit 1）。angareion MUST NOT 直接寫這個檔（只有 workflow 寫，見下面的 requirement）。**這檔是機器產物**（重建的輸出）：人工改會被下一次重建還原，MUST NOT 手改（複審 L5）。
 
 #### Scenario: 設定檔指到 backend 實體
 - **WHEN** 設定檔把 `general` 指到 backend `github-main` 的某個實體，執行 `angareion send --channel general --body hi`
@@ -29,15 +29,17 @@ backend 本身的設定 MUST 寫在 MyAiStorage repo 的 `config/angareion/backe
 ### Requirement: channel 對應的更新（註冊簿重建）
 `channels.json` MUST 由 MyAiStorage 的**註冊簿 issue**（長期存在，label 見 design §10）上的留言重建：`channel create`／`channel delete` MUST 各在它下面留一則一行 JSON 留言——`{"schema": 1, "action": "register"|"unregister", "channel": "<名>", "backend": "<backend 名>", "issue": <編號>}`；angareion 送出留言後 MUST NOT 等重建完成（`channel create` 會輪詢 fetch 到對應出現，見 `angareion` 的五個介面）。
 
-workflow MUST `on: issue_comment`（限註冊簿 issue）觸發，每次 run 從整串留言依時間序**重建** `channels.json` 並 commit 進 main（結果與 main 相同就不 commit）；MUST 用 `concurrency` 併發控制且 `cancel-in-progress`（新的取消舊的）——因為每次都從整串重建，被取消的 MUST NOT 遺失任何留言的效果。
+workflow MUST `on: issue_comment`（限註冊簿 issue；觸發層 MUST 用 `if` 擋掉 Bot——workflow 自己的回報留言不會再觸發新的 run，複審 H1）並有 `schedule`（每天一次）當保險（複審 M3）觸發；每次 run 用 `GET /repos/{owner}/{repo}/issues/{n}/comments?per_page=100` 讀整串留言（MUST 翻完所有頁——複審 M4），依時間序**重建** `channels.json` 並 commit 進 main（結果與 main 相同就不 commit）；MUST 用 `concurrency` 併發控制且 `cancel-in-progress`（新的取消舊的）——因為每次都從整串重建，被取消的 MUST NOT 遺失任何留言的效果。
 
 **套用規則（先到者為準）**：`register`——名字沒有對應就加上；已對應同一個實體視為成功（冪等）；已對應不同實體 MUST NOT 覆蓋，MUST 在註冊簿上回報。`unregister`——只移除指向同一個實體的對應；已經沒有、或指到別的實體 MUST NOT 改動對應，MUST 回報。
 
-**輸入（防注入）**：留言內容 MUST 只經環境變數交給腳本，MUST NOT 用 `${{ }}` 插進 shell；JSON MUST 嚴格解析。每個留言 MUST 驗證：channel 名（`^[A-Za-z0-9_-]+$`）、backend 名存在（在 `backends.json` 裡）、實體存在（issue 在該 backend 的 repo）而且標題等於 channel 名；不符的留言 MUST 跳過並在註冊簿上回報，MUST NOT 影響其他留言的重建。
+**輸入（防注入；複審 H2 調整）**：留言內容 MUST 只經環境變數交給腳本，MUST NOT 用 `${{ }}` 插進 shell；JSON MUST 嚴格解析。重建時每個留言 MUST **只驗留言本身**：channel 名（`^[A-Za-z0-9_-]+$`）、backend 名存在（在 `backends.json` 裡）、`author_association` 在採計清單；**MUST NOT 查 backend 的 issue**——標題被改、issue 被刪、API 暫時失敗都不會讓對應下架（issue 的存在與標題在 channel create 的用戶端驗，見 `angareion`）。不符的留言 MUST 跳過並在註冊簿上回報（非授權作者不回報，見下），MUST NOT 影響其他留言的重建。
 
 **寫入**：以 main 的最新版本（sha）為底；被拒 MUST 重讀重試（上限 5 次）。
 
-**授權**：workflow MUST 只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言；其他留言 MUST 忽略（不採計、不影響重建）。防注入與驗證不是授權，照上面執行；不是合法 action 形狀的留言（含 workflow 的回報）MUST 忽略。
+**授權**：workflow MUST 只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言；其他留言 MUST 忽略（不採計、不影響重建、**也不回報**——不回報才不會產生新留言）。防注入與驗證不是授權，照上面執行；不是合法 action 形狀的留言（含 workflow 的回報）MUST 忽略。
+
+**回報**：無法套用或驗證失敗的留言（授權作者）MUST 在註冊簿上用**純文字**回報（引用那則留言；MUST NOT 是可被解析成 action 的一行 JSON——複審 L4）。
 
 #### Scenario: 註冊新 channel
 - **WHEN** 註冊簿上有一則 `register` 留言（`X`、backend `B`、issue `N`；B 在 `backends.json`、X 不在對應表）
@@ -63,13 +65,17 @@ workflow MUST `on: issue_comment`（限註冊簿 issue）觸發，每次 run 從
 - **WHEN** 一則 `unregister` 留言的 `X` 已經不在，或（依先前留言）指到別的實體
 - **THEN** 對應不變；留言在註冊簿上被回報（no-op）
 
-#### Scenario: issue 不存在或標題不符
-- **WHEN** 一則 `register` 留言指向的 backend repo 裡沒有那個 issue 編號，或它的標題不等於 channel 名
-- **THEN** 該留言被跳過（不進 `channels.json`）並在註冊簿上回報；其他留言照常重建
+#### Scenario: 留言超過一頁仍全部重建
+- **WHEN** 註冊簿的留言超過 100 則（要翻頁）
+- **THEN** 重建翻完所有頁；早期的 register 仍在（沒有因為只讀第 1 頁被下架）
 
-#### Scenario: 非 OWNER／MEMBER／COLLABORATOR 的留言被忽略
+#### Scenario: 非 OWNER／MEMBER／COLLABORATOR 的留言被忽略且不回報
 - **WHEN** 一則格式合法的留言，作者 `author_association` 不是 `OWNER`／`MEMBER`／`COLLABORATOR`
-- **THEN** 該留言被忽略（不進重建、不影響其他留言）
+- **THEN** 該留言被忽略（不進重建、不影響其他留言、也不回報——沒有新留言產生）
+
+#### Scenario: 回報留言不會再觸發 run
+- **WHEN** workflow 對一則不合格的留言回了純文字回報（作者是 `github-actions[bot]`）
+- **THEN** 那則回報不會觸發新的 run（觸發層的 `if` 擋 Bot）；不會無限空轉
 
 #### Scenario: 取消舊 run 不遺失
 - **WHEN** 一次重建 run 進行中，新留言觸發的 run 把它取消（`cancel-in-progress`）
