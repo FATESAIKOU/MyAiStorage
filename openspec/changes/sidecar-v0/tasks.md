@@ -49,7 +49,7 @@
   - [x] 3.7.6 L3：agora 3.3 SIGTERM handler 在 Popen 前抵達記旗標，Popen 後轉送
   - [x] 3.7.7 H2：new 模式換把前 import 失敗也 stop、標 waiting-quota、scheduler 重試 import 後掛 job
   - [x] 3.7.8 M2：OpenCodeDriver 長逾時、狀態以背景送出在跑為準、錯誤寫進 exit.reason
-  - [ ] 3.7.9 M4：import 逾時 ≤ close_timeout、job open 禁 merge、docs/sidecar.md 修正公式與 L2/L4
+  - [x] 3.7.9 M4：import 逾時 ≤ close_timeout、job open 禁 merge、docs/sidecar.md 修正公式與 L2/L4
 
 ## 4. 文件與收尾
 

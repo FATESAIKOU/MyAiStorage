@@ -248,8 +248,11 @@ curl -s 127.0.0.1:8471/jobs -X POST -H 'content-type: application/json' -d '{
 - **close**：先 import → 溫和停下 → 再 import 一次（寫回停下之前最後的對話）→ `exited`。
   import 失敗時仍然停下，但 `exit.reason` 會說明沒有寫回。
 - **換把**：先 import 拿到 agora id → 停下 → 再 import → 用 `continue` 那個 agora id 接續
-  （之後就照一般 headless 路徑走）；import 失敗時**不停下** agent，掛一個
-  `now + retry_interval` 的重試 job 並 log。
+  （之後就照一般 headless 路徑走）。import 失敗時仍然**停下** agent（對話還在 agent 自己的
+  session 檔裡，不會丟），標 `waiting-quota`、記住它的 session id；scheduler 每
+  `retry_interval` 重試 import，成功後才掛一般的自動重開 job（`continue` 那個 agora id、
+  算出的解除時刻）。還沒跑過任何一輪（連 session id 都沒有）就額度用完：停下、
+  `waiting-quota`、沒有 job，由控制者決定。
 
 ## 7. 在 Mac 與 worker 上怎麼跑
 
@@ -260,14 +263,23 @@ sidecar run                # 起 daemon（讀設定檔；HTTP 只綁 127.0.0.1�
 ```
 
 - 健康檢查不另加端點：`GET /agents` 有回應就是「在跑」，連不上就是「沒在跑」。
+- **從原始碼目錄開發（L2）**：`AgoraSessionStore` 預設跑 `python -m agora.cli`，子行程
+  只拿 `child_env` 允許清單裡的變數（**沒有 `PYTHONPATH`**，設了也到不了子行程）。
+  最省事的是 `uv tool install` 從本 repo 裝好再跑；直接跑原始碼時，先讓同一個 python
+  找得到 `agora` 套件（例如 `uv run` 的同步 venv、`pip install -e .`），否則 agora 起不來、
+  啟動失敗的 stderr 會寫明 `ModuleNotFoundError`。
 - **worker**：由 MyLinuxPool 的 supervisor 拉起 `sidecar run`。收到 SIGTERM 時 sidecar 會先
   進入「關閉中」（`open`／`poke`／`POST /jobs` 回 503 `shutting_down`，到期的 job 不再執行），
   等 scheduler 的進行中那一次（上限 `close_timeout + 5` 秒，逾時只記 log），再逐一 close
   每個 agent，全部做完才結束。
-- **supervisor 的 kill timeout 必須大於 `close_timeout × agent 數`＋一個 scheduler beat**，
-  否則 SIGKILL 一來，還沒 close 的 agent 會變成孤兒。
+- **supervisor 的 kill timeout 必須大於「各 agent 的最壞時間加總」**：逐一 close 時，一般
+  agent 最壞 `close_timeout + 5` 秒（溫和停下再強制結束）、`new` 模式 `close_timeout × 2 + 5`
+  秒（import → stop → import；每個 import 的逾時都不超過 `close_timeout`）。預設
+  `close_timeout` 30 秒：一般 35 秒、`new` 65 秒，乘以同時的 agent 數，再加一個 scheduler
+  beat；否則 SIGKILL 一來，還沒 close 的 agent 會變成孤兒。
 - **v0 只有一個 scheduler 執行緒**：一個 agent 的換把（網路加 stop，可能數十秒）會延遲其他
-  agent 的刷新、佇列中的 poke 與 job。這是 v0 接受的取捨。
+  agent 的刷新、佇列中的 poke 與 job；`new` 模式到期的 periodic import 也在同一個執行緒裡
+  做（每個最多 `close_timeout` 秒），多個 `new` agent 時同樣延遲其他 agent。這是 v0 接受的取捨。
 - 沒有 driver 的 agent 種類：`POST /agents` 回 400（訊息 unsupported agent kind）；
   `GET /agents` 仍然正常（健康檢查會過），`docs/sidecar.md` 這節就是說明這件事。
 

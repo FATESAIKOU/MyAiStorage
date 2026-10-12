@@ -18,7 +18,7 @@ from sidecar import cli
 from sidecar.config import Config, load_config
 from sidecar.core import SidecarCore
 from sidecar.protocols import BadRequestError, ConfigError
-from sidecar.wiring import build_core
+from sidecar.wiring import build_core, default_session_store
 
 
 # --- --version (design D8) ----------------------------------------------------
@@ -157,6 +157,15 @@ def test_build_core_wires_llmgateway_without_the_extra_installed(tmp_path):
     # The source exists; without the lgw extra every operation is Unreachable,
     # which open turns into a 503 (covered by the sources tests).
     assert core is not None
+
+
+def test_session_store_timeouts_follow_close_timeout():
+    """M4: the shutdown-path calls (import) stay within close_timeout."""
+    config = Config(close_timeout=45.0)
+    store = default_session_store(config)
+    assert store is not None
+    assert store._import_timeout == 45.0
+    assert store._start_timeout == 45.0
 
 
 def test_main_run_with_llmgateway_still_serves_status(tmp_path):

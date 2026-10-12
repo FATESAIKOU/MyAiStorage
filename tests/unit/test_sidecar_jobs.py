@@ -66,6 +66,21 @@ def test_at_job_is_visible_before_and_opens_at_due_time(tmp_path):
     assert core.list_jobs() == []  # a one-shot job is consumed
 
 
+def test_open_with_a_merge_session_is_refused_in_a_job(tmp_path):
+    """M4: a merge open stays a direct call (D1), never a scheduler-held job."""
+    core, _driver, _store, _source, clock, workdir = rig(tmp_path)
+    with pytest.raises(BadRequestError) as excinfo:
+        core.add_job(
+            "open",
+            {"id": "t1", "agent": "claude-code", "workdir": workdir,
+             "session": {"mode": "merge", "from": ["agora:A", "agora:B"]}},
+            at=clock.t + 60,
+        )
+    assert excinfo.value.status == 400
+    assert excinfo.value.code == "merge_not_allowed_in_job"
+    assert core.list_jobs() == []
+
+
 def test_every_job_runs_until(tmp_path):
     core, _driver, _store, _source, clock, workdir = rig(tmp_path)
     core.open("t1", "claude-code", workdir, {"mode": "new"})

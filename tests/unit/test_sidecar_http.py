@@ -235,6 +235,15 @@ def test_job_validation_is_a_400(control):
     assert status == 400 and body["error"]["code"] == "invalid_request"
 
 
+def test_job_open_with_a_merge_session_is_a_400(control):
+    """M4: POST /jobs refuses an open whose session mode is merge (D1)."""
+    base, _server, _core, _driver, _store, _source, clock, workdir = control
+    args = _open_args(workdir)
+    args["session"] = {"mode": "merge", "from": ["agora:A", "agora:B"]}
+    status, body = call(base, "POST", "/jobs", {"action": "open", "args": args, "at": clock.t + 60})
+    assert status == 400 and body["error"]["code"] == "merge_not_allowed_in_job"
+
+
 def test_failed_job_keeps_last_run_and_last_error(control):
     base, _server, core, _driver, _store, _source, clock, workdir = control
     call(base, "POST", "/agents", _open_args(workdir))  # t1 is running

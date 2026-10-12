@@ -498,6 +498,15 @@ class SidecarCore:
         missing = [key for key in _JOB_REQUIRED[action] if key not in args]
         if missing:
             raise BadRequestError(f"{action} args need: {', '.join(missing)}")
+        if action == "open":
+            session = args.get("session")
+            if isinstance(session, dict) and session.get("mode") == "merge":
+                # D1/M4: a merge open runs the summarizer (up to 15 minutes) in
+                # the scheduler thread; it stays a direct call, never a job.
+                raise BadRequestError(
+                    "open with a merge session is not allowed in a job",
+                    code="merge_not_allowed_in_job",
+                )
         if at is not None and at < self._now():
             raise BadRequestError("at is in the past")
         return self._jobs.add(action, args, at=at, every=every, until=until, now=self._now())
