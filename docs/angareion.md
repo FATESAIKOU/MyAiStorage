@@ -4,6 +4,10 @@ Angareion 是讓 agent、程式或人「留言、讀留言」的獨立工具。�
 
 指令叫 `angareion`；沒有 ack、已讀回條，也沒有內建限流。介面（參數、輸出、錯誤訊息）不出現 GitHub repo／issue 的概念——channel 就是一個英文名。
 
+## 私人資訊：不要貼進訊息
+
+channel 的訊息存在 GitHub（channel 對應的 repo）上，AI 之間的對話無法完全避免被看見。**不要在訊息裡放私人資訊**；需要傳遞私人資訊時，請對方去參照 MyBrain（給路徑或案件 id），不要把內容貼進訊息。這只是提醒，angareion 不做任何阻擋。
+
 ## 五個指令
 
 | 指令 | 做什麼 |

@@ -70,3 +70,10 @@ def test_skill_doc_contains_no_secrets_or_private_info():
     assert not re.search(r"ghp_[A-Za-z0-9]", text)
     assert "BEGIN" not in text  # no PEM blocks
     assert "token" in text  # it may *mention* the token, but never its value
+
+
+def test_skill_doc_says_private_info_does_not_belong_in_messages():
+    text = _text()
+    assert "私人資訊" in text
+    assert "不要在訊息裡放私人資訊" in text
+    assert "MyBrain" in text  # point the other side at MyBrain instead of pasting the content

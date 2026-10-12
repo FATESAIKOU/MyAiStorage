@@ -171,6 +171,23 @@ def test_help_exits_zero(capsys):
             parser.parse_args(["channel", action, "--help"])
 
 
+def test_help_carries_the_private_info_reminder(capsys):
+    """#52: the help's reminder paragraph says private info goes to MyBrain, not the message.
+
+    The send help only repeats the short line; the middle assertion is unique to
+    the full paragraph, so deleting the paragraph from the parser fails here.
+    """
+    parser = build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["--help"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "不要在訊息裡放私人資訊" in out
+    assert "AI 之間的對話無法完全避免被看見" in out
+    assert "不要把內容貼進訊息" in out
+    assert "MyBrain" in out
+
+
 def test_no_subcommand_is_usage_error(capsys):
     assert main([]) == 1
     captured = capsys.readouterr()
