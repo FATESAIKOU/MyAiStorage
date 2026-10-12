@@ -956,7 +956,7 @@ def test_a_second_continue_is_refused_while_the_first_still_holds_the_lock(env, 
     path, lock = cli._write_pending(paths(), record)
     try:
         code, out, err = _continue(capsys, a)
-        assert code == cli.EXIT_LOCKED and out == ""
+        assert code == cli.EXIT_LOCKED == 4 and out == ""    # 4 is the number the caller sees
         _locked(err, a)
         assert not env.launched
     finally:
@@ -979,7 +979,7 @@ def test_a_lock_held_by_another_process_is_seen_without_any_mocking(env, capsys)
     try:
         _wait_for(lambda: store.continuing(paths(), ulid), what="the other process to lock it")
         code, out, err = _continue(capsys, a)
-        assert code == cli.EXIT_LOCKED and out == ""
+        assert code == cli.EXIT_LOCKED == 4 and out == ""    # 4 is the number the caller sees
         _locked(err, a)
         assert not env.launched, "the agent must not be opened"
     finally:
@@ -1032,7 +1032,7 @@ def test_a_continue_that_loses_the_lock_race_exits_locked(env, capsys, monkeypat
     _lock_appears_mid_preparation(env, monkeypatch, pending_file, "{}", holder)
     try:
         code, out, err = _continue(capsys, a)
-        assert code == cli.EXIT_LOCKED and out == ""
+        assert code == cli.EXIT_LOCKED == 4 and out == ""    # 4 is the number the caller sees
         _locked(err, a)
         assert pending_file.read_text(encoding="utf-8") == "{}", "the winner's record was renamed over"
         assert not list(paths().pending.glob("*.json.tmp")), "the loser leaves no tmp behind"
@@ -1055,7 +1055,7 @@ def test_two_runs_inside_write_pending_at_once_leave_the_record_alone(env, capsy
     _lock_appears_mid_preparation(env, monkeypatch, tmp_file, other, holder)
     try:
         code, out, err = _continue(capsys, a)
-        assert code == cli.EXIT_LOCKED and out == ""
+        assert code == cli.EXIT_LOCKED == 4 and out == ""    # 4 is the number the caller sees
         _locked(err, a)
         assert tmp_file.read_text(encoding="utf-8") == other, "the record being written was truncated"
     finally:
