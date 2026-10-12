@@ -1,0 +1,43 @@
+name: Angareion registry rebuild
+
+# The registry issue is the request entry point for channel mappings: every
+# `channel create`/`channel delete` leaves one line of JSON there, and this
+# workflow rebuilds config/angareion/channels.json from the whole thread.
+#
+# The trigger is limited to the single registry issue (repo variable
+# ANGAREION_REGISTRY_ISSUE, set once the issue exists) and Bot comments are
+# filtered out, so the workflow's own reports never start another run. The
+# daily schedule is the safety net; workflow_dispatch re-runs by hand.
+
+on:
+  issue_comment:
+    types: [created]
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: angareion-channels
+  cancel-in-progress: true
+
+jobs:
+  rebuild:
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (github.event.comment.user.type != 'Bot' &&
+       github.event.issue.number == vars.ANGAREION_REGISTRY_ISSUE)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rebuild config/angareion/channels.json from the registry thread
+        env:
+          PYTHONPATH: src
+          GITHUB_TOKEN: ${{ github.token }}
+          ANGAREION_REGISTRY_REPO: ${{ github.repository }}
+          ANGAREION_REGISTRY_ISSUE: ${{ vars.ANGAREION_REGISTRY_ISSUE }}
+          ANGAREION_TRIGGER_COMMENT_BODY: ${{ github.event.comment.body }}
+        run: python3 -m angareion.registry_rebuild

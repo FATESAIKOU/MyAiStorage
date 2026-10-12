@@ -349,7 +349,7 @@ class FakeRegistryClient:
 
     def get_file(self, path: str) -> tuple[str, str | None]:
         if path not in self.files:
-            raise FileNotFoundError(path)
+            return "", None  # like the real client: a missing file is empty
         return self.files[path], f"sha-{self._sha}"
 
     def put_file(self, path: str, text: str, *, sha: str | None, message: str) -> None:
