@@ -14,7 +14,7 @@
 ## 3. 後端與指令
 
 - [x] 3.1 `ChannelBackend` 去 members；GitHub 後端經兩個設定檔解析（查無→`ChannelNotFoundError`）；實體開（create）與關（delete，不刪）的動作；不再寫／讀 members（舊殘留忽略）
-- [ ] 3.2 `channel create` 三步：後端開實體 → 用戶端驗實體（存在且標題等於 channel 名；不符 exit 2）→ 送註冊（在註冊簿留一行 JSON 留言；短間隔重試 2 次、最多 3 次嘗試）→ 輪詢 fetch 等對應出現（上限 2 分鐘）；同名 exit 1、開失敗 exit 2；`--backend`（多個 backend 時必給）（design §6）
+- [x] 3.2 `channel create` 三步：後端開實體 → 用戶端驗實體（存在且標題等於 channel 名；不符 exit 2）→ 送註冊（在註冊簿留一行 JSON 留言；短間隔重試 2 次、最多 3 次嘗試）→ 輪詢 fetch 等對應出現（上限 2 分鐘）；同名 exit 1、開失敗 exit 2；`--backend`（多個 backend 時必給）（design §6）
 - [ ] 3.3 `channel delete`：找對應 → 關實體（404 視同已關）→ 在註冊簿留 unregister 留言（design §7）
 - [x] 3.4 留言送出（註冊簿；`Issues: Read and write`）與假的註冊端（測試用）
 - [ ] 3.5 註冊簿重建 workflow（例 `.github/workflows/angareion-registry.yml`）＋更新腳本：`on: issue_comment`（`if` 擋 Bot）＋每天一次 `schedule`、授權（只採計 `OWNER`／`MEMBER`／`COLLABORATOR`；非授權不回報）、從整串留言重建（`per_page=100`、翻完所有頁）、只驗留言本身（格式、channel 名、backend 名；不查 backend 的 issue）、回報（純文字）、commit main（無變化不 commit；`permissions:` 至少 `contents: write`＋`issues: write`）、`concurrency`＋`cancel-in-progress`、sha 樂觀鎖重試（上限 5）（design §9／§10；腳本以可注入的檔案 API 單元測試）

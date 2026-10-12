@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from typing import Callable, NamedTuple
 
-from angareion.backend import ChannelBackend, Cursor, EntityResolver, Target
+from angareion.backend import BackendRef, ChannelBackend, Cursor, Entity, EntityResolver, Target
 from angareion.messages import Message
 from angareion.state import CursorStore, channel_cursor_key, recipient_cursor_key
 
@@ -45,6 +45,18 @@ class Angareion:
 
     def send(self, channel: str, message: Message) -> str:
         return self.backend.send(self.store.entity_for(channel), message)
+
+    def create_channel(self, name: str, backend: BackendRef) -> int:
+        """Step 1 of `channel create`: open the backend entity; returns its number."""
+        return self.backend.create_channel(name, backend)
+
+    def verify_channel(self, name: str, backend: BackendRef, entity: int) -> bool:
+        """Step 2's check: the entity exists and its title is exactly the channel name."""
+        return self.backend.verify_channel(name, backend, entity)
+
+    def close_channel(self, entity: Entity) -> None:
+        """`channel delete` step 2: close the entity without deleting it."""
+        self.backend.close_channel(entity)
 
     def check(self, target: Target, *, timeout: float | None = None) -> bool:
         """Whether the backend has anything new for the target right now.

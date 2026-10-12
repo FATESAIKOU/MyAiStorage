@@ -90,7 +90,13 @@ def test_send_rejects_a_bad_to_before_touching_the_backend():
 def test_send_without_to_builds_a_broadcast_message():
     sent = {}
 
+    class NoopStore:
+        def ensure_fresh(self):
+            pass
+
     class RecordingApp:
+        store = NoopStore()
+
         def send(self, channel, message):
             sent["channel"] = channel
             sent["message"] = message

@@ -1,4 +1,4 @@
-"""Command line interface: the four commands, exit codes 0/1/2/3, stdout vs stderr (D1)."""
+"""Command line interface: the five commands, exit codes 0/1/2/3, stdout vs stderr (D1/v5)."""
 
 from __future__ import annotations
 
@@ -12,10 +12,17 @@ from typing import Any, Callable, Sequence
 
 from angareion.backend import (
     BackendError,
+    BackendRef,
     ChannelBackend,
     ChannelNotFoundError,
+    EntityResolver,
     Target,
     parse_backend_time,
+)
+from angareion.channel_config import (
+    BackendChoiceError,
+    ChannelConfigError,
+    ChannelStore,
 )
 from angareion.client import POLL_INTERVAL_SECONDS, Angareion
 from angareion.config import (
@@ -33,6 +40,14 @@ from angareion.messages import (
     message_to_dict,
     validate_address,
     validate_channel_name,
+)
+from angareion.registry import (
+    CommentPoster,
+    RegistryClient,
+    RegistryError,
+    post_with_retries,
+    register_comment,
+    unregister_comment,
 )
 from angareion.state import CursorStore
 
@@ -140,16 +155,110 @@ def _read_body(args: argparse.Namespace) -> str:
     return args.body
 
 
-def cmd_channel_create(args: argparse.Namespace, config: Config, app: Angareion, token: str) -> int:
+def cmd_channel_create(
+    args: argparse.Namespace,
+    config: Config,
+    app: Angareion,
+    registry: CommentPoster,
+    store: ChannelStore,
+    token: str,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> int:
+    """The three-step create (design section 6).
+
+    1. open the backend entity; 2. verify it, then post a register comment on
+    the registry issue; 3. wait (bounded) for the rebuild to land the mapping.
+    """
     try:
         validate_channel_name(args.name)
     except MessageValidationError as e:
         sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
         return EXIT_USAGE
 
-    # v5: channels have no member list any more (every channel is public in phase one).
-    channel = app.create_channel(args.name)
-    sys.stdout.write(f"{channel.name} #{channel.number}\n")
+    store.ensure_fresh()
+    if args.name in store.channels():
+        sys.stderr.write(
+            f"Error: channel '{args.name}' already exists; use `angareion channel delete` first to replace it.\n"
+        )
+        return EXIT_USAGE
+
+    try:
+        backend_ref = store.choose_backend_for_create(args.backend)
+    except BackendChoiceError as e:
+        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
+        return EXIT_USAGE
+    except ChannelConfigError as e:
+        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
+        return EXIT_BACKEND
+
+    # Step 1: open the entity in the backend.
+    try:
+        entity = app.create_channel(args.name, backend_ref)
+    except BackendError:
+        sys.stderr.write(f"Error: channel '{args.name}' was not created.\n")
+        return EXIT_BACKEND
+
+    # Step 2: the client verifies the entity (exists and its title is the
+    # channel name) before anything is registered (review H2).
+    if not app.verify_channel(args.name, backend_ref, entity):
+        sys.stderr.write(
+            f"Error: channel '{args.name}' could not be verified in the backend; nothing was registered.\n"
+        )
+        return EXIT_BACKEND
+
+    body = register_comment(args.name, backend_ref.name, entity)
+    try:
+        post_with_retries(registry, body, sleeper=sleeper)
+    except RegistryError:
+        sys.stderr.write(
+            f"Error: channel '{args.name}' was not created: the registration could not be posted.\n"
+        )
+        return EXIT_BACKEND
+
+    # Step 3: wait for the mapping to land (bounded); a timeout is not an error.
+    if not store.poll_for_channel(args.name):
+        sys.stderr.write(
+            f"Notice: channel '{args.name}' is registered but has not shown up in the local copy yet; "
+            "it will be usable once the registry rebuild lands.\n"
+        )
+    sys.stdout.write(f"{args.name}\n")
+    return EXIT_OK
+
+
+def cmd_channel_delete(
+    args: argparse.Namespace,
+    config: Config,
+    app: Angareion,
+    registry: CommentPoster,
+    store: ChannelStore,
+    token: str,
+) -> int:
+    """Delete a channel: close the entity (keep the record), then unregister (design section 7)."""
+    try:
+        validate_channel_name(args.name)
+    except MessageValidationError as e:
+        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
+        return EXIT_USAGE
+
+    store.ensure_fresh()
+    entity = store.entity_for(args.name)  # a missing channel raises ChannelNotFoundError
+
+    try:
+        app.close_channel(entity)
+    except BackendError:
+        sys.stderr.write(f"Error: channel '{args.name}' was not deleted: the backend entity could not be closed.\n")
+        return EXIT_BACKEND
+
+    body = unregister_comment(args.name, entity.backend, entity.issue)
+    try:
+        registry.post_comment(body)
+    except RegistryError:
+        sys.stderr.write(
+            f"Error: channel '{args.name}' was closed but the unregistration could not be posted.\n"
+        )
+        return EXIT_BACKEND
+
+    sys.stdout.write(f"{args.name}\n")
     return EXIT_OK
 
 
@@ -184,6 +293,7 @@ def cmd_send(args: argparse.Namespace, config: Config, app: Angareion, token: st
         sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
         return EXIT_USAGE
 
+    app.store.ensure_fresh()
     message_id = app.send(args.channel, message)
     sys.stdout.write(f"{message_id}\n")
     return EXIT_OK
@@ -201,6 +311,8 @@ def cmd_wait(
         sys.stderr.write(f"Error: --timeout must not be negative, got {args.timeout}\n")
         return EXIT_USAGE
 
+    # The pull happens once, before the loop: wait must not fetch while polling.
+    app.store.ensure_fresh()
     target = _target_from_args(args, config)
     found = app.wait(target, args.timeout, poll_interval=POLL_INTERVAL_SECONDS, sleeper=sleeper, clock=clock)
     _report_old_cursors(app)
@@ -224,6 +336,7 @@ def cmd_read(args: argparse.Namespace, config: Config, app: Angareion, token: st
             return EXIT_USAGE
 
     target = _target_from_args(args, config)
+    app.store.ensure_fresh()
     batch = app.read(target, since=args.since)
 
     if args.json:
@@ -249,8 +362,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_channel = subparsers.add_parser("channel", help="Channel operations.")
     channel_sub = p_channel.add_subparsers(dest="channel_action", metavar="ACTION")
-    p_create = channel_sub.add_parser("create", help="Create a channel; prints '<name> #<number>'.")
+    p_create = channel_sub.add_parser("create", help="Create a channel; prints the channel name.")
     p_create.add_argument("name", help="Channel name.")
+    p_create.add_argument("--backend", metavar="NAME",
+                          help="Which backend to open the channel in (required when several are configured).")
+    p_delete = channel_sub.add_parser("delete", help="Delete a channel; prints the channel name.")
+    p_delete.add_argument("name", help="Channel name.")
 
     p_send = subparsers.add_parser("send", help="Send a message to a channel; prints the message id.")
     p_send.add_argument("--channel", required=True, help="Channel name.")
@@ -280,15 +397,19 @@ def build_parser() -> argparse.ArgumentParser:
 def main(
     argv: Sequence[str] | None = None,
     backend: ChannelBackend | None = None,
+    store: EntityResolver | None = None,
+    registry: CommentPoster | None = None,
     sleeper: Callable[[float], None] | None = None,
     clock: Callable[[], float] | None = None,
     transport: HttpTransport | None = None,
 ) -> int:
     """Entrypoint for the `angareion` command; returns the exit code.
 
-    `backend` and `transport` are test seams: a fake backend, or a fake HTTP
-    transport for the real GitHubIssuesBackend, so tests never touch the
-    network. `sleeper` and `clock` make `wait` testable without real waiting.
+    `backend`, `store`, `registry` and `transport` are test seams: a fake
+    backend, a fake config store, a fake registry issue, or a fake HTTP
+    transport for the real GitHub clients, so tests never touch the network.
+    `sleeper` and `clock` make `wait` and the create retry testable without
+    real waiting.
     """
     parser = build_parser()
     try:
@@ -301,7 +422,10 @@ def main(
         parser.print_help(sys.stderr)
         return EXIT_USAGE
     if args.command == "channel" and args.channel_action is None:
-        sys.stderr.write("Error: channel needs an action; try 'angareion channel create <name>'.\n")
+        sys.stderr.write(
+            "Error: channel needs an action; try 'angareion channel create <name>' "
+            "or 'angareion channel delete <name>'.\n"
+        )
         return EXIT_USAGE
 
     try:
@@ -310,45 +434,69 @@ def main(
         sys.stderr.write(f"Error: {e}\n")
         return EXIT_BACKEND
 
-    # Load the token where possible, only to mask it out of any later message.
-    token_for_masking = ""
+    # Load the token where possible (also to mask it out of later messages).
+    token = ""
     try:
-        token_for_masking = load_token(config)
-    except TokenError:
-        pass
+        token = load_token(config)
+    except TokenError as e:
+        # With fakes for both the backend and the registry no token is needed.
+        if backend is None or registry is None:
+            sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
+            return EXIT_BACKEND
 
     try:
-        active_backend = backend if backend is not None else GitHubIssuesBackend.from_config(config, transport=transport)
-    except (TokenError, ConfigError, BackendError) as e:
-        sys.stderr.write(f"Error: {mask_token(str(e), token_for_masking)}\n")
+        active_store = store if store is not None else ChannelStore(
+            config.config_dir, interval=config.config_pull_interval
+        )
+        active_backend = backend if backend is not None else GitHubIssuesBackend(
+            active_store, token=token, transport=transport
+        )
+        active_registry = registry if registry is not None else RegistryClient(
+            config.registry_repo, config.registry_issue, token=token, transport=transport
+        )
+    except (TokenError, ConfigError, BackendError, RegistryError) as e:
+        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
         return EXIT_BACKEND
 
-    app = Angareion(active_backend, CursorStore(config.state_dir, config.identity))
+    app = Angareion(active_backend, CursorStore(config.state_dir, config.identity), active_store, config.identity)
     active_sleeper = sleeper or time.sleep
     active_clock = clock or time.monotonic
 
     try:
         if args.command == "channel":
-            return cmd_channel_create(args, config, app, token_for_masking)
+            if args.channel_action == "create":
+                return cmd_channel_create(
+                    args, config, app, active_registry, active_store, token, sleeper=active_sleeper
+                )
+            if args.channel_action == "delete":
+                return cmd_channel_delete(args, config, app, active_registry, active_store, token)
+            parser.print_help(sys.stderr)
+            return EXIT_USAGE
         if args.command == "send":
-            return cmd_send(args, config, app, token_for_masking)
+            return cmd_send(args, config, app, token)
         if args.command == "wait":
-            return cmd_wait(args, config, app, token_for_masking, active_sleeper, active_clock)
+            return cmd_wait(args, config, app, token, active_sleeper, active_clock)
         if args.command == "read":
-            return cmd_read(args, config, app, token_for_masking)
+            return cmd_read(args, config, app, token)
         parser.print_help(sys.stderr)
         return EXIT_USAGE
     except ChannelNotFoundError as e:
         # A missing channel is an input error, not a backend failure.
-        sys.stderr.write(f"Error: {mask_token(str(e), token_for_masking)}\n")
+        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
+        return EXIT_USAGE
+    except BackendChoiceError as e:
+        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
         return EXIT_USAGE
     except MessageValidationError as e:
         # A parse-level ValueError from a backend is converted to BackendError
         # inside the backend (L1); only input validation exits 1 here.
-        sys.stderr.write(f"Error: {mask_token(str(e), token_for_masking)}\n")
+        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
         return EXIT_USAGE
+    except (ChannelConfigError, RegistryError) as e:
+        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
+        return EXIT_BACKEND
     except BackendError as e:
-        sys.stderr.write(f"Error: {mask_token(str(e), token_for_masking)}\n")
+        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
         return EXIT_BACKEND
     except BrokenPipeError:
         # stdout (a pipe like `| head`) closed before the messages were out.
@@ -363,7 +511,7 @@ def main(
         sys.stderr.write("Error: stdout was closed before the messages were written; the cursor was not advanced.\n")
         return EXIT_USAGE
     except Exception as e:
-        sys.stderr.write(f"Error: {mask_token(f'Unexpected error: {e}', token_for_masking)}\n")
+        sys.stderr.write(f"Error: {mask_token(f'Unexpected error: {e}', token)}\n")
         return EXIT_BACKEND
 
 
