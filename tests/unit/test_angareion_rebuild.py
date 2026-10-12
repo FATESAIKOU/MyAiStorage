@@ -83,6 +83,34 @@ def test_first_come_first_served_and_the_loser_is_reported():
     assert parse_comment(reports[0]) is None  # a report is never a parseable action
 
 
+def test_out_of_order_api_results_still_apply_first_come_first_served():
+    """L2: the API order is transport order; (created_at, id) decides who was first."""
+    early = {
+        "body": register_comment("X", "github-main", 1),
+        "author_association": "OWNER",
+        "user": {"type": "User"},
+        "created_at": "2026-10-10T12:00:01Z",
+        "id": 101,
+    }
+    late = {
+        "body": register_comment("X", "github-main", 2),
+        "author_association": "OWNER",
+        "user": {"type": "User"},
+        "created_at": "2026-10-10T12:00:02Z",
+        "id": 102,
+    }
+    channels, reports = rebuild_channels([late, early], BACKEND_NAMES)
+    assert channels == {"X": {"backend": "github-main", "issue": 1}}
+    assert len(reports) == 1
+    assert "already registered" in reports[0]
+
+    # Same timestamp: the smaller id was first, even when listed last.
+    first_id = dict(early, created_at="2026-10-10T12:00:01Z", id=201)
+    second_id = dict(late, created_at="2026-10-10T12:00:01Z", id=202)
+    channels, _ = rebuild_channels([second_id, first_id], BACKEND_NAMES)
+    assert channels == {"X": {"backend": "github-main", "issue": 1}}
+
+
 def test_repeat_register_of_the_same_entity_is_a_noop_without_a_report():
     channels, reports = rebuild_channels(
         [

@@ -120,6 +120,18 @@ def report_text(reason: str, body: Any) -> str:
     )
 
 
+def _comment_order(comment: dict[str, Any]) -> tuple[str, int]:
+    """Sort key for the rebuild: the authoritative arrival order is (created_at, id)."""
+    created = comment.get("created_at")
+    if not isinstance(created, str):
+        created = ""
+    try:
+        comment_id = int(comment.get("id", 0))
+    except (TypeError, ValueError):
+        comment_id = 0
+    return (created, comment_id)
+
+
 def rebuild_channels(
     comments: list[dict[str, Any]], backend_names: set[str]
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
@@ -127,7 +139,7 @@ def rebuild_channels(
     channels: dict[str, dict[str, Any]] = {}
     reports: list[str] = []
 
-    for comment in comments:
+    for comment in sorted(comments, key=_comment_order):
         if comment.get("author_association") not in AUTHORIZED_ASSOCIATIONS:
             continue  # not authorized: ignored, and never reported
         body = comment.get("body")

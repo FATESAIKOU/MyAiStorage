@@ -232,6 +232,7 @@ def cmd_channel_delete(
     registry: CommentPoster,
     store: ChannelStore,
     token: str,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> int:
     """Delete a channel: close the entity (keep the record), then unregister (design section 7)."""
     try:
@@ -251,7 +252,7 @@ def cmd_channel_delete(
 
     body = unregister_comment(args.name, entity.backend, entity.issue)
     try:
-        registry.post_comment(body)
+        post_with_retries(registry, body, sleeper=sleeper)
     except RegistryError:
         sys.stderr.write(
             f"Error: channel '{args.name}' was closed but the unregistration could not be posted.\n"
@@ -469,7 +470,7 @@ def main(
                     args, config, app, active_registry, active_store, token, sleeper=active_sleeper
                 )
             if args.channel_action == "delete":
-                return cmd_channel_delete(args, config, app, active_registry, active_store, token)
+                return cmd_channel_delete(args, config, app, active_registry, active_store, token, sleeper=active_sleeper)
             parser.print_help(sys.stderr)
             return EXIT_USAGE
         if args.command == "send":

@@ -110,7 +110,7 @@ def cli_env(tmp_path, monkeypatch):
     )
     backend = FakeBackend(store)
     backend.add_entity("general", number=10)
-    backend.add_entity("other", number=7)
+    backend.add_entity("other", number=7, repo="owner/repo")
     registry = ApplyingRegistry(git)
     return {
         "config": config,
@@ -689,20 +689,28 @@ def test_channel_delete_404_is_already_closed(cli_env, capsys):
     assert json.loads(cli_env["registry"].posted[0])["action"] == "unregister"
 
 
+def test_channel_delete_unregister_retries_then_succeeds(cli_env, capsys):
+    cli_env["registry"].fail_posts_times = 1
+    assert run(cli_env, ["channel", "delete", "general"]) == 0
+    capsys.readouterr()
+    assert cli_env["clock"].sleeps == [1.0]  # one short retry gap, like create
+    assert cli_env["backend"].entity_state(10) == "closed"
+
+
 def test_channel_delete_unregister_failure_exits_2(cli_env, capsys):
-    cli_env["registry"].fail_posts_times = 1  # delete does not retry
+    cli_env["registry"].fail_posts_times = 3  # all 3 attempts fail
     ret = run(cli_env, ["channel", "delete", "general"])
     assert ret == 2
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "could not be posted" in captured.err
     assert cli_env["backend"].entity_state(10) == "closed"  # closed, mapping still there
-    assert cli_env["clock"].sleeps == []
+    assert cli_env["clock"].sleeps == [1.0, 1.0]  # 3 attempts, 2 gaps
 
 
 def test_channel_delete_is_safe_to_rerun_after_a_failed_unregister(cli_env, capsys):
     """Re-running closes an already-closed entity again (idempotent) and retries the comment."""
-    cli_env["registry"].fail_posts_times = 1
+    cli_env["registry"].fail_posts_times = 3
     assert run(cli_env, ["channel", "delete", "general"]) == 2
     assert cli_env["backend"].entity_state(10) == "closed"
 

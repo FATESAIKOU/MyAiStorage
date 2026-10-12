@@ -46,7 +46,7 @@ def _backend() -> tuple[FakeBackend, Entity]:
     other = entity(channel="other", backend="github-2", repo="owner/repo2", issue=7)
     backend = FakeBackend(StaticResolver([general, other]))
     backend.add_entity("general", number=10)
-    backend.add_entity("other", number=7)
+    backend.add_entity("other", number=7, repo="owner/repo2")
     return backend, general
 
 
@@ -170,6 +170,31 @@ def test_fake_create_verify_close_without_members():
     backend.close_channel(entity(channel="fresh", issue=999))
     # And closing a channel that was never created does not resurrect anything.
     assert backend.entity_state(999) is None
+
+
+def test_fake_backend_keys_entities_by_repo_and_issue():
+    """L5: the same issue number in two repos are different entities."""
+    general = entity(channel="general", issue=10)  # owner/repo
+    other = entity(channel="other", backend="github-2", repo="owner/repo2", issue=10)
+    backend = FakeBackend(StaticResolver([general, other]))
+    backend.add_entity("general", number=10, repo="owner/repo")
+    backend.add_entity("other", number=10, repo="owner/repo2")
+
+    assert backend.entity_state(10, repo="owner/repo") == "open"
+    assert backend.entity_state(10, repo="owner/repo2") == "open"
+
+    # Verify is repo-sensitive: the same number under the other repo has another title.
+    assert backend.verify_channel("general", BackendRef("github-main", "github", "owner/repo"), 10) is True
+    assert backend.verify_channel("general", BackendRef("github-2", "github", "owner/repo2"), 10) is False
+
+    # Closing one repo's entity leaves the other's alone.
+    backend.close_channel(general)
+    assert backend.entity_state(10, repo="owner/repo") == "closed"
+    assert backend.entity_state(10, repo="owner/repo2") == "open"
+
+    # And sending to the still-open entity works.
+    msg = _make_msg(channel="other", msg_id="01OTHER")
+    assert backend.send(other, msg) == "01OTHER"
 
 
 def test_fake_backend_injected_failures():

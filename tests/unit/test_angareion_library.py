@@ -45,7 +45,7 @@ def _backend(resolver=None) -> FakeBackend:
     resolver = resolver or StaticResolver([GENERAL, OTHER])
     backend = FakeBackend(resolver)
     backend.add_entity("general", number=10)
-    backend.add_entity("other", number=7)
+    backend.add_entity("other", number=7, repo="owner/repo2")
     return backend
 
 
