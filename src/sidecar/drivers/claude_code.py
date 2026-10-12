@@ -46,7 +46,7 @@ from ..protocols import (
     iso,
 )
 from ..subproc import child_env, terminate_process
-from .common import pick_model, stderr_excerpt
+from .common import extract_secrets, pick_model, stderr_excerpt
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ class ClaudeHandle:
     quota: DriverState | None = None  # sticky: only a new handle clears it
     stopped: bool = False
     stderr_tail: deque = field(default_factory=lambda: deque(maxlen=20))
-    secrets: tuple[str, ...] = ()  # env_for values, for masking error tails
+    secrets: tuple[str, ...] = ()  # real secret values from env, for masking error tails
     lock: threading.Lock = field(default_factory=threading.Lock)
     reader: threading.Thread | None = None
     is_api_key: bool = False
@@ -162,7 +162,7 @@ class ClaudeCodeDriver:
             ("ANTHROPIC_API_KEY" in env or "ANTHROPIC_AUTH_TOKEN" in env)
             and "CLAUDE_CODE_OAUTH_TOKEN" not in env
         )
-        handle.secrets = tuple(value for value in env.values() if value)
+        handle.secrets = extract_secrets(env)
         handle.reader = threading.Thread(target=self._read_events, args=(handle,), daemon=True)
         handle.reader.start()
         return handle

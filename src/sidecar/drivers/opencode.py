@@ -55,7 +55,7 @@ from ..protocols import (
     iso,
 )
 from ..subproc import child_env, terminate_process
-from .common import pick_model, stderr_excerpt
+from .common import extract_secrets, pick_model, stderr_excerpt
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ class OpenCodeHandle:
     expected_model: str | None = None
     model_mismatch: str | None = None  # the first response used something else
     stderr_tail: deque = field(default_factory=lambda: deque(maxlen=20))
-    secrets: tuple[str, ...] = ()  # env_for values, for masking error tails
+    secrets: tuple[str, ...] = ()  # real secret values from env, for masking error tails
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -189,7 +189,7 @@ class OpenCodeDriver:
             )
             self._wait_listening(handle)
         handle.expected_provider, handle.expected_model = _expected_model(env)
-        handle.secrets = tuple(value for value in env.values() if value)
+        handle.secrets = extract_secrets(env)
         return handle
 
     def send(self, handle: OpenCodeHandle, text: str) -> None:

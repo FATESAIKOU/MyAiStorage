@@ -27,10 +27,45 @@ def pick_model(subscription: Subscription) -> str:
     )
 
 
+import json
+
+
+def extract_secrets(env: dict[str, str]) -> tuple[str, ...]:
+    """Extract real secret values (keys / tokens) from env (D6, M3).
+
+    Excludes switch flags ('1', '0'), model names, endpoint URLs,
+    and whole configuration blobs.
+    """
+    secrets: list[str] = []
+    for key, val in env.items():
+        if not val or not isinstance(val, str):
+            continue
+        if key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN") or key.upper().endswith(
+            ("_API_KEY", "_AUTH_TOKEN", "_OAUTH_TOKEN", "_SECRET", "_KEY")
+        ):
+            secrets.append(val)
+        elif key == "OPENCODE_CONFIG_CONTENT":
+            try:
+                data = json.loads(val)
+                if isinstance(data, dict):
+                    providers = data.get("provider", {})
+                    if isinstance(providers, dict):
+                        for prov in providers.values():
+                            if isinstance(prov, dict):
+                                opts = prov.get("options", {})
+                                if isinstance(opts, dict):
+                                    api_key = opts.get("apiKey")
+                                    if isinstance(api_key, str) and api_key:
+                                        secrets.append(api_key)
+            except Exception:
+                pass
+    return tuple(dict.fromkeys(secrets))
+
+
 def mask_secrets(text: str, secrets: Sequence[str]) -> str:
-    """Replace every value `env_for` produced with `<masked>` (D6)."""
+    """Replace real secrets with `<masked>` (D6, M3)."""
     for secret in secrets:
-        if secret:
+        if secret and len(secret) >= 4:
             text = text.replace(secret, "<masked>")
     return text
 
