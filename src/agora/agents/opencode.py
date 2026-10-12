@@ -112,11 +112,18 @@ def _server_args() -> list[str]:
 
 #: opencode keeps everything in one SQLite file. `opencode session list` only
 #: shows the current project's sessions and has no flag for the rest, so the
-#: interactive mode reads that file itself - read-only, and only the four columns
-#: the listing needs.
+#: interactive mode reads that file itself - read-only, and only the listing
+#: columns. v2 names its table `session_v2`, 1.x called it `session`. All three
+#: measurements cover both: a fresh 2.x store records into `session_v2` alone,
+#: one the user upgraded watches both tables carry the same ids (the upgrade
+#: copies every v1 session into `session_v2` under the same id), and sessions a
+#: migration could not convert are left in the v1 table only. So the listing
+#: unions the ids, v2's row winning a collision, and nothing gets hidden
+#: (docs/spike/opencode.md 3.1).
 _DB_DIR = ("opencode", "opencode.db")
+_SESSION_TABLES = ("session_v2", "session")
 _LIST_COLUMNS = ("id", "directory", "title", "time_updated")
-_LIST_SQL = "select id, directory, title, time_updated from session order by time_updated desc, id desc"
+_LIST_SQL = "select id, directory, title, time_updated from {table} order by time_updated desc, id desc"
 #: How many of the newest messages to look at for a preview. Reading the whole
 #: transcript to show its last line is what T15 rules out.
 _LAST_SQL = "select id, data from message where session_id=? order by time_created desc, id desc limit ?"
@@ -196,6 +203,16 @@ def _db(path: Path | None = None) -> Iterator[sqlite3.Connection | None]:
         _warn_schema()
     finally:
         connection.close()
+
+
+def _tables(connection: sqlite3.Connection, names: tuple[str, ...], columns: tuple[str, ...]) -> list[str]:
+    """The readable tables among `names`, in the order given.
+
+    A table that lacks a column is a table this opencode does not know, not one
+    to read half of - the same rule the listing applies before it trusts a table.
+    """
+    return [name for name in names
+            if set(columns) <= {row[1] for row in connection.execute(f"pragma table_info({name})")}]
 
 
 def _session_directory(session_id: str) -> str | None:
@@ -1009,14 +1026,18 @@ class OpencodeAgent:
         with _db(path) as connection:
             if connection is None:
                 return []
-            columns = {row[1] for row in connection.execute("pragma table_info(session)")}
-            if not set(_LIST_COLUMNS) <= columns:
+            rows: dict[str, tuple] = {}
+            readable = _tables(connection, _SESSION_TABLES, _LIST_COLUMNS)
+            for table in reversed(readable):      # v1 laid down first, v2's row wins the id
+                for row in connection.execute(_LIST_SQL.format(table=table)):
+                    rows[row[0]] = row
+            if not readable:
                 _warn_schema()
                 return []
             return [Listed(session_id=session_id, dir=directory or None,
                            title=title or None, updated_at=_iso(time_updated))
                     for session_id, directory, title, time_updated
-                    in connection.execute(_LIST_SQL)]
+                    in sorted(rows.values(), key=lambda row: (row[3], row[0]), reverse=True)]
         return []
 
     def search_text(self, keyword: str, only: set[str] | None = None) -> Iterator[str]:
