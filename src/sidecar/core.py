@@ -459,7 +459,13 @@ class SidecarCore:
                     self._clear_pending(rec)
             raise AgentNotRunningError(f"agent {id!r} is not running: {e}") from e
         with self._lock:
-            if self._agents.get(id) is rec:
+            if (
+                self._agents.get(id) is rec
+                and rec.state != STATE_EXITED
+                and rec.handle is handle
+            ):
+                # D: a close (or a swap) may have finished while the send was
+                # in flight; a late poke must not resurrect the record.
                 rec.state = STATE_RUNNING
         return rec
 

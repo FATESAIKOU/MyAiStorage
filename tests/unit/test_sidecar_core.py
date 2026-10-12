@@ -474,6 +474,29 @@ def test_poke_when_the_driver_send_fails_is_409_and_exits(tmp_path):
         core.poke("t1", "again")  # the record no longer pretends to be usable
 
 
+def test_poke_released_after_close_stays_exited(tmp_path):
+    """D (section-3 review): a poke whose send was gated, released only after
+    close finished, must not write the record back to running."""
+    core, driver, _store, _source, _clock, workdir = rig(tmp_path)
+    core.open("t1", "claude-code", workdir, {"mode": "new"})
+    gate = threading.Event()
+    driver.send_gate = gate
+    driver.send_started.clear()
+
+    poked: list = []
+    poker = threading.Thread(target=lambda: poked.append(core.poke("t1", "late words")))
+    poker.start()
+    assert driver.send_started.wait(2)
+
+    assert core.close("t1").state == STATE_EXITED
+
+    gate.set()  # the gated send now goes through, after the close
+    poker.join(5)
+
+    assert poked and poked[0].id == "t1"
+    assert core.get("t1").state == STATE_EXITED
+
+
 # --- status (spec: 不列別人的 / waiting-quota 的預定時刻) ----------------------
 
 
