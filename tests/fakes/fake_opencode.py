@@ -8,10 +8,13 @@ $FAKE_HOME/opencode-cwd.log.
 
 Subcommands / flags:
     --version                 print a fake version
-    export <id>               the stored JSON for <id> on stdout, progress on
-                              stderr (like the real one); rc=1 + "Session not
-                              found" for an id that was never imported
-    import <file>             store the file under its own session id
+    export <id> / session export <id>    the stored JSON for <id> on stdout,
+                              progress on stderr (like the real one); rc=1 +
+                              "Session not found" for an id that was never imported
+    import <file> / session import <file> [--directory <dir>]
+                              store the file under its own session id; with
+                              --directory, the session lands in that directory
+                              the way opencode 2.x rewrites it
     session delete <id>       forget it
     serve --hostname H --port <p>  the headless server mode: listen on the port;
                               on SIGTERM append one pair to the newest stored
@@ -20,6 +23,12 @@ Subcommands / flags:
     --session <id>            the TUI: act on <id> per FAKE_AGENT_MODE
     run [--session <id>]      the same, non-interactive
     run -m <model> <text...>  a headless run; -s/--session means "append to <id>"
+
+`--standalone` is accepted and ignored everywhere opencode 2.x takes it.
+
+Sessions are stored as they were imported: a v1 payload (nested `info`/`parts`
+rows) stays nested, a v2 payload (`type` rows, `content` inside them) stays flat,
+and `say()` appends rows in whichever shape the session already is.
 
 FAKE_AGENT_MODE:
     append      add one user + one assistant message to the session
@@ -43,6 +52,10 @@ FAKE_OPENCODE_DROP_PART=<n>  drop the <n>th part of every message but keep the
 FAKE_OPENCODE_SLEEP=<s>  sleep before doing anything (for timeout tests)
 FAKE_OPENCODE_LEAVE=<id> import refuses: "Expected a string starting with msg"
 FAKE_OPENCODE_EXPORT_SCOPE=project  export only finds sessions of $PWD's project
+FAKE_OPENCODE_REQUIRE_V2=1  refuse a v1 nested payload the way opencode 2.x does
+                         (`SchemaError: Missing key at ["info"]["location"]`);
+                         off by default, because the adapter's v1 write path is
+                         still what the step-1 tests exercise (step 2 replaces it)
 """
 
 from __future__ import annotations
@@ -87,6 +100,27 @@ def path_of(session_id: str) -> Path:
     return STORE / f"{session_id}.json"
 
 
+def positional(argv: list[str], flags_with_values: tuple[str, ...] = ()) -> list[str]:
+    """The arguments that are neither a flag nor a flag's value."""
+    out: list[str] = []
+    skip = 0
+    for arg in argv:
+        if skip:
+            skip -= 1
+            continue
+        if arg in flags_with_values:
+            skip = 1
+            continue
+        if arg.startswith("-"):
+            continue
+        out.append(arg)
+    return out
+
+
+def flag_value(argv: list[str], flag: str) -> str | None:
+    return argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else None
+
+
 def load(session_id: str) -> dict:
     target = path_of(session_id)
     if not target.exists():
@@ -96,6 +130,30 @@ def load(session_id: str) -> dict:
 
 def save(session_id: str, payload: dict):
     path_of(session_id).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def is_v2(payload: dict) -> bool:
+    """v2 is the flat shape: a row with `type` and no nested `info`."""
+    rows = payload.get("messages") or []
+    return any(isinstance(row, dict) and isinstance(row.get("type"), str) for row in rows) and \
+        not any(isinstance(row, dict) and isinstance(row.get("info"), dict) for row in rows)
+
+
+def directory_of(payload: dict) -> str | None:
+    info = payload.get("info") or {}
+    location = info.get("location")
+    if isinstance(location, dict):
+        return location.get("directory")
+    return info.get("directory")
+
+
+def set_directory(payload: dict, directory: str) -> None:
+    info = payload.setdefault("info", {})
+    location = info.get("location")
+    if isinstance(location, dict):
+        location["directory"] = directory
+    else:
+        info["directory"] = directory
 
 
 def act(session_id: str):
@@ -123,6 +181,23 @@ def say(session_id: str, text: str) -> None:
     payload = load(session_id)
     now = int(time.time() * 1000)
     base = len(payload["messages"])
+    if is_v2(payload):
+        payload["messages"].extend([
+            {"id": f"msg_FAKE{base:04d}a", "time": {"created": now}, "text": text,
+             "files": [], "type": "user"},
+            {"id": f"msg_FAKE{base:04d}b", "time": {"created": now + 1},
+             "type": "assistant", "agent": "build",
+             "model": {"id": os.environ.get("FAKE_OPENCODE_MODEL", "space-bunny-free"),
+                       "providerID": "fakeup", "variant": "default"},
+             "content": [{"type": "text", "text": "ZZAPPEND 助手多說了一句。"}],
+             "finish": "stop", "rawFinish": "stop", "cost": 0,
+             "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                        "cache": {"read": 0, "write": 0}}},
+            {"id": f"msg_FAKE{base:04d}c", "time": {"created": now + 2},
+             "type": "idle", "outcome": "succeeded"},
+        ])
+        save(session_id, payload)
+        return
     payload["messages"].extend([
         {"info": {"id": f"msg_FAKE{base:04d}a", "sessionID": session_id, "role": "user",
                   "time": {"created": now}},
@@ -153,6 +228,22 @@ def mid_message(session_id: str) -> None:
     now = int(time.time() * 1000)
     base = len(payload["messages"])
     message_id = f"msg_FAKEPART{base:04d}"
+    if is_v2(payload):
+        payload["messages"].append({
+            "id": message_id, "time": {"created": now}, "type": "assistant",
+            "agent": "build",
+            "model": {"id": os.environ.get("FAKE_OPENCODE_MODEL", "space-bunny-free"),
+                      "providerID": "fakeup", "variant": "default"},
+            "content": [{"type": "tool", "id": f"call_FAKEPART{base:04d}",
+                         "name": "bash", "executed": false,
+                         "state": {"status": "running",
+                                   "input": {"command": "sleep 3600"}},
+                         "time": {"created": now}}],
+            "finish": "tool-calls", "rawFinish": "tool_calls", "cost": 0,
+            "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                       "cache": {"read": 0, "write": 0}}})
+        save(session_id, payload)
+        return
     previous = next((m["info"]["id"] for m in reversed(payload["messages"])
                      if m.get("info", {}).get("role") == "user"), "")
     payload["messages"].append({
@@ -185,12 +276,12 @@ def do_export(params: list[str]):
         # the terminal belongs to the agent, and a read there eats the user's line.
         with open(probe, "a") as f:
             f.write(sys.stdin.read())
-    session_id = params[0]
+    session_id = positional(params)[0]
     if os.environ.get("FAKE_OPENCODE_EXPORT_SCOPE") == "project":
         # An opencode that only knows the current project's sessions - what
         # `opencode session list` does, if export ever followed it.
         stored = load(session_id)
-        if os.environ.get("PWD", "") != (stored.get("info") or {}).get("directory"):
+        if os.environ.get("PWD", "") != directory_of(stored):
             die(f"Error: Session not found: {session_id}")
     print(f"Exporting session: {session_id}", file=sys.stderr)
     sys.stdout.write(json.dumps(load(session_id), ensure_ascii=False))
@@ -201,7 +292,13 @@ def do_import(params: list[str]):
         die("injected import failure")
     if os.environ.get("FAKE_OPENCODE_LEAVE"):
         die('Error: Unexpected error\n\nExpected a string starting with "msg", got "m0"')
-    payload = json.loads(Path(params[0]).read_text(encoding="utf-8"))
+    payload = json.loads(Path(positional(params, ("--directory",))[0]).read_text(encoding="utf-8"))
+    if os.environ.get("FAKE_OPENCODE_REQUIRE_V2") and not is_v2(payload):
+        # What opencode 2.0.26 answers to a v1 nested payload (spike 1.2 §A).
+        die('SchemaError: Missing key at ["info"]["location"]')
+    directory = flag_value(params, "--directory")
+    if directory:
+        set_directory(payload, directory)
     session_id = str((payload.get("info") or {}).get("id"))
     keep = os.environ.get("FAKE_OPENCODE_DROP")
     if keep:
@@ -310,21 +407,28 @@ def main() -> int:
         return 0
     if argv[:1] == ["serve"]:
         return serve()
+    if argv[:2] == ["session", "export"]:
+        do_export(argv[2:])
+        return 0
     if argv[:1] == ["export"]:
         do_export(argv[1:])
+        return 0
+    if argv[:2] == ["session", "import"]:
+        do_import(argv[2:])
         return 0
     if argv[:1] == ["import"]:
         do_import(argv[1:])
         return 0
-    if argv[:1] == ["session"] and argv[1:2] == ["delete"]:
+    if argv[:2] == ["session", "delete"]:
         if os.environ.get("FAKE_OPENCODE_FAIL") == "delete":
             die("injected delete failure")
-        target = path_of(argv[2])
+        target_id = positional(argv[2:])[0]
+        target = path_of(target_id)
         if target.exists():
             target.unlink()
-            print(f"Session {argv[2]} deleted")
+            print(f"Session {target_id} deleted")
         else:
-            die(f"Error: Session not found: {argv[2]}")
+            die(f"Error: Session not found: {target_id}")
         return 0
 
     target = None
