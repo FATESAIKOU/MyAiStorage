@@ -110,7 +110,7 @@ def cli_env(tmp_path, monkeypatch):
     )
     backend = FakeBackend(store)
     backend.add_entity("general", number=10)
-    backend.add_entity("other", number=7)
+    backend.add_entity("other", number=7, repo="owner/repo")
     registry = ApplyingRegistry(git)
     return {
         "config": config,

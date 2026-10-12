@@ -268,7 +268,7 @@ class FakeBackend:
         clock: Any = None,
     ):
         self.resolver = resolver
-        self._entities: dict[int, dict[str, Any]] = {}
+        self._entities: dict[tuple[str, int], dict[str, Any]] = {}
         self._comments: list[FakeComment] = []
         self._next_entity_id = start_entity_id
         self._next_comment_id = start_comment_id
@@ -276,6 +276,11 @@ class FakeBackend:
         self.next_create_error: Exception | None = None
         self.next_close_error: Exception | None = None
         self._clock = clock or _utc_now
+
+    @staticmethod
+    def _key(repo: str, number: int) -> tuple[str, int]:
+        """Entities live per repo: the same issue number in two repos are different entities."""
+        return (repo, number)
 
     def _check_injected_error(self) -> None:
         if self.next_error is not None:
@@ -285,23 +290,23 @@ class FakeBackend:
 
     # -- test helpers ----------------------------------------------------
 
-    def add_entity(self, title: str, *, number: int | None = None) -> int:
+    def add_entity(self, title: str, *, number: int | None = None, repo: str = "owner/repo") -> int:
         """Pre-create an entity for tests that set up the config file first."""
         number = self._next_entity_id if number is None else number
-        self._entities[number] = {"title": title, "state": "open"}
+        self._entities[self._key(repo, number)] = {"title": title, "state": "open"}
         self._next_entity_id = max(self._next_entity_id, number + 1)
         return number
 
-    def entity_state(self, number: int) -> str | None:
+    def entity_state(self, number: int, repo: str = "owner/repo") -> str | None:
         """The state of an entity ("open"/"closed"), or None when it does not exist."""
-        entry = self._entities.get(number)
+        entry = self._entities.get(self._key(repo, number))
         return entry["state"] if entry else None
 
-    def set_entity_title(self, number: int, title: str) -> None:
-        self._entities[number]["title"] = title
+    def set_entity_title(self, number: int, title: str, *, repo: str = "owner/repo") -> None:
+        self._entities[self._key(repo, number)]["title"] = title
 
-    def entity_title(self, number: int) -> str | None:
-        entry = self._entities.get(number)
+    def entity_title(self, number: int, repo: str = "owner/repo") -> str | None:
+        entry = self._entities.get(self._key(repo, number))
         return entry["title"] if entry else None
 
     def deliver(
@@ -338,12 +343,12 @@ class FakeBackend:
             raise ValueError("Channel name must be a non-empty string")
         number = self._next_entity_id
         self._next_entity_id += 1
-        self._entities[number] = {"title": name, "state": "open"}
+        self._entities[self._key(backend.repo, number)] = {"title": name, "state": "open"}
         return number
 
     def verify_channel(self, name: str, backend: BackendRef, entity: int) -> bool:
         self._check_injected_error()
-        entry = self._entities.get(entity)
+        entry = self._entities.get(self._key(backend.repo, entity))
         return entry is not None and entry["title"] == name
 
     def close_channel(self, entity: Entity) -> None:
@@ -352,14 +357,14 @@ class FakeBackend:
             err = self.next_close_error
             self.next_close_error = None
             raise err
-        entry = self._entities.get(entity.issue)
+        entry = self._entities.get(self._key(entity.repo, entity.issue))
         if entry is None:
             return  # 404: already deleted, treated as already closed
         entry["state"] = "closed"
 
     def send(self, entity: Entity, message: Message) -> str:
         self._check_injected_error()
-        if entity.issue not in self._entities:
+        if self._key(entity.repo, entity.issue) not in self._entities:
             raise ChannelNotFoundError(f"Channel '{entity.channel}' does not exist")
         self.deliver(entity, message)
         return message.id
