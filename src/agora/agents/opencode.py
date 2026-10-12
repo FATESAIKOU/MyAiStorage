@@ -227,12 +227,24 @@ def _tables(connection: sqlite3.Connection, names: tuple[str, ...], columns: tup
 
 
 def _session_directory(session_id: str) -> str | None:
-    """The project directory the database records for one session, if it exists."""
+    """The project directory the database records for one session, if it exists.
+
+    The v2 table is asked first and the v1 one only when the id is not in it -
+    the id union applies to this lookup too. `row` starts as None because no
+    failing arm would assign it: a table that does not exist, an id the store
+    never heard of and a row whose directory is gone are all None, and the
+    spike's `cannot access local variable 'row'` (the error `_db()` swallowed,
+    leaving the variable never assigned) is gone with them.
+    """
+    row = None
     with _db() as connection:
         if connection is None:
             return None
-        row = connection.execute("select directory from session where id=?",
-                                (session_id,)).fetchone()
+        for table in _tables(connection, _SESSION_TABLES, ("id", "directory")):
+            row = connection.execute(f"select directory from {table} where id=?",
+                                     (session_id,)).fetchone()
+            if row is not None:
+                break
     directory = row[0] if row else None
     return directory if isinstance(directory, str) and Path(directory).is_dir() else None
 
