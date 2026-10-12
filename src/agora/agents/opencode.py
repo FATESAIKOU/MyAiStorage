@@ -12,9 +12,10 @@ as it is and a rebuild would lose every tool call. The reading version is
 `base.reading(agent, raw)` — this module has nothing for it.
 
 Loading a session means writing a new one: re-identify every id, `opencode
-import` in the target directory, then `opencode --session <new id>`. Five things
-about that are not negotiable, and all five were measured rather than assumed —
-see docs/spike/opencode.md (traps 1-6) for the evidence:
+session import` in the target directory, then `opencode --session <new id>`. Five
+things about that are not negotiable, and all five were measured rather than
+assumed — see docs/spike/opencode.md (traps 1-6) for the evidence; the opencode 2.x
+commands and server contexts are in the v2 section of the same file:
 
 1. import silently drops rows whose id already exists, so every id is new
    (id order and uniqueness: see `reidentify`).
@@ -93,6 +94,20 @@ PENDING_PREFIX = "pending-"
 #: A merge prompt must not be able to reach for a file, so every tool is denied -
 #: a prompt asking nicely is not a boundary (measured in docs/spike/opencode.md).
 DENY_TOOLS = '{"*":"deny"}'
+
+
+def _server_args() -> list[str]:
+    """The server context every automated call carries (one place, design 2).
+
+    Without it, opencode 2.x looks for the user's managed background service -
+    default port 49374, shared by every opencode on the machine, so isolating the
+    XDG directories does not isolate it - and tries to start one when it is not
+    there. `--standalone` runs a private server for the one command instead, which
+    is what a call that comes and goes wants; a long-lived serve would want
+    `--server <url>` (syntax measured in docs/spike/opencode.md). Export, import,
+    delete and summarize all go through here, so one flow is never half-flagged.
+    """
+    return ["--standalone"]
 
 
 #: opencode keeps everything in one SQLite file. `opencode session list` only
@@ -679,12 +694,14 @@ class OpencodeAgent:
                              f"{argv[1] if len(argv) > 1 else argv[0]}") from None
 
     def _export_bytes(self, session_id: str, cwd: Path | str | None = None) -> bytes:
-        """`opencode export <id>` with stdout going to a file, stderr apart.
+        """`opencode session export <id> --standalone`, stdout going to a file,
+        stderr apart.
 
-        `cwd` is not needed for this to work - opencode finds any session from any
-        directory (measured, including when the session's own project directory no
-        longer exists) - but when it is given, $PWD goes with it, because opencode
-        reads the project from $PWD.
+        v2 moved export under `session` and made it a server operation, so it needs
+        a server context; `cwd` is still not needed for this to work - opencode
+        finds any session from any directory (measured, including when the
+        session's own project directory no longer exists) - but when it is given,
+        $PWD goes with it, because opencode reads the project from $PWD.
 
         stdin is /dev/null: an export is ours, not the user's, and during a periodic
         write-back the terminal belongs to the agent - a child that read there would
@@ -693,7 +710,8 @@ class OpencodeAgent:
         with tempfile.TemporaryDirectory(prefix="agora-opencode-") as tmp:
             target = Path(tmp) / "export.json"
             with open(target, "wb") as out:
-                proc = self._run([agent_cmd(self.name), "export", session_id],
+                proc = self._run([agent_cmd(self.name), "session", "export", session_id,
+                                  *_server_args()],
                                  cwd=cwd, stdout=out, stdin=subprocess.DEVNULL,
                                  env={"PWD": str(cwd)} if cwd else None)
             if proc.returncode != 0:
@@ -704,19 +722,30 @@ class OpencodeAgent:
             return target.read_bytes()
 
     def _import(self, payload: dict, cwd: Path) -> None:
+        """`opencode session import <path> --standalone --directory <cwd>`.
+
+        v2 import takes the project directory as a flag and ignores the payload's
+        own `location` (measured) - and $PWD has to say the same thing, because
+        opencode resolves the project from $PWD: a shell keeps the two in step, a
+        subprocess does not (spike trap A).
+        """
         with tempfile.TemporaryDirectory(prefix="agora-opencode-") as tmp:
             path = Path(tmp) / "import.json"
             path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-            proc = self._run([agent_cmd(self.name), "import", str(path)], cwd=cwd)
+            proc = self._run([agent_cmd(self.name), "session", "import", str(path),
+                              *_server_args(), "--directory", str(cwd)],
+                             cwd=cwd, env={"PWD": str(cwd)})
         if proc.returncode != 0:
             raise AgentError(f"opencode import 失敗：{_err(proc)}")
 
     def _delete(self, session_id: str, cwd: Path, n: int = 200) -> str | None:
-        """`opencode session delete <id>` - by id, never a pattern and never a listing.
+        """`opencode session delete <id> --standalone` - by id, never a pattern and
+        never a listing.
 
         None when it worked, otherwise what to tell the user (review O5).
         """
-        proc = self._run([agent_cmd(self.name), "session", "delete", session_id], cwd=cwd)
+        proc = self._run([agent_cmd(self.name), "session", "delete", session_id,
+                          *_server_args()], cwd=cwd)
         return None if proc.returncode == 0 else _err(proc, n)
 
     def _discard(self, session_id: str, cwd: Path) -> str:
@@ -1067,8 +1096,8 @@ class OpencodeAgent:
         self._sweep_pending(workdir)
         unique = _session_id()[-16:]
         material = workdir / f"{MATERIAL_PREFIX}{unique}.md"
-        argv = [agent_cmd(self.name), "run", MATERIAL_MESSAGE, "-f", str(material),
-                "--format", "json"]
+        argv = [agent_cmd(self.name), "run", *_server_args(), MATERIAL_MESSAGE,
+                "-f", str(material), "--format", "json"]
         model = os.environ.get("AGORA_OPENCODE_MODEL")
         if model:
             argv += ["-m", model]

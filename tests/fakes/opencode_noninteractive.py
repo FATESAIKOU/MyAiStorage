@@ -7,8 +7,10 @@ here instead, and this wrapper translates the TUI form into the headless one:
 
     [--session <id>]  ->  opencode run -s <id> -m <model> <fixed question>
 
-`--version`, `export <id>`, `import <file>` and `session delete <id>` are passed
-straight through, because the adapter uses them for real.
+`--version`, `session export <id>`, `session import <file>` and
+`session delete <id>` are passed straight through, because the adapter uses them
+for real; opencode 2.x's server flags (`--standalone`, `--server`, `--directory`)
+ride along in argv untouched.
 
 Every received argv is appended (JSON) to $FAKE_HOME/opencode-e2e-args.log, with
 the model that answered, so the test can see which session ids agora minted and

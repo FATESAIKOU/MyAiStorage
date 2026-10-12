@@ -1051,7 +1051,10 @@ def test_summarize_sends_the_prompt_in_a_file_and_deny_tools(fake, tmp_path, mon
 
     argv = json.loads((fake / "opencode-argv.log").read_text().splitlines()[0])
     assert argv[0] == "run"
-    assert argv[1] == oc.MATERIAL_MESSAGE and len(argv[1]) < 60
+    # the server context comes right after the subcommand; the message is short and
+    # rides before -f (its position is what the v2 CLI reads as the message)
+    assert argv[1] == "--standalone"
+    assert argv[2] == oc.MATERIAL_MESSAGE and len(argv[2]) < 60
     assert "-f" in argv and argv[argv.index("-f") + 1].startswith(str(workdir))
     assert "-m" in argv and argv[argv.index("-m") + 1] == "opencode/space-bunny-free"
     env = seen_env[0]
