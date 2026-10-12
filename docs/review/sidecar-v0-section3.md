@@ -203,3 +203,30 @@
 1. **可以進 3.4 PM 真機。**
 2. 3.4 順手確認 A（opencode 當掉時狀態卡 `running`）、B（連續 poke 的 idle 誤報）、C（interrupt 後誤標 exited）——症狀對得上就修，都是 `drivers/opencode.py` 裡幾行。
 3. D、E 是既有的，可以排到 3.4 之後。
+
+## A～D 的確認
+
+- 對象：分支 `sidecar-v0-agy4` 的 `3b54b7c`（A）、`9b0aec7`（B）、`d663a5b`（C）、`5db66b6`（D）；`git archive` 解到 `/tmp/a4`，測試與突變都在副本做。
+- 審查者：架構師（Claude Sonnet 5.5）。只碰程式與假資料。
+- 副本的 `tests/unit` 全部：1038 passed、1 skipped（與實作者回報相同）。
+
+### 結論：**可以進 3.4。** 四項都照上一輪的描述修好，沒有引入新問題；有兩個測試漏洞（Low）。
+
+| 項 | 修好了？ | 依據 |
+|---|---|---|
+| A | 是 | `_send_round` 外層多了 `except Exception`（`IncompleteRead` 之類轉成 `OpenCodeDriverError`）與 `finally: _finish_round`，兩個出口都清掉 `sending`。突變「拿掉 catch-all」→ 紅。 |
+| B | 是 | `sending` 改成計數，`send` 加一、回合結束減一、歸零才設 `IDLE`；`interrupt` 與 `stop` 都歸零。突變：結束時直接設 0 → 紅；`interrupt` 不歸零 → 紅。 |
+| C | 是 | `abort_epoch`：`send` 取快照，`interrupt`／`stop` 遞增；epoch 不符或已 stop 的回合失敗只記 `last_error`，不改狀態、不動計數。突變：失敗路徑不看 epoch → 紅；`interrupt` 不遞增 → 紅。 |
+| D | 是 | `poke` 寫回前要 `rec.state != EXITED` 且 `rec.handle is handle`。突變：拿掉 EXITED 檢查 → 紅。 |
+
+### 你問的兩件事
+
+- **B 的計數在 interrupt／stop 時有沒有歸零**：有（`interrupt` 在 abort 成功後的鎖內、`stop` 在設 `stopped` 的同一個鎖內）。而且因為 epoch 遞增，被中止的舊回合之後回來**不會再減計數**，不會把 interrupt 之後新開的回合減成負的或誤報 idle。我另外寫了探針（副本裡，不進 repo）：send → interrupt → send 第二個 → 放行第一個，`state()` 仍是 `running` 直到第二個結束，綠。
+- **D 的檢查會不會擋掉正常的 poke**：不會。守門條件在 poke 開頭已經要求 `running`／`idle`（排隊中的 `starting` 走另一條路），正常 poke 的寫回只在「這段期間記錄被 close 成 exited，或換了 handle」時才被擋掉；既有的 poke 測試全綠。
+
+### Low（不擋）
+
+1. **`finish` 路徑的 epoch 檢查沒有測試擋住。** 突變「成功回合不看 epoch」→ 全綠（61 passed）。壞處是：interrupt 之後開了新回合，舊回合稍後成功回來會把新回合的計數減掉、提早報 idle。我的探針（上面那個）在這個突變下轉紅，建議把它收進 repo 的測試。
+2. **`poke` 的 `rec.handle is handle` 沒有測試擋住。** 突變拿掉 → 全綠。換把（handle 換了）與 poke 的 send 交錯的情形只有 EXITED 那一半有測試。
+3. 觀察（不是問題）：`interrupt` 是 abort 成功之後才遞增 epoch，若 server 在 abort 回應之前就讓舊回合失敗，那一次失敗會走 `exited` 路徑；但 `interrupt` 隨後在鎖內把狀態改回 `IDLE`、計數歸零，探針（abort 回應慢 0.8 秒、回合 0.3 秒就失敗）顯示最終狀態不是 `exited`。時間窗極小，3.4 實機要是看到 poke+interrupt 後偶爾 `exited` 再回頭看。
+4. 等價突變：「結束時不判斷計數就設 IDLE」不會紅，因為 `state()` 以 `sending` 為準先回 `running`；「`stop` 不歸零」不會紅，因為 stop 之後本來就是 exited。這兩個不算漏洞。
