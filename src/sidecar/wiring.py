@@ -54,14 +54,17 @@ def default_drivers(config: Config) -> dict[str, Any]:
 
 
 def default_session_store(config: Config) -> Any | None:
-    """The real store (task 3.0): spawns `agora continue --headless`.
+    """The real store (task 3.0): spawns the configured `agora` command.
 
+    The command is `config.agora_command` (default `agora` on PATH); sidecar
+    never imports the agora package (step 2 of the MyLinuxPool move).
     `start_timeout` is the time the fixed stderr line gets; bounding it by
     close_timeout keeps a hung `agora continue` from wedging a tick (N2).
     (`agora merge` has its own budget: a summarizer round trip is not a
     `close_timeout` thing - see the report.)
     """
     return AgoraSessionStore(
+        command=config.agora_command,
         sync_period=config.sync_period,
         start_timeout=config.close_timeout,
         import_timeout=config.close_timeout,

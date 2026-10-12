@@ -7,13 +7,17 @@ the port, and the caller talks to the agent through the process's stdio or the
 port.  Stopping is SIGTERM to that process - agora forwards it, writes the
 last conversation back and releases the lock before exiting (D6).
 
+The `agora` command is the one on `PATH` (config `agora_command`, default
+`agora`); sidecar never imports the agora package, so it can live in a
+checkout that has only `src/sidecar`.
+
 Everything a child does has a timeout: waiting for the stderr lines
 (`start_timeout`), the summarizer round trip of `agora merge` (`merge_timeout`)
 and the gentle stop that the drivers perform via
 `subproc.terminate_process(..., timeout=close_timeout)`.
 
 This module never runs in unit tests except through the fake command injected
-into `AgoraSessionStore(command=[...])`.
+into `AgoraSessionStore(command=[...])` (or a fake `agora` on PATH).
 """
 
 from __future__ import annotations
@@ -22,13 +26,13 @@ import logging
 import queue
 import socket
 import subprocess
-import sys
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
+from .config import DEFAULT_AGORA_COMMAND
 from .protocols import RunningSession, SidecarError
 from .subproc import child_env
 
@@ -191,14 +195,20 @@ class AgoraSessionStore:
     def __init__(
         self,
         *,
-        command: Sequence[str] | None = None,
+        command: str | Sequence[str] | None = None,
         sync_period: float | None = None,
         start_timeout: float = START_TIMEOUT,
         merge_timeout: float = MERGE_TIMEOUT,
         import_timeout: float = IMPORT_TIMEOUT,
     ) -> None:
-        #: argv prefix; production is `python -m agora.cli`, tests inject a fake.
-        self._command = list(command or [sys.executable, "-m", "agora.cli"])
+        #: argv prefix; production is the `agora` on PATH (D7's
+        #: `agora_command`), tests inject a fake.
+        if command is None:
+            self._command = [DEFAULT_AGORA_COMMAND]
+        elif isinstance(command, str):
+            self._command = [command]
+        else:
+            self._command = list(command)
         self._sync_period = sync_period
         self._start_timeout = start_timeout
         self._merge_timeout = merge_timeout

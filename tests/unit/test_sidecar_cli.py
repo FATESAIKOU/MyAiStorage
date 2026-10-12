@@ -63,6 +63,7 @@ def test_load_config_defaults_when_the_file_is_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("SIDECAR_CONFIG", str(tmp_path / "missing.json"))
     config = load_config()
     assert config.port == 8471  # D7's default, read from the file when present
+    assert config.agora_command == "agora"  # the command on PATH (step 2)
     assert config.gateway_connect_file.name == "gateway-connect.json"
     assert config.sync_period == 5.0
     assert config.resume_prompt == "額度恢復了，請接著剛才的工作"
@@ -80,6 +81,7 @@ def test_load_config_reads_the_file(tmp_path):
         json.dumps(
             {
                 "port": 9000,
+                "agora_command": "/x/agora",
                 "subscription_source": {"kind": "llmgateway"},
                 "gateway_connect_file": "/x/gateway-connect.json",
                 "agents": {"claude-code": {"command": "/x/claude", "extra_args": ["--foo"]}},
@@ -96,6 +98,7 @@ def test_load_config_reads_the_file(tmp_path):
     config = load_config(path)
     assert config.path == path
     assert config.port == 9000
+    assert config.agora_command == "/x/agora"
     assert config.subscription_source == {"kind": "llmgateway"}
     assert config.gateway_connect_file == _p.Path("/x/gateway-connect.json")
     assert config.agents["claude-code"].command == "/x/claude"
@@ -114,6 +117,12 @@ def test_load_config_rejects_bad_files(tmp_path):
     with pytest.raises(ConfigError):
         load_config(path)
     path.write_text(json.dumps({"retry_interval": -1}), encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(path)
+    path.write_text(json.dumps({"agora_command": ""}), encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(path)
+    path.write_text(json.dumps({"agora_command": 5}), encoding="utf-8")
     with pytest.raises(ConfigError):
         load_config(path)
     path.write_text("{not json", encoding="utf-8")
@@ -166,6 +175,14 @@ def test_session_store_timeouts_follow_close_timeout():
     assert store is not None
     assert store._import_timeout == 45.0
     assert store._start_timeout == 45.0
+
+
+def test_session_store_runs_the_configured_agora_command():
+    """Step 2 of the MyLinuxPool move: `agora` from config/PATH, no `-m agora.cli`."""
+    assert Config().agora_command == "agora"
+    assert default_session_store(Config())._command == ["agora"]
+    store = default_session_store(Config(agora_command="/opt/agora/bin/agora"))
+    assert store._command == ["/opt/agora/bin/agora"]
 
 
 def test_main_run_with_llmgateway_still_serves_status(tmp_path):

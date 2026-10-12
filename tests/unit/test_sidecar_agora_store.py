@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401
 
 import json
+import os
 import signal
 import socket
 import sys
@@ -242,3 +243,47 @@ def test_unknown_agent_and_mode_are_refused(store):
         built.start(mode="new", ids=[], by="claude-code", agent="claude-code",
                     workdir=workdir, tag="tag", env={})
     assert not (fh / "agora-args.log").exists()  # nothing was spawned
+
+
+# --- the command comes from PATH (step 2 of the MyLinuxPool move) --------------
+
+
+def test_the_default_command_is_the_agora_on_path(tmp_path, monkeypatch):
+    """No `python -m agora.cli`: with nothing named agora on PATH the start fails
+    as a missing command, not as a missing module."""
+    bindir = tmp_path / "empty-bin"
+    bindir.mkdir()
+    monkeypatch.setenv("PATH", str(bindir))
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    built = AgoraSessionStore(start_timeout=0.5)
+    with pytest.raises(AgoraSessionError) as excinfo:
+        built.start(mode="continue", ids=["agora:A"], by="claude-code",
+                    agent="claude-code", workdir=str(workdir), tag="tag", env={})
+    assert "cannot run agora" in str(excinfo.value)
+
+
+def test_the_default_command_runs_the_fake_agora_on_path(tmp_path, monkeypatch):
+    """The fake agora script stands in for the real command (no agora package)."""
+    fh = tmp_path / "fh"
+    monkeypatch.setenv("FAKE_HOME", str(fh))
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    wrapper = bindir / "agora"
+    wrapper.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_AGORA}" "$@"\n', encoding="utf-8"
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}:{os.environ.get('PATH', '')}")
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    built = AgoraSessionStore(start_timeout=5.0)  # no command: the PATH `agora`
+    running = built.start(mode="continue", ids=["agora:A"], by="claude-code",
+                          agent="claude-code", workdir=str(workdir), tag="sidecar:t1",
+                          env={})
+    try:
+        assert running.session_id == "agora:A"
+        assert args_log(fh)[-1][:3] == ["continue", "session", "agora:A"]
+    finally:
+        running.process.terminate(timeout=5.0)
+    assert (fh / "agora-stopped").exists()  # the gentle stop's write-back marker

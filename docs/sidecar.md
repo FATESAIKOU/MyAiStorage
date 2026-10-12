@@ -22,7 +22,8 @@ sidecar 是每台機器（worker 或 Mac）上的一個 daemon，用來控制 AI
 - **沒有暫停**：「暫停」＝ `poke` 加 `interrupt`（打斷這一輪，再送一句「停下來等指示」）。
 - **狀態揮發**：agent 清單、job 清單只在記憶體；sidecar 重啟就從空的開始（對話記憶在 agora，
   要接回就由控制者再 `open` 一次 `continue`）。
-- **相依**：sidecar → agora（`agora continue --headless` 開 agent、寫回 Session）、
+- **相依**：sidecar → agora（`agora continue --headless` 開 agent、寫回 Session；用 PATH 上的
+  `agora` 指令，路徑可用設定檔的 `agora_command` 指定）、
   sidecar → LLMGateway（拿 subscription；經它的 `lgw connect`）。不依賴任何信道工具，也不依賴 herdr。
 - **秘密**：subscription 的 key 只放進 agent 子行程的環境，不上命令列、不進 log、不寫進任何檔案。
 
@@ -164,6 +165,7 @@ curl -s 127.0.0.1:8471/jobs -X POST -H 'content-type: application/json' -d '{
 ```json
 {
   "port": 8471,
+  "agora_command": "agora",
   "subscription_source": {"kind": "llmgateway"},
   "gateway_connect_file": "~/.config/sidecar/gateway-connect.json",
   "agents": {
@@ -182,6 +184,7 @@ curl -s 127.0.0.1:8471/jobs -X POST -H 'content-type: application/json' -d '{
 | 欄位 | 預設 | 說明 |
 |---|---|---|
 | `port` | `8471` | HTTP 埠；只綁 `127.0.0.1`。 |
+| `agora_command` | `agora` | sidecar 呼叫的 agora 指令（名稱或絕對路徑；用 PATH 找）。sidecar 不 import agora 套件，也不再用 `python -m agora.cli`；要帶參數就用一支 wrapper 腳本。 |
 | `subscription_source` | 無 | `{"kind": "file", "path": "<JSON 檔>"}`（本機開發）或 `{"kind": "llmgateway"}`。 |
 | `gateway_connect_file` | `~/.config/sidecar/gateway-connect.json` | 見第 4 節。 |
 | `agents` | `{}` | 各種類的執行檔路徑與額外參數（值是字串＝只有 command，或 `{"command", "extra_args"}`）。 |
@@ -263,11 +266,11 @@ sidecar run                # 起 daemon（讀設定檔；HTTP 只綁 127.0.0.1�
 ```
 
 - 健康檢查不另加端點：`GET /agents` 有回應就是「在跑」，連不上就是「沒在跑」。
-- **從原始碼目錄開發（L2）**：`AgoraSessionStore` 預設跑 `python -m agora.cli`，子行程
-  只拿 `child_env` 允許清單裡的變數（**沒有 `PYTHONPATH`**，設了也到不了子行程）。
-  最省事的是 `uv tool install` 從本 repo 裝好再跑；直接跑原始碼時，先讓同一個 python
-  找得到 `agora` 套件（例如 `uv run` 的同步 venv、`pip install -e .`），否則 agora 起不來、
-  啟動失敗的 stderr 會寫明 `ModuleNotFoundError`。
+- **從原始碼目錄開發（L2）**：`AgoraSessionStore` 跑設定檔的 `agora_command`（預設 PATH 上的
+  `agora`）；子行程只拿 `child_env` 允許清單裡的變數（**沒有 `PYTHONPATH`**，設了也到不了
+  子行程），所以不要指向 `python -m agora.cli`。最省事的是 `uv tool install` 從本 repo 裝好
+  （`agora` 就在 PATH 上）；直接跑原始碼時，把 `agora_command` 指到跑得起來的絕對路徑
+  （例如某個 venv 的 `bin/agora`）。找不到指令時啟動失敗，訊息是 `cannot run agora: ...`。
 - **worker**：由 MyLinuxPool 的 supervisor 拉起 `sidecar run`。收到 SIGTERM 時 sidecar 會先
   進入「關閉中」（`open`／`poke`／`POST /jobs` 回 503 `shutting_down`，到期的 job 不再執行），
   等 scheduler 的進行中那一次（上限 `close_timeout + 5` 秒，逾時只記 log），再逐一 close

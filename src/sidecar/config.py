@@ -1,10 +1,10 @@
 """sidecar configuration (design D7).
 
 `~/.config/sidecar/config.json` (override with `SIDECAR_CONFIG`) holds the
-port, the subscription source, the LLMGateway connect-file path, the agent
-commands and the timing knobs.  No secrets live here: LLMGateway credentials
-belong to its own connector, and a local file source's `key` fields are only
-for development.
+port, the `agora` command, the subscription source, the LLMGateway connect-file
+path, the agent commands and the timing knobs.  No secrets live here: LLMGateway
+credentials belong to its own connector, and a local file source's `key` fields
+are only for development.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from typing import Any
 from .protocols import ConfigError
 
 DEFAULT_PORT = 8471
+DEFAULT_AGORA_COMMAND = "agora"
 DEFAULT_SYNC_PERIOD = 5.0
 DEFAULT_RESUME_PROMPT = "額度恢復了，請接著剛才的工作"
 DEFAULT_RETRY_INTERVAL = 300.0  # seconds
@@ -35,6 +36,7 @@ class AgentConfig:
 @dataclass
 class Config:
     port: int = DEFAULT_PORT
+    agora_command: str = DEFAULT_AGORA_COMMAND
     subscription_source: dict[str, Any] | None = None
     gateway_connect_file: Path = field(
         default_factory=lambda: Path.home() / ".config" / "sidecar" / "gateway-connect.json"
@@ -70,6 +72,10 @@ def load_config(path: str | Path | None = None) -> Config:
     port = data.get("port", DEFAULT_PORT)
     if isinstance(port, bool) or not isinstance(port, int) or not (0 <= port <= 65535):
         raise ConfigError("port must be an integer between 0 and 65535")
+
+    agora_command = data.get("agora_command", DEFAULT_AGORA_COMMAND)
+    if not isinstance(agora_command, str) or not agora_command:
+        raise ConfigError("agora_command must be a non-empty string (the command on PATH)")
 
     source = data.get("subscription_source")
     if source is not None and not isinstance(source, dict):
@@ -115,6 +121,7 @@ def load_config(path: str | Path | None = None) -> Config:
 
     return Config(
         port=port,
+        agora_command=agora_command,
         subscription_source=source,
         gateway_connect_file=Path(gateway_file),
         agents=agents,
