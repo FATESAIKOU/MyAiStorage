@@ -3,6 +3,13 @@
 2026-10-02，impl1。opencode **1.18.34**（macOS arm64）。模型只用
 `opencode/space-bunny-free`。
 
+> **⚠️ 這一節的指令是 opencode 1.x 的語法。** 2.x（macOS 上已是 2.0.26）把
+> `opencode export／import` 搬到 `opencode session export／import` 並要求 server
+> 上下文、匯出格式改成扁平、互動模式換表——agora 現在用的是 2.x 的語法。**2.x 的
+> 格式、隔離做法與 fixture 請直接看本檔最後三節**（「opencode 2.x 的 server 上下文與
+> `--server` 量測」、「opencode 2.x 的格式、隔離與 fixture」）；下面的歷史結論裡，
+> 與 2.x 相抵的部分以那三節為準（issue #51、change agora-opencode-v2）。
+
 ## 怎麼測（先讀這段，因為它決定了下面每個結論能不能重跑）
 
 opencode 的 session 屬於「專案目錄」，在沒有 commit 的資料夾裡跑任何 opencode
