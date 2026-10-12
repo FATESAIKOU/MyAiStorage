@@ -88,7 +88,7 @@ class OpenCodeHandle:
     state: DriverState = field(default_factory=lambda: DriverState(kind=DRIVER_IDLE))
     quota: DriverState | None = None
     stopped: bool = False
-    sending: bool = False  # the background POST /message is in flight (M2)
+    sending: int = 0  # background POST /message rounds in flight (M2/A/B)
     last_error: str | None = None  # the last round failure, masked (M2)
     expected_provider: str | None = None  # what env_for told opencode to use
     expected_model: str | None = None
@@ -200,18 +200,17 @@ class OpenCodeDriver:
     def send(self, handle: OpenCodeHandle, text: str) -> None:
         # The HTTP call blocks until the round is over (D6), so it goes to a
         # background thread with the long message timeout; while that thread
-        # runs the driver reports running (M2).
+        # runs the driver reports running (M2).  `sending` counts the rounds in
+        # flight, so one round ending never reports idle while another runs (B).
         with handle.lock:
             if handle.stopped:
                 raise OpenCodeDriverError("opencode is stopped")
             session_id = handle.agent_session_id
+            if session_id is None:
+                raise OpenCodeDriverError("no opencode session id to send to")
+            handle.sending += 1
             if handle.quota is None:
-                handle.sending = True
                 handle.state = DriverState(kind=DRIVER_RUNNING)
-        if session_id is None:
-            with handle.lock:
-                handle.sending = False
-            raise OpenCodeDriverError("no opencode session id to send to")
         body = {"parts": [{"type": "text", "text": text}]}
         thread = threading.Thread(
             target=self._send_round,
@@ -227,7 +226,7 @@ class OpenCodeDriver:
             raise OpenCodeDriverError("no opencode session id to abort")
         self._request(handle, "POST", f"/session/{session_id}/abort", body={})
         with handle.lock:
-            handle.sending = False  # the round was aborted
+            handle.sending = 0  # every aborted round is over
             if handle.quota is None:
                 handle.state = DriverState(kind=DRIVER_IDLE)
 
@@ -259,7 +258,7 @@ class OpenCodeDriver:
     def stop(self, handle: OpenCodeHandle, *, graceful: bool = True, timeout: float = 30.0) -> None:
         with handle.lock:
             handle.stopped = True
-            handle.sending = False
+            handle.sending = 0
         if graceful:
             code = terminate_process(handle.proc, timeout=timeout)
         else:
@@ -353,8 +352,8 @@ class OpenCodeDriver:
             self._fail_round(handle, failure)
             return
         with handle.lock:
-            handle.sending = False
-            if handle.quota is None:
+            handle.sending = max(0, handle.sending - 1)  # this round is over
+            if handle.sending == 0 and handle.quota is None:
                 handle.state = DriverState(kind=DRIVER_IDLE)
 
     def _fail_round(self, handle: OpenCodeHandle, error: OpenCodeDriverError) -> None:
@@ -366,7 +365,7 @@ class OpenCodeDriver:
         message = mask_secrets(str(error), handle.secrets)
         logger.warning("opencode: sending a message failed: %s", message)
         with handle.lock:
-            handle.sending = False
+            handle.sending = max(0, handle.sending - 1)  # this round is over
             if handle.quota is not None:
                 return  # the quota state already explains the round
             handle.last_error = message

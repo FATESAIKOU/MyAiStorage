@@ -15,6 +15,7 @@ import logging
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -486,6 +487,51 @@ def test_an_unexpected_request_error_does_not_leave_the_agent_running(
     state = driver.state(handle)
     assert state.kind in (DRIVER_IDLE, DRIVER_EXITED)
     assert "IncompleteRead" in (handle.last_error or "")
+    driver.stop(handle, graceful=False, timeout=5)
+
+
+def test_two_interleaved_rounds_stay_running_until_the_last_one(
+    driver, serve, tmp_path, monkeypatch
+):
+    """B (section-3 review): the first of two rounds to finish must not report
+    idle while the second is still in flight."""
+    proc, port = serve()
+    handle = driver.launch(
+        RunningSession("agora:A", AgoraProcess(proc=proc, port=port, agent_session_id="ses_A")),
+        {}, str(tmp_path),
+    )
+    real_request = driver._request
+    first_started = threading.Event()
+    first_release = threading.Event()
+    second_started = threading.Event()
+    second_release = threading.Event()
+    started = {"n": 0}
+
+    def gated_request(h, method, path, *, body=None, timeout=None):
+        if path.endswith("/message"):
+            started["n"] += 1
+            if started["n"] == 1:
+                first_started.set()
+                first_release.wait(5)
+            else:
+                second_started.set()
+                second_release.wait(5)
+            return {"info": {}}
+        return real_request(h, method, path, body=body, timeout=timeout)
+
+    monkeypatch.setattr(driver, "_request", gated_request)
+    driver.send(handle, "one")
+    assert first_started.wait(2)
+    driver.send(handle, "two")
+    assert second_started.wait(2)
+
+    first_release.set()
+    wait_until(lambda: handle.sending == 1)  # the first round is over ...
+    assert driver.state(handle).kind == DRIVER_RUNNING  # ... the second still runs
+
+    second_release.set()
+    assert wait_state(driver, handle, DRIVER_IDLE).kind == DRIVER_IDLE
+    assert handle.sending == 0
     driver.stop(handle, graceful=False, timeout=5)
 
 

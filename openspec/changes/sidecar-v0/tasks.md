@@ -51,6 +51,7 @@
   - [x] 3.7.8 M2：OpenCodeDriver 長逾時、狀態以背景送出在跑為準、錯誤寫進 exit.reason
   - [x] 3.7.9 M4：import 逾時 ≤ close_timeout、job open 禁 merge、docs/sidecar.md 修正公式與 L2/L4
   - [x] 3.7.10 A（複審的 3.4 觀察名單）：`_send_round` 兩個出口以 try/finally 清 `sending`；非 `OpenCodeDriverError`（如 `http.client.IncompleteRead`）也走同一條收尾，不會卡在 running
+  - [x] 3.7.11 B（複審的 3.4 觀察名單）：`sending` 改成進行中回合數的計數；兩個交錯的回合中，先完成的那個不會讓狀態變 idle
 
 ## 4. 文件與收尾
 
