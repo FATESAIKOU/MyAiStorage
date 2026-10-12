@@ -62,6 +62,10 @@ import claude_noninteractive as cl_shim  # noqa: E402  (its fixed question)
 
 pytestmark = pytest.mark.integration
 
+if oc_shim.session_export_supported():
+    pytest.skip("opencode 2.x：整合測試還在用 1.x 的指令，第 5 步更新（tasks 1.11）",
+                allow_module_level=True)
+
 # pwd, not HOME: the opencode sandbox replaces HOME per test.
 REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
 REAL_CONF = REAL_HOME / ".config" / "agora" / "rclone.conf"

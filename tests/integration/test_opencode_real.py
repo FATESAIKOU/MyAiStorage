@@ -33,6 +33,10 @@ import opencode_noninteractive as agent  # noqa: E402  (needs the path above)
 
 pytestmark = pytest.mark.integration
 
+if agent.session_export_supported():
+    pytest.skip("opencode 2.x：整合測試還在用 1.x 的指令，第 5 步更新（tasks 1.11）",
+                allow_module_level=True)
+
 PROJ = Path("/tmp/agora-it-opencode/proj")
 
 # OC4: an earlier version of this file set the *real* HOME in a module-scope
