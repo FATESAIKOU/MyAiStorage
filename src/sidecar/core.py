@@ -582,6 +582,18 @@ class SidecarCore:
                 with self._lock:
                     rec.busy = False
             return
+        self._observe_handle(rec, driver, handle, now)
+
+    def _observe_handle(
+        self, rec: AgentRecord, driver: Any, handle: Any, now: float | None = None
+    ) -> None:
+        """Read `handle`'s driver state and apply it.
+
+        No busy gate here: the caller already owns the record's transition
+        (H1's swap calls this right after launching the replacement handle,
+        while `rec.busy` is still set), and a state observed on the fresh
+        handle must land.
+        """
         if driver is None:
             return
         try:
@@ -745,7 +757,7 @@ class SidecarCore:
                 self._stop_handle(handle, driver)
                 self._set_exited(rec)
                 return
-            self._refresh_one(rec, now)
+            self._observe_handle(rec, driver, handle, now)
             self._send_resume(rec)
             return
 
@@ -845,7 +857,7 @@ class SidecarCore:
             self._stop_handle(handle, driver)
             self._set_exited(rec)
             return
-        self._refresh_one(rec, now)
+        self._observe_handle(rec, driver, handle, now)
         self._send_resume(rec)
 
     def _wait_quota(
