@@ -18,7 +18,7 @@ backend 本身的設定。更新走 PR（AiStorage PM 審查＋merge，d 等級�
 - `type` 目前只有 `github`（未知 type＝設定錯誤，angareion exit 2）。
 - GitHub backend 的 `repo` 是放實體的 repo（`owner/repo`）。
 
-目前 repo 裡的 `backends` 是空的：等各專案用 d 等級 PR 把自己要用的 backend 加進來。
+各專案用 d 等級 PR 把自己要用的 backend 加進來（第一個是 AiCompany 的 `aicompany-channel`）。
 
 ## channels.json（機器產物，不要手改）
 

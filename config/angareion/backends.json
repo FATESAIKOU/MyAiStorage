@@ -1,4 +1,9 @@
 {
-  "backends": {},
+  "backends": {
+    "aicompany-channel": {
+      "repo": "FATESAIKOU/AiCompany-channel",
+      "type": "github"
+    }
+  },
   "version": 1
 }
