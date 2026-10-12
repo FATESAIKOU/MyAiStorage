@@ -1,13 +1,19 @@
-"""Library layer (D2/D4): `wait` polls the backend's `check`; `read` moves the cursor."""
+"""Library layer (D2/D4/v5): `wait` polls the backend's `check`; `read` moves the cursor.
+
+"To me" spans every channel in the config file; each channel is a separate
+backend entity with its own arrival positions, so each keeps its own cursor
+entry (`to:<agent name>:<channel>`). A channel target uses one entry
+(`channel:<name>`).
+"""
 
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, NamedTuple
+from typing import Callable, NamedTuple
 
-from angareion.backend import ChannelBackend, Channel, Cursor, Target
+from angareion.backend import BackendRef, ChannelBackend, Cursor, Entity, EntityResolver, Target
 from angareion.messages import Message
-from angareion.state import CursorStore
+from angareion.state import CursorStore, channel_cursor_key, recipient_cursor_key
 
 POLL_INTERVAL_SECONDS = 15.0
 # wait bounds each check's network budget to [5s, 30s]: slow networks still get
@@ -29,27 +35,47 @@ class ReadBatch(NamedTuple):
 
 
 class Angareion:
-    """The four interfaces over a backend, with the local cursor for read/wait."""
+    """The five interfaces over a backend, with the local cursors for read/wait."""
 
-    def __init__(self, backend: ChannelBackend, cursors: CursorStore):
+    def __init__(self, backend: ChannelBackend, cursors: CursorStore, store: EntityResolver, identity: str):
         self.backend = backend
         self.cursors = cursors
-
-    def create_channel(self, name: str, members: list[dict[str, Any]] | None = None) -> Channel:
-        return self.backend.create_channel(name, list(members or []))
+        self.store = store
+        self.identity = identity
 
     def send(self, channel: str, message: Message) -> str:
-        return self.backend.send(channel, message)
+        return self.backend.send(self.store.entity_for(channel), message)
+
+    def create_channel(self, name: str, backend: BackendRef) -> int:
+        """Step 1 of `channel create`: open the backend entity; returns its number."""
+        return self.backend.create_channel(name, backend)
+
+    def verify_channel(self, name: str, backend: BackendRef, entity: int) -> bool:
+        """Step 2's check: the entity exists and its title is exactly the channel name."""
+        return self.backend.verify_channel(name, backend, entity)
+
+    def close_channel(self, entity: Entity) -> None:
+        """`channel delete` step 2: close the entity without deleting it."""
+        self.backend.close_channel(entity)
 
     def check(self, target: Target, *, timeout: float | None = None) -> bool:
         """Whether the backend has anything new for the target right now.
 
-        Uses the local cursor but never writes it (the spec: waiting must not
-        move the cursor). Any ETag used for conditional requests lives in the
-        backend instance, for this process only. `timeout` is an optional
+        Uses the local cursors but never writes them (the spec: waiting must
+        not move the cursor). Any ETag used for conditional requests lives in
+        the backend instance, for this process only. `timeout` is an optional
         budget for the backend's own network requests.
         """
-        return self.backend.check(target, self.cursors.cursor_for(target), timeout=timeout)
+        if target.channel is not None:
+            entity = self.store.entity_for(target.channel)
+            cursor = self.cursors.cursor(channel_cursor_key(entity.channel))
+            return self.backend.check(entity, cursor, timeout=timeout)
+
+        for entity in self.store.entities():
+            cursor = self.cursors.cursor(recipient_cursor_key(self.identity, entity.channel))
+            if self.backend.check(entity, cursor, recipient=self.identity, timeout=timeout):
+                return True
+        return False
 
     def wait(
         self,
@@ -98,11 +124,34 @@ class Angareion:
         does not lose them.
         """
         use_local_cursor = since is None
-        cursor = self.cursors.cursor_for(target) if use_local_cursor else Cursor(at=since)
-        result = self.backend.read(target, cursor)
 
-        def commit() -> None:
+        if target.channel is not None:
+            entity = self.store.entity_for(target.channel)
+            key = channel_cursor_key(entity.channel)
+            cursor = self.cursors.cursor(key) if use_local_cursor else Cursor(at=since)
+            result = self.backend.read(entity, cursor)
+
+            def commit_channel() -> None:
+                if use_local_cursor:
+                    self.cursors.save(key, result.cursor)
+
+            return ReadBatch(result.messages, commit_channel)
+
+        messages: list[Message] = []
+        updates: dict[str, Cursor] = {}
+        for entity in self.store.entities():
+            key = recipient_cursor_key(self.identity, entity.channel)
+            cursor = self.cursors.cursor(key) if use_local_cursor else Cursor(at=since)
+            result = self.backend.read(entity, cursor, recipient=self.identity)
+            messages.extend(result.messages)
             if use_local_cursor:
-                self.cursors.save(target, result.cursor)
+                updates[key] = result.cursor
 
-        return ReadBatch(result.messages, commit)
+        # Oldest first across channels: by the backend time, then channel/name.
+        messages.sort(key=lambda m: (getattr(m, "received_at", "") or "", m.channel, m.id))
+
+        def commit_recipient() -> None:
+            if updates:
+                self.cursors.save_many(updates)
+
+        return ReadBatch(messages, commit_recipient)

@@ -1,4 +1,4 @@
-"""Configuration, paths, identity slug and token reading for Angareion (D5)."""
+"""Configuration, paths, token reading and the local-copy settings for Angareion (D5/v5)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,9 @@ import os
 from pathlib import Path
 from typing import Any
 
-from angareion.messages import MessageValidationError, is_group_address, validate_address
+from angareion.messages import MessageValidationError, validate_address
+
+CONFIG_PULL_INTERVAL_DEFAULT = 900
 
 
 class ConfigError(ValueError):
@@ -54,40 +56,70 @@ def get_default_token_path() -> Path:
     return Path(os.path.expanduser("~/.config/angareion/token"))
 
 
-def identity_slug(identity: dict[str, Any]) -> str:
-    """Derive a filesystem-safe filename slug for an identity."""
-    if "group" in identity:
-        group = str(identity.get("group", "")).replace("/", "_").replace(":", "_")
-        return f"group__{group}"
-    repo = str(identity.get("repo", "unknown")).replace("/", "_").replace(":", "_")
-    role = str(identity.get("role", "unknown")).replace("/", "_").replace(":", "_")
-    return f"{repo}__{role}"
+def identity_slug(identity: str) -> str:
+    """Derive a filesystem-safe filename slug for an agent name (v5).
+
+    Agent names are already `[A-Za-z0-9._-]`, so this mostly passes through;
+    anything else is replaced so a hand-written identity cannot escape the
+    state directory. v0's `{repo}__{role}` slug is gone: old cursor files are
+    simply never read again (a new identity starts from the beginning).
+    """
+    slug = "".join(
+        character if (character.isascii() and (character.isalnum() or character in "._-")) else "_"
+        for character in str(identity)
+    )
+    return slug or "unknown"
 
 
 @dataclass
 class Config:
-    channel_repo: str
-    identity: dict[str, Any]
+    identity: str
+    config_dir: Path
+    registry_repo: str
+    registry_issue: int
     token_file: Path = field(default_factory=get_default_token_path)
     state_dir: Path = field(default_factory=get_state_dir)
     config_file: Path = field(default_factory=get_config_path)
+    config_pull_interval: int = CONFIG_PULL_INTERVAL_DEFAULT
 
     def validate(self) -> None:
-        if not self.channel_repo or not isinstance(self.channel_repo, str):
-            raise ConfigError("channel_repo must be a non-empty string (e.g. 'owner-org/repo-channel')")
+        if not isinstance(self.identity, str) or not self.identity.strip():
+            raise ConfigError(
+                "identity must be an agent name such as 'MyLinuxPool-impl-2'"
+            )
         try:
             validate_address(self.identity, field_name="identity")
         except MessageValidationError as e:
             raise ConfigError(f"Invalid identity: {e}") from e
-        if is_group_address(self.identity):
-            raise ConfigError("Identity must be a member address {repo, role, [name]}; group addressing is not supported in v0")
+        if not self.config_dir or not str(self.config_dir).strip():
+            raise ConfigError("config_dir must be the path of the local MyAiStorage clone")
+        repo = self.registry_repo
+        if not isinstance(repo, str) or repo.count("/") != 1 or not all(repo.split("/")):
+            raise ConfigError("registry_repo must be an 'owner/repo' string")
+        if not isinstance(self.registry_issue, int) or isinstance(self.registry_issue, bool) or self.registry_issue <= 0:
+            raise ConfigError("registry_issue must be a positive issue number")
+        if (
+            not isinstance(self.config_pull_interval, int)
+            or isinstance(self.config_pull_interval, bool)
+            or self.config_pull_interval < 0
+        ):
+            raise ConfigError("config_pull_interval must be an integer number of seconds (0 = no periodic pull)")
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "channel_repo": self.channel_repo,
             "identity": self.identity,
+            "config_dir": str(self.config_dir),
+            "registry_repo": self.registry_repo,
+            "registry_issue": self.registry_issue,
             "token_file": str(self.token_file),
+            "config_pull_interval": self.config_pull_interval,
         }
+
+
+def _required(data: dict[str, Any], key: str, config_path: Path) -> Any:
+    if key not in data or data[key] in (None, ""):
+        raise ConfigError(f"Configuration is missing '{key}': {config_path}")
+    return data[key]
 
 
 def load_config(path: Path | str | None = None) -> Config:
@@ -104,23 +136,28 @@ def load_config(path: Path | str | None = None) -> Config:
     if not isinstance(data, dict):
         raise ConfigError(f"Configuration root must be a JSON object in {config_path}")
 
-    channel_repo = data.get("channel_repo", "")
-    identity = data.get("identity", {})
+    identity = _required(data, "identity", config_path)
+    config_dir = _required(data, "config_dir", config_path)
+    registry_repo = _required(data, "registry_repo", config_path)
+    registry_issue = _required(data, "registry_issue", config_path)
 
     token_file_env = os.environ.get("ANGAREION_TOKEN_FILE")
     if token_file_env:
         token_file = Path(os.path.expanduser(token_file_env))
-    elif "token_file" in data and data["token_file"]:
+    elif data.get("token_file"):
         token_file = Path(os.path.expanduser(str(data["token_file"])))
     else:
         token_file = get_default_token_path()
 
     cfg = Config(
-        channel_repo=channel_repo,
-        identity=identity,
+        identity=str(identity),
+        config_dir=Path(os.path.expanduser(str(config_dir))),
+        registry_repo=str(registry_repo),
+        registry_issue=registry_issue,
         token_file=token_file,
         state_dir=get_state_dir(),
         config_file=config_path,
+        config_pull_interval=data.get("config_pull_interval", CONFIG_PULL_INTERVAL_DEFAULT),
     )
     cfg.validate()
     return cfg

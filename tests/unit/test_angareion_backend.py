@@ -1,4 +1,4 @@
-"""Unit tests for the ChannelBackend protocol, targets/cursors and FakeBackend (D2/D4)."""
+"""Unit tests for the ChannelBackend protocol, targets/cursors and FakeBackend (D2/D4/v5)."""
 
 from __future__ import annotations
 
@@ -6,54 +6,62 @@ import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve
 
 import pytest
 
+from _angareion_fakes import StaticResolver, entity
 from angareion.backend import (
     CURSOR_SEEN_MARGIN_SECONDS,
     AuthenticationError,
     BackendError,
+    BackendRef,
     ChannelBackend,
     ChannelNotFoundError,
     Cursor,
+    Entity,
     FakeBackend,
     ReadResult,
     Target,
-    address_matches_identity,
     advance_cursor,
     comment_is_new,
     cursor_since,
     parse_backend_time,
+    recipient_matches,
 )
 from angareion.messages import Message
 
+ME = "MyLinuxPool-impl-2"
+PM = "LLMGateway-pm"
+
 
 def _make_msg(
-    channel: str = "test-topic",
+    channel: str = "general",
     content: str = "hello",
     msg_id: str = "01MSG0000000000000000000001",
     at: str = "2026-10-10T12:00:00+00:00",
-    to: dict | None = None,
+    to: str | None = ME,
 ) -> Message:
-    return Message(
-        from_={"repo": "owner-org/team", "role": "PM"},
-        to=to or {"repo": "owner-org/worker", "role": "worker"},
-        channel=channel,
-        content=content,
-        id=msg_id,
-        at=at,
-    )
+    return Message(from_=PM, to=to, channel=channel, content=content, id=msg_id, at=at)
+
+
+def _backend() -> tuple[FakeBackend, Entity]:
+    general = entity(channel="general", issue=10)
+    other = entity(channel="other", backend="github-2", repo="owner/repo2", issue=7)
+    backend = FakeBackend(StaticResolver([general, other]))
+    backend.add_entity("general", number=10)
+    backend.add_entity("other", number=7)
+    return backend, general
 
 
 def test_target_requires_exactly_one_destination():
     with pytest.raises(ValueError):
         Target()
     with pytest.raises(ValueError):
-        Target(channel="a", recipient={"repo": "r", "role": "x"})
+        Target(channel="a", recipient=ME)
     assert Target(channel="a").channel == "a"
-    assert Target(recipient={"repo": "r", "role": "x"}).recipient == {"repo": "r", "role": "x"}
+    assert Target(recipient=ME).recipient == ME
 
 
 def test_target_keys():
     assert Target(channel="general").key() == "channel:general"
-    assert Target(recipient={"repo": "owner-org/team", "role": "PM"}).key() == "to:owner-org_team__PM"
+    assert Target(recipient=ME).key() == "to:MyLinuxPool-impl-2"
 
 
 def test_backend_time_parsing_and_formatting():
@@ -129,65 +137,88 @@ def test_advance_cursor_keeps_position_and_recomputes_seen():
     assert advance_cursor(cursor, []) == cursor
 
 
-def test_address_matches_identity():
-    me = {"repo": "owner-org/worker", "role": "team-a"}
-    assert address_matches_identity({"repo": "owner-org/worker", "role": "team-a", "name": "X"}, me)
-    assert not address_matches_identity({"repo": "owner-org/worker", "role": "team-b"}, me)
-    assert not address_matches_identity({"group": "all-workers"}, me)
-    assert not address_matches_identity("not a dict", me)
+def test_recipient_matches_counts_broadcasts():
+    assert recipient_matches(_make_msg(to=ME), ME)
+    assert not recipient_matches(_make_msg(to="other-pm"), ME)
+    # A broadcast (no `to`) is for everyone.
+    assert recipient_matches(_make_msg(to=None), ME)
+    assert recipient_matches(_make_msg(to=None), "any-arch")
+    # No recipient filter: every message is in scope.
+    assert recipient_matches(_make_msg(to="other-pm"), None)
 
 
 def test_fake_backend_conforms_to_protocol():
-    assert isinstance(FakeBackend(), ChannelBackend)
+    backend, _ = _backend()
+    assert isinstance(backend, ChannelBackend)
 
 
-def test_fake_create_channel_idempotent_and_members():
-    backend = FakeBackend()
-    members = [{"repo": "owner-org/team", "role": "PM"}]
-    channel = backend.create_channel("topic-1", members)
-    assert channel.name == "topic-1"
-    assert channel.number == 1
-    assert channel.members == members
+def test_fake_create_verify_close_without_members():
+    backend, _ = _backend()
+    number = backend.create_channel("fresh", BackendRef(name="github-main", type="github", repo="owner/repo"))
+    assert backend.entity_state(number) == "open"
+    assert backend.entity_title(number) == "fresh"
+    assert backend.verify_channel("fresh", BackendRef("github-main", "github", "owner/repo"), number) is True
 
-    again = backend.create_channel("topic-1", [])
-    assert again == channel
+    # A different title fails the client-side verification (review H2).
+    backend.set_entity_title(number, "renamed")
+    assert backend.verify_channel("fresh", BackendRef("github-main", "github", "owner/repo"), number) is False
 
-    second = backend.create_channel("topic-2", [])
-    assert second.number == 2
+    backend.close_channel(entity(channel="fresh", issue=number))
+    assert backend.entity_state(number) == "closed"
+
+    # A missing entity is a 404: closing it again is fine.
+    backend.close_channel(entity(channel="fresh", issue=999))
+    # And closing a channel that was never created does not resurrect anything.
+    assert backend.entity_state(999) is None
 
 
-def test_fake_send_requires_channel_and_matching_name():
-    backend = FakeBackend()
+def test_fake_backend_injected_failures():
+    backend, general = _backend()
+    backend.next_create_error = BackendError("backend refused to open an entity")
+    with pytest.raises(BackendError):
+        backend.create_channel("fresh", BackendRef("github-main", "github", "owner/repo"))
+
+    backend.next_close_error = BackendError("closing failed")
+    with pytest.raises(BackendError):
+        backend.close_channel(general)
+
+    backend.next_error = AuthenticationError("Invalid token")
+    with pytest.raises(AuthenticationError):
+        backend.read(general, Cursor())
+    assert isinstance(AuthenticationError("x"), BackendError)
+    # Once consumed, the next call works.
+    assert backend.check(general, Cursor()) is False
+
+
+def test_fake_send_requires_the_entity_and_a_matching_name():
+    backend, general = _backend()
     with pytest.raises(ChannelNotFoundError):
-        backend.send("unknown-topic", _make_msg(channel="unknown-topic"))
+        backend.send(entity(channel="nope", issue=42), _make_msg(channel="nope"))
 
-    backend.create_channel("topic-1", [])
     with pytest.raises(ValueError, match="does not match target channel"):
-        backend.send("topic-1", _make_msg(channel="topic-2"))
+        backend.send(general, _make_msg(channel="other"))
 
-    msg = _make_msg(channel="topic-1", content="first")
-    assert backend.send("topic-1", msg) == msg.id
+    msg = _make_msg(channel="general", content="first")
+    assert backend.send(general, msg) == msg.id
 
 
-def test_fake_check_and_read_by_channel():
-    backend = FakeBackend()
-    backend.create_channel("topic-1", [])
-    target = Target(channel="topic-1")
+def test_fake_check_and_read_by_entity():
+    backend, general = _backend()
 
-    assert backend.check(target, Cursor()) is False
-    res = backend.read(target, Cursor())
+    assert backend.check(general, Cursor()) is False
+    res = backend.read(general, Cursor())
     assert isinstance(res, ReadResult)
     assert res.messages == []
     assert res.cursor == Cursor()
 
-    first = _make_msg(channel="topic-1", msg_id="01AAAA")
-    second = _make_msg(channel="topic-1", msg_id="01BBBB")
-    backend.deliver("topic-1", first, comment_id=10, created_at="2026-10-10T10:00:00Z")
-    backend.deliver("topic-1", second, comment_id=11, created_at="2026-10-10T11:00:00Z")
+    first = _make_msg(channel="general", msg_id="01AAAA")
+    second = _make_msg(channel="general", msg_id="01BBBB")
+    backend.deliver(general, first, comment_id=10, created_at="2026-10-10T10:00:00Z")
+    backend.deliver(general, second, comment_id=11, created_at="2026-10-10T11:00:00Z")
 
-    assert backend.check(target, Cursor()) is True
+    assert backend.check(general, Cursor()) is True
 
-    res = backend.read(target, Cursor())
+    res = backend.read(general, Cursor())
     assert [m.id for m in res.messages] == ["01AAAA", "01BBBB"]
     assert res.cursor.position == "11"
     assert res.cursor.at == "2026-10-10T11:00:00Z"
@@ -195,85 +226,65 @@ def test_fake_check_and_read_by_channel():
     assert res.messages[1].received_at == "2026-10-10T11:00:00Z"
 
     # Nothing new once the cursor has been advanced onto that read.
-    assert backend.check(target, res.cursor) is False
-
-    # A second read from the stored cursor returns nothing.
-    again = backend.read(target, res.cursor)
-    assert again.messages == []
-    assert again.cursor == res.cursor
+    assert backend.check(general, res.cursor) is False
+    assert backend.read(general, res.cursor).messages == []
 
 
 def test_fake_replication_lag_delivers_the_late_smaller_id():
     """A smaller comment id that shows up after a bigger one must still arrive (D4)."""
-    backend = FakeBackend()
-    backend.create_channel("topic-1", [])
-    target = Target(channel="topic-1")
+    backend, general = _backend()
 
-    backend.deliver("topic-1", _make_msg(channel="topic-1", msg_id="01LATER"), comment_id=100, created_at="2026-10-10T12:00:10Z")
-    first = backend.read(target, Cursor())
+    backend.deliver(general, _make_msg(msg_id="01LATER"), comment_id=100, created_at="2026-10-10T12:00:10Z")
+    first = backend.read(general, Cursor())
     assert [m.id for m in first.messages] == ["01LATER"]
 
     # The lagging comment: smaller id, backend time close behind.
-    backend.deliver("topic-1", _make_msg(channel="topic-1", msg_id="01EARLIER"), comment_id=99, created_at="2026-10-10T12:00:05Z")
-    assert backend.check(target, first.cursor) is True
+    backend.deliver(general, _make_msg(msg_id="01EARLIER"), comment_id=99, created_at="2026-10-10T12:00:05Z")
+    assert backend.check(general, first.cursor) is True
 
-    second = backend.read(target, first.cursor)
+    second = backend.read(general, first.cursor)
     assert [m.id for m in second.messages] == ["01EARLIER"]
     assert second.cursor.position == "100"  # the position never moves backwards
     assert second.cursor.at == "2026-10-10T12:00:10Z"
     assert set(second.cursor.seen) == {"99", "100"}
 
     # And it does not come back a third time.
-    assert backend.read(target, second.cursor).messages == []
+    assert backend.read(general, second.cursor).messages == []
 
 
 def test_fake_edited_comment_does_not_come_back():
-    backend = FakeBackend()
-    backend.create_channel("topic-1", [])
-    target = Target(channel="topic-1")
-    message = _make_msg(channel="topic-1", msg_id="01AAAA")
-    backend.deliver("topic-1", message, comment_id=10, created_at="2026-10-10T12:00:00Z")
+    backend, general = _backend()
+    message = _make_msg(msg_id="01AAAA")
+    backend.deliver(general, message, comment_id=10, created_at="2026-10-10T12:00:00Z")
 
-    cursor = backend.read(target, Cursor()).cursor
+    cursor = backend.read(general, Cursor()).cursor
     message.content = "edited after being read"  # the backend's updated_at moved; id and time did not
-    assert backend.check(target, cursor) is False
-    assert backend.read(target, cursor).messages == []
+    assert backend.check(general, cursor) is False
+    assert backend.read(general, cursor).messages == []
 
 
-def test_fake_read_to_me_filters_recipient_and_groups():
-    me = {"repo": "owner-org/worker", "role": "team-a"}
-    backend = FakeBackend()
-    backend.create_channel("topic-1", [])
-    backend.create_channel("topic-2", [])
-    backend.deliver("topic-1", _make_msg(channel="topic-1", msg_id="01AAAA", to=me), comment_id=1, created_at="2026-10-10T10:00:00Z")
-    backend.deliver("topic-2", _make_msg(channel="topic-2", msg_id="01BBBB", to=me), comment_id=2, created_at="2026-10-10T10:01:00Z")
-    backend.deliver("topic-1", _make_msg(channel="topic-1", msg_id="01CCCC",
-                                         to={"repo": "owner-org/worker", "role": "team-b"}), comment_id=3, created_at="2026-10-10T10:02:00Z")
-    backend.deliver("topic-1", _make_msg(channel="topic-1", msg_id="01DDDD", to={"group": "all-workers"}), comment_id=4, created_at="2026-10-10T10:03:00Z")
+def test_fake_read_to_me_filters_recipient_and_includes_broadcasts():
+    backend, general = _backend()
+    other = entity(channel="other", backend="github-2", repo="owner/repo2", issue=7)
+    backend.deliver(general, _make_msg(channel="general", msg_id="01AAAA", to=ME), comment_id=1, created_at="2026-10-10T10:00:00Z")
+    backend.deliver(other, _make_msg(channel="other", msg_id="01BBBB", to=ME), comment_id=2, created_at="2026-10-10T10:01:00Z")
+    backend.deliver(general, _make_msg(channel="general", msg_id="01CCCC", to="other-pm"), comment_id=3, created_at="2026-10-10T10:02:00Z")
+    backend.deliver(general, _make_msg(channel="general", msg_id="01DDDD", to=None), comment_id=4, created_at="2026-10-10T10:03:00Z")
 
-    res = backend.read(Target(recipient=me), Cursor())
-    assert [m.id for m in res.messages] == ["01AAAA", "01BBBB"]
-    assert backend.check(Target(recipient=me), res.cursor) is False
+    res = backend.read(general, Cursor(), recipient=ME)
+    assert [m.id for m in res.messages] == ["01AAAA", "01DDDD"]
+    assert backend.check(general, res.cursor, recipient=ME) is False
 
     # A channel target is not filtered by recipient.
-    res_channel = backend.read(Target(channel="topic-1"), Cursor())
+    res_channel = backend.read(general, Cursor())
     assert [m.id for m in res_channel.messages] == ["01AAAA", "01CCCC", "01DDDD"]
 
 
-def test_fake_read_unknown_channel_raises():
-    backend = FakeBackend()
+def test_fake_read_unknown_entity_raises_nothing_but_send_does():
+    backend, _ = _backend()
+    ghost = entity(channel="nope", issue=999)
+    # Reading an entity the resolver handed out but the backend never opened:
+    # comments are simply empty (the resolver owns existence).
+    assert backend.read(ghost, Cursor()).messages == []
     with pytest.raises(ChannelNotFoundError):
-        backend.read(Target(channel="nope"), Cursor())
-    with pytest.raises(ChannelNotFoundError):
-        backend.check(Target(channel="nope"), Cursor())
-
-
-def test_fake_backend_error_simulation():
-    backend = FakeBackend()
-    backend.create_channel("topic", [])
-    backend.next_error = AuthenticationError("Invalid token")
-    with pytest.raises(AuthenticationError):
-        backend.read(Target(channel="topic"), Cursor())
-    assert isinstance(AuthenticationError("x"), BackendError)
-    # Once consumed, the next call works.
-    assert backend.check(Target(channel="topic"), Cursor()) is False
+        backend.send(ghost, _make_msg(channel="nope"))

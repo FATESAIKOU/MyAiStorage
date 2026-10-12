@@ -1,4 +1,11 @@
-"""ChannelBackend protocol (the four operations), targets, cursors and the fake backend (D2/D4)."""
+"""ChannelBackend protocol (create/close/send/check/read), targets, cursors, fake backend.
+
+v5: a channel is a name that a config file points at a backend entity; the
+backend never stores members. `create_channel` opens the entity, `close_channel`
+closes it (without deleting it), `send`/`check`/`read` work on a resolved
+`Entity`. "To me" spans every channel, so `check`/`read` take an optional
+recipient filter; a message without `to` is a broadcast and counts for everyone.
+"""
 
 from __future__ import annotations
 
@@ -26,12 +33,34 @@ class AuthenticationError(BackendError):
 
 
 @dataclass(frozen=True)
-class Channel:
-    """A channel: a name, the backend's number for it, and its members."""
+class BackendRef:
+    """One backends.json entry: a named backend and where its entities live."""
 
     name: str
-    number: int
-    members: list[dict[str, Any]] = field(default_factory=list)
+    type: str
+    repo: str
+
+
+@dataclass(frozen=True)
+class Entity:
+    """A resolved channel: the backend entity a command may act on."""
+
+    channel: str
+    backend: str
+    repo: str
+    issue: int
+
+
+class EntityResolver(Protocol):
+    """What a backend needs to turn a channel name into an entity."""
+
+    def entity_for(self, channel: str) -> Entity:
+        """The entity for a channel name; raises ChannelNotFoundError when absent."""
+        ...
+
+    def entities(self) -> list[Entity]:
+        """Every configured channel as an entity ("to me" spans them all)."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -39,11 +68,11 @@ class Target:
     """Where to check/read: one channel, or everything addressed to me.
 
     Exactly one of `channel` and `recipient` must be set. `recipient` is the
-    reader's identity {repo, role, [name]}; "to me" spans all channels.
+    reader's agent name; "to me" spans all channels.
     """
 
     channel: str | None = None
-    recipient: dict[str, Any] | None = None
+    recipient: str | None = None
 
     def __post_init__(self) -> None:
         if (self.channel is None) == (self.recipient is None):
@@ -53,7 +82,7 @@ class Target:
         """Stable key for this target in the local cursor file."""
         if self.channel is not None:
             return f"channel:{self.channel}"
-        return "to:" + identity_slug(self.recipient or {})
+        return "to:" + identity_slug(self.recipient or "")
 
 
 def parse_backend_time(value: str) -> datetime:
@@ -160,35 +189,51 @@ class ReadResult(NamedTuple):
 
 @runtime_checkable
 class ChannelBackend(Protocol):
-    """The backend is the same four operations as the four interfaces."""
+    """The backend is the same operations as the five interfaces."""
 
-    def create_channel(self, name: str, members: list[dict[str, Any]]) -> Channel:
-        """Create a channel (idempotent) and return it."""
+    def create_channel(self, name: str, backend: BackendRef) -> int:
+        """Open the backend entity for a channel; return its number."""
         ...
 
-    def send(self, channel: str, message: Message) -> str:
-        """Post a message to a channel; return the message id."""
+    def verify_channel(self, name: str, backend: BackendRef, entity: int) -> bool:
+        """Whether the entity exists and its title is exactly the channel name."""
         ...
 
-    def check(self, target: Target, cursor: Cursor, *, timeout: float | None = None) -> bool:
-        """Whether there is any new message for the target right now.
+    def close_channel(self, entity: Entity) -> None:
+        """Close the entity (without deleting it); an already-deleted entity is fine."""
+        ...
 
+    def send(self, entity: Entity, message: Message) -> str:
+        """Post a message to the entity; return the message id."""
+        ...
+
+    def check(
+        self,
+        entity: Entity,
+        cursor: Cursor,
+        *,
+        recipient: str | None = None,
+        timeout: float | None = None,
+    ) -> bool:
+        """Whether there is any new message for the entity right now.
+
+        `recipient` filters "to me" (messages whose `to` is that agent name or
+        that have no `to` at all); None means every message in the channel.
         `timeout` is an optional budget in seconds for the backend's own
-        network requests (the wait loop passes its remaining time); None means
-        the backend's own default.
+        network requests (the wait loop passes its remaining time).
         """
         ...
 
-    def read(self, target: Target, cursor: Cursor) -> ReadResult:
+    def read(self, entity: Entity, cursor: Cursor, *, recipient: str | None = None) -> ReadResult:
         """Read the messages after the cursor (oldest first), and the new cursor."""
         ...
 
 
-def address_matches_identity(address: Any, recipient: dict[str, Any]) -> bool:
-    """Whether a message's `to` is this member (name is display-only)."""
-    if not isinstance(address, dict) or "group" in address:
-        return False
-    return address.get("repo") == recipient.get("repo") and address.get("role") == recipient.get("role")
+def recipient_matches(message: Message, recipient: str | None) -> bool:
+    """Whether a message counts as "to me": addressed to me, or a broadcast."""
+    if recipient is None:
+        return True
+    return message.to is None or message.to == recipient
 
 
 @dataclass(frozen=True)
@@ -207,34 +252,30 @@ def _utc_now() -> str:
 class FakeBackend:
     """In-memory ChannelBackend for tests and local development; never touches the network.
 
-    Comments carry a backend arrival id (like GitHub's comment id) and a
-    backend time (like `created_at`); `deliver` lets a test pin both, so a
-    replication lag (a smaller id appearing after a bigger one) can be played
-    out.
+    Entities live in memory: `create_channel` opens one (title = channel name),
+    `close_channel` closes it without deleting it. Comments carry a backend
+    arrival id (like GitHub's comment id) and a backend time (like
+    `created_at`); `deliver` lets a test pin both, so a replication lag (a
+    smaller id appearing after a bigger one) can be played out.
     """
 
     def __init__(
         self,
-        channels: dict[str, int] | None = None,
-        messages: list[Message] | None = None,
-        members: dict[str, list[dict[str, Any]]] | None = None,
+        resolver: EntityResolver,
         *,
+        start_entity_id: int = 1,
         start_comment_id: int = 1,
         clock: Any = None,
     ):
-        self._channels: dict[str, Channel] = {}
+        self.resolver = resolver
+        self._entities: dict[int, dict[str, Any]] = {}
         self._comments: list[FakeComment] = []
+        self._next_entity_id = start_entity_id
         self._next_comment_id = start_comment_id
         self.next_error: Exception | None = None
+        self.next_create_error: Exception | None = None
+        self.next_close_error: Exception | None = None
         self._clock = clock or _utc_now
-
-        for name, number in (channels or {}).items():
-            self._channels[name] = Channel(name=name, number=number, members=list((members or {}).get(name, [])))
-
-        for msg in messages or []:
-            if msg.channel not in self._channels:
-                self.create_channel(msg.channel, [])
-            self.deliver(msg.channel, msg)
 
     def _check_injected_error(self) -> None:
         if self.next_error is not None:
@@ -242,20 +283,30 @@ class FakeBackend:
             self.next_error = None
             raise err
 
-    def create_channel(self, name: str, members: list[dict[str, Any]]) -> Channel:
-        self._check_injected_error()
-        if not name or not isinstance(name, str):
-            raise ValueError("Channel name must be a non-empty string")
-        if name in self._channels:
-            return self._channels[name]
-        numbers = [channel.number for channel in self._channels.values()]
-        channel = Channel(name=name, number=(max(numbers) + 1) if numbers else 1, members=list(members))
-        self._channels[name] = channel
-        return channel
+    # -- test helpers ----------------------------------------------------
+
+    def add_entity(self, title: str, *, number: int | None = None) -> int:
+        """Pre-create an entity for tests that set up the config file first."""
+        number = self._next_entity_id if number is None else number
+        self._entities[number] = {"title": title, "state": "open"}
+        self._next_entity_id = max(self._next_entity_id, number + 1)
+        return number
+
+    def entity_state(self, number: int) -> str | None:
+        """The state of an entity ("open"/"closed"), or None when it does not exist."""
+        entry = self._entities.get(number)
+        return entry["state"] if entry else None
+
+    def set_entity_title(self, number: int, title: str) -> None:
+        self._entities[number]["title"] = title
+
+    def entity_title(self, number: int) -> str | None:
+        entry = self._entities.get(number)
+        return entry["title"] if entry else None
 
     def deliver(
         self,
-        channel: str,
+        entity: Entity,
         message: Message,
         *,
         comment_id: int | None = None,
@@ -263,12 +314,10 @@ class FakeBackend:
     ) -> FakeComment:
         """Record a message as a backend comment; tests may pin id/created_at."""
         self._check_injected_error()
-        if channel not in self._channels:
-            raise ChannelNotFoundError(f"Channel '{channel}' does not exist")
         message.validate()
-        if message.channel != channel:
+        if message.channel != entity.channel:
             raise ValueError(
-                f"Message channel '{message.channel}' does not match target channel '{channel}'"
+                f"Message channel '{message.channel}' does not match target channel '{entity.channel}'"
             )
         cid = self._next_comment_id if comment_id is None else comment_id
         if cid >= self._next_comment_id:
@@ -277,25 +326,72 @@ class FakeBackend:
         self._comments.append(comment)
         return comment
 
-    def send(self, channel: str, message: Message) -> str:
-        self.deliver(channel, message)
+    # -- the backend protocol -------------------------------------------
+
+    def create_channel(self, name: str, backend: BackendRef) -> int:
+        self._check_injected_error()
+        if self.next_create_error is not None:
+            err = self.next_create_error
+            self.next_create_error = None
+            raise err
+        if not name or not isinstance(name, str):
+            raise ValueError("Channel name must be a non-empty string")
+        number = self._next_entity_id
+        self._next_entity_id += 1
+        self._entities[number] = {"title": name, "state": "open"}
+        return number
+
+    def verify_channel(self, name: str, backend: BackendRef, entity: int) -> bool:
+        self._check_injected_error()
+        entry = self._entities.get(entity)
+        return entry is not None and entry["title"] == name
+
+    def close_channel(self, entity: Entity) -> None:
+        self._check_injected_error()
+        if self.next_close_error is not None:
+            err = self.next_close_error
+            self.next_close_error = None
+            raise err
+        entry = self._entities.get(entity.issue)
+        if entry is None:
+            return  # 404: already deleted, treated as already closed
+        entry["state"] = "closed"
+
+    def send(self, entity: Entity, message: Message) -> str:
+        self._check_injected_error()
+        if entity.issue not in self._entities:
+            raise ChannelNotFoundError(f"Channel '{entity.channel}' does not exist")
+        self.deliver(entity, message)
         return message.id
 
-    def _comments_for(self, target: Target) -> list[FakeComment]:
-        if target.channel is not None:
-            if target.channel not in self._channels:
-                raise ChannelNotFoundError(f"Channel '{target.channel}' does not exist")
-            return [c for c in self._comments if c.message.channel == target.channel]
-        recipient = target.recipient or {}
-        return [c for c in self._comments if address_matches_identity(c.message.to, recipient)]
+    def _comments_for(self, entity: Entity, recipient: str | None) -> list[FakeComment]:
+        return [
+            comment
+            for comment in self._comments
+            if comment.message.channel == entity.channel
+            and recipient_matches(comment.message, recipient)
+        ]
 
-    def check(self, target: Target, cursor: Cursor, *, timeout: float | None = None) -> bool:
+    def check(
+        self,
+        entity: Entity,
+        cursor: Cursor,
+        *,
+        recipient: str | None = None,
+        timeout: float | None = None,
+    ) -> bool:
         self._check_injected_error()
-        return any(comment_is_new(c.id, c.created_at, cursor) for c in self._comments_for(target))
+        return any(
+            comment_is_new(c.id, c.created_at, cursor)
+            for c in self._comments_for(entity, recipient)
+        )
 
-    def read(self, target: Target, cursor: Cursor) -> ReadResult:
+    def read(self, entity: Entity, cursor: Cursor, *, recipient: str | None = None) -> ReadResult:
         self._check_injected_error()
-        in_scope = self._comments_for(target)
+        # The cursor tracks every comment on the entity (the backend's arrival
+        # positions); `recipient` only decides which messages are returned.
+        all_comments = self._comments_for(entity, None)
+        in_scope = [c for c in all_comments if recipient_matches(c.message, recipient)]
         matched = [c for c in in_scope if comment_is_new(c.id, c.created_at, cursor)]
         matched.sort(key=lambda c: c.id)
 
@@ -306,4 +402,4 @@ class FakeBackend:
 
         if cursor.position is None and cursor.at is not None:
             return ReadResult(messages, cursor)  # a `--since` read moves nothing
-        return ReadResult(messages, advance_cursor(cursor, [(c.id, c.created_at) for c in in_scope]))
+        return ReadResult(messages, advance_cursor(cursor, [(c.id, c.created_at) for c in all_comments]))
