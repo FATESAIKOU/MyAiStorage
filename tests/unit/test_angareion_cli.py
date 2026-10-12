@@ -674,6 +674,36 @@ def test_channel_delete_unregister_failure_exits_2(cli_env, capsys):
     assert cli_env["clock"].sleeps == []
 
 
+def test_channel_delete_is_safe_to_rerun_after_a_failed_unregister(cli_env, capsys):
+    """Re-running closes an already-closed entity again (idempotent) and retries the comment."""
+    cli_env["registry"].fail_posts_times = 1
+    assert run(cli_env, ["channel", "delete", "general"]) == 2
+    assert cli_env["backend"].entity_state(10) == "closed"
+
+    assert run(cli_env, ["channel", "delete", "general"]) == 0
+    assert capsys.readouterr().out == "general\n"
+    assert json.loads(cli_env["registry"].posted[-1]) == {
+        "schema": 1,
+        "action": "unregister",
+        "channel": "general",
+        "backend": "github-main",
+        "issue": 10,
+    }
+
+
+def test_channel_delete_over_the_github_backend_treats_404_as_closed(cli_env, capsys):
+    transport = MiniGitHub()  # this backend never saw entity 10: PATCH will 404
+    ret = main(
+        ["channel", "delete", "general"],
+        store=cli_env["store"],
+        registry=cli_env["registry"],
+        transport=transport,
+    )
+    assert ret == 0
+    assert capsys.readouterr().out == "general\n"
+    assert json.loads(cli_env["registry"].posted[-1])["action"] == "unregister"
+
+
 # -- the pull policy at the CLI level ----------------------------------------
 
 
