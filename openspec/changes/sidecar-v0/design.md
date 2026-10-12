@@ -232,6 +232,6 @@ LLMGateway 的共通 JSON 欄位以 LLMGateway 的 `gateway-v0` 規格（`specs/
 - [Claude 的 `rejected` 與 opencode 的額度類 reason 只觀察到少數值] → 未知值只 log 不換把；第一次真實用完時把原事件貼回 D6（tasks 3.4）。
 - [`new` 模式不經 agora 行程] → 定期 import 之間若被強制殺掉，最多掉一個 `sync_period` 的對話（PM 已確認）；close 與換把一律先 import。
 - [逐一 close 的時間] → 一般 agent 最壞 `close_timeout + 5`、`new` 模式 `close_timeout × 2 + 5`；supervisor 的 kill timeout 要大於加總（D2）。
-- [`AgoraSessionStore` 以 `python -m agora.cli` 開 agora，`child_env` 的允許清單沒有 `PYTHONPATH`] → 用 `uv tool install` 裝的沒問題；從原始碼目錄開發時要用 `command` 設定指定 agora 的路徑（`docs/sidecar.md` 寫明；找不到模組時給明確的訊息）。
+- [`AgoraSessionStore` 以 `python -m agora.cli` 開 agora，`child_env` 的允許清單沒有 `PYTHONPATH`] → **v0 的做法是先用 `uv tool install` 從本 repo 裝 agora**（`Config` 沒有指定 agora 路徑的選項，`child_env` 也不會傳 `PYTHONPATH`，所以從原始碼目錄直接跑時要讓同一個 python 找得到 `agora` 套件，例如 `uv run` 的同步 venv 或 `pip install -e .`）。`docs/sidecar.md` 寫明；找不到模組時給明確的訊息。
 - [單一 scheduler 執行緒做 periodic import] → 多個 `new` agent 時延遲其他 agent 的刷新（D2，`docs/sidecar.md` 寫明）。
 - [`sidecar run` 在 tasks 3.x 之前開不了任何 agent（沒有 driver、沒有 store）] → `docs/sidecar.md`（tasks 4.1）要寫明；`GET /agents` 仍會回應，所以健康檢查會過，但 `POST /agents` 回 400 `unsupported agent kind`。

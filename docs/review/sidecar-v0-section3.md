@@ -97,3 +97,109 @@
 3. **M2**（opencode 的送出方式與狀態來源）；`prompt_async` 與 `/session/status` 的形狀請 PM 在 3.4 實機確認後定案。
 4. **M4**（逾時契約與 D2 的公式）、L1～L4。
 5. 然後進 3.4。
+
+---
+
+# 複審（第二輪）
+
+- 對象：`sidecar-v0-agy4` 的 `e5b246a` 之後十個 commit（`8d11da7` H1、`65de9fd` M1、`fc00eae` M3、`904bc6d` H1 後續、`2cbc925` M5、`e174545` L1、`98656ae` L3、`d154753` H2、`0732257` M2、`8e1cb3b` M4）。`git archive` 到 `/tmp/s31e`，只讀；沒有叫真的 claude、opencode、agora 或 Drive，沒有連網。
+- 對照：PM 在 `e5b246a` 寫進 design 與 spec 的決定（D2/D3/D5 的公式與逾時契約、close 占用轉移、new 模式 import 失敗也 stop、Claude 輔助訊號收窄、opencode 的送出與狀態來源、遮罩、merge 不進 job）。
+- 審查者：架構師（Space Bunny）。非作者。
+- 基準：副本上 `-k sidecar` 190 passed、1 skipped；整個 `tests/unit` 1034 passed、1 skipped。
+
+## 結論
+
+**可以進 3.4 PM 真機。** 十個修正全部照 design 修好，而且每一個都有測試真的釘住：我逐一在副本裡把該修正「故意改壞」，十個全部轉紅（見下面的突變表），包括實作者自己加的 `904bc6d`。沒有引入新的競態、死鎖或逾時問題。
+
+有三件事要帶進 3.4 的觀察名單（見「3.4 要順手看」）：兩個是既有程式本來就有的、不是這輪引入的，一個是這輪 M2 帶進來的新邊角。它們都不擋 3.4。
+
+## 修正的複審
+
+| # | commit | 真的照 design 修好？ | 證據 |
+|---|---|---|---|
+| H1 | `8d11da7` | 是 | `close` 在同一個鎖內設 `rec.busy = True`，`finally` 才放（`core.py:383`、`core.py:401-403`）；`_refresh_one` 開頭就 `if rec.busy: return`（`core.py:598`）。改壞後 `test_close_held_in_stop_prevents_swap_and_leaves_no_live_process` 轉紅。 |
+| H1 後續 | `904bc6d` | **是，而且必要** | 把觀察拆成 `_observe_handle`（不設 busy gate，由呼叫端擁有轉移）與 `_refresh_one`（保留 busy gate）。見下。 |
+| H2 | `d154753` | 是 | import 失敗照樣 stop、`_wait_import_retry` 標 `waiting-quota` 記住 `external_session_id`、`tick()` 裡 `_retry_pending_imports` 每 `retry_interval` 重試、成功才 `_schedule_reopen` 掛 job。改壞後兩個測試轉紅。 |
+| M1 | `65de9fd` | 是 | 輔助訊號收成 `handle.is_api_key` 且 `api_retry` 要 `attempt >= max_retries`、文字要 `is_error: true`。改壞後 `test_subscription_ignores_auxiliary_signals`／`test_transient_api_retry_does_not_mark_quota` 轉紅。 |
+| M2 | `0732257` | 是（有一個新邊角，見下） | `POST /message` 用 `self._message_timeout`；`state()` 以 `handle.sending` 為準、`/session/status` 只讀 `retry`；`info.error` 與非 2xx 走 `_fail_round` 寫進 `last_error` 與 `exit.reason`。改壞後 3 個測試轉紅。 |
+| M3 | `fc00eae` | 是 | `extract_secrets` 只收 `*_API_KEY`／`*_AUTH_TOKEN`／`*_OAUTH_TOKEN`／`*_SECRET`／`*_KEY` 與 `OPENCODE_CONFIG_CONTENT` 的 `apiKey`；`mask_secrets` 還加 `len >= 4`。改壞後 13 個測試轉紅。 |
+| M4 | `8e1cb3b` | 是 | `add_job` 在鎖外擋 `session.mode == "merge"` 回 400 `merge_not_allowed_in_job`；`wiring` 把 `import_timeout`（連同 `start_timeout`）綁到 `close_timeout`；docs 的公式改成「一般 `close_timeout + 5`、`new` 模式 `close_timeout × 2 + 5`」。改壞後 3 個測試轉紅。 |
+| M5 | `2cbc925` | 是 | `AgoraProcess.stderr_lines` 改成持有 pump 的 live deque，`stderr_tail()` 在呼叫時才複製。改壞後 `test_stderr_tail_sees_lines_printed_after_start` 轉紅。 |
+| L1 | `e174545` | 是 | `poke` 接住 driver 例外轉 `AgentNotRunningError`（409）並標 exited。改壞後 `test_poke_when_the_driver_send_fails_is_409_and_exits` 轉紅。 |
+| L3 | `98656ae` | 是 | `proc = None` 先宣告、handler 記 `term_pending`、`Popen` 回來後立刻轉送。改壞後 `test_sigterm_in_the_window_before_popen_is_forwarded_not_unbound` 轉紅。 |
+
+### `904bc6d` 特別確認（實作者自己加的）
+
+**對，而且非有不可。** `8d11da7` 把 busy gate 提到 `_refresh_one` 最前面之後，換把路徑尾端那個「啟動新 handle 後立刻觀察狀態」的呼叫也被 gate 掉了——但那時 `rec.busy` 正是換把自己設的，於是換把剛啟動的 handle 永遠停在 `starting`。`904bc6d` 把這一步拆成獨立的 `_observe_handle`（不做 busy gate，由呼叫端負責轉移的擁有權），`_refresh_one` 只保留給 scheduler 端的觀察。
+
+我把 `904bc6d` 整個還原（兩個呼叫點都改回 `_refresh_one`）當作突變，**三個測試轉紅**：`test_quota_exhaustion_switches_to_the_next_subscription`、`test_busy_is_released_after_a_swap_allowing_another`、`test_swap_imports_then_continues`。這個修正本身沒有附測試（commit 只動 `core.py`），但既有的測試就釘得住它——作者說的三個正是實際轉紅的三個。判斷正確、範圍剛好（沒有順手把 `_observe_handle` 也放進鎖裡）。
+
+### 突變表（每一個都在副本裡改壞，跑該區的測試）
+
+| 突變 | 結果 |
+|---|---|
+| `close` 不設 `busy` | RED（`test_close_held_in_stop_prevents_swap_and_leaves_no_live_process`） |
+| `904bc6d` 還原成 `_refresh_one` | RED（3 個） |
+| H2 還原成「import 失敗不停下」 | RED（`test_swap_import_failure_stops_and_waits_for_the_retry`、`test_import_retry_success_hangs_the_auto_reopen_job`） |
+| `tick()` 不呼叫 `_retry_pending_imports` | RED（`test_import_retry_success_hangs_the_auto_reopen_job`） |
+| M1 拿掉 `is_api_key` gate | RED（`test_subscription_ignores_auxiliary_signals`） |
+| M1 拿掉 `attempt >= max_retries` gate | RED（`test_transient_api_retry_does_not_mark_quota`） |
+| M2 `POST /message` 改回短逾時 | RED（`test_a_long_round_is_not_cut_by_the_short_http_timeout`） |
+| M2 `info.error`／非 2xx 只 log | RED（`test_info_error_marks_the_round_failed`、`test_non_2xx_marks_the_round_failed`） |
+| M3 遮所有 `env` 值 | RED（13 個） |
+| M4 拿掉 merge-in-job guard | RED（`test_open_with_a_merge_session_is_refused_in_a_job`、`test_job_open_with_a_merge_session_is_a_400`） |
+| M4 `import_timeout` 改回 60 | RED（`test_session_store_timeouts_follow_close_timeout`） |
+| M5 改回啟動當下的快照 | RED（`test_stderr_tail_sees_lines_printed_after_start`） |
+| L1 拿掉 `poke` 的例外轉換 | RED（`test_poke_when_the_driver_send_fails_is_409_and_exits`） |
+| L3 還原成讀未賦值的 `proc` | RED（`test_sigterm_in_the_window_before_popen_is_forwarded_not_unbound`） |
+
+**十一項、十四個突變，全部轉紅。** 這一輪的測試是真的釘住修正，不是寫來裝飾的。
+
+### 新的競態、死鎖、逾時
+
+沒找到會擋 3.4 的。具體查過：
+
+- **close 現在整段持有 `busy`**（含 `new` 模式的 import → stop → import）。這段時間裡 `_refresh_one` 與 `_retry_pending_imports` 都會跳過這個 agent，正是 D5/D2 要的。我用假的 store 把 close 的 import 閘住、讓 scheduler 連續 tick，結果：`state: exited`、`/jobs` 空、沒有任何 handle 活著。close 結束後 `busy` 一定釋放（`finally`），不會卡住後續的換把。
+- **close 撞上正在跑的 import retry**：close 看到 `busy` 會記 `closing` 交給那條執行緒，那條執行緒的 `finally` 檢查 `rec.closing and rec.state == WAITING_QUOTA` 再 `_set_exited`。實測兩種交錯（close 在 import 之前到、close 在 import 中間到）都是 `exited`、沒有 job、沒有活著的 handle。
+- **鎖的取得次序**：`self._lock` 是 `RLock`，`self._cond` 建在它上面。close 的 `finally` 是在鎖外呼叫的，不會跟 `_cond.wait` 死鎖。沒有新增的跨鎖取得。
+- **逾時**：這輪把 `import_timeout` 綁到 `close_timeout`（預設 30 秒），D2 的公式（一般 35 秒、`new` 65 秒）因此成立。opencode 的 `message_timeout` 上限 1 小時只在背景執行緒裡，不是 shutdown 路徑，不影響 kill timeout。沒有逾時被拉長。
+
+## 3.4 要順手看（不擋）
+
+**A（Low，這輪 M2 帶進來的）：`_send_round` 沒有 `finally`，非 `OpenCodeDriverError` 會讓 agent 永遠 `running`。**
+`_request` 只接 `HTTPError`、`URLError`、`OSError`、`ValueError`。`http.client.IncompleteRead`（server 在回應中途斷線——這正是 opencode 當掉時最常見的形狀）繼承的是 `HTTPException`，不是 `OSError`，所以會穿出 `_request`、穿出 `_send_round`。`handle.sending` 留在 `True`，`state()` 就永遠回 `running`：scheduler 不會換把、也不會標 exited。實測（`/tmp/s31e`，把 `_request` 換成拋 `IncompleteRead`）：`wait_state(IDLE)` 等滿 5 秒仍是 `running`。
+**修法**：`_send_round` 的兩個出口（成功與 `_fail_round`）改成 `try/finally: with handle.lock: handle.sending = False`。三分鐘的事。3.4 實機如果 opencode 當過，症狀會是「狀態卡在 running 不換把」，對得上就順手修。
+
+**B（Low，既有）：兩個 send 交錯時，先完成的那個會把 `sending` 清掉，回合仍在跑但狀態報 `idle`。**
+`send()` 只是 `handle.sending = True` 再開一個執行緒，沒有計數。連續兩次 send（第一回合 1 秒、第二回合 1 秒），t=1.3 秒時第一個已完成、第二個還在跑，`state()` 回 `idle`。3.4 連續 poke 兩次就會碰到。修法同上：把 `sending` 改成計數器，或記住「目前有幾個回合在跑」。
+
+**C（Low，既有）：`interrupt` 之後被中止的回合會把整個 agent 標成 `exited`。**
+`interrupt` 先把 `sending` 清成 `False` 並設 `IDLE`，但背景執行緒還在；那一回合之後回來的錯誤（中止就是中止，server 會回 error）會走 `_fail_round`，把狀態寫成 `exited`——即使 opencode 行程還活著。實測：`driver.interrupt()` 之後那一回合以 `info.error: aborted by user` 結束，`state()` 變 `exited`。3.4 用「poke + interrupt」停一個長回合時會看到。修法：`_fail_round` 在 `handle.stopped` 或是「已被 interrupt」時不要升成 `exited`。
+
+**D（Low，既有）：close 完成後才回來的 poke 會把記錄從 `exited` 寫回 `running`。**
+`poke` 在鎖外送完之後無條件寫 `rec.state = STATE_RUNNING`。我在 3.4 之前就能重現：poke 的 `send` 被閘住、close 跑完（`exited`）、poke 放行——記錄變 `running`，但 handle 都是 stopped（沒有行程復活）。這在 `5429d3c` 就存在，**不是這輪引入的**，H1 也沒有讓它更糟。修法：poke 寫回前檢查 `rec.state != STATE_EXITED`（或在鎖內確認 handle 沒換過）。
+
+**E（Low，既有）：`_run_periodic_imports` 不看 `busy`，可以和 close 自己的 import 併行。**
+到期的 periodic import 和 close 的 `import → stop → import` 在不同執行緒（scheduler 與 HTTP），`import_external` 對同一個 agent 同時被呼叫兩次。實測 peak = 2。也存在於 H1 之前。影響小（同一個 external id，agora 端是原地更新），但兩個 agora 行程同時 import 同一個 Session 不是設計想要的。3.4 用 `new` 模式時順手觀察。
+
+## 實作者的其他判斷
+
+| # | 判斷 | 結論 |
+|---|---|---|
+| 1 | **opencode 一輪失敗就標 `EXITED` 但不殺行程** | **可以接受，但要在 3.4 觀察。** 這是 D6 的指定語意（失敗要寫進 `exit.reason`，不是只 log），而且不殺行程是安全的——`stop` 之後仍然會收。但它跟 A、C 是同一個家族：任何一次回合失敗都會讓 sidecar 認為 agent 死了，之後 poke 得到 409，控制器只能 close 再 open。3.4 連續跑長回合時看一下失败的頻率；如果 provider 偶發 5xx 會誤殺，就把它降成「記 `last_error`、留在 idle」。這是 3.4 的量測題，不是現在的裁定。 |
+| 2 | **`message_timeout` 上限 1 小時** | **可以接受。** 這個逾時只在背景執行緒的 `POST /session/{id}/message` 上，不是 shutdown 路徑，不影響 supervisor 的 kill timeout（D2 的公式不變）。實作上還多了一層保險：`min(message_timeout, MESSAGE_TIMEOUT)`，而且 `Config` 沒有這個欄位、連 wiring 都沒有傳，**所以外部改不了上限**——這正是 design 要的「MUST 是長逾時（上限 1 小時）」。1 小時對 coding agent 的最壞回合夠用。 |
+| 3 | **merge 在 `core.add_job` 拒絕（`merge_not_allowed_in_job`）** | **可以接受，而且位置對。** 放在 `add_job`（不是 HTTP 層）代表三種外部控制形式（`at`、`every`、`every+until`）與直接呼叫 `core` 的路徑都經過同一個門。我另外驗了三件事都擋住（`every` 形式、沒有 `at` 也沒有 `every` 的 job、以及 HTTP 層走的就是 `core.add_job`），而**同樣的內容用 `POST /agents` 直接呼叫仍然可行**（我實跑了一次真的 merge，`session_id` 有值）。15 分鐘的 summarizer 不會卡住 scheduler 執行緒。 |
+
+## 規格面的修正（我做掉的）
+
+實作者指出的 spec 矛盾是真的，我改在本 worktree：
+
+1. **`specs/sidecar/spec.md` 的「new 模式的換把與關閉先 import」**：末句「import 失敗時換把 MUST NOT stop agent」與 40 行後新增的「new 模式換把前 import 失敗」（MUST stop）直接矛盾。已把舊 Requirement 改成只規定 **close** 路徑（close 的 import 失敗仍然停下、`exit.reason` 說明沒有寫回、close 不重試），並把矛盾的 Scenario「import 失敗時不停下」換成「close 前的 import 失敗仍然停下」。換把的失敗語意交給新的那條 Requirement，兩邊不再打架。換把成功路徑與 close 成功路徑的兩個 Scenario 一字未動。
+2. **`design.md` 的 agora 路徑那句**：原本寫「從原始碼目錄開發時要用 `command` 設定指定 agora 的路徑」，但 `Config` 沒有這個選項（我查過 `config.py`：只有 `port`、`agents`、`close_timeout` 等，沒有 agora 路徑），`child_env` 也不傳 `PYTHONPATH`。已改成和實作一致：先用 `uv tool install` 從本 repo 裝；直接跑原始碼時要讓同一個 python 找得到 `agora` 套件（`uv run` 的同步 venv 或 `pip install -e .`）。這也和實作者寫的 `docs/sidecar.md` 第 7 節一致。
+3. `tasks.md` 沒有動。`openspec validate sidecar-v0 --strict` 過。
+
+## 建議順序
+
+1. **可以進 3.4 PM 真機。**
+2. 3.4 順手確認 A（opencode 當掉時狀態卡 `running`）、B（連續 poke 的 idle 誤報）、C（interrupt 後誤標 exited）——症狀對得上就修，都是 `drivers/opencode.py` 裡幾行。
+3. D、E 是既有的，可以排到 3.4 之後。

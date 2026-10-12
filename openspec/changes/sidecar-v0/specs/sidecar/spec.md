@@ -306,7 +306,7 @@ sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`PO
 - **THEN** 新掛的 job 的 `at` 是現在加 `retry_interval`，不是過去的時刻，也不是每個 tick 重掛
 
 ### Requirement: new 模式的換把與關閉先 import
-`new` 模式（沒有 agora 行程）的 agent 在 close 與換把時 MUST 先用 `agora import` 存進 agora（拿到 agora id，已有的就是原地更新），再停下（溫和），再 import 一次寫回最後的對話；換把接著 `continue` 那個 agora id。import 失敗時換把 MUST NOT stop agent。
+`new` 模式（沒有 agora 行程）的 agent 在 close 與換把時 MUST 先用 `agora import` 存進 agora（拿到 agora id，已有的就是原地更新），再停下（溫和），再 import 一次寫回最後的對話；換把接著 `continue` 那個 agora id。close 前的 import 失敗 MUST 仍然停下 agent，並在回應裡說明沒有寫回（`exit.reason`）；close 不重試。換把前的 import 失敗的處理由下一條 Requirement 規定。
 
 #### Scenario: new 模式換把先 import
 - **WHEN** t1 是 `new` 模式、`status.session` 還是 null，額度用完且有可用的下一把
@@ -316,9 +316,9 @@ sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`PO
 - **WHEN** 對 `new` 模式的 t1 `close`
 - **THEN** 先 import 再停下再 import；agora 上有這個 Session；`status` 是 exited
 
-#### Scenario: import 失敗時不停下
-- **WHEN** `new` 模式換把前的 import 失敗
-- **THEN** agent 沒有被 stop，仍在原本的狀態；掛一個 `now + retry_interval` 的重試 job，log 原因
+#### Scenario: close 前的 import 失敗仍然停下
+- **WHEN** 對 `new` 模式的 t1 `close`，而 import 失敗（agora 或網路）
+- **THEN** t1 仍然被停下、`status` 是 exited，`exit.reason` 說明沒有寫回；close 不重試，沒有留下活著的行程
 
 ### Requirement: 沒有 driver 時開不了 agent
 在 driver 與 session store 實作之前，`sidecar run` MUST 仍然啟動、`GET /agents` MUST 有回應（健康檢查過），但 `POST /agents` MUST 回 400 `unsupported agent kind`；`docs/sidecar.md` MUST 說明這一點。
