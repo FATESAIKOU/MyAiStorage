@@ -512,19 +512,41 @@ def _payload_format(payload: object) -> str:
     raise AgentError("opencode 的匯出檔認不出格式（沒有 location，也沒有 directory／slug）")
 
 
+def _message_count(payload: dict, fmt: str | None = None) -> int:
+    """The conversation's length: user/assistant rows only.
+
+    v2 writes one `idle` row after every exchange; it is a marker, not something
+    the session said, so it is not new content (M8) - `collect()` would otherwise
+    write back a session the user only opened, and `turns()` agrees with this
+    count. v1 has no idle rows, so all of its messages are conversation.
+    """
+    messages = _payload_messages(payload)
+    if (fmt or _payload_format(payload)) == "v2":
+        return sum(1 for m in messages if m.get("type") in ("user", "assistant"))
+    return len(messages)
+
+
 def _last_model(payload: dict) -> str | None:
     """The model the session used most recently.
 
-    opencode records the bare model id on assistant messages (`modelID`, with
-    `providerID` beside it); user messages carry a nested `model` object instead,
-    so the last assistant turn is the one that answers "which model was this".
-    A session with no assistant turn yet has none.
+    opencode records the bare model id on assistant messages: v1 has `modelID`
+    beside `providerID` (user messages carry a nested `model` object instead),
+    v2 has `model.id` on the row. The last assistant turn is the one that
+    answers "which model was this". A session with no assistant turn yet has none.
     """
+    fmt = _payload_format(payload)
     for message in reversed(_payload_messages(payload)):
-        info = message.get("info") or {}
-        if info.get("role") == "assistant":
+        if fmt == "v2":
+            if message.get("type") != "assistant":
+                continue
+            model = (message.get("model") or {}).get("id") \
+                if isinstance(message.get("model"), dict) else None
+        else:
+            info = message.get("info") or {}
+            if info.get("role") != "assistant":
+                continue
             model = info.get("modelID")
-            return model if isinstance(model, str) and model else None
+        return model if isinstance(model, str) and model else None
     return None
 
 
@@ -684,23 +706,30 @@ class OpencodeAgent:
 
         Returns (session id, messages landed). Messages *and* parts are compared:
         a colliding part id leaves the message count intact, so counting only
-        messages would wave through a session that quietly lost content.
+        messages would wave through a session that quietly lost content. A v2
+        payload has no parts layer - the per-content count belongs to step 2 (M2) -
+        and what comes back is counted the way `export().message_count` counts it
+        (user/assistant rows; `idle` is not conversation, M8).
         """
         session_id = str((payload.get("info") or {}).get("id") or "")
         if not session_id:
             raise AgentError("匯出檔的 info.id 不見了，無法決定新 session 的 id")
         messages = _payload_messages(payload)
+        fmt = _payload_format(payload)
+        count = _message_count(payload, fmt)
         parts = sum(len(m.get("parts") or []) for m in messages)
         self._import(payload, cwd)
-        landed = _payload_messages(self._read(self._export_bytes(session_id, cwd=cwd)))
+        landed_payload = self._read(self._export_bytes(session_id, cwd=cwd))
+        landed = _payload_messages(landed_payload)
+        landed_count = _message_count(landed_payload, fmt)
         landed_parts = sum(len(m.get("parts") or []) for m in landed)
-        if len(landed) != len(messages) or landed_parts != parts:
+        if len(landed) != len(messages) or landed_count != count or landed_parts != parts:
             tail = self._discard(session_id, cwd)
             raise AgentError(
-                f"opencode import 後數量不對（來源 {len(messages)} 則／{parts} 個 part，"
-                f"匯入後 {len(landed)} 則／{landed_parts} 個），{tail}；"
+                f"opencode import 後數量不對（來源 {len(messages)} 則／{count} 句／{parts} 個 part，"
+                f"匯入後 {len(landed)} 則／{landed_count} 句／{landed_parts} 個），{tail}；"
                 "多半是 id 撞到 opencode 裡既有的 Session")
-        return session_id, len(landed)
+        return session_id, landed_count
 
     def _read(self, raw: bytes) -> dict:
         try:
@@ -726,9 +755,14 @@ class OpencodeAgent:
                 raise
             raw = self._export_bytes(session_id, cwd=Path(elsewhere))
         payload = self._read(raw)
+        fmt = _payload_format(payload)
         info = payload.get("info") or {}
-        directory = info.get("directory")
-        version = info.get("version")   # the version that produced *this* session
+        if fmt == "v2":
+            location = info.get("location")
+            directory = location.get("directory") if isinstance(location, dict) else None
+        else:
+            directory = info.get("directory")
+        version = info.get("version")   # v1 only: v2 does not record one (it may be None)
         return Exported(
             session_id=str(info.get("id") or session_id),
             raw=raw,
@@ -736,7 +770,7 @@ class OpencodeAgent:
             title=info.get("title") if isinstance(info.get("title"), str) else None,
             created_at=_iso(_created_ms(info)),
             agent_version=str(version) if version else None,
-            message_count=len(_payload_messages(payload)),
+            message_count=_message_count(payload, fmt),
             model=_last_model(payload),
         )
 
