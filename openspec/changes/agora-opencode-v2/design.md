@@ -80,8 +80,8 @@ opencode 2.0.26 的實測（MyLinuxPool spike 1.2 報告 §A～§H；issue #51 �
 - v2 的 `turns()`／`_lines_of()` **跟第 1 步一起進來**（H1）：user 列的 `text` → 一行；assistant 列的 `content` 內每個 text → 一行、每個 tool → 一行 `[tool] <name> <input>`；`idle` 列略過；`files`（附件）不算對話。工具 content 的實際形狀以第 1 步的真 fixture 複驗（報告 §G-1）。
 - 第 1 步的驗收測試 MUST 包含「匯入 v2 fixture 後，body 有 user／assistant 段落」；否則第 1 步就是把大聲的失敗換成靜默的空閱讀版（H1）。
 - 既有規則不變：不輸出 reasoning／step／tool 結果；不認得的型別 `[skip <type>]`；`native(turns(raw))` 的 round trip 要成立（native 在第 2 步，round trip 也在第 2 步）。
-- **計數定義**（審查 M8；第 2 步落地）：`message_count` 是「user／assistant 列數」，與 `turns()` 一致；`idle` 不是對話、不算新內容。`collect()` 的「沒有新內容」比較、`native()` → import → export 的列數比對都用這個定義（單元案例在第 2 步；真 opencode 至少驗一次）。
-- **v2 的「part」定義**（審查 M2；第 2 步落地）：回讀驗證第 2 層改成「該格式可數的內容項目數」——v1 是 `parts` 數、v2 是 assistant 列 `content` 的項目數；該格式沒有這一層時只比訊息數。spec 的句子照這個說法改（見 delta spec），不再寫死「part 數」。
+- **計數定義**（審查 M8／N4）：`message_count` 是「user／assistant 列數」，與 `turns()` 一致；`idle` 不是對話、不算新內容——這半（一行 `len`）跟 `export()` 一起在**第 1 步**落地，第 1 步的 `_import_verified` 先只比訊息數（與下面「沒有這一層時只比訊息數」一致）；單元與真 opencode 的案例在第 2 步補。`collect()` 的「沒有新內容」比較、`native()` → import → export 的列數比對都用這個定義。
+- **v2 的「part」定義**（審查 M2；第 2 步落地）：回讀驗證第 2 層改成「該格式可數的內容項目數」——v1 是 `parts` 數、v2 是 assistant 列 `content` 的項目數；該格式沒有這一層時只比訊息數（第 1 步就是這個情形）。spec 的句子照這個說法改（見 delta spec），不再寫死「part 數」。
 
 ### 6. 互動模式的 DB
 
@@ -101,7 +101,7 @@ opencode 2.0.26 的實測（MyLinuxPool spike 1.2 報告 §A～§H；issue #51 �
 - 情況：opencode 2.x 之前匯入的 Session，raw 是 v1；opencode 2.x 的 `session import` 拒收（實測）。
 - **決定**：同 agent 接續／fork 在開 agent 前拒絕（發生在 `start_native`／`append_native`，那時 pending 還沒寫，所以原 Session 與 raw 不動）。
 - **訊息要誠實**（審查 M5）：重新匯入**不一定**原地更新——被 merge／continue 分支過的 Session 會走「保留舊版、另開分支」；來源不在本機時連重新匯入都做不到，只能跨 agent 接續。訊息 MUST 這樣說，不誤導使用者。
-- **原地更新加「turns 數不能變少」的檢查**（M5；第 2 步，動 `cli._import_one`）：重新匯入一個既有 Session 之前，比對新匯出與 store 裡那份的 user／assistant turn 數；新的比較少（遷移丟東西等）就不覆蓋——拒絕並說明差多少（不靜默覆蓋）。「不變」與「變多」照舊更新；分支過的情形照現行規則另存。spec 的 delta 在 `batch-commands`。
+- **原地更新加「有內容的 turn 不能變少」的檢查**（M5／N1；第 2 步，動 `cli._import_one`）：重新匯入一個既有 Session 之前，比對新匯出與 store 裡那份的 user／assistant turn 數，**只算至少有一行內容的 turn**（legit 的 undo／revert／rewind 讓空 turn 消失，不算變少）；新的比較少（遷移丟東西等）就不覆蓋——拒絕並**寫明下一步**（改用跨 agent 接續，或先讓這個 Session 分支再重新匯入、依分支規則另存），不能只說少了多少。「不變」與「變多」照舊更新；分支過的情形照現行規則另存。spec 的 delta 在 `batch-commands`。
 - **不採「自動重新 export 本機那份」**：本機 DB 的那份不一定和 store 裡的 raw 是同一份（跨機器 import 的 raw 在本機可能沒有、或比較舊），靜默換掉內容比拒絕更糟。
 - **不採 v1→v2 轉換**（本 change）：工具呼叫在 v2 `content` 的形狀還沒複驗（§G-1），現在寫轉換器等於用猜的。留下來當後續單（Open Questions）。
 - 代價：舊 Session 在重新匯入前不能同 agent 接續；這是明確、可回復的限制，重新匯入會用 v2 的匯出覆蓋 store 裡的 v1 raw（列在「本人未指示、作者提議」）。
@@ -148,7 +148,8 @@ opencode 2.0.26 的實測（MyLinuxPool spike 1.2 報告 §A～§H；issue #51 �
 - server 上下文一律 `--standalone`，`--server` 先不用；第 1 步量一次語法（Decisions 2；量的結果可能改形狀）。
 - v1 的**讀取**支援保留（嗅探），寫入只有 v2（Decisions 1）。
 - **第 1 步之後不再支援 opencode 1.x 的 CLI**：指令改用 `session export／import`，1.x 沒有這些子指令；嗅探只保住 payload 的讀取，沒有指令的 fallback；Linux worker 上的 opencode 版本未知（L7）。
-- 重新匯入會**用 v2 的匯出覆蓋 store 裡的 v1 raw**（原地更新前有「turns 數不能變少」的檢查；被分支過的 Session 另存，M5）。
+- 重新匯入會**用 v2 的匯出覆蓋 store 裡的 v1 raw**（原地更新前有「有內容的 turn 不能變少」的檢查；被分支過的 Session 另存，M5／N1）。
+- **「重新匯入不覆蓋更少對話」的檢查對所有 agent 生效**（寫在共用的 `cli._import_one`，claude 也走這條）：本人確認要不要限縮到 opencode（N1 (c)）。
 - `message_count` 的 idle 語意：只算 user／assistant 列，`idle` 不算（M8）。
 - conftest 的 opencode 護欄改成 v2 語法＋`--standalone`，失敗時大聲報錯（M5）。
 - 驗收與改壞驗證用**本機 fake upstream**，不用真模型；免費模型的路徑只在「不是為了驗 v2」時用（M6）。
@@ -162,7 +163,7 @@ opencode 2.0.26 的實測（MyLinuxPool spike 1.2 報告 §A～§H；issue #51 �
 ## Risks / Trade-offs
 
 - [v2 的欄位全集／工具形狀未知] → fake upstream＋fixture 先行＋逐欄探測；不確定就少改；失敗是明確的 `SchemaError` 而不是靜默。
-- [重新匯入的原地更新會覆蓋 v1 raw] → turns 數不能變少的檢查（第 2 步；spec 在 `batch-commands`）；被分支過的 Session 照現行規則另存；訊息誠實說明。
+- [重新匯入的原地更新會覆蓋 v1 raw] → 「有內容的 turn 不能變少」的檢查（第 2 步；spec 在 `batch-commands`；合法的 undo 不算變少）；被分支過的 Session 照現行規則另存；訊息誠實說明。
 - [managed 服務被叫到] → 全部呼叫經 `_server_args()`；測試斷言 argv；隔離環境先改埠；真 opencode 前後檢查服務沒被動。
 - [headless 的定期寫回期間 serve 還活著（未實測）] → 第 1 步量 `--server`；第 5 步驗收用 `--sync-period` > 0 真的做一次寫回。
 - [非 headless 的 TUI 路徑沒被測到] → 第 5 步的手動驗收（隔離環境＋運行中的服務）。
@@ -176,7 +177,7 @@ opencode 2.0.26 的實測（MyLinuxPool spike 1.2 報告 §A～§H；issue #51 �
 ## Migration Plan
 
 - **沒有 schema 變更、沒有資料遷移。** 部署就是換程式。
-- 使用者路徑：下次 `agora import` 同一個來源時，舊 Session 的 raw 會更新成 v2（原地更新有 turns 數的檢查；分支過的就另存）；要接續舊 Session 就重新匯入（訊息會誠實說明可能是新 Session、來源不在本機時只能跨 agent）。
+- 使用者路徑：下次 `agora import` 同一個來源時，舊 Session 的 raw 會更新成 v2（原地更新有「有內容的 turn 不能變少」的檢查；分支過的就另存）；要接續舊 Session 就重新匯入（訊息會誠實說明可能是新 Session、來源不在本機時只能跨 agent）。
 - 第 1 步之後不再支援 1.x 的 CLI（指令形態變了）。
 - 回退：純程式碼變更，回退 commit 即回到 v1 寫入路徑（但對 v2 安裝就是現在的壞法）。無狀態要清理。
 - 開工順序：tasks 1→2→5，第 3、4 步在第 1 步之後可以並行（M7）。
