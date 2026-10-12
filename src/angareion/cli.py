@@ -60,9 +60,9 @@ EXIT_TIMEOUT = 3
 # messages live on GitHub, so the help, the skill and the docs all say the
 # same thing: keep private information out of messages.
 _PRIVACY_REMINDER = (
-    "channel 的訊息存在 GitHub（channel 對應的 repo）上，AI 之間的對話無法完全避免被看見；"
-    "請不要在訊息裡放私人資訊。需要傳遞私人資訊時，請對方去參照 MyBrain"
-    "（給路徑或案件 id），不要把內容貼進訊息。"
+    "私人資訊提醒：channel 的訊息存在 GitHub（channel 對應的 repo）上，\n"
+    "AI 之間的對話無法完全避免被看見；請不要在訊息裡放私人資訊。\n"
+    "需要傳遞私人資訊時，請對方去參照 MyBrain（給路徑或案件 id），不要把內容貼進訊息。"
 )
 _PRIVACY_REMINDER_SHORT = "不要在訊息裡放私人資訊（改用 MyBrain 路徑或案件 id）。"
 
@@ -367,10 +367,11 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser for `angareion`."""
     parser = _Parser(
         prog="angareion",
-        description=(
-            "Angareion: leave and read messages on a channel (GitHub Issues or a fake backend).\n"
-            "私人資訊提醒：" + _PRIVACY_REMINDER
-        ),
+        description="Angareion: leave and read messages on a channel (GitHub Issues or a fake backend).",
+        # The reminder gets its own paragraph after the options; Raw... keeps
+        # the explicit line breaks instead of gluing it to the English text.
+        epilog=_PRIVACY_REMINDER,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
