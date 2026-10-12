@@ -22,7 +22,7 @@ import sys
 import time
 from typing import Any, Callable, Iterator, Protocol, Sequence
 
-from angareion.backend import ChannelNotFoundError
+from angareion.backend import BackendRef, ChannelNotFoundError, Entity
 from angareion.config import CONFIG_PULL_INTERVAL_DEFAULT, ConfigError
 
 try:
@@ -91,25 +91,6 @@ class ChannelRef:
 
     name: str
     backend: str
-    issue: int
-
-
-@dataclass(frozen=True)
-class BackendRef:
-    """One backends.json entry."""
-
-    name: str
-    type: str
-    repo: str
-
-
-@dataclass(frozen=True)
-class Entity:
-    """A resolved channel: the backend entity a command may act on."""
-
-    channel: str
-    backend: str
-    repo: str
     issue: int
 
 

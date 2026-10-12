@@ -13,7 +13,7 @@
 
 ## 3. 後端與指令
 
-- [ ] 3.1 `ChannelBackend` 去 members；GitHub 後端經兩個設定檔解析（查無→`ChannelNotFoundError`）；實體開（create）與關（delete，不刪）的動作；不再寫／讀 members（舊殘留忽略）
+- [x] 3.1 `ChannelBackend` 去 members；GitHub 後端經兩個設定檔解析（查無→`ChannelNotFoundError`）；實體開（create）與關（delete，不刪）的動作；不再寫／讀 members（舊殘留忽略）
 - [ ] 3.2 `channel create` 三步：後端開實體 → 用戶端驗實體（存在且標題等於 channel 名；不符 exit 2）→ 送註冊（在註冊簿留一行 JSON 留言；短間隔重試 2 次、最多 3 次嘗試）→ 輪詢 fetch 等對應出現（上限 2 分鐘）；同名 exit 1、開失敗 exit 2；`--backend`（多個 backend 時必給）（design §6）
 - [ ] 3.3 `channel delete`：找對應 → 關實體（404 視同已關）→ 在註冊簿留 unregister 留言（design §7）
 - [ ] 3.4 留言送出（註冊簿；`Issues: Read and write`）與假的註冊端（測試用）

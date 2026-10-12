@@ -13,7 +13,30 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from angareion.backend import ChannelNotFoundError, Entity
 from angareion.channel_config import GitResult
+
+
+def entity(channel: str = "general", backend: str = "github-main", repo: str = "owner/repo", issue: int = 1) -> Entity:
+    """A resolved channel entity for tests."""
+    return Entity(channel=channel, backend=backend, repo=repo, issue=issue)
+
+
+class StaticResolver:
+    """An EntityResolver over a fixed mapping; the store's behaviour without git."""
+
+    def __init__(self, entities: dict[str, Entity] | list[Entity]):
+        if isinstance(entities, list):
+            entities = {item.channel: item for item in entities}
+        self._entities = dict(entities)
+
+    def entity_for(self, channel: str) -> Entity:
+        if channel not in self._entities:
+            raise ChannelNotFoundError(f"channel '{channel}' does not exist")
+        return self._entities[channel]
+
+    def entities(self) -> list[Entity]:
+        return list(self._entities.values())
 
 
 def channels_json(channels: dict[str, tuple[str, int]]) -> str:
