@@ -135,6 +135,8 @@ class AgentRecord:
     closing: bool = False  # close arrived while starting; open finishes the stop (M1)
     new_mode: bool = False  # no agora process; periodic `agora import` (D5/3.5)
     next_import: float = 0.0  # when the next periodic import is due
+    external_session_id: str | None = None  # remembered for a pending import (H2)
+    import_pending: bool = False  # waiting-quota: the swap import is still owed
     pending: list[PendingPoke] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -343,10 +345,15 @@ class SidecarCore:
         with self._lock:
             if self._agents.get(rec.id) is not rec:
                 return
+            job_id = rec.reopen_job
             rec.state = STATE_EXITED
             rec.exit = {"code": None, "reason": reason}
             rec.reopen_at = None
             rec.reopen_job = None
+            rec.import_pending = False
+        if job_id:
+            # An exited agent must not be reopened by a job hung during the race.
+            self._jobs.delete(job_id)
 
     def _stop_handle(self, handle: Any, driver: Any) -> DriverState:
         if handle is None or driver is None:
@@ -530,6 +537,7 @@ class SidecarCore:
         now = self._now() if now is None else now
         self.refresh_states(now)
         self._run_periodic_imports(now)
+        self._retry_pending_imports(now)
         for job in self._jobs.due(now):
             if self._jobs.get(job.id) is not job:
                 continue  # deleted while we were looking
@@ -796,20 +804,27 @@ class SidecarCore:
         now: float,
         state: dict,
     ) -> None:
-        """A quota swap for `new` mode: import -> stop -> import -> continue (D5)."""
+        """A quota swap for `new` mode: import -> stop -> import -> continue (D5).
+
+        An import that fails does not keep the agent alive (review H2, D5): the
+        conversation stays in the agent's own session file, so the agent is
+        stopped and the scheduler retries the import every `retry_interval`;
+        only a successful import hangs the normal auto-reopen job.
+        """
         external = self._external_session_id(rec)
+        import_failed: Exception | None = None
         if external is not None:
+            with self._lock:
+                rec.external_session_id = external
             try:
                 agora_id = self._import_new_mode(rec, external)
                 with self._lock:
                     rec.session_id = agora_id
             except Exception as e:
-                # Import failed: keep the agent running, retry later (3.5).
+                import_failed = e
                 logger.warning(
-                    "agent %s: import before the swap failed (%s); not stopping", rec.id, e
+                    "agent %s: import before the swap failed (%s); stopping anyway", rec.id, e
                 )
-                self._schedule_swap_retry(rec, now, e)
-                return
         if self._closing_requested(rec):
             self._stop_and_exit(rec)
             state["stopped"] = True
@@ -819,11 +834,17 @@ class SidecarCore:
         state["stopped"] = True
         with self._lock:
             self._clear_pending(rec)
-        if external is not None:
+        if external is not None and import_failed is None:
             try:
                 self._import_new_mode(rec, external)  # write back the final words
             except Exception as e:
+                import_failed = e
                 logger.warning("agent %s: final import before continue failed: %s", rec.id, e)
+        if import_failed is not None:
+            # D5/H2: the agent is stopped; the scheduler retries the import and
+            # only its success hangs the auto-reopen job.
+            self._wait_import_retry(rec, now)
+            return
 
         if picked is None:
             if unreachable is not None:
@@ -1078,38 +1099,84 @@ class SidecarCore:
             external_id=external, agent=rec.agent, tag=f"sidecar:{rec.id}"
         )
 
-    def _schedule_swap_retry(self, rec: AgentRecord, now: float, reason: Exception) -> None:
-        """An import failure before a swap: keep the agent, retry later (3.5)."""
+    def _retry_pending_imports(self, now: float) -> None:
+        """`new`-mode agents whose swap import failed: retry it (D5/H2).
+
+        The agent is already stopped and waiting-quota; the conversation is
+        still in the agent's own session file.  Every `retry_interval` the
+        scheduler tries the import again; its first success hangs the normal
+        auto-reopen job (reopen_at holds the next retry until then).
+        """
         with self._lock:
-            if self._agents.get(rec.id) is not rec or rec.session_id is None or rec.reopen_job:
-                if rec.session_id is None:
-                    logger.warning(
-                        "agent %s: cannot schedule the swap retry yet (%s); "
-                        "no agora id has been imported", rec.id, reason,
-                    )
+            due = [
+                rec for rec in self._agents.values()
+                if rec.import_pending
+                and rec.state == STATE_WAITING_QUOTA
+                and rec.reopen_at is not None
+                and now >= rec.reopen_at
+            ]
+        for rec in due:
+            with self._lock:
+                if rec.busy:
+                    continue  # a transition (e.g. close) owns it
+                rec.busy = True
+            try:
+                self._retry_import_one(rec, now)
+            except Exception:
+                logger.exception("agent %s: the import retry failed", rec.id)
+            finally:
+                with self._lock:
+                    rec.busy = False
+                    closed = rec.closing and rec.state == STATE_WAITING_QUOTA
+                if closed:
+                    self._set_exited(rec)
+
+    def _retry_import_one(self, rec: AgentRecord, now: float) -> None:
+        external = rec.external_session_id
+        if external is None:
+            return  # nothing to import; the controller decides
+        try:
+            agora_id = self._import_new_mode(rec, external)
+        except Exception as e:
+            logger.warning("agent %s: import retry failed: %s", rec.id, e)
+            with self._lock:
+                if self._agents.get(rec.id) is rec:
+                    rec.reopen_at = now + self._retry_interval
+            return
+        with self._lock:
+            if self._agents.get(rec.id) is not rec:
                 return
-            session_id = rec.session_id
-        job = self._jobs.add(
-            "open",
-            {
-                "id": rec.id,
-                "agent": rec.agent,
-                "workdir": rec.workdir,
-                "session": {"mode": "continue", "from": session_id},
-            },
-            at=now + self._retry_interval,
-            auto=True,
-            now=now,
-        )
+            rec.session_id = agora_id
+            rec.import_pending = False
+        # The import succeeded: hang the normal auto-reopen job (D4).
+        self._schedule_reopen(rec, now)
+
+    def _wait_import_retry(self, rec: AgentRecord, now: float) -> None:
+        """Waiting-quota until the scheduler imports the agent's session (H2)."""
         with self._lock:
-            if self._agents.get(rec.id) is rec:
-                rec.reopen_job = job.id
+            if self._agents.get(rec.id) is not rec:
+                return
+            if rec.closing:
+                rec.state = STATE_EXITED
+                rec.exit = {"code": None, "reason": "closed during a transition"}
+                rec.import_pending = False
+                rec.reopen_at = None
+                rec.reopen_job = None
+                return
+            rec.state = STATE_WAITING_QUOTA
+            rec.import_pending = True
+            rec.reopen_at = now + self._retry_interval
+            rec.reopen_job = None
+        logger.info(
+            "agent %s: waiting-quota until the next import retry in %gs",
+            rec.id, self._retry_interval,
+        )
 
     def _close_new_mode(
         self, rec: AgentRecord, driver: Any, handle: Any, *, waiting: bool
     ) -> AgentRecord:
         """close for `new` mode: import -> stop -> import (D5/3.5)."""
-        external = self._external_session_id(rec)
+        external = rec.external_session_id or self._external_session_id(rec)
         note: str | None = None
         if external is not None:
             try:
@@ -1133,6 +1200,7 @@ class SidecarCore:
             rec.state = STATE_EXITED
             rec.exit = {"code": final.code, "reason": note or final.reason or "closed"}
             rec.new_mode = False
+            rec.import_pending = False
             rec.reopen_at = None
             rec.reopen_job = None
         return rec

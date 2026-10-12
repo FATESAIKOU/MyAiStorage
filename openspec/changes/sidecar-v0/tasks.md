@@ -47,7 +47,7 @@
   - [x] 3.7.4 M5：AgoraProcess 持有 pump deque 或 callable 取最新末幾行
   - [x] 3.7.5 L1：poke 時 driver 例外轉 409 agent_not_running 並標 exited
   - [x] 3.7.6 L3：agora 3.3 SIGTERM handler 在 Popen 前抵達記旗標，Popen 後轉送
-  - [ ] 3.7.7 H2：new 模式換把前 import 失敗也 stop、標 waiting-quota、scheduler 重試 import 後掛 job
+  - [x] 3.7.7 H2：new 模式換把前 import 失敗也 stop、標 waiting-quota、scheduler 重試 import 後掛 job
   - [ ] 3.7.8 M2：OpenCodeDriver 長逾時、狀態以背景送出在跑為準、錯誤寫進 exit.reason
   - [ ] 3.7.9 M4：import 逾時 ≤ close_timeout、job open 禁 merge、docs/sidecar.md 修正公式與 L2/L4
 

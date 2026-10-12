@@ -136,26 +136,85 @@ def test_close_without_an_agent_session_id_just_stops(tmp_path):
     assert rec.state == STATE_EXITED
 
 
-def test_swap_import_failure_keeps_the_agent_and_retries(tmp_path):
-    core, driver, store, _source, clock, workdir = rig(tmp_path, retry_interval=300.0)
+def test_swap_import_failure_stops_and_waits_for_the_retry(tmp_path):
+    """H2 spec `import 失敗後停下並重試`: stop, waiting-quota, one attempt only."""
+    core, driver, store, source, clock, workdir = rig(tmp_path, retry_interval=300.0)
     handle = open_new(core, driver, workdir)
     handle.agent_session_id = EXTERNAL
     clock.advance(60)
     core.tick()  # a periodic import gives us an agora id first
     assert core.get("t1").session_id == "agora:imported-1"
 
-    store.fail_import = SidecarError("agora is not reachable")
+    store.fail_import_every_time = SidecarError("agora is not reachable")
     driver.force_state(handle, "quota_exhausted", window="5h", resets_at=iso(clock.t + 60))
     core.tick()
 
-    assert driver.stop_calls == []  # MUST NOT stop on an import failure
+    assert driver.stop_calls == [(handle, True, 30.0)]  # stopped anyway (H2, D5)
     rec = core.get("t1")
-    assert rec.state in (STATE_RUNNING, STATE_IDLE)
+    assert rec.state == STATE_WAITING_QUOTA
     assert rec.new_mode is True
+    retry_at = clock.t + 300.0  # the next import retry
+    assert rec.reopen_at == retry_at
+    assert core.list_jobs() == []  # no reopen job until the import succeeds
+    cooldowns, lists, imports = len(source.cooldowns), source.lists, len(store.imports)
+    assert cooldowns == 1 and imports == 1  # one swap attempt, one failed import
+
+    for _ in range(5):  # five refreshes inside retry_interval: nothing repeats
+        clock.advance(1)
+        core.refresh_states()
+    assert len(source.cooldowns) == cooldowns
+    assert source.lists == lists
+    assert len(store.imports) == imports
+    assert core.get("t1").reopen_at == retry_at  # untouched
+    assert core.list_jobs() == []
+
+
+def test_import_retry_success_hangs_the_auto_reopen_job(tmp_path):
+    """H2 spec `重試 import 成功後掛 job`: continue the imported id, computed lift."""
+    core, driver, store, source, clock, workdir = rig(tmp_path, retry_interval=300.0)
+    source.add(F.claude_subscription(  # the only other candidate is cooling too
+        "claude-company", key="key-company", priority=20,
+        available=False, cooldown={"5h": iso(clock.t + 3600)},
+    ))
+    handle = open_new(core, driver, workdir)
+    handle.agent_session_id = EXTERNAL
+    store.fail_import_every_time = SidecarError("agora is down")
+    driver.force_state(handle, "quota_exhausted", window="5h",
+                       resets_at=iso(clock.t + 1800))
+    core.tick()
+
+    rec = core.get("t1")
+    assert rec.state == STATE_WAITING_QUOTA
+    assert rec.session_id is None  # the import really failed
+    assert core.list_jobs() == []
+
+    store.fail_import_every_time = None  # agora is back
+    clock.advance(300)
+    core.tick()  # the scheduler retries the import
+
+    rec = core.get("t1")
+    assert rec.state == STATE_WAITING_QUOTA  # the quota window is still cooling
+    assert rec.session_id == "agora:imported-1"  # status.session from the retry
     jobs = core.list_jobs()
     assert len(jobs) == 1 and jobs[0].auto is True
     assert jobs[0].args["session"] == {"mode": "continue", "from": "agora:imported-1"}
-    assert jobs[0].next_run_at == clock.t + 300.0
+    assert jobs[0].next_run_at == clock.t + 1500  # the computed lift (t0 + 1800)
+    assert len(source.cooldowns) == 1  # no second swap happened
+
+
+def test_swap_without_an_external_session_id_stops_with_no_job(tmp_path):
+    """H2 spec `還沒跑過任何一輪`: stop, waiting-quota, nothing to reopen on."""
+    core, driver, store, _source, clock, workdir = rig(tmp_path)
+    handle = open_new(core, driver, workdir)  # no events, no external id
+    driver.force_state(handle, "quota_exhausted", window="5h", resets_at=iso(clock.t + 60))
+    core.tick()
+
+    rec = core.get("t1")
+    assert rec.state == STATE_WAITING_QUOTA
+    assert driver.stop_calls == [(handle, True, 30.0)]
+    assert rec.reopen_at is None  # no agora id to continue
+    assert core.list_jobs() == []
+    assert store.imports == []  # nothing was imported
 
 
 def test_close_import_failure_still_closes_and_says_no_write_back(tmp_path):

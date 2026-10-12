@@ -158,7 +158,8 @@ class FakeSessionStore:
         self.starts: list[dict[str, Any]] = []
         self.imports: list[dict[str, Any]] = []
         self.fail_start: Exception | None = None  # raise from start(), for M3
-        self.fail_import: Exception | None = None  # raise from import_external(), for 3.5
+        self.fail_import: Exception | None = None  # raise once from import_external(), for 3.5
+        self.fail_import_every_time: Exception | None = None  # raise from every import (H2)
         self.start_gate: threading.Event | None = None  # block inside start(), for N1
         self.start_entered = threading.Event()
         self._counter = 0
@@ -168,6 +169,8 @@ class FakeSessionStore:
         if self.fail_import is not None:
             error, self.fail_import = self.fail_import, None
             raise error
+        if self.fail_import_every_time is not None:
+            raise self.fail_import_every_time
         self.imports.append({"external_id": external_id, "agent": agent, "tag": tag})
         agora_id = self._imported_ids.setdefault(
             external_id, f"agora:imported-{len(self._imported_ids) + 1}"
