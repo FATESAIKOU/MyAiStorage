@@ -8,7 +8,7 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** agent 這一輪被打斷，接著收到那句話，停在提示處
 
 ### Requirement: 開啟
-`open` MUST 收：呼叫方給的 `id`（共通命名 `<repo 名>-<pm|arch|impl|test>[-<id>]`）、agent 種類、工作目錄（存在的絕對路徑，不存在 MUST 回 400，sidecar MUST NOT 建目錄）、接續的 agora session id（選填；給＝在上面接續，不給＝新開，實作是 design D5 的 `new` 路徑）。`open` MUST NOT 收 fork／merge 的入口（本人 2026-10-12 裁定：fork／merge 由外部先在 agora 做好 Session 再以 id 交進來；`SessionStore` 的 fork／merge 能力保留）。subscription 的 id 與第一則輸入 MUST 是選填（subscription 省略時，sidecar 依挑選規則自己挑一個現在能用的）。呼叫方指定的 subscription 在冷卻中時 MUST 照辦。`id` 對應的 agent 還在 starting／running／idle 時 MUST 拒絕；在 waiting-quota 或 exited 時 MUST 用同一個 id 重開，waiting-quota 的自動重開 job MUST 一併刪掉。sidecar MUST 自己向 subscription 來源取得詳細資料（呼叫方不傳 key），把憑證與環境變數當 `launch` 的參數傳進去；這些值 MUST NOT 出現在命令列、log 或任何檔案。開出來的 Session MUST 在 agora 標頭的 tags 附加 `sidecar:<id>`，原有的 tags MUST NOT 被取代。第一則輸入 MUST 排進該 agent 的佇列（等它起來再送），MUST NOT 因為它而讓 open 失敗；省略 subscription 而且沒有任何能用的候選時 MUST 回 409 `no_subscription`。
+`open` MUST 收：呼叫方給的 `id`（共通命名 `<repo 名>-<pm|arch|impl|test>[-<id>]` 是慣例；sidecar MUST NOT 驗證或改寫格式，只做基本字元／長度檢查）、agent 種類、工作目錄（存在的絕對路徑，不存在 MUST 回 400，sidecar MUST NOT 建目錄）、接續的 agora session id（選填；給＝在上面接續，不給＝新開，實作是 design D5 的 `new` 路徑）。`open` MUST NOT 收 fork／merge 的入口（本人 2026-10-12 裁定：fork／merge 由外部先在 agora 做好 Session 再以 id 交進來；`SessionStore` 的 fork／merge 能力保留）。subscription 的 id 與第一則輸入 MUST 是選填（subscription 省略時，sidecar 依挑選規則自己挑一個現在能用的）。呼叫方指定的 subscription 在冷卻中時 MUST 照辦。`id` 對應的 agent 還在 starting／running／idle 時 MUST 拒絕；在 waiting-quota 或 exited 時 MUST 用同一個 id 重開，waiting-quota 的自動重開 job MUST 一併刪掉。sidecar MUST 自己向 subscription 來源取得詳細資料（呼叫方不傳 key），把憑證與環境變數當 `launch` 的參數傳進去；這些值 MUST NOT 出現在命令列、log 或任何檔案。開出來的 Session MUST 在 agora 標頭的 tags 附加 `sidecar:<id>`，原有的 tags MUST NOT 被取代。第一則輸入 MUST 排進該 agent 的佇列（等它起來再送），MUST NOT 因為它而讓 open 失敗；省略 subscription 而且沒有任何能用的候選時 MUST 回 409 `no_subscription`。
 
 #### Scenario: 給 agora id 就接續
 - **WHEN** `open`（id=MyLinuxPool-impl-2、claude-code、session=agora:A、第一則輸入「讀 channel X」）
@@ -27,12 +27,16 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** 被拒絕（HTTP 409），什麼都沒開
 
 #### Scenario: 重開已結束的 id
-- **WHEN** t1 已經 exited，再 `open` id=t1（接續它的 Session）
-- **THEN** t1 重新開起來，接著同一個 Session
+- **WHEN** t1 已經 exited；控制者從 `GET /agents`（或先前的紀錄）拿 t1 的 `session`，再 `open` id=t1、session=那個 id
+- **THEN** t1 重新開起來，接著同一個 Session；`sidecar:t1` 的 tag 又附加一次（重複值無害，查詢以集合看待）
 
 #### Scenario: 重開 waiting-quota 的 id
-- **WHEN** t1 是 waiting-quota 而且有自動重開 job，控制者 `open` id=t1（接續）
+- **WHEN** t1 是 waiting-quota 而且有自動重開 job，控制者 `open` id=t1、session=從 `GET /agents` 取回的 id
 - **THEN** t1 重新開起來，自動重開的 job 從 `GET /jobs` 消失
+
+#### Scenario: 指定的 Session 已被別的行程接續
+- **WHEN** `open` 的 `session` 是正在被另一個行程接續的 Session（agora 的鎖）
+- **THEN** 回 409 `session_locked`，什麼都沒開
 
 #### Scenario: 省略 subscription
 - **WHEN** `open` 沒有給 subscription，而 `list` 裡 claude-personal（priority 10）與 claude-company（priority 20）都能用
@@ -55,15 +59,23 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** 回 400，什麼都沒開
 
 ### Requirement: 關閉
-`close` MUST 先溫和停下 agent（等閒了才退，不中途打斷），再讓 agora 把最後的對話寫回；溫和停不下來時，逾時後強制結束（立刻退）。退出 MUST 結束整個 agent 程序（claude／opencode 行程本身）。`close` 不存在的 id MUST 回 404。
+`close` MUST 依 design D6 分三段停下 agent：(1) 等 driver 回報 `idle`（不中途打斷），上限 `close_idle_wait`（預設 300 秒，可設定）；(2) 對 agora 行程送 SIGTERM、讓它寫回最後的對話，上限 `close_timeout`；(3) 逾時才 SIGKILL。sidecar 自己收到 SIGTERM（shutdown）時 MUST 跳過第一段、直接第二段。退出 MUST 結束整個 agent 程序（claude／opencode 行程本身）。`close` 不存在的 id MUST 回 404。
 
 #### Scenario: 關閉
 - **WHEN** 對 t1 `close`
 - **THEN** agent 結束；它最後的對話在 agora 的那個 Session 上；`status` 顯示 exited
 
-#### Scenario: 溫和停等閒、強制立刻退
-- **WHEN** 對正在跑一輪的 t1 溫和 `close`；逾時還沒退就強制結束
-- **THEN** 溫和停等手上這輪做完才退；強制結束立刻退；結束後 agent 行程不在了
+#### Scenario: close 時在忙：先等 idle
+- **WHEN** t1 正在跑一輪；對它 `close`，driver 在這一輪結束、回報 idle 之後才收到 SIGTERM
+- **THEN** SIGTERM 是在 idle 之後才送出（沒有中途打斷那一輪）；agora 寫回最後的對話；`status` 是 exited
+
+#### Scenario: 等閒逾時才 SIGTERM
+- **WHEN** t1 一直不回 idle、超過 `close_idle_wait`
+- **THEN** 照樣進入第二段（送 SIGTERM），不會無限等；逾時才 SIGKILL；結束後 agent 行程不在了
+
+#### Scenario: shutdown 不等閒
+- **WHEN** sidecar 收到 SIGTERM，t1 正在跑一輪
+- **THEN** 跳過等 idle、直接對 t1 送 SIGTERM（第二段）；之後才結束
 
 #### Scenario: 關閉不存在的 id
 - **WHEN** 對沒開過的 id `close`
@@ -123,7 +135,7 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** 它 listen 的位址是 127.0.0.1
 
 ### Requirement: 額度用完自動換把
-agent 回報額度用完時，sidecar MUST 向 subscription 來源登錄冷卻（只送 `until`；driver 拿不到恢復時間時報「現在＋1 小時」，下次刷新有時間了再更正），再從一覽挑一個現在能用、支援這個 agent 種類、而且不是剛用完的那一把的 subscription（挑法是可替換的介面，預設照 priority）；挑到就停下 agent、等 agora 寫回、用 continue 同一個 Session 以新的 subscription 重開，id 不變，成功後 MUST 送一則 `resume_prompt`（設定；空字串就不送）。登錄冷卻失敗（被拒絕或無法確認）時 MUST 仍然換把，而且 MUST NOT 挑回同一把。全部冷卻時 MUST 停下、寫回、狀態標 waiting-quota，並自動掛一個在最早解除冷卻的時刻 open 同一個 id（continue 同一個 Session、不指定 subscription）的 job；最早解除的時刻 MUST 是各候選（支援這個種類、key 已部署）的 `until` 的最小值（沒在冷卻的就是現在）。沒有任何候選時 MUST NOT 掛 job。自動重開的 open 失敗時 MUST 重新計算再掛一次；subscription 來源無法確認時 MUST 在固定間隔（`retry_interval`）之後再掛一次。
+agent 回報額度用完時，sidecar MUST 向 subscription 來源登錄冷卻（只送 `until`；driver 拿不到恢復時間時報「現在＋1 小時」；LLMGateway 對同一把的重複登錄取較晚的 `until`——登錄只會延長；額度用完後 agent 已停下，不會再自動刷新那一把），再從一覽挑一個現在能用、支援這個 agent 種類、而且不是剛用完的那一把的 subscription（挑法是可替換的介面，預設照 priority）；挑到就停下 agent、等 agora 寫回、用 continue 同一個 Session 以新的 subscription 重開，id 不變，成功後 MUST 送一則 `resume_prompt`（設定；空字串就不送）。登錄冷卻失敗（被拒絕或無法確認）時 MUST 仍然換把，而且 MUST NOT 挑回同一把。全部冷卻時 MUST 停下、寫回、狀態標 waiting-quota，並自動掛一個在最早解除冷卻的時刻 open 同一個 id（continue 同一個 Session、不指定 subscription）的 job；最早解除的時刻 MUST 是各候選（支援這個種類、key 已部署）的 `until` 的最小值（沒在冷卻的就是現在）。沒有任何候選時 MUST NOT 掛 job。自動重開的 open 失敗時 MUST 重新計算再掛一次；subscription 來源無法確認時 MUST 在固定間隔（`retry_interval`）之後再掛一次。
 
 #### Scenario: 換到另一把
 - **WHEN** t1 用 claude-personal 時額度用完，claude-company 現在能用
@@ -141,8 +153,12 @@ agent 回報額度用完時，sidecar MUST 向 subscription 來源登錄冷卻�
 - **WHEN** t1 用完時 `cooldown` 被拒絕，而 `list` 仍把 claude-personal 當 available
 - **THEN** 不會挑回 claude-personal；有其他能用的就換過去，沒有就走全部冷卻
 
+#### Scenario: 用完之後不再自動刷新
+- **WHEN** t1 額度用完、進 waiting-quota（agent 已停），之後數個 scheduler tick
+- **THEN** 沒有再對那一把登錄 `cooldown`（沒有「下次刷新更正」）；`reopen_at` 不變，直到自動重開 job 到時
+
 #### Scenario: until 被拒絕時改報現在＋1 小時重送
-- **WHEN** driver 給的恢復時間被 LLMGateway 以超出範圍拒絕
+- **WHEN** driver 給的恢復時間被 LLMGateway 以 `until_out_of_range` 拒絕
 - **THEN** sidecar 改報「現在＋1 小時」重送一次
 
 #### Scenario: 無法確認
@@ -237,7 +253,7 @@ agent 的狀態轉移（刷新、換把、自動重開、job 的執行）MUST �
 - **THEN** 會再換一次（上一次轉移的 `busy` 已經釋放）
 
 ### Requirement: 結束時先擋新請求再逐一關閉
-sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`POST /jobs` MUST 回 503；到期的 job MUST NOT 再執行（不會再開 agent）；停掉 scheduler（`join` 有逾時：`close_timeout` 加 5 秒；逾時只記 log）之後才逐一 close 每個 agent，全部做完才結束。scheduler 的某一次 tick 卡住 MUST NOT 讓 SIGTERM 卡住或讓 agent 成為孤兒。`docs/sidecar.md` MUST 寫明 supervisor 的 kill timeout 要大於各 agent 的最壞時間加總（一般 `close_timeout + 5`、`new` 模式 `close_timeout × 2 + 5`）。
+sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`POST /jobs` MUST 回 503；到期的 job MUST NOT 再執行（不會再開 agent）；停掉 scheduler（`join` 有逾時：`close_timeout` 加 5 秒；逾時只記 log）之後才逐一 close 每個 agent，全部做完才結束。scheduler 的某一次 tick 卡住 MUST NOT 讓 SIGTERM 卡住或讓 agent 成為孤兒。`docs/sidecar.md` MUST 寫明 supervisor 的 kill timeout 要大於各 agent 在 shutdown 路徑的最壞時間加總（一般 `close_timeout + 5`、`new` 模式 `close_timeout × 2 + 5`；`close` API 另有等閒段，見 design D2）。
 
 #### Scenario: 關閉中到期的 job 不會再開 agent
 - **WHEN** sidecar 進入關閉中的同時，一個 `open` 的 job 剛好到期
@@ -266,7 +282,7 @@ sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`PO
 | `ok` | 值 |
 | 連不上、逾時 | `Unreachable`（只寫種類，不寫 `data`） |
 | `status` 403／404／409 | `agent_not_allowed`／`not_found`／`not_deployed` |
-| `status` 400 | `SourceError(error 碼)`：`until` 超出範圍類會讓 D4 的「改報現在＋1 小時重送」觸發；`bad_request` 不重送 |
+| `status` 400 | `SourceError(error 碼)`：`until_out_of_range`／`invalid_until` 會讓 D4 的「改報現在＋1 小時重送」觸發；`bad_request` 不重送 |
 | `status` 413 | `SourceError("body_too_large")` |
 | `error` 是 `bad_response`（回覆不是 JSON 物件），或其他沒列出的 `status` | `Unreachable` |
 
@@ -279,7 +295,7 @@ sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`PO
 - **THEN** 分別是 `not_found`（open 400 `subscription_not_found`）與 `not_deployed`（open 409 `not_deployed`)
 
 #### Scenario: until 被拒絕時改報現在＋1 小時重送
-- **WHEN** `cooldown` 送的 `until` 被回 `ok=False, status=400`（超出範圍類錯誤）
+- **WHEN** `cooldown` 送的 `until` 被回 `ok=False, status=400, error="until_out_of_range"`
 - **THEN** 回覆是 `SourceError`（不是成功）；換把改報「現在＋1 小時」重送一次
 
 #### Scenario: 其他的 400 不重送
@@ -331,30 +347,37 @@ sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`PO
 - **WHEN** 沒有註冊任何 agent 種類的 `sidecar run`，`POST /agents`
 - **THEN** 回 400 `unsupported agent kind`；`GET /agents` 回 200 與空清單
 
+### Requirement: opencode driver 的規則以 v2 spike 為準
+`OpenCodeDriver` 的介面形狀（開 server、送訊息、中斷、狀態、額度、session id 的取得與 `launch` 的環境給法）MUST 依 tasks 1.4 的 v2 server API spike 結果重寫——本人裁定：v1 的形狀作廢、不得照 v1 猜。本 spec 與 design D6 標「（v1）」（或 v1 保留段）的規則只作對照，不再是 MUST。spike MUST 找出 server API 的打斷對應（本人實測 v2 TUI 的緊急插播是先按 esc 兩次再送），並確認「打斷後再送」不會只排進佇列。
+
+#### Scenario: 實作前先看 spike
+- **WHEN** 實作 `OpenCodeDriver` 的任一介面
+- **THEN** 形狀以 tasks 1.4 的 spike 為準；與標「（v1）」的規則衝突時，以 spike 為準
+
 ### Requirement: driver 的 launch 環境與憑證規則
 `launch` MUST 依 design D6 的規則（憑證只在參數與子行程環境裡）組出子行程的環境，並以純單元測試驗證（不啟動真的 agent）。沒有可用的模型來源時 MUST 拒絕（open 回 400 `no_model`），MUST NOT 讓 agent 自己挑預設模型。打真 binary 的測試 MUST NOT 在預設的 unit 裡跑（預設 skip，`tests/integration/` 或 `SIDECAR_REAL_AGENT_TESTS=1`）。
 
-#### Scenario: opencode 的 Zen provider id
+#### Scenario: opencode 的 Zen provider id（v1；v2 spike 後依 tasks 1.4／3.2 重定）
 - **WHEN** `launch` 拿到的憑證是 `provider="opencode-zen"`、模型是 `"big-pickle"`
 - **THEN** 子行程的 `OPENCODE_CONFIG_CONTENT` 的 provider 鍵是 `opencode`（不是 `opencode-zen`），`model` 與 `small_model` 都是 `opencode/big-pickle`
 
-#### Scenario: opencode 的 provider 對應不到
+#### Scenario: opencode 的 provider 對應不到（v1；v2 spike 後依 tasks 1.4／3.2 重定）
 - **WHEN** 憑證的 `provider` 是對應表裡沒有的名稱
 - **THEN** `launch` 丟錯，open 回 4xx，什麼都沒開（不用原名猜）
 
-#### Scenario: opencode 沒有模型來源
+#### Scenario: opencode 沒有模型來源（v1；v2 spike 後依 tasks 1.4／3.2 重定）
 - **WHEN** 模型設定只有萬用字元（例如 `models.allow` 只有 `["*:free"]`，沒有 default）
 - **THEN** open 回 400 `no_model`，什麼都沒開
 
-#### Scenario: opencode 用 allow 的第一個明確模型
+#### Scenario: opencode 用 allow 的第一個明確模型（v1；v2 spike 後依 tasks 1.4／3.2 重定）
 - **WHEN** `models.default` 是 null，`models.allow` 是 `["*:free", "acme/spike-model"]`
 - **THEN** `model` 與 `small_model` 都是 `openrouter/acme/spike-model`，`provider.openrouter.models` 宣告了 `acme/spike-model`
 
-#### Scenario: opencode 的環境變數
+#### Scenario: opencode 的環境變數（v1；v2 spike 後依 tasks 1.4／3.2 重定）
 - **WHEN** 任何一次 `launch` 組出的子行程環境
 - **THEN** 含 `OPENCODE_DISABLE_AUTOUPDATE=1` 與 `OPENCODE_DISABLE_MODELS_FETCH=1`；apiKey 與 baseURL 只在 `OPENCODE_CONFIG_CONTENT` 裡，不在命令列
 
-#### Scenario: opencode 首次回應的模型不符
+#### Scenario: opencode 首次回應的模型不符（v1；v2 spike 後依 tasks 1.4／3.2 重定）
 - **WHEN** 第一則回應的 `info.providerID`／`modelID` 不是選出的那一組
 - **THEN** 視為錯誤：`exit.reason` 與 log 說明期望與實際（不含 key），不當作正常運作
 
@@ -420,14 +443,14 @@ sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`PO
 - **THEN** 不算額度用完
 
 ### Requirement: opencode 的送出與狀態
-`OpenCodeDriver` 的 `POST /session/{id}/message` MUST 在背景執行緒用長逾時（上限 1 小時）；狀態 MUST 以背景送出是否在跑為準（跑＝running、結束＝idle）；`/session/status` MUST 只用來偵測 `retry`。送出結束時回應的 `info.error` 或非 2xx MUST 寫進 `last_error`／`exit.reason`，不是只 log。
+`OpenCodeDriver` 的介面形狀（送出、狀態、中斷）MUST 以 v2 spike（tasks 1.4）為準重寫；v1 的形狀（`POST /session/{id}/message`、背景執行緒、`/session/status`）見 design D6 的 v1 保留段，只作對照、不再是 MUST。不因 v2 改變的行為：一個回合的送出 MUST NOT 被一般請求的逾時切斷；送出結束對應 `idle`；送出結束時回應的錯誤或非 2xx MUST 寫進 `last_error`／`exit.reason`（不含 key），不是只 log；`poke` 的「先打斷再送」 MUST 是立刻讀到——打斷後再送 MUST NOT 只是排進佇列。
 
-#### Scenario: 長回合不被切斷、結束後 idle
-- **WHEN** 一個回合要 30 秒（超過一般請求的 10 秒逾時），`/session/status` 的 map 一直不含這個 session
+#### Scenario: 長回合不被切斷、結束後 idle（行為面；形狀隨 v2 spike 重定）
+- **WHEN** 一個回合要 30 秒（超過一般請求的 10 秒逾時），狀態查詢一直沒回報變化
 - **THEN** 回合期間 `status` 是 running；回合結束後是 idle；請求沒有被逾時切斷
 
-#### Scenario: 回應帶 info.error
-- **WHEN** 回應是 HTTP 200 但 `info.error` 有內容（例如 provider 的授權錯誤），或回應是 HTTP 500
+#### Scenario: 回應帶錯誤（行為面；形狀隨 v2 spike 重定）
+- **WHEN** 一輪以錯誤收場（provider 的授權錯誤、HTTP 500 或等價的 v2 形狀）
 - **THEN** `status` 的 `exit.reason` 或 `GET /jobs` 的 `last_error` 帶那個錯誤（不含 key）；狀態不是永遠的 running
 
 ### Requirement: 錯誤訊息的遮罩與 stderr

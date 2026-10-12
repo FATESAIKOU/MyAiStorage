@@ -30,12 +30,12 @@ Angareion 側讀本 worktree 群組的 A worktree（`angareion-v5`，即 angarei
 ### 1.2 sidecar（分支 `sidecar-v0-agy4`：`src/sidecar/`、`tests/unit/test_sidecar_*.py`）
 
 - `open` 的 session 參數（`core.py: parse_session`、`open`、`_swap_new_mode` 等 new／fork／merge 路；`protocols.py: SESSION_MODES`；`http.py` 只透傳）：`session` 改為選填的 agora id（接續）／不給（新開）；`parse_session` 只認 id 或省略；fork／merge 的入口拿掉（core 的對外路徑收斂；store 的能力保留；`merge_not_allowed_in_job` 與 job 的 merge 規則刪除）。測試：`test_sidecar_core.py`、`test_sidecar_http.py`、`test_sidecar_jobs.py`、`test_sidecar_new_mode.py` 裡帶 `mode` 的案例（`merge` 相關見 `git grep merge` 的 4 個測試檔）。
-- agent id 共通命名（`protocols.py: valid_id`）：命名規則寫進驗證（`<>-<>[-<>]` 形狀仍在既有字元集內，主要是規則文字＋測試）；不做身分認證。
+- agent id 共通命名（`protocols.py: valid_id`）：**只是慣例，sidecar 不驗證格式**（`valid_id` 的基本字元／長度檢查不變；審查 M7 定案）；不做身分認證。
 - 拿掉 `env_for`（`protocols.py: AgentDriver.env_for` 協定＋docstring、`core.py` 的 open／換把／merge 三處呼叫、`drivers/claude_code.py`、`drivers/opencode.py`、`drivers/common.py: pick_model` 搬家、`subproc.py` docstring；測試：`test_sidecar_driver_{claude,opencode,masking}.py`、`test_sidecar_core.py`、`_sidecar_fakes.py` 的 `env_for`、`tests/integration/test_sidecar_driver_env_real.py`）：`launch(session, workdir, credentials, env)` 直接拿憑證與環境變數，兩 driver 把模型選擇、`no_model`、開關變數、遮罩規則搬進 `launch`（opencode 的部分併入 v2 改寫）。
 - **opencode driver 改寫成 v2**（`drivers/opencode.py`；本人 2026-10-12 裁定）：先做 v2 server API 的 spike（tasks 1.4；Mac 上已是 2.0.26，用 `--standalone` 的私有 server，不干擾共用的背景服務），再照 v2 重寫開 server／送訊息／中斷／狀態來源／額度偵測／session id 的取得，並在 v2 重驗 `launch` 的 key 與 baseURL（v1 的 `OPENCODE_CONFIG_CONTENT` 形狀作廢，沿用與否由 spike 定）；測試：`test_sidecar_driver_opencode.py` 與相關（形狀以 spike 為準）。
 - `poke` 立刻讀（`core.py: poke` 已是 interrupt-then-send）：行為不動，補測試鎖住。
-- 「現在＋1 小時」（`core.py: _swap` 的 `cooldown` 呼叫處、`_wait_quota`／`_earliest_lift`）：`resets_at` 缺失時報 now+1h，下次刷新更正；測試 `test_sidecar_{core,jobs,new_mode}.py` 的相關案例。
-- `stop` 語意（`drivers/*/stop`、`subproc.terminate_process`、`core.py` close／shutdown 路）：溫和＝等閒才退、強制＝立刻、退出結束整個 agent 程序；agora 的 SIGTERM 轉送機制不動。
+- 「現在＋1 小時」（`core.py: _swap` 的 `cooldown` 呼叫處、`_wait_quota`／`_earliest_lift`）：`resets_at` 缺失時報 now+1h；登錄只延長（LLMGateway 取較晚的 `until`）、agent 已停下後不會再自動刷新（審查 M1）；測試 `test_sidecar_{core,jobs,new_mode}.py` 的相關案例。
+- `stop` 語意（`drivers/*/stop`、`subproc.terminate_process`、`core.py` close／shutdown 路）：close 三段＝等閒（`close_idle_wait`）→ SIGTERM → SIGKILL；shutdown 跳過等閒、換把不等閒；強制＝立刻；退出結束整個 agent 程序；agora 的 SIGTERM 轉送機制不動。
 - `cooldown` 只送 `until`（`protocols.py: WINDOWS`、`Subscription.cooldown` 形狀、`SubscriptionSource.cooldown` 簽名、`sources.py` 兩實作＋`invalid_window`、`core.py` 的 swap／`_earliest_lift`／`_wait_quota`、兩 driver 的 window 對應；測試：`test_sidecar_{core,jobs,new_mode,sources}.py` 帶 `"5h"` 的案例、`test_sidecar_driver_{claude,opencode}.py` 的 window 案例）：`cooldown` 形狀改單一 `until`，`_earliest_lift` 取最小 `until`。
 - curl 來源（`sources.py` 整個 `LLMGatewaySource`＋`_import_lgw`＋connect 流程、`wiring.py`、`config.py: gateway_connect_file`、`pyproject.toml` 的 gateway extra 註解；測試：`test_sidecar_sources.py`、`test_sidecar_cli.py` 的 wiring 案例、`test_sidecar_lgw_loopback.py` 改打本地 loopback、`_sidecar_fakes.py` 的 lgw doubles）：重寫為直連 `base_url`（標準函式庫），`FileSubscriptionSource` 不動。
 - `/jobs`：程式完全不動（本人 2026-10-12 定案保留、不加功能）。
@@ -69,8 +69,8 @@ sidecar（合計約 9～11 commits；worker 映像不算在內）：
 2. **設定檔格式與位置**：**已裁定（本人 2026-10-12）**——channel 對應持久化在 MyAiStorage：`config/angareion/channels.json`（`version`＋`channels`，每筆 `{backend, issue}`；只有 workflow 寫）；backend 設定 `config/angareion/backends.json`（`version`＋`backends`，`{type, repo}`）走 PR（d 等級）；angareion 只讀本機複本。
 3. **讀取端多久 pull、pull 失敗怎麼辦**：**已裁定（本人 2026-10-12；設計要處理）**——定案見 angareion-v5 design §11：lazy pull（`config_pull_interval` 預設 900 秒、`--ff-only`、鎖檔、逾時；`wait` 輪詢中不 pull）；失敗沿用目前複本＋stderr 警告（exit code 不變）；複本缺失／壞 JSON 才 exit 2；外部 cron／systemd 也可以另外拉。
 4. **`--to` 選填時 wait／read 怎麼過濾**：**已裁定（本人 2026-10-12）**——無 `to`＝廣播，算進「寄給我的」：不給 `--channel` 的 `wait`／`read` 收「`to` 是自己或沒有 `to`」的訊息。
-5. **「現在＋1 小時」由誰報**：**已定案（v5 設計；design D4 已照建議採 core）**——driver 只報測到的 `resets_at`（拿不到就不帶），core 在 `cooldown` 補「現在＋1 小時」，下次刷新有時間再更正。
+5. **「現在＋1 小時」由誰報**：**已定案（v5 設計；design D4 已照建議採 core；審查 M1 補充）**——driver 只報測到的 `resets_at`（拿不到就不帶），core 在 `cooldown` 補「現在＋1 小時」；登錄只會延長、沒有「下次刷新更正」（額度用完後 agent 已停）。
 6. **不用 window 之後 claude 的 5h／1w 資訊要不要丟**：**已定案（v5 設計；design D4／D6）**——不丟：driver 照常解析（log 與內部判斷用），只是不進 `cooldown`（core 只送 `until`）。
-7. **curl 本機 port 的位址從哪裡設定**：**已定案（v5 規格）**——`subscription_source` 用 `{"kind": "llmgateway", "base_url": …}`（無預設值、必填）；worker 由 MyLinuxPool 的 capability／supervisor 把實際 port 寫進設定，Mac／手機用既有轉發。spec 與 tasks 5.5 已照此寫；design D7 仍留「欄位名待 PM 確認」的字樣，與此不一致（design 下次同步時對齊）。
+7. **curl 本機 port 的位址從哪裡設定**：**已定案（v5 規格）**——`subscription_source` 用 `{"kind": "llmgateway", "base_url": …}`（無預設值、必填）；worker 由 MyLinuxPool 的 capability／supervisor 把實際 port 寫進設定，Mac／手機用既有轉發。spec、design 與 tasks 5.5 已照此寫（design D7 的「待 PM 確認」字樣已同步拿掉）。
 8. **／jobs 待定期間程式怎麼辦**：**已裁定（本人 2026-10-12）**——`/jobs` 保留（at／every／until＋`GET`／`POST`／`DELETE`），越簡單越好、不加功能；程式完全不動（「若拿掉」案不成立）。
 9. **fork／merge／new 入口去留**：**已裁定（本人 2026-10-12）**——`open` 只收 agora id（接續）或不給（新開）；fork／merge 的入口拿掉（由 PMO／PM 先在 agora 做好 Session 再交 id）；`SessionStore` 的 fork／merge 能力保留、本期沒有對外入口。估工不另加（入口拿掉＝刪舊對外路徑；`new` 已含在 D5 的工作裡）。
