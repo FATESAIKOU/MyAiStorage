@@ -78,7 +78,7 @@ def test_unknown_channel_is_none_not_an_error(tmp_path):
     store, _ = _store(tmp_path, _files(channels={"general": ("github-main", 1)}, backends={"github-main": ("github", "owner/repo")}))
     assert store.resolve("nobody-knows") is None
     with pytest.raises(ChannelNotFoundError, match="does not exist"):
-        store.resolve_or_raise("nobody-knows")
+        store.entity_for("nobody-knows")
 
 
 def test_missing_local_copy_is_a_config_error(tmp_path):

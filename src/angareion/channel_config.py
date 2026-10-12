@@ -12,6 +12,7 @@ git runner and the clocks, so nothing here touches the network by itself.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import os
@@ -19,10 +20,15 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Callable, Iterator, Protocol, Sequence
 
 from angareion.backend import ChannelNotFoundError
 from angareion.config import CONFIG_PULL_INTERVAL_DEFAULT, ConfigError
+
+try:
+    import fcntl
+except ImportError:  # non-POSIX: run without the cross-process lock
+    fcntl = None  # type: ignore[assignment]
 
 CHANNELS_PATH = "config/angareion/channels.json"
 BACKENDS_PATH = "config/angareion/backends.json"
@@ -97,8 +103,52 @@ class BackendRef:
     repo: str
 
 
+@dataclass(frozen=True)
+class Entity:
+    """A resolved channel: the backend entity a command may act on."""
+
+    channel: str
+    backend: str
+    repo: str
+    issue: int
+
+
 def _default_warn(message: str) -> None:
     sys.stderr.write(f"Warning: {message}\n")
+
+
+class FileLock:
+    """An exclusive flock on a file: a second process waits for the first.
+
+    The lock file lives inside the clone's `.git` so it never shows up in the
+    working tree; without POSIX flock the lock degrades to a no-op.
+    """
+
+    def __init__(self, path: Path | str):
+        self.path = Path(path)
+        self._fd: int | None = None
+
+    def __enter__(self) -> FileLock:
+        if fcntl is None:
+            return self
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            os.close(fd)
+            raise
+        self._fd = fd
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        if self._fd is None:
+            return
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self._fd)
+            self._fd = None
 
 
 class ChannelStore:
@@ -120,6 +170,7 @@ class ChannelStore:
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
         fetch_head_mtime: Callable[[], float | None] | None = None,
+        lock: Callable[[], Any] | None = None,
     ):
         self.config_dir = Path(config_dir)
         self.interval = interval
@@ -129,6 +180,61 @@ class ChannelStore:
         self._clock = clock
         self._sleep = sleeper
         self._fetch_head_mtime = fetch_head_mtime or self._read_fetch_head_mtime
+        self._lock = lock or (lambda: FileLock(self.config_dir / ".git" / "angareion-pull.lock"))
+
+    # -- pulling ---------------------------------------------------------
+
+    def _fetch(self) -> bool:
+        """One `git fetch origin main`; failures warn once and keep the copy."""
+        try:
+            result = self._git.run(["fetch", "--quiet", "origin", "main"], cwd=self.config_dir, timeout=GIT_TIMEOUT_SECONDS)
+        except GitError as e:
+            self._warn(f"could not refresh the configuration copy: {e}; using the current copy")
+            return False
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip() or "git fetch failed"
+            self._warn(f"could not refresh the configuration copy: {detail}; using the current copy")
+            return False
+        return True
+
+    def fetch(self) -> bool:
+        """Refresh the clone, serialized with other angareion processes on this machine."""
+        with self._lock():
+            return self._fetch()
+
+    def ensure_fresh(self) -> None:
+        """The periodic pull: at the start of any command using the config files.
+
+        `config_pull_interval=0` disables only this periodic pull; the
+        event-driven fetches below still happen.
+        """
+        if self.interval <= 0:
+            return
+        mtime = self._fetch_head_mtime()
+        if mtime is None or self._now() - mtime > self.interval:
+            self.fetch()
+
+    def refresh_for_lookup(self) -> None:
+        """A lookup miss asks for fresher data, but not more often than every 30s."""
+        mtime = self._fetch_head_mtime()
+        if mtime is not None and self._now() - mtime < MIN_EVENT_FETCH_INTERVAL_SECONDS:
+            return
+        self.fetch()
+
+    def poll_for_channel(self, name: str, *, timeout: float = LANDING_POLL_TIMEOUT_SECONDS) -> bool:
+        """Poll the clone until a channel mapping appears (or the wait runs out).
+
+        This is the landing wait of `channel create`; it is not used while a
+        command is otherwise polling (wait never fetches after it started).
+        """
+        deadline = self._clock() + timeout
+        while True:
+            self.fetch()
+            if name in self.channels():
+                return True
+            if self._clock() >= deadline:
+                return False
+            self._sleep(min(LANDING_POLL_INTERVAL_SECONDS, max(0.0, deadline - self._clock())))
 
     # -- reading ---------------------------------------------------------
 
@@ -231,18 +337,42 @@ class ChannelStore:
     # -- resolution ------------------------------------------------------
 
     def resolve(self, name: str) -> ChannelRef | None:
-        """The entity for a channel name, or None (the channel does not exist)."""
+        """The entity for a channel name, or None (the channel does not exist).
+
+        A miss asks for one event-driven fetch first (not more often than
+        every 30 seconds), so a channel a teammate just created is found.
+        """
         ref = self.channels().get(name)
+        if ref is None:
+            self.refresh_for_lookup()
+            ref = self.channels().get(name)
         if ref is None:
             return None
         self.backend(ref.backend)  # unknown backend / type is a config error, not "no channel"
         return ref
 
-    def resolve_or_raise(self, name: str) -> ChannelRef:
+    def entity_for(self, name: str) -> Entity:
+        """The full target of a channel: its backend repo and entity number."""
         ref = self.resolve(name)
         if ref is None:
             raise ChannelNotFoundError(f"channel '{name}' does not exist")
-        return ref
+        backend = self.backend(ref.backend)
+        return Entity(channel=name, backend=backend.name, repo=backend.repo, issue=ref.issue)
+
+    def entities(self) -> list[Entity]:
+        """Every channel as a target ("to me" spans them all)."""
+        backends = self.backends()
+        entities: list[Entity] = []
+        for name, ref in self.channels().items():
+            backend = backends.get(ref.backend)
+            if backend is None:
+                raise ChannelConfigError(f"the channel configuration points to an unknown backend: {ref.backend}")
+            if backend.type != "github":
+                raise ChannelConfigError(
+                    f"unsupported backend type {backend.type!r} for backend '{backend.name}'"
+                )
+            entities.append(Entity(channel=name, backend=backend.name, repo=backend.repo, issue=ref.issue))
+        return entities
 
     def channel_names(self) -> list[str]:
         return list(self.channels())

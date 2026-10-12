@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from angareion.channel_config import GitResult
 
@@ -66,6 +66,7 @@ class FakeGit:
         self.fetch_head_mtime = fetch_head_mtime
         self.raise_on_fetch = raise_on_fetch
         self.raise_on_show = raise_on_show
+        self.on_fetch: Callable[[], None] | None = None
 
     def run(self, args: Sequence[str], *, cwd: Path, timeout: float) -> GitResult:
         self.commands.append(list(args))
@@ -74,6 +75,8 @@ class FakeGit:
             self.fetch_timeouts.append(timeout)
             if self.raise_on_fetch is not None:
                 raise self.raise_on_fetch
+            if self.on_fetch is not None:
+                self.on_fetch()
             return GitResult(0, "", "")
         if args and args[0] == "show":
             if self.raise_on_show is not None:
