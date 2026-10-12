@@ -132,3 +132,62 @@
 3. **M1**（一個字元）＋**M4**（分頁寫進 §9、補 Scenario）同一輪改。
 4. **M2**（寫明 clone 走匿名）、**M3**（schedule 或 Risks 說明）、L1～L3 同一輪。
 5. 之後請非作者再看一次 H1／H2／M1 的改動，再轉可審。
+
+---
+
+## 7. 修正的確認（第三輪，`c95824e`）
+
+- 對象：`c95824e`（`H1, H2, M1-M4, L1-L6`）＋ PM 對 H2 的決定（PMO 已同意：不改成 main 優先；issue 存在與標題相符只在 `channel create` 用戶端驗，重建時只看留言本身與作者；授權降級寫進 Risks）。
+- `openspec validate angareion-v5 --strict` 仍通過；地址文法已用實際執行測過（見 M1）。只讀，未改任何設計文件。
+
+### 結論
+
+**可以轉成可審。** H1、H2 都照決定修好（不是照我原本的建議，是照 PM 的決定，且沒有偷偷加回我建議的 main 優先），M1～M4 與 L1～L6 都落地並且一致。剩下的只有一項 **Medium**（`backend` 名仍然在重建時驗，是 H2 關掉其他路徑後唯一剩下的下架向量）與幾個 Low／nit，都可以在設計 PR 的審查回合補，不擋轉可審。
+
+### 逐項確認
+
+| 項目 | 修好？ | 證據 |
+|---|---|---|
+| **H1** 觸發層擋 Bot | ✅ | design §10 觸發：`if` MUST 擋掉 Bot（`github.event.comment.user.type != 'Bot'` 或排除 `github-actions[bot]`）；§9 回報段明寫回報留言的作者是 Bot、不會再觸發；spec channel-config 的 Requirement 與新 Scenario「回報留言不會再觸發 run」。 |
+| **H1** 非授權者不回報 | ✅ | §9 授權、§10 授權、spec 授權段（都加了「也**不回報**——不回報才不會產生新留言」）、Scenario「非 OWNER／MEMBER／COLLABORATOR 的留言被忽略且不回報」。 |
+| **H1** 重建腳本仍重驗授權 | ✅ | §9／§10 都寫「觸發層的 `if` 只擋 Bot，授權仍由腳本驗——手動重跑與日後重建都重讀整串」。這點很重要（`schedule` 與 `workflow_dispatch` 沒有 `comment` 事件，靠腳本驗才不會漏）。 |
+| **H2** 照 PM 決定：不改 main 優先 | ✅ | 沒有任何地方寫「main 優先」或「保留既有對應」；`channels.json` 仍是 f(整串留言)。 |
+| **H2** issue 存在與標題只在使用者端驗 | ✅ | §9 輸入：「重建時每個留言 MUST **只驗留言本身**：channel 名、backend 名存在、`author_association`；**MUST NOT 查 backend 的 issue**」；§6 第 2 步：「留言之前 MUST 先查一次實體（GET；存在而且標題等於 channel 名，否則 exit 2、不留留言）」；spec `angareion` 的五個介面 Requirement ＋ 新 Scenario「建 channel 的用戶端驗證」；舊的 Scenario「issue 不存在或標題不符」已從 channel-config spec 移除（正確，它現在不做這件事了）。tasks 3.2／3.5 也同步。 |
+| **H2** 標題被改／issue 被刪／API 失敗不下架 | ✅ | §9 明寫這三種都不會下架。全 repo grep 過，沒有殘留「workflow 驗 issue／標題」的條文。 |
+| **H2** 授權降級寫進 Risks | ✅ | Risks 新增「[授權降級] → 舊留言的作者若從 OWNER／MEMBER／COLLABORATOR 被降級，下次重建不再採計、對應會消失……第一期所有留言都是本人帳號，不另外處理」。 |
+| **M1** 地址文法 | ✅ | 正規式改為 `^[A-Za-z0-9][A-Za-z0-9._-]*-(pm|arch|impl|test)(-[A-Za-z0-9_.]+)?$`，並在 design §1 與 spec「訊息格式」都講清楚「**驗證與解析是兩步**——regex 只驗整體形狀，由右而左取出 id 與角色字是另外寫的解析步驟」。實測：四個接受案例（含 `my-repo-impl-2`）全通、五個拒絕案例全拒；`my-repo-impl-2` 由右而左解析得 repo `my-repo`／role `impl`／id `2`，與 Scenario 的斷言相符。tasks 2.1 同步。 |
+| **M2** clone／fetch 的認證 | ✅ | §10 token 權限與 §11 都寫「clone 與 fetch 走**匿名 HTTPS**（public repo、不用這把 token）」，並把 backend repo（讀 issue＋留言）與 MyAiStorage（只在註冊簿留言）的用途分開寫；spec「token 的位置與讀法」Requirement 同步。 |
+| **M3** 每天 `schedule` ＋ 硬失敗寫進 Risks | ✅ | §9 觸發與重建、§10 觸發、spec channel-config Requirement、tasks 3.5 都寫「`schedule`（每天一次）當保險」；Risks 明寫「run 硬失敗……而且之後沒有新留言時，那則留言要等到下一次 `schedule` 才會套用」。 |
+| **M4** 留言分頁 | ✅ | §9 指定 `GET /repos/{owner}/{repo}/issues/{n}/comments?per_page=100` 並「MUST 翻完所有頁」；spec channel-config 同；新 Scenario「留言超過 100 則仍全部重建」。 |
+| **L1** workflow `permissions:` | ⚠️ 部分 | design §10 與 tasks 3.5 有寫（`contents: write`＋`issues: write`），但 **spec channel-config 的 Requirement 沒有**（見 Low a）。 |
+| **L2** 註冊簿 issue 的 label | ✅ | §10 寫死 `層級:d`＋`狀態:進行中`，理由（d 不佔 b／c 額度、有 label 不會被列樹外、與「做完 completed 關閉」的慣例不同）；Risks 加一行；tasks 1.4 同步。 |
+| **L3** 作者提議清單 | ✅ | design 末段補了四項：`workflow_dispatch`＋每天 `schedule`、issue 檢查移到使用者端、2 分鐘等待上限與 30 秒最短 fetch 間隔、置頂留言與「`issue_comment` 只限單一註冊簿 issue」的觸發條件。 |
+| **L4** 回報用純文字 | ✅ | §9 回報與 spec channel-config 新增的「**回報**」段都寫「用**純文字**回報……MUST NOT 是可被解析成 action 的一行 JSON」。 |
+| **L5** `channels.json` 是機器產物 | ✅ | §8、Risks「[channels.json 被手改]」、spec channel-config「channel 設定檔」Requirement 三處一致。 |
+| **L6** 註冊簿遷移 | ✅ | 移到 Open Questions 第 1 項（第一期可接受），並把「沒有未定項目」改成列這一條。 |
+
+順帶確認 H1 與 M3 合起來不會繞回空轉：不合格留言 → 回報一次（Bot，被 `if` 擋）→ 不再觸發；之後每天的 `schedule` 會再跑一次並再回報一次，是有界的（見 Low b）。
+
+### 剩下來的問題
+
+**Medium（不擋轉可審，但建議在設計 PR 那一輪補掉）**
+
+- **N1. `backend` 名仍然在重建時驗，是 H2 關掉其他路徑之後唯一剩下的「靜默下架」向量。** §9 輸入仍然要求「backend 名存在（在 `backends.json`）」。所以當某個 backend 被從 `backends.json` 移除（§8 說 backend 設定是走 PR、每個 a/b 專案動一次，專案結束時就會發生），**它底下的每一個 channel 都會在下一個 run（任何一則不相干的留言就會觸發）從 `channels.json` 消失**，所有隊員那邊變成「channel 不存在」，而且沒有任何人收到通知。這是 H2 同一個型態的問題，PM 的決定明確處理的是 issue 的檢查，這一項留下來了。建議二選一（都是小改）：
+  1. 在 Risks 加一行：「backend 被移出 `backends.json` 時，其下的 channel 會在下一次重建被下架；移除 backend 的 PR 要一併確認／重發 register 留言」。
+  2. 讓移除 backend 的 PR 檢查清單裡列出受影響的 channel（`channels.json` 裡指向該 backend 的項目）。
+  如果 PM 认为这属于「重建为权威」的既定取舍，那第 1 项（Risks 一行）就够。
+
+**Low**
+
+- **a.** L1 的 `permissions:` 只補在 design 與 tasks，spec channel-config 的 Requirement 沒帶。只讀 spec 的實作者會漏掉它。建議把「`permissions:` 至少 `contents: write`＋`issues: write`」補進 spec 的 Requirement（與 `concurrency` 同一段）。
+- **b.** 每天的 `schedule` 會讓「不合格留言」每天多長一則純文字回報留言（一則壞掉的留言＝一年 365 則），註冊簿的討論串會慢慢變長。不是錯誤（分頁已處理），但值得寫一句，或讓回報在「結果沒變」時不重複貼。
+- **c.** design §8 格式細節還寫著「workflow 寫入時保留未知欄位，只動自己那一筆」——這是 drain 時代的 incremental 用語，和現在的「整串留言重建成最終對應」＋「機器產物、人工改會被還原」（L5）不一致。建議改成「重建成最終對應後整檔寫回；`version` 等頂層欄位保留」。
+- **d.** §13 文件改寫點沒跟上 H2：`docs/angareion.md` 要寫的 create 流程現在多了一步「送出留言前先確認後端實體，不符 exit 2」。加一句即可。
+- **e.** §11 還寫「fetch 失敗（離線、權限）」；改成匿名 HTTPS 之後「權限」這個用詞已不適用（可以留著無害）。
+- **f.** nit：§9 與 §10 的「授權」兩段幾乎一字不差重複；以後改一邊忘一邊會漂移，可以讓其中一邊引用另一邊。
+- **g.** nit：§9／§10 的 Bot 守門請照寫的 `!= 'Bot'`（`schedule` 事件沒有 `comment` 欄位，`null != 'Bot'` 為真所以會照跑）；若寫成 `== 'User'` 就會把每天的 `schedule` 一起擋掉。設計已經寫對，實作時照抄即可。
+
+### Scenario 可測性（第三輪）
+
+- 新增的三個 Scenario 都可測：「回報留言不會再觸發 run」（對觸發條件 `if` 的測試或 workflow 整合測試）、「非授權…被忽略且不回報」（腳本層：假留言陣列，斷言重建結果不變且沒有回報呼叫）、「留言超過 100 則仍全部重建」（腳本層用假 API 分兩頁回資料）、「建 channel 的用戶端驗證」（假後端）、以及「位址文法（接受）」新增的解析斷言（`parse` 函式的單元測試）。
+- 前一輪列的「寫不成測試」的項目（H1／H2／M1／M4）現在都有對應 Scenario 且可測。剩下的只有 N1 需要 PM 先做決定，才好寫 Scenario。
