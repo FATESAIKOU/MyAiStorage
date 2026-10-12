@@ -9,15 +9,15 @@
 - `send`：`--channel` 必填維持，收件人 `--to` 改為**選填**（不給＝發到整個 channel；廣播算進「寄給我的」）。
 - 收件人／寄件人／身分改用共通 agent 命名 `<repo 名>-<pm|arch|impl|test>[-<id>]`。
 - **channel 設定檔**（`config/angareion/channels.json`：channel 名 → backend 實體）由 `register-channel`／`unregister-channel` workflow 直接更新 main（channel 自由建立，不走 PR）；**backend 設定檔**（`config/angareion/backends.json`：backend 本身的設定）走 PR（AiStorage PM 審查＋merge，d 等級）。
-- `channel create`／`channel delete` 的三步流程、同名與併發的處理（見 design §6、§7、§9）；`channel create` 不等落地，對應最慢一個 pull 週期後可見。
-- 觸發 workflow 的方式與權限（`workflow_dispatch`／`repository_dispatch`／issue 事件）與 token 範圍**待本人確認**（design §10 有比較與建議）。
+- `channel create`／`channel delete` 的三步流程、同名與併發的處理、workflow 的授權與輸入要求（見 design §6、§7、§9）；`channel create` 送出後輪詢 pull 等對應出現（上限 2 分鐘，逾時提示、exit 0），`channel delete` 不等待；查無 channel 時先 fetch 一次再判斷（design §11）。
+- 觸發 workflow 的方式與權限（`workflow_dispatch`／`repository_dispatch`／issue 事件）、token 範圍與註冊落點（含工單規則的取捨）**待本人確認**（design §10 有比較與建議）。
 - `docs/angareion.md` 與 `skills/angareion/SKILL.md` 的改寫點列在 design §13，不在這個 change 改。
 
 ## Capabilities
 
 ### New Capabilities
 
-- `angareion/channel-config`：兩個設定檔的格式與位置、register／unregister workflow 的契約（驗證、同名不覆蓋、sha 樂觀鎖、冪等）、讀取（本機複本＋lazy pull、失敗沿用）。
+- `angareion/channel-config`：兩個設定檔的格式與位置、register／unregister workflow 的契約（授權與輸入、驗證、drain／sweep、同名不覆蓋、sha 樂觀鎖、完成記號與冪等）、讀取（`git fetch` 讀 `origin/main`、查無先拉、失敗沿用）。
 
 ### Modified Capabilities
 
@@ -29,4 +29,4 @@
 - repo 資產（本 change 只規劃、不實作）：`config/angareion/channels.json`、`config/angareion/backends.json`、`.github/workflows/register-channel.yml`、`.github/workflows/unregister-channel.yml`、workflow 用的更新腳本。
 - 測試：`tests/unit/test_angareion_*.py`（cli、messages、backend、github、config、state、skill；新增註冊／同名／pull 的案例）。
 - 文件（不在此 change 改，只列改寫點）：`docs/angareion.md`、`skills/angareion/SKILL.md`。
-- 流程：backends.json 的 PR（d 等級）；本人對 workflow 觸發方式與 token 的確認；PR #41 的處置（提案見 design）。
+- 流程：backends.json 的 PR（d 等級）；本人對 workflow 觸發方式、token 與註冊落點的確認；PR #41 已用 merge commit 合併、v5 以 `angareion-v0` 為 base 堆疊（見 design）。
