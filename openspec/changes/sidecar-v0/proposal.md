@@ -15,9 +15,13 @@ AiCompany 期 1 需要在每台 worker（以及 Mac）上控制 AI agent 的程�
 
 本人 2026-10-12 中午看完介面圖後，把設計改成 **v5**（唯一依據 `design-v5-changes.md`；以 v4 為底，只列改的地方）：
 - `open` 的 `session` 參數＝agora session id（選填，接續用）；agent id 用共通命名（`<repo 名>-<pm|arch|impl|test>[-<id>]`）。
-- `/jobs` 留不留還沒決定：維持現狀，design 標「待本人決定」。
 - `AgentDriver` 拿掉 `env_for`（憑證與環境變數直接當 `launch` 的參數）；要 agent 立刻讀＝先打斷（如果在跑）再送；`state` 拿不到恢復時間就報「現在＋1 小時」；`stop` 溫和＝閒了才退、強制＝立刻，退出＝結束整個 agent 程序。
 - `cooldown` 只送 `until`（拿掉 `window`）；不用 `lgw connect`，`SubscriptionSource`＝curl 本機 LLMGateway port 或本機檔案（拿掉 gateway extra 的設計）。
+
+本人 2026-10-12 對 v5 疑點的裁定（`v5-decisions.md`）再把三件事定案：
+- `open` 只收 agora id（接續）或不給（新開）：fork／merge 的入口拿掉——由 PMO／PM 先在 agora 做好 Session 再以 id 交進來；`SessionStore` 的 fork／merge 能力保留。
+- `/jobs` 保留現狀（at／every／until＋`GET`／`POST`／`DELETE`），越簡單越好、不加功能。
+- opencode driver 改寫成 opencode v2：先做 v2 server API 的 spike（Mac 上已是 2.0.26，用 `--standalone` 的私有 server，不干擾共用的背景服務），再改 driver；worker 映像的 opencode 一併升 v2（MyLinuxPool 開單）。
 
 這個 change 取代 v1 的 `agent-sidecar-design`（只在 branch `aicompany-p1`，沒合進 main）。v1 的程式大多不適用（herdr、收信迴圈、中繼都拿掉了），可以沿用的部分在 tasks 裡列出。
 
@@ -26,7 +30,7 @@ AiCompany 期 1 需要在每台 worker（以及 Mac）上控制 AI agent 的程�
 - 新增 daemon `sidecar`（`src/sidecar/`）：HTTP 控制面（`/agents`、`/jobs`）、四個動作、job 排程（at／every）、自動換把與重開。
 - 內部介面：`AgentDriver`（實作：Claude Code、opencode）、`SessionStore`（實作：agora）、`SubscriptionSource`（實作：LLMGateway；本機開發用讀 JSON 檔的實作）、`Selector`（預設照 priority）。
 - agora 增加 sidecar 需要的能力（見 `session-continue` 的 delta）：`continue --headless`（程式化模式、照常定期寫回、stderr 印新 Session 的 id）、`--headless-port`、附加 tag 的 `--add-tag`。
-- v5 差異（見 design）：`session` 參數改為選填的 agora session id；agent id 用共通命名；`AgentDriver` 拿掉 `env_for`；`cooldown` 只送 `until`；`SubscriptionSource` 改為 curl 本機 port 或本機檔案；`/jobs` 維持現狀（待本人決定）。
+- v5 差異（見 design）：`session` 參數改為選填的 agora session id（fork／merge 的入口拿掉、store 的能力保留）；agent id 用共通命名；`AgentDriver` 拿掉 `env_for`；`cooldown` 只送 `until`；`SubscriptionSource` 改為 curl 本機 port 或本機檔案；`/jobs` 定案保留（不加功能）；opencode driver 改寫成 v2（spike 後；worker 映像的 opencode 一併升 v2）。
 
 ## Capabilities
 
@@ -42,5 +46,5 @@ AiCompany 期 1 需要在每台 worker（以及 Mac）上控制 AI agent 的程�
 
 - 程式：`src/sidecar/`（新）、`src/agora/`（小改）、`pyproject.toml`（console script `sidecar`）。
 - 測試：`tests/unit/test_sidecar_*.py`（假 driver、假 agora、假 subscription 來源；不連網、不開真的 agent）。
-- 文件：`docs/sidecar.md`（HTTP 介面、設定、連線設定檔、怎麼在 worker 與 Mac 上跑）。
-- 其他專案：LLMGateway（`list`／`get`／`cooldown`，sidecar 直連本機 port）；MyLinuxPool（worker 上 supervisor 拉起 `sidecar run`）。
+- 文件：`docs/sidecar.md`（HTTP 介面、設定、怎麼在 worker 與 Mac 上跑）。
+- 其他專案：LLMGateway（`list`／`get`／`cooldown`，sidecar 直連本機 port）；MyLinuxPool（worker 上 supervisor 拉起 `sidecar run`；worker 映像的 opencode 升 v2）。
