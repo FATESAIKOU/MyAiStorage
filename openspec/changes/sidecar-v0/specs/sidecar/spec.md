@@ -8,7 +8,7 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** agent 這一輪被打斷，接著收到那句話，停在提示處
 
 ### Requirement: 開啟
-`open` MUST 收：呼叫方給的 `id`（共通命名 `<repo 名>-<pm|arch|impl|test>[-<id>]`）、agent 種類、工作目錄（存在的絕對路徑，不存在 MUST 回 400，sidecar MUST NOT 建目錄）、接續的 agora session id（選填；不給＝新開）。subscription 的 id 與第一則輸入 MUST 是選填（subscription 省略時，sidecar 依挑選規則自己挑一個現在能用的）。呼叫方指定的 subscription 在冷卻中時 MUST 照辦。`id` 對應的 agent 還在 starting／running／idle 時 MUST 拒絕；在 waiting-quota 或 exited 時 MUST 用同一個 id 重開，waiting-quota 的自動重開 job MUST 一併刪掉。sidecar MUST 自己向 subscription 來源取得詳細資料（呼叫方不傳 key），把憑證與環境變數當 `launch` 的參數傳進去；這些值 MUST NOT 出現在命令列、log 或任何檔案。開出來的 Session MUST 在 agora 標頭的 tags 附加 `sidecar:<id>`，原有的 tags MUST NOT 被取代。第一則輸入 MUST 排進該 agent 的佇列（等它起來再送），MUST NOT 因為它而讓 open 失敗；省略 subscription 而且沒有任何能用的候選時 MUST 回 409 `no_subscription`。
+`open` MUST 收：呼叫方給的 `id`（共通命名 `<repo 名>-<pm|arch|impl|test>[-<id>]`）、agent 種類、工作目錄（存在的絕對路徑，不存在 MUST 回 400，sidecar MUST NOT 建目錄）、接續的 agora session id（選填；給＝在上面接續，不給＝新開，實作是 design D5 的 `new` 路徑）。`open` MUST NOT 收 fork／merge 的入口（本人 2026-10-12 裁定：fork／merge 由外部先在 agora 做好 Session 再以 id 交進來；`SessionStore` 的 fork／merge 能力保留）。subscription 的 id 與第一則輸入 MUST 是選填（subscription 省略時，sidecar 依挑選規則自己挑一個現在能用的）。呼叫方指定的 subscription 在冷卻中時 MUST 照辦。`id` 對應的 agent 還在 starting／running／idle 時 MUST 拒絕；在 waiting-quota 或 exited 時 MUST 用同一個 id 重開，waiting-quota 的自動重開 job MUST 一併刪掉。sidecar MUST 自己向 subscription 來源取得詳細資料（呼叫方不傳 key），把憑證與環境變數當 `launch` 的參數傳進去；這些值 MUST NOT 出現在命令列、log 或任何檔案。開出來的 Session MUST 在 agora 標頭的 tags 附加 `sidecar:<id>`，原有的 tags MUST NOT 被取代。第一則輸入 MUST 排進該 agent 的佇列（等它起來再送），MUST NOT 因為它而讓 open 失敗；省略 subscription 而且沒有任何能用的候選時 MUST 回 409 `no_subscription`。
 
 #### Scenario: 給 agora id 就接續
 - **WHEN** `open`（id=MyLinuxPool-impl-2、claude-code、session=agora:A、第一則輸入「讀 channel X」）
@@ -17,6 +17,10 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 #### Scenario: 不給 session 就新開
 - **WHEN** `open`（id=MyLinuxPool-impl-2、claude-code、不給 session）
 - **THEN** agent 直接開起來（沒有繼承的 Session）；`status.session` 要等第一次寫回才有值
+
+#### Scenario: 不收 fork／merge 的參數
+- **WHEN** `open` 用舊的 fork／merge 欄位（例如 `session` 是 `{"mode": "merge", …}` 而不是 id）
+- **THEN** 回 400，什麼都沒開
 
 #### Scenario: id 重複
 - **WHEN** t1 正在跑時再 `open` id=t1
@@ -95,8 +99,8 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **WHEN** agent 還在 starting 時 `poke`
 - **THEN** 起來之後收到那則文字；逾時還沒起來則回 409
 
-### Requirement: 三種外部控制形式（`/jobs` 去留待本人決定，本期維持現狀）
-控制者 MUST 能用 HTTP 以三種形式下四個動作：立即（直接呼叫）、定時（job 的 `at`）、輪詢（job 的 `every`，可設 `until`）。job 的動作 MUST 只能是四個動作之一，否則 MUST 回 400；帶 `session.mode == "merge"` 的 `open` MUST NOT 出現在 job 裡（回 400 `merge_not_allowed_in_job`）；`at` 在過去 MUST 回 400。`GET /jobs` 的每一筆 MUST 有 `last_run` 與 `last_error`（不含 key）。HTTP MUST 只綁本機（127.0.0.1），不做認證。請求本文超過 1 MB MUST 回 413。`every` 的下一次執行時刻 MUST 是原本節奏上第一個晚於現在的預定點，MUST NOT 在停頓之後補跑（只補執行一次，之後照原本節奏）。
+### Requirement: 三種外部控制形式（`/jobs` 保留；本人 2026-10-12 定案，不加功能）
+控制者 MUST 能用 HTTP 以三種形式下四個動作：立即（直接呼叫）、定時（job 的 `at`）、輪詢（job 的 `every`，可設 `until`）。job 的動作 MUST 只能是四個動作之一，否則 MUST 回 400；`at` 在過去 MUST 回 400。`GET /jobs` 的每一筆 MUST 有 `last_run` 與 `last_error`（不含 key）。HTTP MUST 只綁本機（127.0.0.1），不做認證。請求本文超過 1 MB MUST 回 413。`every` 的下一次執行時刻 MUST 是原本節奏上第一個晚於現在的預定點，MUST NOT 在停頓之後補跑（只補執行一次，之後照原本節奏）。
 
 #### Scenario: 定時開啟
 - **WHEN** 掛一個 job：`at` 明天 9:00、動作 `open`
@@ -154,7 +158,7 @@ agent 回報額度用完時，sidecar MUST 向 subscription 來源登錄冷卻�
 - **THEN** t1 維持 waiting-quota，`reopen_at` 是 null
 
 ### Requirement: 狀態揮發與結束
-agent 清單與 job 清單 MUST 只在記憶體。sidecar MUST NOT 在重啟後找回先前的 agent 或 job。收到 SIGTERM 時 MUST 先對每個 agent 做 close（停下、寫回），全部做完才結束。連線設定與其他設定的改變 MUST NOT 需要重啟 sidecar。
+agent 清單與 job 清單 MUST 只在記憶體。sidecar MUST NOT 在重啟後找回先前的 agent 或 job。收到 SIGTERM 時 MUST 先對每個 agent 做 close（停下、寫回），全部做完才結束。設定的改變（例如 `subscription_source` 的 `file` 檔內容）MUST NOT 需要重啟 sidecar。
 
 #### Scenario: 重啟
 - **WHEN** sidecar 重新啟動
@@ -441,10 +445,4 @@ driver 與 store 的錯誤訊息 MUST 帶子行程 stderr 的最新末幾行（�
 - **WHEN** agent 行程剛結束、scheduler 還沒刷新時對它 `poke`
 - **THEN** 回 409 `agent_not_running`，不是 500；狀態標 exited
 
-### Requirement: 帶 merge 的 open 不能是 job
-`POST /jobs` 的 `open` 帶 `session.mode == "merge"` MUST 回 400 `merge_not_allowed_in_job`。
-
-#### Scenario: job 帶 merge
-- **WHEN** `POST /jobs {"action": "open", "args": {…, "session": {"mode": "merge", "from": ["agora:A", "agora:B"]}}, "at": …}`
-- **THEN** 回 400 `merge_not_allowed_in_job`，沒有掛任何 job；同樣的內容用 `POST /agents` 直接呼叫仍可行
 
