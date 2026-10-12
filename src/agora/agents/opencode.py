@@ -310,6 +310,29 @@ def _remap(info: dict, keys: tuple[str, ...], mapping: dict[str, str]) -> None:
             info[key] = mapping.get(value, value)
 
 
+def _reidentify_v2(payload: dict, session_id: str, salt: str) -> dict:
+    """The v2 half of `reidentify`: flat rows, the content inside them.
+
+    Every row id is new, and so is every content item that carries an id (a tool
+    call's, measured; text items have none). A v2 export's only reference-shaped
+    field is `info.fork`, and it points at a *different* session - the boundary at
+    the parent session's last row, which a fork did not copy under its own ids - so
+    there is nothing inside this payload to remap: the field is left byte-for-byte
+    (opencode's own import drops it, measured). Everything else stays untouched as
+    well; `_id` keeps the prefixes opencode insists on (`msg`/`prt`).
+    """
+    stamp = 0
+    for position, row in enumerate(payload["messages"]):
+        stamp = _created_ms(row, stamp)
+        row["id"] = _id("msg_", time_ms=stamp, salt=salt, *((position, _MESSAGE_HEX),))
+        for content_position, item in enumerate(row.get("content") or []):
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                item["id"] = _id("prt_", time_ms=stamp, salt=salt,
+                                 *((position, _MESSAGE_HEX), (content_position, _PART_HEX)))
+    payload["info"]["id"] = session_id
+    return payload
+
+
 def reidentify(payload: dict, *, session_id: str, salt: str | None = None) -> dict:
     """Return `payload` re-identified as a brand-new session.
 
@@ -318,8 +341,11 @@ def reidentify(payload: dict, *, session_id: str, salt: str | None = None) -> di
     never modified.
     """
     messages = _payload_messages(payload)
+    fmt = _payload_format(payload)
     out = json.loads(json.dumps(payload))  # deep copy; never mutate the caller's
     salt = salt or _salt_for(session_id)
+    if fmt == "v2":
+        return _reidentify_v2(out, session_id, salt)
 
     # Pass 1: hand out the new ids. Doing this before touching references is what
     # lets a parentID that points forwards resolve.
