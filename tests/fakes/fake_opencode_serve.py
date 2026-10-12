@@ -7,6 +7,8 @@ Speaks just the three HTTP calls the driver makes:
                                     ({} when missing)
   POST /session                  -> {"id": $FAKE_OC_SESSION or a default}
   POST /session/<id>/message     -> sleeps $FAKE_OC_ROUND_SECONDS, then {"ok": true}
+                                     (FAKE_OC_MESSAGE_500 answers 500 instead;
+                                      FAKE_OC_MESSAGE_INFO_ERROR adds info.error)
   POST /session/<id>/abort       -> {}
 
 Every request is appended to $FAKE_HOME/fake-oc-calls.log (JSON per line).
@@ -124,7 +126,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": "no readable reason"})
                 return
             time.sleep(float(os.environ.get("FAKE_OC_ROUND_SECONDS", "0.05")))
-            self._json(200, self._message_response())
+            response = self._message_response()
+            if os.environ.get("FAKE_OC_MESSAGE_INFO_ERROR"):
+                # The real shape of a failed round: HTTP 200 with info.error.
+                response.setdefault("info", {})["error"] = (
+                    os.environ["FAKE_OC_MESSAGE_INFO_ERROR"]
+                )
+            self._json(200, response)
         elif path.endswith("/abort"):
             self._json(200, {})
         else:

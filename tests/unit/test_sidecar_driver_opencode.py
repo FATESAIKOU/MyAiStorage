@@ -217,7 +217,9 @@ def test_opencode_errors_carry_the_masked_stderr_tail(tmp_path, monkeypatch, ser
 # --- attach: status lookup, send, abort ----------------------------------------
 
 
-def test_attach_send_and_status(driver, serve, tmp_path):
+def test_attach_send_and_status(driver, serve, tmp_path, monkeypatch):
+    """M2: running follows the background send, not the status map."""
+    monkeypatch.setenv("FAKE_OC_ROUND_SECONDS", "0.6")
     proc, port = serve()
     session = RunningSession(
         session_id="agora:A",
@@ -225,8 +227,9 @@ def test_attach_send_and_status(driver, serve, tmp_path):
     )
     handle = driver.launch(session, {}, str(tmp_path))
     assert driver.external_session_id(handle) == "ses_A"
+    assert driver.state(handle).kind == DRIVER_IDLE  # nothing in flight yet
 
-    set_status(tmp_path / "fh", {"ses_A": {"type": "busy"}})
+    set_status(tmp_path / "fh", {})  # the map never even names this session
     driver.send(handle, "read channel X")
     assert wait_state(driver, handle, DRIVER_RUNNING).kind == DRIVER_RUNNING
     sent = wait_until(lambda: calls(tmp_path / "fh") and [
@@ -234,9 +237,7 @@ def test_attach_send_and_status(driver, serve, tmp_path):
         if c["method"] == "POST" and c["path"].endswith("/session/ses_A/message")
     ])
     assert sent[-1]["body"] == {"parts": [{"type": "text", "text": "read channel X"}]}
-
-    set_status(tmp_path / "fh", {"ses_A": {"type": "idle"}})
-    assert wait_state(driver, handle, DRIVER_IDLE).kind == DRIVER_IDLE
+    assert wait_state(driver, handle, DRIVER_IDLE).kind == DRIVER_IDLE  # the round ended
 
     driver.interrupt(handle)
     aborts = [c for c in calls(tmp_path / "fh")
@@ -245,14 +246,19 @@ def test_attach_send_and_status(driver, serve, tmp_path):
     driver.stop(handle, graceful=False, timeout=5)
 
 
-def test_status_may_be_the_flat_object(driver, serve, tmp_path):
+def test_status_is_only_read_for_retry(driver, serve, tmp_path):
+    """M2: the status answer's shape does not drive running/idle, only retry."""
     proc, port = serve()
     handle = driver.launch(
         RunningSession("agora:A", AgoraProcess(proc=proc, port=port, agent_session_id="ses_A")),
         {}, str(tmp_path),
     )
-    set_status(tmp_path / "fh", {"type": "idle"})
-    assert wait_state(driver, handle, DRIVER_IDLE).kind == DRIVER_IDLE
+    set_status(tmp_path / "fh", {"type": "busy"})
+    time.sleep(0.3)
+    assert driver.state(handle).kind == DRIVER_IDLE  # not running: no send in flight
+
+    set_status(tmp_path / "fh", {"type": "retry", "action": {"reason": "free_tier_limit"}})
+    assert wait_state(driver, handle, DRIVER_QUOTA_EXHAUSTED).kind == DRIVER_QUOTA_EXHAUSTED
     driver.stop(handle, graceful=False, timeout=5)
 
 
@@ -331,7 +337,8 @@ def test_retry_without_next_is_5h_without_resets(driver, serve, tmp_path):
     driver.stop(handle, graceful=False, timeout=5)
 
 
-def test_retry_with_a_non_quota_reason_stays_running(driver, serve, tmp_path, caplog):
+def test_retry_with_a_non_quota_reason_is_ignored(driver, serve, tmp_path, caplog):
+    """A retry with an off-whitelist reason is only logged, never swapped on."""
     proc, port = serve()
     handle = driver.launch(
         RunningSession("agora:A", AgoraProcess(proc=proc, port=port, agent_session_id="ses_A")),
@@ -343,7 +350,8 @@ def test_retry_with_a_non_quota_reason_stays_running(driver, serve, tmp_path, ca
     with caplog.at_level(logging.WARNING):
         time.sleep(0.3)
         state = driver.state(handle)
-    assert state.kind == DRIVER_RUNNING
+    assert state.kind == DRIVER_IDLE  # no round in flight; not quota either
+    assert handle.quota is None
     assert "non-quota reason" in caplog.text
     driver.stop(handle, graceful=False, timeout=5)
 
@@ -364,7 +372,7 @@ def test_state_send_and_interrupt_are_bounded(tmp_path, monkeypatch, serve):
     start = time.monotonic()
     state = driver.state(handle)
     assert time.monotonic() - start < 3  # bounded by status_timeout
-    assert state.kind == DRIVER_RUNNING  # the last known state is kept
+    assert state.kind == DRIVER_IDLE  # no round in flight; the map is not trusted
 
     start = time.monotonic()
     driver.send(handle, "x")  # fires in the background
@@ -375,6 +383,79 @@ def test_state_send_and_interrupt_are_bounded(tmp_path, monkeypatch, serve):
         driver.interrupt(handle)  # bounded by http_timeout
     assert time.monotonic() - start < 3
     driver.stop(handle, graceful=False, timeout=5)
+
+
+# --- M2: the long message timeout and the visible round failure -----------------
+
+
+def test_a_long_round_is_not_cut_by_the_short_http_timeout(tmp_path, monkeypatch, serve):
+    """M2/D6: a round longer than the 10s general timeout runs to the end."""
+    monkeypatch.setenv("FAKE_HOME", str(tmp_path / "fh"))
+    monkeypatch.setenv("FAKE_OC_ROUND_SECONDS", "1.0")
+    driver = OpenCodeDriver(
+        command=[sys.executable, str(FAKE_SERVE)],
+        poll_timeout=5.0, http_timeout=0.3, status_timeout=0.3,
+    )
+    proc, port = serve()
+    handle = driver.launch(
+        RunningSession("agora:A", AgoraProcess(proc=proc, port=port, agent_session_id="ses_A")),
+        {}, str(tmp_path),
+    )
+    driver.send(handle, "a long round")
+    assert wait_state(driver, handle, DRIVER_RUNNING).kind == DRIVER_RUNNING
+    time.sleep(0.5)  # past http_timeout: the round is still in flight, uncut
+    assert driver.state(handle).kind == DRIVER_RUNNING
+    assert wait_state(driver, handle, DRIVER_IDLE, timeout=10.0).kind == DRIVER_IDLE
+    assert handle.last_error is None
+    driver.stop(handle, graceful=False, timeout=5)
+
+
+def test_info_error_marks_the_round_failed(tmp_path, monkeypatch):
+    """M2 spec: HTTP 200 with info.error writes exit.reason, not just a log."""
+    monkeypatch.setenv("FAKE_HOME", str(tmp_path / "fh"))
+    monkeypatch.setenv("FAKE_OC_MESSAGE_INFO_ERROR", "provider auth failed")
+    driver = OpenCodeDriver(
+        command=[sys.executable, str(FAKE_SERVE)], poll_timeout=5.0, http_timeout=5.0,
+    )
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    env = driver.env_for(Subscription(
+        id="zen", provider="opencode-zen", kind="api-key", key=SECRET,
+        models={"default": "z"},
+    ))
+    handle = driver.launch(None, env, str(workdir))
+    try:
+        driver.send(handle, "hi")
+        state = wait_state(driver, handle, DRIVER_EXITED)
+        assert "provider auth failed" in (state.reason or "")
+        assert SECRET not in (state.reason or "")
+        assert handle.last_error is not None and "provider auth failed" in handle.last_error
+        assert SECRET not in (handle.last_error or "")
+    finally:
+        driver.stop(handle, graceful=False, timeout=5)
+
+
+def test_non_2xx_marks_the_round_failed(tmp_path, monkeypatch):
+    """M2 spec: an HTTP 500 without a readable reason lands in exit.reason."""
+    monkeypatch.setenv("FAKE_HOME", str(tmp_path / "fh"))
+    monkeypatch.setenv("FAKE_OC_STDERR_ECHO", "OPENCODE_CONFIG_CONTENT")
+    monkeypatch.setenv("FAKE_OC_MESSAGE_500", "1")
+    driver = OpenCodeDriver(
+        command=[sys.executable, str(FAKE_SERVE)], poll_timeout=5.0, http_timeout=5.0,
+    )
+    workdir = tmp_path / "w"
+    workdir.mkdir()
+    env = driver.env_for(Subscription(id="zen", provider="opencode-zen", kind="api-key",
+                                      key=SECRET, models={"default": "z"}))
+    handle = driver.launch(None, env, str(workdir))
+    try:
+        driver.send(handle, "hi")
+        state = wait_state(driver, handle, DRIVER_EXITED)
+        assert "HTTP 500" in (state.reason or "")
+        assert "<masked>" in (state.reason or "")
+        assert SECRET not in (state.reason or "")
+    finally:
+        driver.stop(handle, graceful=False, timeout=5)
 
 
 # --- new mode ------------------------------------------------------------------

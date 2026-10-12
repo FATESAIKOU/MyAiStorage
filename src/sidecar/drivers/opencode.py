@@ -11,10 +11,10 @@ the port until it accepts a connection (`poll_timeout`); talking to the agent
 is HTTP on 127.0.0.1 with every request carrying a timeout:
 
 - send: `POST /session/{id}/message` (the call returns only when the round is
-  done, so it runs in a background thread), body
+  done, so it runs in a background thread with a long timeout, D6/M2), body
   `{"parts": [{"type": "text", "text": ...}]}`;
-- state: `GET /session/status`, looked up by session id (the answer may be
-  keyed by id or be the status object itself);
+- state: whether that background send is in flight (running) or not (idle);
+  `GET /session/status` is only read for `retry` (quota), D6/M2;
 - interrupt: `POST /session/{id}/abort`.
 
 Quota exhaustion is `{"type": "retry", "action": {"reason": …}, "next": …}`
@@ -55,7 +55,7 @@ from ..protocols import (
     iso,
 )
 from ..subproc import child_env, terminate_process
-from .common import extract_secrets, pick_model, stderr_excerpt
+from .common import extract_secrets, mask_secrets, pick_model, stderr_excerpt
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,7 @@ FIVE_HOURS_PLUS_SLACK = 5 * 3600 + 300  # D6's single window rule
 POLL_TIMEOUT = 15.0
 HTTP_TIMEOUT = 10.0
 STATUS_TIMEOUT = 2.0
+MESSAGE_TIMEOUT = 3600.0  # the round call waits for the whole round (D6: cap 1h)
 
 #: LLMGateway's `provider` -> opencode's provider id (D6, verified by the
 #: spike for opencode-zen/openrouter; ollama-cloud is still to be confirmed).
@@ -84,9 +85,11 @@ class OpenCodeHandle:
     port: int
     session_id: str | None = None  # the agora Session id, when known
     agent_session_id: str | None = None  # the `ses_…` the HTTP calls need
-    state: DriverState = field(default_factory=lambda: DriverState(kind=DRIVER_RUNNING))
+    state: DriverState = field(default_factory=lambda: DriverState(kind=DRIVER_IDLE))
     quota: DriverState | None = None
     stopped: bool = False
+    sending: bool = False  # the background POST /message is in flight (M2)
+    last_error: str | None = None  # the last round failure, masked (M2)
     expected_provider: str | None = None  # what env_for told opencode to use
     expected_model: str | None = None
     model_mismatch: str | None = None  # the first response used something else
@@ -109,6 +112,7 @@ class OpenCodeDriver:
         poll_timeout: float = POLL_TIMEOUT,
         http_timeout: float = HTTP_TIMEOUT,
         status_timeout: float = STATUS_TIMEOUT,
+        message_timeout: float = MESSAGE_TIMEOUT,
     ) -> None:
         self._command = [command] if isinstance(command, str) else list(command)
         self._extra_args = list(extra_args)
@@ -116,6 +120,7 @@ class OpenCodeDriver:
         self._poll_timeout = poll_timeout
         self._http_timeout = http_timeout
         self._status_timeout = status_timeout
+        self._message_timeout = min(message_timeout, MESSAGE_TIMEOUT)  # D6: cap 1h
 
     # -- AgentDriver ------------------------------------------------------
 
@@ -194,14 +199,18 @@ class OpenCodeDriver:
 
     def send(self, handle: OpenCodeHandle, text: str) -> None:
         # The HTTP call blocks until the round is over (D6), so it goes to a
-        # background thread; the caller only learns "running" from it.
+        # background thread with the long message timeout; while that thread
+        # runs the driver reports running (M2).
         with handle.lock:
             if handle.stopped:
                 raise OpenCodeDriverError("opencode is stopped")
-            if handle.quota is None:
-                handle.state = DriverState(kind=DRIVER_RUNNING)
             session_id = handle.agent_session_id
+            if handle.quota is None:
+                handle.sending = True
+                handle.state = DriverState(kind=DRIVER_RUNNING)
         if session_id is None:
+            with handle.lock:
+                handle.sending = False
             raise OpenCodeDriverError("no opencode session id to send to")
         body = {"parts": [{"type": "text", "text": text}]}
         thread = threading.Thread(
@@ -218,6 +227,7 @@ class OpenCodeDriver:
             raise OpenCodeDriverError("no opencode session id to abort")
         self._request(handle, "POST", f"/session/{session_id}/abort", body={})
         with handle.lock:
+            handle.sending = False  # the round was aborted
             if handle.quota is None:
                 handle.state = DriverState(kind=DRIVER_IDLE)
 
@@ -225,6 +235,8 @@ class OpenCodeDriver:
         with handle.lock:
             if handle.quota is not None:
                 return handle.quota
+            if handle.sending:
+                return DriverState(kind=DRIVER_RUNNING)  # the background round runs
             session_id = handle.agent_session_id
         if handle.proc.poll() is not None:
             code = handle.proc.returncode
@@ -247,6 +259,7 @@ class OpenCodeDriver:
     def stop(self, handle: OpenCodeHandle, *, graceful: bool = True, timeout: float = 30.0) -> None:
         with handle.lock:
             handle.stopped = True
+            handle.sending = False
         if graceful:
             code = terminate_process(handle.proc, timeout=timeout)
         else:
@@ -300,11 +313,43 @@ class OpenCodeDriver:
 
     def _send_round(self, handle: OpenCodeHandle, session_id: str, body: dict[str, Any]) -> None:
         try:
-            data = self._request(handle, "POST", f"/session/{session_id}/message", body=body)
+            data = self._request(
+                handle, "POST", f"/session/{session_id}/message", body=body,
+                timeout=self._message_timeout,  # long: the round may take an hour (D6)
+            )
         except OpenCodeDriverError as e:
-            logger.warning("opencode: sending a message failed: %s", e)
+            self._fail_round(handle, e)
+            return
+        info_error = None
+        if isinstance(data, dict):
+            info = data.get("info")
+            if isinstance(info, dict) and info.get("error"):
+                info_error = str(info["error"])
+        if info_error:
+            self._fail_round(
+                handle, OpenCodeDriverError(f"round failed: {info_error}{self._tail(handle)}")
+            )
             return
         self._verify_first_response(handle, data)
+        with handle.lock:
+            handle.sending = False
+            if handle.quota is None:
+                handle.state = DriverState(kind=DRIVER_IDLE)
+
+    def _fail_round(self, handle: OpenCodeHandle, error: OpenCodeDriverError) -> None:
+        """A failed round is visible in the state, not just a log line (M2).
+
+        The reason lands in `exit.reason` (via DriverState) and in
+        `last_error`; the message is masked, never carrying the key.
+        """
+        message = mask_secrets(str(error), handle.secrets)
+        logger.warning("opencode: sending a message failed: %s", message)
+        with handle.lock:
+            handle.sending = False
+            if handle.quota is not None:
+                return  # the quota state already explains the round
+            handle.last_error = message
+            handle.state = DriverState(kind=DRIVER_EXITED, reason=message)
 
     def _verify_first_response(self, handle: OpenCodeHandle, data: Any) -> None:
         """The first response must name the provider/model env_for picked (D6).
@@ -375,34 +420,31 @@ class OpenCodeDriver:
         return stderr_excerpt(handle.proc, handle.stderr_tail, handle.secrets)
 
     def _apply_status(self, handle: OpenCodeHandle, status: dict[str, Any]) -> None:
+        """Read `/session/status` for `retry` only (D6/M2).
+
+        The round's running/idle state comes from whether the background send
+        is in flight (and the send itself), never from this map: the map may be
+        empty or not contain this session while a round runs.
+        """
         kind = status.get("type")
-        if kind == "retry":
-            reason = (status.get("action") or {}).get("reason")
-            if reason in self._quota_reasons:
-                window, resets_at = _window_and_resets(status.get("next"))
-                with handle.lock:
-                    if handle.quota is None:
-                        handle.quota = DriverState(
-                            kind=DRIVER_QUOTA_EXHAUSTED,
-                            window=window,
-                            resets_at=resets_at,
-                            reason=f"retry {reason!r}",
-                        )
-            else:
-                logger.warning(
-                    "opencode: retry with non-quota reason %r; staying running",
-                    reason,
-                )
+        if kind != "retry":
             return
-        if kind == "busy":
+        reason = (status.get("action") or {}).get("reason")
+        if reason in self._quota_reasons:
+            window, resets_at = _window_and_resets(status.get("next"))
             with handle.lock:
                 if handle.quota is None:
-                    handle.state = DriverState(kind=DRIVER_RUNNING)
-        elif kind == "idle":
-            with handle.lock:
-                if handle.quota is None:
-                    handle.state = DriverState(kind=DRIVER_IDLE)
-        # unknown types: keep the last known state
+                    handle.quota = DriverState(
+                        kind=DRIVER_QUOTA_EXHAUSTED,
+                        window=window,
+                        resets_at=resets_at,
+                        reason=f"retry {reason!r}",
+                    )
+        else:
+            logger.warning(
+                "opencode: retry with non-quota reason %r; staying running",
+                reason,
+            )
 
 
 def _status_for(data: Any, session_id: str | None) -> dict[str, Any] | None:
