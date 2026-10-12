@@ -18,7 +18,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: 五個介面
-Angareion 對外 MUST 只有五個介面：建 channel、刪 channel、送訊息、確認有沒有新訊息、讀訊息；指令分別是 `angareion channel create`、`angareion channel delete`、`angareion send`、`angareion wait`、`angareion read`。MUST NOT 有 ack、已讀回條或限流。channel 名 MUST 是英文名（非空的 ASCII 字母、數字、`-`、`_`）；介面（參數、stdout、stderr、錯誤訊息）MUST NOT 出現 GitHub repo／issue 的概念。第一期 channel 對所有隊員公開，沒有成員設定：`channel create` MUST NOT 收 `--member`。`send` 的 `--channel` 必填、`--to` 選填（不給＝發到整個 channel）。`channel create` 與 `channel delete` 的 stdout MUST 只印 channel 名。`channel create` MUST 在送出註冊後輪詢 pull 到對應出現為止（上限 2 分鐘；逾時 MUST 在 stderr 印提示、仍 exit 0）；`channel delete` MUST NOT 等落地（送出註銷成功即 exit 0）。（落地與 pull 見 `angareion/channel-config`。）
+Angareion 對外 MUST 只有五個介面：建 channel、刪 channel、送訊息、確認有沒有新訊息、讀訊息；指令分別是 `angareion channel create`、`angareion channel delete`、`angareion send`、`angareion wait`、`angareion read`。MUST NOT 有 ack、已讀回條或限流。channel 名 MUST 是英文名（非空的 ASCII 字母、數字、`-`、`_`）；介面（參數、stdout、stderr、錯誤訊息）MUST NOT 出現 GitHub repo／issue 的概念。第一期 channel 對所有隊員公開，沒有成員設定：`channel create` MUST NOT 收 `--member`。`send` 的 `--channel` 必填、`--to` 選填（不給＝發到整個 channel）。`channel create` 與 `channel delete` 的 stdout MUST 只印 channel 名。`channel create` MUST 在送出註冊留言後輪詢 fetch 到對應出現為止（上限 2 分鐘；逾時 MUST 在 stderr 印提示、仍 exit 0）；`channel delete` MUST NOT 等落地（送出註銷留言成功即 exit 0）。（註冊簿與重建見 `angareion/channel-config` 與 design §9／§10。）
 
 #### Scenario: 送出並讀到
 - **WHEN** A 對 channel X 送一則 `to` 是 B 的訊息，B 執行 `angareion read`
@@ -30,11 +30,11 @@ Angareion 對外 MUST 只有五個介面：建 channel、刪 channel、送訊息
 
 #### Scenario: 建 channel
 - **WHEN** `angareion channel create X`（不帶 `--member`；後端與本體都可用）
-- **THEN** 後端出現 X 的實體、本體收到 X 的註冊請求；stdout 只印 `X`，exit 0；沒有給名稱時 exit 1
+- **THEN** 後端出現 X 的實體、註冊簿上出現 X 的 `register` 留言；stdout 只印 `X`，exit 0；沒有給名稱時 exit 1
 
 #### Scenario: 刪 channel
 - **WHEN** `angareion channel delete X`（X 在設定檔裡有對應）
-- **THEN** 後端實體被關掉（不刪除）、本體收到 X 的註銷請求；stdout 只印 `X`，exit 0；X 不在設定檔裡時 exit 1
+- **THEN** 後端實體被關掉（不刪除）、註冊簿上出現 X 的 `unregister` 留言；stdout 只印 `X`，exit 0；X 不在設定檔裡時 exit 1
 
 #### Scenario: 建 channel 不再收成員
 - **WHEN** `angareion channel create X --member <位址>`
@@ -46,7 +46,7 @@ Angareion 對外 MUST 只有五個介面：建 channel、刪 channel、送訊息
 
 #### Scenario: 建 channel 等落地
 - **WHEN** `angareion channel create X` 的第 2 步送出成功，而本機複本還沒有 `X`
-- **THEN** 指令輪詢 pull 到 `X` 出現才回：stdout 只印 `X`、exit 0；2 分鐘還沒出現→stderr 印提示、仍 exit 0
+- **THEN** 指令輪詢 fetch 到 `X` 出現才回：stdout 只印 `X`、exit 0；2 分鐘還沒出現→stderr 印提示、仍 exit 0
 
 #### Scenario: 建 channel 的後端開實體失敗
 - **WHEN** 第 1 步（在 backend 的 repo 開實體）失敗（網路、403、5xx）
@@ -73,7 +73,7 @@ Angareion 對外 MUST 只有五個介面：建 channel、刪 channel、送訊息
 - **THEN** exit 1，什麼都沒建
 
 #### Scenario: 送註冊失敗後重試成功
-- **WHEN** 第 2 步的送出第一次失敗、重試（短間隔）成功
+- **WHEN** 第 2 步的留言送出第一次失敗、重試（短間隔）成功
 - **THEN** `channel create` 照常完成：stdout 印 `X`、exit 0
 
 #### Scenario: channel 名不是英文名
@@ -170,7 +170,7 @@ Angareion 對外 MUST 只有五個介面：建 channel、刪 channel、送訊息
 - **THEN** exit 1，stderr 說明 channel 不存在；什麼都沒送、什麼都沒改
 
 ### Requirement: token 的位置與讀法
-token 檔的位置 MUST 能由 `ANGAREION_TOKEN_FILE` 指定（優先於其他來源）；沒有設定時用設定檔的 `token_file` 或預設位置（實作細節，見 design）。檔案 MUST 只有擁有者有權限（0400 或 0600），否則 MUST 拒絕（exit 2）。token MUST NOT 出現在任何輸出、log、錯誤訊息或訊息內容裡。token 的權限範圍（哪些 repo 的 Issues，含註冊請求用到的 repo）見 design §10（**待本人確認**）；檔案的位置與權限規則不變。
+token 檔的位置 MUST 能由 `ANGAREION_TOKEN_FILE` 指定（優先於其他來源）；沒有設定時用設定檔的 `token_file` 或預設位置（實作細節，見 design）。檔案 MUST 只有擁有者有權限（0400 或 0600），否則 MUST 拒絕（exit 2）。token MUST NOT 出現在任何輸出、log、錯誤訊息或訊息內容裡。token 的權限範圍見 design §10（定案）：各 backend 的 repo 與 `MyAiStorage` 的 `Issues: Read and write`；檔案的位置與權限規則不變。
 
 #### Scenario: 權限太寬
 - **WHEN** token 檔的權限是 0644

@@ -1,6 +1,6 @@
 ## Purpose
 
-channel 名與 backend 實體的對應、以及 backend 本身的設定，放在 MyAiStorage repo 的兩個設定檔（`config/angareion/channels.json`、`config/angareion/backends.json`）；channel 的對應由 `register-channel`／`unregister-channel` workflow 直接更新 main（本人裁定：channel 自由建立、不走 PR），backend 設定走 PR；angareion 只讀本機複本（`git fetch` 讀 `origin/main`；查無先拉一次，失敗沿用）。
+channel 名與 backend 實體的對應、以及 backend 本身的設定，放在 MyAiStorage repo 的兩個設定檔（`config/angareion/channels.json`、`config/angareion/backends.json`）；channel 的對應由**註冊簿重建 workflow**直接更新 main（本人裁定：channel 自由建立、不走 PR；2026-10-12 14:3x 改為註冊簿 issue＋整串留言重建），backend 設定走 PR；angareion 只讀本機複本（`git fetch` 讀 `origin/main`；查無先拉一次，失敗沿用）。
 
 ## ADDED Requirements
 
@@ -26,56 +26,66 @@ backend 本身的設定 MUST 寫在 MyAiStorage repo 的 `config/angareion/backe
 - **WHEN** backend 條目的 `type` 不是 `github`
 - **THEN** exit 2，stderr 說明不認得的 type；什麼都沒送
 
-### Requirement: channel 對應的更新（register／unregister workflow）
-`channels.json` 的更新 MUST 由 MyAiStorage repo 裡的 `register-channel`（新增對應）與 `unregister-channel`（移除對應）workflow 直接寫 main；angareion 送出註冊／註銷請求後 MUST NOT 等它完成（`channel create` 會輪詢 pull 到對應出現，見 `angareion` 的五個介面）。請求 MUST 帶 `action`（`register`／`unregister`）、channel 名、backend 名、實體編號。
+### Requirement: channel 對應的更新（註冊簿重建）
+`channels.json` MUST 由 MyAiStorage 的**註冊簿 issue**（長期存在，label 見 design §10）上的留言重建：`channel create`／`channel delete` MUST 各在它下面留一則一行 JSON 留言——`{"schema": 1, "action": "register"|"unregister", "channel": "<名>", "backend": "<backend 名>", "issue": <編號>}`；angareion 送出留言後 MUST NOT 等重建完成（`channel create` 會輪詢 fetch 到對應出現，見 `angareion` 的五個介面）。
 
-**授權與輸入（審查 H2）**：workflow MUST 只處理授權帳號開立、或授權帳號加上 label 的請求（驗 `github.event.sender` 在授權名單；`author_association` 只當輔助）；不在名單的請求 MUST NOT 動檔、MUST NOT 留完成記號。請求內容（標題、本文）MUST 只經環境變數交給腳本，MUST NOT 用 `${{ }}` 插進 shell；JSON MUST 嚴格解析。寫入前 MUST 驗證：channel 名（`^[A-Za-z0-9_-]+$`）、backend 名存在（在 `backends.json` 裡）、實體存在（issue 在該 backend 的 repo）而且標題等於 channel 名；任何一項不符 MUST 在請求上回報、MUST NOT 動檔。
+workflow MUST `on: issue_comment`（限註冊簿 issue）觸發，每次 run 從整串留言依時間序**重建** `channels.json` 並 commit 進 main（結果與 main 相同就不 commit）；MUST 用 `concurrency` 併發控制且 `cancel-in-progress`（新的取消舊的）——因為每次都從整串重建，被取消的 MUST NOT 遺失任何留言的效果。
 
-**併發與冪等**：每次 run MUST 從頭處理所有尚未完成的請求（drain：開放中、帶 label、沒有完成記號；被 GitHub 取消的 pending 由下一次 run 帶走），並有 `on: schedule` 定時 sweep。寫入 MUST 以 main 的最新版本為底（讀到該版本的 sha、只改自己那一筆、寫回帶 sha），被拒 MUST 重讀重試（上限 5 次）；兩個請求幾乎同時到達時 MUST NOT 遺失任何一筆；重試用盡 MUST 在請求上回報失敗（不留完成記號）。
+**套用規則（先到者為準）**：`register`——名字沒有對應就加上；已對應同一個實體視為成功（冪等）；已對應不同實體 MUST NOT 覆蓋，MUST 在註冊簿上回報。`unregister`——只移除指向同一個實體的對應；已經沒有、或指到別的實體 MUST NOT 改動對應，MUST 回報。
 
-**同名與註銷**：同名已有對應而且指到不同實體時 MUST NOT 覆蓋，MUST 回報「名字已被使用」；指到同一實體 MUST 視為成功（冪等）。`unregister` MUST 只移除指向同一個實體的對應；已經沒有那一筆 MUST 視為成功；指到別的實體 MUST NOT 動檔，MUST 回報。
+**輸入（防注入）**：留言內容 MUST 只經環境變數交給腳本，MUST NOT 用 `${{ }}` 插進 shell；JSON MUST 嚴格解析。每個留言 MUST 驗證：channel 名（`^[A-Za-z0-9_-]+$`）、backend 名存在（在 `backends.json` 裡）、實體存在（issue 在該 backend 的 repo）而且標題等於 channel 名；不符的留言 MUST 跳過並在註冊簿上回報，MUST NOT 影響其他留言的重建。
 
-**結果記號**：成功與失敗 MUST 留在請求可以看見的地方——workflow 留言的第一行 MUST 是 `angareion-wf: done`（成功，或依規則視為成功）或 `angareion-wf: rejected`（規則不符、不動檔），後面帶 action／channel／backend／issue 與結果；有記號的請求 MUST 跳過（重跑與 sweep 都冪等）；結果確定後 MUST 關閉請求 issue，暫時性失敗 MUST NOT 留記號（留著開放給 sweep 重試）。（請求的傳遞方式見 design §10。）
+**寫入**：以 main 的最新版本（sha）為底；被拒 MUST 重讀重試（上限 5 次）。
+
+**授權**：workflow MUST 只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言；其他留言 MUST 忽略（不採計、不影響重建）。防注入與驗證不是授權，照上面執行；不是合法 action 形狀的留言（含 workflow 的回報）MUST 忽略。
 
 #### Scenario: 註冊新 channel
-- **WHEN** workflow 收到 `{action: register, channel: X, backend: B, issue: N}`（B 在 backends.json、X 不在 channels.json）
-- **THEN** main 的 `channels.json` 出現 `{X: {backend: B, issue: N}}`；請求上留下成功的紀錄
+- **WHEN** 註冊簿上有一則 `register` 留言（`X`、backend `B`、issue `N`；B 在 `backends.json`、X 不在對應表）
+- **THEN** 重建後 main 的 `channels.json` 出現 `{X: {backend: B, issue: N}}`
 
-#### Scenario: 同名不覆蓋
-- **WHEN** 收到 `X` 的註冊，但 `channels.json` 已經有 `X` 指到別的實體
-- **THEN** `channels.json` 不變；請求上回報名字已被使用（不是成功）
+#### Scenario: 留言格式與重建
+- **WHEN** 註冊簿上有兩則合法留言（依時間序）：register `X`→B/N，之後 unregister `X`→B/N
+- **THEN** 重建後 `channels.json` 沒有 `X`；兩則都被採計（每次從整串重建）
 
-#### Scenario: 兩個註冊同時到
-- **WHEN** 兩個不同名字的註冊幾乎同時到達
-- **THEN** 兩筆對應都在 `channels.json`（沒有因為併發遺失或互相覆蓋）
+#### Scenario: 重建以先到者為準
+- **WHEN** 兩則 `register` 留言都註冊 `X`、指向不同實體（先 B1/N1、後 B2/N2）
+- **THEN** 重建後 `X` 指到 B1 的 N1（不覆蓋）；後到的留言被跳過，並在註冊簿上回報
+
+#### Scenario: 兩則註冊都採計
+- **WHEN** 兩則不同名字的 `register` 留言幾乎同時留下
+- **THEN** 兩筆對應都在 `channels.json`（沒有因為併發遺失）
 
 #### Scenario: 註銷
-- **WHEN** workflow 收到 `{action: unregister, channel: X, backend: B, issue: N}`，而 `channels.json` 的 `X` 指到 B 的 N
-- **THEN** `X` 從 `channels.json` 移除；請求上留下成功的紀錄
+- **WHEN** 一則 `unregister` 留言指到 `X` 目前的同一個實體
+- **THEN** 重建後 `X` 從 `channels.json` 移除
 
 #### Scenario: 註銷已經沒有或指到別人
-- **WHEN** 收到 `X` 的註銷，但 `channels.json` 已經沒有 `X`，或 `X` 指到別的實體
-- **THEN** 前者視為成功；後者不動檔並在請求上回報
-
-#### Scenario: 非授權帳號的請求
-- **WHEN** 一個不在授權名單的帳號開的請求（或由它加上 label 的請求）到達
-- **THEN** workflow 不處理、不動檔、不留完成記號
+- **WHEN** 一則 `unregister` 留言的 `X` 已經不在，或（依先前留言）指到別的實體
+- **THEN** 對應不變；留言在註冊簿上被回報（no-op）
 
 #### Scenario: issue 不存在或標題不符
-- **WHEN** 註冊請求指向的 backend repo 裡沒有那個 issue 編號，或它的標題不等於 channel 名
-- **THEN** 不動檔；請求上回報規則不符（`angareion-wf: rejected`）
+- **WHEN** 一則 `register` 留言指向的 backend repo 裡沒有那個 issue 編號，或它的標題不等於 channel 名
+- **THEN** 該留言被跳過（不進 `channels.json`）並在註冊簿上回報；其他留言照常重建
 
-#### Scenario: 被取消的請求由下一次 run 帶走
-- **WHEN** 一次註冊的 run 被 GitHub 取消、請求沒有完成記號
-- **THEN** 下一次 run（issue 事件或 `schedule` sweep）照樣處理它並完成（drain）
+#### Scenario: 非 OWNER／MEMBER／COLLABORATOR 的留言被忽略
+- **WHEN** 一則格式合法的留言，作者 `author_association` 不是 `OWNER`／`MEMBER`／`COLLABORATOR`
+- **THEN** 該留言被忽略（不進重建、不影響其他留言）
 
-#### Scenario: 重跑跳過已完成
-- **WHEN** 對一個已經有 `angareion-wf: done` 的請求重跑 workflow
-- **THEN** 不動檔、不重複處理（冪等）
+#### Scenario: 取消舊 run 不遺失
+- **WHEN** 一次重建 run 進行中，新留言觸發的 run 把它取消（`cancel-in-progress`）
+- **THEN** 新 run 從整串留言完整重建；沒有任何留言的效果遺失
+
+#### Scenario: 被取消後下一次 run 仍正確
+- **WHEN** 一次 run 被取消（還沒寫回 main），之後又一次 run（下一則留言或手動重跑）
+- **THEN** 重建結果仍正確包含全部合法留言（`channels.json` 完整）
+
+#### Scenario: 手動重跑安全
+- **WHEN** 對同一串留言 `workflow_dispatch` 重跑
+- **THEN** 重建結果相同（相同就不 commit）；檔案不變
 
 #### Scenario: 樂觀鎖重試用盡
 - **WHEN** 寫回 main 連續被拒 5 次
-- **THEN** 不動檔；請求上回報重試用盡、不留完成記號（留給下一次 run／sweep 再試）
+- **THEN** 不動 main；在註冊簿上回報；下一次 run 重建再試
 
 ### Requirement: 讀取與 pull
 angareion MUST 只讀本機複本（MyAiStorage 的 clone；路徑由個人設定 `config_dir` 給）——更新用 `git fetch`、讀檔用 `git show origin/main:<路徑>`，MUST NOT 依賴工作樹的狀態（本機改動、detached HEAD 都無妨）。新鮮度以 clone 裡 `FETCH_HEAD` 的 mtime 判斷（沒有就視為很久以前）。每個要用設定檔的指令一開始，若上次 fetch 超過 `config_pull_interval`（預設 900 秒；0＝不按週期拉）MUST 試一次 fetch：同機並行 MUST 以鎖檔避免、請求 MUST 有逾時（20 秒）；`wait` 的輪詢中 MUST NOT fetch。查無 channel 時 MUST 忽略間隔先 fetch 一次再判斷（距上次 fetch 少於 30 秒則跳過）；`channel create` 送出後 MUST 輪詢 fetch 到對應出現（上限 2 分鐘，逾時印提示、exit 0）——查無與 create 的事件驅動 fetch 在 `config_pull_interval=0` 時仍會做。fetch 失敗時 MUST 沿用目前的複本（stderr 警告；exit code 不因此改變）；複本缺失或不是合法 JSON MUST exit 2 並說明缺什麼。
