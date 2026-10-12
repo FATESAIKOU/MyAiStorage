@@ -52,10 +52,12 @@ FAKE_OPENCODE_DROP_PART=<n>  drop the <n>th part of every message but keep the
 FAKE_OPENCODE_SLEEP=<s>  sleep before doing anything (for timeout tests)
 FAKE_OPENCODE_LEAVE=<id> import refuses: "Expected a string starting with msg"
 FAKE_OPENCODE_EXPORT_SCOPE=project  export only finds sessions of $PWD's project
-FAKE_OPENCODE_REQUIRE_V2=1  refuse a v1 nested payload the way opencode 2.x does
-                         (`SchemaError: Missing key at ["info"]["location"]`);
-                         off by default, because the adapter's v1 write path is
-                         still what the step-1 tests exercise (step 2 replaces it)
+FAKE_OPENCODE_REQUIRE_V2  how the v1 nested payload is treated: the 2.x spelling
+                         (`session import`) refuses it by default with
+                         `SchemaError: Missing key at ["info"]["location"]`, like
+                         the real 2.x; the 1.x spelling (`import`) accepts it, so
+                         the adapter's v1 write path (step 2 replaces it) stays
+                         testable. `=1` refuses on both spellings, `=0` on neither.
 """
 
 from __future__ import annotations
@@ -139,6 +141,15 @@ def is_v2(payload: dict) -> bool:
     rows = payload.get("messages") or []
     return any(isinstance(row, dict) and isinstance(row.get("type"), str) for row in rows) and \
         not any(isinstance(row, dict) and isinstance(row.get("info"), dict) for row in rows)
+
+
+def require_v2() -> bool:
+    """Whether this call must refuse a v1 payload: yes for the 2.x spelling
+    (`session import`), unless the variable is `0`; `1` refuses either spelling."""
+    value = os.environ.get("FAKE_OPENCODE_REQUIRE_V2")
+    if value == "0":
+        return False
+    return value == "1" or argv[:2] == ["session", "import"]
 
 
 def directory_of(payload: dict) -> str | None:
@@ -295,9 +306,14 @@ def do_import(params: list[str]):
     if os.environ.get("FAKE_OPENCODE_LEAVE"):
         die('Error: Unexpected error\n\nExpected a string starting with "msg", got "m0"')
     payload = json.loads(Path(positional(params, ("--directory",))[0]).read_text(encoding="utf-8"))
-    if os.environ.get("FAKE_OPENCODE_REQUIRE_V2") and not is_v2(payload):
-        # What opencode 2.0.26 answers to a v1 nested payload (spike 1.2 §A).
+    if not is_v2(payload) and require_v2():
+        # What opencode 2.0.26 answers to a v1 nested payload (spike 1.2 §A). The
+        # refusal follows the syntax: `session import` is 2.x's spelling and 2.x
+        # has no v1 payload, while the 1.x spelling (`import`) keeps accepting one
+        # so the adapter's v1 write path (step 2 replaces it) stays testable.
+        # `FAKE_OPENCODE_REQUIRE_V2=1` refuses on both spellings, `=0` on neither.
         die('SchemaError: Missing key at ["info"]["location"]')
+
     directory = flag_value(params, "--directory")
     if directory:
         set_directory(payload, directory)

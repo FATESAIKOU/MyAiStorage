@@ -356,12 +356,29 @@ def test_import_lands_the_session_in_the_directory_it_was_told(fake, workdir):
     assert stored(fake, payload["info"]["id"])["info"]["location"]["directory"] == str(workdir)
 
 
-def test_the_fake_refuses_a_v1_payload_when_it_simulates_v2(fake, workdir, monkeypatch):
-    """opencode 2.0.26's answer to a v1 nested payload; the fake only says it when
-    asked, because step 1 still exercises the v1 write path (step 2 replaces it)."""
-    monkeypatch.setenv("FAKE_OPENCODE_REQUIRE_V2", "1")
-    with pytest.raises(AgentError, match="SchemaError"):
-        oc.ADAPTER._import(json.loads(raw()), workdir)
+def test_the_fake_refuses_a_v1_payload_the_way_2x_does(fake, tmp_path, monkeypatch):
+    """The refusal follows the syntax, like the real 2.x: `session import` (2.x's
+    spelling) has no v1 payload, the 1.x spelling (`import`) still accepts one so
+    the adapter's v1 write path (step 2 replaces it) stays testable; `=0` turns the
+    refusal off, `=1` refuses on both spellings."""
+    v1 = tmp_path / "v1.json"
+    v1.write_text(raw().decode("utf-8"))
+    wrapper = os.environ["AGORA_OPENCODE_CMD"]
+
+    def call(*args, **extra):
+        env = {**os.environ, **extra}
+        return subprocess.run([wrapper, *args], capture_output=True, text=True, env=env)
+
+    refused = call("session", "import", str(v1))
+    assert refused.returncode != 0
+    assert 'SchemaError: Missing key at ["info"]["location"]' in refused.stderr
+
+    accepted = call("import", str(v1))                       # the 1.x spelling
+    assert accepted.returncode == 0
+    assert call("session", "import", str(v1),
+                FAKE_OPENCODE_REQUIRE_V2="0").returncode == 0
+    both = call("import", str(v1), FAKE_OPENCODE_REQUIRE_V2="1")
+    assert both.returncode != 0 and "SchemaError" in both.stderr
 
 
 def test_a_v2_fork_is_refused_before_anything_is_imported(fake, workdir):
@@ -418,16 +435,18 @@ def _masked(payload: dict) -> str:
 
 
 def test_start_native_imports_then_opens_the_new_session(fake, workdir):
-    launch = oc.ADAPTER.start_native(raw(), workdir)
+    """A v2 source: on a 2.x opencode a v1 raw cannot be loaded at all (the fake
+    refuses it like the real one), so the load path's tests run on the v2 fixture."""
+    launch = oc.ADAPTER.start_native(v2(), workdir)
     assert launch.cwd == str(workdir)
     assert launch.argv[0].endswith("opencode")
     assert launch.argv[1:] == ["--session", launch.agent_session_id]
     assert launch.agent_session_id.startswith("ses_")
-    assert launch.before_count == 4
+    assert launch.before_count == 5     # the user/assistant rows; the 2 idle rows are not
 
     landed = stored(fake, launch.agent_session_id)
-    assert "ZZSRCID-000000000000000" not in json.dumps(landed, ensure_ascii=False)
-    assert len(landed["messages"]) == 4
+    assert "ZZV2BASIC" not in json.dumps(landed, ensure_ascii=False)
+    assert len(landed["messages"]) == 7    # 5 conversation rows, 2 idle rows
     # the cwd of the import is the launch cwd (H1 / spike V5)
     cwds = (fake / "opencode-cwd.log").read_text().split()
     assert cwds[-2:] == [str(workdir), str(workdir)]
@@ -436,16 +455,17 @@ def test_start_native_imports_then_opens_the_new_session(fake, workdir):
 def test_start_native_twice_gives_two_independent_sessions(fake, workdir):
     """The reason ids must be re-identified: the second import keeps its own
     messages instead of silently landing as an empty session (spike V1b)."""
-    first = oc.ADAPTER.start_native(raw(), workdir)
-    second = oc.ADAPTER.start_native(raw(), workdir)
+    first = oc.ADAPTER.start_native(v2(), workdir)
+    second = oc.ADAPTER.start_native(v2(), workdir)
     assert first.agent_session_id != second.agent_session_id
-    assert len(stored(fake, second.agent_session_id)["messages"]) == 4
+    assert len(stored(fake, second.agent_session_id)["messages"]) == 7
 
 
 def test_start_native_keeps_the_source_session_untouched(fake, workdir):
-    before = (fake / "opencode-sessions" / "default.json").read_bytes()
-    oc.ADAPTER.start_native(raw(), workdir)
-    assert (fake / "opencode-sessions" / "default.json").read_bytes() == before
+    seed(fake, "oc-v2-basic.json", "v2source")
+    before = (fake / "opencode-sessions" / "v2source.json").read_bytes()
+    oc.ADAPTER.start_native(v2(), workdir)
+    assert (fake / "opencode-sessions" / "v2source.json").read_bytes() == before
 
 
 def test_start_native_detects_a_short_import_and_cleans_up(fake, workdir, monkeypatch):
@@ -453,7 +473,7 @@ def test_start_native_detects_a_short_import_and_cleans_up(fake, workdir, monkey
     that notices, and the half-built session must not be left behind (trap 4)."""
     monkeypatch.setenv("FAKE_OPENCODE_DROP", "2")
     with pytest.raises(AgentError, match="數量不對"):
-        oc.ADAPTER.start_native(raw(), workdir)
+        oc.ADAPTER.start_native(v2(), workdir)
     assert list((fake / "opencode-sessions").glob("*.json")) == \
         [fake / "opencode-sessions" / "default.json"]
 
@@ -505,17 +525,19 @@ def test_native_payload_has_every_field_opencode_needs(fake):
 
 def test_collect_returns_nothing_when_the_agent_was_quiet(fake, workdir, monkeypatch):
     monkeypatch.setenv("FAKE_AGENT_MODE", "noop")
-    launch = oc.ADAPTER.start_native(raw(), workdir)
+    launch = oc.ADAPTER.start_native(v2(), workdir)
     assert oc.ADAPTER.collect(launch) is None
 
 
 def test_collect_returns_the_grown_session(fake, workdir, monkeypatch):
     monkeypatch.setenv("FAKE_AGENT_MODE", "append")
-    launch = oc.ADAPTER.start_native(raw(), workdir)
+    launch = oc.ADAPTER.start_native(v2(), workdir)
     subprocess.run(launch.argv, cwd=launch.cwd, check=True)
     exported = oc.ADAPTER.collect(launch)
     assert exported is not None
     assert exported.session_id == launch.agent_session_id
+    # the fake's append adds a user, an assistant and an idle row; only the first
+    # two are conversation (M8), so the count grows by exactly 2
     assert exported.message_count == launch.before_count + 2
     assert "ZZAPPEND" in base.reading(oc.ADAPTER, exported.raw)
 
@@ -569,7 +591,7 @@ def test_an_export_cannot_read_the_terminal(fake, monkeypatch):
 
 def test_never_touches_the_real_opencode_storage(fake, workdir):
     """design.md section 7: the user's own sessions must stay unreadable here."""
-    oc.ADAPTER.start_native(raw(), workdir)
+    oc.ADAPTER.start_native(v2(), workdir)
     assert os.environ["HOME"].endswith("home")  # conftest points HOME at tmp_path
     assert not Path(os.environ["HOME"], ".local/share/opencode").exists()
 
@@ -627,15 +649,10 @@ def test_part_ids_sort_by_message_then_by_part(fake):
     assert sorted(firsts) == firsts
 
 
-def test_import_verification_counts_parts_not_only_messages(fake, workdir, monkeypatch):
-    """The fake keeps every message but drops a part, which is exactly what an id
-    collision inside one message looks like from the outside."""
-    monkeypatch.setenv("FAKE_OPENCODE_DROP_PART", "1")
-    with pytest.raises(AgentError, match="數量不對"):
-        oc.ADAPTER.start_native(raw(), workdir)
-    assert list((fake / "opencode-sessions").glob("*.json")) == \
-        [fake / "opencode-sessions" / "default.json"]
-
+# The v1 part-count layer of `_import_verified` has no test any more: on a 2.x
+# opencode a v1 payload is refused before any counting happens (the fake models
+# that), and the v2 layer - the assistant rows' content items - is step 2 (M2),
+# which brings the v2 analogue of the fake's FAKE_OPENCODE_DROP_PART with it.
 
 # --- OC2: only structural ids are rewritten -------------------------------
 
@@ -757,15 +774,16 @@ def test_native_output_carries_id_prefixes_opencode_accepts(fake):
     assert len(set(ids)) == len(ids)          # unique inside the payload
 
 
-def test_native_loads_through_start_native(fake, workdir):
-    """The whole point: turns -> native -> start_native, no injection path."""
+def test_a_v1_load_is_refused_by_a_2x_opencode(fake, workdir):
+    """native() still writes the v1 shape (step 2 replaces it), and a 2.x opencode
+    refuses to load one - loudly, which is exactly what step 1 buys: the old write
+    path cannot quietly produce an empty or half Session any more."""
     built = oc.ADAPTER.native(oc.ADAPTER.turns(raw()))
-    launch = oc.ADAPTER.start_native(built, workdir)
-    assert launch.before_count == len(json.loads(built)["messages"])
-    landed = stored(fake, launch.agent_session_id)
-    assert [m["info"]["role"] for m in landed["messages"]] == \
-        [m["info"]["role"] for m in json.loads(built)["messages"]]
-    assert "ZZTOOLOUT" not in json.dumps(landed, ensure_ascii=False)
+    with pytest.raises(AgentError, match="SchemaError"):
+        oc.ADAPTER.start_native(built, workdir)
+    # nothing landed, and the half-built session did not stay behind either
+    assert list((fake / "opencode-sessions").glob("*.json")) == \
+        [fake / "opencode-sessions" / "default.json"]
 
 
 def test_an_attachment_opencode_inlined_produces_no_line(fake):
@@ -841,9 +859,10 @@ def test_append_native_picks_ids_a_session_of_its_own_cannot_have(fake, workdir)
     assert len(set(ids)) == len(ids)
     assert {i for i in ids if i not in before} == \
         {f"msg_agoraa{n}" for n in (0, 1)} | {f"prt_agoraa{n}-0" for n in (0, 1)}
-    # and it still loads: one row per message, none of them merged away
-    assert oc.ADAPTER.start_native(oc.ADAPTER.append_native(forked, FORK),
-                                   workdir).before_count == len(after)
+    # the payload it built is still a v1 one, so a 2.x opencode refuses to load it
+    # (the load itself is step 2, with a v2 append)
+    with pytest.raises(AgentError, match="SchemaError"):
+        oc.ADAPTER.start_native(oc.ADAPTER.append_native(forked, FORK), workdir)
 
 
 def test_append_native_copies_the_model_a_was_using(fake):
@@ -912,7 +931,10 @@ def test_append_native_leaves_a_itself_untouched(fake, workdir):
     before = (fake / "opencode-sessions" / "default.json").read_bytes()
     out = oc.ADAPTER.append_native(raw(), FORK)
     assert json.loads(out)["info"].get("revert") is None
-    oc.ADAPTER.start_native(out, workdir)
+    # the copy is still a v1 payload, so the 2.x fake refuses to load it - and
+    # either way nothing was written back into A's own file
+    with pytest.raises(AgentError, match="SchemaError"):
+        oc.ADAPTER.start_native(out, workdir)
     assert (fake / "opencode-sessions" / "default.json").read_bytes() == before
 
 
@@ -1080,58 +1102,26 @@ def test_append_native_of_an_undo_point_that_is_not_there_only_clears_it(fake):
     assert len(json.loads(out)["messages"]) == 6
 
 
-def test_start_native_counts_the_turns_the_fork_added(fake, workdir):
-    """before_count is how `collect` tells "the user said something" from "they
-    opened it and left", so the fork's turns have to be in it from the start."""
-    raw_bytes = unreverted()
-    before = oc.ADAPTER.start_native(raw_bytes, workdir).before_count
-    launch = oc.ADAPTER.start_native(oc.ADAPTER.append_native(raw_bytes, FORK), workdir)
-    assert launch.before_count == before + len(FORK)
-    landed = stored(fake, launch.agent_session_id)
-    assert [m["info"]["role"] for m in landed["messages"]] == \
-        ["user", "assistant", "user", "assistant", "user", "assistant"]
-    assert "ZZFORK" in base.format_reading(oc.ADAPTER.turns(
-        json.dumps(landed, ensure_ascii=False).encode("utf-8")))
-
-
-def test_start_native_of_a_reverted_fork_counts_the_survivors(fake, workdir):
-    launch = oc.ADAPTER.start_native(oc.ADAPTER.append_native(raw(), FORK), workdir)
-    assert launch.before_count == 4        # two survivors and the two fork turns
-
-
-def test_collect_of_a_fork_says_nothing_when_the_user_says_nothing(fake, workdir, monkeypatch):
-    monkeypatch.setenv("FAKE_AGENT_MODE", "noop")
-    launch = oc.ADAPTER.start_native(oc.ADAPTER.append_native(unreverted(), FORK), workdir)
-    assert oc.ADAPTER.collect(launch) is None
-
-
-def test_collect_of_a_fork_returns_what_the_user_added(fake, workdir, monkeypatch):
-    monkeypatch.setenv("FAKE_AGENT_MODE", "append")
-    launch = oc.ADAPTER.start_native(oc.ADAPTER.append_native(unreverted(), FORK), workdir)
-    subprocess.run(launch.argv, cwd=launch.cwd, check=True, capture_output=True)
-    exported = oc.ADAPTER.collect(launch)
-    assert exported is not None
-    assert exported.message_count == launch.before_count + 2
-    assert "ZZAPPEND" in base.reading(oc.ADAPTER, exported.raw)
+# The fork's end-to-end count tests (before_count includes the fork's turns, a
+# reverted fork counts the survivors, collect reads a fork) wait for step 2: their
+# premise was "opencode loads the v1 payload append_native builds", and a 2.x
+# opencode refuses exactly that - the fake now models it, and a v2 append is what
+# step 2 writes (M1).
 
 
 # --- the loaded session is verified and the wreckage goes -----------------
 
 
-def test_a_short_import_is_detected_on_the_native_path_too(fake, workdir, monkeypatch):
-    """There is one load path now, so this check covers both (OC3)."""
-    monkeypatch.setenv("FAKE_OPENCODE_DROP", "0")
-    with pytest.raises(AgentError, match="數量不對"):
-        oc.ADAPTER.start_native(oc.ADAPTER.native(oc.ADAPTER.turns(raw())), workdir)
-    assert list((fake / "opencode-sessions").glob("*.json")) == \
-        [fake / "opencode-sessions" / "default.json"]
-
+# `test_a_short_import_is_detected_on_the_native_path_too` is gone with the v1
+# load: what it pinned ("there is one load path, so the count check covers both")
+# now runs on the v2 fixture in `test_start_native_detects_a_short_import_and_
+# cleans_up`, and a native() payload is refused before any counting happens.
 
 def test_a_failed_delete_is_reported_as_such(fake, workdir, monkeypatch):
     monkeypatch.setenv("FAKE_OPENCODE_DROP", "0")
     monkeypatch.setenv("FAKE_OPENCODE_FAIL", "delete")
     with pytest.raises(AgentError) as e:
-        oc.ADAPTER.start_native(oc.ADAPTER.native(oc.ADAPTER.turns(raw())), workdir)
+        oc.ADAPTER.start_native(v2(), workdir)
     assert "刪不掉" in str(e.value) and "opencode session delete" in str(e.value)
 
 
@@ -1189,9 +1179,9 @@ def test_collect_reports_the_model_the_agent_just_used(fake, workdir, monkeypatc
     imported transcript ended with: the appended turn names it."""
     monkeypatch.setenv("FAKE_AGENT_MODE", "append")
     monkeypatch.setenv("FAKE_OPENCODE_MODEL", model)
-    launch = oc.ADAPTER.start_native(raw(), workdir)
+    launch = oc.ADAPTER.start_native(v2(), workdir)
     assert launch.before_count and oc.ADAPTER.export(
-        launch.agent_session_id).model == "muse-spark-1.3-contributor-free"
+        launch.agent_session_id).model == "fake-model"
     subprocess.run(launch.argv, cwd=launch.cwd, check=True)
     assert oc.ADAPTER.collect(launch).model == model
 

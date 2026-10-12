@@ -88,7 +88,10 @@ def opencode_lab(tmp_path, monkeypatch):
     _with_fakes(tmp_path, monkeypatch)
     fh = tmp_path / "fh"
     (fh / "opencode-sessions").mkdir(parents=True)
-    shutil.copyfile(OC_FIX / "oc-basic.json", fh / "opencode-sessions" / "default.json")
+    # a 2.x opencode cannot load a v1 payload, so the lab's own session is the v2
+    # fixture; the continue (start_native -> import) is what needs it (review of
+    # step 1: the fake models 2.x for `session import`)
+    shutil.copyfile(OC_FIX / "oc-v2-basic.json", fh / "opencode-sessions" / "default.json")
     monkeypatch.setenv("AGORA_OPENCODE_CMD", str(_wrapper(tmp_path, "opencode", FAKE_OPENCODE)))
     monkeypatch.setattr(cli, "load_agent", lambda name: OC.ADAPTER)
     work = tmp_path / "work"

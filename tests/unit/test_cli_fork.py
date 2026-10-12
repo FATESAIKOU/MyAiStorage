@@ -935,37 +935,39 @@ def test_the_real_claude_adapter_forks(env, capsys, tmp_path, monkeypatch, mode)
         assert "ZZSAY" in document_of(b)
 
 
-@pytest.mark.parametrize("mode", ["noop", "append"])
-def test_the_real_opencode_adapter_forks(env, capsys, tmp_path, monkeypatch, mode):
-    """P2: the same path through opencode's own import/export round trip."""
+def test_the_real_opencode_adapter_cannot_fork_yet(env, capsys, tmp_path, monkeypatch):
+    """P2's premise was "opencode loads the v1 payload append_native builds"; a 2.x
+    opencode refuses exactly that (the fake models it), and a v2 raw is refused
+    before the agent starts. Both refusals are loud, and the Session stays
+    untouched - the fork path itself works again when step 2 writes the v2 append."""
     from agora.agents import opencode as oc
     fh = tmp_path / "fh"
     (fh / "opencode-sessions").mkdir(parents=True)
-    shutil.copyfile(OC_FIX / "oc-basic.json", fh / "opencode-sessions" / "default.json")
+    shutil.copyfile(OC_FIX / "oc-v2-basic.json", fh / "opencode-sessions" / "default.json")
+    shutil.copyfile(OC_FIX / "oc-basic.json", fh / "opencode-sessions" / "old.json")
     monkeypatch.setenv("FAKE_HOME", str(fh))
     monkeypatch.setenv("AGORA_OPENCODE_CMD", str(_wrapper(tmp_path, "opencode", FAKE_OPENCODE)))
-    monkeypatch.setenv("FAKE_AGENT_MODE", mode)
     monkeypatch.setattr(cli, "load_agent", lambda name: oc.ADAPTER)
     work = tmp_path / "work"
     work.mkdir()
 
-    code, a, err = run(capsys, "import", "session", "--external-session-id", "default",
-                       "--agent", "opencode")
+    code, importing, err = run(capsys, "import", "session", "--external-session-id",
+                               "default", "--agent", "opencode")
     assert code == 0, err
-    before = document_of(a)
+    before = document_of(importing)
+    code, _b, err = run(capsys, "continue", "session", importing, "--agent", "opencode",
+                        "--fork", "--dir", str(work))
+    assert code != 0 and "還不能 fork" in err
+    assert document_of(importing) == before
 
-    code, b, err = run(capsys, "continue", "session", a, "--agent", "opencode", "--fork",
-                       "--dir", str(work))
-
+    code, old, err = run(capsys, "import", "session", "--external-session-id",
+                         "old", "--agent", "opencode")
     assert code == 0, err
-    assert b != a
-    hdr = header_of(b)
-    assert h.agora_of(hdr)["relation"] == "fork"
-    assert document_of(a) == before
-    body = document_of(b)
-    assert "fork" in body
-    if mode == "append":
-        assert "ZZAPPEND" in body
+    old_document = document_of(old)
+    code, _b, err = run(capsys, "continue", "session", old, "--agent", "opencode",
+                        "--fork", "--dir", str(work))
+    assert code != 0 and "SchemaError" in err      # v1 payload, like the real 2.x
+    assert document_of(old) == old_document
 
 
 # --- the shared fakes answer the whole protocol (C12) ---------------------------------
