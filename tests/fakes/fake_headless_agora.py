@@ -19,7 +19,8 @@ continue: prints the fixed stderr lines - `agora-session <id>`,
        and exits 0 (the gentle stop's "last write-back").
 
 Knobs: FAKE_AGORA_SESSION, FAKE_AGORA_AGENT_SESSION, FAKE_AGORA_NO_AGENT_LINE,
-FAKE_AGORA_NO_PORT_LINE, FAKE_AGORA_EXIT_EARLY, FAKE_AGORA_REFUSE_TERM.
+FAKE_AGORA_NO_PORT_LINE, FAKE_AGORA_EXIT_EARLY, FAKE_AGORA_REFUSE_TERM,
+FAKE_AGORA_LATE_LINE (printed on stderr 0.5s after the fixed lines).
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ import os
 import signal
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -80,6 +82,14 @@ if "--headless-port" in argv:
 
 if os.environ.get("FAKE_AGORA_EXIT_EARLY"):
     sys.exit(3)
+
+late_line = os.environ.get("FAKE_AGORA_LATE_LINE")
+if late_line:
+    def _late_line() -> None:
+        time.sleep(0.5)
+        print(late_line, file=sys.stderr, flush=True)
+
+    threading.Thread(target=_late_line, daemon=True).start()
 
 
 def _gentle_stop(signum, frame):

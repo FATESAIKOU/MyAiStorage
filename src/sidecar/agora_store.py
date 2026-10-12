@@ -57,13 +57,14 @@ class AgoraProcess:
     `stdout` is the agent's own stream (Claude Code's stream-json); `port` and
     `agent_session_id` come from the fixed stderr lines and are what the
     opencode driver needs.  A background thread keeps draining stderr so the
-    child can never block on a full pipe.
+    child can never block on a full pipe; `stderr_lines` is that pump's live
+    deque, so `stderr_tail()` also sees lines printed *after* the start.
     """
 
     proc: subprocess.Popen
     port: int | None = None
     agent_session_id: str | None = None
-    stderr_lines: list[str] = field(default_factory=list)
+    stderr_lines: Sequence[str] = field(default_factory=list)
 
     @property
     def stdout(self) -> Any:
@@ -102,7 +103,12 @@ class AgoraProcess:
         return terminate_process(self.proc, timeout=timeout)
 
     def stderr_tail(self) -> str:
-        return "\n".join(self.stderr_lines[-10:])[-ERROR_TAIL_CHARS:]
+        """The latest lines, read from the live deque at call time (M5)."""
+        try:
+            lines = list(self.stderr_lines)
+        except RuntimeError:  # the pump appended while we were copying
+            lines = []
+        return "\n".join(lines[-10:])[-ERROR_TAIL_CHARS:]
 
 
 class _StderrPump:
@@ -308,7 +314,7 @@ class AgoraSessionStore:
             proc=proc,
             port=int(found["agora-port "]) if "agora-port " in found else None,
             agent_session_id=found.get("agora-agent-session ") or None,
-            stderr_lines=list(pump.lines),
+            stderr_lines=pump.lines,  # live deque (M5): keep seeing new lines
         )
         return RunningSession(session_id=session_id, process=process)
 

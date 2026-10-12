@@ -176,6 +176,25 @@ def test_refusing_sigterm_escalates_to_sigkill(tmp_path, monkeypatch):
     assert not (fh / "agora-stopped").exists()  # SIGKILL never writes back (D6)
 
 
+def test_stderr_tail_sees_lines_printed_after_start(store, monkeypatch):
+    """M5: the process holds the pump's live deque, not a start-time snapshot."""
+    built, fh, workdir = store
+    monkeypatch.setenv("FAKE_AGORA_LATE_LINE", "late error: boom after start")
+    running = built.start(
+        mode="continue", ids=["agora:A"], by="claude-code", agent="claude-code",
+        workdir=workdir, tag="sidecar:t1", env={},
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if "late error: boom after start" in running.process.stderr_tail():
+                break
+            time.sleep(0.05)
+        assert "late error: boom after start" in running.process.stderr_tail()
+    finally:
+        running.process.terminate(timeout=5.0)
+
+
 def test_merge_timeout_is_bounded(tmp_path, monkeypatch):
     """N2: a hung `agora merge` returns within merge_timeout, not forever."""
     fh = tmp_path / "fh"
