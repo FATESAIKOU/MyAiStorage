@@ -61,6 +61,29 @@ def real_opencode() -> str | None:
 
 
 @functools.lru_cache(maxsize=None)
+def session_export_supported() -> bool:
+    """Whether this opencode has the 2.x `session export` subcommand.
+
+    opencode 1.x has `opencode export` at the top level; 2.x moved export/import
+    under `session` and made them server operations (change agora-opencode-v2,
+    design 2). The integration tests in this repository still speak the 1.x CLI
+    (they are updated in step 5 of that change), so they ask this first and skip
+    themselves on a 2.x machine - instead of running against a CLI that cannot
+    answer them, and instead of letting the 2.x CLI reach for the shared managed
+    service (default port 49374) while they do.
+    """
+    real = real_opencode()
+    if real is None:
+        return False
+    try:
+        proc = subprocess.run([real, "session", "--help"], capture_output=True,
+                              text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0 and "export" in (proc.stdout or "")
+
+
+@functools.lru_cache(maxsize=None)
 def models_of(provider: str) -> frozenset[str]:
     """The model ids this machine has for `provider` (empty if it has none)."""
     real = real_opencode()
