@@ -2587,8 +2587,14 @@ def test_reaching_the_top_after_everything_is_here_adds_nothing():
 
 
 def test_a_moving_cursor_reads_nothing(monkeypatch):
-    """T6: only once the cursor has come to rest for ~150 ms. Moving through a list must
-    not read or lay out anything per keystroke."""
+    """T6: only once the cursor has come to rest. Moving through a list must
+    not read or lay out anything per keystroke.
+
+    The rest timer is captured instead of waited on: under load the keystrokes
+    themselves can span the ~150 ms rest window, and the test was reading the
+    scheduler instead of the behaviour. Firing the pending timer by hand is
+    the cursor coming to rest, deterministically.
+    """
     hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
     paths, _index_ = _index((hdr, _big_body()), (_hdr("01EEEEEEEEEEEEEEEEEEEEEEEE", "小的", sid="ses_b"), "## user\nx\n"))
     app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
@@ -2600,14 +2606,39 @@ def test_a_moving_cursor_reads_nothing(monkeypatch):
         return real(*a, **kw)
     monkeypatch.setattr(tui, "read_tail", counting)
 
+    pending: list = []
+    real_set_timer = app.set_timer
+    rest = app.settled
+
+    class FakeTimer:
+        def __init__(self, callback):
+            self.callback = callback
+            self.stopped = False
+
+        def stop(self):
+            self.stopped = True
+
+    def fake_set_timer(delay, callback, *args, **kwargs):
+        if callback == rest:            # the "the cursor came to rest" timer
+            timer = FakeTimer(callback)
+            pending.append(timer)
+            return timer
+        return real_set_timer(delay, callback, *args, **kwargs)
+    monkeypatch.setattr(app, "set_timer", fake_set_timer)
+
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
+            pending.clear()              # forget the startup timer: it never fired
+            calls.clear()
             for _ in range(6):
                 await pilot.press("down")
                 await pilot.press("up")
             assert calls == [], f"read while the cursor was moving: {len(calls)}"
-            await pilot.pause(0.5)
+            live = [t for t in pending if not t.stopped]
+            assert len(live) == 1, f"one rest read armed, not {len(live)}"
+            live[0].callback()           # the cursor comes to rest
+            await pilot.pause()
             assert calls, "and once it rests, it does read"
     _run(go)
 
