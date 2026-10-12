@@ -110,3 +110,66 @@
 **格式嗅探、v1 讀取保留／寫入只 v2、舊 raw 同 agent 接續拒絕**：讀寫分離的設計本身是對的；拒絕發生在 `start_native`／`append_native` 內（`cli.py:1350-1365`），那時 pending record 還沒寫（`cli.py:1413`），所以「原 Session 與 raw 不被改動」成立。會出事的是：PR 1 與 2 之間的靜默空閱讀版（H1）、`append_native` 的 v1 helper（M1）、part 計數（M2）、補救路徑的宣稱（M5）、1.x CLI 的消失沒被宣告（L7）。
 
 **測試與改壞驗證是否可行、隔離 XDG 對不對**：單元層（fake＋fixture）可行。真 opencode 層：XDG＋HOME 是對的方向但不夠，要加埠（H2）、環境變數清單（L3）、conftest 護欄（M5）、可重現的 fake upstream（M6）。
+
+---
+
+# 修正的確認
+
+- 對象：作者的 56a914f（修正）與 b92d52b（`batch-commands` delta）；PM 決定全部照上面的建議。只讀 `openspec/changes/agora-opencode-v2/` 的 proposal／design／tasks／三份 delta spec；沒有讀 `~/.config`、憑證、真實 opencode 資料，沒有連網。
+- 行號是這兩個 commit 之後的 `tasks.md`（T）、`design.md`（D）與各 spec。
+
+## 結論
+
+**可以開工**，條件是開工前在 2.6 補一句（N1，Medium）。H1、H2、M1～M8、L1～L7 共 17 項都照建議修好；另有 1 項 Medium、4 項 Low 的新問題，只有 N1 需要在開工前處理，其餘在實作時順手處理即可。
+
+## 逐項確認
+
+| 項 | 判定 | 落點 |
+|---|---|---|
+| H1 | 修好 | `turns()`／`_lines_of()` 進 PR 1（T:13 的 1.8）；測試「匯入 v2 fixture 後 body 有段落」（T:17 的 1.12、D:81）；改壞驗證含「turns 漏掉工具行」（T:18） |
+| H2 | 修好 | 隔離環境先改埠（T:7 的 1.2、D:69）；「拿掉 `--standalone`」只對 fake 做（T:18 的 1.13、T:79 的 5.6、D:123）；前後確認 49374（T:19 的 1.14、T:78 的 5.5） |
+| M1 | 修好 | 五個 helper 逐個點名（T:31 的 2.3、D:56-61）；測試與改壞驗證（T:35 的 2.7、T:37 的 2.9） |
+| M2 | 修好 | v2「part」＝assistant 列 `content` 項目數（T:32 的 2.4、D:84）；spec 的句子已改成可滿足的說法（`session-continue/spec.md:18`） |
+| M3 | 修好 | 非 headless 路徑列成 5.2（T:75）；5.1 要求 `--sync-period` > 0（T:74）；替身只證明參數（D:128） |
+| M4 | 修好 | 3.1 先量（T:47）、id 聯集（T:48 的 3.2）、測試與改壞驗證（T:51、52）；`interactive-mode` delta 已同步 |
+| M5 | 部分修好，見 N1 | 訊息誠實（T:33 的 2.5、`session-continue/spec.md:45`）；conftest 護欄（T:15 的 1.10、D:124）；turns 變少不覆蓋（T:34 的 2.6、`batch-commands/spec.md:6`） |
+| M6 | 修好 | fake upstream 是 1.1 的前置交付物並有出口（T:6）；驗 v2 用 fake upstream、要紅不是 skip（T:79、D:126）；殘留一處不一致見 N5 |
+| M7 | 修好 | server 上下文與 `opencode_noninteractive.py` 全進 PR 1（T:9 的 1.4）；PR 3、4 在 PR 1 之後並行（T:42、57、D:97） |
+| M8 | 修好（時機見 N4） | `message_count` 只算 user／assistant（T:32、D:83）；spec 加了「只開 agent 沒說話 MUST NOT 寫回」（`session-continue/spec.md:22`、Scenario :28-30）；測試（T:35、36） |
+| L1 | 修好 | 每列同質、混合報錯（T:8 的 1.3、D:34）；五種情形與改壞驗證（T:17、18） |
+| L2 | 修好 | 去識別化清單與 fake upstream 產生（T:7、D:74） |
+| L3 | 修好 | 清 `OPENCODE_*`、pytest 外設 `AGORA_*`／`RCLONE_CONFIG`（T:7、D:70） |
+| L4 | 修好 | 1.5 在 PR 1 量 `--server`（T:10、D:49）；相衝就在 PR 1 內改 `_server_args()` |
+| L5 | 修好 | 版本／語法探測（T:16 的 1.11、D:125），5.3 拔掉（T:76） |
+| L6 | 修好 | 斷言 fixture 至少一個跨訊息參照（T:7、D:75） |
+| L7 | 修好 | 「不再支援 1.x 的 CLI」在 Non-Goals（D:27）、作者提議（D:150）、proposal（:17）、Migration（D:180）；其餘四項（覆蓋 v1 raw、idle 語意、conftest、fake upstream）也都列進 D:151-154 |
+
+另確認：`batch-commands` 的 MODIFIED 包含主 spec 該 Requirement 的全部既有 Scenario（「其中一個失敗」「中斷後重跑」），不會漏；proposal 的 Capabilities 三項與三份 delta 一致；tasks 的 §6 對照表指到新的 1.x／2.x 編號。
+
+## 新問題
+
+**N1（Medium）　「turns 變少就不覆蓋」沒有出口，且範圍是所有 agent**
+- `batch-commands/spec.md:6`：「新的匯出比 store 裡那版的 user／assistant 對話數**少**時 MUST NOT 原地更新」；`tasks.md:34`（2.6）；`design.md:104`。
+- 失敗情境（兩個）：
+  1. 合法的變少：opencode 的 undo／revert（`opencode.py:387-403` 的 `_apply_revert` 正是這個語意）、claude 的 rewind，或 v1→v2 遷移把一則空的／中斷的 assistant 訊息合併掉（`turns()` 對每一列都產一個 turn，含空的，`opencode.py:663`）。這時 `agora import` 永遠拒絕，使用者沒有旗標可繞，而 2.5 的拒絕訊息偏偏叫人「重新匯入」——形成死路：同 agent 不能接續、重新匯入又被擋，只剩跨 agent。
+  2. 這個檢查寫在共用的 `_import_one`（`cli.py:395-409`），claude 也受影響，但 `design.md:151` 的「作者提議」只寫 v1 raw 的覆蓋。
+- 建議（開工前補在 2.6，不用改架構）：(a) 比的是「至少有一行內容的 turn」，不是 turn 的列數；(b) 拒絕訊息要寫明下一步（跨 agent 接續，或用 `--header` 之類既有手段另存），不能只說「少了多少」；(c) 在作者提議一節記一句「這個檢查對所有 agent 生效」，由本人確認要不要限縮到 opencode；(d) 2.1 在量必填欄位時順便量「遷移過的舊 Session 的 turn 數」是否一致。
+
+**N2（Low）　`opencode service set port` 的語法與副作用沒量過**
+- `design.md:69`：「`opencode service set port <埠>` 或等價設定」；這句話只來自報告的錯誤訊息原文（`spike-1-2.md:79`）。
+- 如果 `service set` 是對運行中的服務發指令，而不是只寫設定檔，第一次在隔離環境執行它就可能碰到使用者真的服務——正是 H2 要避免的。
+- 建議：1.2 在執行它之前先用 `--help` 與 `opencode debug paths` 確認它只寫 XDG_CONFIG 下的檔案；執行前後各做一次 1.14 的檢查，並把量到的結果記進 `docs/spike/opencode.md`。
+
+**N3（Low）　前後檢查 49374 的清單漏了 PR 2、4 的真 opencode 測試**
+- `tasks.md:19`（1.14）只點名「第 2、5 步的整合測試」；PR 4 的 4.4（`tasks.md:64`）與 5.2（`tasks.md:75`）也跑真 opencode，沒被點名。
+- 建議：做成一個共用的 fixture／helper（開跑前後各看一次），所有 `-m integration` 的真 opencode 測試自動套用，而不是逐步點名。
+
+**N4（Low）　`message_count` 的 idle 語意落在 PR 2，但 PR 1 已經讓 v2 的接續可以用**
+- `design.md:83`「（第 2 步落地）」、`tasks.md:11`（1.6）的 `export()` 沒有改 `message_count`；PR 1 合併後，`collect()`（`opencode.py:1047`）與 `_import_verified`（`opencode.py:609`）在 v2 上仍把 `idle` 列算進去——M8 的兩個情境在 PR 1 與 PR 2 之間又出現一次，只是不會丟資料（多一次無內容的寫回）。
+- 另外 PR 1 的 `append_native` 在 v2 raw 上仍是 v1 形狀的 helper（T:31 在 PR 2）；現在靠 1.3 的「混合列報錯」會變成響亮的錯誤，這是可以接受的，但 PR 說明應該寫一句「PR 1 的 `--fork` 對 v2 的 Session 會報錯，PR 2 才通」。
+- 建議：把 2.4 裡 `message_count` 的那半（一行 `len`）移到 1.6；PR 1 的 `_import_verified` 先只比訊息數（與 2.4 的「沒有這一層時只比訊息數」一致）。
+
+**N5（Low）　殘留的不一致與 PR 1 的體積**
+- `design.md:72`（隔離步驟 5）仍寫「用 1.1 的 fake upstream **或免費模型**」，而 :74（步驟 7）與 `tasks.md:7` 要求「由 fake upstream 產生」。fixture 應該只准 fake upstream。
+- PR 1 現在含 fake upstream、fixture、`--server` 量測、conftest、嗅探、指令、reidentify、turns、fake——是 15 項。這不是設計錯誤，但如果 1.1 做不到工具呼叫（走出口），PR 1 就會卡住。建議 PR 說明預先約定：1.1 與 1.5 可以各自先成一個小 PR 再接 PR 1，不算違反「一步一個 PR」。
+- 錯字：`design.md:18`「每一歩一個 PR」。
