@@ -45,7 +45,7 @@
   - [x] 3.7.2 M1：Claude 輔助訊號限 api-key、api_retry 等重試用盡或 is_error、文字要求 is_error
   - [x] 3.7.3 M3：只遮真正的秘密（key 與 config 內 apiKey），不遮 1／模型名／endpoint
   - [x] 3.7.4 M5：AgoraProcess 持有 pump deque 或 callable 取最新末幾行
-  - [ ] 3.7.5 L1：poke 時 driver 例外轉 409 agent_not_running 並標 exited
+  - [x] 3.7.5 L1：poke 時 driver 例外轉 409 agent_not_running 並標 exited
   - [ ] 3.7.6 L3：agora 3.3 SIGTERM handler 在 Popen 前抵達記旗標，Popen 後轉送
   - [ ] 3.7.7 H2：new 模式換把前 import 失敗也 stop、標 waiting-quota、scheduler 重試 import 後掛 job
   - [ ] 3.7.8 M2：OpenCodeDriver 長逾時、狀態以背景送出在跑為準、錯誤寫進 exit.reason

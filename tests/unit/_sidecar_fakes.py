@@ -70,6 +70,7 @@ class FakeAgentDriver:
         self.stop_calls: list[tuple[FakeHandle, bool, float]] = []
         self.state_calls = 0
         self.state_fails = False  # raise from state(), for the isolation tests
+        self.send_fails: Exception | None = None  # raise from send(), for L1
         self.launch_state: DriverState | None = None  # what state() reports first
         self.send_gate: threading.Event | None = None  # block send(), for L1
         self.send_started = threading.Event()
@@ -99,6 +100,8 @@ class FakeAgentDriver:
 
     def send(self, handle: FakeHandle, text: str) -> None:
         self.send_started.set()
+        if self.send_fails is not None:
+            raise self.send_fails
         if self.send_gate is not None:
             self.send_gate.wait(timeout=5)
         if handle.busy:

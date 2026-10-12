@@ -454,6 +454,26 @@ def test_poke_while_starting_times_out_with_409(tmp_path):
     assert core.get("t1").state == STATE_IDLE  # the agent did come up in the end
 
 
+def test_poke_when_the_driver_send_fails_is_409_and_exits(tmp_path):
+    """L1: a driver RuntimeError from send becomes 409, never a 500."""
+    core, driver, _store, _source, _clock, workdir = rig(tmp_path)
+    core.open("t1", "claude-code", workdir, {"mode": "new"})
+    handle = driver.handles[0]
+    driver.send_fails = RuntimeError("cannot write to claude: broken pipe")
+
+    with pytest.raises(AgentNotRunningError) as excinfo:
+        core.poke("t1", "hello")
+
+    assert excinfo.value.status == 409
+    assert excinfo.value.code == "agent_not_running"
+    assert handle.stopped is False  # the driver failed on its own; no fake stop
+    rec = core.get("t1")
+    assert rec.state == STATE_EXITED
+    assert rec.exit and rec.exit["reason"].startswith("poke failed")
+    with pytest.raises(AgentNotRunningError):
+        core.poke("t1", "again")  # the record no longer pretends to be usable
+
+
 # --- status (spec: 不列別人的 / waiting-quota 的預定時刻) ----------------------
 
 

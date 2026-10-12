@@ -432,9 +432,25 @@ class SidecarCore:
         # The driver call happens outside the lock (L1): a slow send must not
         # freeze status.  A concurrent close may stop the handle in between;
         # that surfaces here as the driver's own error.
-        if interrupt:
-            driver.interrupt(handle)
-        driver.send(handle, text)
+        try:
+            if interrupt:
+                driver.interrupt(handle)
+            driver.send(handle, text)
+        except SidecarError:
+            raise
+        except Exception as e:
+            # L1: the agent ended between the state check and the send.  The
+            # driver's RuntimeError becomes 409 agent_not_running, and the
+            # record is exited (never a 500).
+            logger.warning("agent %s: poke found the agent not running: %s", id, e)
+            with self._lock:
+                if self._agents.get(id) is rec:
+                    rec.state = STATE_EXITED
+                    rec.exit = {"code": None, "reason": f"poke failed: {e}"}
+                    rec.reopen_at = None
+                    rec.reopen_job = None
+                    self._clear_pending(rec)
+            raise AgentNotRunningError(f"agent {id!r} is not running: {e}") from e
         with self._lock:
             if self._agents.get(id) is rec:
                 rec.state = STATE_RUNNING
