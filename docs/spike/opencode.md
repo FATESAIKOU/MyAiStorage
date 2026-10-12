@@ -1244,8 +1244,20 @@ opencode session export <fork id> --standalone > fork.json
 - v1 的附件 part（`synthetic: true` 的 text）被拆成**獨立的 `type=synthetic` 列**；沒有 role 的情況下另有 `type=system` 列（opencode 自己加的「工具參數已變更」通知）與 `type=idle` 列（每回合結尾）。**預覽與搜尋只算 `user`／`assistant`** 這件事在 v2 的 DB 上也成立。
 - v2 的 `session_message`：`id, session_id, type, seq, time_created, time_updated, data`（JSON）。排序實測看 `time_created`（同毫秒用 `seq` 穩）；`seq` 不是連續的（5, 6, 13, 18），只是列內的穩定次序。
 - `session_v2` 的欄位比 v1 的 `session` 多：`workspace_id, fork_session_id, fork_boundary, time_idle, time_viewed, idle_outcome, time_suspended, resume_attempts…`；agora 列表用的 id／directory／title／time_updated 一個不少（v1 後備與 v2 欄位同名同形）。
-- 遷移游標在 `kv` 表（`migration.v1-v2`，`{"phase":"seats"/"completed"}`）；實測把游標刪掉＋放回 v1 表就能重放遷移（否則 completed 之後不再跑）。
+- 遷移游標在 `kv` 表（`migration.v1-v2`，`{"phase":"sessions"/"completed"}`）；實測把游標刪掉＋放回 v1 表就能重放遷移（否則 completed 之後不再跑）。
 
 **量測的做法（可重跑）：** `env -i` 起隔離環境＋改埠 → 先跑 fake upstream 產生一個 v2 原生 session（fresh DB，無 v1 表）→ 在同一顆 DB 另建 v1 的 `session`／`message`／`part` 三表、塞兩個自編假 session（完整 v1 欄位與 v1 訊息形狀；**id 必須以 `ses_`／`msg_`／`prt_` 開頭**且訊息／part 的 `data` 必須帶齊 v1 的必填欄位，否則遷移會 WARN 跳過）→ 刪掉 `kv.migration.v1-v2` 的游標 → 再跑任一 opencode 指令 → 讀 DB 對照。測完整個隔離目錄刪除；共用服務前後 PID／etime 不變。
 
-**定下的選表規則（3.2）**：`session_v2` 欄位齊全就用它；兩表都在時做 **id 聯集、同 id 以 v2 的列為準**，**只在 v1 表的 Session 仍要列出**（遷移跳過／中斷的 window 與「新版 DB 沒有 v1 表、舊版 DB 沒有 v2 表」兩種狀態都要列得出來）；預覽／搜尋讀 `session_message`，v1 表在時舊 Session 的預覽／搜尋回 None／沒有命中（v1 的路徑照舊）。fixture：`tests/fixtures/opencode/oc-v2-db.sql`（文字 dump：schema＋上面三種 session 的假列，去識別化）。
+**定下的選表規則（3.2）**：`session_v2` 欄位齊全就用它；兩表都在時做 **id 聯集、同 id 以 v2 的列為準**，**只在 v1 表的 Session 仍要列出**（遷移跳過／中斷的 window 與「新版 DB 沒有 v1 表、舊版 DB 沒有 v2 表」兩種狀態都要列得出來）。預覽與搜尋在兩表的資料來源上也走同一條路：有 `session_message` 就優先讀它，該 Session 在 v2 沒有列（遷移漏掉的那種）時退回 v1 的 `message`／`part`；搜尋兩邊的表都掃、同一個 Session 只報一次。fixture：`tests/fixtures/opencode/oc-v2-db.sql`（文字 dump：schema＋上面三種 session 的假列，去識別化）。
+
+**PR 說明記一句**（報告 §H 末段）：sidecar `new` 模式 fallback 的讀取修（v2 的列表／預覽／搜尋）包含這一步。
+
+**改壞驗證（3.6，逐項在 4 個 commit 之後的樹上做，做完還原）**：
+
+| 改壞什麼 | 轉紅的測試 |
+|---|---|
+| 表名改回 `session`（`_SESSION_TABLES` 只看 v1） | 4 個：v2 列表的跨專案／id 聯集／memoisation、`_session_directory` 的 v2 優先 |
+| 聯集改成只看 v2（v1 的列不進字典） | 1 個：id 聯集（只在舊表的 Session 從清單消失） |
+| 預覽讀錯欄位（assistant 列也拿 `user` 的欄位讀） | 2 個：預覽拿最新一輪、預覽截長度 |
+| 搜尋不比對（LIKE 掃到就算命中，不由程式確認） | 6 個：v1 的三個（萬用字元、只算真的話、找不到）＋ v2 的三個（命中、不算附件／工具／system、正規化） |
+| `_session_directory` 拿掉 `row = None` | 1 個：沒有 session 表的 store（spike 的 `cannot access local variable 'row'`） |
