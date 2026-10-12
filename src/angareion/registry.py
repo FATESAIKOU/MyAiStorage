@@ -155,7 +155,8 @@ class RegistryClient:
     """The real registry issue on GitHub: comments plus the channels.json file.
 
     The token is the channel token (`Issues: Read and write` on MyAiStorage);
-    the file writes use the same repo. Only the rebuild workflow uses the file
+    on the workflow side the caller passes `GITHUB_TOKEN` instead.
+    The file writes use the same repo. Only the rebuild workflow uses the file
     side; `channel create`/`channel delete` only post comments.
     """
 
