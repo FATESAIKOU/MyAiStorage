@@ -1015,11 +1015,21 @@ class OpencodeAgent:
         name = ((payload.get("info") or {}).get("model") or {}).get("id")
         return name if isinstance(name, str) and name else None
 
-    def start_native(self, raw: bytes, workdir: Path) -> Launch:
+    def start_native(self, raw: bytes, workdir: Path, *, headless: bool = False,
+                     headless_port: int | None = None) -> Launch:
         session_id, landed = self._import_verified(
             reidentify(self._read(raw), session_id=_session_id()), workdir)
-        return Launch(argv=[agent_cmd(self.name), "--session", session_id],
-                      cwd=str(workdir), agent_session_id=session_id,
+        if headless:
+            # The server mode from the spike (design D6): the caller allocated
+            # the port (sidecar passes --headless-port) and talks HTTP to it;
+            # the session the conversation was imported into is `session_id`.
+            if not headless_port:
+                raise AgentError("opencode 的 --headless 需要 --headless-port（由呼叫方給一個空的埠）")
+            argv = [agent_cmd(self.name), "serve",
+                    "--hostname", "127.0.0.1", "--port", str(headless_port)]
+        else:
+            argv = [agent_cmd(self.name), "--session", session_id]
+        return Launch(argv=argv, cwd=str(workdir), agent_session_id=session_id,
                       before_count=landed)
 
     def collect(self, launch: Launch) -> Exported | None:

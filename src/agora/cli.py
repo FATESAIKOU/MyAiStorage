@@ -128,13 +128,34 @@ def _source(agent: Agent, exported: Exported) -> dict:
     }
 
 
-def _with_user(hdr: dict, updates: dict) -> dict:
-    """The user's overlay wins over the automatic fields; system fields stay ours."""
+def _with_user(hdr: dict, updates: dict, *, add_tags: "list[str] | tuple[str, ...]" = ()) -> dict:
+    """The user's overlay wins over the automatic fields; system fields stay ours.
+
+    `add_tags` (--add-tag) is applied after the overlay, as an append to the
+    header's existing tags: the tag is added, never a replacement of what the
+    Session already carries (session-continue「附加 tag」).
+    """
     system = {k: hdr[k] for k in h.SYSTEM_KEYS if k in hdr}
     merged = h.overlay(hdr, updates)
     merged.update(system)
+    _add_tags(merged, add_tags)
     h.validate(merged)
     return merged
+
+
+def _add_tags(hdr: dict, tags: "list[str] | tuple[str, ...]") -> None:
+    """Append tags to `hdr["tags"]`, keeping existing ones and dropping duplicates."""
+    tags = [tag for tag in tags if tag]
+    if not tags:
+        return
+    current = hdr.get("tags") or []
+    if isinstance(current, str):
+        current = [current]
+    out = list(current)
+    for tag in tags:
+        if tag not in out:
+            out.append(tag)
+    hdr["tags"] = out
 
 
 def _updates(args) -> dict:
@@ -181,8 +202,9 @@ def _uploaded(paths: store.Paths, ulid: str) -> bool:
     return False
 
 
-def _emit(saved: tuple[str, bool]) -> int:
-    print(saved[0])
+def _emit(saved: tuple[str, bool], *, quiet: bool = False) -> int:
+    if not quiet:                 # headless: stdout belongs to the agent (D6)
+        print(saved[0])
     return 0 if saved[1] else EXIT_IN_OUTBOX
 
 
@@ -334,6 +356,7 @@ def cmd_import(args, paths: store.Paths) -> int:
         raise InputError("import 要給 --external-session-id 與 --agent")
     agent = load_agent(args.agent)
     updates = _updates(args)
+    add_tags = list(getattr(args, "add_tag", []) or [])
     ids = [i.strip() for raw in args.external_session_id for i in raw.split(",") if i.strip()]
     if not ids:
         raise InputError("--external-session-id 沒有內容")
@@ -345,7 +368,7 @@ def cmd_import(args, paths: store.Paths) -> int:
     for k, external_id in enumerate(ids, 1):
         _progress("匯入", k, len(ids), external_id)
         try:
-            code = _import_one(agent, external_id, updates, paths, index)
+            code = _import_one(agent, external_id, updates, paths, index, add_tags)
         except InputError as e:      # a single id used to end here: exit 1 (S1-2)
             print(f"[agora] {external_id} 匯入失敗：{e}", file=sys.stderr)
             code = EXIT_INPUT
@@ -357,13 +380,14 @@ def cmd_import(args, paths: store.Paths) -> int:
 
 
 def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Paths,
-                index: store.Index) -> int:
+                index: store.Index, add_tags: "list[str] | None" = None) -> int:
     """One import. Unchanged content and no --header is a no-op that just
     prints the same id (R4: a re-run after Ctrl-C skips what is done).
 
     The caller syncs once and passes the index in (review S1-3); _save keeps
     that index current, so a later id still sees what an earlier one saved.
     """
+    add_tags = add_tags or []
     exported = agent.export(external_id)
     if exported.message_count <= 0:
         raise InputError(f"{external_id} 沒有任何訊息，不匯入")
@@ -372,11 +396,11 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
     if existing:
         old = index.header(existing[0])
         unchanged = (h.agora_of(old).get("raw") or {}).get("md5") == store.hashlib.md5(exported.raw).hexdigest()
-        if unchanged and not updates:
+        if unchanged and not updates and not add_tags:
             print(f"agora:{existing[0]}")
             return 0
         if unchanged or not _branched(index, existing[0]):
-            hdr = _with_user(old, updates)
+            hdr = _with_user(old, updates, add_tags=add_tags)
             hdr["agora"]["source"] = _source(agent, exported)
             hdr["agora"]["updated_at"] = _now_iso()
             return _emit(_save(paths, hdr, body, exported.raw, update=True))
@@ -386,7 +410,7 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
                             parent_headers=[old])
     else:
         auto = _auto_header("import", [], body, title=exported.title, exported=exported, agent=agent)
-    return _emit(_save(paths, _with_user(auto, updates), body, exported.raw))
+    return _emit(_save(paths, _with_user(auto, updates, add_tags=add_tags), body, exported.raw))
 
 
 def _branched(index: store.Index, ulid: str) -> bool:
@@ -1043,7 +1067,8 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
     # `kind`: a continue is the one write that is a relation of its own, and if this
     # session is gone by the time it goes up the work is saved as a session of its own -
     # as a continue, not as whatever X was (review G2)
-    return (_save(paths, _with_user(hdr, record.get("header_updates") or {}), body,
+    return (_save(paths, _with_user(hdr, record.get("header_updates") or {},
+                                    add_tags=record.get("add_tags") or []), body,
                   exported.raw, update=same_id, kind="continue"), note)
 
 
@@ -1282,6 +1307,14 @@ def cmd_continue(args, paths: store.Paths) -> int:
         raise InputError("continue 要給 --agent opencode|claude")
     agent = load_agent(args.agent)
     updates = _updates(args)
+    add_tags = list(getattr(args, "add_tag", []) or [])
+    headless = bool(getattr(args, "headless", False))
+    headless_port = getattr(args, "headless_port", None)
+    if headless_port is not None and not (0 < headless_port <= 65535):
+        raise InputError(f"--headless-port 要是 1-65535 的埠：{headless_port!r}")
+    if headless and agent.name == "opencode" and headless_port is None:
+        # The server mode needs the caller's port (design D6): sidecar allocates it.
+        raise InputError("--headless 的 opencode 要給 --headless-port")
     source_id = _the_id(args)
     index = _sync_for(paths, [source_id])
     _refuse_if_gone(paths, index, source_id)  # T1 3.3: no agent is opened for it
@@ -1325,7 +1358,11 @@ def cmd_continue(args, paths: store.Paths) -> int:
         raw = agent.append_native(own, fork_turns)
     else:
         raw = own
-    launch = agent.start_native(raw, workdir)
+    if headless:
+        launch = agent.start_native(raw, workdir, headless=True, headless_port=headless_port)
+    else:
+        # The old call shape stays for agents that predate headless (test fakes).
+        launch = agent.start_native(raw, workdir)
     if fork:
         if not launch.agent_session_id:
             raise AgentError(f"{agent.name} 啟動之後沒有 session id，這個 fork 沒有存成")
@@ -1346,7 +1383,8 @@ def cmd_continue(args, paths: store.Paths) -> int:
         # a given `generated.*` or `sources` (review M4) - and the given title stays
         # without `-fork` on the B that is saved here, which the write-back may never
         # touch again (M2).
-        fork_hdr = _with_user(_fork_after_launch(base, agent, exported), updates)
+        fork_hdr = _with_user(_fork_after_launch(base, agent, exported), updates,
+                              add_tags=add_tags)
         fork_md5 = store.hashlib.md5(exported.raw).hexdigest()
         saved_fork = _save(paths, fork_hdr, reading(agent, exported.raw), exported.raw)
         print(f"[agora] fork 已存成 {fork_hdr['id']}", file=sys.stderr)   # M7: the id is out
@@ -1356,6 +1394,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
             "parent": {"id": fork_hdr["id"], "raw_md5": fork_md5},
             "title": fork_hdr["title"], "before_count": launch.before_count,
             "started_at": _now_iso(), "header_updates": updates,
+            "add_tags": add_tags,
             "fork": True, "saved_md5": fork_md5,
         }
     else:
@@ -1367,6 +1406,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
             "parent_headers": [{"id": source_id, "title": parent.get("title"), "agora": {"updated_at": agora.get("updated_at")}}],
             "title": parent.get("title"), "before_count": launch.before_count,
             "started_at": _now_iso(), "header_updates": updates,
+            "add_tags": add_tags,
             # the baseline "nothing new" compares against: what was just loaded (design P8)
             "saved_md5": store.hashlib.md5(raw).hexdigest(),
         }
@@ -1375,16 +1415,57 @@ def cmd_continue(args, paths: store.Paths) -> int:
     if fork:
         run.wrote = True          # step 6 already staged B
     store._fault("before-agent-launch")
+    continued_id = fork_hdr["id"] if fork else source_id
+    if headless:
+        # The fixed lines the caller reads (session-continue delta): the agora
+        # Session this run writes, and - for opencode - the port the server
+        # listens on. Both before the agent starts.
+        print(f"agora-session {continued_id}", file=sys.stderr)
+        if agent.name == "opencode":
+            print(f"agora-port {headless_port}", file=sys.stderr)
+        # The agent's own session id, which the opencode driver needs to talk
+        # HTTP to the right session; an explanation line, not part of the two
+        # fixed lines (reported to the PM: the spec's two lines do not carry it).
+        print(f"agora-agent-session {launch.agent_session_id}", file=sys.stderr)
     # Ctrl-C belongs to the agent. The child gets the default handler back
     # before exec, otherwise it would inherit the ignore (N1). The child also
     # inherits the pending lock, so the record stays locked while the agent
     # lives even if agora itself is killed (C1).
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    previous_term = None
+    proc = None
+    term_pending = False
+
+    def _term_child(child) -> None:
+        if child.poll() is None:
+            try:
+                child.send_signal(signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    if headless:
+        # Gentle stop (design D6): SIGTERM forwards to the agent, then this
+        # process keeps waiting for it, writes the last conversation back,
+        # releases the lock and leaves 0. A default SIGTERM would kill agora
+        # before any of that. A SIGTERM that lands before Popen returns has no
+        # child to forward to yet: remember it and send it right after (L3).
+        def _forward_term(signum, frame):
+            nonlocal term_pending
+            if proc is None:
+                term_pending = True
+                return
+            _term_child(proc)
+
+        previous_term = signal.signal(signal.SIGTERM, _forward_term)
     try:
         # opencode reads PWD, not the real cwd, to pick the project (impl1).
         proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env={**os.environ, "PWD": launch.cwd},
                                 pass_fds=(lock.fileno(),),
                                 preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+        if term_pending:
+            # The SIGTERM arrived while Popen had not returned yet; pass it on.
+            term_pending = False
+            _term_child(proc)
         if interval is None:
             proc.wait()           # --sync-period 0: just wait, only the final write-back
             said_writing = False
@@ -1400,6 +1481,8 @@ def cmd_continue(args, paths: store.Paths) -> int:
                 print("[agora] 正在寫回…", file=sys.stderr)
     finally:
         signal.signal(signal.SIGINT, previous)
+        if previous_term is not None:
+            signal.signal(signal.SIGTERM, previous_term)
     store._fault("before-finalize")
     saved, target, final_note = _final_write(run, agent)
     run.pending.unlink()          # the current path: a rescue may have renamed it
@@ -1419,7 +1502,8 @@ def cmd_continue(args, paths: store.Paths) -> int:
             # The fork is saved already; its id is the answer, and nothing goes into
             # `unsaved-launches` - B's source is this launch, so the import tab must keep
             # comparing it (design「沒有新內容時」).
-            print(target)
+            if not headless:
+                print(target)
             print(f"[agora] 沒有新內容；fork 已存成 {target}", file=sys.stderr)
             return 0 if (saved_fork[1] and ok) else EXIT_IN_OUTBOX
         if not run.wrote:
@@ -1428,18 +1512,19 @@ def cmd_continue(args, paths: store.Paths) -> int:
                 f.write(f"{agent.name}:{launch.agent_session_id}\n")
             print("[agora] 這次沒有新內容，沒有存", file=sys.stderr)
             return 0 if ok else EXIT_IN_OUTBOX
-        print(target)
+        if not headless:
+            print(target)
         return 0 if ok else EXIT_IN_OUTBOX
     if not fork:
-        return _emit(saved)
+        return _emit(saved, quiet=headless)
     if saved[0] == saved_fork[0]:
         # The write-back landed on B itself: its outbox entry replaced step 6's, so the
         # later save's answer is the whole truth - the earlier failure is superseded
         # (review M6). The id printed is the one that is on Drive.
-        return _emit(saved)
+        return _emit(saved, quiet=headless)
     # The write-back saved the work as another session: both writes matter, or the one
     # that failed would be forgotten.
-    return _emit((saved[0], saved[1] and saved_fork[1]))
+    return _emit((saved[0], saved[1] and saved_fork[1]), quiet=headless)
 
 
 CONVERTED_NOTE = ("（以下是從其他 Session 轉過來的對話紀錄。[tool] 開頭的行只是當時工具呼叫的摘要，"
@@ -1732,6 +1817,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="continue：先複製出新 Session 再用它開 agent，原本那個不動")
     p.add_argument("--sync-period", default=None,
                    help="continue：每幾分鐘自動寫回一次（預設 5；0 就只在結束時寫回）")
+    p.add_argument("--add-tag", action="append", default=[],
+                   help="continue／import：附加 tag 到 Session 的 tags（可重複；原有的會保留）")
+    p.add_argument("--headless", action="store_true",
+                   help="continue：用 agent 的程式化模式開（claude：stream-json；opencode：serve）")
+    p.add_argument("--headless-port", type=int, default=None,
+                   help="continue --headless：opencode server 要聽的埠（由呼叫方分配）")
     p.add_argument("--yes", action="store_true", help="delete：確定要移到 Drive 垃圾桶")
     p.add_argument("--raw", action="store_true", help="show：印出原始匯出")
     p.add_argument("--no-sync", action="store_true", help="search：不連 Drive，只查本機索引")

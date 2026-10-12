@@ -13,6 +13,10 @@ Subcommands / flags:
                               found" for an id that was never imported
     import <file>             store the file under its own session id
     session delete <id>       forget it
+    serve --hostname H --port <p>  the headless server mode: listen on the port;
+                              on SIGTERM append one pair to the newest stored
+                              session (the handoff agora just imported), then
+                              exit 0 - what lets a test see the final write-back
     --session <id>            the TUI: act on <id> per FAKE_AGENT_MODE
     run [--session <id>]      the same, non-interactive
     run -m <model> <text...>  a headless run; -s/--session means "append to <id>"
@@ -47,6 +51,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import sys
 import time
 
@@ -267,10 +272,44 @@ def summarize_run(argv: list[str]) -> int:
     return 0
 
 
+def serve() -> int:
+    """`opencode serve`: listen on --port until SIGTERM, then append and stop.
+
+    The append simulates the server writing into its session while it runs, so
+    the caller's final write-back has something new to collect. The session is
+    the newest one in the store - the handoff `agora continue` just imported.
+    """
+    port = int(argv[argv.index("--port") + 1]) if "--port" in argv else 0
+    host = argv[argv.index("--hostname") + 1] if "--hostname" in argv else "127.0.0.1"
+
+    def _stop(signum, frame):
+        candidates = sorted(STORE.glob("*.json"), key=lambda p: p.stat().st_mtime)
+        if candidates:
+            say(candidates[-1].stem, "ZZSERVE 伺服器收尾前說了最後一句。")
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _stop)
+    with socket.socket() as srv:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind((host, port))
+        srv.listen(8)
+        srv.settimeout(0.2)
+        print(f"opencode server listening on http://{host}:{srv.getsockname()[1]}",
+              file=sys.stderr, flush=True)
+        while True:
+            try:
+                conn, _ = srv.accept()
+                conn.close()
+            except socket.timeout:
+                continue
+
+
 def main() -> int:
     if "--version" in argv:
         print(VERSION)
         return 0
+    if argv[:1] == ["serve"]:
+        return serve()
     if argv[:1] == ["export"]:
         do_export(argv[1:])
         return 0
