@@ -59,8 +59,8 @@ CREATE TABLE `session_v2` (
         );
 
 insert into session_v2 (id, project_id, slug, directory, title, version, time_created, time_updated, time_idle, idle_outcome) values
-  ('ses_ocv2dbBBB0000000002', '0123456789abcdef0123456789abcdef01234567', 'probe-one', '/tmp/agora-it-opencode/proj', '遷移的舊座談一', '2.0.26', 1790214209000, 1790214211600, NULL, NULL),
-  ('ses_ocv2dbCCC0000000003', '0123456789abcdef0123456789abcdef01234567', 'probe-two', '/tmp/agora-it-opencode/proj', '遷移的舊座談二', '1.18.34', 1790214219000, 1790214221000, NULL, NULL),
+  ('ses_ocv2dbBBB0000000002', '0123456789abcdef0123456789abcdef01234567', 'probe-one', '/tmp/agora-it-opencode/proj-2', '遷移的舊座談一', '2.0.26', 1790214209000, 1790214211600, NULL, NULL),
+  ('ses_ocv2dbCCC0000000003', '0123456789abcdef0123456789abcdef01234567', 'probe-two', '/tmp/agora-it-opencode/proj-2', '遷移的舊座談二', '1.18.34', 1790214219000, 1790214221000, NULL, NULL),
   ('ses_ocv2dbAAA0000000001', '0123456789abcdef0123456789abcdef01234567', 'oc-v2db-fixture', '/tmp/agora-it-opencode/proj', 'oc-v2db fixture', '2.0.26', 1790214199000, 1790214201730, NULL, NULL);
 
 insert into session_message (id, session_id, type, seq, time_created, time_updated, data) values

@@ -1737,6 +1737,257 @@ def test_search_never_exports_a_session(fake, store_db, workdir):
     assert not [line for line in _calls(fake, "export")]      # no transcript read
 
 
+# --- the interactive listing on a v2 store (agora-opencode-v2, step 3) --------
+# The database below is the text dump `tests/fixtures/opencode/oc-v2-db.sql`:
+# the shapes 2.0.26 really wrote (schema included) for one fake-upstream run and
+# two sessions its own migration converted from hand-seeded v1 rows. The
+# migrated sessions really exist in the v1 tables too (same id), which the
+# union test adds back in to see both sides at once.
+
+V2_PROBE = "ses_ocv2dbAAA0000000001"          # fake upstream: tool turn, then a sentence
+V2_TOOL_ANSWER = "ses_ocv2dbBBB0000000002"    # migrated: reasoning + text + tool content
+V2_ATTACHMENT = "ses_ocv2dbCCC0000000003"     # migrated: a synthetic attachment row
+
+
+@pytest.fixture
+def v2_db(tmp_path, monkeypatch):
+    """A v2-shaped opencode SQLite, from the dump (task 3.1)."""
+    home = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_DATA_HOME", str(home))
+    monkeypatch.setattr(oc, "_list_cache", None)     # the memo is process-wide
+    monkeypatch.setattr(oc, "_warned_schema", False)
+    path = home / "opencode" / "opencode.db"
+    path.parent.mkdir(parents=True)
+    db = sqlite3.connect(path)
+    db.executescript((FIXTURES / "oc-v2-db.sql").read_text(encoding="utf-8"))
+    return db, path
+
+
+def test_the_v2_listing_covers_projects_newest_first(v2_db):
+    db, _ = v2_db
+    db.close()
+
+    listed = oc.ADAPTER.list_sessions()
+    assert [row.updated_at for row in listed] == sorted(
+        (row.updated_at for row in listed), reverse=True)
+    probe = next(row for row in listed if row.session_id == V2_PROBE)
+    assert probe.title == "oc-v2db fixture"
+    assert probe.dir == "/tmp/agora-it-opencode/proj"
+    assert {row.dir for row in listed} >= {"/tmp/agora-it-opencode/proj",
+                                           "/tmp/agora-it-opencode/proj-2"}
+    assert sorted(row.session_id for row in listed) == sorted([V2_PROBE, V2_TOOL_ANSWER, V2_ATTACHMENT])
+
+
+def test_the_v2_listing_unions_the_v1_rows(v2_db):
+    """Same id in both tables: the v2 row wins and the session is listed once;
+    a session only the v1 table knows is still listed (review M4)."""
+    db, _ = v2_db
+    db.executescript("""
+        create table session (id text primary key, directory text not null,
+                              title text not null, time_created integer not null,
+                              time_updated integer not null);
+    """)
+    # same id as the dump's probe, with a stale title only the v1 table knows
+    db.execute("insert into session values (?,?,?,?,?)",
+               (V2_PROBE, "/tmp/舊資料夾", "v1 的舊標題", 1000, 1000))
+    db.execute("insert into session values (?,?,?,?,?)",
+               ("ses_ZZV1ONLY0000000001", "/tmp/別的專案", "只在舊表", 990, 1990))
+    db.commit()
+    db.close()
+
+    listed = oc.ADAPTER.list_sessions()
+    assert [row.session_id for row in listed] == [
+        V2_ATTACHMENT, V2_TOOL_ANSWER, V2_PROBE, "ses_ZZV1ONLY0000000001"]
+    probe = next(row for row in listed if row.session_id == V2_PROBE)
+    assert probe.title == "oc-v2db fixture" and probe.dir == "/tmp/agora-it-opencode/proj"
+
+
+def test_the_v2_preview_takes_the_newest_conversation_turn(v2_db):
+    db, _ = v2_db
+    db.close()
+    # the probe ends with a sentence; the idle row and the tool content are not turns
+    assert oc.ADAPTER.last_message(V2_PROBE) == ("assistant", "ZZFAKEUP 這是一句話的回答。")
+    # the migrated session says its text, not the reasoning beside it, and the
+    # migration's own `system` note behind it is not a turn either
+    assert oc.ADAPTER.last_message(V2_TOOL_ANSWER) == ("assistant", "舊的回答一：同樣是假資料。")
+    # the synthetic attachment row is an attachment, not the session's words
+    assert oc.ADAPTER.last_message(V2_ATTACHMENT) == ("user", "舊的問題二")
+
+
+def test_the_v2_preview_decodes_the_json_encoded_first_message(v2_db):
+    """The run's first user row stores the prompt JSON-encoded, like the export."""
+    db, _ = v2_db
+    db.execute("insert into session_v2 (id, project_id, slug, directory, title, version, "
+               "time_created, time_updated) values "
+               "('ses_ZZJSONONE0000000001', 'p', 'json-one', '/tmp/p', 'json', '2.0.26', 9, 9)")
+    db.execute("insert into session_message (id, session_id, type, seq, time_created, "
+               "time_updated, data) values ('msg_ZZJSONONE0000000001', "
+               "'ses_ZZJSONONE0000000001', 'user', 0, 9, 9, ?)",
+               (json.dumps({"text": json.dumps("第一句：先打招呼"), "time": {"created": 9}},
+                           ensure_ascii=False),))
+    db.commit()
+    db.close()
+    assert oc.ADAPTER.last_message("ses_ZZJSONONE0000000001") == ("user", "第一句：先打招呼")
+
+
+def test_the_v2_preview_is_capped(v2_db):
+    db, _ = v2_db
+    long_turn = json.dumps({"time": {"created": 1790214200600, "streamed": 1790214200700,
+                                     "completed": 1790214200726},
+                            "content": [{"type": "text", "text": "長" * 5000}]},
+                           ensure_ascii=False)
+    db.execute("update session_message set data=? where session_id like 'ses_ocv2dbAAA%' "
+               "and seq=13", (long_turn,))
+    db.commit()
+    db.close()
+    role, text = oc.ADAPTER.last_message(V2_PROBE)
+    assert role == "assistant"
+    assert len(text) == oc._PREVIEW_CHARS == 2000
+
+
+def test_the_v2_search_finds_the_words_that_were_said(v2_db):
+    db, _ = v2_db
+    db.close()
+    # across projects, in the user's wording and the assistant's answer
+    assert list(oc.ADAPTER.search_text("假資料")) == [V2_TOOL_ANSWER]
+    assert list(oc.ADAPTER.search_text("一句話的回答")) == [V2_PROBE]
+    # the first user row's JSON encoding is decoded for the match too
+    assert list(oc.ADAPTER.search_text("再回答")) == [V2_PROBE]
+
+
+def test_the_v2_search_skips_what_the_session_did_not_say(v2_db):
+    db, _ = v2_db
+    db.close()
+    # reasoning in an assistant row's content, a tool's input and output, an
+    # attachment row and the migration's system note are all not conversation
+    assert list(oc.ADAPTER.search_text("ZZTHINK")) == []
+    assert list(oc.ADAPTER.search_text("紙條")) == []
+    assert list(oc.ADAPTER.search_text("fake-note", only={V2_TOOL_ANSWER})) == []
+    assert list(oc.ADAPTER.search_text("舊的附件內容")) == []
+    assert list(oc.ADAPTER.search_text("filePath")) == []
+
+
+def test_the_v2_search_normalises_like_the_reading_version(v2_db):
+    db, _ = v2_db
+    db.execute("insert into session_v2 (id, project_id, slug, directory, title, version, "
+               "time_created, time_updated) values "
+               "('ses_ZZFULLW00000000001', 'p', 'full', '/tmp/p', 'fw', '2.0.26', 8, 8)")
+    db.execute("insert into session_message (id, session_id, type, seq, time_created, "
+               "time_updated, data) values ('msg_ZZFULLW00000000001', "
+               "'ses_ZZFULLW00000000001', 'user', 0, 8, 8, ?)",
+               (json.dumps({"text": "ZZ Ｈｅｌｌｏ 世界", "time": {"created": 8}},
+                           ensure_ascii=False),))
+    db.commit()
+    db.close()
+    assert list(oc.ADAPTER.search_text("hello")) == ["ses_ZZFULLW00000000001"]
+    assert list(oc.ADAPTER.search_text("HELLO 世界")) == ["ses_ZZFULLW00000000001"]
+
+
+def test_the_v2_search_reports_a_session_once(v2_db):
+    db, _ = v2_db
+    db.close()
+    found = list(oc.ADAPTER.search_text("假資料"))
+    assert found.count(V2_TOOL_ANSWER) == 1
+
+
+def test_the_v2_search_over_an_unknown_schema_yields_nothing_once(v2_db, capsys):
+    db, _ = v2_db
+    db.executescript("drop table session_message;")
+    db.commit()
+    db.close()
+
+    assert list(oc.ADAPTER.search_text("假資料")) == []
+    assert list(oc.ADAPTER.search_text("假資料")) == []   # and only the first one warns
+    assert "資料庫結構認不出來" in capsys.readouterr().err
+
+
+def test_the_v2_listing_memoises_like_before(v2_db):
+    db, path = v2_db
+    db.close()
+    first = oc.ADAPTER.list_sessions()
+    assert oc.ADAPTER.list_sessions() is not first
+    db = sqlite3.connect(path)
+    db.execute("insert into session_v2 (id, project_id, slug, directory, title, version, "
+               "time_created, time_updated) values "
+               "('ses_ZZMEMO000000000001', 'p', 'memo', '/tmp/p', 'm', '2.0.26', 5, 5)")
+    db.commit()
+    db.close()
+    assert any(row.session_id == "ses_ZZMEMO000000000001" for row in oc.ADAPTER.list_sessions())
+
+
+# --- the session-directory lookup (task 3.4) ----------------------------------
+
+def test_the_directory_lookup_asks_v2_first_then_v1(v2_db, tmp_path):
+    """Same id in both tables: the v2 row's directory is the answer."""
+    db, path = v2_db
+    here = tmp_path / "真實存在"
+    here.mkdir()
+    db.executescript("""
+        create table session (id text primary key, directory text not null,
+                              title text not null, time_created integer not null,
+                              time_updated integer not null);
+    """)
+    db.execute("insert into session values (?,?,?,?,?)",
+               (V2_PROBE, str(tmp_path / "舊資料夾不存在"), "v1", 1000, 1000))
+    db.commit()
+    db.close()
+    db = sqlite3.connect(path)
+    db.execute("update session_v2 set directory=? where id=?", (str(here), V2_PROBE))
+    db.commit()
+    db.close()
+    assert oc._session_directory(V2_PROBE) == str(here)
+
+
+def test_the_directory_lookup_falls_back_to_v1_when_v2_is_not_there(v2_db, tmp_path):
+    """A session the migration never converted: only the v1 table knows it."""
+    db, _ = v2_db
+    here = tmp_path / "舊專案還在"
+    here.mkdir()
+    db.executescript("""
+        create table session (id text primary key, directory text not null,
+                              title text not null, time_created integer not null,
+                              time_updated integer not null);
+    """)
+    db.execute("insert into session values (?,?,?,?,?)", (V2_PROBE, str(here), "v1", 1000, 1000))
+    db.execute("delete from session_v2 where id=?", (V2_PROBE,))
+    db.commit()
+    db.close()
+    assert oc._session_directory(V2_PROBE) == str(here)
+
+def test_the_directory_lookup_is_none_when_the_store_has_no_session_table(v2_db):
+    """The spike's `cannot access local variable 'row'`: an empty store must
+    return None, not raise the unassigned name."""
+    db, _ = v2_db
+    db.executescript("drop table session_v2; drop table session_message;")
+    db.commit()
+    db.close()
+    assert oc._session_directory(V2_PROBE) is None
+
+
+def test_the_directory_lookup_is_none_when_the_row_is_missing(v2_db, tmp_path):
+    db, _ = v2_db
+    db.close()
+    assert oc._session_directory("ses_NOSUCH0000000001") is None
+
+
+def test_the_directory_lookup_is_none_when_the_directory_is_gone(v2_db, tmp_path):
+    db, path = v2_db
+    gone = tmp_path / "專案被刪掉了"        # never created
+    db.execute("update session_v2 set directory=? where id=?", (str(gone), V2_PROBE))
+    db.commit()
+    db.close()
+    assert oc._session_directory(V2_PROBE) is None
+
+
+def test_the_directory_lookup_still_answers_a_v1_only_store(store_db, tmp_path):
+    """The fallback covers plain 1.x stores too: one lookup site, both tables."""
+    db, _ = store_db
+    _add_session(db, "ses_lookup0000000001", str(tmp_path), "t", 1000)
+    db.commit()
+    db.close()
+    assert oc._session_directory("ses_lookup0000000001") == str(tmp_path)
+
+
 def test_summarize_records_the_session_while_the_run_is_still_going(fake, tmp_path,
                                                                    monkeypatch):
     """Review V5: the record used to be written after the run finished, which is
