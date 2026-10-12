@@ -2003,19 +2003,20 @@ def test_a_window_with_nothing_to_choose_says_enter_submits():   # E3
     _run(go)
 
 
-def test_the_bar_really_reaches_n_n_before_the_window_goes():   # E2
+def test_the_bar_really_reaches_n_n_before_the_window_goes(monkeypatch):   # E2
     """A clean exit fills the bar - on screen, before the window closes.
 
-    `tick` redraws every 0.1s and the window used to dismiss the instant the process
-    ended, so `N/N` was in the code and nowhere on the screen. Recording every value
-    the bar is given is the only way to see it: a test that looks at the bar after
-    the window closed sees nothing at all.
+    `finish` fills the bar synchronously before dismissing; the 0.1 s `tick`
+    behind it is frozen here, so the only `N/N` the bar can ever see is that
+    fill. Under load a tick landing after the window closed used to append a
+    second `N/N`, and the test read the timing instead of the behaviour.
     """
     app = _marked_app(None)
     proc = FakeProc(lines=["[agora] 刪除 1/3", "[agora] 刪除 2/3", "[agora] 刪除 3/3"],
                     code=0, hang=True)
     app.spawn, _ = _spawn(proc)
     seen: list[tuple] = []
+    monkeypatch.setattr(tui.Run, "tick", lambda self: None)
 
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
@@ -2036,7 +2037,7 @@ def test_the_bar_really_reaches_n_n_before_the_window_goes():   # E2
     _run(go)
     full = [row for row in seen if row[:2] == (3, 3)]
     assert full, f"the bar never reached full: {seen}"
-    assert full[-1][2], f"it filled only after the window closed: {seen}"
+    assert any(row[2] for row in full), f"it filled only after the window closed: {seen}"
 
 
 def test_the_bar_counts_what_is_finished_and_fills_only_on_a_clean_exit():   # Q3
