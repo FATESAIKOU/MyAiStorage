@@ -769,6 +769,7 @@ class MiniGitHub:
         self.comments: list[dict] = []
         self._next_issue = 1
         self._next_comment = 1
+        self.requested_repos: list[str] = []
 
     def request(self, method, url, headers=None, body=None, timeout=None):
         import urllib.parse
@@ -776,6 +777,8 @@ class MiniGitHub:
         parsed = urllib.parse.urlparse(url)
         path = parsed.path
         params = urllib.parse.parse_qs(parsed.query)
+        rest = path.split("/repos/", 1)[1] if "/repos/" in path else ""
+        self.requested_repos.append("/".join(rest.split("/")[:2]))
 
         if method == "POST" and path.endswith("/issues"):
             payload = json.loads(body.decode("utf-8"))
@@ -926,6 +929,219 @@ def test_read_same_second_smaller_ulid_is_delivered(cli_env, capsys):
     capsys.readouterr()
     assert run(cli_env, ["read", "--channel", "general", "--json"]) == 0
     assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01AAAA00000000000000000000"]
+
+
+# -- spec scenarios: coverage sweep (section 4.1) -----------------------------
+
+
+def test_the_five_commands_over_the_fake_backend(cli_env, capsys):
+    """`用假後端`: the same five interfaces, in memory, no network."""
+    assert run(cli_env, ["channel", "create", "fresh"]) == 0
+    assert capsys.readouterr().out == "fresh\n"
+
+    assert run(cli_env, ["send", "--channel", "fresh", "--to", PM, "--body", "ping"]) == 0
+    message_id = capsys.readouterr().out.strip()
+
+    assert run(cli_env, ["wait", "--channel", "fresh", "--timeout", "0"]) == 0
+    capsys.readouterr()
+
+    assert run(cli_env, ["read", "--channel", "fresh", "--json"]) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == [message_id]
+
+    assert run(cli_env, ["channel", "delete", "fresh"]) == 0
+    assert capsys.readouterr().out == "fresh\n"
+    assert cli_env["backend"].entity_state(11) == "closed"
+    assert json.loads(cli_env["registry"].posted[-1])["action"] == "unregister"
+
+
+def test_channel_create_rejects_a_non_ascii_name_and_registers_nothing(cli_env, capsys):
+    assert run(cli_env, ["channel", "create", "小明"]) == 1
+    assert capsys.readouterr().err != ""
+    assert cli_env["registry"].posted == []
+    assert not cli_env["backend"].entity_title(11)
+
+
+def test_wait_without_a_timeout_waits_until_a_message_arrives(cli_env, capsys):
+    clock = cli_env["clock"]
+
+    def sleeper(seconds: float) -> None:
+        clock.sleep(seconds)
+        if len(clock.sleeps) == 2:
+            _seed_message(cli_env)
+
+    ret = main(
+        ["wait"],  # no --timeout: wait forever
+        backend=cli_env["backend"],
+        store=cli_env["store"],
+        registry=cli_env["registry"],
+        sleeper=sleeper,
+        clock=lambda: clock.now,
+    )
+    assert ret == 0
+    assert clock.sleeps == [15.0, 15.0]
+    assert not (cli_env["state_dir"] / "cursor-MyLinuxPool-impl-2.json").exists()
+
+
+def test_wait_unknown_channel_exits_1(cli_env, capsys):
+    assert run(cli_env, ["wait", "--channel", "nowhere", "--timeout", "0"]) == 1
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_deleting_the_cursor_file_reads_from_the_start(cli_env, capsys):
+    _seed_message(cli_env, comment_id=1, created_at="2026-10-10T12:00:05Z")
+    cursor_file = cli_env["state_dir"] / "cursor-MyLinuxPool-impl-2.json"
+
+    assert run(cli_env, ["read", "--channel", "general"]) == 0
+    capsys.readouterr()
+    assert cursor_file.is_file()
+
+    cursor_file.unlink()
+    assert run(cli_env, ["read", "--channel", "general", "--json"]) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01AAAA00000000000000000000"]
+
+
+def test_an_edited_message_is_not_returned_again(cli_env, capsys):
+    message = _seed_message(cli_env, comment_id=1, created_at="2026-10-10T12:00:00Z")
+
+    assert run(cli_env, ["read", "--channel", "general", "--json"]) == 0
+    assert len(json.loads(capsys.readouterr().out)) == 1
+
+    message.content = "edited after being read"  # the backend's updated_at moved; id and time did not
+    assert run(cli_env, ["read", "--channel", "general", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_a_missing_channel_or_backend_config_file_exits_2(cli_env, capsys):
+    cli_env["git"].files.pop(f"origin/main:{CHANNELS_PATH}")
+    assert run(cli_env, ["send", "--channel", "general", "--body", "x"]) == 2
+    assert "missing" in capsys.readouterr().err
+
+    cli_env["git"].files.pop(f"origin/main:{BACKENDS_PATH}")
+    assert run(cli_env, ["send", "--channel", "general", "--body", "x"]) == 2
+
+
+def test_the_backend_repo_comes_from_the_config_file(cli_env, capsys):
+    """Only backends.json knows which repo an entity lives in."""
+    cli_env["git"].set_file(BACKENDS_PATH, backends_json({"github-2": ("github", "owner/repo2")}))
+    cli_env["git"].set_file(CHANNELS_PATH, channels_json({"general": ("github-2", 4)}))
+    cli_env["store"].refresh_for_lookup()
+
+    transport = MiniGitHub()
+    assert main(
+        ["send", "--channel", "general", "--body", "hi"],
+        store=cli_env["store"],
+        registry=cli_env["registry"],
+        transport=transport,
+    ) == 0
+    capsys.readouterr()
+    # The comment landed on owner/repo2's issue 4, not owner/repo's issue 10.
+    assert transport.comments[-1]["_issue_number"] == 4
+    assert transport.requested_repos[-1] == "owner/repo2"
+
+
+def test_a_same_title_entity_never_hijacks_a_channel(cli_env, capsys):
+    """`同名標題不影響對應`: the config points at entity 7, and that is the one used."""
+    transport = MiniGitHub()
+    for number in (3, 7):
+        transport.issues[number] = {"number": number, "title": "general", "body": "", "state": "open"}
+    cli_env["git"].set_file(CHANNELS_PATH, channels_json({"general": ("github-main", 7)}))
+    cli_env["store"].refresh_for_lookup()
+
+    assert main(
+        ["send", "--channel", "general", "--body", "hi"],
+        store=cli_env["store"],
+        registry=cli_env["registry"],
+        transport=transport,
+    ) == 0
+    capsys.readouterr()
+    assert transport.comments[-1]["_issue_number"] == 7
+
+
+def test_wait_sees_a_page_two_message_when_page_one_is_unchanged(cli_env, capsys):
+    """M1 at the CLI: a page-2 message must not be hidden behind page 1's 304."""
+    page1_url = "https://api.github.com/repos/owner/repo/issues/10/comments?per_page=100"
+    page2_url = page1_url + "&page=2"
+    others = [
+        {
+            "id": 100 + i,
+            "body": json.dumps({"not": "a message"}),
+            "created_at": f"2026-10-10T03:00:{i:02d}Z",
+            "updated_at": f"2026-10-10T03:00:{i:02d}Z",
+        }
+        for i in range(20)
+    ]
+    from angareion.messages import Message, serialize_message
+
+    def mine() -> list[dict]:
+        message = Message(from_=PM, to=IDENTITY, channel="general", content="mine",
+                          id="01MINE00000000000000000000", at="2026-10-10T03:01:00+00:00")
+        return [{
+            "id": 500,
+            "body": serialize_message(message),
+            "created_at": "2026-10-10T03:01:00Z",
+            "updated_at": "2026-10-10T03:01:00Z",
+        }]
+
+    class MultiPageTransport:
+        """Page 1 is frozen (same payload + ETag); page 2 grows on demand.
+
+        If the backend ever sends If-None-Match on the multi-page listing, this
+        fake answers 304 — exactly what GitHub would do, which is the bug M1
+        forbids.
+        """
+
+        def __init__(self):
+            self.page2_has_mine = False
+            self.if_none_match: list[str | None] = []
+
+        def request(self, method, url, headers=None, body=None, timeout=None):
+            if (headers or {}).get("If-None-Match"):
+                self.if_none_match.append(headers["If-None-Match"])
+                return HttpResponse(304, {}, b"")
+            if url == page2_url:
+                return HttpResponse(200, {}, json.dumps(mine() if self.page2_has_mine else []).encode("utf-8"))
+            if url.startswith(page1_url):
+                self.if_none_match.append(None)
+                return HttpResponse(
+                    200,
+                    {"etag": 'W/"unchanged-page-1"', "link": f'<{page2_url}>; rel="next"'},
+                    json.dumps(others).encode("utf-8"),
+                )
+            return HttpResponse(404, {}, b'{"message": "Not Found"}')
+
+    transport = MultiPageTransport()
+    # First wait: page 2 is empty, so nothing is new (exit 3). This run must
+    # not teach the backend to trust page 1's ETag.
+    assert main(
+        ["wait", "--channel", "general", "--timeout", "0"],
+        store=cli_env["store"],
+        registry=cli_env["registry"],
+        transport=transport,
+    ) == 3
+    capsys.readouterr()
+
+    transport.page2_has_mine = True
+    assert main(
+        ["wait", "--channel", "general", "--timeout", "0"],
+        store=cli_env["store"],
+        registry=cli_env["registry"],
+        transport=transport,
+    ) == 0  # the new message on page 2 is found despite page 1 being unchanged
+    assert all(value is None for value in transport.if_none_match)  # never trusted
+
+
+def test_read_delivers_a_message_with_a_different_sender_timezone(cli_env, capsys):
+    _seed_message(
+        cli_env,
+        msg_id="01TZ0000000000000000000000",
+        at="2026-10-10T12:00:00+09:00",
+        comment_id=100,
+        created_at="2026-10-10T03:00:10Z",
+    )
+    assert run(cli_env, ["wait", "--channel", "general", "--timeout", "0"]) == 0
+    capsys.readouterr()
+    assert run(cli_env, ["read", "--channel", "general", "--json"]) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01TZ0000000000000000000000"]
 
 
 def test_read_delivers_a_message_from_a_slow_senders_clock(cli_env, capsys):
