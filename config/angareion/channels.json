@@ -1,9 +1,4 @@
 {
-  "channels": {
-    "smoke-test-30": {
-      "backend": "aicompany-channel",
-      "issue": 1
-    }
-  },
+  "channels": {},
   "version": 1
 }
