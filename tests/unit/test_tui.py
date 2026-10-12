@@ -1479,6 +1479,47 @@ def test_continue_ticked_fork_with_space_passes_fork_flag():
     assert argv[-1] == "--fork"
 
 
+def test_continue_fork_hint_uses_description_when_title_missing():
+    """Low: header 沒有 title、有 description 時，fork 提示用 description（和 cli._fork_title 同一順序）."""
+    from agora import cli as cli_mod
+    hdr_b = _hdr("01BBBBBBBBBBBBBBBBBBBBBBBB", "第二個", sid="ses_2")
+    hdr_b["title"] = None
+    hdr_b["description"] = "表格的描述"
+    paths, _ = _index((_hdr("01AAAAAAAAAAAAAAAAAAAAAAAA", "第一個", sid="ses_1"), "## user\n表格的問題\n"),
+                      (hdr_b, "## user\n別的\n"))
+    cli = FakeCli()
+    app = tui.AgoraApp(paths, cli, agents=[], check_setup=False)
+    app.spawn, started = _spawn()
+    app._last_spawned = started
+    ran = []
+    app.outside = lambda argv: ran.append(argv) or 0
+
+    async def go():
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            await pilot.press("enter")
+            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            assert isinstance(app.screen, tui.Confirm)
+            await pilot.press("tab")
+            await pilot.pause()
+            await pilot.press("space")
+            await pilot.pause()
+            assert app.screen.picked
+            effect = str(app.screen.query_one("#effect", Static).render())
+            expected = cli_mod._fork_title(hdr_b, "agora:01BBBBBBBBBBBBBBBBBBBBBBBB")
+            assert expected == "表格的描述-fork"
+            assert f"會多一個 {expected} 的新 Session，原本的不動" in effect
+            await pilot.press("enter")                       # confirm
+            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
+            await pilot.press("enter")                       # workdir
+            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            await pilot.press("enter")                       # sync period
+            await pilot.pause()
+    _run(go)
+    assert len(ran) == 1
+    assert ran[0][-1] == "--fork"
+
+
 def test_continue_already_continuing_without_fork_is_refused_early(monkeypatch):
     """Scenario: 正在接續中、沒勾 fork: Tell explains it is continuing, does not ask dir or run agent."""
     app, _ = _app([])

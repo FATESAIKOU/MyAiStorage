@@ -2059,14 +2059,14 @@ class AgoraApp(App):
         if await self._refuse(row, "接續"):
             return
         # Imported here to avoid a circular import with cli.
-        from agora.cli import _ulid_of
+        from agora.cli import _fork_title, _ulid_of
         ulid = _ulid_of(row.key)
-        title = (self.index.header(ulid) or {}).get("title") or (row.cells[1] if len(row.cells) > 1 else row.key) or row.key
+        fork_title = _fork_title(self.index.header(ulid) or {}, row.key)
         ans = await self.push_screen_wait(Confirm(
             "用哪個 agent 接續？", ["opencode", "claude"],
             note="接續原本這個 Session",
             extra="fork：複製成新的 Session 再接續",
-            note_on=f"會多一個 {title}-fork 的新 Session，原本的不動",
+            note_on=f"會多一個 {fork_title} 的新 Session，原本的不動",
         ))
         if ans is None or ans[0] is None:
             return
