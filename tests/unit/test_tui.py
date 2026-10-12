@@ -2107,19 +2107,20 @@ def test_a_window_with_nothing_to_choose_says_enter_submits():   # E3
     _run(go)
 
 
-def test_the_bar_really_reaches_n_n_before_the_window_goes():   # E2
+def test_the_bar_really_reaches_n_n_before_the_window_goes(monkeypatch):   # E2
     """A clean exit fills the bar - on screen, before the window closes.
 
-    `tick` redraws every 0.1s and the window used to dismiss the instant the process
-    ended, so `N/N` was in the code and nowhere on the screen. Recording every value
-    the bar is given is the only way to see it: a test that looks at the bar after
-    the window closed sees nothing at all.
+    `finish` fills the bar synchronously before dismissing; the 0.1 s `tick`
+    behind it is frozen here, so the only `N/N` the bar can ever see is that
+    fill. Under load a tick landing after the window closed used to append a
+    second `N/N`, and the test read the timing instead of the behaviour.
     """
     app = _marked_app(None)
     proc = FakeProc(lines=["[agora] 刪除 1/3", "[agora] 刪除 2/3", "[agora] 刪除 3/3"],
                     code=0, hang=True)
     app.spawn, _ = _spawn(proc)
     seen: list[tuple] = []
+    monkeypatch.setattr(tui.Run, "tick", lambda self: None)
 
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
@@ -2140,7 +2141,7 @@ def test_the_bar_really_reaches_n_n_before_the_window_goes():   # E2
     _run(go)
     full = [row for row in seen if row[:2] == (3, 3)]
     assert full, f"the bar never reached full: {seen}"
-    assert full[-1][2], f"it filled only after the window closed: {seen}"
+    assert any(row[2] for row in full), f"it filled only after the window closed: {seen}"
 
 
 def test_the_bar_counts_what_is_finished_and_fills_only_on_a_clean_exit():   # Q3
@@ -2690,8 +2691,14 @@ def test_reaching_the_top_after_everything_is_here_adds_nothing():
 
 
 def test_a_moving_cursor_reads_nothing(monkeypatch):
-    """T6: only once the cursor has come to rest for ~150 ms. Moving through a list must
-    not read or lay out anything per keystroke."""
+    """T6: only once the cursor has come to rest. Moving through a list must
+    not read or lay out anything per keystroke.
+
+    The rest timer is captured instead of waited on: under load the keystrokes
+    themselves can span the ~150 ms rest window, and the test was reading the
+    scheduler instead of the behaviour. Firing the pending timer by hand is
+    the cursor coming to rest, deterministically.
+    """
     hdr = _hdr("01DDDDDDDDDDDDDDDDDDDDDDDD", "大的")
     paths, _index_ = _index((hdr, _big_body()), (_hdr("01EEEEEEEEEEEEEEEEEEEEEEEE", "小的", sid="ses_b"), "## user\nx\n"))
     app = tui.AgoraApp(paths, FakeCli(), agents=[], check_setup=False)
@@ -2703,14 +2710,39 @@ def test_a_moving_cursor_reads_nothing(monkeypatch):
         return real(*a, **kw)
     monkeypatch.setattr(tui, "read_tail", counting)
 
+    pending: list = []
+    real_set_timer = app.set_timer
+    rest = app.settled
+
+    class FakeTimer:
+        def __init__(self, callback):
+            self.callback = callback
+            self.stopped = False
+
+        def stop(self):
+            self.stopped = True
+
+    def fake_set_timer(delay, callback, *args, **kwargs):
+        if callback == rest:            # the "the cursor came to rest" timer
+            timer = FakeTimer(callback)
+            pending.append(timer)
+            return timer
+        return real_set_timer(delay, callback, *args, **kwargs)
+    monkeypatch.setattr(app, "set_timer", fake_set_timer)
+
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
+            pending.clear()              # forget the startup timer: it never fired
+            calls.clear()
             for _ in range(6):
                 await pilot.press("down")
                 await pilot.press("up")
             assert calls == [], f"read while the cursor was moving: {len(calls)}"
-            await pilot.pause(0.5)
+            live = [t for t in pending if not t.stopped]
+            assert len(live) == 1, f"one rest read armed, not {len(live)}"
+            live[0].callback()           # the cursor comes to rest
+            await pilot.pause()
             assert calls, "and once it rests, it does read"
     _run(go)
 
