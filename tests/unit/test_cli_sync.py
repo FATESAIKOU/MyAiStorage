@@ -26,6 +26,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -498,31 +499,49 @@ def test_final_write_does_not_block_full_timeout_on_normal_upload_or_offline(cla
     """Review M1 / item 6: _wait_target_settled does not block for the 15s timeout:
     1. when A's upload is normal, it returns as soon as A leaves waiting_ulids;
     2. when offline (copy fails), the uploader stops and it returns quickly leaving entry in outbox.
+
+    What is measured is the seconds the settle itself sleeps, not the whole
+    run's wall clock: under load agent startup and rounds alone can exceed any
+    whole-run bound, and the test was reading the scheduler instead of the
+    behaviour. A full-timeout block sleeps ~15 s; a legitimate settle sleeps
+    ~0 s (normal) or ~2 s (the offline fallback).
     """
     monkeypatch.delenv("AGORA_UPLOAD", raising=False)
+    settled_sleeps: list[float] = []
+    real_wait = cli._wait_target_settled
+
+    def counting_wait(paths_, run_):
+        seen: list[float] = []
+        real_sleep = time.sleep
+
+        def spy(seconds):
+            seen.append(seconds)
+            return real_sleep(seconds)
+
+        with mock.patch.object(time, "sleep", spy):
+            real_wait(paths_, run_)
+        settled_sleeps.append(sum(seen))
+    monkeypatch.setattr(cli, "_wait_target_settled", counting_wait)
 
     # 1. Normal upload: detached uploader finishes and A leaves outbox well under 15s
     a = _import_claude(capsys)
     _script(claude_lab, monkeypatch, "append:ZZ 正常上傳,wait-sync,exit")
-    t0 = time.monotonic()
     code, out, err = _continue_claude(capsys, claude_lab, a)
-    normal_duration = time.monotonic() - t0
     assert code == 0, err
     assert out == a
-    assert normal_duration < 5.0, f"normal upload took too long: {normal_duration}s"
+    assert settled_sleeps[-1] < 10.0, f"the settle slept {settled_sleeps[-1]}s on a normal upload"
     _wait_for(lambda: not store.uploader_is_running(paths()), timeout=10.0, what="part 1 uploader finished")
 
     # 2. Offline / copy failure: uploader fails and stops, returns quickly without hanging for 15s
     a2 = _import_claude(capsys)
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")
     _script(claude_lab, monkeypatch, "append:ZZ 離線失敗,wait-sync,exit")
-    t0 = time.monotonic()
     code, out, err = _continue_claude(capsys, claude_lab, a2)
-    offline_duration = time.monotonic() - t0
     assert out == a2
-    assert offline_duration < 5.0, f"offline run took too long: {offline_duration}s"
+    assert settled_sleeps[-1] < 10.0, f"the settle slept {settled_sleeps[-1]}s while offline"
     assert a2.split(":")[1] in store.outbox_ulids(paths()), "unsent entry remains in outbox"
     _wait_for(lambda: not store.uploader_is_running(paths()), timeout=10.0, what="part 2 uploader finished")
+    assert len(settled_sleeps) == 2, f"each part settles once: {settled_sleeps}"
 
 
 def test_subprocess_mid_run_rescue_interleaving(claude_lab, capsys, monkeypatch, tmp_path, clean_subprocesses):
