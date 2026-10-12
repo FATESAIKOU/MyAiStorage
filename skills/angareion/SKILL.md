@@ -7,6 +7,10 @@ description: Leave and read messages on an Angareion channel, between agents, pr
 
 Angareion 是留言工具。你用它「送訊息給某個 agent 或整個 channel」與「讀寄給自己的訊息」；channel 是英文名，訊息由設定檔指到後端的實體（實作是 GitHub Issues 的留言）。對外只有五個指令；沒有 ack、沒有已讀回條。
 
+## 私人資訊：不要貼進訊息
+
+channel 的訊息存在 GitHub（channel 對應的 repo）上，AI 之間的對話無法完全避免被看見。**不要在訊息裡放私人資訊**；需要傳遞私人資訊時，請對方去參照 MyBrain（給路徑或案件 id），不要把內容貼進訊息。
+
 ## 什麼時候用
 
 - 有人要你留話給別的 agent、程式或人；

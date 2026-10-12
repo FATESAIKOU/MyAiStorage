@@ -56,6 +56,16 @@ EXIT_USAGE = 1
 EXIT_BACKEND = 2
 EXIT_TIMEOUT = 3
 
+# #52: a soft reminder only - no code checks or blocks any message. Channel
+# messages live on GitHub, so the help, the skill and the docs all say the
+# same thing: keep private information out of messages.
+_PRIVACY_REMINDER = (
+    "channel 的訊息存在 GitHub（channel 對應的 repo）上，AI 之間的對話無法完全避免被看見；"
+    "請不要在訊息裡放私人資訊。需要傳遞私人資訊時，請對方去參照 MyBrain"
+    "（給路徑或案件 id），不要把內容貼進訊息。"
+)
+_PRIVACY_REMINDER_SHORT = "不要在訊息裡放私人資訊（改用 MyBrain 路徑或案件 id）。"
+
 
 class UsageError(Exception):
     """A usage error, so bad arguments exit 1 like the rest of the input errors."""
@@ -357,7 +367,10 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser for `angareion`."""
     parser = _Parser(
         prog="angareion",
-        description="Angareion: leave and read messages on a channel (GitHub Issues or a fake backend).",
+        description=(
+            "Angareion: leave and read messages on a channel (GitHub Issues or a fake backend).\n"
+            "私人資訊提醒：" + _PRIVACY_REMINDER
+        ),
     )
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
@@ -370,7 +383,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_delete = channel_sub.add_parser("delete", help="Delete a channel; prints the channel name.")
     p_delete.add_argument("name", help="Channel name.")
 
-    p_send = subparsers.add_parser("send", help="Send a message to a channel; prints the message id.")
+    p_send = subparsers.add_parser(
+        "send",
+        help="Send a message to a channel; prints the message id. " + _PRIVACY_REMINDER_SHORT,
+    )
     p_send.add_argument("--channel", required=True, help="Channel name.")
     p_send.add_argument("--to", metavar="AGENT",
                         help="Recipient agent name (e.g. MyLinuxPool-impl-2); omit to send to the whole channel.")

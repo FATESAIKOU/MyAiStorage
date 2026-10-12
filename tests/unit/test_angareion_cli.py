@@ -171,6 +171,17 @@ def test_help_exits_zero(capsys):
             parser.parse_args(["channel", action, "--help"])
 
 
+def test_help_carries_the_private_info_reminder(capsys):
+    """#52: the help is a soft reminder that private info goes to MyBrain, not the message."""
+    parser = build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["--help"])
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "MyBrain" in out
+    assert "私人資訊" in out
+
+
 def test_no_subcommand_is_usage_error(capsys):
     assert main([]) == 1
     captured = capsys.readouterr()
