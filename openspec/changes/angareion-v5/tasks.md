@@ -3,7 +3,7 @@
 - [x] 1.1 `config/angareion/channels.json`／`backends.json` 的 JSON schema（`version`）與範例檔；`config/angareion/` 進 repo（d 等級 PR）
 - [x] 1.2 本地複本的讀取（`config_dir`）、缺失／壞 JSON 的 exit 2；單元測試
 - [x] 1.3 讀取與更新：`git fetch`＋`git show origin/main:<路徑>`（不依賴工作樹）、`FETCH_HEAD` mtime 當新鮮度、`config_pull_interval`（預設 900 秒；0＝不按週期）、flock 鎖、逾時 20 秒、失敗沿用舊複本＋stderr 警告、`wait` 輪詢中不 fetch；查無 channel 先 fetch 一次（最短間隔 30 秒）、create 輪詢 fetch（上限 2 分鐘）；單元測試
-- [ ] 1.4 註冊簿 issue（MyAiStorage；label `層級:d`＋`狀態:進行中`、長期存在不關閉；置頂留言寫格式與規則）
+- [x] 1.4 註冊簿 issue（MyAiStorage；label `層級:d`＋`狀態:進行中`、長期存在不關閉；置頂留言寫格式與規則）
 
 ## 2. 位址與訊息格式
 
