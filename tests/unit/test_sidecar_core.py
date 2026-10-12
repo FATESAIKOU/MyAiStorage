@@ -497,6 +497,43 @@ def test_poke_released_after_close_stays_exited(tmp_path):
     assert core.get("t1").state == STATE_EXITED
 
 
+def test_poke_released_after_a_swap_does_not_mark_the_new_handle_running(tmp_path):
+    """D (section-3 review): the poke write-back also checks the handle.
+
+    The gated send went to the handle a swap has already replaced; when it is
+    released afterwards, the record must not be written back to running - the
+    fresh handle is idle, and the late send was never its round.
+    """
+    core, driver, store, _source, _clock, workdir = rig(tmp_path, resume_prompt="")
+    store.seed("agora:A")
+    core.open("t1", "claude-code", workdir, {"mode": "continue", "from": "agora:A"})
+    first = driver.handles[0]
+    gate = threading.Event()
+    driver.send_gate = gate
+    driver.send_started.clear()
+
+    poked: list = []
+    poker = threading.Thread(target=lambda: poked.append(core.poke("t1", "late words")))
+    poker.start()
+    assert driver.send_started.wait(2)
+
+    # Quota lands while the poke's send is gated: the swap stops the old handle
+    # and puts a fresh one in service (the late send still targets the old one).
+    driver.force_state(first, "quota_exhausted", window="5h", resets_at=None)
+    core.tick()
+    second = driver.handles[1]
+    assert core.get("t1").handle is second
+
+    gate.set()  # the gated send now goes through, on the replaced handle
+    poker.join(5)
+
+    assert poked and poked[0].id == "t1"
+    assert first.inbox == ["late words"]  # it really was the old handle's send
+    rec = core.get("t1")
+    assert rec.handle is second
+    assert rec.state == STATE_IDLE  # not resurrected to running by the late poke
+
+
 # --- status (spec: 不列別人的 / waiting-quota 的預定時刻) ----------------------
 
 

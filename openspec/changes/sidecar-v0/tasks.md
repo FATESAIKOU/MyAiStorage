@@ -54,6 +54,7 @@
   - [x] 3.7.11 B（複審的 3.4 觀察名單）：`sending` 改成進行中回合數的計數；兩個交錯的回合中，先完成的那個不會讓狀態變 idle
   - [x] 3.7.12 C（複審的 3.4 觀察名單）：被 interrupt 中止的回合（或 handle 已 stopped）回來的錯誤只記 `last_error`，不把 agent 升成 exited
   - [x] 3.7.13 D（複審的 3.4 觀察名單）：poke 在鎖外送完、寫回 running 前確認 `rec.state` 不是 exited 且 handle 沒被換過
+  - [x] 3.7.14 A～D 確認的兩個 Low：測試釘住成功回合的 epoch 檢查（interrupt 後舊回合成功回來不誤報 idle）與 poke 寫回前的 handle 檢查（換把後不寫回 running）
 
 ## 4. 文件與收尾
 

@@ -569,6 +569,69 @@ def test_aborted_round_error_does_not_exit_the_agent(
     driver.stop(handle, graceful=False, timeout=5)
 
 
+def test_a_late_success_from_an_interrupted_round_does_not_report_idle(
+    driver, serve, tmp_path, monkeypatch
+):
+    """Low 1 (section-3 review): the epoch check also covers the success path.
+
+    interrupt clears `sending` and bumps the epoch; the aborted round then
+    comes back *successfully*.  That late success must not decrement the count
+    of the round that took its place: the state stays running until the second
+    round is really over.
+    """
+    proc, port = serve()
+    handle = driver.launch(
+        RunningSession("agora:A", AgoraProcess(proc=proc, port=port, agent_session_id="ses_A")),
+        {}, str(tmp_path),
+    )
+    real_request = driver._request
+    first_started = threading.Event()
+    first_release = threading.Event()
+    second_started = threading.Event()
+    second_release = threading.Event()
+    finishes = threading.Event()
+    started = {"n": 0}
+
+    def gated_request(h, method, path, *, body=None, timeout=None):
+        if path.endswith("/message"):
+            started["n"] += 1
+            if started["n"] == 1:
+                first_started.set()
+                first_release.wait(10)
+            else:
+                second_started.set()
+                second_release.wait(10)
+            return {"info": {}}  # both rounds come back successfully
+        return real_request(h, method, path, body=body, timeout=timeout)
+
+    real_finish = driver._finish_round
+
+    def observed_finish(h, failure, epoch):
+        try:
+            return real_finish(h, failure, epoch)
+        finally:
+            finishes.set()  # the second round is still gated, so this is round one
+
+    monkeypatch.setattr(driver, "_request", gated_request)
+    monkeypatch.setattr(driver, "_finish_round", observed_finish)
+
+    driver.send(handle, "one")
+    assert first_started.wait(2)
+    driver.interrupt(handle)  # abort it: sending resets, the epoch moves on
+    driver.send(handle, "two")
+    assert second_started.wait(2)
+
+    first_release.set()  # the interrupted round comes back as a success
+    assert finishes.wait(2)  # its bookkeeping ran ...
+    assert handle.sending == 1  # ... it did not count the second round out
+    assert driver.state(handle).kind == DRIVER_RUNNING  # still running
+
+    second_release.set()
+    assert wait_state(driver, handle, DRIVER_IDLE).kind == DRIVER_IDLE
+    assert handle.sending == 0
+    driver.stop(handle, graceful=False, timeout=5)
+
+
 # --- new mode ------------------------------------------------------------------
 
 
