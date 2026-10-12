@@ -1,4 +1,4 @@
-"""Unit tests for the Angareion message model, serialization, parsing, validation (D3)."""
+"""Unit tests for the Angareion message model, serialization, parsing, validation (D3/v5)."""
 
 from __future__ import annotations
 
@@ -7,19 +7,24 @@ import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve
 import pytest
 
 from angareion.messages import (
+    AGENT_NAME_RE,
     ANGAREION_VERSION,
     MAX_MESSAGE_LENGTH,
     Message,
     MessageValidationError,
-    is_group_address,
     message_to_dict,
+    parse_identity,
     new_ulid,
     now_iso,
     parse_message,
     serialize_message,
     validate_address,
     validate_attachment,
+    validate_channel_name,
 )
+
+ME = "MyLinuxPool-impl-2"
+PM = "LLMGateway-pm"
 
 
 def test_ulid_generation():
@@ -40,13 +45,13 @@ def test_now_iso():
 
 def test_message_roundtrip():
     msg = Message(
-        from_={"repo": "owner-org/repo-channel", "role": "PM", "name": "PMO"},
-        to={"repo": "owner-org/worker-team", "role": "team-pm", "name": "worker-1"},
-        channel="phase-1-task-42",
+        from_="MyLinuxPool-impl-2",
+        to=PM,
+        channel="general",
         urgency=7,
         content="Here is the body content.\nMultiple lines.\n",
         attachments=[
-            {"name": "工單", "ref": "https://github.com/owner-org/repo-channel/issues/42"},
+            {"name": "工單", "ref": "https://example.com/issue/42"},
             {"name": "片段", "inline": "print('hello world')"},
         ],
     )
@@ -55,8 +60,8 @@ def test_message_roundtrip():
 
     parsed = parse_message(serialized, strict=True)
     assert parsed is not None
-    assert parsed.from_ == msg.from_
-    assert parsed.to == msg.to
+    assert parsed.from_ == "MyLinuxPool-impl-2"
+    assert parsed.to == PM
     assert parsed.channel == msg.channel
     assert parsed.urgency == 7
     assert parsed.content == msg.content
@@ -66,31 +71,35 @@ def test_message_roundtrip():
     assert parsed.angareion == ANGAREION_VERSION
 
 
+def test_broadcast_omits_to_and_parses_back_as_none():
+    msg = Message(from_=PM, to=None, channel="general", content="everyone")
+    serialized = serialize_message(msg)
+    assert "to:" not in serialized.split("---")[1]
+
+    parsed = parse_message(serialized, strict=True)
+    assert parsed is not None
+    assert parsed.to is None
+    assert parsed.content == "everyone"
+
+
 def test_front_matter_version_field_is_angareion():
-    msg = Message(
-        from_={"repo": "owner-org/repo-channel", "role": "PM"},
-        to={"repo": "owner-org/worker-team", "role": "worker"},
-        channel="ch-1",
-    )
+    msg = Message(from_=PM, to=ME, channel="ch-1")
     serialized = serialize_message(msg)
     assert serialized.startswith("---\nangareion: 1\n")
-    # v1's ack is gone: nothing writes an ack field any more.
     assert "ack" not in serialized
+    # v5 addresses are plain strings in the front matter, not repo/role objects.
+    assert "from: LLMGateway-pm" in serialized
+    assert "to: MyLinuxPool-impl-2" in serialized
 
 
 def test_message_to_dict():
-    msg = Message(
-        from_={"repo": "owner-org/repo-channel", "role": "PM"},
-        to={"repo": "owner-org/worker-team", "role": "worker"},
-        channel="ch-1",
-        content="body",
-    )
+    msg = Message(from_=PM, to=ME, channel="ch-1", content="body")
     data = message_to_dict(msg)
     assert data == {
         "id": msg.id,
         "at": msg.at,
-        "from": msg.from_,
-        "to": msg.to,
+        "from": PM,
+        "to": ME,
         "channel": "ch-1",
         "urgency": 5,
         "content": "body",
@@ -100,16 +109,8 @@ def test_message_to_dict():
 
 def test_content_with_horizontal_rule_delimiters():
     body = "Line 1\n---\nLine 2\n---\nAnother line\n"
-    msg = Message(
-        from_={"repo": "owner-org/repo-channel", "role": "PM"},
-        to={"repo": "owner-org/worker-team", "role": "worker"},
-        channel="ch-1",
-        urgency=5,
-        content=body,
-        attachments=[],
-    )
-    serialized = serialize_message(msg)
-    parsed = parse_message(serialized, strict=True)
+    msg = Message(from_=PM, to=ME, channel="ch-1", urgency=5, content=body, attachments=[])
+    parsed = parse_message(serialize_message(msg), strict=True)
     assert parsed is not None
     assert parsed.content == body
 
@@ -118,7 +119,7 @@ def test_unquoted_yaml_timestamp_at_is_accepted():
     """L7: YAML turns an unquoted timestamp into datetime; that must parse, not reject."""
     text = (
         "---\nangareion: 1\nid: 01JABC\nat: 2026-10-10T12:00:00+00:00\n"
-        "from: {repo: a, role: b}\nto: {repo: c, role: d}\nchannel: x\nurgency: 5\n"
+        "from: LLMGateway-pm\nto: MyLinuxPool-impl-2\nchannel: x\nurgency: 5\n"
         "attachments: []\n---\nbody"
     )
     parsed = parse_message(text, strict=True)
@@ -135,59 +136,74 @@ def test_unquoted_yaml_timestamp_at_is_accepted():
 
 
 def test_missing_required_fields():
-    msg = Message(
-        from_={"repo": "owner-org/repo-channel", "role": "PM"},
-        to={"repo": "owner-org/worker-team", "role": "worker"},
-        channel="",
-    )
     with pytest.raises(MessageValidationError, match="channel"):
-        serialize_message(msg)
+        serialize_message(Message(from_=PM, to=ME, channel=""))
 
-    msg2 = Message(
-        from_={},
-        to={"repo": "owner-org/worker-team", "role": "worker"},
-        channel="test-channel",
-    )
     with pytest.raises(MessageValidationError, match="from"):
-        serialize_message(msg2)
+        serialize_message(Message(from_="", to=ME, channel="test-channel"))
 
-    msg3 = Message(
-        from_={"repo": "owner-org/repo-channel", "role": "PM"},
-        to={},
-        channel="test-channel",
-    )
-    with pytest.raises(MessageValidationError, match="to"):
-        serialize_message(msg3)
+    with pytest.raises(MessageValidationError, match="from must be an agent name"):
+        # `None` is not an agent name; only `to` may be omitted.
+        serialize_message(Message(from_=None, to=ME, channel="test-channel"))  # type: ignore[arg-type]
+
+    with pytest.raises(MessageValidationError, match="to must be an agent name"):
+        serialize_message(Message(from_=PM, to="not-an-agent", channel="test-channel"))
 
 
-def test_address_validation():
-    validate_address({"repo": "owner-org/repo-channel", "role": "PM", "name": "Alice"})
-    validate_address({"repo": "owner-org/repo-channel", "role": "PM"})
+@pytest.mark.parametrize("name", ["LLMGateway-pm", "MyLinuxPool-impl-2", "my-repo-impl-2", "repo_1.2-arch"])
+def test_address_grammar_accepts_agent_names(name):
+    validate_address(name)
 
-    with pytest.raises(MessageValidationError, match="requires 'repo' and 'role'"):
-        validate_address({"role": "PM"})
 
-    with pytest.raises(MessageValidationError, match="non-empty string"):
-        validate_address({"repo": "   ", "role": "PM"})
+@pytest.mark.parametrize(
+    "name",
+    [
+        "myrepo-dev",     # role not in the list
+        "MyRepo-PM",      # roles are lower case
+        "-pm",            # empty repo
+        "foo-impl-",      # empty id segment
+        "foo-impl-2!",    # illegal character
+        "group=全員",      # there are no group addresses in v5
+        "repo=owner/team,role=pm",
+        "owner/team",     # no role at all
+        {"repo": "owner/team", "role": "pm"},  # the v0 shape is not an agent name
+    ],
+)
+def test_address_grammar_rejects_everything_else(name):
+    with pytest.raises(MessageValidationError):
+        validate_address(name)
 
-    with pytest.raises(MessageValidationError, match="unknown keys"):
-        validate_address({"repo": "owner-org/repo-channel", "role": "PM", "extra": 123})
 
-    # The parser still recognises the group shape so the CLI can reject it.
-    validate_address({"group": "all-workers"})
-    assert is_group_address({"group": "all-workers"})
-    assert not is_group_address({"repo": "owner-org/repo-channel", "role": "PM"})
+def test_parse_identity_takes_the_name_apart_from_the_right():
+    parsed = parse_identity("my-repo-impl-2")
+    assert (parsed.repo, parsed.role, parsed.agent_id) == ("my-repo", "impl", "2")
 
-    with pytest.raises(MessageValidationError, match="extra keys"):
-        validate_address({"group": "all-workers", "role": "PM"})
+    parsed = parse_identity("LLMGateway-pm")
+    assert (parsed.repo, parsed.role, parsed.agent_id) == ("LLMGateway", "pm", None)
 
-    msg_group_from = Message(
-        from_={"group": "all-workers"},
-        to={"repo": "owner-org/repo-channel", "role": "PM"},
-        channel="ch-1",
-    )
-    with pytest.raises(MessageValidationError, match="'from' cannot be a group address"):
-        serialize_message(msg_group_from)
+    # The rightmost role segment wins; the repo keeps the earlier ones.
+    parsed = parse_identity("foo-pm-test")
+    assert (parsed.repo, parsed.role, parsed.agent_id) == ("foo-pm", "test", None)
+
+    parsed = parse_identity("MyLinuxPool-impl-2")
+    assert (parsed.repo, parsed.role, parsed.agent_id) == ("MyLinuxPool", "impl", "2")
+
+    with pytest.raises(MessageValidationError):
+        parse_identity("myrepo-dev")
+
+
+def test_address_regex_and_parser_agree_on_the_shape():
+    # The regex only checks the overall shape; the parser is a separate step.
+    assert AGENT_NAME_RE.match("my-repo-impl-2")
+    assert not AGENT_NAME_RE.match("myrepo-dev")
+
+
+def test_channel_name_validation():
+    for good in ("general", "phase-1", "a_b-9"):
+        validate_channel_name(good)
+    for bad in ("", "小明", "has space", "dot.name", None, 3):
+        with pytest.raises(MessageValidationError):
+            validate_channel_name(bad)
 
 
 def test_attachment_validation():
@@ -209,33 +225,16 @@ def test_attachment_validation():
 
 def test_urgency_validation():
     for u in range(10):
-        msg = Message(
-            from_={"repo": "owner-org/repo-channel", "role": "PM"},
-            to={"repo": "owner-org/worker-team", "role": "worker"},
-            channel="ch",
-            urgency=u,
-        )
-        msg.validate()
+        Message(from_=PM, to=ME, channel="ch", urgency=u).validate()
 
     for bad in (-1, 10, 100, True, False, "5"):
-        msg = Message(
-            from_={"repo": "owner-org/repo-channel", "role": "PM"},
-            to={"repo": "owner-org/worker-team", "role": "worker"},
-            channel="ch",
-            urgency=bad,  # type: ignore
-        )
         with pytest.raises(MessageValidationError):
-            msg.validate()
+            Message(from_=PM, to=ME, channel="ch", urgency=bad).validate()  # type: ignore[arg-type]
 
 
 def test_message_length_limit():
     huge_body = "x" * 65500
-    msg = Message(
-        from_={"repo": "owner-org/repo-channel", "role": "PM"},
-        to={"repo": "owner-org/worker-team", "role": "worker"},
-        channel="ch",
-        content=huge_body,
-    )
+    msg = Message(from_=PM, to=ME, channel="ch", content=huge_body)
     with pytest.raises(MessageValidationError, match="exceeds maximum limit of 65536"):
         serialize_message(msg)
 
@@ -246,16 +245,16 @@ def test_parse_non_messages():
 
     text_v2 = (
         "---\nangareion: 2\nid: 01JABC\nat: 2026-10-10T00:00:00Z\n"
-        "from: {repo: a, role: b}\nto: {repo: c, role: d}\nchannel: x\nurgency: 5\nattachments: []\n---\n"
+        "from: LLMGateway-pm\nto: MyLinuxPool-impl-2\nchannel: x\nurgency: 5\nattachments: []\n---\n"
     )
     assert parse_message(text_v2) is None
     with pytest.raises(MessageValidationError, match="Unsupported angareion version"):
         parse_message(text_v2, strict=True)
 
-    # v1-shaped front matter (a2a, ack) is not a v0 message.
-    text_v1 = (
-        "---\na2a: 1\nid: 01JABC\nat: 2026-10-10T00:00:00Z\n"
+    # The v0 {repo, role} address shape is not a v5 message: ignored on read.
+    text_v0 = (
+        "---\nangareion: 1\nid: 01JABC\nat: 2026-10-10T00:00:00Z\n"
         "from: {repo: a, role: b}\nto: {repo: c, role: d}\nchannel: x\nurgency: 5\n"
         "attachments: []\n---\n"
     )
-    assert parse_message(text_v1) is None
+    assert parse_message(text_v0) is None

@@ -7,7 +7,7 @@
 
 ## 2. 位址與訊息格式
 
-- [ ] 2.1 `messages.validate_address` 改用 agent 名文法（`^[A-Za-z0-9][A-Za-z0-9._-]*-(pm|arch|impl|test)(-[A-Za-z0-9_.]+)?$`；驗證與由右而左的解析是兩步）；`parse_message`／`serialize_message` 的 `to` 選填
+- [x] 2.1 `messages.validate_address` 改用 agent 名文法（`^[A-Za-z0-9][A-Za-z0-9._-]*-(pm|arch|impl|test)(-[A-Za-z0-9_.]+)?$`；驗證與由右而左的解析是兩步）；`parse_message`／`serialize_message` 的 `to` 選填
 - [ ] 2.2 `cli.parse_address` 拿掉 `repo=`／`×`／`:`／JSON 位址；`--to` 選填、`--member` 拿掉
 - [ ] 2.3 `state.identity_slug`、顯示格式改 agent 名；舊游標檔自然廢棄的測試
 

@@ -1,10 +1,18 @@
-"""Six-field message model, front matter serialization, parsing, and validation (D3)."""
+"""Six-field message model, front matter serialization, parsing, and validation (D3/v5).
+
+v5 speaks agent names, not GitHub shapes: `from`, `to` and the personal
+identity are strings like `MyLinuxPool-impl-2` or `LLMGateway-pm`. The grammar
+has two steps: `validate_address` checks the overall shape, and
+`parse_identity` takes the address apart (repo, role, optional id) from right
+to left. `to` is optional: no `to` means the message went to the whole channel.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 import os
+import re
 import time
 from typing import Any
 
@@ -12,6 +20,12 @@ import yaml
 
 MAX_MESSAGE_LENGTH = 65536
 ANGAREION_VERSION = 1
+
+# The shape of an agent name: <repo name>-<role>[-<id>]. The repo part may
+# contain '-'; taking the address apart is parse_identity's job, not the regex's.
+AGENT_ROLES = ("pm", "arch", "impl", "test")
+AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*-(pm|arch|impl|test)(-[A-Za-z0-9_.]+)?$")
+CHANNEL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
@@ -32,44 +46,60 @@ class MessageValidationError(ValueError):
     """Raised when message fields, address, attachments, or length are invalid."""
 
 
-def is_group_address(address: Any) -> bool:
-    """Check if address is a group address shape: {group: ...}."""
-    return isinstance(address, dict) and "group" in address
+@dataclass(frozen=True)
+class AgentAddress:
+    """An agent name taken apart: `my-repo-impl-2` -> repo, role, optional id."""
+
+    repo: str
+    role: str
+    agent_id: str | None = None
+
+    def __str__(self) -> str:
+        return self.repo + "-" + self.role + (f"-{self.agent_id}" if self.agent_id else "")
 
 
 def validate_address(address: Any, *, field_name: str = "address") -> None:
-    """Validate member address {repo, role, [name]} or group address {group}."""
-    if not isinstance(address, dict):
-        raise MessageValidationError(f"{field_name} must be a dictionary, got {type(address).__name__}")
+    """Check that an address is an agent name string (v5 grammar)."""
+    if not isinstance(address, str):
+        raise MessageValidationError(
+            f"{field_name} must be an agent name string, got {type(address).__name__}"
+        )
+    if not AGENT_NAME_RE.match(address):
+        raise MessageValidationError(
+            f"{field_name} must be an agent name such as 'MyLinuxPool-impl-2' or "
+            f"'LLMGateway-pm', got {address!r}"
+        )
 
-    if "group" in address:
-        group_val = address["group"]
-        if not isinstance(group_val, str) or not group_val.strip():
-            raise MessageValidationError(f"{field_name}.group must be a non-empty string")
-        extra = set(address.keys()) - {"group"}
-        if extra:
-            raise MessageValidationError(f"Group {field_name} must not contain extra keys: {sorted(extra)}")
-        return
 
-    # Member address
-    if "repo" not in address or "role" not in address:
-        raise MessageValidationError(f"{field_name} requires 'repo' and 'role'")
+def parse_identity(name: str) -> AgentAddress:
+    """Take an agent name apart from right to left (design section 1).
 
-    repo_val = address["repo"]
-    if not isinstance(repo_val, str) or not repo_val.strip():
-        raise MessageValidationError(f"{field_name}.repo must be a non-empty string")
+    Validation and parsing are two steps: this function is called on names that
+    already passed `validate_address`. The rightmost `-<role>` segment is the
+    role; one trailing `-<id>` segment is the optional id; everything left of
+    the role is the repo name (it may contain '-').
+    """
+    validate_address(name)
+    segments = name.split("-")
+    role_index = None
+    for index in range(len(segments) - 1, 0, -1):
+        if segments[index] in AGENT_ROLES:
+            role_index = index
+            break
+    if role_index is None:  # unreachable after validate_address; defensive
+        raise MessageValidationError(f"{name!r} has no agent role (pm|arch|impl|test)")
+    repo = "-".join(segments[:role_index])
+    tail = segments[role_index + 1:]
+    agent_id = tail[0] if tail else None
+    return AgentAddress(repo=repo, role=segments[role_index], agent_id=agent_id)
 
-    role_val = address["role"]
-    if not isinstance(role_val, str) or not role_val.strip():
-        raise MessageValidationError(f"{field_name}.role must be a non-empty string")
 
-    allowed = {"repo", "role", "name"}
-    extra = set(address.keys()) - allowed
-    if extra:
-        raise MessageValidationError(f"{field_name} has unknown keys: {sorted(extra)}")
-
-    if "name" in address and address["name"] is not None and not isinstance(address["name"], str):
-        raise MessageValidationError(f"{field_name}.name must be a string if provided")
+def validate_channel_name(name: Any, *, field_name: str = "channel") -> None:
+    """Channel names are non-empty ASCII letters, digits, '-' and '_' (design section 4)."""
+    if not isinstance(name, str) or not CHANNEL_NAME_RE.match(name):
+        raise MessageValidationError(
+            f"{field_name} must be a non-empty ASCII name (letters, digits, '-', '_'), got {name!r}"
+        )
 
 
 def validate_attachment(attachment: Any, index: int = 0) -> None:
@@ -103,8 +133,8 @@ def validate_attachment(attachment: Any, index: int = 0) -> None:
 
 @dataclass
 class Message:
-    from_: dict[str, Any]
-    to: dict[str, Any]
+    from_: str
+    to: str | None
     channel: str
     urgency: int = 5
     content: str = ""
@@ -114,7 +144,7 @@ class Message:
     angareion: int = ANGAREION_VERSION
 
     def validate(self) -> None:
-        """Validate all six fields and metadata."""
+        """Validate all fields and metadata."""
         if self.angareion != ANGAREION_VERSION:
             raise MessageValidationError(
                 f"Unsupported angareion version: {self.angareion} (expected {ANGAREION_VERSION})"
@@ -125,13 +155,10 @@ class Message:
             raise MessageValidationError("Message at must be a non-empty ISO 8601 string")
 
         validate_address(self.from_, field_name="from")
-        if is_group_address(self.from_):
-            raise MessageValidationError("'from' cannot be a group address")
+        if self.to is not None:
+            validate_address(self.to, field_name="to")
 
-        validate_address(self.to, field_name="to")
-
-        if not isinstance(self.channel, str) or not self.channel.strip():
-            raise MessageValidationError("channel must be a non-empty string")
+        validate_channel_name(self.channel)
 
         if not isinstance(self.urgency, int) or isinstance(self.urgency, bool):
             raise MessageValidationError("urgency must be an integer between 0 and 9")
@@ -189,7 +216,10 @@ def split_front_matter(text: str) -> tuple[str, str]:
 
 
 def serialize_message(msg: Message) -> str:
-    """Serialize a message into YAML front matter + Markdown content."""
+    """Serialize a message into YAML front matter + Markdown content.
+
+    A broadcast (no `to`) omits the `to` field entirely.
+    """
     msg.validate()
 
     fm: dict[str, Any] = {
@@ -197,11 +227,12 @@ def serialize_message(msg: Message) -> str:
         "id": msg.id,
         "at": msg.at,
         "from": msg.from_,
-        "to": msg.to,
-        "channel": msg.channel,
-        "urgency": msg.urgency,
-        "attachments": msg.attachments,
     }
+    if msg.to is not None:
+        fm["to"] = msg.to
+    fm["channel"] = msg.channel
+    fm["urgency"] = msg.urgency
+    fm["attachments"] = msg.attachments
 
     fm_yaml = yaml.safe_dump(fm, sort_keys=False, allow_unicode=True)
     text = f"---\n{fm_yaml}---\n{msg.content}"
@@ -230,7 +261,7 @@ def parse_message(text: str, *, strict: bool = False) -> Message | None:
         if not isinstance(data, dict):
             raise MessageValidationError("Front matter is not a mapping")
 
-        required = {"angareion", "id", "at", "from", "to", "channel", "urgency", "attachments"}
+        required = {"angareion", "id", "at", "from", "channel", "urgency", "attachments"}
         missing = required - set(data.keys())
         if missing:
             raise MessageValidationError(f"Missing required front matter fields: {sorted(missing)}")
@@ -248,7 +279,7 @@ def parse_message(text: str, *, strict: bool = False) -> Message | None:
             id=data["id"],
             at=at,
             from_=data["from"],
-            to=data["to"],
+            to=data.get("to"),
             channel=data["channel"],
             urgency=data["urgency"],
             attachments=data["attachments"],
