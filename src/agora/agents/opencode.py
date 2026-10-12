@@ -551,6 +551,54 @@ def _lines_of(parts: list[dict]) -> list[str]:
     return lines
 
 
+def _lines_of_v2(content: list) -> list[str]:
+    """The same rules for one v2 assistant row's `content` (design 5).
+
+    The row is flat, so the content items are named `text` / `tool` and the tool
+    call's name and arguments sit in `name` and `state.input` - everything else
+    (attachments, steps, reasoning, a shape a later opencode adds) follows the v1
+    rules: silent when it is not conversation, `[skip <type>]` when it is unknown.
+    """
+    lines: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type")
+        if item.get("synthetic") is True:
+            continue
+        if kind == "text":
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                lines.append(text.strip())
+        elif kind == "tool":
+            state = item.get("state") or {}
+            lines.append(tool_line(str(item.get("name", "?")), state.get("input", {})))
+        elif kind in _SILENT_PARTS:
+            continue
+        else:
+            lines.append(f"[skip {kind}]")
+    return lines
+
+
+def _user_text(text: object) -> str | None:
+    """The words of a v2 user row, if it said anything in writing.
+
+    v2's *first* user row stores the prompt JSON-encoded (`"hello"`), later ones
+    plain (measured 2.0.26) - the CLI wraps its positional argument and nothing
+    else does. Decoding when it is a JSON string keeps the reading version showing
+    the user's words instead of their escaping.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    try:
+        decoded = json.loads(text)
+    except json.JSONDecodeError:
+        return text.strip()
+    if isinstance(decoded, str) and decoded.strip():
+        return decoded.strip()
+    return text.strip()
+
+
 class OpencodeAgent:
     """Speaks to the `opencode` executable; owns nothing else."""
 
@@ -695,9 +743,24 @@ class OpencodeAgent:
     def turns(self, raw: bytes) -> Turns:
         """One entry per user/assistant message: its text, plus a line per tool
         call - the reading version's rules (design 4.4), so `native(turns(raw))`
-        can rebuild a session whose history reads the same way."""
+        can rebuild a session whose history reads the same way.
+
+        Both export formats read the same way; `idle` rows and attachment files are
+        not conversation and produce no turn (H1: a v2 import must not come out as
+        an empty body).
+        """
+        payload = self._read(raw)
         out: Turns = []
-        for message in _payload_messages(self._read(raw)):
+        if _payload_format(payload) == "v2":
+            for row in _payload_messages(payload):
+                kind = row.get("type")
+                if kind == "user":
+                    text = _user_text(row.get("text"))
+                    out.append(("user", [text] if text else []))
+                elif kind == "assistant":
+                    out.append(("assistant", _lines_of_v2(row.get("content") or [])))
+            return out
+        for message in _payload_messages(payload):
             role = (message.get("info") or {}).get("role")
             if role in ("user", "assistant"):
                 out.append((role, _lines_of(message.get("parts") or [])))
