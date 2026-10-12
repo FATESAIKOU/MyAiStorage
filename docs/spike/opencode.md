@@ -1059,3 +1059,34 @@ SQL 只決定要看哪幾列。兩段都串流，消費者拿到第一個 id 就
 只比 `type == "text"` 且非 `synthetic` 的 part（跟 `last_message` 同一條規則：附件不是
 對話，工具輸出也不是）。同一個 session 只出現一次。資料庫開不起來、schema 認不出來、
 沒有這張表，都只是沒有結果，不丟例外。
+
+---
+
+# opencode 2.x 的 server 上下文與 `--server` 量測（2026-10-13，agora-opencode-v2 1.5）
+
+agora 從第 1 步起，所有自動化呼叫都帶 `--standalone`：v2 的 `session export／import／delete`
+與 `run` 都是 **server 操作**，沒帶旗標時 CLI 會去找（沒有就試著起）使用者的 managed 服務，
+而預設埠 **49374 是全機共用**的——隔離四個 XDG 不會隔離埠。`start_native` 的私有
+`serve --hostname 127.0.0.1 --port <p>` 照舊（實測不變）。
+
+量測環境：四個 XDG＋`HOME` 指到 `/tmp` 底下的新目錄（`opencode debug paths` 確認），
+先在隔離的 XDG_CONFIG 下 `opencode service set port 51999`，再另起一個**私有**
+`opencode serve --hostname 127.0.0.1 --port 51990`，對它跑 `--server`：
+
+| 呼叫 | 結果 |
+|---|---|
+| `session export <id> --server http://127.0.0.1:51990` | 成功（7 則）；**需要密碼** |
+| `session import <file> --server … --directory <dir>` | 成功（`--directory` 也收） |
+| `session delete <id> --server …` | 成功 |
+| `session export <id> --standalone`（serve 還活著） | 成功——**`--standalone` 與 live serve 沒有相衝** |
+
+- 密碼：serve 啟動時把 `server password <43 碼>` 印在 stdout；沒設時命令回
+  `Server at … requires a password; set OPENCODE_PASSWORD`。`OPENCODE_PASSWORD` 與
+  `OPENCODE_SERVER_PASSWORD` 兩個環境變數都能過（都實測）。
+- `opencode service set port` 只寫 `$XDG_CONFIG_HOME/opencode/service.json`
+  （`{"port": …}`），**不會連運行中的服務**：`service get` 立刻反映，執行前後 49374 的
+  PID／etime 不變（審查 N2）。
+- 兩次量測前後都只 `lsof -nP -iTCP:49374 -sTCP:LISTEN` 看有沒有在聽（不連、不讀資料）：
+  仍是原本的 PID 62837、etime 連續。
+
+**結論**：`_server_args()` 維持 `--standalone`，設計 Decisions 2 的形狀不用改。
