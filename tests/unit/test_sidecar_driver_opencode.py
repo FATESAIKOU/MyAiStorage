@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401
 
+import http.client
 import json
 import logging
 import socket
@@ -456,6 +457,36 @@ def test_non_2xx_marks_the_round_failed(tmp_path, monkeypatch):
         assert SECRET not in (state.reason or "")
     finally:
         driver.stop(handle, graceful=False, timeout=5)
+
+
+def test_an_unexpected_request_error_does_not_leave_the_agent_running(
+    driver, serve, tmp_path, monkeypatch
+):
+    """A (section-3 review): IncompleteRead is an HTTPException, not an OSError.
+
+    The round still ends - idle or exited, never a stuck `running` - and the
+    failure is visible in `last_error`.
+    """
+    proc, port = serve()
+    handle = driver.launch(
+        RunningSession("agora:A", AgoraProcess(proc=proc, port=port, agent_session_id="ses_A")),
+        {}, str(tmp_path),
+    )
+    real_request = driver._request
+
+    def broken_request(h, method, path, *, body=None, timeout=None):
+        if path.endswith("/message"):
+            raise http.client.IncompleteRead(b'{"ok"', 64)
+        return real_request(h, method, path, body=body, timeout=timeout)
+
+    monkeypatch.setattr(driver, "_request", broken_request)
+    driver.send(handle, "hi")
+
+    wait_until(lambda: driver.state(handle).kind != DRIVER_RUNNING)
+    state = driver.state(handle)
+    assert state.kind in (DRIVER_IDLE, DRIVER_EXITED)
+    assert "IncompleteRead" in (handle.last_error or "")
+    driver.stop(handle, graceful=False, timeout=5)
 
 
 # --- new mode ------------------------------------------------------------------

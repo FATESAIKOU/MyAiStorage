@@ -312,25 +312,46 @@ class OpenCodeDriver:
         return session_id
 
     def _send_round(self, handle: OpenCodeHandle, session_id: str, body: dict[str, Any]) -> None:
+        failure: OpenCodeDriverError | None = None
         try:
-            data = self._request(
-                handle, "POST", f"/session/{session_id}/message", body=body,
-                timeout=self._message_timeout,  # long: the round may take an hour (D6)
+            try:
+                data = self._request(
+                    handle, "POST", f"/session/{session_id}/message", body=body,
+                    timeout=self._message_timeout,  # long: the round may take an hour (D6)
+                )
+            except OpenCodeDriverError as e:
+                failure = e
+            else:
+                info_error = None
+                if isinstance(data, dict):
+                    info = data.get("info")
+                    if isinstance(info, dict) and info.get("error"):
+                        info_error = str(info["error"])
+                if info_error:
+                    failure = OpenCodeDriverError(
+                        f"round failed: {info_error}{self._tail(handle)}"
+                    )
+                else:
+                    self._verify_first_response(handle, data)
+        except Exception as e:
+            # A (section-3 review): anything that is not an OpenCodeDriverError
+            # (http.client.IncompleteRead is an HTTPException, not an OSError) is
+            # still a failed round; it must not escape and leave `sending` stuck.
+            failure = OpenCodeDriverError(
+                f"round failed: {type(e).__name__}: {e}{self._tail(handle)}"
             )
-        except OpenCodeDriverError as e:
-            self._fail_round(handle, e)
+        finally:
+            # Both exits go through here, so the agent never keeps looking
+            # running after its background round is over (A).
+            self._finish_round(handle, failure)
+
+    def _finish_round(
+        self, handle: OpenCodeHandle, failure: OpenCodeDriverError | None
+    ) -> None:
+        """The round is over either way: clear `sending` and apply the outcome."""
+        if failure is not None:
+            self._fail_round(handle, failure)
             return
-        info_error = None
-        if isinstance(data, dict):
-            info = data.get("info")
-            if isinstance(info, dict) and info.get("error"):
-                info_error = str(info["error"])
-        if info_error:
-            self._fail_round(
-                handle, OpenCodeDriverError(f"round failed: {info_error}{self._tail(handle)}")
-            )
-            return
-        self._verify_first_response(handle, data)
         with handle.lock:
             handle.sending = False
             if handle.quota is None:
