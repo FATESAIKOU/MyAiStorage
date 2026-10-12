@@ -59,6 +59,19 @@ from agora.agents.base import NO_REPLY
 
 pytestmark = pytest.mark.integration
 
+
+# --- opencode 2.x: the 1.x command line (opencode export/import) is gone and the
+# 2.x one needs a server context per call; these tests are rewritten in step 5 of
+# change agora-opencode-v2 and skip until then (tasks 1.11). Without this they do
+# not skip on a 2.x machine, they run and fail - or reach for the shared managed
+# service (port 49374) while doing it.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "fakes"))
+import opencode_noninteractive as _oc_probe  # noqa: E402  (needs the path above)
+
+if _oc_probe.session_export_supported():
+    pytest.skip("opencode 2.x：整合測試還在用 1.x 的指令，第 5 步更新（tasks 1.11）",
+                allow_module_level=True)
+
 CLAUDE = shutil.which("claude")
 OPENCODE = shutil.which("opencode")
 # E6, same list test_claude_real.py uses: the fork note is plain text, so no tool

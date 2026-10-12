@@ -14,10 +14,16 @@ from pathlib import Path
 import pwd
 import shutil
 import subprocess
+import sys
 
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
+
+# The probe and the integration tests share one definition of "is this opencode
+# 2.x?", so the guard and the skips cannot disagree (tasks 1.10/1.11).
+sys.path.insert(0, str(Path(__file__).resolve().parent / "fakes"))
+import opencode_noninteractive as _agent  # noqa: E402
 
 # The token `_guard` reads to tell "a pytest run that has this conftest" from "a pytest run
 # of a test file kept outside the repository", where pytest loads no conftest and nothing is
@@ -38,15 +44,46 @@ def _real_env() -> dict:
     return env
 
 
+def _opencode_guard_style() -> list[str]:
+    """The server context the installed opencode's session commands need."""
+    return (_agent.session_export_supported() and ["--standalone"]) or []
+
+
+def _session_list() -> subprocess.CompletedProcess:
+    """The one call the repo-clean guard makes, kept whole so a test can fake it:
+    `opencode session list [--standalone] --format json` in this repository."""
+    return subprocess.run(["opencode", "session", "list", *_opencode_guard_style(),
+                           "--format", "json"],
+                          cwd=str(REPO), env=_real_env(), capture_output=True, text=True)
+
+
+def _session_ids_from(proc: subprocess.CompletedProcess, command: str) -> set[str]:
+    """The ids that call reported - or a failure, never an empty set.
+
+    A call that failed says so out loud: returning an empty set here is exactly
+    the silent blindness review M5 found (on 2.x the 1.x flags differ, the exit
+    code is non-zero, and a guard that shrugs is no guard).
+    """
+    if proc.returncode != 0:
+        pytest.fail(f"{command} 失敗，護欄沒辦法確認 repo 目錄是乾淨的："
+                    f"{(proc.stderr or '').strip()[-200:]}")
+    try:
+        rows = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError as e:
+        pytest.fail(f"{command} 的輸出不是 JSON：{e}")
+    return {row["id"] for row in rows if isinstance(row, dict) and row.get("id")}
+
+
 def _repo_session_ids() -> set[str]:
     """Ids of the opencode sessions that belong to this repository, and nothing
     else: `session list` is scoped to the project directory. Only ids are kept -
-    no titles, no transcripts."""
-    proc = subprocess.run(["opencode", "session", "list", "--format", "json"],
-                          cwd=str(REPO), env=_real_env(), capture_output=True, text=True)
-    if proc.returncode != 0:
-        return set()
-    return {row["id"] for row in json.loads(proc.stdout or "[]") if row.get("id")}
+    no titles, no transcripts.
+
+    A 2.x opencode needs a server context of its own for every call, and a private
+    one (`--standalone`) is the point of that - without it the command looks for
+    the user's managed service. The 1.x spelling of both commands has no such flag.
+    """
+    return _session_ids_from(_session_list(), "opencode session list")
 
 
 @pytest.fixture(autouse=True)
@@ -69,11 +106,16 @@ def repo_project_stays_clean(request):
     added = _repo_session_ids() - before
     if not added:
         return
+    style = _opencode_guard_style()
+    undeleted: list[str] = []
     for session_id in sorted(added):
-        subprocess.run(["opencode", "session", "delete", session_id],
-                       cwd=str(REPO), env=_real_env(), capture_output=True)
+        proc = subprocess.run(["opencode", "session", "delete", session_id, *style],
+                              cwd=str(REPO), env=_real_env(), capture_output=True)
+        if proc.returncode != 0:
+            undeleted.append(f"{session_id}（{(proc.stderr or b'').decode('utf-8', 'replace').strip()[-120:]}）")
+    leftover = f"；這些沒刪掉：{'、'.join(undeleted)}" if undeleted else ""
     pytest.fail("整合測試在 repo 目錄留下 opencode session（已刪掉，請找出是哪條指令"
-                f"忘了 --dir）：{', '.join(sorted(added))}")
+                f"忘了 --dir）：{', '.join(sorted(added))}{leftover}")
 
 
 @pytest.fixture(autouse=True)

@@ -3,6 +3,13 @@
 2026-10-02，impl1。opencode **1.18.34**（macOS arm64）。模型只用
 `opencode/space-bunny-free`。
 
+> **⚠️ 這一節的指令是 opencode 1.x 的語法。** 2.x（macOS 上已是 2.0.26）把
+> `opencode export／import` 搬到 `opencode session export／import` 並要求 server
+> 上下文、匯出格式改成扁平、互動模式換表——agora 現在用的是 2.x 的語法。**2.x 的
+> 格式、隔離做法與 fixture 請直接看本檔最後三節**（「opencode 2.x 的 server 上下文與
+> `--server` 量測」、「opencode 2.x 的格式、隔離與 fixture」）；下面的歷史結論裡，
+> 與 2.x 相抵的部分以那三節為準（issue #51、change agora-opencode-v2）。
+
 ## 怎麼測（先讀這段，因為它決定了下面每個結論能不能重跑）
 
 opencode 的 session 屬於「專案目錄」，在沒有 commit 的資料夾裡跑任何 opencode
@@ -1059,3 +1066,161 @@ SQL 只決定要看哪幾列。兩段都串流，消費者拿到第一個 id 就
 只比 `type == "text"` 且非 `synthetic` 的 part（跟 `last_message` 同一條規則：附件不是
 對話，工具輸出也不是）。同一個 session 只出現一次。資料庫開不起來、schema 認不出來、
 沒有這張表，都只是沒有結果，不丟例外。
+
+---
+
+# opencode 2.x 的 server 上下文與 `--server` 量測（2026-10-13，agora-opencode-v2 1.5）
+
+agora 從第 1 步起，所有自動化呼叫都帶 `--standalone`：v2 的 `session export／import／delete`
+與 `run` 都是 **server 操作**，沒帶旗標時 CLI 會去找（沒有就試著起）使用者的 managed 服務，
+而預設埠 **49374 是全機共用**的——隔離四個 XDG 不會隔離埠。`start_native` 的私有
+`serve --hostname 127.0.0.1 --port <p>` 照舊（實測不變）。
+
+量測環境：四個 XDG＋`HOME` 指到 `/tmp` 底下的新目錄（`opencode debug paths` 確認），
+先在隔離的 XDG_CONFIG 下 `opencode service set port 51999`，再另起一個**私有**
+`opencode serve --hostname 127.0.0.1 --port 51990`，對它跑 `--server`：
+
+| 呼叫 | 結果 |
+|---|---|
+| `session export <id> --server http://127.0.0.1:51990` | 成功（7 則）；**需要密碼** |
+| `session import <file> --server … --directory <dir>` | 成功（`--directory` 也收） |
+| `session delete <id> --server …` | 成功 |
+| `session export <id> --standalone`（serve 還活著） | 成功——**`--standalone` 與 live serve 沒有相衝** |
+
+- 密碼：serve 啟動時把 `server password <43 碼>` 印在 stdout；沒設時命令回
+  `Server at … requires a password; set OPENCODE_PASSWORD`。`OPENCODE_PASSWORD` 與
+  `OPENCODE_SERVER_PASSWORD` 兩個環境變數都能過（都實測）。
+- `opencode service set port` 只寫 `$XDG_CONFIG_HOME/opencode/service.json`
+  （`{"port": …}`），**不會連運行中的服務**：`service get` 立刻反映，執行前後 49374 的
+  PID／etime 不變（審查 N2）。
+- 兩次量測前後都只 `lsof -nP -iTCP:49374 -sTCP:LISTEN` 看有沒有在聽（不連、不讀資料）：
+  仍是原本的 PID 62837、etime 連續。
+
+**結論**：`_server_args()` 維持 `--standalone`，設計 Decisions 2 的形狀不用改。
+
+---
+
+# opencode 2.x 的格式、隔離與 fixture（2026-10-13，agora-opencode-v2 第 1 步）
+
+opencode **2.0.26**（macOS arm64）。模型是**本機的 fake upstream**
+（`tests/fakes/fake_upstream.py`）：不連外、不用憑證、回一句話或一次工具呼叫，
+fixture 與之後的驗收看 v2 的測試都用它，不用真模型（審查 M6）。
+
+## 怎麼隔離（fixture 產生與驗收共用）
+
+1. `HOME` 與四個 XDG（`XDG_DATA_HOME` 資料、`XDG_CONFIG_HOME` 設定、`XDG_STATE_HOME`
+   狀態、`XDG_CACHE_HOME` 快取）指到 `/tmp` 底下的新目錄；先 `opencode debug paths`
+   確認 opencode 真的跟著指過去。
+2. **埠不在 XDG 裡**：預設埠 49374 是全機共用的。第一步在隔離的 XDG_CONFIG 下
+   `opencode service set port <空閒埠>`（本次 51999）。實測它只寫
+   `$XDG_CONFIG_HOME/opencode/service.json`、不連任何服務（見上一節）。
+3. 清掉繼承的 `OPENCODE_*`（本次用 `env -i` 全清）。pytest 外的步驟另外自己設
+   `AGORA_CONFIG`／`AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`AGORA_RCLONE`／
+   `RCLONE_CONFIG`——`tests/conftest.py` 的隔離只在 pytest 內。
+4. 工作目錄用 `/tmp` 底下的暫存 git 專案，不是 repo、不是使用者的專案。
+5. 開跑前後各 `lsof -nP -iTCP:49374 -sTCP:LISTEN` 看共用服務**在不在**（只看在不在聽、
+   PID／etime，不連它、不讀資料）。本次全程 PID 62837、etime 連續，沒被動到。
+6. **`opencode debug config` 的來源不只隔離的 XDG 目錄**：它還列出使用者真正的
+   `~/.opencode`（從 passwd 的 home 找，`HOME` 隔離擋不掉）與 cwd 的 `.opencode`。
+   所以自動化一律用 `-m fakeup/fake-model` 明確指定 provider，不去碰其他 provider；
+   要真正全隔離得換使用者或改安裝位置，不在本單範圍。
+
+**陷阱**：`opencode run` 在 stdin 不是 TTY 時**會把 stdin 讀進來接在訊息後面**。
+用 heredoc／管線呼叫它時要給 `/dev/null`（第一次產生 fixture 就踩到，prompt 尾巴多了一段
+腳本；也順帶說明 `_export_bytes` 為什麼把 stdin 關掉）。
+
+## v2 的指令
+
+| 動作 | v1（agora 舊的） | v2（agora 第 1 步起） |
+|---|---|---|
+| 匯出 | `opencode export <id>` | `opencode session export <id> --standalone` |
+| 匯入 | `opencode import <file>` | `opencode session import <file> --standalone --directory <workdir>` |
+| 刪除 | `opencode session delete <id>` | `opencode session delete <id> --standalone` |
+| 寫要約 | `opencode run <msg> -f <file> --format json` | `opencode run --standalone <msg> -f <file> --format json` |
+| headless serve | `opencode serve --hostname 127.0.0.1 --port <p>` | 不變 |
+
+- 前四個都是 server 操作，沒帶旗標時 CLI 會去找（沒有就試著起）managed 服務；
+  agora 一律 `--standalone`（見上一節的量測）。
+- import 的 `--directory` 決定專案，**payload 裡的 `location.directory` 被忽略**：實測
+  匯入 proj3 後再匯出，`location.directory` 是 proj3，還多了 `subpath`（相對路徑）。
+  `$PWD` 也要設成同一個目錄（v1 的陷阱 A 在 v2 一樣成立）。
+- 匯入的錯誤是響亮的：v1 巢狀 payload → `SchemaError: Missing key at ["info"]["location"]`；
+  **訊息 id 撞到既有 Session → `Internal Server Error`**（不是 v1 的靜默丟列）。
+  所以 `reidentify` 的 id 一定要全新，agora 的寫入路徑本來就是這樣。
+
+## v2 的匯出格式（與 v1 的差異）
+
+| | v1 | v2 |
+|---|---|---|
+| `info` | `agent, cost, directory, id, model, path, permission, projectID, revert, slug, summary, time, title, tokens, version` | `cost, id, location, model, outcome, projectID, time, title, tokens`（這次的導出有 `model`；spike 的樣本沒有） |
+| `directory` | `info.directory` | `info.location.directory` |
+| `version` | 有 | 沒有（`export()` 回 `None`） |
+| messages | `[{info, parts}]` | 扁平：`{…, type: "user"/"assistant"/"idle"}` |
+
+- **user**：`text`＋`files`。第一則是把 CLI 參數 **JSON 編碼**後存的（`"…"`），
+  `-s` 接續的後續訊息是純文字——閱讀版把 JSON 字串解開再顯示（`_user_text`）。
+- **assistant**：`content`（`type: text` 的文字、`type: tool` 的 `name`＋`state.input`，
+  工具的輸出在 `state.content`，閱讀版只取一行 `[tool] …`）、`model{id,providerID,variant}`、
+  `finish`／`rawFinish`、`snapshot`。
+- **idle**：每回合結尾一列，不是對話：不算 `message_count`、閱讀版不產段落（審查 M8）。
+- **v2 沒有跨訊息參照**：assistant 列沒有 `parentID`、訊息列沒有 `sessionID`／`messageID`／
+  `partID`（實測 2.0.26）。任務書原本預期「第二輪 `-s <id>` 讓參照出現」——**沒有出現**。
+  唯一的參照形狀是 fork 的 `info.fork{sessionID, boundary.messageID}`，指到**別的** Session
+  （父的那一則），匯入時 opencode 會把整個 `fork` 丟掉（實測）。所以：
+  - `reidentify` 的 v2 只改訊息列的 `id` 與 `content` 裡有 `id` 的項目（工具呼叫的 id）；
+    `info.fork` 原樣（它的目標不在這份 payload 裡，沒有東西可以 remap；測試斷言它不變）。
+  - fixture 的跨訊息參照就用 fork 的 `info.fork`（審查 L6）：`oc-v2-fork.json` 的
+    `boundary.messageID` 指到 `oc-v2-basic.json` 的最後一列。
+
+## fixture 與它怎麼來的
+
+`tests/fixtures/opencode/oc-v2-basic.json`（兩輪＋一次工具呼叫）、
+`oc-v2-fork.json`（它的 fork，帶 `info.fork` 參照）。形狀：
+
+```
+info.location.directory = /tmp/agora-it-opencode/proj
+messages: user（第一則 JSON 編碼）→ assistant（content[0] 是 read 工具的呼叫與結果）
+          → assistant（一句話）→ idle → user → assistant → idle
+```
+
+產生（全部在隔離環境，模型是 fake upstream）：
+
+```bash
+# 1. fake upstream 起在 127.0.0.1 的臨時埠，順便寫 opencode 的 provider 設定
+python3 tests/fakes/fake_upstream.py --port 0 \
+    --config "$XDG_CONFIG_HOME/opencode/opencode.json"       # provider fakeup / model fake-model
+# 2. 暫存專案（git init）裡放 fake-note.txt，自編兩輪；工具呼叫＝讀那個檔
+opencode run --standalone -m fakeup/fake-model --format json --title "oc-v2 fixture" "先讀 fake-note.txt 再回答。"
+opencode run --standalone -m fakeup/fake-model -s <id> --format json "第二輪：…"
+opencode run --standalone -m fakeup/fake-model -s <id> --fork --format json "第三輪：fork …"
+# 3. 匯出（stdout 是乾淨 JSON、進度在 stderr）
+opencode session export <id> --standalone > basic.json
+opencode session export <fork id> --standalone > fork.json
+```
+
+去識別化（審查 L2）：id（session／訊息／工具呼叫）換成固定的假 id、`projectID`／
+`snapshot` 的 git 雜湊換成 `0123…`、`location.directory` 換成
+`/tmp/agora-it-opencode/proj`、時間戳固定成 `1790214000000` 起。做完把
+`fatesaikou`、`/Users`、`/private/tmp`、主機名、`@`、`providerState` 逐一 grep 過，
+都是 0；兩個 fixture 的 `info.fork` 與 basic 的最後一列互相對得上。
+
+## 順手複驗（設計 §G 的落點）
+
+- **工具呼叫的 parts**（設計 §G-1）：形狀是 assistant 列的 `content[type=tool]`
+  （`name`、`state.input`、`state.content` 是工具輸出）。閱讀版對它出一行
+  `[tool] read {'path': 'fake-note.txt'}`，工具輸出（`ZZNOTE 這是一張紙條。`）不出現。
+- **跨訊息 reference**（§G-2／L6）：見上，v2 的普通 Session 沒有；fork 的 `info.fork`
+  是唯一有的。reidentify 只改它該改的（訊息 id／content id），測試驗 round trip 其餘
+  byte-for-byte。
+- **真 opencode 的 round trip**：把 `oc-v2-basic.json` 用 `reidentify` 換 id 後在真的
+  2.0.26 上 `session import --standalone --directory <proj>` → `run --standalone -s` 一輪 →
+  `session export --standalone` 讀回：閱讀版 7 段（fixture 的 5 段＋新的一輪 2 段）、
+  工具行還在。這是第 1 步的完整讀取鏈（第 5 步會用整條 CLI 驗收再跑一次）。
+- **import 必填欄位全集**：第 2 步（`native()`）逐欄餵 `session import` 補齊；這次已知的
+  必填／行為是 `info.location`、訊息 id 要全新（撞到是 500）、`--directory` 決定專案。
+
+## 清理
+
+測試用的 Session 都在隔離的 store（`/tmp`）：逐一以
+`opencode session delete <id> --standalone` 刪掉，工作用的臨時 XDG 整個目錄刪除。
+共用服務（PID 62837、49374）與使用者真正的 store 全程沒被碰過。

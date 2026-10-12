@@ -7,8 +7,10 @@ here instead, and this wrapper translates the TUI form into the headless one:
 
     [--session <id>]  ->  opencode run -s <id> -m <model> <fixed question>
 
-`--version`, `export <id>`, `import <file>` and `session delete <id>` are passed
-straight through, because the adapter uses them for real.
+`--version`, `session export <id>`, `session import <file>` and
+`session delete <id>` are passed straight through, because the adapter uses them
+for real; opencode 2.x's server flags (`--standalone`, `--server`, `--directory`)
+ride along in argv untouched.
 
 Every received argv is appended (JSON) to $FAKE_HOME/opencode-e2e-args.log, with
 the model that answered, so the test can see which session ids agora minted and
@@ -56,6 +58,29 @@ PERMISSION = '{"*":"deny"}'
 
 def real_opencode() -> str | None:
     return shutil.which("opencode") or os.environ.get("AGORA_REAL_OPENCODE")
+
+
+@functools.lru_cache(maxsize=None)
+def session_export_supported() -> bool:
+    """Whether this opencode has the 2.x `session export` subcommand.
+
+    opencode 1.x has `opencode export` at the top level; 2.x moved export/import
+    under `session` and made them server operations (change agora-opencode-v2,
+    design 2). The integration tests in this repository still speak the 1.x CLI
+    (they are updated in step 5 of that change), so they ask this first and skip
+    themselves on a 2.x machine - instead of running against a CLI that cannot
+    answer them, and instead of letting the 2.x CLI reach for the shared managed
+    service (default port 49374) while they do.
+    """
+    real = real_opencode()
+    if real is None:
+        return False
+    try:
+        proc = subprocess.run([real, "session", "--help"], capture_output=True,
+                              text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0 and "export" in (proc.stdout or "")
 
 
 @functools.lru_cache(maxsize=None)

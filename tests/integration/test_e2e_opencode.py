@@ -61,6 +61,10 @@ import opencode_noninteractive as agent  # noqa: E402  (needs the path above)
 
 pytestmark = pytest.mark.integration
 
+if agent.session_export_supported():
+    pytest.skip("opencode 2.x：整合測試還在用 1.x 的指令，第 5 步更新（tasks 1.11）",
+                allow_module_level=True)
+
 # pwd, not HOME: the sandbox replaces HOME per test.
 REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
 REAL_CONF = REAL_HOME / ".config" / "agora" / "rclone.conf"

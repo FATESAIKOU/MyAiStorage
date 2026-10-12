@@ -86,3 +86,26 @@ def test_an_empty_env_var_counts_as_unset(monkeypatch):
     """`export AGORA_TEST_MODEL=` must not put `-m ''` in front of the chain."""
     assert chain_with(monkeypatch, chosen="", provider_models={THIRD}) == [
         ["-m", W.PRIMARY], ["-m", W.FALLBACK], ["-m", THIRD, *W.THIRD_PARTY[1]]]
+
+
+def test_the_v2_probe_reads_session_export_from_the_help(monkeypatch):
+    """The guard and the integration skips share this: 2.x has `session export`,
+    1.x does not (`export` sits at the top level there). No opencode is run."""
+    class Done:
+        def __init__(self, stdout, returncode=0):
+            self.stdout, self.returncode = stdout, returncode
+
+    monkeypatch.setattr(W, "real_opencode", lambda: "/usr/bin/opencode")
+    W.session_export_supported.cache_clear()
+    monkeypatch.setattr(W.subprocess, "run", lambda *a, **kw: Done(
+        "SUBCOMMANDS\n  list      List top-level sessions\n  export    Export session data\n"))
+    assert W.session_export_supported() is True
+    W.session_export_supported.cache_clear()
+    monkeypatch.setattr(W.subprocess, "run", lambda *a, **kw: Done("SUBCOMMANDS\n  list\n  delete\n"))
+    assert W.session_export_supported() is False
+
+
+def test_the_v2_probe_without_opencode_is_false(monkeypatch):
+    monkeypatch.setattr(W, "real_opencode", lambda: None)
+    W.session_export_supported.cache_clear()
+    assert W.session_export_supported() is False

@@ -12,9 +12,10 @@ as it is and a rebuild would lose every tool call. The reading version is
 `base.reading(agent, raw)` — this module has nothing for it.
 
 Loading a session means writing a new one: re-identify every id, `opencode
-import` in the target directory, then `opencode --session <new id>`. Five things
-about that are not negotiable, and all five were measured rather than assumed —
-see docs/spike/opencode.md (traps 1-6) for the evidence:
+session import` in the target directory, then `opencode --session <new id>`. Five
+things about that are not negotiable, and all five were measured rather than
+assumed — see docs/spike/opencode.md (traps 1-6) for the evidence; the opencode 2.x
+commands and server contexts are in the v2 section of the same file:
 
 1. import silently drops rows whose id already exists, so every id is new
    (id order and uniqueness: see `reidentify`).
@@ -93,6 +94,20 @@ PENDING_PREFIX = "pending-"
 #: A merge prompt must not be able to reach for a file, so every tool is denied -
 #: a prompt asking nicely is not a boundary (measured in docs/spike/opencode.md).
 DENY_TOOLS = '{"*":"deny"}'
+
+
+def _server_args() -> list[str]:
+    """The server context every automated call carries (one place, design 2).
+
+    Without it, opencode 2.x looks for the user's managed background service -
+    default port 49374, shared by every opencode on the machine, so isolating the
+    XDG directories does not isolate it - and tries to start one when it is not
+    there. `--standalone` runs a private server for the one command instead, which
+    is what a call that comes and goes wants; a long-lived serve would want
+    `--server <url>` (syntax measured in docs/spike/opencode.md). Export, import,
+    delete and summarize all go through here, so one flow is never half-flagged.
+    """
+    return ["--standalone"]
 
 
 #: opencode keeps everything in one SQLite file. `opencode session list` only
@@ -310,6 +325,29 @@ def _remap(info: dict, keys: tuple[str, ...], mapping: dict[str, str]) -> None:
             info[key] = mapping.get(value, value)
 
 
+def _reidentify_v2(payload: dict, session_id: str, salt: str) -> dict:
+    """The v2 half of `reidentify`: flat rows, the content inside them.
+
+    Every row id is new, and so is every content item that carries an id (a tool
+    call's, measured; text items have none). A v2 export's only reference-shaped
+    field is `info.fork`, and it points at a *different* session - the boundary at
+    the parent session's last row, which a fork did not copy under its own ids - so
+    there is nothing inside this payload to remap: the field is left byte-for-byte
+    (opencode's own import drops it, measured). Everything else stays untouched as
+    well; `_id` keeps the prefixes opencode insists on (`msg`/`prt`).
+    """
+    stamp = 0
+    for position, row in enumerate(payload["messages"]):
+        stamp = _created_ms(row, stamp)
+        row["id"] = _id("msg_", time_ms=stamp, salt=salt, *((position, _MESSAGE_HEX),))
+        for content_position, item in enumerate(row.get("content") or []):
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                item["id"] = _id("prt_", time_ms=stamp, salt=salt,
+                                 *((position, _MESSAGE_HEX), (content_position, _PART_HEX)))
+    payload["info"]["id"] = session_id
+    return payload
+
+
 def reidentify(payload: dict, *, session_id: str, salt: str | None = None) -> dict:
     """Return `payload` re-identified as a brand-new session.
 
@@ -318,8 +356,11 @@ def reidentify(payload: dict, *, session_id: str, salt: str | None = None) -> di
     never modified.
     """
     messages = _payload_messages(payload)
+    fmt = _payload_format(payload)
     out = json.loads(json.dumps(payload))  # deep copy; never mutate the caller's
     salt = salt or _salt_for(session_id)
+    if fmt == "v2":
+        return _reidentify_v2(out, session_id, salt)
 
     # Pass 1: hand out the new ids. Doing this before touching references is what
     # lets a parentID that points forwards resolve.
@@ -472,19 +513,81 @@ def _payload_messages(payload: object) -> list[dict]:
     return payload["messages"]
 
 
+def _payload_format(payload: object) -> str:
+    """Which opencode wrote this export: "v2" (flat rows) or "v1" (nested).
+
+    v2 flattened the rows - `{…, type: "user"|"assistant"|"idle"}`, the assistant's
+    content in `content` - and stopped writing `directory`/`version`, so the shape
+    of the payload is the fact, not the version of the CLI that is installed now
+    (the store still holds raws from earlier versions).
+
+    Every row has to agree (review L1): one v1 row appended to a v2 export by an
+    older `append_native` is a broken payload, and calling it v2 would import it
+    as one. An empty message list falls back to `info`, and a payload that is
+    neither is an error with a reason, never an empty reading version.
+    """
+    messages = _payload_messages(payload)
+    seen: set[str] = set()
+    for position, message in enumerate(messages):
+        if not isinstance(message, dict):
+            raise AgentError(f"opencode 的匯出檔第 {position} 則訊息不是物件")
+        has_type = isinstance(message.get("type"), str)
+        has_info = isinstance(message.get("info"), dict)
+        if has_type and not has_info:
+            seen.add("v2")
+        elif has_info and not has_type:
+            seen.add("v1")
+        else:
+            raise AgentError(f"opencode 的匯出檔第 {position} 則訊息認不出形狀"
+                             "（要嘛有 type，要嘛有 info）")
+    if len(seen) == 1:
+        return seen.pop()
+    if seen:
+        raise AgentError("opencode 的匯出檔每一列的形狀不一致（v1 與 v2 混在一起）")
+    info = payload.get("info") if isinstance(payload, dict) else None
+    info = info if isinstance(info, dict) else {}
+    if isinstance(info.get("location"), dict):
+        return "v2"
+    if isinstance(info.get("directory"), str) or isinstance(info.get("slug"), str):
+        return "v1"
+    raise AgentError("opencode 的匯出檔認不出格式（沒有 location，也沒有 directory／slug）")
+
+
+def _message_count(payload: dict, fmt: str | None = None) -> int:
+    """The conversation's length: user/assistant rows only.
+
+    v2 writes one `idle` row after every exchange; it is a marker, not something
+    the session said, so it is not new content (M8) - `collect()` would otherwise
+    write back a session the user only opened, and `turns()` agrees with this
+    count. v1 has no idle rows, so all of its messages are conversation.
+    """
+    messages = _payload_messages(payload)
+    if (fmt or _payload_format(payload)) == "v2":
+        return sum(1 for m in messages if m.get("type") in ("user", "assistant"))
+    return len(messages)
+
+
 def _last_model(payload: dict) -> str | None:
     """The model the session used most recently.
 
-    opencode records the bare model id on assistant messages (`modelID`, with
-    `providerID` beside it); user messages carry a nested `model` object instead,
-    so the last assistant turn is the one that answers "which model was this".
-    A session with no assistant turn yet has none.
+    opencode records the bare model id on assistant messages: v1 has `modelID`
+    beside `providerID` (user messages carry a nested `model` object instead),
+    v2 has `model.id` on the row. The last assistant turn is the one that
+    answers "which model was this". A session with no assistant turn yet has none.
     """
+    fmt = _payload_format(payload)
     for message in reversed(_payload_messages(payload)):
-        info = message.get("info") or {}
-        if info.get("role") == "assistant":
+        if fmt == "v2":
+            if message.get("type") != "assistant":
+                continue
+            model = (message.get("model") or {}).get("id") \
+                if isinstance(message.get("model"), dict) else None
+        else:
+            info = message.get("info") or {}
+            if info.get("role") != "assistant":
+                continue
             model = info.get("modelID")
-            return model if isinstance(model, str) and model else None
+        return model if isinstance(model, str) and model else None
     return None
 
 
@@ -509,6 +612,54 @@ def _lines_of(parts: list[dict]) -> list[str]:
         else:
             lines.append(f"[skip {kind}]")  # visible, and never fatal
     return lines
+
+
+def _lines_of_v2(content: list) -> list[str]:
+    """The same rules for one v2 assistant row's `content` (design 5).
+
+    The row is flat, so the content items are named `text` / `tool` and the tool
+    call's name and arguments sit in `name` and `state.input` - everything else
+    (attachments, steps, reasoning, a shape a later opencode adds) follows the v1
+    rules: silent when it is not conversation, `[skip <type>]` when it is unknown.
+    """
+    lines: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type")
+        if item.get("synthetic") is True:
+            continue
+        if kind == "text":
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                lines.append(text.strip())
+        elif kind == "tool":
+            state = item.get("state") or {}
+            lines.append(tool_line(str(item.get("name", "?")), state.get("input", {})))
+        elif kind in _SILENT_PARTS:
+            continue
+        else:
+            lines.append(f"[skip {kind}]")
+    return lines
+
+
+def _user_text(text: object) -> str | None:
+    """The words of a v2 user row, if it said anything in writing.
+
+    v2's *first* user row stores the prompt JSON-encoded (`"hello"`), later ones
+    plain (measured 2.0.26) - the CLI wraps its positional argument and nothing
+    else does. Decoding when it is a JSON string keeps the reading version showing
+    the user's words instead of their escaping.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    try:
+        decoded = json.loads(text)
+    except json.JSONDecodeError:
+        return text.strip()
+    if isinstance(decoded, str) and decoded.strip():
+        return decoded.strip()
+    return text.strip()
 
 
 class OpencodeAgent:
@@ -543,12 +694,14 @@ class OpencodeAgent:
                              f"{argv[1] if len(argv) > 1 else argv[0]}") from None
 
     def _export_bytes(self, session_id: str, cwd: Path | str | None = None) -> bytes:
-        """`opencode export <id>` with stdout going to a file, stderr apart.
+        """`opencode session export <id> --standalone`, stdout going to a file,
+        stderr apart.
 
-        `cwd` is not needed for this to work - opencode finds any session from any
-        directory (measured, including when the session's own project directory no
-        longer exists) - but when it is given, $PWD goes with it, because opencode
-        reads the project from $PWD.
+        v2 moved export under `session` and made it a server operation, so it needs
+        a server context; `cwd` is still not needed for this to work - opencode
+        finds any session from any directory (measured, including when the
+        session's own project directory no longer exists) - but when it is given,
+        $PWD goes with it, because opencode reads the project from $PWD.
 
         stdin is /dev/null: an export is ours, not the user's, and during a periodic
         write-back the terminal belongs to the agent - a child that read there would
@@ -557,7 +710,8 @@ class OpencodeAgent:
         with tempfile.TemporaryDirectory(prefix="agora-opencode-") as tmp:
             target = Path(tmp) / "export.json"
             with open(target, "wb") as out:
-                proc = self._run([agent_cmd(self.name), "export", session_id],
+                proc = self._run([agent_cmd(self.name), "session", "export", session_id,
+                                  *_server_args()],
                                  cwd=cwd, stdout=out, stdin=subprocess.DEVNULL,
                                  env={"PWD": str(cwd)} if cwd else None)
             if proc.returncode != 0:
@@ -568,19 +722,30 @@ class OpencodeAgent:
             return target.read_bytes()
 
     def _import(self, payload: dict, cwd: Path) -> None:
+        """`opencode session import <path> --standalone --directory <cwd>`.
+
+        v2 import takes the project directory as a flag and ignores the payload's
+        own `location` (measured) - and $PWD has to say the same thing, because
+        opencode resolves the project from $PWD: a shell keeps the two in step, a
+        subprocess does not (spike trap A).
+        """
         with tempfile.TemporaryDirectory(prefix="agora-opencode-") as tmp:
             path = Path(tmp) / "import.json"
             path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-            proc = self._run([agent_cmd(self.name), "import", str(path)], cwd=cwd)
+            proc = self._run([agent_cmd(self.name), "session", "import", str(path),
+                              *_server_args(), "--directory", str(cwd)],
+                             cwd=cwd, env={"PWD": str(cwd)})
         if proc.returncode != 0:
             raise AgentError(f"opencode import 失敗：{_err(proc)}")
 
     def _delete(self, session_id: str, cwd: Path, n: int = 200) -> str | None:
-        """`opencode session delete <id>` - by id, never a pattern and never a listing.
+        """`opencode session delete <id> --standalone` - by id, never a pattern and
+        never a listing.
 
         None when it worked, otherwise what to tell the user (review O5).
         """
-        proc = self._run([agent_cmd(self.name), "session", "delete", session_id], cwd=cwd)
+        proc = self._run([agent_cmd(self.name), "session", "delete", session_id,
+                          *_server_args()], cwd=cwd)
         return None if proc.returncode == 0 else _err(proc, n)
 
     def _discard(self, session_id: str, cwd: Path) -> str:
@@ -596,23 +761,30 @@ class OpencodeAgent:
 
         Returns (session id, messages landed). Messages *and* parts are compared:
         a colliding part id leaves the message count intact, so counting only
-        messages would wave through a session that quietly lost content.
+        messages would wave through a session that quietly lost content. A v2
+        payload has no parts layer - the per-content count belongs to step 2 (M2) -
+        and what comes back is counted the way `export().message_count` counts it
+        (user/assistant rows; `idle` is not conversation, M8).
         """
         session_id = str((payload.get("info") or {}).get("id") or "")
         if not session_id:
             raise AgentError("匯出檔的 info.id 不見了，無法決定新 session 的 id")
         messages = _payload_messages(payload)
+        fmt = _payload_format(payload)
+        count = _message_count(payload, fmt)
         parts = sum(len(m.get("parts") or []) for m in messages)
         self._import(payload, cwd)
-        landed = _payload_messages(self._read(self._export_bytes(session_id, cwd=cwd)))
+        landed_payload = self._read(self._export_bytes(session_id, cwd=cwd))
+        landed = _payload_messages(landed_payload)
+        landed_count = _message_count(landed_payload, fmt)
         landed_parts = sum(len(m.get("parts") or []) for m in landed)
-        if len(landed) != len(messages) or landed_parts != parts:
+        if len(landed) != len(messages) or landed_count != count or landed_parts != parts:
             tail = self._discard(session_id, cwd)
             raise AgentError(
-                f"opencode import 後數量不對（來源 {len(messages)} 則／{parts} 個 part，"
-                f"匯入後 {len(landed)} 則／{landed_parts} 個），{tail}；"
+                f"opencode import 後數量不對（來源 {len(messages)} 則／{count} 句／{parts} 個 part，"
+                f"匯入後 {len(landed)} 則／{landed_count} 句／{landed_parts} 個），{tail}；"
                 "多半是 id 撞到 opencode 裡既有的 Session")
-        return session_id, len(landed)
+        return session_id, landed_count
 
     def _read(self, raw: bytes) -> dict:
         try:
@@ -638,9 +810,14 @@ class OpencodeAgent:
                 raise
             raw = self._export_bytes(session_id, cwd=Path(elsewhere))
         payload = self._read(raw)
+        fmt = _payload_format(payload)
         info = payload.get("info") or {}
-        directory = info.get("directory")
-        version = info.get("version")   # the version that produced *this* session
+        if fmt == "v2":
+            location = info.get("location")
+            directory = location.get("directory") if isinstance(location, dict) else None
+        else:
+            directory = info.get("directory")
+        version = info.get("version")   # v1 only: v2 does not record one (it may be None)
         return Exported(
             session_id=str(info.get("id") or session_id),
             raw=raw,
@@ -648,16 +825,31 @@ class OpencodeAgent:
             title=info.get("title") if isinstance(info.get("title"), str) else None,
             created_at=_iso(_created_ms(info)),
             agent_version=str(version) if version else None,
-            message_count=len(_payload_messages(payload)),
+            message_count=_message_count(payload, fmt),
             model=_last_model(payload),
         )
 
     def turns(self, raw: bytes) -> Turns:
         """One entry per user/assistant message: its text, plus a line per tool
         call - the reading version's rules (design 4.4), so `native(turns(raw))`
-        can rebuild a session whose history reads the same way."""
+        can rebuild a session whose history reads the same way.
+
+        Both export formats read the same way; `idle` rows and attachment files are
+        not conversation and produce no turn (H1: a v2 import must not come out as
+        an empty body).
+        """
+        payload = self._read(raw)
         out: Turns = []
-        for message in _payload_messages(self._read(raw)):
+        if _payload_format(payload) == "v2":
+            for row in _payload_messages(payload):
+                kind = row.get("type")
+                if kind == "user":
+                    text = _user_text(row.get("text"))
+                    out.append(("user", [text] if text else []))
+                elif kind == "assistant":
+                    out.append(("assistant", _lines_of_v2(row.get("content") or [])))
+            return out
+        for message in _payload_messages(payload):
             role = (message.get("info") or {}).get("role")
             if role in ("user", "assistant"):
                 out.append((role, _lines_of(message.get("parts") or [])))
@@ -723,12 +915,14 @@ class OpencodeAgent:
         chained to A's last one, carrying the model and mode A was using, and visible
         plain text like everything else `native()` writes.
 
-        The one place this is not `raw` plus `turns`: applying the undo *removes*
-        messages, so for a session the user undid something in, the result reads as
-        that session as the user sees it now - the undone exchange is not in the
-        fork, and neither is it in A (design「接在原生 raw 後面」).
+        A v2 raw is refused before anything happens: appending to the flat rows is
+        what step 2 of agora-opencode-v2 writes (the helpers below only know the
+        nested shape), so today the answer is an explicit refusal, not a payload
+        v2's import would reject - or worse, accept half of (design 8).
         """
         payload = self._read(raw)
+        if _payload_format(payload) == "v2":
+            raise AgentError("opencode v2 的 Session 還不能 fork／同 agent 接續，第 2 步才支援")
         _apply_revert(payload)
         messages = _payload_messages(payload)
         body = [(role, [line for line in lines if line.strip()]) for role, lines in turns
@@ -904,8 +1098,8 @@ class OpencodeAgent:
         self._sweep_pending(workdir)
         unique = _session_id()[-16:]
         material = workdir / f"{MATERIAL_PREFIX}{unique}.md"
-        argv = [agent_cmd(self.name), "run", MATERIAL_MESSAGE, "-f", str(material),
-                "--format", "json"]
+        argv = [agent_cmd(self.name), "run", *_server_args(), MATERIAL_MESSAGE,
+                "-f", str(material), "--format", "json"]
         model = os.environ.get("AGORA_OPENCODE_MODEL")
         if model:
             argv += ["-m", model]
