@@ -915,12 +915,14 @@ class OpencodeAgent:
         chained to A's last one, carrying the model and mode A was using, and visible
         plain text like everything else `native()` writes.
 
-        The one place this is not `raw` plus `turns`: applying the undo *removes*
-        messages, so for a session the user undid something in, the result reads as
-        that session as the user sees it now - the undone exchange is not in the
-        fork, and neither is it in A (design「接在原生 raw 後面」).
+        A v2 raw is refused before anything happens: appending to the flat rows is
+        what step 2 of agora-opencode-v2 writes (the helpers below only know the
+        nested shape), so today the answer is an explicit refusal, not a payload
+        v2's import would reject - or worse, accept half of (design 8).
         """
         payload = self._read(raw)
+        if _payload_format(payload) == "v2":
+            raise AgentError("opencode v2 的 Session 還不能 fork／同 agent 接續，第 2 步才支援")
         _apply_revert(payload)
         messages = _payload_messages(payload)
         body = [(role, [line for line in lines if line.strip()]) for role, lines in turns

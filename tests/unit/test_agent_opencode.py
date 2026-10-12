@@ -364,6 +364,19 @@ def test_the_fake_refuses_a_v1_payload_when_it_simulates_v2(fake, workdir, monke
         oc.ADAPTER._import(json.loads(raw()), workdir)
 
 
+def test_a_v2_fork_is_refused_before_anything_is_imported(fake, workdir):
+    """Appending to the flat rows is step 2's work (review of step 1): the fork of
+    a v2 Session must say so instead of handing out a payload 2.x would refuse -
+    or accept half of - and nothing may reach opencode until it does."""
+    with pytest.raises(AgentError, match="還不能 fork"):
+        oc.ADAPTER.append_native(fork(), [("user", ["ZZFORK 再問一句。"]),
+                                          ("assistant", ["ZZFORK 回答。"])])
+    # the refusal came before the import: no call at all left the process, and the
+    # source session is not even in the fake's store - only the fixture is
+    assert not (fake / "opencode-calls.log").exists()
+    assert [path.stem for path in (fake / "opencode-sessions").glob("*.json")] == ["default"]
+
+
 def test_every_automated_call_carries_its_server_context(fake, workdir):
     """One place composes it (`_server_args`), so the whole flow has it: export,
     import with --directory, delete and the summarize run (tasks 1.4, 2.7)."""
