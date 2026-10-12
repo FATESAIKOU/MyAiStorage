@@ -8,22 +8,26 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** agent 這一輪被打斷，接著收到那句話，停在提示處
 
 ### Requirement: 開啟
-`open` MUST 收：呼叫方給的 `id`、agent 種類、工作目錄（存在的絕對路徑，不存在 MUST 回 400，sidecar MUST NOT 建目錄）、繼承的 Session（new／continue／fork／merge；merge 可帶選填的 `by`，預設是 agent 種類）；subscription 的 id 與第一則輸入 MUST 是選填（subscription 省略時，sidecar 依挑選規則自己挑一個現在能用的）。呼叫方指定的 subscription 在冷卻中時 MUST 照辦。`id` 對應的 agent 還在 starting／running／idle 時 MUST 拒絕；在 waiting-quota 或 exited 時 MUST 用同一個 id 重開，waiting-quota 的自動重開 job MUST 一併刪掉。sidecar MUST 自己向 subscription 來源取得詳細資料（呼叫方不傳 key；merge 的 `by` 與 agent 種類不同時，替 `by` 另外用挑選規則挑一把），把它轉成 agent 的環境變數，放在子行程的環境裡；這些值 MUST NOT 出現在命令列、log 或任何檔案。開出來的 Session MUST 在 agora 標頭的 tags 附加 `sidecar:<id>`，原有的 tags MUST NOT 被取代。第一則輸入 MUST 排進該 agent 的佇列（等它起來再送），MUST NOT 因為它而讓 open 失敗；省略 subscription 而且沒有任何能用的候選時 MUST 回 409 `no_subscription`。
+`open` MUST 收：呼叫方給的 `id`（共通命名 `<repo 名>-<pm|arch|impl|test>[-<id>]`）、agent 種類、工作目錄（存在的絕對路徑，不存在 MUST 回 400，sidecar MUST NOT 建目錄）、接續的 agora session id（選填；不給＝新開）。subscription 的 id 與第一則輸入 MUST 是選填（subscription 省略時，sidecar 依挑選規則自己挑一個現在能用的）。呼叫方指定的 subscription 在冷卻中時 MUST 照辦。`id` 對應的 agent 還在 starting／running／idle 時 MUST 拒絕；在 waiting-quota 或 exited 時 MUST 用同一個 id 重開，waiting-quota 的自動重開 job MUST 一併刪掉。sidecar MUST 自己向 subscription 來源取得詳細資料（呼叫方不傳 key），把憑證與環境變數當 `launch` 的參數傳進去；這些值 MUST NOT 出現在命令列、log 或任何檔案。開出來的 Session MUST 在 agora 標頭的 tags 附加 `sidecar:<id>`，原有的 tags MUST NOT 被取代。第一則輸入 MUST 排進該 agent 的佇列（等它起來再送），MUST NOT 因為它而讓 open 失敗；省略 subscription 而且沒有任何能用的候選時 MUST 回 409 `no_subscription`。
 
-#### Scenario: fork 一個 team 的 home Session
-- **WHEN** `open`（id=t1、claude-code、fork 自 H、subscription=claude-personal、第一則輸入「讀 channel X」）
-- **THEN** agora 上多一個從 H fork 出來、tags 含 H 原有的 tags 與 `sidecar:t1` 的 Session；agent 在它上面開著，收到第一則輸入；H 不變；`status` 的 session 是新的那個 id
+#### Scenario: 給 agora id 就接續
+- **WHEN** `open`（id=MyLinuxPool-impl-2、claude-code、session=agora:A、第一則輸入「讀 channel X」）
+- **THEN** agent 在 agora:A 上開著，收到第一則輸入；`status` 的 session 是 agora:A
+
+#### Scenario: 不給 session 就新開
+- **WHEN** `open`（id=MyLinuxPool-impl-2、claude-code、不給 session）
+- **THEN** agent 直接開起來（沒有繼承的 Session）；`status.session` 要等第一次寫回才有值
 
 #### Scenario: id 重複
 - **WHEN** t1 正在跑時再 `open` id=t1
 - **THEN** 被拒絕（HTTP 409），什麼都沒開
 
 #### Scenario: 重開已結束的 id
-- **WHEN** t1 已經 exited，再 `open` id=t1（continue 它的 Session）
+- **WHEN** t1 已經 exited，再 `open` id=t1（接續它的 Session）
 - **THEN** t1 重新開起來，接著同一個 Session
 
 #### Scenario: 重開 waiting-quota 的 id
-- **WHEN** t1 是 waiting-quota 而且有自動重開 job，控制者 `open` id=t1（continue）
+- **WHEN** t1 是 waiting-quota 而且有自動重開 job，控制者 `open` id=t1（接續）
 - **THEN** t1 重新開起來，自動重開的 job 從 `GET /jobs` 消失
 
 #### Scenario: 省略 subscription
@@ -42,24 +46,20 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **WHEN** `open` 時 subscription 來源回報無法確認（unreachable）
 - **THEN** 回 503 `gateway_unreachable`，什麼都沒開、沒有掛 job
 
-#### Scenario: merge 指定要約的 agent
-- **WHEN** `open` 的 session 是 `merge`、`by` 是 opencode、agent 是 claude-code，subscription 指定 claude-personal
-- **THEN** 另外替 opencode 用 `Selector` 挑一把（經 `get(id, opencode)`），要約用 opencode 寫、環境變數來自那一把；之後以 claude-personal 的 claude-code 接續那個新 Session
-
-#### Scenario: merge 的要約沒有可用的 subscription
-- **WHEN** `by` 的種類沒有任何能用的 subscription
-- **THEN** 回 409 `no_subscription_for_merge`，什麼都沒開
-
 #### Scenario: 工作目錄不存在
 - **WHEN** `open` 的 `workdir` 不存在
 - **THEN** 回 400，什麼都沒開
 
 ### Requirement: 關閉
-`close` MUST 先溫和停下 agent，再讓 agora 把最後的對話寫回；溫和停不下來時，逾時後強制結束。`close` 不存在的 id MUST 回 404。
+`close` MUST 先溫和停下 agent（等閒了才退，不中途打斷），再讓 agora 把最後的對話寫回；溫和停不下來時，逾時後強制結束（立刻退）。退出 MUST 結束整個 agent 程序（claude／opencode 行程本身）。`close` 不存在的 id MUST 回 404。
 
 #### Scenario: 關閉
 - **WHEN** 對 t1 `close`
 - **THEN** agent 結束；它最後的對話在 agora 的那個 Session 上；`status` 顯示 exited
+
+#### Scenario: 溫和停等閒、強制立刻退
+- **WHEN** 對正在跑一輪的 t1 溫和 `close`；逾時還沒退就強制結束
+- **THEN** 溫和停等手上這輪做完才退；強制結束立刻退；結束後 agent 行程不在了
 
 #### Scenario: 關閉不存在的 id
 - **WHEN** 對沒開過的 id `close`
@@ -77,11 +77,15 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** `status` 的 t1 有 `reopen_at`，等於自動重開 job 的 `at`；`status` 的任何欄位都沒有 key
 
 ### Requirement: 戳
-`poke` MUST 把一則文字送進 agent，成為它讀得到的下一則輸入；`interrupt` 為真時 MUST 先打斷這一輪再送，為假時 MUST NOT 打斷（agent 正在跑時就排到這一輪之後）。id 不存在 MUST 回 404；agent 是 exited 或 waiting-quota 時 MUST 回 409 且不排隊；agent 是 starting 時 MUST 排隊到它起來之後再送，逾時 MUST 回 409。
+`poke` MUST 把一則文字送進 agent，成為它讀得到的下一則輸入；`interrupt` 為真時 MUST 先打斷這一輪再送，為假時 MUST NOT 打斷（agent 正在跑時就排到這一輪之後）。要 agent 立刻讀下一則 MUST 帶 `interrupt`（跑著就先打斷再送）。id 不存在 MUST 回 404；agent 是 exited 或 waiting-quota 時 MUST 回 409 且不排隊；agent 是 starting 時 MUST 排隊到它起來之後再送，逾時 MUST 回 409。
 
 #### Scenario: 不打斷
 - **WHEN** agent 正在跑一輪時 `poke`（不中斷）
 - **THEN** 這一輪照常完成，之後 agent 讀到那則文字
+
+#### Scenario: 立刻讀
+- **WHEN** agent 正在跑一輪時 `poke`（`interrupt` 為真）
+- **THEN** 這一輪先被打斷，接著 agent 讀到那則文字
 
 #### Scenario: 戳不存在或已結束的
 - **WHEN** `poke` 一個沒開過的 id，或 exited 的 id
@@ -91,7 +95,7 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **WHEN** agent 還在 starting 時 `poke`
 - **THEN** 起來之後收到那則文字；逾時還沒起來則回 409
 
-### Requirement: 三種外部控制形式
+### Requirement: 三種外部控制形式（`/jobs` 去留待本人決定，本期維持現狀）
 控制者 MUST 能用 HTTP 以三種形式下四個動作：立即（直接呼叫）、定時（job 的 `at`）、輪詢（job 的 `every`，可設 `until`）。job 的動作 MUST 只能是四個動作之一，否則 MUST 回 400；帶 `session.mode == "merge"` 的 `open` MUST NOT 出現在 job 裡（回 400 `merge_not_allowed_in_job`）；`at` 在過去 MUST 回 400。`GET /jobs` 的每一筆 MUST 有 `last_run` 與 `last_error`（不含 key）。HTTP MUST 只綁本機（127.0.0.1），不做認證。請求本文超過 1 MB MUST 回 413。`every` 的下一次執行時刻 MUST 是原本節奏上第一個晚於現在的預定點，MUST NOT 在停頓之後補跑（只補執行一次，之後照原本節奏）。
 
 #### Scenario: 定時開啟
@@ -115,7 +119,7 @@ sidecar 對外 MUST 只有四個動作：開啟（open）、關閉（close）、
 - **THEN** 它 listen 的位址是 127.0.0.1
 
 ### Requirement: 額度用完自動換把
-agent 回報額度用完時，sidecar MUST 向 subscription 來源登錄冷卻（窗只有 5h 與 1w 兩種；重置時刻選填，拿不到時 MUST NOT 自己猜），再從一覽挑一個現在能用、支援這個 agent 種類、而且不是剛用完的那一把的 subscription（挑法是可替換的介面，預設照 priority）；挑到就停下 agent、等 agora 寫回、用 continue 同一個 Session 以新的 subscription 重開，id 不變，成功後 MUST 送一則 `resume_prompt`（設定；空字串就不送）。登錄冷卻失敗（被拒絕或無法確認）時 MUST 仍然換把，而且 MUST NOT 挑回同一把。全部冷卻時 MUST 停下、寫回、狀態標 waiting-quota，並自動掛一個在最早解除冷卻的時刻 open 同一個 id（continue 同一個 Session、不指定 subscription）的 job；最早解除的時刻 MUST 是各候選（支援這個種類、key 已部署）的兩個窗口冷卻中較晚者的最小值。沒有任何候選時 MUST NOT 掛 job。自動重開的 open 失敗時 MUST 重新計算再掛一次；subscription 來源無法確認時 MUST 在固定間隔（`retry_interval`）之後再掛一次。
+agent 回報額度用完時，sidecar MUST 向 subscription 來源登錄冷卻（只送 `until`；driver 拿不到恢復時間時報「現在＋1 小時」，下次刷新有時間了再更正），再從一覽挑一個現在能用、支援這個 agent 種類、而且不是剛用完的那一把的 subscription（挑法是可替換的介面，預設照 priority）；挑到就停下 agent、等 agora 寫回、用 continue 同一個 Session 以新的 subscription 重開，id 不變，成功後 MUST 送一則 `resume_prompt`（設定；空字串就不送）。登錄冷卻失敗（被拒絕或無法確認）時 MUST 仍然換把，而且 MUST NOT 挑回同一把。全部冷卻時 MUST 停下、寫回、狀態標 waiting-quota，並自動掛一個在最早解除冷卻的時刻 open 同一個 id（continue 同一個 Session、不指定 subscription）的 job；最早解除的時刻 MUST 是各候選（支援這個種類、key 已部署）的 `until` 的最小值（沒在冷卻的就是現在）。沒有任何候選時 MUST NOT 掛 job。自動重開的 open 失敗時 MUST 重新計算再掛一次；subscription 來源無法確認時 MUST 在固定間隔（`retry_interval`）之後再掛一次。
 
 #### Scenario: 換到另一把
 - **WHEN** t1 用 claude-personal 時額度用完，claude-company 現在能用
@@ -125,17 +129,17 @@ agent 回報額度用完時，sidecar MUST 向 subscription 來源登錄冷卻�
 - **WHEN** t1 額度用完，而所有支援 claude-code 的 subscription 都在冷卻
 - **THEN** t1 停下、寫回，狀態 waiting-quota；`GET /jobs` 有一個在最早解除時刻 open t1（continue）的 job
 
-#### Scenario: 解除時刻看兩個窗口
-- **WHEN** claude-personal 的 5h 冷卻到 15:02、1w 冷卻到 10-18，claude-company 的 5h 冷卻到 16:02，其餘的 key 沒部署
-- **THEN** job 的 `at` 是 16:02（claude-personal 要 10-18 才能用，沒部署的不算）
+#### Scenario: 解除時刻看 until
+- **WHEN** claude-personal 的 `until` 到 15:02，claude-company 的 `until` 到 16:02，其餘的 key 沒部署
+- **THEN** job 的 `at` 是 16:02（沒部署的不算）
 
 #### Scenario: 冷卻登錄失敗不原地打轉
 - **WHEN** t1 用完時 `cooldown` 被拒絕，而 `list` 仍把 claude-personal 當 available
 - **THEN** 不會挑回 claude-personal；有其他能用的就換過去，沒有就走全部冷卻
 
-#### Scenario: 重置時刻被拒絕時去掉重送
-- **WHEN** driver 給的 `resets_at` 被 LLMGateway 以 `invalid_resets_at` 或 `resets_at_out_of_range` 拒絕
-- **THEN** sidecar 不帶 `resets_at` 重送一次
+#### Scenario: until 被拒絕時改報現在＋1 小時重送
+- **WHEN** driver 給的恢復時間被 LLMGateway 以超出範圍拒絕
+- **THEN** sidecar 改報「現在＋1 小時」重送一次
 
 #### Scenario: 無法確認
 - **WHEN** 換把時 subscription 來源無法確認
@@ -160,15 +164,15 @@ agent 清單與 job 清單 MUST 只在記憶體。sidecar MUST NOT 在重啟後�
 - **WHEN** sidecar 收到 SIGTERM，有兩個 agent 在跑
 - **THEN** 兩個都先停下、寫回 agora，之後 sidecar 才結束
 
-### Requirement: LLMGateway 的連線設定
-LLMGatewaySource MUST 從獨立的連線設定檔（預設 `~/.config/sidecar/gateway-connect.json`，主設定的 `gateway_connect_file` 可改）取得連線資訊，**每一次** LLMGateway 操作都重新讀取，MUST NOT 快取。讀不到或格式錯誤時 MUST 當作無法確認，不丟出未處理的例外。sidecar MUST NOT 讀 MyLinuxPool 的任何檔。
+### Requirement: subscription 來源的設定
+`subscription_source` MUST 是本機檔案（`{"kind": "file", "path": …}`）或本機 LLMGateway port（`{"kind": "llmgateway", "base_url": …}`）二選一；`file` 種**每一次**操作都重新讀取，MUST NOT 快取。讀不到、格式錯誤或連不上時 MUST 當作無法確認，不丟出未處理的例外。sidecar MUST NOT 讀 MyLinuxPool 的任何檔，也 MUST NOT 依賴 `lgw` 套件。
 
-#### Scenario: 連線設定被改寫
-- **WHEN** 外部以原子方式（寫暫存檔再 rename）換掉連線設定檔，sidecar 沒有重啟，之後有一次 `open`
-- **THEN** 那次 `open` 用新的連線資訊
+#### Scenario: 檔案設定被改寫
+- **WHEN** 外部以原子方式（寫暫存檔再 rename）換掉 `file` 種的 JSON 檔，sidecar 沒有重啟，之後有一次 `open`
+- **THEN** 那次 `open` 用新的內容
 
-#### Scenario: 連線設定壞掉
-- **WHEN** 連線設定檔不存在或不是合法的 JSON
+#### Scenario: 設定壞掉或連不上
+- **WHEN** `file` 種的檔案不存在或不是合法的 JSON，或 `llmgateway` 種的 port 連不上
 - **THEN** `open` 回 503 `gateway_unreachable`，log 說明原因
 
 ### Requirement: 介面和實作分開
@@ -229,7 +233,7 @@ agent 的狀態轉移（刷新、換把、自動重開、job 的執行）MUST �
 - **THEN** 會再換一次（上一次轉移的 `busy` 已經釋放）
 
 ### Requirement: 結束時先擋新請求再逐一關閉
-sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`POST /jobs` MUST 回 503；到期的 job MUST NOT 再執行（不會再開 agent）；停掉 scheduler（`join` 有逾時：`close_timeout` 加 5 秒；逾時只記 log）之後才逐一 close 每個 agent，全部做完才結束。scheduler 的某一次 tick 卡住 MUST NOT 讓 SIGTERM 卡住或讓 agent 成為孤兒。`docs/sidecar.md` MUST 寫明 supervisor 的 kill timeout 要大於 `close_timeout × agent 數`。
+sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`POST /jobs` MUST 回 503；到期的 job MUST NOT 再執行（不會再開 agent）；停掉 scheduler（`join` 有逾時：`close_timeout` 加 5 秒；逾時只記 log）之後才逐一 close 每個 agent，全部做完才結束。scheduler 的某一次 tick 卡住 MUST NOT 讓 SIGTERM 卡住或讓 agent 成為孤兒。`docs/sidecar.md` MUST 寫明 supervisor 的 kill timeout 要大於各 agent 的最壞時間加總（一般 `close_timeout + 5`、`new` 模式 `close_timeout × 2 + 5`）。
 
 #### Scenario: 關閉中到期的 job 不會再開 agent
 - **WHEN** sidecar 進入關閉中的同時，一個 `open` 的 job 剛好到期
@@ -250,55 +254,51 @@ sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`PO
 - **WHEN** t1 額度用完，已經挑到下一把並停下，但 `SessionStore.start` 失敗
 - **THEN** t1 是 waiting-quota，`reopen_at` 是現在加 `retry_interval`，`GET /jobs` 有對應的 open job；到時重開成功，t1 回到 running
 
-### Requirement: lgw 回應的對應
-`LLMGatewaySource` MUST 把 `lgw.client` 的 `Result` 與 `lgw.connect` 的例外依下表對應；MUST NOT 把 `ok=False` 當成功；進入 `with lgw.connect.connect(...)` 時的例外 MUST 在來源內轉成 `Unreachable`，MUST NOT 穿出去：
+### Requirement: 本機 port 回應的對應
+`SubscriptionSource`（curl 版）MUST 把本地 LLMGateway port 的 HTTP 回應依下表對應；MUST NOT 把 `ok=False` 當成功；連不上、逾時或回覆不是 JSON 物件 MUST 當作無法確認，不丟出未處理的例外：
 
-| lgw | 回覆 |
+| 回應 | 回覆 |
 |---|---|
 | `ok` | 值 |
-| `unreachable=True`、`Unavailable`、`load_config` 的 `OSError`／`ConfigError` | `Unreachable`（只寫種類，不寫 `data`） |
+| 連不上、逾時 | `Unreachable`（只寫種類，不寫 `data`） |
 | `status` 403／404／409 | `agent_not_allowed`／`not_found`／`not_deployed` |
-| `status` 400 | `SourceError(error 碼)`：只有 `invalid_resets_at`／`resets_at_out_of_range` 讓 `resets_at` 去掉重送；`bad_request`、`invalid_window` 不重送 |
+| `status` 400 | `SourceError(error 碼)`：`until` 超出範圍類會讓 D4 的「改報現在＋1 小時重送」觸發；`bad_request` 不重送 |
 | `status` 413 | `SourceError("body_too_large")` |
-| `error` 是 `bad_response`，或其他沒列出的 `status` | `Unreachable` |
+| `error` 是 `bad_response`（回覆不是 JSON 物件），或其他沒列出的 `status` | `Unreachable` |
 
 #### Scenario: 403
-- **WHEN** `get(id, "opencode")` 對只允許 claude-code 的 subscription，lgw 回 `ok=False, status=403, error="agent_not_allowed"`
+- **WHEN** `get(id, "opencode")` 對只允許 claude-code 的 subscription，port 回 `ok=False, status=403, error="agent_not_allowed"`
 - **THEN** `SourceError("agent_not_allowed")`；open 回 400 `subscription_not_allowed`
 
 #### Scenario: 404 與 409
-- **WHEN** lgw 對 `get` 回 `status=404`，另一次回 `status=409, error="not_deployed"`
-- **THEN** 分別是 `not_found`（open 400 `subscription_not_found`）與 `not_deployed`（open 409 `not_deployed`）
+- **WHEN** port 對 `get` 回 `status=404`，另一次回 `status=409, error="not_deployed"`
+- **THEN** 分別是 `not_found`（open 400 `subscription_not_found`）與 `not_deployed`（open 409 `not_deployed`)
 
-#### Scenario: cooldown 的 resets_at 被拒絕
-- **WHEN** `cooldown(id, "5h", resets_at)` 回 `ok=False, status=400, error="resets_at_out_of_range"`（或 `invalid_resets_at`）
-- **THEN** 回覆是 `SourceError`（不是成功）；換把去掉 `resets_at` 重送一次
+#### Scenario: until 被拒絕時改報現在＋1 小時重送
+- **WHEN** `cooldown` 送的 `until` 被回 `ok=False, status=400`（超出範圍類錯誤）
+- **THEN** 回覆是 `SourceError`（不是成功）；換把改報「現在＋1 小時」重送一次
 
 #### Scenario: 其他的 400 不重送
-- **WHEN** `cooldown` 回 `ok=False, status=400, error="invalid_window"`
-- **THEN** 回覆是 `SourceError("invalid_window")`；不重送；換把仍排除剛用完的那一把繼續
+- **WHEN** `cooldown` 回 `ok=False, status=400, error="bad_request"`
+- **THEN** 回覆是 `SourceError("bad_request")`；不重送；換把仍排除剛用完的那一把繼續
 
 #### Scenario: 回覆不是 JSON 物件
-- **WHEN** lgw 回 `error="bad_response"`
+- **WHEN** port 回 `error="bad_response"`
 - **THEN** 當作 `Unreachable`，走重試；不是成功
 
 #### Scenario: list 的形狀
-- **WHEN** lgw 的 `list()` 回 `ok=True, data={"schema": 1, "subscriptions": [...]}`
+- **WHEN** port 的 `list()` 回 `ok=True, data={"schema": 1, "subscriptions": [...]}`
 - **THEN** 轉成 `Subscription` 的列表（不含 key）；`get` 的 `data` 是平的一筆，含 key
 
 #### Scenario: 連不上
-- **WHEN** lgw 回 `unreachable=True`
+- **WHEN** port 連不上（或請求逾時）
 - **THEN** `Unreachable`；open 回 503 `gateway_unreachable`
 
-#### Scenario: 進入 with 時 Unavailable
-- **WHEN** `lgw.connect.connect(cfg)` 在進入 `with` 時丟 `Unavailable("timeout")`
-- **THEN** 來源回 `Unreachable`，沒有例外穿出去；open 回 503（不是 500），換把走 `waiting-quota` 與重試 job
-
 ### Requirement: 自動重開的候選與時刻
-自動重開的候選 MUST 只有「支援這個 agent 種類而且 key 已部署」的 subscription；沒有部署 key 的（`available` 為 false 而且兩個窗口都沒在冷卻）MUST NOT 是候選。算出的解除時刻已過但候選仍不可用時，`at` MUST 是 `now + retry_interval`，MUST NOT 每個 tick 重掛。
+自動重開的候選 MUST 只有「支援這個 agent 種類而且 key 已部署」的 subscription；沒有部署 key 的（`available` 為 false 而且沒有 `until`）MUST NOT 是候選。算出的解除時刻已過但候選仍不可用時，`at` MUST 是 `now + retry_interval`，MUST NOT 每個 tick 重掛。
 
 #### Scenario: 未部署的不是候選
-- **WHEN** t1 額度用完，唯一其他的 claude-code subscription 沒有部署 key（`available` false、兩個窗口都沒冷卻）
+- **WHEN** t1 額度用完，唯一其他的 claude-code subscription 沒有部署 key（`available` false、沒有 `until`）
 - **THEN** 沒有候選：t1 是 waiting-quota，`reopen_at` 是 null，`GET /jobs` 沒有自動重開的 job
 
 #### Scenario: 解除時刻已過仍不可用
@@ -327,19 +327,19 @@ sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`PO
 - **WHEN** 沒有註冊任何 agent 種類的 `sidecar run`，`POST /agents`
 - **THEN** 回 400 `unsupported agent kind`；`GET /agents` 回 200 與空清單
 
-### Requirement: driver 的 env_for 規則
-`env_for` MUST 依 design D6 的「`env_for` 規則」產生子行程的環境，並以純單元測試驗證輸出（不啟動真的 agent）。沒有可用的模型來源時 MUST 拒絕（open 回 400 `no_model`），MUST NOT 讓 agent 自己挑預設模型。打真 binary 的測試 MUST NOT 在預設的 unit 裡跑（預設 skip，`tests/integration/` 或 `SIDECAR_REAL_AGENT_TESTS=1`）。
+### Requirement: driver 的 launch 環境與憑證規則
+`launch` MUST 依 design D6 的規則（憑證只在參數與子行程環境裡）組出子行程的環境，並以純單元測試驗證（不啟動真的 agent）。沒有可用的模型來源時 MUST 拒絕（open 回 400 `no_model`），MUST NOT 讓 agent 自己挑預設模型。打真 binary 的測試 MUST NOT 在預設的 unit 裡跑（預設 skip，`tests/integration/` 或 `SIDECAR_REAL_AGENT_TESTS=1`）。
 
 #### Scenario: opencode 的 Zen provider id
-- **WHEN** `OpenCodeDriver.env_for` 收到 `provider="opencode-zen"`、`models.default="big-pickle"` 的 subscription
-- **THEN** `OPENCODE_CONFIG_CONTENT` 的 provider 鍵是 `opencode`（不是 `opencode-zen`），`model` 與 `small_model` 都是 `opencode/big-pickle`
+- **WHEN** `launch` 拿到的憑證是 `provider="opencode-zen"`、模型是 `"big-pickle"`
+- **THEN** 子行程的 `OPENCODE_CONFIG_CONTENT` 的 provider 鍵是 `opencode`（不是 `opencode-zen`），`model` 與 `small_model` 都是 `opencode/big-pickle`
 
 #### Scenario: opencode 的 provider 對應不到
-- **WHEN** `provider` 是對應表裡沒有的名稱
-- **THEN** `env_for` 丟錯，open 回 4xx，什麼都沒開（不用原名猜）
+- **WHEN** 憑證的 `provider` 是對應表裡沒有的名稱
+- **THEN** `launch` 丟錯，open 回 4xx，什麼都沒開（不用原名猜）
 
 #### Scenario: opencode 沒有模型來源
-- **WHEN** subscription 的 `models.default` 是 null，`models.allow` 只有 `["*:free"]`（只有萬用字元）
+- **WHEN** 模型設定只有萬用字元（例如 `models.allow` 只有 `["*:free"]`，沒有 default）
 - **THEN** open 回 400 `no_model`，什麼都沒開
 
 #### Scenario: opencode 用 allow 的第一個明確模型
@@ -347,7 +347,7 @@ sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`PO
 - **THEN** `model` 與 `small_model` 都是 `openrouter/acme/spike-model`，`provider.openrouter.models` 宣告了 `acme/spike-model`
 
 #### Scenario: opencode 的環境變數
-- **WHEN** 任何 `OpenCodeDriver.env_for` 的輸出
+- **WHEN** 任何一次 `launch` 組出的子行程環境
 - **THEN** 含 `OPENCODE_DISABLE_AUTOUPDATE=1` 與 `OPENCODE_DISABLE_MODELS_FETCH=1`；apiKey 與 baseURL 只在 `OPENCODE_CONFIG_CONTENT` 裡，不在命令列
 
 #### Scenario: opencode 首次回應的模型不符
@@ -355,24 +355,24 @@ sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`PO
 - **THEN** 視為錯誤：`exit.reason` 與 log 說明期望與實際（不含 key），不當作正常運作
 
 #### Scenario: Claude 的 Anthropic 訂閱與 api-key
-- **WHEN** `ClaudeCodeDriver.env_for` 收到 `kind=claude-subscription`；另一次收到 `provider="anthropic"`、`kind=api-key`
-- **THEN** 前者輸出 `CLAUDE_CODE_OAUTH_TOKEN`，後者輸出 `ANTHROPIC_API_KEY`；兩者都含 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` 與 `DISABLE_AUTOUPDATER=1`
+- **WHEN** `launch` 拿到的憑證是 `kind=claude-subscription`；另一次是 `provider="anthropic"`、`kind=api-key`
+- **THEN** 前者的子行程環境有 `CLAUDE_CODE_OAUTH_TOKEN`，後者有 `ANTHROPIC_API_KEY`；兩者都含 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` 與 `DISABLE_AUTOUPDATER=1`
 
 #### Scenario: Claude 的非 Anthropic api-key
-- **WHEN** `provider="openrouter"`、`kind=api-key`、`endpoint="https://…"`、`models.default="acme/model-x"`
-- **THEN** 輸出 `ANTHROPIC_AUTH_TOKEN=<key>`、`ANTHROPIC_API_KEY=""`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL` 與 `ANTHROPIC_SMALL_FAST_MODEL`（都是 `acme/model-x`）
+- **WHEN** 憑證是 `provider="openrouter"`、`kind=api-key`、`endpoint="https://…"`、模型是 `"acme/model-x"`
+- **THEN** 子行程環境有 `ANTHROPIC_AUTH_TOKEN=<key>`、`ANTHROPIC_API_KEY=""`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_MODEL` 與 `ANTHROPIC_SMALL_FAST_MODEL`（都是 `acme/model-x`）
 
 #### Scenario: Claude 的非 Anthropic provider 沒有模型來源
-- **WHEN** `provider="openrouter"`、`kind=api-key`，`models.default` 是 null 而 `allow` 只有萬用字元
+- **WHEN** 憑證是 `provider="openrouter"`、`kind=api-key`，沒有 `models.default` 而 `allow` 只有萬用字元
 - **THEN** open 回 400 `no_model`
 
 #### Scenario: 父行程的憑證不進子行程
 - **WHEN** 父行程的環境有 `ANTHROPIC_API_KEY`、`OPENAI_API_KEY`、`OPENCODE_CONFIG_CONTENT`，開一個 agent
-- **THEN** 子行程的環境裡沒有這些（只有 `env_for` 給的），子行程的環境變數不出現在命令列、log 或 `status`
+- **THEN** 子行程的環境裡沒有這些（只有 `launch` 拿到的憑證與環境變數），子行程的環境變數不出現在命令列、log 或 `status`
 
 #### Scenario: 驅動錯誤帶 stderr 末幾行
 - **WHEN** agent 行程啟動失敗或模型請求以沒有原因的 HTTP 500 失敗
-- **THEN** 錯誤訊息帶子行程 stderr 的末幾行，其中 key 與 `env_for` 給的值被遮掉
+- **THEN** 錯誤訊息帶子行程 stderr 的末幾行，其中 key 與憑證值被遮掉
 
 ### Requirement: close 占用轉移
 `close` MUST 在同一個鎖內檢查並占用 agent 的 `busy`（轉移）再停下行程；已經 `busy` 時才記 `closing`。close 進行中，scheduler MUST NOT 對同一個 agent 開始換把或刷新。
@@ -405,7 +405,7 @@ sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`PO
 
 #### Scenario: 重試用盡
 - **WHEN** api-key 類的 `api_retry` 出現 `attempt 10/10`，之後 `result` 是 `is_error: true`
-- **THEN** 視為額度用完（窗口 5h、不帶 `resets_at`）
+- **THEN** 視為額度用完（沒有恢復時間，core 向 LLMGateway 報現在＋1 小時）
 
 #### Scenario: 文字巧合
 - **WHEN** 一個回合的 `result` 是 `is_error: false`、文字是「You've hit your goal of five tests.」
@@ -427,7 +427,7 @@ sidecar 收到 SIGTERM 後 MUST 先進入「關閉中」：`open`、`poke`、`PO
 - **THEN** `status` 的 `exit.reason` 或 `GET /jobs` 的 `last_error` 帶那個錯誤（不含 key）；狀態不是永遠的 running
 
 ### Requirement: 錯誤訊息的遮罩與 stderr
-driver 與 store 的錯誤訊息 MUST 帶子行程 stderr 的最新末幾行（包含啟動之後才印出的）；遮罩 MUST 只遮真正的秘密（key 與 `OPENCODE_CONFIG_CONTENT` 裡的 `apiKey`），MUST NOT 遮 `env_for` 的非秘密值。driver 的例外（agent 已結束時 `send` 失敗）MUST 轉成 `409 agent_not_running` 並把狀態標 exited，MUST NOT 變成 500。
+driver 與 store 的錯誤訊息 MUST 帶子行程 stderr 的最新末幾行（包含啟動之後才印出的）；遮罩 MUST 只遮真正的秘密（key 與 `OPENCODE_CONFIG_CONTENT` 裡的 `apiKey`），MUST NOT 遮非秘密的環境值。driver 的例外（agent 已結束時 `send` 失敗）MUST 轉成 `409 agent_not_running` 並把狀態標 exited，MUST NOT 變成 500。
 
 #### Scenario: 數字不被遮掉
 - **WHEN** 子行程 stderr 的末幾行是「agent exited with code 1 after 12 retries」，env 含 `DISABLE_AUTOUPDATER=1` 與 key `K-SECRET`
