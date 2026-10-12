@@ -316,6 +316,32 @@ def test_read_to_me_includes_broadcasts_and_excludes_others(cli_env, capsys):
     assert [m["id"] for m in data] == ["01AAAA00000000000000000000", "01BBBB00000000000000000000"]
 
 
+def test_wait_without_channel_sees_a_broadcast(cli_env, capsys):
+    """A broadcast counts as "to me": wait without --channel must wake up on it."""
+    _seed_message(cli_env, channel="other", entity_number=7, msg_id="01BBBB00000000000000000000", to=None)
+    assert run(cli_env, ["wait", "--timeout", "0"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_read_json_marks_a_broadcast_with_a_null_to(cli_env, capsys):
+    _seed_message(cli_env, msg_id="01AAAA00000000000000000000", to=None)
+    assert run(cli_env, ["read", "--channel", "general", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data[0]["to"] is None
+
+
+def test_send_without_to_over_the_github_backend_is_a_broadcast(cli_env, capsys):
+    transport = MiniGitHub()
+    assert main(["send", "--channel", "general", "--body", "all hands"], store=cli_env["store"], transport=transport) == 0
+    capsys.readouterr()
+    from angareion.messages import parse_message
+
+    posted = transport.comments[-1]["body"]
+    parsed = parse_message(posted, strict=True)
+    assert parsed is not None
+    assert parsed.to is None
+
+
 def test_read_with_since_does_not_touch_the_cursor(cli_env, capsys):
     _seed_message(cli_env, comment_id=1, created_at="2026-10-10T12:00:00Z")
     _seed_message(cli_env, msg_id="01BBBB00000000000000000000", comment_id=2, created_at="2026-10-10T12:00:01Z")
