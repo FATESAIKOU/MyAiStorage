@@ -3,21 +3,21 @@
 **範圍**：`src/agora/agents/opencode.py` 的讀取層與指令層、`tests/fakes/`（fake upstream、`fake_opencode.py`、`opencode_noninteractive.py`）、`tests/conftest.py` 的 opencode 護欄、`tests/fixtures/opencode/` 的 v2 session fixture、`docs/spike/opencode.md`。合併後：opencode 2.x 上的匯入、同 agent 接續、閱讀版都正確——**不再有靜默空閱讀版**（審查 H1）；native／append 與舊 raw 的拒絕留給第 2 步。
 **PR 說明記一句**（報告 §H 末段）：sidecar `new` 模式 fallback 的寫回只需要讀取側的修（§F'-1、3、5、6），落在第 1 步與第 3 步。
 
-- [ ] 1.1 **fake upstream（前置交付物；審查 M6）**：放 `tests/fakes/`，本機、不連外、不用憑證，能回一句話與一次工具呼叫（讀暫存目錄裡自己寫的檔案這種無害動作）。做不到時的出口：先收純文字 fixture、工具形狀記成 open、閱讀版對工具先 `[skip tool]`，並在 PR 說明標明（視為未完成，不是預設路線）
-- [ ] 1.2 在隔離環境產生 v2 fixture（用 1.1）：四個 XDG＋`HOME` 指到暫存（`opencode debug paths` 確認）；**在隔離的 XDG_CONFIG 下把 managed 服務的埠改成空閒埠**（審查 H2）；清掉／控制繼承的 `OPENCODE_*`，pytest 外自己設 `AGORA_CONFIG`／`AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`AGORA_RCLONE`／`RCLONE_CONFIG`（L3）；工作目錄用暫存專案；自編多輪＋一次工具呼叫（第二輪 `-s <id>` 讓跨訊息參照出現）；`opencode session export <id> --standalone` 匯出；**去識別化清單**（`providerState`、`projectID`、HOME 路徑、主機名、email、時間戳、id；由 fake upstream 產生，L2）；**斷言 fixture 至少有一個跨訊息參照**（L6），否則補一輪；放 `tests/fixtures/opencode/oc-v2-*.json`
-- [ ] 1.3 嗅探：**每一列同質**——每列有 `type` → v2、每列有 `info` → v1、混合 → `AgentError`（L1）；`messages` 空／不存在時看 `info.location`（v2）／`info.directory`（v1）；兩者都不是 → `AgentError`（明確訊息）
-- [ ] 1.4 指令與 server 上下文（**全部在同一步**，審查 M7）：`_server_args()` 一處組；`_export_bytes` → `session export <id> --standalone`；`_import` → `session import <path> --standalone --directory <workdir>`（cwd 與 `PWD` 都給 workdir）；`_delete` → `session delete <id> --standalone`（`_discard`、`_drop_summary_session`、pending 補刪都走它）；summarize → `run --standalone <訊息> -f <材料> --format json`；`opencode_noninteractive.py` 的透傳（`export`／`import`／`session delete`）一起改
-- [ ] 1.5 量 `--server`（L4）：隔離環境起一個私有 serve，對它跑 `session export／import --server …`，記語法與行為進 `docs/spike/opencode.md`；量到 `--standalone` 與 live serve 相衝就在第 1 步內改 `_server_args()` 的形狀
-- [ ] 1.6 `export()` 的欄位讀 v2：`dir` 讀 `info.location.directory`、`version` 沒有就是 `None`、`model` 讀最後一則 assistant 的 `model.id`、`created_at` 照舊
-- [ ] 1.7 `reidentify()` 認 v2：依真 fixture 決定要改的結構位置（訊息 id、assistant 列的參照、`content` 內部的 id 若有）；fixture 上不存在的欄位一律不動；v1 行為不變
-- [ ] 1.8 `turns()`／`_lines_of()` 讀 v2（**審查 H1**）：user 的 `text`、assistant 的 `content`（text 一行、tool 一行 `[tool] …`）、`idle` 列略過、附件不算；不認得的型別照舊 `[skip <type>]`
-- [ ] 1.9 `fake_opencode.py`：新舊語法都收（`export` 與 `session export`、`import` 與 `session import`、`--standalone`、`--directory` 決定 session 目錄）；v2 session 以扁平存；`session import` 收到 v1 巢狀 payload MUST 以 `SchemaError` 拒絕（模擬 v2）
-- [ ] 1.10 conftest 的 opencode 護欄（審查 M5）：`session list --standalone`／`session delete <id> --standalone`；指令非 0 時**大聲失敗**（pytest.fail／raise），不是回空集合
-- [ ] 1.11 整合測試的語法／版本探測（L5）：探測 `opencode session --help` 認不認得 `export`；v2 上讓現有的真 opencode 整合測試 skip 到第 5 步（否則它們在 2.x 上會真的跑並撞 49374）
-- [ ] 1.12 單元測試：嗅探五種情形（v1／v2／空＋info／混合列／認不得）；指令 argv 帶 `--standalone`／`--directory`（fake 的 `opencode-calls.log`）；v2 的 export 欄位；reidentify v2 round trip（id 全換、參照指對、其餘 byte-for-byte）；**匯入 v2 fixture 後 body 有 user／assistant 段落**（H1）；v1 的既有測試全綠
-- [ ] 1.13 改壞驗證：拿掉 `--standalone`／`--directory`、嗅探只認一版／不看同質、export 讀 `info.directory`、reidentify 少改一個 fixture 上的參照、turns 漏掉工具行——**「拿掉 --standalone」只在 fake 上做**（真 opencode 不刻意去走 managed 服務，H2）
-- [ ] 1.14 真 opencode 的跑動（1.2；第 2、5 步的整合測試照做）**前後各確認預設埠 49374 的服務沒被動**：只看有沒有在聽／PID／etime，不讀任何資料（H2，被動到就是失敗）
-- [ ] 1.15 `docs/spike/opencode.md` 補 v2 一節：fixture 產生步驟（含埠與環境變數）、v2 的指令與旗標、`--server` 的量測結果、格式差異、觀察到的陷阱
+- [x] 1.1 **fake upstream（前置交付物；審查 M6）**：放 `tests/fakes/`，本機、不連外、不用憑證，能回一句話與一次工具呼叫（讀暫存目錄裡自己寫的檔案這種無害動作）。做不到時的出口：先收純文字 fixture、工具形狀記成 open、閱讀版對工具先 `[skip tool]`，並在 PR 說明標明（視為未完成，不是預設路線）
+- [x] 1.2 在隔離環境產生 v2 fixture（用 1.1）：四個 XDG＋`HOME` 指到暫存（`opencode debug paths` 確認）；**在隔離的 XDG_CONFIG 下把 managed 服務的埠改成空閒埠**（審查 H2）；清掉／控制繼承的 `OPENCODE_*`，pytest 外自己設 `AGORA_CONFIG`／`AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`AGORA_RCLONE`／`RCLONE_CONFIG`（L3）；工作目錄用暫存專案；自編多輪＋一次工具呼叫（第二輪 `-s <id>` 讓跨訊息參照出現）；`opencode session export <id> --standalone` 匯出；**去識別化清單**（`providerState`、`projectID`、HOME 路徑、主機名、email、時間戳、id；由 fake upstream 產生，L2）；**斷言 fixture 至少有一個跨訊息參照**（L6），否則補一輪；放 `tests/fixtures/opencode/oc-v2-*.json`
+- [x] 1.3 嗅探：**每一列同質**——每列有 `type` → v2、每列有 `info` → v1、混合 → `AgentError`（L1）；`messages` 空／不存在時看 `info.location`（v2）／`info.directory`（v1）；兩者都不是 → `AgentError`（明確訊息）
+- [x] 1.4 指令與 server 上下文（**全部在同一步**，審查 M7）：`_server_args()` 一處組；`_export_bytes` → `session export <id> --standalone`；`_import` → `session import <path> --standalone --directory <workdir>`（cwd 與 `PWD` 都給 workdir）；`_delete` → `session delete <id> --standalone`（`_discard`、`_drop_summary_session`、pending 補刪都走它）；summarize → `run --standalone <訊息> -f <材料> --format json`；`opencode_noninteractive.py` 的透傳（`export`／`import`／`session delete`）一起改
+- [x] 1.5 量 `--server`（L4）：隔離環境起一個私有 serve，對它跑 `session export／import --server …`，記語法與行為進 `docs/spike/opencode.md`；量到 `--standalone` 與 live serve 相衝就在第 1 步內改 `_server_args()` 的形狀
+- [x] 1.6 `export()` 的欄位讀 v2：`dir` 讀 `info.location.directory`、`version` 沒有就是 `None`、`model` 讀最後一則 assistant 的 `model.id`、`created_at` 照舊
+- [x] 1.7 `reidentify()` 認 v2：依真 fixture 決定要改的結構位置（訊息 id、assistant 列的參照、`content` 內部的 id 若有）；fixture 上不存在的欄位一律不動；v1 行為不變
+- [x] 1.8 `turns()`／`_lines_of()` 讀 v2（**審查 H1**）：user 的 `text`、assistant 的 `content`（text 一行、tool 一行 `[tool] …`）、`idle` 列略過、附件不算；不認得的型別照舊 `[skip <type>]`
+- [x] 1.9 `fake_opencode.py`：新舊語法都收（`export` 與 `session export`、`import` 與 `session import`、`--standalone`、`--directory` 決定 session 目錄）；v2 session 以扁平存；`session import` 收到 v1 巢狀 payload MUST 以 `SchemaError` 拒絕（模擬 v2）
+- [x] 1.10 conftest 的 opencode 護欄（審查 M5）：`session list --standalone`／`session delete <id> --standalone`；指令非 0 時**大聲失敗**（pytest.fail／raise），不是回空集合
+- [x] 1.11 整合測試的語法／版本探測（L5）：探測 `opencode session --help` 認不認得 `export`；v2 上讓現有的真 opencode 整合測試 skip 到第 5 步（否則它們在 2.x 上會真的跑並撞 49374）
+- [x] 1.12 單元測試：嗅探五種情形（v1／v2／空＋info／混合列／認不得）；指令 argv 帶 `--standalone`／`--directory`（fake 的 `opencode-calls.log`）；v2 的 export 欄位；reidentify v2 round trip（id 全換、參照指對、其餘 byte-for-byte）；**匯入 v2 fixture 後 body 有 user／assistant 段落**（H1）；v1 的既有測試全綠
+- [x] 1.13 改壞驗證：拿掉 `--standalone`／`--directory`、嗅探只認一版／不看同質、export 讀 `info.directory`、reidentify 少改一個 fixture 上的參照、turns 漏掉工具行——**「拿掉 --standalone」只在 fake 上做**（真 opencode 不刻意去走 managed 服務，H2）
+- [x] 1.14 真 opencode 的跑動（1.2；第 2、5 步的整合測試照做）**前後各確認預設埠 49374 的服務沒被動**：只看有沒有在聽／PID／etime，不讀任何資料（H2，被動到就是失敗）
+- [x] 1.15 `docs/spike/opencode.md` 補 v2 一節：fixture 產生步驟（含埠與環境變數）、v2 的指令與旗標、`--server` 的量測結果、格式差異、觀察到的陷阱
 
 **測試**：`uv run pytest -q tests/unit/test_agent_opencode.py`（＋受影響的 fake／conftest 測試）；不需要真 opencode。
 **改壞驗證**：1.13 逐項記在 PR 說明（哪一項、改壞什麼、哪個測試紅）。

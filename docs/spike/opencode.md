@@ -1207,8 +1207,8 @@ opencode session export <fork id> --standalone > fork.json
   byte-for-byte。
 - **真 opencode 的 round trip**：把 `oc-v2-basic.json` 用 `reidentify` 換 id 後在真的
   2.0.26 上 `session import --standalone --directory <proj>` → `run --standalone -s` 一輪 →
-  `session export --standalone` 讀回：閱讀版 6 段、工具行還在。這是第 1 步的完整讀取鏈
-  （第 5 步會用整條 CLI 驗收再跑一次）。
+  `session export --standalone` 讀回：閱讀版 7 段（fixture 的 5 段＋新的一輪 2 段）、
+  工具行還在。這是第 1 步的完整讀取鏈（第 5 步會用整條 CLI 驗收再跑一次）。
 - **import 必填欄位全集**：第 2 步（`native()`）逐欄餵 `session import` 補齊；這次已知的
   必填／行為是 `info.location`、訊息 id 要全新（撞到是 500）、`--directory` 決定專案。
 
