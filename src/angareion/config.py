@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from angareion.messages import MessageValidationError, validate_address
+
 CONFIG_PULL_INTERVAL_DEFAULT = 900
 
 
@@ -54,14 +56,19 @@ def get_default_token_path() -> Path:
     return Path(os.path.expanduser("~/.config/angareion/token"))
 
 
-def identity_slug(identity: dict[str, Any]) -> str:
-    """Derive a filesystem-safe filename slug for an identity."""
-    if "group" in identity:
-        group = str(identity.get("group", "")).replace("/", "_").replace(":", "_")
-        return f"group__{group}"
-    repo = str(identity.get("repo", "unknown")).replace("/", "_").replace(":", "_")
-    role = str(identity.get("role", "unknown")).replace("/", "_").replace(":", "_")
-    return f"{repo}__{role}"
+def identity_slug(identity: str) -> str:
+    """Derive a filesystem-safe filename slug for an agent name (v5).
+
+    Agent names are already `[A-Za-z0-9._-]`, so this mostly passes through;
+    anything else is replaced so a hand-written identity cannot escape the
+    state directory. v0's `{repo}__{role}` slug is gone: old cursor files are
+    simply never read again (a new identity starts from the beginning).
+    """
+    slug = "".join(
+        character if (character.isascii() and (character.isalnum() or character in "._-")) else "_"
+        for character in str(identity)
+    )
+    return slug or "unknown"
 
 
 @dataclass
@@ -80,6 +87,10 @@ class Config:
             raise ConfigError(
                 "identity must be an agent name such as 'MyLinuxPool-impl-2'"
             )
+        try:
+            validate_address(self.identity, field_name="identity")
+        except MessageValidationError as e:
+            raise ConfigError(f"Invalid identity: {e}") from e
         if not self.config_dir or not str(self.config_dir).strip():
             raise ConfigError("config_dir must be the path of the local MyAiStorage clone")
         repo = self.registry_repo

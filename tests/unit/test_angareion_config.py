@@ -1,4 +1,4 @@
-"""Unit tests for Angareion configuration, paths and identity (D5, tasks 1.2)."""
+"""Unit tests for Angareion configuration, paths, identity and token files (v5)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import json
 import pytest
 
 from angareion.config import (
+    CONFIG_PULL_INTERVAL_DEFAULT,
     Config,
     ConfigError,
     get_config_path,
@@ -45,8 +46,12 @@ def test_config_env_overrides(tmp_path, monkeypatch):
     assert get_default_token_path() == custom_token
 
 
-def test_identity_slug():
-    assert identity_slug({"repo": "owner-org/team", "role": "PM"}) == "owner-org_team__PM"
+def test_identity_slug_uses_the_agent_name():
+    assert identity_slug("MyLinuxPool-impl-2") == "MyLinuxPool-impl-2"
+    assert identity_slug("LLMGateway-pm") == "LLMGateway-pm"
+    # Anything unsafe cannot escape the state directory.
+    assert "/" not in identity_slug("owner/team×pm")
+    assert identity_slug("") == "unknown"
 
 
 def test_load_and_save_config(tmp_path, monkeypatch):
@@ -60,8 +65,10 @@ def test_load_and_save_config(tmp_path, monkeypatch):
     monkeypatch.setenv("ANGAREION_TOKEN_FILE", str(token_file))
 
     cfg = Config(
-        channel_repo="owner-org/repo-channel",
-        identity={"repo": "owner-org/repo-worker", "role": "PM", "name": "worker-1"},
+        identity="MyLinuxPool-impl-2",
+        config_dir=tmp_path / "clone",
+        registry_repo="owner/MyAiStorage",
+        registry_issue=77,
         token_file=token_file,
         state_dir=state_dir,
         config_file=cfg_file,
@@ -70,29 +77,75 @@ def test_load_and_save_config(tmp_path, monkeypatch):
     assert cfg_file.is_file()
 
     loaded = load_config(cfg_file)
-    assert loaded.channel_repo == "owner-org/repo-channel"
-    assert loaded.identity["role"] == "PM"
+    assert loaded.identity == "MyLinuxPool-impl-2"
+    assert loaded.config_dir == tmp_path / "clone"
+    assert loaded.registry_repo == "owner/MyAiStorage"
+    assert loaded.registry_issue == 77
     assert loaded.token_file == token_file
     assert loaded.state_dir == state_dir
+    assert loaded.config_pull_interval == CONFIG_PULL_INTERVAL_DEFAULT == 900
+
+
+def test_config_pull_interval_can_be_overridden(tmp_path):
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(
+        json.dumps(
+            {
+                "identity": "MyLinuxPool-impl-2",
+                "config_dir": str(tmp_path / "clone"),
+                "registry_repo": "owner/MyAiStorage",
+                "registry_issue": 77,
+                "config_pull_interval": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert load_config(cfg_file).config_pull_interval == 0
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["identity", "config_dir", "registry_repo", "registry_issue"],
+)
+def test_missing_config_keys_are_config_errors(tmp_path, missing):
+    data = {
+        "identity": "MyLinuxPool-impl-2",
+        "config_dir": str(tmp_path / "clone"),
+        "registry_repo": "owner/MyAiStorage",
+        "registry_issue": 77,
+    }
+    del data[missing]
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=missing):
+        load_config(cfg_file)
 
 
 def test_config_validation_failures(tmp_path):
-    bad_cfg = tmp_path / "bad.json"
+    base = {
+        "identity": "MyLinuxPool-impl-2",
+        "config_dir": str(tmp_path / "clone"),
+        "registry_repo": "owner/MyAiStorage",
+        "registry_issue": 77,
+    }
+    cfg_file = tmp_path / "config.json"
 
-    bad_cfg.write_text(json.dumps({"identity": {"repo": "a", "role": "b"}}), encoding="utf-8")
-    with pytest.raises(ConfigError, match="channel_repo"):
-        load_config(bad_cfg)
-
-    bad_cfg.write_text(json.dumps({"channel_repo": "owner/repo"}), encoding="utf-8")
-    with pytest.raises(ConfigError, match="Invalid identity"):
-        load_config(bad_cfg)
-
-    # Group addressing is not supported in v0; a group identity is a config error.
-    bad_cfg.write_text(
-        json.dumps({"channel_repo": "owner/repo", "identity": {"group": "all-workers"}}), encoding="utf-8"
-    )
-    with pytest.raises(ConfigError, match="group addressing is not supported"):
-        load_config(bad_cfg)
+    for override, message in (
+        ({"identity": "not an agent"}, "identity"),
+        ({"config_dir": ""}, "config_dir"),
+        ({"registry_repo": "no-slash"}, "registry_repo"),
+        ({"registry_repo": "too/many/slashes"}, "registry_repo"),
+        ({"registry_issue": 0}, "registry_issue"),
+        ({"registry_issue": "77"}, "registry_issue"),
+        ({"config_pull_interval": -1}, "config_pull_interval"),
+        ({"config_pull_interval": "900"}, "config_pull_interval"),
+    ):
+        data = dict(base)
+        data.update(override)
+        cfg_file.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ConfigError, match=message):
+            load_config(cfg_file)
 
 
 def test_missing_config_file(tmp_path):

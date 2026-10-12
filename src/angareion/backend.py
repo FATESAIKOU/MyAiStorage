@@ -39,11 +39,11 @@ class Target:
     """Where to check/read: one channel, or everything addressed to me.
 
     Exactly one of `channel` and `recipient` must be set. `recipient` is the
-    reader's identity {repo, role, [name]}; "to me" spans all channels.
+    reader's agent name; "to me" spans all channels.
     """
 
     channel: str | None = None
-    recipient: dict[str, Any] | None = None
+    recipient: str | None = None
 
     def __post_init__(self) -> None:
         if (self.channel is None) == (self.recipient is None):
@@ -53,7 +53,7 @@ class Target:
         """Stable key for this target in the local cursor file."""
         if self.channel is not None:
             return f"channel:{self.channel}"
-        return "to:" + identity_slug(self.recipient or {})
+        return "to:" + identity_slug(self.recipient or "")
 
 
 def parse_backend_time(value: str) -> datetime:

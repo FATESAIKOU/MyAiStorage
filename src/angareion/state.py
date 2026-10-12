@@ -1,8 +1,11 @@
-"""Local cursor state (D4): per target, the backend's position/at/seen.
+"""Local cursor state (D4/v5): per target key, the backend's position/at/seen.
 
 Nothing else lives here — no message cache, no acks. Deleting the file means
 reading from the start. ETag and scan_since are not part of the cursor: they
 live in the backend instance for one process (D2).
+
+The cursor file is named after the agent name (v5); v0's `{repo}__{role}`
+files are naturally abandoned — a new identity starts from the beginning.
 """
 
 from __future__ import annotations
@@ -13,13 +16,28 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
-from angareion.backend import Cursor, Target
+from angareion.backend import Cursor
 from angareion.config import identity_slug
 
 
-def cursor_file_path(state_dir: Path | str, identity: dict[str, Any]) -> Path:
-    """Path of the cursor file for an identity: cursor-<identity>.json."""
+def cursor_file_path(state_dir: Path | str, identity: str) -> Path:
+    """Path of the cursor file for an agent name: cursor-<identity>.json."""
     return Path(state_dir) / f"cursor-{identity_slug(identity)}.json"
+
+
+def channel_cursor_key(channel: str) -> str:
+    """The cursor key for a channel target."""
+    return f"channel:{channel}"
+
+
+def recipient_cursor_key(identity: str, channel: str) -> str:
+    """The cursor key for "to me" in one channel.
+
+    "To me" spans every channel, and each channel is a different backend
+    entity with its own arrival positions, so each channel keeps its own
+    cursor entry.
+    """
+    return f"to:{identity_slug(identity)}:{channel}"
 
 
 class CursorStore:
@@ -28,7 +46,7 @@ class CursorStore:
     def __init__(
         self,
         state_dir: Path | str | None = None,
-        identity: dict[str, Any] | None = None,
+        identity: str | None = None,
         path: Path | str | None = None,
     ):
         if path is None:
@@ -67,17 +85,21 @@ class CursorStore:
             )
         return cursors
 
-    def cursor_for(self, target: Target) -> Cursor:
-        """The stored cursor for a target; an empty cursor when never read."""
-        return self._load().get(target.key(), Cursor())
+    def cursor(self, key: str) -> Cursor:
+        """The stored cursor for a target key; an empty cursor when never read."""
+        return self._load().get(key, Cursor())
 
-    def save(self, target: Target, cursor: Cursor) -> None:
-        """Store the cursor for a target, atomically."""
-        cursors = self._load()
-        cursors[target.key()] = cursor
-        payload = {
+    def save(self, key: str, cursor: Cursor) -> None:
+        """Store the cursor for one target key, atomically."""
+        self.save_many({key: cursor})
+
+    def save_many(self, cursors: dict[str, Cursor]) -> None:
+        """Store several cursors at once (a "to me" read spans channels)."""
+        current = self._load()
+        current.update(cursors)
+        payload: dict[str, Any] = {
             key: {"position": c.position, "at": c.at, "seen": list(c.seen)}
-            for key, c in cursors.items()
+            for key, c in current.items()
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # L6: a unique temp file in the same directory, so two processes
