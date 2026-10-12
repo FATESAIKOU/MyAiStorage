@@ -30,9 +30,9 @@ from angareion.github import HttpTransport, GitHubIssuesBackend
 from angareion.messages import (
     Message,
     MessageValidationError,
-    is_group_address,
     message_to_dict,
     validate_address,
+    validate_channel_name,
 )
 from angareion.state import CursorStore
 
@@ -54,55 +54,17 @@ class _Parser(argparse.ArgumentParser):
         raise UsageError(f"{self.prog}: error: {message}")
 
 
-def parse_address(addr_str: str) -> dict[str, Any]:
-    """Parse an address string into a dictionary.
+def parse_address(addr_str: str) -> str:
+    """Validate one address and return it as an agent name (the v5 grammar).
 
-    Supports:
-    - JSON dictionary: '{"repo": "...", "role": "..."}' or '{"group": "..."}'
-    - Key-value pairs: 'repo=...,role=...,name=...' or 'group=...'
-    - Cross-format: 'repo×role'
-    - Colon-format: 'repo:role'
+    v5 has one address shape: `<repo 名>-<pm|arch|impl|test>[-<id>]`. The old
+    `repo=…`, `×`, `:` and JSON shapes are gone (and are format errors now).
     """
-    addr_str = addr_str.strip()
-    if not addr_str:
+    if not isinstance(addr_str, str) or not addr_str.strip():
         raise MessageValidationError("Address string cannot be empty")
-
-    if addr_str.startswith("{") and addr_str.endswith("}"):
-        try:
-            val = json.loads(addr_str)
-            if isinstance(val, dict):
-                validate_address(val)
-                return val
-        except json.JSONDecodeError as e:
-            raise MessageValidationError(f"Invalid JSON in address: {e}") from e
-
-    if "group=" in addr_str or "repo=" in addr_str or "role=" in addr_str:
-        parts = [p.strip() for p in addr_str.split(",") if p.strip()]
-        res: dict[str, Any] = {}
-        for p in parts:
-            if "=" in p:
-                k, v = p.split("=", 1)
-                res[k.strip()] = v.strip()
-            else:
-                raise MessageValidationError(f"Invalid key=value pair in address: {p}")
-        validate_address(res)
-        return res
-
-    if "×" in addr_str:
-        repo, role = addr_str.split("×", 1)
-        res = {"repo": repo.strip(), "role": role.strip()}
-        validate_address(res)
-        return res
-
-    if ":" in addr_str and not addr_str.startswith("http:") and not addr_str.startswith("https:"):
-        repo, role = addr_str.split(":", 1)
-        res = {"repo": repo.strip(), "role": role.strip()}
-        validate_address(res)
-        return res
-
-    raise MessageValidationError(
-        f"Unrecognized address format: '{addr_str}'. Expected 'repo=...,role=...' or JSON object"
-    )
+    address = addr_str.strip()
+    validate_address(address)
+    return address
 
 
 def _target_from_args(args: argparse.Namespace, config: Config) -> Target:
@@ -112,15 +74,11 @@ def _target_from_args(args: argparse.Namespace, config: Config) -> Target:
 
 
 def _format_message(message: Message) -> str:
-    sender = message.from_
-    sender_str = f"{sender.get('repo')}×{sender.get('role')}"
-    if sender.get("name"):
-        sender_str += f" ({sender['name']})"
     header = f"[{message.urgency}] {message.id} {message.at}"
     received_at = getattr(message, "received_at", None)
     if received_at:
         header += f" (received {received_at})"
-    header += f" <{sender_str}> channel: {message.channel}"
+    header += f" <{message.from_}> channel: {message.channel}"
     lines = [header]
     body = message.content.rstrip("\n")
     if body:
@@ -183,43 +141,33 @@ def _read_body(args: argparse.Namespace) -> str:
 
 
 def cmd_channel_create(args: argparse.Namespace, config: Config, app: Angareion, token: str) -> int:
-    if not args.name or not args.name.strip():
-        sys.stderr.write("Error: channel name must be a non-empty string.\n")
+    try:
+        validate_channel_name(args.name)
+    except MessageValidationError as e:
+        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
         return EXIT_USAGE
 
-    members: list[dict[str, Any]] = []
-    for member_str in args.member or []:
-        try:
-            member = parse_address(member_str)
-        except MessageValidationError as e:
-            sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
-            return EXIT_USAGE
-        if is_group_address(member):
-            sys.stderr.write("Error: group addressing is not supported in v0.\n")
-            return EXIT_USAGE
-        members.append(member)
-
-    channel = app.create_channel(args.name, members)
+    # v5: channels have no member list any more (every channel is public in phase one).
+    channel = app.create_channel(args.name)
     sys.stdout.write(f"{channel.name} #{channel.number}\n")
     return EXIT_OK
 
 
 def cmd_send(args: argparse.Namespace, config: Config, app: Angareion, token: str) -> int:
-    try:
-        to_addr = parse_address(args.to)
-    except MessageValidationError as e:
-        sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
-        return EXIT_USAGE
-
-    if is_group_address(to_addr):
-        sys.stderr.write("Error: group addressing is not supported in v0.\n")
-        return EXIT_USAGE
+    to_addr: str | None = None
+    if args.to is not None:
+        try:
+            to_addr = parse_address(args.to)
+        except MessageValidationError as e:
+            sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
+            return EXIT_USAGE
 
     if not (0 <= args.urgency <= 9):
         sys.stderr.write(f"Error: urgency must be between 0 and 9, got {args.urgency}\n")
         return EXIT_USAGE
 
     try:
+        validate_channel_name(args.channel)
         attachments = _build_attachments(args)
         body = _read_body(args)
         message = Message(
@@ -301,14 +249,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_channel = subparsers.add_parser("channel", help="Channel operations.")
     channel_sub = p_channel.add_subparsers(dest="channel_action", metavar="ACTION")
-    p_create = channel_sub.add_parser("create", help="Create a channel (idempotent); prints '<name> #<number>'.")
+    p_create = channel_sub.add_parser("create", help="Create a channel; prints '<name> #<number>'.")
     p_create.add_argument("name", help="Channel name.")
-    p_create.add_argument("--member", action="append", default=[], metavar="ADDRESS",
-                          help="Member address (repeatable).")
 
     p_send = subparsers.add_parser("send", help="Send a message to a channel; prints the message id.")
     p_send.add_argument("--channel", required=True, help="Channel name.")
-    p_send.add_argument("--to", required=True, help="Recipient address ({repo, role, [name]}).")
+    p_send.add_argument("--to", metavar="AGENT",
+                        help="Recipient agent name (e.g. MyLinuxPool-impl-2); omit to send to the whole channel.")
     p_send.add_argument("--urgency", type=int, default=5, help="Urgency 0-9 (default: 5).")
     p_send.add_argument("--attach", action="append", default=[], metavar="NAME=PATH",
                         help="Attach a file inline (repeatable).")
