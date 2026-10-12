@@ -54,8 +54,21 @@ def stored(home: Path, session_id: str) -> dict:
     return json.loads((home / "opencode-sessions" / f"{session_id}.json").read_text())
 
 
+def seed(home: Path, fixture: str, session_id: str) -> None:
+    """Lay one more session into the fake opencode's store."""
+    shutil.copyfile(FIXTURES / fixture, home / "opencode-sessions" / f"{session_id}.json")
+
+
 def raw() -> bytes:
     return (FIXTURES / "oc-basic.json").read_bytes()
+
+
+def v2() -> bytes:
+    return (FIXTURES / "oc-v2-basic.json").read_bytes()
+
+
+def fork() -> bytes:
+    return (FIXTURES / "oc-v2-fork.json").read_bytes()
 
 
 # --- export ---------------------------------------------------------------
@@ -230,6 +243,162 @@ def test_reidentify_does_not_touch_the_input(fake):
 def test_reidentify_refuses_a_shapeless_export(fake):
     with pytest.raises(AgentError):
         oc.reidentify({"info": {}}, session_id="ses_" + "F" * 16)
+
+
+# --- v2 exports (opencode 2.x; change agora-opencode-v2, step 1) ---------
+#
+# The fixtures were generated offline (tests/fakes/fake_upstream.py) in an isolated
+# XDG+HOME and de-identified; see docs/spike/opencode.md.
+
+
+def test_the_sniffer_tells_v1_and_v2_apart(fake):
+    assert oc._payload_format(json.loads(raw())) == "v1"
+    assert oc._payload_format(json.loads(v2())) == "v2"
+    # an empty message list falls back to info (v2 has location, v1 directory/slug)
+    assert oc._payload_format({"info": {"location": {"directory": "/tmp/x"}},
+                               "messages": []}) == "v2"
+    assert oc._payload_format({"info": {"directory": "/tmp/x"}, "messages": []}) == "v1"
+    assert oc._payload_format({"info": {"slug": "quiet-otter"}, "messages": []}) == "v1"
+
+
+def test_the_sniffer_refuses_mixed_or_shapeless_payloads(fake):
+    mixed = json.loads(v2())
+    mixed["messages"].append({"info": {"id": "msg_x", "role": "assistant"}, "parts": []})
+    with pytest.raises(AgentError, match="形狀不一致"):
+        oc._payload_format(mixed)
+    with pytest.raises(AgentError, match="認不出形狀"):
+        oc._payload_format({"info": {}, "messages": [{"id": "msg_x"}]})
+    with pytest.raises(AgentError, match="認不出格式"):
+        oc._payload_format({"info": {}, "messages": []})
+
+
+def test_the_v2_fixtures_carry_a_cross_message_reference():
+    """L6: the fork fixture's boundary names the basic fixture's last row.
+
+    A plain v2 session has no reference inside it at all (measured 2.0.26: no
+    parentID/messageID), so the one reference-shaped structure a v2 export has -
+    a fork pointing back at its parent - is what the fixtures carry, and what a
+    reidentify must not quietly rewrite.
+    """
+    basic = json.loads(v2())
+    forked = json.loads(fork())
+    assert forked["info"]["fork"]["sessionID"] == basic["info"]["id"]
+    assert forked["info"]["fork"]["boundary"]["messageID"] == basic["messages"][-1]["id"]
+
+
+def test_export_reads_the_v2_fields(fake):
+    seed(fake, "oc-v2-basic.json", "v2basic")
+    exported = oc.ADAPTER.export("v2basic")
+    assert exported.session_id == "ses_ZZV2BASIC00000000000000AA"
+    assert exported.dir == "/tmp/agora-it-opencode/proj"    # info.location.directory
+    assert exported.title == "oc-v2 fixture"
+    assert exported.agent_version is None                  # v2 records no version
+    assert exported.created_at == "2026-09-24T01:40:00Z"
+    assert exported.message_count == 5                     # 7 rows, two of them idle
+    assert exported.model == "fake-model"                  # the last assistant's model.id
+
+
+def test_the_reading_version_of_a_v2_session_has_its_sections(fake):
+    """H1: this is the test that the step-1 change exists for - importing a v2
+    session must not come out as an empty reading version."""
+    body = base.reading(oc.ADAPTER, v2())
+    assert "## user" in body and "## assistant" in body
+    # v2's first user row is JSON-encoded; the reading version shows the words
+    assert "先讀 fake-note.txt 再回答。" in body
+    assert "第二輪：紙條上寫的是什麼顏色？一句話。" in body
+    assert "[tool] read {'path': 'fake-note.txt'}" in body
+    # the tool's result is not conversation (D6), and idle rows produce no section
+    assert "ZZNOTE 這是一張紙條。" not in body
+    assert "idle" not in body
+
+
+def test_a_reidentified_v2_session_keeps_everything_else_byte_for_byte(fake):
+    before = json.loads(v2())
+    after = oc.reidentify(before, session_id="ses_" + "G" * 16)
+    assert after["info"]["id"] == "ses_" + "G" * 16
+
+    def ids(payload: dict) -> set[str]:
+        return {m["id"] for m in payload["messages"]} | {
+            c["id"] for m in payload["messages"] for c in m.get("content") or []
+            if isinstance(c.get("id"), str)}
+
+    assert not (ids(after) & ids(before))
+    assert len(ids(after)) == len(ids(before))
+    assert ids(after) and all(value.startswith(("msg_", "prt_")) for value in ids(after))
+    assert _masked(after) == _masked(before)
+
+
+def test_reidentify_v2_leaves_the_fork_reference_alone(fake):
+    """The one reference a v2 export has points at the parent session's row, which
+    is not in this payload: nothing to remap, so it stays byte-for-byte."""
+    before = json.loads(fork())
+    after = oc.reidentify(before, session_id="ses_" + "H" * 16)
+    assert after["info"]["fork"] == before["info"]["fork"]
+    assert {m["id"] for m in after["messages"]}.isdisjoint({m["id"] for m in before["messages"]})
+
+
+def test_a_reidentified_v2_session_imports_and_reads_back_the_same(fake, workdir):
+    new_id = "ses_ZZV2IMPORT000000000000AA"
+    payload = oc.reidentify(json.loads(v2()), session_id=new_id)
+    oc.ADAPTER._import(payload, workdir)
+    landed = stored(fake, new_id)
+    assert [m["id"] for m in landed["messages"]] == [m["id"] for m in payload["messages"]]
+    assert oc.ADAPTER.turns(json.dumps(landed).encode()) == oc.ADAPTER.turns(v2())
+    assert oc.ADAPTER.export(new_id).message_count == 5
+
+
+def test_import_lands_the_session_in_the_directory_it_was_told(fake, workdir):
+    """v2's `--directory` decides the project; the payload's own location does not."""
+    payload = json.loads(v2())
+    payload["info"]["id"] = "ses_ZZV2DIR00000000000000AA"
+    payload["info"]["location"]["directory"] = "/elsewhere"
+    oc.ADAPTER._import(payload, workdir)
+    assert stored(fake, payload["info"]["id"])["info"]["location"]["directory"] == str(workdir)
+
+
+def test_the_fake_refuses_a_v1_payload_when_it_simulates_v2(fake, workdir, monkeypatch):
+    """opencode 2.0.26's answer to a v1 nested payload; the fake only says it when
+    asked, because step 1 still exercises the v1 write path (step 2 replaces it)."""
+    monkeypatch.setenv("FAKE_OPENCODE_REQUIRE_V2", "1")
+    with pytest.raises(AgentError, match="SchemaError"):
+        oc.ADAPTER._import(json.loads(raw()), workdir)
+
+
+def test_every_automated_call_carries_its_server_context(fake, workdir):
+    """One place composes it (`_server_args`), so the whole flow has it: export,
+    import with --directory, delete and the summarize run (tasks 1.4, 2.7)."""
+    oc.ADAPTER.export("default")
+    oc.ADAPTER._import(json.loads(v2()), workdir)
+    oc.ADAPTER._delete("default", workdir)
+    oc.ADAPTER.summarize("ZZPROMPT 材料", workdir)
+
+    calls = [json.loads(line) for line in
+             (fake / "opencode-calls.log").read_text(encoding="utf-8").splitlines()]
+    argv = [call["argv"] for call in calls]
+    assert next(a for a in argv if a[:2] == ["session", "export"]) == \
+        ["session", "export", "default", "--standalone"]
+    imported = next(a for a in argv if a[:2] == ["session", "import"])
+    assert imported[0:2] == ["session", "import"] and "--standalone" in imported
+    assert imported[-2:] == ["--directory", str(workdir)]
+    assert next(a for a in argv if a[:2] == ["session", "delete"]) == \
+        ["session", "delete", "default", "--standalone"]
+    assert next(a for a in argv if a[:1] == ["run"])[:2] == ["run", "--standalone"]
+    # $PWD is set to the same directory as cwd for the import (spike trap A)
+    import_call = next(c for c in calls if c["argv"][:2] == ["session", "import"])
+    assert import_call["cwd"] == str(workdir) and import_call["pwd"] == str(workdir)
+
+
+def _masked(payload: dict) -> str:
+    """The payload with every id blanked, for a byte-for-byte comparison that the
+    re-identified ids are the only difference."""
+    out = json.loads(json.dumps(payload))
+    out["info"]["id"] = "<id>"
+    for message in out["messages"]:
+        message["id"] = "<id>"
+        for content in message.get("content") or []:
+            if "id" in content:
+                content["id"] = "<id>"
+    return json.dumps(out, ensure_ascii=False, sort_keys=True)
 
 
 # --- start_native (U-CON-01, 01b, 02) -------------------------------------

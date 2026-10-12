@@ -308,6 +308,23 @@ def test_import_add_tag_appends_without_duplicates(tmp_path, monkeypatch, capsys
 # --- opencode: serve mode, agora-port, SIGTERM (3.3) --------------------------
 
 
+def test_import_of_a_v2_opencode_session_writes_its_body(opencode_lab, capsys):
+    """H1 (change agora-opencode-v2, step 1): an import from opencode 2.x must not
+    leave an empty reading version behind - the body carries every section, the
+    tool call included."""
+    shutil.copyfile(OC_FIX / "oc-v2-basic.json",
+                    opencode_lab["fh"] / "opencode-sessions" / "v2basic.json")
+    code, a, err = run(capsys, "import", "session", "--external-session-id", "v2basic",
+                       "--agent", "opencode")
+    assert code == 0, err
+    code, shown, err = run(capsys, "show", "session", a)
+    assert code == 0, err
+    assert "## user" in shown and "## assistant" in shown
+    assert "先讀 fake-note.txt 再回答。" in shown
+    assert "[tool] read" in shown
+    assert "第二輪：紙條上寫的是什麼顏色？一句話。" in shown
+
+
 def test_opencode_headless_serves_the_port_and_terminates_gently(
     opencode_lab, capsys, tmp_path
 ):

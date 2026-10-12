@@ -84,7 +84,9 @@ if sleep_for:
 
 CALLS.parent.mkdir(parents=True, exist_ok=True)
 with open(CALLS, "a") as f:
-    f.write(json.dumps({"argv": argv, "cwd": os.getcwd(), "mode": os.environ.get("FAKE_AGENT_MODE", "")}) + "\n")
+    f.write(json.dumps({"argv": argv, "cwd": os.getcwd(),
+                         "pwd": os.environ.get("PWD"),
+                         "mode": os.environ.get("FAKE_AGENT_MODE", "")}) + "\n")
 with open(CWDS, "a") as f:
     f.write(os.getcwd() + "\n")
 
