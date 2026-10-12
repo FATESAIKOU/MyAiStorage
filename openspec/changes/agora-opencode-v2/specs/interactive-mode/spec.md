@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: 未匯入頁讀本機 opencode 的儲存
-未匯入頁 MUST 以唯讀方式讀本機 opencode 自己的儲存（`XDG_DATA_HOME`，預設 `~/.local/share` 底下的 `opencode/opencode.db`）列出所有專案的 Session（新到舊）、顯示最後一則 user／assistant 文字的預覽、並支援對話內文的搜尋。opencode 2.x 的資料表（`session_v2`、`session_message`）與 1.x 的（`session`、`message`／`part`）都 MUST 能讀；兩者都在時 MUST 以 2.x 的為準。讀不到檔案、結構認不出來時 MUST 只警告一次並顯示空的清單／沒有預覽，MUST NOT 讓互動模式出錯。
+未匯入頁 MUST 以唯讀方式讀本機 opencode 自己的儲存（`XDG_DATA_HOME`，預設 `~/.local/share` 底下的 `opencode/opencode.db`）列出所有專案的 Session（新到舊）、顯示最後一則 user／assistant 文字的預覽、並支援對話內文的搜尋。opencode 2.x 的資料表（`session_v2`、`session_message`）與 1.x 的（`session`、`message`／`part`）都 MUST 能讀；兩者都在時 MUST 以 2.x 的資料為準，但**只出現在 1.x 表的 Session MUST 仍被列出**（以 id 聯集，同一個 id 用 2.x 的列；升級沒有遷移舊 Session 不會把它們藏掉）。讀不到檔案、結構認不出來時 MUST 只警告一次並顯示空的清單／沒有預覽，MUST NOT 讓互動模式出錯。
 
 - 預覽 MUST 只掃最近的幾則訊息並截斷長度（不把整份對話讀進來）；只算 user／assistant 的文字，附件不算。
 - 搜尋 MUST 不分大小寫、正規化後比對，每一個命中都由程式確認；同一個 Session 只出現一次。
@@ -10,6 +10,10 @@
 #### Scenario: v2 的資料庫列得出來
 - **WHEN** 本機 opencode 2.x 的資料庫有兩個不同專案的 Session
 - **THEN** 未匯入頁兩個都列出來，新到舊，專案目錄與標題正確
+
+#### Scenario: 舊 Session 沒有被遷移
+- **WHEN** 升級後 v2 的表沒有某個舊 Session，它只出現在 v1 的表
+- **THEN** 未匯入頁照樣列出它；同一個 Session 同時在兩表時用 v2 的資料，清單不出現兩次
 
 #### Scenario: v2 的預覽
 - **WHEN** 在未匯入頁選一個 v2 的 Session

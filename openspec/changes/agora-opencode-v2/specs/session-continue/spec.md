@@ -15,14 +15,19 @@ adapter MUST 自己認出 opencode 的匯出格式：v2 是扁平（`messages[]`
 - **THEN** 匯入失敗並說明格式認不出來；沒有存出任何 Session
 
 ### Requirement: opencode v2 的接續與 fork
-本機的 opencode 是 2.x 時，`agora continue session <id> --agent opencode`（含 `--headless`）、`--fork`、以及 merge 出來的 Session 的接續 MUST 照常運作：接續時載入的是 agent 自己的格式（工具呼叫等不經轉換）、載入後 MUST 回讀驗證（訊息數與 part 數）、原本的 agent session MUST NOT 被改動。
+本機的 opencode 是 2.x 時，`agora continue session <id> --agent opencode`（含 `--headless`）、`--fork`、以及 merge 出來的 Session 的接續 MUST 照常運作：接續時載入的是 agent 自己的格式（工具呼叫等不經轉換）、載入後 MUST 回讀驗證（訊息數，以及該格式可數的內容項目數——v1 的 part 數、v2 的 `content` 項目數；該格式沒有這一層時只比訊息數）、原本的 agent session MUST NOT 被改動。
 
 - 同 agent 的 fork MUST 是原 Session 的 raw 加上新訊息（原樣載入）。
 - 送給 opencode 的每一個自動化呼叫（匯出、匯入、刪除、寫要約）MUST 帶明確的 server 上下文（`--standalone` 或 `--server`），MUST NOT 讓 opencode 去找或啟動使用者的 managed 背景服務。
+- `idle` 這種不是對話的列 MUST NOT 算成新內容：只開了 agent、沒有說話就離開時，MUST NOT 寫回。
 
 #### Scenario: 接續 v2 的 Session
 - **WHEN** 對一個 opencode 2.x 匯入的 Session 執行 `agora continue session <id> --agent opencode`，在 agent 裡說了一句話後離開
 - **THEN** agent 看得到完整前文（含工具呼叫）；結束後寫回同一個 Session；來源的 agent session 不變；閱讀版完整
+
+#### Scenario: 開了 agent 沒有說話
+- **WHEN** 接續 v2 的 Session 後只開了 agent、沒有說話就離開
+- **THEN** 沒有新的內容被寫回（`idle` 這種不是對話的列不算新內容）
 
 #### Scenario: fork v2 的 Session
 - **WHEN** `agora continue session <id> --agent opencode --fork`
@@ -37,13 +42,13 @@ adapter MUST 自己認出 opencode 的匯出格式：v2 是扁平（`messages[]`
 - **THEN** 呼叫帶明確的 server 上下文（`--standalone` 或 `--server`）：不會轉去尋找或啟動 managed 背景服務（例如預設埠 49374 的共用服務）
 
 ### Requirement: 舊版 opencode raw 的同 agent 接續
-Store 裡在 opencode 2.x 之前匯入的 Session，raw 是 v1 巢狀格式。用同一個 agent 接續或 fork 這種 Session 時，agora MUST 在開 agent 之前以明確的訊息拒絕（exit 非 0），訊息 MUST 說明重新匯入的方法（`agora import session --external-session-id <agent session id> --agent opencode`，來源還在時原地更新）；MUST NOT 把 v1 的 payload 送給 v2 的 `session import`（那會留下半個 Session）。
+Store 裡在 opencode 2.x 之前匯入的 Session，raw 是 v1 巢狀格式。用同一個 agent 接續或 fork 這種 Session 時，agora MUST 在開 agent 之前以明確的訊息拒絕（exit 非 0），訊息 MUST 誠實說明：重新匯入的指令（`agora import session --external-session-id <agent session id> --agent opencode`）、重新匯入不一定原地更新（被 merge／continue 分支過的 Session 會另存）、以及來源不在本機時只能改用跨 agent 接續。MUST NOT 把 v1 的 payload 送給 v2 的 `session import`（那會留下半個 Session）。
 
 跨 agent 接續舊 raw MUST 照常（閱讀版轉換後重建，本來就重寫）；被拒絕時原本的 Session 與它的 raw MUST NOT 被改動。
 
 #### Scenario: 舊格式的 raw 用同一個 agent 接續
 - **WHEN** 對一個 opencode 1.x 時代匯入的 Session（store 裡的 raw 是 v1 巢狀）執行 `agora continue session <id> --agent opencode`
-- **THEN** 不開 agent，exit 非 0，訊息說明要重新匯入那個 Session；原 Session 與 raw 都不變
+- **THEN** 不開 agent，exit 非 0；訊息說明重新匯入的指令、它不一定原地更新、以及來源不在本機時只能跨 agent 接續；原 Session 與 raw 都不變
 
 #### Scenario: 舊格式的 raw 跨 agent 接續
 - **WHEN** 同上，但 `--agent claude`
