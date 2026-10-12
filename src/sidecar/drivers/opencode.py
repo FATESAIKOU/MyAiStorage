@@ -89,6 +89,7 @@ class OpenCodeHandle:
     quota: DriverState | None = None
     stopped: bool = False
     sending: int = 0  # background POST /message rounds in flight (M2/A/B)
+    abort_epoch: int = 0  # interrupt/stop bump this; rounds carry a snapshot (C)
     last_error: str | None = None  # the last round failure, masked (M2)
     expected_provider: str | None = None  # what env_for told opencode to use
     expected_model: str | None = None
@@ -209,12 +210,13 @@ class OpenCodeDriver:
             if session_id is None:
                 raise OpenCodeDriverError("no opencode session id to send to")
             handle.sending += 1
+            epoch = handle.abort_epoch  # this round's snapshot (C)
             if handle.quota is None:
                 handle.state = DriverState(kind=DRIVER_RUNNING)
         body = {"parts": [{"type": "text", "text": text}]}
         thread = threading.Thread(
             target=self._send_round,
-            args=(handle, session_id, body),
+            args=(handle, session_id, body, epoch),
             daemon=True,
         )
         thread.start()
@@ -227,6 +229,7 @@ class OpenCodeDriver:
         self._request(handle, "POST", f"/session/{session_id}/abort", body={})
         with handle.lock:
             handle.sending = 0  # every aborted round is over
+            handle.abort_epoch += 1  # their late errors must not exit us (C)
             if handle.quota is None:
                 handle.state = DriverState(kind=DRIVER_IDLE)
 
@@ -259,6 +262,7 @@ class OpenCodeDriver:
         with handle.lock:
             handle.stopped = True
             handle.sending = 0
+            handle.abort_epoch += 1  # in-flight rounds are stale from here (C)
         if graceful:
             code = terminate_process(handle.proc, timeout=timeout)
         else:
@@ -310,7 +314,9 @@ class OpenCodeDriver:
             raise OpenCodeDriverError("opencode did not answer a session id")
         return session_id
 
-    def _send_round(self, handle: OpenCodeHandle, session_id: str, body: dict[str, Any]) -> None:
+    def _send_round(
+        self, handle: OpenCodeHandle, session_id: str, body: dict[str, Any], epoch: int
+    ) -> None:
         failure: OpenCodeDriverError | None = None
         try:
             try:
@@ -342,29 +348,39 @@ class OpenCodeDriver:
         finally:
             # Both exits go through here, so the agent never keeps looking
             # running after its background round is over (A).
-            self._finish_round(handle, failure)
+            self._finish_round(handle, failure, epoch)
 
     def _finish_round(
-        self, handle: OpenCodeHandle, failure: OpenCodeDriverError | None
+        self, handle: OpenCodeHandle, failure: OpenCodeDriverError | None, epoch: int
     ) -> None:
         """The round is over either way: clear `sending` and apply the outcome."""
         if failure is not None:
-            self._fail_round(handle, failure)
+            self._fail_round(handle, failure, epoch)
             return
         with handle.lock:
+            if epoch != handle.abort_epoch or handle.stopped:
+                return  # reaped by interrupt/stop already; not ours to count (C)
             handle.sending = max(0, handle.sending - 1)  # this round is over
             if handle.sending == 0 and handle.quota is None:
                 handle.state = DriverState(kind=DRIVER_IDLE)
 
-    def _fail_round(self, handle: OpenCodeHandle, error: OpenCodeDriverError) -> None:
+    def _fail_round(
+        self, handle: OpenCodeHandle, error: OpenCodeDriverError, epoch: int
+    ) -> None:
         """A failed round is visible in the state, not just a log line (M2).
 
         The reason lands in `exit.reason` (via DriverState) and in
         `last_error`; the message is masked, never carrying the key.
+        A round that interrupt aborted, or that lands after the stop (C),
+        only records `last_error`: the agent itself is still alive.
         """
         message = mask_secrets(str(error), handle.secrets)
         logger.warning("opencode: sending a message failed: %s", message)
         with handle.lock:
+            if epoch != handle.abort_epoch or handle.stopped:
+                if handle.quota is None:
+                    handle.last_error = message
+                return
             handle.sending = max(0, handle.sending - 1)  # this round is over
             if handle.quota is not None:
                 return  # the quota state already explains the round

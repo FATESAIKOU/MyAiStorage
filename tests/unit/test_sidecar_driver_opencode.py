@@ -535,6 +535,40 @@ def test_two_interleaved_rounds_stay_running_until_the_last_one(
     driver.stop(handle, graceful=False, timeout=5)
 
 
+def test_aborted_round_error_does_not_exit_the_agent(
+    driver, serve, tmp_path, monkeypatch
+):
+    """C (section-3 review): the round interrupt aborted ends as a recorded
+    error, not an exited agent - even though it comes back with info.error."""
+    proc, port = serve()
+    handle = driver.launch(
+        RunningSession("agora:A", AgoraProcess(proc=proc, port=port, agent_session_id="ses_A")),
+        {}, str(tmp_path),
+    )
+    real_request = driver._request
+    message_started = threading.Event()
+    message_release = threading.Event()
+
+    def gated_request(h, method, path, *, body=None, timeout=None):
+        if path.endswith("/message"):
+            message_started.set()
+            message_release.wait(10)
+            return {"info": {"error": "aborted by user"}}
+        return real_request(h, method, path, body=body, timeout=timeout)
+
+    monkeypatch.setattr(driver, "_request", gated_request)
+    driver.send(handle, "a long round")
+    assert message_started.wait(2)
+
+    driver.interrupt(handle)
+    message_release.set()  # the aborted round now comes back with info.error
+
+    wait_until(lambda: handle.last_error is not None and "aborted by user" in handle.last_error)
+    assert driver.state(handle).kind == DRIVER_IDLE
+    assert handle.sending == 0
+    driver.stop(handle, graceful=False, timeout=5)
+
+
 # --- new mode ------------------------------------------------------------------
 
 
