@@ -223,6 +223,49 @@ def test_claude_headless_reads_the_callers_stdin(claude_lab, capsys, tmp_path, m
     assert received.strip() == message
 
 
+def test_sigterm_in_the_window_before_popen_is_forwarded_not_unbound(
+    claude_lab, capsys, tmp_path, monkeypatch
+):
+    """L3: SIGTERM after the handler is installed but before Popen returns.
+
+    The old handler read `proc` before it existed (UnboundLocalError, no
+    write-back, no 0).  The probe patches Popen to raise the signal in exactly
+    that window - guarded to fire only while agora's own handler is installed -
+    and agora must remember it, forward it to the fresh child, and still end 0.
+    """
+    a = _import_claude(capsys)
+    monkeypatch.setenv("FAKE_AGENT_SCRIPT", f"wait-file:{tmp_path / 'never-created'}")
+
+    real_popen = subprocess.Popen
+    sent = {"done": False}
+
+    class EarlyTermPopen:
+        def __init__(self, *args, **kwargs):
+            handler = signal.getsignal(signal.SIGTERM)
+            if not sent["done"] and getattr(handler, "__name__", "") == "_forward_term":
+                sent["done"] = True
+                os.kill(os.getpid(), signal.SIGTERM)  # the race window: proc is None
+            self._proc = real_popen(*args, **kwargs)
+
+        def __enter__(self):
+            self._proc.__enter__()
+            return self._proc
+
+        def __exit__(self, *exc):
+            return self._proc.__exit__(*exc)
+
+        def __getattr__(self, name):
+            return getattr(self._proc, name)
+
+    monkeypatch.setattr(cli.subprocess, "Popen", EarlyTermPopen)
+    code = cli.main(["continue", "session", a, "--agent", "claude",
+                     "--dir", str(claude_lab["work"]), "--headless",
+                     "--sync-period", SECONDS])
+
+    assert sent["done"], "the probe never hit the window; it proved nothing"
+    assert code == 0, capsys.readouterr().err
+
+
 def test_headless_fork_prints_the_new_id_and_adds_tags(claude_lab, capsys, tmp_path, monkeypatch):
     a = _import_claude(capsys, "--header", "tags=[ui, tui]")
     monkeypatch.setenv("FAKE_AGENT_SCRIPT", "append:ZZHF 一句,exit")

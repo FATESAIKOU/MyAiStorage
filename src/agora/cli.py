@@ -1433,17 +1433,28 @@ def cmd_continue(args, paths: store.Paths) -> int:
     # lives even if agora itself is killed (C1).
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
     previous_term = None
+    proc = None
+    term_pending = False
+
+    def _term_child(child) -> None:
+        if child.poll() is None:
+            try:
+                child.send_signal(signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+
     if headless:
         # Gentle stop (design D6): SIGTERM forwards to the agent, then this
         # process keeps waiting for it, writes the last conversation back,
         # releases the lock and leaves 0. A default SIGTERM would kill agora
-        # before any of that.
+        # before any of that. A SIGTERM that lands before Popen returns has no
+        # child to forward to yet: remember it and send it right after (L3).
         def _forward_term(signum, frame):
-            if proc.poll() is None:
-                try:
-                    proc.send_signal(signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    pass
+            nonlocal term_pending
+            if proc is None:
+                term_pending = True
+                return
+            _term_child(proc)
 
         previous_term = signal.signal(signal.SIGTERM, _forward_term)
     try:
@@ -1451,6 +1462,10 @@ def cmd_continue(args, paths: store.Paths) -> int:
         proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env={**os.environ, "PWD": launch.cwd},
                                 pass_fds=(lock.fileno(),),
                                 preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+        if term_pending:
+            # The SIGTERM arrived while Popen had not returned yet; pass it on.
+            term_pending = False
+            _term_child(proc)
         if interval is None:
             proc.wait()           # --sync-period 0: just wait, only the final write-back
             said_writing = False
