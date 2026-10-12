@@ -24,7 +24,7 @@
 ## 4. 測試與收尾
 
 - [x] 4.1 spec 每個 Scenario 的單元測試（假後端／假註冊端；workflow 腳本的重建、同名、取消後重建用可注入的檔案 API 測）
-- [ ] 4.2 每項在副本改壞確認會紅；完整 unit 綠
+- [x] 4.2 每項在副本改壞確認會紅；完整 unit 綠（記錄：`docs/review/angareion-v5-mutation-checks.md`）
 - [ ] 4.3 非作者審查後開 PR
 - [ ] 4.4 `angareion-v5` push 後開 PR：以 `angareion-v0` 為 base 堆疊（#41 已用 merge commit `95a7641` 合併、branch 保留）
 
