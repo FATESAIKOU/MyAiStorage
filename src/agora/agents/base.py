@@ -108,8 +108,16 @@ class Agent(Protocol):
         Leaves no session behind: deletes only the one session this run made (design 5.3).
         """
 
-    def start_native(self, raw: bytes, workdir: Path) -> Launch:
-        """Load raw (this agent's format) as a brand-new session and return how to open it."""
+    def start_native(self, raw: bytes, workdir: Path, *, headless: bool = False,
+                     headless_port: int | None = None) -> Launch:
+        """Load raw (this agent's format) as a brand-new session and return how to open it.
+
+        `headless` (sidecar's `agora continue --headless`) asks for the agent's
+        programmatic mode instead of the TUI (design D6): claude speaks
+        stream-json on stdio, opencode listens on `headless_port` after
+        `opencode serve`. The caller owns stdio and the port; agora stays off
+        stdout while the agent runs.
+        """
 
     def collect(self, launch: Launch) -> Exported | None:
         """After the agent exits, read the session it used; None if nothing new was said."""
