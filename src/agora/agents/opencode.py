@@ -472,6 +472,46 @@ def _payload_messages(payload: object) -> list[dict]:
     return payload["messages"]
 
 
+def _payload_format(payload: object) -> str:
+    """Which opencode wrote this export: "v2" (flat rows) or "v1" (nested).
+
+    v2 flattened the rows - `{…, type: "user"|"assistant"|"idle"}`, the assistant's
+    content in `content` - and stopped writing `directory`/`version`, so the shape
+    of the payload is the fact, not the version of the CLI that is installed now
+    (the store still holds raws from earlier versions).
+
+    Every row has to agree (review L1): one v1 row appended to a v2 export by an
+    older `append_native` is a broken payload, and calling it v2 would import it
+    as one. An empty message list falls back to `info`, and a payload that is
+    neither is an error with a reason, never an empty reading version.
+    """
+    messages = _payload_messages(payload)
+    seen: set[str] = set()
+    for position, message in enumerate(messages):
+        if not isinstance(message, dict):
+            raise AgentError(f"opencode 的匯出檔第 {position} 則訊息不是物件")
+        has_type = isinstance(message.get("type"), str)
+        has_info = isinstance(message.get("info"), dict)
+        if has_type and not has_info:
+            seen.add("v2")
+        elif has_info and not has_type:
+            seen.add("v1")
+        else:
+            raise AgentError(f"opencode 的匯出檔第 {position} 則訊息認不出形狀"
+                             "（要嘛有 type，要嘛有 info）")
+    if len(seen) == 1:
+        return seen.pop()
+    if seen:
+        raise AgentError("opencode 的匯出檔每一列的形狀不一致（v1 與 v2 混在一起）")
+    info = payload.get("info") if isinstance(payload, dict) else None
+    info = info if isinstance(info, dict) else {}
+    if isinstance(info.get("location"), dict):
+        return "v2"
+    if isinstance(info.get("directory"), str) or isinstance(info.get("slug"), str):
+        return "v1"
+    raise AgentError("opencode 的匯出檔認不出格式（沒有 location，也沒有 directory／slug）")
+
+
 def _last_model(payload: dict) -> str | None:
     """The model the session used most recently.
 
