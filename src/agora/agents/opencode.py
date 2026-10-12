@@ -127,11 +127,22 @@ _LIST_SQL = "select id, directory, title, time_updated from {table} order by tim
 #: How many of the newest messages to look at for a preview. Reading the whole
 #: transcript to show its last line is what T15 rules out.
 _LAST_SQL = "select id, data from message where session_id=? order by time_created desc, id desc limit ?"
+_LAST_V2_SQL = "select type, data from session_message where session_id=? order by time_created desc, seq desc limit ?"
 _LAST_SCAN = 20
 _PARTS_SQL = "select data from part where message_id=? order by time_created, id"
 _PREVIEW_CHARS = 2000
+#: Message tables, newest store format first. The v2 `session_message` row says
+#: what a turn was in its `type` column and holds the whole turn (the words
+#: included) in `data`; v1 says both across `message` (role in its data) and
+#: the `part` rows carrying the words. A session the migration did not finish
+#: converting is stored in the v1 tables alone and never stops being previewed
+#: or searched because of it.
+_PREVIEW_TABLES = ("session_message", "message")
+_SEARCH_TABLES = ("session_message", "part")
 _SEARCH_LIKE_SQL = "select session_id, data from part where data like ? escape '\\'"
 _SEARCH_ALL_SQL = "select session_id, data from part"
+_SEARCH_LIKE_SQL_V2 = "select session_id, type, data from session_message where data like ? escape '\\'"
+_SEARCH_ALL_SQL_V2 = "select session_id, type, data from session_message"
 
 _warned_schema = False
 _list_cache: tuple[tuple, list[Listed]] | None = None
@@ -522,6 +533,40 @@ def _said(blob: str) -> str | None:
         return None
     text = _field(blob, "text")
     return text.strip() if isinstance(text, str) and text.strip() else None
+
+
+def _v2_texts(row_type: object, blob: str) -> list[str]:
+    """The strings a `session_message` row said, for preview and search.
+
+    v2 folds one turn - not one utterance - into `data`: a user row is one
+    `text` (the conversation's first message arrives JSON-encoded, exactly as
+    in the reading version, and `files` are whatever was attached, not said);
+    an assistant row lists `content`, of which only `text` items are words -
+    a tool call's input and output, reasoning and steps are not conversation.
+    `idle`, `system` (the migration's own note) and the attachment rows the
+    migration writes (`synthetic`) say nothing either. One turn can carry
+    several text items; the preview joins them the way v1 joined its parts.
+    """
+    def item_text(item: object) -> str | None:
+        if not isinstance(item, dict) or item.get("type") != "text":
+            return None
+        text = item.get("text")
+        return text.strip() if isinstance(text, str) and text.strip() else None
+
+    try:
+        data = json.loads(blob)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if row_type == "user":
+        text = data.get("text") if isinstance(data, dict) else None
+        decoded = _user_text(text) if isinstance(text, str) else None
+        return [decoded] if isinstance(decoded, str) and decoded.strip() else []
+    if row_type == "assistant":
+        content = data.get("content") if isinstance(data, dict) else None
+        items = [text for item in (content if isinstance(content, list) else [])
+                 if (text := item_text(item))]
+        return ["\n\n".join(items)] if items else []
+    return []
 
 
 def _payload_messages(payload: object) -> list[dict]:
@@ -1046,12 +1091,13 @@ class OpencodeAgent:
         Case-insensitive and compared after NFKC, across every project, read-only,
         and streamed: the caller runs this in a thread and puts each id on screen as
         it arrives, so the first match must not wait for the whole store. Hence the
-        two passes - `part.data LIKE %keyword%` is cheap and hands over the common
-        case in milliseconds, then a full scan checks what LIKE cannot see (LIKE
-        folds ASCII case only, and normalises nothing, so full-width "Ｈｅｌｌｏ"
-        must still match "hello"). Python decides every match; SQL only chooses
-        what to look at. Nothing is exported - that would read whole transcripts to
-        answer a question about text.
+        two passes - `data LIKE %keyword%` is cheap and hands over the common case
+        in milliseconds, then a full scan checks what LIKE cannot see (LIKE folds
+        ASCII case only, and normalises nothing, so full-width "Ｈｅｌｌｏ" must
+        still match "hello"). Both formats' message tables are scanned, cheapest
+        pass of each first. Python decides every match; SQL only chooses what to
+        look at. Nothing is exported - that would read whole transcripts to answer
+        a question about text.
         """
         keyword = keyword.strip()
         wanted = normalize(keyword)
@@ -1061,13 +1107,33 @@ class OpencodeAgent:
         with _db() as connection:
             if connection is None:
                 return
-            passes = ((_SEARCH_LIKE_SQL, (_like_pattern(keyword),)), (_SEARCH_ALL_SQL, ()))
-            for statement, arguments in passes:
-                for session_id, blob in connection.execute(statement, arguments):
+            tables = _tables(connection, _SEARCH_TABLES, ("session_id", "data"))
+
+            def v2_texts(row: tuple) -> list[str]:
+                return _v2_texts(row[1], row[2])
+
+            def v1_texts(row: tuple) -> list[str]:
+                text = _said(row[1])
+                return [text] if text else []
+
+            statements = []
+            if "session_message" in tables:
+                statements.append((_SEARCH_LIKE_SQL_V2, (_like_pattern(keyword),), v2_texts))
+            if "part" in tables:
+                statements.append((_SEARCH_LIKE_SQL, (_like_pattern(keyword),), v1_texts))
+            if not statements:
+                _warn_schema()
+                return
+            if "session_message" in tables:
+                statements.append((_SEARCH_ALL_SQL_V2, (), v2_texts))
+            if "part" in tables:
+                statements.append((_SEARCH_ALL_SQL, (), v1_texts))
+            for statement, arguments, texts_of in statements:
+                for row in connection.execute(statement, arguments):
+                    session_id = row[0]
                     if session_id in seen or (only is not None and session_id not in only):
                         continue
-                    text = _said(blob)
-                    if text is not None and wanted in normalize(text):
+                    if any(wanted in normalize(text) for text in texts_of(row)):
                         seen.add(session_id)
                         yield session_id
 
@@ -1075,22 +1141,37 @@ class OpencodeAgent:
         """(role, text) of the newest plain-text turn, as stored; None if there is none.
 
         Reads the last few messages only, and caps the text at 2,000 characters -
-        the preview pane shows one turn, not a transcript. `synthetic` parts are
-        skipped: they are attachments, not something the session said.
+        the preview pane shows one turn, not a transcript. Synthetic/attachment
+        parts are skipped: they are attachments, not something the session said,
+        and so is every other row kind v2 keeps (`idle`, the migration's
+        `system` note, a stand-alone `synthetic` attachment row).
+
+        The v2 table is asked first; a session absent from it falls back to the
+        v1 tables - a session the migration never finished converting keeps its
+        preview.
         """
         with _db() as connection:
             if connection is None:
                 return None
-            for message_id, data in connection.execute(_LAST_SQL, (session_id, _LAST_SCAN)):
-                role = _field(data, "role")
-                if role not in ("user", "assistant"):
-                    continue
-                texts = []   # a long reply is several text parts: all of them, in order
-                for (blob,) in connection.execute(_PARTS_SQL, (message_id,)):
-                    if text := _said(blob):
-                        texts.append(text)
-                if texts:
-                    return role, "\n\n".join(texts)[:_PREVIEW_CHARS]
+            tables = _tables(connection, _PREVIEW_TABLES, ("session_id", "data"))
+            if not tables:
+                _warn_schema()
+                return None
+            if "session_message" in tables:
+                for role, blob in connection.execute(_LAST_V2_SQL, (session_id, _LAST_SCAN)):
+                    texts = _v2_texts(role, blob)
+                    if texts:
+                        return role, texts[0][:_PREVIEW_CHARS]
+            if "message" in tables:
+                for message_id, data in connection.execute(_LAST_SQL, (session_id, _LAST_SCAN)):
+                    if _field(data, "role") not in ("user", "assistant"):
+                        continue
+                    texts = []   # a long reply is several text parts: all of them, in order
+                    for (blob,) in connection.execute(_PARTS_SQL, (message_id,)):
+                        if text := _said(blob):
+                            texts.append(text)
+                    if texts:
+                        return _field(data, "role"), "\n\n".join(texts)[:_PREVIEW_CHARS]
         return None
 
     def summarize(self, prompt: str, workdir: Path) -> tuple[str, str | None]:

@@ -1587,6 +1587,14 @@ class _CountingConnection:
         self._statements.append(statement)
         cursor = self._connection.execute(statement, arguments)
         rows = self._rows
+        if statement.startswith("pragma"):
+            # schema introspection, not read of the conversation: `pragma
+            # table_info` inside `_tables` runs during the search too and lists
+            # the columns the store has - not how much of `part` was scanned.
+            def ignored():
+                for row in cursor:
+                    yield row
+            return ignored()
 
         def counted():
             for index, row in enumerate(cursor, 1):
