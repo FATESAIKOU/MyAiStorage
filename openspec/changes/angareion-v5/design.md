@@ -75,7 +75,7 @@ v0（`openspec/specs/angareion/spec.md`）的介面帶著 GitHub 的形狀：`ch
   ```
 
   `type` 目前只有 `github`（未知 type＝設定錯誤，exit 2）；更新走 PR（AiStorage PM 審查＋merge，d 等級；頻率約每個 a/b 專案一次）。
-- **格式細節**：UTF-8、2 格縮排、key 排序、檔尾換行（diff 整齊）；workflow 寫入時保留未知欄位，只動自己那一筆。
+- **格式細節**：UTF-8、2 格縮排、key 排序、檔尾換行（diff 整齊）；workflow 是重建成最終對應後整檔寫回（不保留人工增修），`version` 等頂層欄位保留（複審 c）。
 
 ### 9. workflow 的規則：重建、輸入、回報（定案；複審 H1／H2 調整）
 - **觸發與重建**：workflow 在註冊簿 issue 的 `issue_comment` 上觸發（觸發層 MUST 擋 Bot，§10），另加 `schedule`（每天一次）當保險；每次 run 用 `GET /repos/{owner}/{repo}/issues/{n}/comments?per_page=100` 讀整串留言（MUST 翻完所有頁）、依時間序套用（重建）成最終對應，寫回 main 的 `channels.json`；結果與 main 相同就不 commit。重建是冪等的——手動重跑（`workflow_dispatch`）安全；被取消的 run 不遺失（下一段）。
@@ -90,10 +90,10 @@ v0（`openspec/specs/angareion/spec.md`）的介面帶著 GitHub 的形狀：`ch
 
 ### 10. 註冊簿 issue、觸發與 token 權限（定案；複審 H1／M2／M3／L1／L2 調整）
 - **註冊簿 issue**：MyAiStorage 上一張**長期存在**（不關閉）的 issue，label 定為 `層級:d`＋`狀態:進行中`（d 不佔 b／c 的同時進行額度；有 label 不會被列「樹外」——與「工單做完 completed 關閉」的慣例不同，見 Risks）。它是 channel 對應的請求入口：`channel create`／`channel delete` 各在上面留一則留言（格式見 §9），留言公開可稽核；置頂留言寫明格式與規則。
-- **觸發**：workflow `on: issue_comment`（限這張 issue，`workflow_dispatch` 可手動重跑），觸發層 MUST 用 `if` 擋掉 Bot（`github.event.comment.user.type != 'Bot'`，或明確排除 `github-actions[bot]`）——workflow 自己的回報留言因此不會再觸發新的 run（不會空轉）。另加 `schedule`（每天一次）重建當保險（複審 M3）；drain 不需要（重建已涵蓋）。
+- **觸發**：workflow `on: issue_comment`（限這張 issue，`workflow_dispatch` 可手動重跑），觸發層 MUST 用 `if` 擋掉 Bot（`github.event.comment.user.type != 'Bot'`，或明確排除 `github-actions[bot]`）——workflow 自己的回報留言因此不會再觸發新的 run（不會空轉）。守門條件用 `!= 'Bot'`：`schedule` 事件沒有 `comment` 欄位、`null != 'Bot'` 為真會照跑（複審 g）。另加 `schedule`（每天一次）重建當保險（複審 M3）；drain 不需要（重建已涵蓋）。
 - **workflow 的權限（複審 L1）**：`permissions:` MUST 至少 `contents: write`（commit 進 main）與 `issues: write`（在註冊簿回報留言）。
 - **token 權限（定案；複審 M2）**：信道的細粒度 PAT——**Repositories** 勾「各 backend 的 repo」＋`MyAiStorage`；**Permissions**：`Issues: Read and write`（backend repo 的 Issues：讀 issue 與留言＝訊息；MyAiStorage 只用來在註冊簿 issue 留言）。不需要 Actions／Contents 等其他權限。MyAiStorage 的 clone／fetch 走**匿名 HTTPS**（public repo、不用這把 token，§11）；workflow 推送 main 用的是 repo 自己的 `GITHUB_TOKEN`，與信道 token 無關。
-- **授權（定案）**：MyAiStorage 是 public（任何人都能留言），workflow MUST 只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言；其他留言 MUST 忽略（不採計、不影響重建，也**不回報**——不回報就不會產生新留言）。重建腳本 MUST 再驗一次（觸發層的 `if` 只擋 Bot，授權仍由腳本驗——手動重跑與日後重建都重讀整串）。
+- **授權（定案）**：MyAiStorage 是 public（任何人都能留言），只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言；其他忽略（不採計、不影響重建、也不回報）；重建腳本 MUST 再驗一次（觸發層的 `if` 只擋 Bot）。細節見 §9。
 - **前置（環境）**：MyAiStorage 的 main 要允許 workflow 用 `GITHUB_TOKEN` 直推（分支保護／bypass 名單）；實作前確認一次。
 
 ### 11. 讀取與 pull（定案；審查 M4／L4）
@@ -101,13 +101,13 @@ v0（`openspec/specs/angareion/spec.md`）的介面帶著 GitHub 的形狀：`ch
 - 更新用 `git fetch`、讀檔用 `git show origin/main:<路徑>`——不依賴工作樹（本機改動、detached HEAD 都無妨）；逾時 20 秒、flock 一個鎖檔避免同機並行。**clone 與 fetch 走匿名 HTTPS**（MyAiStorage 是 public、不用 token——複審 M2）。新鮮度＝clone 裡 `FETCH_HEAD` 的 mtime（沒有就視為很久以前）；第一次的 clone 由佈署做（複本不存在＝exit 2）。
 - 每個要用設定檔的指令一開始，若上次 fetch 超過 `config_pull_interval` 就 fetch 一次；`wait` 的輪詢中 MUST NOT fetch。
 - **查無 channel 時（審查 M4）**：忽略 `config_pull_interval`、先 fetch 一次再判斷（距上次 fetch 不到 30 秒就跳過，避免連續操作連發）；`channel create` 送出成功後輪詢 fetch 到對應出現（上限 2 分鐘），逾時印提示但 exit 0。
-- fetch 失敗（離線、權限）→ stderr 警告一次、沿用目前的複本，指令照常（exit code 不因此改變）；複本不存在或 JSON 壞掉才 exit 2。也可以另外用 cron／systemd 拉（無害）。
+- fetch 失敗（離線、網路錯誤）→ stderr 警告一次、沿用目前的複本，指令照常（exit code 不因此改變）；複本不存在或 JSON 壞掉才 exit 2。也可以另外用 cron／systemd 拉（無害）。
 
 ### 12. v0→v5 的歷史訊息
 讀寫都只認新形狀；舊 `{repo,role}` 形狀的留言視為非訊息忽略（與未知版本同理）。切換日前已讀過的不受影響（游標是後端位置）；要回頭看很久以前的人用 `--since` 會看到舊留言被跳過。切換日由各專案第一次設定檔 PR 決定。v0 的「同名標題取最舊」不再適用：解析只認設定檔，沒有對應就是 channel 不存在。
 
 ### 13. 文件改寫點（本 change 不動這兩個檔）
-- `docs/angareion.md`：指令表四個→五個（加 `channel delete` 與 `--backend`；`--member` 字樣全清）；create／delete 的三步與落地時間差（create 送出留言後輪詢 fetch 到出現或用罄 2 分鐘、逾時提示；delete 不等待；查無 channel 先 fetch 一次）；位址寫法整節（agent 名字串、文法、`group=` 拒絕、`to` 選填）；訊息格式範例（`from`／`to` 字串、`to` 可省）；游標檔名規則；設定節（`identity` 字串；`channel_repo` 換成 `config_dir`／`registry_repo`／`registry_issue`／`config_pull_interval`；channels／backends 兩檔、註冊簿 issue 與重建 workflow）；token 節（權限範圍照 §10：各 backend repo＋MyAiStorage 的 `Issues: Read and write`）；smoke test。
+- `docs/angareion.md`：指令表四個→五個（加 `channel delete` 與 `--backend`；`--member` 字樣全清）；create／delete 的三步與落地時間差（create 留言前先驗實體存在且標題等於 channel 名、不符 exit 2；送出留言後輪詢 fetch 到出現或用罄 2 分鐘、逾時提示；delete 不等待；查無 channel 先 fetch 一次）；位址寫法整節（agent 名字串、文法、`group=` 拒絕、`to` 選填）；訊息格式範例（`from`／`to` 字串、`to` 可省）；游標檔名規則；設定節（`identity` 字串；`channel_repo` 換成 `config_dir`／`registry_repo`／`registry_issue`／`config_pull_interval`；channels／backends 兩檔、註冊簿 issue 與重建 workflow）；token 節（權限範圍照 §10：各 backend repo＋MyAiStorage 的 `Issues: Read and write`）；smoke test。
 - `skills/angareion/SKILL.md`：五個指令表；位址寫法（agent 名）；「不給 `--channel`」的定義加廣播；create／delete 的用法與落地時間差；回覆時 `channel`＋`--to` 的寫法。
 
 ## PR #41 與 v5 的 PR（定案 2026-10-12）
@@ -141,6 +141,8 @@ v0（`openspec/specs/angareion/spec.md`）的介面帶著 GitHub 的形狀：`ch
 - [授權降級] → 舊留言的作者若從 `OWNER`／`MEMBER`／`COLLABORATOR` 被降級，下次重建不再採計、對應會消失（複審 H2）：第一期所有留言都是本人帳號，不另外處理。
 - [channels.json 被手改] → 它是重建的輸出（機器產物）：人工改會被下一次重建還原；MUST NOT 手改（§8；複審 L5）。
 - [註冊簿不關閉] → 一張長期 `層級:d`＋`狀態:進行中` 的 issue（d 不佔 b／c 額度；與「工單做完 completed 關閉」的慣例不同、不會被自動關）（§10；複審 L2）。
+- [backend 被移出 `backends.json`] → 它底下的 channel 會在下一次重建被下架（`backend` 名驗不過）、隊員看到「channel 不存在」；移除 backend 的 PR MUST 列出受影響的 channel（`channels.json` 指向它的項目）並一併處理（複審 N1）。
+- [每天的 `schedule` 會重貼回報] → 同一則不合格留言每天被回報一次（一則壞留言≈一年 365 則）：第一期接受，討論串會變長（分頁已處理；複審 b）。
 - [create 不是原子操作] → 第 1 步成功、第 2 步失敗會留一個沒有對應的實體（孤兒）：緩解＝重試 2 次；孤兒不影響操作（解析只認設定檔）、介面不提它，之後可人工清理。
 - [併發的 run 取消] → 新的 run 會取消舊的（`cancel-in-progress`）：因為每次都從整串留言重建，被取消的不遺失任何效果；寫回用 sha 樂觀鎖（§9）。
 - [同名競爭的輸家] → 輸家 `channel create` exit 0、看不到衝突，只有註冊簿上的回報留言看得到結果（重建先到者為準）；不加 `--wait`（審查 M5）。

@@ -37,6 +37,8 @@ workflow MUST `on: issue_comment`（限註冊簿 issue；觸發層 MUST 用 `if`
 
 **寫入**：以 main 的最新版本（sha）為底；被拒 MUST 重讀重試（上限 5 次）。
 
+**workflow 權限（複審 L1）**：`permissions:` MUST 至少 `contents: write`（commit 進 main）與 `issues: write`（在註冊簿回報留言）。
+
 **授權**：workflow MUST 只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言；其他留言 MUST 忽略（不採計、不影響重建、**也不回報**——不回報才不會產生新留言）。防注入與驗證不是授權，照上面執行；不是合法 action 形狀的留言（含 workflow 的回報）MUST 忽略。
 
 **回報**：無法套用或驗證失敗的留言（授權作者）MUST 在註冊簿上用**純文字**回報（引用那則留言；MUST NOT 是可被解析成 action 的一行 JSON——複審 L4）。
