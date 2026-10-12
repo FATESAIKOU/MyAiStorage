@@ -1,7 +1,24 @@
+## ADDED Requirements
+
+### Requirement: 後端可以替換（設定檔指位）
+五個介面 MUST 經由一個後端介面實作，後端也是那幾個動作（建 channel＝開實體、刪 channel＝關實體、送、確認有沒有新訊息、讀）；對外的 `wait` 是在後端「確認有沒有新訊息」上輪詢（不阻塞＝確認一次）。這次的實作是 GitHub API＋Issues：channel 名經 channel 設定檔指到某個 backend 的某個實體（issue；訊息＝留言）。解析 MUST 只認設定檔，MUST NOT 用標題掃描挑實體——同名標題不影響操作。後端 MUST NOT 存成員（第一期 channel 全公開）。換後端時，指令與訊息格式 MUST NOT 改變。
+
+#### Scenario: 用假後端
+- **WHEN** 測試以記憶體裡的假後端執行五個指令
+- **THEN** 行為和用 GitHub 後端時相同，不連網
+
+#### Scenario: 多頁時第 1 頁不變
+- **WHEN** 「寄給我的」的留言列表超過一頁，第 1 頁（都是寄給別人的）內容和上一次一樣，第 2 頁多了一則寄給我的；`wait` 先前已經查過一次
+- **THEN** `angareion wait --timeout 0` exit 0（不因第 1 頁的 304 而回報沒有新訊息）
+
+#### Scenario: 同名標題不影響對應
+- **WHEN** 後端裡有兩個標題相同的實體（編號 3 與編號 7），channel 設定檔把名字指到編號 7
+- **THEN** 訊息送到編號 7，不會因為「編號 3 比較舊」改送編號 3
+
 ## MODIFIED Requirements
 
-### Requirement: 四個介面
-Angareion 對外 MUST 只有四個介面：建 channel、送訊息、確認有沒有新訊息、讀訊息；指令分別是 `angareion channel create`、`angareion send`、`angareion wait`、`angareion read`（`channel create` 是否保留待本人確認，在那之前維持現狀；見 design 的 Open Questions）。MUST NOT 有 ack、已讀回條或限流。channel 名 MUST 是英文名（非空的 ASCII 字母、數字、`-`、`_`）；介面（參數、stdout、stderr、錯誤訊息）MUST NOT 出現 GitHub repo／issue 的概念。第一期 channel 對所有隊員公開，沒有成員設定：`channel create` MUST NOT 收 `--member`。`send` 的 `--channel` 必填、`--to` 選填（不給＝發到整個 channel）。
+### Requirement: 五個介面
+Angareion 對外 MUST 只有五個介面：建 channel、刪 channel、送訊息、確認有沒有新訊息、讀訊息；指令分別是 `angareion channel create`、`angareion channel delete`、`angareion send`、`angareion wait`、`angareion read`。MUST NOT 有 ack、已讀回條或限流。channel 名 MUST 是英文名（非空的 ASCII 字母、數字、`-`、`_`）；介面（參數、stdout、stderr、錯誤訊息）MUST NOT 出現 GitHub repo／issue 的概念。第一期 channel 對所有隊員公開，沒有成員設定：`channel create` MUST NOT 收 `--member`。`send` 的 `--channel` 必填、`--to` 選填（不給＝發到整個 channel）。`channel create` 與 `channel delete` 的 stdout MUST 只印 channel 名；兩者 MUST NOT 等對應落地（送出註冊／註銷請求成功即 exit 0；落地見 `angareion/channel-config`）。
 
 #### Scenario: 送出並讀到
 - **WHEN** A 對 channel X 送一則 `to` 是 B 的訊息，B 執行 `angareion read`
@@ -12,12 +29,20 @@ Angareion 對外 MUST 只有四個介面：建 channel、送訊息、確認有�
 - **THEN** 送出成功（stdout 印訊息 id）；X 的任何成員 `read --channel X` 都讀得到它
 
 #### Scenario: 建 channel
-- **WHEN** `angareion channel create X`（不帶 `--member`）
-- **THEN** stdout 只印 channel 名，exit 0；之後對 channel X 送訊息成功；沒有給名稱時 exit 1
+- **WHEN** `angareion channel create X`（不帶 `--member`；後端與本體都可用）
+- **THEN** 後端出現 X 的實體、本體收到 X 的註冊請求；stdout 只印 `X`，exit 0；沒有給名稱時 exit 1
+
+#### Scenario: 刪 channel
+- **WHEN** `angareion channel delete X`（X 在設定檔裡有對應）
+- **THEN** 後端實體被關掉（不刪除）、本體收到 X 的註銷請求；stdout 只印 `X`，exit 0；X 不在設定檔裡時 exit 1
 
 #### Scenario: 建 channel 不再收成員
 - **WHEN** `angareion channel create X --member <位址>`
 - **THEN** exit 1（未知參數）；什麼都沒建
+
+#### Scenario: 建 channel 名已存在
+- **WHEN** channel 設定檔已經有 `X`，執行 `angareion channel create X`
+- **THEN** exit 1，stderr 說明 channel 已存在；什麼都沒建
 
 #### Scenario: channel 名不是英文名
 - **WHEN** `angareion channel create 小明` 或 `angareion send --channel 小明 …`
@@ -101,30 +126,11 @@ Angareion 對外 MUST 只有四個介面：建 channel、送訊息、確認有�
 - **THEN** 送出的內文是 `hi`，stdout 印訊息 id
 
 #### Scenario: 不存在的 channel
-- **WHEN** 對 channel 設定檔裡沒有的 channel 做 `send`、`read` 或 `wait`
-- **THEN** exit 1，stderr 說明 channel 不存在；什麼都沒送
-
-### Requirement: 後端可以替換
-四個介面 MUST 經由一個後端介面實作，後端也是那四個動作（建 channel、送、確認有沒有新訊息、讀）；對外的 `wait` 是在後端「確認有沒有新訊息」上輪詢（不阻塞＝確認一次）；這次的實作是 GitHub API＋Issues（channel 名經 channel 設定檔對應到 backend 實體：哪個 backend 的哪個 issue；訊息＝留言）。後端 MUST NOT 存成員（第一期 channel 全公開）。換後端時，指令與訊息格式 MUST NOT 改變。
-
-#### Scenario: 用假後端
-- **WHEN** 測試以記憶體裡的假後端執行四個指令
-- **THEN** 行為和用 GitHub 後端時相同，不連網
-
-#### Scenario: 同名 channel 以最舊的為準
-- **WHEN** 信道裡有兩個標題相同的 issue（較舊的編號 3、較新的編號 7），`angareion send --channel <名稱>`
-- **THEN** 訊息送到編號 3 的那個
-
-#### Scenario: 建立時發現更舊的同名
-- **WHEN** `angareion channel create X` 在建立之後再查，發現出現了比自己剛建的更舊的同名 issue
-- **THEN** 回傳（並印出）更舊的那個的編號，之後的訊息都送到那個
-
-#### Scenario: 多頁時第 1 頁不變
-- **WHEN** 「寄給我的」的留言列表超過一頁，第 1 頁（都是寄給別人的）內容和上一次一樣，第 2 頁多了一則寄給我的；`wait` 先前已經查過一次
-- **THEN** `angareion wait --timeout 0` exit 0（不因第 1 頁的 304 而回報沒有新訊息）
+- **WHEN** 對 channel 設定檔裡沒有的 channel 做 `send`、`read`、`wait` 或 `channel delete`
+- **THEN** exit 1，stderr 說明 channel 不存在；什麼都沒送、什麼都沒改
 
 ### Requirement: token 的位置與讀法
-token 檔的位置 MUST 能由 `ANGAREION_TOKEN_FILE` 指定（優先於其他來源）；沒有設定時用設定檔的 `token_file` 或預設位置（實作細節，見 design D5）。檔案 MUST 只有擁有者有權限（0400 或 0600），否則 MUST 拒絕（exit 2）。token MUST NOT 出現在任何輸出、log、錯誤訊息或訊息內容裡。
+token 檔的位置 MUST 能由 `ANGAREION_TOKEN_FILE` 指定（優先於其他來源）；沒有設定時用設定檔的 `token_file` 或預設位置（實作細節，見 design）。檔案 MUST 只有擁有者有權限（0400 或 0600），否則 MUST 拒絕（exit 2）。token MUST NOT 出現在任何輸出、log、錯誤訊息或訊息內容裡。token 的權限範圍（哪些 repo 的 Issues，含註冊請求用到的 repo）依 design §10 的裁定；檔案的位置與權限規則不變。
 
 #### Scenario: 權限太寬
 - **WHEN** token 檔的權限是 0644
@@ -135,7 +141,7 @@ token 檔的位置 MUST 能由 `ANGAREION_TOKEN_FILE` 指定（優先於其他�
 - **THEN** 正常讀取
 
 ### Requirement: 輸出與結束碼
-stdout MUST 只放結果（`send` 印訊息 id，`read` 印訊息或 `--json`），說明與錯誤放 stderr。結束碼：0 成功；1 用法或輸入錯誤；2 後端、網路或設定錯誤；3 `wait` 逾時沒有新訊息。
+stdout MUST 只放結果（`channel create`／`channel delete` 印 channel 名，`send` 印訊息 id，`read` 印訊息或 `--json`），說明與錯誤放 stderr。結束碼：0 成功；1 用法或輸入錯誤；2 後端、網路或設定錯誤；3 `wait` 逾時沒有新訊息。
 
 #### Scenario: 設定缺少
 - **WHEN** 沒有設定檔（或缺 channel／backend 設定檔）就執行 `angareion send`
@@ -153,9 +159,22 @@ stdout MUST 只放結果（`send` 印訊息 id，`read` 印訊息或 `--json`）
 - **WHEN** 後端回 HTTP 200，但本文不是 JSON（例如 proxy 的登入頁）
 - **THEN** exit 2（後端錯誤），不是 exit 1；輸出裡沒有 token
 
+#### Scenario: 送註冊失敗
+- **WHEN** `channel create X` 的第 2 步（送註冊）重試後仍失敗
+- **THEN** exit 2，stderr 說明 channel 沒有建立成功；後端可能留著沒有對應的實體，但介面不提它
+
 ### Requirement: 給 agent 的說明
-repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：四個指令的用法、身分、閒著時用 `angareion wait` 阻塞地等、收到高 urgency 訊息的處理。說明 MUST NOT 含任何秘密或私人資訊。
+repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：五個指令的用法（含 `channel create`／`channel delete` 與落地有時間差）、身分、閒著時用 `angareion wait` 阻塞地等、收到高 urgency 訊息的處理。說明 MUST NOT 含任何秘密或私人資訊。
 
 #### Scenario: agent 照說明收信
 - **WHEN** 一個讀了說明的 agent 手上沒事
 - **THEN** 它執行 `angareion wait --timeout <秒>`，而不是反覆呼叫模型查信
+
+## REMOVED Requirements
+
+### Requirement: 後端可以替換
+
+## RENAMED Requirements
+
+- FROM: `### Requirement: 四個介面`
+- TO: `### Requirement: 五個介面`
