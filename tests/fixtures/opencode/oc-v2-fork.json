@@ -1,0 +1,265 @@
+{
+  "info": {
+    "id": "ses_ZZV2FORK000000000000000AA",
+    "fork": {
+      "sessionID": "ses_ZZV2BASIC00000000000000AA",
+      "boundary": {
+        "type": "through",
+        "messageID": "msg_ZZV2BASIC0000000000006"
+      }
+    },
+    "projectID": "0123456789abcdef0123456789abcdef01234567",
+    "model": {
+      "id": "fake-model",
+      "providerID": "fakeup",
+      "variant": "default"
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "reasoning": 0,
+      "cache": {
+        "read": 0,
+        "write": 0
+      }
+    },
+    "outcome": "succeeded",
+    "time": {
+      "created": 1790214000000,
+      "updated": 1790214000001,
+      "idle": 1790214000002
+    },
+    "title": "oc-v2 fixture (fork #1)",
+    "location": {
+      "directory": "/tmp/agora-it-opencode/proj"
+    }
+  },
+  "messages": [
+    {
+      "id": "msg_ZZV2FORK00000000000000",
+      "time": {
+        "created": 1790214000000
+      },
+      "text": "\"先讀 fake-note.txt 再回答。\"",
+      "files": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_ZZV2FORK00000000000001",
+      "time": {
+        "created": 1790214000001,
+        "streamed": 1790214000001,
+        "completed": 1790214000001
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "fake-model",
+        "providerID": "fakeup",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "tool",
+          "id": "call_ZZV2FORK0000000000000000",
+          "name": "read",
+          "executed": false,
+          "state": {
+            "status": "completed",
+            "input": {
+              "path": "fake-note.txt"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Read file fake-note.txt, lines 1-1\n1: fake-note.txt: ZZNOTE 這是一張紙條。"
+              }
+            ],
+            "metadata": {
+              "truncated": false
+            }
+          },
+          "time": {
+            "created": 1790214000001,
+            "ran": 1790214000001,
+            "completed": 1790214000001
+          }
+        }
+      ],
+      "snapshot": {
+        "start": "0123456789abcdef0123456789abcdef01234567",
+        "end": "0123456789abcdef0123456789abcdef01234567",
+        "files": []
+      },
+      "finish": "tool-calls",
+      "rawFinish": "tool_calls",
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_ZZV2FORK00000000000002",
+      "time": {
+        "created": 1790214000002,
+        "streamed": 1790214000002,
+        "completed": 1790214000002
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "fake-model",
+        "providerID": "fakeup",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "ZZFAKEUP 這是一句話的回答。"
+        }
+      ],
+      "snapshot": {
+        "start": "0123456789abcdef0123456789abcdef01234567",
+        "end": "0123456789abcdef0123456789abcdef01234567",
+        "files": []
+      },
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_ZZV2FORK00000000000003",
+      "time": {
+        "created": 1790214000003
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    },
+    {
+      "id": "msg_ZZV2FORK00000000000004",
+      "time": {
+        "created": 1790214000004
+      },
+      "text": "第二輪：紙條上寫的是什麼顏色？一句話。",
+      "files": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_ZZV2FORK00000000000005",
+      "time": {
+        "created": 1790214000005,
+        "streamed": 1790214000005,
+        "completed": 1790214000005
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "fake-model",
+        "providerID": "fakeup",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "ZZFAKEUP 這是一句話的回答。"
+        }
+      ],
+      "snapshot": {
+        "start": "0123456789abcdef0123456789abcdef01234567",
+        "end": "0123456789abcdef0123456789abcdef01234567",
+        "files": []
+      },
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_ZZV2FORK00000000000006",
+      "time": {
+        "created": 1790214000006
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    },
+    {
+      "id": "msg_ZZV2FORK00000000000007",
+      "time": {
+        "created": 1790214000007
+      },
+      "text": "\"第三輪：fork 之後再問一句。\"",
+      "files": [],
+      "type": "user"
+    },
+    {
+      "id": "msg_ZZV2FORK00000000000008",
+      "time": {
+        "created": 1790214000008,
+        "streamed": 1790214000008,
+        "completed": 1790214000008
+      },
+      "type": "assistant",
+      "agent": "build",
+      "model": {
+        "id": "fake-model",
+        "providerID": "fakeup",
+        "variant": "default"
+      },
+      "content": [
+        {
+          "type": "text",
+          "text": "ZZFAKEUP 這是一句話的回答。"
+        }
+      ],
+      "snapshot": {
+        "start": "0123456789abcdef0123456789abcdef01234567",
+        "end": "0123456789abcdef0123456789abcdef01234567",
+        "files": []
+      },
+      "finish": "stop",
+      "rawFinish": "stop",
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      }
+    },
+    {
+      "id": "msg_ZZV2FORK00000000000009",
+      "time": {
+        "created": 1790214000009
+      },
+      "type": "idle",
+      "outcome": "succeeded"
+    }
+  ]
+}
