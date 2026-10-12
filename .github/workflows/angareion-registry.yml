@@ -39,5 +39,4 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           ANGAREION_REGISTRY_REPO: ${{ github.repository }}
           ANGAREION_REGISTRY_ISSUE: ${{ vars.ANGAREION_REGISTRY_ISSUE }}
-          ANGAREION_TRIGGER_COMMENT_BODY: ${{ github.event.comment.body }}
         run: python3 -m angareion.registry_rebuild

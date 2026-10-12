@@ -79,8 +79,10 @@ def test_the_step_never_interpolates_comment_content_into_the_shell():
     assert env["GITHUB_TOKEN"] == "${{ github.token }}"
     assert env["ANGAREION_REGISTRY_REPO"] == "${{ github.repository }}"
     assert env["ANGAREION_REGISTRY_ISSUE"] == "${{ vars.ANGAREION_REGISTRY_ISSUE }}"
-    # The comment body is passed as an environment variable (design section 9).
-    assert env["ANGAREION_TRIGGER_COMMENT_BODY"] == "${{ github.event.comment.body }}"
+    # L1: the trigger body is never an input (the rebuild re-reads the whole
+    # thread), so no env value may carry the comment body.
+    assert "ANGAREION_TRIGGER_COMMENT_BODY" not in env
+    assert all("github.event.comment.body" not in str(value) for value in env.values())
 
 
 def test_the_guard_semantics_match_the_design():
