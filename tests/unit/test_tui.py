@@ -553,8 +553,7 @@ def test_esc_stops_the_group_and_the_window_says_it_was_interrupted(group_calls,
             assert sent == [(4242, int(signal.SIGINT))]
             alive[4242] = False                             # the group is gone
             proc.done.set()
-            assert _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
-            await pilot.press("space")                      # close the result window
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
             assert "重跑同一個動作會接著做" in " ".join(str(app.screen.lines).split())
             await pilot.press("space")                      # close the result window
             await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
@@ -632,7 +631,7 @@ def test_ctrl_q_in_the_window_interrupts_instead_of_leaving(group_calls, monkeyp
             await pilot.press("enter")
             await _wait(lambda: sent, pilot)
             await pilot.press("ctrl+q")
-            assert _wait(lambda: len(sent) >= 1, pilot)
+            assert await _wait(lambda: len(sent) >= 1, pilot)
             assert app.is_running                       # still here: it interrupted
             alive[4242] = False
             proc.done.set()
@@ -677,7 +676,7 @@ def test_an_interruption_does_not_start_the_next_command(group_calls, monkeypatc
             await _wait(lambda: sent, pilot)
             alive[4242] = False
             first.done.set()
-            assert _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
             await pilot.press("space")                               # close the result window
             await pilot.pause(0.3)
             assert len(started) == 1, "中斷之後不該再開始第二段"
@@ -753,7 +752,7 @@ def test_the_selection_is_cleared_only_when_the_command_succeeded():
             await pilot.press("d")
             await pilot.pause()
             await pilot.press("down", "enter")
-            assert _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
             assert app.marked, "失敗之後勾選要留著"
             await pilot.press("space")
             await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
@@ -774,9 +773,9 @@ def test_the_selection_is_cleared_after_a_success():
             await pilot.press("d")
             await pilot.pause()
             await pilot.press("down", "enter")
-            assert _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
             await pilot.press("space")
-            assert _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
+            assert await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
             assert not app.marked
     _run(go)
 
@@ -1790,10 +1789,11 @@ def test_deleting_three_marked_rows_is_one_command():
 
 def test_import_uses_the_row_under_the_cursor_when_nothing_is_marked(monkeypatch):
     """spec: 未匯入頁沒有勾選任何列，按 Enter → 只有游標那一列被匯入。"""
-    agent = FakeAgent("opencode", [Listed("s1", "/tmp/p", "甲", None), Listed("s2", "/tmp/q", "乙", None)],
-                      texts={"s1": ["問"], "s2": ["答"]})
+    agent = FakeAgent("opencode", [Listed("s1", "/tmp/p", "甲", None), Listed("s2", "/tmp/q", "乙", None),
+                                   Listed("s3", "/tmp/r", "丙", None)],
+                      texts={"s1": ["問"], "s2": ["答"], "s3": ["再問"]})
     app = tui.AgoraApp(app_paths := store.Paths.from_env(), FakeCli(), agents=[agent], check_setup=False)
-    for n, title in enumerate("甲乙", 1):
+    for n, title in enumerate("甲乙丙", 1):
         ulid = f"02{'0' * 23}{n}"
         (app_paths.mirror / ulid).mkdir(parents=True, exist_ok=True)
         (app_paths.mirror / ulid / "session.md").write_text(
@@ -1813,11 +1813,13 @@ def test_import_uses_the_row_under_the_cursor_when_nothing_is_marked(monkeypatch
             await pilot.pause()
             await pilot.press("]")                      # 未匯入
             await pilot.pause()
-            await pilot.press("down")                     # the second row, un-marked
+            await pilot.press("down")                     # the middle row, un-marked
             await pilot.press("enter")
-            await _wait(lambda: app._last_spawned, pilot)
-            assert app._last_spawned[-1] == ["import", "session", "--agent", "opencode",
-                                             "--external-session-id", "s2"]
+            assert await _wait(lambda: app._last_spawned, pilot), "游標那一列沒有被匯入"
+            # Three rows and the cursor on the middle one: "the cursor row" and "the
+            # last row" are different rows, so a wrong choice cannot pass (issue #69).
+            assert app._last_spawned == [["import", "session", "--agent", "opencode",
+                                          "--external-session-id", "s2"]], app._last_spawned
             # Leave the screen at rest, not mid-action: close the result window the way
             # a person would and wait for the action to finish. A worker still in flight
             # when the test leaves finishes after the screen is gone - that is the
@@ -1872,7 +1874,7 @@ def test_interrupting_a_merge_returns_to_the_list_and_says_it_carries_on(group_c
             await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
             assert "重跑同一個動作會接著做" in " ".join(str(app.screen.lines).split())
             await pilot.press("space")
-            assert _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)   # back at the list
+            assert await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)   # back at the list
             assert str(app.query_one("#msg").render()) == ""       # nothing left over (Q4)
     _run(go)
 
@@ -1971,20 +1973,26 @@ def test_esc_stops_a_real_process_group_with_a_stubborn_grandchild(monkeypatch, 
 
 def test_each_step_of_the_escalation_gets_its_own_time(group_calls, monkeypatch):
     """Review W1: SIGTERM and SIGKILL used the same timer, so they arrived together
-    and an agent had no time to wind up between them."""
+    and an agent had no time to wind up between them.
+
+    The delays the escalation arms are read as the fact under test, not the gap
+    between the two deliveries: a busy event loop can run both overdue timers in one
+    turn, and the wall-clock gap then measures the scheduler instead of the product
+    (issue #69). Every timer still fires for real - the signals below come from them.
+    """
     monkeypatch.setattr(tui, "ESCALATE_AFTER", 0.4)
     sent, alive = group_calls
-    stamps: dict[int, float] = {}
-    real_killpg = tui.killpg
-
-    def timed(pgid, sig):
-        stamps.setdefault(int(sig), time.monotonic())
-        return real_killpg(pgid, sig)
-
-    monkeypatch.setattr(tui, "killpg", timed)
     app = _marked_app(None)
     proc = FakeProc(lines=["[agora] 合併 1/2"], hang=True)
     app.spawn, _ = _spawn(proc)
+    armed: list[float] = []
+    real_set_timer = app.set_timer
+
+    def watching_set_timer(delay, callback, *args, **kwargs):
+        armed.append(delay)
+        return real_set_timer(delay, callback, *args, **kwargs)
+
+    monkeypatch.setattr(app, "set_timer", watching_set_timer)
 
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
@@ -1993,13 +2001,15 @@ def test_each_step_of_the_escalation_gets_its_own_time(group_calls, monkeypatch)
             await pilot.pause()
             await pilot.press("enter")
             await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            armed.clear()                       # from here on, only the escalation's own timers
             await pilot.press("escape")
             for count in (1, 2, 3):
-                await _wait(lambda count=count: len(stamps) >= count, pilot)
+                await _wait(lambda count=count: len(sent) >= count, pilot)
             assert [sig for _pgid, sig in sent] == [int(signal.SIGINT),
                                                      int(signal.SIGTERM), int(signal.SIGKILL)]
-            gap = stamps[int(signal.SIGKILL)] - stamps[int(signal.SIGTERM)]
-            assert gap >= tui.ESCALATE_AFTER * 0.9, f"SIGKILL 只比 SIGTERM 晚 {gap:.2f} 秒"
+            # step n waits n * ESCALATE_AFTER, so each signal gets a window of its own
+            # (review W1) - the decision, whatever the loop does with the deliveries
+            assert armed == [tui.ESCALATE_AFTER, tui.ESCALATE_AFTER * 2], armed
             alive[4242] = False
             proc.done.set()
     _run(go)
