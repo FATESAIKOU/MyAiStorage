@@ -1224,3 +1224,20 @@ opencode session export <fork id> --standalone > fork.json
 測試用的 Session 都在隔離的 store（`/tmp`）：逐一以
 `opencode session delete <id> --standalone` 刪掉，工作用的臨時 XDG 整個目錄刪除。
 共用服務（PID 62837、49374）與使用者真正的 store 全程沒被碰過。
+
+---
+
+# 第 4 步：真 opencode 的 summarize／delete（2026-10-13，agora-opencode-v2 4.4）
+
+隔離環境與第 1 步同一套：`HOME`＋四個 XDG 在 `/tmp` 底下的新目錄（`opencode debug paths`
+確認）、隔離的 `XDG_CONFIG_HOME` 下 `opencode service set port <空閒埠>`（只寫
+`service.json`）、清掉繼承的 `OPENCODE_*`、模型是本機的 `tests/fakes/fake_upstream.py`
+（`fakeup/fake-model`，不回真模型）。自動化測試：
+`tests/integration/test_opencode_v2_summarize.py`（`uv run pytest -q -m integration …`）。
+
+| 量到什麼 | 結果 |
+|---|---|
+| `opencode run --standalone <訊息> -f <材料> --format json`（summarize 的呼叫） | 事件流照舊（`step_start` → `text` → `step_finish`），回 fake upstream 的固定句 `ZZFAKEUP 這是一句話的回答。` |
+| 那個 run 的 session 記的模型 | `_model_of()` 讀到 `fake-model`：2.x 記在 assistant 列的 `model.id`（4.1 的欄位形狀） |
+| 寫完要約的清理 | `session delete <id> --standalone` 真的刪掉；隔離 store 的 `session list --standalone --format json` 回 `[]`，`pending-*`／`material-*` 都沒留下 |
+| 預設埠 49374 的共用服務 | 跑前跑後都在聽、PID 48537 不變（只以 `lsof -nP -iTCP:49374 -sTCP:LISTEN` 看，不連它、不停它；H2） |
