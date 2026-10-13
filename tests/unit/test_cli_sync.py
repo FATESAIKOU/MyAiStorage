@@ -331,6 +331,15 @@ def test_a_rescue_mid_flight_is_adopted_not_minted_again(env, capsys, monkeypatc
     assert gate.wait(timeout=30), "uploader never reached its rescue"
     assert (paths().outbox / f".done-{ulid}").is_dir(), "X claimed, rescue in flight"
 
+    entered = threading.Event()
+    real_wait = cli._wait_inflight_rescue
+
+    def gated_wait(*args, **kwargs):
+        entered.set()      # the foreground parked in the wait; safe to let go now
+        return real_wait(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_wait_inflight_rescue", gated_wait)
+
     record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
               "agent_session_id": "ses_a", "parent": {"id": a}}
     run = cli._Run(paths(), record)
@@ -344,7 +353,7 @@ def test_a_rescue_mid_flight_is_adopted_not_minted_again(env, capsys, monkeypatc
 
     review = threading.Thread(target=foreground, daemon=True)
     review.start()
-    time.sleep(2.0)          # let the foreground resolve while the rescue is held
+    entered.wait(timeout=30)  # no sleep: release only after the wait really started
     release.set()            # the uploader lands its rescue; the foreground must adopt it
     review.join(timeout=60)
     state["uploader"].join(timeout=60)
