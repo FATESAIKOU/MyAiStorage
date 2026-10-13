@@ -176,6 +176,90 @@ def test_reimport_losing_only_empty_turns_still_updates(env, capsys):
     assert third == first  # only an empty turn vanished: still updates, not refused
 
 
+def test_reimport_without_old_raw_comparison_says_so_loudly(env, capsys, monkeypatch):
+    """N-2(a): the old raw cannot be read (StoreError) - the update proceeds but
+    stderr says the shrink check was skipped."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    env.sessions["ses_a"].append("新的一則")
+
+    def missing(*args, **kwargs):
+        raise store.StoreError("ZZSTORE 舊的不見了")
+
+    monkeypatch.setattr(store, "fetch_raw", missing)
+    code, second, err = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code == 0 and second == first
+    assert "沒做「變少不覆蓋」比對" in err
+
+
+def test_reimport_with_unparsable_old_raw_still_updates_loudly(env, capsys, monkeypatch):
+    """N-2(a): the old raw parses to something turns() rejects (AgentError) - same
+    fail-open with the same loud note, not a refusal and not silence."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    env.sessions["ses_a"].append("新的一則")
+    monkeypatch.setattr(store, "fetch_raw", lambda *args, **kwargs: b'{"id": "ses_a"}')
+    orig = env.turns
+
+    def turns(raw):
+        try:
+            return orig(raw)
+        except (KeyError, ValueError) as e:
+            raise AgentError(f"ZZBAD 舊 raw 讀不了：{e}")
+
+    monkeypatch.setattr(env, "turns", turns)
+    code, second, err = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code == 0 and second == first
+    assert "沒做「變少不覆蓋」比對" in err
+
+
+def test_reimport_unchanged_does_not_fetch_old_raw(env, capsys, monkeypatch):
+    """N-2(b)/L-4: identical bytes need no comparison - the old raw is not even
+    fetched, with or without header-only updates."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    calls = []
+    real = store.fetch_raw
+
+    def counting(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "fetch_raw", counting)
+    code, second, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code == 0 and second == first
+    code, _, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode",
+                     "--header", "title=ZZ")
+    assert code == 0
+    assert calls == []
+
+
+def test_new_and_unexpected_errors_are_not_swallowed(env, capsys, monkeypatch):
+    """N-2(c): a failure on the new side was never inside the guard's try, and an
+    unexpected old-side error type is not mistaken for "old raw missing" - both
+    surface instead of silently overwriting."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    env.sessions["ses_a"].append("新的一則")
+    new_bytes = json.dumps({"id": "ses_a", "m": list(env.sessions["ses_a"])},
+                           ensure_ascii=False).encode()
+    orig = env.turns
+
+    def turns(raw):
+        if raw == new_bytes:
+            raise AgentError("ZZBAD 新的壞了")
+        return orig(raw)
+
+    monkeypatch.setattr(env, "turns", turns)
+    code, _, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code != 0
+
+    def turns2(raw):
+        if len(json.loads(raw)["m"]) == 2:  # the stored old raw: unexpected error type
+            raise RuntimeError("ZZBUG 非預期")
+        return orig(raw)
+
+    monkeypatch.setattr(env, "turns", turns2)
+    code, _, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code != 0
+
+
 def test_continue_writes_back_into_the_same_session(env, capsys):  # design 5.4, user's call
     _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     code, out, _ = run(capsys, "continue", "session", parent, "--agent", "opencode", "--dir", "/tmp",
