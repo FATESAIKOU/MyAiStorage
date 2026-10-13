@@ -410,6 +410,72 @@ def test_a_rescue_completed_before_claim_is_adopted_not_minted(env, capsys, monk
     assert "ZZ m1 第四句" in document_of(f"agora:{bid[0]}")
 
 
+def test_adopt_write_survives_confirmation_rename(env, capsys, monkeypatch):
+    """M-2: adopting a rescue while the holder confirms it - the holder renames
+    outbox/Y mid-read, so the first save raises FileNotFoundError; the retry
+    re-resolves and saves into the same rescue instead of failing the round.
+
+    Deterministic: a renamer thread moves outbox/Y aside exactly inside the
+    adopt write's `remember` (threading.Events, no sleeps), then puts it back
+    once the retry is through.
+    """
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append("ZZ m2 第五句")
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    # the holder's rescue, completed up front (staged, indexed, uploaded)
+    assert store.upload_batch(store.Drive(paths()), paths()) == []
+    bid = store.Index(paths()).children(ulid)
+    assert len(bid) == 1, f"setup rescued exactly once: {bid}"
+    target = paths().outbox / bid[0]
+
+    entered, renamed, done = threading.Event(), threading.Event(), threading.Event()
+    errors = {}
+    real_remember = store.remember
+
+    def gated_remember(p, folder, index=None, ulid_=None):
+        if folder == target and not renamed.is_set():
+            entered.set()
+            assert renamed.wait(timeout=30), "renamer never moved outbox/Y aside"
+        return real_remember(p, folder, index, ulid_)
+
+    monkeypatch.setattr(store, "remember", gated_remember)
+
+    def renamer():
+        try:
+            assert entered.wait(timeout=30), "adopt write never reached remember"
+            target.rename(paths().outbox / f".done-{bid[0]}")
+            renamed.set()
+            assert done.wait(timeout=30), "retry never finished"
+            store._put_back(paths().outbox / f".done-{bid[0]}", target)
+        except Exception as e:  # noqa: BLE001 - surfaced below
+            errors["renamer"] = e
+
+    threading.Thread(target=renamer, daemon=True).start()
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    saved, where, _note = cli._write_one(paths(), run, exported, agent, check_drive=True)
+    done.set()
+    assert not errors, errors
+    assert where == f"agora:{bid[0]}", f"adopted the rescue, not a new session: {where}"
+
+    assert store.upload_batch(drive, paths()) == []
+    remote = {e["Name"] for e in
+              json.loads(drive._run("lsjson", "gdrive:sessions", "--dirs-only"))}
+    assert remote - {ulid} == {bid[0]}, f"exactly one rescue: {sorted(remote)}"
+    assert "ZZ m2 第五句" in document_of(f"agora:{bid[0]}")
+
+
 def test_a_deletion_mid_run_moves_later_writes_to_the_rescue(env, capsys, monkeypatch):
     """Scenario「途中被刪」: the uploader's rescue notices, the next round adopts it -
     exactly one new session, and every write after the deletion goes there."""

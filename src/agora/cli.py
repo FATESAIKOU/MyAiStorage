@@ -1111,8 +1111,24 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
     # but writing here keeps the adopted copy current).
     if md5 == run.last_md5 and not is_new and not moved_here:
         return None, target_id, note
-    saved, create_note = _save_continue(paths, run, agent, exported, target_id=target_id,
-                                        hdr=hdr, is_new=is_new)
+    try:
+        saved, create_note = _save_continue(paths, run, agent, exported, target_id=target_id,
+                                            hdr=hdr, is_new=is_new)
+    except (FileNotFoundError, h.HeaderError):
+        # Collision with a concurrent outbox rename (issue #59 M-2): adopting a rescue
+        # the uploader is confirming right now can rename outbox/Y mid-read. Resolve
+        # once more - the target is indexed by now in the adopt case - and save there
+        # instead of failing the round; a second collision propagates loudly.
+        target_id, hdr, is_new = _write_target(paths, run, check_drive=check_drive)
+        note = _follow(run, target_id) or note
+        _say_note(run, note)
+        moved_here = run.target != was
+        if exported is None and not is_new:
+            return None, target_id, note
+        if md5 == run.last_md5 and not is_new and not moved_here:
+            return None, target_id, note
+        saved, create_note = _save_continue(paths, run, agent, exported, target_id=target_id,
+                                            hdr=hdr, is_new=is_new)
     run.last_md5 = md5      # P8: only after `_save` came back
     run.wrote = True
     _follow(run, saved[0], note=False)
