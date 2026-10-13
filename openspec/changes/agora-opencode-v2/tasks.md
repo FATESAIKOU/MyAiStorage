@@ -35,7 +35,7 @@
 - [x] 2.6 重新匯入的保護（**審查 M5／N1**；動 `cli._import_one`）：原地更新既有 Session 前，比對新匯出與 store 那版的 user／assistant turn 數，**只算至少有一行內容的 turn**（合法的 undo／revert／rewind 讓空 turn 消失，不算變少）；新的**有內容的 turn** 比較少就不覆蓋——**拒絕訊息要寫明下一步**（改用跨 agent 接續，或先讓這個 Session 分支再重新匯入、依分支規則另存），不能只說少了多少；不變／變多照舊更新，被分支過的照現行規則另存
 - [x] 2.7 單元測試：`native → import（fake）→ export → turns` 的 round trip；閱讀版對 fixture 的段落數與工具行；`append_native` 保留工具呼叫與原 raw，**fork v2 raw 的新列 model／鏈指對**（M1）；回讀驗證的 content 項目數（fake 掉一個 content 要紅，M2）；`collect` 只有 idle 列時回 None（沒說話不寫回，M8）；舊 raw 拒絕的訊息內容；**有內容的 turn 變少的重新匯入被拒、拒絕訊息含下一步**，**只有空 turn 消失（undo 的合法變少）時照舊更新**（N1）
 - [x] 2.8 真 opencode 整合測試（隔離 XDG＋空閒埠、fake upstream）：`native()` → 真的 `session import` → `run -s` 一輪 → `collect`；閱讀版含前文關鍵字；至少驗一次 `message_count` 與 `idle` 的關係（M8）
-- [ ] 2.9 改壞驗證：native 少一個必填欄位；`idle` 當段落；工具行拿掉；`append_native` 改到原 raw 的其他欄位；v1 helper 的 v2 版拆掉（新列 model／鏈錯）；content 項目數不比對；**「有內容的 turn 少於原本」的檢查拿掉；把空 turn 也算進比較（合法的 undo 被誤擋）**（N1）
+- [x] 2.9 改壞驗證：native 少一個必填欄位；`idle` 當段落；工具行拿掉；`append_native` 改到原 raw 的其他欄位；v1 helper 的 v2 版拆掉（新列 model／鏈錯）；content 項目數不比對；**「有內容的 turn 少於原本」的檢查拿掉；把空 turn 也算進比較（合法的 undo 被誤擋）**（N1）
 
 **測試**：`uv run pytest -q tests/unit/test_agent_opencode.py tests/unit/test_cli.py`；`uv run pytest -q -m integration tests/integration/test_opencode_real.py`（需真 opencode）。
 **改壞驗證**：2.9 逐項記在 PR 說明。
