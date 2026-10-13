@@ -1399,3 +1399,37 @@ spike 早先的樣本沒有——兩者不矛盾。所以 4.1 的單元測試把
 
 第一項只讓 v2 的欄位讀取轉紅；v1 的 `test_summarize_answers_and_leaves_no_session`
 照樣綠（v1 的 payload 本來就有 `info.model`，走的是後備那條）。
+
+---
+
+# 第 5 步：整條 v2 驗收（2026-10-14，agora-opencode-v2 5.1～5.7）
+
+## 5.1／5.2 自動化（真 opencode 2.0.26＋假模型／假 Drive）
+
+`tests/integration/test_opencode_v2_acceptance.py`（`uv run pytest -q -m integration …`）：
+`HOME`＋四個 XDG 在 pytest 的 `tmp_path`、隔離的 `XDG_CONFIG_HOME` 下服務埠改空閒埠、
+兩個本機 `tests/fakes/fake_upstream.py`（一個先叫 read 工具再回一句、一個只回 merge 要約）、
+Drive 是 `tests/fakes/fake_rclone.py`、模型是 `fakeup/fake-model`（要約用 `faketext/fake-model`）。
+跑前跑後只以 `lsof -nP -iTCP:49374 -sTCP:LISTEN` 看預設埠的服務（不連、不停）。
+
+1. **整條流程**（5.1）：自編兩顆 v2 session（A 多輪且第一輪有工具呼叫）→ `agora import`
+   → `continue --headless --sync-period 0.05`（每 3 秒一次寫回；期間再跑一輪，確認
+   **定期寫回真的把新的一輪寫進 store**）→ SIGTERM（**最後一次寫回**存下收尾前那一輪、
+   exit 0）→ `agora show`（閱讀版有 3 個 `## user`／`## assistant`、`[tool] read` 一行、
+   工具輸出不出現）→ `agora merge` 兩顆（要約走假 upstream）→ `continue --headless`
+   merged（載入的對話＋`ZZMERGED` 一輪寫回）。
+2. **非 headless 的服務面**（5.2 自動化）：`opencode service start` 起在隔離埠後，
+   `session import --standalone` 匯入的 Session 能用**不帶** `--standalone` 的
+   `opencode session list` 看到、並用 `opencode run -s <id>` 經那個服務得到回覆。
+
+## 5.2 手動驗收清單（真 TUI，沒在自動化裡假裝測過）
+
+1. 隔離：`HOME`＋四個 XDG 指到新目錄；隔離的 `XDG_CONFIG_HOME` 下
+   `opencode service set port <空閒埠>`；確認 `opencode debug paths` 全在暫存裡。
+2. 匯入：`agora import session --external-session-id <真 session id> --agent opencode`。
+3. `agora continue session <agora id> --agent opencode --dir <暫存專案>`（非 headless，
+   拉起 `opencode --session <id>` 的 TUI）。
+4. 在 TUI 裡看得到載入的歷史（user／assistant 段落、`[tool] …` 一行），可以打字得到回覆；
+   離開後 store／Drive 的寫回沒有把內容弄壞（`agora show session <id>` 再看一次）。
+5. `opencode service status` 指到隔離埠；預設 49374 的服務 pid／etime 前後不變。
+6. 清理：`opencode session delete <id> --standalone` 逐 id 刪、隔離的 XDG 整個目錄刪除。

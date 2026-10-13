@@ -73,7 +73,7 @@
 **範圍**：整合測試與驗收紀錄（issue #51 的驗收條件）。合併後：一條測試證明整條路徑在真的 opencode 2.x 上會動，而且不碰使用者的 managed 服務。
 
 - [x] 5.1 整合測試（隔離 XDG＋**空閒埠的 managed 服務**＋fake upstream＋假 Drive 用 `tests/fakes/fake_rclone.py`、自編多輪含工具呼叫的 v2 session）：`agora import` → `continue --headless`（三行 stderr；`--sync-period` > 0，真的做一次定期寫回；SIGTERM 後溫和停下、寫回）→ `agora show`（閱讀版完整）→ `merge` 兩顆 → 接續 merged Session
-- [ ] 5.2 非 headless 的路徑（審查 M3）：隔離環境＋運行中的 managed 服務（空閒埠），`session import --standalone` 之後用 `opencode --session <id>`（或 attach）確認看得到；另列手動驗收，替身（`opencode_noninteractive.py`）只證明參數
+- [x] 5.2 非 headless 的路徑（審查 M3）：隔離環境＋運行中的 managed 服務（空閒埠），`session import --standalone` 之後用 `opencode --session <id>`（或 attach）確認看得到；另列手動驗收，替身（`opencode_noninteractive.py`）只證明參數
 - [ ] 5.3 更新 `tests/integration/test_opencode_real.py` 與 `test_e2e_opencode.py` 的 v1 語法與格式假設（`session export／import`、扁平格式）；拔掉 1.11 的跳過探測；沒有 opencode 或模型不可用時照舊 skip（**驗 v2 的項目不用真模型**）
 - [ ] 5.4 §G 三項複驗：工具呼叫的 parts、跨訊息 reference、import 必填欄位全集——結果（欄位清單、參照位置、fixture 名稱）記進 `docs/spike/opencode.md`；fixture 有漏就補
 - [ ] 5.5 跑動前後確認預設埠 49374 的服務沒被動（只看在不在聽／PID／etime，不讀資料，H2）
