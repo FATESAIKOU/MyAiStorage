@@ -1183,31 +1183,29 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
     note = None
     same_id = True            # False once the work has been saved as a session of its own
     own_claim = False
-    give_back = None          # our claim, when the recheck adopts instead of minting (issue #65)
-    if is_new:
-        # Claim X's outbox entry before minting (issue #59): the uploader claims the
-        # same way, and whoever loses the rename must not mint - otherwise the two
-        # rescues land side by side while neither sees the other.
-        old_ulid = _ulid_of(run.target)
-        claim = _claim_rescue_entry(paths, old_ulid)
-        hit = None
-        if claim == "busy":
-            hit = _wait_inflight_rescue(paths, record, old_ulid)
-        else:
-            own_claim = claim == "claimed"
-        if hit is None:
-            # M-1: the holder may have finished between resolve and claim (staged
-            # and indexed, claim released) - look once more before minting.
-            hit = _find_rescue(paths, record, old_ulid)
-        if hit is not None:
-            target_id, hdr = hit
-            is_new = False
-            note = (f"[agora] {run.target} 在你接續的時候被別台刪掉了，"
-                    f"這次的對話寫到已另存的 {target_id}；原來那個保持被刪掉的狀態")
-            if own_claim:
-                give_back = old_ulid
-    if is_new:
-        try:
+    old_ulid = None           # the outbox entry this call claimed, while it holds it
+    try:
+        if is_new:
+            # Claim X's outbox entry before minting (issue #59): the uploader claims the
+            # same way, and whoever loses the rename must not mint - otherwise the two
+            # rescues land side by side while neither sees the other.
+            old_ulid = _ulid_of(run.target)
+            claim = _claim_rescue_entry(paths, old_ulid)
+            hit = None
+            if claim == "busy":
+                hit = _wait_inflight_rescue(paths, record, old_ulid)
+            else:
+                own_claim = claim == "claimed"
+            if hit is None:
+                # M-1: the holder may have finished between resolve and claim (staged
+                # and indexed, claim released) - look once more before minting.
+                hit = _find_rescue(paths, record, old_ulid)
+            if hit is not None:
+                target_id, hdr = hit
+                is_new = False
+                note = (f"[agora] {run.target} 在你接續的時候被別台刪掉了，"
+                        f"這次的對話寫到已另存的 {target_id}；原來那個保持被刪掉的狀態")
+        if is_new:
             if run.target == record["agora_id"] and record.get("parent"):
                 # First rescue, from the session this run continued: the record knows what
                 # was continued from (C9), even when that id itself was never here (F4).
@@ -1235,41 +1233,35 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
             how = "被別台機器刪掉了" if was_here else "在這台機器上被刪掉了"
             note = (f"[agora] {run.target} 在你接續的時候{how}，"
                     f"這次的對話另存成 {hdr['id']}；原來那個保持被刪掉的狀態")
-            old_ulid = _ulid_of(run.target)
             # Only clear the claim we hold: `.done-` may be another rescue's live claim
             # on the fallback path below, and clearing it would orphan its work.
             prefixes = ("", ".done-", ".old-", ".tmp-") if own_claim else ("", ".old-", ".tmp-")
             for prefix in prefixes:
                 shutil.rmtree(paths.outbox / f"{prefix}{old_ulid}", ignore_errors=True)
-        except Exception:
-            if own_claim:
-                store._put_back(paths.outbox / f".done-{old_ulid}", paths.outbox / old_ulid)
-            raise
-    agora = h.agora_of(hdr)
-    old = agora.get("source") or {}
-    if old.get("session_id") and old.get("session_id") != exported.session_id:
-        # the agent session it came from is not "not imported" now: the import tab leaves
-        # it out. Listed once each: a write-back every few minutes would otherwise append
-        # the same id again and again (design「一次寫回」P5).
-        previous = [s for s in agora.setdefault("previous_sources", []) if s != f"{old.get('agent')}:{old['session_id']}"]
-        agora["previous_sources"] = [*previous, f"{old.get('agent')}:{old['session_id']}"]
-    if agora.get("relation") == "merge":   # a continued merge is that conversation now, not its summary
-        agora["relation"] = "continue"
-        agora.pop("merge", None)
-        hdr.pop("status", None)
-    agora["source"] = _source(agent, exported)
-    agora["updated_at"] = _now_iso()
-    actor = _actor(agent.name, exported.model)
-    hdr["generated"] = {"by": actor, "at": exported.created_at or _now_iso()}
-    sources = [s for s in hdr.get("sources") or [] if not str(s.get("id", "")).startswith(f"{agent.name}:")]
-    hdr["sources"] = [{"id": f"{agent.name}:{exported.session_id}", "title": f"{agent.name} session",
-                       "author": actor, "last_modified": _now_iso()[:10]}, *sources]
-    if not hdr.get("description"):
-        hdr["description"] = _description(body)
-    # `kind`: a continue is the one write that is a relation of its own, and if this
-    # session is gone by the time it goes up the work is saved as a session of its own -
-    # as a continue, not as whatever X was (review G2)
-    try:
+        agora = h.agora_of(hdr)
+        old = agora.get("source") or {}
+        if old.get("session_id") and old.get("session_id") != exported.session_id:
+            # the agent session it came from is not "not imported" now: the import tab leaves
+            # it out. Listed once each: a write-back every few minutes would otherwise append
+            # the same id again and again (design「一次寫回」P5).
+            previous = [s for s in agora.setdefault("previous_sources", []) if s != f"{old.get('agent')}:{old['session_id']}"]
+            agora["previous_sources"] = [*previous, f"{old.get('agent')}:{old['session_id']}"]
+        if agora.get("relation") == "merge":   # a continued merge is that conversation now, not its summary
+            agora["relation"] = "continue"
+            agora.pop("merge", None)
+            hdr.pop("status", None)
+        agora["source"] = _source(agent, exported)
+        agora["updated_at"] = _now_iso()
+        actor = _actor(agent.name, exported.model)
+        hdr["generated"] = {"by": actor, "at": exported.created_at or _now_iso()}
+        sources = [s for s in hdr.get("sources") or [] if not str(s.get("id", "")).startswith(f"{agent.name}:")]
+        hdr["sources"] = [{"id": f"{agent.name}:{exported.session_id}", "title": f"{agent.name} session",
+                           "author": actor, "last_modified": _now_iso()[:10]}, *sources]
+        if not hdr.get("description"):
+            hdr["description"] = _description(body)
+        # `kind`: a continue is the one write that is a relation of its own, and if this
+        # session is gone by the time it goes up the work is saved as a session of its own -
+        # as a continue, not as whatever X was (review G2)
         saved = _save(paths, _with_user(hdr, record.get("header_updates") or {},
                                         add_tags=record.get("add_tags") or []), body,
                       exported.raw, update=same_id, kind="continue")
@@ -1278,15 +1270,16 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
             raise                   # a mint: no id to resolve to again (issue #65 F-1)
         raise AdoptCollision(e) from e
     finally:
-        if give_back:
-            # Issue #65: the claim was taken for a mint, and this write adopted somebody
-            # else's rescue instead. Minting consumes `outbox/X`; adopting does not, so
-            # the entry goes back where `restore_done` would have put it and waits for the
-            # uploader's own rules (`_put_back` drops ours instead if a newer version
-            # landed meanwhile). After this write, not at the recheck: the entry may not
-            # become visible again before the adopted session is remembered, or the
-            # uploader's rescue of X could land a second one first (L-5).
-            store._put_back(paths.outbox / f".done-{give_back}", paths.outbox / give_back)
+        if own_claim:
+            # Issue #65: a claim we took goes back whatever became of the write (F-2: the
+            # guard opens at the claim, so nothing in between can skip it). A mint consumed
+            # the entry already - then this is a no-op; an adopt (the work went into
+            # somebody else's rescue) leaves `outbox/X` waiting, and `_put_back` drops ours
+            # instead if a newer version landed meanwhile. Given back after the write, not
+            # at the recheck: the entry may not become visible again before the adopted
+            # session is remembered, or the uploader's rescue of X could land a second one
+            # first (L-5).
+            store._put_back(paths.outbox / f".done-{old_ulid}", paths.outbox / old_ulid)
     return saved, note
 
 
