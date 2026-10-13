@@ -1158,7 +1158,11 @@ fixture 與之後的驗收看 v2 的測試都用它，不用真模型（審查 M
 | messages | `[{info, parts}]` | 扁平：`{…, type: "user"/"assistant"/"idle"}` |
 
 - **user**：`text`＋`files`。第一則是把 CLI 參數 **JSON 編碼**後存的（`"…"`），
-  `-s` 接續的後續訊息是純文字——閱讀版把 JSON 字串解開再顯示（`_user_text`）。
+  `-s` 接續的後續訊息是純文字——閱讀版只解開第一則（`_user_text`），後續原樣，
+  所以後續訊息若本身就是 `"abc"` 這種帶引號的字串不會被誤剝引號（L-10）。
+  已知限制（L-10）：user 列只有一個 `text`，`native()` 把多行 user turn 以 `\n`
+  併成一則，`turns()` 回來是單一含換行的 line——多行 user 的 round trip 不恆等
+  （assistant 多行則恆等，一行一 content）。
 - **assistant**：`content`（`type: text` 的文字、`type: tool` 的 `name`＋`state.input`，
   工具的輸出在 `state.content`，閱讀版只取一行 `[tool] …`）、`model{id,providerID,variant}`、
   `finish`／`rawFinish`、`snapshot`。

@@ -725,7 +725,9 @@ def _user_text(text: object) -> str | None:
     v2's *first* user row stores the prompt JSON-encoded (`"hello"`), later ones
     plain (measured 2.0.26) - the CLI wraps its positional argument and nothing
     else does. Decoding when it is a JSON string keeps the reading version showing
-    the user's words instead of their escaping.
+    the user's words instead of their escaping. Only the first user row goes through
+    here (`turns()` keeps later rows verbatim), so a later message that literally
+    reads `"abc"` keeps its quotes (L-10).
     """
     if not isinstance(text, str) or not text.strip():
         return None
@@ -928,10 +930,16 @@ class OpencodeAgent:
         payload = self._read(raw)
         out: Turns = []
         if _payload_format(payload) == "v2":
+            first_user = True  # only the first user row is CLI JSON-encoded (L-10)
             for row in _payload_messages(payload):
                 kind = row.get("type")
                 if kind == "user":
-                    text = _user_text(row.get("text"))
+                    if first_user:
+                        text = _user_text(row.get("text"))
+                    else:
+                        raw_text = row.get("text")
+                        text = raw_text.strip() if isinstance(raw_text, str) and raw_text.strip() else None
+                    first_user = False
                     out.append(("user", [text] if text else []))
                 elif kind == "assistant":
                     out.append(("assistant", _lines_of_v2(row.get("content") or [])))

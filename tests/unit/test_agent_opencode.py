@@ -1914,6 +1914,25 @@ def test_reading_version_paragraphs_and_tool_line(fake):
     assert "第二輪：紙條上寫的是什麼顏色？一句話。" in body
 
 
+def test_only_the_first_user_row_is_json_decoded(fake):
+    """L-10: a later user row that literally reads `"abc"` keeps its quotes -
+    only the CLI-wrapped first row is JSON-encoded (measured 2.0.26)."""
+    payload = json.loads(v2())
+    payload["messages"][-3]["text"] = '"abc"'
+    turns = oc.ADAPTER.turns(json.dumps(payload).encode())
+    assert turns[0] == ("user", ["先讀 fake-note.txt 再回答。"])
+    assert turns[-2] == ("user", ['"abc"'])
+
+
+def test_multi_line_user_turns_come_back_joined(fake):
+    """L-10, known limitation: a user row holds one text, so `native()` joins a
+    multi-line user turn with newlines and `turns()` returns it as one line -
+    unlike assistant turns, which keep one content item per line."""
+    converted = [("user", ["第一行", "第二行"]), ("assistant", ["ZZ"])]
+    assert oc.ADAPTER.turns(oc.ADAPTER.native(converted)) == [
+        ("user", ["第一行\n第二行"]), ("assistant", ["ZZ"])]
+
+
 def test_import_verification_counts_content_items_not_only_messages(fake, workdir,
                                                                    monkeypatch):
     """2.7/M2: dropping one content item keeps every message, so only the second
