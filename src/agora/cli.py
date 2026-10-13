@@ -412,13 +412,16 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
         if unchanged or not _branched(index, existing[0]):
             # M5/N1: never silently overwrite with less conversation. Only turns
             # with content count - an undo that drops empty turns is not "less".
+            # The new export already parsed (reading() above), so only the old
+            # side is guarded: an unreadable old raw means no basis to refuse.
+            new_content = _content_turn_count(agent.turns(exported.raw))
             try:
                 old_raw = store.fetch_raw(paths, store.Drive(paths), existing[0], old)
                 old_content = _content_turn_count(agent.turns(old_raw))
-                new_content = _content_turn_count(agent.turns(exported.raw))
-            except Exception:
-                old_content = new_content = 0  # unreadable old raw: no basis to refuse
-                # fall through to the normal update below
+            except (store.StoreError, AgentError):
+                print(f"[agora] 舊 raw 讀不到，沒做「變少不覆蓋」比對就更新：{existing[0]}",
+                      file=sys.stderr)
+                old_content = new_content  # fail-open, but said out loud (review L-3)
             if new_content < old_content:
                 raise InputError(
                     f"{external_id} 重新匯入的內容比原本少（原本 {old_content} 則有內容的對話，"
