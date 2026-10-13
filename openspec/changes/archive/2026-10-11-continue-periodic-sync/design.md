@@ -114,5 +114,11 @@
 ## issue #59：前景另存與背景另存撞車（已修）
 
 - 根因：另存有兩條路（前景 `_save_continue` 的 is_new、背景 `_rescue_deleted`），但只有背景在另存前先 claim（`outbox/X → .done-X` 原子改名）；前景直接另存。背景正處在 claim 到 remember 之間時，前景的 `_write_target`／`_staged_as` 都看不到另存（`.done-X` 裡還是 X 自己的更新、不是另存形狀），於是也另存一個——兩個 Session 並存。序列化跑（單元測試）永遠撞不上；e2e（真 detached 上傳器＋0.6 秒一輪＋purge 重試迴圈）幾乎必撞。`assert 2 == 1` 即此。
-- 修法：前景另存前走同一個 claim 協議（`_claim_rescue_entry`）：搶到就另存並清掉自己的 claim；撞見別人的 claim（busy）就等對方的另存落袋（`_wait_inflight_rescue`，staged 或 indexed，10 秒上限）再沿用；等不到才另存（等於以前的行為）。另存失敗則把 claim 放回去再拋。`.done-` 只清自己持有的那個。
+- 修法：前景另存前走同一個 claim 協議（`_claim_rescue_entry`）：搶到就另存並清掉自己的 claim；撞見別人的 claim（busy）就等對方的另存落袋（`_wait_inflight_rescue`，staged 或 indexed，10 秒上限）再沿用；等不到才另存。另存失敗則把 claim 放回去再拋。`.done-` 只清自己持有的那個。
+- M-1（審查）：`_write_target` 的判定與 claim 之間還隔著 `_follow`／`_say_note`／`reading(agent, raw)`，持有者可能正好在這一段裡把整個救回做完（Y staged＋remember、`.done-X` 已刪）。claim 這時回 `"empty"`，前景就鑄造第二個。所以 claim 之後（拿到與逾時兩條路）再查一次 `_staged_as`／`_saved_as`，命中就採納：`test_a_rescue_completed_before_claim_is_adopted_not_minted`。
+- M-2（審查）：採納到的 Y 可能正是同一個 uploader 這一輪在送的 entry——它把 `outbox/Y` 改名成 `.done-Y` 做確認（H1），前景的 update 讀 `outbox/Y/session.md` 就撞上改名（`FileNotFoundError`）或寫到一半的檔（`HeaderError`），整個寫回拋錯。`_write_one` 對這兩種錯重解析一次再寫（這時 Y 已在 index，`_saved_as` 找得到），第二次再撞才拋：`test_adopt_write_survives_confirmation_rename`。
+- L-3（審查，記著）：`.done-X` 也可能是 uploader 在確認階段暫時改名的正常更新，不一定是救回。這種情況前景看到 busy 會白等 10 秒才走回鑄造——結果與修前一樣（鑄造一個），只是慢；要分辨得讀 `.done-X` 的內容或看 uploader 在不在跑，成本不划算。
+- L-5（審查，殘留風險，這次不修）：前景 claim 成功、把 `.done-X` 清掉之前，若背景剛好拿到上傳鎖並跑 `restore_done`，會把 `.done-X` 放回 `outbox/X`，uploader 就照常救回一個 Y1，與前景鑄造的 Y2 並存。窗口是「claim 到清 claim」這一小段本機工作（清 claim 在新 Session 送出去之前），而且要 uploader 的救回比前景的 `remember(Y2)` 先落袋才會真的多出第二個——晚一點 `_rescue_deleted` 的 continue-child 檢查就會沿用 Y2。同一窗口裡前景的清單也可能誤刪 uploader 重新搶下的 claim；內容不會不見（Y2 是這一輪最新的版本），但那個 entry 的版本會被丟掉。曾想用獨立名稱 `.claim-X` 讓 `restore_done` 碰不到，但 `restore_done`／`waiting_ulids` 只看 `.done-*`，前景若在這段窗口 crash，`.claim-X` 連「等待中」都算不上，得為它另做一套逾時收斂才安全，代價比這個窗口大，先記在這裡。
+- 測試也鎖住了審查的 L-2（持有者 crash：`.done-X` 沒人持有 → 等 10 秒 → 鑄造一個，`restore_done` 放回後由 child 規則沿用：`test_a_crashed_holder_times_out_and_still_lands_once`）與 L-4（逾時鑄造只清自己的 claim：`test_timeout_mint_clears_only_its_own_claim`）。
+- L-6（審查）：修法那條的「等不到才另存」只在「結果都是一個新 Session」上等於以前的行為，時序與殘留窗口已經不同（見 M-1、L-5）；`git log -S` 斷代是推論不是 bisect，文件如實寫明。
 - 機制存在已久（uploader 的 claim 自 T3-sec5 V1；前景 mint 無 claim 自 `_save_continue` is_new 起）；真 Drive 跑 bisect 不可行（無憑證、禁碰真 config／Drive），以 git log -S 斷代＋雙執行緒確定性重現為證（`test_a_rescue_mid_flight_is_adopted_not_minted_again`）。
