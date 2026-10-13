@@ -1115,6 +1115,12 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
         saved, create_note = _save_continue(paths, run, agent, exported, target_id=target_id,
                                             hdr=hdr, is_new=is_new)
     except (FileNotFoundError, h.HeaderError):
+        if is_new:
+            # Issue #65: this was a mint, not the adopt write M-2 is about. The id it
+            # composed exists nowhere yet - resolving again would not find it - so a
+            # second attempt would mint a session of its own next to the one the first
+            # attempt may already have staged. Let the collision out loudly instead.
+            raise
         # Collision with a concurrent outbox rename (issue #59 M-2): adopting a rescue
         # the uploader is confirming right now can rename outbox/Y mid-read. Resolve
         # once more - the target is indexed by now in the adopt case - and save there

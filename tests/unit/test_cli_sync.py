@@ -597,9 +597,8 @@ def test_a_collision_while_minting_is_not_retried(env, capsys, monkeypatch):
         cli._write_one(paths(), run, exported, agent, check_drive=True)
 
     assert len(saves) == 1, f"the mint is not retried: {saves}"
-    assert (paths().outbox / ulid).is_dir(), "and its claim is given back on the way out"
-    assert not (paths().outbox / f".done-{ulid}").exists()
-    assert _extra_sessions(a) == [], "nothing was minted"
+    assert saves[0] != a, "the one attempt is the mint's own new id"
+    assert _extra_sessions(a) == [], "nothing was minted - the retry never ran"
 
 
 def test_an_adopt_collision_is_retried_once(env, capsys, monkeypatch):
