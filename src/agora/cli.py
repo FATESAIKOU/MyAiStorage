@@ -424,7 +424,8 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
                     f"{external_id} 重新匯入的內容比原本少（原本 {old_content} 則有內容的對話，"
                     f"新的 {new_content} 則），不覆蓋原本的版本。要接續請改用跨 agent 接續"
                     f"（例如 `agora continue session agora:{existing[0]} --agent claude`），"
-                    "或先讓這個 Session 分支（`agora continue session … --fork`）再重新匯入，"
+                    f"或先對這個 Session 做一次非 fork 的接續（`agora continue session agora:{existing[0]}"
+                    " --agent opencode`，接續後會分支）再重新匯入，"
                     "依分支規則另存成新的 Session。")
             hdr = _with_user(old, updates, add_tags=add_tags)
             hdr["agora"]["source"] = _source(agent, exported)

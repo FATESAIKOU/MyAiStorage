@@ -138,16 +138,31 @@ def test_reimporting_the_agent_session_a_continue_moved_past_is_a_session_of_its
 
 def test_reimport_with_fewer_content_turns_is_refused_with_next_steps(env, capsys):
     """2.7/N1: the new export has fewer turns with content - do not overwrite, and
-    say what to do instead (cross-agent continue, or fork-then-reimport)."""
+    say what to do instead (cross-agent continue, or continue-then-reimport)."""
     _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     env.sessions["ses_a"].pop()  # the source lost a turn with content
     code, out, err = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     assert code != 0
     assert "比原本少" in err and "跨 agent" in err and "分支" in err
+    assert "--fork" not in err  # M-1: fork does not branch, so it must not be suggested
     # the stored version is untouched: reimporting the full transcript still lands there
     env.sessions["ses_a"].append("好的，三個步驟")
     _, second, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     assert second == first
+
+
+def test_reimport_refusal_next_step_branches_without_fork(env, capsys):
+    """M-1: following the refusal message works - a non-fork continue branches the
+    Session, so reimporting the shorter source then saves as new instead of being
+    refused again."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    env.sessions["ses_a"].pop()  # the source lost a turn with content
+    code, _, err = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code != 0 and "--fork" not in err
+    run(capsys, "continue", "session", first, "--agent", "opencode", "--dir", "/tmp")
+    code, second, err = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code == 0, err
+    assert second != first
 
 
 def test_reimport_losing_only_empty_turns_still_updates(env, capsys):
