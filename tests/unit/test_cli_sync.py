@@ -1209,10 +1209,15 @@ def test_subprocess_mid_run_rescue_interleaving(claude_lab, capsys, monkeypatch,
     _wait_for(lambda: on_drive(a).joinpath("session.md").is_file() and
                       "ZZ 第 2 句" in (on_drive(a) / "session.md").read_text(encoding="utf-8"),
               timeout=20.0, what="sentence 2 on drive")
-    # Delete A on Drive
+    # Delete A on Drive, then let the run go on: from here on it works on a session
+    # that is already gone, and it is still running.
     shutil.rmtree(on_drive(a), ignore_errors=True)
+    release.touch()
     assert proc.wait(timeout=60) == 0
     os.close(fd)
+    # The rescue may be the uploader's (a process of the child's, not ours to wait on):
+    # wait for it to be indexed, and only then read the run's own answer.
+    _wait_for(lambda: len(_extra_sessions(a)) >= 1, timeout=30.0, what="the rescue of A")
     _wait_for(lambda: not store.uploader_is_running(paths()), timeout=10.0, what="subprocess uploader finished")
     text = terminal.read_text(encoding="utf-8")
     last_line = [l.strip() for l in text.splitlines() if l.strip().startswith("agora:")][-1]
