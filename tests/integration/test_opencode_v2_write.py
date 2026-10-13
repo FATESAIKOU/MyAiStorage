@@ -69,6 +69,7 @@ def test_v2_native_import_run_collect(tmp_path, monkeypatch):
                      ("AGORA_CACHE_DIR", str(tmp_path / "agora-cache")),
                      ("AGORA_STATE_DIR", str(tmp_path / "agora-state")),
                      ("AGORA_RCLONE", "fake"),
+                     ("AGORA_OPENCODE_CMD", REAL),
                      ("RCLONE_CONFIG", str(tmp_path / "agora-config" / "rclone.conf"))):
         monkeypatch.setenv(var, val)
     for var in ("OPENCODE_API_KEY", "OPENCODE_PERMISSION"):

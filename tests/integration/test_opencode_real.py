@@ -31,6 +31,7 @@ import sys
 import pytest
 
 from agora.agents import base, opencode as oc
+from agora.agents.base import AgentError
 
 # The model chain lives in the fake so the e2e uses the same one (tests/fakes is
 # not a package; the integration tests are the only importers).
@@ -104,6 +105,9 @@ def isolated_store(opencode_home, monkeypatch):
     monkeypatch.setenv("HOME", str(opencode_home))
     for var in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
         monkeypatch.delenv(var, raising=False)
+    if OPENCODE:
+        # the adapter goes through the same executable this file resolved
+        monkeypatch.setenv("AGORA_OPENCODE_CMD", OPENCODE)
     return opencode_home
 
 
@@ -258,7 +262,7 @@ def test_fixture_is_self_authored():
     assert "把 CSV 轉成 Markdown 表格" in text
 
 
-@pytest.mark.skipif(shutil.which("opencode") is None, reason="opencode is not installed")
+@pytest.mark.skipif(OPENCODE is None, reason="opencode is not installed")
 def test_opencode_is_the_executable_we_expect():
     assert oc.agent_cmd("opencode") in ("opencode", os.environ.get("AGORA_OPENCODE_CMD", "opencode"))
 
@@ -274,6 +278,8 @@ def test_real_summarize_answers_and_cleans_up_after_itself(project, isolated_sto
     of this module uses - so a leftover summarize session cannot be mistaken for
     something the other tests own.
     """
+    if os.environ.get("AGORA_TEST_NO_MODEL"):
+        pytest.skip("AGORA_TEST_NO_MODEL=1：這次不對外要模型")
     workdir = SUMMARIZE_WORKDIR / "summarize"
     if workdir.exists():
         shutil.rmtree(workdir)
@@ -289,7 +295,13 @@ def test_real_summarize_answers_and_cleans_up_after_itself(project, isolated_sto
 
     prompt = ("以下是材料，請寫一段三行的要約給之後接手的人，只輸出要約本身：\n"
               "ZZMATERIAL 我們決定用 Markdown 表格輸出；ZZMATERIAL 未解決的是欄位對齊。")
-    text, model = oc.ADAPTER.summarize(prompt, workdir)
+    try:
+        text, model = oc.ADAPTER.summarize(prompt, workdir)
+    except AgentError as e:
+        # No free model answered (offline, out of quota): this smoke test skips
+        # the way the other model tests do, it does not fail the suite. The
+        # adapter's own failures are covered by the unit tests.
+        pytest.skip(f"免費模型不可用：{e}")
 
     assert text.strip(), "沒有回覆"
     assert model, "拿不到這次用的模型名稱（design 5.3 的 generated.by 要用）"
