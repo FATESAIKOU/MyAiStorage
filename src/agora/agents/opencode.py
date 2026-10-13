@@ -300,24 +300,24 @@ def _last_reply(stdout: bytes) -> tuple[str | None, str | None]:
 
 
 def _session_info(created: int) -> dict:
-    """The smallest `info` opencode will import *and* export again.
+    """The smallest v2 `info` opencode will import *and* export again (2.1/2.2).
 
-    Import rejects the whole payload when a field is missing, and export needs
-    all of them, so a session that cannot be exported cannot be collected after
-    the agent has worked in it. The id is a placeholder (start_native re-identifies
-    the whole payload), and so are `directory` / `projectID`: import rewrites both
-    from the working directory (spike V5).
+    Measured 2.0.26 in isolation: required are `id` (`ses` prefix), `cost`,
+    `location.directory` (may be empty, `--directory` rewrites it), `projectID`
+    (may be empty, but must be present), `time.created/updated`, and the full
+    `tokens` (`input/output/reasoning/cache.read/write`). Optional
+    (`model/outcome/title/time.idle`) are omitted except `title`, which the CLI
+    overwrites with the real one and opencode rewrites on the next continue
+    anyway. The id is a placeholder (start_native re-identifies the whole
+    payload), and so are `directory` / `projectID`: import rewrites both from
+    the working directory (spike V5, v2 §location).
     """
-    stamp = {"created": created, "updated": created}
     return {
-        "id": PLACEHOLDER_ID, "slug": "agora-handoff", "title": NATIVE_TITLE,
-        "directory": "", "projectID": "", "path": "",
-        "agent": "build", "version": "", "cost": 0, "permission": [],
-        "model": {"id": "", "providerID": "opencode", "variant": "default"},
-        "summary": {"additions": 0, "deletions": 0, "files": 0},
+        "id": PLACEHOLDER_ID, "projectID": "", "cost": 0,
         "tokens": {"input": 0, "output": 0, "reasoning": 0,
                    "cache": {"read": 0, "write": 0}},
-        "time": stamp,
+        "time": {"created": created, "updated": created},
+        "title": NATIVE_TITLE, "location": {"directory": ""},
     }
 
 
@@ -535,6 +535,82 @@ def _unused_stem(messages: list[dict]) -> str:
     return stem
 
 
+def _row_created_ms(row: dict, fallback: int = 0) -> int:
+    """A flat v2 row's `time.created` (M1: v1 reads `m.get("info")`, v2 has none)."""
+    clock = row.get("time")
+    created = clock.get("created") if isinstance(clock, dict) else None
+    return created if isinstance(created, int) else fallback
+
+
+def _apply_revert_v2(payload: dict) -> None:
+    """The v2 half of `_apply_revert` (M1): flat rows, `content` inside them.
+
+    未實測、open：v2 的真匯出沒有 `revert` 欄位可量（`session` 子指令沒有 undo／
+    revert 操作，TUI 觸發的 undo 形狀沒量過），以下形狀是照 v1 類推的——`info.revert
+    {messageID, partID}` 配扁平列／`content`。行為由合成 payload 的單元測試鎖住
+    （拆掉即紅）；量到真形狀時以實測為準改這裡。
+    """
+    info = payload.get("info")
+    revert = info.get("revert") if isinstance(info, dict) else None
+    if not isinstance(revert, dict):
+        return
+    messages = _payload_messages(payload)
+    found = next((n for n, row in enumerate(messages)
+                  if str(row.get("id")) == str(revert.get("messageID"))), -1)
+    if found >= 0:
+        part_id = revert.get("partID")
+        del messages[found + (1 if part_id else 0):]
+        if part_id and isinstance(messages[found].get("content"), list):
+            content = messages[found]["content"]
+            cut = next((n for n, item in enumerate(content)
+                        if isinstance(item, dict) and item.get("id") == part_id), -1)
+            if cut >= 0:
+                del content[cut:]
+    if isinstance(info, dict):
+        info.pop("revert", None)
+
+
+def _role_fields_v2(payload: dict) -> dict[str, dict]:
+    """Per role, the fields a new v2 row has to copy (M1).
+
+    v2 user rows carry no agent/model (just `text`), so there is nothing to
+    copy for them; a new assistant row carries the `agent` and `model` the
+    session was using, read off its last assistant row. Without this the fork's
+    new rows would record no model at all (`_last_model` stops at the last
+    assistant), and opencode could come back on a model this session never used.
+    """
+    fields: dict[str, dict] = {"user": {}, "assistant": {}}
+    for row in reversed(_payload_messages(payload)):
+        if row.get("type") != "assistant" or fields["assistant"]:
+            continue
+        picked = fields["assistant"]
+        agent = row.get("agent")
+        if isinstance(agent, str) and agent:
+            picked["agent"] = agent
+        model = row.get("model")
+        if isinstance(model, dict):
+            picked["model"] = json.loads(json.dumps(model))
+        break
+    return fields
+
+
+def _unused_stem_v2(messages: list[dict]) -> str:
+    """An id stem nothing in this v2 payload uses (M1).
+
+    Flat rows (`msg_...`) plus the content items that carry an id (a tool
+    call's `call_...`, re-identified to `prt_...`); new `msg_agora...` rows must
+    not collide with any of them, the same rule `_unused_stem` enforces for v1.
+    """
+    taken = {str(row.get("id")) for row in messages}
+    taken |= {str(item.get("id")) for row in messages
+              for item in (row.get("content") or []) if isinstance(item, dict)}
+    stem = "agora"
+    while any(value.startswith(("msg_", "prt_", "call_")) and stem in value
+              for value in taken):
+        stem += "a"
+    return stem
+
+
 def _said(blob: str) -> str | None:
     """The text one part blob holds, if it is text the session said.
 
@@ -723,7 +799,9 @@ def _user_text(text: object) -> str | None:
     v2's *first* user row stores the prompt JSON-encoded (`"hello"`), later ones
     plain (measured 2.0.26) - the CLI wraps its positional argument and nothing
     else does. Decoding when it is a JSON string keeps the reading version showing
-    the user's words instead of their escaping.
+    the user's words instead of their escaping. Only the first user row goes through
+    here (`turns()` keeps later rows verbatim), so a later message that literally
+    reads `"abc"` keeps its quotes (L-10).
     """
     if not isinstance(text, str) or not text.strip():
         return None
@@ -833,12 +911,13 @@ class OpencodeAgent:
     def _import_verified(self, payload: dict, cwd: Path) -> tuple[str, int]:
         """Import, read it back, and prove nothing was dropped (rules 2 and 4).
 
-        Returns (session id, messages landed). Messages *and* parts are compared:
-        a colliding part id leaves the message count intact, so counting only
-        messages would wave through a session that quietly lost content. A v2
-        payload has no parts layer - the per-content count belongs to step 2 (M2) -
-        and what comes back is counted the way `export().message_count` counts it
-        (user/assistant rows; `idle` is not conversation, M8).
+        Returns (session id, messages landed). Messages *and* content items are
+        compared: a colliding part id leaves the message count intact, so counting
+        only messages would wave through a session that quietly lost content (M2).
+        The second layer is what the format can count - v1 `parts`, v2 assistant
+        rows' `content` items; a format with no such layer only compares message
+        counts. What comes back is counted the way `export().message_count`
+        counts it (user/assistant rows; `idle` is not conversation, M8).
         """
         session_id = str((payload.get("info") or {}).get("id") or "")
         if not session_id:
@@ -846,17 +925,27 @@ class OpencodeAgent:
         messages = _payload_messages(payload)
         fmt = _payload_format(payload)
         count = _message_count(payload, fmt)
-        parts = sum(len(m.get("parts") or []) for m in messages)
+        if fmt == "v2":
+            items = sum(len(m.get("content") or []) for m in messages
+                        if m.get("type") == "assistant")
+            item_word = "個內容"
+        else:
+            items = sum(len(m.get("parts") or []) for m in messages)
+            item_word = "個 part"
         self._import(payload, cwd)
         landed_payload = self._read(self._export_bytes(session_id, cwd=cwd))
         landed = _payload_messages(landed_payload)
         landed_count = _message_count(landed_payload, fmt)
-        landed_parts = sum(len(m.get("parts") or []) for m in landed)
-        if len(landed) != len(messages) or landed_count != count or landed_parts != parts:
+        if fmt == "v2":
+            landed_items = sum(len(m.get("content") or []) for m in landed
+                               if m.get("type") == "assistant")
+        else:
+            landed_items = sum(len(m.get("parts") or []) for m in landed)
+        if len(landed) != len(messages) or landed_count != count or landed_items != items:
             tail = self._discard(session_id, cwd)
             raise AgentError(
-                f"opencode import 後數量不對（來源 {len(messages)} 則／{count} 句／{parts} 個 part，"
-                f"匯入後 {len(landed)} 則／{landed_count} 句／{landed_parts} 個），{tail}；"
+                f"opencode import 後數量不對（來源 {len(messages)} 則／{count} 句／{items}{item_word}，"
+                f"匯入後 {len(landed)} 則／{landed_count} 句／{landed_items}{item_word}），{tail}；"
                 "多半是 id 撞到 opencode 裡既有的 Session")
         return session_id, landed_count
 
@@ -915,10 +1004,16 @@ class OpencodeAgent:
         payload = self._read(raw)
         out: Turns = []
         if _payload_format(payload) == "v2":
+            first_user = True  # only the first user row is CLI JSON-encoded (L-10)
             for row in _payload_messages(payload):
                 kind = row.get("type")
                 if kind == "user":
-                    text = _user_text(row.get("text"))
+                    if first_user:
+                        text = _user_text(row.get("text"))
+                    else:
+                        raw_text = row.get("text")
+                        text = raw_text.strip() if isinstance(raw_text, str) and raw_text.strip() else None
+                    first_user = False
                     out.append(("user", [text] if text else []))
                 elif kind == "assistant":
                     out.append(("assistant", _lines_of_v2(row.get("content") or [])))
@@ -930,73 +1025,66 @@ class OpencodeAgent:
         return out
 
     def native(self, turns: Turns) -> bytes:
-        """Turns as an opencode export, ready for `start_native` to load.
+        """Turns as a v2 opencode export, ready for `start_native` to load (2.2).
 
         The caller (cli._converted_turns) hands over what design v5 promises:
         starts with a user turn, strictly alternating, no empty turn, no
         `[skip …]` line. So this only has to compose them in order - no merging,
         no padding.
 
-        Plain, visible text parts - no synthetic, no attachment: whatever a
-        session says has to be on screen when the agent opens. One part per line,
-        the way opencode stores a multi-paragraph reply, so `turns(native(
-        turns(raw)))` is the same list of lines it started from.
+        Flat rows (design 5, measured 2.0.26): a user row carries its words in
+        one `text` (lines joined - v2 has no per-line parts for users), an
+        assistant row carries one `text` content item per line, so
+        `turns(native(turns))` keeps the assistant's lines. Plain, visible text
+        only - no synthetic, no attachment: whatever a session says has to be
+        on screen when the agent opens. Ids keep opencode's prefixes
+        (`ses`/`msg_`; text items carry no id per the fixture, a tool call's
+        would be `call_`/`prt_`), because a payload whose ids do not start
+        with them is refused outright.
         """
         created = int(time.time() * 1000)
         messages: list[dict] = []
-        previous = ""
         for role, lines in turns:
             # the contract says both are true already; the check keeps a caller
-            # that breaks it from producing a message opencode would reject
+            # that breaks it from producing a row opencode would reject
             body = [line for line in lines if line.strip()]
             if role not in ("user", "assistant") or not body:
                 continue
             at = created + len(messages)   # times move forward: opencode sorts by them
             message_id = f"msg_agora{len(messages)}"
-            info = {"id": message_id, "sessionID": PLACEHOLDER_ID, "role": role,
-                    "time": {"created": at}, "agent": "build",
-                    "model": {"providerID": "opencode", "modelID": ""}}
-            if role == "assistant":
-                # import rejects an assistant message whose parentID is null, so
-                # it has to point at the message it answers; the rest of these
-                # fields are what its schema insists on (measured: each missing
-                # one is "Missing key at [...]" and the whole payload is refused)
-                info.update({"parentID": previous, "mode": "build", "finish": "stop",
-                             "providerID": "opencode", "modelID": "", "cost": 0,
-                             "path": {"cwd": "", "root": ""},
-                             "tokens": {"total": 0, "input": 0, "output": 0,
-                                        "reasoning": 0,
-                                        "cache": {"read": 0, "write": 0}}})
-                info["time"]["completed"] = at
+            if role == "user":
+                messages.append({"id": message_id, "time": {"created": at},
+                                 "text": "\n".join(body), "files": [], "type": "user"})
             else:
-                info["summary"] = {"diffs": []}
-            messages.append({"info": info, "parts": [
-                {"id": f"prt_agora{len(messages)}-{n}", "sessionID": PLACEHOLDER_ID,
-                 "messageID": message_id, "type": "text", "text": line}
-                for n, line in enumerate(body)]})
-            previous = message_id
+                messages.append({"id": message_id, "time": {"created": at, "completed": at},
+                                 "type": "assistant", "agent": "build",
+                                 "model": {"id": "", "providerID": "opencode",
+                                           "variant": "default"},
+                                 "content": [{"type": "text", "text": line}
+                                             for line in body]})
         payload = {"info": _session_info(created), "messages": messages}
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     def append_native(self, raw: bytes, turns: Turns) -> bytes:
-        """A's own export with `turns` added as new messages (F4).
+        """A's own export with `turns` added as new messages (F4, v2 in step 2).
 
         A same-agent fork loads A's session as it is, so the fork's two turns cannot
         go through `native()`: that rebuilds the conversation out of its reading
         version and loses every tool call. So this is A's payload, copied, with the
         undo pointer applied first (so the fork does not inherit a tail opencode
-        would hide and then delete) and the turns appended as ordinary messages -
-        chained to A's last one, carrying the model and mode A was using, and visible
-        plain text like everything else `native()` writes.
-
-        A v2 raw is refused before anything happens: appending to the flat rows is
-        what step 2 of agora-opencode-v2 writes (the helpers below only know the
-        nested shape), so today the answer is an explicit refusal, not a payload
-        v2's import would reject - or worse, accept half of (design 8).
+        would hide and then delete) and the turns appended as ordinary rows -
+        carrying the model A was using, and visible plain text like everything
+        else `native()` writes. The existing rows keep their content (tests compare
+        them as parsed JSON); the stored bytes may differ in whitespace, escaping
+        or number formatting after a loads/dumps round trip. v2 rows carry no
+        parent link, so the new rows chain by time order, not by id.
         """
         payload = self._read(raw)
         if _payload_format(payload) == "v2":
-            raise AgentError("opencode v2 的 Session 還不能 fork／同 agent 接續，第 2 步才支援")
+            return self._append_native_v2(payload, turns)
+        # v1 分支只剩測試用（L-11）：經此建出的 v1 payload 必被 `start_native`
+        # 拒絕（2.5），進不了 `session import`；跨 agent 接續走 `native()`＋閱讀版，
+        # 不經這裡。v1 helper 留著是為了既有單元測試，不再演進。
         _apply_revert(payload)
         messages = _payload_messages(payload)
         body = [(role, [line for line in lines if line.strip()]) for role, lines in turns
@@ -1051,6 +1139,56 @@ class OpencodeAgent:
                 for n, line in enumerate(lines)]})
             if role == "user":
                 previous = message_id
+        return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    def _append_native_v2(self, payload: dict, turns: Turns) -> bytes:
+        """The v2 half of `append_native` (M1): copy the flat rows, append new ones.
+
+        The v1-only helpers below each get their v2 counterpart here: `_apply_revert`
+        reads `info.revert`/`messages[].parts`, this reads the same pointer against
+        flat rows/`content`; `_role_fields` reads `info.role`/`providerID`/`modelID`,
+        this reads `type`/`agent`/`model.id`; `_unused_stem` reads `info`/`parts`
+        ids, this reads row/content ids; `said`/`last_question` look at `type`,
+        times come from `row["time"]` (`_row_created_ms`), and `_last_model`
+        already reads `model.id` for both. New rows are minimal but complete
+        (2.1's required set): user `{id,time,text,files,type}`, assistant
+        `{id,time,type,agent,model,content:[{type,text}]}` - no synthetic, no
+        attachment, no parent link (v2 has none). The fork's new assistant rows
+        copy the model A was using, so `_last_model` still answers with A's model.
+        """
+        _apply_revert_v2(payload)
+        messages = _payload_messages(payload)
+        body = [(role, [line for line in lines if line.strip()]) for role, lines in turns
+                if role in ("user", "assistant") and any(line.strip() for line in lines)]
+        said = [m for m in messages if m.get("type") in ("user", "assistant")]
+        # W1, same rule as v1: what the reading version is about to show, once its
+        # `[skip …]` lines are gone - an interrupted run leaves an assistant with
+        # nothing in it, and the turn before it is still the user's open question.
+        spoken = merge_turns([(role, [line for line in lines if not line.startswith("[skip ")])
+                              for role, lines in self.turns(
+                                  json.dumps(payload, ensure_ascii=False).encode("utf-8"))])
+        if body and spoken and spoken[-1][0] == "user":
+            body.insert(0, ("assistant", [NO_REPLY]))
+        fields = _role_fields_v2(payload)
+        stem = _unused_stem_v2(messages)
+        first = max(int(time.time() * 1000),
+                    1 + max((_row_created_ms(m) for m in messages), default=0))
+        for position, (role, lines) in enumerate(body):
+            at = first + position
+            message_id = f"msg_{stem}{position}"
+            if role == "user":
+                messages.append({"id": message_id, "time": {"created": at},
+                                 "text": "\n".join(lines), "files": [], "type": "user"})
+            else:
+                copied = fields.get("assistant") or {}
+                model = copied.get("model") or {"id": "", "providerID": "opencode",
+                                                "variant": "default"}
+                messages.append({"id": message_id, "time": {"created": at, "completed": at},
+                                 "type": "assistant",
+                                 "agent": copied.get("agent", "build"),
+                                 "model": json.loads(json.dumps(model)),
+                                 "content": [{"type": "text", "text": line}
+                                             for line in lines]})
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     def list_sessions(self) -> list[Listed]:
@@ -1325,8 +1463,23 @@ class OpencodeAgent:
 
     def start_native(self, raw: bytes, workdir: Path, *, headless: bool = False,
                      headless_port: int | None = None) -> Launch:
+        payload = self._read(raw)
+        if _payload_format(payload) == "v1":
+            # Decisions 8 (M5): a v1 raw cannot be loaded on a 2.x opencode at all
+            # (`session import` refuses it), so refusing here - before any import,
+            # before any pending is written - leaves the Session and its raw alone
+            # and never hands a v1 payload to a v2 import (which would leave half
+            # a Session). The id comes from the payload itself.
+            old_id = str((payload.get("info") or {}).get("id") or "")
+            raise AgentError(
+                f"這是 opencode 1.x 時代的 Session（v1 巢狀格式），不能用同一個 agent 接續／fork"
+                f"（來源 agent session：{old_id or '未知'}；opencode 2.x 的 session import 拒收 v1）。"
+                f"要接續請先重新匯入：`agora import session --external-session-id {old_id or '<id>'}"
+                " --agent opencode`。注意：重新匯入不一定原地更新——被 merge／continue 分支過的"
+                " Session 會另存成新的 Session；來源不在本機時只能改用跨 agent 接續"
+                "（例如 `--agent claude`，走閱讀版轉換）。")
         session_id, landed = self._import_verified(
-            reidentify(self._read(raw), session_id=_session_id()), workdir)
+            reidentify(payload, session_id=_session_id()), workdir)
         if headless:
             # The server mode from the spike (design D6): the caller allocated
             # the port (sidecar passes --headless-port) and talks HTTP to it;

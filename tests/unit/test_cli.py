@@ -138,6 +138,146 @@ def test_reimporting_the_agent_session_a_continue_moved_past_is_a_session_of_its
     assert second != first
 
 
+def test_reimport_with_fewer_content_turns_is_refused_with_next_steps(env, capsys):
+    """2.7/N1: the new export has fewer turns with content - do not overwrite, and
+    say what to do instead (cross-agent continue, or continue-then-reimport)."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    env.sessions["ses_a"].pop()  # the source lost a turn with content
+    code, out, err = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code != 0
+    assert "比原本少" in err and "跨 agent" in err and "分支" in err
+    assert "--fork" not in err  # M-1: fork does not branch, so it must not be suggested
+    # the stored version is untouched: reimporting the full transcript still lands there
+    env.sessions["ses_a"].append("好的，三個步驟")
+    _, second, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert second == first
+
+
+def test_reimport_refusal_next_step_branches_without_fork(env, capsys):
+    """M-1: following the refusal message works - a non-fork continue branches the
+    Session, so reimporting the shorter source then saves as new instead of being
+    refused again."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    env.sessions["ses_a"].pop()  # the source lost a turn with content
+    code, _, err = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code != 0 and "--fork" not in err
+    run(capsys, "continue", "session", first, "--agent", "opencode", "--dir", "/tmp")
+    code, second, err = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code == 0, err
+    assert second != first
+
+
+def test_reimport_after_contentless_continue_is_still_refused(env, capsys):
+    """N-1: continuing without new conversation leaves no child version, so a
+    further reimport is still refused - and the message says a continue needs
+    new conversation to count as a branch."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    env.sessions["ses_a"].pop()  # the source lost a turn with content
+    code, _, err = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code != 0
+    env.speak = False  # the agent says nothing new
+    _, _, err = run(capsys, "continue", "session", first, "--agent", "opencode", "--dir", "/tmp")
+    assert "沒有新內容" in err
+    code, _, err = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code != 0
+    assert "至少一則新對話" in err
+
+
+def test_reimport_losing_only_empty_turns_still_updates(env, capsys):
+    """2.7/N1: a legit undo drops empty turns - that is not "less conversation"."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    env.sessions["ses_a"].insert(1, "")  # an empty turn in the middle of the stored version
+    _, second, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert second == first  # updated in place (more total, same content)
+    env.sessions["ses_a"].remove("")  # the undo takes the empty turn away again
+    _, third, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert third == first  # only an empty turn vanished: still updates, not refused
+
+
+def test_reimport_without_old_raw_comparison_says_so_loudly(env, capsys, monkeypatch):
+    """N-2(a): the old raw cannot be read (StoreError) - the update proceeds but
+    stderr says the shrink check was skipped."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    env.sessions["ses_a"].append("新的一則")
+
+    def missing(*args, **kwargs):
+        raise store.StoreError("ZZSTORE 舊的不見了")
+
+    monkeypatch.setattr(store, "fetch_raw", missing)
+    code, second, err = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code == 0 and second == first
+    assert "沒做「變少不覆蓋」比對" in err
+
+
+def test_reimport_with_unparsable_old_raw_still_updates_loudly(env, capsys, monkeypatch):
+    """N-2(a): the old raw parses to something turns() rejects (AgentError) - same
+    fail-open with the same loud note, not a refusal and not silence."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    env.sessions["ses_a"].append("新的一則")
+    monkeypatch.setattr(store, "fetch_raw", lambda *args, **kwargs: b'{"id": "ses_a"}')
+    orig = env.turns
+
+    def turns(raw):
+        try:
+            return orig(raw)
+        except (KeyError, ValueError) as e:
+            raise AgentError(f"ZZBAD 舊 raw 讀不了：{e}")
+
+    monkeypatch.setattr(env, "turns", turns)
+    code, second, err = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code == 0 and second == first
+    assert "沒做「變少不覆蓋」比對" in err
+
+
+def test_reimport_unchanged_does_not_fetch_old_raw(env, capsys, monkeypatch):
+    """N-2(b)/L-4: identical bytes need no comparison - the old raw is not even
+    fetched, with or without header-only updates."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    calls = []
+    real = store.fetch_raw
+
+    def counting(*args, **kwargs):
+        calls.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "fetch_raw", counting)
+    code, second, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code == 0 and second == first
+    code, _, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode",
+                     "--header", "title=ZZ")
+    assert code == 0
+    assert calls == []
+
+
+def test_new_and_unexpected_errors_are_not_swallowed(env, capsys, monkeypatch):
+    """N-2(c): a failure on the new side was never inside the guard's try, and an
+    unexpected old-side error type is not mistaken for "old raw missing" - both
+    surface instead of silently overwriting."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    env.sessions["ses_a"].append("新的一則")
+    new_bytes = json.dumps({"id": "ses_a", "m": list(env.sessions["ses_a"])},
+                           ensure_ascii=False).encode()
+    orig = env.turns
+
+    def turns(raw):
+        if raw == new_bytes:
+            raise AgentError("ZZBAD 新的壞了")
+        return orig(raw)
+
+    monkeypatch.setattr(env, "turns", turns)
+    code, _, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code != 0
+
+    def turns2(raw):
+        if len(json.loads(raw)["m"]) == 2:  # the stored old raw: unexpected error type
+            raise RuntimeError("ZZBUG 非預期")
+        return orig(raw)
+
+    monkeypatch.setattr(env, "turns", turns2)
+    code, _, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code != 0
+
+
 def test_continue_writes_back_into_the_same_session(env, capsys):  # design 5.4, user's call
     _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     code, out, _ = run(capsys, "continue", "session", parent, "--agent", "opencode", "--dir", "/tmp",

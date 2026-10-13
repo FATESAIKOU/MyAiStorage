@@ -381,17 +381,143 @@ def test_the_fake_refuses_a_v1_payload_the_way_2x_does(fake, tmp_path, monkeypat
     assert both.returncode != 0 and "SchemaError" in both.stderr
 
 
-def test_a_v2_fork_is_refused_before_anything_is_imported(fake, workdir):
-    """Appending to the flat rows is step 2's work (review of step 1): the fork of
-    a v2 Session must say so instead of handing out a payload 2.x would refuse -
-    or accept half of - and nothing may reach opencode until it does."""
-    with pytest.raises(AgentError, match="還不能 fork"):
-        oc.ADAPTER.append_native(fork(), [("user", ["ZZFORK 再問一句。"]),
-                                          ("assistant", ["ZZFORK 回答。"])])
-    # the refusal came before the import: no call at all left the process, and the
-    # source session is not even in the fake's store - only the fixture is
-    assert not (fake / "opencode-calls.log").exists()
-    assert [path.stem for path in (fake / "opencode-sessions").glob("*.json")] == ["default"]
+def test_a_v2_fork_appends_flat_rows_and_keeps_the_tool_calls(fake, workdir):
+    """M1: the fork of a v2 Session is the flat rows plus two new ones - the
+    tool call stays, the rest of the payload stays byte-for-byte, and the new
+    assistant row carries the model A was using with times after everything."""
+    before = json.loads(fork())
+    out = json.loads(oc.ADAPTER.append_native(
+        fork(), [("user", ["ZZFORK 再問一句。"]), ("assistant", ["ZZFORK 回答。"])]))
+    assert len(out["messages"]) == len(before["messages"]) + 2
+    assert [m.get("type") for m in out["messages"][-2:]] == ["user", "assistant"]
+    # the original rows are untouched (content-wise, not formatting)
+    assert json.dumps(out["messages"][:len(before["messages"])],
+                      sort_keys=True, ensure_ascii=False) == \
+        json.dumps(before["messages"], sort_keys=True, ensure_ascii=False)
+    # the tool call survived the copy
+    assert any(c.get("type") == "tool"
+               for m in out["messages"] for c in (m.get("content") or []))
+    # the new assistant row points at the right model and lands after everything
+    assert out["messages"][-1]["model"]["id"] == "fake-model"
+    times = [m["time"]["created"] for m in out["messages"]]
+    assert times[-2:] == sorted(times[-2:])
+    assert min(times[-2:]) > max(times[:-2])
+    # and the payload it built loads on a 2.x opencode (fake models it)
+    launch = oc.ADAPTER.start_native(json.dumps(out).encode(), workdir)
+    assert launch.before_count == oc._message_count(before, "v2") + 2
+    assert oc.ADAPTER.export(launch.agent_session_id).message_count == \
+        oc._message_count(out, "v2")
+
+
+def _revert_payload():
+    """A small synthetic v2 payload with an undo pointer (M-2: unmeasured).
+
+    No real v2 export was ever seen carrying `info.revert` (there is no undo／
+    revert session subcommand to produce one headlessly), so the pointer's shape
+    here is by analogy with v1 (`{messageID, partID}` against flat rows and
+    `content`); `_apply_revert_v2` documents it as open.
+    """
+    base = 1790214000000
+    info = {"id": "ses_ZZREVERT000000000000AA", "projectID": "", "cost": 0,
+            "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                       "cache": {"read": 0, "write": 0}},
+            "time": {"created": base, "updated": base}, "title": "t",
+            "location": {"directory": ""}}
+
+    def assistant(i, texts):
+        return {"id": f"msg_ZZRV{i:04d}AAAAAAAA",
+                "time": {"created": base + i, "completed": base + i},
+                "type": "assistant", "agent": "build",
+                "model": {"id": "m", "providerID": "p", "variant": "default"},
+                "content": [{"type": "text", "text": t} for t in texts]}
+
+    rows = [
+        {"id": "msg_ZZRV0000AAAAAAAA", "time": {"created": base},
+         "text": "q1", "files": [], "type": "user"},
+        assistant(1, ["a1"]),
+        {"id": "msg_ZZRV0002AAAAAAAA", "time": {"created": base + 2},
+         "text": "q2", "files": [], "type": "user"},
+        assistant(3, ["a2"]),
+    ]
+    return {"info": info, "messages": rows}
+
+
+def test_apply_revert_v2_drops_the_undone_tail_before_appending(fake):
+    """M-2: the undone rows (and the pointer) go before anything is added, or the
+    fork's turns would sit where opencode hides - and deletes on first reply."""
+    payload = _revert_payload()
+    payload["info"]["revert"] = {"messageID": "msg_ZZRV0002AAAAAAAA"}
+    out = json.loads(oc.ADAPTER.append_native(
+        json.dumps(payload).encode(), [("user", ["ZZNEW"])]))
+    assert "revert" not in out["info"]
+    ids = [m["id"] for m in out["messages"]]
+    assert ids[:2] == ["msg_ZZRV0000AAAAAAAA", "msg_ZZRV0001AAAAAAAA"]
+    assert "msg_ZZRV0002AAAAAAAA" not in ids and "msg_ZZRV0003AAAAAAAA" not in ids
+    assert out["messages"][-1]["text"] == "ZZNEW"
+
+
+def test_apply_revert_v2_cuts_content_at_the_named_item(fake):
+    """M-2: with a partID the row stays but its content stops before the named
+    item, and everything after the row goes."""
+    payload = _revert_payload()
+    payload["messages"][1]["content"].append(
+        {"type": "tool", "id": "call_ZZRV0001AAAAAAAA", "name": "read",
+         "state": {"status": "completed", "input": {}, "content": [{"type": "text", "text": "o"}]},
+         "time": {"created": 1790214000001}})
+    payload["info"]["revert"] = {"messageID": "msg_ZZRV0001AAAAAAAA",
+                                 "partID": "call_ZZRV0001AAAAAAAA"}
+    out = json.loads(oc.ADAPTER.append_native(
+        json.dumps(payload).encode(), [("user", ["ZZNEW"])]))
+    assert "revert" not in out["info"]
+    kept = next(m for m in out["messages"] if m["id"] == "msg_ZZRV0001AAAAAAAA")
+    assert [c.get("type") for c in kept["content"]] == ["text"]
+    assert "msg_ZZRV0002AAAAAAAA" not in {m["id"] for m in out["messages"]}
+
+
+def test_unused_stem_v2_steps_past_taken_stems(fake):
+    """L-5: a constant stem would hand out an id the payload already has."""
+    payload = json.loads(v2())
+    payload["messages"][0]["id"] = "msg_agora0"
+    before = {m["id"] for m in payload["messages"]}
+    out = json.loads(oc.ADAPTER.append_native(
+        json.dumps(payload).encode(), [("user", ["ZZ"])]))
+    fresh = [m["id"] for m in out["messages"][len(payload["messages"]):]]
+    assert fresh and all(i.startswith("msg_agoraa") for i in fresh)
+    assert not (set(fresh) & before)
+
+
+def test_append_native_v2_leaves_info_identical(fake):
+    """L-5: the original `info` (not just the rows) comes through untouched."""
+    before = json.loads(fork())
+    out = json.loads(oc.ADAPTER.append_native(
+        fork(), [("user", ["ZZFORK 再問一句。"]), ("assistant", ["ZZFORK 回答。"])]))
+    assert out["info"] == before["info"]
+
+
+def test_append_native_v2_stands_in_for_an_unanswered_question(fake):
+    """L-5: like v1, a fork onto an open question gets a stand-in reply first."""
+    trimmed = json.loads(v2())
+    del trimmed["messages"][-2:]  # the last answer and its idle: ends on a user turn
+    raw_bytes = json.dumps(trimmed).encode()
+    assert oc.ADAPTER.turns(raw_bytes)[-1][0] == "user"
+    assert oc.ADAPTER.turns(oc.ADAPTER.append_native(raw_bytes, FORK)) == \
+        oc.ADAPTER.turns(raw_bytes) + [("assistant", [base.NO_REPLY])] + FORK
+
+
+def test_append_native_v2_comes_after_a_session_dated_in_the_future(fake):
+    """L-5: opencode orders rows by time.created, so the fork's rows land after
+    everything A has - even when A's clock runs fast. Relative to now, so a
+    "just use now" shortcut goes red."""
+    payload = json.loads(v2())
+    tomorrow = int(time.time() * 1000) + 24 * 3600 * 1000
+    for n, row in enumerate(payload["messages"]):
+        row.setdefault("time", {})["created"] = tomorrow + n
+        if "completed" in row.get("time", {}):
+            row["time"]["completed"] = tomorrow + n
+    after = json.loads(oc.ADAPTER.append_native(
+        json.dumps(payload).encode(), FORK))["messages"]
+    latest = max(m["time"]["created"] for m in after[:-2])
+    assert all(m["time"]["created"] > latest for m in after[-2:])
 
 
 def test_every_automated_call_carries_its_server_context(fake, workdir):
@@ -481,13 +607,13 @@ def test_start_native_detects_a_short_import_and_cleans_up(fake, workdir, monkey
 def test_start_native_reports_a_refused_import(fake, workdir, monkeypatch):
     monkeypatch.setenv("FAKE_OPENCODE_LEAVE", "1")
     with pytest.raises(AgentError, match="import 失敗"):
-        oc.ADAPTER.start_native(raw(), workdir)
+        oc.ADAPTER.start_native(v2(), workdir)
 
 
 def test_start_native_failure_message_has_no_transcript(fake, workdir, monkeypatch):
     monkeypatch.setenv("FAKE_OPENCODE_FAIL", "import")
     with pytest.raises(AgentError) as e:
-        oc.ADAPTER.start_native(raw(), workdir)
+        oc.ADAPTER.start_native(v2(), workdir)
     assert "ZZTOOLOUT" not in str(e.value) and "ZZTHINK" not in str(e.value)
 
 
@@ -500,24 +626,22 @@ def test_start_native_refuses_an_empty_or_broken_export(fake, workdir):
 
 
 def test_native_payload_has_every_field_opencode_needs(fake):
-    """opencode refuses a payload that is missing a field, and one it accepts but
-    cannot export afterwards loses the whole continue result. The integration test
-    found this: a payload with only {id, title, time} imported fine and then
-    failed at `export` with 'Missing key at ["slug"]'.
+    """opencode refuses a payload that is missing a field (2.1: each missing one
+    is `SchemaError: Missing key at [...]` and the whole payload is refused).
 
-    Compared against a real export's shape, which the fixture mirrors.
+    Compared against the real v2 export's shape, which the fixture mirrors.
     """
     payload = json.loads(oc.ADAPTER.native([("user", ["ZZ\n"])]))
-    real = json.loads(raw())
-    # `revert` is what a session the user undid something in carries; a rebuilt
-    # one has nothing to revert.
-    assert set(payload["info"]) == set(real["info"]) - {"revert"}
-    assert isinstance(payload["info"]["permission"], list)
+    real = json.loads(v2())
+    assert set(payload["info"]) == {"id", "projectID", "cost", "tokens",
+                                    "time", "title", "location"}
+    assert set(real["info"]) >= set(payload["info"])
     assert set(payload["info"]["tokens"]["cache"]) == {"read", "write"}
-    real_user = next(m for m in real["messages"] if m["info"]["role"] == "user")
-    assert set(payload["messages"][0]["info"]) == set(real_user["info"])
-    assert set(payload["messages"][0]["info"]["summary"]) == {"diffs"}
-    assert set(payload["messages"][0]["info"]["model"]) == {"providerID", "modelID"}
+    assert set(payload["info"]["time"]) == {"created", "updated"}
+    assert payload["info"]["location"] == {"directory": ""}
+    user = payload["messages"][0]
+    assert set(user) == {"id", "time", "text", "files", "type"}
+    assert user["type"] == "user" and user["files"] == []
 
 
 # --- collect (S9) ---------------------------------------------------------
@@ -702,41 +826,44 @@ def test_a_reverted_session_keeps_its_undo_pointer(fake):
 
 
 def test_native_round_trips_the_lines(fake):
-    """(1) native(turns(raw)) and turns() again give the same lines."""
-    turns = oc.ADAPTER.turns(raw())
+    """(1) native(turns(v2)) and turns() again give the same lines (v2, 2.2)."""
+    turns = oc.ADAPTER.turns(v2())
     assert oc.ADAPTER.turns(oc.ADAPTER.native(turns)) == turns
 
 
 def test_native_is_visible_plain_text(fake):
     """No synthetic, no attachment: design v5 wants the history on screen when
-    the agent opens, so the parts have to be ordinary text parts."""
-    payload = json.loads(oc.ADAPTER.native(oc.ADAPTER.turns(raw())))
-    roles = [m["info"]["role"] for m in payload["messages"]]
-    assert roles == ["user", "assistant", "user", "assistant"]
+    the agent opens, so assistant rows have to be ordinary text content."""
+    payload = json.loads(oc.ADAPTER.native(oc.ADAPTER.turns(v2())))
+    assert [m.get("type") for m in payload["messages"]] == \
+        ["user", "assistant", "assistant", "user", "assistant"]
     for message in payload["messages"]:
-        for part in message["parts"]:
-            assert part["type"] == "text"
-            assert "synthetic" not in part and "metadata" not in part
-            assert part["text"].strip()
+        if message["type"] == "assistant":
+            for item in message["content"]:
+                assert item["type"] == "text"
+                assert "synthetic" not in item and "metadata" not in item
+                assert item["text"].strip()
+        else:
+            assert isinstance(message["text"], str) and message["text"].strip()
+            assert "synthetic" not in message
 
 
-def test_native_links_every_assistant_message_to_a_parent(fake):
-    """opencode rejects an assistant message whose parentID is null (it is how
-    /undo finds the message to drop), so native() chains them."""
-    payload = json.loads(oc.ADAPTER.native(oc.ADAPTER.turns(raw())))
-    ids = [m["info"]["id"] for m in payload["messages"]]
-    for position, message in enumerate(payload["messages"]):
-        if message["info"]["role"] == "assistant":
-            assert message["info"]["parentID"] == ids[position - 1]
+def test_native_v2_rows_carry_no_parent_link(fake):
+    """v2 rows are flat (measured 2.0.26: no parentID/sessionID on the rows), so
+    a rebuilt session chains nothing - the fork path (append_native, 2.3) is
+    what keeps the tool calls and the order, not parent pointers."""
+    payload = json.loads(oc.ADAPTER.native(oc.ADAPTER.turns(v2())))
+    for message in payload["messages"]:
+        assert "parentID" not in message and "info" not in message
 
 
 def test_native_will_not_emit_an_empty_message(fake):
     """cli._converted_turns promises user-first, alternating, non-empty turns, so
     this only guards a caller that breaks the contract: an empty turn must not
-    become a message with empty text."""
+    become a row with empty text."""
     payload = json.loads(oc.ADAPTER.native([
         ("user", []), ("assistant", ["ZZ 有一句"]), ("system", ["ZZ 不該出現"])]))
-    assert [m["info"]["role"] for m in payload["messages"]] == ["assistant"]
+    assert [m.get("type") for m in payload["messages"]] == ["assistant"]
 
 
 def test_native_takes_converted_turns_as_they_come(fake):
@@ -746,44 +873,44 @@ def test_native_takes_converted_turns_as_they_come(fake):
                  ("assistant", ["ZZ 讀取中", "[tool] read {filePath: a.csv}"]),
                  ("user", ["ZZ 繼續嗎"])]
     payload = json.loads(oc.ADAPTER.native(converted))
-    assert [m["info"]["role"] for m in payload["messages"]] == ["user", "assistant", "user"]
-    assert [len(m["parts"]) for m in payload["messages"]] == [1, 2, 1]
+    assert [m.get("type") for m in payload["messages"]] == ["user", "assistant", "user"]
+    assert payload["messages"][0]["text"] == converted[0][1][0]
+    assert [c["text"] for c in payload["messages"][1]["content"]] == converted[1][1]
     assert oc.ADAPTER.turns(oc.ADAPTER.native(converted)) == converted
 
 
 
 def test_native_gives_every_message_a_later_time_than_the_last(fake):
-    payload = json.loads(oc.ADAPTER.native(oc.ADAPTER.turns(raw())))
-    times = [m["info"]["time"]["created"] for m in payload["messages"]]
+    payload = json.loads(oc.ADAPTER.native(oc.ADAPTER.turns(v2())))
+    times = [m["time"]["created"] for m in payload["messages"]]
     assert times == sorted(times) and len(set(times)) == len(times)
 
 
 def test_native_output_carries_id_prefixes_opencode_accepts(fake):
     """Q2 lets native() skip reidentify (start_native does it), but a raw that
     cannot be imported is a trap: opencode refuses a payload whose ids do not
-    start with ses/msg/prt ("Expected a string starting with msg"). Verified by
-    importing it as-is."""
-    payload = json.loads(oc.ADAPTER.native(oc.ADAPTER.turns(raw())))
+    start with ses/msg ("Expected a string starting with msg"). Text items carry
+    no id per the v2 fixture; a tool call's would be call_/prt_. Verified by
+    importing it as-is (2.7 runs the full round trip through the fake)."""
+    payload = json.loads(oc.ADAPTER.native(oc.ADAPTER.turns(v2())))
     assert payload["info"]["id"].startswith("ses")
     for message in payload["messages"]:
-        assert message["info"]["id"].startswith("msg")
-        for part in message["parts"]:
-            assert part["id"].startswith("prt")
-    ids = [m["info"]["id"] for m in payload["messages"]] + \
-          [p["id"] for m in payload["messages"] for p in m["parts"]]
+        assert message["id"].startswith("msg")
+        for item in message.get("content") or []:
+            if "id" in item:
+                assert item["id"].startswith(("prt_", "call_"))
+    ids = [m["id"] for m in payload["messages"]]
     assert len(set(ids)) == len(ids)          # unique inside the payload
 
 
-def test_a_v1_load_is_refused_by_a_2x_opencode(fake, workdir):
-    """native() still writes the v1 shape (step 2 replaces it), and a 2.x opencode
-    refuses to load one - loudly, which is exactly what step 1 buys: the old write
-    path cannot quietly produce an empty or half Session any more."""
-    built = oc.ADAPTER.native(oc.ADAPTER.turns(raw()))
-    with pytest.raises(AgentError, match="SchemaError"):
-        oc.ADAPTER.start_native(built, workdir)
-    # nothing landed, and the half-built session did not stay behind either
-    assert list((fake / "opencode-sessions").glob("*.json")) == \
-        [fake / "opencode-sessions" / "default.json"]
+def test_a_native_v2_payload_loads_on_a_2x_opencode(fake, workdir):
+    """native() now writes the v2 flat shape (2.2), so a 2.x opencode loads it -
+    the step-1 trap (a v1 payload refused with SchemaError) is gone for the
+    rebuilt path; a v1 raw itself is still refused (2.5 honest refusal)."""
+    built = oc.ADAPTER.native(oc.ADAPTER.turns(v2()))
+    launch = oc.ADAPTER.start_native(built, workdir)
+    assert launch.before_count == 5
+    assert len(stored(fake, launch.agent_session_id)["messages"]) == 5
 
 
 def test_an_attachment_opencode_inlined_produces_no_line(fake):
@@ -860,8 +987,8 @@ def test_append_native_picks_ids_a_session_of_its_own_cannot_have(fake, workdir)
     assert {i for i in ids if i not in before} == \
         {f"msg_agoraa{n}" for n in (0, 1)} | {f"prt_agoraa{n}-0" for n in (0, 1)}
     # the payload it built is still a v1 one, so a 2.x opencode refuses to load it
-    # (the load itself is step 2, with a v2 append)
-    with pytest.raises(AgentError, match="SchemaError"):
+    # - now with the honest 2.5 refusal (not a bare SchemaError), before any import
+    with pytest.raises(AgentError, match="1.x|重新匯入"):
         oc.ADAPTER.start_native(oc.ADAPTER.append_native(forked, FORK), workdir)
 
 
@@ -931,9 +1058,9 @@ def test_append_native_leaves_a_itself_untouched(fake, workdir):
     before = (fake / "opencode-sessions" / "default.json").read_bytes()
     out = oc.ADAPTER.append_native(raw(), FORK)
     assert json.loads(out)["info"].get("revert") is None
-    # the copy is still a v1 payload, so the 2.x fake refuses to load it - and
-    # either way nothing was written back into A's own file
-    with pytest.raises(AgentError, match="SchemaError"):
+    # the copy is still a v1 payload, so 2.5 refuses it honestly before any import -
+    # and either way nothing was written back into A's own file
+    with pytest.raises(AgentError, match="1.x|重新匯入"):
         oc.ADAPTER.start_native(out, workdir)
     assert (fake / "opencode-sessions" / "default.json").read_bytes() == before
 
@@ -2136,3 +2263,84 @@ def test_the_record_is_written_even_when_the_run_is_interrupted(fake, tmp_path,
     monkeypatch.setattr(oc, "_remember_summary_session", spy)
     oc.ADAPTER.summarize("ZZPROMPT", workdir)
     assert seen[0] == "ses_fake_summary00000"     # before the delete, not after
+
+
+# --- step 2 unit tests (tasks 2.7; change agora-opencode-v2) ------------------
+
+
+def test_native_import_export_turns_round_trip(fake, workdir):
+    """2.7: native → import (fake) → export → turns is a round trip (v2)."""
+    turns = oc.ADAPTER.turns(v2())
+    built = oc.ADAPTER.native(turns)
+    launch = oc.ADAPTER.start_native(built, workdir)
+    exported = oc.ADAPTER.export(launch.agent_session_id)
+    assert exported.message_count == len(turns) == 5
+    assert oc.ADAPTER.turns(exported.raw) == turns
+
+
+def test_reading_version_paragraphs_and_tool_line(fake):
+    """2.7: the reading version of the v2 fixture has its sections and tool line."""
+    body = base.reading(oc.ADAPTER, v2())
+    assert body.count("## user") == 2 and body.count("## assistant") == 2
+    assert "[tool] read {'path': 'fake-note.txt'}" in body
+    assert "先讀 fake-note.txt 再回答。" in body
+    assert "第二輪：紙條上寫的是什麼顏色？一句話。" in body
+
+
+def test_only_the_first_user_row_is_json_decoded(fake):
+    """L-10: a later user row that literally reads `"abc"` keeps its quotes -
+    only the CLI-wrapped first row is JSON-encoded (measured 2.0.26)."""
+    payload = json.loads(v2())
+    payload["messages"][-3]["text"] = '"abc"'
+    turns = oc.ADAPTER.turns(json.dumps(payload).encode())
+    assert turns[0] == ("user", ["先讀 fake-note.txt 再回答。"])
+    assert turns[-2] == ("user", ['"abc"'])
+
+
+def test_multi_line_user_turns_come_back_joined(fake):
+    """L-10, known limitation: a user row holds one text, so `native()` joins a
+    multi-line user turn with newlines and `turns()` returns it as one line -
+    unlike assistant turns, which keep one content item per line."""
+    converted = [("user", ["第一行", "第二行"]), ("assistant", ["ZZ"])]
+    assert oc.ADAPTER.turns(oc.ADAPTER.native(converted)) == [
+        ("user", ["第一行\n第二行"]), ("assistant", ["ZZ"])]
+
+
+def test_import_verification_counts_content_items_not_only_messages(fake, workdir,
+                                                                   monkeypatch):
+    """2.7/M2: dropping one content item keeps every message, so only the second
+    layer (assistant rows' content count) can notice - and it must go red."""
+    monkeypatch.setenv("FAKE_OPENCODE_DROP_CONTENT", "0")
+    with pytest.raises(AgentError, match="數量不對"):
+        oc.ADAPTER.start_native(v2(), workdir)
+    # the half-built session did not stay behind
+    assert list((fake / "opencode-sessions").glob("*.json")) == \
+        [fake / "opencode-sessions" / "default.json"]
+
+
+def test_collect_with_only_idle_rows_returns_none(fake, workdir):
+    """2.7/M8: opening the agent and saying nothing leaves only idle rows, which
+    are not conversation - nothing new is written back."""
+    launch = oc.ADAPTER.start_native(v2(), workdir)
+    payload = stored(fake, launch.agent_session_id)
+    # the agent said nothing new: keep the conversation rows, add one more idle
+    payload["messages"].append({"id": "msg_FAKEIDLE000000000001",
+                                "time": {"created": 1790214999999},
+                                "type": "idle", "outcome": "succeeded"})
+    stored_path = fake / "opencode-sessions" / f"{launch.agent_session_id}.json"
+    stored_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    assert oc.ADAPTER.collect(launch) is None
+
+
+def test_old_raw_refusal_says_what_to_do_next(fake, workdir):
+    """2.7/2.5: a v1 raw is refused before anything is imported, and the message
+    is honest - the reimport command, the branching caveat, the cross-agent way
+    out, and the source agent session id it came from."""
+    with pytest.raises(AgentError) as e:
+        oc.ADAPTER.start_native(raw(), workdir)
+    message = str(e.value)
+    assert "1.x" in message and "ses_ZZSRCID0000000000000000AA" in message
+    assert "agora import session --external-session-id" in message
+    assert "分支" in message and "跨 agent" in message
+    # nothing reached opencode and nothing landed
+    assert [path.stem for path in (fake / "opencode-sessions").glob("*.json")] == ["default"]

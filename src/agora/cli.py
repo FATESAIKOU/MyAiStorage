@@ -399,6 +399,16 @@ def cmd_import(args, paths: store.Paths) -> int:
     return first_bad
 
 
+def _content_turn_count(turns: list[tuple[str, list[str]]]) -> int:
+    """Turns with at least one line of content (N1).
+
+    A legit undo/revert/rewind makes empty turns disappear - an assistant with
+    only reasoning/step markers, a user row with empty text - and that must not
+    count as "less conversation". Only turns that say something count.
+    """
+    return sum(1 for _, lines in turns if any(line.strip() for line in lines))
+
+
 def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Paths,
                 index: store.Index, add_tags: "list[str] | None" = None) -> int:
     """One import. Unchanged content and no --header is a no-op that just
@@ -420,6 +430,29 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
             print(f"agora:{existing[0]}")
             return 0
         if unchanged or not _branched(index, existing[0]):
+            # M5/N1: never silently overwrite with less conversation. Only turns
+            # with content count - an undo that drops empty turns is not "less".
+            # Unchanged bytes need no comparison (counts are equal by construction),
+            # so the old raw is only fetched when something actually changed (L-4).
+            # The new export already parsed (reading() above), so only the old
+            # side is guarded: an unreadable old raw means no basis to refuse.
+            new_content = _content_turn_count(agent.turns(exported.raw))
+            if not unchanged:
+                try:
+                    old_raw = store.fetch_raw(paths, store.Drive(paths), existing[0], old)
+                    old_content = _content_turn_count(agent.turns(old_raw))
+                except (store.StoreError, AgentError):
+                    print(f"[agora] 舊 raw 讀不到，沒做「變少不覆蓋」比對就更新：{existing[0]}",
+                          file=sys.stderr)
+                    old_content = new_content  # fail-open, but said out loud (review L-3)
+                if new_content < old_content:
+                    raise InputError(
+                        f"{external_id} 重新匯入的內容比原本少（原本 {old_content} 則有內容的對話，"
+                        f"新的 {new_content} 則），不覆蓋原本的版本。要接續請改用跨 agent 接續"
+                        f"（例如 `agora continue session agora:{existing[0]} --agent claude`），"
+                        f"或先對這個 Session 做一次非 fork 的接續（`agora continue session agora:{existing[0]}"
+                        " --agent opencode`，接續後會分支）再重新匯入，依分支規則另存成新的 Session。"
+                        "（接續中要有至少一則新對話：沒有新內容就不會留下子版本，再重新匯入仍被拒。）")
             hdr = _with_user(old, updates, add_tags=add_tags)
             hdr["agora"]["source"] = _source(agent, exported)
             hdr["agora"]["updated_at"] = _now_iso()

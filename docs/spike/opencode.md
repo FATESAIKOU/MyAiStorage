@@ -1094,7 +1094,7 @@ agora 從第 1 步起，所有自動化呼叫都帶 `--standalone`：v2 的 `ses
   （`{"port": …}`），**不會連運行中的服務**：`service get` 立刻反映，執行前後 49374 的
   PID／etime 不變（審查 N2）。
 - 兩次量測前後都只 `lsof -nP -iTCP:49374 -sTCP:LISTEN` 看有沒有在聽（不連、不讀資料）：
-  仍是原本的 PID 62837、etime 連續。
+  仍是原本的 PID、etime 連續。
 
 **結論**：`_server_args()` 維持 `--standalone`，設計 Decisions 2 的形狀不用改。
 
@@ -1119,7 +1119,7 @@ fixture 與之後的驗收看 v2 的測試都用它，不用真模型（審查 M
    `RCLONE_CONFIG`——`tests/conftest.py` 的隔離只在 pytest 內。
 4. 工作目錄用 `/tmp` 底下的暫存 git 專案，不是 repo、不是使用者的專案。
 5. 開跑前後各 `lsof -nP -iTCP:49374 -sTCP:LISTEN` 看共用服務**在不在**（只看在不在聽、
-   PID／etime，不連它、不讀資料）。本次全程 PID 62837、etime 連續，沒被動到。
+   PID／etime，不連它、不讀資料）。本次全程同一個 PID、etime 連續，沒被動到。
 6. **`opencode debug config` 的來源不只隔離的 XDG 目錄**：它還列出使用者真正的
    `~/.opencode`（從 passwd 的 home 找，`HOME` 隔離擋不掉）與 cwd 的 `.opencode`。
    所以自動化一律用 `-m fakeup/fake-model` 明確指定 provider，不去碰其他 provider；
@@ -1158,7 +1158,11 @@ fixture 與之後的驗收看 v2 的測試都用它，不用真模型（審查 M
 | messages | `[{info, parts}]` | 扁平：`{…, type: "user"/"assistant"/"idle"}` |
 
 - **user**：`text`＋`files`。第一則是把 CLI 參數 **JSON 編碼**後存的（`"…"`），
-  `-s` 接續的後續訊息是純文字——閱讀版把 JSON 字串解開再顯示（`_user_text`）。
+  `-s` 接續的後續訊息是純文字——閱讀版只解開第一則（`_user_text`），後續原樣，
+  所以後續訊息若本身就是 `"abc"` 這種帶引號的字串不會被誤剝引號（L-10）。
+  已知限制（L-10）：user 列只有一個 `text`，`native()` 把多行 user turn 以 `\n`
+  併成一則，`turns()` 回來是單一含換行的 line——多行 user 的 round trip 不恆等
+  （assistant 多行則恆等，一行一 content）。
 - **assistant**：`content`（`type: text` 的文字、`type: tool` 的 `name`＋`state.input`，
   工具的輸出在 `state.content`，閱讀版只取一行 `[tool] …`）、`model{id,providerID,variant}`、
   `finish`／`rawFinish`、`snapshot`。
@@ -1223,7 +1227,103 @@ opencode session export <fork id> --standalone > fork.json
 
 測試用的 Session 都在隔離的 store（`/tmp`）：逐一以
 `opencode session delete <id> --standalone` 刪掉，工作用的臨時 XDG 整個目錄刪除。
-共用服務（PID 62837、49374）與使用者真正的 store 全程沒被碰過。
+共用服務（49374）與使用者真正的 store 全程沒被碰過。
+
+---
+
+# opencode 2.x 的 import 必填欄位全集（2026-10-13，agora-opencode-v2 2.1）
+
+量測環境：四個 XDG＋`HOME` 指到 `/tmp/agora-oc2-s2-21866`（`opencode debug paths`
+確認），先在隔離的 XDG_CONFIG 下 `opencode service set port 51201`（只寫
+`service.json`，不連服務），`env -i` 清掉繼承的 `OPENCODE_*`，工作目錄用暫存
+git 專案。模板是 `oc-v2-basic.json`，每次換新 `ses_/msg_/call_` id 再逐欄拿掉餵
+`opencode session import <file> --standalone --directory <proj>`，看
+`SchemaError`；成功就 `session delete --standalone` 清掉。開跑前後各
+`lsof -nP -iTCP:49374 -sTCP:LISTEN` 只看在不在聽：全程同一個 PID，沒被動到。
+
+## 必填（拿掉就 `SchemaError`，整份拒收）
+
+| 位置 | 欄位 | 拿掉時的 `at` |
+|---|---|---|
+| `info` | `id`（`ses` 開頭）、`cost`、`location`、`projectID`、`time`、`tokens` | `["info"]["cost"]` 等 |
+| `info.location` | `directory`（可空字串，`--directory` 會蓋掉，但不能缺） | `["info"]["location"]["directory"]` |
+| `info.time` | `created`、`updated`（`idle` 可缺） | `["info"]["time"]["created"]` |
+| `info.tokens` | `input`、`output`、`reasoning`、`cache.read`、`cache.write` | `["info"]["tokens"]["input"]` 等 |
+| user 列 | `id`（`msg_` 開頭）、`time.created`、`text`（可空字串）、`type` | `["messages"][0]["text"]` 等 |
+| assistant 列 | `id`、`time.created`、`type`、`agent`、`model.id`、`model.providerID`、`content`（可 `[]`） | `["messages"][1]["model"]` 等 |
+| text content | `type`、`text`（可空字串） | `["messages"][n]["content"][k]["text"]` |
+| tool content | `id`（`call_`/`prt_` 都收）、`name`、`state.status`、`state.input`（可 `{}`）、`state.content`（至少一則）、`time.created` | `["messages"][n]["content"][k]["state"]["input"]` 等 |
+| tool 的 `state.content[0]` | `text`（工具輸出那一則） | `["messages"][n]["content"][k]["state"]["content"][0]["text"]` |
+| idle 列 | `id`、`time.created`、`type`、`outcome`（列可整批拿掉，留著就要齊） | `["messages"][3]["outcome"]` |
+
+## 可缺（拿掉照樣 `Imported session`）
+
+`info.model`、`info.outcome`、`info.title`、`info.time.idle`、user 的 `files`、
+assistant 的 `time.streamed`、`snapshot`、`cost`、`tokens`、
+`finish`／`rawFinish`、`model.variant`、tool 的 `executed`、`time.ran`／`completed`、
+`state.metadata`、空字串的 `text`、空的 `content: []`、整批拿掉 idle 列。
+
+## 形狀備註（會靜默丟列的那個）
+
+- assistant 列的 `time.completed`：拿掉時 import 照樣 `rc=0`，但那幾列在匯出時
+  不見了（本次量到：7 列→4 列，三則 assistant 全丟，只剩 user＋idle）。`_import_verified`
+  的訊息數比對會抓到（來源 2 則／ landed 1 則），所以 `native()`／`append_native()`
+  的新 assistant 列一律帶 `time.completed`（`streamed` 可缺，量過）。fake 為了大聲，
+  缺 `completed` 就直接 `SchemaError` 拒收，不等到回讀才紅。
+
+## 形狀備註
+
+- id 前綴是硬性的：`info.id` 非 `ses` 開頭 → `Expected a string starting with "ses"
+  at ["info"]["id"]`；訊息 `id` 非 `msg_` 開頭同理。訊息 id 撞到既有 Session 是
+  `Internal Server Error`（500），不是靜默丟列——所以 `reidentify` 照舊要全新 id。
+- 未知 `type`（如 `zzzunknown`）→ `Expected Session.Message.Info at ["messages"][n]`，
+  整份拒收。
+- 最小可匯入的 `native()` 形狀已用同環境驗過：`info{id,projectID:"",cost:0,
+  tokens:0, time:{created,updated}, title, location:{directory:""}}`＋
+  user`{id,time.created,text,type}`＋assistant`{id,time.created,type,agent,
+  model{id,providerID},content:[{type,text}]}` → `Imported session`。
+- `fake_opencode.py` 依同一份驗：`is_v2` 的 payload 在 `session import`／`import`
+  都走 `validate_v2()`，缺欄位就同字樣的 `SchemaError` 拒收。
+
+## N1 (d)：遷移過的舊 Session 的 turn 數是否一致（部分推論，待第 3 步驗證）
+
+實測部分：空字串的 `text` 照樣匯得進（user／assistant 的空 turn 合法存在）；
+整批拿掉 idle 列照樣匯得進（`message_count`／`turns()` 本來就不算 idle，
+1.6 已落地）；`content: []` 的 assistant 列也合法（空 turn）。
+
+推論部分（待第 3 步的 DB 遷移量測驗證）：升級遷移會多出 `system`（工具參數變更
+通知）、`synthetic`（v1 附件拆出來的獨立列）、每回合的 `idle`——三者都不是
+user／assistant 的對話，`turns()`／`message_count` 照舊不算它們。v1 只有
+reasoning／step 的 assistant 在閱讀版本來就是空 turn（`_lines_of` 回 `[]`），
+遷移後仍是空 turn，不影響「有內容」的計數。若第 3 步量到遷移會吃掉有內容的
+turn，2.6 的比對規則要跟著重議。
+
+目前結論（以推論為前提）：store 裡 v1 raw 的 total turn 數與 v2 匯出的 total
+列數拿來直比會誤報（idle／system／synthetic／空 turn 的有無），但兩邊「至少有
+一行內容的 turn」數一致；2.6 的原地更新檢查只比後者，合法的 undo／revert／
+rewind（空 turn 消失）不會被誤擋，真正丟內容（有內容的 turn 變少）才拒絕。
+
+## 未實測、open：v2 的 `info.revert`（M-2）
+
+- v2 的 `session` 子指令只有 list／delete／export／import，沒有 undo／revert
+  操作（隔離環境 `opencode session --help` 實見），TUI 觸發 undo 後匯出的形狀
+  沒量過；真匯出也從沒見過 `revert` 欄位。所以 `_apply_revert_v2` 是照 v1
+  （`SessionRevert.cleanup` 的讀法）類推的：`info.revert{messageID, partID}`
+  配扁平列／`content`。行為由合成 payload 的單元測試鎖住
+  （`test_apply_revert_v2_*`，拆掉即紅）；量到真形狀時以實測為準改函式。
+
+## 改壞驗證補記（2.9：之前拆了仍綠的五項）
+
+以下五項在第 2 步收尾時實測「拆掉仍綠」，補上斷言／測試後逐項轉紅（全是 fake
+單元測試，不跑真 opencode，不需隔離環境）：
+
+| 拆法 | 紅的測試 | 結果 |
+|---|---|---|
+| `_append_native_v2` 內拿掉 `_apply_revert_v2(payload)` | `test_apply_revert_v2_drops_the_undone_tail_before_appending`、`test_apply_revert_v2_cuts_content_at_the_named_item` | 2 failed（`assert "revert" not in out["info"]`，尾巴與指針都留著） |
+| `_unused_stem_v2` 退化成常數 `return "agora"` | `test_unused_stem_v2_steps_past_taken_stems` | 1 failed（`assert 'agora' == 'agoraa'`） |
+| `_append_native_v2` 改動原 raw 的 `info`（`title` 寫掉） | `test_append_native_v2_leaves_info_identical`（`out["info"] == before["info"]` 整體比對） | 1 failed（info 整體比對） |
+| `_append_native_v2` 拿掉 NO_REPLY 站位 | `test_append_native_v2_stands_in_for_an_unanswered_question` | 1 failed（fork 黏到未答的問題上，turns 不等） |
+| 新列時間只用現在時間（不管 A 的鐘） | `test_append_native_v2_comes_after_a_session_dated_in_the_future`（時間相對現在的 fixture，A 的時間是明天） | 1 failed（新列沒有落在全部舊列之後） |
 
 ---
 
