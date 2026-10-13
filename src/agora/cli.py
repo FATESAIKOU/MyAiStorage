@@ -951,6 +951,63 @@ def _staged_as(paths: store.Paths, record: dict, target_ulid: str) -> tuple[str,
     return found
 
 
+#: How long a rescue waits for a competing rescue of the same session (issue #59).
+#: The holder only does local work (read, stage, remember) while holding the claim,
+#: so anything slower than this is a crash, and the wait falls back to minting.
+RESCUE_CLAIM_WAIT = 10.0
+
+
+def _claim_rescue_entry(paths: store.Paths, ulid: str) -> str:
+    """Take X's outbox entry for this rescue, the way the uploader does (issue #59).
+
+    The uploader claims with `outbox/X -> .done-X` before reading; a foreground
+    rescue that mints without claiming can land a second session while the
+    uploader is still mid-rescue, because neither sees the other's work yet.
+    Returns "claimed" (`.done-X` is ours now - clean it when done), "busy"
+    (`.done-X` already held: someone is mid-rescue, wait and adopt instead) or
+    "empty" (nothing staged - mint directly).
+    """
+    folder = paths.outbox / ulid
+    done = paths.outbox / f".done-{ulid}"
+    if folder.is_dir():
+        try:
+            folder.rename(done)
+        except OSError:
+            return "busy"    # lost the race after seeing it - treat as busy
+        return "claimed"
+    return "busy" if done.exists() else "empty"
+
+
+def _wait_inflight_rescue(paths: store.Paths, record: dict, ulid: str,
+                          timeout: float | None = None) -> tuple[str, dict] | None:
+    """The rescue `.done-X`'s holder is making, staged or indexed (issue #59).
+
+    Polls the same two places `_write_target` looks - the outbox, then the index -
+    so whatever the holder lands gets adopted instead of minted over.
+    """
+    if timeout is None:
+        timeout = RESCUE_CLAIM_WAIT
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        hit = _find_rescue(paths, record, ulid)
+        if hit is not None:
+            return hit
+        time.sleep(0.1)
+    return None
+
+
+def _find_rescue(paths: store.Paths, record: dict, ulid: str) -> tuple[str, dict] | None:
+    """One adopt lookup without waiting: staged, then indexed (issue #59 M-1)."""
+    hit = _staged_as(paths, record, ulid)
+    if hit is not None:
+        return f"agora:{hit[0]}", hit[1]
+    idx = store.Index(paths)
+    found = _saved_as(idx, record, ulid)
+    if found is not None:
+        return f"agora:{found}", idx.header(found) or {}
+    return None
+
+
 def _follow(run: "_Run", target_id: str, *, note: bool = True) -> str | None:
     """The target moved: follow it with the pending file, remember to say so once.
 
@@ -1054,8 +1111,24 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
     # but writing here keeps the adopted copy current).
     if md5 == run.last_md5 and not is_new and not moved_here:
         return None, target_id, note
-    saved, create_note = _save_continue(paths, run, agent, exported, target_id=target_id,
-                                        hdr=hdr, is_new=is_new)
+    try:
+        saved, create_note = _save_continue(paths, run, agent, exported, target_id=target_id,
+                                            hdr=hdr, is_new=is_new)
+    except (FileNotFoundError, h.HeaderError):
+        # Collision with a concurrent outbox rename (issue #59 M-2): adopting a rescue
+        # the uploader is confirming right now can rename outbox/Y mid-read. Resolve
+        # once more - the target is indexed by now in the adopt case - and save there
+        # instead of failing the round; a second collision propagates loudly.
+        target_id, hdr, is_new = _write_target(paths, run, check_drive=check_drive)
+        note = _follow(run, target_id) or note
+        _say_note(run, note)
+        moved_here = run.target != was
+        if exported is None and not is_new:
+            return None, target_id, note
+        if md5 == run.last_md5 and not is_new and not moved_here:
+            return None, target_id, note
+        saved, create_note = _save_continue(paths, run, agent, exported, target_id=target_id,
+                                            hdr=hdr, is_new=is_new)
     run.last_md5 = md5      # P8: only after `_save` came back
     run.wrote = True
     _follow(run, saved[0], note=False)
@@ -1087,39 +1160,66 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
     body = reading(agent, exported.raw)
     note = None
     same_id = True            # False once the work has been saved as a session of its own
+    own_claim = False
     if is_new:
-        # The conversation is the user's work and does not go away with the session:
-        # it becomes a session of its own and points back at the one that is gone.
-        if run.target == record["agora_id"] and record.get("parent"):
-            # First rescue, from the session this run continued: the record knows what
-            # was continued from (C9), even when that id itself was never here (F4).
-            parents = [record["parent"]]
-        else:
-            # Rescued before and adopted, and that one is gone too: chain the rescues
-            # the way `_rescue_deleted` does, so a session saved twice is still found
-            # through the first one (design P14).
-            from_agora = h.agora_of(hdr)
-            parents = [*(from_agora.get("parents") or []),
-                       {"id": run.target, "raw_md5": (from_agora.get("raw") or {}).get("md5")}]
-        was_here = bool(hdr)
-        # What the user wrote on the session being rescued comes with the work: case,
-        # tags, refs, description, verified and any field of their own. Only the system
-        # fields and the two regenerated ones stay behind (review M9); a merge's
-        # auto-filled `draft` goes the way it goes when a merge is continued (5.4).
-        rescued = {k: v for k, v in hdr.items()
-                   if k not in h.SYSTEM_KEYS and k not in ("generated", "sources")}
-        if h.agora_of(hdr).get("relation") == "merge":
-            rescued.pop("status", None)
-        hdr = _auto_header("continue", parents, body, title=record.get("title") or exported.title,
-                           exported=exported, agent=agent, parent_headers=[hdr] if hdr else [])
-        hdr = {**hdr, **rescued}
-        same_id = False        # a new id: Drive has never heard of it, so it is not an update
-        how = "被別台機器刪掉了" if was_here else "在這台機器上被刪掉了"
-        note = (f"[agora] {run.target} 在你接續的時候{how}，"
-                f"這次的對話另存成 {hdr['id']}；原來那個保持被刪掉的狀態")
+        # Claim X's outbox entry before minting (issue #59): the uploader claims the
+        # same way, and whoever loses the rename must not mint - otherwise the two
+        # rescues land side by side while neither sees the other.
         old_ulid = _ulid_of(run.target)
-        for prefix in ("", ".done-", ".old-", ".tmp-"):
-            shutil.rmtree(paths.outbox / f"{prefix}{old_ulid}", ignore_errors=True)
+        claim = _claim_rescue_entry(paths, old_ulid)
+        hit = None
+        if claim == "busy":
+            hit = _wait_inflight_rescue(paths, record, old_ulid)
+        else:
+            own_claim = claim == "claimed"
+        if hit is None:
+            # M-1: the holder may have finished between resolve and claim (staged
+            # and indexed, claim released) - look once more before minting.
+            hit = _find_rescue(paths, record, old_ulid)
+        if hit is not None:
+            target_id, hdr = hit
+            is_new = False
+            note = (f"[agora] {run.target} 在你接續的時候被別台刪掉了，"
+                    f"這次的對話寫到已另存的 {target_id}；原來那個保持被刪掉的狀態")
+    if is_new:
+        try:
+            if run.target == record["agora_id"] and record.get("parent"):
+                # First rescue, from the session this run continued: the record knows what
+                # was continued from (C9), even when that id itself was never here (F4).
+                parents = [record["parent"]]
+            else:
+                # Rescued before and adopted, and that one is gone too: chain the rescues
+                # the way `_rescue_deleted` does, so a session saved twice is still found
+                # through the first one (design P14).
+                from_agora = h.agora_of(hdr)
+                parents = [*(from_agora.get("parents") or []),
+                           {"id": run.target, "raw_md5": (from_agora.get("raw") or {}).get("md5")}]
+            was_here = bool(hdr)
+            # What the user wrote on the session being rescued comes with the work: case,
+            # tags, refs, description, verified and any field of their own. Only the system
+            # fields and the two regenerated ones stay behind (review M9); a merge's
+            # auto-filled `draft` goes the way it goes when a merge is continued (5.4).
+            rescued = {k: v for k, v in hdr.items()
+                       if k not in h.SYSTEM_KEYS and k not in ("generated", "sources")}
+            if h.agora_of(hdr).get("relation") == "merge":
+                rescued.pop("status", None)
+            hdr = _auto_header("continue", parents, body, title=record.get("title") or exported.title,
+                               exported=exported, agent=agent, parent_headers=[hdr] if hdr else [])
+            hdr = {**hdr, **rescued}
+            same_id = False        # a new id: Drive has never heard of it, so it is not an update
+            how = "被別台機器刪掉了" if was_here else "在這台機器上被刪掉了"
+            note = (f"[agora] {run.target} 在你接續的時候{how}，"
+                    f"這次的對話另存成 {hdr['id']}；原來那個保持被刪掉的狀態")
+            old_ulid = _ulid_of(run.target)
+            # Only clear the claim we hold: `.done-` may be another rescue's live claim
+            # on the fallback path below, and clearing it would orphan its work.
+            prefixes = ("", ".done-", ".old-", ".tmp-") if own_claim else ("", ".old-", ".tmp-")
+            for prefix in prefixes:
+                shutil.rmtree(paths.outbox / f"{prefix}{old_ulid}", ignore_errors=True)
+        except Exception:
+            if own_claim:
+                store._put_back(paths.outbox / f".done-{old_ulid}", paths.outbox / old_ulid)
+            raise
     agora = h.agora_of(hdr)
     old = agora.get("source") or {}
     if old.get("session_id") and old.get("session_id") != exported.session_id:

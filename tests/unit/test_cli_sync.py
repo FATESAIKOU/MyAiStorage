@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest import mock
@@ -274,6 +275,287 @@ def test_the_final_round_rescues_even_with_nothing_new(env, capsys, monkeypatch)
     assert len(kept) == 1 and kept[0]["id"] == out
     assert [p["id"] for p in h.agora_of(kept[0])["parents"]] == [a]
     assert "ZZ 第 1 次發言" in document_of(out), "the same conversation, still alive"
+
+
+def test_a_rescue_mid_flight_is_adopted_not_minted_again(env, capsys, monkeypatch):
+    """issue #59: the uploader claimed X for rescue (.done-X) but has not staged its
+    rescue yet; the foreground write-back must adopt the rescue once it lands
+    instead of saving a second one. Exactly one new session either way.
+
+    Deterministic without timing luck: the test holds the uploader inside its
+    rescue (gated `stage`) while the foreground resolves, then lets it finish -
+    the interleave a slow Drive produces on its own in
+    tests/integration/test_e2e_sync.py::test_a_session_deleted_mid_run_is_rescued_exactly_once.
+    """
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    # a periodic round's staged update, like the run's own writes
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append("ZZ autopsy 第三句")
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+
+    gate, release = threading.Event(), threading.Event()
+    real_stage = store.stage
+    state = {"uploader": None, "errors": []}
+
+    def gated_stage(p, header, body_, raw_bytes, **kwargs):
+        if (header["id"].split(":", 1)[1] != ulid
+                and threading.current_thread() is state["uploader"]
+                and not release.is_set()):
+            gate.set()
+            assert release.wait(timeout=30), "foreground never started while rescue held"
+        return real_stage(p, header, body_, raw_bytes, **kwargs)
+
+    monkeypatch.setattr(store, "stage", gated_stage)
+
+    def uploader():
+        try:
+            lock = store.hold_upload_lock(paths(), blocking=True)
+            try:
+                store.upload_batch(store.Drive(paths()), paths())
+            finally:
+                lock.close()
+        except Exception as e:  # noqa: BLE001 - surfaced below
+            state["errors"].append(e)
+
+    state["uploader"] = threading.Thread(target=uploader, daemon=True)
+    state["uploader"].start()
+    assert gate.wait(timeout=30), "uploader never reached its rescue"
+    assert (paths().outbox / f".done-{ulid}").is_dir(), "X claimed, rescue in flight"
+
+    entered = threading.Event()
+    real_wait = cli._wait_inflight_rescue
+
+    def gated_wait(*args, **kwargs):
+        entered.set()      # the foreground parked in the wait; safe to let go now
+        return real_wait(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_wait_inflight_rescue", gated_wait)
+
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    result = {}
+
+    def foreground():
+        try:
+            result["saved"] = cli._write_one(paths(), run, exported, agent, check_drive=True)
+        except Exception as e:  # noqa: BLE001 - surfaced below
+            result["error"] = e
+
+    review = threading.Thread(target=foreground, daemon=True)
+    review.start()
+    entered.wait(timeout=30)  # no sleep: release only after the wait really started
+    release.set()            # the uploader lands its rescue; the foreground must adopt it
+    review.join(timeout=60)
+    state["uploader"].join(timeout=60)
+    assert not state["errors"], state["errors"]
+    assert "error" not in result, result.get("error")
+    assert not review.is_alive() and not state["uploader"].is_alive()
+
+    assert store.upload_batch(drive, paths()) == []
+    remote = {e["Name"] for e in
+              json.loads(drive._run("lsjson", "gdrive:sessions", "--dirs-only"))}
+    new = remote - {ulid}
+    assert len(new) == 1, f"exactly one rescue, not {sorted(new)}"
+    bid = f"agora:{next(iter(new))}"
+    assert [p["id"] for p in h.agora_of(header_of(bid))["parents"]] == [a]
+    assert "ZZ autopsy 第三句" in document_of(bid)
+
+
+def test_a_rescue_completed_before_claim_is_adopted_not_minted(env, capsys, monkeypatch):
+    """M-1: the uploader finished between resolve and claim (staged and indexed,
+    claim released); the post-claim recheck finds it - no second session.
+
+    Deterministic: `_saved_as` misses once, like a resolve that ran just before
+    the rescue landed; the recheck after claim sees it for real.
+    """
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append("ZZ m1 第四句")
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    # the uploader's rescue, completed before the foreground resolves
+    assert store.upload_batch(store.Drive(paths()), paths()) == []
+    bid = store.Index(paths()).children(ulid)
+    assert len(bid) == 1, f"setup rescued exactly once: {bid}"
+
+    calls = {"n": 0}
+    real_saved_as = cli._saved_as
+
+    def miss_once(index, record, target):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None            # the resolve ran just before the rescue landed
+        return real_saved_as(index, record, target)
+
+    monkeypatch.setattr(cli, "_saved_as", miss_once)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    saved, target, _note = cli._write_one(paths(), run, exported, agent, check_drive=True)
+    assert target == f"agora:{bid[0]}", f"adopted the rescue, not a new session: {target}"
+
+    assert store.upload_batch(drive, paths()) == []
+    remote = {e["Name"] for e in
+              json.loads(drive._run("lsjson", "gdrive:sessions", "--dirs-only"))}
+    assert remote - {ulid} == {bid[0]}, f"exactly one rescue: {sorted(remote)}"
+    assert "ZZ m1 第四句" in document_of(f"agora:{bid[0]}")
+
+
+def test_adopt_write_survives_confirmation_rename(env, capsys, monkeypatch):
+    """M-2: adopting a rescue while the holder confirms it - the holder renames
+    outbox/Y mid-read, so the first save raises FileNotFoundError; the retry
+    re-resolves and saves into the same rescue instead of failing the round.
+
+    Deterministic: a renamer thread moves outbox/Y aside exactly inside the
+    adopt write's `remember` (threading.Events, no sleeps), then puts it back
+    once the retry is through.
+    """
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append("ZZ m2 第五句")
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    # the holder's rescue, completed up front (staged, indexed, uploaded)
+    assert store.upload_batch(store.Drive(paths()), paths()) == []
+    bid = store.Index(paths()).children(ulid)
+    assert len(bid) == 1, f"setup rescued exactly once: {bid}"
+    target = paths().outbox / bid[0]
+
+    entered, renamed, done = threading.Event(), threading.Event(), threading.Event()
+    errors = {}
+    real_remember = store.remember
+
+    def gated_remember(p, folder, index=None, ulid_=None):
+        if folder == target and not renamed.is_set():
+            entered.set()
+            assert renamed.wait(timeout=30), "renamer never moved outbox/Y aside"
+        return real_remember(p, folder, index, ulid_)
+
+    monkeypatch.setattr(store, "remember", gated_remember)
+
+    def renamer():
+        try:
+            assert entered.wait(timeout=30), "adopt write never reached remember"
+            target.rename(paths().outbox / f".done-{bid[0]}")
+            renamed.set()
+            assert done.wait(timeout=30), "retry never finished"
+            store._put_back(paths().outbox / f".done-{bid[0]}", target)
+        except Exception as e:  # noqa: BLE001 - surfaced below
+            errors["renamer"] = e
+
+    threading.Thread(target=renamer, daemon=True).start()
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    saved, where, _note = cli._write_one(paths(), run, exported, agent, check_drive=True)
+    done.set()
+    assert not errors, errors
+    assert where == f"agora:{bid[0]}", f"adopted the rescue, not a new session: {where}"
+
+    assert store.upload_batch(drive, paths()) == []
+    remote = {e["Name"] for e in
+              json.loads(drive._run("lsjson", "gdrive:sessions", "--dirs-only"))}
+    assert remote - {ulid} == {bid[0]}, f"exactly one rescue: {sorted(remote)}"
+    assert "ZZ m2 第五句" in document_of(f"agora:{bid[0]}")
+
+
+def test_a_crashed_holder_times_out_and_still_lands_once(env, capsys, monkeypatch):
+    """L-2: `.done-X` residual, nobody behind it - the wait times out, one session
+    is minted, and the restored entry is adopted (not minted over) afterwards."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append("ZZ l2 第六句")
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    # crash residue: claimed, no worker behind it
+    (paths().outbox / ulid).rename(paths().outbox / f".done-{ulid}")
+    monkeypatch.setattr(cli, "RESCUE_CLAIM_WAIT", 0.3)
+    from agora import background
+    monkeypatch.setattr(background, "start", lambda paths: background.STARTED)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    _saved, target, _note = cli._write_one(paths(), run, exported, agent, check_drive=True)
+    assert target != a
+    assert "ZZ l2 第六句" in document_of(target)
+
+
+def test_timeout_mint_clears_only_its_own_claim(env, capsys, monkeypatch):
+    """L-4: the timeout fallback mints, but a foreign live claim is not ours to
+    clear - wiping `.done-X` would orphan the holder's work mid-rescue."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append("ZZ l4 第七句")
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    # someone else's live claim, not ours
+    (paths().outbox / ulid).rename(paths().outbox / f".done-{ulid}")
+    monkeypatch.setattr(cli, "RESCUE_CLAIM_WAIT", 0.3)
+    from agora import background
+    monkeypatch.setattr(background, "start", lambda paths: background.STARTED)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    _saved, target, _note = cli._write_one(paths(), run, exported, agent, check_drive=True)
+    assert target != a
+    assert "ZZ l4 第七句" in document_of(target)
+    assert (paths().outbox / f".done-{ulid}").is_dir(), \
+        "a foreign claim survives someone else's timeout mint"
+    assert (paths().outbox / f".done-{ulid}").is_dir(), \
+        "the timeout mint leaves another claim alone"
+    # the next lock-taker restores the residue; the uploader adopts, not mints
+    lock = store.hold_upload_lock(paths(), blocking=True)
+    try:
+        store.restore_done(paths())
+    finally:
+        lock.close()
+    assert (paths().outbox / ulid).is_dir(), "residue restored for the next round"
+    assert store.upload_batch(drive, paths()) == []
+    remote = {e["Name"] for e in
+              json.loads(drive._run("lsjson", "gdrive:sessions", "--dirs-only"))}
+    assert remote - {ulid} == {target.split(":")[1]}, f"still one rescue: {sorted(remote)}"
 
 
 def test_a_deletion_mid_run_moves_later_writes_to_the_rescue(env, capsys, monkeypatch):
