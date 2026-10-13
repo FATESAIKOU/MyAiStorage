@@ -979,22 +979,32 @@ def _claim_rescue_entry(paths: store.Paths, ulid: str) -> str:
 
 
 def _wait_inflight_rescue(paths: store.Paths, record: dict, ulid: str,
-                          timeout: float = RESCUE_CLAIM_WAIT) -> tuple[str, dict] | None:
+                          timeout: float | None = None) -> tuple[str, dict] | None:
     """The rescue `.done-X`'s holder is making, staged or indexed (issue #59).
 
     Polls the same two places `_write_target` looks - the outbox, then the index -
     so whatever the holder lands gets adopted instead of minted over.
     """
+    if timeout is None:
+        timeout = RESCUE_CLAIM_WAIT
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        hit = _staged_as(paths, record, ulid)
+        hit = _find_rescue(paths, record, ulid)
         if hit is not None:
-            return f"agora:{hit[0]}", hit[1]
-        idx = store.Index(paths)
-        found = _saved_as(idx, record, ulid)
-        if found is not None:
-            return f"agora:{found}", idx.header(found) or {}
+            return hit
         time.sleep(0.1)
+    return None
+
+
+def _find_rescue(paths: store.Paths, record: dict, ulid: str) -> tuple[str, dict] | None:
+    """One adopt lookup without waiting: staged, then indexed (issue #59 M-1)."""
+    hit = _staged_as(paths, record, ulid)
+    if hit is not None:
+        return f"agora:{hit[0]}", hit[1]
+    idx = store.Index(paths)
+    found = _saved_as(idx, record, ulid)
+    if found is not None:
+        return f"agora:{found}", idx.header(found) or {}
     return None
 
 
@@ -1141,15 +1151,20 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
         # rescues land side by side while neither sees the other.
         old_ulid = _ulid_of(run.target)
         claim = _claim_rescue_entry(paths, old_ulid)
+        hit = None
         if claim == "busy":
             hit = _wait_inflight_rescue(paths, record, old_ulid)
-            if hit is not None:
-                target_id, hdr = hit
-                is_new = False
-                note = (f"[agora] {run.target} 在你接續的時候被別台刪掉了，"
-                        f"這次的對話寫到已另存的 {target_id}；原來那個保持被刪掉的狀態")
         else:
             own_claim = claim == "claimed"
+        if hit is None:
+            # M-1: the holder may have finished between resolve and claim (staged
+            # and indexed, claim released) - look once more before minting.
+            hit = _find_rescue(paths, record, old_ulid)
+        if hit is not None:
+            target_id, hdr = hit
+            is_new = False
+            note = (f"[agora] {run.target} 在你接續的時候被別台刪掉了，"
+                    f"這次的對話寫到已另存的 {target_id}；原來那個保持被刪掉的狀態")
     if is_new:
         try:
             if run.target == record["agora_id"] and record.get("parent"):

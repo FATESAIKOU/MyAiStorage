@@ -362,6 +362,54 @@ def test_a_rescue_mid_flight_is_adopted_not_minted_again(env, capsys, monkeypatc
     assert "ZZ autopsy 第三句" in document_of(bid)
 
 
+def test_a_rescue_completed_before_claim_is_adopted_not_minted(env, capsys, monkeypatch):
+    """M-1: the uploader finished between resolve and claim (staged and indexed,
+    claim released); the post-claim recheck finds it - no second session.
+
+    Deterministic: `_saved_as` misses once, like a resolve that ran just before
+    the rescue landed; the recheck after claim sees it for real.
+    """
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append("ZZ m1 第四句")
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    # the uploader's rescue, completed before the foreground resolves
+    assert store.upload_batch(store.Drive(paths()), paths()) == []
+    bid = store.Index(paths()).children(ulid)
+    assert len(bid) == 1, f"setup rescued exactly once: {bid}"
+
+    calls = {"n": 0}
+    real_saved_as = cli._saved_as
+
+    def miss_once(index, record, target):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None            # the resolve ran just before the rescue landed
+        return real_saved_as(index, record, target)
+
+    monkeypatch.setattr(cli, "_saved_as", miss_once)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    saved, target, _note = cli._write_one(paths(), run, exported, agent, check_drive=True)
+    assert target == f"agora:{bid[0]}", f"adopted the rescue, not a new session: {target}"
+
+    assert store.upload_batch(drive, paths()) == []
+    remote = {e["Name"] for e in
+              json.loads(drive._run("lsjson", "gdrive:sessions", "--dirs-only"))}
+    assert remote - {ulid} == {bid[0]}, f"exactly one rescue: {sorted(remote)}"
+    assert "ZZ m1 第四句" in document_of(f"agora:{bid[0]}")
+
+
 def test_a_deletion_mid_run_moves_later_writes_to_the_rescue(env, capsys, monkeypatch):
     """Scenario「途中被刪」: the uploader's rescue notices, the next round adopts it -
     exactly one new session, and every write after the deletion goes there."""
