@@ -300,6 +300,62 @@ def test_the_whole_v2_flow_over_a_real_opencode(lab, capsys, tmp_path):
     assert _shared_port() == before, f"預設埠 {DEFAULT_PORT} 的服務被動到了"
 
 
+def test_the_v2_export_shapes_the_templates_rely_on(lab):
+    """5.4: on a real 2.x export - the tool call's parts, the one cross-message
+    reference (a fork's `info.fork`), and the fields an import needs. The results
+    are recorded in docs/spike/opencode.md."""
+    state = lab
+    parent = _new_session(state, "--title", "5.4 shape", "先讀 fake-note.txt 再回答。")
+    exported = json.loads(_opencode(state, "session", "export", parent,
+                                    "--standalone").stdout)
+    rows, info = exported["messages"], exported["info"]
+
+    # `info`: the fields native() writes and the fixture carries, and the two the
+    # flat shape does not have
+    assert {"id", "location", "time", "title", "cost", "tokens"} <= set(info)
+    assert "directory" not in info and "version" not in info
+    assert info["location"]["directory"].endswith("proj")
+    # rows are flat: `type`/`id`/`time`, never v1's nested shape
+    assert all(row.get("type") in ("user", "assistant", "idle") for row in rows)
+    assert all("info" not in row and "parts" not in row for row in rows)
+    user = next(row for row in rows if row["type"] == "user")
+    assert {"id", "time", "text", "files"} <= set(user)
+    assistant = next(row for row in rows if row["type"] == "assistant")
+    assert {"id", "time", "model", "content", "agent", "finish", "rawFinish",
+            "cost", "tokens"} <= set(assistant)
+    assert {"id", "providerID"} <= set(assistant["model"])
+
+    # the tool call's parts: one `content[type=tool]` item with the name, the input
+    # and the output in `state` (the reading version turns it into one line)
+    tool = next(item for row in rows for item in (row.get("content") or [])
+                if item.get("type") == "tool")
+    assert tool["name"] == "read"
+    assert tool["state"]["input"] == {"path": "fake-note.txt"}
+    assert "ZZNOTE" in json.dumps(tool["state"]["content"], ensure_ascii=False)
+
+    # the fork is the only cross-message reference a v2 export has: it points at
+    # the parent's last row (the idle row), exactly like the fixture
+    fork = _session_id_of(_opencode(state, "run", "--standalone", "-m", FAKE_MODEL,
+                                    "--format", "json", "-s", parent, "--fork",
+                                    "fork 一輪：ZZFORK。"), state)
+    forked = json.loads(_opencode(state, "session", "export", fork, "--standalone").stdout)
+    assert forked["info"]["fork"]["sessionID"] == parent
+    assert forked["info"]["fork"]["boundary"]["messageID"] == rows[-1]["id"]
+
+    # import needs every one of those fields: the whole export, re-identified,
+    # goes back in under a fresh id and comes back with the same rows
+    from agora.agents import opencode as oc
+    fresh = oc.reidentify(exported, session_id="ses_ZZSHAPE00000000001")
+    raw = state["proj"] / "shape.json"
+    raw.write_text(json.dumps(fresh, ensure_ascii=False), encoding="utf-8")
+    state["ses"].append("ses_ZZSHAPE00000000001")
+    _opencode(state, "session", "import", str(raw), "--standalone",
+              "--directory", str(state["proj"]))
+    back = json.loads(_opencode(state, "session", "export", "ses_ZZSHAPE00000000001",
+                                "--standalone").stdout)
+    assert [row["type"] for row in back["messages"]] == [row["type"] for row in rows]
+
+
 def test_an_imported_session_is_visible_through_the_managed_service(lab):
     """5.2: the running managed service (isolated free port) sees a session that
     was imported with --standalone, and can answer in it. The real TUI stays on

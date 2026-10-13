@@ -1433,3 +1433,13 @@ Drive 是 `tests/fakes/fake_rclone.py`、模型是 `fakeup/fake-model`（要約�
    離開後 store／Drive 的寫回沒有把內容弄壞（`agora show session <id>` 再看一次）。
 5. `opencode service status` 指到隔離埠；預設 49374 的服務 pid／etime 前後不變。
 6. 清理：`opencode session delete <id> --standalone` 逐 id 刪、隔離的 XDG 整個目錄刪除。
+
+## 5.4 §G 三項複驗（真 2.0.26＋假模型，`test_the_v2_export_shapes_the_templates_rely_on`）
+
+| §G 項目 | 實測（`session export`） | fixture |
+|---|---|---|
+| 工具呼叫的 parts | assistant 列的 `content[type=tool]`：`name`、`state.input`（`{"path": "fake-note.txt"}`）、`state.content` 是工具輸出；沒有 v1 的 `parts` 巢狀 | `oc-v2-basic.json` |
+| 跨訊息 reference | 普通列沒有 `parentID`／`messageID`／`sessionID`；唯一的參照是 fork 的 `info.fork{sessionID, boundary:{type:"through", messageID}}`，`messageID` 指到父的**最後一列**（idle 列）；import 會把 `info.fork` 丟掉 | `oc-v2-fork.json`（boundary 指到 basic 最後一列） |
+| import 必填欄位全集 | `info`：`id, location, time, title, cost, tokens`（`model, outcome, projectID` 也在；**沒有** `directory`／`version`）；user 列 `id, time, text, files, type`；assistant 列 `id, time, type, model{id,providerID,…}, content, agent, finish, rawFinish, cost, tokens`；idle 列 `id, time, type, outcome`。整份 export 用 `reidentify` 換 id 後 `session import --standalone --directory` 進得去，讀回來列的型別序列相同 | — |
+
+fixture 沒有漏：`oc-v2-basic.json`／`oc-v2-fork.json` 的形狀與這次實測一致。
