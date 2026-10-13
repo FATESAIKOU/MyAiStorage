@@ -1240,7 +1240,11 @@ opencode session export <fork id> --standalone > fork.json
 | `opencode run --standalone <訊息> -f <材料> --format json`（summarize 的呼叫） | 事件流照舊（`step_start` → `text` → `step_finish`），回 fake upstream 的固定句 `ZZFAKEUP 這是一句話的回答。` |
 | 那個 run 的 session 記的模型 | `_model_of()` 讀到 `fake-model`：2.x 記在 assistant 列的 `model.id`（4.1 的欄位形狀） |
 | 寫完要約的清理 | `session delete <id> --standalone` 真的刪掉；隔離 store 的 `session list --standalone --format json` 回 `[]`，`pending-*`／`material-*` 都沒留下 |
-| 預設埠 49374 的共用服務 | 跑前跑後都在聽、PID 48537 不變（只以 `lsof -nP -iTCP:49374 -sTCP:LISTEN` 看，不連它、不停它；H2） |
+| 預設埠 49374 的共用服務 | 跑前跑後都在聽、PID 前後相同（只以 `lsof -nP -iTCP:49374 -sTCP:LISTEN` 看，不連它、不停它；H2） |
+
+`model` 在 `info` 裡的有無兩種都錄到過：第 1 步的 `oc-v2-basic.json`（另一次錄製）有，
+spike 早先的樣本沒有——兩者不矛盾。所以 4.1 的單元測試把 fixture 的 `info.model` pop
+掉，逼模型欄位一定得從 assistant 列的 `model.id` 讀。
 
 **改壞驗證（4.5，三項各改壞一次、做完還原；跑 `uv run pytest -q tests/unit/test_agent_opencode.py tests/unit/test_cli.py`）**：
 
