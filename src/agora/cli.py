@@ -1161,6 +1161,7 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
     note = None
     same_id = True            # False once the work has been saved as a session of its own
     own_claim = False
+    give_back = None          # our claim, when the recheck adopts instead of minting (issue #65)
     if is_new:
         # Claim X's outbox entry before minting (issue #59): the uploader claims the
         # same way, and whoever loses the rename must not mint - otherwise the two
@@ -1181,6 +1182,8 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
             is_new = False
             note = (f"[agora] {run.target} 在你接續的時候被別台刪掉了，"
                     f"這次的對話寫到已另存的 {target_id}；原來那個保持被刪掉的狀態")
+            if own_claim:
+                give_back = old_ulid
     if is_new:
         try:
             if run.target == record["agora_id"] and record.get("parent"):
@@ -1244,9 +1247,20 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
     # `kind`: a continue is the one write that is a relation of its own, and if this
     # session is gone by the time it goes up the work is saved as a session of its own -
     # as a continue, not as whatever X was (review G2)
-    return (_save(paths, _with_user(hdr, record.get("header_updates") or {},
-                                    add_tags=record.get("add_tags") or []), body,
-                  exported.raw, update=same_id, kind="continue"), note)
+    try:
+        return (_save(paths, _with_user(hdr, record.get("header_updates") or {},
+                                        add_tags=record.get("add_tags") or []), body,
+                      exported.raw, update=same_id, kind="continue"), note)
+    finally:
+        if give_back:
+            # Issue #65: the claim was taken for a mint, and this write adopted somebody
+            # else's rescue instead. Minting consumes `outbox/X`; adopting does not, so
+            # the entry goes back where `restore_done` would have put it and waits for the
+            # uploader's own rules (`_put_back` drops ours instead if a newer version
+            # landed meanwhile). After this write, not at the recheck: the entry may not
+            # become visible again before the adopted session is remembered, or the
+            # uploader's rescue of X could land a second one first (L-5).
+            store._put_back(paths.outbox / f".done-{give_back}", paths.outbox / give_back)
 
 
 def _launch_of(record: dict) -> Launch:

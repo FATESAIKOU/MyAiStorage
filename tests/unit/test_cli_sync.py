@@ -485,6 +485,171 @@ def test_adopt_write_survives_confirmation_rename(env, capsys, monkeypatch):
     assert "ZZ m2 第五句" in document_of(f"agora:{bid[0]}")
 
 
+def test_an_adopted_claim_goes_back_to_the_outbox(env, capsys, monkeypatch):
+    """Issue #65: the claim was taken for a mint, but the post-claim recheck adopted
+    somebody else's rescue, so no mint happened and `outbox/X` was never consumed.
+    `.done-X` must not be left set aside: put back, not cleared - X's staged version is
+    still waiting, and the uploader's continue-child rule adopts the rescue when the next
+    lock taker takes it (the way `restore_done` would have done, one command later).
+
+    Deterministic, event gates, no sleeps: the rescue of A completes and a round stages A
+    again while the foreground is parked between the resolve and the claim - the M-1
+    window, with `outbox/X` there for the claim to take.
+    """
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append("ZZ 65 第八句")
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+
+    # No uploader around: an inline one would restore and drain the claim inside `_save`,
+    # and the residue this test is about is what waits for the next lock taker.
+    monkeypatch.setattr(cli, "_uploaded", lambda paths_, ulid_: True)
+
+    entered, gate = threading.Event(), threading.Event()
+    real_claim = cli._claim_rescue_entry
+
+    def gated_claim(p, ulid_):
+        entered.set()
+        assert gate.wait(timeout=30), "the rescue never landed while the claim waited"
+        return real_claim(p, ulid_)
+
+    monkeypatch.setattr(cli, "_claim_rescue_entry", gated_claim)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    result = {}
+
+    def foreground():
+        try:
+            result["saved"] = cli._write_one(paths(), run, exported, agent, check_drive=True)
+        except Exception as e:  # noqa: BLE001 - surfaced below
+            result["error"] = e
+
+    review = threading.Thread(target=foreground, daemon=True)
+    review.start()
+    assert entered.wait(timeout=30), "the foreground never reached its claim"
+    # the uploader rescues A while the foreground is about to claim it ...
+    assert store.upload_batch(store.Drive(paths()), paths()) == []
+    bid = store.Index(paths()).children(ulid)
+    assert len(bid) == 1, f"setup rescued exactly once: {bid}"
+    # ... and a round that resolved before the rescue stages A again
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    gate.set()
+    review.join(timeout=60)
+    assert not review.is_alive()
+    assert "error" not in result, result.get("error")
+    saved, target, _note = result["saved"]
+    assert target == f"agora:{bid[0]}", f"adopted the rescue, not minted over: {target}"
+
+    assert not (paths().outbox / f".done-{ulid}").exists(), "the claim is not left set aside"
+    assert (paths().outbox / ulid).is_dir(), "X waits for the next lock taker again"
+
+    # the next pass takes the waiting entry through the continue-child rule: one rescue
+    assert store.upload_batch(drive, paths()) == []
+    remote = {e["Name"] for e in
+              json.loads(drive._run("lsjson", "gdrive:sessions", "--dirs-only"))}
+    assert remote - {ulid} == {bid[0]}, f"exactly one rescue: {sorted(remote)}"
+    assert "ZZ 65 第八句" in document_of(f"agora:{bid[0]}")
+
+
+def test_a_collision_while_minting_is_not_retried(env, capsys, monkeypatch):
+    """Issue #65: the retry is there for the adopt write (M-2), which re-resolves to the
+    very session the uploader is confirming. A mint has no such session: the id it just
+    composed is not in the index or the outbox, and a second attempt would mint beside
+    the first one - so the collision comes out of the mint instead."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append("ZZ 65 第九句")
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+
+    saves = []
+    real_save = cli._save
+
+    def collide_once(paths_, hdr_, body_, raw_, **kwargs):
+        saves.append(hdr_["id"])
+        if len(saves) == 1:
+            raise FileNotFoundError("outbox renamed under the mint")
+        return real_save(paths_, hdr_, body_, raw_, **kwargs)
+
+    monkeypatch.setattr(cli, "_save", collide_once)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    with pytest.raises(FileNotFoundError):
+        cli._write_one(paths(), run, exported, agent, check_drive=True)
+
+    assert len(saves) == 1, f"the mint is not retried: {saves}"
+    assert (paths().outbox / ulid).is_dir(), "and its claim is given back on the way out"
+    assert not (paths().outbox / f".done-{ulid}").exists()
+    assert _extra_sessions(a) == [], "nothing was minted"
+
+
+def test_an_adopt_collision_is_retried_once(env, capsys, monkeypatch):
+    """M-2, locked in by issue #65: the adopt write retries - twice at most, not a
+    loop - and the second attempt lands in the same rescue, so the round is saved."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append("ZZ 65 第十句")
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    # the rescue of A, completed and uploaded before the write starts: the resolver
+    # adopts it, and the collision hits right after (`_save` reads the entry the
+    # uploader is naming) - one more resolve finds it where it already is
+    assert store.upload_batch(store.Drive(paths()), paths()) == []
+    bid = store.Index(paths()).children(ulid)
+    assert len(bid) == 1, f"setup rescued exactly once: {bid}"
+
+    saves = []
+    real_save = cli._save
+
+    def collide_once(paths_, hdr_, body_, raw_, **kwargs):
+        saves.append(hdr_["id"])
+        if len(saves) == 1:
+            raise FileNotFoundError("outbox renamed under the adopt write")
+        return real_save(paths_, hdr_, body_, raw_, **kwargs)
+
+    monkeypatch.setattr(cli, "_save", collide_once)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    saved, target, _note = cli._write_one(paths(), run, exported, agent, check_drive=True)
+    assert target == f"agora:{bid[0]}", f"the retry lands in the rescue: {target}"
+    assert len(saves) == 2, f"one retry, not a loop: {saves}"
+    assert saved is not None
+
+    assert store.upload_batch(drive, paths()) == []
+    remote = {e["Name"] for e in
+              json.loads(drive._run("lsjson", "gdrive:sessions", "--dirs-only"))}
+    assert remote - {ulid} == {bid[0]}, f"exactly one rescue: {sorted(remote)}"
+    assert "ZZ 65 第十句" in document_of(f"agora:{bid[0]}")
+
+
 def test_a_crashed_holder_times_out_and_still_lands_once(env, capsys, monkeypatch):
     """L-2: `.done-X` residual, nobody behind it - the wait times out, one session
     is minted, and the restored entry is adopted (not minted over) afterwards."""
