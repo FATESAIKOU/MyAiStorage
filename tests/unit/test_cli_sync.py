@@ -181,6 +181,28 @@ def _wait_for(condition, timeout=30.0, what="condition"):
     pytest.fail(f"waited {timeout:g}s for {what}")
 
 
+def _deleted_mid_run(capsys, text):
+    """A session imported and uploaded, then deleted on another machine while it ran.
+
+    One staged update is waiting in the outbox and `exported` holds the newest words:
+    the state every rescue test of issues #59 and #65 starts from (issue #65 F-5).
+    """
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append(text)
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    return a, ulid, agent, drive, hdr, body, raw, exported
+
+
 @pytest.fixture
 def clean_subprocesses(monkeypatch):
     """Ensure any subprocess.Popen spawned during detached uploader tests is reaped."""
@@ -485,9 +507,305 @@ def test_adopt_write_survives_confirmation_rename(env, capsys, monkeypatch):
     assert "ZZ m2 第五句" in document_of(f"agora:{bid[0]}")
 
 
+def test_an_adopted_claim_goes_back_to_the_outbox(env, capsys, monkeypatch):
+    """Issue #65: the claim was taken for a mint, but the post-claim recheck adopted
+    somebody else's rescue, so no mint happened and `outbox/X` was never consumed.
+    `.done-X` must not be left set aside: put back, not cleared - X's staged version is
+    still waiting, and the uploader's continue-child rule adopts the rescue when the next
+    lock taker takes it (the way `restore_done` would have done, one command later).
+
+    Deterministic, event gates, no sleeps: the rescue of A completes and a round stages A
+    again while the foreground is parked between the resolve and the claim - the M-1
+    window, with `outbox/X` there for the claim to take.
+    """
+    a, ulid, agent, drive, hdr, body, raw, exported = _deleted_mid_run(capsys, "ZZ 65 第八句")
+
+    # No uploader around: an inline one would restore and drain the claim inside `_save`,
+    # and the residue this test is about is what waits for the next lock taker.
+    monkeypatch.setattr(cli, "_uploaded", lambda paths_, ulid_: True)
+
+    entered, gate = threading.Event(), threading.Event()
+    real_claim = cli._claim_rescue_entry
+
+    def gated_claim(p, ulid_):
+        entered.set()
+        assert gate.wait(timeout=30), "the rescue never landed while the claim waited"
+        return real_claim(p, ulid_)
+
+    monkeypatch.setattr(cli, "_claim_rescue_entry", gated_claim)
+    # The claim goes back after this write, not before it (issue #65 F-4): the entry may
+    # not become visible to an uploader before the adopted session is remembered, or its
+    # rescue of X could land a second one first - so at the write, both must still hold.
+    real_save = cli._save
+
+    def watched_save(paths_, hdr_, body_, raw_, **kwargs):
+        assert (paths_.outbox / f".done-{ulid}").is_dir(), "the claim is still ours at the write"
+        assert not (paths_.outbox / ulid).exists(), "X is not back before the write is done"
+        return real_save(paths_, hdr_, body_, raw_, **kwargs)
+
+    monkeypatch.setattr(cli, "_save", watched_save)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    result = {}
+
+    def foreground():
+        try:
+            result["saved"] = cli._write_one(paths(), run, exported, agent, check_drive=True)
+        except Exception as e:  # noqa: BLE001 - surfaced below
+            result["error"] = e
+
+    review = threading.Thread(target=foreground, daemon=True)
+    review.start()
+    assert entered.wait(timeout=30), "the foreground never reached its claim"
+    # the uploader rescues A while the foreground is about to claim it ...
+    assert store.upload_batch(store.Drive(paths()), paths()) == []
+    bid = store.Index(paths()).children(ulid)
+    assert len(bid) == 1, f"setup rescued exactly once: {bid}"
+    # ... and a round that resolved before the rescue stages A again
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    gate.set()
+    review.join(timeout=60)
+    assert not review.is_alive()
+    assert "error" not in result, result.get("error")
+    saved, target, _note = result["saved"]
+    assert target == f"agora:{bid[0]}", f"adopted the rescue, not minted over: {target}"
+
+    assert not (paths().outbox / f".done-{ulid}").exists(), "the claim is not left set aside"
+    assert (paths().outbox / ulid).is_dir(), "X waits for the next lock taker again"
+
+    # the next pass takes the waiting entry through the continue-child rule: one rescue
+    assert store.upload_batch(drive, paths()) == []
+    remote = {e["Name"] for e in
+              json.loads(drive._run("lsjson", "gdrive:sessions", "--dirs-only"))}
+    assert remote - {ulid} == {bid[0]}, f"exactly one rescue: {sorted(remote)}"
+    assert "ZZ 65 第八句" in document_of(f"agora:{bid[0]}")
+
+
+def test_a_failure_after_the_recheck_adopt_still_gives_the_claim_back(env, capsys, monkeypatch):
+    """F-2 (issue #65 review, N-3): the claim is given back even when what fails is not
+    a collision at all - here `_source` raises after the recheck already adopted the
+    uploader's rescue. The guard opens at the claim, so nothing between it and the write
+    can skip the `finally`; had the failure fallen outside it (7512ef5's scope), `.done-X`
+    would stay set aside until the next lock taker's `restore_done`.
+    """
+    a, ulid, agent, drive, hdr, body, raw, exported = _deleted_mid_run(capsys, "ZZ f2 第十三句")
+
+    monkeypatch.setattr(cli, "_uploaded", lambda paths_, ulid_: True)
+    entered, gate = threading.Event(), threading.Event()
+    real_claim = cli._claim_rescue_entry
+
+    def gated_claim(p, ulid_):
+        entered.set()
+        assert gate.wait(timeout=30), "the rescue never landed while the claim waited"
+        return real_claim(p, ulid_)
+
+    monkeypatch.setattr(cli, "_claim_rescue_entry", gated_claim)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom between the claim and the write")
+
+    monkeypatch.setattr(cli, "_source", boom)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    result = {}
+
+    def foreground():
+        try:
+            result["saved"] = cli._write_one(paths(), run, exported, agent, check_drive=True)
+        except Exception as e:  # noqa: BLE001 - surfaced below
+            result["error"] = e
+
+    review = threading.Thread(target=foreground, daemon=True)
+    review.start()
+    assert entered.wait(timeout=30), "the foreground never reached its claim"
+    # the uploader rescues A while the claim waits, so the recheck adopts it ...
+    assert store.upload_batch(store.Drive(paths()), paths()) == []
+    bid = store.Index(paths()).children(ulid)
+    assert len(bid) == 1, f"setup rescued exactly once: {bid}"
+    # ... and a round that resolved before the rescue stages A again
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    gate.set()
+    review.join(timeout=60)
+    assert not review.is_alive()
+    assert isinstance(result.get("error"), RuntimeError), result
+
+    assert not (paths().outbox / f".done-{ulid}").exists(), "the claim is not left set aside"
+    assert (paths().outbox / ulid).is_dir(), "it goes back though the write never came"
+
+
+def test_a_collision_while_minting_is_not_retried(env, capsys, monkeypatch):
+    """Issue #65: the retry is there for the adopt write (M-2), which re-resolves to the
+    very session the uploader is confirming. A mint has no such session: the id it just
+    composed is not in the index or the outbox, and a second attempt would mint beside
+    the first one - so the collision comes out of the mint instead."""
+    a, ulid, agent, drive, hdr, body, raw, exported = _deleted_mid_run(capsys, "ZZ 65 第九句")
+
+    saves = []
+    real_save = cli._save
+
+    def collide_once(paths_, hdr_, body_, raw_, **kwargs):
+        saves.append(hdr_["id"])
+        if len(saves) == 1:
+            raise FileNotFoundError("outbox renamed under the mint")
+        return real_save(paths_, hdr_, body_, raw_, **kwargs)
+
+    monkeypatch.setattr(cli, "_save", collide_once)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    with pytest.raises(FileNotFoundError):
+        cli._write_one(paths(), run, exported, agent, check_drive=True)
+
+    assert len(saves) == 1, f"the mint is not retried: {saves}"
+    assert saves[0] != a, "the one attempt is the mint's own new id"
+    assert _extra_sessions(a) == [], "nothing was minted - the retry never ran"
+
+
+def test_an_adopt_collision_is_retried_once(env, capsys, monkeypatch):
+    """M-2, locked in by issue #65: the adopt write retries - twice at most, not a
+    loop - and the second attempt lands in the same rescue, so the round is saved."""
+    a, ulid, agent, drive, hdr, body, raw, exported = _deleted_mid_run(capsys, "ZZ 65 第十句")
+    # the rescue of A, completed and uploaded before the write starts: the resolver
+    # adopts it, and the collision hits right after (`_save` reads the entry the
+    # uploader is naming) - one more resolve finds it where it already is
+    assert store.upload_batch(store.Drive(paths()), paths()) == []
+    bid = store.Index(paths()).children(ulid)
+    assert len(bid) == 1, f"setup rescued exactly once: {bid}"
+
+    saves = []
+    real_save = cli._save
+
+    def collide_once(paths_, hdr_, body_, raw_, **kwargs):
+        saves.append(hdr_["id"])
+        if len(saves) == 1:
+            raise FileNotFoundError("outbox renamed under the adopt write")
+        return real_save(paths_, hdr_, body_, raw_, **kwargs)
+
+    monkeypatch.setattr(cli, "_save", collide_once)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    saved, target, _note = cli._write_one(paths(), run, exported, agent, check_drive=True)
+    assert target == f"agora:{bid[0]}", f"the retry lands in the rescue: {target}"
+    assert len(saves) == 2, f"one retry, not a loop: {saves}"
+    assert saved is not None
+
+    assert store.upload_batch(drive, paths()) == []
+    remote = {e["Name"] for e in
+              json.loads(drive._run("lsjson", "gdrive:sessions", "--dirs-only"))}
+    assert remote - {ulid} == {bid[0]}, f"exactly one rescue: {sorted(remote)}"
+    assert "ZZ 65 第十句" in document_of(f"agora:{bid[0]}")
+
+
+def test_the_recheck_adopt_write_survives_a_collision(env, capsys, monkeypatch):
+    """F-1 (issue #65 review): the resolver called it a mint, the claim succeeded, and
+    only the post-claim recheck found the uploader's just-finished rescue - an adopt
+    reached through `_save_continue`, not through `_write_target`. Its write is the same
+    M-2 adopt write, so it gets the same retry: resolve once more, land in the rescue.
+    The outer `is_new` is still True here, which is exactly what the retry condition may
+    no longer look at (issue #65 review, `test_probe_recheck_adopt_collision_is_retried`).
+    """
+    a, ulid, agent, drive, hdr, body, raw, exported = _deleted_mid_run(capsys, "ZZ f1 第十一句")
+
+    monkeypatch.setattr(cli, "_uploaded", lambda paths_, ulid_: True)
+    entered, gate = threading.Event(), threading.Event()
+    real_claim = cli._claim_rescue_entry
+
+    def gated_claim(p, ulid_):
+        entered.set()
+        assert gate.wait(timeout=30), "the rescue never landed while the claim waited"
+        return real_claim(p, ulid_)
+
+    monkeypatch.setattr(cli, "_claim_rescue_entry", gated_claim)
+    saves = []
+    real_save = cli._save
+
+    def collide_once(paths_, hdr_, body_, raw_, **kwargs):
+        saves.append(hdr_["id"])
+        if len(saves) == 1:
+            raise FileNotFoundError("outbox renamed under the adopt write")
+        return real_save(paths_, hdr_, body_, raw_, **kwargs)
+
+    monkeypatch.setattr(cli, "_save", collide_once)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    result = {}
+
+    def foreground():
+        try:
+            result["saved"] = cli._write_one(paths(), run, exported, agent, check_drive=True)
+        except Exception as e:  # noqa: BLE001 - surfaced below
+            result["error"] = e
+
+    review = threading.Thread(target=foreground, daemon=True)
+    review.start()
+    assert entered.wait(timeout=30), "the foreground never reached its claim"
+    # the uploader finishes its rescue while the claim waits, and a round stages A again
+    assert store.upload_batch(store.Drive(paths()), paths()) == []
+    bid = store.Index(paths()).children(ulid)
+    assert len(bid) == 1, f"setup rescued exactly once: {bid}"
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    gate.set()
+    review.join(timeout=60)
+    assert not review.is_alive()
+    assert "error" not in result, f"the recheck adopt was not retried: {result.get('error')!r}"
+    saved, target, _note = result["saved"]
+    assert len(saves) == 2, f"collision, then one retry: {saves}"
+    assert target == f"agora:{bid[0]}", f"the retry lands in the rescue: {target}"
+
+    assert store.upload_batch(drive, paths()) == []
+    remote = {e["Name"] for e in
+              json.loads(drive._run("lsjson", "gdrive:sessions", "--dirs-only"))}
+    assert remote - {ulid} == {bid[0]}, f"exactly one rescue: {sorted(remote)}"
+    assert "ZZ f1 第十一句" in document_of(f"agora:{bid[0]}")
+
+
+def test_a_mint_that_fails_after_staging_is_adopted_next_round(env, capsys, monkeypatch):
+    """F-3 (issue #65 review): a mint whose `remember` collides already staged its new
+    session, so the work is on disk - the next round's resolver adopts that staged Y2
+    (`_staged_as`) instead of minting a Y3 beside it. The collision itself still comes
+    out of the round: this is a mint, not the adopt write M-2 retries. A `stage` that
+    dies mid-swap (only `.tmp-Y2` left) is the known, unhandled sliver.
+    """
+    a, ulid, agent, drive, hdr, body, raw, exported = _deleted_mid_run(capsys, "ZZ f3 第十二句")
+
+    monkeypatch.setattr(cli, "_uploaded", lambda paths_, ulid_: True)
+    remembered = []
+    real_remember = store.remember
+
+    def collide_once(p, folder, *args, **kwargs):
+        remembered.append(folder.name)
+        if len(remembered) == 1:
+            raise FileNotFoundError("collision after the mint's stage")
+        return real_remember(p, folder, *args, **kwargs)
+
+    monkeypatch.setattr(store, "remember", collide_once)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    with pytest.raises(FileNotFoundError):
+        cli._write_one(paths(), cli._Run(paths(), record), exported, agent, check_drive=True)
+    minted = remembered[0]
+    assert minted != ulid
+    assert (paths().outbox / minted).is_dir(), "the minted session stays staged, not lost"
+
+    saved, target, _note = cli._write_one(paths(), cli._Run(paths(), record), exported, agent,
+                                          check_drive=True)
+    assert target == f"agora:{minted}", f"the next round adopts the staged mint: {target}"
+    assert len(_extra_sessions(a)) == 1, "one rescue - no Y3 beside the orphan"
+    assert "ZZ f3 第十二句" in document_of(target)
+
+
 def test_a_crashed_holder_times_out_and_still_lands_once(env, capsys, monkeypatch):
     """L-2: `.done-X` residual, nobody behind it - the wait times out, one session
-    is minted, and the restored entry is adopted (not minted over) afterwards."""
+    is minted, and the restored entry is adopted (not minted over) afterwards.
+
+    Shortening `RESCUE_CLAIM_WAIT` is only how the test reaches the timeout without
+    sitting the real ten seconds out: what is locked in is the timeout mechanism (a
+    holder that never lands anything), not the constant's value.
+    """
     _, a, _ = _import(capsys)
     ulid = a.split(":")[1]
     agent = cli.load_agent("opencode")
@@ -503,7 +821,7 @@ def test_a_crashed_holder_times_out_and_still_lands_once(env, capsys, monkeypatc
     shutil.rmtree(on_drive(a))                     # another machine deleted A
     # crash residue: claimed, no worker behind it
     (paths().outbox / ulid).rename(paths().outbox / f".done-{ulid}")
-    monkeypatch.setattr(cli, "RESCUE_CLAIM_WAIT", 0.3)
+    monkeypatch.setattr(cli, "RESCUE_CLAIM_WAIT", 0.3)   # exercise the timeout, not the value
     from agora import background
     monkeypatch.setattr(background, "start", lambda paths: background.STARTED)
     record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
@@ -543,8 +861,6 @@ def test_timeout_mint_clears_only_its_own_claim(env, capsys, monkeypatch):
     assert "ZZ l4 第七句" in document_of(target)
     assert (paths().outbox / f".done-{ulid}").is_dir(), \
         "a foreign claim survives someone else's timeout mint"
-    assert (paths().outbox / f".done-{ulid}").is_dir(), \
-        "the timeout mint leaves another claim alone"
     # the next lock-taker restores the residue; the uploader adopts, not mints
     lock = store.hold_upload_lock(paths(), blocking=True)
     try:
