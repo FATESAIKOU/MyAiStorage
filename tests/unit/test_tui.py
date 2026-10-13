@@ -1789,10 +1789,11 @@ def test_deleting_three_marked_rows_is_one_command():
 
 def test_import_uses_the_row_under_the_cursor_when_nothing_is_marked(monkeypatch):
     """spec: 未匯入頁沒有勾選任何列，按 Enter → 只有游標那一列被匯入。"""
-    agent = FakeAgent("opencode", [Listed("s1", "/tmp/p", "甲", None), Listed("s2", "/tmp/q", "乙", None)],
-                      texts={"s1": ["問"], "s2": ["答"]})
+    agent = FakeAgent("opencode", [Listed("s1", "/tmp/p", "甲", None), Listed("s2", "/tmp/q", "乙", None),
+                                   Listed("s3", "/tmp/r", "丙", None)],
+                      texts={"s1": ["問"], "s2": ["答"], "s3": ["再問"]})
     app = tui.AgoraApp(app_paths := store.Paths.from_env(), FakeCli(), agents=[agent], check_setup=False)
-    for n, title in enumerate("甲乙", 1):
+    for n, title in enumerate("甲乙丙", 1):
         ulid = f"02{'0' * 23}{n}"
         (app_paths.mirror / ulid).mkdir(parents=True, exist_ok=True)
         (app_paths.mirror / ulid / "session.md").write_text(
@@ -1812,11 +1813,13 @@ def test_import_uses_the_row_under_the_cursor_when_nothing_is_marked(monkeypatch
             await pilot.pause()
             await pilot.press("]")                      # 未匯入
             await pilot.pause()
-            await pilot.press("down")                     # the second row, un-marked
+            await pilot.press("down")                     # the middle row, un-marked
             await pilot.press("enter")
-            await _wait(lambda: app._last_spawned, pilot)
-            assert app._last_spawned[-1] == ["import", "session", "--agent", "opencode",
-                                             "--external-session-id", "s2"]
+            assert await _wait(lambda: app._last_spawned, pilot), "游標那一列沒有被匯入"
+            # Three rows and the cursor on the middle one: "the cursor row" and "the
+            # last row" are different rows, so a wrong choice cannot pass (issue #69).
+            assert app._last_spawned == [["import", "session", "--agent", "opencode",
+                                          "--external-session-id", "s2"]], app._last_spawned
             # Leave the screen at rest, not mid-action: close the result window the way
             # a person would and wait for the action to finish. A worker still in flight
             # when the test leaves finishes after the screen is gone - that is the
