@@ -381,17 +381,33 @@ def test_the_fake_refuses_a_v1_payload_the_way_2x_does(fake, tmp_path, monkeypat
     assert both.returncode != 0 and "SchemaError" in both.stderr
 
 
-def test_a_v2_fork_is_refused_before_anything_is_imported(fake, workdir):
-    """Appending to the flat rows is step 2's work (review of step 1): the fork of
-    a v2 Session must say so instead of handing out a payload 2.x would refuse -
-    or accept half of - and nothing may reach opencode until it does."""
-    with pytest.raises(AgentError, match="還不能 fork"):
-        oc.ADAPTER.append_native(fork(), [("user", ["ZZFORK 再問一句。"]),
-                                          ("assistant", ["ZZFORK 回答。"])])
-    # the refusal came before the import: no call at all left the process, and the
-    # source session is not even in the fake's store - only the fixture is
-    assert not (fake / "opencode-calls.log").exists()
-    assert [path.stem for path in (fake / "opencode-sessions").glob("*.json")] == ["default"]
+def test_a_v2_fork_appends_flat_rows_and_keeps_the_tool_calls(fake, workdir):
+    """M1: the fork of a v2 Session is the flat rows plus two new ones - the
+    tool call stays, the rest of the payload stays byte-for-byte, and the new
+    assistant row carries the model A was using with times after everything."""
+    before = json.loads(fork())
+    out = json.loads(oc.ADAPTER.append_native(
+        fork(), [("user", ["ZZFORK 再問一句。"]), ("assistant", ["ZZFORK 回答。"])]))
+    assert len(out["messages"]) == len(before["messages"]) + 2
+    assert [m.get("type") for m in out["messages"][-2:]] == ["user", "assistant"]
+    # the original rows are untouched (content-wise, not formatting)
+    assert json.dumps(out["messages"][:len(before["messages"])],
+                      sort_keys=True, ensure_ascii=False) == \
+        json.dumps(before["messages"], sort_keys=True, ensure_ascii=False)
+    # the tool call survived the copy
+    assert any(c.get("type") == "tool"
+               for m in out["messages"] for c in (m.get("content") or []))
+    # the new assistant row points at the right model and lands after everything
+    assert out["messages"][-1]["model"]["id"] == "fake-model"
+    times = [m["time"]["created"] for m in out["messages"]]
+    assert times[-2:] == sorted(times[-2:])
+    assert min(times[-2:]) > max(times[:-2])
+    # and the payload it built loads on a 2.x opencode (fake models it)
+    launch = oc.ADAPTER.start_native(json.dumps(out).encode(), workdir)
+    assert launch.before_count == 9  # fork has 7 user/assistant + 2 new
+    # recount: fork fixture has 10 rows? check via message_count (user/assistant only)
+    assert oc.ADAPTER.export(launch.agent_session_id).message_count == \
+        oc._message_count(out, "v2")
 
 
 def test_every_automated_call_carries_its_server_context(fake, workdir):

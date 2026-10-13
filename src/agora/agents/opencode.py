@@ -495,6 +495,84 @@ def _unused_stem(messages: list[dict]) -> str:
     return stem
 
 
+def _row_created_ms(row: dict, fallback: int = 0) -> int:
+    """A flat v2 row's `time.created` (M1: v1 reads `m.get("info")`, v2 has none)."""
+    clock = row.get("time")
+    created = clock.get("created") if isinstance(clock, dict) else None
+    return created if isinstance(created, int) else fallback
+
+
+def _apply_revert_v2(payload: dict) -> None:
+    """The v2 half of `_apply_revert` (M1): flat rows, `content` inside them.
+
+    v2's undo pointer is still `info.revert{messageID, partID}` when present
+    (no fixture carries one - a forked export drops `fork`, an undone one keeps
+    `revert` the same way v1 does); the rows after it are what opencode hides,
+    and the named content item (a tool call's id) goes with everything after it.
+    A `messageID` that is not in the export removes nothing; only the pointer
+    goes, the same as v1.
+    """
+    info = payload.get("info")
+    revert = info.get("revert") if isinstance(info, dict) else None
+    if not isinstance(revert, dict):
+        return
+    messages = _payload_messages(payload)
+    found = next((n for n, row in enumerate(messages)
+                  if str(row.get("id")) == str(revert.get("messageID"))), -1)
+    if found >= 0:
+        part_id = revert.get("partID")
+        del messages[found + (1 if part_id else 0):]
+        if part_id and isinstance(messages[found].get("content"), list):
+            content = messages[found]["content"]
+            cut = next((n for n, item in enumerate(content)
+                        if isinstance(item, dict) and item.get("id") == part_id), -1)
+            if cut >= 0:
+                del content[cut:]
+    if isinstance(info, dict):
+        info.pop("revert", None)
+
+
+def _role_fields_v2(payload: dict) -> dict[str, dict]:
+    """Per role, the fields a new v2 row has to copy (M1).
+
+    v2 user rows carry no agent/model (just `text`), so there is nothing to
+    copy for them; a new assistant row carries the `agent` and `model` the
+    session was using, read off its last assistant row. Without this the fork's
+    new rows would record no model at all (`_last_model` stops at the last
+    assistant), and opencode could come back on a model this session never used.
+    """
+    fields: dict[str, dict] = {"user": {}, "assistant": {}}
+    for row in reversed(_payload_messages(payload)):
+        if row.get("type") != "assistant" or fields["assistant"]:
+            continue
+        picked = fields["assistant"]
+        agent = row.get("agent")
+        if isinstance(agent, str) and agent:
+            picked["agent"] = agent
+        model = row.get("model")
+        if isinstance(model, dict):
+            picked["model"] = json.loads(json.dumps(model))
+        break
+    return fields
+
+
+def _unused_stem_v2(messages: list[dict]) -> str:
+    """An id stem nothing in this v2 payload uses (M1).
+
+    Flat rows (`msg_...`) plus the content items that carry an id (a tool
+    call's `call_...`, re-identified to `prt_...`); new `msg_agora...` rows must
+    not collide with any of them, the same rule `_unused_stem` enforces for v1.
+    """
+    taken = {str(row.get("id")) for row in messages}
+    taken |= {str(item.get("id")) for row in messages
+              for item in (row.get("content") or []) if isinstance(item, dict)}
+    stem = "agora"
+    while any(value.startswith(("msg_", "prt_", "call_")) and stem in value
+              for value in taken):
+        stem += "a"
+    return stem
+
+
 def _said(blob: str) -> str | None:
     """The text one part blob holds, if it is text the session said.
 
@@ -897,24 +975,21 @@ class OpencodeAgent:
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     def append_native(self, raw: bytes, turns: Turns) -> bytes:
-        """A's own export with `turns` added as new messages (F4).
+        """A's own export with `turns` added as new messages (F4, v2 in step 2).
 
         A same-agent fork loads A's session as it is, so the fork's two turns cannot
         go through `native()`: that rebuilds the conversation out of its reading
         version and loses every tool call. So this is A's payload, copied, with the
         undo pointer applied first (so the fork does not inherit a tail opencode
-        would hide and then delete) and the turns appended as ordinary messages -
-        chained to A's last one, carrying the model and mode A was using, and visible
-        plain text like everything else `native()` writes.
-
-        A v2 raw is refused before anything happens: appending to the flat rows is
-        what step 2 of agora-opencode-v2 writes (the helpers below only know the
-        nested shape), so today the answer is an explicit refusal, not a payload
-        v2's import would reject - or worse, accept half of (design 8).
+        would hide and then delete) and the turns appended as ordinary rows -
+        carrying the model A was using, and visible plain text like everything
+        else `native()` writes. The rest of the payload stays byte-for-byte what
+        it was (only JSON key order may move); v2 rows carry no parent link, so
+        the new rows chain by time order, not by id.
         """
         payload = self._read(raw)
         if _payload_format(payload) == "v2":
-            raise AgentError("opencode v2 的 Session 還不能 fork／同 agent 接續，第 2 步才支援")
+            return self._append_native_v2(payload, turns)
         _apply_revert(payload)
         messages = _payload_messages(payload)
         body = [(role, [line for line in lines if line.strip()]) for role, lines in turns
@@ -969,6 +1044,56 @@ class OpencodeAgent:
                 for n, line in enumerate(lines)]})
             if role == "user":
                 previous = message_id
+        return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    def _append_native_v2(self, payload: dict, turns: Turns) -> bytes:
+        """The v2 half of `append_native` (M1): copy the flat rows, append new ones.
+
+        The v1-only helpers below each get their v2 counterpart here: `_apply_revert`
+        reads `info.revert`/`messages[].parts`, this reads the same pointer against
+        flat rows/`content`; `_role_fields` reads `info.role`/`providerID`/`modelID`,
+        this reads `type`/`agent`/`model.id`; `_unused_stem` reads `info`/`parts`
+        ids, this reads row/content ids; `said`/`last_question` look at `type`,
+        times come from `row["time"]` (`_row_created_ms`), and `_last_model`
+        already reads `model.id` for both. New rows are minimal but complete
+        (2.1's required set): user `{id,time,text,files,type}`, assistant
+        `{id,time,type,agent,model,content:[{type,text}]}` - no synthetic, no
+        attachment, no parent link (v2 has none). The fork's new assistant rows
+        copy the model A was using, so `_last_model` still answers with A's model.
+        """
+        _apply_revert_v2(payload)
+        messages = _payload_messages(payload)
+        body = [(role, [line for line in lines if line.strip()]) for role, lines in turns
+                if role in ("user", "assistant") and any(line.strip() for line in lines)]
+        said = [m for m in messages if m.get("type") in ("user", "assistant")]
+        # W1, same rule as v1: what the reading version is about to show, once its
+        # `[skip …]` lines are gone - an interrupted run leaves an assistant with
+        # nothing in it, and the turn before it is still the user's open question.
+        spoken = merge_turns([(role, [line for line in lines if not line.startswith("[skip ")])
+                              for role, lines in self.turns(
+                                  json.dumps(payload, ensure_ascii=False).encode("utf-8"))])
+        if body and spoken and spoken[-1][0] == "user":
+            body.insert(0, ("assistant", [NO_REPLY]))
+        fields = _role_fields_v2(payload)
+        stem = _unused_stem_v2(messages)
+        first = max(int(time.time() * 1000),
+                    1 + max((_row_created_ms(m) for m in messages), default=0))
+        for position, (role, lines) in enumerate(body):
+            at = first + position
+            message_id = f"msg_{stem}{position}"
+            if role == "user":
+                messages.append({"id": message_id, "time": {"created": at},
+                                 "text": "\n".join(lines), "files": [], "type": "user"})
+            else:
+                copied = fields.get("assistant") or {}
+                model = copied.get("model") or {"id": "", "providerID": "opencode",
+                                                "variant": "default"}
+                messages.append({"id": message_id, "time": {"created": at},
+                                 "type": "assistant",
+                                 "agent": copied.get("agent", "build"),
+                                 "model": json.loads(json.dumps(model)),
+                                 "content": [{"type": "text", "text": line}
+                                             for line in lines]})
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     def list_sessions(self) -> list[Listed]:
