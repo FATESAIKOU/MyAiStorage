@@ -30,6 +30,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 import sys
 
@@ -104,16 +105,31 @@ def isolated(tmp_path, monkeypatch):
     workdir.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=workdir, check=True)
     try:
-        yield upstream, workdir
+        yield upstream, workdir, xdg["XDG_DATA_HOME"]
     finally:
         upstream.stop()
+
+
+def _sessions_in_store(data_home: Path, session_id: str) -> list[str]:
+    """Tables in the isolated store that still carry this session id, if any."""
+    db = sqlite3.connect(data_home / "opencode" / "opencode.db")
+    try:
+        found = []
+        for (table,) in db.execute("select name from sqlite_master where type='table'"):
+            if table not in ("session", "session_v2"):
+                continue
+            if db.execute(f"select 1 from {table} where id=?", (session_id,)).fetchall():
+                found.append(table)
+        return found
+    finally:
+        db.close()
 
 
 def test_a_real_summarize_run_reads_the_model_and_deletes_its_session(isolated,
                                                                        monkeypatch):
     """4.4: the real opencode answers through the fake upstream, the model is read
     off the v2 session the run made, and that session is really gone afterwards."""
-    upstream, workdir = isolated
+    upstream, workdir, data_home = isolated
     deleted: list[str] = []
     real_drop = oc.ADAPTER._drop_summary_session
     monkeypatch.setattr(oc.ADAPTER, "_drop_summary_session",
@@ -129,9 +145,12 @@ def test_a_real_summarize_run_reads_the_model_and_deletes_its_session(isolated,
     assert upstream.calls(), "opencode 沒有問到 fake upstream"
     assert deleted and deleted[0].startswith("ses_"), "沒有刪到要約用的 session"
     assert after == before, f"預設埠 {DEFAULT_PORT} 的服務被動到了：{before!r} -> {after!r}"
-    # nothing of the run is left: no session in the isolated store, no record
+    # the session row is gone from the isolated store itself, and `session list`
+    # (scoped to the workdir project, like the TUI) does not show it either
+    assert _sessions_in_store(data_home, deleted[0]) == []
     listed = subprocess.run([REAL_OPENCODE, "session", "list", "--standalone",
                              "--format", "json"], cwd=str(workdir),
+                            env={**os.environ, "PWD": str(workdir)},
                             capture_output=True, text=True, timeout=120)
     assert listed.returncode == 0, listed.stderr
     assert json.loads(listed.stdout or "[]") == []
