@@ -497,13 +497,13 @@ def test_start_native_detects_a_short_import_and_cleans_up(fake, workdir, monkey
 def test_start_native_reports_a_refused_import(fake, workdir, monkeypatch):
     monkeypatch.setenv("FAKE_OPENCODE_LEAVE", "1")
     with pytest.raises(AgentError, match="import 失敗"):
-        oc.ADAPTER.start_native(raw(), workdir)
+        oc.ADAPTER.start_native(v2(), workdir)
 
 
 def test_start_native_failure_message_has_no_transcript(fake, workdir, monkeypatch):
     monkeypatch.setenv("FAKE_OPENCODE_FAIL", "import")
     with pytest.raises(AgentError) as e:
-        oc.ADAPTER.start_native(raw(), workdir)
+        oc.ADAPTER.start_native(v2(), workdir)
     assert "ZZTOOLOUT" not in str(e.value) and "ZZTHINK" not in str(e.value)
 
 
@@ -877,8 +877,8 @@ def test_append_native_picks_ids_a_session_of_its_own_cannot_have(fake, workdir)
     assert {i for i in ids if i not in before} == \
         {f"msg_agoraa{n}" for n in (0, 1)} | {f"prt_agoraa{n}-0" for n in (0, 1)}
     # the payload it built is still a v1 one, so a 2.x opencode refuses to load it
-    # (the load itself is step 2, with a v2 append)
-    with pytest.raises(AgentError, match="SchemaError"):
+    # - now with the honest 2.5 refusal (not a bare SchemaError), before any import
+    with pytest.raises(AgentError, match="1.x|重新匯入"):
         oc.ADAPTER.start_native(oc.ADAPTER.append_native(forked, FORK), workdir)
 
 
@@ -948,9 +948,9 @@ def test_append_native_leaves_a_itself_untouched(fake, workdir):
     before = (fake / "opencode-sessions" / "default.json").read_bytes()
     out = oc.ADAPTER.append_native(raw(), FORK)
     assert json.loads(out)["info"].get("revert") is None
-    # the copy is still a v1 payload, so the 2.x fake refuses to load it - and
-    # either way nothing was written back into A's own file
-    with pytest.raises(AgentError, match="SchemaError"):
+    # the copy is still a v1 payload, so 2.5 refuses it honestly before any import -
+    # and either way nothing was written back into A's own file
+    with pytest.raises(AgentError, match="1.x|重新匯入"):
         oc.ADAPTER.start_native(out, workdir)
     assert (fake / "opencode-sessions" / "default.json").read_bytes() == before
 

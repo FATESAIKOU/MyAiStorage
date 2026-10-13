@@ -1339,8 +1339,23 @@ class OpencodeAgent:
 
     def start_native(self, raw: bytes, workdir: Path, *, headless: bool = False,
                      headless_port: int | None = None) -> Launch:
+        payload = self._read(raw)
+        if _payload_format(payload) == "v1":
+            # Decisions 8 (M5): a v1 raw cannot be loaded on a 2.x opencode at all
+            # (`session import` refuses it), so refusing here - before any import,
+            # before any pending is written - leaves the Session and its raw alone
+            # and never hands a v1 payload to a v2 import (which would leave half
+            # a Session). The id comes from the payload itself.
+            old_id = str((payload.get("info") or {}).get("id") or "")
+            raise AgentError(
+                f"這是 opencode 1.x 時代的 Session（v1 巢狀格式），不能用同一個 agent 接續／fork"
+                f"（來源 agent session：{old_id or '未知'}；opencode 2.x 的 session import 拒收 v1）。"
+                f"要接續請先重新匯入：`agora import session --external-session-id {old_id or '<id>'}"
+                " --agent opencode`。注意：重新匯入不一定原地更新——被 merge／continue 分支過的"
+                " Session 會另存成新的 Session；來源不在本機時只能改用跨 agent 接續"
+                "（例如 `--agent claude`，走閱讀版轉換）。")
         session_id, landed = self._import_verified(
-            reidentify(self._read(raw), session_id=_session_id()), workdir)
+            reidentify(payload, session_id=_session_id()), workdir)
         if headless:
             # The server mode from the spike (design D6): the caller allocated
             # the port (sidecar passes --headless-port) and talks HTTP to it;
