@@ -725,6 +725,53 @@ def test_the_recheck_adopt_write_survives_a_collision(env, capsys, monkeypatch):
     assert "ZZ f1 第十一句" in document_of(f"agora:{bid[0]}")
 
 
+def test_a_mint_that_fails_after_staging_is_adopted_next_round(env, capsys, monkeypatch):
+    """F-3 (issue #65 review): a mint whose `remember` collides already staged its new
+    session, so the work is on disk - the next round's resolver adopts that staged Y2
+    (`_staged_as`) instead of minting a Y3 beside it. The collision itself still comes
+    out of the round: this is a mint, not the adopt write M-2 retries. A `stage` that
+    dies mid-swap (only `.tmp-Y2` left) is the known, unhandled sliver.
+    """
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append("ZZ f3 第十二句")
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+
+    monkeypatch.setattr(cli, "_uploaded", lambda paths_, ulid_: True)
+    remembered = []
+    real_remember = store.remember
+
+    def collide_once(p, folder, *args, **kwargs):
+        remembered.append(folder.name)
+        if len(remembered) == 1:
+            raise FileNotFoundError("collision after the mint's stage")
+        return real_remember(p, folder, *args, **kwargs)
+
+    monkeypatch.setattr(store, "remember", collide_once)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    with pytest.raises(FileNotFoundError):
+        cli._write_one(paths(), cli._Run(paths(), record), exported, agent, check_drive=True)
+    minted = remembered[0]
+    assert minted != ulid
+    assert (paths().outbox / minted).is_dir(), "the minted session stays staged, not lost"
+
+    saved, target, _note = cli._write_one(paths(), cli._Run(paths(), record), exported, agent,
+                                          check_drive=True)
+    assert target == f"agora:{minted}", f"the next round adopts the staged mint: {target}"
+    assert len(_extra_sessions(a)) == 1, "one rescue - no Y3 beside the orphan"
+    assert "ZZ f3 第十二句" in document_of(target)
+
+
 def test_a_crashed_holder_times_out_and_still_lands_once(env, capsys, monkeypatch):
     """L-2: `.done-X` residual, nobody behind it - the wait times out, one session
     is minted, and the restored entry is adopted (not minted over) afterwards.
