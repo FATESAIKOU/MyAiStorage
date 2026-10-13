@@ -58,11 +58,11 @@
 
 **範圍**：`_model_of()` 與 summarize／delete 的 v2 行為驗證（server 上下文已在第 1 步）。合併後：寫要約、刪除與 merge 的收尾在 v2 上照常。
 
-- [ ] 4.1 `_model_of()` 讀 v2 的模型（assistant 列的 `model.id`；形狀以 fixture 複驗）
-- [ ] 4.2 summarize 的行為測試：argv（已在第 1 步加的 `--standalone`）、成功／空回覆／失敗／逾時；`_drop_summary_session` 失敗時保留記錄
-- [ ] 4.3 刪除路徑的行為測試：`_discard`（匯入驗證失敗時的清理）、`_sweep_pending` 補刪、merge 流程的刪除警告（fake 的 `FAKE_OPENCODE_FAIL=delete` 對照）
-- [ ] 4.4 真 opencode 的 summarize 整合測試（隔離 XDG＋空閒埠、fake upstream）：寫要約後那個 session 真的被刪掉
-- [ ] 4.5 改壞驗證：`_model_of` 讀錯欄位；`_drop_summary_session` 失敗卻刪記錄；`_sweep_pending` 不刪
+- [x] 4.1 `_model_of()` 讀 v2 的模型（assistant 列的 `model.id`；形狀以 fixture 複驗）
+- [x] 4.2 summarize 的行為測試：argv（已在第 1 步加的 `--standalone`）、成功／空回覆／失敗／逾時；`_drop_summary_session` 失敗時保留記錄
+- [x] 4.3 刪除路徑的行為測試：`_discard`（匯入驗證失敗時的清理）、`_sweep_pending` 補刪、merge 流程的刪除警告（fake 的 `FAKE_OPENCODE_FAIL=delete` 對照）
+- [x] 4.4 真 opencode 的 summarize 整合測試（隔離 XDG＋空閒埠、fake upstream）：寫要約後那個 session 真的被刪掉
+- [x] 4.5 改壞驗證：`_model_of` 讀錯欄位；`_drop_summary_session` 失敗卻刪記錄；`_sweep_pending` 不刪
 
 **測試**：`uv run pytest -q tests/unit/test_agent_opencode.py tests/unit/test_continue_headless.py tests/unit/test_cli.py`（受影響的）。
 **改壞驗證**：4.5 逐項記在 PR 說明。
