@@ -512,6 +512,37 @@ def test_a_crashed_holder_times_out_and_still_lands_once(env, capsys, monkeypatc
     _saved, target, _note = cli._write_one(paths(), run, exported, agent, check_drive=True)
     assert target != a
     assert "ZZ l2 第六句" in document_of(target)
+
+
+def test_timeout_mint_clears_only_its_own_claim(env, capsys, monkeypatch):
+    """L-4: the timeout fallback mints, but a foreign live claim is not ours to
+    clear - wiping `.done-X` would orphan the holder's work mid-rescue."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append("ZZ l4 第七句")
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    # someone else's live claim, not ours
+    (paths().outbox / ulid).rename(paths().outbox / f".done-{ulid}")
+    monkeypatch.setattr(cli, "RESCUE_CLAIM_WAIT", 0.3)
+    from agora import background
+    monkeypatch.setattr(background, "start", lambda paths: background.STARTED)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    _saved, target, _note = cli._write_one(paths(), run, exported, agent, check_drive=True)
+    assert target != a
+    assert "ZZ l4 第七句" in document_of(target)
+    assert (paths().outbox / f".done-{ulid}").is_dir(), \
+        "a foreign claim survives someone else's timeout mint"
     assert (paths().outbox / f".done-{ulid}").is_dir(), \
         "the timeout mint leaves another claim alone"
     # the next lock-taker restores the residue; the uploader adopts, not mints
