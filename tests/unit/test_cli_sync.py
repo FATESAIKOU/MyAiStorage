@@ -181,6 +181,28 @@ def _wait_for(condition, timeout=30.0, what="condition"):
     pytest.fail(f"waited {timeout:g}s for {what}")
 
 
+def _deleted_mid_run(capsys, text):
+    """A session imported and uploaded, then deleted on another machine while it ran.
+
+    One staged update is waiting in the outbox and `exported` holds the newest words:
+    the state every rescue test of issues #59 and #65 starts from (issue #65 F-5).
+    """
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append(text)
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    return a, ulid, agent, drive, hdr, body, raw, exported
+
+
 @pytest.fixture
 def clean_subprocesses(monkeypatch):
     """Ensure any subprocess.Popen spawned during detached uploader tests is reaped."""
@@ -496,19 +518,7 @@ def test_an_adopted_claim_goes_back_to_the_outbox(env, capsys, monkeypatch):
     again while the foreground is parked between the resolve and the claim - the M-1
     window, with `outbox/X` there for the claim to take.
     """
-    _, a, _ = _import(capsys)
-    ulid = a.split(":")[1]
-    agent = cli.load_agent("opencode")
-    drive = store.Drive(paths())
-    assert store.upload_batch(drive, paths()) == []
-    assert on_drive(a).is_dir(), "A confirmed on Drive first"
-    mirror = paths().mirror / ulid
-    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
-    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
-    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
-    agent.sessions["ses_a"].append("ZZ 65 第八句")
-    exported = agent.export("ses_a")
-    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    a, ulid, agent, drive, hdr, body, raw, exported = _deleted_mid_run(capsys, "ZZ 65 第八句")
 
     # No uploader around: an inline one would restore and drain the claim inside `_save`,
     # and the residue this test is about is what waits for the next lock taker.
@@ -577,19 +587,7 @@ def test_a_collision_while_minting_is_not_retried(env, capsys, monkeypatch):
     very session the uploader is confirming. A mint has no such session: the id it just
     composed is not in the index or the outbox, and a second attempt would mint beside
     the first one - so the collision comes out of the mint instead."""
-    _, a, _ = _import(capsys)
-    ulid = a.split(":")[1]
-    agent = cli.load_agent("opencode")
-    drive = store.Drive(paths())
-    assert store.upload_batch(drive, paths()) == []
-    assert on_drive(a).is_dir(), "A confirmed on Drive first"
-    mirror = paths().mirror / ulid
-    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
-    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
-    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
-    agent.sessions["ses_a"].append("ZZ 65 第九句")
-    exported = agent.export("ses_a")
-    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    a, ulid, agent, drive, hdr, body, raw, exported = _deleted_mid_run(capsys, "ZZ 65 第九句")
 
     saves = []
     real_save = cli._save
@@ -615,19 +613,7 @@ def test_a_collision_while_minting_is_not_retried(env, capsys, monkeypatch):
 def test_an_adopt_collision_is_retried_once(env, capsys, monkeypatch):
     """M-2, locked in by issue #65: the adopt write retries - twice at most, not a
     loop - and the second attempt lands in the same rescue, so the round is saved."""
-    _, a, _ = _import(capsys)
-    ulid = a.split(":")[1]
-    agent = cli.load_agent("opencode")
-    drive = store.Drive(paths())
-    assert store.upload_batch(drive, paths()) == []
-    assert on_drive(a).is_dir(), "A confirmed on Drive first"
-    mirror = paths().mirror / ulid
-    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
-    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
-    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
-    agent.sessions["ses_a"].append("ZZ 65 第十句")
-    exported = agent.export("ses_a")
-    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    a, ulid, agent, drive, hdr, body, raw, exported = _deleted_mid_run(capsys, "ZZ 65 第十句")
     # the rescue of A, completed and uploaded before the write starts: the resolver
     # adopts it, and the collision hits right after (`_save` reads the entry the
     # uploader is naming) - one more resolve finds it where it already is
@@ -668,19 +654,7 @@ def test_the_recheck_adopt_write_survives_a_collision(env, capsys, monkeypatch):
     The outer `is_new` is still True here, which is exactly what the retry condition may
     no longer look at (issue #65 review, `test_probe_recheck_adopt_collision_is_retried`).
     """
-    _, a, _ = _import(capsys)
-    ulid = a.split(":")[1]
-    agent = cli.load_agent("opencode")
-    drive = store.Drive(paths())
-    assert store.upload_batch(drive, paths()) == []
-    assert on_drive(a).is_dir(), "A confirmed on Drive first"
-    mirror = paths().mirror / ulid
-    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
-    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
-    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
-    agent.sessions["ses_a"].append("ZZ f1 第十一句")
-    exported = agent.export("ses_a")
-    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    a, ulid, agent, drive, hdr, body, raw, exported = _deleted_mid_run(capsys, "ZZ f1 第十一句")
 
     monkeypatch.setattr(cli, "_uploaded", lambda paths_, ulid_: True)
     entered, gate = threading.Event(), threading.Event()
@@ -743,19 +717,7 @@ def test_a_mint_that_fails_after_staging_is_adopted_next_round(env, capsys, monk
     out of the round: this is a mint, not the adopt write M-2 retries. A `stage` that
     dies mid-swap (only `.tmp-Y2` left) is the known, unhandled sliver.
     """
-    _, a, _ = _import(capsys)
-    ulid = a.split(":")[1]
-    agent = cli.load_agent("opencode")
-    drive = store.Drive(paths())
-    assert store.upload_batch(drive, paths()) == []
-    assert on_drive(a).is_dir(), "A confirmed on Drive first"
-    mirror = paths().mirror / ulid
-    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
-    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
-    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
-    agent.sessions["ses_a"].append("ZZ f3 第十二句")
-    exported = agent.export("ses_a")
-    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    a, ulid, agent, drive, hdr, body, raw, exported = _deleted_mid_run(capsys, "ZZ f3 第十二句")
 
     monkeypatch.setattr(cli, "_uploaded", lambda paths_, ulid_: True)
     remembered = []
