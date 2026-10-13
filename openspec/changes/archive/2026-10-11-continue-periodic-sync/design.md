@@ -110,3 +110,9 @@
 - [存在檢查與 copy 之間還剩一個呼叫的窗口] → `.update` 的 entry 在 copy 前一刻再列一次檔、不在就地另存，窗口從「整個 raws 批次」縮到「這一次列檔＋幾次 copy」。落在這個窗口裡的刪除會讓 copy 把資料夾重新建立，所以確認階段會比對：這一輪自己什麼都沒刪，而列檔時還在的檔案不見了，那就是資料夾被刪掉又寫回去——**把剛寫回去的資料夾清掉（維持別台的刪除）並另存成新的 Session**。殘留：entry 指名的 raw 與 Drive 上那一份同名時（例如只改標頭的 `edit`，raw 一個 byte 沒變）重建前後的檔案集合一樣，看不出來；這種寫回不常見，而且內容還在 outbox 裡，下一輪由 L7 的既有規則處理。
 - [最終寫回可能把「copy 復活中的 A」當成還活著] → 別台的刪除正好落在背景 copy 的窗口時，copy 會把 A 的資料夾重建；那一刻若做最後一次寫回，它會看到 A、判它還活著、印出 A，背景隨後才 purge A 並另存成 B——工作不會丟（B 會做出來，之後的寫回都到 B），但 stdout 指的 id 之後就沒了，spec「途中被刪」的「結束時印出另存的說明」在這個交錯下不會發生。現在最後一次寫回有 15 秒上限的等待（`_wait_target_settled`），只要 A 的上傳在 15 秒內有結果就會採納另存，但這只是「縮小窗口」而非完全關閉；若背景上傳超時（如超過 15 秒），超時後仍可能走回舊目標並印出 A。機率低：要刪除正好落在 copy 窗口、agent 又正好在那瞬間結束。**PM 10-11 決定接受、不對調 purge／另存順序**：先另存再 purge 只把窗口縮掉一次 purge、關不掉，還會改變 crash 的語意（先另存再 purge：crash 會同時留下 B 和沒被維持刪除的 A）。
 - [never_confirmed 在 import 的 entry 還沒送出就 continue 時會自我延續] → 鄰近風險，這次不修：只要 A 的 outbox entry 在某個 `_save` 當下是沒記號的（例如 import 自己的 entry 還沒上傳完、continue 就開始），之後每輪都會寫出沒記號的新版，上傳器就一直把它當新建直接傳。目前的整合測試在 continue 之前等 entry 排空，所以走不到這條；**不要**用「在 index 裡就不算 never_confirmed」去堵——那會讓 F1（離線 import 的新 Session 寫回時被誤判成被別台刪掉）回來。
+
+## issue #59：前景另存與背景另存撞車（已修）
+
+- 根因：另存有兩條路（前景 `_save_continue` 的 is_new、背景 `_rescue_deleted`），但只有背景在另存前先 claim（`outbox/X → .done-X` 原子改名）；前景直接另存。背景正處在 claim 到 remember 之間時，前景的 `_write_target`／`_staged_as` 都看不到另存（`.done-X` 裡還是 X 自己的更新、不是另存形狀），於是也另存一個——兩個 Session 並存。序列化跑（單元測試）永遠撞不上；e2e（真 detached 上傳器＋0.6 秒一輪＋purge 重試迴圈）幾乎必撞。`assert 2 == 1` 即此。
+- 修法：前景另存前走同一個 claim 協議（`_claim_rescue_entry`）：搶到就另存並清掉自己的 claim；撞見別人的 claim（busy）就等對方的另存落袋（`_wait_inflight_rescue`，staged 或 indexed，10 秒上限）再沿用；等不到才另存（等於以前的行為）。另存失敗則把 claim 放回去再拋。`.done-` 只清自己持有的那個。
+- 機制存在已久（uploader 的 claim 自 T3-sec5 V1；前景 mint 無 claim 自 `_save_continue` is_new 起）；真 Drive 跑 bisect 不可行（無憑證、禁碰真 config／Drive），以 git log -S 斷代＋雙執行緒確定性重現為證（`test_a_rescue_mid_flight_is_adopted_not_minted_again`）。
