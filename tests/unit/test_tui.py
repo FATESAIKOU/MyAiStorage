@@ -1788,7 +1788,7 @@ def test_deleting_three_marked_rows_is_one_command():
     _run(go)
 
 
-def test_import_uses_the_row_under_the_cursor_when_nothing_is_marked():
+def test_import_uses_the_row_under_the_cursor_when_nothing_is_marked(monkeypatch):
     """spec: 未匯入頁沒有勾選任何列，按 Enter → 只有游標那一列被匯入。"""
     agent = FakeAgent("opencode", [Listed("s1", "/tmp/p", "甲", None), Listed("s2", "/tmp/q", "乙", None)],
                       texts={"s1": ["問"], "s2": ["答"]})
@@ -1801,6 +1801,12 @@ def test_import_uses_the_row_under_the_cursor_when_nothing_is_marked():
         store.Index(app_paths).put(ulid, "md5", _hdr(ulid, f"已在 agora {n}", sid=f"in{n}"), "## user\\nx\\n")
     app.spawn, started = _spawn()
     app._last_spawned = started
+    # The cursor-rest reading is a *thread* worker, and it is not this test's subject:
+    # under load it can still be reading when the test lets the app go, land on a
+    # screen that is gone, and Textual fails the test with WorkerFailed('#table')
+    # (issue #60). With no reading started here, the only worker left to wait out is
+    # the action's own.
+    monkeypatch.setattr(app, "settled", lambda: None)
 
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
@@ -1812,6 +1818,13 @@ def test_import_uses_the_row_under_the_cursor_when_nothing_is_marked():
             await _wait(lambda: app._last_spawned, pilot)
             assert app._last_spawned[-1] == ["import", "session", "--agent", "opencode",
                                              "--external-session-id", "s2"]
+            # Leave the screen at rest, not mid-action: close the result window the way
+            # a person would and wait for the action to finish. A worker still in flight
+            # when the test leaves finishes after the screen is gone - that is the
+            # failure #60 saw, read as the scheduler instead of the behaviour.
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window"
+            await pilot.press("space")                 # close it the way a person would
+            assert await _wait(lambda: not app.workers, pilot), "the action never finished"
     _run(go)
 
 
