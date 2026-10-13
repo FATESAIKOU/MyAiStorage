@@ -1443,3 +1443,11 @@ Drive 是 `tests/fakes/fake_rclone.py`、模型是 `fakeup/fake-model`（要約�
 | import 必填欄位全集 | `info`：`id, location, time, title, cost, tokens`（`model, outcome, projectID` 也在；**沒有** `directory`／`version`）；user 列 `id, time, text, files, type`；assistant 列 `id, time, type, model{id,providerID,…}, content, agent, finish, rawFinish, cost, tokens`；idle 列 `id, time, type, outcome`。整份 export 用 `reidentify` 換 id 後 `session import --standalone --directory` 進得去，讀回來列的型別序列相同 | — |
 
 fixture 沒有漏：`oc-v2-basic.json`／`oc-v2-fork.json` 的形狀與這次實測一致。
+
+## 5.5 預設埠 49374
+
+5.1～5.4 的測試自己在進場與收尾各以 `lsof -nP -iTCP:49374 -sTCP:LISTEN` 看一次
+（只看在不在聽，不連它、不停它、不讀資料；H2），兩次相同。手動外層再各看一次也相同：
+跑前跑後都是同一顆 managed 服務在同一個埠上聽（PID 前後相同，etime 連續）。
+隔離環境自己那顆 managed 服務用的是隔離 `service.json` 裡的空閒埠，另一顆（5.1 的
+headless）是呼叫方給的 `--headless-port`，兩者都不經 49374。

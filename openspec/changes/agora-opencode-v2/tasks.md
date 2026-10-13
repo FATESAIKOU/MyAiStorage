@@ -76,7 +76,7 @@
 - [x] 5.2 非 headless 的路徑（審查 M3）：隔離環境＋運行中的 managed 服務（空閒埠），`session import --standalone` 之後用 `opencode --session <id>`（或 attach）確認看得到；另列手動驗收，替身（`opencode_noninteractive.py`）只證明參數
 - [x] 5.3 更新 `tests/integration/test_opencode_real.py` 與 `test_e2e_opencode.py` 的 v1 語法與格式假設（`session export／import`、扁平格式）；拔掉 1.11 的跳過探測；沒有 opencode 或模型不可用時照舊 skip（**驗 v2 的項目不用真模型**）
 - [x] 5.4 §G 三項複驗：工具呼叫的 parts、跨訊息 reference、import 必填欄位全集——結果（欄位清單、參照位置、fixture 名稱）記進 `docs/spike/opencode.md`；fixture 有漏就補
-- [ ] 5.5 跑動前後確認預設埠 49374 的服務沒被動（只看在不在聽／PID／etime，不讀資料，H2）
+- [x] 5.5 跑動前後確認預設埠 49374 的服務沒被動（只看在不在聽／PID／etime，不讀資料，H2）
 - [ ] 5.6 改壞驗證：在副本把 v2 適配關掉（native 產 v1、turns 讀 v1、DB 讀 `session`）→ 5.1 必須紅；**「不帶 `--standalone`」這一項只對 fake 做**，真 opencode 不做（H2）；要的是紅不是 skip（用 fake upstream，M6）
 - [ ] 5.7 驗收紀錄（PR 說明或 `docs/spike/opencode.md`）：指令與輸出形狀、三行 stderr、定期寫回、SIGTERM 後的寫回、清理（刪掉測試自己的 session id、暫存 XDG 全刪、不碰共用服務與真 store）
 
