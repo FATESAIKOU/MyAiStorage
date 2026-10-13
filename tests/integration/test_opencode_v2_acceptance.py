@@ -147,7 +147,13 @@ class _Continue:
             self.lines.append(line.rstrip("\n"))
 
     def three_lines(self, agora_id: str, timeout: float = 120.0) -> list[str]:
-        """Wait for the fixed lines the session-continue spec promises."""
+        """Wait for the fixed lines the session-continue spec promises.
+
+        The spec fixes two lines (`agora-session`, `agora-port`); the third,
+        `agora-agent-session`, is the opencode driver's explanation line (the
+        spec's two do not carry the agent session id) and is read here only
+        because tasks 5.1 words the acceptance as three lines.
+        """
         got = _wait_for(lambda: self.lines if any(
             line.startswith("agora-agent-session ") for line in self.lines) else None, timeout)
         assert got is not None, f"continue 沒有印出三行：{self.lines}"
