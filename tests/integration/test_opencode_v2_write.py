@@ -31,7 +31,9 @@ from fake_upstream import start as start_upstream, write_config  # noqa: E402
 
 pytestmark = pytest.mark.integration
 
-if shutil.which("opencode") is None:
+REAL = agent.real_opencode()
+
+if REAL is None:
     pytest.skip("opencode is not installed", allow_module_level=True)
 if not agent.session_export_supported():
     pytest.skip("needs opencode 2.x (`session export`)", allow_module_level=True)
@@ -67,13 +69,14 @@ def test_v2_native_import_run_collect(tmp_path, monkeypatch):
                      ("AGORA_CACHE_DIR", str(tmp_path / "agora-cache")),
                      ("AGORA_STATE_DIR", str(tmp_path / "agora-state")),
                      ("AGORA_RCLONE", "fake"),
+                     ("AGORA_OPENCODE_CMD", REAL),
                      ("RCLONE_CONFIG", str(tmp_path / "agora-config" / "rclone.conf"))):
         monkeypatch.setenv(var, val)
     for var in ("OPENCODE_API_KEY", "OPENCODE_PERMISSION"):
         monkeypatch.delenv(var, raising=False)
     # Port isolation first (H2): the default 49374 is machine-shared, XDG is not enough.
     free_service = _free_port()
-    subprocess.run(["opencode", "service", "set", "port", str(free_service)],
+    subprocess.run([REAL, "service", "set", "port", str(free_service)],
                    check=True, capture_output=True, text=True)
     # Fake upstream for the model (M6): local, no credentials, deterministic text.
     upstream = start_upstream(mode="text", log=str(tmp_path / "upstream.log"))
@@ -97,7 +100,7 @@ def test_v2_native_import_run_collect(tmp_path, monkeypatch):
             assert launch.before_count == 2  # two user/assistant rows, no idle yet
 
             proc = subprocess.run(
-                ["opencode", "run", "--standalone", "-m", "fakeup/fake-model",
+                [REAL, "run", "--standalone", "-m", "fakeup/fake-model",
                  "-s", launch.agent_session_id, "--format", "json", "第二輪"],
                 cwd=str(proj), env={**os.environ, "PWD": str(proj)},
                 capture_output=True, text=True, timeout=120)
@@ -117,7 +120,7 @@ def test_v2_native_import_run_collect(tmp_path, monkeypatch):
                 1 for m in landed["messages"] if m.get("type") in ("user", "assistant"))
         finally:
             for sid in sorted(set(recorded)):
-                subprocess.run(["opencode", "session", "delete", sid, "--standalone"],
+                subprocess.run([REAL, "session", "delete", sid, "--standalone"],
                                cwd=str(proj), env={**os.environ, "PWD": str(proj)},
                                capture_output=True)
     finally:

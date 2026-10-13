@@ -1399,3 +1399,148 @@ spike 早先的樣本沒有——兩者不矛盾。所以 4.1 的單元測試把
 
 第一項只讓 v2 的欄位讀取轉紅；v1 的 `test_summarize_answers_and_leaves_no_session`
 照樣綠（v1 的 payload 本來就有 `info.model`，走的是後備那條）。
+
+---
+
+# 第 5 步：整條 v2 驗收（2026-10-14，agora-opencode-v2 5.1～5.7）
+
+## 5.1／5.2 自動化（真 opencode 2.0.26＋假模型／假 Drive）
+
+`tests/integration/test_opencode_v2_acceptance.py`（`uv run pytest -q -m integration …`）：
+`HOME`＋四個 XDG 在 pytest 的 `tmp_path`、隔離的 `XDG_CONFIG_HOME` 下服務埠改空閒埠、
+兩個本機 `tests/fakes/fake_upstream.py`（一個先叫 read 工具再回一句、一個只回 merge 要約）、
+Drive 是 `tests/fakes/fake_rclone.py`、模型是 `fakeup/fake-model`（要約用 `faketext/fake-model`）。
+跑前跑後只以 `lsof -nP -iTCP:49374 -sTCP:LISTEN` 看預設埠的服務（不連、不停）。
+
+1. **整條流程**（5.1）：自編兩顆 v2 session（A 多輪且第一輪有工具呼叫）→ `agora import`
+   → `continue --headless --sync-period 0.05`（每 3 秒一次寫回；期間再跑一輪，確認
+   **定期寫回真的把新的一輪寫進 store**）→ SIGTERM（**最後一次寫回**存下收尾前那一輪、
+   exit 0）→ `agora show`（閱讀版有 3 個 `## user`／`## assistant`、`[tool] read` 一行、
+   工具輸出不出現）→ `agora merge` 兩顆（要約走假 upstream）→ `continue --headless`
+   merged（載入的對話＋`ZZMERGED` 一輪寫回）。
+2. **非 headless 的服務面**（5.2 自動化）：`opencode service start` 起在隔離埠後，
+   `session import --standalone` 匯入的 Session 能用**不帶** `--standalone` 的
+   `opencode session list` 看到、並用 `opencode run -s <id>` 經那個服務得到回覆。
+
+## 5.2 手動驗收清單（真 TUI，沒在自動化裡假裝測過）
+
+1. 隔離：`HOME`＋四個 XDG 指到新目錄；隔離的 `XDG_CONFIG_HOME` 下
+   `opencode service set port <空閒埠>`；確認 `opencode debug paths` 全在暫存裡。
+2. 匯入：`agora import session --external-session-id <真 session id> --agent opencode`。
+3. `agora continue session <agora id> --agent opencode --dir <暫存專案>`（非 headless，
+   拉起 `opencode --session <id>` 的 TUI）。
+4. 在 TUI 裡看得到載入的歷史（user／assistant 段落、`[tool] …` 一行），可以打字得到回覆；
+   離開後 store／Drive 的寫回沒有把內容弄壞（`agora show session <id>` 再看一次）。
+5. `opencode service status` 指到隔離埠；預設 49374 的服務 pid／etime 前後不變。
+6. 清理：`opencode session delete <id> --standalone` 逐 id 刪、隔離的 XDG 整個目錄刪除。
+
+## 5.3 兩支檔的更新，與還在 skip 的
+
+- `test_opencode_real.py`：拔掉 1.11 的 module skip；`export`／`list`／`delete` 改
+  `session … --standalone`；`agent_version` 改成「2.x 沒有 → None」；重匯入以
+  `message_count`（排除 idle）算；adapter 走 `AGORA_OPENCODE_CMD`／`AGORA_REAL_OPENCODE`。
+- `test_e2e_opencode.py`：拔掉 module skip；`session export --standalone`；`model_of` 讀
+  assistant 列的 `model.id`；`idle` 不算對話（`turns_of`）；`info.location.directory`；
+  `agent_version` 為 `None`。**刻意改動（審查 F-4）**：fixture 的檢查順序改成「先看
+  opencode／claude 在不在（不在→skip），再檢查 `~/.config/agora/rclone.conf`（沒有→fail）」
+  ——原本 conf 先 fail，離線或沒 agent 的機器上看到的是 fail 而不是 skip；有 agent 的機器
+  行為不變（conf 缺仍然是 fail，不靜默）。
+- `tests/fakes/opencode_noninteractive.py`：`ask()` 的每個 run 都帶 `--standalone`（不再碰
+  使用者的 managed 服務，H2）；新增 `AGORA_TEST_NO_MODEL=1`（離線跑法：模型相關的測試
+  不連外就 skip）。
+- `test_opencode_v2_write.py`（第 2 步的真 opencode 測試）：opencode 的路徑改用
+  `agent.real_opencode()` 並把 `AGORA_OPENCODE_CMD` 指到它——有 `AGORA_REAL_OPENCODE`
+  的隔離環境才跑得起來。
+- **還沒有更新、在 2.x 上仍 module skip 的**（整支都還在講 1.x 的 `opencode export` 語法）：
+  `test_background_writes.py`、`test_e2e_fork.py`、`test_fork_real.py`、`test_import_batch.py`、
+  `test_pull_push.py`、`test_sync_measure.py`。5.3 只點名兩個檔，這幾支留著。
+
+## 5.4 §G 三項複驗（真 2.0.26＋假模型，`test_the_v2_export_shapes_the_templates_rely_on`）
+
+| §G 項目 | 實測（`session export`） | fixture |
+|---|---|---|
+| 工具呼叫的 parts | assistant 列的 `content[type=tool]`：`name`、`state.input`（`{"path": "fake-note.txt"}`）、`state.content` 是工具輸出；沒有 v1 的 `parts` 巢狀 | `oc-v2-basic.json` |
+| 跨訊息 reference | 普通列沒有 `parentID`／`messageID`／`sessionID`；唯一的參照是 fork 的 `info.fork{sessionID, boundary:{type:"through", messageID}}`，`messageID` 指到父的**最後一列**（idle 列）；import 會把 `info.fork` 丟掉 | `oc-v2-fork.json`（boundary 指到 basic 最後一列） |
+| import 必填欄位全集 | `info`：`id, location, time, title, cost, tokens`（`model, outcome, projectID` 也在；**沒有** `directory`／`version`）；user 列 `id, time, text, files, type`；assistant 列 `id, time, type, model{id,providerID,…}, content, agent, finish, rawFinish, cost, tokens`；idle 列 `id, time, type, outcome`。整份 export 用 `reidentify` 換 id 後 `session import --standalone --directory` 進得去，讀回來列的型別序列相同 | — |
+
+fixture 沒有漏：`oc-v2-basic.json`／`oc-v2-fork.json` 的形狀與這次實測一致。
+
+## 5.5 預設埠 49374
+
+5.1～5.4 的測試自己在進場與收尾各以 `lsof -nP -iTCP:49374 -sTCP:LISTEN` 看一次
+（只看在不在聽，不連它、不停它、不讀資料；H2），兩次相同。手動外層再各看一次也相同：
+跑前跑後都是同一顆 managed 服務在同一個埠上聽（PID 前後相同，etime 連續）。
+隔離環境自己那顆 managed 服務用的是隔離 `service.json` 裡的空閒埠，另一顆（5.1 的
+headless）是呼叫方給的 `--headless-port`，兩者都不經 49374。
+
+## 5.6 改壞驗證（在 `git archive` 的副本做，不動 worktree）
+
+副本 `git archive HEAD | tar -x -C /tmp/…` 裡改了三處再跑；真 opencode 那一項只跑 5.1
+那條，「不帶 `--standalone`」只對 fake／單元測試做（H2）：
+
+| 改壞什麼 | 結果 |
+|---|---|
+| v2 適配關掉：`_payload_format()` 一律回 `"v1"`（`turns()` 讀 v1、`native()` 產 v1） | **5.1 紅，不是 skip**：continue 在載入前大聲拒絕（「這是 opencode 1.x 時代的 Session（v1 巢狀格式）…opencode 2.x 的 session import 拒收 v1」），三行 stderr 沒有出現；5.4 也紅（v2 export 進不去：「第 0 則訊息形狀不對（缺 info 物件）」）。5.2 照樣綠——它驗的是真 CLI 與服務面，不經適配層 |
+| `_SESSION_TABLES = ("session",)`（DB 只讀 v1） | 5 個紅：v2 列表的跨專案／id 聯集／memoisation、`_session_directory` 的 v2 優先，**加上 5.1 本身**（驗收檔對隔離 store 的 `list_sessions()`／`_session_directory()` 斷言；審查 F-1 補上，改壞後 4 秒就紅） |
+| `_server_args()` 回 `[]`（不帶 `--standalone`） | 1 個紅：`test_every_automated_call_carries_its_server_context` |
+
+## 5.7 驗收紀錄
+
+**指令**：
+
+```bash
+uv run pytest -q -m integration tests/integration/test_opencode_v2_acceptance.py
+# 離線／隔離的全套（驗 v2 的項目不 skip；警語見下）
+uv run pytest -q -m integration tests/integration/ \
+    --ignore=tests/integration/test_store_drive.py --ignore=tests/integration/test_e2e_sync.py
+```
+
+**警語（審查 F-5）**：`test_store_drive.py` 與 `test_e2e_sync.py` 用 `pwd.getpwuid()` 取**真
+HOME** 找 `~/.config/agora/rclone.conf`，有就 symlink 起來連**真 Drive**——隔離的 `HOME`
+擋不住這個。這兩檔只能在沒有 `rclone.conf`（或有意用真 Drive／真 rclone）的機器上跑；
+離線或隔離的跑法要像上面一樣 `--ignore` 掉。
+
+**三行 stderr**（`continue --headless`，緊接在 `[agora] 工作目錄：…` 之後）：
+
+```
+agora-session agora:<ULID>
+agora-port <呼叫方給的空閒埠>
+agora-agent-session ses_<opencode 的 session id>
+```
+
+（第三行是給 opencode driver 對 HTTP 用的解釋行，不在 spec 的兩行固定契約裡。）
+
+**定期寫回**：`--sync-period 0.05`＝每 3 秒一輪；期間用另一個
+`opencode run --standalone -s <agent session>` 加一輪，測試等到那一輪出現在 store 的
+`session.md`（真的寫回）。每一輪在 `state/continue.log` 留一行
+`[agora] 定期寫回：已寫回 <agora id>`（或 `沒有新內容`／`失敗（第 n 次）：…`）。
+
+**SIGTERM 後的寫回**：最後一輪之後立刻送 SIGTERM：`continue` 溫和停下（exit 0）、
+把那一輪存下（測試在 store 裡看到它）、沒有「定期寫回失敗」；`session.md` 與假 Drive
+上都是那場對話。
+
+**清理**：測試自己建的 opencode session 逐 id `session delete <id> --standalone`
+（fixture 的 teardown，正常與失敗路徑都跑）；隔離的 XDG／HOME／專案與假 Drive 都在
+pytest 的 `tmp_path`，測完整個目錄刪除；共用服務（預設埠）前後只用 `lsof` 看一眼，
+PID 相同。
+
+**結果（2026-10-14；離線隔離跑法：`AGORA_TEST_NO_MODEL=1`、PATH 只留
+`/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`（真 opencode 由 `AGORA_REAL_OPENCODE` 指定）、
+pytest 的 HOME＋四個 XDG 指到暫存）**：
+
+- `tests/integration/test_opencode_v2_acceptance.py`：`3 passed`（5.1／5.2／5.4 三條）。
+- `uv run pytest -q -m integration tests/integration/` 全套：
+  `7 passed, 16 skipped, 8 errors`。8 個 error 全來自 `test_store_drive.py`（3）與
+  `test_e2e_sync.py`（5）：它們的 fixture 在沒有真 `rclone`／`~/.config/agora/rclone.conf`
+  時**故意 `pytest.fail`**（「整合測試不能 skip」），而這兩樣正是同一份指示禁止碰的
+  （不連網、不讀憑證）。把這兩個檔拿掉：`7 passed, 16 skipped`（綠）。
+- 16 個 skip：6 個還在使用 1.x CLI 語法的檔（1.11 的探測，見上一節）、4 個 claude
+  （CLI 不在 PATH）、`test_e2e_opencode`（opencode 不在 PATH）、`test_install`（uv 不在
+  PATH）、3 個免費模型（`AGORA_TEST_NO_MODEL=1`）、`test_opencode_real` 的 summarize
+  smoke（同上）。
+- **模型**：v2 的項目全部走本機 fake upstream（`fakeup/fake-model`／`faketext/fake-model`），
+  一個都沒 skip；免費模型的那幾條在這次的離線設定裡 skip。
+- **尚未被實際執行驗證（審查 F-7）**：`test_opencode_real.py` 與 `test_e2e_opencode.py` 的
+  v2 改寫（5.3）在這次的離線跑法下**全部 skip**（免費模型／claude 不在 PATH），所以那
+  些改寫還沒被真的跑過；等有免費模型（或 `AGORA_TEST_MODEL=<模型>`）時再跑一次確認，
+  結果補記在這裡。
