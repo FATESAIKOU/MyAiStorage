@@ -1441,7 +1441,10 @@ Drive 是 `tests/fakes/fake_rclone.py`、模型是 `fakeup/fake-model`（要約�
   `message_count`（排除 idle）算；adapter 走 `AGORA_OPENCODE_CMD`／`AGORA_REAL_OPENCODE`。
 - `test_e2e_opencode.py`：拔掉 module skip；`session export --standalone`；`model_of` 讀
   assistant 列的 `model.id`；`idle` 不算對話（`turns_of`）；`info.location.directory`；
-  `agent_version` 為 `None`；先看 opencode／claude 在不在，再檢查 `rclone.conf`。
+  `agent_version` 為 `None`。**刻意改動（審查 F-4）**：fixture 的檢查順序改成「先看
+  opencode／claude 在不在（不在→skip），再檢查 `~/.config/agora/rclone.conf`（沒有→fail）」
+  ——原本 conf 先 fail，離線或沒 agent 的機器上看到的是 fail 而不是 skip；有 agent 的機器
+  行為不變（conf 缺仍然是 fail，不靜默）。
 - `tests/fakes/opencode_noninteractive.py`：`ask()` 的每個 run 都帶 `--standalone`（不再碰
   使用者的 managed 服務，H2）；新增 `AGORA_TEST_NO_MODEL=1`（離線跑法：模型相關的測試
   不連外就 skip）。
