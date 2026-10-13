@@ -976,7 +976,7 @@ class OpencodeAgent:
                 messages.append({"id": message_id, "time": {"created": at},
                                  "text": "\n".join(body), "files": [], "type": "user"})
             else:
-                messages.append({"id": message_id, "time": {"created": at},
+                messages.append({"id": message_id, "time": {"created": at, "completed": at},
                                  "type": "assistant", "agent": "build",
                                  "model": {"id": "", "providerID": "opencode",
                                            "variant": "default"},
@@ -1099,7 +1099,7 @@ class OpencodeAgent:
                 copied = fields.get("assistant") or {}
                 model = copied.get("model") or {"id": "", "providerID": "opencode",
                                                 "variant": "default"}
-                messages.append({"id": message_id, "time": {"created": at},
+                messages.append({"id": message_id, "time": {"created": at, "completed": at},
                                  "type": "assistant",
                                  "agent": copied.get("agent", "build"),
                                  "model": json.loads(json.dumps(model)),

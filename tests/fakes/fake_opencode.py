@@ -387,6 +387,13 @@ def validate_v2(payload: dict) -> None:
             if "text" not in row:
                 _missing(f'["messages"][{n}]["text"]')
         elif kind == "assistant":
+            # `time.completed` is not a SchemaError when absent (the real import
+            # returns 0) but the row is then silently dropped - the read-back
+            # count is what notices. The fake refuses out loud instead, so a
+            # payload missing it fails here rather than passing the fake and
+            # failing the real import's verification.
+            if "completed" not in tick:
+                _missing(f'["messages"][{n}]["time"]["completed"]')
             for key in ("agent", "model", "content"):
                 if key not in row:
                     _missing(f'["messages"][{n}]["{key}"]')

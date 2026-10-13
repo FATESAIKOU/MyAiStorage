@@ -1255,9 +1255,17 @@ git 專案。模板是 `oc-v2-basic.json`，每次換新 `ses_/msg_/call_` id �
 ## 可缺（拿掉照樣 `Imported session`）
 
 `info.model`、`info.outcome`、`info.title`、`info.time.idle`、user 的 `files`、
-assistant 的 `time.completed`／`streamed`、`snapshot`、`cost`、`tokens`、
+assistant 的 `time.streamed`、`snapshot`、`cost`、`tokens`、
 `finish`／`rawFinish`、`model.variant`、tool 的 `executed`、`time.ran`／`completed`、
 `state.metadata`、空字串的 `text`、空的 `content: []`、整批拿掉 idle 列。
+
+## 形狀備註（會靜默丟列的那個）
+
+- assistant 列的 `time.completed`：拿掉時 import 照樣 `rc=0`，但那幾列在匯出時
+  不見了（本次量到：7 列→4 列，三則 assistant 全丟，只剩 user＋idle）。`_import_verified`
+  的訊息數比對會抓到（來源 2 則／ landed 1 則），所以 `native()`／`append_native()`
+  的新 assistant 列一律帶 `time.completed`（`streamed` 可缺，量過）。fake 為了大聲，
+  缺 `completed` 就直接 `SchemaError` 拒收，不等到回讀才紅。
 
 ## 形狀備註
 
