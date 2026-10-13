@@ -19,6 +19,7 @@ from __future__ import annotations
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
 import copy
+import fcntl
 import json
 import os
 import shutil
@@ -919,21 +920,153 @@ def test_a_foreground_rescue_clears_the_old_target_out_of_the_outbox(env, capsys
     assert left == [] and names == [target.split(":")[1]], f"one rescue, not two: {names}"
 
 
+def _locked(err: str, agora_id: str) -> None:
+    """The #54 shape, as a caller reads it: the fixed line, then the explanation."""
+    lines = err.splitlines()
+    assert f"agora-locked {agora_id}" in lines, err
+    i = lines.index(f"agora-locked {agora_id}")
+    assert lines[i + 1].startswith("[agora] ") and "正在接續中" in lines[i + 1], err
+    assert "要分岔請用 --fork" in lines[i + 1], err
+
+
+HOLDER = ("import fcntl, sys, time; f = open(sys.argv[1]);"
+          " fcntl.flock(f, fcntl.LOCK_EX); time.sleep(30)")
+
+
+def _hold_lock(pending_file):
+    """A process of its own holding a pending record's flock, like test_tui.py's."""
+    return subprocess.Popen([sys.executable, "-c", HOLDER, str(pending_file)])
+
+
+def _release(holder):
+    if holder is not None:
+        holder.terminate()
+        holder.wait(timeout=10)
+
+
 def test_a_second_continue_is_refused_while_the_first_still_holds_the_lock(env, capsys):
-    """Scenario「同一台機器再接續一次」: the pending lock is the answer, not the file."""
+    """Scenario「同一台機器再接續一次」: the pending lock is the answer, not the file.
+
+    #54: the refusal is its own signal - `EXIT_LOCKED` with `agora-locked <id>` first -
+    and not the exit 1 of an input error.
+    """
     _, a, _ = _import(capsys)
     record = {"agora_id": a, "agent": "opencode", "agent_session_id": "ses_x", "dir": "/tmp",
               "before_count": 0, "parent": {"id": a, "raw_md5": None}}
     path, lock = cli._write_pending(paths(), record)
     try:
         code, out, err = _continue(capsys, a)
-        assert code == cli.EXIT_INPUT and "正在接續中" in err and out == ""
+        assert code == cli.EXIT_LOCKED == 4 and out == ""    # 4 is the number the caller sees
+        _locked(err, a)
         assert not env.launched
     finally:
         lock.close()
 
     code, out, _ = _continue(capsys, a)      # nobody holds it any more: the record is stale
     assert code == 0 and out == a
+
+
+def test_a_lock_held_by_another_process_is_seen_without_any_mocking(env, capsys):
+    """#54 scenario with a real lock: `store.continuing` asks the record's own flock, so
+    a second continue in another process is refused even though the record is only a file
+    to everyone else."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    paths().pending.mkdir(parents=True, exist_ok=True)
+    pending_file = paths().pending / f"{ulid}.json"
+    pending_file.write_text("{}", encoding="utf-8")
+    holder = _hold_lock(pending_file)
+    try:
+        _wait_for(lambda: store.continuing(paths(), ulid), what="the other process to lock it")
+        code, out, err = _continue(capsys, a)
+        assert code == cli.EXIT_LOCKED == 4 and out == ""    # 4 is the number the caller sees
+        _locked(err, a)
+        assert not env.launched, "the agent must not be opened"
+    finally:
+        _release(holder)
+
+
+def _lock_appears_mid_preparation(env, monkeypatch, target: Path, content, holder: dict):
+    """Make another run take `target`'s lock after the early check, mid-preparation.
+
+    The window between the early check and `_write_pending` is real: the agent session
+    is prepared there, and the pending record has not been written yet. The first check
+    cannot see a lock that arrives in between; the one that counts is inside
+    `_write_pending`. The fake agent is the seam - its `start_native` runs exactly there.
+    """
+    start_native = type(env).start_native
+
+    def hook(self, raw, workdir):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if content is not None:
+            target.write_text(content, encoding="utf-8")
+        holder["proc"] = _hold_lock(target)       # a process of its own takes the lock
+        _wait_for(lambda: _held_by_somebody(target), what=f"the lock on {target.name}")
+        return start_native(self, raw, workdir)
+
+    monkeypatch.setattr(type(env), "start_native", hook)
+
+
+def _held_by_somebody(path: Path) -> bool:
+    """Whether another process holds `path`'s flock (ours would fail)."""
+    if not path.exists():
+        return False
+    with open(path) as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+    return False
+
+
+def test_a_continue_that_loses_the_lock_race_exits_locked(env, capsys, monkeypatch):
+    """#54: the other run got its pending record in place while this one prepared.
+
+    The loser writes nothing: the winner's record stays as it was, and no tmp is left
+    behind for the winner to trip over.
+    """
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    pending_file = paths().pending / f"{ulid}.json"
+    holder = {}
+    _lock_appears_mid_preparation(env, monkeypatch, pending_file, "{}", holder)
+    try:
+        code, out, err = _continue(capsys, a)
+        assert code == cli.EXIT_LOCKED == 4 and out == ""    # 4 is the number the caller sees
+        _locked(err, a)
+        assert pending_file.read_text(encoding="utf-8") == "{}", "the winner's record was renamed over"
+        assert not list(paths().pending.glob("*.json.tmp")), "the loser leaves no tmp behind"
+    finally:
+        _release(holder.get("proc"))
+
+
+def test_two_runs_inside_write_pending_at_once_leave_the_record_alone(env, capsys, monkeypatch):
+    """#54: the narrowest window - the other run is inside `_write_pending` itself.
+
+    Its record is under `<ULID>.json.tmp`, about to be renamed into place; the lock on
+    that name is the only thing saying so, and opening it must not truncate the record
+    that is on its way.
+    """
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    tmp_file = paths().pending / f"{ulid}.json.tmp"
+    other = json.dumps({"agora_id": "agora:01THEOTHER0000000000000000"}, ensure_ascii=False)
+    holder = {}
+    _lock_appears_mid_preparation(env, monkeypatch, tmp_file, other, holder)
+    try:
+        code, out, err = _continue(capsys, a)
+        assert code == cli.EXIT_LOCKED == 4 and out == ""    # 4 is the number the caller sees
+        _locked(err, a)
+        assert tmp_file.read_text(encoding="utf-8") == other, "the record being written was truncated"
+    finally:
+        _release(holder.get("proc"))
+
+
+def test_a_plain_input_error_is_still_exit_1(env, capsys):
+    """#54 changes one refusal only: "cannot be done" keeps the exit code it had."""
+    code, out, err = _continue(capsys, "agora:01ZZZZZZZZZZZZZZZZZZZZZZZZ")
+    assert code == cli.EXIT_INPUT and out == ""
+    assert "agora-locked" not in err
 
 
 def test_a_fork_is_not_refused_by_a_live_continue(env, capsys):
