@@ -1185,6 +1185,13 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
     own_claim = False
     old_ulid = None           # the outbox entry this call claimed, while it holds it
     try:
+        # F-2: the guard opens here, at the claim, so the claim, the wait, the recheck and
+        # the mint's preparation are all inside it and nothing between them and the write
+        # can skip the `finally` that gives the claim back. N-1: a FileNotFoundError or
+        # HeaderError raised in that preparation - before the mint turns `same_id` False -
+        # is read as an adopt collision and retried once. Harmless (nothing is staged yet,
+        # and the claim goes back in the finally all the same), just one step wider in name
+        # than the M-2 collision it is meant for.
         if is_new:
             # Claim X's outbox entry before minting (issue #59): the uploader claims the
             # same way, and whoever loses the rename must not mint - otherwise the two

@@ -582,6 +582,59 @@ def test_an_adopted_claim_goes_back_to_the_outbox(env, capsys, monkeypatch):
     assert "ZZ 65 第八句" in document_of(f"agora:{bid[0]}")
 
 
+def test_a_failure_after_the_recheck_adopt_still_gives_the_claim_back(env, capsys, monkeypatch):
+    """F-2 (issue #65 review, N-3): the claim is given back even when what fails is not
+    a collision at all - here `_source` raises after the recheck already adopted the
+    uploader's rescue. The guard opens at the claim, so nothing between it and the write
+    can skip the `finally`; had the failure fallen outside it (7512ef5's scope), `.done-X`
+    would stay set aside until the next lock taker's `restore_done`.
+    """
+    a, ulid, agent, drive, hdr, body, raw, exported = _deleted_mid_run(capsys, "ZZ f2 第十三句")
+
+    monkeypatch.setattr(cli, "_uploaded", lambda paths_, ulid_: True)
+    entered, gate = threading.Event(), threading.Event()
+    real_claim = cli._claim_rescue_entry
+
+    def gated_claim(p, ulid_):
+        entered.set()
+        assert gate.wait(timeout=30), "the rescue never landed while the claim waited"
+        return real_claim(p, ulid_)
+
+    monkeypatch.setattr(cli, "_claim_rescue_entry", gated_claim)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom between the claim and the write")
+
+    monkeypatch.setattr(cli, "_source", boom)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    result = {}
+
+    def foreground():
+        try:
+            result["saved"] = cli._write_one(paths(), run, exported, agent, check_drive=True)
+        except Exception as e:  # noqa: BLE001 - surfaced below
+            result["error"] = e
+
+    review = threading.Thread(target=foreground, daemon=True)
+    review.start()
+    assert entered.wait(timeout=30), "the foreground never reached its claim"
+    # the uploader rescues A while the claim waits, so the recheck adopts it ...
+    assert store.upload_batch(store.Drive(paths()), paths()) == []
+    bid = store.Index(paths()).children(ulid)
+    assert len(bid) == 1, f"setup rescued exactly once: {bid}"
+    # ... and a round that resolved before the rescue stages A again
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    gate.set()
+    review.join(timeout=60)
+    assert not review.is_alive()
+    assert isinstance(result.get("error"), RuntimeError), result
+
+    assert not (paths().outbox / f".done-{ulid}").exists(), "the claim is not left set aside"
+    assert (paths().outbox / ulid).is_dir(), "it goes back though the write never came"
+
+
 def test_a_collision_while_minting_is_not_retried(env, capsys, monkeypatch):
     """Issue #65: the retry is there for the adopt write (M-2), which re-resolves to the
     very session the uploader is confirming. A mint has no such session: the id it just
