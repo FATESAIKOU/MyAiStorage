@@ -337,25 +337,31 @@ def summarize_run(argv: list[str]) -> int:
     """`opencode run <message> [-f file]` with no session: what summarize() does.
 
     Emits the same event stream as the real one (one JSON object per line), and
-    stores a session so `export` can be asked which model answered.
-    FAKE_OPENCODE_SUMMARIZE: normal | v2 | empty | fail | no-session
+    stores a session so `export` can be asked which model answered. The file `-f`
+    names is copied to opencode-material.log: what the run really handed over.
+    FAKE_OPENCODE_SUMMARIZE: normal | v2 | empty | fail | hang | no-session
       `v2` stores the flat 2.x shape: no `info.model`, the model on the assistant
       row (`model.id`), which is where a real 2.0.26 summarize session records it.
+      `fail` dies after the run started (the session exists and its id was in the
+      first event), so the failure path still has cleanup to do; `hang` keeps going
+      after that first event until the caller's deadline kills the run.
     FAKE_OPENCODE_SUMMARIZE_HOLD=1  after the first event, wait for workdir/pending-<id>
     """
     with open(HOME / "opencode-argv.log", "a") as f:
         f.write(json.dumps(argv) + "\n")
+    material = flag_value(argv, "-f")
+    if material:
+        with open(HOME / "opencode-material.log", "a", encoding="utf-8") as f:
+            f.write(Path(material).read_text(encoding="utf-8"))
     with open(HOME / "opencode-stdin.log", "ab") as f:   # the prompt, if it came in
         f.write(sys.stdin.buffer.read() if not sys.stdin.isatty() else b"")
         f.write(b"\n---8<---\n")
     mode = os.environ.get("FAKE_OPENCODE_SUMMARIZE", "normal")
-    if mode == "fail":
-        die("injected summarize failure")
     session_id = "ses_fake_summary00000"
     now = int(time.time() * 1000)
     model = os.environ.get("FAKE_OPENCODE_MODEL", "space-bunny-free")
     reply = os.environ.get("FAKE_OPENCODE_REPLY", "ZZSUMMARY 這是要約")
-    if mode != "no-session" and mode == "v2":
+    if mode == "v2":
         save(session_id, {
             "info": {"id": session_id, "title": "summarize",
                      "location": {"directory": os.getcwd()},
@@ -390,6 +396,10 @@ def summarize_run(argv: list[str]) -> int:
         return 0
     print(json.dumps({"type": "step_start", "sessionID": session_id,
                       "timestamp": now, "part": {"type": "step-start"}}), flush=True)
+    if mode == "fail":
+        die("injected summarize failure")
+    if mode == "hang":
+        time.sleep(3600)           # until the caller's deadline kills us
     if os.environ.get("FAKE_OPENCODE_SUMMARIZE_HOLD"):
         # Only answer once workdir/pending-<id> is there: if the adapter waits for
         # the run to end before recording it, this never arrives (review V5).
