@@ -1289,7 +1289,9 @@ def test_summarize_material_file_carries_the_whole_prompt(fake, tmp_path):
     workdir.mkdir()
     long_prompt = "ZZPROMPT " + ("把 CSV 轉成 Markdown 表格。\n" * 20000)
     oc.ADAPTER.summarize(long_prompt, workdir)
-    assert f"ZZPROMPT 把 CSV" in (fake / "opencode-stdin.log").read_text() or True
+    # the whole prompt reached the run through the file `-f` names ...
+    assert (fake / "opencode-material.log").read_text(encoding="utf-8") == long_prompt
+    # ... and nothing long travelled in argv
     argv = json.loads((fake / "opencode-argv.log").read_text().splitlines()[0])
     assert all(len(a) < 4096 for a in argv)      # nothing long in argv
 
@@ -1300,6 +1302,9 @@ def test_summarize_reports_a_failed_run(fake, tmp_path, monkeypatch):
     with pytest.raises(AgentError, match="寫要約失敗"):
         oc.ADAPTER.summarize("ZZPROMPT", workdir)
     assert list(workdir.glob("material-*")) == []
+    # the run had already made its session (its id was in the first event), and
+    # the failure path still deletes it
+    assert not (fake / "opencode-sessions" / "ses_fake_summary00000.json").exists()
 
 
 def test_summarize_reports_an_empty_reply(fake, tmp_path, monkeypatch):
@@ -1314,10 +1319,13 @@ def test_summarize_reports_an_empty_reply(fake, tmp_path, monkeypatch):
 def test_summarize_turns_a_timeout_into_an_error(fake, tmp_path, monkeypatch):
     workdir = tmp_path / "summarize"
     monkeypatch.setenv("AGORA_SUMMARIZE_TIMEOUT", "1")
-    monkeypatch.setenv("FAKE_OPENCODE_SLEEP", "5")
+    monkeypatch.setenv("FAKE_OPENCODE_SUMMARIZE", "hang")
     with pytest.raises(AgentError, match="逾時"):
         oc.ADAPTER.summarize("ZZPROMPT", workdir)
     assert list(workdir.glob("material-*")) == []
+    # the run's id was already streamed when the deadline hit, so the record stays
+    # for the next run to finish the delete (V5/Y6)
+    assert [p.name for p in workdir.glob("pending-*")] == ["pending-ses_fake_summary00000"]
 
 
 def test_summarize_default_timeout_is_its_own(fake, tmp_path, monkeypatch):
