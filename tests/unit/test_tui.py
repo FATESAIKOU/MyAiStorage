@@ -553,8 +553,7 @@ def test_esc_stops_the_group_and_the_window_says_it_was_interrupted(group_calls,
             assert sent == [(4242, int(signal.SIGINT))]
             alive[4242] = False                             # the group is gone
             proc.done.set()
-            assert _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
-            await pilot.press("space")                      # close the result window
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
             assert "重跑同一個動作會接著做" in " ".join(str(app.screen.lines).split())
             await pilot.press("space")                      # close the result window
             await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
@@ -632,7 +631,7 @@ def test_ctrl_q_in_the_window_interrupts_instead_of_leaving(group_calls, monkeyp
             await pilot.press("enter")
             await _wait(lambda: sent, pilot)
             await pilot.press("ctrl+q")
-            assert _wait(lambda: len(sent) >= 1, pilot)
+            assert await _wait(lambda: len(sent) >= 1, pilot)
             assert app.is_running                       # still here: it interrupted
             alive[4242] = False
             proc.done.set()
@@ -677,7 +676,7 @@ def test_an_interruption_does_not_start_the_next_command(group_calls, monkeypatc
             await _wait(lambda: sent, pilot)
             alive[4242] = False
             first.done.set()
-            assert _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
             await pilot.press("space")                               # close the result window
             await pilot.pause(0.3)
             assert len(started) == 1, "中斷之後不該再開始第二段"
@@ -753,7 +752,7 @@ def test_the_selection_is_cleared_only_when_the_command_succeeded():
             await pilot.press("d")
             await pilot.pause()
             await pilot.press("down", "enter")
-            assert _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
             assert app.marked, "失敗之後勾選要留著"
             await pilot.press("space")
             await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
@@ -774,9 +773,9 @@ def test_the_selection_is_cleared_after_a_success():
             await pilot.press("d")
             await pilot.pause()
             await pilot.press("down", "enter")
-            assert _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
             await pilot.press("space")
-            assert _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
+            assert await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
             assert not app.marked
     _run(go)
 
@@ -1872,7 +1871,7 @@ def test_interrupting_a_merge_returns_to_the_list_and_says_it_carries_on(group_c
             await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
             assert "重跑同一個動作會接著做" in " ".join(str(app.screen.lines).split())
             await pilot.press("space")
-            assert _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)   # back at the list
+            assert await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)   # back at the list
             assert str(app.query_one("#msg").render()) == ""       # nothing left over (Q4)
     _run(go)
 
