@@ -165,6 +165,22 @@ def test_reimport_refusal_next_step_branches_without_fork(env, capsys):
     assert second != first
 
 
+def test_reimport_after_contentless_continue_is_still_refused(env, capsys):
+    """N-1: continuing without new conversation leaves no child version, so a
+    further reimport is still refused - and the message says a continue needs
+    new conversation to count as a branch."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    env.sessions["ses_a"].pop()  # the source lost a turn with content
+    code, _, err = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code != 0
+    env.speak = False  # the agent says nothing new
+    _, _, err = run(capsys, "continue", "session", first, "--agent", "opencode", "--dir", "/tmp")
+    assert "沒有新內容" in err
+    code, _, err = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code != 0
+    assert "至少一則新對話" in err
+
+
 def test_reimport_losing_only_empty_turns_still_updates(env, capsys):
     """2.7/N1: a legit undo drops empty turns - that is not "less conversation"."""
     _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
