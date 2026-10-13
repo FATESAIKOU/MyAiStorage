@@ -1189,6 +1189,21 @@ def test_collect_reports_the_model_the_agent_just_used(fake, workdir, monkeypatc
 # --- summarize (design 5.3, v6 Y1/Y6) -------------------------------------
 
 
+def test_the_v2_model_is_read_from_the_assistant_row(fake, tmp_path):
+    """4.1: 2.x records the model on each assistant row (`model.id`), and `info`
+    does not have to carry one (the spike's own 2.0.26 sample had none). The row
+    is what `_model_of` answers with, not a field the export may omit."""
+    rows = json.loads(v2())["messages"]
+    assistants = [row["model"]["id"] for row in rows if row.get("type") == "assistant"]
+    assert assistants and set(assistants) == {"fake-model"}       # the fixture's shape
+    payload = json.loads(v2())
+    payload["info"].pop("model")                     # the sample without `info.model`
+    (fake / "opencode-sessions" / "ses_fake_summary00000.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    assert oc.ADAPTER._model_of("ses_fake_summary00000", tmp_path) == "fake-model"
+
+
 def test_summarize_answers_and_leaves_no_session(fake, tmp_path, monkeypatch):
     workdir = tmp_path / "summarize"
     workdir.mkdir()
