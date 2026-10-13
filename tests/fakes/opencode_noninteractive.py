@@ -5,12 +5,14 @@
 (`opencode --session <id>`), which no test can drive. AGORA_OPENCODE_CMD points
 here instead, and this wrapper translates the TUI form into the headless one:
 
-    [--session <id>]  ->  opencode run -s <id> -m <model> <fixed question>
+    `[--session <id>]  ->  opencode run --standalone -s <id> -m <model> <fixed question>`
 
 `--version`, `session export <id>`, `session import <file>` and
 `session delete <id>` are passed straight through, because the adapter uses them
 for real; opencode 2.x's server flags (`--standalone`, `--server`, `--directory`)
-ride along in argv untouched.
+ride along in argv untouched, and every run this module starts carries
+`--standalone` of its own, so no test call can reach the machine-wide managed
+service (review H2).
 
 Every received argv is appended (JSON) to $FAKE_HOME/opencode-e2e-args.log, with
 the model that answered, so the test can see which session ids agora minted and
@@ -25,7 +27,8 @@ cannot read anything even if a prompt asks it to.
 
 This module is also the single definition of which models the tests may use
 (`model_chain`, `ask`), imported by tests/integration/test_opencode_real.py and
-test_e2e_opencode.py so the order lives in one place.
+test_e2e_opencode.py so the order lives in one place. `AGORA_TEST_NO_MODEL=1`
+makes `ask` skip without touching any endpoint, for a run that must stay offline.
 
 Prompts are fixed self-made filler; nothing here reads a real transcript.
 """
@@ -133,6 +136,11 @@ def ask(args: list[str], *, cwd, timeout: int | None = None,
     real = real_opencode()
     if real is None:
         return None, None, ["opencode 不在 PATH 上"]
+    if os.environ.get("AGORA_TEST_NO_MODEL"):
+        # The person running the tests asked for no model call at all (offline):
+        # the model-dependent tests skip with this reason instead of trying an
+        # endpoint. The v2 checks use the local fake upstream and do not need it.
+        return None, None, ["AGORA_TEST_NO_MODEL=1：這次不對外要模型"]
     seconds = timeout or TIMEOUT
     # PWD, not just cwd: opencode resolves its project from $PWD (measured -
     # docs/spike/opencode.md), so a caller that sets only `cwd=` files the
@@ -144,7 +152,9 @@ def ask(args: list[str], *, cwd, timeout: int | None = None,
     for flags in model_chain():
         model = flags[1]
         try:
-            proc = subprocess.run([real, "run", *flags, *args], cwd=str(cwd),
+            # --standalone: one private server for this call, never the shared
+            # managed service (design 2; review H2)
+            proc = subprocess.run([real, "run", "--standalone", *flags, *args], cwd=str(cwd),
                                   env=child_env, capture_output=True, text=True,
                                   timeout=seconds)
         except subprocess.TimeoutExpired:

@@ -6,7 +6,13 @@ Marked integration, so `uv run pytest -q` skips it:
 Everything runs in /tmp/agora-it-opencode/proj, a throwaway git repo, so the
 user's own sessions are out of reach (spike V5: opencode scopes sessions to the
 project directory). The conversation is self-authored filler about turning a CSV
-into a Markdown table; the model is a free one.
+into a Markdown table; the model is a free one, and the tests skip when no model
+answers (a machine with only the local fake has its v2 coverage in
+tests/integration/test_opencode_v2_acceptance.py, which needs none).
+
+opencode 2.x is the only CLI this file speaks from step 5: `session export` /
+`session import` / `session delete` with `--standalone`, and the flat export
+shape (rows with `type`, no `info.parts`, and no `info.version`).
 
 The sessions this creates are deleted by id at the end, one at a time.
 """
@@ -33,9 +39,7 @@ import opencode_noninteractive as agent  # noqa: E402  (needs the path above)
 
 pytestmark = pytest.mark.integration
 
-if agent.session_export_supported():
-    pytest.skip("opencode 2.x：整合測試還在用 1.x 的指令，第 5 步更新（tasks 1.11）",
-                allow_module_level=True)
+OPENCODE = agent.real_opencode()
 
 PROJ = Path("/tmp/agora-it-opencode/proj")
 
@@ -79,8 +83,8 @@ def raw_of(session_id: str) -> bytes:
     """Export through a file, the way the adapter does (spike V1: never a pipe)."""
     out = Path("/tmp/agora-it-opencode/raw.json")
     with open(out, "wb") as handle:
-        proc = subprocess.run(["opencode", "export", session_id], cwd=str(PROJ),
-                              stdout=handle, stderr=subprocess.DEVNULL,
+        proc = subprocess.run([OPENCODE, "session", "export", session_id, "--standalone"],
+                              cwd=str(PROJ), stdout=handle, stderr=subprocess.DEVNULL,
                               env={**os.environ, "PWD": str(PROJ)})
     assert proc.returncode == 0
     return out.read_bytes()
@@ -126,7 +130,7 @@ def trash(project, isolated_store):
     recorded: list[str] = []
     yield recorded
     for session_id in sorted(set(recorded)):
-        subprocess.run(["opencode", "session", "delete", session_id],
+        subprocess.run([OPENCODE, "session", "delete", session_id, "--standalone"],
                        cwd=str(PROJ), env={**os.environ, "PWD": str(PROJ)},
                        capture_output=True)
 
@@ -152,7 +156,9 @@ def test_real_round_trip(project, source, trash, isolated_store):
     # spike V5 / R-1: the session has to belong to *this* project, or the
     # `run --session` below is answering for a different project and hangs.
     assert os.path.realpath(exported.dir) == os.path.realpath(PROJ), f"session 跑到別的專案去了：{exported.dir}"
-    assert exported.agent_version and exported.agent_version[0].isdigit()
+    # 2.x records no version in the export (spike: `info` has no `version`), so the
+    # header goes without one instead of asking the CLI what is installed now (Q8)
+    assert exported.agent_version is None
     assert exported.created_at.endswith("Z")
     untouched = raw_of(source)
 
@@ -230,8 +236,8 @@ def test_real_reimport_is_idempotent(project, source, trash, monkeypatch, isolat
     opencode accepting *less* than we sent, which the fake reproduces
     deterministically (FAKE_OPENCODE_DROP in tests/unit/test_agent_opencode.py).
     """
-    raw = oc.ADAPTER.export(source).raw
-    expected = len(json.loads(raw)["messages"])
+    exported = oc.ADAPTER.export(source)
+    raw, expected = exported.raw, exported.message_count
     pinned = "ses_" + "A" * 16
     trash.append(pinned)
     monkeypatch.setattr(oc, "_session_id", lambda: pinned)
@@ -292,7 +298,7 @@ def test_real_summarize_answers_and_cleans_up_after_itself(project, isolated_sto
         f"回答裡沒有材料才有的字：{text[:120]}"
 
     # the session this run made is deleted, and so are the files it left behind
-    left = subprocess.run(["opencode", "session", "list", "--format", "json"],
+    left = subprocess.run([OPENCODE, "session", "list", "--standalone", "--format", "json"],
                           cwd=str(workdir), env={**os.environ, "PWD": str(workdir)},
                           capture_output=True, text=True)
     ids = [row["id"] for row in json.loads(left.stdout or "[]")]

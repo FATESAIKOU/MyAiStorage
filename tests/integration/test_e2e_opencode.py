@@ -15,7 +15,7 @@ the config is a temp dir whose rclone.conf symlinks to ~/.config/agora/rclone.co
 Two shims make the interactive parts testable:
 
 * AGORA_OPENCODE_CMD -> tests/fakes/opencode_noninteractive.py, which turns the
-  TUI form `opencode --session <id>` into `opencode run -s <id> -m <model>
+  TUI form `opencode --session <id>` into `opencode run --standalone -s <id> -m <model>
   <fixed question>`. Invoked through `sys.executable`, so no shebang roulette.
 * AGORA_CLAUDE_CMD -> tests/fakes/claude_noninteractive.py (impl2's), which adds
   `--disallowedTools Bash Read Glob Grep Edit Write WebFetch WebSearch Task` and
@@ -61,13 +61,10 @@ import opencode_noninteractive as agent  # noqa: E402  (needs the path above)
 
 pytestmark = pytest.mark.integration
 
-if agent.session_export_supported():
-    pytest.skip("opencode 2.x：整合測試還在用 1.x 的指令，第 5 步更新（tasks 1.11）",
-                allow_module_level=True)
-
 # pwd, not HOME: the sandbox replaces HOME per test.
 REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
 REAL_CONF = REAL_HOME / ".config" / "agora" / "rclone.conf"
+OPENCODE = agent.real_opencode()
 OPENCODE_WRAPPER = Path(__file__).parent.parent / "fakes" / "opencode_noninteractive.py"
 CLAUDE_WRAPPER = Path(__file__).parent.parent / "fakes" / "claude_noninteractive.py"
 ASK = "把 CSV 轉成 Markdown 表格，先列三個步驟就好，不要真的動手做。"
@@ -78,12 +75,12 @@ PROJ = ROOT / "p_專案.v2"   # underscore + Chinese + dot, on purpose
 
 @pytest.fixture()
 def e2e(tmp_path, monkeypatch, capsys):
-    if not REAL_CONF.exists():
-        pytest.fail("需要 ~/.config/agora/rclone.conf（整合測試不能 skip）")
     if shutil.which("opencode") is None:
         pytest.skip("opencode not found")
     if shutil.which("claude") is None:
         pytest.skip("claude CLI not found")
+    if not REAL_CONF.exists():
+        pytest.fail("需要 ~/.config/agora/rclone.conf（整合測試不能 skip）")
 
     config = tmp_path / "config"
     config.mkdir()
@@ -158,7 +155,7 @@ def _cleanup(state) -> None:
 
     # opencode: one id at a time, never a pattern or a bulk delete
     for session_id in sorted(set(created["ses"])):
-        proc = subprocess.run(["opencode", "session", "delete", session_id],
+        proc = subprocess.run([OPENCODE, "session", "delete", session_id, "--standalone"],
                               cwd=str(proj), env=env, capture_output=True)
         if proc.returncode != 0:
             warnings.warn(f"delete {session_id} failed: {proc.stderr.decode()[-200:]}")
@@ -244,12 +241,18 @@ def session_md(e2e, agora_id: str) -> str:
 
 
 def model_of(payload: dict) -> str | None:
-    """The model the session last used, read straight out of the export."""
-    for message in reversed(payload.get("messages") or []):
-        info = message.get("info") or {}
-        if info.get("role") == "assistant":
-            return info.get("modelID") or None
+    """The model the session last used, read straight out of the v2 export."""
+    for row in reversed(payload.get("messages") or []):
+        if row.get("type") == "assistant":
+            model = (row.get("model") or {}).get("id") if isinstance(row.get("model"), dict) else None
+            return model or None
     return None
+
+
+def turns_of(payload: dict) -> int:
+    """The conversation rows of a v2 export: user/assistant, never `idle` (M8)."""
+    return sum(1 for row in payload.get("messages") or []
+               if row.get("type") in ("user", "assistant"))
 
 
 def opencode_run(state, *args: str, timeout: int = 300) -> str:
@@ -274,7 +277,8 @@ def opencode_run(state, *args: str, timeout: int = 300) -> str:
 def export_bytes(state, session_id: str) -> bytes:
     out = Path("/tmp/agora-it-e2e-oc/export.json")
     with open(out, "wb") as handle:
-        proc = subprocess.run(["opencode", "export", session_id], cwd=str(state["proj"]),
+        proc = subprocess.run([OPENCODE, "session", "export", session_id, "--standalone"],
+                              cwd=str(state["proj"]),
                               stdout=handle, stderr=subprocess.DEVNULL,
                               env={**os.environ, "PWD": str(state["proj"])})
     assert proc.returncode == 0
@@ -293,7 +297,7 @@ def test_import_search_continue_native_then_cross_agent(e2e):
     source_id = next(e["sessionID"] for e in events if "sessionID" in e)
     created["ses"].append(source_id)
     source_raw = export_bytes(e2e, source_id)
-    source_before = len(json.loads(source_raw)["messages"])
+    source_before = turns_of(json.loads(source_raw))
     source_model = model_of(json.loads(source_raw))
 
     out = run_main(e2e, "import", "session", "--external-session-id", source_id,
@@ -306,7 +310,7 @@ def test_import_search_continue_native_then_cross_agent(e2e):
     hdr1 = header_of(e2e, id1)
     assert hdr1["type"] == "Session"
     assert hdr1["title"] == "e2e 表格" and "CSV" in hdr1["description"]
-    assert source_model, "來源的 export 沒有 modelID，測試資料不對"
+    assert source_model, "來源的 export 沒有 model.id，測試資料不對"
     assert hdr1["generated"]["by"] == f"opencode/{source_model}"
     assert hdr1["generated"]["at"].endswith("Z")
     assert hdr1["sources"][0]["id"] == f"opencode:{source_id}"
@@ -319,7 +323,8 @@ def test_import_search_continue_native_then_cross_agent(e2e):
     assert sysblock["source"]["agent"] == "opencode"
     assert sysblock["source"]["session_id"] == source_id
     assert sysblock["source"]["dir"] == str(proj)   # N9: from the export, not the name
-    assert sysblock["source"]["agent_version"][0].isdigit()
+    # a 2.x export carries no version, so the header goes without one (Q8)
+    assert sysblock["source"]["agent_version"] is None
     assert sysblock["raw"]["md5"] and sysblock["raw"]["file"].startswith("raw-")
     body1 = session_md(e2e, id1)
     assert "CSV" in body1                            # Drive really has it
@@ -355,13 +360,13 @@ def test_import_search_continue_native_then_cross_agent(e2e):
     assert hdr2["generated"]["by"].startswith("opencode/")
 
     # the session we continued from is untouched on the agent side (spike V1a)
-    assert len(json.loads(export_bytes(e2e, source_id))["messages"]) == source_before
+    assert turns_of(json.loads(export_bytes(e2e, source_id))) == source_before
 
     # the new agent session really carries the old transcript plus the new turn,
     # and it belongs to the project directory agora imported it into (spike V5)
     grown = json.loads(export_bytes(e2e, forked))
-    assert len(grown["messages"]) >= source_before + 2
-    assert grown["info"]["directory"].endswith("p_專案.v2")
+    assert turns_of(grown) >= source_before + 2
+    assert grown["info"]["location"]["directory"].endswith("p_專案.v2")
 
     # and Drive's session.md is that longer conversation now
     body2 = session_md(e2e, id1)
