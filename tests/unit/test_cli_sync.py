@@ -485,6 +485,48 @@ def test_adopt_write_survives_confirmation_rename(env, capsys, monkeypatch):
     assert "ZZ m2 第五句" in document_of(f"agora:{bid[0]}")
 
 
+def test_a_crashed_holder_times_out_and_still_lands_once(env, capsys, monkeypatch):
+    """L-2: `.done-X` residual, nobody behind it - the wait times out, one session
+    is minted, and the restored entry is adopted (not minted over) afterwards."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append("ZZ l2 第六句")
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+    # crash residue: claimed, no worker behind it
+    (paths().outbox / ulid).rename(paths().outbox / f".done-{ulid}")
+    monkeypatch.setattr(cli, "RESCUE_CLAIM_WAIT", 0.3)
+    from agora import background
+    monkeypatch.setattr(background, "start", lambda paths: background.STARTED)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    _saved, target, _note = cli._write_one(paths(), run, exported, agent, check_drive=True)
+    assert target != a
+    assert "ZZ l2 第六句" in document_of(target)
+    assert (paths().outbox / f".done-{ulid}").is_dir(), \
+        "the timeout mint leaves another claim alone"
+    # the next lock-taker restores the residue; the uploader adopts, not mints
+    lock = store.hold_upload_lock(paths(), blocking=True)
+    try:
+        store.restore_done(paths())
+    finally:
+        lock.close()
+    assert (paths().outbox / ulid).is_dir(), "residue restored for the next round"
+    assert store.upload_batch(drive, paths()) == []
+    remote = {e["Name"] for e in
+              json.loads(drive._run("lsjson", "gdrive:sessions", "--dirs-only"))}
+    assert remote - {ulid} == {target.split(":")[1]}, f"still one rescue: {sorted(remote)}"
+
+
 def test_a_deletion_mid_run_moves_later_writes_to_the_rescue(env, capsys, monkeypatch):
     """Scenario「途中被刪」: the uploader's rescue notices, the next round adopts it -
     exactly one new session, and every write after the deletion goes there."""
