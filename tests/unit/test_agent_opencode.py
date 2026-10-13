@@ -1747,6 +1747,7 @@ def test_search_never_exports_a_session(fake, store_db, workdir):
 V2_PROBE = "ses_ocv2dbAAA0000000001"          # fake upstream: tool turn, then a sentence
 V2_TOOL_ANSWER = "ses_ocv2dbBBB0000000002"    # migrated: reasoning + text + tool content
 V2_ATTACHMENT = "ses_ocv2dbCCC0000000003"     # migrated: a synthetic attachment row
+V1_ONLY = "ses_ZZV1ONLY0000000001"            # the migration never got to this one (3.1)
 
 
 @pytest.fixture
@@ -1800,6 +1801,63 @@ def test_the_v2_listing_unions_the_v1_rows(v2_db):
         V2_ATTACHMENT, V2_TOOL_ANSWER, V2_PROBE, "ses_ZZV1ONLY0000000001"]
     probe = next(row for row in listed if row.session_id == V2_PROBE)
     assert probe.title == "oc-v2db fixture" and probe.dir == "/tmp/agora-it-opencode/proj"
+
+
+# --- a session the v2 tables do not have (3.1: the migration skips rows that
+# fail its schema check and its cursor can stop half-way, so one session can sit
+# in v1's `session`／`message`／`part` alone while `session_message` exists): the
+# preview and the search must still fall back to those tables (review M4) ------
+
+
+def _v1_only_session(db, turns) -> None:
+    """Lay a session into the v1 tables alone, under `V1_ONLY`.
+
+    The dump carries the v2 side; an upgraded store still has the v1 tables the
+    migration copies out of, so those are created here the way they were in 1.x.
+    """
+    db.executescript("""
+        create table session (id text primary key, directory text not null,
+                              title text not null, time_created integer not null,
+                              time_updated integer not null);
+        create table message (id text primary key, session_id text not null,
+                              time_created integer not null,
+                              time_updated integer not null, data text not null);
+        create table part (id text primary key, message_id text not null,
+                           session_id text not null, time_created integer not null,
+                           time_updated integer not null, data text not null);
+    """)
+    _add_session(db, V1_ONLY, "/tmp/舊專案", "遷移沒輪到這顆", 990, turns=turns)
+    # the window the tests below are about: nothing of it reached the v2 table
+    assert not db.execute("select 1 from session_message where session_id=?",
+                          (V1_ONLY,)).fetchall()
+    db.commit()
+
+
+def test_the_v2_preview_still_reads_a_session_only_the_v1_tables_know(v2_db):
+    """`session_message` being there must not end the search for the preview's
+    rows: this session is in the v1 tables alone and keeps its last turn."""
+    db, _ = v2_db
+    _v1_only_session(db, turns=[
+        ("user", [{"type": "text", "text": "舊的問題：遷移還沒輪到這顆。"}]),
+        ("assistant", [{"type": "reasoning", "text": "ZZTHINK 舊的思路。"},
+                       {"type": "text", "text": "舊的回答：先留在舊表。"}])])
+    db.close()
+
+    assert oc.ADAPTER.last_message(V1_ONLY) == ("assistant", "舊的回答：先留在舊表。")
+
+
+def test_the_v2_search_still_finds_a_session_only_the_v1_tables_know(v2_db):
+    """Same window, the other reader: the words are in the v1 `part` rows alone,
+    and the v2 table must not skip either of the v1 passes."""
+    db, _ = v2_db
+    _v1_only_session(db, turns=[
+        ("user", [{"type": "text", "text": "ZZV1ONLY 只留在舊表的問題。"}]),
+        ("assistant", [{"type": "text", "text": "ＭＩＧＲＡＴＥＤ 只留在舊表的回答。"}])])
+    db.close()
+
+    # the cheap LIKE pass sees the ASCII word, the full scan the normalised one
+    assert list(oc.ADAPTER.search_text("ZZV1ONLY")) == [V1_ONLY]
+    assert list(oc.ADAPTER.search_text("ｍｉｇｒａｔｅｄ")) == [V1_ONLY]
 
 
 def test_the_v2_preview_takes_the_newest_conversation_turn(v2_db):

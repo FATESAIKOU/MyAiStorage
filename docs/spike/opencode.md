@@ -1261,3 +1261,9 @@ opencode session export <fork id> --standalone > fork.json
 | 預覽讀錯欄位（assistant 列也拿 `user` 的欄位讀） | 2 個：預覽拿最新一輪、預覽截長度 |
 | 搜尋不比對（LIKE 掃到就算命中，不由程式確認） | 6 個：v1 的三個（萬用字元、只算真的話、找不到）＋ v2 的三個（命中、不算附件／工具／system、正規化） |
 | `_session_directory` 拿掉 `row = None` | 1 個：沒有 session 表的 store（spike 的 `cannot access local variable 'row'`） |
+| **補測**（2026-10-13 審查）：預覽在 `session_message` 存在時就不退回 v1 | 1 個：`test_the_v2_preview_still_reads_a_session_only_the_v1_tables_know` |
+| **補測**（2026-10-13 審查）：搜尋在 `session_message` 存在時略過 v1 `part` 的兩個 pass | 1 個：`test_the_v2_search_still_finds_a_session_only_the_v1_tables_know` |
+
+最後兩列是審查（非作者）發現的缺口：3.1 的遷移跳過／中斷 window（只在 v1 表的
+Session）在預覽與搜尋上原先沒有測試守住——那兩處改壞時 140 個測試仍全綠；補上兩條
+測試後，各改壞一次都只讓對應的那一個轉紅，改回即全綠。
