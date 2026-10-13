@@ -404,8 +404,7 @@ def test_a_v2_fork_appends_flat_rows_and_keeps_the_tool_calls(fake, workdir):
     assert min(times[-2:]) > max(times[:-2])
     # and the payload it built loads on a 2.x opencode (fake models it)
     launch = oc.ADAPTER.start_native(json.dumps(out).encode(), workdir)
-    assert launch.before_count == 9  # fork has 7 user/assistant + 2 new
-    # recount: fork fixture has 10 rows? check via message_count (user/assistant only)
+    assert launch.before_count == oc._message_count(before, "v2") + 2
     assert oc.ADAPTER.export(launch.agent_session_id).message_count == \
         oc._message_count(out, "v2")
 
