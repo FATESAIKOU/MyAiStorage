@@ -17,6 +17,8 @@ from agora import header as h
 from agora.agents.base import AgentError, Exported, Launch, format_reading
 
 FAKE_RCLONE = Path(__file__).resolve().parent.parent / "fakes" / "fake_rclone.py"
+FAKE_OPENCODE = Path(__file__).resolve().parent.parent / "fakes" / "fake_opencode.py"
+OC_FIX = Path(__file__).resolve().parent.parent / "fixtures" / "opencode"
 
 
 class FakeAgent:
@@ -436,6 +438,48 @@ def test_merge_reuses_a_summary_it_already_paid_for(env, capsys):  # R4
     code, _, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
     assert code == 0 and len(env.prompts) == calls    # no AI called the second time
     assert err.count("沿用") == 2
+
+
+def test_merge_warns_when_the_summary_session_cannot_be_deleted(env, capsys, tmp_path,
+                                                                 monkeypatch):
+    """4.3: the merge writes its summaries through the real opencode path. When
+    the session a summarize run used cannot be deleted, the merge still finishes:
+    it warns and leaves the record for the next run (Y6) - it does not fail."""
+    from agora.agents import opencode as oc
+    fh = tmp_path / "fh"
+    (fh / "opencode-sessions").mkdir(parents=True)
+    for stem, session_id, words in (("first", "ses_ZZV2MERGE00000000001", "第一顆"),
+                                    ("second", "ses_ZZV2MERGE00000000002", "第二顆")):
+        payload = json.loads((OC_FIX / "oc-v2-basic.json").read_text(encoding="utf-8"))
+        payload["info"]["id"] = session_id
+        payload["messages"][0]["text"] = json.dumps(f"ZZ {words}：把 CSV 轉成表格", ensure_ascii=False)
+        (fh / "opencode-sessions" / f"{stem}.json").write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    wrapper = tmp_path / "opencode"
+    wrapper.write_text(f"#!/bin/sh\nexec {sys.executable} {FAKE_OPENCODE} \"$@\"\n")
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("FAKE_HOME", str(fh))
+    monkeypatch.setenv("AGORA_OPENCODE_CMD", str(wrapper))
+    monkeypatch.setenv("FAKE_OPENCODE_SUMMARIZE", "v2")
+    monkeypatch.setenv("FAKE_OPENCODE_FAIL", "delete")
+    monkeypatch.setenv("FAKE_OPENCODE_REPLY", json.dumps(
+        {"purpose": "P", "decisions": [], "progress": "Q", "open_questions": []},
+        ensure_ascii=False))
+    monkeypatch.setattr(cli, "load_agent", lambda name: oc.ADAPTER)
+
+    _, a, _ = run(capsys, "import", "session", "--external-session-id", "first",
+                  "--agent", "opencode")
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "second",
+                  "--agent", "opencode")
+    code, merged, err = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+
+    assert code == 0 and merged.startswith("agora:")
+    assert "沒刪掉" in err
+    paths = store.Paths.from_env()
+    assert (paths.state / "summarize" / "pending-ses_fake_summary00000").exists()
+    # the summary still went in, with the model the v2 row named
+    hdr = store.Index(paths).header(merged.split(":")[1])
+    assert hdr["agora"]["merge"]["by"] == "opencode/space-bunny-free"
 
 
 def test_merge_rewrites_when_the_source_changed(env, capsys):  # spec scenario

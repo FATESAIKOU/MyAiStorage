@@ -1316,6 +1316,21 @@ def test_collect_reports_the_model_the_agent_just_used(fake, workdir, monkeypatc
 # --- summarize (design 5.3, v6 Y1/Y6) -------------------------------------
 
 
+def test_the_v2_model_is_read_from_the_assistant_row(fake, tmp_path):
+    """4.1: 2.x records the model on each assistant row (`model.id`), and `info`
+    does not have to carry one (the spike's own 2.0.26 sample had none). The row
+    is what `_model_of` answers with, not a field the export may omit."""
+    rows = json.loads(v2())["messages"]
+    assistants = [row["model"]["id"] for row in rows if row.get("type") == "assistant"]
+    assert assistants and set(assistants) == {"fake-model"}       # the fixture's shape
+    payload = json.loads(v2())
+    payload["info"].pop("model")                     # the sample without `info.model`
+    (fake / "opencode-sessions" / "ses_fake_summary00000.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    assert oc.ADAPTER._model_of("ses_fake_summary00000", tmp_path) == "fake-model"
+
+
 def test_summarize_answers_and_leaves_no_session(fake, tmp_path, monkeypatch):
     workdir = tmp_path / "summarize"
     workdir.mkdir()
@@ -1327,6 +1342,40 @@ def test_summarize_answers_and_leaves_no_session(fake, tmp_path, monkeypatch):
     assert not (fake / "opencode-sessions" / "ses_fake_summary00000.json").exists()
     assert list(workdir.glob("material-*")) == []
     assert list(workdir.glob("pending-*")) == []
+
+
+def test_a_v2_summarize_run_reports_its_model_and_leaves_no_session(fake, tmp_path,
+                                                                    monkeypatch):
+    """4.2: on 2.x the session a summarize run makes is a flat v2 one, and the
+    model it reports comes off the assistant row - then the delete takes it away
+    again (both commands carry --standalone, pinned in step 1)."""
+    workdir = tmp_path / "summarize"
+    workdir.mkdir()
+    monkeypatch.setenv("FAKE_OPENCODE_SUMMARIZE", "v2")
+    monkeypatch.setenv("FAKE_OPENCODE_MODEL", "space-bunny-free")
+
+    text, model = oc.ADAPTER.summarize("ZZPROMPT 請寫要約", workdir)
+
+    assert text == "ZZSUMMARY 這是要約"
+    assert model == "space-bunny-free"        # the row's id, not `info.model`
+    assert not (fake / "opencode-sessions" / "ses_fake_summary00000.json").exists()
+    assert list(workdir.glob("pending-*")) == []
+
+
+def test_a_v2_summarize_record_survives_a_failed_delete(fake, tmp_path, monkeypatch,
+                                                         capsys):
+    """4.2: same on the v2 shape - if the delete fails the record stays for the
+    next run, and the warning says so (Y6)."""
+    workdir = tmp_path / "summarize"
+    workdir.mkdir()
+    monkeypatch.setenv("FAKE_OPENCODE_SUMMARIZE", "v2")
+    monkeypatch.setenv("FAKE_OPENCODE_FAIL", "delete")
+
+    text, _ = oc.ADAPTER.summarize("ZZPROMPT", workdir)
+
+    assert text == "ZZSUMMARY 這是要約"
+    assert (workdir / "pending-ses_fake_summary00000").exists()
+    assert "沒刪掉" in capsys.readouterr().err
 
 
 def test_summarize_sends_the_prompt_in_a_file_and_deny_tools(fake, tmp_path, monkeypatch):
@@ -1367,7 +1416,9 @@ def test_summarize_material_file_carries_the_whole_prompt(fake, tmp_path):
     workdir.mkdir()
     long_prompt = "ZZPROMPT " + ("把 CSV 轉成 Markdown 表格。\n" * 20000)
     oc.ADAPTER.summarize(long_prompt, workdir)
-    assert f"ZZPROMPT 把 CSV" in (fake / "opencode-stdin.log").read_text() or True
+    # the whole prompt reached the run through the file `-f` names ...
+    assert (fake / "opencode-material.log").read_text(encoding="utf-8") == long_prompt
+    # ... and nothing long travelled in argv
     argv = json.loads((fake / "opencode-argv.log").read_text().splitlines()[0])
     assert all(len(a) < 4096 for a in argv)      # nothing long in argv
 
@@ -1378,6 +1429,9 @@ def test_summarize_reports_a_failed_run(fake, tmp_path, monkeypatch):
     with pytest.raises(AgentError, match="寫要約失敗"):
         oc.ADAPTER.summarize("ZZPROMPT", workdir)
     assert list(workdir.glob("material-*")) == []
+    # the run had already made its session (its id was in the first event), and
+    # the failure path still deletes it
+    assert not (fake / "opencode-sessions" / "ses_fake_summary00000.json").exists()
 
 
 def test_summarize_reports_an_empty_reply(fake, tmp_path, monkeypatch):
@@ -1392,10 +1446,13 @@ def test_summarize_reports_an_empty_reply(fake, tmp_path, monkeypatch):
 def test_summarize_turns_a_timeout_into_an_error(fake, tmp_path, monkeypatch):
     workdir = tmp_path / "summarize"
     monkeypatch.setenv("AGORA_SUMMARIZE_TIMEOUT", "1")
-    monkeypatch.setenv("FAKE_OPENCODE_SLEEP", "5")
+    monkeypatch.setenv("FAKE_OPENCODE_SUMMARIZE", "hang")
     with pytest.raises(AgentError, match="逾時"):
         oc.ADAPTER.summarize("ZZPROMPT", workdir)
     assert list(workdir.glob("material-*")) == []
+    # the run's id was already streamed when the deadline hit, so the record stays
+    # for the next run to finish the delete (V5/Y6)
+    assert [p.name for p in workdir.glob("pending-*")] == ["pending-ses_fake_summary00000"]
 
 
 def test_summarize_default_timeout_is_its_own(fake, tmp_path, monkeypatch):

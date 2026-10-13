@@ -1367,3 +1367,35 @@ rewind（空 turn 消失）不會被誤擋，真正丟內容（有內容的 turn
 最後兩列是審查（非作者）發現的缺口：3.1 的遷移跳過／中斷 window（只在 v1 表的
 Session）在預覽與搜尋上原先沒有測試守住——那兩處改壞時 140 個測試仍全綠；補上兩條
 測試後，各改壞一次都只讓對應的那一個轉紅，改回即全綠。
+
+---
+
+# 第 4 步：真 opencode 的 summarize／delete（2026-10-13，agora-opencode-v2 4.4）
+
+隔離環境與第 1 步同一套：`HOME`＋四個 XDG 在 `/tmp` 底下的新目錄（`opencode debug paths`
+確認）、隔離的 `XDG_CONFIG_HOME` 下 `opencode service set port <空閒埠>`（只寫
+`service.json`）、清掉繼承的 `OPENCODE_*`、模型是本機的 `tests/fakes/fake_upstream.py`
+（`fakeup/fake-model`，不回真模型）。自動化測試：
+`tests/integration/test_opencode_v2_summarize.py`（`uv run pytest -q -m integration …`）。
+
+| 量到什麼 | 結果 |
+|---|---|
+| `opencode run --standalone <訊息> -f <材料> --format json`（summarize 的呼叫） | 事件流照舊（`step_start` → `text` → `step_finish`），回 fake upstream 的固定句 `ZZFAKEUP 這是一句話的回答。` |
+| 那個 run 的 session 記的模型 | `_model_of()` 讀到 `fake-model`：2.x 記在 assistant 列的 `model.id`（4.1 的欄位形狀） |
+| 寫完要約的清理 | `session delete <id> --standalone` 真的刪掉；隔離 store 的 `session list --standalone --format json` 回 `[]`，`pending-*`／`material-*` 都沒留下 |
+| 預設埠 49374 的共用服務 | 跑前跑後都在聽、PID 前後相同（只以 `lsof -nP -iTCP:49374 -sTCP:LISTEN` 看，不連它、不停它；H2） |
+
+`model` 在 `info` 裡的有無兩種都錄到過：第 1 步的 `oc-v2-basic.json`（另一次錄製）有，
+spike 早先的樣本沒有——兩者不矛盾。所以 4.1 的單元測試把 fixture 的 `info.model` pop
+掉，逼模型欄位一定得從 assistant 列的 `model.id` 讀。
+
+**改壞驗證（4.5，三項各改壞一次、做完還原；跑 `uv run pytest -q tests/unit/test_agent_opencode.py tests/unit/test_cli.py`）**：
+
+| 改壞什麼 | 轉紅的測試 |
+|---|---|
+| `_model_of` 不讀 v2 的 assistant 列（只看 `info.model`） | 3 個：`test_the_v2_model_is_read_from_the_assistant_row`、`test_a_v2_summarize_run_reports_its_model_and_leaves_no_session`、`test_merge_warns_when_the_summary_session_cannot_be_deleted`（merge 的 `generated.by` 也跟著錯） |
+| `_drop_summary_session` 刪失敗仍把 `pending-*` 記錄刪掉 | 3 個：`test_a_pending_record_survives_a_failed_delete`、`test_a_v2_summarize_record_survives_a_failed_delete`、`test_merge_warns_when_the_summary_session_cannot_be_deleted` |
+| `_sweep_pending` 只刪記錄、不補刪 session | 2 個：`test_a_leftover_pending_record_is_finished_before_the_next_run`、`test_a_pending_record_survives_a_failed_delete` |
+
+第一項只讓 v2 的欄位讀取轉紅；v1 的 `test_summarize_answers_and_leaves_no_session`
+照樣綠（v1 的 payload 本來就有 `info.model`，走的是後備那條）。
