@@ -1081,6 +1081,23 @@ def _say_note(run: "_Run", note: str | None) -> None:
         run.first_note = note
 
 
+class AdoptCollision(Exception):
+    """A write into an adopted session collided with the uploader working on that entry.
+
+    Issue #59 M-2: the rescue being adopted can be renamed aside (`outbox/Y -> .done-Y`)
+    while it is read, and the write raises `FileNotFoundError` or `HeaderError`. Only an
+    adopt is worth retrying - the resolver finds its id again in the outbox or in the
+    index - so only the adopt path wraps the error this way. `_write_one` resolves once
+    more and tries again; a second collision comes back out as the raw error. A mint
+    raises it raw (issue #65 F-1): the id it composed exists nowhere, and a retry would
+    mint a second session beside the one the first attempt may already have staged.
+    """
+
+    def __init__(self, cause: Exception):
+        super().__init__(str(cause))
+        self.cause = cause
+
+
 def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent: Agent, *,
                check_drive: bool) -> tuple[tuple[str, bool] | None, str, str | None]:
     """Write one version of the conversation back.
@@ -1114,17 +1131,13 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
     try:
         saved, create_note = _save_continue(paths, run, agent, exported, target_id=target_id,
                                             hdr=hdr, is_new=is_new)
-    except (FileNotFoundError, h.HeaderError):
-        if is_new:
-            # Issue #65: this was a mint, not the adopt write M-2 is about. The id it
-            # composed exists nowhere yet - resolving again would not find it - so a
-            # second attempt would mint a session of its own next to the one the first
-            # attempt may already have staged. Let the collision out loudly instead.
-            raise
+    except AdoptCollision:
         # Collision with a concurrent outbox rename (issue #59 M-2): adopting a rescue
-        # the uploader is confirming right now can rename outbox/Y mid-read. Resolve
+        # the uploader is confirming right now can rename outbox/Y mid-read, and
+        # `_save_continue` marks only that write retryable (issue #65 F-1 - a mint's
+        # collision comes out raw, its composed id is nowhere to resolve to). Resolve
         # once more - the target is indexed by now in the adopt case - and save there
-        # instead of failing the round; a second collision propagates loudly.
+        # instead of failing the round; the raw error of a second collision propagates.
         target_id, hdr, is_new = _write_target(paths, run, check_drive=check_drive)
         note = _follow(run, target_id) or note
         _say_note(run, note)
@@ -1133,8 +1146,11 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
             return None, target_id, note
         if md5 == run.last_md5 and not is_new and not moved_here:
             return None, target_id, note
-        saved, create_note = _save_continue(paths, run, agent, exported, target_id=target_id,
-                                            hdr=hdr, is_new=is_new)
+        try:
+            saved, create_note = _save_continue(paths, run, agent, exported, target_id=target_id,
+                                                hdr=hdr, is_new=is_new)
+        except AdoptCollision as again:
+            raise again.cause from None
     run.last_md5 = md5      # P8: only after `_save` came back
     run.wrote = True
     _follow(run, saved[0], note=False)
@@ -1254,9 +1270,13 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
     # session is gone by the time it goes up the work is saved as a session of its own -
     # as a continue, not as whatever X was (review G2)
     try:
-        return (_save(paths, _with_user(hdr, record.get("header_updates") or {},
+        saved = _save(paths, _with_user(hdr, record.get("header_updates") or {},
                                         add_tags=record.get("add_tags") or []), body,
-                      exported.raw, update=same_id, kind="continue"), note)
+                      exported.raw, update=same_id, kind="continue")
+    except (FileNotFoundError, h.HeaderError) as e:
+        if not same_id:
+            raise                   # a mint: no id to resolve to again (issue #65 F-1)
+        raise AdoptCollision(e) from e
     finally:
         if give_back:
             # Issue #65: the claim was taken for a mint, and this write adopted somebody
@@ -1267,6 +1287,7 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
             # become visible again before the adopted session is remembered, or the
             # uploader's rescue of X could land a second one first (L-5).
             store._put_back(paths.outbox / f".done-{give_back}", paths.outbox / give_back)
+    return saved, note
 
 
 def _launch_of(record: dict) -> Launch:

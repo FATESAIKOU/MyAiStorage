@@ -649,6 +649,82 @@ def test_an_adopt_collision_is_retried_once(env, capsys, monkeypatch):
     assert "ZZ 65 第十句" in document_of(f"agora:{bid[0]}")
 
 
+def test_the_recheck_adopt_write_survives_a_collision(env, capsys, monkeypatch):
+    """F-1 (issue #65 review): the resolver called it a mint, the claim succeeded, and
+    only the post-claim recheck found the uploader's just-finished rescue - an adopt
+    reached through `_save_continue`, not through `_write_target`. Its write is the same
+    M-2 adopt write, so it gets the same retry: resolve once more, land in the rescue.
+    The outer `is_new` is still True here, which is exactly what the retry condition may
+    no longer look at (issue #65 review, `test_probe_recheck_adopt_collision_is_retried`).
+    """
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    agent = cli.load_agent("opencode")
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == []
+    assert on_drive(a).is_dir(), "A confirmed on Drive first"
+    mirror = paths().mirror / ulid
+    hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
+    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    agent.sessions["ses_a"].append("ZZ f1 第十一句")
+    exported = agent.export("ses_a")
+    shutil.rmtree(on_drive(a))                     # another machine deleted A
+
+    monkeypatch.setattr(cli, "_uploaded", lambda paths_, ulid_: True)
+    entered, gate = threading.Event(), threading.Event()
+    real_claim = cli._claim_rescue_entry
+
+    def gated_claim(p, ulid_):
+        entered.set()
+        assert gate.wait(timeout=30), "the rescue never landed while the claim waited"
+        return real_claim(p, ulid_)
+
+    monkeypatch.setattr(cli, "_claim_rescue_entry", gated_claim)
+    saves = []
+    real_save = cli._save
+
+    def collide_once(paths_, hdr_, body_, raw_, **kwargs):
+        saves.append(hdr_["id"])
+        if len(saves) == 1:
+            raise FileNotFoundError("outbox renamed under the adopt write")
+        return real_save(paths_, hdr_, body_, raw_, **kwargs)
+
+    monkeypatch.setattr(cli, "_save", collide_once)
+    record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
+              "agent_session_id": "ses_a", "parent": {"id": a}}
+    run = cli._Run(paths(), record)
+    result = {}
+
+    def foreground():
+        try:
+            result["saved"] = cli._write_one(paths(), run, exported, agent, check_drive=True)
+        except Exception as e:  # noqa: BLE001 - surfaced below
+            result["error"] = e
+
+    review = threading.Thread(target=foreground, daemon=True)
+    review.start()
+    assert entered.wait(timeout=30), "the foreground never reached its claim"
+    # the uploader finishes its rescue while the claim waits, and a round stages A again
+    assert store.upload_batch(store.Drive(paths()), paths()) == []
+    bid = store.Index(paths()).children(ulid)
+    assert len(bid) == 1, f"setup rescued exactly once: {bid}"
+    store.stage(paths(), hdr, body, raw, update=True, kind="continue")
+    gate.set()
+    review.join(timeout=60)
+    assert not review.is_alive()
+    assert "error" not in result, f"the recheck adopt was not retried: {result.get('error')!r}"
+    saved, target, _note = result["saved"]
+    assert len(saves) == 2, f"collision, then one retry: {saves}"
+    assert target == f"agora:{bid[0]}", f"the retry lands in the rescue: {target}"
+
+    assert store.upload_batch(drive, paths()) == []
+    remote = {e["Name"] for e in
+              json.loads(drive._run("lsjson", "gdrive:sessions", "--dirs-only"))}
+    assert remote - {ulid} == {bid[0]}, f"exactly one rescue: {sorted(remote)}"
+    assert "ZZ f1 第十一句" in document_of(f"agora:{bid[0]}")
+
+
 def test_a_crashed_holder_times_out_and_still_lands_once(env, capsys, monkeypatch):
     """L-2: `.done-X` residual, nobody behind it - the wait times out, one session
     is minted, and the restored entry is adopted (not minted over) afterwards.
