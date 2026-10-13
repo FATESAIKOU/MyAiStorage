@@ -958,8 +958,17 @@ def test_the_real_opencode_adapter_forks_v2_and_refuses_v1_honestly(env, capsys,
                             "--fork", "--dir", str(work))
     assert code == 0, err
     assert forked != importing
-    assert document_of(importing) == before  # A untouched, B has the fork note
-    assert "ZZFORK" in document_of(forked) or "fork" in document_of(forked).lower()
+    assert document_of(importing) == before  # A untouched
+    a_raw = json.loads(store.fetch_raw(paths(), store.Drive(paths()),
+                                       importing.split(":")[1], header_of(importing)))
+    b_raw = json.loads(store.fetch_raw(paths(), store.Drive(paths()),
+                                       forked.split(":")[1], header_of(forked)))
+    assert len(b_raw["messages"]) == len(a_raw["messages"]) + 2
+    assert [m.get("type") for m in b_raw["messages"][-2:]] == ["user", "assistant"]
+    assert any(c.get("type") == "tool" and c.get("name") == "read"
+               for m in b_raw["messages"] for c in (m.get("content") or []))
+    last_a = next(m for m in reversed(a_raw["messages"]) if m.get("type") == "assistant")
+    assert b_raw["messages"][-1]["model"] == last_a["model"]
 
     code, old, err = run(capsys, "import", "session", "--external-session-id",
                          "old", "--agent", "opencode")
