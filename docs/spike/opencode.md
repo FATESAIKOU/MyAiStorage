@@ -1281,23 +1281,23 @@ assistant 的 `time.streamed`、`snapshot`、`cost`、`tokens`、
 - `fake_opencode.py` 依同一份驗：`is_v2` 的 payload 在 `session import`／`import`
   都走 `validate_v2()`，缺欄位就同字樣的 `SchemaError` 拒收。
 
-## N1 (d)：遷移過的舊 Session 的 turn 數是否一致
+## N1 (d)：遷移過的舊 Session 的 turn 數是否一致（部分推論，待第 3 步驗證）
 
-結論：**total 列數可能不一致，但「有內容的 turn」一致，所以只算有內容的 turn
-的比對可以放行**。
+實測部分：空字串的 `text` 照樣匯得進（user／assistant 的空 turn 合法存在）；
+整批拿掉 idle 列照樣匯得進（`message_count`／`turns()` 本來就不算 idle，
+1.6 已落地）；`content: []` 的 assistant 列也合法（空 turn）。
 
-- 本次量到：空字串的 `text` 照樣匯得進（user／assistant 的空 turn 合法存在）；
-  整批拿掉 idle 列照樣匯得進（`message_count`／`turns()` 本來就不算 idle，
-  1.6 已落地）；`content: []` 的 assistant 列也合法（空 turn）。
-- 升級遷移（3.1 的量測方向）會多出 `system`（工具參數變更通知）、`synthetic`
- （v1 附件拆出來的獨立列）、每回合的 `idle`——三者都不是 user／assistant 的對話，
-  `turns()`／`message_count` 照舊不算它們。v1 只有 reasoning／step 的 assistant
-  在閱讀版本來就是空 turn（`_lines_of` 回 `[]`），遷移後仍是空 turn，不影響
-  「有內容」的計數。
-- 所以：store 裡 v1 raw 的 total turn 數與 v2 匯出的 total 列數拿來直比會誤報
-  （idle／system／synthetic／空 turn 的有無），但兩邊「至少有一行內容的 turn」
-  數一致；2.6 的原地更新檢查只比後者，合法的 undo／revert／rewind（空 turn
-  消失）不會被誤擋，真正丟內容（有內容的 turn 變少）才拒絕。
+推論部分（待第 3 步的 DB 遷移量測驗證）：升級遷移會多出 `system`（工具參數變更
+通知）、`synthetic`（v1 附件拆出來的獨立列）、每回合的 `idle`——三者都不是
+user／assistant 的對話，`turns()`／`message_count` 照舊不算它們。v1 只有
+reasoning／step 的 assistant 在閱讀版本來就是空 turn（`_lines_of` 回 `[]`），
+遷移後仍是空 turn，不影響「有內容」的計數。若第 3 步量到遷移會吃掉有內容的
+turn，2.6 的比對規則要跟著重議。
+
+目前結論（以推論為前提）：store 裡 v1 raw 的 total turn 數與 v2 匯出的 total
+列數拿來直比會誤報（idle／system／synthetic／空 turn 的有無），但兩邊「至少有
+一行內容的 turn」數一致；2.6 的原地更新檢查只比後者，合法的 undo／revert／
+rewind（空 turn 消失）不會被誤擋，真正丟內容（有內容的 turn 變少）才拒絕。
 
 ## 未實測、open：v2 的 `info.revert`（M-2）
 
