@@ -1507,6 +1507,11 @@ def test_a_periodic_round_uploads_while_the_agent_is_still_running(env, capsys, 
     monkeypatch.delenv("AGORA_UPLOAD", raising=False)   # detached, like the e2e
     _, a, _ = _import(capsys)
     ulid = a.split(":")[1]
+    # The import spawned its own detached uploader, and waiting on the upload lock is
+    # not enough: a just-spawned one has not taken it yet. Wait for that process to end
+    # (the `clean_subprocesses` spy has it), or it and the in-process batch below race
+    # over the same outbox (issue #69, the same shape #60 fixed in final-write).
+    _wait_spawned(clean_subprocesses, "the import's uploader")
     assert store.upload_batch(store.Drive(paths()), paths()) == []
     record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
               "agent_session_id": "ses_a", "parent": {"id": a, "raw_md5": "x"}}
