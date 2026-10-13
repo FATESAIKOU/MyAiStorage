@@ -1973,20 +1973,26 @@ def test_esc_stops_a_real_process_group_with_a_stubborn_grandchild(monkeypatch, 
 
 def test_each_step_of_the_escalation_gets_its_own_time(group_calls, monkeypatch):
     """Review W1: SIGTERM and SIGKILL used the same timer, so they arrived together
-    and an agent had no time to wind up between them."""
+    and an agent had no time to wind up between them.
+
+    The delays the escalation arms are read as the fact under test, not the gap
+    between the two deliveries: a busy event loop can run both overdue timers in one
+    turn, and the wall-clock gap then measures the scheduler instead of the product
+    (issue #69). Every timer still fires for real - the signals below come from them.
+    """
     monkeypatch.setattr(tui, "ESCALATE_AFTER", 0.4)
     sent, alive = group_calls
-    stamps: dict[int, float] = {}
-    real_killpg = tui.killpg
-
-    def timed(pgid, sig):
-        stamps.setdefault(int(sig), time.monotonic())
-        return real_killpg(pgid, sig)
-
-    monkeypatch.setattr(tui, "killpg", timed)
     app = _marked_app(None)
     proc = FakeProc(lines=["[agora] 合併 1/2"], hang=True)
     app.spawn, _ = _spawn(proc)
+    armed: list[float] = []
+    real_set_timer = app.set_timer
+
+    def watching_set_timer(delay, callback, *args, **kwargs):
+        armed.append(delay)
+        return real_set_timer(delay, callback, *args, **kwargs)
+
+    monkeypatch.setattr(app, "set_timer", watching_set_timer)
 
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
@@ -1995,13 +2001,15 @@ def test_each_step_of_the_escalation_gets_its_own_time(group_calls, monkeypatch)
             await pilot.pause()
             await pilot.press("enter")
             await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            armed.clear()                       # from here on, only the escalation's own timers
             await pilot.press("escape")
             for count in (1, 2, 3):
-                await _wait(lambda count=count: len(stamps) >= count, pilot)
+                await _wait(lambda count=count: len(sent) >= count, pilot)
             assert [sig for _pgid, sig in sent] == [int(signal.SIGINT),
                                                      int(signal.SIGTERM), int(signal.SIGKILL)]
-            gap = stamps[int(signal.SIGKILL)] - stamps[int(signal.SIGTERM)]
-            assert gap >= tui.ESCALATE_AFTER * 0.9, f"SIGKILL 只比 SIGTERM 晚 {gap:.2f} 秒"
+            # step n waits n * ESCALATE_AFTER, so each signal gets a window of its own
+            # (review W1) - the decision, whatever the loop does with the deliveries
+            assert armed == [tui.ESCALATE_AFTER, tui.ESCALATE_AFTER * 2], armed
             alive[4242] = False
             proc.done.set()
     _run(go)
