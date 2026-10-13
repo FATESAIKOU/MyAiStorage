@@ -204,7 +204,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 - `--external-session-id`：只有 import 用，是 agent 自己的 session id，可以給多次或用逗號分隔（5.2）。
 - **一次處理多個**（2026-10-03 使用者決定）：import、delete、merge、pull、push 都吃 id 清單；逐一在 **stderr** 印一行 `k/N` 進度，**stdout 只放 agora id**（可以接管線）。被 Ctrl-C 中斷後重跑同一個指令會接著做：import 略過已匯入、delete 略過已刪、merge 沿用已寫好的要約、pull 略過已快取（5.2、5.3、5.6、5.10）。
 - `cache`／`sync` 拿掉了，改成 `pull`／`push`，而且**只吃給的 id**（5.10）。
-- 所有寫入指令的輸出第一欄都是 agora id。exit code：0 成功；1 做不到（找不到 id、沒有訊息、merge 少於兩個、delete 沒加 `--yes`、有子 Session）；2 錯誤（包含要約失敗：agent 錯誤、逾時、空的回覆，這時不存檔）；3 已存進 outbox、還沒上傳。
+- 所有寫入指令的輸出第一欄都是 agora id。exit code：0 成功；1 做不到（找不到 id、沒有訊息、merge 少於兩個、delete 沒加 `--yes`、有子 Session）；2 錯誤（包含要約失敗：agent 錯誤、逾時、空的回覆，這時不存檔）；3 已存進 outbox、還沒上傳；4 這個 Session 正在接續中（同一台機器的另一個 `continue`），stderr 在說明之前先印一行 `agora-locked <agora id>`（#54）。
 
 ### 5.1 search
 
@@ -306,7 +306,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
    - 定期寫回**不連 Drive**：只看本機索引，目標還在就寫；別台的刪除交給背景上傳發現，背景另存之後，下一輪寫回就沿用那個新 Session。**沿用的搜尋不只在索引**：索引以外，也在 outbox（含上傳器正在比對的 `.done-`）找「只 staged、還沒被 `store.remember` 索引」的另存——同樣是 `relation: continue`、`source` 是這次的 agent session、`parents` 含目前的目標；兩邊都有時取 ULID 較新的那個。途中被刪、背景另存、最後一次、補存，同一段工作只會多出**一個**新 Session，之後的寫回都寫到它。
    - 最後一次寫回照原本的規則，但一定先確認目標還在（若目標在 outbox 中有未完成的上傳，最多等 15 秒讓其 settle）：和上一輪相同就不必再寫（但仍踢一下背景上傳，exit 照 0／3 的規則給），目標被刪了就照樣另存（工作不能只留在被刪的 Session 裡）；沿用到的另存如果還只在 outbox（stage 完、還沒索引），讀它的 header 直接寫到它，stdout 印的就是沿用後的那個 id。
    - **靜音**：定期寫回在終端機不印任何東西、也不讀鍵盤（rclone 與 `opencode export` 的 stdin 都是 DEVNULL；rclone 加 `--ask-password=false`）。訊息寫到 `<state>/continue.log`（每行有時間與 Session id，大小上限和 `upload.log` 一樣）；失敗只記數、不中斷 agent，下一輪再試。agent 結束後，有失敗過就印「定期寫回失敗 N 次，見 `<state>/continue.log`」。
-   - **同一台機器不能同時接續同一個 Session**：`continue` 一開頭，目標正在接續中（`pending/<ULID>.json` 的鎖有人拿著）就拒絕，exit 1。`--fork` 的目標是新的，不受影響；被 fork 的 A 正在接續中也可以 fork（A 不會被寫）。
+   - **同一台機器不能同時接續同一個 Session**：`continue` 一開頭，目標正在接續中（`pending/<ULID>.json` 的鎖有人拿著）就拒絕，exit 4（`EXIT_LOCKED`；3 已經是「還在 outbox」），並在中文說明之前先印一行固定格式 `agora-locked <agora id>`——呼叫方（sidecar）靠它回報 409，不必解析中文（#54）。拿 `pending/<ULID>.json` 的鎖時再問一次同一個問題，蓋掉開頭檢查之後才拿到鎖的窗口：目的地已被鎖，或 `<ULID>.json.tmp` 已被另一個 `_write_pending` 鎖著（那個名字只有同一個 Session 的 `_write_pending` 在用；開啟時不 truncate，免得毀掉正要 rename 的記錄）就同樣 exit 4，輸的那個不覆蓋贏的記錄、不啟動 agent。`--fork` 的目標是新的，不受影響；被 fork 的 A 正在接續中也可以 fork（A 不會被寫）。
    - 目標換到另存的新 Session 時，pending 改名跟著換（`pending/A.json` → `pending/B.json`，鎖跟著走）；結束時刪掉的是目前的那一份。
    - 接受的代價：**跨機器同時接續同一個 Session 是後寫的贏**（Drive 上的版本每幾分鐘換成另一段對話；很少見，不另做衝突偵測）；**接續中別台改的 header（title、tags）會被本機的舊版蓋回去**（原本只在結束時蓋一次，現在每幾分鐘蓋一次）；**每次有變化就上一份完整的 raw，被取代的進 Drive 垃圾桶留 30 天**（先留著當安全網）；**最終寫回偶爾會把「copy 復活中的 A」當成還活著**——別台的刪除正好落在背景 copy 的窗口時，copy 把 A 的資料夾重建，那一刻做最後一次寫回會看到 A、印出 A；背景隨後仍 purge A 並另存成 B（工作不會丟，之後的寫回都到 B），只是 stdout 指的 id 之後就沒了，結束時也不會印另存的說明。最後一次寫回已加上 15 秒上限的 settled 等待以大幅縮小窗口，但超時仍可能發生；刪除落在 copy 窗口、agent 又正好在那一瞬結束才踩到，機率低；不對調 purge／另存的順序（只縮窗不關窗，且改變 crash 的語意）（PM 10-11 決定）。
 Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之後那個 session 要用的 import 指令。

@@ -1227,6 +1227,49 @@ opencode session export <fork id> --standalone > fork.json
 
 ---
 
+# opencode 2.x 的互動模式 DB：升級遷移量測（2026-10-13，agora-opencode-v2 3.1）
+
+隔離環境（第 1 步的做法原樣：四個 XDG＋`HOME` 都在 `/tmp`、`env -i`、
+`opencode service set port 53871` 先改埠）量的問題與結論：
+
+| 問題 | 結論 |
+|---|---|
+| v2 升級有沒有把舊 session 遷進 `session_v2` | **有**。opencode 2.x 在進入 v2 DB 時自己跑「Migrating sessions」背景資料遷移：v1 `session` 的**每一列**用 `INSERT OR IGNORE INTO session_v2 (…同組欄位…) SELECT … WHERE id = <同一個 id>` 抄進去——**id 不變** |
+| 舊表還在不在 | **在**。遷移不 drop 舊的 `session`／`message`／`part`（它們是遷移的來源）；新版 DB（fresh bootstrap）**沒有**這三張表——兩種狀態都會出現 |
+| 同一顆 Session 在兩表的 id 是否相同 | **相同**。上表的 `INSERT … WHERE id = T.id` 保留原 id；訊息層會從 v1 的 `message`＋`part` 合併成 `session_message`（`type`／`seq`／`data` JSON） |
+
+**附帶量到的行為（fixture 與實作都用得上）：**
+
+- 逐 session 遷移時，訊息以 zod 等價的 schema 校驗；不合格的列會 **WARN `Skipped V1 migration row`（`reason=invalid-message`／`invalid-part`）並跳過**——遷移不是無損保證，所以「同一顆 Session 只在 v1 表」（遷移被中斷／列被跳過的 window）與 id 聯集都必須叫得出來。
+- v1 的附件 part（`synthetic: true` 的 text）被拆成**獨立的 `type=synthetic` 列**；沒有 role 的情況下另有 `type=system` 列（opencode 自己加的「工具參數已變更」通知）與 `type=idle` 列（每回合結尾）。**預覽與搜尋只算 `user`／`assistant`** 這件事在 v2 的 DB 上也成立。
+- v2 的 `session_message`：`id, session_id, type, seq, time_created, time_updated, data`（JSON）。排序實測看 `time_created`（同毫秒用 `seq` 穩）；`seq` 不是連續的（5, 6, 13, 18），只是列內的穩定次序。
+- `session_v2` 的欄位比 v1 的 `session` 多：`workspace_id, fork_session_id, fork_boundary, time_idle, time_viewed, idle_outcome, time_suspended, resume_attempts…`；agora 列表用的 id／directory／title／time_updated 一個不少（v1 後備與 v2 欄位同名同形）。
+- 遷移游標在 `kv` 表（`migration.v1-v2`，`{"phase":"sessions"/"completed"}`）；實測把游標刪掉＋放回 v1 表就能重放遷移（否則 completed 之後不再跑）。
+
+**量測的做法（可重跑）：** `env -i` 起隔離環境＋改埠 → 先跑 fake upstream 產生一個 v2 原生 session（fresh DB，無 v1 表）→ 在同一顆 DB 另建 v1 的 `session`／`message`／`part` 三表、塞兩個自編假 session（完整 v1 欄位與 v1 訊息形狀；**id 必須以 `ses_`／`msg_`／`prt_` 開頭**且訊息／part 的 `data` 必須帶齊 v1 的必填欄位，否則遷移會 WARN 跳過）→ 刪掉 `kv.migration.v1-v2` 的游標 → 再跑任一 opencode 指令 → 讀 DB 對照。測完整個隔離目錄刪除；共用服務前後 PID／etime 不變。
+
+**定下的選表規則（3.2）**：`session_v2` 欄位齊全就用它；兩表都在時做 **id 聯集、同 id 以 v2 的列為準**，**只在 v1 表的 Session 仍要列出**（遷移跳過／中斷的 window 與「新版 DB 沒有 v1 表、舊版 DB 沒有 v2 表」兩種狀態都要列得出來）。預覽與搜尋在兩表的資料來源上也走同一條路：有 `session_message` 就優先讀它，該 Session 在 v2 沒有列（遷移漏掉的那種）時退回 v1 的 `message`／`part`；搜尋兩邊的表都掃、同一個 Session 只報一次。fixture：`tests/fixtures/opencode/oc-v2-db.sql`（文字 dump：schema＋上面三種 session 的假列，去識別化）。
+
+**PR 說明記一句**（報告 §H 末段）：sidecar `new` 模式 fallback 的讀取修（v2 的列表／預覽／搜尋）包含這一步。
+
+**改壞驗證（3.6，逐項在 4 個 commit 之後的樹上做，做完還原）**：
+
+| 改壞什麼 | 轉紅的測試 |
+|---|---|
+| 表名改回 `session`（`_SESSION_TABLES` 只看 v1） | 4 個：v2 列表的跨專案／id 聯集／memoisation、`_session_directory` 的 v2 優先 |
+| 聯集改成只看 v2（v1 的列不進字典） | 1 個：id 聯集（只在舊表的 Session 從清單消失） |
+| 預覽讀錯欄位（assistant 列也拿 `user` 的欄位讀） | 2 個：預覽拿最新一輪、預覽截長度 |
+| 搜尋不比對（LIKE 掃到就算命中，不由程式確認） | 6 個：v1 的三個（萬用字元、只算真的話、找不到）＋ v2 的三個（命中、不算附件／工具／system、正規化） |
+| `_session_directory` 拿掉 `row = None` | 1 個：沒有 session 表的 store（spike 的 `cannot access local variable 'row'`） |
+| **補測**（2026-10-13 審查）：預覽在 `session_message` 存在時就不退回 v1 | 1 個：`test_the_v2_preview_still_reads_a_session_only_the_v1_tables_know` |
+| **補測**（2026-10-13 審查）：搜尋在 `session_message` 存在時略過 v1 `part` 的兩個 pass | 1 個：`test_the_v2_search_still_finds_a_session_only_the_v1_tables_know` |
+
+最後兩列是審查（非作者）發現的缺口：3.1 的遷移跳過／中斷 window（只在 v1 表的
+Session）在預覽與搜尋上原先沒有測試守住——那兩處改壞時 140 個測試仍全綠；補上兩條
+測試後，各改壞一次都只讓對應的那一個轉紅，改回即全綠。
+
+---
+
 # 第 4 步：真 opencode 的 summarize／delete（2026-10-13，agora-opencode-v2 4.4）
 
 隔離環境與第 1 步同一套：`HOME`＋四個 XDG 在 `/tmp` 底下的新目錄（`opencode debug paths`
