@@ -1298,3 +1298,12 @@ assistant 的 `time.streamed`、`snapshot`、`cost`、`tokens`、
   （idle／system／synthetic／空 turn 的有無），但兩邊「至少有一行內容的 turn」
   數一致；2.6 的原地更新檢查只比後者，合法的 undo／revert／rewind（空 turn
   消失）不會被誤擋，真正丟內容（有內容的 turn 變少）才拒絕。
+
+## 未實測、open：v2 的 `info.revert`（M-2）
+
+- v2 的 `session` 子指令只有 list／delete／export／import，沒有 undo／revert
+  操作（隔離環境 `opencode session --help` 實見），TUI 觸發 undo 後匯出的形狀
+  沒量過；真匯出也從沒見過 `revert` 欄位。所以 `_apply_revert_v2` 是照 v1
+  （`SessionRevert.cleanup` 的讀法）類推的：`info.revert{messageID, partID}`
+  配扁平列／`content`。行為由合成 payload 的單元測試鎖住
+  （`test_apply_revert_v2_*`，拆掉即紅）；量到真形狀時以實測為準改函式。

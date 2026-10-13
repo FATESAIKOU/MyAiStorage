@@ -410,6 +410,71 @@ def test_a_v2_fork_appends_flat_rows_and_keeps_the_tool_calls(fake, workdir):
         oc._message_count(out, "v2")
 
 
+def _revert_payload():
+    """A small synthetic v2 payload with an undo pointer (M-2: unmeasured).
+
+    No real v2 export was ever seen carrying `info.revert` (there is no undo／
+    revert session subcommand to produce one headlessly), so the pointer's shape
+    here is by analogy with v1 (`{messageID, partID}` against flat rows and
+    `content`); `_apply_revert_v2` documents it as open.
+    """
+    base = 1790214000000
+    info = {"id": "ses_ZZREVERT000000000000AA", "projectID": "", "cost": 0,
+            "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                       "cache": {"read": 0, "write": 0}},
+            "time": {"created": base, "updated": base}, "title": "t",
+            "location": {"directory": ""}}
+
+    def assistant(i, texts):
+        return {"id": f"msg_ZZRV{i:04d}AAAAAAAA",
+                "time": {"created": base + i, "completed": base + i},
+                "type": "assistant", "agent": "build",
+                "model": {"id": "m", "providerID": "p", "variant": "default"},
+                "content": [{"type": "text", "text": t} for t in texts]}
+
+    rows = [
+        {"id": "msg_ZZRV0000AAAAAAAA", "time": {"created": base},
+         "text": "q1", "files": [], "type": "user"},
+        assistant(1, ["a1"]),
+        {"id": "msg_ZZRV0002AAAAAAAA", "time": {"created": base + 2},
+         "text": "q2", "files": [], "type": "user"},
+        assistant(3, ["a2"]),
+    ]
+    return {"info": info, "messages": rows}
+
+
+def test_apply_revert_v2_drops_the_undone_tail_before_appending(fake):
+    """M-2: the undone rows (and the pointer) go before anything is added, or the
+    fork's turns would sit where opencode hides - and deletes on first reply."""
+    payload = _revert_payload()
+    payload["info"]["revert"] = {"messageID": "msg_ZZRV0002AAAAAAAA"}
+    out = json.loads(oc.ADAPTER.append_native(
+        json.dumps(payload).encode(), [("user", ["ZZNEW"])]))
+    assert "revert" not in out["info"]
+    ids = [m["id"] for m in out["messages"]]
+    assert ids[:2] == ["msg_ZZRV0000AAAAAAAA", "msg_ZZRV0001AAAAAAAA"]
+    assert "msg_ZZRV0002AAAAAAAA" not in ids and "msg_ZZRV0003AAAAAAAA" not in ids
+    assert out["messages"][-1]["text"] == "ZZNEW"
+
+
+def test_apply_revert_v2_cuts_content_at_the_named_item(fake):
+    """M-2: with a partID the row stays but its content stops before the named
+    item, and everything after the row goes."""
+    payload = _revert_payload()
+    payload["messages"][1]["content"].append(
+        {"type": "tool", "id": "call_ZZRV0001AAAAAAAA", "name": "read",
+         "state": {"status": "completed", "input": {}, "content": [{"type": "text", "text": "o"}]},
+         "time": {"created": 1790214000001}})
+    payload["info"]["revert"] = {"messageID": "msg_ZZRV0001AAAAAAAA",
+                                 "partID": "call_ZZRV0001AAAAAAAA"}
+    out = json.loads(oc.ADAPTER.append_native(
+        json.dumps(payload).encode(), [("user", ["ZZNEW"])]))
+    assert "revert" not in out["info"]
+    kept = next(m for m in out["messages"] if m["id"] == "msg_ZZRV0001AAAAAAAA")
+    assert [c.get("type") for c in kept["content"]] == ["text"]
+    assert "msg_ZZRV0002AAAAAAAA" not in {m["id"] for m in out["messages"]}
+
+
 def test_every_automated_call_carries_its_server_context(fake, workdir):
     """One place composes it (`_server_args`), so the whole flow has it: export,
     import with --directory, delete and the summarize run (tasks 1.4, 2.7)."""

@@ -505,12 +505,10 @@ def _row_created_ms(row: dict, fallback: int = 0) -> int:
 def _apply_revert_v2(payload: dict) -> None:
     """The v2 half of `_apply_revert` (M1): flat rows, `content` inside them.
 
-    v2's undo pointer is still `info.revert{messageID, partID}` when present
-    (no fixture carries one - a forked export drops `fork`, an undone one keeps
-    `revert` the same way v1 does); the rows after it are what opencode hides,
-    and the named content item (a tool call's id) goes with everything after it.
-    A `messageID` that is not in the export removes nothing; only the pointer
-    goes, the same as v1.
+    未實測、open：v2 的真匯出沒有 `revert` 欄位可量（`session` 子指令沒有 undo／
+    revert 操作，TUI 觸發的 undo 形狀沒量過），以下形狀是照 v1 類推的——`info.revert
+    {messageID, partID}` 配扁平列／`content`。行為由合成 payload 的單元測試鎖住
+    （拆掉即紅）；量到真形狀時以實測為準改這裡。
     """
     info = payload.get("info")
     revert = info.get("revert") if isinstance(info, dict) else None
