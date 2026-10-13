@@ -300,6 +300,137 @@ def do_export(params: list[str]):
     sys.stdout.write(json.dumps(load(session_id), ensure_ascii=False))
 
 
+def _missing(at: str) -> None:
+    """Die like opencode 2.x does when a required field is absent (2.1).
+
+    Measured 2.0.26 in isolation (`session import --standalone --directory`):
+    every absent field is `SchemaError: Missing key at [...]`, one line per
+    field, and a bad id prefix is `Expected a string starting with ...`.
+    The fake keeps the single-line shape the v1 refusal already uses, so the
+    existing assertion (`in stderr`) keeps working.
+    """
+    die(f"SchemaError: Missing key at {at}")
+
+
+def _bad_prefix(want: str, at: str, got: object) -> None:
+    die(f'SchemaError: Expected a string starting with "{want}" at {at} (got {got!r})')
+
+
+def validate_v2(payload: dict) -> None:
+    """Reject a v2 payload missing a field the real 2.x import insists on.
+
+    The full set was probed field by field against 2.0.26 in an isolated
+    XDG+HOME (port moved off 49374 first); see docs/spike/opencode.md §2.1.
+    Optional: info.model/outcome/title, info.time.idle, user.files,
+    assistant.time.completed/streamed, snapshot/cost/tokens/finish/rawFinish,
+    model.variant, tool.executed/ran/completed, state.metadata, empty text.
+    Everything else below is required; idle rows are markers but still carry
+    id/time/outcome.
+    """
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        _missing('["info"]')
+    assert isinstance(info, dict)
+    for key in ("id", "cost", "location", "projectID", "time", "tokens"):
+        if key not in info:
+            _missing(f'["info"]["{key}"]')
+    sid = info["id"]
+    if not (isinstance(sid, str) and sid.startswith("ses")):
+        _bad_prefix("ses", '["info"]["id"]', sid)
+    location = info["location"]
+    if not isinstance(location, dict) or "directory" not in location:
+        _missing('["info"]["location"]["directory"]')
+    clock = info["time"]
+    if not isinstance(clock, dict):
+        _missing('["info"]["time"]')
+    assert isinstance(clock, dict)
+    for key in ("created", "updated"):
+        if key not in clock:
+            _missing(f'["info"]["time"]["{key}"]')
+    tokens = info["tokens"]
+    if not isinstance(tokens, dict):
+        _missing('["info"]["tokens"]')
+    assert isinstance(tokens, dict)
+    for key in ("input", "output", "reasoning", "cache"):
+        if key not in tokens:
+            _missing(f'["info"]["tokens"]["{key}"]')
+    cache = tokens["cache"]
+    if not isinstance(cache, dict):
+        _missing('["info"]["tokens"]["cache"]')
+    assert isinstance(cache, dict)
+    for key in ("read", "write"):
+        if key not in cache:
+            _missing(f'["info"]["tokens"]["cache"]["{key}"]')
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        _missing('["messages"]')
+    assert isinstance(messages, list)
+    for n, row in enumerate(messages):
+        if not isinstance(row, dict):
+            _missing(f'["messages"][{n}]')
+        assert isinstance(row, dict)
+        for key in ("id", "type", "time"):
+            if key not in row:
+                _missing(f'["messages"][{n}]["{key}"]')
+        mid = row["id"]
+        if not (isinstance(mid, str) and mid.startswith("msg_")):
+            _bad_prefix("msg_", f'["messages"][{n}]["id"]', mid)
+        kind = row["type"]
+        if kind not in ("user", "assistant", "idle"):
+            die(f"SchemaError: Expected Session.Message.Info at [\"messages\"][{n}]")
+        tick = row["time"]
+        if not isinstance(tick, dict) or "created" not in tick:
+            _missing(f'["messages"][{n}]["time"]["created"]')
+        if kind == "user":
+            if "text" not in row:
+                _missing(f'["messages"][{n}]["text"]')
+        elif kind == "assistant":
+            for key in ("agent", "model", "content"):
+                if key not in row:
+                    _missing(f'["messages"][{n}]["{key}"]')
+            model = row["model"]
+            if not isinstance(model, dict):
+                _missing(f'["messages"][{n}]["model"]')
+            assert isinstance(model, dict)
+            for key in ("id", "providerID"):
+                if key not in model:
+                    _missing(f'["messages"][{n}]["model"]["{key}"]')
+            content = row["content"]
+            if not isinstance(content, list):
+                _missing(f'["messages"][{n}]["content"]')
+            assert isinstance(content, list)
+            for k, item in enumerate(content):
+                if not isinstance(item, dict) or "type" not in item:
+                    _missing(f'["messages"][{n}]["content"][{k}]["type"]')
+                assert isinstance(item, dict)
+                if item["type"] == "text":
+                    if "text" not in item:
+                        _missing(f'["messages"][{n}]["content"][{k}]["text"]')
+                elif item["type"] == "tool":
+                    for key in ("id", "name", "state", "time"):
+                        if key not in item:
+                            _missing(f'["messages"][{n}]["content"][{k}]["{key}"]')
+                    state = item["state"]
+                    if not isinstance(state, dict):
+                        _missing(f'["messages"][{n}]["content"][{k}]["state"]')
+                    assert isinstance(state, dict)
+                    for key in ("status", "input", "content"):
+                        if key not in state:
+                            _missing(f'["messages"][{n}]["content"][{k}]["state"]["{key}"]')
+                    inner = state["content"]
+                    if not isinstance(inner, list) or not inner:
+                        _missing(f'["messages"][{n}]["content"][{k}]["state"]["content"][0]')
+                    for j, bit in enumerate(inner):
+                        if not isinstance(bit, dict) or "text" not in bit:
+                            _missing(f'["messages"][{n}]["content"][{k}]["state"]["content"][{j}]["text"]')
+                    tick = item["time"]
+                    if not isinstance(tick, dict) or "created" not in tick:
+                        _missing(f'["messages"][{n}]["content"][{k}]["time"]["created"]')
+        else:  # idle: a marker, but still a row with an outcome
+            if "outcome" not in row:
+                _missing(f'["messages"][{n}]["outcome"]')
+
+
 def do_import(params: list[str]):
     if os.environ.get("FAKE_OPENCODE_FAIL") == "import":
         die("injected import failure")
@@ -313,6 +444,8 @@ def do_import(params: list[str]):
         # so the adapter's v1 write path (step 2 replaces it) stays testable.
         # `FAKE_OPENCODE_REQUIRE_V2=1` refuses on both spellings, `=0` on neither.
         die('SchemaError: Missing key at ["info"]["location"]')
+    if is_v2(payload):
+        validate_v2(payload)
 
     directory = flag_value(params, "--directory")
     if directory:
