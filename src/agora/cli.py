@@ -46,6 +46,7 @@ TYPES = ("session",)
 EXIT_INPUT = 1       # cannot be done: unknown id, nothing to import, too few ids, no --yes, has children
 EXIT_ERROR = 2       # header, Drive, agent or unexpected error (argparse usage errors are 2 too)
 EXIT_IN_OUTBOX = 3   # saved locally, not on Drive yet (N13)
+EXIT_LOCKED = 4      # this Session is being continued by another run (#54); not an input error
 DESCRIPTION_MAX = 80
 ACTOR = {"opencode": "opencode", "claude": "claude-code"}   # OKF actor prefix per agent
 SYNC_PERIOD_MINUTES = 5.0   # --sync-period when the user does not give one
@@ -56,6 +57,25 @@ LOG_MAX = 1 << 20         # the same ceiling upload.log has (design「不弄亂 
 
 class InputError(Exception):
     """The user asked for something that does not exist or cannot be done."""
+
+
+class LockedError(Exception):
+    """Another run is continuing this Session right now (issue #54).
+
+    A signal of its own, not an input error: a caller driving `continue` (the Sidecar)
+    has to tell "somebody else holds this Session" apart from "you asked wrong", and
+    answer 409 rather than 500. `agora_id` goes out as the fixed first line
+    `agora-locked <agora id>`; the explanation follows it as before.
+    """
+
+    def __init__(self, agora_id: str, message: str):
+        super().__init__(message)
+        self.agora_id = agora_id
+
+
+def _locked(agora_id: str) -> LockedError:
+    """The one refusal for「這個 Session 有人在接續」, said the same way in both checks."""
+    return LockedError(agora_id, f"{agora_id} 正在接續中，等它結束再接續（要分岔請用 --fork）")
 
 
 def load_agent(name: str) -> Agent:
@@ -708,12 +728,36 @@ def _fsync_dir(path: Path) -> None:
 
 
 def _write_pending(paths: store.Paths, record: dict):
-    """Create the pending record already locked, so nobody can grab it in between (C3)."""
+    """Create the pending record already locked, so nobody can grab it in between (C3).
+
+    This is where the lock is really taken, so this is also where "somebody else is
+    already continuing this Session" is asked again (#54): the early check in
+    `cmd_continue` cannot see a second run that takes the lock right after it - the
+    agent session is prepared in between - and renaming over that run's record would
+    leave it writing to a file we later delete. Both lock names answer the question:
+
+    * `pending/<ULID>.json` held (the destination probe) - that run got here first;
+    * `pending/<ULID>.json.tmp` held - only a `_write_pending` in flight holds it, and
+      only this Session ever uses that name. Opening it must not truncate first, or a
+      concurrent run would wipe the record that is about to be renamed into place.
+
+    Either way the record is not written, no agent is started, and `EXIT_LOCKED` goes out.
+    """
     paths.pending.mkdir(parents=True, exist_ok=True)
     path = paths.pending / f"{_ulid_of(record['agora_id'])}.json"
     tmp = path.with_suffix(".json.tmp")          # not matched by *.json, so nobody sees it yet (R5)
-    lock = open(tmp, "w")
-    fcntl.flock(lock, fcntl.LOCK_EX)
+    lock = os.fdopen(os.open(tmp, os.O_CREAT | os.O_RDWR, 0o600), "r+", encoding="utf-8")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:      # another `_write_pending` for this Session is mid-flight
+        lock.close()
+        raise _locked(record["agora_id"]) from None
+    if store.continuing(paths, _ulid_of(record["agora_id"])):
+        lock.close()
+        tmp.unlink(missing_ok=True)  # ours, and nobody has looked at that name yet
+        raise _locked(record["agora_id"])
+    lock.seek(0)
+    lock.truncate()
     lock.write(json.dumps(record, ensure_ascii=False, indent=2))
     lock.flush()
     os.fsync(lock.fileno())      # the record is the only thing a crash leaves behind (design P17)
@@ -1358,8 +1402,9 @@ def cmd_continue(args, paths: store.Paths) -> int:
         # This machine is already writing this session back; a second run would
         # overwrite its pending record and then delete it when the first one ends
         # (design「同一台機器上不能同時接續同一個 Session」P5). A fork writes a new
-        # session, so it is not affected.
-        raise InputError(f"{source_id} 正在接續中，等它結束再接續（要分岔請用 --fork）")
+        # session, so it is not affected. #54: its own exit code and a fixed line,
+        # so a caller driving the continue can tell this from an input error.
+        raise _locked(source_id)
     interval = _sync_interval_seconds(args)
     src = agora.get("source") or {}
     src_dir = src.get("dir") if src.get("dir") and Path(src["dir"]).is_dir() else None
@@ -1896,6 +1941,12 @@ def main(argv: list[str] | None = None) -> int:
         if bad := store.bad_count(paths):
             print(f"[agora] 有 {bad} 筆壞檔放在 {paths.state}/*/.bad，請檢查", file=sys.stderr)
         return ACTIONS[args.action](args, paths)
+    except LockedError as e:
+        # #54: the fixed line first - callers read it and do not parse the Chinese -
+        # then the same explanation the early check has always given.
+        print(f"agora-locked {e.agora_id}", file=sys.stderr)
+        print(f"[agora] {e}", file=sys.stderr)
+        return EXIT_LOCKED
     except InputError as e:
         print(f"[agora] {e}", file=sys.stderr)
         return EXIT_INPUT

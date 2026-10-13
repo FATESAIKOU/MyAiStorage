@@ -45,12 +45,12 @@
 **範圍**：`src/agora/agents/opencode.py` 的 DB 讀取（`list_sessions`／`last_message`／`search_text`／`_session_directory`）、v2 DB fixture。合併後：TUI 的列表／預覽／搜尋在 v2 的 store 上照常，舊 Session 不會被藏掉。
 **PR 說明記一句**：sidecar `new` 模式 fallback 的讀取修包含這一步（報告 §H 末段）。
 
-- [ ] 3.1 **先量（審查 M4；Open Q 原本的 3、4）**：隔離環境量「v2 升級有沒有把舊 session 遷進 `session_v2`」「舊表（`session` 等）還在不在」「同一顆 Session 在兩表的 id 是否相同」；記進 `docs/spike/opencode.md`。沒遷移時，fixture 與測試要涵蓋「只出現在舊表的 Session」
-- [ ] 3.2 選表：`session_v2` 與所需欄位齊全就用它，否則讀 v1 的 `session`；**兩者都在時以 v2 為準，但只出現在 v1 表的 Session 仍要列出**（id 聯集、v2 的資料優先，M4）；都沒有 → `_warn_schema()` 一次＋空清單
-- [ ] 3.3 預覽與搜尋改讀 `session_message`：欄位（`type`、`data` 形狀、排序用 `time_created` 或 `seq`）以 3.1 的真 DB fixture 定案；v1 的路徑照舊
-- [ ] 3.4 `_session_directory()`：用選中的表；`row` 先設 None（表不存在、查不到、目錄不在都回 None），不再 `UnboundLocalError`
-- [ ] 3.5 單元測試：v2 DB 的列表（跨專案、新到舊、目錄＋標題）、**id 聯集（同 id 用 v2 的列；只在舊表的 Session 也在清單）**、預覽（只算 user／assistant、截長度）、搜尋（命中、附件不算、正規化、同一個 Session 一次）；v1 DB 的既有測試全綠；認不得的結構只警告一次；`_session_directory` 的四種情形；`list_sessions` 的 memoisation 照舊
-- [ ] 3.6 改壞驗證：表名改回 `session`；聯集改成只看 v2；預覽讀錯欄位；搜尋不比對；`_session_directory` 拿掉 `row = None`
+- [x] 3.1 **先量（審查 M4；Open Q 原本的 3、4）**：隔離環境量「v2 升級有沒有把舊 session 遷進 `session_v2`」「舊表（`session` 等）還在不在」「同一顆 Session 在兩表的 id 是否相同」；記進 `docs/spike/opencode.md`。沒遷移時，fixture 與測試要涵蓋「只出現在舊表的 Session」
+- [x] 3.2 選表：`session_v2` 與所需欄位齊全就用它，否則讀 v1 的 `session`；**兩者都在時以 v2 為準，但只出現在 v1 表的 Session 仍要列出**（id 聯集、v2 的資料優先，M4）；都沒有 → `_warn_schema()` 一次＋空清單
+- [x] 3.3 預覽與搜尋改讀 `session_message`：欄位（`type`、`data` 形狀、排序用 `time_created` 或 `seq`）以 3.1 的真 DB fixture 定案；v1 的路徑照舊
+- [x] 3.4 `_session_directory()`：用選中的表；`row` 先設 None（表不存在、查不到、目錄不在都回 None），不再 `UnboundLocalError`
+- [x] 3.5 單元測試：v2 DB 的列表（跨專案、新到舊、目錄＋標題）、**id 聯集（同 id 用 v2 的列；只在舊表的 Session 也在清單）**、預覽（只算 user／assistant、截長度）、搜尋（命中、附件不算、正規化、同一個 Session 一次）；v1 DB 的既有測試全綠；認不得的結構只警告一次；`_session_directory` 的四種情形；`list_sessions` 的 memoisation 照舊
+- [x] 3.6 改壞驗證：表名改回 `session`；聯集改成只看 v2；預覽讀錯欄位；搜尋不比對；`_session_directory` 拿掉 `row = None`
 
 **測試**：`uv run pytest -q tests/unit/test_agent_opencode.py`；不需要真 opencode。
 **改壞驗證**：3.6 逐項記在 PR 說明。
