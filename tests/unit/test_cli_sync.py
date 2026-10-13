@@ -53,6 +53,7 @@ class SyncAgent:
     def __init__(self):
         self.sessions: dict[str, list[str]] = {"ses_a": ["問題", "回答"]}
         self.launched: list[Launch] = []
+        self.headless_calls: list[tuple[bool, int | None]] = []
         self.collects = 0
         self.speak_rounds = 99      # how many collects answer with new content
         self.sleep = 0.7            # how long the "agent" holds the terminal
@@ -81,7 +82,10 @@ class SyncAgent:
         msgs += ["\n".join(lines) for _role, lines in turns]
         return json.dumps({"id": "appended", "m": msgs}, ensure_ascii=False).encode()
 
-    def start_native(self, raw, workdir):
+    def start_native(self, raw, workdir, *, headless=False, headless_port=None):
+        # The headless shape (`continue --headless`, #66) is recorded, not started:
+        # the CLI's own `Popen` is what would run it, after the pending is locked.
+        self.headless_calls.append((headless, headless_port))
         new = f"ses_n{len(self.sessions)}"
         self.sessions[new] = list(json.loads(raw)["m"])
         launch = Launch(argv=["sleep", str(self.sleep)], cwd=str(workdir),
@@ -1278,13 +1282,13 @@ def _lock_appears_mid_preparation(env, monkeypatch, target: Path, content, holde
     """
     start_native = type(env).start_native
 
-    def hook(self, raw, workdir):
+    def hook(self, raw, workdir, **kwargs):
         target.parent.mkdir(parents=True, exist_ok=True)
         if content is not None:
             target.write_text(content, encoding="utf-8")
         holder["proc"] = _hold_lock(target)       # a process of its own takes the lock
         _wait_for(lambda: _held_by_somebody(target), what=f"the lock on {target.name}")
-        return start_native(self, raw, workdir)
+        return start_native(self, raw, workdir, **kwargs)
 
     monkeypatch.setattr(type(env), "start_native", hook)
 
@@ -1362,6 +1366,83 @@ def test_a_fork_is_not_refused_by_a_live_continue(env, capsys):
         assert code == 0 and out != a
     finally:
         lock.close()
+
+
+# --- the locked headless continue (#66): no agora-session, no agora-port -----------
+
+HEADLESS_PORT = 51999
+HEADLESS_LINES = ("agora-session ", "agora-port ", "agora-agent-session ")
+
+
+def _continue_headless(capsys, agora_id, *extra):
+    return run(capsys, "continue", "session", agora_id, "--agent", "opencode", "--dir", "/tmp",
+               "--sync-period", SECONDS, "--headless", "--headless-port", str(HEADLESS_PORT), *extra)
+
+
+def _no_headless_lines(err: str) -> None:
+    """#66: a refused run must not look like a started one to the sidecar - any of
+    these lines reads as「它起來了」, so a locked Session must print none of them."""
+    for line in err.splitlines():
+        assert not line.startswith(HEADLESS_LINES), err
+
+
+def test_a_headless_continue_refused_early_prints_no_session_or_port(env, capsys):
+    """#66: `continue --headless` on a Session another run holds is still #54's refusal.
+
+    The early check in `cmd_continue` runs before `start_native` and before the three
+    headless lines, so a locked Session reads exactly like the non-headless case: exit 4,
+    the fixed `agora-locked <id>` line, none of `agora-session`/`agora-port`/
+    `agora-agent-session`, and no agent opened.
+    """
+    _, a, _ = _import(capsys)
+    record = {"agora_id": a, "agent": "opencode", "agent_session_id": "ses_x", "dir": "/tmp",
+              "before_count": 0, "parent": {"id": a, "raw_md5": None}}
+    path, lock = cli._write_pending(paths(), record)     # the other run holds it
+    try:
+        code, out, err = _continue_headless(capsys, a)
+        assert code == cli.EXIT_LOCKED == 4 and out == ""
+        _locked(err, a)
+        _no_headless_lines(err)
+        assert env.launched == [] and env.headless_calls == [], "no agent may be opened"
+    finally:
+        lock.close()
+
+
+def test_a_headless_continue_that_loses_the_lock_race_prints_no_session_or_port(
+    env, capsys, monkeypatch
+):
+    """#66: the `_write_pending` loser is refused the same way, after the preparation.
+
+    The early check cannot see a lock that arrives while the agent session is being
+    prepared; `_write_pending` is what catches it. That is after `start_native` (so the
+    fake agent is asked once for a headless launch) but before the three lines and
+    before the CLI runs the agent (`subprocess.Popen`), so losing here still means
+    exit 4, the fixed line, no headless lines, and no agent process.
+    """
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    pending_file = paths().pending / f"{ulid}.json"
+    holder = {}
+    _lock_appears_mid_preparation(env, monkeypatch, pending_file, "{}", holder)
+    started = []
+    real_popen = subprocess.Popen
+
+    def recording_popen(argv, *args, **kwargs):
+        started.append(list(argv))
+        return real_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(cli.subprocess, "Popen", recording_popen)
+    try:
+        code, out, err = _continue_headless(capsys, a)
+        assert code == cli.EXIT_LOCKED == 4 and out == ""
+        _locked(err, a)
+        _no_headless_lines(err)
+        assert env.headless_calls == [(True, HEADLESS_PORT)], \
+            "the headless agent session was prepared before _write_pending"
+        assert not [cmd for cmd in started if cmd and cmd[0] == "sleep"], \
+            "the prepared agent must not start once the lock is lost"
+    finally:
+        _release(holder.get("proc"))
 
 
 # --- the update decision and the pending file --------------------------------------
