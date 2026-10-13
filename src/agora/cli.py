@@ -379,6 +379,16 @@ def cmd_import(args, paths: store.Paths) -> int:
     return first_bad
 
 
+def _content_turn_count(turns: list[tuple[str, list[str]]]) -> int:
+    """Turns with at least one line of content (N1).
+
+    A legit undo/revert/rewind makes empty turns disappear - an assistant with
+    only reasoning/step markers, a user row with empty text - and that must not
+    count as "less conversation". Only turns that say something count.
+    """
+    return sum(1 for _, lines in turns if any(line.strip() for line in lines))
+
+
 def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Paths,
                 index: store.Index, add_tags: "list[str] | None" = None) -> int:
     """One import. Unchanged content and no --header is a no-op that just
@@ -400,6 +410,22 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
             print(f"agora:{existing[0]}")
             return 0
         if unchanged or not _branched(index, existing[0]):
+            # M5/N1: never silently overwrite with less conversation. Only turns
+            # with content count - an undo that drops empty turns is not "less".
+            try:
+                old_raw = store.fetch_raw(paths, store.Drive(paths), existing[0], old)
+                old_content = _content_turn_count(agent.turns(old_raw))
+                new_content = _content_turn_count(agent.turns(exported.raw))
+            except Exception:
+                old_content = new_content = 0  # unreadable old raw: no basis to refuse
+                # fall through to the normal update below
+            if new_content < old_content:
+                raise InputError(
+                    f"{external_id} 重新匯入的內容比原本少（原本 {old_content} 則有內容的對話，"
+                    f"新的 {new_content} 則），不覆蓋原本的版本。要接續請改用跨 agent 接續"
+                    f"（例如 `agora continue session agora:{existing[0]} --agent claude`），"
+                    "或先讓這個 Session 分支（`agora continue session … --fork`）再重新匯入，"
+                    "依分支規則另存成新的 Session。")
             hdr = _with_user(old, updates, add_tags=add_tags)
             hdr["agora"]["source"] = _source(agent, exported)
             hdr["agora"]["updated_at"] = _now_iso()
