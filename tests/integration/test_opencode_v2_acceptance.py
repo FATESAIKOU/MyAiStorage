@@ -47,6 +47,7 @@ import fake_upstream  # noqa: E402  (needs the path above)
 import opencode_noninteractive as agent  # noqa: E402
 
 from agora import cli, store
+from agora.agents import opencode as oc
 
 pytestmark = pytest.mark.integration
 
@@ -240,6 +241,13 @@ def test_the_whole_v2_flow_over_a_real_opencode(lab, capsys, tmp_path):
     _new_session(state, "-s", first, "第二輪：ZZACCEPT2 這是接續的一輪。")
     second = _new_session(state, "--title", "驗收 B", "ZZACCEPTB 另一顆要一起 merge 的。")
 
+    # the DB path of step 3 reads this same isolated 2.x store: the listing and
+    # the directory lookup have to see the sessions this test just made (what
+    # breaking `_SESSION_TABLES` back to v1 would hide - 5.6's DB item)
+    listed = {row.session_id for row in oc.ADAPTER.list_sessions()}
+    assert {first, second} <= listed, f"list_sessions 沒看到自己建的 v2 session：{sorted(listed)}"
+    assert oc._session_directory(first) == str(state["proj"])
+
     code, out, err = _agora(capsys, "import", "session", "--external-session-id", first,
                             "--agent", "opencode", "--header", "title=驗收 A")
     assert code == 0, err[-400:]
@@ -344,7 +352,6 @@ def test_the_v2_export_shapes_the_templates_rely_on(lab):
 
     # import needs every one of those fields: the whole export, re-identified,
     # goes back in under a fresh id and comes back with the same rows
-    from agora.agents import opencode as oc
     fresh = oc.reidentify(exported, session_id="ses_ZZSHAPE00000000001")
     raw = state["proj"] / "shape.json"
     raw.write_text(json.dumps(fresh, ensure_ascii=False), encoding="utf-8")

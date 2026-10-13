@@ -1478,7 +1478,7 @@ headless）是呼叫方給的 `--headless-port`，兩者都不經 49374。
 | 改壞什麼 | 結果 |
 |---|---|
 | v2 適配關掉：`_payload_format()` 一律回 `"v1"`（`turns()` 讀 v1、`native()` 產 v1） | **5.1 紅，不是 skip**：continue 在載入前大聲拒絕（「這是 opencode 1.x 時代的 Session（v1 巢狀格式）…opencode 2.x 的 session import 拒收 v1」），三行 stderr 沒有出現；5.4 也紅（v2 export 進不去：「第 0 則訊息形狀不對（缺 info 物件）」）。5.2 照樣綠——它驗的是真 CLI 與服務面，不經適配層 |
-| `_SESSION_TABLES = ("session",)`（DB 只讀 v1） | 4 個紅：v2 列表的跨專案／id 聯集／memoisation、`_session_directory` 的 v2 優先 |
+| `_SESSION_TABLES = ("session",)`（DB 只讀 v1） | 5 個紅：v2 列表的跨專案／id 聯集／memoisation、`_session_directory` 的 v2 優先，**加上 5.1 本身**（驗收檔對隔離 store 的 `list_sessions()`／`_session_directory()` 斷言；審查 F-1 補上，改壞後 4 秒就紅） |
 | `_server_args()` 回 `[]`（不帶 `--standalone`） | 1 個紅：`test_every_automated_call_carries_its_server_context` |
 
 ## 5.7 驗收紀錄
