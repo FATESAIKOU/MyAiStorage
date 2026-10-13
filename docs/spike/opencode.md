@@ -1490,8 +1490,15 @@ headless）是呼叫方給的 `--headless-port`，兩者都不經 49374。
 
 ```bash
 uv run pytest -q -m integration tests/integration/test_opencode_v2_acceptance.py
-uv run pytest -q -m integration tests/integration/          # 全套；驗 v2 的項目不 skip
+# 離線／隔離的全套（驗 v2 的項目不 skip；警語見下）
+uv run pytest -q -m integration tests/integration/ \
+    --ignore=tests/integration/test_store_drive.py --ignore=tests/integration/test_e2e_sync.py
 ```
+
+**警語（審查 F-5）**：`test_store_drive.py` 與 `test_e2e_sync.py` 用 `pwd.getpwuid()` 取**真
+HOME** 找 `~/.config/agora/rclone.conf`，有就 symlink 起來連**真 Drive**——隔離的 `HOME`
+擋不住這個。這兩檔只能在沒有 `rclone.conf`（或有意用真 Drive／真 rclone）的機器上跑；
+離線或隔離的跑法要像上面一樣 `--ignore` 掉。
 
 **三行 stderr**（`continue --headless`，緊接在 `[agora] 工作目錄：…` 之後）：
 
