@@ -992,9 +992,10 @@ class OpencodeAgent:
         undo pointer applied first (so the fork does not inherit a tail opencode
         would hide and then delete) and the turns appended as ordinary rows -
         carrying the model A was using, and visible plain text like everything
-        else `native()` writes. The rest of the payload stays byte-for-byte what
-        it was (only JSON key order may move); v2 rows carry no parent link, so
-        the new rows chain by time order, not by id.
+        else `native()` writes. The existing rows keep their content (tests compare
+        them as parsed JSON); the stored bytes may differ in whitespace, escaping
+        or number formatting after a loads/dumps round trip. v2 rows carry no
+        parent link, so the new rows chain by time order, not by id.
         """
         payload = self._read(raw)
         if _payload_format(payload) == "v2":
