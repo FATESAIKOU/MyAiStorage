@@ -1307,3 +1307,16 @@ assistant 的 `time.streamed`、`snapshot`、`cost`、`tokens`、
   （`SessionRevert.cleanup` 的讀法）類推的：`info.revert{messageID, partID}`
   配扁平列／`content`。行為由合成 payload 的單元測試鎖住
   （`test_apply_revert_v2_*`，拆掉即紅）；量到真形狀時以實測為準改函式。
+
+## 改壞驗證補記（2.9：之前拆了仍綠的五項）
+
+以下五項在第 2 步收尾時實測「拆掉仍綠」，補上斷言／測試後逐項轉紅（全是 fake
+單元測試，不跑真 opencode，不需隔離環境）：
+
+| 拆法 | 紅的測試 | 結果 |
+|---|---|---|
+| `_append_native_v2` 內拿掉 `_apply_revert_v2(payload)` | `test_apply_revert_v2_drops_the_undone_tail_before_appending`、`test_apply_revert_v2_cuts_content_at_the_named_item` | 2 failed（`assert "revert" not in out["info"]`，尾巴與指針都留著） |
+| `_unused_stem_v2` 退化成常數 `return "agora"` | `test_unused_stem_v2_steps_past_taken_stems` | 1 failed（`assert 'agora' == 'agoraa'`） |
+| `_append_native_v2` 改動原 raw 的 `info`（`title` 寫掉） | `test_append_native_v2_leaves_info_identical`（`out["info"] == before["info"]` 整體比對） | 1 failed（info 整體比對） |
+| `_append_native_v2` 拿掉 NO_REPLY 站位 | `test_append_native_v2_stands_in_for_an_unanswered_question` | 1 failed（fork 黏到未答的問題上，turns 不等） |
+| 新列時間只用現在時間（不管 A 的鐘） | `test_append_native_v2_comes_after_a_session_dated_in_the_future`（時間相對現在的 fixture，A 的時間是明天） | 1 failed（新列沒有落在全部舊列之後） |

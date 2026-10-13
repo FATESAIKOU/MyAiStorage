@@ -475,6 +475,53 @@ def test_apply_revert_v2_cuts_content_at_the_named_item(fake):
     assert "msg_ZZRV0002AAAAAAAA" not in {m["id"] for m in out["messages"]}
 
 
+def test_unused_stem_v2_steps_past_taken_stems(fake):
+    """L-5: a constant stem would hand out an id the payload already has."""
+    assert oc._unused_stem_v2([{"id": "msg_agora0"}, {"id": "msg_x"}]) == "agoraa"
+    payload = json.loads(v2())
+    payload["messages"][0]["id"] = "msg_agora0"
+    before = {m["id"] for m in payload["messages"]}
+    out = json.loads(oc.ADAPTER.append_native(
+        json.dumps(payload).encode(), [("user", ["ZZ"])]))
+    fresh = [m["id"] for m in out["messages"][len(payload["messages"]):]]
+    assert fresh and all(i.startswith("msg_agoraa") for i in fresh)
+    assert not (set(fresh) & before)
+
+
+def test_append_native_v2_leaves_info_identical(fake):
+    """L-5: the original `info` (not just the rows) comes through untouched."""
+    before = json.loads(fork())
+    out = json.loads(oc.ADAPTER.append_native(
+        fork(), [("user", ["ZZFORK 再問一句。"]), ("assistant", ["ZZFORK 回答。"])]))
+    assert out["info"] == before["info"]
+
+
+def test_append_native_v2_stands_in_for_an_unanswered_question(fake):
+    """L-5: like v1, a fork onto an open question gets a stand-in reply first."""
+    trimmed = json.loads(v2())
+    del trimmed["messages"][-2:]  # the last answer and its idle: ends on a user turn
+    raw_bytes = json.dumps(trimmed).encode()
+    assert oc.ADAPTER.turns(raw_bytes)[-1][0] == "user"
+    assert oc.ADAPTER.turns(oc.ADAPTER.append_native(raw_bytes, FORK)) == \
+        oc.ADAPTER.turns(raw_bytes) + [("assistant", [base.NO_REPLY])] + FORK
+
+
+def test_append_native_v2_comes_after_a_session_dated_in_the_future(fake):
+    """L-5: opencode orders rows by time.created, so the fork's rows land after
+    everything A has - even when A's clock runs fast. Relative to now, so a
+    "just use now" shortcut goes red."""
+    payload = json.loads(v2())
+    tomorrow = int(time.time() * 1000) + 24 * 3600 * 1000
+    for n, row in enumerate(payload["messages"]):
+        row.setdefault("time", {})["created"] = tomorrow + n
+        if "completed" in row.get("time", {}):
+            row["time"]["completed"] = tomorrow + n
+    after = json.loads(oc.ADAPTER.append_native(
+        json.dumps(payload).encode(), FORK))["messages"]
+    latest = max(m["time"]["created"] for m in after[:-2])
+    assert all(m["time"]["created"] > latest for m in after[-2:])
+
+
 def test_every_automated_call_carries_its_server_context(fake, workdir):
     """One place composes it (`_server_args`), so the whole flow has it: export,
     import with --directory, delete and the summarize run (tasks 1.4, 2.7)."""
