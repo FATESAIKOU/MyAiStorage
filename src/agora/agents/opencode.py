@@ -260,24 +260,24 @@ def _last_reply(stdout: bytes) -> tuple[str | None, str | None]:
 
 
 def _session_info(created: int) -> dict:
-    """The smallest `info` opencode will import *and* export again.
+    """The smallest v2 `info` opencode will import *and* export again (2.1/2.2).
 
-    Import rejects the whole payload when a field is missing, and export needs
-    all of them, so a session that cannot be exported cannot be collected after
-    the agent has worked in it. The id is a placeholder (start_native re-identifies
-    the whole payload), and so are `directory` / `projectID`: import rewrites both
-    from the working directory (spike V5).
+    Measured 2.0.26 in isolation: required are `id` (`ses` prefix), `cost`,
+    `location.directory` (may be empty, `--directory` rewrites it), `projectID`
+    (may be empty, but must be present), `time.created/updated`, and the full
+    `tokens` (`input/output/reasoning/cache.read/write`). Optional
+    (`model/outcome/title/time.idle`) are omitted except `title`, which the CLI
+    overwrites with the real one and opencode rewrites on the next continue
+    anyway. The id is a placeholder (start_native re-identifies the whole
+    payload), and so are `directory` / `projectID`: import rewrites both from
+    the working directory (spike V5, v2 §location).
     """
-    stamp = {"created": created, "updated": created}
     return {
-        "id": PLACEHOLDER_ID, "slug": "agora-handoff", "title": NATIVE_TITLE,
-        "directory": "", "projectID": "", "path": "",
-        "agent": "build", "version": "", "cost": 0, "permission": [],
-        "model": {"id": "", "providerID": "opencode", "variant": "default"},
-        "summary": {"additions": 0, "deletions": 0, "files": 0},
+        "id": PLACEHOLDER_ID, "projectID": "", "cost": 0,
         "tokens": {"input": 0, "output": 0, "reasoning": 0,
                    "cache": {"read": 0, "write": 0}},
-        "time": stamp,
+        "time": {"created": created, "updated": created},
+        "title": NATIVE_TITLE, "location": {"directory": ""},
     }
 
 
@@ -856,51 +856,43 @@ class OpencodeAgent:
         return out
 
     def native(self, turns: Turns) -> bytes:
-        """Turns as an opencode export, ready for `start_native` to load.
+        """Turns as a v2 opencode export, ready for `start_native` to load (2.2).
 
         The caller (cli._converted_turns) hands over what design v5 promises:
         starts with a user turn, strictly alternating, no empty turn, no
         `[skip …]` line. So this only has to compose them in order - no merging,
         no padding.
 
-        Plain, visible text parts - no synthetic, no attachment: whatever a
-        session says has to be on screen when the agent opens. One part per line,
-        the way opencode stores a multi-paragraph reply, so `turns(native(
-        turns(raw)))` is the same list of lines it started from.
+        Flat rows (design 5, measured 2.0.26): a user row carries its words in
+        one `text` (lines joined - v2 has no per-line parts for users), an
+        assistant row carries one `text` content item per line, so
+        `turns(native(turns))` keeps the assistant's lines. Plain, visible text
+        only - no synthetic, no attachment: whatever a session says has to be
+        on screen when the agent opens. Ids keep opencode's prefixes
+        (`ses`/`msg_`; text items carry no id per the fixture, a tool call's
+        would be `call_`/`prt_`), because a payload whose ids do not start
+        with them is refused outright.
         """
         created = int(time.time() * 1000)
         messages: list[dict] = []
-        previous = ""
         for role, lines in turns:
             # the contract says both are true already; the check keeps a caller
-            # that breaks it from producing a message opencode would reject
+            # that breaks it from producing a row opencode would reject
             body = [line for line in lines if line.strip()]
             if role not in ("user", "assistant") or not body:
                 continue
             at = created + len(messages)   # times move forward: opencode sorts by them
             message_id = f"msg_agora{len(messages)}"
-            info = {"id": message_id, "sessionID": PLACEHOLDER_ID, "role": role,
-                    "time": {"created": at}, "agent": "build",
-                    "model": {"providerID": "opencode", "modelID": ""}}
-            if role == "assistant":
-                # import rejects an assistant message whose parentID is null, so
-                # it has to point at the message it answers; the rest of these
-                # fields are what its schema insists on (measured: each missing
-                # one is "Missing key at [...]" and the whole payload is refused)
-                info.update({"parentID": previous, "mode": "build", "finish": "stop",
-                             "providerID": "opencode", "modelID": "", "cost": 0,
-                             "path": {"cwd": "", "root": ""},
-                             "tokens": {"total": 0, "input": 0, "output": 0,
-                                        "reasoning": 0,
-                                        "cache": {"read": 0, "write": 0}}})
-                info["time"]["completed"] = at
+            if role == "user":
+                messages.append({"id": message_id, "time": {"created": at},
+                                 "text": "\n".join(body), "files": [], "type": "user"})
             else:
-                info["summary"] = {"diffs": []}
-            messages.append({"info": info, "parts": [
-                {"id": f"prt_agora{len(messages)}-{n}", "sessionID": PLACEHOLDER_ID,
-                 "messageID": message_id, "type": "text", "text": line}
-                for n, line in enumerate(body)]})
-            previous = message_id
+                messages.append({"id": message_id, "time": {"created": at},
+                                 "type": "assistant", "agent": "build",
+                                 "model": {"id": "", "providerID": "opencode",
+                                           "variant": "default"},
+                                 "content": [{"type": "text", "text": line}
+                                             for line in body]})
         payload = {"info": _session_info(created), "messages": messages}
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
