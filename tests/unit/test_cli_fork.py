@@ -935,11 +935,10 @@ def test_the_real_claude_adapter_forks(env, capsys, tmp_path, monkeypatch, mode)
         assert "ZZSAY" in document_of(b)
 
 
-def test_the_real_opencode_adapter_cannot_fork_yet(env, capsys, tmp_path, monkeypatch):
-    """P2's premise was "opencode loads the v1 payload append_native builds"; a 2.x
-    opencode refuses exactly that (the fake models it), and a v2 raw is refused
-    before the agent starts. Both refusals are loud, and the Session stays
-    untouched - the fork path itself works again when step 2 writes the v2 append."""
+def test_the_real_opencode_adapter_forks_v2_and_refuses_v1_honestly(env, capsys, tmp_path, monkeypatch):
+    """Step 2 (2.3/2.5): a v2 raw forks via the flat append (tool calls kept, new
+    rows carry A's model), and a v1 raw is refused honestly before anything is
+    imported - not a bare SchemaError, and the Session stays untouched."""
     from agora.agents import opencode as oc
     fh = tmp_path / "fh"
     (fh / "opencode-sessions").mkdir(parents=True)
@@ -955,10 +954,12 @@ def test_the_real_opencode_adapter_cannot_fork_yet(env, capsys, tmp_path, monkey
                                "default", "--agent", "opencode")
     assert code == 0, err
     before = document_of(importing)
-    code, _b, err = run(capsys, "continue", "session", importing, "--agent", "opencode",
-                        "--fork", "--dir", str(work))
-    assert code != 0 and "還不能 fork" in err
-    assert document_of(importing) == before
+    code, forked, err = run(capsys, "continue", "session", importing, "--agent", "opencode",
+                            "--fork", "--dir", str(work))
+    assert code == 0, err
+    assert forked != importing
+    assert document_of(importing) == before  # A untouched, B has the fork note
+    assert "ZZFORK" in document_of(forked) or "fork" in document_of(forked).lower()
 
     code, old, err = run(capsys, "import", "session", "--external-session-id",
                          "old", "--agent", "opencode")
@@ -966,7 +967,7 @@ def test_the_real_opencode_adapter_cannot_fork_yet(env, capsys, tmp_path, monkey
     old_document = document_of(old)
     code, _b, err = run(capsys, "continue", "session", old, "--agent", "opencode",
                         "--fork", "--dir", str(work))
-    assert code != 0 and "SchemaError" in err      # v1 payload, like the real 2.x
+    assert code != 0 and ("1.x" in err and "重新匯入" in err)  # honest, not SchemaError
     assert document_of(old) == old_document
 
 
