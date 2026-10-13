@@ -338,7 +338,9 @@ def summarize_run(argv: list[str]) -> int:
 
     Emits the same event stream as the real one (one JSON object per line), and
     stores a session so `export` can be asked which model answered.
-    FAKE_OPENCODE_SUMMARIZE: normal | empty | fail | no-session
+    FAKE_OPENCODE_SUMMARIZE: normal | v2 | empty | fail | no-session
+      `v2` stores the flat 2.x shape: no `info.model`, the model on the assistant
+      row (`model.id`), which is where a real 2.0.26 summarize session records it.
     FAKE_OPENCODE_SUMMARIZE_HOLD=1  after the first event, wait for workdir/pending-<id>
     """
     with open(HOME / "opencode-argv.log", "a") as f:
@@ -351,16 +353,37 @@ def summarize_run(argv: list[str]) -> int:
         die("injected summarize failure")
     session_id = "ses_fake_summary00000"
     now = int(time.time() * 1000)
-    if mode != "no-session":
+    model = os.environ.get("FAKE_OPENCODE_MODEL", "space-bunny-free")
+    reply = os.environ.get("FAKE_OPENCODE_REPLY", "ZZSUMMARY 這是要約")
+    if mode != "no-session" and mode == "v2":
+        save(session_id, {
+            "info": {"id": session_id, "title": "summarize",
+                     "location": {"directory": os.getcwd()},
+                     "cost": 0, "outcome": "succeeded",
+                     "time": {"created": now, "updated": now + 2},
+                     "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                                "cache": {"read": 0, "write": 0}}},
+            "messages": [
+                {"id": "msg_fake_summary0", "type": "user", "text": "寫要約",
+                 "files": [], "time": {"created": now}},
+                {"id": "msg_fake_summary1", "type": "assistant", "agent": "build",
+                 "model": {"id": model, "providerID": "opencode", "variant": "default"},
+                 "content": [{"type": "text", "text": reply}],
+                 "finish": "stop", "rawFinish": "stop", "cost": 0,
+                 "tokens": {"input": 0, "output": 0, "reasoning": 0,
+                            "cache": {"read": 0, "write": 0}},
+                 "time": {"created": now + 1}},
+                {"id": "msg_fake_summary2", "type": "idle", "outcome": "succeeded",
+                 "time": {"created": now + 2}},
+            ]})
+    elif mode != "no-session":
         save(session_id, {
             "info": {"id": session_id, "title": "summarize", "directory": os.getcwd(),
                      "version": "9.9.9",
-                     "model": {"id": os.environ.get("FAKE_OPENCODE_MODEL", "space-bunny-free"),
-                               "providerID": "opencode", "variant": "default"},
+                     "model": {"id": model, "providerID": "opencode", "variant": "default"},
                      "time": {"created": now, "updated": now}},
             "messages": [{"info": {"id": "msg_fake0", "sessionID": session_id,
-                                   "role": "assistant", "modelID":
-                                   os.environ.get("FAKE_OPENCODE_MODEL", "space-bunny-free"),
+                                   "role": "assistant", "modelID": model,
                                    "time": {"created": now}}, "parts": []}],
         })
     if mode == "no-session":       # a run that produced no events at all
@@ -379,9 +402,7 @@ def summarize_run(argv: list[str]) -> int:
             die("the pending record never appeared")
     if mode != "empty":
         print(json.dumps({"type": "text", "sessionID": session_id, "timestamp": now,
-                          "part": {"type": "text",
-                                   "text": os.environ.get("FAKE_OPENCODE_REPLY",
-                                                           "ZZSUMMARY 這是要約")}}))
+                          "part": {"type": "text", "text": reply}}))
     print(json.dumps({"type": "step_finish", "sessionID": session_id,
                       "timestamp": now, "part": {"type": "step-finish"}}))
     return 0

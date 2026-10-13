@@ -1217,6 +1217,40 @@ def test_summarize_answers_and_leaves_no_session(fake, tmp_path, monkeypatch):
     assert list(workdir.glob("pending-*")) == []
 
 
+def test_a_v2_summarize_run_reports_its_model_and_leaves_no_session(fake, tmp_path,
+                                                                    monkeypatch):
+    """4.2: on 2.x the session a summarize run makes is a flat v2 one, and the
+    model it reports comes off the assistant row - then the delete takes it away
+    again (both commands carry --standalone, pinned in step 1)."""
+    workdir = tmp_path / "summarize"
+    workdir.mkdir()
+    monkeypatch.setenv("FAKE_OPENCODE_SUMMARIZE", "v2")
+    monkeypatch.setenv("FAKE_OPENCODE_MODEL", "space-bunny-free")
+
+    text, model = oc.ADAPTER.summarize("ZZPROMPT 請寫要約", workdir)
+
+    assert text == "ZZSUMMARY 這是要約"
+    assert model == "space-bunny-free"        # the row's id, not `info.model`
+    assert not (fake / "opencode-sessions" / "ses_fake_summary00000.json").exists()
+    assert list(workdir.glob("pending-*")) == []
+
+
+def test_a_v2_summarize_record_survives_a_failed_delete(fake, tmp_path, monkeypatch,
+                                                         capsys):
+    """4.2: same on the v2 shape - if the delete fails the record stays for the
+    next run, and the warning says so (Y6)."""
+    workdir = tmp_path / "summarize"
+    workdir.mkdir()
+    monkeypatch.setenv("FAKE_OPENCODE_SUMMARIZE", "v2")
+    monkeypatch.setenv("FAKE_OPENCODE_FAIL", "delete")
+
+    text, _ = oc.ADAPTER.summarize("ZZPROMPT", workdir)
+
+    assert text == "ZZSUMMARY 這是要約"
+    assert (workdir / "pending-ses_fake_summary00000").exists()
+    assert "沒刪掉" in capsys.readouterr().err
+
+
 def test_summarize_sends_the_prompt_in_a_file_and_deny_tools(fake, tmp_path, monkeypatch):
     """Y1: argv carries only the short message and the file; `-f` inlines the file
     so the material reaches the model with every tool denied (that is why the
