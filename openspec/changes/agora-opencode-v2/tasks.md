@@ -2,13 +2,14 @@
 
 **範圍**：`src/agora/agents/opencode.py` 的讀取層與指令層、`tests/fakes/`（fake upstream、`fake_opencode.py`、`opencode_noninteractive.py`）、`tests/conftest.py` 的 opencode 護欄、`tests/fixtures/opencode/` 的 v2 session fixture、`docs/spike/opencode.md`。合併後：opencode 2.x 上的匯入、同 agent 接續、閱讀版都正確——**不再有靜默空閱讀版**（審查 H1）；native／append 與舊 raw 的拒絕留給第 2 步。
 **PR 說明記一句**（報告 §H 末段）：sidecar `new` 模式 fallback 的寫回只需要讀取側的修（§F'-1、3、5、6），落在第 1 步與第 3 步。
+**PR 說明也要寫（N4／N5）**：(1) PR 1 的 `--fork` 對 v2 的 Session 會報錯（`append_native` 底下還是 v1 形狀的 helper），第 2 步才通——這是響亮的錯誤，不是靜默；(2) 1.1（fake upstream）或 1.5（`--server` 量測）若先各自成一個小 PR 再接 PR 1，不算違反「一步一個 PR」。
 
 - [x] 1.1 **fake upstream（前置交付物；審查 M6）**：放 `tests/fakes/`，本機、不連外、不用憑證，能回一句話與一次工具呼叫（讀暫存目錄裡自己寫的檔案這種無害動作）。做不到時的出口：先收純文字 fixture、工具形狀記成 open、閱讀版對工具先 `[skip tool]`，並在 PR 說明標明（視為未完成，不是預設路線）
 - [x] 1.2 在隔離環境產生 v2 fixture（用 1.1）：四個 XDG＋`HOME` 指到暫存（`opencode debug paths` 確認）；**在隔離的 XDG_CONFIG 下把 managed 服務的埠改成空閒埠**（審查 H2）；清掉／控制繼承的 `OPENCODE_*`，pytest 外自己設 `AGORA_CONFIG`／`AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`AGORA_RCLONE`／`RCLONE_CONFIG`（L3）；工作目錄用暫存專案；自編多輪＋一次工具呼叫（第二輪 `-s <id>` 讓跨訊息參照出現）；`opencode session export <id> --standalone` 匯出；**去識別化清單**（`providerState`、`projectID`、HOME 路徑、主機名、email、時間戳、id；由 fake upstream 產生，L2）；**斷言 fixture 至少有一個跨訊息參照**（L6），否則補一輪；放 `tests/fixtures/opencode/oc-v2-*.json`
 - [x] 1.3 嗅探：**每一列同質**——每列有 `type` → v2、每列有 `info` → v1、混合 → `AgentError`（L1）；`messages` 空／不存在時看 `info.location`（v2）／`info.directory`（v1）；兩者都不是 → `AgentError`（明確訊息）
 - [x] 1.4 指令與 server 上下文（**全部在同一步**，審查 M7）：`_server_args()` 一處組；`_export_bytes` → `session export <id> --standalone`；`_import` → `session import <path> --standalone --directory <workdir>`（cwd 與 `PWD` 都給 workdir）；`_delete` → `session delete <id> --standalone`（`_discard`、`_drop_summary_session`、pending 補刪都走它）；summarize → `run --standalone <訊息> -f <材料> --format json`；`opencode_noninteractive.py` 的透傳（`export`／`import`／`session delete`）一起改
 - [x] 1.5 量 `--server`（L4）：隔離環境起一個私有 serve，對它跑 `session export／import --server …`，記語法與行為進 `docs/spike/opencode.md`；量到 `--standalone` 與 live serve 相衝就在第 1 步內改 `_server_args()` 的形狀
-- [x] 1.6 `export()` 的欄位讀 v2：`dir` 讀 `info.location.directory`、`version` 沒有就是 `None`、`model` 讀最後一則 assistant 的 `model.id`、`created_at` 照舊
+- [x] 1.6 `export()` 的欄位讀 v2：`dir` 讀 `info.location.directory`、`version` 沒有就是 `None`、`model` 讀最後一則 assistant 的 `model.id`、`created_at` 照舊；**`message_count` 只算 user／assistant 列**（`idle` 不算，與 `turns()` 一致；N4）；`_import_verified` 在第 1 步先只比訊息數（內容項目數第 2 步才對 v2 生效）
 - [x] 1.7 `reidentify()` 認 v2：依真 fixture 決定要改的結構位置（訊息 id、assistant 列的參照、`content` 內部的 id 若有）；fixture 上不存在的欄位一律不動；v1 行為不變
 - [x] 1.8 `turns()`／`_lines_of()` 讀 v2（**審查 H1**）：user 的 `text`、assistant 的 `content`（text 一行、tool 一行 `[tool] …`）、`idle` 列略過、附件不算；不認得的型別照舊 `[skip <type>]`
 - [x] 1.9 `fake_opencode.py`：新舊語法都收（`export` 與 `session export`、`import` 與 `session import`、`--standalone`、`--directory` 決定 session 目錄）；v2 session 以扁平存；`session import` 收到 v1 巢狀 payload MUST 以 `SchemaError` 拒絕（模擬 v2）
@@ -26,15 +27,15 @@
 
 **範圍**：`src/agora/agents/opencode.py` 的寫入層（native／append 與底下的 helper）、`src/agora/cli.py` 的原地更新檢查、fake 的必填欄位驗證、真 opencode 的整合測試。合併後：v2 的接續／fork／merge 後接續、計數語意、舊 raw 的誠實拒絕。
 
-- [ ] 2.1 必填欄位全集：拿 1.2 的 fixture 當模板，在隔離 XDG（＋空閒埠）逐欄餵 `session import` 看 `SchemaError: Missing key at [...]` 補齊（`info`、user 列、assistant 列的 `content`）；結果記進 `docs/spike/opencode.md`，`fake_opencode.py` 依同一份拒絕缺欄位的 payload
+- [ ] 2.1 必填欄位全集：拿 1.2 的 fixture 當模板，在隔離 XDG（＋空閒埠）逐欄餵 `session import` 看 `SchemaError: Missing key at [...]` 補齊（`info`、user 列、assistant 列的 `content`）；結果記進 `docs/spike/opencode.md`，`fake_opencode.py` 依同一份拒絕缺欄位的 payload；**順便量（N1 (d)）**：遷移過的舊 Session（v1 時代進來的）用 v2 匯出時，turn 數和 store 裡那版是否一致——落差要決定「只算有內容的 turn」的比對能不能放行
 - [ ] 2.2 `native()` 產 v2：`info` 照模板（含 `location` 等）；訊息列照 v2 的 user／assistant 列，一則一行一個 text；不使用 synthetic／attachment；placeholder id 用 `ses`／`msg`／`prt` 前綴（以 fixture 複驗）；`_session_info` 的欄位集照模板換
 - [ ] 2.3 `append_native()` 產 v2（**審查 M1**）：複製原 raw、接上新訊息列；原 raw 其餘部分 byte-for-byte 不動。**逐個點名底下的 v1-only helper 並寫 v2 版**：`_apply_revert`（讀 `info.revert`／`messages[].parts`）、`_role_fields`（讀 `info.role`／`providerID`／`modelID`）、`_unused_stem`（讀 `info`／`parts` 的 id）、`said`／`last_question`／`_created_ms(m.get("info"))`、`_last_model`（讀 `info.modelID`）——v2 扁平列沒有 `info`，不處理會回空／None，輕則被 `SchemaError` 拒絕、重則匯入鏈不對的 Session（靜默）
-- [ ] 2.4 計數定義（**審查 M2／M8**）：`message_count`＝user／assistant 列數（與 `turns()` 一致；`idle` 不算）；回讀驗證的第 2 層是「該格式可數的內容項目數」——v1 是 `parts` 數、v2 是 assistant 列 `content` 的項目數，沒有這一層時只比訊息數；spec 的說法照這個改
+- [ ] 2.4 回讀驗證的第 2 層（**審查 M2；M8 的 `message_count` 已在 1.6，N4**）：該格式可數的內容項目數——v1 是 `parts` 數、v2 是 assistant 列 `content` 的項目數，沒有這一層時只比訊息數；spec 的說法照這個改
 - [ ] 2.5 舊 raw（v1）的同 agent 接續／fork：在開 agent 前拒絕（agent session id 取自 payload 的 `info.id`），**訊息誠實**（審查 M5）：重新匯入不一定原地更新（被分支過的 Session 會另存），來源不在本機時只能跨 agent 接續
-- [ ] 2.6 重新匯入的保護（審查 M5；動 `cli._import_one`）：原地更新既有 Session 前，比對新匯出與 store 那版的 user／assistant turn 數；**新的比較少就不覆蓋**（拒絕並說明差多少）；不變／變多照舊更新，被分支過的照現行規則另存
-- [ ] 2.7 單元測試：`native → import（fake）→ export → turns` 的 round trip；閱讀版對 fixture 的段落數與工具行；`append_native` 保留工具呼叫與原 raw，**fork v2 raw 的新列 model／鏈指對**（M1）；回讀驗證的 content 項目數（fake 掉一個 content 要紅，M2）；`collect` 只有 idle 列時回 None（沒說話不寫回，M8）；舊 raw 拒絕的訊息內容；turns 變少的重新匯入被拒（M5）
+- [ ] 2.6 重新匯入的保護（**審查 M5／N1**；動 `cli._import_one`）：原地更新既有 Session 前，比對新匯出與 store 那版的 user／assistant turn 數，**只算至少有一行內容的 turn**（合法的 undo／revert／rewind 讓空 turn 消失，不算變少）；新的**有內容的 turn** 比較少就不覆蓋——**拒絕訊息要寫明下一步**（改用跨 agent 接續，或先讓這個 Session 分支再重新匯入、依分支規則另存），不能只說少了多少；不變／變多照舊更新，被分支過的照現行規則另存
+- [ ] 2.7 單元測試：`native → import（fake）→ export → turns` 的 round trip；閱讀版對 fixture 的段落數與工具行；`append_native` 保留工具呼叫與原 raw，**fork v2 raw 的新列 model／鏈指對**（M1）；回讀驗證的 content 項目數（fake 掉一個 content 要紅，M2）；`collect` 只有 idle 列時回 None（沒說話不寫回，M8）；舊 raw 拒絕的訊息內容；**有內容的 turn 變少的重新匯入被拒、拒絕訊息含下一步**，**只有空 turn 消失（undo 的合法變少）時照舊更新**（N1）
 - [ ] 2.8 真 opencode 整合測試（隔離 XDG＋空閒埠、fake upstream）：`native()` → 真的 `session import` → `run -s` 一輪 → `collect`；閱讀版含前文關鍵字；至少驗一次 `message_count` 與 `idle` 的關係（M8）
-- [ ] 2.9 改壞驗證：native 少一個必填欄位；`idle` 當段落；工具行拿掉；`append_native` 改到原 raw 的其他欄位；v1 helper 的 v2 版拆掉（新列 model／鏈錯）；content 項目數不比對；turns 變少的檢查拿掉
+- [ ] 2.9 改壞驗證：native 少一個必填欄位；`idle` 當段落；工具行拿掉；`append_native` 改到原 raw 的其他欄位；v1 helper 的 v2 版拆掉（新列 model／鏈錯）；content 項目數不比對；**「有內容的 turn 少於原本」的檢查拿掉；把空 turn 也算進比較（合法的 undo 被誤擋）**（N1）
 
 **測試**：`uv run pytest -q tests/unit/test_agent_opencode.py tests/unit/test_cli.py`；`uv run pytest -q -m integration tests/integration/test_opencode_real.py`（需真 opencode）。
 **改壞驗證**：2.9 逐項記在 PR 說明。

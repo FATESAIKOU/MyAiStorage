@@ -3,7 +3,7 @@
 ### Requirement: import 一次多個
 `agora import session --external-session-id <id>[,<id>…]` MUST 接受多個 agent session id（`--external-session-id` 可以給多次，也可以用逗號分隔）。MUST 先同步一次（受 5 分鐘節流：5 分鐘內同步過就沿用本機索引），再逐一匯入；某一個失敗 MUST 照樣做下一個，最後 exit code 是第一個非零的（全部成功是 0；存進本機、交給背景上傳算成功，見 `local-first-writes`）。只給一個 id 時，行為與 exit code 和給多個時相同。
 
-重新匯入一個**已經在 store 裡**的來源時，新的匯出比 store 裡那版的 user／assistant 對話數**少**時 MUST NOT 原地更新：MUST 拒絕並說明差多少（exit 非 0），原本的版本 MUST NOT 被覆蓋；不變或變多時照現行規則（原地更新，或依分支規則另存成新的 Session）。
+重新匯入一個**已經在 store 裡**的來源時，新的匯出的 user／assistant 對話數——**只算至少有一行內容的 turn**（undo／rewind 讓空 turn 消失不算變少）——比 store 裡那版**少**時 MUST NOT 原地更新：MUST 拒絕（exit 非 0）並**寫明下一步**（改用跨 agent 接續，或先讓這個 Session 分支再重新匯入、依分支規則另存），原本的版本 MUST NOT 被覆蓋；不變或變多時照現行規則（原地更新，或依分支規則另存成新的 Session）。
 
 #### Scenario: 其中一個失敗
 - **WHEN** 給三個 id，其中一個不存在
@@ -14,5 +14,9 @@
 - **THEN** 第一個因為內容沒變而略過，只做剩下的
 
 #### Scenario: 重新匯入的內容比原本少
-- **WHEN** 重新匯入一個來源，新的匯出比 store 裡那版少一則 user／assistant 對話
-- **THEN** 原本的版本沒有被覆蓋，指令 exit 非 0，訊息說明少了多少
+- **WHEN** 重新匯入一個來源，新的匯出比 store 裡那版少一則**有內容的** user／assistant 對話
+- **THEN** 原本的版本沒有被覆蓋，指令 exit 非 0，訊息說明少了多少並寫明下一步（跨 agent 接續，或先讓它分支再重新匯入）
+
+#### Scenario: 合法的變少（undo）不算變少
+- **WHEN** 重新匯入一個來源，新的匯出比 store 那版少的是沒有內容的 turn（undo／rewind 之後）
+- **THEN** 照現行規則更新，不因這個檢查被拒絕

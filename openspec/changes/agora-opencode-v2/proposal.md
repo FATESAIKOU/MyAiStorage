@@ -11,7 +11,7 @@ Mac 上的 opencode 已經升到 2.x（2.0.26）：`opencode import／export` �
 - **計數**：`message_count` 只算 user／assistant 列（`idle` 不算新內容）；回讀驗證的第 2 層是「該格式可數的內容項目數」（v1 的 part 數／v2 的 `content` 項目數）。
 - **`reidentify`**：認 v2 的訊息 id 與參照位置（只改真 fixture 上實際存在的結構位置，其餘 byte-for-byte 保留）。
 - **互動模式 DB**：改讀 `session_v2`／`session_message`（v2 的資料優先）；只出現在 v1 表的舊 Session 以 id 聯集照樣列出，不會被藏掉；修好 `_session_directory` 在資料表不存在時的未賦值錯誤（`UnboundLocalError`）。
-- **舊 raw（v1）的同 agent 接續**：明確拒絕，訊息誠實（重新匯入不一定原地更新、來源不在本機時只能跨 agent 接續）；MUST NOT 把 v1 payload 送給 v2 import 留下半個 Session。重新匯入既有 Session 前比對 turn 數，**變少就不覆蓋**。
+- **舊 raw（v1）的同 agent 接續**：明確拒絕，訊息誠實（重新匯入不一定原地更新、來源不在本機時只能跨 agent 接續）；MUST NOT 把 v1 payload 送給 v2 import 留下半個 Session。重新匯入既有 Session 前比對**有內容的 turn**數，**變少就不覆蓋**（拒絕訊息寫明下一步）。
 - **測試與文件**：本機能發 tool call 的 fake upstream 進 `tests/fakes/`（fixture 與驗收都用它，驗 v2 不用真模型）；去識別化的 v2 fixture；假 opencode 的 v2 語意（拒收 v1 巢狀）；conftest 的 opencode 護欄改 v2 語法且失敗時大聲報錯；隔離環境連 managed 服務的埠一起隔；驗收：隔離 XDG＋空閒埠＋假 Drive＋自編多輪含工具呼叫的 v2 session，跑 import → headless continue（三行＋SIGTERM，含定期寫回）→ show → merge → 接續 merged，另驗非 headless 的 TUI 路徑。
 - **資料目錄（XDG）**：agora 不指定、只透傳；要隔離由呼叫方（sidecar／supervisor）在啟動 agora 前設（design §8 列了選項與建議）；埠不在 XDG 裡，另外隔離。
 - **不再支援 opencode 1.x 的 CLI**：第 1 步之後指令改用 `session export／import`（1.x 沒有）；嗅探只保住 payload 的讀取。
