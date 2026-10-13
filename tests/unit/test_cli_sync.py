@@ -523,6 +523,17 @@ def test_an_adopted_claim_goes_back_to_the_outbox(env, capsys, monkeypatch):
         return real_claim(p, ulid_)
 
     monkeypatch.setattr(cli, "_claim_rescue_entry", gated_claim)
+    # The claim goes back after this write, not before it (issue #65 F-4): the entry may
+    # not become visible to an uploader before the adopted session is remembered, or its
+    # rescue of X could land a second one first - so at the write, both must still hold.
+    real_save = cli._save
+
+    def watched_save(paths_, hdr_, body_, raw_, **kwargs):
+        assert (paths_.outbox / f".done-{ulid}").is_dir(), "the claim is still ours at the write"
+        assert not (paths_.outbox / ulid).exists(), "X is not back before the write is done"
+        return real_save(paths_, hdr_, body_, raw_, **kwargs)
+
+    monkeypatch.setattr(cli, "_save", watched_save)
     record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
               "agent_session_id": "ses_a", "parent": {"id": a}}
     run = cli._Run(paths(), record)
