@@ -1540,3 +1540,7 @@ pytest 的 HOME＋四個 XDG 指到暫存）**：
   smoke（同上）。
 - **模型**：v2 的項目全部走本機 fake upstream（`fakeup/fake-model`／`faketext/fake-model`），
   一個都沒 skip；免費模型的那幾條在這次的離線設定裡 skip。
+- **尚未被實際執行驗證（審查 F-7）**：`test_opencode_real.py` 與 `test_e2e_opencode.py` 的
+  v2 改寫（5.3）在這次的離線跑法下**全部 skip**（免費模型／claude 不在 PATH），所以那
+  些改寫還沒被真的跑過；等有免費模型（或 `AGORA_TEST_MODEL=<模型>`）時再跑一次確認，
+  結果補記在這裡。
