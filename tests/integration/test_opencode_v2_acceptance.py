@@ -269,12 +269,21 @@ def test_the_whole_v2_flow_over_a_real_opencode(lab, capsys, tmp_path):
     assert _wait_for(lambda: "ZZPERIODIC" in _stored_body(paths, id_a)), \
         f"定期寫回沒有把新的一輪寫進 store：{run.lines[-6:]}"
 
-    # a last turn right after that round, then SIGTERM inside the same interval:
-    # the final write-back is what saves it, and the stop is gentle
-    _new_session(state, "-s", agent_session, "第四輪：ZZFINAL 收尾前說的。")
-    assert run.sigterm() == 0, "continue --headless 沒有溫和停下"
-    assert _wait_for(lambda: "ZZFINAL" in _stored_body(paths, id_a), 30), \
-        "最後一次寫回沒有存到收尾前的那一輪"
+    # a last turn, then SIGTERM inside the same interval: the *final* write-back is
+    # what has to save it, so first say a periodic round did not already get it -
+    # if one did, run the last turn again instead of pretending
+    for attempt in (1, 2, 3):
+        marker = f"ZZFINAL{attempt}"
+        _new_session(state, "-s", agent_session,
+                     f"第四輪：{marker} 收尾前說的，只有最後一次寫回看得到。")
+        if marker in _stored_body(paths, id_a):
+            continue                       # the periodic round was faster: try again
+        assert run.sigterm() == 0, "continue --headless 沒有溫和停下"
+        assert _wait_for(lambda m=marker: m in _stored_body(paths, id_a), 30), \
+            "最後一次寫回沒有存到收尾前的那一輪"
+        break
+    else:
+        pytest.fail("三次都被定期寫回搶先，沒能單獨驗到最後一次寫回")
     assert "定期寫回失敗" not in "\n".join(run.lines), run.lines[-5:]
 
     # show: the reading version is complete - both rounds, the tool line, the text
