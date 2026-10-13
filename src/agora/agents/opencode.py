@@ -1008,6 +1008,9 @@ class OpencodeAgent:
         payload = self._read(raw)
         if _payload_format(payload) == "v2":
             return self._append_native_v2(payload, turns)
+        # v1 分支只剩測試用（L-11）：經此建出的 v1 payload 必被 `start_native`
+        # 拒絕（2.5），進不了 `session import`；跨 agent 接續走 `native()`＋閱讀版，
+        # 不經這裡。v1 helper 留著是為了既有單元測試，不再演進。
         _apply_revert(payload)
         messages = _payload_messages(payload)
         body = [(role, [line for line in lines if line.strip()]) for role, lines in turns
