@@ -136,6 +136,31 @@ def test_reimporting_the_agent_session_a_continue_moved_past_is_a_session_of_its
     assert second != first
 
 
+def test_reimport_with_fewer_content_turns_is_refused_with_next_steps(env, capsys):
+    """2.7/N1: the new export has fewer turns with content - do not overwrite, and
+    say what to do instead (cross-agent continue, or fork-then-reimport)."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    env.sessions["ses_a"].pop()  # the source lost a turn with content
+    code, out, err = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert code != 0
+    assert "比原本少" in err and "跨 agent" in err and "分支" in err
+    # the stored version is untouched: reimporting the full transcript still lands there
+    env.sessions["ses_a"].append("好的，三個步驟")
+    _, second, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert second == first
+
+
+def test_reimport_losing_only_empty_turns_still_updates(env, capsys):
+    """2.7/N1: a legit undo drops empty turns - that is not "less conversation"."""
+    _, first, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    env.sessions["ses_a"].insert(1, "")  # an empty turn in the middle of the stored version
+    _, second, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert second == first  # updated in place (more total, same content)
+    env.sessions["ses_a"].remove("")  # the undo takes the empty turn away again
+    _, third, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
+    assert third == first  # only an empty turn vanished: still updates, not refused
+
+
 def test_continue_writes_back_into_the_same_session(env, capsys):  # design 5.4, user's call
     _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     code, out, _ = run(capsys, "continue", "session", parent, "--agent", "opencode", "--dir", "/tmp",

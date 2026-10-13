@@ -1779,3 +1779,65 @@ def test_the_record_is_written_even_when_the_run_is_interrupted(fake, tmp_path,
     monkeypatch.setattr(oc, "_remember_summary_session", spy)
     oc.ADAPTER.summarize("ZZPROMPT", workdir)
     assert seen[0] == "ses_fake_summary00000"     # before the delete, not after
+
+
+# --- step 2 unit tests (tasks 2.7; change agora-opencode-v2) ------------------
+
+
+def test_native_import_export_turns_round_trip(fake, workdir):
+    """2.7: native → import (fake) → export → turns is a round trip (v2)."""
+    turns = oc.ADAPTER.turns(v2())
+    built = oc.ADAPTER.native(turns)
+    launch = oc.ADAPTER.start_native(built, workdir)
+    exported = oc.ADAPTER.export(launch.agent_session_id)
+    assert exported.message_count == len(turns) == 5
+    assert oc.ADAPTER.turns(exported.raw) == turns
+
+
+def test_reading_version_paragraphs_and_tool_line(fake):
+    """2.7: the reading version of the v2 fixture has its sections and tool line."""
+    body = base.reading(oc.ADAPTER, v2())
+    assert body.count("## user") == 2 and body.count("## assistant") == 2
+    assert "[tool] read {'path': 'fake-note.txt'}" in body
+    assert "先讀 fake-note.txt 再回答。" in body
+    assert "第二輪：紙條上寫的是什麼顏色？一句話。" in body
+
+
+def test_import_verification_counts_content_items_not_only_messages(fake, workdir,
+                                                                   monkeypatch):
+    """2.7/M2: dropping one content item keeps every message, so only the second
+    layer (assistant rows' content count) can notice - and it must go red."""
+    monkeypatch.setenv("FAKE_OPENCODE_DROP_CONTENT", "0")
+    with pytest.raises(AgentError, match="數量不對"):
+        oc.ADAPTER.start_native(v2(), workdir)
+    # the half-built session did not stay behind
+    assert list((fake / "opencode-sessions").glob("*.json")) == \
+        [fake / "opencode-sessions" / "default.json"]
+
+
+def test_collect_with_only_idle_rows_returns_none(fake, workdir):
+    """2.7/M8: opening the agent and saying nothing leaves only idle rows, which
+    are not conversation - nothing new is written back."""
+    launch = oc.ADAPTER.start_native(v2(), workdir)
+    payload = stored(fake, launch.agent_session_id)
+    # the agent said nothing new: keep the conversation rows, add one more idle
+    payload["messages"].append({"id": "msg_FAKEIDLE000000000001",
+                                "time": {"created": 1790214999999},
+                                "type": "idle", "outcome": "succeeded"})
+    stored_path = fake / "opencode-sessions" / f"{launch.agent_session_id}.json"
+    stored_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    assert oc.ADAPTER.collect(launch) is None
+
+
+def test_old_raw_refusal_says_what_to_do_next(fake, workdir):
+    """2.7/2.5: a v1 raw is refused before anything is imported, and the message
+    is honest - the reimport command, the branching caveat, the cross-agent way
+    out, and the source agent session id it came from."""
+    with pytest.raises(AgentError) as e:
+        oc.ADAPTER.start_native(raw(), workdir)
+    message = str(e.value)
+    assert "1.x" in message and "ses_ZZSRCID0000000000000000AA" in message
+    assert "agora import session --external-session-id" in message
+    assert "分支" in message and "跨 agent" in message
+    # nothing reached opencode and nothing landed
+    assert [path.stem for path in (fake / "opencode-sessions").glob("*.json")] == ["default"]
