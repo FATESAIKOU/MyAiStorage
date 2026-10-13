@@ -651,7 +651,12 @@ def test_an_adopt_collision_is_retried_once(env, capsys, monkeypatch):
 
 def test_a_crashed_holder_times_out_and_still_lands_once(env, capsys, monkeypatch):
     """L-2: `.done-X` residual, nobody behind it - the wait times out, one session
-    is minted, and the restored entry is adopted (not minted over) afterwards."""
+    is minted, and the restored entry is adopted (not minted over) afterwards.
+
+    Shortening `RESCUE_CLAIM_WAIT` is only how the test reaches the timeout without
+    sitting the real ten seconds out: what is locked in is the timeout mechanism (a
+    holder that never lands anything), not the constant's value.
+    """
     _, a, _ = _import(capsys)
     ulid = a.split(":")[1]
     agent = cli.load_agent("opencode")
@@ -667,7 +672,7 @@ def test_a_crashed_holder_times_out_and_still_lands_once(env, capsys, monkeypatc
     shutil.rmtree(on_drive(a))                     # another machine deleted A
     # crash residue: claimed, no worker behind it
     (paths().outbox / ulid).rename(paths().outbox / f".done-{ulid}")
-    monkeypatch.setattr(cli, "RESCUE_CLAIM_WAIT", 0.3)
+    monkeypatch.setattr(cli, "RESCUE_CLAIM_WAIT", 0.3)   # exercise the timeout, not the value
     from agora import background
     monkeypatch.setattr(background, "start", lambda paths: background.STARTED)
     record = {"agora_id": a, "agent": "opencode", "dir": "/tmp",
@@ -707,8 +712,6 @@ def test_timeout_mint_clears_only_its_own_claim(env, capsys, monkeypatch):
     assert "ZZ l4 第七句" in document_of(target)
     assert (paths().outbox / f".done-{ulid}").is_dir(), \
         "a foreign claim survives someone else's timeout mint"
-    assert (paths().outbox / f".done-{ulid}").is_dir(), \
-        "the timeout mint leaves another claim alone"
     # the next lock-taker restores the residue; the uploader adopts, not mints
     lock = store.hold_upload_lock(paths(), blocking=True)
     try:
