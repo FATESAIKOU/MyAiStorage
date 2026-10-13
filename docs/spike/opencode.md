@@ -1094,7 +1094,7 @@ agora 從第 1 步起，所有自動化呼叫都帶 `--standalone`：v2 的 `ses
   （`{"port": …}`），**不會連運行中的服務**：`service get` 立刻反映，執行前後 49374 的
   PID／etime 不變（審查 N2）。
 - 兩次量測前後都只 `lsof -nP -iTCP:49374 -sTCP:LISTEN` 看有沒有在聽（不連、不讀資料）：
-  仍是原本的 PID 62837、etime 連續。
+  仍是原本的 PID、etime 連續。
 
 **結論**：`_server_args()` 維持 `--standalone`，設計 Decisions 2 的形狀不用改。
 
@@ -1119,7 +1119,7 @@ fixture 與之後的驗收看 v2 的測試都用它，不用真模型（審查 M
    `RCLONE_CONFIG`——`tests/conftest.py` 的隔離只在 pytest 內。
 4. 工作目錄用 `/tmp` 底下的暫存 git 專案，不是 repo、不是使用者的專案。
 5. 開跑前後各 `lsof -nP -iTCP:49374 -sTCP:LISTEN` 看共用服務**在不在**（只看在不在聽、
-   PID／etime，不連它、不讀資料）。本次全程 PID 62837、etime 連續，沒被動到。
+   PID／etime，不連它、不讀資料）。本次全程同一個 PID、etime 連續，沒被動到。
 6. **`opencode debug config` 的來源不只隔離的 XDG 目錄**：它還列出使用者真正的
    `~/.opencode`（從 passwd 的 home 找，`HOME` 隔離擋不掉）與 cwd 的 `.opencode`。
    所以自動化一律用 `-m fakeup/fake-model` 明確指定 provider，不去碰其他 provider；
@@ -1227,7 +1227,7 @@ opencode session export <fork id> --standalone > fork.json
 
 測試用的 Session 都在隔離的 store（`/tmp`）：逐一以
 `opencode session delete <id> --standalone` 刪掉，工作用的臨時 XDG 整個目錄刪除。
-共用服務（PID 62837、49374）與使用者真正的 store 全程沒被碰過。
+共用服務（49374）與使用者真正的 store 全程沒被碰過。
 
 ---
 
@@ -1239,7 +1239,7 @@ opencode session export <fork id> --standalone > fork.json
 git 專案。模板是 `oc-v2-basic.json`，每次換新 `ses_/msg_/call_` id 再逐欄拿掉餵
 `opencode session import <file> --standalone --directory <proj>`，看
 `SchemaError`；成功就 `session delete --standalone` 清掉。開跑前後各
-`lsof -nP -iTCP:49374 -sTCP:LISTEN` 只看在不在聽：全程同一個 PID 48537，沒被動到。
+`lsof -nP -iTCP:49374 -sTCP:LISTEN` 只看在不在聽：全程同一個 PID，沒被動到。
 
 ## 必填（拿掉就 `SchemaError`，整份拒收）
 
