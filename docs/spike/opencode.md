@@ -1451,3 +1451,14 @@ fixture 沒有漏：`oc-v2-basic.json`／`oc-v2-fork.json` 的形狀與這次實
 跑前跑後都是同一顆 managed 服務在同一個埠上聽（PID 前後相同，etime 連續）。
 隔離環境自己那顆 managed 服務用的是隔離 `service.json` 裡的空閒埠，另一顆（5.1 的
 headless）是呼叫方給的 `--headless-port`，兩者都不經 49374。
+
+## 5.6 改壞驗證（在 `git archive` 的副本做，不動 worktree）
+
+副本 `git archive HEAD | tar -x -C /tmp/…` 裡改了三處再跑；真 opencode 那一項只跑 5.1
+那條，「不帶 `--standalone`」只對 fake／單元測試做（H2）：
+
+| 改壞什麼 | 結果 |
+|---|---|
+| v2 適配關掉：`_payload_format()` 一律回 `"v1"`（`turns()` 讀 v1、`native()` 產 v1） | **5.1 紅，不是 skip**：continue 在載入前大聲拒絕（「這是 opencode 1.x 時代的 Session（v1 巢狀格式）…opencode 2.x 的 session import 拒收 v1」），三行 stderr 沒有出現；5.4 也紅（v2 export 進不去：「第 0 則訊息形狀不對（缺 info 物件）」）。5.2 照樣綠——它驗的是真 CLI 與服務面，不經適配層 |
+| `_SESSION_TABLES = ("session",)`（DB 只讀 v1） | 4 個紅：v2 列表的跨專案／id 聯集／memoisation、`_session_directory` 的 v2 優先 |
+| `_server_args()` 回 `[]`（不帶 `--standalone`） | 1 個紅：`test_every_automated_call_carries_its_server_context` |
