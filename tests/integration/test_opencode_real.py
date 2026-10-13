@@ -298,10 +298,14 @@ def test_real_summarize_answers_and_cleans_up_after_itself(project, isolated_sto
     try:
         text, model = oc.ADAPTER.summarize(prompt, workdir)
     except AgentError as e:
-        # No free model answered (offline, out of quota): this smoke test skips
-        # the way the other model tests do, it does not fail the suite. The
-        # adapter's own failures are covered by the unit tests.
-        pytest.skip(f"免費模型不可用：{e}")
+        # Only "no model answered" is a skip: the run timed out, or the CLI run
+        # failed (offline, no quota, the endpoint is down). Every other adapter
+        # error - an empty reply, a broken export, a missing session - is the bug
+        # this smoke test exists to catch, so it fails.
+        message = str(e)
+        if "逾時" not in message and "寫要約失敗" not in message:
+            raise
+        pytest.skip(f"免費模型不可用：{message[:200]}")
 
     assert text.strip(), "沒有回覆"
     assert model, "拿不到這次用的模型名稱（design 5.3 的 generated.by 要用）"
