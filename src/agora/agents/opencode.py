@@ -837,12 +837,13 @@ class OpencodeAgent:
     def _import_verified(self, payload: dict, cwd: Path) -> tuple[str, int]:
         """Import, read it back, and prove nothing was dropped (rules 2 and 4).
 
-        Returns (session id, messages landed). Messages *and* parts are compared:
-        a colliding part id leaves the message count intact, so counting only
-        messages would wave through a session that quietly lost content. A v2
-        payload has no parts layer - the per-content count belongs to step 2 (M2) -
-        and what comes back is counted the way `export().message_count` counts it
-        (user/assistant rows; `idle` is not conversation, M8).
+        Returns (session id, messages landed). Messages *and* content items are
+        compared: a colliding part id leaves the message count intact, so counting
+        only messages would wave through a session that quietly lost content (M2).
+        The second layer is what the format can count - v1 `parts`, v2 assistant
+        rows' `content` items; a format with no such layer only compares message
+        counts. What comes back is counted the way `export().message_count`
+        counts it (user/assistant rows; `idle` is not conversation, M8).
         """
         session_id = str((payload.get("info") or {}).get("id") or "")
         if not session_id:
@@ -850,17 +851,27 @@ class OpencodeAgent:
         messages = _payload_messages(payload)
         fmt = _payload_format(payload)
         count = _message_count(payload, fmt)
-        parts = sum(len(m.get("parts") or []) for m in messages)
+        if fmt == "v2":
+            items = sum(len(m.get("content") or []) for m in messages
+                        if m.get("type") == "assistant")
+            item_word = "個內容"
+        else:
+            items = sum(len(m.get("parts") or []) for m in messages)
+            item_word = "個 part"
         self._import(payload, cwd)
         landed_payload = self._read(self._export_bytes(session_id, cwd=cwd))
         landed = _payload_messages(landed_payload)
         landed_count = _message_count(landed_payload, fmt)
-        landed_parts = sum(len(m.get("parts") or []) for m in landed)
-        if len(landed) != len(messages) or landed_count != count or landed_parts != parts:
+        if fmt == "v2":
+            landed_items = sum(len(m.get("content") or []) for m in landed
+                               if m.get("type") == "assistant")
+        else:
+            landed_items = sum(len(m.get("parts") or []) for m in landed)
+        if len(landed) != len(messages) or landed_count != count or landed_items != items:
             tail = self._discard(session_id, cwd)
             raise AgentError(
-                f"opencode import 後數量不對（來源 {len(messages)} 則／{count} 句／{parts} 個 part，"
-                f"匯入後 {len(landed)} 則／{landed_count} 句／{landed_parts} 個），{tail}；"
+                f"opencode import 後數量不對（來源 {len(messages)} 則／{count} 句／{items}{item_word}，"
+                f"匯入後 {len(landed)} 則／{landed_count} 句／{landed_items}{item_word}），{tail}；"
                 "多半是 id 撞到 opencode 裡既有的 Session")
         return session_id, landed_count
 

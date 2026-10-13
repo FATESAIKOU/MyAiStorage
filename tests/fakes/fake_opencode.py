@@ -49,6 +49,8 @@ FAKE_OPENCODE_DROP=<n>   import the payload but keep only the first <n> messages
                          (simulates opencode's silent onConflictDoNothing)
 FAKE_OPENCODE_DROP_PART=<n>  drop the <n>th part of every message but keep the
                          messages: what a part-id collision looks like
+FAKE_OPENCODE_DROP_CONTENT=<n>  the v2 analogue (M2): drop the <n>th content item
+                         of every assistant row but keep the rows
 FAKE_OPENCODE_SLEEP=<s>  sleep before doing anything (for timeout tests)
 FAKE_OPENCODE_LEAVE=<id> import refuses: "Expected a string starting with msg"
 FAKE_OPENCODE_EXPORT_SCOPE=project  export only finds sessions of $PWD's project
@@ -462,6 +464,15 @@ def do_import(params: list[str]):
             parts = message.get("parts") or []
             if len(parts) > int(lose):
                 del parts[int(lose)]
+    lose_content = os.environ.get("FAKE_OPENCODE_DROP_CONTENT")
+    if lose_content:
+        # The v2 analogue of DROP_PART (M2): drop one content item but keep the
+        # rows, so the message count still matches and only the second layer
+        # notices - what a content-id collision looks like.
+        for message in payload["messages"]:
+            content = message.get("content") or []
+            if len(content) > int(lose_content):
+                del content[int(lose_content)]
     save(session_id, payload)
     print(f"Imported session: {session_id}")
 
