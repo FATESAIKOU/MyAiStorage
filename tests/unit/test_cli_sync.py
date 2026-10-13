@@ -185,6 +185,22 @@ def _wait_for(condition, timeout=30.0, what="condition"):
     pytest.fail(f"waited {timeout:g}s for {what}")
 
 
+def _wait_spawned(procs, what, timeout=30.0):
+    """Every process spawned so far has really exited - not merely let the lock go.
+
+    `store.uploader_is_running` answers with the upload lock, and a just-spawned
+    uploader has not taken it yet: under load the check passes while its process is
+    only starting (issue #60). These tests spawn their uploaders in-process, so the
+    `clean_subprocesses` spy already holds every `Popen` - and the process ending is
+    the fact to wait for, with a bound so a stuck one fails instead of hanging.
+    """
+    for p in list(procs):
+        try:
+            p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pytest.fail(f"{what}: a spawned process was still running after {timeout:g}s")
+
+
 def _deleted_mid_run(capsys, text):
     """A session imported and uploaded, then deleted on another machine while it ran.
 
@@ -209,7 +225,11 @@ def _deleted_mid_run(capsys, text):
 
 @pytest.fixture
 def clean_subprocesses(monkeypatch):
-    """Ensure any subprocess.Popen spawned during detached uploader tests is reaped."""
+    """Ensure any subprocess.Popen spawned during detached uploader tests is reaped.
+
+    The list is handed back too: waiting on a process the test has in hand, rather
+    than on the upload lock, is how a test can know an uploader has really gone.
+    """
     procs: list[subprocess.Popen] = []
     real_popen = subprocess.Popen
 
@@ -219,7 +239,7 @@ def clean_subprocesses(monkeypatch):
         return p
 
     monkeypatch.setattr(subprocess, "Popen", spy_popen)
-    yield
+    yield procs
     for p in procs:
         try:
             p.wait(timeout=5.0)
@@ -1108,6 +1128,12 @@ def test_final_write_does_not_block_full_timeout_on_normal_upload_or_offline(cla
     whole-run bound, and the test was reading the scheduler instead of the
     behaviour. A full-timeout block sleeps ~15 s; a legitimate settle sleeps
     ~0 s (normal) or ~2 s (the offline fallback).
+
+    Each part waits for the uploaders it started to really have exited (the
+    `clean_subprocesses` Popens), not for the upload lock to be free: a check
+    of the lock passes while a just-spawned uploader is still starting, and an
+    uploader spawned before the failure exists uploads the very entry part 2
+    is about (issue #60).
     """
     monkeypatch.delenv("AGORA_UPLOAD", raising=False)
     settled_sleeps: list[float] = []
@@ -1133,30 +1159,43 @@ def test_final_write_does_not_block_full_timeout_on_normal_upload_or_offline(cla
     assert code == 0, err
     assert out == a
     assert settled_sleeps[-1] < 10.0, f"the settle slept {settled_sleeps[-1]}s on a normal upload"
-    _wait_for(lambda: not store.uploader_is_running(paths()), timeout=10.0, what="part 1 uploader finished")
+    _wait_spawned(clean_subprocesses, "part 1 uploader")
 
     # 2. Offline / copy failure: uploader fails and stops, returns quickly without hanging for 15s
     a2 = _import_claude(capsys)
+    # The import's uploader was spawned before the failure exists: wait for its process
+    # to end, or it can still be starting when the round below stages the update and,
+    # without the injected failure, upload exactly the entry this part is about.
+    _wait_spawned(clean_subprocesses, "the import's uploader")
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "copy")
     _script(claude_lab, monkeypatch, "append:ZZ 離線失敗,wait-sync,exit")
     code, out, err = _continue_claude(capsys, claude_lab, a2)
     assert out == a2
     assert settled_sleeps[-1] < 10.0, f"the settle slept {settled_sleeps[-1]}s while offline"
     assert a2.split(":")[1] in store.outbox_ulids(paths()), "unsent entry remains in outbox"
-    _wait_for(lambda: not store.uploader_is_running(paths()), timeout=10.0, what="part 2 uploader finished")
+    _wait_spawned(clean_subprocesses, "part 2 uploaders")
     assert len(settled_sleeps) == 2, f"each part settles once: {settled_sleeps}"
 
 
 def test_subprocess_mid_run_rescue_interleaving(claude_lab, capsys, monkeypatch, tmp_path, clean_subprocesses):
     """The e2e's interleaving in a subprocess: mid-run the uploader rescues A into B,
-    followed by quiet rounds and the final write. Terminal output must name B."""
+    followed by quiet rounds and the final write. Terminal output must name B.
+
+    The run is held at `wait-file` until the deletion is in, so "mid-run" is by
+    construction: waiting for sentence 2 on Drive alone raced the run - the sentence
+    reaches Drive only via the detached uploader, and under load the run could finish
+    (and name A) before the test got to delete anything, leaving nothing to rescue
+    (issue #60).
+    """
     monkeypatch.setenv("AGORA_UPLOAD", "inline")
     a = _import_claude(capsys)
     ulid = a.split(":")[1]
     monkeypatch.delenv("AGORA_UPLOAD", raising=False)
 
+    release = tmp_path / "deletion-done"
     _script(claude_lab, monkeypatch,
-            f"append:ZZ 第 1 句,wait-sync,append:ZZ 第 2 句,wait-sync,append:ZZ 第 3 句,wait-sync,exit")
+            f"append:ZZ 第 1 句,wait-sync,append:ZZ 第 2 句,wait-sync,"
+            f"wait-file:{release},append:ZZ 第 3 句,wait-sync,exit")
     terminal = tmp_path / "terminal.txt"
     fd = os.open(terminal, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     env = dict(os.environ)
