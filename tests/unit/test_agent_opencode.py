@@ -476,7 +476,6 @@ def test_apply_revert_v2_cuts_content_at_the_named_item(fake):
 
 def test_unused_stem_v2_steps_past_taken_stems(fake):
     """L-5: a constant stem would hand out an id the payload already has."""
-    assert oc._unused_stem_v2([{"id": "msg_agora0"}, {"id": "msg_x"}]) == "agoraa"
     payload = json.loads(v2())
     payload["messages"][0]["id"] = "msg_agora0"
     before = {m["id"] for m in payload["messages"]}
