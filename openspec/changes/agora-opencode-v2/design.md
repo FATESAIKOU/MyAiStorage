@@ -53,7 +53,7 @@ opencode 2.0.26 的實測（MyLinuxPool spike 1.2 報告 §A～§H；issue #51 �
 
 - **必填欄位的方法（照報告 §F'-4）**：拿真 session 的 `session export` 當模板，再逐欄餵 `session import`，看 `SchemaError: Missing key at [...]` 補齊；欄位全集（`info` 與每種 message 列）記進 `docs/spike/opencode.md`，fake 依同一份驗證（缺欄位就拒絕）。
 - `native()` 的 v2 形狀：`info` 照模板的必填欄位（含 `location`、`cost`、`tokens`、`time`、`outcome`……以實測為準，`_session_info` 的欄位集跟著換）；訊息列照 v2 的 user／assistant 列（`id`、`time`、`type`；assistant 的 `content` 一則一行一個 text）；**不寫 synthetic／attachment**（設計 4.4：打開就看得見）。placeholder id 沿用 `ses`／`msg`／`prt` 前綴（v2 的前綴要求以 fixture 複驗）。
-- `append_native()`（**審查 M1**）：複製 v2 raw、接上新訊息列；原 raw 其餘部分 byte-for-byte 保留（OC2）。**底下只懂 v1 的 helper 要逐個寫 v2 版**——v2 扁平列沒有 `info`，它們現在會回空／None，輕則被 `SchemaError` 拒絕、重則匯入鏈不對的 Session（靜默）：
+- `append_native()`（**審查 M1**）：複製 v2 raw、接上新訊息列；原 raw 內容相同（語意相等；byte-for-byte 只對 store 裡的原 raw 成立）（OC2）。**底下只懂 v1 的 helper 要逐個寫 v2 版**——v2 扁平列沒有 `info`，它們現在會回空／None，輕則被 `SchemaError` 拒絕、重則匯入鏈不對的 Session（靜默）：
   - `_apply_revert`（讀 `info.revert`／`messages[].parts`）、
   - `_role_fields`（讀 `info.role`／`providerID`／`modelID`）、
   - `_unused_stem`（讀 `info`／`parts` 的 id）、
