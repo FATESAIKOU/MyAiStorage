@@ -524,7 +524,12 @@ def group_calls(monkeypatch):
 
 
 async def _wait(predicate, pilot, tries=80):
-    """Give the screen the pauses it needs; `pilot.pause` is what runs the timers."""
+    """Give the screen the pauses it needs; `pilot.pause` is what runs the timers.
+
+    The result is handed back rather than failing here, so a wait that must happen is
+    asserted by its caller with a line saying what was being waited for; the rare wait
+    that is only "give it a chance" says that where it stands.
+    """
     for _ in range(tries):
         if predicate():
             return True
@@ -547,16 +552,16 @@ def test_esc_stops_the_group_and_the_window_says_it_was_interrupted(group_calls,
             await pilot.press("d")
             await pilot.pause()
             await pilot.press("down", "enter")
-            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Run), pilot), "the run window never appeared"
             await pilot.press("escape")
-            await _wait(lambda: sent, pilot)
+            assert await _wait(lambda: sent, pilot), "the group was never signalled"
             assert sent == [(4242, int(signal.SIGINT))]
             alive[4242] = False                             # the group is gone
             proc.done.set()
-            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
             assert "重跑同一個動作會接著做" in " ".join(str(app.screen.lines).split())
             await pilot.press("space")                      # close the result window
-            await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
+            assert await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot), "the result window never closed"
             assert str(app.query_one("#msg").render()) == ""      # Q4
     _run(go)
 
@@ -577,12 +582,12 @@ def test_the_escalation_goes_on_after_agora_itself_is_gone(group_calls, monkeypa
             await pilot.press("space", "down", "space", "m")
             await pilot.pause()
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Run), pilot), "the run window never appeared"
             await pilot.press("escape")
-            await _wait(lambda: sent, pilot)
+            assert await _wait(lambda: sent, pilot), "the group was never signalled"
             proc.done.set()                     # agora itself is gone; the agent is not
             proc.code = 130
-            await _wait(lambda: len(sent) >= 3, pilot)
+            assert await _wait(lambda: len(sent) >= 3, pilot), "the escalation never sent all three signals"
             assert [sig for _pgid, sig in sent] == [int(signal.SIGINT),
                                                      int(signal.SIGTERM), int(signal.SIGKILL)]
     _run(go)
@@ -603,12 +608,12 @@ def test_the_escalation_stops_when_the_group_is_gone(group_calls, monkeypatch):
             await pilot.press("d")
             await pilot.pause()
             await pilot.press("down", "enter")
-            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Run), pilot), "the run window never appeared"
             alive[4242] = False                  # nothing left in the group, from the start
             await pilot.press("escape")
-            await _wait(lambda: sent, pilot)
+            assert await _wait(lambda: sent, pilot), "the group was never signalled"
             proc.done.set()
-            await _wait(lambda: len(sent) > 1, pilot, tries=20)   # both later steps had their turn
+            await _wait(lambda: len(sent) > 1, pilot, tries=20)   # deliberately soft: the assertion below is that nothing more was sent
             assert [sig for _pgid, sig in sent] == [int(signal.SIGINT)]
     _run(go)
 
@@ -629,9 +634,9 @@ def test_ctrl_q_in_the_window_interrupts_instead_of_leaving(group_calls, monkeyp
             await pilot.press("space", "down", "space", "m")
             await pilot.pause()
             await pilot.press("enter")
-            await _wait(lambda: sent, pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Run), pilot), "the run window never appeared"
             await pilot.press("ctrl+q")
-            assert await _wait(lambda: len(sent) >= 1, pilot)
+            assert await _wait(lambda: len(sent) >= 1, pilot), "the interrupt never reached the group"
             assert app.is_running                       # still here: it interrupted
             alive[4242] = False
             proc.done.set()
@@ -671,12 +676,12 @@ def test_an_interruption_does_not_start_the_next_command(group_calls, monkeypatc
             await pilot.press("]")
             await pilot.pause()
             await pilot.press("space", "down", "space", "enter")     # mark both, then import
-            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Run), pilot), "the run window never appeared"
             await pilot.press("escape")
-            await _wait(lambda: sent, pilot)
+            assert await _wait(lambda: sent, pilot), "the group was never signalled"
             alive[4242] = False
             first.done.set()
-            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
             await pilot.press("space")                               # close the result window
             await pilot.pause(0.3)
             assert len(started) == 1, "中斷之後不該再開始第二段"
@@ -699,7 +704,7 @@ def test_a_second_escape_does_not_resend_or_restart_the_escalation(group_calls, 
             await pilot.press("space", "down", "space", "m")
             await pilot.pause()
             await pilot.press("enter")
-            await _wait(lambda: sent, pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Run), pilot), "the run window never appeared"
             await pilot.press("escape")
             await pilot.press("escape")
             await pilot.press("escape")
@@ -733,7 +738,7 @@ def test_a_failure_line_with_a_timestamp_in_it_is_not_progress():
                     return None
                 bar = app.screen.query_one("#bar")
                 return (bar.progress, bar.total) if bar.total else None
-            await _wait(lambda: progress() is not None, pilot)
+            assert await _wait(lambda: progress() is not None, pilot), "the bar never showed the total"
             assert progress() == (0, 2)      # 1/2 means the first one started (Q3)
     _run(go)
 
@@ -752,10 +757,10 @@ def test_the_selection_is_cleared_only_when_the_command_succeeded():
             await pilot.press("d")
             await pilot.pause()
             await pilot.press("down", "enter")
-            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
             assert app.marked, "失敗之後勾選要留著"
             await pilot.press("space")
-            await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
+            assert await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot), "the result window never closed"
             assert app.marked
     _run(go)
 
@@ -773,9 +778,9 @@ def test_the_selection_is_cleared_after_a_success():
             await pilot.press("d")
             await pilot.pause()
             await pilot.press("down", "enter")
-            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
             await pilot.press("space")
-            assert await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
+            assert await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot), "the result window never closed"
             assert not app.marked
     _run(go)
 
@@ -889,12 +894,12 @@ def test_a_does_not_touch_the_rows_the_filter_hides():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             await _filter_to(pilot, "甲")
-            await _wait(lambda: len(app.shown()) == 1, pilot)
+            assert await _wait(lambda: len(app.shown()) == 1, pilot), "the filter never narrowed the list to one row"
             await pilot.press("a")
             await pilot.pause()
             assert app.marked == {r.key for r in app.rows["agora"] if r.cells[1] == "甲"}
             await pilot.press("slash", "backspace", "enter")  # clear the filter
-            await _wait(lambda: len(app.shown()) == 3, pilot)
+            assert await _wait(lambda: len(app.shown()) == 3, pilot), "the filter never gave all the rows back"
             await pilot.press("a")
             await pilot.pause()
             assert app.marked == {r.key for r in app.rows["agora"]}
@@ -996,7 +1001,7 @@ def test_a_success_clears_only_the_rows_it_acted_on():
             for _ in range(3):
                 await pilot.press("space", "down")            # mark all three
             await _filter_to(pilot, "甲")
-            await _wait(lambda: len(app.shown()) == 1, pilot)
+            assert await _wait(lambda: len(app.shown()) == 1, pilot), "the filter never narrowed the list to one row"
             hidden = set(app.marked) - {r.key for r in app.shown()}
             await pilot.press("d")
             await pilot.pause()
@@ -1032,7 +1037,7 @@ def test_cancelling_every_visible_row_keeps_the_hidden_marks():
             await pilot.press("a")                       # all three
             await pilot.pause()
             await _filter_to(pilot, "甲")
-            await _wait(lambda: len(app.shown()) == 1, pilot)
+            assert await _wait(lambda: len(app.shown()) == 1, pilot), "the filter never narrowed the list to one row"
             await pilot.press("a")                       # 甲 visible and marked -> unmark it
             await pilot.pause()
             assert app.marked == {r.key for r in app.rows["agora"] if r.cells[1] != "甲"}
@@ -1069,7 +1074,7 @@ def test_p_pulls_and_P_pushes():
             await pilot.press("p")
             await pilot.pause()
             await pilot.press("down", "enter")            # 確定 in the confirm window
-            await _wait(lambda: app._last_spawned, pilot)
+            assert await _wait(lambda: app._last_spawned, pilot), "the pull never started"
             assert app._last_spawned[-1][:2] == ["pull", "session"]
             await pilot.pause()
             for _ in range(60):                      # close the result window
@@ -1077,7 +1082,7 @@ def test_p_pulls_and_P_pushes():
                 if isinstance(app.screen, tui.Tell):
                     break
             await pilot.press("space")
-            await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
+            assert await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot), "the result window never closed"
             await pilot.press("P")
             await pilot.pause()
             assert isinstance(app.screen, tui.Confirm)          # push asks first
@@ -1150,7 +1155,7 @@ def test_pull_and_push_ask_before_doing_it_and_offer_the_flag():   # spec 3.2
             assert window.picked
             await pilot.press("shift+tab")                # back to the buttons
             await pilot.press("down", "enter")            # 確定
-            await _wait(lambda: app._last_spawned, pilot)
+            assert await _wait(lambda: app._last_spawned, pilot), "the push never started"
             assert app._last_spawned[-1][-1] == "--not-exist-delete"
     _run(go)
 
@@ -1166,7 +1171,7 @@ def test_push_without_the_option_sends_no_flag():
             assert isinstance(app.screen, tui.Confirm)
             assert app.screen.extra == "雲端沒有的就傳回去（等同 --not-exist-upload）"
             await pilot.press("down", "enter")            # 確定, unticked
-            await _wait(lambda: app._last_spawned, pilot)
+            assert await _wait(lambda: app._last_spawned, pilot), "the push never started"
             assert app._last_spawned[-1][:2] == ["push", "session"]
             assert "--not-exist-upload" not in app._last_spawned[-1]
     _run(go)
@@ -1214,7 +1219,7 @@ def test_no_action_starts_a_process_without_rows_to_send():
             for ch in "zzzz":
                 await pilot.press(ch)
             await pilot.press("enter")
-            await _wait(lambda: app.shown() == [], pilot)
+            assert await _wait(lambda: app.shown() == [], pilot), "the filter never emptied the list"
             for key in ("d", "p"):
                 await pilot.press(key)
                 await pilot.pause()
@@ -1237,7 +1242,7 @@ def test_continuing_a_session_the_cloud_lost_is_refused_on_screen():   # spec 3.
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
             said = app.screen.title_ + " " + " ".join(str(app.screen.lines).split())
             assert "不能接續" in said and "雲端沒有" in said
             assert "--not-exist-upload" in said and "--not-exist-delete" in said
@@ -1264,11 +1269,11 @@ def _continue(app, typed=None, *, escape=False, tab=False):
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             await pilot.press("enter")                       # 接續
-            await _wait(lambda: isinstance(app.screen, (tui.Choose, tui.Confirm)), pilot)
+            assert await _wait(lambda: isinstance(app.screen, (tui.Choose, tui.Confirm)), pilot), "the agent question never appeared"
             await pilot.press("enter")                       # opencode
-            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Choose), pilot), "the directory question never appeared"
             await pilot.press("enter")                       # 在這裡開
-            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.AskText), pilot), "the period question never appeared"
             seen["title"] = app.screen.title_
             seen["offered"] = str(app.screen.query_one(Input).value)
             if tab:                                   # the window's own key rule (W4)
@@ -1354,11 +1359,11 @@ def test_a_later_press_can_still_fix_what_was_typed():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, (tui.Choose, tui.Confirm)), pilot)
+            assert await _wait(lambda: isinstance(app.screen, (tui.Choose, tui.Confirm)), pilot), "the agent question never appeared"
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Choose), pilot), "the directory question never appeared"
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.AskText), pilot), "the period question never appeared"
             await pilot.press("backspace", "a", "b", "c", "enter")
             await pilot.pause()
             assert isinstance(app.screen, tui.AskText), "the box is still up"
@@ -1390,11 +1395,11 @@ def test_a_plain_ask_text_gains_nothing_from_the_check():
             async def push():
                 await app.push_screen(tui.AskText("工作目錄", "/tmp"))
             app.call_after_refresh(push)
-            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.AskText), pilot), "the prompt never appeared"
             await pilot.pause()
             assert not list(app.screen.query("#ask-problem"))   # no extra line
             await pilot.press("a", "b", "c", "enter")           # not a number, and fine
-            await _wait(lambda: not isinstance(app.screen, tui.AskText), pilot)
+            assert await _wait(lambda: not isinstance(app.screen, tui.AskText), pilot), "the prompt never closed"
     _run(go)
 
 
@@ -1429,14 +1434,14 @@ def test_continue_default_unticked_does_not_pass_fork():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot), "the confirm window never appeared"
             assert isinstance(app.screen, tui.Confirm)
             assert "接續原本這個 Session" in app.screen.note
             assert not app.screen.picked
             await pilot.press("enter")                       # confirms default agent (opencode), unticked fork
-            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Choose), pilot), "the directory question never appeared"
             await pilot.press("enter")                       # workdir
-            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.AskText), pilot), "the period question never appeared"
             await pilot.press("enter")                       # sync period
             await pilot.pause()
     _run(go)
@@ -1456,7 +1461,7 @@ def test_continue_ticked_fork_with_space_passes_fork_flag():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot), "the confirm window never appeared"
             assert isinstance(app.screen, tui.Confirm)
             # Focus checkbox, tick with space
             await pilot.press("tab")
@@ -1467,9 +1472,9 @@ def test_continue_ticked_fork_with_space_passes_fork_flag():
             effect = str(app.screen.query_one("#effect", Static).render())
             assert "會多一個 第二個-fork 的新 Session，原本的不動" in effect
             await pilot.press("enter")                       # confirm
-            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Choose), pilot), "the directory question never appeared"
             await pilot.press("enter")                       # workdir
-            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.AskText), pilot), "the period question never appeared"
             await pilot.press("enter")                       # sync period
             await pilot.pause()
     _run(go)
@@ -1497,7 +1502,7 @@ def test_continue_fork_hint_uses_description_when_title_missing():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot), "the confirm window never appeared"
             assert isinstance(app.screen, tui.Confirm)
             await pilot.press("tab")
             await pilot.pause()
@@ -1509,9 +1514,9 @@ def test_continue_fork_hint_uses_description_when_title_missing():
             assert expected == "表格的描述-fork"
             assert f"會多一個 {expected} 的新 Session，原本的不動" in effect
             await pilot.press("enter")                       # confirm
-            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Choose), pilot), "the directory question never appeared"
             await pilot.press("enter")                       # workdir
-            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.AskText), pilot), "the period question never appeared"
             await pilot.press("enter")                       # sync period
             await pilot.pause()
     _run(go)
@@ -1537,9 +1542,9 @@ def test_continue_already_continuing_without_fork_is_refused_early(monkeypatch):
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot), "the confirm window never appeared"
             await pilot.press("enter")                       # unticked fork
-            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
             assert isinstance(app.screen, tui.Tell)
             assert app.screen.title_ == "✗ 不能接續"
             lines_text = "\n".join(app.screen.lines)
@@ -1571,13 +1576,13 @@ def test_continue_already_continuing_with_fork_proceeds_normally(monkeypatch):
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot), "the confirm window never appeared"
             await pilot.press("tab")
             await pilot.press("space")
             await pilot.press("enter")                       # ticks fork and confirms
-            await _wait(lambda: isinstance(app.screen, tui.Choose), pilot)  # asked dir
+            assert await _wait(lambda: isinstance(app.screen, tui.Choose), pilot), "the directory question never appeared"
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)  # asked period
+            assert await _wait(lambda: isinstance(app.screen, tui.AskText), pilot), "the period question never appeared"
             await pilot.press("enter")
             await pilot.pause()
     _run(go)
@@ -1615,9 +1620,9 @@ def test_continue_pending_lock_held_by_another_process_is_refused_early():
             async with app.run_test(size=(120, 30)) as pilot:
                 await pilot.pause()
                 await pilot.press("enter")
-                await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+                assert await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot), "the confirm window never appeared"
                 await pilot.press("enter")                       # unticked fork
-                await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+                assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
                 assert isinstance(app.screen, tui.Tell)
                 assert app.screen.title_ == "✗ 不能接續"
                 lines_text = "\n".join(app.screen.lines)
@@ -1643,7 +1648,7 @@ def test_continue_escape_at_agent_confirm_cancels_and_does_nothing():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot), "the confirm window never appeared"
             await pilot.press("escape")
             await pilot.pause()
             assert not isinstance(app.screen, tui.ModalScreen)
@@ -1664,7 +1669,7 @@ def test_continue_confirm_tab_and_shift_tab_do_not_switch_app_tab():
 
             # 1. Tab inside Confirm moves focus to checkbox, underlying table focus unaffected
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot), "the confirm window never appeared"
             screen = app.screen
             assert screen.focused == screen.query_one("OptionList")
             await pilot.press("tab")
@@ -1679,7 +1684,7 @@ def test_continue_confirm_tab_and_shift_tab_do_not_switch_app_tab():
 
             # 2. shift+tab inside Confirm moves focus backwards, underlying table focus unaffected
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Confirm), pilot), "the confirm window never appeared"
             screen = app.screen
             assert screen.focused == screen.query_one("OptionList")
             await pilot.press("tab")
@@ -1708,7 +1713,7 @@ def test_editing_a_session_the_cloud_lost_is_refused_too():
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
             await pilot.press("e")
-            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
             assert "不能改標頭" in app.screen.title_
             assert not launched                       # the editor never opened
     _run(go)
@@ -1740,7 +1745,7 @@ def test_enter_on_the_checkbox_confirms_and_does_not_tick_it():   # review U1
             await pilot.pause()
             assert not window.picked
             await pilot.press("enter")                      # confirm, not tick
-            await _wait(lambda: app._last_spawned, pilot)
+            assert await _wait(lambda: app._last_spawned, pilot), "the pull never started"
             assert "--not-exist-delete" not in app._last_spawned[-1]
     _run(go)
 
@@ -1761,7 +1766,7 @@ def test_space_is_what_ticks_it():
             assert window.picked
             await pilot.press("shift+tab")                  # back to the buttons
             await pilot.press("enter")                      # 確定 (already highlighted)
-            await _wait(lambda: app._last_spawned, pilot)
+            assert await _wait(lambda: app._last_spawned, pilot), "the push never started"
             assert app._last_spawned[-1][-1] == "--not-exist-upload"
     _run(go)
 
@@ -1782,7 +1787,7 @@ def test_deleting_three_marked_rows_is_one_command():
             await pilot.press("d")
             await pilot.pause()
             await pilot.press("down", "enter")
-            await _wait(lambda: app._last_spawned, pilot)
+            assert await _wait(lambda: app._last_spawned, pilot), "the delete never started"
             assert app._last_spawned[-1] == ["delete", "session", *marked, "--yes"]
     _run(go)
 
@@ -1847,7 +1852,7 @@ def test_the_progress_bar_walks_from_one_to_five():
                     return None
                 bar = app.screen.query_one("#bar")
                 return (bar.progress, bar.total) if bar.total else None
-            await _wait(lambda: progress() == (4, 5), pilot)
+            assert await _wait(lambda: progress() == (4, 5), pilot), "the bar never reached 4/5"
             assert progress() == (4, 5)      # the fifth started, so four are finished
     _run(go)
 
@@ -1867,14 +1872,14 @@ def test_interrupting_a_merge_returns_to_the_list_and_says_it_carries_on(group_c
             await pilot.press("m")
             await pilot.pause()
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Run), pilot), "the run window never appeared"
             await pilot.press("escape")
             alive[4242] = False
             proc.done.set()
-            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
             assert "重跑同一個動作會接著做" in " ".join(str(app.screen.lines).split())
             await pilot.press("space")
-            assert await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)   # back at the list
+            assert await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot), "back at the list"
             assert str(app.query_one("#msg").render()) == ""       # nothing left over (Q4)
     _run(go)
 
@@ -1943,7 +1948,7 @@ def test_esc_stops_a_real_process_group_with_a_stubborn_grandchild(monkeypatch, 
             await pilot.press("d")
             await pilot.pause()
             await pilot.press("down", "enter")
-            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Run), pilot), "the run window never appeared"
             for _ in range(60):                     # it writes the two pids and goes on
                 await pilot.pause(0.1)
                 if pidfile.exists():
@@ -2000,11 +2005,11 @@ def test_each_step_of_the_escalation_gets_its_own_time(group_calls, monkeypatch)
             await pilot.press("space", "down", "space", "m")
             await pilot.pause()
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Run), pilot), "the run window never appeared"
             armed.clear()                       # from here on, only the escalation's own timers
             await pilot.press("escape")
             for count in (1, 2, 3):
-                await _wait(lambda count=count: len(sent) >= count, pilot)
+                assert await _wait(lambda count=count: len(sent) >= count, pilot), f"the escalation never sent signal {count}"
             assert [sig for _pgid, sig in sent] == [int(signal.SIGINT),
                                                      int(signal.SIGTERM), int(signal.SIGKILL)]
             # step n waits n * ESCALATE_AFTER, so each signal gets a window of its own
@@ -2026,14 +2031,14 @@ def test_marking_all_leaves_the_rows_the_filter_hides_alone():   # review W2
             second = next(r for r in app.shown() if r.cells[1] == "乙")
             app.marked = {second.key}
             await _filter_to(pilot, "甲")
-            await _wait(lambda: len(app.shown()) == 1, pilot)
+            assert await _wait(lambda: len(app.shown()) == 1, pilot), "the filter never narrowed the list to one row"
             await pilot.press("a")                       # mark what is on screen
             await pilot.pause()
             assert second.key in app.marked               # 乙 was already marked, still is
             assert app.marked == {second.key, next(r.key for r in app.rows["agora"]
                                                    if r.cells[1] == "甲")}
             await pilot.press("slash", "backspace", "enter")     # and the filter off
-            await _wait(lambda: len(app.shown()) == 3, pilot)
+            assert await _wait(lambda: len(app.shown()) == 3, pilot), "the filter never gave all the rows back"
             assert app.marked == {second.key, next(r.key for r in app.rows["agora"]
                                                    if r.cells[1] == "甲")}
     _run(go)
@@ -2121,7 +2126,7 @@ def test_a_window_with_nothing_to_choose_says_enter_submits():   # E3
     async def go():
         async with app.run_test(size=(120, 30)) as pilot:
             app.push_screen(tui.AskText("工作目錄", "/tmp"))
-            await _wait(lambda: isinstance(app.screen, tui.AskText), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.AskText), pilot), "the prompt never appeared"
             await pilot.pause()                        # let it compose
             assert isinstance(app.screen, tui.AskText), app.screen
             hints = [str(w.render()) for w in app.screen.query("Static")]
@@ -2151,7 +2156,7 @@ def test_the_bar_really_reaches_n_n_before_the_window_goes(monkeypatch):   # E2
             await pilot.press("d")
             await pilot.pause()
             await pilot.press("down", "enter")
-            await _wait(lambda: isinstance(app.screen, tui.Run), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Run), pilot), "the run window never appeared"
             window, bar = app.screen, app.screen.query_one("#bar")
             real_update = bar.update
 
@@ -2160,7 +2165,7 @@ def test_the_bar_really_reaches_n_n_before_the_window_goes(monkeypatch):   # E2
                 return real_update(**kw)
             bar.update = recording
             proc.done.set()                            # and now it ends cleanly
-            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
     _run(go)
     full = [row for row in seen if row[:2] == (3, 3)]
     assert full, f"the bar never reached full: {seen}"
@@ -2186,10 +2191,10 @@ def test_the_bar_counts_what_is_finished_and_fills_only_on_a_clean_exit():   # Q
                     return None
                 bar = app.screen.query_one("#bar")
                 return (bar.progress, bar.total) if bar.total else None
-            await _wait(lambda: progress() == (2, 3), pilot)
+            assert await _wait(lambda: progress() == (2, 3), pilot), "the bar never reached 2/3"
             assert progress() == (2, 3)              # the third started, two are done
             proc.done.set()                           # and now it exits cleanly
-            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
             assert "已從本機刪除" in " ".join(str(app.screen.lines).split())
     _run(go)
 
@@ -2205,10 +2210,10 @@ def test_the_status_line_is_empty_after_the_result_window_closes():   # Q4
             await pilot.press("d")
             await pilot.pause()
             await pilot.press("down", "enter")
-            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
             assert "已從本機刪除" in " ".join(str(app.screen.lines).split())   # it is in the window
             await pilot.press("space")
-            await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot)
+            assert await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot), "the result window never closed"
             assert str(app.query_one("#msg").render()) == ""
     _run(go)
 
@@ -2236,7 +2241,7 @@ def _result_of(app, code, *, mark_one=False, action="delete", said=()):
                 await pilot.press(key)
                 await pilot.pause()
                 await pilot.press("down", "enter")
-            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
             lines.append(" ".join(str(line) for line in app.screen.lines))
     _run(go)
     return lines
@@ -2287,13 +2292,13 @@ def test_the_progress_bar_walks_through_the_middle_values():
                 return (bar.progress, bar.total) if bar.total else None
 
             proc.send(0)                                 # 1/3: nothing finished yet
-            await _wait(lambda: progress() == (0, 3), pilot)
+            assert await _wait(lambda: progress() == (0, 3), pilot), "the bar never showed 1/3"
             seen.append(progress())
             proc.send(1)                                 # 2/3
-            await _wait(lambda: progress() == (1, 3), pilot)
+            assert await _wait(lambda: progress() == (1, 3), pilot), "the bar never showed 2/3"
             seen.append(progress())
             proc.send(2)                                 # 3/3
-            await _wait(lambda: progress() == (2, 3), pilot)
+            assert await _wait(lambda: progress() == (2, 3), pilot), "the bar never showed 3/3"
             seen.append(progress())
     _run(go)
     assert seen == [(0, 3), (1, 3), (2, 3)]              # it walked, and stopped short of full
@@ -2332,7 +2337,7 @@ def _after_one_import(code=0) -> str:
             await pilot.press("]")                       # the import tab
             await pilot.pause()
             await pilot.press("enter")
-            await _wait(lambda: isinstance(app.screen, tui.Tell), pilot)
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
             said.append(" ".join(str(line) for line in app.screen.lines))
     _run(go)
     return " ".join(said)
@@ -2519,14 +2524,15 @@ def _first_run(pick: int, typed: str, tmp_path, monkeypatch, give_up: bool | Non
                     await pilot.press("space" if ch == " " else ch)
                 await pilot.press("enter")
                 # a path we cannot use stops at a window that has to be read first
-                await _wait(lambda: isinstance(app.screen, tui.Choose) or bool(authorize_calls),
-                            pilot)
+                assert await _wait(
+                    lambda: isinstance(app.screen, tui.Choose) or bool(authorize_calls),
+                    pilot), "neither the fallback question nor the authorization appeared"
                 said.extend(str(w.render()) for w in app.screen.walk_children(Widget)
                             if isinstance(w, Static))
                 if isinstance(app.screen, tui.Choose) and give_up is not None:
                     await pilot.press("down", "enter")    # 用內建的 client
                     await pilot.pause()
-            await _wait(lambda: bool(authorize_calls), pilot)
+            assert await _wait(lambda: bool(authorize_calls), pilot), "the authorization never ran"
     _run(go)
     return authorize_calls, " ".join(said)
 
@@ -2948,9 +2954,9 @@ def test_a_search_that_is_replaced_stops_instead_of_running_to_the_end():
             await pilot.pause()
             await pilot.press("ctrl+t", "slash")
             await pilot.press("t")
-            await _wait(lambda: agent.counts and agent.counts[0] >= 1, pilot)  # it started
+            assert await _wait(lambda: agent.counts and agent.counts[0] >= 1, pilot), "the first scan never produced a result"
             await pilot.press("a")                 # and is replaced while it runs
-            await _wait(lambda: agent.calls >= 2, pilot)   # the new one has started
+            assert await _wait(lambda: agent.calls >= 2, pilot), "the replacement scan never started"
             stopped_at = agent.counts[0]
             await pilot.pause(1.0)                 # five more results, if it kept going
             assert agent.counts[0] <= stopped_at + 1, \
@@ -2999,7 +3005,7 @@ def test_a_scan_that_finds_nothing_does_not_stack_up():
             assert agent.calls == 1, f"三個字應該只有一個掃描在跑，開了 {agent.calls} 個"
             assert agent.most_at_once == 1, f"同時在跑的不該超過一個：{agent.most_at_once}"
             # and the newest word goes once the running one is done - once
-            await _wait(lambda: agent.calls == 2, pilot)
+            assert await _wait(lambda: agent.calls == 2, pilot), "the newest word never started its scan"
             await pilot.pause(0.3)
             assert agent.calls == 2, f"中間的字不該各補一次：{agent.calls}"
             assert agent.last_keyword == "xyz", "跑的是最後打的那個字"
