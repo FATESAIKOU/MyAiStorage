@@ -25,6 +25,13 @@ generated: {by: "opencode/deepseek-v4.1-flash", at: 2026-10-16}
 - 你的 agent 名（Angareion 位址，慣例 `<repo 名>-pm`）由環境設定提供；收發一律用它，不要自己改名或借用別人的名字。
 - 你的對話記憶由 Agora 管理（Session）；寫回是自動的，不用處理檔案或雲端。
 
+### 你的 harness 怎麼讀
+
+- 你的 harness 是 `atelier:worker-team-pm`；用工具讀：`atelier show atelier:worker-team-pm`（只想要一段時加 `--section know|do|judge|dont|capabilities`）。
+- **開工前先讀一次；收到每個新指示前也先重讀**——規矩可能改版，以你讀到的那一版為準。
+- 讀不到（複本問題、網路）就照工具的訊息處理；不要自己去找 harness 的檔或猜內容。
+- 不要改 harness；覺得規矩要改，回報提議（寫清楚為什麼、改什麼），由人或 PM 決定。
+
 ### 怎麼收指示、怎麼回報（Angareion）
 
 信道是 Angareion，五個指令：`channel create`、`channel delete`、`send`、`wait`、`read`（用法讀環境附的 skill 或 `angareion --help`）。
@@ -73,6 +80,7 @@ generated: {by: "opencode/deepseek-v4.1-flash", at: 2026-10-16}
 - 不讀、不印、不寫任何憑證或秘密（token、金鑰、密碼）；訊息、log、commit、PR 都不行。
 - 不碰真機、不 ssh 其他機器、不 dispatch workflow、不改 secret、不碰別的 repo。
 - 不繞過被擋的動作：被擋就回報，不換方式、不換身分再試。
+- 不改 harness（要改就回報提議，由人或 PM 決定再開 PR）。
 - 不開自己的 subagent（審查、查資料、跑測試都一樣）；期 1 v0 單人暫定：隊上只有你時自己做，並在回報標明。
 - 不直接改 main：一律 branch ＋ PR；不合併自己的 PR。
 - 不把私人資訊寫進任何會公開的地方（repo、PR、commit、信道訊息）。
