@@ -13,7 +13,7 @@
 
 ## What Changes
 
-- **載入（r3 的主題）**：新增 **`atelier install <id> --agent claude|opencode`**——把 harness 寫進 agent 的**使用者層級指示檔**（claude：`~/.claude/rules/atelier-*.md` 或 `CLAUDE.md` 的管理區塊；opencode：`~/.config/opencode/AGENTS.md` 的管理區塊），agent 每次啟動自動載入；管理區塊冪等、**不碰專案檔／工作目錄／`~/.claude/settings.json`**；期 1 由 MyLinuxPool#130 的開機掛點（start.d）跑 install；**sidecar 零改動**（D8）。選項與建議：使用者層級指示檔＋開機 install（v0）＋每 agent 一份設定目錄（期 3）。
+- **載入（r3 的主題）**：新增 **`atelier install <id> --agent claude|opencode`（可重複；每個值各裝一次；不給＝用法錯）**——把 harness 寫進 agent 的**使用者層級指示檔**（claude：`~/.claude/rules/atelier-*.md` 或 `CLAUDE.md` 的管理區塊；opencode：`~/.config/opencode/AGENTS.md` 的管理區塊），agent 啟動時自動載入（claude：新的 conversation 一定，接續由驗收確認）；管理區塊冪等、**不碰專案檔／工作目錄／`~/.claude/settings.json`**；期 1 由 MyLinuxPool#130 的開機掛點（start.d）跑 install；**sidecar 零改動**（D8）。選項與建議：使用者層級指示檔＋開機 install（v0）＋每 agent 一份設定目錄（期 3）。
 - **五要素照 2026-10-10**：know／do／judge／dont＋能力需求；`capabilities` 宣告要用 `angareion`、用法寫在 `know`；**MUST NOT 有 `angareion` 章節**；harness MUST 明寫「專案自己的指示檔與工單規則優先」（D1／D2）。
 - **存放與版本**：harness 樹＝MyAiStorage 的 git（`atelier/<team>/<role>/v<N>.md`）；版本檔 append-only、不可變；寫入只有 PR；agent 工作時 MUST NOT 改 harness（D3／D4／D6）。
 - **讀取工具**：`atelier ls`／`show <id>[@版本] [--section …] [--json]`；只讀、匿名、讀本機複本＋`git fetch`（沿用 angareion 的同一複本路徑、flock、20 秒逾時）；exit 0／1／2（D7／D10）。

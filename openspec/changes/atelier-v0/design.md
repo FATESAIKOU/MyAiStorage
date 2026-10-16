@@ -15,6 +15,8 @@
 
 **r3 的查證：兩種 agent 的「一定會載入」機制**（2026-10-16；來源逐一標注）
 
+> 版本註：**以 worker 實機釘的版本為準**。本機查證版本：claude 2.1.301、opencode 2.0.29；worker 目前釘 claude 2.1.296／opencode 2.0.26（同一個世代，但實作與驗收時要按 worker 的實際版本重驗）。
+
 Claude Code（本機 2.1.301）：
 
 - **使用者層級記憶檔 `~/.claude/CLAUDE.md`** 在每次 conversation 開始時載入；載入順序由廣到窄：managed（`/etc/claude-code/CLAUDE.md`）→ user（`~/.claude/CLAUDE.md`）→ project（`./CLAUDE.md` 或 `./.claude/CLAUDE.md`）→ local（`./CLAUDE.local.md`）；**全部串接、不是覆蓋**；衝突時模型可能任選一邊（來源：官方 memory 文件）。使用者層級另有 `~/.claude/rules/*.md`（在 project rules 之前載入，套用到每台機器上的每個專案）。（來源：https://code.claude.com/docs/en/memory。）
@@ -148,14 +150,14 @@ opencode（本機 2.0.29；隔離環境實測——HOME／XDG 指到暫存、`op
 
 ### D8 載入（本人已答覆 E11 改方向；**新的選項要本人決定**）
 
-**方向**：不靠開場句；用 agent 一定會載入的機制；不能蓋掉或弄髒專案自己的 `AGENTS.md`／`CLAUDE.md`。做法＝`atelier install <id> --agent claude|opencode` 把 harness 裝進 **agent 的使用者層級指示檔**（每台機器一份、不進 repo）。
+**方向**：不靠開場句；用 agent 一定會載入的機制；不能蓋掉或弄髒專案自己的 `AGENTS.md`／`CLAUDE.md`。做法＝`atelier install <id> --agent <claude|opencode> [--agent …]`（**可重複；每個值各裝一次、與順序無關；不給＝用法錯 exit 1**）把 harness 裝進每一個指定 agent 的**使用者層級指示檔**（每台機器一份、不進 repo）。
 
 選項與取捨：
 
 - **選項 1（v0 建議）：使用者層級全域指示檔＋開機安裝。**
   - **claude**：寫進 `~/.claude/rules/atelier-<team>-<role>.md`（使用者層級 rules，每台機器每個專案都會載入、在 project rules 之前；一個職務一個檔，不碰別人的檔案）。備選：`~/.claude/CLAUDE.md` 的**管理區塊**（`<!-- atelier:… -->`…`<!-- /atelier -->`，install 冪等替換）。**不碰** `~/.claude/settings.json`（不得有 `apiKeyHelper`；#33 D6 已列檢查）。
   - **opencode**：寫進 `~/.config/opencode/AGENTS.md` 的同款**管理區塊**（實測這個檔會被載入；v2 不讀 `~/.claude/CLAUDE.md`）。
-  - **誰在什麼時候跑 install**：期 1 由 MyLinuxPool#130 的**開機掛點（start.d）**加一個 atelier 單位，開機時跑 `atelier install`（映像建置時先裝一次也可以）；`atelier`／harness 檔已在 worker 的套件與複本裡。
+  - **誰在什麼時候跑 install**：期 1 由 MyLinuxPool#130 的**開機掛點（start.d）**加一個 atelier 單位，開機時跑 `atelier install`。`atelier`／harness 檔在 worker 的套件與複本裡（**建置時不跑**——那時還沒有 angareion 準備好的本機複本）。**改版後**：worker 重啟時自動重跑；長期不重啟的 worker 要人工跑一次（驗收記在 tasks 4.4）。
   - 影響：**sidecar 零改動**（agent 啟動時自己載入）。期 3 多職務：同一台機器上多職務會共用同一份全域指示檔 → **撐不住**（要走選項 2）。
   - 生效：claude 在每個 conversation 開始時載入（resume 的重載要在驗收確認）；opencode 依官方文件在下一次模型請求前就會更新（同一 session 也吃）。
 - **選項 2（期 3 建議的擴充）：每個 agent 一份設定目錄。** claude 用 `CLAUDE_CONFIG_DIR`（每個職務一個 `~/.claude` 等價目錄，各自一份 `CLAUDE.md`／rules）；opencode 每個職務一個 `XDG_CONFIG_HOME`（各自一份 `~/.config/opencode/AGENTS.md`）。**sidecar 在 `open` 時要多設一個環境變數**（要改 sidecar，小）；多職務撐得住；不碰 repo。`OPENCODE_CONFIG_DIR`／`instructions` 也可以研究，但本機 v2.0.29 的 `instructions` 實測沒生效（Context），先不要押。
@@ -216,7 +218,7 @@ opencode（本機 2.0.29；隔離環境實測——HOME／XDG 指到暫存、`op
 
 ### D12 測試與驗收
 
-- **工具測試（MyAiStorage）**：單元＝假的 git／假複本／假 HOME——`ls`、`show`（整份 byte-for-byte、`--section`、`--json`）、版本解析（latest／`@v0`）、exit 1／2、fetch 失敗沿用複本；**install**：管理區塊的**冪等**（跑兩次結果一樣）、保留使用者原本的內容、只動目標檔、`--agent claude`／`opencode` 各自的路徑與格式、寫不進去時 exit 2；改壞驗證（拿掉版本解析、`--section` 抓錯段、install 蓋掉整個檔、install 動到 settings.json、重複安裝產生兩份——各要紅）。
+- **工具測試（MyAiStorage）**：單元＝假的 git／假複本／假 HOME——`ls`、`show`（整份 byte-for-byte、`--section`、`--json`）、版本解析（latest／`@v0`）、exit 1／2、fetch 失敗沿用複本；**install**：管理區塊的**冪等**（跑兩次結果一樣）、保留使用者原本的內容、只動目標檔、`--agent claude`／`opencode` 各自的路徑與格式、**重複 `--agent`（兩個都裝、順序無關、同值去重）、沒給 `--agent` exit 1**、寫不進去時 exit 2；改壞驗證（拿掉版本解析、`--section` 抓錯段、install 蓋掉整個檔、install 動到 settings.json、重複安裝產生兩份——各要紅）。
 - **載入驗證（隔離環境）**：claude／opencode 各起一次（opencode 用假 upstream 的本機流程；claude 用官方文件的行為＋期 1 實機驗收看得到）——確認 harness 的內容出現在 agent 的指示裡、且專案的同名檔沒有被動。
 - **格式檢查（MyAiStorage；本 repo 目前沒有跑 pytest 的 CI）**：pytest 讀 `atelier/**/v<N>.md`——frontmatter 必填、`id`↔`version`↔檔名一致、五章齊、`capabilities` 以 H3 子節列出能力、`models` 兩欄存在（值可空）、MUST NOT 有 `angareion` 章節；**加上 append-only 檢查**（與 `origin/main` 的 merge-base 比對：既有版本檔的 blob 不得改變、不得刪除）。改壞驗證逐項記在 PR 說明；要不要接 CI 見 tasks。
 - **期 1 驗收（MyLinuxPool#45 端到端；MyPMO#31）要看到什麼才算 harness v0 有效**：
@@ -262,7 +264,7 @@ opencode（本機 2.0.29；隔離環境實測——HOME／XDG 指到暫存、`op
 
 ### 要 MyLinuxPool 做的事
 
-1. **`atelier` 單位（開機掛點；期 1 的安裝機制）**——在 worker 的 `shared-configs/` 加一個單位（`unit.json` 的 `start`＋`files/start`，照 MyLinuxPool#130 的契約）：開機時跑 `atelier install atelier:worker-team-pm --agent claude --agent opencode`（或映像建置時先跑一次）；失敗只記 log、不擋開機（照 #130 的規則）。**sidecar 不改。**
+1. **`atelier` 單位（開機掛點；期 1 的安裝機制）**——在 worker 的 `shared-configs/` 加一個單位（`unit.json` 的 `start`＋`files/start`，照 MyLinuxPool#130 的契約）：開機時跑 `atelier install atelier:worker-team-pm --agent claude --agent opencode`（改版後重啟會重跑；長跑不重啟的 worker 要人工跑一次）；失敗只記 log、不擋開機（照 #130 的規則）。**sidecar 不改。**
 2. **套件 pin 升級（既有流程）**：worker 的 `agora` 套件 pin 升到含 `atelier` 的 sha。
 3. **不做**：`harness_dir`／`open` 欄位／sidecar 的載入（未選）；harness 的內容驗證（在 MyAiStorage 的 CI）。
 4. 其餘環境能力（映像、憑證、LLMGateway 等）照 #52 的既有範圍。
@@ -298,6 +300,7 @@ opencode（本機 2.0.29；隔離環境實測——HOME／XDG 指到暫存、`op
 - [harness 檔在公開 repo] → 內容照 D11 的公開規則；模型的值留空（E4）。
 - [未選方案日後若要回頭用] → r1／r2 的清單都保留；r1 的 sidecar 錯誤碼仍在。
 - [「開 team」的路徑] → **由 MyPMO#33 處理**（PMO 經 ssh 轉發到 worker 8471 呼叫 open；PR #66）。
+- [「一定會載入」≠「一定會遵守」] → 指示檔只是**注入 context**；官方 memory 文件說 CLAUDE.md 是 context、不是 enforced configuration（「Claude treats them as context, not enforced configuration」）。規矩有沒有被遵守用**行為驗收**看（D12：Angareion 收發、PR、回報格式、不碰禁區）；不遵守就改寫法或加別的檢查，不要假設它會被強制執行。
 
 ## Open Questions（未決事項；編號；附建議）
 

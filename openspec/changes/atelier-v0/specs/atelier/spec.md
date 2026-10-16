@@ -1,6 +1,6 @@
 ## ADDED Requirements
 
-> 註（暫定）：以下「儲存位置」「讀取工具」「載入方式」暫依 design D6／D7／D8 的建議（MyAiStorage 的 git 虛擬資料夾＋`atelier` 指令＋使用者層級指示檔的安裝），待 E11 由本人裁定後同步。已答覆（2026-10-16）：E1（harness 五要素；Angareion 是 AiStorage 的要素、不是 harness 章節）、E2（虛擬資料夾＋工具讀）、E5（sidecar 暫不改）、E8（單人暫定）、E9（放 MyAiStorage 的 git）、E10（新增 `atelier` 指令）、E4（`models` 先留空）。
+> 註：**儲存位置、讀取工具＝已答覆（E9／E10）**；**載入方式暫依 design D8 的建議**（使用者層級指示檔的安裝），待 E11 由本人裁定後同步。已答覆（2026-10-16）：E1（harness 五要素；Angareion 是 AiStorage 的要素、不是 harness 章節）、E2（虛擬資料夾＋工具讀）、E5（sidecar 暫不改）、E8（單人暫定）、E9（放 MyAiStorage 的 git）、E10（新增 `atelier` 指令）、E4（`models` 先留空）。
 
 ### Requirement: harness 檔的格式
 一份 harness MUST 是一個職務一個版本的 UTF-8 Markdown 檔，第一個區塊是 YAML frontmatter（OKF v0.2 對齊；不認得的欄位保留）。frontmatter MUST 有 `type`（值 `Harness`）、`id`、`title`、`status`、`team`、`role`、`version`、`models`。`team` MUST 使用 `[a-z0-9][a-z0-9-]*`（英文小寫與 `-`）；`role` MUST 是 `pm`／`arch`／`impl`／`test` 之一（期 3 的 reviewer 對應 `arch`）；`status` MUST 是 `draft`／`stable`／`deprecated` 之一。本文 MUST 有 `know`、`do`、`judge`、`dont`、`capabilities` 五個 H2 章節；`capabilities` MUST 以能力名為 H3 子節；**v0 職務檔 MUST 有 `angareion` 子節，一般格式規則 SHOULD 宣告該職務真正需要的能力**；每個子節內 MUST 用一行 YAML 或清單寫參數，沒有參數時留空（用途放 `know`／`do`，不在子節內寫散文）。**MUST NOT 有 `angareion` 章節**（本人 2026-10-16）。內容 MUST NOT 含帳號、額度、憑證名稱、模型輪換表或第二大腦內容等私人資訊。harness 的 `know` MUST 明寫「專案自己的指示檔與工單規則優先」。
@@ -67,7 +67,7 @@ repo MUST 附一個讀取工具（依 D7 的建議＝指令 `atelier`，與 agor
 - **THEN** 用複本回答，stderr 警告一次，exit 0
 
 ### Requirement: 安裝（`atelier install`）——agent 一定會載入的機制
-`atelier install <id>[@<版本>] --agent claude|opencode` MUST 把 harness 寫進該 agent 的**使用者層級指示檔**，讓 agent **每一次啟動／每一個 conversation 都會載入**，MUST NOT 依賴第一則輸入、MUST NOT 要求 sidecar 的任何欄位。寫入方式：**管理區塊**（以固定開頭與結尾的註解包住；同一個目標檔內一個 harness 一個區塊）或**獨立檔**（claude 的 `~/.claude/rules/atelier-<team>-<role>.md` 這種一職務一檔）——重複執行 MUST 冪等（同樣的輸入產生同樣的結果，不重複堆疊）。安裝 MUST NOT：碰到目標 repo 自己的 `AGENTS.md`／`CLAUDE.md`、工作目錄的任何檔案、或 `~/.claude/settings.json`（尤其 MUST NOT 產生 `apiKeyHelper`）。不指定版本時 MUST 裝版本號最大的那一版。退出碼同讀取工具：0 成功；1 用法錯或找不到 id／版本；2 複本或檔案問題（含寫不進去）。
+`atelier install <id>[@<版本>] --agent <claude|opencode> [--agent …]` MUST 把 harness 寫進**每一個指定 agent** 的**使用者層級指示檔**（`--agent` **可以重複**；每個值各裝一次、與順序無關；同一個值重複＝只裝一次；**不給 `--agent` ＝用法錯、exit 1**），讓 agent **一定會載入**（claude：新的 conversation 一定，`--resume` 的接續要在驗收確認——官方沒有明文；opencode：下一個模型請求前就會更新），MUST NOT 依賴第一則輸入、MUST NOT 要求 sidecar 的任何欄位。寫入方式：**管理區塊**（以固定開頭與結尾的註解包住；同一個目標檔內一個 harness 一個區塊）或**獨立檔**（claude 的 `~/.claude/rules/atelier-<team>-<role>.md` 這種一職務一檔）——重複執行 MUST 冪等（同樣的輸入產生同樣的結果，不重複堆疊）。安裝 MUST NOT：碰到目標 repo 自己的 `AGENTS.md`／`CLAUDE.md`、工作目錄的任何檔案、或 `~/.claude/settings.json`（尤其 MUST NOT 產生 `apiKeyHelper`）。不指定版本時 MUST 裝版本號最大的那一版。退出碼同讀取工具：0 成功；1 用法錯或找不到 id／版本；2 複本或檔案問題（含寫不進去）。
 
 #### Scenario: 裝進 opencode 的使用者層級指示檔
 - **WHEN** `atelier install atelier:worker-team-pm --agent opencode`
@@ -80,6 +80,14 @@ repo MUST 附一個讀取工具（依 D7 的建議＝指令 `atelier`，與 agor
 #### Scenario: 冪等
 - **WHEN** 同一個 install 指令跑兩次
 - **THEN** 目標檔的內容只多一份 harness（管理區塊被替換，不是再貼一次）
+
+#### Scenario: 重複 --agent
+- **WHEN** `atelier install atelier:worker-team-pm --agent claude --agent opencode`
+- **THEN** claude 與 opencode 的使用者層級指示檔各出現一份 harness（只裝一次、與 `--agent` 的順序無關）
+
+#### Scenario: 沒給 --agent
+- **WHEN** `atelier install atelier:worker-team-pm`
+- **THEN** exit 1（用法錯）；什麼都沒裝
 
 #### Scenario: 不動專案檔與 settings
 - **WHEN** 目標 repo 有 `AGENTS.md`／`CLAUDE.md`，而使用者有 `~/.claude/settings.json`

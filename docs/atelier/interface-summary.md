@@ -42,7 +42,7 @@ sequenceDiagram
 ## 介面
 
 - **harness 檔**：識別 `atelier:<team>-<role>@<vN>` ↔ 路徑 `atelier/<team>/<role>/v<N>.md`；frontmatter：`type/id/title/status/team/role/version/models{floor,preferred}`；本文五章：know／do／judge／dont／capabilities（能力為 H3 子節；v0：`github`／`angareion`／`agora`）。Angareion 不是章節；harness 明寫「專案自己的指示檔優先」。版本檔 append-only。
-- **`atelier` 指令**：`ls`／`show <id>[@<版本>] [--section] [--json]`／`install <id>[@<版本>] --agent claude|opencode`。讀取走本機複本＋`git fetch`（匿名、同一複本路徑與 angareion 共用、flock、20 秒逾時）；install 寫**使用者層級指示檔**（管理區塊或獨立檔、冪等），**不碰專案 `AGENTS.md`／`CLAUDE.md`、工作目錄、`~/.claude/settings.json`**；exit 0（成功）／1（用法、查無）／2（複本或檔案問題）。
-- **載入（E11 的選項）**：建議選項 1＝使用者層級指示檔＋開機 install（**sidecar 零改動**；v0 單職務）；期 3 用選項 2＝每個 agent 一份設定目錄（`CLAUDE_CONFIG_DIR`／per-role `XDG_CONFIG_HOME`；sidecar 要設環境變數）。未選（保留）：r2 的開場句、r1 的 sidecar 全文載入、啟動參數注入（`--append-system-prompt-file`）。
+- **`atelier` 指令**：`ls`／`show <id>[@<版本>] [--section] [--json]`／`install <id>[@<版本>] --agent claude|opencode`（**可重複；每個各裝一次；不給＝用法錯**）。讀取走本機複本＋`git fetch`（匿名、同一複本路徑與 angareion 共用、flock、20 秒逾時）；install 寫**使用者層級指示檔**（管理區塊或獨立檔、冪等），**不碰專案 `AGENTS.md`／`CLAUDE.md`、工作目錄、`~/.claude/settings.json`**；exit 0（成功）／1（用法、查無）／2（複本或檔案問題）。
+- **載入（E11 的選項）**：建議選項 1＝使用者層級指示檔＋開機 install（**sidecar 零改動**；v0 單職務）；期 3 用選項 2＝每個 agent 一份設定目錄（`CLAUDE_CONFIG_DIR`／per-role `XDG_CONFIG_HOME`；sidecar 要設環境變數）。未選（保留）：r2 的開場句、r1 的 sidecar 全文載入、啟動參數注入（`--append-system-prompt-file`）。**「一定會載入」＝一定注入 context，不等於強制遵守**（官方 memory 文件：CLAUDE.md 是 context、不是 enforced configuration）；規矩有沒有被遵守看行為驗收。
 - **第一則輸入（#33）**：「先讀你的 harness」半句可以去掉；保留「指示在 Angareion」那半句（派工）。
 - **要 MyLinuxPool 做的事**：1) 開機掛點的 **atelier 單位**（跑 `atelier install`；照 #130 的契約）；2) 套件 pin 升到含 `atelier` 的 sha（既有流程）。**sidecar 不改。**
