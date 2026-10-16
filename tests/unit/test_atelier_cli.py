@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
+import io
 import json
 import os
 import subprocess
@@ -74,8 +75,11 @@ H9 = _harness("v9", "v9")
 I0 = _harness("v0", "impl-v0", role="impl")
 
 PM = "atelier:worker-team-pm"
+IMPL = "atelier:worker-team-impl"
 CLAUDE_MARKER = "<!-- atelier:worker-team-pm -->"
 CLAUDE_END = "<!-- /atelier:worker-team-pm -->"
+IMPL_MARKER = "<!-- atelier:worker-team-impl -->"
+IMPL_END = "<!-- /atelier:worker-team-impl -->"
 
 
 # --- the local-only git pair ---------------------------------------------------
@@ -140,9 +144,17 @@ def _run(capsysbinary, *argv):
 
 
 def _tree(root: Path) -> dict[str, bytes]:
+    """Every file under root, `.git` included: a stray lock file must show."""
     return {str(p.relative_to(root)): p.read_bytes()
             for p in sorted(root.rglob("*"))
-            if p.is_file() and ".git" not in p.parts}
+            if p.is_file()}
+
+
+def _block_between(text: str, start: str, end: str) -> str:
+    """What sits between one managed block's two marker lines."""
+    _, _, rest = text.partition(start + "\n")
+    block, _, _ = rest.partition(end)
+    return block
 
 
 # --- show ----------------------------------------------------------------------
@@ -208,6 +220,47 @@ def test_show_json_with_section(harness_repo, capsysbinary):
     assert data["content"].rstrip().endswith("v0 know 第二行。")
 
 
+def test_show_works_when_stdout_has_no_binary_buffer(harness_repo, monkeypatch):
+    """An embedded caller's stdout may be a plain text stream (L11)."""
+    fake = io.StringIO()
+    monkeypatch.setattr(_s, "stdout", fake)
+    code = cli.main(["show", "atelier:worker-team-pm@v0"])
+    assert code == 0
+    assert fake.getvalue() == H0
+
+
+BAD_FRONTMATTER = "---\nkey: [unclosed\nsecret-line: LEAKME\n---\n\n## know\n\n內文\n"
+
+
+def test_show_json_broken_frontmatter_is_exit_2_and_does_not_leak_the_file(harness_repo,
+                                                                           capsysbinary):
+    _publish(harness_repo, "atelier/worker-team/pm/v3.md", BAD_FRONTMATTER)
+    _age_fetch_head(harness_repo.clone, 120)
+    code, out, err = _run(capsysbinary, "show", "atelier:worker-team-pm@v3", "--json")
+    assert code == 2
+    text = err.decode()
+    assert "LEAKME" not in text, "error messages must not carry harness content"
+    assert "secret-line" not in text, "not even the offending YAML snippet"
+
+
+def test_show_json_without_frontmatter_is_exit_2(harness_repo, capsysbinary):
+    _publish(harness_repo, "atelier/worker-team/pm/v3.md", "# no frontmatter\n")
+    _age_fetch_head(harness_repo.clone, 120)
+    code, out, err = _run(capsysbinary, "show", "atelier:worker-team-pm@v3", "--json")
+    assert code == 2
+    assert err != b""
+
+
+def test_show_section_missing_from_an_otherwise_valid_file_is_exit_1(harness_repo, capsysbinary):
+    only_know = "---\ntype: Harness\nid: atelier:worker-team-pm@v3\n---\n\n## know\n\n只有 know。\n"
+    _publish(harness_repo, "atelier/worker-team/pm/v3.md", only_know)
+    _age_fetch_head(harness_repo.clone, 120)
+    code, out, err = _run(capsysbinary, "show", "atelier:worker-team-pm@v3",
+                          "--section", "dont")
+    assert code == 1
+    assert b"dont" in err
+
+
 @pytest.mark.parametrize("bad", ["worker-team-pm", "atelier:worker-team", "atelier:worker-team-pm@0",
                                  "atelier:worker-team-pm@vX"])
 def test_show_bad_id_is_a_usage_error(bad, harness_repo, capsysbinary):
@@ -227,6 +280,27 @@ def test_show_missing_version_is_exit_1(harness_repo, capsysbinary):
 def test_show_missing_role_is_exit_1(harness_repo, capsysbinary):
     code, out, err = _run(capsysbinary, "show", "atelier:worker-team-test")
     assert code == 1
+
+
+@pytest.mark.parametrize("argv", [("show", "atelier:worker-team-pm@0"),
+                                  ("install", "atelier:worker-team-pm@0", "--agent", "claude")])
+def test_a_bad_id_without_a_copy_is_a_usage_error(argv, tmp_path, monkeypatch, capsysbinary):
+    """A usage error is exit 1, not a copy failure, even with no copy configured (L2)."""
+    monkeypatch.setenv("ATELIER_CONFIG_DIR", str(tmp_path / "nowhere"))
+    monkeypatch.delenv("ANGAREION_CONFIG", raising=False)
+    code, out, err = _run(capsysbinary, *argv)
+    assert code == 1
+    assert err != b""
+
+
+def test_a_usage_error_does_not_fetch(harness_repo, capsysbinary):
+    """The id is checked before any network work (L2)."""
+    _git("remote", "set-url", "origin", str(harness_repo.origin.parent / "gone"),
+         cwd=harness_repo.clone)
+    _age_fetch_head(harness_repo.clone, 10_000)
+    code, out, err = _run(capsysbinary, "show", "atelier:worker-team-pm@0")
+    assert code == 1
+    assert b"Warning" not in err, "an invalid id must be rejected before a fetch"
 
 
 # --- fetch policy ---------------------------------------------------------------
@@ -277,13 +351,48 @@ def test_fetch_uses_the_shared_lock_and_the_20_second_timeout(tmp_path):
 
     assert repo_mod.GIT_TIMEOUT_SECONDS == 20.0
     clone = tmp_path / "clone"
-    clone.mkdir()
+    (clone / ".git").mkdir(parents=True)   # a copy, not a plain directory
     git = RecordingGit()
     instance = repo_mod.Repo(clone, git=git)
     assert instance.lock_path == clone / ".git" / "angareion-pull.lock"
     assert instance.fetch() is True
     assert git.calls == [["fetch", "--quiet", "origin", "main"]]
     assert git.timeouts == [20.0]
+
+
+def test_fetch_runs_while_the_shared_lock_is_held(tmp_path):
+    """The lock file is really flock-held during git: dropping the lock turns this red (L5)."""
+    fcntl = pytest.importorskip("fcntl")
+
+    class LockProbeGit:
+        def __init__(self):
+            self.lock_was_held: bool | None = None
+
+        def run(self, args, *, cwd, timeout):
+            lock = Path(cwd) / ".git" / repo_mod.FETCH_LOCK_FILENAME
+            try:
+                fd = os.open(lock, os.O_RDONLY)
+            except FileNotFoundError:
+                self.lock_was_held = False   # no lock file at all: nothing was held
+                return repo_mod.GitResult(0, b"", "")
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    self.lock_was_held = True   # someone holds it: the fetch is serialized
+                else:
+                    self.lock_was_held = False
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+            return repo_mod.GitResult(0, b"", "")
+
+    clone = tmp_path / "clone"
+    (clone / ".git").mkdir(parents=True)
+    probe = LockProbeGit()
+    instance = repo_mod.Repo(clone, git=probe)
+    assert instance.fetch() is True
+    assert probe.lock_was_held is True, "git must run under the shared flock"
 
 
 def test_clone_path_falls_back_to_the_angareion_config(harness_repo, tmp_path, monkeypatch,
@@ -299,12 +408,80 @@ def test_clone_path_falls_back_to_the_angareion_config(harness_repo, tmp_path, m
     assert out == H0.encode()
 
 
+def _angareion_config(tmp_path: Path, clone: Path, **extra) -> Path:
+    config = tmp_path / "angareion-config.json"
+    config.write_text(json.dumps({"identity": "x-pm", "config_dir": str(clone),
+                                  "registry_repo": "o/MyAiStorage", "registry_issue": 1,
+                                  **extra}),
+                      encoding="utf-8")
+    return config
+
+
+def _offline_stale_copy(harness_repo, seconds: float, tmp_path: Path, monkeypatch, **config):
+    """Point the clone at angareion's config, make origin unreachable and the copy stale."""
+    monkeypatch.delenv("ATELIER_CONFIG_DIR")
+    monkeypatch.setenv("ANGAREION_CONFIG",
+                       str(_angareion_config(tmp_path, harness_repo.clone, **config)))
+    _git("remote", "set-url", "origin", str(harness_repo.origin.parent / "gone"),
+         cwd=harness_repo.clone)
+    _age_fetch_head(harness_repo.clone, seconds)
+
+
+def test_pull_interval_zero_from_the_angareion_config_disables_the_periodic_pull(
+        harness_repo, tmp_path, monkeypatch, capsysbinary):
+    """`config_pull_interval: 0` (angareion's "no periodic pull") still applies here (L4)."""
+    _offline_stale_copy(harness_repo, 10_000, tmp_path, monkeypatch, config_pull_interval=0)
+    code, out, err = _run(capsysbinary, "show", "atelier:worker-team-pm@v0")
+    assert code == 0, err
+    assert out == H0.encode()
+    assert b"Warning" not in err, "interval 0: no periodic fetch, so no fetch failure"
+
+
+def test_a_configured_pull_interval_is_honoured(harness_repo, tmp_path, monkeypatch, capsysbinary):
+    """A longer interval than the 900s default also silences the periodic fetch (L4)."""
+    _offline_stale_copy(harness_repo, 1000, tmp_path, monkeypatch, config_pull_interval=10_000)
+    code, out, err = _run(capsysbinary, "show", "atelier:worker-team-pm@v0")
+    assert code == 0, err
+    assert b"Warning" not in err, "1000s < 10000s: no fetch yet"
+
+
+def test_without_the_field_the_900_second_default_is_used(harness_repo, tmp_path, monkeypatch,
+                                                           capsysbinary):
+    _offline_stale_copy(harness_repo, 1000, tmp_path, monkeypatch)
+    code, out, err = _run(capsysbinary, "show", "atelier:worker-team-pm@v0")
+    assert code == 0, err
+    assert err.decode().count("Warning") == 1, "no config field: the 900s default fetches"
+
+
+def test_a_bad_pull_interval_falls_back_to_the_default(harness_repo, tmp_path, monkeypatch,
+                                                       capsysbinary):
+    _offline_stale_copy(harness_repo, 1000, tmp_path, monkeypatch, config_pull_interval="soon")
+    code, out, err = _run(capsysbinary, "show", "atelier:worker-team-pm@v0")
+    assert code == 0, err
+    assert err.decode().count("Warning") == 1, "a non-integer interval is ignored, not honoured"
+
+
 def test_show_without_a_configured_copy_is_exit_2(tmp_path, monkeypatch, capsysbinary):
     monkeypatch.setenv("ATELIER_CONFIG_DIR", str(tmp_path / "nowhere"))
     monkeypatch.delenv("ANGAREION_CONFIG", raising=False)
     code, out, err = _run(capsysbinary, "show", PM)
     assert code == 2
     assert "clone" in err.decode()
+
+
+def test_a_plain_directory_is_not_a_copy_and_is_left_alone(tmp_path, monkeypatch, capsysbinary):
+    """A directory that exists but is not a git copy gets no .git and no lock file (L1)."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.setenv("ATELIER_CONFIG_DIR", str(plain))
+    monkeypatch.delenv("ANGAREION_CONFIG", raising=False)
+    before = _tree(plain)
+    code, out, err = _run(capsysbinary, "ls")
+    assert code == 2
+    assert "複本" in err.decode()
+    code, out, err = _run(capsysbinary, "show", PM)
+    assert code == 2
+    assert _tree(plain) == before, "a non-git directory must not get a .git or a lock file"
 
 
 # --- ls --------------------------------------------------------------------------
@@ -331,17 +508,26 @@ def test_ls_json(harness_repo, capsysbinary):
     ]
 
 
+def test_ls_without_a_configured_copy_is_exit_2(tmp_path, monkeypatch, capsysbinary):
+    monkeypatch.setenv("ATELIER_CONFIG_DIR", str(tmp_path / "nowhere"))
+    monkeypatch.delenv("ANGAREION_CONFIG", raising=False)
+    code, out, err = _run(capsysbinary, "ls")
+    assert code == 2
+    assert err != b""
+
+
 def test_reads_do_not_touch_the_working_tree_or_the_cwd(harness_repo, tmp_path, monkeypatch,
                                                           capsysbinary):
     project = tmp_path / "project"
     project.mkdir()
     (project / "AGENTS.md").write_text("# project\n", encoding="utf-8")
     monkeypatch.chdir(project)
-    clone_before = _tree(harness_repo.clone)
+    _run(capsysbinary, "ls")   # the first lookup may fetch; later ones must not touch anything
+    clone_before = _tree(harness_repo.clone)   # .git included: no lock file may appear
     cwd_before = _tree(project)
     _run(capsysbinary, "ls")
     _run(capsysbinary, "show", "atelier:worker-team-pm@v0")
-    assert _tree(harness_repo.clone) == clone_before, "reads must not write the clone's tree"
+    assert _tree(harness_repo.clone) == clone_before, "reads must not write the clone at all"
     assert _tree(project) == cwd_before, "reads must not write the working directory"
 
 
@@ -472,3 +658,138 @@ def test_install_never_touches_settings_project_files_or_the_cwd(harness_repo, i
     for path, data in before.items():
         assert path.read_bytes() == data, f"{path} must be byte-for-byte unchanged"
     assert _tree(install_env.project) == cwd_before, "install must not write the working directory"
+
+
+# --- install durability and the managed-block edge cases (M1/M2/L6-L9) -----------
+
+
+def test_install_writes_through_a_same_directory_tmp_file_and_replace(harness_repo, install_env,
+                                                                      capsysbinary, monkeypatch):
+    """Every write is a same-directory tmp file + os.replace, never a truncating write (M1)."""
+    calls: list[tuple[Path, Path]] = []
+    real_replace = os.replace
+
+    def spy(src, dst, *args, **kwargs):
+        calls.append((Path(src), Path(dst)))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", spy)
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "claude", "--agent", "opencode")
+    assert code == 0, err
+    assert {dst for _, dst in calls} == {_claude_file(install_env), _opencode_file(install_env)}
+    for src, dst in calls:
+        assert src.parent == dst.parent, "the tmp file must sit next to its target"
+        assert not src.exists(), "os.replace moves the tmp file onto the target"
+
+
+@pytest.mark.parametrize("agent", ["claude", "opencode"])
+def test_a_failed_install_write_keeps_the_old_file_and_leaves_no_residue(
+        agent, harness_repo, install_env, capsysbinary, monkeypatch):
+    """A write that cannot be committed leaves only the old file - no half block (M1)."""
+    if agent == "opencode":
+        target = _opencode_file(install_env)
+        target.parent.mkdir(parents=True)
+        target.write_text("USER\n", encoding="utf-8")
+    else:
+        code, out, err = _run(capsysbinary, "install", PM, "--agent", "claude")
+        assert code == 0, err
+        target = _claude_file(install_env)
+    before_bytes = target.read_bytes()
+    before_listing = sorted(p.name for p in target.parent.iterdir())
+
+    real_replace = os.replace
+
+    def boom(src, dst, *args, **kwargs):
+        raise OSError("simulated failure before the new file is in place")
+
+    monkeypatch.setattr(os, "replace", boom)
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", agent)
+    assert code == 2
+    assert err != b""
+    monkeypatch.setattr(os, "replace", real_replace)
+    assert target.read_bytes() == before_bytes, "a failed write must leave the old file"
+    assert sorted(p.name for p in target.parent.iterdir()) == before_listing, "no tmp residue"
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", agent)
+    assert code == 0, "the failure must not poison later installs"
+
+
+def test_install_opencode_with_a_non_utf8_target_is_exit_2_without_a_traceback(
+        harness_repo, install_env, capsysbinary):
+    """A target that cannot be read is a file problem: exit 2, no traceback (M2)."""
+    target = _opencode_file(install_env)
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"\xff\xfe not utf8\n")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    assert code == 2
+    assert b"Traceback" not in err
+    assert target.read_bytes() == b"\xff\xfe not utf8\n"
+
+
+def test_two_roles_in_one_file_keep_their_own_blocks(harness_repo, install_env, capsysbinary):
+    """pm and impl blocks live side by side; neither replaces the other (L6)."""
+    target = _opencode_file(install_env)
+    target.parent.mkdir(parents=True)
+    user = "# 使用者自己的規矩\n"
+    target.write_text(user, encoding="utf-8")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    assert code == 0, err
+    code, out, err = _run(capsysbinary, "install", IMPL, "--agent", "opencode")
+    assert code == 0, err
+    text = target.read_text(encoding="utf-8")
+    assert text.startswith(user), "the user's own content is kept"
+    assert text.count(CLAUDE_MARKER) == 1 and text.count(CLAUDE_END) == 1
+    assert text.count(IMPL_MARKER) == 1 and text.count(IMPL_END) == 1
+    assert _block_between(text, CLAUDE_MARKER, CLAUDE_END) == H1
+    assert _block_between(text, IMPL_MARKER, IMPL_END) == I0
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    assert code == 0, err
+    text = target.read_text(encoding="utf-8")
+    assert _block_between(text, IMPL_MARKER, IMPL_END) == I0, "the other role's block is untouched"
+
+
+def test_install_refuses_a_damaged_managed_block_and_keeps_the_file(harness_repo, install_env,
+                                                                    capsysbinary):
+    """An opening marker without its closing marker is refused, not appended to (L7)."""
+    target = _opencode_file(install_env)
+    target.parent.mkdir(parents=True)
+    damaged = "# user\n" + CLAUDE_MARKER + "\nUSER NOTE\n"
+    target.write_text(damaged, encoding="utf-8")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    assert code == 2
+    assert err != b""
+    assert target.read_text(encoding="utf-8") == damaged
+
+
+def test_install_refuses_a_stray_opening_marker_that_would_eat_user_content(
+        harness_repo, install_env, capsysbinary):
+    """A user line equal to our opening marker must not swallow what follows (L8)."""
+    target = _opencode_file(install_env)
+    target.parent.mkdir(parents=True)
+    stray = ("# user top\n" + CLAUDE_MARKER + "\nUSER NOTE BETWEEN\n"
+             + CLAUDE_MARKER + "\n" + H1 + CLAUDE_END + "\n")
+    target.write_text(stray, encoding="utf-8")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    assert code == 2, "an unbalanced pair of marker lines must be refused, not used"
+    assert target.read_text(encoding="utf-8") == stray, "the file must be untouched"
+
+
+def test_install_refuses_a_marker_pair_that_is_not_ours(harness_repo, install_env, capsysbinary):
+    """A paired marker written by the user around user content is refused (L8)."""
+    target = _opencode_file(install_env)
+    target.parent.mkdir(parents=True)
+    quoted = "# user\n" + CLAUDE_MARKER + "\nUSER QUOTES OUR MARKERS\n" + CLAUDE_END + "\n"
+    target.write_text(quoted, encoding="utf-8")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    assert code == 2
+    assert target.read_text(encoding="utf-8") == quoted
+
+
+def test_install_refuses_an_orphan_closing_marker(harness_repo, install_env, capsysbinary):
+    """A closing marker alone is refused too (L9: the chosen policy, see tool.md)."""
+    target = _opencode_file(install_env)
+    target.parent.mkdir(parents=True)
+    orphan = "# user\n" + CLAUDE_END + "\n"
+    target.write_text(orphan, encoding="utf-8")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    assert code == 2
+    assert target.read_text(encoding="utf-8") == orphan

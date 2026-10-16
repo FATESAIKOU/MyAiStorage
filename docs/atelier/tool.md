@@ -21,8 +21,8 @@ atelier install <id>[@<版本>] --agent <claude|opencode> [--agent …]
 - 讀取走本機複本（MyAiStorage 的 clone）：`git fetch origin main` 更新、`git show origin/main:<路徑>` 讀檔；**不依賴工作樹**（本機改動、detached HEAD 都無妨）、匿名 HTTPS、不用憑證。
 - **複本路徑**：`ATELIER_CONFIG_DIR`；沒設就看 angareion 的 `config.json`（`ANGAREION_CONFIG`，預設 `~/.config/angareion/config.json`）裡的 `config_dir`——兩邊共用同一份複本。
 - **同一把 flock**：`<複本>/.git/angareion-pull.lock`（angareion 用的同一個鎖檔，兩邊的 fetch 因此不並行）；git 逾時 **20 秒**。
-- fetch 節流：指令開始時距上次 fetch（`FETCH_HEAD` 的 mtime）超過 15 分鐘才拉；查無 id／版本時再補一次（距上次不到 30 秒就跳過）。**fetch 失敗只警告一次（stderr）並沿用目前的複本，退出碼不變。**
-- 唯一的本機寫入就是這個 fetch 和 install 的目標檔；工具不會寫 harness 樹、工作目錄或使用者其他檔案。
+- fetch 節流：指令開始時距上次 fetch（`FETCH_HEAD` 的 mtime）超過 `config_pull_interval` 才拉——**沿用 angareion `config.json` 的 `config_pull_interval`**（沒設＝15 分鐘／900 秒；`0`＝不按週期拉，查無時的事件驅動 fetch 仍會做）；查無 id／版本時再補一次（距上次不到 30 秒就跳過）。**fetch 失敗只警告一次（stderr）並沿用目前的複本，退出碼不變。**
+- 唯一的本機寫入就是複本自身的 `git fetch`（以及它建立的共用鎖檔 `<複本>/.git/angareion-pull.lock`）和 install 的目標檔；工具不會寫 harness 樹、工作目錄或使用者其他檔案。
 
 ## install 的目標與管理區塊
 
@@ -35,7 +35,7 @@ atelier install <id>[@<版本>] --agent <claude|opencode> [--agent …]
   <!-- /atelier:worker-team-pm -->
   ```
 
-- **冪等**：同一個 harness 的區塊被替換（重跑不堆疊）、區塊外的內容逐字保留；目標檔不存在就建立。區塊開頭在、結尾不在（壞檔）＝拒絕覆蓋、exit 2。
+- **冪等**：同一個 harness 的區塊被替換（重跑不堆疊）、區塊外的內容逐字保留；目標檔不存在就建立；寫入走同目錄暫存檔＋`os.replace`（中斷只會留下舊檔，不會半寫）。只有**整行、成對**且中間是 atelier 寫的（frontmatter 開頭）標記才當作我們的區塊；其他**壞檔拒絕**（原檔不動、exit 2）：不成對（有開頭沒結尾、只有結尾）或成對但不是我們的區塊。行內提到標記不算標記，你自己內容裡的標記行不會被吃掉。
 - **不碰**：`~/.claude/settings.json`（也絕不產生 `apiKeyHelper`）、專案自己的 `AGENTS.md`／`CLAUDE.md`、工作目錄的任何檔案。
 - 生效：claude 在下一個新 conversation（`--resume` 時是否重載要在驗收確認）；opencode 依官方文件在下一個模型請求前。期 1 由 MyLinuxPool 的開機掛點跑 `atelier install atelier:worker-team-pm --agent claude --agent opencode`（PR 3；sidecar 不改）。
 - 本 PR 還沒放 harness 檔（PR 2），所以真實複本上的 `atelier ls` 目前會是空的。

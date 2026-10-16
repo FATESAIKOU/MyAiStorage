@@ -107,7 +107,12 @@ def split_sections(text: str) -> dict[str, str]:
 
 
 def frontmatter(text: str) -> dict:
-    """The YAML frontmatter block at the top of the file, or HarnessFormatError."""
+    """The YAML frontmatter block at the top of the file, or HarnessFormatError.
+
+    A YAML error is reported by its problem and position only: PyYAML's own
+    message quotes the offending source lines, and error messages must not
+    carry harness content (spec「讀取工具」).
+    """
     if not text.startswith("---\n"):
         raise HarnessFormatError("檔案開頭沒有 frontmatter")
     end = text.find("\n---", 4)
@@ -116,7 +121,12 @@ def frontmatter(text: str) -> dict:
     try:
         data = yaml.safe_load(text[4:end])
     except yaml.YAMLError as e:
-        raise HarnessFormatError(f"frontmatter 不是 YAML：{e}") from e
+        problem = getattr(e, "problem", None) or "無法解析"
+        mark = getattr(e, "problem_mark", None)
+        # mark lines are 0-based inside the stripped frontmatter; +2 names the
+        # line in the file itself (line 1 holds the opening `---`).
+        where = f"（第 {mark.line + 2} 行第 {mark.column + 1} 列）" if mark is not None else ""
+        raise HarnessFormatError(f"frontmatter 不是 YAML：{problem}{where}") from e
     if not isinstance(data, dict):
         raise HarnessFormatError("frontmatter 不是一個 YAML 物件")
     return data

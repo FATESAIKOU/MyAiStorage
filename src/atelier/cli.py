@@ -102,8 +102,8 @@ def _cmd_ls(repo: Repo, args: argparse.Namespace) -> int:
 
 
 def _cmd_show(repo: Repo, args: argparse.Namespace) -> int:
+    ident = parse_id(args.id)   # a pure syntax check comes before any fetch (L2)
     repo.ensure_fresh()
-    ident = parse_id(args.id)
     resolved = repo.resolve(ident)
     if args.section is not None:
         content = split_sections(_decode(resolved.raw)).get(args.section)
@@ -127,16 +127,21 @@ def _cmd_show(repo: Repo, args: argparse.Namespace) -> int:
         _json_print(row)
         return EXIT_OK
     # The whole file, byte for byte (spec「讀整份」).
-    sys.stdout.buffer.write(resolved.raw)
-    sys.stdout.buffer.flush()
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        buffer.write(resolved.raw)
+        buffer.flush()
+    else:   # an embedded caller may hand us a text stream without a buffer (L11)
+        sys.stdout.write(_decode(resolved.raw))
+        sys.stdout.flush()
     return EXIT_OK
 
 
 def _cmd_install(repo: Repo, args: argparse.Namespace) -> int:
     if not args.agent:
         raise UsageError("install 需要至少一個 --agent claude|opencode")
+    ident = parse_id(args.id)   # a pure syntax check comes before any fetch (L2)
     repo.ensure_fresh()
-    ident = parse_id(args.id)
     resolved = repo.resolve(ident)
     text = _decode(resolved.raw)
     for agent in _agents(args.agent):

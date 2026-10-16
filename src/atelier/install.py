@@ -5,16 +5,19 @@ user-level `rules/` (one file per harness, nothing else touched), opencode gets
 a managed block in `config/opencode/AGENTS.md`. Both targets are derived from
 the environment - `CLAUDE_CONFIG_DIR` else `$HOME/.claude`,
 `XDG_CONFIG_HOME` else `$HOME/.config` - so a test (or an image build) can
-point them anywhere. Re-running is idempotent: the block is replaced, user
-content outside it is kept byte-for-byte, and `settings.json`, project files
-and the working directory are never touched.
+point them anywhere. Writes go through a same-directory temporary file and
+`os.replace`, so an interrupted install leaves the old file, never a truncated
+one. Re-running is idempotent: the block is replaced, user content outside it
+is kept byte-for-byte, and `settings.json`, project files and the working
+directory are never touched.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-import re
+import stat
+import uuid
 
 from atelier.harness import HarnessId
 
@@ -54,53 +57,122 @@ def managed_block(ident: HarnessId, content: str) -> str:
     return f"{start}\n{content}{end}\n"
 
 
+def _marker_positions(text: str, start: str, end: str) -> list[tuple[str, int, int]]:
+    """(kind, line start, line end) for every whole line equal to a marker.
+
+    Only a complete line counts: a mention of the marker inside a line of the
+    user's own prose is not a marker and cannot start (or end) a block.
+    """
+    found: list[tuple[str, int, int]] = []
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        body = line[:-1] if line.endswith("\n") else line
+        if body == start:
+            found.append(("open", offset, offset + len(line)))
+        elif body == end:
+            found.append(("close", offset, offset + len(line)))
+        offset += len(line)
+    return found
+
+
+def _looks_like_our_block(region: str) -> bool:
+    """Only blocks atelier wrote hold a harness, and a harness starts with frontmatter."""
+    return region.startswith("---\n")
+
+
 def replace_managed_block(text: str, ident: HarnessId, block: str) -> str:
     """Replace this harness's block, keep everything else, never stack.
 
-    Duplicates of the same harness (should they exist) collapse into the one
-    fresh block; an opening marker without its closing marker is a damaged file
-    and is refused rather than appended to.
+    A block is ours only when a whole opening marker line is paired, in order,
+    with a whole closing marker line and the text between them looks like a
+    block we wrote (a harness with frontmatter). Anything else - an opening
+    marker without its closing marker, an orphan closing marker, or a pair
+    around the user's own text - is refused, so a stray marker line in the
+    user's content can never make the replacement swallow it. Duplicates of the
+    same harness (should they exist) collapse into the one fresh block.
     """
     start, end = marker_lines(ident)
-    pattern = re.compile(rf"(?ms)^{re.escape(start)}\n.*?^{re.escape(end)}\n?")
-    matches = list(pattern.finditer(text))
-    if matches:
-        # The first block is replaced; duplicates of the same harness collapse
-        # into it; everything around all of them is kept byte-for-byte.
-        parts: list[str] = []
-        last = 0
-        for index, match in enumerate(matches):
-            parts.append(text[last:match.start()])
-            if index == 0:
-                parts.append(block)
-            last = match.end()
-        parts.append(text[last:])
-        return "".join(parts)
-    if start in text:
-        raise InstallError(f"{ident} 的管理區塊壞了（有開頭沒有結尾），不覆蓋")
-    if not text:
-        return block
-    return text + ("" if text.endswith("\n") else "\n") + block
+    marks = _marker_positions(text, start, end)
+    if not marks:
+        if not text:
+            return block
+        return text + ("" if text.endswith("\n") else "\n") + block
+    kinds = [kind for kind, _, _ in marks]
+    if kinds != ["open", "close"] * (len(kinds) // 2):
+        raise InstallError(f"{ident} 的管理區塊壞了（標記不成對或有孤兒），不覆蓋")
+    for index in range(0, len(marks), 2):
+        open_line, close_line = marks[index], marks[index + 1]
+        if not _looks_like_our_block(text[open_line[2]:close_line[1]]):
+            raise InstallError(f"{ident} 的標記成對了，但中間不是 atelier 寫的區塊，不覆蓋")
+    # The first block is replaced; duplicates of the same harness collapse into
+    # it; everything around all of them is kept byte-for-byte.
+    pairs = list(zip(marks[0::2], marks[1::2]))
+    parts = [text[:pairs[0][0][1]], block]
+    for index, (_, close_line) in enumerate(pairs):
+        next_start = pairs[index + 1][0][1] if index + 1 < len(pairs) else len(text)
+        parts.append(text[close_line[2]:next_start])
+    return "".join(parts)
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _fsync_dir(path: Path) -> None:
+    """Best effort: make the rename durable too (ignored where unsupported)."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _atomic_write(target: Path, data: bytes) -> None:
+    """Write `data` next to `target`, then move it in with `os.replace`.
+
+    A crash or a full disk leaves the old file or the new one, never a
+    truncated file: a half-written managed block (opening marker without its
+    closing marker) would make every later install refuse the target and only
+    a human could repair it. The temporary file never survives a failure.
+    """
+    tmp = target.parent / f".{target.name}.atelier-{uuid.uuid4().hex}.tmp"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if target.exists():   # keep the target's mode; a fresh file follows the umask
+            os.chmod(tmp, stat.S_IMODE(target.stat().st_mode))
+        os.replace(tmp, target)
+        _fsync_dir(target.parent)
+    except OSError as e:
+        _unlink_quietly(tmp)
+        raise InstallError(f"寫不進去 {target}：{e}") from e
+    except BaseException:
+        _unlink_quietly(tmp)
+        raise
 
 
 def install_claude(target: Path, raw: bytes) -> None:
     """Write the harness as-is: the file is atelier's alone (spec「獨立檔」)."""
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(raw)
-    except OSError as e:
-        raise InstallError(f"寫不進去 {target}：{e}") from e
+    _atomic_write(target, raw)
 
 
 def install_opencode(target: Path, ident: HarnessId, raw_text: str) -> None:
     """Wrap the harness in the managed block, keeping the user's own content."""
     try:
         current = target.read_text(encoding="utf-8") if target.is_file() else ""
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
         raise InstallError(f"讀不到 {target}：{e}") from e
     new_text = replace_managed_block(current, ident, managed_block(ident, raw_text))
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(new_text, encoding="utf-8")
-    except OSError as e:
-        raise InstallError(f"寫不進去 {target}：{e}") from e
+    _atomic_write(target, new_text.encode("utf-8"))

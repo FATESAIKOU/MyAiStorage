@@ -3,10 +3,12 @@
 This mirrors angareion's §11 (src/angareion/channel_config.py) without
 changing angareion: the same clone (angareion's `config_dir`, or
 `ATELIER_CONFIG_DIR`), the same fetch lock file (`<clone>/.git/
-angareion-pull.lock`), the same 20-second git timeout and the same policy -
-`git fetch origin main` to refresh, `git show origin/main:<path>` to read,
-never the working tree. The only local write is the fetch itself, and a failed
-fetch warns once and keeps the current copy (exit code unchanged).
+angareion-pull.lock`), the same 20-second git timeout, the same pull interval
+(angareion's `config_pull_interval`, 900 seconds when it is not set) and the
+same policy - `git fetch origin main` to refresh, `git show origin/main:<path>`
+to read, never the working tree. The only local writes are the fetch itself and
+its lock file, and a failed fetch warns once and keeps the current copy (exit
+code unchanged).
 """
 
 from __future__ import annotations
@@ -122,30 +124,51 @@ def _default_warn(message: str) -> None:
     sys.stderr.write(f"Warning: {message}\n")
 
 
-def configured_clone_path() -> Path | None:
-    """Where the shared copy is: `ATELIER_CONFIG_DIR`, else angareion's `config_dir`.
+def _angareion_config_data() -> object:
+    """angareion's config.json as parsed JSON, or None when absent or unreadable.
 
-    angareion's config.json is only read for its `config_dir` - the clone path
-    both tools share; no token or other field is read or needed.
+    angareion's config is only read for `config_dir` (the clone both tools
+    share) and `config_pull_interval` (the pull policy both tools share); no
+    token or other field is read or needed.
     """
-    override = os.environ.get("ATELIER_CONFIG_DIR")
-    if override:
-        return Path(override).expanduser()
     angareion_config = os.environ.get("ANGAREION_CONFIG")
     config_file = (Path(angareion_config).expanduser() if angareion_config
                    else Path("~/.config/angareion/config.json").expanduser())
     if config_file.is_dir():
         config_file = config_file / "config.json"
     try:
-        data = json.loads(config_file.read_text(encoding="utf-8"))
+        return json.loads(config_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+
+
+def configured_clone_path() -> Path | None:
+    """Where the shared copy is: `ATELIER_CONFIG_DIR`, else angareion's `config_dir`."""
+    override = os.environ.get("ATELIER_CONFIG_DIR")
+    if override:
+        return Path(override).expanduser()
+    data = _angareion_config_data()
     if not isinstance(data, dict):
         return None
     clone = data.get("config_dir")
     if not isinstance(clone, str) or not clone.strip():
         return None
     return Path(clone).expanduser()
+
+
+def configured_pull_interval() -> int | None:
+    """angareion's `config_pull_interval`, honoured when it is set and sane (L4).
+
+    `0` means "no periodic pull" there and means the same here; a missing or
+    unusable value leaves the caller on the 900-second default.
+    """
+    data = _angareion_config_data()
+    if not isinstance(data, dict):
+        return None
+    value = data.get("config_pull_interval")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 @dataclass(frozen=True)
@@ -188,6 +211,10 @@ class Repo:
                 "找不到本機複本：設 ATELIER_CONFIG_DIR，或在 angareion 的 config.json 設 config_dir"
                 "（複本＝MyAiStorage 的 clone；見 docs/atelier/tool.md）"
             )
+        if "interval" not in kwargs:
+            configured = configured_pull_interval()
+            kwargs["interval"] = (CONFIG_PULL_INTERVAL_DEFAULT if configured is None
+                                  else configured)
         return cls(clone, **kwargs)
 
     # -- the clone itself --------------------------------------------------
@@ -196,6 +223,12 @@ class Repo:
         if not self.clone.is_dir():
             raise RepoError(
                 f"本機複本不存在：{self.clone}（先 clone MyAiStorage 到這個路徑；見 docs/atelier/tool.md）"
+            )
+        if not (self.clone / ".git").exists():
+            # Decided before the lock is taken: a plain directory must not get
+            # a stray .git/ or a lock file from a fetch that cannot work (L1).
+            raise RepoError(
+                f"本機複本不是 git 複本：{self.clone}（先 clone MyAiStorage 到這個路徑；見 docs/atelier/tool.md）"
             )
 
     def _read_fetch_head_mtime(self) -> float | None:
@@ -208,7 +241,7 @@ class Repo:
 
     def fetch(self) -> bool:
         """Refresh the clone, serialized with angareion (the same lock file)."""
-        self._ensure_clone()   # never create a stray .git under a missing clone
+        self._ensure_clone()   # never create a stray .git under a missing or non-git directory
         with self._lock():
             return self._fetch()
 
