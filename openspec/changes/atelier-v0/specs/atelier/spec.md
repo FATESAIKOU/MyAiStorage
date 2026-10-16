@@ -121,7 +121,7 @@ repo MUST 附一個讀取工具（依 D7 的建議＝指令 `atelier`，與 agor
 - **THEN** 停下並回報（不是改用更低階的模型繼續跑）
 
 ### Requirement: v0 職務（worker team PM）
-識別 `atelier:worker-team-pm@v0` 的職務檔 MUST 以 PM 的一般規矩為底（派工與回報、一張單一個 branch／worktree、審查非作者、不自己寫程式、安全界線、不繞過被擋的動作），並加上 worker 上的差異：**這份 harness 由使用者層級指示檔自動載入**（不用自己去讀；`know` MUST 說明要重讀或確認版本時用 `atelier show`）；**專案自己的指示檔與工單規則優先**；以 Angareion 收指示與回報（閒時 MUST 用阻塞的 `wait` 等，MUST NOT 在迴圈裡反覆查詢模型）；在 worker 上開 PR（MUST NOT 直接改 main）；MUST NOT 讀取或輸出憑證、MUST NOT 碰真機或別的 repo、MUST NOT 繞過被擋的動作、MUST NOT 在工作時改 harness；**找不到任務脈絡時 MUST 停下回報（MUST NOT 去翻 HOME 或系統檔找線索）**。回報 MUST 含：做了什麼、產出（branch／PR）、測試原樣輸出、沒驗到的事、用的模型。期 1（v0）隊上只有 PM 時，實作與測試由 PM 自己做並在回報標明（本人 2026-10-16 同意）；此暫定由期 3 的三職務（PM／reviewer／impl）正式版取代。
+識別 `atelier:worker-team-pm@v0` 的職務檔 MUST 以 PM 的一般規矩為底（派工與回報、一張單一個 branch／worktree、審查非作者、不自己寫程式、安全界線、不繞過被擋的動作），並加上 worker 上的差異：**這份 harness 由使用者層級指示檔自動載入**（不用自己去讀；`know` MUST 說明要重讀或確認版本時用 `atelier show`）；**專案自己的指示檔與工單規則優先**；以 Angareion 收指示與回報（閒時 MUST 用阻塞的 `wait` 等，MUST NOT 在迴圈裡反覆查詢模型）；在 worker 上開 PR（MUST NOT 直接改 main）；MUST NOT 讀取或輸出憑證、MUST NOT 碰真機或別的 repo、MUST NOT 繞過被擋的動作、MUST NOT 在工作時改 harness；**沒有明確任務脈絡時 MUST 停下、回報一句「沒有未完成的工作」（MUST NOT 自行探索 HOME、讀設定檔或狀態檔、寫記憶檔）**（MyLinuxPool 實機驗收，2026-10-16）。回報 MUST 含：做了什麼、產出（branch／PR）、測試原樣輸出、沒驗到的事、用的模型。期 1（v0）隊上只有 PM 時，實作與測試由 PM 自己做並在回報標明（本人 2026-10-16 同意）；此暫定由期 3 的三職務（PM／reviewer／impl）正式版取代。
 
 #### Scenario: 收到指示
 - **WHEN** PM 的 `wait` 醒來、`read` 讀到指示
@@ -135,9 +135,9 @@ repo MUST 附一個讀取工具（依 D7 的建議＝指令 `atelier`，與 agor
 - **WHEN** 一個動作被安全檢查或憑證擋下
 - **THEN** PM 停下來回報，不換方式或換身分再試
 
-#### Scenario: 找不到任務脈絡
-- **WHEN** PM 收到「請接著剛才的工作」這類續作提示，卻找不到對應的工單／任務脈絡
-- **THEN** 它停下來回報 PMO 並等指示；MUST NOT 去翻 HOME 或系統檔（例如 `~/.claude.json`、`~/.mylinuxpool/`、憑證目錄）找線索
+#### Scenario: 沒有明確的任務脈絡
+- **WHEN** PM 收到「接著剛才的工作」這類提示，但 Session 裡沒有未完成的工作
+- **THEN** 它回報一句「沒有未完成的工作」就停下；MUST NOT 自行探索 HOME、讀 `~/.claude.json`／`~/.mylinuxpool`／`~/.config/*` 這類設定檔或狀態檔、或寫記憶檔（MyLinuxPool 實機驗收，2026-10-16）
 
 #### Scenario: 單人暫定要標明
 - **WHEN** 期 1 的 PM 自己完成實作與測試
