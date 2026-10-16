@@ -103,11 +103,25 @@
 - **THEN** 不開 agent，exit 1，說明要給不小於 0 的分鐘數
 
 ### Requirement: 同一台機器上不能同時接續同一個 Session
-一個 Session 正在接續中（這台機器上有另一個 `agora continue` 正在寫回它）時，再對它 `agora continue`（不含 `--fork`）MUST 被拒絕（exit 1），說明它正在接續中。對它 `--fork` 不受影響。
+一個 Session 正在接續中（這台機器上有另一個 `agora continue` 正在寫回它）時，再對它 `agora continue`（不含 `--fork`）MUST 被拒絕，exit 4，並在中文說明之前先印一行固定格式 `agora-locked <agora id>`（呼叫方不必解析中文；#54）。被鎖的訊號 MUST 和一般輸入錯誤的 exit 1 分開。對它 `--fork` 不受影響。
+
+拒絕 MUST 涵蓋兩條路徑：開頭的提早檢查（`store.continuing`），以及真的拿 `pending/<ULID>.json` 的鎖時。兩個行程幾乎同時接續時，開頭的檢查看不到後到的鎖；輸的那個 MUST NOT 覆蓋贏的那個的 pending 記錄、MUST NOT 啟動 agent，而且 MUST 給同一個訊號。
 
 #### Scenario: 同一台機器再接續一次
 - **WHEN** A 正在接續中，在另一個終端機 `agora continue session A --agent claude`
-- **THEN** 被拒絕（exit 1），說明 A 正在接續中；第一個接續不受影響
+- **THEN** 被拒絕：exit 4，`agora-locked agora:A` 這一行在說明之前，說明 A 正在接續中；第一個接續不受影響
+
+#### Scenario: 幾乎同時接續同一個 Session
+- **WHEN** 兩個 `agora continue` 幾乎同時接續 A，其中一個先拿到 `pending/<ULID>.json` 的鎖
+- **THEN** 另一個在拿鎖時被拒絕：exit 4，同樣先印 `agora-locked agora:A`；沒有啟動 agent，先到的那個 pending 記錄沒有被覆蓋
+
+#### Scenario: 不是被鎖的輸入錯誤
+- **WHEN** `agora continue session agora:…`（不存在的 id）`--agent claude`
+- **THEN** 照舊 exit 1，不是 4；被鎖的訊號只有同機接續中會給
+
+#### Scenario: 被鎖時 fork 照常
+- **WHEN** A 正在接續中，`agora continue session A --agent claude --fork`
+- **THEN** 照常 fork 並接續新的 Session，exit 0
 
 ### Requirement: agent 死掉要傳出來
 agent 子行程以 `returncode != 0` 結束（排除 130／143、-2／-15，以及轉送過 SIGTERM 之後的結束（不論 agent 回什麼碼）；-9／-11 都算失敗）時，`agora continue` MUST 照做寫回（死前的內容 MUST NOT 丟），stderr MUST 印固定一行 `agora-agent-failed rc=<原碼>`（#54 的風格，負值照印如 `rc=-9`）；寫回成功時 MUST 回固定的 5（`EXIT_AGENT_FAILED`），寫回失敗時 MUST 維持寫回自己的失敗碼（3，同樣印那一行）。舊行為是只看寫回結果，agent 死掉又沒有新內容時回 0；第一版回 agent 原碼，但原碼會與 agora 自己的 1／2／3／4 撞碼，故改固定 5。新行為下正常結束（0）、使用者離開、headless 被 SIGTERM 溫和停下（exit 0）MUST 不變。
