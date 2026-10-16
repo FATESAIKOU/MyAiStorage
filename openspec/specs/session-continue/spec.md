@@ -109,3 +109,26 @@
 - **WHEN** A 正在接續中，在另一個終端機 `agora continue session A --agent claude`
 - **THEN** 被拒絕（exit 1），說明 A 正在接續中；第一個接續不受影響
 
+### Requirement: agent 死掉要傳出來
+agent 子行程以 returncode > 0 結束（排除 130／143 的 Ctrl-C／SIGTERM 慣例碼、被訊號殺掉的負值，以及 headless 溫和停下時 agora 自己轉送 SIGTERM 造成的結束）時，`agora continue` MUST 照做寫回（死前的內容 MUST NOT 丟），stderr MUST 印固定一行 `agora-agent-failed <code>`（#54 的風格）；寫回成功時 MUST 回該 returncode，寫回失敗時 MUST 維持寫回自己的失敗碼（3，同樣印那一行）。舊行為是只看寫回結果，agent 死掉又沒有新內容時回 0。新行為下正常結束（0）、使用者離開、headless 被 SIGTERM 溫和停下（exit 0）MUST 不變。
+
+#### Scenario: agent 死掉且沒有新內容
+- **WHEN** agent 以 exit 3 結束，結束時沒有新對話
+- **THEN** 寫回照做（沒有新內容就不存），stderr 有 `agora-agent-failed 3`，exit 3
+
+#### Scenario: agent 死掉但有新內容
+- **WHEN** agent 生前說了一句話，之後以 exit 3 結束
+- **THEN** 那句話寫回了 Session，stderr 有 `agora-agent-failed 3`，exit 3
+
+#### Scenario: 正常離開
+- **WHEN** agent 以 exit 0 結束
+- **THEN** exit 0，stderr 沒有 `agora-agent-failed`，行為與舊版相同
+
+#### Scenario: Ctrl-C 慣例碼不算失敗
+- **WHEN** agent 以 exit 130 或 143 結束，或被訊號殺掉（負值）
+- **THEN** exit 照寫回結果給（成功 0／失敗 3），stderr 沒有 `agora-agent-failed`
+
+#### Scenario: 寫回也失敗時維持寫回的碼
+- **WHEN** agent 以 exit 5 結束，且寫回上傳失敗
+- **THEN** exit 3，stderr 同時有上傳失敗的說明與 `agora-agent-failed 5`
+

@@ -162,6 +162,9 @@ agora show session agora:01K6… --raw
 | 2 | 錯誤：標頭、Drive、agent 或非預期的錯誤，以及指令用法錯誤 |
 | 3 | 還在 outbox（背景上傳器起不來，或 `AGORA_UPLOAD=inline` 時這一輪沒送完） |
 | 4 | 這個 Session 正在接續中（同一台機器有另一個 `continue` 在寫回它）：說明之前先印一行 `agora-locked <agora id>`，呼叫方用它分辨（409）；`--fork` 不受影響 |
+| agent 的 exit code | `continue` 的 agent 子行程以非 0 結束時（130／143 除外，見下）：寫回照做，stderr 印一行 `agora-agent-failed <code>`；寫回成功回該 code，寫回失敗回 3（同樣印那一行） |
+
+- `continue` 的 agent 失敗（#76）：舊行為是只看寫回結果，agent 死掉又沒有新內容時回 0；新行為是寫回仍然照做（死前的內容不丟），但 agent 以 returncode > 0 結束（排除 130／143 的 Ctrl-C／SIGTERM 慣例碼、被訊號殺掉的負值，以及 headless 溫和停下時 agora 自己轉送 SIGTERM 造成的結束）時，stderr 印固定一行 `agora-agent-failed <code>`，寫回成功就回該 returncode，寫回失敗維持 3。正常結束（0）、使用者離開、headless 被 SIGTERM 溫和停下（exit 0）不變。
 
 **先存本機，Drive 的部分交給背景。** import、continue、merge、edit 寫完本機（鏡像裡有完整的一份，含原始檔）就回 exit 0，背景上傳器慢慢送；`delete` 也是本機先不見，Drive 那份排進 `<state>/trash-queue/`，背景逐一 purge。所以指令的離開時間不再由 Drive 決定。
 

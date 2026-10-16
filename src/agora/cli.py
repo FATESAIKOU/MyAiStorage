@@ -47,6 +47,11 @@ EXIT_INPUT = 1       # cannot be done: unknown id, nothing to import, too few id
 EXIT_ERROR = 2       # header, Drive, agent or unexpected error (argparse usage errors are 2 too)
 EXIT_IN_OUTBOX = 3   # saved locally, not on Drive yet (N13)
 EXIT_LOCKED = 4      # this Session is being continued by another run (#54); not an input error
+#: `continue`'s agent child died with this code, but that is a goodbye, not a crash
+#: (#76): 130 is Ctrl-C and 143 is SIGTERM in the shell convention. A child killed
+#: by a signal shows up negative here (-2/-15) and likewise stays 0 - the headless
+#: gentle stop and the two SIGINT tests depend on that.
+AGENT_FAILED_IGNORED = (130, 143)
 DESCRIPTION_MAX = 80
 ACTOR = {"opencode": "opencode", "claude": "claude-code"}   # OKF actor prefix per agent
 SYNC_PERIOD_MINUTES = 5.0   # --sync-period when the user does not give one
@@ -1357,6 +1362,30 @@ def _periodic_write(run: "_Run", agent: Agent) -> None:
         run.logger = None
 
 
+def _agent_failure(returncode: int | None, forwarded: bool) -> int | None:
+    """The agent's own failure to report, or None when it is not one (#76).
+
+    Only a positive exit counts, and never the 130/143 goodbye codes (Ctrl-C /
+    SIGTERM in the shell convention) nor an ending this run caused itself by
+    forwarding its own SIGTERM to the child (the headless gentle stop leaves 0).
+    A child killed by a signal is negative here (-2/-15) and likewise stays None,
+    so the two SIGINT tests and the headless SIGTERM tests keep passing. The
+    caller still writes back first - what the agent said before dying is not lost -
+    then prints `agora-agent-failed <code>` on stderr (#54's shape) and leaves
+    with the agent's code when the write-back succeeded, or the write-back's own
+    failure code when it did not.
+    """
+    if returncode is None:
+        return None
+    if returncode <= 0:
+        return None
+    if returncode in AGENT_FAILED_IGNORED:
+        return None
+    if forwarded:
+        return None
+    return returncode
+
+
 def _wait_agent(proc, run: "_Run", agent: Agent, interval: float) -> bool:
     """Wait for the agent, writing back every `interval` seconds.
 
@@ -1654,13 +1683,17 @@ def cmd_continue(args, paths: store.Paths) -> int:
     previous_term = None
     proc = None
     term_pending = False
+    term_forwarded = False
 
     def _term_child(child) -> None:
+        nonlocal term_forwarded
         if child.poll() is None:
             try:
                 child.send_signal(signal.SIGTERM)
             except (ProcessLookupError, PermissionError):
                 pass
+            else:
+                term_forwarded = True
 
     if headless:
         # Gentle stop (design D6): SIGTERM forwards to the agent, then this
@@ -1702,6 +1735,23 @@ def cmd_continue(args, paths: store.Paths) -> int:
         signal.signal(signal.SIGINT, previous)
         if previous_term is not None:
             signal.signal(signal.SIGTERM, previous_term)
+    agent_rc = proc.returncode if proc is not None else None
+    failed = _agent_failure(agent_rc, term_forwarded)
+
+    def _finish(normal: int) -> int:
+        """The write-back's answer, with the agent's death laid on top (#76).
+
+        The fixed line goes to stderr in #54's shape, so a caller can tell "the
+        agent died" from "still in the outbox" even when both are exit 3: the
+        line is there in the first case and not in the second. A write-back that
+        failed on its own keeps its own code (3); only a clean write-back takes
+        the agent's code.
+        """
+        if failed is None:
+            return normal
+        print(f"agora-agent-failed {failed}", file=sys.stderr)
+        return failed if normal == 0 else normal
+
     store._fault("before-finalize")
     saved, target, final_note = _final_write(run, agent)
     run.pending.unlink()          # the current path: a rescue may have renamed it
@@ -1724,26 +1774,26 @@ def cmd_continue(args, paths: store.Paths) -> int:
             if not headless:
                 print(target)
             print(f"[agora] 沒有新內容；fork 已存成 {target}", file=sys.stderr)
-            return 0 if (saved_fork[1] and ok) else EXIT_IN_OUTBOX
+            return _finish(0 if (saved_fork[1] and ok) else EXIT_IN_OUTBOX)
         if not run.wrote:
             # the agent still holds the copy agora loaded; the import tab leaves it out (review T5)
             with open(paths.state / "unsaved-launches", "a", encoding="utf-8") as f:
                 f.write(f"{agent.name}:{launch.agent_session_id}\n")
             print("[agora] 這次沒有新內容，沒有存", file=sys.stderr)
-            return 0 if ok else EXIT_IN_OUTBOX
+            return _finish(0 if ok else EXIT_IN_OUTBOX)
         if not headless:
             print(target)
-        return 0 if ok else EXIT_IN_OUTBOX
+        return _finish(0 if ok else EXIT_IN_OUTBOX)
     if not fork:
-        return _emit(saved, quiet=headless)
+        return _finish(_emit(saved, quiet=headless))
     if saved[0] == saved_fork[0]:
         # The write-back landed on B itself: its outbox entry replaced step 6's, so the
         # later save's answer is the whole truth - the earlier failure is superseded
         # (review M6). The id printed is the one that is on Drive.
-        return _emit(saved, quiet=headless)
+        return _finish(_emit(saved, quiet=headless))
     # The write-back saved the work as another session: both writes matter, or the one
     # that failed would be forgotten.
-    return _emit((saved[0], saved[1] and saved_fork[1]), quiet=headless)
+    return _finish(_emit((saved[0], saved[1] and saved_fork[1]), quiet=headless))
 
 
 CONVERTED_NOTE = ("（以下是從其他 Session 轉過來的對話紀錄。[tool] 開頭的行只是當時工具呼叫的摘要，"
