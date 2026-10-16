@@ -210,6 +210,34 @@ def test_show_json_carries_frontmatter_and_sections(harness_repo, capsysbinary):
     assert data["sections"]["dont"] == "v1 dont 內容。"
 
 
+def test_show_json_serializes_yaml_dates(harness_repo, capsysbinary):
+    """A frontmatter date (PyYAML hands back `datetime.date`) must still print as JSON.
+
+    The first real harness carries `generated: {by: ..., at: 2026-10-16}` (PR 2);
+    before this test, `--json` died with a TypeError on it.
+    """
+    dated = H1.replace("status: draft", "status: draft\ngenerated: {by: x, at: 2026-10-16}")
+    _publish(harness_repo, "atelier/worker-team/pm/v3.md", dated)
+    _age_fetch_head(harness_repo.clone, 120)
+    code, out, err = _run(capsysbinary, "show", "atelier:worker-team-pm@v3", "--json")
+    assert code == 0, err
+    data = json.loads(out)
+    assert data["frontmatter"]["generated"]["at"] == "2026-10-16"
+
+
+def test_show_json_stringifies_yaml_keys_and_serializes_sets(harness_repo, capsysbinary):
+    """YAML keys can be non-strings and values can be sets: clean both up (低5)."""
+    weird = H1.replace("status: draft",
+                       "status: draft\nhistory: {2026-10-16: created}\ntags: !!set {b, a}")
+    _publish(harness_repo, "atelier/worker-team/pm/v3.md", weird)
+    _age_fetch_head(harness_repo.clone, 120)
+    code, out, err = _run(capsysbinary, "show", "atelier:worker-team-pm@v3", "--json")
+    assert code == 0, err
+    data = json.loads(out)
+    assert data["frontmatter"]["history"] == {"2026-10-16": "created"}
+    assert data["frontmatter"]["tags"] == ["a", "b"], "a set prints as a sorted list, not repr"
+
+
 def test_show_json_with_section(harness_repo, capsysbinary):
     code, out, err = _run(capsysbinary, "show", "atelier:worker-team-pm@v0",
                           "--section", "know", "--json")
