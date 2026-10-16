@@ -5,10 +5,12 @@ checked for every file under `atelier/`: frontmatter fields, id/version/file-nam
 consistency, the five H2 sections, the `capabilities` H3 subsections (`angareion`
 required at v0), `models.floor`/`models.preferred`, no `angareion` H2 section,
 and the `know` statement that project instructions come first. The
-「版本檔 append-only」rule is checked against the merge-base with `origin/main`
-and pinned with small fake repositories, so the rule is exercised even where no
-origin exists (there the real-tree check skips with a reason - never silently
-passes).
+「版本檔 append-only」rule is checked with `git diff --name-status` against the
+merge-base with `origin/main` - for HEAD and for the working tree - so an edit
+that was committed and then reverted in the working tree, a mode change, a
+rename and a file/symlink swap all count; small fake repositories pin every
+case, so the rule is exercised even where no origin exists (there the real-tree
+check skips with a reason - never silently passes).
 
 The checker lives here, with the tests, as section 2 of the change scopes it
 (`tests/unit/test_atelier_harness.py`); wiring it into CI is task 2.6, not done.
@@ -20,6 +22,7 @@ import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import os
 import re
 import subprocess
 from typing import Callable
@@ -41,8 +44,16 @@ KNOWN_CAPABILITIES = ("github", "angareion", "agora")
 TEAM_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 VERSION_RE = re.compile(r"^v(\d+)$")
 ID_RE = re.compile(r"^atelier:([a-z0-9][a-z0-9-]*)-(pm|arch|impl|test)@v(\d+)$")
-#: 「專案自己的指示檔與工單規則優先」- allowing the parenthetical in between.
-PROJECT_FIRST_RE = re.compile(r"專案[^\n]{0,60}指示檔[^\n]{0,60}優先")
+#: The sentence the `know` section MUST state. Parenthesised asides are dropped
+#: before matching (the real file names AGENTS.md/CLAUDE.md inside them), and the
+#: words must appear in this order - a sentence like「指示檔沒有 harness 優先」
+#: must not pass (低6).
+PROJECT_FIRST = "專案自己的指示檔與工單規則優先"
+_PARENTHESISED = re.compile(r"（[^）]*）|\([^)]*\)")
+
+
+def _states_project_first(know: str) -> bool:
+    return PROJECT_FIRST in _PARENTHESISED.sub("", know)
 
 V0_REL = "atelier/worker-team/pm/v0.md"
 
@@ -148,7 +159,7 @@ def findings_for(path: str, text: str) -> Findings:
             found.errors.append(f"{path}: 缺 {name} 章節")
     if "angareion" in sections:
         found.errors.append(f"{path}: MUST NOT 有 angareion 章節（它是 capabilities 的子節）")
-    if not PROJECT_FIRST_RE.search(sections.get("know", "")):
+    if not _states_project_first(sections.get("know", "")):
         found.errors.append(f"{path}: know 沒有明寫「專案自己的指示檔與工單規則優先」")
 
     capabilities = sections.get("capabilities")
@@ -238,23 +249,29 @@ def _drop_frontmatter_block(text: str, key: str) -> str:
     return "".join(out)
 
 
-MUTATIONS: list[tuple[str, Callable[[str], str], str]] = [
-    ("拿掉必填欄位 status", lambda t: _drop_line(t, "status:"), "status"),
-    ("version 改歪", lambda t: t.replace("version: v0", "version: vX"), "version"),
-    ("id 的版本與檔名不一致", lambda t: t.replace("@v0", "@v1", 1), "id"),
-    ("拿掉 dont 章節", lambda t: _drop_section(t, "dont"), "dont"),
-    ("拿掉 models 一欄", lambda t: _drop_frontmatter_block(t, "models"), "models"),
+MUTATIONS: list[tuple[str, Callable[[str], str], tuple[str, ...]]] = [
+    ("拿掉必填欄位 status", lambda t: _drop_line(t, "status:"), ("缺必填欄位", "status")),
+    ("拿掉必填欄位 title", lambda t: _drop_line(t, "title:"), ("缺必填欄位", "title")),
+    ("version 改歪", lambda t: t.replace("version: v0", "version: vX"), ("version",)),
+    ("id 的版本與檔名不一致", lambda t: t.replace("@v0", "@v1", 1), ("id",)),
+    ("拿掉 dont 章節", lambda t: _drop_section(t, "dont"), ("dont",)),
+    ("拿掉 models 一欄", lambda t: _drop_frontmatter_block(t, "models"), ("models",)),
     ("拿掉 capabilities 的 angareion 子節", lambda t: t.replace("### angareion\n", ""),
-     "angareion"),
+     ("angareion",)),
     ("能力子節改成散文", lambda t: t.replace("### github\n", "### github\n這是散文。\n", 1),
-     "散文"),
-    ("多一個 angareion 的 H2 章節", lambda t: t.replace("## do\n", "## angareion\n\n參數。\n\n## do\n", 1),
-     "angareion"),
-    ("know 拿掉專案指示優先", lambda t: _drop_line(t, "與工單規則優先"), "know"),
+     ("散文",)),
+    ("多一個 angareion 的 H2 章節",
+     lambda t: t.replace("## do\n", "## angareion\n\n參數。\n\n## do\n", 1), ("angareion",)),
+    ("know 拿掉專案指示優先", lambda t: _drop_line(t, "與工單規則優先"), ("know",)),
+    ("know 寫成反句（指示檔沒有 harness 優先）",
+     lambda t: t.replace(
+         "**專案自己的指示檔（`AGENTS.md`／`CLAUDE.md`）與工單規則優先**；",
+         "專案自己的指示檔沒有 harness 優先；", 1),
+     ("know",)),
     ("capabilities 沒有 H3 子節",
      lambda t: "".join(line for line in t.splitlines(keepends=True)
                        if not line.startswith("### ")),
-     "H3"),
+     ("H3",)),
 ]
 
 
@@ -265,13 +282,20 @@ def test_the_checker_catches_each_format_violation(name, corrupt, expected):
     broken = corrupt(text)
     assert broken != text, f"這個改壞沒有改到東西：{name}"
     found = findings_for(V0_REL, broken)
-    assert any(expected in error for error in found.errors), \
+    assert any(all(part in error for part in expected) for error in found.errors), \
         f"格式檢查沒有抓到「{name}」：{found.errors}"
 
 
 def test_the_checker_accepts_the_real_file():
     found = findings_for(V0_REL, _v0_text())
     assert not found.errors, "\n".join(found.errors)
+
+
+def test_the_v0_harness_keeps_reviews_by_non_authors():
+    """Spec「v0 職務」：審查非作者；PM 不審也不合併自己的 PR（低1）。"""
+    sections = split_sections(_v0_text())
+    area = sections.get("judge", "") + "\n" + sections.get("dont", "")
+    assert "審查一律非作者" in area
 
 
 def test_the_file_name_version_must_match_the_id():
@@ -331,30 +355,50 @@ def append_only_base(repo: Path = REPO) -> str | None:
     return proc.stdout.strip() or None
 
 
-def append_only_violations(repo: Path, base_rev: str) -> list[str]:
-    """Published version files that changed or vanished since `base_rev`.
-
-    Every `atelier/<team>/<role>/v<N>.md` at `base_rev` is compared with the
-    file on disk: it MUST NOT be modified and MUST NOT be deleted; content
-    changes MUST arrive as a new `v<N+1>.md`.
-    """
-    listing = _git(repo, "ls-tree", "-r", base_rev, "--", HARNESS_ROOT.name)
-    violations: list[str] = []
+def _changed_paths(repo: Path, base_rev: str, *rev_args: str) -> list[tuple[str, str | None, str]]:
+    """(status, old path or None, path) for every atelier/ change the diff reports."""
+    listing = _git(repo, "diff", "--name-status", base_rev, *rev_args, "--", HARNESS_ROOT.name)
+    changes: list[tuple[str, str | None, str]] = []
     for line in listing.stdout.splitlines():
-        meta, _, path = line.partition("\t")
-        if parse_path(path) is None:
-            continue
-        base_blob = meta.split()[2]
-        disk = repo / path
-        if not disk.is_file():
-            violations.append(f"{path}: 已發布的版本檔被刪除（append-only）")
-            continue
-        current_blob = _git(repo, "hash-object", "--", path).stdout.strip()
-        if current_blob != base_blob:
-            violations.append(
-                f"{path}: 已發布的版本檔被修改（blob {base_blob[:8]} → {current_blob[:8]}）；"
-                "內容有變要新增下一個版本檔")
-    return violations
+        fields = line.split("\t")
+        if len(fields) == 2:
+            changes.append((fields[0], None, fields[1]))
+        elif len(fields) >= 3:   # R/C: <status>\t<old>\t<new>
+            changes.append((fields[0], fields[1], fields[-1]))
+    return changes
+
+
+def _violation_for(status: str, old: str | None, path: str) -> str | None:
+    """The message for a forbidden change, or None for the one allowed change (A of v<N>.md)."""
+    if status == "A":
+        if parse_path(path) is not None:
+            return None   # a new version file: the only way content may change
+        return f"{path}: 新增的不是版本檔（atelier/ 底下只放 v<N>.md 版本檔）"
+    changed = {"M": "被修改（含模式變更）", "D": "被刪除", "R": "被改名",
+               "T": "型別變更（不再是普通檔案）"}.get(status[0], f"有未預期的變化（{status}）")
+    target = f"{old} → {path}" if old else path
+    if parse_path(path) is not None:
+        return f"{target}: 已發布的版本檔{changed}；內容有變要新增下一個版本檔（append-only）"
+    return f"{target}: atelier/ 底下的檔案{changed}（append-only）"
+
+
+def append_only_violations(repo: Path, base_rev: str) -> list[str]:
+    """Everything under atelier/ that changed since `base_rev` in a forbidden way.
+
+    Both the commits (`base_rev..HEAD`) and the live working tree are compared:
+    a violation committed and then reverted in the working tree still counts.
+    The only allowed change is an added new version file (`A` on `v<N>.md`);
+    every M/D/R/T - and a bare mode change, which git reports as `M` - is a
+    violation, so edits, deletions, renames, chmod and file/symlink swaps are
+    all caught.
+    """
+    violations: dict[str, None] = {}
+    for rev_args in (("HEAD",), ()):   # committed first, then the working tree
+        for status, old, path in _changed_paths(repo, base_rev, *rev_args):
+            message = _violation_for(status, old, path)
+            if message is not None:
+                violations.setdefault(message, None)
+    return list(violations)
 
 
 def _check_published_versions(repo: Path = REPO) -> None:
@@ -401,6 +445,40 @@ def test_append_only_flags_an_edited_version_file(tmp_path):
     assert len(violations) == 1 and "v0.md" in violations[0], violations
 
 
+def test_append_only_flags_an_edit_that_was_committed_and_then_reverted(tmp_path):
+    """The working tree may look clean again - the committed edit still counts (低3)."""
+    repo, base = _fake_repo(tmp_path)
+    version = repo / "atelier/worker-team/pm/v0.md"
+    version.write_text("v0 改過又 commit 了\n", encoding="utf-8")
+    _git(repo, "-c", "user.name=atelier-test", "-c", "user.email=atelier-test@example.invalid",
+         "add", "-A")
+    _git(repo, "-c", "user.name=atelier-test", "-c", "user.email=atelier-test@example.invalid",
+         "commit", "-q", "-m", "edit")
+    _git(repo, "checkout", base, "--", "atelier")   # working tree back to the published bytes
+    assert _git(repo, "diff", "--name-status", base, "--", "atelier").stdout == ""
+    violations = append_only_violations(repo, base)
+    assert len(violations) == 1 and "v0.md" in violations[0], violations
+
+
+def test_append_only_flags_a_mode_change(tmp_path):
+    """chmod is a change too: git reports it as M and it must be a violation (低4)."""
+    repo, base = _fake_repo(tmp_path)
+    os.chmod(repo / "atelier/worker-team/pm/v0.md", 0o755)
+    violations = append_only_violations(repo, base)
+    assert len(violations) == 1 and "模式變更" in violations[0], violations
+
+
+def test_append_only_flags_a_symlink_swap(tmp_path):
+    """Replacing the file with a symlink of the same content is a type change (低4)."""
+    repo, base = _fake_repo(tmp_path)
+    pm = repo / "atelier/worker-team/pm"
+    (pm / "v0.target").write_text("v0 的內容\n", encoding="utf-8")
+    (pm / "v0.md").unlink()
+    (pm / "v0.md").symlink_to("v0.target")
+    violations = append_only_violations(repo, base)
+    assert len(violations) == 1 and "型別" in violations[0], violations
+
+
 def test_append_only_flags_a_deleted_version_file(tmp_path):
     repo, base = _fake_repo(tmp_path)
     (repo / "atelier/worker-team/pm/v0.md").unlink()
@@ -414,8 +492,14 @@ def test_append_only_accepts_a_new_version_file(tmp_path):
     assert append_only_violations(repo, base) == []
 
 
-def test_append_only_leaves_other_files_alone(tmp_path):
+def test_append_only_flags_a_change_to_a_file_that_is_not_a_version_file(tmp_path):
     repo, base = _fake_repo(tmp_path)
     (repo / "atelier/worker-team/pm/notes.md").write_text("筆記改過\n", encoding="utf-8")
+    violations = append_only_violations(repo, base)
+    assert len(violations) == 1 and "notes.md" in violations[0], violations
+
+
+def test_append_only_ignores_changes_outside_the_harness_tree(tmp_path):
+    repo, base = _fake_repo(tmp_path)
     (repo / "README.md").write_text("README 改過\n", encoding="utf-8")
     assert append_only_violations(repo, base) == []

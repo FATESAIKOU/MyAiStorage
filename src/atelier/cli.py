@@ -66,10 +66,38 @@ def _agents(values: list[str]) -> list[str]:
     return [agent for agent in ("claude", "opencode") if agent in chosen]
 
 
+def _json_key(key: object) -> str:
+    """YAML mapping keys are objects: dates, numbers, even bytes. JSON wants strings."""
+    if isinstance(key, str):
+        return key
+    if isinstance(key, bytes):
+        return key.decode("utf-8", "replace")
+    return str(key)
+
+
+def _json_safe(value: object) -> object:
+    """A JSON-ready copy of a YAML-loaded structure.
+
+    Frontmatter is YAML, so values and keys can be `datetime.date`, `bytes` or
+    `set` (`history: {2026-10-16: created}`, `tags: !!set {...}`): keys become
+    strings, sets become sorted lists, bytes decode, everything else falls back
+    to `str` - `json.dumps` then never meets an object it cannot print.
+    """
+    if isinstance(value, dict):
+        return {_json_key(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, set):
+        return sorted((_json_safe(item) for item in value), key=str)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
 def _json_print(data: object) -> None:
-    # default=str: frontmatter may hold YAML dates (PyYAML gives `datetime.date`,
-    # e.g. `generated.at`) - they print as strings instead of crashing `--json`.
-    print(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=False, default=str))
+    print(json.dumps(_json_safe(data), ensure_ascii=False, indent=2, sort_keys=False))
 
 
 def _decode(raw: bytes) -> str:

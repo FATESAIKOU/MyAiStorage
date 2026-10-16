@@ -36,7 +36,7 @@ harness ＝ 一個職務一個版本的 UTF-8 Markdown 檔，放 `atelier/<team>
 ## 版本與 append-only
 
 - 一個版本一個檔（`v0.md`、`v1.md`…）；**內容有變 MUST 新增下一個版本檔**。
-- **既有版本檔 MUST NOT 被修改、MUST NOT 被刪除**（append-only）。檢查＝與 `origin/main` 的 merge-base 比對既有 `v<N>.md` 的 blob；沒有 `origin/main`（或算不出 merge-base）的環境會 skip 並說明——不是默默通過。
+- **既有版本檔 MUST NOT 被修改、MUST NOT 被刪除**（append-only）；**新增版本檔（`A`）是唯一允許的變化**。檢查＝與 `origin/main` 的 merge-base 比對，對 **HEAD 與工作樹**各做一次 `git diff --name-status`：凡不是「新增 `v<N>.md`」的變化——修改（含 `chmod` 等模式變更）、刪除、改名、型別變更（例如換成符號連結）——都是違規；`atelier/` 底下不是版本檔的變更也一樣。沒有 `origin/main`（或算不出 merge-base）的環境會 skip 並說明——不是默默通過。
 - 版本判定**只比版本字串**（frontmatter 的 `version` 與檔名）——本文不用來判斷版本；`atelier show <id>` 不給版本＝同一職務最大的 N。
 - 改規矩的唯一路徑：對 MyAiStorage 開 PR（審查＋本人同意）；**agent 在工作時 MUST NOT 改 harness**——要改就回報提議，由人或 PM 決定。
 
