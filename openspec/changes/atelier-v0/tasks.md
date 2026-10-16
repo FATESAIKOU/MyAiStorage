@@ -8,12 +8,13 @@
 
 **範圍**：`docs/atelier/harness/worker-team-pm.md`（新；內容＝`openspec/changes/atelier-v0/harness/worker-team-pm.md` 的定稿）、`tests/unit/test_atelier_harness.py`（新）、`docs/design.md` 的 Atelier 一段（若 E3 有裁定就補）。合併後：正式位置有一份通過格式檢查的 v0 職務檔；change 歸檔時同步（刪掉 change 內的草稿副本或留指路）。**一步一個 PR；本檔不做。**
 
-- [ ] 1.1 把職務草稿放進 `docs/atelier/harness/worker-team-pm.md`；依 E1／E8 的裁定修正章節與內容（照 D1 的解讀調整 `capabilities.angareion` 的位置）
-- [ ] 1.2 格式檢查測試（照 spec「harness 檔的格式」「識別與版本」「能力需求與模型欄位」）：frontmatter 必填（type／id／title／status／team／role／version／models）、`id`↔`version`↔`team`／`role` 一致、五個 H2 章節齊、`capabilities.angareion` 子節在、`models.floor`／`preferred` 兩欄存在（值可空）
-- [ ] 1.3 改壞驗證：拿掉一個必填欄位、把 `id` 的版本改歪、拿掉一個章節、拿掉 `models` 的一欄、拿掉 `angareion` 子節——各要讓 1.2 紅；逐項記在 PR 說明
+- [ ] 1.1 把職務草稿放進 `docs/atelier/harness/worker-team-pm.md`；依 E1／E8 的裁定修正章節與內容（照 D1 的解讀調整 `capabilities` 章節——甲的 `angareion` 是子節，乙則獨立成章）
+- [ ] 1.2 格式檢查測試（照 spec「harness 檔的格式」「識別與版本」「能力需求與模型欄位」）：frontmatter 必填（type／id／title／status／team／role／version／models）、`id`↔`version`↔`team`／`role` 一致、五個 H2 章節齊、`capabilities` 以 H3 子節列出能力（v0：`github`／`angareion`／`agora`；子節內一行 YAML 或留空）、`models.floor`／`preferred` 兩欄存在（值可空）
+- [ ] 1.3 改壞驗證：拿掉一個必填欄位、把 `id` 的版本改歪、拿掉一個章節、拿掉 `models` 的一欄、拿掉 `angareion` 子節、把能力子節改成散文——各要讓 1.2 紅；逐項記在 PR 說明
 - [ ] 1.4（選配，PM 決定）`docs/atelier/harness.md` 一頁格式說明（給之後寫職務的人）：欄位表、章節指引、版本規則
+- [ ] 1.5（選配）把格式檢查接進 GitHub Actions workflow（本 repo 目前沒有跑 pytest 的 CI；要接再開）
 
-**測試**：`uv run pytest -q tests/unit/test_atelier_harness.py`（不需要網路、不碰任何憑證）。
+**測試**：`uv run pytest -q tests/unit/test_atelier_harness.py`（不需要網路、不碰任何憑證；現無 CI，PR 說明附原樣輸出）。
 
 ## 2. MyLinuxPool：sidecar 的 harness 載入（PR 2；甲案；依存 PR 1 的檔與 E5 的裁定）
 

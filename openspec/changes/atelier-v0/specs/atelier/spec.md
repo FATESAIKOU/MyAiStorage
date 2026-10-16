@@ -1,7 +1,9 @@
 ## ADDED Requirements
 
+> 註（暫定）：以下「能力需求」的落點暫依 design D1 的建議甲（能力需求為第五要素；`angareion` 是 `capabilities` 的子節）與 D9 的表示法（H3 子節）。待 E1 由本人裁定後同步；若改乙，`angareion` 成為獨立的 H2 章節。
+
 ### Requirement: harness 檔的格式
-一份 harness MUST 是一個職務一份 UTF-8 的 Markdown 檔，第一個區塊是 YAML frontmatter（OKF v0.2 對齊；不認得的欄位保留）。frontmatter MUST 有 `type`（值 `Harness`）、`id`、`title`、`status`、`team`、`role`、`version`、`models`。`team` MUST 使用 `[a-z0-9][a-z0-9-]*`（英文小寫與 `-`）；`role` MUST 是 `pm`／`arch`／`impl`／`test` 之一；`status` MUST 是 `draft`／`stable`／`deprecated` 之一。本文 MUST 有 `know`、`do`、`judge`、`dont`、`capabilities` 五個 H2 章節；`capabilities` MUST 有 `angareion` 子節。內容 MUST NOT 含帳號、額度、憑證名稱、模型輪換表或第二大腦內容等私人資訊。
+一份 harness MUST 是一個職務一份 UTF-8 的 Markdown 檔，第一個區塊是 YAML frontmatter（OKF v0.2 對齊；不認得的欄位保留）。frontmatter MUST 有 `type`（值 `Harness`）、`id`、`title`、`status`、`team`、`role`、`version`、`models`。`team` MUST 使用 `[a-z0-9][a-z0-9-]*`（英文小寫與 `-`）；`role` MUST 是 `pm`／`arch`／`impl`／`test` 之一（期 3 的 reviewer 對應 `arch`）；`status` MUST 是 `draft`／`stable`／`deprecated` 之一。本文 MUST 有 `know`、`do`、`judge`、`dont`、`capabilities` 五個 H2 章節；`capabilities` MUST 以能力名為 H3 子節，MUST 有 `angareion` 子節；每個子節內 MUST 用一行 YAML 或清單寫參數，沒有參數時留空（用途放 `know`／`do`，不在子節內寫散文）。內容 MUST NOT 含帳號、額度、憑證名稱、模型輪換表或第二大腦內容等私人資訊。
 
 #### Scenario: 通過格式檢查
 - **WHEN** 對一份照本格式寫的 harness 執行 MyAiStorage 的格式檢查
@@ -12,7 +14,7 @@
 - **THEN** 失敗，訊息指出缺哪個欄位
 
 #### Scenario: 章節不齊
-- **WHEN** 拿掉 `dont` 章節（或 `capabilities` 的 `angareion` 子節）後執行格式檢查
+- **WHEN** 拿掉 `dont` 章節、拿掉 `capabilities` 的 `angareion` 子節，或把能力子節改成散文（沒有 H3）後執行格式檢查
 - **THEN** 失敗
 
 ### Requirement: 識別與版本
@@ -27,11 +29,23 @@
 - **THEN** 格式檢查失敗
 
 ### Requirement: 能力需求與模型欄位
-`capabilities` MUST 是能力名到參數的 mapping（沒有參數用空 mapping），MUST 含 `angareion`。frontmatter MUST 有 `models`，含 `floor`（模型識別碼或 `null`）與 `preferred`（有順序的清單，可空）。租用模型時 MUST 先照 `preferred` 的順序滿足，且 MUST NOT 低於 `floor`；滿足不了 MUST 停下並回報，MUST NOT 靜默降級。v0 的能力由 worker 的預設 profile 全部提供；harness MUST NOT 指定 profile 名（限制在期 2 由 worker profile 做）。sidecar MUST NOT 對宣告逐項核銷。
+`capabilities` 章節 MUST 以能力名為 H3 子節；子節名 SHOULD 用環境（MyLinuxPool）的 capability 名（v0：`github`、`angareion`、`agora`；`github` 的單位是 `shared-configs/gh`），MUST 含 `angareion` 子節；子節內 MUST 用一行 YAML 或清單寫參數，沒有參數時留空；同一份 harness 內的子節名 MUST NOT 重複。未知的能力名 MUST 只警告、MUST NOT 擋（能力清單要能長）。**模型不是能力子節**：frontmatter MUST 有 `models`，含 `floor`（模型識別碼或 `null`）與 `preferred`（有順序的清單，可空）。租用模型時 MUST 先照 `preferred` 的順序滿足，且 MUST NOT 低於 `floor`；滿足不了 MUST 停下並回報，MUST NOT 靜默降級。v0 的能力由 worker 的預設 profile 全部提供；harness MUST NOT 指定 profile 名（限制在期 2 由 worker profile 做）。sidecar MUST NOT 對宣告逐項核銷。
 
 #### Scenario: 欄位存在、值可空
 - **WHEN** 一份 harness 的 `models.floor` 是 `null`、`preferred` 是空清單
 - **THEN** 格式檢查通過（＝未指定，由環境決定）
+
+#### Scenario: 能力的子節
+- **WHEN** `capabilities` 有三個 H3 子節 `github`／`angareion`／`agora`，參數都留空
+- **THEN** 格式檢查通過
+
+#### Scenario: 子節名重複或沒有子節
+- **WHEN** `capabilities` 有兩個同名子節，或整章沒有 H3 子節
+- **THEN** 格式檢查失敗
+
+#### Scenario: 未知名稱只警告
+- **WHEN** `capabilities` 有一個環境不認得的能力名
+- **THEN** 格式檢查警告、不擋（能力清單要能長）
 
 #### Scenario: 達不到底線
 - **WHEN** 租用時 `preferred` 都不可用、可用的模型又低於 `floor`

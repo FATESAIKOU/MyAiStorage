@@ -15,7 +15,7 @@
 約束與邊界（本人指示，經工單）：
 
 - **本單只做設計**；程式、sidecar、部署都不動（MyAiStorage#32 的 tasks 只是之後的步驟）。
-- **不要定這兩件**：code agent 的正式啟動機制（沿用現況）、A2A 的正式設計（MyPMO#23；介面以 `openspec/changes/angareion-v5/` 為準）。只要把介面留好、不卡死。
+- **不要定這兩件**：code agent 的正式啟動機制（沿用現況）、A2A 的正式設計（angareion-v5；原 MyPMO#23 已關，見 MyPMO#31）。只要把介面留好、不卡死。
 - **公開 repo**：不寫帳號、額度、憑證名稱、模型輪換的具體表、第二大腦的內容。
 - 設計與介面摘要由 PMO 拿給本人看，本人同意才實作。
 
@@ -35,7 +35,7 @@
 **Non-Goals：**
 
 - 實作（程式、sidecar 欄位、映像部署、文件改寫都只列步驟）。
-- A2A／Angareion 的正式設計與 sidecar 的 team 概念（MyPMO#23、v5 的後續）。
+- A2A／Angareion 的正式設計與 sidecar 的 team 概念（angareion-v5；原 MyPMO#23 已關，見 MyPMO#31；sidecar 的 team 概念是 v5 的後續）。
 - code agent 的正式啟動機制（本人未定案；本設計對「誰開 team、怎麼開」只留介面，列為未決 E6）。
 - 三職務（PM／reviewer／impl）與 Atelier 本體（期 3，MyAiStorage#17）。
 - 模型輪換政策本身（哪個模型給哪個角色）；harness 只留欄位（見 E4）。
@@ -55,7 +55,7 @@
 | D6 | 載入方式：全文原樣、作為第一則輸入（建議） | **要本人決定（E2）** |
 | D7 | 載入時機與版本固定：每次 open（含接續）送一次；部署版為準 | 定（隨 D6） |
 | D8 | 檔案來源與位置：MyAiStorage 版控；映像部署進 worker；`harness_dir` | 定（來源位置見 E3） |
-| D9 | 能力需求：宣告式 mapping＋`models.floor`／`preferred`；預設 profile | 定（值見 E4） |
+| D9 | 能力需求：本文 H3 子節（子節名＝能力名、v0：`github`／`angareion`／`agora`）＋frontmatter 的 `models.floor`／`preferred`；預設 profile | 定（值見 E4） |
 | D10 | 錯誤情形：`harness_not_found`／`harness_version_mismatch`／`harness_invalid`；什麼都沒開 | 定（隨 sidecar 介面 E5） |
 | D11 | v0 職務（worker team PM）的內容 | 定（草案；單人暫定見 E8） |
 | D12 | 測試與驗收：格式檢查、載入測試、期 1 端到端 | 定 |
@@ -69,7 +69,7 @@
 - MyPMO#19 留言（2026-10-11）：「裁定（本人 2026-10-11）：A2A 信道（Angareion）就是第五要素。」
 
 **解讀甲（建議）：四要素＋能力需求是五要素；Angareion 是能力需求裡的第一個具名子節。**
-harness 的五個章節是 `know`／`do`／`judge`／`dont`／`capabilities`；`capabilities` 底下 MUST 有 `angareion` 子節（信道、身分、誰提供 token 的部署邊界），Angareion 的**用法**（怎麼讀、怎麼回、閒時怎麼等）放 `know`。
+harness 的五個章節是 `know`／`do`／`judge`／`dont`／`capabilities`；`capabilities` MUST 以能力名為 H3 子節（表示法見 D9），MUST 有 `angareion` 子節（信道、身分、誰提供 token 的部署邊界），Angareion 的**用法**（怎麼讀、怎麼回、閒時怎麼等）放 `know`。
 後果：與 2026-10-10 的列舉完全一致；sidecar／worker 只需要一條「能力」處理路徑（環境提供、v0 不核銷）；10-11 那句被讀成「worker 溝通的答案是 Angareion，它屬於第五要素的內容」——如果本人的本意是「信道本身要獨立成一個要素」，這個讀法就打了折。風險：誤解本人。
 
 **解讀乙：四要素＋Angareion 是五要素；能力需求併入 `do`（或當附錄）。**
@@ -93,7 +93,7 @@ harness 的五個章節是 `know`／`do`／`judge`／`dont`／`capabilities`；`
 | `do` | 要做什麼：職責、動作、產出（含開 PR） |
 | `judge` | 怎麼判斷：完成定義、什麼時候停下來問、品質與證據的要求 |
 | `dont` | 不做什麼：安全界線、禁止事項、被擋不繞過 |
-| `capabilities` | 能力需求（D9；含 `angareion` 子節） |
+| `capabilities` | 能力需求（D9）：每個能力一個 H3 子節（子節名＝能力名；v0：`github`／`angareion`／`agora`），子節內用一行 YAML／清單寫參數、沒有參數就留空 |
 
 - **frontmatter 欄位**：
 
@@ -108,12 +108,12 @@ harness 的五個章節是 `know`／`do`／`judge`／`dont`／`capabilities`；`
 | `models` | ✔ | `floor`（模型識別碼或 `null`）＋`preferred`（有順序清單，可空）——本人的兩個欄位（D9） |
 | `generated`、`refs` | 選填 | OKF；`generated` 記作者與時間，`refs` 可指其他實體 |
 
-- **寫到多細**：以「agent 照著做不會錯、人看得懂」為準；只有 frontmatter 與 `models` 是機器要讀的（載入器不解析本文；D6）。本文用繁中，指令、欄位名與識別用原文。
+- **寫到多細**：以「agent 照著做不會錯、人看得懂」為準；機器只讀 frontmatter（含 `models`；載入器不解析本文；D6）；`capabilities` 在本文、v0 沒有機器消費它（環境不核銷；D9）。本文用繁中，指令、欄位名與識別用原文。
 - **取捨**：單檔（frontmatter＋本文）vs 拆多檔（frontmatter／本文分開）。單檔：好搬、全文送入 agent 時不用拼接、編輯直覺；多檔的好處（各章節獨立版控、機器可選讀）v0 不需要——期 3 Atelier 本體要拆再說。**採單檔。**
 
 ### D3 識別、命名與檔案命名
 
-- **名稱**：`<team>-<role>`；`team` 用 `[a-z0-9][a-z0-9-]*`（英文小寫與 `-`）、`role` 用小寫角色字。v0：`worker-team-pm`。
+- **名稱**：`<team>-<role>`；`team` 用 `[a-z0-9][a-z0-9-]*`（英文小寫與 `-`）、`role` 用小寫職務字（`pm`／`arch`／`impl`／`test`）。**期 3 的 reviewer 職務對應 agent 角色字 `arch`（沿用現行命名）；impl＝實作隊員**。v0：`worker-team-pm`。
 - **識別**：`atelier:<名稱>@<版本>`，例 `atelier:worker-team-pm@v0`——與 `docs/design.md` 的 ref 語法（第 61-63 行）與例子 `atelier:reviewer@v3`（第 66 行）同一形狀，任何項目都能用 `refs` 指到它。
 - **檔名**：`<名稱>.md`（例 `worker-team-pm.md`）；版本只寫在 frontmatter 與識別裡，不放檔名（舊版靠 git 歷史）。
 - **與 agent 位址是兩件事**：agent 名（Angareion 位址）照 `angareion-v5` 的文法 `<repo 名>-<pm|arch|impl|test>[-<id>]`（`openspec/changes/angareion-v5/specs/angareion/spec.md` 第 142 行），由環境（個人設定）給；harness 名稱不取代它。職務檔會寫「你的 agent 名由環境提供，收發一律用它」。
@@ -161,7 +161,7 @@ harness 的五個章節是 `know`／`do`／`judge`／`dont`／`capabilities`；`
 
 ### D9 能力需求與預設 profile
 
-- **表示**：`capabilities` 是 mapping（能力名→參數；沒有參數用 `{}`），宣告式、不寫實作。能力名是環境（MyLinuxPool 的能力單位）的詞彙，本設計先固定一個小集合（v0 檔：`git`、`angareion`、`agora`；參數 free-form）。
+- **表示（定死一種）**：`capabilities` 在**本文**：一個能力一個 **H3 子節**，子節名＝能力名（用環境的 capability 名）；子節內用**一行 YAML（或清單）**寫參數，沒有參數就留空（不寫假參數、不寫散文——用途放 `know`／`do`，不在此重複）。**frontmatter 不放 `capabilities`**。v0 的能力集合：`github`（MyLinuxPool 單位 `gh` 的 capability 名；gh 本體與 git credential）、`angareion`、`agora`——與 MyLinuxPool 的 `shared-configs/*/unit.json` 一致（只讀確認）。**模型不是能力子節**：它是 frontmatter 的 `models`（消費端是 sidecar 的 ModelBroker 與 LLMGateway；`llmgateway` 是環境的能力單位、sidecar 用，agent 不直接用）。v0 的三個子節都沒有參數（值由環境決定）；參數語意等有需求再定。
 - **語意**：能力由環境提供（worker 的 profile＋憑證）；**v0 不逐項核銷**（本人：先全給預設 profile、要限制時再說）——harness 宣告是「需求清單」，不是開關。**誰負責滿足**：環境能力＝MyLinuxPool（profile、映像、憑證）；模型＝LLMGateway（未來 ModelBroker 依 harness 的兩個模型欄位租用）；sidecar 只把環境給的憑證交給 agent（既有機制），不自己核銷。
 - **本人的兩個模型欄位**（#32 留言）：
 
@@ -205,7 +205,7 @@ harness 的五個章節是 `know`／`do`／`judge`／`dont`／`capabilities`；`
 
 ### D12 測試與驗收
 
-- **格式檢查（MyAiStorage，CI）**：pytest 讀 `docs/atelier/harness/*.md`——frontmatter 必填欄位、`id`↔`version` 一致、五章齊、`models` 兩欄存在（值可空）；拿掉任一項要紅。改壞驗證逐項記在 PR 說明。
+- **格式檢查（MyAiStorage；本 repo 目前沒有跑 pytest 的 CI）**：pytest 讀 `docs/atelier/harness/*.md`——frontmatter 必填欄位、`id`↔`version` 一致、五章齊、`capabilities` 以 H3 子節列出能力、`models` 兩欄存在（值可空）；拿掉任一項要紅。改壞驗證逐項記在 PR 說明；要不要接 CI 見 tasks 1.5。
 - **載入測試（MyLinuxPool）**：單元＝假 harness 檔＋假 driver——`open` 帶 `harness` → 第一則輸入是**全文（byte-for-byte）**；找不到／版本不符／壞檔 → 400 且**沒有**開 agent；接續（`session`）也送；改壞驗證（拿掉載入、改寫內文、不比對版本 → 測試紅）。整合＝真 agent 起一次，看第一個輸入（可用 fake／離線）。
 - **期 1 驗收（MyLinuxPool#45 端到端；MyPMO#31）要看到什麼才算 harness v0 有效**：
   1. PM 的第一則輸入是 harness 全文（版本 `atelier:worker-team-pm@v0`）；
@@ -252,20 +252,26 @@ harness 的五個章節是 `know`／`do`／`judge`／`dont`／`capabilities`；`
 3. **worker 部署**——把 MyAiStorage 釘住的 sha 裡的 `docs/atelier/harness/worker-team-pm.md` 放進映像的 `harness_dir`（與 agora／sidecar 同一處 pin）；`install.sh --check` 驗檔案存在（不存在回 1）。
 4. **不做／不要做**——harness 的內容驗證（在 MyAiStorage 的 CI）；team 概念；Angareion 整合（v5 的 sidecar 不含 Angareion；agent 自己用它讀信道）；把 harness 寫進工作目錄。
 5. **（期 1 驗收前置）**——worker 上「開 team」的呼叫路徑要有人或有程式做（E6）；若採乙案過渡，期 1 用「把全文放 `input`」即可，不必等 1。
+6. **其餘不變**——其餘環境能力（映像、憑證、LLMGateway 等）照 #52 的既有範圍，本設計不新增要求。
 
 ## 作者加的項目（本人未指示；帶給本人看）
 
 以下不是本人的指示，是設計時作者提的；都保留，說明時要讓本人知道：
 
 - `harness_dir` 與檔名 `<name>.md` 的形狀；`harness` 欄位的形狀（`{name, version?}`）與「不帶＝照舊」。
+- 乙案（呼叫方把全文放 `input`）當過渡備援（「與 sidecar 的介面」）。
+- `capabilities` 的表示法（H3 子節、子節內一行 YAML 或留空）與 v0 的能力集合 `github`／`angareion`／`agora`（D9）。
 - 三個錯誤碼與 400 的選擇。
 - 載入順序（harness 先於一般 `input`）與「每次 open 都送」。
 - 版本只放 frontmatter（`v<整數>`、不做 semver）。
 - `models` 放 frontmatter 頂層（而不是 `capabilities` 裡）；v0 的值留空。
+- `role ∈ {pm, arch, impl, test}` 與 `team` 的字元規則（D3）。
+- harness 名稱與 agent 位址是兩件事（D3）。
+- 隊名 `worker-team`（D3；E7）。
 - v0 檔的 `status: draft`；`generated` 欄位記設計者。
 - 期 1 單人暫定（PM 自己做實作與測試並標明）。
 - Session `refs` 記 harness id（期 3；v0 不做）。
-- 格式檢查放 MyAiStorage 的 pytest、載入測試放 MyLinuxPool。
+- 格式檢查放 MyAiStorage 的 pytest、載入測試放 MyLinuxPool；tasks.md 1.4 的可選格式文件（`docs/atelier/harness.md`）。
 - 內容來源先放 `docs/atelier/`（不建新頂層目錄）。
 
 ## Risks / Trade-offs

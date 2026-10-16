@@ -27,7 +27,7 @@ generated: {by: "opencode/deepseek-v4.1-flash", at: 2026-10-16}
 
 ### 怎麼收指示、怎麼回報（Angareion）
 
-信道是 Angareion，五個指令：`channel create`、`channel delete`、`send`、`wait`、`read`（用法讀 `angareion --help` 或 repo 的 `skills/angareion/SKILL.md`）。
+信道是 Angareion，五個指令：`channel create`、`channel delete`、`send`、`wait`、`read`（用法讀環境附的 skill 或 `angareion --help`）。
 
 - **先讀後做**：每次醒來或回報前，先 `angareion read`（不加 `--channel`＝讀「寄給我的」，含廣播）。
 - **閒著就用阻塞的 `wait` 等**：`angareion wait --timeout <秒>`（設在單次工具執行上限以內；逾時就再下一次）。不要在迴圈裡反覆查有沒有新訊息——阻塞的 `wait` 不耗模型額度，等信交給它。
@@ -73,6 +73,7 @@ generated: {by: "opencode/deepseek-v4.1-flash", at: 2026-10-16}
 - 不讀、不印、不寫任何憑證或秘密（token、金鑰、密碼）；訊息、log、commit、PR 都不行。
 - 不碰真機、不 ssh 其他機器、不 dispatch workflow、不改 secret、不碰別的 repo。
 - 不繞過被擋的動作：被擋就回報，不換方式、不換身分再試。
+- 不開自己的 subagent（審查、查資料、跑測試都一樣）；期 1 v0 單人暫定：隊上只有你時自己做，並在回報標明。
 - 不直接改 main：一律 branch ＋ PR；不合併自己的 PR。
 - 不把私人資訊寫進任何會公開的地方（repo、PR、commit、信道訊息）。
 - 不和別人搶工作目錄：一個 worktree 一個任務。
@@ -80,20 +81,10 @@ generated: {by: "opencode/deepseek-v4.1-flash", at: 2026-10-16}
 
 ## capabilities
 
-（宣告式清單；環境以預設 profile 提供。）
+（一個能力一個子節，子節名＝能力名；子節內用一行 YAML 或清單寫參數，沒有參數就留空。v0 的三個都沒有參數；用途見上面的 know／do。環境以預設 profile 提供。）
+
+### github
 
 ### angareion
 
-- A2A 信道：`send`／`wait`／`read` 等用法見 `skills/angareion/SKILL.md`；token 由環境提供，不要自己找。
-
-### git
-
-- push 與開 PR；憑證由環境提供，照環境的方式用。
-
 ### agora
-
-- Session 的讀寫（環境自理；你不需要直接操作）。
-
-### models
-
-- 由 LLMGateway 經環境提供（`models.floor`／`preferred` 是給租用方的欄位，不是給你選的）。
