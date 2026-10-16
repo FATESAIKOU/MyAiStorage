@@ -3,10 +3,10 @@
 The bug: `_wait_agent` only `proc.wait()`ed and never read `returncode`, so the
 exit code came from the write-back alone - a dead agent with nothing new looked
 like exit 0. The contract (same shape as #54's `agora-locked`): the write-back
-still happens, but a positive exit (>0, except the 130/143 Ctrl-C/SIGTERM
-convention and a SIGTERM agora itself forwarded) prints a fixed stderr line
-`agora-agent-failed <code>`; the exit is the agent's code when the write-back
-succeeded, otherwise the write-back's own failure code (3).
+still happens, but any death (`returncode != 0`, except 130/143, -2/-15, and a
+SIGTERM agora itself forwarded) prints a fixed stderr line
+`agora-agent-failed rc=<code>`; the exit is the fixed `EXIT_AGENT_FAILED` (5) when
+the write-back succeeded, otherwise the write-back's own failure code (3).
 """
 
 from __future__ import annotations
@@ -120,7 +120,7 @@ def _fail_with(monkeypatch, code: int):
     _die_with(monkeypatch, [sys.executable, "-c", f"import sys; sys.exit({code})"])
 
 
-def test_agent_fails_with_no_new_content_reports_its_code(env, capsys, monkeypatch):
+def test_agent_fails_with_no_new_content_reports_fixed_code(env, capsys, monkeypatch):
     """#76: the agent dies (exit 3) before saying anything - the old code said 0."""
     env.speak = False
     _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a",
@@ -128,20 +128,20 @@ def test_agent_fails_with_no_new_content_reports_its_code(env, capsys, monkeypat
     _fail_with(monkeypatch, 3)
     code, out, err = run(capsys, "continue", "session", parent, "--agent", "opencode",
                          "--dir", "/tmp", "--sync-period", "0")
-    assert code == 3, err
-    assert "agora-agent-failed 3" in err
+    assert code == cli.EXIT_AGENT_FAILED == 5, err
+    assert "agora-agent-failed rc=3" in err
     assert "沒有新內容" in err
 
 
 def test_agent_fails_but_new_content_is_still_written_back(env, capsys, monkeypatch):
-    """#76: what the agent said before dying is not lost, and the exit is still its."""
+    """#76: what the agent said before dying is not lost; the exit is the fixed 5."""
     _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a",
                        "--agent", "opencode")
     _fail_with(monkeypatch, 3)
     code, out, err = run(capsys, "continue", "session", parent, "--agent", "opencode",
                          "--dir", "/tmp", "--sync-period", "0")
-    assert code == 3, err
-    assert "agora-agent-failed 3" in err
+    assert code == cli.EXIT_AGENT_FAILED == 5, err
+    assert "agora-agent-failed rc=3" in err
     assert out == parent
     code, shown, _ = run(capsys, "show", "session", parent)
     assert code == 0
@@ -172,7 +172,7 @@ def test_ctrl_c_convention_codes_are_not_failures(env, capsys, monkeypatch):
 
 
 def test_sigterm_death_is_not_a_failure(env, capsys, monkeypatch):
-    """#76: killed by a signal (-15) stays 0 - the headless gentle stop depends on it."""
+    """#76: killed by SIGTERM (-15) stays 0 - the headless gentle stop depends on it."""
     _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a",
                        "--agent", "opencode")
     _die_with(monkeypatch, ["sh", "-c", "kill -TERM $$"])
@@ -182,14 +182,37 @@ def test_sigterm_death_is_not_a_failure(env, capsys, monkeypatch):
     assert "agora-agent-failed" not in err
 
 
+def test_sigint_death_is_not_a_failure(env, capsys, monkeypatch):
+    """#76: killed by SIGINT (-2) stays 0 - Ctrl-C belongs to the agent (N1)."""
+    _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a",
+                       "--agent", "opencode")
+    _die_with(monkeypatch, ["sh", "-c", "kill -INT $$"])
+    code, _, err = run(capsys, "continue", "session", parent, "--agent", "opencode",
+                       "--dir", "/tmp", "--sync-period", "0")
+    assert code == 0, err
+    assert "agora-agent-failed" not in err
+
+
+def test_sigkill_and_sigsegv_are_failures(env, capsys, monkeypatch):
+    """#76 follow-up: -9 (SIGKILL/OOM) and -11 must not be swallowed either."""
+    for sig, flag in (("KILL", "-9"), ("SEGV", "-11")):
+        _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a",
+                           "--agent", "opencode")
+        _die_with(monkeypatch, ["sh", "-c", f"kill -{sig} $$"])
+        code, _, err = run(capsys, "continue", "session", parent, "--agent", "opencode",
+                           "--dir", "/tmp", "--sync-period", "0")
+        assert code == cli.EXIT_AGENT_FAILED == 5, (sig, err)
+        assert f"agora-agent-failed rc={flag}" in err, sig
+
+
 def test_agent_failure_plus_upload_failure_keeps_exit_3_with_signal(
         env, capsys, monkeypatch):
     """#76: the write-back's own failure (3) wins over the agent's code, but the line stays."""
     _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a",
                        "--agent", "opencode")
-    _fail_with(monkeypatch, 5)
+    _fail_with(monkeypatch, 7)
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")
     code, _, err = run(capsys, "continue", "session", parent, "--agent", "opencode",
                        "--dir", "/tmp", "--sync-period", "0")
     assert code == cli.EXIT_IN_OUTBOX == 3, err
-    assert "agora-agent-failed 5" in err
+    assert "agora-agent-failed rc=7" in err

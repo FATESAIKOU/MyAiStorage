@@ -47,11 +47,13 @@ EXIT_INPUT = 1       # cannot be done: unknown id, nothing to import, too few id
 EXIT_ERROR = 2       # header, Drive, agent or unexpected error (argparse usage errors are 2 too)
 EXIT_IN_OUTBOX = 3   # saved locally, not on Drive yet (N13)
 EXIT_LOCKED = 4      # this Session is being continued by another run (#54); not an input error
-#: `continue`'s agent child died with this code, but that is a goodbye, not a crash
-#: (#76): 130 is Ctrl-C and 143 is SIGTERM in the shell convention. A child killed
-#: by a signal shows up negative here (-2/-15) and likewise stays 0 - the headless
-#: gentle stop and the two SIGINT tests depend on that.
-AGENT_FAILED_IGNORED = (130, 143)
+EXIT_AGENT_FAILED = 5  # `continue`'s agent child died (#76); stderr has `agora-agent-failed rc=<code>`
+#: `continue`'s agent child ended this way, but that is a goodbye, not a crash
+#: (#76): 130 is Ctrl-C and 143 is SIGTERM in the shell convention; -2 (SIGINT)
+#: and -15 (SIGTERM) are the same deaths as negative returncodes. Anything else
+#: != 0 counts - including -9 (SIGKILL/OOM) and -11 - unless agora itself
+#: forwarded its own SIGTERM to the child (the headless gentle stop leaves 0).
+AGENT_FAILED_IGNORED = (130, 143, -2, -15)
 DESCRIPTION_MAX = 80
 ACTOR = {"opencode": "opencode", "claude": "claude-code"}   # OKF actor prefix per agent
 SYNC_PERIOD_MINUTES = 5.0   # --sync-period when the user does not give one
@@ -1365,19 +1367,18 @@ def _periodic_write(run: "_Run", agent: Agent) -> None:
 def _agent_failure(returncode: int | None, forwarded: bool) -> int | None:
     """The agent's own failure to report, or None when it is not one (#76).
 
-    Only a positive exit counts, and never the 130/143 goodbye codes (Ctrl-C /
-    SIGTERM in the shell convention) nor an ending this run caused itself by
-    forwarding its own SIGTERM to the child (the headless gentle stop leaves 0).
-    A child killed by a signal is negative here (-2/-15) and likewise stays None,
-    so the two SIGINT tests and the headless SIGTERM tests keep passing. The
-    caller still writes back first - what the agent said before dying is not lost -
-    then prints `agora-agent-failed <code>` on stderr (#54's shape) and leaves
-    with the agent's code when the write-back succeeded, or the write-back's own
-    failure code when it did not.
+    Any `returncode != 0` counts, except the goodbye codes (130/143 and their
+    signal deaths -2/-15) and an ending this run caused itself by forwarding its
+    own SIGTERM to the child (the headless gentle stop leaves 0). The caller
+    still writes back first - what the agent said before dying is not lost -
+    then prints `agora-agent-failed rc=<code>` on stderr (#54's shape, negative
+    codes as they are, e.g. rc=-9) and leaves with the fixed `EXIT_AGENT_FAILED`
+    (5) when the write-back succeeded, or the write-back's own failure code (3)
+    when it did not - so the agent's 1/2/3/4 can never collide with agora's own.
     """
     if returncode is None:
         return None
-    if returncode <= 0:
+    if returncode == 0:
         return None
     if returncode in AGENT_FAILED_IGNORED:
         return None
@@ -1741,16 +1742,15 @@ def cmd_continue(args, paths: store.Paths) -> int:
     def _finish(normal: int) -> int:
         """The write-back's answer, with the agent's death laid on top (#76).
 
-        The fixed line goes to stderr in #54's shape, so a caller can tell "the
-        agent died" from "still in the outbox" even when both are exit 3: the
-        line is there in the first case and not in the second. A write-back that
-        failed on its own keeps its own code (3); only a clean write-back takes
-        the agent's code.
+        The fixed line goes to stderr in #54's shape, carrying the original
+        code. A write-back that failed on its own keeps its own code (3); only
+        a clean write-back takes the fixed `EXIT_AGENT_FAILED` (5), so an agent
+        that died with 1/2/3/4 never collides with agora's own 1/2/3/4.
         """
         if failed is None:
             return normal
-        print(f"agora-agent-failed {failed}", file=sys.stderr)
-        return failed if normal == 0 else normal
+        print(f"agora-agent-failed rc={failed}", file=sys.stderr)
+        return EXIT_AGENT_FAILED if normal == 0 else normal
 
     store._fault("before-finalize")
     saved, target, final_note = _final_write(run, agent)
