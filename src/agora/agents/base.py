@@ -156,7 +156,13 @@ def warn(message: str) -> None:
 
 
 def agent_cmd(name: str) -> str:
-    """The agent executable; AGORA_OPENCODE_CMD / AGORA_CLAUDE_CMD override it for tests."""
+    """The agent executable agora runs: `AGORA_<NAME>_CMD` overrides the name (#77).
+
+    Every call that runs the agent's CLI goes through here, so the value may be
+    an executable path or a name found on PATH - a wrapper executable can stand
+    in for `opencode`/`claude` (MyLinuxPool's sidecar sets
+    `AGORA_CLAUDE_CMD=claude-real`). Unset, the name itself is used.
+    """
     return os.environ.get(f"AGORA_{name.upper()}_CMD", name)
 
 

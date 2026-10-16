@@ -201,6 +201,10 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 
 - 位置參數固定是「動作、型態、session id」。型態目前只有 `session`。
 - `--agent`：import 時是「這是哪個 agent 的 session」，merge 時是「誰寫要約」，continue 時是「用哪個 agent 接」。不再有 `--format`。
+- **agent 執行檔**（#77）：預設從 PATH 找 `opencode`／`claude`；`AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD` 可以換成指定的執行檔，值是執行檔路徑或 PATH 上的名稱。每個會跑 agent CLI 的地方都走它：
+  - opencode：`session export`（含 collect 的回讀）、`session import`（continue 的載入）、`session delete`、merge 要約的 `run`、`--headless` 的 `serve`、互動的 `--session`；
+  - claude：互動的 `--resume`、`--headless` 的 `-p --input-format stream-json`、merge 要約的 `-p`。claude 的 import／export 是直接讀寫 `~/.claude/projects/` 的 jsonl，不叫 CLI；agora 也不跑 `--version`（版本從 jsonl／匯出檔的欄位讀，見 5.2、OC8）。
+  這是正式介面，不是測試用的接縫：MyLinuxPool 的 sidecar 靠 `AGORA_CLAUDE_CMD=claude-real` 繞過 worker 上 PATH 的切換包裝；語意要維持（值照樣當第一個 argv、其餘參數不變）。
 - `--external-session-id`：只有 import 用，是 agent 自己的 session id，可以給多次或用逗號分隔（5.2）。
 - **一次處理多個**（2026-10-03 使用者決定）：import、delete、merge、pull、push 都吃 id 清單；逐一在 **stderr** 印一行 `k/N` 進度，**stdout 只放 agora id**（可以接管線）。被 Ctrl-C 中斷後重跑同一個指令會接著做：import 略過已匯入、delete 略過已刪、merge 沿用已寫好的要約、pull 略過已快取（5.2、5.3、5.6、5.10）。
 - `cache`／`sync` 拿掉了，改成 `pull`／`push`，而且**只吃給的 id**（5.10）。
@@ -516,4 +520,4 @@ Python（uv）＋ rclone ＋ SQLite FTS5。**`src/` 的程式碼行數只記錄�
 | `agents/claude` | 找 jsonl 與附屬檔、改寫欄位、閱讀版、找出結束後的 session | 350 |
 | `cli` | 六個指令、continue 流程、pending 補存、merge | 400 |
 
-測試照當初的 test-plan review（`docs/review/test-plan.md`（2026-10-04 清理時已從 repo 移除，要看請用 `git show fd3ba9f:<路徑>` 從歷史取回）），之後依 `openspec/specs/` 的 Scenario 補。**測試的 helper 只能在 pytest 或隔離的環境裡用**：不在 pytest（沒有 `PYTEST_VERSION`）而且 `AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`AGORA_CONFIG`／`HOME` 有任一個沒指到暫存目錄時，`tests/_guard.py` 在 import 的當下就 `SystemExit`（T8；在那之前有過兩次直接用真的目錄，其中一次把真實 Session 的標題送進了外部模型）。測試用的接縫：`AGORA_FOLDER_NAME`（整合測試設成 `agora-test`）、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`AGORA_RCLONE`、`AGORA_OPENCODE_CMD`、`AGORA_CLAUDE_CMD`、`AGORA_CLAUDE_HOME`、`AGORA_TEST_FAULT`（含 `after-periodic-write`：定期寫回做完之後）、`AGORA_NOW`。接續的間隔直接用 `--sync-period` 給很小的小數（例如 `0.005`）測試，不另設環境變數。
+測試照當初的 test-plan review（`docs/review/test-plan.md`（2026-10-04 清理時已從 repo 移除，要看請用 `git show fd3ba9f:<路徑>` 從歷史取回）），之後依 `openspec/specs/` 的 Scenario 補。**測試的 helper 只能在 pytest 或隔離的環境裡用**：不在 pytest（沒有 `PYTEST_VERSION`）而且 `AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`AGORA_CONFIG`／`HOME` 有任一個沒指到暫存目錄時，`tests/_guard.py` 在 import 的當下就 `SystemExit`（T8；在那之前有過兩次直接用真的目錄，其中一次把真實 Session 的標題送進了外部模型）。測試用的接縫：`AGORA_FOLDER_NAME`（整合測試設成 `agora-test`）、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`AGORA_RCLONE`、`AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD`（正式介面，#77；測試也用它）、`AGORA_CLAUDE_HOME`、`AGORA_TEST_FAULT`（含 `after-periodic-write`：定期寫回做完之後）、`AGORA_NOW`。接續的間隔直接用 `--sync-period` 給很小的小數（例如 `0.005`）測試，不另設環境變數。

@@ -30,6 +30,8 @@ uv tool install --editable .     # 之後就有 agora 指令
 
 - `opencode`、`claude`（用到哪個裝哪個）。
 
+- **指定 agent 執行檔**（#77）：預設就是 PATH 上的 `opencode`／`claude`。`AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD` 可以把它們換成指定的執行檔（值是執行檔路徑或 PATH 上的名稱，例如包裝過、或繞過包裝的 `claude-real`）。所有要跑 agent CLI 的呼叫都經過它：continue 開 agent（互動與 `--headless` 的 `serve`／stream-json）、opencode 的 `session export`／`session import`／`session delete`、merge 的要約（summarize）；沒設定就是用預設名。claude 的 import／export 直接讀寫 `~/.claude` 的檔案，不叫 CLI；agora 也不會為了版本去跑 `--version`（版本從 jsonl／匯出檔讀）。這是正式介面（MyLinuxPool 的 sidecar 用它指定 worker 上的執行檔），不是測試專用的旋鈕；細節見 [docs/design.md](docs/design.md)。
+
 第一次執行時，agora 會在 Drive 建一個 `agora/` 資料夾，並把它的 folder ID 記到 `~/.config/agora/config.json`。
 
 ## 指令
