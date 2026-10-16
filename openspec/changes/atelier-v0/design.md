@@ -101,7 +101,7 @@
 | `models` | ✔ | `floor`（模型識別碼或 `null`）＋`preferred`（有順序清單，可空）——本人的兩個欄位（D9） |
 | `generated`、`refs` | 選填 | OKF；`generated` 記作者與時間，`refs` 可指其他實體 |
 
-- **寫到多細**：以「agent 照著做不會錯、人看得懂」為準；機器只讀 frontmatter（含 `models`；讀取工具不解析本文）；`capabilities` 在本文、v0 沒有機器消費它（環境不核銷；D9）。本文用繁中，指令、欄位名與識別用原文。
+- **寫到多細**：以「agent 照著做不會錯、人看得懂」為準；**機器欄位只認 frontmatter**（含 `models`）；本文只在 `--section`／`--json` 時做章節切分，不做語意解析；`capabilities` 在本文、v0 沒有機器消費它（環境不核銷；D9）。本文用繁中，指令、欄位名與識別用原文。
 - **取捨**：單檔（frontmatter＋本文）vs 拆多檔——單檔好搬、好讀、好版本；期 3 Atelier 本體要拆再說。**採單檔。**
 
 ### D3 識別、命名與路徑
@@ -131,7 +131,7 @@
 三個選項與取捨（本人要求的比較面向：版本、審查、公開性、離線、與 Agora／Angareion 的存取共用程度）：
 
 - **甲（建議）：MyAiStorage 的 git**——虛擬資料夾樹 `atelier/…` 放這個 repo，讀取工具走本機 clone ＋ `git fetch`／`git show origin/main:`（與 angareion 讀 channel 設定同一種做法）。
-  - 版本：git 歷史＋append-only 版本檔（D4）；審查：PR（與設計／程式同一套；本人同意才 merge）；公開性：內容本來就要公開（規則不放私人資訊）；離線：clone 一次、之後離線可讀（fetch 失敗沿用複本）；共用：**與 angareion 共用同一份本機複本／同一種匿名 HTTPS 讀法——零新憑證**；worker 端 angareion 能力已經需要這份複本。
+  - 版本：git 歷史＋append-only 版本檔（D4）；審查：PR（與設計／程式同一套；本人同意才 merge）；公開性：內容本來就要公開（規則不放私人資訊）；離線：clone 一次、之後離線可讀（fetch 失敗沿用複本）；共用：**與 angareion 共用同一份本機複本／同一種匿名 HTTPS 讀法——同一複本路徑、同一把 flock 鎖與 20 秒逾時（沿用 angareion §11，`openspec/changes/angareion-v5/design.md` 第 101 行）——零新憑證**；worker 端 angareion 能力已經需要這份複本。
   - 缺點：每次更新要 PR（但這正是審查要的）；Drive 派的人要用 git 看（既有習慣）。
 - **乙：Google Drive**（與 Agora 同一套 rclone 存取；Atelier 自己的資料夾樹）。
   - 版本：檔案版本＋檔名 `vN`；審查：**沒有 PR**（只有檔案，誰改的都難追）；公開性：Drive 是私人儲存（內容公開無妨，但沒有好處）；離線：可借 Agora 的鏡像做法；共用：與 Agora 共用 rclone／憑證與快取機制。
@@ -140,10 +140,10 @@
 
 **多個 AI 同時讀不會亂的理由**（選甲時全部成立；選乙時除「共用 clone」外同理）：
 
-1. **唯讀工具**：`atelier` 沒有寫入介面（D7）；讀者碰不到狀態。
+1. **唯讀工具**：`atelier` 沒有寫入 harness／工作目錄的介面（D7；唯一的本機寫入是複本自身的 `git fetch` 更新）；讀者碰不到 harness 的狀態。
 2. **版本不可變**：append-only（D4）；`v0` 讀到的位元組永遠一樣。
 3. **沒有共享可寫狀態**：不像工作目錄（會被 commit、改檔、切 branch）；harness 樹沒有人邊讀邊改。
-4. **各讀各的**：每個 agent 讀自己機器上的本機複本；同名 id 的內容由 git 保證一致。
+4. **各讀各的**：**同一台機器共用一份本機複本、各機器各自一份**；同名 id 的內容由 git 保證一致。
 5. **不在工作目錄放實體複本**：工作樹乾淨；AI 再多也只是多幾個讀者。
 
 **建議：甲**（與本人「AiStorage 的虛擬資料夾」的說法一致；審查與版本都最強；共用 angareion 的讀法＝零新憑證）。**要本人決定（E9）。**
@@ -155,9 +155,9 @@
 - **甲（建議）：新增 `atelier` 指令**（與 agora／angareion 同一個 distribution：`pyproject.toml` 加一個 entry point、新模組 `src/atelier/`）。
   - `atelier ls [--json]`：列職務與版本（例 `atelier:worker-team-pm@v0`、`@v1`）。
   - `atelier show <id>[@<版本>] [--section know|do|judge|dont|capabilities] [--json]`：印 harness。**預設整份原樣**（含 frontmatter——版本與識別在裡面）；`--section` 只印該章節的內容（給不想整份進 context 的 agent）；`--json` 給程式（frontmatter＋各章節）。
-  - **讀法**：本機複本（MyAiStorage 的 clone）＋ `git fetch` 節流更新（沿用 angareion §11：`git show origin/main:<路徑>`、匿名 HTTPS、查無先 fetch、fetch 失敗 stderr 警告一次並沿用複本）；不依賴工作樹。
-  - **退出碼**（對齊 angareion／agora 的簡化版）：0 成功；1 用法錯或找不到（id／版本／章節）；2 讀取失敗（複本不存在、檔案壞、git 壞）。沒有 3（outbox）／4（鎖）／5（agent）——它是唯讀的。
-  - 權限與私密界線：工具**只讀**；寫入只有一條路——對 MyAiStorage 開 PR（審查＋本人同意）；**agent 執行工作時 MUST NOT 改 harness**（要改就回報提議，由人或 PM 決定再開 PR）；harness 的內容照公開規則（不放私人資訊）。
+  - **讀法**：本機複本（MyAiStorage 的 clone）＋ `git fetch` 節流更新（沿用 angareion §11：`git show origin/main:<路徑>`、匿名 HTTPS、查無先 fetch、fetch 失敗 stderr 警告一次並沿用複本；**同一複本路徑、同一把 flock 鎖與 20 秒逾時**——`openspec/changes/angareion-v5/design.md` 第 101 行）；不依賴工作樹。
+  - **退出碼**（對齊 angareion 的退出碼表；**不採** `agora continue` 的 3（outbox）／4（鎖）／5（agent）——它是唯讀工具，不對 harness 或工作目錄寫入）：0 成功；1 用法錯或找不到（id／版本／章節）；2 讀取失敗（複本不存在、檔案壞、git 壞）。
+  - 權限與私密界線：工具的**唯一寫入是複本自身的 `git fetch`**（對 harness 唯讀）；harness 的寫入只有一條路——對 MyAiStorage 開 PR（審查＋本人同意）；**agent 執行工作時 MUST NOT 改 harness**（要改就回報提議，由人或 PM 決定再開 PR）；harness 的內容照公開規則（不放私人資訊）。
   - 取捨：多一個指令（多一個入口），但語意正確、與 angareion 同一家族、之後 Atelier 本體就從這裡長。
 - **乙：併進 `agora`**（例 `agora atelier show …`）：不新增指令；但 agora 是 Session 工具，介面與退出碼表都是 Session 的，把 Atelier 塞進去會讓兩個實體糾纏（r1 D5：不混）。
 - **丙：把 harness 當特殊 Session** 用 `agora show` 讀：重用 Agora 全部機制（含 Drive）；但 harness 不是 Session（要偽造 header／kind）、沒有 PR 審查、選 Drive 才有意義；不建議。
@@ -202,7 +202,7 @@
 | fetch 失敗（離線、網路） | 0（不變） | stderr 警告一次、沿用複本；**MUST NOT** 因此改變退出碼 |
 
 - 錯誤訊息**不含 harness 內文**（只講 id／版本／路徑）。
-- 工具 MUST NOT 有寫入動作、MUST NOT 需要憑證（匿名 HTTPS）。
+- 工具 MUST NOT 寫入 harness 樹、工作目錄或使用者檔案（**唯一的本機寫入是複本自身的 `git fetch` 更新**）、MUST NOT 需要憑證（匿名 HTTPS）。
 - **（未選）sidecar 全文載入的錯誤表**（`harness_not_found`／`harness_version_mismatch`／`harness_invalid`；400、什麼都沒開）保留在「與 sidecar 的介面」，日後選丙再照做。
 
 ### D11 v0 職務（worker team PM）的內容
@@ -221,7 +221,7 @@
 
 ### D12 測試與驗收
 
-- **讀取工具測試（MyAiStorage）**：單元＝假的 git／假複本——`ls`、`show`（整份 byte-for-byte、`--section`、`--json`）、版本解析（latest／`@v0`）、exit 1（用法、查無）／2（複本不存在）、fetch 失敗沿用複本且 exit 不變、**唯讀**（沒有任何寫入路徑）；改壞驗證（拿掉版本解析、`--section` 抓錯段、fetch 失敗回 2、把內容「整理」過再印——各要紅）。
+- **讀取工具測試（MyAiStorage）**：單元＝假的 git／假複本——`ls`、`show`（整份 byte-for-byte、`--section`、`--json`）、版本解析（latest／`@v0`）、exit 1（用法、查無）／2（複本不存在）、fetch 失敗沿用複本且 exit 不變、**唯讀**（除複本自身的 `git fetch` 外沒有任何寫入；沒有寫 harness／工作目錄的路徑）；改壞驗證（拿掉版本解析、`--section` 抓錯段、fetch 失敗回 2、把內容「整理」過再印——各要紅）。
 - **格式檢查（MyAiStorage；本 repo 目前沒有跑 pytest 的 CI）**：pytest 讀 `atelier/**/v<N>.md`——frontmatter 必填欄位、`id`↔`version`↔檔名一致、五章齊、`capabilities` 以 H3 子節列出能力、`models` 兩欄存在（值可空）；**加上 append-only 檢查**（與 `origin/main` 的 merge-base 比對：既有版本檔的 blob 不得改變、不得刪除）。拿掉任一項要紅。改壞驗證逐項記在 PR 說明；要不要接 CI 見 tasks 1.5。
 - **期 1 驗收（MyLinuxPool#45 端到端；MyPMO#31）要看到什麼才算 harness v0 有效**：
   1. `open` 的 `input` 開頭是固定開場句（讀 harness → 讀信道）；
@@ -273,8 +273,8 @@
 
 以下不是本人的指示，是設計時作者提的；都保留，說明時要讓本人知道：
 
-- **儲存建議**：`atelier/<team>/<role>/v<N>.md` 的三層路徑、append-only 版本檔（E9）。
-- **讀取工具建議**：`atelier` 指令、`ls`／`show`、`--section`／`--json`、exit 0／1／2、共用 angareion 的 clone 與 fetch 節流（E10）。
+- **儲存建議**：`atelier/<team>/<role>/v<N>.md` 的三層路徑、append-only 版本檔；**latest 的判定＝同一個 role 資料夾裡最大的 N**（E9／D4）。
+- **讀取工具建議**：`atelier` 指令、`ls`／`show`、`--section`／`--json`、exit 0／1／2（對齊 angareion）、共用 angareion 的 clone 與 fetch 節流（同一複本路徑、同一把 flock 鎖、20 秒逾時）（E10）。
 - **固定開場句的字面與位置**（`input` 開頭第一段；版本預設不 pin）（E11）。
 - **harness 的 `know` 要求「收到新指示前重讀一次」**（D8 甲的一部分）。
 - **能力表示法**（`capabilities` 的 H3 子節、一行 YAML 或留空）與 v0 能力集合 `github`／`angareion`／`agora`（D9）。
@@ -285,6 +285,7 @@
 - 隊名 `worker-team`（D3；E7）。
 - v0 檔的 `status: draft`；`generated` 欄位記設計者。
 - 期 1 單人暫定（本人已同意）。
+- **回報可加記「讀到的 harness 版本」**（D11 的回報格式；風險一節的緩解）。
 - Session `refs` 記 harness id（期 3；v0 不做）。
 - 格式檢查放 MyAiStorage 的 pytest；tasks 1.7／2.5／2.6 的可選文件與可選 CI。
 - （未選，r1 遗留）`harness_dir`、`harness` 欄位形狀、三個錯誤碼、載入順序——保留在「與 sidecar 的介面」。
@@ -309,16 +310,16 @@
 2. **E2 載入方式（r1 版）**——已答覆：harness 是 AiStorage 的**虛擬資料夾**（一個團隊／職務一組），AI 用**工具**讀；不是把全文塞進第一則輸入、也不在各工作目錄擺實體檔（本文件的 D6／D7／D8 照此重做）。
 3. **E5 sidecar 介面（r1 版）**——已答覆：暫不要求 sidecar 加欄位；sidecar 盡量不改；載入方式改在 r2 提選項（D8、「與 sidecar 的介面」）。
 4. **E8 期 1 單人暫定**——已確認：同意（PM 自己做並在回報標明）。
+5. **E3（原「harness 檔的正式位置」）——已併入 E9，不再單獨列**：r2 的方向（E2）把這個問題換成「harness 放哪」（存放位置，見 E9）。
 
 **仍開放（要本人決定）**：
 
-5. **E4（要本人決定）：`models.floor`／`preferred` 的值放哪、可不可以公開**——公開 repo 不寫模型輪換表。**建議：格式留欄位、v0 的值留空（`floor: null`、`preferred: []`＝未指定）；期 3 ModelBroker 落地前，由本人決定哪些值可以寫進公開檔（模型名本身不是憑證，但「哪個角色用哪個模型」的順序可能不想公開）。**
-6. **E7（低）：隊名**——v0 用 `worker-team`；期 2 部門命名（MyLinuxPool#5）再定。**建議：不阻塞，v0 就用。**
-7. **E9（新；要本人決定）：harness 放哪**——甲 MyAiStorage 的 git（建議；虛擬資料夾樹、PR 審查、與 angareion 共用複本）／乙 Google Drive（與 Agora 同套；沒有 PR 審查）／丙 實體複本（本人已排除）。見 D6。
-8. **E10（新；要本人決定）：讀取工具**——甲 新增 `atelier` 指令（建議；`ls`／`show`）／乙 併進 `agora`／丙 當特殊 Session。見 D7。
-9. **E11（新；要本人決定）：載入選項**——甲 固定開場句＋自讀＋新指示前重讀（建議）／乙 只在開頭讀一次／丙（未選）sidecar 全文載入。見 D8。
+6. **E4（要本人決定）：`models.floor`／`preferred` 的值放哪、可不可以公開**——公開 repo 不寫模型輪換表。**建議：格式留欄位、v0 的值留空（`floor: null`、`preferred: []`＝未指定）；期 3 ModelBroker 落地前，由本人決定哪些值可以寫進公開檔（模型名本身不是憑證，但「哪個角色用哪個模型」的順序可能不想公開）。**
+7. **E7（低）：隊名**——v0 用 `worker-team`；期 2 部門命名（MyLinuxPool#5）再定。**建議：不阻塞，v0 就用。**
+8. **E9（新；要本人決定）：harness 放哪**——甲 MyAiStorage 的 git（建議；虛擬資料夾樹、PR 審查、與 angareion 共用複本）／乙 Google Drive（與 Agora 同套；沒有 PR 審查）／丙 實體複本（本人已排除）。見 D6。
+9. **E10（新；要本人決定）：讀取工具**——甲 新增 `atelier` 指令（建議；`ls`／`show`）／乙 併進 `agora`／丙 當特殊 Session。見 D7。
+10. **E11（新；要本人決定）：載入選項**——甲 固定開場句＋自讀＋新指示前重讀（建議）／乙 只在開頭讀一次／丙（未選）sidecar 全文載入。見 D8。
 
 **現況缺口（不是本人的裁定）**：
 
-10. **E6：worker 上「誰開 team、怎麼呼叫 `open`」**——sidecar 只綁 `127.0.0.1`；與 #52／#130 的後續相關。**建議：期 1 先用最簡做法（人在 worker 上或以本機 CLI／腳本呼叫 `open`），正式做法留給 #52 的後續；本設計不因它改介面。**
-11. **E3（原「harness 檔的正式位置」）**——已併入 E9（存放位置），不再單獨列。
+11. **E6：worker 上「誰開 team、怎麼呼叫 `open`」**——sidecar 只綁 `127.0.0.1`；與 #52／#130 的後續相關。**建議：期 1 先用最簡做法（人在 worker 上或以本機 CLI／腳本呼叫 `open`），正式做法留給 #52 的後續；本設計不因它改介面。**

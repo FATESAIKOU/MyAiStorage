@@ -9,12 +9,12 @@
 
 **範圍**：`src/atelier/`（新模組：`cli.py` 的 `ls`／`show`、讀取層 `git fetch`／`git show origin/main:<路徑>`、版本解析、設定）、`pyproject.toml`（entry point `atelier`、hatch packages）、`tests/unit/test_atelier_cli.py`。合併後：任何機器上（有本機複本）能用 `atelier ls`／`atelier show` 讀 harness，唯讀、匿名、離線可退。**一步一個 PR。**
 
-- [ ] 1.1 讀取層：本機複本＋`git fetch` 節流（沿用 angareion §11 的讀法；fetch 失敗沿用複本＋stderr 警告）；`git show origin/main:<路徑>` 讀檔；不依賴工作樹、不用憑證（可抽共用或先小型複製，實作決定）
+- [ ] 1.1 讀取層：**同一複本路徑（與 angareion 共用）、同一把 flock 鎖、20 秒逾時**（沿用 angareion §11；`openspec/changes/angareion-v5/design.md` 第 101 行）；`git fetch` 節流；fetch 失敗沿用複本＋stderr 警告；`git show origin/main:<路徑>` 讀檔；不依賴工作樹、不用憑證；**除複本自身的 fetch 外不寫任何檔案**（可抽共用或先小型複製，實作決定）
 - [ ] 1.2 `atelier ls`：列職務與版本（`atelier:worker-team-pm@v0`、`@v1`…；`--json`）
-- [ ] 1.3 `atelier show <id>[@<版本>] [--section …] [--json]`：預設整份原樣（byte-for-byte，含 frontmatter）；`--section` 只印該章節；不指定版本＝版本號最大
-- [ ] 1.4 退出碼與錯誤：0／1（用法、查無——查無先 fetch 一次）／2（複本不存在、檔案壞、git 壞）；訊息不含內文；沒有寫入路徑
-- [ ] 1.5 單元測試（假 git／假複本）：整份 byte-for-byte、`--section`、`--json`、latest／`@v0`、exit 1／2、fetch 失敗沿用複本（exit 不變）、唯讀
-- [ ] 1.6 改壞驗證：拿掉版本解析（永遠讀最新／忽略 `@`）、`--section` 抓錯段、fetch 失敗回 2、把內容「整理」過再印、讓工具能寫——各要讓 1.5 紅；逐項記在 PR 說明
+- [ ] 1.3 `atelier show <id>[@<版本>] [--section …] [--json]`：預設整份原樣（byte-for-byte，含 frontmatter）；`--section` 只印該章節；不指定版本＝版本號最大（同 role 資料夾最大的 N）
+- [ ] 1.4 退出碼與錯誤：0／1（用法、查無——查無先 fetch 一次）／2（複本不存在、檔案壞、git 壞）；訊息不含內文；**除複本自身的 fetch 外沒有寫入路徑**
+- [ ] 1.5 單元測試（假 git／假複本）：整份 byte-for-byte、`--section`、`--json`、latest／`@v0`、exit 1／2、fetch 失敗沿用複本（exit 不變）、**唯讀（除複本自身的 `git fetch` 外沒有寫入）**
+- [ ] 1.6 改壞驗證：拿掉版本解析（永遠讀最新／忽略 `@`）、`--section` 抓錯段、fetch 失敗回 2、把內容「整理」過再印、讓工具能寫 harness／工作目錄（不該有）——各要讓 1.5 紅；逐項記在 PR 說明
 - [ ] 1.7 文件：`docs/atelier/tool.md`（一頁：指令、退出碼、設定與複本、與 angareion 共用）
 
 **測試**：`uv run pytest -q tests/unit/test_atelier_cli.py`（不需要網路、不碰憑證；現無 CI，PR 說明附原樣輸出）。
