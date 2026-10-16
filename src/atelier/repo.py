@@ -202,6 +202,7 @@ class Repo:
         self._now = now
         self._fetch_head_mtime = fetch_head_mtime or self._read_fetch_head_mtime
         self._lock = lock or (lambda: FileLock(self.lock_path))
+        self._tried_fetch = False   # one fetch attempt per command, not one per lookup
 
     @classmethod
     def from_env(cls, **kwargs) -> Repo:
@@ -224,11 +225,15 @@ class Repo:
             raise RepoError(
                 f"本機複本不存在：{self.clone}（先 clone MyAiStorage 到這個路徑；見 docs/atelier/tool.md）"
             )
-        if not (self.clone / ".git").exists():
-            # Decided before the lock is taken: a plain directory must not get
-            # a stray .git/ or a lock file from a fetch that cannot work (L1).
+        git_dir = self.clone / ".git"
+        if not (git_dir.is_dir() and (git_dir / "HEAD").exists()):
+            # A git worktree or submodule has a `.git` *file*, and a plain or
+            # empty directory can fake one. The shared lock lives under .git/,
+            # so both are refused here, before the lock is taken: a lock file
+            # must never be left in something that is not a copy (中1/L4).
             raise RepoError(
-                f"本機複本不是 git 複本：{self.clone}（先 clone MyAiStorage 到這個路徑；見 docs/atelier/tool.md）"
+                f"本機複本不是 git 複本（沒有 .git 目錄）：{self.clone}"
+                "（先 clone MyAiStorage 到這個路徑；見 docs/atelier/tool.md）"
             )
 
     def _read_fetch_head_mtime(self) -> float | None:
@@ -240,10 +245,19 @@ class Repo:
     # -- fetching ----------------------------------------------------------
 
     def fetch(self) -> bool:
-        """Refresh the clone, serialized with angareion (the same lock file)."""
+        """Refresh the clone, serialized with angareion (the same lock file).
+
+        One attempt per command: `_tried_fetch` keeps a later lookup miss from
+        fetching (and warning) a second time after the periodic pull already
+        ran. A lock that cannot be taken at all is a copy problem, not a crash.
+        """
         self._ensure_clone()   # never create a stray .git under a missing or non-git directory
-        with self._lock():
-            return self._fetch()
+        self._tried_fetch = True
+        try:
+            with self._lock():
+                return self._fetch()
+        except OSError as e:
+            raise RepoError(f"取不到共用鎖（{self.lock_path}）：{e}") from e
 
     def _fetch(self) -> bool:
         """One `git fetch origin main`; a failure warns once and keeps the copy."""
@@ -269,7 +283,11 @@ class Repo:
             self.fetch()
 
     def refresh_for_lookup(self) -> None:
-        """A lookup miss asks for fresher data, but not more often than every 30s."""
+        """A lookup miss asks for fresher data, once per command and not more often
+        than every 30s - a fetch that already ran (and may have failed) is not tried
+        again, so an offline miss warns exactly once."""
+        if self._tried_fetch:
+            return
         mtime = self._fetch_head_mtime()
         if mtime is not None and self._now() - mtime < MIN_EVENT_FETCH_INTERVAL_SECONDS:
             return

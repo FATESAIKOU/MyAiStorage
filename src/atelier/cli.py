@@ -145,11 +145,14 @@ def _cmd_install(repo: Repo, args: argparse.Namespace) -> int:
     resolved = repo.resolve(ident)
     text = _decode(resolved.raw)
     try:
-        # A harness without frontmatter is not installable: the managed block's
-        # "ours" check relies on it, so refuse before anything is written.
-        frontmatter(text)
+        # The managed block's "ours" check accepts only a harness (parseable
+        # frontmatter with type: Harness), so refuse anything else before a
+        # single byte is written.
+        front = frontmatter(text)
     except HarnessFormatError as e:
         raise RepoError(f"不裝 {resolved.path}：{e}") from e
+    if front.get("type") != "Harness":
+        raise RepoError(f"不裝 {resolved.path}：frontmatter 的 type 不是 Harness")
     for agent in _agents(args.agent):
         if agent == "claude":
             target = claude_target(resolved.ident)

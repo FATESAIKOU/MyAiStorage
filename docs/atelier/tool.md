@@ -35,8 +35,8 @@ atelier install <id>[@<版本>] --agent <claude|opencode> [--agent …]
   <!-- /atelier:worker-team-pm -->
   ```
 
-- **冪等**：同一個 harness 的區塊被替換（重跑不堆疊）、區塊外的內容逐字保留；目標檔不存在就建立；寫入走同目錄暫存檔＋`os.replace`（中斷只會留下舊檔，不會半寫）。只有**整行、成對**且中間是 atelier 寫的（frontmatter 開頭）標記才當作我們的區塊；其他**壞檔拒絕**（原檔不動、exit 2）：不成對（有開頭沒結尾、只有結尾）或成對但不是我們的區塊。行內提到標記不算標記，你自己內容裡的標記行不會被吃掉。
-- **install 先驗 frontmatter**：要裝的 harness 必須有 frontmatter（開頭 `---` 的可解析 YAML 區塊）；沒有（或不是 YAML）＝exit 2、**什麼都不寫**——管理區塊的「ours」判定靠 frontmatter。
+- **冪等**：同一個 harness 的區塊被替換（重跑不堆疊）、區塊外的內容逐字保留（含 `\r\n`；讀寫都用位元組）；目標檔不存在就建立；寫入走同目錄暫存檔＋`os.replace`（中斷只會留下舊檔，不會半寫）。只有**整行、成對**的標記、**且**中間是可解析、`type: Harness` 的 frontmatter 區塊（= 兩個整行標記＋內文以 frontmatter 開頭），才會被當成我們的區塊；其他**壞檔拒絕**（原檔不動、exit 2）：不成對（有開頭沒結尾、只有結尾）或成對但不是我們的區塊。行內提到標記不算標記，你自己內容裡的標記行不會被吃掉。
+- **install 先驗**：要裝的 harness 必須有可解析的 frontmatter 且 `type: Harness`；沒有（或不是）＝exit 2、**什麼都不寫**。opencode 另外拒絕內文含整行管理標記的 harness（裝了會讓之後的 install 拒絕該檔）。
 - **不碰**：`~/.claude/settings.json`（也絕不產生 `apiKeyHelper`）、專案自己的 `AGENTS.md`／`CLAUDE.md`、工作目錄的任何檔案。
 - 生效：claude 在下一個新 conversation（`--resume` 時是否重載要在驗收確認）；opencode 依官方文件在下一個模型請求前。期 1 由 MyLinuxPool 的開機掛點跑 `atelier install atelier:worker-team-pm --agent claude --agent opencode`（PR 3；sidecar 不改）。
 - 本 PR 還沒放 harness 檔（PR 2），所以真實複本上的 `atelier ls` 目前會是空的。

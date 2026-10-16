@@ -338,6 +338,38 @@ def test_offline_fetch_failure_warns_once_and_uses_the_copy(harness_repo, capsys
     assert text.count("Warning") == 1 and "using the current copy" in text
 
 
+def test_an_offline_lookup_miss_warns_only_once(harness_repo, capsysbinary):
+    """One command tries one fetch, not two (periodic + event): one warning (L5)."""
+    _git("remote", "set-url", "origin", str(harness_repo.origin.parent / "gone"),
+         cwd=harness_repo.clone)
+    _age_fetch_head(harness_repo.clone, 10_000)
+    code, out, err = _run(capsysbinary, "show", "atelier:worker-team-pm@v9")
+    assert code == 1
+    assert err.decode().count("Warning") == 1, "the failed fetch must not be retried per command"
+
+
+def test_a_lookup_miss_still_fetches_when_the_periodic_pull_was_off(harness_repo, capsysbinary,
+                                                                    monkeypatch, tmp_path):
+    """`config_pull_interval=0` disables the periodic pull only, not the event fetch (L5)."""
+    monkeypatch.delenv("ATELIER_CONFIG_DIR")
+    monkeypatch.setenv("ANGAREION_CONFIG",
+                       str(_angareion_config(tmp_path, harness_repo.clone,
+                                             config_pull_interval=0)))
+    _run(capsysbinary, "show", "atelier:worker-team-pm@v0")   # makes FETCH_HEAD
+    _publish(harness_repo, "atelier/worker-team/pm/v9.md", H9)
+    _age_fetch_head(harness_repo.clone, 120)
+    code, out, err = _run(capsysbinary, "show", "atelier:worker-team-pm@v9")
+    assert code == 0, err
+    assert out == H9.encode(), "a miss must still fetch once with interval 0"
+
+
+def _fake_copy(root: Path) -> Path:
+    """A directory shaped like a git copy: `.git` is a directory with HEAD."""
+    (root / ".git").mkdir(parents=True)
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    return root
+
+
 def test_fetch_uses_the_shared_lock_and_the_20_second_timeout(tmp_path):
     class RecordingGit:
         def __init__(self):
@@ -350,8 +382,7 @@ def test_fetch_uses_the_shared_lock_and_the_20_second_timeout(tmp_path):
             return repo_mod.GitResult(0, b"", "")
 
     assert repo_mod.GIT_TIMEOUT_SECONDS == 20.0
-    clone = tmp_path / "clone"
-    (clone / ".git").mkdir(parents=True)   # a copy, not a plain directory
+    clone = _fake_copy(tmp_path / "clone")   # a copy, not a plain directory
     git = RecordingGit()
     instance = repo_mod.Repo(clone, git=git)
     assert instance.lock_path == clone / ".git" / "angareion-pull.lock"
@@ -387,8 +418,7 @@ def test_fetch_runs_while_the_shared_lock_is_held(tmp_path):
                 os.close(fd)
             return repo_mod.GitResult(0, b"", "")
 
-    clone = tmp_path / "clone"
-    (clone / ".git").mkdir(parents=True)
+    clone = _fake_copy(tmp_path / "clone")
     probe = LockProbeGit()
     instance = repo_mod.Repo(clone, git=probe)
     assert instance.fetch() is True
@@ -482,6 +512,55 @@ def test_a_plain_directory_is_not_a_copy_and_is_left_alone(tmp_path, monkeypatch
     code, out, err = _run(capsysbinary, "show", PM)
     assert code == 2
     assert _tree(plain) == before, "a non-git directory must not get a .git or a lock file"
+
+
+def test_a_git_worktree_is_refused_without_a_traceback_or_a_lock_file(harness_repo, tmp_path,
+                                                                       monkeypatch, capsysbinary):
+    """A worktree's .git is a file: refused as not-a-copy, before the lock (中1)."""
+    worktree = tmp_path / "worktree"
+    _git("worktree", "add", "--detach", str(worktree), "HEAD", cwd=harness_repo.clone)
+    assert (worktree / ".git").is_file()
+    git_file_before = (worktree / ".git").read_bytes()
+    monkeypatch.setenv("ATELIER_CONFIG_DIR", str(worktree))
+    before = _tree(worktree)
+    code, out, err = _run(capsysbinary, "ls")
+    assert code == 2
+    assert b"Traceback" not in err
+    assert (worktree / ".git").read_bytes() == git_file_before
+    assert _tree(worktree) == before, "no lock file may be left behind"
+
+
+def test_a_read_only_git_directory_is_exit_2_without_a_traceback(tmp_path, monkeypatch,
+                                                                  capsysbinary):
+    """A copy whose lock cannot be taken is a copy problem: exit 2, no traceback (中1)."""
+    clone = _fake_copy(tmp_path / "ro-clone")
+    git_dir = clone / ".git"
+    monkeypatch.setenv("ATELIER_CONFIG_DIR", str(clone))
+    monkeypatch.delenv("ANGAREION_CONFIG", raising=False)
+    os.chmod(git_dir, 0o500)
+    try:
+        code, out, err = _run(capsysbinary, "ls")
+    finally:
+        os.chmod(git_dir, 0o755)
+    assert code == 2
+    assert b"Traceback" not in err
+    assert not (git_dir / "angareion-pull.lock").exists()
+
+
+def test_a_git_directory_without_head_is_refused_and_gets_no_lock_file(tmp_path, monkeypatch,
+                                                                       capsysbinary):
+    """An empty fake .git is not a copy: no lock file may appear in it (L4)."""
+    fake = tmp_path / "fake"
+    (fake / ".git").mkdir(parents=True)
+    monkeypatch.setenv("ATELIER_CONFIG_DIR", str(fake))
+    monkeypatch.delenv("ANGAREION_CONFIG", raising=False)
+    before = _tree(fake)
+    code, out, err = _run(capsysbinary, "ls")
+    assert code == 2
+    assert b"Traceback" not in err
+    code, out, err = _run(capsysbinary, "show", PM)
+    assert code == 2
+    assert _tree(fake) == before, "a fake .git must not get a lock file"
 
 
 # --- ls --------------------------------------------------------------------------
@@ -821,3 +900,79 @@ def test_install_refuses_a_harness_with_broken_frontmatter_and_writes_nothing(ha
     assert code == 2
     assert b"LEAKME" not in err
     assert not (install_env.claude / "rules").exists(), "nothing may be written"
+
+
+def test_install_refuses_a_harness_whose_type_is_not_harness(harness_repo, install_env,
+                                                             capsysbinary):
+    """The block checker only accepts type: Harness, so install refuses it up front (低6)."""
+    _publish(harness_repo, "atelier/worker-team/pm/v3.md", H1.replace("type: Harness", "type: Note"))
+    _age_fetch_head(harness_repo.clone, 120)
+    code, out, err = _run(capsysbinary, "install", "atelier:worker-team-pm@v3",
+                          "--agent", "claude", "--agent", "opencode")
+    assert code == 2
+    assert err != b""
+    assert not (install_env.claude / "rules").exists(), "nothing may be written"
+    assert not _opencode_file(install_env).parent.exists(), "nothing may be written"
+
+
+def test_install_opencode_keeps_the_users_line_endings(harness_repo, install_env, capsysbinary):
+    """A user file's \\r\\n is kept byte-for-byte outside the block (低1)."""
+    target = _opencode_file(install_env)
+    target.parent.mkdir(parents=True)
+    user = b"# user\r\nsecond\r\n"
+    target.write_bytes(user)
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    assert code == 0, err
+    first = target.read_bytes()
+    assert first.startswith(user), "\\r\\n outside the block is kept byte-for-byte"
+    assert CLAUDE_MARKER.encode() in first and H1.encode() in first
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    assert code == 0, err
+    assert target.read_bytes() == first, "a second install replaces the block, nothing else"
+
+
+def test_install_refuses_a_harness_whose_body_contains_a_marker_line(harness_repo, install_env,
+                                                                      capsysbinary):
+    """A harness body with a whole marker line would make later installs refuse (低2)."""
+    polluted = H1.replace("## dont", CLAUDE_END + "\n\n## dont")
+    assert CLAUDE_END in polluted.splitlines(), "the test harness really carries the marker line"
+    _publish(harness_repo, "atelier/worker-team/pm/v3.md", polluted)
+    _age_fetch_head(harness_repo.clone, 120)
+    code, out, err = _run(capsysbinary, "install", "atelier:worker-team-pm@v3",
+                          "--agent", "opencode")
+    assert code == 2
+    assert err != b""
+    assert not _opencode_file(install_env).parent.exists(), "nothing is written"
+
+
+def test_an_inline_marker_mention_is_plain_text_not_a_block(harness_repo, install_env,
+                                                             capsysbinary):
+    """Only whole lines are markers: an inline mention never starts or ends a block (低3)."""
+    target = _opencode_file(install_env)
+    target.parent.mkdir(parents=True)
+    inline = "說明：<!-- atelier:worker-team-pm --> 的用法\n"
+    target.write_text(inline, encoding="utf-8")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    assert code == 0, err
+    text = target.read_text(encoding="utf-8")
+    assert text.startswith(inline), "the inline line is kept as it was"
+    assert text.count(CLAUDE_MARKER) == 2, "the inline mention + our own opening marker"
+    assert _block_between(text, CLAUDE_MARKER, CLAUDE_END) == H1
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    assert code == 0, err
+    assert target.read_text(encoding="utf-8") == text, "the inline mention is not a marker"
+
+
+@pytest.mark.parametrize("body", ["---\nUSER QUOTED FRONTMATTER\n",
+                                  "---\ntype: Note\ntitle: 不是 harness\n---\n"])
+def test_install_refuses_a_marker_pair_that_only_starts_like_a_harness(body, harness_repo,
+                                                                        install_env,
+                                                                        capsysbinary):
+    """Paired markers are ours only when the block really is a harness (低6)."""
+    target = _opencode_file(install_env)
+    target.parent.mkdir(parents=True)
+    quoted = "# user\n" + CLAUDE_MARKER + "\n" + body + CLAUDE_END + "\n"
+    target.write_text(quoted, encoding="utf-8")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    assert code == 2, "a lookalike block must be refused, not replaced"
+    assert target.read_text(encoding="utf-8") == quoted, "the file must be untouched"

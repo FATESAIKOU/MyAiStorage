@@ -19,7 +19,7 @@ from pathlib import Path
 import stat
 import uuid
 
-from atelier.harness import HarnessId
+from atelier.harness import HarnessFormatError, HarnessId, frontmatter
 
 
 class InstallError(RuntimeError):
@@ -61,12 +61,13 @@ def _marker_positions(text: str, start: str, end: str) -> list[tuple[str, int, i
     """(kind, line start, line end) for every whole line equal to a marker.
 
     Only a complete line counts: a mention of the marker inside a line of the
-    user's own prose is not a marker and cannot start (or end) a block.
+    user's own prose is not a marker and cannot start (or end) a block. A
+    trailing \\r of a \\r\\n file belongs to the line ending, not to the line.
     """
     found: list[tuple[str, int, int]] = []
     offset = 0
     for line in text.splitlines(keepends=True):
-        body = line[:-1] if line.endswith("\n") else line
+        body = line.rstrip("\r\n")
         if body == start:
             found.append(("open", offset, offset + len(line)))
         elif body == end:
@@ -76,8 +77,17 @@ def _marker_positions(text: str, start: str, end: str) -> list[tuple[str, int, i
 
 
 def _looks_like_our_block(region: str) -> bool:
-    """Only blocks atelier wrote hold a harness, and a harness starts with frontmatter."""
-    return region.startswith("---\n")
+    """Only our blocks hold a harness: frontmatter that parses and says type: Harness.
+
+    A pair of marker lines around text that merely starts with `---` (or whose
+    frontmatter is another kind of document) is not ours - the caller refuses
+    it rather than replacing the user's text (低6).
+    """
+    try:
+        data = frontmatter(region.replace("\r\n", "\n").replace("\r", "\n"))
+    except HarnessFormatError:
+        return False
+    return data.get("type") == "Harness"
 
 
 def replace_managed_block(text: str, ident: HarnessId, block: str) -> str:
@@ -170,8 +180,19 @@ def install_claude(target: Path, raw: bytes) -> None:
 
 def install_opencode(target: Path, ident: HarnessId, raw_text: str) -> None:
     """Wrap the harness in the managed block, keeping the user's own content."""
+    start, end = marker_lines(ident)
+    if _marker_positions(raw_text, start, end):
+        # The block we would write would carry marker lines inside itself, and
+        # every later install would refuse the target: ask for a harness rewrite
+        # instead of writing something we cannot manage (低2).
+        raise InstallError(
+            f"{ident} 的 harness 內文含整行的管理標記；裝進去會讓之後的 install 拒絕這個檔，"
+            "請改寫 harness 後再裝"
+        )
     try:
-        current = target.read_text(encoding="utf-8") if target.is_file() else ""
+        # Bytes, not text: read_text would translate the user's CRLF/CR lines
+        # to LF, and "everything outside the block is kept" must be true (低1).
+        current = target.read_bytes().decode("utf-8") if target.is_file() else ""
     except (OSError, UnicodeDecodeError) as e:
         raise InstallError(f"讀不到 {target}：{e}") from e
     new_text = replace_managed_block(current, ident, managed_block(ident, raw_text))
