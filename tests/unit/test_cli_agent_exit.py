@@ -14,13 +14,22 @@ from __future__ import annotations
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401
 
 import json
+import os
+import shutil
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from agora import cli, store
+from agora.agents import claude as C
 from agora.agents.base import Exported, Launch
 
 FAKE_RCLONE = Path(__file__).resolve().parent.parent / "fakes" / "fake_rclone.py"
+CL_FIX = Path(__file__).resolve().parent.parent / "fixtures" / "claude"
+CL_SID = "11111111-2222-4333-8444-555555555555"
+HEADLESS_SYNC = "0.005"
 
 
 class ExitAgent:
@@ -216,3 +225,258 @@ def test_agent_failure_plus_upload_failure_keeps_exit_3_with_signal(
                        "--dir", "/tmp", "--sync-period", "0")
     assert code == cli.EXIT_IN_OUTBOX == 3, err
     assert "agora-agent-failed rc=7" in err
+
+
+def test_final_write_exception_still_prints_signal(env, capsys, monkeypatch):
+    """#76 Minor3: `_final_write` raises (main → exit 2), the death is still said."""
+    _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a",
+                       "--agent", "opencode")
+    _fail_with(monkeypatch, 7)
+    def _boom(*args, **kwargs):
+        raise store.StoreError("boom")
+    monkeypatch.setattr(cli, "_final_write", _boom)
+    code, _, err = run(capsys, "continue", "session", parent, "--agent", "opencode",
+                       "--dir", "/tmp", "--sync-period", "0")
+    assert code == cli.EXIT_ERROR == 2, err
+    assert "agora-agent-failed rc=7" in err
+
+
+def test_fork_agent_failure_reports_5(env, capsys, monkeypatch):
+    """#76 Minor2: `--fork` + dead agent - B stays, the exit is the fixed 5."""
+    _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a",
+                       "--agent", "opencode")
+    before_parent = store.Index(store.Paths.from_env()).header(parent.split(":")[1])
+    _fail_with(monkeypatch, 7)
+    code, child, err = run(capsys, "continue", "session", parent, "--agent", "opencode",
+                           "--fork", "--dir", "/tmp", "--sync-period", "0")
+    assert code == cli.EXIT_AGENT_FAILED == 5, err
+    assert "agora-agent-failed rc=7" in err
+    assert child != parent and child.startswith("agora:")
+    code, shown, _ = run(capsys, "show", "session", child)
+    assert code == 0
+    assert "接著做完了" in shown
+    after_parent = store.Index(store.Paths.from_env()).header(parent.split(":")[1])
+    assert after_parent == before_parent
+
+
+def test_no_new_at_final_but_wrote_before_reports_5(env, capsys, monkeypatch):
+    """#76 Minor2: periodic wrote, final has nothing new - the `run.wrote` branch."""
+    _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a",
+                       "--agent", "opencode")
+    orig_collect = env.collect
+    calls = {"n": 0}
+
+    def collect_once(launch):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            env.speak = False  # nothing beyond what the periodic round already wrote
+        return orig_collect(launch)
+
+    monkeypatch.setattr(env, "collect", collect_once)
+    _die_with(monkeypatch, ["sh", "-c", "sleep 2; exit 7"])
+    code, out, err = run(capsys, "continue", "session", parent, "--agent", "opencode",
+                         "--dir", "/tmp", "--sync-period", "0.005")
+    assert calls["n"] >= 2, "no periodic round happened; the branch was not hit"
+    assert code == cli.EXIT_AGENT_FAILED == 5, err
+    assert "agora-agent-failed rc=7" in err
+    assert out == parent
+
+
+# --- Major1: headless + term_forwarded, in real subprocesses -------------------
+
+AGENT_FAIL_FAST = """\
+import datetime, json, os, sys, uuid
+args = sys.argv[1:]
+if args[:1] == ["--version"]:
+    print("9.9.9 (Fake Claude)")
+    sys.exit(0)
+sid = args[args.index("--resume") + 1]
+from agora.agents.claude import encode_project_dir
+home = os.environ["AGORA_CLAUDE_HOME"]
+path = os.path.join(home, ".claude", "projects",
+                    encode_project_dir(os.getcwd()), sid + ".jsonl")
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+user = {"type": "user", "sessionId": sid, "uuid": str(uuid.uuid4()),
+        "parentUuid": None, "timestamp": now, "cwd": os.getcwd(),
+        "message": {"role": "user", "content": "ZZHL 死前說了一句"}}
+assistant = {"type": "assistant", "sessionId": sid, "uuid": str(uuid.uuid4()),
+             "parentUuid": user["uuid"], "timestamp": now, "cwd": os.getcwd(),
+             "message": {"role": "assistant",
+                         "content": [{"type": "text", "text": "ZZHL 收到"}]}}
+with open(path, "a") as f:
+    f.write(json.dumps(user, ensure_ascii=False) + "\\n")
+    f.write(json.dumps(assistant, ensure_ascii=False) + "\\n")
+sys.exit(7)
+"""
+
+AGENT_TERM_EXIT_1 = """\
+import datetime, json, os, signal, sys, time, uuid
+args = sys.argv[1:]
+if args[:1] == ["--version"]:
+    print("9.9.9 (Fake Claude)")
+    sys.exit(0)
+sid = args[args.index("--resume") + 1]
+from agora.agents.claude import encode_project_dir
+home = os.environ["AGORA_CLAUDE_HOME"]
+path = os.path.join(home, ".claude", "projects",
+                    encode_project_dir(os.getcwd()), sid + ".jsonl")
+now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+user = {"type": "user", "sessionId": sid, "uuid": str(uuid.uuid4()),
+        "parentUuid": None, "timestamp": now, "cwd": os.getcwd(),
+        "message": {"role": "user", "content": "ZZHL 轉送前說了一句"}}
+assistant = {"type": "assistant", "sessionId": sid, "uuid": str(uuid.uuid4()),
+             "parentUuid": user["uuid"], "timestamp": now, "cwd": os.getcwd(),
+             "message": {"role": "assistant",
+                         "content": [{"type": "text", "text": "ZZHL 收到"}]}}
+with open(path, "a") as f:
+    f.write(json.dumps(user, ensure_ascii=False) + "\\n")
+    f.write(json.dumps(assistant, ensure_ascii=False) + "\\n")
+print("AGENT-READY", flush=True)
+def _on_term(signum, frame):
+    sys.exit(1)
+signal.signal(signal.SIGTERM, _on_term)
+while True:
+    time.sleep(0.1)
+"""
+
+
+def _headless_lab(tmp_path, monkeypatch, script: str):
+    """Real claude adapter over a scripted `claude` that dies however we ask."""
+    remote = tmp_path / "remote"
+    remote.mkdir(exist_ok=True)
+    rclone = tmp_path / "rclone"
+    rclone.write_text(f"#!/bin/sh\nexec {sys.executable} {FAKE_RCLONE} \"$@\"\n")
+    rclone.chmod(0o755)
+    monkeypatch.setenv("FAKE_REMOTE", str(remote))
+    monkeypatch.setenv("AGORA_RCLONE", str(rclone))
+    monkeypatch.setenv("FAKE_HOME", str(tmp_path / "fh"))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    home = Path(os.environ["AGORA_CLAUDE_HOME"])
+    work = tmp_path / "proj"
+    work.mkdir(exist_ok=True)
+    proj = home / ".claude" / "projects" / C.encode_project_dir(work)
+    proj.mkdir(parents=True, exist_ok=True)
+    shutil.copy(CL_FIX / "cl-basic.jsonl", proj / f"{CL_SID}.jsonl")
+    agent_py = tmp_path / "agent_under_test.py"
+    agent_py.write_text(script)
+    wrapper = tmp_path / "claude"
+    wrapper.write_text(f"#!/bin/sh\nexec {sys.executable} {agent_py} \"$@\"\n")
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("AGORA_CLAUDE_CMD", str(wrapper))
+    monkeypatch.setattr(cli, "load_agent", lambda name: C.ADAPTER)
+    return {"home": home, "work": work}
+
+
+class _Headless:
+    """One headless continue in a subprocess, stdio parked in files (not pipes)."""
+
+    def __init__(self, lab, tmp_path, agora_id):
+        self.out_path = tmp_path / "headless.out"
+        self.err_path = tmp_path / "headless.err"
+        self._out = open(self.out_path, "wb")
+        self._err = open(self.err_path, "wb")
+        self.proc = subprocess.Popen(
+            [sys.executable, "-m", "agora.cli", "continue", "session", agora_id,
+             "--agent", "claude", "--dir", str(lab["work"]), "--headless",
+             "--sync-period", HEADLESS_SYNC],
+            stdout=self._out, stderr=self._err, stdin=subprocess.DEVNULL,
+            env=dict(os.environ), cwd=str(tmp_path), text=True,
+        )
+
+    def stderr(self) -> str:
+        return self.err_path.read_text(encoding="utf-8", errors="replace")
+
+    def stdout(self) -> str:
+        return self.out_path.read_text(encoding="utf-8", errors="replace")
+
+    def wait_for_stderr(self, prefix, timeout=30.0) -> str:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for line in self.stderr().splitlines():
+                if line.startswith(prefix):
+                    return line
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.02)
+        raise AssertionError(f"never saw stderr {prefix!r}; got {self.stderr()!r}")
+
+    def wait_for_stdout(self, needle, timeout=30.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if needle in self.stdout():
+                return
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.02)
+        raise AssertionError(f"never saw stdout {needle!r}; got {self.stdout()!r}")
+
+    def terminate(self, timeout=60.0) -> int:
+        self.proc.send_signal(signal.SIGTERM)
+        return self.wait(timeout)
+
+    def wait(self, timeout=60.0) -> int:
+        code = self.proc.wait(timeout=timeout)
+        self._out.close()
+        self._err.close()
+        return code
+
+
+def test_headless_agent_dies_before_sigterm_reports_5(tmp_path, monkeypatch, capsys):
+    """Major1(a): headless, agent already dead (rc=7) when sidecar would signal."""
+    lab = _headless_lab(tmp_path, monkeypatch, AGENT_FAIL_FAST)
+    code, a, err = run(capsys, "import", "session", "--external-session-id", CL_SID,
+                       "--agent", "claude")
+    assert code == 0, err
+    headless = _Headless(lab, tmp_path, a)
+    assert headless.wait(timeout=60) == cli.EXIT_AGENT_FAILED == 5
+    assert "agora-agent-failed rc=7" in headless.stderr()
+    code, shown, err = run(capsys, "show", "session", a)
+    assert code == 0, err
+    assert "ZZHL 死前說了一句" in shown
+
+
+def test_headless_forwarded_sigterm_exit_1_stays_0(tmp_path, monkeypatch, capsys):
+    """Major1(b): SIGTERM forwarded, agent ends 1 (non-conventional) - still 0, no line."""
+    lab = _headless_lab(tmp_path, monkeypatch, AGENT_TERM_EXIT_1)
+    code, a, err = run(capsys, "import", "session", "--external-session-id", CL_SID,
+                       "--agent", "claude")
+    assert code == 0, err
+    headless = _Headless(lab, tmp_path, a)
+    assert headless.wait_for_stderr("agora-session ") == f"agora-session {a}"
+    headless.wait_for_stdout("AGENT-READY")
+    assert headless.terminate() == 0
+    assert "agora-agent-failed" not in headless.stderr()
+    code, shown, err = run(capsys, "show", "session", a)
+    assert code == 0, err
+    assert "ZZHL 轉送前說了一句" in shown
+
+
+def test_forward_sigterm_only_to_live_child():
+    """Major1: the poll() guard - a dead child gets nothing, so a late SIGTERM
+    cannot whitewash an earlier death into a gentle stop."""
+
+    class _Live:
+        def __init__(self):
+            self.sent = []
+        def poll(self):
+            return None
+        def send_signal(self, sig):
+            self.sent.append(sig)
+
+    class _Zombie:
+        """Exited (poll() set) but send would still succeed - without the guard
+        this looks forwarded."""
+        def __init__(self):
+            self.sent = []
+        def poll(self):
+            return 7
+        def send_signal(self, sig):
+            self.sent.append(sig)
+
+    live = _Live()
+    assert cli._forward_sigterm(live) is True
+    assert live.sent == [signal.SIGTERM]
+
+    zombie = _Zombie()
+    assert cli._forward_sigterm(zombie) is False
+    assert zombie.sent == []

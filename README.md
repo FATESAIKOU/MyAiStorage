@@ -159,12 +159,12 @@ agora show session agora:01K6… --raw
 |---|---|
 | 0 | 成功 |
 | 1 | 做不到：找不到 id、沒有訊息可匯入、merge 少於兩個、delete 沒加 `--yes`、有子 Session |
-| 2 | 錯誤：標頭、Drive、agent 或非預期的錯誤，以及指令用法錯誤 |
+| 2 | 錯誤：標頭、Drive、agent 匯出失敗或非預期的錯誤，以及指令用法錯誤 |
 | 3 | 還在 outbox（背景上傳器起不來，或 `AGORA_UPLOAD=inline` 時這一輪沒送完） |
 | 4 | 這個 Session 正在接續中（同一台機器有另一個 `continue` 在寫回它）：說明之前先印一行 `agora-locked <agora id>`，呼叫方用它分辨（409）；`--fork` 不受影響 |
 | 5 | `continue` 的 agent 子行程死掉（`returncode != 0`，130／143／-2／-15 除外，見下）：寫回照做，stderr 印一行 `agora-agent-failed rc=<原碼>`；寫回成功回 5，寫回失敗回 3（同樣印那一行） |
 
-- `continue` 的 agent 失敗（#76）：舊行為是只看寫回結果，agent 死掉又沒有新內容時回 0；第一版改成回 agent 原碼，但原碼會與 agora 自己的 1／2／3／4 撞碼。新行為是寫回仍然照做（死前的內容不丟），但 agent 以 `returncode != 0` 結束（排除 130／143、-2／-15，以及 headless 溫和停下時 agora 自己轉送 SIGTERM 造成的結束；-9／-11 都算失敗）時，stderr 印固定一行 `agora-agent-failed rc=<原碼>`（負值照印，如 `rc=-9`），寫回成功回固定的 5，寫回失敗維持 3。正常結束（0）、使用者離開、headless 被 SIGTERM 溫和停下（exit 0）不變。0／1／2／3／4 的原語意完全不變：絕不把 agent 原碼當 exit code，sidecar 靠 exit 4＝locked 判斷不受影響。
+- `continue` 的 agent 失敗（#76）：舊行為是只看寫回結果，agent 死掉又沒有新內容時回 0；第一版改成回 agent 原碼，但原碼會與 agora 自己的 1／2／3／4 撞碼。新行為是寫回仍然照做（死前的內容不丟），但 agent 以 `returncode != 0` 結束（排除 130／143、-2／-15，以及轉送過 SIGTERM 之後的結束（不論 agent 回什麼碼）；-9／-11 都算失敗）時，stderr 印固定一行 `agora-agent-failed rc=<原碼>`（負值照印，如 `rc=-9`），寫回成功回固定的 5，寫回失敗維持 3。正常結束（0）、使用者離開、headless 被 SIGTERM 溫和停下（exit 0）不變。0／1／2／3／4 的原語意完全不變：絕不把 agent 原碼當 exit code，sidecar 靠 exit 4＝locked 判斷不受影響。
 
 **`agora continue` exit code 新舊對照（#76）：**
 
@@ -175,7 +175,7 @@ agora show session agora:01K6… --raw
 | 2 | 錯誤：標頭、Drive、agent 匯出失敗或非預期錯誤 | 回 2 | 不變 | 中文說明，無固定行 |
 | 3 | 還在 outbox：寫回已存本機但上傳沒送完 | 回 3 | 不變；agent 同時死時仍回 3，但多印 agent 那一行 | 上傳失敗說明；agent 同死時加 `agora-agent-failed rc=<原碼>` |
 | 4 | 被鎖：同機另一個 `continue` 正在寫回它 | 回 4 | 不變（絕不被 agent 原碼污染） | `agora-locked <agora id>` 在說明之前 |
-| 5 | agent 死掉：`returncode != 0`（排除 130／143、-2／-15、轉送的結束；-9／-11 算） | 回 0（失敗被吞掉；第一版曾回 agent 原碼，會撞 1／2／3／4） | 新增：寫回照做，寫回成功回 5，寫回失敗回 3（都印行） | `agora-agent-failed rc=<原碼>`（如 `rc=3`、`rc=-9`） |
+| 5 | agent 死掉：`returncode != 0`（排除 130／143、-2／-15、轉送過 SIGTERM 之後的結束；-9／-11 算） | 回 0（失敗被吞掉） | 新增：寫回照做，寫回成功回 5，寫回失敗回 3（都印行） | `agora-agent-failed rc=<原碼>`（如 `rc=3`、`rc=-9`） |
 
 **先存本機，Drive 的部分交給背景。** import、continue、merge、edit 寫完本機（鏡像裡有完整的一份，含原始檔）就回 exit 0，背景上傳器慢慢送；`delete` 也是本機先不見，Drive 那份排進 `<state>/trash-queue/`，背景逐一 purge。所以指令的離開時間不再由 Drive 決定。
 

@@ -110,7 +110,7 @@
 - **THEN** 被拒絕（exit 1），說明 A 正在接續中；第一個接續不受影響
 
 ### Requirement: agent 死掉要傳出來
-agent 子行程以 `returncode != 0` 結束（排除 130／143、-2／-15，以及 headless 溫和停下時 agora 自己轉送 SIGTERM 造成的結束；-9／-11 都算失敗）時，`agora continue` MUST 照做寫回（死前的內容 MUST NOT 丟），stderr MUST 印固定一行 `agora-agent-failed rc=<原碼>`（#54 的風格，負值照印如 `rc=-9`）；寫回成功時 MUST 回固定的 5（`EXIT_AGENT_FAILED`），寫回失敗時 MUST 維持寫回自己的失敗碼（3，同樣印那一行）。舊行為是只看寫回結果，agent 死掉又沒有新內容時回 0；第一版回 agent 原碼，但原碼會與 agora 自己的 1／2／3／4 撞碼，故改固定 5。新行為下正常結束（0）、使用者離開、headless 被 SIGTERM 溫和停下（exit 0）MUST 不變。
+agent 子行程以 `returncode != 0` 結束（排除 130／143、-2／-15，以及轉送過 SIGTERM 之後的結束（不論 agent 回什麼碼）；-9／-11 都算失敗）時，`agora continue` MUST 照做寫回（死前的內容 MUST NOT 丟），stderr MUST 印固定一行 `agora-agent-failed rc=<原碼>`（#54 的風格，負值照印如 `rc=-9`）；寫回成功時 MUST 回固定的 5（`EXIT_AGENT_FAILED`），寫回失敗時 MUST 維持寫回自己的失敗碼（3，同樣印那一行）。舊行為是只看寫回結果，agent 死掉又沒有新內容時回 0；第一版回 agent 原碼，但原碼會與 agora 自己的 1／2／3／4 撞碼，故改固定 5。新行為下正常結束（0）、使用者離開、headless 被 SIGTERM 溫和停下（exit 0）MUST 不變。
 
 #### Scenario: agent 死掉且沒有新內容
 - **WHEN** agent 以 exit 3 結束，結束時沒有新對話

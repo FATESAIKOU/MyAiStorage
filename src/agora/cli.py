@@ -1364,6 +1364,22 @@ def _periodic_write(run: "_Run", agent: Agent) -> None:
         run.logger = None
 
 
+def _forward_sigterm(child) -> bool:
+    """Send SIGTERM to a live agent child; say whether it was forwarded (Major1).
+
+    A child that already exited (`poll()` not None) gets nothing - a SIGTERM
+    arriving after the agent's death must not whitewash its exit code into a
+    gentle stop. Returns True only when the signal was actually sent.
+    """
+    if child.poll() is None:
+        try:
+            child.send_signal(signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+    return False
+
+
 def _agent_failure(returncode: int | None, forwarded: bool) -> int | None:
     """The agent's own failure to report, or None when it is not one (#76).
 
@@ -1688,13 +1704,8 @@ def cmd_continue(args, paths: store.Paths) -> int:
 
     def _term_child(child) -> None:
         nonlocal term_forwarded
-        if child.poll() is None:
-            try:
-                child.send_signal(signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-            else:
-                term_forwarded = True
+        if _forward_sigterm(child):
+            term_forwarded = True
 
     if headless:
         # Gentle stop (design D6): SIGTERM forwards to the agent, then this
@@ -1753,7 +1764,14 @@ def cmd_continue(args, paths: store.Paths) -> int:
         return EXIT_AGENT_FAILED if normal == 0 else normal
 
     store._fault("before-finalize")
-    saved, target, final_note = _final_write(run, agent)
+    try:
+        saved, target, final_note = _final_write(run, agent)
+    except Exception:
+        # Minor3: the write-back itself blew up (main turns it into exit 2) -
+        # the agent's death is still said out loud before the exception goes on.
+        if failed is not None:
+            print(f"agora-agent-failed rc={failed}", file=sys.stderr)
+        raise
     run.pending.unlink()          # the current path: a rescue may have renamed it
     lock.close()
     if run.first_note is not None and final_note is None:
