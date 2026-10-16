@@ -44,7 +44,7 @@ harness MUST 構成「一個團隊／職務一組」的虛擬資料夾樹（依 
 - **THEN** 它回報提議（用 Angareion／回報格式），MUST NOT 直接改 harness 樹
 
 ### Requirement: 讀取工具（`atelier`）
-repo MUST 附一個讀取工具（依 D7 的建議＝指令 `atelier`，與 agora／angareion 同一家族；見頂部註），對外 MUST 只有讀的操作：`atelier ls`（列職務與版本）與 `atelier show <id>[@<版本>] [--section know|do|judge|dont|capabilities] [--json]`。`show` 不給 `--section` 時 MUST 印整份檔原樣（含 frontmatter）；給 `--section` 時 MUST 只印該章節的內容。讀取 MUST 走本機複本（MyAiStorage 的 clone）＋`git fetch`（匿名 HTTPS；查無時先 fetch 一次；**同一複本路徑、同一把 flock 鎖與 20 秒逾時——沿用 angareion §11**），MUST NOT 依賴工作樹、MUST NOT 需要憑證。**MUST NOT 寫入 harness 樹、工作目錄或使用者檔案；唯一的本機寫入是複本自身的 `git fetch` 更新**（安裝見下一條）。`git fetch` 失敗（離線、網路）時 MUST 在 stderr 警告一次並沿用目前的複本，MUST NOT 改變退出碼。退出碼：0 成功；1 用法錯或找不到（id／版本／章節）；2 讀取失敗（複本不存在、檔案壞、git 壞）；沒有其他碼。錯誤訊息 MUST NOT 含 harness 內文。
+repo MUST 附一個讀取工具（依 D7 的建議＝指令 `atelier`，與 agora／angareion 同一家族；見頂部註），對外 MUST 只有讀的操作：`atelier ls`（列職務與版本）與 `atelier show <id>[@<版本>] [--section know|do|judge|dont|capabilities] [--json]`。`show` 不給 `--section` 時 MUST 印整份檔原樣（含 frontmatter）；給 `--section` 時 MUST 只印該章節的內容。讀取 MUST 走本機複本（MyAiStorage 的 clone）＋`git fetch`（匿名 HTTPS；查無時先 fetch 一次；**同一複本路徑、同一把 flock 鎖與 20 秒逾時——沿用 angareion §11**；那一次 fetch 受節流限制——距上次 fetch 不足 30 秒不再 fetch；週期 fetch 沿用 angareion 的 `config_pull_interval`——未設定時 900 秒、`0`＝不按週期拉；複本路徑以 `ATELIER_CONFIG_DIR` 優先，否則取 angareion `config.json` 的 `config_dir`），MUST NOT 依賴工作樹、MUST NOT 需要憑證。**MUST NOT 寫入 harness 樹、工作目錄或使用者檔案；唯一的本機寫入是複本自身的 `git fetch` 更新**（安裝見下一條）。`git fetch` 失敗（離線、網路）時 MUST 在 stderr 警告一次並沿用目前的複本，MUST NOT 改變退出碼。退出碼：0 成功；1 用法錯或找不到（id／版本／章節）；2 讀取失敗（複本不存在、檔案壞、git 壞）；沒有其他碼。錯誤訊息 MUST NOT 含 harness 內文。
 
 #### Scenario: 讀整份
 - **WHEN** `atelier show atelier:worker-team-pm@v0`
