@@ -793,3 +793,31 @@ def test_install_refuses_an_orphan_closing_marker(harness_repo, install_env, cap
     code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
     assert code == 2
     assert target.read_text(encoding="utf-8") == orphan
+
+
+def test_install_refuses_a_harness_without_frontmatter_and_writes_nothing(harness_repo,
+                                                                          install_env,
+                                                                          capsysbinary):
+    """install validates first: no frontmatter means exit 2 and nothing is written."""
+    _publish(harness_repo, "atelier/worker-team/pm/v3.md",
+             "# 沒有 frontmatter\n\n## know\n\n內文\n")
+    _age_fetch_head(harness_repo.clone, 120)
+    code, out, err = _run(capsysbinary, "install", "atelier:worker-team-pm@v3",
+                          "--agent", "claude", "--agent", "opencode")
+    assert code == 2
+    assert err != b"" and b"Traceback" not in err
+    assert not (install_env.claude / "rules").exists(), "nothing may be written"
+    assert not _opencode_file(install_env).parent.exists(), "nothing may be written"
+
+
+def test_install_refuses_a_harness_with_broken_frontmatter_and_writes_nothing(harness_repo,
+                                                                              install_env,
+                                                                              capsysbinary):
+    """Frontmatter that exists but is not YAML is refused too - and does not leak."""
+    _publish(harness_repo, "atelier/worker-team/pm/v3.md", BAD_FRONTMATTER)
+    _age_fetch_head(harness_repo.clone, 120)
+    code, out, err = _run(capsysbinary, "install", "atelier:worker-team-pm@v3",
+                          "--agent", "claude")
+    assert code == 2
+    assert b"LEAKME" not in err
+    assert not (install_env.claude / "rules").exists(), "nothing may be written"

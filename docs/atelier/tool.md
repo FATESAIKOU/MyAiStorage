@@ -36,6 +36,7 @@ atelier install <id>[@<版本>] --agent <claude|opencode> [--agent …]
   ```
 
 - **冪等**：同一個 harness 的區塊被替換（重跑不堆疊）、區塊外的內容逐字保留；目標檔不存在就建立；寫入走同目錄暫存檔＋`os.replace`（中斷只會留下舊檔，不會半寫）。只有**整行、成對**且中間是 atelier 寫的（frontmatter 開頭）標記才當作我們的區塊；其他**壞檔拒絕**（原檔不動、exit 2）：不成對（有開頭沒結尾、只有結尾）或成對但不是我們的區塊。行內提到標記不算標記，你自己內容裡的標記行不會被吃掉。
+- **install 先驗 frontmatter**：要裝的 harness 必須有 frontmatter（開頭 `---` 的可解析 YAML 區塊）；沒有（或不是 YAML）＝exit 2、**什麼都不寫**——管理區塊的「ours」判定靠 frontmatter。
 - **不碰**：`~/.claude/settings.json`（也絕不產生 `apiKeyHelper`）、專案自己的 `AGENTS.md`／`CLAUDE.md`、工作目錄的任何檔案。
 - 生效：claude 在下一個新 conversation（`--resume` 時是否重載要在驗收確認）；opencode 依官方文件在下一個模型請求前。期 1 由 MyLinuxPool 的開機掛點跑 `atelier install atelier:worker-team-pm --agent claude --agent opencode`（PR 3；sidecar 不改）。
 - 本 PR 還沒放 harness 檔（PR 2），所以真實複本上的 `atelier ls` 目前會是空的。

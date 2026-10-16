@@ -139,7 +139,7 @@ opencode（本機 2.0.29；隔離環境實測——HOME／XDG 指到暫存、`op
 
 ### D6 存放位置（本人已答覆，E9）
 
-**MyAiStorage 的 git**：虛擬資料夾樹 `atelier/…` 放這個 repo；讀取與安裝都走本機 clone ＋ `git fetch`／`git show origin/main:`（與 angareion 讀 channel 設定同一種做法、同一複本路徑、同一把 flock 鎖、20 秒逾時——`openspec/changes/angareion-v5/design.md` 第 101 行）；匿名 HTTPS、零新憑證。多個 AI 同時讀不會亂的理由：讀取與安裝工具不寫 harness（唯一寫入是複本自身的 fetch）、版本檔不可變、沒有共享可寫狀態、同一台機器共用一份複本（各機器各自一份）。
+**MyAiStorage 的 git**：虛擬資料夾樹 `atelier/…` 放這個 repo；讀取與安裝都走本機 clone ＋ `git fetch`／`git show origin/main:`（與 angareion 讀 channel 設定同一種做法、同一複本路徑、同一把 flock 鎖、20 秒逾時——`openspec/changes/angareion-v5/design.md` 第 101 行）；匿名 HTTPS、零新憑證。多個 AI 同時讀不會亂的理由：讀取與安裝工具不寫 harness（唯一寫入是複本自身的 fetch）、版本檔不可變、沒有共享可寫狀態、同一台機器共用一份複本（各機器各自一份）。**複本路徑與 fetch 節流沿用 angareion**：查無版本時的「先 fetch 一次」受節流限制（距上次 fetch 不足 30 秒不再 fetch）；週期拉取用 angareion 的 `config_pull_interval`（未設定時 900 秒、`0`＝不按週期拉）；複本路徑以 `ATELIER_CONFIG_DIR` 優先，否則取 angareion `config.json` 的 `config_dir`。
 
 ### D7 讀取工具（本人已答覆，E10）
 
@@ -195,7 +195,7 @@ opencode（本機 2.0.29；隔離環境實測——HOME／XDG 指到暫存、`op
 | 情形 | 退出碼 | 行為 |
 |---|---|---|
 | 正常 | 0 | 印結果／裝好 |
-| 用法錯、找不到 id／版本 | 1 | 說明；查無時先 fetch 一次（同 angareion） |
+| 用法錯、找不到 id／版本 | 1 | 說明；查無時先 fetch 一次（同 angareion；距上次 fetch 不足 30 秒則不 fetch） |
 | 複本不存在、檔案壞、git 壞、安裝目標寫不進去 | 2 | 說明明確原因（複本不存在→提示 clone；權限→提示使用者／路徑） |
 | fetch 失敗（離線、網路） | 0（不變） | stderr 警告一次、沿用複本 |
 
