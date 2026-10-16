@@ -67,7 +67,9 @@ def _agents(values: list[str]) -> list[str]:
 
 
 def _json_print(data: object) -> None:
-    print(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=False))
+    # default=str: frontmatter may hold YAML dates (PyYAML gives `datetime.date`,
+    # e.g. `generated.at`) - they print as strings instead of crashing `--json`.
+    print(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=False, default=str))
 
 
 def _decode(raw: bytes) -> str:
