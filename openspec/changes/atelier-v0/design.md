@@ -11,7 +11,8 @@
 - **E9（r2 建議採納）**：harness 存在 **MyAiStorage 的 git**：`atelier/<team>/<role>/v<N>.md`，版本只增不改。
 - **E10（r2 建議採納）**：新增 **`atelier` 指令**（`ls`／`show`，只讀）。
 - **E4（r2 建議採納）**：`models` 先留空、只留欄位。
-- **E11（改方向）**：載入不靠開場句；用 agent 一定會載入的機制（D8）。
+- **E11（本人 2026-10-16 答覆）**：先改方向成「不靠開場句、用 agent 一定會載入的機制」，看過 r3 後**選定選項 1**：使用者層級指示檔＋開機 install（D8）。
+- **E7（本人 2026-10-16 答覆）**：隊名用 `worker-team`。
 
 **r3 的查證：兩種 agent 的「一定會載入」機制**（2026-10-16；來源逐一標注）
 
@@ -47,7 +48,7 @@ opencode（本機 2.0.29；隔離環境實測——HOME／XDG 指到暫存、`op
 - 沿用 r2：**存放**（MyAiStorage 的 git、`atelier/<team>/<role>/v<N>.md`、append-only）、**識別與版本**、**讀取工具**（`ls`／`show`）、**格式**（frontmatter＋五章＋`capabilities` H3 子節）、**能力需求**（`models` 欄位）。
 - **開場句**與 **MyPMO#33 的銜接**：第一則輸入不再負責載入 harness；寫出剩下的派工句與位置（「與 sidecar 的介面」）。
 - 定**測試與驗收**（安裝與載入要看到什麼）與**期 3 銜接**（多職務）。
-- 把**要本人決定的事**編號列好（附建議）；已答覆的標「本人已答覆（2026-10-16）」。
+- 把**原本要本人決定的事**編號列好（附建議）；已答覆的全部標「本人已答覆（2026-10-16）」，未決事項＝無。
 
 **Non-Goals：**
 
@@ -66,12 +67,12 @@ opencode（本機 2.0.29；隔離環境實測——HOME／XDG 指到暫存、`op
 |---|---|---|
 | D1 | 五要素＝know／do／judge／dont＋能力需求；Angareion 是 AiStorage 的要素、不是 harness 章節 | **本人已答覆（E1）** |
 | D2 | 一份檔＝一個職務一個版本；frontmatter（OKF）＋五章；`capabilities` 是 H3 子節 | 定（r1） |
-| D3 | 識別、命名與路徑：`atelier:<team>-<role>@<vN>` ↔ `atelier/<team>/<role>/v<N>.md` | 定（隊名 E7） |
+| D3 | 識別、命名與路徑：`atelier:<team>-<role>@<vN>` ↔ `atelier/<team>/<role>/v<N>.md` | 定（隊名 `worker-team`；E7 已答覆） |
 | D4 | 版本：append-only 版本檔；舊版不可變、不刪；latest＝最大 N | 定 |
 | D5 | 與 Agora 的關係：不混 | 定 |
 | D6 | 存放位置：MyAiStorage 的 git | **本人已答覆（E9）** |
 | D7 | 讀取工具：`atelier` 指令（`ls`／`show`） | **本人已答覆（E10）** |
-| D8 | 載入：`atelier install` 寫進 agent 的使用者層級指示檔（一定會載入） | **要本人決定（E11 的新選項）** |
+| D8 | 載入：`atelier install` 寫進 agent 的使用者層級指示檔（一定會載入） | **本人已答覆（E11）：選項 1** |
 | D9 | 能力需求：宣告式 H3 子節＋`models.floor`／`preferred`（先留空） | 定 |
 | D10 | 錯誤情形：讀取與安裝的退出碼 | 定 |
 | D11 | v0 職務（worker team PM）的內容 | 定（草案） |
@@ -121,7 +122,7 @@ opencode（本機 2.0.29；隔離環境實測——HOME／XDG 指到暫存、`op
 - **識別**：`atelier:<名稱>@<版本>`（例 `atelier:worker-team-pm@v0`）——與 `docs/design.md` 的 ref 語法與例子 `atelier:reviewer@v3` 同一形狀。
 - **路徑（虛擬資料夾）**：`atelier/<team>/<role>/v<N>.md`；一個團隊一個資料夾、一個職務一個子資料夾、一個版本一個檔。
 - **與 agent 位址是兩件事**：agent 名（Angareion 位址）照 `angareion-v5` 的文法 `<repo 名>-<pm|arch|impl|test>[-<id>]`，由環境設定提供；harness 名稱不取代它。
-- **取捨**：`<team>-<role>` vs 直接用 agent 名（會把 harness 綁死一個 repo）；資料夾樹 vs 扁平檔名——樹讓未來有團隊層共用檔的位置。**採 `<team>-<role>`＋三層路徑**（隊名 E7）。
+- **取捨**：`<team>-<role>` vs 直接用 agent 名（會把 harness 綁死一個 repo）；資料夾樹 vs 扁平檔名——樹讓未來有團隊層共用檔的位置。**採 `<team>-<role>`＋三層路徑**（隊名 `worker-team`，E7 已答覆）。
 
 ### D4 版本怎麼管
 
@@ -148,22 +149,22 @@ opencode（本機 2.0.29；隔離環境實測——HOME／XDG 指到暫存、`op
 - `atelier show <id>[@<版本>] [--section know|do|judge|dont|capabilities] [--json]`：印 harness。預設整份原樣（含 frontmatter）；`--section` 只印該章節；`--json` 給程式。
 - **只讀**（唯一的本機寫入是複本自身的 `git fetch`）；不依賴工作樹、不用憑證；exit 0／1／2（D10）。
 
-### D8 載入（本人已答覆 E11 改方向；**新的選項要本人決定**）
+### D8 載入（本人已答覆 E11：選項 1）
 
 **方向**：不靠開場句；用 agent 一定會載入的機制；不能蓋掉或弄髒專案自己的 `AGENTS.md`／`CLAUDE.md`。做法＝`atelier install <id> --agent <claude|opencode> [--agent …]`（**可重複；每個值各裝一次、與順序無關；不給＝用法錯 exit 1**）把 harness 裝進每一個指定 agent 的**使用者層級指示檔**（每台機器一份、不進 repo）。
 
 選項與取捨：
 
-- **選項 1（v0 建議）：使用者層級全域指示檔＋開機安裝。**
+- **選項 1（本人已選，2026-10-16）：使用者層級全域指示檔＋開機安裝。**
   - **claude**：寫進 `~/.claude/rules/atelier-<team>-<role>.md`（使用者層級 rules，每台機器每個專案都會載入、在 project rules 之前；一個職務一個檔，不碰別人的檔案）。備選：`~/.claude/CLAUDE.md` 的**管理區塊**（`<!-- atelier:… -->`…`<!-- /atelier -->`，install 冪等替換）。**不碰** `~/.claude/settings.json`（不得有 `apiKeyHelper`；#33 D6 已列檢查）。
   - **opencode**：寫進 `~/.config/opencode/AGENTS.md` 的同款**管理區塊**（實測這個檔會被載入；v2 不讀 `~/.claude/CLAUDE.md`）。
   - **誰在什麼時候跑 install**：期 1 由 MyLinuxPool#130 的**開機掛點（start.d）**加一個 atelier 單位，開機時跑 `atelier install`。`atelier`／harness 檔在 worker 的套件與複本裡（**建置時不跑**——那時還沒有 angareion 準備好的本機複本）。**改版後**：worker 重啟時自動重跑；長期不重啟的 worker 要人工跑一次（驗收記在 tasks 4.4）。
   - 影響：**sidecar 零改動**（agent 啟動時自己載入）。期 3 多職務：同一台機器上多職務會共用同一份全域指示檔 → **撐不住**（要走選項 2）。
   - 生效：claude 在每個 conversation 開始時載入（resume 的重載要在驗收確認）；opencode 依官方文件在下一次模型請求前就會更新（同一 session 也吃）。
-- **選項 2（期 3 建議的擴充）：每個 agent 一份設定目錄。** claude 用 `CLAUDE_CONFIG_DIR`（每個職務一個 `~/.claude` 等價目錄，各自一份 `CLAUDE.md`／rules）；opencode 每個職務一個 `XDG_CONFIG_HOME`（各自一份 `~/.config/opencode/AGENTS.md`）。**sidecar 在 `open` 時要多設一個環境變數**（要改 sidecar，小）；多職務撐得住；不碰 repo。`OPENCODE_CONFIG_DIR`／`instructions` 也可以研究，但本機 v2.0.29 的 `instructions` 實測沒生效（Context），先不要押。
-- **選項 3（未選保留）：agent 啟動參數注入**——claude 用 `--append-system-prompt-file <harness>`（本機實測旗標存在）；opencode 沒有等價旗標。要改 agora（`start_native` 的 argv）或 sidecar 的 driver，而且 claude 的系統提示在對話中會被記錄、旗標文字要等壓縮或新對話才生效（官方文件）；不建議當 v0 的機制，保留。
+- **選項 2（未選；期 3 多職務若要用）**：每個 agent 一份設定目錄。claude 用 `CLAUDE_CONFIG_DIR`（每個職務一個 `~/.claude` 等價目錄，各自一份 `CLAUDE.md`／rules）；opencode 每個職務一個 `XDG_CONFIG_HOME`（各自一份 `~/.config/opencode/AGENTS.md`）。**sidecar 在 `open` 時要多設一個環境變數**（要改 sidecar，小）；多職務撐得住；不碰 repo。`OPENCODE_CONFIG_DIR`／`instructions` 也可以研究，但本機 v2.0.29 的 `instructions` 實測沒生效（Context），先不要押。
+- **選項 3（未選保留）**：agent 啟動參數注入——claude 用 `--append-system-prompt-file <harness>`（本機實測旗標存在）；opencode 沒有等價旗標。要改 agora（`start_native` 的 argv）或 sidecar 的 driver，而且 claude 的系統提示在對話中會被記錄、旗標文字要等壓縮或新對話才生效（官方文件）；不建議，保留。
 
-**建議：選項 1（v0）＋選項 2（期 3）**；選項 3 與 r1／r2 的方案都保留為未選。**要本人決定（E11）。**
+**本人已選選項 1（2026-10-16）**；選項 2（期 3 的擴充）、選項 3 與 r1／r2 的方案都保留為未選（不刪）。
 
 **未選（保留、不刪）**：
 
@@ -210,6 +211,7 @@ opencode（本機 2.0.29；隔離環境實測——HOME／XDG 指到暫存、`op
 - 用 Angareion 收指示與回報；閒著用阻塞的 `wait` 等；urgency 7 以上先處理；訊息不貼私人資訊。
 - 在 worker 上開 PR（憑證由環境提供；不直接改 main；不碰別的 repo、不碰真機、不 ssh、不 dispatch）。
 - 憑證不讀不印不寫進訊息／log／commit；被擋就回報，不換方式繞過。
+- **找不到任務脈絡時**（例如被叫「接著剛才的工作」但不知道是哪一件）：**停下回報 PMO**，不要自己去翻 HOME／系統檔（`~/.claude.json`、`~/.mylinuxpool/`、憑證目錄等）找線索。
 - 回報格式：做了什麼、產出（branch／PR）、**測試原樣輸出**、沒驗到的、用的模型（可加「讀到的 harness 版本」）、要決定的（附建議）。
 - **期 1 v0 的暫定（本人已同意）**：隊上只有 PM 一個職務——收到的工作由 PM 自己做（含實作與測試），並在回報標明；期 3 有三職務後改回「不自己寫程式、非作者審查」。
 - 公開性：不寫帳號、額度、憑證名、輪換表、MyBrain 內容。
@@ -282,7 +284,7 @@ opencode（本機 2.0.29；隔離環境實測——HOME／XDG 指到暫存、`op
 - `models` 放 frontmatter 頂層；v0 的值留空（E4 已答覆）。
 - `role ∈ {pm, arch, impl, test}` 與 `team` 的字元規則（D2）。
 - harness 名稱與 agent 位址是兩件事（D3）。
-- 隊名 `worker-team`（D3；E7）。
+- 隊名 `worker-team`（D3；E7 已答覆）。
 - v0 檔的 `status: draft`；`generated` 欄位記設計者。
 - 期 1 單人暫定（本人已同意）。
 - 回報可加記「讀到的 harness 版本」。
@@ -314,11 +316,10 @@ opencode（本機 2.0.29；隔離環境實測——HOME／XDG 指到暫存、`op
 6. **E9**：harness 存 MyAiStorage 的 git（`atelier/<team>/<role>/v<N>.md`、append-only）（D6）。
 7. **E10**：新增 `atelier` 指令（`ls`／`show`，只讀）（D7）。
 8. **E4**：`models` 先留空、只留欄位（D9）。
+9. **E11**：載入用**選項 1**——使用者層級指示檔＋開機 install（D8；選項 2／3 與 r1／r2 的方案保留為未選）。
+10. **E7**：隊名用 `worker-team`（D3；期 2 部門命名再動）。
 
-**仍開放（要本人決定）**：
-
-9. **E11（新；要本人決定）：載入機制的選項**——選項 1 使用者層級指示檔＋開機 install（**建議**；sidecar 零改動；v0 單職務）；選項 2 每 agent 一份設定目錄（期 3 多職務；sidecar 要設環境變數）；選項 3 啟動參數注入（未選）。見 D8。
-10. **E7（低）：隊名**——v0 用 `worker-team`；期 2 部門命名（MyLinuxPool#5）再定。**建議：不阻塞，v0 就用。**
+**未決事項：無。** 目前沒有要本人決定的事；E6 已轉出去（見下）。
 
 **已轉出去（不是本單的未決）**：
 

@@ -7,7 +7,7 @@
 - **E5**：暫不要求 sidecar 加欄位；sidecar 盡量不改。
 - **E8**：同意期 1 先由 PM 一個人做並在回報標明。
 - **E9／E10／E4（照建議採納）**：harness 放 MyAiStorage 的 git（`atelier/<team>/<role>/v<N>.md`、版本只增不改）；新增 `atelier` 指令（`ls`／`show`，只讀）；`models` 先留空、只留欄位。
-- **E11（改方向）**：「我希望不要讓 AI 作業時還要特別打 prompt，用更加強制的方式吧……（但要考慮專案覆蓋問題）」——不要靠固定開場句；要用 **agent 一定會載入**的機制，但不能蓋掉或弄髒目標 repo 自己的 `AGENTS.md`／`CLAUDE.md`。
+- **E11（本人 2026-10-16 答覆）**：先改方向成「不要靠固定開場句；用 agent 一定會載入的機制」（原話：「我希望不要讓 AI 作業時還要特別打 prompt，用更加強制的方式吧……（但要考慮專案覆蓋問題）」），看過 r3 後**選定選項 1＝使用者層級指示檔＋開機 install**。E7 一併答覆：隊名 `worker-team`。
 
 本 change 只做設計（r3），**不實作**。v0 範圍：只寫「worker team PM」一份職務，用來跑期 1 的驗收（MyLinuxPool#45 端到端）。
 

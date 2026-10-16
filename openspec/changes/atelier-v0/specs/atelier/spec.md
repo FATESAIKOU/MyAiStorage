@@ -1,6 +1,6 @@
 ## ADDED Requirements
 
-> 註：**儲存位置、讀取工具＝已答覆（E9／E10）**；**載入方式暫依 design D8 的建議**（使用者層級指示檔的安裝），待 E11 由本人裁定後同步。已答覆（2026-10-16）：E1（harness 五要素；Angareion 是 AiStorage 的要素、不是 harness 章節）、E2（虛擬資料夾＋工具讀）、E5（sidecar 暫不改）、E8（單人暫定）、E9（放 MyAiStorage 的 git）、E10（新增 `atelier` 指令）、E4（`models` 先留空）。
+> 註：儲存位置、讀取工具、載入方式＝**已答覆**（E9／E10；E11 選項 1：使用者層級指示檔＋開機 install）。已答覆（2026-10-16）：E1（harness 五要素；Angareion 是 AiStorage 的要素、不是 harness 章節）、E2（虛擬資料夾＋工具讀）、E5（sidecar 暫不改）、E8（單人暫定）、E9（放 MyAiStorage 的 git）、E10（新增 `atelier` 指令）、E4（`models` 先留空）、E11（選項 1）、E7（隊名 `worker-team`）。
 
 ### Requirement: harness 檔的格式
 一份 harness MUST 是一個職務一個版本的 UTF-8 Markdown 檔，第一個區塊是 YAML frontmatter（OKF v0.2 對齊；不認得的欄位保留）。frontmatter MUST 有 `type`（值 `Harness`）、`id`、`title`、`status`、`team`、`role`、`version`、`models`。`team` MUST 使用 `[a-z0-9][a-z0-9-]*`（英文小寫與 `-`）；`role` MUST 是 `pm`／`arch`／`impl`／`test` 之一（期 3 的 reviewer 對應 `arch`）；`status` MUST 是 `draft`／`stable`／`deprecated` 之一。本文 MUST 有 `know`、`do`、`judge`、`dont`、`capabilities` 五個 H2 章節；`capabilities` MUST 以能力名為 H3 子節；**v0 職務檔 MUST 有 `angareion` 子節，一般格式規則 SHOULD 宣告該職務真正需要的能力**；每個子節內 MUST 用一行 YAML 或清單寫參數，沒有參數時留空（用途放 `know`／`do`，不在子節內寫散文）。**MUST NOT 有 `angareion` 章節**（本人 2026-10-16）。內容 MUST NOT 含帳號、額度、憑證名稱、模型輪換表或第二大腦內容等私人資訊。harness 的 `know` MUST 明寫「專案自己的指示檔與工單規則優先」。
@@ -121,7 +121,7 @@ repo MUST 附一個讀取工具（依 D7 的建議＝指令 `atelier`，與 agor
 - **THEN** 停下並回報（不是改用更低階的模型繼續跑）
 
 ### Requirement: v0 職務（worker team PM）
-識別 `atelier:worker-team-pm@v0` 的職務檔 MUST 以 PM 的一般規矩為底（派工與回報、一張單一個 branch／worktree、審查非作者、不自己寫程式、安全界線、不繞過被擋的動作），並加上 worker 上的差異：**這份 harness 由使用者層級指示檔自動載入**（不用自己去讀；`know` MUST 說明要重讀或確認版本時用 `atelier show`）；**專案自己的指示檔與工單規則優先**；以 Angareion 收指示與回報（閒時 MUST 用阻塞的 `wait` 等，MUST NOT 在迴圈裡反覆查詢模型）；在 worker 上開 PR（MUST NOT 直接改 main）；MUST NOT 讀取或輸出憑證、MUST NOT 碰真機或別的 repo、MUST NOT 繞過被擋的動作、MUST NOT 在工作時改 harness。回報 MUST 含：做了什麼、產出（branch／PR）、測試原樣輸出、沒驗到的事、用的模型。期 1（v0）隊上只有 PM 時，實作與測試由 PM 自己做並在回報標明（本人 2026-10-16 同意）；此暫定由期 3 的三職務（PM／reviewer／impl）正式版取代。
+識別 `atelier:worker-team-pm@v0` 的職務檔 MUST 以 PM 的一般規矩為底（派工與回報、一張單一個 branch／worktree、審查非作者、不自己寫程式、安全界線、不繞過被擋的動作），並加上 worker 上的差異：**這份 harness 由使用者層級指示檔自動載入**（不用自己去讀；`know` MUST 說明要重讀或確認版本時用 `atelier show`）；**專案自己的指示檔與工單規則優先**；以 Angareion 收指示與回報（閒時 MUST 用阻塞的 `wait` 等，MUST NOT 在迴圈裡反覆查詢模型）；在 worker 上開 PR（MUST NOT 直接改 main）；MUST NOT 讀取或輸出憑證、MUST NOT 碰真機或別的 repo、MUST NOT 繞過被擋的動作、MUST NOT 在工作時改 harness；**找不到任務脈絡時 MUST 停下回報（MUST NOT 去翻 HOME 或系統檔找線索）**。回報 MUST 含：做了什麼、產出（branch／PR）、測試原樣輸出、沒驗到的事、用的模型。期 1（v0）隊上只有 PM 時，實作與測試由 PM 自己做並在回報標明（本人 2026-10-16 同意）；此暫定由期 3 的三職務（PM／reviewer／impl）正式版取代。
 
 #### Scenario: 收到指示
 - **WHEN** PM 的 `wait` 醒來、`read` 讀到指示
@@ -134,6 +134,10 @@ repo MUST 附一個讀取工具（依 D7 的建議＝指令 `atelier`，與 agor
 #### Scenario: 被擋不繞過
 - **WHEN** 一個動作被安全檢查或憑證擋下
 - **THEN** PM 停下來回報，不換方式或換身分再試
+
+#### Scenario: 找不到任務脈絡
+- **WHEN** PM 收到「請接著剛才的工作」這類續作提示，卻找不到對應的工單／任務脈絡
+- **THEN** 它停下來回報 PMO 並等指示；MUST NOT 去翻 HOME 或系統檔（例如 `~/.claude.json`、`~/.mylinuxpool/`、憑證目錄）找線索
 
 #### Scenario: 單人暫定要標明
 - **WHEN** 期 1 的 PM 自己完成實作與測試

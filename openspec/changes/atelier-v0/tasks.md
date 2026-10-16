@@ -1,8 +1,7 @@
 ## 0. 前提（不是 PR）
 
 - 本 change（設計 r3）經非作者審查、PMO 拿給本人看、本人同意後才動工。
-- 需要留給本人裁定的：**E11（載入機制的選項）**；E7（隊名）低、不阻塞。沒有裁定前，實作照設計的建議（E11 選項 1：使用者層級指示檔＋開機 install），PR 說明要標「依建議暫定，若改裁定需同步」。
-- 本人 2026-10-16 已答覆：E1／E2／E5／E8／E9（放 MyAiStorage 的 git）／E10（新增 `atelier` 指令）／E4（`models` 先留空）。
+- 本人 2026-10-16 已答覆所有先前的未決：E1／E2／E5／E8／E9／E10／E4；**E11＝選項 1**（使用者層級指示檔＋開機 install）；**E7＝隊名 `worker-team`**。**沒有要本人裁定的了**——實作照本設計。
 - **E6 由 MyPMO#33 處理**（PMO 經 ssh 轉發到 worker 8471 呼叫 open；PR #66）——本 change 不再處理，也不要有相依的實作。
 - v0 的驗收是期 1 端到端（本檔第 4 節）；MyLinuxPool#45 的內容不要先做（那是驗收題目）。
 
@@ -41,7 +40,7 @@
 - [ ] 3.1 worker 的 `agora` 套件 pin 升到含 `atelier` 指令的 sha（既有流程；與 agora／angareion 同一個 pin）
 - [ ] 3.2 新單位：開機時跑 `atelier install atelier:worker-team-pm --agent claude --agent opencode`；失敗只記 log、不擋開機（照 #130 的規則）；`install.sh --check` **兩邊都要驗**：claude 的 `~/.claude/rules/atelier-*.md` 存在（或 `CLAUDE.md` 裡有管理區塊）**且** opencode 的 `~/.config/opencode/AGENTS.md` 裡有管理區塊（任一沒有回 1）
 - [ ] 3.3（可選）worker 啟動文件的固定開場句改成 r3 的簡化版（去掉「先讀 harness」半句；見設計「與 sidecar 的介面」）
-- [ ] 3.4 若 E11 最後選了「每個 agent 一份設定目錄」（期 3）：sidecar 在 `open` 時多設 `CLAUDE_CONFIG_DIR`／per-role `XDG_CONFIG_HOME`——那是**期 3**的獨立單，不在本 PR。
+- [ ] 3.4（未選；日後多職務要用時）每個 agent 一份設定目錄（D8 選項 2）：sidecar 在 `open` 時多設 `CLAUDE_CONFIG_DIR`／per-role `XDG_CONFIG_HOME`——那是**期 3**的獨立單，不在本 PR（本人 2026-10-16 選的是選項 1）。
 
 **測試**：單元的 `--check` 三態；沒有真機時用沙箱 HOME／XDG；**不碰任何真檔**。
 

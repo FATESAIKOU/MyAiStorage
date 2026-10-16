@@ -1,6 +1,6 @@
 # Atelier v0 介面摘要（一頁）
 
-> 給 PMO 向本人說明用（r3，2026-10-16）。設計全文：`openspec/changes/atelier-v0/`；v0 職務草稿：`openspec/changes/atelier-v0/harness/worker-team-pm.md`。本人已答覆：E1（Angareion 是 AiStorage 的要素、不是 harness 章節）、E2（虛擬資料夾＋工具讀）、E5（sidecar 暫不改）、E8（單人暫定）、E9（放 MyAiStorage 的 git）、E10（`atelier` 指令）、E4（`models` 先留空）。**要本人裁定的是 E11（載入機制的選項；建議見下）**；E7 低；**E6 由 MyPMO#33 處理**（PR #66）。
+> 給 PMO 向本人說明用（r3，2026-10-16）。設計全文：`openspec/changes/atelier-v0/`；v0 職務草稿：`openspec/changes/atelier-v0/harness/worker-team-pm.md`。本人已答覆：E1（Angareion 是 AiStorage 的要素、不是 harness 章節）、E2（虛擬資料夾＋工具讀）、E5（sidecar 暫不改）、E8（單人暫定）、E9（放 MyAiStorage 的 git）、E10（`atelier` 指令）、E4（`models` 先留空）、**E11（載入＝選項 1）**、E7（隊名 `worker-team`）。**沒有要本人裁定的了**；E6 由 MyPMO#33 處理（PR #66）。
 
 ## 實體
 
@@ -43,6 +43,6 @@ sequenceDiagram
 
 - **harness 檔**：識別 `atelier:<team>-<role>@<vN>` ↔ 路徑 `atelier/<team>/<role>/v<N>.md`；frontmatter：`type/id/title/status/team/role/version/models{floor,preferred}`；本文五章：know／do／judge／dont／capabilities（能力為 H3 子節；v0：`github`／`angareion`／`agora`）。Angareion 不是章節；harness 明寫「專案自己的指示檔優先」。版本檔 append-only。
 - **`atelier` 指令**：`ls`／`show <id>[@<版本>] [--section] [--json]`／`install <id>[@<版本>] --agent claude|opencode`（**可重複；每個各裝一次；不給＝用法錯**）。讀取走本機複本＋`git fetch`（匿名、同一複本路徑與 angareion 共用、flock、20 秒逾時）；install 寫**使用者層級指示檔**（管理區塊或獨立檔、冪等），**不碰專案 `AGENTS.md`／`CLAUDE.md`、工作目錄、`~/.claude/settings.json`**；exit 0（成功）／1（用法、查無）／2（複本或檔案問題）。
-- **載入（E11 的選項）**：建議選項 1＝使用者層級指示檔＋開機 install（**sidecar 零改動**；v0 單職務）；期 3 用選項 2＝每個 agent 一份設定目錄（`CLAUDE_CONFIG_DIR`／per-role `XDG_CONFIG_HOME`；sidecar 要設環境變數）。未選（保留）：r2 的開場句、r1 的 sidecar 全文載入、啟動參數注入（`--append-system-prompt-file`）。**「一定會載入」＝一定注入 context，不等於強制遵守**（官方 memory 文件：CLAUDE.md 是 context、不是 enforced configuration）；規矩有沒有被遵守看行為驗收。
+- **載入（E11：本人已選選項 1）**：使用者層級指示檔＋開機 install（**sidecar 零改動**；v0 單職務）。未選（保留）：選項 2＝每個 agent 一份設定目錄（`CLAUDE_CONFIG_DIR`／per-role `XDG_CONFIG_HOME`；期 3 多職務若要用，sidecar 要設環境變數）；選項 3 啟動參數注入（`--append-system-prompt-file`）；r2 的開場句；r1 的 sidecar 全文載入。**「一定會載入」＝一定注入 context，不等於強制遵守**（官方 memory 文件：CLAUDE.md 是 context、不是 enforced configuration）；規矩有沒有被遵守看行為驗收。
 - **第一則輸入（#33）**：「先讀你的 harness」半句可以去掉；保留「指示在 Angareion」那半句（派工）。
 - **要 MyLinuxPool 做的事**：1) 開機掛點的 **atelier 單位**（跑 `atelier install`；照 #130 的契約）；2) 套件 pin 升到含 `atelier` 的 sha（既有流程）。**sidecar 不改。**
