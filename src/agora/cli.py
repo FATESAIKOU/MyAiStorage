@@ -6,7 +6,7 @@
     agora import   session --external-session-id <id> --agent opencode|claude [--header-file F] [--header K=V]...
     agora merge    session <id>, <id>, ... [--header-file F] [--header K=V]...
     agora continue session <id> --agent opencode|claude [--dir <dir>] [--fork] [--header-file F] [--header K=V]...
-    agora delete   session <id> --yes
+    agora delete   session <id> --yes [--force]
     agora edit     session <id> [--header-file F] [--header K=V]...
     agora show     session <id> [--raw]
 
@@ -80,9 +80,42 @@ class LockedError(Exception):
         self.agora_id = agora_id
 
 
-def _locked(agora_id: str) -> LockedError:
-    """The one refusal for「這個 Session 有人在接續」, said the same way in both checks."""
-    return LockedError(agora_id, f"{agora_id} 正在接續中，等它結束再接續（要分岔請用 --fork）")
+def _locked(paths: store.Paths, agora_id: str) -> LockedError:
+    """The one refusal for「這個 Session 有人在接續」, said the same way in both checks.
+
+    #90: the explanation also says who is in there when the winner's record can say it
+    (`agent`, `dir`, `started_at`). The fixed first line and `EXIT_LOCKED` do not change.
+    """
+    record = store.continuing_details(paths, _ulid_of(agora_id))
+    return LockedError(agora_id,
+                       f"{agora_id} 正在接續中{_who_note(record)}，等它結束再接續（要分岔請用 --fork）")
+
+
+def _who_note(record: dict | None) -> str:
+    """「誰在接續」那一段，幾個拒絕訊息共用（#90）。
+
+    Only what the pending record itself says - the agent, the directory it works in,
+    when it started. A field that is not there is left out rather than guessed, and
+    nothing else from the record goes out (it also carries ids, titles and headers).
+    """
+    if not record:
+        return ""
+    who = []
+    if record.get("agent"):
+        who.append(f"agent {record['agent']}")
+    if record.get("dir"):
+        who.append(f"目錄 {_short_dir(str(record['dir']))}")
+    if record.get("started_at"):
+        who.append(f"從 {record['started_at']} 開始")
+    return "（" + "、".join(who) + "）" if who else ""
+
+
+def _short_dir(where: str) -> str:
+    """A directory with the home prefix shortened to `~` (the TUI shows the same)."""
+    home = os.path.expanduser("~").rstrip("/")
+    if home and home != "/" and (where == home or where.startswith(home + "/")):
+        return "~" + where[len(home):]
+    return where
 
 
 def load_agent(name: str) -> Agent:
@@ -345,13 +378,31 @@ def cmd_search(args, paths: store.Paths) -> int:
                 print(f"[agora] {first} 與 agora:{ulid} 來自同一個來源 Session", file=sys.stderr)
             continue
         seen[key] = f"agora:{ulid}"
-        date = store.sort_date(hdr)[:10]
-        mark = "  (未上傳)" if ulid in outbox else ""
+        date = _updated_cell(hdr)
+        mark = "  (使用中)" if store.continuing(paths, ulid) else ""
+        if ulid in outbox:
+            mark += "  (未上傳)"
         if not index.cloud_has(ulid):
             mark += "  (雲端沒有)"      # T1 3.4: the row is here, Drive's copy is not
         text = snippet or str(hdr.get("title") or "")
         print(f"agora:{ulid}  {date}  {source.get('agent') or agora.get('relation')}  {text}{mark}")
     return 0
+
+
+def _updated_cell(header: dict) -> str:
+    """The date column of one search row: when the conversation happened, plus when it
+    was last written when that is another day (#90).
+
+    The list is sorted by the conversation date, so that stays the first thing in the
+    cell; the update date rides along because a session somebody is continuing right now
+    would otherwise look as old as its conversation. No space inside the cell: the row
+    is space-separated and the first column is the id.
+    """
+    date = store.sort_date(header)[:10]
+    updated = str(h.agora_of(header).get("updated_at") or "")[:10]
+    if not date:
+        return updated
+    return f"{date}（更新：{updated}）" if updated and updated != date else date
 
 
 _progress = store.progress
@@ -758,11 +809,11 @@ def _write_pending(paths: store.Paths, record: dict):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:      # another `_write_pending` for this Session is mid-flight
         lock.close()
-        raise _locked(record["agora_id"]) from None
+        raise _locked(paths, record["agora_id"]) from None
     if store.continuing(paths, _ulid_of(record["agora_id"])):
         lock.close()
         tmp.unlink(missing_ok=True)  # ours, and nobody has looked at that name yet
-        raise _locked(record["agora_id"])
+        raise _locked(paths, record["agora_id"])
     lock.seek(0)
     lock.truncate()
     lock.write(json.dumps(record, ensure_ascii=False, indent=2))
@@ -1591,7 +1642,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
         # (design「同一台機器上不能同時接續同一個 Session」P5). A fork writes a new
         # session, so it is not affected. #54: its own exit code and a fixed line,
         # so a caller driving the continue can tell this from an input error.
-        raise _locked(source_id)
+        raise _locked(paths, source_id)
     interval = _sync_interval_seconds(args)
     src = agora.get("source") or {}
     src_dir = src.get("dir") if src.get("dir") and Path(src["dir"]).is_dir() else None
@@ -1879,9 +1930,14 @@ def cmd_delete(args, paths: store.Paths) -> int:
     enter the queue: there is nothing to purge (design L6). A session that was
     already deleted in an earlier run is skipped (R4). Children named in the same
     request go first; children outside it are still refused.
+
+    #90: a session another run is continuing right now is skipped - the rest still go,
+    and each skip is named with who is in there. `--force` asks for those too: then the
+    consequence goes out before each one (that agent's next write-back is saved as a
+    session of its own), and the pending record itself is left alone.
     """
     from agora import background
-    ids = [f"agora:{_ulid_of(i)}" for i in _split_ids(args.ids)]
+    ids = list(dict.fromkeys(f"agora:{_ulid_of(i)}" for i in _split_ids(args.ids)))
     if not ids:
         raise InputError("delete 要給至少一個 session id")
     # kick=False: the uploader must not start before the outbox entry is gone, or the
@@ -1889,16 +1945,26 @@ def cmd_delete(args, paths: store.Paths) -> int:
     index = store.sync(paths, kick=False)
     gone = _deleted_ids(paths)
     headers, missing, unknown = {}, [], []
+    locked: dict[str, dict] = {}    # id -> what the winner's pending record says
+    skipped: dict[str, dict] = {}   # locked, and not asked to be forced: left alone
     for agora_id in ids:
-        if store.continuing(paths, _ulid_of(agora_id)):
-            # F4: an agent is working on it right now. Deleting here would only make
-            # `_finish` save the result elsewhere; wait until that run is over.
-            raise InputError(f"{agora_id} 正在接續，等它結束再刪")
-        stale = paths.pending / f"{_ulid_of(agora_id)}.json"
-        if stale.exists():
-            # G1: nobody holds this one - what is left of a continue that could not
-            # be finished. It must not block the delete for ever.
-            print(f"[agora] {agora_id} 有一筆中斷的接續沒補存成功（{stale}），照樣刪", file=sys.stderr)
+        record = store.continuing_details(paths, _ulid_of(agora_id))
+        if record is not None:
+            # F4: an agent is working on it right now. Deleting here makes `_finish`
+            # save the result as a session of its own - wait, unless --force asks for
+            # exactly that (#90).
+            locked[agora_id] = record
+            if not args.force:
+                skipped[agora_id] = record
+                continue
+        else:
+            stale = paths.pending / f"{_ulid_of(agora_id)}.json"
+            if stale.exists():
+                # G1: nobody holds this one - what is left of a continue that could not
+                # be finished. It must not block the delete for ever. The path is shown
+                # with `~` like the directories in the other lines (#90 review L4).
+                print(f"[agora] {agora_id} 有一筆中斷的接續沒補存成功（{_short_dir(str(stale))}），照樣刪",
+                      file=sys.stderr)
         if index.header(_ulid_of(agora_id)) is not None:
             headers[agora_id] = index.header(_ulid_of(agora_id))
         elif _ulid_of(agora_id) in gone:
@@ -1906,14 +1972,41 @@ def cmd_delete(args, paths: store.Paths) -> int:
         else:
             unknown.append(agora_id)    # never existed: a typo, not something to skip
     if unknown:
+        # A typo still refuses the whole batch (R4): nothing goes, not even the ids that
+        # were fine, and the locked ones are not reported either.
         raise InputError("找不到：" + "、".join(unknown))
     if missing:
         print(f"[agora] 已經不在了，略過 {len(missing)} 個：" + "、".join(missing), file=sys.stderr)
+    for agora_id, record in skipped.items():
+        print(f"[agora] 跳過 {agora_id}：正在接續中{_who_note(record)}，等它結束再重跑同一個指令",
+              file=sys.stderr)
     if not headers:
+        if skipped:
+            # One locked session saying「1 個都在接續中」reads wrong (#90 review L3):
+            # the plural line speaks for the batch, the singular one names the session.
+            ids = "、".join(skipped)
+            if len(skipped) > 1:
+                print(f"[agora] {len(skipped)} 個都在接續中，沒有刪除任何東西：{ids}", file=sys.stderr)
+                print("[agora] 等它們結束再重跑同一個指令；要連它們一起刪就加上 --force --yes",
+                      file=sys.stderr)
+            else:
+                print(f"[agora] {ids} 正在接續中，沒有刪除任何東西", file=sys.stderr)
+                print("[agora] 等它結束再重跑同一個指令；要連它一起刪就加上 --force --yes",
+                      file=sys.stderr)
+            return EXIT_INPUT
         return 0
     if not args.yes:
-        listed = "\n".join(f"  {i}（{hdr.get('title') or '無標題'}）" for i, hdr in headers.items())
-        raise InputError(f"會把這 {len(headers)} 個移到 Drive 垃圾桶：\n{listed}\n確定的話加 --yes")
+        listed = "\n".join(f"  {i}（{'使用中，' if i in locked else ''}{hdr.get('title') or '無標題'}）"
+                           for i, hdr in headers.items())
+        if locked and args.force:
+            ask = ("確定的話加 --yes；--force 也要 --yes：刪掉使用中的之後，"
+                   "那個 agent 的寫回會另存成一個新的 Session")
+        elif locked:
+            ask = (f"確定的話加 --yes；正在接續中的 {len(locked)} 個這次不刪，"
+                   f"要連它{'們' if len(locked) > 1 else ''}一起刪就加 --force --yes")
+        else:
+            ask = "確定的話加 --yes"
+        raise InputError(f"會把這 {len(headers)} 個移到 Drive 垃圾桶：\n{listed}\n{ask}")
     total = len(headers)
     queued = False
     left, refused, done = list(headers), [], 0
@@ -1924,6 +2017,13 @@ def cmd_delete(args, paths: store.Paths) -> int:
         for agora_id in ready:
             done += 1
             _progress("刪除", done, total)
+            if agora_id in locked:
+                # #90: --force was asked for, but the consequence is said before it goes.
+                # The pending record and its lock belong to the other run; delete does
+                # not touch them (removing the lock would make that run write wrong).
+                print(f"[agora] --force：{agora_id} 正在接續中{_who_note(locked[agora_id])}；"
+                      f"刪掉之後那個 agent 的寫回會另存成一個新的 Session，這個 id 不會再有它的更新",
+                      file=sys.stderr)
             ulid = _ulid_of(agora_id)
             # Asked before forget_local: dropping the row also drops the marker that
             # says Drive does not have it, so afterwards every session looks present
@@ -1945,7 +2045,12 @@ def cmd_delete(args, paths: store.Paths) -> int:
             print(agora_id)
             left.remove(agora_id)
     for agora_id in left:
-        children = "、".join(f"agora:{c}" for c in index.children(_ulid_of(agora_id)))
+        # A child that was skipped as locked is still somebody's child, so its parent
+        # cannot go either (the same rule as a child that is not in this request at all),
+        # and the parent's message says why that child is still here (#90).
+        children = "、".join(
+            f"agora:{c}" + ("（子 Session 這次被跳過：正在接續中）" if f"agora:{c}" in skipped else "")
+            for c in index.children(_ulid_of(agora_id)))
         print(f"[agora] {agora_id} 有子 Session，不能刪：{children}", file=sys.stderr)
         refused.append(agora_id)
     state = None
@@ -1957,6 +2062,11 @@ def cmd_delete(args, paths: store.Paths) -> int:
         more = f"，重跑會接著做剩下的 {len(left) + len(missing)} 個" if left else ""
         where = "，背景移到 Drive 垃圾桶" if queued else ""
         print(f"[agora] 已從本機刪除 {done} 個{where}{more}", file=sys.stderr)
+    if skipped:
+        many = len(skipped) > 1
+        print(f"[agora] 跳過 {len(skipped)} 個正在接續的：{'、'.join(skipped)}；"
+              f"等它{'們' if many else ''}結束再重跑同一個指令"
+              f"（要連它{'們' if many else ''}一起刪就加上 --force --yes）", file=sys.stderr)
     if state == background.FAILED:
         # The Drive half is queued and safe, but nobody is going to do it now. Same exit
         # as an upload that did not get through, and the next command starts it again.
@@ -1964,7 +2074,7 @@ def cmd_delete(args, paths: store.Paths) -> int:
         what = "移到 Drive 垃圾桶" if queued else "outbox 的上傳"
         print(f"[agora] 背景上傳啟動失敗，{what}要等之後的指令", file=sys.stderr)
         return EXIT_IN_OUTBOX
-    return EXIT_INPUT if refused else 0
+    return EXIT_INPUT if (refused or skipped) else 0
 
 
 def _deleted_ids(paths: store.Paths) -> set[str]:
@@ -2111,6 +2221,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--headless-port", type=int, default=None,
                    help="continue --headless：opencode server 要聽的埠（由呼叫方分配）")
     p.add_argument("--yes", action="store_true", help="delete：確定要移到 Drive 垃圾桶")
+    p.add_argument("--force", action="store_true",
+                   help="delete：連正在接續中的一起刪（要加 --yes；刪掉之後那個 agent 的寫回會另存成新的 Session）")
     p.add_argument("--raw", action="store_true", help="show：印出原始匯出")
     p.add_argument("--no-sync", action="store_true", help="search：不連 Drive，只查本機索引")
     p.add_argument("--not-exist-delete", action="store_true",

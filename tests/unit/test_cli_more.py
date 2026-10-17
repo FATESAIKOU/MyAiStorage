@@ -619,12 +619,24 @@ def test_show_raw_lazy_and_merge_message(env, capsys):  # U-SHW-03
 
 # --- U-SRC -------------------------------------------------------------------------------
 
-def test_search_output_format(env, capsys):  # U-SRC-01
+def test_search_output_format(env, capsys):  # U-SRC-01, #90
+    from datetime import datetime, timezone
     _, a, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     code, found, _ = run(capsys, "search", "session", "--filter", "text~=CSV", "--no-sync")
     assert code == 0
     parts = found.split()
-    assert parts[0] == a and parts[1] == "2026-10-01" and parts[2] == "opencode"
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # the conversation date stays first (the list is sorted by it), then the last write
+    assert parts[0] == a and parts[1] == f"2026-10-01（更新：{today}）" and parts[2] == "opencode"
+
+
+def test_search_date_cell_without_an_update_stamp_or_on_the_same_day():
+    """#90: an old header with no `agora.updated_at` keeps the old cell, and so does a
+    session whose last write was on the conversation's own day."""
+    same_day = {"agora": {"created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T09:00:00Z"}}
+    assert cli._updated_cell(same_day) == "2026-10-01"
+    old = {"agora": {"created_at": "2026-10-01T00:00:00Z"}}
+    assert cli._updated_cell(old) == "2026-10-01"
 
 
 def test_search_special_keywords_no_crash(env, capsys):  # U-SRC-07

@@ -2071,13 +2071,19 @@ class AgoraApp(App):
         if ans is None or ans[0] is None:
             return
         pick, fork = ans
-        if not fork and store.continuing(self.paths, ulid):
-            await self.push_screen_wait(Tell(
-                "不能接續",
-                f"{row.key} 正在接續中，等它結束再接續；要分岔請在選 agent 的視窗勾 fork",
-                ok=False,
-            ))
-            return
+        if not fork:
+            # #90: one probe, and the winner's own record answers who is in there - the
+            # same words the command mode uses (`cli._who_note`), so Enter on the list
+            # refuses with the same information `agora continue` gives.
+            details = store.continuing_details(self.paths, ulid)
+            if details is not None:
+                await self.push_screen_wait(Tell(
+                    "不能接續",
+                    f"{row.key} 正在接續中{self.cli._who_note(details)}，等它結束再接續；"
+                    f"要分岔請在選 agent 的視窗勾 fork",
+                    ok=False,
+                ))
+                return
         workdir = await self.ask_dir(row)
         if workdir is None:
             return

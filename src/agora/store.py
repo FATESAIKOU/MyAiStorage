@@ -1119,6 +1119,24 @@ def continuing(paths: Paths, ulid: str) -> bool:
     return False           # nobody does: what is left of an interrupted one
 
 
+def continuing_details(paths: Paths, ulid: str) -> dict | None:
+    """Who is continuing this Session right now, from the winner's pending record (#90).
+
+    `continuing` stays the authority on yes/no: a record nobody holds is a leftover,
+    not a run, and must not be described as one. When somebody does hold it, this
+    answers the record's own fields (`agent`, `dir`, `started_at`) so a refusal can
+    say who is in there; a record that cannot be read answers `{}` - the same thing the
+    old message said, "somebody is continuing", and nothing more.
+    """
+    if not continuing(paths, ulid):
+        return None
+    try:
+        record = json.loads((paths.pending / f"{ulid}.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
 def kick_uploader(paths: Paths) -> str | None:
     """Make sure something is looking after the outbox and the trash queue.
 

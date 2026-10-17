@@ -1595,6 +1595,26 @@ def _release(holder):
         holder.wait(timeout=10)
 
 
+def test_the_locked_refusal_says_who_is_continuing(env, capsys):
+    """#90: the explanation after the fixed line names the agent, the directory and when
+    it started - from the winner's own pending record, and nothing else from it."""
+    _, a, _ = _import(capsys)
+    record = {"agora_id": a, "agent": "claude", "agent_session_id": "ses_secret",
+              "dir": str(Path.home() / "proj"), "before_count": 0,
+              "parent": {"id": a, "raw_md5": None}, "started_at": "2026-10-18T05:01:00Z",
+              "header_updates": {"title": "私人標題"}}
+    _, lock = cli._write_pending(paths(), record)
+    try:
+        code, out, err = _continue(capsys, a)
+    finally:
+        lock.close()
+    assert code == cli.EXIT_LOCKED and out == ""
+    _locked(err, a)                       # the fixed line and exit 4 are untouched
+    line = err.splitlines()[err.splitlines().index(f"agora-locked {a}") + 1]
+    assert "agent claude" in line and "目錄 ~/proj" in line and "從 2026-10-18T05:01:00Z 開始" in line
+    assert "ses_secret" not in err and "私人標題" not in err, "only agent, dir and start time go out"
+
+
 def test_a_second_continue_is_refused_while_the_first_still_holds_the_lock(env, capsys):
     """Scenario「同一台機器再接續一次」: the pending lock is the answer, not the file.
 

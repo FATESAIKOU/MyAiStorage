@@ -192,7 +192,7 @@ agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync]
 agora import   session --external-session-id <id>[,<id>...] [--external-session-id <id>...] --agent opencode|claude [--header-file F] [--header K=V]...
 agora merge    session <id>, <id>, ... --agent opencode|claude [--header-file F] [--header K=V]...
 agora continue session <id> --agent opencode|claude [--dir <專案目錄>] [--fork] [--sync-period <分鐘>] [--header-file F] [--header K=V]...
-agora delete   session <id>, <id>, ... --yes
+agora delete   session <id>, <id>, ... --yes [--force]
 agora edit     session <id> [--header-file F] [--header K=V]...
 agora show     session <id> [--raw]
 agora pull     session <id>, <id>, ... [--not-exist-delete]
@@ -208,7 +208,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 - `--external-session-id`：只有 import 用，是 agent 自己的 session id，可以給多次或用逗號分隔（5.2）。
 - **一次處理多個**（2026-10-03 使用者決定）：import、delete、merge、pull、push 都吃 id 清單；逐一在 **stderr** 印一行 `k/N` 進度，**stdout 只放 agora id**（可以接管線）。被 Ctrl-C 中斷後重跑同一個指令會接著做：import 略過已匯入、delete 略過已刪、merge 沿用已寫好的要約、pull 略過已快取（5.2、5.3、5.6、5.10）。
 - `cache`／`sync` 拿掉了，改成 `pull`／`push`，而且**只吃給的 id**（5.10）。
-- 所有寫入指令的輸出第一欄都是 agora id。exit code：0 成功；1 做不到（找不到 id、沒有訊息、merge 少於兩個、delete 沒加 `--yes`、有子 Session）；2 錯誤（包含要約失敗：agent 錯誤、逾時、空的回覆，這時不存檔）；3 已存進 outbox、還沒上傳；4 這個 Session 正在接續中（同一台機器的另一個 `continue`），stderr 在說明之前先印一行 `agora-locked <agora id>`（#54）；5 `continue` 的 agent 子行程死掉（`returncode != 0`，130／143／-2／-15、轉送過 SIGTERM 之後的結束除外），stderr 印一行 `agora-agent-failed rc=<原碼>`，寫回成功回 5、寫回失敗回 3（#76；舊行為是只看寫回結果，agent 死掉又沒新內容時回 0；第一版回 agent 原碼會與 1／2／3／4 撞碼，故改固定 5）。
+- 所有寫入指令的輸出第一欄都是 agora id。exit code：0 成功；1 做不到（找不到 id、沒有訊息、merge 少於兩個、delete 沒加 `--yes`、有子 Session、delete 有正在接續的而跳過——全部都被鎖住也是，訊息說明沒有刪除任何東西；背景上傳器起不來時仍是 3）；2 錯誤（包含要約失敗：agent 錯誤、逾時、空的回覆，這時不存檔）；3 已存進 outbox、還沒上傳；4 這個 Session 正在接續中（同一台機器的另一個 `continue`），stderr 在說明之前先印一行 `agora-locked <agora id>`（#54）；5 `continue` 的 agent 子行程死掉（`returncode != 0`，130／143／-2／-15、轉送過 SIGTERM 之後的結束除外），stderr 印一行 `agora-agent-failed rc=<原碼>`，寫回成功回 5、寫回失敗回 3（#76；舊行為是只看寫回結果，agent 死掉又沒新內容時回 0；第一版回 agent 原碼會與 1／2／3／4 撞碼，故改固定 5）。
 
 ### 5.1 search
 
@@ -219,6 +219,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 - 清單欄位（`tags`、`refs`）：`=` 是「清單裡有一個全等」，`~=` 是「有一個包含」。
 - 沒有 filter 就列出全部。之後要加更複雜的比較時，再加運算子（例如 `>`、`<`）。
 - 全文 `~=` 用 FTS5 trigram，少於 3 個字時改用掃描（4.5）。
+- **每一行**（#90）：`agora:<ULID>  <對話日期>[（更新：YYYY-MM-DD）]  <agent 或 relation>  <摘要>  <標記>…`，標記是 `(使用中)`、`(未上傳)`、`(雲端沒有)`。清單**仍按對話日期新到舊**（顯示跟著排序走）；`agora.updated_at` 與對話日期不同時補「（更新：…）」，讓「很久以前對話、今天還在動」的 Session 不會看起來像舊的。「使用中」＝本機 `pending/<ULID>.json` 的鎖有人拿著（**只判斷這台機器**；別台機器上的接續這裡看不到，沒有共用的鎖可以查）；只是留下來的記錄不算。
 
 ### 5.2 import
 
@@ -310,7 +311,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
    - 定期寫回**不連 Drive**：只看本機索引，目標還在就寫；別台的刪除交給背景上傳發現，背景另存之後，下一輪寫回就沿用那個新 Session。**沿用的搜尋不只在索引**：索引以外，也在 outbox（含上傳器正在比對的 `.done-`）找「只 staged、還沒被 `store.remember` 索引」的另存——同樣是 `relation: continue`、`source` 是這次的 agent session、`parents` 含目前的目標；兩邊都有時取 ULID 較新的那個。途中被刪、背景另存、最後一次、補存，同一段工作只會多出**一個**新 Session，之後的寫回都寫到它。
    - 最後一次寫回照原本的規則，但一定先確認目標還在（若目標在 outbox 中有未完成的上傳，最多等 15 秒讓其 settle）：和上一輪相同就不必再寫（但仍踢一下背景上傳，exit 照 0／3 的規則給），目標被刪了就照樣另存（工作不能只留在被刪的 Session 裡）；沿用到的另存如果還只在 outbox（stage 完、還沒索引），讀它的 header 直接寫到它，stdout 印的就是沿用後的那個 id。
    - **靜音**：定期寫回在終端機不印任何東西、也不讀鍵盤（rclone 與 `opencode export` 的 stdin 都是 DEVNULL；rclone 加 `--ask-password=false`）。訊息寫到 `<state>/continue.log`（每行有時間與 Session id，大小上限和 `upload.log` 一樣）；失敗只記數、不中斷 agent，下一輪再試。agent 結束後，有失敗過就印「定期寫回失敗 N 次，見 `<state>/continue.log`」。
-   - **同一台機器不能同時接續同一個 Session**：`continue` 一開頭，目標正在接續中（`pending/<ULID>.json` 的鎖有人拿著）就拒絕，exit 4（`EXIT_LOCKED`；3 已經是「還在 outbox」），並在中文說明之前先印一行固定格式 `agora-locked <agora id>`——呼叫方（sidecar）靠它回報 409，不必解析中文（#54）。拿 `pending/<ULID>.json` 的鎖時再問一次同一個問題，蓋掉開頭檢查之後才拿到鎖的窗口：目的地已被鎖，或 `<ULID>.json.tmp` 已被另一個 `_write_pending` 鎖著（那個名字只有同一個 Session 的 `_write_pending` 在用；開啟時不 truncate，免得毀掉正要 rename 的記錄）就同樣 exit 4，輸的那個不覆蓋贏的記錄、不啟動 agent。`--fork` 的目標是新的，不受影響；被 fork 的 A 正在接續中也可以 fork（A 不會被寫）。
+   - **同一台機器不能同時接續同一個 Session**：`continue` 一開頭，目標正在接續中（`pending/<ULID>.json` 的鎖有人拿著）就拒絕，exit 4（`EXIT_LOCKED`；3 已經是「還在 outbox」），並在中文說明之前先印一行固定格式 `agora-locked <agora id>`——呼叫方（sidecar）靠它回報 409，不必解析中文（#54）；說明本身會寫出是誰在接續（pending 記錄的 `agent`、`dir`、`started_at`，缺的欄位略過；#90）。拿 `pending/<ULID>.json` 的鎖時再問一次同一個問題，蓋掉開頭檢查之後才拿到鎖的窗口：目的地已被鎖，或 `<ULID>.json.tmp` 已被另一個 `_write_pending` 鎖著（那個名字只有同一個 Session 的 `_write_pending` 在用；開啟時不 truncate，免得毀掉正要 rename 的記錄）就同樣 exit 4，輸的那個不覆蓋贏的記錄、不啟動 agent。`--fork` 的目標是新的，不受影響；被 fork 的 A 正在接續中也可以 fork（A 不會被寫）。
    - **agent 死掉要傳出來（#76）**：舊行為是只看寫回結果，agent 死掉又沒新內容時回 0，失敗被吞掉；第一版回 agent 原碼，但原碼會與 agora 自己的 1／2／3／4 撞碼。新行為是寫回仍然照做（死前的內容不丟），但子行程以 `returncode != 0` 結束（排除 130／143、-2／-15，以及轉送過 SIGTERM 之後的結束（不論 agent 回什麼碼）；-9／-11 都算失敗）時，stderr 印固定一行 `agora-agent-failed rc=<原碼>`（#54 的風格，負值照印如 `rc=-9`），寫回成功回固定的 5（`EXIT_AGENT_FAILED`），寫回失敗維持 3（同樣印那一行）。0／1／2／3／4 的原語意完全不變：絕不把 agent 原碼當 exit code。正常結束（0）、使用者離開、headless 被 SIGTERM 溫和停下（exit 0）不變。
    `agora continue` exit code 新舊對照（#76）：
 
@@ -336,7 +337,7 @@ Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之�
 - 一定要加 `--yes`，沒加就只印出會刪什麼，exit 1。
 - 有子 Session（別的 Session 的 `parents` 指向它，fork 出來的也算）時不刪，列出那些子 Session，exit 1。
 - **重跑會接著做**（2026-10-03 使用者決定）：刪除成功時把 ULID 記到 `<state>/deleted`；重跑同一個指令時，**在這份記錄裡的** id 印「已經不在了，略過」並不算失敗（全部都略過時 exit 0）。**從來不存在的 id（例如打錯）照樣報找不到、exit 1**——只有自己刪過的才略過。
-- **正在接續的（有人拿著 `pending/<ULID>.json` 的鎖）拒絕刪除**，exit 1，訊息說「正在接續，等它結束再刪」——那時候刪了，`_finish` 只會把結果另存成一個新的 Session，等於刪不掉又冒出一個。**只是留下來的記錄**（鎖已經沒人拿，例如那個 agent 的 session 已經不見了、收不了尾）**照樣刪**，並印一行「有一筆中斷的接續沒補存成功（`<state>/pending/<ULID>.json`）」——否則一個收不了尾的接續會讓那個 Session 永遠刪不掉。**目標換到另存的新 Session 之後，護的是改名後的那個**（`pending` 跟著改名，鎖也跟著走）：原本的那個不再算接續中，可以照一般規則刪；新的那個在接續結束前不能刪。
+- **正在接續的（有人拿著 `pending/<ULID>.json` 的鎖）跳過不刪**（#90），其他照刪；每一個跳過的都寫出是誰在用（pending 記錄的 `agent`、`dir`、`started_at`），結尾說跳過幾個；**有任何一個被跳過就 exit 1**，**全部都被鎖住時什麼都不刪、明說「沒有刪除任何東西」、exit 1**（不新增 exit code：4 是 `continue` 被鎖的專用訊號、5 是 agent 死掉；背景上傳器起不來時仍是 3）。等它結束再重跑就會刪掉。**子 Session 在同一次裡但被跳過（被鎖）時，它的父 Session 照樣不能刪**（批外的子 Session 的規則），父的那一行要寫明那個子是這次被跳過的。**`--force --yes` 才連使用中的一起刪**：`--force` 不取代 `--yes`（沒加 `--yes` 什麼都不刪，預覽標出使用中的那幾個）；刪之前逐個警告後果——那個 agent 之後的寫回會另存成一個新的 Session（`_finish` 找不到目標就走另存規則），這個 id 不會再有它的更新；pending 記錄與它的鎖是另一個行程的東西，不動。**只是留下來的記錄**（鎖已經沒人拿，例如那個 agent 的 session 已經不見了、收不了尾）**照樣刪**，並印一行「有一筆中斷的接續沒補存成功（`<state>/pending/<ULID>.json`）」——否則一個收不了尾的接續會讓那個 Session 永遠刪不掉。**目標換到另存的新 Session 之後，護的是改名後的那個**（`pending` 跟著改名，鎖也跟著走）：原本的那個不再算接續中，可以照一般規則刪；新的那個在接續結束前不能刪。
 - **Drive 上已經沒有的資料夾當成已刪掉**（S1-4：rclone 不會 purge 一個不存在的資料夾，會回錯；中斷在 purge 與本機忘掉之間就會這樣，否則重跑會永遠失敗）。但**「找不到」不能單獨相信**（S1-4b）：Drive API 在 folder id 錯了或 token 看不到東西時說的也是同一句話。所以 purge 失敗之後會再列檔一次，**只有列檔回來而且清單裡沒有這個 ULID** 才當成已刪掉；列檔也失敗就照原本的錯誤丟出。
 - **一次可以刪多個**（2026-10-02 使用者決定）：`agora delete session id1 id2 … --yes`，空白或逗號分隔。子 Session 也在同一次要刪的，就先刪子 Session，它的來源接著就能刪；子 Session 不在這次裡面的照樣拒絕，其他的照刪，有被拒絕的就 exit 1。互動模式的 `d` 刪掉所有勾選的（沒有勾選就是游標那一個），確認視窗列出數量與標題，預設停在「取消」。
 
