@@ -570,6 +570,42 @@ def _apply_revert_v2(payload: dict) -> None:
         info.pop("revert", None)
 
 
+def _empty_model() -> dict:
+    """The v2 `model` object for a row that carries the key and claims nothing (#86).
+
+    import refuses a payload whose assistant row has no `model` at all
+    (`Missing key at [...]`, 2.1), so the key is always there - but an id agora
+    was never told stays empty rather than invented: `_last_model()` reads an
+    empty id as "no model", so the Session records nothing instead of a falsehood.
+    """
+    return {"id": "", "providerID": "opencode", "variant": "default"}
+
+
+def _env_model() -> dict | None:
+    """The v2 `model` object for `AGORA_OPENCODE_MODEL`, or None if it names none.
+
+    It is the one model agora was actually told to run - `summarize()` hands the
+    same value to `-m` - so a row built from it can say which model this session
+    used without agora guessing. That is all of #86: the rows `native()` writes
+    for a cross-agent continue used to carry an empty id, so the Session that
+    came out of it remembered no model and `collect()`'s `generated.by` had none.
+
+    The value is spelled the way opencode spells it (`provider/id`), so a model
+    of another provider is not filed under `opencode`; a bare id is taken as an
+    `opencode` model, which is the provider every other fallback here uses. A
+    value with no id at all (`provider/`) names no model: the caller keeps the
+    empty one rather than half a model.
+    """
+    chosen = (os.environ.get("AGORA_OPENCODE_MODEL") or "").strip()
+    if "/" in chosen:
+        provider, _, model_id = chosen.partition("/")
+    else:
+        provider, model_id = "opencode", chosen
+    if not model_id:
+        return None
+    return {"id": model_id, "providerID": provider or "opencode", "variant": "default"}
+
+
 def _role_fields_v2(payload: dict) -> dict[str, dict]:
     """Per role, the fields a new v2 row has to copy (M1).
 
@@ -1043,6 +1079,11 @@ class OpencodeAgent:
         with them is refused outright.
         """
         created = int(time.time() * 1000)
+        # one model for every row it writes: the one AGORA_OPENCODE_MODEL names,
+        # else none (#86). A cross-agent continue has no opencode row to copy a
+        # model off - the source is another agent's - so this is the only source
+        # there is here, and without it the rows record no model at all.
+        model = _env_model() or _empty_model()
         messages: list[dict] = []
         for role, lines in turns:
             # the contract says both are true already; the check keeps a caller
@@ -1058,8 +1099,7 @@ class OpencodeAgent:
             else:
                 messages.append({"id": message_id, "time": {"created": at, "completed": at},
                                  "type": "assistant", "agent": "build",
-                                 "model": {"id": "", "providerID": "opencode",
-                                           "variant": "default"},
+                                 "model": dict(model),
                                  "content": [{"type": "text", "text": line}
                                              for line in body]})
         payload = {"info": _session_info(created), "messages": messages}
@@ -1078,6 +1118,9 @@ class OpencodeAgent:
         them as parsed JSON); the stored bytes may differ in whitespace, escaping
         or number formatting after a loads/dumps round trip. v2 rows carry no
         parent link, so the new rows chain by time order, not by id.
+
+        The model the new rows carry is A's own; `AGORA_OPENCODE_MODEL` fills in
+        when A's rows name none, and with neither the row claims no model (#86).
         """
         payload = self._read(raw)
         if _payload_format(payload) == "v2":
@@ -1154,7 +1197,8 @@ class OpencodeAgent:
         (2.1's required set): user `{id,time,text,files,type}`, assistant
         `{id,time,type,agent,model,content:[{type,text}]}` - no synthetic, no
         attachment, no parent link (v2 has none). The fork's new assistant rows
-        copy the model A was using, so `_last_model` still answers with A's model.
+        copy the model A was using, so `_last_model` still answers with A's model
+        - falling back to `AGORA_OPENCODE_MODEL` when A's rows name none (#86).
         """
         _apply_revert_v2(payload)
         messages = _payload_messages(payload)
@@ -1181,8 +1225,9 @@ class OpencodeAgent:
                                  "text": "\n".join(lines), "files": [], "type": "user"})
             else:
                 copied = fields.get("assistant") or {}
-                model = copied.get("model") or {"id": "", "providerID": "opencode",
-                                                "variant": "default"}
+                # what A was using is a fact; the env model fills the hole when
+                # A's rows name none, and neither means the row claims none (#86)
+                model = copied.get("model") or _env_model() or _empty_model()
                 messages.append({"id": message_id, "time": {"created": at, "completed": at},
                                  "type": "assistant",
                                  "agent": copied.get("agent", "build"),
