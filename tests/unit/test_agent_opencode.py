@@ -990,8 +990,8 @@ def _empty_id_model_fork() -> bytes:
     The reachable order is this one: continue across agents without
     `AGORA_OPENCODE_MODEL` (so A's rows name no model), then fork A's Session with
     the variable set. A row that says no model must not pass for a row that
-    names one - `{}` and `{"id": "", ...}` are both truthy dicts, so a truthiness
-    test alone lets the empty one win.
+    names one - `{"id": "", ...}` is a truthy dict, so a truthiness test alone
+    lets the empty one win.
     """
     return oc.ADAPTER.native(oc.ADAPTER.turns(v2()))
 
