@@ -98,6 +98,9 @@ agora search session --filter agent=claude --filter tags=csv
 agora search session --filter generated.by~=opencode
 agora search session                          # 沒有 filter＝列出全部
 agora search session --filter text~=CSV --no-sync   # 不連 Drive，只查本機索引
+# 每行：agora id、對話日期、agent、標題或摘要；最後更新日與對話日期不同時補
+# 「（更新：YYYY-MM-DD）」（清單順序仍是對話日期，新到舊）。
+# 本機正在接續的標 (使用中)；只看得到這台機器的鎖，別台機器上的接續看不到。
 
 # 合併成一個新的 Session（空白或逗號分隔都可以）
 agora merge session agora:01K6…, agora:01K7…, agora:01K8…
@@ -119,8 +122,13 @@ agora edit session agora:01K6…
 # 刪除：本機立刻不見（鏡像、索引、outbox 那一筆），Drive 那份由背景移到垃圾桶
 # （30 天內可以在 Drive 網頁還原）。指令不等背景。一定要加 --yes
 # 有找不到的 id 時整批都不刪（exit 1）；自己刪過的 id 重跑時會略過
+# 正在接續的（本機有人在寫回它）跳過不刪，並寫出是誰在用（agent、目錄、開始時間）；
+# 其他照刪，exit 1；全部都被鎖住時什麼都不刪並明說。等它結束再重跑就會刪掉
+# 要連使用中的一起刪：加 --force（--force 也要 --yes）。刪掉之後那個 agent 的寫回
+# 會另存成新的 Session（原本那個 id 不會再有更新），刪之前會逐個警告
 agora delete session agora:01K6… --yes
 agora delete session agora:01K6…, agora:01K7… --yes
+agora delete session agora:01K6… --force --yes    # 連正在接續的一起刪（會先警告）
 
 # pull／push 只吃給的 id（沒有 --all；id 的前綴決定意思，不從形狀猜）
 # agora:X → agora 的 Session；opencode:<id>／claude:<id> → 這台機器上的 agent session
@@ -160,7 +168,7 @@ agora show session agora:01K6… --raw
 | code | 意思 |
 |---|---|
 | 0 | 成功 |
-| 1 | 做不到：找不到 id、沒有訊息可匯入、merge 少於兩個、delete 沒加 `--yes`、有子 Session |
+| 1 | 做不到：找不到 id、沒有訊息可匯入、merge 少於兩個、delete 沒加 `--yes`、有子 Session、delete 有正在接續的而跳過（全部都被鎖住也是，訊息說明沒有刪除任何東西） |
 | 2 | 錯誤：標頭、Drive、agent 匯出失敗或非預期的錯誤，以及指令用法錯誤 |
 | 3 | 還在 outbox（背景上傳器起不來，或 `AGORA_UPLOAD=inline` 時這一輪沒送完） |
 | 4 | 這個 Session 正在接續中（同一台機器有另一個 `continue` 在寫回它）：說明之前先印一行 `agora-locked <agora id>`，呼叫方用它分辨（409）；`--fork` 不受影響 |

@@ -821,6 +821,19 @@ def _import(capsys, *extra):
     return run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode", *extra)
 
 
+def _a_live_continue(paths, agora_id, *, agent="opencode", started_at=None, sid="ses_x"):
+    """The pending record of a continue that is running right now: written the way
+    `_write_pending` writes it, with its lock still held (#90). Returns it with the
+    record's path and its lock, so the caller can let the run end."""
+    record = {"agora_id": agora_id, "agent": agent, "agent_session_id": sid,
+              "dir": str(Path.home() / "proj"), "before_count": 1,
+              "parent": {"id": agora_id, "raw_md5": None}}
+    if started_at:
+        record["started_at"] = started_at
+    path, lock = cli._write_pending(paths, record)
+    return record, path, lock
+
+
 def test_import_fills_okf_fields(env, capsys):  # design 3.4
     _, sid, _ = _import(capsys)
     hdr = store.Index(store.Paths.from_env()).header(sid.split(":")[1])
@@ -1185,6 +1198,30 @@ def _lost_in_the_cloud(capsys):
     return a, ulid
 
 
+def test_search_marks_a_session_being_continued_here_and_shows_when_it_was_written(env, capsys):
+    """#90: the date cell carries the last write next to the conversation date, and a
+    locked session is marked - that is what says「in use, not old」at a glance."""
+    from datetime import datetime, timezone
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    _, _, lock = _a_live_continue(paths, a, started_at="2026-10-18T05:01:00Z")
+    try:
+        code, out, _ = run(capsys, "search", "session", "--filter", "text~=CSV", "--no-sync")
+    finally:
+        lock.close()
+    line = next(line for line in out.splitlines() if line.startswith(a))
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    assert code == 0
+    assert line.split()[1] == f"2026-10-01（更新：{today}）"
+    assert line.endswith("(使用中)")
+
+    # the leftover record nobody holds is not「in use」: it is a continue that died
+    code, out, err = run(capsys, "search", "session", "--filter", "text~=CSV", "--no-sync")
+    line = next(line for line in out.splitlines() if line.startswith(a))
+    assert code == 0 and not line.endswith("(使用中)")
+    assert "有中斷的接續待補存" in err
+
+
 def test_search_marks_what_the_cloud_does_not_have(env, capsys):
     a, _ = _lost_in_the_cloud(capsys)
     code, out, _ = run(capsys, "search", "session", "--filter", "text~=CSV", "--no-sync")
@@ -1266,16 +1303,159 @@ def test_a_session_in_the_outbox_is_not_taken_for_deleted(env, capsys, monkeypat
     assert code != 1 or "雲端沒有" not in err, "an unuploaded session is not a deleted one"
 
 
-def test_delete_refuses_a_session_that_is_being_continued(env, capsys):
-    """F4: deleting it now would only make `_finish` save the result elsewhere."""
+def test_delete_skips_a_session_that_is_being_continued_and_deletes_the_rest(env, capsys):
+    """#90: one locked session must not stop the whole batch (F4 used to refuse it all).
+    It is left alone, and the stderr line says who is continuing it."""
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    paths = store.Paths.from_env()
+    _, _, lock = _a_live_continue(paths, a, agent="claude", started_at="2026-10-18T05:01:00Z")
+    try:
+        code, out, err = run(capsys, "delete", "session", a, b, "--yes")
+    finally:
+        lock.close()
+    assert code == 1 and out.split() == [b]
+    assert f"跳過 {a}：正在接續中" in err
+    assert "agent claude" in err and "目錄 ~/proj" in err and "從 2026-10-18T05:01:00Z 開始" in err
+    assert f"跳過 1 個正在接續的：{a}" in err
+    index = store.Index(paths)
+    assert index.header(a.split(":")[1]) is not None      # kept: somebody is working in it
+    assert index.header(b.split(":")[1]) is None          # and the rest went anyway
+
+
+def test_delete_when_every_session_is_being_continued_deletes_nothing(env, capsys):
+    """#90: all locked - say so and exit 1. Not a silent 0, and not 4/5 (those belong to
+    `continue` being locked and to an agent dying)."""
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    paths = store.Paths.from_env()
+    _, _, lock_a = _a_live_continue(paths, a, started_at="2026-10-18T05:01:00Z")
+    _, _, lock_b = _a_live_continue(paths, b, sid="ses_b")
+    try:
+        code, out, err = run(capsys, "delete", "session", a, b, "--yes")
+    finally:
+        lock_a.close()
+        lock_b.close()
+    assert code == 1 and out == ""
+    assert "2 個都在接續中，沒有刪除任何東西" in err and a in err and b in err
+    assert "--force --yes" in err
+    index = store.Index(paths)
+    assert index.header(a.split(":")[1]) is not None and index.header(b.split(":")[1]) is not None
+
+
+def test_delete_of_a_session_being_continued_goes_through_after_the_lock_is_released(env, capsys):
+    """#90: rerunning the same command once the run is over finishes the job."""
     _, a, _ = _import(capsys)
     paths = store.Paths.from_env()
-    _, lock = cli._write_pending(paths, {"agora_id": a, "agent": "opencode", "agent_session_id": "ses_x",
-                                         "dir": "/tmp", "before_count": 1, "parent": {"id": a}})
-    code, _, err = run(capsys, "delete", "session", a, "--yes")   # the lock keeps it in flight
-    assert code == 1 and "正在接續" in err
+    _, _, lock = _a_live_continue(paths, a, sid="ses_gone")
+    code, out, err = run(capsys, "delete", "session", a, "--yes")
+    assert code == 1 and out == "" and "正在接續中" in err
+    lock.close()                     # the run is over: what is left is a stale record
+    code, out, err = run(capsys, "delete", "session", a, "--yes")
+    assert code == 0 and out == a
+    assert store.Index(paths).header(a.split(":")[1]) is None
+
+
+def test_delete_force_deletes_a_session_being_continued_after_saying_the_consequence(env, capsys):
+    """#90: --force --yes does delete it, but the warning comes first - that agent's next
+    write-back is saved as a session of its own - and the other run's record is not touched."""
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    _, pending, lock = _a_live_continue(paths, a, agent="claude", started_at="2026-10-18T05:01:00Z")
+    try:
+        code, out, err = run(capsys, "delete", "session", a, "--force", "--yes")
+    finally:
+        lock.close()
+    assert code == 0 and out == a
+    assert "另存成一個新的 Session" in err
+    assert "agent claude" in err and "從 2026-10-18T05:01:00Z 開始" in err
+    assert err.index("--force") < err.index("已從本機刪除")     # warned on the way out
+    assert pending.exists(), "the other run's pending record is its own"
+    assert store.Index(paths).header(a.split(":")[1]) is None
+    # the Drive half is queued for the trash like any other delete (inline uploader here)
+    assert not Path(os.environ["FAKE_REMOTE"]).joinpath("agora", "sessions", a.split(":")[1]).exists()
+
+
+def test_delete_force_without_yes_deletes_nothing(env, capsys):
+    """#90: --force is not a shortcut around --yes. The list names the in-use session and
+    says both flags are needed."""
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    _, _, lock = _a_live_continue(paths, a, started_at="2026-10-18T05:01:00Z")
+    try:
+        code, out, err = run(capsys, "delete", "session", a, "--force")
+    finally:
+        lock.close()
+    assert code == 1 and out == ""
+    assert "（使用中）" in err and "--force 也要 --yes" in err and "另存成一個新的 Session" in err
     assert store.Index(paths).header(a.split(":")[1]) is not None
-    lock.close()
+
+
+def test_the_work_of_a_force_deleted_continue_is_rescued_by_the_next_command(env, capsys):
+    """#90: the consequence the warning promises. The write-back cannot go into the
+    deleted session, so the conversation is saved as a session of its own pointing at it."""
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    env.sessions["ses_x"] = ["繼續說", "好的"]
+    _, pending, lock = _a_live_continue(paths, a, sid="ses_x")
+    code, out, _ = run(capsys, "delete", "session", a, "--force", "--yes")
+    assert code == 0 and out == a
+    lock.close()                        # the run is over; the record is a leftover now
+    cli.recover_pending(paths)          # what the next command does with it
+    found = [hdr for _u, hdr, _s in store.Index(paths).search([]) if hdr["id"] != a]
+    assert len(found) == 1, "the work is saved once, as its own session"
+    assert [p["id"] for p in h.agora_of(found[0])["parents"]] == [a]
+    assert h.agora_of(found[0])["relation"] == "continue"
+    assert store.Index(paths).header(a.split(":")[1]) is None
+    assert not pending.exists()
+
+
+def test_delete_refuses_a_parent_whose_locked_child_in_the_batch_was_skipped(env, capsys):
+    """#90 / R4: a child that was skipped as locked is still somebody's child, so its
+    parent cannot go either (the rule for children outside the request), and the parent's
+    line says why that child is still here."""
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")   # m is a child of a
+    paths = store.Paths.from_env()
+    _, _, lock = _a_live_continue(paths, m, sid="ses_m")
+    try:
+        code, out, err = run(capsys, "delete", "session", a, m, "--yes")
+    finally:
+        lock.close()
+    assert code == 1 and out == ""
+    assert f"{a} 有子 Session" in err and m in err
+    assert "（子 Session 這次被跳過：正在接續中）" in err
+    index = store.Index(paths)
+    assert index.header(a.split(":")[1]) is not None and index.header(m.split(":")[1]) is not None
+
+
+def test_delete_of_an_unknown_id_still_refuses_the_whole_batch(env, capsys):
+    """#90 keeps R4: a typo is not a skip - nothing goes, not even the ids that were fine."""
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "好"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b", "--agent", "opencode")
+    code, out, err = run(capsys, "delete", "session", a, "agora:01K6NOSUCH0000000000000", b, "--yes")
+    assert code == 1 and out == "" and "找不到" in err
+    index = store.Index(store.Paths.from_env())
+    assert index.header(a.split(":")[1]) is not None and index.header(b.split(":")[1]) is not None
+
+
+def test_an_unknown_id_refuses_even_a_batch_with_a_locked_one(env, capsys):
+    """#90: the typo rule comes first - no skip line, no deletion, even when another id
+    in the same batch is locked."""
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    _, _, lock = _a_live_continue(paths, a, started_at="2026-10-18T05:01:00Z")
+    try:
+        code, out, err = run(capsys, "delete", "session", a, "agora:01K6NOSUCH0000000000000", "--yes")
+    finally:
+        lock.close()
+    assert code == 1 and out == "" and "找不到" in err and "跳過" not in err
+    assert store.Index(paths).header(a.split(":")[1]) is not None
 
 
 def test_delete_goes_through_when_the_pending_record_is_a_leftover(env, capsys):
