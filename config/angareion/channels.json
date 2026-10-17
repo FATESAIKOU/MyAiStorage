@@ -1,5 +1,9 @@
 {
   "channels": {
+    "m0-exp-r2": {
+      "backend": "aicompany-channel",
+      "issue": 3
+    },
     "team-mylinuxpool": {
       "backend": "aicompany-channel",
       "issue": 2
