@@ -190,6 +190,17 @@ agora show session agora:01K6… --raw
 
 **壓縮：** 用 agent 內建的指令，opencode 是 `/compact`，Claude Code 是 `/compact`。壓縮後的內容會在 agent 結束時存回 Agora。
 
+**已知限制（接續進 opencode 用 Zen 免費模型）：** `continue` 開出來的 opencode session——
+跨 agent 接續、或 opencode 接續自己，都一樣——**不能用 Zen（`opencode` provider）的免費模型**，
+第一個請求就被擋（HTTP 403 `FreeTierError`：`free tier can only be used from within OpenCode`）。
+要接續請改用 **Ollama Cloud 的 DeepSeek**（`ollama-cloud/deepseek-v4.1-flash`）——它不在 Zen 的免費層，
+這個專案實際就是這樣接續的。（Zen 的**付費**模型是否也擋匯入進來的 session，這次沒有實測。）
+
+這是 Zen 對「不是 opencode 自己開的對話」的限制，不是 agora 送出的東西造成的：匯入一個
+**0 則訊息**的 session 也被拒，與對話大小無關（兩千到二十萬字元第一個請求就被擋），
+而那個 session 送出的 request 與 opencode 自開 session 的第一輪逐欄位相同（body 一樣，
+只有 session id 不同）。完整的實測、排除過的假設與證據表在 [docs/review/agora-free-85.md](docs/review/agora-free-85.md)。
+
 ## 檔案放哪
 
 | 位置 | 內容 |
