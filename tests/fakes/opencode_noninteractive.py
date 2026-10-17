@@ -7,9 +7,9 @@ here instead, and this wrapper translates the TUI form into the headless one:
 
     `[--session <id>]  ->  opencode run --standalone -s <id> -m <model> <fixed question>`
 
-`--version`, `session export <id>`, `session import <file>` and
-`session delete <id>` are passed straight through, because the adapter uses them
-for real; opencode 2.x's server flags (`--standalone`, `--server`, `--directory`)
+`session export <id>`, `session import <file>` and `session delete <id>` are
+passed straight through, because the adapter uses them for real (nothing calls
+`--version` any more: the version comes from the export); opencode 2.x's server flags (`--standalone`, `--server`, `--directory`)
 ride along in argv untouched, and every run this module starts carries
 `--standalone` of its own, so no test call can reach the machine-wide managed
 service (review H2).

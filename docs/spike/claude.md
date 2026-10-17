@@ -136,7 +136,7 @@ import → search（第一欄即新 id）→ continue 原生（wrapper 收到 `-
 → merge（逗號寫法）→ continue 注入（wrapper 收到 `--session-id`，回覆引用閱讀版）。
 新 Session 的 `relation=continue`、`parents[0].id` 正確、`source.session_id` 為新 uuid。
 真實 `claude -p` 共 3 次。cli／store 側沒發現 bug（U-CON-05 pending 留刪問題 PM 已定為刪除）。
-小發現：adapter 的 `claude --version` 也走 `AGORA_CLAUDE_CMD`，wrapper 需透傳 `--version`。
+小發現：adapter 的 `claude --version` 也走 `AGORA_CLAUDE_CMD`，wrapper 需透傳 `--version`。（2026-10-16 對帳：已不成立——agora 不再跑 `--version`；claude 的版本從 jsonl 讀、opencode 的從匯出檔讀。）
 
 ## 附記3：CL1–CL14、P 精簡、E1–E8（2026-10-02，claude.py 355 行，src 合計 1840）
 

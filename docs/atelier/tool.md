@@ -39,4 +39,4 @@ atelier install <id>[@<版本>] --agent <claude|opencode> [--agent …]
 - **install 先驗**：要裝的 harness 必須有可解析的 frontmatter 且 `type: Harness`；沒有（或不是）＝exit 2、**什麼都不寫**。opencode 另外拒絕內文含整行管理標記的 harness（裝了會讓之後的 install 拒絕該檔）。
 - **不碰**：`~/.claude/settings.json`（也絕不產生 `apiKeyHelper`）、專案自己的 `AGENTS.md`／`CLAUDE.md`、工作目錄的任何檔案。
 - 生效：claude 在下一個新 conversation（`--resume` 時是否重載要在驗收確認）；opencode 依官方文件在下一個模型請求前。期 1 由 MyLinuxPool 的開機掛點跑 `atelier install atelier:worker-team-pm --agent claude --agent opencode`（PR 3；sidecar 不改）。
-- 本 PR 還沒放 harness 檔（PR 2），所以真實複本上的 `atelier ls` 目前會是空的。
+- PR 2 已放第一份職務檔（`atelier/worker-team/pm/v0.md`，識別 `atelier:worker-team-pm@v0`）：真實複本上的 `atelier ls` 會列出它。

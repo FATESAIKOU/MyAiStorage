@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """A fake claude CLI for unit tests (test-plan 0.3).
 
---version prints a version number (AGORA agent_version reads it).
+--version prints a version number (nothing reads it: agora takes claude's version
+from the jsonl and opencode's from the export, never from `--version`).
 --resume <id> appends one user + one assistant line to
 $AGORA_CLAUDE_HOME/.claude/projects/<encoded pwd>/<id>.jsonl, unless
 FAKE_AGENT_MODE=noop. Every call appends its argv + pwd to

@@ -1,6 +1,6 @@
 # Atelier v0 介面摘要（一頁）
 
-> 給 PMO 向本人說明用（r3，2026-10-16）。設計全文：`openspec/changes/atelier-v0/`；v0 職務草稿：`openspec/changes/atelier-v0/harness/worker-team-pm.md`。本人已答覆：E1（Angareion 是 AiStorage 的要素、不是 harness 章節）、E2（虛擬資料夾＋工具讀）、E5（sidecar 暫不改）、E8（單人暫定）、E9（放 MyAiStorage 的 git）、E10（`atelier` 指令）、E4（`models` 先留空）、**E11（載入＝選項 1）**、E7（隊名 `worker-team`）。**沒有要本人裁定的了**；E6 由 MyPMO#33 處理（PR #66）。
+> 給 PMO 向本人說明用（r3，2026-10-16）。設計全文：`openspec/changes/atelier-v0/`；v0 職務檔：`atelier/worker-team/pm/v0.md`（與草稿 `openspec/changes/atelier-v0/harness/worker-team-pm.md` 逐位元組相同）。本人已答覆：E1（Angareion 是 AiStorage 的要素、不是 harness 章節）、E2（虛擬資料夾＋工具讀）、E5（sidecar 暫不改）、E8（單人暫定）、E9（放 MyAiStorage 的 git）、E10（`atelier` 指令）、E4（`models` 先留空）、**E11（載入＝選項 1）**、E7（隊名 `worker-team`）。**沒有要本人裁定的了**；E6 由 MyPMO#33 處理（PR #66）。
 
 ## 實體
 

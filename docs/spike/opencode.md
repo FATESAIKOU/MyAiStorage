@@ -525,7 +525,7 @@ PM 已經自己加上了（`XDG_*`／`CLAUDE_CONFIG_DIR` 的 `delenv`，加上�
 | OC5 | 注入的 part 加上 `"synthetic": true` 與 `metadata.agora = "agora-injected"`；`_lines_of` 遇到自己注入的只輸出一行 `[注入的閱讀版]`，遇到 opencode 自己 inline 的 attachment（也是 `synthetic`）**完全不輸出** | `test_our_injected_reading_version_is_one_line`（50 段閱讀版只變一行）、`test_an_injected_part_is_marked_synthetic`、`test_an_attachment_opencode_inlined_produces_no_line` |
 | OC6 | 保留 `part_map`，`info.revert.partID` 也照對應改寫 | `test_a_reverted_session_keeps_its_undo_pointer` |
 | OC7 | 所有對 opencode 的 subprocess 都加 timeout（`AGORA_OPENCODE_TIMEOUT`，預設 60 秒），逾時丟 `AgentError`，所以會走 R4 的「下次再試」而不是把每一個後續 agora 指令一起卡住。timeout 每次呼叫再讀（不是 import 時讀），測試才改得動 | `test_a_hanging_opencode_becomes_an_error_not_a_hang` |
-| OC8 | `agent_version` 改成用 `info.version`（那才是**產生這個 session** 的版本），拿不到才叫 `opencode --version` | `test_export_fills_every_field`（改成斷言 1.18.34）、`test_the_version_falls_back_to_the_cli_only_when_the_export_has_none` |
+| OC8 | `agent_version` 改成用 `info.version`（那才是**產生這個 session** 的版本），拿不到才叫 `opencode --version`（2026-10-16 對帳：後半已不成立——agora 不再跑 `--version`，匯出檔沒有版本時 `agent_version` 就留空，v2 根本不記錄版本） | `test_export_fills_every_field`（改成斷言 1.18.34）、`test_the_version_falls_back_to_the_cli_only_when_the_export_has_none` |
 | OC9 | `_delete` 檢查 rc；失敗時訊息改成「刪除也失敗了，請手動 `opencode session delete <id>`」 | `test_a_failed_delete_is_reported_as_such` |
 | OC10 | `collect` 沒有 `agent_session_id` 時丟 `AgentError`（與 claude 一致），不再回 None——回 None 會讓 CLI 刪掉 pending，整個 Session 就沒了 | `test_collect_without_a_session_id_raises` |
 | OC11 | conftest 是 PM 的檔案，不動。PM 已經自己處理了 | — |
