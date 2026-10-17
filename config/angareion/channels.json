@@ -1,4 +1,9 @@
 {
-  "channels": {},
+  "channels": {
+    "team-mylinuxpool": {
+      "backend": "aicompany-channel",
+      "issue": 2
+    }
+  },
   "version": 1
 }
