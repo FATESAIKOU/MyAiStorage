@@ -40,3 +40,8 @@ atelier install <id>[@<版本>] --agent <claude|opencode> [--agent …]
 - **不碰**：`~/.claude/settings.json`（也絕不產生 `apiKeyHelper`）、專案自己的 `AGENTS.md`／`CLAUDE.md`、工作目錄的任何檔案。
 - 生效：claude 在下一個新 conversation（`--resume` 時是否重載要在驗收確認）；opencode 依官方文件在下一個模型請求前。期 1 由 MyLinuxPool 的開機掛點跑 `atelier install atelier:worker-team-pm --agent claude --agent opencode`（PR 3；sidecar 不改）。
 - PR 2 已放第一份職務檔（`atelier/worker-team/pm/v0.md`，識別 `atelier:worker-team-pm@v0`）：真實複本上的 `atelier ls` 會列出它。
+
+## 已知限制
+
+- install 完成前就開的 agent 不會有 harness，要重開一次（worker 開機時 `start.d/20-atelier` 在 angareion-setup 之後才裝）。
+- 實機載入只驗過 new 模式（MyLinuxPool#114，2026-10-17）；`--resume`／continue 接續是否載入沒驗。
