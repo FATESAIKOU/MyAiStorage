@@ -592,15 +592,18 @@ def _env_model() -> dict | None:
 
     The value is spelled the way opencode spells it (`provider/id`), so a model
     of another provider is not filed under `opencode`; a bare id is taken as an
-    `opencode` model, which is the provider every other fallback here uses. A
+    `opencode` model, which is the provider every other fallback here uses. The
+    split is on the one slash (a model id may carry a slash of its own) and each
+    side is trimmed, so a space around the separator is not part of a name. A
     value with no id at all (`provider/`) names no model: the caller keeps the
-    empty one rather than half a model.
+    empty one rather than half a model (review F2).
     """
     chosen = (os.environ.get("AGORA_OPENCODE_MODEL") or "").strip()
     if "/" in chosen:
         provider, _, model_id = chosen.partition("/")
     else:
         provider, model_id = "opencode", chosen
+    provider, model_id = provider.strip(), model_id.strip()
     if not model_id:
         return None
     return {"id": model_id, "providerID": provider or "opencode", "variant": "default"}
@@ -1225,9 +1228,14 @@ class OpencodeAgent:
                                  "text": "\n".join(lines), "files": [], "type": "user"})
             else:
                 copied = fields.get("assistant") or {}
-                # what A was using is a fact; the env model fills the hole when
-                # A's rows name none, and neither means the row claims none (#86)
-                model = copied.get("model") or _env_model() or _empty_model()
+                # A's model, but only if A's rows actually name one: the empty
+                # model `native()` writes is a truthy dict, and taking it for a
+                # model would leave the fork with none forever - the reachable
+                # order is a cross-agent continue without the env variable, then
+                # a fork of that Session with it set (review F1).
+                cm = copied.get("model")
+                inherited = cm if isinstance(cm, dict) and cm.get("id") else None
+                model = inherited or _env_model() or _empty_model()
                 messages.append({"id": message_id, "time": {"created": at, "completed": at},
                                  "type": "assistant",
                                  "agent": copied.get("agent", "build"),

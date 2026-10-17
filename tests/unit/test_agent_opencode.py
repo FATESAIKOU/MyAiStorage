@@ -983,6 +983,60 @@ def test_append_native_v2_falls_back_to_the_env_model(fake, monkeypatch):
     assert oc._last_model(out) == "space-bunny-free"
 
 
+def _empty_id_model_fork() -> bytes:
+    """A's own raw as a cross-agent continue leaves it with no env model set: every
+    assistant row carries the empty model `native()` writes (review F1).
+
+    The reachable order is this one: continue across agents without
+    `AGORA_OPENCODE_MODEL` (so A's rows name no model), then fork A's Session with
+    the variable set. A row that says no model must not pass for a row that
+    names one - `{}` and `{"id": "", ...}` are both truthy dicts, so a truthiness
+    test alone lets the empty one win.
+    """
+    return oc.ADAPTER.native(oc.ADAPTER.turns(v2()))
+
+
+def test_append_native_v2_takes_the_env_model_when_a_named_none(fake, monkeypatch):
+    """Review F1: A's rows carry `{"id": "", ...}` - the shape a cross-agent
+    continue writes without the env variable - and a truthiness test reads that as
+    "A has a model", so the fork copies the emptiness and the model is lost for
+    good. An empty id is no model: the env model fills it in."""
+    monkeypatch.delenv("AGORA_OPENCODE_MODEL", raising=False)
+    a_raw = _empty_id_model_fork()
+    assert {row["model"]["id"] for row in json.loads(a_raw)["messages"]
+            if row["type"] == "assistant"} == {""}
+    monkeypatch.setenv("AGORA_OPENCODE_MODEL", "opencode/space-bunny-free")
+
+    out = json.loads(oc.ADAPTER.append_native(a_raw, FORK))
+    assert out["messages"][-1]["model"] == {"id": "space-bunny-free",
+                                            "providerID": "opencode", "variant": "default"}
+    assert oc._last_model(out) == "space-bunny-free"
+
+
+def test_append_native_v2_with_an_empty_model_and_no_env_keeps_it_empty(fake, monkeypatch):
+    monkeypatch.delenv("AGORA_OPENCODE_MODEL", raising=False)
+    out = json.loads(oc.ADAPTER.append_native(_empty_id_model_fork(), FORK))
+    assert out["messages"][-1]["model"] == {"id": "", "providerID": "opencode",
+                                            "variant": "default"}
+    assert oc._last_model(out) is None
+
+
+@pytest.mark.parametrize("chosen,want", [
+    ("opencode / space-bunny-free", {"id": "space-bunny-free",
+                                     "providerID": "opencode", "variant": "default"}),
+    ("a/b/c", {"id": "b/c", "providerID": "a", "variant": "default"}),
+    ("  opencode/space-bunny-free  ", {"id": "space-bunny-free",
+                                       "providerID": "opencode", "variant": "default"}),
+])
+def test_native_reads_the_env_model_the_way_opencode_spell_it(fake, monkeypatch, chosen, want):
+    """Review F2: the split is on the one slash, each side trimmed - a model id may
+    itself contain a slash, and a stray space around the separator is not part of
+    either name."""
+    monkeypatch.setenv("AGORA_OPENCODE_MODEL", chosen)
+    payload = json.loads(oc.ADAPTER.native([("user", ["ZZ 問"]), ("assistant", ["ZZ 答"])]))
+    assert payload["messages"][1]["model"] == want
+
+
 def test_append_native_v2_prefers_the_model_the_session_was_using(fake, monkeypatch):
     """What A was using is a fact; the env variable only fills a hole."""
     monkeypatch.setenv("AGORA_OPENCODE_MODEL", "opencode/space-bunny-free")
