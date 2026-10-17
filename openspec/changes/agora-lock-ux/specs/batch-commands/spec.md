@@ -5,7 +5,7 @@
 
 跳過的每一個 MUST 在 stderr 寫明**是哪一個**與**為什麼**：pending 記錄的 `agent`、`dir`、`started_at`（拿不到的欄位略過，MUST NOT 印這些以外的私人資訊）。結尾的摘要 MUST 說明跳過了幾個，以及等它結束再重跑同一個指令（要連它一起刪就加 `--force`，見下一條）。
 
-exit code：有任何一個被鎖而跳過時 MUST 是 1；**全部都被鎖住**時 MUST 什麼都不刪，stderr 明確說明「沒有刪除任何東西」，exit 1。MUST NOT 用 4（`continue` 被鎖的專用訊號，固定行 `agora-locked <agora id>`）或 5（agent 子行程死掉）。自己刪過的 id 重跑時略過仍不算失敗（0）；找不到的 id（打錯）仍然整批不刪（1）；有子 Session 的規則不變。
+exit code：有任何一個被鎖而跳過時 MUST 是 1；**全部都被鎖住**時 MUST 什麼都不刪，stderr 明確說明「沒有刪除任何東西」，exit 1。MUST NOT 用 4（`continue` 被鎖的專用訊號，固定行 `agora-locked <agora id>`）或 5（agent 子行程死掉）；**背景上傳器起不來時仍是 3**（`EXIT_IN_OUTBOX` 的既有優先序：佇列那半沒人做比「有跳過」更需要說），MUST NOT 被當成 1。自己刪過的 id 重跑時略過仍不算失敗（0）；找不到的 id（打錯）仍然整批不刪（1）；有子 Session 的規則不變。
 
 #### Scenario: 批次裡混著被鎖與沒鎖的
 - **WHEN** `agora delete session agora:A agora:B --yes`，A 正在接續中、B 沒有

@@ -21,7 +21,7 @@ from textual.widget import Widget
 from textual.widgets import Input, Static
 
 from agora import header as h
-from agora import cache, store, tui
+from agora import cache, cli, store, tui
 from agora.agents.base import NO_REPLY, Exported, Listed
 
 
@@ -191,6 +191,10 @@ def test_no_interactive_mode_without_a_terminal(monkeypatch, capsys):  # review 
 
 class FakeCli:
     AGENTS = ("opencode", "claude")
+    # #90: the screen refuses a locked continue with the command mode's own wording
+    # (`cli._who_note`), so the fake stands in for that helper too - the real app is
+    # handed the `agora.cli` module itself.
+    _who_note = staticmethod(cli._who_note)
 
     def __init__(self):
         self.calls = []
@@ -1596,6 +1600,8 @@ def test_continue_pending_lock_held_by_another_process_is_refused_early():
 
     真實的 continuing 只認 bare ulid 的檔名；若程式把 row.key（agora:<ULID>）
     傳進去，這裡的鎖永遠對不上，擋下就不會觸發。
+
+    #90：說明也要和指令模式一樣說出是誰在接續（`cli._who_note`），資料來自那筆記錄。
     """
     app, _ = _app([])
     ran = []
@@ -1604,7 +1610,12 @@ def test_continue_pending_lock_held_by_another_process_is_refused_early():
     paths = app.paths
     paths.pending.mkdir(parents=True, exist_ok=True)
     pending_file = paths.pending / f"{ulid}.json"
-    pending_file.write_text("{}", encoding="utf-8")
+    pending_file.write_text(json.dumps(
+        {"agora_id": f"agora:{ulid}", "agent": "claude", "agent_session_id": "ses_secret",
+         "dir": str(pathlib.Path.home() / "proj"), "before_count": 0,
+         "parent": {"id": f"agora:{ulid}", "raw_md5": None},
+         "started_at": "2026-10-18T05:01:00Z"}),
+        encoding="utf-8")
     holder = subprocess.Popen(
         [sys.executable, "-c",
          "import fcntl, sys, time; f = open(sys.argv[1]);"
@@ -1626,8 +1637,10 @@ def test_continue_pending_lock_held_by_another_process_is_refused_early():
                 assert isinstance(app.screen, tui.Tell)
                 assert app.screen.title_ == "✗ 不能接續"
                 lines_text = "\n".join(app.screen.lines)
-                assert "正在接續中，等它結束再接續；要分岔請在選 agent 的視窗勾 fork" in lines_text
+                assert ("正在接續中（agent claude、目錄 ~/proj、從 2026-10-18T05:01:00Z 開始），"
+                        "等它結束再接續；要分岔請在選 agent 的視窗勾 fork") in lines_text
                 assert "agora:01BBBBBBBBBBBBBBBBBBBBBBBB" in lines_text
+                assert "ses_secret" not in lines_text, "只有 agent、目錄與開始時間可以出去"
                 await pilot.press("enter")                       # close Tell
                 await pilot.pause()
                 assert not isinstance(app.screen, tui.ModalScreen)

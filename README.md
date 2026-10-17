@@ -168,7 +168,7 @@ agora show session agora:01K6… --raw
 | code | 意思 |
 |---|---|
 | 0 | 成功 |
-| 1 | 做不到：找不到 id、沒有訊息可匯入、merge 少於兩個、delete 沒加 `--yes`、有子 Session、delete 有正在接續的而跳過（全部都被鎖住也是，訊息說明沒有刪除任何東西） |
+| 1 | 做不到：找不到 id、沒有訊息可匯入、merge 少於兩個、delete 沒加 `--yes`、有子 Session、delete 有正在接續的而跳過（全部都被鎖住也是，訊息說明沒有刪除任何東西；背景上傳器起不來時仍是 3） |
 | 2 | 錯誤：標頭、Drive、agent 匯出失敗或非預期的錯誤，以及指令用法錯誤 |
 | 3 | 還在 outbox（背景上傳器起不來，或 `AGORA_UPLOAD=inline` 時這一輪沒送完） |
 | 4 | 這個 Session 正在接續中（同一台機器有另一個 `continue` 在寫回它）：說明之前先印一行 `agora-locked <agora id>`，呼叫方用它分辨（409）；`--fork` 不受影響 |

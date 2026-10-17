@@ -1352,10 +1352,48 @@ def test_delete_of_a_session_being_continued_goes_through_after_the_lock_is_rele
     _, _, lock = _a_live_continue(paths, a, sid="ses_gone")
     code, out, err = run(capsys, "delete", "session", a, "--yes")
     assert code == 1 and out == "" and "正在接續中" in err
+    assert f"{a} 正在接續中，沒有刪除任何東西" in err     # one session: the singular line (#90 review L3)
     lock.close()                     # the run is over: what is left is a stale record
     code, out, err = run(capsys, "delete", "session", a, "--yes")
     assert code == 0 and out == a
     assert store.Index(paths).header(a.split(":")[1]) is None
+
+
+def test_delete_still_skips_when_the_pending_record_cannot_be_read(env, capsys):
+    """#90 review M1: the lock is the authority. A damaged record changes nothing except
+    the wording - there is no agent, directory or start time to quote, and none is invented."""
+    import fcntl
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    paths.pending.mkdir(parents=True, exist_ok=True)
+    pending = paths.pending / f"{a.split(':')[1]}.json"
+    pending.write_text("{ 壞掉的 JSON", encoding="utf-8")
+    holder = open(pending, "r+", encoding="utf-8")
+    fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        code, out, err = run(capsys, "delete", "session", a, "--yes")
+    finally:
+        holder.close()
+    assert code == 1 and out == ""
+    assert f"跳過 {a}：正在接續中，" in err
+    assert f"{a} 正在接續中，沒有刪除任何東西" in err
+    assert "agent" not in err and "目錄" not in err, "no field was invented from the broken record"
+    assert store.Index(paths).header(a.split(":")[1]) is not None
+
+
+def test_delete_leftover_warning_shows_the_state_path_with_a_short_home(env, capsys, monkeypatch):
+    """#90 review L4: the leftover record's path gets the same `~` as the directories in
+    the other lines - it is local state, and the home in it should not stand out."""
+    monkeypatch.setenv("AGORA_STATE_DIR", str(Path.home() / "agora-state"))
+    _, a, _ = _import(capsys)
+    paths = store.Paths.from_env()
+    record = {"agora_id": a, "agent": "opencode", "agent_session_id": "ses_gone",
+              "dir": "/tmp", "before_count": 1, "parent": {"id": a, "raw_md5": None}}
+    _, lock = cli._write_pending(paths, record)
+    lock.close()                      # a run that could not be finished leaves this
+    code, out, err = run(capsys, "delete", "session", a, "--yes")
+    assert code == 0 and out == a
+    assert "中斷的接續沒補存成功（~/agora-state/pending/" in err
 
 
 def test_delete_force_deletes_a_session_being_continued_after_saying_the_consequence(env, capsys):
@@ -1389,7 +1427,8 @@ def test_delete_force_without_yes_deletes_nothing(env, capsys):
     finally:
         lock.close()
     assert code == 1 and out == ""
-    assert "（使用中）" in err and "--force 也要 --yes" in err and "另存成一個新的 Session" in err
+    assert "（使用中，" in err and "（使用中）（" not in err
+    assert "--force 也要 --yes" in err and "另存成一個新的 Session" in err
     assert store.Index(paths).header(a.split(":")[1]) is not None
 
 

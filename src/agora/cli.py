@@ -1961,8 +1961,10 @@ def cmd_delete(args, paths: store.Paths) -> int:
             stale = paths.pending / f"{_ulid_of(agora_id)}.json"
             if stale.exists():
                 # G1: nobody holds this one - what is left of a continue that could not
-                # be finished. It must not block the delete for ever.
-                print(f"[agora] {agora_id} 有一筆中斷的接續沒補存成功（{stale}），照樣刪", file=sys.stderr)
+                # be finished. It must not block the delete for ever. The path is shown
+                # with `~` like the directories in the other lines (#90 review L4).
+                print(f"[agora] {agora_id} 有一筆中斷的接續沒補存成功（{_short_dir(str(stale))}），照樣刪",
+                      file=sys.stderr)
         if index.header(_ulid_of(agora_id)) is not None:
             headers[agora_id] = index.header(_ulid_of(agora_id))
         elif _ulid_of(agora_id) in gone:
@@ -1980,15 +1982,21 @@ def cmd_delete(args, paths: store.Paths) -> int:
               file=sys.stderr)
     if not headers:
         if skipped:
-            many = len(skipped) > 1
-            print(f"[agora] {len(skipped)} 個都在接續中，沒有刪除任何東西：" + "、".join(skipped),
-                  file=sys.stderr)
-            print(f"[agora] 等它{'們' if many else ''}結束再重跑同一個指令；"
-                  f"要連它{'們' if many else ''}一起刪就加上 --force --yes", file=sys.stderr)
+            # One locked session saying「1 個都在接續中」reads wrong (#90 review L3):
+            # the plural line speaks for the batch, the singular one names the session.
+            ids = "、".join(skipped)
+            if len(skipped) > 1:
+                print(f"[agora] {len(skipped)} 個都在接續中，沒有刪除任何東西：{ids}", file=sys.stderr)
+                print("[agora] 等它們結束再重跑同一個指令；要連它們一起刪就加上 --force --yes",
+                      file=sys.stderr)
+            else:
+                print(f"[agora] {ids} 正在接續中，沒有刪除任何東西", file=sys.stderr)
+                print("[agora] 等它結束再重跑同一個指令；要連它一起刪就加上 --force --yes",
+                      file=sys.stderr)
             return EXIT_INPUT
         return 0
     if not args.yes:
-        listed = "\n".join(f"  {i}{'（使用中）' if i in locked else ''}（{hdr.get('title') or '無標題'}）"
+        listed = "\n".join(f"  {i}（{'使用中，' if i in locked else ''}{hdr.get('title') or '無標題'}）"
                            for i, hdr in headers.items())
         if locked and args.force:
             ask = ("確定的話加 --yes；--force 也要 --yes：刪掉使用中的之後，"

@@ -34,15 +34,15 @@
 ### 1. 跳過與 exit code
 
 - **逐個判定**（沿用今天的順序）：`store.continuing` 為真→這次不刪（記下來，附原因）；為假→照現行規則（`deleted` 記錄裡的就略過、找不到的整批拒絕、有子 Session 的規則是另一段，不變）。只是留下來的記錄（鎖沒人拿）不算接續中，照現行規則刪並照舊警告。
-- **exit code：有任何一個被鎖而跳過 → 1**；全部被鎖 → 一樣 1，stderr 明確說「N 個都在接續中，沒有刪除任何東西」。這是今天單一個被鎖的碼（`InputError` → 1），所以不算新碼；重跑（等 agent 結束後）就會刪掉，符合既有的「重跑接著做」。
+- **exit code：有任何一個被鎖而跳過 → 1**；全部被鎖 → 一樣 1，stderr 明確說「沒有刪除任何東西」（兩個以上說「N 個都在接續中：…」，只有一個說「`agora:X` 正在接續中」——單數時不通順，審查 L3 改掉）。這是今天單一個被鎖的碼（`InputError` → 1），所以不算新碼；重跑（等 agent 結束後）就會刪掉，符合既有的「重跑接著做」。**背景上傳器起不來時仍是 3**（`EXIT_IN_OUTBOX` 的既有優先序：那半已經排進佇列但現在沒人做，比「有跳過」更需要說；審查 L1）。
 - **不用 4**：4 是 `continue` 的專用訊號——固定行 `agora-locked <agora id>`，呼叫方（sidecar）靠它回 409。delete 的答案是一個批次結果（部分刪了、部分沒有），回 4 會讓呼叫方以為是「continue 被拒絕」。**不用 5**：那是 agent 子行程死掉。需要分辨「因為被鎖而沒刪」的呼叫方讀 stderr 的那一段（或等將來真的有需求再加碼）。
 - 混批次（刪了 2 個、跳過 1 個）也是 1——與「有子 Session 被拒絕時回 1、其他照刪」的現行語意一致；0 留給「要刪的都不在了／全刪掉」。
-- 邊界：同一個 id 給兩次照現行去重（跳過訊息只印一次）；被跳過的父 Session 不進刪除清單，但**同一次要刪的子 Session 照刪**（子自己的刪除不需要父先不見；子不在這次裡的照樣擋住父，規則不變）。
+- 邊界：同一個 id 給兩次**這次新加的去重**（`dict.fromkeys`）只印一次（#90 沒要求，是順手的小整理；`headers`／`skipped` 本來就是 dict，重複 id 的可觀察行為幾乎不變，審查 L6）；被跳過的父 Session 不進刪除清單，但**同一次要刪的子 Session 照刪**（子自己的刪除不需要父先不見；子不在這次裡的照樣擋住父，規則不變）。
 
 ### 2. 誰在接續：資料與說法
 
-- 新增 `store.continuing_details(paths, ulid) -> dict | None`：只在這把鎖有人拿時回那份 pending 記錄（讀不到／壞掉回 `None`，不讓壞檔把命令弄死）；`continuing()` 的 bool 契約不變（`cache`、TUI、`sync` 的呼叫端不動，TUI 測試的 monkeypatch 也不變）。
-- 說法在 cli 裡集中一個 helper，三處共用：`continue` 的說明（提早檢查與 `_write_pending` 的兩個鎖）、`delete` 的跳過訊息、`delete --force` 的警告。形狀：`正在接續中（agent claude、目錄 ~/proj、從 2026-10-18T05:01:00Z 開始）`；缺哪個欄位就少哪一段（舊記錄沒有 `started_at` 時不編造）。目錄把 `$HOME` 開頭縮成 `~`（同 TUI 的 `_home` 精神），其他欄位一律不印。
+- 新增 `store.continuing_details(paths, ulid) -> dict | None`：只在這把鎖有人拿時回那份 pending 記錄（**讀不到／壞掉回 `{}`**——「有人在接續、細節不明」，和實作與 tasks 2.1 一致；審查 M1。`None` 只有一個意思：沒有人在接續）；`continuing()` 的 bool 契約不變（`cache`／TUI／`sync` 的呼叫端不動）。
+- 說法在 cli 裡集中一個 helper（`_who_note`），四處共用：`continue` 的說明（提早檢查與 `_write_pending` 的兩個鎖）、`delete` 的跳過訊息、`delete --force` 的警告、**TUI 清單上 Enter 的接續拒絕**（審查 M2：同一個症狀、同一個說法）。形狀：`正在接續中（agent claude、目錄 ~/proj、從 2026-10-18T05:01:00Z 開始）`；缺哪個欄位就少哪一段（舊記錄沒有 `started_at` 時不編造；壞掉的記錄只剩「正在接續中」）。目錄把 `$HOME` 開頭縮成 `~`（TUI 的 `_home` 本來就這樣，指令模式的 `_short_dir` 這次一起），其他欄位一律不印。
 - `continue` 的說明因此變成 `agora:X 正在接續中（…），等它結束再接續（要分岔請用 --fork）`：`agora-locked <agora id>` 固定行、`正在接續中`、`要分岔請用 --fork`、exit 4 都不變（既有測試的斷言仍成立）。
 - `_write_pending` 的 `*.json.tmp` 競合窗口：另一個 `_write_pending` 還在飛，記錄不一定存在——拿不到細節時維持原本的說明，不編。
 - `delete` 的跳過訊息（每個一行）與 `--force` 的警告（每個刪除之前一行）都用同一個 helper 組出來；只在 stderr。
