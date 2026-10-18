@@ -29,8 +29,8 @@ ISSUE_URL = f"https://api.github.com/repos/owner/repo/issues/{ISSUE}"
 OTHER_COMMENTS_URL = "https://api.github.com/repos/owner/repo2/issues/7/comments?per_page=100"
 OTHER_POST_COMMENTS_URL = "https://api.github.com/repos/owner/repo2/issues/7/comments"
 
-ME = "MyLinuxPool-impl-2"
-PM = "LLMGateway-pm"
+ME = "mylinuxpool-impl-w1-1"
+PM = "mypmo-pm-m1"
 GENERAL = entity(channel="general", issue=ISSUE)
 OTHER = entity(channel="other", backend="github-2", repo="owner/repo2", issue=7)
 BACKEND_MAIN = BackendRef(name="github-main", type="github", repo="owner/repo")
@@ -209,7 +209,7 @@ def test_read_filters_recipient_and_includes_broadcasts():
             json.dumps(
                 [
                     _comment(_make_msg(msg_id="01AAAA"), comment_id=101, created_at="2026-10-10T12:00:01Z"),
-                    _comment(_make_msg(msg_id="01BBBB", to="other-pm"), comment_id=102, created_at="2026-10-10T12:00:02Z"),
+                    _comment(_make_msg(msg_id="01BBBB", to="other-pm-m1"), comment_id=102, created_at="2026-10-10T12:00:02Z"),
                     _comment(_make_msg(msg_id="01CCCC", to=None), comment_id=103, created_at="2026-10-10T12:00:03Z"),
                     {"id": 104, "body": "just a comment", "created_at": "2026-10-10T12:00:04Z"},
                 ]
@@ -310,7 +310,7 @@ def test_check_does_not_trust_a_multi_page_etag():
         HttpResponse(
             200,
             {"etag": 'W/"page-1-unchanged"', "link": f'<{page2_url}>; rel="next"'},
-            json.dumps([_comment(_make_msg(msg_id="01AAAA", to="other-pm"), comment_id=101, created_at="2026-10-10T12:00:01Z")]).encode("utf-8"),
+            json.dumps([_comment(_make_msg(msg_id="01AAAA", to="other-pm-m1"), comment_id=101, created_at="2026-10-10T12:00:01Z")]).encode("utf-8"),
         ),
     )
     transport.set_route(
@@ -342,7 +342,7 @@ def test_check_respects_the_recipient_filter():
         HttpResponse(
             200,
             {},
-            json.dumps([_comment(_make_msg(msg_id="01AAAA", to="other-pm"), comment_id=101, created_at="2026-10-10T12:00:01Z")]).encode("utf-8"),
+            json.dumps([_comment(_make_msg(msg_id="01AAAA", to="other-pm-m1"), comment_id=101, created_at="2026-10-10T12:00:01Z")]).encode("utf-8"),
         ),
     )
     assert _backend(transport).check(GENERAL, Cursor(), recipient=ME) is False

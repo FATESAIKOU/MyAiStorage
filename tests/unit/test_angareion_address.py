@@ -15,24 +15,51 @@ import pytest
 from angareion.cli import build_parser, cmd_send, main, parse_address
 from angareion.messages import MessageValidationError
 
-PM = "LLMGateway-pm"
-ME = "MyLinuxPool-impl-2"
+PM = "mypmo-pm-m1"
+ME = "mylinuxpool-impl-w1-1"
 
 
-@pytest.mark.parametrize("name", [PM, ME, "my-repo-impl-2", "repo_1.2-arch"])
-def test_parse_address_accepts_agent_names(name):
+@pytest.mark.parametrize(
+    "name",
+    [
+        PM,
+        ME,
+        "mylinuxpool-rev-w1-1",
+        "myaistorage-arch-m1-2",
+        "myaientry-secretary-p1",
+        "pm-tools-impl-m1-1",  # the project may contain a role word
+    ],
+)
+def test_parse_address_accepts_ai_names(name):
     assert parse_address(name) == name
-    assert parse_address(f"  {name}  ") == name  # surrounding space is trimmed
+    assert parse_address(f"  {name}  ") == name  # half-width spaces are forgiven
+
+
+@pytest.mark.parametrize("dirt", ["\n", "\t", "\r", " \n", "\n ", " \t "])
+def test_only_half_width_spaces_are_forgiven(dirt):
+    """R3: a pasted-in newline/tab/CR is refused, not quietly trimmed."""
+    with pytest.raises(MessageValidationError) as caught:
+        parse_address(f"{dirt}mypmo-pm-m1{dirt}")
+    message = str(caught.value)
+    assert "step 1" in message
+    assert "lowercase" in message
+
+
+def test_the_empty_address_check_is_about_spaces_only():
+    with pytest.raises(MessageValidationError, match="cannot be empty"):
+        parse_address("  ")
+    with pytest.raises(MessageValidationError, match="step 1"):
+        parse_address("\n")
 
 
 @pytest.mark.parametrize(
     "raw",
     [
-        "myrepo-dev",
-        "MyRepo-PM",
-        "-pm",
+        "myrepo-dev-m1",
+        "MyRepo-PM-m1",
+        "-pm-m1",
         "foo-impl-",
-        "foo-impl-2!",
+        "foo-impl-w1-1!",
         "group=全員",
         "repo=owner/team,role=pm",
         "owner/team×pm",
@@ -45,6 +72,15 @@ def test_parse_address_accepts_agent_names(name):
 def test_parse_address_rejects_everything_else(raw):
     with pytest.raises(MessageValidationError):
         parse_address(raw)
+
+
+def test_a_group_address_is_a_phase_3_feature():
+    """"群組位址期 3 才有" - and it is not a usage error about the grammar."""
+    with pytest.raises(MessageValidationError) as caught:
+        parse_address("@all")
+    message = str(caught.value)
+    assert "group address" in message
+    assert "phase 3" in message
 
 
 def test_send_to_is_optional_in_the_parser():
@@ -85,6 +121,34 @@ def test_send_rejects_a_bad_to_before_touching_the_backend():
             raise AssertionError("nothing may be sent for a bad address")
 
     assert cmd_send(args, config, ExplodingApp(), token="") == 1
+
+
+@pytest.mark.parametrize(
+    "to, expected",
+    [
+        ("mypmo-pm", "team"),          # 缺 team 段
+        ("mylinuxpool-pm", "team"),
+        ("myaientry-secretary", "team"),
+        ("MyPMO-pm-m1", "lowercase"),  # 請用小寫
+        ("mylinuxpool-impl-pm", "team"),  # the team segment is a role word
+        ("mylinuxpool-impl-w1-0", "step 5"),
+        ("@all", "phase 3"),           # 群組位址期 3 才有
+    ],
+)
+def test_send_explains_why_a_to_was_refused(to, expected, capsys):
+    """exit 1 and the reason on stderr - nothing reaches the backend."""
+    args = argparse.Namespace(channel="general", to=to, urgency=5, body="hi", attach=[], ref=[])
+    config = argparse.Namespace(identity=PM)
+
+    class ExplodingApp:
+        def send(self, *arguments, **kwargs):  # pragma: no cover - must not run
+            raise AssertionError("nothing may be sent for a bad address")
+
+    assert cmd_send(args, config, ExplodingApp(), token="") == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert expected in captured.err
+    assert "--to" in captured.err
 
 
 def test_send_without_to_builds_a_broadcast_message():

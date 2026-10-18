@@ -1,6 +1,6 @@
 # harness 檔的格式（一頁）
 
-harness ＝ 一個職務一個版本的 UTF-8 Markdown 檔，放 `atelier/<team>/<role>/v<N>.md`；識別 `atelier:<team>-<role>@v<N>`——識別、版本與路徑是同一件事的三個寫法。spec 全文：`openspec/specs/atelier/spec.md`（`v1` 起的變更在 `openspec/changes/atelier-pm-harness-v1/specs/atelier/spec.md`，歸檔後併進主 spec）；檢查在 `tests/unit/test_atelier_harness.py`（格式＋append-only；接 CI 是 tasks 2.6，未做）。
+harness ＝ 一個職務一個版本的 UTF-8 Markdown 檔，放 `atelier/<team>/<role>/v<N>.md`；識別 `atelier:<team>-<role>@v<N>`——識別、版本與路徑是同一件事的三個寫法。frontmatter 的 `team` 欄位說的是**系列**（欄位名沿用 `team`，程式與檔名都不改）。spec 全文：`openspec/specs/atelier/spec.md`（`v1` 起的變更在 `openspec/changes/atelier-pm-harness-v1/specs/atelier/spec.md`，歸檔後併進主 spec）；檢查在 `tests/unit/test_atelier_harness.py`（格式＋append-only；接 CI 是 tasks 2.6，未做）。
 
 **現況**：`atelier/worker-team/pm/` 有 `v0.md`（期 1 單人暫定）與 `v1.md`（有隊員的 PM）。**`v0` 已被 `v1` 取代**——`atelier show atelier:worker-team-pm` 不給版本讀到 `v1`。`v0` 檔因為 append-only 不改（`status` 也不原地改），所以它不會自己標 `deprecated`。
 
@@ -13,8 +13,8 @@ harness ＝ 一個職務一個版本的 UTF-8 Markdown 檔，放 `atelier/<team>
 | `title` | ✓ | 一行標題 |
 | `description` | — | 一行摘要 |
 | `status` | ✓ | `draft`／`stable`／`deprecated` |
-| `team` | ✓ | `[a-z0-9][a-z0-9-]*`（英文小寫與 `-`） |
-| `role` | ✓ | `pm`／`arch`／`impl`／`test`（期 3 的 reviewer 對應 `arch`） |
+| `team` | ✓ | `[a-z0-9][a-z0-9-]*`（英文小寫與 `-`）；frontmatter 的欄位名是 `team`，它說的是**系列** |
+| `role` | ✓ | `pm`／`arch`／`impl`／`test`／`rev`（審查職務是 `rev` 自己的角色） |
 | `version` | ✓ | `v` 加非負整數；與檔名、`id` 一致 |
 | `models` | ✓ | `floor`（模型識別碼或 `null`）＋`preferred`（有順序的清單，可空）；`v0`／`v1` 的值留空（未指定，由環境決定） |
 | `generated` 等 | — | 不認得的欄位保留（例：`generated: {by, at}` 產生者註記） |

@@ -1,0 +1,326 @@
+[
+  {
+    "name": "mypmo-pm-m1",
+    "valid": true,
+    "project": "mypmo",
+    "role": "pm",
+    "team": "m1",
+    "seq": null,
+    "note": "pm takes no sequence number"
+  },
+  {
+    "name": "myaientry-secretary-p1",
+    "valid": true,
+    "project": "myaientry",
+    "role": "secretary",
+    "team": "p1",
+    "seq": null,
+    "note": "secretary takes no sequence number either"
+  },
+  {
+    "name": "mylinuxpool-impl-w1-1",
+    "valid": true,
+    "project": "mylinuxpool",
+    "role": "impl",
+    "team": "w1",
+    "seq": 1,
+    "note": "the canonical seat: impl, team w1, first one"
+  },
+  {
+    "name": "mylinuxpool-rev-w1-1",
+    "valid": true,
+    "project": "mylinuxpool",
+    "role": "rev",
+    "team": "w1",
+    "seq": 1,
+    "note": "rev is a role of its own"
+  },
+  {
+    "name": "myaistorage-arch-m1-2",
+    "valid": true,
+    "project": "myaistorage",
+    "role": "arch",
+    "team": "m1",
+    "seq": 2,
+    "note": "the second architect of team m1"
+  },
+  {
+    "name": "pm-tools-impl-m1-1",
+    "valid": true,
+    "project": "pm-tools",
+    "role": "impl",
+    "team": "m1",
+    "seq": 1,
+    "note": "a project name may contain a role word; the rightmost role wins"
+  },
+  {
+    "name": "mkcommunication-secretary-p1",
+    "valid": true,
+    "project": "mkcommunication",
+    "role": "secretary",
+    "team": "p1",
+    "seq": null,
+    "note": "the secretary of team p1"
+  },
+  {
+    "name": "mkcommunication-impl-w12-99",
+    "valid": true,
+    "project": "mkcommunication",
+    "role": "impl",
+    "team": "w12",
+    "seq": 99,
+    "note": "99 is the largest sequence number"
+  },
+  {
+    "name": "a-pm-m1",
+    "valid": true,
+    "project": "a",
+    "role": "pm",
+    "team": "m1",
+    "seq": null,
+    "note": "a one-character project name is legal"
+  },
+  {
+    "name": "aaaaaaaaaaaaaaaaaaaaaaaaaa-pm-m1",
+    "valid": true,
+    "project": "aaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "role": "pm",
+    "team": "m1",
+    "seq": null,
+    "note": "exactly 32 characters: the length boundary is inside"
+  },
+  {
+    "name": "mypmo-pm",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 4: the team segment is missing"
+  },
+  {
+    "name": "mylinuxpool-pm",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 4: the team segment is missing (an old-style name; read, never sent)"
+  },
+  {
+    "name": "myaientry-secretary",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 4: the team segment is missing"
+  },
+  {
+    "name": "MyPMO-pm-m1",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 1: AI names are all lowercase"
+  },
+  {
+    "name": "mypmo-pm-m1\n",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 1: the comparison is over the whole string; a trailing newline is illegal"
+  },
+  {
+    "name": "mypmo-pm-m1 ",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 1: a trailing space is illegal too"
+  },
+  {
+    "name": "mylinuxpool-impl-pm",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 4: pm is a role word, so the rightmost role wins and no team segment is left"
+  },
+  {
+    "name": "mypmo-pm-m1-1",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 5: pm must not be followed by another segment"
+  },
+  {
+    "name": "mylinuxpool-impl-w1",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 5: impl needs a sequence number"
+  },
+  {
+    "name": "mylinuxpool-impl-w1-0",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 5: 0 is not a sequence number"
+  },
+  {
+    "name": "mylinuxpool-impl-w1-01",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 5: sequence numbers are not zero-padded"
+  },
+  {
+    "name": "mylinuxpool-impl-w1-100",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 5: the largest sequence number is 99"
+  },
+  {
+    "name": "mylinuxpool--impl-w1-1",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 1: '--' is not allowed"
+  },
+  {
+    "name": "mylinuxpool-impl-w1-",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 1: the name must not end with '-'"
+  },
+  {
+    "name": "1mypmo-pm-m1",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 1: the first character must be a letter"
+  },
+  {
+    "name": "1m1-pm",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 1: the first character must be a letter"
+  },
+  {
+    "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaa-pm-m1",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 1: 33 characters; one over the boundary"
+  },
+  {
+    "name": "mylinuxpool-impl-workerpool-1",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 4: a team code is at most 8 characters"
+  },
+  {
+    "name": "mylinuxpool-impl-w1-1-2",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 5: exactly one segment after the team"
+  },
+  {
+    "name": "impl-w1-1",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 2: the role segment may not be the first segment, so there is no project"
+  },
+  {
+    "name": "",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 1: the empty string is not a name"
+  },
+  {
+    "name": "@all",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 1: a group address: is_group() is true, is_valid() is false; group addresses arrive in phase 3"
+  },
+  {
+    "name": "mypmo-pm_m1",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 1: '_' is not allowed"
+  },
+  {
+    "name": "mypmo-pm-m1\t",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 1: a trailing tab is illegal like any other character"
+  },
+  {
+    "name": "ｍypmo-pm-m1",
+    "valid": false,
+    "project": null,
+    "role": null,
+    "team": null,
+    "seq": null,
+    "note": "step 1: full-width letters are not a-z (a name is ASCII lowercase)"
+  },
+  {
+    "name": "aaaaaaaaaaaaaaaaaaaaaaaaa-pm-m1",
+    "valid": true,
+    "project": "aaaaaaaaaaaaaaaaaaaaaaaaa",
+    "role": "pm",
+    "team": "m1",
+    "seq": null,
+    "note": "31 characters: still inside the 32-character boundary"
+  }
+]
