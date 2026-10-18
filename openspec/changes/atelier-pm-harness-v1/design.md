@@ -241,7 +241,7 @@
 | append-only（與 `origin/main` 的 merge-base 比對） | 已有 | 不動（v1 是「新增版本檔」這條唯一允許的變化） |
 | `know` 明寫「專案自己的指示檔與工單規則優先」 | 已有 | 不動（v1 必須有） |
 | 「審查一律非作者」 | 已有（只驗 v0） | **擴到所有 pm 版本**（v1 的 judge／dont 也要有） |
-| **關鍵句**：`不是權限`（B-1）、`照 PMO 的模型輪換表`（B-15）、`不指定頻道`（收發紀律）、`長時間的指令`（關隊員） | 無 | 新增：把 `know`＋`do`＋`judge`＋`dont` 的正文**合起來**（聯集）比對，每一句至少出現一次。**不採「每一段都要有」**——照字面會紅（`不是權限` 只在 know／judge，`照 PMO 的模型輪換表` 只在 know；實測見審查 A-1）。後兩句是 M0 的協定教訓（PMO 指示寫入）；**工具擋得住的部分另外列在「要 Angareion 配合」**，這裡只釘住 harness 有沒有寫 |
+| **關鍵句**：`不是權限`（B-1）、`照 PMO 的模型輪換表`（B-15）、`不指定頻道`（收發紀律）、`長時間的指令`（關隊員） | 無 | 新增：把 `know`＋`do`＋`judge`＋`dont` 的正文**合起來**（聯集）比對，每一句至少出現一次。**範圍只限 `role: pm` 且 `v>=1`**（這四句是 PM 職務的義務，不是所有 `v>=1` 職務的義務——spec delta 把它們放在 ADDED「PM 職務（`v1`）」，MODIFIED「harness 檔的格式」沒有它們；`v0` 是 append-only、也豁免）。**不採「每一段都要有」**——照字面會紅（`不是權限` 只在 know／judge，`照 PMO 的模型輪換表` 只在 know；實測見審查 A-1）。後兩句是 M0 的協定教訓（PMO 指示寫入）；**工具擋得住的部分另外列在「要 Angareion 配合」**，這裡只釘住 harness 有沒有寫 |
 | **工具名／模型名黑名單**（B-16／B-15） | 無 | 新增：`know`／`do`／`judge`／`dont` 的**正文**不得出現具體工具名與模型名（清單放測試一處）；**只驗 `v>=1`**（v0 是既成事實，append-only 不能改）。比對前要先遮掉 `CLAUDE.md`／`AGENTS.md` 這兩個**專案指示檔的檔名**——`know` 的 MUST 句本來就要寫它們，字串比對會誤殺（`CLAUDE.md` 含 `claude`）。清單不要收**一般詞**（`session`／`輪換表`／`通道`／`CI`／`ssh`／`commit`／`repo`……規矩的句子本身要用）。frontmatter 的 `generated` 不算正文（spec 已明寫）（B-16／B-15） |
 | **機器位址與家目錄路徑**（公開 repo） | 無 | 新增：不得出現 IPv4 樣式、`/Users/`、`~/`（`v>=1`）。**通用系統路徑不算**——`/tmp` 是 `v1` 的 B-9 句要用的字（spec 已明寫） |
 | **共用一份**：同一職務的版本不該綁單一環境 | 無 | 新增（**只警告、不擋**——未知能力名照 spec 只警告）：v1 的 `team`／`role` 與 v0 相同（同一職務的下一版）；`capabilities` 不含只有單一環境才有的名字（D6 已定的 `channel`／`team`／`monitor` 是中性名，`github`／`agora` 兩邊都有） |
@@ -283,11 +283,14 @@
 
 **worker（MyLinuxPool）**
 
-3. **sidecar 的 `open`（新 session）與 `continue --headless`**：欄位形狀（**作者提議，見「作者提議」15：選項 a／b／c，建議 c**）——
-   - 以 **`harness: {"id": "atelier:worker-team-pm", "env_note": "<worker 環境說明的路徑>"}` 為準**（`env_note` 可省略）；`role: "pm"|"arch"|"impl"|"test"` 只是**便利別名**，由 sidecar 的設定表 `role → {id, env_note}` 解析（`pm` 預設 `atelier:worker-team-pm`；表的內容在 worker 的設定，不在 harness）。**兩個都給且解析結果不同 → 拒絕**（不開 agent）。
+3. **sidecar 的 `open`（新 session）與 `continue --headless`**：欄位形狀（**已定：PMO 2026-10-18 在 PR #95 留言的介面調和，與 MyPMO#80 的命名定案對齊；實作時以那一條為準，細節見 MyLinuxPool#216**；原本的作者提議見「作者提議」15，已被取代）——
+   - **不收 `role` 欄位**：角色一律**由 AI 名字推出**（例如 `mylinuxpool-pm-w1` → 角色 pm；本人 Q9「由角色推」）。
+   - **預設 harness＝`atelier:<harness_series>-<角色>`**；**選填 `harness` 可以覆寫，形狀 `{id, env_note}`**（`env_note` 可省略），例如 `harness: {"id": "atelier:worker-team-pm", "env_note": "<worker 環境說明的路徑>"}`。
+   - **推出來的 harness 在 Atelier 不存在（目前隊員的角色都是這樣）→ 不注入、不算錯**；隊員本來就不拿 PM harness。
+   - **秘書不由 sidecar 開**，照 MyPMO#80 回 **400**。
    - sidecar 在起 agent **之前**：跑 `atelier render <id> --append <env_note> --out <agent 自己的 state 目錄>/instructions.md`。
    - 注入：opencode＝`OPENCODE_CONFIG_CONTENT` 只帶 `instructions`（**實測與檔案設定合併**：provider 與檔案自己的 instructions 都保留；不要重貼整份設定，會把憑證帶進環境變數）；claude＝driver 的 argv 加 `--append-system-prompt-file <path>` ＋ `--system-prompt-snapshot off`（headless 與互動兩條都要）。
-   - **錯誤情形**：`render` 回 1／2 → **不開 agent**，`open` 回 4xx／5xx 並附原因（不要開一個沒有規矩的 PM）；`harness`／`role` 都沒給 → 不注入（隊員不拿）；**`continue` 的 harness 來源＝`open` 時記在 sidecar 的 session metadata**，`continue` 沿用；metadata 沒有（舊 session）→ 不注入＋記一行警告（安靜地讓 PM 沒有規矩是不行的，要讓 PMO 看得見）。
+   - **錯誤情形**：`render` 回 1／2 → **不開 agent**，`open` 回 4xx／5xx 並附原因（不要開一個沒有規矩的 PM）；推出的 harness 不存在 → 不注入、不算錯（隊員）；**`continue` 的 harness 來源＝`open` 時記在 sidecar 的 session metadata**，`continue` 沿用；metadata 沒有（舊 session）→ 不注入＋記一行警告（安靜地讓 PM 沒有規矩是不行的，要讓 PMO 看得見）。
    - **生命週期**：`--out` 放 agent 自己的 state 目錄（不是 `/tmp`、不是 repo）；每次啟動重寫（版本跟著 main 走）。
 4. **開機單位（`start.d/20-atelier`）**：**移除 `atelier install`**（改成只驗證：`atelier show --section capabilities` 之類，或整個單位刪掉）；不再把 PM harness 寫進使用者層級。**它遇到 `atelier install` exit 1 時 MUST 忽略並記一行警告、不擋開機**（照 MyLinuxPool#130 的契約；訊息要說「這一輪沒有裝 harness」）。
    - **順序（H1）**：開機單位跑的是**不指定版本**的 install（＝latest）——PR1 一合併，latest 就是 v1，下一次 worker 重啟就會把 v1 寫進使用者層級、所有 agent 都拿到。所以**停 install／pin 版本 MUST 在 PR1 之前或同一個部署批次**（見 Migration Plan）。
@@ -324,7 +327,7 @@
 12. **spec delta 的範圍**（D8）：動「格式」「能力需求與模型欄位」「v0 職務」「讀取工具」「安裝」＋新增「PM 職務 v1」「按 agent 交付 harness」「產生 agent 指示檔（`render`）」；其中「能力需求與模型欄位」**刻意**順帶拿掉兩處環境細節（`github` 的單位、環境的 repo 名），理由見 D8。
 13. **M0 的收發紀律與關隊員規矩**（PMO 2026-10-18 在 #94 留言指示寫入）：收發紀律的來源＝M0 報告 §3／§5；**關隊員那條的來源＝PM-HANDOFF 2026-10-18 下午的教訓**（M0 的 `wait` 迴圈因此多吃額度；M0 報告 §3／§5 沒有這段）。作者提議的是措辭、D7 的關鍵句，以及「哪些能用工具擋」的清單（`--channel` 警告與 ETag 由 #96 涵蓋）。
 14. **一次只起一個 agent／session**（PMO 2026-10-18 指示，寫進 D5 的環境說明；harness 不寫——屬環境、也不寫工具名）：共用的 opencode 服務被多個 client 同時起時，搶到的那個開大 session 資料庫會 `database is locked`，之後所有 client 被拒、要人工重啟（2026-10-18 實際發生）。
-15. **sidecar 的 `harness`／`role` 欄位形狀**（M5 的決策記錄）：三個選項——(a) **只收 `harness: {id, env_note}`**（最明確，呼叫方每次都要寫全 id）；(b) **只收 `role`**（最省，但 `pm` 的 id／env note 要由 sidecar 的設定表決定，換 harness 就要改設定）；(c) **兩者都收**（`harness` 優先、`role` 是別名；衝突拒絕）。**建議 (c)**：worker 的呼叫方大多只在乎「這是 PM」，`role` 讓它不用記 id；要換 harness／指定環境說明時再寫 `harness`。**要 PM／PMO 與 MyLinuxPool 確認**（跨 repo 的介面；`continue` 的角色來源＝`open` 時的 session metadata）。
+15. **sidecar 的 `harness`／`role` 欄位形狀**——**已定（PMO 2026-10-18，PR #95 留言；與 MyPMO#80 命名定案對齊，細節 MyLinuxPool#216）**。原本的三個選項：(a) 只收 `harness: {id, env_note}`；(b) 只收 `role`（由 sidecar 的設定表解析成 id／env note）；(c) 兩者都收（`harness` 優先、`role` 是別名；衝突拒絕）。**定案不是 a／b／c 任何一個**：`open` **不收 `role` 欄位**，角色**由 AI 名字推出**（`<前綴>-<角色>-<序號>`，例如 `mylinuxpool-pm-w1` → pm）；**預設 harness＝`atelier:<harness_series>-<角色>`**；**選填 `harness`（形狀 `{id, env_note}`）可覆寫**；推出來的 harness 在 Atelier 不存在（目前隊員的角色都是這樣）→ **不注入、不算錯**（隊員不拿 PM harness）；**秘書不由 sidecar 開，照 MyPMO#80 回 400**。
 
 ## Risks / Trade-offs
 

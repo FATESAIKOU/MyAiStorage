@@ -7,6 +7,10 @@
     "team-mylinuxpool": {
       "backend": "aicompany-channel",
       "issue": 2
+    },
+    "team-mylinuxpool-w1": {
+      "backend": "aicompany-channel",
+      "issue": 8
     }
   },
   "version": 1

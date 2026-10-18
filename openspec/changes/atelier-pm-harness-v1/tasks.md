@@ -49,7 +49,7 @@ worker 的開機單位跑的是**不指定版本**的 `atelier install`（＝lat
 
 ## 4. 交付機制（跨 repo；PMO 排，MyPMO#86 會用到）
 
-- [ ] 4.1 worker：sidecar 的 `open`／`continue --headless` 注入（`harness: {id, env_note}` 為準、`role` 是別名、衝突拒絕 → `atelier render` → opencode `OPENCODE_CONFIG_CONTENT` 只帶 `instructions`（實測合併）／claude `--append-system-prompt-file` ＋ `--system-prompt-snapshot off`）；`render` 失敗**不開 agent**、回 4xx／5xx；`continue` 用 `open` 時的 session metadata，沒有就警告
+- [ ] 4.1 worker：sidecar 的 `open`／`continue --headless` 注入（**欄位形狀已定：PMO 2026-10-18（PR #95 留言，與 MyPMO#80 命名定案對齊；細節 MyLinuxPool#216）——`open` 不收 `role` 欄位，角色由 AI 名字推出；預設 harness＝`atelier:<harness_series>-<角色>`；選填 `harness`（形狀 `{id, env_note}`）可覆寫；推出來的 harness 不存在 → 不注入、不算錯；秘書不由 sidecar 開、回 400** → `atelier render` → opencode `OPENCODE_CONFIG_CONTENT` 只帶 `instructions`（實測合併）／claude `--append-system-prompt-file` ＋ `--system-prompt-snapshot off`）；`render` 失敗**不開 agent**、回 4xx／5xx；`continue` 用 `open` 時的 session metadata，沒有就警告
 - [ ] 4.1b 測試（sidecar 端，跨 repo）：`CONTENT` 只帶 `instructions` 時**檔案設定保留**（provider 還在、檔案的 `instructions` 還在）——釘住 M1 的實測
 - [ ] 4.2 worker：開機單位在階段 A 已 pin `@v0`／移除 install（1b）；這個階段確認它只做驗證、`install` exit 1 時忽略＋警告、不擋開機
 - [ ] 4.3 Mac：開 pane 的指令與 `agora continue`（`src/agora/agents/*.py` 的 `start_native`＋`Launch.env`）帶交付；PMO／隊員不帶
