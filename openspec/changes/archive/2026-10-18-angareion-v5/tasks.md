@@ -25,11 +25,11 @@
 
 - [x] 4.1 spec 每個 Scenario 的單元測試（假後端／假註冊端；workflow 腳本的重建、同名、取消後重建用可注入的檔案 API 測）
 - [x] 4.2 每項在副本改壞確認會紅；完整 unit 綠（記錄：`docs/review/angareion-v5-mutation-checks.md`）
-- [ ] 4.3 非作者審查後開 PR
-- [ ] 4.4 `angareion-v5` push 後開 PR：以 `angareion-v0` 為 base 堆疊（#41 已用 merge commit `95a7641` 合併、branch 保留）
+- [x] 4.3 非作者審查後開 PR — 做完（審查見 docs/review/angareion-v5-impl-review.md；PR #42 已 merge）
+- [x] 4.4 `angareion-v5` push 後開 PR：以 `angareion-v0` 為 base 堆疊（#41 已用 merge commit `95a7641` 合併、branch 保留） — 做完（PR #42、#48、#53 已 merge）
 
 ## 5. 開工前確認（design §10）
 
-- [ ] 5.1 workflow 授權：只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言；觸發層擋 Bot、非授權不回報（design §10）
-- [ ] 5.2 信道 token 加選 `MyAiStorage`（`Issues: Read and write`；細粒度 PAT）
-- [ ] 5.3 MyAiStorage 的 main 允許 workflow 用 `GITHUB_TOKEN` 直推（分支保護／bypass）
+- [x] 5.1 workflow 授權：只採計 `author_association` 為 `OWNER`／`MEMBER`／`COLLABORATOR` 的留言；觸發層擋 Bot、非授權不回報（design §10） — 做完（觸發層擋 Bot、授權由腳本驗；工作流程實際運作中）
+- [x] 5.2 信道 token 加選 `MyAiStorage`（`Issues: Read and write`；細粒度 PAT） — 做完（`channel create` 能在註冊簿 issue 留言）
+- [x] 5.3 MyAiStorage 的 main 允許 workflow 用 `GITHUB_TOKEN` 直推（分支保護／bypass） — 做完（workflow 以 `GITHUB_TOKEN` 直推 main，registry commit 持續進 main）

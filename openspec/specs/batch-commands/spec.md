@@ -6,6 +6,8 @@ import、delete、merge 一次處理多個 Session，逐一顯示進度，被中
 ### Requirement: import 一次多個
 `agora import session --external-session-id <id>[,<id>…]` MUST 接受多個 agent session id（`--external-session-id` 可以給多次，也可以用逗號分隔）。MUST 先同步一次（受 5 分鐘節流：5 分鐘內同步過就沿用本機索引），再逐一匯入；某一個失敗 MUST 照樣做下一個，最後 exit code 是第一個非零的（全部成功是 0；存進本機、交給背景上傳算成功，見 `local-first-writes`）。只給一個 id 時，行為與 exit code 和給多個時相同。
 
+重新匯入一個**已經在 store 裡**的來源時，新的匯出的 user／assistant 對話數——**只算至少有一行內容的 turn**（undo／rewind 讓空 turn 消失不算變少）——比 store 裡那版**少**時 MUST NOT 原地更新：MUST 拒絕（exit 非 0）並**寫明下一步**（改用跨 agent 接續，或先讓這個 Session 分支再重新匯入、依分支規則另存），原本的版本 MUST NOT 被覆蓋；不變或變多時照現行規則（原地更新，或依分支規則另存成新的 Session）。
+
 #### Scenario: 其中一個失敗
 - **WHEN** 給三個 id，其中一個不存在
 - **THEN** 另外兩個被匯入並印出 agora id，stderr 說明失敗的那個，exit 非零
@@ -13,6 +15,14 @@ import、delete、merge 一次處理多個 Session，逐一顯示進度，被中
 #### Scenario: 中斷後重跑
 - **WHEN** 匯入三個時在第二個被中斷，再執行同一個指令
 - **THEN** 第一個因為內容沒變而略過，只做剩下的
+
+#### Scenario: 重新匯入的內容比原本少
+- **WHEN** 重新匯入一個來源，新的匯出比 store 裡那版少一則**有內容的** user／assistant 對話
+- **THEN** 原本的版本沒有被覆蓋，指令 exit 非 0，訊息說明少了多少並寫明下一步（跨 agent 接續，或先讓它分支再重新匯入）
+
+#### Scenario: 合法的變少（undo）不算變少
+- **WHEN** 重新匯入一個來源，新的匯出比 store 那版少的是沒有內容的 turn（undo／rewind 之後）
+- **THEN** 照現行規則更新，不因這個檢查被拒絕
 
 ### Requirement: 進度
 import、delete、merge、pull、push MUST 在處理多個項目時，逐一在 stderr 印出一行含 `k/N` 的進度。
@@ -43,7 +53,6 @@ merge 每寫好一個來源的要約，MUST 先存在本機；重跑時，同一
 #### Scenario: 來源改過
 - **WHEN** 第一個來源的內容在重跑前被改過
 - **THEN** 第一個來源的要約重寫
-
 
 ### Requirement: delete 遇到正在接續的就跳過
 `agora delete session <id>… --yes` 中，正在接續中的 Session（本機 `pending/<ULID>.json` 的鎖有人拿著，見 `session-continue`）MUST 被跳過，其他照刪；MUST NOT 因為其中一個被鎖就整批不刪。只是留下來的記錄（鎖沒人拿）MUST NOT 算正在接續，照現行規則刪除（含原本的警告）。
@@ -88,3 +97,4 @@ exit code：有任何一個被鎖而跳過時 MUST 是 1；**全部都被鎖住*
 #### Scenario: 被 force 刪掉的那個還在雲端
 - **WHEN** 在 A 的機器上 `--force --yes` 刪掉正在接續的 A，A 在 Drive 上也有
 - **THEN** A 進 `trash-queue`（背景移到 Drive 垃圾桶），和一般刪除一樣
+
