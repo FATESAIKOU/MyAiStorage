@@ -40,12 +40,12 @@ worker 的開機單位跑的是**不指定版本**的 `atelier install`（＝lat
 
 ## 3b. MyAiStorage：`install` 的守門與 `agora continue` 的交付（PR 3）
 
-- [ ] 3b.1 `install`：`v>=1` 的 `role: pm` harness 沒給 `--global` → exit 1（訊息指向 `render`／啟動方交付）、目標檔不動；給 `--global` → 成功且 stderr 有警告
-- [ ] 3b.2 測試釘住 3b.1 的兩條路徑（含「什麼都沒寫」與「警告有印」）
-- [ ] 3b.3 `Launch.env: dict`（預設空）；`src/agora/cli.py` spawn 時 `{**os.environ, **launch.env, "PWD": …}`；**不改 `os.environ`**
-- [ ] 3b.4 `agora continue --harness-file <檔>`：claude → argv 加 `--append-system-prompt-file` ＋ `--system-prompt-snapshot off`；opencode → `Launch.env` 的 `OPENCODE_CONFIG_CONTENT` 只帶 `instructions`（**與檔案設定合併**，實測；不要把整份設定重貼、把憑證帶進環境）
-- [ ] 3b.5 測試：只有帶 `--harness-file` 的 process 吃得到；同一個 CLI、不帶的下一個 session 吃不到；檔案設定（provider、檔案自己的 `instructions`）都還在
-- [ ] 3b.6 改壞驗證：把 env 改成改 `os.environ`（應紅）、CONTENT 重貼整份設定（應紅）、沒帶 `--harness-file` 卻注入（應紅）
+- [x] 3b.1 `install`：`v>=1` 的 `role: pm` harness 沒給 `--global` → exit 1（訊息指向 `render`／啟動方交付）、目標檔不動；給 `--global` → 成功且 stderr 有警告；`render` 查無 id／版本 → exit 3（讓呼叫方分辨查無與用法錯）
+- [x] 3b.2 測試釘住 3b.1 的兩條路徑（含「什麼都沒寫」與「警告有印」）以及 render 查無 id／版本 exit 3
+- [x] 3b.3 `Launch.env: dict`（預設空）；`src/agora/cli.py` spawn 時 `{**os.environ, **launch.env, "PWD": …}`；**不改 `os.environ`**
+- [x] 3b.4 `agora continue --harness-file <檔>`：claude → argv 加 `--append-system-prompt-file` ＋ `--system-prompt-snapshot off`；opencode → `Launch.env` 的 `OPENCODE_CONFIG_CONTENT` 只帶 `instructions`（**與檔案設定合併**，實測；不要把整份設定重貼、把憑證帶進環境）
+- [x] 3b.5 測試：只有帶 `--harness-file` 的 process 吃得到；同一個 CLI、不帶的下一個 session 吃不到；檔案設定仍在（合併）由人工實測、無自動測試；自動測試只釘 CONTENT 只含 instructions 與路徑為絕對路徑
+- [x] 3b.6 改壞驗證：把 env 改成改 `os.environ`（應紅）、CONTENT 重貼整份設定（應紅）、沒帶 `--harness-file` 卻注入（應紅）、install 守門拿掉（應紅）、`--global` 不印警告（應紅）、claude 少一個旗標（應紅）、render 查無改回 1（應紅）
 
 ## 4. 交付機制（跨 repo；PMO 排，MyPMO#86 會用到）
 

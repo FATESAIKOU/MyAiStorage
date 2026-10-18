@@ -26,6 +26,22 @@ class InstallError(RuntimeError):
     not one (exit 2). A target that simply cannot be written raises WriteError."""
 
 
+class PolicyError(Exception):
+    """The install request violates safety policy (exit 1)."""
+
+
+def check_install_policy(ident: HarnessId, *, global_install: bool = False) -> None:
+    if global_install:
+        return
+    version = ident.version
+    if ident.role == "pm" and version is not None and version >= 1:
+        raise PolicyError(
+            f"拒絕將 PM harness ({ident}) 安裝至使用者層級指示檔。"
+            "使用者層級指示檔會讓同一個使用者的所有 agent 都拿到 PM 規矩。"
+            "請改用 'atelier render' 由啟動方按 agent 交付；若確實在整台機器只有一個 agent 時要全域安裝，請明寫 --global。"
+        )
+
+
 def claude_dir() -> Path:
     override = os.environ.get("CLAUDE_CONFIG_DIR")
     return Path(override).expanduser() if override else Path.home() / ".claude"

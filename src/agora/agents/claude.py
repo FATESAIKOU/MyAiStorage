@@ -588,7 +588,8 @@ class ClaudeAgent:
         return _pack_raw(main + _native_lines(extra, parent=_leaf_uuid(main)), aux)
 
     def start_native(self, raw: bytes, workdir: Path, *, headless: bool = False,
-                     headless_port: int | None = None) -> Launch:
+                     headless_port: int | None = None,
+                     harness_file: Path | None = None) -> Launch:
         main, aux = _unpack_raw(raw)
         new_id = str(uuid.uuid4())
         workdir_str = str(workdir)
@@ -613,6 +614,9 @@ class ClaudeAgent:
                     "--settings", '{"autoContinueAtUsageLimit": false}']
         else:
             argv = [agent_cmd("claude"), "--resume", new_id]
+        if harness_file is not None:
+            argv.extend(["--append-system-prompt-file", str(harness_file.resolve()),
+                         "--system-prompt-snapshot", "off"])
         return Launch(argv=argv, cwd=workdir_str, agent_session_id=new_id,
                       before_count=_count_messages(_parse_all(rewritten)))
 

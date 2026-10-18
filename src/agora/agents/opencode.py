@@ -1515,7 +1515,8 @@ class OpencodeAgent:
         return name if isinstance(name, str) and name else None
 
     def start_native(self, raw: bytes, workdir: Path, *, headless: bool = False,
-                     headless_port: int | None = None) -> Launch:
+                     headless_port: int | None = None,
+                     harness_file: Path | None = None) -> Launch:
         payload = self._read(raw)
         if _payload_format(payload) == "v1":
             # Decisions 8 (M5): a v1 raw cannot be loaded on a 2.x opencode at all
@@ -1543,8 +1544,11 @@ class OpencodeAgent:
                     "--hostname", "127.0.0.1", "--port", str(headless_port)]
         else:
             argv = [agent_cmd(self.name), "--session", session_id]
+        launch_env = {}
+        if harness_file is not None:
+            launch_env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"instructions": [str(harness_file.resolve())]})
         return Launch(argv=argv, cwd=str(workdir), agent_session_id=session_id,
-                      before_count=landed)
+                      before_count=landed, env=launch_env)
 
     def collect(self, launch: Launch) -> Exported | None:
         """What the agent produced, or None if it said nothing new (S9).

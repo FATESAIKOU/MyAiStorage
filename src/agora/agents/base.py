@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Protocol
@@ -54,6 +54,7 @@ class Launch:
     cwd: str
     agent_session_id: str | None    # known before launch when the agent lets us pick it
     before_count: int = 0           # messages present before the user starts (S9)
+    env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -109,7 +110,8 @@ class Agent(Protocol):
         """
 
     def start_native(self, raw: bytes, workdir: Path, *, headless: bool = False,
-                     headless_port: int | None = None) -> Launch:
+                     headless_port: int | None = None,
+                     harness_file: Path | None = None) -> Launch:
         """Load raw (this agent's format) as a brand-new session and return how to open it.
 
         `headless` (sidecar's `agora continue --headless`) asks for the agent's

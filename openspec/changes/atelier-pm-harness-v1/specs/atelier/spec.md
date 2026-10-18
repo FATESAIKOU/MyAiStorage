@@ -186,7 +186,7 @@ repo MUST 附一個讀取工具（依 D7 的建議＝指令 `atelier`，與 agor
 - **THEN** 內容逐字不變（交付是啟動參數／每 process 設定，不是寫檔）
 
 #### Scenario: 產生失敗就不開
-- **WHEN** `atelier render`（或等價的交付準備）回 1／2、或產生的檔不存在
+- **WHEN** `atelier render`（或等價的交付準備）回 1／2／3、或產生的檔不存在
 - **THEN** 啟動方不開 agent，回報原因（不開一個沒有規矩的 PM）
 
 #### Scenario: --global 的全域安裝是唯一例外
@@ -194,7 +194,7 @@ repo MUST 附一個讀取工具（依 D7 的建議＝指令 `atelier`，與 agor
 - **THEN** 安裝成功、stderr 有警告（同一個使用者的每個 agent 都會拿到）；同一個指令沒有 `--global` 時 exit 1——這是「v1 的 PM harness 不用 install 交付」的唯一例外
 
 ### Requirement: 產生 agent 指示檔（`atelier render`）
-`atelier render <id>[@<版本>] [--append <檔>] --out <檔>` MUST 讀 harness（不指定版本＝版本號最大）、可選把 `--append` 的檔案（環境說明）接在後面、**原子寫入** `--out`（先寫同目錄的暫存檔再 rename；中斷時不留半份）。`--append` 的檔 MUST 存在（不存在 → exit 1）。harness 格式壞（frontmatter 缺或無法解析、`type` 不是 `Harness`）MUST 拒絕（exit 2，`--out` 不建立）。`render` 是**只寫 `--out`** 的寫入操作：MUST NOT 寫 `--out` 以外的任何檔案（harness 樹、使用者層級指示檔、工作目錄都一樣）。退出碼：0 成功；1 用法錯、查無 id／版本、`--append` 檔不存在；2 讀取失敗（含壞 harness）或寫不進去。錯誤訊息 MUST NOT 含 harness 內文。
+`atelier render <id>[@<版本>] [--append <檔>] --out <檔>` MUST 讀 harness（不指定版本＝版本號最大）、可選把 `--append` 的檔案（環境說明）接在後面、**原子寫入** `--out`（先寫同目錄的暫存檔再 rename；中斷時不留半份）。`--append` 的檔 MUST 存在（不存在 → exit 1）。harness 格式壞（frontmatter 缺或無法解析、`type` 不是 `Harness`）MUST 拒絕（exit 2，`--out` 不建立）。`render` 是**只寫 `--out`** 的寫入操作：MUST NOT 寫 `--out` 以外的任何檔案（harness 樹、使用者層級指示檔、工作目錄都一樣）。退出碼：0 成功；1 用法錯（參數錯、壞 id 格式、缺 `--out`、`--out ''`、`--append` 檔不存在含 `--append ''`）；2 讀取失敗（複本不存在、壞 harness）或寫不進去；3 harness 查無 id／版本（讓呼叫方分辨「查無」與「用法錯」）。錯誤訊息 MUST NOT 含 harness 內文。
 
 #### Scenario: 產生一份給啟動方
 - **WHEN** `atelier render atelier:worker-team-pm --out <agent 的 state 目錄>/instructions.md`
@@ -207,6 +207,14 @@ repo MUST 附一個讀取工具（依 D7 的建議＝指令 `atelier`，與 agor
 #### Scenario: --append 的檔不存在
 - **WHEN** `atelier render atelier:worker-team-pm --append <不存在的檔> --out <agent 的 state 目錄>/instructions.md`
 - **THEN** exit 1，訊息說明檔案不存在；`--out` 沒有被建立
+
+#### Scenario: 查無版本
+- **WHEN** `atelier render atelier:worker-team-pm@v9 --out <檔>`（沒有 v9）
+- **THEN** exit 3，訊息說明版本不存在；`--out` 沒有被建立
+
+#### Scenario: 查無 id
+- **WHEN** `atelier render atelier:worker-team-test --out <檔>`（沒有這個職務的 harness）
+- **THEN** exit 3，訊息說明找不到 harness；`--out` 沒有被建立
 
 #### Scenario: 壞 harness
 - **WHEN** `atelier render` 指定的 harness 沒有 frontmatter、frontmatter 無法解析或 `type` 不是 `Harness`

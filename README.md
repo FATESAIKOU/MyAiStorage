@@ -115,6 +115,9 @@ agora continue session agora:01K6… --agent opencode --sync-period 1
 # 從同一點分岔：先複製出新 Session 再開 agent，原本那個不動，寫回都寫到新的那個
 agora continue session agora:01K6… --agent opencode --fork
 
+# 啟動方交付 harness（單一 agent 生效，不改使用者層級檔案）
+agora continue session agora:01K6… --agent opencode --harness-file /path/to/harness.md
+
 # 改標頭：給 --header／--header-file 就直接疊加；都不給就用 $EDITOR 打開
 agora edit session agora:01K6… --header 'tags=[csv, 表格]' --header 'status=stable'
 agora edit session agora:01K6…
