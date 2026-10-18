@@ -24,6 +24,8 @@ from atelier.harness import (
 )
 from atelier.install import (
     InstallError,
+    PolicyError,
+    check_install_policy,
     claude_target,
     install_claude,
     install_opencode,
@@ -35,6 +37,7 @@ from atelier.repo import HarnessNotFound, Repo, RepoError
 EXIT_OK = 0
 EXIT_USAGE = 1
 EXIT_DATA = 2
+EXIT_NOT_FOUND = 3
 
 
 class UsageError(Exception):
@@ -62,6 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--agent", action="append", choices=("claude", "opencode"),
                          default=[], metavar="claude|opencode",
                          help="可以給多次；每個值各裝一次（同值去重）")
+    install.add_argument("--global", dest="global_install", action="store_true",
+                         help="允許安裝 v>=1 的 PM harness 至使用者層級（整台機器只有一個 agent 時才該使用）")
     render = sub.add_parser("render", help="產生單一個 agent 的指示檔（harness ＋環境說明）")
     render.add_argument("id", help="atelier:<team>-<role>[@v<N>]")
     render.add_argument("--append", dest="append_file", metavar="檔",
@@ -182,10 +187,14 @@ def _cmd_install(repo: Repo, args: argparse.Namespace) -> int:
     if not args.agent:
         raise UsageError("install 需要至少一個 --agent claude|opencode")
     ident = parse_id(args.id)   # a pure syntax check comes before any fetch (L2)
+    check_install_policy(ident, global_install=args.global_install)
     repo.ensure_fresh()
     resolved = repo.resolve(ident)
+    check_install_policy(resolved.ident, global_install=args.global_install)
     text = _decode(resolved.raw)
     validate_harness(text, resolved.path)
+    if args.global_install and resolved.ident.role == "pm" and (resolved.ident.version is None or resolved.ident.version >= 1):
+        print("Warning: 同一個使用者的每個 agent 都會拿到這份 PM harness", file=sys.stderr)
     for agent in _agents(args.agent):
         if agent == "claude":
             target = claude_target(resolved.ident)
@@ -227,9 +236,13 @@ def main(argv: list[str] | None = None, *, repo: Repo | None = None) -> int:
         if args.command == "show":
             return _cmd_show(active, args)
         if args.command == "render":
-            return _cmd_render(active, args)
+            try:
+                return _cmd_render(active, args)
+            except HarnessNotFound as e:
+                print(f"Error: {e}", file=sys.stderr)
+                return EXIT_NOT_FOUND
         return _cmd_install(active, args)
-    except (UsageError, InvalidId, HarnessNotFound, AppendMissing) as e:
+    except (UsageError, InvalidId, HarnessNotFound, AppendMissing, PolicyError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return EXIT_USAGE
     except (RepoError, InstallError, WriteError, HarnessFormatError) as e:

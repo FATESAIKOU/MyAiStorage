@@ -678,7 +678,7 @@ def _opencode_file(env) -> Path:
 
 
 def test_install_claude_writes_the_rules_file(harness_repo, install_env, capsysbinary):
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "claude")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "claude", "--global")
     assert code == 0, err
     assert _claude_file(install_env).read_bytes() == H1.encode()
     assert str(_claude_file(install_env)) in out.decode()
@@ -697,19 +697,19 @@ def test_install_opencode_wraps_the_harness_in_one_managed_block(harness_repo, i
     target.parent.mkdir(parents=True)
     user_text = "# 使用者自己的規矩\n不要做壞事。\n"
     target.write_text(user_text, encoding="utf-8")
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 0, err
     first = target.read_text(encoding="utf-8")
     assert first.startswith(user_text), "the user's own content is kept verbatim"
     assert H1 in first, "the harness is inside the managed block"
     assert first.count(CLAUDE_MARKER) == 1 and first.count(CLAUDE_END) == 1
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 0, err
     assert target.read_text(encoding="utf-8") == first, "a second install replaces, not stacks"
 
 
 def test_install_opencode_creates_the_file_when_missing(harness_repo, install_env, capsysbinary):
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 0, err
     text = _opencode_file(install_env).read_text(encoding="utf-8")
     assert text.startswith(CLAUDE_MARKER + "\n")
@@ -720,7 +720,7 @@ def test_install_opencode_creates_the_file_when_missing(harness_repo, install_en
                                     ("claude", "claude", "opencode")])
 def test_install_repeated_agents_each_installed_once(agents, harness_repo, install_env,
                                                       capsysbinary):
-    argv = ["install", PM]
+    argv = ["install", PM, "--global"]
     for agent in agents:
         argv += ["--agent", agent]
     code, out, err = _run(capsysbinary, *argv)
@@ -745,7 +745,7 @@ def test_install_missing_version_is_exit_1(harness_repo, install_env, capsysbina
 
 def test_install_write_failure_is_exit_2(harness_repo, install_env, capsysbinary):
     _opencode_file(install_env).mkdir(parents=True)   # a directory where the file goes
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 2
     assert err != b""
 
@@ -753,7 +753,7 @@ def test_install_write_failure_is_exit_2(harness_repo, install_env, capsysbinary
 def test_install_targets_fall_back_to_home(harness_repo, install_env, monkeypatch, capsysbinary):
     monkeypatch.delenv("CLAUDE_CONFIG_DIR")
     monkeypatch.delenv("XDG_CONFIG_HOME")
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "claude", "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "claude", "--agent", "opencode", "--global")
     assert code == 0, err
     assert (install_env.home / ".claude/rules/atelier-worker-team-pm.md").read_bytes() == H1.encode()
     assert (install_env.home / ".config/opencode/AGENTS.md").is_file()
@@ -771,7 +771,7 @@ def test_install_never_touches_settings_project_files_or_the_cwd(harness_repo, i
     project_claude.write_text("# project claude\n", encoding="utf-8")
     before = {p: p.read_bytes() for p in (settings, user_claude, project_agents, project_claude)}
     cwd_before = _tree(install_env.project)
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "claude", "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "claude", "--agent", "opencode", "--global")
     assert code == 0, err
     for path, data in before.items():
         assert path.read_bytes() == data, f"{path} must be byte-for-byte unchanged"
@@ -792,7 +792,7 @@ def test_install_writes_through_a_same_directory_tmp_file_and_replace(harness_re
         return real_replace(src, dst, *args, **kwargs)
 
     monkeypatch.setattr(os, "replace", spy)
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "claude", "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "claude", "--agent", "opencode", "--global")
     assert code == 0, err
     assert {dst for _, dst in calls} == {_claude_file(install_env), _opencode_file(install_env)}
     for src, dst in calls:
@@ -809,7 +809,7 @@ def test_a_failed_install_write_keeps_the_old_file_and_leaves_no_residue(
         target.parent.mkdir(parents=True)
         target.write_text("USER\n", encoding="utf-8")
     else:
-        code, out, err = _run(capsysbinary, "install", PM, "--agent", "claude")
+        code, out, err = _run(capsysbinary, "install", PM, "--agent", "claude", "--global")
         assert code == 0, err
         target = _claude_file(install_env)
     before_bytes = target.read_bytes()
@@ -821,13 +821,13 @@ def test_a_failed_install_write_keeps_the_old_file_and_leaves_no_residue(
         raise OSError("simulated failure before the new file is in place")
 
     monkeypatch.setattr(os, "replace", boom)
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", agent)
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", agent, "--global")
     assert code == 2
     assert err != b""
     monkeypatch.setattr(os, "replace", real_replace)
     assert target.read_bytes() == before_bytes, "a failed write must leave the old file"
     assert sorted(p.name for p in target.parent.iterdir()) == before_listing, "no tmp residue"
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", agent)
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", agent, "--global")
     assert code == 0, "the failure must not poison later installs"
 
 
@@ -837,7 +837,7 @@ def test_install_opencode_with_a_non_utf8_target_is_exit_2_without_a_traceback(
     target = _opencode_file(install_env)
     target.parent.mkdir(parents=True)
     target.write_bytes(b"\xff\xfe not utf8\n")
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 2
     assert b"Traceback" not in err
     assert target.read_bytes() == b"\xff\xfe not utf8\n"
@@ -849,7 +849,7 @@ def test_two_roles_in_one_file_keep_their_own_blocks(harness_repo, install_env, 
     target.parent.mkdir(parents=True)
     user = "# 使用者自己的規矩\n"
     target.write_text(user, encoding="utf-8")
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 0, err
     code, out, err = _run(capsysbinary, "install", IMPL, "--agent", "opencode")
     assert code == 0, err
@@ -859,7 +859,7 @@ def test_two_roles_in_one_file_keep_their_own_blocks(harness_repo, install_env, 
     assert text.count(IMPL_MARKER) == 1 and text.count(IMPL_END) == 1
     assert _block_between(text, CLAUDE_MARKER, CLAUDE_END) == H1
     assert _block_between(text, IMPL_MARKER, IMPL_END) == I0
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 0, err
     text = target.read_text(encoding="utf-8")
     assert _block_between(text, IMPL_MARKER, IMPL_END) == I0, "the other role's block is untouched"
@@ -872,7 +872,7 @@ def test_install_refuses_a_damaged_managed_block_and_keeps_the_file(harness_repo
     target.parent.mkdir(parents=True)
     damaged = "# user\n" + CLAUDE_MARKER + "\nUSER NOTE\n"
     target.write_text(damaged, encoding="utf-8")
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 2
     assert err != b""
     assert target.read_text(encoding="utf-8") == damaged
@@ -886,7 +886,7 @@ def test_install_refuses_a_stray_opening_marker_that_would_eat_user_content(
     stray = ("# user top\n" + CLAUDE_MARKER + "\nUSER NOTE BETWEEN\n"
              + CLAUDE_MARKER + "\n" + H1 + CLAUDE_END + "\n")
     target.write_text(stray, encoding="utf-8")
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 2, "an unbalanced pair of marker lines must be refused, not used"
     assert target.read_text(encoding="utf-8") == stray, "the file must be untouched"
 
@@ -897,7 +897,7 @@ def test_install_refuses_a_marker_pair_that_is_not_ours(harness_repo, install_en
     target.parent.mkdir(parents=True)
     quoted = "# user\n" + CLAUDE_MARKER + "\nUSER QUOTES OUR MARKERS\n" + CLAUDE_END + "\n"
     target.write_text(quoted, encoding="utf-8")
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 2
     assert target.read_text(encoding="utf-8") == quoted
 
@@ -908,7 +908,7 @@ def test_install_refuses_an_orphan_closing_marker(harness_repo, install_env, cap
     target.parent.mkdir(parents=True)
     orphan = "# user\n" + CLAUDE_END + "\n"
     target.write_text(orphan, encoding="utf-8")
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 2
     assert target.read_text(encoding="utf-8") == orphan
 
@@ -921,7 +921,7 @@ def test_install_refuses_a_harness_without_frontmatter_and_writes_nothing(harnes
              "# 沒有 frontmatter\n\n## know\n\n內文\n")
     _age_fetch_head(harness_repo.clone, 120)
     code, out, err = _run(capsysbinary, "install", "atelier:worker-team-pm@v3",
-                          "--agent", "claude", "--agent", "opencode")
+                          "--agent", "claude", "--agent", "opencode", "--global")
     assert code == 2
     assert err != b"" and b"Traceback" not in err
     assert not (install_env.claude / "rules").exists(), "nothing may be written"
@@ -935,7 +935,7 @@ def test_install_refuses_a_harness_with_broken_frontmatter_and_writes_nothing(ha
     _publish(harness_repo, "atelier/worker-team/pm/v3.md", BAD_FRONTMATTER)
     _age_fetch_head(harness_repo.clone, 120)
     code, out, err = _run(capsysbinary, "install", "atelier:worker-team-pm@v3",
-                          "--agent", "claude")
+                          "--agent", "claude", "--global")
     assert code == 2
     assert b"LEAKME" not in err
     assert not (install_env.claude / "rules").exists(), "nothing may be written"
@@ -947,7 +947,7 @@ def test_install_refuses_a_harness_whose_type_is_not_harness(harness_repo, insta
     _publish(harness_repo, "atelier/worker-team/pm/v3.md", H1.replace("type: Harness", "type: Note"))
     _age_fetch_head(harness_repo.clone, 120)
     code, out, err = _run(capsysbinary, "install", "atelier:worker-team-pm@v3",
-                          "--agent", "claude", "--agent", "opencode")
+                          "--agent", "claude", "--agent", "opencode", "--global")
     assert code == 2
     assert err != b""
     assert not (install_env.claude / "rules").exists(), "nothing may be written"
@@ -960,12 +960,12 @@ def test_install_opencode_keeps_the_users_line_endings(harness_repo, install_env
     target.parent.mkdir(parents=True)
     user = b"# user\r\nsecond\r\n"
     target.write_bytes(user)
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 0, err
     first = target.read_bytes()
     assert first.startswith(user), "\\r\\n outside the block is kept byte-for-byte"
     assert CLAUDE_MARKER.encode() in first and H1.encode() in first
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 0, err
     assert target.read_bytes() == first, "a second install replaces the block, nothing else"
 
@@ -978,7 +978,7 @@ def test_install_refuses_a_harness_whose_body_contains_a_marker_line(harness_rep
     _publish(harness_repo, "atelier/worker-team/pm/v3.md", polluted)
     _age_fetch_head(harness_repo.clone, 120)
     code, out, err = _run(capsysbinary, "install", "atelier:worker-team-pm@v3",
-                          "--agent", "opencode")
+                          "--agent", "opencode", "--global")
     assert code == 2
     assert err != b""
     assert not _opencode_file(install_env).parent.exists(), "nothing is written"
@@ -991,13 +991,13 @@ def test_an_inline_marker_mention_is_plain_text_not_a_block(harness_repo, instal
     target.parent.mkdir(parents=True)
     inline = "說明：<!-- atelier:worker-team-pm --> 的用法\n"
     target.write_text(inline, encoding="utf-8")
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 0, err
     text = target.read_text(encoding="utf-8")
     assert text.startswith(inline), "the inline line is kept as it was"
     assert text.count(CLAUDE_MARKER) == 2, "the inline mention + our own opening marker"
     assert _block_between(text, CLAUDE_MARKER, CLAUDE_END) == H1
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 0, err
     assert target.read_text(encoding="utf-8") == text, "the inline mention is not a marker"
 
@@ -1012,7 +1012,7 @@ def test_install_refuses_a_marker_pair_that_only_starts_like_a_harness(body, har
     target.parent.mkdir(parents=True)
     quoted = "# user\n" + CLAUDE_MARKER + "\n" + body + CLAUDE_END + "\n"
     target.write_text(quoted, encoding="utf-8")
-    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
+    code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode", "--global")
     assert code == 2, "a lookalike block must be refused, not replaced"
     assert target.read_text(encoding="utf-8") == quoted, "the file must be untouched"
 
@@ -1129,20 +1129,20 @@ def test_render_requires_out(harness_repo, state_dir, capsysbinary):
     assert list(state_dir.iterdir()) == []
 
 
-def test_render_unknown_version_is_exit_1_and_writes_nothing(harness_repo, state_dir, capsysbinary):
+def test_render_unknown_version_is_exit_3_and_writes_nothing(harness_repo, state_dir, capsysbinary):
     _age_fetch_head(harness_repo.clone, 120)
     out = state_dir / "instructions.md"
     code, stdout, err = _run(capsysbinary, "render", "atelier:worker-team-pm@v9", "--out", str(out))
-    assert code == 1
+    assert code == 3
     assert "v9" in err.decode()
     assert b"v0 know" not in err, "error messages must not leak harness content"
     assert not out.exists()
 
 
-def test_render_unknown_role_is_exit_1(harness_repo, state_dir, capsysbinary):
+def test_render_unknown_id_is_exit_3_and_writes_nothing(harness_repo, state_dir, capsysbinary):
     out = state_dir / "instructions.md"
     code, stdout, err = _run(capsysbinary, "render", "atelier:worker-team-test", "--out", str(out))
-    assert code == 1
+    assert code == 3
     assert not out.exists()
 
 
@@ -1290,7 +1290,7 @@ def test_render_refuses_a_harness_without_frontmatter_and_out_is_not_created(har
     assert b"\xe5\x85\xa7\xe6\x96\x87" not in err, "error message must not leak harness content"
 
     code_inst, _, err_inst = _run(capsysbinary, "install", "atelier:worker-team-pm@v3",
-                                  "--agent", "claude")
+                                  "--agent", "claude", "--global")
     assert code_inst == 2
     assert err.decode() == err_inst.decode(), "render and install must have identical failure message"
 
@@ -1308,7 +1308,7 @@ def test_render_refuses_a_harness_whose_type_is_not_harness_and_out_is_not_creat
     assert "frontmatter 的 type 不是 Harness" in err.decode()
 
     code_inst, _, err_inst = _run(capsysbinary, "install", "atelier:worker-team-pm@v3",
-                                  "--agent", "claude")
+                                  "--agent", "claude", "--global")
     assert code_inst == 2
     assert err.decode() == err_inst.decode(), "render and install must have identical failure message"
 
@@ -1324,7 +1324,7 @@ def test_render_refuses_a_crlf_harness_identical_to_install(harness_repo, state_
     assert "檔案開頭沒有 frontmatter" in err.decode()
 
     code_inst, _, err_inst = _run(capsysbinary, "install", "atelier:worker-team-pm@v3",
-                                  "--agent", "claude")
+                                  "--agent", "claude", "--global")
     assert code_inst == 2
     assert err.decode() == err_inst.decode(), "render and install must have identical failure message"
 
@@ -1376,3 +1376,67 @@ def test_render_interrupted_write_leaves_old_out_and_no_residue(harness_repo, st
     assert out.read_bytes() == b"OLD INSTRUCTIONS\n", "interrupted write leaves the old file"
     assert sorted(p.name for p in state_dir.iterdir()) == ["instructions.md"], "no tmp residue"
 
+
+def test_install_v1_pm_without_global_is_refused_and_writes_nothing(harness_repo, install_env, capsysbinary):
+    """3b.1: v1+ PM harness without --global must exit 1, explain why, and touch nothing."""
+    code, out, err = _run(capsysbinary, "install", "atelier:worker-team-pm@v1", "--agent", "claude")
+    assert code == 1
+    assert "atelier render" in err.decode()
+    assert "PM" in err.decode() or "pm" in err.decode().lower()
+    assert "使用者層級" in err.decode()
+    assert not (install_env.claude / "rules").exists(), "no files may be written"
+
+
+def test_install_v1_pm_with_global_succeeds_and_warns(harness_repo, install_env, capsysbinary):
+    """3b.1: v1+ PM harness with --global succeeds and prints a warning on stderr."""
+    code, out, err = _run(capsysbinary, "install", "atelier:worker-team-pm@v1", "--agent", "claude", "--global")
+    assert code == 0, err
+    assert "Warning: 同一個使用者的每個 agent 都會拿到這份 PM harness" in err.decode()
+    assert _claude_file(install_env).read_bytes() == H1.encode()
+
+
+def test_install_latest_pm_without_global_is_refused(harness_repo, install_env, capsysbinary):
+    """3b.1: unversioned PM (latest resolves to v1) without --global is refused."""
+    code, out, err = _run(capsysbinary, "install", "atelier:worker-team-pm", "--agent", "claude")
+    assert code == 1
+    assert "atelier render" in err.decode()
+    assert not (install_env.claude / "rules").exists()
+
+
+def test_install_v0_pm_does_not_need_global(harness_repo, install_env, capsysbinary):
+    """3b.1: v0 PM harness installs normally without --global and emits no warning."""
+    code, out, err = _run(capsysbinary, "install", "atelier:worker-team-pm@v0", "--agent", "claude")
+    assert code == 0, err
+    assert b"Warning" not in err
+    assert _claude_file(install_env).read_bytes() == H0.encode()
+
+
+def test_install_non_pm_does_not_need_global(harness_repo, install_env, capsysbinary):
+    """3b.1: non-pm harnesses (e.g. impl) do not need --global even for v1."""
+    _publish(harness_repo, "atelier/worker-team/impl/v1.md", I0.replace("version: v0", "version: v1"))
+    _age_fetch_head(harness_repo.clone, 120)
+    code, out, err = _run(capsysbinary, "install", "atelier:worker-team-impl@v1", "--agent", "claude")
+    assert code == 0, err
+    assert b"Warning" not in err
+
+
+def test_install_pm_without_version_when_only_v0_exists_succeeds_without_global(harness_repo, install_env, capsysbinary):
+    """M1 (a): PM harness with only v0 in repo, unversioned and without --global, must succeed."""
+    _publish(harness_repo, "atelier/solo-team/pm/v0.md", H0.replace("worker-team-pm", "solo-team-pm"))
+    code, out, err = _run(capsysbinary, "install", "atelier:solo-team-pm", "--agent", "claude")
+    assert code == 0, err
+    assert b"Warning" not in err
+    target = install_env.claude / "rules" / "atelier-solo-team-pm.md"
+    assert target.exists()
+    assert b"installed atelier:solo-team-pm@v0" in out
+
+
+def test_install_explicit_v1_pm_refuses_before_fetch(harness_repo, install_env, capsysbinary):
+    """M1 (c): explicit @v1 PM harness without --global must refuse before any fetch is attempted."""
+    subprocess.run(["git", "remote", "set-url", "origin", "/nonexistent"],
+                   cwd=harness_repo.clone, check=True)
+    _age_fetch_head(harness_repo.clone, 10_000)
+    code, out, err = _run(capsysbinary, "install", "atelier:worker-team-pm@v1", "--agent", "claude")
+    assert code == 1
+    assert b"Warning" not in err, "explicit @v1 must be rejected before fetch"
+    assert not (install_env.claude / "rules").exists()

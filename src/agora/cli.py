@@ -1621,6 +1621,21 @@ def cmd_continue(args, paths: store.Paths) -> int:
     if not args.agent:
         raise InputError("continue 要給 --agent opencode|claude")
     agent = load_agent(args.agent)
+    harness_path = None
+    if getattr(args, "harness_file", None):
+        harness_p = Path(args.harness_file)
+        if not harness_p.exists():
+            raise InputError(f"--harness-file 指定的檔案不存在：{args.harness_file}")
+        if harness_p.is_dir():
+            raise AgentError(f"--harness-file 不能是目錄：{args.harness_file}")
+        try:
+            with open(harness_p, "rb") as f:
+                f.read(1)
+        except OSError as e:
+            raise AgentError(f"--harness-file 無法讀取：{e}")
+        if agent.name not in ("claude", "opencode"):
+            raise InputError(f"--harness-file 不支援 agent：{agent.name}")
+        harness_path = harness_p
     updates = _updates(args)
     add_tags = list(getattr(args, "add_tag", []) or [])
     headless = bool(getattr(args, "headless", False))
@@ -1674,11 +1689,17 @@ def cmd_continue(args, paths: store.Paths) -> int:
         raw = agent.append_native(own, fork_turns)
     else:
         raw = own
-    if headless:
-        launch = agent.start_native(raw, workdir, headless=True, headless_port=headless_port)
+    if harness_path is not None:
+        if headless:
+            launch = agent.start_native(raw, workdir, headless=True, headless_port=headless_port,
+                                        harness_file=harness_path)
+        else:
+            launch = agent.start_native(raw, workdir, harness_file=harness_path)
     else:
-        # The old call shape stays for agents that predate headless (test fakes).
-        launch = agent.start_native(raw, workdir)
+        if headless:
+            launch = agent.start_native(raw, workdir, headless=True, headless_port=headless_port)
+        else:
+            launch = agent.start_native(raw, workdir)
     if fork:
         if not launch.agent_session_id:
             raise AgentError(f"{agent.name} 啟動之後沒有 session id，這個 fork 沒有存成")
@@ -1774,7 +1795,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
         previous_term = signal.signal(signal.SIGTERM, _forward_term)
     try:
         # opencode reads PWD, not the real cwd, to pick the project (impl1).
-        proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env={**os.environ, "PWD": launch.cwd},
+        proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env={**os.environ, **launch.env, "PWD": launch.cwd},
                                 pass_fds=(lock.fileno(),),
                                 preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
         if term_pending:
@@ -2220,6 +2241,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="continue：用 agent 的程式化模式開（claude：stream-json；opencode：serve）")
     p.add_argument("--headless-port", type=int, default=None,
                    help="continue --headless：opencode server 要聽的埠（由呼叫方分配）")
+    p.add_argument("--harness-file",
+                   help="continue：啟動方在單一 agent 啟動時交付 harness（檔案要存在且可讀）")
     p.add_argument("--yes", action="store_true", help="delete：確定要移到 Drive 垃圾桶")
     p.add_argument("--force", action="store_true",
                    help="delete：連正在接續中的一起刪（要加 --yes；刪掉之後那個 agent 的寫回會另存成新的 Session）")
