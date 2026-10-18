@@ -6,6 +6,7 @@ import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve
 
 import io
 import json
+import os
 import sys
 
 import pytest
@@ -30,6 +31,10 @@ IDENTITY = "MyLinuxPool-impl-2"
 PM = "LLMGateway-pm"
 GENERAL = entity(channel="general", issue=10)
 OTHER = entity(channel="other", backend="github-main", repo="owner/repo", issue=7)
+CHANNEL_WARNING = (
+    "Warning: --channel reads every message in the channel, including messages addressed to other agents; "
+    "omit --channel to get only messages addressed to you.\n"
+)
 
 
 class FakeClock:
@@ -300,7 +305,7 @@ def test_read_prints_messages_and_advances_the_cursor(cli_env, capsys):
     assert "<LLMGateway-pm>" in captured.out  # the sender is the agent name
     assert "channel: general" in captured.out
     assert "(received 2026-10-10T12:00:05Z)" in captured.out
-    assert captured.err == ""
+    assert captured.err == CHANNEL_WARNING
 
     cursor_file = cli_env["state_dir"] / "cursor-MyLinuxPool-impl-2.json"
     stored = json.loads(cursor_file.read_text(encoding="utf-8"))
@@ -449,6 +454,76 @@ def test_wait_blocks_until_a_message_arrives(cli_env, capsys):
 def test_wait_negative_timeout_is_usage_error(cli_env, capsys):
     assert run(cli_env, ["wait", "--channel", "general", "--timeout", "-1"]) == 1
     assert "--timeout" in capsys.readouterr().err
+
+
+def test_wait_with_channel_prints_a_warning_and_keeps_stdout_and_exit(cli_env, capsys):
+    """#96: --channel receives other agents' messages; the warning is stderr only."""
+    assert run(cli_env, ["wait", "--channel", "general", "--timeout", "0"]) == 3
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith(CHANNEL_WARNING)
+    assert "addressed to other agents" in captured.err
+    assert "Timed out" in captured.err  # the normal timeout message is unchanged
+
+    assert run(cli_env, ["wait", "--timeout", "0"]) == 3
+    assert "Warning: --channel" not in capsys.readouterr().err
+
+
+def test_read_with_channel_prints_a_warning_and_keeps_stdout_and_exit(cli_env, capsys):
+    _seed_message(cli_env)
+    assert run(cli_env, ["read", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert "Warning:" not in captured.err
+    assert [m["id"] for m in json.loads(captured.out)] == ["01AAAA00000000000000000000"]
+
+    _seed_message(cli_env, msg_id="01BBBB00000000000000000000", comment_id=2, created_at="2026-10-10T12:00:01Z")
+    assert run(cli_env, ["read", "--channel", "general", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert CHANNEL_WARNING in captured.err
+    assert {m["id"] for m in json.loads(captured.out)} == {
+        "01AAAA00000000000000000000",
+        "01BBBB00000000000000000000",
+    }
+
+
+def test_wait_and_read_with_an_unknown_channel_do_not_print_the_warning(cli_env, capsys):
+    """REVIEW-96 L2: the warning is about acting on a channel; a missing channel only errors."""
+    assert run(cli_env, ["wait", "--channel", "nowhere", "--timeout", "0"]) == 1
+    err = capsys.readouterr().err
+    assert "does not exist" in err
+    assert "Warning: --channel" not in err
+
+    assert run(cli_env, ["read", "--channel", "nowhere"]) == 1
+    err = capsys.readouterr().err
+    assert "does not exist" in err
+    assert "Warning: --channel" not in err
+
+
+def test_wait_survives_an_unwritable_state_dir(cli_env, capsys):
+    """The ETag state is an optimisation: a failed write warns once and wait still exits 3, not 2."""
+    if getattr(os, "geteuid", lambda: -1)() == 0:
+        pytest.skip("root can write into a read-only directory")
+    state_dir = cli_env["state_dir"]
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    class CleanGitHub:
+        def request(self, method, url, headers=None, body=None, timeout=None):
+            return HttpResponse(200, {"etag": 'W/"clean"'}, b"[]")
+
+    os.chmod(state_dir, 0o500)
+    try:
+        ret = main(
+            ["wait", "--timeout", "0"],
+            store=cli_env["store"],
+            registry=cli_env["registry"],
+            transport=CleanGitHub(),
+        )
+    finally:
+        os.chmod(state_dir, 0o700)
+    captured = capsys.readouterr()
+    assert ret == 3
+    assert "Warning: could not write the wait state file" in captured.err
+    assert "Messages are not affected" in captured.err
 
 
 def test_wait_polling_does_not_fetch(cli_env, capsys):
@@ -1220,4 +1295,4 @@ def test_old_format_cursor_is_reported_and_read_from_the_start(cli_env, capsys):
     assert run(cli_env, ["read", "--channel", "general", "--json"]) == 0
     captured2 = capsys.readouterr()
     assert json.loads(captured2.out) == []
-    assert captured2.err == ""
+    assert captured2.err == CHANNEL_WARNING

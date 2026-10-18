@@ -187,6 +187,56 @@ class ReadResult(NamedTuple):
     cursor: Cursor
 
 
+class ETagRecord(NamedTuple):
+    """A conditional-request state that was fully scanned and found clean (D2/#96).
+
+    `url` is the exact request URL the response came from (its query includes
+    `since`), `cursor` is the cursor it was checked against, and `etag` is the
+    backend's validator. It is sent back as `If-None-Match` only when all three
+    still match; see `github.GitHubIssuesBackend.check`.
+    """
+
+    url: str
+    cursor: Cursor
+    etag: str
+
+
+@runtime_checkable
+class ETagCache(Protocol):
+    """Remembers the last clean conditional-request state per target (D2/#96).
+
+    `GitHubIssuesBackend.check` reads, stores and drops records through this;
+    the CLI wires the file-backed cache so a restarted `wait` sends
+    `If-None-Match`. It is only a cache: a missing or unusable entry means a
+    full query.
+    """
+
+    def get(self, key: str) -> ETagRecord | None:
+        ...
+
+    def put(self, key: str, record: ETagRecord) -> None:
+        ...
+
+    def drop(self, key: str) -> None:
+        ...
+
+
+class MemoryETagCache:
+    """In-process ETagCache: today's behaviour when no state directory is wired."""
+
+    def __init__(self) -> None:
+        self._records: dict[str, ETagRecord] = {}
+
+    def get(self, key: str) -> ETagRecord | None:
+        return self._records.get(key)
+
+    def put(self, key: str, record: ETagRecord) -> None:
+        self._records[key] = record
+
+    def drop(self, key: str) -> None:
+        self._records.pop(key, None)
+
+
 @runtime_checkable
 class ChannelBackend(Protocol):
     """The backend is the same operations as the five interfaces."""

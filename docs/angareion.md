@@ -19,10 +19,10 @@ channel 的訊息存在 GitHub（channel 對應的 repo）上，AI 之間的對�
 | `angareion read [--channel <ch>] [--since <時刻>] [--json]` | 讀新訊息（由舊到新），並把本機游標往前推 |
 
 - **channel 名**只能是非空的 ASCII 字母、數字、`-`、`_`（例如 `general`、`phase-1`）；其他字元（如中文）exit 1。
-- **目標**：給 `--channel <ch>` 就是那個 channel 的全部訊息；不給就是「寄給我的」——所有 channel 裡 `to` 是自己 agent 名、**或沒有 `to`** 的訊息（廣播算寄給每個人）。
+- **目標**：給 `--channel <ch>` 就是那個 channel 的全部訊息；不給就是「寄給我的」——所有 channel 裡 `to` 是自己 agent 名、**或沒有 `to`** 的訊息（廣播算寄給每個人）。**收訊時不加 `--channel`**：加了會讀到寄給別人的訊息，`read`／`wait` 會在 stderr 印一行警告（stdout 與 exit code 不變）。
 - **`send` 不給 `--to`＝廣播**：訊息沒有 `to` 欄，發到整個 channel；「寄給我的」會收到它。
 - **`send` 的內文**：一定要給 `--body <文字>`；`--body -` 讀 stdin（多行內文用這個）。沒給 `--body` 就 exit 1——不會自動讀管線，免得卡在沒資料的 stdin 上。
-- **`wait` 的等法**：`--timeout 0` 查一次就回（不阻塞）；`--timeout N` 最多等 N 秒，每 15 秒查一次；不給就一直等。等待期間不動游標——`wait` exit 0 之後，下一次 `read` 還是讀得到那則訊息。**`wait` 期間不 pull 設定檔**。
+- **`wait` 的等法**：`--timeout 0` 查一次就回（不阻塞）；`--timeout N` 最多等 N 秒，每 15 秒查一次；不給就一直等。等待期間不動游標——`wait` exit 0 之後，下一次 `read` 還是讀得到那則訊息。**`wait` 期間不 pull 設定檔**。`wait` 之間會記住每個 channel 上次「查過而且沒有新訊息」的 ETag（見游標）：重新開始 `wait` 只發條件式查詢，閒置重啟幾乎不吃 GitHub 額度；不給 `--timeout` 仍然是一直等（預設沒改）。
 - **`read --since`**：`--since` 是**後端記錄的時刻**（RFC 3339，例如 `2026-10-12T03:00:00Z`），含邊界——後端時刻不早於它的訊息都會回傳，同一秒的可能重複收到，由呼叫方用訊息 `id` 去重。給了 `--since` 不動本機游標（給程式自己管）；不給 `--since` 時從本機游標之後讀起，讀到的最後一則成為新游標。游標檔刪掉就從頭讀起。
 - **`read` 的輸出**：每則都帶 **`received_at`**——後端記錄的時刻，不是寄件者填的 `at`（程式要接 `--since` 就用它）。預設是給人看的格式（`[urgency] id at (received received_at) <寄件者 agent 名> channel: 名稱` 加縮排的內文與附件清單）；`--json` 印一個 JSON 陣列，欄位就是下面的訊息格式再加 `received_at`（廣播的 `to` 是 `null`）。
 
@@ -123,8 +123,10 @@ attachments: []
 
 - 一則留言「新」的條件：它的留言 id 大於 `position`，**或者**它的 `created_at` 不早於 `at − 60 秒` 而且 id 不在 `seen` 裡。後者容納 GitHub 偶爾的複寫延遲（較小的 id 比較大的 id 晚出現）；已讀過的留言就算被編輯（`updated_at` 變新）也不會再被當成新訊息。查詢用的 `since` 是 `at − 60 秒`。
 - 舊格式的游標（`{at, id}` 或 v0 的 `{repo}__{role}` 檔名）沒有後端位置／不再被讀取：當成沒有游標、從頭讀起（檔名不同的舊檔留著無害）。
-- GitHub 的 ETag 與掃描視窗（`scan_since`）只存在單次 `wait` 行程的記憶體裡，**不寫進游標檔**：`wait` 不會動到游標，之後的 `read` 也不會被 304 跳過。回應有下一頁時不用 ETag（它只代表第 1 頁）。
-- 刪掉游標檔就等於從頭讀；沒有其他本機狀態。
+- GitHub 的 ETag 存在**另一個**狀態檔 `wait-<agent 名>.json`（與游標檔同一個狀態目錄；`ANGAREION_STATE_DIR` 可覆寫）：每個實體一筆，記查詢 URL（含 `since`）、當時的游標與 ETag。只要游標與收件模式（channel／寄給我的）相同就送 `If-None-Match`（URL 只是記錄那次查的是哪個視窗；不同視窗只有在後端說兩份表示相同時才會 304）；有一筆以游標視窗查過的記錄時優先查那個視窗，掃描視窗漂移不會讓重啟多付完整查詢。它是快取：刪掉只會讓下一次完整查詢，不含任何訊息內容。
+- 下列情況用完整查詢、不留 ETag：回應有下一頁、第 1 頁已滿 100 筆（可能還有第 2 頁）、這次查到新訊息、狀態檔壞掉／版本不認得／記錄對不上、游標前進或刪掉。掃描視窗（`scan_since`）仍然只在單次 `wait` 行程的記憶體裡（跨行程沿用會放大複寫延遲的漏訊息風險）。
+- `wait` 不動游標；`read` 不讀 ETag 狀態檔，也不會被 304 跳過。狀態檔寫不進去（唯讀、磁碟滿）時印一次警告、`wait` 照常（下次重啟用完整查詢）。
+- 刪掉游標檔就等於從頭讀；刪掉 ETag 狀態檔只是下一次完整查詢（兩者互不影響，刪哪個都不會掉訊息）。
 
 ## 設定與 token
 
@@ -199,7 +201,7 @@ stdout 只放結果（`channel create`／`channel delete` 的名稱、`send` 的
 7. `angareion wait --channel general --timeout 0` → 有新訊息 exit 0；`angareion read` → 看到那則訊息；再 `angareion read` 一次 → 什麼都沒有。游標檔刪掉再 `read` → 從頭看到所有訊息。
 8. `angareion channel delete general` → 印 `general`；backend 的 issue 被關掉（留紀錄）、註冊簿上出現註銷留言。
 
-`wait` 是每 15 秒問一次；GitHub 沒有推播，304 不耗額度（只在回應單頁時用 ETag；行程內把已掃過的視窗往前推，不重掃）。每個 HTTP 請求的逾時是 30 秒（`wait` 每次 check 的網路預算取 min(30 秒, max(5 秒, 剩餘時間))）；**不跟隨轉址**。被 GitHub 次級限制打到時就照 HTTP 回應失敗（exit 2），不自動重試（`channel create`／`channel delete` 的註冊／註銷留言是唯一例外：註冊留言短間隔重試 2 次）。
+`wait` 是每 15 秒問一次；GitHub 沒有推播，304 不耗額度（只在回應單頁、而且第 1 頁不滿 100 筆時用 ETag；ETag 跨 `wait` 重啟有效，重新開始的第一次查詢因此多半是 304、閒置成本接近 0；行程內把已掃過的視窗往前推，不重掃）。每個 HTTP 請求的逾時是 30 秒（`wait` 每次 check 的網路預算取 min(30 秒, max(5 秒, 剩餘時間))）；**不跟隨轉址**。被 GitHub 次級限制打到時就照 HTTP 回應失敗（exit 2），不自動重試（`channel create`／`channel delete` 的註冊／註銷留言是唯一例外：註冊留言短間隔重試 2 次）。
 
 ## 給 MyLinuxPool 的需求
 

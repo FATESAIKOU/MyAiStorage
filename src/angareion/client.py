@@ -62,9 +62,9 @@ class Angareion:
         """Whether the backend has anything new for the target right now.
 
         Uses the local cursors but never writes them (the spec: waiting must
-        not move the cursor). Any ETag used for conditional requests lives in
-        the backend instance, for this process only. `timeout` is an optional
-        budget for the backend's own network requests.
+        not move the cursor). The backend keeps the conditional-request state
+        (the CLI wires the file-backed cache, so it can outlive this process).
+        `timeout` is an optional budget for the backend's own network requests.
         """
         if target.channel is not None:
             entity = self.store.entity_for(target.channel)
