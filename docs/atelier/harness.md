@@ -49,7 +49,7 @@ harness ＝ 一個職務一個版本的 UTF-8 Markdown 檔，放 `atelier/<team>
 ## 怎麼載入（`v0` 與 `v1` 不同）
 
 - **`v0`**：由 `atelier install` 寫進**使用者層級**指示檔（claude：`~/.claude/rules/`；opencode：`~/.config/opencode/AGENTS.md` 的管理區塊），同一個使用者的**每個** agent 都會載入。
-- **`v1` 起：按 agent 交付**——開 agent 的一方（啟動那一個 agent 時）依它的角色把 harness 交給它，**只有 PM 角色拿 PM harness，隊員不拿**；交付只對那一個 process 生效，使用者層級的指示檔不再用作交付管道，也不會被動到。`v1` 的 PM harness **不得**用 `install` 交付（唯一例外是明寫 `--global`，且會印警告）——**這道守門（含 `--global` 旗標）PR 3 才實作**，在那之前 `install` 仍會照舊把 v1 寫進使用者層級，不要用它交付 v1。交付的介面在 `atelier render`（PR 2 才實作）。
+- **`v1` 起：按 agent 交付**——開 agent 的一方（啟動那一個 agent 時）依它的角色把 harness 交給它，**只有 PM 角色拿 PM harness，隊員不拿**；交付只對那一個 process 生效，使用者層級的指示檔不再用作交付管道，也不會被動到。`v1` 的 PM harness **不得**用 `install` 交付（唯一例外是明寫 `--global`，且會印警告）——**這道守門（含 `--global` 旗標）PR 3 才實作**，在那之前 `install` 仍會照舊把 v1 寫進使用者層級，不要用它交付 v1。交付的介面在 `atelier render`（已實作，指令見 `docs/atelier/tool.md`）：啟動方在起 agent 前跑一次，把 `--out` 那個檔交給那一個 process。
 
 ## 版本與 append-only
 

@@ -8,13 +8,15 @@
 atelier ls [--json]
 atelier show <id>[@<版本>] [--section know|do|judge|dont|capabilities] [--json]
 atelier install <id>[@<版本>] --agent <claude|opencode> [--agent …]
+atelier render <id>[@<版本>] [--append <檔>] --out <檔>
 ```
 
 - `<id>` 是 `atelier:<team>-<role>`（例 `atelier:worker-team-pm`）；`@v<N>` 不給＝同一職務檔案裡最大的 N。
 - `ls`：一個版本一行 `atelier:worker-team-pm@v0`；`--json` 給 `[{"id","team","role","version"}, …]`（照 team／role／版本排序）。
 - `show`：預設整份**原樣 byte-for-byte**（含 frontmatter；就是 `git show` 的位元組，不整理、不加行）；`--section` 只印該章節本文（不含 `##` 標題、去頭尾空行，行內原樣）；`--json` 給 `{"id","team","role","version","frontmatter","sections"}`，跟 `--section` 一起用時給 `{"id","team","role","version","section","content"}`。
 - `install`：`--agent` **可以給多次**；每個值各裝一次、與順序無關、同值只裝一次；**不給＝exit 1**。不指定版本＝裝最大 N。
-- 退出碼：**0** 成功；**1** 用法錯、id／版本／章節查無（查無會先 fetch 一次）；**2** 複本不存在、git 或檔案問題、install 寫不進去。訊息不含 harness 內文。
+- `render`：產生**單一個 agent** 的指示檔（`--out` 必給，**不給或空字串＝exit 1**）；不指定版本＝最大 N；`--append` 的檔是接在 harness 後面的環境說明。
+- 退出碼：**0** 成功；**1** 用法錯（含 `--out ''`）、id／版本／章節查無（查無會先 fetch 一次）、**`--append` 的檔不存在**（含 `--append ''`）；**2** 複本不存在、git 或檔案問題、install 寫不進去、render 讀不到 `--append`、寫不進去 `--out` 或 harness 格式壞。訊息不含 harness 內文。
 
 ## 複本與 fetch（與 angareion 共用）
 
@@ -22,7 +24,7 @@ atelier install <id>[@<版本>] --agent <claude|opencode> [--agent …]
 - **複本路徑**：`ATELIER_CONFIG_DIR`；沒設就看 angareion 的 `config.json`（`ANGAREION_CONFIG`，預設 `~/.config/angareion/config.json`）裡的 `config_dir`——兩邊共用同一份複本。
 - **同一把 flock**：`<複本>/.git/angareion-pull.lock`（angareion 用的同一個鎖檔，兩邊的 fetch 因此不並行）；git 逾時 **20 秒**。
 - fetch 節流：指令開始時距上次 fetch（`FETCH_HEAD` 的 mtime）超過 `config_pull_interval` 才拉——**沿用 angareion `config.json` 的 `config_pull_interval`**（沒設＝15 分鐘／900 秒；`0`＝不按週期拉，查無時的事件驅動 fetch 仍會做）；查無 id／版本時再補一次（距上次不到 30 秒就跳過）。**fetch 失敗只警告一次（stderr）並沿用目前的複本，退出碼不變。**
-- 唯一的本機寫入就是複本自身的 `git fetch`（以及它建立的共用鎖檔 `<複本>/.git/angareion-pull.lock`）和 install 的目標檔；工具不會寫 harness 樹、工作目錄或使用者其他檔案。
+- 唯一的本機寫入就是複本自身的 `git fetch`（以及它建立的共用鎖檔 `<複本>/.git/angareion-pull.lock`）、install 的目標檔，和 render 的 `--out`；工具不會寫 harness 樹、工作目錄或使用者其他檔案。
 
 ## install 的目標與管理區塊
 
@@ -40,6 +42,16 @@ atelier install <id>[@<版本>] --agent <claude|opencode> [--agent …]
 - **不碰**：`~/.claude/settings.json`（也絕不產生 `apiKeyHelper`）、專案自己的 `AGENTS.md`／`CLAUDE.md`、工作目錄的任何檔案。
 - 生效：claude 在下一個新 conversation（`--resume` 時是否重載要在驗收確認）；opencode 依官方文件在下一個模型請求前。期 1 由 MyLinuxPool 的開機掛點跑 `atelier install atelier:worker-team-pm --agent claude --agent opencode`（PR 3；sidecar 不改）。
 - PR 2 已放第一份職務檔（`atelier/worker-team/pm/v0.md`，識別 `atelier:worker-team-pm@v0`）：真實複本上的 `atelier ls` 會列出它。
+
+## render：交給單一個 agent 的指示檔（`v1` 起的交付方式）
+
+- **和 install 的差別**：install 寫**使用者層級**指示檔，同一個使用者的**每個** agent 都會拿到（`v0` 用它）；**render 產生一個檔，給「啟動單一個 agent 時交付」用**——啟動方（worker 的 sidecar、Mac 的開 pane 指令／`agora continue`）在起 agent **之前**跑 `atelier render <id> --append <環境說明> --out <那個 agent 自己的 state 目錄>/instructions.md`，再把那個檔交給該 process（各 agent 的『附加系統指示檔』能力，旗標見環境說明）。**render 自己不啟動 agent，也不寫使用者層級**；`render` 回 1／2 就是「不要開這個 agent」。
+- **內容**：harness **原樣 byte-for-byte**（和 `show` 印的同一份位元組，含 frontmatter）；給 `--append` 時是 **harness 後面接環境說明**，順序固定。**兩份都不整理**：不補空行、不去尾端換行、不動行尾空白、CRLF 照樣留著——要在自己前面留空白的環境說明自己在開頭留。
+- **只寫 `--out`**：`--out` 的父目錄是啟動方為那個 agent 準備的，**必須已經存在**；不存在＝exit 2，**不會**替你把目錄樹長出來。除 `--out` 以外不寫任何檔案：不碰 harness 樹、使用者層級指示檔、工作目錄。
+- **原子寫入**：同目錄暫存檔＋`os.replace`（中斷或寫不進去只會留下舊檔，不會半寫，也不留暫存檔；`--out` 是 symlink 時換掉的是 symlink 本身、不寫穿到目標）。
+- **不指定版本＝版本號最大**；讀取走 `show`／`install` 同一套讀取層（本機複本的 `git show origin/main:<路徑>`，不讀工作樹）。
+- **harness 格式先驗**：render 驗 harness 的格式（frontmatter 可解析、`type: Harness`，與 install 走同一條先驗）；格式壞（缺 frontmatter、無法解析、`type` 不是 `Harness`）＝exit 2、`--out` 不會被建立、訊息不含內文。
+- 退出碼同上面：**1** 用法錯（含 `--out ''`）、查無 id／版本、**`--append` 的檔不存在**（含 `--append ''`，且 `--out` **不會被建立**，也不會為此去 fetch）；**2** 複本或讀取失敗、harness 格式壞、`--append` 讀不到（那是檔案問題不是寫錯路徑）、寫不進去 `--out`。退出碼優先序：`--append` 先讀，所以讀不到的 append 在未知 id 之前就 exit 2／不存在 exit 1。成功時 stdout 一行：`rendered atelier:worker-team-pm@v1 -> <路徑>`。
 
 ## 已知限制
 

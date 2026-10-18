@@ -34,9 +34,9 @@ worker 的開機單位跑的是**不指定版本**的 `atelier install`（＝lat
 
 ## 3. MyAiStorage：`atelier render`（PR 2）
 
-- [ ] 3.1 `atelier render <id>[@v<N>] [--append <檔>] --out <檔>`：讀 harness（不指定版本＝latest）、可選附加環境說明、**原子寫入**；exit 0／1（用法、查無、**`--append` 檔不存在**）／2（複本、讀取、寫入失敗）；訊息不含內文
-- [ ] 3.2 測試：整份內容、`--append` 的順序與分隔、latest／`@v<n>`、查無 id → 1、`--append` 檔不存在 → 1 且 `--out` 沒建立、寫不進去 → 2、不碰使用者層級檔案與 harness 樹
-- [ ] 3.3 改壞驗證：拿掉版本解析、`--append` 內容漏掉、寫入不是原子、把內容整理過——各要紅
+- [x] 3.1 `atelier render <id>[@v<N>] [--append <檔>] --out <檔>`：讀 harness（不指定版本＝latest）、可選附加環境說明、**原子寫入**；exit 0／1（用法、查無、**`--append` 檔不存在**）／2（複本、讀取、寫入失敗）；訊息不含內文
+- [x] 3.2 測試：整份內容、`--append` 的順序與分隔、latest／`@v<n>`、查無 id → 1、`--append` 檔不存在 → 1 且 `--out` 沒建立、寫不進去 → 2、不碰使用者層級檔案與 harness 樹
+- [x] 3.3 改壞驗證：拿掉版本解析、`--append` 內容漏掉、寫入不是原子、把內容整理過——各要紅
 
 ## 3b. MyAiStorage：`install` 的守門與 `agora continue` 的交付（PR 3）
 

@@ -133,3 +133,20 @@ def frontmatter(text: str) -> dict:
     if not isinstance(data, dict):
         raise HarnessFormatError("frontmatter 不是一個 YAML 物件")
     return data
+
+
+def validate_harness(text: str, path: str) -> dict:
+    """Validate that text is a harness: parseable frontmatter and type: Harness.
+
+    Shared by `install` and `render` (exit 2): neither writes anything if the
+    harness is not a valid Harness document. Error messages must not carry
+    harness content.
+    """
+    try:
+        front = frontmatter(text)
+    except HarnessFormatError as e:
+        raise HarnessFormatError(f"不裝 {path}：{e}") from e
+    if front.get("type") != "Harness":
+        raise HarnessFormatError(f"不裝 {path}：frontmatter 的 type 不是 Harness")
+    return front
+
