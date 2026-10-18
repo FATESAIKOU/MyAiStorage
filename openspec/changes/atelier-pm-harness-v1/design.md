@@ -5,7 +5,7 @@
 - **來源（唯讀、不進 repo）**：PMO 整理的「PM 共通的工作方式」草稿（四個 repo PM 加上 PMO 自己的職責→做法的整理；本設計只用它的第 1、2 節＝任何 repo 的 PM 都適用的部分）＋**本人 2026-10-18 對該草稿附錄 B 的 17 條決定**（以下記為 B-1～B-17）。草稿的附錄 A（各專案特有的做法）**不進 harness**，留在各 repo 的 `AGENTS.md`（B-17）。
 - **現行 v0**：`atelier/worker-team/pm/v0.md`（`atelier:worker-team-pm@v0`）＝期 1 的**單人暫定** PM（自己實作、沒有非作者審查），已在 worker 上由開機單位 `start.d/20-atelier` 安裝、實機載入驗收通過（MyAiStorage#32）。
 - **v1＝有隊員的 PM**（B-17）：Mac 上的 repo PM 與 worker 上的 team PM **共用一份**；「單人暫定」結束——PM 不自己寫程式、一律非作者審查、派工與監看是主要動作。
-- **載入機制沿用 v0**：`atelier install <id> --agent claude|opencode` 寫進**使用者層級指示檔**（claude：`~/.claude/rules/atelier-<name>.md`，一個職務一個檔；opencode：`~/.config/opencode/AGENTS.md` 的管理區塊）。開機單位跑的是**不指定版本**的 `atelier install atelier:worker-team-pm`（＝latest）。
+- **載入改成按 agent**（D4）：v0 是使用者層級指示檔（`~/.claude/rules/`、`~/.config/opencode/AGENTS.md`）——同一台機器、同一個使用者的**每個** agent 都會載入；v1 起由**開 agent 的一方**在啟動那一個 agent 時交付（只有 PM 拿 PM harness、隊員不拿），使用者層級不再是 v1 的交付管道。
 - **約束**：MyAiStorage 是 public repo——harness 與本 change 都**不寫**帳號、額度、憑證名稱、機器位址、其他專案的名字、模型輪換表的內容、第二大腦的內容；模型只寫「照 PMO 的模型輪換表」（B-15）、通道與隊員管理只寫**能力**不寫工具名（B-16）。本 change 只做設計、不改 `src/`／`tests/`、不碰真機。
 
 ## Goals / Non-Goals
@@ -14,12 +14,12 @@
 
 - 定 v1 職務檔的內容，並**以 v0 為底逐章說明差異**（刪／改／新增＋理由）（D1）。
 - 把 17 條決定**逐條落點**到：harness（know／do／judge／dont）、環境說明（Mac／worker 各一份）、各 repo 的 `AGENTS.md`（D2）。
-- 回答識別與路徑（D3）、v0 的升級與兩份的關係（D4）、環境說明放哪（D5）、能力名（D6）——**未定的列選項＋建議，交 PM／本人**。
-- 說清楚格式檢查要補什麼（D7）、spec delta 為什麼要寫與寫哪些（D8）。
+- 回答識別與路徑（D3，已定）、**載入改成按 agent 交付**（D4：機制選項＋實測／推測＋成本＋建議）、環境說明（D5，已定＋交付方式）、能力名（D6，已定）。
+- 說清楚格式檢查要補什麼（D7）、spec delta 為什麼要寫與寫哪些（D8）、**要 MyLinuxPool 配合的介面變更**（誰改什麼、欄位／旗標、錯誤情形）。
 
 **Non-Goals**
 
-- 實作：v1 檔進 `atelier/` 樹、格式檢查、`docs/`、install 的重跑、開機單位、環境說明都只列步驟（tasks.md）。
+- 實作：v1 檔進 `atelier/` 樹、格式檢查、`docs/`、`atelier render`、sidecar／pane 的交付、開機單位的清理都只列步驟（tasks.md）。
 - 各 repo 的 `AGENTS.md` 內容與附錄 A 的搬遷（各 repo 自己的事）。
 - 模型輪換表與工單規則的修訂（PMO 的 repo）。
 - 期 3 的 Atelier 本體、三職務、多職務載入（每個 agent 一份設定目錄）。
@@ -31,10 +31,10 @@
 |---|---|---|
 | D1 | v1 職務檔的內容：以 v0 為底改成「有隊員的 PM」；逐章差異見下 | 定（草案 `harness/pm-v1.md`） |
 | D2 | 17 條決定（B-1～B-17）各落在哪一層 | 定 |
-| D3 | 識別與路徑：沿用 `worker-team`、新增 `atelier/worker-team/pm/v1.md` | **要 PM／本人決定**（選項 1／2／3） |
-| D4 | 載入與升級：同一個 name 升級＝重跑 install 取代 v0；v0 檔不動 | 定（依 `src/atelier/install.py` 實查） |
-| D5 | 環境說明：每個環境一份、放哪、誰維護 | **要 PM／本人決定**（選項 A／B／C） |
-| D6 | 能力名：`github`／`channel`／`agora`／`team`／`monitor` | **要 PM／本人決定**（選項 I／II／III） |
+| D3 | 識別與路徑：沿用 `worker-team`、新增 `atelier/worker-team/pm/v1.md` | **已定：選項 1**（PMO 2026-10-18） |
+| D4 | 載入：**按 agent 交付**（不是使用者層級）；機制選項、實測／推測、v0 的過渡 | 定（建議選項 A；見下） |
+| D5 | 環境說明：放環境那一側（已定）＋**也按 agent 交付** | **已定：選項 A**（PMO 2026-10-18）＋交付方式定 |
+| D6 | 能力名：`github`／`channel`／`agora`／`team`／`monitor` | **已定：選項 I**（PMO 2026-10-18） |
 | D7 | 格式檢查要補的項目 | 定（清單） |
 | D8 | spec delta 的範圍與理由 | 定 |
 
@@ -56,10 +56,10 @@
 | 「你的 agent 名（Angareion 位址，慣例 `<repo 名>-pm`）由環境設定提供」 | 「你的 agent 名怎麼取看環境說明」＋保留「不要自己改名或借用別人的名字」 | 改 | 命名慣例是環境的（B-16） |
 | 「你的對話記憶由 Agora 管理（Session）；寫回是自動的」 | 刪掉「自動寫回」；記憶只在 `do`「收尾」留「掃過憑證才匯入長期記憶」，能力在 `capabilities` 宣告 | 刪＋改 | 匯入的作法每個環境不同（Mac 上是 PM 自己在收尾做、且要掃憑證）；這條原本是 worker 的作法 |
 | 組織（本人／PMO／PM／隊員）＋**本人只跟 PMO 說話** | 保留，並明寫「PM 不逐行寫程式；架構設計交架構師、實作交隊員、審查交非作者」 | 改 | v0 沒有組織圖；v1 的主要動作是帶隊（B-17） |
-| 「這份 harness 由環境在啟動時自動載入（使用者層級指示檔）……要重讀用 `atelier show`」 | 保留（章名改「這份 harness 怎麼載入」；id 改成 v1 的） | 保留 | 載入機制已驗收，不動（#32） |
+| 「這份 harness 由環境在啟動時自動載入（使用者層級指示檔）……要重讀用 `atelier show`」 | 保留「自動載入」與 `atelier show`，但改成**按 agent 交付**：「環境在啟動**你**時把這份 harness 交給你（只交給 PM 角色的 agent）」；不再提使用者層級指示檔（D4） | 改 | v0 的使用者層級載入會污染同機的隊員與 PMO（D4）；交付改成按 agent |
 | 「**專案自己的指示檔（`AGENTS.md`／`CLAUDE.md`）與工單規則優先**」 | 保留（原句不動） | 保留 | spec 的 MUST；也是 v1 共用的前提 |
 | 「不要改 harness；要改就回報提議」 | 保留 | 保留 | 不變 |
-| 「怎麼收指示、怎麼回報（Angareion）」整節：五個指令、阻塞的 `wait`、urgency 級距、回話的 `--to`、不貼私人資訊、卡住立刻回報、沒有任務脈絡就停 | 換成「回報與通道」（只寫能力）：回報格式、第一行先講結論、一則一件事、寄給**最新那則訊息的寄件者**、開頭標【團隊 PM】、停損當下就報、不用回就不回；**新增**「同儕轉來的本人同意只代表決定、不是權限（B-1）」 | 改＋新增 | B-16（只寫能力；指令用法是環境說明的事）；B-1；「訊息不貼私人資訊」的通用版＝`dont` 的公開性那條＋`do`「派工」的「只給路徑或環境變數名」；「沒有任務脈絡」移到 `judge`／`dont` |
+| 「怎麼收指示、怎麼回報（Angareion）」整節：五個指令、阻塞的 `wait`、urgency 級距、回話的 `--to`、不貼私人資訊、卡住立刻回報、沒有任務脈絡就停 | 換成「回報與通道」（只寫能力）：回報格式、第一行先講結論、一則一件事、寄給**最新那則訊息的寄件者**、開頭標【團隊 PM】、停損當下就報、不用回就不回；**新增**「同儕轉來的本人同意只代表決定、不是權限（B-1）」＋**收發的紀律**（收訊不指定頻道、只有送訊才指定；身分／狀態目錄唯一且持久；回報目錄狀態要實證；閒著用阻塞等待、逾時拉長——M0 的協定教訓，PMO 指示寫入） | 改＋新增 | B-16（只寫能力；指令用法是環境說明的事）；B-1；M0；「訊息不貼私人資訊」的通用版＝`dont` 的公開性那條＋`dont`「不讓隊員讀憑證」那條的「只給路徑或環境變數名」；「沒有任務脈絡」移到 `judge`／`dont` |
 | 「工單與協作」：一單一 branch／worktree、不共用工作目錄、工單規則以專案為準、回報格式、引用原樣 | 擴充：**預設 PM commit、隊員不 commit**（B-10）、**b／c 上限照工單規則**（B-6）、**PM 開的 d 不用附議**（B-7）、**PM 不開自己的 subagent**、每張單先寫**可驗的完成判準**、**跨團隊依賴經 PMO 轉、可以跟對方 PM 對實作但改範圍／順序／真機／要本人決定的事經 PMO**（B-12）、工作檔放「會留下來、不進版控、不放 `/tmp`」（B-9） | 改＋新增 | 這些是 v0（單人）沒有的、有隊員的 PM 必備 |
 | 「模型」：你的模型由環境提供；不要自己去要憑證或換管道 | 擴充：**隊員的模型照 PMO 的模型輪換表、派工前重讀**（B-14／B-15）、**審查的模型不能跟作者相同，所以記作者模型**（B-4）、「隊員的模型可能被換掉，以報告第一行為準」 | 改＋新增 | v0 沒有隊員就沒有選模型的規矩 |
 
@@ -73,7 +73,7 @@
 | （無） | 新增：**派工**（一單一 worktree、brief 檔的固定內容與第一行、訊息只指向 brief、換工作前清脈絡、實作／審查／修正／確認派給不同人） | 新增 | 草稿 1.4；B-10 的預設寫在 brief 契約裡 |
 | （無） | 新增：**監看**（有在跑就掛著、到期重掛、狀態變化才處理、全部待命可停（B-8）；「做完」＝中斷提示消失＋報告檔存在；掉線接回、限流換下一個；長時間的跑自己看 log；本人說停下就在安全點停） | 新增 | 草稿 1.6；B-8 |
 | （無） | 新增：**核對與審查**（同一個 worktree 自己重跑、只寫自己跑過的數字；給審查者 diff／設計／清單、要求在副本裡改壞實作確認會轉紅；**高、中修完才開 PR**、低可後續、專案可更嚴（B-3）；**同模型不同 session 的退路**（B-4）） | 新增 | 草稿 1.7／1.8；B-3／B-4 |
-| v0 收尾：commit→push→開 PR（PR 說明寫範圍、測試、風險）→回報 | 擴充：**PR 說明**（為什麼／改了什麼／驗證原樣輸出／限制與沒驗到的／作者與審查模型／`Closes #N`）、「PR 好了」＝審過且 CI 綠、**合併的分工**（c／d 交 PMO 代 merge、b 等本人、私人筆記類留本人）、互相依存的 PR 先後與 rebase、收尾（worktree remove、歸檔、掃憑證才匯入、更新交接檔） | 改＋新增 | 草稿 1.9；v0 只有單人的收尾 |
+| v0 收尾：commit→push→開 PR（PR 說明寫範圍、測試、風險）→回報 | 擴充：**PR 說明**（為什麼／改了什麼／驗證原樣輸出／限制與沒驗到的／作者與審查模型／`Closes #N`）、「PR 好了」＝審過且 CI 綠、**合併的分工**（c／d 交 PMO 代 merge、b 等本人、私人筆記類留本人）、互相依存的 PR 先後與 rebase、收尾（worktree remove、歸檔、掃憑證才匯入、更新交接檔）＋**關隊員前的確認**（先中斷、確認沒有長時間的指令還活著；只關畫面不會停掉 session，共用服務重啟會叫醒——M0） | 改＋新增 | 草稿 1.9；v0 只有單人的收尾；M0 的實際事故 |
 
 **judge**
 
@@ -115,10 +115,9 @@
 
 | v0 | v1 | 動作 | 理由 |
 |---|---|---|---|
-| `github`／`angareion`／`agora`（都留空；父說明「環境以預設 profile 提供」） | 加 `team`（開／派／讀／關隊員）與 `monitor`（長時間監看）（B-8／B-16）；`angareion` 要不要保留、要不要換中性名見 D6；父說明改成「能力由誰、用什麼提供，看環境說明」 | 改＋新增 | B-16：harness 只宣告能力，工具留給環境說明 |
+| `github`／`angareion`／`agora`（都留空；父說明「環境以預設 profile 提供」） | **`angareion` 改名成中性的 `channel`**（D6 已定；不是只加新名字）；加 `team`（開／派／讀／關隊員）與 `monitor`（長時間監看）（B-8／B-16）；父說明改成「能力由誰、用什麼提供，看環境說明」 | 改＋新增 | B-16：harness 只宣告能力，工具留給環境說明；`angareion` 在 Mac 上不存在，共用一份就不能用這個名字 |
 
 ### D2 17 條決定各落在哪一層
-
 「harness」＝ v1 的章節；「環境說明」＝ Mac／worker 各一份的說明（D5）；「AGENTS.md」＝各 repo 自己的指示檔。
 
 | # | 決定（一句話） | 落點 | 理由 |
@@ -141,49 +140,88 @@
 | B-16 | 只寫能力，不寫工具名 | harness：know「你是誰、你在哪」「回報與通道」＋capabilities（D6）；**工具名**→環境說明 | 換工具只改說明 |
 | B-17 | Mac 與 worker 共用一份；差異放環境說明；專案特有留 `AGENTS.md` | 整份的結構（D1）＋D5；**附錄 A 的搬遷**＝跨 repo 收尾（各 repo 的 PM 帶） | 期二後兩邊都是有隊員的 PM；專案特有跟著 repo 走最好維護 |
 
-### D3 識別與路徑（**要 PM／本人決定**）
+**另外兩條不是 17 條決定，是協定與操作層的教訓**（PMO 2026-10-18 在 #94 留言指示寫入）：
 
-現行：`atelier:worker-team-pm@v0` ↔ `atelier/worker-team/pm/v0.md`（`team: worker-team`）。`atelier install` 的目標檔名與管理區塊標記**都只用 `<team>-<role>`（不含版本）**：claude 是 `~/.claude/rules/atelier-worker-team-pm.md`（獨立檔，整個檔就是 harness），opencode 是 `AGENTS.md` 裡 `<!-- atelier:worker-team-pm -->`…`<!-- /atelier:worker-team-pm -->` 的管理區塊（依 `src/atelier/install.py`）。
+- **收發的紀律**（收訊不指定頻道、只有送訊才指定；身分在每個工作單位唯一、狀態目錄持久；回報目錄狀態要實證；閒著用阻塞等待、逾時拉長）→ harness `know`「回報與通道」（能力層級、不寫工具名）＋環境說明（具體指令與秒數）；能用工具擋的列在「要 Angareion 配合」。**來源：M0 報告 §3／§5**（M0 的 4 個 B 回合有 2 個因協定錯誤中止）。
+- **關隊員前的確認**（先中斷、確認沒有長時間的指令還活著；只關畫面不會停掉 session；共用服務重啟會把中斷的長指令重新叫醒、繼續吃額度）→ harness `know`「工單與協作」一句＋`do`「收尾」＋環境說明（操作步驟）；D7 用關鍵句釘住。**來源：PM-HANDOFF 2026-10-18 下午的教訓**（M0 的 `wait` 迴圈因此多吃了額度；M0 報告 §3／§5 沒有這段）。
 
-- **選項 1（建議）：沿用 `worker-team`，新增 `atelier/worker-team/pm/v1.md`（`atelier:worker-team-pm@v1`）。**
-  - 升級＝**同一個 name**：重跑 `atelier install atelier:worker-team-pm`（不指定版本＝latest）就把 claude 的那個檔、opencode 的那個區塊換成 v1——**不會兩份同時載入**；開機單位（跑的是不帶版本的 install）**不用改**；`atelier show`／`--section`／格式檢查的 id↔檔名↔路徑規則都不動。
-  - 缺點：名字的字面還綁 worker（Mac 也在吃同一份）；期 3 若要正式命名，那時再處理（會需要 uninstall 或等價機制）。
-- **選項 2（建議不選）：換一個名符其實的 team 名**（例如 `shared`、`pm`、`company`……）＝`atelier:<新名>-pm@v1`。
-  - 代價：舊的 install 產物會**留著**（claude 多一個 rules 檔、opencode 多一個區塊）→ 兩個 harness 同時載入、規矩互相矛盾；要**先清掉舊的**（目前沒有 `uninstall`：得人工刪檔／刪區塊，或先做一個 `atelier uninstall`）；開機單位的 id 要改；舊版仍要可讀（append-only），樹上會有同一職務的另一個 team 名。
-  - 除非本人要一個中性的名字，否則不急——期 2 的價值不在改名。
-- **選項 3（不建議在這一版做）：不分團隊的 `atelier:pm@v1`。** 要動 id 與路徑的文法：`src/atelier/harness.py` 的 `_ID`／`_PATH` 都要求 `<team>-<role>`（實測 `atelier:pm@v1` → 用法錯、`atelier/pm/v1.md` 不被接受），連帶 spec「識別、版本與路徑」「讀取工具」「安裝」與 install 的檔名；影響面最大。
+### D3 識別與路徑（已定：選項 1）
 
-**建議：選項 1。** 理由是升級路徑乾淨（同名取代＝不會兩份）、開機單位不用改、既有的 id／路徑／install 規則都不用動。若選 2／3，tasks 要多一組「清理舊 install 產物（或先做 `atelier uninstall`）」與文法修改的步驟。本 change 的草稿（`harness/pm-v1.md`）就照選項 1 寫（`team: worker-team`、`id: atelier:worker-team-pm@v1`）；若定案不同，只要改 frontmatter 的 `id`／`team`（與定稿時的檔名），正文不動。
+現行：`atelier:worker-team-pm@v0` ↔ `atelier/worker-team/pm/v0.md`（`team: worker-team`）。`atelier install` 的目標檔名與管理區塊標記**都只用 `<team>-<role>`（不含版本）**：claude 是 `~/.claude/rules/atelier-worker-team-pm.md`（獨立檔，整個檔就是 harness），opencode 是 `AGENTS.md` 裡 `<!-- atelier:worker-team-pm -->`…`<!-- /atelier:worker-team-pm -->` 的管理區塊（依 `src/atelier/install.py`）。**v1 不再用 install 交付（D4）**，所以下面「升級」的說法是 `atelier show`／`render` 的世界。
 
-### D4 載入與升級（v0 怎麼辦）
+- **選項 1（已定）：沿用 `worker-team`，新增 `atelier/worker-team/pm/v1.md`（`atelier:worker-team-pm@v1`）。**
+  - 交付方拿的是 id（不指定版本＝latest）→ 下一次啟動 agent 就是 v1；**同一台機器不會有兩份 PM harness 被交付**（交付是 per-agent 的一份檔，不是檔案疊加）；`atelier show`／`--section`／`render`／格式檢查的 id↔檔名↔路徑規則都不動。
+  - 缺點：名字的字面還綁 worker（Mac 也在吃同一份）；期 3 若要正式命名，那時再處理。
+- **選項 2（未選）：換一個名符其實的 team 名**（例如 `shared`、`pm`、`company`……）＝`atelier:<新名>-pm@v1`。
+  - 代價：交付的 id 要改（sidecar／pane／開機單位的參數）；舊的使用者層級殘留還是要清（過渡本來就要清）；`atelier show @v0` 仍要可讀（append-only），樹上會有同一職務的另一個 team 名。
+- **選項 3（未選、這一版不做）：不分團隊的 `atelier:pm@v1`。** 要動 id 與路徑的文法：`src/atelier/harness.py` 的 `_ID`／`_PATH` 都要求 `<team>-<role>`（實測 `atelier:pm@v1` → 用法錯、`atelier/pm/v1.md` 不被接受），連帶 spec「識別、版本與路徑」「讀取工具」與 install 的檔名；影響面最大。
 
-**結論：v1 用同一個 name 時，v0 與 v1 不會同時被載入。** 實查與推論：
+**已定（PMO 2026-10-18）：選項 1。** 本 change 的草稿（`harness/pm-v1.md`）照這個寫（`team: worker-team`、`id: atelier:worker-team-pm@v1`）。
 
-- **claude**：install 寫的是**同一個獨立檔** `~/.claude/rules/atelier-worker-team-pm.md`（檔名取自 `<team>-<role>`，不含版本）→ 裝 v1 就是覆蓋它，**不會多一個檔**。
-- **opencode**：管理區塊的標記也是 `<team>-<role>` → 裝 v1 就是替換那個區塊，**不會多一個區塊**；檔案裡使用者的其他內容逐字不動（`replace_managed_block` 只動那一個區塊）。
-- **兩份同時載入只在換 name 時發生**（選項 2／3）：那時 claude 會多一個 rules 檔、opencode 會多一個區塊，兩份規矩一起進 context（衝突時模型可能任選一邊——和 v0 一樣，載入順序不保證）。→ 這是 D3 建議選項 1 的主要理由。
-- **v0 檔留著**（append-only：`MUST NOT` 修改或刪除既有版本檔）；`atelier show atelier:worker-team-pm@v0` 永遠讀得到，不指定版本讀 v1。**副作用**：`status: draft` 不能原地改成 `stable`、v0 也不能標 `deprecated`——「v0 已被 v1 取代」只能寫在文件與 v1 內文（**提議**：`docs/atelier/harness.md` 加一段）。
-- **生效的時機（沿 v0 的已知限制）**：
-  - **worker**：開機單位在每次開機跑 install（latest）——**改版後要重啟才重裝**；長期不重啟的 worker 要人工跑一次 `atelier install atelier:worker-team-pm`。install 之前它還是 v0。
-  - **Mac**：目前**沒有任何 harness 裝在 Mac 上**（實查：`~/.claude/rules/` 不存在、`~/.config/opencode/AGENTS.md` 不存在）——要共用一份，Mac 就要有人在共用之後跑一次 `atelier install atelier:worker-team-pm --agent claude`；之後每次改版也要重跑（Mac 沒有開機掛點）。
-  - 已經開著的 agent：claude 要**新的 conversation** 才重讀；opencode 是下一個請求前會吃到檔案的更新（但前提是 install 已經跑過）。
-- **退回（rollback）**：`atelier install atelier:worker-team-pm@v0`（同一個 name → 覆蓋回 v0）；harness 樹不用動。
+### D4 載入：按 agent 交付（不是使用者層級）
 
-### D5 環境說明（Mac 與 worker 各一份；**要 PM／本人決定**）
+**為什麼改（PMO 抓到的高）**：v0 把 harness 寫進**使用者層級**指示檔（`~/.claude/rules/`、`~/.config/opencode/AGENTS.md`）——同一台機器、同一個使用者的**每一個** agent 都會載入它：
 
-「環境說明」＝ 每個環境一份的短文件：你在哪、通道怎麼收發（用什麼）、能力由誰提供、工作檔放哪、真機怎麼動、怎麼請本人接手（Mac 的「在你的畫面上自己執行」／worker 的「經通道回報 PMO」）。B-16 就是把具體工具與作法集中在這裡。
+- **worker**：team PM 與 M2 的隊員（opencode／Claude Code）同一台、同一個使用者 → 隊員也會載入 PM harness、以為自己是 PM。
+- **Mac**：同一個使用者有 PMO、多個 PM、Claude Code 隊員、本人其他專案的 Claude Code、opencode 隊員 → 裝一次就全部被套上 PM 規矩。
 
-- **選項 A（建議）：放在環境那一側，由環境的主人維護；載入沿用同一批使用者層級指示檔。**
-  - worker：由 worker 的開機單位（或它的 `files/`）在跑 `atelier install` 之後，把環境說明放進同一批指示檔（claude：`~/.claude/rules/` 的獨立檔；opencode：`AGENTS.md` 裡**自己的一組標記**——注意**不要**用 `<!-- atelier:… -->`，那是 install 認的管理區塊，混用會讓 install 拒絕那個檔）。
-  - Mac：一份放 `~/.claude/rules/`（手寫或小腳本），由本人／PM 維護。
-  - 好處：改工具只改說明（B-16 的原意）；harness 樹與格式檢查不用為環境差異長東西。壞處：不進版控、沒有審查（但它是環境的設定，本來就跟機器綁）。
-- **選項 B：也做成 harness 檔（`atelier` 樹裡的第二份），用同一個 install 機制裝。**
-  - 好處：有版本、有審查、install 現成（不同 id 各一個檔／區塊）。借名**文法上可行、不用改文法**（審查實測 `atelier/mac/pm/v1.md` → `('mac','pm',1)`）；代價是它會被當成一份 **pm 職務 v1**：格式檢查會要求 `know` 有「專案指示優先」，D7 的關鍵句與黑名單也會套上去——而環境說明正是要寫工具名的地方（會踩自己的黑名單），「一份 harness＝一個職務」的語意也被撐開。要走這條得先解決這個矛盾（可行做法：環境說明**不套 harness 格式**——那就等於回到選項 A，只是借 install 運送）。
-- **選項 C：放 repo 的 `docs/`，只給人看**（不自動載入）。好處：最好寫、最好審；壞處：agent 看不到——B-16 的「工具寫在環境說明」就落空。
+**方向（v1 起）**：**按 agent 載入**——開 agent 的那一方（worker：隊員控制服務的 `open`／headless continue；Mac：開 pane 的指令／`agora continue`）在啟動**那一個** agent 時，依它的角色把 harness 交給它；**只有 PM 角色拿 PM harness，隊員不拿**。使用者層級指示檔不再是 v1 的交付管道。
 
-**建議：選項 A**（環境的差異留在環境，harness 與 change 保持公開、可審、與機器無關）；worker 那一份的實際落地是**跨 repo 的工作**（另一個 PR，由 PMO 排）。
+**機制選項**（本機版本：opencode **v2.0.32**、claude **2.1.302**；「實測」＝這次在隔離環境真的跑過，「推測」＝只驗了旗標／文件）：
 
-### D6 能力名（**要 PM／本人決定**）
+| 選項 | claude 這邊 | opencode 這邊 | 成本與風險 | 標記 |
+|---|---|---|---|---|
+| **A（建議）啟動參數／每 process 設定** | `--append-system-prompt-file <檔>` ＋ `--system-prompt-snapshot off` | `OPENCODE_CONFIG_CONTENT` 的 `instructions: [<絕對路徑>]`（或 `OPENCODE_CONFIG=<檔>`） | 要改啟動方（sidecar／pane／`agora continue`）；harness 檔要留在 agent 讀得到的地方；共用背景服務會破壞隔離（見下） | opencode 實測；claude 旗標存在（help／binary）、行為推測 |
+| **B 每個 agent 一份設定目錄** | `CLAUDE_CONFIG_DIR=<dir>` | `OPENCODE_CONFIG_DIR=<dir>`（`opencode.json` 直接放在那個目錄） | sidecar 多設環境變數；每份目錄要**自己帶齊**設定（實測：設了 `OPENCODE_CONFIG_DIR` 之後，使用者的 `$XDG_CONFIG_HOME/opencode/AGENTS.md` 不再載入）；憑證／設定的複製是風險 | opencode 實測；claude 推測 |
+| **C 第一則輸入／訊息** | `open` 的 `input` 帶全文 | 同 | 最省事，但只在新 session、會被歷史與壓縮沖淡；v0 已裁定不靠它（E11） | 推測（不建議當主機制） |
+| **D 自訂 agent 的 prompt** | `--agents <json-or-file>`（定義一個 `pm` agent） | 設定 `agents.<name>.prompt` ＋ `--agent <name>` | 看起來最貼角色；但 opencode 這條**實測不生效**，claude 只驗了 help | opencode 實測（不生效）；claude 推測 |
+
+**實測（隔離環境：`HOME` 與四個 XDG 指到 `/tmp`、專案自建、模型是本機 `tests/fakes/fake_upstream.py`、每次 `--standalone`、受管理的服務埠設成自由埠；沒有碰 49374 與真資料）**：
+
+- **opencode `instructions`（A）**：帶 `OPENCODE_CONFIG_CONTENT='{"instructions":["<絕對路徑>"]}'` 的那一次 `opencode run`，假 upstream 收到的請求裡**有** harness 的 marker；**同一個隔離使用者、不帶設定的下一次 `opencode run` 沒有**（前後各一次對照）→ **只有那個 process 吃得到**。
+  - `OPENCODE_CONFIG=<檔>` 同樣有效（實測）。
+  - **路徑要絕對**：相對路徑實測不生效（marker 沒出現）。
+  - 指向**不存在的檔**：`opencode run` 照常 exit 0、instruction 被忽略、**沒有錯誤訊息**（交付方要自己先驗檔案存在）。
+  - 對照：使用者層級 `$XDG_CONFIG_HOME/opencode/AGENTS.md` 的 marker 在**每一次** run 都出現——現況的問題在隔離環境裡重現。
+- **opencode `OPENCODE_CONFIG_DIR`（B）**：`opencode.json`（含 provider 與 `instructions`）直接放在那個目錄 → harness 有進模型（實測）；**但同一次 run 裡使用者層級的 `AGENTS.md` 沒有被載入**（實測）→ B 要自己帶齊所有設定。
+- **opencode `agents.<name>.prompt`（D）**：v2 的設定鍵是 `agents`（不是 v1 的 `agent`）。作者的一次實測裡 `agents` 定義的 agent 曾出現在 `debug agents`，但**另一次審查重現不到**（回 `[]`）；不管列不列得出來，`opencode run --agent <name>` 的請求裡**看不到**那段 prompt——**inline 文字與檔案路徑都試過，都不生效**（實測）。不要押這條。
+- **opencode 的共用背景服務會破壞隔離**：per-process 設定只對「自己起的 process／server」有效；若 agent 走同一台機器共用的 managed 服務，設定不是 per-agent 的。所以交付要在**per-agent 的 process** 上做（sidecar 的 headless 已經是每個 continue 一個 `opencode serve`）。
+- **claude 的旗標（只到「存在」這一級）**：`--system-prompt-snapshot <on|off>`、`--agents`、`--resume` 在 2.1.302 的 `--help` 裡；`--append-system-prompt` 也在 help。**`--append-system-prompt-file` 不是 help 的獨立選項**（只在描述裡以 `--append-system-prompt[-file]` 出現），但 binary strings 有 `--append-system-prompt-file <file>` → **旗標存在**。`CLAUDE_CONFIG_DIR` 在 binary 裡（官方文件也列）。**`--help` 的旗標探測不具區分力**（給一個不存在的旗標加 `--help` 也 exit 0）。
+- **claude 的行為（推測）**：help 明寫 `--system-prompt-snapshot`：**on（預設）**＝第一次請求時把系統提示（含 `--append-system-prompt`）記下來，之後的請求與 **resume** 都沿用那一份，「即使後來的啟動傳了不同的文字」，直到壓縮；**off**＝不記錄、每次請求重新渲染。→ 要讓「每次啟動拿到當時的 harness」就**必須帶 `off`**，否則 resume 的 session 會沿用舊的（甚至沒有 harness 的）提示。**旗標真的會把內容放進系統提示、`off` 在 resume 真的會重讀、缺檔錯誤的時機——都沒有行為證據**（推測）。
+- **⚠️ 揭露：作者誤跑過一次 `claude -p`**（`--system-prompt-snapshot off -p hi`，隔離 HOME），它印出像模型回覆的文字、疑似真的呼叫了模型；**那次輸出沒有被採用**，本節的行為結論只來自 help 文字、binary strings 與 `src/agora/agents/claude.py` 的 argv。之後沒有再跑任何 `claude -p`。
+- **啟動 argv（實查 `src/agora/agents/claude.py`）**：互動＝`claude --resume <id>`；headless＝`claude -p --input-format stream-json --output-format stream-json --verbose --resume <id> --settings '{"autoContinueAtUsageLimit": false}'`。交付要加在**這兩個** argv 上。opencode 的兩條（`opencode --session <id>`／`opencode serve --hostname … --port …`）同理。
+
+**建議：選項 A。** opencode 的 `instructions` 已**實測**是 per-process（同一使用者、另一個 process 吃不到），不動使用者的檔案、也不動 agent 的設定目錄；claude 用啟動旗標是同一條思路（旗標存在、語意由官方 help 寫明，**行為待實作時驗**）。成本集中在**啟動方**：sidecar 的 `open`／headless continue、Mac 的開 pane 指令與 `agora continue`（還需要 `Launch` 的 env 通道，見介面清單第 2 條）各帶一個參數；`atelier` 要提供「產生這份檔」的子指令（見下面「要 MyLinuxPool 配合的介面變更」）。
+
+**v0→v1 的過渡（**現在**的問題要明講）**：
+
+- **現在**：worker 上以使用者層級安裝的 **v0** 已經會被 **M2 的隊員**載入（同一台、同一個使用者的 `~/.claude/rules/atelier-worker-team-pm.md` 與 opencode `AGENTS.md` 的區塊）——隊員會看到「你是 PM」的規矩。
+- **緩解（依序）**：(1) 先做 per-agent 交付；(2) 開機單位**停止** `atelier install`（不再把 PM harness 放進使用者層級）；(3) **清掉**使用者層級的殘留（claude：刪 `~/.claude/rules/atelier-worker-team-pm.md`；opencode：刪 `AGENTS.md` 裡那個管理區塊——沒有 `uninstall`，人工做，經 PM 授權）；(4) v1 上線（PM 由啟動方交付）。在 (2)(3) 之前，隊員被 v0 污染的風險**還在**；暫時只能靠 brief 明寫角色與範圍、PM 盯隊員行為——這是暫時的，不是解法。
+- v0 檔**不動**（append-only）；`atelier show @v0` 永遠讀得到；只是不再被交付。`status: draft` 也不能原地改 `stable`／標 `deprecated`（提議：`docs/atelier/harness.md` 寫一段「v0 已被 v1 取代」）。
+- **生效時機**：per-agent 交付是**每次啟動 agent 都重新交**——沒有「重啟才重裝」的限制；已開著的 agent 要重開才拿到新版（claude 還要 `--system-prompt-snapshot off` 才會在 resume 時重讀）。
+- **Rollback**：啟動方不帶交付參數（回到「沒有 harness」），或把交付指回 `@v0`；harness 樹不動。
+- **`install` 還要不要留？** 建議**留著**（v0 的機制、以及「整台機器只有一個 agent」的全域用途），但 **v1 的 PM harness MUST NOT 用 install 交付——唯一例外是明寫 `--global` 的全域安裝**（單一 agent 的機器；安裝時印警告）；worker 的開機單位不再呼叫它。**而且光有規矩不夠（M0 的教訓：不靠自覺），工具要擋**——三個選項：
+  1. **（建議）`install` 對 `v>=1` 的 `pm` harness 預設拒絕**（exit 1，訊息說「改用 `render`／啟動方交付」）；真的要全域安裝時，必須明寫 `--global`，並在 stderr 印一行警告「同一個使用者的每個 agent 都會拿到這份 PM harness」。測試釘住兩件事：沒有 `--global` → exit 1、什麼都沒寫；有 `--global` → 安裝成功且警告有印。
+  2. 一律拒絕（沒有 `--global` 的後門）：最安全，但「只有一個 agent 的機器」就沒有合法路徑。
+  3. 只加警告、照舊安裝：最省事，但擋不住舊習慣／舊腳本，等於沒修。
+  → 選 1；主 spec 的「安裝」requirement 要跟著改（原本說它不動，現在有 `--global` 與拒絕的 MUST）。
+
+### D5 環境說明（已定：選項 A；交付也按 agent）
+
+「環境說明」＝ 每個環境一份的短文件：你在哪、通道怎麼收發（用什麼）、能力由誰提供、工作檔放哪、真機怎麼動、怎麼請本人接手（Mac：「在你的畫面上自己執行」／worker：「經通道回報 PMO」）。**已定（PMO 2026-10-18）：選項 A——放環境那一側，由環境的主人維護**（worker＝MyLinuxPool；Mac＝本人／PM）；不進 harness 樹、不套 harness 格式（它是環境的文件，不是職務）。
+
+**環境說明要寫的具體項目**（harness 只寫能力，實際指令與秒數在這裡）：
+
+1. 通道的指令用法：**收訊不加頻道、送訊才指定頻道**；等待的指令與**逾時秒數**（數分鐘級）；身分名怎麼取、狀態目錄在哪（要持久）。
+2. 關隊員的步驟：先中斷它正在跑的工作、確認沒有長時間的指令還活著、再收掉畫面／session；共用服務重啟會把 session 裡中斷的長指令重新叫醒（M0 實際發生過）。
+3. **開或接回多個 agent／session 時一個一個來、中間隔幾秒**；不要同時起多個。原因：共用的 opencode 服務一旦有多個 client 同時起它，搶到的那個開很大的 session 資料庫時會「database is locked」，之後所有 client 都被拒，要人工重啟服務（2026-10-18 實際發生）。
+4. 真機怎麼動、被擋時怎麼請本人接手、工作檔放哪、能力由誰提供。
+
+**交付：和 harness 一樣按 agent 交付。** 啟動 PM 時，由啟動方把「harness ＋ 該環境的說明」一起交給那一個 agent，不是寫在使用者層級。建議做法：`atelier render` 把 harness 與環境說明**合成一份**「這個 agent 的指示檔」（`render <id> --append <env-note> --out <path>`），啟動方再交給 claude 的 `--append-system-prompt-file`／opencode 的 `instructions`。這樣 harness 樹保持公開、可審、與機器無關；環境說明留在環境；交付路徑只有一條。
+
+（未選的紀錄保留：**B**＝環境說明也做成 harness 檔——借名文法可行（審查實測 `atelier/mac/pm/v1.md` → `('mac','pm',1)`），但它會被當成一份 pm 職務 v1，格式檢查的 MUST 句與 D7 的黑名單都會套上去，而環境說明正是要寫工具名的地方；**C**＝只放 `docs/`，agent 看不到。兩者都不選。）
+
+### D6 能力名（已定：選項 I）
 
 現行環境（worker profile）實際提供的能力名是 `angareion`／`github`／`agora`／`llmgateway`／`sidecar`／`atelier`。共用一份之後，v0 的三個名字只有兩個可以照用（`github`、`agora`）；通道與隊員管理在 Mac 與 worker 是不同的東西（工具名不能寫，B-16），所以需要**跨環境的中性名**。
 
@@ -191,7 +229,7 @@
 - **選項 II（保守）**：保留 `angareion` 當通道的名字，只加 `team`／`monitor`。好處：與 worker 的既有能力名一致（v0 也是這樣）；壞處：Mac 上沒有這個能力，名不符實。
 - **選項 III**：`github`、`agora` 之外全用中性名（含把隊員管理再拆細，例如 `dispatch`／`watch`）。好處：最貼 B-16；壞處：名字多、環境要對更多次。
 
-**建議：選項 I。** 五個能力的參數都留空（跟 v0 一樣）；未知名稱在格式檢查只警告、不擋，所以這一項不會卡住實作。本 change 的草稿（`harness/pm-v1.md`）先照這個建議寫；若定案是 II／III，只改 `capabilities` 的子節名。
+**已定（PMO 2026-10-18）：選項 I。** 五個能力的參數都留空（跟 v0 一樣）；未知名稱在格式檢查只警告、不擋。草稿照這個定案寫（`github`／`channel`／`agora`／`team`／`monitor`）。
 
 ### D7 可驗收的格式檢查（沿用 `tests/unit/test_atelier_harness.py`）
 
@@ -203,55 +241,132 @@
 | append-only（與 `origin/main` 的 merge-base 比對） | 已有 | 不動（v1 是「新增版本檔」這條唯一允許的變化） |
 | `know` 明寫「專案自己的指示檔與工單規則優先」 | 已有 | 不動（v1 必須有） |
 | 「審查一律非作者」 | 已有（只驗 v0） | **擴到所有 pm 版本**（v1 的 judge／dont 也要有） |
-| **關鍵句**：`不是權限`（B-1）、`照 PMO 的模型輪換表`（B-15） | 無 | 新增：把 `know`＋`judge`＋`dont` 的正文**合起來**（聯集）比對，每一句至少出現一次。**不採「每一段都要有」**——照字面會紅（`不是權限` 只在 know／judge，`照 PMO 的模型輪換表` 只在 know；實測見審查 A-1） |
+| **關鍵句**：`不是權限`（B-1）、`照 PMO 的模型輪換表`（B-15）、`不指定頻道`（收發紀律）、`長時間的指令`（關隊員） | 無 | 新增：把 `know`＋`do`＋`judge`＋`dont` 的正文**合起來**（聯集）比對，每一句至少出現一次。**不採「每一段都要有」**——照字面會紅（`不是權限` 只在 know／judge，`照 PMO 的模型輪換表` 只在 know；實測見審查 A-1）。後兩句是 M0 的協定教訓（PMO 指示寫入）；**工具擋得住的部分另外列在「要 Angareion 配合」**，這裡只釘住 harness 有沒有寫 |
 | **工具名／模型名黑名單**（B-16／B-15） | 無 | 新增：`know`／`do`／`judge`／`dont` 的**正文**不得出現具體工具名與模型名（清單放測試一處）；**只驗 `v>=1`**（v0 是既成事實，append-only 不能改）。比對前要先遮掉 `CLAUDE.md`／`AGENTS.md` 這兩個**專案指示檔的檔名**——`know` 的 MUST 句本來就要寫它們，字串比對會誤殺（`CLAUDE.md` 含 `claude`）。清單不要收**一般詞**（`session`／`輪換表`／`通道`／`CI`／`ssh`／`commit`／`repo`……規矩的句子本身要用）。frontmatter 的 `generated` 不算正文（spec 已明寫）（B-16／B-15） |
 | **機器位址與家目錄路徑**（公開 repo） | 無 | 新增：不得出現 IPv4 樣式、`/Users/`、`~/`（`v>=1`）。**通用系統路徑不算**——`/tmp` 是 `v1` 的 B-9 句要用的字（spec 已明寫） |
-| **共用一份**：同一職務的版本不該綁單一環境 | 無 | 新增（**只警告、不擋**——未知能力名照 spec 只警告）：v1 的 `team`／`role` 與 v0 相同（同一職務的下一版）；`capabilities` 不含只有單一環境才有的名字——清單跟 **D6 的定案**走，若最後選 II（保留 `angareion`）這一條就不成立 |
+| **共用一份**：同一職務的版本不該綁單一環境 | 無 | 新增（**只警告、不擋**——未知能力名照 spec 只警告）：v1 的 `team`／`role` 與 v0 相同（同一職務的下一版）；`capabilities` 不含只有單一環境才有的名字（D6 已定的 `channel`／`team`／`monitor` 是中性名，`github`／`agora` 兩邊都有） |
 | 改壞驗證 | 已有 12 項 | 每一條新檢查各一個注入（拿掉關鍵句、塞一個工具名、塞一個模型名、塞一個 IP、塞一個 `~/` 路徑）都要紅；**共用一份那條是警告**：注入後 assert 有 warning、不是 error |
 
 `KNOWN_CAPABILITIES` 這一類「清單」只影響警告還是錯誤：**未知能力名只警告、不擋**（spec），所以清單更新是為了讓已知的能力名有人顧，不是把它變成硬門檻。
 
 ### D8 要不要寫 spec delta（為什麼要）
 
-**要。** 三個理由：
+**要。** 六個理由：
 
 1. **格式有變**（B-15／B-16）：內容限制多了「只寫能力、不寫工具名」「模型只寫照輪換表」——這是 harness 檔的規格（「harness 檔的格式」）。→ **MODIFIED**。
-2. **能力需求的子節名規則要放寬**：原則是「子節名 SHOULD 用環境的 capability 名（v0：`github`／`angareion`／`agora`）」——共用一份的職務有一半的能力在兩個環境是不同的東西，要允許中性名（D6）。→ **MODIFIED**。
+2. **能力需求的子節名規則要放寬**：原則是「子節名 SHOULD 用環境的 capability 名（v0：`github`／`angareion`／`agora`）」——共用一份的職務有一半的能力在兩個環境是不同的東西，要允許中性名（D6 已定）。→ **MODIFIED**。
 3. **v1 職務的內容是新的要求**（有隊員的 PM；Mac 與 worker 共用；單人暫定結束）。→ **ADDED**；同時把「v0 職務」的最後一句（「此暫定由期 3 的三職務正式版取代」）改成「由 v1 起的 PM 職務取代，期 3 再由 Atelier 本體接手」→ **MODIFIED**（其餘 scenario 逐字保留）。
+4. **載入範圍變了**（D4）：v1 起**按 agent 交付**、不是使用者層級；PM harness MUST NOT 被非 PM 角色載入。這是可觀察的行為（同一台機器上隊員拿不到、使用者層級檔案不變），不是實作細節。→ **ADDED**「按 agent 交付 harness」。
+5. **多了一個寫檔的子指令**（`atelier render`）：主 spec 的「讀取工具」寫「對外 MUST 只有讀的操作：`atelier ls` 與 `atelier show`」——不加 delta，PR 2 就與主 spec 打架。→ **MODIFIED**「讀取工具」（把「只有讀」限定在 `ls`／`show`）＋ **ADDED**「產生 agent 指示檔（`render`）」。
+6. **`install` 要加守門**（M4）：v1 的 pm harness 預設拒絕、要 `--global` 才行——這是 install 的行為改變。→ **MODIFIED**「安裝（`atelier install`）」。
 
-**不用改**的（除非 D3 選了 2／3）：識別／版本／路徑（`atelier:<team>-<role>@v<N>` 的通則沒變）、harness 樹、讀取工具、安裝、「與 Agora Session 的關係」。**若最後選了「不分團隊的 id」**（D3 選項 3），再補一段「識別、版本與路徑」的 MODIFIED（把 `<team>-<role>` 放寬成「職務名」）；本設計不先寫，免得定了一個 PM／本人還沒定的東西。
+**不用改**的：識別／版本／路徑（`atelier:<team>-<role>@v<N>` 的通則沒變）、harness 樹、「與 Agora Session 的關係」。**讀取工具與安裝要改**（理由 5／6）；`v0` 職務的 scenario 逐字保留；`安裝` 的既有 scenario **pin `@v0` 後保留**（不 pin 的話 v1 之後會被新守門拒絕——M2），只加新的。
 
 **順帶在「能力需求與模型欄位」裡拿掉主 spec 的兩處環境細節**：一個是 `SHOULD` 句裡的**別 repo 名**（原文寫出環境所在的那個 repo），一個是「`github` 的單位是某個環境單位」（原文寫出單位路徑）。理由是公開 repo 不寫別的 repo 的名字（本 change 的規矩），而環境的單位名正是 B-16 要留給環境說明的細節。**這是刻意的刪除**，不是順手刪——所以列在這裡、delta 的開頭與「作者提議」也各記一筆。
 
+## 要 MyLinuxPool 配合的介面變更（本單不實作；PMO 排程，MyPMO#86 會用到）
+
+**共同前提**：交付＝「啟動那一個 agent 時，把『harness ＋ 該環境的說明』交給它」。harness 內容由本 repo 的 `atelier` 產生；**怎麼交給 process** 由啟動方做（opencode：`OPENCODE_CONFIG_CONTENT` 的 `instructions`／`OPENCODE_CONFIG` 檔；claude：`--append-system-prompt-file` ＋ `--system-prompt-snapshot off`）。啟動方**MUST 先確認檔案存在**（opencode 對不存在的 instruction 是靜默忽略，實測）。
+
+**本 repo（MyAiStorage）的 `atelier` 要加的東西**
+
+1. **新增 `atelier render <id>[@v<N>] [--append <檔>] --out <檔>`**：讀 harness（不指定版本＝latest）、可選附加一份環境說明、**原子寫入** `--out`（同 install 的寫法）。啟動方用它產生「這個 agent 的指示檔」。
+   - 退出碼沿用：0 成功／1 用法錯、查無 id（含版本）、**`--append` 的檔不存在**／2 讀取或寫入失敗；錯誤訊息不含內文。
+   - `render` 是**只寫 `--out` 的寫入操作**：不碰 harness 樹、不碰使用者層級檔案、不碰工作目錄。
+   - **spec delta 有它自己的 requirement**（「產生 agent 指示檔」）；主 spec 的「讀取工具」也一起改成「讀的操作只有 `ls`／`show`」——不然 PR 2 會與主 spec 的「對外 MUST 只有讀的操作」打架。
+1b. **`install` 的守門**（M4：規矩要有工具擋）：`install` 對 `v>=1` 的 `pm` harness **預設拒絕**（exit 1，訊息指向 `render`／啟動方交付）；要全域安裝必須明寫 `--global`，並在 stderr 印警告「同一個使用者的每個 agent 都會拿到這份 PM harness」。測試：沒有 `--global` → exit 1、什麼都沒寫；有 `--global` → 成功且警告有印。主 spec 的「安裝」requirement 要跟著改（加上這條 MUST）。
+2. **`agora continue`（`src/agora/agents/claude.py`／`opencode.py` 的 `start_native`）**：新增**每次呼叫**的選項 `--harness-file <檔>`（不要用 ambient 環境變數——PM 的 shell 帶著它去接續隊員的 session 時，隊員會拿到 PM harness）。
+   - **`Launch` 要加 `env` 通道**（現在只有 `argv`／`cwd`／`agent_session_id`／`before_count`）：`Launch.env: dict`（預設空），`src/agora/cli.py` spawn 時用 `{**os.environ, **launch.env, "PWD": …}`；**不要**在 `start_native` 改 `os.environ`（會污染父 process 與之後的 child）。
+   - claude：`--harness-file` → argv 加 `--append-system-prompt-file <檔>` ＋ `--system-prompt-snapshot off`。
+   - opencode：`--harness-file` → `Launch.env` 加 `OPENCODE_CONFIG_CONTENT={"instructions":[<絕對路徑>]}`（**實測與檔案設定合併**，只帶 `instructions`；**不要**把整份設定（含 provider 的 `apiKey`）重新序列化進環境變數）。
+   - **測試**：只有帶 `--harness-file` 的那個 process 吃得到；同一個使用者、不帶的下一個 session 吃不到；檔案設定（provider、檔案自己的 `instructions`）都還在。
+
+**worker（MyLinuxPool）**
+
+3. **sidecar 的 `open`（新 session）與 `continue --headless`**：欄位形狀（**作者提議，見「作者提議」15：選項 a／b／c，建議 c**）——
+   - 以 **`harness: {"id": "atelier:worker-team-pm", "env_note": "<worker 環境說明的路徑>"}` 為準**（`env_note` 可省略）；`role: "pm"|"arch"|"impl"|"test"` 只是**便利別名**，由 sidecar 的設定表 `role → {id, env_note}` 解析（`pm` 預設 `atelier:worker-team-pm`；表的內容在 worker 的設定，不在 harness）。**兩個都給且解析結果不同 → 拒絕**（不開 agent）。
+   - sidecar 在起 agent **之前**：跑 `atelier render <id> --append <env_note> --out <agent 自己的 state 目錄>/instructions.md`。
+   - 注入：opencode＝`OPENCODE_CONFIG_CONTENT` 只帶 `instructions`（**實測與檔案設定合併**：provider 與檔案自己的 instructions 都保留；不要重貼整份設定，會把憑證帶進環境變數）；claude＝driver 的 argv 加 `--append-system-prompt-file <path>` ＋ `--system-prompt-snapshot off`（headless 與互動兩條都要）。
+   - **錯誤情形**：`render` 回 1／2 → **不開 agent**，`open` 回 4xx／5xx 並附原因（不要開一個沒有規矩的 PM）；`harness`／`role` 都沒給 → 不注入（隊員不拿）；**`continue` 的 harness 來源＝`open` 時記在 sidecar 的 session metadata**，`continue` 沿用；metadata 沒有（舊 session）→ 不注入＋記一行警告（安靜地讓 PM 沒有規矩是不行的，要讓 PMO 看得見）。
+   - **生命週期**：`--out` 放 agent 自己的 state 目錄（不是 `/tmp`、不是 repo）；每次啟動重寫（版本跟著 main 走）。
+4. **開機單位（`start.d/20-atelier`）**：**移除 `atelier install`**（改成只驗證：`atelier show --section capabilities` 之類，或整個單位刪掉）；不再把 PM harness 寫進使用者層級。**它遇到 `atelier install` exit 1 時 MUST 忽略並記一行警告、不擋開機**（照 MyLinuxPool#130 的契約；訊息要說「這一輪沒有裝 harness」）。
+   - **順序（H1）**：開機單位跑的是**不指定版本**的 install（＝latest）——PR1 一合併，latest 就是 v1，下一次 worker 重啟就會把 v1 寫進使用者層級、所有 agent 都拿到。所以**停 install／pin 版本 MUST 在 PR1 之前或同一個部署批次**（見 Migration Plan）。
+4b. **sidecar 的 `close`／`status`**：`close` 要真的結束 agent 的 process 與它 session 裡還在跑的長指令（不只關 pane）；`status` 要能看出「還有指令在跑」（M0：只關畫面不會停 session，共用服務重啟會叫醒中斷的長指令）。
+5. **清理一次使用者層級殘留**（過渡，人工、經 PM 授權）：刪 `~/.claude/rules/atelier-worker-team-pm.md`；刪 opencode `AGENTS.md` 裡的 `<!-- atelier:worker-team-pm -->` 區塊（沒有 `uninstall`）。
+
+**Mac（本人／PM）**
+
+6. **開 pane 的指令**：PM 的啟動帶交付（claude：`--append-system-prompt-file` ＋ `--system-prompt-snapshot off`；opencode：`OPENCODE_CONFIG_CONTENT`＋`--standalone`）；PMO 與隊員的啟動**不帶**。
+7. **驗收**（PMO／本人）：同一台機器同時開 PM 與一個隊員，隊員的請求裡**沒有** harness；PM 的有；`~/.claude/rules/` 與 `~/.config/opencode/AGENTS.md` **逐字不變**。
+
+**要 Angareion 配合（工具能擋的部分）**（本 repo 的 tool；#96 已涵蓋前兩項）
+
+1. `read`／`wait` 帶 `--channel` 時**印警告**：這會包含寄給別人的訊息（#96）。
+2. `wait` 之間**保留 ETag**（同一個等待不重複抓完整清單；#96）。
+3. **新的狀態目錄／新的身分**第一次 `read` 時警告：沒有游標，會從所有頻道的第一則開始讀（M0 的 r2b 事故）。
+4. `wait` 的**預設逾時**拉到數分鐘級（例如 600 秒；文件寫明為什麼），逾時時印一行「可以再等一次」，不要讓 agent 以為要改成輪詢。
+5. （擋不住）「隊員回報目錄狀態要實證」——工具不知道 agent 有沒有看過；留在 brief 與 PM 的核對（harness 的 `judge`）。
+
 ## 作者提議、本人未指示
 
-1. **id／team 名**（D3 選項 1）、**能力名**（D6 選項 I）、**環境說明的放法**（D5 選項 A）——三個都附建議，**要 PM／本人決定**。
-2. **Mac 也用 `atelier install` 載入同一份 harness**（共用一份的前提）；跑的人與時機（本人手動／PM 提醒／登入腳本）未定。
-3. **格式檢查的黑名單範圍**：工具名與模型名（B-15／B-16）之外，我把它擴到「其他專案的名字、機器位址、使用者家目錄路徑（`/Users/`、`~/`）」（公開 repo）；`github`／`agora` 這種**本專案自己的元件名**與 `/tmp` 這種通用系統路徑不算，清單也不收一般詞（`session`／`輪換表`／`通道`／`CI`／`ssh`……）。範圍要 PM／審查者核一下。
-4. **v1 的 `models` 照 v0 留空**（欄位在、值之後由本人決定）（E4 已答覆的延伸）。
-5. **v0 不標 `deprecated`**（append-only 不能改檔）；「v0 已被 v1 取代」寫在 `docs/atelier/harness.md`。
-6. **環境說明不套 harness 格式**（它是環境的文件，不是職務）；若要走 D5 選項 B 借 install 運送，內容仍**不套 harness 格式**（否則會踩 D7 的黑名單與「專案指示優先」的 MUST 句）。
-7. **`harness/pm-v1.md` 先放 change 內**，定稿後才進 `atelier/worker-team/pm/v1.md`（同 v0 的做法）。
-8. **`docs/atelier/harness.md` 與 `src/atelier/harness.py` 的已知能力名**跟著 v1 更新（文件與警告清單）。
-9. **spec delta 的範圍**（D8）：動「格式」「能力需求與模型欄位」「v0 職務」與「新增 PM 職務 v1」四處；其中「能力需求與模型欄位」**刻意**順帶拿掉兩處環境細節（`github` 的單位、環境的 repo 名），理由見 D8。
+0. **三題已定（PMO 2026-10-18）**：D3＝選項 1、D5＝選項 A、D6＝選項 I；設計照定案寫，不再列為待決。
+1. **per-agent 交付的機制**（D4）：建議選項 A（opencode 的 `instructions` 實測 per-process；claude 的啟動旗標存在）。未選：B（每 agent 一份設定目錄——實測會失去使用者層級的 `AGENTS.md`）、C（第一則輸入——只在新 session）、D（自訂 agent 的 prompt——opencode 實測不生效）。**要 PM／PMO 確認**，因為會動 MyLinuxPool 的 sidecar。
+2. **Mac 的 PM 由誰交付**：開 pane 的指令（本人／PM 的腳本）＋`agora continue`；腳本誰維護未定。
+3. **`atelier render`（新子指令）與「harness＋環境說明合成一份」**：作者提議；`install` 留著（v0 遺留＋全域用途），但**要加守門**——`v1` 的 pm harness 預設拒絕、要 `--global`（M4 的三個選項，選 1）；`--global` 這個名字與警告文字要 PM 確認。
+4. **`Launch` 加 `env` 通道**（`agora continue` 用得到；opencode 的 per-process 設定只能走環境變數）＋每次呼叫的 `--harness-file`（不用 ambient 環境變數）——作者提議，會動 `src/agora/`。
+5. **claude 的交付要帶 `--system-prompt-snapshot off`**（help 明寫：on 會讓 resume 沿用舊的系統提示；行為推測）。
+6. **格式檢查的黑名單範圍**：工具名與模型名（B-15／B-16）之外，我把它擴到「其他專案的名字、機器位址、使用者家目錄路徑（`/Users/`、`~/`）」（公開 repo）；`github`／`agora` 這種**本專案自己的元件名**與 `/tmp` 這種通用系統路徑不算，清單也不收一般詞（`session`／`輪換表`／`通道`／`CI`／`ssh`……）。範圍要 PM／審查者核一下。
+7. **v1 的 `models` 照 v0 留空**（欄位在、值之後由本人決定）（E4 已答覆的延伸）。
+8. **v0 不標 `deprecated`**（append-only 不能改檔）；「v0 已被 v1 取代」寫在 `docs/atelier/harness.md`。
+9. **環境說明不套 harness 格式**（它是環境的文件，不是職務）。
+10. **`harness/pm-v1.md` 先放 change 內**，定稿後才放進 `atelier/worker-team/pm/v1.md`（同 v0 的做法）。
+11. **`docs/atelier/harness.md` 與 `src/atelier/harness.py` 的已知能力名**跟著 v1 更新（文件與警告清單）。
+12. **spec delta 的範圍**（D8）：動「格式」「能力需求與模型欄位」「v0 職務」「讀取工具」「安裝」＋新增「PM 職務 v1」「按 agent 交付 harness」「產生 agent 指示檔（`render`）」；其中「能力需求與模型欄位」**刻意**順帶拿掉兩處環境細節（`github` 的單位、環境的 repo 名），理由見 D8。
+13. **M0 的收發紀律與關隊員規矩**（PMO 2026-10-18 在 #94 留言指示寫入）：收發紀律的來源＝M0 報告 §3／§5；**關隊員那條的來源＝PM-HANDOFF 2026-10-18 下午的教訓**（M0 的 `wait` 迴圈因此多吃額度；M0 報告 §3／§5 沒有這段）。作者提議的是措辭、D7 的關鍵句，以及「哪些能用工具擋」的清單（`--channel` 警告與 ETag 由 #96 涵蓋）。
+14. **一次只起一個 agent／session**（PMO 2026-10-18 指示，寫進 D5 的環境說明；harness 不寫——屬環境、也不寫工具名）：共用的 opencode 服務被多個 client 同時起時，搶到的那個開大 session 資料庫會 `database is locked`，之後所有 client 被拒、要人工重啟（2026-10-18 實際發生）。
+15. **sidecar 的 `harness`／`role` 欄位形狀**（M5 的決策記錄）：三個選項——(a) **只收 `harness: {id, env_note}`**（最明確，呼叫方每次都要寫全 id）；(b) **只收 `role`**（最省，但 `pm` 的 id／env note 要由 sidecar 的設定表決定，換 harness 就要改設定）；(c) **兩者都收**（`harness` 優先、`role` 是別名；衝突拒絕）。**建議 (c)**：worker 的呼叫方大多只在乎「這是 PM」，`role` 讓它不用記 id；要換 harness／指定環境說明時再寫 `harness`。**要 PM／PMO 與 MyLinuxPool 確認**（跨 repo 的介面；`continue` 的角色來源＝`open` 時的 session metadata）。
 
 ## Risks / Trade-offs
 
 - [共用一份 → 內文容易愈寫愈抽象] → 每條規則都要有落點（D2 的表）：原則留 harness、具體做法放環境說明、專案特有放 `AGENTS.md`；寫不出落點的就不要進 harness。
-- [兩份 harness 同時載入] → 只在換 name 時發生（D4）；建議選項 1（同名升級＝取代），要換名就先做清理／uninstall。
-- [install 不會自己重跑] → worker 要重啟（或人工跑一次）；Mac 每次改版都要人工重跑。tasks 把這兩件事寫成驗收前的步驟。
+- [交付依賴啟動方] → 啟動方沒帶參數＝PM 沒有規矩（而且**不會報錯**）。介面清單把「`render` 失敗就不開 agent」寫成 MUST；驗收要看「PM 的請求裡有 harness、隊員的沒有」。
+- [使用者層級殘留沒清] → 過渡期隊員仍會被 v0 污染；遷移把「停 install」與「清殘留」列成獨立步驟，順序在 v1 上線前。
+- [opencode 的共用背景服務] → per-process 設定只對自己起的 process／server 有效；sidecar 的 headless 已是每個 continue 一個 serve；若有人把 agent 接到共用的 managed 服務，交付會失效。
+- [版本差異] → `instructions` 在 2.0.29 實測**不生效**、2.0.32 生效：worker 的 opencode 釘的版本比本機舊；worker 的 PM 目前是 claude，所以 opencode 這條主要用在本機（2.0.32 實測）；**若 worker 上要跑 opencode PM，要先升級 pin 並重驗**。claude 的旗標在 worker 釘的 2.1.296 上沒驗（本機 2.1.302 有）。
+- [claude 的 resume 語意] → `--system-prompt-snapshot` 預設 on 會沿用第一次記錄的提示（help 明寫）→ 交付要帶 `off`；不然換版／換 harness 後 resume 還吃舊的。
 - [「一定會載入」≠「一定會遵守」] → 沿 v0：行為驗收看（PM 起來後收指示、派工、開 PR、回報的格式）；不遵守就改寫法。
 - [append-only 的副作用] → v0 不能標 `deprecated`、`status` 不能原地改 `stable`；要改就新增版本檔（提議：先留 `draft`，本人驗收後再決定要不要發 v2）。
 - [公開 repo 的內容風險] → 黑名單檢查（D7）＋非作者審查；本 change 的來源（決定的原文、輪換表）**不進 repo**。
 - [黑名單可能誤殺] → 清單放測試一處、範圍寫清楚（只驗 `v>=1` 的正文，不含 `capabilities` 子節名與 frontmatter）；`CLAUDE.md`／`AGENTS.md` 這兩個檔名先遮掉再比對（`know` 的 MUST 句一定要寫它們，實測會撞到 `claude`）；清單不收一般詞（`session`／`輪換表`／`通道`／`CI`／`ssh`／`commit`／`repo`——規矩的句子本身要用）；誤殺就改清單，不要放寬原則。
-- [選項 2／3 的清理工作被低估] → tasks 把它列成獨立步驟（含「install 沒有 uninstall」的代價）。
+- [M0 的教訓：規矩靠自覺就會出事] → 4 個 B 回合有 2 個因協定錯誤中止 → harness 寫明（`know`／`do`）＋D7 的關鍵句檢查＋Angareion 的警告（能擋的先擋），不要只靠隊員自覺（M0 報告 §3／§5）。
+- [M0 的教訓：關隊員只關畫面] → 只關畫面不會停掉 session，共用服務重啟會把中斷的長指令叫醒、繼續吃額度 → `do`「收尾」寫明「先中斷、確認長指令不在」＋環境說明的操作步驟；sidecar 的 `close` 也要真的結束 process（介面清單）。
+- [交接的檔案沒人清] → `render --out` 放 agent 的 state 目錄、每次啟動重寫；agent 關掉後留著（下次覆蓋），不堆積。
+- [install 仍可手動把 v1 裝回使用者層級] → 光寫規矩不夠（M0 的教訓）→ `install` 對 `v>=1` 的 pm harness 預設拒絕、要 `--global`（D4 的三個選項，選 1）＋測試釘住；開機單位的 install 一併移除。
+- [交付用 ambient 環境變數會漏給隊員] → `agora continue` 用**每次呼叫的 `--harness-file`**（不是 shell 環境變數）；sidecar 的 `continue` 用 `open` 時記下的 session metadata。
 
 ## Migration Plan
 
-1. **定案**：D3／D5／D6 三題（PM／本人）→ 沒有定案不動工。
-2. **PR 1（MyAiStorage）**：`atelier/worker-team/pm/v1.md` 定稿＋格式檢查補強（D7）＋`docs/atelier/harness.md` 更新；`uv run pytest -q tests/unit/test_atelier_harness.py` 綠、`openspec validate atelier-pm-harness-v1 --strict`。
-3. **歸檔**：openspec archive（把 delta 併進主 spec）。
-4. **上線**：worker 重啟（或人工跑一次 `atelier install atelier:worker-team-pm`）；Mac 跑一次 `atelier install atelier:worker-team-pm --agent claude`。
-5. **環境說明**（D5 選項 A）：Mac 一份（本人／PM）、worker 一份（跨 repo，PMO 排）。
-6. **行為驗收**：兩個環境各開一個新 session，確認指示檔裡是 v1、沒有兩份同時載入、專案檔沒被動；PM 起來後的行為照 harness（收指示、派工、非作者審查、回報格式）。
-7. **Rollback**：`atelier install atelier:worker-team-pm@v0`（同名覆蓋回 v0）；harness 樹不動。
+**部署順序是這個 change 的一部分（H1）**：worker 的開機單位跑的是**不指定版本**的 `atelier install`（＝latest）。PR 1 一合併，latest 就是 v1；在那之後、開機單位移除 install 之前，任何一次 worker 重啟都會把 v1 的 PM harness 寫進使用者層級，**所有 agent（含隊員）都拿到**——正是這個 change 要修的事。所以「停 install／pin 版本」**MUST 在 PR 1 之前或同一個部署批次**。
+
+### 階段 A：部署前置（PR 1 之前或同一批次；跨 repo，PMO 排）
+
+1. **（建議）先把開機單位 pin 到 `@v0`**：`atelier install atelier:worker-team-pm@v0 --agent claude --agent opencode`。一行改動，重啟也只會裝 v0（**不會**把 v1 裝進使用者層級），PM 在過渡期還有（v0 的）規矩；隊員被 v0 污染的問題仍在（已知風險，用 brief＋PM 盯緩解，不是解法）。
+2. **（交付機制就緒後）移除 install**：開機單位只做驗證（或整個刪掉）；遇到 `install` exit 1 **忽略＋記一行警告、不擋開機**。
+3. **備案**：如果 1 做不到，PR 1 **不得合併**；PR 1 合併後到 1 完成之前 **worker 不得重啟**（不建議依賴人記——M0 的教訓：不靠自覺）。
+
+**為什麼建議 pin `@v0` 而不是直接移除 install**：直接移除後，PM 在交付機制就緒前完全沒有 harness（會用舊習慣做事），而交付是跨 repo、排程不在這個 change；pin 把「v1 外洩」這個新風險關掉，代價只是維持已知的 v0 污染到清理為止。
+**為什麼不用「同一個批次」**：批次要跨 repo 同時上，實務上很難保證原子性；pin 是一個 repo 的一行，先做最穩。
+
+### 階段 B：程式與規格（MyAiStorage）
+
+4. **PR 1**：`atelier/worker-team/pm/v1.md` 定稿＋格式檢查補強（D7）＋`docs/atelier/harness.md` 更新；`uv run pytest -q tests/unit/test_atelier_harness.py` 綠、`openspec validate atelier-pm-harness-v1 --strict`。**只動 `atelier/` 樹、`tests/`、`docs/`（不動 `src/`）。**
+5. **PR 2**：`atelier render`（介面清單 1）＋測試（查無 id → 1、`--append` 檔不存在 → 1、寫不進去 → 2、原子寫入、不碰 `--out` 以外的檔案）。
+6. **PR 3**：`install` 的守門（`v1` 的 pm harness 預設 exit 1、`--global` 才裝並警告）＋`Launch.env`＋`agora continue --harness-file`＋測試（**會動 `src/atelier/install.py`、`src/agora/cli.py`、`src/agora/agents/*.py`**）。
+
+### 階段 C：上線與收尾
+
+7. **交付機制（跨 repo）**：worker 的 sidecar `open`／headless continue 注入（介面清單 3）＋Mac 的開 pane 指令（6）；PMO 排。開機單位在這個階段轉成「只驗證」（階段 A 的 2）。
+8. **過渡清理**：使用者層級的 v0 殘留（介面清單 5）——**在交付可用之後**才做，否則 PM 也失去 harness。
+9. **歸檔**：openspec archive（把 delta 併進主 spec）。
+10. **行為驗收**：**在殘留清掉之後**，同一台機器同時開 PM 與隊員 → 只有 PM 的請求有 harness、`~/.claude/rules/` 與 `~/.config/opencode/AGENTS.md` 逐字不變；PM 起來後的行為照 harness（收指示、派工、非作者審查、回報格式）。
+11. **Rollback**：交付方不帶參數（回到「沒有 harness」）或指回 `@v0`；harness 樹不動。
