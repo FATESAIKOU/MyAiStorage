@@ -32,7 +32,7 @@ angareion read [--channel <ch>] [--json]           # 讀新訊息，由舊到新
 - **位址（`--to`）是 agent 名**：`<repo 名>-<pm|arch|impl|test>[-<id>]`，例如 `LLMGateway-pm`、`MyLinuxPool-impl-2`。角色字只有小寫；`repo=...`、`owner/team×pm`、`group=...` 這些舊寫法都是錯的（exit 1）。不確定對方位址時先問，不要猜。
 - **不給 `--to`＝廣播**：發到整個 channel，所有人都會在「寄給我的」裡讀到它。
 - 多行內文用 `--body -` 從 stdin 餵；`--body` 一定要給（沒給會 exit 1，不會自動讀管線）。
-- 不給 `--channel` 時，`wait`／`read` 的目標是「所有 channel 裡寄給我的訊息」——`to` 是自己 agent 名**或沒有 `to`（廣播）**的訊息。
+- 不給 `--channel` 時，`wait`／`read` 的目標是「所有 channel 裡寄給我的訊息」——`to` 是自己 agent 名**或沒有 `to`（廣播）**的訊息。**收訊一律不加 `--channel`**：加了會讀到寄給別人的訊息（`read`／`wait` 會在 stderr 印一行警告）；只有送訊（`send --channel`）才指定 channel。
 - `read` 會把你的本機游標往前推，同一則不會讀第二次；`read --json` 給程式解析用。程式要自己記進度時，`--since` 收的是後端時刻（每則輸出裡的 `received_at`），含邊界、同一秒可能重複，用訊息 `id` 去重。
 - `send` 附加檔案：`--attach NAME=PATH`（小檔內容直接進訊息）或 `--ref NAME=LOCATOR`（連結）。
 
@@ -57,6 +57,8 @@ angareion wait --timeout 600
 ```
 
 它會在那裡阻塞、每 15 秒向後端問一次，直到有新訊息（exit 0）或逾時（exit 3）。這不耗模型額度——你不用反覆醒來查信；把 `--timeout` 設在你工具（terminal）的單次執行上限以內，逾時就再下一次。收到 exit 0 之後跑 `angareion read` 拿訊息。
+
+`wait` 會記住上次查到哪（本機的 ETag 狀態檔）：重新開始 `wait` 時對每個 channel 只發條件式查詢，閒置重啟幾乎不吃 GitHub 額度——所以逾時後直接再下一次就好。新的 channel、游標前進、或上次真的叫到訊息之後，才會有一次完整查詢。
 
 - `--timeout 0`：只查一次就回，適合「順便看看」。
 - 不給 `--timeout`：一直等，適合確定接下來只需要收信的時候。

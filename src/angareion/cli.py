@@ -49,7 +49,7 @@ from angareion.registry import (
     register_comment,
     unregister_comment,
 )
-from angareion.state import CursorStore
+from angareion.state import CursorStore, FileETagCache
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -65,6 +65,18 @@ _PRIVACY_REMINDER = (
     "需要傳遞私人資訊時，請對方去參照 MyBrain（給路徑或案件 id），不要把內容貼進訊息。"
 )
 _PRIVACY_REMINDER_SHORT = "不要在訊息裡放私人資訊（改用 MyBrain 路徑或案件 id）。"
+
+# #96 (M0 §3.1): receiving with --channel spans every message in the channel,
+# including instructions addressed to someone else. The tool cannot stop that,
+# so read/wait say it once on stderr; stdout and exit codes stay unchanged.
+_CHANNEL_READ_WARNING = (
+    "--channel reads every message in the channel, including messages addressed to other agents; "
+    "omit --channel to get only messages addressed to you."
+)
+
+
+def _warn(message: str) -> None:
+    sys.stderr.write(f"Warning: {message}\n")
 
 
 class UsageError(Exception):
@@ -324,6 +336,11 @@ def cmd_wait(
 
     # The pull happens once, before the loop: wait must not fetch while polling.
     app.store.ensure_fresh()
+    if args.channel:
+        # REVIEW-96 L2: validate the channel before warning; a missing channel
+        # is an input error, not a reason to warn about reading other agents' mail.
+        app.store.entity_for(args.channel)
+        _warn(_CHANNEL_READ_WARNING)
     target = _target_from_args(args, config)
     found = app.wait(target, args.timeout, poll_interval=POLL_INTERVAL_SECONDS, sleeper=sleeper, clock=clock)
     _report_old_cursors(app)
@@ -345,6 +362,11 @@ def cmd_read(args: argparse.Namespace, config: Config, app: Angareion, token: st
                 f"2026-10-12T03:00:00Z, got '{args.since}'\n"
             )
             return EXIT_USAGE
+
+    if args.channel:
+        # REVIEW-96 L2: validate the channel before warning (see cmd_wait).
+        app.store.entity_for(args.channel)
+        _warn(_CHANNEL_READ_WARNING)
 
     target = _target_from_args(args, config)
     app.store.ensure_fresh()
@@ -400,12 +422,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Message text; '-' reads the text on stdin. Required.")
 
     p_wait = subparsers.add_parser("wait", help="Wait for new messages: exit 0, or 3 on timeout.")
-    p_wait.add_argument("--channel", help="Channel to watch; default: everything addressed to me.")
+    p_wait.add_argument(
+        "--channel",
+        help="Channel to watch; default: everything addressed to me. Includes messages addressed to other agents.",
+    )
     p_wait.add_argument("--timeout", type=float, metavar="SECONDS",
                         help="Wait at most this long; 0 checks once; omit to wait forever.")
 
     p_read = subparsers.add_parser("read", help="Read new messages, oldest first.")
-    p_read.add_argument("--channel", help="Channel to read; default: everything addressed to me.")
+    p_read.add_argument(
+        "--channel",
+        help="Channel to read; default: everything addressed to me. Includes messages addressed to other agents.",
+    )
     p_read.add_argument("--since", metavar="TIMESTAMP",
                         help="Read after this time; does not move the local cursor.")
     p_read.add_argument("--json", action="store_true", help="Print a JSON array.")
@@ -467,7 +495,10 @@ def main(
             config.config_dir, interval=config.config_pull_interval
         )
         active_backend = backend if backend is not None else GitHubIssuesBackend(
-            active_store, token=token, transport=transport
+            active_store,
+            token=token,
+            transport=transport,
+            etag_cache=FileETagCache(config.state_dir, config.identity),
         )
         active_registry = registry if registry is not None else RegistryClient(
             config.registry_repo, config.registry_issue, token=token, transport=transport
