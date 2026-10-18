@@ -30,7 +30,16 @@ from typing import Callable
 import pytest
 import yaml
 
-from atelier.harness import HarnessFormatError, ROLES, frontmatter, parse_path, split_sections
+from atelier.harness import (
+    HarnessFormatError,
+    InvalidId,
+    ROLES,
+    frontmatter,
+    parse_id,
+    parse_path,
+    path_for,
+    split_sections,
+)
 
 REPO = Path(__file__).resolve().parents[2]
 HARNESS_ROOT = REPO / "atelier"
@@ -43,7 +52,7 @@ KNOWN_CAPABILITIES = ("github", "angareion", "agora")
 
 TEAM_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 VERSION_RE = re.compile(r"^v(\d+)$")
-ID_RE = re.compile(r"^atelier:([a-z0-9][a-z0-9-]*)-(pm|arch|impl|test)@v(\d+)$")
+ID_RE = re.compile(r"^atelier:([a-z0-9][a-z0-9-]*)-(pm|arch|impl|test|rev)@v(\d+)$")
 #: The sentence the `know` section MUST state. Parenthesised asides are dropped
 #: before matching (the real file names AGENTS.md/CLAUDE.md inside them), and the
 #: words must appear in this order - a sentence like「指示檔沒有 harness 優先」
@@ -112,7 +121,7 @@ def findings_for(path: str, text: str) -> Findings:
     if not isinstance(team, str) or not TEAM_RE.match(team):
         found.errors.append(f"{path}: team 要符合 [a-z0-9][a-z0-9-]*（{team!r}）")
     if not isinstance(role, str) or role not in ROLES:
-        found.errors.append(f"{path}: role 要是 pm/arch/impl/test 之一（{role!r}）")
+        found.errors.append(f"{path}: role 要是 pm/arch/impl/test/rev 之一（{role!r}）")
     version_match = VERSION_RE.match(version) if isinstance(version, str) else None
     if version_match is None:
         found.errors.append(f"{path}: version 要是 v 加非負整數（{version!r}）")
@@ -301,6 +310,29 @@ def test_the_v0_harness_keeps_reviews_by_non_authors():
 def test_the_file_name_version_must_match_the_id():
     found = findings_for("atelier/worker-team/pm/v1.md", _v0_text())
     assert any("檔名" in error for error in found.errors)
+
+
+def test_the_reviewer_role_is_rev_of_its_own():
+    """#97: `rev` is a role, not a synonym for `arch`."""
+    assert ROLES == ("pm", "arch", "impl", "test", "rev")
+    assert "reviewer" not in ROLES  # the reviewer does not borrow arch
+
+    ident = parse_id("atelier:worker-team-rev@v0")
+    assert (ident.team, ident.role, ident.version) == ("worker-team", "rev", 0)
+    assert path_for("worker-team", "rev", 0) == "atelier/worker-team/rev/v0.md"
+    assert parse_path("atelier/worker-team/rev/v0.md") == ("worker-team", "rev", 0)
+
+    text = (_v0_text().replace("atelier:worker-team-pm", "atelier:worker-team-rev")
+            .replace("role: pm", "role: rev").replace("/pm/v0.md", "/rev/v0.md"))
+    found = findings_for("atelier/worker-team/rev/v0.md", text)
+    assert not found.errors, "\n".join(found.errors)
+
+
+def test_an_unknown_role_is_still_refused():
+    for text in ("atelier:worker-team-reviewer@v0", "atelier:worker-team-sec@v0"):
+        with pytest.raises(InvalidId):
+            parse_id(text)
+    assert parse_path("atelier/worker-team/reviewer/v0.md") is None
 
 
 def test_a_non_v0_role_file_need_not_declare_angareion():

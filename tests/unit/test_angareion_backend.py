@@ -27,8 +27,8 @@ from angareion.backend import (
 )
 from angareion.messages import Message
 
-ME = "MyLinuxPool-impl-2"
-PM = "LLMGateway-pm"
+ME = "mylinuxpool-impl-w1-1"
+PM = "mypmo-pm-m1"
 
 
 def _make_msg(
@@ -61,7 +61,7 @@ def test_target_requires_exactly_one_destination():
 
 def test_target_keys():
     assert Target(channel="general").key() == "channel:general"
-    assert Target(recipient=ME).key() == "to:MyLinuxPool-impl-2"
+    assert Target(recipient=ME).key() == "to:mylinuxpool-impl-w1-1"
 
 
 def test_backend_time_parsing_and_formatting():
@@ -139,12 +139,12 @@ def test_advance_cursor_keeps_position_and_recomputes_seen():
 
 def test_recipient_matches_counts_broadcasts():
     assert recipient_matches(_make_msg(to=ME), ME)
-    assert not recipient_matches(_make_msg(to="other-pm"), ME)
+    assert not recipient_matches(_make_msg(to="other-pm-m1"), ME)
     # A broadcast (no `to`) is for everyone.
     assert recipient_matches(_make_msg(to=None), ME)
     assert recipient_matches(_make_msg(to=None), "any-arch")
     # No recipient filter: every message is in scope.
-    assert recipient_matches(_make_msg(to="other-pm"), None)
+    assert recipient_matches(_make_msg(to="other-pm-m1"), None)
 
 
 def test_fake_backend_conforms_to_protocol():
@@ -293,7 +293,7 @@ def test_fake_read_to_me_filters_recipient_and_includes_broadcasts():
     other = entity(channel="other", backend="github-2", repo="owner/repo2", issue=7)
     backend.deliver(general, _make_msg(channel="general", msg_id="01AAAA", to=ME), comment_id=1, created_at="2026-10-10T10:00:00Z")
     backend.deliver(other, _make_msg(channel="other", msg_id="01BBBB", to=ME), comment_id=2, created_at="2026-10-10T10:01:00Z")
-    backend.deliver(general, _make_msg(channel="general", msg_id="01CCCC", to="other-pm"), comment_id=3, created_at="2026-10-10T10:02:00Z")
+    backend.deliver(general, _make_msg(channel="general", msg_id="01CCCC", to="other-pm-m1"), comment_id=3, created_at="2026-10-10T10:02:00Z")
     backend.deliver(general, _make_msg(channel="general", msg_id="01DDDD", to=None), comment_id=4, created_at="2026-10-10T10:03:00Z")
 
     res = backend.read(general, Cursor(), recipient=ME)

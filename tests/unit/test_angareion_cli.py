@@ -25,10 +25,11 @@ from angareion.config import Config, save_config
 from angareion.github import HttpResponse
 from angareion.messages import Message
 from angareion.registry import Action, parse_comment
+from angareion.state import CursorStore, FileETagCache, wait_state_file_path
 
 TOKEN = "ghp_FAKE_CLI_TOKEN_ABC123"
-IDENTITY = "MyLinuxPool-impl-2"
-PM = "LLMGateway-pm"
+IDENTITY = "mylinuxpool-impl-w1-1"
+PM = "mypmo-pm-m1"
 GENERAL = entity(channel="general", issue=10)
 OTHER = entity(channel="other", backend="github-main", repo="owner/repo", issue=7)
 CHANNEL_WARNING = (
@@ -263,7 +264,53 @@ def test_send_urgency_out_of_range_sends_nothing(cli_env, capsys):
 def test_send_group_address_rejected(cli_env, capsys):
     ret = run(cli_env, ["send", "--channel", "general", "--to", "group=全員", "--body", "hi"])
     assert ret == 1
-    assert "agent name" in capsys.readouterr().err
+    assert "AI name" in capsys.readouterr().err
+    assert cli_env["backend"].read(GENERAL, Cursor()).messages == []
+
+
+def test_send_at_address_rejected_as_a_phase_3_feature(cli_env, capsys):
+    """`@…` is a group address: it exits 1 and says when it arrives."""
+    ret = run(cli_env, ["send", "--channel", "general", "--to", "@all", "--body", "hi"])
+    assert ret == 1
+    err = capsys.readouterr().err
+    assert "group address" in err and "phase 3" in err
+    assert cli_env["backend"].read(GENERAL, Cursor()).messages == []
+
+
+@pytest.mark.parametrize("to", ["mypmo-pm", "MyPMO-pm-m1", "mylinuxpool-impl-pm"])
+def test_send_to_an_old_or_wrong_name_is_refused(cli_env, capsys, to):
+    """#97: the send path is strict - old names are read, never sent."""
+    ret = run(cli_env, ["send", "--channel", "general", "--to", to, "--body", "hi"])
+    assert ret == 1
+    assert capsys.readouterr().err
+    assert cli_env["backend"].read(GENERAL, Cursor()).messages == []
+
+
+@pytest.mark.parametrize("to", ["mypmo-pm-m1\n", "mypmo-pm-m1\t", "mypmo-pm-m1\r", "mypmo-pm-m1\n "])
+def test_send_to_a_name_with_a_trailing_newline_is_refused(cli_env, capsys, to):
+    """R3: `--to` forgives half-width spaces only; a pasted newline is refused."""
+    ret = run(cli_env, ["send", "--channel", "general", "--to", to, "--body", "hi"])
+    assert ret == 1
+    err = capsys.readouterr().err
+    assert "--to" in err and "step 1" in err
+    assert cli_env["backend"].read(GENERAL, Cursor()).messages == []
+
+
+def test_send_to_a_name_wrapped_in_spaces_is_still_sent(cli_env, capsys):
+    """The one thing `parse_address` forgives: a shell quoting slip."""
+    assert run(cli_env, ["send", "--channel", "general", "--to", " mypmo-pm-m1 ", "--body", "hi"]) == 0
+    capsys.readouterr()
+    assert cli_env["backend"].read(GENERAL, Cursor()).messages[0].to == "mypmo-pm-m1"
+
+
+@pytest.mark.parametrize("value", [" mypmo-pm-m1", "mypmo-pm-m1 ", "\tmypmo-pm-m1", "mypmo-pm-m1\n", "  "])
+def test_a_padded_environment_identity_is_a_configuration_error(cli_env, capsys, monkeypatch, value):
+    """R4: the environment value is taken as it stands - padding is a typo."""
+    monkeypatch.setenv("ANGAREION_IDENTITY", value)
+    ret = run(cli_env, ["read", "--json"])
+    assert ret == 2
+    err = capsys.readouterr().err
+    assert "ANGAREION_IDENTITY" in err
 
 
 def test_send_non_ascii_channel_rejected(cli_env, capsys):
@@ -302,12 +349,12 @@ def test_read_prints_messages_and_advances_the_cursor(cli_env, capsys):
     captured = capsys.readouterr()
     assert "01AAAA00000000000000000000" in captured.out
     assert "Task for worker" in captured.out
-    assert "<LLMGateway-pm>" in captured.out  # the sender is the agent name
+    assert "<mypmo-pm-m1>" in captured.out  # the sender is the agent name
     assert "channel: general" in captured.out
     assert "(received 2026-10-10T12:00:05Z)" in captured.out
     assert captured.err == CHANNEL_WARNING
 
-    cursor_file = cli_env["state_dir"] / "cursor-MyLinuxPool-impl-2.json"
+    cursor_file = cli_env["state_dir"] / "cursor-mylinuxpool-impl-w1-1.json"
     stored = json.loads(cursor_file.read_text(encoding="utf-8"))
     assert stored == {"channel:general": {"position": "1", "at": "2026-10-10T12:00:05Z", "seen": ["1"]}}
 
@@ -331,7 +378,7 @@ def test_read_json_output(cli_env, capsys):
 def test_read_to_me_includes_broadcasts_and_excludes_others(cli_env, capsys):
     _seed_message(cli_env, channel="general", entity_number=10, msg_id="01AAAA00000000000000000000", to=IDENTITY)
     _seed_message(cli_env, channel="other", entity_number=7, msg_id="01BBBB00000000000000000000", to=None)
-    _seed_message(cli_env, channel="general", entity_number=10, msg_id="01CCCC00000000000000000000", to="someone-pm")
+    _seed_message(cli_env, channel="general", entity_number=10, msg_id="01CCCC00000000000000000000", to="someone-pm-m1")
 
     assert run(cli_env, ["read", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
@@ -371,7 +418,7 @@ def test_read_with_since_does_not_touch_the_cursor(cli_env, capsys):
     assert run(cli_env, ["read", "--channel", "general", "--since", "2026-10-10T12:00:01Z", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert [m["id"] for m in data] == ["01BBBB00000000000000000000"]
-    assert not (cli_env["state_dir"] / "cursor-MyLinuxPool-impl-2.json").exists()
+    assert not (cli_env["state_dir"] / "cursor-mylinuxpool-impl-w1-1.json").exists()
 
 
 def test_read_since_must_be_rfc3339(cli_env, capsys):
@@ -390,7 +437,7 @@ def test_read_unknown_channel_exits_1(cli_env, capsys):
 def test_read_keeps_the_cursor_when_stdout_breaks(cli_env, capsys, monkeypatch):
     """`angareion read | head`: stdout closing early must not consume the messages (L2)."""
     _seed_message(cli_env)
-    cursor_file = cli_env["state_dir"] / "cursor-MyLinuxPool-impl-2.json"
+    cursor_file = cli_env["state_dir"] / "cursor-mylinuxpool-impl-w1-1.json"
     real_stdout = sys.stdout
 
     class BrokenStdout:
@@ -448,7 +495,7 @@ def test_wait_blocks_until_a_message_arrives(cli_env, capsys):
     )
     assert ret == 0
     assert clock.sleeps == [15.0]
-    assert not (cli_env["state_dir"] / "cursor-MyLinuxPool-impl-2.json").exists()
+    assert not (cli_env["state_dir"] / "cursor-mylinuxpool-impl-w1-1.json").exists()
 
 
 def test_wait_negative_timeout_is_usage_error(cli_env, capsys):
@@ -1079,7 +1126,7 @@ def test_wait_without_a_timeout_waits_until_a_message_arrives(cli_env, capsys):
     )
     assert ret == 0
     assert clock.sleeps == [15.0, 15.0]
-    assert not (cli_env["state_dir"] / "cursor-MyLinuxPool-impl-2.json").exists()
+    assert not (cli_env["state_dir"] / "cursor-mylinuxpool-impl-w1-1.json").exists()
 
 
 def test_wait_unknown_channel_exits_1(cli_env, capsys):
@@ -1089,7 +1136,7 @@ def test_wait_unknown_channel_exits_1(cli_env, capsys):
 
 def test_deleting_the_cursor_file_reads_from_the_start(cli_env, capsys):
     _seed_message(cli_env, comment_id=1, created_at="2026-10-10T12:00:05Z")
-    cursor_file = cli_env["state_dir"] / "cursor-MyLinuxPool-impl-2.json"
+    cursor_file = cli_env["state_dir"] / "cursor-mylinuxpool-impl-w1-1.json"
 
     assert run(cli_env, ["read", "--channel", "general"]) == 0
     capsys.readouterr()
@@ -1278,7 +1325,7 @@ def test_read_delivers_a_replication_lagging_smaller_id(cli_env, capsys):
 def test_old_format_cursor_is_reported_and_read_from_the_start(cli_env, capsys):
     """A pre-review {at, id} cursor cannot be translated: no cursor, plus a notice."""
     _seed_message(cli_env, comment_id=7, created_at="2026-10-10T12:00:00Z")
-    cursor_file = cli_env["state_dir"] / "cursor-MyLinuxPool-impl-2.json"
+    cursor_file = cli_env["state_dir"] / "cursor-mylinuxpool-impl-w1-1.json"
     cursor_file.parent.mkdir(parents=True, exist_ok=True)
     cursor_file.write_text(
         json.dumps({"channel:general": {"at": "2026-10-10T12:00:00+00:00", "id": "01AAAA00000000000000000000"}}),
@@ -1296,3 +1343,165 @@ def test_old_format_cursor_is_reported_and_read_from_the_start(cli_env, capsys):
     captured2 = capsys.readouterr()
     assert json.loads(captured2.out) == []
     assert captured2.err == CHANNEL_WARNING
+
+
+# -- #97: the AI-name grammar, reading wide, and ANGAREION_IDENTITY -------------
+
+
+def _old_comment(issue_number: int, comment_id: int, body: str) -> dict:
+    """A GitHub comment holding a message the old version wrote."""
+    stamp = f"2026-10-10T12:00:{comment_id:02d}Z"
+    return {
+        "id": comment_id,
+        "body": body,
+        "created_at": stamp,
+        "updated_at": stamp,
+        "html_url": f"https://github.com/owner/repo/issues/{issue_number}#issuecomment-{comment_id}",
+        "_issue_number": issue_number,
+    }
+
+
+def _old_message_text(sender: str, recipient: str | None, content: str, msg_id: str) -> str:
+    to_line = f"to: {recipient}\n" if recipient else ""
+    return (
+        "---\n"
+        "angareion: 1\n"
+        f"id: {msg_id}\n"
+        "at: '2026-10-10T12:00:00+00:00'\n"
+        f"from: {sender}\n"
+        f"{to_line}"
+        "channel: general\n"
+        "urgency: 5\n"
+        "attachments: []\n"
+        "---\n"
+        f"{content}\n"
+    )
+
+
+def test_reading_is_wide_messages_the_old_version_sent_still_arrive(cli_env, capsys):
+    """讀寬: uppercase addresses, `mypmo-pm` and `mylinuxpool-pm` are all read."""
+    transport = MiniGitHub()
+    transport.comments.extend(
+        [
+            _old_comment(10, 1, _old_message_text("MyLinuxPool-impl-2", None, "broadcast from the old version", "01OLD0000000000000000000000AA")),
+            _old_comment(10, 2, _old_message_text("MyLinuxPool-impl-2", "mypmo-pm", "to a pm with no team", "01OLD0000000000000000000000BB")),
+            _old_comment(10, 3, _old_message_text("mylinuxpool-pm", None, "from an old pm", "01OLD0000000000000000000000CC")),
+        ]
+    )
+
+    assert main(["read", "--channel", "general", "--json"], store=cli_env["store"], transport=transport) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert [m["from"] for m in data] == ["MyLinuxPool-impl-2", "MyLinuxPool-impl-2", "mylinuxpool-pm"]
+    assert [m["to"] for m in data] == [None, "mypmo-pm", None]
+
+
+def test_a_new_name_the_old_grammar_never_had_is_read_too(cli_env, capsys):
+    """讀寬: `secretary`/`rev` messages used to be skipped in silence."""
+    transport = MiniGitHub()
+    transport.comments.append(
+        _old_comment(10, 1, _old_message_text("myaientry-secretary-p1", "mylinuxpool-rev-w1-1", "review, please", "01NEW0000000000000000000000AA"))
+    )
+
+    assert main(["read", "--channel", "general", "--json"], store=cli_env["store"], transport=transport) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert [m["from"] for m in data] == ["myaientry-secretary-p1"]
+
+
+def test_to_me_is_still_an_exact_match_or_a_broadcast(cli_env, capsys):
+    """The read rule is unchanged: the whole string, or no `to` at all."""
+    _seed_message(cli_env, msg_id="01AAAA00000000000000000000", to=IDENTITY, comment_id=1, created_at="2026-10-10T12:00:01Z")
+    _seed_message(cli_env, msg_id="01BBBB00000000000000000000", to=None, comment_id=2, created_at="2026-10-10T12:00:02Z")
+    _seed_message(cli_env, msg_id="01CCCC00000000000000000000", to="someone-pm-m1", comment_id=3, created_at="2026-10-10T12:00:03Z")
+
+    assert run(cli_env, ["read", "--json"]) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == [
+        "01AAAA00000000000000000000",
+        "01BBBB00000000000000000000",
+    ]
+
+
+OTHER_SEAT = "mylinuxpool-rev-w1-1"
+
+
+def test_the_environment_identity_is_the_from_of_a_sent_message(cli_env, capsys, monkeypatch):
+    monkeypatch.setenv("ANGAREION_IDENTITY", OTHER_SEAT)
+    assert run(cli_env, ["send", "--channel", "general", "--to", PM, "--body", "from another seat"]) == 0
+    capsys.readouterr()
+    message = cli_env["backend"].read(GENERAL, Cursor()).messages[0]
+    assert message.from_ == OTHER_SEAT
+    assert message.to == PM
+
+
+def test_the_environment_identity_decides_who_is_me_and_which_cursor_file(cli_env, capsys, monkeypatch):
+    monkeypatch.setenv("ANGAREION_IDENTITY", OTHER_SEAT)
+    _seed_message(cli_env, msg_id="01AAAA00000000000000000000", to=OTHER_SEAT, comment_id=1, created_at="2026-10-10T12:00:01Z")
+    _seed_message(cli_env, msg_id="01BBBB00000000000000000000", to=IDENTITY, comment_id=2, created_at="2026-10-10T12:00:02Z")
+
+    assert run(cli_env, ["read", "--json"]) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01AAAA00000000000000000000"]
+
+    state_dir = cli_env["state_dir"]
+    assert (state_dir / f"cursor-{OTHER_SEAT}.json").is_file()
+    assert not (state_dir / f"cursor-{IDENTITY}.json").exists()
+
+
+def test_another_seat_never_advances_this_seats_cursor(cli_env, capsys, monkeypatch):
+    """The acceptance case: config.json's cursor is not moved by another identity."""
+    _seed_message(cli_env, msg_id="01AAAA00000000000000000000", to=IDENTITY, comment_id=1, created_at="2026-10-10T12:00:01Z")
+
+    monkeypatch.setenv("ANGAREION_IDENTITY", OTHER_SEAT)
+    assert run(cli_env, ["read", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+    assert not (cli_env["state_dir"] / f"cursor-{IDENTITY}.json").exists()
+
+    # Back as the configured seat: its own message is still unread.
+    monkeypatch.delenv("ANGAREION_IDENTITY")
+    assert run(cli_env, ["read", "--json"]) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01AAAA00000000000000000000"]
+
+
+def test_the_environment_identity_names_the_cursor_and_the_wait_state_file(cli_env, capsys, monkeypatch):
+    """#96's ETag state file follows the seat too, not just the cursor."""
+    seen: dict[str, str] = {}
+
+    class RecordingCursors(CursorStore):
+        def __init__(self, state_dir=None, identity=None, path=None):
+            seen["cursor"] = str(identity)
+            super().__init__(state_dir=state_dir, identity=identity, path=path)
+
+    class RecordingETags(FileETagCache):
+        def __init__(self, state_dir=None, identity=None, path=None, warn=None):
+            seen["wait"] = str(identity)
+            super().__init__(state_dir=state_dir, identity=identity, path=path, warn=warn)
+
+    monkeypatch.setattr("angareion.cli.CursorStore", RecordingCursors)
+    monkeypatch.setattr("angareion.cli.FileETagCache", RecordingETags)
+    monkeypatch.setenv("ANGAREION_IDENTITY", OTHER_SEAT)
+
+    assert main(["wait", "--channel", "general", "--timeout", "0"], store=cli_env["store"], transport=MiniGitHub()) == 3
+    capsys.readouterr()
+    assert seen == {"cursor": OTHER_SEAT, "wait": OTHER_SEAT}
+    assert wait_state_file_path(cli_env["state_dir"], OTHER_SEAT).name == f"wait-{OTHER_SEAT}.json"
+
+
+@pytest.mark.parametrize("bad", ["mypmo-pm", "MyPMO-pm-m1", "not-an-agent", "@all", ""])
+def test_a_bad_environment_identity_is_a_configuration_error(cli_env, capsys, monkeypatch, bad):
+    monkeypatch.setenv("ANGAREION_IDENTITY", bad)
+    ret = run(cli_env, ["read", "--json"])
+    assert ret == 2
+    err = capsys.readouterr().err
+    assert "ANGAREION_IDENTITY" in err
+    assert capsys.readouterr().out == ""
+
+
+def test_a_config_identity_that_is_not_a_new_grammar_name_exits_2(cli_env, capsys, monkeypatch):
+    monkeypatch.delenv("ANGAREION_IDENTITY", raising=False)
+    config_file = cli_env["config"].config_file
+    data = json.loads(config_file.read_text(encoding="utf-8"))
+    data["identity"] = "mylinuxpool-impl-2"  # the old grammar
+    config_file.write_text(json.dumps(data), encoding="utf-8")
+
+    ret = run(cli_env, ["read", "--json"])
+    assert ret == 2
+    err = capsys.readouterr().err
+    assert "identity" in err and "team" in err

@@ -14,17 +14,17 @@ channel 的訊息存在 GitHub（channel 對應的 repo）上，AI 之間的對�
 |---|---|
 | `angareion channel create <名稱> [--backend <名>]` | 建 channel；stdout 只印 channel 名 |
 | `angareion channel delete <名稱>` | 刪 channel（後端實體關掉、留紀錄）；stdout 只印 channel 名 |
-| `angareion send --channel <ch> [--to <agent 名>] [--urgency N] [--attach NAME=PATH]… [--ref NAME=LOCATOR]… (--body <文字> \| --body -)` | 送一則訊息；stdout 只印訊息 id |
+| `angareion send --channel <ch> [--to <AI 名>] [--urgency N] [--attach NAME=PATH]… [--ref NAME=LOCATOR]… (--body <文字> \| --body -)` | 送一則訊息；stdout 只印訊息 id |
 | `angareion wait [--channel <ch>] [--timeout <秒>]` | 確認有沒有新訊息；有新訊息 exit 0，逾時沒有 exit 3；stdout 不印東西 |
 | `angareion read [--channel <ch>] [--since <時刻>] [--json]` | 讀新訊息（由舊到新），並把本機游標往前推 |
 
 - **channel 名**只能是非空的 ASCII 字母、數字、`-`、`_`（例如 `general`、`phase-1`）；其他字元（如中文）exit 1。
-- **目標**：給 `--channel <ch>` 就是那個 channel 的全部訊息；不給就是「寄給我的」——所有 channel 裡 `to` 是自己 agent 名、**或沒有 `to`** 的訊息（廣播算寄給每個人）。**收訊時不加 `--channel`**：加了會讀到寄給別人的訊息，`read`／`wait` 會在 stderr 印一行警告（stdout 與 exit code 不變）。
+- **目標**：給 `--channel <ch>` 就是那個 channel 的全部訊息；不給就是「寄給我的」——所有 channel 裡 `to` 是自己 AI 名、**或沒有 `to`** 的訊息（廣播算寄給每個人）。**收訊時不加 `--channel`**：加了會讀到寄給別人的訊息，`read`／`wait` 會在 stderr 印一行警告（stdout 與 exit code 不變）。
 - **`send` 不給 `--to`＝廣播**：訊息沒有 `to` 欄，發到整個 channel；「寄給我的」會收到它。
 - **`send` 的內文**：一定要給 `--body <文字>`；`--body -` 讀 stdin（多行內文用這個）。沒給 `--body` 就 exit 1——不會自動讀管線，免得卡在沒資料的 stdin 上。
 - **`wait` 的等法**：`--timeout 0` 查一次就回（不阻塞）；`--timeout N` 最多等 N 秒，每 15 秒查一次；不給就一直等。等待期間不動游標——`wait` exit 0 之後，下一次 `read` 還是讀得到那則訊息。**`wait` 期間不 pull 設定檔**。`wait` 之間會記住每個 channel 上次「查過而且沒有新訊息」的 ETag（見游標）：重新開始 `wait` 只發條件式查詢，閒置重啟幾乎不吃 GitHub 額度；不給 `--timeout` 仍然是一直等（預設沒改）。
 - **`read --since`**：`--since` 是**後端記錄的時刻**（RFC 3339，例如 `2026-10-12T03:00:00Z`），含邊界——後端時刻不早於它的訊息都會回傳，同一秒的可能重複收到，由呼叫方用訊息 `id` 去重。給了 `--since` 不動本機游標（給程式自己管）；不給 `--since` 時從本機游標之後讀起，讀到的最後一則成為新游標。游標檔刪掉就從頭讀起。
-- **`read` 的輸出**：每則都帶 **`received_at`**——後端記錄的時刻，不是寄件者填的 `at`（程式要接 `--since` 就用它）。預設是給人看的格式（`[urgency] id at (received received_at) <寄件者 agent 名> channel: 名稱` 加縮排的內文與附件清單）；`--json` 印一個 JSON 陣列，欄位就是下面的訊息格式再加 `received_at`（廣播的 `to` 是 `null`）。
+- **`read` 的輸出**：每則都帶 **`received_at`**——後端記錄的時刻，不是寄件者填的 `at`（程式要接 `--since` 就用它）。預設是給人看的格式（`[urgency] id at (received received_at) <寄件者 AI 名> channel: 名稱` 加縮排的內文與附件清單）；`--json` 印一個 JSON 陣列，欄位就是下面的訊息格式再加 `received_at`（廣播的 `to` 是 `null`）。
 
 ### 建 channel 的三步與時間差
 
@@ -55,13 +55,14 @@ delete **不等待**落地（送出註銷即 exit 0）；重跑安全（再關�
 
 ## 位址寫法
 
-`from`、`to` 與自己的身分都是 **agent 名**：`<repo 名>-<pm|arch|impl|test>[-<id>]`。
+`from`、`to` 與自己的身分都是 **AI 名**：`<專案>-<角色>-<team>[-<序號>]`，指的是「哪個席位」。文法與測試向量在這個 repo 的 `src/ainame/`（`tests/vectors/ainame-vectors.json`）；其他 repo 抄一份釘住來源 commit 的副本。
 
-- 例：`LLMGateway-pm`、`MyLinuxPool-impl-2`、`my-repo-impl-2`（repo 名可以含 `-`）。
-- 角色字只有小寫的 `pm`、`arch`、`impl`、`test`（`MyRepo-PM` 不合法）。
-- 同角色只有一個人時省略 id（`LLMGateway-pm`）；多人時用 `-1`、`-2` 區分。
-- 驗證與解析是兩步：文法用 `^[A-Za-z0-9][A-Za-z0-9._-]*-(pm|arch|impl|test)(-[A-Za-z0-9_.]+)?$` 檢查整體形狀；「取出 repo／角色／id」是由右而左的解析——最右邊的 `-<角色>` 是角色，右邊最多一段 `-<id>` 是 id，左邊剩下的都是 repo 名。
-- **沒有群組位址**：`group=全員`、`repo=owner/team,role=pm`、`owner/team×pm`、`owner/team:pm`、JSON 位址都是格式錯誤（exit 1）。
+- 例：`mypmo-pm-m1`、`mylinuxpool-impl-w1-1`、`myaientry-secretary-p1`、`mkcommunication-impl-w12-99`。
+- 五個步驟（`parse` 會說是哪一步不通過）：**（1）** 整串 1～32 字，只有 `a-z`、`0-9`、`-`，開頭是字母，不以 `-` 結尾、沒有 `--`——**整串比對**，字尾換行或空白都不合法；**（2）** 用 `-` 切段，從**右往左**找第一個角色段（不能是第一段）；**（3）** 角色左邊全是專案（可以含 `-`，也可以含角色字，例 `pm-tools-impl-m1-1`）；**（4）** 角色右邊第一段是 `team`，**一定要有**，1～8 個小寫英數、字母開頭；**（5）** `pm`／`secretary` 後面不能再有段，`arch`／`impl`／`test`／`rev` 後面一定要有一個序號，1～99、不補 0。
+- **送出用嚴的，讀信用寬的**：`send --to`、`from` 與設定檔的 `identity` 只接受上面的文法（不符 → exit 1／exit 2，並說明缺什麼）；**讀信時新舊文法都合法的訊息都收**——舊文法是 `<repo 名>-(pm|arch|impl|test)[-<id>]`（大小寫有別），例如舊版寄的 `MyLinuxPool-impl-2`、`mypmo-pm`、`mylinuxpool-pm` 讀得到；新文法才有、舊文法沒有的名字（例如 `myaientry-secretary-p1`、`mylinuxpool-rev-w1-1`）也不再被默默略過。「寄給我的」仍是**整串相等**或廣播。
+- **群組位址（`@…`）期 3 才有**：現在送 `--to @all` → exit 1 說明期 3 才有（`ainame.is_group` 只判斷字首 `@`）。
+- **`--to` 只原諒半形空格**：名字前後的半形空格（`" "`）會被去掉，因為那通常是引號打錯；**換行、tab、CR 不會被去掉**——`--to "mypmo-pm-m1\n"` 會 exit 1 並說明是字元不合文法。貼進來的髒資料要自己清掉，不要讓工具猜。設定檔的 `identity` 完全不修剪空白。
+- 沒有特例：team 代號取成角色字（例 `mylinuxpool-impl-pm`）會被讀成角色、名稱不合法——這是預期。
 - 不做嚴格的身分認證：任何人可以用任何名字送。
 
 ## 訊息格式
@@ -73,8 +74,8 @@ delete **不等待**落地（送出註銷即 exit 0）；重跑安全（再關�
 angareion: 1
 id: 01JX2M3N4P5Q6R7S8T9V0W1XYZ
 at: '2026-10-12T03:00:00.123456+00:00'
-from: MyLinuxPool-impl-2
-to: LLMGateway-pm
+from: mylinuxpool-impl-w1-1
+to: mypmo-pm-m1
 channel: general
 urgency: 5
 attachments: []
@@ -89,7 +90,7 @@ attachments: []
 angareion: 1
 id: 01JX2M3N4P5Q6R7S8T9V0W1XYZ
 at: '2026-10-12T03:00:00.123456+00:00'
-from: MyLinuxPool-impl-2
+from: mylinuxpool-impl-w1-1
 channel: general
 urgency: 5
 attachments: []
@@ -107,13 +108,13 @@ attachments: []
 
 「讀到哪」是讀的人自己的本機狀態，不在信道上留任何記號。**新舊只看後端**：訊息的 `at` 與 `id`（ULID）是寄件者的機器產生的，時鐘、時區、到達順序都不保證和後端一致，所以不用它們判斷；游標的三個欄位都是後端的東西：
 
-- 檔案：`~/.local/state/angareion/cursor-<agent 名>.json`（`ANGAREION_STATE_DIR` 可覆寫）。
+- 檔案：`~/.local/state/angareion/cursor-<AI 名>.json`（`ANGAREION_STATE_DIR` 可覆寫）。
 - 每個目標一筆；channel 目標用 `channel:<名>`，「寄給我的」**每個 channel 各一筆**（每個 backend 實體有自己的到達位置）：
 
   ```json
   {
     "channel:general": {"position": "104", "at": "2026-10-12T03:00:05Z", "seen": ["102", "103", "104"]},
-    "to:MyLinuxPool-impl-2:general": {"position": "98", "at": "2026-10-12T03:05:00Z", "seen": ["98"]}
+    "to:mylinuxpool-impl-w1-1:general": {"position": "98", "at": "2026-10-12T03:05:00Z", "seen": ["98"]}
   }
   ```
 
@@ -123,7 +124,7 @@ attachments: []
 
 - 一則留言「新」的條件：它的留言 id 大於 `position`，**或者**它的 `created_at` 不早於 `at − 60 秒` 而且 id 不在 `seen` 裡。後者容納 GitHub 偶爾的複寫延遲（較小的 id 比較大的 id 晚出現）；已讀過的留言就算被編輯（`updated_at` 變新）也不會再被當成新訊息。查詢用的 `since` 是 `at − 60 秒`。
 - 舊格式的游標（`{at, id}` 或 v0 的 `{repo}__{role}` 檔名）沒有後端位置／不再被讀取：當成沒有游標、從頭讀起（檔名不同的舊檔留著無害）。
-- GitHub 的 ETag 存在**另一個**狀態檔 `wait-<agent 名>.json`（與游標檔同一個狀態目錄；`ANGAREION_STATE_DIR` 可覆寫）：每個實體一筆，記查詢 URL（含 `since`）、當時的游標與 ETag。只要游標與收件模式（channel／寄給我的）相同就送 `If-None-Match`（URL 只是記錄那次查的是哪個視窗；不同視窗只有在後端說兩份表示相同時才會 304）；有一筆以游標視窗查過的記錄時優先查那個視窗，掃描視窗漂移不會讓重啟多付完整查詢。它是快取：刪掉只會讓下一次完整查詢，不含任何訊息內容。
+- GitHub 的 ETag 存在**另一個**狀態檔 `wait-<AI 名>.json`（與游標檔同一個狀態目錄；`ANGAREION_STATE_DIR` 可覆寫）：每個實體一筆，記查詢 URL（含 `since`）、當時的游標與 ETag。只要游標與收件模式（channel／寄給我的）相同就送 `If-None-Match`（URL 只是記錄那次查的是哪個視窗；不同視窗只有在後端說兩份表示相同時才會 304）；有一筆以游標視窗查過的記錄時優先查那個視窗，掃描視窗漂移不會讓重啟多付完整查詢。它是快取：刪掉只會讓下一次完整查詢，不含任何訊息內容。
 - 下列情況用完整查詢、不留 ETag：回應有下一頁、第 1 頁已滿 100 筆（可能還有第 2 頁）、這次查到新訊息、狀態檔壞掉／版本不認得／記錄對不上、游標前進或刪掉。掃描視窗（`scan_since`）仍然只在單次 `wait` 行程的記憶體裡（跨行程沿用會放大複寫延遲的漏訊息風險）。
 - `wait` 不動游標；`read` 不讀 ETag 狀態檔，也不會被 304 跳過。狀態檔寫不進去（唯讀、磁碟滿）時印一次警告、`wait` 照常（下次重啟用完整查詢）。
 - 刪掉游標檔就等於從頭讀；刪掉 ETag 狀態檔只是下一次完整查詢（兩者互不影響，刪哪個都不會掉訊息）。
@@ -136,7 +137,7 @@ attachments: []
 
 ```json
 {
-  "identity": "MyLinuxPool-impl-2",
+  "identity": "mylinuxpool-impl-w1-1",
   "config_dir": "/path/to/MyAiStorage",
   "registry_repo": "owner/MyAiStorage",
   "registry_issue": 77,
@@ -145,11 +146,20 @@ attachments: []
 }
 ```
 
-- `identity`：自己的 agent 名；`send` 的 `from` 與「寄給我的」都用它。
+- `identity`：自己的 AI 名；`send` 的 `from`、「寄給我的」、游標檔（`cursor-<AI 名>.json`）與 `wait` 的狀態檔（`wait-<AI 名>.json`）都用它。**不合新文法 → exit 2**（設定錯），並說明是哪一步（例如缺 `team` 段）。
+- **`ANGAREION_IDENTITY`**：有設定時**以它為準**（見下）。
 - `config_dir`：本機的 MyAiStorage clone（放 channel／backend 設定檔；angareion 只讀 `origin/main`，不動工作樹）。
 - `registry_repo`／`registry_issue`：註冊簿 issue 的位置（`channel create`／`channel delete` 在那裡留言）。
 - `config_pull_interval`：選填，預設 900 秒；`0`＝不按週期拉（查無與 create 等待的事件驅動 fetch 仍會做）。
 - `token_file`：選填；不寫就用預設路徑。
+
+### `ANGAREION_IDENTITY`：換席位，不必換設定檔
+
+環境變數 `ANGAREION_IDENTITY` **優先於**設定檔的 `identity`（沒有設定時才用 `identity`）。一個機器可以放好幾個席位的設定檔，用這個變數決定「這一次是哪個席位」。
+
+- 它決定的是**整個席位**，不是只有 `from`：`send` 的 `from`、不給 `--channel` 時「寄給我的」、**游標檔 `cursor-<名>.json`**、**`wait` 的狀態檔 `wait-<名>.json`** 全部換成它。換席位就是換一份本機進度，另一個席位的游標不會被推進。
+- 兩邊都必須是合法的 AI 名；`identity` 或 `ANGAREION_IDENTITY` 不合新文法 → **exit 2**（設定錯），並說明是哪一步。**設了但空字串也算錯**（寧可不要跑，也不要用錯席位跑）；**值原樣驗、不修剪空白**——`ANGAREION_IDENTITY=" mypmo-pm-m1 "` 是打錯，不是合法席位。
+- `identity_slug` 仍會把名字裡不安穩的字元換掉，所以手寫的名字不會跑出狀態目錄。
 
 ### repo 裡的兩個設定檔
 
@@ -197,9 +207,10 @@ stdout 只放結果（`channel create`／`channel delete` 的名稱、`send` 的
 3. 寫 `~/.config/angareion/config.json`（見上）。
 4. 裝指令：在 repo 檢出裡 `uv tool install --editable .`（或 `uv run angareion …`）。
 5. `angareion channel create general` → 印 `general`；註冊簿上出現註冊留言；落地後 `config/angareion/channels.json` 出現 `general`。
-6. 用另一個身分（另一台機器或另一個設定目錄）`angareion send --channel general --to MyLinuxPool-impl-2 --body 'hello'` → 印訊息 id；不給 `--to` 再送一則是廣播。
+6. 用另一個身分（另一台機器或另一個設定目錄）`angareion send --channel general --to mylinuxpool-impl-w1-1 --body 'hello'` → 印訊息 id；不給 `--to` 再送一則是廣播。
 7. `angareion wait --channel general --timeout 0` → 有新訊息 exit 0；`angareion read` → 看到那則訊息；再 `angareion read` 一次 → 什麼都沒有。游標檔刪掉再 `read` → 從頭看到所有訊息。
 8. `angareion channel delete general` → 印 `general`；backend 的 issue 被關掉（留紀錄）、註冊簿上出現註銷留言。
+9. `ANGAREION_IDENTITY=mylinuxpool-rev-w1-1 angareion send --channel general --body 'hi'` → 訊息標頭的寄件者是 `mylinuxpool-rev-w1-1`，狀態目錄裡出現 `cursor-mylinuxpool-rev-w1-1.json`；同一則訊息用原本身分的 `read` **讀不到**（不同席位、不同游標）。
 
 `wait` 是每 15 秒問一次；GitHub 沒有推播，304 不耗額度（只在回應單頁、而且第 1 頁不滿 100 筆時用 ETag；ETag 跨 `wait` 重啟有效，重新開始的第一次查詢因此多半是 304、閒置成本接近 0；行程內把已掃過的視窗往前推，不重掃）。每個 HTTP 請求的逾時是 30 秒（`wait` 每次 check 的網路預算取 min(30 秒, max(5 秒, 剩餘時間))）；**不跟隨轉址**。被 GitHub 次級限制打到時就照 HTTP 回應失敗（exit 2），不自動重試（`channel create`／`channel delete` 的註冊／註銷留言是唯一例外：註冊留言短間隔重試 2 次）。
 
@@ -219,6 +230,7 @@ stdout 只放結果（`channel create`／`channel delete` 的名稱、`send` 的
 
 - 每個 worker 需要 `config.json`（`identity`、`config_dir`、`registry_repo`、`registry_issue`；`config_pull_interval` 可選）與一份 MyAiStorage 的 clone（`config_dir`）。
 - 設定檔不含秘密（只有名字與路徑）；token 走上面的 secret 檔。
+- 一個 pool 共用一份設定檔時，用 `ANGAREION_IDENTITY` 指定這一次是哪個席位（`identity` 仍要合法）；它連游標檔與 `wait` 的狀態檔一起換，所以每個席位在 worker 上各有一份本機進度。
 
 ### 說明檔（skill）
 

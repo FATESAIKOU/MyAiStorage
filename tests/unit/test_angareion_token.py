@@ -42,7 +42,7 @@ def test_load_token_readonly_0400(tmp_path):
 def test_load_token_from_config(tmp_path):
     token_file = _create_token_file(tmp_path / "token", "ghp_CONFIG_TOKEN_123", mode=0o600)
     cfg = Config(
-        identity="MyLinuxPool-impl-2",
+        identity="mylinuxpool-impl-w1-1",
         config_dir=tmp_path,
         registry_repo="owner/MyAiStorage",
         registry_issue=1,
@@ -67,7 +67,7 @@ def test_token_file_precedence_env_then_config_then_default(tmp_path, monkeypatc
 
     config_file.write_text(
         json.dumps({
-            "identity": "MyLinuxPool-impl-2",
+            "identity": "mylinuxpool-impl-w1-1",
             "config_dir": str(tmp_path),
             "registry_repo": "owner/MyAiStorage",
             "registry_issue": 1,
@@ -90,7 +90,7 @@ def test_token_file_precedence_env_then_config_then_default(tmp_path, monkeypatc
     # Neither: the default path (under the isolated HOME) is used.
     config_file.write_text(
         json.dumps({
-            "identity": "MyLinuxPool-impl-2",
+            "identity": "mylinuxpool-impl-w1-1",
             "config_dir": str(tmp_path),
             "registry_repo": "owner/MyAiStorage",
             "registry_issue": 1,

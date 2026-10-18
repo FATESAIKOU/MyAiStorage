@@ -1,10 +1,18 @@
 """Six-field message model, front matter serialization, parsing, and validation (D3/v5).
 
-v5 speaks agent names, not GitHub shapes: `from`, `to` and the personal
-identity are strings like `MyLinuxPool-impl-2` or `LLMGateway-pm`. The grammar
-has two steps: `validate_address` checks the overall shape, and
-`parse_identity` takes the address apart (repo, role, optional id) from right
-to left. `to` is optional: no `to` means the message went to the whole channel.
+v5 speaks AI names, not GitHub shapes: `from`, `to` and the personal identity
+are strings like `mylinuxpool-impl-w1-1` or `mypmo-pm-m1`. The grammar is
+`ainame`'s (see `src/ainame`), and it is applied two ways:
+
+- **sending is strict** (`validate_address`, the default): only an AI name of
+  the current grammar may be sent, sent from, or used as the identity;
+- **reading is lenient** (`validate_address(..., allow_legacy=True)`, what
+  `parse_message` uses): a message is also accepted when its addresses follow
+  the old grammar (`<repo>-(pm|arch|impl|test)[-<id>]`, case-sensitive), so
+  messages written by older versions are still delivered instead of being
+  silently skipped (#97).
+
+`to` is optional: no `to` means the message went to the whole channel.
 """
 
 from __future__ import annotations
@@ -18,13 +26,19 @@ from typing import Any
 
 import yaml
 
+from ainame import is_valid as is_ainame
+from ainame import parse as parse_ainame
+
 MAX_MESSAGE_LENGTH = 65536
 ANGAREION_VERSION = 1
 
-# The shape of an agent name: <repo name>-<role>[-<id>]. The repo part may
-# contain '-'; taking the address apart is parse_identity's job, not the regex's.
-AGENT_ROLES = ("pm", "arch", "impl", "test")
-AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*-(pm|arch|impl|test)(-[A-Za-z0-9_.]+)?$")
+# The old (pre-#97) address shape: `<repo name>-(pm|arch|impl|test)[-<id>]`,
+# case-sensitive, with at most one optional id segment. It is only used on the
+# read side; see the module docstring. It is matched whole (`fullmatch`), not
+# with `^…$`: reading is wide, but a trailing newline is still not a name.
+LEGACY_AGENT_NAME_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]*-(pm|arch|impl|test)(-[A-Za-z0-9_.]+)?"
+)
 CHANNEL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -48,50 +62,69 @@ class MessageValidationError(ValueError):
 
 @dataclass(frozen=True)
 class AgentAddress:
-    """An agent name taken apart: `my-repo-impl-2` -> repo, role, optional id."""
+    """An AI name taken apart: `mylinuxpool-impl-w1-1` -> project, role, team, seq.
 
-    repo: str
+    The fields are `ainame.Name`'s; this alias keeps the old name of the type
+    working for callers that imported it (#97 renamed `repo`/`agent_id` to the
+    grammar's `project`/`team`/`seq`).
+    """
+
+    project: str
     role: str
-    agent_id: str | None = None
+    team: str
+    seq: int | None = None
 
     def __str__(self) -> str:
-        return self.repo + "-" + self.role + (f"-{self.agent_id}" if self.agent_id else "")
+        if self.seq is None:
+            return f"{self.project}-{self.role}-{self.team}"
+        return f"{self.project}-{self.role}-{self.team}-{self.seq}"
 
 
-def validate_address(address: Any, *, field_name: str = "address") -> None:
-    """Check that an address is an agent name string (v5 grammar)."""
+def validate_address(
+    address: Any,
+    *,
+    field_name: str = "address",
+    allow_legacy: bool = False,
+) -> None:
+    """Check that an address is an AI name of the current grammar (#97).
+
+    With `allow_legacy=True` an address of the old grammar is accepted too;
+    that is the read side (`parse_message`), never the send side.
+    """
     if not isinstance(address, str):
         raise MessageValidationError(
-            f"{field_name} must be an agent name string, got {type(address).__name__}"
+            f"{field_name} must be an AI name string, got {type(address).__name__}"
         )
-    if not AGENT_NAME_RE.match(address):
-        raise MessageValidationError(
-            f"{field_name} must be an agent name such as 'MyLinuxPool-impl-2' or "
-            f"'LLMGateway-pm', got {address!r}"
-        )
+    if is_ainame(address):
+        return
+    if allow_legacy and LEGACY_AGENT_NAME_RE.fullmatch(address):
+        return
+    try:
+        parse_ainame(address)
+        reason = "it is not a legal AI name"
+    except ValueError as e:
+        reason = str(e)
+    raise MessageValidationError(
+        f"{field_name} must be an AI name '<project>-<role>-<team>[-<seq>]' such as "
+        f"'mylinuxpool-impl-w1-1' or 'mypmo-pm-m1', got {address!r}: {reason}"
+    )
 
 
 def parse_identity(name: str) -> AgentAddress:
-    """Take an agent name apart from right to left (design section 1).
+    """Take an AI name apart: project, role, team, and the sequence number (#97).
 
-    Validation and parsing are two steps: this function is called on names that
-    already passed `validate_address`. The rightmost `-<role>` segment is the
-    role; one trailing `-<id>` segment is the optional id; everything left of
-    the role is the repo name (it may contain '-').
+    Validation and parsing are two steps, still: the grammar is checked here,
+    and the parts come from `ainame.parse`. `seq` is None for `pm` and
+    `secretary`, which name one seat on their own.
     """
-    validate_address(name)
-    segments = name.split("-")
-    role_index = None
-    for index in range(len(segments) - 1, 0, -1):
-        if segments[index] in AGENT_ROLES:
-            role_index = index
-            break
-    if role_index is None:  # unreachable after validate_address; defensive
-        raise MessageValidationError(f"{name!r} has no agent role (pm|arch|impl|test)")
-    repo = "-".join(segments[:role_index])
-    tail = segments[role_index + 1:]
-    agent_id = tail[0] if tail else None
-    return AgentAddress(repo=repo, role=segments[role_index], agent_id=agent_id)
+    validate_address(name, field_name="identity")
+    parsed = parse_ainame(name)
+    return AgentAddress(
+        project=parsed.project,
+        role=parsed.role,
+        team=parsed.team,
+        seq=parsed.seq,
+    )
 
 
 def validate_channel_name(name: Any, *, field_name: str = "channel") -> None:
@@ -143,8 +176,14 @@ class Message:
     at: str = field(default_factory=now_iso)
     angareion: int = ANGAREION_VERSION
 
-    def validate(self) -> None:
-        """Validate all fields and metadata."""
+    def validate(self, *, allow_legacy_addresses: bool = False) -> None:
+        """Validate all fields and metadata.
+
+        Addresses are held to the current grammar unless the caller is reading
+        (`allow_legacy_addresses=True` from `parse_message`), which also accepts
+        the old grammar so that messages written by older versions are still
+        delivered (#97).
+        """
         if self.angareion != ANGAREION_VERSION:
             raise MessageValidationError(
                 f"Unsupported angareion version: {self.angareion} (expected {ANGAREION_VERSION})"
@@ -154,9 +193,9 @@ class Message:
         if not isinstance(self.at, str) or not self.at.strip():
             raise MessageValidationError("Message at must be a non-empty ISO 8601 string")
 
-        validate_address(self.from_, field_name="from")
+        validate_address(self.from_, field_name="from", allow_legacy=allow_legacy_addresses)
         if self.to is not None:
-            validate_address(self.to, field_name="to")
+            validate_address(self.to, field_name="to", allow_legacy=allow_legacy_addresses)
 
         validate_channel_name(self.channel)
 
@@ -285,7 +324,7 @@ def parse_message(text: str, *, strict: bool = False) -> Message | None:
             attachments=data["attachments"],
             content=body,
         )
-        msg.validate()
+        msg.validate(allow_legacy_addresses=True)
         return msg
     except MessageValidationError:
         if strict:

@@ -10,6 +10,7 @@ import sys
 import time
 from typing import Any, Callable, Sequence
 
+from ainame import is_group
 from angareion.backend import (
     BackendError,
     BackendRef,
@@ -32,6 +33,7 @@ from angareion.config import (
     load_config,
     load_token,
     mask_token,
+    resolve_identity,
 )
 from angareion.github import HttpTransport, GitHubIssuesBackend
 from angareion.messages import (
@@ -91,16 +93,26 @@ class _Parser(argparse.ArgumentParser):
         raise UsageError(f"{self.prog}: error: {message}")
 
 
-def parse_address(addr_str: str) -> str:
-    """Validate one address and return it as an agent name (the v5 grammar).
+def parse_address(addr_str: str, *, field_name: str = "address") -> str:
+    """Validate one address and return it as an AI name (the #97 grammar).
 
-    v5 has one address shape: `<repo 名>-<pm|arch|impl|test>[-<id>]`. The old
-    `repo=…`, `×`, `:` and JSON shapes are gone (and are format errors now).
+    An AI name is `<project>-<role>-<team>[-<seq>]`, e.g. `mypmo-pm-m1` or
+    `mylinuxpool-impl-w1-1`. Only half-width spaces around it are forgiven (a
+    shell quoting slip): a newline, a tab or a carriage return is copied-in
+    dirt, and it is refused loudly with the grammar's reason, because the
+    grammar compares the whole string. The old `repo=…`, `×`, `:` and JSON
+    shapes are format errors, and a `@…` group address is one too: group
+    addresses arrive in phase 3.
     """
-    if not isinstance(addr_str, str) or not addr_str.strip():
+    if not isinstance(addr_str, str) or not addr_str.strip(" "):
         raise MessageValidationError("Address string cannot be empty")
-    address = addr_str.strip()
-    validate_address(address)
+    address = addr_str.strip(" ")
+    if is_group(address):
+        raise MessageValidationError(
+            f"{field_name} {address!r} is a group address; group addresses arrive in phase 3, "
+            "phase 2 sends to one AI name or to the whole channel (no --to)"
+        )
+    validate_address(address, field_name=field_name)
     return address
 
 
@@ -289,7 +301,7 @@ def cmd_send(args: argparse.Namespace, config: Config, app: Angareion, token: st
     to_addr: str | None = None
     if args.to is not None:
         try:
-            to_addr = parse_address(args.to)
+            to_addr = parse_address(args.to, field_name="--to")
         except MessageValidationError as e:
             sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
             return EXIT_USAGE
@@ -412,7 +424,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_send.add_argument("--channel", required=True, help="Channel name.")
     p_send.add_argument("--to", metavar="AGENT",
-                        help="Recipient agent name (e.g. MyLinuxPool-impl-2); omit to send to the whole channel.")
+                        help="Recipient AI name '<project>-<role>-<team>[-<seq>]' "
+                             "(e.g. mylinuxpool-impl-w1-1); omit to send to the whole channel.")
     p_send.add_argument("--urgency", type=int, default=5, help="Urgency 0-9 (default: 5).")
     p_send.add_argument("--attach", action="append", default=[], metavar="NAME=PATH",
                         help="Attach a file inline (repeatable).")
@@ -476,6 +489,17 @@ def main(
 
     try:
         config = load_config()
+    except ConfigError as e:
+        sys.stderr.write(f"Error: {e}\n")
+        return EXIT_BACKEND
+
+    # ANGAREION_IDENTITY wins over config.json's identity (#97), and it is
+    # resolved before anything is built from the config: `from`, "to me", the
+    # cursor file and the wait state file all follow the name that is in force
+    # here, so a run under a different seat never touches the other seat's
+    # files. A bad name in either place is a configuration error (exit 2).
+    try:
+        config = config.with_identity(resolve_identity(config))
     except ConfigError as e:
         sys.stderr.write(f"Error: {e}\n")
         return EXIT_BACKEND

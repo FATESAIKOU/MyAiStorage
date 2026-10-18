@@ -22,7 +22,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agora", "src/angareion", "src/atelier"]
+packages = ["src/agora", "src/ainame", "src/angareion", "src/atelier"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit"]

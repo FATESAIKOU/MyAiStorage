@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +18,7 @@ from angareion.config import (
     get_state_dir,
     identity_slug,
     load_config,
+    resolve_identity,
     save_config,
 )
 
@@ -47,8 +49,8 @@ def test_config_env_overrides(tmp_path, monkeypatch):
 
 
 def test_identity_slug_uses_the_agent_name():
-    assert identity_slug("MyLinuxPool-impl-2") == "MyLinuxPool-impl-2"
-    assert identity_slug("LLMGateway-pm") == "LLMGateway-pm"
+    assert identity_slug("mylinuxpool-impl-w1-1") == "mylinuxpool-impl-w1-1"
+    assert identity_slug("mypmo-pm-m1") == "mypmo-pm-m1"
     # Anything unsafe cannot escape the state directory.
     assert "/" not in identity_slug("owner/team×pm")
     assert identity_slug("") == "unknown"
@@ -65,7 +67,7 @@ def test_load_and_save_config(tmp_path, monkeypatch):
     monkeypatch.setenv("ANGAREION_TOKEN_FILE", str(token_file))
 
     cfg = Config(
-        identity="MyLinuxPool-impl-2",
+        identity="mylinuxpool-impl-w1-1",
         config_dir=tmp_path / "clone",
         registry_repo="owner/MyAiStorage",
         registry_issue=77,
@@ -77,7 +79,7 @@ def test_load_and_save_config(tmp_path, monkeypatch):
     assert cfg_file.is_file()
 
     loaded = load_config(cfg_file)
-    assert loaded.identity == "MyLinuxPool-impl-2"
+    assert loaded.identity == "mylinuxpool-impl-w1-1"
     assert loaded.config_dir == tmp_path / "clone"
     assert loaded.registry_repo == "owner/MyAiStorage"
     assert loaded.registry_issue == 77
@@ -91,7 +93,7 @@ def test_config_pull_interval_can_be_overridden(tmp_path):
     cfg_file.write_text(
         json.dumps(
             {
-                "identity": "MyLinuxPool-impl-2",
+                "identity": "mylinuxpool-impl-w1-1",
                 "config_dir": str(tmp_path / "clone"),
                 "registry_repo": "owner/MyAiStorage",
                 "registry_issue": 77,
@@ -109,7 +111,7 @@ def test_config_pull_interval_can_be_overridden(tmp_path):
 )
 def test_missing_config_keys_are_config_errors(tmp_path, missing):
     data = {
-        "identity": "MyLinuxPool-impl-2",
+        "identity": "mylinuxpool-impl-w1-1",
         "config_dir": str(tmp_path / "clone"),
         "registry_repo": "owner/MyAiStorage",
         "registry_issue": 77,
@@ -124,7 +126,7 @@ def test_missing_config_keys_are_config_errors(tmp_path, missing):
 
 def test_config_validation_failures(tmp_path):
     base = {
-        "identity": "MyLinuxPool-impl-2",
+        "identity": "mylinuxpool-impl-w1-1",
         "config_dir": str(tmp_path / "clone"),
         "registry_repo": "owner/MyAiStorage",
         "registry_issue": 77,
@@ -151,3 +153,73 @@ def test_config_validation_failures(tmp_path):
 def test_missing_config_file(tmp_path):
     with pytest.raises(ConfigError, match="not found"):
         load_config(tmp_path / "nope.json")
+
+
+def _write_config(tmp_path, identity: str) -> Path:
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(
+        json.dumps(
+            {
+                "identity": identity,
+                "config_dir": str(tmp_path / "clone"),
+                "registry_repo": "owner/MyAiStorage",
+                "registry_issue": 77,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return cfg_file
+
+
+def test_the_config_identity_must_be_an_ai_name(tmp_path):
+    """The old grammar is read, never sent - and never the identity either."""
+    for old in ("mylinuxpool-impl-2", "mypmo-pm", "MyPMO-pm-m1", "mylinuxpool-impl-w1-0",
+                " mylinuxpool-impl-w1-1", "mylinuxpool-impl-w1-1\n"):
+        cfg_file = _write_config(tmp_path, old)
+        with pytest.raises(ConfigError, match="identity"):
+            load_config(cfg_file)
+
+
+def test_a_good_ai_name_identity_loads(tmp_path):
+    cfg = load_config(_write_config(tmp_path, "mylinuxpool-impl-w1-1"))
+    assert cfg.identity == "mylinuxpool-impl-w1-1"
+
+
+def test_the_environment_identity_wins_over_the_config_file(tmp_path, monkeypatch):
+    cfg = load_config(_write_config(tmp_path, "mylinuxpool-impl-w1-1"))
+    monkeypatch.setenv("ANGAREION_IDENTITY", "mylinuxpool-rev-w1-1")
+    assert resolve_identity(cfg) == "mylinuxpool-rev-w1-1"
+
+    monkeypatch.delenv("ANGAREION_IDENTITY")
+    assert resolve_identity(cfg) == "mylinuxpool-impl-w1-1"
+
+
+def test_a_bad_environment_identity_is_a_config_error(tmp_path, monkeypatch):
+    cfg = load_config(_write_config(tmp_path, "mylinuxpool-impl-w1-1"))
+    for bad in ("mypmo-pm", "MyPMO-pm-m1", "@all", ""):
+        monkeypatch.setenv("ANGAREION_IDENTITY", bad)
+        with pytest.raises(ConfigError, match="ANGAREION_IDENTITY"):
+            resolve_identity(cfg)
+
+
+def test_the_environment_identity_is_not_trimmed(tmp_path, monkeypatch):
+    """R4: a padded value is a mistyped name, so it is an error, not a name.
+
+    `config.json`'s `identity` is not trimmed either, so both places treat a
+    stray space the same way.
+    """
+    cfg = load_config(_write_config(tmp_path, "mylinuxpool-impl-w1-1"))
+    for padded in (" mypmo-pm-m1", "mypmo-pm-m1 ", "\tmypmo-pm-m1", "mypmo-pm-m1\n", "  "):
+        monkeypatch.setenv("ANGAREION_IDENTITY", padded)
+        with pytest.raises(ConfigError, match="ANGAREION_IDENTITY"):
+            resolve_identity(cfg)
+
+
+def test_with_identity_copies_and_keeps_everything_else(tmp_path):
+    cfg = load_config(_write_config(tmp_path, "mylinuxpool-impl-w1-1"))
+    other = cfg.with_identity("mylinuxpool-rev-w1-1")
+    assert other.identity == "mylinuxpool-rev-w1-1"
+    assert cfg.identity == "mylinuxpool-impl-w1-1"  # the original is untouched
+    assert other.state_dir == cfg.state_dir
+    assert other.registry_issue == cfg.registry_issue
+    assert other.to_dict()["identity"] == "mylinuxpool-rev-w1-1"

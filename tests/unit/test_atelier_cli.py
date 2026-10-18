@@ -457,7 +457,7 @@ def test_clone_path_falls_back_to_the_angareion_config(harness_repo, tmp_path, m
                                                        capsysbinary):
     monkeypatch.delenv("ATELIER_CONFIG_DIR")
     config = tmp_path / "angareion-config.json"
-    config.write_text(json.dumps({"identity": "x-pm", "config_dir": str(harness_repo.clone),
+    config.write_text(json.dumps({"identity": "x-pm-m1", "config_dir": str(harness_repo.clone),
                                   "registry_repo": "o/MyAiStorage", "registry_issue": 1}),
                       encoding="utf-8")
     monkeypatch.setenv("ANGAREION_CONFIG", str(config))
@@ -468,7 +468,7 @@ def test_clone_path_falls_back_to_the_angareion_config(harness_repo, tmp_path, m
 
 def _angareion_config(tmp_path: Path, clone: Path, **extra) -> Path:
     config = tmp_path / "angareion-config.json"
-    config.write_text(json.dumps({"identity": "x-pm", "config_dir": str(clone),
+    config.write_text(json.dumps({"identity": "x-pm-m1", "config_dir": str(clone),
                                   "registry_repo": "o/MyAiStorage", "registry_issue": 1,
                                   **extra}),
                       encoding="utf-8")

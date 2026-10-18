@@ -12,15 +12,18 @@ import re
 
 import yaml
 
-#: The roles of a harness (design D2; the phase-3 reviewer maps to `arch`).
-ROLES = ("pm", "arch", "impl", "test")
+#: The roles a harness can be written for (#97; the reviewer role is `rev`).
+ROLES = ("pm", "arch", "impl", "test", "rev")
 
 #: The five H2 sections of a harness body (design D2).
 SECTION_NAMES = ("know", "do", "judge", "dont", "capabilities")
 
-_ID = re.compile(r"^atelier:([a-z0-9][a-z0-9-]*)-(pm|arch|impl|test)$")
+#: `team` is the series: the id/path keep the field name, the docs call it 系列.
+_ROLE_ALTERNATION = "|".join(ROLES)
+
+_ID = re.compile(rf"^atelier:([a-z0-9][a-z0-9-]*)-({_ROLE_ALTERNATION})$")
 _VERSION = re.compile(r"^v(\d+)$")
-_PATH = re.compile(r"^atelier/([a-z0-9][a-z0-9-]*)/(pm|arch|impl|test)/v(\d+)\.md$")
+_PATH = re.compile(rf"^atelier/([a-z0-9][a-z0-9-]*)/({_ROLE_ALTERNATION})/v(\d+)\.md$")
 
 
 class InvalidId(ValueError):

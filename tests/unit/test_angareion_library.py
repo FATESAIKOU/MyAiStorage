@@ -12,8 +12,8 @@ from angareion.client import POLL_INTERVAL_SECONDS, Angareion
 from angareion.messages import Message
 from angareion.state import CursorStore, channel_cursor_key, recipient_cursor_key
 
-ME = "MyLinuxPool-impl-2"
-PM = "LLMGateway-pm"
+ME = "mylinuxpool-impl-w1-1"
+PM = "mypmo-pm-m1"
 GENERAL = entity(channel="general", issue=10)
 OTHER = entity(channel="other", backend="github-2", repo="owner/repo2", issue=7)
 
@@ -281,7 +281,7 @@ def test_read_to_me_spans_channels_with_one_cursor_per_channel(tmp_path):
     backend = _backend()
     backend.deliver(GENERAL, _make_msg(channel="general", msg_id="01AAAA"), comment_id=1, created_at="2026-10-10T10:00:00Z")
     backend.deliver(OTHER, _make_msg(channel="other", msg_id="01BBBB"), comment_id=2, created_at="2026-10-10T10:01:00Z")
-    backend.deliver(GENERAL, _make_msg(channel="general", msg_id="01CCCC", to="other-pm"), comment_id=3, created_at="2026-10-10T10:02:00Z")
+    backend.deliver(GENERAL, _make_msg(channel="general", msg_id="01CCCC", to="other-pm-m1"), comment_id=3, created_at="2026-10-10T10:02:00Z")
     backend.deliver(OTHER, _make_msg(channel="other", msg_id="01DDDD", to=None), comment_id=4, created_at="2026-10-10T10:03:00Z")
     app = _app(tmp_path, backend)
     target = Target(recipient=ME)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path
@@ -11,6 +11,9 @@ from typing import Any
 from angareion.messages import MessageValidationError, validate_address
 
 CONFIG_PULL_INTERVAL_DEFAULT = 900
+
+#: The environment variable that names this seat, overriding config.json (#97).
+IDENTITY_ENV = "ANGAREION_IDENTITY"
 
 
 class ConfigError(ValueError):
@@ -57,11 +60,11 @@ def get_default_token_path() -> Path:
 
 
 def identity_slug(identity: str) -> str:
-    """Derive a filesystem-safe filename slug for an agent name (v5).
+    """Derive a filesystem-safe filename slug for an AI name (v5/#97).
 
-    Agent names are already `[A-Za-z0-9._-]`, so this mostly passes through;
-    anything else is replaced so a hand-written identity cannot escape the
-    state directory. v0's `{repo}__{role}` slug is gone: old cursor files are
+    AI names are already `[a-z0-9-]`, so this mostly passes through; anything
+    else is replaced so a hand-written identity cannot escape the state
+    directory. v0's `{repo}__{role}` slug is gone: old cursor files are
     simply never read again (a new identity starts from the beginning).
     """
     slug = "".join(
@@ -85,7 +88,7 @@ class Config:
     def validate(self) -> None:
         if not isinstance(self.identity, str) or not self.identity.strip():
             raise ConfigError(
-                "identity must be an agent name such as 'MyLinuxPool-impl-2'"
+                "identity must be an AI name such as 'mylinuxpool-impl-w1-1'"
             )
         try:
             validate_address(self.identity, field_name="identity")
@@ -114,6 +117,39 @@ class Config:
             "token_file": str(self.token_file),
             "config_pull_interval": self.config_pull_interval,
         }
+
+    def with_identity(self, identity: str) -> "Config":
+        """A copy of this config that names a different seat (ANGAREION_IDENTITY).
+
+        Everything else - paths, registry, intervals - stays as it is; only the
+        name this run speaks as changes.
+        """
+        return replace(self, identity=identity)
+
+
+def resolve_identity(config: Config) -> str:
+    """The AI name this run speaks as (#97).
+
+    `ANGAREION_IDENTITY` wins over the `identity` in config.json: one machine
+    can hold several seats, and the environment says which one this run is.
+    The name decides *everything* about the seat - `from`, "to me" and the
+    cursor file - so it is resolved once, here, and the config is replaced
+    before anything else is built from it.
+
+    A set-but-illegal value is a configuration error (exit 2), not a silent
+    fall back: running as the wrong seat is worse than not running. The raw
+    value is validated as it stands - a name with a space around it is a
+    mistyped name, and `config.json`'s `identity` is not trimmed either, so the
+    two places behave the same way.
+    """
+    if IDENTITY_ENV not in os.environ:
+        return config.identity
+    candidate = os.environ[IDENTITY_ENV]
+    try:
+        validate_address(candidate, field_name=IDENTITY_ENV)
+    except MessageValidationError as e:
+        raise ConfigError(f"{IDENTITY_ENV} is not a legal AI name: {e}") from e
+    return candidate
 
 
 def _required(data: dict[str, Any], key: str, config_path: Path) -> Any:

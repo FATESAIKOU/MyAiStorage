@@ -22,8 +22,8 @@ from angareion.github import GitHubIssuesBackend, HttpResponse
 from angareion.messages import Message, serialize_message
 from angareion.state import CursorStore, FileETagCache, wait_state_file_path
 
-ME = "MyLinuxPool-impl-2"
-PM = "LLMGateway-pm"
+ME = "mylinuxpool-impl-w1-1"
+PM = "mypmo-pm-m1"
 GENERAL = entity(channel="general", issue=10)
 OTHER = entity(channel="other", backend="github-main", repo="owner/repo2", issue=7)
 COMMENTS = "https://api.github.com/repos/owner/repo/issues/10/comments?per_page=100"
@@ -426,8 +426,8 @@ def test_a_write_failure_warns_once_and_the_check_still_works(tmp_path):
 
 
 def test_the_wait_state_file_is_separate_from_the_cursor_file(tmp_path):
-    assert wait_state_file_path(tmp_path, ME) == tmp_path / "wait-MyLinuxPool-impl-2.json"
-    assert CursorStore(tmp_path, ME).path == tmp_path / "cursor-MyLinuxPool-impl-2.json"
+    assert wait_state_file_path(tmp_path, ME) == tmp_path / "wait-mylinuxpool-impl-w1-1.json"
+    assert CursorStore(tmp_path, ME).path == tmp_path / "cursor-mylinuxpool-impl-w1-1.json"
 
 
 def test_the_file_cache_roundtrips_a_record(tmp_path):

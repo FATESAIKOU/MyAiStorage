@@ -42,7 +42,7 @@ def test_skill_doc_says_what_to_do_with_high_urgency():
 def test_skill_doc_explains_exit_2_retry_and_the_reply_address():
     text = _text()
     assert "exit 2" in text and "稍等" in text  # wait exit 2 is a transient backend error: retry
-    assert "<agent 名>" in text  # the reply address is the agent name in the message header
+    assert "<AI 名>" in text  # the reply address is the AI name in the message header
     assert "--to" in text
 
 
@@ -59,10 +59,14 @@ def test_skill_doc_explains_the_channel_landing_delay():
     assert "channel delete" in text and "留紀錄" in text
 
 
-def test_skill_doc_uses_agent_names_for_addresses():
+def test_skill_doc_uses_ai_names_for_addresses():
     text = _text()
-    assert "LLMGateway-pm" in text or "MyLinuxPool-impl-2" in text
-    assert "pm|arch|impl|test" in text
+    assert "mypmo-pm-m1" in text or "mylinuxpool-impl-w1-1" in text
+    assert "`pm`／`arch`／`impl`／`test`／`rev`／`secretary`" in text
+    assert "<專案>-<角色>-<team>[-<序號>]" in text
+    assert "群組位址期 3" in text
+    # The trim the tool does not do must not be promised to the reader.
+    assert "換行、tab、CR 不會" in text
 
 
 def test_skill_doc_contains_no_secrets_or_private_info():
