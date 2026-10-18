@@ -1,8 +1,9 @@
 """`atelier`: read and install the harness tree; exit 0/1/2 (design D7/D10).
 
 `ls` lists ids and versions, `show` prints a harness (whole file byte-for-byte,
-one section, or JSON) and `install` writes it into the user-level instruction
-files of the named agents. Messages never carry harness content.
+one section, or JSON), `install` writes it into the user-level instruction files
+of the named agents and `render` writes the instruction file of a single agent.
+Messages never carry harness content.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import argparse
 import json
 import sys
 
+from atelier.atomic import WriteError
 from atelier.harness import (
     HarnessFormatError,
     InvalidId,
@@ -18,6 +20,7 @@ from atelier.harness import (
     frontmatter,
     parse_id,
     split_sections,
+    validate_harness,
 )
 from atelier.install import (
     InstallError,
@@ -26,6 +29,7 @@ from atelier.install import (
     install_opencode,
     opencode_target,
 )
+from atelier.render import AppendMissing, compose, read_append, write_instructions
 from atelier.repo import HarnessNotFound, Repo, RepoError
 
 EXIT_OK = 0
@@ -44,7 +48,8 @@ class _Parser(argparse.ArgumentParser):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = _Parser(prog="atelier", description="讀 Atelier harness 樹，或把它裝進 agent 的使用者層級指示檔。")
+    parser = _Parser(prog="atelier", description="讀 Atelier harness 樹，或交給 agent："
+                                                "install 寫使用者層級指示檔，render 寫單一個 agent 的指示檔。")
     sub = parser.add_subparsers(dest="command")
     ls = sub.add_parser("ls", help="列出職務與版本")
     ls.add_argument("--json", action="store_true", help="機器的輸出")
@@ -57,6 +62,12 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--agent", action="append", choices=("claude", "opencode"),
                          default=[], metavar="claude|opencode",
                          help="可以給多次；每個值各裝一次（同值去重）")
+    render = sub.add_parser("render", help="產生單一個 agent 的指示檔（harness ＋環境說明）")
+    render.add_argument("id", help="atelier:<team>-<role>[@v<N>]")
+    render.add_argument("--append", dest="append_file", metavar="檔",
+                        help="接在 harness 後面的環境說明（要存在）")
+    render.add_argument("--out", required=True, metavar="檔",
+                        help="寫到哪裡；唯一寫入的檔案（不給＝用法錯）")
     return parser
 
 
@@ -174,15 +185,7 @@ def _cmd_install(repo: Repo, args: argparse.Namespace) -> int:
     repo.ensure_fresh()
     resolved = repo.resolve(ident)
     text = _decode(resolved.raw)
-    try:
-        # The managed block's "ours" check accepts only a harness (parseable
-        # frontmatter with type: Harness), so refuse anything else before a
-        # single byte is written.
-        front = frontmatter(text)
-    except HarnessFormatError as e:
-        raise RepoError(f"不裝 {resolved.path}：{e}") from e
-    if front.get("type") != "Harness":
-        raise RepoError(f"不裝 {resolved.path}：frontmatter 的 type 不是 Harness")
+    validate_harness(text, resolved.path)
     for agent in _agents(args.agent):
         if agent == "claude":
             target = claude_target(resolved.ident)
@@ -191,6 +194,22 @@ def _cmd_install(repo: Repo, args: argparse.Namespace) -> int:
             target = opencode_target(resolved.ident)
             install_opencode(target, resolved.ident, text)
         print(f"installed {resolved.ident} -> {target}")
+    return EXIT_OK
+
+
+def _cmd_render(repo: Repo, args: argparse.Namespace) -> int:
+    if not args.out:
+        raise UsageError("--out 不能為空字串")
+    ident = parse_id(args.id)   # a pure syntax check comes before any fetch (L2)
+    # The note is read before the copy is touched: a request that already names a
+    # file that is not there must not make atelier fetch for it (exit 1, no fetch).
+    note = read_append(args.append_file) if args.append_file is not None else None
+    repo.ensure_fresh()
+    resolved = repo.resolve(ident)
+    text = _decode(resolved.raw)
+    validate_harness(text, resolved.path)
+    target = write_instructions(args.out, compose(resolved.raw, note))
+    print(f"rendered {resolved.ident} -> {target}")
     return EXIT_OK
 
 
@@ -207,17 +226,13 @@ def main(argv: list[str] | None = None, *, repo: Repo | None = None) -> int:
             return _cmd_ls(active, args)
         if args.command == "show":
             return _cmd_show(active, args)
+        if args.command == "render":
+            return _cmd_render(active, args)
         return _cmd_install(active, args)
-    except UsageError as e:
+    except (UsageError, InvalidId, HarnessNotFound, AppendMissing) as e:
         print(f"Error: {e}", file=sys.stderr)
         return EXIT_USAGE
-    except InvalidId as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return EXIT_USAGE
-    except HarnessNotFound as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return EXIT_USAGE
-    except (RepoError, InstallError, HarnessFormatError) as e:
+    except (RepoError, InstallError, WriteError, HarnessFormatError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return EXIT_DATA
 

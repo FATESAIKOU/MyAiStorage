@@ -1,9 +1,10 @@
-"""Unit tests for the `atelier` CLI: ls / show / install (openspec atelier-v0, section 1).
+"""Unit tests for the `atelier` CLI: ls / show / install / render
+(openspec atelier-v0 section 1; atelier-pm-harness-v1 tasks 3.2).
 
-Reads and installs run against a real, local-only git pair (a bare "origin" and
-a clone whose remote points at it, both under tmp_path): no network, no
-credentials. Install targets are derived from HOME / XDG_CONFIG_HOME /
-CLAUDE_CONFIG_DIR, all pointed at tmp_path before anything can write, so the
+Reads, installs and renders run against a real, local-only git pair (a bare
+"origin" and a clone whose remote points at it, both under tmp_path): no
+network, no credentials. Install targets are derived from HOME / XDG_CONFIG_HOME
+/ CLAUDE_CONFIG_DIR, all pointed at tmp_path before anything can write, so the
 user's real ~/.claude and ~/.config/opencode are never touched.
 """
 
@@ -125,6 +126,14 @@ def _publish(repo, rel: str, text: str) -> None:
     path = repo.work / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+    _commit(repo.work, f"harness: {rel}")
+
+
+def _publish_bytes(repo, rel: str, data: bytes) -> None:
+    """Publish exact bytes: a harness with CRLF or no trailing newline."""
+    path = repo.work / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
     _commit(repo.work, f"harness: {rel}")
 
 
@@ -311,7 +320,8 @@ def test_show_missing_role_is_exit_1(harness_repo, capsysbinary):
 
 
 @pytest.mark.parametrize("argv", [("show", "atelier:worker-team-pm@0"),
-                                  ("install", "atelier:worker-team-pm@0", "--agent", "claude")])
+                                  ("install", "atelier:worker-team-pm@0", "--agent", "claude"),
+                                  ("render", "atelier:worker-team-pm@0", "--out", "unused-canary")])
 def test_a_bad_id_without_a_copy_is_a_usage_error(argv, tmp_path, monkeypatch, capsysbinary):
     """A usage error is exit 1, not a copy failure, even with no copy configured (L2)."""
     monkeypatch.setenv("ATELIER_CONFIG_DIR", str(tmp_path / "nowhere"))
@@ -319,6 +329,7 @@ def test_a_bad_id_without_a_copy_is_a_usage_error(argv, tmp_path, monkeypatch, c
     code, out, err = _run(capsysbinary, *argv)
     assert code == 1
     assert err != b""
+    assert not Path("unused-canary").exists(), "a rejected request must not render anything"
 
 
 def test_a_usage_error_does_not_fetch(harness_repo, capsysbinary):
@@ -1004,3 +1015,364 @@ def test_install_refuses_a_marker_pair_that_only_starts_like_a_harness(body, har
     code, out, err = _run(capsysbinary, "install", PM, "--agent", "opencode")
     assert code == 2, "a lookalike block must be refused, not replaced"
     assert target.read_text(encoding="utf-8") == quoted, "the file must be untouched"
+
+
+# --- render (atelier-pm-harness-v1 tasks 3.1/3.2) --------------------------------
+
+
+@pytest.fixture
+def state_dir(tmp_path):
+    """The agent's own state directory: `render`'s `--out` parent, the launcher's job."""
+    state = tmp_path / "state"
+    state.mkdir()
+    return state
+
+
+def _note(tmp_path, text: str = "# 環境說明\n\n通道指令與逾時看這裡。\n") -> Path:
+    path = tmp_path / "env-note.md"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_render_writes_the_whole_harness_byte_for_byte(harness_repo, state_dir, capsysbinary):
+    out = state_dir / "instructions.md"
+    code, stdout, err = _run(capsysbinary, "render", PM, "--out", str(out))
+    assert code == 0, err
+    assert out.read_bytes() == H1.encode(), "the whole harness, frontmatter included, as it is"
+    assert str(out) in stdout.decode() and "v1" in stdout.decode()
+
+
+def test_render_without_a_version_renders_the_latest(harness_repo, state_dir, capsysbinary):
+    out = state_dir / "instructions.md"
+    code, stdout, err = _run(capsysbinary, "render", PM, "--out", str(out))
+    assert code == 0, err
+    assert out.read_bytes() == H1.encode(), "no version means the largest one (v1)"
+
+
+def test_render_pins_the_version_it_is_given(harness_repo, state_dir, capsysbinary):
+    out = state_dir / "instructions.md"
+    code, stdout, err = _run(capsysbinary, "render", "atelier:worker-team-pm@v0", "--out", str(out))
+    assert code == 0, err
+    assert out.read_bytes() == H0.encode(), "an explicit @v0 must not read the latest (v1)"
+
+
+def test_render_reads_through_origin_main_not_the_working_tree(harness_repo, state_dir,
+                                                              capsysbinary):
+    (harness_repo.clone / "atelier/worker-team/pm/v1.md").write_text("LOCAL EDIT\n",
+                                                                    encoding="utf-8")
+    out = state_dir / "instructions.md"
+    code, stdout, err = _run(capsysbinary, "render", PM, "--out", str(out))
+    assert code == 0, err
+    assert out.read_bytes() == H1.encode()
+
+
+def test_render_output_is_exactly_what_show_prints(harness_repo, state_dir, capsysbinary):
+    out = state_dir / "instructions.md"
+    code, stdout, err = _run(capsysbinary, "render", PM, "--out", str(out))
+    assert code == 0, err
+    code, shown, err = _run(capsysbinary, "show", PM)
+    assert code == 0, err
+    assert out.read_bytes() == shown, "render and show read the same bytes through one layer"
+
+
+def test_render_puts_the_note_after_the_harness(harness_repo, tmp_path, state_dir, capsysbinary):
+    note = _note(tmp_path)
+    out = state_dir / "instructions.md"
+    code, stdout, err = _run(capsysbinary, "render", PM, "--append", str(note), "--out", str(out))
+    assert code == 0, err
+    written = out.read_bytes()
+    assert written == H1.encode() + note.read_bytes(), "harness first, note after it, in that order"
+    assert written.index("v1 know".encode()) < written.index("環境說明".encode())
+
+
+def test_render_replaces_an_existing_out_file(harness_repo, state_dir, capsysbinary):
+    out = state_dir / "instructions.md"
+    out.write_bytes(b"STALE INSTRUCTIONS\n")
+    code, stdout, err = _run(capsysbinary, "render", PM, "--out", str(out))
+    assert code == 0, err
+    assert out.read_bytes() == H1.encode(), "every start rewrites the file (versions follow main)"
+    assert sorted(p.name for p in state_dir.iterdir()) == ["instructions.md"]
+
+
+@pytest.mark.parametrize("harness_text,note_text", [
+    (H1, "# 環境說明  \n沒有結尾換行"),
+    (H1.rstrip("\n"), "# 環境說明\n"),
+    (H1 + "\n\n\n", "# 環境說明\n\n"),
+    (H1, "# 環境說明\r\n"),
+])
+def test_render_neither_part_is_tidied(harness_text, note_text, harness_repo, tmp_path,
+                                       state_dir, capsysbinary):
+    """No blank line is inserted and no trailing newline dropped (byte for byte)."""
+    _publish_bytes(harness_repo, "atelier/worker-team/pm/v2.md", harness_text.encode())
+    _age_fetch_head(harness_repo.clone, 120)
+    note = _note(tmp_path, note_text)
+    out = state_dir / "instructions.md"
+    code, stdout, err = _run(capsysbinary, "render", "atelier:worker-team-pm@v2",
+                             "--append", str(note), "--out", str(out))
+    assert code == 0, err
+    assert out.read_bytes() == harness_text.encode() + note.read_bytes()
+
+
+@pytest.mark.parametrize("bad", ["worker-team-pm", "atelier:worker-team", "atelier:worker-team-pm@0",
+                                 "atelier:worker-team-pm@vX"])
+def test_render_bad_id_is_a_usage_error(bad, harness_repo, state_dir, capsysbinary):
+    code, stdout, err = _run(capsysbinary, "render", bad, "--out",
+                             str(state_dir / "instructions.md"))
+    assert code == 1
+    assert err != b""
+    assert not (state_dir / "instructions.md").exists()
+
+
+def test_render_requires_out(harness_repo, state_dir, capsysbinary):
+    code, stdout, err = _run(capsysbinary, "render", PM)
+    assert code == 1, "no --out is a usage error: render has exactly one write"
+    assert list(state_dir.iterdir()) == []
+
+
+def test_render_unknown_version_is_exit_1_and_writes_nothing(harness_repo, state_dir, capsysbinary):
+    _age_fetch_head(harness_repo.clone, 120)
+    out = state_dir / "instructions.md"
+    code, stdout, err = _run(capsysbinary, "render", "atelier:worker-team-pm@v9", "--out", str(out))
+    assert code == 1
+    assert "v9" in err.decode()
+    assert b"v0 know" not in err, "error messages must not leak harness content"
+    assert not out.exists()
+
+
+def test_render_unknown_role_is_exit_1(harness_repo, state_dir, capsysbinary):
+    out = state_dir / "instructions.md"
+    code, stdout, err = _run(capsysbinary, "render", "atelier:worker-team-test", "--out", str(out))
+    assert code == 1
+    assert not out.exists()
+
+
+def test_render_missing_append_file_is_exit_1_and_out_is_not_created(harness_repo, tmp_path,
+                                                                state_dir, capsysbinary):
+    out = state_dir / "instructions.md"
+    code, stdout, err = _run(capsysbinary, "render", PM, "--append", str(tmp_path / "nope.md"),
+                             "--out", str(out))
+    assert code == 1
+    assert "nope.md" in err.decode()
+    assert not out.exists(), "the spec scenario: exit 1, --out not created"
+    assert list(state_dir.iterdir()) == []
+
+
+def test_render_missing_append_file_does_not_fetch(harness_repo, tmp_path, state_dir, capsysbinary):
+    """The note is read before the copy is touched (L2, one layer down)."""
+    _git("remote", "set-url", "origin", str(harness_repo.origin.parent / "gone"),
+         cwd=harness_repo.clone)
+    _age_fetch_head(harness_repo.clone, 10_000)
+    out = state_dir / "instructions.md"
+    code, stdout, err = _run(capsysbinary, "render", PM, "--append", str(tmp_path / "nope.md"),
+                             "--out", str(out))
+    assert code == 1
+    assert b"Warning" not in err, "a request that already failed must not reach the network"
+    assert not out.exists()
+
+
+def test_render_unreadable_append_file_is_exit_2(harness_repo, tmp_path, state_dir, capsysbinary):
+    note = tmp_path / "env-note.md"
+    note.mkdir()
+    out = state_dir / "instructions.md"
+    code, stdout, err = _run(capsysbinary, "render", PM, "--append", str(note), "--out", str(out))
+    assert code == 2, "the file exists but cannot be read: a file problem, not a wrong request"
+    assert b"Traceback" not in err
+    assert not out.exists()
+
+
+def test_render_missing_out_directory_is_exit_2_and_creates_nothing(harness_repo, tmp_path, capsysbinary):
+    out = tmp_path / "no-such-state" / "instructions.md"
+    code, stdout, err = _run(capsysbinary, "render", PM, "--out", str(out))
+    assert code == 2
+    assert "目錄" in err.decode()
+    assert not (tmp_path / "no-such-state").exists(), "render must not grow a directory tree"
+
+
+def test_render_into_a_read_only_directory_is_exit_2_and_leaves_no_tmp_file(
+        harness_repo, state_dir, capsysbinary):
+    os.chmod(state_dir, 0o500)
+    try:
+        code, stdout, err = _run(capsysbinary, "render", PM, "--out",
+                                 str(state_dir / "instructions.md"))
+    finally:
+        os.chmod(state_dir, 0o755)
+    assert code == 2
+    assert err != b"" and b"Traceback" not in err
+    assert list(state_dir.iterdir()) == [], "no out file, no tmp residue"
+
+
+def test_render_onto_a_directory_is_exit_2_and_keeps_it(harness_repo, state_dir, capsysbinary):
+    out = state_dir / "instructions.md"
+    out.mkdir()
+    code, stdout, err = _run(capsysbinary, "render", PM, "--out", str(out))
+    assert code == 2
+    assert b"Traceback" not in err
+    assert out.is_dir(), "what was already there is not removed"
+
+
+def test_render_writes_through_a_same_directory_tmp_file_and_replace(harness_repo, state_dir,
+                                                                    capsysbinary, monkeypatch):
+    """The write is a tmp file next to the target plus os.replace, never a truncating write."""
+    calls: list[tuple[Path, Path]] = []
+    real_replace = os.replace
+
+    def spy(src, dst, *args, **kwargs):
+        calls.append((Path(src), Path(dst)))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", spy)
+    out = state_dir / "instructions.md"
+    code, stdout, err = _run(capsysbinary, "render", PM, "--out", str(out))
+    assert code == 0, err
+    assert len(calls) == 1
+    src, dst = calls[0]
+    assert dst == out
+    assert src != out, "the target must not be written in place"
+    assert src.parent == dst.parent, "the tmp file must sit next to its target"
+    assert not src.exists(), "os.replace moves the tmp file onto the target"
+
+
+def test_a_failed_render_write_keeps_the_old_out_and_leaves_no_residue(
+        harness_repo, state_dir, capsysbinary, monkeypatch):
+    """An interrupted write leaves the old file, never half of the new one (tasks 3.1)."""
+    out = state_dir / "instructions.md"
+    out.write_bytes(b"OLD INSTRUCTIONS\n")
+
+    def boom(src, dst, *args, **kwargs):
+        raise OSError("simulated failure before the new file is in place")
+
+    monkeypatch.setattr(os, "replace", boom)
+    code, stdout, err = _run(capsysbinary, "render", PM, "--out", str(out))
+    assert code == 2
+    assert err != b""
+    assert out.read_bytes() == b"OLD INSTRUCTIONS\n", "a failed write leaves the old file"
+    assert sorted(p.name for p in state_dir.iterdir()) == ["instructions.md"], "no tmp residue"
+
+
+def test_render_touches_nothing_but_out(harness_repo, install_env, tmp_path, state_dir,
+                                        capsysbinary):
+    """`--out` is the only file written: no user-level file, no harness tree, no cwd."""
+    claude_rule = install_env.claude / "rules" / "atelier-worker-team-pm.md"
+    claude_rule.parent.mkdir(parents=True)
+    claude_rule.write_text("USER CLAUDE RULE\n", encoding="utf-8")
+    agents = _opencode_file(install_env)
+    agents.parent.mkdir(parents=True)
+    agents.write_text("<!-- user -->\nUSER AGENTS\n<!-- /user -->\n", encoding="utf-8")
+    (install_env.claude / "settings.json").write_text('{"permissions": {"allow": []}}\n',
+                                                      encoding="utf-8")
+    (install_env.project / "AGENTS.md").write_text("# project\n", encoding="utf-8")
+    note = _note(tmp_path)
+    _run(capsysbinary, "ls")   # the one allowed copy write happens here: FETCH_HEAD
+    before = (_tree(install_env.home), _tree(install_env.claude), _tree(install_env.xdg),
+              _tree(harness_repo.clone), _tree(install_env.project))
+    out = state_dir / "instructions.md"
+    code, stdout, err = _run(capsysbinary, "render", PM, "--append", str(note), "--out", str(out))
+    assert code == 0, err
+    assert out.read_bytes() == H1.encode() + note.read_bytes()
+    assert (_tree(install_env.home), _tree(install_env.claude), _tree(install_env.xdg),
+            _tree(harness_repo.clone), _tree(install_env.project)) == before, (
+        "render must write --out and nothing else: user-level files, the harness tree and the "
+        "working directory all stay byte-for-byte")
+
+
+def test_render_refuses_a_harness_without_frontmatter_and_out_is_not_created(harness_repo,
+                                                                             state_dir,
+                                                                             capsysbinary):
+    """M1: render validates harness format before writing; exit 2 and --out is not created."""
+    _publish(harness_repo, "atelier/worker-team/pm/v3.md",
+             "# 沒有 frontmatter\n\n## know\n\n內文\n")
+    _age_fetch_head(harness_repo.clone, 120)
+    out = state_dir / "instructions.md"
+    code, _, err = _run(capsysbinary, "render", "atelier:worker-team-pm@v3", "--out", str(out))
+    assert code == 2
+    assert not out.exists(), "bad harness must not create --out"
+    assert b"Traceback" not in err
+    assert b"\xe5\x85\xa7\xe6\x96\x87" not in err, "error message must not leak harness content"
+
+    code_inst, _, err_inst = _run(capsysbinary, "install", "atelier:worker-team-pm@v3",
+                                  "--agent", "claude")
+    assert code_inst == 2
+    assert err.decode() == err_inst.decode(), "render and install must have identical failure message"
+
+
+def test_render_refuses_a_harness_whose_type_is_not_harness_and_out_is_not_created(harness_repo,
+                                                                                  state_dir,
+                                                                                  capsysbinary):
+    """M1: type must be Harness; exit 2 and --out is not created."""
+    _publish(harness_repo, "atelier/worker-team/pm/v3.md", H1.replace("type: Harness", "type: Other"))
+    _age_fetch_head(harness_repo.clone, 120)
+    out = state_dir / "instructions.md"
+    code, _, err = _run(capsysbinary, "render", "atelier:worker-team-pm@v3", "--out", str(out))
+    assert code == 2
+    assert not out.exists(), "bad harness must not create --out"
+    assert "frontmatter 的 type 不是 Harness" in err.decode()
+
+    code_inst, _, err_inst = _run(capsysbinary, "install", "atelier:worker-team-pm@v3",
+                                  "--agent", "claude")
+    assert code_inst == 2
+    assert err.decode() == err_inst.decode(), "render and install must have identical failure message"
+
+
+def test_render_refuses_a_crlf_harness_identical_to_install(harness_repo, state_dir, capsysbinary):
+    """A CRLF harness has no Unix frontmatter and is refused with exit 2 (same as install and HEAD)."""
+    _publish(harness_repo, "atelier/worker-team/pm/v3.md", H1.replace("\n", "\r\n"))
+    _age_fetch_head(harness_repo.clone, 120)
+    out = state_dir / "instructions.md"
+    code, _, err = _run(capsysbinary, "render", "atelier:worker-team-pm@v3", "--out", str(out))
+    assert code == 2
+    assert not out.exists()
+    assert "檔案開頭沒有 frontmatter" in err.decode()
+
+    code_inst, _, err_inst = _run(capsysbinary, "install", "atelier:worker-team-pm@v3",
+                                  "--agent", "claude")
+    assert code_inst == 2
+    assert err.decode() == err_inst.decode(), "render and install must have identical failure message"
+
+
+
+def test_render_empty_append_is_not_omitted(harness_repo, state_dir, capsysbinary):
+    """L1: --append '' goes through the read path (exit 1 or 2), never silently ignored."""
+    out = state_dir / "instructions.md"
+    code, _, err = _run(capsysbinary, "render", PM, "--append", "", "--out", str(out))
+    assert code in (1, 2)
+    assert not out.exists()
+
+
+def test_render_out_as_symlink_replaces_symlink_and_leaves_target_unchanged(harness_repo,
+                                                                            state_dir,
+                                                                            capsysbinary):
+    """L3: when --out is a symlink, replace the symlink itself; do not write through."""
+    real_target = state_dir / "real.md"
+    real_target.write_bytes(b"TARGET CONTENT\n")
+    link = state_dir / "link.md"
+    link.symlink_to(real_target)
+
+    code, _, err = _run(capsysbinary, "render", PM, "--out", str(link))
+    assert code == 0, err
+    assert not link.is_symlink(), "os.replace replaces the symlink itself"
+    assert link.read_bytes() == H1.encode()
+    assert real_target.read_bytes() == b"TARGET CONTENT\n", "target file must not be modified"
+
+
+def test_render_empty_out_is_a_usage_error(harness_repo, capsysbinary):
+    """L4: --out '' is rejected at the entry as a usage error (exit 1)."""
+    code, _, err = _run(capsysbinary, "render", PM, "--out", "")
+    assert code == 1
+    assert "--out" in err.decode()
+
+
+def test_render_interrupted_write_leaves_old_out_and_no_residue(harness_repo, state_dir,
+                                                               capsysbinary, monkeypatch):
+    """L8: KeyboardInterrupt leaves the old file and no tmp residue."""
+    out = state_dir / "instructions.md"
+    out.write_bytes(b"OLD INSTRUCTIONS\n")
+
+    def boom(src, dst, *args, **kwargs):
+        raise KeyboardInterrupt("simulated interrupt while writing")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(KeyboardInterrupt):
+        _run(capsysbinary, "render", PM, "--out", str(out))
+    assert out.read_bytes() == b"OLD INSTRUCTIONS\n", "interrupted write leaves the old file"
+    assert sorted(p.name for p in state_dir.iterdir()) == ["instructions.md"], "no tmp residue"
+

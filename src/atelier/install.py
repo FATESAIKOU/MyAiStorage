@@ -16,14 +16,14 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import stat
-import uuid
 
+from atelier.atomic import write_atomic
 from atelier.harness import HarnessFormatError, HarnessId, frontmatter
 
 
 class InstallError(RuntimeError):
-    """An install target cannot be written (exit 2)."""
+    """A target atelier would not write into: a damaged block, a harness that is
+    not one (exit 2). A target that simply cannot be written raises WriteError."""
 
 
 def claude_dir() -> Path:
@@ -124,58 +124,9 @@ def replace_managed_block(text: str, ident: HarnessId, block: str) -> str:
     return "".join(parts)
 
 
-def _unlink_quietly(path: Path) -> None:
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
-
-
-def _fsync_dir(path: Path) -> None:
-    """Best effort: make the rename durable too (ignored where unsupported)."""
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    except OSError:
-        pass
-    finally:
-        os.close(fd)
-
-
-def _atomic_write(target: Path, data: bytes) -> None:
-    """Write `data` next to `target`, then move it in with `os.replace`.
-
-    A crash or a full disk leaves the old file or the new one, never a
-    truncated file: a half-written managed block (opening marker without its
-    closing marker) would make every later install refuse the target and only
-    a human could repair it. The temporary file never survives a failure.
-    """
-    tmp = target.parent / f".{target.name}.atelier-{uuid.uuid4().hex}.tmp"
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if target.exists():   # keep the target's mode; a fresh file follows the umask
-            os.chmod(tmp, stat.S_IMODE(target.stat().st_mode))
-        os.replace(tmp, target)
-        _fsync_dir(target.parent)
-    except OSError as e:
-        _unlink_quietly(tmp)
-        raise InstallError(f"寫不進去 {target}：{e}") from e
-    except BaseException:
-        _unlink_quietly(tmp)
-        raise
-
-
 def install_claude(target: Path, raw: bytes) -> None:
     """Write the harness as-is: the file is atelier's alone (spec「獨立檔」)."""
-    _atomic_write(target, raw)
+    write_atomic(target, raw)
 
 
 def install_opencode(target: Path, ident: HarnessId, raw_text: str) -> None:
@@ -196,4 +147,4 @@ def install_opencode(target: Path, ident: HarnessId, raw_text: str) -> None:
     except (OSError, UnicodeDecodeError) as e:
         raise InstallError(f"讀不到 {target}：{e}") from e
     new_text = replace_managed_block(current, ident, managed_block(ident, raw_text))
-    _atomic_write(target, new_text.encode("utf-8"))
+    write_atomic(target, new_text.encode("utf-8"))
