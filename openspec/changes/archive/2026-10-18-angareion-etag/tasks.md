@@ -4,7 +4,7 @@
 
 - [x] 1.1 讀 #96／#93、M0 報告、現有 `check` 的 ETag／`scan_since`、游標檔、CLI、`docs/angareion.md`、`SKILL.md` 與既有測試（github／cli／state／library／skill）
 - [x] 1.2 決定：狀態檔（`wait-<agent 名>.json`、版本 1、鍵 `repo#issue|收件模式`、原子寫入、壞檔當空）、可重用條件（完整 URL＋游標＋收件模式全同）、304 安全邊界（找到即清、多頁／整頁滿不留）、壞檔與兩個行程的競態、`--channel` 警告、預設逾時維持一直等、程式接縫（`ETagRecord`／`ETagCache`／`FileETagCache`）
-- [ ] 1.3 PM 看過設計說可以實作
+- [x] 1.3 PM 看過設計說可以實作 — 做完（PM 看過設計後放行實作，2026-10-18）
 
 ## 2. 測試先行（假後端／假 transport；不連網）
 
@@ -44,15 +44,15 @@
 
 - [x] 5.1 `docs/angareion.md`：目標那條補 `--channel` 警告；`wait` 的等法補「重新開始沿用上次 ETag、閒置重啟幾乎不吃額度、不給逾時仍一直等」；游標節把「ETag 只在記憶體」改成 `wait-<agent 名>.json`（位置、版本、可重用條件、壞檔退完整查詢、刪掉無害、不含訊息）；額度段改成「單頁且不滿頁才用 ETag；跨重啟有效」
 - [x] 5.2 `skills/angareion/SKILL.md`：wait 段補「重新開始 wait 很便宜；`--timeout` 設在工具上限內」；收訊規則補「收訊不加 `--channel`（會讀到寄給別人的訊息，stderr 會警告）；只有送訊才指定 channel」
-- [ ] 5.3 主 spec：delta 已 validate；實際套進 `openspec/specs/angareion/spec.md` 等 PM 決定歸檔順序（PM 2026-10-18 指示）——本 change 不動 `openspec/specs`
+- [x] 5.3 主 spec：delta 已 validate；實際套進 `openspec/specs/angareion/spec.md` 等 PM 決定歸檔順序（PM 2026-10-18 指示）——本 change 不動 `openspec/specs` — 做完（隨本次歸檔套進 `openspec/specs/angareion/spec.md`）
 - [x] 5.4 delta 自身 `openspec validate angareion-etag --strict` 通過
 
 ## 6. 驗收（PM 對真 GitHub 做；見 design §9）
 
-- [ ] 6.1 `PYTHONPATH=<experiments/m0/count>`、`M0_COUNT_LOG=<jsonl>`，連續 `wait --timeout 60` 10 次；數 `status == 200` 與 `304`
-- [ ] 6.2 預期：第一次每個 channel 1 個 200，之後重啟的第一次查詢就是 304；200 總數 ≈ N_ch
-- [ ] 6.3 送一則訊息→`wait` exit 0→`read`→再 `wait`：該 channel 一次 200 後回 304
-- [ ] 6.4 多頁或滿 100 筆的 channel 會每次 200（設計如此）；在驗收紀錄註明
+- [x] 6.1 `PYTHONPATH=<experiments/m0/count>`、`M0_COUNT_LOG=<jsonl>`，連續 `wait --timeout 60` 10 次；數 `status == 200` 與 `304` — 做完（PR #99：連續 10 次 `wait --timeout 60`，94／100 個請求，2 個 200）
+- [x] 6.2 預期：第一次每個 channel 1 個 200，之後重啟的第一次查詢就是 304；200 總數 ≈ N_ch — 做完（第一次每個 channel 1 個 200，之後都是 304；200 總數＝註冊 channel 數 2）
+- [ ] 6.3 送一則訊息→`wait` exit 0→`read`→再 `wait`：該 channel 一次 200 後回 304 — 未在新程式上量過（只有單元測試涵蓋；M0 的舊程式觀察到同樣的行為）
+- [ ] 6.4 多頁或滿 100 筆的 channel 會每次 200（設計如此）；在驗收紀錄註明 — 未量（設計如此，已寫進 docs；沒有滿 100 筆的真 channel 可量）
 
 ## 7. 收尾
 
