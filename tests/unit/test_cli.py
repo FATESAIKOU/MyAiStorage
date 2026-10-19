@@ -15,6 +15,7 @@ import pytest
 from agora import cli, store
 from agora import header as h
 from agora.agents.base import AgentError, Exported, Launch, format_reading
+from _round_seam import in_process_start_child
 
 FAKE_RCLONE = Path(__file__).resolve().parent.parent / "fakes" / "fake_rclone.py"
 FAKE_OPENCODE = Path(__file__).resolve().parent.parent / "fakes" / "fake_opencode.py"
@@ -97,6 +98,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("AGORA_RCLONE", str(wrapper))
     agent = FakeAgent()
     monkeypatch.setattr(cli, "load_agent", lambda name: agent)
+    monkeypatch.setattr(cli, "_start_child", in_process_start_child)
     return agent
 
 

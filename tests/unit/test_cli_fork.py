@@ -23,6 +23,7 @@ import pytest
 from agora import cli, store
 from agora import header as h
 from agora.agents.base import AgentError, Exported, Launch
+from _round_seam import in_process_start_child
 
 FAKE_RCLONE = Path(__file__).resolve().parent.parent / "fakes" / "fake_rclone.py"
 
@@ -94,6 +95,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("AGORA_RCLONE", str(wrapper))
     agent = ForkAgent()
     monkeypatch.setattr(cli, "load_agent", lambda name: agent)
+    monkeypatch.setattr(cli, "_start_child", in_process_start_child)
     return agent
 
 
@@ -439,19 +441,42 @@ def test_the_pending_record_says_it_is_a_fork_of_b(env, capsys, during_agent):
 
     def peek():
         [record] = [json.loads(p.read_text(encoding="utf-8")) for p in paths().pending.glob("*.json")]
-        seen.update(record, saved_md5_at_launch=h.agora_of(_fork_session())["raw"]["md5"])
+        seen.update(record, fork_md5=h.agora_of(_fork_session())["raw"]["md5"],
+                    exported_md5=hashlib.md5(env._exported(env.launched[-1].agent_session_id).raw).hexdigest())
 
     during_agent(peek)
     _, b, _ = _fork(capsys, a)
 
     assert seen["fork"] is True
     assert seen["agora_id"] == b
-    assert seen["parent"] == {"id": b, "raw_md5": seen["saved_md5_at_launch"]}
-    assert seen["saved_md5"] == seen["saved_md5_at_launch"]
+    assert seen["parent"] == {"id": b, "raw_md5": seen["fork_md5"]}
+    assert seen["saved_md5"] == seen["fork_md5"]
+    assert seen["fork_md5"] == seen["exported_md5"], "the fork's md5 is the staged B's raw"
     assert seen["title"] == "表格排版-fork"
     assert seen["header_updates"] == {}
     assert seen["agent_session_id"] == env.launched[-1].agent_session_id
     assert a not in json.dumps(seen), "nothing in the record points at A any more"
+
+
+def test_a_fork_whose_child_reported_no_saved_b_is_a_named_error(env, capsys, monkeypatch):
+    """`saved_fork` is only taken on the fork path. An empty answer there means the
+    shell cannot finish the fork and says so - a clear AgentError (exit 2), not the
+    bare TypeError a `tuple(None)` would raise."""
+    _, a, _ = _import(capsys)
+    payload = {"launch": {"argv": ["true"], "cwd": "/tmp", "agent_session_id": "ses_b",
+                          "before_count": 1, "env": {}},
+               "parent_md5": None, "saved_md5": None,
+               "fork_id": "agora:01TEST00000000000000000000", "fork_title": "x",
+               "fork_md5": "0" * 32, "saved_fork": None}
+    monkeypatch.setattr(cli, "_start_child", lambda paths_, state: payload)
+    args = cli.build_parser().parse_args(
+        ["continue", "session", a, "--agent", "opencode", "--fork",
+         "--dir", "/tmp", "--sync-period", "0"])
+
+    with pytest.raises(cli.AgentError) as e:
+        cli.cmd_continue(args, paths())
+
+    assert "saved_fork" in str(e.value) and "沒有" in str(e.value)
 
 
 def _break_case_of(agora_id, entity="mybrain-plus"):

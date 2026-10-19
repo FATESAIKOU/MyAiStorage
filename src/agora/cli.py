@@ -1475,6 +1475,95 @@ def _kill_round_group(proc) -> bool:
     return True
 
 
+class StartChildDead(AgentError):
+    """The startup load child did not come back with an answer the shell can use:
+    killed, crashed, exited nonzero, or answered garbage. A failed continue, the
+    way a load failure always was - the message says it was the load child
+    (impl-mem-start; before this, a hard death here was the shell's own)."""
+
+
+def _start_child(paths: store.Paths, state: dict) -> dict:
+    """Run the load-and-launch half of `continue` in a fresh interpreter.
+
+    `agora.start_child` fetches the raw, takes the md5s, calls `start_native`
+    and - for a fork - reads the new session back and stages it, then exits:
+    the session-sized bytes live and die in that child, and the shell carries
+    nothing of them while it waits (impl-mem-start; why a fresh interpreter
+    and not `os.fork()`: `agora.round_child`'s docstring). What comes back is
+    one small JSON payload. The child's stderr is the shell's, so a warning it
+    makes reads exactly where it always did; a killed or broken child counts
+    as a failed continue, with the group killed like a wedged round's. `paths`
+    is the seam's signature; the real child rebuilds the paths from the env it
+    inherits (the same directories the shell has)."""
+    proc = subprocess.Popen([sys.executable, "-m", "agora.start_child"],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            start_new_session=True)
+    try:
+        out, _err = proc.communicate(json.dumps(state).encode(), timeout=_round_timeout())
+    except subprocess.TimeoutExpired:
+        group_dead = _kill_round_group(proc)
+        try:
+            proc.communicate(timeout=5)               # drain what the corpse left
+        except Exception:                             # refused kill or a live pipe:
+            group_dead = False                        # not finished cleaning up
+        if not group_dead:                            # bounded, whatever the corpse
+            with contextlib.suppress(Exception):      # does - the shell never
+                proc.kill()                           # hangs on a dead child's pipes
+                proc.wait(timeout=5)
+        raise StartChildDead("載入接續失敗：子行程逾時")
+    except BaseException:
+        # Ctrl-C (or anything else driving the shell out) while the load child is
+        # still working: it leads its own session, so the terminal's SIGINT never
+        # reached it - kill the group here, then let the original exception go
+        # (impl-mem-start review 中1: a cancelled continue must not leave a load
+        # running, and a stop must not turn into an orphan).
+        group_dead = _kill_round_group(proc)
+        try:
+            proc.communicate(timeout=5)               # drain what the corpse left
+        except BaseException:                         # a second cancel, refused kill
+            group_dead = False                        # or a live pipe: keep going
+        if not group_dead:
+            with contextlib.suppress(BaseException):  # still bounded, and the
+                proc.kill()                           # original exception wins
+                proc.wait(timeout=5)
+        raise
+    if proc.returncode != 0:
+        raise StartChildDead(f"載入接續失敗：子行程異常結束（rc={proc.returncode}）")
+    try:
+        payload = json.loads(out)
+    except ValueError as e:
+        raise StartChildDead(f"載入接續失敗：子行程狀態壞掉（{e}）")
+    return _start_payload(payload)
+
+
+def _start_payload(payload: dict) -> dict:
+    """A child's answer, with its named failure raised in this process.
+
+    The seam's in-process child uses this too, so a test world sees the same
+    conversion the real boundary performs."""
+    if payload.get("err") is not None:
+        _raise_child_error(payload["err"])
+    return payload
+
+
+#: The exceptions `agora.start_child` can name in its payload, by class name.
+#: A named type is raised as itself again - the CLI's exit code and words hang
+#: on it (InputError vs AgentError, #54 and the M7 fork messages).
+_CHILD_ERRORS = {"InputError": InputError, "AgentError": AgentError,
+                 "StoreError": store.StoreError, "HeaderError": h.HeaderError}
+
+
+def _raise_child_error(err: dict) -> None:
+    """Raise what the load child caught, so the caller sees the same failure.
+
+    Anything not in `_CHILD_ERRORS` is rebuilt under its own name: that is all
+    the generic handler prints of an unexpected exception (`非預期的錯誤：Name: …`)."""
+    cls = _CHILD_ERRORS.get(err.get("kind"))
+    if cls is None:
+        cls = type(err.get("kind") or "Exception", (Exception,), {})
+    raise cls(err.get("text", ""))
+
+
 #: The seven fields one round owes the outer shell; `_apply_diff` refuses a
 #: payload that is missing any of them (a broken answer lands whole or not at
 #: all), and the tests name the same list.
@@ -1781,6 +1870,111 @@ def _export_launch(agent: Agent, launch: Launch) -> Exported:
     return agent.export(launch.agent_session_id)
 
 
+def _load_for_launch(paths: store.Paths, state: dict) -> dict:
+    """The load-and-launch half of `cmd_continue`, in its own function.
+
+    It runs where `cmd_continue` would have run it - for real, inside
+    `agora.start_child`, a fresh interpreter that exits at the end, so every
+    session-sized byte it reads (the raw, the parsed session, the newly built
+    one) is memory the OS takes back at once. The shell gets the small answer
+    only. `state` carries what the caller already decided (the ids, the header,
+    the user's updates, the directory); the language here is unchanged from
+    when this was `cmd_continue`'s own middle: same fetch, same md5s, same
+    `start_native`, same fork read-back and stage, same errors. Keep it that
+    way - the child is a process boundary, not a new code path.
+    """
+    agent = load_agent(state["agent"])
+    source_id = state["source_id"]
+    parent = state["parent"]
+    agora = h.agora_of(parent)
+    fork = bool(state["fork"])
+    updates = state["updates"]
+    add_tags = state["add_tags"]
+    workdir = Path(state["workdir"])
+    headless = bool(state["headless"])
+    headless_port = state.get("headless_port")
+    harness_path = Path(state["harness_file"]) if state.get("harness_file") else None
+    fork_turns = _fork_turns(source_id, parent) if fork else []
+    # ① what to load, ② the target adapter builds its own format, ③ one way to load it (design 5.4).
+    own: bytes | None = None
+    if agora.get("relation") == "merge":   # its sections and list of sources, never the sources' raws
+        _require_sections(source_id, agora)
+        parent_md5 = None
+        lines = [line for line in _body_for(paths, source_id).splitlines() if line.strip()]
+        # a deliberate stand-in reply, then what this fork is (design「接在原生 raw 後面」)
+        merge_turn = [("user", [MERGE_NOTE.format(by=agora["merge"].get("by")), *lines]),
+                      ("assistant", [MERGE_READY])]
+    else:
+        own = store.fetch_raw(paths, store.Drive(paths), _ulid_of(source_id), parent)
+        parent_md5 = store.hashlib.md5(own).hexdigest()   # what we really continued from (C9)
+        merge_turn = None
+    base = _fork_base(parent, source_id, parent_md5, updates) if fork else None   # F16
+    src = agora.get("source") or {}
+    if merge_turn is not None:
+        raw = agent.native(merge_turns([*merge_turn, *fork_turns]))
+    elif src.get("agent") != agent.name:
+        raw = agent.native(merge_turns([*_converted_turns(src.get("agent"), source_id, own), *fork_turns]))
+    elif fork:
+        # same agent: A's own raw, unconverted (tool calls and prefixes intact, so the
+        # cache still hits), with the fork's two turns appended to it (design 5.4).
+        raw = agent.append_native(own, fork_turns)
+    else:
+        raw = own
+    # What the non-fork record keeps: the md5 of what was loaded (design P8).
+    loaded_md5 = None if fork else store.hashlib.md5(raw).hexdigest()
+    if harness_path is not None:
+        if headless:
+            launch = agent.start_native(raw, workdir, headless=True, headless_port=headless_port,
+                                        harness_file=harness_path)
+        else:
+            launch = agent.start_native(raw, workdir, harness_file=harness_path)
+    else:
+        if headless:
+            launch = agent.start_native(raw, workdir, headless=True, headless_port=headless_port)
+        else:
+            launch = agent.start_native(raw, workdir)
+    fork_id = fork_title = fork_md5 = None
+    saved_fork = None
+    if fork:
+        if not launch.agent_session_id:
+            raise AgentError(f"{agent.name} 啟動之後沒有 session id，這個 fork 沒有存成")
+        # Read it back right away: B is what this launch holds, and `before_count` says
+        # it should hold exactly what was loaded (F3).
+        try:
+            exported = _export_launch(agent, launch)
+        except Exception as e:
+            # The agent session exists but was never saved as an agora Session: say so,
+            # or the user finds it in the not-imported tab and wonders (review M7).
+            raise AgentError(f"{agent.name} 的 agent session {launch.agent_session_id} 讀不回來（{e}）；"
+                             f"它沒有存成 agora Session，可以不管它") from e
+        if exported.message_count != launch.before_count:
+            raise AgentError(f"{agent.name} 剛啟動的 Session {launch.agent_session_id} 和匯出來的內容對不上"
+                             f"（{exported.message_count} 則／{launch.before_count} 則），沒有存；"
+                             f"那個 agent session 可以不管它")
+        # The user's --header is folded in last, or `_fork_after_launch` would overwrite
+        # a given `generated.*` or `sources` (review M4) - and the given title stays
+        # without `-fork` on the B that is saved here, which the write-back may never
+        # touch again (M2).
+        fork_hdr = _with_user(_fork_after_launch(base, agent, exported), updates,
+                              add_tags=add_tags)
+        fork_id, fork_title = fork_hdr["id"], fork_hdr["title"]
+        fork_md5 = store.hashlib.md5(exported.raw).hexdigest()
+        saved_fork = _save(paths, fork_hdr, reading(agent, exported.raw), exported.raw)
+    # Nothing below reads the loaded conversation - and below is the whole day -
+    # so drop it before the answer goes back: the launch owns its own copy on
+    # disk, the record keeps the md5s, and the rounds collect the agent's file
+    # anew (impl-mem-start: 100 MB session, 128 MB shell left).
+    own = raw = None
+    exported = None
+    merge_turn = fork_turns = None
+    return {"launch": {"argv": launch.argv, "cwd": launch.cwd,
+                       "agent_session_id": launch.agent_session_id,
+                       "before_count": launch.before_count, "env": launch.env},
+            "parent_md5": parent_md5, "saved_md5": loaded_md5,
+            "fork_id": fork_id, "fork_title": fork_title, "fork_md5": fork_md5,
+            "saved_fork": list(saved_fork) if saved_fork else None}
+
+
 def cmd_continue(args, paths: store.Paths) -> int:
     if not args.agent:
         raise InputError("continue 要給 --agent opencode|claude")
@@ -1829,71 +2023,32 @@ def cmd_continue(args, paths: store.Paths) -> int:
     fallback = not args.dir and not src_dir
     print(f"[agora] 工作目錄：{workdir}" + ("（來源沒有記錄目錄，用目前目錄；要換地方請加 --dir）" if fallback else ""),
           file=sys.stderr)
-    fork_turns = _fork_turns(source_id, parent) if fork else []
-    # ① what to load, ② the target adapter builds its own format, ③ one way to load it (design 5.4).
-    if agora.get("relation") == "merge":   # its sections and list of sources, never the sources' raws
-        _require_sections(source_id, agora)
-        parent_md5 = None
-        lines = [line for line in _body_for(paths, source_id).splitlines() if line.strip()]
-        # a deliberate stand-in reply, then what this fork is (design「接在原生 raw 後面」)
-        merge_turn = [("user", [MERGE_NOTE.format(by=agora["merge"].get("by")), *lines]),
-                      ("assistant", [MERGE_READY])]
-    else:
-        own = store.fetch_raw(paths, store.Drive(paths), _ulid_of(source_id), parent)
-        parent_md5 = store.hashlib.md5(own).hexdigest()   # what we really continued from (C9)
-        merge_turn = None
-    base = _fork_base(parent, source_id, parent_md5, updates) if fork else None   # F16
-    if merge_turn is not None:
-        raw = agent.native(merge_turns([*merge_turn, *fork_turns]))
-    elif src.get("agent") != agent.name:
-        raw = agent.native(merge_turns([*_converted_turns(src.get("agent"), source_id, own), *fork_turns]))
-    elif fork:
-        # same agent: A's own raw, unconverted (tool calls and prefixes intact, so the
-        # cache still hits), with the fork's two turns appended to it (design 5.4).
-        raw = agent.append_native(own, fork_turns)
-    else:
-        raw = own
-    if harness_path is not None:
-        if headless:
-            launch = agent.start_native(raw, workdir, headless=True, headless_port=headless_port,
-                                        harness_file=harness_path)
-        else:
-            launch = agent.start_native(raw, workdir, harness_file=harness_path)
-    else:
-        if headless:
-            launch = agent.start_native(raw, workdir, headless=True, headless_port=headless_port)
-        else:
-            launch = agent.start_native(raw, workdir)
+    state = {
+        "agent": agent.name, "source_id": source_id, "parent": parent, "fork": fork,
+        "updates": updates, "add_tags": add_tags, "workdir": str(workdir),
+        "headless": headless, "headless_port": headless_port,
+        "harness_file": str(harness_path) if harness_path is not None else None,
+    }
+    payload = _start_child(paths, state)
+    launch = Launch(argv=payload["launch"]["argv"], cwd=payload["launch"]["cwd"],
+                    agent_session_id=payload["launch"]["agent_session_id"],
+                    before_count=payload["launch"]["before_count"],
+                    env=payload["launch"]["env"])
+    parent_md5 = payload["parent_md5"]
     if fork:
-        if not launch.agent_session_id:
-            raise AgentError(f"{agent.name} 啟動之後沒有 session id，這個 fork 沒有存成")
-        # Read it back right away: B is what this launch holds, and `before_count` says
-        # it should hold exactly what was loaded (F3).
-        try:
-            exported = _export_launch(agent, launch)
-        except Exception as e:
-            # The agent session exists but was never saved as an agora Session: say so,
-            # or the user finds it in the not-imported tab and wonders (review M7).
-            raise AgentError(f"{agent.name} 的 agent session {launch.agent_session_id} 讀不回來（{e}）；"
-                             f"它沒有存成 agora Session，可以不管它") from e
-        if exported.message_count != launch.before_count:
-            raise AgentError(f"{agent.name} 剛啟動的 Session {launch.agent_session_id} 和匯出來的內容對不上"
-                             f"（{exported.message_count} 則／{launch.before_count} 則），沒有存；"
-                             f"那個 agent session 可以不管它")
-        # The user's --header is folded in last, or `_fork_after_launch` would overwrite
-        # a given `generated.*` or `sources` (review M4) - and the given title stays
-        # without `-fork` on the B that is saved here, which the write-back may never
-        # touch again (M2).
-        fork_hdr = _with_user(_fork_after_launch(base, agent, exported), updates,
-                              add_tags=add_tags)
-        fork_md5 = store.hashlib.md5(exported.raw).hexdigest()
-        saved_fork = _save(paths, fork_hdr, reading(agent, exported.raw), exported.raw)
-        print(f"[agora] fork 已存成 {fork_hdr['id']}", file=sys.stderr)   # M7: the id is out
+        saved_fork = tuple(payload.get("saved_fork") or ())
+        if not saved_fork:
+            raise AgentError("fork 已啟動，但載入子行程沒有回報存好的 B（saved_fork）；"
+                             "這個 fork 沒有存成")
+        fork_id, fork_md5 = payload["fork_id"], payload["fork_md5"]
+        # The fork is saved already (in the child, which is where its bytes died);
+        # M7: the id is out.
+        print(f"[agora] fork 已存成 {fork_id}", file=sys.stderr)
         record = {
-            "agora_id": fork_hdr["id"], "agent": agent.name,     # B, not A: A is not touched
+            "agora_id": fork_id, "agent": agent.name,     # B, not A: A is not touched
             "agent_session_id": launch.agent_session_id, "dir": launch.cwd,
-            "parent": {"id": fork_hdr["id"], "raw_md5": fork_md5},
-            "title": fork_hdr["title"], "before_count": launch.before_count,
+            "parent": {"id": fork_id, "raw_md5": fork_md5},
+            "title": payload["fork_title"], "before_count": launch.before_count,
             "started_at": _now_iso(), "header_updates": updates,
             "add_tags": add_tags,
             "fork": True, "saved_md5": fork_md5,
@@ -1909,14 +2064,14 @@ def cmd_continue(args, paths: store.Paths) -> int:
             "started_at": _now_iso(), "header_updates": updates,
             "add_tags": add_tags,
             # the baseline "nothing new" compares against: what was just loaded (design P8)
-            "saved_md5": store.hashlib.md5(raw).hexdigest(),
+            "saved_md5": payload["saved_md5"],
         }
     pending, lock = _write_pending(paths, record)
     run = _Run(paths, record, pending=pending, lock=lock)
     if fork:
         run.wrote = True          # step 6 already staged B
     store._fault("before-agent-launch")
-    continued_id = fork_hdr["id"] if fork else source_id
+    continued_id = fork_id if fork else source_id
     if headless:
         # The fixed lines the caller reads (session-continue delta): the agora
         # Session this run writes, and - for opencode - the port the server
