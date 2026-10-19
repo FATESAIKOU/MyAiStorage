@@ -1,10 +1,13 @@
-"""The raw copy in `store.remember` is a byte copy, not a text round trip (B1b-1).
+"""The raw copy in `store.remember` is a byte copy, not a text round trip (B1b-1);
+`store.stage` also accepts a file path and streams the raw into the outbox (B1b-2).
 
 `remember` used to do `write_atomic(target, wanted.read_text())`: the raw was already
 on disk as bytes, and that held a whole second copy of it as a `str` - the 5.5x round
 peak the B1a report measured. These tests keep the copy byte-for-byte equal to the old
 text path for the shapes a raw really has, keep the old failure behaviour for a raw no
-`read_text` would accept, and guard the memory that made the change worth doing.
+`read_text` would accept, guard the memory that made the change worth doing, and pin
+that staging a file-backed raw does it without a second in-memory copy and cleans up on
+failure.
 """
 
 from __future__ import annotations
@@ -14,14 +17,18 @@ import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve
 import gc
 import hashlib
 import json
+import os
 import shutil
+import sys
 import tracemalloc
 from pathlib import Path
 
 import pytest
 
-from agora import header as h
+from agora import cli, header as h
 from agora import store
+from agora.agents.base import Exported
+from agora.agents.claude import ClaudeAgent, encode_project_dir
 
 
 def _header(title="raw 複製") -> dict:
@@ -212,3 +219,119 @@ def test_remember_does_not_hold_a_second_copy_of_the_raw():
 
     grew = peak - baseline
     assert grew < size // 3, f"remember held {grew / (1 << 20):.1f} MB for a {size >> 20} MB raw"
+
+
+def test_stage_from_file_streams_bytes_and_header_fields(tmp_path):
+    """A file-backed raw is staged byte-for-byte without being read into memory."""
+    raw = _raw_shapes()["big-tool-result"]
+    src = tmp_path / "raw.json"
+    src.write_bytes(raw)
+    paths = store.Paths.from_env()
+    hdr = _header()
+    folder = store.stage(paths, hdr, "## user\nCSV\n", src)
+
+    name = hdr["agora"]["raw"]["file"]
+    assert (folder / name).read_bytes() == raw
+    assert hdr["agora"]["raw"]["md5"] == hashlib.md5(raw).hexdigest()
+    assert hdr["agora"]["raw"]["size"] == len(raw)
+
+
+def test_stage_from_file_failure_leaves_no_tmp_folder(tmp_path, monkeypatch):
+    """A mid-copy crash must not leave the `.tmp-<ulid>` staging folder behind."""
+    raw = b"a" * 100_000
+    src = tmp_path / "raw.json"
+    src.write_bytes(raw)
+    paths = store.Paths.from_env()
+    hdr = _header()
+    ulid = hdr["id"].split(":", 1)[1]
+
+    def dies_after_a_chunk(fileobj, out, length=0):
+        out.write(b"half")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(shutil, "copyfileobj", dies_after_a_chunk)
+    with pytest.raises(OSError):
+        store.stage(paths, hdr, "## user\nCSV\n", src)
+
+    assert not (paths.outbox / f".tmp-{ulid}").exists()
+    assert not (paths.outbox / ulid).exists()
+
+
+def test_claude_export_stage_does_not_hold_raw_bytes(tmp_path, monkeypatch):
+    """Export + stage with a ~35 MB CJK jsonl peaks below 2.2x and never needs `.raw`.
+
+    The streaming pack writes the raw to disk, and the file-backed stage copies it
+    to the outbox without reading it back. The only large memory still held is the
+    line list and the carried turns (B1a), so the ratio is well under the old 5.6x.
+    """
+    home = Path(os.environ["AGORA_CLAUDE_HOME"])
+    workdir = tmp_path / "proj"
+    workdir.mkdir()
+    pdir = home / ".claude" / "projects" / encode_project_dir(workdir)
+    pdir.mkdir(parents=True)
+    sid = "11111111-2222-4333-8444-555555555555"
+    path = pdir / f"{sid}.jsonl"
+
+    # ~35 MB of non-ASCII jsonl so the line list pays the CJK str overhead.
+    content = "中文" * 5000
+    line = json.dumps({"type": "user", "message": {"role": "user", "content": content}}, ensure_ascii=False) + "\n"
+    target = 35 << 20
+    with path.open("wb") as f:
+        while f.tell() < target:
+            f.write(line.encode("utf-8"))
+    main_bytes = path.stat().st_size
+
+    agent = ClaudeAgent()
+    gc.collect()
+    tracemalloc.start()
+    try:
+        gc.collect()
+        baseline = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        exported = agent.export(sid, hint_dir=workdir)
+        paths = store.Paths.from_env()
+        store.stage(paths, _header(), "## user\nCSV\n", exported.raw_file)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    grew = peak - baseline
+    assert grew < 2.2 * main_bytes, (
+        f"export+stage peak {grew / (1 << 20):.1f} MB for {main_bytes / (1 << 20):.1f} MB file")
+    # The lazy property reads the file correctly when something does need bytes.
+    assert exported.raw_md5 == hashlib.md5(exported.raw).hexdigest()
+    assert exported.raw_size == len(exported.raw)
+
+
+def test_write_one_uses_raw_md5_without_loading_raw(tmp_path, monkeypatch):
+    """`_write_one` must stage the raw through `raw_file`/`raw_md5`, never `.raw`."""
+    raw = b'{"format": "claude-jsonl/1", "main": [], "aux": {}}'
+    src = tmp_path / "raw.json"
+    src.write_bytes(raw)
+    exported = Exported(session_id="s", raw_file=src,
+                        raw_md5=hashlib.md5(raw).hexdigest(), raw_size=len(raw),
+                        turns=[], title="t")
+    accesses: list = []
+    real_getter = Exported.raw.fget
+
+    def tracked_raw(self):
+        accesses.append(1)
+        return real_getter(self)
+
+    monkeypatch.setattr(Exported, "raw", property(tracked_raw))
+
+    paths = store.Paths.from_env()
+    hdr = _header()
+    folder = store.stage(paths, hdr, "## user\nCSV\n", raw)
+    target_id = hdr["id"]
+    record = {"agora_id": target_id, "agent": "claude", "agent_session_id": "s",
+              "dir": str(tmp_path), "parent": {"id": target_id, "raw_md5": "0" * 32},
+              "parent_headers": [], "title": "t", "before_count": 0,
+              "started_at": "2026-10-20T00:00:00Z", "header_updates": {},
+              "add_tags": [], "saved_md5": "0" * 32}
+    run = cli._Run(paths, record)
+
+    saved, _where, _note = cli._write_one(paths, run, exported, ClaudeAgent(),
+                                          check_drive=False)
+    assert saved is not None
+    assert not accesses, "_write_one loaded exported.raw instead of using raw_md5"

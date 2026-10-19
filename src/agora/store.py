@@ -269,14 +269,62 @@ class Drive:
                          "copy", "gdrive:sessions", str(mirror), "--no-traverse")
 
 
+class _Md5Reader:
+    """A read-through that feeds `shutil.copyfileobj` while computing md5/size."""
+
+    def __init__(self, fileobj):
+        self._file = fileobj
+        self.digest = hashlib.md5()
+        self.size = 0
+
+    def read(self, size: int = -1) -> bytes:
+        data = self._file.read(size)
+        if data:
+            self.digest.update(data)
+            self.size += len(data)
+        return data
+
+
+def _stage_raw(tmp: Path, raw: bytes | Path) -> tuple[str, int, str]:
+    """Put the raw into `tmp` and return (md5, size, file name).
+
+    Bytes are written directly; a path is copied in 1 MiB chunks so the staging
+    folder never holds a second whole copy. The staging name is unique inside `tmp`
+    and is renamed to the raw-md5 name once the copy finishes, so a crash leaves no
+    `raw-*.json` half-file.
+    """
+    if isinstance(raw, Path):
+        handle, staging = tempfile.mkstemp(dir=tmp, prefix="raw-", suffix=".tmp")
+        try:
+            with os.fdopen(handle, "wb") as out, open(raw, "rb") as src:
+                reader = _Md5Reader(src)
+                shutil.copyfileobj(reader, out, 1 << 20)
+                out.flush()
+                os.fsync(out.fileno())
+            name = f"raw-{reader.digest.hexdigest()[:12]}.json"
+            os.replace(staging, tmp / name)
+        except Exception:
+            Path(staging).unlink(missing_ok=True)
+            raise
+        return reader.digest.hexdigest(), reader.size, name
+    md5 = hashlib.md5(raw).hexdigest()
+    name = f"raw-{md5[:12]}.json"
+    _write_file(tmp / name, raw)
+    return md5, len(raw), name
+
+
 # ---------------------------------------------------------------------------
 # Outbox: a session is written here first and only leaves once Drive has it.
 # ---------------------------------------------------------------------------
 
 
-def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None, *,
-          update: bool = False, kind: str = "") -> Path:
+def stage(paths: Paths, header: dict, body: str,
+          raw: bytes | Path | None, *, update: bool = False, kind: str = "") -> Path:
     """Write a complete session into the outbox and return its folder.
+
+    `raw` may be the whole bytes, or a file path that holds them. When it is a path,
+    the bytes are streamed into the staging folder and the md5/size are taken from
+    the file without a second in-memory copy (impl-mem B1b-2).
 
     `update`／`kind` say what `mark_update` says, and are written into the folder that
     is about to go in, before the swap: the uploader reads the outbox whenever it likes,
@@ -292,44 +340,48 @@ def stage(paths: Paths, header: dict, body: str, raw_bytes: bytes | None, *,
     tmp = paths.outbox / f".tmp-{ulid}"
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir()
-    if raw_bytes is not None:
-        md5 = hashlib.md5(raw_bytes).hexdigest()
-        name = f"raw-{md5[:12]}.json"
-        _write_file(tmp / name, raw_bytes)
-        header.setdefault("agora", {})["raw"] = {"file": name, "md5": md5, "size": len(raw_bytes)}
-    else:
-        header.setdefault("agora", {}).pop("raw", None)
-    if folder.is_dir():
-        # The raw the entry being replaced names comes along, and only that one: an
-        # uploader may have built its list from that entry a moment ago, and rclone
-        # reading it after this swap would otherwise stop the whole batch on
-        # `source not found` (review T2). Older raws stay behind - nobody's list names
-        # them any more, and carrying every version made each round's entry one raw
-        # bigger and each pass send them all again (review N1).
-        previous = _named_raw(folder)
-        if previous and not (tmp / previous).exists():
-            try:
-                shutil.copyfile(folder / previous, tmp / previous)
-            except OSError:
-                pass                    # claimed by an uploader meanwhile: nothing to keep
-    _write_file(tmp / "session.md", h.dump_document(header, body).encode("utf-8"))
-    if update:
-        mark_update(tmp, kind)          # into the folder that is about to go in, not the one that is there
-    _fsync_dir(tmp)                    # the files and the names pointing at them
-    # Swap in whole, so a crash never leaves an outbox entry without session.md
-    # (C4): the old entry is renamed aside, the new one moved in, then the old removed (R6).
-    old = paths.outbox / f".old-{ulid}"
-    shutil.rmtree(old, ignore_errors=True)
-    if folder.exists():
-        folder.rename(old)
-    tmp.rename(folder)
-    shutil.rmtree(old, ignore_errors=True)
-    # `.done-<ULID>` is left alone (review R1): an uploader may be comparing it right
-    # now, and what it holds is a version that was current a moment ago - deleting it
-    # loses an edit. Whoever finds `outbox/<ULID>` already there drops it instead:
-    # `_rename_back` while comparing, `restore_done` when the background takes the lock.
-    _fsync_dir(paths.outbox)            # the rename itself, and the entry it removed
-    return folder
+    try:
+        if raw is not None:
+            md5, size, name = _stage_raw(tmp, raw)
+            header.setdefault("agora", {})["raw"] = {"file": name, "md5": md5, "size": size}
+        else:
+            header.setdefault("agora", {}).pop("raw", None)
+        if folder.is_dir():
+            # The raw the entry being replaced names comes along, and only that one: an
+            # uploader may have built its list from that entry a moment ago, and rclone
+            # reading it after this swap would otherwise stop the whole batch on
+            # `source not found` (review T2). Older raws stay behind - nobody's list names
+            # them any more, and carrying every version made each round's entry one raw
+            # bigger and each pass send them all again (review N1).
+            previous = _named_raw(folder)
+            if previous and not (tmp / previous).exists():
+                try:
+                    shutil.copyfile(folder / previous, tmp / previous)
+                except OSError:
+                    pass                    # claimed by an uploader meanwhile: nothing to keep
+        _write_file(tmp / "session.md", h.dump_document(header, body).encode("utf-8"))
+        if update:
+            mark_update(tmp, kind)          # into the folder that is about to go in, not the one that is there
+        _fsync_dir(tmp)                    # the files and the names pointing at them
+        # Swap in whole, so a crash never leaves an outbox entry without session.md
+        # (C4): the old entry is renamed aside, the new one moved in, then the old removed (R6).
+        old = paths.outbox / f".old-{ulid}"
+        shutil.rmtree(old, ignore_errors=True)
+        if folder.exists():
+            folder.rename(old)
+        tmp.rename(folder)
+        shutil.rmtree(old, ignore_errors=True)
+        # `.done-<ULID>` is left alone (review R1): an uploader may be comparing it right
+        # now, and what it holds is a version that was current a moment ago - deleting it
+        # loses an edit. Whoever finds `outbox/<ULID>` already there drops it instead:
+        # `_rename_back` while comparing, `restore_done` when the background takes the lock.
+        _fsync_dir(paths.outbox)            # the rename itself, and the entry it removed
+        return folder
+    except Exception:
+        # A failure before the swap left a staging folder; the old entry is untouched,
+        # so the staging folder is only a half-written copy (impl-mem B1b-2).
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
 
 
 def outbox_count(paths: Paths) -> int:

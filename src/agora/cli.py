@@ -223,7 +223,7 @@ def _updates(args) -> dict:
     return h.user_updates(getattr(args, "header_file", None), getattr(args, "header", []))
 
 
-def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | None, *,
+def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | Path | None, *,
           update: bool = False, kind: str = "") -> tuple[str, bool]:
     """Keep the whole session here, then let the background send it (local-first-writes).
 
@@ -480,11 +480,13 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
     exported = agent.export(external_id)
     if exported.message_count <= 0:
         raise InputError(f"{external_id} 沒有任何訊息，不匯入")
-    body = reading(agent, exported.raw)
+    body = reading_of(agent, exported)
     existing = index.by_source(agent.name, exported.session_id)
+    new_md5 = exported.raw_md5 if exported.raw_md5 is not None else store.hashlib.md5(exported.raw).hexdigest()
+    raw_src = exported.raw_file if exported.raw_file is not None else exported.raw
     if existing:
         old = index.header(existing[0])
-        unchanged = (h.agora_of(old).get("raw") or {}).get("md5") == store.hashlib.md5(exported.raw).hexdigest()
+        unchanged = (h.agora_of(old).get("raw") or {}).get("md5") == new_md5
         if unchanged and not updates and not add_tags:
             print(f"agora:{existing[0]}")
             return 0
@@ -493,9 +495,9 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
             # with content count - an undo that drops empty turns is not "less".
             # Unchanged bytes need no comparison (counts are equal by construction),
             # so the old raw is only fetched when something actually changed (L-4).
-            # The new export already parsed (reading() above), so only the old
-            # side is guarded: an unreadable old raw means no basis to refuse.
-            new_content = _content_turn_count(agent.turns(exported.raw))
+            # The new export already carried its turns, so the reading version needs
+            # no second parse (impl-mem B1b-2).
+            new_content = _content_turn_count(exported.turns if exported.turns is not None else agent.turns(exported.raw))
             if not unchanged:
                 try:
                     old_raw = store.fetch_raw(paths, store.Drive(paths), existing[0], old)
@@ -515,14 +517,14 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
             hdr = _with_user(old, updates, add_tags=add_tags)
             hdr["agora"]["source"] = _source(agent, exported)
             hdr["agora"]["updated_at"] = _now_iso()
-            return _emit(_save(paths, hdr, body, exported.raw, update=True))
+            return _emit(_save(paths, hdr, body, raw_src, update=True))
         # Already continued or merged from: keep the old version and branch (S7).
         parents = [{"id": f"agora:{existing[0]}", "raw_md5": (h.agora_of(old).get("raw") or {}).get("md5")}]
         auto = _auto_header("import", parents, body, title=exported.title, exported=exported, agent=agent,
                             parent_headers=[old])
     else:
         auto = _auto_header("import", [], body, title=exported.title, exported=exported, agent=agent)
-    return _emit(_save(paths, _with_user(auto, updates, add_tags=add_tags), body, exported.raw))
+    return _emit(_save(paths, _with_user(auto, updates, add_tags=add_tags), body, raw_src))
 
 
 def _branched(index: store.Index, ulid: str) -> bool:
@@ -1179,7 +1181,7 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
         # be kept somewhere alive (design「最後一次」P2).
         exported = Exported(session_id=record["agent_session_id"],
                             raw=_last_raw(paths, run) or b"", title=record.get("title"))
-    md5 = store.hashlib.md5(exported.raw).hexdigest()
+    md5 = exported.raw_md5 if exported.raw_md5 is not None else store.hashlib.md5(exported.raw).hexdigest()
     # Same bytes, same place, and the target did not just move: the stage is skipped.
     # A move always writes - the adopted session may hold an older copy than the last
     # one staged, and skipping would leave it stale while the gone session's outbox
@@ -1328,9 +1330,10 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
         # `kind`: a continue is the one write that is a relation of its own, and if this
         # session is gone by the time it goes up the work is saved as a session of its own -
         # as a continue, not as whatever X was (review G2)
+        raw_src = exported.raw_file if exported.raw_file is not None else exported.raw
         saved = _save(paths, _with_user(hdr, record.get("header_updates") or {},
                                         add_tags=record.get("add_tags") or []), body,
-                      exported.raw, update=same_id, kind="continue")
+                      raw_src, update=same_id, kind="continue")
     except (FileNotFoundError, h.HeaderError) as e:
         if not same_id:
             raise                   # a mint: no id to resolve to again (issue #65 F-1)

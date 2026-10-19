@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Protocol
+import tempfile
 
 TOOL_SUMMARY_MAX = 200
 
@@ -32,22 +33,79 @@ NO_REPLY = "（這一段在這裡結束，當時沒有回覆）"
 Turns = list[tuple[str, list[str]]]   # [(role, lines)]; role is "user" or "assistant"
 
 
+class _NoRaw:
+    """Sentinel meaning `raw` was not passed; a raw_file may still supply it."""
+
+
 @dataclass
 class Exported:
-    """One agent session read back from the agent's own storage."""
+    """One agent session read back from the agent's own storage.
+
+    `raw_file` is the file-backed form (impl-mem B1b-2): the bytes are on disk,
+    and the in-memory `raw` property reads them only when something still needs
+    the whole bytes. Callers that only need the md5 or to stage the file should
+    use `raw_file`/`raw_md5`/`raw_size` and never touch `.raw`.
+    """
 
     session_id: str                 # the agent's id (ses_… / uuid)
-    raw: bytes                      # the original export, unchanged
-    dir: str | None = None          # project directory the session belongs to
+    raw_file: Path | None = None      # file-backed export (B1b-2)
+    raw_md5: str | None = None        # md5 of the bytes raw_file names
+    raw_size: int | None = None       # size of those bytes
+    dir: str | None = None            # project directory the session belongs to
     title: str | None = None
-    created_at: str | None = None   # RFC 3339 UTC
+    created_at: str | None = None     # RFC 3339 UTC
     agent_version: str | None = None
     message_count: int = 0
-    model: str | None = None        # the model used most recently, e.g. "space-bunny-free" or "claude-opus-5-5"
+    model: str | None = None          # the model used most recently
     # Contract on `turns` (review 低1): it caches what the adapter parsed from
     # `raw` at export time, so it must equal `agent.turns(raw)`. A path that
     # swaps or rewrites `raw` without reparsing must set `turns` back to None.
-    turns: Turns | None = None      # the shared turns, when the adapter kept them from its own parse (impl-mem 2a); None keeps every other adapter as it was
+    turns: Turns | None = None        # shared turns carried from the parse (B1a)
+    # Private carriers of `raw`: not part of equality or repr (review 低1) - two exports of
+    # the same session are the same export whichever has read its file back yet.
+    _raw: bytes | None = field(default=None, repr=False, compare=False, init=False)
+    _raw_tmpdir: tempfile.TemporaryDirectory | None = field(default=None, repr=False,
+                                                            compare=False, init=False)
+
+    def __init__(self, session_id: str, *, raw: bytes = _NoRaw,
+                 raw_file: Path | None = None, raw_md5: str | None = None,
+                 raw_size: int | None = None, dir: str | None = None,
+                 title: str | None = None, created_at: str | None = None,
+                 agent_version: str | None = None, message_count: int = 0,
+                 model: str | None = None, turns: Turns | None = None,
+                 _raw_tmpdir: tempfile.TemporaryDirectory | None = None) -> None:
+        self.session_id = session_id
+        self.raw_file = raw_file
+        self.raw_md5 = raw_md5
+        self.raw_size = raw_size
+        self.dir = dir
+        self.title = title
+        self.created_at = created_at
+        self.agent_version = agent_version
+        self.message_count = message_count
+        self.model = model
+        self.turns = turns
+        self._raw_tmpdir = _raw_tmpdir
+        self._raw = None if raw is _NoRaw else raw
+
+    @property
+    def raw(self) -> bytes:
+        """The original export bytes. First access from a file reads it once."""
+        if self._raw is not None:
+            return self._raw
+        if self.raw_file is not None:
+            self._raw = self.raw_file.read_bytes()
+            return self._raw
+        return b""
+
+    @raw.setter
+    def raw(self, value: bytes) -> None:
+        # New bytes make the file-backed facts stale (review 低2): `_write_one` trusts
+        # `raw_md5`, and an old one would skip a version that has to be written.
+        self._raw = value
+        self.raw_file = None
+        self.raw_md5 = None
+        self.raw_size = None
 
 
 @dataclass

@@ -16,11 +16,13 @@ never touched.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import os
 import re
 import subprocess
+import tempfile
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -303,6 +305,36 @@ def _pack_raw(main: list[str], aux: dict) -> bytes:
     return buf.getvalue()
 
 
+def _pack_raw_file(main: list[str], aux: dict, path: Path) -> tuple[str, int]:
+    """Stream the same bytes `_pack_raw` would produce straight to a file.
+
+    The main list stays in memory (B1a already made it the only large list), but
+    the packed raw never becomes a whole in-memory bytes object. The file is
+    fsync'd before the caller sees the path, and the md5/size are computed while
+    writing so the round never has to read it back just to know them.
+    """
+    digest = hashlib.md5()
+    size = 0
+    with path.open("wb") as f:
+        def write(piece: bytes) -> None:
+            nonlocal size
+            f.write(piece)
+            digest.update(piece)
+            size += len(piece)
+
+        write(b'{"format": "claude-jsonl/1", "main": [')
+        for i, line in enumerate(main):
+            if i:
+                write(b", ")
+            write(json.dumps(line, ensure_ascii=False).encode("utf-8"))
+        write(b'], "aux": ')
+        write(json.dumps(aux, ensure_ascii=False).encode("utf-8"))
+        write(b"}")
+        f.flush()
+        os.fsync(f.fileno())
+    return digest.hexdigest(), size
+
+
 def _unpack_raw(raw: bytes) -> tuple[list[str], dict]:
     try:
         doc = json.loads(raw.decode("utf-8"))
@@ -425,9 +457,16 @@ def _scan(main: list[str], label: str) -> _Facts:
 def _exported(session_id: str, main: list[str], sidecar: Path,
               *, label: str = "session") -> Exported:
     facts = _scan(main, label)
+    aux = _pack_aux(sidecar)
+    tmpdir = tempfile.TemporaryDirectory(prefix="agora-raw-", suffix=".tmp")
+    raw_path = Path(tmpdir.name) / "raw.json"
+    md5, size = _pack_raw_file(main, aux, raw_path)
     return Exported(
         session_id=session_id,
-        raw=_pack_raw(main, _pack_aux(sidecar)),
+        raw_file=raw_path,
+        raw_md5=md5,
+        raw_size=size,
+        _raw_tmpdir=tmpdir,
         dir=facts.directory,
         title=facts.title,
         created_at=facts.created_at,
