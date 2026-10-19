@@ -20,6 +20,7 @@ from agora import cli, store
 from agora.agents import claude as C
 from agora.agents import opencode as OC
 from agora.agents.base import Launch
+from _round_seam import in_process_start_child
 
 FAKES = Path(__file__).resolve().parent.parent / "fakes"
 FAKE_RCLONE = FAKES / "fake_rclone.py"
@@ -135,6 +136,7 @@ def claude_lab(tmp_path, monkeypatch):
     log_file = tmp_path / "calls.jsonl"
     monkeypatch.setenv("AGORA_CLAUDE_CMD", str(_recording_wrapper(tmp_path, "claude", FAKE_CLAUDE, log_file)))
     monkeypatch.setattr(cli, "load_agent", lambda name: C.ADAPTER)
+    monkeypatch.setattr(cli, "_start_child", in_process_start_child)
     return {"home": home, "work": work, "log": log_file}
 
 
@@ -147,6 +149,7 @@ def opencode_lab(tmp_path, monkeypatch):
     log_file = tmp_path / "calls.jsonl"
     monkeypatch.setenv("AGORA_OPENCODE_CMD", str(_recording_wrapper(tmp_path, "opencode", FAKE_OPENCODE, log_file)))
     monkeypatch.setattr(cli, "load_agent", lambda name: OC.ADAPTER)
+    monkeypatch.setattr(cli, "_start_child", in_process_start_child)
     work = tmp_path / "work"
     work.mkdir()
     return {"work": work, "fh": fh, "log": log_file}

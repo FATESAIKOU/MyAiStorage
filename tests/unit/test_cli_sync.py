@@ -36,7 +36,7 @@ from agora import cli, store
 from agora import header as h
 from agora.agents import claude as C
 from agora.agents.base import Exported, Launch
-from _round_seam import in_process_round_child
+from _round_seam import in_process_round_child, in_process_start_child
 
 FAKE_RCLONE = Path(__file__).resolve().parent.parent / "fakes" / "fake_rclone.py"
 FAKE_CLAUDE = Path(__file__).resolve().parent.parent / "fakes" / "fake_claude.py"
@@ -121,6 +121,7 @@ def env(tmp_path, monkeypatch):
     agent = SyncAgent()
     monkeypatch.setattr(cli, "load_agent", lambda name: agent)
     monkeypatch.setattr(cli, "_round_child", _round_child_in_process)
+    monkeypatch.setattr(cli, "_start_child", in_process_start_child)
     return agent
 
 
@@ -177,6 +178,30 @@ def _stage_spy(monkeypatch):
         return real(paths_, hdr, body, raw, **kwargs)
     monkeypatch.setattr(cli, "_save", spy)
     return staged
+
+
+def _pending_record_when_the_agent_starts(monkeypatch, seen):
+    """Read the locked pending JSON at the moment the fake agent's process starts."""
+    real = cli.subprocess.Popen
+
+    def spy(argv, **kwargs):
+        if isinstance(argv, (list, tuple)) and list(argv[:1]) == ["sleep"]:
+            [path] = list(paths().pending.glob("*.json"))
+            seen.append(json.loads(path.read_text(encoding="utf-8")))
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(cli.subprocess, "Popen", spy)
+
+
+def _capture_loaded_raw(monkeypatch, agent, sink):
+    """Record the exact bytes handed to `start_native` (what `saved_md5` covers)."""
+    real = agent.start_native
+
+    def start(raw, workdir, **kwargs):
+        sink.append(raw)
+        return real(raw, workdir, **kwargs)
+
+    monkeypatch.setattr(agent, "start_native", start)
 
 
 def _extra_sessions(agora_id):
@@ -253,6 +278,63 @@ def clean_subprocesses(monkeypatch):
         except subprocess.TimeoutExpired:
             p.kill()
             p.wait()
+
+
+# --- the pending record's md5 semantics (impl-mem-start review) -------------------
+
+def test_cross_agent_pending_keeps_the_two_md5s_apart(env, capsys, monkeypatch):
+    """`parent.raw_md5` is what was continued FROM (A's own raw); `saved_md5` is
+    what was loaded INTO the next agent (the converted raw). When B is another
+    agent's format the two differ, so swapping them in the loader cannot hide."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    hdr = store.Index(paths()).header(ulid)
+    source_raw = (paths().mirror / ulid / hdr["agora"]["raw"]["file"]).read_bytes()
+    parent_md5 = store.hashlib.md5(source_raw).hexdigest()
+    loaded: list[bytes] = []
+    _capture_loaded_raw(monkeypatch, env, loaded)
+    env.name = "claude"                 # A was opencode's: this continue converts it
+    env.sleep = 0.01
+    seen: list[dict] = []
+    _pending_record_when_the_agent_starts(monkeypatch, seen)
+
+    code, _, err = run(capsys, "continue", "session", a, "--agent", "claude",
+                       "--dir", "/tmp", "--sync-period", "0")
+
+    assert code == 0, err
+    [record] = seen
+    assert record["parent"]["raw_md5"] == parent_md5
+    assert record["saved_md5"] == store.hashlib.md5(loaded[0]).hexdigest()
+    assert record["parent"]["raw_md5"] != record["saved_md5"], \
+        "the converted raw is not the raw we continued from"
+
+
+def test_merge_pending_has_no_parent_raw_and_the_exact_saved_md5(env, capsys, monkeypatch):
+    """A merge has no raw of its own (`parent.raw_md5` is None) but it does load a
+    synthesized raw, and `saved_md5` is the md5 of exactly that."""
+    monkeypatch.setattr(env, "summarize",
+                        lambda prompt, workdir: (json.dumps(
+                            {"purpose": "合併要約", "decisions": [], "progress": "進行中",
+                             "open_questions": []}, ensure_ascii=False), "fake-model"),
+                        raising=False)
+    _, a, _ = _import(capsys)
+    env.sessions["ses_b"] = ["讀取 CSV", "完成"]
+    _, b, _ = run(capsys, "import", "session", "--external-session-id", "ses_b",
+                  "--agent", "opencode")
+    _, m, _ = run(capsys, "merge", "session", a, b, "--agent", "opencode")
+    loaded: list[bytes] = []
+    _capture_loaded_raw(monkeypatch, env, loaded)
+    env.sleep = 0.01
+    seen: list[dict] = []
+    _pending_record_when_the_agent_starts(monkeypatch, seen)
+
+    code, _, err = run(capsys, "continue", "session", m, "--agent", "opencode",
+                       "--dir", "/tmp", "--sync-period", "0")
+
+    assert code == 0, err
+    [record] = seen
+    assert record["parent"]["raw_md5"] is None, "a merge has no raw of its own"
+    assert record["saved_md5"] == store.hashlib.md5(loaded[0]).hexdigest()
 
 
 # --- the spec's scenarios ---------------------------------------------------------

@@ -27,6 +27,7 @@ import pytest
 from agora import cli, header as h, store
 from agora.agents import claude as C
 from agora.agents.base import Exported, Launch, format_reading
+from _round_seam import in_process_start_child
 
 FAKE_RCLONE = Path(__file__).resolve().parent.parent / "fakes" / "fake_rclone.py"
 FAKE_CLAUDE = Path(__file__).resolve().parent.parent / "fakes" / "fake_claude.py"
@@ -103,6 +104,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     agent = FakeAgent()
     monkeypatch.setattr(cli, "load_agent", lambda name: agent)
+    monkeypatch.setattr(cli, "_start_child", in_process_start_child)
     return agent
 
 
