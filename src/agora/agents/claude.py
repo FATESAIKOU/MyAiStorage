@@ -16,6 +16,7 @@ never touched.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
@@ -266,8 +267,20 @@ def _unpack_aux(aux: dict, sidecar: Path, rewrite=None) -> None:
 
 
 def _pack_raw(main: list[str], aux: dict) -> bytes:
-    return json.dumps({"format": FORMAT, "main": main, "aux": aux},
-                      ensure_ascii=False).encode("utf-8")
+    # C4 (impl-mem 2a): json.dump straight into a byte buffer - json.dumps's
+    # whole-document str plus its encode would hold two copies of the raw at
+    # the peak. The chunked writer produces the same bytes as dumps did.
+    # newline="": no os.linesep translation of the "\n" json.dump may emit (the
+    # packed output has no bare newline today - json escapes the ones inside
+    # strings - but spelling it out keeps that true if anyone adds an indent).
+    buf = io.BytesIO()
+    writer = io.TextIOWrapper(buf, encoding="utf-8", newline="", write_through=True)
+    try:
+        json.dump({"format": FORMAT, "main": main, "aux": aux}, writer, ensure_ascii=False)
+        writer.flush()   # clarity only; the detach below flushes the wrapper and encoder anyway (review 低3)
+    finally:
+        writer.detach()           # flush the encoder without closing buf
+    return buf.getvalue()
 
 
 def _unpack_raw(raw: bytes) -> tuple[list[str], dict]:
@@ -306,15 +319,20 @@ def _exported(session_id: str, main: list[str], sidecar: Path) -> Exported:
     model = next((m["model"] for o in reversed(objs) if o.get("type") == "assistant"
                   and isinstance(m := o.get("message"), dict)
                   and isinstance(m.get("model"), str) and m["model"]), None)
+    title = _session_title(objs)
+    count = _count_messages(objs)
+    turns = _turns(objs)          # carried on the export: reading_of needs no second parse (C1)
+    del objs                      # the parsed dicts are the fat of the peak; not needed past this
     return Exported(
         session_id=session_id,
         raw=_pack_raw(main, _pack_aux(sidecar)),
         dir=directory,
-        title=_session_title(objs),
+        title=title,
         created_at=created,
         agent_version=version,
-        message_count=_count_messages(objs),
+        message_count=count,
         model=model,
+        turns=turns,
     )
 
 
