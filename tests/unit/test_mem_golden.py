@@ -363,11 +363,13 @@ def test_the_round_child_stages_the_same_golden_bytes(golden_env):
 
 
 def test_collect_parses_once(golden_env, monkeypatch):
-    """One collect+write round parses the session's lines exactly once (impl-mem 2a C1).
+    """One collect+write round parses the session's lines exactly once (B1a).
 
     Counters wrap `_parse_all`, `_unpack_raw` and json.loads-as-called-from-
-    claude. HEAD's shape was _parse_all ×2 and an `_unpack_raw` on top; the
-    second parse coming back turns this red.
+    claude. Before B1a the shape was `_split_lines` ×1 plus `_parse_all` ×2 for
+    the export side (`_split_lines` validated, `_parse_all` parsed, and the
+    reading re-parsed raw). Now the streaming read validates and accumulates in
+    the same json.loads, and the carried turns mean nothing parses raw again.
     """
     from agora.agents import claude
 
@@ -412,7 +414,7 @@ def test_collect_parses_once(golden_env, monkeypatch):
     cli._write_one(paths, run, exported, agent, check_drive=False)
     monkeypatch.undo()
 
-    assert counts["_parse_all"] == 1, counts              # was 2: export + reading
+    assert counts["_parse_all"] == 0, counts              # the export no longer builds dicts
     assert counts["_unpack_raw"] == 0, counts             # was 1: reading re-unpacked raw
-    # line-level: _split_lines validates each line once, _parse_all parses each once
-    assert counts["json.loads@claude"] == 2 * n_lines, counts
+    # line-level: the streaming read parses each non-blank line once (B1a)
+    assert counts["json.loads@claude"] == n_lines, counts
