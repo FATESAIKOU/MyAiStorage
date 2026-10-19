@@ -25,6 +25,7 @@ from pathlib import Path
 from agora import cli, store
 from agora.agents import claude as C
 from agora.agents.base import Exported, Launch
+from _round_seam import in_process_round_child
 
 FAKE_RCLONE = Path(__file__).resolve().parent.parent / "fakes" / "fake_rclone.py"
 CL_FIX = Path(__file__).resolve().parent.parent / "fixtures" / "claude"
@@ -94,6 +95,7 @@ def _env_fixture(tmp_path, monkeypatch):
     monkeypatch.setenv("AGORA_RCLONE", str(wrapper))
     agent = ExitAgent()
     monkeypatch.setattr(cli, "load_agent", lambda name: agent)
+    monkeypatch.setattr(cli, "_round_child", in_process_round_child)
     return agent
 
 

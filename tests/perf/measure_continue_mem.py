@@ -19,8 +19,13 @@ What it does:
    subagent sidecar, docs/spike/claude.md line shapes) of the requested
    size, plus a small seed session.
 3. Imports the seed as an agora Session (the continue target), then runs N
-   rounds of `cli._collect_new` + `cli._write_one` in THIS process, growing
-   the session a little every round the way a live session does.
+   rounds of the write-back, growing the session a little every round the way
+   a live session does. `--round-mode inproc` (the shape before
+   impl-mem-subproc) does `cli._collect_new` + `cli._write_one` in THIS
+   process; `--round-mode child` runs one real `cli._periodic_write` per round
+   - the shell shape since impl-mem-subproc, heavy work in a fresh
+   `agora.round_child` - and samples that child's RSS too: the shell's own
+   deliberately stays flat.
 4. Per round it records the tracemalloc peak (--tracemalloc), the true RSS
    peak (a sampler thread polling `ps -o rss=`) and the resident RSS after
    the round. Stage probes (monkeypatched wrappers; src/ untouched) say how
@@ -59,40 +64,58 @@ BOOKKEEPING = ("summary", "queue-operation", "last-prompt", "cost-state", "mode"
 AGENT_HEX = "0123456789abcdef"
 
 
-def rss_kb() -> int:
+def rss_kb(pid: int | None = None) -> int:
     """Resident set size in KB, via ps (no psutil in this repo's deps)."""
-    out = subprocess.run(["ps", "-o", "rss=", "-p", str(os.getpid())],
+    out = subprocess.run(["ps", "-o", "rss=", "-p", str(pid or os.getpid())],
                          capture_output=True, text=True).stdout.strip()
     return int(out or 0)
 
 
 class RssSampler(threading.Thread):
-    """Polls this process's RSS in the background; per-round max via mark()."""
+    """Polls this process's RSS (and any watched child pids) in the background;
+    per-round max via mark()/peak_of(). The watched set is how `--round-mode
+    child` sees the round child's peak: the shell stays small by design, the
+    peak lives in a process the shell's own RSS never covers."""
 
     def __init__(self, every: float = 0.05):
         super().__init__(daemon=True)
         self.every = every
         self._stop = threading.Event()
         self._lock = threading.Lock()
-        self._marks: list[tuple[int, int]] = []   # (round, rss_kb)
+        self._marks: list[tuple[int, str, int]] = []   # (round, "shell"/"child", rss_kb)
+        self._watched: set[int] = set()
         self.round = 0
 
     def mark(self, round_no: int) -> None:
         with self._lock:
             self.round = round_no
 
+    def watch(self, pid: int) -> None:
+        with self._lock:
+            self._watched.add(pid)
+
+    def unwatch(self) -> None:
+        with self._lock:
+            self._watched.clear()
+
     def run(self) -> None:
         while not self._stop.is_set():
             with self._lock:
-                self._marks.append((self.round, rss_kb()))
+                rnd = self.round
+                watched = set(self._watched)
+            self._marks.append((rnd, "shell", rss_kb()))
+            for pid in watched:
+                kb = rss_kb(pid)
+                if kb:                                   # gone: ps prints nothing
+                    self._marks.append((rnd, "child", kb))
             self._stop.wait(self.every)
 
     def stop(self) -> None:
         self._stop.set()
 
-    def peak_of(self, round_no: int) -> int:
+    def peak_of(self, round_no: int, kind: str = "shell") -> int:
         with self._lock:
-            hits = [kb for r, kb in self._marks if r == round_no]
+            hits = [kb for r, k, kb in self._marks if r == round_no and k == kind]
         return max(hits) if hits else 0
 
 
@@ -397,14 +420,23 @@ def main() -> int:
     ap.add_argument("--growth-pct", type=float, default=2.0,
                     help="per-round growth as %% of the initial size")
     ap.add_argument("--tracemalloc", action="store_true")
+    ap.add_argument("--round-mode", choices=("inproc", "child"), default="inproc",
+                    help="inproc: _collect_new + _write_one here (HEAD shape); "
+                         "child: one full cli._periodic_write round per cycle - the "
+                         "heavy work in a fresh agora.round_child process, which is "
+                         "what the shell actually does since impl-mem-subproc")
     ap.add_argument("--top", type=int, default=10)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--keep", action="store_true", help="keep the playground (debug)")
     args = ap.parse_args()
+    if args.round_mode == "child" and args.tracemalloc:
+        sys.exit("--tracemalloc only makes sense with --round-mode inproc: "
+                 "in child mode the allocations live in another process")
 
     root = Path(tempfile.mkdtemp(prefix=f"agora-mem-{args.size_mb}mb-"))
     result: dict = {"size_mb": args.size_mb, "rounds": args.rounds,
                     "growth_pct": args.growth_pct, "tracemalloc": args.tracemalloc,
+                    "round_mode": args.round_mode,
                     "python": sys.version.split()[0], "playground": str(root)}
     print(f"[probe] playground {root}", flush=True)
     try:
@@ -452,13 +484,25 @@ def main() -> int:
         run = cli._Run(paths, record)
         agent = ClaudeAgent()
 
+        child_mode = args.round_mode == "child"
         probes = StageProbes(args.tracemalloc)
         if args.tracemalloc:
             import tracemalloc
             tracemalloc.start()
-        probes.install()
+        if not child_mode:
+            probes.install()        # the stage lines describe the in-process pipeline
         sampler = RssSampler()
         sampler.start()
+        real_popen = cli.subprocess.Popen
+        if child_mode:
+            # watch every round child the shell spawns, so its peak is in the table
+            # too - the shell's own RSS deliberately does not carry the peak anymore.
+            def _watch_round_child(argv, **kw):
+                proc = real_popen(argv, **kw)
+                if isinstance(argv, (list, tuple)) and list(argv[1:3]) == ["-m", "agora.round_child"]:
+                    sampler.watch(proc.pid)
+                return proc
+            cli.subprocess.Popen = _watch_round_child
 
         rounds: list[dict] = []
         try:
@@ -472,22 +516,32 @@ def main() -> int:
                 append_exchanges(big_path, pdir / big_id, grow, str(workdir))
                 size_mb = big_path.stat().st_size / (1 << 20)
                 t0 = time.perf_counter()
-                exported = cli._collect_new(run, agent)
-                saved = None
-                if exported is not None:
-                    saved, _target, _note = cli._write_one(paths, run, exported, agent,
-                                                           check_drive=False)
+                before_md5, before_fail = run.last_md5, run.failures
+                exported = saved = None
+                if child_mode:
+                    cli._periodic_write(run, agent)     # the shell's real round shape
+                    written, failed = run.last_md5 != before_md5, run.failures > before_fail
+                    sampler.unwatch()                   # the round child is reaped
+                else:
+                    exported = cli._collect_new(run, agent)
+                    if exported is not None:
+                        saved, _target, _note = cli._write_one(paths, run, exported, agent,
+                                                               check_drive=False)
+                    written, failed = saved is not None, False
                 dt = time.perf_counter() - t0
                 cur = peak = None
                 if args.tracemalloc:
                     cur, peak = tracemalloc.get_traced_memory()
                 row = {"round": r, "session_mb": round(size_mb, 1),
-                       "collected": exported is not None, "written": saved is not None,
+                       "collected": (exported is not None) if not child_mode else None,
+                       "written": written, "failed": failed,
                        "seconds": round(dt, 1),
                        "tm_current_mb": round(cur / (1 << 20), 1) if cur is not None else None,
                        "tm_peak_mb": round(peak / (1 << 20), 1) if peak is not None else None,
                        "rss_after_mb": round(rss_kb() / 1024, 1),
                        "rss_peak_mb": round(sampler.peak_of(r) / 1024, 1)}
+                if child_mode:
+                    row["child_peak_mb"] = round(sampler.peak_of(r, "child") / 1024, 1)
                 if r == 1 and args.tracemalloc:
                     row["top"] = probes.top_lines(args.top)
                     probes.drop_snapshots()
@@ -500,9 +554,19 @@ def main() -> int:
                 prune_remote_raws(root / "remote")
         finally:
             probes.uninstall()
+            if child_mode:
+                cli.subprocess.Popen = real_popen
             sampler.stop()
         result["rounds"] = rounds
         result["stage_rows"] = probes.rows
+        shells = [row["rss_after_mb"] for row in rounds]
+        if shells:
+            result["shell"] = {"first_mb": shells[0], "last_mb": shells[-1],
+                               "max_mb": max(shells),
+                               "flat_within_line": max(shells) <= shells[0] * 1.3 + 50}
+            if child_mode:
+                kids = [row.get("child_peak_mb") or 0 for row in rounds]
+                result["child_peak_max_mb"] = max(kids)
     finally:
         if args.keep:
             print(f"[probe] playground kept at {root}", flush=True)

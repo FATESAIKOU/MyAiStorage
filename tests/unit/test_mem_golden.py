@@ -324,6 +324,44 @@ def md5(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
 
 
+def test_the_round_child_stages_the_same_golden_bytes(golden_env):
+    """Ticket impl-mem-subproc ⑥: the fresh-interpreter round child stages the
+    same bytes the in-process pipeline does. Nothing is patched into the child -
+    it inherits the pinned clock (`AGORA_NOW`) and the fake Drive through the
+    environment, and its `已寫回` round must move no byte of the golden output.
+    The child also cannot see this process's `new_ulid` patch, which is exactly
+    the point: the update path mints no id, so it does not need one."""
+    _make_sessions()
+    agent = ClaudeAgent()
+    exported = agent.export(SID)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = cli.main(["import", "session", "--external-session-id", SEED,
+                       "--agent", "claude"])
+    assert rc == 0
+    target = out.getvalue().strip().splitlines()[-1]
+    paths = golden_env
+    record = {"agora_id": target, "agent": "claude", "agent_session_id": SID,
+              "dir": CWD, "parent": {"id": target, "raw_md5": "0" * 32},
+              "parent_headers": [], "title": "金標準", "before_count": exported.message_count - 1,
+              "started_at": "2026-10-19T00:00:00Z", "header_updates": {},
+              "add_tags": [], "saved_md5": "0" * 32}
+    run = cli._Run(paths, record)
+
+    cli._periodic_write(run, agent)                     # the REAL child: no seam patch
+
+    log = (paths.state / cli.CONTINUE_LOG).read_text(encoding="utf-8")
+    assert "定期寫回：已寫回" in log, log
+    assert run.failures == 0
+    ulid = target.split(":", 1)[1]
+    md = (paths.mirror / ulid / "session.md").read_bytes()
+    assert md5(md) == GOLDEN_MD5_SESSION_MD             # the child moved no byte
+    raws = sorted((paths.mirror / ulid).glob("raw-*.json"))
+    assert len(raws) == 1 and md5(raws[0].read_bytes()) == GOLDEN_MD5_OUTBOX_RAW
+    assert run.last_md5 == md5(raws[0].read_bytes())
+    assert isinstance(run.fingerprint, tuple)           # the wire's trap, end to end
+
+
 def test_collect_parses_once(golden_env, monkeypatch):
     """One collect+write round parses the session's lines exactly once (impl-mem 2a C1).
 
