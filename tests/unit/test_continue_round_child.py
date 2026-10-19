@@ -36,6 +36,7 @@ from agora.agents.claude import encode_project_dir
 FAKE_RCLONE = Path(__file__).resolve().parent.parent / "fakes" / "fake_rclone.py"
 FAKE_CLAUDE = Path(__file__).resolve().parent.parent / "fakes" / "fake_claude.py"
 FAKE_OPENCODE = Path(__file__).resolve().parent.parent / "fakes" / "fake_opencode.py"
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])   # this checkout, for `_absent`
 CL_FIX = Path(__file__).resolve().parent.parent / "fixtures" / "claude"
 CL_SID = "11111111-2222-4333-8444-555555555555"
 NO_SUCH_SID = "00000000-dead-beef-0000-000000000000"
@@ -129,12 +130,39 @@ def _absent(*needles):
     list it - the blind scan would make every absence-check trivially true.
     `serve` lines are skipped: old detached `fake_opencode serve` daemons from
     earlier runs of other tickets linger for hours on end; this test's fake
-    never serves - a surviving round's fake is always `session export`."""
+    never serves - a surviving round's fake is always `session export`.
+
+    Only THIS checkout's processes count (#74): the same machine runs other
+    projects' tests whose fakes carry the same file names (`fake_opencode*`), and a
+    bare-name match took them for orphans of ours. Ours are the ones whose command
+    line names this repo's root (the fakes live under it) or this interpreter (the
+    round child is `<sys.executable> -m agora.round_child`)."""
     out = subprocess.run(["ps", "-ax", "-o", "pid=,command="],
                          capture_output=True, text=True).stdout
     return [ln.strip() for ln in out.splitlines()
             if "serve --hostname" not in ln
+            and (_REPO_ROOT in ln or sys.executable in ln)
             for n in needles if n in ln and "ps -ax" not in ln]
+
+
+def test_absent_counts_only_this_checkouts_processes(tmp_path):
+    """#74: another project's `fake_opencode*` on the same machine is not an orphan
+    of ours, while a process that names this repo's fake is."""
+    elsewhere = tmp_path / "other-project" / "fake_opencode_elsewhere.py"
+    elsewhere.parent.mkdir()
+    elsewhere.write_text("import time\ntime.sleep(60)\n")
+    sleeper = "import sys, time; time.sleep(60)"
+    theirs = subprocess.Popen(["/usr/bin/env", "python3", str(elsewhere)])   # not this venv
+    ours = subprocess.Popen(["/usr/bin/env", "python3", "-c", sleeper, str(FAKE_OPENCODE)])
+    try:
+        time.sleep(0.5)
+        assert _absent("fake_opencode_elsewhere") == []
+        mine = _absent("fake_opencode.py")
+        assert any(str(ours.pid) in ln.split()[0] for ln in mine), mine
+    finally:
+        for proc in (theirs, ours):
+            proc.kill()
+            proc.wait(timeout=10)
 
 
 # --- the wire: the trap that JSON sets ---------------------------------------
