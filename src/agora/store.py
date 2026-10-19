@@ -13,6 +13,7 @@ session as unfinished and skips it.
 
 from __future__ import annotations
 
+import codecs
 import fcntl
 import copy
 import hashlib
@@ -106,6 +107,48 @@ def write_atomic(path: Path, text: str) -> None:
         os.replace(tmp, path)
     finally:
         Path(tmp).unlink(missing_ok=True)   # gone on success; a leftover never clutters
+
+
+class _Utf8Reader:
+    """A read-through for `shutil.copyfileobj` that rejects what `read_text` rejected.
+
+    The incremental decoder keeps at most one character's bytes, so checking a raw
+    costs no second copy of it (B1b-1). Only `read` is needed: that is all
+    `copyfileobj` asks for.
+    """
+
+    def __init__(self, fileobj):
+        self._file = fileobj
+        self._decoder = codecs.getincrementaldecoder("utf-8")()
+
+    def read(self, size: int = -1) -> bytes:
+        data = self._file.read(size)
+        if data:
+            self._decoder.decode(data)
+        else:
+            self._decoder.decode(b"", final=True)   # a sequence cut off at EOF
+        return data
+
+
+def copy_atomic(src: Path, dst: Path, *, utf8: bool = False) -> None:
+    """Copy a file so a reader sees the old one or the new one, never half of either.
+
+    The staging name and the rename are `write_atomic`'s; the bytes are streamed, so
+    a 100 MB raw does not become a second 100 MB string on its way to the mirror
+    (B1b-1). `utf8` makes the copy reject the bytes `read_text` used to reject -
+    without holding them - so the callers that catch UnicodeDecodeError keep
+    catching it; the bytes themselves are still copied exactly, newlines and all.
+    (The text round trip turned a bare CRLF into LF; no producer writes one - a raw is
+    JSON, whose newlines are escaped - so the exact copy is the faithful one, and
+    the mirror's md5 matches the header's. Do not "restore" the old conversion.)
+    """
+    handle, tmp = tempfile.mkstemp(dir=dst.parent, prefix=dst.name, suffix=".tmp")
+    try:
+        with os.fdopen(handle, "wb") as out, open(src, "rb") as source:
+            shutil.copyfileobj(_Utf8Reader(source) if utf8 else source, out, 1 << 20)
+        os.replace(tmp, dst)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
 
 
 def _write_file(path: Path, data: bytes) -> None:
@@ -408,7 +451,7 @@ def remember(paths: Paths, folder: Path, index: "Index | None" = None, ulid: str
     if (name := raw.get("file")) and (folder / name).is_file():
         wanted, target = folder / name, mirror / name
         if not (target.is_file() and target.stat().st_size == wanted.stat().st_size):
-            write_atomic(target, wanted.read_text(encoding="utf-8"))
+            copy_atomic(wanted, target, utf8=True)
         for other in mirror.glob("raw-*"):
             if other.name != name:
                 other.unlink()
