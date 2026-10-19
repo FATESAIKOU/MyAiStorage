@@ -301,8 +301,9 @@ def count_messages(path: Path) -> int:
 
 PROBED = (("agora.agents.claude", "_read_lines"), ("agora.agents.claude", "_exported"),
           ("agora.agents.claude", "_parse_all"), ("agora.agents.claude", "_pack_raw"),
-          ("agora.cli", "reading_of"),
-          ("agora.agents.base", "format_reading"), ("agora.store", "stage"))
+          ("agora.cli", "reading_of"), ("agora.cli", "_save_continue"),
+          ("agora.agents.base", "format_reading"), ("agora.store", "stage"),
+          ("agora.store", "remember"), ("agora.store", "index_file"))
 
 # Low-5 (review 低5): after impl-mem 2a the continue round runs `reading_of` ->
 # `format_reading`, never `reading`. The probes wrap where the call actually
