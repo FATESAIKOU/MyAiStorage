@@ -23,6 +23,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import textwrap
 import time
 import uuid as uuid_mod
 from datetime import datetime, timezone
@@ -163,6 +164,64 @@ def test_absent_counts_only_this_checkouts_processes(tmp_path):
         for proc in (theirs, ours):
             proc.kill()
             proc.wait(timeout=10)
+
+
+def _group_with_a_grandchild_that_ignores_term(leader_ignores_term: bool):
+    """A real round-shaped process group: a leader (own session, like `_round_child`
+    makes it) and a grandchild that ignores SIGTERM. Returns (leader, grandchild pid)."""
+    ignore = "signal.signal(signal.SIGTERM, signal.SIG_IGN)"
+    grandchild = (f"import signal, time; {ignore}; print('up', flush=True); time.sleep(120)")
+    leader = textwrap.dedent(f"""
+        import signal, subprocess, sys, time
+        {ignore if leader_ignores_term else 'pass'}
+        g = subprocess.Popen([sys.executable, "-c", {grandchild!r}], stdout=subprocess.PIPE, text=True)
+        g.stdout.readline()
+        print(g.pid, flush=True)
+        time.sleep(120)
+    """)
+    proc = subprocess.Popen([sys.executable, "-c", leader], stdout=subprocess.PIPE, text=True,
+                            start_new_session=True)
+    return proc, int(proc.stdout.readline())
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _wait_gone(pid: int, seconds: float = 15.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not _alive(pid):
+            return True
+        time.sleep(0.05)
+    return not _alive(pid)
+
+
+@pytest.mark.parametrize("leader_ignores_term", [False, True],
+                         ids=["leader-exits-on-term", "leader-ignores-term-too"])
+def test_kill_round_group_takes_a_grandchild_that_ignores_sigterm(leader_ignores_term):
+    """The SIGKILL half of `_kill_round_group`, on a REAL group (#74's detection gap): a
+    wedged rclone/opencode grandchild that ignores SIGTERM must not outlive the round,
+    whether or not the leader itself goes quietly on SIGTERM (since B1b-2 it does:
+    `round_child` exits on SIGTERM - and a leader that is gone is no reason to leave
+    its group's survivors behind)."""
+    proc, gpid = _group_with_a_grandchild_that_ignores_term(leader_ignores_term)
+    try:
+        assert _alive(gpid)
+        assert cli._kill_round_group(proc) is True
+        assert _wait_gone(gpid), "the grandchild that ignores SIGTERM survived the group kill"
+        assert proc.poll() is not None
+    finally:
+        for pid in (gpid, proc.pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        proc.wait(timeout=10)
 
 
 # --- the wire: the trap that JSON sets ---------------------------------------

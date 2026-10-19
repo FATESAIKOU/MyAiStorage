@@ -1456,11 +1456,13 @@ def _round_child(paths: store.Paths, run: "_Run", agent: Agent, lock_fd: int | N
 def _kill_round_group(proc) -> bool:
     """SIGTERM the round's whole group - the child leads its own
     (`start_new_session`), so the rclone or `opencode export` grandchildren
-    live there too - then SIGKILL if TERM was ignored. The detached uploader
-    is NOT in this group: it starts its own session, so a wedged round can be
+    live there too - then ALWAYS SIGKILL the group: the round child now exits
+    on TERM by itself, which says nothing about a grandchild that ignores it
+    (#74). Anything that must outlive the round has to `setsid` itself: the
+    detached uploader does (`start_new_session`), so a wedged round can be
     killed without ever taking an in-flight upload down with it. Returns
-    whether the group is known dead: False only when `killpg` was refused,
-    which tells the caller nothing was actually killed (review #4)."""
+    whether the group is known dead: False when `killpg` was refused or the
+    leader is still alive after SIGKILL (review #4)."""
     try:
         os.killpg(proc.pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -1470,11 +1472,19 @@ def _kill_round_group(proc) -> bool:
     try:
         proc.wait(timeout=5.0)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-        proc.wait()
+        pass
+    # SIGKILL the group either way: a leader that left quietly on SIGTERM (since B1b-2
+    # the round child does) says nothing about a wedged rclone/opencode grandchild
+    # that ignores SIGTERM and would otherwise outlive the round. No member left means
+    # ProcessLookupError, which is the good answer.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.wait(timeout=5.0)                  # bounded: a refused kill must not hang us
+    except subprocess.TimeoutExpired:
+        return False                            # the leader is still live: nothing worked
     return True
 
 
