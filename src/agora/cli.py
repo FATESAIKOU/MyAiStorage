@@ -39,7 +39,8 @@ import jsonschema
 
 from agora import header as h
 from agora import store
-from agora.agents.base import NO_REPLY, Agent, AgentError, Exported, Launch, merge_turns, reading
+from agora.agents.base import (NO_REPLY, Agent, AgentError, Exported, Launch, merge_turns,
+                               reading, reading_of)
 
 AGENTS = ("opencode", "claude")
 TYPES = ("session",)
@@ -1237,7 +1238,7 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
     terminal at the end).
     """
     record = run.record
-    body = reading(agent, exported.raw)
+    body = reading_of(agent, exported)   # C1: the export already carried its turns over
     note = None
     same_id = True            # False once the work has been saved as a session of its own
     own_claim = False

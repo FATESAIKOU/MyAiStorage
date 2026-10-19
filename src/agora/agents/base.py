@@ -44,6 +44,10 @@ class Exported:
     agent_version: str | None = None
     message_count: int = 0
     model: str | None = None        # the model used most recently, e.g. "space-bunny-free" or "claude-opus-5-5"
+    # Contract on `turns` (review 低1): it caches what the adapter parsed from
+    # `raw` at export time, so it must equal `agent.turns(raw)`. A path that
+    # swaps or rewrites `raw` without reparsing must set `turns` back to None.
+    turns: Turns | None = None      # the shared turns, when the adapter kept them from its own parse (impl-mem 2a); None keeps every other adapter as it was
 
 
 @dataclass
@@ -202,3 +206,18 @@ def format_reading(turns: Turns) -> str:
 def reading(agent: "Agent", raw: bytes) -> str:
     """The reading version of a raw session, through the agent's own turns()."""
     return format_reading(agent.turns(raw))
+
+
+def reading_of(agent: "Agent", exported: Exported) -> str:
+    """The reading version of an export, without parsing raw a second time (impl-mem 2a C1).
+
+    The export already parsed the session when the adapter carried the turns
+    over on it (`Exported.turns`); then the reading version is just those turns
+    laid out. When it did not - the other adapters, fakes, or a caller-built
+    Exported - raw is parsed here, exactly as `reading` always did. Both arms
+    produce the same bytes for the same session; the flag only decides whether
+    the parse happens twice.
+    """
+    if exported.turns is not None:
+        return format_reading(exported.turns)
+    return reading(agent, exported.raw)
