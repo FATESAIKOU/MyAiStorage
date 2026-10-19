@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -96,7 +97,20 @@ def run_round(run, agent) -> dict:
             "first_note": run.first_note}
 
 
+def _exit_on_sigterm() -> None:
+    """Turn SIGTERM into a normal interpreter exit (review 中3).
+
+    A round that times out or is cancelled gets SIGTERM from `_kill_round_group`; the
+    default action kills the process at once and leaves the export's temp directory
+    (the whole packed raw, private conversation bytes) behind in the temp dir. Raising
+    SystemExit lets the finalizers run first; SIGKILL, the escalation after five
+    seconds, still cannot be caught.
+    """
+    signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(143))
+
+
 def main() -> int:
+    _exit_on_sigterm()
     state = json.loads(sys.stdin.read())
     paths = store.Paths.from_env()
     run = decode_run(state, paths)
