@@ -23,6 +23,7 @@ import re
 import subprocess
 import uuid
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
@@ -205,11 +206,30 @@ def _split_lines(text: str, label: str) -> list[str]:
 
 
 def _read_lines(path: Path) -> list[str]:
+    """The session's non-blank lines, read one line at a time (B1a).
+
+    The file is never held as one string plus its `split("\\n")` copy: each line
+    is appended as it is read. Validation and the one parse per line happen in
+    the single streaming pass `_exported` makes over these strings.
+    """
+    lines: list[str] = []
     try:
-        text = path.read_text(encoding="utf-8")
+        with path.open(encoding="utf-8") as f:
+            for raw in f:
+                line = raw[:-1] if raw.endswith("\n") else raw
+                if line.strip():                 # CL8: skip blank lines
+                    lines.append(line)
     except UnicodeDecodeError as e:
+        # The streaming decoder reports a position inside its read buffer, while
+        # HEAD's whole-file read reported a file position (and that position is in
+        # the user-facing message). Reproduce the old message on this failing path
+        # only; a valid session never pays for the second read.
+        try:
+            path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as whole:
+            e = whole
         raise AgentError(f"{path.name} 不是 UTF-8：{e}")
-    return _split_lines(text, path.name)
+    return lines
 
 
 def _parse_all(lines: list[str]) -> list[dict]:
@@ -291,48 +311,130 @@ def _unpack_raw(raw: bytes) -> tuple[list[str], dict]:
         raise AgentError(f"Claude raw 解析失敗：{e}")
 
 
-def _session_title(objs: list[dict]) -> str | None:
-    """The export's rule: a summary anywhere wins, else the first real user turn.
+_MISSING = object()
 
-    Left as it was (review K4): C2 tried to fold this into the listing's rule, which
-    changed the title a session imports under - the proposal says behaviour does not
-    change, so the two rules stay two.
+
+@dataclass
+class _Facts:
+    """The small facts one streaming pass keeps from a session's lines (B1a).
+
+    These are what `_exported` used to collect in six scans over a list of every
+    parsed object; the objects themselves are dropped line by line now.
     """
-    for o in objs:
-        if o.get("type") == "summary" and isinstance(o.get("summary"), str):
-            return o["summary"][:TITLE_MAX] or None
-    for o in objs:
-        if (title := _title_of(o)) is not None:
-            return title
-    return None
+
+    created_at: str | None = None
+    agent_version: str | None = None
+    directory: str | None = None
+    model: str | None = None
+    summary_seen: bool = False      # a summary line with a string `summary` exists
+    summary: str | None = None      # ... and its value, even when it is empty
+    first_title: str | None = None  # first user text, used only when no summary matched
+    message_count: int = 0
+    turns: Turns = field(default_factory=list)
+
+    @property
+    def title(self) -> str | None:
+        """A summary anywhere wins, else the first real user turn (review K4)."""
+        return self.summary if self.summary_seen else self.first_title
 
 
-def _exported(session_id: str, main: list[str], sidecar: Path) -> Exported:
-    objs = _parse_all(main)
-    created = next((o["timestamp"] for o in objs  # CL11: first present timestamp
-                    if isinstance(o.get("timestamp"), str)), None)
-    version = next((o["version"] for o in reversed(objs)  # P3: from the jsonl
-                    if isinstance(o.get("version"), str)), None)
-    # source.dir comes from the jsonl's own cwd field, not the folder name (N9).
-    directory = next((o["cwd"] for o in objs if isinstance(o.get("cwd"), str)), None)
-    # The model of the most recent assistant line (design v4 source.model).
-    model = next((m["model"] for o in reversed(objs) if o.get("type") == "assistant"
-                  and isinstance(m := o.get("message"), dict)
-                  and isinstance(m.get("model"), str) and m["model"]), None)
-    title = _session_title(objs)
-    count = _count_messages(objs)
-    turns = _turns(objs)          # carried on the export: reading_of needs no second parse (C1)
-    del objs                      # the parsed dicts are the fat of the peak; not needed past this
+def _take_turn(turns: Turns, o: dict) -> None:
+    """The `_turns` mapping for one line, kept as the line goes by (P13)."""
+    handlers = {"user": _user_lines, "assistant": _assistant_lines}
+    otype = o.get("type")
+    if otype in handlers:
+        if _is_noise(o):
+            return
+        lines = handlers[otype](o)
+        if lines is not None:
+            turns.append((otype, lines))
+    elif otype in _SILENT_TYPES:
+        return
+    else:
+        turns.append(("user", [f"[skip {otype}]"]))
+
+
+def _accumulate(facts: _Facts, o: dict) -> None:
+    """Fold one parsed line into the export's fields, in HEAD's own rules."""
+    if facts.created_at is None and isinstance(o.get("timestamp"), str):
+        facts.created_at = o["timestamp"]              # CL11: first present timestamp
+    if isinstance(o.get("version"), str):
+        facts.agent_version = o["version"]             # P3: the last one in the file
+    if facts.directory is None and isinstance(o.get("cwd"), str):
+        facts.directory = o["cwd"]                     # N9: from the jsonl, not the folder
+    message = o.get("message")
+    if (o.get("type") == "assistant" and isinstance(message, dict)
+            and isinstance(message.get("model"), str) and message["model"]):
+        facts.model = message["model"]                 # design v4: the most recent assistant
+    if (not facts.summary_seen and o.get("type") == "summary"
+            and isinstance(o.get("summary"), str)):
+        facts.summary_seen = True
+        facts.summary = o["summary"][:TITLE_MAX] or None
+    if not facts.summary_seen and facts.first_title is None:
+        facts.first_title = _title_of(o)
+    if o.get("type") in ("user", "assistant") and not _is_noise(o):
+        facts.message_count += 1
+    _take_turn(facts.turns, o)
+
+
+def _scan(main: list[str], label: str) -> _Facts:
+    """The one parse per line: validate, fold into `_Facts`, drop the dict.
+
+    This is HEAD's `_split_lines` + `_parse_all` + six scans with the same
+    outcomes and no list of parsed objects: a broken line that is not last is an
+    `AgentError` with its non-blank line number, a half-written last line is
+    dropped with a warning, and anything the post-parse scans raised (a
+    valid-JSON non-dict line's first `.get`) is raised after validation has had
+    its say - so a syntax error below it still wins, exactly as before.
+    """
+    facts = _Facts()
+    non_dict: object = _MISSING
+    first_error: Exception | None = None
+    last = len(main) - 1
+    for i, line in enumerate(main):
+        try:
+            o = json.loads(line)
+        except json.JSONDecodeError:
+            if i == last:
+                warn(f"警告：{label} 最後一行不完整，已丟掉")
+                main.pop()
+                break
+            raise AgentError(f"{label} 第 {i + 1} 行解析失敗")
+        if not isinstance(o, dict):
+            # HEAD's first scan (`created`) called `.get` on every object, so any
+            # non-dict anywhere wins over the later scans' errors.
+            if non_dict is _MISSING:
+                non_dict = o
+            continue
+        if first_error is not None:
+            continue                      # HEAD stopped here; keep validating the rest
+        try:
+            _accumulate(facts, o)
+        except Exception as e:            # noqa: BLE001 - re-raised after validation
+            # Drop the traceback: it would keep this line's dict (possibly a large
+            # tool_result) alive until the end of the file, and only the type and
+            # text of the error are still needed.
+            first_error = e.with_traceback(None)
+    if non_dict is not _MISSING:
+        raise AttributeError(f"'{type(non_dict).__name__}' object has no attribute 'get'")
+    if first_error is not None:
+        raise first_error
+    return facts
+
+
+def _exported(session_id: str, main: list[str], sidecar: Path,
+              *, label: str = "session") -> Exported:
+    facts = _scan(main, label)
     return Exported(
         session_id=session_id,
         raw=_pack_raw(main, _pack_aux(sidecar)),
-        dir=directory,
-        title=title,
-        created_at=created,
-        agent_version=version,
-        message_count=count,
-        model=model,
-        turns=turns,
+        dir=facts.directory,
+        title=facts.title,
+        created_at=facts.created_at,
+        agent_version=facts.agent_version,
+        message_count=facts.message_count,
+        model=facts.model,
+        turns=facts.turns,
     )
 
 
@@ -575,7 +677,7 @@ class ClaudeAgent:
     def export(self, session_id: str, hint_dir: str | Path | None = None) -> Exported:
         path = find_jsonl(session_id, hint_dir)
         main = _read_lines(path)
-        return _exported(session_id, main, path.parent / session_id)
+        return _exported(session_id, main, path.parent / session_id, label=path.name)
 
     def turns(self, raw: bytes) -> Turns:
         main, _aux = _unpack_raw(raw)
