@@ -38,6 +38,21 @@ def fail(msg):
 
 if os.environ.get("FAKE_RCLONE_DELAY"):     # let a test watch a slow upload happen
     import time
+    # FAKE_RCLONE_DELAYED=<path>: touch it the moment an UPLOAD - a copy/copyto/move
+    # whose destination is the remote (push_outbox batches `copy <outbox>
+    # gdrive:sessions`, downloads run the other way and never mark) - starts
+    # sleeping, so a caller can tell "an upload is verifiably in flight" without
+    # racing a sleep.
+    _marker = os.environ.get("FAKE_RCLONE_DELAYED")
+    _a = sys.argv[1:]
+    if _marker:
+        for _i, _t in enumerate(_a[:-2]):
+            if _t in ("copy", "copyto", "move") and _a[_i + 2].startswith("gdrive:"):
+                try:
+                    Path(_marker).touch()
+                except OSError:
+                    pass
+                break
     time.sleep(float(os.environ["FAKE_RCLONE_DELAY"]))
 
 args = sys.argv[1:]

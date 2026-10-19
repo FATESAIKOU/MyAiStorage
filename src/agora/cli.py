@@ -40,7 +40,7 @@ import jsonschema
 from agora import header as h
 from agora import store
 from agora.agents.base import (NO_REPLY, Agent, AgentError, Exported, Launch, merge_turns,
-                               reading, reading_of)
+                               reading, reading_of, env_seconds)
 
 AGENTS = ("opencode", "claude")
 TYPES = ("session",)
@@ -1377,26 +1377,183 @@ def _collect_new(run: "_Run", agent: Agent) -> Exported | None:
     return exported
 
 
+#: The dead-man switch on a round. Everything else in the round carries its own
+#: deadline (the opencode export, the summarize budget) except rclone - which has
+#: none (store.Drive._run) - so the round as a whole gets one here. Generous by
+#: design: a killed round loses a round's work, and on a slow link a big session
+#: can legitimately take minutes to stage and upload; this only fires when the
+#: round is truly wedged. `AGORA_ROUND_TIMEOUT`, seconds, like the other two.
+ROUND_TIMEOUT_SECONDS = 1800.0
+
+
+def _round_timeout() -> float:
+    """`communicate(timeout=0)` fires at once: a 0 or negative
+    `AGORA_ROUND_TIMEOUT` - often typed for "no limit" - would kill every round
+    (review #1). A number that is not a usable deadline answers as the default.
+    The guard is HERE, not in `env_seconds`: the other callers keep their
+    exact reading, zero and all."""
+    value = env_seconds("AGORA_ROUND_TIMEOUT", ROUND_TIMEOUT_SECONDS)
+    return ROUND_TIMEOUT_SECONDS if value <= 0 else value
+
+
+class RoundChildDead(Exception):
+    """A round that did not come back with an answer the shell can use: killed,
+    crashed, exited nonzero, or returned a broken payload. One counted failure,
+    nothing applied, the next round looks again (design impl-mem-subproc)."""
+
+
+def _round_child(paths: store.Paths, run: "_Run", agent: Agent, lock_fd: int | None = None):
+    """Run one write-back round in a fresh interpreter and return its payload.
+
+    The heavy work - read the whole session, parse it, lay it out, stage it -
+    happens in `agora.round_child`, a child that exits at the round's end, so
+    the session-sized peak is memory the OS takes back instead of one the
+    day-long shell keeps resident (impl-mem-subproc; why not `os.fork()`: the
+    module's docstring, with the measurement).
+
+    `agent` is not used by the real child - a fresh interpreter loads it by
+    name from the record - but the signature is the seam the test world
+    replaces with an in-process round, and both then feed the same `_apply_diff`
+    and the same outcome logic below. The child's stderr is continue.log, so a
+    death before its own logging starts is still readable where every other
+    round word lands; the pending lock fd is passed on so an orphaned round
+    (the shell SIGKILLed) holds the record busy until it finishes, keeping the
+    next command's recovery from writing beside it. Raises RoundChildDead with
+    the text for this round's one line."""
+    from agora import round_child
+    paths.state.mkdir(parents=True, exist_ok=True)
+    with open(paths.state / CONTINUE_LOG, "ab") as err_sink:
+        proc = subprocess.Popen([sys.executable, "-m", "agora.round_child"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=err_sink,
+                                pass_fds=(lock_fd,) if lock_fd is not None else (),
+                                start_new_session=True)
+        try:
+            out, _err = proc.communicate(json.dumps(round_child.state_of(run)).encode(),
+                                         timeout=_round_timeout())
+        except subprocess.TimeoutExpired:
+            group_dead = _kill_round_group(proc)
+            try:
+                proc.communicate(timeout=5)           # drain what the corpse left
+            except Exception:                         # refused kill or a live pipe:
+                group_dead = False                    # not finished cleaning up
+            if not group_dead:                        # bounded, whatever the corpse
+                with contextlib.suppress(Exception):  # does - the shell never
+                    proc.kill()                       # hangs on a dead round's pipes
+                    proc.wait(timeout=5)              # (review #4)
+            raise RoundChildDead("子行程異常結束（逾時）")
+    if proc.returncode != 0:
+        raise RoundChildDead(f"子行程異常結束（rc={proc.returncode}）")
+    try:
+        return json.loads(out)
+    except ValueError as e:
+        raise RoundChildDead(f"子行程異常結束（狀態壞掉：{e}）")
+
+
+def _kill_round_group(proc) -> bool:
+    """SIGTERM the round's whole group - the child leads its own
+    (`start_new_session`), so the rclone or `opencode export` grandchildren
+    live there too - then SIGKILL if TERM was ignored. The detached uploader
+    is NOT in this group: it starts its own session, so a wedged round can be
+    killed without ever taking an in-flight upload down with it. Returns
+    whether the group is known dead: False only when `killpg` was refused,
+    which tells the caller nothing was actually killed (review #4)."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True                             # already gone: nothing to kill
+    except PermissionError:
+        return False                            # refused: the round is still live
+    try:
+        proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait()
+    return True
+
+
+#: The seven fields one round owes the outer shell; `_apply_diff` refuses a
+#: payload that is missing any of them (a broken answer lands whole or not at
+#: all), and the tests name the same list.
+ROUND_DIFF_KEYS = ("last_md5", "fingerprint", "collect_failed", "wrote",
+                   "target", "pending", "first_note")
+
+
+def _apply_diff(run: "_Run", payload: dict) -> None:
+    """Bring a clean round's small state back into the outer shell's `_Run`.
+    Every field is read by name: a payload missing one is a broken return and
+    raises `KeyError`, which the round's death branch counts as a failure -
+    silently skipping a field would make a round half-land. The keys are
+    checked BEFORE anything moves (review #2): assigning field by field let an
+    early field land when a later one was missing, so a dead round changed the
+    shell's `last_md5` or `target` after all. Refused whole instead."""
+    from agora import round_child
+    missing = [key for key in ROUND_DIFF_KEYS if key not in payload]
+    if missing:
+        raise KeyError("round payload is missing " + ", ".join(missing))
+    run.last_md5 = payload["last_md5"]
+    run.fingerprint = round_child.decode_fingerprint(payload["fingerprint"])
+    run.collect_failed = payload["collect_failed"]
+    run.wrote = payload["wrote"]
+    run.target = payload["target"]
+    if payload["pending"] is not None:
+        run.pending = Path(payload["pending"])
+    run.first_note = payload["first_note"]
+
+
+def _repair_pending(run: "_Run") -> None:
+    """A child that died after `_follow` renamed the pending record but before
+    returning the new name left the rename real and the answer lost: the lock
+    sits on the inode, and a rename does not move the inode, so follow the
+    lock's file back to its name. Without this, the next move's `_move_pending`
+    and the final `run.pending.unlink()` would work on a stale path."""
+    if run.pending is None or run.lock is None:
+        return
+    try:
+        if run.pending.exists():
+            return
+        ino = os.fstat(run.lock.fileno()).st_ino
+    except (OSError, ValueError):
+        return
+    for cand in run.paths.pending.glob("*.json"):
+        try:
+            if cand.stat().st_ino == ino:
+                run.pending = cand
+                return
+        except OSError:
+            continue
+
+
 def _periodic_write(run: "_Run", agent: Agent) -> None:
     """One write-back round while the agent runs; failures are counted, never raised.
 
     The agent must not stop because Drive was unreachable for a minute (design「讀到
-    一半不能寫壞」). Everything said here goes to continue.log, and every round leaves
-    exactly one line there - written or skipped - so a waiter can tell a round
-    happened without reading the terminal the agent owns.
-    """
+    一半不能寫壞」). The round's heavy work runs in a child interpreter that exits
+    when the round ends, so the peak leaves with it and the shell keeps only the
+    small state (impl-mem-subproc); this outer shell opens the round's `_quiet`,
+    decides the outcome from what came back, and owns the count. Everything said
+    goes to continue.log - the child's own lines through its stamped writer, this
+    round's outcome through this one - and every round leaves exactly one outcome
+    line there, written or skipped, so a waiter can tell a round happened without
+    reading the terminal the agent owns. A child that died, was killed, or came
+    back with a broken answer counts as this round's failure: nothing of it is
+    applied, and the next round is forced to look again."""
     try:
         with _quiet(run.paths, run.target) as writer:
             run.logger = writer
             try:
-                exported = _collect_new(run, agent)
-                saved, target, _note = _write_one(run.paths, run, exported, agent,
-                                                  check_drive=False)
-            except Exception as e:   # read, stage or upload trouble: next round retries
-                run.failures += 1
-                outcome = f"失敗（第 {run.failures} 次）：{e}"
-            else:
-                if saved is None:
+                payload = _round_child(run.paths, run, agent,
+                                       run.lock.fileno() if run.lock else None)
+                err, saved, target = payload["err"], payload["saved"], payload["target"]
+                _apply_diff(run, payload)
+                writer.tag = run.target
+                if err is not None:        # the round body raised inside the child
+                    run.failures += 1
+                    outcome = f"失敗（第 {run.failures} 次）：{err}"
+                elif saved is None:
                     if store.outbox_ulids(run.paths) and not store.uploader_is_running(run.paths):
                         from agora import background
                         run.failures += 1
@@ -1409,6 +1566,12 @@ def _periodic_write(run: "_Run", agent: Agent) -> None:
                 else:                # staged here, but it did not reach the outbox's exit
                     run.failures += 1
                     outcome = f"已寫回 {target}，但上傳失敗（第 {run.failures} 次）"
+            except Exception as e:   # a dead or unreadable round: counted, and next looks again
+                run.failures += 1
+                run.collect_failed = True
+                run.fingerprint = None
+                _repair_pending(run)
+                outcome = f"失敗（第 {run.failures} 次）：{e}"
             print(f"[agora] 定期寫回：{outcome}", file=sys.stderr)
     except Exception:                # the log itself is broken: stay silent, keep going
         run.failures += 1

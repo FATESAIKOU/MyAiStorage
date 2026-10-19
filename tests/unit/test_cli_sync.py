@@ -36,6 +36,7 @@ from agora import cli, store
 from agora import header as h
 from agora.agents import claude as C
 from agora.agents.base import Exported, Launch
+from _round_seam import in_process_round_child
 
 FAKE_RCLONE = Path(__file__).resolve().parent.parent / "fakes" / "fake_rclone.py"
 FAKE_CLAUDE = Path(__file__).resolve().parent.parent / "fakes" / "fake_claude.py"
@@ -103,6 +104,11 @@ class SyncAgent:
         return self._exported(launch.agent_session_id)
 
 
+def _round_child_in_process(paths_, run_, agent_, lock_fd_=None):
+    """The round child's boundary, run in-process: see _round_seam.py."""
+    return in_process_round_child(paths_, run_, agent_)
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     remote = tmp_path / "remote"
@@ -114,6 +120,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("AGORA_RCLONE", str(wrapper))
     agent = SyncAgent()
     monkeypatch.setattr(cli, "load_agent", lambda name: agent)
+    monkeypatch.setattr(cli, "_round_child", _round_child_in_process)
     return agent
 
 
