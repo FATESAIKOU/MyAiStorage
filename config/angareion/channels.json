@@ -4,6 +4,10 @@
       "backend": "aicompany-channel",
       "issue": 6
     },
+    "secretary-pmo": {
+      "backend": "aicompany-channel",
+      "issue": 9
+    },
     "team-mylinuxpool": {
       "backend": "aicompany-channel",
       "issue": 2
