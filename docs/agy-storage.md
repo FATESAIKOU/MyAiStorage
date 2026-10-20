@@ -1,0 +1,294 @@
+# agy (Antigravity CLI) conversation storage — PR0 probe notes
+
+Public notes on how the **agy** CLI (Antigravity, version **1.4.3** at the time of
+this probe; the earlier interface note assumed 1.4.2) stores conversations on
+disk, and how `tests/fixtures/agy/make_agy_db.py` reproduces that shape so the
+read-only adapter (PR1) has deterministic test data. Everything written here was
+learned from **fake conversations generated only from synthetic text**
+(`hello probe`-style prompts, number lists, a single `echo hi` tool call); no
+real session content, no credential files, no paths containing real user names
+appear in this document.
+
+Provenance: three fake conversations opened with the real agy CLI inside a
+temp cwd (the findings below are global to the CLI version, not to that cwd);
+schema, timestamps and uuids are structural facts, safe to publish.
+
+## 1. Files and layout
+
+Under the agy home (default `~/.gemini/antigravity-cli/`, overridable - that is
+what `AGORA_AGY_HOME` should be for):
+
+| path | what it is |
+|---|---|
+| `conversations/<conversation-uuid>.db` | one SQLite 3 database per conversation (WAL mode, page size 32768) |
+| `conversations/<uuid>.db-wal`, `.db-shm` | sidecars, **only while a write turn is in progress / a connection is open**; absent when idle or after exit |
+| `conversation_summaries.db` | SQLite (WAL): list/titles/preview/step-count index over all conversations (*not deciphered here - it is shared across all sessions and holds real titles; treat its content as private*) |
+| `brain/<conversation-uuid>/` | scratch area, empty-ish for fresh CLI conversations: `scratch/`, `.user_uploaded/`, and `.system_generated/{logs/transcript.jsonl, logs/transcript_full.jsonl, logs/chunks/, steps/<idx>/}` *(names and sizes only were inspected; contents were not read)* |
+
+The `.db` file name equals the conversation id. Note the ids stored *inside* are
+not that uuid - see §5.
+
+## 2. Database shape
+
+Standard SQLite 3, `page_size = 32768`, journal mode **WAL** (the persisted
+write/read format bytes in the main header stay `2/2` even after agy drops the
+sidecars - so an idle file is still "a WAL database without its -wal"),
+`user_version = 1`, `auto_vacuum = 0`, UTF-8. Full schema (verbatim):
+
+```sql
+CREATE TABLE `trajectory_meta` (`trajectory_id` text,`cascade_id` text,`trajectory_type` integer,`source` integer,PRIMARY KEY (`trajectory_id`));
+CREATE TABLE `steps` (`idx` integer,`step_type` integer NOT NULL DEFAULT 0,`status` integer NOT NULL DEFAULT 0,`has_subtrajectory` numeric NOT NULL DEFAULT false,`metadata` blob,`error_details` blob,`permissions` blob,`task_details` blob,`render_info` blob,`step_payload` blob,`step_format` integer NOT NULL DEFAULT 0,PRIMARY KEY (`idx`));
+CREATE INDEX `idx_steps_status` ON `steps`(`status`);
+CREATE INDEX `idx_steps_step_type` ON `steps`(`step_type`);
+CREATE TABLE `gen_metadata` (`idx` integer,`data` blob,`size` integer NOT NULL DEFAULT 0,PRIMARY KEY (`idx`));
+CREATE TABLE `executor_metadata` (`idx` integer,`data` blob,PRIMARY KEY (`idx`));
+CREATE TABLE `parent_references` (`idx` integer,`data` blob,PRIMARY KEY (`idx`));
+CREATE TABLE `trajectory_metadata_blob` (`id` text DEFAULT "main",`data` blob,PRIMARY KEY (`id`));
+CREATE TABLE `battle_mode_infos` (`idx` integer,`data` blob,PRIMARY KEY (`idx`));
+```
+
+Row semantics observed on fake conversations:
+
+- `trajectory_meta`: exactly one row; `cascade_id` **is the file-name uuid**,
+  `trajectory_id` is a separate inner uuid; `trajectory_type=4`, `source=17`
+  (CLI conversations; other enum values not observed).
+- `steps`: one row per step; `step_payload` carries everything interesting as
+  protobuf (next section). `metadata` duplicates one sub-message of the payload
+  (§4). `error_details`/`permissions`/`task_details` were empty in every
+  observed step. `render_info` is only non-NULL on tool steps.
+- `gen_metadata`: 1-2 rows (a small "bootstrap" row plus one large "main
+  context" row); the mapping to turns is not fully determined (one of the fake
+  conversations ended with only the large row after a single turn). Sizes
+  observed on real agy: bootstrap ≈1.2 KB, main ≈52 KB (real observations; the
+  fixture is shape-only and its synthetic blobs are smaller).
+- `executor_metadata`: **exactly one row per user turn**, a ≈16.9 KB template
+  (byte-length was identical across conversations; real observation - the
+  fixture keeps the same field classes but a different size).
+- `trajectory_metadata_blob`: one row `id='main'` containing workspace state:
+  a nested title-ish proto, the two uuids of §5, `file://` workspace URI,
+  project name (`default-cli-project` for CLI conversations), plus one 492-byte
+  opaque blob that also recurs inside gen/executor rows.
+- `parent_references`/`battle_mode_infos`: empty for fresh CLI conversations.
+
+## 3. Wire format and resolved field paths
+
+Blobs are plain protobuf wire format (no compression, no encryption at the
+container level; some interior values are opaque blobs that could not be parsed
+- they are listed as such). Every `step_payload` starts with:
+
+| field | meaning |
+|---|---|
+| `1` | step_type again (same as the column) |
+| `4` | final status (same as the column) |
+| `5` | per-step context envelope (repeated structure, `5.12` below) |
+
+Context envelope (payload field 5), observed on all steps:
+
+| path | meaning (as observed) |
+|---|---|
+| `5.1` | start timestamp {1: unix seconds, 2: nanos} |
+| `5.3` | actor int: **4 = user-written step, 2 = assistant/tool side** |
+| `5.6` `5.7` `5.8` | timestamp triplets (assistant steps only) |
+| `5.6/.7/.8.1.2` | nanos parts |
+| `5.9` | generation stats (model steps): token counts (1/2/3/6), `5.9.7` = `bot-<uuid>` agent id, `5.9.8` = {1: "sessionID", 2: numeric id}, `5.9.11` = short id |
+| `5.11` | context token count (int) |
+| `5.12` | **conversation-scoped execution uuid, same value in every step of the conversation** (and equal to a field inside `gen_metadata`) |
+| `5.20` | ids: {1: trajectory_id, 4: cascade_id}; on user steps it arrives as the equivalent pre-serialized bytes, on assistant steps as a nested message |
+| `5.26` | status history: repeated {1: status code, 2: timestamp} - codes seen: 1, 2, 3, 8 |
+| `5.32` | another timestamp pair (assistant steps) |
+| `5.34` | permission decision: {4: "allow"} (tool steps) |
+| `5.35` | 32-hex per-step session-ish id |
+| `5.38` | int (1) on tool steps |
+
+User steps (`step_type = 14`) - the user text lives at:
+
+- `19.2` = the typed prompt (UTF-8)
+- `19.3` = wrapped twin: embedded message whose `1` repeats the same text
+- `19.4` = empty message (constant)
+- `19.12` (and `19.13` on later user turns) = ≈1.3 KB generation-context blob;
+  contains, at deep paths, the tool-permission strings class
+  (`read_file(...)`, `write_file(...)` with workspace paths) and other config
+  info - settings, not dialogue.
+
+Model steps (`step_type = 15`):
+
+- text turns: `20.1` = the reply text; `20.8` = same text again (display copy);
+  `20.6` = per-step `bot-<uuid>`; `20.14.2.1` = opaque ≈150-350 B blob.
+- tool-call turns instead carry a parts list: `20.7` = one part with
+  {1: call id (`call_...`), 2: tool name (`run_command`), 3: args as a JSON
+  string, 7.2.1: opaque 264 B blob}. The JSON keys mirror the executed command
+  (e.g. `{"CommandLine":"echo hi",...}`).
+
+Tool steps (`step_type = 132`):
+
+- `5.4` = the call echo: {1: call id, 2: tool name, 3: args JSON, 7.2.1: the
+  same opaque 264 B blob as in the model part above}
+- `payload.140` = the result envelope:
+  - `140.1` = repeated key/value pairs (e.g. `toolSummary`, `CommandLine`,
+    `IsDaemon`, `WaitMsBeforeAsync`)
+  - `140.2.1` = **the tool output text as the agent saw it**
+    (observed shape: `Command exited with code N.\n\nCommand output:\n<out>` with
+    CRLF tail on the captured output)
+  - `140.2.3` = display tree proto {5: "Ran", 6: "terminal", 9.1: command,
+    10.3.1: command, 10.3.2: cwd, 10.3.3: int, 10.3.4: captured output with CRLF}
+  - `140.2.6` = typed detail: {1: `type.googleapis.com/exa.cortex.core.tools.RunCommand`,
+    2: {5: shell name, 6: command, 7: cwd}}
+  - `140.7` = `file:///.../brain/<conversation-uuid>/.system_generated/steps/<idx>/...`
+    URL (embeds the conversation uuid again)
+- `render_info` column (small display summary):
+  {5: "Ran", 6: "terminal", 9.1: command, 10: {1: command, 2: cwd, 3: 0, 4: output CRLF}}
+
+So a PR1 `turns()` decoder can extract, per row:
+
+| step_type | what to extract | path from `step_payload` |
+|---|---|---|
+| 14 | user text | `19.2` |
+| 15 | model text (only when a text part exists) | `20.1`; skip if absent |
+| 15 (tool-call part) | tool name + args preview | `20.7.2`, `20.7.3` |
+| 132 | tool name + output text | `5.4.2`, `140.2.1` |
+
+Unknown step types should be passed through raw/unhandled (interface note §2),
+not dropped.
+
+## 4. Column semantics (observed)
+
+- `step_type`: 14 = user input, 15 = model reply (text or tool-call part),
+  132 = tool call execution step. No other values appeared in the fake
+  conversations (sub-steps for other tool kinds, IDE interactions, etc.: unknown).
+- `status` (column) = 3 for every finished step; inside `5.26` the transitions
+  recorded were 1 → 2 → 3 on tool steps and 8 → 3 on model steps (code
+  semantics beyond "3 = done" unknown).
+- `has_subtrajectory`: 0 everywhere in the observed data (including tool steps,
+  which do carry nested opaque blobs - those did not flip this flag).
+- `step_format`: 0 everywhere (plain wire protobuf; other formats: not
+  observed - when/if they appear, the decoder must treat them like unknown
+  step types).
+- `metadata` column: **byte-equal to `step_payload` field 5** (the context
+  envelope) on every observed step - a cheap consistency check, not a separate
+  message family.
+
+## 5. Where the conversation uuid lives (fork/rename implications)
+
+- file name = conversation (cascade) uuid;
+- `trajectory_meta` row: `trajectory_id` (inner uuid) + `cascade_id`;
+- every step's `5.20` repeats **both** ids;
+- `140.7` URLs and workspace references embed the conversation uuid;
+- `trajectory_metadata_blob` row carries both ids again.
+
+Conclusion for PR2: renaming/forking to a new id is **not** a
+`trajectory_meta`-only rewrite; step payloads must be rewritten too (or the
+restore plan reuses the original id).
+
+## 6. gen_metadata / executor classes (by class, no content)
+
+- `gen_metadata.data` top-level: {1: main proto with a ≈15 KB opaque sub-blob,
+  repeated 30-2000 B config messages (workspace paths, skill names, IDE state
+  entries by class), token counts}, {3: ≈4.4 KB proto}, {4: the per-conversation
+  execution uuid of `5.12`}, {8: the shared 492-byte opaque blob}.
+  Plus tool-permission strings (`read_file(...)`, ...) of the same class PR0's
+  interface note already recorded.
+- `executor_metadata.data`: {1: int, 2/3: small ints, 9: uuid, 10: ≈7.3 KB
+  opaque blob, 11: the 492-byte blob, 16: 14 B, 17: int, 18: ≈7.7 KB blob}.
+
+The opaque blobs are the only content classes this probe could not decode; the
+fixture generator fills them with deterministic synthetic bytes.
+
+## 7. WAL behaviour (measured on fake conversations)
+
+- **Turn start:** agy opens the db writable → `-shm` (32768 B) and `-wal`
+  appear; the main `.db` mtime/size does not change until turn end.
+- **During the turn:** the wal briefly grows on the order of **1.0-1.9 MB per
+  turn** (measured 1,082,168 B and 1,344,504 B at the first samples ~1-6 s into
+  two different turns; writes are batched, sampling was coarse). This dwarfs
+  the visible new content (steps + one ≈17 KB executor row + one ≈52 KB
+  gen row) - it reflects page-level churn (32 KB pages, re-written context
+  blobs), not 1 MB of user text.
+- **Turn end:** within ≤1 s of the turn finishing, the wal checkpoints into the
+  main file (main grows by a few pages, e.g. 13→15 pages) and the sidecars are
+  deleted (`lsof` showed no open conversation handles between turns). So an
+  agy process left idle between turns holds **no** `.db-wal`/`.db-shm`.
+- **Exit:** after `/exit` the conversation db stays WAL-mode-flagged in its
+  header but has no sidecars; `file:...?immutable=1` opens it fine.
+- **Kill during a turn:** not tested (would be required to prove
+  crash-recovery semantics).
+
+## 8. Snapshot / export practice (evidence)
+
+- Idle conversations (no sidecars): copy `.db` alone; open with
+  `file:...?immutable=1` → `PRAGMA quick_check` = ok. (Matches the
+  interface note §1.2①; `sqlite3 -readonly` on the *original* still fails
+  because it cannot create `-shm` next to a live-running agy - but that is a
+  live-dir behavior, snapshots don't hit it.)
+- **Mid-turn copy validated once more (this PR):** during a running turn the
+  triple `.db` + `.db-wal` + `.db-shm` was copied, and the copy - opened with a
+  *normal* connection (which replays the wal) - gave `quick_check` = ok and
+  showed the in-progress state (2 steps where the turn later finished with the
+  same 2 steps + the completed turn). Consistent with the interface note
+  §1.2②; second confirming data point, still not stress-tested.
+- **`VACUUM INTO` determinism:** three consecutive runs of
+  `VACUUM INTO` from the same agy-format db produced **byte-identical** output
+  (same md5), and another export of the same source unchanged it again. The
+  PR1 golden standard "export twice → equal md5" is safe *as long as the
+  snapshot itself does not get rewritten between exports* (it had earlier been
+  feared that header change-counter fields might churn; they did not).
+- Snapshot hygiene: a plain (read-write) open on a sidecar-less copy leaves
+  0-byte `-wal`/`-shm` behind on Python's stdlib; treat "no -wal or a 0-byte
+  -wal after clean close" as idle. agy's own cleanup removes both.
+
+## 9. The fixture generator
+
+`tests/fixtures/agy/make_agy_db.py` builds N-turn agy-shaped dbs purely
+programmatically:
+
+- same schema (the exact `CREATE` strings above), page size 32768,
+  `user_version = 1`, `journal_mode = WAL`;
+- encodes user/model/tool steps with the field numbers of §3 (a ~40-line
+  protobuf encoder, no protobuf dependency);
+- forms `metadata` = payload-field-5 bytes and a tool `render_info`, matching
+  the real rule;
+- fills every opaque blob with deterministic `sha256` filler (seeded uuids via
+  `uuid5`, fixed synthetic epoch) so the logical rows and the `VACUUM INTO`
+  export are reproducible. Two independently generated files can still differ
+  in the SQLite header change counter (offset 24-27/92-95), so regeneration
+  checks compare `VACUUM INTO` output md5 plus per-row content - not the
+  whole-file md5 of two fresh files;
+- **contains no data derived from a real agy db** - texts are caller-supplied
+  fake strings (`hello probe`-style), paths are `/tmp/...` placeholders, and a
+  unit test scans every generated artifact and the fixture sources for
+  home-shaped/credential-shaped strings (`/Users/`, `/home/`, `C:\Users\`,
+  `.gemini/`, `google_accounts`, `oauth`);
+- `make_db(path, turns, with_wal=False)` returns a clean file without sidecars
+  (idle shape); `with_wal=True` returns with the connection left open on
+  committed-but-uncheckpointed rows - a **mid-turn / live-writer** shape, not
+  agy's idle between-turns shape. The caller copies `db`+`-wal` only (no
+  `-shm`; SQLite rebuilds it), runs `VACUUM INTO`, and then closes.
+
+Turn spec: `{"user": ..., "model": ..., "tool": {"name": ..., "args": ...,
+"command": ..., "output": ...}}` - the tool key adds the model tool-call part
+and the 132 step that echoes it with its result. `raw_steps=[{idx, step_type,
+status, step_format, has_subtrajectory, payload}]` appends arbitrary rows so
+PR1 can test unknown step types/statuses/formats passing through unchanged;
+this is deliberately a minimum shape, not a full agy emulator.
+
+Generated dbs currently only cover the voices this probe saw (no streaming
+partial steps, no IDE sub-steps, no crash states).
+
+## 10. Unknowns
+
+- `conversation_summaries.db` cross-checks (title/preview/`step_count`,
+  `last_user_input_step_index`) were **not** verified in this PR (the table is
+  shared across real sessions; reading its rows was out of scope). PR1 should
+  verify against the fake conversations under the PM's direction.
+- `gen_metadata` row-count semantics (and when the small bootstrap row
+  appears) not determined.
+- Status codes other than 3, `step_format` other than 0, and
+  `has_subtrajectory=1`: never observed - semantics unknown.
+- Tool steps other than `run_command`, and a *denied* permission flow: not
+  observed (`echo hi` ran without a visible permission prompt in interactive
+  mode, and the tool step stored `5.34.4 = "allow"`; how denial is stored is
+  unknown).
+- brain/<id> file contents, and WAL checkpoint behavior when agy is killed
+  mid-turn: untested.
+- agy version drift: probe ran on **1.4.3** vs the 1.4.2 note - field paths
+  should be re-checked whenever the adapter starts failing, and the raw blobs
+  are kept untouched on export precisely because of this risk (interface R1).
