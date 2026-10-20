@@ -119,7 +119,7 @@ def test_start_child_timeout_kills_the_group(monkeypatch):
         cli._start_child(paths(), _state("agora:01TEST00000000000000000000", {"id": "x"}, "/tmp"))
 
     assert "逾時" in str(e.value)
-    assert killed == [(4242, signal.SIGTERM)], killed
+    assert killed == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)], killed  # TERM, then always KILL (#74)
 
 
 def test_a_cancelled_shell_kills_the_load_child_and_reraises(monkeypatch):
@@ -142,7 +142,7 @@ def test_a_cancelled_shell_kills_the_load_child_and_reraises(monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         cli._start_child(paths(), _state("agora:01TEST00000000000000000000", {"id": "x"}, "/tmp"))
 
-    assert killed == [(4242, signal.SIGTERM)], killed
+    assert killed == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)], killed  # TERM, then always KILL (#74)
     assert len(calls) == 2 and calls[1] == 5, "the drain after the kill is bounded"
 
 
