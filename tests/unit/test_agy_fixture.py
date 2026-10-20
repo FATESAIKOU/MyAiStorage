@@ -66,8 +66,8 @@ GEN_SIZES = [555, 39031]
 EXECUTOR_SIZE = 15603
 
 # Strings that must never appear in fixture sources or generated artifacts.
-DENYLIST = (b"/Users/", b"/home/", b"C:\\Users\\", b".gemini/",
-            b"google_accounts", b"oauth")
+DENYLIST = tuple(n.lower() for n in (b"/Users/", b"/home/", b"C:\\Users\\", b".gemini/",
+                                     b"google_accounts", b"oauth"))   # compared against lowercased bytes
 
 
 def _make_demo(tmp_path: Path, *, name: str | None = None,
@@ -130,6 +130,17 @@ def _private_hits(path: Path) -> list[str]:
         if pos >= 0:
             hits.append(f"{path.name}: {needle.decode()} at offset {pos}")
     return hits
+
+
+def test_private_scan_catches_what_it_claims_to(tmp_path):
+    """The denylist itself is checked: a mac path, a windows path and a token word must hit."""
+    for text in (b"x /Users/bob y", b"C:\\Users\\bob", b"/USERS/bob", b"~/.gemini/antigravity-cli", b"OAuth"):
+        f = tmp_path / "probe.bin"
+        f.write_bytes(text)
+        assert _private_hits(f), text
+    clean = tmp_path / "clean.bin"
+    clean.write_bytes(b"hello probe")
+    assert _private_hits(clean) == []
 
 
 def test_schema_and_pragmas_match_docs(tmp_path):
@@ -265,9 +276,11 @@ def test_context_ids_and_bookkeeping_sizes(tmp_path):
 
 
 def test_idle_generation_is_reproducible(tmp_path):
-    """C1: compare VACUUM INTO exports and logical rows, not raw file md5."""
+    """C1: independently generated files are identical byte for byte (one transaction,
+    so no header change counter churn), and so are their VACUUM INTO exports."""
     one, _ = _make_demo(tmp_path, name="one")
     two, _ = _make_demo(tmp_path, name="two")
+    assert hashlib.md5(one.read_bytes()).hexdigest() == hashlib.md5(two.read_bytes()).hexdigest()
     assert _dump(one) == _dump(two)
 
     h1 = _vacuum(one, tmp_path / "v1.db")

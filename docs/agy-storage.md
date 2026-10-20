@@ -248,10 +248,11 @@ programmatically:
   the real rule;
 - fills every opaque blob with deterministic `sha256` filler (seeded uuids via
   `uuid5`, fixed synthetic epoch) so the logical rows and the `VACUUM INTO`
-  export are reproducible. Two independently generated files can still differ
-  in the SQLite header change counter (offset 24-27/92-95), so regeneration
-  checks compare `VACUUM INTO` output md5 plus per-row content - not the
-  whole-file md5 of two fresh files;
+  export are reproducible. Schema and rows are written in a single
+  transaction, so two independently generated files are byte-identical (with
+  several transactions the SQLite header change counter, offset 24-27/92-95,
+  could differ under load); the tests check the whole-file md5, the per-row
+  content and the `VACUUM INTO` output;
 - **contains no data derived from a real agy db** - texts are caller-supplied
   fake strings (`hello probe`-style), paths are `/tmp/...` placeholders, and a
   unit test scans every generated artifact and the fixture sources for
