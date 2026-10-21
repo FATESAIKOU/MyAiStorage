@@ -458,7 +458,7 @@ What this revision does:
 ### 2026-10-21 真機驗收：#26 的接續（#141）
 
 The hand acceptance run of §18 (`agora continue --agent agy`, real agy 1.4.4,
-real `~/.gemini/antigravity-cli`, the conversation deleted from agy first)
+real `~/.gemini/antigravity-cli`; before the run the conversation file and its summaries row were absent)
 settled §12's open question:
 
 - **The row is enough to load the restored conversation.** agy opened the
@@ -478,12 +478,12 @@ settled §12's open question:
   | --- | --- | --- |
   | `status` | `''` (empty string) | `CASCADE_RUN_STATUS_IDLE` |
   | `raw_summary` | `NULL` | a protobuf blob |
-  | `last_user_input_step_index` | `0` (declared type) | updated to agy's own value (a fresh agy row carried `-1`) |
+  | `last_user_input_step_index` | `-1` (the column default) | `2` (agy's own value) |
   | `step_count`, `last_modified_time`, `last_user_input_time` | computed by agora from the steps and the table's samples | rewritten by agy |
 
-  (In that run the list had no sample row left - the conversation had been
-  deleted first - so `status`, `project_id` and `app_data_dir` took the empty
-  fallback. With rows present they copy the most common value, as above.)
+  (In that run agora's row carried `project_id` `default-cli-project` and
+  `app_data_dir` `antigravity-cli`; only `status` stayed empty. Where those
+  values came from was not traced.)
 
   So the row is an entry ticket, not a format agy keeps: it accepts ours and
   then writes its own. The adapter never has to imitate agy's protobuf.

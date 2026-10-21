@@ -109,7 +109,7 @@ agy 的 raw MUST 是一個 JSON 物件，`format` 恰為 `agy-conversation/1`，
 - **THEN** 在同步與任何寫入之前拒絕，exit 1，訊息說明 agy 的 headless 在後續
 
 #### Scenario: harness 檔
-- **WHEN** `agora continue session <id> --agent agy --harness-file <path>`
+- **WHEN** `agora continue session <id> --agent agy --harness-file <path>`（檔案存在且可讀；否則先得到檔案本身的錯誤）
 - **THEN** 在啟動之前拒絕，exit 1，訊息說明 `--harness-file` 不支援 agent agy
 
 #### Scenario: 接續中 db 不見
