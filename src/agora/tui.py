@@ -47,7 +47,7 @@ COLUMNS = {"agora": ("id", "標題", "agent", "更新", "雲端"),
            "import": ("id", "標題", "agent", "更新", "目錄")}
 CLOUD_YES, CLOUD_NO, CLOUD_NEW = "✓", "✗", "未上傳"
 TITLE_MAX = 36                   # the title column is cut here, so the others stay on screen
-AGENT_STYLE = {"opencode": "cyan", "claude": "#ff8700", "merge": "green"}
+AGENT_STYLE = {"opencode": "cyan", "claude": "#ff8700", "agy": "#5fafff", "merge": "green"}
 #: The key bar, per tab and side (spec「按鍵」): what a key does here, and only here.
 KEYS = {
     "list": {
@@ -169,6 +169,16 @@ def filtered(rows: list[Row], text: str, matches: set[str] | None = None) -> lis
 PREVIEW_CHUNK = 30 << 10     # about 30 KB a step; a session.md is 340 KB to 3 MB (T6)
 FILTER_IDLE = 0.3            # content search: this long without a keystroke before it reads the agents (T7 P1)
 PREVIEW_IDLE = 0.15          # the cursor has to rest this long before anything is read
+
+#: The content search reads each agent's own store. agy's first version only has
+#: title+preview to search (its conversation bodies are not in the summaries db),
+#: and saying so is what keeps "no result" from reading as "not there" (#26).
+AGY_SEARCH_NOTE = "內文搜尋：agy 只搜標題與 preview（不搜內文）"
+
+
+def content_search_note(agents) -> str | None:
+    """The one-line caveat for the content search, when agy is one of the agents."""
+    return AGY_SEARCH_NOTE if any(getattr(agent, "name", None) == "agy" for agent in agents) else None
 
 
 def read_tail(path: Path, at: int | None = None, size: int | None = None) -> tuple[str, int]:
@@ -1782,6 +1792,8 @@ class AgoraApp(App):
     def action_search_mode(self) -> None:
         self.content = not self.content
         self.query_one("#mode", Static).update("內文" if self.content else "標題")
+        if self.content and (note := content_search_note(self.agents)):
+            self.say(note)
         if self.text:
             self.search(self.text)
 

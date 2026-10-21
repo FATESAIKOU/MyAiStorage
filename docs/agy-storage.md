@@ -225,6 +225,12 @@ fixture generator fills them with deterministic synthetic bytes.
   showed the in-progress state (2 steps where the turn later finished with the
   same 2 steps + the completed turn). Consistent with the interface note
   §1.2②; second confirming data point, still not stress-tested.
+- **PR1 copies two files, not three.** `-shm` is a wal-index cache that SQLite
+  rebuilds on the first connection, so copying it adds a file to check without
+  adding consistency; the adapter copies `.db` + `.db-wal` only (review #26
+  finding 9). This is a choice made after the probe, not a contradiction of it:
+  the triple copy above is what was measured in PR0; PR1's snapshot is
+  `.db`+`-wal` → replay in a temp dir → `VACUUM INTO`.
 - **`VACUUM INTO` determinism:** three consecutive runs of
   `VACUUM INTO` from the same agy-format db produced **byte-identical** output
   (same md5), and another export of the same source unchanged it again. The
@@ -280,6 +286,14 @@ partial steps, no IDE sub-steps, no crash states).
   `last_user_input_step_index`) were **not** verified in this PR (the table is
   shared across real sessions; reading its rows was out of scope). PR1 should
   verify against the fake conversations under the PM's direction.
+  **PR1 update:** the adapter now reads this file, but only against a
+  *synthetic* table built by `tests/unit/test_agent_agy.py` (columns
+  `conversation_id, title, preview, step_count, last_modified_time,
+  workspace_uris`, a plausible table name). The real table's name, column
+  types, timestamp unit and `workspace_uris` encoding are still unverified;
+  the adapter discovers the table by columns and accepts seconds,
+  milliseconds or ISO timestamps rather than assuming one (`agy.py`
+  `_summary_table` / `_iso` / `_workspace`).
 - `gen_metadata` row-count semantics (and when the small bootstrap row
   appears) not determined.
 - Status codes other than 3, `step_format` other than 0, and
@@ -293,3 +307,59 @@ partial steps, no IDE sub-steps, no crash states).
 - agy version drift: probe ran on **1.4.3** vs the 1.4.2 note - field paths
   should be re-checked whenever the adapter starts failing, and the raw blobs
   are kept untouched on export precisely because of this risk (interface R1).
+- Where agy would record its own version (and a conversation's creation time
+  or model name) was not found; the PR1 envelope writes `agy_version: null`
+  and `Exported.created_at` / `model` stay empty rather than invented.
+
+## 11. PR1 verification (fixture only)
+
+What `tests/unit/test_agent_agy.py` pins against the programmatic fixture -
+these are facts about the fixture and the adapter's rules, not new claims
+about a real agy:
+
+- **Idle snapshot:** only the `.db` is copied (no `-wal`, no `-shm`), opened
+  `immutable=1`, `quick_check` = ok; the source file's `(size, mtime_ns)` is
+  unchanged afterwards.
+- **Live snapshot:** `.db` + `.db-wal` copied, `-shm` never; the replay in the
+  temp dir sees the committed-but-uncheckpointed rows; `VACUUM INTO` gives a
+  single file.
+- **Races:** a stat change between the before/after pair (main file or `-wal`
+  only) triggers a second copy; a file that vanishes mid-copy (agy's last
+  connection removing the wal) is retried on the idle path; three consecutive
+  changes/deletions raise `AgentError`, and the temp directory is gone without
+  relying on the garbage collector.
+- **Golden standard:** exporting the same fake db twice gives the same
+  `raw_md5` and `raw_size`; the envelope's `db_b64` decodes to the source file
+  byte for byte (idle path) and `turns(raw)` equals the turns carried on
+  `Exported`.
+- **Turns:** user `19.2`, model text `20.1` and tool call `20.7` come out as
+  text / one `[tool] …` line per call; the tool execution step (`132`) is
+  recognised and silent - it is not `[skip]`, and its `5.4`/`140.2.1` content
+  (including the full output) is only in `scan_text`, not in the reading
+  version (design 4.4). An unobserved `step_type` becomes
+  `[skip agy-step-<idx>/<type>]` with one `warn` line; a broken protobuf, or a
+  field whose declared length runs past the message, skips just that step and
+  does not fail the export. `message_count` counts only 14/15 turns that
+  produced reading content.
+- **scan_text:** every UTF-8 string of ≥ 4 bytes in any length-delimited field
+  of `steps.step_payload` / `render_info` / `metadata` is collected,
+  untruncated, deduplicated and in order (a 300-byte tool output with a
+  `sk-…` string is in `scan_text` and not in `turns()`). `gen_metadata`,
+  `executor_metadata` and `trajectory_metadata_blob` are not walked: those
+  settings/system-prompt strings stay only inside `db_b64`. The repo has no
+  credential-scan implementation; this is the plain-text surface for the
+  PM/MyPMO scan, and this gap is known.
+- **Listing / search:** the synthetic summaries rows give `Listed` title,
+  dir, `updated_at` and the `(mtime, size)` cache avoids a second copy;
+  `search_text` matches title/preview only (conversation body text is not
+  searched), as the interface note's narrow first version says. Timestamps
+  are accepted as seconds/milliseconds/microseconds/ISO inside 2020-2100 and
+  are `None` (with one warning) outside it; an unrecognised summaries table is
+  an `AgentError`, not an empty list; column names match case-insensitively.
+- **Read-only boundary:** the five unsupported adapter methods raise
+  `AgentError`; `agora merge` / `continue` (including `--fork`) with
+  `--agent agy`, and any merge/continue/fork whose **source** is an
+  agy-imported Session, exit 1 before syncing or reading a source.
+- **Privacy:** `google_accounts.json` and `antigravity-oauth-token` placed in
+  the fake `AGORA_AGY_HOME` are never opened by listing, exporting,
+  `last_message` or an import.

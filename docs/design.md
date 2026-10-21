@@ -47,7 +47,7 @@
 | `type` | OKF（必填） | 形式。Agora 的 Session 是 `Session` |
 | `title`、`description`、`tags` | OKF | 標題、一句話摘要、標籤（清單） |
 | `status` | OKF | `draft`／`stable`／`deprecated` |
-| `generated` | OKF | `{by: <actor>, at: <ISO 8601 UTC>}`；actor 照 OKF 慣例：`opencode/<模型>`、`claude-code/<模型>`、`human:fatesaikou` |
+| `generated` | OKF | `{by: <actor>, at: <ISO 8601 UTC>}`；actor 照 OKF 慣例：`opencode/<模型>`、`claude-code/<模型>`、`agy/<模型>`（agy 第一版模型未知時只有 `agy`）、`human:fatesaikou` |
 | `verified` | OKF | `[{by, at}]`；**只有本人能加** |
 | `sources` | OKF | `[{id, title, resource, author, last_modified}]` |
 | `stale_after` | OKF | 絕對日期 |
@@ -117,6 +117,10 @@ Drive: agora/                              （rclone 內建 client 建立；以 
     raw-<md5 前 12 碼>.json   來源 agent 的原始匯出（N15）：
                               opencode＝export 的 JSON 原封不動；
                               claude＝{"format":"claude-jsonl/1","main":[每一行原字串],"aux":{"<相對路徑>":"內容"}}
+                              agy＝{"format":"agy-conversation/1","agy_version":null,
+                                    "trajectory_id":…,"scan_text":[…],"db_b64":整包 db 的 base64}
+                                    （db 不刪不改；scan_text 是獨立於閱讀版的掃描明文，
+                                      包含工具輸出，不含 gen_metadata 的設定字串）
 Mac:
   ~/.config/agora/            rclone.conf（rclone 內建 client）、config.json（folder ID）
   ~/.cache/agora/             鏡像（只有 session.md）＋ index.sqlite；壞了刪掉重建
@@ -189,7 +193,7 @@ Mac:
 agora <動作> <型態> [session_id] [選項]
 
 agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync]
-agora import   session --external-session-id <id>[,<id>...] [--external-session-id <id>...] --agent opencode|claude [--header-file F] [--header K=V]...
+agora import   session --external-session-id <id>[,<id>...] [--external-session-id <id>...] --agent opencode|claude|agy [--header-file F] [--header K=V]...
 agora merge    session <id>, <id>, ... --agent opencode|claude [--header-file F] [--header K=V]...
 agora continue session <id> --agent opencode|claude [--dir <專案目錄>] [--fork] [--sync-period <分鐘>] [--header-file F] [--header K=V]...
 agora delete   session <id>, <id>, ... --yes [--force]
@@ -200,8 +204,8 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 ```
 
 - 位置參數固定是「動作、型態、session id」。型態目前只有 `session`。
-- `--agent`：import 時是「這是哪個 agent 的 session」，merge 時是「誰寫要約」，continue 時是「用哪個 agent 接」。不再有 `--format`。
-- **agent 執行檔**（#77）：預設從 PATH 找 `opencode`／`claude`；`AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD` 可以換成指定的執行檔，值是執行檔路徑或 PATH 上的名稱。每個會跑 agent CLI 的地方都走它：
+- `--agent`：import 時是「這是哪個 agent 的 session」，merge 時是「誰寫要約」，continue 時是「用哪個 agent 接」。不再有 `--format`。**agy 第一版只支援 import／讀取**：`merge`／`continue`（含 `--fork`）帶 `--agent agy`，或**來源是 agy 匯入的 Session**（跨 agent 的 continue／merge／fork）都一進來就拒絕（exit 1，`InputError`），訊息說接續在 PR2、fork／merge 為後續（#26）；轉接器本身的 `native`／`append_native`／`summarize`／`start_native`／`collect` 也是拒絕 stub。
+- **agent 執行檔**（#77）：預設從 PATH 找 `opencode`／`claude`（`AGORA_AGY_CMD` 沿用同一條 `agent_cmd` 規則；agy 第一版是唯讀、不叫 CLI，接續的呼叫點在 PR2）；`AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD` 可以換成指定的執行檔，值是執行檔路徑或 PATH 上的名稱。每個會跑 agent CLI 的地方都走它：
   - opencode：`session export`（含 collect 的回讀）、`session import`（continue 的載入）、`session delete`、merge 要約的 `run`、`--headless` 的 `serve`、互動的 `--session`；
   - claude：互動的 `--resume`、`--headless` 的 `-p --input-format stream-json`、merge 要約的 `-p`。claude 的 import／export 是直接讀寫 `~/.claude/projects/` 的 jsonl，不叫 CLI；agora 也不跑 `--version`（版本從 jsonl／匯出檔的欄位讀，見 5.2、OC8）。
   這是正式介面，不是測試用的接縫：MyLinuxPool 的 sidecar 靠 `AGORA_CLAUDE_CMD=claude-real` 繞過 worker 上 PATH 的切換包裝；語意要維持（值照樣當第一個 argv、其餘參數不變）。
@@ -225,6 +229,8 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 
 - `--agent opencode`：`opencode export <id> > 檔案`，stderr 另外導走、**不能 `2>&1`**。檢查 JSON 能解析、message 數大於 0（S10）。`agora.source.dir` 取 `info.directory`（N9）。
 - `--agent claude`：`~/.claude/projects/*/<id>.jsonl` 加上 `<id>/` 附屬資料夾（S9）；最後一行不完整就丟掉並警告（S10）。`agora.source.dir` 取 jsonl 的 `cwd`（N9）。
+- `--agent agy`（#26 PR1，唯讀）：`$AGORA_AGY_HOME`（預設 `~/.gemini/antigravity-cli`）下的 `conversations/<id>.db`；閒置（沒有 `-wal`）就複製單檔用 `immutable=1` 開，有 `-wal` 就複製 db＋wal（不複製 `-shm`）、在暫存目錄重放再 `VACUUM INTO`，前後比 `(size, mtime_ns)`、最多重試 3 次（複製途中檔案消失也算競態，重試），`quick_check` 與 summaries 的 `step_count` 交叉比對（不符只警告）。raw 是 JSON 信封＋整包 db 的 base64（4.1）。`scan_text` 是**獨立於閱讀版**的掃描明文：遞迴走每個 `steps` 列的 `step_payload`／`render_info`／`metadata` 的所有 length-delimited 欄位，能 UTF-8 解碼且 ≥ 4 bytes 的字串全收（不截斷、去重、保序），所以**工具輸出在 `scan_text` 裡是完整的**；`gen_metadata`／`executor_metadata`／`trajectory_metadata_blob` 是設定與系統提示，不在 `scan_text`（它們只在 `db_b64` 裡；這是已知的掃描缺口，repo 內也沒有掃描實作，掃描在 PM／MyPMO 流程）。`scan_text` 是 db 步驟內容的**明文**子集（`db_b64` 是 base64）：agora 自己不索引 raw，但任何對 raw 檔做全文處理的流程會直接看到這些明文。閱讀版**不含工具結果**（design 4.4）：只有 14／15 的文字與 15 的工具呼叫行；132 是已認得、無閱讀文字，不產生 turn、也不是 `[skip]`。`agora.source.dir` 取 `conversation_summaries.db` 的 `workspace_uris`（第一筆，去掉 `file://`）。`agent_version`、`created_at`、`model` 在 db 裡沒有已確認的欄位，第一版留空（docs/agy-storage.md §10）。
+- **agy 的清單與搜尋是窄的**：`list_sessions()` 讀 `conversation_summaries.db` 的 `title`／`preview`／`last_modified_time`／`step_count`／`workspace_uris`，以該檔的 `(mtime, size)`（含 `-wal`）為快取鍵；`search_text()` **只搜標題＋preview，不搜內文**（`--help` 與 TUI 的內文搜尋提示都寫明）；`last_message()` 點選時才對那一個 session 做一次 snapshot，role 由 `step_type`（14 user／15 model）取。
 - 只上傳指定的那一個 Session。
 - **一次可以匯入多個**（2026-10-03 使用者決定）：`--external-session-id` 可以給多次或用逗號分隔。**先同步一次**，再逐一匯入；**某一個失敗照樣做下一個**，stderr 說明是哪一個失敗，exit code 是第一個非零的（全部成功是 0）。
 - 同一個來源 Session 再匯入：內容沒變、也沒有 `--header`，就不做事；內容沒變但有 `--header`，只更新標頭；內容變了而且還沒有子 Session，就更新同一個 agora id；已經有子 Session，就建一個新的（`relation: import`、`parents: [舊 id]`，S7）。
@@ -233,7 +239,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 
 **merge ＝ 把每個來源各自的要約，照順序接起來。** 要約的內容由 AI 寫，但格式是確定的：AI 只產生 JSON，程式用 JSON Schema 驗證，接起來和排版全部由程式做。沒有跨來源的內容（例如「整體下一步」）。
 
-- `agora merge session id1 id2 … --agent opencode|claude`：`--agent` 必填，指定**誰寫要約**。id 用空白或逗號分隔都可以；同一個 id 給兩次是錯誤（X4）。
+- `agora merge session id1 id2 … --agent opencode|claude`：`--agent` 必填，指定**誰寫要約**。id 用空白或逗號分隔都可以；同一個 id 給兩次是錯誤（X4）。`--agent agy` 第一版直接拒絕；**來源有任何一個是 agy 匯入的 Session 也拒絕**（exit 1，見 5 的 `--agent`）。
 - 產生一個新的 Session：`relation: merge`、`parents` 依給的順序。它的 raw 是 `sections.json`（每個來源一節的結構化要約，見下）；`session.md` 的內文由程式從這份 JSON 排出來。
 - **中斷後重跑會接著做**（2026-10-03 使用者決定）：每寫好一個來源的要約就**先存在本機** `<state>/merge-sections/<key>.json`，鍵是「agent ＋提示詞版本 ＋模型設定（`AGORA_OPENCODE_MODEL` 之類）＋來源 id ＋實際送出的那段文字（截斷之後）」的雜湊。重跑時同樣的來源**沿用**已寫好的要約（沿用前再用 JSON Schema 驗一次），只寫還沒寫的；任何一項不同就重寫。
 - **每個直接來源一節**：
@@ -287,7 +293,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 
 ### 5.4 continue（第 5 版：2026-10-02 使用者決定；merge 部分第 6 版改寫）
 
-**continue ＝ ① 取得需要的原始 session，② 交給目標 agent 的轉接器轉成它自己的格式載入。** 不論 opencode 或 Claude、不論接的是普通還是 merge 出來的 Session，畫面上一打開都看得到前文，行為相同。import 與 merge 不用考慮這件事。
+**continue ＝ ① 取得需要的原始 session，② 交給目標 agent 的轉接器轉成它自己的格式載入。** 不論 opencode 或 Claude、不論接的是普通還是 merge 出來的 Session，畫面上一打開都看得到前文，行為相同。import 與 merge 不用考慮這件事。**agy 第一版拒絕 continue（含跨 agent、`--fork`）：目標是 agy、或來源是 agy 匯入的 Session，都在 `cmd_continue` 讀任何東西之前以 `InputError` 停掉（exit 1）；agy.py 的 `start_native`／`collect` 等也是拒絕 stub。跨 agent 的兩個方向都留給 PR2（#26）。**
 
 1. **取得原始 session（cli）**：
    - 普通 Session：它自己的 raw（`agora.raw`）。
@@ -382,7 +388,7 @@ Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之�
 
 - **兩個分頁**，用 `[`、`]` 切換（**只在清單有焦點時**；`Tab`／`shift+tab` 現在是切焦點，不是換頁。這是 breaking：以前 `Tab` 換頁、`shift+tab` 切焦點）：
   - **Agora**：已經存在 agora 的 Session（本機索引，開啟時同步一次）。每行：短 id、日期、agent（merge 顯示 `merge`）、標題、**雲端**（`✓` 雲端有、`✗` 雲端沒有＝被別台機器刪掉了、`未上傳` 還在 outbox）。這個欄讀的是索引裡的標記與 outbox，**不另外問 Drive**（change `tui-batch-actions` 的決定）。
-  - **未匯入**：這台機器上**所有專案**裡、還沒匯入的 opencode／Claude session。每行：agent 的 session id（截短）、agent、專案目錄、標題。已經匯入過的（`Index.by_source`）不列；但匯入之後 agent 那邊又有更新的（`Listed.updated_at` 晚於 agora 的 `agora.updated_at`），會再列出來並標 `↻`，按 Enter 照 5.2 重新匯入（使用者決定，review T14）。
+  - **未匯入**：這台機器上**所有專案**裡、還沒匯入的 opencode／Claude／agy session。每行：agent 的 session id（截短）、agent、專案目錄、標題。已經匯入過的（`Index.by_source`）不列；但匯入之後 agent 那邊又有更新的（`Listed.updated_at` 晚於 agora 的 `agora.updated_at`），會再列出來並標 `↻`，按 Enter 照 5.2 重新匯入（使用者決定，review T14）。`agy` 的列出來自 `conversation_summaries.db`（唯讀 PR1）；切到內文搜尋時，狀態列會說「agy 只搜標題與 preview（不搜內文）」。
 - **預覽**：寬的終端機（寬度 ≥ 100 欄）放右側，窄的放在清單下方。內容是**原生紀錄裡的 Markdown 原文**（唯讀、有語法上色），**不另外產生**：
   - Agora 頁：`session.md` 內文的**尾端一段**（merge 是它的最後一節要約），加上 `dir`、`tags`。
   - 未匯入頁：轉接器從 agent 自己的檔案讀出最後一則 user／assistant 文字；讀不到就不顯示預覽。
@@ -454,7 +460,7 @@ Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之�
 - **左邊的色條**（使用者選的，和 mlp 用的 fzf 一樣）：每一行最左邊一條灰色的 `▌`，目前這一行是紅色、整行淺灰底，字保持原本的顏色。
 - **欄位**：Agora 頁是 id、標題、agent、更新、**雲端**（✓／✗／未上傳）；未匯入頁是 id、標題、agent、更新、目錄（使用者要求要有欄位名與最後更新時刻）。標題太長會截斷。
 - **焦點**：有焦點的一邊黑底，另一邊灰底；分頁用亮底與暗底區分。`Tab`／`shift+tab` 在兩邊之間切換焦點，**頁面不變**（換頁是 `[`、`]`，只在清單那邊）。
-- **搜尋內文**（清單的篩選）：`/` 輸入、ctrl+t 切換「標題／內文」。內文模式下，Agora 頁用既有的全文索引；未匯入頁用各轉接器的 `search_text()` 在背景搜，找到一個就排進清單一個。預覽區的 `/` 是**另一個**搜尋（整份 Session，見上面的「預覽區搜尋」）。
+- **搜尋內文**（清單的篩選）：`/` 輸入、ctrl+t 切換「標題／內文」。內文模式下，Agora 頁用既有的全文索引；未匯入頁用各轉接器的 `search_text()` 在背景搜，找到一個就排進清單一個。**agy 第一版的 `search_text()` 只搜摘要表的標題＋preview，不搜對話內文**；切到內文模式時狀態列會說明，`agora --help` 的 `--agent` 也寫。預覽區的 `/` 是**另一個**搜尋（整份 Session，見上面的「預覽區搜尋」）。
 - **預覽**：Markdown 原文、語法上色、一開始停在**最後一行**；未匯入頁先顯示最後一則，背景讀完整份後換上（提示「已換成整份對話」）。平常只讀尾端一段，往上才補前面的（提示「↑ 往上捲、按 k 或 g 載入更早的內容（還有約 N KB）」）。
 - **顏色**：標題列、agent（opencode 青、claude 橘、merge 綠）、勾選、按鍵各有顏色；對話裡的 `## user` 用粗體 **`#87afff`**、`## assistant` 用粗體 **`#d787ff`**（PM 10-04 決定；避開清單裡 agent、合併、標記與錯誤用的顏色）；工具摘要變暗；終端機沒有顏色時照常可以用。
 - **游標**：預覽區是一個唯讀的文字區（`read_only`、折行、不顯示行號），焦點在預覽區時打開游標行高亮、離開時關掉；`dir`、`tags` 固定在預覽最上面兩行（在文字區之外）。清單移動游標後，預覽有 0.15 秒防抖才換。
@@ -532,6 +538,7 @@ Python（uv）＋ rclone ＋ SQLite FTS5。**`src/` 的程式碼行數只記錄�
 | `store` | rclone 呼叫、outbox、鏡像、索引（含 NFKC 與二字詞退路） | 400 |
 | `agents/opencode` | export、id 改寫後 import、閱讀版、找出結束後的 session | 300 |
 | `agents/claude` | 找 jsonl 與附屬檔、改寫欄位、閱讀版、找出結束後的 session | 350 |
+| `agents/agy` | 唯讀（#26 PR1）：快照、整包 db 的 raw 信封、閱讀版、讀 summaries 的清單／搜尋／最後一則；接續方法為拒絕 stub | 400 |
 | `cli` | 六個指令、continue 流程、pending 補存、merge | 400 |
 
-測試照當初的 test-plan review（`docs/review/test-plan.md`（2026-10-04 清理時已從 repo 移除，要看請用 `git show fd3ba9f:<路徑>` 從歷史取回）），之後依 `openspec/specs/` 的 Scenario 補。**測試的 helper 只能在 pytest 或隔離的環境裡用**：不在 pytest（沒有 `PYTEST_VERSION`）而且 `AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`AGORA_CONFIG`／`HOME` 有任一個沒指到暫存目錄時，`tests/_guard.py` 在 import 的當下就 `SystemExit`（T8；在那之前有過兩次直接用真的目錄，其中一次把真實 Session 的標題送進了外部模型）。測試用的接縫：`AGORA_FOLDER_NAME`（整合測試設成 `agora-test`）、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`AGORA_RCLONE`、`AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD`（正式介面，#77；測試也用它）、`AGORA_CLAUDE_HOME`、`AGORA_TEST_FAULT`（含 `after-periodic-write`：定期寫回做完之後）、`AGORA_ROUND_TIMEOUT`（一輪定期寫回的死線，秒，預設 1800——正式的使用者介面，測試用它把卡住的輪縮短到幾秒）、`AGORA_NOW`。接續的間隔直接用 `--sync-period` 給很小的小數（例如 `0.005`）測試，不另設環境變數。
+測試照當初的 test-plan review（`docs/review/test-plan.md`（2026-10-04 清理時已從 repo 移除，要看請用 `git show fd3ba9f:<路徑>` 從歷史取回）），之後依 `openspec/specs/` 的 Scenario 補。**測試的 helper 只能在 pytest 或隔離的環境裡用**：不在 pytest（沒有 `PYTEST_VERSION`）而且 `AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`AGORA_CONFIG`／`HOME` 有任一個沒指到暫存目錄時，`tests/_guard.py` 在 import 的當下就 `SystemExit`（T8；在那之前有過兩次直接用真的目錄，其中一次把真實 Session 的標題送進了外部模型）。測試用的接縫：`AGORA_FOLDER_NAME`（整合測試設成 `agora-test`）、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`AGORA_RCLONE`、`AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD`（正式介面，#77；測試也用它）、`AGORA_CLAUDE_HOME`、`AGORA_AGY_HOME`（agy 的根目錄；測試一律指到暫存目錄）、`AGORA_TEST_FAULT`（含 `after-periodic-write`：定期寫回做完之後）、`AGORA_ROUND_TIMEOUT`（一輪定期寫回的死線，秒，預設 1800——正式的使用者介面，測試用它把卡住的輪縮短到幾秒）、`AGORA_NOW`。接續的間隔直接用 `--sync-period` 給很小的小數（例如 `0.005`）測試，不另設環境變數。

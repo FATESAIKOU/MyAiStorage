@@ -39,10 +39,11 @@ import jsonschema
 
 from agora import header as h
 from agora import store
+from agora.agents.agy import AGY_READ_ONLY
 from agora.agents.base import (NO_REPLY, Agent, AgentError, Exported, Launch, merge_turns,
                                reading, reading_of, env_seconds)
 
-AGENTS = ("opencode", "claude")
+AGENTS = ("opencode", "claude", "agy")
 TYPES = ("session",)
 EXIT_INPUT = 1       # cannot be done: unknown id, nothing to import, too few ids, no --yes, has children
 EXIT_ERROR = 2       # header, Drive, agent or unexpected error (argparse usage errors are 2 too)
@@ -56,7 +57,7 @@ EXIT_AGENT_FAILED = 5  # `continue`'s agent child died (#76); stderr has `agora-
 #: forwarded its own SIGTERM to the child (the headless gentle stop leaves 0).
 AGENT_FAILED_IGNORED = (130, 143, -2, -15)
 DESCRIPTION_MAX = 80
-ACTOR = {"opencode": "opencode", "claude": "claude-code"}   # OKF actor prefix per agent
+ACTOR = {"opencode": "opencode", "claude": "claude-code", "agy": "agy"}   # OKF actor prefix per agent
 SYNC_PERIOD_MINUTES = 5.0   # --sync-period when the user does not give one
 SYNC_MINIMUM_SECONDS = 0.1  # a floor, so a tiny period cannot turn the wait into a write loop
 CONTINUE_LOG = "continue.log"
@@ -350,6 +351,24 @@ def _the_id(args) -> str:
     return f"agora:{_ulid_of(args.ids[0].rstrip(','))}"
 
 
+def _refuse_agy_source(index: store.Index, ids: list[str]) -> None:
+    """Refuse a Session that was imported from agy (#26 PR1, N7).
+
+    The first version is read-only in both directions: a cross-agent continue,
+    a merge or a fork whose *source* is agy would have to read that session
+    through agy's `turns()` and hand it to another agent, and that is PR2's
+    scope. The header's source agent is local, so the callers check it before
+    syncing where the index already knows the id, and again right after the
+    sync for an id that was only on Drive - still before any raw fetch or
+    model call.
+    """
+    for agora_id in ids:
+        header = index.header(_ulid_of(agora_id))
+        source = h.agora_of(header or {}).get("source") or {}
+        if source.get("agent") == "agy":
+            raise InputError(AGY_READ_ONLY)
+
+
 # ---------------------------------------------------------------------------
 # actions
 # ---------------------------------------------------------------------------
@@ -639,15 +658,21 @@ def _render(sections: list[dict], level: int = 3) -> list[str]:
 
 def cmd_merge(args, paths: store.Paths) -> int:
     if not args.agent:
-        raise InputError("merge 要給 --agent opencode|claude（由誰來寫要約）")
+        raise InputError("merge 要給 --agent opencode|claude（由誰來寫要約；agy 第一版不支援）")
     agent = load_agent(args.agent)
+    if agent.name == "agy":
+        # Refused here, before a sync/read/summarize, so the refusal cannot be
+        # mistaken for a model answering badly and retried three times.
+        raise InputError(AGY_READ_ONLY)
     ids = _split_ids(args.ids)
     if len(ids) < 2:
         raise InputError("merge 至少要兩個 Session")
     if len({_ulid_of(i) for i in ids}) < len(ids):
         raise InputError("merge 的 Session 重複了")
+    _refuse_agy_source(store.Index(paths), ids)     # a local agy source: no sync needed
     updates = _updates(args)
     index = _sync_for(paths, ids)
+    _refuse_agy_source(index, ids)                  # a source that was only on Drive
     for session_id in ids:      # P2: all of them first - writing a summary costs an AI
         _need_in_cloud(index, f"agora:{_ulid_of(session_id)}")   # call, and none should be
     parents, parent_headers, sections, models = [], [], [], set()
@@ -1990,8 +2015,13 @@ def _load_for_launch(paths: store.Paths, state: dict) -> dict:
 
 def cmd_continue(args, paths: store.Paths) -> int:
     if not args.agent:
-        raise InputError("continue 要給 --agent opencode|claude")
+        raise InputError("continue 要給 --agent opencode|claude（agy 第一版不支援）")
     agent = load_agent(args.agent)
+    if agent.name == "agy":
+        # Every continue flavour (same agent, cross agent, fork) goes through
+        # here: PR1 has no native/start_native/collect, and refusing before the
+        # child fetches the raw is the boundary the interface note asks for.
+        raise InputError(AGY_READ_ONLY)
     harness_path = None
     if getattr(args, "harness_file", None):
         harness_p = Path(args.harness_file)
@@ -2017,7 +2047,9 @@ def cmd_continue(args, paths: store.Paths) -> int:
         # The server mode needs the caller's port (design D6): sidecar allocates it.
         raise InputError("--headless 的 opencode 要給 --headless-port")
     source_id = _the_id(args)
+    _refuse_agy_source(store.Index(paths), [source_id])   # a local agy source: no sync
     index = _sync_for(paths, [source_id])
+    _refuse_agy_source(index, [source_id])                # a source only on Drive
     _refuse_if_gone(paths, index, source_id)  # T1 3.3: no agent is opened for it
     parent = _header_for(index, source_id)
     agora = h.agora_of(parent)
@@ -2558,7 +2590,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="session id（可以給多個，用空白或逗號分隔；沒有前綴當 agora）")
     p.add_argument("--external-session-id", action="append", default=[],
                    help="import：agent 自己的 session id，可重複或用逗號分隔")
-    p.add_argument("--agent", choices=AGENTS, help="import：來源的 agent；merge：誰寫要約；continue：用哪個 agent 接")
+    p.add_argument("--agent", choices=AGENTS,
+                   help="import：來源的 agent；merge：誰寫要約；continue：用哪個 agent 接"
+                        "（agy 第一版只支援 import／讀取；全文搜尋只搜標題＋preview，不搜內文）")
     p.add_argument("--filter", action="append", default=[], help="search：KEY=VALUE（全等）或 KEY~=TEXT（包含）")
     p.add_argument("--header", action="append", default=[], help="KEY=VALUE；KEY 可以用點路徑，VALUE 用 YAML 解析")
     p.add_argument("--header-file", help="YAML 標頭檔，先套用，再套 --header")
