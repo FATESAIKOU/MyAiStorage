@@ -42,6 +42,7 @@ harness ＝ 一個職務一個版本的 UTF-8 Markdown 檔，放 `atelier/<team>
 `v0` 是既成事實、append-only 不能改，這一節只驗 `v>=1`。範圍＝**正文**（`know`／`do`／`judge`／`dont` 合起來）：`capabilities` 的子節名與 frontmatter（例如 `generated` 的產生者註記）不算正文。
 
 - MUST NOT 出現**具體的工具名、模型名**（工具與模型的名稱寫在各環境的說明／PMO 的模型輪換表）、**其他專案的名字**、**機器位址**（IPv4 樣式）、**使用者家目錄路徑**（`~/…`、`/Users/…`）。
+- 私人資訊（#134）：MUST NOT 出現 **email**、**憑證樣式字串**（GitHub `ghp_`／`ghr_`／`github_pat_`、`sk-`、AWS `AKIA`／`ASIA`、`xox?-`、`AIza`、`ya29.`、`npm_`、`-----BEGIN … PRIVATE KEY-----`／`-----BEGIN PGP PRIVATE KEY BLOCK-----`／JWT；前綴後面要夠長才算，只寫前綴的規則句不算；中文與值之間沒有空格也一樣算）、**憑證的環境變數名**（`*_API_KEY`／`*_SECRET`／`*_TOKEN`／`*_PASSWORD`／`*_ACCESS_KEY`；本專案非憑證的 `AGORA_…` 不算）與**額度數字**（`額度`／`quota`／`用量`／`限額`／`token 數` 後面緊跟的三位數以上數字或百分比，`quota=5000`、`quota is 5000` 也算；「額度用完就換下一個」沒有數字、不算）。
 - **通用系統路徑不算**（`/tmp` 要能用——`v1` 的「工作檔不放 `/tmp`」那句要用它）。
 - 清單放測試一處、不收**一般詞**（`session`／`輪換表`／`通道`／`CI`／`git`／`commit`／`repo`／`ssh`／`brief`……規矩的句子本身要用），也不收**本專案自己的元件名**（`atelier`／`github`／`agora`）。比對前先遮掉 `CLAUDE.md`／`AGENTS.md` 兩個檔名（`know` 的 MUST 句一定要寫它們，而 `CLAUDE.md` 含 `claude`）。誤殺就改清單，不要放寬原則。
 - `pm` 的 `v>=1` MUST 還寫到四個關鍵句——`不是權限`、`照 PMO 的模型輪換表`、`不指定頻道`、`長時間的指令`——**放在哪一段由 harness 自己安排**，只要 `know`＋`do`＋`judge`＋`dont` 合起來每一句至少出現一次。

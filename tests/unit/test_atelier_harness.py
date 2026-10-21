@@ -11,9 +11,11 @@ same pass: every `pm` harness keeps「審查一律非作者」(not only v0); a `
 `v>=1` must still write the key sentences (`不是權限`／`照 PMO 的模型輪換表`／
 `不指定頻道`／`長時間的指令` - the union of the four body sections, each sentence
 at least once, not one section each); and a `v>=1` file's body must not hardcode
-tool names, model names, other projects' names, machine addresses or the user's
-home path (B-15/B-16; general words like `session`/`輪換表`/`git` are not on the
-list, and `CLAUDE.md`/`AGENTS.md` are masked before matching). `v0` is exempt from
+tool names, model names, other projects' names, machine addresses, the user's
+home path, or (since #134; spec「MUST NOT 含帳號、額度、憑證名稱」) an email
+address, a credential-token shape, a credential environment-variable name or a
+quota figure (B-15/B-16; general words like `session`/`輪換表`/`git` are not on
+the list, and `CLAUDE.md`/`AGENTS.md` are masked before matching). `v0` is exempt from
 the content limits - it is append-only and can no longer change. The body those
 limits read is `know`/`do`/`judge`/`dont`: capability subsection names and the
 frontmatter are not body (spec「harness 檔的格式」). A capability name only one
@@ -42,6 +44,7 @@ from pathlib import Path
 import os
 import re
 import subprocess
+import time
 from typing import Callable
 
 import pytest
@@ -108,6 +111,67 @@ HOME_PATH_RE = re.compile(r"~/|/Users/", re.IGNORECASE)
 #: MUST sentence has to name them, and `CLAUDE.md` contains `claude`.
 INSTRUCTION_FILES_RE = re.compile(r"(?i)\b(?:CLAUDE|AGENTS)\.md\b")
 
+#: Private information the spec also forbids (#134, spec「MUST NOT 含帳號、額度、
+#: 憑證名稱」). Matched on the masked, lower-cased body - except the credential
+#: environment-variable names, which must stay upper-case to be a name at all.
+#: No leading `\b`: `\w` (and so `\b`) counts CJK as a word character. The
+#: lookbehind is the address's own class instead: a run that follows a Chinese
+#: character can still start (the local part then absorbs the Chinese run and
+#: the address is caught), while one start per run keeps a long run without `@`
+#: linear (N1 - without it 20,000 characters took about a second, 200 KB about
+#: 100 s). The harness id (`…-pm@v1`) is safe: `@v1` has no dot-separated domain.
+EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+#: Credential shapes: the common prefix plus the low end of that kind's usual
+#: length. The minimum is what keeps prose *about* the rule clean - 「不得寫
+#: `ghp_` 開頭的字串」 only writes the prefix, so nothing follows it. The
+#: boundaries are ASCII-limited on purpose: `\b`／`(?<![\w-])` treat a Chinese
+#: character as part of the word, so「金鑰ghp_…」and「AKIA…的值」were clean (W1) -
+#: the harness is Chinese prose, where writing the value without a space is
+#: natural. `sk-` keeps its lookbehind so `risk-…`／`task-…` stay clean.
+TOKEN_PATTERNS = (
+    ("GitHub token",
+     r"(?<![A-Za-z0-9_-])(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]{20,}"
+     r"(?![A-Za-z0-9_])"),
+    ("sk- 開頭的 API key",
+     r"(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_])"),
+    ("AWS access key",
+     r"(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9_])"),
+    ("Slack token",
+     r"(?<![A-Za-z0-9_])xox[baprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9_])"),
+    ("Google API key",
+     r"(?<![A-Za-z0-9_])AIza[A-Za-z0-9_-]{30,}(?![A-Za-z0-9_])"),
+    ("Google OAuth token",
+     r"(?<![A-Za-z0-9_])ya29\.[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_])"),
+    ("npm token",
+     r"(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{36}(?![A-Za-z0-9_])"),
+    ("私鑰檔頭",
+     r"-----BEGIN (?:PGP PRIVATE KEY BLOCK|(?:[A-Z]+ )?PRIVATE KEY)-----"),
+    ("JWT",
+     r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+     r"(?![A-Za-z0-9_])"),
+)
+TOKEN_RES = tuple((label, re.compile(pattern, re.IGNORECASE))
+                  for label, pattern in TOKEN_PATTERNS)
+#: Credential environment-variable names. Case-sensitive on the original body:
+#: only ALL-CAPS names name a credential, and this project's own non-credential
+#: names (`AGORA_AGY_CONTINUE`…) carry none of the suffixes. ASCII-limited
+#: boundaries for the same reason as the token shapes (W1): `\b` does not fire
+#: between a Chinese character and the name, on either side.
+ENV_CREDENTIAL_RE = re.compile(
+    r"(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]*(?:API_KEY|SECRET|TOKEN|PASSWORD|ACCESS_KEY)"
+    r"[A-Z0-9_]*(?![A-Za-z0-9_])")
+#: A quota figure: the quota word, then (only whitespace/colon/是/為/=/is/of
+#: between) at least three digits or a percentage - 「額度 5000」「quota: 5000」
+#: 「quota=5000」「quota is 5000」「剩餘 30%」. 「額度用完就換下一個」has no figure
+#: and stays clean; 剩餘/餘額 only count with a percentage, so「剩餘 30 分鐘」is
+#: not a quota. Arbitrary words between the keyword and the digits are
+#: deliberately not allowed: 「額度規則 2024 版」must not read as a quota.
+QUOTA_RE = re.compile(
+    r"(?:額度|限額|用量|quota|token[ \t]*數)(?:[ \t]*(?:是|為|of|is|[:：=]))?[ \t]*"
+    r"(?:\d{1,3}(?:,\d{3})+|\d{3,}|\d+(?:\.\d+)?[ \t]*%)"
+    r"|(?:剩餘|餘額)(?:是|為|[:：])?[ \t]*\d+(?:\.\d+)?[ \t]*%",
+    re.IGNORECASE)
+
 TEAM_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 VERSION_RE = re.compile(r"^v(\d+)$")
 ID_RE = re.compile(r"^atelier:([a-z0-9][a-z0-9-]*)-(pm|arch|impl|test|rev)@v(\d+)$")
@@ -145,13 +209,17 @@ def _body(sections: dict[str, str]) -> str:
 
 
 def _forbidden_in_body(path: str, body: str) -> list[str]:
-    """Tool names, model names, other projects, addresses and home paths in a `v>=1` body.
+    """Tool/model/project names, addresses, home paths, and private account data in a `v>=1` body.
 
     The two project instruction file names are masked first (the `know` MUST
     sentence names them and `CLAUDE.md` contains `claude`); matching is
-    case-insensitive, so `CLAUDE` and `claude` are one entry.
+    case-insensitive, so `CLAUDE` and `claude` are one entry. The private-data
+    patterns (#134) read the same masked body: email addresses, credential-token
+    shapes (each with a minimum length, so writing the prefix alone is clean),
+    credential environment-variable names and quota figures.
     """
-    text = INSTRUCTION_FILES_RE.sub("（專案指示檔）", body).lower()
+    original = INSTRUCTION_FILES_RE.sub("（專案指示檔）", body)
+    text = original.lower()
     errors: list[str] = []
     for label, names, why in (
             ("工具名", TOOL_NAMES, "只寫能力；工具名寫在各環境的說明"),
@@ -165,6 +233,17 @@ def _forbidden_in_body(path: str, body: str) -> list[str]:
     if HOME_PATH_RE.search(text):
         errors.append(f"{path}: 正文有使用者家目錄路徑（`~/`、`/Users/`）；"
                       "通用系統路徑（`/tmp`）不算")
+    if EMAIL_RE.search(text):
+        errors.append(f"{path}: 正文有 email 樣式（帳號是私人資訊；要指路就寫檔案路徑或案件 id）")
+    for label, pattern in TOKEN_RES:
+        if pattern.search(text):
+            errors.append(f"{path}: 正文有{label}的憑證樣式（憑證不進 harness，"
+                          "連樣式字串也不寫）")
+    for name in sorted(set(ENV_CREDENTIAL_RE.findall(original))):
+        errors.append(f"{path}: 正文有憑證環境變數名「{name}」（憑證名稱不進 harness；"
+                      "看環境說明或 brief）")
+    if QUOTA_RE.search(text):
+        errors.append(f"{path}: 正文有額度數字（額度是私人資訊；harness 只寫照環境的訊號處理）")
     return errors
 
 
@@ -548,6 +627,204 @@ def test_the_content_limits_skip_v0_and_the_frontmatter():
     """`v0` is append-only and exempt; `generated` is not body (spec「格式」)."""
     injected = _v0_text().replace("## judge\n", "## judge\n\n- 派工用 angareion 的指令。\n", 1)
     assert not findings_for(V0_REL, injected).errors
+
+
+# --- 私人資訊：email、憑證樣式、憑證變數名、額度數字（#134） --------------------
+
+
+#: One sample per pattern, assembled at run time: the source file must not hold a
+#: finished credential shape (the session import scans for those).
+FAKE_LEAKS: list[tuple[str, str, str]] = [
+    ("email", "some" + "one@" + "exa" + "mple.com", "email"),
+    ("GitHub token", "gh" + "p_" + "A" * 26 + "123456", "憑證樣式"),
+    ("GitHub fine-grained token", "gith" + "ub_pat_" + "B" * 30, "憑證樣式"),
+    ("GitHub refresh token", "gh" + "r_" + "B" * 30, "憑證樣式"),
+    ("sk- 開頭的 key", "s" + "k-" + "a" * 24, "憑證樣式"),
+    ("AWS access key", "AK" + "IA" + "C" * 16, "憑證樣式"),
+    ("AWS temporary credential", "AS" + "IA" + "C" * 16, "憑證樣式"),
+    ("Slack token", "xox" + "b-" + "9" * 12 + "-" + "z" * 12, "憑證樣式"),
+    ("Google API key", "AI" + "za" + "Q" * 35, "憑證樣式"),
+    ("Google OAuth token", "ya" + "29." + "x" * 30, "憑證樣式"),
+    ("npm token", "np" + "m_" + "B" * 36, "憑證樣式"),
+    ("private key header", "-----BEG" + "IN RSA PRIVATE KEY-----", "憑證樣式"),
+    ("PGP private key header",
+     "-----BEG" + "IN PGP PRIVATE KEY BLOCK-----", "憑證樣式"),
+    ("JWT", "ey" + "J" + "h" * 12 + "." + "p" * 12 + "." + "s" * 16, "憑證樣式"),
+    ("credential env var", "ANTHRO" + "PIC_API_KEY", "環境變數名"),
+    ("quota with digits", "額度 " + "5000", "額度"),
+    ("quota after an equals sign", "quota=" + "5000", "額度"),
+    ("quota after is", "quota is " + "5000", "額度"),
+    ("quota percentage", "quota: " + "30" + "%", "額度"),
+    ("remaining percentage", "剩餘 " + "30" + "%", "額度"),
+]
+
+
+#: The same classes with no space between a Chinese character and the value:
+#: Python's `\w` counts CJK, so `\b`／`(?<![\w-])` used to miss these while the
+#: harness is Chinese prose (W1). Assembled at run time, like `FAKE_LEAKS`.
+CJK_ADJACENT_LEAKS: list[tuple[str, str, str]] = [
+    ("GitHub token 緊接在中文之後",
+     "金鑰" + "gh" + "p_" + "A" * 26 + "123456", "憑證樣式"),
+    ("sk- 緊接在中文之後", "憑證" + "s" + "k-" + "a" * 24, "憑證樣式"),
+    ("AWS access key 緊接在中文之後",
+     "金鑰" + "AK" + "IA" + "C" * 16, "憑證樣式"),
+    ("Slack token 緊接在中文之後",
+     "憑證" + "xox" + "b-" + "9" * 12 + "-" + "z" * 12, "憑證樣式"),
+    ("Google API key 緊接在中文之後",
+     "金鑰" + "AI" + "za" + "Q" * 35, "憑證樣式"),
+    ("Google OAuth token 緊接在中文之後",
+     "權杖" + "ya" + "29." + "x" * 30, "憑證樣式"),
+    ("JWT 緊接在中文之後",
+     "權杖" + "ey" + "J" + "h" * 12 + "." + "p" * 12 + "." + "s" * 16, "憑證樣式"),
+    ("憑證變數名緊接在中文之後", "變數" + "ANTHRO" + "PIC_API_KEY", "環境變數名"),
+    ("AWS access key 後面緊接中文",
+     "AK" + "IA" + "C" * 16 + "的值", "憑證樣式"),
+    ("憑證變數名後面緊接中文", "ANTHRO" + "PIC_API_KEY" + "的值", "環境變數名"),
+]
+
+
+@pytest.mark.parametrize("name, line, expected", CJK_ADJACENT_LEAKS,
+                         ids=[name for name, _, _ in CJK_ADJACENT_LEAKS])
+def test_a_value_with_no_space_next_to_a_chinese_character_is_caught(name, line, expected):
+    """W1: 中文行文不加空格（「金鑰ghp_…」）時也要抓到。"""
+    found = findings_for(V1_REL, _inject(_v1_text(), f"- {line}。\n"))
+    assert any(expected in error for error in found.errors), \
+        f"格式檢查沒有抓到「{name}」：{found.errors}"
+
+
+@pytest.mark.parametrize("name, value, expected", FAKE_LEAKS,
+                         ids=[name for name, _, _ in FAKE_LEAKS])
+def test_the_checker_catches_each_private_value(name, value, expected):
+    """#134: 帳號、憑證樣式、憑證名稱、額度數字都算私人資訊（spec「格式」）。"""
+    found = findings_for(V1_REL, _inject(_v1_text(), f"- 參考資料：{value}。\n"))
+    assert any(expected in error for error in found.errors), \
+        f"格式檢查沒有抓到「{name}」：{found.errors}"
+
+
+def test_prose_about_accounts_is_not_an_address():
+    """提到規則、沒有實值：括號內的一般文字與 harness id 都不算（#134）。"""
+    line = ("- 帳號與 email 不寫進 harness（要指路就寫檔案路徑或案件 id）；"
+            "識別 atelier:worker-team-pm@v1 不是帳號。\n")
+    found = findings_for(V1_REL, _inject(_v1_text(), line))
+    assert not found.errors, "\n".join(found.errors)
+    assert not EMAIL_RE.search("atelier:worker-team-pm@v1")
+
+
+def test_prose_about_the_token_rule_is_not_a_token():
+    """只寫前綴、後面沒有長字串：散文談規則不算（#134）。"""
+    line = ("- 憑證不進 harness：`ghp_`、`ghr_`、`sk-`、`AKIA`、`ASIA`、`xoxb-`、`AIza`、"
+            "`ya29.`、`npm_` 開頭的字串，以及 `-----BEGIN … PRIVATE KEY-----` 這種檔頭都不寫。\n")
+    found = findings_for(V1_REL, _inject(_v1_text(), line))
+    assert not found.errors, "\n".join(found.errors)
+
+
+def test_the_sk_lookbehind_keeps_prose_about_tasks_clean():
+    """`risk-`／`task-`／`desk-` 後面接長字串不是 key（N5/M7：拿掉 lookbehind 會紅）。"""
+    words = ("ri" + "sk-assessment-for-deployment-process",
+             "task-" + "a" * 25, "desk-" + "a" * 25)
+    line = "- " + "、".join(words) + " 都是工作名，不是憑證。\n"
+    found = findings_for(V1_REL, _inject(_v1_text(), line))
+    assert not found.errors, "\n".join(found.errors)
+    assert not any(res.search(word.lower()) for _, res in TOKEN_RES for word in words), \
+        "sk- 的 lookbehind 失效：task-/risk-/desk- 後的長字串被當成 key"
+
+
+def test_a_jwt_needs_three_long_enough_segments():
+    """`eyJ` 之後三段都要夠長（N5/M12：放寬成只有 `eyJ` 前綴會紅）。"""
+    short = "ey" + "J" + "h" * 12 + "." + "p" * 5 + "." + "s" * 16
+    line = "- 這個字串不是 JWT：" + short + "。\n"
+    assert not findings_for(V1_REL, _inject(_v1_text(), line)).errors
+    assert not any(res.search(short.lower()) for _, res in TOKEN_RES), \
+        f"JWT 樣式放寬了：{short} 被當成 JWT"
+
+
+def test_an_address_right_after_a_chinese_character_is_still_caught():
+    """信箱緊接在中文之後也要抓到（REVIEW-134 的漏擋表那一列；別改成 ASCII 限定的局部部分）。"""
+    line = "- 我的信箱" + "some" + "one@" + "exa" + "mple.com" + "。\n"
+    found = findings_for(V1_REL, _inject(_v1_text(), line))
+    assert any("email" in error for error in found.errors), found.errors
+
+
+def test_a_long_run_without_an_at_sign_is_checked_quickly():
+    r"""N1: `[\w.+-]+@` 沒有起點錨點時是二次方 - 20,000 字元（無 `@`）約 1 秒。
+
+    門檻刻意寬鬆（0.5 秒；正常約 0.001 秒），避免慢機器偶發紅。
+    """
+    text = "a" * 20_000
+    started = time.perf_counter()
+    assert not EMAIL_RE.search(text)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.5, f"20,000 字元的連續字串花了 {elapsed:.3f} 秒（二次方時間？）"
+
+
+def test_a_long_run_of_spaces_after_a_quota_word_is_checked_quickly():
+    """修正輪新引入的二次方：兩個相鄰的 `[ \\t]*` 夾著可省略群組，32,000 個空白約 28 秒。"""
+    text = "額度" + " " * 32_000 + "x"
+    started = time.perf_counter()
+    assert not QUOTA_RE.search(text)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.5, f"額度後接 32,000 個空白花了 {elapsed:.3f} 秒（二次方時間？）"
+
+
+def test_prose_about_credential_names_is_not_a_name():
+    """「憑證的環境變數名」這句話沒有名字，不算（#134）。"""
+    line = "- 憑證的環境變數名不寫進 harness（看環境說明或 brief）。\n"
+    found = findings_for(V1_REL, _inject(_v1_text(), line))
+    assert not found.errors, "\n".join(found.errors)
+    assert not ENV_CREDENTIAL_RE.search("AGORA_AGY_CONTINUE")
+
+
+def test_the_projects_own_environment_names_are_not_credentials():
+    """`AGORA_…` 是本專案非憑證的環境變數名，不能被當成憑證（#134）。"""
+    line = "- 等待用 AGORA_AGY_CONTINUE 這類環境變數（它們不是憑證）。\n"
+    assert not findings_for(V1_REL, _inject(_v1_text(), line)).errors
+
+
+def test_prose_about_the_quota_rule_is_not_a_figure():
+    """「額度用完就換下一個」沒有數字；「剩餘 30 分鐘」不是額度（#134、N2）。"""
+    line = "- 額度用完就換下一個（照環境的訊號處理）；剩餘的時間留給回報。\n"
+    assert not findings_for(V1_REL, _inject(_v1_text(), line)).errors
+    for prose in ("額度用完就換下一個", "額度規則 2024 版", "5000 行", "30 秒",
+                  "剩餘 30 分鐘"):
+        assert not QUOTA_RE.search(prose), prose
+    assert QUOTA_RE.search("額度 5000")
+    assert QUOTA_RE.search("quota=" + "5000")
+    assert QUOTA_RE.search("quota is " + "5000")
+
+
+def test_a_two_digit_quota_is_not_a_quota():
+    """額度數字至少三位（N5/M11：放寬成任意位數時這條會紅）。"""
+    line = "- 額度 99 只是舉例的兩位數，不是額度。\n"
+    assert not findings_for(V1_REL, _inject(_v1_text(), line)).errors
+    assert not QUOTA_RE.search("額度 99")
+
+
+def test_the_private_data_limits_skip_v0_and_the_frontmatter():
+    """#134 的規則與舊規則同範圍：`v0` 與 frontmatter 不是正文。"""
+    address = "some" + "one@" + "exa" + "mple.com"
+    v0 = _v0_text().replace("## judge\n", f"## judge\n\n- 帳號 {address}。\n", 1)
+    assert not findings_for(V0_REL, v0).errors
+    v1 = _v1_text().replace("description: repo／team PM",
+                            f"description: {address} repo／team PM", 1)
+    assert not findings_for(V1_REL, v1).errors
+
+
+def test_review_a3_an_address_and_a_token_are_caught():
+    """REVIEW-120 a3：這一行以前是綠的（檢查器只擋工具名那一類）。"""
+    line = ("- 帳號 " + "some" + "one@" + "exa" + "mple.com"
+            + "、token " + "gh" + "p_" + "A" * 26 + "123456" + "。\n")
+    found = findings_for(V1_REL, _inject(_v1_text(), line))
+    assert any("email" in error for error in found.errors), found.errors
+    assert any("憑證樣式" in error for error in found.errors), found.errors
+
+
+def test_review_a6_a_credential_name_and_a_quota_figure_are_caught():
+    """REVIEW-120 a6：它以前只因為 `MyBrain` 才紅；拿掉那個名字也要紅。"""
+    line = ("- 憑證名稱 " + "ANTHRO" + "PIC_API_KEY" + "、本月額度 " + "5000" + "。\n")
+    found = findings_for(V1_REL, _inject(_v1_text(), line))
+    assert any("環境變數名" in error for error in found.errors), found.errors
+    assert any("額度" in error for error in found.errors), found.errors
+    assert not any("其他專案" in error for error in found.errors), found.errors
 
 
 def test_the_instruction_file_names_are_masked_before_matching():
