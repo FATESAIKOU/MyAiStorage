@@ -22,7 +22,7 @@ from pathlib import Path
 
 from agora import header as h
 from agora import store
-from agora.agents.base import reading
+from agora.agents.base import reading_of
 
 _UUID = re.compile(r"[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
 
@@ -54,7 +54,9 @@ def local_reading(paths: store.Paths, agent, session_id: str, updated_at: str | 
     path, when = paths.reading / agent.name / f"{session_id}.md", _stamp(updated_at)
     if is_fresh(paths, agent.name, session_id, updated_at):
         return path.read_text(encoding="utf-8")
-    text = reading(agent, agent.export(session_id).raw)
+    # reading_of uses the turns the export already parsed (agy carries them), so
+    # prefilling the cache does not have to pull a whole 35 MB raw into memory.
+    text = reading_of(agent, agent.export(session_id))
     path.parent.mkdir(parents=True, exist_ok=True)
     store.write_atomic(path, text)
     if when is not None:
