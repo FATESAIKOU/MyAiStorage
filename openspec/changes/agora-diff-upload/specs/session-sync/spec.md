@@ -2,12 +2,12 @@
 
 ### Requirement: raw 一律分段儲存（`chunks/1`）
 
-一個帶 raw 的 Session MUST 用分段的方式存它的 raw，而且**只有這一種**：
+一個**新寫入**的 Session MUST 用分段的方式存它的 raw，而且**只有這一種**（保留原樣、不是 `chunks/1` 的舊 Session 見「不是 `chunks/1` 的 Session 不猜、不刪」）：
 
 - `agora.raw.layout` 恰為 `chunks/1`；
 - `agora.raw.segments` 是一個非空的清單，依順序排列，每一項是 `{file, size, md5}`；
 - `agora.raw.md5`／`size` 指**整份** raw（不是某一段）：`md5` 是接起來之後的 md5，`size` 是所有 `size` 的總和；
-- **MUST NOT 寫 `agora.raw.file`**：Drive 上沒有整份 raw 這個檔案。本機鏡像的整份 raw 檔名由 `raw.md5` 推得（`raw-<md5[:12]>.json`）。
+- **MUST NOT 寫 `agora.raw.file`**：新寫入的 Session 在 Drive 上沒有整份 raw 這個檔案（保留原樣的舊 Session 不在這條的範圍，見「不是 `chunks/1` 的 Session 不猜、不刪」）。本機鏡像的整份 raw 檔名由 `raw.md5` 推得（`raw-<md5[:12]>.json`）。
 
 整份 raw 的位元組 MUST 等於 `segments` 依序串接的位元組；**最後一段（tail） MAY 每一版不同，其餘的段 MUST 不變**。段檔 MUST 是 `sessions/<ULID>/` 下面的扁平檔名（`seg-<gen>-<seq>-<md5[:12]>.part`），MUST NOT 放在子目錄，MUST NOT 被當成一份可以單獨解析的 raw。段檔名 MUST 只是安全的 basename（不含 `/`、`\`、`..`、不以 `.` 開頭）。
 
@@ -109,7 +109,7 @@
 
 MUST NOT 刪「本輪 listing 有、但不在目前 manifest」的所有段——那會刪掉另一台剛傳上來、還沒發布 `session.md` 的段。確認成功之後 MUST 把這一版寫成新的記錄（同一個檔），下一輪才知道誰是被取代的版本；寫記錄失敗只影響下一次的前一版保護（那一輪只剩寬限期），不影響正確性。清理 MUST 用一次批次刪除；失敗 MUST 只警告。
 
-Drive 上不再有整份 `raw-*`（新寫入不產生）；唯一的例外是遷移的 `adopt` 收尾，它 MUST 在確認之後才刪掉舊的 `raw-*.json`。
+Drive 上不再有新的整份 `raw-*`；新寫入 MUST NOT 產生它。**舊 Session 的 `raw-*.json` 不逐檔刪**：它們隨 `agora delete` 對 `sessions/<ULID>/` 的整個資料夾 purge 一起進垃圾桶（與 `session.md` 同進退）；本人決定保留的舊 Session 原樣留著（見「不是 `chunks/1` 的 Session 不猜、不刪」）。
 
 #### Scenario: 別台剛傳的段不被刪
 - **WHEN** A 把新段傳上 Drive、還沒傳 `session.md`；B 在同一個資料夾確認成功並清理
@@ -131,9 +131,9 @@ Drive 上不再有整份 `raw-*`（新寫入不產生）；唯一的例外是遷
 - MAY 把閱讀版建進索引（`show`／搜尋可用），但 raw MUST 標成不可用：`show --raw`、`continue`、`pull` 的下載、`edit` 都給一個明確錯誤（說明是舊格式或未知格式、要遷移）；
 - MUST NOT 因為這樣就把它從索引或鏡像刪掉；MUST 在 `unfinished.json` 記成 `legacy`，下一次 sync 不再為它下載。
 
-寫的一方 MUST 拒絕寫入這種 Session（`edit`／`continue`／`push` 都一樣），MUST NOT 自動把它升級成分段；要保留它只能用 `agora migrate adopt`（一次明確的指令）。
+寫的一方 MUST 拒絕寫入這種 Session（`edit`／`continue`／`push` 都一樣），MUST NOT 自動把它升級成分段。**沒有原地轉存**：要它變成新格式只能從原檔重匯成一個新的 Session（`import … --as-new`）；舊的 MUST 原樣留著，或由本人明確 `delete`（整個資料夾進垃圾桶）。**升級前留在 outbox 的舊格式版本**（舊 header＋`raw-*.json`）MUST NOT 被上傳器發布（上傳前 MUST 檢查 `layout`），MUST 留在 outbox 並警告——否則會把舊格式寫回 Drive。**逐筆略過**：同一批的其他 entry MUST 照常上傳（MUST NOT 因為這一筆中止整批）；**警告 MUST 每個 entry 只印一次**（以 ULID 記在本機 `state/legacy-warned`，只有 id），重跑或下一輪 MUST NOT 再印。
 
-**一般的 `agora import`（沒有 `--as-new`）也算寫的一方**：同一個來源最新的一筆（`Index.by_source` 的第一筆，就是會被更新的那一個）不是 `chunks/1` 時，MUST 拒絕（exit 非 0），訊息指向 `--as-new` 與 `agora migrate adopt`。MUST NOT 用「舊 raw 讀不到就不做『內容不能變少』比對」的 fail-open 更新它（那等於靜靜原地升級），MUST NOT 走分支路徑建一個 `parents` 指到它的新 Session（那會讓舊的因為「有子 Session」而永遠刪不掉）。同來源最新的一筆已經是 `chunks/1` 時，照常更新它。
+**一般的 `agora import`（沒有 `--as-new`）也算寫的一方**：同一個來源最新的一筆（`Index.by_source` 的第一筆，就是會被更新的那一個）不是 `chunks/1` 時，MUST 拒絕（exit 非 0），訊息指向 `--as-new`（另存重匯）。MUST NOT 用「舊 raw 讀不到就不做『內容不能變少』比對」的 fail-open 更新它（那等於靜靜原地升級），MUST NOT 走分支路徑建一個 `parents` 指到它的新 Session（那會讓舊的因為「有子 Session」而永遠刪不掉）。同來源最新的一筆已經是 `chunks/1` 時，照常更新它。
 
 #### Scenario: 舊的單檔 Session
 - **WHEN** 一個 Session 的 header 沒有 `layout`，只有舊的 `raw.file`／`md5`／`size`
@@ -145,11 +145,15 @@ Drive 上不再有整份 `raw-*`（新寫入不產生）；唯一的例外是遷
 
 #### Scenario: 寫入一個舊格式的 Session
 - **WHEN** 對一個沒有 `layout` 的 Session 執行 `agora continue` 或 `agora edit`
-- **THEN** 在抓 raw 之前就明確拒絕（exit 非 0），訊息說明要用 `agora migrate adopt`；Drive 與本機都不動
+- **THEN** 在抓 raw 之前就明確拒絕（exit 非 0），訊息說明要用 `agora import … --as-new` 另存重匯（沒有原地轉存）；Drive 與本機都不動
 
 #### Scenario: 一般 import 遇到舊格式
 - **WHEN** 對一個沒有 `layout` 的 Session 執行 `agora import session …`（同來源、沒有 `--as-new`）
-- **THEN** 拒絕（exit 非 0），訊息說明要用 `--as-new` 或 `agora migrate adopt`；舊 Session 沒有被升級、也沒有產生指向它的子 Session；Drive 與本機都不動
+- **THEN** 拒絕（exit 非 0），訊息說明要用 `--as-new`；舊 Session 沒有被升級、也沒有產生指向它的子 Session；Drive 與本機都不動
+
+#### Scenario: 升級前留在 outbox 的舊格式版本
+- **WHEN** 升級到含 R3 的版本時，`outbox/` 裡還有一筆升級前 stage 的舊格式版本（沒有 `layout`、有舊 `raw.file`），同一批還有另一筆新格式 entry
+- **THEN** 上傳器不上傳它、不發布它的 `session.md`（Drive 原樣不動），留在 outbox 並警告；**同一批的另一筆照常上傳**（逐筆略過，不是整批中止）；警告只印一次，重跑不再印；它留在 outbox 直到舊 Session 被 `delete`（本機 entry 清掉）或本人明確放棄——重匯成新 Session（`--as-new`）不會動它
 
 ### Requirement: 匯入大 Session 不把整份 raw 放進記憶體
 
@@ -206,13 +210,21 @@ Drive 上不再有整份 `raw-*`（新寫入不產生）；唯一的例外是遷
 
 `agora migrate inventory` MUST 只讀 metadata，MUST NOT 讀或印對話內容：
 
-- 讀本機索引的 `sessions` 表（`ulid`、`agent`、`source_id`、那一版 `session.md` 的 `md5`、header 的 `agora` 區塊；**MUST NOT SELECT `body`**，而且 `agora` 區塊 MUST 用 `json_extract` 只取需要的欄位（`$.agora.source`／`$.agora.relation`／`$.agora.raw.md5`／`.size`／`.layout`／`.file`／`.segments`（只留檔名／md5／size），lineage 另用 `$.agora.parents`），**MUST NOT 把整個 `header`（含 `title`／`description`／`tags`）載進記憶體**）；
+- 讀本機索引的 `sessions` 表（`ulid`、`agent`、`source_id`、那一版 `session.md` 的 `md5`、header 的 `agora` 區塊；**MUST NOT SELECT `body`**，而且 `agora` 區塊 MUST 用 `json_extract` 只取需要的欄位（`$.agora.source`／`$.agora.relation`／`$.agora.raw.md5`／`.size`／`.layout`／`.segments`（只留檔名／md5／size），lineage 另用 `$.agora.parents`），**MUST NOT 把整個 `header`（含 `title`／`description`／`tags`）載進記憶體**；**MUST NOT 讀 `$.agora.raw.file`**——沒有任何程式需要舊 raw 的檔名）；
 - 讀 Drive 的 listing（只有檔名、大小、md5）；
 - 查本機 agent store 的**存在性**（claude 的 `find_jsonl`、opencode 的 `list_sessions` id 集合、agy 的 `db_path().is_file()`）；
+- 讀**本機 outbox** 的 entry（`store.waiting_ulids`：outbox 與 `.done-` 的 set-aside；不碰上傳鎖）與每一筆 `session.md` **header** 的 `$.agora.raw.layout`（判 `outbox_legacy`；不讀 `raw.file`、不輸出 body）；
 - MUST NOT 下載任何 `session.md`（那是閱讀版）、MUST NOT 開 agent 的原始檔或 db 內容；**MUST NOT 觸發 sync**：MUST NOT 呼叫 `store.sync`（它會下載有變的 `session.md`、改索引與 `cloud_missing`、並啟動上傳器），MUST NOT 啟動上傳器；只列 Drive、不下載、不更新鏡像、不上傳。
 - **前提是索引已經重建完成**：`Index` 開啟時若 `PRAGMA user_version` 不符，會清表並從鏡像的 `*/session.md` 重建（本機快取，但會讀 body）。所以升級後 MUST 先跑一次正常指令（例如 `agora sync`）讓重建完成，再跑 `inventory`；`inventory` 本身 MUST NOT 觸發或依賴這次重建——索引版本不符時它 MUST 明確報錯、要求先跑一次正常指令，而不是順手重建。這樣它才真的維持「只讀 metadata、不讀內容」。
+- **必保清單**：`agora migrate inventory --must-keep <file>` MUST 接受一個 **repo 外**的本機檔（一行一個 `agora:` id 或裸 ULID，`#` 開頭是註解、空行忽略；檔案 MUST 只有本人可讀，`0600`，用完由本人刪除）；清單的內容 MUST NOT 寫進 repo、MUST NOT 上傳、MUST NOT 被複製進 `state`／log，輸出只有布林標記、算好的 `drop_list` 與 `must_keep_deleted`（只有 id）。**輸入端 MUST fail-closed**：（a）檔案開不了（不存在／權限／是目錄）或不是 UTF-8 → MUST 明確錯誤、exit 非 0、**不輸出任何候選**；（b）有給旗標但正規化、去註解與空行之後**解析出 0 個 id** → MUST 明確錯誤、exit 非 0、不給候選（空清單不等於沒有清單）；（c）**任何一行**不是可辨認的 id（`agora:<ULID>` 或裸 ULID；26 碼、Crockford 大寫字元）→ MUST 明確錯誤、exit 非 0、不給候選，而且**只列出行號、MUST NOT 重印那一行的內容**；（d）空白／CRLF／BOM MUST 先正規化再判斷，重複的 id（含 `agora:` 與裸寫法指到同一個）MUST 只算一次；大小寫 MUST NOT 自動轉換。清單裡的 id 在本機索引與 Drive listing 都找不到時：若在本機 `state/deleted` 墓碑裡（裸 ULID；比對前先正規化）MUST 標成已刪（不算錯；放在頂層 `must_keep_deleted`，只有 id，不在 `drop_list`）；否則 MUST 以明確錯誤結束（exit 非 0）、列出那些 id，而且那一輪 MUST NOT 給任何候選（打錯字不能靜靜地少保護一條）。**錯誤訊息 MUST NOT 含清單任何一行的內容**（只有路徑、行號、認得的 id 與原因）。
 
-輸出 MUST 只有形狀：`host`、每一類的數量、以及每一筆的 `ulid`／`agent`／`external_id`／`host`／`relation`／`layout`／`raw_size`／`class`／`replacement`／`old_children`（`parents` 指到這一筆的其他舊 Session 的 id，用來決定丟掉的 lineage 範圍）；MUST NOT 含 `title`／`description`／`tags`／`body`。`old_children` MUST 用只讀 id 的查詢算（`json_each(header, '$.agora.parents')` 找 `agora:<ULID>` 再排除 `cloud_missing`），MUST NOT 用 `Index.children`——它會把每個 header 解析一次，違反上面「不把整個 header 載進來」。分類 MUST 至少包含：`local-present`、`local-missing`、`other-machine`、`host-unknown`、`no-source`、`agent-unavailable`、`drive-only`、`new-format`。
+輸出 MUST 只有形狀：`host`、`drop_list`（只有 id）、`must_keep_deleted`（清單裡已在 `state/deleted` 墓碑的 id，只有 id；沒有給清單時是空陣列）、每一類的數量、以及每一筆的 `ulid`／`agent`／`external_id`／`host`／`relation`／`layout`／`raw_size`／`class`／`replacement`／`old_children`（`parents` 指到這一筆的其他舊 Session 的 id）／`lineage`（同一條 lineage 的連通集合，含自己；只算還在索引裡的舊格式 Session，只有 id）／`must_keep`（這一筆本身在必保清單裡）／`lineage_protected`（同一條 lineage 有任何一筆在清單裡）／`continuing`（這台正在 `continue` 它；`store.continuing_details` 非 `None`，只讀 pending 記錄與它的鎖）／`outbox_legacy`（本機 outbox 有這一筆的舊格式 entry）／`droppable`（這一筆可不可以丟）／`not_droppable_reason`（不可以丟的原因）；MUST NOT 含 `title`／`description`／`tags`／`body`，MUST NOT 重印必保清單的內容。`old_children` MUST 用只讀 id 的查詢算（`json_each(header, '$.agora.parents')` 找 `agora:<ULID>` 再排除 `cloud_missing`），MUST NOT 用 `Index.children`——它會把每個 header 解析一次，違反上面「不把整個 header 載進來」；`lineage` MUST 由同一批 `$.agora.parents` 的 id 在記憶體算，不另外查、不解析 header。分類 MUST 至少包含：`local-present`、`local-missing`、`other-machine`、`host-unknown`、`no-source`、`agent-unavailable`、`drive-only`、`new-format`。
+
+`outbox_legacy` MUST 是「這個 ULID 在**本機 outbox** 裡有一個 `layout` 不是 `chunks/1` 的 entry」（用 `store.waiting_ulids` 列 entry，含 `.done-`；只讀那一份本機 `session.md` 的 header；不讀 `raw.file`、不下載、不輸出 body）。它只影響 `droppable`／`not_droppable_reason`：`droppable` MUST 是 `false`：那個未上傳的版本會隨 `delete` 一起清掉、永遠不會上線，只有本人明確放棄才丟。
+
+`droppable` MUST 恰在以下全部成立時是 `true`，否則是 `false`；**同一條 lineage 的所有成員 MUST 同值**（丟掉的單位是整條）：(1) `class` 是 `local-present`；(2) `continuing` 是 `false`；(3) `replacement.relation_to_old` 是 `identical`；(4) `outbox_legacy` 是 `false`；(5) 同一條 lineage 的**每一筆**成員都成立 (1)–(4)；(6) 這一輪沒有未知 id 錯誤（有就整輪不輸出）。`not_droppable_reason` 在 `droppable: true` 時 MUST 是 `null`；否則 MUST 是恰一個，依這個順序取第一個成立的：`class-not-local-present`／`continuing`／`no-replacement`／`relation-null`／`relation-different`／`outbox-legacy`／`lineage-member-not-droppable`（自己 (1)–(4) 都成立，但同一條 lineage 有另一筆不成立）。
+
+`drop_list` MUST 是 `sessions` 裡所有 `droppable: true` 的 `ulid`（升冪、不重複，只有 id），而且 MUST 是**完整 lineage 的聯集**——MUST NOT 出現同一條 lineage 只有一半在裡面。搬遷第 4 步 MUST 只把 `drop_list` 原樣交給 `delete`（不是人看 JSON 手算）；`different`／`outbox_legacy` 的人工例外 MUST NOT 進 `drop_list`。有未知 id 錯誤時，指令 MUST exit 非 0，而且 MUST NOT 輸出 `sessions`／`drop_list`（fail-closed，連同上面（a）–（c）的輸入錯誤）。
 
 `replacement` 沒有替代版本時是 `null`，否則 MUST 是物件 `{ulid, relation_to_old, raw_size, reason}`：
 
@@ -220,11 +232,55 @@ Drive 上不再有整份 `raw-*`（新寫入不產生）；唯一的例外是遷
 - `raw_size`：替代版本整份 raw 的大小（外層那一筆的 `raw_size` 是舊的）。
 - `relation_to_old` MUST 是 `identical`／`different`／`null`：**`identical` 恰在三條都成立時**——(a) 兩邊 header 的整份 `raw.md5` 相同（`raw.size` 也相同）；(b) **替代版本**就是 Drive 上那一份（索引裡那一版的 `session.md` md5 等於 listing 的 `session.md` md5），**而且那一版列的每一個段都在 listing**（`raw_complete`：檔名是 basename、`size` 加起來等於 `raw.size`、每個段的 md5 相符）；(c) **舊的那一筆**也還是 Drive 上那一份（索引裡舊 ULID 的 md5 等於 listing 的）。`md5` 不同、任一邊的索引比 Drive 舊、舊的已經不在 Drive、替代版本還沒上傳完、或替代版本少了任何一個段，都是 `different`；兩邊任何一邊沒有 `raw.md5`（例如沒有 raw 的 Session）是 `null`（無法比較，不是相同）。
 - `reason`：`md5-equal`／`md5-differs`／`drive-version-elsewhere`（替代版本還沒上傳完或 Drive 上是別的版本）／`segments-missing`（替代版本的 `session.md` 在，但它列的段有缺；別台把它們當孤兒清掉了）／`old-drive-version-elsewhere`（本機對舊版的認知過期）／`old-not-on-drive`（別台已經刪了；本機鏡像可能是最後一份）／`old-has-no-raw`／`new-has-no-raw`／`no-old-md5`，給人看的診斷。
-- **預設丟掉清單只含 `relation_to_old: identical` 的**；`different` 與 `null` MUST NOT 進預設清單（要本人逐筆決定）。這個判準不讀內容：重匯同一份沒變的原檔時，新的分段版本接起來的位元組等於舊的單檔 raw，兩邊的 `raw.md5` 才會相同。
+- **`droppable` 以 `identical` 為第一條件**；`different` 與 `null` MUST NOT 進 `drop_list`（要本人逐筆決定）。這個判準不讀內容：重匯同一份沒變的原檔時，新的分段版本接起來的位元組等於舊的單檔 raw，兩邊的 `raw.md5` 才會相同。
+
+**必保清單的保護規則（全部 A 的搬遷）**：
+
+- 清單內的 Session 及其**整條 lineage**（`lineage`）MUST 在重匯後**逐一**核對 `identical`（上面三條）才可進 `drop_list`；結果 MUST 由程式寫成每一筆的 `droppable`／`not_droppable_reason`，不是人看 JSON 推論。
+- 任何一筆不是 `identical`（`different`／`null`／沒有原檔）、或那一筆沒有原始紀錄 → **整條 lineage MUST `droppable: false`、MUST NOT 進 `drop_list`**，MUST 列出來交本人；MUST NOT 只丟同一條裡剛好 `identical` 的其他成員。
+- 清單內的 Session 正在被 `continue` 接續（`continuing: true`）→ MUST NOT 重匯、MUST NOT 丟（整條 lineage 都 `droppable: false`），MUST 列出來等它結束再跑。
+- `identical` 只保證 raw 的位元組，不保證閱讀版 body 沒被手改（本指令不讀內容）。要保留手改過的 body，MUST 由本人決定整條不丟：把那一整條 lineage 從 `drop_list` **整條移除**（MUST NOT 只移除一半），記在搬遷紀錄；必保清單本身不是「永不丟」名單。
+- 沒有原始紀錄的類別 MUST NOT 進 `drop_list`（`droppable: false`、`not_droppable_reason: class-not-local-present`）；由 `inventory` 列出、本人逐筆決定。
+
+#### Scenario: 必保清單內一筆不同
+- **WHEN** 必保清單裡的 X 重匯後是 `different`（原檔變短），同一條 lineage 的其他成員是 `identical`
+- **THEN** `inventory` 標出 X 的 `must_keep` 與整條的 `lineage_protected`；X 是 `droppable: false`（`not_droppable_reason: relation-different`），其他成員也是 `droppable: false`（`lineage-member-not-droppable`）；**`drop_list` 不含這一整條的任何 id**；本人看過再決定
+
+#### Scenario: 必保清單內正在接續
+- **WHEN** 必保清單裡的 X 正在被 `agora continue` 接續
+- **THEN** `inventory` 標 `continuing: true` 並把 X 列出來；X 與同一條 lineage 的每一筆都是 `droppable: false`、不在 `drop_list`；搬遷步驟 MUST 跳過 X（不重匯、不丟），等它結束再跑；其他 id 照做
+
+#### Scenario: 必保清單的打字錯誤
+- **WHEN** `--must-keep` 的檔案裡有一個 id 不在本機索引、不在 Drive listing，也不在本機的 `state/deleted`
+- **THEN** `inventory` 以明確錯誤結束（exit 非 0）、列出那個 id，且**不輸出 `sessions`／`drop_list`**（沒有任何候選）；修正清單後重跑
+
+#### Scenario: 必保清單的 id 已經刪掉
+- **WHEN** 清單裡的 id 在 `state/deleted` 墓碑裡（別台或先前跑過已經刪了）
+- **THEN** 它被標成已刪、不算錯：出現在 `must_keep_deleted`（只有 id）、不在 `sessions`／`drop_list`；指令正常輸出其他筆
+
+#### Scenario: 必保清單的檔案讀不到
+- **WHEN** `--must-keep` 指到的路徑不存在（或沒有讀取權限、是目錄、不是 UTF-8）
+- **THEN** `inventory` MUST 以明確錯誤結束（exit 非 0）、訊息只有路徑與原因；MUST NOT 輸出 `sessions`／`drop_list`、MUST NOT 當成「沒有必保清單」照常給候選
+
+#### Scenario: 必保清單是空的
+- **WHEN** 有給 `--must-keep`，但檔案只有註解與空行（或整份是空白），解析出 0 個 id
+- **THEN** `inventory` MUST 明確錯誤（exit 非 0）、說明「真的不要就不要給這個旗標」；MUST NOT 輸出任何候選
+
+#### Scenario: 必保清單有一行不認得
+- **WHEN** 清單檔的某一行不是 `agora:<ULID>` 也不是裸 ULID（小寫 ULID、全形字、`claude:`／`session:` 前綴、多餘字元）
+- **THEN** `inventory` MUST 以明確錯誤結束（exit 非 0）、**只列出行號**（一次列完所有不認得的行）、**MUST NOT 重印那一行的內容**；MUST NOT 輸出任何候選
+
+#### Scenario: 清單的正規化與重複
+- **WHEN** 清單檔是 UTF-8 BOM、CRLF 換行，某個 id 前後有空白，同一筆同時以 `agora:<ULID>` 與裸 ULID 各寫一次
+- **THEN** BOM／CRLF／空白先被正規化；兩行只算同一個 id；輸出的 `must_keep` 只標一次，清單內容不出現在 stdout／stderr／`state`
 
 #### Scenario: 盤點的分類
 - **WHEN** 本機索引有四個舊 Session：一個原檔還在、一個 `source.host` 是別台、一個是 merge（沒有 `source`）、一個只在 Drive 上
 - **THEN** 輸出分成 `local-present`、`other-machine`、`no-source`、`drive-only`；每筆有 `replacement`（沒有就是 `null`）；沒有任何 title／body
+
+#### Scenario: 卡在 outbox 的舊格式 entry
+- **WHEN** 升級前有一筆舊格式版本還留在本機 outbox（沒有 `layout`、有舊 `raw.file`），它對應的舊 Session 也在盤點裡
+- **THEN** 那一筆是 `outbox_legacy: true`、`droppable: false`（`not_droppable_reason: outbox-legacy`）、不在 `drop_list`；`inventory` 沒有上傳、沒有改 outbox、沒有啟動上傳器
 
 #### Scenario: 不讀對話、也不 sync
 - **WHEN** 執行 `agora migrate inventory --json`
@@ -237,70 +293,27 @@ Drive 上不再有整份 `raw-*`（新寫入不產生）；唯一的例外是遷
 
 #### Scenario: 原檔變短後重匯
 - **WHEN** 一個舊 Session 的原檔在匯入後被截短（或 `/compact` 改寫），用 `--as-new` 重匯得到一個較短的新 Session
-- **THEN** `replacement.relation_to_old` 是 `different`（`reason: md5-differs`）、`replacement.raw_size` 比舊的 `raw_size` 小；這一筆**不在**預設丟掉清單裡；舊 Session 要本人逐筆決定才能刪
+- **THEN** `replacement.relation_to_old` 是 `different`（`reason: md5-differs`）、`replacement.raw_size` 比舊的 `raw_size` 小；這一筆是 `droppable: false`（`not_droppable_reason: relation-different`）、不在 `drop_list` 裡；舊 Session 要本人逐筆決定才能刪
 
 #### Scenario: 替代版本還沒上傳完
 - **WHEN** `--as-new` 剛建立新 Session，它還在 outbox，Drive 上還沒有它的 `session.md`
-- **THEN** `replacement` 出現但 `relation_to_old` 是 `different`（`reason: drive-version-elsewhere`），不在預設丟掉清單裡；等上傳成功後再跑一次 `inventory` 才是 `identical`
+- **THEN** `replacement` 出現但 `relation_to_old` 是 `different`（`reason: drive-version-elsewhere`），`droppable: false`、不在 `drop_list` 裡；等上傳成功後再跑一次 `inventory` 才是 `identical`
 
 #### Scenario: 替代版本少了一段
 - **WHEN** 替代版本的 `session.md` 已在 Drive 上、md5 也與索引相同，但它列的某一個段被別台當孤兒清掉了（A.3）
-- **THEN** `relation_to_old` 是 `different`（`reason: segments-missing`）——listing 裡少那一段，`raw_complete` 不成立；不在預設丟掉清單裡（`session.md` 在，不代表讀得回來）
+- **THEN** `relation_to_old` 是 `different`（`reason: segments-missing`）——listing 裡少那一段，`raw_complete` 不成立；`droppable: false`、不在 `drop_list` 裡（`session.md` 在，不代表讀得回來）
 
 #### Scenario: 本機對舊版的認知過期
 - **WHEN** 另一台還在跑舊版，把舊 Session 改了並發布（Drive 上舊 ULID 的 `session.md` md5 與本機索引不同）
-- **THEN** `relation_to_old` 是 `different`（`reason: old-drive-version-elsewhere`）；不拿本機的 `raw.md5` 當等價證明，這一筆不進預設清單
+- **THEN** `relation_to_old` 是 `different`（`reason: old-drive-version-elsewhere`）；不拿本機的 `raw.md5` 當等價證明，這一筆 `droppable: false`（`not_droppable_reason: relation-different`）
 
 #### Scenario: 舊的已經被別台刪了
 - **WHEN** 舊 Session 已經不在 Drive 的 listing 裡（別台刪掉了），本機鏡像還在
-- **THEN** `relation_to_old` 是 `different`（`reason: old-not-on-drive`）、不在預設清單；本機鏡像可能是最後一份，要不要丟或 `push --not-exist-upload` 由本人決定
+- **THEN** `relation_to_old` 是 `different`（`reason: old-not-on-drive`）、`droppable: false`、不在 `drop_list`；本機鏡像可能是最後一份，要不要丟或 `push --not-exist-upload` 由本人決定
 
 #### Scenario: 已經是新格式
 - **WHEN** 一個 Session 已經是 `chunks/1`
-- **THEN** 它被標成 `new-format`，不會出現在丟掉候選裡
-
-### Requirement: 原地轉存（`agora migrate adopt`）
-
-`agora migrate adopt <id>…` MUST 只處理 `layout` 不是 `chunks/1` 的 Session，並把它轉成分段：同一個 id、同一份 header（`tags`／`refs`／`case`／`relation`／`parents`／`source` 一個都不變）**與同一份閱讀版 body**（MUST 用 Drive 上那一份，MUST NOT 重新從 raw 產生），只有 `agora.raw` 換成 `{md5, size, layout: chunks/1, segments}`。它 MUST 先取得整份 raw：本機鏡像的 `raw-<md5>`（md5 相符）→ 否則下載舊的 `raw.file` 並驗**Drive 上那一份 header** 的 `md5`；拿不到或驗不過 MUST 拒絕這一個，Drive 原樣不動。**用的 header 也 MUST 是 Drive 上那一份**（見下面的 CAS）。
-
-上傳順序照一般版本（段 → `session.md` → 核對）；確認成功後 MUST 用與批次上傳同一條清理規則處理 `seg-*`（目前＋前一版＋寬限期），並 MAY 刪掉開始時讀到的那一個 `raw.file`（一次批次刪除，失敗只警告）；MUST NOT 掃資料夾刪其他 `raw-*`；MUST NOT 在確認前刪。這是唯一會讀舊 `raw.file` 的程式，MUST NOT 出現在 sync／pull／show／continue 的路徑上。
-
-**多機一致性（第 7 版補，MUST）**：
-
-- **取上傳鎖**：adopt 是「讀舊版 → 下載／切段／上傳（數分鐘）→ 發布」的長動作，MUST 在開始前取得上傳鎖（與背景上傳器、`push` 同一個），MUST NOT 與別的寫入交錯。
-- **跳過接續中的 Session**：目標正在被 `continue`（`store.continuing_details`）時 MUST 跳過並列出，其他 id 照做；MUST NOT 對它寫入。
-- **拒絕還在 outbox 的版本**：`outbox/<ULID>`（含 `.done-` 等 set-aside 版本）存在時 MUST 拒絕這一個；那個 entry 是舊版，之後上傳會把 adopt 好的版本蓋回舊格式。訊息說明要先讓它上傳完或清掉。
-- **compare-and-swap**：adopt MUST 先用一次 listing 拿 Drive 上那一份 `session.md` 的 md5 當基準；本機鏡像／索引的那一份與它不同時，MUST 先下載 Drive 上那一份並用它的 header（MUST NOT 用一份過期的 header 覆蓋別台的 tag／description）。**發布新 `session.md` 之前**再列一次 Drive，同一個 ULID 的 `session.md` md5 與基準不同 → MUST 中止這一個、MUST NOT 動 Drive（重跑即可）。這不是原子 CAS：它把「幾分鐘的下載＋上傳窗口」縮成「最後一次 copy 的窗口」。
-- **只刪記下來的那個檔名**：收尾刪舊 raw 時 MUST 只刪 adopt 開始時讀到的 `raw.file` 那一個檔名，MUST NOT 用 glob 或掃資料夾刪其他 `raw-*`（別台同時寫回的新 raw 名字不同，掃了會誤刪）。
-- 確認成功後 MUST 寫下 `state/published/<ULID>.json`（與批次上傳同一個形狀），下一次清理才有前一版可保護。
-
-#### Scenario: 轉存一個有 tag 的舊 Session
-- **WHEN** 對一個 `tags`／`case` 都有的舊 Session 執行 `agora migrate adopt agora:X`
-- **THEN** 同一個 id、同一份 header（那些欄位一個都沒變）、`layout: chunks/1`；Drive 上舊的 `raw-*.json` 被清掉（進垃圾桶）；舊機器不再讀得到它的 raw（本來就讀不到）
-
-#### Scenario: 手改過的閱讀版
-- **WHEN** 舊 Session 的 `session.md` body 被手改過再 `push`（raw 沒變）
-- **THEN** adopt 沿用 Drive 上那一份 body（不重新從 raw 產生），改動還在；同一筆走「丟掉＋重匯」會失去它（`replacement` 的 `identical` 只保證 raw 的位元組）
-
-#### Scenario: 舊 raw 對不上 header
-- **WHEN** Drive 上那份舊 `raw.file` 的 md5 與 header 的 `md5` 不符
-- **THEN** 這一個被拒絕、exit 非 0；Drive 上的版本原樣不動
-
-#### Scenario: 別台在 adopt 期間改過 header
-- **WHEN** adopt 開始時 Drive 上 `session.md` 的 md5 是 `M1`；下載與切段花了幾分鐘，期間另一台改了同一個 Session 的 tag 並發布（`M2`）
-- **THEN** adopt 在發布前看到 `M2 ≠ M1`，中止這一個、Drive 原樣不動（新的 tag 沒有被蓋掉）；重跑即可
-
-#### Scenario: 本機的 header 比 Drive 舊
-- **WHEN** 本機鏡像的 `session.md` 與 Drive 上的不同（別台改過 tag）
-- **THEN** adopt 先下載 Drive 上那一份並用它的 header 當基準；MUST NOT 用本機那份過期的 header 覆蓋回去
-
-#### Scenario: 正在被 continue 的 Session
-- **WHEN** 對一個正在 `agora continue` 的舊 Session 執行 `agora migrate adopt`
-- **THEN** 它被跳過並列出（其他 id 照做）；沒有寫入、Drive 原樣不動
-
-#### Scenario: 還在 outbox 的舊版本
-- **WHEN** 目標在 `outbox/` 裡還有一個舊格式的版本（等上傳）
-- **THEN** adopt 拒絕這一個，訊息說明先讓它上傳完或清掉；Drive 原樣不動
+- **THEN** 它被標成 `new-format`、`droppable: false`（`not_droppable_reason: class-not-local-present`），不會出現在 `drop_list` 裡
 
 ## MODIFIED Requirements
 
@@ -330,7 +343,7 @@ Drive 上不再有整份 `raw-*`（新寫入不產生）；唯一的例外是遷
 
 ### Requirement: push 只寫回該寫的檔案
 
-`agora push session <agora id>…` MUST 先送出 outbox，再把每個給的、雲端還在的 Session 的 `session.md` 與它的原始檔寫回 Drive，同名覆蓋。**分段儲存的 Session，原始檔是 `agora.raw.segments` 列出的每一個段**：本機缺的段 MUST 用本機的整份原始檔按 manifest 的 `size` 切出來再傳；MUST NOT 上傳不在這份 manifest 裡的分段、MUST NOT 上傳整份 raw。**本機沒有整份原始檔、而且 Drive 上缺段時 MUST 拒絕這一個（exit 非 0），MUST NOT 只傳 `session.md` 讓 manifest 指到不存在的段。** 從鏡像送出時，Drive 上多出來的檔不刪；從 outbox 送出時（批次上傳），依「舊段只刪被取代與過期」規則該清的 `seg-*` 會被刪掉，其餘多出來的檔仍然不刪。本機沒有那個原始檔、但 Drive 上已經有完整的原始檔（或完整的段）時，只傳 `session.md`；Drive 上不完整時拒絕這一個。舊的原始檔、下載到一半的檔、以 `.` 開頭的檔 MUST NOT 被上傳。不是 `chunks/1` 的 Session MUST 拒絕 push 它的 raw（只傳 `session.md` 也不行：那會讓 manifest 不存在），並說明要先用 `agora migrate adopt`。
+`agora push session <agora id>…` MUST 先送出 outbox，再把每個給的、雲端還在的 Session 的 `session.md` 與它的原始檔寫回 Drive，同名覆蓋。**分段儲存的 Session，原始檔是 `agora.raw.segments` 列出的每一個段**：本機缺的段 MUST 用本機的整份原始檔按 manifest 的 `size` 切出來再傳；MUST NOT 上傳不在這份 manifest 裡的分段、MUST NOT 上傳整份 raw。**本機沒有整份原始檔、而且 Drive 上缺段時 MUST 拒絕這一個（exit 非 0），MUST NOT 只傳 `session.md` 讓 manifest 指到不存在的段。** 從鏡像送出時，Drive 上多出來的檔不刪；從 outbox 送出時（批次上傳），依「舊段只刪被取代與過期」規則該清的 `seg-*` 會被刪掉，其餘多出來的檔仍然不刪。本機沒有那個原始檔、但 Drive 上已經有完整的原始檔（或完整的段）時，只傳 `session.md`；Drive 上不完整時拒絕這一個。舊的原始檔、下載到一半的檔、以 `.` 開頭的檔 MUST NOT 被上傳。不是 `chunks/1` 的 Session MUST 拒絕 push 它的 raw（只傳 `session.md` 也不行：那會讓 manifest 不存在），並說明沒有原地轉存、要重匯請用 `agora import … --as-new`。
 
 #### Scenario: 覆蓋雲端的版本
 - **WHEN** 本機改過某個 Session 的 `session.md`，執行 `agora push session agora:X`
@@ -346,4 +359,4 @@ Drive 上不再有整份 `raw-*`（新寫入不產生）；唯一的例外是遷
 
 #### Scenario: 舊格式的 Session 不能 push
 - **WHEN** 對一個沒有 `layout` 的 Session 執行 `agora push session agora:X`
-- **THEN** 拒絕這一個、exit 非 0，說明要先用 `agora migrate adopt`；Drive 原樣不動
+- **THEN** 拒絕這一個、exit 非 0，說明沒有原地轉存、要重匯請用 `agora import … --as-new`；Drive 原樣不動

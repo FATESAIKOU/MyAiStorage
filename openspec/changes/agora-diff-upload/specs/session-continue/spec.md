@@ -7,7 +7,7 @@
 - 這條只改**上傳的位元組**，不改「什麼時候寫回」「寫回哪一個 Session」「讀者看到什麼」的規則（本 spec 的其他 Requirement 不變）。
 - 封存前綴被改寫、來源短到封存點之前、沒有 cursor 時，那一輪 MUST 退回整份（新的世代、整份按 C 切成多段、`session.md` 最後上傳）；前一版在新版確認前 MUST 保持完整。只砍掉封存點之後的內容不算改寫（新的 tail 較短，仍可 append）。基準段不在 Drive 上不是退回整份的理由：上傳的一方 MUST 從本機的整份 raw 補回缺的段；補不回才不上傳。
 - **每次新開一個 `continue` 的第一次寫回是整份**：`start_native` 會把每一行換成新的 agent session id（所以封存前綴必然不同），來源 jsonl 也是新檔案；那一輪 MUST 走整份，之後同一個 continue 的定期寫回才差分。這是固定成本，不是失敗。
-- 目標是**不是 `chunks/1`** 的 Session（舊格式、未知格式）時，MUST 在啟動 agent 之前就拒絕，訊息說明要用 `agora migrate adopt`；MUST NOT 自動把它升級、MUST NOT 開 agent 之後才失敗。
+- 目標是**不是 `chunks/1`** 的 Session（舊格式、未知格式）時，MUST 在啟動 agent 之前就拒絕，訊息說明沒有原地轉存、要重匯請用 `agora import … --as-new`；MUST NOT 自動把它升級、MUST NOT 開 agent 之後才失敗。
 - 差分上傳失敗（離線、段沒傳完、Drive md5 不符）MUST NOT 中斷 agent；MUST 照「定期寫回失敗」的既有規則下一輪再試，entry 留在 outbox。
 - 閱讀版 `session.md` 仍整份上傳（這個 change 不做它的差分）；`--sync-period 0`、沒有新內容不寫、最後一次寫回、被刪另存等行為都不變。
 - 換機器或清掉本機快取之後的第一次寫回 MAY 是整份（沒有 cursor）；之後才差分。
@@ -34,7 +34,7 @@
 
 #### Scenario: 舊格式的 Session 不能接續
 - **WHEN** 對一個 header 沒有 `layout` 的 Session 執行 `agora continue`
-- **THEN** 在開 agent 之前拒絕（exit 非 0），訊息說明要先用 `agora migrate adopt`；不寫任何東西
+- **THEN** 在開 agent 之前拒絕（exit 非 0），訊息說明沒有原地轉存、要重匯請用 `agora import … --as-new`；不寫任何東西
 
 #### Scenario: 沒有新內容
 - **WHEN** 一個定期寫回的間隔內沒有新的對話
