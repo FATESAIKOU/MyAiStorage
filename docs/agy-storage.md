@@ -443,3 +443,13 @@ Everything this repository's tests do is against a temporary fake
 `AGORA_AGY_HOME` and the fake CLI in `tests/fakes/fake_agy.py`: no real agy is
 started, no real `conversation_summaries.db` is written, and the user's agy
 home is never read or written by the test suite.
+
+## 13. The opt-in gate (`AGORA_AGY_CONTINUE=1`)
+
+`agora continue --agent agy` is **off by default** (PMO, 2026-10-21): it writes the user's real
+`~/.gemini/antigravity-cli` (the restored conversation file and a `conversation_summaries.db` row), and
+whether the real agy loads what we write is **not verified** (§12). Without `AGORA_AGY_CONTINUE=1` the
+command refuses before a sync or any write, and `AgyAgent.start_native` refuses too, with a message that
+says to back up `~/.gemini/antigravity-cli` first. Import, listing, search and preview are read-only and
+are not gated. The gate comes off in a small follow-up ticket once the user has checked a real agy
+continue by hand.
