@@ -54,7 +54,6 @@ FAKE_RCLONE = FAKES / "fake_rclone.py"
 @pytest.fixture(autouse=True)
 def fresh_module_caches(monkeypatch):
     """The module's caches and warn-once flags must not leak between tests."""
-    monkeypatch.setenv("AGORA_AGY_CONTINUE", "1")        # the opt-in; the gate has its own tests below
     monkeypatch.setattr(agy_summaries, "_summaries_cache", None)
     monkeypatch.setattr(agy_summaries, "_warned_summary_for", False)
     monkeypatch.setattr(agy_summaries, "_warned_stamp", False)
@@ -1248,32 +1247,3 @@ def test_pruning_backups_never_touches_another_ids_files(tmp_path):
     assert [n for n in left if n in stamped] == stamped[-3:], "only the three newest stamped backups stay"
     for name in bystanders:
         assert name in left, f"{name} is not a stamped backup of abc and must stay"
-
-
-def test_the_agy_continue_is_off_unless_the_user_opts_in(agy_home, monkeypatch, capsys):
-    """The restore writes the real agy directory and real agy is unverified: no opt-in, no write."""
-    from agora import cli
-    from agora.agents import agy
-    monkeypatch.delenv("AGORA_AGY_CONTINUE", raising=False)
-    before = sorted(p.name for p in agy_home.rglob("*"))
-    with pytest.raises(agy.AgentError) as err:
-        agy.ADAPTER.start_native(b"{}", agy_home.parent, expected_id="x")
-    assert "備份" in str(err.value) and "AGORA_AGY_CONTINUE=1" in str(err.value)
-    for value in ("", "0", "true", "yes"):
-        monkeypatch.setenv("AGORA_AGY_CONTINUE", value)
-        assert not agy.restore_enabled(), value
-    assert sorted(p.name for p in agy_home.rglob("*")) == before, "nothing was written"
-    monkeypatch.setenv("AGORA_AGY_CONTINUE", "1")
-    assert agy.restore_enabled()
-
-
-def test_cli_continue_agy_is_refused_before_anything_without_the_opt_in(agy_home, tmp_path, monkeypatch, capsys):
-    from agora import cli
-    monkeypatch.delenv("AGORA_AGY_CONTINUE", raising=False)
-    before = sorted(p.name for p in agy_home.rglob("*"))
-    code = cli.main(["continue", "session", "agora:01TEST00000000000000000000", "--agent", "agy",
-                     "--dir", str(tmp_path)])
-    err = capsys.readouterr().err
-    assert code == 1, err
-    assert "備份" in err and "AGORA_AGY_CONTINUE=1" in err
-    assert sorted(p.name for p in agy_home.rglob("*")) == before
