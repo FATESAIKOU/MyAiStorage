@@ -33,8 +33,8 @@ from agora import store
 from agora.agents.agy_store import (PREVIEW_MAX, cascade_id, conversations_dir, db_path,
                                     decode_db, envelope, home, immutable, quick_check, rows,
                                     step_fingerprint)
-from agora.agents.agy_summaries import (ensure_summary_row, epoch_seconds, summary_rows,
-                                        summaries_path, summary_table)
+from agora.agents.agy_summaries import (ensure_summary_row, epoch_seconds, precheck_row,
+                                        summary_rows, summaries_path, summary_table)
 from agora.agents.agy_wire import fields, one, read_turns
 from agora.agents.base import AgentError, warn
 
@@ -69,6 +69,10 @@ class RestoreResult:
     latest step's start stamp as epoch seconds - the value the summaries row
     carries, in whatever shape the table's own rows use (None when every step
     stamp was unreadable; `prepare_continue` falls back to `store.now()`).
+    `backup` is the live db's copy `_backup_live` took before an overwrite -
+    the bytes `_withdraw_restore` puts back when the summaries row cannot be
+    added (#136); `None` means this restore replaced nothing or filled an
+    empty slot (there was nothing to keep).
     """
 
     conversation_id: str          # the cascade id, the file name agy opens it by
@@ -79,6 +83,7 @@ class RestoreResult:
     preview: str | None           # the last real text, truncated like last_message
     wrote: bool                   # this call actually replaced the file
     last_modified: float | None = None   # epoch seconds; None when stamps unread
+    backup: Path | None = None    # the old live copy, when one was overwritten
 
 
 def _step_seconds(path: Path) -> float | None:
@@ -296,15 +301,19 @@ def _prune_stale_temps(directory: Path) -> None:
             continue
 
 
-def _precheck_summaries() -> None:
+def _precheck_summaries(workdir: Path | None = None) -> None:
     """Read-only check that the summaries row can be added after the restore.
 
     `restore` replaces the conversation file for real; `ensure_summary_row`
     runs afterwards and raises when the list is missing or unrecognised.
-    Checking the same two conditions first (no write) means a failed continue
-    never leaves the directory half-changed (review N5). The connection is the
-    same immutable single-file kind everything else here reads with: it never
-    creates a `-shm` next to agy's file. `immutable=1` on a file agy is
+    Checking the same conditions first (no write) means a failed continue
+    never leaves the directory half-changed (review N5). Since #136 it also
+    builds the row the insert would carry (`agy_summaries.precheck_row`) and
+    refuses a table whose `NOT NULL` columns the fill rules cannot satisfy -
+    the acceptance run found the real table's `last_user_input_time` only
+    after the conversation file had already been written. The connection is
+    the same immutable single-file kind everything else here reads with: it
+    never creates a `-shm` next to agy's file. `immutable=1` on a file agy is
     currently writing (the table only in an uncheckpointed `-wal`) can report
     「結構認不出來」 by mistake (review N1, E9): rare - only around the first
     table creation - and the message says to try again later.
@@ -312,9 +321,12 @@ def _precheck_summaries() -> None:
     path = summaries_path()
     if not path.is_file():
         raise AgentError("agy conversation_summaries.db 不存在，不補列（#26：不建表）")
+    found = None
     try:
         with closing(immutable(path)) as connection:
             found = summary_table(connection)
+            if found is not None:
+                precheck_row(connection, found, workdir=workdir)
     except sqlite3.Error as e:
         raise AgentError(f"agy summaries 開不起來：{e}") from e
     if found is None:
@@ -442,6 +454,7 @@ def restore(raw, *, workdir: Path, expected_id: str | None = None) -> RestoreRes
                              "若確定壞了請手動移走再接續") from e
         live_seconds = (None if live_fp is None else _live_stamp(cascade))
         wrote = used_live = False
+        backup: Path | None = None
         if live_fp is None:
             os.replace(tmp, target)
             _fsync_dir(target.parent)
@@ -470,20 +483,63 @@ def restore(raw, *, workdir: Path, expected_id: str | None = None) -> RestoreRes
                              title=title, preview=preview,
                              last_modified=(seconds if seconds is not None
                                             else raw_seconds),
-                             wrote=wrote)
+                             wrote=wrote, backup=backup)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _withdraw_restore(result: RestoreResult) -> None:
+    """Take back the one file `restore` itself wrote - never a file it left alone.
+
+    `prepare_continue` adds the summaries row after the restore; a failure
+    there must not leave a conversation file agy would list **without** its
+    row (ticket #136, the acceptance run's 18.11). A restore that filled an
+    empty slot is undone by unlinking the target; one that overwrote an older
+    live copy puts the `_backup_live` bytes back through a temp file and
+    `os.replace`, so a failed put-back never leaves half a db. A `used_live`
+    or same-fingerprint restore is not touched at all: that file is agy's own,
+    and it was there before this continue ran.
+    """
+    if not result.wrote:
+        return
+    target = db_path(result.conversation_id)
+    tmp = target.with_name(f"{RESTORE_TMP_PREFIX}{uuid.uuid4().hex}.tmp")
+    try:
+        if result.backup is None:
+            target.unlink(missing_ok=True)
+        else:
+            shutil.copyfile(result.backup, tmp)
+            with tmp.open("r+b") as written:
+                os.fsync(written.fileno())
+            os.replace(tmp, target)
+        _fsync_dir(target.parent)
+    except OSError as e:
+        raise AgentError(
+            f"agy：補 summaries 列失敗，撤回剛還原的 {target} 也失敗（{e}）；"
+            "請手動把這個檔移走，免得 agy 列出一個沒有 summaries 列的對話") from e
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def prepare_continue(raw: bytes, *, workdir: Path,
                      expected_id: str | None = None) -> tuple[str, int]:
     """Everything an agy continue needs before `agy --conversation <id>` runs.
 
-    Check the summaries list can be written (read-only, N5), restore/adjudicate
-    the conversation file, then add the one row the PR2b spike showed agy
-    additionally loads conversations *by*: a `conversation_summaries.db` row
-    for the id (`ensure_summary_row`), whose stamps stay in `_stamp_like`'s
-    unverified shape.
+    Check the summaries list can be written (read-only, N5) **and** build the
+    row it would receive (`_precheck_summaries`／`agy_summaries.precheck_row`,
+    #136), restore/adjudicate the conversation file, then add the one row the
+    PR2b spike showed agy additionally loads conversations *by*: a
+    `conversation_summaries.db` row for the id (`ensure_summary_row`), whose
+    stamps stay in `_stamp_like`'s unverified shape.
+
+    If that insert fails for any reason - lock timeout, constraint, disk - the
+    file this restore just wrote is withdrawn (`_withdraw_restore`) and the
+    error is an `AgentError`: a conversation agy lists without a summaries row
+    is worse than a continue that did not run (#136). A restore that left the
+    live file alone never has anything withdrawn.
 
     It answers `(conversation_id, message_count)`. The message count is the
     14/15 turns the conversation agy opens carries - the number that becomes
@@ -500,11 +556,27 @@ def prepare_continue(raw: bytes, *, workdir: Path,
     """
     if expected_id is None:
         raise AgentError(NO_SOURCE_ID)
-    _precheck_summaries()
+    _precheck_summaries(Path(workdir) if workdir is not None else None)
     result = restore(raw, workdir=Path(workdir), expected_id=expected_id)
-    ensure_summary_row(
-        result.conversation_id,
-        title=result.title, preview=result.preview, step_count=result.step_count,
-        last_modified=result.last_modified if result.last_modified is not None else store.now(),
-        workdir=Path(workdir) if workdir is not None else None)
+    try:
+        ensure_summary_row(
+            result.conversation_id,
+            title=result.title, preview=result.preview, step_count=result.step_count,
+            last_modified=(result.last_modified if result.last_modified is not None
+                           else store.now()),
+            workdir=Path(workdir) if workdir is not None else None)
+    except BaseException as e:      # no file without its row: undo, then say so
+        # Ctrl-C lands here too: the 30 s wait for agy's lock is exactly when a person
+        # presses it (review W1). An interrupt is undone and then re-raised as itself.
+        try:
+            _withdraw_restore(result)
+        except AgentError as undo_failed:
+            raise AgentError(f"{undo_failed}；原本補列失敗的原因：{e}") from e
+        if not isinstance(e, Exception):
+            raise
+        undone = ("已撤回剛還原的對話檔" if result.wrote
+                  else "活體本來就沒動，維持原樣")
+        raise AgentError(
+            f"agy：{result.conversation_id} 補 summaries 列失敗（{e}）；"
+            f"{undone}（#136）") from e
     return result.conversation_id, result.messages

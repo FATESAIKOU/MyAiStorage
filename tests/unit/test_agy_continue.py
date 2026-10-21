@@ -116,6 +116,65 @@ def _db_bytes_of(raw: bytes) -> bytes:
     return base64.b64decode(json.loads(raw)["db_b64"])
 
 
+#: The real agy 1.4.4 `conversation_summaries` schema, copied from
+#: `MyAiStorage-team/fixtures-real/agy-summaries-schema.sql` (#136: schema only,
+#: no rows). The PR2b helper `make_summaries` is deliberately looser - its
+#: table has none of these `NOT NULL` constraints, which is how 117 tests
+#: missed the acceptance failure on `last_user_input_time`.
+REAL_SUMMARIES_SCHEMA = """\
+CREATE TABLE `conversation_summaries` (`conversation_id` text,`title` text NOT NULL DEFAULT "",`preview` text NOT NULL DEFAULT "",`step_count` integer NOT NULL DEFAULT 0,`last_modified_time` datetime NOT NULL,`workspace_uris` text NOT NULL,`status` text NOT NULL DEFAULT "",`source` text NOT NULL DEFAULT "",`project_id` text NOT NULL DEFAULT "",`agent_name` text NOT NULL DEFAULT "",`parent_conversation_id` text NOT NULL DEFAULT "",`nesting_depth` integer NOT NULL DEFAULT 0,`battle_id` text NOT NULL DEFAULT "",`winning_conversation_id` text NOT NULL DEFAULT "",`not_fully_idle` numeric NOT NULL DEFAULT false,`killed` numeric NOT NULL DEFAULT false,`last_user_input_time` datetime NOT NULL,`last_user_input_step_index` integer NOT NULL DEFAULT -1,`app_data_dir` text NOT NULL DEFAULT "",`raw_summary` blob,`group_id` text NOT NULL DEFAULT "",PRIMARY KEY (`conversation_id`));
+CREATE INDEX `idx_conversation_summaries_last_user_input_time` ON `conversation_summaries`(`last_user_input_time`);
+CREATE INDEX `idx_conversation_summaries_last_modified_time` ON `conversation_summaries`(`last_modified_time`);
+"""
+
+#: One row shaped the way the real agy writes its own (test conversation, fake
+#: text), per the acceptance run in #136.
+REAL_SAMPLE_ROW = {
+    "conversation_id": "sample-conv", "title": "Sample title",
+    "preview": "sample preview", "step_count": 3,
+    "last_modified_time": "2026-10-21 08:41:06.65668+00:00",
+    "workspace_uris": '["file:///private/tmp/agora-acc/proj"]',
+    "status": "CASCADE_RUN_STATUS_IDLE", "source": "",
+    "project_id": "default-cli-project", "agent_name": "",
+    "parent_conversation_id": "", "nesting_depth": 0, "battle_id": "",
+    "winning_conversation_id": "", "not_fully_idle": 0, "killed": 0,
+    "last_user_input_time": "2026-10-21 08:41:06.65668+00:00",
+    "last_user_input_step_index": -1, "app_data_dir": "antigravity-cli",
+    "raw_summary": None, "group_id": "",
+}
+
+
+def make_real_summaries(home: Path, rows: list[dict] | None = None) -> Path:
+    """The summaries db with the real agy's columns and constraints (#136)."""
+    path = home / "conversation_summaries.db"
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(REAL_SUMMARIES_SCHEMA)
+        for row in rows or []:
+            names = ", ".join(f'"{name}"' for name in row)
+            marks = ", ".join("?" for _ in row)
+            con.execute(f"INSERT INTO conversation_summaries ({names}) VALUES ({marks})",
+                        tuple(row.values()))
+        con.commit()
+    finally:
+        con.close()
+    return path
+
+
+def summary_row(home: Path, conversation_id: str) -> dict[str, object]:
+    """One summaries row as a dict, every column of the (real or loose) table."""
+    con = sqlite3.connect(home / "conversation_summaries.db")
+    con.row_factory = sqlite3.Row
+    try:
+        row = con.execute("SELECT * FROM conversation_summaries WHERE conversation_id = ?",
+                          (conversation_id,)).fetchone()
+    finally:
+        con.close()
+    assert row is not None, f"{conversation_id} has no summaries row"
+    return dict(row)
+
+
+
 # ---------------------------------------------------------------------------
 # restore: what it writes, when it refuses, and what it never leaves behind
 # ---------------------------------------------------------------------------
@@ -582,6 +641,53 @@ def test_the_fresh_stamp_keeps_the_table_s_own_shape(agy_home, tmp_path, shape, 
     assert value == fresh
 
 
+def test_ensure_summary_row_fits_the_real_agy_schema(agy_home, tmp_path):
+    """#136: every NOT NULL column of the real table gets a value, in its shape."""
+    make_real_summaries(agy_home, [REAL_SAMPLE_ROW])     # one row the real agy wrote
+    assert agy_summaries.ensure_summary_row(
+        "fresh-conv", title="fresh", preview="p", step_count=4,
+        last_modified=1767225600.0, workdir=tmp_path) is True
+    row = summary_row(agy_home, "fresh-conv")
+    # both datetimes carry the same moment, written the way the sample row is:
+    # a space, five fraction digits, +00:00 - not ISO T…Z.
+    assert row["last_modified_time"] == row["last_user_input_time"] == (
+        "2026-01-01 00:00:00.00000+00:00")
+    assert row["workspace_uris"] == f'["file://{tmp_path}"]'
+    assert row["status"] == "CASCADE_RUN_STATUS_IDLE"
+    assert row["project_id"] == "default-cli-project"
+    assert row["app_data_dir"] == "antigravity-cli"
+    assert row["title"] == "fresh" and row["preview"] == "p"
+    assert row["step_count"] == 4
+    assert row["source"] == row["agent_name"] == row["parent_conversation_id"] == ""
+    assert row["battle_id"] == row["winning_conversation_id"] == row["group_id"] == ""
+    assert row["nesting_depth"] == row["not_fully_idle"] == row["killed"] == 0
+    assert row["last_user_input_step_index"] == -1
+    assert row["raw_summary"] is None               # a nullable blob stays NULL
+    assert summary_row(agy_home, "sample-conv")["title"] == "Sample title"
+
+
+def test_ensure_summary_row_on_an_empty_real_schema_falls_back(agy_home, tmp_path):
+    """#136/(b): no row to copy → the shapes this adapter always wrote."""
+    make_real_summaries(agy_home)                    # the real constraints, no rows
+    assert agy_summaries.ensure_summary_row(
+        "fresh-conv", title="fresh", preview="p", step_count=4,
+        last_modified=1767225600.0, workdir=tmp_path) is True
+    row = summary_row(agy_home, "fresh-conv")
+    assert row["last_modified_time"] == row["last_user_input_time"] == (
+        "2026-01-01T00:00:00Z")                     # the 未驗 ISO fallback
+    assert row["workspace_uris"] == f"file://{tmp_path}"      # plain, as before
+    assert row["status"] == row["project_id"] == row["app_data_dir"] == ""
+
+
+def test_the_fresh_workspace_uris_keeps_a_plain_sample_plain(agy_home, tmp_path):
+    """#136: the JSON-array text is copied because the rows use it, not hardcoded."""
+    make_real_summaries(agy_home, [dict(REAL_SAMPLE_ROW, workspace_uris="/tmp/proj")])
+    assert agy_summaries.ensure_summary_row(
+        "fresh-conv", title="fresh", preview="p", step_count=4,
+        last_modified=1767225600.0, workdir=tmp_path) is True
+    assert summary_row(agy_home, "fresh-conv")["workspace_uris"] == f"file://{tmp_path}"
+
+
 def test_ensure_summary_row_fills_unknown_columns_by_declared_type(agy_home, tmp_path):
     con = sqlite3.connect(agy_home / "conversation_summaries.db")
     try:
@@ -709,6 +815,160 @@ def test_a_missing_summaries_list_stops_before_touching_the_conversation(agy_hom
     after = {p.name: (p.read_bytes(), p.stat().st_mtime_ns)
              for p in directory.iterdir()}
     assert after == before and target.is_file()          # no file was restored
+
+
+def test_the_precheck_refuses_a_row_the_real_schema_cannot_take(agy_home, tmp_path):
+    """#136: a NOT NULL column the fill rules cannot satisfy stops it first.
+
+    The real schema plus one future-looking column (`mystery blob NOT NULL`,
+    the ticket's example): the restore would replace the older live copy, so
+    «nothing in `conversations/` moved» proves the dry run ran before it.
+    """
+    session_id, _ = make_conversation(agy_home, TURNS, seed="precheck-row")
+    raw = raw_bytes_of(session_id)
+    sibling = tmp_path / "older.db"
+    MUT.make_db(str(sibling), TURNS[:1], cascade_id=session_id, seed="precheck-row-old")
+    directory = agy_home / "conversations"
+    target = directory / f"{session_id}.db"
+    target.write_bytes(sibling.read_bytes())            # older: a restore would replace it
+    path = make_real_summaries(agy_home)                # empty, so the ADD COLUMN is allowed
+    con = sqlite3.connect(path)
+    try:
+        con.execute("ALTER TABLE conversation_summaries ADD COLUMN mystery blob NOT NULL")
+        con.commit()
+    finally:
+        con.close()
+    before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns)
+              for p in directory.iterdir()}
+    with pytest.raises(AgentError, match="mystery 是 NOT NULL"):
+        agy_restore.prepare_continue(raw, workdir=tmp_path, expected_id=session_id)
+    after = {p.name: (p.read_bytes(), p.stat().st_mtime_ns)
+             for p in directory.iterdir()}
+    assert after == before and target.is_file()          # not one byte was written
+    assert not _tmp_names(agy_home)
+
+
+def test_a_failed_summaries_insert_takes_the_restored_file_back(agy_home, tmp_path,
+                                                                monkeypatch):
+    """#136: a conversation file must not survive without its summaries row.
+
+    The target was missing, so the restore filled an empty slot; the failed
+    insert has to take exactly that file away again.
+    """
+    session_id, _ = make_conversation(agy_home, TURNS, seed="undo-missing")
+    raw = raw_bytes_of(session_id)
+    target = agy_home / "conversations" / f"{session_id}.db"
+    target.unlink()
+    make_real_summaries(agy_home)                        # the precheck passes
+
+    def refuse(*args, **kwargs):
+        raise AgentError("forced: 鎖逾時")
+
+    monkeypatch.setattr(agy_restore, "ensure_summary_row", refuse)
+    with pytest.raises(AgentError, match="已撤回剛還原的對話檔"):
+        agy_restore.prepare_continue(raw, workdir=tmp_path, expected_id=session_id)
+    assert not target.exists()                          # no row-less conversation left
+    assert not _tmp_names(agy_home)
+
+
+def test_an_interrupt_during_the_summaries_insert_also_takes_the_restored_file_back(
+        agy_home, tmp_path, monkeypatch):
+    """#136 review W1: Ctrl-C while waiting for agy's lock is an interrupt, not an
+    Exception - it still must not leave a conversation file without its row, and it
+    still arrives as the interrupt (not wrapped)."""
+    session_id, _ = make_conversation(agy_home, TURNS, seed="undo-interrupt")
+    raw = raw_bytes_of(session_id)
+    target = agy_home / "conversations" / f"{session_id}.db"
+    target.unlink()
+    make_real_summaries(agy_home)
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(agy_restore, "ensure_summary_row", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        agy_restore.prepare_continue(raw, workdir=tmp_path, expected_id=session_id)
+    assert not target.exists()
+    assert not _tmp_names(agy_home)
+
+
+def test_a_failed_undo_still_says_why_the_row_failed(agy_home, tmp_path, monkeypatch):
+    """#136 review N2: when taking the file back fails too, the message carries the
+    original reason (a lock timeout, a constraint) as well as the undo failure."""
+    session_id, _ = make_conversation(agy_home, TURNS, seed="undo-fails")
+    raw = raw_bytes_of(session_id)
+    (agy_home / "conversations" / f"{session_id}.db").unlink()
+    make_real_summaries(agy_home)
+
+    def refuse(*args, **kwargs):
+        raise AgentError("forced: 鎖逾時")
+
+    def cannot_undo(result):
+        raise AgentError("撤回失敗（forced）")
+
+    monkeypatch.setattr(agy_restore, "ensure_summary_row", refuse)
+    monkeypatch.setattr(agy_restore, "_withdraw_restore", cannot_undo)
+    with pytest.raises(AgentError) as err:
+        agy_restore.prepare_continue(raw, workdir=tmp_path, expected_id=session_id)
+    assert "撤回失敗" in str(err.value) and "鎖逾時" in str(err.value)
+
+
+def test_a_column_default_the_table_declares_is_used_not_the_type_default(agy_home):
+    """#136 review N1: `last_user_input_step_index` is declared DEFAULT -1; a row we add
+    carries what agy itself writes, not the integer type's 0."""
+    from agora.agents import agy_summaries
+    for text, want in (("-1", (True, -1)), ("0", (True, 0)), ('""', (True, "")),
+                       ("'x'", (True, "x")), ("false", (True, 0)), ("true", (True, 1)),
+                       ("1.5", (True, 1.5)), ("CURRENT_TIMESTAMP", (False, None)),
+                       ("NULL", (False, None)), (None, (False, None))):
+        assert agy_summaries._declared_default(text) == want, text
+
+
+def test_a_failed_summaries_insert_puts_the_overwritten_live_copy_back(
+        agy_home, tmp_path, monkeypatch):
+    """#136: an overwritten live copy comes back byte for byte, not just gone."""
+    session_id, _ = make_conversation(agy_home, TURNS, seed="undo-live")
+    raw = raw_bytes_of(session_id)
+    sibling = tmp_path / "older.db"
+    MUT.make_db(str(sibling), TURNS[:1], cascade_id=session_id, seed="undo-live-old")
+    target = agy_home / "conversations" / f"{session_id}.db"
+    target.write_bytes(sibling.read_bytes())
+    live_bytes = target.read_bytes()
+    make_real_summaries(agy_home)
+
+    def refuse(*args, **kwargs):
+        raise AgentError("forced: 約束")
+
+    monkeypatch.setattr(agy_restore, "ensure_summary_row", refuse)
+    with pytest.raises(AgentError, match="已撤回剛還原的對話檔"):
+        agy_restore.prepare_continue(raw, workdir=tmp_path, expected_id=session_id)
+    assert target.read_bytes() == live_bytes             # the old live copy is back
+    backup = store.Paths.from_env().state / "agy-backups" / f"{session_id}.db"
+    assert backup.read_bytes() == live_bytes
+    assert not _tmp_names(agy_home)
+
+
+def test_a_failed_summaries_insert_leaves_a_file_the_restore_only_read(
+        agy_home, tmp_path, monkeypatch):
+    """#136: only the file this restore wrote is withdrawn - never agy's own.
+
+    The target has the raw's own fingerprint, so `restore` wrote nothing; a
+    failure in the row insert must leave that live copy where it is.
+    """
+    session_id, _ = make_conversation(agy_home, TURNS, seed="undo-noop")
+    raw = raw_bytes_of(session_id)
+    target = agy_home / "conversations" / f"{session_id}.db"
+    live_bytes = target.read_bytes()
+    make_real_summaries(agy_home)
+
+    def refuse(*args, **kwargs):
+        raise AgentError("forced: 磁碟")
+
+    monkeypatch.setattr(agy_restore, "ensure_summary_row", refuse)
+    with pytest.raises(AgentError, match="活體本來就沒動"):
+        agy_restore.prepare_continue(raw, workdir=tmp_path, expected_id=session_id)
+    assert target.read_bytes() == live_bytes
+    assert not _tmp_names(agy_home)
 
 
 def test_prepare_continue_answers_the_launch_facts(agy_home, tmp_path, capsys):
@@ -887,6 +1147,24 @@ def test_continue_inserts_the_missing_summaries_row_itself(agy_home, env, tmp_pa
     assert row[2] == f"file://{work}"
     document = (store.Paths.from_env().mirror / agora_id.split(":")[1] / "session.md").read_text()
     assert "ZZSAY 好的" in document                       # a row is all the fake agent needed
+
+
+def test_the_continue_writes_a_row_into_the_real_schema(agy_home, env, tmp_path, capsys):
+    """#136: the whole `continue --agent agy` against the real table's constraints."""
+    make_real_summaries(agy_home)                       # a fresh agy: no rows yet
+    cascade, agora_id = _import_session(agy_home, capsys, "e2e-real-schema", with_row=False)
+    work = tmp_path / "proj"
+    work.mkdir()
+    code, out, err = run_cli(capsys, "continue", "session", agora_id, "--agent", "agy",
+                             "--dir", str(work), "--sync-period", "0")
+    assert code == 0, err
+    row = summary_row(agy_home, cascade)
+    assert row["last_modified_time"] == row["last_user_input_time"]   # both NOT NULL, one moment
+    assert row["workspace_uris"] == f"file://{work}"
+    assert row["status"] == row["project_id"] == row["app_data_dir"] == ""
+    document = (store.Paths.from_env().mirror / agora_id.split(":")[1] / "session.md").read_text()
+    assert "ZZSAY 好的" in document
+    assert not _tmp_names(agy_home)
 
 
 def test_the_continue_hands_the_session_s_own_source_id_to_the_restore(
