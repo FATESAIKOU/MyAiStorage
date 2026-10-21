@@ -1,9 +1,5 @@
 {
   "channels": {
-    "guide-m9": {
-      "backend": "aicompany-channel",
-      "issue": 12
-    },
     "m0-exp-r2b": {
       "backend": "aicompany-channel",
       "issue": 6
