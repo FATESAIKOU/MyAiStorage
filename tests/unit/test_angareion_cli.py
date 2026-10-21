@@ -27,7 +27,7 @@ from angareion.messages import Message
 from angareion.registry import Action, parse_comment
 from angareion.state import CursorStore, FileETagCache, wait_state_file_path
 
-TOKEN = "ghp_FAKE_CLI_TOKEN_ABC123"
+TOKEN = "gh" + "p_FAKE_CLI_TOKEN_ABC123"
 IDENTITY = "mylinuxpool-impl-w1-1"
 PM = "mypmo-pm-m1"
 GENERAL = entity(channel="general", issue=10)

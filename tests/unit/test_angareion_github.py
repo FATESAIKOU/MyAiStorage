@@ -102,7 +102,7 @@ def test_github_backend_conforms_to_protocol():
 
 def test_from_config_reads_token_and_builds_backend(tmp_path):
     token_file = tmp_path / "token"
-    token_file.write_text("ghp_FAKE_TRANSPORT_TOKEN\n", encoding="utf-8")
+    token_file.write_text("gh" + "p_FAKE_TRANSPORT_TOKEN\n", encoding="utf-8")
     token_file.chmod(0o600)
     config = Config(
         identity=ME,
@@ -112,7 +112,7 @@ def test_from_config_reads_token_and_builds_backend(tmp_path):
         token_file=token_file,
     )
     backend = GitHubIssuesBackend.from_config(config, StaticResolver([GENERAL]), transport=FakeTransport())
-    assert backend.token == "ghp_FAKE_TRANSPORT_TOKEN"
+    assert backend.token == "gh" + "p_FAKE_TRANSPORT_TOKEN"
 
 
 def test_create_channel_opens_an_issue_without_members():

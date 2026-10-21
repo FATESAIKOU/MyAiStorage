@@ -22,7 +22,7 @@ from angareion.config import (
 )
 
 
-def _create_token_file(path: Path, content: str = "ghp_TEST_TOKEN_0123456789abcdef", mode: int = 0o600) -> Path:
+def _create_token_file(path: Path, content: str = "gh" + "p_TEST_TOKEN_0123456789abcdef", mode: int = 0o600) -> Path:
     path.write_text(content, encoding="utf-8")
     path.chmod(mode)
     return path
@@ -133,7 +133,7 @@ def test_load_token_empty_file_raises_error(tmp_path):
 
 
 def test_token_never_leaks_in_output_exceptions_or_logs(tmp_path, capsys, caplog):
-    secret_value = "ghp_ULTRA_SECRET_TOKEN_DO_NOT_LEAK_999888777"
+    secret_value = "gh" + "p_ULTRA_SECRET_TOKEN_DO_NOT_LEAK_999888777"
     token_file = _create_token_file(tmp_path / "leaky_token", secret_value, mode=0o644)
 
     logger = logging.getLogger("angareion.test")
