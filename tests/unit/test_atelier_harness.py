@@ -720,7 +720,7 @@ def test_prose_about_the_token_rule_is_not_a_token():
 
 def test_the_sk_lookbehind_keeps_prose_about_tasks_clean():
     """`risk-`／`task-`／`desk-` 後面接長字串不是 key（N5/M7：拿掉 lookbehind 會紅）。"""
-    words = ("ri" + "sk-assessment-for-deployment-process",
+    words = ("ri" + "sk" + "-assessment-for-deployment-process",
              "task-" + "a" * 25, "desk-" + "a" * 25)
     line = "- " + "、".join(words) + " 都是工作名，不是憑證。\n"
     found = findings_for(V1_REL, _inject(_v1_text(), line))
