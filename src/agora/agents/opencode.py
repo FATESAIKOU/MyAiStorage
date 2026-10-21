@@ -172,6 +172,17 @@ def _err(proc: subprocess.CompletedProcess, n: int = 300) -> str:
     return (proc.stderr or b"").decode("utf-8", "replace").strip()[-n:]
 
 
+def _file_digest(path: Path, chunk: int = 1 << 20) -> tuple[str, int]:
+    """(md5, size) of a file, read in chunks: never the whole export in memory (R1)."""
+    digest = hashlib.md5()
+    size = 0
+    with path.open("rb") as f:
+        while piece := f.read(chunk):
+            digest.update(piece)
+            size += len(piece)
+    return digest.hexdigest(), size
+
+
 def _warn_schema() -> None:
     """One line, once: an opencode we do not recognise is not an error to raise."""
     global _warned_schema
@@ -884,9 +895,14 @@ class OpencodeAgent:
             raise AgentError(f"opencode 逾時（{seconds:g} 秒）："
                              f"{argv[1] if len(argv) > 1 else argv[0]}") from None
 
-    def _export_bytes(self, session_id: str, cwd: Path | str | None = None) -> bytes:
-        """`opencode session export <id> --standalone`, stdout going to a file,
-        stderr apart.
+    def _export_file(self, session_id: str,
+                     cwd: Path | str | None = None) -> tuple[PrivateTmpDir, Path]:
+        """`opencode session export <id> --standalone` into a private file.
+
+        Returns the export file and the private temp dir that owns it; the caller
+        keeps the dir alive as long as it needs the file (`Exported._raw_tmpdir`)
+        or removes it with `cleanup()`. The whole export is never read back into
+        one bytes object here (R1): the file *is* the raw.
 
         v2 moved export under `session` and made it a server operation, so it needs
         a server context; `cwd` is still not needed for this to work - opencode
@@ -898,8 +914,9 @@ class OpencodeAgent:
         write-back the terminal belongs to the agent - a child that read there would
         take the line the user is typing (design「不弄亂 agent 的畫面」).
         """
-        with PrivateTmpDir("agora-opencode") as tmp:
-            target = Path(tmp) / "export.json"
+        tmpdir = PrivateTmpDir("agora-opencode")
+        target = Path(tmpdir.name) / "export.json"
+        try:
             with open(target, "wb") as out:
                 proc = self._run([agent_cmd(self.name), "session", "export", session_id,
                                   *_server_args()],
@@ -910,7 +927,10 @@ class OpencodeAgent:
                 if "Session not found" in message:
                     raise AgentError(f"opencode 找不到 Session {session_id}")
                 raise AgentError(f"opencode export {session_id} 失敗：{message}")
-            return target.read_bytes()
+        except BaseException:
+            tmpdir.cleanup()
+            raise
+        return tmpdir, target
 
     def _import(self, payload: dict, cwd: Path) -> None:
         """`opencode session import <path> --standalone --directory <cwd>`.
@@ -972,7 +992,11 @@ class OpencodeAgent:
             items = sum(len(m.get("parts") or []) for m in messages)
             item_word = "個 part"
         self._import(payload, cwd)
-        landed_payload = self._read(self._export_bytes(session_id, cwd=cwd))
+        landed_tmp, landed_path = self._export_file(session_id, cwd=cwd)
+        try:
+            landed_payload = self._read_file(landed_path)
+        finally:
+            landed_tmp.cleanup()
         landed = _payload_messages(landed_payload)
         landed_count = _message_count(landed_payload, fmt)
         if fmt == "v2":
@@ -997,11 +1021,22 @@ class OpencodeAgent:
             raise AgentError("opencode 的匯出檔最外層不是 JSON 物件")
         return payload
 
+    def _read_file(self, path: Path) -> dict:
+        """`_read`'s contract over the export file, without holding its bytes (R1)."""
+        try:
+            with path.open(encoding="utf-8") as f:
+                payload = json.load(f)
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise AgentError(f"opencode 的匯出檔不是 JSON：{e}")
+        if not isinstance(payload, dict):
+            raise AgentError("opencode 的匯出檔最外層不是 JSON 物件")
+        return payload
+
     # -- the Agent protocol ------------------------------------------------
 
     def export(self, session_id: str) -> Exported:
         try:
-            raw = self._export_bytes(session_id)
+            tmpdir, path = self._export_file(session_id)
         except AgentError:
             # opencode 1.18 exports from anywhere, so this is the belt to that
             # braces: if a version ever scopes export to the current project, the
@@ -1010,8 +1045,13 @@ class OpencodeAgent:
             elsewhere = _session_directory(session_id)
             if not elsewhere:
                 raise
-            raw = self._export_bytes(session_id, cwd=Path(elsewhere))
-        payload = self._read(raw)
+            tmpdir, path = self._export_file(session_id, cwd=Path(elsewhere))
+        try:
+            payload = self._read_file(path)
+            md5, size = _file_digest(path)
+        except BaseException:
+            tmpdir.cleanup()
+            raise
         fmt = _payload_format(payload)
         info = payload.get("info") or {}
         if fmt == "v2":
@@ -1022,13 +1062,19 @@ class OpencodeAgent:
         version = info.get("version")   # v1 only: v2 does not record one (it may be None)
         return Exported(
             session_id=str(info.get("id") or session_id),
-            raw=raw,
+            raw_file=path,
+            raw_md5=md5,
+            raw_size=size,
+            _raw_tmpdir=tmpdir,
             dir=directory if isinstance(directory, str) and directory else None,
             title=info.get("title") if isinstance(info.get("title"), str) else None,
             created_at=_iso(_created_ms(info)),
             agent_version=str(version) if version else None,
             message_count=_message_count(payload, fmt),
             model=_last_model(payload),
+            # Carried so `reading_of` never parses the export a second time (R1):
+            # without this it would fall back to `agent.turns(exported.raw)`.
+            turns=self._turns_of(payload),
         )
 
     def turns(self, raw: bytes) -> Turns:
@@ -1040,7 +1086,10 @@ class OpencodeAgent:
         not conversation and produce no turn (H1: a v2 import must not come out as
         an empty body).
         """
-        payload = self._read(raw)
+        return self._turns_of(self._read(raw))
+
+    def _turns_of(self, payload: dict) -> Turns:
+        """`turns` over an already-parsed export (the export carries the result)."""
         out: Turns = []
         if _payload_format(payload) == "v2":
             first_user = True  # only the first user row is CLI JSON-encoded (L-10)
@@ -1506,9 +1555,15 @@ class OpencodeAgent:
     def _model_of(self, session_id: str, workdir: Path) -> str | None:
         """Which model answered, read from the session this run just made."""
         try:
-            payload = self._read(self._export_bytes(session_id, cwd=workdir))
+            tmpdir, path = self._export_file(session_id, cwd=workdir)
         except AgentError:
             return None
+        try:
+            payload = self._read_file(path)
+        except AgentError:
+            return None
+        finally:
+            tmpdir.cleanup()
         if _last_model(payload):
             return _last_model(payload)
         name = ((payload.get("info") or {}).get("model") or {}).get("id")

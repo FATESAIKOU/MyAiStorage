@@ -1,7 +1,7 @@
 """Private temporary directories under agora's own state, and the sweep for leftovers (#116).
 
 An export writes the whole raw conversation to a temporary directory before it
-is staged (`claude._exported`, `agy.AgyAgent.export`, `opencode._export_bytes`,
+is staged (`claude._exported`, `agy.AgyAgent.export`, `opencode._export_file`,
 `agy_store.snapshot`, `agy_summaries._read_summaries`). A `TemporaryDirectory`
 in the shared system temp cleaned those on the normal and the failing path, but
 nothing can run on the SIGKILL path: the whole conversation stayed in

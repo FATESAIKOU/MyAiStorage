@@ -1,16 +1,18 @@
-"""B1a: the claude export reads the session in one pass and moves no byte.
+"""R1: the claude export streams the session in one pass and moves no byte.
 
-The reference is the pre-B1a adapter, imported from a `git archive` of the
-commit this slice started on. For a generated batch of session files (fixed
-seed, plus the shapes the ticket names: summaries before/after/absent, the
-first title at different positions, several timestamps/versions/cwds/models,
-isMeta/isCompactSummary, unknown line types, CJK, a big tool_result, broken
-lines, a half-written tail, blank lines, non-dict lines) every `Exported`
-field and the raw bytes must equal what HEAD produces - including which error
-comes out, and with which line number.
+The reference is the three-stage adapter this slice started on (`_read_lines` +
+`_scan` + `_pack_raw_file`), imported from a `git archive` of the commit it was
+cut from. For a generated batch of session files (fixed seed, plus the shapes
+the ticket names: summaries before/after/absent, the first title at different
+positions, several timestamps/versions/cwds/models, isMeta/isCompactSummary,
+unknown line types, CJK, a big tool_result, broken lines, a half-written tail,
+blank lines, non-dict lines, `/clear` switching files, sidecars) every
+`Exported` field, the raw bytes, `main_end`, `stable_at(n)` and the digests
+must equal what the three-stage version produces - including which error comes
+out, and with which line number.
 
 `AGORA_B1A_HEAD_FILE` points the reference at another copy of claude.py; the
-mutation checks in the B1a report use it to make the reference deliberately
+mutation checks in the R1 report use it to make the reference deliberately
 wrong and watch this test go red.
 """
 
@@ -19,12 +21,14 @@ from __future__ import annotations
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
 import os
 import random
 import subprocess
+import sys
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,10 +40,11 @@ from agora.agents.base import AgentError
 
 REPO = Path(__file__).resolve().parents[2]
 
-#: The adapter before B1a (`Merge pull request #108`). A fixed commit and not
-#: `HEAD`: after PM commits this slice, HEAD is the code under test and the
-#: property test would only compare the new implementation with itself.
-HEAD_COMMIT = "fa513923f3a1bf2a9851658b1579af5ca1a8bb3d"
+#: The adapter before R1 (`Merge pull request #147`, the design merge). A fixed
+#: commit and not `HEAD`: after PM commits this slice, HEAD is the code under
+#: test and the property test would only compare the new implementation with
+#: itself. This one still has `_read_lines` + `_scan` + `_pack_raw_file`.
+HEAD_COMMIT = "985afd7"
 
 SID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 CWD = "/golden/b1a"
@@ -121,6 +126,14 @@ def _cases() -> list[Case]:
     add("summary-empty-first", _summary(""), u1, _summary("ZZSUMMARY 後來的摘要"), a1)
     add("summary-non-string", _summary(42), u1, a1)
     add("summary-whitespace", _summary("  "), u1, a1)
+
+    # `/clear` keeps the same file going here; the switch to a new session file
+    # is its own test below (the ticket's「/clear 換檔」).
+    add("clear-keeps-writing",
+        u1,
+        _user("<command-name>/clear</command-name>"),
+        _user("<local-command-stdout>Cleared conversation</local-command-stdout>"),
+        a1, u1, a1)
 
     add("title-after-noise",
         _user("ZZMETA 這是系統提示", isMeta=True),
@@ -259,8 +272,8 @@ CASES = _cases()
 
 
 @pytest.fixture(scope="session")
-def head_claude(tmp_path_factory):
-    """The pre-B1a claude.py, imported under its own module name."""
+def reference_claude(tmp_path_factory):
+    """The three-stage claude.py, imported under its own module name."""
     override = os.environ.get("AGORA_B1A_HEAD_FILE")
     if override:
         source = Path(override).read_bytes()
@@ -274,31 +287,65 @@ def head_claude(tmp_path_factory):
             pytest.skip(f"git archive {HEAD_COMMIT} 不可用：{proc.stderr.decode('utf-8', 'replace')[-200:]}")
         with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
             source = tar.extractfile("src/agora/agents/claude.py").read()
-    path = tmp_path_factory.mktemp("head-claude") / "claude_b1a_head.py"
+    path = tmp_path_factory.mktemp("reference-claude") / "claude_r1_reference.py"
     path.write_bytes(source)
-    spec = importlib.util.spec_from_file_location("agora_b1a_head_claude", path)
+    spec = importlib.util.spec_from_file_location("agora_r1_reference_claude", path)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module      # dataclasses resolves postponed annotations by name
     spec.loader.exec_module(module)
     return module
 
 
-def _observe(module, path: Path, sidecar: Path, *, head: bool) -> dict:
-    """One export, reduced to the things the two versions have to agree on."""
+#: The envelope's opening bytes, as both paths write them.
+HEAD_BYTES = b'{"format": "claude-jsonl/1", "main": ['
+
+
+def _shape_of_raw(main: list[str], raw: bytes) -> dict:
+    """`main_end`/`stable_at`/digests of the old path, read off the bytes it wrote.
+
+    Computed from the raw and the lines it packed, not from the new adapter: the
+    element boundaries are the serializer's own pieces (the same `json.dumps`
+    `_pack_raw_file` called), and every digest is a slice of the actual bytes.
+    """
+    positions, pos = [0], len(HEAD_BYTES)
+    for i, line in enumerate(main):
+        if i:
+            pos += 2
+        pos += len(json.dumps(line, ensure_ascii=False).encode("utf-8"))
+        positions.append(pos)
+    return {
+        "main_end": pos,
+        "main_md5": hashlib.md5(raw[:pos]).hexdigest(),
+        "stable_at": positions,
+        "stable_md5": [hashlib.md5(raw[:p]).hexdigest() for p in positions],
+    }
+
+
+def _observe(module, path: Path, sidecar: Path, *, old: bool) -> dict:
+    """One export, reduced to the things the two passes have to agree on."""
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr):
         try:
-            main = module._read_lines(path)
-            if head:
-                exported = module._exported(SID, main, sidecar)
-            else:
+            if old:
+                main = module._read_lines(path)
                 exported = module._exported(SID, main, sidecar, label=path.name)
+                shape = _shape_of_raw(main, exported.raw)
+            else:
+                exported, packed = module._exported(SID, path, sidecar,
+                                                    label=path.name, capture=True)
+                shape = {"main_end": packed.main_end, "main_md5": packed.main_md5,
+                         "stable_at": list(packed.stable_at),
+                         "stable_md5": [packed.stable_md5(n)
+                                        for n in range(len(packed.stable_at))]}
         except Exception as exc:                    # noqa: BLE001 - the type is the assertion
             return {"stderr": stderr.getvalue(),
                     "error": (type(exc).__name__, str(exc))}
     return {
         "stderr": stderr.getvalue(),
-        "main": main,
         "raw": exported.raw,
+        "raw_md5": exported.raw_md5,
+        "raw_size": exported.raw_size,
+        "shape": shape,
         "fields": {k: getattr(exported, k) for k in
                    ("session_id", "dir", "title", "created_at", "agent_version",
                     "message_count", "model", "turns")},
@@ -306,7 +353,7 @@ def _observe(module, path: Path, sidecar: Path, *, head: bool) -> dict:
 
 
 @pytest.mark.parametrize("case", CASES, ids=[case.name for case in CASES])
-def test_the_new_export_is_head_bit_for_bit(case, head_claude, tmp_path):
+def test_the_new_export_is_head_bit_for_bit(case, reference_claude, tmp_path):
     path = tmp_path / "session.jsonl"
     path.write_bytes(case.content)
     sidecar = path.parent / "session"
@@ -314,7 +361,54 @@ def test_the_new_export_is_head_bit_for_bit(case, head_claude, tmp_path):
         dest = sidecar / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
-    assert _observe(C, path, sidecar, head=False) == _observe(head_claude, path, sidecar, head=True)
+    assert _observe(C, path, sidecar, old=False) == _observe(reference_claude, path, sidecar, old=True)
+
+
+def test_a_clear_switch_reads_only_the_named_file(reference_claude, tmp_path, monkeypatch):
+    """`/clear` starts a new session file; the export of either id reads its own."""
+    monkeypatch.setenv("AGORA_CLAUDE_HOME", str(tmp_path))
+    pdir = tmp_path / ".claude" / "projects" / C.encode_project_dir(CWD)
+    pdir.mkdir(parents=True)
+    old_id, new_id = "clear-old-0000-4000-8000-000000000001", "clear-new-0000-4000-8000-000000000002"
+    old_path, new_path = pdir / f"{old_id}.jsonl", pdir / f"{new_id}.jsonl"
+    old_path.write_text("".join([_user("ZZUSER 清掉之前"), _assistant("ZZASSIST 之前"),
+                                 _user("<command-name>/clear</command-name>")]), encoding="utf-8")
+    new_path.write_text("".join([_user("ZZUSER 清掉之後"), _assistant("ZZASSIST 之後")]),
+                        encoding="utf-8")
+    for session_id, path in ((old_id, old_path), (new_id, new_path)):
+        new = C.ClaudeAgent().export(session_id, CWD)
+        old = reference_claude.ClaudeAgent().export(session_id, CWD)
+        assert new.raw == old.raw
+        assert new.raw_md5 == old.raw_md5
+        assert {k: getattr(new, k) for k in ("title", "dir", "message_count", "turns")} == \
+            {k: getattr(old, k) for k in ("title", "dir", "message_count", "turns")}
+        _new_export, packed = C._exported(session_id, path, path.parent / session_id,
+                                          capture=True)
+        assert {"main_end": packed.main_end, "main_md5": packed.main_md5,
+                "stable_at": list(packed.stable_at),
+                "stable_md5": [packed.stable_md5(n) for n in range(len(packed.stable_at))]} \
+            == _shape_of_raw(reference_claude._read_lines(path), old.raw)
+
+
+def test_the_sidecar_order_is_stable(reference_claude, tmp_path):
+    """Aux is serialized in `sorted(rglob)` order, so the same sidecar is the same
+    bytes twice and an added file does not reorder the existing entries (B.2)."""
+    path = tmp_path / "session.jsonl"
+    path.write_text(_user("ZZUSER") + _assistant("ZZASSIST"), encoding="utf-8")
+    sidecar = tmp_path / "session"
+    sidecar.mkdir()
+    for rel in ("b.txt", "a/one.txt", "a/two.txt"):
+        dest = sidecar / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(f"ZZ {rel}\n", encoding="utf-8")
+    first = C._exported(SID, path, sidecar)[0].raw
+    second = C._exported(SID, path, sidecar)[0].raw
+    assert first == second
+    before = json.loads(first)["aux"]
+    (sidecar / "a" / "zero.txt").write_text("ZZ zero\n", encoding="utf-8")
+    after = json.loads(C._exported(SID, path, sidecar)[0].raw)["aux"]
+    assert [k for k in after if k in before] == list(before)   # relative order kept
+    assert list(after) == sorted(after)
 
 
 def test_a_non_dict_line_fails_where_head_fails(tmp_path):
@@ -323,7 +417,7 @@ def test_a_non_dict_line_fails_where_head_fails(tmp_path):
     path = tmp_path / "session.jsonl"
     path.write_text('{"type": "user", "message": "hi"}\n42\n', encoding="utf-8")
     with pytest.raises(AttributeError) as exc:
-        C._exported(SID, C._read_lines(path), path.parent / "session", label=path.name)
+        C._exported(SID, path, path.parent / "session", label=path.name)
     assert str(exc.value) == "'int' object has no attribute 'get'"
 
 
@@ -335,7 +429,7 @@ def test_a_broken_line_wins_over_a_non_dict_line(tmp_path):
     path.write_text('{"type": "user", "message": "hi"}\n42\n{"type": "user", \n'
                     + _assistant("ZZASSIST 最後一行是好的"), encoding="utf-8")
     with pytest.raises(AgentError, match=r"第 3 行解析失敗"):
-        C._exported(SID, C._read_lines(path), path.parent / "session", label=path.name)
+        C._exported(SID, path, path.parent / "session", label=path.name)
 
 
 def test_an_unhashable_type_fails_like_head(tmp_path):
@@ -344,7 +438,7 @@ def test_an_unhashable_type_fails_like_head(tmp_path):
     path = tmp_path / "session.jsonl"
     path.write_text('{"type": []}\n', encoding="utf-8")
     with pytest.raises(TypeError, match="unhashable type: 'list'"):
-        C._exported(SID, C._read_lines(path), path.parent / "session", label=path.name)
+        C._exported(SID, path, path.parent / "session", label=path.name)
 
 
 def test_a_post_parse_error_waits_for_a_later_syntax_error(tmp_path):
@@ -355,7 +449,7 @@ def test_a_post_parse_error_waits_for_a_later_syntax_error(tmp_path):
     path.write_text('{"type": []}\n{"type": "user", \n'
                     + _user("ZZUSER 最後一行是好的"), encoding="utf-8")
     with pytest.raises(AgentError, match=r"第 2 行解析失敗"):
-        C._exported(SID, C._read_lines(path), path.parent / "session", label=path.name)
+        C._exported(SID, path, path.parent / "session", label=path.name)
 
 
 def test_the_file_is_read_one_line_at_a_time(tmp_path, monkeypatch):
@@ -371,6 +465,24 @@ def test_the_file_is_read_one_line_at_a_time(tmp_path, monkeypatch):
     assert main == ['{"type": "user", "message": "hi"}']
 
 
+def test_the_export_never_reads_the_whole_file(tmp_path, monkeypatch):
+    """R1: the export streams the session; nothing loads it back (no read_text/
+    read_bytes on the session, and the raw is never read either)."""
+    path = tmp_path / "session.jsonl"
+    path.write_text("".join([_user("ZZUSER 一"), _assistant("ZZASSIST 一")]),
+                    encoding="utf-8")
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("the export must not read the whole file")
+
+    monkeypatch.setattr(Path, "read_text", refuse)
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+    exported, packed = C._exported(SID, path, path.parent / "session", label=path.name)
+    assert exported.raw_md5 == packed.md5
+    assert exported.raw_file.stat().st_size == packed.size
+    assert packed.main_count == 2
+
+
 def test_each_line_is_parsed_once(tmp_path, monkeypatch):
     lines = [_user("ZZUSER 一"), _assistant("ZZASSIST 一"), _summary("ZZSUMMARY")]
     path = tmp_path / "session.jsonl"
@@ -383,7 +495,7 @@ def test_each_line_is_parsed_once(tmp_path, monkeypatch):
         return real_loads(*args, **kwargs)
 
     monkeypatch.setattr(C.json, "loads", counted)
-    C._exported(SID, C._read_lines(path), path.parent / "session", label=path.name)
+    C._exported(SID, path, path.parent / "session", label=path.name)
     assert len(calls) == len(lines)
 
 
