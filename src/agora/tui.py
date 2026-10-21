@@ -39,6 +39,7 @@ from textual.widgets.text_area import Edit, EditResult, LanguageDoesNotExist, Se
 from agora import cache
 from agora import header as h
 from agora import store
+from agora.agents import agy
 
 WIDE = 100                       # columns from which the preview goes to the right
 TABS = ("agora", "import")
@@ -173,7 +174,9 @@ PREVIEW_IDLE = 0.15          # the cursor has to rest this long before anything 
 #: The content search reads each agent's own store. agy's first version only has
 #: title+preview to search (its conversation bodies are not in the summaries db),
 #: and saying so is what keeps "no result" from reading as "not there" (#26).
-AGY_SEARCH_NOTE = "內文搜尋：agy 只搜標題與 preview（不搜內文）"
+#: The wording is `agy.SEARCH_SCOPE` itself, so the help text and this note
+#: cannot drift apart (PR2b).
+AGY_SEARCH_NOTE = "內文搜尋：" + agy.SEARCH_SCOPE
 
 
 def content_search_note(agents) -> str | None:

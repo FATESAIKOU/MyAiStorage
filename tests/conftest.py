@@ -145,4 +145,11 @@ def isolated_home(tmp_path, monkeypatch, request):
         # A unit test that forgets its fake agent fails loudly instead of running the real one.
         monkeypatch.setenv("AGORA_OPENCODE_CMD", os.environ.get("AGORA_OPENCODE_CMD", "/nonexistent/opencode"))
         monkeypatch.setenv("AGORA_CLAUDE_CMD", os.environ.get("AGORA_CLAUDE_CMD", "/nonexistent/claude"))
+        monkeypatch.setenv("AGORA_AGY_CMD", os.environ.get("AGORA_AGY_CMD", "/nonexistent/agy"))
+        # Belt and braces for agy (#26 PR2b review N8): a test that forgets the
+        # agy_home fixture still writes under tmp_path, never the real
+        # ~/.gemini/antigravity-cli. Always set, not inherited from the outer
+        # shell (review N6): this is a directory tests write to; a test that
+        # wants its own path sets it on top.
+        monkeypatch.setenv("AGORA_AGY_HOME", str(tmp_path / "agy-home"))
     return home
