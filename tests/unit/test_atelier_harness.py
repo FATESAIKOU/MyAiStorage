@@ -10,7 +10,9 @@ The `v1` additions (change atelier-pm-harness-v1, design D7) are checked in the
 same pass: every `pm` harness keeps「審查一律非作者」(not only v0); a `pm` file of
 `v>=1` must still write the key sentences (`不是權限`／`照 PMO 的模型輪換表`／
 `不指定頻道`／`長時間的指令` - the union of the four body sections, each sentence
-at least once, not one section each); and a `v>=1` file's body must not hardcode
+at least once, not one section each; since #135 `impl` and `rev` have their own
+lists under the same union rule, and `rev` also keeps「不審自己的作品」); and a
+`v>=1` file's body must not hardcode
 tool names, model names, other projects' names, machine addresses, the user's
 home path, or (since #134; spec「MUST NOT 含帳號、額度、憑證名稱」) an email
 address, a credential-token shape, a credential environment-variable name or a
@@ -86,6 +88,26 @@ BODY_SECTIONS = ("know", "do", "judge", "dont")
 PM_KEY_SENTENCES = ("不是權限", "照 PMO 的模型輪換表", "不指定頻道", "長時間的指令")
 #: The sentence every `pm` version must keep (judge or dont).
 REVIEW_BY_NON_AUTHOR = "審查一律非作者"
+
+#: The same union rule for an `impl` harness of `v>=1` (#135): the four body
+#: sections, each sentence at least once (not one section each - the
+#: self-verification sentence lives in `judge`, the copy rule in `do`). Only the
+#: rules the impl file actually states are listed; a rule it does not have is
+#: reported, not written into the harness to fit this list.
+IMPL_KEY_SENTENCES = ("作者（你）的說明不算證據", "原 worktree 不動")
+#: `rev`'s own list (#135): the union of the four body sections, each sentence at
+#: least once (not one section each - `不灌水` is only in `dont`, the
+#: self-verification sentence only in `know`, 改壞驗證 only in `do`).
+REV_KEY_SENTENCES = (
+    "不灌水：不把 nit 講成 warning",
+    "不質疑工單的意圖與目標",
+    "審查者自己驗證，不採信作者的報告",
+    "模型與作者相同時不審",
+    "改壞驗證一律在副本做",
+)
+#: The sentence every `rev` version must keep (judge or dont): the reviewer is
+#: never the author. `rev` writes it differently from `pm`'s「審查一律非作者」.
+REV_REVIEW_BY_NON_AUTHOR = "不審自己的作品"
 
 #: Content limits for `v>=1` (B-15/B-16): the body names capabilities, never the
 #: concrete tool, model, address or path of one environment. Deliberately NOT in
@@ -188,6 +210,8 @@ def _states_project_first(know: str) -> bool:
 
 V0_REL = "atelier/worker-team/pm/v0.md"
 V1_REL = "atelier/worker-team/pm/v1.md"
+IMPL_REL = "atelier/worker-team/impl/v1.md"
+REV_REL = "atelier/worker-team/rev/v1.md"
 
 
 @dataclass
@@ -365,6 +389,9 @@ def findings_for(path: str, text: str) -> Findings:
     judge_and_dont = sections.get("judge", "") + "\n" + sections.get("dont", "")
     if role == "pm" and REVIEW_BY_NON_AUTHOR not in judge_and_dont:
         found.errors.append(f"{path}: pm 職務要寫「{REVIEW_BY_NON_AUTHOR}」（judge 或 dont）")
+    if role == "rev" and REV_REVIEW_BY_NON_AUTHOR not in judge_and_dont:
+        found.errors.append(
+            f"{path}: rev 職務要寫「{REV_REVIEW_BY_NON_AUTHOR}」（judge 或 dont）")
     is_v1_or_later = version_match is not None and int(version_match.group(1)) >= 1
     if role == "pm" and is_v1_or_later:
         for sentence in PM_KEY_SENTENCES:
@@ -372,6 +399,14 @@ def findings_for(path: str, text: str) -> Findings:
                 found.errors.append(
                     f"{path}: v1 起的 pm 職務缺關鍵句「{sentence}」"
                     "（know/do/judge/dont 合起來至少出現一次）")
+    for role_with_keys, sentences in (("impl", IMPL_KEY_SENTENCES),
+                                      ("rev", REV_KEY_SENTENCES)):
+        if role == role_with_keys and is_v1_or_later:
+            for sentence in sentences:
+                if sentence not in body:
+                    found.errors.append(
+                        f"{path}: v1 起的 {role_with_keys} 職務缺關鍵句「{sentence}」"
+                        "（know/do/judge/dont 合起來至少出現一次）")
     if is_v1_or_later:
         found.errors.extend(_forbidden_in_body(path, body))
         if isinstance(team, str) and isinstance(role, str):
@@ -629,6 +664,48 @@ def test_the_content_limits_skip_v0_and_the_frontmatter():
     assert not findings_for(V0_REL, injected).errors
 
 
+# --- impl／rev 的關鍵句（#135） --------------------------------------------------
+
+
+#: One negative case per sentence: (file, sentence, what the error must also say).
+#: Built from the constants, so a sentence added to a list is pinned automatically.
+KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
+    [(IMPL_REL, sentence, "關鍵句") for sentence in IMPL_KEY_SENTENCES]
+    + [(REV_REL, sentence, "關鍵句") for sentence in REV_KEY_SENTENCES]
+    + [(REV_REL, REV_REVIEW_BY_NON_AUTHOR, "rev 職務要寫")]
+)
+
+
+def _tmp_copy_without(tmp_path: Path, rel: str, sentence: str) -> str:
+    """The real file's text with `sentence` taken out, held in a tmp copy.
+
+    The real harness is never rewritten (it is append-only); the checker reads the
+    copy. `sentence` must be in the file, so a renamed harness line fails here
+    instead of silently testing nothing.
+    """
+    text = (REPO / rel).read_text(encoding="utf-8")
+    assert sentence in text, f"{rel} 裡找不到「{sentence}」：這條測試等於沒驗到"
+    copy = tmp_path / Path(rel).name
+    copy.write_text(text.replace(sentence, ""), encoding="utf-8")
+    return copy.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("rel, sentence, expected", KEY_SENTENCE_CASES,
+                         ids=[f"{Path(rel).parent.name}/{sentence}"
+                              for rel, sentence, _ in KEY_SENTENCE_CASES])
+def test_a_missing_impl_or_rev_key_sentence_is_flagged(rel, sentence, expected, tmp_path):
+    """#135: 每一條關鍵句拿掉都要紅（不是只有 pm 的四句）。"""
+    found = findings_for(rel, _tmp_copy_without(tmp_path, rel, sentence))
+    assert any(sentence in error and expected in error for error in found.errors), \
+        f"格式檢查沒有抓到「{sentence}」被拿掉：{found.errors}"
+
+
+@pytest.mark.parametrize("rel", (IMPL_REL, REV_REL), ids=("impl", "rev"))
+def test_the_impl_and_rev_harnesses_pass_the_format_check(rel):
+    found = findings_for(rel, (REPO / rel).read_text(encoding="utf-8"))
+    assert not found.errors, "\n".join(found.errors)
+
+
 # --- 私人資訊：email、憑證樣式、憑證變數名、額度數字（#134） --------------------
 
 
@@ -855,7 +932,8 @@ def test_the_reviewer_role_is_rev_of_its_own():
     assert parse_path("atelier/worker-team/rev/v0.md") == ("worker-team", "rev", 0)
 
     text = (_v0_text().replace("atelier:worker-team-pm", "atelier:worker-team-rev")
-            .replace("role: pm", "role: rev").replace("/pm/v0.md", "/rev/v0.md"))
+            .replace("role: pm", "role: rev").replace("/pm/v0.md", "/rev/v0.md")
+            .replace("審查一律非作者", "不審自己的作品"))
     found = findings_for("atelier/worker-team/rev/v0.md", text)
     assert not found.errors, "\n".join(found.errors)
 
