@@ -396,9 +396,70 @@ settle:
   recognised table, only a missing id, one `BEGIN IMMEDIATE` transaction; it
   never touches the list's `-wal`/`-shm`).
   The row's five read columns are `conversation_id`, `title`, `preview`,
-  `step_count`, `last_modified_time`; also written are `workspace_uris` and
+  `step_count`, `last_modified_time`; PR2b also wrote `workspace_uris` and
   every other column by its declared type (strings `''`, numbers `0`, blobs
-  `NULL`), with `raw_summary` left `NULL`.
+  `NULL`), with `raw_summary` left `NULL`. The real table's constraints and
+  the shapes its own rows use were found on 2026-10-21 - see the subsection
+  below.
+
+### 2026-10-21 真機驗收發現 (#136)
+
+The first hand acceptance run of §18 (`agora continue --agent agy`) against
+the real agy 1.4.4 failed at the summaries insert:
+`NOT NULL constraint failed: conversation_summaries.last_user_input_time`.
+The real table (`MyAiStorage-team/fixtures-real/agy-summaries-schema.sql`,
+schema only, no rows) has three columns `NOT NULL` **without a default**:
+`last_modified_time` (datetime), `workspace_uris` (text) and
+`last_user_input_time` (datetime). PR2b filled the first two; the third went
+through the declared-type rule, which answers NULL for `datetime`.
+
+A row agy itself wrote (test conversation, fake text) looks like this:
+
+| column | value |
+| --- | --- |
+| `last_modified_time`, `last_user_input_time` | text `2026-10-21 08:41:06.65668+00:00` - a space, five fraction digits here, `+00:00` (not ISO `T…Z`) |
+| `workspace_uris` | JSON array text `["file:///private/tmp/agora-acc/proj"]` (not a bare string) |
+| `status` | `CASCADE_RUN_STATUS_IDLE` |
+| `project_id` / `app_data_dir` | `default-cli-project` / `antigravity-cli` |
+| `last_user_input_step_index` | `-1` |
+| `source`, `agent_name`, `parent_conversation_id`, `battle_id`, `winning_conversation_id`, `group_id` | empty string |
+| `not_fully_idle`, `killed`, `nesting_depth` | `0` |
+| `raw_summary` | protobuf blob (nullable) |
+
+Worse than the refused insert: `restore` had already written the conversation
+db into `conversations/`, so the run left a conversation file with **no**
+summaries row (that one test file was deleted by hand; nothing else was
+touched).
+
+What this revision does:
+
+- **Fill from samples first, defaults second.** Both datetimes carry the same
+  moment; its text copies the separator, fraction width and zone form of the
+  table's own datetime rows (`_stamp_text`), and only an empty table falls back
+  to the old ISO `Z`. `workspace_uris` becomes `["file://<workdir>"]` when the
+  rows use a JSON array and a bare `file://<workdir>` when they do not;
+  `status`, `project_id`, `app_data_dir` take the most common value among the
+  rows. None of agy 1.4.4's values are hardcoded: they are copied, so a later
+  agy that changes them changes the fresh row with them.
+- **Check the row before touching `conversations/`.** `prepare_continue`
+  builds the full row from the schema and up to 50 sample rows and refuses
+  (`AgentError`) when a `NOT NULL` column is still NULL. No dry
+  INSERT/`ROLLBACK`: that would take agy's write lock for a row we were not
+  going to keep, and a rollback still bumps the file's change counter; the
+  static check is the simpler option, and the failures it cannot see (a
+  trigger, a `CHECK`) are covered by the next point.
+- **Undo the restore when the insert still fails.** Any failure of
+  `ensure_summary_row` (lock timeout, constraint, disk) withdraws the file
+  this restore wrote: the missing-target case unlinks it, and an overwritten
+  live copy is put back from `agy-backups/` through a temp file and
+  `os.replace`. A file the restore only read (`used_live`, same fingerprint)
+  is left alone. No 「有對話檔、沒有 summaries 列」 state is left behind.
+
+**Not verified:** whether the real agy, after a *successful* insert of this
+shape, can actually open the restored conversation - §18 of
+`docs/acceptance.md` has to be re-run by hand. Everything above is either the
+real table's schema or a row agy wrote itself; the load path is still §12's
+open question.
 
 **Unverified - the owner must check these against the real agy once, by
 hand:**
@@ -417,14 +478,18 @@ hand:**
   empty pair behind on a normal exit, the user would still have to delete the
   two files before every continue - that would have to be reconsidered, and
   until then the refusal stands and the message names the path and size.
-- **The real format/unit of `last_modified_time`.** The adapter mirrors the
-  shape of the table's own rows (seconds/milliseconds/microseconds/ISO) and
-  uses ISO 8601 UTC `Z` when the table is empty - a shape chosen because
-  nothing is known, not because it was observed.
-- **The real format of `workspace_uris`** (the adapter writes
-  `file://<workdir>`) and of `raw_summary`, `status`, `source`, `project_id`,
-  `agent_name`, `parent_conversation_id`, `group_id` (the adapter leaves
-  them `NULL` / `''` / `0` by declared type).
+- **The shapes an empty table has no sample for.** The real row's datetime
+  text and JSON-array `workspace_uris` are now known (above), but a brand-new
+  list has no row to copy: the adapter then writes ISO 8601 UTC `Z` and a bare
+  `file://<workdir>`, still a guess rather than an observation. How agy parses
+  either, and whether it rewrites the row on load, is unverified as well.
+- **The columns no row samples.** `raw_summary` stays `NULL` (nullable in the
+  real schema; the adapter never invents a protobuf blob), and `source`,
+  `agent_name`, `parent_conversation_id`, `battle_id`,
+  `winning_conversation_id`, `group_id` stay `''` while
+  `last_user_input_step_index`, `nesting_depth`, `not_fully_idle` and `killed`
+  become `0` by declared type - agy itself wrote `-1` for the first of those.
+  Whether agy cares about any of them is unverified.
 - **Whether agy renames or rekeys a conversation when it is continued**
   (review #26 finding 7). `collect` treats a vanished db as an out-loud
   error saying the id may have changed; it does not guess a new id.
