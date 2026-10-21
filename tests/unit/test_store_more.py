@@ -11,6 +11,7 @@ import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve
 import hashlib
 import fcntl
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -160,6 +161,154 @@ def test_sync_never_downloads_raw(remote, tmp_path):  # U-ST-19, N11
     downloads = [c for c in calls(remote)[before:]
                  if "copyto" in c and any(t.endswith(".json") for t in gdrive_targets(c))]
     assert downloads == []
+
+
+def _on_drive(remote, ulid):
+    return remote / "agora" / "sessions" / ulid
+
+
+def _raw_of(remote, ulid):
+    hdr, _ = h.split_document((_on_drive(remote, ulid) / "session.md").read_text(encoding="utf-8"))
+    return hdr["agora"]["raw"]
+
+
+def _session_downloads(remote, ulid, before: int = 0):
+    return [c for c in calls(remote)[before:]
+            if "copyto" in c and any(t.endswith(f"sessions/{ulid}/session.md")
+                                     for t in gdrive_targets(c))]
+
+
+def _stuck_session(remote, paths):
+    """A session on Drive whose session.md is there and whose raw is not (#119).
+
+    Uploaded without `remember`, like a session another machine wrote: the local
+    index does not know it, so the first sync has to read it and find it unfinished.
+    Returns (ulid, raw header, raw bytes).
+    """
+    ulid = _save(paths, _header())
+    raw = _raw_of(remote, ulid)
+    raw_path = _on_drive(remote, ulid) / raw["file"]
+    data = raw_path.read_bytes()
+    raw_path.unlink()
+    return ulid, raw, data
+
+
+def test_a_stuck_session_is_downloaded_once_not_on_every_command(remote, capsys):
+    """#119: the same unfinished session.md and raw listing is remembered locally."""
+    paths = store.Paths.from_env()
+    ulid, _, _ = _stuck_session(remote, paths)
+    capsys.readouterr()
+
+    before = len(calls(remote))
+    index = store.sync(paths)
+    assert index.header(ulid) is None
+    assert len(_session_downloads(remote, ulid, before)) == 1
+    assert "還沒寫完" in capsys.readouterr().err
+
+    before = len(calls(remote))
+    index = store.sync(paths)                 # the next command
+    assert index.header(ulid) is None
+    assert _session_downloads(remote, ulid, before) == []
+    assert "還沒寫完" not in capsys.readouterr().err
+    assert json.loads((paths.state / store.UNFINISHED_FILE).read_text())["sessions"][ulid]
+
+
+def test_a_skipped_download_still_keeps_the_unfinished_session_out_of_the_mirror(remote, capsys):
+    """#119 review N1 (G3): not downloading must not leave the unfinished session.md in the
+    mirror - an offline rebuild would turn it into a finished-looking session. Put one there
+    the way a stale copy would be (an earlier build of the mirror) and the remembered round
+    has to take it out again."""
+    paths = store.Paths.from_env()
+    ulid, _, _ = _stuck_session(remote, paths)
+    store.sync(paths)
+    stale = paths.mirror / ulid / "session.md"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes((_on_drive(remote, ulid) / "session.md").read_bytes())
+    before = len(calls(remote))
+    store.sync(paths)                         # the remembered round: no download
+    assert _session_downloads(remote, ulid, before) == []
+    assert not stale.exists(), "the unfinished session.md is out of the mirror again"
+    assert store.Index(paths).header(ulid) is None
+
+
+def test_a_listing_without_sessions_leaves_the_memory_alone(remote, capsys):
+    """#119 review N1: Drive having no `sessions/` at all says nothing about what is
+    unfinished (like the cloud_missing marks) - the memory file comes out of that round
+    byte for byte as it went in."""
+    paths = store.Paths.from_env()
+    ulid, _, _ = _stuck_session(remote, paths)
+    store.sync(paths)
+    memory = paths.state / store.UNFINISHED_FILE
+    before = memory.read_bytes()
+    assert ulid in json.loads(before)["sessions"]
+    shutil.rmtree(remote / "agora" / "sessions")
+    store.sync(paths)
+    assert memory.read_bytes() == before
+
+
+def test_a_raw_that_arrives_later_is_not_blocked_by_the_memory(remote, capsys):
+    """#119: the raw appears with the md5 its header names; the session must be indexed."""
+    paths = store.Paths.from_env()
+    ulid, raw, data = _stuck_session(remote, paths)
+    store.sync(paths)
+    capsys.readouterr()
+    before = len(calls(remote))
+    store.sync(paths)                         # remembered: no download
+    assert _session_downloads(remote, ulid, before) == []
+
+    (_on_drive(remote, ulid) / raw["file"]).write_bytes(data)
+    before = len(calls(remote))
+    index = store.sync(paths)
+    assert [hit[0] for hit in index.search(T("CSV"))] == [ulid]
+    assert len(_session_downloads(remote, ulid, before)) == 1
+    assert "還沒寫完" not in capsys.readouterr().err
+    assert ulid not in json.loads((paths.state / store.UNFINISHED_FILE).read_text())["sessions"]
+
+
+def test_a_new_session_md_is_evaluated_again(remote, capsys):
+    """#119: session.md changed on Drive, so the remembered answer no longer applies."""
+    paths = store.Paths.from_env()
+    ulid, _, _ = _stuck_session(remote, paths)
+    store.sync(paths)
+    capsys.readouterr()
+    before = len(calls(remote))
+    store.sync(paths)
+    assert _session_downloads(remote, ulid, before) == []
+
+    path = _on_drive(remote, ulid) / "session.md"
+    hdr, body = h.split_document(path.read_text(encoding="utf-8"))
+    hdr["title"] = "同一個 raw 還沒到，但標題改了"
+    path.write_text(h.dump_document(hdr, body), encoding="utf-8")
+    before = len(calls(remote))
+    index = store.sync(paths)
+    assert index.header(ulid) is None
+    assert len(_session_downloads(remote, ulid, before)) == 1
+    assert "還沒寫完" in capsys.readouterr().err
+
+    before = len(calls(remote))
+    store.sync(paths)
+    assert _session_downloads(remote, ulid, before) == []
+
+
+def test_a_broken_or_deleted_memory_falls_back_to_one_download(remote, capsys):
+    """#119: a corrupt or missing state file is no memory, not a skipped session."""
+    paths = store.Paths.from_env()
+    ulid, _, _ = _stuck_session(remote, paths)
+    store.sync(paths)
+    capsys.readouterr()
+    before = len(calls(remote))
+    store.sync(paths)
+    assert _session_downloads(remote, ulid, before) == []
+
+    (paths.state / store.UNFINISHED_FILE).write_text("{not json", encoding="utf-8")
+    before = len(calls(remote))
+    store.sync(paths)
+    assert len(_session_downloads(remote, ulid, before)) == 1
+
+    (paths.state / store.UNFINISHED_FILE).unlink()
+    before = len(calls(remote))
+    store.sync(paths)
+    assert len(_session_downloads(remote, ulid, before)) == 1
 
 
 def test_missing_sessions_dir_keeps_mirror(remote, capsys):  # U-ST-20, N12

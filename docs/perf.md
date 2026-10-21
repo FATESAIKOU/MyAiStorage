@@ -78,3 +78,50 @@ Drive 上 `agora-test/sessions/` 最後 0 筆、自己那個 uuid 的 `projects/
 
 - **冷啟動改成一次批次下載（已做）**：sync 把所有要更新的 `session.md` 用一次 `rclone copy --files-from … --no-traverse` 抓下來，失敗才退回逐一下載。真的 Drive 上 3 個 Session 的冷啟動從約 13 秒（依上表推算）變成 5.8 秒；Session 越多差越多。
 - **寫入少一次往返（沒做，留給使用者決定）**：建議 1 會拿掉上傳後的 md5 確認，那是 outbox「確認 Drive 有了才移除」的保證（design 4.1），所以不拿掉。另一個做法是把 raw 與 session.md 用一次 `rclone copy --order-by name --transfers 1` 上傳（`raw-…` 排在 `session.md` 前面，順序仍然成立），可以省約 3.5 秒；但要改寫 fake 與幾個依賴 `copyto` 的測試，也要在真的 Drive 上確認順序，所以留到下一輪。
+
+## 2026-10-21：一次 import 的呼叫清單（#119，改前／改後）
+
+量測方式：`tests/fakes/fake_rclone.py`，`FAKE_RCLONE_DELAY=0.5`（每次呼叫睡 0.5 秒），
+`HOME`／`AGORA_CONFIG`／`AGORA_CACHE_DIR`／`AGORA_STATE_DIR` 都在暫存目錄，
+`AGORA_UPLOAD=inline`，每次都刪掉 `state/last-sync` 讓 sync 真的跑。呼叫數是穩定值；
+秒數是三次的中位數（同一次執行裡的假延遲固定，差異來自 process 啟動）。
+
+一次**新 import**（Drive 上沒有同名來源）4 次：
+
+1. `lsjson gdrive:sessions -R --fast-list --hash --files-only`（sync 列檔）
+2. `copy <outbox> gdrive:sessions --files-from …`（raw）
+3. `copy <outbox> gdrive:sessions --files-from …`（session.md）
+4. `lsjson …`（上傳後確認 md5，H1）
+
+一次**更新 import**（同一個來源再匯入，raw 也變了）7 次：
+
+1. sync 列檔
+2. `lsjson …`（L7：更新前確認 id 還在）
+3. `lsjson …`（copy 前再看一次；resurrect 規則）
+4. raw copy
+5. session.md copy
+6. `lsjson …`（確認 md5）
+7. `delete gdrive:sessions --files-from …`（清掉被取代的舊 raw）
+
+Drive 上有一個「卡住的舊 session」（session.md 在、raw 不在）時，每一次指令多一次下載：
+`copyto gdrive:sessions/<ULID>/session.md → mirror`（要讀標頭才知道它還沒寫完）。
+
+改前／改後（同樣 0.5 秒假延遲）：
+
+| 情境 | 改前 | 改後 |
+|---|---|---|
+| 新 import，Drive 乾淨 | 4 次（約 2.3～2.9 秒） | 4 次（約 2.3～2.9 秒） |
+| 新 import，有 1 個卡住的 session（第一次看到） | 5 次（約 2.9～3.3 秒） | 5 次（約 2.9～3.3 秒） |
+| 同上，**下一個指令** | 5 次 / 2.93 秒 | **4 次 / 2.31 秒** |
+| 更新 import，有 1 個卡住的 session | 8 次 / 4.63 秒 | **7 次 / 4.05 秒** |
+
+卡住的 session 現在記在 `<state>/unfinished.json`：`session.md` 的 md5 與它標頭指到的 raw 在
+listing 裡的值（不存在＝空字串）都沒變，就不再下載、也不再重印「還沒寫完」；任一個變了
+（raw 補上、session.md 更新）就重新讀一次。檔案壞掉或不存在＝沒有記憶，退回一次下載。
+
+**issue 的問題（慢在 Drive 寫入還是舊 session 重試？）**：主要是固定的上傳往返。
+一次新 import 4 次、更新 import 7 次；舊 session 的重試在多數情況只多 1 次
+（清單上一個 `copyto`），但每次指令都會再付一次。以上面量到的單次往返約 3.5 秒估算，
+23 秒比較像「更新 import 的 7 次」而不是「很多卡住的 session」。這次只拿掉重複的那一次；
+上傳順序（raw → session.md）、上傳後的 md5 確認（H1）、更新前的存在檢查（L7）與
+copy 前的再檢查（resurrect）都沒有動。
