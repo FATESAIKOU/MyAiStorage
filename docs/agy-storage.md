@@ -292,7 +292,7 @@ partial steps, no IDE sub-steps, no crash states).
   workspace_uris`, a plausible table name). The real table's name, column
   types, timestamp unit and `workspace_uris` encoding are still unverified;
   the adapter discovers the table by columns and accepts seconds,
-  milliseconds or ISO timestamps rather than assuming one (`agy.py`
+  milliseconds or ISO timestamps rather than assuming one (`agy_store.py`
   `_summary_table` / `_iso` / `_workspace`).
 - `gen_metadata` row-count semantics (and when the small bootstrap row
   appears) not determined.
