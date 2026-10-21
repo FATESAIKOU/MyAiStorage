@@ -140,7 +140,7 @@ Mac:
 
 1. 所有原始檔一次 `copy --files-from`（檔名帶 md5，重新匯入時是新檔名，不會蓋掉舊的）。**這一次不乾淨，整輪都不傳 `session.md`**（M4）——讀的一方用 `session.md` 判斷版本完成，所以順序不換。
 2. 所有 `session.md` 一次 `copy --files-from`，**內容是本輪開頭讀到的快照**（寫進 `<state>/batch-<pid>/` 再送）：兩個 copy 之間 entry 被 `stage` 換掉時，送出的仍是與剛送出 raw 同源的那一版，新版本只會讓 H1 留下它（#130）。
-3. 列一次 Drive，用 **Drive 的 md5** 逐筆核對。標了 `.update` 而 Drive 上已經沒有那一筆的，**另存成新的 Session**（L7、N5）——那是別台機器刪掉的，傳回去等於撤銷它的刪除。
+3. 列一次 Drive，用 **Drive 的 md5** 逐筆核對。標了 `.update` 而 Drive 上已經沒有那一筆的，**另存成新的 Session**（L7、N5）——那是別台機器刪掉的，傳回去等於撤銷它的刪除。列表少了某一筆時，先對那個資料夾做一次定向查詢（`list_one`）：查得到、查不動、或查到空，都當不確定，留在 outbox 下一輪再送，只有 rclone 明說資料夾不存在（rc=3／`directory not found`）才另存（#152）。
 4. 核對時把 outbox 那一筆先改名成 `.done-<ULID>` 再比一次（H1）：**只有這一輪送出去、而且 Drive 用 md5 確認過、而且期間沒有新版本插進來**的才離開 outbox並刪掉被取代的舊 raw（一次 `delete --files-from`，`.done-` 的交錯見 R1、N6、N7）。上傳期間又編輯過的會以同一個 ULID 留在 outbox，下一輪再送——背景的迴圈比的是**版本**（session.md 的 md5）而不是 ULID（P2），否則會誤判成「沒東西在等」而丟下。
 
 **push 是唯一的例外**：它的契約是「回來時那幾筆在 Drive 上」，所以拿同一把鎖、等自己的 id 離開 outbox 才回報成功（N2）；等待期間每 10 秒說一次自己在等什麼。

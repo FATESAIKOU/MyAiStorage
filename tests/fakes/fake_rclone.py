@@ -10,6 +10,17 @@ $FAKE_REMOTE/../stdin.log: `/dev/null` when the caller opened it on the void,
 `fifo` when it inherited one (a pipe the test is holding open, so a child that
 tried to read would block), `closed`, or `other` (a terminal, a file).
 
+FAKE_RCLONE_OMIT=<name>[,<name>]: the whole `lsjson -R` listing leaves those
+folders (and everything under them) out, while a directed `lsjson` on the folder
+still sees it - a Drive listing that silently lost a folder (#152).
+FAKE_RCLONE_OMIT_FROM=<n> starts leaving them out at the Nth whole listing, so a
+test can break the re-check and leave the first check intact (default 1).
+
+FAKE_RCLONE_NOT_FOUND_RC=3 makes an `lsjson` on a folder that is not there exit
+with the status a real rclone uses for it. The message then carries no
+"directory not found" (the default rc=1 keeps those words for older tests), so a
+caller can only tell this apart from a failed look by the returncode.
+
 FAKE_RCLONE_PURGE_AFTER=<file>: another machine deletes a folder *now*. The file
 holds {"after": <needle>, "purge": <path under the folder id>}. The first call
 matching the needle (matched the way FAKE_RCLONE_FAIL matches, listing included)
@@ -31,9 +42,9 @@ remote = Path(os.environ["FAKE_REMOTE"])
 log = remote.parent / "calls.log"
 
 
-def fail(msg):
+def fail(msg, rc=1):
     print(msg, file=sys.stderr)
-    sys.exit(1)
+    sys.exit(rc)
 
 
 if os.environ.get("FAKE_RCLONE_DELAY"):     # let a test watch a slow upload happen
@@ -136,11 +147,33 @@ if cmd == "mkdir":
 elif cmd == "lsjson":
     base = resolve(params[0])
     if not base.exists():
+        # #152: a real rclone exits 3 for a folder that is not there. The default
+        # stays rc=1 + the words older tests match; with the switch the message says
+        # "object not found", so only the returncode tells it from a failed look.
+        if os.environ.get("FAKE_RCLONE_NOT_FOUND_RC") == "3":
+            fail("error listing: object not found", rc=3)
         fail("error listing: directory not found")
     recursive = "-R" in params
+    # #152: a whole listing that silently leaves a folder out, while the folder itself
+    # is still there - the Drive error the directed look exists for. Comma-separated
+    # names, and only in the recursive listing: `lsjson gdrive:sessions/<ulid>` still
+    # sees the folder, which is what makes it a directed look.
+    omit = {name for name in os.environ.get("FAKE_RCLONE_OMIT", "").split(",") if name}
+    if omit and recursive:
+        # FAKE_RCLONE_OMIT_FROM=N: leave it out only from the Nth whole listing on, so
+        # a test can break the second (re-check) listing and leave the first intact.
+        nth = int(os.environ.get("FAKE_RCLONE_OMIT_FROM", "1"))
+        counter = remote.parent / "listings.count"
+        calls = int(counter.read_text()) + 1 if counter.exists() else 1
+        counter.write_text(str(calls))
+        if calls < nth:
+            omit = set()
     out = []
     items = base.rglob("*") if recursive else base.iterdir()
     for p in sorted(items):
+        rel = p.relative_to(base)
+        if omit and rel.parts[0] in omit:
+            continue
         if "--dirs-only" in params and not p.is_dir():
             continue
         if "--files-only" in params and not p.is_file():
