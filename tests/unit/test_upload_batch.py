@@ -1427,3 +1427,189 @@ def test_a_crlf_session_md_still_parses_like_it_did_with_read_text(env):
     path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
     hdr = store.read_entry(folder)
     assert h.agora_of(hdr)["raw"]["file"], "the header parsed and names its raw"
+
+
+# --- #152: a listing that lost a folder is not proof that it is gone ----------------
+
+
+def _update_on_drive(env, paths, title="改過了"):
+    """X confirmed on Drive, then an edit of X waiting in the outbox (`.update`)."""
+    ulid = _stage(paths, "原本的")
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    folder = store.stage(paths, _kept_header(ulid, title), f"## user\n{title}\n", b'{"v": 2}')
+    store.remember(paths, folder)
+    store.mark_update(folder)
+    return ulid
+
+
+def _session_folder_names(env) -> list[str]:
+    return sorted(p.name for p in (env / "agora" / "sessions").iterdir() if p.is_dir())
+
+
+def test_a_listing_that_misses_a_live_update_waits_instead_of_rescuing(env, monkeypatch):
+    """#152: the existence check decides from one listing. A Drive error had left a
+    folder out of it (twice for real), and the edit was saved as a new session while X
+    was still on Drive - two continues diverging. The directed look says X is there,
+    so the entry waits for a round whose listing works, and X keeps its id."""
+    paths = store.Paths.from_env()
+    ulid = _update_on_drive(env, paths)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT", ulid)
+    said: list[str] = []
+
+    assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == [ulid]
+
+    assert ulid in store.outbox_ulids(paths)
+    assert _session_folder_names(env) == [ulid], "列表出錯不該另存成新的 Session"
+    assert any("列表裡沒有，但直接查還在" in s for s in said), said
+
+    monkeypatch.delenv("FAKE_RCLONE_OMIT")
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    assert ulid not in store.outbox_ulids(paths)
+    assert "改過了" in (env / "agora" / "sessions" / ulid / "session.md").read_text(
+        encoding="utf-8")
+
+
+def test_a_recheck_that_misses_a_live_update_waits_instead_of_rescuing(env, monkeypatch):
+    """#152's second check, right before the copies: the first listing saw X, the
+    re-check silently lost it. It must not rescue X either - the folder is still there,
+    and the next round sends the same id."""
+    paths = store.Paths.from_env()
+    ulid = _update_on_drive(env, paths)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT", ulid)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT_FROM", "2")     # the re-check, not the first
+    said: list[str] = []
+
+    assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == [ulid]
+
+    assert ulid in store.outbox_ulids(paths)
+    assert _session_folder_names(env) == [ulid], "列表出錯不該另存成新的 Session"
+    assert any("列表裡沒有，但直接查還在" in s for s in said), said
+
+    monkeypatch.delenv("FAKE_RCLONE_OMIT")
+    monkeypatch.delenv("FAKE_RCLONE_OMIT_FROM")
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    assert "改過了" in (env / "agora" / "sessions" / ulid / "session.md").read_text(
+        encoding="utf-8")
+
+
+def test_a_directed_look_that_comes_back_empty_waits(env, monkeypatch):
+    """#152 B1: an empty answer is not proof of a deletion. The same Drive failure that
+    left X out of the whole listing can answer the directed look with `[]` and exit 0;
+    rescuing on that would fork a session that is still on Drive. X waits, and the next
+    round whose listing works sends the same id."""
+    paths = store.Paths.from_env()
+    ulid = _update_on_drive(env, paths)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT", ulid)
+    monkeypatch.setattr(store.Drive, "list_one", lambda self, _ulid: {})
+    said: list[str] = []
+
+    assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == [ulid]
+
+    assert ulid in store.outbox_ulids(paths)
+    assert _session_folder_names(env) == [ulid], "空結果不該另存成新的 Session"
+    assert any("直接查是空的，不能確認被刪" in s for s in said), said
+
+    monkeypatch.delenv("FAKE_RCLONE_OMIT")
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    assert ulid not in store.outbox_ulids(paths)
+    assert "改過了" in (env / "agora" / "sessions" / ulid / "session.md").read_text(
+        encoding="utf-8")
+
+
+def test_a_recheck_whose_directed_look_is_empty_also_waits(env, monkeypatch):
+    """#152 B1 at the second check: the first listing saw X, the re-check lost it, and
+    the directed look is empty too. Still no proof of a deletion - X waits in the
+    outbox and the next round sends the same id."""
+    paths = store.Paths.from_env()
+    ulid = _update_on_drive(env, paths)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT", ulid)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT_FROM", "2")     # the re-check, not the first
+    monkeypatch.setattr(store.Drive, "list_one", lambda self, _ulid: {})
+    said: list[str] = []
+
+    assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == [ulid]
+
+    assert ulid in store.outbox_ulids(paths)
+    assert _session_folder_names(env) == [ulid], "空結果不該另存成新的 Session"
+    assert any("直接查是空的，不能確認被刪" in s for s in said), said
+
+    monkeypatch.delenv("FAKE_RCLONE_OMIT")
+    monkeypatch.delenv("FAKE_RCLONE_OMIT_FROM")
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    assert ulid not in store.outbox_ulids(paths)
+    assert "改過了" in (env / "agora" / "sessions" / ulid / "session.md").read_text(
+        encoding="utf-8")
+
+
+def test_a_failed_directed_look_after_a_missed_listing_waits(env, monkeypatch):
+    """#152 / V6: not seeing it is not seeing it gone. The listing missed X and the
+    directed look failed too; that is not proof of a deletion, so no rescue - X waits
+    in the outbox for a round that can see."""
+    paths = store.Paths.from_env()
+    ulid = _update_on_drive(env, paths)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT", ulid)
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", ulid)         # only `lsjson …/<ulid>` fails
+    said: list[str] = []
+
+    assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == [ulid]
+
+    assert ulid in store.outbox_ulids(paths)
+    assert _session_folder_names(env) == [ulid]
+    assert any("直接查也失敗" in s for s in said), said
+
+
+def test_a_failed_directed_look_at_the_recheck_also_waits(env, monkeypatch):
+    """#152: the same rule at the second check - a failed look there leaves X in the
+    outbox, never rescued on a listing alone."""
+    paths = store.Paths.from_env()
+    ulid = _update_on_drive(env, paths)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT", ulid)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT_FROM", "2")
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", ulid)
+    said: list[str] = []
+
+    assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == [ulid]
+
+    assert ulid in store.outbox_ulids(paths)
+    assert _session_folder_names(env) == [ulid]
+    assert any("直接查也失敗" in s for s in said), said
+
+
+def test_a_listing_that_misses_a_deleted_update_still_rescues(env, monkeypatch):
+    """#152: the directed look is only a second opinion. When it agrees with the
+    listing that X is gone, the existing rescue is exactly what happens."""
+    import shutil
+    paths = store.Paths.from_env()
+    ulid = _update_on_drive(env, paths)
+    shutil.rmtree(env / "agora" / "sessions" / ulid)      # another machine deleted it
+    monkeypatch.setenv("FAKE_RCLONE_OMIT", ulid)          # and the listing lost it too
+    said: list[str] = []
+
+    assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == []
+
+    assert ulid not in store.outbox_ulids(paths)
+    assert _session_folder_names(env) != [ulid], "X 不該被傳回去"
+    (new_id,) = _session_folder_names(env)
+    assert new_id != ulid
+    assert any("已被別台刪除" in s for s in said), said
+
+
+def test_a_directed_look_that_says_rc3_is_a_deletion(env, monkeypatch):
+    """#152: rclone's rc=3 for a missing folder is the proof a missing listing lacks.
+    The fake's rc=3 message has no "directory not found" in it, so only the
+    returncode can tell this from a failed look - an empty answer does not count."""
+    import shutil
+    paths = store.Paths.from_env()
+    ulid = _update_on_drive(env, paths)
+    shutil.rmtree(env / "agora" / "sessions" / ulid)      # another machine deleted it
+    monkeypatch.setenv("FAKE_RCLONE_OMIT", ulid)          # and the listing lost it too
+    monkeypatch.setenv("FAKE_RCLONE_NOT_FOUND_RC", "3")
+    said: list[str] = []
+
+    assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == []
+
+    assert ulid not in store.outbox_ulids(paths)
+    assert _session_folder_names(env) != [ulid], "X 不該被傳回去"
+    (new_id,) = _session_folder_names(env)
+    assert new_id != ulid
+    assert any("已被別台刪除" in s for s in said), said

@@ -41,7 +41,16 @@ UNFINISHED_FILE = "unfinished.json"
 
 
 class StoreError(RuntimeError):
-    """Drive or local storage failed in a way the user has to know about."""
+    """Drive or local storage failed in a way the user has to know about.
+
+    `returncode` is the rclone exit status when a run produced one: a caller that
+    has to tell「資料夾不存在」(rc=3) from other failures reads it instead of
+    parsing the message. It is None for errors that never got a process answer.
+    """
+
+    def __init__(self, message: str, *, returncode: int | None = None):
+        super().__init__(message)
+        self.returncode = returncode
 
 
 def _env_path(var: str, default: str) -> Path:
@@ -211,7 +220,8 @@ class Drive:
         except OSError as e:   # rclone missing or not executable: a Drive problem, not a bad file (R1)
             raise StoreError(f"叫不起 rclone（{self.rclone}）：{e}") from None
         if proc.returncode != 0:
-            raise StoreError(f"rclone {args[0]} 失敗（rc={proc.returncode}）：{proc.stderr.strip()[-300:]}")
+            raise StoreError(f"rclone {args[0]} 失敗（rc={proc.returncode}）：{proc.stderr.strip()[-300:]}",
+                             returncode=proc.returncode)
         return proc.stdout
 
     def folder_id(self) -> str:
@@ -709,6 +719,39 @@ def _listing_with_md5(drive: Drive):
         return e
 
 
+def _really_gone(drive: Drive, ulid: str, say) -> bool:
+    """#152: is an id a whole listing left out really gone from Drive?
+
+    Drive has answered a failed call with an error and then a listing that was simply
+    missing a folder (10-12, 10-21), and the whole listing is all the existence check
+    used to go on. Two long-running continues were saved as new sessions that were
+    still on Drive. So one directed look at that folder decides: files there mean the
+    listing was wrong; rclone saying the folder itself is not there means what it says.
+
+    An empty answer is *not* that saying (#152 B1): the same Drive failure that drops
+    a folder from the whole listing can answer the directed look with `[]` and exit 0.
+    A wrong「gone」forks a still-live session; a wrong「not sure」waits one more round.
+    Not seeing is not seeing it gone (V6): a look that fails leaves the entry for the
+    next round, exactly like a listing that fails.
+    """
+    try:
+        files = drive.list_one(ulid)
+    except StoreError as e:
+        # rclone says rc=3 (and "directory not found") for a folder that is not there;
+        # the fake says the same words with rc=1. Anything else is a failed look.
+        if e.returncode == 3 or "directory not found" in str(e):
+            return True
+        say(f"存在檢查 {ulid}：列表裡沒有，直接查也失敗（{e}），"
+            f"當成看不到，留到下一輪")
+        return False
+    if files:
+        say(f"存在檢查 {ulid}：列表裡沒有，但直接查還在，"
+            f"當成 Drive 列表出錯，留到下一輪")
+        return False
+    say(f"存在檢查 {ulid}：列表裡沒有，直接查是空的，不能確認被刪，留到下一輪")
+    return False
+
+
 def _with_files_from(drive: Drive, names: list[str], where: Path, *args: str) -> None:
     """One rclone call driven by a `--files-from` list, written and cleaned up here."""
     if not names:
@@ -809,7 +852,16 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
             left.extend(updates)
             updates = []
         # None: Drive has no sessions/ at all - not evidence of a deletion (N12)
-        gone = [u for u in updates if remote is not None and u not in remote]
+        gone = []
+        for ulid in (u for u in updates if remote is not None and u not in remote):
+            if not _really_gone(drive, ulid, say):
+                # The listing missed it or the look failed. Do not send it from a list
+                # we know is wrong, and do not rescue it: it waits for the next round.
+                entries.pop(ulid, None)
+                if (paths.outbox / ulid).is_dir():
+                    left.append(ulid)
+                continue
+            gone.append(ulid)
         rescued = {}
         for ulid in gone:
             say(f"存在檢查 {ulid}：不在了")
@@ -846,6 +898,13 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         elif isinstance(again, dict):
             for ulid in [u for u in updates if u in entries]:
                 if ulid not in again:
+                    if not _really_gone(drive, ulid, say):
+                        # Same rule as the first check (#152): one listing missing an
+                        # id is not proof, and a failed look is not either. It waits.
+                        entries.pop(ulid, None)
+                        if (paths.outbox / ulid).is_dir():
+                            left.append(ulid)
+                        continue
                     say(f"存在檢查 {ulid}：不在了")
                     new_id = _rescue_deleted(paths, paths.outbox / ulid, ulid, say, notices)
                     entries.pop(ulid, None)
