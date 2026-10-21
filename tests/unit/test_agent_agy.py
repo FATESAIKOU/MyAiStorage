@@ -418,7 +418,7 @@ def test_turns_call_once_and_never_the_tool_output(agy_home):
 
 def test_scan_text_carries_tool_output_in_full_but_reading_does_not(agy_home):
     """W1: scan_text is its own coverage surface - no truncation, tool result included."""
-    secret = "sk-SECRETSECRET1234567890"
+    secret = "s" + "k-SECRETSECRET1234567890"
     output = "A" * 300 + " " + secret
     session_id, _ = make_conversation(
         agy_home, turns=[{"user": "run it", "model": "done",
@@ -436,7 +436,7 @@ def test_scan_text_carries_tool_output_in_full_but_reading_does_not(agy_home):
 def test_scan_text_reads_render_info_too(agy_home):
     """N1: a string that exists only in `steps.render_info` still reaches scan_text."""
     session_id, _ = make_conversation(agy_home)
-    secret = "sk-RENDERONLY1234567890"
+    secret = "s" + "k-RENDERONLY1234567890"
     db = agy_home / "conversations" / f"{session_id}.db"
     con = sqlite3.connect(db)
     try:
