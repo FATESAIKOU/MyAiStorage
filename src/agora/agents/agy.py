@@ -36,7 +36,9 @@ collapses it to one file. The copy is checked before/after with
 `(size, mtime_ns)` and retried when a checkpoint moved the files under it;
 a file that vanished mid-copy is the same race, not an error. Nothing here
 ever opens a file inside `AGORA_AGY_HOME` writable, and every temp directory
-is a `TemporaryDirectory` cleaned on the way out (also on the failing path).
+is a `PrivateTmpDir` (under agora's own state, 0700) cleaned on the way out
+(also on the failing path); a SIGKILL's leftover is swept by the next round,
+continue or export.
 The continue half writes the conversation and the summaries row under
 `$AGORA_AGY_HOME` (restore temp file inside `conversations/`, `os.replace`,
 one summaries insert) and, before replacing a live db, one backup under
@@ -81,11 +83,11 @@ one-way: store → summaries → restore (review W5).
 from __future__ import annotations
 
 import sqlite3
-import tempfile
 from collections.abc import Iterator
 from contextlib import closing
 from pathlib import Path
 
+from agora.private_tmp import PrivateTmpDir
 from agora.store import normalize
 
 from .agy_restore import prepare_continue
@@ -167,7 +169,7 @@ class AgyAgent:
             strings = scan_text(db)
             inner_id = trajectory_id(db)
             summary = summary_for(session_id)
-            tmpdir = tempfile.TemporaryDirectory(prefix="agora-agy-raw-")
+            tmpdir = PrivateTmpDir("agora-agy-raw")
             raw_path = Path(tmpdir.name) / "raw.json"
             md5, size = pack_raw_file(raw_path, db, inner_id, strings)
         return Exported(
@@ -188,7 +190,7 @@ class AgyAgent:
     def turns(self, raw: bytes) -> Turns:
         """The envelope's db, decoded to a temp file and read step by step."""
         document = envelope(raw)
-        with tempfile.TemporaryDirectory(prefix="agora-agy-raw-") as tmp:
+        with PrivateTmpDir("agora-agy-raw") as tmp:
             db = Path(tmp) / "raw.db"
             decode_db(document, db)
             return read_turns(rows(db))[0]

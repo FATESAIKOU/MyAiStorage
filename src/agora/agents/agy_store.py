@@ -29,13 +29,13 @@ import json
 import os
 import shutil
 import sqlite3
-import tempfile
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
 from agora.agents.agy_wire import fields
 from agora.agents.base import AgentError
+from agora.private_tmp import PrivateTmpDir
 
 COPY_TRIES = 3             # a snapshot is retried at most this many times
 
@@ -184,7 +184,7 @@ def snapshot(session_id: str) -> Iterator[Path]:
     db = db_path(session_id)
     if not db.is_file():
         raise AgentError(f"找不到 agy 對話：{session_id}（{db}）")
-    tmpdir = tempfile.TemporaryDirectory(prefix="agora-agy-")
+    tmpdir = PrivateTmpDir("agora-agy")
     try:
         root = Path(tmpdir.name)
         live = copy_stable(db, root)

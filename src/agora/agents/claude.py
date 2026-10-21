@@ -22,7 +22,6 @@ import json
 import os
 import re
 import subprocess
-import tempfile
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -31,6 +30,7 @@ from pathlib import Path, PurePosixPath
 
 from agora.agents.base import (AgentError, Exported, Launch, Listed, NO_REPLY, Turns, agent_cmd,
                                iso_utc, merge_turns, summarize_timeout, tool_line, warn)
+from agora.private_tmp import PrivateTmpDir
 from agora.store import normalize
 
 FORMAT = "claude-jsonl/1"
@@ -458,7 +458,7 @@ def _exported(session_id: str, main: list[str], sidecar: Path,
               *, label: str = "session") -> Exported:
     facts = _scan(main, label)
     aux = _pack_aux(sidecar)
-    tmpdir = tempfile.TemporaryDirectory(prefix="agora-raw-", suffix=".tmp")
+    tmpdir = PrivateTmpDir("agora-raw")
     raw_path = Path(tmpdir.name) / "raw.json"
     md5, size = _pack_raw_file(main, aux, raw_path)
     return Exported(

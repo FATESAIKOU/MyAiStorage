@@ -20,7 +20,6 @@ import os
 import shutil
 import sqlite3
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -28,6 +27,7 @@ import pytest
 from agora import cache, cli, store, tui
 from agora.agents import agy, agy_store, agy_summaries, agy_wire
 from agora.agents.base import AgentError
+from agora.private_tmp import PrivateTmpDir
 from agora import header as h
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "agy"
@@ -209,15 +209,15 @@ def test_snapshot_gives_up_after_three_moves_and_cleans_the_temp_dir(agy_home, m
         stat = Path(src).stat()
         os.utime(src, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
 
-    made: list[tempfile.TemporaryDirectory] = []
+    made: list[PrivateTmpDir] = []
 
-    class Recorder(tempfile.TemporaryDirectory):
+    class Recorder(PrivateTmpDir):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             made.append(self)          # the object, not its path: no GC finalizer may help
 
     monkeypatch.setattr(agy_store.shutil, "copyfile", always_moving)
-    monkeypatch.setattr(agy_store.tempfile, "TemporaryDirectory", Recorder)
+    monkeypatch.setattr(agy_store, "PrivateTmpDir", Recorder)
     with pytest.raises(AgentError, match="3 次"):
         with agy_store.snapshot(session_id):
             pass
@@ -228,14 +228,14 @@ def test_snapshot_gives_up_after_three_moves_and_cleans_the_temp_dir(agy_home, m
 def test_snapshot_success_cleans_the_temp_dir_immediately(agy_home, monkeypatch):
     """m10: cleanup is explicit, not the TemporaryDirectory finalizer on GC."""
     session_id, _ = make_conversation(agy_home)
-    made: list[tempfile.TemporaryDirectory] = []
+    made: list[PrivateTmpDir] = []
 
-    class Recorder(tempfile.TemporaryDirectory):
+    class Recorder(PrivateTmpDir):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             made.append(self)
 
-    monkeypatch.setattr(agy_store.tempfile, "TemporaryDirectory", Recorder)
+    monkeypatch.setattr(agy_store, "PrivateTmpDir", Recorder)
     with agy_store.snapshot(session_id) as path:
         assert path.is_file()
     assert made and all(not Path(obj.name).exists() for obj in made)

@@ -6,6 +6,7 @@ import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve
 
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -440,6 +441,71 @@ def test_stage_fsyncs_the_files_it_writes_and_the_folders_around_them(remote, mo
     assert ("dir", tmp) in seen, "the files, and the names pointing at them, before the swap"
     assert ("dir", paths.outbox) in seen, "and the rename that put them in the outbox"
     assert len(synced) == len(seen), "each of those really reached the disk, not just the call"
+
+
+@pytest.mark.parametrize("raw_as_path", [False, True], ids=["raw-bytes", "raw-file"])
+def test_stage_fsyncs_each_written_file_before_the_swap_and_the_outbox_after_it(
+        remote, monkeypatch, tmp_path, raw_as_path):
+    """#116: the guard the ticket asked for - every fsync, on what, and in which order.
+
+    The test above counts the calls; this one records `os.fstat(fd)` so a call is
+    tied to the file or directory that was open, and interleaves the renames with
+    the fsyncs. Dropping any one fsync, or moving the outbox's fsync before the
+    swap, fails here. Both arms of `_stage_raw` are covered: bytes, and a file the
+    stage streams (the two write the raw with different code).
+    """
+    paths = store.Paths.from_env()
+    events = []
+    real_fsync, real_rename, real_replace = os.fsync, os.rename, os.replace
+
+    def fsync(fd):
+        info = os.fstat(fd)
+        events.append(("fsync", info.st_dev, info.st_ino, stat.S_ISDIR(info.st_mode)))
+        return real_fsync(fd)
+
+    def rename(src, dst, **kwargs):
+        events.append(("rename", str(src), str(dst)))
+        return real_rename(src, dst, **kwargs)
+
+    def replace(src, dst, **kwargs):
+        events.append(("replace", str(src), str(dst)))
+        return real_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "rename", rename)
+    monkeypatch.setattr(os, "replace", replace)
+
+    source = tmp_path / "source.json"
+    source.write_bytes(b'{"x": "private"}')
+    hdr = _header()
+    folder = store.stage(paths, hdr, "## user\nCSV\n", source if raw_as_path else source.read_bytes())
+    raw_name = h.agora_of(hdr)["raw"]["file"]
+    written = {"raw": (folder / raw_name).stat(), "session.md": (folder / "session.md").stat()}
+    directory, outbox = folder.stat(), paths.outbox.stat()
+
+    def synced(info) -> bool:
+        return any(e[:3] == ("fsync", info.st_dev, info.st_ino) for e in events)
+
+    for name, info in written.items():
+        assert synced(info), f"{name} never reached the disk"
+        assert not stat.S_ISDIR(info.st_mode)
+    assert {(e[1], e[2]) for e in events if e[0] == "fsync" and not e[3]} == \
+        {(info.st_dev, info.st_ino) for info in written.values()}, events
+    assert synced(directory) and synced(outbox) and stat.S_ISDIR(directory.st_mode)
+    assert {(e[1], e[2]) for e in events if e[0] == "fsync" and e[3]} == \
+        {(directory.st_dev, directory.st_ino), (outbox.st_dev, outbox.st_ino)}, events
+
+    def first(kind, *, dst=None, info=None):
+        return next(i for i, e in enumerate(events)
+                    if e[0] == kind
+                    and (dst is None or e[2] == str(dst))
+                    and (info is None or (e[1], e[2]) == (info.st_dev, info.st_ino)))
+
+    swap = first("rename", dst=folder)
+    for name, info in written.items():
+        assert first("fsync", info=info) < swap, f"{name} was not fsynced before the swap"
+    assert first("fsync", info=directory) < swap, "the names were not on disk before the swap"
+    assert first("fsync", info=outbox) > swap, "the outbox rename was not made durable after it"
 
 
 def test_rclone_never_inherits_the_terminal_and_never_asks_for_a_password(remote, monkeypatch):
