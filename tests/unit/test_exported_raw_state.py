@@ -1,10 +1,8 @@
 """State rules for the file-backed `Exported` and the round child's SIGTERM exit (B1b-2 review).
 
-Review 低1/低2: `raw` is a lazy property over `raw_file`; the private carriers must not
-take part in equality, and new bytes must not leave an old `raw_md5` behind (the
-write-back skips a version when the md5 matches the last one it wrote). Review 中3: a
-round killed by SIGTERM has to leave through the interpreter's normal exit so the
-export's temp directory is removed.
+Review 低1: `raw` is a lazy, read-only property over `raw_file`, and the private
+carriers must not take part in equality. Review 中3: a round killed by SIGTERM has to
+leave through the interpreter's normal exit so the export's temp directory is removed.
 """
 
 from __future__ import annotations
@@ -44,15 +42,6 @@ def test_equality_ignores_whether_the_raw_was_read_back_yet(tmp_path):
     assert a == b
 
 
-def test_setting_raw_clears_the_file_backed_facts(tmp_path):
-    e = _file_export(tmp_path)
-    old_md5 = e.raw_md5
-    e.raw = b'{"x": 2}'
-    assert e.raw == b'{"x": 2}'
-    assert e.raw_file is None and e.raw_md5 is None and e.raw_size is None
-    assert old_md5 != hashlib.md5(e.raw).hexdigest()
-
-
 def test_the_round_child_turns_sigterm_into_a_normal_exit():
     """`_exit_on_sigterm` is what lets the export's temp directory be removed: in a real
     child, SIGTERM now exits 143 through the finalizers instead of dying at once."""
@@ -79,3 +68,13 @@ def test_the_round_child_turns_sigterm_into_a_normal_exit():
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=10)
+
+
+def test_raw_is_read_only(tmp_path):
+    """#117 review N3: the setter is gone, so `raw` cannot be made to disagree with `raw_md5`."""
+    exported = _file_export(tmp_path)
+    try:
+        exported.raw = b"other"
+    except AttributeError:
+        return
+    raise AssertionError("Exported.raw accepted an assignment")

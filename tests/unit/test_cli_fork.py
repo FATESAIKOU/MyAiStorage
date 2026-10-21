@@ -539,9 +539,11 @@ def test_a_launch_that_does_not_match_what_was_loaded_saves_nothing(env, capsys,
 
     def export(sid):
         exported = original(sid)
-        exported.raw = exported.raw.replace("好的，三個步驟".encode(), "短少一則".encode())
-        exported.message_count -= 1
-        return exported
+        return Exported(session_id=exported.session_id,
+                        raw=exported.raw.replace("好的，三個步驟".encode(), "短少一則".encode()),
+                        dir=exported.dir, title=exported.title,
+                        created_at=exported.created_at, agent_version=exported.agent_version,
+                        message_count=exported.message_count - 1)
 
     monkeypatch.setattr(env, "export", export)
     code, out, err = _fork(capsys, a)

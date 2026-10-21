@@ -1412,16 +1412,22 @@ def _collect_new(run: "_Run", agent: Agent) -> Exported | None:
 #: can legitimately take minutes to stage and upload; this only fires when the
 #: round is truly wedged. `AGORA_ROUND_TIMEOUT`, seconds, like the other two.
 ROUND_TIMEOUT_SECONDS = 1800.0
+ROUND_TIMEOUT_MAX_SECONDS = 7 * 24 * 3600.0   # `communicate` raises OverflowError past ~2.1e6 s (#117)
 
 
 def _round_timeout() -> float:
     """`communicate(timeout=0)` fires at once: a 0 or negative
     `AGORA_ROUND_TIMEOUT` - often typed for "no limit" - would kill every round
-    (review #1). A number that is not a usable deadline answers as the default.
-    The guard is HERE, not in `env_seconds`: the other callers keep their
+    (review #1). `inf` is no deadline either (`communicate` raises OverflowError)
+    and `nan` is not a number at all (ValueError), so both killed every round the
+    same way (#117), and so does any finite number past ~2.1e6 seconds (the C int
+    `selectors` converts to): that is clamped to a week. A number that is not a usable,
+    finite deadline answers as the default. The guard is HERE, not in `env_seconds`: the other callers keep their
     exact reading, zero and all."""
     value = env_seconds("AGORA_ROUND_TIMEOUT", ROUND_TIMEOUT_SECONDS)
-    return ROUND_TIMEOUT_SECONDS if value <= 0 else value
+    if not (math.isfinite(value) and value > 0):
+        return ROUND_TIMEOUT_SECONDS
+    return min(value, ROUND_TIMEOUT_MAX_SECONDS)    # "no limit" typed as 1e10 means "very long", not "kill at 30 min"
 
 
 class RoundChildDead(Exception):

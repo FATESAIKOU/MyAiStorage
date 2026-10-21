@@ -338,6 +338,7 @@ def stage(paths: Paths, header: dict, body: str,
     paths.outbox.mkdir(parents=True, exist_ok=True)
     folder = paths.outbox / ulid
     tmp = paths.outbox / f".tmp-{ulid}"
+    old = paths.outbox / f".old-{ulid}"
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir()
     try:
@@ -365,7 +366,6 @@ def stage(paths: Paths, header: dict, body: str,
         _fsync_dir(tmp)                    # the files and the names pointing at them
         # Swap in whole, so a crash never leaves an outbox entry without session.md
         # (C4): the old entry is renamed aside, the new one moved in, then the old removed (R6).
-        old = paths.outbox / f".old-{ulid}"
         shutil.rmtree(old, ignore_errors=True)
         if folder.exists():
             folder.rename(old)
@@ -377,9 +377,21 @@ def stage(paths: Paths, header: dict, body: str,
         # `_rename_back` while comparing, `restore_done` when the background takes the lock.
         _fsync_dir(paths.outbox)            # the rename itself, and the entry it removed
         return folder
-    except Exception:
+    except BaseException:
         # A failure before the swap left a staging folder; the old entry is untouched,
-        # so the staging folder is only a half-written copy (impl-mem B1b-2).
+        # so the staging folder is only a half-written copy (impl-mem B1b-2). A
+        # SIGTERM is a BaseException here (`round_child._exit_on_sigterm` turns it
+        # into SystemExit) and can land between the two renames: the old entry is
+        # then aside and `outbox/<ULID>` is gone. Put the old version back before
+        # leaving - the round died, but it must not lose the write-back that was
+        # already there (#117).
+        try:
+            if not folder.is_dir() and old.is_dir():
+                old.rename(folder)
+            elif folder.is_dir():
+                shutil.rmtree(old, ignore_errors=True)
+        except OSError:
+            pass                            # the original failure is the one to report
         shutil.rmtree(tmp, ignore_errors=True)
         raise
 

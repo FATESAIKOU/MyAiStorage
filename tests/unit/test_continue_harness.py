@@ -84,19 +84,18 @@ class Headless:
 
 
 def _recording_wrapper(tmp_path, name, real_fake, log_file):
-    """Wrapper that records argv and env to log_file, then calls the real fake."""
+    """Wrapper that records argv and env to log_file, then becomes the real fake."""
     w = tmp_path / f"wrap_{name}"
     w.write_text(f"""#!/usr/bin/env python3
-import sys, os, json, subprocess
+import sys, os, json
 
 log_path = {repr(str(log_file))}
 with open(log_path, "a") as f:
     f.write(json.dumps({{"name": {repr(name)}, "argv": sys.argv[1:], "env": dict(os.environ)}}) + "\\n")
 
-# Run the real fake with timeout protection
-cmd = [{repr(sys.executable)}, {repr(str(real_fake))}] + sys.argv[1:]
-proc = subprocess.run(cmd, timeout=30.0)
-sys.exit(proc.returncode)
+# Replace this process with the real fake: no middle process that a SIGTERM to the
+# headless harness could kill while the fake keeps running as an orphan (#117).
+os.execv({repr(sys.executable)}, [{repr(sys.executable)}, {repr(str(real_fake))}] + sys.argv[1:])
 """)
     w.chmod(0o755)
     return w
@@ -454,6 +453,18 @@ def test_cli_continue_opencode_headless_with_harness_file(opencode_lab, tmp_path
                     raise
                 time.sleep(0.05)
         assert headless.terminate(timeout=10.0) == 0
+        # #117: the wrapper now `execv`s the fake, so the child the headless CLI
+        # signals IS the server. With a middle process, that one died and the fake
+        # `serve` kept the port - and the session - alive as an orphan.
+        deadline = time.monotonic() + 2.0
+        while True:
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+            except OSError:
+                break                   # nothing is listening: the server went with the CLI
+            if time.monotonic() > deadline:
+                raise AssertionError("fake_opencode serve outlived the headless continue (orphan)")
+            time.sleep(0.05)
     finally:
         if headless.proc.poll() is None:
             headless.proc.kill()

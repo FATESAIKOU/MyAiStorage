@@ -350,6 +350,72 @@ def test_a_version_that_is_not_an_update_carries_no_marker(remote):
     assert store.never_confirmed(paths, ulid)
 
 
+def test_a_sigterm_between_the_two_renames_keeps_the_old_entry(remote, monkeypatch):
+    """#117: the swap is two syscalls - the old entry aside, the new one in. `stage`
+    only caught `Exception`, but a round child turns SIGTERM into `SystemExit`
+    (`round_child._exit_on_sigterm`), so an interrupt in that window used to leave
+    no `outbox/<ULID>` at all: the write-back vanished and both versions sat in
+    `.tmp-<ULID>`/`.old-<ULID>`. The old version has to be back in place, with no
+    staging leftovers, before the exception leaves.
+    """
+    paths = store.Paths.from_env()
+    hdr = _header()
+    ulid = hdr["id"].split(":", 1)[1]
+    old_version = store.stage(paths, hdr, "## user\n舊版\n", b'{"x": 1}')
+    before = (old_version / "session.md").read_text(encoding="utf-8")
+    old_raw = h.agora_of(hdr)["raw"]["file"]
+    old_raw_bytes = (old_version / old_raw).read_bytes()
+
+    real_rename = Path.rename
+    renames = []
+
+    def sigterm_before_the_swap(folder, target):
+        renames.append((folder.name, Path(target).name))
+        if len(renames) == 2:             # folder -> .old is done; this is tmp -> folder
+            raise SystemExit(143)         # what the SIGTERM handler raises
+        return real_rename(folder, target)
+
+    monkeypatch.setattr(Path, "rename", sigterm_before_the_swap)
+    with pytest.raises(SystemExit):
+        store.stage(paths, hdr, "## user\n新版\n", b'{"x": 2}')
+
+    folder = paths.outbox / ulid
+    assert folder.is_dir(), "the outbox entry the round was about to update is still there"
+    assert (folder / "session.md").read_text(encoding="utf-8") == before, "it is the old version"
+    assert (folder / old_raw).read_bytes() == old_raw_bytes, "raw of the old version came with it"
+    assert not (paths.outbox / f".tmp-{ulid}").exists(), "no half-written staging folder left"
+    assert not (paths.outbox / f".old-{ulid}").exists(), "no old version left aside"
+
+
+def test_a_sigterm_after_the_swap_keeps_the_new_entry_and_drops_the_old_aside(remote, monkeypatch):
+    """#117 review N1: the interrupt can also land AFTER the second rename, while the
+    old version is still aside (`.old-<ULID>`). The new version is already in place, so
+    the cleanup keeps it and removes the leftover - not the other way round."""
+    paths = store.Paths.from_env()
+    hdr = _header()
+    ulid = hdr["id"].split(":", 1)[1]
+    store.stage(paths, hdr, "## user\n舊版\n", b'{"x": 1}')
+
+    real_rmtree = store.shutil.rmtree
+    seen_old = []
+
+    def sigterm_while_removing_the_old(path, *args, **kwargs):
+        if Path(path).name == f".old-{ulid}":
+            seen_old.append(path)
+            if len(seen_old) == 2:        # the first is before the swap; this one is after it
+                raise SystemExit(143)
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(store.shutil, "rmtree", sigterm_while_removing_the_old)
+    with pytest.raises(SystemExit):
+        store.stage(paths, hdr, "## user\n新版\n", b'{"x": 2}')
+
+    folder = paths.outbox / ulid
+    assert "新版" in (folder / "session.md").read_text(encoding="utf-8"), "the new version stays"
+    assert not (paths.outbox / f".old-{ulid}").exists(), "the old version aside is removed"
+    assert not (paths.outbox / f".tmp-{ulid}").exists()
+
+
 def test_stage_fsyncs_the_files_it_writes_and_the_folders_around_them(remote, monkeypatch):
     """P17: a periodic write-back stages a session every few minutes for hours on end. A
     power cut used to be able to leave a `session.md` that was short but whole-looking -
