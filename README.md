@@ -28,9 +28,11 @@ uv tool install --editable .     # 之後就有 agora 指令
 
   設完就把那個 JSON 移走或刪掉：值已經在 `rclone.conf`（權限 600）裡了。授權時同意畫面**要選正式版**：testing 模式的 refresh token 只有 7 天。換 client 之後以前建的檔案要自己搬（見 design D5）；換機器只要複製 `rclone.conf` 與 `config.json`。
 
-- `opencode`、`claude`（用到哪個裝哪個）。
+- `opencode`、`claude`、`agy`（Antigravity CLI；用到哪個裝哪個）。
 
-- **指定 agent 執行檔**（#77）：預設就是 PATH 上的 `opencode`／`claude`。`AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD` 可以把它們換成指定的執行檔（值是執行檔路徑或 PATH 上的名稱，例如包裝過、或繞過包裝的 `claude-real`）。所有要跑 agent CLI 的呼叫都經過它：continue 開 agent（互動與 `--headless` 的 `serve`／stream-json）、opencode 的 `session export`／`session import`／`session delete`、merge 的要約（summarize）；沒設定就是用預設名。claude 的 import／export 直接讀寫 `~/.claude` 的檔案，不叫 CLI；agora 也不會為了版本去跑 `--version`（版本從 jsonl／匯出檔讀）。這是正式介面（MyLinuxPool 的 sidecar 用它指定 worker 上的執行檔），不是測試專用的旋鈕；細節見 [docs/design.md](docs/design.md)。
+- **指定 agent 執行檔**（#77）：預設就是 PATH 上的 `opencode`／`claude`／`agy`。`AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD`／`AGORA_AGY_CMD` 可以把它們換成指定的執行檔（值是執行檔路徑或 PATH 上的名稱，例如包裝過、或繞過包裝的 `claude-real`）。所有要跑 agent CLI 的呼叫都經過它：continue 開 agent（互動與 `--headless` 的 `serve`／stream-json）、opencode 的 `session export`／`session import`／`session delete`、merge 的要約（summarize）；沒設定就是用預設名。claude 的 import／export 直接讀寫 `~/.claude` 的檔案，不叫 CLI；agy 的 import／export 直接讀它的 db，也不叫 CLI；agora 也不會為了版本去跑 `--version`（版本從 jsonl／匯出檔讀）。這是正式介面（MyLinuxPool 的 sidecar 用它指定 worker 上的執行檔），不是測試專用的旋鈕；細節見 [docs/design.md](docs/design.md)。
+
+- **agy 的目錄與接續開關**（#26）：`AGORA_AGY_HOME` 換 agy 的資料目錄，預設 `~/.gemini/antigravity-cli`；測試與隔離用。agora 的 agy 轉接器在 agy 的目錄裡只讀寫 `conversations/` 與 `conversation_summaries.db`（覆蓋對話前會另備份到 agora 自己的 `~/.local/state/agora/agy-backups/`），**不讀 agy 的憑證檔**。接續預設拒絕，要設 `AGORA_AGY_CONTINUE=1` 才會寫入真的 agy 目錄；理由與範圍見下面「agy 的範圍與限制」。
 
 第一次執行時，agora 會在 Drive 建一個 `agora/` 資料夾，並把它的 folder ID 記到 `~/.config/agora/config.json`。
 
@@ -90,6 +92,7 @@ pull 略過已經是新的。
 # 初次引入（只上傳指定的那一個 Session）；--external-session-id 可以給多次或用逗號分隔
 agora import session --external-session-id ses_xxxx --agent opencode --header 'title=CSV 規劃'
 agora import session --external-session-id 0f1e…-uuid --agent claude
+agora import session --external-session-id 0f1e…-uuid --agent agy   # agy 的 id 是 conversations/<id>.db 的檔名
 agora import session --external-session-id ses_a,ses_b --external-session-id ses_c --agent opencode
 
 # 找：--filter KEY=VALUE 是全等，KEY~=TEXT 是包含；text 是全文
@@ -134,9 +137,10 @@ agora delete session agora:01K6…, agora:01K7… --yes
 agora delete session agora:01K6… --force --yes    # 連正在接續的一起刪（會先警告）
 
 # pull／push 只吃給的 id（沒有 --all；id 的前綴決定意思，不從形狀猜）
-# agora:X → agora 的 Session；opencode:<id>／claude:<id> → 這台機器上的 agent session
+# agora:X → agora 的 Session；opencode:<id>／claude:<id>／agy:<id> → 這台機器上的 agent session
 agora pull session agora:01K6…                    # 拿下 session.md 與它指到的原始檔
 agora pull session claude:0f1e…-uuid              # 把那個 session 的全文寫進本機快取
+agora pull session agy:0f1e…-uuid                 # 把那個 agy 對話的閱讀版寫進本機快取
 
 # 把給的 agora Session 寫回 Drive：只傳 session.md 與它標頭指到的那一個原始檔
 agora push session agora:01K6… agora:01K7…
@@ -211,6 +215,24 @@ agora show session agora:01K6… --raw
 **0 則訊息**的 session 也被拒，與對話大小無關（兩千到二十萬字元第一個請求就被擋），
 而那個 session 送出的 request 與 opencode 自開 session 的第一輪逐欄位相同（body 一樣，
 只有 session id 不同）。完整的實測、排除過的假設與證據表在 [docs/review/agora-free-85.md](docs/review/agora-free-85.md)。
+
+## agy 的範圍與限制
+
+agy 的對話是一個 SQLite 檔（`~/.gemini/antigravity-cli/conversations/<id>.db`），清單與標題在旁邊的 `conversation_summaries.db`。agora 直接讀這兩個地方，不叫 agy 的 CLI（接續除外）。
+
+- **可以**：`agora import session --external-session-id <agy 對話 id> --agent agy`；互動模式的「未匯入」頁會列出來；搜尋標題與 preview；預覽；**同 agent 的互動接續**。import、列表、搜尋、預覽都是唯讀，不需要 `AGORA_AGY_CONTINUE`。
+- **搜尋的範圍**：agy 自己的摘要表只有標題與 preview，所以「未匯入」頁的內文搜尋只看得到這兩欄，**不搜對話內文**（切到內文模式時狀態列會說明）。匯入之後，閱讀版就在 agora 的索引裡，照一般規則搜。
+- **接續預設拒絕**：`agora continue session <agora id> --agent agy` 會寫入你真的 `~/.gemini/antigravity-cli`（還原 `conversations/` 的對話檔，缺的話補 `conversation_summaries.db` 的一列），而真 agy 能不能接上還沒驗證。**先備份 `~/.gemini/antigravity-cli`**，再設 `AGORA_AGY_CONTINUE=1` 才會執行；沒設時指令在同步與任何寫入之前就拒絕（exit 1），訊息會寫明要備份。來源必須是 agy 匯入的 Session。
+
+  ```bash
+  # 先備份 ~/.gemini/antigravity-cli，再開這個開關
+  AGORA_AGY_CONTINUE=1 agora continue session agora:01K6… --agent agy --dir ~/proj
+  ```
+
+- **不支援**：`--fork`、`--headless`、跨 agent 的接續（agy → opencode／claude 或反過來）、以及 merge（`--agent agy`，或來源是 agy 匯入的 Session）；都在讀 Session 內容或叫 agent 之前拒絕，exit 1。
+- **一輪定期寫回的成本**：agy 的對話是整份 SQLite，有新的內容時，每一輪寫回都整份匯出、base64 後整份上傳，沒有差分；對話大了會慢。差分上傳是另案。
+
+探查與理由見 [docs/agy-storage.md](docs/agy-storage.md)（§12 spike、§13 預設開關）。
 
 ## 檔案放哪
 
