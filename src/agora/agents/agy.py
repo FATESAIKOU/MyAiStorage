@@ -80,7 +80,6 @@ one-way: store → summaries → restore (review W5).
 
 from __future__ import annotations
 
-import os
 import sqlite3
 import tempfile
 from collections.abc import Iterator
@@ -111,21 +110,6 @@ AGY_HEADLESS_LATER = "agy 的 headless 在後續（#26：先支援同 agent 的�
 #: source continued by agy, an agy source continued by claude/opencode);
 #: same-agent only (#26). merge keeps its own `AGY_READ_ONLY`.
 AGY_CROSS_AGENT = "跨 agent 的 continue 在後續（#26）：接續只支援同 agent"
-
-#: The opt-in for the one path that WRITES the user's real agy directory
-#: (the restored conversation file and a `conversation_summaries.db` row).
-#: Whether the real agy loads what we write is not verified yet (docs/agy-storage.md
-#: §12), so a stray click in the TUI must not touch the real index.
-RESTORE_OPT_IN_ENV = "AGORA_AGY_CONTINUE"
-AGY_RESTORE_OFF = ("agy 的接續會寫入你真的 ~/.gemini/antigravity-cli（對話檔與 conversation_summaries.db），"
-                   "而真 agy 能否接上尚未驗證；使用前請先備份 ~/.gemini/antigravity-cli，"
-                   f"再設 {RESTORE_OPT_IN_ENV}=1 重試（#26）")
-
-
-def restore_enabled() -> bool:
-    """True only when the user opted in with `AGORA_AGY_CONTINUE=1`."""
-    return os.environ.get(RESTORE_OPT_IN_ENV) == "1"
-
 
 #: What `search_text` can see. Written into `agora --help` and the TUI's
 #: content-search note, because "no result" must not look like "not there".
@@ -308,8 +292,6 @@ class AgyAgent:
         different conversation, before writing anything (review W2／W3 - the
         guard is against accidents and conflicts, not a malicious writer).
         """
-        if not restore_enabled():
-            raise AgentError(AGY_RESTORE_OFF)
         if headless:
             raise AgentError(AGY_HEADLESS_LATER)
         if harness_file is not None:

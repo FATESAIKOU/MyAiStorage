@@ -39,8 +39,7 @@ import jsonschema
 
 from agora import header as h
 from agora import store
-from agora.agents.agy import (AGY_CROSS_AGENT, AGY_HEADLESS_LATER, AGY_READ_ONLY,
-                              AGY_RESTORE_OFF, restore_enabled)
+from agora.agents.agy import AGY_CROSS_AGENT, AGY_HEADLESS_LATER, AGY_READ_ONLY
 from agora.agents.base import (NO_REPLY, Agent, AgentError, Exported, Launch, merge_turns,
                                reading, reading_of, env_seconds)
 
@@ -2076,8 +2075,6 @@ def cmd_continue(args, paths: store.Paths) -> int:
             raise InputError(AGY_READ_ONLY)
         if bool(getattr(args, "headless", False)):
             raise InputError(AGY_HEADLESS_LATER)
-        if not restore_enabled():     # writes the user's real agy dir; real agy unverified (#26)
-            raise InputError(AGY_RESTORE_OFF)
     harness_path = None
     if getattr(args, "harness_file", None):
         harness_p = Path(args.harness_file)

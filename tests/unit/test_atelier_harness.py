@@ -176,7 +176,7 @@ TOKEN_RES = tuple((label, re.compile(pattern, re.IGNORECASE))
                   for label, pattern in TOKEN_PATTERNS)
 #: Credential environment-variable names. Case-sensitive on the original body:
 #: only ALL-CAPS names name a credential, and this project's own non-credential
-#: names (`AGORA_AGY_CONTINUE`…) carry none of the suffixes. ASCII-limited
+#: names (`AGORA_AGY_HOME`…) carry none of the suffixes. ASCII-limited
 #: boundaries for the same reason as the token shapes (W1): `\b` does not fire
 #: between a Chinese character and the name, on either side.
 ENV_CREDENTIAL_RE = re.compile(
@@ -848,12 +848,12 @@ def test_prose_about_credential_names_is_not_a_name():
     line = "- 憑證的環境變數名不寫進 harness（看環境說明或 brief）。\n"
     found = findings_for(V1_REL, _inject(_v1_text(), line))
     assert not found.errors, "\n".join(found.errors)
-    assert not ENV_CREDENTIAL_RE.search("AGORA_AGY_CONTINUE")
+    assert not ENV_CREDENTIAL_RE.search("AGORA_AGY_HOME")
 
 
 def test_the_projects_own_environment_names_are_not_credentials():
     """`AGORA_…` 是本專案非憑證的環境變數名，不能被當成憑證（#134）。"""
-    line = "- 等待用 AGORA_AGY_CONTINUE 這類環境變數（它們不是憑證）。\n"
+    line = "- 等待用 AGORA_AGY_HOME 這類環境變數（它們不是憑證）。\n"
     assert not findings_for(V1_REL, _inject(_v1_text(), line)).errors
 
 

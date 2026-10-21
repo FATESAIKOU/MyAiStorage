@@ -455,46 +455,53 @@ What this revision does:
   `os.replace`. A file the restore only read (`used_live`, same fingerprint)
   is left alone. No 「有對話檔、沒有 summaries 列」 state is left behind.
 
-**Not verified:** whether the real agy, after a *successful* insert of this
-shape, can actually open the restored conversation - §18 of
-`docs/acceptance.md` has to be re-run by hand. Everything above is either the
-real table's schema or a row agy wrote itself; the load path is still §12's
-open question.
+### 2026-10-21 真機驗收：#26 的接續（#141）
 
-**Unverified - the owner must check these against the real agy once, by
-hand:**
+The hand acceptance run of §18 (`agora continue --agent agy`, real agy 1.4.4,
+real `~/.gemini/antigravity-cli`, the conversation deleted from agy first)
+settled §12's open question:
 
-- **Whether inserting the row really lets the real agy open the restored
-  conversation.** The spike only established that the row is required for
-  the lookup; it did not run a continue after the insert.
-- **Whether a normally exited agy leaves an empty `-wal`/`-shm` behind.** The
-  fingerprint code treats an empty `-wal` as "nothing pending" (that is what
-  SQLite leaves when its last connection closes), but the restore refuses
-  **any** existing sidecar because a live one looks the same. Its message now
-  follows the `-wal`'s size (review W1): an empty one may be deleted by hand
-  while agy is not running; one with bytes holds committed but uncheckpointed
-  turns, so the message says **not** to delete it and to let agy finish (or
-  let sqlite3 open the db once to checkpoint) first. If agy really leaves the
-  empty pair behind on a normal exit, the user would still have to delete the
-  two files before every continue - that would have to be reconsidered, and
-  until then the refusal stands and the message names the path and size.
+- **The row is enough to load the restored conversation.** agy opened the
+  restored conversation and the sentence from the original one was visible.
+  Whether `jetbox_summaries.pb` / `agyhub_summaries.pb` hold an entry for it was
+  not checked.
+- **A normally exited agy leaves no sidecars.** After the continue's agy
+  exited normally, `conversations/` held only `<id>.db` - no `-wal`, no
+  `-shm`. The restore's refusal of *any* sidecar therefore does not get in the
+  way of a normal continue; the refusal and its size-based message (an empty
+  `-wal` may be deleted by hand while agy is not running, one with bytes may
+  not) stay as the guard against a live agy.
+- **agy rewrites the summaries row when it uses it.** The row agora inserts and
+  the row agy leaves behind differ:
+
+  | column | agora's row | after agy used it |
+  | --- | --- | --- |
+  | `status` | `''` (empty string) | `CASCADE_RUN_STATUS_IDLE` |
+  | `raw_summary` | `NULL` | a protobuf blob |
+  | `last_user_input_step_index` | `0` (declared type) | updated to agy's own value (a fresh agy row carried `-1`) |
+  | `step_count`, `last_modified_time`, `last_user_input_time` | computed by agora from the steps and the table's samples | rewritten by agy |
+
+  (In that run the list had no sample row left - the conversation had been
+  deleted first - so `status`, `project_id` and `app_data_dir` took the empty
+  fallback. With rows present they copy the most common value, as above.)
+
+  So the row is an entry ticket, not a format agy keeps: it accepts ours and
+  then writes its own. The adapter never has to imitate agy's protobuf.
+
+**Still unverified after this run:**
+
 - **The shapes an empty table has no sample for.** The real row's datetime
   text and JSON-array `workspace_uris` are now known (above), but a brand-new
   list has no row to copy: the adapter then writes ISO 8601 UTC `Z` and a bare
   `file://<workdir>`, still a guess rather than an observation. How agy parses
-  either, and whether it rewrites the row on load, is unverified as well.
-- **The columns no row samples.** `raw_summary` stays `NULL` (nullable in the
-  real schema; the adapter never invents a protobuf blob), and `source`,
-  `agent_name`, `parent_conversation_id`, `battle_id`,
-  `winning_conversation_id`, `group_id` stay `''` while
-  `last_user_input_step_index`, `nesting_depth`, `not_fully_idle` and `killed`
-  become `0` by declared type - agy itself wrote `-1` for the first of those.
-  Whether agy cares about any of them is unverified.
+  those two fallbacks is unverified; that agy rewrites the row once it uses the
+  conversation is now known (above).
 - **Whether agy renames or rekeys a conversation when it is continued**
   (review #26 finding 7). `collect` treats a vanished db as an out-loud
   error saying the id may have changed; it does not guess a new id.
 - **The `jetbox_summaries.pb` / `agyhub_summaries.pb` indexes** - what they
-  contain, and whether a fresh conversation also needs an entry there.
+  contain is still unknown, and so is whether the restored conversation has an
+  entry there; the 2026-10-21 run did not look.
 
 **Known limit, not fixed: TOCTOU between the `-wal`/`-shm` check and the
 replace.** `restore` checks the sidecars and then `os.replace`s the file; agy
@@ -509,12 +516,14 @@ Everything this repository's tests do is against a temporary fake
 started, no real `conversation_summaries.db` is written, and the user's agy
 home is never read or written by the test suite.
 
-## 13. The opt-in gate (`AGORA_AGY_CONTINUE=1`)
+## 13. The opt-in gate (history: removed 2026-10-21)
 
-`agora continue --agent agy` is **off by default** (PMO, 2026-10-21): it writes the user's real
-`~/.gemini/antigravity-cli` (the restored conversation file and a `conversation_summaries.db` row), and
-whether the real agy loads what we write is **not verified** (§12). Without `AGORA_AGY_CONTINUE=1` the
-command refuses before a sync or any write, and `AgyAgent.start_native` refuses too, with a message that
-says to back up `~/.gemini/antigravity-cli` first. Import, listing, search and preview are read-only and
-are not gated. The gate comes off in a small follow-up ticket once the user has checked a real agy
-continue by hand.
+`agora continue --agent agy` was **off by default** until 2026-10-21: it writes the user's real
+`~/.gemini/antigravity-cli` (the restored conversation file and a `conversation_summaries.db` row),
+and whether the real agy loaded what we write was not verified (§12). Without `AGORA_AGY_CONTINUE=1`
+the command refused before a sync or any write, and `AgyAgent.start_native` refused too.
+
+The hand acceptance run of 2026-10-21 (§12, §18 of `docs/acceptance.md`) verified the load, the
+sidecars and agy's rewrite of the row, so the gate and its environment variable were removed in
+#141: the continue runs like any other agent's now. Import, listing, search and preview were never
+gated.
