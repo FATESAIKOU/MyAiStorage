@@ -18,6 +18,7 @@ from __future__ import annotations
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
 import json
+import math
 import os
 import shutil
 import signal
@@ -136,32 +137,39 @@ def _absent(*needles):
     Only THIS checkout's processes count (#74): the same machine runs other
     projects' tests whose fakes carry the same file names (`fake_opencode*`), and a
     bare-name match took them for orphans of ours. Ours are the ones whose command
-    line names this repo's root (the fakes live under it) or this interpreter (the
-    round child is `<sys.executable> -m agora.round_child`)."""
+    line names this repo's root (the fakes live under it) or this interpreter's own
+    round-child command (`<sys.executable> -m agora.round_child`). Both matches carry
+    a boundary (review #1): `/…/MyAiStorage-team` has `/…/MyAiStorage` as a prefix,
+    and this interpreter runs every other Python process on the machine too."""
     out = subprocess.run(["ps", "-ax", "-o", "pid=,command="],
                          capture_output=True, text=True).stdout
     return [ln.strip() for ln in out.splitlines()
             if "serve --hostname" not in ln
-            and (_REPO_ROOT in ln or sys.executable in ln)
+            and (f"{_REPO_ROOT}{os.sep}" in ln or f"{sys.executable} -m agora." in ln)
             for n in needles if n in ln and "ps -ax" not in ln]
 
 
 def test_absent_counts_only_this_checkouts_processes(tmp_path):
     """#74: another project's `fake_opencode*` on the same machine is not an orphan
-    of ours, while a process that names this repo's fake is."""
+    of ours, while a process that names this repo's fake is. #1: a sibling checkout
+    whose path starts with this root is a different checkout."""
     elsewhere = tmp_path / "other-project" / "fake_opencode_elsewhere.py"
     elsewhere.parent.mkdir()
     elsewhere.write_text("import time\ntime.sleep(60)\n")
     sleeper = "import sys, time; time.sleep(60)"
     theirs = subprocess.Popen(["/usr/bin/env", "python3", str(elsewhere)])   # not this venv
+    sibling_fake = f"{_REPO_ROOT}-team/tests/fakes/fake_opencode_sibling.py"
+    sibling = subprocess.Popen(["/usr/bin/env", "python3", "-c", sleeper, sibling_fake])
     ours = subprocess.Popen(["/usr/bin/env", "python3", "-c", sleeper, str(FAKE_OPENCODE)])
     try:
         time.sleep(0.5)
         assert _absent("fake_opencode_elsewhere") == []
+        assert _absent("fake_opencode_sibling") == [], \
+            "a sibling directory with this root as a prefix is another checkout"
         mine = _absent("fake_opencode.py")
         assert any(str(ours.pid) in ln.split()[0] for ln in mine), mine
     finally:
-        for proc in (theirs, ours):
+        for proc in (theirs, sibling, ours):
             proc.kill()
             proc.wait(timeout=10)
 
@@ -571,17 +579,29 @@ def test_mid_round_sigterm_finishes_the_round_then_the_final_write(lab, capsys):
 # --- fix round #1 (review HIGH): a timeout of 0 would kill every round ---------
 
 @pytest.mark.parametrize("raw,want", [("0", 1800.0), ("-5", 1800.0), ("abc", 1800.0),
-                                      ("0.0", 1800.0), ("7", 7.0)])
+                                      ("0.0", 1800.0), ("7", 7.0),
+                                      ("inf", 1800.0), ("-inf", 1800.0), ("nan", 1800.0),
+                                      ("100000", 100000.0),
+                                      # finite but past what `communicate` can take (#117 review W1):
+                                      # clamped to a week instead of killing every round
+                                      ("2147484", 604800.0), ("1e10", 604800.0), ("1e308", 604800.0)])
 def test_round_timeout_refuses_values_that_would_kill_every_round(monkeypatch, raw, want):
     """`communicate(timeout=0)` fires at once, so `AGORA_ROUND_TIMEOUT=0` - often
     meant as "no limit" - or a negative typo would kill every round (review #1).
-    A value that is not a real deadline falls back to the default HERE; the
-    generic reader `env_seconds` itself stays untouched for its other callers."""
+    `inf` makes `communicate` raise OverflowError and `nan` ValueError, so those
+    killed every round too (#117). A value that is not a real deadline falls back
+    to the default HERE; the generic reader `env_seconds` itself stays untouched
+    for its other callers."""
     from agora.agents import base
     monkeypatch.setenv("AGORA_ROUND_TIMEOUT", raw)
     assert cli._round_timeout() == want
-    assert base.env_seconds("AGORA_ROUND_TIMEOUT", 5.0) == (5.0 if raw == "abc"
-                                                            else float(raw))
+    plain = base.env_seconds("AGORA_ROUND_TIMEOUT", 5.0)
+    if raw == "abc":
+        assert plain == 5.0
+    elif math.isnan(float(raw)):
+        assert math.isnan(plain), "the generic reader still reads the value as given"
+    else:
+        assert plain == float(raw)
 
 
 # --- fix round #2 (review HIGH): a payload with a missing key lands NOTHING -----

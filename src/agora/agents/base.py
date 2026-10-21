@@ -58,8 +58,8 @@ class Exported:
     message_count: int = 0
     model: str | None = None          # the model used most recently
     # Contract on `turns` (review 低1): it caches what the adapter parsed from
-    # `raw` at export time, so it must equal `agent.turns(raw)`. A path that
-    # swaps or rewrites `raw` without reparsing must set `turns` back to None.
+    # `raw` at export time, so it must equal `agent.turns(raw)`. `raw` is read-only
+    # (no setter): whoever builds an `Exported` with other bytes builds it with `turns=None`.
     turns: Turns | None = None        # shared turns carried from the parse (B1a)
     # Private carriers of `raw`: not part of equality or repr (review 低1) - two exports of
     # the same session are the same export whichever has read its file back yet.
@@ -97,15 +97,6 @@ class Exported:
             self._raw = self.raw_file.read_bytes()
             return self._raw
         return b""
-
-    @raw.setter
-    def raw(self, value: bytes) -> None:
-        # New bytes make the file-backed facts stale (review 低2): `_write_one` trusts
-        # `raw_md5`, and an old one would skip a version that has to be written.
-        self._raw = value
-        self.raw_file = None
-        self.raw_md5 = None
-        self.raw_size = None
 
 
 @dataclass
