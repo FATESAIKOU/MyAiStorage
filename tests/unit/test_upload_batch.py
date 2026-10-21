@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -292,12 +293,12 @@ def test_a_failed_raw_upload_sends_no_session_md_at_all(env, monkeypatch, capsys
     ulids = [_stage(paths, f"第 {i} 個") for i in range(3)]
     real_copy = store._copy_batch
 
-    def raws_only(drive, paths_, names):
+    def raws_only(drive, paths_, names, **kw):
         # Only the raws call fails. The session.md call must still be reachable, or
         # this test cannot tell "stopped after the raws" from "everything failed".
         if any("/raw-" in n for n in names):
             raise store.StoreError("原始檔傳不上去")
-        return real_copy(drive, paths_, names)
+        return real_copy(drive, paths_, names, **kw)
 
     monkeypatch.setattr(store, "_copy_batch", raws_only)
     capsys.readouterr()
@@ -851,11 +852,11 @@ def test_a_stage_between_the_list_and_the_raw_copy_does_not_stop_the_batch(env, 
     real_copy = store._copy_batch
     staged = {"done": False}
 
-    def stage_then_copy(drive, paths_, names):
+    def stage_then_copy(drive, paths_, names, **kw):
         if not staged["done"] and any("/raw-" in n for n in names):
             staged["done"] = True
             store.stage(paths_, hdr, "## user\n第二版\n", b'{"v": 2}')   # the next round
-        return real_copy(drive, paths_, names)
+        return real_copy(drive, paths_, names, **kw)
 
     monkeypatch.setattr(store, "_copy_batch", stage_then_copy)
     said: list[str] = []
@@ -930,15 +931,16 @@ def test_replaced_remote_raws_are_deleted_even_when_the_entry_still_holds_them(e
     real_copy = store._copy_batch
     swapped = {"done": False}
 
-    def copy_then_swap(drive, paths_, names):
+    def copy_then_swap(drive, paths_, names, **kw):
         if not swapped["done"]:
             swapped["done"] = True
             # the next version lands while this round's copies are in flight: the
-            # round sends v2's raw with v3's session.md, v3 stays waiting, and the
-            # entry keeps v2's raw for lists built before the swap
+            # round sends v2's raw and v2's session.md (its own snapshot, #130), v3
+            # stays waiting, and the entry keeps v2's raw for lists built before the
+            # swap
             store.stage(paths_, _kept_header(ulid, "第三版"), "## user\n第三版\n", b'{"v": 3}',
                         update=True, kind="continue")
-        return real_copy(drive, paths_, names)
+        return real_copy(drive, paths_, names, **kw)
 
     monkeypatch.setattr(store, "_copy_batch", copy_then_swap)
     left = store.upload_batch(store.Drive(paths), paths)
@@ -1097,3 +1099,331 @@ def test_an_update_deleted_between_the_listing_and_the_copy_is_rescued_not_sent(
     new_hdr, body = h.split_document(text)
     assert [p["id"] for p in h.agora_of(new_hdr)["parents"]] == [f"agora:{ulid}"]
     assert new_hdr["title"] == "改過了" and "改過了" in body, "另存的是這次改過的那一份"
+
+
+# --- #130: the two copies must describe the same version --------------------------
+
+
+def _drive_sessions_consistent(remote: Path) -> None:
+    """Every session.md on the fake Drive names a raw that is in its own folder (#130)."""
+    sessions = remote / "agora" / "sessions"
+    if not sessions.is_dir():
+        return
+    for folder in sorted(p for p in sessions.iterdir() if p.is_dir()):
+        text = (folder / "session.md").read_text(encoding="utf-8")
+        hdr, _ = h.split_document(text)
+        name = (h.agora_of(hdr).get("raw") or {}).get("file")
+        if name:
+            assert (folder / name).is_file(), \
+                f"{folder.name} 的 session.md 指名 {name}，但 Drive 上沒有"
+
+
+def _swap_after_the_raws(monkeypatch, paths, ulid: str) -> dict:
+    """A `stage` in the window between the raws copy and the session.md copy (#130)."""
+    real_copy = store._copy_batch
+    done = {"swapped": False}
+
+    def copy(drive, paths_, names, **kw):
+        got = real_copy(drive, paths_, names, **kw)
+        if not done["swapped"] and any("/raw-" in n for n in names):
+            done["swapped"] = True
+            hdr = store.read_entry(paths.outbox / ulid)
+            store.stage(paths_, hdr, "## user\n第二版\n", b'{"v": 2}')
+            store.remember(paths_, paths.outbox / ulid)
+        return got
+
+    monkeypatch.setattr(store, "_copy_batch", copy)
+    return done
+
+
+def test_a_version_staged_between_the_copies_never_points_at_a_missing_raw(env, monkeypatch):
+    """#130: the raw copy sends v1's raw, the session.md copy used to read the entry
+    again and send v2 - which names a raw that never went up. Drive then has a
+    session.md pointing at a file nobody has. The session.md copy must send the
+    version the raws belonged to; the newer entry stays in the outbox."""
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "第一版")
+    done = _swap_after_the_raws(monkeypatch, paths, ulid)
+    said: list[str] = []
+
+    left = store.upload_batch(store.Drive(paths), paths, warn=said.append)
+
+    assert done["swapped"], "the stage never landed between the copies - the test proved nothing"
+    _drive_sessions_consistent(env)
+    assert left == [ulid]
+    assert ulid in store.outbox_ulids(paths)
+    assert "第二版" in (paths.outbox / ulid / "session.md").read_text(encoding="utf-8")
+    # Drive kept what this round actually sent, and its raw is there too
+    text = (env / "agora" / "sessions" / ulid / "session.md").read_text(encoding="utf-8")
+    hdr, _ = h.split_document(text)
+    assert "第一版" in text
+    assert (env / "agora" / "sessions" / ulid / h.agora_of(hdr)["raw"]["file"]).is_file()
+    assert any(f"{ulid} 上傳期間又有新版本" in s for s in said), said
+
+
+def test_the_round_after_the_swap_sends_the_new_version(env, monkeypatch):
+    """#130, the other half: the version left in the outbox goes up in full next
+    round, and Drive never held a session.md naming a raw it does not have."""
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "第一版")
+    _swap_after_the_raws(monkeypatch, paths, ulid)
+    assert store.upload_batch(store.Drive(paths), paths) == [ulid]       # v2 waits
+
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    _drive_sessions_consistent(env)
+    assert ulid not in store.outbox_ulids(paths)
+    text = (env / "agora" / "sessions" / ulid / "session.md").read_text(encoding="utf-8")
+    hdr, _ = h.split_document(text)
+    assert "第二版" in text
+    name = h.agora_of(hdr)["raw"]["file"]
+    assert store.md5_file(env / "agora" / "sessions" / ulid / name) == \
+        h.agora_of(hdr)["raw"]["md5"]
+
+
+def test_an_unconfirmed_version_says_why_it_stays(env, monkeypatch):
+    """#130: 「留在 outbox」 with no reason sent the user looking at upload.log in vain.
+    A Drive md5 that is not ours is one of the two reasons."""
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "第一版")
+    real_listing = store._listing_with_md5
+
+    def stale(drive):
+        got = real_listing(drive)
+        if isinstance(got, dict) and ulid in got:
+            got[ulid] = {**got[ulid], "session.md": "0" * 32}
+        return got
+
+    monkeypatch.setattr(store, "_listing_with_md5", stale)
+    said: list[str] = []
+
+    assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == [ulid]
+    assert any(f"{ulid} Drive 的 md5 與本機不符（session.md 或 raw），留在 outbox" in s
+               for s in said), said
+
+
+def test_no_batch_snapshot_is_left_behind(env, monkeypatch):
+    """#130: the private copy of session.md lives under <state>/batch-<pid> and goes on
+    the way out - after a good round, a failed one, and an exception."""
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "第一版")
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    assert not list(paths.state.glob("batch-*"))
+
+    real_copy = store._copy_batch
+
+    def fail_sessions(drive, paths_, names, **kw):
+        if any(n.endswith("/session.md") for n in names):
+            raise store.StoreError("session.md 傳不上去")
+        return real_copy(drive, paths_, names, **kw)
+
+    monkeypatch.setattr(store, "_copy_batch", fail_sessions)
+    second = _stage(paths, "第二版")
+    assert store.upload_batch(store.Drive(paths), paths) == [second]
+    assert not list(paths.state.glob("batch-*"))
+
+    def blow_up(drive, paths_, names, **kw):
+        if any(n.endswith("/session.md") for n in names):
+            raise RuntimeError("boom")
+        return real_copy(drive, paths_, names, **kw)
+
+    monkeypatch.setattr(store, "_copy_batch", blow_up)
+    _stage(paths, "第三版")
+    with pytest.raises(RuntimeError):
+        store.upload_batch(store.Drive(paths), paths)
+    assert not list(paths.state.glob("batch-*"))
+
+
+# --- #130 review: W1, W2, N1, N2, N3 ------------------------------------------------
+
+
+def _set_raw(paths, ulid: str, raw) -> None:
+    """Rewrite an entry's header with `raw`, as a hand edit or damage would leave it.
+
+    `stage` always writes `{file, md5, size}`, and `h.validate()` does not look at the
+    shape of `raw`, so `edit --header agora.raw=…` and a damaged file are the two ways
+    a session.md ends up naming its raw some other way.
+    """
+    path = paths.outbox / ulid / "session.md"
+    hdr, body = h.split_document(path.read_text(encoding="utf-8"))
+    hdr["agora"]["raw"] = raw
+    path.write_text(h.dump_document(hdr, body), encoding="utf-8")
+
+
+@pytest.mark.parametrize("raw", ["abc", [1], {"md5": "0" * 32, "size": 12}],
+                         ids=["字串", "list", "缺file"])
+def test_a_header_raw_of_another_shape_is_quarantined_not_uploaded(env, raw, capsys):
+    """W1: the old `read_entry` isolated these three; the #130 snapshot let a string or
+    a list escape as AttributeError (the round died, again on every round) and took a
+    mapping without `file` for "no raw" (Drive got a session.md pointing nowhere). The
+    uploader's single read has to be exactly as strict - and one bad entry is not the
+    round's end (R1), so the other entry still goes up."""
+    paths = store.Paths.from_env()
+    good = _stage(paths, "正常的")
+    bad = _stage(paths, "壞掉的")
+    _set_raw(paths, bad, raw)
+    capsys.readouterr()
+
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    assert (paths.outbox / ".bad" / bad).is_dir()          # kept whole, not deleted
+    assert bad not in store.outbox_ulids(paths)
+    assert (env / "agora" / "sessions" / good / "session.md").is_file()
+    assert not (env / "agora" / "sessions" / bad).exists()
+    assert "壞了" in capsys.readouterr().err
+
+
+def _two_stages_before_the_raws(monkeypatch, paths, ulid: str) -> dict:
+    """Two `stage`s after the entries were read and before the raws copy (#130, W2).
+
+    The second one drops v1's raw (the first stage kept it for a list built a moment
+    ago; the second takes v2's and leaves v1's behind), so this round has no raw for
+    that entry left to send.
+    """
+    real_is_update = store._is_update
+    done = {"swapped": False}
+
+    def twice(folder):
+        got = real_is_update(folder)
+        if not done["swapped"] and folder.name == ulid:
+            done["swapped"] = True
+            for title, raw in (("第二版", b'{"v": 2}'), ("第三版", b'{"v": 3}')):
+                hdr = store.read_entry(paths.outbox / ulid)
+                store.stage(paths, hdr, f"## user\n{title}\n", raw)
+                store.remember(paths, paths.outbox / ulid)
+        return got
+
+    monkeypatch.setattr(store, "_is_update", twice)
+    return done
+
+
+def test_two_stages_before_the_raws_copy_send_nothing_at_all(env, monkeypatch):
+    """W2: v1's session.md must not go up on its own. It names v1's raw, which the
+    second stage dropped and this round therefore never sent; Drive would have a
+    session.md pointing at a file nobody has. Nothing goes up, the entry waits, and the
+    next round sends v3 whole. Removing the `sessions` filter turns this red - the
+    first round then sends v1's session.md and leaves Drive inconsistent."""
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "第一版")
+    done = _two_stages_before_the_raws(monkeypatch, paths, ulid)
+    said: list[str] = []
+
+    assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == [ulid]
+
+    assert done["swapped"], "the stages never landed - the test proved nothing"
+    sessions = env / "agora" / "sessions"
+    assert not (sessions / ulid / "session.md").exists(), "v1's session.md went up alone"
+    assert ulid in store.outbox_ulids(paths)
+    assert "第三版" in (paths.outbox / ulid / "session.md").read_text(encoding="utf-8")
+    _drive_sessions_consistent(env)
+
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    _drive_sessions_consistent(env)
+    assert ulid not in store.outbox_ulids(paths)
+    text = (sessions / ulid / "session.md").read_text(encoding="utf-8")
+    assert "第三版" in text
+    hdr, _ = h.split_document(text)
+    name = h.agora_of(hdr)["raw"]["file"]
+    assert (sessions / ulid / name).is_file()
+    assert store.md5_file(sessions / ulid / name) == h.agora_of(hdr)["raw"]["md5"]
+
+
+def test_a_batch_snapshot_left_by_a_dead_run_is_cleared(env):
+    """N1: a run killed before its cleanup leaves <state>/batch-<pid> - copies of
+    session.md - behind for good. Whoever holds upload.lock is the only writer, so a
+    round clears every batch-* and touches nothing else in state/."""
+    paths = store.Paths.from_env()
+    stale = paths.state / "batch-99999" / "01M5STALE"
+    stale.mkdir(parents=True)
+    (stale / "session.md").write_text("---\n", encoding="utf-8")
+    listing = paths.state / ".files-from-keep.txt"
+    listing.write_text("x\n", encoding="utf-8")
+    notices = paths.state / "notices"
+    notices.write_text("keep me\n", encoding="utf-8")
+    # neighbours whose names only look a bit like it (review N1): none of them may go
+    neighbours = [paths.state / "mybatch-1", paths.state / "xbatch-2", paths.state / "batchfoo",
+                  paths.state / "agy-backups"]
+    for neighbour in neighbours:
+        neighbour.mkdir()
+        (neighbour / "keep").write_text("x", encoding="utf-8")
+    file_neighbour = paths.state / "batch-notes.txt"       # a FILE with the prefix is not a snapshot dir
+    file_neighbour.write_text("keep me too\n", encoding="utf-8")
+    ulid = _stage(paths, "第一版")
+
+    assert store.upload_batch(store.Drive(paths), paths) == []
+
+    assert not (paths.state / "batch-99999").exists()
+    assert not [p for p in paths.state.glob("batch-*") if p.is_dir()]
+    assert listing.is_file() and notices.is_file() and file_neighbour.is_file()
+    assert all((n / "keep").is_file() for n in neighbours), "only batch-* directories are cleared"
+    assert (env / "agora" / "sessions" / ulid / "session.md").is_file()
+
+
+def test_a_snapshot_that_cannot_be_written_leaves_every_entry_for_the_next_round(
+        env, monkeypatch):
+    """N2: a full disk while writing the snapshot is a failed round, not a crash - like
+    every other send failure: say it, keep the entries, no batch-* left, and no
+    session.md this round (the raws that already went up are harmless on their own)."""
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "第一版")
+    real_write = store._write_file
+
+    def no_room(path, data):
+        if any(part.startswith("batch-") for part in Path(path).parts):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_write(path, data)
+
+    monkeypatch.setattr(store, "_write_file", no_room)
+    said: list[str] = []
+
+    assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == [ulid]
+    assert ulid in store.outbox_ulids(paths)
+    assert not list(paths.state.glob("batch-*"))
+    assert not (env / "agora" / "sessions" / ulid / "session.md").exists()
+    assert any("快照寫不進 state" in s for s in said), said
+
+
+def test_an_entry_that_cannot_be_moved_aside_says_what_we_know(env, monkeypatch):
+    """N3: the rename into `.done-` can fail for permissions too, so the line may not
+    claim a newer version replaced it - only that this round could not confirm it."""
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "第一版")
+    real_rename = Path.rename
+
+    def refuse(self, target):
+        if Path(target).name == f".done-{ulid}":
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_rename(self, Path(target))
+
+    monkeypatch.setattr(Path, "rename", refuse)
+    said: list[str] = []
+
+    assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == [ulid]
+    assert ulid in store.outbox_ulids(paths)
+    assert said[-1] == f"{ulid} 這一輪沒能確認（可能是新版本取代了它），留在 outbox 下一輪再送", said
+    assert (env / "agora" / "sessions" / ulid / "session.md").is_file()
+
+
+def test_a_round_with_no_sessions_folder_says_that_is_why(env, monkeypatch):
+    """N3: the very first session has no sessions/ on Drive to land in, and when that
+    is why nothing was sent the entry must not just sit there without a reason."""
+    paths = store.Paths.from_env()
+    ulid = _stage(paths, "第一版")
+    _two_stages_before_the_raws(monkeypatch, paths, ulid)
+    said: list[str] = []
+
+    assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == [ulid]
+    assert not (env / "agora" / "sessions").exists()
+    assert said == [f"Drive 上還沒有 sessions/，{ulid} 留在 outbox"], said
+
+    after: list[str] = []
+    assert store.upload_batch(store.Drive(paths), paths, warn=after.append) == []
+    assert not any("還沒有 sessions/" in s for s in after), after
+
+
+def test_a_crlf_session_md_still_parses_like_it_did_with_read_text(env):
+    """#130 fix: `read_entry` moved from text mode to bytes; a CRLF header still has to parse."""
+    paths = store.Paths.from_env()
+    folder = store.stage(paths, _header(), "## user\nhi\n", b'{"x": 1}')
+    path = folder / "session.md"
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+    hdr = store.read_entry(folder)
+    assert h.agora_of(hdr)["raw"]["file"], "the header parsed and names its raw"

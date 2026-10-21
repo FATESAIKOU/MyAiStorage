@@ -539,16 +539,46 @@ def _index_outbox(paths: Paths, index: "Index") -> None:
             continue   # e.g. the uploader just put it back or finished with it
 
 
+def _entry_bytes(folder: Path) -> bytes:
+    """One copy of the entry's session.md; HeaderError if it cannot be read.
+
+    The uploader wants the bytes it hashed, the rest of the code wants the header;
+    both read here and parse through `_entry_header`, so the two never disagree about
+    what a readable entry is (review W1).
+    """
+    try:
+        return (folder / "session.md").read_bytes()
+    except OSError as e:
+        raise h.HeaderError(str(e)) from None
+
+
+def _entry_header(folder: Path, data: bytes) -> tuple[dict, str | None]:
+    """The header and the raw it names, from these exact bytes.
+
+    As strict as `read_entry` always was (review W1): a `raw` that is not a mapping, or
+    that has no `file`, is a broken entry - HeaderError, never an AttributeError that
+    escapes `upload_batch` and stops the whole round. The raw it names has to be there
+    too, or the session would go up pointing at a file Drive does not have.
+    """
+    try:
+        # `read_text()` used to turn CRLF/CR into LF before parsing; keep that for the header
+        # (the bytes sent and hashed stay exactly what is in the file).
+        text = data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        hdr, _ = h.split_document(text)
+        raw = h.agora_of(hdr).get("raw")
+        name = None
+        if raw:
+            name = raw["file"]                      # KeyError when it has no file
+            if not (folder / name).is_file():
+                raise h.HeaderError(f"缺少 {name}")
+    except (OSError, UnicodeDecodeError, AttributeError, KeyError, TypeError) as e:
+        raise h.HeaderError(str(e)) from None
+    return hdr, name
+
+
 def read_entry(folder: Path) -> dict:
     """The header of an outbox entry; HeaderError if it is unreadable or incomplete."""
-    try:
-        hdr, _ = h.split_document((folder / "session.md").read_text(encoding="utf-8"))
-        raw = h.agora_of(hdr).get("raw")
-        if raw and not (folder / raw["file"]).is_file():
-            raise h.HeaderError(f"缺少 {raw['file']}")
-    except (OSError, UnicodeDecodeError, KeyError, TypeError) as e:
-        raise h.HeaderError(str(e)) from None
-    return hdr
+    return _entry_header(folder, _entry_bytes(folder))[0]
 
 
 def _upload_checked(drive: Drive, folder: Path, ulid: str, raw: dict,
@@ -691,10 +721,43 @@ def _with_files_from(drive: Drive, names: list[str], where: Path, *args: str) ->
         listing.unlink(missing_ok=True)
 
 
-def _copy_batch(drive: Drive, paths: Paths, names: list[str]) -> None:
-    """One rclone for a whole batch: `copy --files-from --no-traverse` (design M4)."""
-    _with_files_from(drive, names, paths.state, "copy", str(paths.outbox), "gdrive:sessions",
+def _copy_batch(drive: Drive, paths: Paths, names: list[str],
+                source: Path | None = None) -> None:
+    """One rclone for a whole batch: `copy --files-from --no-traverse` (design M4).
+
+    `source` is where the listed names are read from - `paths.outbox` unless this is
+    the session.md step, which sends the snapshot its raws belonged to (#130).
+    """
+    where = source if source is not None else paths.outbox
+    _with_files_from(drive, names, paths.state, "copy", str(where), "gdrive:sessions",
                      "--no-traverse", "--ignore-times")
+
+
+def _write_batch_snapshot(paths: Paths, documents: dict[str, bytes]) -> Path:
+    """This round's session.md files, where `_copy_batch` reads exactly them (#130).
+
+    `upload_batch` takes an entry's header and md5 from one copy of session.md; the
+    outbox folder can be replaced by a `stage` before the session.md copy, and reading
+    it then sent a version naming a raw the raws copy never sent. The bytes go here
+    once, and the session.md copy reads from here instead.
+    """
+    where = paths.state / f"batch-{os.getpid()}"
+    # Every run that died before its cleanup - not just this pid (review N1). The callers
+    # of `upload_batch` all hold `upload.lock`, so whoever is here is the only writer and
+    # nothing under `state/` but these copies may go.
+    paths.state.mkdir(parents=True, exist_ok=True)
+    for stale in paths.state.glob("batch-*"):
+        if stale.is_dir():
+            shutil.rmtree(stale, ignore_errors=True)
+    try:
+        for ulid, data in documents.items():
+            folder = where / ulid
+            folder.mkdir(parents=True)
+            _write_file(folder / "session.md", data)
+    except BaseException:
+        shutil.rmtree(where, ignore_errors=True)
+        raise
+    return where
 
 
 def _delete_batch(drive: Drive, paths: Paths, names: list[str]) -> None:
@@ -722,10 +785,11 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
     say = warn
     left = []
     entries = {}
+    documents = {}          # the session.md bytes each entry's md5s were taken from
     for ulid in sorted(outbox_ulids(paths)):
         folder = paths.outbox / ulid
         try:
-            entries[ulid] = _entry_md5s(folder)
+            entries[ulid], documents[ulid] = _entry_for_batch(folder)
         except (OSError, h.HeaderError):
             quarantine(folder, paths.outbox / ".bad", f"outbox 的 {ulid} 壞了")
             continue
@@ -755,7 +819,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         # foreground `push` ends with the edit in Drive rather than still waiting.
         for ulid, new_id in rescued.items():
             if new_id and new_id not in entries and (paths.outbox / new_id).exists():
-                entries[new_id] = _entry_md5s(paths.outbox / new_id)
+                entries[new_id], documents[new_id] = _entry_for_batch(paths.outbox / new_id)
         # X still in the outbox was not rescued: an edit landed while we were reading it,
         # or we could not read it. Either way it is still waiting - the next round meets
         #「.update 而 Drive 沒有」again - and Y goes up in this one (V1).
@@ -786,7 +850,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
                     new_id = _rescue_deleted(paths, paths.outbox / ulid, ulid, say, notices)
                     entries.pop(ulid, None)
                     if new_id and new_id not in entries and (paths.outbox / new_id).exists():
-                        entries[new_id] = _entry_md5s(paths.outbox / new_id)
+                        entries[new_id], documents[new_id] = _entry_for_batch(paths.outbox / new_id)
                     if (paths.outbox / ulid).is_dir():
                         left.append(ulid)
                 else:
@@ -806,16 +870,36 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
             say(f"原始檔沒傳好，這一輪不傳 session.md：{e}")
             return sorted(set(entries) | set(left))
         say(f"本輪送出的原始檔：{', '.join(sorted({r.split('/', 1)[0] for r in raws}))}")
-    if entries:
+    # #130: session.md comes from the bytes read above, written where rclone reads
+    # exactly that version. Copying the outbox folder again could send a session.md a
+    # `stage` swapped in between the copies - one naming a raw this round never sent.
+    # An entry whose raw was not part of this round waits: its session.md would point
+    # at a raw that is not on Drive either (an entry replaced twice before the raws
+    # copy is the one way that happens).
+    sent_raws = {r.split("/", 1)[0] for r in raws}
+    sessions = [u for u, (_, name, _) in entries.items() if not name or u in sent_raws]
+    if sessions:
         try:
-            _copy_batch(drive, paths, [f"{u}/session.md" for u in entries])
+            batch_dir = _write_batch_snapshot(paths, {u: documents[u] for u in sessions})
+        except OSError as e:
+            # A full disk is not the round's end either (R1, review N2): the raws are up,
+            # every entry stays, and the next round with room sends session.md.
+            say(f"session.md 快照寫不進 state：{e}，這一輪不傳 session.md")
+            return sorted(set(entries) | set(left))
+        try:
+            _copy_batch(drive, paths, [f"{u}/session.md" for u in sessions],
+                        source=batch_dir)
         except StoreError as e:
             say(f"session.md 沒傳好：{e}")
             return sorted(set(entries) | set(left))
-        say(f"本輪送出的 session.md：{', '.join(sorted(entries))}")
+        finally:
+            shutil.rmtree(batch_dir, ignore_errors=True)
+        say(f"本輪送出的 session.md：{', '.join(sorted(sessions))}")
 
     remote = _listing_with_md5(drive)
-    if not isinstance(remote, dict):
+    listed = isinstance(remote, dict)
+    no_sessions_yet = remote is None      # Drive has no sessions/ at all (review N3)
+    if not listed:
         remote = {}           # nothing confirmed, so nothing leaves the outbox
     replaced = []
     for ulid, (sent_md5, _, sent_raw) in entries.items():
@@ -823,6 +907,18 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         files = remote.get(ulid) or {}
         if files.get("session.md") != sent_md5:
             left.append(ulid)     # not confirmed, or changed underneath us: it stays
+            if no_sessions_yet and ulid not in sessions:
+                # The one round where nothing went up because there was nowhere yet:
+                # say so, or the entry just sits there with no reason (review N3).
+                say(f"Drive 上還沒有 sessions/，{ulid} 留在 outbox")
+            elif listed and ulid not in sessions:
+                say(f"{ulid} 上傳期間又有新版本，留在 outbox 下一輪再送")
+            elif listed:
+                now_md5 = _outbox_session_md5(folder)
+                if now_md5 is not None and now_md5 != sent_md5:
+                    say(f"{ulid} 上傳期間又有新版本，留在 outbox 下一輪再送")
+                else:
+                    say(f"{ulid} Drive 的 md5 與本機不符（session.md 或 raw），留在 outbox")
             continue
         if ulid in updates and isinstance(again, dict):
             before = again.get(ulid) or {}
@@ -846,7 +942,8 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         try:
             folder.rename(done)                      # H1: compare what is *now* in there
         except OSError:
-            left.append(ulid)                       # a stage took it; the next round sees it
+            left.append(ulid)                       # it may be gone, or a stage took it
+            say(f"{ulid} 這一輪沒能確認（可能是新版本取代了它），留在 outbox 下一輪再送")
             continue
         try:
             now_md5, now_raw_name, now_raw = _entry_md5s(done)
@@ -858,6 +955,10 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         if now_md5 != sent_md5 or (sent_raw and files.get(now_raw_name) != sent_raw):
             _put_back(done, folder)              # a newer version: it stays for the next round
             left.append(ulid)
+            if now_md5 != sent_md5:
+                say(f"{ulid} 上傳期間又有新版本，留在 outbox 下一輪再送")
+            else:
+                say(f"{ulid} Drive 的 md5 與本機不符（session.md 或 raw），留在 outbox")
             continue
         if folder.exists():
             # R1: the edit landed after we renamed our copy aside. What we sent is on
@@ -865,6 +966,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
             # is a newer version, so this ULID is still waiting either way.
             shutil.rmtree(done, ignore_errors=True)
             left.append(ulid)
+            say(f"{ulid} 上傳期間又有新版本，留在 outbox 下一輪再送")
             continue
         for old_raw in _replaced_raws(done, now_raw_name, files):
             replaced.append(f"{ulid}/{old_raw}")
@@ -965,11 +1067,36 @@ def take_notices(paths: Paths) -> list[str]:
     return lines
 
 
+def _entry_snapshot(folder: Path) -> tuple[str, str | None, bytes]:
+    """session.md's md5, the raw it names, and its own bytes - all from one read.
+
+    The uploader sends the bytes it hashed; reading session.md twice let a `stage` in
+    between give the md5 of one version and the header of another (#130). The header
+    is checked by `_entry_header`, the same one `read_entry` uses (review W1).
+    """
+    data = _entry_bytes(folder)
+    _, name = _entry_header(folder, data)
+    return hashlib.md5(data).hexdigest(), name, data
+
+
+def _entry_for_batch(folder: Path) -> tuple[tuple[str, str | None, str | None], bytes]:
+    """The entry as this round reads it, and the session.md bytes those md5s describe."""
+    session_md5, name, data = _entry_snapshot(folder)
+    return (session_md5, name, md5_file(folder / name) if name else None), data
+
+
+def _outbox_session_md5(folder: Path) -> str | None:
+    """session.md's md5 right now, or None when it cannot be read (it may be gone)."""
+    try:
+        return hashlib.md5((folder / "session.md").read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
 def _entry_md5s(folder: Path) -> tuple[str, str | None, str | None]:
     """(session.md md5, the raw's file name and md5 - both None when there is no raw)."""
-    name = (h.agora_of(read_entry(folder)).get("raw") or {}).get("file")
-    got = md5_file(folder / name) if name else None
-    return md5_file(folder / "session.md"), name, got
+    session_md5, name, _ = _entry_snapshot(folder)
+    return session_md5, name, md5_file(folder / name) if name else None
 
 
 
