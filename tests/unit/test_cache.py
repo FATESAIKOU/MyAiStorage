@@ -19,9 +19,11 @@ import threading
 import pytest
 
 from agora import cache, store
-from agora.agents.base import Exported, Listed
+from agora.agents.base import Exported, Listed, reading
 
 FAKE_RCLONE = Path(__file__).resolve().parent.parent / "fakes" / "fake_rclone.py"
+CLAUDE_FIX = Path(__file__).resolve().parent.parent / "fixtures" / "claude"
+CLAUDE_SID = "11111111-2222-4333-8444-555555555555"
 
 
 class Agent:
@@ -115,6 +117,53 @@ def test_full_text_is_kept_and_reread_only_when_the_session_is_newer():
     agent.texts["s"] = ["問", "答", "又問"]
     assert "又問" in cache.local_reading(paths, agent, "s", "2026-10-03T00:00:00Z") and agent.exports == 2
     assert (paths.reading / "claude" / "s.md").exists()
+
+
+def _claude_agent():
+    """The real claude adapter over a fake session under the isolated HOME (CL4)."""
+    from agora.agents import claude
+    proj = claude.projects_dir() / "-tmp-p"
+    proj.mkdir(parents=True, exist_ok=True)
+    shutil.copy(CLAUDE_FIX / "cl-basic.jsonl", proj / f"{CLAUDE_SID}.jsonl")
+    aux = CLAUDE_FIX / "cl-aux" / CLAUDE_SID
+    if aux.is_dir():
+        shutil.copytree(aux, proj / CLAUDE_SID)
+    return claude.ADAPTER
+
+
+def _watch_raw(monkeypatch):
+    """Every `Exported.raw` access, by session id: the whole-bytes read-back (#118)."""
+    reads, original = [], Exported.raw
+    monkeypatch.setattr(
+        Exported, "raw",
+        property(lambda self: reads.append(self.session_id) or original.fget(self)))
+    return reads
+
+
+def test_filling_the_cache_does_not_read_the_raw_back_when_the_export_carries_turns(monkeypatch):
+    """#118: claude's export already parsed the session, so caching its reading must not
+    pull the whole raw back (it was written to a temp file, fsynced, then read again and
+    parsed a second time). The text stays exactly what `reading` produced."""
+    agent = _claude_agent()
+    expected = reading(agent, agent.export(CLAUDE_SID).raw)      # the old path, as the oracle
+    reads = _watch_raw(monkeypatch)
+
+    text = cache.local_reading(store.Paths.from_env(), agent, CLAUDE_SID)
+
+    assert reads == [], "the turns were already there; nothing had to read the raw back"
+    assert text == expected
+    assert (store.Paths.from_env().reading / "claude" / f"{CLAUDE_SID}.md").read_text(
+        encoding="utf-8") == expected
+
+
+def test_an_export_without_turns_still_parses_its_raw_for_the_cache(monkeypatch):
+    """opencode's export carries no turns: `reading_of` falls back to the raw, exactly as
+    `reading` always did. That read-back is allowed - #118 stops paying for a parse that
+    already happened, it does not forbid `.raw` where it is the only way to a reading."""
+    reads = _watch_raw(monkeypatch)
+    text = cache.local_reading(store.Paths.from_env(), Agent({"s": ["問", "答"]}, name="opencode"), "s")
+    assert reads == ["s"]
+    assert text == "## user\n問\n\n## assistant\n答\n"
 
 
 def test_search_finds_cached_text_whatever_the_width_and_case():

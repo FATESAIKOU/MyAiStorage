@@ -545,12 +545,14 @@ def import_preview(agent, session_id: str, full: bool = False, paths: store.Path
                    updated: str | None = None) -> Preview | None:
     """The last message at once; with `full`, the tail of the reading version, kept in the
     cache (5.10). Same rule as the agora side: read a step, not the whole thing (T6)."""
-    from agora.agents.base import reading
+    from agora.agents.base import reading_of
     try:
         if full:
             if paths is None:                     # no cache to read: the only way is all of it
+                # The export already parsed the session (claude, agy carry the turns);
+                # laying those out beats reading a whole raw back and parsing it again.
                 return Preview(None, "整份對話（閱讀版）",
-                               reading(agent, agent.export(session_id).raw).strip())
+                               reading_of(agent, agent.export(session_id)).strip())
             path = cache.reading_path(paths, agent, session_id)
             if not path.is_file():
                 cache.local_reading(paths, agent, session_id, updated)   # builds it, once
