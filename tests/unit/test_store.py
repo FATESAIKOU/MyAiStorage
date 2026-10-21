@@ -59,7 +59,7 @@ def test_raw_uploaded_before_session_md(remote, monkeypatch):  # U-ST-01, U-ST-0
     batches = []
     real_copy = store._copy_batch
     monkeypatch.setattr(store, "_copy_batch",
-                        lambda d, p, names: (batches.append(list(names)), real_copy(d, p, names))[1])
+                        lambda d, p, names, **kw: (batches.append(list(names)), real_copy(d, p, names, **kw))[1])
     ulid = _save(paths, _header())
     # raws first, once each: two batches, and no file sent twice (D1)
     assert len(batches) == 2, batches
@@ -242,7 +242,7 @@ def test_a_session_without_a_raw_uploads_only_session_md(remote, monkeypatch):  
     batches = []
     real_copy = store._copy_batch
     monkeypatch.setattr(store, "_copy_batch",
-                        lambda d, p, names: (batches.append(list(names)), real_copy(d, p, names))[1])
+                        lambda d, p, names, **kw: (batches.append(list(names)), real_copy(d, p, names, **kw))[1])
     store.upload_batch(store.Drive(paths), paths)
     assert batches == [[f"{ulid}/session.md"]], batches   # one batch, and no raw to send
     assert (remote / "agora" / "sessions" / ulid / "session.md").is_file()
