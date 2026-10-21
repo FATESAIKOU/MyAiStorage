@@ -163,6 +163,12 @@ class AgyAgent:
     # -- the Agent protocol ------------------------------------------------
 
     def export(self, session_id: str) -> Exported:
+        """The session as `agy-conversation/1`, packed by `pack_raw_file`.
+
+        The raw is written straight from the db snapshot (streamed; R1 changed
+        nothing here) and the turns are carried on the export, so the reading
+        version never re-reads the raw. `scan_text` is still O(text) - design K5.
+        """
         with snapshot(session_id) as db:
             _cross_check(db, session_id)   # N3: the check lives at this caller, not in store
             turns, message_count = read_turns(rows(db))

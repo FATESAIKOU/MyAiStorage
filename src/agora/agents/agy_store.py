@@ -307,10 +307,14 @@ def pack_raw_file(path: Path, db: Path, trajectory_id: str | None,
     """Stream the envelope to `path`; return (md5, size) without reading it back.
 
     base64 is written in 3-byte multiples and the db is read chunk by chunk, so
-    the whole raw is never in memory (the same shape claude's `_pack_raw_file`
+    the whole raw is never in memory (the same shape claude's `_stream_raw`
     has). The byte order is fixed, which is what makes two exports of the same
     unchanged snapshot produce the same md5. The parameters deliberately
     mirror the envelope's own field names.
+
+    The remaining O(conversation) bound is `scan_text`: it is a list of the db's
+    text, and `json.dumps(scan_text)` is one string of it (R1: still streaming,
+    this part is not; measured in design K5, left for a later change).
     """
     digest = hashlib.md5()
     size = 0

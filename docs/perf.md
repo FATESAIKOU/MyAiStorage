@@ -125,3 +125,36 @@ listing 裡的值（不存在＝空字串）都沒變，就不再下載、也不
 23 秒比較像「更新 import 的 7 次」而不是「很多卡住的 session」。這次只拿掉重複的那一次；
 上傳順序（raw → session.md）、上傳後的 md5 確認（H1）、更新前的存在檢查（L7）與
 copy 前的再檢查（resurrect）都沒有動。
+
+## R1 匯入量測（草稿；R4 轉正）
+
+2026-10-22，MyAiStorage#154（R1 串流匯入）。腳本 `tests/perf/measure_import_mem.py`，
+全部隔離：假 HOME、`AGORA_CLAUDE_HOME` 指到假 projects、假 rclone（`tests/fakes/fake_rclone.py`）、
+`AGORA_UPLOAD=inline`、`AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`TMPDIR` 在 `/tmp/r1-*`，
+量完立刻刪。`agora import` 跑在**新的子行程**，數字是那個子行程的
+`resource.getrusage(RUSAGE_SELF).ru_maxrss`（不含產生假 session 與量測腳本自己）。
+
+假 session 的形狀：一小段對話＋固定大小（約 0.5 MB 的 body、一行約 1 MB）的 `tool_result`；
+閱讀版（`session.md`）因此只隨輪數長（100→800 MB 是 21.6 KB→167.7 KB），不是隨工具輸出長。
+sidecar 固定 64 KB。
+
+| 大小 | 最長一行 | 峰值 RSS | 匯入秒數 | 閱讀版 | 磁碟（原檔／鏡像／假 Drive） | 上傳 |
+|---|---|---|---|---|---|---|
+| 100.9 MB | 0.51 MB | **35.8 MiB** | 2.30 | 21.6 KB | 100.9／102.0／102.0 MB | 2 檔（raw＋session.md） |
+| 403.5 MB | 0.51 MB | **38.0 MiB** | 6.72 | 84.0 KB | 403.5／407.9／407.9 MB | 2 檔 |
+| 807.5 MB | 0.51 MB | **39.1 MiB** | 16.42 | 167.7 KB | 807.5／816.2／816.2 MB | 2 檔 |
+
+斷言（design I.8／L15）：`peak(800) 39.1 ≦ 1.2 × peak(100) 35.8`（比值 1.09）✔；
+`peak(800) ≦ 256 MiB` ✔。秒數沒有門檻，記下來給 R4 對照。
+
+單行很長（design K14；一行就是那個大小）：
+
+| 一行 | 峰值 RSS |
+|---|---|
+| 1.02 MB | 43.4 MiB |
+| 10.21 MB | 137.8 MiB |
+
+磁碟峰值：一次匯入同時會有原檔＋outbox 的整份 raw＋Drive 的整份 raw，結束後 outbox 已清空、
+鏡像與 Drive 各留一份；800 MB 那一筆結束時是 2.4 GB（推得峰值約 3.2 GB）。R1 還沒有分段
+（`chunks/1` 是 R3），所以 Drive 上仍是一個整份 raw＋`session.md`（2 個檔），不是
+`ceil(main_end/C)+1` 個段；R3 的 K.2 那一條要用 R3 之後的版本量。

@@ -23,7 +23,8 @@ import os
 import re
 import subprocess
 import uuid
-from collections.abc import Iterator
+from array import array
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -207,20 +208,19 @@ def _split_lines(text: str, label: str) -> list[str]:
     return out
 
 
-def _read_lines(path: Path) -> list[str]:
-    """The session's non-blank lines, read one line at a time (B1a).
+def _iter_lines(path: Path) -> Iterator[str]:
+    """The session's non-blank lines, one at a time, never the whole file (B1a).
 
     The file is never held as one string plus its `split("\\n")` copy: each line
-    is appended as it is read. Validation and the one parse per line happen in
-    the single streaming pass `_exported` makes over these strings.
+    is yielded as it is read. Validation, the one parse per line and the packed
+    write all happen in the caller's single pass (`_stream_raw`, design B.2).
     """
-    lines: list[str] = []
     try:
         with path.open(encoding="utf-8") as f:
             for raw in f:
                 line = raw[:-1] if raw.endswith("\n") else raw
                 if line.strip():                 # CL8: skip blank lines
-                    lines.append(line)
+                    yield line
     except UnicodeDecodeError as e:
         # The streaming decoder reports a position inside its read buffer, while
         # HEAD's whole-file read reported a file position (and that position is in
@@ -231,7 +231,15 @@ def _read_lines(path: Path) -> list[str]:
         except UnicodeDecodeError as whole:
             e = whole
         raise AgentError(f"{path.name} 不是 UTF-8：{e}")
-    return lines
+
+
+def _read_lines(path: Path) -> list[str]:
+    """All non-blank lines as a list.
+
+    Not on the export path any more (it streams, `_stream_raw`); measurements and
+    the idle check (`tests/perf`, `tests/integration`) still ask for the lines.
+    """
+    return list(_iter_lines(path))
 
 
 def _parse_all(lines: list[str]) -> list[dict]:
@@ -305,34 +313,37 @@ def _pack_raw(main: list[str], aux: dict) -> bytes:
     return buf.getvalue()
 
 
-def _pack_raw_file(main: list[str], aux: dict, path: Path) -> tuple[str, int]:
-    """Stream the same bytes `_pack_raw` would produce straight to a file.
+#: The envelope's fixed bytes (design B.2); `_stream_raw` writes them as it reads.
+_RAW_HEAD = b'{"format": "claude-jsonl/1", "main": ['
+_AUX_SEP = b'], "aux": '
 
-    The main list stays in memory (B1a already made it the only large list), but
-    the packed raw never becomes a whole in-memory bytes object. The file is
-    fsync'd before the caller sees the path, and the md5/size are computed while
-    writing so the round never has to read it back just to know them.
+
+@dataclass
+class PackedRaw:
+    """What the one streaming pass knows about the raw it wrote (design B.2).
+
+    These are the offsets and digests R3's cursor is built from (`append_from` /
+    `seal_upto`, the three sealed values) and they stay in the adapter: they are
+    not part of `Exported` (design B.2 point 3).
     """
-    digest = hashlib.md5()
-    size = 0
-    with path.open("wb") as f:
-        def write(piece: bytes) -> None:
-            nonlocal size
-            f.write(piece)
-            digest.update(piece)
-            size += len(piece)
 
-        write(b'{"format": "claude-jsonl/1", "main": [')
-        for i, line in enumerate(main):
-            if i:
-                write(b", ")
-            write(json.dumps(line, ensure_ascii=False).encode("utf-8"))
-        write(b'], "aux": ')
-        write(json.dumps(aux, ensure_ascii=False).encode("utf-8"))
-        write(b"}")
-        f.flush()
-        os.fsync(f.fileno())
-    return digest.hexdigest(), size
+    path: Path
+    md5: str                  # md5 of the whole raw file
+    size: int
+    main_end: int             # byte offset where `], "aux": ` starts (tail begins here)
+    main_count: int           # main elements written (the non-blank, valid lines)
+    main_md5: str             # md5 of raw[0:main_end]
+    stable_at: array          # stable_at[n] = offset after n elements; len = main_count + 1
+    _stable_md5: dict[int, str] = field(default_factory=dict, repr=False, compare=False)
+
+    def stable_md5(self, n: int) -> str | None:
+        """md5 of raw[0:stable_at(n)], when this pass captured that boundary.
+
+        The caller names the one boundary it needs (`capture=`); copying an md5
+        state for every element would be one live state per line, and R3 only
+        ever asks about the cursor's own `sealed_line_count`.
+        """
+        return self._stable_md5.get(n)
 
 
 def _unpack_raw(raw: bytes) -> tuple[list[str], dict]:
@@ -409,63 +420,132 @@ def _accumulate(facts: _Facts, o: dict) -> None:
     _take_turn(facts.turns, o)
 
 
-def _scan(main: list[str], label: str) -> _Facts:
-    """The one parse per line: validate, fold into `_Facts`, drop the dict.
+def _stream_raw(path: Path, sidecar: Path, out_path: Path, *,
+                label: str = "session",
+                capture: "Iterable[int] | bool" = ()) -> tuple[_Facts, PackedRaw]:
+    """Read, validate, fold and pack the session in one streaming pass (B.2).
 
-    This is HEAD's `_split_lines` + `_parse_all` + six scans with the same
-    outcomes and no list of parsed objects: a broken line that is not last is an
-    `AgentError` with its non-blank line number, a half-written last line is
-    dropped with a warning, and anything the post-parse scans raised (a
-    valid-JSON non-dict line's first `.get`) is raised after validation has had
-    its say - so a syntax error below it still wins, exactly as before.
+    This is `_read_lines` + `_scan` + `_pack_raw_file` as one loop: each line is
+    read, parsed once, folded into `_Facts` and - once it is known not to be the
+    last one - written to the raw file. Only **one line** is buffered, which is
+    what makes a half-written last line droppable without holding the file: the
+    line being read now proves the buffered one is not last; at EOF the buffered
+    one is decided on its own.
+
+    The observable rules are HEAD's, unchanged:
+      - blank lines are skipped before they are counted, so the "line N" in an
+        error counts non-blank lines only (CL8);
+      - a line that is not JSON and is *not* last is `AgentError` with its
+        non-blank line number; the *last* non-blank line, if it is not JSON, is
+        dropped with a warning (a writer still going, review S10);
+      - a valid-JSON non-dict line is remembered and raised as the same
+        `AttributeError` at the end, after validation has had its say;
+      - a post-parse error from `_accumulate` is kept as the first one and
+        re-raised only after the whole file validated, so a syntax error below
+        it still wins.
+    Nothing is written for a session that fails validation except the partial
+    file in the caller's private temp dir, which the caller removes.
+
+    `capture` names main-element boundaries whose md5 the pass should snapshot
+    (`True` = every boundary, for the dual-run test). `PackedRaw` keeps the
+    offsets and `main_md5` for R3's cursor; `Exported` gets none of it.
     """
     facts = _Facts()
+    digest = hashlib.md5()
+    size = 0
+    offsets = array("q", [0])       # 8 bytes per element, not one Python int each
+    captured: dict[int, str] = {}
+    capture_all = capture is True
+    wanted = set() if capture_all else set(capture)
     non_dict: object = _MISSING
     first_error: Exception | None = None
-    last = len(main) - 1
-    for i, line in enumerate(main):
-        try:
-            o = json.loads(line)
-        except json.JSONDecodeError:
-            if i == last:
+    written = 0
+
+    with out_path.open("wb") as f:
+        def write(piece: bytes) -> None:
+            nonlocal size
+            f.write(piece)
+            digest.update(piece)
+            size += len(piece)
+
+        def emit(line: str, parsed: object) -> None:
+            """Fold one valid line into the facts and write it to the raw."""
+            nonlocal written, non_dict, first_error
+            if not isinstance(parsed, dict):
+                # HEAD's first scan (`created`) called `.get` on every object, so any
+                # non-dict anywhere wins over the later scans' errors.
+                if non_dict is _MISSING:
+                    non_dict = parsed
+            elif first_error is None:
+                try:
+                    _accumulate(facts, parsed)
+                except Exception as e:        # noqa: BLE001 - re-raised after validation
+                    # Drop the traceback: it would keep this line's dict (possibly a
+                    # large tool_result) alive until the end of the file.
+                    first_error = e.with_traceback(None)
+            if written:
+                write(b", ")
+            write(json.dumps(line, ensure_ascii=False).encode("utf-8"))
+            written += 1
+            offsets.append(size)
+            if capture_all or written in wanted:
+                captured[written] = digest.copy().hexdigest()
+
+        if capture_all or 0 in wanted:      # the empty prefix's md5 (R3: sealed at line 0)
+            captured[0] = digest.copy().hexdigest()
+        write(_RAW_HEAD)
+        pending: str | None = None
+        for line in _iter_lines(path):
+            if pending is not None:
+                try:
+                    parsed = json.loads(pending)
+                except json.JSONDecodeError:
+                    # `written` non-blank lines came before this one.
+                    raise AgentError(f"{label} 第 {written + 1} 行解析失敗") from None
+                emit(pending, parsed)
+            pending = line
+        if pending is not None:
+            try:
+                parsed = json.loads(pending)
+            except json.JSONDecodeError:
                 warn(f"警告：{label} 最後一行不完整，已丟掉")
-                main.pop()
-                break
-            raise AgentError(f"{label} 第 {i + 1} 行解析失敗")
-        if not isinstance(o, dict):
-            # HEAD's first scan (`created`) called `.get` on every object, so any
-            # non-dict anywhere wins over the later scans' errors.
-            if non_dict is _MISSING:
-                non_dict = o
-            continue
+            else:
+                emit(pending, parsed)
+        if non_dict is not _MISSING:
+            raise AttributeError(f"'{type(non_dict).__name__}' object has no attribute 'get'")
         if first_error is not None:
-            continue                      # HEAD stopped here; keep validating the rest
-        try:
-            _accumulate(facts, o)
-        except Exception as e:            # noqa: BLE001 - re-raised after validation
-            # Drop the traceback: it would keep this line's dict (possibly a large
-            # tool_result) alive until the end of the file, and only the type and
-            # text of the error are still needed.
-            first_error = e.with_traceback(None)
-    if non_dict is not _MISSING:
-        raise AttributeError(f"'{type(non_dict).__name__}' object has no attribute 'get'")
-    if first_error is not None:
-        raise first_error
-    return facts
+            raise first_error
+        aux = _pack_aux(sidecar)
+        main_end = size
+        main_md5 = digest.copy().hexdigest()
+        write(_AUX_SEP)
+        write(json.dumps(aux, ensure_ascii=False).encode("utf-8"))
+        write(b"}")
+        f.flush()
+        os.fsync(f.fileno())
+
+    packed = PackedRaw(path=out_path, md5=digest.hexdigest(), size=size,
+                       main_end=main_end, main_count=written, main_md5=main_md5,
+                       stable_at=offsets, _stable_md5=captured)
+    return facts, packed
 
 
-def _exported(session_id: str, main: list[str], sidecar: Path,
-              *, label: str = "session") -> Exported:
-    facts = _scan(main, label)
-    aux = _pack_aux(sidecar)
+def _exported(session_id: str, path: Path, sidecar: Path, *,
+              label: str = "session",
+              capture: "Iterable[int] | bool" = ()) -> tuple[Exported, PackedRaw]:
+    """The export and the streaming facts R3's cursor is built from (B.2)."""
     tmpdir = PrivateTmpDir("agora-raw")
     raw_path = Path(tmpdir.name) / "raw.json"
-    md5, size = _pack_raw_file(main, aux, raw_path)
-    return Exported(
+    try:
+        facts, packed = _stream_raw(path, sidecar, raw_path, label=label, capture=capture)
+    except BaseException:
+        tmpdir.cleanup()
+        raise
+    exported = Exported(
         session_id=session_id,
         raw_file=raw_path,
-        raw_md5=md5,
-        raw_size=size,
+        raw_md5=packed.md5,
+        raw_size=packed.size,
         _raw_tmpdir=tmpdir,
         dir=facts.directory,
         title=facts.title,
@@ -475,6 +555,7 @@ def _exported(session_id: str, main: list[str], sidecar: Path,
         model=facts.model,
         turns=facts.turns,
     )
+    return exported, packed
 
 
 def _rewrite_lines(lines: list[str], new_id: str, workdir: str) -> list[str]:
@@ -715,8 +796,9 @@ class ClaudeAgent:
 
     def export(self, session_id: str, hint_dir: str | Path | None = None) -> Exported:
         path = find_jsonl(session_id, hint_dir)
-        main = _read_lines(path)
-        return _exported(session_id, main, path.parent / session_id, label=path.name)
+        exported, _streamed = _exported(session_id, path, path.parent / session_id,
+                                        label=path.name)
+        return exported
 
     def turns(self, raw: bytes) -> Turns:
         main, _aux = _unpack_raw(raw)

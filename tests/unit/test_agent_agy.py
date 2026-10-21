@@ -362,6 +362,9 @@ def test_export_twice_has_the_same_md5_and_keeps_the_db_whole(agy_home):
                                "workspace_uris": '["file:///tmp/agy-fixture-ws"]'}])
     first = agy.ADAPTER.export(session_id)
     second = agy.ADAPTER.export(session_id)
+    # Recorded on the R1 base (985afd7), before the export changed: agy's raw
+    # is streamed either way and may not move by one byte (design B.2, I.6).
+    assert first.raw_md5 == "108d73ecc1164623e98bb30c08c5ad76"
     assert first.raw_md5 == second.raw_md5
     assert first.raw_size == second.raw_size
     assert first.raw_file is not None and second.raw_file != first.raw_file

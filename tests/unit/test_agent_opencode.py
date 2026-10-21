@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
+import hashlib
 import json
 import os
 from contextlib import contextmanager
@@ -85,6 +86,25 @@ def test_export_fills_every_field(fake, workdir):
     # ms -> RFC 3339 UTC (design.md 3.4 wants UTC with a Z)
     assert exported.created_at == "2026-09-24T01:40:00Z"
     assert json.loads(exported.raw)["info"]["id"] == exported.session_id
+
+
+def test_export_is_file_backed_and_carries_its_turns(fake):
+    """R1: the export file is the raw, with no second whole copy in memory.
+
+    The bytes are the ones the old path put in `Exported.raw` (the fake's stdout
+    is the file now), and the turns travel with the export so `reading_of` does
+    not fall back to parsing the raw again.
+    """
+    exported = oc.ADAPTER.export("default")
+    assert exported._raw is None                       # nothing read it back yet
+    assert exported.raw_file is not None and exported.raw_file.is_file()
+    expected = json.dumps(json.loads(raw()), ensure_ascii=False).encode("utf-8")
+    assert exported.raw_file.read_bytes() == expected  # the old `_export_bytes` bytes
+    assert exported.raw_md5 == hashlib.md5(expected).hexdigest()
+    assert exported.raw_size == len(expected)
+    assert exported.turns is not None
+    assert base.reading_of(oc.ADAPTER, exported) == base.reading(oc.ADAPTER, expected)
+    assert exported._raw is None                       # the reading version never read it
 
 
 def test_export_keeps_the_progress_line_off_stdout(fake, workdir, tmp_path):
