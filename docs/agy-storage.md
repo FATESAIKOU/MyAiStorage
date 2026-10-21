@@ -292,8 +292,8 @@ partial steps, no IDE sub-steps, no crash states).
   workspace_uris`, a plausible table name). The real table's name, column
   types, timestamp unit and `workspace_uris` encoding are still unverified;
   the adapter discovers the table by columns and accepts seconds,
-  milliseconds or ISO timestamps rather than assuming one (`agy_store.py`
-  `_summary_table` / `_iso` / `_workspace`).
+  milliseconds or ISO timestamps rather than assuming one (`agy_summaries.py`
+  `summary_table` / `_iso` / `_workspace`).
 - `gen_metadata` row-count semantics (and when the small bootstrap row
   appears) not determined.
 - Status codes other than 3, `step_format` other than 0, and
@@ -363,3 +363,93 @@ about a real agy:
 - **Privacy:** `google_accounts.json` and `antigravity-oauth-token` placed in
   the fake `AGORA_AGY_HOME` are never opened by listing, exporting,
   `last_message` or an import.
+
+## 12. PR2b spike: what agy loads a conversation by (2026-10-21)
+
+The PM ran a real agy once, outside this repository's tests, against a
+hand-made conversation db placed at `conversations/<new-uuid>.db` (the file
+name rule of §1 holds). This is what the spike found, and what it did **not**
+settle:
+
+- **`agy --conversation <new-uuid>` answered `conversation "<id>" not found`
+  and opened an empty new conversation.** The conversation db file alone is
+  not what agy loads a conversation from.
+- The load is keyed by a row in `conversation_summaries.db`:
+  `conversation_id = ?`. With no row, agy does not open the file that is
+  clearly there.
+- The agy executable also carries the strings `jetbox_summaries.pb` and
+  `agyhub_summaries.pb`. So there may be **other indexes** (a hub or a
+  protobuf side list) involved in loading as well. This has not been
+  deciphered and is **unverified**.
+- Therefore the continue implemented in PR2b is **restore the db + insert the
+  summaries row**: `agy_restore.restore` (content adjudication by
+  `(count(*), max(idx))` and the summaries stamp, never mtime; the temp file is
+  `quick_check`ed **before** `os.replace`; a Session that records no
+  `agora.source.session_id`, or a raw naming another conversation than it, is
+  refused - the guard is against **accidents and conflicts** (two writers on
+  one Drive, a raw pasted into the wrong conversation), **not against a
+  malicious writer**, since the header and the raw sit in the same Drive; an
+  overwrite first backs the live db up to agora's own state, atomically and
+  privately: the first backup as `<id>.db` (the user's original agy version,
+  never replaced) and later ones as `<id>.<UTC stamp>.db`, only the newest
+  three of those kept) and `agy_summaries.ensure_summary_row` (only a
+  recognised table, only a missing id, one `BEGIN IMMEDIATE` transaction; it
+  never touches the list's `-wal`/`-shm`).
+  The row's five read columns are `conversation_id`, `title`, `preview`,
+  `step_count`, `last_modified_time`; also written are `workspace_uris` and
+  every other column by its declared type (strings `''`, numbers `0`, blobs
+  `NULL`), with `raw_summary` left `NULL`.
+
+**Unverified - the owner must check these against the real agy once, by
+hand:**
+
+- **Whether inserting the row really lets the real agy open the restored
+  conversation.** The spike only established that the row is required for
+  the lookup; it did not run a continue after the insert.
+- **Whether a normally exited agy leaves an empty `-wal`/`-shm` behind.** The
+  fingerprint code treats an empty `-wal` as "nothing pending" (that is what
+  SQLite leaves when its last connection closes), but the restore refuses
+  **any** existing sidecar because a live one looks the same. Its message now
+  follows the `-wal`'s size (review W1): an empty one may be deleted by hand
+  while agy is not running; one with bytes holds committed but uncheckpointed
+  turns, so the message says **not** to delete it and to let agy finish (or
+  let sqlite3 open the db once to checkpoint) first. If agy really leaves the
+  empty pair behind on a normal exit, the user would still have to delete the
+  two files before every continue - that would have to be reconsidered, and
+  until then the refusal stands and the message names the path and size.
+- **The real format/unit of `last_modified_time`.** The adapter mirrors the
+  shape of the table's own rows (seconds/milliseconds/microseconds/ISO) and
+  uses ISO 8601 UTC `Z` when the table is empty - a shape chosen because
+  nothing is known, not because it was observed.
+- **The real format of `workspace_uris`** (the adapter writes
+  `file://<workdir>`) and of `raw_summary`, `status`, `source`, `project_id`,
+  `agent_name`, `parent_conversation_id`, `group_id` (the adapter leaves
+  them `NULL` / `''` / `0` by declared type).
+- **Whether agy renames or rekeys a conversation when it is continued**
+  (review #26 finding 7). `collect` treats a vanished db as an out-loud
+  error saying the id may have changed; it does not guess a new id.
+- **The `jetbox_summaries.pb` / `agyhub_summaries.pb` indexes** - what they
+  contain, and whether a fresh conversation also needs an entry there.
+
+**Known limit, not fixed: TOCTOU between the `-wal`/`-shm` check and the
+replace.** `restore` checks the sidecars and then `os.replace`s the file; agy
+starting in that window would hold a connection to the inode that was just
+replaced, while a new `-wal` keeps the path. Detecting the agy process
+(`pgrep`/`lsof`) is left for later (cross-platform and false-positive work),
+and no lock exists that agy also takes, so the window can only be narrowed -
+it is not eliminated and this document says so rather than implying safety.
+
+Everything this repository's tests do is against a temporary fake
+`AGORA_AGY_HOME` and the fake CLI in `tests/fakes/fake_agy.py`: no real agy is
+started, no real `conversation_summaries.db` is written, and the user's agy
+home is never read or written by the test suite.
+
+## 13. The opt-in gate (`AGORA_AGY_CONTINUE=1`)
+
+`agora continue --agent agy` is **off by default** (PMO, 2026-10-21): it writes the user's real
+`~/.gemini/antigravity-cli` (the restored conversation file and a `conversation_summaries.db` row), and
+whether the real agy loads what we write is **not verified** (§12). Without `AGORA_AGY_CONTINUE=1` the
+command refuses before a sync or any write, and `AgyAgent.start_native` refuses too, with a message that
+says to back up `~/.gemini/antigravity-cli` first. Import, listing, search and preview are read-only and
+are not gated. The gate comes off in a small follow-up ticket once the user has checked a real agy
+continue by hand.

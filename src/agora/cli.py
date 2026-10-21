@@ -39,7 +39,8 @@ import jsonschema
 
 from agora import header as h
 from agora import store
-from agora.agents.agy import AGY_READ_ONLY
+from agora.agents.agy import (AGY_CROSS_AGENT, AGY_HEADLESS_LATER, AGY_READ_ONLY,
+                              AGY_RESTORE_OFF, restore_enabled)
 from agora.agents.base import (NO_REPLY, Agent, AgentError, Exported, Launch, merge_turns,
                                reading, reading_of, env_seconds)
 
@@ -352,12 +353,12 @@ def _the_id(args) -> str:
 
 
 def _refuse_agy_source(index: store.Index, ids: list[str]) -> None:
-    """Refuse a Session that was imported from agy (#26 PR1, N7).
+    """Refuse a merge whose source includes agy (#26 PR1, N7; PR2b left merge out).
 
-    The first version is read-only in both directions: a cross-agent continue,
-    a merge or a fork whose *source* is agy would have to read that session
-    through agy's `turns()` and hand it to another agent, and that is PR2's
-    scope. The header's source agent is local, so the callers check it before
+    Writing a merge summary *into* a conversation that came from agy would
+    have to read that session through agy's `turns()` and hand it to another
+    agent, and that is later than the same-agent continue PR2b delivered.
+    The header's source agent is local, so the callers check it before
     syncing where the index already knows the id, and again right after the
     sync for an id that was only on Drive - still before any raw fetch or
     model call.
@@ -367,6 +368,30 @@ def _refuse_agy_source(index: store.Index, ids: list[str]) -> None:
         source = h.agora_of(header or {}).get("source") or {}
         if source.get("agent") == "agy":
             raise InputError(AGY_READ_ONLY)
+
+
+def _refuse_cross_agent_source(index: store.Index, ids: list[str],
+                               target_agent: str) -> None:
+    """Refuse a continue whose source agent differs from the target's (#26 PR2b).
+
+    The same-agent continue is PR2b's scope: the source's own raw is handed
+    to the same adapter (`_load_for_launch` keeps `raw = own` there). A
+    cross direction has to convert one agent's conversation into the
+    other's format - both of those are PR3. agy as the target is also
+    refused for a merge source: its raw is arranged markdown, not an agy
+    envelope, so `prepare_continue` would have no conversation to restore.
+    Ids without a header are skipped, so the missing case stays
+    `_refuse_if_gone`'s to report.
+    """
+    for agora_id in ids:
+        header = index.header(_ulid_of(agora_id))
+        if header is None:
+            continue
+        agora = h.agora_of(header)
+        from_agy = (agora.get("source") or {}).get("agent") == "agy"
+        if from_agy != (target_agent == "agy") or (
+                target_agent == "agy" and agora.get("relation") == "merge"):
+            raise InputError(AGY_CROSS_AGENT)
 
 
 # ---------------------------------------------------------------------------
@@ -960,23 +985,32 @@ def _quiet(paths: store.Paths, tag: str):
 
 
 def _fingerprint(record: dict, agent: Agent) -> tuple | None:
-    """A cheap "did the session move" for claude: the jsonl and sidecar sizes and
-    mtimes (design「一次寫回」P6). None when there is nothing cheap to ask - opencode
-    always exports - or when the file cannot be read, in which case the export is the
-    thing that will say so.
+    """A cheap "did the session move" - claude: the jsonl and sidecar sizes and
+    mtimes; agy (#26 PR2b): the conversation db's and `-wal`'s sizes and mtimes, so
+    a turn that only grows the wal still reads as moved and the 35 MB export is not
+    re-run every round (design「一次寫回」P6). None when there is nothing cheap to ask -
+    opencode always exports - or when the file cannot be read, in which case the
+    export is the thing that will say so.
     """
-    if agent.name != "claude":
-        return None
-    from agora.agents import claude
-    try:
-        path = claude.find_jsonl(record.get("agent_session_id") or "", record.get("dir"))
-        main = path.stat()
-        sidecar = path.parent / path.stem
-        extra = tuple(sorted((f.stat().st_size, f.stat().st_mtime_ns)
-                             for f in sidecar.iterdir())) if sidecar.is_dir() else ()
-    except (OSError, AgentError):
-        return None
-    return (main.st_size, main.st_mtime_ns, extra)
+    if agent.name == "claude":
+        from agora.agents import claude
+        try:
+            path = claude.find_jsonl(record.get("agent_session_id") or "", record.get("dir"))
+            main = path.stat()
+            sidecar = path.parent / path.stem
+            extra = tuple(sorted((f.stat().st_size, f.stat().st_mtime_ns)
+                                 for f in sidecar.iterdir())) if sidecar.is_dir() else ()
+        except (OSError, AgentError):
+            return None
+        return (main.st_size, main.st_mtime_ns, extra)
+    if agent.name == "agy":
+        from agora.agents import agy_store
+        try:
+            return agy_store.move_fingerprint(
+                agy_store.db_path(record.get("agent_session_id") or ""))
+        except (OSError, AgentError):
+            return None
+    return None
 
 
 def _this_runs_rescue(hdr: dict, record: dict, target_ulid: str | None = None) -> bool:
@@ -1966,17 +2000,27 @@ def _load_for_launch(paths: store.Paths, state: dict) -> dict:
         raw = own
     # What the non-fork record keeps: the md5 of what was loaded (design P8).
     loaded_md5 = None if fork else store.hashlib.md5(raw).hexdigest()
+    # The Session's own record of where this conversation came from. The one
+    # adapter that restores into the agent's own store says so explicitly
+    # (`restores_in_place = True`, `AgyAgent`): it takes `expected_id`, so a raw
+    # cannot name a different conversation than the one this Session was
+    # imported from (review W3). Every other adapter gets exactly the arguments
+    # it always got; no `inspect.signature` sniffing (review W2).
+    start_kwargs = {}
+    if getattr(agent, "restores_in_place", False) is True:
+        start_kwargs["expected_id"] = src.get("session_id")
     if harness_path is not None:
         if headless:
             launch = agent.start_native(raw, workdir, headless=True, headless_port=headless_port,
-                                        harness_file=harness_path)
+                                        harness_file=harness_path, **start_kwargs)
         else:
-            launch = agent.start_native(raw, workdir, harness_file=harness_path)
+            launch = agent.start_native(raw, workdir, harness_file=harness_path, **start_kwargs)
     else:
         if headless:
-            launch = agent.start_native(raw, workdir, headless=True, headless_port=headless_port)
+            launch = agent.start_native(raw, workdir, headless=True, headless_port=headless_port,
+                                        **start_kwargs)
         else:
-            launch = agent.start_native(raw, workdir)
+            launch = agent.start_native(raw, workdir, **start_kwargs)
     fork_id = fork_title = fork_md5 = None
     saved_fork = None
     if fork:
@@ -2021,13 +2065,19 @@ def _load_for_launch(paths: store.Paths, state: dict) -> dict:
 
 def cmd_continue(args, paths: store.Paths) -> int:
     if not args.agent:
-        raise InputError("continue 要給 --agent opencode|claude（agy 第一版不支援）")
+        raise InputError("continue 要給 --agent opencode|claude|agy")
     agent = load_agent(args.agent)
     if agent.name == "agy":
-        # Every continue flavour (same agent, cross agent, fork) goes through
-        # here: PR1 has no native/start_native/collect, and refusing before the
-        # child fetches the raw is the boundary the interface note asks for.
-        raise InputError(AGY_READ_ONLY)
+        # Same-agent interactive continue is PR2b; the rest of the flavours
+        # still stop here, before a sync or any agent half starts - the
+        # interface note's boundary point is that the refusal is never
+        # mistaken for a bad model answer and retried.
+        if bool(getattr(args, "fork", False)):
+            raise InputError(AGY_READ_ONLY)
+        if bool(getattr(args, "headless", False)):
+            raise InputError(AGY_HEADLESS_LATER)
+        if not restore_enabled():     # writes the user's real agy dir; real agy unverified (#26)
+            raise InputError(AGY_RESTORE_OFF)
     harness_path = None
     if getattr(args, "harness_file", None):
         harness_p = Path(args.harness_file)
@@ -2053,9 +2103,9 @@ def cmd_continue(args, paths: store.Paths) -> int:
         # The server mode needs the caller's port (design D6): sidecar allocates it.
         raise InputError("--headless 的 opencode 要給 --headless-port")
     source_id = _the_id(args)
-    _refuse_agy_source(store.Index(paths), [source_id])   # a local agy source: no sync
+    _refuse_cross_agent_source(store.Index(paths), [source_id], agent.name)  # local: no sync
     index = _sync_for(paths, [source_id])
-    _refuse_agy_source(index, [source_id])                # a source only on Drive
+    _refuse_cross_agent_source(index, [source_id], agent.name)               # only on Drive
     _refuse_if_gone(paths, index, source_id)  # T1 3.3: no agent is opened for it
     parent = _header_for(index, source_id)
     agora = h.agora_of(parent)
@@ -2598,7 +2648,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="import：agent 自己的 session id，可重複或用逗號分隔")
     p.add_argument("--agent", choices=AGENTS,
                    help="import：來源的 agent；merge：誰寫要約；continue：用哪個 agent 接"
-                        "（agy 第一版只支援 import／讀取；全文搜尋只搜標題＋preview，不搜內文）")
+                        "（agy 支援同 agent 的互動接續；fork／headless／跨 agent／merge 為後續；"
+                        "全文搜尋只搜標題＋preview，不搜內文）")
     p.add_argument("--filter", action="append", default=[], help="search：KEY=VALUE（全等）或 KEY~=TEXT（包含）")
     p.add_argument("--header", action="append", default=[], help="KEY=VALUE；KEY 可以用點路徑，VALUE 用 YAML 解析")
     p.add_argument("--header-file", help="YAML 標頭檔，先套用，再套 --header")

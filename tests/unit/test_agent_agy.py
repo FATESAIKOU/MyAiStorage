@@ -1,9 +1,11 @@
-"""The agy adapter (read-only PR1 of #26): snapshot, export, turns, listing.
+"""The agy adapter (#26 PR2b: import, reading, restore and the summaries row).
 
 Every db here is made by `tests/fixtures/agy/make_agy_db.py` inside a temp
 `AGORA_AGY_HOME`; the summary table is built by a helper in this file because
 PR0 never deciphered the real one. Nothing reads the user's agy home, a real
-session, or a credential file.
+session, or a credential file. The continue itself (restore/summaries/
+start_native/collect/boundary allows) lives in test_agy_continue.py; the
+refusals that did not change with PR2b stay here.
 """
 
 from __future__ import annotations
@@ -24,8 +26,8 @@ from pathlib import Path
 import pytest
 
 from agora import cache, cli, store, tui
-from agora.agents import agy, agy_store, agy_wire
-from agora.agents.base import AgentError, Launch
+from agora.agents import agy, agy_store, agy_summaries, agy_wire
+from agora.agents.base import AgentError
 from agora import header as h
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "agy"
@@ -54,9 +56,9 @@ TURNS = [
 @pytest.fixture(autouse=True)
 def fresh_module_caches(monkeypatch):
     """The module's caches and warn-once flags must not leak between tests."""
-    monkeypatch.setattr(agy_store, "_summaries_cache", None)
-    monkeypatch.setattr(agy_store, "_warned_summary_for", False)
-    monkeypatch.setattr(agy_store, "_warned_stamp", False)
+    monkeypatch.setattr(agy_summaries, "_summaries_cache", None)
+    monkeypatch.setattr(agy_summaries, "_warned_summary_for", False)
+    monkeypatch.setattr(agy_summaries, "_warned_stamp", False)
 
 
 @pytest.fixture
@@ -335,13 +337,13 @@ def test_snapshot_gives_up_when_files_keep_vanishing(agy_home, monkeypatch):
     assert len(calls) == 3
 
 
-def test_snapshot_cross_check_only_warns(agy_home, capsys):
+def test_export_cross_check_only_warns(agy_home, capsys):
     session_id, _ = make_conversation(agy_home)
     make_summaries(agy_home, [{"id": session_id, "title": "x",
                                "step_count": count_steps(agy_home, session_id) + 1,
                                "last_modified_time": MUT.EPOCH}])
-    with agy_store.snapshot(session_id) as path:
-        assert path.is_file()
+    exported = agy.ADAPTER.export(session_id)   # N3: the check lives at the caller of snapshot
+    assert exported.raw_file.is_file()
     err = capsys.readouterr().err
     assert "summaries 說" in err and "以快照為準" in err
 
@@ -457,7 +459,7 @@ def test_scan_text_survives_deep_nesting_and_keeps_shallow_strings():
         deep = MUT.enc_msg(2, deep)
     blob += deep
     out: list[str] = []
-    assert agy_wire._scan_strings(blob, out, set()) is None
+    assert agy_store.scan_strings(blob, out, set()) is None
     assert shallow in out
 
 
@@ -507,7 +509,7 @@ def test_a_length_past_the_message_end_is_a_skip_not_a_truncation(agy_home, caps
 
 def test_fields_rejects_a_declared_length_past_the_buffer():
     with pytest.raises(ValueError, match="長度超過訊息"):
-        list(agy_wire._fields(b"\x0a\x05ab"))
+        list(agy_wire.fields(b"\x0a\x05ab"))
 
 
 # ---------------------------------------------------------------------------
@@ -586,7 +588,7 @@ def test_a_non_finite_step_count_does_not_take_the_listing_down(agy_home):
     make_summaries(agy_home, [{"id": session_id, "title": "x", "step_count": float("inf"),
                                "last_modified_time": MUT.EPOCH}])
     assert [item.session_id for item in agy.ADAPTER.list_sessions()] == [session_id]
-    assert agy_store._summary_rows()[0].step_count is None
+    assert agy_summaries.summary_rows()[0].step_count is None
 
 
 @pytest.mark.parametrize("value", [
@@ -597,15 +599,15 @@ def test_a_non_finite_step_count_does_not_take_the_listing_down(agy_home):
     "1767225600",               # numeric string
 ])
 def test_iso_accepts_the_plausible_time_units(value):
-    assert agy_store._iso(value) == "2026-01-01T00:00:00Z"
+    assert agy_summaries._iso(value) == "2026-01-01T00:00:00Z"
 
 
 def test_iso_outside_the_window_is_unknown_and_warned_once(capsys):
-    assert agy_store._iso(0) is None
-    assert agy_store._iso(4_102_444_800) is None       # 2100-01-01 is outside (exclusive)
+    assert agy_summaries._iso(0) is None
+    assert agy_summaries._iso(4_102_444_800) is None       # 2100-01-01 is outside (exclusive)
     err = capsys.readouterr().err
     assert err.count("時間欄位看不懂") == 1
-    assert agy_store._iso(5) is None
+    assert agy_summaries._iso(5) is None
     assert "時間欄位看不懂" not in capsys.readouterr().err
 
 
@@ -662,40 +664,44 @@ def test_last_message_is_capped_at_preview_max(agy_home):
     assert len(text) == agy.PREVIEW_MAX and text == long[-agy.PREVIEW_MAX:]
 
 
-@pytest.mark.parametrize("bad", ["../x", "a/b", "..", ".", "a\\b"])
+@pytest.mark.parametrize("bad", ["../x", "a/b", "..", ".", "a\\b",
+                                 "a\x00b",             # NUL: refused before Path() sees it
+                                 "x" * 300])           # past the 255-byte file name limit
 def test_a_conversation_id_that_is_not_a_plain_name_is_refused(bad, agy_home):
     with pytest.raises(AgentError, match="不合法"):
         agy.ADAPTER.export(bad)
 
 
 # ---------------------------------------------------------------------------
-# the boundary: the adapter's stubs and the command's early refusal
+# the boundary: the adapter's still-read-only stubs and the refusals that
+# PR2b did not lift
 # ---------------------------------------------------------------------------
 
 
-def test_the_five_unsupported_methods_refuse_with_one_message(tmp_path):
+def test_the_three_read_only_methods_refuse_with_one_message(tmp_path):
     calls = [
         lambda: agy.ADAPTER.native([]),
         lambda: agy.ADAPTER.append_native(b"", []),
         lambda: agy.ADAPTER.summarize("prompt", tmp_path),
-        lambda: agy.ADAPTER.start_native(b"", tmp_path),
-        lambda: agy.ADAPTER.collect(Launch(argv=[], cwd=str(tmp_path), agent_session_id=None)),
     ]
     for call in calls:
         with pytest.raises(AgentError, match="agy 第一版只支援 import／讀取"):
             call()
 
 
-@pytest.mark.parametrize("argv", [
-    ["merge", "session", "agora:01M3XB78", "agora:01M3XED5", "--agent", "agy"],
-    ["continue", "session", "agora:01M3XB78", "--agent", "agy"],
-    ["continue", "session", "agora:01M3XB78", "--agent", "agy", "--fork"],
+@pytest.mark.parametrize("argv, message", [
+    (["merge", "session", "agora:01M3XB78", "agora:01M3XED5", "--agent", "agy"],
+     "agy 第一版只支援 import／讀取與同 agent 的互動接續"),
+    (["continue", "session", "agora:01M3XB78", "--agent", "agy", "--fork"],
+     "agy 第一版只支援 import／讀取與同 agent 的互動接續"),
+    (["continue", "session", "agora:01M3XB78", "--agent", "agy", "--headless"],
+     "agy 的 headless 在後續"),
 ])
-def test_cli_refuses_agy_at_the_boundary(argv, capsys):
+def test_cli_refuses_agy_at_the_boundary(argv, message, capsys):
     code, out, err = run_cli(capsys, *argv)
     assert code == cli.EXIT_INPUT
     assert not out
-    assert "agy 第一版只支援 import／讀取；接續在 PR2、fork／merge 為後續（#26）" in err
+    assert message in err
 
 
 def _import_one_agy(home: Path, capsys, seed: str) -> str:
@@ -710,13 +716,22 @@ def _import_one_agy(home: Path, capsys, seed: str) -> str:
     ["continue", "session", "{first}", "--agent", "claude"],
     ["continue", "session", "{first}", "--agent", "claude", "--fork"],
     ["continue", "session", "{first}", "--agent", "opencode"],
-    ["merge", "session", "{first}", "{second}", "--agent", "claude"],
 ])
-def test_a_session_imported_from_agy_is_refused_as_a_source(argv, agy_home, drive, capsys):
-    """N7: a cross-agent move whose *source* is agy is outside PR1 too."""
+def test_an_agy_source_is_refused_as_a_cross_agent_continue(argv, agy_home, drive, capsys):
+    """#26 PR2b: continue is same-agent only, both directions, fork or not."""
     first = _import_one_agy(agy_home, capsys, "agy-source-1")
     second = _import_one_agy(agy_home, capsys, "agy-source-2")
     code, out, err = run_cli(capsys, *[arg.format(first=first, second=second) for arg in argv])
+    assert code == cli.EXIT_INPUT
+    assert not out
+    assert "跨 agent 的 continue 在後續（#26）" in err
+
+
+def test_an_agy_source_for_a_merge_stays_refused(agy_home, drive, capsys):
+    """N7: writing a summary into (or out of) agy source sessions is later than PR2b."""
+    first = _import_one_agy(agy_home, capsys, "agy-source-1")
+    second = _import_one_agy(agy_home, capsys, "agy-source-2")
+    code, out, err = run_cli(capsys, "merge", "session", first, second, "--agent", "claude")
     assert code == cli.EXIT_INPUT
     assert not out
     assert "agy 第一版只支援 import／讀取" in err
@@ -725,10 +740,10 @@ def test_a_session_imported_from_agy_is_refused_as_a_source(argv, agy_home, driv
 @pytest.mark.parametrize("argv", [
     ["continue", "session", "{first}", "--agent", "opencode"],
     ["continue", "session", "{first}", "--agent", "claude", "--fork"],
-    ["merge", "session", "{first}", "{second}", "--agent", "claude"],
 ])
-def test_a_drive_only_agy_source_is_refused_before_any_agent(argv, agy_home, drive,
-                                                             tmp_path, monkeypatch, capsys):
+def test_a_drive_only_agy_source_is_refused_as_a_cross_continue(argv, agy_home, drive,
+                                                                tmp_path, monkeypatch,
+                                                                capsys):
     """W5: after the cache is gone the source is known only after the sync.
 
     The two commands point at files that do not exist: reaching an agent at all
@@ -741,6 +756,18 @@ def test_a_drive_only_agy_source_is_refused_before_any_agent(argv, agy_home, dri
     monkeypatch.setenv("AGORA_OPENCODE_CMD", str(tmp_path / "no-opencode"))
     monkeypatch.setenv("AGORA_CLAUDE_CMD", str(tmp_path / "no-claude"))
     code, out, err = run_cli(capsys, *[arg.format(first=first, second=second) for arg in argv])
+    assert code == cli.EXIT_INPUT
+    assert not out
+    assert "跨 agent 的 continue 在後續（#26）" in err
+
+
+def test_a_drive_only_agy_source_for_a_merge_stays_refused(agy_home, drive, tmp_path,
+                                                           monkeypatch, capsys):
+    first = _import_one_agy(agy_home, capsys, "agy-drive-1")
+    second = _import_one_agy(agy_home, capsys, "agy-drive-2")
+    shutil.rmtree(store.Paths.from_env().cache)
+    monkeypatch.setenv("AGORA_CLAUDE_CMD", str(tmp_path / "no-claude"))
+    code, out, err = run_cli(capsys, "merge", "session", first, second, "--agent", "claude")
     assert code == cli.EXIT_INPUT
     assert not out
     assert "agy 第一版只支援 import／讀取" in err
