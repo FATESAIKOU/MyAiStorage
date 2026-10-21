@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 import pathlib
+import shutil
 import signal
 import subprocess
 import sys
@@ -22,7 +23,10 @@ from textual.widgets import Input, Static
 
 from agora import header as h
 from agora import cache, cli, store, tui
-from agora.agents.base import NO_REPLY, Exported, Listed
+from agora.agents.base import NO_REPLY, Exported, Listed, reading
+
+CLAUDE_FIX = pathlib.Path(__file__).resolve().parent.parent / "fixtures" / "claude"
+CLAUDE_SID = "11111111-2222-4333-8444-555555555555"
 
 
 def _hdr(ulid: str, title: str, relation: str = "import", agent: str | None = "opencode", sid: str = "ses_a") -> dict:
@@ -153,6 +157,29 @@ def test_previews_show_what_was_read_and_never_fail():
     assert broken.text == "" and broken.hint() == ""
     whole = tui.import_preview(FakeAgent("claude", [], texts={"s": ["問題", "回答"]}), "s", full=True)
     assert "問題" in whole.text and whole.text.endswith("回答")
+
+
+def test_the_whole_conversation_lays_out_the_turns_without_reading_the_raw(monkeypatch):
+    """#118: with no cache folder the full preview used to read the whole raw back out of
+    the export's temp file and parse it a second time. Claude's export already carries the
+    turns, so laying those out gives the very same text without the read-back."""
+    from agora.agents import claude
+    proj = claude.projects_dir() / "-tmp-p"
+    proj.mkdir(parents=True, exist_ok=True)
+    shutil.copy(CLAUDE_FIX / "cl-basic.jsonl", proj / f"{CLAUDE_SID}.jsonl")
+    aux = CLAUDE_FIX / "cl-aux" / CLAUDE_SID
+    if aux.is_dir():
+        shutil.copytree(aux, proj / CLAUDE_SID)
+    agent = claude.ADAPTER
+    expected = reading(agent, agent.export(CLAUDE_SID).raw).strip()   # what the old path showed
+    reads, original = [], Exported.raw
+    monkeypatch.setattr(Exported, "raw",
+                        property(lambda self: reads.append(self.session_id) or original.fget(self)))
+
+    whole = tui.import_preview(agent, CLAUDE_SID, full=True)
+
+    assert reads == [], "the turns were already there; nothing had to read the raw back"
+    assert whole.text == expected
 
 
 def test_actions_and_what_they_run():
