@@ -12,6 +12,10 @@
       "backend": "aicompany-channel",
       "issue": 9
     },
+    "team-m9": {
+      "backend": "aicompany-channel",
+      "issue": 14
+    },
     "team-mylinuxpool": {
       "backend": "aicompany-channel",
       "issue": 2
