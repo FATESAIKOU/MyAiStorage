@@ -406,6 +406,38 @@ EOF
 
 ---
 
+# 第四段：換 agy 接續（選做，有裝 agy 才做）
+
+⚠️ 這一節是**唯一**會碰到你真的 agy 資料目錄（`~/.gemini/antigravity-cli`）的地方：不隔離才驗得到真 agy。只在裡面開一個**新的、無關緊要的對話**（自編一句話），不要用有價值的對話；**18.9 會用 agy 自己的刪除功能把它刪掉**，接續完再刪一次（18.16）。18.9 的刪除是這一節的重點：只有「這台機器上 agy 沒有這個對話」時，agora 才會真的還原對話檔、補 `conversation_summaries.db` 的一列，18.11 的「載入」才是證據（docs/agy-storage.md §12 的未驗事項就是這條路徑）；對話還留著時 `restore` 是 no-op，「載入成功」是必然的。**不要手動刪檔**（`-wal` 的例外見 18.9、18.11）。匯入的 Session 進的是 `agora-test`，照最後的「清理」一起清掉。**不要設 `AGORA_AGY_HOME`**（設了會讀到假的 home，驗不到真 agy）。
+
+⚠️ **只看、不碰**：這一節查 `conversation_summaries.db` 的每一步（18.8、18.9、18.10、18.14、18.16）一律用下面的 `immutable` URI（`sqlite3 -readonly` ＋ `immutable=1`）。一般開啟**就算只是 SELECT** 也會在 agy 的目錄建 `-wal`／`-shm`，WAL 裡有殘留的回合時還會 checkpoint、改寫主檔，18.13／18.14 的觀察就會混進自己造成的差異；只加 `-readonly` 也不行：WAL 模式、旁邊沒有 sidecar 時會 `unable to open database file`。
+
+⚠️ `immutable` 會**忽略非空的 `-wal`**：查之前先 `ls -la ~/.gemini/antigravity-cli/conversation_summaries.db*`；看到非空的 `-wal`，就把主檔與 `-wal` 都複製到 `/tmp/agora-acc/`（`/bin/cp -f ~/.gemini/antigravity-cli/conversation_summaries.db ~/.gemini/antigravity-cli/conversation_summaries.db-wal /tmp/agora-acc/`），**對複本用一般開啟查**（不加 `-readonly`、不加 `immutable`；複本在 `/tmp`，讓它自己 checkpoint 沒關係）：`T=$(sqlite3 /tmp/agora-acc/conversation_summaries.db "SELECT name FROM sqlite_master WHERE type='table' AND sql LIKE '%conversation_id%' LIMIT 1"); sqlite3 -header -line /tmp/agora-acc/conversation_summaries.db "SELECT * FROM \"$T\" WHERE conversation_id='<AGY>'"`。18.10 的迴圈抓不到列、而 summaries 旁確實有非空 `-wal` 時，就是這個限制：讓迴圈跑完，記下「沒抓到」，18.14 改用複本查。
+
+| # | 做 | 應該看到 |
+|---|---|---|
+| 18.1 | `source /tmp/agora-acc/env.sh` | `[acc] 機器 1 … ✓` |
+| 18.2 | 先關掉 agy（`pgrep -x agy` 什麼都沒印；行程名稱不是 `agy` 就依實際名稱），再 `/bin/cp -R ~/.gemini/antigravity-cli ~/.gemini/antigravity-cli.bak-acc`（`.bak-acc` 已存在就先把它改名或移走：`cp -R` 到既有的目錄會把東西複製**進去**）。驗備份：`ls -d ~/.gemini/antigravity-cli.bak-acc`，再 `/usr/bin/diff -rq ~/.gemini/antigravity-cli ~/.gemini/antigravity-cli.bak-acc`。**還原**（只用在「這一節做完就立刻還原」）：`/bin/mv ~/.gemini/antigravity-cli ~/.gemini/antigravity-cli.bad && /bin/mv ~/.gemini/antigravity-cli.bak-acc ~/.gemini/antigravity-cli`。用 `/bin/cp`、`/bin/mv` 是避開 shell alias 的 `-i`（會停下來問） | 沒有輸出；`ls -d` 看得到目錄；`/usr/bin/diff -rq` **沒有輸出**（備份後、18.3 之前應該如此）。**備份失敗或不完整就停在這裡**，後面每一步都會動真目錄。`.bad` 已存在時 `mv` 會把整個目錄搬**進去**（變成 `.bad/antigravity-cli`），先改名或移走。還原只適用「這一節做完就立刻還原」；**如果之後有正常使用過 agy，不要整個還原**（會把那之後的對話一起退回），改成只處理這個測試對話 |
+| 18.3 | 在 `/tmp/agora-acc/proj` 跑 `agy`，開一個**新的**對話，說一句自編的話（例如「測試用，這句話不重要」），正常離開 | 回到 shell；`pgrep -x agy` 什麼都沒印（真 agy 的行程名稱不是 `agy` 的話，依實際名稱） |
+| 18.4 | `ls -t ~/.gemini/antigravity-cli/conversations/*.db \| head -3` | 最上面那個檔名去掉 `.db` 就是那個對話的 id（記為 `<AGY>`）。什麼都沒印：agy 的存放位置和這一版不同，停下來告訴 PM（見 docs/agy-storage.md §1） |
+| 18.5 | `unset AGORA_AGY_HOME AGORA_AGY_CONTINUE; agora import session --external-session-id <AGY> --agent agy` | stdout 一行 `agora:<ULID>`（記為 `<AG>`）；stderr `[agora] 匯入 1/1  <AGY>`；`echo $?` 是 `0` |
+| 18.6 | `agora search session --filter agent=agy`，再 `agora show session <AG> \| head -20`，再 `agora show session <AG> \| tail -20` | search 有一行 `<AG>`，agent 欄是 `agy`；標頭的 `generated` 底下是 `by: agy`；內文（尾端）看得到 18.3 說的那句話。`--filter agent=agy` 搜的是**已匯入**的 Session；「未匯入」頁對 agy 的內文搜尋只看標題與 preview（不搜對話內文），狀態列會說明 |
+| 18.7 | `agora`，游標移到 `<AG>`，看右邊的預覽，`q` 離開 | 預覽看得到同一段對話；沒有大量 `[skip agy-step-…]`（工具步驟是靜音的，只有未知的步驟類型才會標） |
+| 18.8 | 先 `ls -la ~/.gemini/antigravity-cli/conversation_summaries.db*`（有非空 `-wal` 就照上面的提醒對複本查），再 `T=$(sqlite3 -readonly "file:$HOME/.gemini/antigravity-cli/conversation_summaries.db?immutable=1" "SELECT name FROM sqlite_master WHERE type='table' AND sql LIKE '%conversation_id%' LIMIT 1"); sqlite3 -readonly -header -line "file:$HOME/.gemini/antigravity-cli/conversation_summaries.db?immutable=1" "SELECT * FROM \"$T\" WHERE conversation_id='<AGY>'" \| tee /tmp/agora-acc/agy-row-before.txt` | 第二條印出 `<AGY>` 那一列——這是 **agy 自己寫的列**，記為 **before**，同時存到 `/tmp/agora-acc/agy-row-before.txt`（記下它的長相）。沒有這一列或 `$T` 是空的：停下來告訴 PM，不要自己補 |
+| 18.9 | 在 agy 裡把 18.3 那個測試對話刪掉（用 agy 自己的刪除功能；**不要手動刪檔**）。刪完確認：`ls ~/.gemini/antigravity-cli/conversations/<AGY>.db`，再 `ls -la ~/.gemini/antigravity-cli/conversations/ \| grep <AGY>`，再跑一次 `sqlite3 -readonly -header -line "file:$HOME/.gemini/antigravity-cli/conversation_summaries.db?immutable=1" "SELECT * FROM \"$T\" WHERE conversation_id='<AGY>'"` | 第一個 `ls` 說 `<AGY>.db` 不存在；第二個**什麼都沒印**（連 `-wal`／`-shm` 都沒有；有印就記下來，見下面）；查詢**什麼都沒印**（summaries 的列也沒了）。**刪不掉（agy 沒有刪除功能、或刪完檔案還在）就停在這裡回報 PM**：不要手動刪檔、不要自己補列、也不要往下接續。`$T` 是空的或查詢說表不存在：記下來一起回報。還看得到那一列：先 `pgrep -x agy` 確認 agy 結束，再查一次；還在也停下回報。如果只剩 `-wal` 是 **0 位元組**的（`-shm` 通常是 32 KB 左右，不論大小）：18.11 會被 agora 拒絕，照訊息說的把這兩個檔刪掉再重試（0 位元組的 `-wal` 不含未 checkpoint 的回合）；**有內容的 `-wal` 不要刪**，回報 PM |
+| 18.10 | 另開終端機 B，先跑 18.8 的 `T=$(…)` 那一段（不用 `tee`），再貼上：`: "${T:?先跑 18.8 設定表名的那一段}"; for i in $(seq 450); do sqlite3 -readonly -header -line "file:$HOME/.gemini/antigravity-cli/conversation_summaries.db?immutable=1" "SELECT * FROM \"$T\" WHERE conversation_id='<AGY>'" > /tmp/agora-acc/agy-row-agora.txt 2>/dev/null; test -s /tmp/agora-acc/agy-row-agora.txt && break; sleep 0.2; done` | 這個迴圈最多等 90 秒，等到 **agora 補進去的那一列**出現就停（記為 agora 的是最早抓到的版本）；`/tmp/agora-acc/agy-row-agora.txt` 有內容＝抓到了（記為 **agora**）。**迴圈幾乎立刻就有內容（18.11 還沒開始）**：代表 summaries 的列其實沒刪掉，停下來回報。90 秒後還是空的就記下「沒抓到 agora 的列」，18.14 只比 before／after（先看 summaries 旁有沒有非空 `-wal`：有就是上面那個限制，18.14 改用複本查）。終端機 B 在等，接著到終端機 A 做 18.11 |
+| 18.11 | `unset AGORA_AGY_HOME; AGORA_AGY_CONTINUE=1 agora continue session <AG> --agent agy --dir /tmp/agora-acc/proj` | 先印 `[agora] 工作目錄：…`（macOS 上 `/tmp` 可能是 `/private/tmp` 的連結），再開 agy。對話檔已經刪掉，這次應該是**安靜地**還原檔案＋補列（「已有較新的對話…用活體」與「將以 agora 的版本…覆蓋」只在 agy 那邊還有較新／較舊的對話時才印，**不能**拿「沒印」當還原的證據；證據是 18.9 的刪除確認、18.10 抓到的列）。**agy 裡面看得到 18.3 那句話**（載入成功）；agy 回 `conversation "<AGY>" not found` 或開一個空對話，照實記下來（18.12 要回報）。再說一句自編的話，正常離開；印出的還是 `<AG>`。若 agora 拒絕並說「raw 自報的對話…不是這個 Session 的來源」：**不要處理，原樣回報 PM**（agy 的檔名與內部對話 id 不一致，屬於未驗事項）。若 agora 拒絕並說對話旁有 `-wal`／`-shm`：`-wal` 是 0 位元組的照 18.9 處理，**有內容的 `-wal` 不要刪**，回報 PM |
+| 18.12 | 記下：agy 有沒有載入剛才的對話（看得到 18.3 那句話＝載入成功；`conversation not found`／開空對話＝沒載入） | 這是**要回報的第一件事** |
+| 18.13 | `ls -la ~/.gemini/antigravity-cli/conversations/ \| grep <AGY>` | 看得到 `<AGY>.db`；**記下有沒有 `<AGY>.db-wal`／`<AGY>.db-shm`**（正常結束後還在不在、是不是空的）。這是**要回報的第二件事** |
+| 18.14 | `sqlite3 -readonly -header -line "file:$HOME/.gemini/antigravity-cli/conversation_summaries.db?immutable=1" "SELECT * FROM \"$T\" WHERE conversation_id='<AGY>'" \| tee /tmp/agora-acc/agy-row-after.txt; /usr/bin/diff /tmp/agora-acc/agy-row-before.txt /tmp/agora-acc/agy-row-agora.txt; /usr/bin/diff /tmp/agora-acc/agy-row-after.txt /tmp/agora-acc/agy-row-before.txt` | 第一條印出接續後的列（記為 **after**）。兩個 `diff` 分別是「agy 原本的列 vs agora 補的列」與「接續後 vs agy 原本的列」；**逐欄回報**差異，尤其是 `last_modified_time` 的單位（秒／毫秒／文字？）、`workspace_uris` 的格式（`file://…`、空字串、`[]`？）、其他欄位的預設值。`agy-row-agora.txt` 是空的就註明，只比 before／after。agy 載入成功時，離開可能已把那一列改寫成自己的格式（after 是 agy 接手後的樣子），照實註明；agy 說 `conversation not found` 時 after 就是 agora 補的列本身。這是**要回報的第三件事** |
+| 18.15 | `unset AGORA_AGY_HOME AGORA_AGY_CONTINUE; agora continue session <AG> --agent agy; echo $?` | **不會**開 agy。stderr `[agora] agy 的接續會寫入你真的 ~/.gemini/antigravity-cli（對話檔與 conversation_summaries.db），而真 agy 能否接上尚未驗證；使用前請先備份 ~/.gemini/antigravity-cli，再設 AGORA_AGY_CONTINUE=1 重試（#26）`；exit `1` |
+| 18.16 | 在 agy 裡把**接續後**的那個測試對話再刪一次（用 agy 自己的刪除功能；**不要手動刪檔**），確認 `ls ~/.gemini/antigravity-cli/conversations/<AGY>.db` 說不存在，再跑一次 18.14 的第一條查詢（不用 `tee`）確認 summaries 也沒有那一列 | 檔案與列都不見了；刪不掉就留著，回報 PM。**不要整個還原** `~/.gemini/antigravity-cli`（見 18.2；接續後 agy 可能又寫了東西）。確認 agy 一切正常後，備份可以自己刪掉（`/bin/rm -rf ~/.gemini/antigravity-cli.bak-acc`），不確定就先留著 |
+| 18.17 | 把 18.12～18.14 的三件事（有沒有載入成功、有沒有留下 `-wal`／`-shm`、agora 補的列與 agy 自己的列差在哪）回報給 PM | PM 拿到回報後才會開單，拿掉 `AGORA_AGY_CONTINUE` 的預設開關 |
+
+18.8、18.9、18.10、18.14、18.16 需要 `sqlite3`（macOS 內建）；沒有這個指令就跳過查 summaries 的那幾步，回報「summaries 列沒驗到」。
+
+---
+
 ## 給 PM 填的數字
 
 | 項目 | 數字 |
@@ -428,6 +460,8 @@ EOF
 - 背景程序**啟動失敗**時，指令會 exit 3。delete 的訊息是 `背景上傳啟動失敗，移到 Drive 垃圾桶要等之後的指令`，其他寫入是 `上傳失敗，已存入 outbox，之後的指令會自動再送`。驗收時做不出這種情況，單元測試有測。互動模式裡 delete 遇到 exit 3 時，結果視窗用的是「已存進 outbox…」這句通用的說法（review T3-final2 G4）。
 - 列不出 Drive（例如連線一瞬間斷掉）的那一輪，「更新既有 Session」的修改不會送出，留到下一輪。新建的照常送。這是刻意的（不把別台剛刪掉的傳回去）。
 - 背景上傳在比對到一半當掉的話，那一版會留在 `outbox/.done-<ULID>`；下一個指令會把它算成「未上傳」，並啟動背景把它送出去。驗收時不用特別做。
+- 18.11～18.14 的 agy 接續行為是**未驗**的：真 agy 是否載入還原的對話、正常結束後是否留下 `-wal`／`-shm`、agora 補的列與 agy 自己的列差在哪（docs/agy-storage.md §12）。在拿到回報之前 `AGORA_AGY_CONTINUE` 預設不開，所以 18.15 的拒絕是**預期行為**，不是驗收失敗。
+- agy 接續遇到目標對話旁已有 `-wal`／`-shm` 會拒絕（agy 可能正在用；閒置 agy 是否留下空的一對還沒驗）；訊息會依 `-wal` 的大小說可不可以手動刪。這是刻意的，不算驗收失敗（18.11）。
 
 ---
 
@@ -457,6 +491,8 @@ opencode session delete <ses_id> # 一個一個刪
 ```bash
 rm -rf "$HOME/.claude/projects/-private-tmp-agora-acc-proj"
 ```
+
+有做第四段（agy）才需要：18.16 要在 agy 裡把接續後的測試對話再刪一次（不要手動刪檔；刪不掉就回報 PM）；備份 `~/.gemini/antigravity-cli.bak-acc` 確認 agy 一切正常後再 `/bin/rm -rf`，不確定就先留著。
 
 最後：
 
