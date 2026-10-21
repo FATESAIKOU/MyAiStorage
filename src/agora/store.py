@@ -35,6 +35,9 @@ SYNC_THROTTLE_S = 300
 #: Bumped when the index's tables change: the index is a cache of the mirror, so
 #: a new shape is rebuilt from the mirror rather than migrated (design, T1 3.1).
 INDEX_VERSION = 2
+#: What an unfinished session looked like the last time we downloaded it (#119):
+#: `{ulid: {session_md5, raw_file, raw_md5}}`. Local state, never uploaded.
+UNFINISHED_FILE = "unfinished.json"
 
 
 class StoreError(RuntimeError):
@@ -1262,6 +1265,42 @@ def kick_uploader(paths: Paths) -> str | None:
     return None
 
 
+def _unfinished(paths: Paths) -> dict[str, dict[str, str]]:
+    """What sync last saw for sessions whose raw was missing or wrong (#119).
+
+    The pair is enough to tell whether downloading the same session.md again could
+    reach a different answer: the same session.md and the same raw listing mean the
+    header still names a raw Drive does not have (or has with another md5), so it is
+    still unfinished. A missing or broken file is the same as no memory: the next
+    sync downloads once and writes it again.
+    """
+    try:
+        data = json.loads((paths.state / UNFINISHED_FILE).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    if not isinstance(data, dict) or data.get("version") != 1:
+        return {}
+    entries = data.get("sessions")
+    if not isinstance(entries, dict):
+        return {}
+    found: dict[str, dict[str, str]] = {}
+    for ulid, record in entries.items():
+        if not isinstance(ulid, str) or not isinstance(record, dict):
+            continue
+        values = (record.get("session_md5"), record.get("raw_file"), record.get("raw_md5"))
+        if all(isinstance(value, str) for value in values):
+            found[ulid] = {"session_md5": values[0], "raw_file": values[1],
+                           "raw_md5": values[2]}
+    return found
+
+
+def _write_unfinished(paths: Paths, entries: dict[str, dict[str, str]]) -> None:
+    paths.state.mkdir(parents=True, exist_ok=True)
+    write_atomic(paths.state / UNFINISHED_FILE,
+                 json.dumps({"version": 1, "sessions": entries},
+                            ensure_ascii=False, sort_keys=True))
+
+
 def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
          kick: bool = True, warn=warn) -> Index:
     """Start the uploader if anything is waiting, then pull the session.md files whose md5 changed.
@@ -1272,7 +1311,9 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
 
     Only session.md is mirrored; raws are fetched on demand. A session whose
     raw is missing or has another md5 than its header says is unfinished
-    and is left out of the index until the next sync.
+    and is left out of the index until the next sync. What that looked like is
+    remembered in the state directory, so the same unfinished session.md is not
+    downloaded again until its md5 or its raw entry changes (#119).
 
     A session Drive no longer has is *not* removed here (T1 R6): the mirror, the
     index row and its search entry stay, and it is marked instead, so that
@@ -1307,8 +1348,28 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
     # were deleted here (change local-first-writes 2.4).
     trashing = queued_for_trash(paths)
     known = index.known()
-    changed = [u for u, f in remote.items() if f.get("session.md") and u not in trashing
-               and not (known.get(u) == f["session.md"] and (paths.mirror / u / "session.md").exists())]
+    unfinished = _unfinished(paths)
+    still_unfinished: dict[str, dict[str, str]] = {}
+    changed = []
+    for u, f in remote.items():
+        if not f.get("session.md") or u in trashing:
+            continue
+        if known.get(u) == f["session.md"] and (paths.mirror / u / "session.md").exists():
+            continue
+        seen = unfinished.get(u)
+        if (seen and seen["session_md5"] == f["session.md"]
+                and f.get(seen["raw_file"], "") == seen["raw_md5"]):
+            # Same half-written session.md and the same raw on Drive: downloading it
+            # again would read the same header and reach the same "not written yet"
+            # answer, once per command (#119). Keep it out of the index and out of an
+            # offline rebuild (G3) without downloading it again; the message was said
+            # when this state was first seen. Any change to either value - the raw
+            # appearing, or a new session.md - falls through and is read again.
+            index.drop(u)
+            (paths.mirror / u / "session.md").unlink(missing_ok=True)
+            still_unfinished[u] = seen
+            continue
+        changed.append(u)
     if len(changed) > 1:
         # One rclone run for all of them: each call costs seconds (docs/perf.md).
         try:
@@ -1332,6 +1393,8 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
             say(f"{ulid} 還沒寫完（raw 不在或 md5 不符），下次再試")
             index.drop(ulid)
             local.unlink(missing_ok=True)   # keep unfinished sessions out of an offline rebuild (G3)
+            still_unfinished[ulid] = {"session_md5": md5, "raw_file": raw["file"],
+                                      "raw_md5": remote[ulid].get(raw["file"], "")}
             continue
         index.put(ulid, md5, hdr, body)
     if missing:
@@ -1345,6 +1408,10 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
                            if u not in staged and u not in trashing and not continuing(paths, u))
     _index_outbox(paths, index)
     paths.state.mkdir(parents=True, exist_ok=True)
+    if not missing and still_unfinished != unfinished:
+        # A complete listing is the only one that may change what we remember (#119);
+        # a failed or missing one leaves the file alone, like the cloud_missing marks.
+        _write_unfinished(paths, still_unfinished)
     stamp.write_text(str(now()))
     return index
 
