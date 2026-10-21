@@ -39,10 +39,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 import subprocess
-import tempfile
 import threading
 import time
 
+from agora.private_tmp import PrivateTmpDir
 from agora.store import normalize
 
 from .base import (AgentError, Exported, Launch, Listed, NO_REPLY, Turns, agent_cmd, env_seconds,
@@ -898,7 +898,7 @@ class OpencodeAgent:
         write-back the terminal belongs to the agent - a child that read there would
         take the line the user is typing (design「不弄亂 agent 的畫面」).
         """
-        with tempfile.TemporaryDirectory(prefix="agora-opencode-") as tmp:
+        with PrivateTmpDir("agora-opencode") as tmp:
             target = Path(tmp) / "export.json"
             with open(target, "wb") as out:
                 proc = self._run([agent_cmd(self.name), "session", "export", session_id,
@@ -920,7 +920,7 @@ class OpencodeAgent:
         opencode resolves the project from $PWD: a shell keeps the two in step, a
         subprocess does not (spike trap A).
         """
-        with tempfile.TemporaryDirectory(prefix="agora-opencode-") as tmp:
+        with PrivateTmpDir("agora-opencode") as tmp:
             path = Path(tmp) / "import.json"
             path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             proc = self._run([agent_cmd(self.name), "session", "import", str(path),

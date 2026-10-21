@@ -35,7 +35,7 @@ import signal
 import sys
 from pathlib import Path
 
-from agora import cli, store
+from agora import cli, private_tmp, store
 
 
 def state_of(run) -> dict:
@@ -111,8 +111,9 @@ def _exit_on_sigterm() -> None:
 
 def main() -> int:
     _exit_on_sigterm()
-    state = json.loads(sys.stdin.read())
     paths = store.Paths.from_env()
+    private_tmp.sweep(paths.state)   # #116: an export SIGKILLed last round left its temp dir
+    state = json.loads(sys.stdin.read())
     run = decode_run(state, paths)
     writer = cli._LogWriter(paths.state / cli.CONTINUE_LOG, run.target)
     try:

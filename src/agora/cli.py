@@ -38,6 +38,7 @@ from pathlib import Path
 import jsonschema
 
 from agora import header as h
+from agora import private_tmp
 from agora import store
 from agora.agents.agy import AGY_CROSS_AGENT, AGY_HEADLESS_LATER, AGY_READ_ONLY
 from agora.agents.base import (NO_REPLY, Agent, AgentError, Exported, Launch, merge_turns,
@@ -2063,6 +2064,7 @@ def _load_for_launch(paths: store.Paths, state: dict) -> dict:
 
 
 def cmd_continue(args, paths: store.Paths) -> int:
+    private_tmp.sweep(paths.state)   # #116: before a round/export of this run, not during one
     if not args.agent:
         raise InputError("continue 要給 --agent opencode|claude|agy")
     agent = load_agent(args.agent)

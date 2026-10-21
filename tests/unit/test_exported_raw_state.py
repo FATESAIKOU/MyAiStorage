@@ -46,10 +46,11 @@ def test_the_round_child_turns_sigterm_into_a_normal_exit():
     """`_exit_on_sigterm` is what lets the export's temp directory be removed: in a real
     child, SIGTERM now exits 143 through the finalizers instead of dying at once."""
     code = textwrap.dedent("""
-        import sys, tempfile, time
+        import time
         from agora import round_child
+        from agora.private_tmp import PrivateTmpDir
         round_child._exit_on_sigterm()
-        d = tempfile.TemporaryDirectory(prefix="agora-raw-")
+        d = PrivateTmpDir("agora-raw")
         print(d.name, flush=True)
         time.sleep(60)
     """)

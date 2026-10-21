@@ -14,7 +14,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Protocol
-import tempfile
+
+from agora.private_tmp import PrivateTmpDir
 
 TOOL_SUMMARY_MAX = 200
 
@@ -64,8 +65,8 @@ class Exported:
     # Private carriers of `raw`: not part of equality or repr (review 低1) - two exports of
     # the same session are the same export whichever has read its file back yet.
     _raw: bytes | None = field(default=None, repr=False, compare=False, init=False)
-    _raw_tmpdir: tempfile.TemporaryDirectory | None = field(default=None, repr=False,
-                                                            compare=False, init=False)
+    _raw_tmpdir: PrivateTmpDir | None = field(default=None, repr=False,
+                                               compare=False, init=False)
 
     def __init__(self, session_id: str, *, raw: bytes = _NoRaw,
                  raw_file: Path | None = None, raw_md5: str | None = None,
@@ -73,7 +74,7 @@ class Exported:
                  title: str | None = None, created_at: str | None = None,
                  agent_version: str | None = None, message_count: int = 0,
                  model: str | None = None, turns: Turns | None = None,
-                 _raw_tmpdir: tempfile.TemporaryDirectory | None = None) -> None:
+                 _raw_tmpdir: PrivateTmpDir | None = None) -> None:
         self.session_id = session_id
         self.raw_file = raw_file
         self.raw_md5 = raw_md5

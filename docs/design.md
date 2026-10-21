@@ -124,7 +124,7 @@ Drive: agora/                              （rclone 內建 client 建立；以 
 Mac:
   ~/.config/agora/            rclone.conf（rclone 內建 client）、config.json（folder ID）
   ~/.cache/agora/             鏡像（只有 session.md）＋ index.sqlite；壞了刪掉重建
-  ~/.local/state/agora/       outbox/、pending/ ——不能刪
+  ~/.local/state/agora/       outbox/、pending/ ——不能刪；tmp/ 是匯出／快照的暫存
 ```
 
 ### 4.1 寫入順序（S1；2026-10-03 改成「先存本機完整的一份，背景上傳」）
@@ -483,6 +483,7 @@ Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之�
 - **本機位置**（都在 `~/.cache/agora/`；原始檔自 2026-10-03 起也留一份在本機）：
   - agora 的 Session：Drive 鏡像 `sessions/<ULID>/`，`session.md`（閱讀版）與**原始檔都在**（4.1）。本機的 `continue`／`merge` 因此不必先抓 Drive；抓不到或 md5 不符時那一筆照樣由上傳補回去。
   - 上傳中的版本：`<state>/outbox/<ULID>/`（stage 出去、Drive 確認之前）。
+  - 匯出／快照的暫存（整份私人對話、agy 快照）：`<state>/tmp/`（目錄 0700，名稱 `<用途>-<pid>-<隨機>`）——不再放共用的系統 temp。正常與例外路徑用完就刪；SIGKILL 留下的，在下一次 round／continue／export 開始時清掉，**只清擁有者已不在的**：每個暫存目錄有一把 `.owner.lock` flock，行程一死（含 SIGKILL）核心就放開，所以同時在跑的其他 `agora continue` 的暫存不會被誤刪，pid 重用也不會（pid 只在名字裡給人看）。sweep 也只動自己命名的項目（`.new-*` 或實際前綴的 `<前綴>-<pid>-<8 碼隨機>`）——`AGORA_STATE_DIR` 是使用者給的，指到的 `tmp/` 裡原本就有的東西一律不碰。清理失敗（state 讀不到、檔案系統不支援 flock）只會留著、下次再試，**不擋指令**；但**建立**暫存時拿不到鎖就直接失敗（`AgentError`，訊息請把 `AGORA_STATE_DIR` 設到本機磁碟）——不把整份對話寫到無法判斷擁有者的地方。
   - 背景上傳器的記錄：`<state>/upload.log`（超過 1 MB 只留尾巴）；鎖：`<state>/upload.lock`；等著移到垃圾桶的：`<state>/trash-queue/`。
   - 這台機器上 agent 的 session：`reading/<agent>/<session id>.md`，閱讀版的全文；mtime 設成該 session 自己的更新時間，比較新就是過時。
 - **`agora pull session <id>…`／`agora push session <id>…`：只吃給的 id**（2026-10-03 使用者決定，沒有 `--all`，不給 id 就報錯；要全部就在 TUI 按 `a`，或從 search 用管線接過來）。id 的前綴決定意思，不從形狀猜：

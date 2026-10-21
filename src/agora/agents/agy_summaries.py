@@ -21,7 +21,6 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-import tempfile
 import time
 from collections import Counter
 from contextlib import closing
@@ -32,6 +31,7 @@ from urllib.parse import unquote
 
 from agora.agents.agy_store import copy_stable, file_fingerprint, immutable, summaries_path
 from agora.agents.base import AgentError, iso_utc, warn
+from agora.private_tmp import PrivateTmpDir
 
 #: How long the writable summaries connection waits on agy's own lock before
 #: answering `AgentError` (agy checkpoints within a second of a turn ending,
@@ -249,7 +249,7 @@ def summary_table(connection: sqlite3.Connection) -> tuple[str, dict[str, str]] 
 
 
 def _read_summaries(path: Path) -> list[_Summary]:
-    with tempfile.TemporaryDirectory(prefix="agora-agy-sum-") as tmp:
+    with PrivateTmpDir("agora-agy-sum") as tmp:
         root = Path(tmp)
         live = copy_stable(path, root)
         copy = root / "snapshot.db"
