@@ -251,3 +251,7 @@ uv run pytest -q                                   # 單元測試：不碰 Drive
 # claude（自編短對話，claude -p 約 6 次），要跑好幾分鐘，所以丟到背景：
 nohup uv run pytest -q -m integration tests/integration > it.log 2>&1 &
 ```
+
+## 授權
+
+[MIT](LICENSE)。第三方內容的授權聲明見 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
