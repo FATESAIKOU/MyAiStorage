@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from agora import cache, cli, store, tui
-from agora.agents import agy
+from agora.agents import agy, agy_store, agy_wire
 from agora.agents.base import AgentError, Launch
 from agora import header as h
 
@@ -54,9 +54,9 @@ TURNS = [
 @pytest.fixture(autouse=True)
 def fresh_module_caches(monkeypatch):
     """The module's caches and warn-once flags must not leak between tests."""
-    monkeypatch.setattr(agy, "_summaries_cache", None)
-    monkeypatch.setattr(agy, "_warned_summary_for", False)
-    monkeypatch.setattr(agy, "_warned_stamp", False)
+    monkeypatch.setattr(agy_store, "_summaries_cache", None)
+    monkeypatch.setattr(agy_store, "_warned_summary_for", False)
+    monkeypatch.setattr(agy_store, "_warned_stamp", False)
 
 
 @pytest.fixture
@@ -137,14 +137,14 @@ def test_snapshot_idle_copies_the_db_alone(agy_home, monkeypatch):
     source = agy_home / "conversations" / f"{session_id}.db"
     before = (source.stat().st_size, source.stat().st_mtime_ns)
     copied: list[str] = []
-    real = agy.shutil.copyfile
+    real = agy_store.shutil.copyfile
 
     def spy(src, dst):
         copied.append(Path(src).name)
         return real(src, dst)
 
-    monkeypatch.setattr(agy.shutil, "copyfile", spy)
-    with agy.snapshot(session_id) as path:
+    monkeypatch.setattr(agy_store.shutil, "copyfile", spy)
+    with agy_store.snapshot(session_id) as path:
         assert path.is_file() and path.parent != source.parent
         con = sqlite3.connect(f"file:{path}?immutable=1", uri=True)
         try:
@@ -158,15 +158,15 @@ def test_snapshot_idle_copies_the_db_alone(agy_home, monkeypatch):
 def test_snapshot_replays_a_live_wal_without_copying_shm(agy_home, monkeypatch):
     session_id, meta = make_conversation(agy_home, with_wal=True)
     copied: list[str] = []
-    real = agy.shutil.copyfile
+    real = agy_store.shutil.copyfile
 
     def spy(src, dst):
         copied.append(Path(src).name)
         return real(src, dst)
 
-    monkeypatch.setattr(agy.shutil, "copyfile", spy)
+    monkeypatch.setattr(agy_store.shutil, "copyfile", spy)
     try:
-        with agy.snapshot(session_id) as path:
+        with agy_store.snapshot(session_id) as path:
             con = sqlite3.connect(f"file:{path}?immutable=1", uri=True)
             try:
                 assert con.execute("SELECT count(*) FROM steps").fetchone()[0] == 6
@@ -181,7 +181,7 @@ def test_snapshot_replays_a_live_wal_without_copying_shm(agy_home, monkeypatch):
 def test_snapshot_retries_when_the_copy_moves(agy_home, monkeypatch):
     session_id, _ = make_conversation(agy_home)
     calls: list[str] = []
-    real = agy.shutil.copyfile
+    real = agy_store.shutil.copyfile
 
     def moving(src, dst):
         calls.append(Path(src).name)
@@ -190,15 +190,15 @@ def test_snapshot_retries_when_the_copy_moves(agy_home, monkeypatch):
             stat = Path(src).stat()
             os.utime(src, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
 
-    monkeypatch.setattr(agy.shutil, "copyfile", moving)
-    with agy.snapshot(session_id) as path:
+    monkeypatch.setattr(agy_store.shutil, "copyfile", moving)
+    with agy_store.snapshot(session_id) as path:
         assert path.is_file()
     assert len(calls) == 2                       # the second copy was stable
 
 
 def test_snapshot_gives_up_after_three_moves_and_cleans_the_temp_dir(agy_home, monkeypatch):
     session_id, _ = make_conversation(agy_home)
-    real = agy.shutil.copyfile
+    real = agy_store.shutil.copyfile
     calls = []
 
     def always_moving(src, dst):
@@ -214,10 +214,10 @@ def test_snapshot_gives_up_after_three_moves_and_cleans_the_temp_dir(agy_home, m
             super().__init__(*args, **kwargs)
             made.append(self)          # the object, not its path: no GC finalizer may help
 
-    monkeypatch.setattr(agy.shutil, "copyfile", always_moving)
-    monkeypatch.setattr(agy.tempfile, "TemporaryDirectory", Recorder)
+    monkeypatch.setattr(agy_store.shutil, "copyfile", always_moving)
+    monkeypatch.setattr(agy_store.tempfile, "TemporaryDirectory", Recorder)
     with pytest.raises(AgentError, match="3 次"):
-        with agy.snapshot(session_id):
+        with agy_store.snapshot(session_id):
             pass
     assert len(calls) == 3
     assert made and all(not Path(obj.name).exists() for obj in made)
@@ -233,8 +233,8 @@ def test_snapshot_success_cleans_the_temp_dir_immediately(agy_home, monkeypatch)
             super().__init__(*args, **kwargs)
             made.append(self)
 
-    monkeypatch.setattr(agy.tempfile, "TemporaryDirectory", Recorder)
-    with agy.snapshot(session_id) as path:
+    monkeypatch.setattr(agy_store.tempfile, "TemporaryDirectory", Recorder)
+    with agy_store.snapshot(session_id) as path:
         assert path.is_file()
     assert made and all(not Path(obj.name).exists() for obj in made)
 
@@ -243,7 +243,7 @@ def test_snapshot_of_a_broken_db_fails_quick_check(agy_home):
     """m9: a file that is not a database is an AgentError, not a silent empty read."""
     (agy_home / "conversations" / "deadbeef.db").write_bytes(b"not a database" * 100)
     with pytest.raises(AgentError):
-        with agy.snapshot("deadbeef"):
+        with agy_store.snapshot("deadbeef"):
             pass
 
 
@@ -264,7 +264,7 @@ def test_snapshot_reports_a_page_quick_check_rejects(agy_home):
     data[(page - 1) * MUT.PAGE_SIZE] = 0   # an invalid b-tree page type, not a bad header
     db.write_bytes(data)
     with pytest.raises(AgentError, match="quick_check 沒過"):
-        with agy.snapshot(session_id):
+        with agy_store.snapshot(session_id):
             pass
 
 
@@ -273,7 +273,7 @@ def test_snapshot_retries_when_only_the_wal_moves(agy_home, monkeypatch):
     session_id, meta = make_conversation(agy_home, with_wal=True)
     wal = agy_home / "conversations" / f"{session_id}.db-wal"
     copied: list[str] = []
-    real = agy.shutil.copyfile
+    real = agy_store.shutil.copyfile
 
     def moving_wal(src, dst):
         copied.append(Path(src).name)
@@ -282,9 +282,9 @@ def test_snapshot_retries_when_only_the_wal_moves(agy_home, monkeypatch):
             stat = wal.stat()
             os.utime(wal, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
 
-    monkeypatch.setattr(agy.shutil, "copyfile", moving_wal)
+    monkeypatch.setattr(agy_store.shutil, "copyfile", moving_wal)
     try:
-        with agy.snapshot(session_id) as path:
+        with agy_store.snapshot(session_id) as path:
             assert path.is_file()
     finally:
         meta["connection"].close()
@@ -296,7 +296,7 @@ def test_snapshot_retries_when_the_wal_vanishes(agy_home, monkeypatch):
     session_id, meta = make_conversation(agy_home, with_wal=True)
     wal = agy_home / "conversations" / f"{session_id}.db-wal"
     copied: list[str] = []
-    real = agy.shutil.copyfile
+    real = agy_store.shutil.copyfile
 
     def vanishing_wal(src, dst):
         copied.append(Path(src).name)
@@ -306,9 +306,9 @@ def test_snapshot_retries_when_the_wal_vanishes(agy_home, monkeypatch):
             raise FileNotFoundError(src)
         return real(src, dst)
 
-    monkeypatch.setattr(agy.shutil, "copyfile", vanishing_wal)
+    monkeypatch.setattr(agy_store.shutil, "copyfile", vanishing_wal)
     try:
-        with agy.snapshot(session_id) as path:
+        with agy_store.snapshot(session_id) as path:
             con = sqlite3.connect(f"file:{path}?immutable=1", uri=True)
             try:
                 assert con.execute("SELECT count(*) FROM steps").fetchone()[0] == 6
@@ -328,9 +328,9 @@ def test_snapshot_gives_up_when_files_keep_vanishing(agy_home, monkeypatch):
         calls.append(1)
         raise FileNotFoundError(src)
 
-    monkeypatch.setattr(agy.shutil, "copyfile", missing)
+    monkeypatch.setattr(agy_store.shutil, "copyfile", missing)
     with pytest.raises(AgentError, match="3 次"):
-        with agy.snapshot(session_id):
+        with agy_store.snapshot(session_id):
             pass
     assert len(calls) == 3
 
@@ -340,7 +340,7 @@ def test_snapshot_cross_check_only_warns(agy_home, capsys):
     make_summaries(agy_home, [{"id": session_id, "title": "x",
                                "step_count": count_steps(agy_home, session_id) + 1,
                                "last_modified_time": MUT.EPOCH}])
-    with agy.snapshot(session_id) as path:
+    with agy_store.snapshot(session_id) as path:
         assert path.is_file()
     err = capsys.readouterr().err
     assert "summaries 說" in err and "以快照為準" in err
@@ -457,7 +457,7 @@ def test_scan_text_survives_deep_nesting_and_keeps_shallow_strings():
         deep = MUT.enc_msg(2, deep)
     blob += deep
     out: list[str] = []
-    assert agy._scan_strings(blob, out, set()) is None
+    assert agy_wire._scan_strings(blob, out, set()) is None
     assert shallow in out
 
 
@@ -507,7 +507,7 @@ def test_a_length_past_the_message_end_is_a_skip_not_a_truncation(agy_home, caps
 
 def test_fields_rejects_a_declared_length_past_the_buffer():
     with pytest.raises(ValueError, match="長度超過訊息"):
-        list(agy._fields(b"\x0a\x05ab"))
+        list(agy_wire._fields(b"\x0a\x05ab"))
 
 
 # ---------------------------------------------------------------------------
@@ -525,13 +525,13 @@ def test_list_sessions_reads_the_summaries_and_caches_by_mtime(agy_home, monkeyp
          "last_modified_time": MUT.EPOCH + 60, "workspace_uris": "/tmp/plain-dir"},
     ])
     copied: list[str] = []
-    real = agy.shutil.copyfile
+    real = agy_store.shutil.copyfile
 
     def spy(src, dst):
         copied.append(str(src))
         return real(src, dst)
 
-    monkeypatch.setattr(agy.shutil, "copyfile", spy)
+    monkeypatch.setattr(agy_store.shutil, "copyfile", spy)
     listed = agy.ADAPTER.list_sessions()
     assert [item.session_id for item in listed] == [newer, older]
     assert listed[0].title == "New" and listed[0].dir == "/tmp/plain-dir"
@@ -586,7 +586,7 @@ def test_a_non_finite_step_count_does_not_take_the_listing_down(agy_home):
     make_summaries(agy_home, [{"id": session_id, "title": "x", "step_count": float("inf"),
                                "last_modified_time": MUT.EPOCH}])
     assert [item.session_id for item in agy.ADAPTER.list_sessions()] == [session_id]
-    assert agy._summary_rows()[0].step_count is None
+    assert agy_store._summary_rows()[0].step_count is None
 
 
 @pytest.mark.parametrize("value", [
@@ -597,15 +597,15 @@ def test_a_non_finite_step_count_does_not_take_the_listing_down(agy_home):
     "1767225600",               # numeric string
 ])
 def test_iso_accepts_the_plausible_time_units(value):
-    assert agy._iso(value) == "2026-01-01T00:00:00Z"
+    assert agy_store._iso(value) == "2026-01-01T00:00:00Z"
 
 
 def test_iso_outside_the_window_is_unknown_and_warned_once(capsys):
-    assert agy._iso(0) is None
-    assert agy._iso(4_102_444_800) is None       # 2100-01-01 is outside (exclusive)
+    assert agy_store._iso(0) is None
+    assert agy_store._iso(4_102_444_800) is None       # 2100-01-01 is outside (exclusive)
     err = capsys.readouterr().err
     assert err.count("時間欄位看不懂") == 1
-    assert agy._iso(5) is None
+    assert agy_store._iso(5) is None
     assert "時間欄位看不懂" not in capsys.readouterr().err
 
 

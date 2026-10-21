@@ -538,7 +538,9 @@ Python（uv）＋ rclone ＋ SQLite FTS5。**`src/` 的程式碼行數只記錄�
 | `store` | rclone 呼叫、outbox、鏡像、索引（含 NFKC 與二字詞退路） | 400 |
 | `agents/opencode` | export、id 改寫後 import、閱讀版、找出結束後的 session | 300 |
 | `agents/claude` | 找 jsonl 與附屬檔、改寫欄位、閱讀版、找出結束後的 session | 350 |
-| `agents/agy` | 唯讀（#26 PR1）：快照、整包 db 的 raw 信封、閱讀版、讀 summaries 的清單／搜尋／最後一則；接續方法為拒絕 stub | 400 |
+| `agents/agy` | 唯讀（#26 PR1）：信封（raw 打包／解碼）、`AgyAgent` 的 export／閱讀版／清單／搜尋／最後一則；接續方法為拒絕 stub。AGY_READ_ONLY 等常數在這裡再匯出 | 280 |
+| `agents/agy_store` | agy 目錄與 db 的存取層（#26 PR2a 拆出）：home／快照（複製＋wal 重放＋VACUUM）、`_rows`／`_trajectory_id`、summaries 清單與快取 | 398 |
+| `agents/agy_wire` | protobuf 線格式與步驟解碼（#26 PR2a 拆出）：`_fields` 家族、閱讀版 turns、`_scan_text` 掃描面、step_type 常數 | 216 |
 | `cli` | 六個指令、continue 流程、pending 補存、merge | 400 |
 
 測試照當初的 test-plan review（`docs/review/test-plan.md`（2026-10-04 清理時已從 repo 移除，要看請用 `git show fd3ba9f:<路徑>` 從歷史取回）），之後依 `openspec/specs/` 的 Scenario 補。**測試的 helper 只能在 pytest 或隔離的環境裡用**：不在 pytest（沒有 `PYTEST_VERSION`）而且 `AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`AGORA_CONFIG`／`HOME` 有任一個沒指到暫存目錄時，`tests/_guard.py` 在 import 的當下就 `SystemExit`（T8；在那之前有過兩次直接用真的目錄，其中一次把真實 Session 的標題送進了外部模型）。測試用的接縫：`AGORA_FOLDER_NAME`（整合測試設成 `agora-test`）、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`AGORA_RCLONE`、`AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD`（正式介面，#77；測試也用它）、`AGORA_CLAUDE_HOME`、`AGORA_AGY_HOME`（agy 的根目錄；測試一律指到暫存目錄）、`AGORA_TEST_FAULT`（含 `after-periodic-write`：定期寫回做完之後）、`AGORA_ROUND_TIMEOUT`（一輪定期寫回的死線，秒，預設 1800——正式的使用者介面，測試用它把卡住的輪縮短到幾秒）、`AGORA_NOW`。接續的間隔直接用 `--sync-period` 給很小的小數（例如 `0.005`）測試，不另設環境變數。
