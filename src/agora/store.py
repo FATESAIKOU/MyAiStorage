@@ -18,6 +18,7 @@ import fcntl
 import copy
 import hashlib
 import json
+import re
 import os
 import shutil
 import sqlite3
@@ -36,7 +37,8 @@ SYNC_THROTTLE_S = 300
 #: a new shape is rebuilt from the mirror rather than migrated (design, T1 3.1).
 INDEX_VERSION = 2
 #: What an unfinished session looked like the last time we downloaded it (#119):
-#: `{ulid: {session_md5, raw_file, raw_md5}}`. Local state, never uploaded.
+#: `{ulid: {session_md5, raw_manifest, raw_fingerprint, legacy}}` (version 2; a version 1
+#: file is ignored). Local state, never uploaded.
 UNFINISHED_FILE = "unfinished.json"
 
 
@@ -195,6 +197,184 @@ def _md5(entry: dict) -> str:
     return (entry.get("Hashes") or {}).get("md5", "")
 
 
+# --- the raw's layout on Drive (design A, C.3, E; #168) ----------------------------------
+
+RAW_LAYOUT = "chunks/1"
+
+#: TRANSITION (R3a -> R3b-1, same release). `stage` still writes the one-file raw:
+#: a header with `raw.file` and no `layout`. Until R3b-1 makes `stage` write
+#: `chunks/1`, that header is the only one agora itself produces, so it must stay
+#: readable. While this is True a header with no `layout` is read as that single
+#: file; a header with any *other* `layout` is already "unknown" (raw not usable).
+#: R3b-1 sets it False (and deletes the single-file branches): then no `layout`
+#: means legacy, which is the design's rule (C.3).
+_SINGLE_FILE_READABLE = True
+
+_HEX32 = re.compile(r"[0-9a-f]{32}")
+
+
+def raw_layout(raw: dict | None) -> str | None:
+    """The `layout` a header's `raw` declares, when it is a string; None otherwise.
+
+    None is *not* "declares none": `3` or `[]` come back as None too. Whoever has to
+    tell "no layout" from "a layout this version does not know" asks `raw_kind`.
+    """
+    layout = raw.get("layout") if isinstance(raw, dict) else None
+    return layout if isinstance(layout, str) else None
+
+
+def raw_segments(raw: dict | None) -> list[dict]:
+    """The manifest: `raw.segments` as written, [] when there is none."""
+    segs = raw.get("segments") if isinstance(raw, dict) else None
+    return segs if isinstance(segs, list) else []
+
+
+def _derived_name(raw: dict) -> str | None:
+    md5 = raw.get("md5")
+    if isinstance(md5, str) and _HEX32.fullmatch(md5):
+        return f"raw-{md5[:12]}.json"
+    return None
+
+
+def raw_name(raw: dict) -> str:
+    """The whole raw's file name in the mirror (and, for the one-file format, on Drive).
+
+    Always derived from `raw.md5` - `raw-<md5[:12]>.json` (design A.2) - and never
+    from anything else in the header: a header is what another machine wrote, and a
+    name taken from it can walk out of the mirror (`../../x`). The md5 has to be 32
+    lowercase hex characters, or there is no name (StoreError).
+    """
+    name = _derived_name(raw) if isinstance(raw, dict) else None
+    if name is None:
+        raise StoreError("raw 標頭的 md5 不是 32 位小寫 hex，沒有可用的檔名")
+    return name
+
+
+def _safe_basename(name: object) -> bool:
+    """A manifest name we may download or delete: a plain file name, nothing more."""
+    return (isinstance(name, str) and bool(name) and name == os.path.basename(name)
+            and "\\" not in name and "/" not in name and ".." not in name
+            and not name.startswith("."))
+
+
+def _manifest_ok(raw: dict) -> bool:
+    """The static checks on a `chunks/1` manifest (design E.1), without any listing."""
+    segs = raw_segments(raw)
+    size = raw.get("size")
+    if (not segs or not isinstance(size, int) or isinstance(size, bool)
+            or _derived_name(raw) is None):
+        return False
+    total = 0
+    for seg in segs:
+        if not isinstance(seg, dict):
+            return False
+        seg_size = seg.get("size")
+        if (not _safe_basename(seg.get("file")) or not isinstance(seg_size, int)
+                or isinstance(seg_size, bool) or seg_size < 0
+                or not isinstance(seg.get("md5"), str) or not _HEX32.fullmatch(seg["md5"])):
+            return False
+        total += seg_size
+    return total == size
+
+
+def raw_complete(raw: dict | None, files: dict) -> bool | None:
+    """Is the raw this header names whole on Drive? True / False / **None**.
+
+    None is not "no": it is a raw this version does not read (no `layout`, or one it
+    does not know). The caller marks it unusable and keeps the session - it neither
+    waits for Drive nor deletes anything (design E.1). `files` is Drive's listing of
+    the one session folder, `{name: md5}`.
+    """
+    if not raw:
+        return True                    # no raw (a merge, a hand-written one): whole by itself
+    if not isinstance(raw, dict) or raw_layout(raw) != RAW_LAYOUT:
+        return None
+    return _manifest_ok(raw) and all(
+        files.get(seg["file"]) == seg["md5"] for seg in raw_segments(raw))
+
+
+def raw_kind(raw: dict | None) -> str:
+    """How this version reads the header's raw: none / chunks / single / legacy.
+
+    `legacy` is "do not read it, do not delete it": a layout this version does not know
+    (any string but `chunks/1`, and any non-string value too), a `raw` that is not a
+    mapping, and - once R3b-1 clears `_SINGLE_FILE_READABLE` - the one-file format.
+    Only a header with **no** `layout` (the key missing or null) can be `single`, and
+    only while it is readable and its `file` is exactly the name its md5 gives.
+    """
+    if not raw:
+        return "none"
+    if not isinstance(raw, dict):
+        return "legacy"
+    layout = raw.get("layout")
+    if layout is not None:
+        return "chunks" if layout == RAW_LAYOUT else "legacy"
+    name = _derived_name(raw)
+    if _SINGLE_FILE_READABLE and name is not None and raw.get("file") == name:
+        return "single"
+    return "legacy"
+
+
+def raw_state(raw: dict | None, files: dict) -> bool | None:
+    """`raw_complete`, plus the one-file format while it is still readable."""
+    if raw_kind(raw) == "single":
+        return files.get(raw_name(raw)) == raw.get("md5")
+    return raw_complete(raw, files)
+
+
+def raw_manifest(raw: dict) -> list[tuple[str, str]]:
+    """[(file, md5)] of everything on Drive the raw consists of."""
+    if raw_kind(raw) == "single":
+        return [(raw_name(raw), str(raw.get("md5", "")))]
+    return [(str(seg.get("file")), str(seg.get("md5"))) for seg in raw_segments(raw)
+            if isinstance(seg, dict)]
+
+
+def raw_fingerprint(manifest: list, files: dict) -> str:
+    """md5 of the canonical JSON of the manifest's (file, md5) and what Drive lists
+    for each now: the same fingerprint means a re-download could not answer differently
+    (`unfinished.json` v2)."""
+    rows = [[name, md5, files.get(name, "")] for name, md5 in manifest]
+    return hashlib.md5(json.dumps(rows, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+LEGACY_RAW_MESSAGE = ("這個 Session 的 raw 是舊格式或未知格式，這個版本不讀它；"
+                      "要重新匯入請用 agora import … --as-new")
+
+
+def require_usable_raw(header: dict) -> None:
+    """StoreError, up front, for a session whose raw this version does not read (C.3).
+
+    A session with no raw (a merge) passes - it has nothing to refuse.
+    """
+    if raw_kind(h.agora_of(header).get("raw")) == "legacy":
+        raise StoreError(LEGACY_RAW_MESSAGE)
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    """An integer environment setting; a bad value is an error, never the default."""
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    try:
+        number = int(value)
+    except ValueError:
+        raise StoreError(f"{name}={value!r} 不是整數") from None
+    if number <= 0:
+        raise StoreError(f"{name}={value!r} 要大於 0")
+    return number
+
+
+def raw_chunk_size() -> int:
+    """`AGORA_RAW_CHUNK`: bytes per sealed segment (default 4 MiB; tests use 4096)."""
+    return _env_positive_int("AGORA_RAW_CHUNK", 4 * 1024 * 1024)
+
+
+def raw_orphan_grace() -> int:
+    """`AGORA_RAW_ORPHAN_GRACE`: seconds an unreferenced segment is left alone (default 3600)."""
+    return _env_positive_int("AGORA_RAW_ORPHAN_GRACE", 3600)
+
+
 class Drive:
     """Thin wrapper over rclone. Never reads the token; rclone refreshes it."""
 
@@ -309,6 +489,13 @@ class Drive:
         mirror.mkdir(parents=True, exist_ok=True)
         _with_files_from(self, [f"{u}/session.md" for u in ulids], mirror,
                          "copy", "gdrive:sessions", str(mirror), "--no-traverse")
+
+
+    def download_segments(self, ulid: str, names: list[str], dest: Path) -> None:
+        """Fetch several files of one session folder in one rclone run (`--files-from`)."""
+        dest.mkdir(parents=True, exist_ok=True)
+        _with_files_from(self, names, dest, "copy", f"gdrive:sessions/{ulid}", str(dest),
+                         "--no-traverse")
 
 
 class _Md5Reader:
@@ -554,7 +741,7 @@ def remember(paths: Paths, folder: Path, index: "Index | None" = None, ulid: str
     mirror.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(folder / "session.md", mirror / "session.md")
     raw = (h.agora_of(read_entry(folder)).get("raw") or {})
-    if (name := raw.get("file")) and (folder / name).is_file():
+    if raw and (name := raw_name(raw)) and (folder / name).is_file():
         wanted, target = folder / name, mirror / name
         if not (target.is_file() and target.stat().st_size == wanted.stat().st_size):
             copy_atomic(wanted, target, utf8=True)
@@ -607,10 +794,10 @@ def _entry_header(folder: Path, data: bytes) -> tuple[dict, str | None]:
         raw = h.agora_of(hdr).get("raw")
         name = None
         if raw:
-            name = raw["file"]                      # KeyError when it has no file
+            name = raw_name(raw)
             if not (folder / name).is_file():
                 raise h.HeaderError(f"缺少 {name}")
-    except (OSError, UnicodeDecodeError, AttributeError, KeyError, TypeError) as e:
+    except (OSError, UnicodeDecodeError, AttributeError, KeyError, TypeError, StoreError) as e:
         raise h.HeaderError(str(e)) from None
     return hdr, name
 
@@ -630,16 +817,16 @@ def _upload_checked(drive: Drive, folder: Path, ulid: str, raw: dict,
     zero is not proof that the bytes arrived, so the md5s Drive reports decide.
     """
     if uploaded_raw:
-        drive.upload(folder / raw["file"], ulid, raw["file"])
+        drive.upload(folder / raw_name(raw), ulid, raw_name(raw))
         _fault("after-raw-upload")        # crash between the two uploads (AGORA_TEST_FAULT)
-    elif raw.get("file"):
-        warn(f"{ulid} 標頭指到的 {raw['file']} 本機沒有{tail}")
+    elif raw:
+        warn(f"{ulid} 標頭指到的 {raw_name(raw)} 本機沒有{tail}")
     drive.upload(folder / "session.md", ulid, "session.md")
     _fault("after-session-upload")
     remote = drive.list_one(ulid)
     if remote.get("session.md") != md5_file(folder / "session.md"):
         raise StoreError(f"{ulid} 的 session.md 在 Drive 上的 md5 不符{tail}")
-    if uploaded_raw and remote.get(raw["file"]) != raw.get("md5"):
+    if uploaded_raw and remote.get(raw_name(raw)) != raw.get("md5"):
         raise StoreError(f"{ulid} 的 raw 在 Drive 上的 md5 不符{tail}")
     return remote
 
@@ -649,23 +836,26 @@ def push_mirror(drive: Drive, paths: Paths, ulid: str, header: dict) -> None:
     folder = paths.mirror / ulid
     raw = h.agora_of(header).get("raw") or {}
     _upload_checked(drive, folder, ulid, raw,
-                    bool(raw.get("file")) and (folder / raw["file"]).is_file(), "")
+                    bool(raw) and (folder / raw_name(raw)).is_file(), "")
 
 
 def mirror_one(paths: Paths, drive: Drive, index: "Index", ulid: str,
                files: dict) -> dict | None:
     """Put one session Drive has into the mirror and the index (sync and pull, once).
 
-    None means it is not whole yet: its header names a raw that is missing or has
-    another md5, so the half-written session.md leaves the mirror and the index
-    (G3). The caller words that case its own way.
+    None means it is not whole yet: its header names a raw (or segments) that are
+    missing or have another md5, so the half-written session.md leaves the mirror and
+    the index (G3). The caller words that case its own way. A raw this version does
+    not read is not "not whole yet": the session stays, with its raw unusable.
     """
     local = paths.mirror / ulid / "session.md"
     if not (local.exists() and md5_file(local) == files.get("session.md")):
         drive.download(ulid, "session.md", local)
     hdr, body = h.split_document(local.read_text(encoding="utf-8"))
-    raw = h.agora_of(hdr).get("raw") or {}
-    if raw.get("file") and files.get(raw["file"]) != raw.get("md5"):
+    # False: the raw is not whole on Drive yet - out of the mirror and the index (G3).
+    # None: a raw this version does not read (legacy / unknown layout) - kept and
+    # indexed like any other session, only its raw is unusable (design C.3, E.1).
+    if raw_state(h.agora_of(hdr).get("raw"), files) is False:
         local.unlink(missing_ok=True)
         index.drop(ulid)
         return None
@@ -1223,9 +1413,10 @@ def _rescue_deleted(paths: Paths, folder: Path, ulid: str, say, notices: bool = 
     try:
         text = (done / "session.md").read_text(encoding="utf-8")
         hdr, body = h.split_document(text)
-        name = (h.agora_of(hdr).get("raw") or {}).get("file")
+        named = h.agora_of(hdr).get("raw")
+        name = raw_name(named) if named else None
         raw = (done / name).read_bytes() if name else None
-    except (OSError, h.HeaderError) as e:
+    except (OSError, h.HeaderError, StoreError) as e:
         say(f"{ulid} 雲端沒有，而且讀不出這筆（{e}）；留在 outbox 等你處理")
         _put_back(done, folder)
         return None
@@ -1344,8 +1535,9 @@ def _named_raw(folder: Path) -> str | None:
     for an uploader that listed it a moment ago); this is the one that belongs to it.
     """
     try:
-        return (h.agora_of(read_entry(folder)).get("raw") or {}).get("file")
-    except h.HeaderError:
+        named = h.agora_of(read_entry(folder)).get("raw")
+        return raw_name(named) if named else None
+    except (h.HeaderError, StoreError):
         return None
 
 
@@ -1622,40 +1814,53 @@ def kick_uploader(paths: Paths) -> str | None:
     return None
 
 
-def _unfinished(paths: Paths) -> dict[str, dict[str, str]]:
-    """What sync last saw for sessions whose raw was missing or wrong (#119).
+def _unfinished(paths: Paths) -> dict[str, dict]:
+    """What sync last saw for sessions whose raw was not whole, or not readable (#119).
 
-    The pair is enough to tell whether downloading the same session.md again could
-    reach a different answer: the same session.md and the same raw listing mean the
-    header still names a raw Drive does not have (or has with another md5), so it is
-    still unfinished. A missing or broken file is the same as no memory: the next
-    sync downloads once and writes it again.
+    A record is `{session_md5, raw_manifest, raw_fingerprint, legacy}`. For a raw that
+    is still being written: the same session.md and the same fingerprint (the manifest's
+    (file, md5) with what Drive lists for each now) mean downloading again could only
+    reach the same "not written yet" - so it does not. For a raw this version does not
+    read (`legacy: true`, design E.1): the session is indexed and kept, and the record
+    only says that nobody needs to look at it again until its session.md changes.
+    A missing, broken or version-1 file is the same as no memory: the next sync
+    downloads once and writes it again.
     """
     try:
         data = json.loads((paths.state / UNFINISHED_FILE).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return {}
-    if not isinstance(data, dict) or data.get("version") != 1:
+    if not isinstance(data, dict) or data.get("version") != 2:
         return {}
     entries = data.get("sessions")
     if not isinstance(entries, dict):
         return {}
-    found: dict[str, dict[str, str]] = {}
+    found: dict[str, dict] = {}
     for ulid, record in entries.items():
         if not isinstance(ulid, str) or not isinstance(record, dict):
             continue
-        values = (record.get("session_md5"), record.get("raw_file"), record.get("raw_md5"))
-        if all(isinstance(value, str) for value in values):
-            found[ulid] = {"session_md5": values[0], "raw_file": values[1],
-                           "raw_md5": values[2]}
+        manifest = record.get("raw_manifest")
+        if (isinstance(record.get("session_md5"), str)
+                and isinstance(record.get("raw_fingerprint"), str)
+                and isinstance(manifest, list)
+                and all(isinstance(row, list) and len(row) == 2
+                        and all(isinstance(x, str) for x in row) for row in manifest)):
+            found[ulid] = {"session_md5": record["session_md5"], "raw_manifest": manifest,
+                           "raw_fingerprint": record["raw_fingerprint"],
+                           "legacy": record.get("legacy") is True}
     return found
 
 
-def _write_unfinished(paths: Paths, entries: dict[str, dict[str, str]]) -> None:
+def _write_unfinished(paths: Paths, entries: dict[str, dict]) -> None:
     paths.state.mkdir(parents=True, exist_ok=True)
     write_atomic(paths.state / UNFINISHED_FILE,
-                 json.dumps({"version": 1, "sessions": entries},
+                 json.dumps({"version": 2, "sessions": entries},
                             ensure_ascii=False, sort_keys=True))
+
+
+def _folder_files(remote: dict, ulid: str) -> dict:
+    """The listing of one session folder (`{}` when Drive lists none)."""
+    return remote.get(ulid) or {}
 
 
 def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
@@ -1706,16 +1911,19 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
     trashing = queued_for_trash(paths)
     known = index.known()
     unfinished = _unfinished(paths)
-    still_unfinished: dict[str, dict[str, str]] = {}
+    still_unfinished: dict[str, dict] = {}
     changed = []
     for u, f in remote.items():
         if not f.get("session.md") or u in trashing:
             continue
-        if known.get(u) == f["session.md"] and (paths.mirror / u / "session.md").exists():
-            continue
         seen = unfinished.get(u)
-        if (seen and seen["session_md5"] == f["session.md"]
-                and f.get(seen["raw_file"], "") == seen["raw_md5"]):
+        if known.get(u) == f["session.md"] and (paths.mirror / u / "session.md").exists():
+            if seen and seen["legacy"] and seen["session_md5"] == f["session.md"]:
+                still_unfinished[u] = seen       # still a raw we do not read: remember it
+            continue
+        if (seen and not seen["legacy"] and seen["session_md5"] == f["session.md"]
+                and raw_fingerprint(seen["raw_manifest"], _folder_files(remote, u))
+                == seen["raw_fingerprint"]):
             # Same half-written session.md and the same raw on Drive: downloading it
             # again would read the same header and reach the same "not written yet"
             # answer, once per command (#119). Keep it out of the index and out of an
@@ -1746,13 +1954,23 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
             say(f"{ulid} 讀不到，先跳過：{e}")
             continue
         raw = h.agora_of(hdr).get("raw")
-        if raw and remote[ulid].get(raw["file"]) != raw.get("md5"):
+        state = raw_state(raw, remote[ulid])
+        if state is False:
             say(f"{ulid} 還沒寫完（raw 不在或 md5 不符），下次再試")
             index.drop(ulid)
             local.unlink(missing_ok=True)   # keep unfinished sessions out of an offline rebuild (G3)
-            still_unfinished[ulid] = {"session_md5": md5, "raw_file": raw["file"],
-                                      "raw_md5": remote[ulid].get(raw["file"], "")}
+            manifest = [list(row) for row in raw_manifest(raw)]
+            still_unfinished[ulid] = {
+                "session_md5": md5, "raw_manifest": manifest, "legacy": False,
+                "raw_fingerprint": raw_fingerprint(manifest, remote[ulid])}
             continue
+        if state is None:
+            # A raw this version does not read: the reading version is as good as any
+            # other, the session stays in the mirror and the index (C.3, E.1) - only
+            # its raw is unusable, which `show --raw` / `continue` / `edit` say.
+            say(f"{ulid} 的 raw 是舊格式或未知格式，這個版本不讀它（閱讀版照常可用）")
+            still_unfinished[ulid] = {"session_md5": md5, "raw_manifest": [],
+                                      "legacy": True, "raw_fingerprint": ""}
         index.put(ulid, md5, hdr, body)
     if missing:
         say("Drive 上找不到 sessions/，可能是 folder ID 或 token 有問題，標記不動")
@@ -1827,23 +2045,173 @@ def delete_session(paths: Paths, drive: Drive, ulid: str) -> None:
     shutil.rmtree(paths.outbox / ulid, ignore_errors=True)
 
 
-def fetch_raw(paths: Paths, drive: Drive, ulid: str, header: dict, *, retry: bool = True) -> bytes:
-    """Download a session's raw on demand and verify it against the header."""
+def _read_header(path: Path) -> dict:
+    hdr, _ = h.split_document(path.read_text(encoding="utf-8"))
+    return hdr
+
+
+def ensure_raw_file(paths: Paths, drive: Drive, ulid: str, header: dict, *,
+                    retry: bool = True) -> Path:
+    """The session's whole raw as a file in the mirror, fetched and verified on demand (E.2).
+
+    1. The mirror already has `raw-<md5[:12]>.json` with the right md5: done, no network.
+    2. A raw this version does not read (`legacy`: an unknown layout, ...): StoreError.
+    3. `chunks/1`: the missing segments in **one** `copy --files-from` into
+       `<cache>/segments/<ULID>/`, each checked against its manifest md5, joined in
+       manifest order into a temp file next to the target, whole md5 and size checked,
+       then `os.replace`d in - and the temp segments and any other `raw-*.json` go.
+       A segment that is gone (another machine cleaned up after a new version) makes us
+       fetch session.md once more and follow its manifest, keeping the segments that
+       are still in it (same name, same md5); still short -> StoreError, nothing left.
+    The segments live only for this call, success or not.
+    """
     raw = h.agora_of(header).get("raw")
     if not raw:
         raise StoreError(f"{ulid} 沒有 raw：merge 出來的 Session 沒有自己的 raw，請看 agora.parents 裡各個來源的 raw")
-    local = paths.mirror / ulid / raw["file"]
-    if not local.exists() or md5_file(local) != raw["md5"]:
-        try:
-            drive.download(ulid, raw["file"], local)
-        except StoreError:
-            if not retry:
-                raise
-            # Another machine may have re-imported it and removed this raw:
-            # refresh session.md once and follow its new pointer (N8).
-            drive.download(ulid, "session.md", paths.mirror / ulid / "session.md")
-            fresh, _ = h.split_document((paths.mirror / ulid / "session.md").read_text(encoding="utf-8"))
-            return fetch_raw(paths, drive, ulid, fresh, retry=False)
-    if md5_file(local) != raw["md5"]:
-        raise StoreError(f"{ulid} 的 raw md5 和 header 不符")
-    return local.read_bytes()
+    kind = raw_kind(raw)
+    if kind == "legacy":                 # before the mirror: a raw we do not read stays unread
+        raise StoreError(f"{ulid}：{LEGACY_RAW_MESSAGE}")
+    local = paths.mirror / ulid / raw_name(raw)
+    if local.is_file() and md5_file(local) == raw.get("md5"):
+        return local
+    if kind == "single":
+        return _ensure_single_file(paths, drive, ulid, raw, local, retry=retry)
+    return _ensure_segmented(paths, drive, ulid, raw, retry=retry)
+
+
+def _ensure_single_file(paths: Paths, drive: Drive, ulid: str, raw: dict, local: Path, *,
+                        retry: bool) -> Path:
+    """The one-file format (transition, `_SINGLE_FILE_READABLE`): what `fetch_raw` always did,
+    except that the download lands in a temp file next to the target and only a raw whose
+    md5 and size are right is `os.replace`d in - a wrong one never sits in the mirror."""
+    local.parent.mkdir(parents=True, exist_ok=True)
+    tmp = local.parent / f".{local.name}.dl-{os.getpid()}"
+    try:
+        drive.download(ulid, local.name, tmp)
+    except StoreError:
+        tmp.unlink(missing_ok=True)
+        if not retry:
+            raise
+        # Another machine may have re-imported it and removed this raw:
+        # refresh session.md once and follow its new pointer (N8).
+        drive.download(ulid, "session.md", paths.mirror / ulid / "session.md")
+        fresh = _read_header(paths.mirror / ulid / "session.md")
+        return ensure_raw_file(paths, drive, ulid, fresh, retry=False)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    try:
+        size = raw.get("size")
+        if md5_file(tmp) != raw["md5"]:
+            raise StoreError(f"{ulid} 的 raw md5 和 header 不符")
+        if isinstance(size, int) and tmp.stat().st_size != size:
+            raise StoreError(f"{ulid} 的 raw 大小和 header 不符")
+        os.replace(tmp, local)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return local
+
+
+def _ensure_segmented(paths: Paths, drive: Drive, ulid: str, raw: dict, *,
+                      retry: bool) -> Path:
+    segdir = paths.cache / "segments" / ulid
+    shutil.rmtree(segdir, ignore_errors=True)          # nothing from an earlier call is trusted
+    segdir.mkdir(parents=True)
+    try:
+        have: dict[str, str] = {}                      # segment name -> md5, verified this call
+        for attempt in range(2 if retry else 1):
+            if not _manifest_ok(raw):
+                raise StoreError(f"{ulid} 的 raw 清單不合法（檔名、大小或 md5 有問題），不讀")
+            wanted = [(s["file"], s["md5"]) for s in raw_segments(raw)]
+            missing = [name for name, md5 in wanted if have.get(name) != md5]
+            for name in {n for n in have if n not in {w[0] for w in wanted}}:
+                (segdir / name).unlink(missing_ok=True)   # not in this manifest any more
+            failure: StoreError | None = None
+            try:
+                if missing:
+                    drive.download_segments(ulid, missing, segdir)
+            except StoreError as e:
+                failure = e
+            # What arrived is checked either way: after a failed call the segments that
+            # did come are still good, and a retry on a newer manifest must not fetch them again.
+            for name, md5 in wanted:
+                if have.get(name) == md5:
+                    continue
+                path = segdir / name
+                if not path.is_file():
+                    continue
+                if md5_file(path) != md5:
+                    path.unlink(missing_ok=True)
+                    raise StoreError(f"{ulid} 的段 {name} 下載後 md5 不符，不拼半份")
+                have[name] = md5
+            if failure is not None:
+                if not _segments_gone(drive, ulid, missing) or attempt + 1 >= (2 if retry else 1):
+                    raise StoreError(f"{ulid} 的 raw 段下載失敗：{failure}") from None
+                raw = _fresh_raw(paths, drive, ulid)    # 404: follow the newer manifest
+                keep = {seg.get("file") for seg in raw_segments(raw)}
+                have = {n: m for n, m in have.items() if n in keep}
+                continue
+            if any(have.get(name) != md5 for name, md5 in wanted):
+                raise StoreError(f"{ulid} 的 raw 段沒有下載齊")
+            return _join_segments(paths, ulid, raw, segdir)
+        raise StoreError(f"{ulid} 的 raw 段不齊")          # not reached
+    finally:
+        shutil.rmtree(segdir, ignore_errors=True)
+
+
+def _segments_gone(drive: Drive, ulid: str, names: list[str]) -> bool:
+    """Is a failed segment download because Drive no longer has them (404), not the network?
+
+    A listing that works and lacks a wanted name says so; one that fails says nothing,
+    and the download's own error stands.
+    """
+    try:
+        files = drive.list_one(ulid)
+    except StoreError:
+        return False
+    return any(name not in files for name in names)
+
+
+def _fresh_raw(paths: Paths, drive: Drive, ulid: str) -> dict:
+    """session.md again (once), and the `raw` it names now."""
+    local = paths.mirror / ulid / "session.md"
+    drive.download(ulid, "session.md", local)
+    raw = h.agora_of(_read_header(local)).get("raw") or {}
+    if raw_kind(raw) != "chunks":          # a newer header that is not `chunks/1` is not followed
+        raise StoreError(LEGACY_RAW_MESSAGE)
+    return raw
+
+
+def _join_segments(paths: Paths, ulid: str, raw: dict, segdir: Path) -> Path:
+    mirror = paths.mirror / ulid
+    mirror.mkdir(parents=True, exist_ok=True)
+    final = mirror / raw_name(raw)
+    tmp = mirror / f".{final.name}.joining-{os.getpid()}"
+    digest = hashlib.md5()
+    size = 0
+    try:
+        with open(tmp, "wb") as out:
+            for seg in raw_segments(raw):
+                with open(segdir / seg["file"], "rb") as part:
+                    for block in iter(lambda: part.read(1 << 20), b""):
+                        out.write(block)
+                        digest.update(block)
+                        size += len(block)
+            out.flush()
+            os.fsync(out.fileno())
+        if digest.hexdigest() != raw.get("md5") or size != raw.get("size"):
+            raise StoreError(f"{ulid} 的 raw 接起來 md5／大小和 header 不符，不安裝")
+        os.replace(tmp, final)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    for other in mirror.glob("raw-*"):
+        if other.name != final.name:
+            other.unlink(missing_ok=True)
+    return final
+
+
+def fetch_raw(paths: Paths, drive: Drive, ulid: str, header: dict, *, retry: bool = True) -> bytes:
+    """Download a session's raw on demand and verify it against the header (bytes)."""
+    return ensure_raw_file(paths, drive, ulid, header, retry=retry).read_bytes()
