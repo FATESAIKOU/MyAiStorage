@@ -80,13 +80,22 @@ def test_reimport_swaps_raw_and_other_machine_follows(two_machines):
     created.append(ulid)
     store.upload_batch(store.Drive(a), a)
     store.sync(b)
+    first_segments = [seg["file"] for seg in hdr["agora"]["raw"]["segments"]]
 
     folder = store.stage(a, hdr, "## user\n第二版\n", b'{"v": 2}')
     store.upload_batch(store.Drive(a), a)
     files = store.Drive(a).list_sessions()[ulid]
-    assert sorted(files) == sorted(["session.md", hdr["agora"]["raw"]["file"]])   # the old raw is gone
+    # the segments the final header lists, and session.md - Drive has no whole raw; the first
+    # version's segment is still inside its grace period, so it may still be there
+    named = {seg["file"] for seg in hdr["agora"]["raw"]["segments"]}     # stage filled the final header in
+    assert {"session.md", *named} <= set(files) and not any(n.startswith("raw-") for n in files)
 
     stale = store.Index(b).header(ulid)          # b still points at the first raw
+    # N8 needs the old segments to be GONE (404), which on a real Drive only happens once their
+    # grace period is over (design B.5.5) - the first version's segments are still inside it
+    # here, so take them away as another machine's later cleanup would.
+    for name in first_segments:
+        store.Drive(a)._run("deletefile", f"gdrive:sessions/{ulid}/{name}")
     assert store.fetch_raw(b, store.Drive(b), ulid, stale) == b'{"v": 2}'   # N8 refresh
 
 

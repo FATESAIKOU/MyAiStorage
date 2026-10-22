@@ -155,7 +155,7 @@ def test_the_real_child_does_the_load_and_answers_small(lab, capsys):
     a = _seed_import(capsys)
     ulid = a.split(":")[1]
     parent = store.Index(paths()).header(ulid)
-    raw = (paths().mirror / ulid / parent["agora"]["raw"]["file"]).read_bytes()
+    raw = (paths().mirror / ulid / store.raw_name(parent["agora"]["raw"])).read_bytes()
     expected = store.hashlib.md5(raw).hexdigest()
 
     payload = cli._start_child(paths(), _state(a, parent, lab["work"]))

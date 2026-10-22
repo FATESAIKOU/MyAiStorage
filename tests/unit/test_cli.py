@@ -1089,15 +1089,18 @@ def test_a_broken_stored_section_is_refused(env, capsys):  # review v7 A2
     run(capsys, "show", "session", ab, "--raw")             # brings sections.json into the cache
     paths = store.Paths.from_env()
     hdr = store.Index(paths).header(ab.split(":")[1])
-    raw = paths.mirror / ab.split(":")[1] / hdr["agora"]["raw"]["file"]
+    raw = paths.mirror / ab.split(":")[1] / store.raw_name(hdr["agora"]["raw"])
     doc = json.loads(raw.read_text())
     del doc["sections"][0]["title"]
     raw.write_text(json.dumps(doc))
-    hdr["agora"]["raw"]["md5"] = store.md5_file(raw)
-    # a raw is named by its md5 (#168: the header's `file` is only believed when it is that name)
-    named = raw.with_name(f"raw-{hdr['agora']['raw']['md5'][:12]}.json")
+    # a raw is named by its md5 and described by its manifest: stand the tampered one up
+    # as a consistent single-segment raw, so only its sections are broken
+    new_md5, new_size = store.md5_file(raw), raw.stat().st_size
+    named = raw.with_name(f"raw-{new_md5[:12]}.json")
     raw.rename(named)
-    hdr["agora"]["raw"]["file"] = named.name
+    hdr["agora"]["raw"] = {"md5": new_md5, "size": new_size, "layout": "chunks/1",
+                           "segments": [{"file": store.segment_name(1, 0, new_md5),
+                                         "size": new_size, "md5": new_md5}]}
     md = paths.mirror / ab.split(":")[1] / "session.md"
     _, body = h.split_document(md.read_text())
     md.write_text(h.dump_document(hdr, body))
@@ -1132,7 +1135,7 @@ def test_pull_brings_the_raw_down_and_push_writes_the_session_back(env, capsys):
     paths = store.Paths.from_env()
     ulid = a.split(":")[1]
     hdr = store.Index(paths).header(ulid)
-    raw = paths.mirror / ulid / hdr["agora"]["raw"]["file"]
+    raw = paths.mirror / ulid / store.raw_name(hdr["agora"]["raw"])
     if raw.exists():
         raw.unlink()
     code, out, _ = run(capsys, "pull", "session", ulid)

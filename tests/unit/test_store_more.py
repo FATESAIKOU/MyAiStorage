@@ -106,9 +106,10 @@ def test_no_snapshot_has_a_dangling_raw_pointer(remote):  # U-ST-03, snapshots
             raw = h.agora_of(hdr).get("raw")
             if not raw:
                 continue
-            target = md.parent / raw["file"]
-            assert target.is_file(), f"{snap.name}: {raw['file']} missing"
-            assert hashlib.md5(target.read_bytes()).hexdigest() == raw["md5"]
+            for seg in raw["segments"]:
+                target = md.parent / seg["file"]
+                assert target.is_file(), f"{snap.name}: {seg['file']} missing"
+                assert hashlib.md5(target.read_bytes()).hexdigest() == seg["md5"]
             checked += 1
     assert checked >= 2
 
@@ -121,18 +122,21 @@ def test_missing_raw_not_indexed_until_added(remote, tmp_path):  # U-ST-04
     drive.upload(folder / "session.md", hdr["id"].split(":", 1)[1], "session.md")
     other = machine2(tmp_path)
     assert store.sync(other).search(T("表格")) == []
-    drive.upload(folder / h.agora_of(hdr)["raw"]["file"], hdr["id"].split(":", 1)[1], h.agora_of(hdr)["raw"]["file"])
+    seg = h.agora_of(hdr)["raw"]["segments"][0]["file"]          # one small segment: the raw itself
+    (remote / "agora" / "sessions" / hdr["id"].split(":", 1)[1] / seg).write_bytes(
+        (folder / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes())
     assert [hit[0] for hit in store.sync(other).search(T("表格"))] == [hdr["id"].split(":", 1)[1]]
 
 
-def test_session_md_upload_failure_leaves_only_raw(remote, tmp_path, monkeypatch):  # U-ST-07
+def test_session_md_upload_failure_leaves_only_segments(remote, tmp_path, monkeypatch):  # U-ST-07
     paths = store.Paths.from_env()
     hdr = _header()
     folder = store.stage(paths, hdr, "## user\nCSV\n", b"{}")
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "session.md")
     ulid = hdr["id"].split(":", 1)[1]
     assert store.upload_batch(store.Drive(paths), paths) == [ulid]
-    assert sorted(p.name for p in (remote / "agora" / "sessions" / ulid).iterdir()) == [h.agora_of(hdr)["raw"]["file"]]
+    assert sorted(p.name for p in (remote / "agora" / "sessions" / ulid).iterdir()) == \
+        sorted(seg["file"] for seg in h.agora_of(hdr)["raw"]["segments"])
     assert store.sync(machine2(tmp_path)).search(T("CSV")) == []
 
 
@@ -187,7 +191,8 @@ def _stuck_session(remote, paths):
     """
     ulid = _save(paths, _header())
     raw = _raw_of(remote, ulid)
-    raw_path = _on_drive(remote, ulid) / raw["file"]
+    (seg,) = raw["segments"]                              # a small raw is one segment
+    raw_path = _on_drive(remote, ulid) / seg["file"]
     data = raw_path.read_bytes()
     raw_path.unlink()
     return ulid, raw, data
@@ -256,7 +261,7 @@ def test_a_raw_that_arrives_later_is_not_blocked_by_the_memory(remote, capsys):
     store.sync(paths)                         # remembered: no download
     assert _session_downloads(remote, ulid, before) == []
 
-    (_on_drive(remote, ulid) / raw["file"]).write_bytes(data)
+    (_on_drive(remote, ulid) / raw["segments"][0]["file"]).write_bytes(data)
     before = len(calls(remote))
     index = store.sync(paths)
     assert [hit[0] for hit in index.search(T("CSV"))] == [ulid]
@@ -414,6 +419,10 @@ def test_fetch_raw_refetches_session_md(remote, tmp_path):  # U-ST-21, N8
     other = machine2(tmp_path)
     stale = store.sync(other).header(hdr["id"].split(":", 1)[1])
     _save(paths, hdr, body="## user\n第二版表格\n", raw=b'{"v": 2}')
+    # the first version's segment is cleaned up once its grace period is over (design B.5.5);
+    # a reader still holding the old header meets a 404 and follows session.md's new manifest
+    old_seg = h.agora_of(stale)["raw"]["segments"][0]["file"]
+    (remote / "agora" / "sessions" / hdr["id"].split(":", 1)[1] / old_seg).unlink()
     got = store.fetch_raw(other, store.Drive(other), hdr["id"].split(":", 1)[1], stale)
     assert got == b'{"v": 2}'
     fresh, _ = h.split_document((other.mirror / hdr["id"].split(":", 1)[1] / "session.md").read_text())

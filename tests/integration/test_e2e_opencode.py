@@ -325,7 +325,7 @@ def test_import_search_continue_native_then_cross_agent(e2e):
     assert sysblock["source"]["dir"] == str(proj)   # N9: from the export, not the name
     # a 2.x export carries no version, so the header goes without one (Q8)
     assert sysblock["source"]["agent_version"] is None
-    assert sysblock["raw"]["md5"] and sysblock["raw"]["file"].startswith("raw-")
+    assert sysblock["raw"]["md5"] and sysblock["raw"]["layout"] == "chunks/1" and "file" not in sysblock["raw"]
     body1 = session_md(e2e, id1)
     assert "CSV" in body1                            # Drive really has it
 

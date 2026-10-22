@@ -47,7 +47,7 @@ def _remember_ready(raw: bytes) -> tuple[store.Paths, Path, str]:
     paths = store.Paths.from_env()
     hdr = _header()
     folder = store.stage(paths, hdr, "## user\nCSV\n", raw)
-    return paths, folder, h.agora_of(hdr)["raw"]["file"]
+    return paths, folder, store.raw_name(h.agora_of(hdr)["raw"])
 
 
 def _md5(data: bytes) -> str:
@@ -230,31 +230,49 @@ def test_stage_from_file_streams_bytes_and_header_fields(tmp_path):
     hdr = _header()
     folder = store.stage(paths, hdr, "## user\nCSV\n", src)
 
-    name = hdr["agora"]["raw"]["file"]
+    name = store.raw_name(hdr["agora"]["raw"])
     assert (folder / name).read_bytes() == raw
     assert hdr["agora"]["raw"]["md5"] == hashlib.md5(raw).hexdigest()
     assert hdr["agora"]["raw"]["size"] == len(raw)
 
 
-def test_stage_from_file_failure_leaves_no_tmp_folder(tmp_path, monkeypatch):
-    """A mid-copy crash must not leave the `.tmp-<ulid>` staging folder behind."""
-    raw = b"a" * 100_000
+@pytest.mark.parametrize("link_works", [True, False], ids=["hard-link", "copy"])
+def test_stage_from_file_failure_leaves_no_tmp_folder(tmp_path, monkeypatch, link_works):
+    """A mid-read crash must not leave the `.tmp-<ulid>` staging folder behind - whether the
+    raw was hard-linked in or copied (a different volume)."""
+    raw = b"a" * 3_000_000
     src = tmp_path / "raw.json"
     src.write_bytes(raw)
     paths = store.Paths.from_env()
     hdr = _header()
     ulid = hdr["id"].split(":", 1)[1]
+    if not link_works:
+        monkeypatch.setattr(os, "link", lambda *a, **k: (_ for _ in ()).throw(OSError("EXDEV")))
+    real_feed, calls = store._Chunker.feed, []
 
-    def dies_after_a_chunk(fileobj, out, length=0):
-        out.write(b"half")
-        raise OSError("disk full")
+    def dies_after_a_chunk(self, data):
+        calls.append(len(data))
+        if len(calls) >= 2:
+            raise OSError("disk full")
+        return real_feed(self, data)
 
-    monkeypatch.setattr(shutil, "copyfileobj", dies_after_a_chunk)
+    monkeypatch.setattr(store._Chunker, "feed", dies_after_a_chunk)
     with pytest.raises(OSError):
         store.stage(paths, hdr, "## user\nCSV\n", src)
 
     assert not (paths.outbox / f".tmp-{ulid}").exists()
     assert not (paths.outbox / ulid).exists()
+
+
+def test_stage_from_file_links_instead_of_copying_when_it_can(tmp_path):
+    """Design B.4: same volume -> one hard link, not a second whole-raw write."""
+    src = tmp_path / "raw.json"
+    src.write_bytes(b'{"x": 1}')
+    paths = store.Paths.from_env()
+    hdr = _header()
+    folder = store.stage(paths, hdr, "## user\nCSV\n", src)
+    staged = folder / store.raw_name(hdr["agora"]["raw"])
+    assert os.path.samefile(src, staged) or tmp_path.stat().st_dev != paths.outbox.stat().st_dev
 
 
 def test_claude_export_stage_does_not_hold_raw_bytes(tmp_path, monkeypatch):

@@ -374,7 +374,7 @@ def _push_mirrored(paths: store.Paths, drive: store.Drive, ulid: str, *,
         raise store.StoreError("本機沒有這個 Session，先 pull 或匯入")
     hdr, _ = h.split_document(local.read_text(encoding="utf-8"))
     if need_raw:
-        raw = h.agora_of(hdr).get("raw") or {}
-        if raw and not (paths.mirror / ulid / store.raw_name(raw)).is_file():
+        raw = h.agora_of(hdr).get("raw")
+        if store.raw_kind(raw) == "chunks" and not (paths.mirror / ulid / store.raw_name(raw)).is_file():
             raise store.StoreError(f"標頭指到的 {store.raw_name(raw)} 本機沒有，不傳半套")
     store.push_mirror(drive, paths, ulid, hdr)

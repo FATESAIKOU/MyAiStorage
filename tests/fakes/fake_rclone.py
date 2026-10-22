@@ -26,6 +26,12 @@ lost the files themselves, not the folder (#155). FAKE_RCLONE_OMIT_FILES_FROM=<n
 does the same from the Nth whole listing on, so a test can break only the
 confirmation listing after the copies and leave the rounds before it intact.
 
+Every `copy --files-from` is also written to $FAKE_REMOTE/../copies.log as one JSON
+line `{"src": <source dir>, "files": [{"name", "size", "mtime"}...]}` - what was sent,
+how big, and the mtime it carried (#169). `copy`/`copyto` keep the source file's mtime
+(like rclone does), and `lsjson` reports it as `ModTime` (RFC 3339, UTC). A test sets a
+file's age with `os.utime` on the remote file or on the source before the copy.
+
 FAKE_RCLONE_NO_DIR_ID=1: the recursive `lsjson` (the one without `--files-only`)
 returns directory entries without an `ID`, as if the Drive did not send it;
 FAKE_RCLONE_NO_DIR_ID=all drops the `ID` from `--dirs-only` listings too (#164).
@@ -265,6 +271,10 @@ elif cmd == "lsjson":
         if "--files-only" in params and not p.is_file():
             continue
         entry = {"Path": str(p.relative_to(base)), "Name": p.name, "IsDir": p.is_dir(), "ID": p.name}
+        if p.is_file():
+            import datetime as _dt
+            entry["ModTime"] = _dt.datetime.fromtimestamp(
+                p.stat().st_mtime, _dt.timezone.utc).isoformat().replace("+00:00", "Z")
         if p.is_dir():
             try:
                 entry["ID"] = folder_id_of(p)
@@ -287,17 +297,22 @@ elif cmd == "copyto":
     if not src_p.exists():
         fail("source not found")
     make_dirs(dst_p.parent)
-    shutil.copyfile(src_p, dst_p)
+    shutil.copy2(src_p, dst_p)
 elif cmd == "copy" and "--files-from" in params:
     # local -> Drive, one call for a whole batch (local-first-writes M4)
     src = resolve(params[0]) or Path(params[0])
     dst = resolve(params[1]) or Path(params[1])
     listed = Path(params[params.index("--files-from") + 1]).read_text().split()
+    with open(remote.parent / "copies.log", "a") as f:
+        f.write(json.dumps({"src": str(src), "files": [
+            {"name": rel, "size": (src / rel).stat().st_size if (src / rel).exists() else None,
+             "mtime": (src / rel).stat().st_mtime if (src / rel).exists() else None}
+            for rel in listed]}) + "\n")
     for rel in listed:
         if not (src / rel).exists():
             fail(f"source not found: {rel}")
         make_dirs((dst / rel).parent)
-        shutil.copyfile(src / rel, dst / rel)
+        shutil.copy2(src / rel, dst / rel)
 elif cmd == "delete" and "--files-from" in params:
     # the superseded raws, gone in one call
     dst = resolve(params[0])
@@ -317,7 +332,7 @@ elif cmd == "copy":          # a local tree up to the remote, same names overwri
         rel = path.relative_to(src).as_posix()
         if path.is_file() and not any(rel == e or rel.startswith(e.rstrip("*")) for e in excluded):
             make_dirs((dst / rel).parent)
-            shutil.copyfile(path, dst / rel)
+            shutil.copy2(path, dst / rel)
 elif cmd == "deletefile":
     target = resolve(params[0])
     if not target.is_file():

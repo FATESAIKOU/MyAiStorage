@@ -95,6 +95,7 @@ sessions/<ULID>/
 - **只有一種形狀**：每個帶 raw 的**新寫入** Session 都有 `layout: chunks/1` 與 `segments`；這種 Session 在 Drive 上**沒有**整份 `raw-<md5>.json`。本機鏡像仍有整份（B.4），檔名由 `raw.md5` 推得：`raw-<md5[:12]>.json`。**`agora.raw.file` 不再寫**（理由見 A.2）。保留原樣的舊 Session 不在這條的範圍（C.3、G.3）。
 - **扁平、不開子目錄**：`Drive.list_sessions` 只收 `Path` 兩段的路徑（`src/agora/store.py:239-252`），`list_one` 不遞迴（`254-256`）。放 `sessions/<ULID>/segs/…` 會讓 listing 看不到段，完整性判斷與清除都會失效。
 - **`seg-` 前綴**：段不是 raw，也不能被當成一份可以單獨解析的 raw；`_replaced_raws`（`store.py:1103-1107`）只認 `raw-*`，而新寫入的 Session 在 Drive 上沒有 `raw-*`（保留的舊 Session 仍是舊格式，C.3），所以那一條規則整個拿掉（B.5.5）。
+- **清單裡的段名只能是這個形狀**（讀端與寫端都檢查，R3b-1 第 2 輪補）：`seg-<gen>-<seq>-<md5[:12]>.part`（小寫，`md5[:12]` 必須就是該段 `md5` 的前 12 碼），清單內不得有同名段（不分大小寫），**保留名 `session.md`（含 `SESSION.MD`）不得當段名**——否則批次目錄與 Drive 上的完成標記會被段內容蓋掉。不合格的清單是壞 header：當 legacy（建索引、不刪、raw 不可用、不上傳），不是「未完成」。切段（`_cut_segments`）也再拒絕一次。
 - **檔名帶 md5**：內容定址；同樣的位元組不會因為換版本而改名。`gen` 讓一個世代可以被整組辨認、除錯；`seq` 是順序。tail 也是同一個命名規則，只是每版 md5 不同。
 - **`.part`**：明確表示「這不是一份可以單獨解析的 raw」；不要用 `.json`。
 - **大小**：`AGORA_RAW_CHUNK`（C）＝4 MiB（4194304 bytes；測試可調到 4 KiB）。**封存段一律按 C 切、每段 ≤ C；tail 是剩下的一個檔，不受 C 限制**（claude 的 tail 含 trailer 與 aux，所以可能比 C 大）：
@@ -278,8 +279,15 @@ class Increment:
      - **別台真的刪除**（`purge sessions/X`）：送出前的兩次檢查若看到就不送（現行行為）；若發生在複製期間，ID 預期變了（假設，K.1）→ purge 剛建回來的資料夾、另存 Y（B.5.7 的 `_rescue_deleted`），X 維持被刪。
      - **換世代**（我們自己的 `gen+1` 或別台的）：段名整組換掉、資料夾 ID 不變 → 不觸發。
      - **離線很久**（段是幾小時前切好的）：不影響這個判斷（ID 與時間無關）；寬限期靠 B.5.2 的 `os.utime`。
+   - **跨輪記住「送出前的資料夾 ID」（#166，R3b-1 第 2 輪補）**：只在同一輪比 ID 抓不到「崩潰／確認列表漏資料夾，下一輪才發現」的情況——別台在我們的第一個 copy 之前 purge，我們的 copy（尤其是只改 header 時的第一個 copy 就是 `session.md`）把資料夾重建，這一輪停在 md5 檢查或行程被殺；下一輪看到的是「有 `session.md` 的活資料夾」，會把它補完，等於撤銷別台的刪除。所以：
+     - **存哪、什麼格式**：`<state>/folder-ids/<ULID>.json`，`{"folder_id": "<送出前看到的資料夾 ID>", "sent": ["session.md", "<段名>", …]}`；一個 update 一個檔，只在本機、不上傳、不含內容（只有 ID 與檔名）。`sent` 記這個資料夾自記錄以來**每一輪「要送」的名字**（在 copy 之前寫，不等送成功——所以崩潰當下送到一半的名字也在裡面；它只用來放寬 `_recreated_by_us` 的「只有我們的檔」判斷，寧可寬一點也不會因此多 purge 別人的檔）。
+     - **何時寫**：每一輪、`ids_before` 取得之後、第一個 copy 之前。已有記錄就**保留原來的 `folder_id`**（那個舊 ID 就是下一輪要比的證據），只把這一輪要送的名字併進 `sent`；沒有才用這一輪的 ID 建立。
+     - **何時比**：下一輪取得 `ids_before` 之後，記錄的 `folder_id` 與現在的 ID 不同 → 資料夾在兩輪之間被 purge 又重建；照確認階段的規則（`_recreated_by_us`：定向查詢必須回「還在且有 `session.md`」、而且資料夾裡只有 `session.md`、目前清單的段與 `sent` 裡的名字）才 `purge` 並 `_rescue_deleted` 另存；查到空、查不動、rc=3、孤兒、多出別的檔都等待，留在 outbox。ID 相同 → 什麼都不改變，照常補完。
+     - **何時清**：該版本確認成功離開 outbox；另存（X 被救成 Y）；`forget_local`（`agora delete`）；**這一輪拿不到 `ids_before`（`sessions/` 不存在，N12：不是刪除證據）時，該筆的舊記錄也清掉**——否則下一輪會拿舊 ID 去比我們自己重建的新資料夾，把活的 Session 誤判成「被別台 purge 又被我們重建」。entry 被新版本取代**不清**（同一個資料夾，記錄仍有效）。清的時候 `unlink` 失敗只警告。
+     - **purge 失敗不另存**：確認階段與跨輪比對兩條路都一樣——要 `purge` 剛重建的資料夾而 `purge` 失敗時，**不** `_rescue_deleted`，這一筆與記錄都留著，下一輪再判斷（否則舊資料夾還在，X 沒被拿掉、Y 又另存一份）。
+     - **壞了怎麼辦（fail-safe）**：檔案不存在、讀不了、不是 JSON、欄位型別不對 → 當成沒有記錄（少了這一道跨輪比對，不會產生任何刪除或復活的判斷；下一輪照常用現在的 ID 重建記錄）。寫不進去 → 只警告，照送（少一道偵測，不是誤判）。記錄多出一個已不存在的 ULID 無害：只有該 ULID 還有 update 要送時才會被讀。
    - **已知限度**：兩台都在同一個窗口被 purge 誤導時，先確認的那台會 purge 另一台剛寫回的資料夾。另一台的 entry 已經確認、離開 outbox；它下一輪 sync 會看到 X「別台刪掉了」（`cloud_missing`：`store.py:1534` 標記、`:1546-1553` 的訊息），**不會自動再送**，要手動 `agora push session X --not-exist-upload` 才復原（內容仍在它的鏡像裡）。不是靜靜復活一個被刪掉的 Session，但也不是零成本。
-   - **適用範圍**：這個偵測在 `upload_batch`（背景上傳，以及 `push` 先送 outbox 的那條）。`agora push session` 走 `_upload_checked`（`store.py:584-605`），是明確指令的「後寫者贏」：複製期間別台刪掉時會把 X 寫回去，不是背景自動復活；要避免就在指令前先確認。**`push_mirror` 也 MUST 用 batch dir＋一次 `copy --files-from` 送段**：`_upload_checked` 的 `drive.upload` 是一個檔一次 `copyto`（`:593-599`），revive 一個 814 MB 的 session 就是 195 次呼叫 ≈ 11 分鐘（`docs/perf.md` 的 3.5 秒／次）。
+   - **適用範圍**：這個偵測在 `upload_batch`（背景上傳，以及 `push` 先送 outbox 的那條）。`agora push session` 走 `push_mirror`（分段版是 `_push_chunked`；R3b-1 之前的單檔 `_upload_checked` 已拿掉），是明確指令的「後寫者贏」：複製期間別台刪掉時會把 X 寫回去，不是背景自動復活；要避免就在指令前先確認。**`push_mirror` 也 MUST 用 batch dir＋一次 `copy --files-from` 送段**：`_upload_checked` 的 `drive.upload` 是一個檔一次 `copyto`（`:593-599`），revive 一個 814 MB 的 session 就是 195 次呼叫 ≈ 11 分鐘（`docs/perf.md` 的 3.5 秒／次）。
    - **`_rescue_deleted` 對分段項目**：entry 裡有整份 raw，另存的 Y 也是分段（走同一個 `stage`，所有段都是新的）；把 raw 以**檔案路徑**交給 `stage`（`store.py:325` 已經接受 `Path`），不要 `read_bytes()` 把 814 MB 讀進上傳器的記憶體（`store.py:997` 現在是 bytes）。
 
 **離線開關**（rclone 包裝 exit 75）不變：`Drive._run` 把非零當 `StoreError`（`store.py:213-215`），entry 留在 outbox；下一輪照常。

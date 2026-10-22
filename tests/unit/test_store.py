@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
+import hashlib
 import json
 import os
 import stat
@@ -62,14 +63,19 @@ def test_raw_uploaded_before_session_md(remote, monkeypatch):  # U-ST-01, U-ST-0
     monkeypatch.setattr(store, "_copy_batch",
                         lambda d, p, names, **kw: (batches.append(list(names)), real_copy(d, p, names, **kw))[1])
     ulid = _save(paths, _header())
-    # raws first, once each: two batches, and no file sent twice (D1)
+    # segments first, once each: two batches, and no file sent twice (D1)
     assert len(batches) == 2, batches
-    assert batches[0][0].split("/")[1].startswith("raw-"), batches
+    assert all(n.split("/")[1].startswith("seg-") for n in batches[0]), batches
     assert batches[1] == [f"{ulid}/session.md"]
     hdr, _ = h.split_document((remote / "agora" / "sessions" / ulid / "session.md").read_text())
-    raw_path = remote / "agora" / "sessions" / ulid / hdr["agora"]["raw"]["file"]
-    assert hdr["agora"]["raw"]["file"] == f"raw-{hdr['agora']['raw']['md5'][:12]}.json"
-    assert store.md5_file(raw_path) == hdr["agora"]["raw"]["md5"]
+    raw = hdr["agora"]["raw"]
+    assert "file" not in raw and raw["layout"] == "chunks/1"
+    assert store.raw_name(raw) == f"raw-{raw['md5'][:12]}.json"
+    folder = remote / "agora" / "sessions" / ulid
+    assert sorted(p.name for p in folder.iterdir()) == sorted(
+        ["session.md", *[seg["file"] for seg in raw["segments"]]]), "Drive has no whole raw"
+    joined = b"".join((folder / seg["file"]).read_bytes() for seg in raw["segments"])
+    assert hashlib.md5(joined).hexdigest() == raw["md5"] and len(joined) == raw["size"]
     assert not (paths.outbox / ulid).exists()
 
 
@@ -78,16 +84,19 @@ def test_reimport_replaces_raw_without_dangling_pointer(remote):  # U-ST-03
     hdr = _header()
     ulid = _save(paths, hdr)
     _save(paths, hdr, raw=b'{"x": 2}')
-    files = sorted(p.name for p in (remote / "agora" / "sessions" / ulid).iterdir())
+    files = {p.name for p in (remote / "agora" / "sessions" / ulid).iterdir()}
     final, _ = h.split_document((remote / "agora" / "sessions" / ulid / "session.md").read_text())
-    assert files == sorted([final["agora"]["raw"]["file"], "session.md"])
+    # the version session.md names is all there (no dangling pointer); the first version's
+    # segment is still inside its grace period, so it is not cleaned yet
+    assert {"session.md", *[seg["file"] for seg in final["agora"]["raw"]["segments"]]} <= files
+    assert len(files) == 3
 
 
 def test_unfinished_session_is_not_indexed(remote):  # U-ST-04, U-ST-05
     paths = store.Paths.from_env()
     ulid = _save(paths, _header())
     hdr, _ = h.split_document((remote / "agora" / "sessions" / ulid / "session.md").read_text())
-    raw = remote / "agora" / "sessions" / ulid / hdr["agora"]["raw"]["file"]
+    raw = remote / "agora" / "sessions" / ulid / hdr["agora"]["raw"]["segments"][0]["file"]
     raw.write_text("tampered")
     index = store.sync(paths)
     assert index.search(T("CSV")) == []
@@ -97,7 +106,7 @@ def test_failed_upload_stays_in_outbox_and_sync_pushes_it(remote, monkeypatch): 
     paths = store.Paths.from_env()
     hdr = _header()
     folder = store.stage(paths, hdr, "## user\nCSV\n", b"{}")
-    monkeypatch.setenv("FAKE_RCLONE_FAIL", "raw-")
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "seg-")
     assert store.upload_batch(store.Drive(paths), paths) == [folder.name]   # it says, not raise
     assert folder.exists() and store.outbox_count(paths) == 1
     monkeypatch.delenv("FAKE_RCLONE_FAIL")
@@ -364,7 +373,7 @@ def test_a_sigterm_between_the_two_renames_keeps_the_old_entry(remote, monkeypat
     ulid = hdr["id"].split(":", 1)[1]
     old_version = store.stage(paths, hdr, "## user\n舊版\n", b'{"x": 1}')
     before = (old_version / "session.md").read_text(encoding="utf-8")
-    old_raw = h.agora_of(hdr)["raw"]["file"]
+    old_raw = store.raw_name(h.agora_of(hdr)["raw"])
     old_raw_bytes = (old_version / old_raw).read_bytes()
 
     real_rename = Path.rename
@@ -435,7 +444,7 @@ def test_stage_fsyncs_the_files_it_writes_and_the_folders_around_them(remote, mo
     folder = store.stage(paths, hdr, "## user\nCSV\n", b'{"x": 1}', update=True, kind="continue")
 
     tmp = paths.outbox / f".tmp-{folder.name}"
-    raw_name = h.agora_of(hdr)["raw"]["file"]
+    raw_name = store.raw_name(h.agora_of(hdr)["raw"])
     assert {p.name for kind, p in seen if kind == "file" and p.parent == tmp} == \
         {"session.md", raw_name, store.UPDATE_MARK}, seen
     assert ("dir", tmp) in seen, "the files, and the names pointing at them, before the swap"
@@ -479,7 +488,7 @@ def test_stage_fsyncs_each_written_file_before_the_swap_and_the_outbox_after_it(
     source.write_bytes(b'{"x": "private"}')
     hdr = _header()
     folder = store.stage(paths, hdr, "## user\nCSV\n", source if raw_as_path else source.read_bytes())
-    raw_name = h.agora_of(hdr)["raw"]["file"]
+    raw_name = store.raw_name(h.agora_of(hdr)["raw"])
     written = {"raw": (folder / raw_name).stat(), "session.md": (folder / "session.md").stat()}
     directory, outbox = folder.stat(), paths.outbox.stat()
 

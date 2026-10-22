@@ -431,18 +431,19 @@ def test_continue_uses_the_local_raw_and_puts_drive_s_right(env, capsys, tmp_pat
     upload instead of stopping the work."""
     _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     ulid = parent.split(":")[1]
-    raws = list((tmp_path / "remote" / "agora" / "sessions" / ulid).glob("raw-*.json"))
-    assert len(raws) == 1
-    raws[0].write_bytes(b"tampered")
+    segments = list((tmp_path / "remote" / "agora" / "sessions" / ulid).glob("seg-*.part"))
+    assert len(segments) == 1
+    segments[0].write_bytes(b"tampered")
 
     code, _, _ = run(capsys, "continue", "session", parent, "--agent", "opencode", "--dir", "/tmp")
     assert code == 0
     hdr = store.Index(paths()).header(ulid)
     on_drive = tmp_path / "remote" / "agora" / "sessions" / ulid
-    # Drive ends up with the raw this session's header names, and the one it replaced
-    # (here: a damaged copy) is cleared in the same round (N7).
-    assert store.md5_file(on_drive / hdr["agora"]["raw"]["file"]) == hdr["agora"]["raw"]["md5"]
-    assert [p.name for p in on_drive.glob("raw-*")] == [hdr["agora"]["raw"]["file"]]
+    # Drive ends up with every segment this session's header names, each with the md5 the
+    # manifest gives. The damaged one belonged to the version it replaced: under the new
+    # cleanup rule (design B.5.5) it is not deleted until its grace period is over.
+    for seg in hdr["agora"]["raw"]["segments"]:
+        assert store.md5_file(on_drive / seg["file"]) == seg["md5"]
 
 
 def test_continue_fetches_a_raw_it_does_not_have_and_refuses_a_mismatch(env, capsys, tmp_path):
@@ -451,9 +452,9 @@ def test_continue_fetches_a_raw_it_does_not_have_and_refuses_a_mismatch(env, cap
     _, parent, _ = run(capsys, "import", "session", "--external-session-id", "ses_a", "--agent", "opencode")
     ulid = parent.split(":")[1]
     hdr = store.Index(paths()).header(ulid)
-    (paths().mirror / ulid / hdr["agora"]["raw"]["file"]).unlink()      # not here any more
-    raws = list((tmp_path / "remote" / "agora" / "sessions" / ulid).glob("raw-*.json"))
-    raws[0].write_bytes(b"tampered")
+    (paths().mirror / ulid / store.raw_name(hdr["agora"]["raw"])).unlink()      # not here any more
+    segments = list((tmp_path / "remote" / "agora" / "sessions" / ulid).glob("seg-*.part"))
+    segments[0].write_bytes(b"tampered")
 
     code, _, _ = run(capsys, "continue", "session", parent, "--agent", "opencode", "--dir", "/tmp")
     assert code != 0
