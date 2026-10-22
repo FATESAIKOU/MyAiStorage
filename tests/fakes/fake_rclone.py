@@ -16,6 +16,12 @@ still sees it - a Drive listing that silently lost a folder (#152).
 FAKE_RCLONE_OMIT_FROM=<n> starts leaving them out at the Nth whole listing, so a
 test can break the re-check and leave the first check intact (default 1).
 
+FAKE_RCLONE_OMIT_FILES=<name>[,<name>]: the whole `lsjson -R` listing leaves those
+files out, while a directed `lsjson` on the folder still sees them - a listing that
+lost the files themselves, not the folder (#155). FAKE_RCLONE_OMIT_FILES_FROM=<n>
+does the same from the Nth whole listing on, so a test can break only the
+confirmation listing after the copies and leave the rounds before it intact.
+
 FAKE_RCLONE_NOT_FOUND_RC=3 makes an `lsjson` on a folder that is not there exit
 with the status a real rclone uses for it. The message then carries no
 "directory not found" (the default rc=1 keeps those words for older tests), so a
@@ -28,6 +34,13 @@ does its own work first, then that folder goes, and the file goes with it - one
 shot. A test can put a deletion exactly between two of the uploader's calls, e.g.
 right after the listing that decided an update's id was still there, without
 racing a sleep.
+
+FAKE_RCLONE_CLEAN_AFTER=<file>: another machine's ordinary cleanup of an old file
+*now*. The file holds {"after": <needle>, "folder": <path under the folder id>,
+"remove": [<name>...], "add": {<name>: <text>}}. The first call matching the
+needle finishes its own work, then those files go and those appear - one shot.
+A test can put「刪掉舊 raw、放上別台的新 raw」exactly between the raws copy and
+the session.md copy (#155, 非阻擋 1).
 """
 
 import hashlib
@@ -159,20 +172,28 @@ elif cmd == "lsjson":
     # names, and only in the recursive listing: `lsjson gdrive:sessions/<ulid>` still
     # sees the folder, which is what makes it a directed look.
     omit = {name for name in os.environ.get("FAKE_RCLONE_OMIT", "").split(",") if name}
-    if omit and recursive:
-        # FAKE_RCLONE_OMIT_FROM=N: leave it out only from the Nth whole listing on, so
+    # #155: files the whole listing leaves out while the folder's own listing sees
+    # them - a listing that lost a file, not a folder. Only recursive listings.
+    omit_files = {name for name in os.environ.get("FAKE_RCLONE_OMIT_FILES", "").split(",") if name}
+    if (omit or omit_files) and recursive:
+        # FAKE_RCLONE_OMIT_FROM=N: leave them out only from the Nth whole listing on, so
         # a test can break the second (re-check) listing and leave the first intact.
         nth = int(os.environ.get("FAKE_RCLONE_OMIT_FROM", "1"))
+        files_nth = int(os.environ.get("FAKE_RCLONE_OMIT_FILES_FROM", "1"))
         counter = remote.parent / "listings.count"
         calls = int(counter.read_text()) + 1 if counter.exists() else 1
         counter.write_text(str(calls))
         if calls < nth:
             omit = set()
+        if calls < files_nth:
+            omit_files = set()
     out = []
     items = base.rglob("*") if recursive else base.iterdir()
     for p in sorted(items):
         rel = p.relative_to(base)
         if omit and rel.parts[0] in omit:
+            continue
+        if recursive and omit_files and p.is_file() and rel.name in omit_files:
             continue
         if "--dirs-only" in params and not p.is_dir():
             continue
@@ -238,6 +259,30 @@ else:
     fail(f"fake rclone does not support {cmd}")
 
 
+def clean_after():
+    """Another machine's ordinary cleanup, placed exactly between two calls.
+
+    It deletes the old raws it replaced and puts its own new raw in, while our
+    uploader is between its raws copy and its session.md copy (#155, 非阻擋 1).
+    """
+    trigger = os.environ.get("FAKE_RCLONE_CLEAN_AFTER")
+    if not trigger:
+        return
+    try:
+        spec = json.loads(Path(trigger).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not _should_fail(spec["after"]):
+        return
+    Path(trigger).unlink(missing_ok=True)   # one shot, before the work below
+    folder = root / spec["folder"]
+    for name in spec.get("remove", []):
+        (folder / name).unlink(missing_ok=True)
+    for name, text in spec.get("add", {}).items():
+        (folder / name).parent.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_text(text, encoding="utf-8")
+
+
 def purge_after():
     """Another machine's delete, placed exactly between two calls (see the docstring)."""
     trigger = os.environ.get("FAKE_RCLONE_PURGE_AFTER")
@@ -253,5 +298,6 @@ def purge_after():
     shutil.rmtree(root / spec["purge"], ignore_errors=True)
 
 
+clean_after()
 purge_after()
 snapshot()
