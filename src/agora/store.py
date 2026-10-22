@@ -261,6 +261,35 @@ class Drive:
                 found.setdefault(parts[0], {})[parts[1]] = _md5(entry)
         return found
 
+    def list_sessions_with_ids(self) -> "_Listing | None":
+        """`list_sessions` plus each session folder's Drive ID (#164, design B.5.7).
+
+        The same one recursive listing without `--files-only`: the directory entries
+        come back too, and (K.1, real Drive) they carry an `ID`. `.ids` has an entry
+        for every top-level folder that did. None if sessions/ is missing.
+        """
+        try:
+            out = self._run("lsjson", "gdrive:sessions", "-R", "--fast-list", "--hash")
+        except StoreError as e:
+            if "directory not found" in str(e):
+                return None
+            raise
+        found = _Listing()
+        for entry in json.loads(out or "[]"):
+            parts = entry["Path"].split("/")
+            if entry.get("IsDir"):
+                if len(parts) == 1 and entry.get("ID"):
+                    found.ids[parts[0]] = entry["ID"]
+            elif len(parts) == 2:
+                found.setdefault(parts[0], {})[parts[1]] = _md5(entry)
+        return found
+
+    def folder_ids(self) -> dict[str, str]:
+        """{ULID: folder ID} from `lsjson gdrive:sessions --dirs-only` (the shape
+        `folder_id()` uses): the fallback when a listing carried no directory IDs."""
+        out = self._run("lsjson", "gdrive:sessions", "--dirs-only")
+        return {e["Name"]: e["ID"] for e in json.loads(out or "[]") if e.get("ID")}
+
     def list_one(self, ulid: str) -> dict[str, str]:
         out = self._run("lsjson", f"gdrive:sessions/{ulid}", "--hash", "--files-only")
         return {e["Name"]: _md5(e) for e in json.loads(out or "[]")}
@@ -706,15 +735,40 @@ def never_confirmed(paths: Paths, ulid: str) -> bool:
     return not _is_update(folder)
 
 
+class _Listing(dict):
+    """{ulid: {file name: md5}} that also knows each folder's Drive ID (`.ids`)."""
+
+    def __init__(self):
+        super().__init__()
+        self.ids: dict[str, str] = {}
+
+
+def _ids_of(drive: Drive, listing: "_Listing", ulids, say) -> dict[str, str]:
+    """The folder IDs of `ulids`: from the listing, and for the ones it did not carry,
+    from one `--dirs-only` call. Whoever has no ID after that is missing from the
+    result - and whoever needs the ID then fails closed (#164, 2.1)."""
+    have = getattr(listing, "ids", {})        # a plain dict (a test double) has none
+    ids = {u: have[u] for u in ulids if u in have}
+    missing = [u for u in ulids if u not in ids]
+    if missing:
+        try:
+            extra = drive.folder_ids()
+        except StoreError as e:
+            say(f"補查資料夾 ID 失敗：{e}")
+            extra = {}
+        ids.update({u: extra[u] for u in missing if u in extra})
+    return ids
+
+
 def _listing_with_md5(drive: Drive):
-    """Drive's file list with md5s, or the error that stopped us.
+    """Drive's file list with md5s (and the folder IDs, `.ids`), or the error that stopped us.
 
     A `None` inside it means Drive has no `sessions/` at all - not a failure, and not
     evidence of a deletion (N12). Whoever needs to tell「離線」from「空的」looks at the
     type, which is why the error comes back instead of being swallowed.
     """
     try:
-        return drive.list_sessions()
+        return drive.list_sessions_with_ids()
     except StoreError as e:
         return e
 
@@ -749,29 +803,51 @@ def _directed_look(drive: Drive, ulid: str) -> _Look:
         return _Look(None, {}, e)
 
 
+def _folder_state(look: _Look) -> str:
+    """What one directed look says about a session folder (design B.5.7, 2.1).
+
+    gone     rclone said the folder is not there (rc=3 / directory not found) - the
+             only answer that means "not there"
+    alive    the folder answers and holds a `session.md`
+    orphans  the folder answers, holds files, but no `session.md`: what a purge leaves
+             when the first big copy after it broke - not a session, nothing to resume
+    empty    the folder answers with nothing in it: not proof of anything (#152 B1)
+    failed   the look itself failed (timeout, 5xx, permission, offline): says nothing
+    """
+    if look.there is None:
+        return "failed"
+    if not look.there:
+        return "gone"
+    if not look.files:
+        return "empty"
+    return "alive" if "session.md" in look.files else "orphans"
+
+
 def _really_gone(drive: Drive, ulid: str, say) -> bool:
-    """#152: is an id a whole listing left out really gone from Drive?
+    """#152 / #164: is an id a listing left out (or showed without a session.md) gone?
 
-    Drive has answered a failed call with an error and then a listing that was simply
-    missing a folder (10-12, 10-21), and the whole listing is all the existence check
-    used to go on. Two long-running continues were saved as new sessions that were
-    still on Drive. So one directed look at that folder decides: files there mean the
-    listing was wrong; rclone saying the folder itself is not there means what it says.
+    The one rule for every "is it still there" decision: a listing can lose a folder
+    when Drive has a bad day (10-12, 10-21 - two long-running continues were saved as
+    new sessions that were still on Drive), so one directed look at that folder decides.
+    Only rclone saying the folder is not there, or a folder with files but no
+    `session.md` (orphans: nothing a reader could resume, and completing it would
+    bring a purged session back), means gone. Everything else waits a round.
 
-    An empty answer is *not* that saying (#152 B1): the same Drive failure that drops
-    a folder from the whole listing can answer the directed look with `[]` and exit 0.
-    A wrong「gone」forks a still-live session; a wrong「not sure」waits one more round.
     Not seeing is not seeing it gone (V6): a look that fails leaves the entry for the
     next round, exactly like a listing that fails.
     """
     look = _directed_look(drive, ulid)
-    if look.there is None:
+    state = _folder_state(look)
+    if state == "failed":
         say(f"存在檢查 {ulid}：列表裡沒有，直接查也失敗（{look.error}），"
             f"當成看不到，留到下一輪")
         return False
-    if not look.there:
+    if state == "gone":
         return True
-    if look.files:
+    if state == "orphans":
+        say(f"存在檢查 {ulid}：資料夾裡只剩沒有 session.md 的檔（孤兒），當成不在了")
+        return True
+    if state == "alive":
         say(f"存在檢查 {ulid}：列表裡沒有，但直接查還在，"
             f"當成 Drive 列表出錯，留到下一輪")
         return False
@@ -779,55 +855,33 @@ def _really_gone(drive: Drive, ulid: str, say) -> bool:
     return False
 
 
-def _files_really_gone(drive: Drive, ulid: str, names: list[str],
-                       ours: set[str], say) -> bool:
-    """#155: are the files a confirmation listing lost really gone from Drive?
+def _recreated_by_us(drive: Drive, ulid: str, ours: set[str], say) -> bool:
+    """#164: the folder's ID changed between the re-check and the confirmation - is
+    what stands there really our copies landing on a folder that was purged?
 
-    The confirmation compares the folder from just before the copies with what Drive
-    lists now. A name that was there and is not there any more used to be read as
-    another machine's purge during the copies, and the whole folder was taken down and
-    the work saved as a session of its own. But a Drive listing that fails can leave
-    files out too (#152), and purging a *live* folder is worse than waiting a round.
-
-    So one directed look decides - about names, not about the folder. After another
-    machine purges a folder and this round's copies land, they re-create it, and the
-    look then finds a folder holding *only* what we just copied (`ours`: session.md and
-    this round's raw). Any file outside `ours` - the other machine's new raw, say - is
-    a live folder doing its ordinary cleanup, not a re-created empty one. Any lost name
-    still being there is a listing that was wrong, and an empty answer or a failed look
-    is not proof either (#152 B1, V6).
-
-    rc=3 is「not sure」*here*, unlike `_really_gone`: the confirmation listing has just
-    matched our session.md, so a directed look saying the folder is not there
-    contradicts it. Taking it as a deletion would fork the session on conflicting
-    evidence; waiting one round costs nothing, because the next round's existence check
-    asks the same question without the contradiction and `_really_gone` owns that call.
+    The ID change is the evidence of the purge (it does not move on another machine's
+    ordinary cleanup, a `gen+1` or a rename of the files inside - #155's case, now
+    covered by the comparison itself). It is still not enough to take a folder down on:
+    a directed look must find a folder holding a `session.md` and *only* files this
+    round sent (`ours`). A file outside `ours` means somebody else wrote there since -
+    a live folder, not the leftovers of our own copy - and an empty, failed or
+    not-found answer contradicts the listing that just showed it. All of those wait.
     """
     look = _directed_look(drive, ulid)
-    missing = ", ".join(names)
-    if look.there is None:
-        say(f"確認檢查 {ulid}：列表少了 {missing}，直接查也失敗（{look.error}），"
-            f"當成列表出錯，不清資料夾，留到下一輪")
-        return False
-    if not look.there:
-        say(f"確認檢查 {ulid}：列表少了 {missing}，但直接查說資料夾不在（rc=3），"
-            f"和剛確認過的列表矛盾，當成不確定，不清資料夾，留到下一輪")
-        return False
-    if not look.files:
-        say(f"確認檢查 {ulid}：列表少了 {missing}，直接查是空的，"
-            f"不能確認被刪，不清資料夾，留到下一輪")
-        return False
-    still = [n for n in names if n in look.files]
-    if still:
-        say(f"確認檢查 {ulid}：列表少了 {missing}，但直接查還在（{', '.join(still)}），"
-            f"當成列表出錯，不清資料夾，留到下一輪")
-        return False
-    others = sorted(set(look.files) - ours)
-    if others:
-        say(f"確認檢查 {ulid}：列表少了 {missing}，但直接查還有這一輪沒送的檔"
+    state = _folder_state(look)
+    if state == "alive":
+        others = sorted(set(look.files) - ours)
+        if not others:
+            return True
+        say(f"確認檢查 {ulid}：資料夾 ID 變了，但直接查還有這一輪沒送的檔"
             f"（{', '.join(others)}），資料夾是活的，不清資料夾，留到下一輪")
         return False
-    return True
+    why = {"failed": f"直接查也失敗（{look.error}）",
+           "gone": "直接查說資料夾不在，和剛列出的結果矛盾",
+           "empty": "直接查是空的",
+           "orphans": "直接查沒有 session.md"}[state]
+    say(f"確認檢查 {ulid}：資料夾 ID 變了，{why}，不能確認，不清資料夾，留到下一輪")
+    return False
 
 
 def _with_files_from(drive: Drive, names: list[str], where: Path, *args: str) -> None:
@@ -917,6 +971,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
 
     updates = [u for u in entries if _is_update(paths.outbox / u)]
     again = None                 # the listing the confirmation compares against (resurrect)
+    ids_before = {}              # {ulid: folder ID} from that listing, before the copies
     if updates:
         # L7: an update needs its id to still be there, or we would put back what
         # another machine deleted.
@@ -931,7 +986,12 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
             updates = []
         # None: Drive has no sessions/ at all - not evidence of a deletion (N12)
         gone = []
-        for ulid in (u for u in updates if remote is not None and u not in remote):
+        # A folder with files but no session.md is not a session either (#164, 2.3): it
+        # is what a purge leaves when the first big copy after it broke, and completing
+        # it would bring the purged session back. `_really_gone` settles both the same way.
+        for ulid in (u for u in updates
+                     if remote is not None
+                     and (u not in remote or "session.md" not in remote[u])):
             if not _really_gone(drive, ulid, say):
                 # The listing missed it or the look failed. Do not send it from a list
                 # we know is wrong, and do not rescue it: it waits for the next round.
@@ -975,7 +1035,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
                 left.append(u)
         elif isinstance(again, dict):
             for ulid in [u for u in updates if u in entries]:
-                if ulid not in again:
+                if ulid not in again or "session.md" not in again[ulid]:
                     if not _really_gone(drive, ulid, say):
                         # Same rule as the first check (#152): one listing missing an
                         # id is not proof, and a failed look is not either. It waits.
@@ -992,6 +1052,18 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
                         left.append(ulid)
                 else:
                     say(f"存在檢查 {ulid}：還在，這一輪送出")
+            # The folder IDs the confirmation compares against (#164, 2.2). An update
+            # whose folder has no ID we can read is not sent: without it the copy window
+            # has no purge detection, so it waits for a round that can see (fail-closed).
+            staying = [u for u in updates if u in entries]
+            ids_before = _ids_of(drive, again, staying, say)
+            for ulid in staying:
+                if ulid not in ids_before:
+                    say(f"{ulid} 拿不到資料夾 ID，沒辦法偵測 copy 期間被刪，"
+                        f"這筆更新留在 outbox 等下一次")
+                    entries.pop(ulid, None)
+                    if (paths.outbox / ulid).is_dir():
+                        left.append(ulid)
         # None: Drive has no sessions/ at all - not evidence of a deletion (N12).
 
     # The raw each entry names, as read with its md5s - not every raw-* in the
@@ -1035,6 +1107,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
 
     remote = _listing_with_md5(drive)
     listed = isinstance(remote, dict)
+    ids_after = None             # {ulid: folder ID} now; read once, only if an update needs it
     no_sessions_yet = remote is None      # Drive has no sessions/ at all (review N3)
     if not listed:
         remote = {}           # nothing confirmed, so nothing leaves the outbox
@@ -1057,23 +1130,33 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
                 else:
                     say(f"{ulid} Drive 的 md5 與本機不符（session.md 或 raw），留在 outbox")
             continue
-        if ulid in updates and isinstance(again, dict):
-            before = again.get(ulid) or {}
-            lost = [n for n in before if n != "session.md" and n not in files]
+        if ulid in updates and isinstance(again, dict) and ulid in ids_before:
+            # Was the folder purged while the copies were in flight? Its ID says so:
+            # a purge then our copy re-creating it gives a new one (K.1, real Drive),
+            # while another machine's ordinary cleanup - a replaced raw, a `gen+1` -
+            # leaves it alone. The file names in it prove nothing (#164 replaces #155's
+            # name comparison with this).
+            if ids_after is None:
+                ids_after = _ids_of(drive, remote,
+                                    [u for u in ids_before if u in entries], say)
+            now_id = ids_after.get(ulid)
+            if now_id is None:
+                left.append(ulid)
+                say(f"{ulid} 確認時拿不到資料夾 ID，不能確認 copy 期間沒被刪，留在 outbox 下一輪再送")
+                continue
             ours = {"session.md"} | ({sent_name} if sent_name else set())
-            if lost and not _files_really_gone(drive, ulid, lost, ours, say):
-                # The confirmation list lost names the directed look still sees, or
-                # could not say, or the folder holds files this round never sent. That
-                # is a listing error or another machine's live cleanup, not a deletion:
-                # taking a live folder down would fork the session, so the entry waits.
+            if now_id != ids_before[ulid] and not _recreated_by_us(drive, ulid, ours, say):
+                # The ID moved but the folder does not look like our own copy landing on
+                # a purged one, or the look could not say: waiting costs a round, taking
+                # a live folder down forks the session.
                 if (paths.outbox / ulid).is_dir():
                     left.append(ulid)
                 continue
-            if lost:
-                # This round deleted nothing, yet files the folder had a moment ago are
-                # gone: only a real deletion does that, and the copies just landed on
-                # the folder it re-created (review resurrect). Another machine's delete
-                # stands - take our copy down, and keep the work as a session of its own.
+            if now_id != ids_before[ulid]:
+                # The folder is not the one we looked at before the copies: it was
+                # purged meanwhile, and the copies just landed on the folder they
+                # re-created (review resurrect). Another machine's delete stands - take
+                # our copy down, and keep the work as a session of its own.
                 say(f"{ulid} copy 期間被別台刪掉，剛寫回去的資料夾已清掉")
                 try:
                     drive._run("purge", f"gdrive:sessions/{ulid}")

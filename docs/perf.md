@@ -103,6 +103,12 @@ Drive 上 `agora-test/sessions/` 最後 0 筆、自己那個 uuid 的 `projects/
 6. `lsjson …`（確認 md5）
 7. `delete gdrive:sessions --files-from …`（清掉被取代的舊 raw）
 
+**#164（刪除偵測改用資料夾 ID）不改次數**：更新 import 的那 7 次裡，三次列檔（第 1、2、6 次的 `lsjson -R`）
+現在不加 `--files-only`，目錄項順便帶 `ID`，仍是同樣的三個呼叫。只有兩種情況才多呼叫：
+列表沒帶目錄 ID 時，送出前與確認各多一次 `lsjson gdrive:sessions --dirs-only`（上限 7 → 9，
+只有一邊缺則 8）；列表少了某一筆、或確認時 ID 變了，才多一次定向 `lsjson gdrive:sessions/<ULID>`。
+正常輪次不變。
+
 Drive 上有一個「卡住的舊 session」（session.md 在、raw 不在）時，每一次指令多一次下載：
 `copyto gdrive:sessions/<ULID>/session.md → mirror`（要讀標頭才知道它還沒寫完）。
 
