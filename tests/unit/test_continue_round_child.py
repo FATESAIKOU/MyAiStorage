@@ -38,7 +38,6 @@ from agora.agents.claude import encode_project_dir
 FAKE_RCLONE = Path(__file__).resolve().parent.parent / "fakes" / "fake_rclone.py"
 FAKE_CLAUDE = Path(__file__).resolve().parent.parent / "fakes" / "fake_claude.py"
 FAKE_OPENCODE = Path(__file__).resolve().parent.parent / "fakes" / "fake_opencode.py"
-_REPO_ROOT = str(Path(__file__).resolve().parents[2])   # this checkout, for `_absent`
 CL_FIX = Path(__file__).resolve().parent.parent / "fixtures" / "claude"
 CL_SID = "11111111-2222-4333-8444-555555555555"
 NO_SUCH_SID = "00000000-dead-beef-0000-000000000000"
@@ -66,9 +65,14 @@ def run(capsys, *argv):
     return code, out.out.strip(), out.err
 
 
-def _wrapper(tmp_path, name, target):
+def _wrapper(tmp_path, name, target, mark=None):
+    """A launcher script for a fake. With a `mark` the fake's interpreter gets `-X agora_test_mark=<mark>`:
+    CPython ignores an `-X` option it does not know, and the option stays on the process's command
+    line - for as long as the process lives, orphaned or not - which is how `_Mine` tells this
+    test's fakes from the same-named fakes of any other test (#180)."""
     w = tmp_path / name
-    w.write_text(f"#!/bin/sh\nexec {sys.executable} {target} \"$@\"\n")
+    flag = f" -X agora_test_mark={mark}" if mark else ""
+    w.write_text(f"#!/bin/sh\nexec {sys.executable}{flag} {target} \"$@\"\n")
     w.chmod(0o755)
     return w
 
@@ -81,7 +85,8 @@ def lab(tmp_path, monkeypatch):
     remote = tmp_path / "remote"
     remote.mkdir()
     monkeypatch.setenv("FAKE_REMOTE", str(remote))
-    monkeypatch.setenv("AGORA_RCLONE", str(_wrapper(tmp_path, "rclone", FAKE_RCLONE)))
+    mark = uuid_mod.uuid4().hex                    # this test's, nobody else's (#180)
+    monkeypatch.setenv("AGORA_RCLONE", str(_wrapper(tmp_path, "rclone", FAKE_RCLONE, mark)))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     home = Path(os.environ["AGORA_CLAUDE_HOME"])
     work = tmp_path / "proj"
@@ -89,8 +94,8 @@ def lab(tmp_path, monkeypatch):
     proj = home / ".claude" / "projects" / encode_project_dir(work)
     proj.mkdir(parents=True)
     shutil.copy(CL_FIX / "cl-basic.jsonl", proj / f"{CL_SID}.jsonl")
-    monkeypatch.setenv("AGORA_CLAUDE_CMD", str(_wrapper(tmp_path, "claude", FAKE_CLAUDE)))
-    return {"home": home, "work": work, "remote": remote,
+    monkeypatch.setenv("AGORA_CLAUDE_CMD", str(_wrapper(tmp_path, "claude", FAKE_CLAUDE, mark)))
+    return {"home": home, "work": work, "remote": remote, "mark": mark,
             "session": proj / f"{CL_SID}.jsonl", "tmp": tmp_path}
 
 
@@ -125,53 +130,122 @@ def _record(agora_id, sid, workdir, agent="claude"):
             "add_tags": [], "saved_md5": "0" * 32}
 
 
-def _absent(*needles):
-    """The pids of anything still alive that matches a command line (a dead
-    round child, its rclone/opencode children included). `-ax` matters: an
-    orphaned grandchild has no controlling terminal and plain `ps` would not
-    list it - the blind scan would make every absence-check trivially true.
-    `serve` lines are skipped: old detached `fake_opencode serve` daemons from
-    earlier runs of other tickets linger for hours on end; this test's fake
-    never serves - a surviving round's fake is always `session export`.
-
-    Only THIS checkout's processes count (#74): the same machine runs other
-    projects' tests whose fakes carry the same file names (`fake_opencode*`), and a
-    bare-name match took them for orphans of ours. Ours are the ones whose command
-    line names this repo's root (the fakes live under it) or this interpreter's own
-    round-child command (`<sys.executable> -m agora.round_child`). Both matches carry
-    a boundary (review #1): `/…/MyAiStorage-team` has `/…/MyAiStorage` as a prefix,
-    and this interpreter runs every other Python process on the machine too."""
-    out = subprocess.run(["ps", "-ax", "-o", "pid=,command="],
-                         capture_output=True, text=True).stdout
-    return [ln.strip() for ln in out.splitlines()
-            if "serve --hostname" not in ln
-            and (f"{_REPO_ROOT}{os.sep}" in ln or f"{sys.executable} -m agora." in ln)
-            for n in needles if n in ln and "ps -ax" not in ln]
+def _ps_table() -> list[tuple[int, int, str]]:
+    """[(pid, ppid, command)] of every process on the machine. `-ax` matters: an orphaned
+    grandchild has no controlling terminal and plain `ps` would not list it - the blind scan would
+    make every absence-check trivially true."""
+    out = subprocess.run(["ps", "-ax", "-o", "pid=,ppid=,command="], capture_output=True, text=True).stdout
+    table = []
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            table.append((int(parts[0]), int(parts[1]), parts[2]))
+    return table
 
 
-def test_absent_counts_only_this_checkouts_processes(tmp_path):
-    """#74: another project's `fake_opencode*` on the same machine is not an orphan
-    of ours, while a process that names this repo's fake is. #1: a sibling checkout
-    whose path starts with this root is a different checkout."""
-    elsewhere = tmp_path / "other-project" / "fake_opencode_elsewhere.py"
-    elsewhere.parent.mkdir()
-    elsewhere.write_text("import time\ntime.sleep(60)\n")
+class _Mine:
+    """The processes THIS test started - and nobody else's (#180; #74 was the first cut of this).
+
+    The machine runs other tests' fakes (same file names, same checkout), other projects', and
+    whatever an earlier run left behind. A name match, even one limited to this checkout, took those
+    for orphans of this test and failed it by accident twice. Two things say "ours":
+
+    - **the mark**: the fakes are started through `_wrapper(..., mark)`, which puts a per-test
+      `-X agora_test_mark=<mark>` on their command line. It survives re-parenting to init, so an
+      orphaned grandchild with no controlling terminal is found by it, and a fork of a fake carries
+      it along. Same-named fakes without this mark are not ours.
+    - **the round children**: `agora.round_child` is started by the product, so it cannot carry the
+      mark. Ours are the ones that show up under `root` (the process this test started - or the test
+      process itself) after `__enter__`, sampled while they run; whatever was already alive then is
+      excluded, and the `seen` set keeps a round child counted after its parent is gone.
+    """
+
+    ROUND_CHILD = "-m agora.round_child"
+
+    def __init__(self, mark: str, root: int | None = None):
+        import threading
+        self.mark = mark
+        self.root = os.getpid() if root is None else root
+        self.baseline = {pid for pid, _ppid, _cmd in _ps_table()}
+        self.seen: set[int] = set()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._sample, daemon=True)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+    def _sample(self):
+        while not self._stop.is_set():
+            self.sample()
+            self._stop.wait(0.05)
+
+    def sample(self):
+        table = _ps_table()
+        children: dict[int, list[int]] = {}
+        for pid, ppid, _cmd in table:
+            children.setdefault(ppid, []).append(pid)
+        commands = {pid: cmd for pid, _ppid, cmd in table}
+        todo, below = [self.root], set()
+        while todo:
+            for child in children.get(todo.pop(), []):
+                if child not in below:
+                    below.add(child)
+                    todo.append(child)
+        for pid in below - self.baseline:
+            if self.ROUND_CHILD in commands.get(pid, ""):
+                self.seen.add(pid)
+
+    def left(self, *needles) -> list[str]:
+        """The command lines of this test's processes that are still alive and match a needle."""
+        self.sample()
+        return [f"{pid} {cmd}" for pid, _ppid, cmd in _ps_table()
+                if pid != os.getpid() and "ps -ax" not in cmd and any(n in cmd for n in needles)
+                and (f"agora_test_mark={self.mark}" in cmd or pid in self.seen)]
+
+
+def test_mine_counts_this_tests_processes_and_nobody_elses(tmp_path):
+    """#180: a same-named fake that does not carry this test's mark - another test's, another
+    project's, one an earlier run left - is not an orphan of ours; a marked one is, parent or no
+    parent; and so is a round child that was started under the root during the test."""
     sleeper = "import sys, time; time.sleep(60)"
-    theirs = subprocess.Popen(["/usr/bin/env", "python3", str(elsewhere)])   # not this venv
-    sibling_fake = f"{_REPO_ROOT}-team/tests/fakes/fake_opencode_sibling.py"
-    sibling = subprocess.Popen(["/usr/bin/env", "python3", "-c", sleeper, sibling_fake])
-    ours = subprocess.Popen(["/usr/bin/env", "python3", "-c", sleeper, str(FAKE_OPENCODE)])
+    fake = str(FAKE_OPENCODE)
+    mark = uuid_mod.uuid4().hex
+    procs = []
     try:
-        time.sleep(0.5)
-        assert _absent("fake_opencode_elsewhere") == []
-        assert _absent("fake_opencode_sibling") == [], \
-            "a sibling directory with this root as a prefix is another checkout"
-        mine = _absent("fake_opencode.py")
-        assert any(str(ours.pid) in ln.split()[0] for ln in mine), mine
+        earlier = subprocess.Popen([sys.executable, "-c", sleeper + "  # -m agora.round_child, left by an earlier test"])
+        procs.append(earlier)
+        with _Mine(mark) as mine:
+            stranger = subprocess.Popen([sys.executable, "-c", sleeper, fake])             # same name, no mark
+            elsewhere = tmp_path / "other-project" / "fake_opencode_elsewhere.py"
+            elsewhere.parent.mkdir()
+            elsewhere.write_text("import time\ntime.sleep(60)\n")
+            other_project = subprocess.Popen([sys.executable, str(elsewhere)])
+            ours = subprocess.Popen([sys.executable, "-X", f"agora_test_mark={mark}", "-c", sleeper, fake])
+            # an orphan: a marked grandchild whose parent is gone, no controlling terminal
+            orphan_pid = int(subprocess.run(
+                ["sh", "-c", f'{sys.executable} -X agora_test_mark={mark} -c "{sleeper}" {fake} >/dev/null 2>&1 '
+                             f'</dev/null & echo $!'], capture_output=True, text=True).stdout.strip())
+            roundish = subprocess.Popen([sys.executable, "-c", sleeper + "  # -m agora.round_child"])
+            procs += [stranger, other_project, ours, roundish]
+            time.sleep(0.8)
+            rounds = mine.left("agora.round_child")
+            assert any(f"{roundish.pid} " in ln for ln in rounds), "a round child started under the root counts"
+            assert not any(f"{earlier.pid} " in ln for ln in rounds), "one that was alive before the test does not"
+            left = mine.left("fake_opencode")
+            assert any(f"{ours.pid} " in ln for ln in left), left
+            assert any(f"{orphan_pid} " in ln for ln in left), left
+            assert not any(f"{stranger.pid} " in ln or f"{other_project.pid} " in ln for ln in left), left
     finally:
-        for proc in (theirs, sibling, ours):
+        for proc in procs:
             proc.kill()
             proc.wait(timeout=10)
+        subprocess.run(["pkill", "-f", f"agora_test_mark={mark}"])
+
 
 
 def _group_with_a_grandchild_that_ignores_term(leader_ignores_term: bool):
@@ -428,7 +502,7 @@ def test_round_child_timeout_kills_a_real_wedged_group(lab, monkeypatch, tmp_pat
     """The same through a REAL child: the round hangs inside the fake opencode's
     sleep (its own grandchild process); AGORA_ROUND_TIMEOUT=2 fires, and NEITHER
     the round child nor the sleeping fake survives."""
-    monkeypatch.setenv("AGORA_OPENCODE_CMD", str(_wrapper(tmp_path, "opencode", FAKE_OPENCODE)))
+    monkeypatch.setenv("AGORA_OPENCODE_CMD", str(_wrapper(tmp_path, "opencode", FAKE_OPENCODE, lab["mark"])))
     monkeypatch.setenv("FAKE_OPENCODE_SLEEP", "30")
     monkeypatch.setenv("AGORA_ROUND_TIMEOUT", "2")
     rec = _record("agora:01TEST00000000000000000000", "ses_slow", str(lab["work"]),
@@ -436,13 +510,13 @@ def test_round_child_timeout_kills_a_real_wedged_group(lab, monkeypatch, tmp_pat
     run_obj = cli._Run(paths(), rec)
 
     t0 = time.monotonic()
-    with pytest.raises(Exception) as exc:
+    with _Mine(lab["mark"]) as mine, pytest.raises(Exception) as exc:
         cli._round_child(paths(), run_obj, None)
     assert "逾時" in str(exc.value)
     assert time.monotonic() - t0 < 30, "the timeout is enforced, not waited out"
 
     time.sleep(0.5)
-    left = _absent("agora.round_child", "fake_opencode")
+    left = mine.left("agora.round_child", "fake_opencode")
     assert not left, f"the group kill orphaned: {left}"
 
 
@@ -547,11 +621,12 @@ def test_mid_round_sigterm_finishes_the_round_then_the_final_write(lab, capsys):
            "FAKE_RCLONE_DELAYED": str(lab["tmp"] / "upload-in-flight")}
     out_file = lab["tmp"] / "shell.out"
     marker = Path(env["FAKE_RCLONE_DELAYED"])
-    with open(out_file, "wb") as sink:
+    with open(out_file, "wb") as sink, _Mine(lab["mark"]) as mine:
         proc = subprocess.Popen(
             [sys.executable, "-m", "agora.cli", "continue", "session", a, "--agent", "claude",
              "--dir", str(lab["work"]), "--headless", "--sync-period", SECONDS],
             stdout=sink, stderr=sink, stdin=subprocess.DEVNULL, env=env, cwd=str(lab["tmp"]))
+        mine.root = proc.pid                 # the round children are under the shell this test started
         deadline = time.monotonic() + 150
         while not marker.exists():
             if proc.poll() is not None:
@@ -572,7 +647,7 @@ def test_mid_round_sigterm_finishes_the_round_then_the_final_write(lab, capsys):
     on_drive = lab["remote"] / "agora" / "sessions" / a.split(":")[1] / "session.md"
     assert "ZZTERM TERM前的一句" in on_drive.read_text(encoding="utf-8")
     assert not list(store.Paths.from_env().pending.glob("*.json")), "pending cleaned up"
-    left = _absent("agora.round_child", "fake_rclone.py", "fake_claude.py")
+    left = mine.left("agora.round_child", "fake_rclone.py", "fake_claude.py")
     assert not left, f"processes outlived the gentle stop: {left}"
 
 
