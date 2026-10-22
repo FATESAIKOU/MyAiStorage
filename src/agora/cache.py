@@ -234,6 +234,13 @@ def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
             # evidence of a delete (N12). sync and `_lost_in_cloud` both read it as
             # "do not know"; deleting on it would throw away a real session.
             raise store.StoreError("Drive 上找不到 sessions/，不能確定它是被刪掉的（先修好連線再說）")
+        # The listing is one call, and a bad day can lose a live folder from it (#152): what this
+        # does next is irreversible, so the folder is asked about directly first (#159). Only
+        # "not there" (or a folder with nothing but orphans) deletes; a folder that answers, an
+        # empty one or a look that failed leaves the local copy.
+        if not store._really_gone(drive, ulid, _line):
+            _line(f"{ulid} 確認不了雲端真的沒有它，本機的副本不動；下一次再試")
+            return
         store.forget_local(paths, ulid)
         _line(f"{ulid} 雲端沒有，本機的副本已刪")
         return
