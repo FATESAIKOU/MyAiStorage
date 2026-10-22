@@ -359,6 +359,11 @@ def _push_back(paths: store.Paths, drive: store.Drive, ulid: str,
         raise store.StoreError(
             f"{ulid} 列表裡沒有，直接查是空的，不能確認它真的不在，這次不傳；下一次再試")
     _push_mirrored(paths, drive, ulid, need_raw=True)
+    # A crash earlier may have left the pre-send folder ID of the folder that is gone now. The
+    # folder just put back has another ID, and the next round would read that as "purged and
+    # re-created by our own copy" and take the revived session down (#173). It is revived on
+    # purpose: that record describes a folder that no longer exists.
+    store._forget_folder_record(paths, ulid)
 
 
 def _push_mirrored(paths: store.Paths, drive: store.Drive, ulid: str, *,
