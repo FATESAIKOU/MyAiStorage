@@ -1613,3 +1613,174 @@ def test_a_directed_look_that_says_rc3_is_a_deletion(env, monkeypatch):
     (new_id,) = _session_folder_names(env)
     assert new_id != ulid
     assert any("已被別台刪除" in s for s in said), said
+
+
+# --- #155: a missing file in the confirmation is not proof of a deletion ------------
+
+
+def _raws_on_drive(env, ulid: str) -> list[str]:
+    return sorted(p.name for p in (env / "agora" / "sessions" / ulid).glob("raw-*"))
+
+
+def _update_with_old_raw(env, paths, title="改過了"):
+    """X confirmed on Drive, then an edit of X waiting; the old raw's name on Drive."""
+    ulid = _update_on_drive(env, paths, title)
+    (old_raw,) = _raws_on_drive(env, ulid)
+    return ulid, old_raw
+
+
+def test_a_confirmation_that_loses_a_file_does_not_purge_a_live_folder(env, monkeypatch):
+    """#155: the confirmation compares the names the folder had before the copies with
+    what Drive lists after them, and used to purge the whole folder when one was gone.
+    A listing that drops a *file* (the old raw) is enough to trigger that, while the
+    folder is alive. The directed look still sees the raw, so that is a listing error:
+    nothing is taken down or rescued, the entry waits, and the next round sends the
+    same id."""
+    paths = store.Paths.from_env()
+    ulid, old_raw = _update_with_old_raw(env, paths)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT_FILES", old_raw)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT_FILES_FROM", "3")   # the confirmation only
+    said: list[str] = []
+
+    left = store.upload_batch(store.Drive(paths), paths, warn=said.append)
+
+    assert left == [ulid], f"同一筆更新該留在 outbox：{left}"
+    assert _session_folder_names(env) == [ulid], "活的資料夾不該被清掉或另存"
+    assert old_raw in _raws_on_drive(env, ulid), "舊 raw 還在 Drive 上，資料夾沒被清"
+    assert any("直接查還在" in s and old_raw in s for s in said), said
+    assert not any("copy 期間被別台刪掉" in s for s in said), said
+
+    monkeypatch.delenv("FAKE_RCLONE_OMIT_FILES")
+    monkeypatch.delenv("FAKE_RCLONE_OMIT_FILES_FROM")
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    assert ulid not in store.outbox_ulids(paths)
+    assert "改過了" in (env / "agora" / "sessions" / ulid / "session.md").read_text(
+        encoding="utf-8")
+
+
+def test_a_confirmation_look_that_comes_back_empty_does_not_purge(env, monkeypatch):
+    """#155 / #152 B1: the directed look can answer `[]` with exit 0 after the same
+    Drive failure that lost files from the whole listing. That is not proof the old
+    raw is gone, so the folder stays, no rescue, and the entry waits."""
+    paths = store.Paths.from_env()
+    ulid, old_raw = _update_with_old_raw(env, paths)
+    real_look = store.Drive.list_one
+    monkeypatch.setenv("FAKE_RCLONE_OMIT_FILES", old_raw)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT_FILES_FROM", "3")
+    monkeypatch.setattr(store.Drive, "list_one", lambda self, _ulid: {})
+    said: list[str] = []
+
+    left = store.upload_batch(store.Drive(paths), paths, warn=said.append)
+
+    assert left == [ulid]
+    assert _session_folder_names(env) == [ulid]
+    assert old_raw in _raws_on_drive(env, ulid)
+    assert any("直接查是空的" in s for s in said), said
+    assert not any("copy 期間被別台刪掉" in s for s in said), said
+
+    monkeypatch.setattr(store.Drive, "list_one", real_look)
+    monkeypatch.delenv("FAKE_RCLONE_OMIT_FILES")
+    monkeypatch.delenv("FAKE_RCLONE_OMIT_FILES_FROM")
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    assert "改過了" in (env / "agora" / "sessions" / ulid / "session.md").read_text(
+        encoding="utf-8")
+
+
+def test_a_confirmation_look_that_fails_does_not_purge(env, monkeypatch):
+    """#155 / V6: not seeing is not seeing it gone. The confirmation list lost the old
+    raw and the directed look failed too; no purge and no rescue - the entry waits for
+    a round whose look works."""
+    paths = store.Paths.from_env()
+    ulid, old_raw = _update_with_old_raw(env, paths)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT_FILES", old_raw)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT_FILES_FROM", "3")
+
+    def failed(self, _ulid):
+        raise store.StoreError("injected failure")
+
+    monkeypatch.setattr(store.Drive, "list_one", failed)
+    said: list[str] = []
+
+    left = store.upload_batch(store.Drive(paths), paths, warn=said.append)
+
+    assert left == [ulid]
+    assert _session_folder_names(env) == [ulid]
+    assert old_raw in _raws_on_drive(env, ulid)
+    assert any("直接查也失敗" in s for s in said), said
+    assert not any("copy 期間被別台刪掉" in s for s in said), said
+
+
+def test_a_normal_update_round_does_not_look_at_the_folder_again(env, monkeypatch):
+    """#155: the directed look only happens when the confirmation lost a name. A round
+    whose confirmation matches the listing before the copies must not add an rclone
+    call at all."""
+    paths = store.Paths.from_env()
+    ulid, _ = _update_with_old_raw(env, paths)
+    looks: list[str] = []
+
+    def spy(self, looked_at):
+        looks.append(looked_at)
+        return {}
+
+    monkeypatch.setattr(store.Drive, "list_one", spy)
+    assert store.upload_batch(store.Drive(paths), paths) == []
+    assert looks == [], f"正常路徑不該多打 rclone：{looks}"
+    assert ulid not in store.outbox_ulids(paths)
+
+
+def test_another_machines_cleanup_during_the_copies_does_not_purge_the_folder(env, monkeypatch):
+    """#155 非阻擋 1: two machines write the same session. While this round's copies
+    are in flight the other machine does its ordinary cleanup: it deletes the old
+    raw-X it replaced and puts its own new raw-Z in. One name from before the copies
+    is gone from the confirmation, but the folder is alive - raw-Z and our raw are
+    there. A folder purged and re-created by our copies holds *only* this round's
+    files, so anything else is proof of a live folder: no purge, no rescue, wait."""
+    paths = store.Paths.from_env()
+    ulid, old_raw = _update_with_old_raw(env, paths)
+    our_raw = _entry_raw(paths, ulid)
+    trigger = env.parent / "clean-after.json"
+    trigger.write_text(json.dumps({
+        "after": "raw-",                       # after this round's raws copy
+        "folder": f"sessions/{ulid}",
+        "remove": [old_raw],
+        "add": {"raw-Z.json": '{"other": 1}'},
+    }), encoding="utf-8")
+    monkeypatch.setenv("FAKE_RCLONE_CLEAN_AFTER", str(trigger))
+    said: list[str] = []
+
+    left = store.upload_batch(store.Drive(paths), paths, warn=said.append)
+
+    assert not trigger.exists(), "the cleanup hook never fired - the test proved nothing"
+    assert left == [ulid], f"同一筆更新該留在 outbox：{left}"
+    assert _session_folder_names(env) == [ulid], "活著的資料夾不該被清掉或另存"
+    folder = env / "agora" / "sessions" / ulid
+    assert (folder / our_raw).is_file(), "我們這一輪送的 raw 被自己的 purge 清掉了"
+    assert (folder / "raw-Z.json").is_file(), "別台剛放的 raw-Z 被我們的 purge 清掉了"
+    assert any("這一輪沒送" in s and "raw-Z.json" in s for s in said), said
+    assert not any("copy 期間被別台刪掉" in s for s in said), said
+
+
+def test_a_confirmation_look_that_says_rc3_waits_for_the_next_round(env, monkeypatch):
+    """#155 非阻擋 2: the confirmation listing just matched our session.md's md5, so
+    the folder exists. A directed look answering rc=3 contradicts that, and either
+    answer can be the wrong one: take the contradiction as「not sure」, keep the entry,
+    and let the next round's existence check (#152) make the call when the evidence
+    is no longer at odds with itself. No purge, no rescue."""
+    paths = store.Paths.from_env()
+    ulid, old_raw = _update_with_old_raw(env, paths)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT_FILES", old_raw)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT_FILES_FROM", "3")   # the confirmation only
+
+    def gone(self, _ulid):
+        raise store.StoreError("error listing: object not found", returncode=3)
+
+    monkeypatch.setattr(store.Drive, "list_one", gone)
+    said: list[str] = []
+
+    left = store.upload_batch(store.Drive(paths), paths, warn=said.append)
+
+    assert left == [ulid], f"同一筆更新該留在 outbox：{left}"
+    assert _session_folder_names(env) == [ulid], "證據互相矛盾時不該 purge 或另存"
+    assert old_raw in _raws_on_drive(env, ulid), "資料夾還在，舊 raw 不該被清"
+    assert any("矛盾" in s for s in said), said
+    assert not any("copy 期間被別台刪掉" in s for s in said), said
