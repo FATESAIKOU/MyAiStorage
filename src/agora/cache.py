@@ -14,6 +14,7 @@ else, because putting it back is not what anybody asked for (review Q1).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -303,6 +304,7 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
         _line(f"outbox 還有 {len(left)} 筆沒上傳成功")
     listing = store._listing_with_md5(drive)   # offline: every id here fails, and says so
     done = failed = 0
+    fresh: "bool | store.StoreError | None" = None     # `_fresh_drive`'s answer, asked at most once
     for k, agora_id in enumerate(wanted, 1):
         store.progress("push", k, len(wanted))
         try:
@@ -324,7 +326,17 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
                 if not not_exist_upload:
                     _absent(paths, ulid, "沒有傳")
                     continue
-                _push_back(paths, drive, ulid, listing)
+                if listing is None:
+                    if fresh is None:
+                        # once per push; the refusal is remembered so the other ids do not ask again
+                        try:
+                            _fresh_drive(drive, _revive_count(paths, wanted, agents))
+                            fresh = True
+                        except store.StoreError as e:
+                            fresh = e
+                    if isinstance(fresh, store.StoreError):
+                        raise fresh
+                _push_back(paths, drive, ulid, listing, fresh=fresh is True)
             else:
                 _push_mirrored(paths, drive, ulid)
             done += 1
@@ -335,8 +347,57 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
 
 
 
+def _revive_count(paths: store.Paths, wanted: list[str], agents: dict) -> int:
+    """How many of the ids given are agora sessions that are not waiting in the outbox."""
+    count = 0
+    for session_id in wanted:
+        try:
+            kind, ulid = _split(session_id, agents)
+        except ValueError:
+            continue
+        count += kind == "agora" and not (paths.outbox / ulid).is_dir()
+    return count
+
+
+def _fresh_drive(drive: store.Drive, count: int) -> None:
+    """`--not-exist-upload` with no `sessions/` in the listing: is this a new or emptied Drive (#162)?
+
+    Raises StoreError unless both hold: the configured root folder is really there (the same ID,
+    found among My Drive's own folders, so a mistyped ID cannot pass whatever a wrong root answers),
+    and listing that root works and shows no `sessions/`, and a directed look at `sessions/` itself
+    says "not there". A bad token, a root that is not found, a
+    network error - anything else - refuses, as before. Called once per push, and only when the
+    listing had no `sessions/`.
+    """
+    refuse = ("Drive 上找不到 sessions/。這是新的或清空的 Drive 嗎？只有確定設定的 root 資料夾在、"
+              "而且裡面真的沒有 sessions/ 時，--not-exist-upload 才會建立並上傳；這次查不出來（{why}），"
+              "分不出是新的 Drive 還是 root／token 設定有問題，所以不傳。確認 `agora sync`／連線正常後再試一次")
+    try:
+        mine = json.loads(drive._run("lsjson", "gdrive:", "--dirs-only", root=False) or "[]")
+        root_id = drive.folder_id()
+        if not any(isinstance(e, dict) and e.get("ID") == root_id for e in mine):
+            raise store.StoreError(f"設定的 root 資料夾 {root_id} 在 Drive 上找不到")
+        children = json.loads(drive._run("lsjson", "gdrive:", "--dirs-only") or "[]")
+    except store.StoreError as e:
+        raise store.StoreError(refuse.format(why=e)) from None
+    except ValueError as e:
+        raise store.StoreError(refuse.format(why=f"Drive 的回應讀不懂：{e}")) from None
+    if any(isinstance(e, dict) and e.get("Name") == "sessions" for e in children):
+        raise store.StoreError(refuse.format(why="root 裡其實有 sessions/，是列表出了問題"))
+    # The third answer, from the one place that tells "not there" from a failed look (#152): a
+    # directed look at `sessions/` itself (the folder name with an empty ULID). Only rclone saying it
+    # is not there (rc=3 / "directory not found") lets the revive through; a folder that answers,
+    # an empty one or a look that fails does not.
+    look = store._directed_look(drive, "")
+    if store._folder_state(look) != "gone":
+        why = (f"直接查 sessions/ 也失敗（{look.error}）" if look.there is None
+               else "直接查 sessions/ 還找得到它")
+        raise store.StoreError(refuse.format(why=why))
+    _line(f"Drive 上沒有 sessions/，將建立並上傳 {count} 個")
+
+
 def _push_back(paths: store.Paths, drive: store.Drive, ulid: str,
-               listing: dict | None) -> None:
+               listing: dict | None, fresh: bool = False) -> None:
     """`--not-exist-upload`: put a session back, only when Drive says it is gone.
 
     Until now the whole listing was the only evidence: if it did not have the
@@ -350,11 +411,15 @@ def _push_back(paths: store.Paths, drive: store.Drive, ulid: str,
     A look that fails says nothing either way, and a missing `sessions/` is not
     evidence of a deletion either (N12: a broken folder id or token looks the
     same). Both refuse the entry and say to try again; none of them touches Drive.
+
+    The one exception is `fresh` (#162): `_fresh_drive` found the root folder there and no
+    `sessions/` in it - a new or emptied Drive, where the mirror is all there is. Then there is
+    no folder to look at and the session goes up.
     """
-    if listing is None:
+    if listing is None and not fresh:
         raise store.StoreError(
-            "Drive 上找不到 sessions/，不能確定它真的不在，這次不傳；先修好連線，下一次再試")
-    look = store._directed_look(drive, ulid)
+            "Drive 上找不到 sessions/，不能確定它真的不在，這次不傳；稍後重試")
+    look = store._directed_look(drive, ulid) if not fresh else store._Look(False, {})
     if look.there is None:
         raise store.StoreError(
             f"Drive 上查不動 {ulid}（{look.error}），不能確定它不在，這次不傳；下一次再試")
@@ -362,7 +427,7 @@ def _push_back(paths: store.Paths, drive: store.Drive, ulid: str,
         if look.files:
             raise store.StoreError(
                 f"{ulid} 在 Drive 上其實還在（只是列表裡沒有），不用 --not-exist-upload；"
-                f"先 pull 再 push，才不會用本機的舊版蓋掉它")
+                f"稍後重試：列表正常後直接 push（不加旗標）或先 pull，才不會用本機的舊版蓋掉它")
         raise store.StoreError(
             f"{ulid} 列表裡沒有，直接查是空的，不能確認它真的不在，這次不傳；下一次再試")
     _push_mirrored(paths, drive, ulid, need_raw=True)

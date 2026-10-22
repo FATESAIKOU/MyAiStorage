@@ -1147,19 +1147,46 @@ def test_pull_brings_the_raw_down_and_push_writes_the_session_back(env, capsys):
     assert code == 0 and "寫回 1 個" in out and "本機改的一行" in remote.read_text()
 
 
-def test_push_not_exist_upload_that_cannot_confirm_exits_nonzero(env, capsys):
-    """#159: without `sessions/` there is no way to confirm the session is really
-    gone, so it is not pushed back - and the command exits non-zero."""
+def test_push_not_exist_upload_revives_a_session_on_a_new_or_emptied_drive(env, capsys):
+    """#159 -> #162: #159 made a missing `sessions/` a plain refusal, because it could not tell a new
+    Drive from a wrong root or a bad token. #162 asks the root: when the configured root folder is
+    really there and holds no `sessions/` (an emptied Drive, a new account's folder), nothing was
+    deleted by anybody, the mirror is all there is, and the flag puts the session back - exit 0."""
     _, a, _ = _import(capsys)
+    ulid = a.split(":", 1)[1]
     sessions = Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions"
     shutil.rmtree(sessions)
 
     code, out, err = run(capsys, "push", "session", a, "--not-exist-upload")
 
+    assert code == 0
+    assert "Drive 上沒有 sessions/，將建立並上傳 1 個" in err
+    assert "寫回 1 個" in out
+    assert (sessions / ulid / "session.md").is_file(), "rebuilt on Drive"
+
+
+def test_push_not_exist_upload_that_cannot_vouch_for_the_root_exits_nonzero(env, capsys):
+    """#159 -> #162: what is still refused. Without `sessions/` AND without a root that can be vouched
+    for (the configured folder id is not among My Drive's folders) there is no telling an emptied
+    Drive from a wrong root or a bad token, so nothing is copied and the command exits non-zero."""
+    _, a, _ = _import(capsys)
+    remote = Path(os.environ["FAKE_REMOTE"])
+    sessions = remote / "agora" / "sessions"
+    shutil.rmtree(sessions)
+    settings = Path(os.environ["AGORA_CONFIG"]) / "config.json"
+    data = json.loads(settings.read_text())
+    data["folders"] = {name: "BOGUS-ROOT-ID" for name in data["folders"]}
+    settings.write_text(json.dumps(data))
+    copies = remote.parent / "copies.log"
+    before = copies.read_text() if copies.exists() else ""
+
+    code, out, err = run(capsys, "push", "session", a, "--not-exist-upload")
+
     assert code == cli.EXIT_ERROR
-    assert "找不到 sessions/" in err and "下一次再試" in err
+    assert "找不到 sessions/" in err and "這是新的或清空的 Drive 嗎" in err and "所以不傳" in err
     assert "寫回 0 個，1 個失敗" in out
-    assert not sessions.exists()
+    assert (copies.read_text() if copies.exists() else "") == before, "nothing was copied"
+    assert not sessions.exists() and not (remote / "BOGUS-ROOT-ID").exists()
 
 
 def test_pull_and_push_need_ids(env, capsys):   # review S2-6

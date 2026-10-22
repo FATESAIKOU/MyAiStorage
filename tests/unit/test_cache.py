@@ -744,7 +744,7 @@ def test_not_exist_upload_does_not_overwrite_a_session_the_listing_only_missed(
     assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (0, 1)
 
     err = capsys.readouterr().err
-    assert "其實還在" in err and "先 pull 再 push" in err
+    assert "其實還在" in err and "稍後重試" in err and "直接 push（不加旗標）或先 pull" in err
     assert on_drive.read_text(encoding="utf-8") == newer
     assert {name: store.md5_file(sessions_on(drive) / ulid / name) for name in names} == before
 
@@ -795,18 +795,172 @@ def test_not_exist_upload_refuses_when_the_direct_look_fails(drive, capsys, monk
     assert not (sessions_on(drive) / ulid).exists()
 
 
-def test_not_exist_upload_refuses_when_sessions_is_missing(drive, capsys):
-    """N12: Drive without `sessions/` at all is a broken folder id or token, not
-    evidence that this session was deleted. Nothing goes up and the entry fails."""
-    paths = store.Paths.from_env()
-    ulid = _on_drive(paths)
+# --- #162: a new or emptied Drive ------------------------------------------------------------------
+
+
+def _config_json(paths) -> Path:
+    return paths.config / "config.json"
+
+
+def _wrong_root(paths) -> None:
+    data = json.loads(_config_json(paths).read_text())
+    data["folders"] = {name: "BOGUS-ROOT-ID" for name in data["folders"]}
+    _config_json(paths).write_text(json.dumps(data))
+
+
+def _emptied_drive(drive, paths, ulid) -> None:
+    """The session is in the mirror; Drive keeps its root folder but has no `sessions/` any more."""
     cache.pull(paths, [ulid], {})
     shutil.rmtree(sessions_on(drive))
+
+
+def _copies(drive, mark) -> list[str]:
+    return [c for c in calls(drive)[mark:] if "copy" in c or "copyto" in c]
+
+
+def test_not_exist_upload_revives_the_mirror_on_a_new_or_emptied_drive(drive, capsys):
+    """#162: the root is there and has no `sessions/`: nothing was deleted by anybody, the mirror is
+    all there is. The session goes up (the folder is created) and the person is told first."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    store._note_folder_record(paths, ulid, "an-id-from-before", ["session.md"], lambda *_: None)   # #173
+    _emptied_drive(drive, paths, ulid)
+
+    assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (1, 0)
+
+    err = capsys.readouterr().err
+    assert "Drive 上沒有 sessions/，將建立並上傳 1 個" in err
+    assert "session.md" in _uploaded(drive, ulid) and len(_uploaded(drive, ulid)) >= 2
+    assert not (paths.state / "folder-ids" / f"{ulid}.json").exists(), "#173: the old record is cleared"
+
+
+def test_the_fresh_drive_question_is_asked_once_for_the_whole_push(drive):
+    paths = store.Paths.from_env()
+    first, second = _on_drive(paths), _on_drive(paths, body="## user\n第二個\n")
+    cache.pull(paths, [first, second], {})
+    shutil.rmtree(sessions_on(drive))
+    mark = len(calls(drive))
+
+    assert cache.push(paths, [first, second], {}, not_exist_upload=True) == (2, 0)
+
+    root_questions = [c for c in calls(drive)[mark:] if "lsjson" in c and "--dirs-only" in c and "gdrive:" in c]
+    assert len(root_questions) == 2, "My Drive (is the root there?) and the root (no sessions/?), once each"
+
+
+@pytest.mark.parametrize("what", ["root-not-found", "bad-token", "network-error", "root-lookup-lies"])
+def test_not_exist_upload_still_refuses_when_the_root_cannot_be_vouched_for(drive, capsys, monkeypatch, what):
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    _emptied_drive(drive, paths, ulid)
+    if what == "root-not-found":
+        _wrong_root(paths)
+    elif what in ("bad-token", "network-error"):
+        real = store.Drive._run
+
+        def failing(self, *args, root=True):
+            if args[:1] == ("lsjson",) and "--dirs-only" in args:
+                raise store.StoreError("rclone lsjson 失敗（rc=1）：" + (
+                    "invalid_grant: Token has been expired or revoked" if what == "bad-token"
+                    else "dial tcp: lookup www.googleapis.com: no such host"))
+            return real(self, *args, root=root)
+        monkeypatch.setattr(store.Drive, "_run", failing)
+    else:
+        # A wrong root that answers an empty list: the root listing alone would say "fresh Drive".
+        # My Drive's own folders do not contain this ID, so it must not pass.
+        _wrong_root(paths)
+        real = store.Drive._run
+
+        def lies(self, *args, root=True):
+            if root and args[:1] == ("lsjson",) and "--dirs-only" in args:
+                return "[]"
+            return real(self, *args, root=root)
+        monkeypatch.setattr(store.Drive, "_run", lies)
     mark = len(calls(drive))
 
     assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (0, 1)
 
     err = capsys.readouterr().err
-    assert "找不到 sessions/" in err and "下一次再試" in err
-    assert not [c for c in calls(drive)[mark:] if "copyto" in c]
+    assert "找不到 sessions/" in err and "這是新的或清空的 Drive 嗎" in err and "所以不傳" in err
+    assert not _copies(drive, mark), "nothing was sent anywhere"
     assert not sessions_on(drive).exists()
+
+
+def test_a_legacy_session_is_still_refused_on_a_fresh_drive(drive, capsys):
+    """#169: a session whose raw this version does not read is never written back, new Drive or not."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    cache.pull(paths, [ulid], {})
+    md = paths.mirror / ulid / "session.md"
+    hdr, body = store.h.split_document(md.read_text(encoding="utf-8"))
+    hdr["agora"]["raw"] = {"file": "raw-aaaaaaaaaaaa.json", "md5": "a" * 32, "size": 3}
+    md.write_text(store.h.dump_document(hdr, body), encoding="utf-8")
+    shutil.rmtree(sessions_on(drive))
+    mark = len(calls(drive))
+
+    assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (0, 1)
+
+    assert not _copies(drive, mark) and not sessions_on(drive).exists()
+
+
+def test_without_the_flag_a_missing_sessions_folder_is_still_just_absent(drive, capsys):
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    _emptied_drive(drive, paths, ulid)
+    mark = len(calls(drive))
+
+    assert cache.push(paths, [ulid], {}) == (0, 0)
+
+    assert "雲端沒有" in capsys.readouterr().err and not _copies(drive, mark)
+
+
+def test_not_exist_upload_refuses_when_the_root_does_have_a_sessions_folder(drive, capsys, monkeypatch):
+    """The listing said "no `sessions/`" but the root lists one: the listing is what is wrong, so
+    this is not a new Drive and nothing may be sent over what is there."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    cache.pull(paths, [ulid], {})
+    monkeypatch.setattr(store, "_listing_with_md5", lambda drive_: None)      # what push lists with
+    mark = len(calls(drive))
+
+    assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (0, 1)
+
+    assert "root 裡其實有 sessions/" in capsys.readouterr().err
+    assert not _copies(drive, mark)
+
+
+@pytest.mark.parametrize("how", ["sessions-answers-empty", "sessions-answers-files", "look-fails"])
+def test_not_exist_upload_refuses_when_only_the_directed_look_finds_sessions(drive, capsys, monkeypatch, how):
+    """#162 review: both root questions say "no `sessions/`", but one directed look at `sessions/`
+    itself (the same look every other irreversible path asks) finds it - or cannot say. Not a new Drive."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    _emptied_drive(drive, paths, ulid)
+    real = store.Drive.list_one
+
+    def look(self, u):
+        if u != "":
+            return real(self, u)
+        if how == "look-fails":
+            raise store.StoreError("rclone lsjson 失敗（rc=1）：500 backend error")
+        return {} if how == "sessions-answers-empty" else {"stray.txt": "m"}
+    monkeypatch.setattr(store.Drive, "list_one", look)
+    mark = len(calls(drive))
+
+    assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (0, 1)
+
+    err = capsys.readouterr().err
+    assert "這是新的或清空的 Drive 嗎" in err and "直接查 sessions/" in err
+    assert not _copies(drive, mark) and not sessions_on(drive).exists()
+
+
+def test_the_directed_look_at_sessions_is_part_of_the_one_question_per_push(drive):
+    paths = store.Paths.from_env()
+    first, second = _on_drive(paths), _on_drive(paths, body="## user\n第二個\n")
+    cache.pull(paths, [first, second], {})
+    shutil.rmtree(sessions_on(drive))
+    mark = len(calls(drive))
+
+    assert cache.push(paths, [first, second], {}, not_exist_upload=True) == (2, 0)
+
+    looks = [c for c in calls(drive)[mark:] if "lsjson" in c and "gdrive:sessions/" in c]
+    assert len(looks) == 1, "asked once for the whole push, the answer is remembered"
