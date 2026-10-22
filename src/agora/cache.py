@@ -314,7 +314,7 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
                 if not not_exist_upload:
                     _absent(paths, ulid, "沒有傳")
                     continue
-                _push_mirrored(paths, drive, ulid, need_raw=True)
+                _push_back(paths, drive, ulid, listing)
             else:
                 _push_mirrored(paths, drive, ulid)
             done += 1
@@ -323,6 +323,39 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
             _line(f"{agora_id} 傳不上去：{e}")
     return done, failed
 
+
+
+def _push_back(paths: store.Paths, drive: store.Drive, ulid: str,
+               listing: dict | None) -> None:
+    """`--not-exist-upload`: put a session back, only when Drive says it is gone.
+
+    Until now the whole listing was the only evidence: if it did not have the
+    folder, the flag sent the local copy up. But that listing drops live folders
+    when Drive has a bad day (#152), and then this sends an older local version
+    over the newer one still on Drive - the one thing this path must not do.
+
+    One directed look at that folder decides. Only rclone saying the folder itself
+    is not there (rc=3, or the words older builds print) is "gone". A folder that
+    answers is still there, and an empty answer is not proof either (#152 B1).
+    A look that fails says nothing either way, and a missing `sessions/` is not
+    evidence of a deletion either (N12: a broken folder id or token looks the
+    same). Both refuse the entry and say to try again; none of them touches Drive.
+    """
+    if listing is None:
+        raise store.StoreError(
+            "Drive 上找不到 sessions/，不能確定它真的不在，這次不傳；先修好連線，下一次再試")
+    look = store._directed_look(drive, ulid)
+    if look.there is None:
+        raise store.StoreError(
+            f"Drive 上查不動 {ulid}（{look.error}），不能確定它不在，這次不傳；下一次再試")
+    if look.there:
+        if look.files:
+            raise store.StoreError(
+                f"{ulid} 在 Drive 上其實還在（只是列表裡沒有），不用 --not-exist-upload；"
+                f"先 pull 再 push，才不會用本機的舊版蓋掉它")
+        raise store.StoreError(
+            f"{ulid} 列表裡沒有，直接查是空的，不能確認它真的不在，這次不傳；下一次再試")
+    _push_mirrored(paths, drive, ulid, need_raw=True)
 
 
 def _push_mirrored(paths: store.Paths, drive: store.Drive, ulid: str, *,

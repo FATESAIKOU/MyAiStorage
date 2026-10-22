@@ -660,3 +660,95 @@ def test_not_exist_upload_refuses_when_the_raw_is_not_here(drive, capsys):
     assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (0, 1)
     assert "不傳半套" in capsys.readouterr().err
     assert not (sessions_on(drive) / ulid).exists()
+
+
+# --- #159: `--not-exist-upload` asks the folder before it sends -----------------
+
+
+def test_not_exist_upload_does_not_overwrite_a_session_the_listing_only_missed(
+        drive, capsys, monkeypatch):
+    """#159: the whole listing can lose a live folder (#152). `--not-exist-upload`
+    used to take that as its premise and send the local copy - an older one over
+    the newer one still on Drive. One directed look sees the folder, so this entry
+    is refused and Drive keeps its bytes."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    cache.pull(paths, [ulid], {})
+    on_drive = sessions_on(drive) / ulid / "session.md"
+    newer = on_drive.read_text(encoding="utf-8") + "\n別台比較新\n"   # the version here is older
+    on_drive.write_text(newer, encoding="utf-8")
+    raw = _raw_name_on_drive(drive, ulid)
+    before = {name: store.md5_file(sessions_on(drive) / ulid / name)
+              for name in ("session.md", raw)}
+    monkeypatch.setenv("FAKE_RCLONE_OMIT", ulid)     # the whole listing loses the folder
+
+    assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (0, 1)
+
+    err = capsys.readouterr().err
+    assert "其實還在" in err and "先 pull 再 push" in err
+    assert on_drive.read_text(encoding="utf-8") == newer
+    assert {name: store.md5_file(sessions_on(drive) / ulid / name)
+            for name in ("session.md", raw)} == before
+
+
+def test_not_exist_upload_refuses_when_the_folder_is_there_but_empty(
+        drive, capsys, monkeypatch):
+    """#152 B1: the same Drive failure that drops a folder from the listing can
+    answer the directed look with `[]`. That is not proof it is gone (the folder
+    is), so it is not a revive either."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    _lost_on_drive(paths, drive, ulid)
+    monkeypatch.setenv("FAKE_RCLONE_OMIT", ulid)
+    monkeypatch.setattr(store.Drive, "list_one", lambda self, _ulid: {})
+
+    assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (0, 1)
+
+    assert "直接查是空的" in capsys.readouterr().err
+    assert not (sessions_on(drive) / ulid).exists()
+
+
+def test_not_exist_upload_goes_ahead_when_the_direct_look_says_rc3(drive, monkeypatch):
+    """rclone saying the folder itself is not there (rc=3) is still the one answer
+    that means gone, so the revive goes through as before."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    _lost_on_drive(paths, drive, ulid)
+    monkeypatch.setenv("FAKE_RCLONE_NOT_FOUND_RC", "3")
+
+    assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (1, 0)
+    assert _uploaded(drive, ulid) == {"session.md", _raw_name_on_drive(drive, ulid)}
+
+
+def test_not_exist_upload_refuses_when_the_direct_look_fails(drive, capsys, monkeypatch):
+    """V6: not seeing it is not seeing it gone. A look that fails uploads nothing,
+    says to try again, and is a failed entry, so the command exits non-zero."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    _lost_on_drive(paths, drive, ulid)
+    mark = len(calls(drive))
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", f"gdrive:sessions/{ulid}")   # only the directed look
+
+    assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (0, 1)
+
+    err = capsys.readouterr().err
+    assert "查不動" in err and "下一次再試" in err
+    assert not [c for c in calls(drive)[mark:] if "copyto" in c]
+    assert not (sessions_on(drive) / ulid).exists()
+
+
+def test_not_exist_upload_refuses_when_sessions_is_missing(drive, capsys):
+    """N12: Drive without `sessions/` at all is a broken folder id or token, not
+    evidence that this session was deleted. Nothing goes up and the entry fails."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    cache.pull(paths, [ulid], {})
+    shutil.rmtree(sessions_on(drive))
+    mark = len(calls(drive))
+
+    assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (0, 1)
+
+    err = capsys.readouterr().err
+    assert "找不到 sessions/" in err and "下一次再試" in err
+    assert not [c for c in calls(drive)[mark:] if "copyto" in c]
+    assert not sessions_on(drive).exists()

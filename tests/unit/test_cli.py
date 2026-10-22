@@ -1140,6 +1140,21 @@ def test_pull_brings_the_raw_down_and_push_writes_the_session_back(env, capsys):
     assert code == 0 and "寫回 1 個" in out and "本機改的一行" in remote.read_text()
 
 
+def test_push_not_exist_upload_that_cannot_confirm_exits_nonzero(env, capsys):
+    """#159: without `sessions/` there is no way to confirm the session is really
+    gone, so it is not pushed back - and the command exits non-zero."""
+    _, a, _ = _import(capsys)
+    sessions = Path(os.environ["FAKE_REMOTE"]) / "agora" / "sessions"
+    shutil.rmtree(sessions)
+
+    code, out, err = run(capsys, "push", "session", a, "--not-exist-upload")
+
+    assert code == cli.EXIT_ERROR
+    assert "找不到 sessions/" in err and "下一次再試" in err
+    assert "寫回 0 個，1 個失敗" in out
+    assert not sessions.exists()
+
+
 def test_pull_and_push_need_ids(env, capsys):   # review S2-6
     """`cache agora` and `sync` acted on everything; pull and push do not, and
     saying nothing would look like it did."""
