@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """A fake rclone for unit tests (test-plan 0.3).
 
-The "remote" is the folder $FAKE_REMOTE. Folder IDs are just folder names.
+The "remote" is the folder $FAKE_REMOTE. A top-level folder's ID is its name (the
+agora root, `--drive-root-folder-id`, relies on it); every folder below it gets an
+ID when it is *created* - `<name>#<serial>`, kept in $FAKE_REMOTE/../folder-ids.json -
+so the same path purged and created again carries a new ID, as on the real Drive
+(K.1 probe, #164).
 Every call is appended to $FAKE_REMOTE/../calls.log. FAKE_RCLONE_FAIL=<text>
 makes any call whose arguments contain <text> fail with rc=1.
 
@@ -21,6 +25,10 @@ files out, while a directed `lsjson` on the folder still sees them - a listing t
 lost the files themselves, not the folder (#155). FAKE_RCLONE_OMIT_FILES_FROM=<n>
 does the same from the Nth whole listing on, so a test can break only the
 confirmation listing after the copies and leave the rounds before it intact.
+
+FAKE_RCLONE_NO_DIR_ID=1: the recursive `lsjson` (the one without `--files-only`)
+returns directory entries without an `ID`, as if the Drive did not send it;
+FAKE_RCLONE_NO_DIR_ID=all drops the `ID` from `--dirs-only` listings too (#164).
 
 FAKE_RCLONE_NOT_FOUND_RC=3 makes an `lsjson` on a folder that is not there exit
 with the status a real rclone uses for it. The message then carries no
@@ -121,6 +129,63 @@ if os.environ.get("FAKE_RCLONE_FAIL") and _should_fail(os.environ["FAKE_RCLONE_F
     fail("injected failure")
 
 
+ids_file = remote.parent / "folder-ids.json"
+
+
+def _load_ids():
+    try:
+        return json.loads(ids_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"next": 1, "ids": {}}
+
+
+def _new_id(reg, rel):
+    n = reg["next"]
+    reg["next"] = n + 1
+    reg["ids"][rel] = f"{Path(rel).name}#{n}"
+
+
+def make_dirs(path):
+    """mkdir -p that gives every directory it really creates a fresh ID."""
+    created = []
+    p = path
+    while not p.exists() and p != remote.parent and p != p.parent:
+        created.append(p)
+        p = p.parent
+    path.mkdir(parents=True, exist_ok=True)
+    if created:
+        reg = _load_ids()
+        for d in created:
+            try:
+                _new_id(reg, d.relative_to(remote).as_posix())
+            except ValueError:
+                continue
+        ids_file.write_text(json.dumps(reg), encoding="utf-8")
+
+
+def forget_ids(path):
+    """A purged folder (and everything under it) loses its IDs."""
+    try:
+        rel = path.relative_to(remote).as_posix()
+    except ValueError:
+        return
+    reg = _load_ids()
+    reg["ids"] = {k: v for k, v in reg["ids"].items() if k != rel and not k.startswith(rel + "/")}
+    ids_file.write_text(json.dumps(reg), encoding="utf-8")
+
+
+def folder_id_of(p):
+    """The ID a folder carries: its name at the top, the creation serial below."""
+    rel = p.relative_to(remote).as_posix()
+    if "/" not in rel:
+        return p.name
+    reg = _load_ids()
+    if rel not in reg["ids"]:           # made some other way (a test): first sight is creation
+        _new_id(reg, rel)
+        ids_file.write_text(json.dumps(reg), encoding="utf-8")
+    return reg["ids"][rel]
+
+
 def snapshot():
     """Copy the whole remote aside after every successful call (test-plan 0.3b)."""
     snaps = remote.parent / "snapshots"
@@ -156,7 +221,7 @@ def resolve(target):
 
 
 if cmd == "mkdir":
-    resolve(params[0]).mkdir(parents=True, exist_ok=True)
+    make_dirs(resolve(params[0]))
 elif cmd == "lsjson":
     base = resolve(params[0])
     if not base.exists():
@@ -200,6 +265,14 @@ elif cmd == "lsjson":
         if "--files-only" in params and not p.is_file():
             continue
         entry = {"Path": str(p.relative_to(base)), "Name": p.name, "IsDir": p.is_dir(), "ID": p.name}
+        if p.is_dir():
+            try:
+                entry["ID"] = folder_id_of(p)
+            except ValueError:          # outside the remote (a local path)
+                pass
+            no_id = os.environ.get("FAKE_RCLONE_NO_DIR_ID")
+            if no_id == "all" or (no_id and "--dirs-only" not in params and "--files-only" not in params):
+                del entry["ID"]
         if p.is_file() and "--hash" in params:
             entry["Hashes"] = {"md5": hashlib.md5(p.read_bytes()).hexdigest()}
         out.append(entry)
@@ -213,7 +286,7 @@ elif cmd == "copyto":
     dst_p = resolve(dst) or Path(dst)
     if not src_p.exists():
         fail("source not found")
-    dst_p.parent.mkdir(parents=True, exist_ok=True)
+    make_dirs(dst_p.parent)
     shutil.copyfile(src_p, dst_p)
 elif cmd == "copy" and "--files-from" in params:
     # local -> Drive, one call for a whole batch (local-first-writes M4)
@@ -223,7 +296,7 @@ elif cmd == "copy" and "--files-from" in params:
     for rel in listed:
         if not (src / rel).exists():
             fail(f"source not found: {rel}")
-        (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+        make_dirs((dst / rel).parent)
         shutil.copyfile(src / rel, dst / rel)
 elif cmd == "delete" and "--files-from" in params:
     # the superseded raws, gone in one call
@@ -243,7 +316,7 @@ elif cmd == "copy":          # a local tree up to the remote, same names overwri
     for path in sorted(src.rglob("*")):
         rel = path.relative_to(src).as_posix()
         if path.is_file() and not any(rel == e or rel.startswith(e.rstrip("*")) for e in excluded):
-            (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+            make_dirs((dst / rel).parent)
             shutil.copyfile(path, dst / rel)
 elif cmd == "deletefile":
     target = resolve(params[0])
@@ -255,6 +328,7 @@ elif cmd == "purge":
     if not target.is_dir():
         fail("error: directory not found")   # ditto
     shutil.rmtree(target)
+    forget_ids(target)
 else:
     fail(f"fake rclone does not support {cmd}")
 
@@ -296,6 +370,7 @@ def purge_after():
         return
     Path(trigger).unlink(missing_ok=True)   # one shot, before the work below
     shutil.rmtree(root / spec["purge"], ignore_errors=True)
+    forget_ids(root / spec["purge"])
 
 
 clean_after()
