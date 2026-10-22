@@ -443,6 +443,12 @@ def _stream_raw(path: Path, sidecar: Path, out_path: Path, *,
       - a post-parse error from `_accumulate` is kept as the first one and
         re-raised only after the whole file validated, so a syntax error below
         it still wins.
+
+    One difference from HEAD is intended (#158): HEAD decoded the whole file before it looked at a
+    single line, so a file with a syntax error early *and* non-UTF-8 bytes later said "not UTF-8".
+    The stream reaches the early line first and says "line N does not parse"; the encoding error
+    only comes first when the bad bytes sit within the first read buffer (a short file). Both
+    refuse the file with an `AgentError`, and only the message differs.
     Nothing is written for a session that fails validation except the partial
     file in the caller's private temp dir, which the caller removes.
 

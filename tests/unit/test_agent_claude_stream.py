@@ -1,8 +1,8 @@
 """R1: the claude export streams the session in one pass and moves no byte.
 
 The reference is the three-stage adapter this slice started on (`_read_lines` +
-`_scan` + `_pack_raw_file`), imported from a `git archive` of the commit it was
-cut from. For a generated batch of session files (fixed seed, plus the shapes
+`_scan` + `_pack_raw_file`), read from tests/fixtures/claude_r1_reference_985afd7.py.txt (the file at the commit it was
+cut from; no git needed, and a missing reference fails instead of skipping). For a generated batch of session files (fixed seed, plus the shapes
 the ticket names: summaries before/after/absent, the first title at different
 positions, several timestamps/versions/cwds/models, isMeta/isCompactSummary,
 unknown line types, CJK, a big tool_result, broken lines, a half-written tail,
@@ -27,9 +27,7 @@ import io
 import json
 import os
 import random
-import subprocess
 import sys
-import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -271,22 +269,23 @@ def _cases() -> list[Case]:
 CASES = _cases()
 
 
+REFERENCE_FIXTURE = REPO / "tests" / "fixtures" / "claude_r1_reference_985afd7.py.txt"
+
+
 @pytest.fixture(scope="session")
 def reference_claude(tmp_path_factory):
-    """The three-stage claude.py, imported under its own module name."""
+    """The three-stage claude.py, imported under its own module name.
+
+    From `tests/fixtures/` (the file at `HEAD_COMMIT`), not from git history: a copy without `.git`
+    runs these tests too. A reference that cannot be read is a **failure** - a skip would let the
+    whole equivalence suite quietly stop proving anything.
+    """
     override = os.environ.get("AGORA_B1A_HEAD_FILE")
-    if override:
-        source = Path(override).read_bytes()
-    else:
-        try:
-            proc = subprocess.run(["git", "archive", HEAD_COMMIT, "src/agora/agents/claude.py"],
-                                  cwd=REPO, capture_output=True)
-        except OSError as e:
-            pytest.skip(f"git 不可用：{e}")
-        if proc.returncode != 0:
-            pytest.skip(f"git archive {HEAD_COMMIT} 不可用：{proc.stderr.decode('utf-8', 'replace')[-200:]}")
-        with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
-            source = tar.extractfile("src/agora/agents/claude.py").read()
+    target = Path(override) if override else REFERENCE_FIXTURE
+    try:
+        source = target.read_bytes()
+    except OSError as e:
+        pytest.fail(f"參考版 claude.py 讀不到（{target}）：{e}", pytrace=False)
     path = tmp_path_factory.mktemp("reference-claude") / "claude_r1_reference.py"
     path.write_bytes(source)
     spec = importlib.util.spec_from_file_location("agora_r1_reference_claude", path)
@@ -515,3 +514,27 @@ def test_a_large_non_utf8_file_reports_the_whole_file_position(tmp_path):
     with pytest.raises(AgentError) as exc:
         C._read_lines(path)
     assert "position 100000" in str(exc.value)
+
+
+def test_a_syntax_error_far_before_non_utf8_bytes_is_reported_by_line_not_by_encoding(
+        reference_claude, tmp_path):
+    """The one intended difference in error order (#158): a file with a broken line early and
+    non-UTF-8 bytes much later. HEAD read the whole file first and said "not UTF-8"; the streaming
+    pass reaches line 2 first and says line 2 does not parse. Both refuse the file; only the
+    message differs, and a file that is bad in both ways is bad in both - no behaviour a caller
+    could rely on. (A short file is decoded in one go, so the encoding error still comes first
+    there; the difference needs the bad bytes beyond the first read buffer.)"""
+    good = _user("ZZUSER 好的一行")
+    filler = _assistant("ZZASSIST " + "x" * 200)
+    content = (good + "{ this is not json }\n" + filler * 600).encode("utf-8") + b"\xff\xfe broken\n" + \
+        good.encode("utf-8")
+    assert len(content) > 100_000
+    path = tmp_path / f"{SID}.jsonl"
+    path.write_bytes(content)
+    sidecar = tmp_path / SID
+
+    new = _observe(C, path, sidecar, old=False)
+    old = _observe(reference_claude, path, sidecar, old=True)
+    assert new["error"][0] == "AgentError" and old["error"][0] == "AgentError", "both refuse the file"
+    assert "第 2 行解析失敗" in new["error"][1] and "UTF-8" not in new["error"][1]
+    assert "UTF-8" in old["error"][1] and "第 2 行" not in old["error"][1]
