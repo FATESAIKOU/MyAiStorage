@@ -2612,9 +2612,13 @@ def cmd_edit(args, paths: store.Paths) -> int:
     old = _header_for(index, agora_id)
     body = _body_for(paths, agora_id)
     updates = _updates(args)
+    add_tags = list(getattr(args, "add_tag", []) or [])
     system = {k: old[k] for k in h.SYSTEM_KEYS if k in old}
-    if updates:
-        new = _with_user(old, updates)
+    if updates or add_tags:
+        # Not the editor: a script that says what to change must not end up waiting on `$EDITOR` (#153).
+        # `--header` is overlaid first and `--add-tag` appended to the result, so `--header 'tags=[a]'
+        # with `--add-tag b` gives [a, b]; tags the Session has already are kept and never doubled.
+        new = _with_user(old, updates, add_tags=add_tags)
     else:
         new = {**_edit_in_editor(old), **system}   # the editor's version replaces the user part whole
         h.validate(new)
@@ -2708,6 +2712,9 @@ def _ids_of(args, action: str) -> list[str]:
     return ids
 
 
+#: The commands that read `--add-tag`; the others refuse it instead of ignoring it (#153).
+ADD_TAG_ACTIONS = ("import", "continue", "edit")
+
 ACTIONS = {
     "search": cmd_search, "import": cmd_import, "merge": cmd_merge, "continue": cmd_continue,
     "delete": cmd_delete, "edit": cmd_edit, "show": cmd_show, "pull": cmd_pull, "push": cmd_push,
@@ -2735,7 +2742,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sync-period", default=None,
                    help="continue：每幾分鐘自動寫回一次（預設 5；0 就只在結束時寫回）")
     p.add_argument("--add-tag", action="append", default=[],
-                   help="continue／import：附加 tag 到 Session 的 tags（可重複；原有的會保留）")
+                   help="import／continue／edit：附加 tag 到 Session 的 tags（可重複；原有的會保留、不重複；"
+                        "edit 帶了它就不開編輯器，可以和 --header 一起用，先套 --header 再附加）。"
+                        "其他指令不吃，收到會報錯")
     p.add_argument("--headless", action="store_true",
                    help="continue：用 agent 的程式化模式開（claude：stream-json；opencode：serve）")
     p.add_argument("--headless-port", type=int, default=None,
@@ -2800,6 +2809,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[agora] {args.action} 的型態要寫 session，例如 agora {args.action} session", file=sys.stderr)
         return EXIT_INPUT
     paths = store.Paths.from_env()
+    if args.add_tag and args.action not in ADD_TAG_ACTIONS:
+        # A flag nobody reads must not look like it worked (#153).
+        print(f"[agora] {args.action} 不吃 --add-tag（只有 {'、'.join(ADD_TAG_ACTIONS)} 吃）；"
+              f"要改 tags 請用 edit session <id> --add-tag，或 --header 'tags=[…]'", file=sys.stderr)
+        return EXIT_INPUT
     try:
         recover_pending(paths, notice_only=args.no_sync)
         for line in store.take_notices(paths):
