@@ -1094,6 +1094,10 @@ def test_a_broken_stored_section_is_refused(env, capsys):  # review v7 A2
     del doc["sections"][0]["title"]
     raw.write_text(json.dumps(doc))
     hdr["agora"]["raw"]["md5"] = store.md5_file(raw)
+    # a raw is named by its md5 (#168: the header's `file` is only believed when it is that name)
+    named = raw.with_name(f"raw-{hdr['agora']['raw']['md5'][:12]}.json")
+    raw.rename(named)
+    hdr["agora"]["raw"]["file"] = named.name
     md = paths.mirror / ab.split(":")[1] / "session.md"
     _, body = h.split_document(md.read_text())
     md.write_text(h.dump_document(hdr, body))

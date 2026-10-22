@@ -282,6 +282,14 @@ def _sync_for(paths: store.Paths, ids: list[str]) -> store.Index:
     return index
 
 
+def _refuse_unreadable_raw(header: dict) -> None:
+    """The clear refusal for a session whose raw this version does not read (C.3, 3.15)."""
+    try:
+        store.require_usable_raw(header)
+    except store.StoreError as e:
+        raise InputError(str(e)) from None
+
+
 def _header_for(index: store.Index, agora_id: str) -> dict:
     hdr = index.header(_ulid_of(agora_id))
     if hdr is None:
@@ -1281,11 +1289,11 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
 def _last_raw(paths: store.Paths, run: "_Run") -> bytes | None:
     """The raw of the last version that was written, when the session still has one."""
     ulid = _ulid_of(run.target)
-    name = ((store.Index(paths).header(ulid) or {}).get("agora") or {}).get("raw") or {}
-    local = paths.mirror / ulid / name.get("file", "")
+    named = ((store.Index(paths).header(ulid) or {}).get("agora") or {}).get("raw") or {}
     try:
+        local = paths.mirror / ulid / (store.raw_name(named) if named else "")
         return local.read_bytes()
-    except OSError:
+    except (OSError, store.StoreError):
         return None
 
 
@@ -2108,6 +2116,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
     _refuse_if_gone(paths, index, source_id)  # T1 3.3: no agent is opened for it
     parent = _header_for(index, source_id)
     agora = h.agora_of(parent)
+    _refuse_unreadable_raw(parent)    # 3.15: before any agent half starts
     fork = bool(getattr(args, "fork", False))
     if not fork and store.continuing(paths, _ulid_of(source_id)):
         # This machine is already writing this session back; a second run would
@@ -2551,6 +2560,7 @@ def cmd_edit(args, paths: store.Paths) -> int:
         print("[agora] 標頭沒有變", file=sys.stderr)
         return 0
     _refuse_if_gone(paths, index, agora_id)   # the editor was open a while (F8)
+    _refuse_unreadable_raw(old)               # 3.15: before the raw is fetched
     new["agora"] = {**new["agora"], "updated_at": _now_iso()}
     # Re-stage with the same raw bytes (same md5, same file name) so the
     # outbox entry is complete; only session.md really changes.
@@ -2584,7 +2594,13 @@ def cmd_show(args, paths: store.Paths) -> int:
               f"agora push session {agora_id} --not-exist-upload 傳回去，"
               f"agora pull session {agora_id} --not-exist-delete 刪掉本機這份", file=sys.stderr)
     if args.raw:
-        sys.stdout.buffer.write(store.fetch_raw(paths, store.Drive(paths), _ulid_of(agora_id), hdr))
+        _refuse_unreadable_raw(hdr)
+        if not h.agora_of(hdr).get("raw"):
+            raise InputError(f"{agora_id} 沒有 raw：merge 出來的 Session 沒有自己的 raw")
+        # The file, streamed (E.2.6): an 814 MB raw never sits in memory.
+        with open(store.ensure_raw_file(paths, store.Drive(paths), _ulid_of(agora_id), hdr), "rb") as f:
+            shutil.copyfileobj(f, sys.stdout.buffer)
+        sys.stdout.buffer.flush()
         return 0
     print(h.dump_document(hdr, _body_for(paths, agora_id)), end="")
     return 0

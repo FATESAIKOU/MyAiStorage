@@ -250,8 +250,11 @@ def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
     if hdr is None:
         _line(f"{ulid} 雲端上的 raw 還沒齊，先不建索引")
         return
-    if (h.agora_of(hdr).get("raw") or {}).get("file"):
-        store.fetch_raw(paths, drive, ulid, hdr)   # a no-op when the local copy is the right one
+    raw = h.agora_of(hdr).get("raw")
+    if raw and store.raw_kind(raw) == "legacy":
+        _line(f"{ulid} 的 raw 是舊格式或未知格式，這個版本不讀它；閱讀版已經拉下來")
+    elif raw:
+        store.ensure_raw_file(paths, drive, ulid, hdr)   # a no-op when the local copy is the right one
     # `mirror_one` already indexed it; this second pass is what picks up the raw
     # that `fetch_raw` may just have fetched (N8), so the row has the whole session.
     store.index_file(index, paths.mirror / ulid / "session.md")   # searchable again
@@ -372,6 +375,6 @@ def _push_mirrored(paths: store.Paths, drive: store.Drive, ulid: str, *,
     hdr, _ = h.split_document(local.read_text(encoding="utf-8"))
     if need_raw:
         raw = h.agora_of(hdr).get("raw") or {}
-        if raw.get("file") and not (paths.mirror / ulid / raw["file"]).is_file():
-            raise store.StoreError(f"標頭指到的 {raw['file']} 本機沒有，不傳半套")
+        if raw and not (paths.mirror / ulid / store.raw_name(raw)).is_file():
+            raise store.StoreError(f"標頭指到的 {store.raw_name(raw)} 本機沒有，不傳半套")
     store.push_mirror(drive, paths, ulid, hdr)
