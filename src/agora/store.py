@@ -1369,7 +1369,7 @@ def _really_gone(drive: Drive, ulid: str, say) -> bool:
     return False
 
 
-def _recreated_by_us(drive: Drive, ulid: str, ours: set[str], say) -> bool:
+def _recreated_by_us(drive: Drive, ulid: str, ours: set[str], say, blocked: list | None = None) -> bool:
     """#164: the folder's ID changed between the re-check and the confirmation - is
     what stands there really our copies landing on a folder that was purged?
 
@@ -1380,6 +1380,9 @@ def _recreated_by_us(drive: Drive, ulid: str, ours: set[str], say) -> bool:
     round sent (`ours`). A file outside `ours` means somebody else wrote there since -
     a live folder, not the leftovers of our own copy - and an empty, failed or
     not-found answer contradicts the listing that just showed it. All of those wait.
+
+    `blocked`, when given, is filled with the foreign file names for the one wait that does not
+    go away by itself: the folder is alive and holds files this round did not send (#173).
     """
     look = _directed_look(drive, ulid)
     state = _folder_state(look)
@@ -1387,6 +1390,8 @@ def _recreated_by_us(drive: Drive, ulid: str, ours: set[str], say) -> bool:
         others = sorted(set(look.files) - ours)
         if not others:
             return True
+        if blocked is not None:
+            blocked.extend(others)
         say(f"確認檢查 {ulid}：資料夾 ID 變了，但直接查還有這一輪沒送的檔"
             f"（{', '.join(others)}），資料夾是活的，不清資料夾，留到下一輪")
         return False
@@ -1554,6 +1559,54 @@ def _note_folder_record(paths: Paths, ulid: str, folder_id: str, names: list[str
         write_atomic(path, json.dumps(record, ensure_ascii=False, sort_keys=True))
     except OSError as e:
         say(f"{ulid} 資料夾 ID 記錄寫不進去（只少了跨輪偵測被刪的那一道）：{e}")
+
+
+FOLDER_WAIT_ROUNDS = 3
+
+
+def folder_wait_rounds() -> int:
+    """How many rounds in a row an entry may wait on the same folder-ID mismatch before the
+    person is told once (`AGORA_FOLDER_ID_WAIT_ROUNDS`, default 3). A background round is minutes
+    apart, so three is long enough that another machine's copy in flight has finished and short
+    enough that a permanent stand-off is said within the hour. A bad value is the default."""
+    try:
+        value = int(os.environ.get("AGORA_FOLDER_ID_WAIT_ROUNDS", FOLDER_WAIT_ROUNDS))
+    except ValueError:
+        return FOLDER_WAIT_ROUNDS
+    return value if value >= 1 else FOLDER_WAIT_ROUNDS
+
+
+def _note_blocked_wait(paths: Paths, ulid: str, record: dict, current_id: str, others: list[str],
+                       say, notices: bool) -> None:
+    """The entry waited again because the folder's ID changed *and* it holds files that are not
+    ours (#173). Count the rounds in the folder record itself - the record is exactly "this
+    entry is mid-way into that folder", it is dropped the moment the entry is confirmed, rescued
+    or deleted, and a record that cannot be read is no record, so the counter can only be lost
+    toward "say it later", never toward a wrong verdict. After `folder_wait_rounds()` rounds
+    against the same current ID the person is told once (`warned` is in the record, so the next
+    rounds stay quiet); a different current ID starts the count again. Nothing is purged or
+    rescued here."""
+    waits = record.get("waits") if record.get("wait_id") == current_id else 0
+    waits = (waits if isinstance(waits, int) and not isinstance(waits, bool) else 0) + 1
+    already = record.get("warned") is True and record.get("wait_id") == current_id
+    tell = waits >= folder_wait_rounds() and not already
+    updated = dict(record, wait_id=current_id, waits=waits, warned=already or tell)
+    try:
+        path = _folder_record_path(paths, ulid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic(path, json.dumps(updated, ensure_ascii=False, sort_keys=True))
+    except OSError as e:
+        say(f"{ulid} 資料夾 ID 記錄寫不進去（等待輪數記不住）：{e}")
+    if not tell:
+        return
+    line = (f"{ulid} 的更新已經連續 {waits} 輪沒送出：Drive 上這個 Session 的資料夾 ID 和這台上次送出前記的不同"
+            f"（可能被別台刪掉又重建過），而且資料夾裡有不是這台送的檔（{', '.join(others)}），"
+            f"所以這台不自動清它、也不另存，更新留在 outbox。可以：① 等那台機器用完，這筆會在下一輪自己再判斷；"
+            f"② 確定那個資料夾就是現在要用的：刪掉 {_folder_record_path(paths, ulid)}，下一輪就當一般更新送進去"
+            f"（後寫的贏，會蓋掉那邊的版本；那個資料夾裡別台的舊段，超過寬限期的也會在送出確認後被清掉）。這則只說一次")
+    say(line)
+    if notices:
+        _notice(paths, line)
 
 
 def _forget_folder_record(paths: Paths, ulid: str) -> None:
@@ -1818,7 +1871,10 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
                 if record is not None and record["folder_id"] != ids_before[ulid]:
                     ours = ({"session.md"} | {seg["file"] for seg in manifests.get(ulid, [])}
                             | set(record["sent"]))
-                    if not _recreated_by_us(drive, ulid, ours, say):
+                    blocked: list[str] = []
+                    if not _recreated_by_us(drive, ulid, ours, say, blocked):
+                        if blocked:
+                            _note_blocked_wait(paths, ulid, record, ids_before[ulid], blocked, say, notices)
                         entries.pop(ulid, None)
                         if (paths.outbox / ulid).is_dir():
                             left.append(ulid)
