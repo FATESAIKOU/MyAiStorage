@@ -17,6 +17,7 @@ import codecs
 import fcntl
 import copy
 import hashlib
+from datetime import datetime, timezone
 import json
 import re
 import os
@@ -201,15 +202,6 @@ def _md5(entry: dict) -> str:
 
 RAW_LAYOUT = "chunks/1"
 
-#: TRANSITION (R3a -> R3b-1, same release). `stage` still writes the one-file raw:
-#: a header with `raw.file` and no `layout`. Until R3b-1 makes `stage` write
-#: `chunks/1`, that header is the only one agora itself produces, so it must stay
-#: readable. While this is True a header with no `layout` is read as that single
-#: file; a header with any *other* `layout` is already "unknown" (raw not usable).
-#: R3b-1 sets it False (and deletes the single-file branches): then no `layout`
-#: means legacy, which is the design's rule (C.3).
-_SINGLE_FILE_READABLE = True
-
 _HEX32 = re.compile(r"[0-9a-f]{32}")
 
 
@@ -237,7 +229,7 @@ def _derived_name(raw: dict) -> str | None:
 
 
 def raw_name(raw: dict) -> str:
-    """The whole raw's file name in the mirror (and, for the one-file format, on Drive).
+    """The whole raw's file name in the mirror (Drive has only its segments).
 
     Always derived from `raw.md5` - `raw-<md5[:12]>.json` (design A.2) - and never
     from anything else in the header: a header is what another machine wrote, and a
@@ -257,6 +249,23 @@ def _safe_basename(name: object) -> bool:
             and not name.startswith("."))
 
 
+#: A segment's name, and only that (design A.1): `seg-<gen>-<seq>-<md5[:12]>.part`, lower case.
+#: Nothing else may be a segment - least of all `session.md` (or `SESSION.MD` on a volume that
+#: ignores case), which would overwrite the completion marker.
+_SEGMENT_NAME = re.compile(r"^seg-([0-9]{4,})-([0-9]{4,})-([0-9a-f]{12})\.part$")
+RESERVED_NAMES = {"session.md"}
+
+
+def _is_segment_name(name: object, md5: object = None) -> bool:
+    """Is `name` a legal segment name - and, when `md5` is given, is its prefix that md5's?"""
+    if not isinstance(name, str) or name.casefold() in RESERVED_NAMES:
+        return False
+    m = _SEGMENT_NAME.match(name)
+    if not m:
+        return False
+    return md5 is None or (isinstance(md5, str) and m.group(3) == md5[:12])
+
+
 def _manifest_ok(raw: dict) -> bool:
     """The static checks on a `chunks/1` manifest (design E.1), without any listing."""
     segs = raw_segments(raw)
@@ -265,14 +274,18 @@ def _manifest_ok(raw: dict) -> bool:
             or _derived_name(raw) is None):
         return False
     total = 0
+    seen: set[str] = set()
     for seg in segs:
         if not isinstance(seg, dict):
             return False
         seg_size = seg.get("size")
         if (not _safe_basename(seg.get("file")) or not isinstance(seg_size, int)
                 or isinstance(seg_size, bool) or seg_size < 0
-                or not isinstance(seg.get("md5"), str) or not _HEX32.fullmatch(seg["md5"])):
+                or not isinstance(seg.get("md5"), str) or not _HEX32.fullmatch(seg["md5"])
+                or not _is_segment_name(seg["file"], seg["md5"])
+                or seg["file"].casefold() in seen):          # the same segment twice
             return False
+        seen.add(seg["file"].casefold())
         total += seg_size
     return total == size
 
@@ -285,7 +298,7 @@ def raw_complete(raw: dict | None, files: dict) -> bool | None:
     waits for Drive nor deletes anything (design E.1). `files` is Drive's listing of
     the one session folder, `{name: md5}`.
     """
-    if not raw:
+    if raw is None:
         return True                    # no raw (a merge, a hand-written one): whole by itself
     if not isinstance(raw, dict) or raw_layout(raw) != RAW_LAYOUT:
         return None
@@ -293,39 +306,38 @@ def raw_complete(raw: dict | None, files: dict) -> bool | None:
         files.get(seg["file"]) == seg["md5"] for seg in raw_segments(raw))
 
 
-def raw_kind(raw: dict | None) -> str:
-    """How this version reads the header's raw: none / chunks / single / legacy.
+def raw_kind(raw: object) -> str:
+    """How this version reads the header's raw: none / chunks / legacy.
 
-    `legacy` is "do not read it, do not delete it": a layout this version does not know
-    (any string but `chunks/1`, and any non-string value too), a `raw` that is not a
-    mapping, and - once R3b-1 clears `_SINGLE_FILE_READABLE` - the one-file format.
-    Only a header with **no** `layout` (the key missing or null) can be `single`, and
-    only while it is readable and its `file` is exactly the name its md5 gives.
+    `none` is only "the key is missing or null". Everything else that is not a
+    well-formed `chunks/1` manifest is `legacy` - "do not read it, do not delete it":
+    no `layout` (the one-file raw older versions wrote), a layout this version does not
+    know (any string but `chunks/1`, and any non-string value), a `raw` that is not a
+    mapping or is an empty value (`[]`, `""`, `0`, `{}`), and a `chunks/1` whose manifest
+    is not sound (bad whole md5, unsafe names, sizes that do not add up): a corrupt
+    header is not "still being written", so the session stays and only its raw is
+    unusable.
     """
-    if not raw:
+    if raw is None:
         return "none"
-    if not isinstance(raw, dict):
-        return "legacy"
-    layout = raw.get("layout")
-    if layout is not None:
-        return "chunks" if layout == RAW_LAYOUT else "legacy"
-    name = _derived_name(raw)
-    if _SINGLE_FILE_READABLE and name is not None and raw.get("file") == name:
-        return "single"
+    if isinstance(raw, dict) and raw.get("layout") == RAW_LAYOUT and _manifest_ok(raw):
+        return "chunks"
     return "legacy"
 
 
-def raw_state(raw: dict | None, files: dict) -> bool | None:
-    """`raw_complete`, plus the one-file format while it is still readable."""
-    if raw_kind(raw) == "single":
-        return files.get(raw_name(raw)) == raw.get("md5")
+def raw_state(raw: object, files: dict) -> bool | None:
+    """True / False / None for sync: none and whole -> True, not yet whole -> False,
+    a raw this version does not read -> None."""
+    kind = raw_kind(raw)
+    if kind == "none":
+        return True
+    if kind == "legacy":
+        return None
     return raw_complete(raw, files)
 
 
 def raw_manifest(raw: dict) -> list[tuple[str, str]]:
     """[(file, md5)] of everything on Drive the raw consists of."""
-    if raw_kind(raw) == "single":
-        return [(raw_name(raw), str(raw.get("md5", "")))]
     return [(str(seg.get("file")), str(seg.get("md5"))) for seg in raw_segments(raw)
             if isinstance(seg, dict)]
 
@@ -462,6 +474,8 @@ class Drive:
                     found.ids[parts[0]] = entry["ID"]
             elif len(parts) == 2:
                 found.setdefault(parts[0], {})[parts[1]] = _md5(entry)
+                if entry.get("ModTime"):
+                    found.mtimes.setdefault(parts[0], {})[parts[1]] = entry["ModTime"]
         return found
 
     def folder_ids(self) -> dict[str, str]:
@@ -493,53 +507,127 @@ class Drive:
 
     def download_segments(self, ulid: str, names: list[str], dest: Path) -> None:
         """Fetch several files of one session folder in one rclone run (`--files-from`)."""
+        self.fetched += 1                 # pull tells a skip from a pull by this (P3)
         dest.mkdir(parents=True, exist_ok=True)
         _with_files_from(self, names, dest, "copy", f"gdrive:sessions/{ulid}", str(dest),
                          "--no-traverse")
 
 
-class _Md5Reader:
-    """A read-through that feeds `shutil.copyfileobj` while computing md5/size."""
+class _Chunker:
+    """Cuts a stream of blocks into `chunk`-byte pieces and keeps each piece's md5 and
+    size, plus the whole thing's: the manifest, taken on the same pass that stages the raw."""
 
-    def __init__(self, fileobj):
-        self._file = fileobj
-        self.digest = hashlib.md5()
+    def __init__(self, chunk: int):
+        self.chunk = chunk
+        self.whole = hashlib.md5()
         self.size = 0
+        self.parts: list[tuple[str, int]] = []
+        self._cur = hashlib.md5()
+        self._cur_size = 0
 
-    def read(self, size: int = -1) -> bytes:
-        data = self._file.read(size)
-        if data:
-            self.digest.update(data)
-            self.size += len(data)
-        return data
+    def feed(self, data: bytes) -> None:
+        view = memoryview(data)
+        while len(view):
+            take = min(len(view), self.chunk - self._cur_size)
+            piece = view[:take]
+            self.whole.update(piece)
+            self._cur.update(piece)
+            self._cur_size += take
+            self.size += take
+            view = view[take:]
+            if self._cur_size == self.chunk:
+                self._close()
+
+    def _close(self) -> None:
+        self.parts.append((self._cur.hexdigest(), self._cur_size))
+        self._cur = hashlib.md5()
+        self._cur_size = 0
+
+    def finish(self) -> tuple[str, int, list[tuple[str, int]]]:
+        if self._cur_size or not self.parts:       # the last piece; an empty raw is one empty piece
+            self._close()
+        return self.whole.hexdigest(), self.size, self.parts
 
 
-def _stage_raw(tmp: Path, raw: bytes | Path) -> tuple[str, int, str]:
-    """Put the raw into `tmp` and return (md5, size, file name).
+def segment_name(gen: int, seq: int, md5: str) -> str:
+    """`seg-<gen>-<seq>-<md5[:12]>.part` (design A.1)."""
+    return f"seg-{gen:04d}-{seq:04d}-{md5[:12]}.part"
 
-    Bytes are written directly; a path is copied in 1 MiB chunks so the staging
-    folder never holds a second whole copy. The staging name is unique inside `tmp`
-    and is renamed to the raw-md5 name once the copy finishes, so a crash leaves no
-    `raw-*.json` half-file.
+
+_SEG_GEN = re.compile(r"^seg-([0-9]{4,})-[0-9]{4,}-[0-9a-f]{12}\.part$")
+
+
+def _generation(raw: object) -> int:
+    """The generation the manifest's first segment names (0 when there is none)."""
+    segs = raw_segments(raw) if isinstance(raw, dict) else []
+    if segs and isinstance(segs[0], dict):
+        m = _SEG_GEN.match(str(segs[0].get("file")))
+        if m:
+            return int(m.group(1))
+    return 0
+
+
+def _stage_raw(tmp: Path, raw: bytes | Path, chunk: int) -> tuple[str, int, str, list[tuple[str, int]]]:
+    """Put the raw into `tmp`; return (md5, size, file name, [(segment md5, size)]).
+
+    The manifest comes from the same pass that reads the raw. Bytes are written directly.
+    A path is first tried as a hard link (the export's temp file and the outbox are
+    usually on one volume - one whole-raw write fewer for an 800 MB first import) and
+    read once for the md5s; only when linking fails is it copied in 1 MiB blocks, hashing
+    as it goes. The staging name is unique inside `tmp` and renamed to the raw-md5 name
+    when it is done, so a crash leaves no `raw-*.json` half-file.
     """
+    chunker = _Chunker(chunk)
     if isinstance(raw, Path):
-        handle, staging = tempfile.mkstemp(dir=tmp, prefix="raw-", suffix=".tmp")
+        staging = tmp / f".staging-{os.getpid()}.tmp"
         try:
-            with os.fdopen(handle, "wb") as out, open(raw, "rb") as src:
-                reader = _Md5Reader(src)
-                shutil.copyfileobj(reader, out, 1 << 20)
-                out.flush()
-                os.fsync(out.fileno())
-            name = f"raw-{reader.digest.hexdigest()[:12]}.json"
+            try:
+                os.link(raw, staging)
+                with open(staging, "rb") as src:
+                    for block in iter(lambda: src.read(1 << 20), b""):
+                        chunker.feed(block)
+            except OSError:
+                staging.unlink(missing_ok=True)
+                chunker = _Chunker(chunk)
+                with open(staging, "wb") as out, open(raw, "rb") as src:
+                    for block in iter(lambda: src.read(1 << 20), b""):
+                        chunker.feed(block)
+                        out.write(block)
+                    out.flush()
+                    os.fsync(out.fileno())
+            md5, size, parts = chunker.finish()
+            fd = os.open(staging, os.O_RDONLY)     # a linked file is already on disk (the export
+            try:                                   # synced it), so this is cheap - and every file in
+                os.fsync(fd)                       # the staging folder is synced, as #116 asks
+            finally:
+                os.close(fd)
+            name = f"raw-{md5[:12]}.json"
             os.replace(staging, tmp / name)
-        except Exception:
-            Path(staging).unlink(missing_ok=True)
+        except BaseException:
+            staging.unlink(missing_ok=True)
             raise
-        return reader.digest.hexdigest(), reader.size, name
-    md5 = hashlib.md5(raw).hexdigest()
+        return md5, size, name, parts
+    for start in range(0, len(raw), 1 << 20):
+        chunker.feed(raw[start:start + (1 << 20)])
+    md5, size, parts = chunker.finish()
     name = f"raw-{md5[:12]}.json"
     _write_file(tmp / name, raw)
-    return md5, len(raw), name
+    return md5, size, name, parts
+
+
+def _previous_raw(paths: Paths, ulid: str, folder: Path) -> dict | None:
+    """The `raw` block of the version this stage replaces: the outbox entry if there is
+    one, else the mirror's session.md (`remember` keeps it after every stage)."""
+    try:
+        if folder.is_dir():
+            return h.agora_of(read_entry(folder)).get("raw")
+    except h.HeaderError:
+        pass
+    try:
+        hdr, _ = h.split_document((paths.mirror / ulid / "session.md").read_text(encoding="utf-8"))
+        return h.agora_of(hdr).get("raw")
+    except (OSError, h.HeaderError, UnicodeDecodeError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -572,8 +660,20 @@ def stage(paths: Paths, header: dict, body: str,
     tmp.mkdir()
     try:
         if raw is not None:
-            md5, size, name = _stage_raw(tmp, raw)
-            header.setdefault("agora", {})["raw"] = {"file": name, "md5": md5, "size": size}
+            md5, size, name, parts = _stage_raw(tmp, raw, raw_chunk_size())
+            previous_raw = _previous_raw(paths, ulid, folder)
+            if (raw_kind(previous_raw) == "chunks" and previous_raw.get("md5") == md5
+                    and previous_raw.get("size") == size):
+                # The same raw under a new header (an edit): the same manifest, or the
+                # same bytes would be renamed and sent whole again (design B.4).
+                segments = copy.deepcopy(previous_raw["segments"])
+            else:
+                gen = _generation(previous_raw) + 1
+                segments = [{"file": segment_name(gen, seq, part_md5), "size": part_size,
+                             "md5": part_md5} for seq, (part_md5, part_size) in enumerate(parts)]
+            header.setdefault("agora", {})["raw"] = {
+                "md5": md5, "size": size, "layout": RAW_LAYOUT, "segments": segments}
+            _fault("after-manifest")      # crash with the raw staged, before anything is swapped in
         else:
             header.setdefault("agora", {}).pop("raw", None)
         if folder.is_dir():
@@ -807,36 +907,90 @@ def read_entry(folder: Path) -> dict:
     return _entry_header(folder, _entry_bytes(folder))[0]
 
 
-def _upload_checked(drive: Drive, folder: Path, ulid: str, raw: dict,
-                    uploaded_raw: bool, tail: str) -> dict:
-    """The safe order - the raw, then session.md - then Drive's own md5s (S2-7).
-
-    Nothing else goes (R7): an older raw, a `*.partial` left by an interrupted
-    write, a `.DS_Store` - none of them is what the session is, and uploading one
-    is how a half-written file comes back to life on Drive. A copyto that returned
-    zero is not proof that the bytes arrived, so the md5s Drive reports decide.
-    """
-    if uploaded_raw:
-        drive.upload(folder / raw_name(raw), ulid, raw_name(raw))
-        _fault("after-raw-upload")        # crash between the two uploads (AGORA_TEST_FAULT)
-    elif raw:
-        warn(f"{ulid} 標頭指到的 {raw_name(raw)} 本機沒有{tail}")
+def _push_session_md_only(drive: Drive, folder: Path, ulid: str) -> None:
+    """A session with no raw (a merge): session.md alone, then Drive's own md5 decides."""
     drive.upload(folder / "session.md", ulid, "session.md")
     _fault("after-session-upload")
     remote = drive.list_one(ulid)
     if remote.get("session.md") != md5_file(folder / "session.md"):
-        raise StoreError(f"{ulid} 的 session.md 在 Drive 上的 md5 不符{tail}")
-    if uploaded_raw and remote.get(raw_name(raw)) != raw.get("md5"):
-        raise StoreError(f"{ulid} 的 raw 在 Drive 上的 md5 不符{tail}")
-    return remote
+        raise StoreError(f"{ulid} 的 session.md 在 Drive 上的 md5 不符")
+
+
+def _push_chunked(drive: Drive, paths: Paths, folder: Path, ulid: str, data: bytes, raw: dict) -> None:
+    """Send one mirrored `chunks/1` session: the segments Drive lacks, then session.md.
+
+    `data` is the one read of session.md this push works from: `raw` (the manifest) was
+    parsed out of those very bytes, the batch dir gets those bytes, and the check at the end
+    compares Drive with their md5 - the same rule as the uploader's `documents` snapshot
+    (#130). A `stage` landing meanwhile cannot make a session.md go up with a manifest it
+    does not belong to.
+
+    Like the uploader (design B.5, 3.17): the missing segments are cut from the whole raw
+    in the mirror into a batch dir, stamped with the current time, and go in **one**
+    `copy --files-from` - not one call per segment, which for an 800 MB session would be
+    ~195 calls - then session.md in another. Drive's own md5s decide afterwards: session.md
+    and every segment. Nothing else goes (R7).
+    """
+    whole = folder / raw_name(raw)
+    manifest = raw_segments(raw)
+    try:
+        on_drive = drive.list_one(ulid)
+    except StoreError as e:
+        if e.returncode == 3 or "directory not found" in str(e):
+            on_drive = {}               # the session is not there (a revive): all of it goes
+        else:
+            raise
+    needed = {seg["file"] for seg in manifest if on_drive.get(seg["file"]) != seg["md5"]}
+    if not whole.is_file():
+        if needed:
+            raise StoreError(f"標頭指到的 {whole.name} 本機沒有，Drive 上的段又不齊，不傳半套")
+        warn(f"{ulid} 標頭指到的 {whole.name} 本機沒有；Drive 上的段都在，只傳 session.md")
+    where = paths.state / f"pushbatch-{os.getpid()}"     # not `batch-*`: the uploader sweeps those
+    shutil.rmtree(where, ignore_errors=True)
+    try:
+        target = where / ulid
+        target.mkdir(parents=True)
+        _write_file(target / "session.md", data)
+        try:
+            if needed:
+                _cut_segments(whole, target, manifest, needed)
+        except ValueError as e:
+            raise StoreError(f"{ulid} 切段失敗（{e}），不傳") from None
+        for path in where.rglob("*"):
+            if path.is_file():
+                os.utime(path, None)
+        if needed:
+            _copy_batch(drive, paths, [f"{ulid}/{name}" for name in sorted(needed)], source=where)
+        _fault("after-segment-upload")
+        _copy_batch(drive, paths, [f"{ulid}/session.md"], source=where)
+        _fault("after-session-upload")
+    finally:
+        shutil.rmtree(where, ignore_errors=True)
+    remote = drive.list_one(ulid)
+    if remote.get("session.md") != hashlib.md5(data).hexdigest():
+        raise StoreError(f"{ulid} 的 session.md 在 Drive 上的 md5 不符")
+    if any(remote.get(seg["file"]) != seg["md5"] for seg in manifest):
+        raise StoreError(f"{ulid} 的段在 Drive 上缺或 md5 不符")
 
 
 def push_mirror(drive: Drive, paths: Paths, ulid: str, header: dict) -> None:
-    """Send one mirrored session up: `session.md` and the raw its header names."""
+    """Send one mirrored session up: `session.md` and, for a raw, its segments.
+
+    session.md is read once here; the raw block that decides what to send is parsed from
+    those bytes, not from `header` (which the caller read earlier)."""
     folder = paths.mirror / ulid
-    raw = h.agora_of(header).get("raw") or {}
-    _upload_checked(drive, folder, ulid, raw,
-                    bool(raw) and (folder / raw_name(raw)).is_file(), "")
+    try:
+        data = (folder / "session.md").read_bytes()
+        raw = _raw_block(data)
+    except (OSError, h.HeaderError, UnicodeDecodeError) as e:
+        raise StoreError(f"{ulid} 的 session.md 讀不了：{e}") from None
+    kind = raw_kind(raw)
+    if kind == "chunks":
+        _push_chunked(drive, paths, folder, ulid, data, raw)
+    elif kind == "none":
+        _push_session_md_only(drive, folder, ulid)
+    else:
+        raise StoreError(f"{ulid}：{LEGACY_RAW_MESSAGE}")      # never write the old layout back
 
 
 def mirror_one(paths: Paths, drive: Drive, index: "Index", ulid: str,
@@ -931,6 +1085,7 @@ class _Listing(dict):
     def __init__(self):
         super().__init__()
         self.ids: dict[str, str] = {}
+        self.mtimes: dict[str, dict[str, str]] = {}      # {ulid: {name: ModTime}}, for the cleanup grace
 
 
 def _ids_of(drive: Drive, listing: "_Listing", ulids, say) -> dict[str, str]:
@@ -1098,39 +1253,243 @@ def _copy_batch(drive: Drive, paths: Paths, names: list[str],
                      "--no-traverse", "--ignore-times")
 
 
-def _write_batch_snapshot(paths: Paths, documents: dict[str, bytes]) -> Path:
-    """This round's session.md files, where `_copy_batch` reads exactly them (#130).
+def _delete_batch(drive: Drive, paths: Paths, names: list[str]) -> None:
+    """The segments this upload made obsolete, gone in one call (design B.5.5)."""
+    try:
+        _with_files_from(drive, names, paths.state, "delete", "gdrive:sessions")
+    except StoreError as e:
+        warn(f"清掉舊的段失敗，下次再說：{e}")
 
-    `upload_batch` takes an entry's header and md5 from one copy of session.md; the
-    outbox folder can be replaced by a `stage` before the session.md copy, and reading
-    it then sent a version naming a raw the raws copy never sent. The bytes go here
-    once, and the session.md copy reads from here instead.
+
+def _build_batch(paths: Paths, documents: dict[str, bytes],
+                 cuts: dict[str, tuple[Path, list[dict], set[str]]]) -> tuple[Path, dict[str, str]]:
+    """This round's batch dir: every entry's session.md (the bytes its md5s were taken
+    from, #130) and the segments to send, each cut from the entry's whole raw by the
+    sizes the manifest gives and checked against the manifest md5 as it is cut.
+
+    Returns the dir and `{ulid: why}` for the entries whose cut did not match their
+    manifest - those are not sent (a version that does not agree with itself is not
+    published) and their half-cut files are removed. Every file is stamped with the
+    current time before it is returned: rclone gives Drive the file's mtime as its
+    `ModTime`, and the orphan grace period is counted from that (K.1, design B.5.2).
     """
     where = paths.state / f"batch-{os.getpid()}"
-    # Every run that died before its cleanup - not just this pid (review N1). The callers
-    # of `upload_batch` all hold `upload.lock`, so whoever is here is the only writer and
-    # nothing under `state/` but these copies may go.
     paths.state.mkdir(parents=True, exist_ok=True)
-    for stale in paths.state.glob("batch-*"):
+    for stale in paths.state.glob("batch-*"):       # every run that died before its cleanup
         if stale.is_dir():
             shutil.rmtree(stale, ignore_errors=True)
+    failed: dict[str, str] = {}
     try:
         for ulid, data in documents.items():
             folder = where / ulid
             folder.mkdir(parents=True)
             _write_file(folder / "session.md", data)
+        for ulid, (raw_path, manifest, needed) in cuts.items():
+            if ulid not in documents:
+                continue
+            try:
+                _cut_segments(raw_path, where / ulid, manifest, needed)
+            except (OSError, ValueError) as e:
+                failed[ulid] = str(e)
+                shutil.rmtree(where / ulid, ignore_errors=True)
+        _fault("after-segment-cut")
+        for path in where.rglob("*"):
+            if path.is_file():
+                os.utime(path, None)
     except BaseException:
         shutil.rmtree(where, ignore_errors=True)
         raise
-    return where
+    return where, failed
 
 
-def _delete_batch(drive: Drive, paths: Paths, names: list[str]) -> None:
-    """The raws this upload replaced, gone in one call (design M4 step 5)."""
+def _cut_segments(raw_path: Path, into: Path, manifest: list[dict], needed: set[str]) -> None:
+    """Write the segments named in `needed` into `into`, cut from `raw_path`; ValueError
+    on a mismatch.
+
+    A segment is a byte range of the whole raw: its offset is the sum of the sizes
+    before it in the manifest (design B.5.1), so the whole manifest is walked and only
+    the needed ones are written.
+    """
+    offset = 0
+    with open(raw_path, "rb") as src:
+        for seg in manifest:
+            size = seg["size"]
+            if seg["file"] in needed:
+                if not _is_segment_name(seg["file"]):
+                    raise ValueError(f"{seg['file']!r} 不是合法的段名，不寫")
+                src.seek(offset)
+                digest = hashlib.md5()
+                left = size
+                with open(into / seg["file"], "wb") as out:
+                    while left:
+                        block = src.read(min(left, 1 << 20))
+                        if not block:
+                            raise ValueError(f"整份 raw 比清單短（缺 {seg['file']}）")
+                        out.write(block)
+                        digest.update(block)
+                        left -= len(block)
+                if digest.hexdigest() != seg["md5"]:
+                    raise ValueError(f"切出來的 {seg['file']} md5 和清單不符")
+            offset += size
+
+
+def _iso_epoch(text: str) -> float | None:
+    """An rclone `ModTime` (RFC 3339, any number of fractional digits) as epoch seconds."""
+    if not isinstance(text, str) or not text:
+        return None
+    value = re.sub(r"(\.\d{6})\d+", r"\1", text.strip())
+    if value[-1:] in ("Z", "z"):
+        value = value[:-1] + "+00:00"
     try:
-        _with_files_from(drive, names, paths.state, "delete", "gdrive:sessions")
+        stamp = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.timestamp()
+
+
+def _published_path(paths: Paths, ulid: str) -> Path:
+    return paths.state / "published" / f"{ulid}.json"
+
+
+def _folder_record_path(paths: Paths, ulid: str) -> Path:
+    return paths.state / "folder-ids" / f"{ulid}.json"
+
+
+def _read_folder_record(paths: Paths, ulid: str) -> dict | None:
+    """`{folder_id, sent}` this machine wrote before it last started copying into the session's
+    folder, or None. A missing, unreadable or malformed file is None - the same as "no earlier
+    attempt": it can only cost the one comparison it would have made, never a wrong verdict."""
+    try:
+        data = json.loads(_folder_record_path(paths, ulid).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if (isinstance(data, dict) and isinstance(data.get("folder_id"), str) and data["folder_id"]
+            and isinstance(data.get("sent"), list) and all(isinstance(n, str) for n in data["sent"])):
+        return data
+    return None
+
+
+def _note_folder_record(paths: Paths, ulid: str, folder_id: str, names: list[str], say) -> None:
+    """Remember, before the copies, the folder ID this entry is about to write into and every
+    name it has sent there since. An existing record keeps its ID - that old ID is the evidence a
+    later round compares with - and only learns the new names. A write that fails only warns."""
+    record = _read_folder_record(paths, ulid)
+    if record is None:
+        record = {"folder_id": folder_id, "sent": []}
+    record["sent"] = sorted(set(record["sent"]) | set(names))
+    try:
+        path = _folder_record_path(paths, ulid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic(path, json.dumps(record, ensure_ascii=False, sort_keys=True))
+    except OSError as e:
+        say(f"{ulid} 資料夾 ID 記錄寫不進去（只少了跨輪偵測被刪的那一道）：{e}")
+
+
+def _forget_folder_record(paths: Paths, ulid: str) -> None:
+    """Drop the record. A file that cannot be removed only warns: by now the version may be
+    out of the outbox, and a permissions problem must not turn that into an exception."""
+    try:
+        _folder_record_path(paths, ulid).unlink(missing_ok=True)
+    except OSError as e:
+        warn(f"{ulid} 資料夾 ID 記錄刪不掉（下一輪會再比對一次，不影響正確性）：{e}")
+
+
+def _read_published(paths: Paths, ulid: str) -> dict | None:
+    """What this machine last published for the session: `{session_md5, segments}`."""
+    try:
+        data = json.loads(_published_path(paths, ulid).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if (isinstance(data, dict) and isinstance(data.get("session_md5"), str)
+            and isinstance(data.get("segments"), list)
+            and all(isinstance(n, str) for n in data["segments"])):
+        return data
+    return None
+
+
+def _clean_segments(drive: Drive, paths: Paths, confirmed: list, remote, again, say) -> None:
+    """Design B.5.5, for every entry this round confirmed and took out of the outbox.
+
+    Decided on the confirmation's own listing: keep the manifest just published, the
+    previous one this machine recorded (only when it really was what Drive had before
+    this round - another machine may have written since), and every `seg-*` whose
+    `ModTime` is within `AGORA_RAW_ORPHAN_GRACE` (another machine's segments that are not
+    named by a session.md yet). Everything else `seg-*` goes in one call. A failure only
+    warns - the next confirmation tries again. Then the new record is written.
+    """
+    if not confirmed:
+        return
+    try:
+        grace = raw_orphan_grace()
     except StoreError as e:
-        warn(f"清掉被取代的舊原始檔失敗，下次再說：{e}")
+        say(f"清理跳過（設定有誤）：{e}")
+        grace = None
+    mtimes = getattr(remote, "mtimes", {})
+    deletions: list[str] = []
+    _fault("before-cleanup")
+    if grace is not None:
+        stamp = now()
+        for ulid, manifest, files in confirmed:
+            keep = {seg["file"] for seg in manifest}
+            before = (again.get(ulid) or {}).get("session.md") if isinstance(again, dict) else None
+            previous = _read_published(paths, ulid)
+            if previous and before and previous["session_md5"] == before:
+                keep |= set(previous["segments"])
+            for name in files:
+                if not name.startswith("seg-") or name in keep:
+                    continue
+                modified = _iso_epoch(mtimes.get(ulid, {}).get(name, ""))
+                if modified is None or stamp - modified < grace:
+                    continue                  # fresh, or no time to judge by: not ours to remove
+                deletions.append(f"{ulid}/{name}")
+        if deletions:
+            _delete_batch(drive, paths, deletions)
+    _fault("after-cleanup")
+    for ulid, manifest, files in confirmed:
+        record = {"session_md5": files.get("session.md"),
+                  "segments": [seg["file"] for seg in manifest]}
+        try:
+            _published_path(paths, ulid).parent.mkdir(parents=True, exist_ok=True)
+            write_atomic(_published_path(paths, ulid), json.dumps(record, ensure_ascii=False))
+        except OSError as e:
+            say(f"{ulid} 發布記錄寫不進去（只影響下次清理的保護範圍）：{e}")
+
+
+def _raw_block(data: bytes) -> object:
+    """The `agora.raw` block of a session.md, from its bytes (None when it has none)."""
+    text = data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    hdr, _ = h.split_document(text)
+    return h.agora_of(hdr).get("raw")
+
+
+def _warn_legacy_once(paths: Paths, ulid: str, say, notices: bool, corrupt: bool = False) -> None:
+    """One warning per stuck entry, ever: the id goes in `state/legacy-warned` (ids only).
+    A pre-upgrade entry (no `layout`) and a `chunks/1` entry whose manifest is broken are
+    worded differently: the second is not "old", and nobody should be told to delete it.
+    A record that cannot be written just means it is said again next round."""
+    path = paths.state / "legacy-warned"
+    try:
+        if ulid in path.read_text(encoding="utf-8").split():
+            return
+    except OSError:
+        pass
+    if corrupt:
+        line = (f"{ulid} 在 outbox 裡的 raw 清單不合法（段名、大小或 md5 有問題），這個版本不上傳它；"
+                f"它留在 outbox，內容沒有動。請不要直接 delete——先看一下這個 header 是怎麼壞的")
+    else:
+        line = (f"{ulid} 在 outbox 裡是升級前的舊格式版本，這個版本不上傳它（會把舊格式寫回 Drive）；"
+                f"它留在 outbox，要丟掉請 agora delete，或等遷移處理")
+    if notices:
+        _notice(paths, line)
+    say(line)
+    try:
+        paths.state.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(ulid + "\n")
+    except OSError:
+        pass
 
 
 def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -> list[str]:
@@ -1151,13 +1510,27 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
     left = []
     entries = {}
     documents = {}          # the session.md bytes each entry's md5s were taken from
+    manifests = {}          # {ulid: [segment dicts]} of every entry that has a raw
     for ulid in sorted(outbox_ulids(paths)):
         folder = paths.outbox / ulid
         try:
             entries[ulid], documents[ulid] = _entry_for_batch(folder)
+            raw_block = _raw_block(documents[ulid])
         except (OSError, h.HeaderError):
             quarantine(folder, paths.outbox / ".bad", f"outbox 的 {ulid} 壞了")
             continue
+        if raw_kind(raw_block) == "legacy":
+            # A version staged before the upgrade (no `layout`, one whole raw) or one we do
+            # not read: never published from here - that would write the old layout back to
+            # Drive. Only this entry waits; the rest of the batch goes (design C.3, B.6).
+            entries.pop(ulid)
+            documents.pop(ulid)
+            left.append(ulid)
+            _warn_legacy_once(paths, ulid, say, notices,
+                              corrupt=isinstance(raw_block, dict) and raw_block.get("layout") == RAW_LAYOUT)
+            continue
+        if raw_block is not None:
+            manifests[ulid] = copy.deepcopy(raw_segments(raw_block))
 
     updates = [u for u in entries if _is_update(paths.outbox / u)]
     again = None                 # the listing the confirmation compares against (resurrect)
@@ -1194,12 +1567,13 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         for ulid in gone:
             say(f"存在檢查 {ulid}：不在了")
             rescued[ulid] = _rescue_deleted(paths, paths.outbox / ulid, ulid, say, notices)
+            _forget_folder_record(paths, ulid)
         entries = {u: m for u, m in entries.items() if u not in gone}
         # Y went into the outbox while we were here: this round takes it too, so a
         # foreground `push` ends with the edit in Drive rather than still waiting.
         for ulid, new_id in rescued.items():
             if new_id and new_id not in entries and (paths.outbox / new_id).exists():
-                entries[new_id], documents[new_id] = _entry_for_batch(paths.outbox / new_id)
+                _adopt_entry(paths, new_id, entries, documents, manifests)
         # X still in the outbox was not rescued: an edit landed while we were reading it,
         # or we could not read it. Either way it is still waiting - the next round meets
         #「.update 而 Drive 沒有」again - and Y goes up in this one (V1).
@@ -1223,6 +1597,14 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
             for u in pending:
                 entries.pop(u)
                 left.append(u)
+        elif again is None:
+            # Drive has no sessions/ at all: not evidence of a deletion (N12), and no folder ID to
+            # work with this round. A record from an earlier round would then be compared with the
+            # ID of a folder *we* are about to re-create, and read as "purged and re-created by
+            # us" - taking a live session down. So the stale records go; this round writes none
+            # (no ID), and a later round starts from the folder as it is then.
+            for u in [u for u in updates if u in entries]:
+                _forget_folder_record(paths, u)
         elif isinstance(again, dict):
             for ulid in [u for u in updates if u in entries]:
                 if ulid not in again or "session.md" not in again[ulid]:
@@ -1235,9 +1617,10 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
                         continue
                     say(f"存在檢查 {ulid}：不在了")
                     new_id = _rescue_deleted(paths, paths.outbox / ulid, ulid, say, notices)
+                    _forget_folder_record(paths, ulid)
                     entries.pop(ulid, None)
                     if new_id and new_id not in entries and (paths.outbox / new_id).exists():
-                        entries[new_id], documents[new_id] = _entry_for_batch(paths.outbox / new_id)
+                        _adopt_entry(paths, new_id, entries, documents, manifests)
                     if (paths.outbox / ulid).is_dir():
                         left.append(ulid)
                 else:
@@ -1254,46 +1637,101 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
                     entries.pop(ulid, None)
                     if (paths.outbox / ulid).is_dir():
                         left.append(ulid)
+                    continue
+                # An earlier round of this entry died (or could not confirm) after it started
+                # copying: the folder ID it was aimed at is on disk. A different ID now means the
+                # folder was purged and re-created since - by our own copy landing on a deleted
+                # session - and nothing else would tell, because what stands there looks alive
+                # (#166, design B.5.7). Same rule as the confirmation: only our own files on it
+                # and the directed look agree -> take it down and keep the work as a session of
+                # its own; anything else waits.
+                record = _read_folder_record(paths, ulid)
+                if record is not None and record["folder_id"] != ids_before[ulid]:
+                    ours = ({"session.md"} | {seg["file"] for seg in manifests.get(ulid, [])}
+                            | set(record["sent"]))
+                    if not _recreated_by_us(drive, ulid, ours, say):
+                        entries.pop(ulid, None)
+                        if (paths.outbox / ulid).is_dir():
+                            left.append(ulid)
+                        continue
+                    say(f"{ulid} 上一輪送到一半時資料夾被別台刪掉又被我們重建，剛寫回去的資料夾已清掉")
+                    try:
+                        drive._run("purge", f"gdrive:sessions/{ulid}")
+                    except StoreError as e:
+                        # The old folder may still be there: rescuing now would leave X alive
+                        # on Drive AND save the work as Y. Keep the record and the entry; the
+                        # next round judges again.
+                        say(f"{ulid} 清掉剛寫回去的資料夾失敗，不另存，留在 outbox 下一輪再判斷：{e}")
+                        entries.pop(ulid, None)
+                        if (paths.outbox / ulid).is_dir():
+                            left.append(ulid)
+                        continue
+                    new_id = _rescue_deleted(paths, paths.outbox / ulid, ulid, say, notices)
+                    entries.pop(ulid, None)
+                    _forget_folder_record(paths, ulid)
+                    if new_id and new_id not in entries and (paths.outbox / new_id).exists():
+                        _adopt_entry(paths, new_id, entries, documents, manifests)
+                    if (paths.outbox / ulid).is_dir():
+                        left.append(ulid)
         # None: Drive has no sessions/ at all - not evidence of a deletion (N12).
 
-    # The raw each entry names, as read with its md5s - not every raw-* in the
-    # folder: the one `stage` carried over from the previous version is only there
-    # for a list built before the swap, and sending it again is what made each pass
-    # grow (review N1).
-    raws = [f"{u}/{name}" for u, (_, name, _) in entries.items() if name]
-    raws = [r for r in raws if (paths.outbox / r).is_file()]
-    if raws:
+    # What Drive already has of each entry's segments (only an update was listed above): the
+    # rest is cut from the entry's whole raw into this round's batch dir. Segments are
+    # content-addressed, so a name that is there with the right md5 is not sent again.
+    def on_drive(ulid: str) -> dict:
+        if isinstance(again, dict) and ulid in updates:
+            return again.get(ulid) or {}
+        return {}
+
+    sessions: list[str] = []
+    cuts = {u: [seg for seg in manifests.get(u, []) if on_drive(u).get(seg["file"]) != seg["md5"]]
+            for u in entries}
+    for u in entries:
+        if u in updates and u in ids_before:
+            _note_folder_record(paths, u, ids_before[u],
+                                ["session.md", *[seg["file"] for seg in cuts[u]]], say)
+    batch_dir = None
+    if entries:
         try:
-            _copy_batch(drive, paths, raws)
-        except StoreError as e:
-            say(f"原始檔沒傳好，這一輪不傳 session.md：{e}")
-            return sorted(set(entries) | set(left))
-        say(f"本輪送出的原始檔：{', '.join(sorted({r.split('/', 1)[0] for r in raws}))}")
-    # #130: session.md comes from the bytes read above, written where rclone reads
-    # exactly that version. Copying the outbox folder again could send a session.md a
-    # `stage` swapped in between the copies - one naming a raw this round never sent.
-    # An entry whose raw was not part of this round waits: its session.md would point
-    # at a raw that is not on Drive either (an entry replaced twice before the raws
-    # copy is the one way that happens).
-    sent_raws = {r.split("/", 1)[0] for r in raws}
-    sessions = [u for u, (_, name, _) in entries.items() if not name or u in sent_raws]
-    if sessions:
-        try:
-            batch_dir = _write_batch_snapshot(paths, {u: documents[u] for u in sessions})
+            batch_dir, cut_failed = _build_batch(
+                paths, documents,
+                {u: (paths.outbox / u / entries[u][1], manifests[u], {seg["file"] for seg in cuts[u]})
+                 for u in entries if cuts[u]})
         except OSError as e:
-            # A full disk is not the round's end either (R1, review N2): the raws are up,
-            # every entry stays, and the next round with room sends session.md.
-            say(f"session.md 快照寫不進 state：{e}，這一輪不傳 session.md")
+            # A full disk is not the round's end either (R1, review N2): every entry stays,
+            # and the next round with room tries again.
+            say(f"批次暫存寫不進 state：{e}，這一輪不傳")
             return sorted(set(entries) | set(left))
-        try:
-            _copy_batch(drive, paths, [f"{u}/session.md" for u in sessions],
-                        source=batch_dir)
-        except StoreError as e:
-            say(f"session.md 沒傳好：{e}")
-            return sorted(set(entries) | set(left))
-        finally:
+        for ulid, why in cut_failed.items():
+            say(f"{ulid} 切段失敗（{why}），這一筆不送，留在 outbox")
+            entries.pop(ulid, None)
+            left.append(ulid)
+    try:
+        segment_files = [f"{u}/{seg['file']}" for u in entries for seg in cuts[u]]
+        if segment_files:
+            try:
+                _copy_batch(drive, paths, segment_files, source=batch_dir)
+            except StoreError as e:
+                say(f"段沒傳好，這一輪不傳 session.md：{e}")
+                return sorted(set(entries) | set(left))
+            say(f"本輪送出的段：{', '.join(sorted({r.split('/', 1)[0] for r in segment_files}))}")
+            _fault("after-segment-upload")      # segments up, session.md not: the new ones are orphans
+        # #130: session.md comes from the bytes read above, written where rclone reads
+        # exactly that version. The segments an entry's manifest names are all on Drive
+        # now - already there, or sent a moment ago - so its session.md may go.
+        sessions = list(entries)
+        if sessions:
+            try:
+                _copy_batch(drive, paths, [f"{u}/session.md" for u in sessions],
+                            source=batch_dir)
+            except StoreError as e:
+                say(f"session.md 沒傳好：{e}")
+                return sorted(set(entries) | set(left))
+            say(f"本輪送出的 session.md：{', '.join(sorted(sessions))}")
+            _fault("after-session-upload")      # session.md up, nothing confirmed yet
+    finally:
+        if batch_dir is not None:
             shutil.rmtree(batch_dir, ignore_errors=True)
-        say(f"本輪送出的 session.md：{', '.join(sorted(sessions))}")
 
     remote = _listing_with_md5(drive)
     listed = isinstance(remote, dict)
@@ -1301,7 +1739,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
     no_sessions_yet = remote is None      # Drive has no sessions/ at all (review N3)
     if not listed:
         remote = {}           # nothing confirmed, so nothing leaves the outbox
-    replaced = []
+    confirmed = []               # (ulid, manifest, the folder's listing) of what left the outbox
     for ulid, (sent_md5, sent_name, sent_raw) in entries.items():
         folder = paths.outbox / ulid
         files = remote.get(ulid) or {}
@@ -1334,7 +1772,8 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
                 left.append(ulid)
                 say(f"{ulid} 確認時拿不到資料夾 ID，不能確認 copy 期間沒被刪，留在 outbox 下一輪再送")
                 continue
-            ours = {"session.md"} | ({sent_name} if sent_name else set())
+            # everything this round put there: session.md and the segments of the manifest
+            ours = {"session.md"} | {seg["file"] for seg in manifests.get(ulid, [])}
             if now_id != ids_before[ulid] and not _recreated_by_us(drive, ulid, ours, say):
                 # The ID moved but the folder does not look like our own copy landing on
                 # a purged one, or the look could not say: waiting costs a round, taking
@@ -1351,13 +1790,24 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
                 try:
                     drive._run("purge", f"gdrive:sessions/{ulid}")
                 except StoreError as e:
-                    say(f"{ulid} 清掉剛寫回去的資料夾失敗：{e}")
+                    # Same rule as the cross-round path: no purge, no rescue.
+                    say(f"{ulid} 清掉剛寫回去的資料夾失敗，不另存，留在 outbox 下一輪再判斷：{e}")
+                    left.append(ulid)
+                    continue
                 new_id = _rescue_deleted(paths, folder, ulid, say, notices)
+                _forget_folder_record(paths, ulid)
                 if new_id and new_id not in entries and (paths.outbox / new_id).exists():
                     left.append(new_id)          # Y goes up on the next pass
                 if (paths.outbox / ulid).is_dir():
                     left.append(ulid)
                 continue
+        if any(files.get(seg["file"]) != seg["md5"] for seg in manifests.get(ulid, [])):
+            # session.md is up but a segment it names is not (or has another md5): the
+            # version is not whole on Drive. It stays; the next round cuts the missing
+            # ones from the whole raw again (design B.5.4, B.6).
+            left.append(ulid)
+            say(f"{ulid} 的段在 Drive 上缺或 md5 不符，留在 outbox 下一輪補回")
+            continue
         done = paths.outbox / f".done-{ulid}"
         try:
             folder.rename(done)                      # H1: compare what is *now* in there
@@ -1372,7 +1822,7 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
             _put_back(done, folder)
             left.append(ulid)
             continue
-        if now_md5 != sent_md5 or (sent_raw and files.get(now_raw_name) != sent_raw):
+        if now_md5 != sent_md5 or (sent_raw and now_raw != sent_raw):
             _put_back(done, folder)              # a newer version: it stays for the next round
             left.append(ulid)
             if now_md5 != sent_md5:
@@ -1388,11 +1838,22 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
             left.append(ulid)
             say(f"{ulid} 上傳期間又有新版本，留在 outbox 下一輪再送")
             continue
-        for old_raw in _replaced_raws(done, now_raw_name, files):
-            replaced.append(f"{ulid}/{old_raw}")
         shutil.rmtree(done, ignore_errors=True)
-    _delete_batch(drive, paths, replaced)
+        _forget_folder_record(paths, ulid)          # confirmed: the folder is the one we think
+        if ulid in manifests:
+            confirmed.append((ulid, manifests[ulid], files))
+    _fault("after-confirm")        # confirmed and out of the outbox, nothing cleaned yet
+    _clean_segments(drive, paths, confirmed, remote, again, say)
     return sorted(left)
+
+
+def _adopt_entry(paths: Paths, ulid: str, entries: dict, documents: dict, manifests: dict) -> None:
+    """Take an outbox entry that appeared during the round (a rescued Y) into this round -
+    its manifest too, or its session.md would go up without its segments."""
+    entries[ulid], documents[ulid] = _entry_for_batch(paths.outbox / ulid)
+    raw_block = _raw_block(documents[ulid])
+    if raw_block is not None:
+        manifests[ulid] = copy.deepcopy(raw_segments(raw_block))
 
 
 def _rescue_deleted(paths: Paths, folder: Path, ulid: str, say, notices: bool = False) -> str | None:
@@ -1415,7 +1876,7 @@ def _rescue_deleted(paths: Paths, folder: Path, ulid: str, say, notices: bool = 
         hdr, body = h.split_document(text)
         named = h.agora_of(hdr).get("raw")
         name = raw_name(named) if named else None
-        raw = (done / name).read_bytes() if name else None
+        raw = (done / name) if name else None      # the path: an 800 MB raw is not read into memory here
     except (OSError, h.HeaderError, StoreError) as e:
         say(f"{ulid} 雲端沒有，而且讀不出這筆（{e}）；留在 outbox 等你處理")
         _put_back(done, folder)
@@ -1519,13 +1980,6 @@ def _entry_md5s(folder: Path) -> tuple[str, str | None, str | None]:
     session_md5, name, _ = _entry_snapshot(folder)
     return session_md5, name, md5_file(folder / name) if name else None
 
-
-
-def _replaced_raws(folder: Path, keep: str | None, remote_files: dict) -> list[str]:
-    """The older raws this upload replaced, to clear in one call (N7: only for the
-    entries that actually left the outbox, so a later round can do the rest)."""
-    return [n for n in remote_files
-            if n.startswith("raw-") and n != keep]
 
 
 def _named_raw(folder: Path) -> str | None:
@@ -1991,12 +2445,18 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
     return index
 
 
-def cloud_lost(agora_id: str) -> str:
+def cloud_lost(agora_id: str, header: dict | None = None) -> str:
     """The one place the two ways out of a deleted session are worded (review L2).
 
     With the marker itself, which is how the interactive mode asks: it shows this
     same message rather than a second wording that can drift from it (T2 3.3).
+    A session whose raw this version does not read cannot be pushed back (it would
+    write the old layout to Drive again): for those the way to keep it is a re-import.
     """
+    if header is not None and raw_kind(h.agora_of(header).get("raw")) == "legacy":
+        return (f"{agora_id} 雲端沒有（別台機器刪掉了），不再寫回去；它的 raw 是舊格式或未知格式，"
+                f"不能傳回去。要保留內容請用 agora import … --as-new 從原始紀錄重匯，"
+                f"要刪掉本機這份用 agora pull session {agora_id} --not-exist-delete")
     return (f"{agora_id} 雲端沒有（別台機器刪掉了），不再寫回去；"
             f"要傳回去用 agora push session {agora_id} --not-exist-upload，"
             f"要刪掉本機這份用 agora pull session {agora_id} --not-exist-delete")
@@ -2004,13 +2464,19 @@ def cloud_lost(agora_id: str) -> str:
 
 def cloud_gone(index: "Index", agora_id: str) -> str | None:
     """Why this session cannot be written to, or None (T1 3.3 / T2 3.3)."""
-    return None if index.cloud_has(agora_id.split(":", 1)[-1]) else cloud_lost(agora_id)
+    ulid = agora_id.split(":", 1)[-1]
+    return None if index.cloud_has(ulid) else cloud_lost(agora_id, index.header(ulid))
 
 
 def forget_local(paths: Paths, ulid: str) -> None:
     """Drop the local copy of a session: its index row, its search entry, its marker."""
     Index(paths).drop(ulid)
     shutil.rmtree(paths.mirror / ulid, ignore_errors=True)
+    _forget_folder_record(paths, ulid)
+    try:
+        _published_path(paths, ulid).unlink(missing_ok=True)       # the previous-manifest record
+    except OSError:
+        pass
 
 
 def delete_session(paths: Paths, drive: Drive, ulid: str) -> None:
@@ -2054,8 +2520,10 @@ def ensure_raw_file(paths: Paths, drive: Drive, ulid: str, header: dict, *,
                     retry: bool = True) -> Path:
     """The session's whole raw as a file in the mirror, fetched and verified on demand (E.2).
 
-    1. The mirror already has `raw-<md5[:12]>.json` with the right md5: done, no network.
-    2. A raw this version does not read (`legacy`: an unknown layout, ...): StoreError.
+    1. A raw this version does not read (`legacy`: no or unknown layout, a corrupt
+       manifest): StoreError - before looking at the mirror, so a legacy raw that happens
+       to be there is not handed out either.
+    2. The mirror already has `raw-<md5[:12]>.json` with the right md5: done, no network.
     3. `chunks/1`: the missing segments in **one** `copy --files-from` into
        `<cache>/segments/<ULID>/`, each checked against its manifest md5, joined in
        manifest order into a temp file next to the target, whole md5 and size checked,
@@ -2066,7 +2534,7 @@ def ensure_raw_file(paths: Paths, drive: Drive, ulid: str, header: dict, *,
     The segments live only for this call, success or not.
     """
     raw = h.agora_of(header).get("raw")
-    if not raw:
+    if raw is None:
         raise StoreError(f"{ulid} 沒有 raw：merge 出來的 Session 沒有自己的 raw，請看 agora.parents 裡各個來源的 raw")
     kind = raw_kind(raw)
     if kind == "legacy":                 # before the mirror: a raw we do not read stays unread
@@ -2074,43 +2542,7 @@ def ensure_raw_file(paths: Paths, drive: Drive, ulid: str, header: dict, *,
     local = paths.mirror / ulid / raw_name(raw)
     if local.is_file() and md5_file(local) == raw.get("md5"):
         return local
-    if kind == "single":
-        return _ensure_single_file(paths, drive, ulid, raw, local, retry=retry)
     return _ensure_segmented(paths, drive, ulid, raw, retry=retry)
-
-
-def _ensure_single_file(paths: Paths, drive: Drive, ulid: str, raw: dict, local: Path, *,
-                        retry: bool) -> Path:
-    """The one-file format (transition, `_SINGLE_FILE_READABLE`): what `fetch_raw` always did,
-    except that the download lands in a temp file next to the target and only a raw whose
-    md5 and size are right is `os.replace`d in - a wrong one never sits in the mirror."""
-    local.parent.mkdir(parents=True, exist_ok=True)
-    tmp = local.parent / f".{local.name}.dl-{os.getpid()}"
-    try:
-        drive.download(ulid, local.name, tmp)
-    except StoreError:
-        tmp.unlink(missing_ok=True)
-        if not retry:
-            raise
-        # Another machine may have re-imported it and removed this raw:
-        # refresh session.md once and follow its new pointer (N8).
-        drive.download(ulid, "session.md", paths.mirror / ulid / "session.md")
-        fresh = _read_header(paths.mirror / ulid / "session.md")
-        return ensure_raw_file(paths, drive, ulid, fresh, retry=False)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    try:
-        size = raw.get("size")
-        if md5_file(tmp) != raw["md5"]:
-            raise StoreError(f"{ulid} 的 raw md5 和 header 不符")
-        if isinstance(size, int) and tmp.stat().st_size != size:
-            raise StoreError(f"{ulid} 的 raw 大小和 header 不符")
-        os.replace(tmp, local)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    return local
 
 
 def _ensure_segmented(paths: Paths, drive: Drive, ulid: str, raw: dict, *,

@@ -100,9 +100,21 @@ def _uploaded(drive: Path, ulid: str) -> set[str]:
     return {p.name for p in folder.iterdir()} if folder.is_dir() else set()
 
 
+def copied_since(drive: Path, mark: int) -> list[str]:
+    """Every file name the `copy --files-from` calls after `mark` carried (copies.log)."""
+    log = drive.parent / "copies.log"
+    rows = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    return [f["name"].split("/", 1)[1] for row in rows[mark:] for f in row["files"]]
+
+
+def copies_mark(drive: Path) -> int:
+    log = drive.parent / "copies.log"
+    return len(log.read_text().splitlines()) if log.exists() else 0
+
+
 def _raw_name(paths, ulid: str) -> str:
     hdr, _ = store.h.split_document((paths.mirror / ulid / "session.md").read_text())
-    return hdr["agora"]["raw"]["file"]
+    return store.raw_name(hdr["agora"]["raw"])
 
 
 # --- the agent full-text cache ------------------------------------------------
@@ -307,22 +319,55 @@ def test_pull_goes_on_past_a_failure_and_reports_k_of_n(drive, capsys):   # revi
 # --- push ---------------------------------------------------------------------
 
 
-def test_push_sends_session_md_and_the_raw_it_names_and_nothing_else(drive, capsys):
-    """R7: an older raw, a *.partial and a .DS_Store stay here."""
+def test_push_sends_session_md_and_the_segments_it_names_and_nothing_else(drive, capsys):
+    """R7: an older raw, a *.partial and a .DS_Store stay here. Segments are content-addressed,
+    so one Drive already has is not sent again - only session.md goes - and a segment it
+    lost is sent in the same `copy` call as nothing else."""
     paths = store.Paths.from_env()
     ulid = _on_drive(paths)
     cache.pull(paths, [ulid], {})                     # so the mirror really has the raw
-    raw = _raw_name(paths, ulid)
     for name in ("raw-000000000000.json", "session.md.partial", ".DS_Store"):
         (paths.mirror / ulid / name).write_text("不該被傳上去", encoding="utf-8")
+    segments = _segments_on_drive(drive, ulid)
 
-    mark = len(calls(drive))
+    mark = copies_mark(drive)
     assert cache.push(paths, [ulid], {}) == (1, 0)
     assert "push 1/1" in capsys.readouterr().err
-    assert sorted(copyto_since(drive, mark, ulid)) == sorted([raw, "session.md"])
-    assert _uploaded(drive, ulid) == {"session.md", raw}
+    assert copied_since(drive, mark) == ["session.md"], "the segments Drive has are not sent again"
+    assert _uploaded(drive, ulid) == {"session.md", *segments}
     assert (paths.mirror / ulid / ".DS_Store").is_file()      # still here, still not up there
 
+    # a segment Drive lost goes back, with session.md, and nothing else
+    (sessions_on(drive) / ulid / sorted(segments)[0]).unlink()
+    mark = copies_mark(drive)
+    assert cache.push(paths, [ulid], {}) == (1, 0)
+    assert sorted(copied_since(drive, mark)) == sorted([sorted(segments)[0], "session.md"])
+    assert _uploaded(drive, ulid) == {"session.md", *segments}
+
+
+def test_push_goes_up_in_two_copy_calls_however_many_segments(drive, monkeypatch):
+    """3.17: a session of many segments is one `copy --files-from` for the segments and one
+    for session.md - not a `copyto` per segment."""
+    monkeypatch.setenv("AGORA_RAW_CHUNK", "4096")
+    paths = store.Paths.from_env()
+    hdr = _header()
+    store.stage(paths, hdr, "## user\n很多段\n", bytes(range(256)) * 160)      # 40 KiB: 10 segments
+    store.upload_batch(store.Drive(paths), paths)
+    ulid = hdr["id"].split(":", 1)[1]
+    segments = _segments_on_drive(drive, ulid)
+    assert len(segments) == 10
+    cache.pull(paths, [ulid], {})                        # the mirror gets the whole raw, joined
+    shutil.rmtree(sessions_on(drive) / ulid)             # lost: a revive sends everything
+    mark_calls, mark = len(calls(drive)), copies_mark(drive)
+
+    assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (1, 0)
+
+    sent = calls(drive)[mark_calls:]
+    assert not [c for c in sent if "copyto" in c], "no per-segment copyto"
+    log = (drive.parent / "copies.log").read_text().splitlines()[mark:]
+    assert len(log) == 2 and len(json.loads(log[0])["files"]) == 10
+    assert [f["name"].split("/", 1)[1] for f in json.loads(log[1])["files"]] == ["session.md"]
+    assert _uploaded(drive, ulid) == {"session.md", *segments}
 
 def test_push_overwrites_the_copy_on_drive(drive):
     paths = store.Paths.from_env()
@@ -343,18 +388,33 @@ def test_push_sends_only_session_md_when_the_raw_is_not_here(drive, capsys):   #
     cache.pull(paths, [ulid], {})
     (paths.mirror / ulid / _raw_name(paths, ulid)).unlink()
 
-    mark = len(calls(drive))
+    mark = copies_mark(drive)
     assert cache.push(paths, [ulid], {}) == (1, 0)
     assert "本機沒有" in capsys.readouterr().err
-    assert copyto_since(drive, mark, ulid) == ["session.md"]
-    # Drive keeps the raw it already had: push overwrites, it does not tidy up
-    assert _uploaded(drive, ulid) == {"session.md", _raw_name_on_drive(drive, ulid)}
+    assert copied_since(drive, mark) == ["session.md"]
+    # Drive keeps the segments it already had: push overwrites, it does not tidy up
+    assert _uploaded(drive, ulid) == {"session.md", *_segments_on_drive(drive, ulid)}
 
 
-def _raw_name_on_drive(drive: Path, ulid: str) -> str:
-    """The raw name Drive has for this session (the mirror copy is gone)."""
+def test_push_does_not_send_half_a_session_when_both_the_raw_and_the_segments_are_gone(drive, capsys):
+    """If Drive lacks a segment and the whole raw is not here either, nothing can be cut:
+    refuse that one, upload nothing."""
+    paths = store.Paths.from_env()
+    ulid = _on_drive(paths)
+    cache.pull(paths, [ulid], {})
+    (paths.mirror / ulid / _raw_name(paths, ulid)).unlink()
+    (sessions_on(drive) / ulid / sorted(_segments_on_drive(drive, ulid))[0]).unlink()
+
+    mark = copies_mark(drive)
+    assert cache.push(paths, [ulid], {}) == (0, 1)
+    assert "不傳半套" in capsys.readouterr().err
+    assert copied_since(drive, mark) == []
+
+
+def _segments_on_drive(drive: Path, ulid: str) -> set[str]:
+    """The segment names the session.md on Drive lists."""
     hdr, _ = store.h.split_document((sessions_on(drive) / ulid / "session.md").read_text())
-    return hdr["agora"]["raw"]["file"]
+    return {seg["file"] for seg in hdr["agora"]["raw"]["segments"]}
 
 
 def test_push_does_not_revive_a_session_the_cloud_lost(drive, capsys):
@@ -381,7 +441,7 @@ def test_push_sends_the_outbox_first(drive):
 
     assert cache.push(paths, [ulid], {}) == (1, 0)
     assert not (paths.outbox / ulid).exists()
-    assert _uploaded(drive, ulid) == {"session.md", hdr["agora"]["raw"]["file"]}
+    assert _uploaded(drive, ulid) == {"session.md", *[s["file"] for s in hdr["agora"]["raw"]["segments"]]}
 
 
 def test_push_goes_on_past_a_failure_and_reports_k_of_n(drive, capsys):   # review K5
@@ -476,7 +536,7 @@ def test_pull_does_not_index_a_session_whose_raw_is_not_there_yet(drive, capsys)
     """S1/G3: an unfinished session is not searchable and not continuable."""
     paths = store.Paths.from_env()
     ulid = _on_drive(paths)
-    (sessions_on(drive) / ulid / _raw_name_on_drive(drive, ulid)).unlink()   # Drive lost the raw
+    (sessions_on(drive) / ulid / sorted(_segments_on_drive(drive, ulid))[0]).unlink()   # Drive lost the raw
 
     assert cache.pull(paths, [ulid], {}) == (1, 0)
     assert "先不建索引" in capsys.readouterr().err
@@ -646,7 +706,7 @@ def test_not_exist_upload_sends_the_session_back(drive):
     assert store.Index(paths).missing_in_cloud() == [ulid]
 
     assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (1, 0)
-    assert _uploaded(drive, ulid) == {"session.md", _raw_name_on_drive(drive, ulid)}
+    assert _uploaded(drive, ulid) == {"session.md", *_segments_on_drive(drive, ulid)}
     assert store.sync(paths).missing_in_cloud() == []      # and the marker is gone
 
 
@@ -677,9 +737,8 @@ def test_not_exist_upload_does_not_overwrite_a_session_the_listing_only_missed(
     on_drive = sessions_on(drive) / ulid / "session.md"
     newer = on_drive.read_text(encoding="utf-8") + "\n別台比較新\n"   # the version here is older
     on_drive.write_text(newer, encoding="utf-8")
-    raw = _raw_name_on_drive(drive, ulid)
-    before = {name: store.md5_file(sessions_on(drive) / ulid / name)
-              for name in ("session.md", raw)}
+    names = ("session.md", *sorted(_segments_on_drive(drive, ulid)))
+    before = {name: store.md5_file(sessions_on(drive) / ulid / name) for name in names}
     monkeypatch.setenv("FAKE_RCLONE_OMIT", ulid)     # the whole listing loses the folder
 
     assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (0, 1)
@@ -687,8 +746,7 @@ def test_not_exist_upload_does_not_overwrite_a_session_the_listing_only_missed(
     err = capsys.readouterr().err
     assert "其實還在" in err and "先 pull 再 push" in err
     assert on_drive.read_text(encoding="utf-8") == newer
-    assert {name: store.md5_file(sessions_on(drive) / ulid / name)
-            for name in ("session.md", raw)} == before
+    assert {name: store.md5_file(sessions_on(drive) / ulid / name) for name in names} == before
 
 
 def test_not_exist_upload_refuses_when_the_folder_is_there_but_empty(
@@ -717,7 +775,7 @@ def test_not_exist_upload_goes_ahead_when_the_direct_look_says_rc3(drive, monkey
     monkeypatch.setenv("FAKE_RCLONE_NOT_FOUND_RC", "3")
 
     assert cache.push(paths, [ulid], {}, not_exist_upload=True) == (1, 0)
-    assert _uploaded(drive, ulid) == {"session.md", _raw_name_on_drive(drive, ulid)}
+    assert _uploaded(drive, ulid) == {"session.md", *_segments_on_drive(drive, ulid)}
 
 
 def test_not_exist_upload_refuses_when_the_direct_look_fails(drive, capsys, monkeypatch):

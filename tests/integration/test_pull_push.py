@@ -142,7 +142,7 @@ def fetch_local_raw(env, agora_id: str):
     paths, ulid = env["paths"], agora_id.split(":", 1)[1]
     hdr = store.Index(paths).header(ulid)
     store.fetch_raw(paths, store.Drive(paths), ulid, hdr)
-    raw = paths.mirror / ulid / h.agora_of(hdr)["raw"]["file"]
+    raw = paths.mirror / ulid / store.raw_name(h.agora_of(hdr)["raw"])
     assert raw.is_file()
     return hdr, raw
 
@@ -269,7 +269,7 @@ def test_not_exist_upload_puts_it_back_and_the_mark_clears(env):
     agora_id, _ = imported(env)
     ulid = agora_id.split(":", 1)[1]
     hdr, local_raw = fetch_local_raw(env, agora_id)     # both files go up (R7)
-    raw_name = h.agora_of(hdr)["raw"]["file"]
+    raw_name = store.raw_name(h.agora_of(hdr)["raw"])
     purge_on_drive(env, agora_id)
     resync(env)
     assert not store.Index(env["paths"]).cloud_has(ulid)
@@ -279,7 +279,8 @@ def test_not_exist_upload_puts_it_back_and_the_mark_clears(env):
     assert ulid in remote_names(env), "it should be back on Drive"
     on_drive = {e["Name"] for e in json.loads(
         store.Drive(env["paths"])._run("lsjson", f"gdrive:sessions/{ulid}", "--files-only") or "[]")}
-    assert on_drive == {"session.md", raw_name}, on_drive
+    segments = {seg["file"] for seg in h.agora_of(hdr)["raw"]["segments"]}     # Drive has no whole raw
+    assert on_drive == {"session.md", *segments}, on_drive
     (env["paths"].state / "last-sync").unlink(missing_ok=True)
     run_cli(env, "search", "session", "--filter", "cloud=yes")
     assert store.Index(env["paths"]).cloud_has(ulid), "the mark clears once it is back"

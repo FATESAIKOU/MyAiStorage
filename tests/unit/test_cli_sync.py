@@ -247,7 +247,7 @@ def _deleted_mid_run(capsys, text):
     assert on_drive(a).is_dir(), "A confirmed on Drive first"
     mirror = paths().mirror / ulid
     hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
-    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    raw = (mirror / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes()
     store.stage(paths(), hdr, body, raw, update=True, kind="continue")
     agent.sessions["ses_a"].append(text)
     exported = agent.export("ses_a")
@@ -289,7 +289,7 @@ def test_cross_agent_pending_keeps_the_two_md5s_apart(env, capsys, monkeypatch):
     _, a, _ = _import(capsys)
     ulid = a.split(":")[1]
     hdr = store.Index(paths()).header(ulid)
-    source_raw = (paths().mirror / ulid / hdr["agora"]["raw"]["file"]).read_bytes()
+    source_raw = (paths().mirror / ulid / store.raw_name(hdr["agora"]["raw"])).read_bytes()
     parent_md5 = store.hashlib.md5(source_raw).hexdigest()
     loaded: list[bytes] = []
     _capture_loaded_raw(monkeypatch, env, loaded)
@@ -431,7 +431,7 @@ def test_a_rescue_mid_flight_is_adopted_not_minted_again(env, capsys, monkeypatc
     # a periodic round's staged update, like the run's own writes
     mirror = paths().mirror / ulid
     hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
-    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    raw = (mirror / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes()
     store.stage(paths(), hdr, body, raw, update=True, kind="continue")
     agent.sessions["ses_a"].append("ZZ autopsy 第三句")
     exported = agent.export("ses_a")
@@ -521,7 +521,7 @@ def test_a_rescue_completed_before_claim_is_adopted_not_minted(env, capsys, monk
     assert on_drive(a).is_dir(), "A confirmed on Drive first"
     mirror = paths().mirror / ulid
     hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
-    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    raw = (mirror / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes()
     store.stage(paths(), hdr, body, raw, update=True, kind="continue")
     agent.sessions["ses_a"].append("ZZ m1 第四句")
     exported = agent.export("ses_a")
@@ -571,7 +571,7 @@ def test_adopt_write_survives_confirmation_rename(env, capsys, monkeypatch):
     assert on_drive(a).is_dir(), "A confirmed on Drive first"
     mirror = paths().mirror / ulid
     hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
-    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    raw = (mirror / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes()
     store.stage(paths(), hdr, body, raw, update=True, kind="continue")
     agent.sessions["ses_a"].append("ZZ m2 第五句")
     exported = agent.export("ses_a")
@@ -927,7 +927,7 @@ def test_a_crashed_holder_times_out_and_still_lands_once(env, capsys, monkeypatc
     assert on_drive(a).is_dir(), "A confirmed on Drive first"
     mirror = paths().mirror / ulid
     hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
-    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    raw = (mirror / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes()
     store.stage(paths(), hdr, body, raw, update=True, kind="continue")
     agent.sessions["ses_a"].append("ZZ l2 第六句")
     exported = agent.export("ses_a")
@@ -956,7 +956,7 @@ def test_timeout_mint_clears_only_its_own_claim(env, capsys, monkeypatch):
     assert on_drive(a).is_dir(), "A confirmed on Drive first"
     mirror = paths().mirror / ulid
     hdr, body = h.split_document((mirror / "session.md").read_text(encoding="utf-8"))
-    raw = (mirror / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    raw = (mirror / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes()
     store.stage(paths(), hdr, body, raw, update=True, kind="continue")
     agent.sessions["ses_a"].append("ZZ l4 第七句")
     exported = agent.export("ses_a")
@@ -1039,7 +1039,7 @@ def test_the_final_write_adopts_an_indexed_rescue_with_nothing_new(claude_lab, c
             return
         done["rescued"] = True
         hdr = store.Index(paths()).header(ulid)
-        raw = (paths().mirror / ulid / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+        raw = (paths().mirror / ulid / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes()
         body = (paths().mirror / ulid / "session.md").read_text(encoding="utf-8")
         store.stage(paths(), hdr, body, raw, update=True, kind="continue")
         shutil.rmtree(on_drive(a))                     # another machine deleted A
@@ -1084,7 +1084,7 @@ def test_the_final_write_adopts_a_rescue_that_is_only_staged(claude_lab, capsys,
             return
         done["rescued"] = True
         hdr = store.Index(paths()).header(ulid)
-        raw = (paths().mirror / ulid / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+        raw = (paths().mirror / ulid / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes()
         body = (paths().mirror / ulid / "session.md").read_text(encoding="utf-8")
         store.stage(paths(), hdr, body, raw, update=True, kind="continue")   # the entry being rescued
         shutil.rmtree(on_drive(a))                     # another machine deleted A
@@ -1138,7 +1138,7 @@ def test_a_rescue_the_uploader_remembered_carries_the_rest_of_the_run(claude_lab
             return
         done["rescued"] = True
         hdr = store.Index(paths()).header(ulid)
-        raw = (paths().mirror / ulid / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+        raw = (paths().mirror / ulid / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes()
         body = (paths().mirror / ulid / "session.md").read_text(encoding="utf-8")
         store.stage(paths(), hdr, body, raw, update=True, kind="continue")   # the third round's entry
         shutil.rmtree(on_drive(a))                     # another machine deleted A
@@ -1182,7 +1182,7 @@ def test_final_write_waits_for_inflight_uploader_to_adopt_rescue(claude_lab, cap
             return
         done["staged"] = True
         hdr = store.Index(paths()).header(ulid)
-        raw = (paths().mirror / ulid / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+        raw = (paths().mirror / ulid / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes()
         body = (paths().mirror / ulid / "session.md").read_text(encoding="utf-8")
         store.stage(paths(), hdr, body, raw, update=True, kind="continue")
         import threading
@@ -1634,7 +1634,7 @@ def test_a_foreground_rescue_clears_the_old_target_out_of_the_outbox(env, capsys
     _, a, _ = _import(capsys)
     ulid = a.split(":")[1]
     hdr = header_of(a)
-    raw = (paths().mirror / ulid / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    raw = (paths().mirror / ulid / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes()
     body = document_of(a).split("\n---\n", 1)[1]
     store.stage(paths(), hdr, body, raw, update=True, kind="continue")   # queued .update
     import shutil
@@ -1929,7 +1929,7 @@ def test_a_write_back_while_a_uploader_compares_it_is_an_update(env, capsys, mon
     ulid = a.split(":")[1]
     hdr = header_of(a)
     body = document_of(a).split("\n---\n", 1)[1]
-    raw = (paths().mirror / ulid / hdr["agora"]["raw"]["file"]).read_bytes()
+    raw = (paths().mirror / ulid / store.raw_name(hdr["agora"]["raw"])).read_bytes()
     cli._save(paths(), hdr, body, raw, update=False)     # a fresh entry, unmarked
     assert not store._is_update(paths().outbox / ulid)
 
@@ -2102,7 +2102,7 @@ def test_final_write_rescues_when_target_queued_in_outbox_and_deleted_on_drive(e
         if not deleted["done"]:
             deleted["done"] = True
             hdr = store.Index(paths()).header(ulid)
-            raw = (paths().mirror / ulid / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+            raw = (paths().mirror / ulid / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes()
             body = (paths().mirror / ulid / "session.md").read_text(encoding="utf-8")
             store.stage(paths(), hdr, body, raw, update=True, kind="continue")
             assert ulid in store.outbox_ulids(paths())

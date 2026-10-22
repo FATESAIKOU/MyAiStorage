@@ -112,7 +112,14 @@ def test_a_whole_chunked_raw_is_complete():
 
 def test_no_raw_is_whole_by_itself():
     assert store.raw_complete(None, {}) is True
-    assert store.raw_complete({}, {}) is True
+
+
+@pytest.mark.parametrize("empty", [{}, [], "", 0, False])
+def test_an_empty_value_is_not_no_raw(empty):
+    """#169 note 2: only a missing key or null is "no raw"; any other empty value is a
+    raw this version does not read - it must not be taken for a merge's missing raw."""
+    assert store.raw_complete(empty, {}) is None
+    assert store.raw_kind(empty) == "legacy"
 
 
 @pytest.mark.parametrize("layout", ["chunks/9", "single/1", "", 3])
@@ -267,10 +274,9 @@ def test_a_version_1_unfinished_file_is_ignored(env):
 
 
 @pytest.mark.parametrize("variant", ["no-layout", "unknown-layout"])
-def test_a_legacy_session_is_indexed_kept_and_not_downloaded_again(env, monkeypatch, variant):
-    """3.24: legacy (no `layout`, once R3b-1 stops writing the one-file raw) and unknown
+def test_a_legacy_session_is_indexed_kept_and_not_downloaded_again(env, variant):
+    """3.24: legacy (no `layout` - the one-file raw older versions wrote) and unknown
     (`chunks/9`) are one behaviour: the reading version works, the raw does not."""
-    monkeypatch.setattr(store, "_SINGLE_FILE_READABLE", False)
     paths = store.Paths.from_env()
     if variant == "no-layout":
         ulid, _, _ = _put(env, layout=None)
@@ -290,15 +296,26 @@ def test_a_legacy_session_is_indexed_kept_and_not_downloaded_again(env, monkeypa
                    for c in calls(env)[before:]), "no further download of a legacy session"
 
 
-def test_the_one_file_raw_is_still_read_while_it_is_the_only_thing_stage_writes(env):
-    """R3a -> R3b-1 transition: no `layout` + `file` is today's own format and must keep working."""
-    assert store._SINGLE_FILE_READABLE is True
+def test_what_stage_writes_now_is_read_back_and_the_one_file_raw_is_not(env):
+    """R3b-1: `stage` writes `chunks/1`; the one-file raw (no `layout`) is legacy for everyone."""
     paths = store.Paths.from_env()
-    ulid, _, data = _put(env, layout=None)
-    assert store.sync(paths).header(ulid) is not None
-    assert not _unfinished_exists(paths)
-    hdr = store.Index(paths).header(ulid)
-    assert store.fetch_raw(paths, store.Drive(paths), ulid, hdr) == data
+    new = _header_for_stage()
+    folder = store.stage(paths, new, "## user\n新格式\n", b'{"v": 1}')
+    raw = h.agora_of(store.read_entry(folder))["raw"]
+    assert raw["layout"] == "chunks/1" and "file" not in raw
+    assert store.raw_kind(raw) == "chunks"
+    old, _, _ = _put(env, layout=None)
+    store.sync(paths)
+    assert store.raw_kind(h.agora_of(store.Index(paths).header(old))["raw"]) == "legacy"
+
+
+def _header_for_stage() -> dict:
+    ulid = h.new_ulid()
+    return {"type": "Session", "title": "新格式", "tags": [], "id": f"agora:{ulid}", "refs": [],
+            "case": None, "agora": {"header": 2, "created_at": "2026-10-02T00:00:00Z",
+                                    "updated_at": "2026-10-02T00:00:00Z", "relation": "import",
+                                    "parents": [], "source": {"agent": "opencode", "session_id": "s",
+                                                              "created_at": "2026-10-01T00:00:00Z"}}}
 
 
 def _unfinished_exists(paths) -> bool:
@@ -400,12 +417,16 @@ def test_a_segment_with_the_wrong_md5_is_not_installed(env):
 
 
 def test_a_segment_whose_own_md5_is_wrong_is_caught_even_when_the_whole_is_right(env):
-    """The per-segment check is its own line of defence: the manifest md5 of one segment is
-    wrong while the bytes joined (and so the whole md5) would be fine."""
+    """The per-segment check is its own line of defence: one segment's manifest md5 (and the
+    name that carries its prefix) says something the bytes on Drive are not, while the bytes
+    joined - and so the whole md5 - would be fine."""
     paths = store.Paths.from_env()
     ulid, hdr, data = _put(env)
-    hdr["agora"]["raw"]["segments"][1]["md5"] = "f" * 32
-    # the listing the writer left would not agree either, but ensure_raw_file only has the header
+    seg = hdr["agora"]["raw"]["segments"][1]
+    real = env / "agora" / "sessions" / ulid / seg["file"]
+    lie = "f" * 32
+    seg["md5"], seg["file"] = lie, f"seg-0001-0001-{lie[:12]}.part"        # a consistent-looking lie
+    real.rename(real.with_name(seg["file"]))
 
     with pytest.raises(store.StoreError, match="md5"):
         store.ensure_raw_file(paths, store.Drive(paths), ulid, hdr)
@@ -585,15 +606,18 @@ def test_an_outbox_entry_with_a_bad_md5_is_a_broken_entry(tmp_path):
 
 
 _KIND_TABLE = [
-    (None, "none"), ({}, "none"),
+    (None, "none"),
+    ({}, "legacy"), ([], "legacy"), ("", "legacy"), (0, "legacy"), (False, "legacy"),
     (_raw(), "chunks"),
     ({**_raw(), "file": "../../x.json"}, "chunks"),                       # `file` is not consulted
-    ({"md5": "a" * 32, "size": 3, "file": "raw-aaaaaaaaaaaa.json"}, "single"),
-    ({"md5": "a" * 32, "size": 3, "file": "raw-aaaaaaaaaaaa.json", "layout": None}, "single"),
-    ({"md5": "a" * 32, "size": 3}, "legacy"),                             # no file: nothing to read
-    ({"md5": "a" * 32, "size": 3, "file": "raw-bbbbbbbbbbbb.json"}, "legacy"),
-    ({"md5": "a" * 32, "size": 3, "file": "../raw-aaaaaaaaaaaa.json"}, "legacy"),
-    ({"md5": "short", "size": 3, "file": "raw-short.json"}, "legacy"),
+    ({**_raw(), "md5": "nope"}, "legacy"),                                # #169 note 1: corrupt, kept
+    ({**_raw(), "md5": None}, "legacy"),
+    ({**_raw(), "size": 1}, "legacy"),                                    # sizes do not add up
+    ({**_raw(), "segments": []}, "legacy"),
+    # the one-file raw older versions wrote: no `layout`. Not read, not deleted (C.3).
+    ({"md5": "a" * 32, "size": 3, "file": "raw-aaaaaaaaaaaa.json"}, "legacy"),
+    ({"md5": "a" * 32, "size": 3, "file": "raw-aaaaaaaaaaaa.json", "layout": None}, "legacy"),
+    ({"md5": "a" * 32, "size": 3}, "legacy"),
     ("a string", "legacy"), ([1, 2], "legacy"), (7, "legacy"),
 ]
 _NON_STRING_LAYOUTS = [3, True, False, [], {}, ["chunks/1"], 0]
@@ -610,15 +634,6 @@ def test_any_layout_value_that_is_not_chunks_1_is_legacy_even_with_a_matching_fi
     raw = {"md5": "a" * 32, "size": 3, "file": "raw-aaaaaaaaaaaa.json", "layout": layout}
     assert store.raw_kind(raw) == "legacy"
     assert store.raw_complete(raw, {"raw-aaaaaaaaaaaa.json": "a" * 32}) is None
-
-
-@pytest.mark.parametrize("raw,kind", [
-    ({"md5": "a" * 32, "size": 3, "file": "raw-aaaaaaaaaaaa.json"}, "legacy"),
-    ({"md5": "a" * 32, "size": 3, "file": "raw-aaaaaaaaaaaa.json", "layout": None}, "legacy"),
-    (_raw(), "chunks"), (None, "none")])
-def test_raw_kind_after_r3b1_flips_the_constant(monkeypatch, raw, kind):
-    monkeypatch.setattr(store, "_SINGLE_FILE_READABLE", False)
-    assert store.raw_kind(raw) == kind
 
 
 @pytest.mark.parametrize("layout", _NON_STRING_LAYOUTS)
@@ -656,10 +671,9 @@ def _mirror_a_whole_legacy_raw(paths, ulid, data):
     (paths.mirror / ulid / f"raw-{md5(data)[:12]}.json").write_bytes(data)
 
 
-def test_with_the_constant_off_a_legacy_raw_in_the_mirror_is_still_refused(env, monkeypatch):
-    """Blocker 3: once R3b-1 clears the constant, a no-layout session is legacy - also when
-    its whole raw happens to be in the mirror already."""
-    monkeypatch.setattr(store, "_SINGLE_FILE_READABLE", False)
+def test_a_legacy_raw_in_the_mirror_is_still_refused(env):
+    """Blocker 3: a no-layout session is legacy - also when its whole raw happens to be in
+    the mirror already."""
     paths = store.Paths.from_env()
     ulid, hdr, data = _put(env, layout=None)
     _mirror_a_whole_legacy_raw(paths, ulid, data)
@@ -670,8 +684,7 @@ def test_with_the_constant_off_a_legacy_raw_in_the_mirror_is_still_refused(env, 
         store.fetch_raw(paths, store.Drive(paths), ulid, hdr)
 
 
-def test_with_the_constant_off_show_raw_and_pull_refuse_a_legacy_session(env, monkeypatch, capsys):
-    monkeypatch.setattr(store, "_SINGLE_FILE_READABLE", False)
+def test_show_raw_and_pull_refuse_a_legacy_session(env, capsys):
     paths = store.Paths.from_env()
     ulid, hdr, data = _put(env, layout=None)
     _mirror_a_whole_legacy_raw(paths, ulid, data)
@@ -685,56 +698,36 @@ def test_with_the_constant_off_show_raw_and_pull_refuse_a_legacy_session(env, mo
     assert (paths.mirror / ulid / "session.md").is_file(), "pull keeps the reading version"
 
 
-# --- the one-file download (blocker 4) ---------------------------------------------------------
-
-
-def _single_mirror_files(paths, ulid) -> list[str]:
-    folder = paths.mirror / ulid
-    return sorted(p.name for p in folder.iterdir()) if folder.exists() else []
-
-
-def test_a_one_file_raw_with_the_wrong_md5_leaves_nothing_in_the_mirror(env):
-    paths = store.Paths.from_env()
-    ulid, hdr, data = _put(env, layout=None)
-    (env / "agora" / "sessions" / ulid / f"raw-{md5(data)[:12]}.json").write_bytes(b"Z" * len(data))
-
-    with pytest.raises(store.StoreError, match="md5"):
-        store.ensure_raw_file(paths, store.Drive(paths), ulid, hdr)
-
-    assert not [n for n in _single_mirror_files(paths, ulid) if n != "session.md"]
-
-
-def test_a_one_file_raw_with_the_wrong_size_leaves_nothing_in_the_mirror(env):
-    paths = store.Paths.from_env()
-    ulid, hdr, data = _put(env, layout=None)
-    hdr["agora"]["raw"]["size"] = len(data) + 1            # md5 is right, the size claim is not
-
-    with pytest.raises(store.StoreError, match="大小"):
-        store.ensure_raw_file(paths, store.Drive(paths), ulid, hdr)
-
-    assert not [n for n in _single_mirror_files(paths, ulid) if n != "session.md"]
-
-
-def test_a_one_file_download_that_fails_leaves_nothing_in_the_mirror(env, monkeypatch):
-    paths = store.Paths.from_env()
-    ulid, hdr, _ = _put(env, layout=None)
-    monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")
-
-    with pytest.raises(store.StoreError):
-        store.ensure_raw_file(paths, store.Drive(paths), ulid, hdr, retry=False)
-
-    assert not [n for n in _single_mirror_files(paths, ulid) if n != "session.md"]
-
-
-def test_a_good_one_file_raw_is_installed_by_the_temp_file(env):
-    paths = store.Paths.from_env()
-    ulid, hdr, data = _put(env, layout=None)
-    got = store.ensure_raw_file(paths, store.Drive(paths), ulid, hdr)
-    assert got.read_bytes() == data
-    assert not [n for n in _single_mirror_files(paths, ulid) if n.startswith(".")]
-
-
 # --- the non-blocking ones ---------------------------------------------------------------------
+
+
+def test_a_chunked_header_with_a_broken_whole_md5_is_kept_not_dropped(env):
+    """#169 note 1: a `chunks/1` header whose whole `raw.md5` is not 32 hex characters is
+    corrupt, not "still being written": sync keeps the session (legacy) instead of taking
+    its reading version out of the index and the mirror."""
+    paths = store.Paths.from_env()
+    ulid, hdr, _ = _put(env, extra_raw={"md5": "not-a-md5"})
+    index = store.sync(paths)
+    assert index.header(ulid) is not None and (paths.mirror / ulid / "session.md").is_file()
+    assert _unfinished(paths)["sessions"][ulid]["legacy"] is True
+
+
+@pytest.mark.parametrize("empty", [[], "", 0, False, {}])
+def test_an_empty_raw_value_is_kept_and_edit_does_not_drop_it(env, capsys, empty):
+    """#169 note 2: `raw: []` (and the like) is a raw this version does not read - the
+    session stays, and `edit` refuses instead of rewriting it with `raw=None`."""
+    paths = store.Paths.from_env()
+    ulid, hdr, _ = _put(env)
+    hdr["agora"]["raw"] = empty
+    (env / "agora" / "sessions" / ulid / "session.md").write_text(
+        h.dump_document(hdr, "## user\n壞 raw\n"), encoding="utf-8")
+    index = store.sync(paths)
+    assert index.header(ulid) is not None
+    assert _unfinished(paths)["sessions"][ulid]["legacy"] is True
+
+    code, _, err = _run(capsys, "edit", "session", f"agora:{ulid}", "--header", "title=改")
+    assert code != 0 and "舊格式或未知格式" in err
+    assert not (paths.outbox / ulid).exists()
 
 
 def test_a_manifest_without_a_proper_whole_md5_is_not_complete():

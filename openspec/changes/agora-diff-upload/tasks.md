@@ -48,36 +48,36 @@
 
 - [x] 3.1 `store.py`：`raw_layout(raw)`／`raw_segments(raw)`／`raw_complete(raw, files)`；`layout == "chunks/1"` 時檢查 manifest 非空、`sum(size) == raw.size`、每個 `file` 是安全的 basename（不含 `/`、`\`、`..`、不以 `.` 開頭）、`md5` 是 32 位 hex；**沒有 `layout` 或不是 `chunks/1` 時回 `None`（舊格式／未知），不是 `False`**
 - [x] 3.2 `store.raw_name(raw)`：本機整份 raw 的檔名由 `raw.md5` 推得（`raw-<md5[:12]>.json`），取代 `raw["file"]` 的讀取點（`grep` 到 16 行：`cache.py:253`、`:342-343`；`store.py:518`、`:571`、`:594-597`、`:603`、`:613`、`:629`、`:996`、`:1117`、`:1519-1524`、`:1605-1608`）
-- [ ] 3.3 `store.stage`（`:324-399`）：`_stage_raw`（`:291-316`）在同一趟算 manifest（每 C bytes 一個 md5／size）；header 寫 `agora.raw = {md5, size, layout: chunks/1, segments}`；**outbox 只放 `session.md` 與整份 raw，不切段**；上一版 entry 的 raw 照舊帶過來（`:353-365`）；`Path` 來源先試 `os.link`、失敗才複製；整份 md5 沒變（edit）沿用上一版 manifest；`update`／`kind` 不變
+- [x] 3.3 `store.stage`（`:324-399`）：`_stage_raw`（`:291-316`）在同一趟算 manifest（每 C bytes 一個 md5／size）；header 寫 `agora.raw = {md5, size, layout: chunks/1, segments}`；**outbox 只放 `session.md` 與整份 raw，不切段**；上一版 entry 的 raw 照舊帶過來（`:353-365`）；`Path` 來源先試 `os.link`、失敗才複製；整份 md5 沒變（edit）沿用上一版 manifest；`update`／`kind` 不變
 - [ ] 3.4 `store.stage`：接受 `plan`（`append_from`／`seal_upto`）——讀上一版 header（outbox → 鏡像），驗 `prev.raw.md5 == cursor.base_md5` 與 `sum(prev.segments[:-1].size) == append_from`；不符 → full；**swap 成功後**寫 cursor（封存點有變才更新 `sealed_line_count`／`sealed_md5`／`raw_stable`）；**不寫** `.prev-*`
 - [ ] 3.5 `agents/base.py`：`Increment{exported, append_from, seal_upto, cursor}`；`Agent.collect_increment(launch, cursor)`；預設＝`collect()` 包成 `Increment(exported, None, None, None)`
 - [ ] 3.6 `agents/claude.py`：`collect_increment` 讀 cursor；`stable_at(cursor.sealed_line_count) == cursor.raw_stable` 且該位置的前綴 md5 == `cursor.sealed_md5` → `append_from = cursor.raw_stable`；否則 `append_from = None`；`seal_upto = main_end`。cursor `{version: 1, agent_session_id, path, source_size, sealed_line_count, sealed_md5, raw_stable, base_md5, main_line_count, main_md5}`
 - [ ] 3.7 `cli.py`：`_collect_new`（`:1419`）讀 `<state>/cursors/<ULID>.json`；`Increment` 放到 `run` 上；`_save`／`_save_continue` 把 `append_from`／`seal_upto`／cursor 傳給 `stage`；`delete`／`store.forget_local` 清 cursor 與 `state/published`
-- [ ] 3.8 `store.upload_batch`：分段 entry 的 `raws` **不列整份 raw**；比對 manifest 與 listing，把缺的段從 outbox 的整份 raw 按 `size` 切進 batch dir（切出來 md5 不符 → 這一筆不送）；`sessions` 的判斷改成「manifest 的段都在 Drive 或這一輪送出」；整批沒有 `.update` 但有基準段時，先列一次（失敗就這一輪不送）；**升級前留下的舊格式 entry（`layout` 不是 `chunks/1`）→ 不上傳、不發布、留在 outbox 並警告**（C.3、B.6）；**逐筆略過**（同一批的其他 entry 照常送，不是整批中止）；**警告每個 entry 一次**：以 ULID 記在 `state/legacy-warned`（只有 id），記過的不再印；背景的那一行走既有 `notices` 機制（下一個指令說一次）
-- [ ] 3.9 `store.upload_batch`：確認階段加驗每一個段（`files.get(s.file) == s.md5`）；缺段／不符 → 留在 outbox，下一輪補回；`.done` 的第二次比對沿用它（整份 raw 就在 entry 裡，manifest 是它的純函數）
-- [ ] 3.10 `store.upload_batch` 清理（**新規則**）：對每一個這一輪確認成功、離開 outbox 的項目：保留「目前 manifest」＋「`state/published` 記錄的前一版 manifest（只有 md5 等於送出前 Drive 的 `session.md` 時才算）」＋「`ModTime` 在 `AGORA_RAW_ORPHAN_GRACE` 內的所有 `seg-*`」，其餘一次 `delete --files-from`；確認成功後寫新的 `state/published` 記錄（寫失敗只警告）；**拿掉 `_replaced_raws`／`:971-974` 的 `raw-*` 清理**（Drive 上不再有）；失敗只警告、下次再試
-- [ ] 3.11 `store.upload_batch`：batch dir 放這一輪要送的段與 `session.md` 快照；**送出前對 batch dir 裡每個檔案 `os.utime(f, None)`**；一次 `copy --files-from` 送段、再一次送 `session.md`；失敗清掉 batch dir
+- [x] 3.8 `store.upload_batch`：分段 entry 的 `raws` **不列整份 raw**；比對 manifest 與 listing，把缺的段從 outbox 的整份 raw 按 `size` 切進 batch dir（切出來 md5 不符 → 這一筆不送）；`sessions` 的判斷改成「manifest 的段都在 Drive 或這一輪送出」；整批沒有 `.update` 但有基準段時，先列一次（失敗就這一輪不送）；**升級前留下的舊格式 entry（`layout` 不是 `chunks/1`）→ 不上傳、不發布、留在 outbox 並警告**（C.3、B.6）；**逐筆略過**（同一批的其他 entry 照常送，不是整批中止）；**警告每個 entry 一次**：以 ULID 記在 `state/legacy-warned`（只有 id），記過的不再印；背景的那一行走既有 `notices` 機制（下一個指令說一次）
+- [x] 3.9 `store.upload_batch`：確認階段加驗每一個段（`files.get(s.file) == s.md5`）；缺段／不符 → 留在 outbox，下一輪補回；`.done` 的第二次比對沿用它（整份 raw 就在 entry 裡，manifest 是它的純函數）
+- [x] 3.10 `store.upload_batch` 清理（**新規則**）：對每一個這一輪確認成功、離開 outbox 的項目：保留「目前 manifest」＋「`state/published` 記錄的前一版 manifest（只有 md5 等於送出前 Drive 的 `session.md` 時才算）」＋「`ModTime` 在 `AGORA_RAW_ORPHAN_GRACE` 內的所有 `seg-*`」，其餘一次 `delete --files-from`；確認成功後寫新的 `state/published` 記錄（寫失敗只警告）；**拿掉 `_replaced_raws`／`:971-974` 的 `raw-*` 清理**（Drive 上不再有）；失敗只警告、下次再試
+- [x] 3.11 `store.upload_batch`：batch dir 放這一輪要送的段與 `session.md` 快照；**送出前對 batch dir 裡每個檔案 `os.utime(f, None)`**；一次 `copy --files-from` 送段、再一次送 `session.md`；失敗清掉 batch dir
 - [x] 3.12 `store.mirror_one`（`:616-634`）／`store.sync`（`:1431-1543`）：完整性改用 `raw_complete`；`None`（舊／未知）→ **建索引、標成 raw 不可用、不刪鏡像、不刪索引**，`unfinished.json` 記 `legacy: true`；`False` → 照現行「還沒寫完」跳過；`unfinished.json` 升到 `version: 2`，記 `{session_md5, raw_fingerprint}`（manifest 的 `(file, md5)`＋listing 實際 md5 的 canonical JSON 的 md5），v1 檔忽略。**R3a 過渡（同一個 release 內）**：`stage` 還在寫單檔格式，所以沒有 `layout` 但有 `raw.file` 的標頭在 R3b-1 之前仍當作可讀（`store._SINGLE_FILE_READABLE = True`）；未知 `layout` 從現在就是 legacy。R3b-1 把它設成 False 並刪掉單檔分支，之後「沒有 `layout`」才依本節當舊格式
 - [x] 3.13 `store.ensure_raw_file(paths, drive, ulid, header) -> Path`：鏡像已有整份且 md5 對 → 直接回；`layout != "chunks/1"` → `StoreError`（舊／未知，raw 不可用）；否則一次 `copy --files-from` 下載缺少的段到 `<cache>/segments/<ULID>/`，逐段驗 md5，依序串接、驗整份 md5／size，原子寫入鏡像、刪暫存段與其他舊 `raw-<md5>`；**段 404 → 重抓一次 `session.md`，保留仍在新 manifest 的暫存段，只補缺的**；`store.fetch_raw`（`:1600-1619`）改用它再讀 bytes
 - [x] 3.14 `cli.cmd_show --raw`（`:2584-2586`）：整份存在時用 `shutil.copyfileobj` 串流到 `sys.stdout.buffer`
 - [x] 3.15 `cli.cmd_edit`（`:2555`）／`cmd_continue`：`layout != "chunks/1"` 的 Session 在抓 raw 之前就給明確錯誤（「raw 是舊格式或未知格式，這個版本不讀它；要重新匯入用 `agora import … --as-new`」），不要走 `fetch_raw` 的半套
 - [ ] 3.16 `cli._import_one`（`:514-570`）：claude 用 `collect_increment(launch=None, cursor=None)`（或等價的串流 `export`＋manifest），讓第一次匯入就是分段；`raw_src` 用 `raw_file`（`:529` 已經是）；fork（`cli.py:2049`）／merge（`cli.py:751`）維持 bytes／整份
-- [ ] 3.17 `store.push_mirror`／`cache._push_mirrored`（`cache.py:328-344`）：分段版從鏡像的整份 raw 按 manifest 切出缺少的段、**用 batch dir＋一次 `copy --files-from`** 上傳、驗證（`session.md`＋每一段）；`--not-exist-upload` 也走這條（不然 revive 一個 814 MB 的 session 是 195 次 `copyto`）
-- [ ] 3.18 `store._rescue_deleted`（`:978-1044`）：另存的 Y 也走分段（同一個 `stage`）；raw 以**檔案路徑**交給 `stage`（`:325` 接受 `Path`），不要 `read_bytes()`（`:997`）
-- [ ] 3.19 `_upload_checked`（`:584-605`）／`push_outbox`：分段版送完段與 `session.md` 後驗 `session.md` ＋每一段的 md5
-- [ ] 3.20 `tests/fakes/fake_rclone.py`：記錄每次 `copy --files-from` 的來源檔名與大小；支援「只讓某個段失敗」「上傳後立刻 listing 看不到某個段」「`ModTime` 可控」；**`copy` 要保留來源 mtime（`shutil.copy2` 或 `os.utime`；現在是 `shutil.copyfile`，`:163`、`:173`）並在 `lsjson` 回 `ModTime`**（資料夾 `ID` 的 fake 在 R2 的 2.4）
+- [x] 3.17 `store.push_mirror`／`cache._push_mirrored`（`cache.py:328-344`）：分段版從鏡像的整份 raw 按 manifest 切出缺少的段、**用 batch dir＋一次 `copy --files-from`** 上傳、驗證（`session.md`＋每一段）；`--not-exist-upload` 也走這條（不然 revive 一個 814 MB 的 session 是 195 次 `copyto`）
+- [x] 3.18 `store._rescue_deleted`（`:978-1044`）：另存的 Y 也走分段（同一個 `stage`）；raw 以**檔案路徑**交給 `stage`（`:325` 接受 `Path`），不要 `read_bytes()`（`:997`）
+- [x] 3.19 `_upload_checked`（`:584-605`）／`push_outbox`：分段版送完段與 `session.md` 後驗 `session.md` ＋每一段的 md5
+- [x] 3.20 `tests/fakes/fake_rclone.py`：記錄每次 `copy --files-from` 的來源檔名與大小；支援「只讓某個段失敗」「上傳後立刻 listing 看不到某個段」「`ModTime` 可控」；**`copy` 要保留來源 mtime（`shutil.copy2` 或 `os.utime`；現在是 `shutil.copyfile`，`:163`、`:173`）並在 `lsjson` 回 `ModTime`**（資料夾 `ID` 的 fake 在 R2 的 2.4）
 - [ ] 3.21 測試：814 MB（或小 `CHUNK` 的等效）多輪——第 2 輪起只送新段＋tail；`calls.log` 的 bytes 與次數符合 `C+I+S`；Drive 上的段接起來等於整份；第一次切段是約 195 個檔、不是一個巨段；一路 append 的段數符合 `ceil(size/C)`～`2·ceil(size/C)`；**小 session 是一個段**
-- [ ] 3.22 測試：崩潰點（`after-manifest`／`after-segment-cut`／`after-segment-upload`／`after-session-upload`／`after-confirm`／`before-cleanup`／`after-cleanup`）——每個點之後舊版仍完整、下一輪收斂、I1–I5 成立
+- [x] 3.22 測試：崩潰點（`after-manifest`／`after-segment-cut`／`after-segment-upload`／`after-session-upload`／`after-confirm`／`before-cleanup`／`after-cleanup`）——每個點之後舊版仍完整、下一輪收斂、I1–I5 成立
 - [ ] 3.23 測試：跨機器——A 寫、B sync＋append、A 再寫並清掉 B 的基準 → B 下一輪補回缺的段；**別台換 tail／`gen+1` 不得觸發 purge 或 `_rescue_deleted`**；**複製期間被 purge → 確認時 ID 不同 → purge＋另存 Y，Drive 上沒有 X**；**只剩孤兒段 → 下一輪 rescue、不復活**；`edit` 只換 header 不重傳段；`push --not-exist-upload` 重建段
 - [x] 3.24 測試：舊格式——手工造沒有 `layout` 的 `session.md`＋`raw-*.json` → sync 建索引、`show` 可讀、`show --raw` 明確錯誤、鏡像與索引都還在、`unfinished.json` 記 `legacy`、下一次 sync 不再下載；未知 `layout`（`chunks/9`）同一個行為
-- [ ] 3.25 測試：清理新規則——別台剛傳的段（寬限期內）不被刪；**前一版 manifest 是 `state/published` 的記錄、md5 對得上**才保護（離線連 stage 三代）；記錄對不上時只剩寬限期；孤兒段超過寬限期才被刪；清理在確認前不跑
+- [x] 3.25 測試：清理新規則——別台剛傳的段（寬限期內）不被刪；**前一版 manifest 是 `state/published` 的記錄、md5 對得上**才保護（離線連 stage 三代）；記錄對不上時只剩寬限期；孤兒段超過寬限期才被刪；清理在確認前不跑
 - [x] 3.26 測試：`ensure_raw_file` 的失敗路徑（段 404 → 重抓 header 且已驗段不重抓；md5 不符 → 不留檔；size 不符 → 不留檔；網路錯 → `StoreError`）
 - [ ] 3.27 改壞驗證：設計 I.2 的 1–19 與 27（第 20 條屬 R1；21–26、28–29 屬 R4）——各要紅
 - [x] 3.28 實作環境變數：`AGORA_RAW_CHUNK`（bytes，預設 4194304；測試 4096）、`AGORA_RAW_ORPHAN_GRACE`（秒，預設 3600）；解析失敗 → 明確錯誤，不靜默回預設；**沒有** `AGORA_RAW_LAYOUT`／`AGORA_RAW_SEGMENT_MIN`
 - [ ] 3.29 量測：`tests/perf/measure_continue_mem.py` 或新的小腳本，記上傳 bytes／rclone 次數／輪耗時／子行程峰值；和 `docs/perf.md` 的現值對照；另記 listing 的總量（N 個長 session）
 - [ ] 3.30 跑整套 `uv run pytest -q tests/unit`＋`openspec validate agora-diff-upload --strict`；`test_mem_golden` 的 `GOLDEN_MD5_SESSION_MD` 已依 0.2 簽核重算
 
-- [ ] 3.31 測試：**升級前留在 outbox 的舊格式 entry**（沒有 `layout`、有舊 `raw.file`）→ 上傳器不發布、留在 outbox、Drive 不變；**同一批的另一筆正常 entry 照常上傳**（逐筆略過）；**警告只印一次**（同一輪再跑、或下一輪都不再印；`state/legacy-warned` 只有 id）；`delete` 那個 Session 之後本機 entry（含 `.done-`）消失
+- [x] 3.31 測試：**升級前留在 outbox 的舊格式 entry**（沒有 `layout`、有舊 `raw.file`）→ 上傳器不發布、留在 outbox、Drive 不變；**同一批的另一筆正常 entry 照常上傳**（逐筆略過）；**警告只印一次**（同一輪再跑、或下一輪都不再印；`state/legacy-warned` 只有 id）；`delete` 那個 Session 之後本機 entry（含 `.done-`）消失
 
 ## 4. R4：搬遷、盤點、必保清單、文件、量測（PR 4；d；依 R1、R3；**K.1 已過**）
 

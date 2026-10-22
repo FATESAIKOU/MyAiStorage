@@ -216,10 +216,12 @@ def same_as_local(paths, ulid: str, title_of=None) -> None:
     assert remote.get("session.md") == store.md5_file(local / "session.md"), \
         f"{ulid} 的 session.md 和本機的不一樣"
     hdr, _body = h.split_document((local / "session.md").read_text(encoding="utf-8"))
-    raw = (h.agora_of(hdr).get("raw") or {})
-    if raw.get("file"):
-        assert (local / raw["file"]).is_file(), "本機沒有那個原始檔"
-        assert remote.get(raw["file"]) == raw["md5"], f"{ulid} 的原始檔和本機的不一樣"
+    raw = h.agora_of(hdr).get("raw")
+    if raw:
+        assert (local / store.raw_name(raw)).is_file(), "本機沒有那個原始檔"      # the mirror keeps the whole raw
+        for seg in raw["segments"]:                                              # Drive has the segments
+            assert remote.get(seg["file"]) == seg["md5"], \
+                f"{ulid} 的段 {seg['file']} 和本機的清單不一樣"
     if title_of:
         assert hdr.get("title") == title_of, f"{ulid} 的標題是 {hdr.get('title')!r}"
 

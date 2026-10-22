@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
 import errno
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -96,7 +97,7 @@ def test_the_mirror_keeps_the_whole_session(env):
     """2.1: session.md and the raw, so another machine's delete can be undone."""
     paths = store.Paths.from_env()
     ulid = _stage(paths)
-    raw = (h.agora_of(store.read_entry(paths.outbox / ulid)).get("raw") or {})["file"]
+    raw = store.raw_name(h.agora_of(store.read_entry(paths.outbox / ulid)).get("raw"))
     assert (paths.mirror / ulid / "session.md").is_file()
     assert (paths.mirror / ulid / raw).is_file()
 
@@ -104,19 +105,19 @@ def test_the_mirror_keeps_the_whole_session(env):
     hdr = store.read_entry(paths.outbox / ulid)
     store.stage(paths, hdr, "## user\n第二版\n", b'{"v": 2}')
     store.remember(paths, paths.outbox / ulid)
-    new_raw = (h.agora_of(store.read_entry(paths.outbox / ulid)).get("raw") or {})["file"]
+    new_raw = store.raw_name(h.agora_of(store.read_entry(paths.outbox / ulid)).get("raw"))
     assert new_raw != raw
     assert [p.name for p in (paths.mirror / ulid).glob("raw-*")] == [new_raw]
 
 
 def test_three_sessions_go_up_in_a_few_rclone_calls(env, monkeypatch):
-    """M4: a fixed number of calls whatever the count, raws before session.md."""
+    """M4: a fixed number of calls whatever the count, segments before session.md."""
     paths = store.Paths.from_env()
     batches = _record_batches(monkeypatch)
     ulids = [_stage(paths, f"第 {i} 個") for i in range(3)]
     assert store.upload_batch(store.Drive(paths), paths) == []
 
-    raws = [b for b in batches if any("/raw-" in n for n in b[1])]
+    raws = [b for b in batches if any("/seg-" in n for n in b[1])]
     sessions = [b for b in batches if any(n.endswith("/session.md") for n in b[1])]
     assert batches.index(raws[0]) < batches.index(sessions[0]), batches
     assert len(_uploads(env)) <= 4, _uploads(env)
@@ -296,8 +297,8 @@ def test_a_failed_raw_upload_sends_no_session_md_at_all(env, monkeypatch, capsys
     def raws_only(drive, paths_, names, **kw):
         # Only the raws call fails. The session.md call must still be reachable, or
         # this test cannot tell "stopped after the raws" from "everything failed".
-        if any("/raw-" in n for n in names):
-            raise store.StoreError("原始檔傳不上去")
+        if any("/seg-" in n for n in names):
+            raise store.StoreError("段傳不上去")
         return real_copy(drive, paths_, names, **kw)
 
     monkeypatch.setattr(store, "_copy_batch", raws_only)
@@ -397,7 +398,7 @@ def test_an_edit_that_only_changes_the_header_is_not_reported_as_sent(env, monke
     paths = store.Paths.from_env()
     ulid = _stage(paths, "第一版")
     hdr = store.read_entry(paths.outbox / ulid)
-    raw = (paths.outbox / ulid / h.agora_of(hdr)["raw"]["file"]).read_bytes()
+    raw = (paths.outbox / ulid / store.raw_name(h.agora_of(hdr)["raw"])).read_bytes()
     real = store._listing_with_md5
 
     def listing(drive):
@@ -801,7 +802,7 @@ def test_a_set_aside_version_that_cannot_be_put_back_is_kept(env, monkeypatch):
 
 
 def _entry_raw(paths, ulid: str) -> str:
-    return h.agora_of(store.read_entry(paths.outbox / ulid))["raw"]["file"]
+    return store.raw_name(h.agora_of(store.read_entry(paths.outbox / ulid))["raw"])
 
 
 def test_an_entry_staged_round_after_round_keeps_at_most_two_raws(env):
@@ -821,9 +822,10 @@ def test_an_entry_staged_round_after_round_keeps_at_most_two_raws(env):
     assert store._is_update(folder), "the marker still goes in with the swap"
 
 
-def test_a_pass_sends_only_the_raw_the_entry_names(env, monkeypatch):
-    """N1: the carried-over raw is for a list built before the swap - it is not sent
-    again, and Drive ends with the one raw session.md points at."""
+def test_a_pass_sends_only_the_segments_the_entry_names(env, monkeypatch):
+    """N1: the carried-over whole raw is for a list built before the swap - it is never
+    sent (Drive has no whole raw any more), and the batch carries the segments of the
+    manifest session.md names, nothing else."""
     paths = store.Paths.from_env()
     hdr = _header()
     store.stage(paths, hdr, "## user\n第一版\n", b'{"v": 1}')
@@ -835,10 +837,14 @@ def test_a_pass_sends_only_the_raw_the_entry_names(env, monkeypatch):
 
     assert store.upload_batch(store.Drive(paths), paths) == []
 
-    raws = [names for cmd, names in batches if cmd == "copy" and any("/raw-" in n for n in names)]
-    assert raws == [[f"{ulid}/{named}"]], batches
+    hdr = store.Index(paths).header(ulid) or h.split_document(
+        (env / "agora" / "sessions" / ulid / "session.md").read_text(encoding="utf-8"))[0]
+    manifest = [seg["file"] for seg in h.agora_of(hdr)["raw"]["segments"]]
+    sent = [names for cmd, names in batches if cmd == "copy" and any("/seg-" in n for n in names)]
+    assert sent == [[f"{ulid}/{name}" for name in manifest]], batches
+    assert not any("/raw-" in n for _, names in batches for n in names), "no whole raw goes up"
     on_drive = sorted(p.name for p in (env / "agora" / "sessions" / ulid).iterdir())
-    assert on_drive == sorted([named, "session.md"])
+    assert on_drive == sorted([*manifest, "session.md"])
 
 
 def test_a_stage_between_the_list_and_the_raw_copy_does_not_stop_the_batch(env, monkeypatch):
@@ -853,7 +859,7 @@ def test_a_stage_between_the_list_and_the_raw_copy_does_not_stop_the_batch(env, 
     staged = {"done": False}
 
     def stage_then_copy(drive, paths_, names, **kw):
-        if not staged["done"] and any("/raw-" in n for n in names):
+        if not staged["done"] and any("/seg-" in n for n in names):
             staged["done"] = True
             store.stage(paths_, hdr, "## user\n第二版\n", b'{"v": 2}')   # the next round
         return real_copy(drive, paths_, names, **kw)
@@ -864,16 +870,15 @@ def test_a_stage_between_the_list_and_the_raw_copy_does_not_stop_the_batch(env, 
     left = store.upload_batch(store.Drive(paths), paths, warn=said.append)
 
     assert staged["done"]
-    assert not any("原始檔沒傳好" in s for s in said), said
-    assert (env / "agora" / "sessions" / folder.name / first_raw).is_file()
+    assert not any("段沒傳好" in s for s in said), said
+    assert _drive_has_segments_of(env, folder.name, "第一版"), "the version this round read went up whole"
     # the version this round read is not the one in the folder any more, so it stays
     # until a round confirms what it read
     assert left == [folder.name]
     assert store.upload_batch(store.Drive(paths), paths) == []
     doc = (env / "agora" / "sessions" / folder.name / "session.md").read_text(encoding="utf-8")
     assert "第二版" in doc
-    raw = h.agora_of(h.split_document(doc)[0])["raw"]["file"]
-    assert (env / "agora" / "sessions" / folder.name / raw).is_file()
+    _drive_sessions_consistent(env)
 
 
 def _rescue_child(paths, ulid: str, title: str = "已另存的那份") -> str:
@@ -915,16 +920,20 @@ def test_an_uploader_that_finds_an_adopted_rescue_mints_nothing(env):
         f"沿用也要留一句話在 log，不然下次查不到這筆去哪了：{said}"
 
 
-def test_replaced_remote_raws_are_deleted_even_when_the_entry_still_holds_them(env, monkeypatch):
-    """T2 / R8: the entry still holds the previous raw (for lists built before the
-    swap), but Drive must end with only what the session points at - a raw Drive
-    already has is still replaced once a newer version goes up."""
+def test_obsolete_segments_are_cleaned_even_when_the_entry_still_holds_the_old_raw(env, monkeypatch):
+    """T2 / R8, under the new cleanup rule (design B.5.5): the entry still holds the previous
+    whole raw (for lists built before the swap), but once the grace period is over Drive
+    ends with only what the session points at. The clock is pinned two hours ahead, so
+    every segment on Drive is older than the one-hour grace and nothing is protected by
+    its age: only the manifest (and a record that matches Drive) is kept."""
+    import time
+    monkeypatch.setenv("AGORA_NOW", str(time.time() + 7200))
     paths = store.Paths.from_env()
     ulid = _stage(paths, "第一版")
     assert store.upload_batch(store.Drive(paths), paths) == []
     hdr = store.Index(paths).header(ulid)
-    first_raw = (h.agora_of(hdr).get("raw") or {})["file"]
-    assert (env / "agora" / "sessions" / ulid / first_raw).is_file()
+    first_segment = h.agora_of(hdr)["raw"]["segments"][0]["file"]
+    assert (env / "agora" / "sessions" / ulid / first_segment).is_file()
 
     store.stage(paths, _kept_header(ulid, "第二版"), "## user\n第二版\n", b'{"v": 2}',
                 update=True, kind="continue")
@@ -935,7 +944,7 @@ def test_replaced_remote_raws_are_deleted_even_when_the_entry_still_holds_them(e
         if not swapped["done"]:
             swapped["done"] = True
             # the next version lands while this round's copies are in flight: the
-            # round sends v2's raw and v2's session.md (its own snapshot, #130), v3
+            # round sends v2's segments and v2's session.md (its own snapshot, #130), v3
             # stays waiting, and the entry keeps v2's raw for lists built before the
             # swap
             store.stage(paths_, _kept_header(ulid, "第三版"), "## user\n第三版\n", b'{"v": 3}',
@@ -954,9 +963,10 @@ def test_replaced_remote_raws_are_deleted_even_when_the_entry_still_holds_them(e
 
     assert store.upload_batch(store.Drive(paths), paths) == []
 
+    final, _ = h.split_document((env / "agora" / "sessions" / ulid / "session.md").read_text(encoding="utf-8"))
+    current = [seg["file"] for seg in h.agora_of(final)["raw"]["segments"]]
     on_drive = sorted(p.name for p in (env / "agora" / "sessions" / ulid).iterdir())
-    assert on_drive == sorted([named, "session.md"]), on_drive
-
+    assert on_drive == sorted([*current, "session.md"]), on_drive
 
 def test_an_update_round_decides_from_a_late_listing(env, monkeypatch):
     """The round's decision about updates comes from listings, and the last word is
@@ -1005,7 +1015,7 @@ def test_an_update_deleted_under_the_copies_is_taken_down_again(env, monkeypatch
     store.mark_update(folder)
     drive = store.Drive(paths)
     trigger = env.parent / "purge-after.json"
-    trigger.write_text(json.dumps({"after": "raw-", "purge": f"sessions/{ulid}"}),
+    trigger.write_text(json.dumps({"after": "seg-", "purge": f"sessions/{ulid}"}),
                        encoding="utf-8")
     monkeypatch.setenv("FAKE_RCLONE_PURGE_AFTER", str(trigger))
     said: list[str] = []
@@ -1104,18 +1114,28 @@ def test_an_update_deleted_between_the_listing_and_the_copy_is_rescued_not_sent(
 # --- #130: the two copies must describe the same version --------------------------
 
 
+def _drive_has_segments_of(remote: Path, ulid: str, word: str) -> bool:
+    """The session.md on Drive mentions `word` and every segment it names is there."""
+    folder = remote / "agora" / "sessions" / ulid
+    text = (folder / "session.md").read_text(encoding="utf-8")
+    hdr, _ = h.split_document(text)
+    return word in text and all((folder / seg["file"]).is_file()
+                                for seg in h.agora_of(hdr)["raw"]["segments"])
+
+
 def _drive_sessions_consistent(remote: Path) -> None:
-    """Every session.md on the fake Drive names a raw that is in its own folder (#130)."""
+    """Every session.md on the fake Drive names segments that are in its own folder (#130)."""
     sessions = remote / "agora" / "sessions"
     if not sessions.is_dir():
         return
     for folder in sorted(p for p in sessions.iterdir() if p.is_dir()):
         text = (folder / "session.md").read_text(encoding="utf-8")
         hdr, _ = h.split_document(text)
-        name = (h.agora_of(hdr).get("raw") or {}).get("file")
-        if name:
-            assert (folder / name).is_file(), \
-                f"{folder.name} 的 session.md 指名 {name}，但 Drive 上沒有"
+        raw = h.agora_of(hdr).get("raw")
+        for seg in (raw or {}).get("segments", []):
+            assert (folder / seg["file"]).is_file(), \
+                f"{folder.name} 的 session.md 指名 {seg['file']}，但 Drive 上沒有"
+            assert store.md5_file(folder / seg["file"]) == seg["md5"]
 
 
 def _swap_after_the_raws(monkeypatch, paths, ulid: str) -> dict:
@@ -1125,7 +1145,7 @@ def _swap_after_the_raws(monkeypatch, paths, ulid: str) -> dict:
 
     def copy(drive, paths_, names, **kw):
         got = real_copy(drive, paths_, names, **kw)
-        if not done["swapped"] and any("/raw-" in n for n in names):
+        if not done["swapped"] and any("/seg-" in n for n in names):
             done["swapped"] = True
             hdr = store.read_entry(paths.outbox / ulid)
             store.stage(paths_, hdr, "## user\n第二版\n", b'{"v": 2}')
@@ -1157,7 +1177,7 @@ def test_a_version_staged_between_the_copies_never_points_at_a_missing_raw(env, 
     text = (env / "agora" / "sessions" / ulid / "session.md").read_text(encoding="utf-8")
     hdr, _ = h.split_document(text)
     assert "第一版" in text
-    assert (env / "agora" / "sessions" / ulid / h.agora_of(hdr)["raw"]["file"]).is_file()
+    assert _drive_has_segments_of(env, ulid, "第一版")
     assert any(f"{ulid} 上傳期間又有新版本" in s for s in said), said
 
 
@@ -1175,9 +1195,9 @@ def test_the_round_after_the_swap_sends_the_new_version(env, monkeypatch):
     text = (env / "agora" / "sessions" / ulid / "session.md").read_text(encoding="utf-8")
     hdr, _ = h.split_document(text)
     assert "第二版" in text
-    name = h.agora_of(hdr)["raw"]["file"]
-    assert store.md5_file(env / "agora" / "sessions" / ulid / name) == \
-        h.agora_of(hdr)["raw"]["md5"]
+    folder = env / "agora" / "sessions" / ulid
+    joined = b"".join((folder / seg["file"]).read_bytes() for seg in h.agora_of(hdr)["raw"]["segments"])
+    assert hashlib.md5(joined).hexdigest() == h.agora_of(hdr)["raw"]["md5"]
 
 
 def test_an_unconfirmed_version_says_why_it_stays(env, monkeypatch):
@@ -1295,12 +1315,13 @@ def _two_stages_before_the_raws(monkeypatch, paths, ulid: str) -> dict:
     return done
 
 
-def test_two_stages_before_the_raws_copy_send_nothing_at_all(env, monkeypatch):
-    """W2: v1's session.md must not go up on its own. It names v1's raw, which the
-    second stage dropped and this round therefore never sent; Drive would have a
-    session.md pointing at a file nobody has. Nothing goes up, the entry waits, and the
-    next round sends v3 whole. Removing the `sessions` filter turns this red - the
-    first round then sends v1's session.md and leaves Drive inconsistent."""
+def test_two_stages_before_the_segments_are_cut_send_nothing_at_all(env, monkeypatch):
+    """W2: v1's session.md must not go up on its own. The second stage dropped v1's whole
+    raw (the first kept it for a list built a moment ago; the second takes v2's and leaves
+    v1's behind), so this round cannot cut v1's segments - and a session.md whose segments
+    are not on Drive is exactly what must never be published. The cut fails, the entry
+    says so and waits, nothing goes up, and the next round sends v3 whole. Sending
+    session.md without checking that its segments are in the batch turns this red."""
     paths = store.Paths.from_env()
     ulid = _stage(paths, "第一版")
     done = _two_stages_before_the_raws(monkeypatch, paths, ulid)
@@ -1312,6 +1333,7 @@ def test_two_stages_before_the_raws_copy_send_nothing_at_all(env, monkeypatch):
     sessions = env / "agora" / "sessions"
     assert not (sessions / ulid / "session.md").exists(), "v1's session.md went up alone"
     assert ulid in store.outbox_ulids(paths)
+    assert any(f"{ulid} 切段失敗" in s for s in said), said
     assert "第三版" in (paths.outbox / ulid / "session.md").read_text(encoding="utf-8")
     _drive_sessions_consistent(env)
 
@@ -1320,11 +1342,7 @@ def test_two_stages_before_the_raws_copy_send_nothing_at_all(env, monkeypatch):
     assert ulid not in store.outbox_ulids(paths)
     text = (sessions / ulid / "session.md").read_text(encoding="utf-8")
     assert "第三版" in text
-    hdr, _ = h.split_document(text)
-    name = h.agora_of(hdr)["raw"]["file"]
-    assert (sessions / ulid / name).is_file()
-    assert store.md5_file(sessions / ulid / name) == h.agora_of(hdr)["raw"]["md5"]
-
+    assert _drive_has_segments_of(env, ulid, "第三版")
 
 def test_a_batch_snapshot_left_by_a_dead_run_is_cleared(env):
     """N1: a run killed before its cleanup leaves <state>/batch-<pid> - copies of
@@ -1359,9 +1377,9 @@ def test_a_batch_snapshot_left_by_a_dead_run_is_cleared(env):
 
 def test_a_snapshot_that_cannot_be_written_leaves_every_entry_for_the_next_round(
         env, monkeypatch):
-    """N2: a full disk while writing the snapshot is a failed round, not a crash - like
-    every other send failure: say it, keep the entries, no batch-* left, and no
-    session.md this round (the raws that already went up are harmless on their own)."""
+    """N2: a full disk while writing the batch dir is a failed round, not a crash - like
+    every other send failure: say it, keep the entries, no batch-* left, and nothing sent
+    this round."""
     paths = store.Paths.from_env()
     ulid = _stage(paths, "第一版")
     real_write = store._write_file
@@ -1378,7 +1396,7 @@ def test_a_snapshot_that_cannot_be_written_leaves_every_entry_for_the_next_round
     assert ulid in store.outbox_ulids(paths)
     assert not list(paths.state.glob("batch-*"))
     assert not (env / "agora" / "sessions" / ulid / "session.md").exists()
-    assert any("快照寫不進 state" in s for s in said), said
+    assert any("批次暫存寫不進 state" in s for s in said), said
 
 
 def test_an_entry_that_cannot_be_moved_aside_says_what_we_know(env, monkeypatch):
@@ -1402,9 +1420,11 @@ def test_an_entry_that_cannot_be_moved_aside_says_what_we_know(env, monkeypatch)
     assert (env / "agora" / "sessions" / ulid / "session.md").is_file()
 
 
-def test_a_round_with_no_sessions_folder_says_that_is_why(env, monkeypatch):
-    """N3: the very first session has no sessions/ on Drive to land in, and when that
-    is why nothing was sent the entry must not just sit there without a reason."""
+def test_a_round_that_sends_nothing_says_why_even_with_no_sessions_folder(env, monkeypatch):
+    """N3: the very first session has no sessions/ on Drive to land in, and when nothing
+    was sent the entry must not just sit there without a reason. (Since the batch dir is
+    cut before anything is copied, the race that used to leave an entry unsent silently now
+    ends in an explicit "切段失敗" for that entry.)"""
     paths = store.Paths.from_env()
     ulid = _stage(paths, "第一版")
     _two_stages_before_the_raws(monkeypatch, paths, ulid)
@@ -1412,12 +1432,11 @@ def test_a_round_with_no_sessions_folder_says_that_is_why(env, monkeypatch):
 
     assert store.upload_batch(store.Drive(paths), paths, warn=said.append) == [ulid]
     assert not (env / "agora" / "sessions").exists()
-    assert said == [f"Drive 上還沒有 sessions/，{ulid} 留在 outbox"], said
+    assert len(said) == 1 and said[0].startswith(f"{ulid} 切段失敗"), said
 
     after: list[str] = []
     assert store.upload_batch(store.Drive(paths), paths, warn=after.append) == []
-    assert not any("還沒有 sessions/" in s for s in after), after
-
+    assert not any("切段失敗" in s for s in after), after
 
 def test_a_crlf_session_md_still_parses_like_it_did_with_read_text(env):
     """#130 fix: `read_entry` moved from text mode to bytes; a CRLF header still has to parse."""
@@ -1426,7 +1445,7 @@ def test_a_crlf_session_md_still_parses_like_it_did_with_read_text(env):
     path = folder / "session.md"
     path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
     hdr = store.read_entry(folder)
-    assert h.agora_of(hdr)["raw"]["file"], "the header parsed and names its raw"
+    assert store.raw_name(h.agora_of(hdr)["raw"]), "the header parsed and names its raw"
 
 
 # --- #152: a listing that lost a folder is not proof that it is gone ----------------
@@ -1619,7 +1638,7 @@ def test_a_directed_look_that_says_rc3_is_a_deletion(env, monkeypatch):
 
 
 def _raws_on_drive(env, ulid: str) -> list[str]:
-    return sorted(p.name for p in (env / "agora" / "sessions" / ulid).glob("raw-*"))
+    return sorted(p.name for p in (env / "agora" / "sessions" / ulid).glob("seg-*"))
 
 
 def _update_with_old_raw(env, paths, title="改過了"):
@@ -1640,7 +1659,7 @@ def _purge_after_raws(env, ulid):
     """Another machine purges the folder right after this round's raws copy; the
     session.md copy then re-creates it - a new folder ID, holding only our file."""
     trigger = env.parent / "purge-after.json"
-    trigger.write_text(json.dumps({"after": "raw-", "purge": f"sessions/{ulid}"}),
+    trigger.write_text(json.dumps({"after": "seg-", "purge": f"sessions/{ulid}"}),
                        encoding="utf-8")
     return trigger
 
@@ -1677,7 +1696,7 @@ def test_another_machines_cleanup_during_the_copies_is_not_a_deletion(env, monke
     ulid, old_raw = _update_with_old_raw(env, paths)
     trigger = env.parent / "clean-after.json"
     trigger.write_text(json.dumps({
-        "after": "raw-",                       # after this round's raws copy
+        "after": "seg-",                       # after this round's segments copy
         "folder": f"sessions/{ulid}",
         "remove": [old_raw],
         "add": {"raw-Z.json": '{"other": 1}'},

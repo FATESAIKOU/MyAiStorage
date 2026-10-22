@@ -318,9 +318,10 @@ def _lost_in_cloud(paths: store.Paths, agora_id: str) -> bool:
     return remote is not None and ulid not in remote
 
 
-def _cloud_lost(agora_id: str) -> str:
+def _cloud_lost(agora_id: str, index: "store.Index | None" = None) -> str:
     """The one place the two ways out of a deleted session are worded (review L2)."""
-    return store.cloud_lost(agora_id)
+    header = index.header(_ulid_of(agora_id)) if index is not None else None
+    return store.cloud_lost(agora_id, header)
 
 
 def _refuse_if_gone(paths: store.Paths, index: store.Index, agora_id: str) -> None:
@@ -332,7 +333,7 @@ def _refuse_if_gone(paths: store.Paths, index: store.Index, agora_id: str) -> No
     """
     _need_in_cloud(index, agora_id)
     if _lost_in_cloud(paths, agora_id):
-        raise InputError(_cloud_lost(agora_id))
+        raise InputError(_cloud_lost(agora_id, index))
 
 
 def _need_in_cloud(index: store.Index, agora_id: str) -> None:
@@ -344,7 +345,7 @@ def _need_in_cloud(index: store.Index, agora_id: str) -> None:
     """
     if index.cloud_has(_ulid_of(agora_id)):
         return
-    raise InputError(_cloud_lost(agora_id))
+    raise InputError(_cloud_lost(agora_id, index))
 
 
 def _body_for(paths: store.Paths, agora_id: str) -> str:
@@ -2590,9 +2591,7 @@ def cmd_show(args, paths: store.Paths) -> int:
     index = _sync_for(paths, [agora_id])
     hdr = _header_for(index, agora_id)
     if not index.cloud_has(_ulid_of(agora_id)):
-        print(f"[agora] {agora_id} 雲端沒有（別台機器刪掉了）；"
-              f"agora push session {agora_id} --not-exist-upload 傳回去，"
-              f"agora pull session {agora_id} --not-exist-delete 刪掉本機這份", file=sys.stderr)
+        print(f"[agora] {_cloud_lost(agora_id, index)}", file=sys.stderr)
     if args.raw:
         _refuse_unreadable_raw(hdr)
         if not h.agora_of(hdr).get("raw"):

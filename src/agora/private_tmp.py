@@ -21,7 +21,7 @@ included - so a sweep that can take the lock knows the owner is gone. The pid
 in the name is for a person reading the directory, not for the decision:
 pids are reused, and several `agora continue` runs export at the same time, so
 "this pid is not alive" alone would eventually delete somebody's live directory
-(the same reason `store._write_batch_snapshot` cannot copy its "delete every
+(the same reason `store._build_batch` cannot copy its "delete every
 `batch-*`" trick here - that one has `upload.lock` to guarantee a single writer).
 
 Two more races are closed by `<state>/tmp/.create.lock`:

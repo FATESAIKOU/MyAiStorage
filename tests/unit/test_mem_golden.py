@@ -53,7 +53,10 @@ STAMP = "2026-10-19T09:00:00.000Z"
 # only with the owner's sign-off.
 GOLDEN_MD5_EXPORTED_RAW = "d245594ea2e89f733749fa1dc4252622"
 GOLDEN_MD5_OUTBOX_RAW = "d245594ea2e89f733749fa1dc4252622"
-GOLDEN_MD5_SESSION_MD = "992991ad88bc5af3a844d5bcc0354c49"
+# Only the session.md constant moved, with the owner's sign-off (design L2, #109 R3b-1): the
+# header's `raw` block now carries `layout: chunks/1` and the segment manifest instead of
+# `file`. The two raw md5s above are the old ones, untouched.
+GOLDEN_MD5_SESSION_MD = "8f673efd2e8002117ff4886e91197c05"
 
 
 def _line(o: dict) -> str:
