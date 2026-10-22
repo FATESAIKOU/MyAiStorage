@@ -1093,11 +1093,61 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                              "0 skips it (60 is the design's hour)")
     parser.add_argument("--keep-local", action="store_true",
                         help="keep the local fake-data folder for debugging")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the rclone commands the chosen mode would run and exit; "
+                             "nothing is run, created or read (no rclone, no network, no files)")
     return parser.parse_args(argv)
+
+
+def dry_run_plan(mode: str, remote: str, rclone: str) -> list[str]:
+    """The rclone commands `mode` runs, in order, as text. Pure: it touches nothing.
+
+    `<cfg>` stands for the path given to --config and `<probe>` for the throwaway folder
+    (`agora-probe-k1-<8 hex>`) the real run makes at the root of the remote."""
+    base = f"{rclone} --config <cfg> --ask-password=false"
+    root = f"{remote}:<probe>"
+    lines = [f"{base} version",
+             f"{base} mkdir {root}                                  # the throwaway folder",
+             f"{base} lsjson {remote}: --dirs-only                  # check it exists and the remote root is My Drive"]
+    if mode in ("answers", "quick", "full"):
+        lines += [
+            f"{base} copy --files-from <list> <local>/sessions {root}/sessions   # small fake files, 4 KiB each"]
+    lines += [
+        "# K17(2): the folder ID across a purge",
+        f"{base} mkdir {root}/probe",
+        f"{base} lsjson {root} --dirs-only                       # record ID #1",
+        f"{base} purge {root}/probe",
+        f"{base} mkdir {root}/probe",
+        f"{base} lsjson {root} --dirs-only                       # record ID #2; compare with #1 (repeat 3x)",
+        f"{base} lsjson {root} -R --hash                         # the directory entries carry an ID? (K17 1)",
+        "# K13: ModTime of three small files with different local mtimes",
+        f"{base} copy --files-from <list> <local>/modtime {root}/modtime",
+        f"{base} lsjson {root}/modtime --hash                     # compare ModTime with the local stat",
+        "# directed look at one session folder (#152, B.5.7)",
+        f"{base} lsjson {root}/sessions/<fake ULID>              # exists: rc=0",
+        f"{base} lsjson {root}/sessions/<missing ULID>           # missing: rc=3 + 'directory not found'",
+    ]
+    if mode in ("quick", "full"):
+        lines += [f"{base} copy --files-from <list> <local>/send {root}/send       # 1/100/(500/1000) files",
+                  f"{base} lsjson {root}/listing5k -R --fast-list --hash --files-only",
+                  f"{base} delete --files-from <list> {root}/send"]
+    if mode == "full":
+        lines += [f"{base} copy <local>/big/one.bin {root}/big",
+                  f"{base} copy --files-from <list> <local>/big/chunks {root}/big/chunks   # 25 x 4 MiB",
+                  f"{base} copy {root}/big <download dir>            # one 100 MiB file vs 25 segments"]
+    lines += [f"{base} purge {root}                                  # cleanup, always, then lsjson to verify it is gone",
+              f"{base} lsjson {remote}: --dirs-only"]
+    return lines
 
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    if args.dry_run:
+        mode = "answers" if args.answers else ("quick" if args.quick else "full")
+        print(f"K.1 Drive probe ({mode} mode) - dry run: nothing is executed")
+        for line in dry_run_plan(mode, args.remote, args.rclone):
+            print("  " + line)
+        return 0
     answers = args.answers
     quick = args.quick
     mode = "answers" if answers else ("quick" if quick else "full")

@@ -92,8 +92,8 @@ python3 -c 'import fcntl,time; f=open("/tmp/agora-acc/state/upload.lock","a"); f
 | 2.4 | `echo $?` | `0` |
 | 2.5 | 等 10 秒，`ls -A /tmp/agora-acc/state/outbox` | 什麼都沒印（都傳完了） |
 | 2.6 | `sh /tmp/agora-acc/drive.sh` | 列出 A、B、C 的 ULID |
-| 2.7 | `sh /tmp/agora-acc/drive.sh <A的ULID>` | `session.md` 和一個 `raw-….json` |
-| 2.8 | `ls /tmp/agora-acc/cache/sessions/<A的ULID>/` | **本機也有** `session.md` 和同一個 `raw-….json` |
+| 2.7 | `sh /tmp/agora-acc/drive.sh <A的ULID>` | `session.md` 和一個 `seg-0001-0000-….part`（小 Session 只有一段；Drive 上**沒有** `raw-….json`） |
+| 2.8 | `ls /tmp/agora-acc/cache/sessions/<A的ULID>/` | **本機也有** `session.md`，和**整份**的 `raw-….json`（本機留整份；Drive 上是段） |
 | 2.9 | 再跑一次 2.3 | 印出**同樣的**三個 id，沒有多出新的 Session |
 | 2.10 | `agora import session --external-session-id s1,ses_nope --agent opencode; echo $?` | stdout 印出 A；stderr 有 `[agora] ses_nope 匯入失敗：…`；exit `2` |
 
@@ -173,7 +173,7 @@ python3 -c 'import fcntl,time; f=open("/tmp/agora-acc/state/upload.lock","a"); f
 | 8.10 | `agora pull session <A>` | stderr `[agora] <A的ULID> 雲端沒有，本機的不動`；A 還在（stdout 是 `拉下 1 個`，見已知問題） |
 | 8.11 | `agora push session <A>` | stderr `[agora] <A的ULID> 雲端沒有，沒有傳`；stdout `[agora] 寫回 0 個` |
 | 8.12 | `agora push session <A> --not-exist-upload; echo $?` | stdout `[agora] 寫回 1 個`；exit `0` |
-| 8.13 | `sh /tmp/agora-acc/drive.sh <A的ULID>` | `session.md` 和**一個** `raw-….json` |
+| 8.13 | `sh /tmp/agora-acc/drive.sh <A的ULID>` | `session.md` 和**一組**段（`seg-….part`；小 Session 一個） |
 | 8.14 | `rm -f /tmp/agora-acc/state/last-sync && agora search session \| grep <A的ULID>` | 沒有 `(雲端沒有)` 了 |
 | 8.15 | 再做一次 8.1～8.4（機器 2 再刪一次 A），然後 `agora search session` | A 又是 `(雲端沒有)` |
 | 8.16 | `agora pull session <A> --not-exist-delete` | stderr `[agora] <A的ULID> 雲端沒有，本機的副本已刪` |
@@ -189,7 +189,7 @@ python3 -c 'import fcntl,time; f=open("/tmp/agora-acc/state/upload.lock","a"); f
 |---|---|---|
 | 9.1 | **終端機 B**：「拿住上傳鎖」那一行，`60` 改成 `120` | `鎖住` |
 | 9.2 | **終端機 A**：`source /tmp/agora-acc/env.sh && agora edit session <N> --header 'title=改到一半'` | 印出 N |
-| 9.3 | `ls -A /tmp/agora-acc/state/outbox/<N的ULID>/` | 有 `.update`、`session.md`、`raw-….json`（還沒傳） |
+| 9.3 | `ls -A /tmp/agora-acc/state/outbox/<N的ULID>/` | 有 `.update`、`session.md`、整份的 `raw-….json`（還沒傳；段要上傳時才從整份切出來） |
 | 9.4 | `source /tmp/agora-acc/env2.sh && agora delete session <N> --yes` | 機器 2 刪掉 N |
 | 9.5 | 等 10 秒，`ls -A /tmp/agora-acc/state2/trash-queue` | 什麼都沒印 |
 | 9.6 | 等終端機 B 結束。然後 `source /tmp/agora-acc/env.sh && rm -f /tmp/agora-acc/state/last-sync && agora search session > /dev/null` | stderr 有 `[agora] outbox 有 1 筆未上傳`。這個指令會啟動背景 |
@@ -213,7 +213,7 @@ python3 -c 'import fcntl,time; f=open("/tmp/agora-acc/state/upload.lock","a"); f
 |---|---|---|
 | 10.1 | 終端機 B：拿住上傳鎖，`60` 改成 `30` | `鎖住` |
 | 10.2 | 終端機 A（30 秒內）：`source /tmp/agora-acc/env.sh && P=$(agora import session --external-session-id s5 --agent opencode) && time agora push session $P` | import 馬上結束。push **一直等**，大約每 10 秒說一次 `[agora] 背景上傳中，還在等…`；終端機 B 結束後，stdout `[agora] 寫回 1 個` |
-| 10.3 | `sh /tmp/agora-acc/drive.sh <P的ULID>` | 已經有 `session.md` 和 `raw-….json` |
+| 10.3 | `sh /tmp/agora-acc/drive.sh <P的ULID>` | 已經有 `session.md` 和它清單裡的段（`seg-….part`） |
 | 10.4 | 再做一次 10.1；終端機 A：`agora push session $P`，等 3 秒按 **Ctrl-C**，`echo $?` | 中斷，exit `130` |
 
 ## 11. 刪除排隊時的提醒
@@ -526,3 +526,19 @@ cat "$(uv tool dir)/agora/uv-receipt.toml"    # directory = "…/agora-stable/9b
 ```
 
 兩種情況都一樣：平常的資料夾（`~/.cache/agora`、`~/.local/state/agora`）不受驗收影響，因為驗收全部用 `/tmp/agora-acc`。
+
+
+## 12. 舊格式 Session 與搬遷（`migrate inventory`、`--as-new`）
+
+升級前上傳的 Session（header 的 `raw` 沒有 `layout`）：閱讀版可讀、raw 不可用、不會被刪、沒有原地轉存。步驟見 [migration.md](migration.md)。
+
+| # | 做 | 應該看到 |
+|---|---|---|
+| 12.1 | 在 `/tmp/agora-acc` 的假環境裡放一個舊格式 Session（`tests/unit/test_migrate_flow.py` 的做法），`agora show session <舊> --raw; echo $?` | 說這個 raw 是舊格式、要用 `--as-new` 重匯；exit 非 0；閱讀版（`agora show session <舊>`）仍可讀 |
+| 12.2 | `agora import session --external-session-id <它的來源 id> --agent claude; echo $?` | **拒絕**，訊息指向 `--as-new`；沒有新 Session，舊的不動；exit `1` |
+| 12.3 | `agora migrate inventory --json`（不加清單） | 只有 `host`／`counts`／`drop_list`／`must_keep_deleted`／`sessions`，沒有 title、body；`drop_list` 是 `[]`（還沒有替代版本） |
+| 12.4 | `agora import session --external-session-id <來源 id> --agent claude --as-new` | 印出**新的** id；再跑一次印出**同一個** id（不讀來源、不上傳）；舊的還在 |
+| 12.5 | 等上傳完，`agora migrate inventory --json` | 舊的那一筆 `replacement.relation_to_old` 是 `identical`，`drop_list` 有它 |
+| 12.6 | 原檔被截短後再 12.4（新的比舊的少），`agora migrate inventory --json` | `relation_to_old` 是 `different`（`md5-differs`），**不在** `drop_list` |
+| 12.7 | `agora migrate inventory --must-keep /不存在的檔; echo $?`；清單檔是空的、有一行不是 id 時各一次 | exit 非 0、沒有 `sessions`／`drop_list`；錯誤只有路徑與行號，不重印那一行 |
+| 12.8 | `agora delete session <最後一次 inventory 的 drop_list 的 id> --yes` | 只刪那幾個；`different` 的、別台的、沒有原始紀錄的都還在 |

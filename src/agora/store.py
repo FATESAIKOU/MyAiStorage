@@ -923,17 +923,46 @@ def restore_done(paths: Paths) -> None:
         _put_back(done, paths.outbox / done.name[len(".done-"):])
 
 
+def _restorable_old(paths: Paths) -> dict[str, Path]:
+    """`.old-<ULID>` with no `outbox/<ULID>` and no stage in flight (`.tmp-<ULID>`): {ULID: folder}.
+
+    What a `stage` that crashed between its two renames leaves - the previous complete entry.
+    `outbox_ulids` puts these back; a read-only caller (`outbox_folders`) only names them."""
+    found = {}
+    if paths.outbox.exists():
+        for old in paths.outbox.glob(".old-*"):
+            ulid = old.name[len(".old-"):]
+            if not (paths.outbox / ulid).exists() and not (paths.outbox / f".tmp-{ulid}").exists():
+                found[ulid] = old
+    return found
+
+
 def outbox_ulids(paths: Paths) -> set[str]:
     """The ULIDs waiting in the outbox. Never touches the upload lock (T3-sec3 R6)."""
     if not paths.outbox.exists():
         return set()
-    for old in paths.outbox.glob(".old-*"):
-        ulid = old.name[len(".old-"):]
-        target = paths.outbox / ulid
-        # Only restore when no stage is in flight for this ULID (its .tmp still exists).
-        if not target.exists() and not (paths.outbox / f".tmp-{ulid}").exists():
-            old.rename(target)   # a stage crashed mid-swap: keep the previous complete entry
+    for ulid, old in _restorable_old(paths).items():
+        old.rename(paths.outbox / ulid)   # a stage crashed mid-swap: keep the previous complete entry
     return {p.name for p in paths.outbox.iterdir() if p.is_dir() and not p.name.startswith(".")}
+
+
+def outbox_folders(paths: Paths) -> dict[str, Path]:
+    """`waiting_ulids` without any repair: {ULID: the folder that holds its entry}.
+
+    The same three shapes - a plain entry, a `.old-` that `outbox_ulids` would put back, a
+    `.done-` set aside - found by the same rules, but nothing is renamed. For the commands
+    that must not touch the outbox (`migrate inventory`)."""
+    found: dict[str, Path] = {}
+    if not paths.outbox.exists():
+        return found
+    for p in paths.outbox.iterdir():
+        if p.is_dir() and not p.name.startswith("."):
+            found[p.name] = p
+    for ulid, old in _restorable_old(paths).items():
+        found.setdefault(ulid, old)
+    for ulid, done in _set_aside(paths).items():
+        found.setdefault(ulid, done)
+    return found
 
 
 def _set_aside(paths: Paths) -> dict[str, Path]:
