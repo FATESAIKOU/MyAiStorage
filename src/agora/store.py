@@ -514,36 +514,59 @@ class Drive:
 
 
 class _Chunker:
-    """Cuts a stream of blocks into `chunk`-byte pieces and keeps each piece's md5 and
-    size, plus the whole thing's: the manifest, taken on the same pass that stages the raw."""
+    """Cuts a stream of blocks into pieces and keeps each piece's md5 and size, plus the
+    whole thing's: the manifest, taken on the same pass that stages the raw.
 
-    def __init__(self, chunk: int):
+    With no `points` the pieces are `chunk` bytes each (the last one shorter). With `points`
+    (strictly increasing byte offsets) a piece ends at each of them, and the rest is the
+    last piece - how a plan says where the sealed range ends and the tail begins.
+    `skip_first` leaves the md5 of the first piece uncomputed (it is the prefix a previous
+    manifest already describes): its entry is `(None, size)`.
+    """
+
+    def __init__(self, chunk: int, points: list[int] | None = None, skip_first: bool = False):
         self.chunk = chunk
+        self.points = list(points) if points is not None else None
+        self._skipping = skip_first
+        self._next = 0
         self.whole = hashlib.md5()
         self.size = 0
-        self.parts: list[tuple[str, int]] = []
+        self.parts: list[tuple[str | None, int]] = []
         self._cur = hashlib.md5()
         self._cur_size = 0
+
+    def _remaining(self) -> int | None:
+        """Bytes to the next boundary, or None when the rest is one last piece."""
+        if self.points is None:
+            return self.chunk - self._cur_size
+        if self._next < len(self.points):
+            return self.points[self._next] - self.size
+        return None
 
     def feed(self, data: bytes) -> None:
         view = memoryview(data)
         while len(view):
-            take = min(len(view), self.chunk - self._cur_size)
+            limit = self._remaining()
+            take = len(view) if limit is None else min(len(view), limit)
             piece = view[:take]
             self.whole.update(piece)
-            self._cur.update(piece)
+            if not self._skipping:
+                self._cur.update(piece)
             self._cur_size += take
             self.size += take
             view = view[take:]
-            if self._cur_size == self.chunk:
+            if limit is not None and take == limit:
                 self._close()
 
     def _close(self) -> None:
-        self.parts.append((self._cur.hexdigest(), self._cur_size))
+        self.parts.append((None if self._skipping else self._cur.hexdigest(), self._cur_size))
+        self._skipping = False
         self._cur = hashlib.md5()
         self._cur_size = 0
+        if self.points is not None:
+            self._next += 1
 
-    def finish(self) -> tuple[str, int, list[tuple[str, int]]]:
+    def finish(self) -> tuple[str, int, list[tuple[str | None, int]]]:
         if self._cur_size or not self.parts:       # the last piece; an empty raw is one empty piece
             self._close()
         return self.whole.hexdigest(), self.size, self.parts
@@ -567,7 +590,8 @@ def _generation(raw: object) -> int:
     return 0
 
 
-def _stage_raw(tmp: Path, raw: bytes | Path, chunk: int) -> tuple[str, int, str, list[tuple[str, int]]]:
+def _stage_raw(tmp: Path, raw: bytes | Path, chunk: int, points: list[int] | None = None,
+               skip_first: bool = False) -> tuple[str, int, str, list[tuple[str | None, int]]]:
     """Put the raw into `tmp`; return (md5, size, file name, [(segment md5, size)]).
 
     The manifest comes from the same pass that reads the raw. Bytes are written directly.
@@ -577,7 +601,7 @@ def _stage_raw(tmp: Path, raw: bytes | Path, chunk: int) -> tuple[str, int, str,
     as it goes. The staging name is unique inside `tmp` and renamed to the raw-md5 name
     when it is done, so a crash leaves no `raw-*.json` half-file.
     """
-    chunker = _Chunker(chunk)
+    chunker = _Chunker(chunk, points, skip_first)
     if isinstance(raw, Path):
         staging = tmp / f".staging-{os.getpid()}.tmp"
         try:
@@ -588,7 +612,7 @@ def _stage_raw(tmp: Path, raw: bytes | Path, chunk: int) -> tuple[str, int, str,
                         chunker.feed(block)
             except OSError:
                 staging.unlink(missing_ok=True)
-                chunker = _Chunker(chunk)
+                chunker = _Chunker(chunk, points, skip_first)
                 with open(staging, "wb") as out, open(raw, "rb") as src:
                     for block in iter(lambda: src.read(1 << 20), b""):
                         chunker.feed(block)
@@ -615,6 +639,90 @@ def _stage_raw(tmp: Path, raw: bytes | Path, chunk: int) -> tuple[str, int, str,
     return md5, size, name, parts
 
 
+EMPTY_MD5 = hashlib.md5(b"").hexdigest()
+
+
+def _cursor_path(paths: Paths, ulid: str) -> Path:
+    return paths.state / "cursors" / f"{ulid}.json"
+
+
+def read_cursor(paths: Paths, ulid: str) -> dict | None:
+    """The cursor `stage` last wrote for the session, or None: a missing, unreadable or
+    malformed file is "no cursor", which means the next version is cut whole (fail-safe)."""
+    try:
+        data = json.loads(_cursor_path(paths, ulid).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def forget_cursor(paths: Paths, ulid: str) -> None:
+    try:
+        _cursor_path(paths, ulid).unlink(missing_ok=True)
+    except OSError as e:
+        warn(f"{ulid} 的 cursor 刪不掉（下一輪驗證不過就會整份重切，不影響正確性）：{e}")
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _plan_mode(plan: dict | None, previous_raw: object, stored: dict | None, ulid: str, size: int,
+               chunk: int) -> dict:
+    """How this version's raw is cut: `append`, `sealed` or `plain` (design B.2, C.1).
+
+    append - a previous manifest of ours, whose sealed segments end exactly where the new bytes
+        begin, and the cursor stored for it (`stored`, read from disk, not taken on the
+        adapter's word) that says the same: reuse those segments, cut `[append_from,
+        seal_upto)` by `chunk` (when it is at least one chunk), the rest is the tail.
+    sealed - the whole raw is new but the adapter knows where its main content ends: cut
+        `[0, seal_upto)` by `chunk` (nothing at all when it is not more than one chunk).
+    plain  - no such notion (opencode, agy, merge): the whole raw cut by `chunk`.
+    Anything that does not add up falls through to the next mode: a wrong increment is never sent.
+    """
+    seal_upto = plan.get("seal_upto") if plan else None
+    if not _is_int(seal_upto) or not (0 < seal_upto < size):
+        return {"mode": "plain"}
+    append_from = plan.get("append_from")
+    if (_is_int(append_from) and isinstance(stored, dict) and plan.get("cursor_ulid") == ulid
+            and 0 <= append_from <= seal_upto and raw_kind(previous_raw) == "chunks"
+            and previous_raw.get("md5") == stored.get("base_md5")
+            and stored.get("raw_stable") == append_from
+            and _is_int(stored.get("sealed_line_count")) and isinstance(stored.get("sealed_md5"), str)
+            and sum(seg["size"] for seg in raw_segments(previous_raw)[:-1]) == append_from):
+        sealed_now = seal_upto - append_from >= chunk
+        points = [append_from] if append_from > 0 else []
+        if sealed_now:
+            points += [append_from + k * chunk for k in range(1, (seal_upto - append_from - 1) // chunk + 1)]
+            points.append(seal_upto)
+        return {"mode": "append", "points": points, "skip_first": append_from > 0,
+                "append_from": append_from, "sealed_now": sealed_now, "seal_upto": seal_upto}
+    sealed_now = seal_upto > chunk
+    points = ([k * chunk for k in range(1, (seal_upto - 1) // chunk + 1)] + [seal_upto]) if sealed_now else []
+    return {"mode": "sealed", "points": points, "skip_first": False, "append_from": 0,
+            "sealed_now": sealed_now, "seal_upto": seal_upto}
+
+
+def _final_cursor(plan: dict, decided: dict, md5: str, stored: dict | None) -> dict | None:
+    """The cursor to write once the stage has landed: this version's `base_md5`, and the
+    sealed values - moved up to this version's main content when it sealed something, kept when
+    an append sealed nothing, back to "nothing sealed" for a version cut whole."""
+    cursor = plan.get("cursor")
+    if not isinstance(cursor, dict) or decided["mode"] == "plain":
+        return None
+    out = dict(cursor)
+    out["base_md5"] = md5
+    if decided["sealed_now"]:
+        out.update(sealed_line_count=cursor.get("main_line_count"), sealed_md5=cursor.get("main_md5"),
+                   raw_stable=decided["seal_upto"])
+    elif decided["mode"] == "append":
+        out.update(sealed_line_count=stored["sealed_line_count"], sealed_md5=stored["sealed_md5"],
+                   raw_stable=stored["raw_stable"])
+    else:
+        out.update(sealed_line_count=0, sealed_md5=EMPTY_MD5, raw_stable=0)
+    return out
+
+
 def _previous_raw(paths: Paths, ulid: str, folder: Path) -> dict | None:
     """The `raw` block of the version this stage replaces: the outbox entry if there is
     one, else the mirror's session.md (`remember` keeps it after every stage)."""
@@ -636,12 +744,19 @@ def _previous_raw(paths: Paths, ulid: str, folder: Path) -> dict | None:
 
 
 def stage(paths: Paths, header: dict, body: str,
-          raw: bytes | Path | None, *, update: bool = False, kind: str = "") -> Path:
+          raw: bytes | Path | None, *, update: bool = False, kind: str = "",
+          plan: dict | None = None) -> Path:
     """Write a complete session into the outbox and return its folder.
 
     `raw` may be the whole bytes, or a file path that holds them. When it is a path,
     the bytes are streamed into the staging folder and the md5/size are taken from
     the file without a second in-memory copy (impl-mem B1b-2).
+
+    `plan` is an adapter's `Increment` as a dict - `append_from`, `seal_upto`, `cursor`,
+    `cursor_ulid` (design B.1): where the new bytes start, where the main content ends, and the
+    local state for the next round. It is checked here against the previous manifest and
+    cursor and, if it does not add up, the version is cut whole instead. The cursor is
+    written only after the swap, so a stage that fails leaves the old one in place.
 
     `update`／`kind` say what `mark_update` says, and are written into the folder that
     is about to go in, before the swap: the uploader reads the outbox whenever it likes,
@@ -659,18 +774,34 @@ def stage(paths: Paths, header: dict, body: str,
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir()
     try:
+        new_cursor = None
         if raw is not None:
-            md5, size, name, parts = _stage_raw(tmp, raw, raw_chunk_size())
+            chunk = raw_chunk_size()
             previous_raw = _previous_raw(paths, ulid, folder)
+            raw_size = raw.stat().st_size if isinstance(raw, Path) else len(raw)
+            stored = read_cursor(paths, ulid) if plan else None
+            decided = _plan_mode(plan, previous_raw, stored, ulid, raw_size, chunk)
+            md5, size, name, parts = _stage_raw(
+                tmp, raw, chunk, decided.get("points") if decided["mode"] != "plain" else None,
+                bool(decided.get("skip_first")))
             if (raw_kind(previous_raw) == "chunks" and previous_raw.get("md5") == md5
                     and previous_raw.get("size") == size):
                 # The same raw under a new header (an edit): the same manifest, or the
-                # same bytes would be renamed and sent whole again (design B.4).
+                # same bytes would be renamed and sent whole again (design B.4). Nothing
+                # new is sealed, so the cursor on disk stays as it is.
                 segments = copy.deepcopy(previous_raw["segments"])
             else:
-                gen = _generation(previous_raw) + 1
-                segments = [{"file": segment_name(gen, seq, part_md5), "size": part_size,
-                             "md5": part_md5} for seq, (part_md5, part_size) in enumerate(parts)]
+                if decided["mode"] == "append":
+                    kept = copy.deepcopy(raw_segments(previous_raw)[:-1])     # the sealed ones, as they are
+                    gen = _generation(previous_raw)
+                    pieces = parts[1:] if decided["skip_first"] else parts
+                else:
+                    kept, gen, pieces = [], _generation(previous_raw) + 1, parts
+                segments = kept + [
+                    {"file": segment_name(gen, len(kept) + n, piece_md5), "size": piece_size,
+                     "md5": piece_md5} for n, (piece_md5, piece_size) in enumerate(pieces)]
+                if plan:
+                    new_cursor = _final_cursor(plan, decided, md5, stored)
             header.setdefault("agora", {})["raw"] = {
                 "md5": md5, "size": size, "layout": RAW_LAYOUT, "segments": segments}
             _fault("after-manifest")      # crash with the raw staged, before anything is swapped in
@@ -705,6 +836,15 @@ def stage(paths: Paths, header: dict, body: str,
         # loses an edit. Whoever finds `outbox/<ULID>` already there drops it instead:
         # `_rename_back` while comparing, `restore_done` when the background takes the lock.
         _fsync_dir(paths.outbox)            # the rename itself, and the entry it removed
+        if new_cursor is not None:
+            # Only now: the version is in the outbox. A cursor written earlier would, after a
+            # failed stage, claim a prefix that no manifest on disk describes.
+            try:
+                path = _cursor_path(paths, ulid)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                write_atomic(path, json.dumps(new_cursor, ensure_ascii=False, sort_keys=True))
+            except OSError as e:
+                warn(f"{ulid} 的 cursor 寫不進去（下一輪整份重切，不影響正確性）：{e}")
         return folder
     except BaseException:
         # A failure before the swap left a staging folder; the old entry is untouched,
@@ -1736,7 +1876,6 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
     remote = _listing_with_md5(drive)
     listed = isinstance(remote, dict)
     ids_after = None             # {ulid: folder ID} now; read once, only if an update needs it
-    no_sessions_yet = remote is None      # Drive has no sessions/ at all (review N3)
     if not listed:
         remote = {}           # nothing confirmed, so nothing leaves the outbox
     confirmed = []               # (ulid, manifest, the folder's listing) of what left the outbox
@@ -1745,13 +1884,11 @@ def upload_batch(drive: Drive, paths: Paths, warn=warn, notices: bool = False) -
         files = remote.get(ulid) or {}
         if files.get("session.md") != sent_md5:
             left.append(ulid)     # not confirmed, or changed underneath us: it stays
-            if no_sessions_yet and ulid not in sessions:
-                # The one round where nothing went up because there was nowhere yet:
-                # say so, or the entry just sits there with no reason (review N3).
-                say(f"Drive 上還沒有 sessions/，{ulid} 留在 outbox")
-            elif listed and ulid not in sessions:
-                say(f"{ulid} 上傳期間又有新版本，留在 outbox 下一輪再送")
-            elif listed:
+            if not listed:
+                # Nothing could be confirmed (no `sessions/` listing at all): it stays, and
+                # the reason is said (review N3).
+                say(f"Drive 上沒有 sessions/ 可以確認，{ulid} 留在 outbox")
+            else:
                 now_md5 = _outbox_session_md5(folder)
                 if now_md5 is not None and now_md5 != sent_md5:
                     say(f"{ulid} 上傳期間又有新版本，留在 outbox 下一輪再送")
@@ -2473,6 +2610,7 @@ def forget_local(paths: Paths, ulid: str) -> None:
     Index(paths).drop(ulid)
     shutil.rmtree(paths.mirror / ulid, ignore_errors=True)
     _forget_folder_record(paths, ulid)
+    forget_cursor(paths, ulid)
     try:
         _published_path(paths, ulid).unlink(missing_ok=True)       # the previous-manifest record
     except OSError:
