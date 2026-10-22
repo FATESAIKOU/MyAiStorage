@@ -18,17 +18,17 @@
 
 **範圍**：`src/agora/agents/claude.py`、`src/agora/agents/opencode.py`、`tests/unit/`、`tests/perf/`。**這是正式的實作單，不是遷移的附屬步驟**：之後任何很長的外部 session 匯入都走它，搬遷（R4）也用它。介面不變（`Agent.export` 仍回 `Exported`，`raw_file` 已經存在），改的是**產生的過程**。
 
-- [ ] 1.1 `claude.py`：把 `_read_lines`（`:210-234`）＋`_scan`（`:412-454`）＋`_pack_raw_file`（`:308-335`）合成**單趟串流**：讀一行→驗一行（規則不變：空白行跳過；最後一個非空白行不合法就丟並警告；其他位置的語法錯誤是 `AgentError`；非 dict 行的例外優先序照舊）→ 把 `json.dumps(line, ensure_ascii=False)` 直接寫進 raw 檔；**只緩衝一行**以判斷「最後一行」
-- [ ] 1.2 `claude.py`：同一趟記 `stable_at(n)`（寫完第 n 個 main 元素後的 offset）、`main_end`（寫 `], "aux": ` 之前）、rolling md5 的 `copy()`（`sealed_md5`／`main_md5`）；這些留在 adapter 裡，用來算 R3 的 `append_from`／`seal_upto` 與 cursor 的三個封存值（**不塞進 `Exported`**）
-- [ ] 1.3 `claude.py`：`_pack_aux`（`:258-271`）不變；確認 aux 序列化順序穩定（`sorted(sidecar.rglob("*"))`，`:263`）並加測試
-- [ ] 1.4 `opencode.py`：`_export_bytes`（`:887-913`）不再 `target.read_bytes()`；`export`（`:1002-1032`）回 `raw_file`（把暫存檔複製／移到 `Exported` 的 tmpdir），事實摘要用 `json.load(open(path))`（`_read` 的等價物，`:991-1000`）——**不再保留一份與 raw 同大小的 `Exported.raw`**；**同時把 `turns` 放進 `Exported`**，否則 `reading_of`（`base.py:260-272`）會走 `agent.turns(exported.raw)` 把整份再讀一次
-- [ ] 1.5 `agy.py`：確認 `pack_raw_file`（`agy_store.py:304-335`）已經是串流；把「`scan_text` 清單與 `json.dumps(scan_text)` 仍是 O(文字)」寫進 docstring；`export`（`agy.py:163-186`）不改行為
-- [ ] 1.6 測試（雙跑）：同一份語料（CJK、大 `tool_result`、sidecar、壞行、半行、非 dict、空白行、`/clear` 換檔），舊三段式與新單趟串流比 **raw bytes、md5、`main_end`、`stable_at(n)`、例外類別與訊息**——全部相同（design I.2）
-- [ ] 1.7 測試（記憶體）：`tests/perf/measure_import_mem.py`；假 claude session 100／400／800 MB（形狀：一小段對話＋大量 `tool_result`，**閱讀版大小固定**），`AGORA_UPLOAD=inline`＋假 rclone、假 HOME；量 `ru_maxrss`／牆上時間／磁碟峰值。斷言 `peak(800) ≤ 1.2 × peak(100)` 且 ≤ 256 MiB；**三份的秒數都要記下來**（不設門檻，但 R1 驗收要有數字；design I.8、K.2）
-- [ ] 1.8 測試：另外兩份「行很長」（單行 1 MB／10 MB）量峰值（K14）；把結果寫進 `docs/perf.md` 的草稿（正式文件在 R4）
-- [ ] 1.9 測試：opencode 的 `export` 不再有整份 `Exported.raw`（`raw` 屬性第一次被讀時才從檔案讀）；`raw_file` 的 md5 與舊路徑相同；agy 的 raw md5 不變
-- [ ] 1.10 改壞驗證：把最後一行半寫也寫進 raw（要紅）；讓語意錯誤蓋掉後面的語法錯誤（要紅）；`import` 把整份讀進記憶體（800 MB 的峰值超過 1.2×100 MB，要紅）——各要紅
-- [ ] 1.11 跑 `uv run pytest -q tests/unit/test_mem_golden.py tests/unit/test_agent_claude.py tests/unit/test_agent_opencode.py`（檔名以實際為準）＋`openspec validate agora-diff-upload --strict`
+- [x] 1.1 `claude.py`：把 `_read_lines`（`:210-234`）＋`_scan`（`:412-454`）＋`_pack_raw_file`（`:308-335`）合成**單趟串流**：讀一行→驗一行（規則不變：空白行跳過；最後一個非空白行不合法就丟並警告；其他位置的語法錯誤是 `AgentError`；非 dict 行的例外優先序照舊）→ 把 `json.dumps(line, ensure_ascii=False)` 直接寫進 raw 檔；**只緩衝一行**以判斷「最後一行」
+- [x] 1.2 `claude.py`：同一趟記 `stable_at(n)`（寫完第 n 個 main 元素後的 offset）、`main_end`（寫 `], "aux": ` 之前）、rolling md5 的 `copy()`（`sealed_md5`／`main_md5`）；這些留在 adapter 裡，用來算 R3 的 `append_from`／`seal_upto` 與 cursor 的三個封存值（**不塞進 `Exported`**）
+- [x] 1.3 `claude.py`：`_pack_aux`（`:258-271`）不變；確認 aux 序列化順序穩定（`sorted(sidecar.rglob("*"))`，`:263`）並加測試
+- [x] 1.4 `opencode.py`：`_export_bytes`（`:887-913`）不再 `target.read_bytes()`；`export`（`:1002-1032`）回 `raw_file`（把暫存檔複製／移到 `Exported` 的 tmpdir），事實摘要用 `json.load(open(path))`（`_read` 的等價物，`:991-1000`）——**不再保留一份與 raw 同大小的 `Exported.raw`**；**同時把 `turns` 放進 `Exported`**，否則 `reading_of`（`base.py:260-272`）會走 `agent.turns(exported.raw)` 把整份再讀一次
+- [x] 1.5 `agy.py`：確認 `pack_raw_file`（`agy_store.py:304-335`）已經是串流；把「`scan_text` 清單與 `json.dumps(scan_text)` 仍是 O(文字)」寫進 docstring；`export`（`agy.py:163-186`）不改行為
+- [x] 1.6 測試（雙跑）：同一份語料（CJK、大 `tool_result`、sidecar、壞行、半行、非 dict、空白行、`/clear` 換檔），舊三段式與新單趟串流比 **raw bytes、md5、`main_end`、`stable_at(n)`、例外類別與訊息**——全部相同（design I.2）
+- [x] 1.7 測試（記憶體）：`tests/perf/measure_import_mem.py`；假 claude session 100／400／800 MB（形狀：一小段對話＋大量 `tool_result`，**閱讀版大小固定**），`AGORA_UPLOAD=inline`＋假 rclone、假 HOME；量 `ru_maxrss`／牆上時間／磁碟峰值。斷言 `peak(800) ≤ 1.2 × peak(100)` 且 ≤ 256 MiB；**三份的秒數都要記下來**（不設門檻，但 R1 驗收要有數字；design I.8、K.2）
+- [x] 1.8 測試：另外兩份「行很長」（單行 1 MB／10 MB）量峰值（K14）；把結果寫進 `docs/perf.md` 的草稿（正式文件在 R4）
+- [x] 1.9 測試：opencode 的 `export` 不再有整份 `Exported.raw`（`raw` 屬性第一次被讀時才從檔案讀）；`raw_file` 的 md5 與舊路徑相同；agy 的 raw md5 不變
+- [x] 1.10 改壞驗證：把最後一行半寫也寫進 raw（要紅）；讓語意錯誤蓋掉後面的語法錯誤（要紅）；`import` 把整份讀進記憶體（800 MB 的峰值超過 1.2×100 MB，要紅）——各要紅
+- [x] 1.11 跑 `uv run pytest -q tests/unit/test_mem_golden.py tests/unit/test_agent_claude.py tests/unit/test_agent_opencode.py`（檔名以實際為準）＋`openspec validate agora-diff-upload --strict`
 
 ## 2. R2：刪除偵測加固（PR 2；d；**依 K.1 探針（L9）；探針沒過不發**；與 R3 同一個 release、先於 R3）
 
@@ -95,7 +95,7 @@
 - [x] 4.10 `tests/perf/measure_import_mem.py` 的正式版本（R1 的草稿轉正）＋一條 CI 之外的說明；真的量測由任何人跑（不碰真資料）
 - [x] 4.11 隱私：文件寫明「掃描整份 raw，不掃單一段檔」；`inventory` 的輸出形狀寫進文件（不含 title／body；含 `outbox_legacy`／`droppable`／`not_droppable_reason`／`drop_list`；必保清單只以布林標記、`drop_list` 的 id 與數量出現；清單內容與不認得的行不進 log）；範例不含真 token、真路徑、真 session；垃圾桶 30 天的隱私面寫進文件（L11）
 - [x] 4.12 驗收：照 4.8 的步驟在隔離環境（fake rclone、假 HOME、假索引）走完 F.1 的七步與三個確認點（含「升級前 outbox 排空，或留下來的由 `outbox_legacy` 列出」、「原檔變短 → `different` → 不在 `drop_list`」、「替代版本還沒上傳完 → 不是 `identical`」、「第 4 步前再跑一次 `inventory`，只把那份的 `drop_list` 給 `delete`」、「必保清單內一筆 `different` → 整條 `droppable: false`、`drop_list` 不含它」、「必保清單內接續中 → 跳過並列出」、「清單檔讀不到／空的／有一行不認得 → 報錯、不給候選、只有行號」、「沒有原始紀錄的類別不在 `drop_list`」、「卡在 outbox 的舊格式 entry → 逐筆略過、只警告一次」）；`openspec validate agora-diff-upload --strict`
-- [ ] 4.13 歸檔：本 change 的實作 PR 合併後 `openspec archive agora-diff-upload`（把 delta 併進主 spec）
+- [x] 4.13 歸檔：本 change 的實作 PR 合併後 `openspec archive agora-diff-upload`（把 delta 併進主 spec）
 - [x] 4.14 改壞驗證（I.2 的 21–26、28–29）：`inventory` 觸發 sync／下載（要紅）；把 `different` 當成可以丟（要紅）；替代版本少一段仍判 `identical`（要紅）；`inventory` 自己觸發索引重建、讀鏡像的 `session.md`（要紅）；必保清單內一筆 `different` 仍讓整條 lineage 進 `drop_list`（`droppable` 要 `false`，要紅）；一般 `import` 遇到舊格式仍更新／分支（要紅）；清單檔讀不到／0 個 id 仍給候選（要紅）；清單有一行不認得仍略過並給候選（或把那一行印出來，要紅）
 
 ## 5. R5：翻預設（取消；不是任務）
