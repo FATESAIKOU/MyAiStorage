@@ -179,6 +179,34 @@ class Agent(Protocol):
         """After the agent exits, read the session it used; None if nothing new was said."""
 
 
+@dataclass
+class Increment:
+    """What one write-back round learned, for a storage layer that sends only what is new.
+
+    `exported` is the whole session as before (a raw file). `append_from` says where the
+    new bytes start - the byte after the last sealed prefix - or is None when this version has
+    to be cut whole; `seal_upto` is where the main content ends (the tail starts there), None
+    for an agent with no such notion (its raw is cut whole). `cursor` is the local state for
+    the next round (design B.1). The adapter never makes segments: sizes, the tail and the
+    generation are the store's decision.
+    """
+
+    exported: Exported
+    append_from: int | None = None
+    seal_upto: int | None = None
+    cursor: dict | None = None
+
+
+def collect_increment(agent, launch: Launch, cursor: dict | None) -> "Increment | None":
+    """`agent.collect_increment` when the adapter has one; otherwise `collect()` wrapped as a
+    whole-raw increment (opencode, agy and the test doubles never append)."""
+    own = getattr(agent, "collect_increment", None)
+    if own is not None:
+        return own(launch, cursor)
+    exported = agent.collect(launch)
+    return None if exported is None else Increment(exported)
+
+
 class AgentError(RuntimeError):
     """The agent's files or CLI did not behave as expected."""
 

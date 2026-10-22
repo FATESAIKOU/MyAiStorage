@@ -41,7 +41,7 @@ from agora import header as h
 from agora import private_tmp
 from agora import store
 from agora.agents.agy import AGY_CROSS_AGENT, AGY_HEADLESS_LATER, AGY_READ_ONLY
-from agora.agents.base import (NO_REPLY, Agent, AgentError, Exported, Launch, merge_turns,
+from agora.agents.base import (NO_REPLY, Agent, AgentError, Exported, Launch, collect_increment, merge_turns,
                                reading, reading_of, env_seconds)
 
 AGENTS = ("opencode", "claude", "agy")
@@ -226,7 +226,7 @@ def _updates(args) -> dict:
 
 
 def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | Path | None, *,
-          update: bool = False, kind: str = "") -> tuple[str, bool]:
+          update: bool = False, kind: str = "", plan: dict | None = None) -> tuple[str, bool]:
     """Keep the whole session here, then let the background send it (local-first-writes).
 
     `update` says this overwrites a session Drive already has - the caller knows, and
@@ -241,7 +241,7 @@ def _save(paths: store.Paths, hdr: dict, body: str, raw: bytes | Path | None, *,
     # unmarked is a session Drive has never confirmed, so writing it back is still new.
     # Read before `stage`, which would leave a fresh folder that never has the marker.
     update = update and not store.never_confirmed(paths, _ulid_of(hdr["id"]))
-    folder = store.stage(paths, hdr, body, raw, update=update, kind=kind)
+    folder = store.stage(paths, hdr, body, raw, update=update, kind=kind, plan=plan)
     store.remember(paths, folder)
     return hdr["id"], _uploaded(paths, folder.name)
 
@@ -530,15 +530,38 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
     that index current, so a later id still sees what an earlier one saved.
     """
     add_tags = add_tags or []
-    exported = agent.export(external_id)
+    # An agent that can say where its new bytes start (claude) exports with the cursor of the
+    # session an update would go to; the first import has none and is cut whole, already in
+    # segments (design B.8, tasks 3.16). The rest export as before.
+    exporter = getattr(agent, "export_increment", None)
+    if exporter is not None:
+        probe = index.by_source(agent.name, external_id)
+        cursor = store.read_cursor(paths, probe[0]) if probe else None
+        increment = exporter(external_id, None, cursor)
+        exported = increment.exported
+    else:
+        increment = None
+        exported = agent.export(external_id)
     if exported.message_count <= 0:
         raise InputError(f"{external_id} 沒有任何訊息，不匯入")
     body = reading_of(agent, exported)
     existing = index.by_source(agent.name, exported.session_id)
+    plan = None
+    if increment is not None and increment.cursor is not None:
+        plan = {"append_from": increment.append_from, "seal_upto": increment.seal_upto,
+                "cursor": increment.cursor, "cursor_ulid": existing[0] if existing else None}
     new_md5 = exported.raw_md5 if exported.raw_md5 is not None else store.hashlib.md5(exported.raw).hexdigest()
     raw_src = exported.raw_file if exported.raw_file is not None else exported.raw
     if existing:
         old = index.header(existing[0])
+        if raw_is_legacy(old):
+            # An ordinary import updates `existing[0]` in place, and for a session whose raw this
+            # version does not read that would be an automatic upgrade - or a branch that makes
+            # the old session undeletable (design C.3). The one way is a re-import beside it.
+            raise InputError(
+                f"{external_id} 在 Drive 上已有一個舊格式（這個版本不讀它的 raw）的 Session "
+                f"agora:{existing[0]}；不會原地更新它，也不會分支。要重新匯入成新的 Session 請用 "
+                f"agora import … --as-new；舊的留著（閱讀版可讀）或自己 delete")
         unchanged = (h.agora_of(old).get("raw") or {}).get("md5") == new_md5
         if unchanged and not updates and not add_tags:
             print(f"agora:{existing[0]}")
@@ -570,14 +593,20 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
             hdr = _with_user(old, updates, add_tags=add_tags)
             hdr["agora"]["source"] = _source(agent, exported)
             hdr["agora"]["updated_at"] = _now_iso()
-            return _emit(_save(paths, hdr, body, raw_src, update=True))
+            return _emit(_save(paths, hdr, body, raw_src, update=True, plan=plan))
         # Already continued or merged from: keep the old version and branch (S7).
         parents = [{"id": f"agora:{existing[0]}", "raw_md5": (h.agora_of(old).get("raw") or {}).get("md5")}]
         auto = _auto_header("import", parents, body, title=exported.title, exported=exported, agent=agent,
                             parent_headers=[old])
     else:
         auto = _auto_header("import", [], body, title=exported.title, exported=exported, agent=agent)
-    return _emit(_save(paths, _with_user(auto, updates, add_tags=add_tags), body, raw_src))
+    # a new session: its id is minted in _save's header, so there is no earlier cursor to append to
+    return _emit(_save(paths, _with_user(auto, updates, add_tags=add_tags), body, raw_src, plan=plan))
+
+
+def raw_is_legacy(header: dict | None) -> bool:
+    """Does this header's raw belong to the layouts this version does not read?"""
+    return store.raw_kind(h.agora_of(header or {}).get("raw")) == "legacy"
 
 
 def _branched(index: store.Index, ulid: str) -> bool:
@@ -922,6 +951,8 @@ class _Run:
         self.lock = lock
         self.last_md5 = last_md5 if last_md5 is not None else record.get("saved_md5")
         self.fingerprint = None
+        self.increment = None         # the last collect's Increment (what is new), see _collect_new
+        self.increment_ulid = None    # the session whose cursor it was read for
         self.collect_failed = False
         self.failures = 0
         self.wrote = False            # anything staged at all, this whole run
@@ -1401,7 +1432,7 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
         raw_src = exported.raw_file if exported.raw_file is not None else exported.raw
         saved = _save(paths, _with_user(hdr, record.get("header_updates") or {},
                                         add_tags=record.get("add_tags") or []), body,
-                      raw_src, update=same_id, kind="continue")
+                      raw_src, update=same_id, kind="continue", plan=_plan_of(run, exported))
     except (FileNotFoundError, h.HeaderError) as e:
         if not same_id:
             raise                   # a mint: no id to resolve to again (issue #65 F-1)
@@ -1418,6 +1449,17 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
             # first (L-5).
             store._put_back(paths.outbox / f".done-{old_ulid}", paths.outbox / old_ulid)
     return saved, note
+
+
+def _plan_of(run: "_Run", exported: Exported) -> dict | None:
+    """The stage plan for `exported`, when this very export came with an Increment (design B.1).
+    The store re-checks it against the manifest and cursor it holds and cuts the version whole
+    if they disagree, so the only job here is to not hand over a plan for another export."""
+    inc = getattr(run, "increment", None)
+    if inc is None or inc.exported is not exported or inc.cursor is None:
+        return None
+    return {"append_from": inc.append_from, "seal_upto": inc.seal_upto, "cursor": inc.cursor,
+            "cursor_ulid": run.increment_ulid}
 
 
 def _launch_of(record: dict) -> Launch:
@@ -1437,15 +1479,20 @@ def _collect_new(run: "_Run", agent: Agent) -> Exported | None:
     mark = _fingerprint(record, agent)
     if mark is not None and mark == run.fingerprint and not run.collect_failed:
         return None
+    ulid = _ulid_of(run.target)
     try:
-        exported = agent.collect(_launch_of(record))
+        # The cursor is the session's, read from state: the adapter says what is new since it,
+        # the store checks that against the manifest it holds (design B.3, C.1).
+        inc = collect_increment(agent, _launch_of(record), store.read_cursor(run.paths, ulid))
     except Exception:
         run.collect_failed = True
         run.fingerprint = None
+        run.increment = None
         raise
     run.collect_failed = False
     run.fingerprint = mark
-    return exported
+    run.increment, run.increment_ulid = inc, ulid
+    return inc.exported if inc is not None else None
 
 
 #: The dead-man switch on a round. Everything else in the round carries its own

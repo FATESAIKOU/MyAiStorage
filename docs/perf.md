@@ -164,3 +164,25 @@ sidecar 固定 64 KB。
 鏡像與 Drive 各留一份；800 MB 那一筆結束時是 2.4 GB（推得峰值約 3.2 GB）。R1 還沒有分段
 （`chunks/1` 是 R3），所以 Drive 上仍是一個整份 raw＋`session.md`（2 個檔），不是
 `ceil(main_end/C)+1` 個段；R3 的 K.2 那一條要用 R3 之後的版本量。
+
+## R3b-2 增量量測（草稿；R4 轉正）
+
+2026-10-22，MyAiStorage#170。腳本 `tests/perf/measure_increment.py`（`python tests/perf/measure_increment.py --size-mb 814 --rounds 6 --grow-mb 1 --sessions 20`）。全部隔離：假 HOME、假 rclone、`/tmp/r3b2-*`，量完立刻刪。
+每輪是一個**新子行程**做 `export_increment` → `stage(plan)` → `upload_batch`（與 `continue` 寫回同一條路；沒用 `import`，因為 `import` 更新時的「不覆蓋較少內容」比對會把舊 raw 整份讀進記憶體）。`C` = 4 MiB，R1 形狀的假 session（約 1 MiB 一行的 `tool_result`），每輪新增約 1 MiB。上傳位元組是 `copies.log` 裡這一輪送出的檔案大小總和（含 `session.md`）。
+
+| 輪 | 原檔 MiB | 送出檔數 | 送出 MiB | rclone 次數 | 秒 | 子行程峰值 RSS |
+|---|---|---|---|---|---|---|
+| 0（第一次匯入，整份切段） | 822.0 | 210 | 830.6 | 5 | 17.4 | 37.6 MiB |
+| 1 | 823.0 | 2 | 1.12 | 5 | 22.7 | 35.1 MiB |
+| 2 | 824.1 | 2 | 2.15 | 5 | 27.3 | 35.1 MiB |
+| 3 | 825.1 | 2 | 3.18 | 5 | 25.7 | 35.4 MiB |
+| 4（累積超過 C，封存） | 826.1 | 4 | 4.22 | 5 | 27.4 | 35.0 MiB |
+| 5 | 827.1 | 2 | 1.12 | 5 | 27.0 | 40.5 MiB |
+| 6 | 828.2 | 2 | 2.15 | 5 | 24.7 | 35.2 MiB |
+
+- 第 2 輪起每輪 ≤ `C + I + S`（約 4.2 + 1 + 閱讀版），不再是 ~820 MiB；今天（R1 之前）每輪約 816 MB。tail 隨未封存的新增長大，累積超過 C 才封存一次（第 4 輪）。
+- 第一次匯入 210 個檔＝約 `ceil(822/4)`＝206 個封存段＋tail＋`session.md`＋（切點落差的小段），與設計 A.1 的 `ceil(main_end/C)` 一致（設計的 195 是 814 MB ÷ 4 MiB 的算法，這個假 session 大 1%）。
+- 每輪秒數 22～27，幾乎都是**讀一遍 800 MB 的來源檔並串流打包**（R1 的 807 MB 匯入是 16.4 秒；這裡另含切段、md5、複製、`lsjson`）；上傳本身只有 1～4 MiB。本機磁碟讀取是下限，沒有因為分段變快或變慢的結論要下。
+- 峰值記憶體不隨大小成長（35～40 MiB，與 R1 的 39.1 MiB 同量級）。
+
+listing：一個 814 MB 的 session 跑 7 輪後 Drive 上是 218 個檔（`seg-*`＋`session.md`；舊 tail 在寬限期內還在）。20 個這樣的 session 一次 `lsjson -R`：4360 筆、302.5 KiB、3.3 秒（假 rclone 本機，真 Drive 的延遲未量，設計 K1/K10 仍待真 Drive 量）。

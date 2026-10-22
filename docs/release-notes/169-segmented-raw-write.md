@@ -27,10 +27,6 @@ agora:
 
 沒有 `layout`（或 `layout` 不認得）的 session——舊版上傳的——**不能 `agora push`、也不能 `push --not-exist-upload` 傳回去**：寫回去等於把舊格式再寫上 Drive。想保留內容，請用 `agora import … --as-new` 從原始紀錄重匯成新 Session；想丟掉本機那份用 `pull --not-exist-delete`。「雲端沒有」的提示對這類 session 已改成這個說法。
 
-## 還沒做（R3b-2）
+## R3b-2
 
-`agora import`（沒有 `--as-new`）遇到舊格式 session 的拒絕（tasks 3.16）屬 R3b-2（#170）：在那之前，一般 import 對舊格式 session 仍會走「更新」並把它原地換成新格式，與上面的建議（`--as-new`）不完全一致，同一個 release 內會補。
-
-
-
-增量：每輪只送新增的那一段（cursor、`append`）。這個 release 的每次 `stage` 都是整份切段（full）；小 session（≤ 一段）與今天的檔案數相同，大 session 每輪重傳整份。
+增量（每輪只送新增的段）與 `import` 對舊格式 session 的拒絕在 #170，同一個 release：見 [170-incremental-upload.md](170-incremental-upload.md)。

@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
-from agora.agents.base import (AgentError, Exported, Launch, Listed, NO_REPLY, Turns, agent_cmd,
+from agora.agents.base import (AgentError, Exported, Increment, Launch, Listed, NO_REPLY, Turns, agent_cmd,
                                iso_utc, merge_turns, summarize_timeout, tool_line, warn)
 from agora.private_tmp import PrivateTmpDir
 from agora.store import normalize
@@ -791,6 +791,27 @@ def _after_the_last_question(objs: list[dict]) -> list[dict]:
     return objs
 
 
+#: md5 of the empty prefix: what a cursor that has sealed nothing yet records.
+EMPTY_MD5 = hashlib.md5(b"").hexdigest()
+
+_CURSOR_INTS = ("source_size", "sealed_line_count", "raw_stable", "main_line_count")
+_CURSOR_MD5S = ("sealed_md5", "base_md5", "main_md5")
+
+
+def _cursor_ok(cursor: object) -> bool:
+    """A cursor this version wrote and can use; anything else is "no cursor" (fail-safe)."""
+    if not isinstance(cursor, dict) or cursor.get("version") != 1:
+        return False
+    if not isinstance(cursor.get("agent_session_id"), str):
+        return False
+    for key in _CURSOR_INTS:
+        value = cursor.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return False
+    return all(isinstance(cursor.get(k), str) and re.fullmatch(r"[0-9a-f]{32}", cursor[k])
+               for k in _CURSOR_MD5S)
+
+
 class ClaudeAgent:
     name = "claude"
 
@@ -799,6 +820,51 @@ class ClaudeAgent:
         exported, _streamed = _exported(session_id, path, path.parent / session_id,
                                         label=path.name)
         return exported
+
+    def export_increment(self, session_id: str, hint_dir: str | Path | None = None,
+                         cursor: dict | None = None) -> Increment:
+        """`export`, plus where the new bytes start (design B.2).
+
+        The same single pass; it also snapshots the md5 at the cursor's sealed line, so the
+        sealed prefix can be checked against what was sealed last time. The prefix is the
+        same bytes at the same offset -> `append_from = cursor.raw_stable`; anything else
+        (no cursor, another agent session, a shorter or rewritten source) -> None, the whole
+        raw is cut again. `seal_upto` is where the main content ends.
+        """
+        path = find_jsonl(session_id, hint_dir)
+        good = _cursor_ok(cursor) and cursor["agent_session_id"] == session_id
+        sealed = cursor["sealed_line_count"] if good else None
+        exported, packed = _exported(session_id, path, path.parent / session_id,
+                                     label=path.name,
+                                     capture=(sealed,) if sealed is not None else ())
+        append_from = None
+        if (good and packed.main_count >= sealed
+                and packed.stable_at[sealed] == cursor["raw_stable"]
+                and packed.stable_md5(sealed) == cursor["sealed_md5"]):
+            append_from = cursor["raw_stable"]
+        try:
+            source_size = path.stat().st_size
+        except OSError:
+            source_size = 0
+        out = {"version": 1, "agent_session_id": session_id, "path": str(path),
+               "source_size": source_size,
+               # what is sealed: the old values when this is an append, nothing otherwise
+               "sealed_line_count": cursor["sealed_line_count"] if append_from is not None else 0,
+               "sealed_md5": cursor["sealed_md5"] if append_from is not None else EMPTY_MD5,
+               "raw_stable": append_from if append_from is not None else 0,
+               "base_md5": exported.raw_md5,
+               "main_line_count": packed.main_count, "main_md5": packed.main_md5}
+        return Increment(exported, append_from, packed.main_end, out)
+
+    def collect_increment(self, launch: Launch, cursor: dict | None) -> "Increment | None":
+        if not launch.agent_session_id:
+            raise AgentError("沒有 agent session id，無法收尾")
+        session_id = launch.agent_session_id
+        _warn_cleared(find_jsonl(session_id, launch.cwd), session_id)
+        inc = self.export_increment(session_id, launch.cwd, cursor)
+        if inc.exported.message_count <= launch.before_count:
+            return None
+        return inc
 
     def turns(self, raw: bytes) -> Turns:
         main, _aux = _unpack_raw(raw)
