@@ -500,7 +500,8 @@ def cmd_import(args, paths: store.Paths) -> int:
     for k, external_id in enumerate(ids, 1):
         _progress("匯入", k, len(ids), external_id)
         try:
-            code = _import_one(agent, external_id, updates, paths, index, add_tags)
+            code = _import_one(agent, external_id, updates, paths, index, add_tags,
+                               **({"as_new": True} if getattr(args, "as_new", False) else {}))
         except InputError as e:      # a single id used to end here: exit 1 (S1-2)
             print(f"[agora] {external_id} 匯入失敗：{e}", file=sys.stderr)
             code = EXIT_INPUT
@@ -522,7 +523,8 @@ def _content_turn_count(turns: list[tuple[str, list[str]]]) -> int:
 
 
 def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Paths,
-                index: store.Index, add_tags: "list[str] | None" = None) -> int:
+                index: store.Index, add_tags: "list[str] | None" = None, *,
+                as_new: bool = False) -> int:
     """One import. Unchanged content and no --header is a no-op that just
     prints the same id (R4: a re-run after Ctrl-C skips what is done).
 
@@ -530,12 +532,20 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
     that index current, so a later id still sees what an earlier one saved.
     """
     add_tags = add_tags or []
+    if as_new:
+        # The migration switch (design F.1 step 3): the old-format Session of the same source is
+        # ignored. One that is already `chunks/1` is the answer - a re-run is a no-op, and nothing
+        # is exported for it (an 800 MB source is not read twice).
+        for ulid in index.by_source(agent.name, external_id):
+            if store.raw_kind(h.agora_of(index.header(ulid) or {}).get("raw")) == "chunks":
+                print(f"agora:{ulid}")
+                return 0
     # An agent that can say where its new bytes start (claude) exports with the cursor of the
     # session an update would go to; the first import has none and is cut whole, already in
     # segments (design B.8, tasks 3.16). The rest export as before.
     exporter = getattr(agent, "export_increment", None)
     if exporter is not None:
-        probe = index.by_source(agent.name, external_id)
+        probe = [] if as_new else index.by_source(agent.name, external_id)
         cursor = store.read_cursor(paths, probe[0]) if probe else None
         increment = exporter(external_id, None, cursor)
         exported = increment.exported
@@ -545,7 +555,7 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
     if exported.message_count <= 0:
         raise InputError(f"{external_id} 沒有任何訊息，不匯入")
     body = reading_of(agent, exported)
-    existing = index.by_source(agent.name, exported.session_id)
+    existing = [] if as_new else index.by_source(agent.name, exported.session_id)
     plan = None
     if increment is not None and increment.cursor is not None:
         plan = {"append_from": increment.append_from, "seal_upto": increment.seal_upto,
@@ -554,7 +564,7 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
     raw_src = exported.raw_file if exported.raw_file is not None else exported.raw
     if existing:
         old = index.header(existing[0])
-        if raw_is_legacy(old):
+        if store.raw_kind(h.agora_of(old).get("raw")) != "chunks":
             # An ordinary import updates `existing[0]` in place, and for a session whose raw this
             # version does not read that would be an automatic upgrade - or a branch that makes
             # the old session undeletable (design C.3). The one way is a re-import beside it.
@@ -602,11 +612,6 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
         auto = _auto_header("import", [], body, title=exported.title, exported=exported, agent=agent)
     # a new session: its id is minted in _save's header, so there is no earlier cursor to append to
     return _emit(_save(paths, _with_user(auto, updates, add_tags=add_tags), body, raw_src, plan=plan))
-
-
-def raw_is_legacy(header: dict | None) -> bool:
-    """Does this header's raw belong to the layouts this version does not read?"""
-    return store.raw_kind(h.agora_of(header or {}).get("raw")) == "legacy"
 
 
 def _branched(index: store.Index, ulid: str) -> bool:
@@ -2727,6 +2732,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="continue --headless：opencode server 要聽的埠（由呼叫方分配）")
     p.add_argument("--harness-file",
                    help="continue：啟動方在單一 agent 啟動時交付 harness（檔案要存在且可讀）")
+    p.add_argument("--as-new", action="store_true",
+                   help="import：遷移用——忽略同來源的舊格式 Session，重新匯入成新的（已有同來源的新格式就回它）；"
+                        "舊的一個位元組都不動")
     p.add_argument("--yes", action="store_true", help="delete：確定要移到 Drive 垃圾桶")
     p.add_argument("--force", action="store_true",
                    help="delete：連正在接續中的一起刪（要加 --yes；刪掉之後那個 agent 的寫回會另存成新的 Session）")
@@ -2739,8 +2747,35 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def cmd_migrate(argv: list[str]) -> int:
+    """`agora migrate inventory [--json] [--must-keep FILE]` (design G.2): read-only.
+
+    It does not go through `main`'s preamble: that recovers pending records, takes notices off
+    the disk and counts the outbox, and an inventory touches nothing."""
+    from agora import migrate
+    parser = argparse.ArgumentParser(prog="agora migrate", description="舊格式 Session 的搬遷盤點（唯讀）")
+    sub = parser.add_subparsers(dest="step", required=True)
+    inv = sub.add_parser("inventory", help="列出舊格式 Session 的類別、替代版本與可不可以丟（唯讀）")
+    inv.add_argument("--json", action="store_true", help="輸出 JSON（只有 metadata：沒有 title／body）")
+    inv.add_argument("--must-keep", metavar="FILE",
+                     help="必保清單（repo 外的本機檔，一行一個 agora:<ULID> 或 <ULID>）；讀不進來就不給候選")
+    args = parser.parse_args(argv)
+    try:
+        report = migrate.inventory(store.Paths.from_env(), args.must_keep)
+    except migrate.MigrateError as e:
+        print(f"[agora] {e}", file=sys.stderr)
+        return EXIT_INPUT
+    except store.StoreError as e:
+        print(f"[agora] {e}", file=sys.stderr)
+        return EXIT_ERROR
+    print(json.dumps(report.as_json(), ensure_ascii=False, indent=1) if args.json else migrate.render(report))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "migrate":
+        return cmd_migrate(argv[1:])
     if not argv:                 # the interactive mode (design 5.9), only for a person at a terminal (review T1)
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             build_parser().print_usage(sys.stderr)

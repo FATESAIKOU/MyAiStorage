@@ -7,6 +7,10 @@ NOT a pytest test: run by hand from the worktree root::
     uv run python tests/perf/measure_import_mem.py --sizes 100,400,800 \
         --long-lines 1,10 --out /tmp/r1-import.json
 
+Not run by CI (it lives outside `tests/unit` and is not named `test_*.py`); anybody can run it by
+hand. It reads nothing real and connects to nothing: every directory is a private temp one and the
+Drive is `tests/fakes/fake_rclone.py`. The numbers it prints are the ones in `docs/perf.md`.
+
 What it does:
 
 1. For each size, builds a private playground under `/tmp/r1-*` (HOME /

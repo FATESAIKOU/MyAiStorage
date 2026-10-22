@@ -94,6 +94,8 @@ agora import session --external-session-id ses_xxxx --agent opencode --header 't
 agora import session --external-session-id 0f1e…-uuid --agent claude
 agora import session --external-session-id 0f1e…-uuid --agent agy   # agy 的 id 是 conversations/<id>.db 的檔名
 agora import session --external-session-id ses_a,ses_b --external-session-id ses_c --agent opencode
+agora import session --external-session-id 0f1e…-uuid --agent claude --as-new   # 搬遷：忽略同來源的舊格式 Session，重匯成新的
+agora migrate inventory --json --must-keep ~/keep.txt   # 搬遷盤點（唯讀）：哪些舊格式 Session 可以丟；流程見 docs/migration.md
 
 # 找：--filter KEY=VALUE 是全等，KEY~=TEXT 是包含；text 是全文
 agora search session --filter text~=表格
@@ -238,9 +240,9 @@ agy 的對話是一個 SQLite 檔（`~/.gemini/antigravity-cli/conversations/<id
 
 | 位置 | 內容 |
 |---|---|
-| Drive `agora/sessions/<ULID>/` | `session.md`（header＋閱讀版）、`raw-<md5>.json`（原始匯出） |
+| Drive `agora/sessions/<ULID>/` | `session.md`（header＋閱讀版；header 的 `agora.raw.segments` 是 raw 的清單）、`seg-<世代>-<序>-<md5 前 12 碼>.part`（raw 的一段，接起來就是整份原始匯出；沒有整份 `raw-*.json`）。升級前上傳的舊格式 Session 還有 `raw-<md5>.json`：閱讀版可讀、raw 不可用、不要刪、沒有原地轉存，見 [docs/migration.md](docs/migration.md) |
 | `~/.config/agora/` | `rclone.conf`、`config.json` |
-| `~/.cache/agora/` | 鏡像與搜尋索引（含原始檔），刪掉也會重建 |
+| `~/.cache/agora/` | 鏡像與搜尋索引（含整份原始檔），刪掉也會重建 |
 | `~/.local/state/agora/` | `outbox/`（等著上傳的）、`trash-queue/`（等著移到 Drive 垃圾桶的）、`pending/`（接續中的）、`upload.log`（背景的記錄）、`*/.bad/`（讀不了的壞檔，每個指令都會提示）——**不要刪** |
 
 ## 測試

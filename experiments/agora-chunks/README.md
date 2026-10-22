@@ -116,6 +116,16 @@ rclone --config ~/.config/agora/rclone.conf lsf gdrive: --dirs-only | grep agora
 沒有輸出就是清乾淨了。如果腳本印出 `THROWAWAY FOLDER STILL EXISTS`，照它印的
 `rclone … purge gdrive:agora-probe-k1-xxxxxxxx` 手動清。
 
+## 乾跑：只印要跑的指令
+
+```bash
+python3 experiments/agora-chunks/probe_drive.py --answers --dry-run
+```
+
+`--dry-run`（搭配 `--answers`／`--quick`／`--full` 其中一個）只印那個模式會跑的 rclone 指令
+（`<cfg>`、`<probe>` 是佔位符），**不叫 rclone、不連網路、不建任何檔**，也不讀 config。
+用來在真正跑之前看一眼會碰什麼；真正的探針由本人或 PM 跑（design K.1）。
+
 ## 不連 Drive 的自測
 
 用 repo 裡的假 rclone 跑 `--quick`（假 rclone 沒有 `version`、`ModTime`、目錄下載、

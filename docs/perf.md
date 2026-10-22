@@ -132,40 +132,53 @@ listing 裡的值（不存在＝空字串）都沒變，就不再下載、也不
 上傳順序（raw → session.md）、上傳後的 md5 確認（H1）、更新前的存在檢查（L7）與
 copy 前的再檢查（resurrect）都沒有動。
 
-## R1 匯入量測（草稿；R4 轉正）
+## 匯入量測（100／400／800 MB）
 
-2026-10-22，MyAiStorage#154（R1 串流匯入）。腳本 `tests/perf/measure_import_mem.py`，
-全部隔離：假 HOME、`AGORA_CLAUDE_HOME` 指到假 projects、假 rclone（`tests/fakes/fake_rclone.py`）、
-`AGORA_UPLOAD=inline`、`AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`TMPDIR` 在 `/tmp/r1-*`，
-量完立刻刪。`agora import` 跑在**新的子行程**，數字是那個子行程的
-`resource.getrusage(RUSAGE_SELF).ru_maxrss`（不含產生假 session 與量測腳本自己）。
+腳本 `tests/perf/measure_import_mem.py`（R1 #154 寫成，R4 #175 轉正；2026-10-22 在 R3 全部合併之後的版本重量）。
+**不是 pytest、不被 CI 跑**（`tests/perf/` 不在 `tests/unit` 之下，也不叫 `test_*.py`）；任何人都可以在 worktree 根目錄手動跑：
 
-假 session 的形狀：一小段對話＋固定大小（約 0.5 MB 的 body、一行約 1 MB）的 `tool_result`；
-閱讀版（`session.md`）因此只隨輪數長（100→800 MB 是 21.6 KB→167.7 KB），不是隨工具輸出長。
-sidecar 固定 64 KB。
+```bash
+python tests/perf/measure_import_mem.py --out /tmp/import-mem.json     # 預設 100,400,800 MB 與 1,10 MB 單行；約 1 分鐘
+python tests/perf/measure_import_mem.py --sizes 5 --long-lines 1       # 煙霧測試
+```
 
-| 大小 | 最長一行 | 峰值 RSS | 匯入秒數 | 閱讀版 | 磁碟（原檔／鏡像／假 Drive） | 上傳 |
+全部隔離：假 HOME、`AGORA_CLAUDE_HOME` 指到假 projects、假 rclone（`tests/fakes/fake_rclone.py`）、`AGORA_UPLOAD=inline`、
+`AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`TMPDIR` 在 `/tmp/r1-*`，量完立刻刪；**不碰真資料、不連 Drive**。
+`agora import` 跑在**新的子行程**，數字是那個子行程的 `resource.getrusage(RUSAGE_SELF).ru_maxrss`（不含產生假 session 與量測腳本自己）。
+斷言（design I.8／L15）：`peak(800) ≦ 1.2 × peak(100)` 且 `peak(800) ≦ 256 MiB`；秒數沒有門檻，記下來對照。
+
+假 session 的形狀：一小段對話＋固定大小（約 0.5 MB 的 body、一行約 1 MB）的 `tool_result`；閱讀版（`session.md`）因此只隨輪數長，
+不是隨工具輸出長。sidecar 固定 64 KB。
+
+| 大小 | 最長一行 | 峰值 RSS | 匯入秒數 | 閱讀版 | 磁碟（原檔／鏡像／假 Drive） | 上傳（`C` = 4 MiB） |
 |---|---|---|---|---|---|---|
-| 100.9 MB | 0.51 MB | **35.8 MiB** | 2.30 | 21.6 KB | 100.9／102.0／102.0 MB | 2 檔（raw＋session.md） |
-| 403.5 MB | 0.51 MB | **38.0 MiB** | 6.72 | 84.0 KB | 403.5／407.9／407.9 MB | 2 檔 |
-| 807.5 MB | 0.51 MB | **39.1 MiB** | 16.42 | 167.7 KB | 807.5／816.2／816.2 MB | 2 檔 |
+| 100.9 MB | 0.51 MB | **37.3 MiB** | 2.02 | 24.5 KB | 100.9／102.0／102.0 MB | 28 檔（段＋`session.md`）、2 次 copy |
+| 403.5 MB | 0.51 MB | **35.8 MiB** | 6.82 | 94.8 KB | 403.5／407.9／407.9 MB | 104 檔、2 次 |
+| 807.5 MB | 0.51 MB | **36.6 MiB** | 18.8 | 189.4 KB | 807.5／816.2／816.2 MB | 206 檔、2 次 |
 
-斷言（design I.8／L15）：`peak(800) 39.1 ≦ 1.2 × peak(100) 35.8`（比值 1.09）✔；
-`peak(800) ≦ 256 MiB` ✔。秒數沒有門檻，記下來給 R4 對照。
+`peak(800) 36.6 ≦ 1.2 × peak(100) 37.3`（比值 0.98）✔；`peak(800) ≦ 256 MiB` ✔。上傳的檔數是 `ceil(main_end/C)` 個封存段＋tail＋
+`session.md`（R3 之後 Drive 上沒有整份 raw）。這次與其他工作同時在一台機器上跑（秒數有雜訊，只當量級）。
 
 單行很長（design K14；一行就是那個大小）：
 
 | 一行 | 峰值 RSS |
 |---|---|
-| 1.02 MB | 43.4 MiB |
-| 10.21 MB | 137.8 MiB |
+| 1.02 MB | 41.3 MiB |
+| 10.21 MB | 136.3 MiB |
 
-磁碟峰值：一次匯入同時會有原檔＋outbox 的整份 raw＋Drive 的整份 raw，結束後 outbox 已清空、
-鏡像與 Drive 各留一份；800 MB 那一筆結束時是 2.4 GB（推得峰值約 3.2 GB）。R1 還沒有分段
-（`chunks/1` 是 R3），所以 Drive 上仍是一個整份 raw＋`session.md`（2 個檔），不是
-`ceil(main_end/C)+1` 個段；R3 的 K.2 那一條要用 R3 之後的版本量。
+磁碟峰值：一次匯入同時會有原檔＋outbox 的整份 raw＋Drive 的段，結束後 outbox 已清空，鏡像與 Drive 各留一份；800 MB 那一筆結束時是
+2.4 GB（推得峰值約 3.2 GB）。
 
-## R3b-2 增量量測（草稿；R4 轉正）
+### 這些數字的前提與未知
+
+- 前提：每輪上傳量的上限是 **`C + I + S`**（C＝一段 4 MiB、I＝這輪新增、S＝閱讀版 `session.md`）——見下一節 814 MB 多輪的實測；
+  匯入量測的是**第一次**（整份、一次）。
+- 假資料的 `tool_result` 是固定形狀，**閱讀版大小固定**；真 session 的閱讀版（K6）、`aux`／sidecar 的大小與變動頻率（K5）、
+  真實 Claude Code 的 jsonl 是不是真的只追加（`/compact`、跨版本 resume，K4）都**沒有量**：K4 決定多常退回整份，K5 決定 tail 多大，
+  K6 是剩下的地板（`session.md` 整份上傳）。這三個要靠真資料，本人在真環境量（只看大小與 metadata）。
+- 真 Drive 的 listing 延遲、幾千個檔時的 API 配額（K1、K3、K10）沒有量；假 rclone 只回答流程與位元組。
+
+## 814 MB 多輪的增量量測
 
 2026-10-22，MyAiStorage#170。腳本 `tests/perf/measure_increment.py`（`python tests/perf/measure_increment.py --size-mb 814 --rounds 6 --grow-mb 1 --sessions 20`）。全部隔離：假 HOME、假 rclone、`/tmp/r3b2-*`，量完立刻刪。
 每輪是一個**新子行程**做 `export_increment` → `stage(plan)` → `upload_batch`（與 `continue` 寫回同一條路；沒用 `import`，因為 `import` 更新時的「不覆蓋較少內容」比對會把舊 raw 整份讀進記憶體）。`C` = 4 MiB，R1 形狀的假 session（約 1 MiB 一行的 `tool_result`），每輪新增約 1 MiB。上傳位元組是 `copies.log` 裡這一輪送出的檔案大小總和（含 `session.md`）。

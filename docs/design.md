@@ -92,7 +92,8 @@ agora:                                # 系統欄位，使用者不能改
   relation: import                    # import | continue | merge | fork（5.4：--fork 分出來的新 Session）
   parents: [{id: "agora:01K5...", raw_md5: "…"}]
   source: {agent: opencode, session_id: ses_xxxx, dir: /Users/me/proj, host: mbp, agent_version: 1.18.34, created_at: 2026-10-01T11:00:00Z}
-  raw: {file: raw-0123456789ab.json, md5: "…", size: 12345}
+  raw: {md5: "…", size: 12345, layout: chunks/1,   # 整份 raw 的 md5／大小；沒有 file 欄位（舊格式才有）
+        segments: [{file: seg-0001-0000-0123456789ab.part, size: 4194304, md5: "…"}, …]}   # 清單；最後一段是 tail
 ---
 ```
 
@@ -113,18 +114,24 @@ agora:                                # 系統欄位，使用者不能改
 ```
 Drive: agora/                              （rclone 內建 client 建立；以 folder ID 存取）
   sessions/<ULID>/
-    session.md                header ＋ 閱讀版；「這個版本完成了」的標記
-    raw-<md5 前 12 碼>.json   來源 agent 的原始匯出（N15）：
+    session.md                header ＋ 閱讀版；header 的 `agora.raw.segments` 就是 raw 的清單，
+                              「這個版本完成了」的標記
+    seg-<世代>-<序>-<md5 前 12 碼>.part
+                              raw 的一段（連續的 bytes；內容定址）。段接起來就是整份 raw，
+                              整份 raw 是來源 agent 的原始匯出（N15）：
                               opencode＝export 的 JSON 原封不動；
                               claude＝{"format":"claude-jsonl/1","main":[每一行原字串],"aux":{"<相對路徑>":"內容"}}
                               agy＝{"format":"agy-conversation/1","agy_version":null,
                                     "trajectory_id":…,"scan_text":[…],"db_b64":整包 db 的 base64}
                                     （db 不刪不改；scan_text 是獨立於閱讀版的掃描明文，
                                       包含工具輸出，不含 gen_metadata 的設定字串）
+                              Drive 上**沒有**整份 `raw-*.json`（#169）。升級前上傳的舊 Session 才有：
+                              它沒有 `layout`，這個版本不讀它的 raw（閱讀版照常可讀），也不逐檔刪；
+                              它只隨整個資料夾被 `agora delete` 一起進垃圾桶（搬遷見 docs/migration.md）
 Mac:
   ~/.config/agora/            rclone.conf（rclone 內建 client）、config.json（folder ID）
-  ~/.cache/agora/             鏡像（只有 session.md）＋ index.sqlite；壞了刪掉重建
-  ~/.local/state/agora/       outbox/、pending/ ——不能刪；tmp/ 是匯出／快照的暫存
+  ~/.cache/agora/             鏡像（session.md；用到過的 session 另有整份 raw）＋ index.sqlite；壞了刪掉重建
+  ~/.local/state/agora/       outbox/、pending/、cursors/、published/、folder-ids/、unfinished.json ——不能刪；tmp/ 是匯出／快照的暫存
 ```
 
 ### 4.1 寫入順序（S1；2026-10-03 改成「先存本機完整的一份，背景上傳」）
@@ -155,14 +162,15 @@ Mac:
 - **pending**：continue-session 啟動 agent **之前**寫一份 `{agora_id, parent, agent, agent_session_id, dir, started_at, before_count}`，建立時就已經上鎖（`flock`），並把鎖用 `pass_fds` 交給 agent 一起持有（C1、C3）。agent 結束後收尾成功才刪。任何 agora 指令開始時檢查 pending：**拿得到 flock**（表示 agora **和** agent 都已經不在了）才補做收尾；`--no-sync` 時只提示不補存；`agora_id` 事先決定，所以補存是冪等的（N2）。
 - 留在 outbox 的 Session 在這台機器上照樣搜得到（N13）。exit code 是 3 只在**背景上傳器起不來**（或 `AGORA_UPLOAD=inline` 時這一輪沒送完）時給；起得來就 exit 0，東西還在 outbox 是背景的事（4.1）。
 - 壞掉的本機檔案（pending 不是合法 JSON、outbox 缺 session.md、header 的 YAML 壞了）移到 `.bad/`，不刪、不讓其他指令跟著壞；Drive 上的壞檔只跳過（C2）。
-- header 沒有 `raw` 的 session.md（merge）本身就是完整的；讀的一方比對 raw 用的是 `lsjson --hash` 列出的 md5，不下載 raw（N5、N11）。
+- header 沒有 `raw` 的 session.md（merge）本身就是完整的；讀的一方判斷 raw 完不完整，用的是 `lsjson --hash` 列出的 md5：清單裡的**每一個段**都在、md5 對（`store.raw_complete`），不下載 raw（N5、N11）。
 
 ### 4.3 sync（S5、L2）
 
 - 列檔一律 `rclone lsjson -R --fast-list --hash`，一次拿到所有檔案的 md5；用 md5 判斷要不要下載（不用時間）。
-- 鏡像只抓 `session.md`；raw 在 continue 或 `show --raw` 用到時才抓。
+- 鏡像只抓 `session.md`；raw 在 continue 或 `show --raw` 用到時才抓：只抓缺的段、逐段驗 md5、接成整份（`ensure_raw_file`），已驗過的段下次不重抓。
+- **不是 `chunks/1` 的 Session**（沒有 `layout` 的舊格式、不認得的 layout、壞掉的清單）：建索引、閱讀版可讀，但 raw 不可用（`show --raw`／`continue` 給明確錯誤），**不下載、不刪**；`state/unfinished.json`（v2，每筆有 `legacy` 旗標）記住它，下一次 sync 不再重新下載。要變成新格式只能 `agora import … --as-new` 重匯（沒有原地轉存），見 docs/migration.md。
 - Drive 上已經不存在的 Session，從鏡像和索引刪掉（outbox、pending 不動）。但 Drive 上**找不到 `sessions/`**（folder ID 或 token 出問題）時不刪，只警告（N12）。
-- continue 時抓不到 raw（另一台機器重新匯入、刪了舊 raw），先重抓那一份 session.md 再試一次（N8）。
+- continue 時抓不到某個段（另一台機器寫了新版、清掉了舊的段），先重抓那一份 session.md 再試一次（N8）；已驗過的段不重抓。
 - 上傳一律用 `rclone copyto`：`rclone copy` 目的地寫成檔名時會靜默建成同名資料夾（spike V4）。
 - search 前的 sync 有節流：距離上次成功 sync 不到 5 分鐘就跳過；`--no-sync` 直接跳過；網路不通時查本機，印一行警告。
 - import 前一律做一次不節流的 sync（S6）。
@@ -237,6 +245,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 - **agy 的清單與搜尋是窄的**：`list_sessions()` 讀 `conversation_summaries.db` 的 `title`／`preview`／`last_modified_time`／`step_count`／`workspace_uris`，以該檔的 `(mtime, size)`（含 `-wal`）為快取鍵；`search_text()` **只搜標題＋preview，不搜內文**（`--help` 與 TUI 的內文搜尋提示都寫明）；`last_message()` 點選時才對那一個 session 做一次 snapshot，role 由 `step_type`（14 user／15 model）取。
 - 只上傳指定的那一個 Session。
 - **一次可以匯入多個**（2026-10-03 使用者決定）：`--external-session-id` 可以給多次或用逗號分隔。**先同步一次**，再逐一匯入；**某一個失敗照樣做下一個**，stderr 說明是哪一個失敗，exit code 是第一個非零的（全部成功是 0）。
+- **`--as-new`（搬遷用，#175）**：忽略同一個 agent＋session id 的**舊格式** Session，重新匯入成新的（`relation: import`、沒有 `parents`，所以舊的仍能被 `delete`）；已經有同來源的 `chunks/1` Session 就印出它的 id、什麼都不做（重跑是 no-op，也不讀來源）；舊 Session 一個位元組都不動。沒有 `--as-new` 時，同來源的 Session 不是 `chunks/1`（舊格式）就**拒絕**（exit 1，訊息指向 `--as-new`）：不更新它、不分支。
 - 同一個來源 Session 再匯入：內容沒變、也沒有 `--header`，就不做事；內容沒變但有 `--header`，只更新標頭；內容變了而且還沒有子 Session，就更新同一個 agora id；已經有子 Session，就建一個新的（`relation: import`、`parents: [舊 id]`，S7）。
 
 ### 5.3 merge（第 7 版：2026-10-02 使用者決定）
@@ -345,7 +354,7 @@ Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之�
 - **背景**對佇列裡每個 ULID 跑**一次 `purge`**（不是逐檔刪再加 rmdirs：那樣 Drive 垃圾桶裡會是零散檔案），沿用下面 S1-4／S1-4b 的判斷；成功的從佇列移除，**失敗的留在佇列裡等下一個指令**並說一聲，而且不擋住後面那幾筆。
 - **雲端沒有的 Session 只刪本機，不進佇列**（L6）：沒有東西要 purge。指令的結尾句也只在真的有排隊時才說「背景移到 Drive 垃圾桶」。
 - **佇列裡的 ULID**：`sync` 列檔看到時不放進索引、也不算進 `mark_missing`（所以不會被當成「別台刪掉的」又冒出來）；**`pull`、`push` 都拒絕**，說「正在刪除」（M5），兩個都用同一個 `store.queued_for_trash(paths)` 判斷（N10）；每個指令開頭提醒「有 N 個等著移到 Drive 垃圾桶」（L4），背景正在跑時不提醒。
-- Drive 上 `sessions/<ULID>/` 整個**移到 Drive 垃圾桶**（30 天內可以在 Drive 網頁還原）。
+- Drive 上 `sessions/<ULID>/` 整個**移到 Drive 垃圾桶**（30 天內可以在 Drive 網頁還原）。裡面的 `session.md`、所有 `seg-*`、舊格式的 `raw-*.json` 一起進去——**舊 raw 沒有逐檔刪的程式，丟舊 Session 就是它唯一的下場**。
 - 一定要加 `--yes`，沒加就只印出會刪什麼，exit 1。
 - 有子 Session（別的 Session 的 `parents` 指向它，fork 出來的也算）時不刪，列出那些子 Session，exit 1。
 - **重跑會接著做**（2026-10-03 使用者決定）：刪除成功時把 ULID 記到 `<state>/deleted`；重跑同一個指令時，**在這份記錄裡的** id 印「已經不在了，略過」並不算失敗（全部都略過時 exit 0）。**從來不存在的 id（例如打錯）照樣報找不到、exit 1**——只有自己刪過的才略過。
@@ -489,12 +498,12 @@ Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之�
   - 背景上傳器的記錄：`<state>/upload.log`（超過 1 MB 只留尾巴）；鎖：`<state>/upload.lock`；等著移到垃圾桶的：`<state>/trash-queue/`。
   - 這台機器上 agent 的 session：`reading/<agent>/<session id>.md`，閱讀版的全文；mtime 設成該 session 自己的更新時間，比較新就是過時。
 - **`agora pull session <id>…`／`agora push session <id>…`：只吃給的 id**（2026-10-03 使用者決定，沒有 `--all`，不給 id 就報錯；要全部就在 TUI 按 `a`，或從 search 用管線接過來）。id 的前綴決定意思，不從形狀猜：
-  - 沒有前綴或 `agora:`：agora 的 Session。pull 拿下 `session.md` 與標頭指到的原始檔；push 寫回 `session.md` 與同一個原始檔。
+  - 沒有前綴或 `agora:`：agora 的 Session。pull 拿下 `session.md` 與清單裡缺的段（接成整份 raw）；push 寫回 `session.md` 與清單裡的每一個段（從本機整份 raw 切出來）。舊格式（不是 `chunks/1`）的 Session 兩者都不碰 raw，push 也不會把舊格式寫回 Drive。
   - `opencode:<id>`／`claude:<id>`：這台機器上的 agent session，pull 把全文寫進快取。
   - `ses_…`／uuid 沒有 agent 前綴：報錯。
   - push 的 id 只能是 agora 的。
 - 已經在本機、沒有過時的，pull 略過；push 則重新覆蓋一次（結果一樣）。
-- **push 只傳該傳的兩個檔**：`session.md` 與它標頭 `agora.raw.file` 指到的那一個原始檔（本機沒有那個原始檔就只傳 `session.md`）。舊的原始檔、下載到一半的檔、以 `.` 開頭的檔都不傳。
+- **push 只傳該傳的檔**：`session.md` 與它標頭 `agora.raw.segments` 列的段（本機沒有整份 raw 就只傳 `session.md`）。舊的段、下載到一半的檔、以 `.` 開頭的檔都不傳；`session.md` 在所有段都在 Drive 上之後才傳，讀的一方才不會看到缺段的版本。
 - **push 會等自己的 id**（2026-10-03，N2）：它拿背景上傳器的那把鎖，等到**它剛寫的**那些 id 離開 outbox 才算成功；背景正在跑就等（每 10 秒說一次為什麼在等，Ctrl-C 隨時可退）。其他指令不等，也不需要等。
 - 兩個指令都逐個在 stderr 印 `k/N`，某一個失敗照樣做下一個。
 - **雲端沒有的 Session**（2026-10-03 決定，規格見 `openspec/changes/command-batch-actions/specs/session-sync/spec.md`）：
@@ -503,6 +512,17 @@ Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之�
   - **其他指令遇到它**：會寫回既有 id 的指令（continue、edit）**拒絕**（exit 1），並提示上面那兩個選擇，agent 不會被打開（判斷同時看標記與當下的 Drive，離線時也不會放行）；merge 不接受雲端沒有的 Session 當來源；delete 雲端沒有的只刪本機副本（exit 0）；它不算成別人的子 Session（不擋刪除、也不讓 import 分岔）；import 的來源對到雲端沒有的那一筆時建一個新的 Session。
   - **看得到**：`search` 每行最後標 `(雲端沒有)`，並支援 `--filter cloud=no`／`cloud=yes`（只列出雲端沒有的可以用管線接著清掉）；`show` 也標。
 - 互動模式：`r` 選「Agora／本機」更新快取，`s` 確認後 push，都在等待視窗裡跑，最新一行就是進度。未匯入頁的完整對話用 `reading/` 的快取；內文搜尋先搜快取，再用轉接器的 `search_text()` 補搜還沒快取的。
+
+### 5.11 migrate inventory（搬遷盤點，#175）
+
+`agora migrate inventory [--json] [--must-keep <file>]`：**唯讀**，只回答「哪些舊格式 Session 可以丟」（完整流程在 `docs/migration.md`）。
+
+- **讀什麼**：本機索引（以唯讀開、只用 `json_extract` 取 metadata；不 SELECT 閱讀版、不載入整個 header、不讀 `raw.file`）、Drive 的一次 listing（檔名與 md5）、這台 agent store 裡來源「在不在」（claude `find_jsonl`、opencode 的 session id 集合、agy `db_path`）、本機 outbox 的資料夾名與其中 header 的 `layout`、`state/deleted` 墓碑。
+- **不做什麼**：不 `sync`、不下載任何 `session.md`、不上傳、不啟動上傳器、不開 agent 的內容、不重建索引（索引版本不符就報錯，要求先跑一次正常指令）、不替沒連過 Drive 的機器建 Drive 資料夾。Drive 端只允許 `lsjson`。
+- **輸出**（`--json`）：`host`、`counts`、`drop_list`（只有 id，升冪）、`must_keep_deleted`（只有 id）、每筆 `ulid`／`agent`／`external_id`／`host`／`relation`／`layout`／`raw_size`／`class`／`replacement`／`old_children`／`lineage`／`must_keep`／`lineage_protected`／`continuing`／`outbox_legacy`／`droppable`／`not_droppable_reason`。**沒有 title、description、tags、body。**
+- **`identical`** 才算替代版本真的到位：兩邊整份 raw 的 md5＋大小相同、替代版本就是 Drive 上那一份（索引的 `session.md` md5 等於 listing 的）、它列的每個段都在 Drive 上、舊的也還是 Drive 上那一份。原檔變短重匯、替代版本還在 outbox、少一個段，都是 `different`，不進 `drop_list`。
+- **`drop_list` 以一條 lineage 為單位**：同一條 lineage 的成員 `droppable` 同值；只有 `local-present`、非接續中、`identical`、沒有卡住的舊格式 outbox entry、而且 lineage 裡每一筆都一樣時才進去。
+- **必保清單**：repo 外的本機檔，一行一個 `agora:<ULID>` 或 `<ULID>`（26 碼大寫 Crockford），`#` 註解、空行忽略；BOM／CRLF／前後空白先正規化，重複只算一次。**讀不進來、不是 UTF-8、0 個 id、有不認得的行、有找不到又不在墓碑的 id → 錯誤、exit 非 0、不給任何候選**；訊息只有路徑、行號、認得的 id 與原因，**不重印清單的任何一行**，清單內容不寫進 log／`state`。
 
 ## 6. 不做的事
 
