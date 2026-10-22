@@ -16,6 +16,8 @@
 
 ## 0. 換成這一版
 
+> 以下是 2026-10-03 那次驗收的環境；現行版本見 git。
+
 你平常用的是穩定版（`9baa0e5`）。驗收要用這個工作目錄的版本。
 
 | # | 做 | 應該看到 |
@@ -528,17 +530,17 @@ cat "$(uv tool dir)/agora/uv-receipt.toml"    # directory = "…/agora-stable/9b
 兩種情況都一樣：平常的資料夾（`~/.cache/agora`、`~/.local/state/agora`）不受驗收影響，因為驗收全部用 `/tmp/agora-acc`。
 
 
-## 12. 舊格式 Session 與搬遷（`migrate inventory`、`--as-new`）
+## 19. 舊格式 Session 與搬遷（`migrate inventory`、`--as-new`）
 
 升級前上傳的 Session（header 的 `raw` 沒有 `layout`）：閱讀版可讀、raw 不可用、不會被刪、沒有原地轉存。步驟見 [migration.md](migration.md)。
 
 | # | 做 | 應該看到 |
 |---|---|---|
-| 12.1 | 在 `/tmp/agora-acc` 的假環境裡放一個舊格式 Session（`tests/unit/test_migrate_flow.py` 的做法），`agora show session <舊> --raw; echo $?` | 說這個 raw 是舊格式、要用 `--as-new` 重匯；exit 非 0；閱讀版（`agora show session <舊>`）仍可讀 |
-| 12.2 | `agora import session --external-session-id <它的來源 id> --agent claude; echo $?` | **拒絕**，訊息指向 `--as-new`；沒有新 Session，舊的不動；exit `1` |
-| 12.3 | `agora migrate inventory --json`（不加清單） | 只有 `host`／`counts`／`drop_list`／`must_keep_deleted`／`sessions`，沒有 title、body；`drop_list` 是 `[]`（還沒有替代版本） |
-| 12.4 | `agora import session --external-session-id <來源 id> --agent claude --as-new` | 印出**新的** id；再跑一次印出**同一個** id（不讀來源、不上傳）；舊的還在 |
-| 12.5 | 等上傳完，`agora migrate inventory --json` | 舊的那一筆 `replacement.relation_to_old` 是 `identical`，`drop_list` 有它 |
-| 12.6 | 原檔被截短後再 12.4（新的比舊的少），`agora migrate inventory --json` | `relation_to_old` 是 `different`（`md5-differs`），**不在** `drop_list` |
-| 12.7 | `agora migrate inventory --must-keep /不存在的檔; echo $?`；清單檔是空的、有一行不是 id 時各一次 | exit 非 0、沒有 `sessions`／`drop_list`；錯誤只有路徑與行號，不重印那一行 |
-| 12.8 | `agora delete session <最後一次 inventory 的 drop_list 的 id> --yes` | 只刪那幾個；`different` 的、別台的、沒有原始紀錄的都還在 |
+| 19.1 | 在 `/tmp/agora-acc` 的假環境裡放一個舊格式 Session（`tests/unit/test_migrate_flow.py` 的做法），`agora show session <舊> --raw; echo $?` | 說這個 raw 是舊格式、要用 `--as-new` 重匯；exit 非 0；閱讀版（`agora show session <舊>`）仍可讀 |
+| 19.2 | `agora import session --external-session-id <它的來源 id> --agent claude; echo $?` | **拒絕**，訊息指向 `--as-new`；沒有新 Session，舊的不動；exit `1` |
+| 19.3 | `agora migrate inventory --json`（不加清單） | 只有 `host`／`counts`／`drop_list`／`must_keep_deleted`／`sessions`，沒有 title、body；`drop_list` 是 `[]`（還沒有替代版本） |
+| 19.4 | `agora import session --external-session-id <來源 id> --agent claude --as-new` | 印出**新的** id；再跑一次印出**同一個** id（不讀來源、不上傳）；舊的還在 |
+| 19.5 | 等上傳完，`agora migrate inventory --json` | 舊的那一筆 `replacement.relation_to_old` 是 `identical`，`drop_list` 有它 |
+| 19.6 | 原檔被截短後再 19.4（新的比舊的少），`agora migrate inventory --json` | `relation_to_old` 是 `different`（`md5-differs`），**不在** `drop_list` |
+| 19.7 | `agora migrate inventory --must-keep /不存在的檔; echo $?`；清單檔是空的、有一行不是 id 時各一次 | exit 非 0、沒有 `sessions`／`drop_list`；錯誤只有路徑與行號，不重印那一行 |
+| 19.8 | `agora delete session <最後一次 inventory 的 drop_list 的 id> --yes` | 只刪那幾個；`different` 的、別台的、沒有原始紀錄的都還在 |

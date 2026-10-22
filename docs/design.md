@@ -203,11 +203,11 @@ Mac:
 agora <動作> <型態> [session_id] [選項]
 
 agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync]
-agora import   session --external-session-id <id>[,<id>...] [--external-session-id <id>...] --agent opencode|claude|agy [--header-file F] [--header K=V]...
+agora import   session --external-session-id <id>[,<id>...] [--external-session-id <id>...] --agent opencode|claude|agy [--header-file F] [--header K=V]... [--add-tag T]... [--as-new]
 agora merge    session <id>, <id>, ... --agent opencode|claude [--header-file F] [--header K=V]...
-agora continue session <id> --agent opencode|claude [--dir <專案目錄>] [--fork] [--sync-period <分鐘>] [--header-file F] [--header K=V]...
+agora continue session <id> --agent opencode|claude [--dir <專案目錄>] [--fork] [--sync-period <分鐘>] [--headless [--headless-port <埠>]] [--harness-file <檔>] [--header-file F] [--header K=V]... [--add-tag T]...
 agora delete   session <id>, <id>, ... --yes [--force]
-agora edit     session <id> [--header-file F] [--header K=V]...
+agora edit     session <id> [--header-file F] [--header K=V]... [--add-tag T]...
 agora show     session <id> [--raw]
 agora pull     session <id>, <id>, ... [--not-exist-delete]
 agora push     session <id>, <id>, ... [--not-exist-upload]
@@ -366,7 +366,7 @@ Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之�
 ### 5.7 edit
 
 - 只改標頭，不動 raw 與閱讀版；改完存成同一個 agora id 的新版本 session.md。
-- 有給 `--header`／`--header-file` 就照 3.5 疊加；**都沒給就用 `$EDITOR` 打開標頭的 YAML**，存檔關掉之後驗證並上傳，驗證不過就不存並印出原因。
+- 有給 `--header`／`--header-file`／`--add-tag` 就照 3.5 疊加（#153）：`--add-tag` 附加到 `tags`，不覆蓋原有的、不重複；和 `--header` 併用時先套 `--header` 再附加；有給任何一個就**不開編輯器**。`--add-tag` 只有 `import`、`continue`、`edit` 吃，其他動作收到會報錯（exit 1）而不是悄悄忽略。**都沒給就用 `$EDITOR` 打開標頭的 YAML**，存檔關掉之後驗證並上傳，驗證不過就不存並印出原因。
 - `id`、`agora` 區塊同樣不能改。`verified` 由本人在這裡加。
 
 ### 5.8 show
@@ -496,7 +496,7 @@ Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之�
   - agora 的 Session：Drive 鏡像 `sessions/<ULID>/`，`session.md`（閱讀版）與**原始檔都在**（4.1）。本機的 `continue`／`merge` 因此不必先抓 Drive；抓不到或 md5 不符時那一筆照樣由上傳補回去。
   - 上傳中的版本：`<state>/outbox/<ULID>/`（stage 出去、Drive 確認之前）。
   - 匯出／快照的暫存（整份私人對話、agy 快照）：`<state>/tmp/`（目錄 0700，名稱 `<用途>-<pid>-<隨機>`）——不再放共用的系統 temp。正常與例外路徑用完就刪；SIGKILL 留下的，在下一次 round／continue／export 開始時清掉，**只清擁有者已不在的**：每個暫存目錄有一把 `.owner.lock` flock，行程一死（含 SIGKILL）核心就放開，所以同時在跑的其他 `agora continue` 的暫存不會被誤刪，pid 重用也不會（pid 只在名字裡給人看）。sweep 也只動自己命名的項目（`.new-*` 或實際前綴的 `<前綴>-<pid>-<8 碼隨機>`）——`AGORA_STATE_DIR` 是使用者給的，指到的 `tmp/` 裡原本就有的東西一律不碰。清理失敗（state 讀不到、檔案系統不支援 flock）只會留著、下次再試，**不擋指令**；但**建立**暫存時拿不到鎖就直接失敗（`AgentError`，訊息請把 `AGORA_STATE_DIR` 設到本機磁碟）——不把整份對話寫到無法判斷擁有者的地方。
-  - 背景上傳器的記錄：`<state>/upload.log`（超過 1 MB 只留尾巴）；鎖：`<state>/upload.lock`；等著移到垃圾桶的：`<state>/trash-queue/`。
+  - 背景上傳器的記錄：`<state>/upload.log`（超過 1 MB 時，下一次背景啟動會把它清空重寫）；鎖：`<state>/upload.lock`；等著移到垃圾桶的：`<state>/trash-queue/`。
   - 這台機器上 agent 的 session：`reading/<agent>/<session id>.md`，閱讀版的全文；mtime 設成該 session 自己的更新時間，比較新就是過時。
 - **`agora pull session <id>…`／`agora push session <id>…`：只吃給的 id**（2026-10-03 使用者決定，沒有 `--all`，不給 id 就報錯；要全部就在 TUI 按 `a`，或從 search 用管線接過來）。id 的前綴決定意思，不從形狀猜：
   - 沒有前綴或 `agora:`：agora 的 Session。pull 拿下 `session.md` 與清單裡缺的段（接成整份 raw）；push 寫回 `session.md` 與清單裡的每一個段（從本機整份 raw 切出來）。舊格式（不是 `chunks/1`）的 Session 兩者都不碰 raw，push 也不會把舊格式寫回 Drive。
@@ -507,7 +507,7 @@ Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之�
 - **push 只傳該傳的檔**：`session.md` 與它標頭 `agora.raw.segments` 列的段（本機沒有整份 raw 就只傳 `session.md`）。舊的段、下載到一半的檔、以 `.` 開頭的檔都不傳；`session.md` 在所有段都在 Drive 上之後才傳，讀的一方才不會看到缺段的版本。
 - **push 會等自己的 id**（2026-10-03，N2）：它拿背景上傳器的那把鎖，等到**它剛寫的**那些 id 離開 outbox 才算成功；背景正在跑就等（每 10 秒說一次為什麼在等，Ctrl-C 隨時可退）。其他指令不等，也不需要等。
 - 兩個指令都逐個在 stderr 印 `k/N`，某一個失敗照樣做下一個。
-- **雲端沒有的 Session**（2026-10-03 決定，規格見 `openspec/changes/command-batch-actions/specs/session-sync/spec.md`）：
+- **雲端沒有的 Session**（2026-10-03 決定，規格見 `openspec/specs/session-sync/spec.md`（原提案已歸檔在 `openspec/changes/archive/2026-10-03-command-batch-actions/`））：
   - **同步時不再自動清掉**別台機器刪掉的 Session：本機的鏡像與索引都保留，標成「雲端沒有」。**只有在這次列檔完整成功時**才更新標記；列檔失敗、離線、或 Drive 上沒有 `sessions/` 時不新增也不清除任何標記；雲端又出現時，下一次同步就清掉。還在 outbox 的顯示為「未上傳」，不算雲端沒有；**正在接續的**（有人拿著 `pending/<ULID>.json` 的鎖）也不算——**只是留下來的記錄不算**（鎖沒人拿就是收不了尾的接續，它不再護著這個 Session，見 5.6）。另外三個「不算刪除」的情況：`pull --not-exist-delete` 時 **Drive 上沒有 `sessions/`**（那是 folder id 或 token 的問題，不是刪除的證據）會拒絕那一個；對 **agent 的 id**，`--not-exist-delete` 會先問那個 agent，**清單讀不到**（資料庫不見、認不出結構、sqlite 出錯）就當成「不知道」，不刪快取並印一行說明。
   - **只在明確要求時才刪或復活**：`pull --not-exist-delete` 刪掉本機副本（在 outbox 或接續中的不刪，並印出原因）；`push --not-exist-upload` 把它傳回 Drive（等於撤銷別台的刪除；本機沒有那個原始檔時拒絕這一個）。傳回去之前，先對那個資料夾做一次定向查詢（`list_one`）：只有 rclone 明說資料夾不存在（rc=3／`directory not found`）才傳；查得到（列表漏了它）、查到空、查不動、或 Drive 上沒有 `sessions/`，都**不傳**並說明下一次再試——列表出錯時傳回去會用本機的舊版蓋掉 Drive 上還在的新版（#159）。**全新或清空的 Drive 的復原方法**（#162）：Drive 換了帳號、資料夾被清空或換了 `AGORA_FOLDER_NAME` 時，`sessions/` 整個不存在，鏡像裡的 session 不在 outbox、背景不會送；這時 `agora push session <id>… --not-exist-upload` 會多問一次 root（先在 My Drive 自己的資料夾列表裡找到設定的 root folder ID，再列 root 看裡面沒有 `sessions/`），**兩個都成立**、而且對 `sessions/` 本身再做一次定向查詢（`_directed_look`，只有 rc=3／directory not found 才算不存在；找得到、空、查詢失敗都拒絕）才放行，印一行「Drive 上沒有 sessions/，將建立並上傳 N 個」，一次 push 只問一次；root 找不到、token 壞、網路錯、回應不一致、或 root 裡其實有 `sessions/`（列表出錯）一律照舊拒絕，因為「找不到 sessions/」本身分不出新 Drive 與設定錯。舊格式（legacy）的 session 仍不傳。兩個 flag 都沒加時只印一行提醒、不動。兩個 flag 對 agent 的 id 也有意思：`--not-exist-delete` 是「agent 那邊已經沒有這個 session 了，就刪掉它的全文快取」。
   - **其他指令遇到它**：會寫回既有 id 的指令（continue、edit）**拒絕**（exit 1），並提示上面那兩個選擇，agent 不會被打開（判斷同時看標記與當下的 Drive，離線時也不會放行）；merge 不接受雲端沒有的 Session 當來源；delete 雲端沒有的只刪本機副本（exit 0）；它不算成別人的子 Session（不擋刪除、也不讓 import 分岔）；import 的來源對到雲端沒有的那一筆時建一個新的 Session。
@@ -569,7 +569,9 @@ Python（uv）＋ rclone ＋ SQLite FTS5。**`src/` 的程式碼行數只記錄�
 | `agents/agy_summaries` | `conversation_summaries.db` 的清單與快取（`summary_rows`／`summary_for`）、時間戳單位判定（`epoch_seconds`，N6 收成一份）與接續補列 `ensure_summary_row`（只寫 `$AGORA_AGY_HOME`、只補缺的 id、單一 transaction；不碰 `-wal`／`-shm`） | 399 |
 | `agents/agy_restore` | 接續的還原半（review W5 拆出）：`RestoreResult`／`restore`（暫存檔先 `quick_check` 再 `os.replace`、來源 id 對照、覆蓋前備份到 agora 的 state（原子、0700／0600、原始版本永久保留＋最近 3 份帶時間戳）、舊暫存清理）／`prepare_continue`（先唯讀預檢 summaries） | 506 |
 | `agents/agy_wire` | protobuf 線格式與步驟解碼（#26 PR2a 拆出；PR2b 掃描面搬到 agy_store）：`varint`／`fields` 家族、閱讀版 turns、step_type 常數 | 165 |
-| `cli` | 六個指令、continue 流程、pending 補存、merge | 400 |
+| `cli` | 九個動作（`search`／`import`／`merge`／`continue`／`delete`／`edit`／`show`／`pull`／`push`）與 `migrate inventory`、continue 流程、pending 補存、merge | 400 |
+
+上表是最初的估計，只列了當時的模組；現在 `src/agora/` 還有 `cache`、`background`、`migrate`、`round_child`、`start_child`、`private_tmp`、`tui`，同一個 distribution 另有 `ainame`、`angareion`、`atelier`。
 
 測試照當初的 test-plan review（`docs/review/test-plan.md`（2026-10-04 清理時已從 repo 移除，要看請用 `git show fd3ba9f:<路徑>` 從歷史取回）），之後依 `openspec/specs/` 的 Scenario 補。**測試的 helper 只能在 pytest 或隔離的環境裡用**：不在 pytest（沒有 `PYTEST_VERSION`）而且 `AGORA_CACHE_DIR`／`AGORA_STATE_DIR`／`AGORA_CONFIG`／`HOME` 有任一個沒指到暫存目錄時，`tests/_guard.py` 在 import 的當下就 `SystemExit`（T8；在那之前有過兩次直接用真的目錄，其中一次把真實 Session 的標題送進了外部模型）。測試用的接縫：`AGORA_FOLDER_NAME`（整合測試設成 `agora-test`）、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`AGORA_RCLONE`、`AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD`（正式介面，#77；測試也用它）、`AGORA_CLAUDE_HOME`、`AGORA_AGY_HOME`（agy 的根目錄；測試一律指到暫存目錄）、`AGORA_TEST_FAULT`（含 `after-periodic-write`：定期寫回做完之後）、`AGORA_ROUND_TIMEOUT`（一輪定期寫回的死線，秒，預設 1800——正式的使用者介面，測試用它把卡住的輪縮短到幾秒）、`AGORA_NOW`。接續的間隔直接用 `--sync-period` 給很小的小數（例如 `0.005`）測試，不另設環境變數。
 

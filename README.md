@@ -43,7 +43,7 @@ agora <動作> <型態> [session_id] [選項]
 ```
 
 動作是 `search`、`import`、`merge`、`continue`、`delete`、`edit`、`show`、`pull`、`push`；
-型態目前只有 `session`。
+型態目前只有 `session`。另有 `agora migrate inventory`（搬遷盤點，唯讀；見 [docs/migration.md](docs/migration.md)），它不在這個 `<動作> <型態>` 的格式裡。
 
 不帶參數執行 `agora` 進入互動模式。關掉 kitty 鍵盤協定是為了讓輸入法能選字：沒有設定時 agora 會自己設成 1（關掉）；自己設了就照你的設定：只有 1 會關掉，其他任何值（包括空字串）都會打開。
 
@@ -123,8 +123,11 @@ agora continue session agora:01K6… --agent opencode --fork
 # 啟動方交付 harness（單一 agent 生效，不改使用者層級檔案）
 agora continue session agora:01K6… --agent opencode --harness-file /path/to/harness.md
 
-# 改標頭：給 --header／--header-file 就直接疊加；都不給就用 $EDITOR 打開
+# 改標頭：給 --header／--header-file／--add-tag 就直接疊加；都不給就用 $EDITOR 打開
+# --add-tag 附加 tag（不覆蓋原有的、不重複，可重複給）；和 --header 併用時先套 --header 再附加
+# --add-tag 只有 import、continue、edit 吃，其他指令收到會報錯（exit 1）
 agora edit session agora:01K6… --header 'tags=[csv, 表格]' --header 'status=stable'
+agora edit session agora:01K6… --add-tag csv --add-tag 表格
 agora edit session agora:01K6…
 
 # 刪除：本機立刻不見（鏡像、索引、outbox 那一筆），Drive 那份由背景移到垃圾桶
@@ -198,7 +201,7 @@ agora show session agora:01K6… --raw
 
 **先存本機，Drive 的部分交給背景。** import、continue、merge、edit 寫完本機（鏡像裡有完整的一份，含原始檔）就回 exit 0，背景上傳器慢慢送；`delete` 也是本機先不見，Drive 那份排進 `<state>/trash-queue/`，背景逐一 purge。所以指令的離開時間不再由 Drive 決定。
 
-- 背景輸出寫在 `~/.local/state/agora/upload.log`（超過 1 MB 只留尾巴），鎖是同目錄的 `upload.lock`；它的 stdout 不接到你的終端機，所以管線還是讀得到 EOF。
+- 背景輸出寫在 `~/.local/state/agora/upload.log`（超過 1 MB 時，下一次背景啟動會把它清空重寫），鎖是同目錄的 `upload.lock`；它的 stdout 不接到你的終端機，所以管線還是讀得到 EOF。
 - 每個指令開頭若發現還在等的東西，會啟動背景並提示「outbox 有 N 筆未上傳」／「有 N 個等著移到 Drive 垃圾桶」（背景正在跑時不提示），不會在前台慢慢送。
 - **只有 `push` 會等**：它的契約是「回來時那幾筆在 Drive 上」，所以等到自己剛寫的 id 離開 outbox 才算成功；等不到就繼續等（每 10 秒說一次為什麼），Ctrl-C 隨時可退。
 - 還在 outbox 或正等著移到垃圾桶的 Session，`pull`／`push` 會拒絕並說「正在刪除」；雲端沒有的（別台刪掉的）Session 在那之前照樣搜得到、標成「雲端沒有」。

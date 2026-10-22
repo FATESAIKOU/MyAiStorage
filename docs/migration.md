@@ -4,7 +4,7 @@
 `show --raw`、`continue`、`edit` 會明確說這個 raw 是舊格式，要用 `agora import … --as-new` 重匯；
 它**不會被刪、也沒有原地轉存**。搬遷是一次性的、由本人動手的事，不是每次升級都要做。
 
-規格在 `openspec/changes/agora-diff-upload/design.md` 的 F、G；這份是操作手冊。範例裡的 id 都是編的，
+規格在 `openspec/changes/archive/2026-10-22-agora-diff-upload/design.md` 的 F、G；這份是操作手冊。範例裡的 id 都是編的，
 不是真的 Session。
 
 ## 先講結論
