@@ -424,7 +424,9 @@ def test_a_failed_trash_whose_folder_is_gone_counts_as_deleted(env, monkeypatch)
     paths = store.Paths.from_env()
     (ulid,) = _queued(paths)
     shutil.rmtree(env / "agora" / "sessions" / ulid)      # gone before the purge ran
-    monkeypatch.setenv("FAKE_RCLONE_FAIL", ulid)
+    # Only the purge fails. (It used to fail every call that names the ULID; since #159 the
+    # directed look at the folder is one of those calls, and a look that fails settles nothing.)
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "purge")
 
     assert background.run(paths) == 0
     assert store.queued_for_trash(paths) == set()

@@ -311,11 +311,17 @@ def _lost_in_cloud(paths: store.Paths, agora_id: str) -> bool:
     ulid = _ulid_of(agora_id)
     if ulid in store.waiting_ulids(paths) and store.never_confirmed(paths, ulid):
         return False               # not up yet: ours, not another machine's delete
+    drive = store.Drive(paths)
     try:
-        remote = store.Drive(paths).list_sessions()
+        remote = drive.list_sessions()
     except store.StoreError:
         return False
-    return remote is not None and ulid not in remote
+    if remote is None or ulid in remote:
+        return False
+    # The listing misses it - which a bad Drive day does to live folders too (#152). One directed
+    # look settles it (#159): only "not there" is a deletion; a folder that answers or a look that
+    # fails is "unknown", i.e. False, like being offline.
+    return store._really_gone(drive, ulid, lambda _line: None)
 
 
 def _cloud_lost(agora_id: str, index: "store.Index | None" = None) -> str:
@@ -2531,6 +2537,9 @@ def cmd_delete(args, paths: store.Paths) -> int:
             # says Drive does not have it, so afterwards every session looks present
             # and a cloud-lost one is queued for a purge that has nothing to purge.
             in_cloud = index.cloud_has(ulid)
+            # Read before the outbox entry goes: a session Drive never confirmed is the one case where
+            # the background may take "no sessions/ and the folder is not there" as the whole story.
+            unconfirmed = store.never_confirmed(paths, ulid)
             store.forget_local(paths, ulid)
             shutil.rmtree(paths.outbox / ulid, ignore_errors=True)
             # and a set-aside copy (K1): the next background would put it back and send it
@@ -2538,7 +2547,8 @@ def cmd_delete(args, paths: store.Paths) -> int:
             if in_cloud:
                 # Drive has it: queue for the background to purge (design「背景刪除」).
                 paths.trash_queue.mkdir(parents=True, exist_ok=True)
-                (paths.trash_queue / ulid).write_text("", encoding="utf-8")
+                (paths.trash_queue / ulid).write_text(
+                    store.QUEUE_NEVER_CONFIRMED if unconfirmed else "", encoding="utf-8")
                 queued = True
             else:
                 # Drive does not have it (L6): the local copy is the whole of it.

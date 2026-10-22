@@ -2655,8 +2655,16 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
         # Not up yet and in flight are not "deleted on another machine".
         staged = waiting_ulids(paths)
         local = set(known) | set(index.known())
-        index.mark_missing(u for u in local - set(remote)
-                           if u not in staged and u not in trashing and not continuing(paths, u))
+        # The listing is what Drive said on one call, and a bad day can drop a live folder from it
+        # (#152). A marker steers the person to `--not-exist-upload` / `--not-exist-delete`, so a
+        # session that is newly missing is asked about once, directly (#159): only "not there" marks
+        # it, a folder that answers or a look that fails leaves it unmarked (unknown is not deleted).
+        # One that was already marked and is still absent is not asked again on every sync.
+        marked = set(index.missing_in_cloud())
+        drive = drive or Drive(paths)
+        candidates = sorted(u for u in local - set(remote)
+                            if u not in staged and u not in trashing and not continuing(paths, u))
+        index.mark_missing(u for u in candidates if u in marked or _really_gone(drive, u, say))
     _index_outbox(paths, index)
     paths.state.mkdir(parents=True, exist_ok=True)
     if not missing and still_unfinished != unfinished:
@@ -2702,7 +2710,20 @@ def forget_local(paths: Paths, ulid: str) -> None:
         pass
 
 
-def delete_session(paths: Paths, drive: Drive, ulid: str) -> None:
+#: What `delete` writes into a trash-queue file when the session had never been confirmed by Drive
+#: (an outbox entry without `.update`, read before the delete removed it): the background then knows a
+#: purge that finds nothing is the whole story, and not a Drive that cannot be trusted (#159).
+QUEUE_NEVER_CONFIRMED = "never-confirmed"
+
+
+def queue_never_confirmed(paths: Paths, ulid: str) -> bool:
+    try:
+        return (paths.trash_queue / ulid).read_text(encoding="utf-8").strip() == QUEUE_NEVER_CONFIRMED
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def delete_session(paths: Paths, drive: Drive, ulid: str, *, never_confirmed: bool = False) -> None:
     """Move sessions/<ULID>/ to the Drive trash (restorable for 30 days) and forget it here.
 
     A folder Drive does not have counts as deleted (review S1-4). rclone refuses
@@ -2714,21 +2735,44 @@ def delete_session(paths: Paths, drive: Drive, ulid: str) -> None:
 
     "Not found" alone is not enough to believe (S1-4b): the Drive API says the
     same thing when the folder id is wrong or the token cannot see anything, and
-    then forgetting it here would drop a session that is perfectly safe. So a
-    failed purge is followed by a listing, and only a listing that came back
-    without this ULID means it is gone. A listing that fails as well leaves the
-    original error alone.
+    a listing can lose a live folder on a bad day (#152). What this does next is
+    irreversible - the mirror and, above all, the outbox (a version that never
+    reached Drive) are thrown away - so it takes two answers that agree: a listing
+    that did not show this ULID (it came back without it, or `sessions/` is not
+    there at all, which is also what a session that never got uploaded to a fresh
+    Drive looks like - but that case needs `never_confirmed`, see below) and one
+    directed look at the folder that says rclone could not find it (#159). A listing that fails or still has the ULID, and a look that finds
+    the folder, finds it empty, finds only orphans or fails, all leave the local copy
+    and the outbox alone and the purge failure stands (the trash queue tries again).
+
+    With no `sessions/` in the listing the look alone is not enough (a wrong root id answers "not
+    there" for every folder): `never_confirmed` - a session Drive never confirmed, taken from the
+    queue file - is the only thing that lets that case through.
     """
     # rclone purge on Drive honours drive.use_trash, which defaults to true.
     try:
         drive._run("purge", f"gdrive:sessions/{ulid}")
-    except StoreError:
+    except StoreError as purge_error:
         try:
             remote = drive.list_sessions()
         except StoreError:
             raise          # cannot tell what happened: the purge failure stands
         if remote is not None and ulid in remote:
             raise          # it is still there, so the purge failed for another reason
+        if remote is None and not never_confirmed:
+            # No `sessions/` at all is what a wrong root folder id or a token that sees nothing
+            # looks like (N12), and a directed look at a folder under that root says "not there"
+            # too. A session Drive once had must not be taken for deleted on that: it stays in
+            # the queue. Only one Drive never confirmed (nothing could be there) is settled by the
+            # look alone - the same strictness as `pull --not-exist-delete`.
+            raise StoreError(f"{ulid}：purge 失敗，而且 Drive 上找不到 sessions/，可能是 root／folder 設定錯；"
+                             f"移到垃圾桶這一步先不做，留在佇列裡之後再試（本機若還有這個 Session 或 outbox 的版本，"
+                             f"也不動）") from purge_error
+        look = _directed_look(drive, ulid)
+        if _folder_state(look) != "gone":
+            why = (f"直接查也失敗（{look.error}）" if look.there is None else "直接查還找得到它")
+            raise StoreError(f"{ulid}：purge 失敗，列表裡沒有它，但{why}——列表可能漏了它，"
+                             f"不能確定它已經沒有了；本機與 outbox 都先不動，之後再試") from purge_error
         warn(f"{ulid} 在 Drive 上已經沒有了，當成刪掉")
     forget_local(paths, ulid)
     shutil.rmtree(paths.outbox / ulid, ignore_errors=True)

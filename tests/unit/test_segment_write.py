@@ -579,7 +579,10 @@ def test_deleting_the_session_clears_a_pre_upgrade_entry_and_its_set_aside_copy(
     code = cli.main(["delete", "session", f"agora:{old}", "--yes"])
     capsys.readouterr()
 
-    assert code == 0
+    # Exit 3, always: with a `.done-` copy beside the entry an uploader may be comparing this very id,
+    # so `never_confirmed` cannot say "never" and the purge that finds no `sessions/` waits in the
+    # queue (#159). The local side is cleared by `agora delete` itself, which is what is asserted below.
+    assert code == 3
     assert not (paths.outbox / old).exists() and not (paths.outbox / f".done-{old}").exists()
 
 

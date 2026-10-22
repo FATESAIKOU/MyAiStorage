@@ -66,7 +66,8 @@ def process_trash_queue(paths: store.Paths, drive: store.Drive) -> None:
     """
     for ulid in sorted(store.queued_for_trash(paths)):
         try:
-            store.delete_session(paths, drive, ulid)
+            store.delete_session(paths, drive, ulid,
+                                 never_confirmed=store.queue_never_confirmed(paths, ulid))
         except store.StoreError as e:
             store.warn(f"{ulid} 移到 Drive 垃圾桶失敗，還在佇列裡等下一個指令：{e}")
             continue
