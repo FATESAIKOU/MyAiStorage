@@ -213,12 +213,12 @@ def test_the_note_names_the_original_and_its_header(env, capsys):
     """design F15: `從 agora:X（title: …，case: …，tags: …）fork` and nothing else - no
     `agora` block, no `generated`, no `sources`. The format is fixed by this test."""
     _, a, _ = _import(capsys, "--header", "title=表格排版", "--header", "case=mybrain:aistorage",
-                      "--header", "tags=[ui, tui]", "--header", "refs=[mybrain:note/x]")
+                      "--header", "tags=[ui, tui]", "--header", "refs=[mybrain:pmo]")
     _fork(capsys, a)
 
     loaded = env.sessions[env.launched[-1].agent_session_id]
     assert loaded[-3] == (f"從 {a}（title: 表格排版，description: 把 CSV 轉成 Markdown 表格，"
-                          "case: mybrain:aistorage，tags: ui, tui，refs: mybrain:note/x）fork")
+                          "case: mybrain:aistorage，tags: ui, tui，refs: mybrain:pmo）fork")
     assert loaded[-2] == cli.FORK_READY
     assert cli.FORK_NOTE.format(id=a, header="title: X") == f"從 {a}（title: X）fork"
 
@@ -668,7 +668,7 @@ def test_a_fork_rescue_carries_the_users_header(env, capsys, during_agent):
     `_save`'s overlay cannot supply these and only the rescue's merge of the old header
     can (the review's F4 mutation has to make this red)."""
     _, a, _ = _import(capsys, "--header", "case=mybrain:aistorage",
-                      "--header", "tags=[實驗]", "--header", "refs=[mybrain:note/x]",
+                      "--header", "tags=[實驗]", "--header", "refs=[mybrain:pmo]",
                       "--header", "description=先做讀取")
     gone, seen = {}, {}
 
@@ -688,7 +688,7 @@ def test_a_fork_rescue_carries_the_users_header(env, capsys, during_agent):
     hdr = header_of(out)
     assert hdr["title"] == "把 CSV 轉成 Markdown 表格-fork"
     assert hdr["case"] == "mybrain:aistorage" and hdr["tags"] == ["實驗"]
-    assert hdr["refs"] == ["mybrain:note/x"] and hdr["description"] == "先做讀取"
+    assert hdr["refs"] == ["mybrain:pmo"] and hdr["description"] == "先做讀取"
 
 
 def test_a_rescued_merge_drops_its_draft_status(env, capsys, during_agent):
@@ -715,7 +715,7 @@ def test_a_continue_rescue_carries_the_users_header(env, capsys, during_agent):
     """M9, the ordinary continue: a session written back in place carries the same
     guarantee when it is the one that turns out to be gone."""
     _, a, _ = _import(capsys, "--header", "case=mybrain:aistorage", "--header", "tags=[實驗]",
-                      "--header", "refs=[mybrain:note/x]",
+                      "--header", "refs=[mybrain:pmo]",
                       "--header", "verified=[{by: human:fatesaikou}]")
 
     def delete_a():
@@ -727,7 +727,7 @@ def test_a_continue_rescue_carries_the_users_header(env, capsys, during_agent):
     assert code == 0 and out != a
     hdr = header_of(out)
     assert hdr["case"] == "mybrain:aistorage" and hdr["tags"] == ["實驗"]
-    assert hdr["refs"] == ["mybrain:note/x"] and hdr["verified"] == [{"by": "human:fatesaikou"}]
+    assert hdr["refs"] == ["mybrain:pmo"] and hdr["verified"] == [{"by": "human:fatesaikou"}]
 
 
 def test_a_fork_refuses_a_session_the_cloud_lost(env, capsys):
