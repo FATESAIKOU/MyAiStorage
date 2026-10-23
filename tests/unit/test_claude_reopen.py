@@ -394,6 +394,137 @@ def test_a_continue_into_another_agent_does_not_pass_keep_id(imported, monkeypat
     assert all("keep_id" not in c for c in _Spy.calls)
 
 
+# --- #195: a line Claude wrote without a sessionId gets none from us -----------------------------------
+#
+# The shapes follow what a real Claude Code session holds (keys and kinds only, every value made up):
+# bookkeeping lines with a sessionId and no cwd, turns with both, and a file-history-snapshot with
+# neither a sessionId nor a cwd.
+
+_C = (",", ":")                                              # Claude writes compact JSON
+
+
+def _line(**o) -> str:
+    return json.dumps(o, ensure_ascii=False, separators=_C)
+
+
+def _real_turn(sid: str, n: int, cwd="/golden/inc") -> list[str]:
+    u1, a1, u2, a2, a3 = (f"{n:04d}{k}000-1111-4222-8333-444444444444" for k in range(5))
+    common = dict(cwd=cwd, entrypoint="cli", gitBranch="main", isSidechain=False, sessionId=sid,
+                  session_id=sid, slug="fake-slug", timestamp="2026-10-20T00:00:00.000Z", userType="external",
+                  version="2.1.286")
+    return [
+        _line(type="queue-operation", operation="enqueue", content=f"問題 {n}", sessionId=sid,
+              timestamp="2026-10-20T00:00:00.000Z"),
+        _line(type="user", uuid=u1, parentUuid=None, promptId=f"p{n}", message={"role": "user", "content": f"問題 {n} a\\/b"}, **common),
+        _line(type="assistant", uuid=a1, parentUuid=u1, requestId=f"r{n}", effort="medium",
+              message={"role": "assistant", "model": "m", "content": [
+                  {"type": "thinking", "thinking": "想 " + "x" * 80, "signature": "fakesig"},
+                  {"type": "text", "text": f"回答 {n} " + "y" * 120},
+                  {"type": "tool_use", "id": f"tu{n}", "name": "Bash", "input": {"command": "echo 1E5"}}]}, **common),
+        _line(type="user", uuid=u2, parentUuid=a1, sourceToolAssistantUUID=a1, toolUseResult={"stdout": "1E5"},
+              message={"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"tu{n}", "content": "1E5"}]},
+              **common),
+        _line(type="assistant", uuid=a2, parentUuid=u2, message={"role": "assistant", "model": "m",
+              "content": [{"type": "text", "text": "好 " + "z" * 60}]}, **common),
+        _line(type="system", uuid=a3, parentUuid=a2, subtype="turn_duration", durationMs=12, isMeta=False,
+              messageCount=5, **common),
+        _line(type="file-history-snapshot", messageId=a1, isSnapshotUpdate=False,       # no sessionId, no cwd
+              snapshot={"messageId": a1, "trackedFileBackups": {}, "timestamp": "2026-10-20T00:00:00.000Z"}),
+        _line(type="last-prompt", lastPrompt=f"問題 {n}", leafUuid=a3, sessionId=sid),
+    ]
+
+
+def _write_real(path: Path, sid: str, first: int, last: int, *, cwd="/golden/inc"):
+    with open(path, "a", encoding="utf-8") as f:
+        for n in range(first, last + 1):
+            f.write("\n".join(_real_turn(sid, n, cwd)) + "\n")
+
+
+def _has_no_session_id(line: str) -> bool:
+    return "sessionId" not in json.loads(line)
+
+
+def test_a_line_without_a_session_id_comes_back_as_the_original_string():
+    lines = _real_turn(SID, 1)
+    snaps = [x for x in lines if _has_no_session_id(x)]
+    assert len(snaps) == 1 and json.loads(snaps[0])["type"] == "file-history-snapshot"
+    out = C._rewrite_lines(lines, SID, "/golden/inc")
+    assert out == lines
+
+
+def test_a_line_without_a_session_id_is_kept_byte_for_byte_whatever_the_new_id():
+    """A fork, a merge or a cross-agent load: every other line takes the new id, this one is not touched."""
+    lines = _real_turn(SID, 1)
+    out = C._rewrite_lines(lines, "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff", "/golden/inc")
+    for before, after in zip(lines, out):
+        if _has_no_session_id(before):
+            assert after == before
+        else:
+            assert json.loads(after)["sessionId"] == "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+    assert sum(_has_no_session_id(x) for x in out) == 1
+
+
+def test_a_line_without_a_session_id_still_gets_its_cwd_rewritten_when_it_has_one():
+    line = '{"type":"x","cwd":"/elsewhere","n":1E5}'
+    out = C._rewrite_lines([line], SID, "/golden/inc")
+    o = json.loads(out[0])
+    assert o["cwd"] == "/golden/inc" and "sessionId" not in o
+
+
+def test_a_fork_load_leaves_the_snapshot_lines_of_the_file_it_writes_alone(env, src, paths):
+    raw = json.dumps({"main": _real_turn(SID, 1) + _real_turn(SID, 2)}, ensure_ascii=False).encode("utf-8")
+    launch = C.ClaudeAgent().start_native(raw, WORKDIR)                # no keep_id: a fork, merge, other agent
+    assert launch.agent_session_id != SID
+    written = (src / f"{launch.agent_session_id}.jsonl").read_text(encoding="utf-8").splitlines()
+    snaps = [x for x in written if json.loads(x)["type"] == "file-history-snapshot"]
+    assert len(snaps) == 2 and all(_has_no_session_id(x) for x in snaps)
+    assert all(json.loads(x)["sessionId"] == launch.agent_session_id for x in written if not _has_no_session_id(x))
+
+
+def test_a_real_shaped_session_reopened_twice_is_a_whole_cut_once_and_then_an_append(env, src, paths):
+    """The user's own file is in the way the first time (no marker of ours): a new id, a whole raw.
+    The second time the file is ours and holds the uploaded bytes: same id, only the new tail is sent."""
+    path = src / f"{SID}.jsonl"
+    _write_real(path, SID, 1, 40)
+    s = Session(src)
+    ulid = h.new_ulid()
+    _, block = _round(paths, ulid, s)
+    _check(env, paths, ulid, s, block)
+
+    first = _reopen(env, paths, ulid, keep_id=SID)
+    new_id = first.agent_session_id
+    assert new_id != SID and (src / f"{new_id}.jsonl").exists()
+    s1 = Session(src, new_id)
+    _write_real(s1.path, new_id, 41, 44)                               # the reopened session goes on
+    inc1, block1 = _round(paths, ulid, s1)
+    assert inc1.append_from is None
+    _check(env, paths, ulid, s1, block1)
+
+    second = _reopen(env, paths, ulid, keep_id=new_id)
+    assert second.agent_session_id == new_id, "the second reopen must not mint another id"
+    _write_real(s1.path, new_id, 45, 48)
+    inc2, block2 = _round(paths, ulid, s1)
+    assert inc2.append_from is not None, "the reopened prefix must be the uploaded prefix"
+    segs, sent = _sent(env, paths, ulid)
+    grown = inc2.exported.raw_size - inc2.append_from
+    assert segs <= math.ceil(grown / CH) + 1 and sent < inc2.exported.raw_size / 2
+    _check(env, paths, ulid, s1, block2)
+
+
+def test_a_real_shaped_session_written_back_from_the_raw_is_the_uploaded_bytes(env, src, paths):
+    """The file is gone (another Claude home): written from the raw, snapshot lines and all, the same bytes."""
+    path = src / f"{SID}.jsonl"
+    _write_real(path, SID, 1, 12)
+    original = path.read_bytes()
+    s = Session(src)
+    ulid = h.new_ulid()
+    _, block = _round(paths, ulid, s)
+    _check(env, paths, ulid, s, block)
+    _gone(s, src)
+    assert _reopen(env, paths, ulid, keep_id=SID).agent_session_id == SID
+    assert path.read_bytes() == original
+
+
 # --- opt-in: the real claude ----------------------------------------------------------------------
 
 

@@ -621,11 +621,12 @@ def _exported(session_id: str, path: Path, sidecar: Path, *,
 
 
 def _rewrite_lines(lines: list[str], new_id: str, workdir: str) -> list[str]:
-    """Point every line at the new session: sessionId always; cwd only where
-    one already exists (review CL7, spike V5: fork only rewrites existing cwd).
+    """Point every line at the new session: sessionId and cwd only where the line
+    already has one (review CL7, spike V5: fork only rewrites existing cwd; #195: a line
+    Claude wrote without a `sessionId`, such as a file-history-snapshot, gets none added).
 
-    A line that already says what it should (its sessionId is `new_id` and it has
-    no `cwd`, or one equal to `workdir`) is kept as the original string, not one
+    A line that already says what it should (its sessionId is `new_id` or it has none,
+    and it has no `cwd`, or one equal to `workdir`) is kept as the original string, not one
     byte changed (#190): re-encoding it would change the separators, numbers and
     escapes Claude Code wrote, and a reopened Session's prefix would no longer be
     the raw that was uploaded, so the whole thing would be cut and sent again.
@@ -638,10 +639,11 @@ def _rewrite_lines(lines: list[str], new_id: str, workdir: str) -> list[str]:
         if not line.strip():
             continue
         o = json.loads(line)
-        if o.get("sessionId") == new_id and o.get("cwd", workdir) == workdir:
+        if o.get("sessionId", new_id) == new_id and o.get("cwd", workdir) == workdir:
             out.append(line)
             continue
-        o["sessionId"] = new_id
+        if "sessionId" in o:
+            o["sessionId"] = new_id
         if "cwd" in o:
             o["cwd"] = workdir
         text = json.dumps(o, ensure_ascii=False)
