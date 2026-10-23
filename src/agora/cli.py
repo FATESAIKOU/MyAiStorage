@@ -2042,6 +2042,7 @@ def _load_for_launch(paths: store.Paths, state: dict) -> dict:
     fork_turns = _fork_turns(source_id, parent) if fork else []
     # ① what to load, ② the target adapter builds its own format, ③ one way to load it (design 5.4).
     own: bytes | None = None
+    in_place = False
     if agora.get("relation") == "merge":   # its sections and list of sources, never the sources' raws
         _require_sections(source_id, agora)
         parent_md5 = None
@@ -2065,6 +2066,7 @@ def _load_for_launch(paths: store.Paths, state: dict) -> dict:
         raw = agent.append_native(own, fork_turns)
     else:
         raw = own
+        in_place = True    # the same conversation, written back to the same Session
     # What the non-fork record keeps: the md5 of what was loaded (design P8).
     loaded_md5 = None if fork else store.hashlib.md5(raw).hexdigest()
     # The Session's own record of where this conversation came from. The one
@@ -2076,6 +2078,12 @@ def _load_for_launch(paths: store.Paths, state: dict) -> dict:
     start_kwargs = {}
     if getattr(agent, "restores_in_place", False) is True:
         start_kwargs["expected_id"] = src.get("session_id")
+    # A continue that is the same conversation written back to the same Session keeps
+    # the agent's own session id when the adapter says it can (#190): the lines come
+    # back as uploaded and the next round sends only what is new. Fork, merge and
+    # another agent's raw are new conversations and get new ids, as before.
+    if in_place and getattr(agent, "keeps_session_id", False) is True and src.get("session_id"):
+        start_kwargs["keep_id"] = src["session_id"]
     if harness_path is not None:
         if headless:
             launch = agent.start_native(raw, workdir, headless=True, headless_port=headless_port,
