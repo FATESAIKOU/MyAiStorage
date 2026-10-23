@@ -198,22 +198,41 @@ def test_anything_but_a_plain_append_is_still_cut_whole(env, src, paths, what):
     _check(env, paths, ulid, s, block)
 
 
-def test_a_different_cwd_rewrites_those_lines_and_so_cuts_the_raw_whole(env, src, paths):
-    """Another directory means every line with a `cwd` changes: the prefix is not the uploaded one."""
+def test_a_different_workdir_points_the_cwds_at_it_and_cuts_the_raw_whole_once(env, src, paths):
+    """A `cwd` outside the new workdir (another machine, another path) is rewritten as a fork's is:
+    the prefix changes for this one reopen, and `source.dir` follows the machine."""
     s = Session(src)
     ulid = _two_rounds(env, paths, s)
     _sent(env, paths, ulid)
     _gone(s, src)
     other = Path("/golden/elsewhere")
     launch = _reopen(env, paths, ulid, keep_id=SID, workdir=other)
-    assert launch.agent_session_id == SID                     # nothing is in the way, so the id stays
+    assert launch.agent_session_id == SID
     moved = C.find_jsonl(SID, other)
-    moved.parent.joinpath("x").mkdir(exist_ok=True)
+    assert {json.loads(x)["cwd"] for x in moved.read_text(encoding="utf-8").splitlines()} == {"/golden/elsewhere"}
     s2 = Session(moved.parent)
     s2.n = s.n
     s2.turns(4)
     inc = C.ClaudeAgent().export_increment(SID, other, store.read_cursor(paths, ulid))
     assert inc.append_from is None
+    assert inc.exported.dir == "/golden/elsewhere"
+
+
+def test_subdirectories_of_the_workdir_keep_their_cwd_and_the_next_round_is_an_append(env, src, paths):
+    path = src / f"{SID}.jsonl"
+    _write_real(path, SID, 1, 12)
+    s = Session(src)
+    ulid = h.new_ulid()
+    _, block = _round(paths, ulid, s)
+    _check(env, paths, ulid, s, block)
+    original = path.read_bytes()
+    _gone(s, src)
+    assert _reopen(env, paths, ulid, keep_id=SID).agent_session_id == SID
+    assert path.read_bytes() == original
+    _write_real(path, SID, 13, 16)
+    inc, block2 = _round(paths, ulid, s)
+    assert inc.append_from is not None
+    _check(env, paths, ulid, s, block2)
 
 
 def test_a_different_file_under_the_same_id_is_never_overwritten(env, src, paths, capfd):
@@ -434,10 +453,15 @@ def _real_turn(sid: str, n: int, cwd="/golden/inc") -> list[str]:
     ]
 
 
-def _write_real(path: Path, sid: str, first: int, last: int, *, cwd="/golden/inc"):
+def _cd(n: int) -> str:
+    """The user cds into a subdirectory and back, several times over the session."""
+    return "/golden/inc/pkg/sub" if n % 6 in (3, 4) else "/golden/inc"
+
+
+def _write_real(path: Path, sid: str, first: int, last: int):
     with open(path, "a", encoding="utf-8") as f:
         for n in range(first, last + 1):
-            f.write("\n".join(_real_turn(sid, n, cwd)) + "\n")
+            f.write("\n".join(_real_turn(sid, n, _cd(n))) + "\n")
 
 
 def _has_no_session_id(line: str) -> bool:
@@ -509,6 +533,82 @@ def test_a_real_shaped_session_reopened_twice_is_a_whole_cut_once_and_then_an_ap
     grown = inc2.exported.raw_size - inc2.append_from
     assert segs <= math.ceil(grown / CH) + 1 and sent < inc2.exported.raw_size / 2
     _check(env, paths, ulid, s1, block2)
+
+
+def test_keep_cwd_keeps_the_workdir_and_what_is_under_it_and_a_fork_rewrites_them_all():
+    new = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+    lines = [x for n in (1, 3, 4) for x in _real_turn(SID, n, _cd(n))]
+    assert C._rewrite_lines(lines, SID, "/golden/inc", keep_cwd=True) == lines
+    other = C._rewrite_lines(lines, new, "/golden/other")
+    assert {json.loads(x)["cwd"] for x in other if "cwd" in json.loads(x)} == {"/golden/other"}
+    kept_new = C._rewrite_lines(lines, new, "/golden/inc", keep_cwd=True)
+    assert {json.loads(x)["cwd"] for x in kept_new if "cwd" in json.loads(x)} == {"/golden/inc", "/golden/inc/pkg/sub"}
+
+
+@pytest.mark.parametrize("cwd", ["/golden/incx", "/golden", "/elsewhere/golden/inc", "relative/golden/inc"])
+def test_keep_cwd_decides_by_path_segments_not_by_string_prefix(cwd):
+    line = _line(type="user", sessionId=SID, cwd=cwd)
+    out = C._rewrite_lines([line], SID, "/golden/inc", keep_cwd=True)
+    assert json.loads(out[0])["cwd"] == "/golden/inc"
+
+
+def test_a_session_that_cds_into_a_subdirectory_reopened_twice_is_a_whole_cut_once_and_then_an_append(env, src, paths):
+    """#197: two kinds of `cwd` in one file, a sidecar too. Second reopen: same id, only the tail is sent."""
+    path = src / f"{SID}.jsonl"
+    _write_real(path, SID, 1, 40)
+    assert {json.loads(x).get("cwd") for x in path.read_text(encoding="utf-8").splitlines()} >= {"/golden/inc", "/golden/inc/pkg/sub"}
+    s = Session(src)
+    s.sidecar("subagents/agent-a1.jsonl", "\n".join(_real_turn(SID, 90, "/golden/inc/pkg/sub")) + "\n")
+    ulid = h.new_ulid()
+    _, block = _round(paths, ulid, s)
+    _check(env, paths, ulid, s, block)
+
+    first = _reopen(env, paths, ulid, keep_id=SID)
+    new_id = first.agent_session_id
+    assert new_id != SID                                      # the user's file, no marker of ours
+    s1 = Session(src, new_id)
+    _write_real(s1.path, new_id, 41, 46)
+    inc1, block1 = _round(paths, ulid, s1)
+    assert inc1.append_from is None
+    _check(env, paths, ulid, s1, block1)
+    cwds = {json.loads(x).get("cwd") for x in s1.path.read_text(encoding="utf-8").splitlines()}
+    assert "/golden/inc/pkg/sub" in cwds                     # the lines added in the reopened session
+
+    second = _reopen(env, paths, ulid, keep_id=new_id)
+    assert second.agent_session_id == new_id, "the second reopen must not mint another id"
+    assert (src / new_id / "subagents/agent-a1.jsonl").exists()
+    _write_real(s1.path, new_id, 47, 52)
+    inc2, block2 = _round(paths, ulid, s1)
+    assert inc2.append_from is not None
+    segs, sent = _sent(env, paths, ulid)
+    grown = inc2.exported.raw_size - inc2.append_from
+    assert segs <= math.ceil(grown / CH) + 1 and sent < inc2.exported.raw_size / 2
+    _check(env, paths, ulid, s1, block2)
+
+
+def test_a_sidecar_line_added_in_a_subdirectory_after_the_first_reopen_still_lets_the_second_reuse_the_id(env, src, paths):
+    """R2: the sidecar goes through the same `keep_cwd` rule as the main file."""
+    path = src / f"{SID}.jsonl"
+    _write_real(path, SID, 1, 20)
+    s = Session(src)
+    s.sidecar("subagents/agent-a1.jsonl", "\n".join(_real_turn(SID, 90, "/golden/inc")) + "\n")
+    ulid = h.new_ulid()
+    _, block = _round(paths, ulid, s)
+    _check(env, paths, ulid, s, block)
+
+    new_id = _reopen(env, paths, ulid, keep_id=SID).agent_session_id
+    assert new_id != SID
+    s1 = Session(src, new_id)
+    _write_real(s1.path, new_id, 21, 22)
+    side = src / new_id / "subagents/agent-a1.jsonl"
+    with open(side, "a", encoding="utf-8") as f:                 # a subagent run from inside a subdirectory
+        f.write("\n".join(_real_turn(new_id, 91, "/golden/inc/pkg/sub")) + "\n")
+    _, block1 = _round(paths, ulid, s1)
+    _check(env, paths, ulid, s1, block1)
+
+    second = _reopen(env, paths, ulid, keep_id=new_id)
+    assert second.agent_session_id == new_id, "the sidecar's subdirectory cwd must not look like a collision"
+    assert side.read_text(encoding="utf-8").count("/golden/inc/pkg/sub") > 0
 
 
 def test_a_real_shaped_session_written_back_from_the_raw_is_the_uploaded_bytes(env, src, paths):
