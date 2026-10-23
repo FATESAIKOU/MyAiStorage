@@ -317,7 +317,15 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
    - `append_native(raw, turns)`：**同 agent fork 用**：A 的 raw 一個 byte 都不改（含工具呼叫與前綴，快取能命中），把給的幾輪掛到它的原生格式尾巴上。`turns()` 讀到的就是原本的輪數加上這幾輪。跨 agent、merge 出來的仍然走 `native()`。
    - 只有一段、而且來源 agent ＝目標 agent → 直接用原始 raw，不經過轉換（保留工具呼叫與前綴，快取能命中）。
    - 跨 agent → 開頭加一則說明「以下是轉過來的紀錄，`[tool]` 行只是摘要」的 user 訊息（W2）；每段前面加一則標示來源的 user 訊息；某一段以沒有回覆的 user 結束時，補一則 assistant「（這一段在這裡結束，當時沒有回覆）」，所以前一段的問題不會和下一段黏在一起，交給 `native()` 的一定是 user／assistant 交替（W1）；丟掉 `[skip …]` 行（W6）；再用目標 agent 的 `native()` 組成原生 raw。
-3. **載入**：一律走目標轉接器的 `start_native(raw, workdir)`（opencode：id 重編、`opencode import`、回讀驗證；Claude：新 uuid、寫 jsonl、`claude --resume`；agy：還原對話 db＋補 summaries 列、`agy --conversation <id>`，見 5.2）。不再有「注入」這條路。
+3. **載入**：一律走目標轉接器的 `start_native(raw, workdir)`（opencode：id 重編、`opencode import`、回讀驗證；Claude：寫 jsonl、`claude --resume <id>`，id 的規則見下；agy：還原對話 db＋補 summaries 列、`agy --conversation <id>`，見 5.2）。不再有「注入」這條路。
+
+   **Claude 的 session id 與每一行（#190）**：
+   - **原地寫回同一個 Session 的 continue（非 fork、非 merge、來源也是 Claude）沿用 raw 裡原本的 Claude session id**，argv 仍是 `claude --resume <id>`。理由：這個 continue 的結果就是同一個 Session（本節的設計是原地寫回，見 5.4 開頭），D4「結果要是新 Session」只對 fork、merge 和跨 agent 成立；它們照舊鑄新 uuid、每一行改成新 id。沿用 id 之後，`header.source.session_id` 跨多次 continue 是同一個值。
+   - **不重新序列化**：`sessionId` 已經是目標值、而且沒有 `cwd` 或 `cwd` 已等於工作目錄的行，寫回**原字串**，一個位元組都不動（分隔符、`1E5`、`\/`、escape 都保留）。要改的行才解析、改寫（內含孤立 surrogate 的行改寫時把非 ASCII 轉成 `\u` escape，不讓寫檔丟例外，#191）。所以重開後 raw 的前綴就是上次上傳的位元組，下一輪走增量：只送新封存的段加尾段（上限 `ceil(新增量 / C) + 1` 段），不再整份重切。
+   - **只沿用 agora 自己寫出來的檔，絕不覆寫、也不去接使用者的檔**：`start_native` 每次真的寫出 `<id>.jsonl`（沿用或鑄新 id 都算），寫成功之後才在 `<state>/claude-launched/<id>` 留記號（內容是那個檔的路徑）。本機 `projects/*/<id>.jsonl` 已存在時，要同時成立才沿用：就是這個工作目錄的專案目錄那一個、有記號且記號記的就是這個路徑、位元組和要寫的完全相同（sidecar 逐檔同樣比對）。使用者自己的 session 檔（例如剛 import 完、原檔一個位元組沒變，位元組當然「相同」）**沒有記號，視為碰撞**：Claude 不鎖檔，使用者的 Claude 可能還開在那個檔上，讓 agora 開的 `--resume` 接著寫會兩個行程寫同一份 jsonl。碰撞（沒記號、別的專案目錄、內容不同、sidecar 不同）就退回鑄新 id 的做法（整份重傳一次），stderr 印一行「無法原樣沿用」，已存在的檔一個位元組、mtime 都不動。所以「匯入後在同一台的第一次 continue」整份重傳一次，從第二次重開起走增量。不是 Claude 的 uuid 格式的 id 不會拿來當檔名。
+   - **建檔是獨占的**：計畫（看一眼）和寫檔之間別的行程可能建出同名檔，所以寫檔一律走「寫暫存檔再 `os.link`」，已存在且位元組相同就算數，不同就丟錯、不覆寫（`<id>.jsonl` 與 sidecar 每個檔都一樣）。
+   - 仍會整份重傳的情況（正確，只是貴）：/compact、既有行被改寫、前綴被改一個位元組、工作目錄不同而使 `cwd` 被改寫、碰撞。
+   - 同一台機器同時 continue 同一個 Session 仍由 `pending/<ULID>.json` 的鎖擋下（#54），沿用 id 不繞過它；兩個**不同**的 agora Session 若來源是同一個 Claude session id，第二個遇到的檔若已被改過就是碰撞、退回新 id，但兩邊剛好位元組相同的瞬間無法區分——這是已知的小缺口。
 4. 工作目錄：`--dir`，預設是 `agora.source.dir`（這台機器上存在的話），否則是目前目錄並提示。agent 啟動時同時設定 cwd 與 `PWD`。
 5. 寫 pending 並持有 flock（交給 agent 繼承），在前景啟動 agent；Ctrl-C 只給 agent。
 6. agent 結束後，內容比啟動前多才存檔，**寫回原本那個 agora Session（同一個 id）**（2026-10-02 使用者決定，原本是另存新的）；**但接續途中那個 Session 已經被刪掉了（不管是別台機器還是這台），就另存成一個新的 Session**（`relation: continue`、`parents` 指向原本那個），並印出說明——原本那個保持被刪的狀態，不會因為這次接續而回到雲端：raw 與閱讀版換成接續後的整段對話，`agora.source` 換成接續用的那個 agent session，舊的記到 `agora.previous_sources`（未匯入頁因此不再列它）；標題、tags 這些使用者欄位不變。接續的是 merge 時，它就變成那段對話：`relation` 改成 `continue`、拿掉 `agora.merge` 與 `status: draft`，`parents` 留著當出處。
@@ -537,7 +545,7 @@ Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之�
 | # | 結論 |
 |---|---|
 | V1 | **可行。** 三種 id 全部重編後 import，原本的 session 位元組不變，新訊息接在後面。只換 session id 會靜默失敗（rc=0、0 則訊息），所以一定要回讀驗證 |
-| V2 | **可行。** 只需改每行頂層 `sessionId`；`--session-id` 搭 `--resume` 必須加 `--fork-session`；用過 Task 的 session 有 `subagents/` 附屬檔；進行中讀 jsonl 沒看到半行（仍防禦性處理） |
+| V2 | **可行。** 只需改每行頂層 `sessionId`（fork、merge、跨 agent 這樣做；原地寫回同一個 Session 的 continue 沿用同一個 id，且不需要改的行不重新序列化，#190，見 5.4 第 3 點）；`--session-id` 搭 `--resume` 必須加 `--fork-session`；用過 Task 的 session 有 `subagents/` 附屬檔；進行中讀 jsonl 沒看到半行（仍防禦性處理） |
 | V3 | **可行。** opencode 用一則 user 訊息帶全文；claude 用 `@<路徑>` |
 | V4 | **可行。** `drive.file` 下建立、上傳、列出、增量、刪除都行；要用 `copyto`；access token 約 1 小時、rclone 自己刷新，agora 不碰 token |
 | V5 | opencode 的 session 屬於 import 時的 cwd；claude 的新檔落在啟動 cwd 的編碼目錄。continue 一律在工作目錄開 |

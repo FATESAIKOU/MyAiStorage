@@ -366,10 +366,11 @@ def test_cli_continue_without_harness_file_calls_start_native_without_harness_fi
     calls = []
     real_start_native = C.ADAPTER.start_native
 
-    def legacy_start_native(raw, workdir):
-        # NOTE: signature intentionally omits harness_file and **kwargs to verify HEAD call shape
-        calls.append({"raw": raw, "workdir": workdir})
-        return real_start_native(raw, workdir)
+    def legacy_start_native(raw, workdir, keep_id=None):
+        # NOTE: signature intentionally omits harness_file and **kwargs to verify HEAD call shape;
+        # `keep_id` is the one argument a same-Session continue adds on top of it (#190)
+        calls.append({"raw": raw, "workdir": workdir, "keep_id": keep_id})
+        return real_start_native(raw, workdir, keep_id=keep_id)
 
     monkeypatch.setattr(C.ADAPTER, "start_native", legacy_start_native)
 
@@ -377,6 +378,7 @@ def test_cli_continue_without_harness_file_calls_start_native_without_harness_fi
                          "--dir", str(claude_lab["work"]), "--sync-period", SECONDS)
     assert code == 0, err
     assert len(calls) == 1
+    assert calls[0]["keep_id"] == CL_SID        # the same conversation written back keeps its Claude id
 
 
 def test_cli_continue_claude_relative_harness_file_resolves_to_absolute(claude_lab, tmp_path, monkeypatch, capsys):

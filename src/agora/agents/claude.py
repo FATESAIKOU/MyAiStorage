@@ -279,8 +279,52 @@ def _pack_aux(sidecar: Path) -> dict:
     return aux
 
 
-def _unpack_aux(aux: dict, sidecar: Path, rewrite=None) -> None:
-    """Restore aux files; rewrite(text, rel) transforms .jsonl ones (P12)."""
+#: A Claude session id as Claude Code writes it. `keep_id` becomes a file name,
+#: so anything else is not used (#190).
+_SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _write_new(target: Path, data: bytes) -> None:
+    """Create `target` with `data` without ever replacing a file: written beside it and
+    linked in, so a file that is already there (or appears meanwhile) is kept. One
+    holding the same bytes is fine; a different one is an error, never overwritten (#190)."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".agora-{uuid.uuid4().hex}.tmp")
+    tmp.write_bytes(data)
+    try:
+        os.link(tmp, target)
+    except FileExistsError:
+        if target.read_bytes() != data:
+            raise AgentError(f"{target} 已經有另一個內容不同的檔（可能剛被別的行程建立）；沒有覆寫，請再試一次") from None
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _launched_marker(session_id: str) -> Path:
+    """Where agora records that it wrote this session's file itself (#190)."""
+    from agora import store
+    return store.Paths.from_env().state / "claude-launched" / session_id
+
+
+def _mark_launched(session_id: str, jsonl: Path) -> None:
+    """Called once `start_native` has written `<id>.jsonl`: only a file agora wrote may be
+    resumed in place later. A session file the user made is theirs - Claude does not
+    lock it and may be open on it somewhere - so one that merely holds the same bytes
+    (an import leaves exactly that) is never handed to a `--resume` of ours."""
+    marker = _launched_marker(session_id)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(str(jsonl), encoding="utf-8")
+
+
+def _launched_by_agora(session_id: str, jsonl: Path) -> bool:
+    try:
+        return _launched_marker(session_id).read_text(encoding="utf-8") == str(jsonl)
+    except OSError:
+        return False
+
+
+def _aux_files(aux: dict, rewrite=None) -> Iterator[tuple[str, bytes]]:
+    """(relative path, the bytes it is restored as); rewrite(text, rel) transforms .jsonl ones (P12)."""
     for rel, content in aux.items():
         parts = PurePosixPath(rel).parts
         if PurePosixPath(rel).is_absolute() or ".." in parts:  # CL14
@@ -288,12 +332,24 @@ def _unpack_aux(aux: dict, sidecar: Path, rewrite=None) -> None:
         if (rewrite is not None and rel.endswith(".jsonl")
                 and isinstance(content, str)):
             content = rewrite(content, rel)
-        dest = sidecar / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(content, dict) and "$base64" in content:
-            dest.write_bytes(base64.b64decode(content["$base64"]))
+            yield rel, base64.b64decode(content["$base64"])
         else:
-            dest.write_text(content, encoding="utf-8")
+            yield rel, content.encode("utf-8")
+
+
+def _unpack_aux(aux: dict, sidecar: Path, rewrite=None, *, exclusive: bool = False) -> None:
+    """Restore aux files; rewrite(text, rel) transforms .jsonl ones (P12).
+
+    `exclusive` creates each file with `_write_new`: one already there with the same
+    bytes is kept, a different one is an error and is never overwritten (#190)."""
+    for rel, data in _aux_files(aux, rewrite):
+        dest = sidecar / rel
+        if exclusive:
+            _write_new(dest, data)
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
 
 
 def _pack_raw(main: list[str], aux: dict) -> bytes:
@@ -566,16 +622,34 @@ def _exported(session_id: str, path: Path, sidecar: Path, *,
 
 def _rewrite_lines(lines: list[str], new_id: str, workdir: str) -> list[str]:
     """Point every line at the new session: sessionId always; cwd only where
-    one already exists (review CL7, spike V5: fork only rewrites existing cwd)."""
+    one already exists (review CL7, spike V5: fork only rewrites existing cwd).
+
+    A line that already says what it should (its sessionId is `new_id` and it has
+    no `cwd`, or one equal to `workdir`) is kept as the original string, not one
+    byte changed (#190): re-encoding it would change the separators, numbers and
+    escapes Claude Code wrote, and a reopened Session's prefix would no longer be
+    the raw that was uploaded, so the whole thing would be cut and sent again.
+    Only a line that has to change is parsed and written; one holding a lone
+    surrogate (an escaped `\\ud83d`, #191) is then written with its non-ASCII
+    escaped, since UTF-8 cannot carry it.
+    """
     out = []
     for line in lines:
         if not line.strip():
             continue
         o = json.loads(line)
+        if o.get("sessionId") == new_id and o.get("cwd", workdir) == workdir:
+            out.append(line)
+            continue
         o["sessionId"] = new_id
         if "cwd" in o:
             o["cwd"] = workdir
-        out.append(json.dumps(o, ensure_ascii=False))
+        text = json.dumps(o, ensure_ascii=False)
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            text = json.dumps(o, ensure_ascii=True)
+        out.append(text)
     return out
 
 
@@ -820,6 +894,10 @@ def _cursor_ok(cursor: object) -> bool:
 
 class ClaudeAgent:
     name = "claude"
+    #: A continue that writes back to the same Session resumes the same Claude session
+    #: id (`start_native(keep_id=...)`, #190). An explicit attribute, like agy's
+    #: `restores_in_place`: no other adapter is handed the argument.
+    keeps_session_id = True
 
     def export(self, session_id: str, hint_dir: str | Path | None = None) -> Exported:
         path = find_jsonl(session_id, hint_dir)
@@ -900,22 +978,85 @@ class ClaudeAgent:
             extra.insert(0, ("assistant", [NO_REPLY]))
         return _pack_raw(main + _native_lines(extra, parent=_leaf_uuid(main)), aux)
 
+    def _plan_same_id(self, keep_id: str, main: list[str], aux: dict,
+                      workdir_str: str, subdir: Path):
+        """Can this launch use `keep_id`, the Claude session id the Session already has (#190)?
+
+        Yes when no file by that name exists anywhere under projects/, or when the one
+        that does is in this directory, **was written by agora's own `start_native`**
+        (the marker) and holds exactly the bytes about to be written (the sidecar
+        likewise, file by file). Anything else - the user's own session file, which an
+        import leaves with those very bytes; one the user went on in outside agora; one
+        somewhere else - is a collision, and nothing of it is touched: the caller mints
+        a new id as it always did. Returns (rewritten lines, aux rewrite, jsonl text)
+        or None.
+        """
+        if not _SESSION_ID.fullmatch(keep_id):
+            return None
+        rewritten = _rewrite_lines(main, keep_id, workdir_str)
+        text = "\n".join(rewritten) + "\n"
+
+        def rewrite(body: str, rel: str) -> str:   # same S10 rule as main (review CL6)
+            joined = "\n".join(_rewrite_lines(_split_lines(body, rel), keep_id, workdir_str))
+            return joined + "\n" if joined and body.endswith("\n") else joined
+
+        target = subdir / f"{keep_id}.jsonl"
+        try:
+            found = sorted(projects_dir().glob(f"*/{keep_id}.jsonl"))
+            if found and (found != [target] or not _launched_by_agora(keep_id, target)
+                          or target.read_bytes() != text.encode("utf-8")):
+                return None
+            sidecar = subdir / keep_id
+            for rel, data in _aux_files(aux, rewrite):
+                if (sidecar / rel).exists() and (sidecar / rel).read_bytes() != data:
+                    return None
+        except (OSError, UnicodeEncodeError):
+            return None
+        return rewritten, rewrite, text
+
     def start_native(self, raw: bytes, workdir: Path, *, headless: bool = False,
                      headless_port: int | None = None,
-                     harness_file: Path | None = None) -> Launch:
+                     harness_file: Path | None = None, keep_id: str | None = None) -> Launch:
+        """Load `raw` as a Claude session in `workdir` and build the `--resume` argv.
+
+        `keep_id` is the Claude session id the Session already has. The cli passes it
+        only for a continue that writes back to the same Session (not a fork, a merge
+        or another agent's raw): that run is the same conversation, so it resumes the
+        same id and the lines come back as they were (#190, design 5.4). When the id
+        cannot be used (a different file under it already), a new one is made and
+        one line says so.
+        """
         main, aux = _unpack_raw(raw)
-        new_id = str(uuid.uuid4())
         workdir_str = str(workdir)
         subdir = projects_dir() / encode_project_dir(workdir)
         subdir.mkdir(parents=True, exist_ok=True)
-        rewritten = _rewrite_lines(main, new_id, workdir_str)
-        (subdir / f"{new_id}.jsonl").write_text("\n".join(rewritten) + "\n", encoding="utf-8")
-        sidecar = subdir / new_id
-        if aux:
-            def rewrite(text: str, rel: str) -> str:   # same S10 rule as main (review CL6)
-                joined = "\n".join(_rewrite_lines(_split_lines(text, rel), new_id, workdir_str))
-                return joined + "\n" if joined and text.endswith("\n") else joined
-            _unpack_aux(aux, sidecar, rewrite=rewrite)
+        planned = None
+        if keep_id is not None:
+            planned = self._plan_same_id(keep_id, main, aux, workdir_str, subdir)
+            if planned is None:
+                warn(f"警告：無法原樣沿用這個 Claude session id（{keep_id}），改用新的 session id"
+                     f"（已經存在的檔一個位元組都不動；第一輪會整份重傳）")
+        if planned is not None:
+            new_id = keep_id
+            rewritten, rewrite, text = planned
+            target = subdir / f"{new_id}.jsonl"
+            _write_new(target, text.encode("utf-8"))      # the plan was a look; this is the claim
+            sidecar = subdir / new_id
+            if aux:
+                _unpack_aux(aux, sidecar, rewrite=rewrite, exclusive=True)
+            _mark_launched(new_id, target)
+        else:
+            new_id = str(uuid.uuid4())
+            rewritten = _rewrite_lines(main, new_id, workdir_str)
+            target = subdir / f"{new_id}.jsonl"
+            target.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+            sidecar = subdir / new_id
+            if aux:
+                def rewrite(text: str, rel: str) -> str:   # same S10 rule as main (review CL6)
+                    joined = "\n".join(_rewrite_lines(_split_lines(text, rel), new_id, workdir_str))
+                    return joined + "\n" if joined and text.endswith("\n") else joined
+                _unpack_aux(aux, sidecar, rewrite=rewrite)
+            _mark_launched(new_id, target)
         if headless:
             # The programmatic mode the spike pinned (design D6): stream-json in
             # and out, verbose is what makes the stream usable, and the fixed
