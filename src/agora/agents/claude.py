@@ -620,7 +620,15 @@ def _exported(session_id: str, path: Path, sidecar: Path, *,
     return exported, packed
 
 
-def _rewrite_lines(lines: list[str], new_id: str, workdir: str) -> list[str]:
+def _cwd_stays(cwd, workdir: str, keep_sub: bool) -> bool:
+    if cwd == workdir:
+        return True
+    if not keep_sub or not isinstance(cwd, str):
+        return False
+    return PurePosixPath(cwd).is_relative_to(PurePosixPath(workdir))
+
+
+def _rewrite_lines(lines: list[str], new_id: str, workdir: str, *, keep_cwd: bool = False) -> list[str]:
     """Point every line at the new session: sessionId and cwd only where the line
     already has one (review CL7, spike V5: fork only rewrites existing cwd; #195: a line
     Claude wrote without a `sessionId`, such as a file-history-snapshot, gets none added).
@@ -633,18 +641,25 @@ def _rewrite_lines(lines: list[str], new_id: str, workdir: str) -> list[str]:
     Only a line that has to change is parsed and written; one holding a lone
     surrogate (an escaped `\\ud83d`, #191) is then written with its non-ASCII
     escaped, since UTF-8 cannot carry it.
+
+    `keep_cwd` is the same-conversation load (`keep_id`, #197): a real session moves between
+    its directory and the subdirectories under it, and rewriting those `cwd`s would change
+    the uploaded prefix and cut the whole raw again. So a `cwd` equal to `workdir` or under
+    it stays as written; one outside it (the session came from another machine or path)
+    is still pointed at `workdir`, as a fork, a merge or another agent's raw always do.
     """
     out = []
     for line in lines:
         if not line.strip():
             continue
         o = json.loads(line)
-        if o.get("sessionId", new_id) == new_id and o.get("cwd", workdir) == workdir:
+        cwd_ok = _cwd_stays(o["cwd"], workdir, keep_cwd) if "cwd" in o else True
+        if o.get("sessionId", new_id) == new_id and cwd_ok:
             out.append(line)
             continue
         if "sessionId" in o:
             o["sessionId"] = new_id
-        if "cwd" in o:
+        if "cwd" in o and not cwd_ok:
             o["cwd"] = workdir
         text = json.dumps(o, ensure_ascii=False)
         try:
@@ -995,11 +1010,11 @@ class ClaudeAgent:
         """
         if not _SESSION_ID.fullmatch(keep_id):
             return None
-        rewritten = _rewrite_lines(main, keep_id, workdir_str)
+        rewritten = _rewrite_lines(main, keep_id, workdir_str, keep_cwd=True)
         text = "\n".join(rewritten) + "\n"
 
         def rewrite(body: str, rel: str) -> str:   # same S10 rule as main (review CL6)
-            joined = "\n".join(_rewrite_lines(_split_lines(body, rel), keep_id, workdir_str))
+            joined = "\n".join(_rewrite_lines(_split_lines(body, rel), keep_id, workdir_str, keep_cwd=True))
             return joined + "\n" if joined and body.endswith("\n") else joined
 
         target = subdir / f"{keep_id}.jsonl"
