@@ -8,6 +8,10 @@
       "backend": "aicompany-channel",
       "issue": 9
     },
+    "team-life-w1": {
+      "backend": "aicompany-channel",
+      "issue": 15
+    },
     "team-mylinuxpool": {
       "backend": "aicompany-channel",
       "issue": 2
