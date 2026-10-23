@@ -371,7 +371,7 @@ def _fresh_drive(drive: store.Drive, count: int) -> None:
     """
     refuse = ("Drive 上找不到 sessions/。這是新的或清空的 Drive 嗎？只有確定設定的 root 資料夾在、"
               "而且裡面真的沒有 sessions/ 時，--not-exist-upload 才會建立並上傳；這次查不出來（{why}），"
-              "分不出是新的 Drive 還是 root／token 設定有問題，所以不傳。確認 `agora sync`／連線正常後再試一次")
+              "分不出是新的 Drive 還是 root／token 設定有問題，所以不傳。確認連線和 root／token 設定正常後再試一次")
     try:
         mine = json.loads(drive._run("lsjson", "gdrive:", "--dirs-only", root=False) or "[]")
         root_id = drive.folder_id()

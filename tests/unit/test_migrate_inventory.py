@@ -217,7 +217,7 @@ def test_a_wrong_index_version_is_an_error_not_a_rebuild(world, capsys):
     world.index.db.execute(f"PRAGMA user_version = {store.INDEX_VERSION + 7}")
     world.index.db.commit()
     code, out, err = world.run(capsys)
-    assert code != 0 and out == "" and "先跑一次正常指令" in err
+    assert code != 0 and out == "" and "先跑一次一般指令（例如 agora search session）" in err
     db = sqlite3.connect(world.paths.cache / "index.sqlite")
     assert db.execute("PRAGMA user_version").fetchone()[0] == store.INDEX_VERSION + 7, "not rebuilt"
     assert db.execute("SELECT count(*) FROM sessions").fetchone()[0] == 1
