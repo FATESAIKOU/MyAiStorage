@@ -63,8 +63,8 @@ entity = "mybrain" | "agora" | "foundry" | "atelier"
 ```
 
 - 只用**第一個** `:` 切開；locator 裡的 `@`、`#` 要百分比編碼。
-- 例：`mybrain:技術/動手做/AiStorage.md`、`agora:01K6XYZ...`、`atelier:reviewer@v3`、`foundry:<id>#sec2`。
-- MyBrain 已經有自己的 frontmatter（OKF），那邊不改；Agora 指向它時用路徑，等 MyBrain 有不變 id 之後改用 id。
+- 例：`mybrain:aistorage`、`agora:01K6XYZ...`、`atelier:reviewer@v3`、`foundry:<id>#sec2`。
+- MyBrain 已經有自己的 frontmatter（OKF），那邊不改；Agora 指向 MyBrain 案件時用案件的不變 id（`mybrain:<專案名>`），不用路徑。id 是 MyBrain 加 id 當下的專案名，小寫英數以 `-` 連接，之後改名也不改；Agora 只照抄、不解讀。舊寫法（路徑）`check_ref` 仍接受。
 - 反向連結（「哪些 Session 參照了這篇」）由各實體自己建索引，不寫進 header。
 
 ### 3.3 放不了 YAML 的項目（H5）
@@ -83,7 +83,7 @@ generated: {by: "opencode/space-bunny-free", at: 2026-10-01T11:00:00Z}
 sources:
   - {id: "opencode:ses_xxxx", title: "opencode session", author: "opencode/space-bunny-free", last_modified: 2026-10-01}
 id: agora:01K6XYZ...
-refs: ["mybrain:技術/動手做/AiStorage.md"]
+refs: ["mybrain:aistorage"]
 case: null
 agora:                                # 系統欄位，使用者不能改
   header: 2

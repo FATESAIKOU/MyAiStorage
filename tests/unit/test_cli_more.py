@@ -665,15 +665,15 @@ def test_search_all_aliases(env, capsys, tmp_path, monkeypatch):  # U-SRC-09
     shutil.copy(CL_FIX / "cl-basic.jsonl", subdir / f"{CL_SID}.jsonl")
     _, op_id, _ = run(capsys, "import", "session", "--external-session-id", "ses_a",
                        "--agent", "opencode",
-                       "--header", "title=規劃", "--header", "case=mybrain:案件/x",
-                       "--header", "tags=[csv]", "--header", "refs=mybrain:a.md")
+                       "--header", "title=規劃", "--header", "case=mybrain:aistorage",
+                       "--header", "tags=[csv]", "--header", "refs=mybrain:pmo")
     _, claude_id, _ = run(capsys, "import", "session", "--external-session-id", CL_SID,
                           "--agent", "claude")
     for filt, want in [("agent=claude", {claude_id}),
                        ("agora.relation=import", {op_id, claude_id}),
-                       ("case=mybrain:案件/x", {op_id}),
+                       ("case=mybrain:aistorage", {op_id}),
                        ("tags=csv", {op_id}),
-                       ("refs=mybrain:a.md", {op_id}),
+                       ("refs=mybrain:pmo", {op_id}),
                        ("title=規劃", {op_id}),
                        ("agora.relation=merge", set())]:
         code, found, _ = run(capsys, "search", "session", "--filter", filt, "--no-sync")

@@ -88,7 +88,7 @@ def test_validate_requires_type_and_prefixed_id():
 def test_check_ref_rules():  # U-HDR-06
     # Nothing reads the parts back, so check_ref only has to accept or raise:
     # a locator with colons, an @rev, and a #fragment all pass.
-    for good in ("mybrain:a:b/c.md", "atelier:職務@v2", "foundry:x#sec",
+    for good in ("mybrain:aistorage", "mybrain:a:b/c.md", "atelier:職務@v2", "foundry:x#sec",
                  "agora:01K6X", "mybrain:案件/檔名.md#某段"):
         assert h.check_ref(good) is None
     for bad in ("nobody:x", "no-colon", "mybrain:", "mybrain:", 42):
