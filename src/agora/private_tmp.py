@@ -73,7 +73,7 @@ _RANDOM = r"[a-z0-9_]{8}"
 #: The prefixes this module's callers use. This is a closed set on purpose:
 #: `AGORA_STATE_DIR` is user-controlled and may point at a `tmp/` that already
 #: had directories in it, so `sweep` only touches a name it can prove is ours.
-PREFIXES = ("agora-raw", "agora-agy", "agora-agy-raw", "agora-agy-sum", "agora-opencode")
+PREFIXES = ("agora-raw", "agora-agy", "agora-agy-raw", "agora-agy-sum", "agora-opencode", "agora-copy-headers")
 
 #: Everything `sweep` may remove: a published name, or one whose setup died.
 _OUR_NAME = re.compile(
