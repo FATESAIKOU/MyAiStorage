@@ -18,8 +18,17 @@
 
 ## 0. 升級前：讓 outbox 排空
 
-在**舊版**上重複跑 `agora sync session`（或任何指令），直到它不再印 `outbox 有 N 筆未上傳`。還沒送出去的用
-`agora push session <id>`。
+沒有 `agora sync` 這個指令：會同步的一般指令（例如 `agora search session > /dev/null`，輸出可以丟掉）在同步時會啟動背景上傳器；
+同步有 5 分鐘節流，節流期間不會重新啟動上傳器、也不會重新列 Drive。在**舊版**上等背景傳完，直到一般指令不再印
+`outbox 有 N 筆未上傳`。要立刻送就用 `agora push session <id>`（它會等自己的 id 離開 outbox）。
+
+**確認排空**（三個都成立）：
+- `<state>/outbox/`（預設 `~/.local/state/agora/outbox/`）底下沒有 ULID 目錄；
+- 沒有 `agora.background` 或 rclone 行程在跑（`pgrep -fl agora.background`、`pgrep -x rclone` 什麼都沒印）；
+- 一般指令不再印「outbox 有 N 筆未上傳」。
+
+**同步有 5 分鐘節流**（`store.SYNC_THROTTLE_S = 300`）：離上一次同步（`<state>/last-sync`）不到 5 分鐘，指令不會重新列 Drive，
+也就看不到 Drive 上的新變化；要隔一段時間再跑。（索引版本不符時的重建不受節流影響，開索引時就做。）
 
 **升級後，升級前留在 outbox 的舊格式版本永遠不會被上傳**（上傳器逐筆略過，每個 entry 只警告一次，其他筆照常送）：
 送上去會把舊格式寫回 Drive。所以升級前處理最省事。排不掉、真的不要那個未上傳版本的，**本人明確說「放棄」**，把 id 記在
@@ -48,7 +57,7 @@
 ## 2. 盤點（確認點 ①）
 
 ```bash
-agora sync session                       # 升級後先跑一次正常指令，讓索引重建完成
+agora search session > /dev/null        # 升級後先跑一次正常指令（沒有 agora sync），讓索引重建完成
 agora migrate inventory --json --must-keep ~/keep.txt
 agora migrate inventory                  # 人看的版本：每類的數量、drop_list 的 id、每個不能丟的 id 與原因
 ```
@@ -132,8 +141,8 @@ agora delete session <那些 id>          # 先不帶 --yes：只印預覽（要
 agora delete session <那些 id> --yes
 ```
 
-- 最後一次盤點的 `counts` 若有 `drive-only`（Drive 上有、這台索引沒有的資料夾，可能是別台剛匯入的子 Session），**先 `agora sync session`
-  再盤點一次**：`delete` 的「有批外子 Session 就拒絕」也只看本機索引，看不到它們。
+- 最後一次盤點的 `counts` 若有 `drive-only`（Drive 上有、這台索引沒有的資料夾，可能是別台剛匯入的子 Session），**先隔 5 分鐘以上再跑一次一般指令（例如 `agora search session`，
+  這樣才會重新列 Drive；節流見第 0 節），再盤點一次**：`delete` 的「有批外子 Session 就拒絕」也只看本機索引，看不到它們。
 - **只把 `drop_list` 原樣交給 `delete`**；不要自己從 `sessions` 挑 id。
 - 整條 lineage 在**同一次**指令裡給。搬遷前確認沒有 `continue` 在跑（使用中的會被跳過）。
 - `different`／`outbox_legacy` 要丟是**人工例外**：本人明確給整條 lineage 的 id，記在搬遷紀錄；`drop_list` 不會為它變動。

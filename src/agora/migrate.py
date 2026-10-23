@@ -148,7 +148,7 @@ def open_index(paths: store.Paths) -> sqlite3.Connection:
     `session.md` (G.2)."""
     path = paths.cache / "index.sqlite"
     if not path.is_file():
-        raise MigrateError("本機還沒有索引；先跑一次正常指令（例如 agora sync session）再盤點")
+        raise MigrateError("本機還沒有索引；先跑一次一般指令（例如 agora search session）再盤點")
     try:
         db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         version = db.execute("PRAGMA user_version").fetchone()[0]
@@ -157,8 +157,8 @@ def open_index(paths: store.Paths) -> sqlite3.Connection:
     if version != store.INDEX_VERSION:
         db.close()
         raise MigrateError(
-            f"索引版本是 {version}，這個版本要 {store.INDEX_VERSION}；先跑一次正常指令"
-            f"（例如 agora sync session）讓索引重建完成，再盤點——盤點自己不重建（重建會讀鏡像的 session.md）")
+            f"索引版本是 {version}，這個版本要 {store.INDEX_VERSION}；先跑一次一般指令"
+            f"（例如 agora search session）讓索引重建完成，再盤點——盤點自己不重建（重建會讀鏡像的 session.md）")
     return db
 
 
@@ -470,7 +470,7 @@ def _listing(paths: store.Paths) -> dict:
     drive = store.Drive(paths)
     name = os.environ.get("AGORA_FOLDER_NAME", "agora")
     if not (drive.settings.get("folders") or {}).get(name):
-        raise MigrateError("這台還沒連過 Drive（沒有 folder id）；先跑一次正常指令（例如 agora sync session）")
+        raise MigrateError("這台還沒連過 Drive（沒有 folder id）；先跑一次一般指令（例如 agora search session）")
     try:
         listing = drive.list_sessions()
     except store.StoreError as e:
