@@ -19,7 +19,7 @@
 | F9 | tui 的狀態來自 hooks：第一則 `UserPromptSubmit`→`running`、`Stop`→`idle`；輸入沒被確認時 sidecar 只記 WARN，**不回錯，因為重送會變兩份**；sidecar 的狀態「最多晚一個 scheduler tick」 | 同上 §2.5、§2.2 status |
 | F10 | `attach` 中的 agent 被 poke 照送並記 WARN | 同上 §2.5（Q2 裁定） |
 | F11 | MyPMO `dispatch.py reply` ＝ `send_message`＋`poke_agent("channel 有新回覆，去讀。", interrupt=False)`；poke 失敗時通知本人並回 2（`--allow-poke-failure` 可吞）；`send` 是派工：驗工單號、讀工單、組樣板、送出、記 `received_at` 到 state 檔 | MyPMO `pmo/dispatch.py:2192-2205`、`:1915-1990` |
-| F12 | MyPMO 對 sidecar 的 poke 逾時＝`poke_queue_timeout`＋10 秒餘裕，遇 409 `agent_not_running` 依 `state` 分類說明；不重試 | `pmo/dispatch.py:1724-1760` |
+| F12 | MyPMO 對 sidecar 的 poke 逾時＝`poke_queue_timeout`＋10 秒餘裕，遇 409 `agent_not_running` 依 `state` 分類說明；不重試。**`poke_queue_timeout` 只用在 `starting` 的 poke 排隊**（sidecar 側：`starting` 時排隊到起來再送，逾時回 409 `poke_timeout`；`running`／`idle` 直接交給 driver），MyPMO 的餘裕是為了這一條 | `pmo/dispatch.py:1724-1760`；MyLinuxPool `modules/sidecar/docs/sidecar.md:281`、`:570`；`modules/sidecar/src/sidecar/core.py:1105-1124` |
 | F13 | 現有 skill 的分發：`skills/angareion/SKILL.md` 由 MyLinuxPool 建映像時用 tool-pins 裡裝 `angareion` 的**同一個 sha** 取檔，放 `~/.claude/skills/angareion/`；opencode 自動讀 `~/.claude/skills/` | `docs/angareion.md`「說明檔（skill）」 |
 | F14 | harness 是 `atelier/<series>/<role>/v<N>.md`、append-only；`v>=1` 的正文只寫能力、不寫工具名；未知能力名只警告（`KNOWN_CAPABILITIES` 在測試裡）；`v1` 起按 agent 交付：啟動方跑 `atelier render <id> [--append <環境說明>] --out <檔>`；環境說明放環境那一側、可寫工具名 | `docs/atelier/harness.md`；`docs/atelier/tool.md`「render」；`tests/unit/test_atelier_harness.py:75` |
 | F15 | `pyproject.toml` 現有 console scripts：`agora`／`angareion`／`atelier` | `pyproject.toml:14-17` |
@@ -79,7 +79,7 @@
 | B | 再加 `ack`／`status`／`poke`／`channels` | 每加一個都是要被記住的介面；Angareion 明說「沒有 ack、沒有已讀回條」，加 `ack` 等於在 skill 層補它刻意不做的東西 |
 | C | 只有 `send`（收信仍用 `angareion read`） | 收信的「不加 `--channel`」「要先 `wait`」仍要靠 AI 記得；`--channel` 誤用已經是 M0 的教訓（F2） |
 
-**建議 A。** 理由：#212 要的是「省精力」，指令少且各只做一件事。`poke` 不單獨暴露——叫醒是 `send` 的副作用；要打斷、要自訂文字的戳是 PMO 的 `dispatch.py poke` 的事（D4）。
+**建議 A。** 理由：#212 要的是「省精力」，指令少且各只做一件事。skill 不提供「單獨的 poke」與「自訂文字」——叫醒是 `send` 的副作用、文字固定；要打斷，只能附在一則訊息上用 `send --interrupt`；「暫停」（打斷後送『停下來等指示』這類自訂文字）仍是 PMO 的 `dispatch.py poke` 的事（D4）。
 
 **`send` 的旗標**（建議）：
 
@@ -155,14 +155,14 @@ send:
  6. exit 0
 ```
 
-### D2.2 怎麼知道「在同一台 sidecar、閒置」
+### D2.2 怎麼知道「在同一台 sidecar、可戳」
 
 | 條件 | 判斷方式 | 出處 |
 |---|---|---|
 | 同一台 sidecar | 對本機 sidecar 問 `GET /agents/{id}`：200＝在；404＝不在這台 | F6、F7；agent id 就是 AI 名（dispatch 用同一個字串當 `to` 與 `/agents/{id}`，F11） |
 | 可戳的狀態 | `state` 是 `idle` 或 `running`；其餘（`starting`／`waiting-quota`／`exited`）不戳 | F7、F8、F9、F17 |
 
-**不再區分 tui／headless**（J10 建議放寬）：F17 證明兩者的 poke 都會開新一輪。**因此也不依賴 `attach` 欄位**（`sidecar.md` 明說 attach「不是狀態」、值不得解析）。`starting`／`waiting-quota`／`exited` **不戳**；`starting` 尤其不戳：`open` 通常帶第一則 `input`，starting 階段再戳會變兩則、或被對話框吃掉，skill 分辨不出（F20）；起來之後的 agent 自己會照 input 去讀信。這同時拿掉了 `poke_queue_timeout` 的長等待：戳只在 `idle` 與 `running` 兩種狀態送。`idle` 的戳約 0.3 秒返回；`running` 的不打斷戳是否在 HTTP 層排隊等這一輪結束【未知】V11（F12 顯示 MyPMO 為此給了 `poke_queue_timeout` 加餘裕）。skill 的 client 逾時照 D2.4：逾時＝「叫醒結果未知」、不重送。
+**不再區分 tui／headless**（J10 建議放寬）：F17 證明兩者的 poke 都會開新一輪。**因此也不依賴 `attach` 欄位**（`sidecar.md` 明說 attach「不是狀態」、值不得解析）。`starting`／`waiting-quota`／`exited` **不戳**；`starting` 尤其不戳：`open` 通常帶第一則 `input`，starting 階段再戳會變兩則、或被對話框吃掉，skill 分辨不出（F20）；起來之後的 agent 自己會照 input 去讀信。這同時拿掉了 `poke_queue_timeout` 的長等待（它只用在 `starting` 的 poke 排隊，`sidecar.md:281`、`:570`；`core.py:1105-1124` 只有 `starting` 分支會等）：戳只在 `idle` 與 `running` 兩種狀態送，兩者都立刻返回（tui：貼上後等 0.3 秒按 Enter 就返回，`running` 的輸入由 claude 輸入框排隊；opencode：`POST /api/session/{id}/prompt` 立即返回，`drivers/opencode.py:13-14`；以上是讀文件與程式，未實測）。skill 的 client 逾時照 D2.4：逾時＝「叫醒結果未知」、不重送。
 
 **對方在 `running` 時怎麼辦（J2）**：**(a)，`running` 也送不打斷的 poke**。出處：PMO 2026-10-24 依本人字面判定（本人說「可以中斷也可以不中斷等對方讀」）；不是本人另外選的。
 
@@ -209,7 +209,7 @@ send:
 | 同台 sidecar、`idle`（tui 或 headless） | 被戳（馬上收到）；跑 `aicomm inbox` |
 | 同台、`running`（含阻塞在 `inbox --wait` 的） | 也被戳（不打斷，排到這一輪之後，D2.2）；阻塞在 wait 的 agent 本來就會自己醒（I1），這一戳讓它多一輪 |
 | 同台、`starting`／`waiting-quota`／`exited` | 不戳；`starting` 的起來後照 `input` 讀信；其他等被重開 |
-| 別台機器的 agent | skill 不做跨機（Non-Goal）。收件人那台上的 agent 靠 `inbox --wait`；**worker team 的 PM 由 PMO 端的 `dispatch.py` 經轉發埠叫醒（F19，D4）**；對 PMO 則是 D2.9 |
+| 別台機器的 agent | skill 不做跨機（Non-Goal）。收件人那台上的 agent 靠 `inbox --wait`；**worker team 的 PM 由 PMO 端的 `dispatch.py` 經轉發埠叫醒（F19，D4）**；對 PMO 則靠 M2 D6 的 watch（F16） |
 | sidecar 沒在跑 | 同上 |
 | 所有收件人的保底 | 訊息已在 Angareion，`wait` 與 `read` 一定讀得到——這就是「送達」的定義 |
 
@@ -217,7 +217,7 @@ send:
 
 ### D2.7 對 sidecar 的依賴面與版本
 
-skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle`、404 語意）。**回應不符預期一律當叫醒失敗、不戳**。sidecar 若改這些形狀，應在 sidecar 的版本說明標示；skill 的 `--version` 印安裝的 sha，對照表放 `docs/aicomm.md`（P10）。這是無法避免的耦合：兩者之間的約定就是 sidecar 公開的 HTTP 形狀。
+skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle`／`running`、404 語意）。**回應不符預期一律當叫醒失敗、不戳**。sidecar 若改這些形狀，應在 sidecar 的版本說明標示；skill 的 `--version` 印安裝的 sha，對照表放 `docs/aicomm.md`（P10）。這是無法避免的耦合：兩者之間的約定就是 sidecar 公開的 HTTP 形狀。
 
 ### D2.8 位址與安全
 
@@ -255,7 +255,7 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 | C | 把用法寫進 harness 本文／環境說明（`--append`） | 正文不能寫工具名（F14）；環境說明每環境一份、散；完整說明佔系統指示上下文 |
 | D | 只靠各 repo 的 `AGENTS.md` | 一定漂移 |
 
-**建議 A**；**判斷點 J4 請本人確認「經 Atelier」是否要字面上走 B**。
+**建議 A**；**本人裁定 A（J4）**；B 等角色別版本有需求時再做。
 
 ### D3.2 harness 怎麼提到它（乙層）
 
@@ -282,13 +282,13 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 |---|---|---|
 | `send <team> <repo#n>` | 驗工單號、讀工單、組派工樣板、送出、**把 `received_at` 寫進 state 供 `open --since` 與 watch 用**、trial 守門；此時 PM 可能還沒開起來 | 不取代 |
 | `reply <team>` | `send_message`＋固定文字 poke，**經 `sidecar_base` 找 sidecar：Mac team 用 `local_sidecar`，worker team 用轉發埠（F19）** | **只對 Mac team 換成 `aicomm send`；worker team 保留現行**（`aicomm` 只問本機 sidecar，換過去 worker team 的 PM 就叫不醒，是退步） |
-| `poke <team> [--interrupt]` | 自訂文字、可打斷 | 並存（sidecar 的「暫停＝poke＋interrupt」；skill 刻意不暴露） |
+| `poke <team> [--interrupt]` | 自訂文字、可打斷 | 並存（sidecar 的「暫停＝poke＋interrupt」＝自訂文字的打斷，仍歸 `dispatch.py poke`；skill 只有附在訊息上的 `send --interrupt`，不提供單獨的 poke 與自訂文字） |
 
 | 選項 | 內容 | 代價 |
 |---|---|---|
-| A | 全面取代 | `send` 的 state、樣板、trial 守門要搬進 skill——skill 變成 MyPMO 專用；`poke --interrupt` 無法表達；worker team 退步 |
+| A | 全面取代 | `send` 的 state、樣板、trial 守門要搬進 skill——skill 變成 MyPMO 專用；單獨的 poke 與自訂文字（「暫停」）無法表達；worker team 退步 |
 | B | 包一層：`dispatch.py send` 最後一步呼叫 `aicomm send` | 派工當下 PM 常常還沒開，叫醒無意義；多一層沒有好處 |
-| **C（建議）** | **並存、按用途分**：派工＝`dispatch.py send`；日常溝通＝`aicomm`；`reply`：**Mac team 換成 `aicomm send`，worker team 保留現行**；`poke` 不變 | 兩套工具並存一段時間；界線清楚 |
+| **C（建議）** | **並存、按用途分**：派工＝`dispatch.py send`；日常溝通＝`aicomm`；`reply`：**Mac team 換成 `aicomm send`，worker team 保留現行**；`poke` 不變 | 兩套工具並存一段時間；界線：aicomm 是「一則訊息＋固定文字的戳（可附 `--interrupt`）」，`dispatch.py poke` 是「單獨的、自訂文字的戳」 |
 
 **誰負責**：`reply` 的改動在 MyPMO，**由 PMO 負責**（它同時決定叫醒失敗要不要保留 exit 2 的語意）；worker team 叫醒的長期歸屬（是否讓 worker 上的 aicomm 自己叫醒同台 PM，不經 PMO）見 tasks 5.3，不在本 change。同一台 worker 上的隊員→PM（都在 worker 的 sidecar）則直接可用 aicomm，因為它們在同一台。
 
@@ -314,7 +314,7 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 | J6 | harness 第一輪不改 | 本人：照建議（A，D3.2） |
 | J7 | 與 `dispatch.py` 並存，`reply` 只換 Mac team | 本人：照建議（C，D4） |
 | J9 | 誰可以叫醒誰 | **本人定案**：不要 `nowake` 名單和 `~/.config/aicomm` 設定；改成 SKILL.md 軟規則（預設不中斷／隊員基本上不要中斷 PM、PMO／「收到」類回覆 `--no-wake`）；要硬控制之後走 sidecar open 帶白名單（MyLinuxPool#346）。代價（任何同台 agent 都能叫醒 PMO，與 M2 D6 並存）本人接受（D2.9） |
-| J10 | 閒置的 headless 也叫醒 | 本人：照建議（A，條件為 `state == idle`，不分 tui／headless） |
+| J10 | 閒置的 headless 也叫醒 | 本人：照建議（A，條件為 `state` 是 `idle` 或 `running`〔J2〕，不分 tui／headless） |
 
 （J3 已刪；J8 名字降為作者提議 P11。）
 
@@ -350,7 +350,7 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 | # | 要驗的事 | 為什麼 |
 |---|---|---|
 | V1 | 阻塞在 `angareion wait` 的 agent，sidecar 看到的 `state` 是不是 `running`（I1，tui 與 headless 各一） | 阻塞在 wait 的 agent 被戳會多一輪（J2 (a) 的已知代價），這裡確認它確實是 `running` |
-| V11 | `running` 的不打斷 poke 在 HTTP 層是立刻返回還是等到這一輪結束（F12 暗示有排隊等待）；連送兩則是否確實排兩句 | D2.2 的逾時與 I2 |
+| V11 | 對 `running` 的同一收件人連送兩則，是否真的排成兩句；tui 輸入框裡已有排隊的字時再貼一次，會不會被合併成一則 | I2 |
 | V10 | 帶 `interrupt: true` 的戳對 `running` 的 headless／tui 的實際行為（F8 只說明文件；本設計未實測） | `--interrupt` |
 | V3 | sidecar 是否記錄 poke 的 `text` 到 log | 影響 D2.5 |
 | V5 | claude／opencode 能否按 agent 指定 skills 目錄 | D3.1-B 是否可行 |

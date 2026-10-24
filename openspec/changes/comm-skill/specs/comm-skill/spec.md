@@ -30,7 +30,7 @@ skill MUST 對外只提供 `send` 與 `inbox` 兩個子指令（另有 `--versio
 - **THEN** 訊息帶一個名為 `ticket`、值為 `MyAiStorage#212` 的 ref 附件
 
 ### Requirement: 叫醒的對象與條件
-`send` 寫入成功後，MUST 只對 `--to` 與每個 `--mention` 的 AI 名各判斷一次是否叫醒；沒有 `--to` 的廣播 MUST NOT 叫醒任何人；寄給自己 MUST NOT 叫醒自己；`--no-wake` MUST NOT 叫醒任何人。skill MUST NOT 依角色（PM、PMO、隊員）分支；所有角色行為相同。預設戳為不中斷（`interrupt: false`）；給了 `--interrupt` 才帶 `interrupt: true`（`--interrupt` 與 `--no-wake` 互斥，同時給 exit 1）。對每個名字，本機 sidecar 的 agent 查詢回 200（agent 在這台）且 `state` 是 `idle` 或 `running` 才戳（不打斷：`idle` 馬上收到，`running` 排到這一輪之後）。判斷 MUST NOT 依賴 agent 是 tui 或 headless，MUST NOT 讀 `attach` 欄位。`starting`、`waiting-quota`、`exited` MUST NOT 戳。對 `running` 的收件人，預設的不中斷戳照送；給了 `--interrupt` 才帶 `interrupt: true`。skill MUST NOT 對同一次 `send` 的同一個對象戳兩次；不同次 `send` 之間 MUST NOT 去重（連送兩則＝兩次戳）。
+`send` 寫入成功後，MUST 只對 `--to` 與每個 `--mention` 的 AI 名各判斷一次是否叫醒；沒有 `--to` 的廣播 MUST NOT 叫醒任何人；寄給自己 MUST NOT 叫醒自己；`--no-wake` MUST NOT 叫醒任何人。skill MUST NOT 依角色（PM、PMO、隊員）分支；所有角色行為相同。預設戳為不中斷（`interrupt: false`）；給了 `--interrupt` 且收件人 `running` 才帶 `interrupt: true`，收件人 `idle` 時 `interrupt` 仍為 false（`--interrupt` 與 `--no-wake` 互斥，同時給 exit 1）。對每個名字，本機 sidecar 的 agent 查詢回 200（agent 在這台）且 `state` 是 `idle` 或 `running` 才戳（不打斷：`idle` 馬上收到，`running` 排到這一輪之後）。判斷 MUST NOT 依賴 agent 是 tui 或 headless，MUST NOT 讀 `attach` 欄位。`starting`、`waiting-quota`、`exited` MUST NOT 戳。對 `running` 的收件人，預設的不中斷戳照送。不同次 `send` 之間 MUST NOT 去重（連送兩則＝兩次戳）。
 
 #### Scenario: 閒置的同台 agent
 - **WHEN** 收件人在本機 sidecar、`state` 為 `idle`（不論 tui 或 headless）
@@ -47,6 +47,10 @@ skill MUST 對外只提供 `send` 與 `inbox` 兩個子指令（另有 `--versio
 #### Scenario: 明確中斷
 - **WHEN** 收件人的 `state` 為 `running`，且給了 `--interrupt`
 - **THEN** 送出一次戳，`interrupt` 為 true
+
+#### Scenario: idle 時給 --interrupt
+- **WHEN** 收件人 `idle`，且給了 `--interrupt`
+- **THEN** 戳的 `interrupt` 仍為 false
 
 #### Scenario: 預設不中斷
 - **WHEN** 收件人 `idle`，沒給 `--interrupt`
