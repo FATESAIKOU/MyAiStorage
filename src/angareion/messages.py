@@ -42,6 +42,7 @@ LEGACY_AGENT_NAME_RE = re.compile(
 CHANNEL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+ULID_RE = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}")
 
 
 def new_ulid(now_ms: int | None = None) -> str:
@@ -49,6 +50,11 @@ def new_ulid(now_ms: int | None = None) -> str:
     ms = int(time.time() * 1000) if now_ms is None else now_ms
     value = (ms << 80) | int.from_bytes(os.urandom(10), "big")
     return "".join(_CROCKFORD[(value >> (5 * i)) & 31] for i in range(25, -1, -1))
+
+
+def is_ulid(value: Any) -> bool:
+    """Whether a value is a 26-character Crockford base32 ULID (`fullmatch`: no trailing newline)."""
+    return isinstance(value, str) and ULID_RE.fullmatch(value) is not None
 
 
 def now_iso() -> str:
@@ -175,6 +181,8 @@ class Message:
     id: str = field(default_factory=new_ulid)
     at: str = field(default_factory=now_iso)
     angareion: int = ANGAREION_VERSION
+    mentions: list[str] = field(default_factory=list)
+    in_reply_to: str | None = None
 
     def validate(self, *, allow_legacy_addresses: bool = False) -> None:
         """Validate all fields and metadata.
@@ -196,6 +204,17 @@ class Message:
         validate_address(self.from_, field_name="from", allow_legacy=allow_legacy_addresses)
         if self.to is not None:
             validate_address(self.to, field_name="to", allow_legacy=allow_legacy_addresses)
+
+        if not isinstance(self.mentions, list):
+            raise MessageValidationError("mentions must be a list of AI names")
+        for i, name in enumerate(self.mentions):
+            validate_address(name, field_name=f"mentions[{i}]", allow_legacy=allow_legacy_addresses)
+        if len(set(self.mentions)) != len(self.mentions):
+            raise MessageValidationError(f"mentions must not repeat a name, got {self.mentions!r}")
+        if self.in_reply_to is not None and not is_ulid(self.in_reply_to):
+            raise MessageValidationError(
+                f"in_reply_to must be a 26-character ULID (the id of the message replied to), got {self.in_reply_to!r}"
+            )
 
         validate_channel_name(self.channel)
 
@@ -224,6 +243,8 @@ def message_to_dict(message: Message) -> dict[str, Any]:
         "urgency": message.urgency,
         "content": message.content,
         "attachments": message.attachments,
+        "mentions": message.mentions,
+        "in_reply_to": message.in_reply_to,
     }
 
 
@@ -257,23 +278,40 @@ def split_front_matter(text: str) -> tuple[str, str]:
 def serialize_message(msg: Message) -> str:
     """Serialize a message into YAML front matter + Markdown content.
 
-    A broadcast (no `to`) omits the `to` field entirely.
+    A broadcast (no `to`) omits the `to` field entirely. `mentions` is written
+    as one flow-style line (`mentions: [a, b]`; the TS side's hand-written
+    parser relies on it) and left out when empty; `in_reply_to` is left out
+    when unset.
     """
     msg.validate()
 
-    fm: dict[str, Any] = {
+    head: dict[str, Any] = {
         "angareion": msg.angareion,
         "id": msg.id,
         "at": msg.at,
         "from": msg.from_,
     }
     if msg.to is not None:
-        fm["to"] = msg.to
-    fm["channel"] = msg.channel
-    fm["urgency"] = msg.urgency
-    fm["attachments"] = msg.attachments
+        head["to"] = msg.to
+    tail: dict[str, Any] = {
+        "channel": msg.channel,
+        "urgency": msg.urgency,
+        "attachments": msg.attachments,
+    }
 
-    fm_yaml = yaml.safe_dump(fm, sort_keys=False, allow_unicode=True)
+    # AI names and ULIDs are plain YAML scalars, so these two lines are written
+    # by hand: safe_dump would turn the list into the block form.
+    extra = ""
+    if msg.mentions:
+        extra += f"mentions: [{', '.join(msg.mentions)}]\n"
+    if msg.in_reply_to is not None:
+        extra += f"in_reply_to: {msg.in_reply_to}\n"
+
+    fm_yaml = (
+        yaml.safe_dump(head, sort_keys=False, allow_unicode=True)
+        + extra
+        + yaml.safe_dump(tail, sort_keys=False, allow_unicode=True)
+    )
     text = f"---\n{fm_yaml}---\n{msg.content}"
 
     if len(text) > MAX_MESSAGE_LENGTH:
@@ -281,6 +319,31 @@ def serialize_message(msg: Message) -> str:
             f"Message length ({len(text)} chars) exceeds maximum limit of {MAX_MESSAGE_LENGTH} chars"
         )
     return text
+
+
+def _read_mentions(value: Any) -> list[str]:
+    """`mentions` on the read side: wide. A bad value is dropped, never the message.
+
+    A value that is not a list reads as empty; inside a list, an item that is
+    not an AI name (the old grammar counts, as for `from`/`to`) and a repeat
+    are dropped one by one.
+    """
+    if not isinstance(value, list):
+        return []
+    names: list[str] = []
+    for item in value:
+        try:
+            validate_address(item, allow_legacy=True)
+        except MessageValidationError:
+            continue
+        if item not in names:
+            names.append(item)
+    return names
+
+
+def _read_in_reply_to(value: Any) -> str | None:
+    """`in_reply_to` on the read side: a value that is not a ULID reads as unset."""
+    return value if is_ulid(value) else None
 
 
 def parse_message(text: str, *, strict: bool = False) -> Message | None:
@@ -323,6 +386,8 @@ def parse_message(text: str, *, strict: bool = False) -> Message | None:
             urgency=data["urgency"],
             attachments=data["attachments"],
             content=body,
+            mentions=_read_mentions(data.get("mentions")),
+            in_reply_to=_read_in_reply_to(data.get("in_reply_to")),
         )
         msg.validate(allow_legacy_addresses=True)
         return msg

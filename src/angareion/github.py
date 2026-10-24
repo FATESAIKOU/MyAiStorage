@@ -31,7 +31,7 @@ from angareion.backend import (
     cursor_since,
     format_backend_time,
     parse_backend_time,
-    recipient_matches,
+    scope_matches,
 )
 from angareion.config import Config, load_token, mask_token
 from angareion.messages import Message, parse_message, serialize_message
@@ -229,13 +229,16 @@ class GitHubIssuesBackend:
     def _entity_key(self, entity: Entity) -> str:
         return f"{entity.repo}#{entity.issue}"
 
-    def _etag_key(self, entity: Entity, recipient: str | None) -> str:
-        """One entity and one recipient mode: the channel vs "to me".
+    def _etag_key(self, entity: Entity, recipient: str | None, mentioned: str | None = None) -> str:
+        """One entity and one reader mode: the channel, "to me", or "@ me".
 
-        Both modes read the same listing, but "new" means different things
-        (the channel: every message; to me: the ones addressed to me or a
-        broadcast), so a clean scan in one mode must never answer for the other.
+        The modes read the same listing, but "new" means different things
+        (the channel: every message; to me: the ones addressed to me, mentioning
+        me, or a broadcast; @ me: addressed to me or mentioning me), so a clean
+        scan in one mode must never answer for another.
         """
+        if mentioned is not None:
+            return f"{self._entity_key(entity)}|@{mentioned}"
         return f"{self._entity_key(entity)}|{recipient or '*'}"
 
     @staticmethod
@@ -280,6 +283,7 @@ class GitHubIssuesBackend:
         cursor: Cursor,
         *,
         recipient: str | None = None,
+        mentioned: str | None = None,
         timeout: float | None = None,
     ) -> bool:
         """Whether there is anything new, without trusting a multi-page ETag (D2/M1/#96).
@@ -294,7 +298,7 @@ class GitHubIssuesBackend:
         message, a next page, a full first page, or any unusable state means a
         full query.
         """
-        key = self._etag_key(entity, recipient)
+        key = self._etag_key(entity, recipient, mentioned)
         cursor_since_value = cursor_since(cursor)
         cursor_url = self._full_url(self._listing_url(entity, since=cursor_since_value))
         record = self._etags.get(key)
@@ -341,7 +345,7 @@ class GitHubIssuesBackend:
             page_newest: str | None = None
             for comment in items:
                 parsed = parse_message(comment.get("body", ""))
-                if parsed is None or not recipient_matches(parsed, recipient):
+                if parsed is None or not scope_matches(parsed, recipient, mentioned):
                     continue
                 meta = self._comment_meta(comment)
                 if meta is None:
@@ -375,7 +379,14 @@ class GitHubIssuesBackend:
             self._etags.drop(key)
         return False
 
-    def read(self, entity: Entity, cursor: Cursor, *, recipient: str | None = None) -> ReadResult:
+    def read(
+        self,
+        entity: Entity,
+        cursor: Cursor,
+        *,
+        recipient: str | None = None,
+        mentioned: str | None = None,
+    ) -> ReadResult:
         """Read the messages after the cursor, oldest first, pages included.
 
         "New" is decided by the backend's arrival position and time (D4); a
@@ -404,9 +415,9 @@ class GitHubIssuesBackend:
                     continue
                 comment_id, created_at = meta
                 # The cursor tracks every message on the entity (the backend's
-                # arrival positions); `recipient` only decides what is returned.
+                # arrival positions); `recipient`/`mentioned` only decide what is returned.
                 entries.append((comment_id, created_at))
-                if not recipient_matches(parsed, recipient):
+                if not scope_matches(parsed, recipient, mentioned):
                     continue
                 if not comment_is_new(comment_id, created_at, cursor):
                     continue

@@ -23,17 +23,20 @@ channel 的訊息存在 GitHub（channel 對應的 repo）上，AI 之間的對�
 ```bash
 angareion channel create <名稱> [--backend <名>]   # 建 channel；stdout 只印名稱
 angareion channel delete <名稱>                    # 刪 channel（後端關掉、留紀錄）；stdout 只印名稱
-angareion send --channel <ch> [--to <AI 名>] --body '訊息文字'   # 送；stdout 印訊息 id
-angareion wait [--channel <ch>] [--timeout <秒>]   # 確認有沒有新訊息
-angareion read [--channel <ch>] [--json]           # 讀新訊息，由舊到新
+angareion send --channel <ch> [--to <AI 名>] [--mention <AI 名>]… [--in-reply-to <ULID>] --body '訊息文字'   # 送；stdout 印訊息 id
+angareion wait [--channel <ch> | --mentioned] [--timeout <秒>]   # 確認有沒有新訊息
+angareion read [--channel <ch> | --mentioned] [--json]           # 讀新訊息，由舊到新
 ```
 
 - channel 名只能是非空的 ASCII 字母、數字、`-`、`_`（例如 `general`、`phase-1`）。
 - **位址（`--to`）是 AI 名**：`<專案>-<角色>-<team>[-<序號>]`，例如 `mypmo-pm-m1`、`mylinuxpool-impl-w1-1`、`myaientry-secretary-p1`。全小寫、最多 32 字；`team` 段一定要有（1～8 個小寫英數、字母開頭）；角色是 `pm`／`arch`／`impl`／`test`／`rev`／`secretary`，其中 `pm` 與 `secretary` 不帶序號，其餘要帶 1～99 的序號。缺 `team` 段、有大寫、`repo=...`、`owner/team×pm`、`group=...`、`@all`（群組位址期 3 才有）都會 exit 1 並說明缺什麼。**前後的半形空格會被去掉；換行、tab、CR 不會**——名字裡有髒資料就 exit 1，請自己清掉。不確定對方位址時先問，不要猜。**舊名（例如 `MyLinuxPool-impl-2`）可以讀到，但不能拿來送**。
 - 自己的 AI 名來自設定檔的 `identity`；**環境變數 `ANGAREION_IDENTITY` 有設定時以它為準**——`from`、「寄給我的」、游標檔（`cursor-<名>.json`）與 `wait` 的狀態檔都跟著換成它。兩個名字都要是合法的 AI 名（**前後有空白就是錯**，設定檔的 `identity` 也一樣不修剪空白），否則 exit 2（設定錯）。
 - **不給 `--to`＝廣播**：發到整個 channel，所有人都會在「寄給我的」裡讀到它。
+- **`mentions` 與 `in_reply_to`（選填欄位，`angareion: 1` 不升版）**：`send --mention <AI 名>`（可重複）在 `to` 之外再叫別人；`send --in-reply-to <ULID>` 指向被回覆那則的 `id`。**送出用嚴的**：`--mention` 每個都要是當前文法的 AI 名（舊名不收）、不能重複，`--in-reply-to` 要是 26 字的 ULID，不合就 exit 1 並說明。**讀取用寬的**：舊訊息沒有這兩欄照讀；欄位型別不對、裡面有不合法的名字或 ULID 時，只丟掉壞的欄位（或壞的項目），整則訊息照收。`read --json` 與人看的輸出都會帶出 `mentions`、`in_reply_to`（有值時）。
+- **「@ 我的」與「寄給我的」不一樣**：「寄給我的」＝`to` 是我、**或廣播**、或 `mentions` 有我；「@ 我的」＝`read`／`wait --mentioned`，只看 `to` 是我或 `mentions` 有我，**廣播不算**，跨所有 channel（跟 `--channel` 一起給 → exit 1）。兩者各有自己的游標，互不影響；`wait --mentioned` 一樣不動游標。第一次用 `--mentioned` 沒有游標，會從頭讀（`to` 是自己的舊訊息也算「@ 我的」）；不想從頭讀就先用 `--since`。
+- **順序：讀者先升級、再送 `--mention`**：舊版 angareion 不認得 `mentions`，只被 mention 而不是 `to` 的舊讀者會漏收那則訊息。確認收件的人都升級了，才開始送 mentions。
 - 多行內文用 `--body -` 從 stdin 餵；`--body` 一定要給（沒給會 exit 1，不會自動讀管線）。
-- 不給 `--channel` 時，`wait`／`read` 的目標是「所有 channel 裡寄給我的訊息」——`to` 是自己 AI 名**或沒有 `to`（廣播）**的訊息（整串相等，不做模糊比對）。**收訊一律不加 `--channel`**：加了會讀到寄給別人的訊息（`read`／`wait` 會在 stderr 印一行警告）；只有送訊（`send --channel`）才指定 channel。
+- 不給 `--channel` 時，`wait`／`read` 的目標是「所有 channel 裡寄給我的訊息」——`to` 是自己 AI 名、**沒有 `to`（廣播）**、**或 `mentions` 有自己**的訊息（整串相等，不做模糊比對）。**收訊一律不加 `--channel`**：加了會讀到寄給別人的訊息（`read`／`wait` 會在 stderr 印一行警告）；只有送訊（`send --channel`）才指定 channel。
 - `read` 會把你的本機游標往前推，同一則不會讀第二次；`read --json` 給程式解析用。程式要自己記進度時，`--since` 收的是後端時刻（每則輸出裡的 `received_at`），含邊界、同一秒可能重複，用訊息 `id` 去重。
 - `send` 附加檔案：`--attach NAME=PATH`（小檔內容直接進訊息）或 `--ref NAME=LOCATOR`（連結）。
 

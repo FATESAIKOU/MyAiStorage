@@ -2,8 +2,9 @@
 
 "To me" spans every channel in the config file; each channel is a separate
 backend entity with its own arrival positions, so each keeps its own cursor
-entry (`to:<agent name>:<channel>`). A channel target uses one entry
-(`channel:<name>`).
+entry (`to:<agent name>:<channel>`). "@ me" (`Target(mentioned=)`) spans them
+too, with entries of its own (`mention:<agent name>:<channel>`). A channel
+target uses one entry (`channel:<name>`).
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from typing import Callable, NamedTuple
 
 from angareion.backend import BackendRef, ChannelBackend, Cursor, Entity, EntityResolver, Target
 from angareion.messages import Message
-from angareion.state import CursorStore, channel_cursor_key, recipient_cursor_key
+from angareion.state import CursorStore, channel_cursor_key, mention_cursor_key, recipient_cursor_key
 
 POLL_INTERVAL_SECONDS = 15.0
 # wait bounds each check's network budget to [5s, 30s]: slow networks still get
@@ -58,6 +59,12 @@ class Angareion:
         """`channel delete` step 2: close the entity without deleting it."""
         self.backend.close_channel(entity)
 
+    def _scope(self, target: Target, entity: Entity) -> tuple[str, dict[str, str]]:
+        """For a "to me" or "@ me" target in one channel: its cursor key and the backend filter."""
+        if target.mentioned is not None:
+            return mention_cursor_key(target.mentioned, entity.channel), {"mentioned": target.mentioned}
+        return recipient_cursor_key(self.identity, entity.channel), {"recipient": self.identity}
+
     def check(self, target: Target, *, timeout: float | None = None) -> bool:
         """Whether the backend has anything new for the target right now.
 
@@ -72,8 +79,8 @@ class Angareion:
             return self.backend.check(entity, cursor, timeout=timeout)
 
         for entity in self.store.entities():
-            cursor = self.cursors.cursor(recipient_cursor_key(self.identity, entity.channel))
-            if self.backend.check(entity, cursor, recipient=self.identity, timeout=timeout):
+            key, scope = self._scope(target, entity)
+            if self.backend.check(entity, self.cursors.cursor(key), timeout=timeout, **scope):
                 return True
         return False
 
@@ -140,9 +147,9 @@ class Angareion:
         messages: list[Message] = []
         updates: dict[str, Cursor] = {}
         for entity in self.store.entities():
-            key = recipient_cursor_key(self.identity, entity.channel)
+            key, scope = self._scope(target, entity)
             cursor = self.cursors.cursor(key) if use_local_cursor else Cursor(at=since)
-            result = self.backend.read(entity, cursor, recipient=self.identity)
+            result = self.backend.read(entity, cursor, **scope)
             messages.extend(result.messages)
             if use_local_cursor:
                 updates[key] = result.cursor

@@ -65,23 +65,29 @@ class EntityResolver(Protocol):
 
 @dataclass(frozen=True)
 class Target:
-    """Where to check/read: one channel, or everything addressed to me.
+    """Where to check/read: one channel, everything addressed to me, or everything that @-s me.
 
-    Exactly one of `channel` and `recipient` must be set. `recipient` is the
-    reader's agent name; "to me" spans all channels.
+    Exactly one of `channel`, `recipient` and `mentioned` must be set.
+    `recipient` is the reader's agent name; "to me" spans all channels and
+    counts a message addressed to me, a broadcast, or one that mentions me.
+    `mentioned` is the reader's agent name for "@ me": `to` is me or `mentions`
+    has me, a broadcast does not count; it spans all channels too.
     """
 
     channel: str | None = None
     recipient: str | None = None
+    mentioned: str | None = None
 
     def __post_init__(self) -> None:
-        if (self.channel is None) == (self.recipient is None):
-            raise ValueError("Target needs exactly one of channel or recipient")
+        if sum(value is not None for value in (self.channel, self.recipient, self.mentioned)) != 1:
+            raise ValueError("Target needs exactly one of channel, recipient or mentioned")
 
     def key(self) -> str:
         """Stable key for this target in the local cursor file."""
         if self.channel is not None:
             return f"channel:{self.channel}"
+        if self.mentioned is not None:
+            return "mention:" + identity_slug(self.mentioned)
         return "to:" + identity_slug(self.recipient or "")
 
 
@@ -263,27 +269,49 @@ class ChannelBackend(Protocol):
         cursor: Cursor,
         *,
         recipient: str | None = None,
+        mentioned: str | None = None,
         timeout: float | None = None,
     ) -> bool:
         """Whether there is any new message for the entity right now.
 
-        `recipient` filters "to me" (messages whose `to` is that agent name or
-        that have no `to` at all); None means every message in the channel.
+        `recipient` filters "to me" (messages whose `to` is that agent name,
+        that mention it, or that have no `to` at all); `mentioned` filters
+        "@ me" (`to` is that agent name or it mentions it, broadcasts do not
+        count); None for both means every message in the channel.
         `timeout` is an optional budget in seconds for the backend's own
         network requests (the wait loop passes its remaining time).
         """
         ...
 
-    def read(self, entity: Entity, cursor: Cursor, *, recipient: str | None = None) -> ReadResult:
+    def read(
+        self,
+        entity: Entity,
+        cursor: Cursor,
+        *,
+        recipient: str | None = None,
+        mentioned: str | None = None,
+    ) -> ReadResult:
         """Read the messages after the cursor (oldest first), and the new cursor."""
         ...
 
 
 def recipient_matches(message: Message, recipient: str | None) -> bool:
-    """Whether a message counts as "to me": addressed to me, or a broadcast."""
+    """Whether a message counts as "to me": addressed to me, a broadcast, or it mentions me."""
     if recipient is None:
         return True
-    return message.to is None or message.to == recipient
+    return message.to is None or message.to == recipient or recipient in message.mentions
+
+
+def mention_matches(message: Message, mentioned: str | None) -> bool:
+    """Whether a message counts as "@ me": addressed to me or it mentions me; a broadcast does not."""
+    if mentioned is None:
+        return True
+    return message.to == mentioned or mentioned in message.mentions
+
+
+def scope_matches(message: Message, recipient: str | None, mentioned: str | None) -> bool:
+    """The reader's filter: "to me" (`recipient`), "@ me" (`mentioned`), or neither (all)."""
+    return recipient_matches(message, recipient) and mention_matches(message, mentioned)
 
 
 @dataclass(frozen=True)
@@ -419,12 +447,14 @@ class FakeBackend:
         self.deliver(entity, message)
         return message.id
 
-    def _comments_for(self, entity: Entity, recipient: str | None) -> list[FakeComment]:
+    def _comments_for(
+        self, entity: Entity, recipient: str | None, mentioned: str | None = None
+    ) -> list[FakeComment]:
         return [
             comment
             for comment in self._comments
             if comment.message.channel == entity.channel
-            and recipient_matches(comment.message, recipient)
+            and scope_matches(comment.message, recipient, mentioned)
         ]
 
     def check(
@@ -433,20 +463,28 @@ class FakeBackend:
         cursor: Cursor,
         *,
         recipient: str | None = None,
+        mentioned: str | None = None,
         timeout: float | None = None,
     ) -> bool:
         self._check_injected_error()
         return any(
             comment_is_new(c.id, c.created_at, cursor)
-            for c in self._comments_for(entity, recipient)
+            for c in self._comments_for(entity, recipient, mentioned)
         )
 
-    def read(self, entity: Entity, cursor: Cursor, *, recipient: str | None = None) -> ReadResult:
+    def read(
+        self,
+        entity: Entity,
+        cursor: Cursor,
+        *,
+        recipient: str | None = None,
+        mentioned: str | None = None,
+    ) -> ReadResult:
         self._check_injected_error()
         # The cursor tracks every comment on the entity (the backend's arrival
-        # positions); `recipient` only decides which messages are returned.
+        # positions); `recipient`/`mentioned` only decide which messages are returned.
         all_comments = self._comments_for(entity, None)
-        in_scope = [c for c in all_comments if recipient_matches(c.message, recipient)]
+        in_scope = [c for c in all_comments if scope_matches(c.message, recipient, mentioned)]
         matched = [c for c in in_scope if comment_is_new(c.id, c.created_at, cursor)]
         matched.sort(key=lambda c: c.id)
 

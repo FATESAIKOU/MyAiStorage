@@ -104,6 +104,8 @@ def test_message_to_dict():
         "urgency": 5,
         "content": "body",
         "attachments": [],
+        "mentions": [],
+        "in_reply_to": None,
     }
 
 

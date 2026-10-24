@@ -81,3 +81,19 @@ def test_skill_doc_says_private_info_does_not_belong_in_messages():
     assert "私人資訊" in text
     assert "不要在訊息裡放私人資訊" in text
     assert "MyBrain" in text  # point the other side at MyBrain instead of pasting the content
+
+
+def test_skill_doc_covers_mentions_and_the_upgrade_order():
+    text = _text()
+    for flag in ("--mention", "--in-reply-to", "--mentioned"):
+        assert flag in text
+    assert "mentions" in text and "in_reply_to" in text
+    assert "廣播不算" in text  # "@ me" is not "to me"
+    assert "先升級" in text  # readers first, then send mentions
+
+
+def test_skill_doc_to_me_definition_counts_mentions_and_the_first_mentioned_read_is_explained():
+    text = _text()
+    line = next(l for l in text.splitlines() if l.startswith("- 不給 `--channel` 時"))
+    assert "mentions" in line and "廣播" in line
+    assert "從頭讀" in text and "--since" in text

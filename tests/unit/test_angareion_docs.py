@@ -42,3 +42,18 @@ def test_docs_state_that_only_half_width_spaces_are_forgiven():
     assert "`--to` 只原諒半形空格" in text
     assert "換行、tab、CR 不會被去掉" in text
     assert "不修剪空白" in text
+
+
+def test_docs_explain_mentions_in_reply_to_and_the_upgrade_order():
+    text = (REPO / "docs" / "angareion.md").read_text(encoding="utf-8")
+    for needle in ("--mention", "--in-reply-to", "--mentioned", "mentions: [", "mention:<AI 名>:<channel>"):
+        assert needle in text
+    assert "廣播不算" in text
+    assert "先升級" in text
+    assert "送嚴讀寬" in text
+
+
+def test_docs_say_the_first_mentioned_read_starts_from_the_beginning():
+    text = DOCS.read_text(encoding="utf-8")
+    assert "第一次用 `--mentioned` 沒有游標，會從頭讀" in text
+    assert "先用 `--since`" in text

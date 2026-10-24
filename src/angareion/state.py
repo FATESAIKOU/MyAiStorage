@@ -26,7 +26,7 @@ def cursor_file_path(state_dir: Path | str, identity: str) -> Path:
     return Path(state_dir) / f"cursor-{identity_slug(identity)}.json"
 
 
-WAIT_STATE_VERSION = 1
+WAIT_STATE_VERSION = 2  # 2: "to me" also counts a mention (#209); a v1 ETag must not answer for it
 
 
 def wait_state_file_path(state_dir: Path | str, identity: str) -> Path:
@@ -187,6 +187,15 @@ def recipient_cursor_key(identity: str, channel: str) -> str:
     cursor entry.
     """
     return f"to:{identity_slug(identity)}:{channel}"
+
+
+def mention_cursor_key(identity: str, channel: str) -> str:
+    """The cursor key for "@ me" in one channel.
+
+    A dimension of its own (like `to:`, one entry per channel): reading "@ me"
+    never moves the "to me" or the channel cursor, and the other way round.
+    """
+    return f"mention:{identity_slug(identity)}:{channel}"
 
 
 class CursorStore:
