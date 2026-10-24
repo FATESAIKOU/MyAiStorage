@@ -44,5 +44,5 @@
 
 ## 6. 驗收
 
-- [ ] 6.1 拋棄式環境端到端：A 送給閒置的 tui B → B 被戳 → B 跑 `inbox` 讀到；閒置的 headless B 同樣被戳；B 在 `running` 時送 → 也被戳（不打斷，插進同一輪、在當下的 tool 呼叫之後處理），B 之後讀到；`--interrupt` → 中斷；`--no-wake` → 不戳、訊息照樣讀得到；收件人在別台 → 不戳、`inbox --wait` 讀到
+- [ ] 6.1 拋棄式環境端到端：A 送給閒置的 tui B → B 被戳 → B 跑 `inbox` 讀到；閒置的 headless B 同樣被戳；B 在 `running` 時送 → 也被戳（不打斷），B 之後讀到（「插進同一輪、在當下的 tool 呼叫之後處理」是對 tui B 的期望；headless、opencode 的 running B 另外記錄實際觀察到的結果）；`--interrupt` → 中斷；`--no-wake` → 不戳、訊息照樣讀得到；收件人在別台 → 不戳、`inbox --wait` 讀到
 - [ ] 6.2 實測不碰真 Session、不讀真 credential

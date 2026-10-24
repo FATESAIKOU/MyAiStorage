@@ -34,7 +34,7 @@
 ### 推論（不是事實）
 
 - **I1**：tui／headless agent 在 `angareion wait` 阻塞時，從 sidecar 看是 `running`（它的 tool call 還沒結束）；這種 agent 不需要被戳，`wait` 自己每 15 秒會看到新訊息（F2）。反過來，**`idle` 的 agent 本輪已結束，不可能同時阻塞在 `inbox --wait`**，要開下一輪只有靠 poke（F17）。依據：F9、F17。**實測（V1，2026-10-24）：tui 卡在長時間前景 tool 呼叫時 `state` 是 `running`；以 `angareion wait` 本身阻塞的情形與 headless 未分別測，仍屬推論。**
-- **I2（沒有去重；X 定案後改寫）**：`running` 也戳，所以**不做去重**：連送兩則會送出兩句固定短句。實測（V11，tui）：兩句是各自獨立的輸入、不合併，而且是**插進同一輪**，在當下的 tool 呼叫結束後一起處理，不是各開一輪；收件人在同一輪內多處理兩則輸入（第二句時收件匣可能已空）。不會壞資料、不會漏信。這是接受的已知代價，不另做鎖或合併；要少排就少送（一則訊息講完），或用 `--no-wake`。
+- **I2（沒有去重；X 定案後改寫）**：`running` 也戳，所以**不做去重**：連送兩則會送出兩句固定短句。實測（V11，tui）：兩句是各自獨立的輸入、不合併，而且是**插進同一輪**，在當下的 tool 呼叫結束後一起處理，不是各開一輪；收件人在同一輪內多處理兩則輸入。不會壞資料、不會漏信。這是接受的已知代價，不另做鎖或合併；要少排就少送（一則訊息講完），或用 `--no-wake`。
 - **I3**：MyPMO 的 Mac team 設定每 team 一個 `local_sidecar`（F19），埠不一定是預設值；但本人裁定（2026-10-24）sidecar 位址固定用 sidecar 文件的預設位址，**不做設定**。若某台機器的 sidecar 不在預設位址，aicomm 查不到＝叫醒失敗（D2.4，訊息照送達）；這是接受的限制。
 
 ## Goals / Non-Goals
@@ -150,7 +150,7 @@ send:
       GET /agents/{id}（逾時 3 秒）
         404 / 連不上 / 回應看不懂   → 記一行原因，不戳
         200，state == idle          → POST /agents/{id}/poke {text: 固定短句, interrupt: false}
-        200，state == running       → POST /agents/{id}/poke {text: 固定短句, interrupt: false}（插進同一輪，在當下的 tool 呼叫之後處理，V11）；--interrupt 時 interrupt: true（中斷正在跑的 tool 呼叫，V10）
+        200，state == running       → POST /agents/{id}/poke {text: 固定短句, interrupt: false}（插進同一輪，在當下的 tool 呼叫之後處理，V11；tui 實測；headless、opencode 在 running 時未測）；--interrupt 時 interrupt: true（中斷正在跑的 tool 呼叫，V10；tui 實測，headless、opencode 未測）
         200，其他 state              → 記「<state>，略過」
  6. exit 0
 ```
@@ -166,8 +166,8 @@ send:
 
 **對方在 `running` 時怎麼辦（J2）**：**(a)，`running` 也送不打斷的 poke**。出處：PMO 2026-10-24 依本人字面判定（本人說「可以中斷也可以不中斷等對方讀」）；不是本人另外選的。
 
-- 預設（不中斷）＝sidecar 的不中斷 poke（F8）：`idle` 馬上收到，開新的一輪（V9）；`running` 時**插進同一輪**，在當下的 tool 呼叫結束後處理（V11，實測）；`--interrupt` 才帶 `interrupt: true`，會中斷正在跑的 tool 呼叫，戳的文字成為新的輸入（V10，實測）。
-- 代價（照實寫，依實測修正）：`running` 的收件人不會多開一輪，而是**這一輪多處理一則輸入**（阻塞在 `inbox --wait` 的 agent 本來自己就會醒，I1，多處理的那一則通常只是叫它去讀本來就要讀的信）；連送兩則是兩則獨立的輸入（I2，無去重、不合併）。**不會漏信。**
+- 預設（不中斷）＝sidecar 的不中斷 poke（F8）：`idle` 馬上收到，開新的一輪（V9）；`running` 時**插進同一輪**，在當下的 tool 呼叫結束後處理（V11；tui 實測；headless、opencode 在 running 時未測）；`--interrupt` 才帶 `interrupt: true`，會中斷正在跑的 tool 呼叫，戳的文字成為新的輸入（V10；tui 實測，headless、opencode 未測）。
+- 代價（照實寫，依實測修正；tui 實測；headless、opencode 在 running 時未測）：`running` 的收件人不會多開一輪，而是**這一輪多處理一則輸入**（阻塞在 `inbox --wait` 的 agent 本來自己就會醒，I1，多處理的那一則通常只是叫它去讀本來就要讀的信）；連送兩則是兩則獨立的輸入（I2，無去重、不合併）。**不會漏信。**
 - 因此不再需要「每輪結束前跑一次 `aicomm inbox`」的軟規則（原退路 (b) 已拿掉）；軟規則只剩 D2.9 的三條。
 - `starting`／`waiting-quota`／`exited` 仍不戳。
 
@@ -207,7 +207,7 @@ send:
 | 收件人 | 怎麼收 |
 |---|---|
 | 同台 sidecar、`idle`（tui 或 headless） | 被戳（馬上收到）；跑 `aicomm inbox` |
-| 同台、`running`（含阻塞在 `inbox --wait` 的） | 也被戳（不打斷，插進同一輪、在當下的 tool 呼叫之後處理，D2.2）；阻塞在 wait 的 agent 本來就會自己醒（I1），這一戳讓它這一輪多處理一則輸入 |
+| 同台、`running`（含阻塞在 `inbox --wait` 的） | 也被戳（不打斷；tui 實測會插進同一輪、在當下的 tool 呼叫之後處理，headless、opencode 在 running 時未測，D2.2）；阻塞在 wait 的 agent 本來就會自己醒（I1），這一戳讓它這一輪多處理一則輸入 |
 | 同台、`starting`／`waiting-quota`／`exited` | 不戳；`starting` 的起來後照 `input` 讀信；其他等被重開 |
 | 別台機器的 agent | skill 不做跨機（Non-Goal）。收件人那台上的 agent 靠 `inbox --wait`；**worker team 的 PM 由 PMO 端的 `dispatch.py` 經轉發埠叫醒（F19，D4）**；對 PMO 則靠 M2 D6 的 watch（F16） |
 | sidecar 沒在跑 | 同上 |
@@ -234,7 +234,7 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 
 **定案：沒有硬控制，只有 SKILL.md 的軟規則。** 不做 `nowake` 名單、不做 aicomm 設定檔。軟規則三條（角色名稱只是文字，程式與 spec 不分角色）：
 
-1. **預設不中斷**：`send` 預設不中斷對方；要中斷才明確加 `--interrupt`（D1.1；對方在跑時照樣戳，不打斷，插進同一輪，D2.2）。
+1. **預設不中斷**：`send` 預設不中斷對方；要中斷才明確加 `--interrupt`（D1.1；對方在跑時照樣戳，不打斷；tui 實測會插進同一輪，headless、opencode 在 running 時未測，D2.2）。
 2. **隊員基本上不要中斷上位職（PM、PMO）**：不要對他們用 `--interrupt`。
 3. **「收到」類回覆不叫醒對方**：沒有要對方動作的回覆（收到、確認）一律加 `--no-wake`。這同時是防迴圈：兩個 agent 互相回「收到」不會互相叫醒。不採「有 `--in-reply-to` 就預設不叫醒」：回報完成也是回覆，卻需要叫醒 PM，語意會錯。
 
@@ -308,7 +308,7 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 | # | 事項 | 裁定 |
 |---|---|---|
 | J1 | 介面範圍（只有 `send`／`inbox`） | 本人：照建議（A，D1.1） |
-| J2 | 對方在 `running` 時 | **(a)：`running` 也送不打斷的 poke**（實測語意：插進同一輪，在當下的 tool 呼叫之後處理，不是排到這一輪之後；V11）。出處：PMO 2026-10-24 依本人字面判定（本人的原話：可以中斷也可以不中斷等對方讀），不是本人另外選的。`--interrupt` 才中斷（本人已定） |
+| J2 | 對方在 `running` 時 | **(a)：`running` 也送不打斷的 poke**（實測語意：插進同一輪，在當下的 tool 呼叫之後處理，不是排到這一輪之後；V11；tui 實測；headless、opencode 在 running 時未測）。出處：PMO 2026-10-24 依本人字面判定（本人的原話：可以中斷也可以不中斷等對方讀），不是本人另外選的。`--interrupt` 才中斷（本人已定） |
 | J4 | 分發路徑 | 本人：照建議（A，沿用 angareion skill 的路徑，這條路不經 Atelier；D3.1） |
 | J5 | 廣播不叫醒 | 本人：照建議（A，D1.3） |
 | J6 | harness 第一輪不改 | 本人：照建議（A，D3.2） |
@@ -339,7 +339,7 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 ## 風險與取捨
 
 - **耦合 sidecar 的公開 HTTP 形狀**：不可免（D2.7）；降低影響的方式是「看不懂就不戳」。
-- **sidecar 側的前提：tui 的 workdir 要先 trust 過**（實測，2026-10-24；MyLinuxPool#374）。沒 trust 過時，trust 對話框會吃掉第一則 input，agent 一直卡在 `starting`。這是 sidecar／環境那一側的前提（`~/testAI` 第一層的專屬 worktree 已 trust），aicomm 不處理；aicomm 本來就不戳 `starting`（D2.2）。
+- **sidecar 側的前提：tui 的 workdir 要先 trust 過**（實測，2026-10-24；MyLinuxPool#374）。沒 trust 過時，agent 一直卡在 `starting`；推測是 trust 對話框吃掉第一則 input（與實測一致：第 1 次畫面上沒看到對話框；第 2 次 trust 過就正常；見 MyLinuxPool#374）。這是 sidecar／環境那一側的前提（環境說明指定的專屬 worktree 要事先 trust 過），aicomm 不處理；aicomm 本來就不戳 `starting`（D2.2）。
 - **提示注入**：戳的文字由 skill 固定、不轉述內容（D2.5）；`inbox` 的輸出仍進模型，與 `angareion read` 相同，沒有惡化。
 - **額度**：每次成功戳＝一次模型輪次。沒有去重（I2）：連送會排多句；廣播不戳；軟規則讓「收到」類回覆不戳（D2.9）。**沒有硬控制：任何同台 agent 都能叫醒 PMO，本人已接受（D2.9）。**
 - **軟規則**：D2.9 的三條規則靠 AI 遵守 SKILL.md；失守的後果是多一輪額度（D2.9），不是壞資料。
@@ -348,7 +348,7 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 
 ## 待驗與實測結果
 
-出處：PM 的實測報告（team 目錄 reports/spike-212-v1-v11.md，「第 2 次」一節；2026-10-24，拋棄式環境，自己起的測試 sidecar、假 agora、假 angareion，沒碰真 session）。第 1 次實測因 tui 卡在 `starting` 停損，原因見最後一列。
+出處：#212 的實測結果留言（2026-10-24，https://github.com/FATESAIKOU/MyAiStorage/issues/212#issuecomment-6388726800；拋棄式環境，自己起的測試 sidecar、假 agora、假 angareion，沒碰真 session）。第 1 次實測因 tui 卡在 `starting` 停損，原因見最後一列。
 
 | # | 結果 | 實測（2026-10-24）與證據 |
 |---|---|---|
@@ -360,7 +360,7 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 | V5 | 未測 | 這次實測沒有涵蓋；D3.1 採 A（不經 Atelier），選 B 才需要 |
 | V6 | 未測 | 這次實測沒有涵蓋；實作後在 6.1 端到端一併看 |
 | V8 | 未測 | 這次實測沒有涵蓋（沒有人 attach 打字的情境） |
-| 附 | 第一則 input | 第 1 次實測 tui 卡在 `starting`：workdir 沒 trust 過，trust 對話框吃掉第一則 input（MyLinuxPool#374）；第 2 次在 trust 過的 workdir 上第一則正常送出，證實。見「風險與取捨」 |
+| 附 | 第一則 input | 第 1 次實測 tui 卡在 `starting`：workdir 沒 trust 過；推測是 trust 對話框吃掉第一則 input，與實測一致（第 1 次畫面上沒看到對話框；第 2 次 trust 過就正常；見 MyLinuxPool#374）。見「風險與取捨」 |
 
 （V2 已由 F17 回答；V4 已由 F20 回答；V7 隨 J3 刪除。）
 
