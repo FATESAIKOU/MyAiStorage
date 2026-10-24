@@ -46,6 +46,47 @@ def test_unknown_subcommand_exits_1_and_says_only_send_and_inbox(world, monkeypa
     assert world.calls() == [] and world.sidecar.requests == []
 
 
+SUFFIX = "aicomm 只有 send 與 inbox"
+
+
+@pytest.mark.parametrize("argv", [
+    ["send", "--channel", "c"],                                   # missing --body
+    ["send", "--channel", "c", "--body", "x", "--bogus"],         # extra argument
+    ["inbox", "--wait", "abc"],                                   # bad number
+    ["send", "--body", "x"],                                      # missing --channel
+])
+def test_other_usage_errors_do_not_claim_the_subcommand_was_wrong(world, monkeypatch, capsys, argv):
+    r = run_aicomm(argv, monkeypatch, capsys)
+    assert r.code == 1
+    assert r.err.strip()
+    assert SUFFIX not in r.err
+    assert world.calls() == [] and world.sidecar.requests == []
+
+
+def test_a_wrong_subcommand_name_still_gets_the_hint(world, monkeypatch, capsys):
+    r = run_aicomm(["poke"], monkeypatch, capsys)
+    assert r.code == 1
+    assert "invalid choice" in r.err
+    assert SUFFIX in r.err
+
+
+@pytest.mark.parametrize("extra", [["--to", ""], ["--mention", ""], ["--to", "", "--mention", ""]])
+def test_an_empty_name_is_never_looked_up_or_woken(world, monkeypatch, capsys, extra):
+    # the fake angareion accepts the empty address and exits 0 (the real one refuses it today)
+    r = run_aicomm(["send", "--channel", "team-demo", *extra, "--body", "x"], monkeypatch, capsys)
+    assert r.code == 0
+    assert len(world.calls()) == 1
+    assert world.sidecar.requests == []
+
+
+def test_an_empty_name_does_not_stop_a_real_one_from_being_woken(world, monkeypatch, capsys):
+    agent(world)
+    r = run_aicomm(["send", "--channel", "team-demo", "--to", "demo-pm-t1", "--mention", "",
+                    "--body", "x"], monkeypatch, capsys)
+    assert r.code == 0
+    assert [q["path"] for q in world.sidecar.requests] == ["/agents/demo-pm-t1", "/agents/demo-pm-t1/poke"]
+
+
 def test_guard_refuses_to_run_without_a_fake_sidecar(world, monkeypatch, capsys):
     monkeypatch.delenv("AICOMM_SIDECAR")
     with pytest.raises(AssertionError, match="AICOMM_SIDECAR"):
