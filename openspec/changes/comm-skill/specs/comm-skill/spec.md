@@ -19,7 +19,7 @@ skill MUST 對外只提供 `send` 與 `inbox` 兩個子指令（另有 `--versio
 - **THEN** `send` 以 exit 1 結束，沒有任何對 sidecar 的請求
 
 ### Requirement: 工單號選填
-`send` MUST 能不帶工單號送出一般訊息。給了 `--ticket <repo>#<n>` 時，skill MUST 以 `--ref ticket=<repo>#<n>` 交給 Angareion，MUST NOT 改動訊息內文，MUST NOT 去讀工單。
+`send` MUST 能不帶工單號送出一般訊息。給了 `--ticket <repo>#<n>`（格式 `^[A-Za-z0-9._-]+#[0-9]+$`，不符 exit 1）時，skill MUST 以 `--ref ticket=<repo>#<n>` 交給 Angareion，MUST NOT 改動訊息內文，MUST NOT 去讀工單。
 
 #### Scenario: 不帶工單號
 - **WHEN** `aicomm send --channel c --to a --body 'hi'`
@@ -30,15 +30,19 @@ skill MUST 對外只提供 `send` 與 `inbox` 兩個子指令（另有 `--versio
 - **THEN** 訊息帶一個名為 `ticket`、值為 `MyAiStorage#212` 的 ref 附件
 
 ### Requirement: 叫醒的對象與條件
-`send` 寫入成功後，MUST 只對 `--to` 與每個 `--mention` 的 AI 名各判斷一次是否叫醒；沒有 `--to` 的廣播 MUST NOT 叫醒任何人；寄給自己 MUST NOT 叫醒自己。對每個名字，只有同時滿足下列三項才戳：(1) 本機 sidecar 的 agent 清單有這個 id；(2) 該 agent 是 tui（sidecar 回報的 `attach` 有值）；(3) 其 `state` 是 `idle` 或 `starting`。`running`、`waiting-quota`、`exited` MUST NOT 戳。
+`send` 寫入成功後，MUST 只對 `--to` 與每個 `--mention` 的 AI 名各判斷一次是否叫醒；沒有 `--to` 的廣播 MUST NOT 叫醒任何人；寄給自己 MUST NOT 叫醒自己；名字在「不叫醒名單」（`AICOMM_NOWAKE`）上 MUST NOT 叫醒，不論寄件者是誰。對其餘每個名字，只有同時滿足下列兩項才戳：(1) 本機 sidecar 的 agent 查詢回 200（agent 在這台）；(2) 其 `state` 是 `idle`。判斷 MUST NOT 依賴 agent 是 tui 或 headless，MUST NOT 讀 `attach` 欄位。`starting`、`running`、`waiting-quota`、`exited` MUST NOT 戳。
 
-#### Scenario: 閒置的同台 tui
-- **WHEN** 收件人在本機 sidecar、是 tui、`state` 為 `idle`
+#### Scenario: 閒置的同台 agent
+- **WHEN** 收件人在本機 sidecar、`state` 為 `idle`（不論 tui 或 headless）
 - **THEN** skill 對它戳一次，不帶 interrupt
 
 #### Scenario: 忙碌中不戳
 - **WHEN** 收件人的 `state` 為 `running`
 - **THEN** 不戳；stderr 記一行「running，略過」
+
+#### Scenario: starting 不戳
+- **WHEN** 收件人的 `state` 為 `starting`
+- **THEN** 不戳
 
 #### Scenario: 不在本機 sidecar
 - **WHEN** 查詢本機 sidecar 回 404（不在這台）
@@ -49,22 +53,34 @@ skill MUST 對外只提供 `send` 與 `inbox` 兩個子指令（另有 `--versio
 - **THEN** 不對 sidecar 發任何請求
 
 #### Scenario: mention 也叫醒
-- **WHEN** `--mention` 的對象符合上述三項條件
+- **WHEN** `--mention` 的對象符合上述兩項條件
 - **THEN** 同樣戳一次
 
+#### Scenario: 不叫醒名單
+- **WHEN** 收件人的 AI 名在 `AICOMM_NOWAKE` 裡，且它在本機 sidecar 是 `idle`
+- **THEN** 不戳，也不查詢；訊息照常寫進 Angareion
+
 ### Requirement: 戳的內容固定且不含訊息
-戳的文字 MUST 是 skill 內固定的短句（指示收件人執行 `inbox`），MUST NOT 含訊息內文、附件、寄件者以外的任何訊息欄位。skill MUST NOT 對同一次 `send` 的同一個對象戳兩次，MUST NOT 在戳失敗或逾時後重送。
+戳的文字 MUST 是 skill 內固定的短句（指示收件人執行 `inbox`），MUST NOT 含訊息內文、附件、寄件者、工單號或任何訊息欄位。skill MUST NOT 對同一次 `send` 的同一個對象戳兩次，MUST NOT 在戳失敗或逾時後重送。
 
 #### Scenario: 戳逾時
 - **WHEN** 戳的請求逾時
 - **THEN** 不重送；stderr 一行「叫醒結果未知」；exit 0
 
-### Requirement: sidecar 位址只能是 loopback
-skill MUST 只接受指向本機 loopback 的 sidecar 位址（預設或環境設定）；設成其他主機 MUST 以 exit 1 拒絕，且 MUST NOT 送出任何請求。
+#### Scenario: 戳的文字
+- **WHEN** 對假 sidecar 檢查收到的戳
+- **THEN** 文字等於固定短句，不含寄件者的 AI 名、訊息 id 與內文
 
-#### Scenario: 非 loopback
-- **WHEN** sidecar 位址設成非 loopback 的主機
+### Requirement: sidecar 位址只能是單一個 loopback 位址
+skill MUST 只接受一個 sidecar 位址（環境變數 `AICOMM_SIDECAR` 或預設），且 MUST 為本機 loopback；不是 loopback MUST 以 exit 1 拒絕，且 MUST 在寫進 Angareion 之前拒絕。位址 MUST 只在需要叫醒時才檢查（`--no-wake` 或廣播不檢查、不使用）。這個檢查 MUST NOT 被宣稱為防止跨機叫醒（轉發埠本身是 loopback）。
+
+#### Scenario: 非 loopback 且要叫醒
+- **WHEN** 位址設成非 loopback 的主機，且 `send` 帶 `--to`、沒有 `--no-wake`
 - **THEN** exit 1，沒有訊息被送出、沒有請求被送出
+
+#### Scenario: 非 loopback 但不需要叫醒
+- **WHEN** 位址設成非 loopback 的主機，且 `send` 帶 `--no-wake`（或是廣播）
+- **THEN** 訊息照常送出，exit 0，沒有任何對 sidecar 的請求
 
 ### Requirement: 叫醒是盡力而為，可關閉
 `send` MUST 提供 `--no-wake`，給了就完全不碰 sidecar。sidecar 不在、回應看不懂或任何非預期錯誤，MUST 只影響叫醒結果，MUST NOT 影響訊息已送達這件事。
@@ -74,15 +90,23 @@ skill MUST 只接受指向本機 loopback 的 sidecar 位址（預設或環境�
 - **THEN** 不對 sidecar 發任何請求
 
 ### Requirement: inbox 固定讀寄給自己的信
-`inbox` MUST 以 Angareion 的 `read`（不帶 `--channel`）讀信；MUST NOT 提供 `--channel` 選項。`--wait <秒>` MUST 先以 Angareion 的 `wait` 阻塞，逾時沒有新訊息 MUST 以 exit 3 結束且不讀。`--mentioned` MUST 轉成 Angareion 的 `--mentioned`。`--json` MUST 原樣轉出 Angareion 的輸出。
+`inbox` MUST 以 Angareion 的 `read`（不帶 `--channel`）讀信；MUST NOT 提供 `--channel` 選項。`--wait <秒>` MUST 先以 Angareion 的 `wait` 阻塞：`wait` exit 0 才 `read`；exit 3 MUST 以 3 結束且不讀；exit 2 MUST 以 2 原樣結束且不讀（不是「沒有新訊息」）。`--mentioned` MUST 同時轉給 `wait` 與 `read`。`--json` MUST 原樣轉出 Angareion 的輸出。
 
 #### Scenario: 等信逾時
 - **WHEN** `aicomm inbox --wait 5` 且 5 秒內沒有新訊息
 - **THEN** exit 3，游標不動
 
+#### Scenario: 等信遇到後端錯誤
+- **WHEN** Angareion 的 `wait` 回 exit 2
+- **THEN** `inbox` 以 exit 2 結束，沒有呼叫 `read`
+
 #### Scenario: 有信
 - **WHEN** 有寄給自己的新訊息
 - **THEN** 印出訊息、游標前進，exit 0
+
+#### Scenario: mentioned 同時給 wait 與 read
+- **WHEN** `aicomm inbox --wait 5 --mentioned`
+- **THEN** 對 Angareion 的 `wait` 與 `read` 兩次呼叫都帶 `--mentioned`
 
 ### Requirement: 不改 Angareion 與 sidecar，不攜帶私人資訊
 skill MUST NOT 修改 Angareion 的協定或程式，MUST NOT 要求 sidecar 新增介面；它對 Angareion 只用其公開的指令列介面，對 sidecar 只用其公開的 HTTP 介面（查 agent、戳）。skill 的說明檔與輸出 MUST NOT 含憑證、機器位址或私人資訊。
