@@ -129,6 +129,37 @@ agora import session --agent claude --external-session-id <id1>,<id2> --as-new
 都出現、而且 `identical`；看到 `drive-version-elsewhere` 就是還沒傳完（指令自己會回報；沒成功就
 `agora push session <新 id>`）。不是 `identical` 的逐筆處理。必保清單內正在接續的先跳過、列出來。
 
+**重匯完、上傳完之後，把舊 Session 的使用者欄位抄到新的**（`--as-new` 不會帶 title、description、case、refs、tags、自訂欄位）。
+**用上傳完之後才跑的 inventory**，不要用第 2 步（重匯之前）存的那份——有 `local-present` 的舊 Session、卻沒有任何一筆有
+`replacement`，工具會明說「看起來是重匯之前的 inventory」並非 0 結束：
+
+```bash
+agora migrate inventory --json > ~/inv-109-2.json
+agora migrate copy-headers --inventory ~/inv-109-2.json            # 乾跑：只印欄位名、長度與 case／refs／tags，不印 title／description
+agora migrate copy-headers --inventory ~/inv-109-2.json --apply    # 真的寫（每筆經 agora edit，寫完重讀逐欄核對）
+agora migrate copy-headers --inventory ~/inv-109-2.json --verify   # 只核對
+```
+
+規則：
+- 同一個來源有多個舊 Session 時，只抄「沒有任何 `superseded-by-*` tag」的那一個，沒有或不只一個就整筆「不抄」、列出來交人決定
+  （判斷看索引裡同來源的**全部**舊格式 Session，不只看 inventory）。
+- `refs`、`verified`、`case`：`agora:<舊 ULID>` 若那個舊 Session 也重匯了，**換成它的新 id**；沒有新 id 的那一個元素丟掉並列出（其餘照抄）。
+  其他欄位（自訂欄位、title、description）裡任何一處提到舊 id，**不猜、不抄那個欄位**，標成「需人決定」。
+  tag 提到任何舊 id 或是 `superseded-by-*` 一律不帶（列在「沒抄（tag）」）。「舊 id」指索引裡的舊格式 Session，加上 inventory 檔裡出現的（含 drive-only）。
+- `parents`／`agora.*` 不抄；新的另外加 `migrated-from-<舊 ULID>`。
+- 有東西被丟掉或需人決定的那一筆**不算「已一致」**：`--apply` 與 `--verify` 都非 0，人處理完（自己 `agora edit` 補或確認不需要）之前不要刪那個舊的。
+  抄完之後如果又手改過新 Session 的欄位，不要再跑 `--apply`（會被舊值蓋回去）。
+
+「預期不適用」與「不抄」不一樣：舊 Session 的 class 不是 `local-present`（別台的、沒有來源的、本機找不到來源的…）而且**不在 `drop_list`**，本來就不會在這台重匯，
+列成「預期不適用」、計數，不讓 `--verify` 失敗。`local-present` 卻沒有替代版本、多個舊的分不出、配對指到別的來源或不在索引、替代版本不是 chunks 的 import、
+已不在 Drive 等，列成「不抄」（配對壞了），`--apply` 與 `--verify` 都非 0。drive-only（Drive 上有、這台索引沒有）沒有 header 可抄，不列在計畫裡，
+只用它的 id 當「不要帶」的名單。
+
+**刪舊的（第 4 節）之前跑 `--verify`，要是 0。** 它的通過條件：沒有待寫、沒有配對壞了、沒有丟掉東西或需人決定，而且第 4 節 `drop_list` 裡**每一個**舊 Session
+都被「已一致」的配對蓋到。它不全信 inventory 檔：索引裡每個非 chunks 的舊 Session 都必須出現在計畫裡，檔案漏掉的（或 class 被改成 `new-format` 的）會列
+`missing-from-inventory` 並非 0。所以 **`--verify` 要用刪除前同一次的 inventory**（第 4 節「緊接著再盤點一次」那份；`inventory --json > …` 之後同一份給 `--verify`
+和 `delete`），或乾脆不給 `--inventory`（現場盤點）。`--verify` 只驗**本機索引**，不確認抄好的 `session.md` 已到 Drive：要先等上傳完（`agora push session <新 id>` 或看 outbox 排空）。
+
 ## 4. 丟舊的（確認點 ③）
 
 **動手之前緊接著再跑一次 `inventory`（同一個清單），以那一次的輸出為準。** 第 2 步的 `identical` 在重匯與上傳的窗口內可能

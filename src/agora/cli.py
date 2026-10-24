@@ -2786,7 +2786,19 @@ def cmd_migrate(argv: list[str]) -> int:
     inv.add_argument("--json", action="store_true", help="輸出 JSON（只有 metadata：沒有 title／body）")
     inv.add_argument("--must-keep", metavar="FILE",
                      help="必保清單（repo 外的本機檔，一行一個 agora:<ULID> 或 <ULID>）；讀不進來就不給候選")
+    cp = sub.add_parser("copy-headers", help="重匯（--as-new）之後，把舊 Session 的使用者欄位抄到新的；預設乾跑")
+    cp.add_argument("--inventory", metavar="FILE",
+                    help="`migrate inventory --json` 的輸出（用它的 replacement 配對）；不給就現場盤點一次")
+    cp.add_argument("--apply", action="store_true", help="真的寫（經 agora edit），寫完重讀逐欄核對")
+    cp.add_argument("--verify", action="store_true", help="只核對本機索引（要等上傳完）：有待寫、有配對壞了、有東西丟掉或需人決定、或 drop_list 有沒被「已一致」蓋到的，就非 0；"
+                         "預期沒有替代版本的（別台的、沒有來源的…且不在 drop_list）不算。用刪除前同一次的 inventory，或不給 --inventory")
+    cp.add_argument("--accept", metavar="FILE",
+                    help="一行一個新 ULID（# 註解、空行忽略）：這一筆丟掉的 ref／tag 或需人決定的欄位，人已經看過、"
+                         "也在新 Session 上補好或不需要。被 accept 的算已一致（輸出會列出哪些是靠它通過的）；"
+                         "檔案讀不到或有不是這次計畫裡新 ULID 的行 → exit 1，全部不採用")
     args = parser.parse_args(argv)
+    if args.step == "copy-headers":
+        return _copy_headers(args)
     try:
         report = migrate.inventory(store.Paths.from_env(), args.must_keep)
     except migrate.MigrateError as e:
@@ -2797,6 +2809,92 @@ def cmd_migrate(argv: list[str]) -> int:
         return EXIT_ERROR
     print(json.dumps(report.as_json(), ensure_ascii=False, indent=1) if args.json else migrate.render(report))
     return 0
+
+
+def _edit_with(new_ulid: str, fields: dict) -> tuple[bool, str]:
+    """Write `fields` onto the new Session through `agora edit` itself (`--header-file`: the same
+    `_with_user` and `check_user_fields`). The file holds the user's text, so it lives in `<state>/tmp`
+    (0700, swept when its owner is gone; `private_tmp`) and goes as soon as edit returns."""
+    import io
+    err = io.StringIO()
+    with private_tmp.PrivateTmpDir("agora-copy-headers") as tmp:
+        path = Path(tmp) / "fields.yaml"
+        path.write_text(h.dump_header(fields), encoding="utf-8")
+        path.chmod(0o600)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = main(["edit", "session", f"agora:{new_ulid}", "--header-file", str(path)])
+    if code in (0, EXIT_IN_OUTBOX):
+        return True, ""
+    lines = [ln for ln in err.getvalue().splitlines() if ln.strip()]
+    return False, f"exit {code}" + (f"：{lines[-1][:200]}" if lines else "")
+
+
+def _copy_headers(args) -> int:
+    """`agora migrate copy-headers [--inventory FILE] [--apply | --verify]`.
+
+    Reads the index read-only to plan; the only write is `agora edit` per pair, and only with --apply.
+    Prints ids, field names, lengths (title, description, custom fields) and case/refs/tags values."""
+    from agora import migrate
+    if args.apply and args.verify:
+        print("[agora] --apply 與 --verify 擇一", file=sys.stderr)
+        return EXIT_INPUT
+    paths = store.Paths.from_env()
+    try:
+        if args.inventory:
+            try:
+                report = json.loads(Path(args.inventory).read_text(encoding="utf-8"))
+            except (OSError, ValueError) as e:
+                raise migrate.MigrateError(f"inventory 輸出 {args.inventory} 讀不進來（{type(e).__name__}）") from None
+            if not isinstance(report, dict):
+                raise migrate.MigrateError(f"inventory 輸出 {args.inventory} 不是 inventory --json 的格式")
+        else:
+            report = migrate.inventory(paths).as_json()
+        sessions = migrate.check_report(report)
+        items = migrate.plan_copy(paths, report)
+        accept = migrate.read_accept(args.accept, items) if args.accept else set()
+    except migrate.MigrateError as e:
+        print(f"[agora] {e}", file=sys.stderr)
+        return EXIT_INPUT
+    except store.StoreError as e:
+        print(f"[agora] {e}", file=sys.stderr)
+        return EXIT_ERROR
+    summary = migrate.summarize(items, report, accept)
+    if summary.pre_reimport:
+        for item in items:
+            print(migrate.describe(item))
+        print("[agora] 這份 inventory 裡有 local-present 的舊 Session，但沒有任何一筆有替代版本：看起來是重匯之前的 "
+              "inventory。重匯並等上傳完之後，重新跑 `agora migrate inventory --json` 再來；什麼都沒寫", file=sys.stderr)
+        return EXIT_INPUT
+    written = failed = 0
+    for item in items:
+        print(migrate.describe(item))
+        if item.kind != "copy" or item.status != "todo" or not args.apply:
+            continue
+        ok, why = _edit_with(item.new, item.fields)
+        wrong = migrate.current_matches(paths, item) if ok else []
+        if not ok or wrong:
+            failed += 1
+            print(f"[agora] agora:{item.new} 沒寫成：{why or '核對不一致：' + '、'.join(wrong)}", file=sys.stderr)
+        else:
+            written += 1
+            print(f"  已寫並核對：agora:{item.new}")
+    c = summary.counts
+    tail = f"；需人決定或有東西丟掉 {summary.blocking}、預期不適用 {c['na']}"
+    if summary.accepted:
+        print(f"[agora] 靠 --accept 通過的（丟掉的東西或需人決定的欄位，人已確認）：{'、'.join(f'agora:{u}' for u in summary.accepted)}")
+    if args.apply:
+        print(f"總數 {len(items)}：寫了 {written}、跳過（已一致）{c['done']}、不抄 {c['broken']}、失敗 {failed}{tail}")
+    else:
+        print(f"總數 {len(items)}：待寫 {c['todo']}、已一致 {c['done']}、不抄 {c['broken']}{tail}"
+              f"（{'核對' if args.verify else '乾跑，沒寫'}）")
+    if summary.uncovered:
+        print(f"[agora] drop_list 裡這 {len(summary.uncovered)} 個沒有對應的「已一致」：{'、'.join(summary.uncovered)}",
+              file=sys.stderr)
+    if failed:
+        return EXIT_ERROR
+    if args.apply:
+        return EXIT_ERROR if (c["broken"] or summary.blocking) else 0
+    return EXIT_INPUT if args.verify and not summary.clean else 0
 
 
 def main(argv: list[str] | None = None) -> int:
