@@ -9,7 +9,7 @@
 ## What Changes
 
 - 新增一個 skill（暫名 `aicomm`，指令與說明檔同一個 distribution、同一個 sha 一起釘），對外**只有兩個指令**：
-  - `aicomm send`：寫進 Angareion；寫成功後，對收件人（`--to`＋`--mention`）中「在本機 sidecar、`state` 為 `idle` 或 `running`（不分 tui／headless）」的，盡力戳一下（固定短句，不含訊息內容）。預設是不中斷的 poke（閒著馬上收到、在跑排到這一輪之後；PMO 2026-10-24 依本人字面判定），`--interrupt` 才中斷。`--no-wake` 不叫醒。
+  - `aicomm send`：寫進 Angareion；寫成功後，對收件人（`--to`＋`--mention`）中「在本機 sidecar、`state` 為 `idle` 或 `running`（不分 tui／headless）」的，盡力戳一下（固定短句，不含訊息內容）。預設是不中斷的 poke（實測範圍與結果見 design；PMO 2026-10-24 依本人字面判定），`--interrupt` 才中斷。`--no-wake` 不叫醒。
   - `aicomm inbox`：讀寄給自己的信（固定不加 `--channel`），可選擇先阻塞等。
 - 叫醒的判斷（誰在本機 sidecar、閒不閒、可不可以叫、失敗怎麼辦）全放在 skill；Angareion 與 sidecar **不改**。
 - `--channel` 必填；**所有角色用同一份、不依角色差異化**。沒有 `nowake`、沒有設定檔：節制叫醒靠 SKILL.md 軟規則（預設不中斷；隊員基本上不要中斷 PM、PMO；「收到」類回覆 `--no-wake`）；要硬控制之後走 sidecar open 帶白名單（MyLinuxPool#346）。代價：任何同台 agent 都能叫醒 PMO，與 M2 D6 的 watch 規則並存（watch 管秘書派工急件、aicomm 管 AI 間一般溝通），本人 2026-10-24 接受。sidecar 位址固定用預設 loopback 位址。

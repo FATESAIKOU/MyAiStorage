@@ -7,7 +7,7 @@
 ## 1. 定案（要 PMO／本人）
 
 - [ ] 1.1 判斷點已定（J2 為 (a)，PMO 2026-10-24 依本人字面判定，其餘本人裁定）；本人看過定稿設計即可動工
-- [ ] 1.2 待驗（V1、V3、V5、V6、V8、V9、V10、V11）在拋棄式環境實測（sidecar 用自己起的測試 daemon、不碰真 agent、不碰真 Session），結果寫回 design
+- [x] 1.2 待驗（V1、V3、V5、V6、V8、V9、V10、V11）在拋棄式環境實測（sidecar 用自己起的測試 daemon、不碰真 agent、不碰真 Session），結果寫回 design。已測並寫回：V1、V3、V9、V10、V11（2026-10-24）。**V5、V6、V8 沒測**：V5 只在 D3.1 選 B 時才需要（已裁定 A）；V6（skill description 是否被可靠使用）要等 skill 實作後在 6.1 端到端看；V8（有人 attach 時被戳）這次的實測計畫沒有涵蓋
 - [ ] 1.3 指令名（暫 `aicomm`，作者提議 P11；PM／PMO 可改）
 
 ## 2. MyAiStorage：指令與說明檔（PR 1）
@@ -44,5 +44,5 @@
 
 ## 6. 驗收
 
-- [ ] 6.1 拋棄式環境端到端：A 送給閒置的 tui B → B 被戳 → B 跑 `inbox` 讀到；閒置的 headless B 同樣被戳；B 在 `running` 時送 → 也被戳（不打斷，排到這一輪之後），B 之後讀到；`--interrupt` → 中斷；`--no-wake` → 不戳、訊息照樣讀得到；收件人在別台 → 不戳、`inbox --wait` 讀到
+- [ ] 6.1 拋棄式環境端到端：A 送給閒置的 tui B → B 被戳 → B 跑 `inbox` 讀到；閒置的 headless B 同樣被戳；B 在 `running` 時送 → 也被戳（不打斷），B 之後讀到（「插進同一輪、在當下的 tool 呼叫之後處理」是對 tui B 的期望；headless、opencode 的 running B 另外記錄實際觀察到的結果）；`--interrupt` → 中斷；`--no-wake` → 不戳、訊息照樣讀得到；收件人在別台 → 不戳、`inbox --wait` 讀到
 - [ ] 6.2 實測不碰真 Session、不讀真 credential
