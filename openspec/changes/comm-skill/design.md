@@ -15,7 +15,7 @@
 | F5 | channel 名不是由 AI 名推得：現有 `team-mylinuxpool` 與 `team-mylinuxpool-w1` 並存、`secretary-pmo`、`team-life-w1` | `config/angareion/channels.json` |
 | F6 | sidecar 對外四個動作（open／close／status／poke），HTTP 只綁 loopback、無認證；agent id 必須是合法 AI 名；一台機器一個 sidecar 管全部 agent | MyLinuxPool `modules/sidecar/docs/sidecar.md` §1、§2.2 |
 | F7 | `GET /agents/{id}` 回 `state`（`starting`／`running`／`idle`／`waiting-quota`／`exited`）；不存在回 404 `agent_not_found` | 同上 §2.1、§2.2 |
-| F8 | `POST /agents/{id}/poke` 的 `text` 必填、`interrupt` 預設 false；不打斷時「agent 正在跑就排到這一輪之後」；`exited`／`waiting-quota` 回 409 `agent_not_running`；sidecar 關閉中回 503 | 同上 §2.2、§2.4 |
+| F8 | `POST /agents/{id}/poke` 的 `text` 必填、`interrupt` 預設 false；文件寫不打斷時「agent 正在跑就排到這一輪之後」（實測的行為見 V11：插進同一輪，在當下的 tool 呼叫之後處理）；`exited`／`waiting-quota` 回 409 `agent_not_running`；sidecar 關閉中回 503 | 同上 §2.2、§2.4 |
 | F9 | tui 的狀態來自 hooks：第一則 `UserPromptSubmit`→`running`、`Stop`→`idle`；輸入沒被確認時 sidecar 只記 WARN，**不回錯，因為重送會變兩份**；sidecar 的狀態「最多晚一個 scheduler tick」 | 同上 §2.5、§2.2 status |
 | F10 | `attach` 中的 agent 被 poke 照送並記 WARN | 同上 §2.5（Q2 裁定） |
 | F11 | MyPMO `dispatch.py reply` ＝ `send_message`＋`poke_agent("channel 有新回覆，去讀。", interrupt=False)`；poke 失敗時通知本人並回 2（`--allow-poke-failure` 可吞）；`send` 是派工：驗工單號、讀工單、組樣板、送出、記 `received_at` 到 state 檔 | MyPMO `pmo/dispatch.py:2192-2205`、`:1915-1990` |
@@ -33,8 +33,8 @@
 
 ### 推論（不是事實）
 
-- **I1**：tui／headless agent 在 `angareion wait` 阻塞時，從 sidecar 看是 `running`（它的 tool call 還沒結束）；這種 agent 不需要被戳，`wait` 自己每 15 秒會看到新訊息（F2）。反過來，**`idle` 的 agent 本輪已結束，不可能同時阻塞在 `inbox --wait`**，要開下一輪只有靠 poke（F17）。依據：F9、F17。**要實測。**
-- **I2（沒有去重；X 定案後改寫）**：`running` 也戳，所以**不做去重**：連送兩則會排兩句固定短句（F8：不打斷的 poke 排到這一輪之後），收件人跑完這一輪後會多一到兩輪去讀（後面的輪次收件匣可能已空）。不會壞資料、不會漏信。這是接受的已知代價，不另做鎖或合併；要少排就少送（一則訊息講完），或用 `--no-wake`。
+- **I1**：tui／headless agent 在 `angareion wait` 阻塞時，從 sidecar 看是 `running`（它的 tool call 還沒結束）；這種 agent 不需要被戳，`wait` 自己每 15 秒會看到新訊息（F2）。反過來，**`idle` 的 agent 本輪已結束，不可能同時阻塞在 `inbox --wait`**，要開下一輪只有靠 poke（F17）。依據：F9、F17。**實測（V1，2026-10-24）：tui 卡在長時間前景 tool 呼叫時 `state` 是 `running`；以 `angareion wait` 本身阻塞的情形與 headless 未分別測，仍屬推論。**
+- **I2（沒有去重；X 定案後改寫）**：`running` 也戳，所以**不做去重**：連送兩則會送出兩句固定短句。實測（V11，tui）：兩句是各自獨立的輸入、不合併，而且是**插進同一輪**，在當下的 tool 呼叫結束後一起處理，不是各開一輪；收件人在同一輪內多處理兩則輸入（第二句時收件匣可能已空）。不會壞資料、不會漏信。這是接受的已知代價，不另做鎖或合併；要少排就少送（一則訊息講完），或用 `--no-wake`。
 - **I3**：MyPMO 的 Mac team 設定每 team 一個 `local_sidecar`（F19），埠不一定是預設值；但本人裁定（2026-10-24）sidecar 位址固定用 sidecar 文件的預設位址，**不做設定**。若某台機器的 sidecar 不在預設位址，aicomm 查不到＝叫醒失敗（D2.4，訊息照送達）；這是接受的限制。
 
 ## Goals / Non-Goals
@@ -150,7 +150,7 @@ send:
       GET /agents/{id}（逾時 3 秒）
         404 / 連不上 / 回應看不懂   → 記一行原因，不戳
         200，state == idle          → POST /agents/{id}/poke {text: 固定短句, interrupt: false}
-        200，state == running       → POST /agents/{id}/poke {text: 固定短句, interrupt: false}（排到這一輪之後，F8）；--interrupt 時 interrupt: true
+        200，state == running       → POST /agents/{id}/poke {text: 固定短句, interrupt: false}（插進同一輪，在當下的 tool 呼叫之後處理，V11）；--interrupt 時 interrupt: true（中斷正在跑的 tool 呼叫，V10）
         200，其他 state              → 記「<state>，略過」
  6. exit 0
 ```
@@ -166,8 +166,8 @@ send:
 
 **對方在 `running` 時怎麼辦（J2）**：**(a)，`running` 也送不打斷的 poke**。出處：PMO 2026-10-24 依本人字面判定（本人說「可以中斷也可以不中斷等對方讀」）；不是本人另外選的。
 
-- 預設（不中斷）＝sidecar 的不中斷 poke（F8）：`idle` 馬上收到，`running` 排到這一輪之後；`--interrupt` 才帶 `interrupt: true`。
-- 代價（照實寫）：**阻塞在 `inbox --wait` 的 agent 會多一輪**（它本來自己就會醒，I1）；連送兩則會排兩句（I2，無去重）。**不會漏信。**
+- 預設（不中斷）＝sidecar 的不中斷 poke（F8）：`idle` 馬上收到，開新的一輪（V9）；`running` 時**插進同一輪**，在當下的 tool 呼叫結束後處理（V11，實測）；`--interrupt` 才帶 `interrupt: true`，會中斷正在跑的 tool 呼叫，戳的文字成為新的輸入（V10，實測）。
+- 代價（照實寫，依實測修正）：`running` 的收件人不會多開一輪，而是**這一輪多處理一則輸入**（阻塞在 `inbox --wait` 的 agent 本來自己就會醒，I1，多處理的那一則通常只是叫它去讀本來就要讀的信）；連送兩則是兩則獨立的輸入（I2，無去重、不合併）。**不會漏信。**
 - 因此不再需要「每輪結束前跑一次 `aicomm inbox`」的軟規則（原退路 (b) 已拿掉）；軟規則只剩 D2.9 的三條。
 - `starting`／`waiting-quota`／`exited` 仍不戳。
 
@@ -200,14 +200,14 @@ send:
 
 ### D2.5 戳的內容
 
-固定短句，**不含寄件者、不含內容、不含工單**，例如「有新訊息：請執行 aicomm inbox。」（P8）。理由：(1) 戳的文字是否進 sidecar 的 log 【未知】V3，不含內容就不必管；(2) 訊息內容是不可信輸入，經 Angareion→`inbox` 才進模型，戳是 skill 自己寫的字，兩條路徑分開；(3) 收件人讀了信才有完整上下文。
+固定短句，**不含寄件者、不含內容、不含工單**，例如「有新訊息：請執行 aicomm inbox。」（P8）。理由：(1) 戳的文字不進 sidecar 的 log（實測 V3），固定短句更不會洩漏內容；(2) 訊息內容是不可信輸入，經 Angareion→`inbox` 才進模型，戳是 skill 自己寫的字，兩條路徑分開；(3) 收件人讀了信才有完整上下文。
 
 ### D2.6 不能叫醒的 agent 怎麼收信
 
 | 收件人 | 怎麼收 |
 |---|---|
 | 同台 sidecar、`idle`（tui 或 headless） | 被戳（馬上收到）；跑 `aicomm inbox` |
-| 同台、`running`（含阻塞在 `inbox --wait` 的） | 也被戳（不打斷，排到這一輪之後，D2.2）；阻塞在 wait 的 agent 本來就會自己醒（I1），這一戳讓它多一輪 |
+| 同台、`running`（含阻塞在 `inbox --wait` 的） | 也被戳（不打斷，插進同一輪、在當下的 tool 呼叫之後處理，D2.2）；阻塞在 wait 的 agent 本來就會自己醒（I1），這一戳讓它這一輪多處理一則輸入 |
 | 同台、`starting`／`waiting-quota`／`exited` | 不戳；`starting` 的起來後照 `input` 讀信；其他等被重開 |
 | 別台機器的 agent | skill 不做跨機（Non-Goal）。收件人那台上的 agent 靠 `inbox --wait`；**worker team 的 PM 由 PMO 端的 `dispatch.py` 經轉發埠叫醒（F19，D4）**；對 PMO 則靠 M2 D6 的 watch（F16） |
 | sidecar 沒在跑 | 同上 |
@@ -234,7 +234,7 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 
 **定案：沒有硬控制，只有 SKILL.md 的軟規則。** 不做 `nowake` 名單、不做 aicomm 設定檔。軟規則三條（角色名稱只是文字，程式與 spec 不分角色）：
 
-1. **預設不中斷**：`send` 預設不中斷對方；要中斷才明確加 `--interrupt`（D1.1；對方在跑時照樣戳，不打斷，排到這一輪之後，D2.2）。
+1. **預設不中斷**：`send` 預設不中斷對方；要中斷才明確加 `--interrupt`（D1.1；對方在跑時照樣戳，不打斷，插進同一輪，D2.2）。
 2. **隊員基本上不要中斷上位職（PM、PMO）**：不要對他們用 `--interrupt`。
 3. **「收到」類回覆不叫醒對方**：沒有要對方動作的回覆（收到、確認）一律加 `--no-wake`。這同時是防迴圈：兩個 agent 互相回「收到」不會互相叫醒。不採「有 `--in-reply-to` 就預設不叫醒」：回報完成也是回覆，卻需要叫醒 PM，語意會錯。
 
@@ -308,7 +308,7 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 | # | 事項 | 裁定 |
 |---|---|---|
 | J1 | 介面範圍（只有 `send`／`inbox`） | 本人：照建議（A，D1.1） |
-| J2 | 對方在 `running` 時 | **(a)：`running` 也送不打斷的 poke（排到這一輪之後）**。出處：PMO 2026-10-24 依本人字面判定（本人的原話：可以中斷也可以不中斷等對方讀），不是本人另外選的。`--interrupt` 才中斷（本人已定） |
+| J2 | 對方在 `running` 時 | **(a)：`running` 也送不打斷的 poke**（實測語意：插進同一輪，在當下的 tool 呼叫之後處理，不是排到這一輪之後；V11）。出處：PMO 2026-10-24 依本人字面判定（本人的原話：可以中斷也可以不中斷等對方讀），不是本人另外選的。`--interrupt` 才中斷（本人已定） |
 | J4 | 分發路徑 | 本人：照建議（A，沿用 angareion skill 的路徑，這條路不經 Atelier；D3.1） |
 | J5 | 廣播不叫醒 | 本人：照建議（A，D1.3） |
 | J6 | harness 第一輪不改 | 本人：照建議（A，D3.2） |
@@ -339,24 +339,28 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 ## 風險與取捨
 
 - **耦合 sidecar 的公開 HTTP 形狀**：不可免（D2.7）；降低影響的方式是「看不懂就不戳」。
+- **sidecar 側的前提：tui 的 workdir 要先 trust 過**（實測，2026-10-24；MyLinuxPool#374）。沒 trust 過時，trust 對話框會吃掉第一則 input，agent 一直卡在 `starting`。這是 sidecar／環境那一側的前提（`~/testAI` 第一層的專屬 worktree 已 trust），aicomm 不處理；aicomm 本來就不戳 `starting`（D2.2）。
 - **提示注入**：戳的文字由 skill 固定、不轉述內容（D2.5）；`inbox` 的輸出仍進模型，與 `angareion read` 相同，沒有惡化。
 - **額度**：每次成功戳＝一次模型輪次。沒有去重（I2）：連送會排多句；廣播不戳；軟規則讓「收到」類回覆不戳（D2.9）。**沒有硬控制：任何同台 agent 都能叫醒 PMO，本人已接受（D2.9）。**
 - **軟規則**：D2.9 的三條規則靠 AI 遵守 SKILL.md；失守的後果是多一輪額度（D2.9），不是壞資料。
 - **私人資訊**：戳與 stderr 都不含內文；說明檔沿用 Angareion 的「不要貼私人資訊」。
 - **測試隔離**：測試只能對自己起的假 sidecar／假 angareion 說話，測試**一律設 `AICOMM_SIDECAR` 指到自己起的假 sidecar；沒設就讓測試失敗（guard）**，免得碰到真的 sidecar（若 P5 被拒絕，改為注入位址的函式參數，guard 同理）（`tests/_guard.py` 的精神；具體做法列 tasks）。
 
-## 待驗（本設計階段未實測；不呼叫 sidecar、不跑 opencode）
+## 待驗與實測結果
 
-| # | 要驗的事 | 為什麼 |
+出處：PM 的實測報告（team 目錄 reports/spike-212-v1-v11.md，「第 2 次」一節；2026-10-24，拋棄式環境，自己起的測試 sidecar、假 agora、假 angareion，沒碰真 session）。第 1 次實測因 tui 卡在 `starting` 停損，原因見最後一列。
+
+| # | 結果 | 實測（2026-10-24）與證據 |
 |---|---|---|
-| V1 | 阻塞在 `angareion wait` 的 agent，sidecar 看到的 `state` 是不是 `running`（I1，tui 與 headless 各一） | 阻塞在 wait 的 agent 被戳會多一輪（J2 (a) 的已知代價），這裡確認它確實是 `running` |
-| V11 | 對 `running` 的同一收件人連送兩則，是否真的排成兩句；tui 輸入框裡已有排隊的字時再貼一次，會不會被合併成一則 | I2 |
-| V10 | 帶 `interrupt: true` 的戳對 `running` 的 headless／tui 的實際行為（F8 只說明文件；本設計未實測） | `--interrupt` |
-| V3 | sidecar 是否記錄 poke 的 `text` 到 log | 影響 D2.5 |
-| V5 | claude／opencode 能否按 agent 指定 skills 目錄 | D3.1-B 是否可行 |
-| V6 | 只靠 skill 的 `description` agent 是否可靠地用它 | D3.2 |
-| V8 | 有人 attach 在打字時被戳的後果（F10 只說 WARN） | 是否需要避開 |
-| V9 | headless（`-p`）agent 剛結束一輪時的 `state` 是否確實回到 `idle`，且此時的 poke 確實開新一輪（F17 是讀碼，未實測） | J10 |
+| V1 | **已測（tui）** | tui 卡在長時間前景 tool 呼叫時 `state` 是 `running`（三次取樣都是）。備註：Claude Code 會擋前景的 `sleep`（agent 沒執行就回到 `idle`），所以實測改用長時間的 `ping`；不影響設計。未分別測 `angareion wait` 本身阻塞與 headless |
+| V11 | **已測（tui）** | `running` 時連續兩次不中斷的戳：畫面上是兩行獨立的輸入，**不合併**；兩則**插進同一輪**，在當下的 tool 呼叫結束後一起處理，不是各開一輪。aicomm 兩次都成功返回 |
+| V10 | **已測（tui）** | `interrupt: true` 對 `running` 的 tui **會中斷**正在跑的 tool 呼叫（畫面顯示被打斷），戳的文字成為新的輸入，約 3 秒後回到 `idle`；sidecar log 記 `interrupt via poke; no Stop event - setting idle`。headless 未測 |
+| V3 | **已測** | 戳的文字**不進** sidecar 的 log：log 只有 `POST /agents/<id>/poke` 這一行，grep 戳的文字 0 筆 |
+| V9 | **已測（headless claude-code）** | 閒著的 headless 收到不中斷的戳會**開新的一輪**：`idle`→`running`（1 秒內）→`idle`（約 4 秒）。回覆文字沒有落地可看，只有 `state` 的變化。opencode 未測 |
+| V5 | 未測 | 這次實測沒有涵蓋；D3.1 採 A（不經 Atelier），選 B 才需要 |
+| V6 | 未測 | 這次實測沒有涵蓋；實作後在 6.1 端到端一併看 |
+| V8 | 未測 | 這次實測沒有涵蓋（沒有人 attach 打字的情境） |
+| 附 | 第一則 input | 第 1 次實測 tui 卡在 `starting`：workdir 沒 trust 過，trust 對話框吃掉第一則 input（MyLinuxPool#374）；第 2 次在 trust 過的 workdir 上第一則正常送出，證實。見「風險與取捨」 |
 
 （V2 已由 F17 回答；V4 已由 F20 回答；V7 隨 J3 刪除。）
 
@@ -364,4 +368,4 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 
 - PMO 的職務規矩放哪、Mac 上 PMO／PM 目前的 skill 安裝路徑（F13 只記 worker 映像的做法）。
 - 我沒讀 `dispatch.py` 的 `cmd_watch` 內文；「PM／隊員沒有定期叫醒」依據是 M2 文件與本設計都沒寫（推論）。
-- 本設計**沒有任何實測**：沒有呼叫 sidecar、沒有跑 opencode、沒有碰真 session。
+- 實測只涵蓋 V1、V3、V9、V10、V11，且 tui 與 headless 只各測了其中幾項（見上表）；opencode 沒測；V5、V6、V8 未測。沒有碰真 session。
