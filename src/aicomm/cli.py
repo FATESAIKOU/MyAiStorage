@@ -79,7 +79,9 @@ def sidecar_base(override: str | None) -> str:
 
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str):  # argparse would exit 2; this tool's usage code is 1
-        raise UsageError(f"{message}（aicomm 只有 send 與 inbox）")
+        if "invalid choice" in message:  # a wrong subcommand name; other mistakes are about arguments
+            message += "（aicomm 只有 send 與 inbox）"
+        raise UsageError(message)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -201,7 +203,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
     me = os.environ.get("ANGAREION_IDENTITY")
     candidates: list[str] = []
     for name in ([args.to] if args.to is not None else []) + args.mention:
-        if name != me and name not in candidates:
+        if name and name != me and name not in candidates:
             candidates.append(name)
     wake = bool(candidates) and not args.no_wake
 
