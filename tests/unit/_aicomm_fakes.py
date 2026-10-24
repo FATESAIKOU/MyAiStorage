@@ -14,12 +14,18 @@ import io
 import json
 import os
 import re
+import shutil
+import socket
 import stat
 import sys
 import threading
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
+
+SENDER = "demo-impl-t1-1"
 FAKE_ID = "01FAKEMSG0000000000000000A"
 WAKE_TEXT = "有新訊息：請執行 aicomm inbox。"
 
@@ -142,6 +148,55 @@ class FakeSidecar:
         return bad
 
 
+class RawSidecar:
+    """A loopback socket that answers the n-th connection with the n-th canned byte string.
+
+    For answers http.server cannot produce (a broken status line, a truncated body). The
+    last answer repeats when there are more connections than answers.
+    """
+
+    def __init__(self, answers: list[bytes]) -> None:
+        self.answers = answers
+        self.connections = 0
+        self._sock = socket.socket()
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(8)
+        self._sock.settimeout(0.2)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self._sock.getsockname()[1]}"
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                continue
+            with conn:
+                conn.settimeout(2)
+                data = b""
+                try:
+                    while b"\r\n\r\n" not in data:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        data += chunk
+                    answer = self.answers[min(self.connections, len(self.answers) - 1)]
+                    self.connections += 1
+                    conn.sendall(answer)
+                except OSError:
+                    pass
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(5)
+        self._sock.close()
+
+
 class Result:
     def __init__(self, code: int, out: str, err: str) -> None:
         self.code, self.out, self.err = code, out, err
@@ -159,3 +214,37 @@ def run_aicomm(argv: list[str], monkeypatch, capsys, stdin: str | None = None) -
     code = cli.main(argv)
     captured = capsys.readouterr()
     return Result(code, captured.out, captured.err)
+
+
+@pytest.fixture
+def aicomm_world(tmp_path, monkeypatch):
+    """A fake `angareion` first on PATH plus a fake loopback sidecar; both are ours alone.
+
+    The environment is cleaned first, so nothing from the shell (a real AICOMM_SIDECAR, a
+    real identity, FAKE_ANG_* leftovers) leaks into a test. The test modules import this as
+    `world`.
+    """
+    for name in list(os.environ):
+        if name.startswith(("FAKE_ANG_", "AICOMM_")):
+            monkeypatch.delenv(name)
+    bin_dir = tmp_path / "bin"
+    install_fake_angareion(bin_dir)
+    log = tmp_path / "angareion-calls.jsonl"
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_ANG_LOG", str(log))
+    monkeypatch.setenv("ANGAREION_IDENTITY", SENDER)
+    # `uv run` puts the venv's bin first on PATH; never run the real angareion by mistake.
+    assert shutil.which("angareion") == str(bin_dir / "angareion")
+    sidecar = FakeSidecar()
+    monkeypatch.setenv("AICOMM_SIDECAR", sidecar.url)
+    try:
+        yield SimpleNamespace(
+            sidecar=sidecar,
+            calls=lambda: angareion_calls(log),
+            sender=SENDER,
+            setenv=monkeypatch.setenv,
+        )
+    finally:
+        sidecar.close()
+    # The sidecar is only ever looked up or poked, whatever the test did.
+    assert sidecar.foreign_requests() == []

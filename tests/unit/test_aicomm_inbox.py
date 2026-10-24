@@ -6,7 +6,7 @@ import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve
 
 import pytest
 
-from _aicomm_fakes import run_aicomm
+from _aicomm_fakes import aicomm_world as world, run_aicomm
 
 
 def verbs(world):
@@ -61,6 +61,12 @@ def test_mentioned_goes_to_both_wait_and_read(world, monkeypatch, capsys):
     r = run_aicomm(["inbox", "--wait", "5", "--mentioned"], monkeypatch, capsys)
     assert r.code == 0
     assert [c["argv"] for c in world.calls()] == [["wait", "--mentioned", "--timeout", "5"], ["read", "--mentioned"]]
+
+
+def test_json_goes_to_read_only_never_to_wait(world, monkeypatch, capsys):
+    r = run_aicomm(["inbox", "--wait", "5", "--json"], monkeypatch, capsys)
+    assert r.code == 0
+    assert [c["argv"] for c in world.calls()] == [["wait", "--timeout", "5"], ["read", "--json"]]
 
 
 def test_read_failure_code_is_passed_through(world, monkeypatch, capsys):

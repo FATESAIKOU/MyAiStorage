@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import math
 import os
 import re
 import socket
@@ -62,6 +63,10 @@ def sidecar_base(override: str | None) -> str:
     parts = urllib.parse.urlsplit(text)
     if parts.scheme != "http" or parts.path not in ("", "/") or parts.query or parts.fragment or "@" in parts.netloc:
         raise ValueError(f"{SIDECAR_ENV} 只收 http://<主機>[:<埠>]：{override!r}")
+    try:
+        parts.port  # a bad port raises ValueError here, not later in the middle of a send
+    except ValueError:
+        raise ValueError(f"{SIDECAR_ENV} 的埠號不對：{override!r}") from None
     host = parts.hostname or ""
     try:
         loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
@@ -74,7 +79,7 @@ def sidecar_base(override: str | None) -> str:
 
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str):  # argparse would exit 2; this tool's usage code is 1
-        raise UsageError(message)
+        raise UsageError(f"{message}（aicomm 只有 send 與 inbox）")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -146,7 +151,19 @@ def _request(method: str, url: str, payload: dict | None, timeout: float) -> tup
 
 
 def _wake_one(base: str, name: str, interrupt: bool) -> str:
-    """Look up one agent, poke it when it is idle or running; returns one stderr line."""
+    """Wake one recipient; returns one stderr line and never raises.
+
+    The message is already delivered when this runs, so whatever goes wrong here (a half
+    answer, a reset connection, anything unforeseen) is only "delivered, not woken".
+    """
+    try:
+        return _wake_one_inner(base, name, interrupt)
+    except Exception as e:  # noqa: BLE001 - best-effort edge: nothing may undo a delivery
+        return f"已送達，未叫醒 {name}：{type(e).__name__}（{e}）"
+
+
+def _wake_one_inner(base: str, name: str, interrupt: bool) -> str:
+    """Look up one agent, poke it when it is idle or running."""
     quoted = urllib.parse.quote(name, safe="")
     failed = f"已送達，未叫醒 {name}："
     try:
@@ -183,7 +200,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
 
     me = os.environ.get("ANGAREION_IDENTITY")
     candidates: list[str] = []
-    for name in ([args.to] if args.to else []) + args.mention:
+    for name in ([args.to] if args.to is not None else []) + args.mention:
         if name != me and name not in candidates:
             candidates.append(name)
     wake = bool(candidates) and not args.no_wake
@@ -197,18 +214,19 @@ def _cmd_send(args: argparse.Namespace) -> int:
         except ValueError as e:
             raise UsageError(str(e))
 
-    command = ["send", "--channel", args.channel]
-    if args.to:
-        command += ["--to", args.to]
+    # Every value is one `--name=value` token, so a value that starts with "-" is not an option.
+    command = ["send", f"--channel={args.channel}"]
+    if args.to is not None:
+        command.append(f"--to={args.to}")
     for name in args.mention:
-        command += ["--mention", name]
+        command.append(f"--mention={name}")
     if args.in_reply_to:
-        command += ["--in-reply-to", args.in_reply_to]
+        command.append(f"--in-reply-to={args.in_reply_to}")
     if args.urgency is not None:
-        command += ["--urgency", str(args.urgency)]
+        command.append(f"--urgency={args.urgency}")
     if args.ticket:
-        command += ["--ref", f"ticket={args.ticket}"]
-    command += ["--body", args.body]
+        command.append(f"--ref=ticket={args.ticket}")
+    command.append(f"--body={args.body}")
     stdin_text = sys.stdin.read() if args.body == "-" else None
 
     code, out, err = _angareion(command, stdin_text)
@@ -223,7 +241,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
 
 def _cmd_inbox(args: argparse.Namespace) -> int:
     if args.wait is not None:
-        if args.wait < 0:
+        if not math.isfinite(args.wait) or args.wait < 0:
             raise UsageError("--wait 要是 0 或正數")
         wait = ["wait"] + (["--mentioned"] if args.mentioned else []) + ["--timeout", f"{args.wait:g}"]
         code, out, err = _angareion(wait)
@@ -240,8 +258,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Entrypoint for the `aicomm` command; returns the exit code."""
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
-        if argv and argv[0] not in ("send", "inbox", "-h", "--help", "--version"):
-            raise UsageError(f"沒有 {argv[0]!r} 這個指令：aicomm 只有 send 與 inbox")
         args = _build_parser().parse_args(argv)
         if args.command is None:
             raise UsageError("aicomm 只有 send 與 inbox 兩個指令")

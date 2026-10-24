@@ -9,7 +9,8 @@ import socket
 
 import pytest
 
-from _aicomm_fakes import FAKE_ID, WAKE_TEXT, run_aicomm
+from _aicomm_fakes import FAKE_ID, WAKE_TEXT, RawSidecar, run_aicomm
+from _aicomm_fakes import aicomm_world as world  # noqa: F401  (the fixture)
 
 BODY = "請看這份草稿 SECRET-BODY-TEXT"
 
@@ -22,6 +23,13 @@ def send(world, monkeypatch, capsys, *extra, to="demo-pm-t1", stdin=None, body=B
     if body is not None:
         argv += ["--body", body]
     return run_aicomm(argv, monkeypatch, capsys, stdin=stdin)
+
+
+def opt(argv, name):
+    """The value of `--name=value`; a bare `--name value` pair is a failure (single token only)."""
+    assert name not in argv, f"{name} must be passed as a single {name}=VALUE token: {argv}"
+    (hit,) = [a for a in argv if a.startswith(name + "=")]
+    return hit[len(name) + 1:]
 
 
 def agent(world, name="demo-pm-t1", state="idle", **extra):
@@ -92,7 +100,7 @@ def test_body_from_stdin_goes_through_to_angareion(world, monkeypatch, capsys):
     r = send(world, monkeypatch, capsys, body="-", stdin="多行\n內文\n")
     assert r.code == 0
     (call,) = world.calls()
-    assert call["argv"][call["argv"].index("--body") + 1] == "-"
+    assert opt(call["argv"], "--body") == "-"
     assert call["stdin"] == "多行\n內文\n"
 
 
@@ -103,12 +111,12 @@ def test_message_fields_are_handed_to_angareion_unchanged(world, monkeypatch, ca
     (call,) = world.calls()
     argv = call["argv"]
     assert argv[0] == "send"
-    assert argv[argv.index("--channel") + 1] == "team-demo"
-    assert argv[argv.index("--to") + 1] == "demo-pm-t1"
-    assert argv[argv.index("--mention") + 1] == "demo-arch-t1"
-    assert argv[argv.index("--in-reply-to") + 1] == "01FAKEREPLY00000000000000"
-    assert argv[argv.index("--urgency") + 1] == "7"
-    assert argv[argv.index("--body") + 1] == BODY
+    assert opt(argv, "--channel") == "team-demo"
+    assert opt(argv, "--to") == "demo-pm-t1"
+    assert opt(argv, "--mention") == "demo-arch-t1"
+    assert opt(argv, "--in-reply-to") == "01FAKEREPLY00000000000000"
+    assert opt(argv, "--urgency") == "7"
+    assert opt(argv, "--body") == BODY
 
 
 def test_channel_is_required(world, monkeypatch, capsys):
@@ -131,8 +139,8 @@ def test_ticket_becomes_a_ref_and_the_body_is_not_touched(world, monkeypatch, ca
     send(world, monkeypatch, capsys, "--ticket", "MyAiStorage#212")
     (call,) = world.calls()
     argv = call["argv"]
-    assert argv[argv.index("--ref") + 1] == "ticket=MyAiStorage#212"
-    assert argv[argv.index("--body") + 1] == BODY
+    assert opt(argv, "--ref") == "ticket=MyAiStorage#212"
+    assert opt(argv, "--body") == BODY
 
 
 @pytest.mark.parametrize("bad", ["MyAiStorage", "MyAiStorage#", "#212", "My Repo#1", "a/b#1", "x#1a", "x#1\n"])
@@ -390,3 +398,98 @@ def test_no_override_means_the_documented_default_loopback_address(world, monkey
 
     assert cli.DEFAULT_SIDECAR == "http://127.0.0.1:8471"
     assert cli.sidecar_base(None) == "http://127.0.0.1:8471"
+
+
+# --- review fixes (fix1) -------------------------------------------------------------------------
+
+_IDLE = b'HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: 16\r\n\r\n{"state":"idle"}'
+_GARBAGE = b"GARBAGE\r\n\r\n"
+_TRUNCATED = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort"
+
+
+@pytest.mark.parametrize("answers,connections", [
+    ([_GARBAGE], 2),            # broken status line on every lookup
+    ([_TRUNCATED], 2),          # body cut short on every lookup
+    ([_IDLE, _GARBAGE, _IDLE, _GARBAGE], 4),     # lookup fine, the poke answer is broken (both recipients)
+    ([_IDLE, _TRUNCATED, _IDLE, _TRUNCATED], 4),
+], ids=["bad-status-line", "truncated-lookup", "bad-poke-status", "truncated-poke"])
+def test_a_broken_sidecar_answer_never_undoes_a_delivered_message(world, monkeypatch, capsys, answers, connections):
+    raw = RawSidecar(answers)
+    try:
+        world.setenv("AICOMM_SIDECAR", raw.url)
+        r = send(world, monkeypatch, capsys, "--mention", "demo-arch-t1")
+    finally:
+        raw.close()
+    assert r.code == 0
+    assert r.out.splitlines()[0] == FAKE_ID
+    assert "Traceback" not in r.err
+    for name in ("demo-pm-t1", "demo-arch-t1"):
+        assert f"未叫醒 {name}" in r.err
+    # the second recipient was still judged after the first one broke
+    assert raw.connections == connections
+
+
+@pytest.mark.parametrize("override", ["127.0.0.1:abc", "http://127.0.0.1:99999", "http://127.0.0.1:-1"])
+def test_a_bad_port_is_refused_before_anything_is_written(world, monkeypatch, capsys, override):
+    world.setenv("AICOMM_SIDECAR", override)
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 1
+    assert "Traceback" not in r.err
+    assert world.calls() == []
+
+
+def test_an_empty_to_is_left_to_angareion_to_refuse(world, monkeypatch, capsys):
+    world.setenv("FAKE_ANG_SEND_EXIT", "1")  # what the real angareion does with an empty address
+    r = run_aicomm(["send", "--channel", "team-demo", "--to", "", "--body", "x"], monkeypatch, capsys)
+    assert r.code == 1
+    (call,) = world.calls()
+    assert opt(call["argv"], "--to") == ""   # not dropped into a broadcast
+    assert world.sidecar.requests == []      # and nobody is looked up or woken
+
+
+def test_a_body_starting_with_a_dash_stays_one_token(world, monkeypatch, capsys):
+    agent(world)
+    r = send(world, monkeypatch, capsys, body="-x --not-an-option")
+    assert r.code == 0
+    (call,) = world.calls()
+    assert "--body=-x --not-an-option" in call["argv"]
+
+
+@pytest.mark.parametrize("flag", ["nan", "inf", "-inf"])
+def test_wait_refuses_a_non_finite_number(world, monkeypatch, capsys, flag):
+    r = run_aicomm(["inbox", "--wait", flag], monkeypatch, capsys)
+    assert r.code == 1
+    assert world.calls() == []
+
+
+def test_version_and_help_work_and_touch_nothing(world, monkeypatch, capsys):
+    r = run_aicomm(["--version"], monkeypatch, capsys)
+    assert r.code == 0 and r.out.startswith("aicomm ")
+    for argv in (["--help"], ["send", "--help"], ["inbox", "--help"]):
+        r = run_aicomm(argv, monkeypatch, capsys)
+        assert r.code == 0 and "usage:" in r.out
+    assert world.calls() == [] and world.sidecar.requests == []
+
+
+def test_an_http_proxy_in_the_environment_is_never_used_for_the_sidecar(world, monkeypatch, capsys):
+    import importlib
+
+    from aicomm import cli
+
+    with socket.socket() as s:  # a loopback port nobody listens on, as the "proxy"
+        s.bind(("127.0.0.1", 0))
+        dead = s.getsockname()[1]
+    agent(world)
+    for name in ("HTTP_PROXY", "http_proxy"):
+        monkeypatch.setenv(name, f"http://127.0.0.1:{dead}")
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    importlib.reload(cli)  # the opener is built at import time, from the environment
+    try:
+        r = send(world, monkeypatch, capsys)
+    finally:
+        for name in ("HTTP_PROXY", "http_proxy"):
+            monkeypatch.delenv(name)
+        importlib.reload(cli)
+    assert r.code == 0
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
