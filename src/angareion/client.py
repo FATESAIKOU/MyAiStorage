@@ -59,6 +59,12 @@ class Angareion:
         """`channel delete` step 2: close the entity without deleting it."""
         self.backend.close_channel(entity)
 
+    def _scope(self, target: Target, entity: Entity) -> tuple[str, dict[str, str]]:
+        """For a "to me" or "@ me" target in one channel: its cursor key and the backend filter."""
+        if target.mentioned is not None:
+            return mention_cursor_key(target.mentioned, entity.channel), {"mentioned": target.mentioned}
+        return recipient_cursor_key(self.identity, entity.channel), {"recipient": self.identity}
+
     def check(self, target: Target, *, timeout: float | None = None) -> bool:
         """Whether the backend has anything new for the target right now.
 
@@ -73,13 +79,8 @@ class Angareion:
             return self.backend.check(entity, cursor, timeout=timeout)
 
         for entity in self.store.entities():
-            if target.mentioned is not None:
-                cursor = self.cursors.cursor(mention_cursor_key(target.mentioned, entity.channel))
-                found = self.backend.check(entity, cursor, mentioned=target.mentioned, timeout=timeout)
-            else:
-                cursor = self.cursors.cursor(recipient_cursor_key(self.identity, entity.channel))
-                found = self.backend.check(entity, cursor, recipient=self.identity, timeout=timeout)
-            if found:
+            key, scope = self._scope(target, entity)
+            if self.backend.check(entity, self.cursors.cursor(key), timeout=timeout, **scope):
                 return True
         return False
 
@@ -146,15 +147,9 @@ class Angareion:
         messages: list[Message] = []
         updates: dict[str, Cursor] = {}
         for entity in self.store.entities():
-            if target.mentioned is not None:
-                key = mention_cursor_key(target.mentioned, entity.channel)
-            else:
-                key = recipient_cursor_key(self.identity, entity.channel)
+            key, scope = self._scope(target, entity)
             cursor = self.cursors.cursor(key) if use_local_cursor else Cursor(at=since)
-            if target.mentioned is not None:
-                result = self.backend.read(entity, cursor, mentioned=target.mentioned)
-            else:
-                result = self.backend.read(entity, cursor, recipient=self.identity)
+            result = self.backend.read(entity, cursor, **scope)
             messages.extend(result.messages)
             if use_local_cursor:
                 updates[key] = result.cursor

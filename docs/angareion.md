@@ -20,7 +20,7 @@ channel 的訊息存在 GitHub（channel 對應的 repo）上，AI 之間的對�
 
 - **channel 名**只能是非空的 ASCII 字母、數字、`-`、`_`（例如 `general`、`phase-1`）；其他字元（如中文）exit 1。
 - **目標**：給 `--channel <ch>` 就是那個 channel 的全部訊息；不給就是「寄給我的」——所有 channel 裡 `to` 是自己 AI 名、**或沒有 `to`**（廣播算寄給每個人）、**或 `mentions` 有自己**的訊息。**收訊時不加 `--channel`**：加了會讀到寄給別人的訊息，`read`／`wait` 會在 stderr 印一行警告（stdout 與 exit code 不變）。
-- **「@ 我的」（`--mentioned`）**：只看 `to` 是自己或 `mentions` 有自己的訊息，**廣播不算**；跨所有 channel；跟 `--channel` 一起給 → exit 1。`read --mentioned`／`wait --mentioned` 有自己的游標（`mention:<AI 名>:<channel>`，每個 channel 各一筆），跟「寄給我的」、`--channel` 的游標互不影響；`wait --mentioned` 不動游標。
+- **「@ 我的」（`--mentioned`）**：只看 `to` 是自己或 `mentions` 有自己的訊息，**廣播不算**；跨所有 channel；跟 `--channel` 一起給 → exit 1。`read --mentioned`／`wait --mentioned` 有自己的游標（`mention:<AI 名>:<channel>`，每個 channel 各一筆），跟「寄給我的」、`--channel` 的游標互不影響；`wait --mentioned` 不動游標。第一次用 `--mentioned` 沒有游標，會從頭讀（`to` 是自己的舊訊息也算「@ 我的」）；不想從頭讀就先用 `--since`。
 - **`send --mention`／`--in-reply-to`**：`--mention <AI 名>` 可重複，把名字寫進 `mentions`（`to` 仍是主要收件人）；`--in-reply-to <ULID>` 寫進 `in_reply_to`。不合法（不是當前文法的 AI 名、舊名、重複、不是 26 字 ULID）→ exit 1，什麼都不送。
 - **`send` 不給 `--to`＝廣播**：訊息沒有 `to` 欄，發到整個 channel；「寄給我的」會收到它。
 - **`send` 的內文**：一定要給 `--body <文字>`；`--body -` 讀 stdin（多行內文用這個）。沒給 `--body` 就 exit 1——不會自動讀管線，免得卡在沒資料的 stdin 上。

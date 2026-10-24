@@ -161,11 +161,11 @@ def test_an_invalid_etag_is_replaced_and_a_found_message_clears_the_record(tmp_p
     [
         None,  # missing file
         "not json",
-        '{"version": 2, "targets": {}}',
-        '{"version": 1, "targets": []}',
+        '{"version": 3, "targets": {}}',
+        '{"version": 2, "targets": []}',
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "targets": {
                     WAIT_KEY: {
                         "url": COMMENTS_SINCE,
@@ -175,7 +175,7 @@ def test_an_invalid_etag_is_replaced_and_a_found_message_clears_the_record(tmp_p
                 },
             }
         ),
-        json.dumps({"version": 1, "targets": {WAIT_KEY: {"url": COMMENTS_SINCE, "cursor": {}, "etag": ""}}}),
+        json.dumps({"version": 2, "targets": {WAIT_KEY: {"url": COMMENTS_SINCE, "cursor": {}, "etag": ""}}}),
     ],
 )
 def test_a_bad_or_mismatched_state_file_falls_back_to_a_full_query(tmp_path, payload):
@@ -193,7 +193,7 @@ def test_a_bad_or_mismatched_state_file_falls_back_to_a_full_query(tmp_path, pay
         assert not state_file.exists()
     else:
         # A file that could not be used (or whose record was dropped) is rewritten as valid JSON.
-        assert json.loads(state_file.read_text(encoding="utf-8")) == {"version": 1, "targets": {}}
+        assert json.loads(state_file.read_text(encoding="utf-8")) == {"version": 2, "targets": {}}
 
 
 def test_a_record_from_another_query_window_is_still_usable_for_the_same_cursor(tmp_path):
@@ -206,7 +206,7 @@ def test_a_record_from_another_query_window_is_still_usable_for_the_same_cursor(
     state_file.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "targets": {
                     WAIT_KEY: {
                         "url": COMMENTS + "&since=2026-10-10T13%3A29%3A00Z",
@@ -355,7 +355,7 @@ def test_two_waiters_share_the_state_file_without_corrupting_it_or_hiding_messag
         cache = cache_a if step % 2 == 0 else cache_b
         cache.put(f"owner/repo#{step}|*", record_a if step % 2 == 0 else record_b)
         data = json.loads(state_file.read_text(encoding="utf-8"))
-        assert data["version"] == 1
+        assert data["version"] == 2
         assert isinstance(data["targets"], dict)
     assert len(json.loads(state_file.read_text(encoding="utf-8"))["targets"]) == 6
 
@@ -462,3 +462,23 @@ def test_the_file_cache_rewrites_an_unchanged_record_only_once(tmp_path, monkeyp
     cache.put("k", record)
     cache.put("k", record)
     assert len(calls) == 1
+
+
+def test_a_wait_state_file_of_the_previous_version_is_not_reused(tmp_path):
+    """#209: "to me" now counts a mention, so a v1 ETag must not answer 304 for it."""
+    transport = ETagTransport()
+    transport.serve(COMMENTS_SINCE, [], etag='W/"v1"')
+    state_file = wait_state_file_path(tmp_path, ME)
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "targets": {WAIT_KEY: {"url": COMMENTS_SINCE, "cursor": {"position": "100", "at": "2026-10-10T12:00:00Z", "seen": ["100"]}, "etag": 'W/"v1"'}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _backend(transport, FileETagCache(tmp_path, ME)).check(GENERAL, CURSOR) is False
+    assert "If-None-Match" not in transport.requests[0]["headers"]
+    assert transport.statuses == [200]

@@ -26,7 +26,7 @@ def cursor_file_path(state_dir: Path | str, identity: str) -> Path:
     return Path(state_dir) / f"cursor-{identity_slug(identity)}.json"
 
 
-WAIT_STATE_VERSION = 1
+WAIT_STATE_VERSION = 2  # 2: "to me" also counts a mention (#209); a v1 ETag must not answer for it
 
 
 def wait_state_file_path(state_dir: Path | str, identity: str) -> Path:
