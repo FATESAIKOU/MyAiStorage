@@ -171,3 +171,5 @@ agora delete session <那些 id> --yes
 - Drive 垃圾桶保留 30 天：被 `delete` 的 Session（含它的 raw 段）在這 30 天內仍在使用者的 Drive 裡，30 天後才真的消失。
   要更快清掉，必須自己清 Drive 的垃圾桶。
 - 文件與範例不含真 token、真路徑、真 Session id。
+
+本文件最後核對：2026-10-24
