@@ -2,8 +2,9 @@
 
 "To me" spans every channel in the config file; each channel is a separate
 backend entity with its own arrival positions, so each keeps its own cursor
-entry (`to:<agent name>:<channel>`). A channel target uses one entry
-(`channel:<name>`).
+entry (`to:<agent name>:<channel>`). "@ me" (`Target(mentioned=)`) spans them
+too, with entries of its own (`mention:<agent name>:<channel>`). A channel
+target uses one entry (`channel:<name>`).
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from typing import Callable, NamedTuple
 
 from angareion.backend import BackendRef, ChannelBackend, Cursor, Entity, EntityResolver, Target
 from angareion.messages import Message
-from angareion.state import CursorStore, channel_cursor_key, recipient_cursor_key
+from angareion.state import CursorStore, channel_cursor_key, mention_cursor_key, recipient_cursor_key
 
 POLL_INTERVAL_SECONDS = 15.0
 # wait bounds each check's network budget to [5s, 30s]: slow networks still get
@@ -72,8 +73,13 @@ class Angareion:
             return self.backend.check(entity, cursor, timeout=timeout)
 
         for entity in self.store.entities():
-            cursor = self.cursors.cursor(recipient_cursor_key(self.identity, entity.channel))
-            if self.backend.check(entity, cursor, recipient=self.identity, timeout=timeout):
+            if target.mentioned is not None:
+                cursor = self.cursors.cursor(mention_cursor_key(target.mentioned, entity.channel))
+                found = self.backend.check(entity, cursor, mentioned=target.mentioned, timeout=timeout)
+            else:
+                cursor = self.cursors.cursor(recipient_cursor_key(self.identity, entity.channel))
+                found = self.backend.check(entity, cursor, recipient=self.identity, timeout=timeout)
+            if found:
                 return True
         return False
 
@@ -140,9 +146,15 @@ class Angareion:
         messages: list[Message] = []
         updates: dict[str, Cursor] = {}
         for entity in self.store.entities():
-            key = recipient_cursor_key(self.identity, entity.channel)
+            if target.mentioned is not None:
+                key = mention_cursor_key(target.mentioned, entity.channel)
+            else:
+                key = recipient_cursor_key(self.identity, entity.channel)
             cursor = self.cursors.cursor(key) if use_local_cursor else Cursor(at=since)
-            result = self.backend.read(entity, cursor, recipient=self.identity)
+            if target.mentioned is not None:
+                result = self.backend.read(entity, cursor, mentioned=target.mentioned)
+            else:
+                result = self.backend.read(entity, cursor, recipient=self.identity)
             messages.extend(result.messages)
             if use_local_cursor:
                 updates[key] = result.cursor

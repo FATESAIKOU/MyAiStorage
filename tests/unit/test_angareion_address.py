@@ -102,7 +102,7 @@ def test_channel_create_no_longer_takes_member():
 
 
 def test_send_rejects_a_non_ascii_channel_name_before_touching_the_backend():
-    args = argparse.Namespace(channel="小明", to=None, urgency=5, body="hi", attach=[], ref=[])
+    args = argparse.Namespace(channel="小明", to=None, urgency=5, body="hi", attach=[], ref=[], mention=[], in_reply_to=None)
     config = argparse.Namespace(identity=PM)
 
     class ExplodingApp:
@@ -113,7 +113,7 @@ def test_send_rejects_a_non_ascii_channel_name_before_touching_the_backend():
 
 
 def test_send_rejects_a_bad_to_before_touching_the_backend():
-    args = argparse.Namespace(channel="general", to="repo=owner/team,role=pm", urgency=5, body="hi", attach=[], ref=[])
+    args = argparse.Namespace(channel="general", to="repo=owner/team,role=pm", urgency=5, body="hi", attach=[], ref=[], mention=[], in_reply_to=None)
     config = argparse.Namespace(identity=PM)
 
     class ExplodingApp:
@@ -137,7 +137,7 @@ def test_send_rejects_a_bad_to_before_touching_the_backend():
 )
 def test_send_explains_why_a_to_was_refused(to, expected, capsys):
     """exit 1 and the reason on stderr - nothing reaches the backend."""
-    args = argparse.Namespace(channel="general", to=to, urgency=5, body="hi", attach=[], ref=[])
+    args = argparse.Namespace(channel="general", to=to, urgency=5, body="hi", attach=[], ref=[], mention=[], in_reply_to=None)
     config = argparse.Namespace(identity=PM)
 
     class ExplodingApp:
@@ -166,7 +166,7 @@ def test_send_without_to_builds_a_broadcast_message():
             sent["message"] = message
             return message.id
 
-    args = argparse.Namespace(channel="general", to=None, urgency=5, body="all hands", attach=[], ref=[])
+    args = argparse.Namespace(channel="general", to=None, urgency=5, body="all hands", attach=[], ref=[], mention=[], in_reply_to=None)
     config = argparse.Namespace(identity=PM)
 
     assert cmd_send(args, config, RecordingApp(), token="") == 0

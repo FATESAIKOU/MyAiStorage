@@ -119,7 +119,15 @@ def parse_address(addr_str: str, *, field_name: str = "address") -> str:
 def _target_from_args(args: argparse.Namespace, config: Config) -> Target:
     if args.channel:
         return Target(channel=args.channel)
+    if args.mentioned:
+        return Target(mentioned=config.identity)
     return Target(recipient=config.identity)
+
+
+def _check_scope_args(args: argparse.Namespace) -> None:
+    """`--mentioned` is "@ me" across all channels, so it cannot be narrowed to one."""
+    if args.mentioned and args.channel:
+        raise UsageError("--mentioned cannot be combined with --channel (it reads @-mentions in every channel)")
 
 
 def _format_message(message: Message) -> str:
@@ -129,6 +137,10 @@ def _format_message(message: Message) -> str:
         header += f" (received {received_at})"
     header += f" <{message.from_}> channel: {message.channel}"
     lines = [header]
+    if message.mentions:
+        lines.append("  mentions: " + ", ".join(message.mentions))
+    if message.in_reply_to:
+        lines.append(f"  in_reply_to: {message.in_reply_to}")
     body = message.content.rstrip("\n")
     if body:
         lines.extend("  " + line for line in body.splitlines())
@@ -321,6 +333,8 @@ def cmd_send(args: argparse.Namespace, config: Config, app: Angareion, token: st
             urgency=args.urgency,
             content=body,
             attachments=attachments,
+            mentions=[parse_address(name, field_name="--mention") for name in args.mention or []],
+            in_reply_to=args.in_reply_to,
         )
         # Validate everything before touching the backend: a bad message sends nothing.
         message.validate()
@@ -346,6 +360,12 @@ def cmd_wait(
         sys.stderr.write(f"Error: --timeout must not be negative, got {args.timeout}\n")
         return EXIT_USAGE
 
+    try:
+        _check_scope_args(args)
+    except UsageError as e:
+        sys.stderr.write(f"Error: {e}\n")
+        return EXIT_USAGE
+
     # The pull happens once, before the loop: wait must not fetch while polling.
     app.store.ensure_fresh()
     if args.channel:
@@ -363,6 +383,12 @@ def cmd_wait(
 
 
 def cmd_read(args: argparse.Namespace, config: Config, app: Angareion, token: str) -> int:
+    try:
+        _check_scope_args(args)
+    except UsageError as e:
+        sys.stderr.write(f"Error: {e}\n")
+        return EXIT_USAGE
+
     if args.since is not None:
         # L-1: a bad --since is an input error (exit 1) with a format hint, not
         # a backend surprise later on.
@@ -426,6 +452,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("--to", metavar="AGENT",
                         help="Recipient AI name '<project>-<role>-<team>[-<seq>]' "
                              "(e.g. mylinuxpool-impl-w1-1); omit to send to the whole channel.")
+    p_send.add_argument("--mention", action="append", default=[], metavar="AGENT",
+                        help="Also call this AI name (repeatable); it is not the recipient, `--to` is. "
+                             "Readers must be upgraded first: an older reader misses a message that only mentions it.")
+    p_send.add_argument("--in-reply-to", metavar="ULID",
+                        help="The id of the message this one replies to.")
     p_send.add_argument("--urgency", type=int, default=5, help="Urgency 0-9 (default: 5).")
     p_send.add_argument("--attach", action="append", default=[], metavar="NAME=PATH",
                         help="Attach a file inline (repeatable).")
@@ -439,6 +470,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--channel",
         help="Channel to watch; default: everything addressed to me. Includes messages addressed to other agents.",
     )
+    p_wait.add_argument("--mentioned", action="store_true",
+                        help="Only messages that are addressed to me or mention me (broadcasts excluded), "
+                             "in every channel; cannot be combined with --channel.")
     p_wait.add_argument("--timeout", type=float, metavar="SECONDS",
                         help="Wait at most this long; 0 checks once; omit to wait forever.")
 
@@ -447,6 +481,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--channel",
         help="Channel to read; default: everything addressed to me. Includes messages addressed to other agents.",
     )
+    p_read.add_argument("--mentioned", action="store_true",
+                        help="Only messages that are addressed to me or mention me (broadcasts excluded), "
+                             "in every channel; cannot be combined with --channel.")
     p_read.add_argument("--since", metavar="TIMESTAMP",
                         help="Read after this time; does not move the local cursor.")
     p_read.add_argument("--json", action="store_true", help="Print a JSON array.")

@@ -1505,3 +1505,83 @@ def test_a_config_identity_that_is_not_a_new_grammar_name_exits_2(cli_env, capsy
     assert ret == 2
     err = capsys.readouterr().err
     assert "identity" in err and "team" in err
+
+
+# -- #209: --mention, --in-reply-to, --mentioned ---------------------------------------
+
+
+ULID_X = "01JABCDEF0123456789ABCDEF0"
+
+
+def test_send_with_mentions_and_in_reply_to_stores_both(cli_env, capsys):
+    ret = run(
+        cli_env,
+        ["send", "--channel", "general", "--to", PM, "--mention", "mypmo-pm-m1", "--mention", "mylinuxpool-impl-w1-2",
+         "--in-reply-to", ULID_X, "--body", "hi"],
+    )
+    assert ret == 0
+    capsys.readouterr()
+    message = cli_env["backend"].read(GENERAL, Cursor()).messages[0]
+    assert message.mentions == ["mypmo-pm-m1", "mylinuxpool-impl-w1-2"]
+    assert message.in_reply_to == ULID_X
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--mention", "not-an-ai"],
+        ["--mention", "mypmo-pm"],  # old grammar
+        ["--mention", "mypmo-pm-m1", "--mention", "mypmo-pm-m1"],  # duplicate
+        ["--in-reply-to", "abc"],
+        ["--in-reply-to", ULID_X.lower()],
+    ],
+)
+def test_send_refuses_bad_mention_or_in_reply_to(cli_env, capsys, extra):
+    ret = run(cli_env, ["send", "--channel", "general", *extra, "--body", "hi"])
+    assert ret == 1
+    assert capsys.readouterr().err.startswith("Error:")
+    assert cli_env["backend"].read(GENERAL, Cursor()).messages == []
+
+
+def test_read_mentioned_reads_across_channels_without_broadcasts(cli_env, capsys):
+    backend = cli_env["backend"]
+    backend.deliver(GENERAL, Message(from_=PM, to=None, channel="general", content="all", id="01AAAA00000000000000000000"))
+    backend.deliver(GENERAL, Message(from_=PM, to="someone-pm-m1", channel="general", content="m", id="01BBBB00000000000000000000", mentions=[IDENTITY]))
+    backend.deliver(OTHER, Message(from_=PM, to=IDENTITY, channel="other", content="d", id="01CCCC00000000000000000000"))
+    assert run(cli_env, ["read", "--mentioned", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert [m["id"] for m in data] == ["01BBBB00000000000000000000", "01CCCC00000000000000000000"]
+    assert data[0]["mentions"] == [IDENTITY]
+    assert data[0]["in_reply_to"] is None
+    # "to me" is untouched by the read above
+    assert run(cli_env, ["read", "--json"]) == 0
+    assert len(json.loads(capsys.readouterr().out)) == 3
+
+
+@pytest.mark.parametrize("command", ["read", "wait"])
+def test_mentioned_with_channel_is_a_usage_error(cli_env, capsys, command):
+    ret = run(cli_env, [command, "--mentioned", "--channel", "general"])
+    assert ret == 1
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_wait_mentioned_exit_codes_and_no_cursor(cli_env, capsys):
+    backend = cli_env["backend"]
+    backend.deliver(GENERAL, Message(from_=PM, to=None, channel="general", content="all", id="01AAAA00000000000000000000"))
+    assert run(cli_env, ["wait", "--mentioned", "--timeout", "0"]) == 3
+    backend.deliver(GENERAL, Message(from_=PM, to=PM, channel="general", content="m", id="01BBBB00000000000000000000", mentions=[IDENTITY]))
+    assert run(cli_env, ["wait", "--mentioned", "--timeout", "0"]) == 0
+    capsys.readouterr()
+    assert not (cli_env["state_dir"] / f"cursor-{IDENTITY}.json").exists()
+
+
+def test_human_output_shows_mentions_and_in_reply_to(cli_env, capsys):
+    cli_env["backend"].deliver(
+        GENERAL,
+        Message(from_=PM, to=IDENTITY, channel="general", content="x", id="01AAAA00000000000000000000",
+                mentions=["mylinuxpool-impl-w1-2"], in_reply_to=ULID_X),
+    )
+    assert run(cli_env, ["read", "--channel", "general"]) == 0
+    out = capsys.readouterr().out
+    assert "mentions: mylinuxpool-impl-w1-2" in out
+    assert f"in_reply_to: {ULID_X}" in out
