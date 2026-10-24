@@ -16,6 +16,10 @@
       "backend": "aicompany-channel",
       "issue": 17
     },
+    "team-myaientry-m3": {
+      "backend": "aicompany-channel",
+      "issue": 18
+    },
     "team-mylinuxpool": {
       "backend": "aicompany-channel",
       "issue": 2
