@@ -18,7 +18,7 @@
 - [ ] 2.2 叫醒：只在要叫醒時檢查單一 loopback 位址、設定檔（`nowake` 名單、`sidecar` 單一 loopback 位址；邊界驗證；壞掉且可能要叫醒＝exit 1；唯一環境變數 `AICOMM_CONFIG`）、`GET /agents/{id}`、條件（只有 `idle`，不看 tui／`attach`）、固定文字、不重送、逾時、`--no-wake`、自己不戳自己、stderr 一行結果
 - [ ] 2.3 `inbox`：`read`（無 `--channel`）、`--wait`（exit 3 逾時、exit 2 原樣傳回不 read）、`--mentioned`（wait 與 read 都帶）、`--json`
 - [ ] 2.4 `SKILL.md`：frontmatter `name`／`description`；用法、結束碼、「送達＝寫進 Angareion」、不要貼私人資訊、閒著用 `inbox --wait`；兩條軟規則：每輪結束前跑一次 `aicomm inbox`；「收到」類回覆加 `--no-wake`
-- [ ] 2.5 測試（全部對自己起的假 sidecar 與假 `angareion`；預設 sidecar 位址在測試中被環境變數蓋掉）：
+- [ ] 2.5 測試（全部對自己起的假 sidecar 與假 `angareion`；測試一律設 `AICOMM_CONFIG` 指到暫存的設定檔；沒設就讓測試失敗〔guard〕）：
   - 每個 spec scenario 一條（寫入失敗不叫醒、404、`running`、`idle`（tui 與 headless 各一）、`starting` 不戳、廣播、mention、不叫醒名單、逾時不重送、非 loopback 且要叫醒、非 loopback 但 `--no-wake`、收件人在名單上且位址非 loopback、設定檔不存在／壞掉、`wait` exit 2、`--mentioned` 同時給 wait 與 read、戳的文字固定）
   - 回應壞掉（非 JSON、缺欄位）＝不戳、exit 0
   - 對每條測試做改壞驗證（拿掉條件，測試要紅）
@@ -29,7 +29,7 @@
 
 - [ ] 3.1 MyLinuxPool：映像建置用 tool-pins 同一個 sha 多裝 `aicomm`、放 `skills/aicomm/SKILL.md`（照 `docs/angareion.md`「說明檔（skill）」）
 - [ ] 3.2 Mac：PMO 與各 PM 的安裝步驟（`uv tool install` 同 sha＋說明檔位置）——現況【未知】，先查
-- [ ] 3.3 Mac 安裝步驟放 aicomm 設定檔（`nowake` 放 PMO 的 AI 名）
+- [ ] 3.3 Mac 安裝步驟放 aicomm 設定檔（`nowake` 放 PMO 的 AI 名）；**由 PMO／本人執行，agent 不自己寫這個檔**
 - [ ] 3.4 各環境說明（`--append`）加一行：溝通用 `aicomm`
 
 ## 4. harness（下一次改版時；不單獨出版本，除非 V6 實測不可靠）

@@ -72,7 +72,7 @@ skill MUST 對外只提供 `send` 與 `inbox` 兩個子指令（另有 `--versio
 - **THEN** 文字等於固定短句，不含寄件者的 AI 名、訊息 id 與內文
 
 ### Requirement: 設定只來自 aicomm 自己的設定檔
-skill MUST 只從 aicomm 自己的設定檔取得 sidecar 位址與不叫醒名單：`$XDG_CONFIG_HOME/aicomm/config.json`（未設則 `$HOME/.config/aicomm/config.json`），欄位 `sidecar`（單一位址，可省略）與 `nowake`（AI 名清單，可省略）。skill MUST NOT 以其他環境變數取得這兩項；唯一的環境變數是路徑覆寫 `AICOMM_CONFIG`（供測試與本機手動使用，文件 MUST 寫明 sidecar 開的 agent 拿不到它）。讀取時 MUST 在邊界驗證。檔案不存在 MUST 視為預設位址與空名單。
+skill MUST 只從 aicomm 自己的設定檔取得 sidecar 位址與不叫醒名單：固定路徑 `~/.config/aicomm/config.json`（不看 `XDG_CONFIG_HOME`），欄位 `sidecar`（單一位址，可省略）與 `nowake`（AI 名清單，可省略）。skill MUST NOT 以其他環境變數取得這兩項；唯一的環境變數是路徑覆寫 `AICOMM_CONFIG`（供測試與本機手動使用，文件 MUST 寫明 sidecar 開的 agent 拿不到它）。讀取時 MUST 在邊界驗證。檔案不存在 MUST 視為預設位址與空名單。
 
 「需要叫醒」定義為：沒有 `--no-wake`，且（`--to` 加 `--mention`）排除自己與 `nowake` 名單後的候選收件人不是空的。「可能要叫醒」＝有 `--to` 或 `--mention` 且沒有 `--no-wake`。
 

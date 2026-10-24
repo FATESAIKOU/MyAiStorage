@@ -214,7 +214,7 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 
 ### D2.8 位址與安全
 
-- **設定來源只有 aicomm 自己的設定檔，不用環境變數**（F22：sidecar 開的 agent 的子行程環境是白名單，自訂的 `AICOMM_*` 進不去；而 `HOME`／`XDG_*` 在白名單內，所以設定檔找得到）。一台機器一份：`$XDG_CONFIG_HOME/aicomm/config.json`，沒設 `XDG_CONFIG_HOME` 就 `$HOME/.config/aicomm/config.json`。欄位：`sidecar`（單一 loopback 位址，可省略＝sidecar 文件的預設位址）、`nowake`（AI 名清單，可省略＝空）。
+- **設定來源只有 aicomm 自己的設定檔，不用環境變數**（F22：sidecar 開的 agent 的子行程環境是白名單，自訂的 `AICOMM_*` 進不去；而 `HOME` 在白名單內，所以固定路徑的設定檔找得到）。一台機器一份，路徑固定 `~/.config/aicomm/config.json`（照 angareion 的做法，不看 `XDG_CONFIG_HOME`）。欄位：`sidecar`（單一 loopback 位址，可省略＝sidecar 文件的預設位址）、`nowake`（AI 名清單，可省略＝空）。
 - **邊界驗證**：讀檔時就驗——JSON 壞、欄位型別錯、`nowake` 裡有不合法的 AI 名、`sidecar` 不是單一位址 → 設定壞。檔案不存在＝預設位址＋空名單（正常）。
 - **設定壞的處理**：「可能要叫醒」（有 `--to` 或 `--mention`、且沒有 `--no-wake`）時 → exit 1，**在寫進 Angareion 之前**，訊息說明哪個欄位壞。`--no-wake` 或廣播不讀設定檔、不受影響。
 - **路徑覆寫只留一個**：`AICOMM_CONFIG`（指到設定檔），給測試與本機手動用。**文件要寫明：sidecar 開的 agent 拿不到它**（F22），所以正式部署只能靠上面的預設路徑。
@@ -336,7 +336,7 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 - **額度**：每次成功戳＝一次模型輪次。去重靠 I2（盡力而為，可能多戳一次）；廣播不戳；PMO 不被 aicomm 戳（D2.9）。
 - **軟規則**：D2.2 與 D2.9 的兩條規則靠 AI 遵守 SKILL.md；失守的後果是漏收（前者）或多一輪（後者），不是壞資料。
 - **私人資訊**：戳與 stderr 都不含內文；說明檔沿用 Angareion 的「不要貼私人資訊」。
-- **測試隔離**：測試只能對自己起的假 sidecar／假 angareion 說話，預設 sidecar 位址在測試中**必須被環境變數蓋掉**（`tests/_guard.py` 的精神；具體做法列 tasks）。
+- **測試隔離**：測試只能對自己起的假 sidecar／假 angareion 說話，測試**一律設 `AICOMM_CONFIG` 指到暫存的設定檔；沒設就讓測試失敗（guard）**，免得讀到真的設定檔或碰到真的 sidecar（`tests/_guard.py` 的精神；具體做法列 tasks）。
 
 ## 待驗（本設計階段未實測；不呼叫 sidecar、不跑 opencode）
 
