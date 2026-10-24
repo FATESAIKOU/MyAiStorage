@@ -1,6 +1,6 @@
 ## Context
 
-見 `proposal.md`「Why」。工單：MyAiStorage#212（b 級，設計先審、本人同意才實作）。第 1 輪修正（回應非作者審查 `REVIEW-rev.md`）後的版本。
+見 `proposal.md`「Why」。工單：MyAiStorage#212（b 級，設計先審、本人同意才實作）。第 1 輪修正（回應非作者審查）與第 2 輪修正後的版本。
 
 **標記**：【事實】附出處；【推論】是我（作者）從事實推的；【未知】沒查到或需要實測，列在最後一節「待驗」。
 
@@ -27,8 +27,9 @@
 | F17 | **headless 的 poke 是確定的**：opencode 的 `poke` ＝（必要時 interrupt）＋`send`，`send` 對 session 打 `POST /api/session/{id}/prompt`，並把狀態設成 running，等於開新的一輪；claude `-p` 的 `poke` 寫一則 user message 進 stdin 並把狀態設成 running | MyLinuxPool `modules/sidecar/src/sidecar/drivers/opencode.py:446-500`；`drivers/claude_code.py:585-605` |
 | F18 | 工單號格式：`TICKET_RE = ^[A-Za-z0-9._-]+#[0-9]+$` | MyPMO `pmo/dispatch.py:124` |
 | F19 | `dispatch.py` 找 sidecar：Mac team 用 `local_sidecar`，**worker team 用 `http://{sidecar_host}:{forward_port}`**（`sidecar_host` 預設 `127.0.0.1`，即轉發埠）；所以 `reply` 今天能戳到 worker 上的 PM | `pmo/dispatch.py:1044-1049`、`:506` |
-| F20 | sidecar 的 `open` 沒有 env 欄位（有 `input` 等）；`open` 常帶第一則 `input`，starting 階段的第一則輸入可能被對話框吃掉 | `sidecar.md` §2.2 open（`:180` 附近）；審查 REVIEW-rev M2、M3 引用 |
-| F21 | 隊員（Mac 與 worker）平常是 headless 的 opencode；PM 與 PMO 是 tui | 審查 REVIEW-rev H2 引用的環境說明；`sidecar.md` §1 |
+| F20 | sidecar 的 `open` 沒有 env 欄位（有 `input` 等）；`open` 常帶第一則 `input`，starting 階段的第一則輸入可能被對話框吃掉 | MyLinuxPool `modules/sidecar/docs/sidecar.md:180`（`input`：「第一則輸入；排進佇列等 agent 起來再送」）、§2.2 open 的欄位表（沒有 env 欄位）；「starting 階段第一則輸入可能被對話框吃掉」是【推論】（來自 sidecar 文件 §2.5 的首開對話框描述） |
+| F22 | **sidecar 開的子行程環境是白名單**：`PATH`、`HOME`、`LANG`、`TMPDIR`、`USER`、`LOGNAME`、`SHELL`、`TERM`、`TZ`，加前綴 `AGORA_`／`XDG_`／`LC_`／`FAKE_`，加 sidecar 維運變數與 resolve 的 overlay；sidecar 自己行程的其他環境變數**不會**進子行程 | 同上 `sidecar.md:619-626`（子行程環境的組法） |
+| F21 | 隊員（Mac 與 worker）平常是 headless 的 opencode；PM 與 PMO 是 tui | 【推論】（sidecar 文件 §1 說 sidecar 控制 Claude Code 與 opencode；隊員用 headless 是環境慣例，我沒有直接出處） |
 
 ### 推論（不是事實）
 
@@ -128,11 +129,11 @@ aicomm inbox [--wait <秒>] [--mentioned] [--json]
 | 選項 | 內容 | 代價 |
 |---|---|---|
 | **A（建議）** | `--channel` 必填 | 最單純；派工信與 BRIEF 本來就寫了 channel 名，AI 不必另外去記；不需要任何環境注入 |
-| B | 環境變數 `AICOMM_CHANNEL` 當預設 | sidecar 的 `open` 沒有 env 欄位（F20），要每個 agent 有不同的值只能改 sidecar 或它的範本（整台機器一份）；而且「某 agent 的 team channel 是哪個」是 #346 說的「團隊的定義」，不該進服務層 |
+| B | 環境變數當預設 channel | sidecar 的 `open` 沒有 env 欄位（F20），子行程環境又是白名單（F22），要每個 agent 有不同的值只能改 sidecar 或它的範本（整台機器一份）；而且「某 agent 的 team channel 是哪個」是 #346 說的「團隊的定義」，不該進服務層 |
 | C | 從 AI 名推 `team-<專案>-<team>` | F5 證明推不出 |
 | D | 讀註冊簿挑收件人最近發過信的 channel | skill 自己做路由，膨脹 |
 
-**建議 A**（審查 M2）。`AICOMM_CHANNEL` 刪掉。
+**建議 A**。不另設 channel 的環境變數（F22：sidecar 開的 agent 拿不到自訂的環境變數）。
 
 ## D2 叫醒的判斷
 
@@ -159,7 +160,7 @@ send:
 | 同一台 sidecar | 對本機 sidecar 問 `GET /agents/{id}`：200＝在；404＝不在這台 | F6、F7；agent id 就是 AI 名（dispatch 用同一個字串當 `to` 與 `/agents/{id}`，F11） |
 | 閒置 | `state == idle` | F7、F9、F17 |
 
-**不再區分 tui／headless**（J10 建議放寬）：F17 證明兩者的 poke 都會開新一輪。**因此也不依賴 `attach` 欄位**（`sidecar.md` 明說 attach「不是狀態」、值不得解析；審查 L5）。`starting` **不戳**：`open` 通常帶第一則 `input`，starting 階段再戳會變兩則、或被對話框吃掉，skill 分辨不出（F20、審查 M3）；起來之後的 agent 自己會照 input 去讀信。這同時拿掉了 `poke_queue_timeout` 的長等待：戳只剩 `idle` 這條路，client 逾時幾秒即可。
+**不再區分 tui／headless**（J10 建議放寬）：F17 證明兩者的 poke 都會開新一輪。**因此也不依賴 `attach` 欄位**（`sidecar.md` 明說 attach「不是狀態」、值不得解析）。`starting` **不戳**：`open` 通常帶第一則 `input`，starting 階段再戳會變兩則、或被對話框吃掉，skill 分辨不出（F20）；起來之後的 agent 自己會照 input 去讀信。這同時拿掉了 `poke_queue_timeout` 的長等待：戳只剩 `idle` 這條路，client 逾時幾秒即可。
 
 **不戳 `running` 的代價（J2，照實寫）**：`running` 的 agent 要等它自己下一次 `inbox`／`wait` 才讀到。**沒有任何保底的定期叫醒給 PM 或隊員**：M2 的 30 分鐘叫醒只給 PMO（F16），本設計與 M2 都沒有說 PM／隊員會被定期叫醒（【推論】，我沒讀 `watch` 內文）。審查列的退路有三：(a) 對 `running` 也送不打斷的 poke（排到這一輪之後）；(b) SKILL.md 規定「每一輪結束前跑一次 `aicomm inbox`，之後才閒下來」；(c) 本人接受漏收。**建議 (b)**：成本是零行程式、不多花額度，且 I1 的「`running` 的 agent 多半在忙或在 wait」讓漏收只剩「一輪做很久且完全不看信」；(a) 會讓阻塞在 wait 的 agent 多一輪、也放大重複戳；(c) 是 (b) 失效時的實情，仍須告知本人。**這是軟規則**（靠 AI 遵守 SKILL.md），不是機制。
 
@@ -213,9 +214,13 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 
 ### D2.8 位址與安全
 
-- sidecar 位址：環境變數 `AICOMM_SIDECAR`，**只收一個位址**（一台機器一個 sidecar，F6；多位址也是跨機的入口，審查 L1），預設為 sidecar 文件的預設 loopback 位址。
-- **只擋非 loopback 主機**（`localhost`、`127.0.0.0/8`、`::1`）。理由：sidecar 只綁 loopback、無認證（F6），指向別的主機的位址一定是設錯。**這不能防跨機**：worker 的轉發埠本身就是 loopback（F19），`AICOMM_SIDECAR` 指到轉發埠會通過檢查——這是使用者自己的明確選擇，檢查分辨不出，也不試圖分辨（P2）。
-- **有意的嚴格選擇（L7）**：位址只在**要叫醒時**才檢查；`--no-wake` 或廣播不碰 sidecar，位址設錯不影響送信。要叫醒但位址非 loopback → exit 1，**在寫進 Angareion 之前**就擋，避免「半個動作」。
+- **設定來源只有 aicomm 自己的設定檔，不用環境變數**（F22：sidecar 開的 agent 的子行程環境是白名單，自訂的 `AICOMM_*` 進不去；而 `HOME`／`XDG_*` 在白名單內，所以設定檔找得到）。一台機器一份：`$XDG_CONFIG_HOME/aicomm/config.json`，沒設 `XDG_CONFIG_HOME` 就 `$HOME/.config/aicomm/config.json`。欄位：`sidecar`（單一 loopback 位址，可省略＝sidecar 文件的預設位址）、`nowake`（AI 名清單，可省略＝空）。
+- **邊界驗證**：讀檔時就驗——JSON 壞、欄位型別錯、`nowake` 裡有不合法的 AI 名、`sidecar` 不是單一位址 → 設定壞。檔案不存在＝預設位址＋空名單（正常）。
+- **設定壞的處理**：「可能要叫醒」（有 `--to` 或 `--mention`、且沒有 `--no-wake`）時 → exit 1，**在寫進 Angareion 之前**，訊息說明哪個欄位壞。`--no-wake` 或廣播不讀設定檔、不受影響。
+- **路徑覆寫只留一個**：`AICOMM_CONFIG`（指到設定檔），給測試與本機手動用。**文件要寫明：sidecar 開的 agent 拿不到它**（F22），所以正式部署只能靠上面的預設路徑。
+- sidecar 位址**只收一個**（一台機器一個 sidecar，F6；多位址也是跨機的入口）。
+- **只擋非 loopback 主機**（`localhost`、`127.0.0.0/8`、`::1`）。理由：sidecar 只綁 loopback、無認證（F6），指向別的主機的位址一定是設錯。**這不能防跨機**：worker 的轉發埠本身就是 loopback（F19），設定檔的 `sidecar` 指到轉發埠會通過檢查——這是使用者自己的明確選擇，檢查分辨不出，也不試圖分辨（P2）。
+- **有意的嚴格選擇**：位址只在「**需要叫醒**」時才驗與使用。**定義**：沒有 `--no-wake`，且（`--to` ∪ `--mention`）排除自己與 `nowake` 名單後**不是空的**。不需要叫醒（`--no-wake`、廣播、候選全被排除）時不碰 sidecar，位址設錯不影響送信；需要叫醒但位址非 loopback → exit 1，**在寫進 Angareion 之前**就擋，避免「半個動作」。
 - 逾時：查 3 秒、戳 5 秒（`idle` 的戳約 0.3 秒返回，F9）；不重試。
 - 自己不戳自己（`--to` 或 `--mention` 等於自己的 AI 名，F3）。
 
@@ -225,13 +230,13 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 
 | 選項 | 內容 | 代價 |
 |---|---|---|
-| **a（建議）** | **收件人那側的「不叫醒名單」**：aicomm 自己的設定（`AICOMM_NOWAKE`，環境變數或 aicomm 自己的設定檔，逗號分隔 AI 名），名單上的收件人**不論誰寄、都不戳**。PMO 的 AI 名放在 Mac 上的名單裡。PMO 因此只被 M2 的規則（`watch` 的 poke／30 分鐘叫醒）叫醒，與 M2 §5.3 一致 | 要有人維護名單（一行，Mac 的安裝步驟放）；名單是政策不是安全邊界（F16/Non-Goal：任何人仍可自己 `dispatch.py poke`）。名單不能走 sidecar 注入（F20），所以放 aicomm 自己這一層 |
+| **a（建議）** | **收件人那側的「不叫醒名單」**：aicomm 自己的設定檔的 `nowake`（AI 名清單，D2.8），名單上的收件人**不論誰寄、都不戳**。**名單的語意＝「收件人所在那台機器」的設定**，也就是會戳它的寄件人讀到的那份（寄件人和收件人在同一台才會戳，D2.2）；PMO 的 AI 名放在 Mac 的設定檔裡。PMO 因此只被 M2 的規則（`watch` 的 poke／30 分鐘叫醒）叫醒，與 M2 §5.3 一致 | 要有人維護名單（一行，Mac 的安裝步驟放）；名單是政策不是安全邊界（F16/Non-Goal：任何人仍可自己 `dispatch.py poke`）。名單不能走 sidecar 注入（F20、F22），所以放 aicomm 自己的設定檔 |
 | b | 只有關係對的才叫醒（PMO→PM、PM→自己 team 的隊員、隊員→自己的 PM） | AI 名文法推不出「誰是 PMO」「誰的 PM」（team 段 `m1` 在不同專案重複）；要另做關係表，等於把「團隊的定義」搬進 skill |
 | c | 照 D2.2（不限制） | 與 M2 D6 衝突；額度與迴圈風險 |
 
 **建議 a**，另加**防迴圈**（選一種，寫死）：**SKILL.md 規定「收到／確認這類沒有要對方動作的回覆一律加 `--no-wake`」**（軟規則）。不採「有 `--in-reply-to` 就預設不叫醒」：回報完成也是回覆，卻需要叫醒 PM，語意會錯。迴圈的另一道天然限制是 D2.2：被叫醒的對方在讀信那一輪是 `running`，只有它回完又回到 `idle` 才可能被再戳，且 `--no-wake` 規則讓「收到」不戳。
 
-**PMO 那邊與 M2 的 watch 規則怎麼一致**：PMO 在 `AICOMM_NOWAKE` 裡 → 任何 `aicomm send --to <PMO>` 都只寫進 Angareion、不戳；PMO 仍會被 M2 `watch` 在 `secretary-pmo`＋秘書身分＋`urgency ≥ 8` 時 poke，其餘等 30 分鐘叫醒，與 M2 完全相同。PMO 發出去的信（PMO→PM）照 D2.2 戳 PM。**代價**：PM→PMO 的訊息最慢等 30 分鐘才被 PMO 看到（與現況一致，沒有退步）。
+**PMO 那邊與 M2 的 watch 規則怎麼一致**：PMO 在 Mac 設定檔的 `nowake` 裡 → 任何 `aicomm send --to <PMO>` 都只寫進 Angareion、不戳；PMO 仍會被 M2 `watch` 在 `secretary-pmo`＋秘書身分＋`urgency ≥ 8` 時 poke，其餘等 30 分鐘叫醒，與 M2 完全相同。PMO 發出去的信（PMO→PM）照 D2.2 戳 PM。**代價**：PM→PMO 的訊息最慢等 30 分鐘才被 PMO 看到（與現況一致，沒有退步）。
 
 ## D3 經 Atelier 分發：位置、交付、版本
 
@@ -287,7 +292,7 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 
 1. 本 change 實作完成、`aicomm` 隨 tool-pins 的下一個 sha 進映像與 Mac。
 2. 待驗在拋棄式環境實測通過（本設計階段不碰 sidecar）。
-3. PMO 與 PM 的環境說明加一行「溝通用 `aicomm`」；Mac 上設定 `AICOMM_NOWAKE`（放 PMO）；先只用在新的對話，派工流程不動。
+3. PMO 與 PM 的環境說明加一行「溝通用 `aicomm`」；Mac 安裝步驟放 aicomm 設定檔（`nowake` 放 PMO 的 AI 名）；先只用在新的對話，派工流程不動。
 4. `dispatch.py reply` 對 Mac team 改為呼叫 `aicomm send`（PMO 的小 PR；是否保留 exit 2 由 PMO 決定）；worker team 不動。
 5. 觀察一個 PM 週期後，Mac 路徑的舊 `reply` 程式碼標 deprecated。`send`、`poke`、`watch`、`open` 保留。
 6. PMO 的 watch 與 30 分鐘叫醒不拆（F16）。**它只涵蓋 PMO**，不是 PM／隊員的保底（D2.2）。
@@ -302,7 +307,7 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 | J5 | 廣播要不要叫醒 | A 不叫醒；B 叫醒所有同台閒置 agent | **A**（D1.3） |
 | J6 | 要不要第一輪就改 harness（`comm` 能力名） | A 不改，等下次改版；B 單獨出新版 | **A**（D3.2） |
 | J7 | 與 `dispatch.py` 的關係 | A 全取代；B 派工包一層；C 並存、`reply` 只換 Mac team | **C**（D4） |
-| J9 | **誰可以叫醒誰**（與 M2 D6／§5.3 對齊） | a 收件人側「不叫醒名單」（PMO 放進去）；b 只有上下游才叫醒；c 不限制 | **a**＋SKILL.md「收到類回覆加 `--no-wake`」（D2.9） |
+| J9 | **誰可以叫醒誰**（與 M2 D6／§5.3 對齊） | a 收件人側「不叫醒名單」（aicomm 設定檔的 `nowake`，語意＝收件人所在那台機器的設定；PMO 放進去）；b 只有上下游才叫醒；c 不限制 | **a**＋SKILL.md「收到類回覆加 `--no-wake`」（D2.9） |
 | J10 | **要不要叫醒閒置的 headless**（#212 標題寫 tui；條件放寬成 `state == idle`） | A 放寬（不分 tui／headless）；B 只戳 tui | **A**。隊員平常是 headless（F21），B 的話 PM→隊員這條主路徑永遠不會叫醒，做不到「不用記兩邊」；F17 證明 headless 的 poke 語意確定 |
 
 （J3「戳 `starting` 要不要等」已刪：只戳 `idle`。J8 名字降為作者提議 P11。）
@@ -315,7 +320,7 @@ skill 依賴 sidecar 的兩個公開端點與兩個欄位（`state` 的值 `idle
 | P2 | 只擋非 loopback，**只在要叫醒時檢查**；不宣稱能防跨機 | sidecar 只綁 loopback、無認證；轉發埠也是 loopback，檢查分辨不出 | 可拿掉 |
 | P3 | `send --json`（stdout 印 `{"id","wake":[…]}`）給程式讀叫醒結果 | `reply` 的 exit 2 語意需要機器可讀的結果（PMO 決定，D4） | 可不做 |
 | P4 | `inbox` 不提供 `--channel`／`--since` | 擋 M0 的誤用 | 可放開 |
-| P5 | 環境變數 `AICOMM_SIDECAR`（單一位址）與 `AICOMM_NOWAKE`（不叫醒名單） | D2.8、D2.9 | 名字可改 |
+| P5 | aicomm 自己的設定檔（`config.json`：`sidecar` 單一位址、`nowake` 名單）；唯一的環境變數是路徑覆寫 `AICOMM_CONFIG`（測試／手動用） | D2.8、D2.9；F22 讓環境變數進不了 sidecar 開的 agent | 欄位與路徑可改 |
 | P6 | 自己不戳自己 | 避免備忘戳醒自己 | 可拿掉 |
 | P7 | 首版不做 `--mention` 的版本偵測 | 同 sha 一起裝 | 可加 |
 | P8 | 戳的文字固定、不含寄件者與內容 | D2.5 | 可改 |

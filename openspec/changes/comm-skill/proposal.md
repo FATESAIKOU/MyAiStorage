@@ -12,7 +12,7 @@
   - `aicomm send`：寫進 Angareion；寫成功後，對收件人（`--to`＋`--mention`）中「在本機 sidecar、`idle`（不分 tui／headless）、且不在不叫醒名單」的，盡力戳一下（固定短句，不含訊息內容）。
   - `aicomm inbox`：讀寄給自己的信（固定不加 `--channel`），可選擇先阻塞等。
 - 叫醒的判斷（誰在本機 sidecar、閒不閒、可不可以叫、失敗怎麼辦）全放在 skill；Angareion 與 sidecar **不改**。
-- `--channel` 必填；叫醒不得違反 M2 已定的「誰可以叫醒 PMO」：PMO 放進 `AICOMM_NOWAKE`，只被 M2 的 watch 規則叫醒。
+- `--channel` 必填；叫醒不得違反 M2 已定的「誰可以叫醒 PMO」：PMO 放進 aicomm 設定檔的 `nowake`，只被 M2 的 watch 規則叫醒。
 - 工單號是選填（`--ticket`），不帶也能送一般訊息。
 - 分發：指令與說明檔跟著 `angareion` 同一個 tool-pins sha 交到各 agent；harness 只在下一次改版時加一個中性能力名 `comm`（見 design D3）。
 - 與 MyPMO 的 `dispatch.py`：`send`（派工）與 `poke` **並存**；`reply`（送＋戳）對 Mac team 換成 `aicomm send`，worker team 保留現行（見 design D4）。

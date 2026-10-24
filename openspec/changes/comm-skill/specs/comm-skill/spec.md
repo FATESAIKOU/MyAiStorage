@@ -30,7 +30,7 @@ skill MUST 對外只提供 `send` 與 `inbox` 兩個子指令（另有 `--versio
 - **THEN** 訊息帶一個名為 `ticket`、值為 `MyAiStorage#212` 的 ref 附件
 
 ### Requirement: 叫醒的對象與條件
-`send` 寫入成功後，MUST 只對 `--to` 與每個 `--mention` 的 AI 名各判斷一次是否叫醒；沒有 `--to` 的廣播 MUST NOT 叫醒任何人；寄給自己 MUST NOT 叫醒自己；名字在「不叫醒名單」（`AICOMM_NOWAKE`）上 MUST NOT 叫醒，不論寄件者是誰。對其餘每個名字，只有同時滿足下列兩項才戳：(1) 本機 sidecar 的 agent 查詢回 200（agent 在這台）；(2) 其 `state` 是 `idle`。判斷 MUST NOT 依賴 agent 是 tui 或 headless，MUST NOT 讀 `attach` 欄位。`starting`、`running`、`waiting-quota`、`exited` MUST NOT 戳。
+`send` 寫入成功後，MUST 只對 `--to` 與每個 `--mention` 的 AI 名各判斷一次是否叫醒；沒有 `--to` 的廣播 MUST NOT 叫醒任何人；寄給自己 MUST NOT 叫醒自己；名字在「不叫醒名單」（aicomm 設定檔的 `nowake`，語意為收件人所在那台機器的設定）上 MUST NOT 叫醒，不論寄件者是誰。對其餘每個名字，只有同時滿足下列兩項才戳：(1) 本機 sidecar 的 agent 查詢回 200（agent 在這台）；(2) 其 `state` 是 `idle`。判斷 MUST NOT 依賴 agent 是 tui 或 headless，MUST NOT 讀 `attach` 欄位。`starting`、`running`、`waiting-quota`、`exited` MUST NOT 戳。
 
 #### Scenario: 閒置的同台 agent
 - **WHEN** 收件人在本機 sidecar、`state` 為 `idle`（不論 tui 或 headless）
@@ -57,7 +57,7 @@ skill MUST 對外只提供 `send` 與 `inbox` 兩個子指令（另有 `--versio
 - **THEN** 同樣戳一次
 
 #### Scenario: 不叫醒名單
-- **WHEN** 收件人的 AI 名在 `AICOMM_NOWAKE` 裡，且它在本機 sidecar 是 `idle`
+- **WHEN** 收件人的 AI 名在設定檔的 `nowake` 裡，且它在本機 sidecar 是 `idle`
 - **THEN** 不戳，也不查詢；訊息照常寫進 Angareion
 
 ### Requirement: 戳的內容固定且不含訊息
@@ -71,8 +71,25 @@ skill MUST 對外只提供 `send` 與 `inbox` 兩個子指令（另有 `--versio
 - **WHEN** 對假 sidecar 檢查收到的戳
 - **THEN** 文字等於固定短句，不含寄件者的 AI 名、訊息 id 與內文
 
+### Requirement: 設定只來自 aicomm 自己的設定檔
+skill MUST 只從 aicomm 自己的設定檔取得 sidecar 位址與不叫醒名單：`$XDG_CONFIG_HOME/aicomm/config.json`（未設則 `$HOME/.config/aicomm/config.json`），欄位 `sidecar`（單一位址，可省略）與 `nowake`（AI 名清單，可省略）。skill MUST NOT 以其他環境變數取得這兩項；唯一的環境變數是路徑覆寫 `AICOMM_CONFIG`（供測試與本機手動使用，文件 MUST 寫明 sidecar 開的 agent 拿不到它）。讀取時 MUST 在邊界驗證。檔案不存在 MUST 視為預設位址與空名單。
+
+「需要叫醒」定義為：沒有 `--no-wake`，且（`--to` 加 `--mention`）排除自己與 `nowake` 名單後的候選收件人不是空的。「可能要叫醒」＝有 `--to` 或 `--mention` 且沒有 `--no-wake`。
+
+#### Scenario: 設定檔不存在
+- **WHEN** 設定檔不存在
+- **THEN** 使用預設位址與空名單，`send` 正常運作
+
+#### Scenario: 設定檔壞掉且可能要叫醒
+- **WHEN** 設定檔不是合法 JSON（或 `nowake` 含不合法的 AI 名），且 `send` 帶 `--to`、沒有 `--no-wake`
+- **THEN** exit 1，在寫進 Angareion 之前拒絕，沒有訊息被送出
+
+#### Scenario: 設定檔壞掉但不需要讀它
+- **WHEN** 設定檔壞掉，且 `send` 帶 `--no-wake`（或是廣播）
+- **THEN** 訊息照常送出，exit 0
+
 ### Requirement: sidecar 位址只能是單一個 loopback 位址
-skill MUST 只接受一個 sidecar 位址（環境變數 `AICOMM_SIDECAR` 或預設），且 MUST 為本機 loopback；不是 loopback MUST 以 exit 1 拒絕，且 MUST 在寫進 Angareion 之前拒絕。位址 MUST 只在需要叫醒時才檢查（`--no-wake` 或廣播不檢查、不使用）。這個檢查 MUST NOT 被宣稱為防止跨機叫醒（轉發埠本身是 loopback）。
+設定檔的 `sidecar` MUST 是單一位址且 MUST 為本機 loopback；需要叫醒（定義見上）時不是 loopback MUST 以 exit 1 拒絕，且 MUST 在寫進 Angareion 之前拒絕。位址 MUST 只在需要叫醒時才驗與使用。這個檢查 MUST NOT 被宣稱為防止跨機叫醒（轉發埠本身是 loopback）。
 
 #### Scenario: 非 loopback 且要叫醒
 - **WHEN** 位址設成非 loopback 的主機，且 `send` 帶 `--to`、沒有 `--no-wake`
@@ -80,6 +97,10 @@ skill MUST 只接受一個 sidecar 位址（環境變數 `AICOMM_SIDECAR` 或預
 
 #### Scenario: 非 loopback 但不需要叫醒
 - **WHEN** 位址設成非 loopback 的主機，且 `send` 帶 `--no-wake`（或是廣播）
+- **THEN** 訊息照常送出，exit 0，沒有任何對 sidecar 的請求
+
+#### Scenario: 收件人在名單上、位址非 loopback
+- **WHEN** `--to` 是 `nowake` 名單上的人（排除後候選為空），且 `sidecar` 設成非 loopback
 - **THEN** 訊息照常送出，exit 0，沒有任何對 sidecar 的請求
 
 ### Requirement: 叫醒是盡力而為，可關閉
