@@ -25,6 +25,15 @@ aicomm inbox [--wait <秒>] [--mentioned] [--json]                              
 - `inbox` 固定讀「寄給我的」，沒有 `--channel`。`--mentioned` 只看寄給我或點名我的（廣播不算）；`--json` 原樣印 Angareion 的輸出。
 - 閒著沒事時用 `aicomm inbox --wait 600`：阻塞等，不花模型額度；不要在迴圈裡反覆問模型「有沒有新訊息」。
 
+## 同一個身分只留一個讀者
+
+`angareion read` 讀走信就推進游標；兩個讀者讀同一個身分，先讀的那個拿走信，另一個看到空的。`aicomm inbox --wait` 在 wait 之後會接著 read，放到背景一樣會把信讀走，所以**不能**當成「背景只等、不讀」。
+
+- 被 sidecar 管的 agent（會被 poke 叫醒）：**不要跑背景讀信迴圈**（`wait → read`，或背景的 `aicomm inbox --wait`）；被叫醒就在**前景**跑 `aicomm inbox`。
+- 不在 sidecar 底下、沒有人會 poke 的：才用 `aicomm inbox --wait` 當**唯一**的讀者。
+- 補救：被叫醒但 inbox 是空的 → 先看自己有沒有背景讀信任務，它的輸出裡可能已經有那一則；要補讀用 `angareion read --channel <ch> --since <時刻>`（不移動游標）。
+- `aicomm inbox` 讀不到信時會在 stderr 提示同一段補救；exit 0 與 stdout 不變。
+
 ## 送達與叫醒
 
 - **送達＝訊息寫進 Angareion**。寫入成功，`send` 就是 exit 0，不管叫醒成不成功；叫醒失敗只在 stderr 印一行（「已送達，未叫醒…」）。看到 exit 0 就不要重送。
@@ -36,7 +45,7 @@ aicomm inbox [--wait <秒>] [--mentioned] [--json]                              
 ## 結束碼
 
 - `send`：exit 0 訊息已寫進 Angareion（叫醒結果不影響）；exit 1 用法錯（沒有送出）；exit 2 Angareion 後端或設定錯；其他非 0 是 Angareion 的原結束碼（沒有叫醒任何人）。
-- `inbox`：exit 0 讀完（可能是空的）；`--wait` 逾時 exit 3（沒有讀、游標不動）；exit 2 後端或設定錯，**不是「沒有新訊息」**，稍等再試；exit 1 用法錯。
+- `inbox`：exit 0 讀完（可能是空的，空的時候 stderr 有一行提示）；`--wait` 逾時 exit 3（沒有讀、游標不動）；exit 2 後端或設定錯，**不是「沒有新訊息」**，稍等再試；exit 1 用法錯。
 
 ## 叫醒的節制：三條軟規則
 

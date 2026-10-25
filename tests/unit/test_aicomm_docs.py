@@ -76,3 +76,28 @@ def test_docs_record_the_sidecar_fields_aicomm_depends_on():
     text = DOCS.read_text(encoding="utf-8")
     for needle in ("GET /agents/", "POST /agents/", "/poke", "state", "idle", "running", "404", "AICOMM_SIDECAR", "127.0.0.1:8471"):
         assert needle in text
+
+
+# --- #219: one reader per identity ---
+
+REMEDY = "angareion read --channel <ch> --since <時刻>"
+
+
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_one_reader_rule_and_remedy_are_written_down(path):
+    text = path.read_text(encoding="utf-8")
+    assert "同一個身分只留一個讀者" in text
+    assert "背景" in text and "前景" in text
+    assert "inbox --wait" in text
+    assert "被叫醒但 inbox 是空的" in text
+    assert REMEDY in text and "不移動游標" in text
+
+
+def test_skill_does_not_call_a_background_inbox_wait_safe():
+    text = _skill()
+    assert "wait 之後會接著 read" in text or "wait 之後會接著讀" in text
+
+
+def test_the_hint_in_the_cli_matches_the_documented_remedy():
+    cli = (REPO / "src" / "aicomm" / "cli.py").read_text(encoding="utf-8")
+    assert REMEDY in cli and "同一個身分" in cli
