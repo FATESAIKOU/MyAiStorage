@@ -261,6 +261,17 @@ def test_send_urgency_out_of_range_sends_nothing(cli_env, capsys):
     assert cli_env["backend"].read(GENERAL, Cursor()).messages == []
 
 
+def test_send_refuses_a_message_that_cannot_be_read_back_and_sends_nothing(cli_env, capsys, monkeypatch):
+    from angareion import messages
+
+    monkeypatch.setattr(messages, "parse_message", lambda text, *, strict=False: None if not strict else (_ for _ in ()).throw(
+        messages.MessageValidationError("cannot read")))
+    ret = run(cli_env, ["send", "--channel", "general", "--to", PM, "--body", "no"])
+    assert ret == 1
+    assert "Refusing to send" in capsys.readouterr().err
+    assert cli_env["backend"].read(GENERAL, Cursor()).messages == []
+
+
 def test_send_group_address_rejected(cli_env, capsys):
     ret = run(cli_env, ["send", "--channel", "general", "--to", "group=全員", "--body", "hi"])
     assert ret == 1
