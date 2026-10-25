@@ -353,3 +353,73 @@ def test_write_one_uses_raw_md5_without_loading_raw(tmp_path, monkeypatch):
                                           check_drive=False)
     assert saved is not None
     assert not accesses, "_write_one loaded exported.raw instead of using raw_md5"
+
+
+def _old_aux(sidecar: Path) -> bytes:
+    """The aux bytes as `_pack_aux` + `json.dumps(..., ensure_ascii=False)` spelled them before #240."""
+    import base64
+    aux: dict = {}
+    if sidecar.is_dir():
+        for p in sorted(sidecar.rglob("*")):
+            if not p.is_file():
+                continue
+            raw = p.read_bytes()
+            try:
+                aux[p.relative_to(sidecar).as_posix()] = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                aux[p.relative_to(sidecar).as_posix()] = {"$base64": base64.b64encode(raw).decode()}
+    return json.dumps(aux, ensure_ascii=False).encode("utf-8")
+
+
+def test_iter_aux_bytes_equal_the_old_dumps(tmp_path):
+    """Streamed aux == json.dumps of the whole dict: key order, ensure_ascii=False, `$base64`, empty, absent."""
+    from agora.agents import claude
+    side = tmp_path / "side"
+    assert b"".join(claude._iter_aux(side)) == _old_aux(side) == b"{}"       # no sidecar
+    side.mkdir()
+    assert b"".join(claude._iter_aux(side)) == _old_aux(side) == b"{}"       # empty sidecar
+    (side / "sub").mkdir()
+    (side / "b.txt").write_text("中文 \"quote\" \\ \n\t\x01   😀", encoding="utf-8")
+    (side / "a.txt").write_bytes(b"")                                          # empty file
+    (side / "sub" / "x.bin").write_bytes(b"\xff\xfe\x00bad")                   # -> $base64
+    (side / "sub" / "中.jsonl").write_bytes("\ufeff".encode("utf-8") + b'{"k": "v"}\n')
+    big = ("中😀a" * 700_000).encode("utf-8")                                   # > 1 chunk, splits mid-char
+    (side / "sub" / "big.txt").write_bytes(big)
+    (side / "sub" / "big.bin").write_bytes(big + b"\xff")                     # invalid only at the very end
+    (side / "sub" / "cut.txt").write_bytes(b"ok" + "中".encode("utf-8")[:2])  # truncated tail char
+    assert b"".join(claude._iter_aux(side)) == _old_aux(side)
+
+
+def test_claude_export_with_big_aux_does_not_hold_the_sidecar(tmp_path):
+    """A ~20 MB sidecar next to a small session peaks under 1.5x the session size (#240)."""
+    home = Path(os.environ["AGORA_CLAUDE_HOME"])
+    workdir = tmp_path / "proj"
+    workdir.mkdir()
+    pdir = home / ".claude" / "projects" / encode_project_dir(workdir)
+    pdir.mkdir(parents=True)
+    sid = "11111111-2222-4333-8444-666666666666"
+    line = json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}) + "\n"
+    (pdir / f"{sid}.jsonl").write_text(line * 100, encoding="utf-8")
+    side = pdir / sid / "subagents"
+    side.mkdir(parents=True)
+    row = (json.dumps({"type": "assistant", "text": "中文" * 2000}, ensure_ascii=False) + "\n").encode("utf-8")
+    with (side / "agent-1.jsonl").open("wb") as f:
+        while f.tell() < (20 << 20):
+            f.write(row)
+    (side / "blob.bin").write_bytes(b"\xff" * (1 << 20))
+    total = (pdir / f"{sid}.jsonl").stat().st_size + sum(p.stat().st_size for p in side.iterdir())
+
+    agent = ClaudeAgent()
+    gc.collect()
+    tracemalloc.start()
+    try:
+        gc.collect()
+        baseline = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        exported = agent.export(sid, hint_dir=workdir)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert exported.raw_file is not None
+    grew = peak - baseline
+    assert grew < 1.5 * total, f"export peak {grew / (1 << 20):.1f} MB for {total / (1 << 20):.1f} MB session"
