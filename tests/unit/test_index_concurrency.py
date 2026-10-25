@@ -30,8 +30,15 @@ LIMIT = 90          # seconds for the whole fleet; a hung child is killed, never
 
 #: Waits for the go-file, so all children reach the index together instead of one by one.
 CHILD = textwrap.dedent("""
-    import os, sys, time
+    import os, subprocess, sys, time
     go = sys.argv[1]
+    pidfile = os.environ["PIDFILE"]
+    _init = subprocess.Popen.__init__
+    def _noting(self, *a, **k):         # the detached uploader this child starts: remember its pid
+        _init(self, *a, **k)
+        with open(pidfile, "a") as f:
+            f.write(f"{self.pid}\\n")
+    subprocess.Popen.__init__ = _noting
     while not os.path.exists(go):
         time.sleep(0.005)
     from agora import cli
@@ -45,6 +52,7 @@ def _sid(k: int) -> str:
 
 @pytest.fixture
 def fleet(tmp_path, monkeypatch):
+    monkeypatch.setenv("PIDFILE", str(tmp_path / "pids"))
     monkeypatch.setenv("AGORA_CLAUDE_HOME", str(tmp_path / "claude-home"))
     proj = tmp_path / "claude-home" / ".claude" / "projects" / "-golden-inc"
     proj.mkdir(parents=True)
@@ -58,6 +66,11 @@ def fleet(tmp_path, monkeypatch):
     end = time.time() + 30
     while store.uploader_is_running(paths_) and time.time() < end:
         time.sleep(0.2)
+    pidfile = tmp_path / "pids"         # past that, only the uploaders this test started
+    for pid in (int(x) for x in pidfile.read_text().split()) if pidfile.exists() else ():
+        cmd = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
+        if "agora.background" in cmd:
+            os.kill(pid, 9)
 
 
 def _spawn(kids, tmp_path, k: int, go):
@@ -204,33 +217,96 @@ def test_the_read_only_inventory_opens_a_wal_index_and_the_extra_files_are_expec
     db.close()
 
 
-class _FlakyDb:
-    """The connection, except that the first BEGINs say `database is locked`."""
+def test_a_write_that_cannot_get_the_lock_gives_up_at_the_one_bound(_env, monkeypatch):
+    import threading
+    p = store.Paths.from_env()
+    store.Index(p)
+    assert store.INDEX_BUSY_MS < 120_000        # the sidecar's import_timeout
+    monkeypatch.setattr(store, "INDEX_BUSY_MS", 1000)
+    held, release = threading.Event(), threading.Event()
 
-    def __init__(self, db, failures):
-        self.db, self.failures = db, failures
+    def holder():                                        # another process's write, stuck past the bound
+        db = sqlite3.connect(p.cache / "index.sqlite", isolation_level=None)
+        db.execute("BEGIN IMMEDIATE")
+        held.set()
+        release.wait(30)
+        db.execute("COMMIT")
+        db.close()
+    t = threading.Thread(target=holder)
+    t.start()
+    try:
+        assert held.wait(10)
+        idx = store.Index(p)
+        start = time.time()
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            idx.put("01M5RFRYEFFS0ZS6Y1Z1BX0GAT", "m" * 32,
+                    {"type": "Session", "title": "x", "tags": [], "refs": [], "agora": {"header": 2}}, "body")
+        waited = time.time() - start
+        assert 0.8 <= waited <= 3, waited               # the bound, not a bound times some tries
+    finally:
+        release.set()
+        t.join(10)
+    assert "01M5RFRYEFFS0ZS6Y1Z1BX0GAT" not in store.Index(p).known()
 
-    def execute(self, sql, *a):
-        if sql.startswith("BEGIN") and self.failures:
-            self.failures -= 1
-            raise sqlite3.OperationalError("database is locked")
-        return self.db.execute(sql, *a)
 
-    def __getattr__(self, name):
-        return getattr(self.db, name)
-
-
-def test_a_write_that_cannot_get_the_lock_is_tried_again_a_bounded_number_of_times(_env):
+def test_a_failing_write_does_not_hide_its_error_behind_a_rollback_error(_env):
     idx = store.Index(store.Paths.from_env())
+    with pytest.raises(ZeroDivisionError):
+        with idx._tx():
+            idx.db.execute("ROLLBACK")          # SQLite ended the transaction by itself
+            1 / 0
+
+
+def test_putting_one_ulid_from_many_threads_never_hits_a_unique_failure(_env):
+    """The delete-then-insert of one ulid has to be one step, whoever else is putting it."""
+    import threading
+    p = store.Paths.from_env()
+    store.Index(p)
     hdr = {"type": "Session", "title": "x", "tags": [], "refs": [], "agora": {"header": 2}}
-    assert store.INDEX_TRIES >= 3
-    idx.db = _FlakyDb(idx.db, 2)
-    idx.put("01M5RFRYEFFS0ZS6Y1Z1BX0GAT", "m" * 32, hdr, "body")      # the third try gets through
-    assert "01M5RFRYEFFS0ZS6Y1Z1BX0GAT" in idx.known()
-    idx.db = _FlakyDb(idx.db.db, store.INDEX_TRIES)
-    with pytest.raises(sqlite3.OperationalError, match="locked"):     # then it gives up, loudly
-        idx.put("01M5RFRYEFFS0ZS6Y1Z1BX0GAU", "m" * 32, hdr, "body")
-    assert "01M5RFRYEFFS0ZS6Y1Z1BX0GAU" not in idx.known()
+    errors = []
+
+    def worker(k):
+        idx = store.Index(p)
+        for i in range(300):
+            try:
+                idx.put("01M5RFRYEFFS0ZS6Y1Z1BX0GAT", f"{k}{i}".ljust(32, "m"), hdr, "body")
+            except sqlite3.Error as e:
+                errors.append(repr(e))
+    threads = [threading.Thread(target=worker, args=(k,)) for k in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert errors == [], errors[:3]
+    assert list(store.Index(p).known()) == ["01M5RFRYEFFS0ZS6Y1Z1BX0GAT"]
+
+
+def test_a_second_process_does_not_get_an_index_that_is_still_being_filled(_env, monkeypatch):
+    import threading
+    p = store.Paths.from_env()
+    hdr = {"type": "Session", "title": "x", "id": "agora:01M5RFRYEFFS0ZS6Y1Z1BX0GAT", "tags": [], "refs": [],
+           "agora": {"header": 2, "created_at": "2026-10-02T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z",
+                     "relation": "import", "parents": [], "source": {"agent": "claude", "session_id": "s"}}}
+    mirror = p.mirror / "01M5RFRYEFFS0ZS6Y1Z1BX0GAT"
+    mirror.mkdir(parents=True)
+    (mirror / "session.md").write_text(h.dump_document(hdr, "body"), encoding="utf-8")
+    midway, release = threading.Event(), threading.Event()
+    real = store.index_file
+
+    def slow(index, md):
+        midway.set()
+        release.wait(10)
+        return real(index, md)
+    monkeypatch.setattr(store, "index_file", slow)
+    first = threading.Thread(target=store.Index, args=(p,))     # builds the index from the mirror
+    first.start()
+    assert midway.wait(10)
+    threading.Timer(0.7, release.set).start()
+    start = time.time()
+    second = store.Index(p)                                     # opens it while that is going on
+    assert time.time() - start >= 0.4, "it had to wait for the first to finish"
+    assert list(second.known()) == ["01M5RFRYEFFS0ZS6Y1Z1BX0GAT"]
+    first.join(10)
 
 
 def test_put_is_one_transaction_that_takes_the_write_lock_first(_env):
@@ -294,3 +370,56 @@ def test_a_deleted_index_does_not_inherit_the_old_wal(_env):
     fresh.put("01M5RFRYEFFS0ZS6Y1Z1BX0GAU", "n" * 32,
               {"type": "Session", "title": "y", "tags": [], "refs": [], "agora": {"header": 2}}, "body")
     assert set(store.Index(p).known()) == {"01M5RFRYEFFS0ZS6Y1Z1BX0GAU"}
+
+
+def _break_put_once(monkeypatch):
+    real_put = store.Index.put
+    monkeypatch.setattr(store.Index, "put", _locked)
+    return lambda: monkeypatch.setattr(store.Index, "put", real_put)
+
+
+def test_importing_again_inside_the_sync_throttle_finds_the_session_whose_index_write_was_lost(one, capsys, monkeypatch):
+    restore = _break_put_once(monkeypatch)
+    code, first, err = run(capsys, *_import_args(one))
+    assert code == 0 and "索引更新失敗" in err
+    p = paths()
+    assert (p.cache / store.PENDING_INDEX / first.split(":")[1]).exists()
+    restore()
+    assert (p.state / "last-sync").exists(), "the first import's sync is what throttles the second"
+    code, second, err = run(capsys, *_import_args(one))
+    assert code == 0, err
+    assert second == first, "a second Session was made for the same source"
+    assert [d.name for d in p.mirror.iterdir()] == [first.split(":")[1]]
+    assert not list((p.cache / store.PENDING_INDEX).iterdir()), "the marker goes once it is indexed"
+
+
+def test_importing_again_offline_finds_the_session_whose_index_write_was_lost(one, capsys, monkeypatch):
+    restore = _break_put_once(monkeypatch)
+    code, first, err = run(capsys, *_import_args(one))
+    assert code == 0 and "索引更新失敗" in err
+    restore()
+    p = paths()
+    (p.state / "last-sync").unlink()                     # not throttled; Drive is what is out of reach
+
+    def offline(self):
+        raise store.StoreError("offline")
+    monkeypatch.setattr(store.Drive, "list_sessions", offline)
+    code, second, err = run(capsys, *_import_args(one))
+    assert code == 0, err
+    assert "連不上 Drive" in err
+    assert second == first
+    assert [d.name for d in p.mirror.iterdir()] == [first.split(":")[1]]
+
+
+def test_a_marker_whose_index_write_fails_again_stays_for_the_next_sync(one, capsys, monkeypatch):
+    real_put = store.Index.put
+    _break_put_once(monkeypatch)
+    code, first, err = run(capsys, *_import_args(one))
+    ulid = first.split(":")[1]
+    p = paths()
+    store.sync(p, throttle=True)                         # put is still broken
+    assert (p.cache / store.PENDING_INDEX / ulid).exists()
+    monkeypatch.setattr(store.Index, "put", real_put)
+    store.sync(p, throttle=True)
+    assert not (p.cache / store.PENDING_INDEX / ulid).exists()
+    assert store.Index(p).header(ulid) is not None
