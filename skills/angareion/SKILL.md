@@ -34,7 +34,7 @@ angareion read [--channel <ch> | --mentioned] [--json]           # 讀新訊息�
 - **不給 `--to`＝廣播**：發到整個 channel，所有人都會在「寄給我的」裡讀到它。
 - **`mentions` 與 `in_reply_to`（選填欄位，`angareion: 1` 不升版）**：`send --mention <AI 名>`（可重複）在 `to` 之外再叫別人；`send --in-reply-to <ULID>` 指向被回覆那則的 `id`。**送出用嚴的**：`--mention` 每個都要是當前文法的 AI 名（舊名不收）、不能重複，`--in-reply-to` 要是 26 字的 ULID，不合就 exit 1 並說明。**讀取用寬的**：舊訊息沒有這兩欄照讀；欄位型別不對、裡面有不合法的名字或 ULID 時，只丟掉壞的欄位（或壞的項目），整則訊息照收。`read --json` 與人看的輸出都會帶出 `mentions`、`in_reply_to`（有值時）。
 - **「@ 我的」與「寄給我的」不一樣**：「寄給我的」＝`to` 是我、**或廣播**、或 `mentions` 有我；「@ 我的」＝`read`／`wait --mentioned`，只看 `to` 是我或 `mentions` 有我，**廣播不算**，跨所有 channel（跟 `--channel` 一起給 → exit 1）。兩者各有自己的游標，互不影響；`wait --mentioned` 一樣不動游標。第一次用 `--mentioned` 沒有游標，會從頭讀（`to` 是自己的舊訊息也算「@ 我的」）；不想從頭讀就先用 `--since`。
-- **順序：讀者先升級、再送 `--mention`**：舊版 angareion 不認得 `mentions`，只被 mention 而不是 `to` 的舊讀者會漏收那則訊息。確認收件的人都升級了，才開始送 mentions。
+- **`--mention` 可以用了**：讀者都已升級（期 4 M2 tasks 2.4，2026-10-25 達成）。舊版 angareion 不認得 `mentions`，只被 mention 而不是 `to` 的舊讀者會漏收那則訊息；以後若加進**新的讀者種類**，要先確認它讀得懂 `mentions`。
 - 多行內文用 `--body -` 從 stdin 餵；`--body` 一定要給（沒給會 exit 1，不會自動讀管線）。
 - 不給 `--channel` 時，`wait`／`read` 的目標是「所有 channel 裡寄給我的訊息」——`to` 是自己 AI 名、**沒有 `to`（廣播）**、**或 `mentions` 有自己**的訊息（整串相等，不做模糊比對）。**收訊一律不加 `--channel`**：加了會讀到寄給別人的訊息（`read`／`wait` 會在 stderr 印一行警告）；只有送訊（`send --channel`）才指定 channel。
 - `read` 會把你的本機游標往前推，同一則不會讀第二次；`read --json` 給程式解析用。程式要自己記進度時，`--since` 收的是後端時刻（每則輸出裡的 `received_at`），含邊界、同一秒可能重複，用訊息 `id` 去重。

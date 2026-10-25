@@ -49,7 +49,8 @@ def test_docs_explain_mentions_in_reply_to_and_the_upgrade_order():
     for needle in ("--mention", "--in-reply-to", "--mentioned", "mentions: [", "mention:<AI 名>:<channel>"):
         assert needle in text
     assert "廣播不算" in text
-    assert "先升級" in text
+    assert "`--mention` 可以用了" in text and "讀得懂 `mentions`" in text
+    assert "先升級" not in text
     assert "送嚴讀寬" in text
 
 

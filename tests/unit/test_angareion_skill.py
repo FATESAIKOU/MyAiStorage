@@ -89,7 +89,8 @@ def test_skill_doc_covers_mentions_and_the_upgrade_order():
         assert flag in text
     assert "mentions" in text and "in_reply_to" in text
     assert "廣播不算" in text  # "@ me" is not "to me"
-    assert "先升級" in text  # readers first, then send mentions
+    assert "`--mention` 可以用了" in text and "讀得懂 `mentions`" in text  # --mention is open; new reader kinds must understand it
+    assert "先升級" not in text  # the old "upgrade first" ban is gone
 
 
 def test_skill_doc_to_me_definition_counts_mentions_and_the_first_mentioned_read_is_explained():

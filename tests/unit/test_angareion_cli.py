@@ -177,6 +177,16 @@ def test_help_exits_zero(capsys):
             parser.parse_args(["channel", action, "--help"])
 
 
+def test_send_help_says_mention_is_open(capsys):
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["send", "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "--mention" in out
+    assert "upgraded first" not in out
+    assert "Every reader understands mentions" in out
+
+
 def test_help_carries_the_private_info_reminder(capsys):
     """#52: the help's reminder paragraph says private info goes to MyBrain, not the message.
 
