@@ -483,3 +483,135 @@ def test_cli_continue_opencode_headless_with_harness_file(opencode_lab, tmp_path
     assert Path(parsed["instructions"][0]).is_absolute()
 
 
+
+
+# ---------------------------------------------------------------------------
+# #242: the caller's OPENCODE_CONFIG_CONTENT is folded in, not replaced
+# ---------------------------------------------------------------------------
+
+def _caller_config() -> dict:
+    # fake values, assembled at run time so no scanner pattern sits in the source
+    return {"provider": {"acme": {"options": {"apiKey": "fake" + "-" + "key" + "-123"}}},
+            "permission": {"bash": "ask"}}
+
+
+def _continue_opencode(opencode_lab, tmp_path, capsys, *extra):
+    code, sid, err = run(capsys, "import", "session", "--external-session-id", "default", "--agent", "opencode")
+    assert code == 0, err
+    code, _, err = run(capsys, "continue", "session", sid, "--agent", "opencode",
+                       "--dir", str(opencode_lab["work"]), "--sync-period", SECONDS, *extra)
+    assert code == 0, err
+    launched = [r for r in _read_records(opencode_lab["log"]) if "--session" in r["argv"]]
+    assert launched
+    return launched[-1]["env"]
+
+
+def _harness(tmp_path) -> Path:
+    hf = tmp_path / "pm-harness.md"
+    hf.write_text("# PM HARNESS\n")
+    return hf
+
+
+def test_popen_env_no_caller_value_gets_only_instructions(opencode_lab, tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
+    hf = _harness(tmp_path)
+    env = _continue_opencode(opencode_lab, tmp_path, capsys, "--harness-file", str(hf))
+    assert json.loads(env["OPENCODE_CONFIG_CONTENT"]) == {"instructions": [str(hf.resolve())]}
+
+
+def test_popen_env_caller_object_is_merged_keys_kept(opencode_lab, tmp_path, capsys, monkeypatch):
+    caller = _caller_config()
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps(caller))
+    hf = _harness(tmp_path)
+    env = _continue_opencode(opencode_lab, tmp_path, capsys, "--harness-file", str(hf))
+    parsed = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    assert parsed["provider"] == caller["provider"]
+    assert parsed["permission"] == caller["permission"]
+    assert parsed["instructions"] == [str(hf.resolve())]
+    assert os.environ["OPENCODE_CONFIG_CONTENT"] == json.dumps(caller)   # agora's own environ untouched
+
+
+def test_popen_env_instructions_conflict_harness_wins(opencode_lab, tmp_path, capsys, monkeypatch):
+    caller = {**_caller_config(), "instructions": ["/somewhere/else.md"]}
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps(caller))
+    hf = _harness(tmp_path)
+    env = _continue_opencode(opencode_lab, tmp_path, capsys, "--harness-file", str(hf))
+    parsed = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    assert parsed["instructions"] == [str(hf.resolve())]
+    assert parsed["permission"] == caller["permission"]
+
+
+MARK = "marker-9137246805"                  # a recognisable piece of a bad caller value
+NOTICE = "[agora] 呼叫方的 OPENCODE_CONFIG_CONTENT 不是 JSON 物件，已忽略，只交付 harness"
+BAD_VALUES = ["{not json " + MARK, f'[1, "{MARK}"]', f'"{MARK}"', "9137246805"]
+
+
+def _log_text() -> str:
+    log = paths().state / cli.CONTINUE_LOG
+    return log.read_text(encoding="utf-8") if log.exists() else ""
+
+
+@pytest.mark.parametrize("bad", BAD_VALUES + [""])
+def test_popen_env_caller_not_an_object_is_replaced(opencode_lab, tmp_path, capsys, monkeypatch, bad):
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", bad)
+    hf = _harness(tmp_path)
+    code, sid, err = run(capsys, "import", "session", "--external-session-id", "default", "--agent", "opencode")
+    assert code == 0, err
+    code, out, err = run(capsys, "continue", "session", sid, "--agent", "opencode",
+                         "--dir", str(opencode_lab["work"]), "--sync-period", SECONDS,
+                         "--harness-file", str(hf))
+    assert code == 0, err
+    launched = [r for r in _read_records(opencode_lab["log"]) if "--session" in r["argv"]]
+    env = launched[-1]["env"]
+    assert json.loads(env["OPENCODE_CONFIG_CONTENT"]) == {"instructions": [str(hf.resolve())]}
+    assert "9137246805" not in err + out + _log_text()
+    if bad:
+        assert err.count(NOTICE) == 1
+    else:
+        assert NOTICE not in err
+
+
+@pytest.mark.parametrize("raw", [
+    '{ "permission" : {"bash":"ask"},\n "x": "é" }',
+    "{not json",
+])
+def test_popen_env_without_harness_file_caller_value_passes_unchanged(opencode_lab, tmp_path, capsys, monkeypatch, raw):
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", raw)
+    env = _continue_opencode(opencode_lab, tmp_path, capsys)
+    assert env["OPENCODE_CONFIG_CONTENT"] == raw
+
+
+def test_headless_bad_caller_value_notice_keeps_fixed_lines(opencode_lab, tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", "{not json " + MARK)
+    hf = _harness(tmp_path)
+    code, agora_id, err = run(capsys, "import", "session", "--external-session-id", "default", "--agent", "opencode")
+    assert code == 0, err
+    port = _free_port()
+    headless = Headless(opencode_lab, tmp_path, agora_id, "opencode",
+                        "--headless-port", str(port), "--harness-file", str(hf))
+    try:
+        assert headless.wait_for_stderr("agora-port ", timeout=10.0) == f"agora-port {port}"
+        assert headless.wait_for_stderr("agora-session ", timeout=10.0) == f"agora-session {agora_id}"
+        assert headless.wait_for_stderr("[agora] 呼叫方的") == NOTICE
+        assert headless.terminate(timeout=10.0) == 0
+    finally:
+        if headless.proc.poll() is None:
+            headless.proc.kill()
+            headless.proc.wait(timeout=5.0)
+    assert MARK not in headless.stderr() + headless.stdout() + _log_text()
+
+
+def test_merge_config_content_deeply_nested_value_is_dropped(capsys):
+    h = json.dumps({"instructions": ["/h.md"]})
+    deep = "[" * 200000 + "]" * 200000        # built at run time: json.loads recurses past the limit
+    assert OC.merge_config_content(deep, h) == h
+    assert capsys.readouterr().err.strip() == NOTICE
+
+
+def test_merge_config_content_unit(capsys):
+    h = json.dumps({"instructions": ["/h.md"]})
+    assert OC.merge_config_content(None, h) == h
+    assert json.loads(OC.merge_config_content('{"a": 1, "instructions": ["x"]}', h)) == {"a": 1, "instructions": ["/h.md"]}
+    assert capsys.readouterr().err == ""
+    assert OC.merge_config_content("nope", h) == h
+    assert capsys.readouterr().err.strip() == NOTICE
