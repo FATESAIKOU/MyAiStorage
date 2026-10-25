@@ -1018,8 +1018,9 @@ def remember(paths: Paths, folder: Path, index: "Index | None" = None, ulid: str
         if not (target.is_file() and target.stat().st_size == wanted.stat().st_size):
             copy_atomic(wanted, target, utf8=True)
         for other in mirror.glob("raw-*"):
-            if other.name != name:
-                other.unlink()
+            # Not another process's `copy_atomic` staging file (`raw-<md5>.json<random>.tmp`).
+            if other.name != name and not other.name.endswith(".tmp"):
+                other.unlink(missing_ok=True)
     try:
         index_file(index or Index(paths), mirror / "session.md")
     except sqlite3.Error as e:
@@ -1029,7 +1030,7 @@ def remember(paths: Paths, folder: Path, index: "Index | None" = None, ulid: str
         # the next import looks the source up in the index and must find this one.
         pending = paths.cache / PENDING_INDEX
         pending.mkdir(parents=True, exist_ok=True)
-        write_atomic(pending / mirror.name, "")
+        (pending / mirror.name).touch()     # empty: no staging file for `index_pending` to trip on
         warn(f"索引更新失敗（{e}），Session 已存好，已留標記，下次 sync 會補進索引：{mirror.name}")
 
 
@@ -1043,15 +1044,18 @@ def index_pending(paths: Paths, index: "Index", warn=warn) -> None:
     if not pending.is_dir():
         return
     for marker in sorted(pending.iterdir()):
+        if not _ULID_NAME.fullmatch(marker.name):
+            continue
         md = paths.mirror / marker.name / "session.md"
         try:
             if md.is_file():
                 index_file(index, md)
         except sqlite3.Error as e:
             warn(f"索引還是寫不進去（{e}），下次再補：{marker.name}")
-            continue
+            break       # the lock is held by someone else; the next marker would wait just as long
         except (h.HeaderError, OSError, UnicodeDecodeError):
-            pass        # the mirror copy is unreadable; the marker would never clear
+            # the mirror copy is unreadable; the marker would never clear
+            warn(f"mirror 裡的 Session 讀不到，標記不留：{marker.name}")
         marker.unlink(missing_ok=True)
 
 
@@ -2302,13 +2306,14 @@ def normalize(text: str) -> str:
     return unicodedata.normalize("NFKC", text or "").lower()
 
 
-#: How long an index write waits for another process's write, in all (#222). A write is a few
-#: rows, so the wait is almost always milliseconds; the bound is for a stuck writer, and past it
-#: the error is raised for the caller to decide (see `remember`). Under the sidecar's
-#: `import_timeout` (120 s), which an import with several writes has to fit in.
+#: How long ONE index write waits for another process's write (#222). A write is a few rows, so
+#: the wait is almost always milliseconds; the bound is for a stuck writer, and past it the error
+#: is raised for the caller to decide (see `remember`). A call with several writes can wait this
+#: long for each.
 INDEX_BUSY_MS = 30_000
 #: Under `<cache>/`: one empty file per session `remember` could not index (see `index_pending`).
 PENDING_INDEX = "pending-index"
+_ULID_NAME = re.compile(r"[0-9A-HJKMNP-TV-Z]{26}")
 _INDEX_TABLES = {"sessions", "fts", "cloud_missing"}
 
 
@@ -2332,6 +2337,7 @@ class Index:
                     path.with_name(path.name + stale).unlink(missing_ok=True)
             if not hasattr(self, "db"):
                 self._connect(path)
+            self._to_wal()      # only here: switching needs the database to itself
             if self._ready():       # another process finished while we waited
                 return
             bumped = self.db.execute("PRAGMA user_version").fetchone()[0] != INDEX_VERSION
@@ -2354,15 +2360,33 @@ class Index:
         # Autocommit: a transaction is only what `_tx` opens, so no statement holds a lock by accident.
         # `timeout` is SQLite's busy handler: the one bound on how long a write waits (INDEX_BUSY_MS).
         self.db = sqlite3.connect(path, timeout=INDEX_BUSY_MS / 1000, isolation_level=None)
-        # WAL: readers and the one writer do not block each other, writers queue. Leaves
-        # index.sqlite-wal / -shm beside the file; they go with it (it is a cache: delete all three).
-        self.db.execute("PRAGMA journal_mode = WAL")
         self.db.execute("PRAGMA synchronous = NORMAL")
+
+    def _to_wal(self) -> None:
+        """WAL: readers and the one writer do not block each other, writers queue. Leaves
+        index.sqlite-wal / -shm beside the file; they go with it (it is a cache: delete all three).
+
+        The mode is kept in the file, so this is for a new index or one an older agora left in
+        rollback-journal mode - and only under the build lock. Switching needs the database to
+        itself and SQLite does not wait for that in its busy handler, so a reader opening the
+        index at that moment is waited out here, up to the same bound.
+        """
+        deadline = time.monotonic() + INDEX_BUSY_MS / 1000
+        while True:
+            try:
+                self.db.execute("PRAGMA journal_mode = WAL")
+                return
+            except sqlite3.OperationalError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.02)
 
     def _ready(self) -> bool:
         """The right version with all its tables: nothing to create."""
         if self.db.execute("PRAGMA user_version").fetchone()[0] != INDEX_VERSION:
             return False
+        if self.db.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+            return False        # left by an older agora: switched under the lock, data kept
         have = {r[0] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         return _INDEX_TABLES <= have
 

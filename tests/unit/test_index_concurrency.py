@@ -293,9 +293,13 @@ def test_a_second_process_does_not_get_an_index_that_is_still_being_filled(_env,
     midway, release = threading.Event(), threading.Event()
     real = store.index_file
 
+    calls = []
+
     def slow(index, md):
-        midway.set()
-        release.wait(10)
+        calls.append(md)
+        if len(calls) == 1:             # only the first builder is held; a second one would not wait on it
+            midway.set()
+            release.wait(10)
         return real(index, md)
     monkeypatch.setattr(store, "index_file", slow)
     first = threading.Thread(target=store.Index, args=(p,))     # builds the index from the mirror
@@ -307,6 +311,7 @@ def test_a_second_process_does_not_get_an_index_that_is_still_being_filled(_env,
     assert time.time() - start >= 0.4, "it had to wait for the first to finish"
     assert list(second.known()) == ["01M5RFRYEFFS0ZS6Y1Z1BX0GAT"]
     first.join(10)
+    assert len(calls) == 1, "the second Index rebuilt it again instead of waiting for the first"
 
 
 def test_put_is_one_transaction_that_takes_the_write_lock_first(_env):
@@ -423,3 +428,127 @@ def test_a_marker_whose_index_write_fails_again_stays_for_the_next_sync(one, cap
     store.sync(p, throttle=True)
     assert not (p.cache / store.PENDING_INDEX / ulid).exists()
     assert store.Index(p).header(ulid) is not None
+
+
+def _legacy_index(p):
+    """What an older agora left: rollback-journal mode, the right version and tables, one row."""
+    p.cache.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(p.cache / "index.sqlite")
+    assert db.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    db.execute("CREATE TABLE sessions (ulid TEXT PRIMARY KEY, md5 TEXT, header TEXT, body TEXT,"
+               " agent TEXT, source_id TEXT, created TEXT)")
+    db.execute("CREATE VIRTUAL TABLE fts USING fts5(ulid UNINDEXED, text, tokenize='trigram')")
+    db.execute("CREATE TABLE cloud_missing (ulid TEXT PRIMARY KEY)")
+    db.execute("INSERT INTO sessions VALUES ('01M5RFRYEFFS0ZS6Y1Z1BX0GAT','m','{}','b','claude','s','c')")
+    db.execute(f"PRAGMA user_version = {store.INDEX_VERSION}")
+    db.commit()
+    db.close()
+
+
+def test_an_old_rollback_journal_index_is_opened_by_many_at_once_and_ends_up_wal(_env):
+    import threading
+    p = store.Paths.from_env()
+    assert "pytest" in str(p.cache) and "pytest" in os.environ["HOME"]      # isolated, as _guard demands
+    _legacy_index(p)
+    n = 8
+    barrier, errors, dbs = threading.Barrier(n), [], []
+
+    def opener():
+        try:
+            barrier.wait(10)
+            dbs.append(store.Index(p))
+        except Exception as e:      # noqa: BLE001 - every failure is the finding
+            errors.append(repr(e))
+    threads = [threading.Thread(target=opener) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert errors == [], errors[:3]
+    assert len(dbs) == n
+    after = store.Index(p)
+    assert after.db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert list(after.known()) == ["01M5RFRYEFFS0ZS6Y1Z1BX0GAT"], "the rows are kept, not rebuilt"
+
+
+def test_ready_means_wal_too(_env):
+    p = store.Paths.from_env()
+    _legacy_index(p)
+    idx = store.Index.__new__(store.Index)
+    idx._connect(p.cache / "index.sqlite")
+    assert idx._ready() is False        # right version, but not yet WAL: goes to the build path under the lock
+
+
+def test_remember_leaves_another_process_staging_file_alone(_env):
+    p = store.Paths.from_env()
+    ulid = "01M5RFRYEFFS0ZS6Y1Z1BX0GAT"
+    raw = b'{"x": 1}'
+    hdr = {"type": "Session", "title": "x", "tags": [], "id": f"agora:{ulid}", "refs": [],
+           "agora": {"header": 2, "created_at": "2026-10-02T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z",
+                     "relation": "import", "parents": [], "source": {"agent": "claude", "session_id": "s"}}}
+    folder = store.stage(p, hdr, "## user\nhi\n", raw)
+    mirror = p.mirror / folder.name
+    mirror.mkdir(parents=True)
+    staging = mirror / "raw-877aeb737d6c.jsonijwv7eaa.tmp"      # `copy_atomic`'s name, in flight elsewhere
+    staging.write_bytes(b"half")
+    stale = mirror / "raw-000000000000.json"
+    stale.write_bytes(b"old")
+    store.remember(p, folder)
+    assert staging.exists(), "removing it makes the other process's rename fail"
+    assert not stale.exists(), "the replaced raw is still cleaned up"
+
+
+def test_a_marker_is_written_in_place_and_only_ulid_names_are_taken_for_markers(one, capsys, monkeypatch):
+    real_write = store.write_atomic
+
+    def staged(path, text):
+        assert path.parent.name != store.PENDING_INDEX, "a staged marker leaves a .tmp that index_pending deletes"
+        return real_write(path, text)
+    monkeypatch.setattr(store, "write_atomic", staged)
+    restore = _break_put_once(monkeypatch)
+    code, first, err = run(capsys, *_import_args(one))
+    ulid = first.split(":")[1]
+    p = paths()
+    pending = p.cache / store.PENDING_INDEX
+    assert [m.name for m in pending.iterdir()] == [ulid]
+    stray = pending / (ulid + "k6wkps1.tmp")        # what a staged write would have left there
+    stray.write_text("")
+    restore()
+    store.index_pending(p, store.Index(p))
+    assert stray.exists(), "not a marker: another process may be about to rename it"
+    assert not (pending / ulid).exists()
+
+
+def test_index_pending_stops_at_the_first_locked_write(_env, monkeypatch):
+    p = store.Paths.from_env()
+    pending = p.cache / store.PENDING_INDEX
+    pending.mkdir(parents=True)
+    ulids = ["01M5RFRYEFFS0ZS6Y1Z1BX0GA%d" % k for k in range(4)]
+    for u in ulids:
+        (pending / u).touch()
+        (p.mirror / u).mkdir(parents=True)
+        (p.mirror / u / "session.md").write_text("x", encoding="utf-8")
+    idx = store.Index(p)
+    tried, said = [], []
+
+    def locked(index, md):
+        tried.append(md)
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(store, "index_file", locked)
+    store.index_pending(p, idx, warn=said.append)
+    assert len(tried) == 1 and len(said) == 1
+    assert sorted(m.name for m in pending.iterdir()) == ulids
+
+
+def test_a_marker_whose_mirror_copy_cannot_be_read_is_dropped_with_a_warning(_env):
+    p = store.Paths.from_env()
+    pending = p.cache / store.PENDING_INDEX
+    pending.mkdir(parents=True)
+    u = "01M5RFRYEFFS0ZS6Y1Z1BX0GAT"
+    (pending / u).touch()
+    (p.mirror / u).mkdir(parents=True)
+    (p.mirror / u / "session.md").write_bytes(b"\xff\xfe no header")
+    said = []
+    store.index_pending(p, store.Index(p), warn=said.append)
+    assert not (pending / u).exists()
+    assert len(said) == 1 and u in said[0]
