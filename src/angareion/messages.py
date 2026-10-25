@@ -265,7 +265,11 @@ def split_front_matter(text: str) -> tuple[str, str]:
     indented `---` belongs to the YAML; trailing blanks are allowed). Only the first
     closing `---` line is considered the boundary. Any `---` in content is
     preserved.
+
+    Like the TS side, `\r\n` is turned into `\n` in the whole text first (so
+    the content reads with `\n`); a lone `\r` is left alone (#232).
     """
+    text = text.replace("\r\n", "\n")
     if not text.startswith("---"):
         raise MessageValidationError("Message does not start with front matter delimiter '---'")
 
@@ -343,8 +347,11 @@ def serialize_message(msg: Message) -> str:
         raise MessageValidationError(
             f"Refusing to send: the message cannot be read back from what would be sent ({e})"
         ) from e
-    if message_to_dict(back) != message_to_dict(msg):
-        before, after = message_to_dict(msg), message_to_dict(back)
+    # The TS writer sends content as it is (`serialize`, messages.ts:208) and
+    # every reader turns `\r\n` into `\n`, so that is what reads back (#232).
+    before, after = message_to_dict(msg), message_to_dict(back)
+    before["content"] = before["content"].replace("\r\n", "\n")
+    if before != after:
         changed = ", ".join(key for key in before if before[key] != after.get(key))
         raise MessageValidationError(
             "Refusing to send: the message reads back with different fields "
