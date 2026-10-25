@@ -552,3 +552,42 @@ def test_a_marker_whose_mirror_copy_cannot_be_read_is_dropped_with_a_warning(_en
     store.index_pending(p, store.Index(p), warn=said.append)
     assert not (pending / u).exists()
     assert len(said) == 1 and u in said[0]
+
+
+def test_an_old_index_is_switched_to_wal_once_an_older_agora_has_finished_writing(_env):
+    import threading
+    p = store.Paths.from_env()
+    assert "pytest" in str(p.cache) and "pytest" in os.environ["HOME"]      # isolated, as _guard demands
+    _legacy_index(p)
+    holder = sqlite3.connect(p.cache / "index.sqlite", isolation_level=None, check_same_thread=False)
+    holder.execute("BEGIN IMMEDIATE")       # an older agora mid-write: the write lock, no busy handler for it
+    timer = threading.Timer(0.5, lambda: holder.execute("COMMIT"))
+    timer.start()
+    try:
+        idx = store.Index(p)
+    finally:
+        timer.join(10)
+        holder.close()
+    assert idx.db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+def test_index_pending_goes_on_after_an_error_that_is_not_the_lock(_env, monkeypatch):
+    p = store.Paths.from_env()
+    pending = p.cache / store.PENDING_INDEX
+    pending.mkdir(parents=True)
+    ulids = ["01M5RFRYEFFS0ZS6Y1Z1BX0GA%d" % k for k in range(3)]
+    for u in ulids:
+        (pending / u).touch()
+        (p.mirror / u).mkdir(parents=True)
+        (p.mirror / u / "session.md").write_text("x", encoding="utf-8")
+    idx = store.Index(p)
+    tried = []
+
+    def broken_first(index, md):
+        tried.append(md.parent.name)
+        if md.parent.name == ulids[0]:
+            raise sqlite3.IntegrityError("its own trouble")
+    monkeypatch.setattr(store, "index_file", broken_first)
+    store.index_pending(p, idx, warn=lambda m: None)
+    assert tried == ulids, "one bad session must not keep the others from being indexed"
+    assert [m.name for m in pending.iterdir()] == [ulids[0]], "its marker stays for the next sync"

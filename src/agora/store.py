@@ -1050,9 +1050,12 @@ def index_pending(paths: Paths, index: "Index", warn=warn) -> None:
         try:
             if md.is_file():
                 index_file(index, md)
-        except sqlite3.Error as e:
+        except sqlite3.OperationalError as e:
             warn(f"索引還是寫不進去（{e}），下次再補：{marker.name}")
             break       # the lock is held by someone else; the next marker would wait just as long
+        except sqlite3.Error as e:
+            warn(f"索引還是寫不進去（{e}），下次再補：{marker.name}")
+            continue    # this one's own trouble: the others may still go in, and its marker stays
         except (h.HeaderError, OSError, UnicodeDecodeError):
             # the mirror copy is unreadable; the marker would never clear
             warn(f"mirror 裡的 Session 讀不到，標記不留：{marker.name}")
@@ -2367,19 +2370,23 @@ class Index:
         index.sqlite-wal / -shm beside the file; they go with it (it is a cache: delete all three).
 
         The mode is kept in the file, so this is for a new index or one an older agora left in
-        rollback-journal mode - and only under the build lock. Switching needs the database to
-        itself and SQLite does not wait for that in its busy handler, so a reader opening the
-        index at that moment is waited out here, up to the same bound.
+        rollback-journal mode - and only under the build lock. A reader holding the index is
+        waited out by SQLite's busy handler; a writer holding the write lock (an older agora
+        mid-write) makes the switch fail at once, so that case is retried here. Every attempt
+        gets only the time left, so the whole thing stays within INDEX_BUSY_MS.
         """
         deadline = time.monotonic() + INDEX_BUSY_MS / 1000
         while True:
+            left = deadline - time.monotonic()
+            self.db.execute(f"PRAGMA busy_timeout = {max(int(left * 1000), 1)}")
             try:
                 self.db.execute("PRAGMA journal_mode = WAL")
-                return
+                break
             except sqlite3.OperationalError:
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(0.02)
+        self.db.execute(f"PRAGMA busy_timeout = {INDEX_BUSY_MS}")
 
     def _ready(self) -> bool:
         """The right version with all its tables: nothing to create."""
