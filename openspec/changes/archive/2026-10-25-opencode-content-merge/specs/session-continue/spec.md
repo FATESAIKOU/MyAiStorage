@@ -4,7 +4,7 @@
 `agora continue … --harness-file <檔>` MUST 讓啟動方在啟動**那一個** agent 時交付一份 harness（agent 的指示檔）；只支援 `claude` 與 `opencode`，其他 agent MUST 拒絕。檔案 MUST 存在、不是目錄、可讀——否則 MUST 在啟動 agent 之前失敗，且不寫任何東西。交付 MUST 只對這一個 agent 的 process 生效：MUST NOT 修改 `agora` 自己的 `os.environ`，也 MUST NOT 寫使用者層級的指示檔；同一個 CLI 之後不帶 `--harness-file` 啟動的 session MUST NOT 拿到。不帶 `--harness-file` 時 MUST NOT 注入任何東西。
 
 - `claude`：啟動參數 MUST 加 `--append-system-prompt-file <絕對路徑>` 與 `--system-prompt-snapshot off`。
-- `opencode`：MUST 透過只給這個 process 的 `OPENCODE_CONFIG_CONTENT` 交付；harness 的部分 MUST 只含 `instructions`，值是 harness 檔的**絕對路徑**。MUST NOT 把整份設定重貼進環境（避免把憑證帶進環境）。呼叫方環境（`os.environ`）裡原有的 `OPENCODE_CONFIG_CONTENT`，若是 JSON 物件，MUST 與 harness 的部分合併：呼叫方原有的鍵 MUST 保留，兩邊都有的鍵（例如 `instructions`）MUST 以 harness 的值為準（取代，不串接）。原值不是合法 JSON、或不是物件時，MUST 視為沒有、只給 harness 的部分，且 MUST NOT 印出原值。合併 MUST 在 `Launch` 之外做（`Launch.env` 只含 harness 的部分），interactive 與 `--headless` MUST 一致。
+- `opencode`：MUST 透過只給這個 process 的 `OPENCODE_CONFIG_CONTENT` 交付；harness 的部分 MUST 只含 `instructions`，值是 harness 檔的**絕對路徑**。MUST NOT 把整份設定重貼進環境（避免把憑證帶進環境）。呼叫方環境（`os.environ`）裡原有的 `OPENCODE_CONFIG_CONTENT`，若是 JSON 物件，MUST 與 harness 的部分合併：呼叫方原有的鍵 MUST 保留，兩邊都有的鍵（例如 `instructions`）MUST 以 harness 的值為準（取代，不串接）。原值不是合法 JSON、或不是物件時，MUST 視為沒有、只給 harness 的部分，非空時 MUST 在 stderr 印一行不含原值的固定訊息，且 MUST NOT 印出原值。合併 MUST 在 `Launch` 之外做（`Launch.env` 只含 harness 的部分），interactive 與 `--headless` MUST 一致。
 
 #### Scenario: claude 加兩個旗標
 - **WHEN** `agora continue session <id> --agent claude --harness-file <檔>`

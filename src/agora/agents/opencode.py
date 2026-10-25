@@ -35,7 +35,6 @@ import hashlib
 import json
 import os
 import sqlite3
-import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -715,7 +714,7 @@ def _payload_messages(payload: object) -> list[dict]:
 
 
 CONFIG_CONTENT_ENV = "OPENCODE_CONFIG_CONTENT"
-DROPPED_CONFIG_NOTICE = "[agora] 呼叫方的 OPENCODE_CONFIG_CONTENT 不是 JSON 物件，已忽略，只交付 harness"
+DROPPED_CONFIG_NOTICE = "呼叫方的 OPENCODE_CONFIG_CONTENT 不是 JSON 物件，已忽略，只交付 harness"
 
 
 def merge_config_content(existing: str | None, harness: str) -> str:
@@ -734,7 +733,7 @@ def merge_config_content(existing: str | None, harness: str) -> str:
         theirs = None
     if not isinstance(theirs, dict):
         if existing:
-            print(DROPPED_CONFIG_NOTICE, file=sys.stderr)
+            warn(DROPPED_CONFIG_NOTICE)
         return harness
     return json.dumps({**theirs, **own})
 

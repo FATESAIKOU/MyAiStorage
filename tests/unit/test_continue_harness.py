@@ -608,8 +608,10 @@ def test_merge_config_content_deeply_nested_value_is_dropped(capsys):
     assert capsys.readouterr().err.strip() == NOTICE
 
 
-def test_merge_config_content_pure():
+def test_merge_config_content_unit(capsys):
     h = json.dumps({"instructions": ["/h.md"]})
     assert OC.merge_config_content(None, h) == h
     assert json.loads(OC.merge_config_content('{"a": 1, "instructions": ["x"]}', h)) == {"a": 1, "instructions": ["/h.md"]}
+    assert capsys.readouterr().err == ""
     assert OC.merge_config_content("nope", h) == h
+    assert capsys.readouterr().err.strip() == NOTICE
