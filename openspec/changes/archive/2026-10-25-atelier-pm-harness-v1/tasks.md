@@ -57,7 +57,7 @@ worker 的開機單位跑的是**不指定版本**的 `atelier install`（＝lat
 - [x] 3b.2 測試釘住 3b.1 的兩條路徑（含「什麼都沒寫」與「警告有印」）以及 render 查無 id／版本 exit 3
 - [x] 3b.3 `Launch.env: dict`（預設空）；`src/agora/cli.py` spawn 時 `{**os.environ, **launch.env, "PWD": …}`；**不改 `os.environ`**
 - [x] 3b.4 `agora continue --harness-file <檔>`：claude → argv 加 `--append-system-prompt-file` ＋ `--system-prompt-snapshot off`；opencode → `Launch.env` 的 `OPENCODE_CONFIG_CONTENT` 只帶 `instructions`（**與檔案設定合併**，實測；不要把整份設定重貼、把憑證帶進環境）
-  - 觀察：`src/agora/agents/opencode.py:1604` 會覆蓋呼叫方原本帶進來的 `OPENCODE_CONFIG_CONTENT`，不是合併；由 #242 處理（delta 的 session-continue 照 #242 的定案寫成合併）
+  - 觀察：`src/agora/agents/opencode.py:1604` 會覆蓋呼叫方原本帶進來的 `OPENCODE_CONFIG_CONTENT`，不是合併；現在是覆蓋，#242 決定要不要改成合併（delta 的 session-continue 寫現在的行為：整份取代）
 - [x] 3b.5 測試：只有帶 `--harness-file` 的 process 吃得到；同一個 CLI、不帶的下一個 session 吃不到；檔案設定仍在（合併）由人工實測、無自動測試；自動測試只釘 CONTENT 只含 instructions 與路徑為絕對路徑
 - [x] 3b.6 改壞驗證：把 env 改成改 `os.environ`（應紅）、CONTENT 重貼整份設定（應紅）、沒帶 `--harness-file` 卻注入（應紅）、install 守門拿掉（應紅）、`--global` 不印警告（應紅）、claude 少一個旗標（應紅）、render 查無改回 1（應紅）
 
@@ -90,7 +90,7 @@ worker 的開機單位跑的是**不指定版本**的 `atelier install`（＝lat
 - [x] 6.1 **在 5.1 清掉使用者層級殘留之後**，同一台機器同時開 PM 與一個隊員：**PM 的請求裡有 harness、隊員的沒有**（opencode 看假 upstream 的請求、claude 看啟動的 argv）；`~/.claude/rules/` 與 `~/.config/opencode/AGENTS.md` 逐字不變
   - 出處：替代驗證；嚴格版在 MyLinuxPool#332。worker：MyLinuxPool#216（2026-10-23，PM 與隊員的 `harness` 分別是 `atelier:worker-team-pm@v1`、`atelier:worker-team-impl@v1`）。Mac：team PM 在 sidecar 上實際用了一整天，算通過；PMO 的 pmo-pm 等 MyPMO#192 merge 後一起驗（不擋）
 - [x] 6.2 PM 起來後的行為照 v1：收指示、開單、派工、監看、非作者審查、PR 與回報的格式都對得上；沒有碰憑證／真機／main
-  - 出處：MyPMO#86（worker 上的 team PM 經 sidecar 開隊員、帶隊員做完一張單，2026-10-21 結案）；逐項比對 v1 沒有做過，未知
+  - 出處：替代驗證：MyPMO#86（worker 上的 team PM 經 sidecar 開隊員、帶隊員做完一張單，2026-10-21 結案）；逐項比對 v1 未做
 - [x] 6.3 沒驗到的、觀察到的偏差，記回工單與 PMO
   - 出處：MyLinuxPool#216 的留言（2026-10-20 的發現；10-23 沒驗到的項目轉 MyLinuxPool#332）
 
@@ -101,6 +101,6 @@ worker 的開機單位跑的是**不指定版本**的 `atelier install`（＝lat
 - [x] 7.2 PMO 的 repo：工單規則補「PM 開的 d 不用另一位附議」（B-7）；模型輪換表收 B-14／B-15 的細節（選模型的順序、哪些只能短任務、審查不用哪些）
   - 出處：MyPMO `工單規則.md:41`（d 的核准）；`handbook/model-rotation.md`（審查不用 agy、短任務模型、依工作類型挑模型）；MyPMO#150
 - [x] 7.3 隊員工具例外的說法（B-13）：不留個別例外；該團隊的文件與輪換表照同一套
-  - 出處：照 arch 報告的建議：MyPMO#150（開發隊員全 Claude）重寫模型規矩時一起處理，沒找到逐字落點；PMO 不另外定
+  - 出處：照 arch 報告的建議：MyPMO#150（開發隊員全 Claude）重寫模型規矩時一起處理；逐字落點：`FATESAIKOU/MyPMO handbook/model-rotation.md:18`（「各團隊都照同一套，沒有個別例外。」）；PMO 不另外定
 - [x] 7.4 工單規則／repo 摘要裡「進行中的 b＋c 上限」的舊數字（B-6）一起更正
   - 出處：MyPMO `工單規則.md:131`（上限 2 張）；本 repo `AGENTS.md` 已改（commit `e679943`）
