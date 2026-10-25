@@ -187,7 +187,9 @@ LOCAL = VECTORS / "local-additions"
 def test_a_crlf_message_reads_with_lf_content_like_ts():
     # Local addition (not from MyAiEntry, see PINNED.md): the file is CRLF throughout.
     raw = (LOCAL / "99-crlf-content.md").read_bytes()
-    assert b"\r\n" in raw
+    lines = raw.split(b"\n")[:-1]
+    assert lines and all(line.endswith(b"\r") for line in lines)
+    assert raw.endswith(b"\r\n")
     msg = parse_message(raw.decode("utf-8"))
     assert msg is not None
     want = json.loads((LOCAL / "99-crlf-content.expected.json").read_text(encoding="utf-8"))
@@ -203,6 +205,41 @@ def test_serialize_message_sends_crlf_content_and_it_reads_as_lf():
     back = parse_message(text)
     assert back is not None
     assert back.content == "body\nmore\n"
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        lambda c: c + "x",  # one more character
+        lambda c: c + "\n",  # only trailing whitespace differs
+        lambda c: " " + c,  # only leading whitespace differs
+        lambda c: c.replace("\r", "\n"),  # a lone CR turned into LF
+    ],
+    ids=["extra-char", "trailing-nl", "leading-space", "lone-cr-to-lf"],
+)
+def test_serialize_message_refuses_when_content_reads_back_changed(monkeypatch, damage):
+    msg = _message_with_inline("plain")
+    msg.content = "x\ry\r\n"
+    real = messages.parse_message
+
+    def lossy(text, *, strict=False):
+        back = real(text, strict=strict)
+        back.content = damage(back.content)
+        return back
+
+    monkeypatch.setattr(messages, "parse_message", lossy)
+    with pytest.raises(MessageValidationError, match="content"):
+        serialize_message(msg)
+
+
+def test_serialize_message_sends_a_lone_cr_and_reads_it_back_as_it_is():
+    msg = _message_with_inline("plain")
+    msg.content = "x\ry\r\n"
+    text = serialize_message(msg)
+    assert text.endswith("---\nx\ry\r\n")
+    back = parse_message(text)
+    assert back is not None
+    assert back.content == "x\ry\n"
 
 
 def test_split_front_matter_turns_crlf_into_lf_in_the_content():
