@@ -111,13 +111,15 @@ REV_REVIEW_BY_NON_AUTHOR = "不審自己的作品"
 
 #: What the PMO `v2` (#246, aligned to the handbook at 44ec9dc) and later must keep
 #: in its body: the merge rules incl. the transition clause, the first-line
-#: conventions, and the secretary rule. Chosen so that flipping the meaning (not
-#: only deleting the words) turns the check red.
+#: conventions, and the secretary rule. Chosen so that deleting any one of the
+#: sentences turns the check red (a flipped meaning is not caught).
 PMO_V2_KEY_SENTENCES = (
     "團隊 PM（不是該 repo 的 PM；由你開去做指定工單的，不論在哪台機器）不 merge",
     "不請求、不轉交",
     "你確認三件事後才代 merge",
+    "是該 repo 自己的 c／d",
     "非作者的審查留言對準目前 head",
+    "有 CI 的，CI 要綠",
     "代 merge 時指定 head 比對（head 不符就不合）",
     "被安全檢查擋下的動作不接手",
     "作者：<provider/model>。…",
@@ -412,27 +414,20 @@ def findings_for(path: str, text: str) -> Findings:
         found.errors.append(
             f"{path}: rev 職務要寫「{REV_REVIEW_BY_NON_AUTHOR}」（judge 或 dont）")
     is_v1_or_later = version_match is not None and int(version_match.group(1)) >= 1
-    if role == "pm" and is_v1_or_later:
-        for sentence in PM_KEY_SENTENCES:
+    pmo_version_2_or_later = team == "pmo" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) >= 2
+    for applies, sentences, label in (
+            (role == "pm" and is_v1_or_later, PM_KEY_SENTENCES, "v1 起的 pm"),
+            (pmo_version_2_or_later, PMO_V2_KEY_SENTENCES, "v2 起的 pmo pm"),
+            (role == "impl" and is_v1_or_later, IMPL_KEY_SENTENCES, "v1 起的 impl"),
+            (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev")):
+        if not applies:
+            continue
+        for sentence in sentences:
             if sentence not in body:
                 found.errors.append(
-                    f"{path}: v1 起的 pm 職務缺關鍵句「{sentence}」"
+                    f"{path}: {label} 職務缺關鍵句「{sentence}」"
                     "（know/do/judge/dont 合起來至少出現一次）")
-    if team == "pmo" and role == "pm" and version_match is not None \
-            and int(version_match.group(1)) >= 2:
-        for sentence in PMO_V2_KEY_SENTENCES:
-            if sentence not in body:
-                found.errors.append(
-                    f"{path}: v2 起的 pmo pm 職務缺關鍵句「{sentence}」"
-                    "（know/do/judge/dont 合起來至少出現一次）")
-    for role_with_keys, sentences in (("impl", IMPL_KEY_SENTENCES),
-                                      ("rev", REV_KEY_SENTENCES)):
-        if role == role_with_keys and is_v1_or_later:
-            for sentence in sentences:
-                if sentence not in body:
-                    found.errors.append(
-                        f"{path}: v1 起的 {role_with_keys} 職務缺關鍵句「{sentence}」"
-                        "（know/do/judge/dont 合起來至少出現一次）")
     if is_v1_or_later:
         found.errors.extend(_forbidden_in_body(path, body))
         if isinstance(team, str) and isinstance(role, str):
