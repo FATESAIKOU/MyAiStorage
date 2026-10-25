@@ -14,6 +14,7 @@ session as unfinished and skips it.
 from __future__ import annotations
 
 import codecs
+import contextlib
 import fcntl
 import copy
 import hashlib
@@ -1008,7 +1009,9 @@ def remember(paths: Paths, folder: Path, index: "Index | None" = None, ulid: str
     """
     mirror = paths.mirror / (ulid or folder.name)
     mirror.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(folder / "session.md", mirror / "session.md")
+    # Atomic: a sync in another process indexes this same outbox entry into this same mirror
+    # file, and a plain copy lets one of them read the other's half-written (#222).
+    copy_atomic(folder / "session.md", mirror / "session.md")
     raw = (h.agora_of(read_entry(folder)).get("raw") or {})
     if raw and (name := raw_name(raw)) and (folder / name).is_file():
         wanted, target = folder / name, mirror / name
@@ -1017,7 +1020,13 @@ def remember(paths: Paths, folder: Path, index: "Index | None" = None, ulid: str
         for other in mirror.glob("raw-*"):
             if other.name != name:
                 other.unlink()
-    index_file(index or Index(paths), mirror / "session.md")
+    try:
+        index_file(index or Index(paths), mirror / "session.md")
+    except sqlite3.Error as e:
+        # The session is already whole in the outbox and the mirror; the index is a cache that
+        # the next sync fills in again (the md5 it holds differs from Drive's), so a lost index
+        # write must not turn a saved import into a failed one (#222).
+        warn(f"索引更新失敗（{e}），Session 已存好，下次 sync 會補上：{mirror.name}")
 
 
 def _index_outbox(paths: Paths, index: "Index") -> None:
@@ -2267,26 +2276,86 @@ def normalize(text: str) -> str:
     return unicodedata.normalize("NFKC", text or "").lower()
 
 
+#: How long an index write waits for another process's write, per try and in tries (#222).
+#: A write is a few rows, so the wait is almost always milliseconds; the bound is for a stuck
+#: writer, and past it the error is raised for the caller to decide (see `remember`).
+INDEX_BUSY_MS = 30_000
+INDEX_TRIES = 3
+_INDEX_TABLES = {"sessions", "fts", "cloud_missing"}
+
+
 class Index:
     def __init__(self, paths: Paths):
         paths.cache.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(paths.cache / "index.sqlite")
-        bumped = self.db.execute("PRAGMA user_version").fetchone()[0] != INDEX_VERSION
-        if bumped:
-            self.db.executescript("DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS fts;"
-                                  " DROP TABLE IF EXISTS cloud_missing;")
-            self.db.execute(f"PRAGMA user_version = {INDEX_VERSION}")
-            self.db.commit()
-        self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                ulid TEXT PRIMARY KEY, md5 TEXT, header TEXT, body TEXT,
-                agent TEXT, source_id TEXT, created TEXT);
-            CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
-                ulid UNINDEXED, text, tokenize='trigram');
-            CREATE TABLE IF NOT EXISTS cloud_missing (ulid TEXT PRIMARY KEY);
-        """)
+        path = paths.cache / "index.sqlite"
+        if path.exists():
+            self._connect(path)
+        else:
+            # A deleted index (the way to rebuild it) can leave its -wal / -shm behind, and a new
+            # database must not inherit them. Under a lock, so a second process that is creating
+            # the file right now does not lose its own -wal.
+            with open(paths.cache / "index.lock", "a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                if not path.exists():
+                    for stale in ("-wal", "-shm"):
+                        path.with_name(path.name + stale).unlink(missing_ok=True)
+                self._connect(path)
+        bumped = False
+        if not self._ready():           # the common case writes nothing: no DDL, no lock
+            with self._tx():
+                if not self._ready():   # another process may have set it up while we waited
+                    bumped = self.db.execute("PRAGMA user_version").fetchone()[0] != INDEX_VERSION
+                    if bumped:
+                        for table in sorted(_INDEX_TABLES):    # not executescript: it would COMMIT first
+                            self.db.execute(f"DROP TABLE IF EXISTS {table}")
+                    self.db.execute("""CREATE TABLE IF NOT EXISTS sessions (
+                        ulid TEXT PRIMARY KEY, md5 TEXT, header TEXT, body TEXT,
+                        agent TEXT, source_id TEXT, created TEXT)""")
+                    self.db.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
+                        ulid UNINDEXED, text, tokenize='trigram')""")
+                    self.db.execute("CREATE TABLE IF NOT EXISTS cloud_missing (ulid TEXT PRIMARY KEY)")
+                    self.db.execute(f"PRAGMA user_version = {INDEX_VERSION}")
         if bumped:
             self.rebuild_from_mirror(paths)
+
+    def _connect(self, path: Path) -> None:
+        # Autocommit: a transaction is only what `_tx` opens, so no statement holds a lock by accident.
+        self.db = sqlite3.connect(path, timeout=INDEX_BUSY_MS / 1000, isolation_level=None)
+        self.db.execute(f"PRAGMA busy_timeout = {INDEX_BUSY_MS}")
+        # WAL: readers and the one writer do not block each other, writers queue. Leaves
+        # index.sqlite-wal / -shm beside the file; they go with it (it is a cache: delete all three).
+        self.db.execute("PRAGMA journal_mode = WAL")
+        self.db.execute("PRAGMA synchronous = NORMAL")
+
+    def _ready(self) -> bool:
+        """The right version with all its tables: nothing to create."""
+        if self.db.execute("PRAGMA user_version").fetchone()[0] != INDEX_VERSION:
+            return False
+        have = {r[0] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        return _INDEX_TABLES <= have
+
+    @contextlib.contextmanager
+    def _tx(self):
+        """One short write transaction, taking the write lock first (`BEGIN IMMEDIATE`).
+
+        Waits `INDEX_BUSY_MS` for the lock, up to `INDEX_TRIES` times; then the
+        `sqlite3.OperationalError` is raised. Taking the lock before the first read is what
+        makes delete-then-insert one step: two processes indexing the same ulid cannot
+        interleave into a UNIQUE failure.
+        """
+        for attempt in range(INDEX_TRIES):
+            try:
+                self.db.execute("BEGIN IMMEDIATE")
+                break
+            except sqlite3.OperationalError as e:
+                if attempt + 1 == INDEX_TRIES or "locked" not in str(e) and "busy" not in str(e):
+                    raise
+        try:
+            yield
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
+        self.db.execute("COMMIT")
 
     def rebuild_from_mirror(self, paths: Paths) -> "Index":
         """Fill an index that has just been emptied (a version bump, a deleted db)
@@ -2307,19 +2376,22 @@ class Index:
             str(header.get("title") or ""), str(header.get("description") or ""),
             " ".join(map(str, header.get("tags") or [])), " ".join(map(str, header.get("refs") or [])), body,
         ]))
-        self.drop(ulid)
-        self.db.execute(
-            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?)",
-            (ulid, md5, json.dumps(header, ensure_ascii=False, default=str), text,
-             source.get("agent"), source.get("session_id"), sort_date(header)))
-        self.db.execute("INSERT INTO fts VALUES (?,?)", (ulid, text))
-        self.db.commit()
+        with self._tx():
+            self._delete(ulid)
+            self.db.execute(
+                "INSERT INTO sessions VALUES (?,?,?,?,?,?,?)",
+                (ulid, md5, json.dumps(header, ensure_ascii=False, default=str), text,
+                 source.get("agent"), source.get("session_id"), sort_date(header)))
+            self.db.execute("INSERT INTO fts VALUES (?,?)", (ulid, text))
 
     def drop(self, ulid: str) -> None:
+        with self._tx():
+            self._delete(ulid)
+
+    def _delete(self, ulid: str) -> None:
         self.db.execute("DELETE FROM sessions WHERE ulid=?", (ulid,))
         self.db.execute("DELETE FROM fts WHERE ulid=?", (ulid,))
         self.db.execute("DELETE FROM cloud_missing WHERE ulid=?", (ulid,))
-        self.db.commit()
 
     def mark_missing(self, ulids) -> None:
         """Which sessions Drive does not have.
@@ -2328,10 +2400,10 @@ class Index:
         move a single marker, or an offline machine would declare the whole
         library deleted on the next start.
         """
-        self.db.execute("DELETE FROM cloud_missing")
-        self.db.executemany("INSERT OR IGNORE INTO cloud_missing VALUES (?)",
-                            [(ulid,) for ulid in sorted(ulids)])
-        self.db.commit()
+        with self._tx():
+            self.db.execute("DELETE FROM cloud_missing")
+            self.db.executemany("INSERT OR IGNORE INTO cloud_missing VALUES (?)",
+                                [(ulid,) for ulid in sorted(ulids)])
 
     def cloud_has(self, ulid: str) -> bool:
         """Whether Drive still has this session (T1 R6). One we never indexed counts as local."""

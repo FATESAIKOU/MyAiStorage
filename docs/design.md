@@ -130,7 +130,7 @@ Drive: agora/                              （rclone 內建 client 建立；以 
                               它只隨整個資料夾被 `agora delete` 一起進垃圾桶（搬遷見 docs/migration.md）
 Mac:
   ~/.config/agora/            rclone.conf（rclone 內建 client）、config.json（folder ID）
-  ~/.cache/agora/             鏡像（session.md；用到過的 session 另有整份 raw）＋ index.sqlite；壞了刪掉重建
+  ~/.cache/agora/             鏡像（session.md；用到過的 session 另有整份 raw）＋ index.sqlite（WAL：旁邊會有 -wal／-shm 與 index.lock，要重建就整組刪）；壞了刪掉重建
   ~/.local/state/agora/       outbox/、pending/、cursors/、published/、folder-ids/、unfinished.json ——不能刪；tmp/ 是匯出／快照的暫存
 ```
 
