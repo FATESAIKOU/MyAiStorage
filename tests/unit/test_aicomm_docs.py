@@ -76,3 +76,47 @@ def test_docs_record_the_sidecar_fields_aicomm_depends_on():
     text = DOCS.read_text(encoding="utf-8")
     for needle in ("GET /agents/", "POST /agents/", "/poke", "state", "idle", "running", "404", "AICOMM_SIDECAR", "127.0.0.1:8471"):
         assert needle in text
+
+
+# --- #219: one reader per identity ---
+
+REMEDY = "angareion read --since <時刻>"
+TIME_FORMAT = "RFC 3339，例如 2026-10-25T03:00:00Z；不移動游標"
+
+
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_one_reader_rule_and_remedy_are_written_down(path):
+    text = path.read_text(encoding="utf-8")
+    assert "同一個身分只留一個讀者" in text
+    assert "背景" in text and "前景" in text
+    assert "inbox --wait" in text
+    assert "被叫醒但 inbox 是空的" in text
+    assert REMEDY in text and TIME_FORMAT in text
+    assert "--channel <ch> --since" not in text
+
+
+def test_skill_states_the_one_reader_rule_itself():
+    text = _skill()
+    assert "不要跑背景讀信迴圈" in text
+    assert "**不能**當成「背景只等、不讀」" in text
+    assert "才用 `aicomm inbox --wait` 當**唯一**的讀者" in text
+
+
+def test_docs_state_the_one_reader_rule_itself():
+    text = DOCS.read_text(encoding="utf-8")
+    assert "不跑背景讀信迴圈" in text
+    assert "當唯一的讀者" in text
+
+
+def test_idle_wait_is_limited_to_agents_nobody_pokes():
+    text = _skill()
+    description = re.search(r"^description: (.*)$", text, re.M).group(1)
+    assert "not managed by a sidecar" in description
+    idle_line = next(line for line in text.splitlines() if "aicomm inbox --wait 600" in line)
+    assert "只限沒有人會 poke 的" in idle_line
+    assert "被 sidecar 管的，閒著就結束這一輪、等 poke" in idle_line
+
+
+def test_the_hint_in_the_cli_matches_the_documented_remedy():
+    cli = (REPO / "src" / "aicomm" / "cli.py").read_text(encoding="utf-8")
+    assert REMEDY in cli and "同一個身分" in cli

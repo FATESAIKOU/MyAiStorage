@@ -92,3 +92,67 @@ def test_angareion_is_never_called_with_a_channel_and_the_sidecar_is_never_asked
     run_aicomm(["inbox", "--wait", "1", "--mentioned", "--json"], monkeypatch, capsys)
     assert all("--channel" not in c["argv"] for c in world.calls())
     assert world.sidecar.requests == []
+
+
+# --- #219: an empty inbox says why on stderr (stdout and exit code unchanged) ---
+
+HINT_KEYS = ("沒有新信", "同一個身分", "背景", "angareion read --since <時刻>", "RFC 3339，例如 2026-10-25T03:00:00Z；不移動游標")
+
+
+def test_empty_read_hints_on_stderr_exit_0_stdout_unchanged(world, monkeypatch, capsys):
+    r = run_aicomm(["inbox"], monkeypatch, capsys)
+    assert r.code == 0
+    assert r.out == ""
+    for key in HINT_KEYS:
+        assert key in r.err
+
+
+@pytest.mark.parametrize("empty", ["[]\n", "[]", "[ ]\n", "  \n"])
+def test_empty_json_read_hints_on_stderr_and_stdout_is_verbatim(world, monkeypatch, capsys, empty):
+    world.setenv("FAKE_ANG_READ_OUT", empty)
+    r = run_aicomm(["inbox", "--json"], monkeypatch, capsys)
+    assert r.code == 0
+    assert r.out == empty
+    for key in HINT_KEYS:
+        assert key in r.err
+
+
+def test_empty_read_after_a_wait_that_succeeded_also_hints(world, monkeypatch, capsys):
+    r = run_aicomm(["inbox", "--wait", "5"], monkeypatch, capsys)
+    assert r.code == 0
+    assert "同一個身分" in r.err
+
+
+def test_mail_present_means_no_hint(world, monkeypatch, capsys):
+    world.setenv("FAKE_ANG_READ_OUT", "hello\n")
+    r = run_aicomm(["inbox"], monkeypatch, capsys)
+    assert r.code == 0 and r.out == "hello\n"
+    assert "同一個身分" not in r.err and "沒有新信" not in r.err
+
+
+def test_json_with_messages_means_no_hint(world, monkeypatch, capsys):
+    world.setenv("FAKE_ANG_READ_OUT", '[{"id": "x"}]\n')
+    r = run_aicomm(["inbox", "--json"], monkeypatch, capsys)
+    assert r.code == 0
+    assert "同一個身分" not in r.err and "沒有新信" not in r.err
+
+
+def test_wait_timeout_gives_no_hint(world, monkeypatch, capsys):
+    world.setenv("FAKE_ANG_WAIT_EXIT", "3")
+    r = run_aicomm(["inbox", "--wait", "5"], monkeypatch, capsys)
+    assert r.code == 3
+    assert "同一個身分" not in r.err and "沒有新信" not in r.err
+
+
+def test_wait_backend_error_gives_no_hint(world, monkeypatch, capsys):
+    world.setenv("FAKE_ANG_WAIT_EXIT", "2")
+    r = run_aicomm(["inbox", "--wait", "5"], monkeypatch, capsys)
+    assert r.code == 2
+    assert "同一個身分" not in r.err and "沒有新信" not in r.err
+
+
+def test_read_backend_error_gives_no_hint(world, monkeypatch, capsys):
+    world.setenv("FAKE_ANG_READ_EXIT", "2")
+    r = run_aicomm(["inbox"], monkeypatch, capsys)
+    assert r.code == 2
+    assert "同一個身分" not in r.err and "沒有新信" not in r.err

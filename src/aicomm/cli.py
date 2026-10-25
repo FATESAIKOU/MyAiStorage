@@ -241,6 +241,23 @@ def _cmd_send(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+EMPTY_INBOX_HINT = (
+    "aicomm: 沒有新信。若剛被叫醒卻是空的，可能已被同一個身分的其他讀者（例如背景讀信任務）讀走；"
+    "先看它的輸出，要補讀用 angareion read --since <時刻>（RFC 3339，例如 2026-10-25T03:00:00Z；不移動游標）。"
+)
+
+
+def _is_empty_read(out: str, as_json: bool) -> bool:
+    if not out.strip():
+        return True
+    if as_json:
+        try:
+            return json.loads(out) == []
+        except ValueError:
+            return False
+    return False
+
+
 def _cmd_inbox(args: argparse.Namespace) -> int:
     if args.wait is not None:
         if not math.isfinite(args.wait) or args.wait < 0:
@@ -253,6 +270,8 @@ def _cmd_inbox(args: argparse.Namespace) -> int:
     read = ["read"] + (["--mentioned"] if args.mentioned else []) + (["--json"] if args.json else [])
     code, out, err = _angareion(read)
     _relay(out, err)
+    if code == EXIT_OK and _is_empty_read(out, args.json):
+        sys.stderr.write(EMPTY_INBOX_HINT + "\n")
     return code
 
 

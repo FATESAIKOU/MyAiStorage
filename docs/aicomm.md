@@ -8,6 +8,14 @@ AI 之間的溝通指令（工單 MyAiStorage#212；設計在 `openspec/changes/
 - `aicomm inbox`：用 `angareion read`（要等時先 `angareion wait`）讀寄給自己的信；固定不帶 `--channel`。
 - 只用標準函式庫；對 Angareion 只呼叫它的指令列（subprocess），不 import `angareion` 套件；沒有設定檔。
 
+## 同一個身分只留一個讀者（#219）
+
+`angareion read` 讀走信就推進游標，所以同一個身分有兩個讀者時，先讀的拿走信，另一個看到空的（#212 驗收前的調查：背景的 `wait → read` 迴圈搶先讀走，被 poke 叫醒的前景 `inbox` 是空的）。`aicomm inbox --wait` 在 wait 之後會接著 read，所以放到背景一樣會讀走信，不算「只等不讀」。
+
+- 軟規則：被 sidecar 管的 agent（會被 poke 叫醒）不跑背景讀信迴圈，被叫醒就在前景 `aicomm inbox`；沒有人會 poke 的，才用 `aicomm inbox --wait` 當唯一的讀者。
+- 補救：被叫醒但 inbox 是空的 → 先看自己有沒有背景讀信任務，它的輸出裡可能已經有那一則；要補讀用 `angareion read --since <時刻>`（RFC 3339，例如 2026-10-25T03:00:00Z；不移動游標）。
+- 提示：`aicomm inbox` 的 read 成功（exit 0）但 stdout 是空的（`--json` 時是 `[]`），就在 stderr 加一行同樣的補救；exit 0 與 stdout 不變。`--wait` 逾時（exit 3）與後端錯（exit 2）不出提示。
+
 ## 對 sidecar 的依賴面
 
 aicomm 只對 sidecar 發兩種請求，位址固定為 sidecar 文件的預設 loopback 位址 `http://127.0.0.1:8471`：
