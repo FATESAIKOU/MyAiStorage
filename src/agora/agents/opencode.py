@@ -713,6 +713,27 @@ def _payload_messages(payload: object) -> list[dict]:
     return payload["messages"]
 
 
+CONFIG_CONTENT_ENV = "OPENCODE_CONFIG_CONTENT"
+
+
+def merge_config_content(existing: str | None, harness: str) -> str:
+    """The caller's OPENCODE_CONFIG_CONTENT folded into the harness one (#242).
+
+    The harness value is a JSON object; the caller's value is kept when it is a
+    JSON object too, and on a key both have (`instructions`) the harness wins.
+    Missing, not JSON, or not an object: nothing to keep, the harness value alone
+    (the caller's text is never echoed - it may hold credentials).
+    """
+    own = json.loads(harness)
+    try:
+        theirs = json.loads(existing) if existing else None
+    except ValueError:
+        theirs = None
+    if not isinstance(theirs, dict):
+        return harness
+    return json.dumps({**theirs, **own})
+
+
 def _payload_format(payload: object) -> str:
     """Which opencode wrote this export: "v2" (flat rows) or "v1" (nested).
 
@@ -1601,7 +1622,7 @@ class OpencodeAgent:
             argv = [agent_cmd(self.name), "--session", session_id]
         launch_env = {}
         if harness_file is not None:
-            launch_env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"instructions": [str(harness_file.resolve())]})
+            launch_env[CONFIG_CONTENT_ENV] = json.dumps({"instructions": [str(harness_file.resolve())]})
         return Launch(argv=argv, cwd=str(workdir), agent_session_id=session_id,
                       before_count=landed, env=launch_env)
 

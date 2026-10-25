@@ -483,3 +483,81 @@ def test_cli_continue_opencode_headless_with_harness_file(opencode_lab, tmp_path
     assert Path(parsed["instructions"][0]).is_absolute()
 
 
+
+
+# ---------------------------------------------------------------------------
+# #242: the caller's OPENCODE_CONFIG_CONTENT is folded in, not replaced
+# ---------------------------------------------------------------------------
+
+def _caller_config() -> dict:
+    # fake values, assembled at run time so no scanner pattern sits in the source
+    return {"provider": {"acme": {"options": {"apiKey": "fake" + "-" + "key" + "-123"}}},
+            "permission": {"bash": "ask"}}
+
+
+def _continue_opencode(opencode_lab, tmp_path, capsys, *extra):
+    code, sid, err = run(capsys, "import", "session", "--external-session-id", "default", "--agent", "opencode")
+    assert code == 0, err
+    code, _, err = run(capsys, "continue", "session", sid, "--agent", "opencode",
+                       "--dir", str(opencode_lab["work"]), "--sync-period", SECONDS, *extra)
+    assert code == 0, err
+    launched = [r for r in _read_records(opencode_lab["log"]) if "--session" in r["argv"]]
+    assert launched
+    return launched[-1]["env"]
+
+
+def _harness(tmp_path) -> Path:
+    hf = tmp_path / "pm-harness.md"
+    hf.write_text("# PM HARNESS\n")
+    return hf
+
+
+def test_popen_env_no_caller_value_gets_only_instructions(opencode_lab, tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
+    hf = _harness(tmp_path)
+    env = _continue_opencode(opencode_lab, tmp_path, capsys, "--harness-file", str(hf))
+    assert json.loads(env["OPENCODE_CONFIG_CONTENT"]) == {"instructions": [str(hf.resolve())]}
+
+
+def test_popen_env_caller_object_is_merged_keys_kept(opencode_lab, tmp_path, capsys, monkeypatch):
+    caller = _caller_config()
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps(caller))
+    hf = _harness(tmp_path)
+    env = _continue_opencode(opencode_lab, tmp_path, capsys, "--harness-file", str(hf))
+    parsed = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    assert parsed["provider"] == caller["provider"]
+    assert parsed["permission"] == caller["permission"]
+    assert parsed["instructions"] == [str(hf.resolve())]
+    assert os.environ["OPENCODE_CONFIG_CONTENT"] == json.dumps(caller)   # agora's own environ untouched
+
+
+def test_popen_env_instructions_conflict_harness_wins(opencode_lab, tmp_path, capsys, monkeypatch):
+    caller = {**_caller_config(), "instructions": ["/somewhere/else.md"]}
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps(caller))
+    hf = _harness(tmp_path)
+    env = _continue_opencode(opencode_lab, tmp_path, capsys, "--harness-file", str(hf))
+    parsed = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    assert parsed["instructions"] == [str(hf.resolve())]
+    assert parsed["permission"] == caller["permission"]
+
+
+@pytest.mark.parametrize("bad", ["{not json", "[1, 2]", '"text"', "7", ""])
+def test_popen_env_caller_not_an_object_is_replaced(opencode_lab, tmp_path, capsys, monkeypatch, bad):
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", bad)
+    hf = _harness(tmp_path)
+    env = _continue_opencode(opencode_lab, tmp_path, capsys, "--harness-file", str(hf))
+    assert json.loads(env["OPENCODE_CONFIG_CONTENT"]) == {"instructions": [str(hf.resolve())]}
+
+
+def test_popen_env_without_harness_file_caller_value_passes_unchanged(opencode_lab, tmp_path, capsys, monkeypatch):
+    raw = json.dumps(_caller_config())
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", raw)
+    env = _continue_opencode(opencode_lab, tmp_path, capsys)
+    assert env["OPENCODE_CONFIG_CONTENT"] == raw
+
+
+def test_merge_config_content_pure():
+    h = json.dumps({"instructions": ["/h.md"]})
+    assert OC.merge_config_content(None, h) == h
+    assert json.loads(OC.merge_config_content('{"a": 1, "instructions": ["x"]}', h)) == {"a": 1, "instructions": ["/h.md"]}
+    assert OC.merge_config_content("nope", h) == h

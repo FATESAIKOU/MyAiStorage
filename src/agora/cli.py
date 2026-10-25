@@ -41,6 +41,7 @@ from agora import header as h
 from agora import private_tmp
 from agora import store
 from agora.agents.agy import AGY_CROSS_AGENT, AGY_HEADLESS_LATER, AGY_READ_ONLY
+from agora.agents.opencode import CONFIG_CONTENT_ENV, merge_config_content
 from agora.agents.base import (NO_REPLY, Agent, AgentError, Exported, Launch, collect_increment, merge_turns,
                                reading, reading_of, env_seconds)
 
@@ -1813,6 +1814,19 @@ def _periodic_write(run: "_Run", agent: Agent) -> None:
         run.logger = None
 
 
+def _spawn_env(launch_env: dict) -> dict:
+    """The agent's environment: the caller's, plus the launch's own variables.
+
+    OPENCODE_CONFIG_CONTENT is the one variable that is folded in, not replaced
+    (#242): the launch's value wins on a key both have. `os.environ` is not touched.
+    """
+    env = {**os.environ, **launch_env}
+    key = CONFIG_CONTENT_ENV
+    if key in launch_env:
+        env[key] = merge_config_content(os.environ.get(key), launch_env[key])
+    return env
+
+
 def _forward_sigterm(child) -> bool:
     """Send SIGTERM to a live agent child; say whether it was forwarded (Major1).
 
@@ -2290,7 +2304,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
         previous_term = signal.signal(signal.SIGTERM, _forward_term)
     try:
         # opencode reads PWD, not the real cwd, to pick the project (impl1).
-        proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env={**os.environ, **launch.env, "PWD": launch.cwd},
+        proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env={**_spawn_env(launch.env), "PWD": launch.cwd},
                                 pass_fds=(lock.fileno(),),
                                 preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
         if term_pending:
