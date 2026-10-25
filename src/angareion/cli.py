@@ -455,7 +455,7 @@ def build_parser() -> argparse.ArgumentParser:
                              "(e.g. mylinuxpool-impl-w1-1); omit to send to the whole channel.")
     p_send.add_argument("--mention", action="append", default=[], metavar="AGENT",
                         help="Also call this AI name (repeatable); it is not the recipient, `--to` is. "
-                             "Readers must be upgraded first: an older reader misses a message that only mentions it.")
+                             "Every reader understands mentions since 2026-10-25; a new kind of reader must be checked first.")
     p_send.add_argument("--in-reply-to", metavar="ULID",
                         help="The id of the message this one replies to.")
     p_send.add_argument("--urgency", type=int, default=5, help="Urgency 0-9 (default: 5).")

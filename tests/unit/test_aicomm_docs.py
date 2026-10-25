@@ -95,6 +95,13 @@ def test_one_reader_rule_and_remedy_are_written_down(path):
     assert "--channel <ch> --since" not in text
 
 
+def test_skill_says_mention_is_open_and_the_upgrade_ban_is_gone():
+    text = _skill()
+    assert "`--mention` 可以用了" in text
+    assert "讀得懂 `mentions`" in text
+    assert "先升級" not in text
+
+
 def test_skill_states_the_one_reader_rule_itself():
     text = _skill()
     assert "不要跑背景讀信迴圈" in text
