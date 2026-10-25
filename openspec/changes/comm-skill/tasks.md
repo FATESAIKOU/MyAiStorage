@@ -21,7 +21,7 @@
 - [x] 2.5 測試（全部對自己起的假 sidecar 與假 `angareion`；測試一律設 `AICOMM_SIDECAR` 指到自己起的假 sidecar；沒設就讓測試失敗〔guard〕；若 P5 被拒絕則改以函式參數注入）：
   - 每個 spec scenario 一條（寫入失敗不叫醒、404、`running`、`idle`（tui 與 headless 各一）、`starting` 不戳、`running` 也戳（不打斷）、`running` 連送兩則排兩句、`--interrupt` 帶 `interrupt: true`、預設 `interrupt: false`、`--interrupt` 與 `--no-wake` 互斥、廣播、mention、逾時不重送、覆寫為非 loopback 且要叫醒、覆寫為非 loopback 但 `--no-wake`、不依角色分支、SKILL.md 含三條軟規則、`wait` exit 2、`--mentioned` 同時給 wait 與 read、戳的文字固定）
   - 回應壞掉（非 JSON、缺欄位）＝不戳、exit 0
-  - 對每條測試做改壞驗證（拿掉條件，測試要紅）
+  - 對每條測試做改壞驗證（拿掉條件，測試要紅）——實際是抽樣（作者 47 處、審查者 9 處），見 PR #216
   - 斷言對假 sidecar 的請求只有「查」與「戳」兩種
   - （PR #216）
 - [x] 2.6 `tests/unit/` 的文件測試：SKILL.md 與 docs 不含私人資訊樣式（沿用 `test_angareion_docs.py` 的做法）（PR #216）
@@ -29,7 +29,7 @@
 ## 3. 分發（跨 repo；PMO 排）
 
 - [ ] 3.1 MyLinuxPool：映像建置用 tool-pins 同一個 sha 多裝 `aicomm`、放 `skills/aicomm/SKILL.md`（照 `docs/angareion.md`「說明檔（skill）」）
-- [x] 3.2 Mac：PMO 與各 PM 的安裝步驟（`uv tool install` 同 sha＋說明檔位置）——現況【未知】，先查。2026-10-25 已裝：Mac 改用每個 sha 一個 venv（不是 `uv tool install`），`angareion` 與 `aicomm` 同 sha、symlink 一起換；說明檔不放全域 skills，改在 Mac 環境說明加一節（MyLinuxPool#376）
+- [x] 3.2 Mac：PMO 與各 PM 的安裝步驟（`uv tool install` 同 sha＋說明檔位置）——現況【未知】，先查。2026-10-25 已裝：Mac 改用每個 sha 一個 venv（不是 `uv tool install`），`angareion` 與 `aicomm` 同 sha、symlink 一起換；說明檔不放全域 skills，改在 Mac 環境說明加一節（那一節由 MyLinuxPool#376 加；#376 不做安裝）
 - [ ] 3.3 各環境說明（`--append`）加一行：溝通用 `aicomm`
 
 ## 4. harness（下一次改版時；不單獨出版本，除非 V6 實測不可靠）
@@ -46,4 +46,4 @@
 ## 6. 驗收
 
 - [x] 6.1 拋棄式環境端到端：A 送給閒置的 tui B → B 被戳 → B 跑 `inbox` 讀到；閒置的 headless B 同樣被戳；B 在 `running` 時送 → 也被戳（不打斷），B 之後讀到（「插進同一輪、在當下的 tool 呼叫之後處理」是對 tui B 的期望；headless、opencode 的 running B 另外記錄實際觀察到的結果）；`--interrupt` → 中斷；`--no-wake` → 不戳、訊息照樣讀得到；收件人在別台 → 不戳、`inbox --wait` 讀到。2026-10-25 全過（真 Angareion、拋棄式身分與測試 sidecar；結果見 #212 的留言）。**沒涵蓋**：`running` 的 headless／opencode 收件人、V6、V8；「收件人在別台」這項用 `inbox`（不帶 `--wait`）與另一組 `angareion wait`→`inbox` 驗證
-- [x] 6.2 實測不碰真 Session、不讀真 credential。2026-10-25：不讀 credential、不碰真 Session；測試 agent 用真 HOME，會在本機新增它自己的 session 紀錄檔（事前經 PMO 同意）
+- [x] 6.2 實測不碰真 Session、不讀真 credential。2026-10-25：測試本身不讀 credential、不碰真 Session（驗收過程中 PM 曾誤把正在用的 sidecar 的 hook 設定印到自己的畫面，未外送、未寫檔，已報 PMO）；測試 agent 用真 HOME，會在本機新增它自己的 session 紀錄檔（事前經 PMO 同意）
