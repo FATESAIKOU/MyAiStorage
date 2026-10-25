@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -714,6 +715,7 @@ def _payload_messages(payload: object) -> list[dict]:
 
 
 CONFIG_CONTENT_ENV = "OPENCODE_CONFIG_CONTENT"
+DROPPED_CONFIG_NOTICE = "[agora] 呼叫方的 OPENCODE_CONFIG_CONTENT 不是 JSON 物件，已忽略，只交付 harness"
 
 
 def merge_config_content(existing: str | None, harness: str) -> str:
@@ -722,14 +724,17 @@ def merge_config_content(existing: str | None, harness: str) -> str:
     The harness value is a JSON object; the caller's value is kept when it is a
     JSON object too, and on a key both have (`instructions`) the harness wins.
     Missing, not JSON, or not an object: nothing to keep, the harness value alone
-    (the caller's text is never echoed - it may hold credentials).
+    (the caller's text is never echoed - it may hold credentials); a non-empty
+    value that is dropped gets one fixed line on stderr, so it does not vanish silently.
     """
     own = json.loads(harness)
     try:
         theirs = json.loads(existing) if existing else None
-    except ValueError:
+    except (ValueError, RecursionError):
         theirs = None
     if not isinstance(theirs, dict):
+        if existing:
+            print(DROPPED_CONFIG_NOTICE, file=sys.stderr)
         return harness
     return json.dumps({**theirs, **own})
 

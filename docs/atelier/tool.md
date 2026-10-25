@@ -59,4 +59,4 @@ atelier render <id>[@<版本>] [--append <檔>] --out <檔>
 
 - install 完成前就開的 agent 不會有 harness，要重開一次（worker 開機時 `start.d/20-atelier` 在 angareion-setup 之後才裝）。
 - 實機載入只驗過 new 模式（MyLinuxPool#114，2026-10-17）；`--resume`／continue 接續是否載入沒驗。
-- 給了 `--harness-file` 時 opencode 的 `OPENCODE_CONFIG_CONTENT` 與使用者環境裡同名變數合併：原值是 JSON 物件就保留它的鍵，鍵衝突（如 `instructions`）以 harness 為準（取代，不串接）；原值不是合法 JSON 或不是物件則視為沒有（不會印出原值）；相對路徑或不存在的路徑會讓 opencode 卡住，所以一律用絕對路徑且先確認存在。
+- 給了 `--harness-file` 時 opencode 的 `OPENCODE_CONFIG_CONTENT` 與使用者環境裡同名變數合併：原值是 JSON 物件就保留它的鍵，鍵衝突（如 `instructions`）以 harness 為準（取代，不串接）；原值不是合法 JSON 或不是物件則視為沒有（stderr 印一行固定訊息「呼叫方的 OPENCODE_CONFIG_CONTENT 不是 JSON 物件，已忽略，只交付 harness」，不會印出原值；空字串不印）；相對路徑或不存在的路徑會讓 opencode 卡住，所以一律用絕對路徑且先確認存在。

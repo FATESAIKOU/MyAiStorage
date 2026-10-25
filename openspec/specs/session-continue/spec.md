@@ -261,7 +261,7 @@ Store 裡在 opencode 2.x 之前匯入的 Session，raw 是 v1 巢狀格式。�
 - **THEN** claude 的啟動參數有 `--append-system-prompt-file <檔的絕對路徑>` 與 `--system-prompt-snapshot off`
 
 #### Scenario: opencode 只帶 instructions
-- **WHEN** `agora continue session <id> --agent opencode --harness-file <檔>`
+- **WHEN** `agora continue session <id> --agent opencode --harness-file <檔>`，且呼叫方環境沒有 `OPENCODE_CONFIG_CONTENT`
 - **THEN** 這個 process 的環境有 `OPENCODE_CONFIG_CONTENT`，內容只含 `instructions`，值是檔的絕對路徑；`agora` 自己的 `os.environ` 沒變
 
 #### Scenario: 呼叫方原有的設定被合併
@@ -274,7 +274,7 @@ Store 裡在 opencode 2.x 之前匯入的 Session，raw 是 v1 巢狀格式。�
 
 #### Scenario: 原值不是 JSON 物件
 - **WHEN** 呼叫方的值不是合法 JSON，或是陣列、字串、數字，且帶 `--harness-file`
-- **THEN** 這個 process 收到的值只含 `instructions`；訊息與日誌不含原值
+- **THEN** 這個 process 收到的值只含 `instructions`；stderr 印一行固定訊息「`[agora] 呼叫方的 OPENCODE_CONFIG_CONTENT 不是 JSON 物件，已忽略，只交付 harness`」，訊息與日誌不含原值；值是空字串時不印這一行
 
 #### Scenario: 不帶就不注入
 - **WHEN** `agora continue session <id> --agent claude|opencode` 沒有 `--harness-file`
