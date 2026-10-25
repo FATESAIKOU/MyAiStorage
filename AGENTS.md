@@ -19,3 +19,21 @@
 - 卡在本人：`狀態:等本人`＋種類。卡在別的工單或外部條件：`狀態:阻塞`＋blocked by 或寫明等什麼。
 - 做完以 completed 關閉；不做以 not planned 關閉並加 `否決`（本人不同意）或 `作廢`（前提不存在）。
 - 本人的決定（核准、裁定、驗收、結案別人的工單）由 MyPMO 的決定檔 PR 套用，不在這裡直接改。
+
+## 這個 repo 的做法
+
+### 測試隔離
+
+- 每個測試由 `tests/conftest.py` 的 autouse fixture（`isolated_home`）把 `HOME`、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`（注意是 `_DIR`）指到該測試的暫存目錄，Angareion 的三個變數與 `AGORA_AGY_HOME` 也一樣；不要在測試裡讀寫真的家目錄與 agora 目錄。
+- 沒有 pytest 保護的探針、手動腳本：自己建暫存目錄，把 `HOME`、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`TMPDIR` 都指進去，再執行。
+- 探針執行前，要在**同一個行程**裡 assert `Paths.from_env()` 的 config／cache／state 與 `HOME`、`TMPDIR` 都在暫存目錄底下，不符就中止（範例：`tests/perf/measure_continue_mem.py` 的 `NOT ISOLATED` 檢查）。規格見 `openspec/specs/test-isolation/spec.md`。
+- 不連真的 Drive：`AGORA_RCLONE` 指到 `tests/fakes/fake_rclone.py`（用包裝腳本呼叫）；`AGORA_UPLOAD=inline` 讓上傳在前景完成。測試用的假 agent 在 `tests/fakes/`；單元測試沒設假 agent 時，agent 指令是 `/nonexistent/...`，會直接失敗而不是跑真的。
+
+### 跑測試
+
+- 在 #210 修好之前，跑測試要加 `env -u ANGAREION_IDENTITY`，例如 `env -u ANGAREION_IDENTITY uv run pytest -q <測試檔>`；外面設著的 `ANGAREION_IDENTITY` 會被測試讀到（`tests/conftest.py` 沒有清掉它）。
+- 只停自己開的行程（記下自己的 pid 再停）；不要用 `pkill`／`killall` 依名稱殺 pytest 或 agora 行程，會誤殺別人的。
+
+### 測試資料
+
+- 假的 secret 不能符合掃描器的樣式（例如 `sk-`、`ghp_` 開頭）：在執行時把前綴拆開組字串，檔案裡不留完整樣式（範例：`tests/unit/test_credscan.py` 開頭的說明與 `"sk" + "-ant-" + rnd(40)`）。
