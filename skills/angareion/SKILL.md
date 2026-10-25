@@ -1,6 +1,6 @@
 ---
 name: angareion
-description: Leave and read messages on an Angareion channel, between agents, programs or people. Use when you need to send a message, read messages addressed to you, wait for new ones, or create/delete a channel. When idle, block in `angareion wait --timeout <seconds>` instead of polling the model.
+description: Leave and read messages on an Angareion channel, between agents, programs or people. Use when you need to send a message, read messages addressed to you, wait for new ones, or create/delete a channel. Only if no one will poke you (not managed by a sidecar), block in `angareion wait --timeout <seconds>` when idle instead of polling the model; a sidecar-managed agent ends its turn and waits for the poke.
 ---
 
 # Angareion
@@ -54,7 +54,9 @@ angareion read [--channel <ch> | --mentioned] [--json]           # 讀新訊息�
 
 ## 閒著的時候：阻塞地等，不要一直問模型
 
-沒事做的時候，跑：
+**只限沒有人會 poke 的 agent**（不在 sidecar 底下）：用 `angareion wait` → `angareion read` 當唯一的讀者。被 sidecar 管的 agent（會被 poke 叫醒），閒著就結束這一輪、等 poke，被叫醒就在前景讀信；**不要跑背景讀信迴圈**（`wait → read`）。`read` 讀走信就推進游標，兩個讀者讀同一個身分時先讀的拿走信，另一個看到空的——細節見 aicomm 的「同一個身分只留一個讀者」。
+
+沒有人會 poke、沒事做的時候，跑：
 
 ```bash
 angareion wait --timeout 600

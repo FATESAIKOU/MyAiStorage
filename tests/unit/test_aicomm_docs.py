@@ -99,13 +99,14 @@ def test_skill_states_the_one_reader_rule_itself():
     text = _skill()
     assert "不要跑背景讀信迴圈" in text
     assert "**不能**當成「背景只等、不讀」" in text
+    assert "wait 之後會接著 read" in text
     assert "才用 `aicomm inbox --wait` 當**唯一**的讀者" in text
 
 
 def test_docs_state_the_one_reader_rule_itself():
     text = DOCS.read_text(encoding="utf-8")
     assert "不跑背景讀信迴圈" in text
-    assert "當唯一的讀者" in text
+    assert "沒有人會 poke 的，才用 `aicomm inbox --wait` 當唯一的讀者" in text
 
 
 def test_idle_wait_is_limited_to_agents_nobody_pokes():
