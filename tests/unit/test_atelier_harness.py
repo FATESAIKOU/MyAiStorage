@@ -617,6 +617,38 @@ def test_every_pm_harness_keeps_reviews_by_non_authors():
         assert not found.errors, f"{rel}: {found.errors}"
 
 
+#: What the PMO `v2` (#246, aligned to the handbook at 44ec9dc) must say in its body:
+#: the merge rules incl. the transition clause, the first-line conventions, and
+#: the secretary rule. Only the sentences the handbook makes binding.
+PMO_V2_KEY_SENTENCES = (
+    "worker 上的團隊 PM 不 merge",
+    "不請求、不轉交",
+    "被安全檢查擋下的動作不接手",
+    "作者：<provider/model>。…",
+    "審查：<provider/model> 結論：可以 merge",
+    "只能回答，不能觸發有副作用的動作",
+    "秘書就是 PMO",
+)
+PMO_V2_REL = "atelier/pmo/pm/v2.md"
+
+
+def _missing_pmo_v2_sentences(text: str) -> list[str]:
+    return [sentence for sentence in PMO_V2_KEY_SENTENCES if sentence not in text]
+
+
+def test_the_pmo_v2_states_the_merge_conventions_and_the_secretary_rule():
+    text = (REPO / PMO_V2_REL).read_text(encoding="utf-8")
+    found = findings_for(PMO_V2_REL, text)
+    assert not found.errors, found.errors
+    assert not _missing_pmo_v2_sentences(text)
+
+
+@pytest.mark.parametrize("sentence", PMO_V2_KEY_SENTENCES)
+def test_a_dropped_pmo_v2_key_sentence_is_reported(sentence):
+    text = (REPO / PMO_V2_REL).read_text(encoding="utf-8")
+    assert _missing_pmo_v2_sentences(text.replace(sentence, "")) == [sentence]
+
+
 def test_a_single_environment_capability_name_only_warns():
     """共用一份的職務不該綁單一環境的能力名：警告、不擋（design D6／D7）。"""
     text = _v1_text().replace("### channel\n", "### angareion\n")
