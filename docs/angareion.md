@@ -106,7 +106,7 @@ attachments: []
 - `urgency` 是 0～9 的整數，預設 5。
 - **`mentions`（選填）**：AI 名的清單，`to` 之外再叫的人。序列化固定寫成**一行 flow 形式** `mentions: [mypmo-pm-m1, mylinuxpool-impl-w1-1]`（不是區塊清單；TS 端手寫的解析器靠這個），清單空就整行省略。**送嚴讀寬**：送出時每個都要是當前文法的 AI 名、不能重複；讀取時舊文法的名字也收（跟 `from`／`to` 一樣），型別不對就當沒有、壞的項目與重複的丟掉，整則訊息照收。
 - **`in_reply_to`（選填）**：被回覆那則訊息的 `id`（26 字 Crockford base32 的 ULID），沒有就省略。送出時不是 ULID → 拒絕；讀取時壞值當沒有、整則照收。
-- **這兩欄不升版**（`angareion: 1` 不動）。**順序：讀者先升級、再送 mentions**——舊版讀者不認得 `mentions`，只被 mention 而不是 `to` 的舊讀者會漏收那則訊息；確認收件的人都升級了才開始帶 `--mention`。
+- **這兩欄不升版**（`angareion: 1` 不動）。**`--mention` 可以用了**——讀者都已升級（期 4 M2 tasks 2.4，2026-10-25 達成）。舊版讀者不認得 `mentions`，只被 mention 而不是 `to` 的舊讀者會漏收那則訊息；以後若加進**新的讀者種類**，要先確認它讀得懂 `mentions`。
 - `attachments` 每項是 `{"name": …, "ref": …}`（連結）或 `{"name": …, "inline": …}`（小檔的內容），兩者恰有一個。指令上的 `--ref NAME=LOCATOR` 產生 `ref`、`--attach NAME=PATH` 把檔案內容讀進來產生 `inline`。
 - 一則訊息（含 front matter）上限 65536 字元。
 
