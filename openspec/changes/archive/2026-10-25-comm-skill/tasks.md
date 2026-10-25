@@ -28,20 +28,22 @@
 
 ## 3. 分發（跨 repo；PMO 排）
 
-- [ ] 3.1 MyLinuxPool：映像建置用 tool-pins 同一個 sha 多裝 `aicomm`、放 `skills/aicomm/SKILL.md`（照 `docs/angareion.md`「說明檔（skill）」）
+- [x] 3.1 MyLinuxPool：映像建置用 tool-pins 同一個 sha 多裝 `aicomm`、放 `skills/aicomm/SKILL.md`（照 `docs/angareion.md`「說明檔（skill）」）。MyLinuxPool #376 已做（PMO 2026-10-25 告知：四台 worker 已換映像）
 - [x] 3.2 Mac：PMO 與各 PM 的安裝步驟（`uv tool install` 同 sha＋說明檔位置）——現況【未知】，先查。2026-10-25 已裝：Mac 改用每個 sha 一個 venv（不是 `uv tool install`），`angareion` 與 `aicomm` 同 sha、symlink 一起換；說明檔不放全域 skills，改在 Mac 環境說明加一節（那一節由 MyLinuxPool#376 加；#376 不做安裝）
-- [ ] 3.3 各環境說明（`--append`）加一行：溝通用 `aicomm`
+- [x] 3.3 各環境說明（`--append`）加一行：溝通用 `aicomm`。已做（PMO 2026-10-25 告知：Mac 與 worker 的環境說明都有「溝通用 aicomm」一節）
 
 ## 4. harness（下一次改版時；不單獨出版本，除非 V6 實測不可靠）
+
+**搬到 #236**（PMO 2026-10-25：等下一次 harness 改版一起做；本 change 歸檔不等它）。下面兩項留原文，不在這裡勾。
 
 - [ ] 4.1 `KNOWN_CAPABILITIES` 加 `comm`（`tests/unit/test_atelier_harness.py`）
 - [ ] 4.2 pm／impl／rev 的下一版 `capabilities` 加 `comm`；正文只寫能力
 
 ## 5. MyPMO（別的 repo；只列）
 
-- [ ] 5.1 `dispatch.py reply` **對 Mac team** 改為呼叫 `aicomm send`，由 PMO 決定叫醒失敗要不要保留 exit 2；**worker team 保留現行**（經轉發埠）
-- [ ] 5.2 觀察一個 PM 週期後 Mac 路徑的舊 `reply` 標 deprecated；`send`／`poke`／`watch`／`open` 保留
-- [ ] 5.3 worker team 的叫醒長期歸屬（PMO 經轉發埠，或 worker 上的 aicomm 自己叫醒同台 PM）——另案
+- [x] 5.1 `dispatch.py reply` **對 Mac team** 改為呼叫 `aicomm send`，由 PMO 決定叫醒失敗要不要保留 exit 2；**worker team 保留現行**（經轉發埠）。FATESAIKOU/MyPMO#183（PR #184）已做
+- [ ] 5.2 觀察一個 PM 週期後 Mac 路徑的舊 `reply` 標 deprecated；`send`／`poke`／`watch`／`open` 保留。**搬到 FATESAIKOU/MyPMO#190**
+- [ ] 5.3 worker team 的叫醒長期歸屬（PMO 經轉發埠，或 worker 上的 aicomm 自己叫醒同台 PM）——另案。**搬到 FATESAIKOU/MyPMO#191**
 
 ## 6. 驗收
 

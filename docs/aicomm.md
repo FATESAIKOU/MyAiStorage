@@ -1,6 +1,6 @@
 # aicomm
 
-AI 之間的溝通指令（工單 MyAiStorage#212；設計在 `openspec/changes/comm-skill/`）。使用說明給 agent 看的是 `skills/aicomm/SKILL.md`，這份記設計上的對照。
+AI 之間的溝通指令（工單 MyAiStorage#212；設計在 `openspec/changes/archive/2026-10-25-comm-skill/`，行為規格在 `openspec/specs/comm-skill/spec.md`）。使用說明給 agent 看的是 `skills/aicomm/SKILL.md`，這份記設計上的對照。
 
 ## 它做什麼
 
