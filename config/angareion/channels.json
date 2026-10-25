@@ -28,6 +28,10 @@
       "backend": "aicompany-channel",
       "issue": 2
     },
+    "team-mylinuxpool-m1": {
+      "backend": "aicompany-channel",
+      "issue": 20
+    },
     "team-mylinuxpool-w1": {
       "backend": "aicompany-channel",
       "issue": 8
