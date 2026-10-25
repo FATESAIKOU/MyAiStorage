@@ -110,11 +110,10 @@ def test_split_front_matter_allows_trailing_blanks_like_ts(tail):
 
 
 def test_split_front_matter_takes_the_first_bare_dash_line_and_keeps_the_body():
-    # Keeping `\r\n` in the body is the current behavior; the TS side turns it into
-    # `\n` (differs, see #232).
+    # `\r\n` in the body is read as `\n`, like the TS side (#232).
     raw, body = split_front_matter("---\na: 1\n    ---\n---\nbody\n---\nmore\r\n")
     assert raw == "a: 1\n    ---\n"
-    assert body == "body\n---\nmore\r\n"
+    assert body == "body\n---\nmore\n"
 
 
 @pytest.mark.parametrize("sep", ["\u2028", "\u2029", "\x85", "\x0b", "\x0c", "\x1c"])
@@ -180,3 +179,50 @@ def test_an_unknown_top_level_key_does_not_hurt_the_known_fields():
     msg = parse_message(text)
     assert msg is not None
     assert message_to_dict(msg) == EXPECTED["messages"][name]
+
+
+LOCAL = VECTORS / "local-additions"
+
+
+def test_a_crlf_message_reads_with_lf_content_like_ts():
+    # Local addition (not from MyAiEntry, see PINNED.md): the file is CRLF throughout.
+    raw = (LOCAL / "99-crlf-content.md").read_bytes()
+    assert b"\r\n" in raw
+    msg = parse_message(raw.decode("utf-8"))
+    assert msg is not None
+    want = json.loads((LOCAL / "99-crlf-content.expected.json").read_text(encoding="utf-8"))
+    assert message_to_dict(msg) == want
+    assert msg.content == "body\nmore\n"
+
+
+def test_serialize_message_sends_crlf_content_and_it_reads_as_lf():
+    msg = _message_with_inline("plain")
+    msg.content = "body\r\nmore\r\n"
+    text = serialize_message(msg)
+    assert text.endswith("---\nbody\r\nmore\r\n")
+    back = parse_message(text)
+    assert back is not None
+    assert back.content == "body\nmore\n"
+
+
+def test_split_front_matter_turns_crlf_into_lf_in_the_content():
+    assert split_front_matter("---\na: 1\n---\nbody\r\nmore\r\n") == ("a: 1\n", "body\nmore\n")
+
+
+def test_split_front_matter_reads_a_crlf_front_matter():
+    assert split_front_matter("---\r\na: 1\r\n---\r\nbody\r\n") == ("a: 1\n", "body\n")
+
+
+def test_split_front_matter_keeps_a_lone_cr():
+    raw, body = split_front_matter("---\na: 1\n---\nx\ry\r\r\nz\r")
+    assert raw == "a: 1\n"
+    assert body == "x\ry\r\nz\r"
+
+
+def test_parse_message_reads_the_crlf_example_of_the_ticket():
+    msg = parse_message(
+        "---\nangareion: 1\nid: 01JB0000000000000000000098\nat: '2026-10-25T01:00:00+00:00'\n"
+        "from: mypmo-pm-m1\nchannel: general\nurgency: 5\nattachments: []\n---\nbody\r\nmore\r\n"
+    )
+    assert msg is not None
+    assert msg.content == "body\nmore\n"

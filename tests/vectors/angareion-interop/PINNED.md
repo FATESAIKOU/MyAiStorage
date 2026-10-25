@@ -20,3 +20,12 @@ git -C <MyAiEntry 的 clone> archive 801013c test/fixtures/angareion-interop | t
 `python-written-py-cannot-read/` 的兩則（10、11）在 `split_front_matter` 修好（#231）之前 `parse_message` 讀不回；修好後由測試覆蓋。
 
 `python-written-py-cannot-read/` 併進主資料要兩個 repo 一起做（另開單），不要單邊併。
+
+## 本地新增（不是來源的檔）
+
+`local-additions/` 裡的檔是這個 repo 自己加的，**不是**從 MyAiEntry 複製來的（#232）：
+
+- `99-crlf-content.md`：整份訊息（front matter 與 content）的行尾都是 `\r\n`，用位元組寫成。
+- `99-crlf-content.expected.json`：預期讀出的欄位；content 是 `body\nmore\n`（`\r\n` 讀成 `\n`，同 TS 的 `splitFrontMatter`）。
+
+MyAiEntry 在 TS 那邊補同一則之後，下次釘新 sha 時要把這則併過去（併進 `ts-written/`／`expected.json`，再刪掉這裡的檔）。
