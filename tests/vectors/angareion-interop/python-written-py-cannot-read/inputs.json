@@ -1,0 +1,34 @@
+[
+  {
+    "file": "10-inline-hr-line.md",
+    "id": "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+    "at": "2026-10-25T01:00:00Z",
+    "from": "mypmo-pm-m1",
+    "to": null,
+    "mentions": [],
+    "in_reply_to": null,
+    "channel": "general",
+    "urgency": 5,
+    "attachments": [
+      {"name": "notes.txt", "inline": "before\n---\nafter\n"},
+      {"name": "second.md", "ref": "docs/second.md"}
+    ],
+    "content": "see attached\n"
+  },
+  {
+    "file": "11-inline-markdown-front-matter.md",
+    "id": "01ARZ3NDEKTSV4RRFFQ69G5FB1",
+    "at": "2026-10-25T01:00:00Z",
+    "from": "mypmo-pm-m1",
+    "to": null,
+    "mentions": [],
+    "in_reply_to": null,
+    "channel": "general",
+    "urgency": 5,
+    "attachments": [
+      {"name": "doc.md", "inline": "---\ntitle: A fake doc\ntags: [x, y]\n---\n\n# Heading\n\nbody text\n"},
+      {"name": "second.md", "ref": "docs/second.md"}
+    ],
+    "content": "markdown attached\n\n---\n\nand a rule in the body\n"
+  }
+]

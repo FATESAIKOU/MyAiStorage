@@ -248,22 +248,37 @@ def message_to_dict(message: Message) -> dict[str, Any]:
     }
 
 
+def _is_delimiter(line: str) -> bool:
+    """Whether a line is a front matter delimiter: `---` at column 0, then only blanks.
+
+    Same rule as the TS side (`/^---[ \t\r]*$/`): no indent, but spaces, tabs
+    and `\r` may follow. PyYAML writes a `---` line of an inline attachment as
+    an indented continuation (`    ---`), which is not a boundary.
+    """
+    return line.rstrip("\r\n \t") == "---"
+
+
 def split_front_matter(text: str) -> tuple[str, str]:
     """Split text into raw front matter YAML and content.
 
-    Only the first closing `---` line is considered the boundary.
-    Any `---` in content is preserved.
+    The opening and closing delimiters are `---` lines (not indented: an
+    indented `---` belongs to the YAML; trailing blanks are allowed). Only the first
+    closing `---` line is considered the boundary. Any `---` in content is
+    preserved.
     """
     if not text.startswith("---"):
         raise MessageValidationError("Message does not start with front matter delimiter '---'")
 
-    lines = text.splitlines(keepends=True)
-    if not lines or lines[0].strip() != "---":
+    # Split on "\n" only: str.splitlines() also breaks at U+2028, \x0b, \x1c...,
+    # which would make a `---` after such a character look like its own line.
+    lines = text.split("\n")
+    lines = [line + "\n" for line in lines[:-1]] + ([lines[-1]] if lines[-1] else [])
+    if not lines or not _is_delimiter(lines[0]):
         raise MessageValidationError("Message first line is not '---'")
 
     closing_index = -1
     for idx in range(1, len(lines)):
-        if lines[idx].strip() == "---":
+        if _is_delimiter(lines[idx]):
             closing_index = idx
             break
 
@@ -317,6 +332,19 @@ def serialize_message(msg: Message) -> str:
     if len(text) > MAX_MESSAGE_LENGTH:
         raise MessageValidationError(
             f"Message length ({len(text)} chars) exceeds maximum limit of {MAX_MESSAGE_LENGTH} chars"
+        )
+
+    # Read it back before it leaves: a message this reader cannot read (or reads
+    # differently) must not be sent (the TS side does the same).
+    try:
+        back = parse_message(text, strict=True)
+    except MessageValidationError as e:
+        raise MessageValidationError(
+            f"Refusing to send: the message cannot be read back from what would be sent ({e})"
+        ) from e
+    if message_to_dict(back) != message_to_dict(msg):
+        raise MessageValidationError(
+            "Refusing to send: the message reads back with different fields than it was written with"
         )
     return text
 

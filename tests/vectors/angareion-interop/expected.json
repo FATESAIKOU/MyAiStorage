@@ -1,0 +1,368 @@
+{
+  "messages": {
+    "01-mentions-attachments-reply.md": {
+      "id": "01JB0000000000000000000001",
+      "at": "2026-10-25T01:00:00+00:00",
+      "from": "mypmo-pm-m1",
+      "to": "mylinuxpool-impl-w1-1",
+      "channel": "general",
+      "urgency": 5,
+      "mentions": [
+        "myaientry-secretary-p1",
+        "mylinuxpool-rev-w1-1"
+      ],
+      "in_reply_to": "01JB0000000000000000000000",
+      "attachments": [
+        {
+          "name": "plan.md",
+          "ref": "gh://example/plan"
+        },
+        {
+          "name": "note.txt",
+          "inline": "x: y"
+        }
+      ],
+      "content": "full message\n"
+    },
+    "02-broadcast-mentions-only.md": {
+      "id": "01JB0000000000000000000002",
+      "at": "2026-10-25T01:01:00+00:00",
+      "from": "mypmo-pm-m1",
+      "to": null,
+      "channel": "general",
+      "urgency": 3,
+      "mentions": [
+        "myaientry-secretary-p1"
+      ],
+      "in_reply_to": null,
+      "attachments": [],
+      "content": "broadcast that mentions one reader\n"
+    },
+    "03-to-and-mentions.md": {
+      "id": "01JB0000000000000000000003",
+      "at": "2026-10-25T01:02:00+00:00",
+      "from": "mylinuxpool-impl-w1-1",
+      "to": "myaientry-secretary-p1",
+      "channel": "secretary-pmo",
+      "urgency": 7,
+      "mentions": [
+        "mylinuxpool-impl-w1-1",
+        "mypmo-pm-m1"
+      ],
+      "in_reply_to": null,
+      "attachments": [
+        {
+          "name": "log.txt",
+          "ref": "gh://example/log"
+        }
+      ],
+      "content": "to someone, mentions others\n"
+    },
+    "04-legacy-shape.md": {
+      "id": "01JB0000000000000000000004",
+      "at": "2026-10-25T01:03:00+00:00",
+      "from": "mylinuxpool-impl-w1-1",
+      "to": "mypmo-pm-m1",
+      "channel": "general",
+      "urgency": 5,
+      "mentions": [],
+      "in_reply_to": null,
+      "attachments": [],
+      "content": "old shape: no new fields\n"
+    },
+    "05-legacy-broadcast.md": {
+      "id": "01JB0000000000000000000005",
+      "at": "2026-10-25T01:04:00+00:00",
+      "from": "mypmo-pm-m1",
+      "to": null,
+      "channel": "general",
+      "urgency": 5,
+      "mentions": [],
+      "in_reply_to": null,
+      "attachments": [],
+      "content": "old shape broadcast\n"
+    },
+    "06-multiline-inline.md": {
+      "id": "01JB0000000000000000000006",
+      "at": "2026-10-25T01:06:00+00:00",
+      "from": "mylinuxpool-impl-w1-1",
+      "to": "mypmo-pm-m1",
+      "channel": "general",
+      "urgency": 5,
+      "mentions": [],
+      "in_reply_to": null,
+      "attachments": [
+        {
+          "name": "multi.txt",
+          "inline": "line one\n\nsecond: has colon\n- dash item\n  indented\nlast\n"
+        },
+        {
+          "name": "after.txt",
+          "ref": "gh://example/after"
+        }
+      ],
+      "content": "attachments with awkward scalars\n"
+    },
+    "07-long-inline.md": {
+      "id": "01JB0000000000000000000007",
+      "at": "2026-10-25T01:07:00+00:00",
+      "from": "mylinuxpool-impl-w1-1",
+      "to": "mypmo-pm-m1",
+      "channel": "general",
+      "urgency": 5,
+      "mentions": [
+        "myaientry-secretary-p1"
+      ],
+      "in_reply_to": null,
+      "attachments": [
+        {
+          "name": "long.txt",
+          "inline": "The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog. The quick brown fox jumps over the lazy dog."
+        },
+        {
+          "name": "wrapped-dq.txt",
+          "inline": "tab\twordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy wordy\nend"
+        }
+      ],
+      "content": "attachments with awkward scalars\n"
+    },
+    "08-chinese-inline.md": {
+      "id": "01JB0000000000000000000008",
+      "at": "2026-10-25T01:08:00+00:00",
+      "from": "mylinuxpool-impl-w1-1",
+      "to": "mypmo-pm-m1",
+      "channel": "general",
+      "urgency": 5,
+      "mentions": [],
+      "in_reply_to": null,
+      "attachments": [
+        {
+          "name": "zh-multi.txt",
+          "inline": "中文內容，含標點：測試\n第二行 😀"
+        },
+        {
+          "name": "zh-long.txt",
+          "inline": "中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文中文"
+        }
+      ],
+      "content": "attachments with awkward scalars\n"
+    },
+    "09-quote-hash-inline.md": {
+      "id": "01JB0000000000000000000009",
+      "at": "2026-10-25T01:09:00+00:00",
+      "from": "mylinuxpool-impl-w1-1",
+      "to": "mypmo-pm-m1",
+      "channel": "general",
+      "urgency": 5,
+      "mentions": [],
+      "in_reply_to": null,
+      "attachments": [
+        {
+          "name": "q.txt",
+          "inline": "it's # not a comment"
+        },
+        {
+          "name": "q-multi.txt",
+          "inline": "it's here\nsay \"hi\" and back\\slash # tail\n"
+        },
+        {
+          "name": "tab.txt",
+          "inline": "tab\there\nnext"
+        }
+      ],
+      "content": "attachments with awkward scalars\n"
+    }
+  },
+  "readers": {
+    "mypmo-pm-m1": {
+      "01-mentions-attachments-reply.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "02-broadcast-mentions-only.md": {
+        "recipient": true,
+        "mention": false
+      },
+      "03-to-and-mentions.md": {
+        "recipient": true,
+        "mention": true
+      },
+      "04-legacy-shape.md": {
+        "recipient": true,
+        "mention": true
+      },
+      "05-legacy-broadcast.md": {
+        "recipient": true,
+        "mention": false
+      },
+      "06-multiline-inline.md": {
+        "recipient": true,
+        "mention": true
+      },
+      "07-long-inline.md": {
+        "recipient": true,
+        "mention": true
+      },
+      "08-chinese-inline.md": {
+        "recipient": true,
+        "mention": true
+      },
+      "09-quote-hash-inline.md": {
+        "recipient": true,
+        "mention": true
+      }
+    },
+    "mylinuxpool-impl-w1-1": {
+      "01-mentions-attachments-reply.md": {
+        "recipient": true,
+        "mention": true
+      },
+      "02-broadcast-mentions-only.md": {
+        "recipient": true,
+        "mention": false
+      },
+      "03-to-and-mentions.md": {
+        "recipient": true,
+        "mention": true
+      },
+      "04-legacy-shape.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "05-legacy-broadcast.md": {
+        "recipient": true,
+        "mention": false
+      },
+      "06-multiline-inline.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "07-long-inline.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "08-chinese-inline.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "09-quote-hash-inline.md": {
+        "recipient": false,
+        "mention": false
+      }
+    },
+    "myaientry-secretary-p1": {
+      "01-mentions-attachments-reply.md": {
+        "recipient": true,
+        "mention": true
+      },
+      "02-broadcast-mentions-only.md": {
+        "recipient": true,
+        "mention": true
+      },
+      "03-to-and-mentions.md": {
+        "recipient": true,
+        "mention": true
+      },
+      "04-legacy-shape.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "05-legacy-broadcast.md": {
+        "recipient": true,
+        "mention": false
+      },
+      "06-multiline-inline.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "07-long-inline.md": {
+        "recipient": true,
+        "mention": true
+      },
+      "08-chinese-inline.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "09-quote-hash-inline.md": {
+        "recipient": false,
+        "mention": false
+      }
+    },
+    "mylinuxpool-rev-w1-1": {
+      "01-mentions-attachments-reply.md": {
+        "recipient": true,
+        "mention": true
+      },
+      "02-broadcast-mentions-only.md": {
+        "recipient": true,
+        "mention": false
+      },
+      "03-to-and-mentions.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "04-legacy-shape.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "05-legacy-broadcast.md": {
+        "recipient": true,
+        "mention": false
+      },
+      "06-multiline-inline.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "07-long-inline.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "08-chinese-inline.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "09-quote-hash-inline.md": {
+        "recipient": false,
+        "mention": false
+      }
+    },
+    "mylinuxpool-test-w1-1": {
+      "01-mentions-attachments-reply.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "02-broadcast-mentions-only.md": {
+        "recipient": true,
+        "mention": false
+      },
+      "03-to-and-mentions.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "04-legacy-shape.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "05-legacy-broadcast.md": {
+        "recipient": true,
+        "mention": false
+      },
+      "06-multiline-inline.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "07-long-inline.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "08-chinese-inline.md": {
+        "recipient": false,
+        "mention": false
+      },
+      "09-quote-hash-inline.md": {
+        "recipient": false,
+        "mention": false
+      }
+    }
+  }
+}
