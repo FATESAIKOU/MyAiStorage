@@ -4,6 +4,8 @@ harness ＝ 一個職務一個版本的 UTF-8 Markdown 檔，放 `atelier/<team>
 
 **現況**：`atelier/worker-team/pm/` 有 `v0.md`（期 1 單人暫定）、`v1.md`（有隊員的 PM）與 `v2.md`（#200：c／d 由該 repo 的 PM 自己 merge、team PM 不 merge；環境不再寫死清單）；`impl/` 與 `rev/` 各有 `v1.md`（隊員專屬的實作與審查職務，`draft`）。**`v0` 已被 `v1`、`v1` 已被 `v2` 取代**——`atelier show atelier:worker-team-pm` 不給版本讀到 `v2`。`v0` 檔因為 append-only 不改（`status` 也不原地改），所以它不會自己標 `deprecated`（`v1` 同理）。
 
+`atelier/pmo/pm/` 有 `v1.md`（#226）與 `v2.md`（#246：對齊 MyPMO handbook `44ec9dc`——合併規矩含過渡條、PR／審查第一行慣例、秘書＝PMO 的叫人與派工）。**`v1` 已被 `v2` 取代**——`atelier show atelier:pmo-pm` 不給版本讀到 `v2`；`v1` 因為 append-only 不改，不會自己標 `deprecated`。
+
 ## frontmatter（檔的第一個區塊，YAML；OKF v0.2 對齊，不認得的欄位保留）
 
 | 欄位 | 必填 | 值 |

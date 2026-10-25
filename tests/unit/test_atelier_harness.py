@@ -109,6 +109,24 @@ REV_KEY_SENTENCES = (
 #: never the author. `rev` writes it differently from `pm`'s「審查一律非作者」.
 REV_REVIEW_BY_NON_AUTHOR = "不審自己的作品"
 
+#: What the PMO `v2` (#246, aligned to the handbook at 44ec9dc) and later must keep
+#: in its body: the merge rules incl. the transition clause, the first-line
+#: conventions, and the secretary rule. Chosen so that flipping the meaning (not
+#: only deleting the words) turns the check red.
+PMO_V2_KEY_SENTENCES = (
+    "團隊 PM（不是該 repo 的 PM；由你開去做指定工單的，不論在哪台機器）不 merge",
+    "不請求、不轉交",
+    "你確認三件事後才代 merge",
+    "非作者的審查留言對準目前 head",
+    "代 merge 時指定 head 比對（head 不符就不合）",
+    "被安全檢查擋下的動作不接手",
+    "作者：<provider/model>。…",
+    "審查：<provider/model> 結論：可以 merge",
+    "只能回答，不能觸發有副作用的動作",
+    "叫人不建單、不派工",
+    "秘書就是 PMO",
+)
+
 #: Content limits for `v>=1` (B-15/B-16): the body names capabilities, never the
 #: concrete tool, model, address or path of one environment. Deliberately NOT in
 #: the lists below - 一般詞 the rules themselves need (`session`, `輪換表`,
@@ -212,6 +230,7 @@ V0_REL = "atelier/worker-team/pm/v0.md"
 V1_REL = "atelier/worker-team/pm/v1.md"
 IMPL_REL = "atelier/worker-team/impl/v1.md"
 REV_REL = "atelier/worker-team/rev/v1.md"
+PMO_V2_REL = "atelier/pmo/pm/v2.md"
 
 
 @dataclass
@@ -398,6 +417,13 @@ def findings_for(path: str, text: str) -> Findings:
             if sentence not in body:
                 found.errors.append(
                     f"{path}: v1 起的 pm 職務缺關鍵句「{sentence}」"
+                    "（know/do/judge/dont 合起來至少出現一次）")
+    if team == "pmo" and role == "pm" and version_match is not None \
+            and int(version_match.group(1)) >= 2:
+        for sentence in PMO_V2_KEY_SENTENCES:
+            if sentence not in body:
+                found.errors.append(
+                    f"{path}: v2 起的 pmo pm 職務缺關鍵句「{sentence}」"
                     "（know/do/judge/dont 合起來至少出現一次）")
     for role_with_keys, sentences in (("impl", IMPL_KEY_SENTENCES),
                                       ("rev", REV_KEY_SENTENCES)):
@@ -673,6 +699,7 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     [(IMPL_REL, sentence, "關鍵句") for sentence in IMPL_KEY_SENTENCES]
     + [(REV_REL, sentence, "關鍵句") for sentence in REV_KEY_SENTENCES]
     + [(REV_REL, REV_REVIEW_BY_NON_AUTHOR, "rev 職務要寫")]
+    + [(PMO_V2_REL, sentence, "關鍵句") for sentence in PMO_V2_KEY_SENTENCES]
 )
 
 
