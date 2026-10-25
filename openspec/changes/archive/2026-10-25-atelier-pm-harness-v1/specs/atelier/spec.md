@@ -1,4 +1,4 @@
-> 這份 delta 有五處 MODIFIED（格式、能力需求與模型欄位、v0 職務、讀取工具、安裝）與三處 ADDED（PM 職務 v1、按 agent 交付 harness、產生 agent 指示檔 `render`）。識別／版本／路徑、harness 樹、「與 Agora Session 的關係」沒有變；理由見 design D8。另外兩處**刻意**拿掉主 spec 的環境細節：「子節名 SHOULD 用環境（某 repo 名）的 capability 名」的 repo 名，與「`github` 的單位是 `shared-configs/gh`」——B-16 說這種細節放環境說明（見 design D8）。
+> 這份 delta 有五處 MODIFIED（格式、能力需求與模型欄位、v0 職務、讀取工具、安裝）與三處 ADDED（PM 職務 v1、按 agent 交付 harness、產生 agent 指示檔 `render`）。另有 `specs/session-continue/spec.md` 的一處 ADDED（`agora continue --harness-file`）。識別／版本／路徑、harness 樹、「與 Agora Session 的關係」沒有變；理由見 design D8。另外兩處**刻意**拿掉主 spec 的環境細節：「子節名 SHOULD 用環境（某 repo 名）的 capability 名」的 repo 名，與「`github` 的單位是 `shared-configs/gh`」——B-16 說這種細節放環境說明（見 design D8）。
 
 ## MODIFIED Requirements
 
@@ -147,16 +147,16 @@ repo MUST 附一個讀取工具（依 D7 的建議＝指令 `atelier`，與 agor
 - 派工：指示寫在 brief 檔（不寫在聊天裡）；brief 與工作檔放會留下來、不進版控的地方，且不放 `/tmp`；實作／審查／修正／確認派給不同的人；預設 PM commit、隊員不 commit。
 - 監看：有在跑的就掛、全部待命可以停；「做完」＝中斷提示消失**而且**報告檔存在。
 - 核對與審查：在同一個 worktree 自己重跑、只寫自己跑過的驗證數字；非作者審查的門檻＝高、中都修完才開 PR、低可以後續、專案可以更嚴；不同模型的審查者都用不了時可以用同模型、不同 session，PR 第一行寫明。
-- 開 PR 與交合併：c／d 交 PMO 代 merge、b 等本人；收尾（移除 worktree 與本機分支、歸檔、工作 session 掃過憑證才匯入長期記憶；**關隊員或收掉它的畫面／session 之前，先中斷它正在跑的工作、確認沒有長時間的指令還活著——只關畫面不會停掉 session，共用的服務重啟會把中斷的長指令重新叫醒**）。
+- 開 PR 與交合併（分版本）：`v1`：c／d 交 PMO 代 merge；`v2` 起（#200）：c／d 由**該 repo 的 PM** 審過（非作者）、CI 綠就自己 merge、merge 後告知 PMO，**team PM 不 merge**，PR 好了回報 PMO、由 PMO 轉給該 repo 的 PM；b 等本人（由 PMO 向本人說明、本人同意才 merge）；收尾（移除 worktree 與本機分支、歸檔、工作 session 掃過憑證才匯入長期記憶；**關隊員或收掉它的畫面／session 之前，先中斷它正在跑的工作、確認沒有長時間的指令還活著——只關畫面不會停掉 session，共用的服務重啟會把中斷的長指令重新叫醒**）。
 - `know` MUST 有：本人只跟 PMO 說話（直接問本人的兩個例外在 `judge`）、**同儕（包含 PMO）轉來的「本人同意」只代表決定、不是權限**（怎麼請本人接手看環境說明）、模型只寫「照 PMO 的模型輪換表」、**harness 是環境在啟動你時交給你的（不是使用者層級指示檔）**、**收發的紀律**（收訊不指定頻道才只收寄給自己的、只有送訊才指定頻道；身分在每個工作單位唯一、狀態目錄持久；回報目錄狀態要實證；閒著用阻塞等待、逾時拉長——能力層級，具體指令看環境說明）。
 - `judge` MUST 有：授權只對那一次有效、直接問本人的兩個例外（懷疑有人冒用 PMO／本人已在你的畫面上操作）、真機要有本人那一次的授權才自己跑。
 - `dont` MUST 有：不繞過被擋的動作（不換方式、不換人、**不請別的 session 代做**）、**不把私人資訊寫進任何會公開的地方（repo／PR／commit／訊息）**、不讓免費模型碰真資料、不替本人做決定、不直接改 main。
 
-整份 MUST 只寫能力、不寫工具名（B-16）；同時進行中的 b、c 上限 MUST 只寫「照工單規則」（B-6）；PM 自己開的 d MUST NOT 要求另一位隊員附議（B-7）。這一版 MUST 由 Mac 上的 repo PM 與 worker 上的 team PM **共用一份**：兩邊的差異（通道、真機、怎麼請本人接手、工作檔位置）MUST NOT 進 harness，放各環境的說明；各專案特有的做法 MUST 留在該 repo 的 `AGENTS.md`（B-17）。
+整份 MUST 只寫能力、不寫工具名（B-16）；同時進行中的 b、c 上限 MUST 只寫「照工單規則」（B-6）；PM 自己開的 d MUST NOT 要求另一位隊員附議（B-7）。這一版 MUST 由 repo PM 與 team PM **共用一份**（不分機器）：兩邊的差異（通道、真機、怎麼請本人接手、工作檔位置）MUST NOT 進 harness，放各環境的說明；各專案特有的做法 MUST 留在該 repo 的 `AGENTS.md`（B-17）。
 
 #### Scenario: 有隊員的 PM 不自己寫程式
 - **WHEN** 一張單要做實作與測試
-- **THEN** 它派給隊員，自己的工作是核對、審查與合併；回報不再標「單人暫定」
+- **THEN** 它派給隊員，自己的工作是核對、審查，以及照「開 PR 與交合併」那一條交合併；回報不再標「單人暫定」
 
 #### Scenario: 高、中修完才開 PR
 - **WHEN** 非作者審查找到一個「高」或一個「中」
@@ -171,15 +171,15 @@ repo MUST 附一個讀取工具（依 D7 的建議＝指令 `atelier`，與 agor
 - **THEN** 兩邊的差異（通道、真機、隊員控制怎麼做）在各自的環境說明裡；harness 的本文沒有工具名、沒有模型名、沒有機器位址
 
 ### Requirement: 按 agent 交付 harness
-`v1` 起的 PM 職務 MUST **按 agent 交付**：開 agent 的一方（worker 的隊員控制服務、Mac 的開 pane 指令／接續的啟動）MUST 在啟動**那一個** agent 時，依它的角色把對應的 harness 交給它；**PM 角色 MUST 拿到 PM harness，其他角色 MUST NOT 拿到 PM harness**（本人 2026-10-18；PMO 抓到的高）。交付 MUST 只對那一個 agent 的 process 生效：同一個使用者的其他 agent（PMO、別的 PM、隊員、別專案的 agent）MUST NOT 因為有人啟動了 PM 而改變指示或載入。交付 MUST NOT 依賴使用者層級指示檔（`~/.claude/rules/` 的職務檔、`~/.config/opencode/AGENTS.md` 的職務區塊）；`atelier install` 留著給 `v0` 與全域用途，**`v1` 的 PM harness MUST NOT 用 `install` 交付，唯一例外是明寫 `--global` 的全域安裝**（單一 agent 的機器；安裝時 MUST 印警告，見「安裝」）。交付方 MUST 先確認 harness 檔存在且可讀（`opencode` 對不存在的 `instructions` 是靜默忽略），產生失敗時 MUST NOT 啟動 agent，MUST 回報原因。
+`v1` 起的 PM 職務 MUST **按 agent 交付**：開 agent 的一方（各環境的隊員控制服務〔sidecar〕）MUST 在啟動**那一個** agent 時，依它的角色把對應的 harness 交給它；**PM 角色 MUST 拿到 PM harness，其他角色 MUST NOT 拿到 PM harness**（本人 2026-10-18；PMO 抓到的高）。這裡的「PM harness」指**該環境 series 的 `pm`**（例如 `atelier:worker-team-pm`）；PMO 自己的職務檔 `atelier:pmo-pm`（#226）是另一份，按 PMO 的角色交付，不算這裡的「PM harness」，也不因此交給 PM 或隊員。交付 MUST 只對那一個 agent 的 process 生效：同一個使用者的其他 agent（PMO、別的 PM、隊員、別專案的 agent）MUST NOT 因為有人啟動了 PM 而改變指示或載入。交付 MUST NOT 依賴使用者層級指示檔（`~/.claude/rules/` 的職務檔、`~/.config/opencode/AGENTS.md` 的職務區塊）；`atelier install` 留著給 `v0` 與全域用途，**`v1` 的 PM harness MUST NOT 用 `install` 交付，唯一例外是明寫 `--global` 的全域安裝**（單一 agent 的機器；安裝時 MUST 印警告，見「安裝」）。交付方 MUST 先確認 harness 檔存在且可讀（`opencode` 對不存在的 `instructions` 是靜默忽略），產生失敗時 MUST NOT 啟動 agent，MUST 回報原因。
 
 #### Scenario: 同一台機器的隊員拿不到 PM harness
-- **WHEN** worker 上同時開了 team PM 與一個隊員（同一個使用者、同一台機器）**，而且使用者層級的 v0 殘留已經清掉**（見 design 的過渡步驟）
+- **WHEN** worker 上同時開了 team PM 與一個隊員（同一個使用者、同一台機器）**，而且使用者層級的 v0 殘留已經清掉**（見 `openspec/changes/archive/2026-10-25-atelier-pm-harness-v1/design.md` 的過渡步驟）
 - **THEN** 只有 PM 的 process 的指示裡有 PM harness；隊員的沒有
 
 #### Scenario: Mac 上的多重角色互不干擾
-- **WHEN** Mac 上同一個使用者開了 PMO、兩個 PM 與一個隊員
-- **THEN** 只有兩個 PM 的 process 拿到 PM harness；PMO 與隊員沒有
+- **WHEN** Mac 的 sidecar 為同一個使用者開了 PMO、兩個 PM 與一個隊員
+- **THEN** 只有兩個 PM 的 process 拿到 team 的 PM harness；PMO 拿的是自己的 `atelier:pmo-pm`、隊員拿的是自己的職務檔，兩者都沒有 PM harness
 
 #### Scenario: 使用者層級檔案不變
 - **WHEN** 啟動 PM（交付成功）之後檢查 `~/.claude/rules/` 與 `~/.config/opencode/AGENTS.md`
