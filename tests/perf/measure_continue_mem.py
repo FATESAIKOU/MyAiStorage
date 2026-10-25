@@ -302,7 +302,7 @@ def count_messages(path: Path) -> int:
 # Stage probes: wrappers around the pipeline's heavy calls (src untouched)
 # ---------------------------------------------------------------------------
 
-PROBED = (("agora.agents.claude", "_pack_aux"), ("agora.agents.claude", "_stream_raw"),
+PROBED = (("agora.agents.claude", "_stream_raw"),
           ("agora.agents.claude", "_read_lines"), ("agora.agents.claude", "_exported"),
           ("agora.agents.claude", "_parse_all"), ("agora.agents.claude", "_pack_raw"),
           ("agora.cli", "reading_of"), ("agora.cli", "_save_continue"),
@@ -314,7 +314,7 @@ PROBED = (("agora.agents.claude", "_pack_aux"), ("agora.agents.claude", "_stream
 # resolves the name: cli's own binding (install() runs after cli is imported, so
 # patching base.reading_of would miss the call from cli.py) and the base global
 # reading_of/format_reading look up at call time.
-SNAPSHOT_STAGES = {"_pack_aux", "_stream_raw", "_read_lines", "_exported", "_pack_raw", "reading_of",
+SNAPSHOT_STAGES = {"_stream_raw", "_read_lines", "_exported", "_pack_raw", "reading_of",
                    "format_reading", "stage"}
 
 

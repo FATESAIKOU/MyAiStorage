@@ -16,6 +16,7 @@ never touched.
 from __future__ import annotations
 
 import base64
+import codecs
 import hashlib
 import io
 import json
@@ -263,20 +264,58 @@ def _count_messages(objs: list[dict]) -> int:
                if o.get("type") in ("user", "assistant") and not _is_noise(o))
 
 
-def _pack_aux(sidecar: Path) -> dict:
-    """{relative-posix-path: text} for everything under <uuid>/ (review N15)."""
-    aux: dict = {}
-    if not sidecar.is_dir():
-        return aux
-    for path in sorted(sidecar.rglob("*")):
-        if not path.is_file():
-            continue
-        raw = path.read_bytes()
-        try:
-            aux[path.relative_to(sidecar).as_posix()] = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            aux[path.relative_to(sidecar).as_posix()] = {"$base64": base64.b64encode(raw).decode()}
-    return aux
+_AUX_CHUNK = 3 << 18   # 768 KiB; a multiple of 3 so base64 pieces concatenate without padding
+
+
+def _read_chunks(path: Path, limit: int) -> Iterator[bytes]:
+    """The first `limit` bytes of `path`, one chunk at a time."""
+    with path.open("rb") as f:
+        while limit > 0:
+            chunk = f.read(min(_AUX_CHUNK, limit))
+            if not chunk:
+                return
+            limit -= len(chunk)
+            yield chunk
+
+
+def _is_utf8(path: Path, size: int) -> bool:
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        for chunk in _read_chunks(path, size):
+            decoder.decode(chunk)
+        decoder.decode(b"", final=True)
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _iter_aux(sidecar: Path) -> Iterator[bytes]:
+    """The aux object as `json.dumps({rel: text | {"$base64": ...}}, ensure_ascii=False)`
+    would spell it (review N15), in pieces: one file's chunk is all that is held (#240).
+
+    A file is read twice - once to learn whether it is UTF-8 (the choice between a text
+    value and `$base64` has to come before the first byte of the value), once to emit it.
+    The second pass stops at the size the first one saw, so a file that grows in between
+    cannot make the value longer than what was checked."""
+    files = [] if not sidecar.is_dir() else [p for p in sorted(sidecar.rglob("*")) if p.is_file()]
+    yield b"{"
+    for i, path in enumerate(files):
+        size = path.stat().st_size
+        key = json.dumps(path.relative_to(sidecar).as_posix(), ensure_ascii=False)
+        yield (", " if i else "").encode("utf-8") + key.encode("utf-8") + b": "
+        if _is_utf8(path, size):
+            decoder = codecs.getincrementaldecoder("utf-8")()
+            yield b'"'
+            for chunk in _read_chunks(path, size):
+                text = decoder.decode(chunk)
+                yield json.dumps(text, ensure_ascii=False)[1:-1].encode("utf-8")
+            yield b'"'
+        else:
+            yield b'{"$base64": "'
+            for chunk in _read_chunks(path, size):
+                yield base64.b64encode(chunk)
+            yield b'"}'
+    yield b"}"
 
 
 #: A Claude session id as Claude Code writes it. `keep_id` becomes a file name,
@@ -577,11 +616,11 @@ def _stream_raw(path: Path, sidecar: Path, out_path: Path, *,
             raise AttributeError(f"'{type(non_dict).__name__}' object has no attribute 'get'")
         if first_error is not None:
             raise first_error
-        aux = _pack_aux(sidecar)
         main_end = size
         main_md5 = digest.copy().hexdigest()
         write(_AUX_SEP)
-        write(json.dumps(aux, ensure_ascii=False).encode("utf-8"))
+        for piece in _iter_aux(sidecar):
+            write(piece)
         write(b"}")
         f.flush()
         os.fsync(f.fileno())
