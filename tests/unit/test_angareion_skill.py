@@ -97,3 +97,15 @@ def test_skill_doc_to_me_definition_counts_mentions_and_the_first_mentioned_read
     line = next(l for l in text.splitlines() if l.startswith("- 不給 `--channel` 時"))
     assert "mentions" in line and "廣播" in line
     assert "從頭讀" in text and "--since" in text
+
+
+def test_idle_wait_is_limited_to_agents_nobody_pokes():
+    text = _text()
+    description = re.search(r"^description: (.*)$", text, re.M).group(1)
+    assert "not managed by a sidecar" in description
+    section = text.split("## 閒著的時候")[1].split("\n## ")[0]
+    assert "只限沒有人會 poke 的 agent" in section
+    assert "被 sidecar 管的 agent" in section and "閒著就結束這一輪、等 poke" in section
+    assert "被叫醒就在前景讀信" in section
+    assert "不要跑背景讀信迴圈" in section
+    assert "同一個身分只留一個讀者" in section

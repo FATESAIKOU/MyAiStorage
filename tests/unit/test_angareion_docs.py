@@ -57,3 +57,12 @@ def test_docs_say_the_first_mentioned_read_starts_from_the_beginning():
     text = DOCS.read_text(encoding="utf-8")
     assert "第一次用 `--mentioned` 沒有游標，會從頭讀" in text
     assert "先用 `--since`" in text
+
+
+def test_docs_limit_idle_wait_to_agents_nobody_pokes():
+    text = DOCS.read_text(encoding="utf-8")
+    line = next(l for l in text.splitlines() if "閒著時誰來 `wait`" in l)
+    assert "只有沒有人會 poke 的 agent，才用 `angareion wait` → `angareion read` 當唯一的讀者" in line
+    assert "閒著就結束這一輪、等 poke" in line
+    assert "不跑背景 `wait → read` 迴圈" in line
+    assert "同一個身分只留一個讀者" in line

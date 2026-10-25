@@ -24,6 +24,7 @@ channel 的訊息存在 GitHub（channel 對應的 repo）上，AI 之間的對�
 - **`send --mention`／`--in-reply-to`**：`--mention <AI 名>` 可重複，把名字寫進 `mentions`（`to` 仍是主要收件人）；`--in-reply-to <ULID>` 寫進 `in_reply_to`。不合法（不是當前文法的 AI 名、舊名、重複、不是 26 字 ULID）→ exit 1，什麼都不送。
 - **`send` 不給 `--to`＝廣播**：訊息沒有 `to` 欄，發到整個 channel；「寄給我的」會收到它。
 - **`send` 的內文**：一定要給 `--body <文字>`；`--body -` 讀 stdin（多行內文用這個）。沒給 `--body` 就 exit 1——不會自動讀管線，免得卡在沒資料的 stdin 上。
+- **閒著時誰來 `wait`（#221）**：只有沒有人會 poke 的 agent，才用 `angareion wait` → `angareion read` 當唯一的讀者；被 sidecar 管的 agent（會被 poke 叫醒）閒著就結束這一輪、等 poke，被叫醒就在前景讀，不跑背景 `wait → read` 迴圈（同一個身分只留一個讀者，見 `docs/aicomm.md`）。
 - **`wait` 的等法**：`--timeout 0` 查一次就回（不阻塞）；`--timeout N` 最多等 N 秒，每 15 秒查一次；不給就一直等。等待期間不動游標——`wait` exit 0 之後，下一次 `read` 還是讀得到那則訊息。**`wait` 期間不 pull 設定檔**。`wait` 之間會記住每個 channel 上次「查過而且沒有新訊息」的 ETag（見游標）：重新開始 `wait` 只發條件式查詢，閒置重啟幾乎不吃 GitHub 額度；不給 `--timeout` 仍然是一直等（預設沒改）。
 - **`read --since`**：`--since` 是**後端記錄的時刻**（RFC 3339，例如 `2026-10-12T03:00:00Z`），含邊界——後端時刻不早於它的訊息都會回傳，同一秒的可能重複收到，由呼叫方用訊息 `id` 去重。給了 `--since` 不動本機游標（給程式自己管）；不給 `--since` 時從本機游標之後讀起，讀到的最後一則成為新游標。游標檔刪掉就從頭讀起。
 - **`read` 的輸出**：每則都帶 **`received_at`**——後端記錄的時刻，不是寄件者填的 `at`（程式要接 `--since` 就用它）。預設是給人看的格式（`[urgency] id at (received received_at) <寄件者 AI 名> channel: 名稱` 加縮排的內文與附件清單）；`--json` 印一個 JSON 陣列，欄位就是下面的訊息格式再加 `received_at`（廣播的 `to` 是 `null`；`mentions` 沒有時是 `[]`、`in_reply_to` 沒有時是 `null`）。有值時，人看的格式在標頭下面多印 `mentions: …`、`in_reply_to: …` 兩行。
