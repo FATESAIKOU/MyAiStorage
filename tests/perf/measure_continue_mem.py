@@ -249,7 +249,7 @@ class SessionGen:
 
 
 def write_session(path: Path, sidecar: Path, target_bytes: int, reserve_bytes: int,
-                  workdir: str) -> None:
+                  workdir: str, aux_bytes: int = 0) -> None:
     """Generate the main jsonl (+subagent sidecar) up to ~target_bytes."""
     gen = SessionGen(path.stem, workdir, datetime(2026, 10, 19, 9, 0, 0, tzinfo=timezone.utc))
     aux_path = sidecar / "subagents" / f"agent-{AGENT_HEX}.jsonl"
@@ -269,6 +269,9 @@ def write_session(path: Path, sidecar: Path, target_bytes: int, reserve_bytes: i
                 for sub in gen.sidecar_lines(2, 3):
                     g.write(sub)
         f.write(gen.bookkeeping())
+        while g.tell() < aux_bytes:             # #116 item 2: a big subagent sidecar
+            for sub in gen.sidecar_lines(48, 1):
+                g.write(sub)
     (sidecar / "subagents" / f"agent-{AGENT_HEX}.meta.json").write_text(json.dumps(
         {"agentType": "Explore", "description": "查設定", "requestNonInteractive": True,
          "requestShape": "direct", "spawnDepth": 1, "toolUseId": "toolu_meta"}))
@@ -299,7 +302,8 @@ def count_messages(path: Path) -> int:
 # Stage probes: wrappers around the pipeline's heavy calls (src untouched)
 # ---------------------------------------------------------------------------
 
-PROBED = (("agora.agents.claude", "_read_lines"), ("agora.agents.claude", "_exported"),
+PROBED = (("agora.agents.claude", "_pack_aux"), ("agora.agents.claude", "_stream_raw"),
+          ("agora.agents.claude", "_read_lines"), ("agora.agents.claude", "_exported"),
           ("agora.agents.claude", "_parse_all"), ("agora.agents.claude", "_pack_raw"),
           ("agora.cli", "reading_of"), ("agora.cli", "_save_continue"),
           ("agora.agents.base", "format_reading"), ("agora.store", "stage"),
@@ -310,7 +314,7 @@ PROBED = (("agora.agents.claude", "_read_lines"), ("agora.agents.claude", "_expo
 # resolves the name: cli's own binding (install() runs after cli is imported, so
 # patching base.reading_of would miss the call from cli.py) and the base global
 # reading_of/format_reading look up at call time.
-SNAPSHOT_STAGES = {"_read_lines", "_exported", "_pack_raw", "reading_of",
+SNAPSHOT_STAGES = {"_pack_aux", "_stream_raw", "_read_lines", "_exported", "_pack_raw", "reading_of",
                    "format_reading", "stage"}
 
 
@@ -383,9 +387,64 @@ class StageProbes:
         return out
 
 
+class PeakSnapshotter(threading.Thread):
+    """Round-1 helper: snapshot tracemalloc when the traced size is at a new high.
+
+    The stage snapshots above are taken when a call *returns*, i.e. after its
+    temporaries are gone; the real peak happens inside. Polling the traced size
+    and snapshotting on every new high (>=3%% above the last) keeps the last
+    snapshot close to the peak, so its top lines say what holds the peak.
+    """
+
+    def __init__(self, every: float = 0.003):
+        super().__init__(daemon=True)
+        import tracemalloc
+        self._tm = tracemalloc
+        self.every = every
+        self._halt = threading.Event()
+        self.best = 0
+        self.snap = None
+
+    def run(self) -> None:
+        while not self._halt.is_set():
+            cur = self._tm.get_traced_memory()[0]
+            if cur > self.best * 1.03:
+                self.best = cur
+                self.snap = self._tm.take_snapshot()
+            self._halt.wait(self.every)
+
+    def stop(self) -> list[str]:
+        self._halt.set()
+        self.join()
+        if self.snap is None:
+            return []
+        out = [f"peak-snapshot traced={self.best / (1 << 20):.1f} MB"]
+        for s in self.snap.statistics("lineno")[:10]:
+            out.append(f"{s.size / (1 << 20):7.1f} MB  {s.count:8d} blocks  "
+                       f"{s.traceback.format()[0].strip()}")
+        return out
+
+
 # ---------------------------------------------------------------------------
 # The run itself
 # ---------------------------------------------------------------------------
+
+def assert_isolated(root: Path) -> None:
+    """Refuse to run unless cache / state / config all resolve under the temp root.
+
+    Runs in THIS process, after make_env and before anything is measured; the
+    #116 probe once touched a real index, so a failed assert stops the run.
+    """
+    from agora.store import Paths
+    p = Paths.from_env()
+    base = root.resolve()
+    for name, d in (("config", p.config), ("cache", p.cache), ("state", p.state)):
+        assert d.resolve().is_relative_to(base), f"NOT ISOLATED: {name}={d} not under {base}"
+    assert Path(os.environ["HOME"]).resolve().is_relative_to(base), "NOT ISOLATED: HOME"
+    assert Path(os.environ["TMPDIR"]).resolve().is_relative_to(base), "NOT ISOLATED: TMPDIR"
+    print(f"[probe] isolation OK: config={p.config} cache={p.cache} state={p.state} "
+          f"HOME={os.environ['HOME']} TMPDIR={os.environ['TMPDIR']} (all under {base})", flush=True)
+
 
 def make_env(root: Path) -> None:
     home = root / "home"
@@ -428,6 +487,9 @@ def main() -> int:
                          "child: one full cli._periodic_write round per cycle - the "
                          "heavy work in a fresh agora.round_child process, which is "
                          "what the shell actually does since impl-mem-subproc")
+    ap.add_argument("--aux-frac", type=float, default=0.0,
+                    help="share of --size-mb that is the subagent sidecar (#116 item 2); "
+                         "the rest is main. session MB in the table is main + sidecar")
     ap.add_argument("--top", type=int, default=10)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--keep", action="store_true", help="keep the playground (debug)")
@@ -438,12 +500,13 @@ def main() -> int:
 
     root = Path(tempfile.mkdtemp(prefix=f"agora-mem-{args.size_mb}mb-"))
     result: dict = {"size_mb": args.size_mb, "rounds": args.rounds,
-                    "growth_pct": args.growth_pct, "tracemalloc": args.tracemalloc,
+                    "growth_pct": args.growth_pct, "aux_frac": args.aux_frac, "tracemalloc": args.tracemalloc,
                     "round_mode": args.round_mode,
                     "python": sys.version.split()[0], "playground": str(root)}
     print(f"[probe] playground {root}", flush=True)
     try:
         make_env(root)
+        assert_isolated(root)
         from agora import cli, store
         from agora.agents.claude import ClaudeAgent, encode_project_dir, projects_dir
 
@@ -454,9 +517,11 @@ def main() -> int:
         seed_id, big_id = str(uuid_mod.uuid4()), str(uuid_mod.uuid4())
         seed_path = pdir / f"{seed_id}.jsonl"
         big_path = pdir / f"{big_id}.jsonl"
-        target = args.size_mb << 20
-        write_session(big_path, pdir / big_id, target, reserve_bytes=256_000,
-                      workdir=str(workdir))
+        total = args.size_mb << 20
+        aux_target = int(total * args.aux_frac)
+        target = total - aux_target
+        write_session(big_path, pdir / big_id, target, reserve_bytes=256_000 if target > 1 << 20 else 0,
+                      workdir=str(workdir), aux_bytes=aux_target)
         write_session(seed_path, pdir / seed_id, 256_000, reserve_bytes=0,
                       workdir=str(workdir))
         msgs0 = count_messages(big_path)
@@ -515,9 +580,13 @@ def main() -> int:
                 if args.tracemalloc:
                     import tracemalloc
                     tracemalloc.reset_peak()
-                grow = int(target * args.growth_pct / 100)
+                grow = int(total * args.growth_pct / 100)
+                peaker = PeakSnapshotter() if (r == 1 and args.tracemalloc) else None
+                if peaker:
+                    peaker.start()
                 append_exchanges(big_path, pdir / big_id, grow, str(workdir))
-                size_mb = big_path.stat().st_size / (1 << 20)
+                size_mb = (big_path.stat().st_size + sum(
+                    p.stat().st_size for p in (pdir / big_id).rglob("*") if p.is_file())) / (1 << 20)
                 t0 = time.perf_counter()
                 before_md5, before_fail = run.last_md5, run.failures
                 exported = saved = None
@@ -532,6 +601,7 @@ def main() -> int:
                                                                check_drive=False)
                     written, failed = saved is not None, False
                 dt = time.perf_counter() - t0
+                peak_top = peaker.stop() if peaker else []
                 cur = peak = None
                 if args.tracemalloc:
                     cur, peak = tracemalloc.get_traced_memory()
@@ -546,7 +616,7 @@ def main() -> int:
                 if child_mode:
                     row["child_peak_mb"] = round(sampler.peak_of(r, "child") / 1024, 1)
                 if r == 1 and args.tracemalloc:
-                    row["top"] = probes.top_lines(args.top)
+                    row["top"] = peak_top + probes.top_lines(args.top)
                     probes.drop_snapshots()
                 rounds.append(row)
                 print(f"[probe] round {r}: "
