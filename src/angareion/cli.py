@@ -338,8 +338,7 @@ def cmd_send(args: argparse.Namespace, config: Config, app: Angareion, token: st
             in_reply_to=args.in_reply_to,
         )
         # Validate everything before touching the backend: a bad message sends nothing.
-        message.validate()
-        serialize_message(message)  # reads it back: one that cannot be read is refused here
+        serialize_message(message)  # validates, then reads it back: one that cannot be read is refused here
     except MessageValidationError as e:
         sys.stderr.write(f"Error: {mask_token(str(e), token)}\n")
         return EXIT_USAGE

@@ -335,7 +335,8 @@ def serialize_message(msg: Message) -> str:
         )
 
     # Read it back before it leaves: a message this reader cannot read (or reads
-    # differently) must not be sent (the TS side does the same).
+    # differently) must not be sent. The TS side (MyAiEntry 801013c) only checks
+    # field by field and does not read it back; this is one more step done here.
     try:
         back = parse_message(text, strict=True)
     except MessageValidationError as e:
@@ -343,8 +344,11 @@ def serialize_message(msg: Message) -> str:
             f"Refusing to send: the message cannot be read back from what would be sent ({e})"
         ) from e
     if message_to_dict(back) != message_to_dict(msg):
+        before, after = message_to_dict(msg), message_to_dict(back)
+        changed = ", ".join(key for key in before if before[key] != after.get(key))
         raise MessageValidationError(
-            "Refusing to send: the message reads back with different fields than it was written with"
+            "Refusing to send: the message reads back with different fields "
+            f"than it was written with ({changed})"
         )
     return text
 

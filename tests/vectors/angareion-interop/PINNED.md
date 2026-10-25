@@ -18,3 +18,5 @@ git -C <MyAiEntry 的 clone> archive 801013c test/fixtures/angareion-interop | t
 `python-written/` 與 `expected.json` 由 `generate_python_written.py` 重產（用 MyAiStorage 的 `serialize_message`、`recipient_matches`、`mention_matches`），做法見 `SOURCE.md`；`ts-written/` 由 MyAiEntry 的 TS 測試重產。重產後必須重跑 `tests/unit/test_angareion_interop.py`。
 
 `python-written-py-cannot-read/` 的兩則（10、11）在 `split_front_matter` 修好（#231）之前 `parse_message` 讀不回；修好後由測試覆蓋。
+
+`python-written-py-cannot-read/` 併進主資料要兩個 repo 一起做（另開單），不要單邊併。

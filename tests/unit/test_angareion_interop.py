@@ -93,6 +93,8 @@ def test_a_message_with_a_dash_line_in_an_inline_attachment_reads_back(inline):
     [
         "---\nangareion: 1\n    ---\nrest",  # indented: not a closing line
         " ---\nangareion: 1\n---\nrest",  # indented opening
+        "---\na: 1\n---\x0c\nb",  # form feed after the closing line: not a blank
+        "---\na: 1\n---\xa0\nb",  # no-break space after the closing line
     ],
 )
 def test_split_front_matter_does_not_take_an_indented_dash_line(text):
@@ -108,15 +110,26 @@ def test_split_front_matter_allows_trailing_blanks_like_ts(tail):
 
 
 def test_split_front_matter_takes_the_first_bare_dash_line_and_keeps_the_body():
+    # Keeping `\r\n` in the body is the current behavior; the TS side turns it into
+    # `\n` (differs, see #232).
     raw, body = split_front_matter("---\na: 1\n    ---\n---\nbody\n---\nmore\r\n")
     assert raw == "a: 1\n    ---\n"
     assert body == "body\n---\nmore\r\n"
 
 
-def test_split_front_matter_does_not_break_lines_at_unicode_separators():
-    raw, body = split_front_matter("---\na: 'x ---'\n---\nb")
-    assert raw == "a: 'x ---'\n"
-    assert body == "b"
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029", "\x85", "\x0b", "\x0c", "\x1c"])
+def test_split_front_matter_does_not_break_lines_at_unicode_separators(sep):
+    # str.splitlines() would break at `sep` and see `---` as its own line.
+    raw, body = split_front_matter(f"---\na: 1{sep}---\nb: 2\n---\nbody")
+    assert raw == f"a: 1{sep}---\nb: 2\n"
+    assert body == "body"
+
+
+def test_serialize_message_refuses_an_inline_attachment_that_reads_back_changed():
+    # No monkeypatch: NEL in an inline attachment is read back as a space.
+    msg = _message_with_inline("x\x85y")
+    with pytest.raises(MessageValidationError, match="attachments"):
+        serialize_message(msg)
 
 
 def test_serialize_message_refuses_what_it_cannot_read_back(monkeypatch):
@@ -148,6 +161,9 @@ def test_an_old_reader_that_ignores_mentions_and_in_reply_to_still_reads_a_ts_me
     The old reader (before #209) built a Message from the seven original keys
     and never looked at the others. It is simulated by making the two readers
     return their defaults, so the unknown keys are ignored as the old code did.
+
+    This is a simulation. The real old reader (messages.py at 89b9686) was run
+    in a scratch copy and reads all 18 ts-written / python-written messages.
     """
     monkeypatch.setattr(messages, "_read_mentions", lambda value: [])
     monkeypatch.setattr(messages, "_read_in_reply_to", lambda value: None)
