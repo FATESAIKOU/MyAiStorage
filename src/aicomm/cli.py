@@ -243,7 +243,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
 
 EMPTY_INBOX_HINT = (
     "aicomm: 沒有新信。若剛被叫醒卻是空的，可能已被同一個身分的其他讀者（例如背景讀信任務）讀走；"
-    "先看它的輸出，要補讀用 angareion read --channel <ch> --since <時刻>（不移動游標）。"
+    "先看它的輸出，要補讀用 angareion read --since <時刻>（RFC 3339，例如 2026-10-25T03:00:00Z；不移動游標）。"
 )
 
 

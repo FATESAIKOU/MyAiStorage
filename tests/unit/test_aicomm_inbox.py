@@ -96,7 +96,7 @@ def test_angareion_is_never_called_with_a_channel_and_the_sidecar_is_never_asked
 
 # --- #219: an empty inbox says why on stderr (stdout and exit code unchanged) ---
 
-HINT_KEYS = ("沒有新信", "同一個身分", "背景", "angareion read --channel <ch> --since <時刻>", "不移動游標")
+HINT_KEYS = ("沒有新信", "同一個身分", "背景", "angareion read --since <時刻>", "RFC 3339，例如 2026-10-25T03:00:00Z；不移動游標")
 
 
 def test_empty_read_hints_on_stderr_exit_0_stdout_unchanged(world, monkeypatch, capsys):

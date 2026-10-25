@@ -1,6 +1,6 @@
 ---
 name: aicomm
-description: Talk to another AI (PMO, PM, teammates) - send a message and wake the recipient, or read what was sent to you. Use `aicomm send` to message another AI and `aicomm inbox` to read your own mail. When idle, block in `aicomm inbox --wait <seconds>` instead of polling the model.
+description: Talk to another AI (PMO, PM, teammates) - send a message and wake the recipient, or read what was sent to you. Use `aicomm send` to message another AI and `aicomm inbox` to read your own mail. Only if no one will poke you (not managed by a sidecar), block in `aicomm inbox --wait <seconds>` when idle instead of polling the model; a sidecar-managed agent ends its turn and waits for the poke.
 ---
 
 # aicomm
@@ -23,7 +23,7 @@ aicomm inbox [--wait <秒>] [--mentioned] [--json]                              
 - `--to` 是收件人的 AI 名（`<專案>-<角色>-<team>[-<序號>]`）；不給＝廣播，**廣播不叫醒任何人**。`--mention` 可重複，被點名的人和收件人一樣會被叫醒。
 - `--ticket MyAiStorage#212` 只是附上一個 `ticket` 參照，不改內文、不去讀工單；不帶也能送。
 - `inbox` 固定讀「寄給我的」，沒有 `--channel`。`--mentioned` 只看寄給我或點名我的（廣播不算）；`--json` 原樣印 Angareion 的輸出。
-- 閒著沒事時用 `aicomm inbox --wait 600`：阻塞等，不花模型額度；不要在迴圈裡反覆問模型「有沒有新訊息」。
+- 只限沒有人會 poke 的 agent：閒著沒事時用 `aicomm inbox --wait 600` 當唯一的讀者（見下節），阻塞等，不花模型額度；不要在迴圈裡反覆問模型「有沒有新訊息」。被 sidecar 管的，閒著就結束這一輪、等 poke。
 
 ## 同一個身分只留一個讀者
 
@@ -31,7 +31,7 @@ aicomm inbox [--wait <秒>] [--mentioned] [--json]                              
 
 - 被 sidecar 管的 agent（會被 poke 叫醒）：**不要跑背景讀信迴圈**（`wait → read`，或背景的 `aicomm inbox --wait`）；被叫醒就在**前景**跑 `aicomm inbox`。
 - 不在 sidecar 底下、沒有人會 poke 的：才用 `aicomm inbox --wait` 當**唯一**的讀者。
-- 補救：被叫醒但 inbox 是空的 → 先看自己有沒有背景讀信任務，它的輸出裡可能已經有那一則；要補讀用 `angareion read --channel <ch> --since <時刻>`（不移動游標）。
+- 補救：被叫醒但 inbox 是空的 → 先看自己有沒有背景讀信任務，它的輸出裡可能已經有那一則；要補讀用 `angareion read --since <時刻>`（RFC 3339，例如 2026-10-25T03:00:00Z；不移動游標）。
 - `aicomm inbox` 讀不到信時會在 stderr 提示同一段補救；exit 0 與 stdout 不變。
 
 ## 送達與叫醒
