@@ -57,6 +57,7 @@ from angareion.registry import (
     unregister_comment,
 )
 from angareion.log_cache import LogCache
+from angareion.log_query import AnchorNotFoundError, select as select_log
 from angareion.state import CursorStore, FileETagCache
 
 EXIT_OK = 0
@@ -497,9 +498,33 @@ class _VersionAction(argparse.Action):
         parser.exit()
 
 
-def cmd_log(args, config, app, token):
-    import datetime as _dt
+def _validate_log_times(args):
+    if args.since is not None:
+        try:
+            parse_backend_time(args.since)
+        except ValueError:
+            sys.stderr.write(
+                "Error: --since must be an RFC 3339 timestamp such as "
+                "2026-10-12T03:00:00Z, got '{}'\n".format(args.since)
+            )
+            return False
+    if args.until is not None:
+        try:
+            parse_backend_time(args.until)
+        except ValueError:
+            sys.stderr.write(
+                "Error: --until must be an RFC 3339 timestamp such as "
+                "2026-10-12T03:00:00Z, got '{}'\n".format(args.until)
+            )
+            return False
+    if args.since is not None and args.until is not None:
+        if parse_backend_time(args.since) > parse_backend_time(args.until):
+            sys.stderr.write("Error: --since must not be later than --until\n")
+            return False
+    return True
 
+
+def cmd_log(args, config, app, token):
     channels = list(args.channel or [])
     # De-duplicate repeated --channel (preserve order): log is a union.
     _seen_channels = set()
@@ -512,18 +537,18 @@ def cmd_log(args, config, app, token):
     channels = _deduped_channels
     app.store.ensure_fresh()
 
-    if getattr(args, "around", None) is not None:
+    if args.around is not None:
         if not is_ulid(args.around):
             sys.stderr.write("Error: --around must be a 26-character ULID, got '{}'\n".format(args.around))
             return EXIT_USAGE
-    if getattr(args, "thread", None) is not None:
+    if args.thread is not None:
         if not is_ulid(args.thread):
             sys.stderr.write("Error: --thread must be a 26-character ULID, got '{}'\n".format(args.thread))
             return EXIT_USAGE
-    if getattr(args, "around", None) is not None and getattr(args, "thread", None) is not None:
+    if args.around is not None and args.thread is not None:
         sys.stderr.write("Error: --around and --thread are mutually exclusive\n")
         return EXIT_USAGE
-    if (getattr(args, "before", None) is not None or getattr(args, "after", None) is not None) and getattr(args, "around", None) is None:
+    if (args.before is not None or args.after is not None) and args.around is None:
         sys.stderr.write("Error: --before/--after require --around\n")
         return EXIT_USAGE
     for name in ("before", "after"):
@@ -531,32 +556,12 @@ def cmd_log(args, config, app, token):
         if val is not None and val < 0:
             sys.stderr.write("Error: --{} must not be negative, got {}\n".format(name, val))
             return EXIT_USAGE
-    if getattr(args, "limit", None) is not None and args.limit < 0:
+    if args.limit is not None and args.limit < 0:
         sys.stderr.write("Error: --limit must not be negative, got {}\n".format(args.limit))
         return EXIT_USAGE
 
-    if args.since is not None:
-        try:
-            parse_backend_time(args.since)
-        except ValueError:
-            sys.stderr.write(
-                "Error: --since must be an RFC 3339 timestamp such as "
-                "2026-10-12T03:00:00Z, got '{}'\n".format(args.since)
-            )
-            return EXIT_USAGE
-    if args.until is not None:
-        try:
-            parse_backend_time(args.until)
-        except ValueError:
-            sys.stderr.write(
-                "Error: --until must be an RFC 3339 timestamp such as "
-                "2026-10-12T03:00:00Z, got '{}'\n".format(args.until)
-            )
-            return EXIT_USAGE
-    if args.since is not None and args.until is not None:
-        if parse_backend_time(args.since) > parse_backend_time(args.until):
-            sys.stderr.write("Error: --since must not be later than --until\n")
-            return EXIT_USAGE
+    if not _validate_log_times(args):
+        return EXIT_USAGE
 
     if not channels:
         channels = None
@@ -575,183 +580,41 @@ def cmd_log(args, config, app, token):
         entities = [app.store.entity_for(ch) for ch in channels]
         selected_channels = list(channels)
 
-    from angareion.log_cache import LogCache
     cache = LogCache(config.state_dir, config.identity)
 
     channel_messages = {}
     for entity in entities:
-        ch = entity.channel
-        cached_entity = {"repo": entity.repo, "issue": entity.issue}
-        cached_msgs, last_cid, last_created, etag = cache.load_messages(ch, cached_entity)
-        mirror = list(cached_msgs)
-        if last_created is None:
-            since = None
-        else:
-            since_dt = parse_backend_time(last_created) - _dt.timedelta(seconds=60)
-            since = format_backend_time(since_dt)
-        enumerated, new_etag, not_modified = app.backend.enumerate_conditional(entity, since=since, etag=etag)
-        by_id = {}
-        for m in mirror:
-            try:
-                by_id[int(m["comment_id"])] = m
-            except Exception:
-                pass
-        max_cid = None
-        max_created = last_created
-        had_new_message = False
-        if not not_modified:
-            for cid, created_at, parsed in enumerated:
-                if parsed is None:
-                    continue
-                cid_int = int(cid)
-                msg_dict = {
-                    "comment_id": str(cid_int),
-                    "created_at": created_at,
-                    "comment_url": getattr(parsed, "comment_url", "") or "",
-                    "message": message_to_dict(parsed),
-                }
-                existing = by_id.get(cid_int)
-                is_new = existing is None or existing.get("message") != msg_dict["message"] or existing.get("created_at") != created_at
-                if is_new:
-                    had_new_message = True
-                if existing is None or existing.get("message") != msg_dict["message"] or existing.get("created_at") != created_at:
-                    by_id[cid_int] = msg_dict
-                if max_cid is None or cid_int > max_cid:
-                    max_cid = cid_int
-                if max_created is None or parse_backend_time(created_at) > parse_backend_time(max_created):
-                    max_created = created_at
-            if by_id:
-                max_created = max((m["created_at"] for m in by_id.values()), key=lambda t: parse_backend_time(t))
-                max_cid = max(int(m["comment_id"]) for m in by_id.values())
-            messages_list = sorted(by_id.values(), key=lambda m: int(m["comment_id"]))
-            if had_new_message:
-                new_etag = None
-            cache.save(ch, cached_entity, str(max_cid) if max_cid is not None else None, max_created, new_etag, messages_list)
-        else:
-            messages_list = list(mirror)
+        channel_messages[entity.channel] = cache.sync(app.backend, entity)
 
-        msgs_for_query = []
-        for m in messages_list:
-            d = m["message"]
-            from angareion.messages import Message as _M
-            msg = _M(
-                id=d["id"],
-                at=d["at"],
-                from_=d["from"],
-                to=d["to"],
-                channel=d["channel"],
-                urgency=d["urgency"],
-                content=d["content"],
-                attachments=d.get("attachments", []),
-                mentions=d.get("mentions", []),
-                in_reply_to=d.get("in_reply_to"),
-            )
-            setattr(msg, "received_at", m["created_at"])
-            setattr(msg, "comment_id", int(m["comment_id"]))
-            setattr(msg, "comment_url", m.get("comment_url", ""))
-            msgs_for_query.append(msg)
-        channel_messages[ch] = msgs_for_query
     me = config.identity
-    from_filter = getattr(args, "from_", None)
+    from_filter = args.from_
     if from_filter == "me":
         from_filter = me
-    to_filter = getattr(args, "to", None)
+    to_filter = args.to
     if to_filter == "me":
         to_filter = me
-    mentioned_flag = bool(getattr(args, "mentioned", False))
+    mentioned_flag = bool(args.mentioned)
 
-    anchor_id = getattr(args, "around", None) or getattr(args, "thread", None)
-    is_thread = getattr(args, "thread", None) is not None
-
-    for ch in channel_messages:
-        channel_messages[ch].sort(key=lambda m: getattr(m, "comment_id", 0))
-
-    candidates = []
-    anchor_channel = None
-    if anchor_id is not None:
-        anchor_msg = None
-        for ch in selected_channels:
-            for m in channel_messages.get(ch, []):
-                if m.id == anchor_id:
-                    anchor_msg = m
-                    anchor_channel = ch
-                    break
-            if anchor_msg is not None:
-                break
-        if anchor_msg is None:
-            sys.stderr.write("Error: message '{}' not found\n".format(anchor_id))
-            return EXIT_USAGE
-        if is_thread:
-            msgs = channel_messages.get(anchor_channel, [])
-            by_id_msg = {m.id: m for m in msgs}
-            # find root
-            current = anchor_msg
-            visited = set()
-            while True:
-                irt = getattr(current, "in_reply_to", None)
-                if irt is None or irt not in by_id_msg or irt in visited:
-                    break
-                visited.add(current.id)
-                current = by_id_msg[irt]
-            root = current
-            closure_ids = {root.id}
-            changed = True
-            while changed:
-                changed = False
-                for m in msgs:
-                    irt = getattr(m, "in_reply_to", None)
-                    if irt in closure_ids and m.id not in closure_ids:
-                        closure_ids.add(m.id)
-                        changed = True
-            collected = [m for m in msgs if m.id in closure_ids]
-            collected.sort(key=lambda m: getattr(m, "comment_id", 0))
-            candidates = collected
-        else:
-            msgs = channel_messages.get(anchor_channel, [])
-            sorted_msgs = sorted(msgs, key=lambda m: getattr(m, "comment_id", 0))
-            idx = next(i for i, m in enumerate(sorted_msgs) if m.id == anchor_id)
-            before_n = getattr(args, "before", 0) or 0
-            after_n = getattr(args, "after", 0) or 0
-            start = max(0, idx - before_n)
-            end = min(len(sorted_msgs), idx + after_n + 1)
-            candidates = list(sorted_msgs[start:end])
-    else:
-        for ch in selected_channels:
-            candidates.extend(channel_messages.get(ch, []))
-
-    def keep(m):
-        if from_filter is not None and m.from_ != from_filter:
-            return False
-        if to_filter is not None:
-            if not (m.to is None or m.to == to_filter or to_filter in (m.mentions or [])):
-                return False
-        if mentioned_flag:
-            if not (m.to == me or me in (m.mentions or [])):
-                return False
-        if args.since is not None:
-            if parse_backend_time(m.received_at) < parse_backend_time(args.since):
-                return False
-        if args.until is not None:
-            if parse_backend_time(m.received_at) > parse_backend_time(args.until):
-                return False
-        if getattr(args, "grep", None):
-            if args.grep.lower() not in (m.content or "").lower():
-                return False
-        return True
-
-    filtered = [m for m in candidates if keep(m)]
-
-    if len(selected_channels) == 1:
-        filtered.sort(key=lambda m: getattr(m, "comment_id", 0))
-    else:
-        filtered.sort(key=lambda m: (getattr(m, "received_at", "") or "", m.channel, m.id))
-
-    if getattr(args, "limit", None) is not None:
-        n = args.limit
-        if n == 0:
-            filtered = []
-        else:
-            filtered = filtered[-n:]
+    try:
+        filtered = select_log(
+            channel_messages,
+            selected_channels,
+            me=me,
+            from_=from_filter,
+            to=to_filter,
+            mentioned=mentioned_flag,
+            since=args.since,
+            until=args.until,
+            grep=args.grep,
+            around=args.around,
+            before=args.before,
+            after=args.after,
+            thread=args.thread,
+            limit=args.limit,
+        )
+    except AnchorNotFoundError as e:
+        sys.stderr.write("Error: {}\n".format(e))
+        return EXIT_USAGE
 
     if args.json:
         sys.stdout.write(json.dumps([_message_for_output(m) for m in filtered], indent=2, ensure_ascii=False) + "\n")

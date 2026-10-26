@@ -81,7 +81,7 @@ def test_enumerate_returns_tuple_with_parsed_none_for_nonmessage(cli_env):
     # deliver a normal message
     _seed(cli_env, "01AAAA00000000000000000000", 1, "2026-10-10T12:00:05Z")
     ent = cli_env["store"].entity_for("general")
-    out = cli_env["backend"].enumerate(ent)
+    out = cli_env["backend"].enumerate_conditional(ent)[0]
     assert isinstance(out, list)
     assert len(out) == 1
     cid, created, parsed = out[0]
@@ -91,7 +91,7 @@ def test_enumerate_returns_tuple_with_parsed_none_for_nonmessage(cli_env):
     # non-message: append a FakeComment with message=None
     from angareion.backend import FakeComment
     cli_env["backend"]._comments.append(FakeComment(id=2, created_at="2026-10-10T12:00:06Z", message=None))
-    out2 = cli_env["backend"].enumerate(ent)
+    out2 = cli_env["backend"].enumerate_conditional(ent)[0]
     # non-message enumerated with parsed=None
     nonmsg = [x for x in out2 if x[0] == 2]
     assert len(nonmsg) == 1

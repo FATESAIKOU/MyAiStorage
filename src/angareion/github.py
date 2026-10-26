@@ -441,9 +441,6 @@ class GitHubIssuesBackend:
         return ReadResult(messages, advance_cursor(cursor, entries))
 
     # -- enumeration (read-only listing for `log`) -----------------------
-    def enumerate(self, entity, since=None, etag=None):
-        return self.enumerate_conditional(entity, since=since, etag=etag)[0]
-
     def enumerate_conditional(self, entity, *, since=None, etag=None):
         url = self._listing_url(entity, since=since)
         full_url = self._full_url(url)
@@ -461,28 +458,14 @@ class GitHubIssuesBackend:
         if resp.status >= 400:
             raise BackendError(f"Failed to enumerate messages: HTTP {resp.status}")
         result = []
-        page_resp = resp
         first_etag = resp.headers.get("etag") or None
-        next_url = self._next_page_url(page_resp)
-        # first page
-        for comment in self._json(page_resp, "enumerating messages"):
-            meta = self._comment_meta(comment)
-            if meta is None:
-                continue
-            comment_id, created_at = meta
-            parsed = parse_message(comment.get("body", ""))
-            if parsed is not None:
-                setattr(parsed, "received_at", created_at)
-                curl = comment.get("html_url", "")
-                if curl:
-                    setattr(parsed, "comment_url", curl)
-            result.append((comment_id, created_at, parsed))
-        # follow pages
-        while next_url:
-            page_resp = self._request("GET", next_url, headers=self._headers())
-            if page_resp.status >= 400:
-                raise BackendError(f"Failed to enumerate messages: HTTP {page_resp.status}")
-            for comment in self._json(page_resp, "enumerating messages"):
+        first_page_items = None
+        page_resp = resp
+        while True:
+            items = self._json(page_resp, "enumerating messages")
+            if first_page_items is None:
+                first_page_items = items
+            for comment in items:
                 meta = self._comment_meta(comment)
                 if meta is None:
                     continue
@@ -495,22 +478,15 @@ class GitHubIssuesBackend:
                         setattr(parsed, "comment_url", curl)
                 result.append((comment_id, created_at, parsed))
             next_url = self._next_page_url(page_resp)
+            if not next_url:
+                break
+            page_resp = self._request("GET", next_url, headers=self._headers())
+            if page_resp.status >= 400:
+                raise BackendError(f"Failed to enumerate messages: HTTP {page_resp.status}")
         result.sort(key=lambda x: x[0])
         # storable etag: single page, not full, has etag
-        try:
-            items0 = self._json(resp, "enumerating messages")
-            page_full = isinstance(items0, list) and len(items0) >= LISTING_PAGE_SIZE
-        except Exception:
-            page_full = False
+        page_full = isinstance(first_page_items, list) and len(first_page_items) >= LISTING_PAGE_SIZE
         next_url0 = self._next_page_url(resp)
         storable = next_url0 is None and not page_full and first_etag is not None
         new_etag = {"url": full_url, "etag": first_etag} if storable else None
         return result, new_etag, False
-
-
-
-
-
-
-
-

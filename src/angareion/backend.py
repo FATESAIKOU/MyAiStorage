@@ -516,20 +516,8 @@ class FakeBackend:
                     pass
             parsed = msg if isinstance(msg, Message) else None
             # non-angareion: if msg is not a Message, parsed=None
-            try:
-                from angareion.messages import Message as _M
-                if not isinstance(msg, _M):
-                    parsed = None
-            except Exception:
-                pass
+            if not isinstance(msg, Message):
+                parsed = None
             items.append((comment.id, comment.created_at, parsed))
         items.sort(key=lambda x: x[0])
         return items, None, False
-
-
-
-
-
-
-
-
