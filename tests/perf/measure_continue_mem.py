@@ -392,7 +392,7 @@ class PeakSnapshotter(threading.Thread):
 
     The stage snapshots above are taken when a call *returns*, i.e. after its
     temporaries are gone; the real peak happens inside. Polling the traced size
-    and snapshotting on every new high (>=3%% above the last) keeps the last
+    and snapshotting on every new high (>=3% above the last) keeps the last
     snapshot close to the peak, so its top lines say what holds the peak.
     """
 
