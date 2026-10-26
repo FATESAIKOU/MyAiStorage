@@ -449,8 +449,6 @@ class GitHubIssuesBackend:
         if isinstance(etag, dict):
             if etag.get("url") == full_url:
                 etag_str = etag.get("etag")
-        elif isinstance(etag, str):
-            etag_str = etag
         headers = self._headers(etag=etag_str)
         resp = self._request("GET", url, headers=headers)
         if resp.status == 304:

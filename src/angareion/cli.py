@@ -20,7 +20,6 @@ from angareion.backend import (
     ChannelNotFoundError,
     EntityResolver,
     Target,
-    format_backend_time,
     parse_backend_time,
 )
 from angareion.channel_config import (
@@ -565,19 +564,18 @@ def cmd_log(args, config, app, token):
 
     if not channels:
         channels = None
-    else:
-        for ch in channels:
-            try:
-                app.store.entity_for(ch)
-            except Exception as e:
-                sys.stderr.write("Error: {}\n".format(e))
-                return EXIT_USAGE
 
     if channels is None:
         entities = list(app.store.entities())
         selected_channels = [e.channel for e in entities]
     else:
-        entities = [app.store.entity_for(ch) for ch in channels]
+        entities = []
+        for ch in channels:
+            try:
+                entities.append(app.store.entity_for(ch))
+            except ChannelNotFoundError as e:
+                sys.stderr.write("Error: {}\n".format(mask_token(str(e), token)))
+                return EXIT_USAGE
         selected_channels = list(channels)
 
     cache = LogCache(config.state_dir, config.identity)

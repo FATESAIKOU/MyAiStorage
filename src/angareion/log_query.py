@@ -7,10 +7,7 @@ then calls ``select`` to turn the cached messages into the final list.
 
 from __future__ import annotations
 
-from typing import Any
-
 from angareion.backend import parse_backend_time
-from angareion.messages import Message
 
 
 class AnchorNotFoundError(Exception):
@@ -43,8 +40,6 @@ def select(
     messages_by_channel = messages_by_channel or {}
     selected_channels = list(selected_channels or [])
 
-    from_filter = from_
-    to_filter = to
     mentioned_flag = bool(mentioned)
 
     anchor_id = around if around is not None else thread
@@ -73,7 +68,7 @@ def select(
             current = anchor_msg
             visited = set()
             while True:
-                irt = getattr(current, "in_reply_to", None)
+                irt = current.in_reply_to
                 if irt is None or irt not in by_id_msg or irt in visited:
                     break
                 visited.add(current.id)
@@ -84,7 +79,7 @@ def select(
             while changed:
                 changed = False
                 for m in msgs:
-                    irt = getattr(m, "in_reply_to", None)
+                    irt = m.in_reply_to
                     if irt in closure_ids and m.id not in closure_ids:
                         closure_ids.add(m.id)
                         changed = True
@@ -105,10 +100,10 @@ def select(
             candidates.extend(messages_by_channel.get(ch, []))
 
     def keep(m):
-        if from_filter is not None and m.from_ != from_filter:
+        if from_ is not None and m.from_ != from_:
             return False
-        if to_filter is not None:
-            if not (m.to is None or m.to == to_filter or to_filter in (m.mentions or [])):
+        if to is not None:
+            if not (m.to is None or m.to == to or to in (m.mentions or [])):
                 return False
         if mentioned_flag:
             if not (m.to == me or me in (m.mentions or [])):
@@ -129,7 +124,7 @@ def select(
     if len(selected_channels) == 1:
         filtered.sort(key=lambda m: m.comment_id)
     else:
-        filtered.sort(key=lambda m: (getattr(m, "received_at", "") or "", m.channel, m.id))
+        filtered.sort(key=lambda m: (m.received_at or "", m.channel, m.id))
 
     if limit is not None:
         n = limit

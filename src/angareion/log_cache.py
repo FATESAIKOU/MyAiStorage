@@ -159,7 +159,7 @@ class LogCache:
     def sync(self, backend, entity):
         ch = entity.channel
         cached_entity = {"repo": entity.repo, "issue": entity.issue}
-        cached_msgs, last_cid, last_created, etag = self.load_messages(ch, cached_entity)
+        cached_msgs, _last_cid, last_created, etag = self.load_messages(ch, cached_entity)
         mirror = list(cached_msgs)
         if last_created is None:
             since = None
@@ -169,10 +169,7 @@ class LogCache:
         enumerated, new_etag, not_modified = backend.enumerate_conditional(entity, since=since, etag=etag)
         by_id = {}
         for m in mirror:
-            try:
-                by_id[int(m["comment_id"])] = m
-            except Exception:
-                pass
+            by_id[int(m["comment_id"])] = m
         had_new_message = False
         if not not_modified:
             for cid, created_at, parsed in enumerated:
@@ -189,7 +186,6 @@ class LogCache:
                 is_new = existing is None or existing.get("message") != msg_dict["message"] or existing.get("created_at") != created_at
                 if is_new:
                     had_new_message = True
-                if existing is None or existing.get("message") != msg_dict["message"] or existing.get("created_at") != created_at:
                     by_id[cid_int] = msg_dict
             if by_id:
                 max_created = max((m["created_at"] for m in by_id.values()), key=lambda t: parse_backend_time(t))
