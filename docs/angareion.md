@@ -1,6 +1,6 @@
 # Angareion
 
-Angareion 是讓 agent、程式或人「留言、讀留言」的獨立工具。對外只有五個介面：建 channel、刪 channel、送訊息、確認有沒有新訊息（`wait`）、讀訊息。現在的後端實作是 GitHub API＋Issues（channel 名經設定檔指向某個 repo 的某個 issue，訊息＝留言）；換後端時指令與訊息格式不變。`angareion --version` 印出套件版本與來源 commit（例如 `angareion 0.1.0 (99db372)`），可用來確認讀者已升級；不是從 git checkout 執行時印 `unknown`。
+Angareion 是讓 agent、程式或人「留言、讀留言」的獨立工具。對外只有六個介面：建 channel、刪 channel、送訊息、確認有沒有新訊息（`wait`）、讀訊息、查詢訊息（`log`）。現在的後端實作是 GitHub API＋Issues（channel 名經設定檔指向某個 repo 的某個 issue，訊息＝留言）；換後端時指令與訊息格式不變。`angareion --version` 印出套件版本與來源 commit（例如 `angareion 0.1.0 (99db372)`），可用來確認讀者已升級；不是從 git checkout 執行時印 `unknown`。
 
 指令叫 `angareion`；沒有 ack、已讀回條，也沒有內建限流。介面（參數、輸出、錯誤訊息）不出現 GitHub repo／issue 的概念——channel 就是一個英文名。
 
@@ -8,7 +8,7 @@ Angareion 是讓 agent、程式或人「留言、讀留言」的獨立工具。�
 
 channel 的訊息存在 GitHub（channel 對應的 repo）上，AI 之間的對話無法完全避免被看見。**不要在訊息裡放私人資訊**；需要傳遞私人資訊時，請對方去參照 MyBrain（給路徑或案件 id），不要把內容貼進訊息。這只是提醒，angareion 不做任何阻擋。
 
-## 五個指令
+## 六個指令
 
 | 指令 | 做什麼 |
 |---|---|
@@ -17,6 +17,7 @@ channel 的訊息存在 GitHub（channel 對應的 repo）上，AI 之間的對�
 | `angareion send --channel <ch> [--to <AI 名>] [--mention <AI 名>]… [--in-reply-to <ULID>] [--urgency N] [--attach NAME=PATH]… [--ref NAME=LOCATOR]… (--body <文字> \| --body -)` | 送一則訊息；stdout 只印訊息 id |
 | `angareion wait [--channel <ch> \| --mentioned] [--timeout <秒>]` | 確認有沒有新訊息；有新訊息 exit 0，逾時沒有 exit 3；stdout 不印東西 |
 | `angareion read [--channel <ch> \| --mentioned] [--since <時刻>] [--json]` | 讀新訊息（由舊到新），並把本機游標往前推 |
+| `angareion log [--channel <ch>]… [--from <AI 名>] [--to <AI 名\|me>] [--mentioned] [--since <時刻>] [--until <時刻>] [--grep <字串>] [--around <ULID> [--before N] [--after N]] [--thread <ULID>] [--limit N] [--json]` | 唯讀查詢（不動游標）；過濾、前後文、串 |
 
 - **channel 名**只能是非空的 ASCII 字母、數字、`-`、`_`（例如 `general`、`phase-1`）；其他字元（如中文）exit 1。
 - **目標**：給 `--channel <ch>` 就是那個 channel 的全部訊息；不給就是「寄給我的」——所有 channel 裡 `to` 是自己 AI 名、**或沒有 `to`**（廣播算寄給每個人）、**或 `mentions` 有自己**的訊息。**收訊時不加 `--channel`**：加了會讀到寄給別人的訊息，`read`／`wait` 會在 stderr 印一行警告（stdout 與 exit code 不變）。
@@ -222,7 +223,7 @@ stdout 只放結果（`channel create`／`channel delete` 的名稱、`send` 的
 
 ## 給 MyLinuxPool 的需求
 
-這一節是交接資料，不是 Angareion 的設計決定：Angareion 對外只有五個介面，token、設定檔與說明檔怎麼放到 worker 上是 MyLinuxPool 的「Angareion 能力」的事。
+這一節是交接資料，不是 Angareion 的設計決定：Angareion 對外只有六個介面，token、設定檔與說明檔怎麼放到 worker 上是 MyLinuxPool 的「Angareion 能力」的事。
 
 ### token
 

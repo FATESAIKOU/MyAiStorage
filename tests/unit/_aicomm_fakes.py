@@ -45,6 +45,12 @@ if cmd == "wait":
 if cmd == "read":
     sys.stdout.write(os.environ.get("FAKE_ANG_READ_OUT", ""))
     sys.exit(int(os.environ.get("FAKE_ANG_READ_EXIT", "0")))
+if cmd == "log":
+    if "--bogus" in sys.argv[1:]:
+        sys.stderr.write("angareion: error: unrecognized arguments: --bogus\\n")
+        sys.exit(1)
+    sys.stdout.write(os.environ.get("FAKE_ANG_LOG_OUT", ""))
+    sys.exit(int(os.environ.get("FAKE_ANG_LOG_EXIT", "0")))
 sys.exit(64)
 '''
 

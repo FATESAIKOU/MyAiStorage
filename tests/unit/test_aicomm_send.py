@@ -46,7 +46,7 @@ def test_unknown_subcommand_exits_1_and_says_only_send_and_inbox(world, monkeypa
     assert world.calls() == [] and world.sidecar.requests == []
 
 
-SUFFIX = "aicomm 只有 send 與 inbox"
+SUFFIX = "aicomm 只有 send、inbox 與 log"
 
 
 @pytest.mark.parametrize("argv", [

@@ -1,22 +1,23 @@
 ---
 name: aicomm
-description: Talk to another AI (PMO, PM, teammates) - send a message and wake the recipient, or read what was sent to you. Use `aicomm send` to message another AI and `aicomm inbox` to read your own mail. Only if no one will poke you (not managed by a sidecar), block in `aicomm inbox --wait <seconds>` when idle instead of polling the model; a sidecar-managed agent ends its turn and waits for the poke.
+description: Talk to another AI (PMO, PM, teammates) - send a message and wake the recipient, read what was sent to you, or query messages (log). Use `aicomm send` to message another AI, `aicomm inbox` to read your own mail, and `aicomm log` to query (read-only). Only if no one will poke you (not managed by a sidecar), block in `aicomm inbox --wait <seconds>` when idle instead of polling the model; a sidecar-managed agent ends its turn and waits for the poke.
 ---
 
 # aicomm
 
-aicomm 是 AI 之間的溝通指令：**送一次、收一次**。它在 Angareion（留言）上再加一步——送出後，如果收件人在這台機器上、正好閒著或在跑，就戳它一下，叫它來讀信。對外只有兩個指令；所有角色（PMO、PM、隊員）用同一份說明。
+aicomm 是 AI 之間的溝通指令：**送一次、收一次**。它在 Angareion（留言）上再加一步——送出後，如果收件人在這台機器上、正好閒著或在跑，就戳它一下，叫它來讀信。對外只有三個指令（send／inbox／log）；所有角色（PMO、PM、隊員）用同一份說明。
 
 ## 私人資訊：不要貼進訊息
 
 訊息存在 GitHub 上，無法完全避免被看見。**不要在訊息裡放私人資訊**；需要傳遞時，請對方去參照 MyBrain（給路徑或案件 id），不要把內容貼進訊息。
 
-## 兩個指令
+## 三個指令
 
 ```bash
 aicomm send --channel <ch> [--to <AI 名>] [--mention <AI 名>]… [--in-reply-to <ULID>] [--urgency 0-9] \
             [--ticket <repo>#<n>] [--no-wake | --interrupt] --body '訊息文字'   # stdout 第一行是訊息 id
 aicomm inbox [--wait <秒>] [--mentioned] [--json]                               # 讀寄給我的信
+aicomm log [同 angareion log 的全部旗標] [--json]                              # 唯讀查詢：不動游標、不叫醒；預設查寄給我的
 ```
 
 - `--channel` 一定要給（channel 名不能從 AI 名推出來；派工信會寫）。`--body` 一定要給，`-` 從 stdin 讀（多行內文）。
@@ -33,6 +34,7 @@ aicomm inbox [--wait <秒>] [--mentioned] [--json]                              
 - 不在 sidecar 底下、沒有人會 poke 的：才用 `aicomm inbox --wait` 當**唯一**的讀者。
 - 補救：被叫醒但 inbox 是空的 → 先看自己有沒有背景讀信任務，它的輸出裡可能已經有那一則；要補讀用 `angareion read --since <時刻>`（RFC 3339，例如 2026-10-25T03:00:00Z；不移動游標）。
 - `aicomm inbox` 讀不到信時會在 stderr 提示同一段補救；exit 0 與 stdout 不變。
+- 被叫醒先 `aicomm inbox`；要前後文或補讀（往回找某則的上下文、沿回覆追串、搜尋過濾）用 `aicomm log`（唯讀查詢，不動游標）；**不要用 `angareion read --since` 反覆撈**——`--since` 只認時間視窗，一則多行訊息可能只看到第一行，容易漏。
 
 ## 找本人：`--to myaientry-secretary-p1`
 
@@ -53,6 +55,7 @@ aicomm inbox [--wait <秒>] [--mentioned] [--json]                              
 
 - `send`：exit 0 訊息已寫進 Angareion（叫醒結果不影響）；exit 1 用法錯（沒有送出）；exit 2 Angareion 後端或設定錯；其他非 0 是 Angareion 的原結束碼（沒有叫醒任何人）。
 - `inbox`：exit 0 讀完（可能是空的，空的時候 stderr 有一行提示）；`--wait` 逾時 exit 3（沒有讀、游標不動）；exit 2 後端或設定錯，**不是「沒有新訊息」**，稍等再試；exit 1 用法錯。
+- `log`：照 `angareion log` 的結束碼（0 成功含空結果、1 用法錯、2 後端或設定錯）；aicomm 不叫醒任何人。
 
 ## 叫醒的節制：三條軟規則
 

@@ -496,3 +496,40 @@ class FakeBackend:
         if cursor.position is None and cursor.at is not None:
             return ReadResult(messages, cursor)  # a `--since` read moves nothing
         return ReadResult(messages, advance_cursor(cursor, [(c.id, c.created_at) for c in all_comments]))
+
+
+    # -- enumeration (read-only listing for `log`) -----------------------
+    def enumerate(self, entity, since=None, etag=None):
+        return self.enumerate_conditional(entity, since=since, etag=etag)[0]
+
+    def enumerate_conditional(self, entity, *, since=None, etag=None):
+        items = []
+        for comment in self._comments:
+            msg = comment.message
+            if msg is not None and getattr(msg, "channel", None) != entity.channel:
+                continue
+            if since is not None:
+                try:
+                    if parse_backend_time(comment.created_at) < parse_backend_time(since):
+                        continue
+                except Exception:
+                    pass
+            parsed = msg if isinstance(msg, Message) else None
+            # non-angareion: if msg is not a Message, parsed=None
+            try:
+                from angareion.messages import Message as _M
+                if not isinstance(msg, _M):
+                    parsed = None
+            except Exception:
+                pass
+            items.append((comment.id, comment.created_at, parsed))
+        items.sort(key=lambda x: x[0])
+        return items, None, False
+
+
+
+
+
+
+
+

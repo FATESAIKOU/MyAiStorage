@@ -138,3 +138,29 @@ def test_skill_gives_the_owner_address_and_keeps_the_pmo_rule():
     text = _skill()
     assert "--to myaientry-secretary-p1" in text
     assert "經 PMO" in text
+
+
+# --- #254: aicomm log ---
+
+def test_skill_and_docs_say_three_commands():
+    for path in (SKILL, DOCS):
+        text = path.read_text(encoding="utf-8")
+        assert "三個指令" in text
+
+
+def test_skill_and_docs_have_log_division_sentence():
+    for path in (SKILL, DOCS):
+        text = path.read_text(encoding="utf-8")
+        assert "被叫醒先 `aicomm inbox`" in text or "被叫醒先" in text
+        assert "aicomm log" in text
+        assert "不動游標" in text
+
+
+def test_cli_hint_contains_appended_plain_sentence():
+    cli = (REPO / "src" / "aicomm" / "cli.py").read_text(encoding="utf-8")
+    assert "要補查用 aicomm log（不動游標）。" in cli
+
+
+def test_injection_literals_sync_with_cli():
+    cli = (REPO / "src" / "aicomm" / "cli.py").read_text(encoding="utf-8")
+    assert '"to"' in cli and '"mentioned"' in cli
