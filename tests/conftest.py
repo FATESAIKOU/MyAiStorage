@@ -138,9 +138,9 @@ def isolated_home(tmp_path, monkeypatch, request):
     # reads, so drop it here along with the other inherited knobs. A test that needs
     # a seat sets it again with monkeypatch.setenv.
     monkeypatch.delenv("ANGAREION_IDENTITY", raising=False)
-    # #242: --harness-file merges the caller's OPENCODE_CONFIG_CONTENT into the
-    # child process, so an outer value would leak into every test; drop it here
-    # the same way. A test that needs it sets it again with monkeypatch.setenv.
+    # #242: the child process inherits os.environ (and --harness-file merges into
+    # the inherited value), so an outer OPENCODE_CONFIG_CONTENT would leak into
+    # every test; drop it here the same way. A test that needs it sets it again with monkeypatch.setenv.
     monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
     # opencode finds its database through XDG_* too; never let a unit test reach it (OC11).
     for var in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR"):
