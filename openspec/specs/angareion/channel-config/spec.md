@@ -26,7 +26,7 @@ backend 本身的設定 MUST 寫在 MyAiStorage repo 的 `config/angareion/backe
 - **THEN** exit 2，stderr 說明不認得的 type；什麼都沒送
 
 ### Requirement: channel 對應的更新（註冊簿重建）
-`channels.json` MUST 由 MyAiStorage 的**註冊簿 issue**（長期存在，label 見 design §10）上的留言重建：`channel create`／`channel delete` MUST 各在它下面留一則一行 JSON 留言——`{"schema": 1, "action": "register"|"unregister", "channel": "<名>", "backend": "<backend 名>", "issue": <編號>}`；angareion 送出留言後 MUST NOT 等重建完成（`channel create` 會輪詢 fetch 到對應出現，見 `angareion` 的五個介面）。
+`channels.json` MUST 由 MyAiStorage 的**註冊簿 issue**（長期存在，label 見 design §10）上的留言重建：`channel create`／`channel delete` MUST 各在它下面留一則一行 JSON 留言——`{"schema": 1, "action": "register"|"unregister", "channel": "<名>", "backend": "<backend 名>", "issue": <編號>}`；angareion 送出留言後 MUST NOT 等重建完成（`channel create` 會輪詢 fetch 到對應出現，見 `angareion` 的六個介面）。
 
 workflow MUST `on: issue_comment`（限註冊簿 issue；觸發層 MUST 用 `if` 擋掉 Bot——workflow 自己的回報留言不會再觸發新的 run，複審 H1）並有 `schedule`（每天一次）當保險（複審 M3）觸發；每次 run 用 `GET /repos/{owner}/{repo}/issues/{n}/comments?per_page=100` 讀整串留言（MUST 翻完所有頁——複審 M4），依時間序**重建** `channels.json` 並 commit 進 main（結果與 main 相同就不 commit）；MUST 用 `concurrency` 併發控制且 `cancel-in-progress`（新的取消舊的）——因為每次都從整串重建，被取消的 MUST NOT 遺失任何留言的效果。
 
