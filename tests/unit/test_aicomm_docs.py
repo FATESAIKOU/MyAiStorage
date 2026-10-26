@@ -145,6 +145,9 @@ def test_skill_says_inline_at_is_plain_text_and_dispatch_is_secretary_pmo_only()
     text = _skill()
     assert "內文寫 `@ myaientry-secretary-p1` 只是普通文字" in text
     assert "廣播會進本人的 inbox，但不叫醒、也不標 @你" in text
+    assert "App 不會把它當成 @你" in text
+    assert "App 只看 `to`／`mentions`" in text
+    assert "本人不在 sidecar 上，所以不會被叫醒" in text
     assert "只認 `secretary-pmo`" in text
     assert "自由文字不當派工" in text
 
