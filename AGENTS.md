@@ -24,7 +24,7 @@
 
 ### 測試隔離
 
-- 每個測試由 `tests/conftest.py` 的 autouse fixture（`isolated_home`）把 `HOME`、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`（注意是 `_DIR`）指到該測試的暫存目錄，Angareion 的三個變數（`ANGAREION_CONFIG`、`ANGAREION_STATE_DIR`、`ANGAREION_TOKEN_FILE`）也一樣，並清掉 `XDG_*`、`CLAUDE_CONFIG_DIR`；不要在測試裡讀寫真的家目錄與 agora 目錄。
+- 每個測試由 `tests/conftest.py` 的 autouse fixture（`isolated_home`）把 `HOME`、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`（注意是 `_DIR`）指到該測試的暫存目錄，Angareion 的三個變數（`ANGAREION_CONFIG`、`ANGAREION_STATE_DIR`、`ANGAREION_TOKEN_FILE`）也一樣，並清掉 `ANGAREION_IDENTITY`、`XDG_*`、`CLAUDE_CONFIG_DIR`；不要在測試裡讀寫真的家目錄與 agora 目錄。
 - 沒有 pytest 保護的探針、手動腳本：自己建暫存目錄，把 `HOME`、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`TMPDIR` 都指進去，並清掉 `XDG_*`、`CLAUDE_CONFIG_DIR`，再執行。
 - 探針執行前，要在**同一個行程**裡 assert `Paths.from_env()` 的 config／cache／state 與 `HOME`、`TMPDIR` 都在暫存目錄底下，不符就中止（範例：`tests/perf/measure_continue_mem.py` 的 `NOT ISOLATED` 檢查）。
 - 新的測試模組（或共用 helper）第一行照既有寫法 `import _guard`；測試檔放在 repo 的 `tests/` 底下，用 `uv run pytest` 跑（放在 repo 外沒有 conftest，會被擋下）。規格見 `openspec/specs/test-isolation/spec.md`。
@@ -32,7 +32,7 @@
 
 ### 跑測試
 
-- 在 #210 修好之前，跑測試要加 `env -u ANGAREION_IDENTITY`，例如 `env -u ANGAREION_IDENTITY uv run pytest -q <測試檔>`；外面設著的 `ANGAREION_IDENTITY` 會被測試讀到（`tests/conftest.py` 沒有清掉它）。
+- 在 #210 修好之後，不用再加 `env -u ANGAREION_IDENTITY`：外面設著的 `ANGAREION_IDENTITY` 由 `tests/conftest.py` 的 `isolated_home` 統一清掉；需要身分的測試自己用 `monkeypatch.setenv` 設。
 - 只停自己開的行程（記下自己的 pid 再停）；不要用 `pkill`／`killall` 依名稱殺 pytest 或 agora 行程，會誤殺別人的。
 
 ### 測試資料
