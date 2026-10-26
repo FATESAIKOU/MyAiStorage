@@ -593,6 +593,7 @@ def cmd_log(args, config, app, token):
                     pass
             max_cid = None
             max_created = last_created
+            had_new_message = False
             if not not_modified:
                 for cid, created_at, parsed in enumerated:
                     if parsed is None:
@@ -605,6 +606,9 @@ def cmd_log(args, config, app, token):
                         "message": message_to_dict(parsed),
                     }
                     existing = by_id.get(cid_int)
+                    is_new = existing is None or existing.get("message") != msg_dict["message"] or existing.get("created_at") != created_at
+                    if is_new:
+                        had_new_message = True
                     if existing is None or existing.get("message") != msg_dict["message"] or existing.get("created_at") != created_at:
                         by_id[cid_int] = msg_dict
                     if max_cid is None or cid_int > max_cid:
@@ -615,7 +619,9 @@ def cmd_log(args, config, app, token):
                     max_created = max((m["created_at"] for m in by_id.values()), key=lambda t: parse_backend_time(t))
                     max_cid = max(int(m["comment_id"]) for m in by_id.values())
                 messages_list = sorted(by_id.values(), key=lambda m: int(m["comment_id"]))
-                cache.save(ch, cached_entity, str(max_cid) if max_cid is not None else None, max_created, new_etag if new_etag is not None else etag, messages_list)
+                if had_new_message:
+                    new_etag = None
+                cache.save(ch, cached_entity, str(max_cid) if max_cid is not None else None, max_created, new_etag, messages_list)
             else:
                 messages_list = list(mirror)
 

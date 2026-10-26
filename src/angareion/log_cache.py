@@ -9,7 +9,6 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from angareion.backend import ETagRecord, Cursor
 from angareion.config import channel_slug, identity_slug
 
 
@@ -31,15 +30,17 @@ def _warn_to_stderr(message):
 def _etag_to_dict(record):
     if record is None:
         return None
-    return {
-        "url": record.url,
-        "etag": record.etag,
-        "cursor": {
-            "position": record.cursor.position,
-            "at": record.cursor.at,
-            "seen": list(record.cursor.seen),
-        },
-    }
+    if isinstance(record, dict):
+        url = record.get("url")
+        etag = record.get("etag")
+        if not isinstance(url, str) or not url or not isinstance(etag, str) or not etag:
+            return None
+        return {"url": url, "etag": etag}
+    url = getattr(record, "url", None)
+    etag = getattr(record, "etag", None)
+    if not isinstance(url, str) or not url or not isinstance(etag, str) or not etag:
+        return None
+    return {"url": url, "etag": etag}
 
 
 def _etag_from_dict(value):
@@ -49,21 +50,9 @@ def _etag_from_dict(value):
         return None
     url = value.get("url")
     etag = value.get("etag")
-    cursor = value.get("cursor")
     if not isinstance(url, str) or not url or not isinstance(etag, str) or not etag:
         return None
-    if not isinstance(cursor, dict):
-        return None
-    position = cursor.get("position")
-    at = cursor.get("at")
-    seen = cursor.get("seen", [])
-    if position is not None and not isinstance(position, str):
-        return None
-    if at is not None and not isinstance(at, str):
-        return None
-    if not isinstance(seen, list) or any(not isinstance(x, str) for x in seen):
-        return None
-    return ETagRecord(url=url, etag=etag, cursor=Cursor(position=position, at=at, seen=list(seen)))
+    return {"url": url, "etag": etag}
 
 
 class LogCache:
