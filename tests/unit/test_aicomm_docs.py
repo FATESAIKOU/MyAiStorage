@@ -128,3 +128,13 @@ def test_idle_wait_is_limited_to_agents_nobody_pokes():
 def test_the_hint_in_the_cli_matches_the_documented_remedy():
     cli = (REPO / "src" / "aicomm" / "cli.py").read_text(encoding="utf-8")
     assert REMEDY in cli and "同一個身分" in cli
+
+
+# --- #258: AI finds the owner at the App address ---
+
+
+def test_skill_gives_the_owner_address_and_keeps_the_pmo_rule():
+    """The owner's address is written down; decisions still go through PMO (#258)."""
+    text = _skill()
+    assert "--to myaientry-secretary-p1" in text
+    assert "經 PMO" in text
