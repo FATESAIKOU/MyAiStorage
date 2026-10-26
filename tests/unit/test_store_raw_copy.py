@@ -422,4 +422,99 @@ def test_claude_export_with_big_aux_does_not_hold_the_sidecar(tmp_path):
         tracemalloc.stop()
     assert exported.raw_file is not None
     grew = peak - baseline
-    assert grew < 1.5 * total, f"export peak {grew / (1 << 20):.1f} MB for {total / (1 << 20):.1f} MB session"
+    assert grew < 0.5 * total, f"export peak {grew / (1 << 20):.1f} MB for {total / (1 << 20):.1f} MB session"
+
+
+def test_iter_aux_ignores_growth_appended_after_is_utf8(tmp_path, monkeypatch):
+    """L2: a file that grows between the two passes must not change the emitted value."""
+    from agora.agents import claude
+    side = tmp_path / "side"
+    side.mkdir()
+    f = side / "t.txt"
+    f.write_bytes(("中文" * 100).encode("utf-8"))
+    snap = tmp_path / "snap"
+    shutil.copytree(side, snap)
+    expected = _old_aux(snap)
+
+    real = claude._is_utf8
+
+    def patched(path, size):
+        r = real(path, size)
+        with path.open("ab") as fh:
+            fh.write(b"APPENDED-GROWTH")
+        return r
+
+    monkeypatch.setattr(claude, "_is_utf8", patched)
+    out = b"".join(claude._iter_aux(side))
+    assert out == expected
+
+
+def test_iter_aux_raises_when_file_rewritten_non_utf8(tmp_path, monkeypatch):
+    """L1(a): text file rewritten to non-UTF-8 between passes -> AgentError."""
+    from agora.agents import claude
+    from agora.agents.base import AgentError
+    side = tmp_path / "side"
+    side.mkdir()
+    f = side / "t.txt"
+    f.write_bytes(("中文" * 50).encode("utf-8"))
+
+    real = claude._is_utf8
+
+    def patched(path, size):
+        r = real(path, size)
+        path.write_bytes(b"\xff" * size)
+        return r
+
+    monkeypatch.setattr(claude, "_is_utf8", patched)
+    with pytest.raises(AgentError):
+        b"".join(claude._iter_aux(side))
+
+
+def test_iter_aux_raises_when_file_truncated(tmp_path, monkeypatch):
+    """L1(b): file truncated between passes -> AgentError."""
+    from agora.agents import claude
+    from agora.agents.base import AgentError
+    side = tmp_path / "side"
+    side.mkdir()
+    f = side / "t.txt"
+    f.write_bytes(("中文" * 50).encode("utf-8"))
+
+    real = claude._is_utf8
+
+    def patched(path, size):
+        r = real(path, size)
+        path.write_bytes(path.read_bytes()[: size // 2])
+        return r
+
+    monkeypatch.setattr(claude, "_is_utf8", patched)
+    with pytest.raises(AgentError):
+        b"".join(claude._iter_aux(side))
+
+
+def test_iter_aux_raises_when_text_truncated_mid_char(tmp_path, monkeypatch):
+    """L1(c): stat size lands in the middle of a multibyte char -> AgentError."""
+    from agora.agents import claude
+    from agora.agents.base import AgentError
+    from pathlib import Path as _Path
+    import os as _os
+
+    side = tmp_path / "side"
+    side.mkdir()
+    f = side / "t.txt"
+    f.write_bytes(("中" * 10).encode("utf-8"))
+
+    monkeypatch.setattr(claude, "_is_utf8", lambda path, size: True)
+
+    orig_stat = _Path.stat
+
+    def fake_stat(self, *a, **k):
+        r = orig_stat(self, *a, **k)
+        if str(self).endswith("t.txt"):
+            return _os.stat_result(
+                (r.st_mode, r.st_ino, r.st_dev, r.st_nlink, r.st_uid,
+                 r.st_gid, 2, r.st_atime, r.st_mtime, r.st_ctime))
+        return r
+
+    monkeypatch.setattr(_Path, "stat", fake_stat)
+    with pytest.raises(AgentError):
+        b"".join(claude._iter_aux(side))

@@ -296,24 +296,57 @@ def _iter_aux(sidecar: Path) -> Iterator[bytes]:
     A file is read twice - once to learn whether it is UTF-8 (the choice between a text
     value and `$base64` has to come before the first byte of the value), once to emit it.
     The second pass stops at the size the first one saw, so a file that grows in between
-    cannot make the value longer than what was checked."""
+    cannot make the value longer than what was checked.
+
+    If a file changes between the two passes, this raises `AgentError` instead of
+    silently emitting a truncated or mojibake value: the value's opening bytes (a `"`
+    for text, `{"$base64": "` for binary) have already been written, so the kind
+    cannot be switched mid-stream - a file that was text when checked but became
+    binary (or vice versa) cannot be re-classified here. The caller retries the
+    whole round next time. Concretely:
+
+    - text branch: a `UnicodeDecodeError` on the second pass (the file stopped being
+      valid UTF-8) is converted to `AgentError`; reading fewer bytes than `size`
+      (the file was truncated) is `AgentError`; and `decoder.decode(b"", final=True)`
+      is called at the end, so an incomplete trailing multibyte sequence is
+      `AgentError` instead of being silently dropped.
+    - `$base64` branch: reading fewer bytes than `size` is `AgentError`."""
     files = [] if not sidecar.is_dir() else [p for p in sorted(sidecar.rglob("*")) if p.is_file()]
     yield b"{"
     for i, path in enumerate(files):
         size = path.stat().st_size
-        key = json.dumps(path.relative_to(sidecar).as_posix(), ensure_ascii=False)
+        rel = path.relative_to(sidecar).as_posix()
+        key = json.dumps(rel, ensure_ascii=False)
         yield (", " if i else "").encode("utf-8") + key.encode("utf-8") + b": "
         if _is_utf8(path, size):
             decoder = codecs.getincrementaldecoder("utf-8")()
             yield b'"'
-            for chunk in _read_chunks(path, size):
-                text = decoder.decode(chunk)
-                yield json.dumps(text, ensure_ascii=False)[1:-1].encode("utf-8")
+            total = 0
+            try:
+                for chunk in _read_chunks(path, size):
+                    total += len(chunk)
+                    text = decoder.decode(chunk)
+                    yield json.dumps(text, ensure_ascii=False)[1:-1].encode("utf-8")
+                if total < size:
+                    raise AgentError(
+                        f"{rel}：讀的時候被截短（讀到 {total} 位元組，檢查時是 {size}），"
+                        f"檔案在兩遍讀取之間被改了，下一輪會重試")
+                decoder.decode(b"", final=True)
+            except UnicodeDecodeError as e:
+                raise AgentError(
+                    f"{rel}：讀的時候不是有效的 UTF-8（檔案在兩遍讀取之間被改了），"
+                    f"下一輪會重試：{e}") from e
             yield b'"'
         else:
             yield b'{"$base64": "'
+            total = 0
             for chunk in _read_chunks(path, size):
+                total += len(chunk)
                 yield base64.b64encode(chunk)
+            if total < size:
+                raise AgentError(
+                    f"{rel}：讀的時候被截短（讀到 {total} 位元組，檢查時是 {size}），"
+                    f"檔案在兩遍讀取之間被改了，下一輪會重試")
             yield b'"}'
     yield b"}"
 
