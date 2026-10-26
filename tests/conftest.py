@@ -133,6 +133,11 @@ def isolated_home(tmp_path, monkeypatch, request):
     monkeypatch.setenv("ANGAREION_CONFIG", str(tmp_path / "angareion" / "config.json"))
     monkeypatch.setenv("ANGAREION_STATE_DIR", str(tmp_path / "angareion-state"))
     monkeypatch.setenv("ANGAREION_TOKEN_FILE", str(tmp_path / "angareion" / "token"))
+    # The environment's seat wins over config.json's identity (#210): an outer shell
+    # that exports ANGAREION_IDENTITY would otherwise be the identity every test
+    # reads, so drop it here along with the other inherited knobs. A test that needs
+    # a seat sets it again with monkeypatch.setenv.
+    monkeypatch.delenv("ANGAREION_IDENTITY", raising=False)
     # opencode finds its database through XDG_* too; never let a unit test reach it (OC11).
     for var in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR"):
         monkeypatch.delenv(var, raising=False)
