@@ -391,7 +391,7 @@ def test_iter_aux_bytes_equal_the_old_dumps(tmp_path):
 
 
 def test_claude_export_with_big_aux_does_not_hold_the_sidecar(tmp_path):
-    """A ~20 MB sidecar next to a small session peaks under 1.5x the session size (#240)."""
+    """A ~20 MB sidecar next to a small session peaks under 0.5x the session size (#240)."""
     home = Path(os.environ["AGORA_CLAUDE_HOME"])
     workdir = tmp_path / "proj"
     workdir.mkdir()
@@ -516,5 +516,27 @@ def test_iter_aux_raises_when_text_truncated_mid_char(tmp_path, monkeypatch):
         return r
 
     monkeypatch.setattr(_Path, "stat", fake_stat)
+    with pytest.raises(AgentError):
+        b"".join(claude._iter_aux(side))
+
+
+def test_iter_aux_raises_when_base64_truncated(tmp_path, monkeypatch):
+    """L1(d): a non-UTF-8 file truncated between passes -> AgentError on the $base64 branch."""
+    from agora.agents import claude
+    from agora.agents.base import AgentError
+
+    side = tmp_path / "side"
+    side.mkdir()
+    f = side / "f.bin"
+    f.write_bytes(b"\xff\xfe" * 200)
+
+    real = claude._is_utf8
+
+    def patched(path, size):
+        r = real(path, size)
+        path.write_bytes(path.read_bytes()[: size // 2])
+        return r
+
+    monkeypatch.setattr(claude, "_is_utf8", patched)
     with pytest.raises(AgentError):
         b"".join(claude._iter_aux(side))

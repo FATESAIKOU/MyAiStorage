@@ -298,19 +298,20 @@ def _iter_aux(sidecar: Path) -> Iterator[bytes]:
     The second pass stops at the size the first one saw, so a file that grows in between
     cannot make the value longer than what was checked.
 
-    If a file changes between the two passes, this raises `AgentError` instead of
-    silently emitting a truncated or mojibake value: the value's opening bytes (a `"`
+    A file may change between the two passes; the value's opening bytes (a `"`
     for text, `{"$base64": "` for binary) have already been written, so the kind
     cannot be switched mid-stream - a file that was text when checked but became
     binary (or vice versa) cannot be re-classified here. The caller retries the
-    whole round next time. Concretely:
-
+    whole round next time. `AgentError` is raised in these cases:
     - text branch: a `UnicodeDecodeError` on the second pass (the file stopped being
-      valid UTF-8) is converted to `AgentError`; reading fewer bytes than `size`
-      (the file was truncated) is `AgentError`; and `decoder.decode(b"", final=True)`
-      is called at the end, so an incomplete trailing multibyte sequence is
-      `AgentError` instead of being silently dropped.
-    - `$base64` branch: reading fewer bytes than `size` is `AgentError`."""
+      valid UTF-8, or ended with an incomplete trailing multibyte sequence -
+      `decoder.decode(b"", final=True)` is called at the end to catch the latter);
+      or reading fewer bytes than `size` (the file was truncated).
+    - `$base64` branch: reading fewer bytes than `size` (the file was truncated).
+    A file that keeps the same size but is rewritten to another valid UTF-8 text is
+    not an error: the new content is emitted and the value stays self-consistent.
+    A file that disappears between the two passes, or becomes a directory, is not
+    converted: the original `OSError` propagates."""
     files = [] if not sidecar.is_dir() else [p for p in sorted(sidecar.rglob("*")) if p.is_file()]
     yield b"{"
     for i, path in enumerate(files):
@@ -334,8 +335,8 @@ def _iter_aux(sidecar: Path) -> Iterator[bytes]:
                 decoder.decode(b"", final=True)
             except UnicodeDecodeError as e:
                 raise AgentError(
-                    f"{rel}：讀的時候不是有效的 UTF-8（檔案在兩遍讀取之間被改了），"
-                    f"下一輪會重試：{e}") from e
+                    f"{rel}：讀的時候不是有效的 UTF-8 或結尾不完整（檔案在兩遍讀取之間被改了），"
+                    f"下一輪會重試") from e
             yield b'"'
         else:
             yield b'{"$base64": "'
