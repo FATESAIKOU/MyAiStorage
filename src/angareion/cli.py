@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import time
 from typing import Any, Callable, Sequence
@@ -424,6 +426,74 @@ def cmd_read(args: argparse.Namespace, config: Config, app: Angareion, token: st
     return EXIT_OK
 
 
+def _package_version() -> str:
+    """Return the installed package version from its metadata (never hardcoded).
+
+    The distribution is named ``agora`` (pyproject.toml); ``angareion`` is not
+    a distribution, so only that name is consulted. If it is not installed,
+    report ``unknown`` rather than falling back to a hardcoded constant.
+    """
+    try:
+        return importlib.metadata.version("agora")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _commit_sha() -> str:
+    """Best-effort short commit sha of the source tree; 'unknown' if unavailable.
+
+    Only report a sha when ``repo_root`` is itself the top level of a git
+    work tree: ``git -C`` walks up the directory tree looking for a ``.git``,
+    so an install sitting inside an unrelated repository would otherwise print
+    that repository's HEAD. Compare the resolved top level to ``repo_root``
+    and fall back to ``unknown`` on any mismatch or failure.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    try:
+        toplevel = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if toplevel.returncode != 0:
+        return "unknown"
+    try:
+        git_root = Path(toplevel.stdout.strip()).resolve()
+    except (OSError, ValueError):
+        return "unknown"
+    if git_root != repo_root.resolve():
+        return "unknown"
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    sha = result.stdout.strip()
+    return sha if sha else "unknown"
+
+
+class _VersionAction(argparse.Action):
+    """Print the version + commit lazily, only when ``--version`` is given."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS,
+                 help="show program's version number and exit"):
+        super().__init__(option_strings, dest, nargs=0, default=default, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        version = f"angareion {_package_version()} ({_commit_sha()})"
+        sys.stdout.write(version + "\n")
+        parser.exit()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser for `angareion`."""
     parser = _Parser(
@@ -434,6 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=_PRIVACY_REMINDER,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--version", action=_VersionAction, help="show program's version number and exit")
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     p_channel = subparsers.add_parser("channel", help="Channel operations.")
@@ -511,6 +582,8 @@ def main(
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
+    except SystemExit as e:  # argparse --help / --version terminate via SystemExit; convert to an int return code
+        return e.code if isinstance(e.code, int) else EXIT_OK
     except UsageError as e:
         sys.stderr.write(f"Error: {e}\n")
         return EXIT_USAGE
