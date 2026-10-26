@@ -140,11 +140,11 @@ def test_skill_gives_the_owner_address_and_keeps_the_pmo_rule():
     assert "經 PMO" in text
 
 
-def test_skill_says_inline_at_is_display_only_and_dispatch_is_secretary_pmo_only():
+def test_skill_says_inline_at_is_plain_text_and_dispatch_is_secretary_pmo_only():
     """W1: inline '@' does not deliver; W2: only secretary-pmo dispatches (#271)."""
     text = _skill()
-    assert "內文寫 `@ myaientry-secretary-p1`" in text
-    assert "只是給 App 顯示用" in text
+    assert "內文寫 `@ myaientry-secretary-p1` 只是普通文字" in text
+    assert "廣播會進本人的 inbox，但不叫醒、也不標 @你" in text
     assert "只認 `secretary-pmo`" in text
     assert "自由文字不當派工" in text
 
