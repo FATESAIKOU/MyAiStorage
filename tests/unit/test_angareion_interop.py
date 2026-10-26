@@ -197,6 +197,36 @@ def test_a_crlf_message_reads_with_lf_content_like_ts():
     assert msg.content == "body\nmore\n"
 
 
+def _local(name: str) -> tuple[bytes, Message, dict]:
+    raw = (LOCAL / f"{name}.md").read_bytes()
+    msg = parse_message(raw.decode("utf-8"))
+    assert msg is not None, f"{name} did not parse"
+    want = json.loads((LOCAL / f"{name}.expected.json").read_text(encoding="utf-8"))
+    return raw, msg, want
+
+
+def test_a_lone_cr_between_front_matter_fields_is_a_line_break_like_yaml():
+    # Local addition (not from MyAiEntry, see PINNED.md): a lone `\r` (not `\r\n`)
+    # between two front matter fields. YAML reads a lone `\r` as a line break, so
+    # PyYAML reads `urgency` and `attachments` as two fields (#238).
+    raw, msg, want = _local("98-lone-cr-front-matter")
+    assert b"urgency: 5\rattachments: []" in raw
+    assert b"urgency: 5\r\n" not in raw
+    assert message_to_dict(msg) == want
+    assert msg.urgency == 5
+    assert msg.attachments == []
+
+
+def test_a_lone_cr_inside_a_double_quoted_scalar_folds_to_a_space():
+    # Same local addition: a raw `\r` inside a double-quoted scalar. YAML folds a
+    # line break inside double quotes into a space, and a lone `\r` is a line
+    # break, so `"a\rb.md"` reads as `a b.md` (#238).
+    raw, msg, want = _local("98-lone-cr-in-quoted-string")
+    assert b'name: "a\rb.md"' in raw
+    assert message_to_dict(msg) == want
+    assert msg.attachments == [{"name": "a b.md", "inline": "hi"}]
+
+
 def test_serialize_message_sends_crlf_content_and_it_reads_as_lf():
     msg = _message_with_inline("plain")
     msg.content = "body\r\nmore\r\n"
