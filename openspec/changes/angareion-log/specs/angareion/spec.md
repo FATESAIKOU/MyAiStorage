@@ -75,8 +75,8 @@ Angareion 對外 MUST 只有六個介面：建 channel、刪 channel、送訊息
 - **THEN** exit 1；什麼都沒建、沒送
 
 #### Scenario: log 是第六個介面
-- **WHEN** `angareion --help` 印出的子指令清單，與 `angareion log --help` 印出的旗標清單
-- **THEN** 子指令恰好是 `channel`（下有 `create`／`delete`）、`send`、`wait`、`read`、`log`；`log` 的旗標是查詢類（`--channel`、`--from`、`--to`、`--mentioned`、`--since`、`--until`、`--grep`、`--around`、`--thread`、`--before`、`--after`、`--limit`、`--json`），沒有 `--body` 等寫入旗標（log 不寫信；`--to` 在 log 是收件人的「過濾」條件，不是 `send` 的寫入）
+- **WHEN** `angareion --help` 印出的子指令清單、`angareion channel --help` 印出的子子指令清單，與 `angareion log --help` 印出的旗標清單（低-14：三份清單都由 WHEN 的輸出觀察）
+- **THEN** 頂層子指令恰好是 `channel`、`send`、`wait`、`read`、`log`（由 `angareion --help` 斷言）；`channel` 下的子子指令恰好是 `create`、`delete`（由 `angareion channel --help` 斷言）；`log` 的旗標是查詢類（`--channel`、`--from`、`--to`、`--mentioned`、`--since`、`--until`、`--grep`、`--around`、`--thread`、`--before`、`--after`、`--limit`、`--json`），沒有 `--body` 等寫入旗標（log 不寫信；`--to` 在 log 是收件人的「過濾」條件，不是 `send` 的寫入）
 
 #### Scenario: log 的介面不出現後端概念
 - **WHEN** 檢查 `angareion log` 的參數清單、stdout、stderr 與說明（`--help`）
@@ -218,7 +218,7 @@ repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：六
 
 #### Scenario: --limit 跨 channel 取全域最新的
 - **WHEN** channel X 與 Y 各有多則（X 內最新的收到時刻比 Y 內所有訊息都早），`angareion log --channel X --channel Y --limit 1`
-- **THEN** 只回傳 Y 內那則（全域排序 `(received_at, channel, id)` 下最新的一則，不是 X、Y 各一則）；由舊到新印出
+- **THEN** 只回傳 **Y 內最新的那一則**（全域排序 `(received_at, channel, id)` 下最新的一則恰是 Y 內最新那則；不是 X、Y 各一則，也不是 Y 的其他訊息）；由舊到新印出
 
 #### Scenario: --limit 可以把錨點截掉
 - **WHEN** `--around` 的窗口經過濾後留有 7 則，再一起給 `--limit 2`
@@ -242,7 +242,7 @@ repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：六
 - 同步用後端的「列舉」動作（見「後端可以替換」），帶 `since = 上一次同步到的後端時刻 − 60 秒`（與游標同源的 margin；快取為空時不帶 `since`）；合併 MUST 是冪等的 upsert：到達位置比已記錄的新、**或從未出現過**（接住亂序晚到的較小位置）就進鏡射，同位置內容不同（後端被編輯）就覆蓋；已記錄的最大位置與時刻 MUST NOT 後退。
 - 回應含新訊息時 MUST NOT 記錄 ETag（不得成為下次「沒有新訊息」的驗證器）；回應完整掃過且乾淨、單頁未滿才記錄（沿用 `wait` 的條件式查詢規則）；下次同步同一視窗 MUST 送 `If-None-Match`，304 MUST 視為「沒有增量」且不計後端額度。
 - 任一涉入 channel 的同步失敗（HTTP 錯、逾時）MUST 以 exit 2 結束且 MUST NOT 輸出任何查詢結果——不用「部分同步＋舊鏡射」當完整答案。
-- 快取 MUST 每身分一份（檔名跟身分的 slug，同游標檔的分位），放在 state 目錄；channel 的檔名 MUST 以 channel 名的**可逆轉義**成檔（屬 `[A-Za-z0-9_-]` 的字元原樣、其餘字元以 `%XX` 編碼其 UTF-8 位元組），MUST NOT 依賴 channel 名的字元限制成立——組態檔裡出不合法的名字（`a/b`、`../x` 這類）時 MUST 仍不出快取目錄（轉義後不成路徑分隔；design D3.2 的 `channel_slug`），檔內記原始 channel 名並在載入時比對（不符＝整檔視為空）；與游標檔、`wait` 的 ETag 狀態檔 MUST NOT 共用檔案，也 MUST NOT 被對方讀寫。快取 MUST NOT 寫進或讀出任何游標。
+- 快取 MUST 每身分一份（檔名跟身分的 slug，同游標檔的分位），放在 state 目錄；channel 的檔名 MUST 以 channel 名的**可逆轉義**成檔（屬 `[a-z0-9_-]` 的字元原樣，**大寫 ASCII 字母與其餘字元一律以 `%XX` 編碼其 UTF-8 位元組**——大寫也轉義是低-16 定案：大小寫不敏感的檔案系統上，只差大小寫的兩個 channel 名 MUST NOT 落到同一個檔，`A` 與 `a` MUST 各有自己的快取檔；轉義 MUST 無條件可逆且單射），MUST NOT 依賴 channel 名的字元限制成立——組態檔裡出不合法的名字（`a/b`、`../x` 這類）時 MUST 仍不出快取目錄（轉義後不成路徑分隔；design D3.2 的 `channel_slug`），檔內記原始 channel 名並在載入時比對（不符＝整檔視為空）；與游標檔、`wait` 的 ETag 狀態檔 MUST NOT 共用檔案，也 MUST NOT 被對方讀寫。快取 MUST NOT 寫進或讀出任何游標。
 - 快取檔 MUST 以「同目錄暫存＋原子替換」寫出，檔案權限 0600、目錄 0700（快取含頻道訊息內文，只能本身分讀）。
 - 快取檔不存在、不是合法 JSON、版本不認得、缺欄位、或檔內記的 channel↔entity 對應與設定檔不符時，MUST 整檔視為空並全量重建；MUST NOT 部分信任。刪掉快取 MUST 只造成下一次全量同步，MUST NOT 讓訊息漏掉或查詢結果變異。
 - 快取寫不進去（唯讀目錄、磁碟滿）MUST 只在 stderr 警告一次（同一行程最多一次），查詢照常以本輪記憶體內的鏡射回答；exit code 與 stdout MUST NOT 因此改變。

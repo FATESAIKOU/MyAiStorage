@@ -26,6 +26,7 @@
 ### Modified Capabilities
 
 - `angareion`：「五個介面」改名為「六個介面」（新增唯讀查詢 `log`）；「輸出與結束碼」補 `log` 的 stdout；「後端可以替換」的後端動作新增一個唯讀列舉；「給 agent 的說明」補 `log` 用法。新增兩條 requirement：唯讀查詢 `log`（介面語意）、`log` 的本機快取（同步、正確性、權限）。
+- `angareion/channel-config`：requirement「channel 對應的更新（註冊簿重建）」的交叉引用「見 `angareion` 的五個介面」隨改名同步成「六個介面」（MODIFIED；不直接改 main spec，由本 change 的 delta 套用——低-17）。
 - `comm-skill`：「對外只有 send 與 inbox 兩個指令」改名為「對外只有 send、inbox、log 三個指令」；新增 requirement：`log` 薄包 Angareion 的 log（預設 `--to me`、原樣轉發、不叫醒）。
 
 （無新增 capability。）
