@@ -18,7 +18,7 @@ skill MUST 對外只提供 `send`、`inbox` 與 `log` 三個子指令（另有 `
 `aicomm log` MUST 以 Angareion 的 `log` 指令查詢：
 
 - 除 `--to`／`--mentioned` 的注入規則外，MUST NOT 自行解析或驗證 `log` 的旗標——`log` 之後的引數原樣交給 `angareion log`（subprocess），stdout／stderr 原樣轉發，結束碼跟著 Angareion（成功 0、用法錯 1、後端或設定錯 2）；錯誤由 Angareion 報，skill 不重複實作旗標語意。
-- **預設 `--to me`**：使用者沒有給 `--to` 也沒有給 `--mentioned` 時，MUST 自動補 `--to me`；使用者給了任一個，MUST NOT 注入（以使用者的為準）。補的是字面 `me`，skill MUST NOT 自己解析身分（skill 不讀 Angareion 的設定檔；`me` 由 angareion 解析為「寄給我的」＝`to` 是我、或廣播、或 `mentions` 有我）。
+- **預設 `--to me`**：使用者沒有給 `--to` 也沒有給 `--mentioned` 時，MUST 自動補 `--to me`；使用者給了任一個，MUST NOT 注入（以使用者的為準）。「使用者給了」的判斷 MUST 認得等價寫法（不只是 `--to` 空格寫法）：對每個使用者引數取 `=` 之前的字面、去掉 `--`，若恰是 `to` 或 `mentioned` 的**前綴**，就算使用者已指定收件人（涵蓋 `--to <值>`、`--to=<值>`、`--mentioned`，與 argparse 會接受的未歧義縮寫如 `--t`、`--m`、`--ment`）；注入 MUST 放在使用者引數**之前**（argparse 同名旗標重複時「後給的贏」，放前面保證使用者值即使漏判也贖得回）。補的是字面 `me`，skill MUST NOT 自己解析身分（skill 不讀 Angareion 的設定檔；`me` 由 angareion 解析為「寄給我的」＝`to` 是我、或廣播、或 `mentions` 有我）。
 - **不叫醒**：`log` MUST NOT 對 sidecar 發出任何請求（查 agent 或戳都不發）；叫醒是 `send` 的副作用。
 - `log` MUST NOT 提供 `--wait`／`--interrupt`／`--no-wake`（沒有等待與叫醒語意）；引數裡出現 Angareion 不認得的旗標時照 Angareion 的回應（exit 1）轉發。
 - `--json` MUST 原樣轉發 Angareion 的 JSON 輸出。
@@ -31,6 +31,14 @@ skill MUST 對外只提供 `send`、`inbox` 與 `log` 三個子指令（另有 `
 #### Scenario: 使用者給了 --to 就不注入
 - **WHEN** `aicomm log --to mypmo-pm-m1 --grep blocker`
 - **THEN** 對 angareion 送出 `log --to mypmo-pm-m1 --grep blocker`（原樣，沒有補 `--to me`）
+
+#### Scenario: 等號的 --to=<值> 也不注入（不會被靜默蓋掉）
+- **WHEN** `aicomm log --to=mypmo-pm-m1 --grep blocker`
+- **THEN** 對 angareion 送出 `log --to=mypmo-pm-m1 --grep blocker`（原樣，沒有補 `--to me`——argparse 合法的等號寫法不會被掃描漏掉）
+
+#### Scenario: 縮寫的 --mentioned 也不注入
+- **WHEN** `aicomm log --m --grep blocker`（argparse 的未歧義縮寫＝`--mentioned`）
+- **THEN** 不注入；對 angareion 轉出 `log --m --grep blocker`（原樣），`--to me` 沒有悄悄與它並存
 
 #### Scenario: 使用者給了 --mentioned 就不注入
 - **WHEN** `aicomm log --mentioned --channel team-alpha`

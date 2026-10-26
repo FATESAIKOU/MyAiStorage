@@ -75,8 +75,8 @@ Angareion 對外 MUST 只有六個介面：建 channel、刪 channel、送訊息
 - **THEN** exit 1；什麼都沒建、沒送
 
 #### Scenario: log 是第六個介面
-- **WHEN** `angareion log`（任何旗標組合）
-- **THEN** 只有 `log` 這個動詞存在於介面清單的查詢；它不提供寫入、不提供 ack，行為見「唯讀查詢 log」
+- **WHEN** `angareion --help` 印出的子指令清單，與 `angareion log --help` 印出的旗標清單
+- **THEN** 子指令恰好是 `channel`（下有 `create`／`delete`）、`send`、`wait`、`read`、`log`；`log` 的旗標是查詢類（`--channel`、`--from`、`--to`、`--mentioned`、`--since`、`--until`、`--grep`、`--around`、`--thread`、`--before`、`--after`、`--limit`、`--json`），沒有 `--body` 等寫入旗標（log 不寫信；`--to` 在 log 是收件人的「過濾」條件，不是 `send` 的寫入）
 
 #### Scenario: log 的介面不出現後端概念
 - **WHEN** 檢查 `angareion log` 的參數清單、stdout、stderr 與說明（`--help`）
@@ -106,10 +106,10 @@ stdout MUST 只放結果（`channel create`／`channel delete` 印 channel 名�
 - **THEN** exit 2，stderr 說明 channel 沒有建立成功；後端可能留著沒有對應的實體，但介面不提它
 
 ### Requirement: 後端可以替換（設定檔指位）
-六個介面 MUST 經由一個後端介面實作，後端的動作是：建 channel＝開實體、刪 channel＝關實體、送、確認有沒有新訊息、讀，以及一個唯讀的「列舉」（列出實體上的留言與其到達位置、後端時刻，並標出留言是否是 angareion 訊息——非訊息的留言也要列得出來；`log` 與它的本機快取使用這個動作）；對外的 `wait` 是在後端「確認有沒有新訊息」上輪詢（不阻塞＝確認一次）。這次的實作是 GitHub API＋Issues：channel 名經 channel 設定檔指到某個 backend 的某個實體（issue；訊息＝留言）。解析 MUST 只認設定檔，MUST NOT 用標題掃描挑實體——同名標題不影響操作。後端 MUST NOT 存成員（第一期 channel 全公開）。換後端時，指令與訊息格式 MUST NOT 改變。
+六個介面 MUST 經由一個後端介面實作，後端的動作是：建 channel＝開實體、刪 channel＝關實體、送、確認有沒有新訊息、讀，以及一個唯讀的「列舉」（列出實體上的留言與其到達位置、後端時刻，並標出留言是否是 angareion 訊息——非訊息的留言也要列得出來；`log` 與它的本機快取使用這個動作）。列舉帶 `since` 時 MUST 按留言的**最後編輯時刻**過濾（與 GitHub 列表 API 的語意一致：被編輯過的舊留言 MUST 因編輯重新出現在結果裡；增量同步的「同 id 內容變就覆蓋」仰賴這條）——假後端 MUST 照守，MUST NOT 以「照 `created_at` 過濾或直接忽略 `since`」實作它。對外的 `wait` 是在後端「確認有沒有新訊息」上輪詢（不阻塞＝確認一次）。這次的實作是 GitHub API＋Issues：channel 名經 channel 設定檔指到某個 backend 的某個實體（issue；訊息＝留言）。解析 MUST 只認設定檔，MUST NOT 用標題掃描挑實體——同名標題不影響操作。後端 MUST NOT 存成員（第一期 channel 全公開）。換後端時，指令與訊息格式 MUST NOT 改變。
 
 #### Scenario: 用假後端
-- **WHEN** 測試以記憶體裡的假後端執行六個介面
+- **WHEN** 測試以記憶體裡的假後端執行六個指令
 - **THEN** 行為和用 GitHub 後端時相同，不連網
 
 #### Scenario: 多頁時第 1 頁不變
@@ -148,11 +148,11 @@ repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：六
 - `--since`／`--until`：時間上下界，都是後端記錄的時刻（`received_at`，RFC 3339），**皆含邊界**；格式錯 exit 1（附格式提示，同 `read --since`），`--since > --until` exit 1。
 - `--grep <字串>`：內文的字面（非 regex）搜尋、不分大小寫、只比對 `content`。
 - `--around <訊息 id>`（＋`--before N`／`--after N`）：以訊息 id（26 字 ULID）錨定，視窗＝同 channel 內以到達位置計的前 N＋後 N 則＋錨點；`--before`／`--after` 只在 `--around` 下合法（否則 exit 1）、非負整數、各自預設 0。
-- `--thread <訊息 id>`：沿 `in_reply_to` 取整串（錨點往上到根，根＋全部子孫，按到達順序）；與 `--around` 互斥（同給 exit 1）；錨點自己的 `in_reply_to` 指不到訊息時，錨點視為根。
-- `--limit N`：過濾完之後保留**最新** N 則，仍由舊到新印；N ≥ 0，0 是合法的空結果；負數 exit 1。**預設不限**。
+- `--thread <訊息 id>`：沿 `in_reply_to` 取整串（錨點往上到根，根＋全部子孫，按到達順序）；與 `--around` 互斥（同給 exit 1）；錨點自己的 `in_reply_to` 指不到訊息時，錨點視為根。**已知限制（唯一規則）：串只在錨點所在 channel 內組裝**——`in_reply_to` 指到別的 channel 的訊息時，鏈在跨 channel 前停下，該訊息視為根；跨 channel 的串不追。
+- `--limit N`：過濾完之後**依輸出順序排序、取排序結果的最後 N 則**（「最新」由排序鍵定義：單 channel 以到達位置；跨 channel 以 `(received_at, channel, id)`——是全域最新的 N 則，**不是每個 channel 各取 N 則**），仍由舊到新印；N ≥ 0，0 是合法的空結果；負數 exit 1。**預設不限**。與錨點旗標同用時照「先錨點後過濾再排序再截」的順序截——錨點沒有保留地位（被過濾或被截掉就不在輸出裡）。
 - `--json`：與 `read --json` 同欄位（`message_to_dict`＋`received_at`）；空結果印 `[]`。
 
-套用順序 MUST 固定：錨點候選集（`--around` 視窗／`--thread` 串；錨點必須在過濾選取的 channel 內，找不到 exit 1）→ 過濾交集 → `--limit` → 排序輸出。輸出 MUST 固定由舊到新（單 channel 以到達位置；跨 channel 以 `(received_at, channel, id)`），內文 MUST 完整印出不截斷（多行逐行完整、`--json` 的 `content` 完整保留）。錨點旗標與 `--since`／`--until`／`--grep` 等過濾旗標 CAN 同時使用（先錨點、後過濾）。非 angareion 訊息格式的留言 MUST NOT 出現在結果裡，MUST NOT 計入 `--around` 的視窗計數。
+套用順序 MUST 固定：**錨點候選集（`--around` 視窗／`--thread` 串；錨點所在的 channel MUST 在本查詢的選取集合（`--channel` 聯集或全部）內，選取集合內同步後沒有那個訊息 id → exit 1；錨點不符合其他過濾條件（`--from`／`--to`／`--mentioned`／`--since`／`--until`／`--grep`）MUST NOT 被當成錯誤——照常定位，錨點本身被過濾則不出現在輸出，結果照常）→ 過濾交集 → 排序（單 channel 以到達位置；跨 channel 以 `(received_at, channel, id)`）→ `--limit` 取排序後的最後 N 則 → 依同序印出**。輸出 MUST 固定由舊到新（同一排序鍵；單 channel 以到達位置；跨 channel 以 `(received_at, channel, id)`），內文 MUST 完整印出不截斷（多行逐行完整、`--json` 的 `content` 完整保留）。錨點旗標與 `--since`／`--until`／`--grep` 等過濾旗標 CAN 同時使用（先錨點、後過濾）。非 angareion 訊息格式的留言 MUST NOT 出現在結果裡，MUST NOT 計入 `--around` 的視窗計數。
 
 #### Scenario: log 不動游標
 - **WHEN** B 有未讀訊息，B 執行 `angareion log`（無旗標、或任何旗標組合，含 `--channel`、`--around`、`--thread`）
@@ -200,13 +200,29 @@ repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：六
 - **WHEN** m5 的 `in_reply_to` 指向一則不存在（或不是 angareion 訊息）的 id，`--thread <m5 的 id>`
 - **THEN** m5 與它的子孫照回傳（m5 視為根），不因為指不到而 exit 1
 
+#### Scenario: --thread 的根在別的 channel（已知限制）
+- **WHEN** channel X 的 m5 的 `in_reply_to` 指向 channel Y 的 m1（Y 那則是 angareion 訊息、在另一個 channel），`--thread <m5 的 id>`
+- **THEN** m5 視為根：回傳 X 內 m5 與它的子孫；Y 的 m1 不追、不回傳；exit 0（不是錯誤）
+
 #### Scenario: 錨點找不到與空結果
 - **WHEN** `--around`／`--thread` 給了同步後確認不存在的 ULID
 - **THEN** exit 1（stderr 說明找不到）；**WHEN** 過濾交集後沒有任何訊息（如 `--grep` 不中）**THEN** exit 0、stdout 空（或 `--json` 為 `[]`）
 
-#### Scenario: --limit 保留最新 N 則
+#### Scenario: 錨點被過濾條件濾掉不是錯誤
+- **WHEN** channel X 內按到達順序有 m1（A 寄）、m2（B 寄）、m3（A 寄），執行 `angareion log --channel X --from <A 的 AI 名> --around <m2 的 id> --before 1 --after 1`
+- **THEN** exit 0：窗口以 m2 數（m1..m3）、`--from A` 把 m2 濾掉，輸出 m1、m3 由舊到新——錨點自己不在輸出裡（與「找不到」不同：定位成功、結果不空）
+
+#### Scenario: --limit 保留排序尾端的 N 則
 - **WHEN** 目標有 m1..m30，`angareion log --channel X --limit 5`
 - **THEN** 回傳 m26..m30，以由舊到新的順序印出
+
+#### Scenario: --limit 跨 channel 取全域最新的
+- **WHEN** channel X 與 Y 各有多則（X 內最新的收到時刻比 Y 內所有訊息都早），`angareion log --channel X --channel Y --limit 1`
+- **THEN** 只回傳 Y 內那則（全域排序 `(received_at, channel, id)` 下最新的一則，不是 X、Y 各一則）；由舊到新印出
+
+#### Scenario: --limit 可以把錨點截掉
+- **WHEN** `--around` 的窗口經過濾後留有 7 則，再一起給 `--limit 2`
+- **THEN** 輸出是該窗口排序後最後 2 則；錨點不在這 2 則內時照常不出現，exit 0（不是錯誤）
 
 #### Scenario: --json 與多行內文
 - **WHEN** 某則信的內文有三行，`angareion log --channel X --json`／文字模式各執行一次
@@ -226,11 +242,12 @@ repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：六
 - 同步用後端的「列舉」動作（見「後端可以替換」），帶 `since = 上一次同步到的後端時刻 − 60 秒`（與游標同源的 margin；快取為空時不帶 `since`）；合併 MUST 是冪等的 upsert：到達位置比已記錄的新、**或從未出現過**（接住亂序晚到的較小位置）就進鏡射，同位置內容不同（後端被編輯）就覆蓋；已記錄的最大位置與時刻 MUST NOT 後退。
 - 回應含新訊息時 MUST NOT 記錄 ETag（不得成為下次「沒有新訊息」的驗證器）；回應完整掃過且乾淨、單頁未滿才記錄（沿用 `wait` 的條件式查詢規則）；下次同步同一視窗 MUST 送 `If-None-Match`，304 MUST 視為「沒有增量」且不計後端額度。
 - 任一涉入 channel 的同步失敗（HTTP 錯、逾時）MUST 以 exit 2 結束且 MUST NOT 輸出任何查詢結果——不用「部分同步＋舊鏡射」當完整答案。
-- 快取 MUST 每身分一份（檔名跟身分的 slug，同游標檔的分位），放在 state 目錄；與游標檔、`wait` 的 ETag 狀態檔 MUST NOT 共用檔案，也 MUST NOT 被對方讀寫。快取 MUST NOT 寫進或讀出任何游標。
+- 快取 MUST 每身分一份（檔名跟身分的 slug，同游標檔的分位），放在 state 目錄；channel 的檔名 MUST 以 channel 名的**可逆轉義**成檔（屬 `[A-Za-z0-9_-]` 的字元原樣、其餘字元以 `%XX` 編碼其 UTF-8 位元組），MUST NOT 依賴 channel 名的字元限制成立——組態檔裡出不合法的名字（`a/b`、`../x` 這類）時 MUST 仍不出快取目錄（轉義後不成路徑分隔；design D3.2 的 `channel_slug`），檔內記原始 channel 名並在載入時比對（不符＝整檔視為空）；與游標檔、`wait` 的 ETag 狀態檔 MUST NOT 共用檔案，也 MUST NOT 被對方讀寫。快取 MUST NOT 寫進或讀出任何游標。
 - 快取檔 MUST 以「同目錄暫存＋原子替換」寫出，檔案權限 0600、目錄 0700（快取含頻道訊息內文，只能本身分讀）。
 - 快取檔不存在、不是合法 JSON、版本不認得、缺欄位、或檔內記的 channel↔entity 對應與設定檔不符時，MUST 整檔視為空並全量重建；MUST NOT 部分信任。刪掉快取 MUST 只造成下一次全量同步，MUST NOT 讓訊息漏掉或查詢結果變異。
 - 快取寫不進去（唯讀目錄、磁碟滿）MUST 只在 stderr 警告一次（同一行程最多一次），查詢照常以本輪記憶體內的鏡射回答；exit code 與 stdout MUST NOT 因此改變。
 - 兩個 `log` 行程並行同一身分時，快取檔 MUST NOT 半寫（原子替換）；最壞情況是其中一輪的增量被下一輪重補（upsert 冪等），結果不漏。
+- **已知限制**：合併只有 upsert，MUST NOT 解後端的刪除——後端刪掉的留言會留在快取與結果裡、`--since` 增量 MUST NOT 回報刪除；它在全量重建之後才不再出現。skill 的說明 MUST 寫明 log 的結果不是「這則現在還在」的證據。
 
 #### Scenario: 增量同步接住新訊息
 - **WHEN** B 先 `log` 過一次（快取建好），之後 A 又送一則信，B 再 `angareion log --channel X`
@@ -242,7 +259,15 @@ repo MUST 附一份給 agent 讀的說明（`skills/angareion/SKILL.md`）：六
 
 #### Scenario: 後端被編輯的留言
 - **WHEN** 已進鏡射的一則留言在後端被編輯（同一位置的內容變了）
-- **THEN** 下一次同步以同位置覆蓋內容；沒建立新位置、不在結果裡重複
+- **THEN** 下一次同步以同位置覆蓋內容；沒建立新位置、不在結果裡重複（機理：列舉的 `since` 按最後編輯時刻過濾，編輯過的舊留言重新出現在列表上）
+
+#### Scenario: 後端刪掉的留言是已知限制
+- **WHEN** 一則留言已在快取裡，隨後在後端被刪掉；之後只做增量的 `log`
+- **THEN** 它仍然出現在結果裡（已知限制：合併不解刪除）；刪掉快取目錄、全量重建之後它就不出現了
+
+#### Scenario: 快取檔名不依賴 channel 名的字元限制（轉義）
+- **WHEN** `channels.json` 被手改出一個名字含 `/` 的 channel（例如 `a/b`），執行觸及它的 `angareion log`
+- **THEN** 它的快取檔落在 `log-<身分>/` 內（檔名用轉義後的名字），MUST NOT 寫到或讀出快取目錄外面的路徑；`log` 的查詢照常回答
 
 #### Scenario: 安靜 channel 重複查詢近零額度
 - **WHEN** 對同一沒有新訊息的 channel 連續多次 `angareion log`

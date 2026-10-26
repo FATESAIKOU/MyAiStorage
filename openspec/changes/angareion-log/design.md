@@ -8,23 +8,23 @@
 
 | # | 事實 | 出處 |
 |---|---|---|
-| F1 | `read` 有三種目標：`--channel`（整個頻道，stderr 印一行警告）、不給 `--channel`（「寄給我的」：`to` 是我、廣播、或 `mentions` 有我）、`--mentioned`（「@ 我」：`to` 是我或 `mentions` 有我，廣播不算；與 `--channel` 互斥） | `src/angareion/cli.py:75-78、120-131` |
+| F1 | `read` 有三種目標：`--channel`（整個頻道，stderr 印一行警告）、不給 `--channel`（「寄給我的」：`to` 是我、廣播、或 `mentions` 有我）、`--mentioned`（「@ 我」：`to` 是我或 `mentions` 有我，廣播不算；與 `--channel` 互斥） | `src/angareion/cli.py:75-78`（警告字串）、`:120-125`（目標建構）、`:130-131`（互斥）；「寄給我的」與「@ 我」的匹配在 `src/angareion/backend.py:298-302`（`recipient_matches`，廣播算「寄給我」）與 `:305-309`（`mention_matches`，廣播不算） |
 | F2 | `read` 把訊息印完並 flush 之後才 `batch.commit()` 推進游標；`--since` 時 commit 不動游標（時間只游標） | `src/angareion/cli.py:386-424`（commit 在 `:422`）；`src/angareion/client.py:123-145、133`；`src/angareion/backend.py:496-498` |
 | F3 | 「寄給我的」跨 channel：對每個已登記 entity 逐一 `read` 自己的游標鍵；跨 channel 排序鍵是 `(received_at, channel, id)` | `src/angareion/client.py:147-164`（排序在 `:158`） |
 | F4 | GitHub 後端的讀取路徑：組 URL `repos/<repo>/issues/<n>/comments?per_page=100`（外加 `since`）→ 依 `Link` 標頭逐頁抓 → 每則留言 `parse_message`（非 angareion 訊息的留言丟掉）→ 以到達位置（comment id）升冪輸出 | `src/angareion/github.py:259-263`（URL）、`:144-155`（Link）、`:382-441`（read 迴圈，`:409-412` parse、`:436-437` 排序） |
 | F5 | `read` 不送 `If-None-Match`（每次都是完整請求）；304 條件式查詢只在 `wait` 的 `check` 上有，且可記錄條件是「單頁、第 1 頁未滿、有 ETag」，查到新訊息就清掉記錄 | `src/angareion/github.py:382-398`（read 無 etag）與 `:280-380`（check，可記錄條件在 `:333-341`） |
 | F6 | 時間語意：新舊只看後端（到達位置 comment id ＋後端 `created_at`），不看寄件者填的 `at`/`id`；`--since` 含邊界；游標比對窗是 `at - 60 秒` margin，容忍亂序晚到 | `src/angareion/backend.py:19、125-159`；`openspec/specs/angareion/spec.md`「目標與游標」 |
 | F7 | 本機狀態檔：游標 `cursor-<slug>.json`（`CursorStore`，只有 `save`/`save_many` 會寫）與 wait 的 ETag `wait-<slug>.json`（`FileETagCache`，寫失敗只警告一次），都用「同目錄暫存＋`os.replace`」原子改寫；`wait-<slug>.json` 的目錄以 mode 0700 建立、暫存檔由 `mkstemp` 建立（0600） | `src/angareion/state.py:24-34、76-174、250-275`；`src/angareion/config.py:62-74`（slug） |
-| F8 | 訊息模型：`from`/`to`（可空）/`channel`/`urgency`/`content`/`attachments` ＋ 寄件者產生的 `id`（ULID）/`at`；`mentions`/`in_reply_to` 選填，讀取用寬的（壞欄位丟掉、訊息照收）；內文上限 65536 字元 | `src/angareion/messages.py:32、174-186、297-334、388-440` |
-| F9 | `read --json` 的欄位＝`message_to_dict` 六欄＋`received_at`（後端時刻）；文字輸出的標頭 `[urgency] id at (received …) <from> channel: …` 之後縮排印完整內文（逐行），不截斷 | `src/angareion/messages.py:235-248`；`src/angareion/cli.py:134-151、154-158、414-415` |
+| F8 | 訊息模型：`from`/`to`（可空）/`channel`/`urgency`/`content`/`attachments` ＋ 寄件者產生的 `id`（ULID）/`at`；`mentions`/`in_reply_to` 選填，讀取用寬的（壞欄位丟掉、訊息照收）；內文上限 65536 字元；`CHANNEL_NAME_RE`＝`^[A-Za-z0-9_-]+$` | `src/angareion/messages.py:32、42、174-186、297-334、388-440` |
+| F9 | `read --json` 的欄位＝`message_to_dict` 的 **10 個 key**（`id`、`at`、`from`、`to`、`channel`、`urgency`、`content`、`attachments`、`mentions`、`in_reply_to`；「六」是必要欄位的數目，不是 dict 的 key 數）＋`received_at`（後端時刻）；文字輸出的標頭 `[urgency] id at (received …) <from> channel: …` 之後縮排印完整內文（逐行），不截斷 | `src/angareion/messages.py:235-248`；`src/angareion/cli.py:134-151、154-158、414-415` |
 | F10 | 結束碼契約：0 成功、1 用法／輸入錯、2 後端／網路／設定錯、3 只給 `wait` 逾時；401→AuthenticationError、403（含次級限制）→BackendError 不重試 | `src/angareion/cli.py:57-60、594-611`；`src/angareion/github.py:132-137` |
 | F11 | 身分決定一切檔案位置：`config.json` 的 `identity`，`ANGAREION_IDENTITY` 優先；不同 seat 不碰彼此的檔案（cli 的註釋與程式結構都是同一個 `config.identity` 造檔名） | `src/angareion/config.py:130-152`；`src/angareion/cli.py:534-543` |
 | F12 | channel→entity 只認設定檔（`ChannelStore`：`ensure_fresh`／`entity_for`／`entities`）；未登記的 channel 是輸入錯（exit 1） | `src/angareion/cli.py:555-558、594-597`；`src/angareion/client.py:76-79、149` |
 | F13 | aicomm 不 import Angareion、不讀其設定檔，只以 subprocess 呼 `angareion`，stdout/stderr 原樣轉、結束碼跟著走（`inbox` 先 `wait` 後 `read` 的轉發是現成例子） | `src/aicomm/cli.py:114-133、261-275` |
 | F14 | 文件是被測試守住的：`test_aicomm_docs.py` 要求補救句 `angareion read --since <時刻>` 同時出現在 SKILL、docs 與 `cli.py` 的提示句裡；`test_angareion_docs.py` 守 `docs/angareion.md` 的既有關鍵句 | `tests/unit/test_aicomm_docs.py:83、87-95、128-130`；`tests/unit/test_aicomm_inbox.py:99`；`tests/unit/test_angareion_docs.py` |
-| F15 | spec 明文「Angareion 對外 MUST 只有五個介面」，README/skill 也寫「五個」；#219 的補救規則寫在 SKILL/docs/提示句三處 | `openspec/specs/angareion/spec.md`「五個介面」；`docs/angareion.md:3`；`skills/angareion/SKILL.md:8` |
+| F15 | spec 明文「Angareion 對外 MUST 只有五個介面」，`docs/angareion.md:3` 與 `skills/angareion/SKILL.md:8` 也寫「五個」（README 沒有介面數的字樣；「五個介面／五個指令」殘留逐檔七處，tasks 2.8 逐檔點名：channel-config spec、docs 三處、SKILL 兩處、PM 職務檔 v0 一處）；#219 的補救規則寫在 SKILL/docs/提示句三處 | `openspec/specs/angareion/spec.md`「五個介面」；`openspec/specs/angareion/channel-config/spec.md:29`；`docs/angareion.md:3、11、225`；`skills/angareion/SKILL.md:8、21`；`atelier/worker-team/pm/v0.md:37` |
 | F16 | TS 端（MyAiEntry）與 Python 端讀同一種留言（front matter 對照寫在程式碼註釋裡：兩邊都以 `---` 分界、`mentions` 一行 flow-style）；協定版次欄位 `angareion` 不因 log 變動 | `src/angareion/messages.py:250-258、321-322、350-353` |
-| F17 | `Link`、`ETag` 標頭與 `since` 參數在列表 API 上都可依賴（`check` 已經在用它們） | `src/angareion/github.py:144-155、327-341` |
+| F17 | `Link`、`ETag` 標頭與 `since` 參數在列表 API 上都可依賴（`check` 已經在用它們）；GitHub 文件明載：List issue comments 的 `since` 是 "**Only show results that were last updated after the given time**"——按留言的**最後編輯時刻**（`updated_at`）過濾，不是 `created_at`，所以被編輯過的舊留言會在新時間再次出現在列表結果裡（`created_at`/`updated_at` 是回應裡每則的欄位）。D3.3 的「同 id 內容變就覆蓋」正是依這條成立 | `src/angareion/github.py:144-155、327-341`；GitHub 文件「List issue comments」的 `since` 參數（`per_issue` 列表與 repo 級列表都是 "last updated after"） |
 
 ### 推論（不是事實）
 
@@ -68,17 +68,19 @@ angareion log [--channel <ch>]… [--from <AI 名>] [--to <AI 名|me>] [--mentio
 | `--since <時刻>`／`--until <時刻>` | 時間下界／上界，都是**後端記錄的時刻**（即 `received_at`、GitHub 的 `created_at`；RFC 3339，含時區），**皆含邊界**；與 `read --since` 同一條 `parse_backend_time`（F6）。`--since > --until` → exit 1（P8：比「悄悄空結果」安全） | `angareion log --channel team-alpha --since 2026-10-25T00:00:00Z --until 2026-10-25T23:59:59Z`——該頻道昨天的信 |
 | `--grep <字串>` | 內文的**字面**（非 regex）搜尋，**不分大小寫**，只比對 `content`（寄收人過濾有專屬旗標；附件不看）。單值不重複（要 AND 就跑兩次或縮小視窗） | `angareion log --channel team-alpha --grep blocking`——頻道裡提過阻塞的信 |
 | `--around <訊息 id>` | 以**訊息 id**（ULID，輸出標頭裡的那個）錨定一則，視窗＝同 channel 內以到達位置（comment id）計的**前 `--before N` 則＋後 `--after N` 則**＋錨點本身。`--before`／`--after` 各自預設 0（單獨 `--around <id>`＝只印該則，P3）；N ≥ 0 整數，負或非整數 exit 1；非 26 字 ULID exit 1；同步後仍找不到 → exit 1（J3；空結果是 exit 0，兩者可區分） | 補看多行訊息漏掉的中間段：`angareion log --around 01JD8X5P3Q9V2W7M4T6RHZABCD --before 3 --after 10` |
-| `--thread <訊息 id>` | 沿 `in_reply_to` 取整串：從錨點沿 `in_reply_to` 往上走到根，取根＋全部子孫（可傳遞閉包），按到達順序印。錨點在 channel 內找；自己的 `in_reply_to` 指到的訊息不存在時，錨點視為根（P6：跨 channel 的 `in_reply_to` 不追，列已知限制） | 回顧決策串：`angareion log --channel team-alpha --thread 01JD8X5P3Q9V2W7M4T6RHZABCD` |
-| `--limit N` | 過濾完之後**保留最新 N 則**，仍由舊到新印（J2）。N=0 合法（空結果 exit 0）；負數 exit 1；**預設不限**——查詢工具的禁手就是把答案悄悄截掉 | `angareion log --to me --limit 20`——最近收到的 20 封，由舊到新 |
+| `--thread <訊息 id>` | 沿 `in_reply_to` 取整串：從錨點沿 `in_reply_to` 往上走到根，取根＋全部子孫（可傳遞閉包），按到達順序印。錨點在 channel 內找；自己的 `in_reply_to` 指到的訊息不存在時，錨點視為根（**已知限制**見 D3.6：串不跨 channel——`in_reply_to` 指到別的 channel 的訊息時，鏈在跨 channel 前停下，該訊息視為根） | 回顧決策串：`angareion log --channel team-alpha --thread 01JD8X5P3Q9V2W7M4T6RHZABCD` |
+| `--limit N` | 過濾完之後**依輸出順序排序、取排序結果的最後 N 則**——「最新」就由這個排序鍵定義：單 channel 以到達位置（comment id 與 `read` 同源，F4），跨 channel 以 `(received_at, channel, id)`（F3）「全域最新的 N 則」，**不是每個 channel 各取 N 則**；取完仍由舊到新印（J2）。N=0 合法（空結果 exit 0）；負數 exit 1；**預設不限**——查詢工具的禁手就是把答案悄悄截掉；預設不限的用量代價（aicomm 層緩衝）寫明在 D5.1 | `angareion log --to me --limit 20`——最近收到的 20 封，由舊到新 |
 | `--json` | 與 `read --json` 同欄位（`message_to_dict`＋`received_at`；F9），空結果印 `[]` | `angareion log --mentioned --json`——程式解析用 |
 
 ### D1.2 組合規則（工單點名 `--around` 跟 `--since` 這一類）
 
 1. **過濾旗標（`--channel`／`--from`／`--to`／`--mentioned`／`--since`／`--until`／`--grep`）任意組合、全部取交集**；`--channel` 重複給是聯集。
 2. **錨點旗標 `--around` 與 `--thread` 互斥**（同給 exit 1）；`--before`／`--after` 只能跟 `--around` 一起給（否則 exit 1）。
-3. **`--around` 與 `--since`／`--until`／`--grep` 可以同時用**：套用順序固定——先由錨點定出候選集（`--around`：以到達位置數出的前 N＋後 N；`--thread`：整串），**再**套過濾交集，**最後** `--limit`。所以「窗口是位置先決、過濾再縮小」：`--around X --before 50 --since <t>` 會先取 X 前 50 則、再留下不早於 <t> 的。錨點本身**必須落在過濾後的範圍內**（`--channel` 過濾時錨點在別的 channel、`--from` 過濾時錨點不是那人寄的…都不影響錨點查找；錨點只受「channel 在不在選取集合」限制），找不到就 exit 1。
-4. **輸出固定由舊到新**：單 channel 內以到達位置（comment id，與 `read` 同源，F4）；跨 channel 以 `(received_at, channel, id)`（同 `client.py:158`，F3）。不提供排序旗標（J1；要看時間序請排序 `--json`）。
-5. `--mentioned` 與 `--channel` 在 log 允許同給（P2）；與 `--to` 同給不衝突（交集＝`--mentioned`，因為「@ 我」是「寄給我」的子集）。
+3. **`--around`／`--thread` 與過濾旗標可以同時用**：套用順序固定——**（1）** 由錨點定出候選集（`--around`：以到達位置數出的前 N＋後 N＋錨點；`--thread`：整串），**（2）** 套過濾交集，**（3）** 依輸出順序排序（單 channel 到達位置；跨 channel `(received_at, channel, id)`），**（4）** `--limit` 取排序後的最後 N 則，**（5）** 以同序印出。所以「窗口是位置先決、過濾再縮小」：`--around X --before 50 --since <t>` 會先取 X 前 50 則、再留下不早於 <t> 的；`--limit` 拿的是**排序尾端**那 N 則。
+4. **錨點的查找與過濾是兩件事，規則只有一條（中-1 定案）**：錨點的查找**只受「錨點所在的 channel 在選取集合內」限制**（`--channel` 的聯集含錨點所在的 channel、或根本沒給 `--channel`）；同選取集合內同步後沒有那個訊息 id → **exit 1**。錨點若不符合**其他**過濾條件（`--from`／`--to`／`--mentioned`／`--since`／`--until`／`--grep`）**不是錯誤**：照常以它定位、框出窗口，只是錨點自己會被過濾交集濾掉、不出現在輸出裡——結果是 exit 0 加窗口內符合條件的訊息。`--limit` 同理：先篩後截，錨點被截掉也照常（沒有「錨點保留地位」）。design 與 spec 用同一句話釘住這條（D1.2 與「唯讀查詢 log」的套用順序），不再有第二種讀法。
+5. **輸出固定由舊到新**：單 channel 內以到達位置（comment id，與 `read` 同源，F4）；跨 channel 以 `(received_at, channel, id)`（同 `client.py:158`，F3）。不提供排序旗標（J1；要看時間序請排序 `--json`）。
+6. `--mentioned` 與 `--channel` 在 log 允許同給（P2）；與 `--to` 同給不衝突（交集＝`--mentioned`，因為「@ 我」是「寄給我」的子集）。
+7. **已知限制**（D3.6）：`--thread` 不跨 channel；連帶地，若給了 `--channel` 又給 `--thread`，跨 channel 的祖先鏈在 channel 邊界停下（該訊息視為根）。
 
 ### D1.3 輸出格式
 
@@ -116,6 +118,7 @@ angareion log [--channel <ch>]… [--from <AI 名>] [--to <AI 名|me>] [--mentio
 - **log 不碰 `CursorStore`**：`CursorStore.save`／`save_many`（F7）是游標檔僅有的寫入者；log 的實作不呼叫它們（連讀也不用——log 的答案與游標無關）。快取是**另一個模組、另一組檔案**（`log-<slug>/`），與 `cursor-<slug>.json`、`wait-<slug>.json` 的檔名與讀寫路徑完全不相交。
 - **重跑安全**：log 對本機的唯一寫入是快取檔（冪等 upsert）；重跑、並行跑、跑到一半斷線都不會改任何人的「已讀」狀態。
 - **與 #219 的關係**：單一讀者規則管的是「消費未讀信」的讀者（wait/read/inbox）；log 不消費任何未讀信，**不算讀者**。同一身分可以一邊在前景 `aicomm inbox`、一邊 `aicomm log` 補查，互不搶信。
+- **與 #224 的關係（只說明，不通；低-7）**：#224（新身分會讀到別隊的舊廣播）不在本單處理，但 log 改變了它的呈現面貌：預設無旗標的 log 會把每個已登記 channel 的**全部歷史**（含寄給別人的、含別隊的舊廣播）一次交出——「新身分一查就看到別隊舊廣播」的現象更容易被一次看到。`--since` 縮窗與 `aicomm log` 的預設 `--to me`（含廣播）能縮小視野，#224 本身（廣播的歸屬／開信時點）已另依其單。
 
 ### D2.2 用什麼測試守
 
@@ -134,16 +137,16 @@ angareion log [--channel <ch>]… [--from <AI 名>] [--to <AI 名|me>] [--mentio
 
 ### D3.2 快取放哪、什麼格式
 
-- **位置**：state 目錄（`ANGAREION_STATE_DIR`，與游標檔同根，F11 身分隔離）下 `log-<identity_slug>/`，**每個 channel 一檔** `<channel>.json`（channel 名限 `[A-Za-z0-9_-]`，F8 的 `CHANNEL_NAME_RE`，做檔名安全）。
-- **內容**：`{"version": 1, "channel": <名>, "entity": {"repo", "issue"}, "last_comment_id": "<十進位字串>", "last_created_at": "<RFC 3339>", "etag": {"url", "etag"} 或 null, "messages": [{"comment_id", "created_at", "comment_url", "message": <message_to_dict 欄位>}…]}`。`messages` 以 `comment_id` 升冪。
+- **位置**：state 目錄（`ANGAREION_STATE_DIR`，與游標檔同根，F11 身分隔離）下 `log-<identity_slug>/`，**每個 channel 一檔** `<channel_slug>.json`。`channel_slug` 是 channel 名的**可逆轉義**（中-6 定案）：屬 `[A-Za-z0-9_-]` 的字元一字不動（合法 channel 名原樣直用），其餘字元以 `%XX` 編碼其 UTF-8 位元組（percent-encode 式；`%` 本身先編碼，保證可逆與無碰撞）。**檔名安全不建立在 channel 名的字元限制上**：`CHANNEL_NAME_RE`（F8）只在 `channel create` 與註冊簿重建時檢查，`channel_config.py:261-282` 的 `channels()` 對組態檔裡的名字**只查非空字串**——手改的 `channels.json` 可能給出 `../x`、`a/b`，log 第一次把組態字串變成路徑元件，所以快取層自己解：轉義保證任何字串都成單一檔名元件、寫不出 `log-<slug>/`。與 `identity_slug` 的替換式不同（那會讓 `a/b` 與 `a_b` 撞同一個 slug），這裡可逆；檔內仍記原始 channel 名，載入時與 `ChannelStore` 比對（不符＝整檔視為空，D3.4）。
+- **內容**：`{"version": 1, "channel": <名>, "entity": {"repo", "issue"}, "last_comment_id": "<十進位字串>", "last_created_at": "<RFC 3339>", "etag": {"url", "etag"} 或 null, "messages": [{"comment_id": "<十進位字串>", "created_at": "<RFC 3339>", "comment_url": <url>, "message": <message_to_dict 欄位>}…]}`。**`comment_id` 是 GitHub 的 int64，以十進位字串儲存（躲 JSON→浮點的精度風險），但一切的比較與排序都用 `int`**：`comment_id` 之間、以及與 `last_comment_id` 之間都是**整數比較**——字串只是儲存格式；既有程式本來就是整數比（github.py:436、backend.py:154），照抄（低-5：跨位數混排（9 位與 10 位 id 同 channel）若照字典型比較會把新留言當舊的丟掉、`--around` 的前後 N 也會數錯）。`messages` 以 `comment_id` **整數**升冪。
 - **與游標檔的關係**：**不相交**。快取不是游標：沒有 `to:*`/`mention:*`/`channel:*` 的游標鍵、不參與「讀走」語意、`read`／`wait` 不讀它，log 也不讀游標檔。與 `wait` 的 ETag 檔（`wait-<slug>.json`）亦是兩組檔案：log 的 ETag 記在每個 channel 快取檔自己身上。
 - **權限**：目錄以 mode 0700 建立（同 `FileETagCache` 的慣例，state.py:149）；檔案由 `mkstemp`（0600）＋`os.replace` 原子改寫（F7）。快取放的是頻道訊息內文（可能含「寄給別人」的信），本機只留給該身分讀——0700／0600 是最低要求（J6：接受用磁碟換查詢速度）。
 
 ### D3.3 怎麼知道新舊（增量同步）
 
 1. 對涉及查詢的每個 channel：讀快取檔 → 有上次位置。
-2. 列表請求帶 `since = last_created_at - 60 秒`（與游標同源的 margin，F6；快取為空時不帶 `since`＝全量）。
-3. **合併規則（冪等 upsert）**：後端回的每則留言，`comment_id` **比 `last_comment_id` 新、或從未出現在快取**（接住亂序晚到的較小 id——比 cursor 的 `seen` 視窗更強，F6），就進清單；同 id 內容不同（留言在 GitHub 被編輯）就覆蓋。`last_comment_id`/`last_created_at` 只進不退。
+2. 列表請求帶 `since = last_created_at - 60 秒`（與游標同源的 margin，F6；快取為空時不帶 `since`＝全量）。`since` 依 F17 是按留言的**最後編輯時刻**過濾——被編輯過的舊留言會帶著新的 `updated_at` **再次出現在列表結果裡**，這就是第 3 步「同 id 內容變就覆蓋」在真後端上的機理；這條語意已寫進 spec 的列舉動作要求（「後端可以替換」），假後端 MUST 照守，不會被「照 `created_at` 或直接忽略 `since`」的假件騙過（低-5）。
+3. **合併規則（冪等 upsert）**：後端回的每則留言，`comment_id` **以整數比較**比 `last_comment_id` 新、或從未出現在快取（接住亂序晚到的較小 id——比 cursor 的 `seen` 視窗更強，F6），就進清單；同 id 內容不同（留言在 GitHub 被編輯）就覆蓋（機理見第 2 步：`since` 按 `updated_at` 過濾，讓編輯過的舊留言回到列表上；`last_created_at` 本身照 `created_at` 記——編輯不改 `created_at`）。`last_comment_id`/`last_created_at` 只進不退。
 4. 有新回應時**不記 ETag**（回應含新訊息不得成為下次的「沒有新訊息」驗證器，照 `check` 的規則，github.py:363-367）；掃過且乾淨、單頁未滿才記（github.py:333-341 的條件原樣沿用，P4）。下次同 sync 若記錄的 URL 一致就送 `If-None-Match`：304＝沒有增量、不吃額度。
 5. 合併有變動才重寫檔（原子改寫）；無變動不寫，免得無謂 I/O。
 
@@ -163,6 +166,12 @@ angareion log [--channel <ch>]… [--from <AI 名>] [--to <AI 名|me>] [--mentio
 - log 的答案由「同步後的鏡射＋本機過濾」組成；`--since`／`--until` 在本機套用（後端只保證 `since` 過濾，F4），所以時間窗不依賴後端對 `until` 的支援。
 - **成本總結（I1/I2）**：查詢一次＝每涉及 channel 1 個增量請求（常態 304）＋本機 O(訊息數) 的過濾；首次使用＝每 channel 全量（等同一次完整的 read 掃描，只付一次）。
 
+### D3.6 已知限制（PM 決定寫進 design 與 spec，不是 bug；低-6、低-9）
+
+1. **`--thread` 不跨 channel**：串只在錨點所在 channel 內組裝。`in_reply_to` 若指到別的 channel 的訊息，鏈在跨到別的 channel 前停下——那則視為根（與「指不到就視為根」同一處置）。跨 channel 的「整段討論」要看涉及的 channel 各查一次（或 `--json` 之後自行合併）。
+2. **快取不解後端的刪除**：合併只有 upsert（D3.3），後端刪掉的留言會留在快取與 log 的結果裡；`--since` 增量也不會回報「這則不見了」。全量重建（刪掉快取目錄）之後，已刪留言才會消失（列表不再回它）。skill 的說明會寫明：**log 裡看得到不代表這則現在還在**。
+3. **`aicomm log --thread` 的串可能被預設 `--to me` 截一半**（中-1 的規則自然套用的結果；注入規則本身不因本條變動）：`--thread` 照常定位整串，但串裡「不寄給我」的訊息會被過濾交集濾掉——exit 0、拿到的是串的可見部分。要看整串的補查走 `angareion log --thread`（angareion 層沒有注入）。
+
 ## D4 與 `read`／`inbox` 的關係
 
 - **游標語意不變**：`read`（與 `inbox`）的行為、`#219` 的軟規則與提示、`read --since` 的規格原樣不動（spec 的「目標與游標」不需修改）。log 是平行的唯讀通道。
@@ -178,7 +187,9 @@ aicomm log [同 angareion log 的全部旗標] [--json]
 ```
 
 - **薄**：不做自己的解析與驗證（P7）——把 `log` 之後的引數**原樣**交給 `angareion log`（subprocess，同 `_angareion`／`_relay` 的轉發模式，F13），stdout／stderr 原樣轉、結束碼跟著走（0／1／2）。錯用法由 angareion 報 exit 1，aicomm 不重複實作旗標語意。
-- **預設 `--to me`（工單補充 1）**：使用者**沒給 `--to` 也沒給 `--mentioned`** 時才注入 `--to me`（J5）：給了任何一個就以使用者的為準，不悄悄疊加（`--mentioned` 沒有參數值，`--to` 有，掃描引數字面即可）。注入的是字面 `me`，aicomm 不自己解身分（它不讀 Angareion 設定檔，F13；`me` 由 angareion 解）。
+- **轉發機制（中-5 定案：在現有 argparse 結構下做得到的一種）**：`main` 頂層先用 **`parse_known_args`** 判子指令；`log` 在 `add_subparsers` 註冊成**不宣告任何旗標**的 subparser、`add_help=False`（`aicomm log --help` 也落進 extras、原樣轉給 angareion 印 log 的用法）；log 撿到的 extras **照出現順序**原樣轉發。非 `log` 的子指令（send／inbox）在判出不是 log 之後照現行**嚴格** `parse_args` 走（extras 非空＝用法錯，維持現行行為）。選 `parse_known_args` 的理由：(a) log 做成正式 subparser 才能留在 `aicomm --help` 的指令清單（說明層「三個指令」）；(b) extras 保序＝「原樣」的保證；(c) 反面兩路都實測不可行——「log subparser 不宣告旗標＋嚴格 `parse_args`」讓**每一種合法旗標**都變成 aicomm 的 `unrecognized arguments` exit 1、回的不是 angareion 的訊息；`nargs=REMAINDER` 在 subparser 裡也吃不掉開頭的選項——而現有 `_Parser.error`（cli.py:80-84）會把任何用法錯轉成 aicomm 自己的 exit 1，直接違反「錯誤由 angareion 報」。tasks 3.1 有一條測試釘行為：`aicomm log --bogus` → stderr 是 angareion 的訊息、exit 1。
+- **緩衝（預設不限的代價，低-10）**：aicomm 以 `subprocess.run(capture_output=True)` 收下 angareion 的**完整** stdout 才轉交（`cli.py:117-121`，`_relay` 先 stderr 後 stdout）。`--limit` 預設不限（J2）＋`aicomm log` 預設 `--to me`＝一次呼叫的輸出可能很長（整個視野的全部訊息全收在 aicomm 的記憶體、再整份倒進 agent 的 context）。規格**不改**（答案不悄悄截）；節流的出口是 skill 示範（D5.2 補 `--limit` 的示範呼叫）。
+- **預設 `--to me`（工單補充 1；判斷方式中-2 定案）**：使用者**沒給 `--to` 也沒給 `--mentioned`** 時才注入 `--to me`（J5）：給了任何一個就以使用者的為準，不悄悄疊加。注入判斷是**引數字面掃描**，要認得 argparse 的等價寫法：對 `log` 之後的每個引數，取 `=` 之前的字面、去掉 `--`，若恰是 `to` 或 `mentioned` 的**前綴**（涵蓋 `--to X`、`--to=<值>`、`--mentioned`，以及 argparse 會接受的未歧義縮寫如 `--t`、`--m`、`--ment`），就算「使用者已指定收件人」，不注入。掃描寬一點是故意的：把 angareion 本來就會 exit 1 的縮寫誤判成「有給」→ 轉發 → angareion 報錯——方向安全（頂多不注入，絕不反向蓋掉使用者的值）；這也正是字面比對三種寫法的補法——argparse 的未歧義縮寫（`--m`）會被字面三分法漏掉、讓注入的 `--to me` 與 `--m`（＝`--mentioned`）悄悄並存，那正是 spec 的 MUST 禁的。注入固定放在使用者引數**之前**：argparse 同名旗標重複時「後給的贏」，放前面＝即使掃描漏掉某種寫法，使用者後給的值也會蓋回注入值。注入的是字面 `me`，aicomm 不自己解身分（它不讀 Angareion 設定檔，F13；`me` 由 angareion 解）。
 - **不叫醒**：log 不對 sidecar 發任何請求（叫醒是 `send` 的副作用，aicomm 的兩種 sidecar 請求不會出現在 log 路徑）。`aicomm log` 永遠不戳人。
 - **不做**：`aicomm log --wait`（沒有等待語意）、`--ticket`（send 專屬）。
 
@@ -193,7 +204,11 @@ aicomm log [--channel <ch>]… [--from <AI 名>] [--to <AI 名|me>] [--mentioned
            [--since <時刻>] [--until <時刻>] [--grep <字串>] \
            [--around <ULID> [--before N] [--after N]] [--thread <ULID>] [--limit N] [--json]
         # 唯讀查詢：不動游標、不叫醒；預設查寄給我的
+        # 示範（低-10）：補查要省得一次拉全部時，先帶 --limit——
+        #   aicomm log --limit 20      # 最近寄給我的 20 封（由舊到新）
 ```
+
+指令區塊後補一段說明（示範的理由；低-10）：`--limit` 預設**不限**（查詢工具不悄悄截答案），但 aicomm 這層會把 angareion 的完整輸出收進來再轉交（D5.1 緩衝段），所以說明裡示範一次帶 `--limit` 的呼叫讓節流有現成的出口。
 
 2. 「## 同一個身分只留一個讀者」的清單末尾（第 35 行「`aicomm inbox` 讀不到信時會在 stderr 提示…」之後）**新增一條**：
 
@@ -203,7 +218,9 @@ aicomm log [--channel <ch>]… [--from <AI 名>] [--to <AI 名|me>] [--mentioned
 
 4. 第 8 行導言「對外只有兩個指令」改「對外只有三個指令（send／inbox／log）」；frontmatter 的 description 同步補一句 log（由實作 PR 一起改，`test_aicomm_docs.py` 補守「三個指令」）。
 
-`docs/aicomm.md` 的第 7～8 行「它做什麼」與補救提示句（第 16～17 行）同步；`src/aicomm/cli.py` 的 `EMPTY_INBOX_HINT`（第 244～247 行）句尾的補救改為「要補查用 `aicomm log`（不動游標）」——這是**程式碼**更新，連動 `test_aicomm_inbox.py:99` 的 `HINT_KEYS` 與 `test_aicomm_docs.py:128-130`（REMEDY 句本體保留在補救 bullet 內不動）。
+`docs/aicomm.md` 的第 7～8 行「它做什麼」與補救提示句（第 16～17 行）同步；`src/aicomm/cli.py` 的 `EMPTY_INBOX_HINT`（第 244～247 行）句尾的補救**照審查實測會綠的寫法**（中-3 定案）：**原句一字不動**（「…要補讀用 angareion read --since <時刻>（RFC 3339，例如 …；不移動游標）」完整保留），句尾**追加**「要補查用 `aicomm log`（不動游標）。」——「把原句改為 log」的寫法會讓 `test_aicomm_docs.py:128-130`（斷言 REMEDY 原句仍在 `cli.py`）與 `test_aicomm_inbox.py:99` 的 `HINT_KEYS` 一起 6 個測試紅；「保留原句＋追加」則兩個測試**都不用動**（REMEDY 原句完好＝`test_aicomm_docs.py` 守得住；`HINT_KEYS` 的 keys 都在）。連動測試的新增只有「追加句也在」的守衛（tasks 3.3／3.4）。
+
+`aicomm` 的**用法錯訊息**跟著「三個指令」一起改字（低-1；不夠就空講 specs/comm-skill 的新 scenario）：`src/aicomm/cli.py:83`（`_Parser.error` 給錯子指令名時補的「（aicomm 只有 send 與 inbox）」）與 `:284`（`UsageError("aicomm 只有 send 與 inbox 兩個指令")`）的字面都照 comm-skill 的 scenario 改成「只有 send、inbox 與 log」；連動 `tests/unit/test_aicomm_send.py:49`（`SUFFIX = "aicomm 只有 send 與 inbox"`）與 `:66-70` 的兩條斷言。
 
 ### D5.3 `aicomm peek`：只列後續
 
@@ -220,12 +237,13 @@ peek（看本機 sidecar 畫面，如 `aicomm peek <AI名>`）依賴 MyLinuxPool
 ## 判斷點（要本人裁定）
 
 - **J1** 輸出順序固定「由舊到新」，不提供排序旗標（要看時間序自己排 `--json`）。
-- **J2** `--limit N`＝保留**最新** N 則、仍由舊到新印；預設不限（結果可能很長，但查詢工具不悄悄截答案）。
-- **J3** 錨點（`--around`／`--thread`）同步後找不到＝exit 1；空結果＝exit 0——兩者要可區分。
+- **J2** `--limit N`＝依輸出順序排序後取**最後（＝最新）N 則**、仍由舊到新印：「最新」的定義＝排序鍵（單 channel 到達位置；跨 channel `(received_at, channel, id)`）下的全域尾端，**不是每個 channel 各取 N 則**；預設不限（結果可能很長，但查詢工具不悄悄截答案；預設不限的用量代價＝aicomm 層的完整緩衝，寫明在 D5.1，skill 示範 `--limit` 供節流——低-10 定案）。
+- **J3** 錨點（`--around`／`--thread`）在選取集合內同步後找不到＝exit 1；空結果＝exit 0——兩者要可區分。**錨點不符合其他過濾條件（`--from`／`--to`／`--mentioned`／時間／`--grep`）不是「找不到」**：照常定位、錨點本身被過濾則不出現在輸出、結果 exit 0（中-1 定案：規則只有一條，design 與 spec 同句）。
 - **J4** `--grep`＝字面字串、不分大小寫、只比對內文（regex 不做）。
-- **J5** aicomm log 預設 `--to me` 的注入時機：使用者沒給 `--to` 也沒給 `--mentioned` 才注入（PM 指示「預設 `--to me`」；注入與明給並存的規則需本人點頭）。
-- **J6** 快取以本機磁碟換查詢速度：每身分每 channel 一檔、放 state 目錄（0700／0600）、各 seat 不共用（磁碟有重複）。接受與否。
+- **J5** aicomm log 預設 `--to me` 的注入時機：使用者沒給 `--to` 也沒給 `--mentioned` 才注入（PM 指示「預設 `--to me`」）。注入判斷的寫法（中-2 定案）：字面掃描要認得 `--to X`、`--to=<值>`、`--mentioned` 與 argparse 未歧義縮寫（判準＝去 `--` 後是 `to` 或 `mentioned` 的前綴）；注入固定放使用者引數**之前**（argparse 同名重複「後給的贏」，放前面保證使用者值在漏判時也贖得回）。
+- **J6** 快取以本機磁碟換查詢速度：每身分每 channel 一檔、放 state 目錄（0700／0600）、各 seat 不共用（磁碟有重複）。接受與否。檔名用 channel 名的**可逆轉義**（`channel_slug`；不依賴 `CHANNEL_NAME_RE` 在載入點成立——中-6 定案）。
 - **J7** 說明層的改法（D4/D5 的擬改原文四處：skills/aicomm、docs/aicomm、提示句、skills/angareion 與 docs/angareion 補 log）——本人同意措辭才照改。
+- **J8** 已知限制的定案（低-6、低-9；PM 決定）：`--thread` 不跨 channel（串在錨點所在 channel 組裝，根在別的 channel 時錨點視為根）；快取不解後端的刪除（後端刪掉的留言留在結果裡，全量重建才消失）。寫進 design D3.6 與 spec。
 
 ## 作者提議（本人未指示）
 
@@ -233,13 +251,13 @@ peek（看本機 sidecar 畫面，如 `aicomm peek <AI名>`）依賴 MyLinuxPool
 - **P2** log 內 `--mentioned` 可以與 `--channel` 組合（`read` 不行；log 沒有游標鍵，交集語意清楚）。
 - **P3** `--around <id>` 單獨使用＝只印該則（`--before`／`--after` 預設 0）——「按 id 找單則」不需要另一個旗標。
 - **P4** 快取的增量同步用 ETag 條件式查詢（沿用 `check` 的可記錄條件與清除規則），安靜 channel 的重複查詢近乎零額度（I2）。
-- **P5** 快取檔案的格式與命名（`log-<slug>/<channel>.json`、version 欄、原子改寫、壞檔整檔視為空、entity 失配重建）。
-- **P6** `--thread` 只在錨點所在 channel 組裝；跨 channel 的 `in_reply_to` 不追（已知限制，寫進 skill 說明）。
-- **P7** `aicomm log` 對旗標零驗證、原樣轉發（薄包；錯用法直接回 angareion 的 exit 1）。
+- **P5** 快取檔案的格式與命名（`log-<slug>/<channel_slug>.json`、version 欄、原子改寫、壞檔整檔視為空、entity 失配重建；`channel_slug`＝可逆 percent-encode 式轉義，中-6 定案——不再假設 channel 名的字元限制在載入點成立）。
+- **P6** `--thread` 只在錨點所在 channel 組裝；跨 channel 的 `in_reply_to` 不追（**已定案**：PM 決定以「已知限制」寫進 spec requirement 與 design D3.6，並補「根在別的 channel → 錨點視為根」的 scenario——從提議收斂為 J8）。
+- **P7** `aicomm log` 對旗標零驗證、原樣轉發（薄包；錯用法直接回 angareion 的 exit 1）。機制定為**頂層 `parse_known_args`**（log subparser 不宣告旗標、`add_help=False`；`REMAINDER` 實測吃不掉開頭選項——理由與探針行為見 D5.1 轉發機制，中-5 定案）。
 - **P8** `--since > --until` → exit 1（比悄悄回空結果安全）。
 
 ## 待驗／未知
 
 - **U1** GitHub 次級限流的精確規則（本單的設計把它當「403 就停、不重試」的既有行為處理，F10；不影響介面）。
-- **U2** GitHub listing 的 `since` 參數在 created_at 與 comment id 亂序下的完備性——合併規則不依賴它（id＋從未見過的雙條件，D3.3-3），但實作後要用假後端把亂序晚到、編輯同 id 兩種情況各測一輪。
+- **U2** GitHub listing 的 `since`＝按留言的最後編輯時刻（`updated_at`）過濾，官方文件已明載（F17）；剩要驗的是它在「`created_at` 與 comment id 亂序」下的完備性、與大量更新下的行為。「編輯覆蓋」（D3.3-3）依賴這條語意，已寫進 spec 的列舉要求（假後端 MUST 照守）；合併的主條件（id＋從未見過的雙條件）不依賴它。實作後用假後端把亂序晚到、編輯同 id 兩種情況各測一輪，並打真信時抽驗一次。
 - **U3** 快取在大頻道（每檔數 MB）下的重寫延遲——I3 是推論；實作後量測，若不合意再論分片（不在本單範圍）。
