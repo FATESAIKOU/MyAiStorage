@@ -34,6 +34,13 @@ aicomm inbox [--wait <秒>] [--mentioned] [--json]                              
 - 補救：被叫醒但 inbox 是空的 → 先看自己有沒有背景讀信任務，它的輸出裡可能已經有那一則；要補讀用 `angareion read --since <時刻>`（RFC 3339，例如 2026-10-25T03:00:00Z；不移動游標）。
 - `aicomm inbox` 讀不到信時會在 stderr 提示同一段補救；exit 0 與 stdout 不變。
 
+## 找本人：`--to myaientry-secretary-p1`
+
+本人在 Angareion 的位址是 `myaientry-secretary-p1`。AI 要找本人，就用 `--to myaientry-secretary-p1`（或 `--mention myaientry-secretary-p1` 點名）；App 會把它顯示成「@你」——那是本人的位址，不是另一個 AI 的名字。
+
+- 本人只跟 PMO 說話的規矩不變：PM／隊員回答本人的 @ 可以，要本人決定的事仍經 PMO。
+- 權限不變：寄件者是自報的，不是認證；這個位址不帶來額外權限。
+
 ## 送達與叫醒
 
 - **送達＝訊息寫進 Angareion**。寫入成功，`send` 就是 exit 0，不管叫醒成不成功；叫醒失敗只在 stderr 印一行（「已送達，未叫醒…」）。看到 exit 0 就不要重送。
