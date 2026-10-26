@@ -24,8 +24,8 @@
 
 ### 測試隔離
 
-- 每個測試由 `tests/conftest.py` 的 autouse fixture（`isolated_home`）把 `HOME`、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`（注意是 `_DIR`）指到該測試的暫存目錄，Angareion 的三個變數（`ANGAREION_CONFIG`、`ANGAREION_STATE_DIR`、`ANGAREION_TOKEN_FILE`）也一樣，並清掉 `ANGAREION_IDENTITY`、`XDG_*`、`CLAUDE_CONFIG_DIR`；不要在測試裡讀寫真的家目錄與 agora 目錄。
-- 沒有 pytest 保護的探針、手動腳本：自己建暫存目錄，把 `HOME`、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`TMPDIR` 都指進去，並清掉 `XDG_*`、`CLAUDE_CONFIG_DIR`，再執行。
+- 每個測試由 `tests/conftest.py` 的 autouse fixture（`isolated_home`）把 `HOME`、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`（注意是 `_DIR`）指到該測試的暫存目錄，Angareion 的三個變數（`ANGAREION_CONFIG`、`ANGAREION_STATE_DIR`、`ANGAREION_TOKEN_FILE`）也一樣，並清掉 `ANGAREION_IDENTITY`、`XDG_*`、`CLAUDE_CONFIG_DIR`、`OPENCODE_CONFIG_CONTENT`；不要在測試裡讀寫真的家目錄與 agora 目錄。
+- 沒有 pytest 保護的探針、手動腳本：自己建暫存目錄，把 `HOME`、`AGORA_CONFIG`、`AGORA_CACHE_DIR`、`AGORA_STATE_DIR`、`TMPDIR` 都指進去，並清掉 `XDG_*`、`CLAUDE_CONFIG_DIR`、`OPENCODE_CONFIG_CONTENT`，再執行。
 - 探針執行前，要在**同一個行程**裡 assert `Paths.from_env()` 的 config／cache／state 與 `HOME`、`TMPDIR` 都在暫存目錄底下，不符就中止（範例：`tests/perf/measure_continue_mem.py` 的 `NOT ISOLATED` 檢查）。
 - 新的測試模組（或共用 helper）第一行照既有寫法 `import _guard`；測試檔放在 repo 的 `tests/` 底下，用 `uv run pytest` 跑（放在 repo 外沒有 conftest，會被擋下）。規格見 `openspec/specs/test-isolation/spec.md`。
 - 不連真的 Drive：`AGORA_RCLONE` 指到 `tests/fakes/fake_rclone.py`（用包裝腳本呼叫）；`AGORA_UPLOAD=inline` 讓上傳在前景完成。測試用的假 agent 在 `tests/fakes/`；單元測試（整合測試除外）沒設假 agent 時，agent 指令是 `/nonexistent/...`，會直接失敗而不是跑真的；`AGORA_AGY_HOME` 同樣只對單元測試設到暫存目錄。
