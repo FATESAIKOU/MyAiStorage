@@ -1134,6 +1134,8 @@ def test_wait_without_a_timeout_waits_until_a_message_arrives(cli_env, capsys):
 
     def sleeper(seconds: float) -> None:
         clock.sleep(seconds)
+        if len(clock.sleeps) > 10:
+            pytest.fail("wait loop did not stop")
         if len(clock.sleeps) == 2:
             _seed_message(cli_env)
 
