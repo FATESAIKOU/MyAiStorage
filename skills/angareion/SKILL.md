@@ -85,3 +85,5 @@ angareion wait --timeout 600
 - 不要在等待迴圈裡反覆問模型「有沒有新訊息」——那是 `wait` 的工作。
 - 不要用 `read --since` 去重複讀已處理過的訊息；本機游標會自己記。
 - 不要手改 `config/angareion/channels.json`（那是重建 workflow 的產物）。
+
+- log 的結果不是『這則現在還在』的證據（快取不解後端的刪除）。

@@ -16,6 +16,7 @@ from angareion.backend import FakeBackend, Cursor
 from angareion.channel_config import BACKENDS_PATH, CHANNELS_PATH, ChannelStore
 from angareion.cli import build_parser, main
 from angareion.config import Config, save_config
+from angareion.messages import Message
 from angareion.registry import FakeRegistryClient
 
 TOKEN = "gh" + "p_FAKE_CLI_TOKEN_ABC123"
@@ -143,3 +144,31 @@ def test_log_channel_no_warning(cli_env, capsys):
     captured = capsys.readouterr()
     assert "Warning:" not in captured.err
     assert captured.out.strip() == "[]"
+
+
+def test_duplicate_channel_is_a_union_and_hits_the_backend_once(cli_env, capsys):
+    """F4: `--channel X --channel X` is one channel: no duplicate rows, one sync."""
+    message = Message(
+        from_=PM,
+        to=IDENTITY,
+        channel="general",
+        content="only-once",
+        id="01AAAA00000000000000000000",
+        at="2026-10-10T12:00:05Z",
+    )
+    cli_env["backend"].deliver(GENERAL, message, comment_id=1, created_at="2026-10-10T12:00:05Z")
+
+    synced = []
+    real = cli_env["backend"].enumerate_conditional
+
+    def counting_enumerate(target, **kwargs):
+        synced.append(target.channel)
+        return real(target, **kwargs)
+
+    cli_env["backend"].enumerate_conditional = counting_enumerate
+
+    rc = run(cli_env, ["log", "--channel", "general", "--channel", "general", "--json"])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert [m["id"] for m in data] == ["01AAAA00000000000000000000"]
+    assert synced == ["general"]

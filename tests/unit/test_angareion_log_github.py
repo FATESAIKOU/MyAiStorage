@@ -4,11 +4,7 @@ from __future__ import annotations
 
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401
 
-import io
-import json
-import sys
 import urllib.parse
-from pathlib import Path
 
 import pytest
 
@@ -79,97 +75,97 @@ def gh_env(tmp_path, monkeypatch):
     return {"config": config, "git": git, "store": store, "backend": backend, "registry": registry, "tmp_path": tmp_path, "state_dir": state_dir, "transport": transport}
 
 
-def run(env, argv):
-    return main(argv, backend=env["backend"], store=env["store"], registry=env["registry"], transport=env["transport"])
+def run(env, argv, capsys=None):
+    rc = main(argv, backend=env["backend"], store=env["store"], registry=env["registry"], transport=env["transport"])
+    return rc
 
 
 def since_url():
     return COMMENTS + "&since=" + urllib.parse.quote("2026-10-10T11:59:05Z", safe="")
 
 
-def test_clean_incremental_records_etag(gh_env):
+def test_fresh_identity_single_page_with_etag(gh_env, capsys):
+    transport = gh_env["transport"]
+    transport.serve(COMMENTS, [_comment(1)], etag='"e1"')
+    rc = run(gh_env, ["log", "--channel", "general"], capsys)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "hi" in out
+
+
+def test_clean_incremental_records_etag(gh_env, capsys):
     transport = gh_env["transport"]
     su = since_url()
-    # seed cache without etag first (full scan)
     transport.serve(COMMENTS, [_comment(1)], etag=None)
-    buf = io.StringIO()
-    real = sys.stdout; sys.stdout = buf
-    assert run(gh_env, ["log", "--channel", "general"]) == 0
-    sys.stdout = real
+    rc = run(gh_env, ["log", "--channel", "general"], capsys)
+    assert rc == 0
+    capsys.readouterr()
 
-    # now serve incremental with etag; no new messages -> record
     transport.serve(su, [_comment(1)], etag='"e1"')
-    buf = io.StringIO()
-    real = sys.stdout; sys.stdout = buf
-    assert run(gh_env, ["log", "--channel", "general"]) == 0
-    sys.stdout = real
+    rc = run(gh_env, ["log", "--channel", "general"], capsys)
+    assert rc == 0
+    capsys.readouterr()
     assert transport.statuses[-1] == 200
     data = LogCache(gh_env["state_dir"], IDENTITY).load("general", {"repo": "owner/repo", "issue": 10})
     assert data["etag"] == {"url": su, "etag": '"e1"'}
 
 
-def test_second_sends_if_none_match_304(gh_env):
+def test_second_sends_if_none_match_304(gh_env, capsys):
     transport = gh_env["transport"]
     su = since_url()
     transport.serve(COMMENTS, [_comment(1)], etag=None)
-    buf = io.StringIO()
-    real = sys.stdout; sys.stdout = buf
-    assert run(gh_env, ["log", "--channel", "general"]) == 0
-    sys.stdout = real
+    rc = run(gh_env, ["log", "--channel", "general"], capsys)
+    assert rc == 0
+    capsys.readouterr()
 
     transport.serve(su, [_comment(1)], etag='"e1"')
-    buf = io.StringIO()
-    real = sys.stdout; sys.stdout = buf
-    assert run(gh_env, ["log", "--channel", "general"]) == 0
-    sys.stdout = real
+    rc = run(gh_env, ["log", "--channel", "general"], capsys)
+    assert rc == 0
+    capsys.readouterr()
 
     transport.serve(su, [_comment(1)], etag='"e1"')
-    buf = io.StringIO()
-    real = sys.stdout; sys.stdout = buf
-    assert run(gh_env, ["log", "--channel", "general"]) == 0
-    sys.stdout = real
+    rc = run(gh_env, ["log", "--channel", "general"], capsys)
+    assert rc == 0
+    captured = capsys.readouterr()
     assert transport.requests[-1]["headers"].get("If-None-Match") == '"e1"'
     assert transport.statuses[-1] == 304
+    assert "hi" in captured.out
 
 
-def test_new_message_not_recorded(gh_env):
+def test_new_message_not_recorded(gh_env, capsys):
     transport = gh_env["transport"]
     su = since_url()
     transport.serve(COMMENTS, [_comment(1)], etag=None)
-    buf = io.StringIO()
-    real = sys.stdout; sys.stdout = buf
-    assert run(gh_env, ["log", "--channel", "general"]) == 0
-    sys.stdout = real
+    rc = run(gh_env, ["log", "--channel", "general"], capsys)
+    assert rc == 0
+    capsys.readouterr()
 
     transport.serve(su, [_comment(1), _comment(2, created_at="2026-10-10T12:10:00Z")], etag='"e2"')
-    buf = io.StringIO()
-    real = sys.stdout; sys.stdout = buf
-    assert run(gh_env, ["log", "--channel", "general"]) == 0
-    sys.stdout = real
+    rc = run(gh_env, ["log", "--channel", "general"], capsys)
+    assert rc == 0
+    capsys.readouterr()
     data = LogCache(gh_env["state_dir"], IDENTITY).load("general", {"repo": "owner/repo", "issue": 10})
     assert data["etag"] is None
 
 
-def test_full_page_not_recorded(gh_env):
+def test_full_page_not_recorded(gh_env, capsys):
     transport = gh_env["transport"]
     comments = [_comment(i) for i in range(1, 101)]
     transport.serve(COMMENTS, comments, etag='"e3"')
-    buf = io.StringIO()
-    real = sys.stdout; sys.stdout = buf
-    assert run(gh_env, ["log", "--channel", "general"]) == 0
-    sys.stdout = real
+    rc = run(gh_env, ["log", "--channel", "general"], capsys)
+    assert rc == 0
+    capsys.readouterr()
     data = LogCache(gh_env["state_dir"], IDENTITY).load("general", {"repo": "owner/repo", "issue": 10})
     assert data["etag"] is None
 
 
-def test_next_page_not_recorded(gh_env):
+def test_next_page_not_recorded(gh_env, capsys):
     transport = gh_env["transport"]
     page2 = COMMENTS + "&page=2"
     transport.serve(COMMENTS, [_comment(1)], etag='"e4"', link=f'<{page2}>; rel="next"')
     transport.serve(page2, [_comment(2)], etag='"e5"')
-    buf = io.StringIO()
-    real = sys.stdout; sys.stdout = buf
-    assert run(gh_env, ["log", "--channel", "general"]) == 0
-    sys.stdout = real
+    rc = run(gh_env, ["log", "--channel", "general"], capsys)
+    assert rc == 0
+    capsys.readouterr()
     data = LogCache(gh_env["state_dir"], IDENTITY).load("general", {"repo": "owner/repo", "issue": 10})
     assert data["etag"] is None

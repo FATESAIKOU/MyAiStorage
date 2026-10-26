@@ -142,6 +142,61 @@ def test_missing_field_treated_as_empty(tmp_path):
     assert cache.load("general", {"repo": "r", "issue": 1}) is None
 
 
+def _cached_message(cid, created_at, *, content="hi"):
+    """One `messages` entry in the shape `LogCache.save` writes."""
+    return {
+        "comment_id": str(cid),
+        "created_at": created_at,
+        "comment_url": "",
+        "message": {
+            "id": "01AAAA00000000000000000000",
+            "at": created_at,
+            "from": "mypmo-pm-m1",
+            "to": "mylinuxpool-impl-w1-1",
+            "channel": "general",
+            "urgency": 5,
+            "content": content,
+            "attachments": [],
+            "mentions": [],
+            "in_reply_to": None,
+        },
+    }
+
+
+def _seed_two_messages(cache):
+    messages = [
+        _cached_message(1, "2026-10-10T10:00:00Z", content="first"),
+        _cached_message(2, "2026-10-10T12:00:00Z", content="second"),
+    ]
+    cache.save("general", {"repo": "r", "issue": 1}, "2", "2026-10-10T12:00:00Z", None, messages)
+
+
+def test_broken_message_content_treats_the_whole_file_as_empty(tmp_path):
+    """F3: one `messages` entry missing a field must void the file, not crash later."""
+    state_dir = tmp_path / "state"
+    identity = "mylinuxpool-impl-w1-1"
+    cache = LogCache(state_dir, identity)
+    _seed_two_messages(cache)
+    f = log_cache_path(state_dir, identity, "general")
+    data = json.loads(f.read_text())
+    del data["messages"][0]["message"]["content"]
+    f.write_text(json.dumps(data), encoding="utf-8")
+    assert cache.load("general", {"repo": "r", "issue": 1}) is None
+
+
+def test_unparseable_comment_id_treats_the_whole_file_as_empty(tmp_path):
+    """F3: a `comment_id` that cannot become an int voids the file."""
+    state_dir = tmp_path / "state"
+    identity = "mylinuxpool-impl-w1-1"
+    cache = LogCache(state_dir, identity)
+    _seed_two_messages(cache)
+    f = log_cache_path(state_dir, identity, "general")
+    data = json.loads(f.read_text())
+    data["messages"][0]["comment_id"] = "not-a-number"
+    f.write_text(json.dumps(data), encoding="utf-8")
+    assert cache.load("general", {"repo": "r", "issue": 1}) is None
+
+
 def test_a_and_a_different_files(tmp_path):
     state_dir = tmp_path / "state"
     identity = "mylinuxpool-impl-w1-1"

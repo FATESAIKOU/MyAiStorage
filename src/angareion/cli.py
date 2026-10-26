@@ -501,10 +501,16 @@ def cmd_log(args, config, app, token):
     import datetime as _dt
 
     channels = list(args.channel or [])
-    try:
-        app.store.ensure_fresh()
-    except Exception:
-        pass
+    # De-duplicate repeated --channel (preserve order): log is a union.
+    _seen_channels = set()
+    _deduped_channels = []
+    for _ch in channels:
+        if _ch in _seen_channels:
+            continue
+        _seen_channels.add(_ch)
+        _deduped_channels.append(_ch)
+    channels = _deduped_channels
+    app.store.ensure_fresh()
 
     if getattr(args, "around", None) is not None:
         if not is_ulid(args.around):
@@ -573,83 +579,78 @@ def cmd_log(args, config, app, token):
     cache = LogCache(config.state_dir, config.identity)
 
     channel_messages = {}
-    try:
-        for entity in entities:
-            ch = entity.channel
-            cached_entity = {"repo": entity.repo, "issue": entity.issue}
-            cached_msgs, last_cid, last_created, etag = cache.load_messages(ch, cached_entity)
-            mirror = list(cached_msgs)
-            if last_created is None:
-                since = None
-            else:
-                since_dt = parse_backend_time(last_created) - _dt.timedelta(seconds=60)
-                since = format_backend_time(since_dt)
-            enumerated, new_etag, not_modified = app.backend.enumerate_conditional(entity, since=since, etag=etag)
-            by_id = {}
-            for m in mirror:
-                try:
-                    by_id[int(m["comment_id"])] = m
-                except Exception:
-                    pass
-            max_cid = None
-            max_created = last_created
-            had_new_message = False
-            if not not_modified:
-                for cid, created_at, parsed in enumerated:
-                    if parsed is None:
-                        continue
-                    cid_int = int(cid)
-                    msg_dict = {
-                        "comment_id": str(cid_int),
-                        "created_at": created_at,
-                        "comment_url": getattr(parsed, "comment_url", "") or "",
-                        "message": message_to_dict(parsed),
-                    }
-                    existing = by_id.get(cid_int)
-                    is_new = existing is None or existing.get("message") != msg_dict["message"] or existing.get("created_at") != created_at
-                    if is_new:
-                        had_new_message = True
-                    if existing is None or existing.get("message") != msg_dict["message"] or existing.get("created_at") != created_at:
-                        by_id[cid_int] = msg_dict
-                    if max_cid is None or cid_int > max_cid:
-                        max_cid = cid_int
-                    if max_created is None or parse_backend_time(created_at) > parse_backend_time(max_created):
-                        max_created = created_at
-                if by_id:
-                    max_created = max((m["created_at"] for m in by_id.values()), key=lambda t: parse_backend_time(t))
-                    max_cid = max(int(m["comment_id"]) for m in by_id.values())
-                messages_list = sorted(by_id.values(), key=lambda m: int(m["comment_id"]))
-                if had_new_message:
-                    new_etag = None
-                cache.save(ch, cached_entity, str(max_cid) if max_cid is not None else None, max_created, new_etag, messages_list)
-            else:
-                messages_list = list(mirror)
+    for entity in entities:
+        ch = entity.channel
+        cached_entity = {"repo": entity.repo, "issue": entity.issue}
+        cached_msgs, last_cid, last_created, etag = cache.load_messages(ch, cached_entity)
+        mirror = list(cached_msgs)
+        if last_created is None:
+            since = None
+        else:
+            since_dt = parse_backend_time(last_created) - _dt.timedelta(seconds=60)
+            since = format_backend_time(since_dt)
+        enumerated, new_etag, not_modified = app.backend.enumerate_conditional(entity, since=since, etag=etag)
+        by_id = {}
+        for m in mirror:
+            try:
+                by_id[int(m["comment_id"])] = m
+            except Exception:
+                pass
+        max_cid = None
+        max_created = last_created
+        had_new_message = False
+        if not not_modified:
+            for cid, created_at, parsed in enumerated:
+                if parsed is None:
+                    continue
+                cid_int = int(cid)
+                msg_dict = {
+                    "comment_id": str(cid_int),
+                    "created_at": created_at,
+                    "comment_url": getattr(parsed, "comment_url", "") or "",
+                    "message": message_to_dict(parsed),
+                }
+                existing = by_id.get(cid_int)
+                is_new = existing is None or existing.get("message") != msg_dict["message"] or existing.get("created_at") != created_at
+                if is_new:
+                    had_new_message = True
+                if existing is None or existing.get("message") != msg_dict["message"] or existing.get("created_at") != created_at:
+                    by_id[cid_int] = msg_dict
+                if max_cid is None or cid_int > max_cid:
+                    max_cid = cid_int
+                if max_created is None or parse_backend_time(created_at) > parse_backend_time(max_created):
+                    max_created = created_at
+            if by_id:
+                max_created = max((m["created_at"] for m in by_id.values()), key=lambda t: parse_backend_time(t))
+                max_cid = max(int(m["comment_id"]) for m in by_id.values())
+            messages_list = sorted(by_id.values(), key=lambda m: int(m["comment_id"]))
+            if had_new_message:
+                new_etag = None
+            cache.save(ch, cached_entity, str(max_cid) if max_cid is not None else None, max_created, new_etag, messages_list)
+        else:
+            messages_list = list(mirror)
 
-            msgs_for_query = []
-            for m in messages_list:
-                d = m["message"]
-                from angareion.messages import Message as _M
-                msg = _M(
-                    id=d["id"],
-                    at=d["at"],
-                    from_=d["from"],
-                    to=d["to"],
-                    channel=d["channel"],
-                    urgency=d["urgency"],
-                    content=d["content"],
-                    attachments=d.get("attachments", []),
-                    mentions=d.get("mentions", []),
-                    in_reply_to=d.get("in_reply_to"),
-                )
-                setattr(msg, "received_at", m["created_at"])
-                setattr(msg, "comment_id", int(m["comment_id"]))
-                setattr(msg, "comment_url", m.get("comment_url", ""))
-                msgs_for_query.append(msg)
-            channel_messages[ch] = msgs_for_query
-    except Exception as e:
-        sys.stderr.write("Error: {}\n".format(e))
-        return EXIT_BACKEND
-
+        msgs_for_query = []
+        for m in messages_list:
+            d = m["message"]
+            from angareion.messages import Message as _M
+            msg = _M(
+                id=d["id"],
+                at=d["at"],
+                from_=d["from"],
+                to=d["to"],
+                channel=d["channel"],
+                urgency=d["urgency"],
+                content=d["content"],
+                attachments=d.get("attachments", []),
+                mentions=d.get("mentions", []),
+                in_reply_to=d.get("in_reply_to"),
+            )
+            setattr(msg, "received_at", m["created_at"])
+            setattr(msg, "comment_id", int(m["comment_id"]))
+            setattr(msg, "comment_url", m.get("comment_url", ""))
+            msgs_for_query.append(msg)
+        channel_messages[ch] = msgs_for_query
     me = config.identity
     from_filter = getattr(args, "from_", None)
     if from_filter == "me":

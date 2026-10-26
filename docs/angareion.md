@@ -246,3 +246,5 @@ stdout 只放結果（`channel create`／`channel delete` 的名稱、`send` 的
   - Claude Code：`~/.claude/skills/angareion/SKILL.md`；
   - opencode：同一份就能讀到——opencode 1.18.35 會自動讀 `~/.claude/skills/` 與 `~/.agents/skills/`；映像或 supervisor 不要設 `OPENCODE_DISABLE_EXTERNAL_SKILLS` 或 `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS`。
 - profile 指定要哪些能力；沒有選 Angareion 能力的 profile 不會有 token 與說明檔。
+
+log 的結果不是『這則現在還在』的證據（快取不解後端的刪除）。

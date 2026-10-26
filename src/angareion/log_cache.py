@@ -104,6 +104,35 @@ class LogCache:
             return None
         if not isinstance(data.get("messages"), list):
             return None
+        for _m in data.get("messages"):
+            if not isinstance(_m, dict):
+                return None
+            try:
+                int(_m.get("comment_id"))
+            except (TypeError, ValueError):
+                return None
+            if not isinstance(_m.get("created_at"), str):
+                return None
+            _msg = _m.get("message")
+            if not isinstance(_msg, dict):
+                return None
+            for _k in ("id", "at", "from", "to", "channel", "urgency", "content"):
+                if _k not in _msg:
+                    return None
+            if not isinstance(_msg.get("id"), str):
+                return None
+            if not isinstance(_msg.get("at"), str):
+                return None
+            if _msg.get("from") is not None and not isinstance(_msg.get("from"), str):
+                return None
+            if _msg.get("to") is not None and not isinstance(_msg.get("to"), str):
+                return None
+            if not isinstance(_msg.get("channel"), str):
+                return None
+            if not isinstance(_msg.get("urgency"), int) or isinstance(_msg.get("urgency"), bool):
+                return None
+            if not isinstance(_msg.get("content"), str):
+                return None
         last_cid = data.get("last_comment_id")
         if last_cid is not None and not isinstance(last_cid, str):
             return None

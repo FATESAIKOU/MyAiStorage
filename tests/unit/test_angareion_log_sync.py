@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 
 from _angareion_fakes import FakeGit, backends_json, channels_json, entity
-from angareion.backend import FakeBackend
-from angareion.channel_config import BACKENDS_PATH, CHANNELS_PATH, ChannelStore
+from angareion.backend import BackendError, FakeBackend
+from angareion.channel_config import BACKENDS_PATH, CHANNELS_PATH, ChannelConfigError, ChannelStore
 from angareion.cli import main
 from angareion.config import Config, save_config
 from angareion.log_cache import LogCache, log_cache_path
@@ -171,3 +171,34 @@ def test_sync_failure_exits_2_empty_stdout(cli_env, monkeypatch):
     sys.stdout = real
     assert rc == 2
     assert buf.getvalue().strip() == ""
+
+
+def test_sync_error_message_never_shows_the_token(cli_env, capsys):
+    """F5: the sync error goes through `main`'s `mask_token`, like every other command."""
+    _seed(cli_env, "01AAAA00000000000000000000", 1, "2026-10-10T12:00:05Z")
+
+    def leaky(*a, **k):
+        raise BackendError("HTTP 403 for " + TOKEN)
+
+    cli_env["backend"].enumerate_conditional = leaky
+    rc = run(cli_env, ["log", "--channel", "general", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out.strip() == ""
+    assert TOKEN not in captured.err
+    assert "***" in captured.err
+
+
+def test_ensure_fresh_failure_exits_2(cli_env, monkeypatch, capsys):
+    """F5: a failed config pull is a backend/config error (exit 2), not a channel-missing exit 1."""
+    _seed(cli_env, "01AAAA00000000000000000000", 1, "2026-10-10T12:00:05Z")
+
+    def boom():
+        raise ChannelConfigError("could not pull the channel configuration")
+
+    monkeypatch.setattr(cli_env["store"], "ensure_fresh", boom)
+    rc = run(cli_env, ["log", "--channel", "general", "--json"])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert captured.out == ""
+    assert "could not pull" in captured.err
