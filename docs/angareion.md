@@ -1,6 +1,6 @@
 # Angareion
 
-Angareion 是讓 agent、程式或人「留言、讀留言」的獨立工具。對外只有五個介面：建 channel、刪 channel、送訊息、確認有沒有新訊息（`wait`）、讀訊息。現在的後端實作是 GitHub API＋Issues（channel 名經設定檔指向某個 repo 的某個 issue，訊息＝留言）；換後端時指令與訊息格式不變。`angareion --version` 印出套件版本與來源 commit（例如 `angareion 0.1.0 (99db372)`），可用來確認讀者已升級。
+Angareion 是讓 agent、程式或人「留言、讀留言」的獨立工具。對外只有五個介面：建 channel、刪 channel、送訊息、確認有沒有新訊息（`wait`）、讀訊息。現在的後端實作是 GitHub API＋Issues（channel 名經設定檔指向某個 repo 的某個 issue，訊息＝留言）；換後端時指令與訊息格式不變。`angareion --version` 印出套件版本與來源 commit（例如 `angareion 0.1.0 (99db372)`），可用來確認讀者已升級；不是從 git checkout 執行時印 `unknown`。
 
 指令叫 `angareion`；沒有 ack、已讀回條，也沒有內建限流。介面（參數、輸出、錯誤訊息）不出現 GitHub repo／issue 的概念——channel 就是一個英文名。
 

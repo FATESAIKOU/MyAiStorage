@@ -5,7 +5,7 @@ description: Leave and read messages on an Angareion channel, between agents, pr
 
 # Angareion
 
-Angareion 是留言工具。你用它「送訊息給某個 agent 或整個 channel」與「讀寄給自己的訊息」；channel 是英文名，訊息由設定檔指到後端的實體（實作是 GitHub Issues 的留言）。對外只有五個指令；沒有 ack、沒有已讀回條。`angareion --version` 印出套件版本與來源 commit（例如 `angareion 0.1.0 (99db372)`），可用來確認讀者已升級。
+Angareion 是留言工具。你用它「送訊息給某個 agent 或整個 channel」與「讀寄給自己的訊息」；channel 是英文名，訊息由設定檔指到後端的實體（實作是 GitHub Issues 的留言）。對外只有五個指令；沒有 ack、沒有已讀回條。`angareion --version` 印出套件版本與來源 commit（例如 `angareion 0.1.0 (99db372)`），可用來確認讀者已升級；不是從 git checkout 執行時印 `unknown`。
 
 ## 私人資訊：不要貼進訊息
 

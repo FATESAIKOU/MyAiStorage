@@ -440,8 +440,32 @@ def _package_version() -> str:
 
 
 def _commit_sha() -> str:
-    """Best-effort short commit sha of the source tree; 'unknown' if unavailable."""
+    """Best-effort short commit sha of the source tree; 'unknown' if unavailable.
+
+    Only report a sha when ``repo_root`` is itself the top level of a git
+    work tree: ``git -C`` walks up the directory tree looking for a ``.git``,
+    so an install sitting inside an unrelated repository would otherwise print
+    that repository's HEAD. Compare the resolved top level to ``repo_root``
+    and fall back to ``unknown`` on any mismatch or failure.
+    """
     repo_root = Path(__file__).resolve().parents[2]
+    try:
+        toplevel = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if toplevel.returncode != 0:
+        return "unknown"
+    try:
+        git_root = Path(toplevel.stdout.strip()).resolve()
+    except (OSError, ValueError):
+        return "unknown"
+    if git_root != repo_root.resolve():
+        return "unknown"
     try:
         result = subprocess.run(
             ["git", "-C", str(repo_root), "rev-parse", "--short", "HEAD"],
@@ -466,9 +490,7 @@ class _VersionAction(argparse.Action):
 
     def __call__(self, parser, namespace, values, option_string=None):
         version = f"angareion {_package_version()} ({_commit_sha()})"
-        formatter = parser._get_formatter()
-        formatter.add_text(version)
-        parser._print_message(formatter.format_help(), sys.stdout)
+        sys.stdout.write(version + "\n")
         parser.exit()
 
 
@@ -560,7 +582,7 @@ def main(
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
-    except SystemExit as e:  # --help / --version
+    except SystemExit as e:  # argparse --help / --version terminate via SystemExit; convert to an int return code
         return e.code if isinstance(e.code, int) else EXIT_OK
     except UsageError as e:
         sys.stderr.write(f"Error: {e}\n")
