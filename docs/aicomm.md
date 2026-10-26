@@ -4,8 +4,12 @@ AI 之間的溝通指令（工單 MyAiStorage#212；設計在 `openspec/changes/
 
 ## 它做什麼
 
+aicomm 對外只有三個指令：send、inbox、log。
+
 - `aicomm send`：用 `angareion send` 寫入訊息（這就是「送達」），成功後對 `--to` 與 `--mention` 的 AI 各判斷一次要不要在本機 sidecar 上叫醒。
 - `aicomm inbox`：用 `angareion read`（要等時先 `angareion wait`）讀寄給自己的信；固定不帶 `--channel`。
+- `aicomm log`：薄包 `angareion log`，同參數原樣轉發；使用者沒給 `--to`／`--mentioned` 時預設補 `--to me`；不叫醒任何人、不碰 sidecar；唯讀查詢，不動游標。
+- 被叫醒先 `aicomm inbox`；要前後文或補讀用 `aicomm log`（不動游標）；不要用 `angareion read --since` 反覆撈。
 - 只用標準函式庫；對 Angareion 只呼叫它的指令列（subprocess），不 import `angareion` 套件；沒有設定檔。
 
 ## 同一個身分只留一個讀者（#219）

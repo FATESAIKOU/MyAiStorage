@@ -80,7 +80,7 @@ def sidecar_base(override: str | None) -> str:
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str):  # argparse would exit 2; this tool's usage code is 1
         if "invalid choice" in message:  # a wrong subcommand name; other mistakes are about arguments
-            message += "（aicomm 只有 send 與 inbox）"
+            message += "（aicomm 只有 send、inbox 與 log）"
         raise UsageError(message)
 
 
@@ -108,6 +108,10 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Block in `angareion wait` first; exit 3 on timeout, 2 on a backend error.")
     p_inbox.add_argument("--mentioned", action="store_true", help="Only messages addressed to or mentioning me.")
     p_inbox.add_argument("--json", action="store_true", help="Print angareion's JSON as it is.")
+
+    # `log` declares no flags: everything after it is forwarded verbatim to
+    # `angareion log` (see main()). add_help=False so `--help` is forwarded too.
+    sub.add_parser("log", help="Query messages (read-only; thin wrapper over angareion log).", add_help=False)
     return parser
 
 
@@ -244,6 +248,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
 EMPTY_INBOX_HINT = (
     "aicomm: 沒有新信。若剛被叫醒卻是空的，可能已被同一個身分的其他讀者（例如背景讀信任務）讀走；"
     "先看它的輸出，要補讀用 angareion read --since <時刻>（RFC 3339，例如 2026-10-25T03:00:00Z；不移動游標）。"
+    "要補查用 aicomm log（不動游標）。"
 )
 
 
@@ -275,14 +280,43 @@ def _cmd_inbox(args: argparse.Namespace) -> int:
     return code
 
 
+def _user_specified_recipient(extras: list[str]) -> bool:
+    for tok in extras:
+        if not tok.startswith("--"):
+            continue
+        head = tok.split("=", 1)[0]
+        name = head[2:]
+        if not name:
+            continue
+        if "to".startswith(name) or "mentioned".startswith(name):
+            return True
+    return False
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entrypoint for the `aicomm` command; returns the exit code."""
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
-        args = _build_parser().parse_args(argv)
+        parser = _build_parser()
+        args, extras = parser.parse_known_args(argv)
         if args.command is None:
-            raise UsageError("aicomm 只有 send 與 inbox 兩個指令")
-        return _cmd_send(args) if args.command == "send" else _cmd_inbox(args)
+            raise UsageError("aicomm 只有 send、inbox 與 log 三個指令")
+        if args.command == "send":
+            if extras:
+                raise UsageError(f"無法識別的引數：{' '.join(extras)}")
+            return _cmd_send(args)
+        if args.command == "inbox":
+            if extras:
+                raise UsageError(f"無法識別的引數：{' '.join(extras)}")
+            return _cmd_inbox(args)
+        # log: forward extras verbatim to `angareion log`, injecting --to me when needed.
+        if not _user_specified_recipient(extras):
+            forwarded = ["--to", "me", *extras]
+        else:
+            forwarded = list(extras)
+        code, out, err = _angareion(["log", *forwarded])
+        _relay(out, err)
+        return code
     except UsageError as e:
         sys.stderr.write(f"aicomm: {e}\n")
         return EXIT_USAGE

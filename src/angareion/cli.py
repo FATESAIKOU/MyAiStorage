@@ -20,6 +20,7 @@ from angareion.backend import (
     ChannelNotFoundError,
     EntityResolver,
     Target,
+    format_backend_time,
     parse_backend_time,
 )
 from angareion.channel_config import (
@@ -41,6 +42,7 @@ from angareion.github import HttpTransport, GitHubIssuesBackend
 from angareion.messages import (
     Message,
     MessageValidationError,
+    is_ulid,
     message_to_dict,
     serialize_message,
     validate_address,
@@ -54,6 +56,8 @@ from angareion.registry import (
     register_comment,
     unregister_comment,
 )
+from angareion.log_cache import LogCache
+from angareion.log_query import AnchorNotFoundError, select as select_log
 from angareion.state import CursorStore, FileETagCache
 
 EXIT_OK = 0
@@ -494,6 +498,132 @@ class _VersionAction(argparse.Action):
         parser.exit()
 
 
+def _validate_log_times(args):
+    if args.since is not None:
+        try:
+            parse_backend_time(args.since)
+        except ValueError:
+            sys.stderr.write(
+                "Error: --since must be an RFC 3339 timestamp such as "
+                "2026-10-12T03:00:00Z, got '{}'\n".format(args.since)
+            )
+            return False
+    if args.until is not None:
+        try:
+            parse_backend_time(args.until)
+        except ValueError:
+            sys.stderr.write(
+                "Error: --until must be an RFC 3339 timestamp such as "
+                "2026-10-12T03:00:00Z, got '{}'\n".format(args.until)
+            )
+            return False
+    if args.since is not None and args.until is not None:
+        if parse_backend_time(args.since) > parse_backend_time(args.until):
+            sys.stderr.write("Error: --since must not be later than --until\n")
+            return False
+    return True
+
+
+def cmd_log(args, config, app, token):
+    channels = list(args.channel or [])
+    # De-duplicate repeated --channel (preserve order): log is a union.
+    _seen_channels = set()
+    _deduped_channels = []
+    for _ch in channels:
+        if _ch in _seen_channels:
+            continue
+        _seen_channels.add(_ch)
+        _deduped_channels.append(_ch)
+    channels = _deduped_channels
+    app.store.ensure_fresh()
+
+    if args.around is not None:
+        if not is_ulid(args.around):
+            sys.stderr.write("Error: --around must be a 26-character ULID, got '{}'\n".format(args.around))
+            return EXIT_USAGE
+    if args.thread is not None:
+        if not is_ulid(args.thread):
+            sys.stderr.write("Error: --thread must be a 26-character ULID, got '{}'\n".format(args.thread))
+            return EXIT_USAGE
+    if args.around is not None and args.thread is not None:
+        sys.stderr.write("Error: --around and --thread are mutually exclusive\n")
+        return EXIT_USAGE
+    if (args.before is not None or args.after is not None) and args.around is None:
+        sys.stderr.write("Error: --before/--after require --around\n")
+        return EXIT_USAGE
+    for name in ("before", "after"):
+        val = getattr(args, name, None)
+        if val is not None and val < 0:
+            sys.stderr.write("Error: --{} must not be negative, got {}\n".format(name, val))
+            return EXIT_USAGE
+    if args.limit is not None and args.limit < 0:
+        sys.stderr.write("Error: --limit must not be negative, got {}\n".format(args.limit))
+        return EXIT_USAGE
+
+    if not _validate_log_times(args):
+        return EXIT_USAGE
+
+    if not channels:
+        channels = None
+    else:
+        for ch in channels:
+            try:
+                app.store.entity_for(ch)
+            except Exception as e:
+                sys.stderr.write("Error: {}\n".format(e))
+                return EXIT_USAGE
+
+    if channels is None:
+        entities = list(app.store.entities())
+        selected_channels = [e.channel for e in entities]
+    else:
+        entities = [app.store.entity_for(ch) for ch in channels]
+        selected_channels = list(channels)
+
+    cache = LogCache(config.state_dir, config.identity)
+
+    channel_messages = {}
+    for entity in entities:
+        channel_messages[entity.channel] = cache.sync(app.backend, entity)
+
+    me = config.identity
+    from_filter = args.from_
+    if from_filter == "me":
+        from_filter = me
+    to_filter = args.to
+    if to_filter == "me":
+        to_filter = me
+    mentioned_flag = bool(args.mentioned)
+
+    try:
+        filtered = select_log(
+            channel_messages,
+            selected_channels,
+            me=me,
+            from_=from_filter,
+            to=to_filter,
+            mentioned=mentioned_flag,
+            since=args.since,
+            until=args.until,
+            grep=args.grep,
+            around=args.around,
+            before=args.before,
+            after=args.after,
+            thread=args.thread,
+            limit=args.limit,
+        )
+    except AnchorNotFoundError as e:
+        sys.stderr.write("Error: {}\n".format(e))
+        return EXIT_USAGE
+
+    if args.json:
+        sys.stdout.write(json.dumps([_message_for_output(m) for m in filtered], indent=2, ensure_ascii=False) + "\n")
+    else:
+        for m in filtered:
+            sys.stdout.write(_format_message(m))
+    sys.stdout.flush()
+    return EXIT_OK
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser for `angareion`."""
     parser = _Parser(
@@ -559,6 +689,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_read.add_argument("--since", metavar="TIMESTAMP",
                         help="Read after this time; does not move the local cursor.")
     p_read.add_argument("--json", action="store_true", help="Print a JSON array.")
+
+    p_log = subparsers.add_parser("log", help="Query messages (read-only; does not move cursors).")
+    p_log.add_argument("--channel", action="append", default=[], metavar="CH",
+                       help="Channel to query (repeatable).")
+    p_log.add_argument("--from", dest="from_", metavar="AGENT",
+                       help="Sender AI name (or 'me').")
+    p_log.add_argument("--to", metavar="AGENT",
+                       help="Recipient filter (or 'me').")
+    p_log.add_argument("--mentioned", action="store_true",
+                       help="@ me filter.")
+    p_log.add_argument("--since", metavar="TIMESTAMP",
+                       help="Lower bound (inclusive).")
+    p_log.add_argument("--until", metavar="TIMESTAMP",
+                       help="Upper bound (inclusive).")
+    p_log.add_argument("--grep", metavar="TEXT",
+                       help="Literal case-insensitive substring in content.")
+    p_log.add_argument("--around", metavar="ULID",
+                       help="Anchor message id.")
+    p_log.add_argument("--before", type=int, metavar="N",
+                       help="Messages before anchor (requires --around).")
+    p_log.add_argument("--after", type=int, metavar="N",
+                       help="Messages after anchor (requires --around).")
+    p_log.add_argument("--thread", metavar="ULID",
+                       help="Thread root message id.")
+    p_log.add_argument("--limit", type=int, metavar="N",
+                       help="Keep the last N after sorting.")
+    p_log.add_argument("--json", action="store_true", help="Print a JSON array.")
     return parser
 
 
@@ -662,6 +819,8 @@ def main(
             return cmd_wait(args, config, app, token, active_sleeper, active_clock)
         if args.command == "read":
             return cmd_read(args, config, app, token)
+        if args.command == "log":
+            return cmd_log(args, config, app, token)
         parser.print_help(sys.stderr)
         return EXIT_USAGE
     except ChannelNotFoundError as e:

@@ -100,6 +100,12 @@ def test_skill_doc_to_me_definition_counts_mentions_and_the_first_mentioned_read
     assert "從頭讀" in text and "--since" in text
 
 
+def test_skill_doc_says_log_is_not_evidence_a_message_still_exists():
+    """F7: the known limit of the log cache must be stated in the skill (spec last line)."""
+    text = _text()
+    assert "log 的結果不是『這則現在還在』的證據" in text
+
+
 def test_idle_wait_is_limited_to_agents_nobody_pokes():
     text = _text()
     description = re.search(r"^description: (.*)$", text, re.M).group(1)

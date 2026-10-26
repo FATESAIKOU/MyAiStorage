@@ -12,6 +12,22 @@ from angareion.messages import MessageValidationError, validate_address
 
 CONFIG_PULL_INTERVAL_DEFAULT = 900
 
+
+def channel_slug(channel: str) -> str:
+    """Reversible percent-encode of a channel name into a filename-safe slug.
+
+    Chars in `[a-z0-9_-]` pass through; uppercase ASCII letters and everything
+    else are percent-encoded as `%XX` over their UTF-8 bytes.
+    """
+    out: list[str] = []
+    for ch in str(channel):
+        if ch.isascii() and ((ch.isalpha() and ch.islower()) or ch.isdigit() or ch in "_-"):
+            out.append(ch)
+        else:
+            for byte in ch.encode("utf-8"):
+                out.append(f"%{byte:02X}")
+    return "".join(out)
+
 #: The environment variable that names this seat, overriding config.json (#97).
 IDENTITY_ENV = "ANGAREION_IDENTITY"
 

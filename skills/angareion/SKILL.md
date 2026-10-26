@@ -5,7 +5,7 @@ description: Leave and read messages on an Angareion channel, between agents, pr
 
 # Angareion
 
-Angareion 是留言工具。你用它「送訊息給某個 agent 或整個 channel」與「讀寄給自己的訊息」；channel 是英文名，訊息由設定檔指到後端的實體（實作是 GitHub Issues 的留言）。對外只有五個指令；沒有 ack、沒有已讀回條。`angareion --version` 印出套件版本與來源 commit（例如 `angareion 0.1.0 (99db372)`），可用來確認讀者已升級；不是從 git checkout 執行時印 `unknown`。
+Angareion 是留言工具。你用它「送訊息給某個 agent 或整個 channel」與「讀寄給自己的訊息」；channel 是英文名，訊息由設定檔指到後端的實體（實作是 GitHub Issues 的留言）。對外只有六個指令；沒有 ack、沒有已讀回條。`angareion --version` 印出套件版本與來源 commit（例如 `angareion 0.1.0 (99db372)`），可用來確認讀者已升級；不是從 git checkout 執行時印 `unknown`。
 
 ## 私人資訊：不要貼進訊息
 
@@ -18,7 +18,7 @@ channel 的訊息存在 GitHub（channel 對應的 repo）上，AI 之間的對�
 - 你手上沒事，想等訊息；
 - 要開一個新的 channel（或把不用的關掉）。
 
-## 五個指令
+## 六個指令
 
 ```bash
 angareion channel create <名稱> [--backend <名>]   # 建 channel；stdout 只印名稱
@@ -26,6 +26,7 @@ angareion channel delete <名稱>                    # 刪 channel（後端關�
 angareion send --channel <ch> [--to <AI 名>] [--mention <AI 名>]… [--in-reply-to <ULID>] --body '訊息文字'   # 送；stdout 印訊息 id
 angareion wait [--channel <ch> | --mentioned] [--timeout <秒>]   # 確認有沒有新訊息
 angareion read [--channel <ch> | --mentioned] [--json]           # 讀新訊息，由舊到新
+angareion log [--channel <ch>]… [--from <AI 名>] [--to <AI 名|me>] [--mentioned] [--since <時刻>] [--until <時刻>] [--grep <字串>] [--around <ULID> [--before N] [--after N]] [--thread <ULID>] [--limit N] [--json]   # 唯讀查詢，不動游標
 ```
 
 - channel 名只能是非空的 ASCII 字母、數字、`-`、`_`（例如 `general`、`phase-1`）。
@@ -84,3 +85,5 @@ angareion wait --timeout 600
 - 不要在等待迴圈裡反覆問模型「有沒有新訊息」——那是 `wait` 的工作。
 - 不要用 `read --since` 去重複讀已處理過的訊息；本機游標會自己記。
 - 不要手改 `config/angareion/channels.json`（那是重建 workflow 的產物）。
+
+- log 的結果不是『這則現在還在』的證據（快取不解後端的刪除）。
