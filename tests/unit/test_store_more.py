@@ -429,6 +429,30 @@ def test_fetch_raw_refetches_session_md(remote, tmp_path):  # U-ST-21, N8
     assert h.agora_of(fresh)["raw"]["md5"] == hashlib.md5(b'{"v": 2}').hexdigest()
 
 
+def test_join_segments_keeps_another_processes_staging_raw(remote, tmp_path):  # #227
+    """`_join_segments` drops the session's older `raw-*`, and leaves another process's
+    `copy_atomic` staging file (`raw-<md5>.json<random>.tmp`) alone: it is that process's
+    half-written copy, renamed in when it is done (same rule as `remember`, #227)."""
+    paths = store.Paths.from_env()
+    hdr = _header()
+    ulid = _save(paths, hdr, raw=b'{"v": 1}')
+    other = machine2(tmp_path)
+    stale = store.sync(other).header(ulid)
+    mirror = other.mirror / ulid
+    final = store.raw_name(h.agora_of(stale)["raw"])
+    staging = mirror / f"{final}4f2a9c1b.tmp"                 # where copy_atomic stages its copy
+    staging.write_bytes(b'half')
+    old = mirror / "raw-0123456789ab.json"                    # what a new header replaced
+    old.write_bytes(b'{"old": true}')
+
+    got = store.fetch_raw(other, store.Drive(other), ulid, stale)
+
+    assert got == b'{"v": 1}'
+    assert (mirror / final).read_bytes() == got
+    assert staging.read_bytes() == b'half'                     # still being written elsewhere
+    assert not old.exists()                                   # the older raw is cleaned up
+
+
 def test_broken_outbox_entry_quarantined(remote, capsys):  # new, C2/C4
     paths = store.Paths.from_env()
     hdr = _header()
