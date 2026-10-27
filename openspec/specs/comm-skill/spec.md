@@ -25,6 +25,21 @@ AI 之間溝通的指令 `aicomm`：`send` 寫進 Angareion，收件人若是本
 - **WHEN** 加上 `--ticket MyAiStorage#212`
 - **THEN** 訊息帶一個名為 `ticket`、值為 `MyAiStorage#212` 的 ref 附件
 
+### Requirement: 其他參照 `--ref` 原樣轉給 Angareion
+`send` MUST 提供可重複的 `--ref <name>=<locator>`，每個值 MUST 原樣轉成一個 `--ref=<name>=<locator>` token 交給 Angareion，MUST NOT 改動訊息內文，MUST NOT 去讀被指到的東西。每個值都是一個 `--ref=...` token，值以 `-` 開頭 MUST NOT 被當成旗標。值裡沒有 `=` 時 MUST 以 exit 1 結束，且 MUST 在寫進 Angareion 之前就拒絕：MUST NOT 送出訊息、MUST NOT 對 sidecar 發任何請求。與 `--ticket` 並用時 MUST 都送：`ticket` 的 ref 在前，其餘 `--ref` 照給的順序。叫醒 MUST 仍只看 `--to`、`--mention`、`--no-wake` 與 `--interrupt`——`aicomm send --ref` 照樣叫醒收件人，與 `angareion send --ref` 不叫醒不同（Angareion 那一層不碰 sidecar）。
+
+#### Scenario: 送出帶 ref 且照樣叫醒
+- **WHEN** `aicomm send --channel c --to a --ref pr=https://github.com/x/y/pull/1 --body 'hi'`，且 `a` 在本機 sidecar 上 `idle`
+- **THEN** 對 Angareion 只多一個 `--ref=pr=https://github.com/x/y/pull/1` token，訊息照常送出，`a` 照 `--to` 的規則被叫醒（exit 0）
+
+#### Scenario: 缺 `=` 被拒不送不 poke
+- **WHEN** `aicomm send --channel c --to a --ref pr --body 'hi'`
+- **THEN** exit 1，沒有呼叫 Angareion 的 `send`，也沒有對 sidecar 發任何請求（查 agent 與戳都沒有），stderr 說明值要是 `<name>=<locator>`
+
+#### Scenario: 與 --ticket 並用時 ticket 的 ref 在前
+- **WHEN** `aicomm send --channel c --to a --ticket MyAiStorage#278 --ref pr=https://github.com/x/y/pull/2 --ref design=openspec/specs/comm-skill/spec.md --body 'hi'`
+- **THEN** 交給 Angareion 的三個 ref token 依序是 `--ref=ticket=MyAiStorage#278`、`--ref=pr=https://github.com/x/y/pull/2`、`--ref=design=openspec/specs/comm-skill/spec.md`
+
 ### Requirement: 叫醒的對象與條件
 `send` 寫入成功後，MUST 只對 `--to` 與每個 `--mention` 的 AI 名各判斷一次是否叫醒；沒有 `--to` 的廣播 MUST NOT 叫醒任何人；寄給自己 MUST NOT 叫醒自己；`--no-wake` MUST NOT 叫醒任何人。skill MUST NOT 依角色（PM、PMO、隊員）分支；所有角色行為相同。預設戳為不中斷（`interrupt: false`）；給了 `--interrupt` 且收件人 `running` 才帶 `interrupt: true`，收件人 `idle` 時 `interrupt` 仍為 false（`--interrupt` 與 `--no-wake` 互斥，同時給 exit 1）。對每個名字，本機 sidecar 的 agent 查詢回 200（agent 在這台）且 `state` 是 `idle` 或 `running` 才戳（不打斷）。判斷 MUST NOT 依賴 agent 是 tui 或 headless，MUST NOT 讀 `attach` 欄位。`starting`、`waiting-quota`、`exited` MUST NOT 戳。對 `running` 的收件人，預設的不中斷戳照送。不同次 `send` 之間 MUST NOT 去重（連送兩則＝兩次戳）。
 

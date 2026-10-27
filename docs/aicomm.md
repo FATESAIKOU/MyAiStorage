@@ -12,6 +12,16 @@ aicomm 對外只有三個指令：send、inbox、log。
 - 被叫醒先 `aicomm inbox`；要前後文或補讀用 `aicomm log`（不動游標）；不要用 `angareion read --since` 反覆撈。
 - 只用標準函式庫；對 Angareion 只呼叫它的指令列（subprocess），不 import `angareion` 套件；沒有設定檔。
 
+## 參照：`--ticket` 與 `--ref`（#278）
+
+`send` 附參照一律走 Angareion 的 `--ref`，不改訊息內文、不去讀被指到的東西：
+
+- `--ticket <repo>#<n>`：一個 `--ref ticket=<repo>#<n>`（格式 `^[A-Za-z0-9._-]+#[0-9]+$`，不符 exit 1）。
+- `--ref <name>=<locator>`（可重複，例 `--ref pr=https://github.com/...` 附 PR 連結）：原樣一個 `--ref <name>=<locator>`；值裡沒有 `=` 就 exit 1，而且在寫進 Angareion 之前就拒絕（跟 `--ticket` 一樣，不會送出一則才說失敗）。
+- 兩者並用都送：`--ticket` 的 ref 在前，其他 `--ref` 照給的順序。
+- 每個值都是一個 `--ref=...` token，值以 `-` 開頭也不會被當成旗標。
+- 叫醒不變：**`aicomm send --ref` 仍然會叫醒**收件人，判斷只看 `--to`／`--mention`／`--no-wake`／`--interrupt`；與 `angareion send --ref` 不叫醒不同（angareion 那一層不碰 sidecar）。
+
 ## 新身分第一次 `inbox`（#224）
 
 `aicomm inbox` 固定用「寄給我的」讀信，所以新開的 agent（游標檔裡還沒有任何一筆「寄給我的」游標）第一次讀時，Angareion 只把**寄給自己的**（`to` 是自己，或點名自己）從頭讀；**沒有 `to` 的舊廣播**只讀「現在」之後的，不會把各頻道開機前留下的廣播全部倒進 inbox。要看舊廣播就自己用 `angareion read --since <時刻>`（或 `angareion log`），`aicomm` 沒有為它加旗標。

@@ -97,6 +97,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("--in-reply-to", metavar="ULID", help="The id of the message this one replies to.")
     p_send.add_argument("--urgency", type=int, help="Urgency 0-9 (angareion's default when omitted).")
     p_send.add_argument("--ticket", metavar="REPO#N", help="Attach the ticket as a ref (ticket=REPO#N).")
+    p_send.add_argument("--ref", action="append", default=[], metavar="NAME=LOCATOR",
+                        help="Attach a reference or link (repeatable).")
     p_send.add_argument("--body", required=True, metavar="TEXT", help="Message text; '-' reads it on stdin.")
     group = p_send.add_mutually_exclusive_group()
     group.add_argument("--no-wake", action="store_true", help="Do not poke anybody.")
@@ -211,6 +213,10 @@ def _wake_one_inner(base: str, name: str, interrupt: bool) -> str:
 def _cmd_send(args: argparse.Namespace) -> int:
     if args.ticket is not None and not TICKET_RE.fullmatch(args.ticket):
         raise UsageError(f"--ticket 要是 <repo>#<n>：{args.ticket!r}")
+    # angareion refuses a ref without "="; refuse it here too, before anything is written.
+    for ref in args.ref:
+        if "=" not in ref:
+            raise UsageError(f"--ref 要是 <name>=<locator>：{ref!r}")
 
     me = os.environ.get("ANGAREION_IDENTITY")
     candidates: list[str] = []
@@ -240,6 +246,8 @@ def _cmd_send(args: argparse.Namespace) -> int:
         command.append(f"--urgency={args.urgency}")
     if args.ticket:
         command.append(f"--ref=ticket={args.ticket}")
+    for ref in args.ref:  # the ticket's ref first, then the given ones in order
+        command.append(f"--ref={ref}")
     command.append(f"--body={args.body}")
     stdin_text = sys.stdin.read() if args.body == "-" else None
 

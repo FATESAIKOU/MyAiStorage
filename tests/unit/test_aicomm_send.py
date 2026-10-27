@@ -192,6 +192,70 @@ def test_a_malformed_ticket_exits_1_and_sends_nothing(world, monkeypatch, capsys
     assert world.calls() == [] and world.sidecar.requests == []
 
 
+# --- --ref (#278) -------------------------------------------------------------------------
+
+def refs(argv):
+    """Every `--ref` value in the order handed to angareion."""
+    assert "--ref" not in argv, f"--ref must be a single --ref=VALUE token: {argv}"
+    return [a[len("--ref="):] for a in argv if a.startswith("--ref=")]
+
+
+def test_a_ref_is_attached_and_the_recipient_is_still_woken(world, monkeypatch, capsys):
+    agent(world)
+    r = send(world, monkeypatch, capsys, "--ref", "pr=https://example.invalid/pull/278")
+    assert r.code == 0
+    (call,) = world.calls()
+    assert refs(call["argv"]) == ["pr=https://example.invalid/pull/278"]
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+
+
+def test_two_refs_keep_their_order_and_follow_the_ticket(world, monkeypatch, capsys):
+    agent(world)
+    r = send(world, monkeypatch, capsys,
+             "--ref", "pr=https://example.invalid/pull/278",
+             "--ticket", "MyAiStorage#278",
+             "--ref", "commit=abc123")
+    assert r.code == 0
+    (call,) = world.calls()
+    assert refs(call["argv"]) == [
+        "ticket=MyAiStorage#278",
+        "pr=https://example.invalid/pull/278",
+        "commit=abc123",
+    ]
+    assert opt(call["argv"], "--body") == BODY
+
+
+@pytest.mark.parametrize("extra", [
+    ["--ref", "pr"],
+    ["--ref", ""],
+    ["--ref", "https://example.invalid/pull/278"],
+    ["--ref", "pr=https://example.invalid/pull/278", "--ref", "noequals"],
+    ["--ticket", "MyAiStorage#278", "--ref", "noequals"],
+], ids=["no-equals", "empty", "url-only", "second-one-bad", "with-ticket"])
+def test_a_ref_without_an_equals_sign_exits_1_and_sends_nothing(world, monkeypatch, capsys, extra):
+    agent(world)
+    r = send(world, monkeypatch, capsys, *extra)
+    assert r.code == 1
+    assert "name" in r.err and "locator" in r.err
+    assert world.calls() == [] and world.sidecar.requests == []
+
+
+def test_a_ref_starting_with_a_dash_stays_one_token(world, monkeypatch, capsys):
+    agent(world)
+    r = send(world, monkeypatch, capsys, "--ref", "-x=-y --not-an-option")
+    assert r.code == 0
+    (call,) = world.calls()
+    assert "--ref=-x=-y --not-an-option" in call["argv"]
+    assert refs(call["argv"]) == ["-x=-y --not-an-option"]
+
+
+def test_send_help_lists_ref_like_angareion(world, monkeypatch, capsys):
+    r = run_aicomm(["send", "--help"], monkeypatch, capsys)
+    assert r.code == 0
+    assert "[--ref NAME=LOCATOR]" in r.out
+    assert "Attach a reference or link (repeatable)." in r.out
+
+
 # --- who gets woken, and when --------------------------------------------------------------
 
 @pytest.mark.parametrize("extra", [{"attach": "tmux:demo"}, {}], ids=["tui", "headless"])
