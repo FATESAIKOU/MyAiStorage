@@ -1002,6 +1002,16 @@ def index_file(index: "Index", session_md: Path) -> None:
     index.put(session_md.parent.name, md5_file(session_md), hdr, body)
 
 
+def _stale_raw_files(mirror: Path, keep_name: str) -> list[Path]:
+    """The mirror's `raw-*` files that a new raw replaces, keeping `keep_name`.
+
+    Not another process's `copy_atomic` staging file (`raw-<md5>.json<random>.tmp`): it is
+    that process's half-written copy, renamed in when it is done.
+    """
+    return [other for other in mirror.glob("raw-*")
+            if other.name != keep_name and not other.name.endswith(".tmp")]
+
+
 def remember(paths: Paths, folder: Path, index: "Index | None" = None, ulid: str | None = None) -> None:
     """Put a session we just wrote into the local mirror and index right away.
 
@@ -1023,10 +1033,8 @@ def remember(paths: Paths, folder: Path, index: "Index | None" = None, ulid: str
         wanted, target = folder / name, mirror / name
         if not (target.is_file() and target.stat().st_size == wanted.stat().st_size):
             copy_atomic(wanted, target, utf8=True)
-        for other in mirror.glob("raw-*"):
-            # Not another process's `copy_atomic` staging file (`raw-<md5>.json<random>.tmp`).
-            if other.name != name and not other.name.endswith(".tmp"):
-                other.unlink(missing_ok=True)
+        for other in _stale_raw_files(mirror, name):
+            other.unlink(missing_ok=True)
     try:
         index_file(index or Index(paths), mirror / "session.md")
     except sqlite3.Error as e:
@@ -3041,9 +3049,8 @@ def _join_segments(paths: Paths, ulid: str, raw: dict, segdir: Path) -> Path:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
-    for other in mirror.glob("raw-*"):
-        if other.name != final.name:
-            other.unlink(missing_ok=True)
+    for other in _stale_raw_files(mirror, final.name):
+        other.unlink(missing_ok=True)
     return final
 
 
