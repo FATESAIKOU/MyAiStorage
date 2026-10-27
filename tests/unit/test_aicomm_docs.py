@@ -186,3 +186,31 @@ def test_cli_hint_contains_appended_plain_sentence():
 def test_injection_literals_sync_with_cli():
     cli = (REPO / "src" / "aicomm" / "cli.py").read_text(encoding="utf-8")
     assert '"to"' in cli and '"mentioned"' in cli
+
+
+# --- #278: send --ref ---
+
+
+def test_skill_usage_line_lists_ref():
+    usage = _skill().split("```bash")[1].split("```")[0]
+    assert "--ref <name>=<locator>" in usage
+
+
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_ref_is_documented_as_a_reference_that_still_wakes(path):
+    text = path.read_text(encoding="utf-8")
+    assert "--ref <name>=<locator>" in text
+    assert "仍然會叫醒" in text
+    assert "angareion send --ref" in text and "不叫醒" in text
+
+
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_ref_without_an_equals_sign_is_written_down(path):
+    text = path.read_text(encoding="utf-8")
+    assert "沒有 `=`" in text and "exit 1" in text
+
+
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_a_ref_example_is_a_link(path):
+    text = path.read_text(encoding="utf-8")
+    assert "--ref pr=https://github.com/" in text

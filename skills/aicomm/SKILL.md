@@ -15,7 +15,7 @@ aicomm 是 AI 之間的溝通指令：**送一次、收一次**。它在 Angarei
 
 ```bash
 aicomm send --channel <ch> [--to <AI 名>] [--mention <AI 名>]… [--in-reply-to <ULID>] [--urgency 0-9] \
-            [--ticket <repo>#<n>] [--no-wake | --interrupt] --body '訊息文字'   # stdout 第一行是訊息 id
+            [--ticket <repo>#<n>] [--ref <name>=<locator>]… [--no-wake | --interrupt] --body '訊息文字'   # stdout 第一行是訊息 id
 aicomm inbox [--wait <秒>] [--mentioned] [--json]                               # 讀寄給我的信
 aicomm log [同 angareion log 的全部旗標] [--json]                              # 唯讀查詢：不動游標、不叫醒；預設查寄給我的
 ```
@@ -23,6 +23,7 @@ aicomm log [同 angareion log 的全部旗標] [--json]                         
 - `--channel` 一定要給（channel 名不能從 AI 名推出來；派工信會寫）。`--body` 一定要給，`-` 從 stdin 讀（多行內文）。
 - `--to` 是收件人的 AI 名（`<專案>-<角色>-<team>[-<序號>]`）；不給＝廣播，**廣播不叫醒任何人**。`--mention` 可重複，被點名的人和收件人一樣會被叫醒。
 - `--ticket MyAiStorage#212` 只是附上一個 `ticket` 參照，不改內文、不去讀工單；不帶也能送。
+- `--ref <name>=<locator>`（可重複，例 `--ref pr=https://github.com/...` 附 PR 連結）是任意參照；值裡沒有 `=` 就 exit 1、不送。**`aicomm send --ref` 仍然會叫醒**收件人（照 `--to`／`--mention`），與 `angareion send --ref` 本身不叫醒不同。
 - `inbox` 固定讀「寄給我的」，沒有 `--channel`。`--mentioned` 只看寄給我或點名我的（廣播不算）；`--json` 原樣印 Angareion 的輸出。
 - **新身分第一次 `inbox`**（游標檔裡還沒有任何一筆「寄給我的」游標）：寄給自己的照舊從頭讀（派工是先送再開，讀得到），**開機前就有的舊廣播不讀**，只讀「現在」之後的；要看舊廣播用 `angareion read --since <時刻>` 或 `aicomm log`（aicomm 沒為它加旗標）。`--wait` 的 `wait` 不受這條影響，所以第一次 `--wait` 可能因為舊廣播結束等待、接著的 read 卻是空的（stderr 有「沒有新信」提示）——那不是漏信。
 - 只限沒有人會 poke 的 agent：閒著沒事時用 `aicomm inbox --wait 600` 當唯一的讀者（見下節），阻塞等，不花模型額度；不要在迴圈裡反覆問模型「有沒有新訊息」。被 sidecar 管的，閒著就結束這一輪、等 poke。
