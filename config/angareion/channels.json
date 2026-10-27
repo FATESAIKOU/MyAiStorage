@@ -1,5 +1,9 @@
 {
   "channels": {
+    "l2-test-1027": {
+      "backend": "aicompany-channel",
+      "issue": 21
+    },
     "m0-exp-r2b": {
       "backend": "aicompany-channel",
       "issue": 6
