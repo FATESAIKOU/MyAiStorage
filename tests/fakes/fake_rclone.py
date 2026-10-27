@@ -41,6 +41,11 @@ with the status a real rclone uses for it. The message then carries no
 "directory not found" (the default rc=1 keeps those words for older tests), so a
 caller can only tell this apart from a failed look by the returncode.
 
+FAKE_RCLONE_FILES_FROM_SILENT=1: a `copy --files-from` whose *source* is the remote
+(a download) leaves out the listed names the source does not have, exits 0 and says
+nothing - what rclone 1.69 does (#256). Off by default, and never for an upload: a
+missing local file still fails, as it must.
+
 FAKE_RCLONE_PURGE_AFTER=<file>: another machine deletes a folder *now*. The file
 holds {"after": <needle>, "purge": <path under the folder id>}. The first call
 matching the needle (matched the way FAKE_RCLONE_FAIL matches, listing included)
@@ -299,10 +304,13 @@ elif cmd == "copyto":
     make_dirs(dst_p.parent)
     shutil.copy2(src_p, dst_p)
 elif cmd == "copy" and "--files-from" in params:
-    # local -> Drive, one call for a whole batch (local-first-writes M4)
+    # local -> Drive, one call for a whole batch (local-first-writes M4); the other
+    # direction is several files down from the remote (#256)
     src = resolve(params[0]) or Path(params[0])
     dst = resolve(params[1]) or Path(params[1])
     listed = Path(params[params.index("--files-from") + 1]).read_text().split()
+    # rclone 1.69 skips a listed name the remote source lacks and still exits 0 (#256)
+    silent = bool(os.environ.get("FAKE_RCLONE_FILES_FROM_SILENT")) and resolve(params[0]) is not None
     with open(remote.parent / "copies.log", "a") as f:
         f.write(json.dumps({"src": str(src), "files": [
             {"name": rel, "size": (src / rel).stat().st_size if (src / rel).exists() else None,
@@ -310,6 +318,8 @@ elif cmd == "copy" and "--files-from" in params:
             for rel in listed]}) + "\n")
     for rel in listed:
         if not (src / rel).exists():
+            if silent:
+                continue
             fail(f"source not found: {rel}")
         make_dirs((dst / rel).parent)
         shutil.copy2(src / rel, dst / rel)
