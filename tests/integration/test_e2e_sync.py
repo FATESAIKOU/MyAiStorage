@@ -527,14 +527,23 @@ def test_a_session_deleted_mid_run_is_rescued_exactly_once(sync):
     still recreate it once, but the content goes quiet after the third sentence
     (no new content, no more stages), so the loop converges instead of hiding a
     real second rescue.
+
+    The agent then holds at a `wait-file` step until the test has really seen A
+    stay gone, and only then leaves: a fixed number of trailing wait-sync rounds
+    only guesses how long the uploads take, and on a slow Drive it guessed wrong
+    - the run was over before the purge even went out, so the final write-back had
+    already landed and nothing was left to rescue (the run ended first, exactly as
+    in test_progress_is_visible_while_the_run_is_still_going).
     """
     id_a = import_session(sync, seed_jsonl(sync, SEED_USER, SEED_ASST), TITLE)
     ulid_a = id_a.split(":", 1)[1]
     names_before = drive_names(sync)
     assert ulid_a in names_before
 
+    release = sync["tmp"] / "session-a-stays-gone"
+    sync["monkeypatch"].setenv("FAKE_SYNC_TIMEOUT", str(int(POLL_TIMEOUT)))
     script_env(sync, f"append:{FIRST}", "wait-sync", f"append:{SECOND}", "wait-sync",
-               f"append:{THIRD}", *["wait-sync"] * 12, "exit")
+               f"append:{THIRD}", f"wait-file:{release}", "exit")
     proc, out = start_continue(sync, "continue", "session", id_a,
                                "--agent", "claude", "--dir", str(sync["proj"]),
                                "--sync-period", PERIOD)
@@ -563,6 +572,8 @@ def test_a_session_deleted_mid_run_is_rescued_exactly_once(sync):
             break
         time.sleep(2.0)
     assert gone, "purge 三次 A 還在 Drive 上，後面的另存量不到"
+    release.touch()   # A stays gone: the agent may leave, and its final write-back
+                      # is what meets「Drive 沒有 A」and rescues
 
     rc, text = finish_proc(sync, proc, out)
     assert rc == 0, text[-2000:]

@@ -512,6 +512,12 @@ class Drive:
         dest.mkdir(parents=True, exist_ok=True)
         _with_files_from(self, names, dest, "copy", f"gdrive:sessions/{ulid}", str(dest),
                          "--no-traverse")
+        # rclone 1.69 leaves a listed name the Drive no longer has out of the copy and still
+        # exits 0 (#256): saying nothing would report "fetched" for a segment that never came,
+        # and `_ensure_segmented` would never ask `_segments_gone` about a newer manifest.
+        missing = [name for name in names if not (dest / name).is_file()]
+        if missing:
+            raise StoreError(f"{ulid} 的段不在 Drive 上：{', '.join(missing)}")
 
 
 class _Chunker:
