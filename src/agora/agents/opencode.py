@@ -406,7 +406,6 @@ def reidentify(payload: dict, *, session_id: str, salt: str | None = None) -> di
     imported is the original transcript, not a paraphrase of it. The input is
     never modified.
     """
-    messages = _payload_messages(payload)
     fmt = _payload_format(payload)
     out = json.loads(json.dumps(payload))  # deep copy; never mutate the caller's
     salt = salt or _salt_for(session_id)
@@ -1281,7 +1280,6 @@ class OpencodeAgent:
         messages = _payload_messages(payload)
         body = [(role, [line for line in lines if line.strip()]) for role, lines in turns
                 if role in ("user", "assistant") and any(line.strip() for line in lines)]
-        said = [m for m in messages if m.get("type") in ("user", "assistant")]
         # W1, same rule as v1: what the reading version is about to show, once its
         # `[skip …]` lines are gone - an interrupted run leaves an assistant with
         # nothing in it, and the turn before it is still the user's open question.

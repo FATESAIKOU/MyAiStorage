@@ -91,6 +91,8 @@ from agora.private_tmp import PrivateTmpDir
 from agora.store import normalize
 
 from .agy_restore import prepare_continue
+# `FORMAT` 是 re-export：`agy.FORMAT` 是 docstring 說的既有 import 路徑（tests 在用），
+# 本檔不用它，但拿掉會斷掉那個路徑。
 from .agy_store import (FORMAT, PREVIEW_MAX, db_path, decode_db, envelope, immutable,
                         pack_raw_file, rows, scan_text, snapshot, step_fingerprint,
                         trajectory_id)
