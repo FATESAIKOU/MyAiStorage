@@ -35,6 +35,10 @@
     "team-mylinuxpool-w1": {
       "backend": "aicompany-channel",
       "issue": 8
+    },
+    "team-mypmo-m1": {
+      "backend": "aicompany-channel",
+      "issue": 22
     }
   },
   "version": 1
