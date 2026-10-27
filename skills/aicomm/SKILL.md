@@ -38,10 +38,14 @@ aicomm log [同 angareion log 的全部旗標] [--json]                         
 
 ## 找本人：`--to myaientry-secretary-p1`
 
-本人在 Angareion 的位址是 `myaientry-secretary-p1`。AI 要找本人，就用 `--to myaientry-secretary-p1`（或 `--mention myaientry-secretary-p1` 點名）；App 會把它顯示成「@你」——那是本人的位址，不是另一個 AI 的名字。
+本人在 Angareion 的位址是 `myaientry-secretary-p1`。AI 要找本人，就用 `--to myaientry-secretary-p1`（或 `--mention myaientry-secretary-p1` 點名）；App 只看 `to`／`mentions`，這樣才會把它顯示成「@你」——那是本人的位址，不是另一個 AI 的名字。內文寫 `@ myaientry-secretary-p1` 只是普通文字，App 不會把它當成 @你。要讓 App 標成 @你（計入未讀 @）要帶 `--to` 或 `--mention`；本人不在 sidecar 上，所以不會被叫醒；廣播會進本人的 inbox，但不叫醒、也不標 @你。
 
 - 本人只跟 PMO 說話的規矩不變：PM／隊員回答本人的 @ 可以，要本人決定的事仍經 PMO。
 - 權限不變：寄件者是自報的，不是認證；這個位址不帶來額外權限。
+
+## 派工：只接受 `secretary-pmo`
+
+本人要派事給秘書／PMO，只認 `secretary-pmo` 這個 channel；MyAiEntry App 的派工工具一律送它（填別的 channel 也會被夾成這個）（細節見 MyAiEntry#230；不使用 App 的角色可略過）。**自由文字不當派工**：在其他 channel 或內文裡寫「請做某某」，不會被當成派工單，也不會因此有派工權限（派工權限不變）。
 
 ## 送達與叫醒
 
