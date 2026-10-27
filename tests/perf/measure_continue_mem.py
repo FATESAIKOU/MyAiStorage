@@ -13,7 +13,10 @@ What it does:
 1. Builds an isolated playground (HOME / AGORA_CONFIG / AGORA_CACHE_DIR /
    AGORA_STATE_DIR / FAKE_REMOTE all under one temp dir) and points
    AGORA_RCLONE at tests/fakes/fake_rclone.py, AGORA_FOLDER_NAME at
-   agora-test. The user's real config, sessions and cache are never read.
+   agora-test. The inherited XDG_* / CLAUDE_CONFIG_DIR /
+   OPENCODE_CONFIG_CONTENT knobs are dropped too (AGENTS.md「測試隔離」), so
+   neither this process nor a round child can find a real agent store. The
+   user's real config, sessions and cache are never read.
 2. Generates a fake but realistic claude session jsonl (user / assistant /
    tool_use / tool_result with large tool outputs, bookkeeping lines, a
    subagent sidecar, docs/spike/claude.md line shapes) of the requested
@@ -62,6 +65,13 @@ FAKE_RCLONE = REPO / "tests" / "fakes" / "fake_rclone.py"
 
 BOOKKEEPING = ("summary", "queue-operation", "last-prompt", "cost-state", "mode")
 AGENT_HEX = "0123456789abcdef"
+
+# AGENTS.md「測試隔離」: the round child inherits os.environ, and opencode finds
+# its store through XDG_* while the agent adapters read CLAUDE_CONFIG_DIR /
+# OPENCODE_CONFIG_CONTENT. Clear them (never point them at the temp root: the
+# user's real knobs are the thing being kept away from) before anything runs.
+ISOLATION_VARS = ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+                  "CLAUDE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT")
 
 
 def rss_kb(pid: int | None = None) -> int:
@@ -442,11 +452,16 @@ def assert_isolated(root: Path) -> None:
         assert d.resolve().is_relative_to(base), f"NOT ISOLATED: {name}={d} not under {base}"
     assert Path(os.environ["HOME"]).resolve().is_relative_to(base), "NOT ISOLATED: HOME"
     assert Path(os.environ["TMPDIR"]).resolve().is_relative_to(base), "NOT ISOLATED: TMPDIR"
+    leaked = [var for var in ISOLATION_VARS if var in os.environ]
+    assert not leaked, f"NOT ISOLATED: still set {', '.join(leaked)}"
     print(f"[probe] isolation OK: config={p.config} cache={p.cache} state={p.state} "
-          f"HOME={os.environ['HOME']} TMPDIR={os.environ['TMPDIR']} (all under {base})", flush=True)
+          f"HOME={os.environ['HOME']} TMPDIR={os.environ['TMPDIR']} "
+          f"cleared={' '.join(ISOLATION_VARS)} (all under {base})", flush=True)
 
 
 def make_env(root: Path) -> None:
+    for var in ISOLATION_VARS:          # inherited real-agent knobs: never let them ride along
+        os.environ.pop(var, None)
     home = root / "home"
     (home / ".claude").mkdir(parents=True)
     (root / "remote").mkdir()
