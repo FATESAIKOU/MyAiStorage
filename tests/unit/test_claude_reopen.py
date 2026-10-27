@@ -625,6 +625,141 @@ def test_a_real_shaped_session_written_back_from_the_raw_is_the_uploaded_bytes(e
     assert path.read_bytes() == original
 
 
+# --- #287: a sidecar file stopped half way through a line -----------------------------------------
+
+
+HALF = '{"type":"user","sessionId":'                 # what a writer leaves when it is cut off short
+
+
+def _ours_with_a_subagent(env, src, paths):
+    """A session with one subagent file, launched once by us: its sidecar is ours and identical."""
+    s = Session(src)
+    s.sidecar("subagents/a.jsonl", _turn(1, 50, SID))
+    ulid = _two_rounds(env, paths, s)
+    _launched_once(env, paths, ulid, s, src)
+    return ulid, src / SID / "subagents/a.jsonl"
+
+
+def test_a_sidecar_stopped_half_way_through_a_line_keeps_the_id(env, src, paths):
+    """#287: export takes the sidecar as it is and the restore drops the unfinished last
+    line, so what is on disk is our bytes plus that fragment - not another writer's file."""
+    ulid, side = _ours_with_a_subagent(env, src, paths)
+    ours = side.read_bytes()
+    with open(side, "a", encoding="utf-8") as f:
+        f.write(HALF)                                     # the subagent was interrupted mid-line
+    before = _stat(side)
+    launch = _reopen(env, paths, ulid, keep_id=SID)
+    assert launch.agent_session_id == SID
+    assert side.read_bytes() == ours + HALF.encode("utf-8")       # kept as it is, not rewritten
+    assert _stat(side) == before                                   # not a byte, not the mtime
+
+
+def test_a_sidecar_half_line_the_raw_already_holds_is_not_a_collision_either(env, src, paths):
+    """The save before this one took the file while it was half-written, so the fragment is
+    in the raw; the restore drops it and the disk is our bytes plus that tail (#287)."""
+    ulid, side = _ours_with_a_subagent(env, src, paths)
+    with open(side, "a", encoding="utf-8") as f:
+        f.write(HALF)
+    s = Session(src)
+    s.turns(1)
+    _, block = _round(paths, ulid, s)
+    _check(env, paths, ulid, s, block)                     # the raw holds the fragment now
+    before = _stat(side)
+    launch = _reopen(env, paths, ulid, keep_id=SID)
+    assert launch.agent_session_id == SID
+    assert side.read_bytes().endswith(HALF.encode("utf-8"))
+    assert _stat(side) == before
+
+
+@pytest.mark.parametrize("what", ["a_whole_line", "a_newline_after_it", "a_broken_line_before_it"])
+def test_a_sidecar_that_is_more_than_a_half_line_is_still_a_collision(env, src, paths, what):
+    """Only a fragment that is not a line is let through: a whole line another writer added,
+    a tail with a newline in it, or a broken line before that tail is a different file."""
+    ulid, side = _ours_with_a_subagent(env, src, paths)
+    ours = side.read_bytes()
+    if what == "a_whole_line":                            # it parses: somebody else finished a line
+        disk = ours + b'{"type":"user"}'
+    elif what == "a_newline_after_it":
+        disk = ours + HALF.encode("utf-8") + b"\nmore"
+    else:                                                 # broken in the middle, then a tail
+        first, rest = ours.split(b"\n", 1)
+        disk = first + b'\n{"broken":\n' + rest + HALF.encode("utf-8")
+    side.write_bytes(disk)
+    before = _stat(side)
+    launch = _reopen(env, paths, ulid, keep_id=SID)
+    assert launch.agent_session_id != SID
+    assert side.read_bytes() == disk                      # nothing of it is touched
+    assert _stat(side) == before
+
+
+def test_a_sidecar_whose_prefix_differs_is_still_a_collision(env, src, paths):
+    """A tail only counts after *our* bytes: a file that differs before that point is another
+    writer's, however much like a half line its last bytes look."""
+    ulid, side = _ours_with_a_subagent(env, src, paths)
+    ours = side.read_bytes()
+    disk = ours[:-5] + b"xxxxx" + HALF.encode("utf-8")     # same length, one piece changed, then a tail
+    assert len(disk) > len(ours) and b"\n" not in disk[len(ours):]   # nothing but the prefix can stop it
+    side.write_bytes(disk)
+    before = _stat(side)
+    launch = _reopen(env, paths, ulid, keep_id=SID)
+    assert launch.agent_session_id != SID
+    assert side.read_bytes() == disk                      # nothing of it is touched
+    assert _stat(side) == before
+
+
+def test_a_sidecar_jsonl_kept_as_base64_is_not_relaxed(env, src, paths):
+    """A `.jsonl` that is not UTF-8 is stored as `$base64` and restored as it is, without
+    `_split_lines`: no tail is dropped there, so a half line after it is a collision."""
+    s = Session(src)
+    binary = b'{"type":"user","sessionId":"' + SID.encode() + b'","n":1,"pad":"\xff"}\n'
+    side = src / SID / "subagents/b.jsonl"
+    side.parent.mkdir(parents=True, exist_ok=True)
+    side.write_bytes(binary)
+    ulid = _two_rounds(env, paths, s)
+    _launched_once(env, paths, ulid, s, src)
+    assert side.read_bytes() == binary                    # went to Drive as `$base64`, came back the same
+    with open(side, "ab") as f:
+        f.write(HALF.encode("utf-8"))
+    before = _stat(side)
+    launch = _reopen(env, paths, ulid, keep_id=SID)
+    assert launch.agent_session_id != SID
+    assert side.read_bytes() == binary + HALF.encode("utf-8")
+    assert _stat(side) == before
+
+
+def test_a_sidecar_file_that_is_not_a_jsonl_is_not_relaxed(env, src, paths):
+    """Only a `.jsonl` kept as text goes through `_split_lines`; nothing else drops a tail."""
+    s = Session(src)
+    s.sidecar("subagents/notes.txt", "hello\n")
+    ulid = _two_rounds(env, paths, s)
+    _launched_once(env, paths, ulid, s, src)
+    note = src / SID / "subagents/notes.txt"
+    ours = note.read_bytes()
+    with open(note, "a", encoding="utf-8") as f:
+        f.write("half")
+    before = _stat(note)
+    launch = _reopen(env, paths, ulid, keep_id=SID)
+    assert launch.agent_session_id != SID
+    assert note.read_bytes() == ours + b"half"
+    assert _stat(note) == before
+
+
+def test_the_main_file_with_a_half_line_at_the_end_is_still_a_collision(env, src, paths):
+    """Only the sidecar is relaxed: the main file is resumed, so a line it does not hold stays a collision."""
+    s = Session(src)
+    ulid = _two_rounds(env, paths, s)
+    _launched_once(env, paths, ulid, s, src)
+    main = src / f"{SID}.jsonl"
+    ours = main.read_bytes()
+    with open(main, "a", encoding="utf-8") as f:
+        f.write(HALF)
+    before = _stat(main)
+    launch = _reopen(env, paths, ulid, keep_id=SID)
+    assert launch.agent_session_id != SID
+    assert main.read_bytes() == ours + HALF.encode("utf-8")
+    assert _stat(main) == before
+
+
 # --- opt-in: the real claude ----------------------------------------------------------------------
 
 
