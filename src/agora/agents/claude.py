@@ -357,17 +357,46 @@ def _iter_aux(sidecar: Path) -> Iterator[bytes]:
 _SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
-def _write_new(target: Path, data: bytes) -> None:
+def _same_but_for_a_half_line(aux: dict, rel: str, want: bytes, disk: bytes) -> bool:
+    """Is `disk` exactly `want` plus the unfinished last line left by an interrupted writer (#287)?
+
+    A sidecar `.jsonl` kept as text is the one place where export and restore disagree:
+    export takes the file as it is, half-written last line and all (`_iter_aux`), and the
+    restore drops that line (`_split_lines`). So a file Claude stopped half way through
+    holds our bytes plus that fragment. The fragment is what makes the two files one:
+    a whole line on disk (it parses), a fragment that carries a `\n`, or anything the two
+    do not share is a different file and stays a collision. The `\n` that would have ended
+    a complete line is part of that difference, since the restore adds none.
+    """
+    if not rel.endswith(".jsonl") or not isinstance(aux.get(rel), str):
+        return False
+    if len(disk) <= len(want) or not disk.startswith(want):
+        return False
+    tail = disk[len(want):]
+    if not want.endswith(b"\n") and tail.startswith(b"\n"):
+        tail = tail[1:]
+    if not tail or b"\n" in tail:
+        return False
+    try:
+        json.loads(tail.decode("utf-8"))
+    except ValueError:              # not UTF-8 or not a value: a line that never got finished
+        return True
+    return False
+
+
+def _write_new(target: Path, data: bytes, *, also_same=None) -> None:
     """Create `target` with `data` without ever replacing a file: written beside it and
     linked in, so a file that is already there (or appears meanwhile) is kept. One
-    holding the same bytes is fine; a different one is an error, never overwritten (#190)."""
+    holding the same bytes - or one `also_same(disk)` allows (#287) - is fine; a
+    different one is an error, never overwritten (#190)."""
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".agora-{uuid.uuid4().hex}.tmp")
     tmp.write_bytes(data)
     try:
         os.link(tmp, target)
     except FileExistsError:
-        if target.read_bytes() != data:
+        disk = target.read_bytes()
+        if disk != data and not (also_same is not None and also_same(disk)):
             raise AgentError(f"{target} 已經有另一個內容不同的檔（可能剛被別的行程建立）；沒有覆寫，請再試一次") from None
     finally:
         tmp.unlink(missing_ok=True)
@@ -415,11 +444,13 @@ def _unpack_aux(aux: dict, sidecar: Path, rewrite=None, *, exclusive: bool = Fal
     """Restore aux files; rewrite(text, rel) transforms .jsonl ones (P12).
 
     `exclusive` creates each file with `_write_new`: one already there with the same
-    bytes is kept, a different one is an error and is never overwritten (#190)."""
+    bytes is kept, a different one is an error and is never overwritten (#190) - except
+    for the unfinished last line a `.jsonl` may have been left with (#287)."""
     for rel, data in _aux_files(aux, rewrite):
         dest = sidecar / rel
         if exclusive:
-            _write_new(dest, data)
+            _write_new(dest, data,
+                       also_same=lambda disk: _same_but_for_a_half_line(aux, rel, data, disk))
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
@@ -1075,11 +1106,12 @@ class ClaudeAgent:
         Yes when no file by that name exists anywhere under projects/, or when the one
         that does is in this directory, **was written by agora's own `start_native`**
         (the marker) and holds exactly the bytes about to be written (the sidecar
-        likewise, file by file). Anything else - the user's own session file, which an
-        import leaves with those very bytes; one the user went on in outside agora; one
-        somewhere else - is a collision, and nothing of it is touched: the caller mints
-        a new id as it always did. Returns (rewritten lines, aux rewrite, jsonl text)
-        or None.
+        likewise, file by file - a `.jsonl` there may end in the unfinished last line
+        an interrupted writer left, #287). Anything else - the user's own session file,
+        which an import leaves with those very bytes; one the user went on in outside
+        agora; one somewhere else - is a collision, and nothing of it is touched: the
+        caller mints a new id as it always did. Returns (rewritten lines, aux rewrite,
+        jsonl text) or None.
         """
         if not _SESSION_ID.fullmatch(keep_id):
             return None
@@ -1098,8 +1130,11 @@ class ClaudeAgent:
                 return None
             sidecar = subdir / keep_id
             for rel, data in _aux_files(aux, rewrite):
-                if (sidecar / rel).exists() and (sidecar / rel).read_bytes() != data:
-                    return None
+                existing = sidecar / rel
+                if existing.exists():
+                    disk = existing.read_bytes()
+                    if disk != data and not _same_but_for_a_half_line(aux, rel, data, disk):
+                        return None
         except (OSError, UnicodeEncodeError):
             return None
         return rewritten, rewrite, text
