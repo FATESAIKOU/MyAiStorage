@@ -38,6 +38,7 @@ from pathlib import Path
 import jsonschema
 
 from agora import header as h
+from agora import orphan_guard
 from agora import private_tmp
 from agora import store
 from agora.agents.agy import AGY_CROSS_AGENT, AGY_HEADLESS_LATER, AGY_READ_ONLY
@@ -2302,97 +2303,110 @@ def cmd_continue(args, paths: store.Paths) -> int:
             _term_child(proc)
 
         previous_term = signal.signal(signal.SIGTERM, _forward_term)
+    # The agent must not outlive a SIGKILLed agora (#229): a tiny reaper is
+    # started right after the agent and holds the read end of a pipe whose
+    # write end only this process has; EOF without the goodbye byte means this
+    # process was killed -9 (or OOM'ed) and the agent is an orphan. Every way
+    # out of this function says goodbye in the `finally` below, so the reaper
+    # only acts when agora really could not (#229). A guard that cannot start
+    # is a warning, never a failed continue.
+    guard = None
     try:
-        # opencode reads PWD, not the real cwd, to pick the project (impl1).
-        proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env={**_spawn_env(launch.env), "PWD": launch.cwd},
-                                pass_fds=(lock.fileno(),),
-                                preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
-        if term_pending:
-            # The SIGTERM arrived while Popen had not returned yet; pass it on.
-            term_pending = False
-            _term_child(proc)
-        if interval is None:
-            proc.wait()           # --sync-period 0: just wait, only the final write-back
-            said_writing = False
-        else:
-            try:
-                said_writing = _wait_agent(proc, run, agent, interval)
-            except BaseException:
-                # Never leave while the agent is alive, and never kill it: wait first,
-                # then let the exception go (design P9a).
-                proc.wait()
-                raise
-            if said_writing:
-                print("[agora] 正在寫回…", file=sys.stderr)
-    finally:
-        signal.signal(signal.SIGINT, previous)
-        if previous_term is not None:
-            signal.signal(signal.SIGTERM, previous_term)
-    agent_rc = proc.returncode if proc is not None else None
-    failed = _agent_failure(agent_rc, term_forwarded)
+        try:
+            # opencode reads PWD, not the real cwd, to pick the project (impl1).
+            proc = subprocess.Popen(launch.argv, cwd=launch.cwd, env={**_spawn_env(launch.env), "PWD": launch.cwd},
+                                    pass_fds=(lock.fileno(),),
+                                    preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+            guard = orphan_guard.start(proc.pid)
+            if term_pending:
+                # The SIGTERM arrived while Popen had not returned yet; pass it on.
+                term_pending = False
+                _term_child(proc)
+            if interval is None:
+                proc.wait()           # --sync-period 0: just wait, only the final write-back
+                said_writing = False
+            else:
+                try:
+                    said_writing = _wait_agent(proc, run, agent, interval)
+                except BaseException:
+                    # Never leave while the agent is alive, and never kill it: wait first,
+                    # then let the exception go (design P9a).
+                    proc.wait()
+                    raise
+                if said_writing:
+                    print("[agora] 正在寫回…", file=sys.stderr)
+        finally:
+            signal.signal(signal.SIGINT, previous)
+            if previous_term is not None:
+                signal.signal(signal.SIGTERM, previous_term)
+        agent_rc = proc.returncode if proc is not None else None
+        failed = _agent_failure(agent_rc, term_forwarded)
 
-    def _finish(normal: int) -> int:
-        """The write-back's answer, with the agent's death laid on top (#76).
+        def _finish(normal: int) -> int:
+            """The write-back's answer, with the agent's death laid on top (#76).
 
-        The fixed line goes to stderr in #54's shape, carrying the original
-        code. A write-back that failed on its own keeps its own code (3); only
-        a clean write-back takes the fixed `EXIT_AGENT_FAILED` (5), so an agent
-        that died with 1/2/3/4 never collides with agora's own 1/2/3/4.
-        """
-        if failed is None:
-            return normal
-        print(f"agora-agent-failed rc={failed}", file=sys.stderr)
-        return EXIT_AGENT_FAILED if normal == 0 else normal
-
-    store._fault("before-finalize")
-    try:
-        saved, target, final_note = _final_write(run, agent)
-    except Exception:
-        # Minor3: the write-back itself blew up (main turns it into exit 2) -
-        # the agent's death is still said out loud before the exception goes on.
-        if failed is not None:
+            The fixed line goes to stderr in #54's shape, carrying the original
+            code. A write-back that failed on its own keeps its own code (3); only
+            a clean write-back takes the fixed `EXIT_AGENT_FAILED` (5), so an agent
+            that died with 1/2/3/4 never collides with agora's own 1/2/3/4.
+            """
+            if failed is None:
+                return normal
             print(f"agora-agent-failed rc={failed}", file=sys.stderr)
-        raise
-    run.pending.unlink()          # the current path: a rescue may have renamed it
-    lock.close()
-    if run.first_note is not None and final_note is None:
-        # The move happened mid-run; its explanation went to the log, so say it again
-        # where the person will see it (design「最後一次」).
-        print(run.first_note, file=sys.stderr)
-    if run.failures:
-        print(f"[agora] 定期寫回失敗 {run.failures} 次，見 {paths.state / CONTINUE_LOG}",
-              file=sys.stderr)
-    if saved is None:
-        # Nothing staged this call, but an entry may still be waiting from an earlier
-        # round: kick the uploader and answer by it (design「最後一次」P8).
-        ok = _uploaded(paths, _ulid_of(target))
-        if fork:
-            # The fork is saved already; its id is the answer, and nothing goes into
-            # `unsaved-launches` - B's source is this launch, so the import tab must keep
-            # comparing it (design「沒有新內容時」).
+            return EXIT_AGENT_FAILED if normal == 0 else normal
+
+        store._fault("before-finalize")
+        try:
+            saved, target, final_note = _final_write(run, agent)
+        except Exception:
+            # Minor3: the write-back itself blew up (main turns it into exit 2) -
+            # the agent's death is still said out loud before the exception goes on.
+            if failed is not None:
+                print(f"agora-agent-failed rc={failed}", file=sys.stderr)
+            raise
+        run.pending.unlink()          # the current path: a rescue may have renamed it
+        lock.close()
+        if run.first_note is not None and final_note is None:
+            # The move happened mid-run; its explanation went to the log, so say it again
+            # where the person will see it (design「最後一次」).
+            print(run.first_note, file=sys.stderr)
+        if run.failures:
+            print(f"[agora] 定期寫回失敗 {run.failures} 次，見 {paths.state / CONTINUE_LOG}",
+                  file=sys.stderr)
+        if saved is None:
+            # Nothing staged this call, but an entry may still be waiting from an earlier
+            # round: kick the uploader and answer by it (design「最後一次」P8).
+            ok = _uploaded(paths, _ulid_of(target))
+            if fork:
+                # The fork is saved already; its id is the answer, and nothing goes into
+                # `unsaved-launches` - B's source is this launch, so the import tab must keep
+                # comparing it (design「沒有新內容時」).
+                if not headless:
+                    print(target)
+                print(f"[agora] 沒有新內容；fork 已存成 {target}", file=sys.stderr)
+                return _finish(0 if (saved_fork[1] and ok) else EXIT_IN_OUTBOX)
+            if not run.wrote:
+                # the agent still holds the copy agora loaded; the import tab leaves it out (review T5)
+                with open(paths.state / "unsaved-launches", "a", encoding="utf-8") as f:
+                    f.write(f"{agent.name}:{launch.agent_session_id}\n")
+                print("[agora] 這次沒有新內容，沒有存", file=sys.stderr)
+                return _finish(0 if ok else EXIT_IN_OUTBOX)
             if not headless:
                 print(target)
-            print(f"[agora] 沒有新內容；fork 已存成 {target}", file=sys.stderr)
-            return _finish(0 if (saved_fork[1] and ok) else EXIT_IN_OUTBOX)
-        if not run.wrote:
-            # the agent still holds the copy agora loaded; the import tab leaves it out (review T5)
-            with open(paths.state / "unsaved-launches", "a", encoding="utf-8") as f:
-                f.write(f"{agent.name}:{launch.agent_session_id}\n")
-            print("[agora] 這次沒有新內容，沒有存", file=sys.stderr)
             return _finish(0 if ok else EXIT_IN_OUTBOX)
-        if not headless:
-            print(target)
-        return _finish(0 if ok else EXIT_IN_OUTBOX)
-    if not fork:
-        return _finish(_emit(saved, quiet=headless))
-    if saved[0] == saved_fork[0]:
-        # The write-back landed on B itself: its outbox entry replaced step 6's, so the
-        # later save's answer is the whole truth - the earlier failure is superseded
-        # (review M6). The id printed is the one that is on Drive.
-        return _finish(_emit(saved, quiet=headless))
-    # The write-back saved the work as another session: both writes matter, or the one
-    # that failed would be forgotten.
-    return _finish(_emit((saved[0], saved[1] and saved_fork[1]), quiet=headless))
+        if not fork:
+            return _finish(_emit(saved, quiet=headless))
+        if saved[0] == saved_fork[0]:
+            # The write-back landed on B itself: its outbox entry replaced step 6's, so the
+            # later save's answer is the whole truth - the earlier failure is superseded
+            # (review M6). The id printed is the one that is on Drive.
+            return _finish(_emit(saved, quiet=headless))
+        # The write-back saved the work as another session: both writes matter, or the one
+        # that failed would be forgotten.
+        return _finish(_emit((saved[0], saved[1] and saved_fork[1]), quiet=headless))
+    finally:
+        if guard is not None:
+            guard.done()
 
 
 CONVERTED_NOTE = ("（以下是從其他 Session 轉過來的對話紀錄。[tool] 開頭的行只是當時工具呼叫的摘要，"
