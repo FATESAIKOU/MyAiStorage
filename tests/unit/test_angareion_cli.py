@@ -30,6 +30,9 @@ from angareion.state import CursorStore, FileETagCache, wait_state_file_path
 TOKEN = "gh" + "p_FAKE_CLI_TOKEN_ABC123"
 IDENTITY = "mylinuxpool-impl-w1-1"
 PM = "mypmo-pm-m1"
+# The fake backend's pinned clock (#281): earlier than every `created_at` the
+# tests seed, so a message delivered without one is still inside the #224 floor.
+BACKEND_NOW = "2026-10-10T09:00:00Z"
 GENERAL = entity(channel="general", issue=10)
 OTHER = entity(channel="other", backend="github-main", repo="owner/repo", issue=7)
 CHANNEL_WARNING = (
@@ -114,7 +117,13 @@ def cli_env(tmp_path, monkeypatch):
         sleeper=clock.sleep,
         fetch_head_mtime=lambda: git.fetch_head_mtime,
     )
-    backend = FakeBackend(store)
+    # #281: pin the backend clock (like #224 done in test_angareion_mentions.py's
+    # `_backend`), so `deliver`'s created_at and a new identity's first "to me"
+    # read's floor come from the same fixed backend time: the #224 comparison is
+    # inclusive, and the wall clock crossing a second boundary cannot eat a
+    # broadcast delivered just before the first read. The value is earlier than
+    # the times the tests seed below.
+    backend = FakeBackend(store, clock=lambda: BACKEND_NOW)
     backend.add_entity("general", number=10)
     backend.add_entity("other", number=7, repo="owner/repo")
     registry = ApplyingRegistry(git)
@@ -1606,6 +1615,28 @@ def test_read_mentioned_reads_across_channels_without_broadcasts(cli_env, capsys
     # "to me" is untouched by the read above
     assert run(cli_env, ["read", "--json"]) == 0
     assert len(json.loads(capsys.readouterr().out)) == 3
+
+
+def test_the_backend_clock_is_pinned_so_a_second_boundary_cannot_eat_a_broadcast(cli_env):
+    """#281: the fixture's backend clock is fixed, so the #224 floor is inclusive.
+
+    Before the pin, `deliver` and the first "to me" read used the wall clock: a
+    broadcast created at `...:54.999038` was below a floor of `...:55.000001`
+    and dropped (the rare `2 == 3`). The second half shows that failure mode on
+    a backend whose clock is not pinned, so this test fails if the pin goes.
+    """
+    broadcast = Message(from_=PM, to=None, channel="general", content="all", id="01AAAA00000000000000000000")
+    pinned = cli_env["backend"]
+    assert pinned.deliver(GENERAL, broadcast).created_at == BACKEND_NOW
+    assert [m.id for m in pinned.read(GENERAL, Cursor(), recipient=IDENTITY, new_recipient=True).messages] == [
+        "01AAAA00000000000000000000"
+    ]
+
+    # Not pinned: the backend's own time is already past the broadcast's second.
+    crossing = FakeBackend(cli_env["store"], clock=lambda: "2026-10-10T12:00:55.000001Z")
+    crossing.add_entity("general", number=10)
+    crossing.deliver(GENERAL, broadcast, created_at="2026-10-10T12:00:54.999038Z")
+    assert crossing.read(GENERAL, Cursor(), recipient=IDENTITY, new_recipient=True).messages == []
 
 
 @pytest.mark.parametrize("command", ["read", "wait"])
