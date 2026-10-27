@@ -1267,10 +1267,11 @@ class OpencodeAgent:
         reads `info.revert`/`messages[].parts`, this reads the same pointer against
         flat rows/`content`; `_role_fields` reads `info.role`/`providerID`/`modelID`,
         this reads `type`/`agent`/`model.id`; `_unused_stem` reads `info`/`parts`
-        ids, this reads row/content ids; `said`/`last_question` look at `type`,
-        times come from `row["time"]` (`_row_created_ms`), and `_last_model`
-        already reads `model.id` for both. New rows are minimal but complete
-        (2.1's required set): user `{id,time,text,files,type}`, assistant
+        ids, this reads row/content ids; roles come from the row's `type`, not
+        `said`/`last_question` (v2 has neither); times come from `row["time"]`
+        (`_row_created_ms`), and `_last_model` already reads `model.id` for
+        both. New rows are minimal but complete (2.1's required set): user
+        `{id,time,text,files,type}`, assistant
         `{id,time,type,agent,model,content:[{type,text}]}` - no synthetic, no
         attachment, no parent link (v2 has none). The fork's new assistant rows
         copy the model A was using, so `_last_model` still answers with A's model
