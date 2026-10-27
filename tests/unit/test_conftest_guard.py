@@ -12,6 +12,7 @@ from __future__ import annotations
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
 import importlib.util
+import os
 import subprocess
 from pathlib import Path
 
@@ -72,3 +73,27 @@ def test_the_list_uses_the_installed_opencode_s_syntax(monkeypatch, v2, standalo
     assert module._repo_session_ids() == set()
     assert seen == [["opencode", "session", "list",
                      *(["--standalone"] if standalone else []), "--format", "json"]]
+
+
+def test_an_integration_test_also_loses_the_outer_opencode_config(monkeypatch, tmp_path):
+    """#269: the drop at the top of `isolated_home` must reach integration tests too.
+
+    A unit test that forgets its fake opencode fails loudly; an integration test is
+    the one that would run the real agent with the outer shell's config. Calling the
+    fixture with an `integration` request keeps this a unit test (an `integration`
+    file would make the repo-clean guard run the real `opencode session list`, and
+    `testpaths` would not even collect it). The second assertion proves which branch
+    ran: only the unit branch sets the `/nonexistent` agent commands.
+    """
+    module = guard()
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", "{}")
+    monkeypatch.delenv("AGORA_OPENCODE_CMD", raising=False)
+    request = type("Request", (), {"keywords": {"integration": True}})()
+    # The autouse fixture already made tmp_path/home for this test; call it on a fresh one.
+    again = tmp_path / "again"
+    again.mkdir()
+
+    module.isolated_home.__wrapped__(again, monkeypatch, request)
+
+    assert "OPENCODE_CONFIG_CONTENT" not in os.environ
+    assert "AGORA_OPENCODE_CMD" not in os.environ
