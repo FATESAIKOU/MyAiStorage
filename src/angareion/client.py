@@ -10,7 +10,7 @@ target uses one entry (`channel:<name>`).
 from __future__ import annotations
 
 import time
-from typing import Callable, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 from angareion.backend import BackendRef, ChannelBackend, Cursor, Entity, EntityResolver, Target
 from angareion.messages import Message
@@ -59,7 +59,7 @@ class Angareion:
         """`channel delete` step 2: close the entity without deleting it."""
         self.backend.close_channel(entity)
 
-    def _scope(self, target: Target, entity: Entity) -> tuple[str, dict[str, str]]:
+    def _scope(self, target: Target, entity: Entity) -> tuple[str, dict[str, Any]]:
         """For a "to me" or "@ me" target in one channel: its cursor key and the backend filter."""
         if target.mentioned is not None:
             return mention_cursor_key(target.mentioned, entity.channel), {"mentioned": target.mentioned}
@@ -126,6 +126,14 @@ class Angareion:
         Without `since`, starts after the local cursor; `commit()` advances it.
         With `since`, reads after that timestamp and `commit()` does nothing.
 
+        A "to me" read with no "to me" cursor at all (a new identity that has
+        never read its inbox) is marked `new_recipient` for every channel: the
+        backend then reads messages addressed to me from the start but a plain
+        broadcast only from the backend's current time (#224). The first read
+        records an entry for every channel, so later broadcasts (even in a
+        channel that was empty then) arrive as usual. `--channel` and "@ me"
+        keep reading from the start, as documented.
+
         The caller must call `commit()` — and only after the messages have
         actually been delivered (printed and flushed) — so a broken stdout
         does not lose them.
@@ -146,9 +154,14 @@ class Angareion:
 
         messages: list[Message] = []
         updates: dict[str, Cursor] = {}
+        first_to_me_read = (
+            use_local_cursor and target.recipient is not None and not self.cursors.has_to_me_cursor()
+        )
         for entity in self.store.entities():
             key, scope = self._scope(target, entity)
             cursor = self.cursors.cursor(key) if use_local_cursor else Cursor(at=since)
+            if first_to_me_read:
+                scope = {**scope, "new_recipient": True}
             result = self.backend.read(entity, cursor, **scope)
             messages.extend(result.messages)
             if use_local_cursor:

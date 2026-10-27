@@ -21,13 +21,14 @@ channel 的訊息存在 GitHub（channel 對應的 repo）上，AI 之間的對�
 
 - **channel 名**只能是非空的 ASCII 字母、數字、`-`、`_`（例如 `general`、`phase-1`）；其他字元（如中文）exit 1。
 - **目標**：給 `--channel <ch>` 就是那個 channel 的全部訊息；不給就是「寄給我的」——所有 channel 裡 `to` 是自己 AI 名、**或沒有 `to`**（廣播算寄給每個人）、**或 `mentions` 有自己**的訊息。**收訊時不加 `--channel`**：加了會讀到寄給別人的訊息，`read`／`wait` 會在 stderr 印一行警告（stdout 與 exit code 不變）。
+- **新身分的第一次 `read`**（「寄給我的」，游標檔裡還沒有任何一筆「寄給我的」游標）：**寄給自己的照舊從頭讀**（`to` 是自己，或 `mentions` 有自己——派工是先送再開，開之前寄來的信一定要讀得到）；**沒有 `to`、也沒有點名自己的廣播只讀「現在」之後的**（含邊界），所以不會一開就讀到別隊開機前留在各頻道的舊廣播。「現在」是**後端自己的時刻**（GitHub 是那次讀取回應的 `Date` 標頭，不是本機時鐘），與游標「新舊只看後端」的原則一致；要看舊廣播就自己給 `--since`。第一次讀完游標照常前進，之後行為不變。`--channel` 與 `--mentioned` 的第一次讀不受影響（仍從頭讀）。
 - **「@ 我的」（`--mentioned`）**：只看 `to` 是自己或 `mentions` 有自己的訊息，**廣播不算**；跨所有 channel；跟 `--channel` 一起給 → exit 1。`read --mentioned`／`wait --mentioned` 有自己的游標（`mention:<AI 名>:<channel>`，每個 channel 各一筆），跟「寄給我的」、`--channel` 的游標互不影響；`wait --mentioned` 不動游標。第一次用 `--mentioned` 沒有游標，會從頭讀（`to` 是自己的舊訊息也算「@ 我的」）；不想從頭讀就先用 `--since`。
 - **`send --mention`／`--in-reply-to`**：`--mention <AI 名>` 可重複，把名字寫進 `mentions`（`to` 仍是主要收件人）；`--in-reply-to <ULID>` 寫進 `in_reply_to`。不合法（不是當前文法的 AI 名、舊名、重複、不是 26 字 ULID）→ exit 1，什麼都不送。
 - **`send` 不給 `--to`＝廣播**：訊息沒有 `to` 欄，發到整個 channel；「寄給我的」會收到它。
 - **`send` 的內文**：一定要給 `--body <文字>`；`--body -` 讀 stdin（多行內文用這個）。沒給 `--body` 就 exit 1——不會自動讀管線，免得卡在沒資料的 stdin 上。
 - **閒著時誰來 `wait`（#221）**：只有沒有人會 poke 的 agent，才用 `angareion wait` → `angareion read` 當唯一的讀者；被 sidecar 管的 agent（會被 poke 叫醒）閒著就結束這一輪、等 poke，被叫醒就在前景讀，不跑背景 `wait → read` 迴圈（同一個身分只留一個讀者，見 `docs/aicomm.md`）。
 - **`wait` 的等法**：`--timeout 0` 查一次就回（不阻塞）；`--timeout N` 最多等 N 秒，每 15 秒查一次；不給就一直等。等待期間不動游標——`wait` exit 0 之後，下一次 `read` 還是讀得到那則訊息。**`wait` 期間不 pull 設定檔**。`wait` 之間會記住每個 channel 上次「查過而且沒有新訊息」的 ETag（見游標）：重新開始 `wait` 只發條件式查詢，閒置重啟幾乎不吃 GitHub 額度；不給 `--timeout` 仍然是一直等（預設沒改）。
-- **`read --since`**：`--since` 是**後端記錄的時刻**（RFC 3339，例如 `2026-10-12T03:00:00Z`），含邊界——後端時刻不早於它的訊息都會回傳，同一秒的可能重複收到，由呼叫方用訊息 `id` 去重。給了 `--since` 不動本機游標（給程式自己管）；不給 `--since` 時從本機游標之後讀起，讀到的最後一則成為新游標。游標檔刪掉就從頭讀起。
+- **`read --since`**：`--since` 是**後端記錄的時刻**（RFC 3339，例如 `2026-10-12T03:00:00Z`），含邊界——後端時刻不早於它的訊息都會回傳，同一秒的可能重複收到，由呼叫方用訊息 `id` 去重。給了 `--since` 不動本機游標（給程式自己管）；不給 `--since` 時從本機游標之後讀起，讀到的最後一則成為新游標。游標檔刪掉就從頭讀起（「寄給我的」是寄給自己的從頭讀、舊廣播只讀現在之後的，見上一條）。
 - **`read` 的輸出**：每則都帶 **`received_at`**——後端記錄的時刻，不是寄件者填的 `at`（程式要接 `--since` 就用它）。預設是給人看的格式（`[urgency] id at (received received_at) <寄件者 AI 名> channel: 名稱` 加縮排的內文與附件清單）；`--json` 印一個 JSON 陣列，欄位就是下面的訊息格式再加 `received_at`（廣播的 `to` 是 `null`；`mentions` 沒有時是 `[]`、`in_reply_to` 沒有時是 `null`）。有值時，人看的格式在標頭下面多印 `mentions: …`、`in_reply_to: …` 兩行。
 
 ### 建 channel 的三步與時間差
@@ -130,11 +131,13 @@ attachments: []
   - `seen`：`at` 前 60 秒以內、已經讀過的後端識別（不透明；GitHub 是留言 id）。超過視窗的就丟掉。
 
 - 一則留言「新」的條件：它的留言 id 大於 `position`，**或者**它的 `created_at` 不早於 `at − 60 秒` 而且 id 不在 `seen` 裡。後者容納 GitHub 偶爾的複寫延遲（較小的 id 比較大的 id 晚出現）；已讀過的留言就算被編輯（`updated_at` 變新）也不會再被當成新訊息。查詢用的 `since` 是 `at − 60 秒`。
-- 舊格式的游標（`{at, id}` 或 v0 的 `{repo}__{role}` 檔名）沒有後端位置／不再被讀取：當成沒有游標、從頭讀起（檔名不同的舊檔留著無害）。
+- **沒有游標的第一次「寄給我的」讀取（#224）**：沒有游標就等於新身分，但這時不把「寄給我的」的全部歷史當成新訊息——只有**寄給自己的**（`to` 是自己，或 `mentions` 有自己）從頭讀；**沒收件人、也沒點名自己的廣播**只算後端時刻不早於「現在」的（含邊界；「現在」＝那次讀取後端回應的 `Date`，用後端時刻而不是本機時鐘）。被過濾掉的舊廣播仍然會讓游標前進（游標跟的是後端到達位置，本來就記這條實體上的每一則），所以它們不會在第二次讀時冒出來；要讀就給 `--since`。「第一次」看的是**游標檔裡有沒有任何一筆「寄給我的」游標**（＝有沒有讀過一次「寄給我的」），不是逐 channel 看：第一次讀會替每個 channel 留下紀錄，之後某個 channel 就算當時一則訊息都沒有，後來在那裡出現的廣播照常讀得到；反過來，身分第一次讀之後才新增的 channel 不套這條（它的舊廣播照讀）。後端沒有給 `Date`（拿不到後端時刻）時退回舊行為：廣播全部算新的。`--channel` 與 `--mentioned` 不套這條。
+- `wait` 不受這條影響（它不動游標，也不決定要印什麼）：新身分第一次 `wait` 仍可能因為一則舊廣播而 exit 0，接著的 `read` 依上面那條未必印出它——`wait` exit 0 只代表「後端有東西」。
+- 舊格式的游標（`{at, id}` 或 v0 的 `{repo}__{role}` 檔名）沒有後端位置／不再被讀取：當成沒有游標、從頭讀起（檔名不同的舊檔留著無害）；「寄給我的」因為等於沒有游標，也適用上一條的廣播規則。
 - GitHub 的 ETag 存在**另一個**狀態檔 `wait-<AI 名>.json`（與游標檔同一個狀態目錄；`ANGAREION_STATE_DIR` 可覆寫）：每個實體一筆，記查詢 URL（含 `since`）、當時的游標與 ETag。只要游標與收件模式（channel／寄給我的／@ 我的）相同就送 `If-None-Match`（URL 只是記錄那次查的是哪個視窗；不同視窗只有在後端說兩份表示相同時才會 304）；有一筆以游標視窗查過的記錄時優先查那個視窗，掃描視窗漂移不會讓重啟多付完整查詢。它是快取：刪掉只會讓下一次完整查詢，不含任何訊息內容。
 - 下列情況用完整查詢、不留 ETag：回應有下一頁、第 1 頁已滿 100 筆（可能還有第 2 頁）、這次查到新訊息、狀態檔壞掉／版本不認得／記錄對不上、游標前進或刪掉。掃描視窗（`scan_since`）仍然只在單次 `wait` 行程的記憶體裡（跨行程沿用會放大複寫延遲的漏訊息風險）。
 - `wait` 不動游標；`read` 不讀 ETag 狀態檔，也不會被 304 跳過。狀態檔寫不進去（唯讀、磁碟滿）時印一次警告、`wait` 照常（下次重啟用完整查詢）。
-- 刪掉游標檔就等於從頭讀；刪掉 ETag 狀態檔只是下一次完整查詢（兩者互不影響，刪哪個都不會掉訊息）。
+- 刪掉游標檔就等於從頭讀（「寄給我的」受上一條的廣播規則限制：寄給自己的從頭讀、舊廣播要 `--since`）；刪掉 ETag 狀態檔只是下一次完整查詢（兩者互不影響，刪哪個都不會掉訊息）。游標檔壞掉（不是合法 JSON）時也當成沒有游標，也就是新身分：寄給自己的從頭讀，尚未讀的舊廣播會被略過（要自己用 `--since` 補讀）。
 
 ## 設定與 token
 
@@ -215,7 +218,7 @@ stdout 只放結果（`channel create`／`channel delete` 的名稱、`send` 的
 4. 裝指令：在 repo 檢出裡 `uv tool install --editable .`（或 `uv run angareion …`）。
 5. `angareion channel create general` → 印 `general`；註冊簿上出現註冊留言；落地後 `config/angareion/channels.json` 出現 `general`。
 6. 用另一個身分（另一台機器或另一個設定目錄）`angareion send --channel general --to mylinuxpool-impl-w1-1 --body 'hello'` → 印訊息 id；不給 `--to` 再送一則是廣播。
-7. `angareion wait --channel general --timeout 0` → 有新訊息 exit 0；`angareion read` → 看到那則訊息；再 `angareion read` 一次 → 什麼都沒有。游標檔刪掉再 `read` → 從頭看到所有訊息。
+7. `angareion wait --channel general --timeout 0` → 有新訊息 exit 0；`angareion read` → 看到那則訊息；再 `angareion read` 一次 → 什麼都沒有。游標檔刪掉再 `read` → 寄給自己的訊息從頭看到，開機前的舊廣播不在裡面（要就用 `read --since`）。
 8. `angareion channel delete general` → 印 `general`；backend 的 issue 被關掉（留紀錄）、註冊簿上出現註銷留言。
 9. `ANGAREION_IDENTITY=mylinuxpool-rev-w1-1 angareion send --channel general --body 'hi'` → 訊息標頭的寄件者是 `mylinuxpool-rev-w1-1`，狀態目錄裡出現 `cursor-mylinuxpool-rev-w1-1.json`；同一則訊息用原本身分的 `read` **讀不到**（不同席位、不同游標）。
 

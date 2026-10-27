@@ -33,6 +33,21 @@ def test_missing_file_means_empty_cursor(tmp_path):
     assert store.cursor("channel:general") == Cursor()
 
 
+def test_has_to_me_cursor_marks_only_a_to_me_read(tmp_path):
+    """#224: the marker of a new identity is "no to: entry", not one channel's entry."""
+    store = CursorStore(tmp_path, ME)
+    assert store.has_to_me_cursor() is False
+
+    # A channel read or an "@ me" read is not a "to me" read.
+    store.save(channel_cursor_key("general"), Cursor(position="1", at="2026-10-10T12:00:00Z"))
+    store.save("mention:mylinuxpool-impl-w1-1:general", Cursor(position="1", at="2026-10-10T12:00:00Z"))
+    assert store.has_to_me_cursor() is False
+
+    # An empty "to me" entry still counts: the first read recorded the channel.
+    store.save(recipient_cursor_key(ME, "other"), Cursor())
+    assert store.has_to_me_cursor() is True
+
+
 def test_save_and_load_roundtrip_per_key(tmp_path):
     store = CursorStore(tmp_path, ME)
     store.save("channel:general", Cursor(position="100", at="2026-10-10T12:00:00Z", seen=["98", "99", "100"]))

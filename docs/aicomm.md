@@ -12,6 +12,14 @@ aicomm 對外只有三個指令：send、inbox、log。
 - 被叫醒先 `aicomm inbox`；要前後文或補讀用 `aicomm log`（不動游標）；不要用 `angareion read --since` 反覆撈。
 - 只用標準函式庫；對 Angareion 只呼叫它的指令列（subprocess），不 import `angareion` 套件；沒有設定檔。
 
+## 新身分第一次 `inbox`（#224）
+
+`aicomm inbox` 固定用「寄給我的」讀信，所以新開的 agent（游標檔裡還沒有任何一筆「寄給我的」游標）第一次讀時，Angareion 只把**寄給自己的**（`to` 是自己，或點名自己）從頭讀；**沒有 `to` 的舊廣播**只讀「現在」之後的，不會把各頻道開機前留下的廣播全部倒進 inbox。要看舊廣播就自己用 `angareion read --since <時刻>`（或 `angareion log`），`aicomm` 沒有為它加旗標。
+
+- 派工不受影響：派工是「先 send 再 open」，那則訊息 `to` 是自己，開機後第一次 `inbox` 讀得到。
+- `inbox --wait` 的 `wait` 不動游標、也不套這條：它可能因為一則舊廣播而 exit 0，接著的 `read` 卻什麼都沒有（stderr 會印「沒有新信」的提示）；補讀一樣用 `--since`。
+- `--mentioned` 與 `angareion read --channel` 的第一次讀行為沒改。
+
 ## 同一個身分只留一個讀者（#219）
 
 `angareion read` 讀走信就推進游標，所以同一個身分有兩個讀者時，先讀的拿走信，另一個看到空的（#212 驗收前的調查：背景的 `wait → read` 迴圈搶先讀走，被 poke 叫醒的前景 `inbox` 是空的）。`aicomm inbox --wait` 在 wait 之後會接著 read，所以放到背景一樣會讀走信，不算「只等不讀」。

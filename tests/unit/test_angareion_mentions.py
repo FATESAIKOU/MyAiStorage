@@ -163,7 +163,9 @@ def test_message_to_dict_carries_both_fields():
 
 def _backend() -> FakeBackend:
     resolver = StaticResolver([GENERAL, OTHER])
-    backend = FakeBackend(resolver)
+    # #224: pin the backend clock before the fixture's times, so a broadcast is
+    # not "older than a new identity's first read" and stays in scope here.
+    backend = FakeBackend(resolver, clock=lambda: "2026-10-10T09:00:00Z")
     backend.add_entity("general", number=10)
     backend.add_entity("other", number=7, repo="owner/repo2")
     return backend

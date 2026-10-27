@@ -63,19 +63,27 @@ TBD - created by archiving change angareion-v0. Update Purpose after archive.
 - **THEN** 狀態檔不會被寫壞（整檔原子替換）；最壞情況是少記一筆、下一次用完整查詢，不會出現壞檔被當成 304 或漏訊息
 
 ### Requirement: 目標與游標
-`wait` 與 `read` 的目標是某個 channel（`--channel`）或「寄給我的」（不給 `--channel`：所有 channel 裡 `to` 是自己 agent 名、或沒有 `to` 的訊息）。判斷訊息新不新 MUST 只看後端（到達位置與後端記錄的時刻），MUST NOT 使用寄件者填的 `at` 或 `id`。`read` 不給 `--since` 時 MUST 從本機游標之後讀起並把游標往前推；給了 `--since`（後端時刻）就回傳不早於它的訊息（含邊界），MUST NOT 改動本機游標。`read` 的每則輸出 MUST 帶後端記錄的時刻 `received_at`。游標刪掉時 MUST 從頭讀起。
+`wait` 與 `read` 的目標是某個 channel（`--channel`）或「寄給我的」（不給 `--channel`：所有 channel 裡 `to` 是自己 agent 名、或沒有 `to` 的訊息）。判斷訊息新不新 MUST 只看後端（到達位置與後端記錄的時刻），MUST NOT 使用寄件者填的 `at` 或 `id`。`read` 不給 `--since` 時 MUST 從本機游標之後讀起並把游標往前推；給了 `--since`（後端時刻）就回傳不早於它的訊息（含邊界），MUST NOT 改動本機游標。`read` 的每則輸出 MUST 帶後端記錄的時刻 `received_at`。游標刪掉（或沒有游標的新身分）時，`--channel` 與 `--mentioned` MUST 從頭讀起；不給 `--channel` 的「寄給我的」第一次讀（游標檔裡沒有任何一筆「寄給我的」游標，即沒有任何 `to:` 游標）時，`to` 是自己（或 `mentions` 有自己）的訊息 MUST 從頭讀起，沒有 `to` 也沒點名自己的廣播 MUST 只讀後端時刻（回應的 `Date`）不早於第一次讀那一刻的（含邊界；那是後端時刻，不是本機時鐘）；要看舊廣播就自己給 `--since`；第一次讀之後游標照常前進，被濾掉的舊廣播 MUST NOT 在第二次讀時冒出來；後端時刻拿不到時 MUST 退回從頭讀起。
 
 `read`／`wait` 給了 `--channel` 時 MUST 在 stderr 印一行警告，說明這會讀到 channel 裡所有訊息（包含寄給別人的訊息）；不給 `--channel`（「寄給我的」，含廣播）時 MUST NOT 印。警告 MUST NOT 改變 exit code 或 stdout。
 
 `wait` 的條件式查詢狀態（見「確認有沒有新訊息」）MUST NOT 寫進游標檔；`read` MUST NOT 讀它或受它影響。它是本機快取：刪掉 MUST 只造成下一次完整查詢，MUST NOT 讓訊息漏掉。
 
-#### Scenario: 游標刪掉
-- **WHEN** 刪掉本機游標後執行 `angareion read`
+#### Scenario: 游標刪掉（--channel／--mentioned）
+- **WHEN** 刪掉本機游標後執行 `angareion read --channel general`（或 `angareion read --mentioned`）
 - **THEN** 讀到目標裡所有的訊息
 
 #### Scenario: 寄給我的
-- **WHEN** 兩個 channel 裡各有一則 `to` 是我的訊息、一則沒有 `to` 的訊息，另外有一則 `to` 是別人的；不給 `--channel` 執行 `angareion read`
+- **WHEN** 兩個 channel 裡各有一則 `to` 是我的訊息、一則沒有 `to` 的訊息，另外有一則 `to` 是別人的；已經有「寄給我的」游標（不是身分的第一次讀），或那則廣播的後端時刻不早於第一次讀的那一刻；不給 `--channel` 執行 `angareion read`
 - **THEN** 讀到 `to` 是我的那兩則與沒有 `to` 的那一則，不含別人的
+
+#### Scenario: 新身分第一次讀
+- **WHEN** 新身分還沒有任何「寄給我的」游標，某個 channel 在它開之前有一則 `to` 是自己的訊息、有一則沒有 `to` 的舊廣播，另一則舊廣播在別的 channel；不給 `--channel` 執行 `angareion read`
+- **THEN** 開之前寄給自己的那一則讀得到；別 channel 開之前的舊廣播讀不到
+- **WHEN** 同一個身分完成第一次讀之後，後端才出現一則沒有 `to` 的廣播，再執行 `angareion read`
+- **THEN** 那則新廣播讀得到（第一次讀之後游標照常前進，被濾掉的舊廣播不會在第二次讀冒出）
+- **WHEN** 同一個身分對開之前的舊廣播執行 `angareion read --since <舊廣播的後端時刻>`
+- **THEN** 舊廣播讀得到，本機游標沒有被改動
 
 #### Scenario: 同一秒、後到但 ULID 較小
 - **WHEN** B 讀過 `at` 是 03:00:00、ULID 較大的一則之後，另一個寄件者的 `at` 同樣是 03:00:00、ULID 較小的一則才到，B 再執行 `angareion read`

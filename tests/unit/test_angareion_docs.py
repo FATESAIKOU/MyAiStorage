@@ -60,6 +60,23 @@ def test_docs_say_the_first_mentioned_read_starts_from_the_beginning():
     assert "先用 `--since`" in text
 
 
+def test_docs_explain_a_new_identitys_first_read():
+    """#224: own messages from the start; older broadcasts only from the backend's now."""
+    text = DOCS.read_text(encoding="utf-8")
+    assert "新身分的第一次 `read`" in text
+    assert "寄給自己的照舊從頭讀" in text
+    assert "只讀「現在」之後的" in text
+    assert "`--channel` 與 `--mentioned` 的第一次讀不受影響" in text
+    assert "`Date`" in text  # the backend's own time, not this machine's clock
+    assert "後端自己的時刻" in text
+
+
+def test_docs_say_the_first_read_rule_leaves_wait_alone():
+    text = DOCS.read_text(encoding="utf-8")
+    line = next(l for l in text.splitlines() if "`wait` 不受這條影響" in l)
+    assert "不動游標" in line and "舊廣播" in line
+
+
 def test_docs_limit_idle_wait_to_agents_nobody_pokes():
     text = DOCS.read_text(encoding="utf-8")
     line = next(l for l in text.splitlines() if "閒著時誰來 `wait`" in l)
@@ -67,3 +84,13 @@ def test_docs_limit_idle_wait_to_agents_nobody_pokes():
     assert "閒著就結束這一輪、等 poke" in line
     assert "不跑背景 `wait → read` 迴圈" in line
     assert "同一個身分只留一個讀者" in line
+
+
+def test_docs_say_a_corrupt_cursor_file_also_makes_a_new_identity():
+    """A cursor file that is not JSON is no cursor: unread old broadcasts get skipped."""
+    text = DOCS.read_text(encoding="utf-8")
+    line = next(l for l in text.splitlines() if "刪掉游標檔就等於從頭讀" in l)
+    assert "游標檔壞掉（不是合法 JSON）時也當成沒有游標" in line
+    assert "新身分" in line
+    assert "尚未讀的舊廣播會被略過" in line
+    assert "`--since` 補讀" in line

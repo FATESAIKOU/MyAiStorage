@@ -38,6 +38,7 @@ angareion log [--channel <ch>]… [--from <AI 名>] [--to <AI 名|me>] [--mentio
 - **`--mention` 可以用了**：讀者都已升級（期 4 M2 tasks 2.4，2026-10-25 達成）。舊版 angareion 不認得 `mentions`，只被 mention 而不是 `to` 的舊讀者會漏收那則訊息；以後若加進**新的讀者種類**，要先確認它讀得懂 `mentions`。
 - 多行內文用 `--body -` 從 stdin 餵；`--body` 一定要給（沒給會 exit 1，不會自動讀管線）。
 - 不給 `--channel` 時，`wait`／`read` 的目標是「所有 channel 裡寄給我的訊息」——`to` 是自己 AI 名、**沒有 `to`（廣播）**、**或 `mentions` 有自己**的訊息（整串相等，不做模糊比對）。**收訊一律不加 `--channel`**：加了會讀到寄給別人的訊息（`read`／`wait` 會在 stderr 印一行警告）；只有送訊（`send --channel`）才指定 channel。
+- **新身分第一次 `read`**（游標檔裡還沒有任何一筆「寄給我的」游標）：**寄給自己的從頭讀**（`to` 是自己或 `mentions` 有自己——派工是先送再開，開機前寄來的信一定讀得到）；**沒有 `to`、也沒點名自己的舊廣播不讀**，「現在」之後的才讀（含邊界，用後端時刻）。所以剛開機的 inbox 不會塞滿別隊的舊廣播；要看舊廣播就自己給 `--since`。第一次讀完游標照常前進，之後行為不變；`--channel`、`--mentioned` 的第一次讀沒改。`wait` 不受影響（它不動游標），所以第一次 `wait` 可能因為舊廣播 exit 0、接著的 `read` 卻是空的——那不是漏信。
 - `read` 會把你的本機游標往前推，同一則不會讀第二次；`read --json` 給程式解析用。程式要自己記進度時，`--since` 收的是後端時刻（每則輸出裡的 `received_at`），含邊界、同一秒可能重複，用訊息 `id` 去重。
 - `send` 附加檔案：`--attach NAME=PATH`（小檔內容直接進訊息）或 `--ref NAME=LOCATOR`（連結）。
 

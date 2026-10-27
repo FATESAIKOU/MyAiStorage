@@ -42,8 +42,9 @@ def _make_msg(
     msg_id: str = "01JABCDEF0123456789ABCDEF0",
     at: str = "2026-10-10T12:00:00+00:00",
     to: str | None = ME,
+    mentions: list[str] | None = None,
 ) -> Message:
-    return Message(from_=PM, to=to, channel=channel, content=content, id=msg_id, at=at)
+    return Message(from_=PM, to=to, channel=channel, content=content, id=msg_id, at=at, mentions=mentions or [])
 
 
 def _comment(
@@ -261,6 +262,117 @@ def test_read_refuses_a_pagination_link_off_host():
     )
     with pytest.raises(BackendError, match="pagination link outside"):
         _backend(transport).read(GENERAL, Cursor())
+
+
+def test_new_reader_takes_old_broadcasts_only_from_the_response_date_header():
+    """#224: the floor is the backend's own time (the `Date` header), not the local clock."""
+    transport = FakeTransport()
+    transport.set_route(
+        "GET",
+        COMMENTS_URL,
+        HttpResponse(
+            200,
+            {"date": "Sat, 10 Oct 2026 12:00:00 GMT"},
+            json.dumps(
+                [
+                    # before the first read: an old broadcast and a dispatch to me
+                    _comment(_make_msg(msg_id="01OLDBC", to=None), comment_id=101, created_at="2026-10-10T11:00:00Z"),
+                    _comment(_make_msg(msg_id="01TOME"), comment_id=102, created_at="2026-10-10T11:00:00Z"),
+                    # the same second as the read: inclusive, so it is not lost
+                    _comment(_make_msg(msg_id="01SAMEBC", to=None), comment_id=103, created_at="2026-10-10T12:00:00Z"),
+                ]
+            ).encode("utf-8"),
+        ),
+    )
+    backend = _backend(transport)
+
+    result = backend.read(GENERAL, Cursor(), recipient=ME, new_recipient=True)
+    assert [m.id for m in result.messages] == ["01TOME", "01SAMEBC"]
+    # The cursor still covers every message on the entity, so nothing re-appears later.
+    assert result.cursor.position == "103"
+
+
+def test_without_the_new_reader_flag_every_broadcast_still_counts():
+    """The old behaviour stays the backend's default: only the client asks for the floor."""
+    transport = FakeTransport()
+    transport.set_route(
+        "GET",
+        COMMENTS_URL,
+        HttpResponse(
+            200,
+            {"date": "Sat, 10 Oct 2026 12:00:00 GMT"},
+            json.dumps(
+                [_comment(_make_msg(msg_id="01OLDBC", to=None), comment_id=101, created_at="2026-10-10T11:00:00Z")]
+            ).encode("utf-8"),
+        ),
+    )
+    assert [m.id for m in _backend(transport).read(GENERAL, Cursor(), recipient=ME).messages] == ["01OLDBC"]
+
+
+def test_new_reader_without_a_date_header_falls_back_to_every_broadcast():
+    """No usable backend time: count the broadcasts rather than guess with a local clock."""
+    transport = FakeTransport()
+    transport.set_route(
+        "GET",
+        COMMENTS_URL,
+        HttpResponse(
+            200,
+            {},
+            json.dumps(
+                [_comment(_make_msg(msg_id="01OLDBC", to=None), comment_id=101, created_at="2026-10-10T11:00:00Z")]
+            ).encode("utf-8"),
+        ),
+    )
+    assert [
+        m.id
+        for m in _backend(transport).read(GENERAL, Cursor(), recipient=ME, new_recipient=True).messages
+    ] == ["01OLDBC"]
+
+
+def test_new_reader_with_an_unparsable_date_header_falls_back_to_every_broadcast():
+    """A garbage `Date` gives no backend time: count the broadcasts, never guess a local clock."""
+    transport = FakeTransport()
+    transport.set_route(
+        "GET",
+        COMMENTS_URL,
+        HttpResponse(
+            200,
+            {"date": "garbage"},
+            json.dumps(
+                [_comment(_make_msg(msg_id="01OLDBC", to=None), comment_id=101, created_at="2026-10-10T11:00:00Z")]
+            ).encode("utf-8"),
+        ),
+    )
+    assert [
+        m.id
+        for m in _backend(transport).read(GENERAL, Cursor(), recipient=ME, new_recipient=True).messages
+    ] == ["01OLDBC"]
+
+
+def test_a_mention_of_me_in_an_old_broadcast_still_counts_for_a_new_reader():
+    """A no-`to` message that mentions me is a call to me, not an anonymous broadcast."""
+    transport = FakeTransport()
+    transport.set_route(
+        "GET",
+        COMMENTS_URL,
+        HttpResponse(
+            200,
+            {"date": "Sat, 10 Oct 2026 12:00:00 GMT"},
+            json.dumps(
+                [
+                    _comment(
+                        _make_msg(msg_id="01MENTION", to=None, mentions=[ME]),
+                        comment_id=101,
+                        created_at="2026-10-10T11:00:00Z",
+                    )
+                ]
+            ).encode("utf-8"),
+        ),
+    )
+    assert [
+        m.id
+        for m in _backend(transport).read(GENERAL, Cursor(), recipient=ME, new_recipient=True).messages
+    ] == ["01MENTION"]
 
 
 def test_read_since_is_inclusive_and_moves_nothing():
