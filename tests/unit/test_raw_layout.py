@@ -400,10 +400,33 @@ def test_a_download_of_a_segment_drive_no_longer_has_is_an_error(env, monkeypatc
     gone = hdr["agora"]["raw"]["segments"][1]["file"]
     (env / "agora" / "sessions" / ulid / gone).unlink()
 
-    with pytest.raises(store.StoreError) as caught:
+    with pytest.raises(store.StoreError, match="不在 Drive 上") as caught:
         store.Drive(paths).download_segments(ulid, [gone], paths.cache / "segments" / ulid)
 
+    # the words pinned above come from `download_segments`'s own look at `dest`; an
+    # rclone that merely failed would say「rclone copy 失敗（rc=1）」instead (#256)
     assert gone in str(caught.value)
+
+
+def test_a_silent_files_from_copy_exits_zero_and_writes_nothing(env, monkeypatch):
+    """The premise `download_segments` has to check for itself (#256): `copy <remote>
+    <dest> --files-from` leaves out a listed name the source no longer has, says
+    nothing, and still exits 0. So this call must not raise, and the name must not
+    appear under `dest` - only a look at `dest` can tell a skip from a fetch."""
+    monkeypatch.setenv("FAKE_RCLONE_FILES_FROM_SILENT", "1")
+    paths = store.Paths.from_env()
+    ulid, hdr, _ = _put(env)
+    gone = hdr["agora"]["raw"]["segments"][1]["file"]
+    (env / "agora" / "sessions" / ulid / gone).unlink()
+    dest = paths.cache / "segments" / ulid
+    dest.mkdir(parents=True)
+
+    store._with_files_from(store.Drive(paths), [gone], dest,
+                           "copy", f"gdrive:sessions/{ulid}", str(dest), "--no-traverse")
+
+    listed = [c for c in calls(env) if "copy" in c and "--files-from" in c]
+    assert len(listed) == 1, "the download really was one copy --files-from, so the call above ran"
+    assert not (dest / gone).is_file(), "rc=0 and nothing written: rclone reported no error at all"
 
 
 def test_a_segment_the_download_skips_silently_still_follows_the_new_manifest(env, monkeypatch):
