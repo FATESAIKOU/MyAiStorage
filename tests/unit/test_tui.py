@@ -349,10 +349,7 @@ def test_mark_two_then_merge_runs_one_command_in_a_child_process():
             await pilot.pause()
             order = [r.key for r in app.rows["agora"] if r.key in app.marked]
             await pilot.press("enter")                     # opencode writes the summaries
-            for _ in range(60):
-                await pilot.pause(0.05)
-                if started:
-                    break
+            assert await _wait(lambda: started, pilot), "the merge never started"
             assert started == [["merge", "session", *order, "--agent", "opencode"]]
     _run(go)
 
@@ -434,10 +431,7 @@ def test_delete_takes_every_marked_row():
             await pilot.pause()
             order = [r.key for r in app.rows["agora"] if r.key in app.marked]
             await pilot.press("down", "enter")             # 確定
-            for _ in range(60):
-                await pilot.pause(0.05)
-                if started:
-                    break
+            assert await _wait(lambda: started, pilot), "the delete never started"
             assert started == [["delete", "session", *order, "--yes"]]
     _run(go)
 
@@ -461,15 +455,9 @@ def test_import_runs_one_command_per_agent():
                 await pilot.press("space")
                 await pilot.press("down")
             await pilot.press("enter")
-            for _ in range(60):
-                await pilot.pause(0.05)
-                if started:
-                    break
+            assert await _wait(lambda: started, pilot), "the first import never started"
             await pilot.press("space")                   # close the first result window
-            for _ in range(60):
-                await pilot.pause(0.05)
-                if len(started) >= 2:
-                    break
+            assert await _wait(lambda: len(started) >= 2, pilot), "the second import never started"
             assert started == [
                 ["import", "session", "--agent", "opencode",
                  "--external-session-id", "s1", "--external-session-id", "s2"],
@@ -488,11 +476,15 @@ def test_the_progress_bar_follows_the_k_of_n_lines():
             await pilot.press("d")
             await pilot.pause()
             await pilot.press("down", "enter")             # 確定
-            for _ in range(60):
-                await pilot.pause(0.05)
-                bar = app.screen.query_one("#bar")
-                if bar.total:
-                    break
+
+            def the_bar():
+                if not isinstance(app.screen, tui.Run):
+                    return None                             # the window is not up yet
+                return app.screen.query_one("#bar")
+
+            assert await _wait(lambda: the_bar() is not None and the_bar().total, pilot), \
+                "the bar never showed the total"
+            bar = app.screen.query_one("#bar")               # re-read: the wait may have run
             assert (bar.progress, bar.total) == (1, 2)      # 2/2 started, so one is finished
     _run(go)
 
@@ -509,11 +501,15 @@ def test_progress_is_read_only_from_our_own_lines():   # review V8
             await pilot.press("d")
             await pilot.pause()
             await pilot.press("down", "enter")
-            for _ in range(60):
-                await pilot.pause(0.05)
-                bar = app.screen.query_one("#bar")
-                if bar.total:
-                    break
+
+            def the_bar():
+                if not isinstance(app.screen, tui.Run):
+                    return None                             # the window is not up yet
+                return app.screen.query_one("#bar")
+
+            assert await _wait(lambda: the_bar() is not None and the_bar().total, pilot), \
+                "the bar never showed the total"
+            bar = app.screen.query_one("#bar")               # re-read: the wait may have run
             assert (bar.progress, bar.total) == (0, 1)      # 1/1 means the first started
     _run(go)
 
@@ -893,10 +889,7 @@ def test_merge_reads_its_sources_from_top_to_bottom():
             await pilot.press("m")
             await pilot.pause()
             await pilot.press("enter")
-            for _ in range(60):
-                await pilot.pause(0.05)
-                if app._last_spawned:
-                    break
+            assert await _wait(lambda: app._last_spawned, pilot), "the merge never started"
             assert app._last_spawned[0][2:5] == order
     _run(go)
 
@@ -976,10 +969,7 @@ def _spawn_per_call(codes):
 
 
 async def _close_result(pilot, app):
-    for _ in range(80):
-        await pilot.pause(0.05)
-        if isinstance(app.screen, tui.Tell):
-            break
+    assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
     await pilot.press("space")
 
 
@@ -1108,10 +1098,7 @@ def test_p_pulls_and_P_pushes():
             assert await _wait(lambda: app._last_spawned, pilot), "the pull never started"
             assert app._last_spawned[-1][:2] == ["pull", "session"]
             await pilot.pause()
-            for _ in range(60):                      # close the result window
-                await pilot.pause(0.05)
-                if isinstance(app.screen, tui.Tell):
-                    break
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
             await pilot.press("space")
             assert await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot), "the result window never closed"
             await pilot.press("P")
@@ -1869,7 +1856,7 @@ def test_import_uses_the_row_under_the_cursor_when_nothing_is_marked(monkeypatch
             # a person would and wait for the action to finish. A worker still in flight
             # when the test leaves finishes after the screen is gone - that is the
             # failure #60 saw, read as the scheduler instead of the behaviour.
-            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window"
+            assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
             await pilot.press("space")                 # close it the way a person would
             assert await _wait(lambda: not app.workers, pilot), "the action never finished"
     _run(go)
@@ -1919,7 +1906,7 @@ def test_interrupting_a_merge_returns_to_the_list_and_says_it_carries_on(group_c
             assert await _wait(lambda: isinstance(app.screen, tui.Tell), pilot), "the result window never appeared"
             assert "重跑同一個動作會接著做" in " ".join(str(app.screen.lines).split())
             await pilot.press("space")
-            assert await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot), "back at the list"
+            assert await _wait(lambda: not isinstance(app.screen, tui.ModalScreen), pilot), "the result window never closed"
             assert str(app.query_one("#msg").render()) == ""       # nothing left over (Q4)
     _run(go)
 
@@ -1989,10 +1976,7 @@ def test_esc_stops_a_real_process_group_with_a_stubborn_grandchild(monkeypatch, 
             await pilot.pause()
             await pilot.press("down", "enter")
             assert await _wait(lambda: isinstance(app.screen, tui.Run), pilot), "the run window never appeared"
-            for _ in range(60):                     # it writes the two pids and goes on
-                await pilot.pause(0.1)
-                if pidfile.exists():
-                    break
+            assert await _wait(pidfile.exists, pilot, tries=120), "the leader never wrote the two pids"
             pgid, grandchild = pidfile.read_text().split()
             pids.update(pgid=int(pgid), grandchild=int(grandchild))
             assert _alive(pids["grandchild"])

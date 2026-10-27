@@ -210,7 +210,9 @@ def _cleanup(state) -> None:
             ["rclone", "--config", str(REAL_CONF),
              "--drive-root-folder-id", drive.folder_id(),
              "purge", f"gdrive:sessions/{ulid}"], capture_output=True)
-        if proc.returncode != 0:
+        # Already gone counts as purged, the same way purge_ulid below reads it: a
+        # test that purged its own ulid mid-run leaves nothing here to remove.
+        if proc.returncode != 0 and "directory not found" not in proc.stderr.decode(errors="replace").lower():
             warnings.warn(f"purge sessions/{ulid} failed: {proc.stderr.decode()[-200:]}")
     shutil.rmtree(ROOT, ignore_errors=True)
 
