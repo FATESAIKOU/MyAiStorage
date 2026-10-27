@@ -103,7 +103,15 @@ def _build_parser() -> argparse.ArgumentParser:
     group.add_argument("--interrupt", action="store_true",
                        help="Interrupt a running recipient instead of queueing the poke after its turn.")
 
-    p_inbox = sub.add_parser("inbox", help="Read the messages addressed to me.")
+    p_inbox = sub.add_parser(
+        "inbox",
+        help="Read the messages addressed to me.",
+        description=(
+            "Read the messages addressed to me (angareion read without --channel). A new "
+            "identity's first read still gets everything addressed to it from the start, but "
+            "older broadcasts only from that moment: use angareion read --since for those."
+        ),
+    )
     p_inbox.add_argument("--wait", type=float, metavar="SECONDS",
                          help="Block in `angareion wait` first; exit 3 on timeout, 2 on a backend error.")
     p_inbox.add_argument("--mentioned", action="store_true", help="Only messages addressed to or mentioning me.")

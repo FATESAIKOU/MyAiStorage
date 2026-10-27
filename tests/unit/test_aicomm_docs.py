@@ -60,6 +60,16 @@ def test_skill_does_not_tell_the_agent_to_inbox_at_the_end_of_every_round():
 
 
 @pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_a_new_identitys_first_inbox_is_written_down(path):
+    """#224: own messages from the start, old broadcasts only with --since."""
+    text = path.read_text(encoding="utf-8")
+    assert "第一次" in text
+    assert "舊廣播" in text
+    assert "angareion read --since" in text
+    assert "wait" in text  # `--wait` may end on an old broadcast; that is not a lost message
+
+
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
 def test_no_secrets_or_private_info_patterns(path):
     text = path.read_text(encoding="utf-8")
     assert not re.search(r"gh[pousr]_[A-Za-z0-9]", text)

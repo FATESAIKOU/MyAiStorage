@@ -290,8 +290,14 @@ class ChannelBackend(Protocol):
         *,
         recipient: str | None = None,
         mentioned: str | None = None,
+        new_recipient: bool = False,
     ) -> ReadResult:
-        """Read the messages after the cursor (oldest first), and the new cursor."""
+        """Read the messages after the cursor (oldest first), and the new cursor.
+
+        `new_recipient` marks the reader's first "to me" read (it has no "to me"
+        cursor at all yet): messages addressed to it read from the start, a
+        plain broadcast only from the backend's current time (#224).
+        """
         ...
 
 
@@ -312,6 +318,31 @@ def mention_matches(message: Message, mentioned: str | None) -> bool:
 def scope_matches(message: Message, recipient: str | None, mentioned: str | None) -> bool:
     """The reader's filter: "to me" (`recipient`), "@ me" (`mentioned`), or neither (all)."""
     return recipient_matches(message, recipient) and mention_matches(message, mentioned)
+
+
+def new_reader_counts(
+    message: Message, created_at: str, floor: str | None, recipient: str | None
+) -> bool:
+    """Whether a message counts on a new identity's first "to me" read (#224).
+
+    A new identity (no "to me" cursor yet) still reads everything
+    addressed to it from the start — `to` is its own name, or the message
+    mentions it — so a dispatch sent before it opened is never missed. A plain
+    broadcast (no `to` and it does not mention the reader) only counts from
+    `floor`: the backend's own time at that first read, inclusive (the backend
+    decides what is old; D4). Inclusive because the backend time has one-second
+    resolution: a broadcast posted in the same second as the first read would
+    otherwise be lost for good.
+
+    `floor` is None when the backend gave no time, or when this is not a
+    reader's first "to me" read: then every broadcast counts, the behaviour
+    before #224.
+    """
+    if floor is None or recipient is None or message.to is not None:
+        return True
+    if recipient in message.mentions:
+        return True
+    return parse_backend_time(created_at) >= parse_backend_time(floor)
 
 
 @dataclass(frozen=True)
@@ -479,12 +510,22 @@ class FakeBackend:
         *,
         recipient: str | None = None,
         mentioned: str | None = None,
+        new_recipient: bool = False,
     ) -> ReadResult:
         self._check_injected_error()
         # The cursor tracks every comment on the entity (the backend's arrival
         # positions); `recipient`/`mentioned` only decide which messages are returned.
         all_comments = self._comments_for(entity, None)
-        in_scope = [c for c in all_comments if scope_matches(c.message, recipient, mentioned)]
+        # #224: the backend's own "now" is the floor for a new identity's
+        # broadcasts; the fake answers with its injected clock, like the real
+        # backend answers with the response's Date header.
+        floor = self._clock() if new_recipient and recipient is not None and mentioned is None else None
+        in_scope = [
+            c
+            for c in all_comments
+            if scope_matches(c.message, recipient, mentioned)
+            and new_reader_counts(c.message, c.created_at, floor, recipient)
+        ]
         matched = [c for c in in_scope if comment_is_new(c.id, c.created_at, cursor)]
         matched.sort(key=lambda c: c.id)
 

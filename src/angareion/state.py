@@ -247,6 +247,17 @@ class CursorStore:
         """The stored cursor for a target key; an empty cursor when never read."""
         return self._load().get(key, Cursor())
 
+    def has_to_me_cursor(self) -> bool:
+        """Whether any "to me" cursor exists: a "to me" read has happened (#224).
+
+        This is what marks a new identity's first "to me" read — not the absence
+        of one channel's entry. A channel can legitimately have nothing to
+        record on that first read (no messages at all), and a broadcast that
+        arrives there afterwards must still be read; the first read itself
+        always records an entry for every channel, empty or not.
+        """
+        return any(key.startswith("to:") for key in self._load())
+
     def save(self, key: str, cursor: Cursor) -> None:
         """Store the cursor for one target key, atomically."""
         self.save_many({key: cursor})

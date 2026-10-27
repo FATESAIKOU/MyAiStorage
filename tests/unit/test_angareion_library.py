@@ -41,9 +41,9 @@ class CountingBackend(FakeBackend):
         return super().check(entity_, cursor, recipient=recipient, timeout=timeout)
 
 
-def _backend(resolver=None) -> FakeBackend:
+def _backend(resolver=None, *, clock=None) -> FakeBackend:
     resolver = resolver or StaticResolver([GENERAL, OTHER])
-    backend = FakeBackend(resolver)
+    backend = FakeBackend(resolver, clock=clock)
     backend.add_entity("general", number=10)
     backend.add_entity("other", number=7, repo="owner/repo2")
     return backend
@@ -278,7 +278,10 @@ def test_read_with_since_is_inclusive_on_the_backend_time(tmp_path):
 
 
 def test_read_to_me_spans_channels_with_one_cursor_per_channel(tmp_path):
-    backend = _backend()
+    # #224: a new identity's first "to me" read takes a plain broadcast only from
+    # the backend's own time. The fake clock is pinned before the fixture's
+    # messages, so the broadcast below is not "older than the first read".
+    backend = _backend(clock=lambda: "2026-10-10T09:59:00Z")
     backend.deliver(GENERAL, _make_msg(channel="general", msg_id="01AAAA"), comment_id=1, created_at="2026-10-10T10:00:00Z")
     backend.deliver(OTHER, _make_msg(channel="other", msg_id="01BBBB"), comment_id=2, created_at="2026-10-10T10:01:00Z")
     backend.deliver(GENERAL, _make_msg(channel="general", msg_id="01CCCC", to="other-pm-m1"), comment_id=3, created_at="2026-10-10T10:02:00Z")

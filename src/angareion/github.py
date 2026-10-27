@@ -8,7 +8,8 @@ repos (and MyAiStorage, for the registry comments).
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import timedelta, timezone
+import email.utils
 import json
 import re
 from typing import Any
@@ -30,6 +31,7 @@ from angareion.backend import (
     comment_is_new,
     cursor_since,
     format_backend_time,
+    new_reader_counts,
     parse_backend_time,
     scope_matches,
 )
@@ -262,6 +264,31 @@ class GitHubIssuesBackend:
             url += f"&since={urllib.parse.quote(since, safe='')}"
         return url
 
+    @staticmethod
+    def _backend_now(resp: HttpResponse) -> str | None:
+        """The backend's own time for a response (#224): its `Date` header.
+
+        A new identity's first "to me" read uses this as the floor for old
+        broadcasts, so the moment must come from the backend, not from this
+        machine's clock (D4: only the backend decides what is old). The header
+        is RFC 7231 (`Tue, 27 Oct 2026 05:04:03 GMT`); it is normalised to the
+        same RFC 3339 UTC form the backend uses for `created_at`. A missing or
+        unparsable header yields None, and the read then counts every broadcast
+        (the behaviour before #224) instead of guessing a local time.
+        """
+        raw = resp.headers.get("date")
+        if not raw:
+            return None
+        try:
+            moment = email.utils.parsedate_to_datetime(raw)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if moment is None:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return format_backend_time(moment)
+
     def _comment_meta(self, comment: dict[str, Any]) -> tuple[int, str] | None:
         """(comment id, created_at) of a comment, or None when unusable."""
         created_at = str(comment.get("created_at") or "")
@@ -386,18 +413,27 @@ class GitHubIssuesBackend:
         *,
         recipient: str | None = None,
         mentioned: str | None = None,
+        new_recipient: bool = False,
     ) -> ReadResult:
         """Read the messages after the cursor, oldest first, pages included.
 
         "New" is decided by the backend's arrival position and time (D4); a
         `--since` cursor (time only) returns the comments at or after that time
-        and moves nothing.
+        and moves nothing. `new_recipient` is the reader's first "to me" read
+        for this entity (#224): messages addressed to it read from the start, a
+        plain broadcast only from the backend's current time (the listing
+        response's `Date` header), never from the local clock.
         """
         since = cursor_since(cursor)
         url: str | None = self._listing_url(entity, since=since)
         resp = self._request("GET", url, headers=self._headers())
         if resp.status >= 400:
             raise BackendError(f"Failed to read messages: HTTP {resp.status}")
+        floor = (
+            self._backend_now(resp)
+            if new_recipient and recipient is not None and mentioned is None
+            else None
+        )
 
         entries: list[tuple[int, str]] = []
         matched: list[tuple[int, Message]] = []
@@ -418,6 +454,8 @@ class GitHubIssuesBackend:
                 # arrival positions); `recipient`/`mentioned` only decide what is returned.
                 entries.append((comment_id, created_at))
                 if not scope_matches(parsed, recipient, mentioned):
+                    continue
+                if not new_reader_counts(parsed, created_at, floor, recipient):
                     continue
                 if not comment_is_new(comment_id, created_at, cursor):
                     continue

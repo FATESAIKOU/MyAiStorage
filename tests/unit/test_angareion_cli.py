@@ -177,6 +177,17 @@ def test_help_exits_zero(capsys):
             parser.parse_args(["channel", action, "--help"])
 
 
+def test_read_help_explains_a_new_identitys_first_read(capsys):
+    """#224: the help says how a new identity reaches the older broadcasts."""
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["read", "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "new identity's first read" in out
+    assert "older broadcasts" in out
+    assert "--since" in out
+
+
 def test_send_help_says_mention_is_open(capsys):
     parser = build_parser()
     with pytest.raises(SystemExit):
@@ -397,13 +408,22 @@ def test_read_json_output(cli_env, capsys):
 
 
 def test_read_to_me_includes_broadcasts_and_excludes_others(cli_env, capsys):
-    _seed_message(cli_env, channel="general", entity_number=10, msg_id="01AAAA00000000000000000000", to=IDENTITY)
-    _seed_message(cli_env, channel="other", entity_number=7, msg_id="01BBBB00000000000000000000", to=None)
-    _seed_message(cli_env, channel="general", entity_number=10, msg_id="01CCCC00000000000000000000", to="someone-pm-m1")
+    """The scope rule: "to me" is my name, a broadcast, or a mention of me.
+
+    The earlier messages are read first so the cursor exists: #224 takes a plain
+    broadcast of a new identity's first read only from the backend's own time,
+    and that rule is pinned in its own tests.
+    """
+    _seed_message(cli_env, channel="general", entity_number=10, msg_id="01AAAA00000000000000000000", to=IDENTITY, comment_id=1, created_at="2026-10-10T12:00:01Z")
+    assert run(cli_env, ["read", "--json"]) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01AAAA00000000000000000000"]
+
+    _seed_message(cli_env, channel="other", entity_number=7, msg_id="01BBBB00000000000000000000", to=None, comment_id=2, created_at="2026-10-10T12:00:02Z")
+    _seed_message(cli_env, channel="general", entity_number=10, msg_id="01CCCC00000000000000000000", to="someone-pm-m1", comment_id=3, created_at="2026-10-10T12:00:03Z")
 
     assert run(cli_env, ["read", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
-    assert [m["id"] for m in data] == ["01AAAA00000000000000000000", "01BBBB00000000000000000000"]
+    assert [m["id"] for m in data] == ["01BBBB00000000000000000000"]
 
 
 def test_wait_without_channel_sees_a_broadcast(cli_env, capsys):
@@ -1431,14 +1451,21 @@ def test_a_new_name_the_old_grammar_never_had_is_read_too(cli_env, capsys):
 
 
 def test_to_me_is_still_an_exact_match_or_a_broadcast(cli_env, capsys):
-    """The read rule is unchanged: the whole string, or no `to` at all."""
+    """The read rule is unchanged: the whole string, or no `to` at all.
+
+    The first read covers what is addressed to me (#224); the broadcast and the
+    other agent's message here arrive after the cursor exists, so the broadcast
+    is read and the other agent's is not.
+    """
     _seed_message(cli_env, msg_id="01AAAA00000000000000000000", to=IDENTITY, comment_id=1, created_at="2026-10-10T12:00:01Z")
+    assert run(cli_env, ["read", "--json"]) == 0
+    assert [m["id"] for m in json.loads(capsys.readouterr().out)] == ["01AAAA00000000000000000000"]
+
     _seed_message(cli_env, msg_id="01BBBB00000000000000000000", to=None, comment_id=2, created_at="2026-10-10T12:00:02Z")
     _seed_message(cli_env, msg_id="01CCCC00000000000000000000", to="someone-pm-m1", comment_id=3, created_at="2026-10-10T12:00:03Z")
 
     assert run(cli_env, ["read", "--json"]) == 0
     assert [m["id"] for m in json.loads(capsys.readouterr().out)] == [
-        "01AAAA00000000000000000000",
         "01BBBB00000000000000000000",
     ]
 

@@ -676,7 +676,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_wait.add_argument("--timeout", type=float, metavar="SECONDS",
                         help="Wait at most this long; 0 checks once; omit to wait forever.")
 
-    p_read = subparsers.add_parser("read", help="Read new messages, oldest first.")
+    p_read = subparsers.add_parser(
+        "read",
+        help="Read new messages, oldest first.",
+        description=(
+            "Read new messages, oldest first, and move the local cursor. Without --channel "
+            "this is everything addressed to me. A new identity's first read still starts at "
+            "the beginning for its own messages, but older broadcasts count only from the "
+            "backend's time of that read: pass --since to read them."
+        ),
+    )
     p_read.add_argument(
         "--channel",
         help="Channel to read; default: everything addressed to me. Includes messages addressed to other agents.",
@@ -685,7 +694,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Only messages that are addressed to me or mention me (broadcasts excluded), "
                              "in every channel; cannot be combined with --channel.")
     p_read.add_argument("--since", metavar="TIMESTAMP",
-                        help="Read after this time; does not move the local cursor.")
+                        help="Read after this time; does not move the local cursor "
+                             "(also how a new identity reaches older broadcasts).")
     p_read.add_argument("--json", action="store_true", help="Print a JSON array.")
 
     p_log = subparsers.add_parser("log", help="Query messages (read-only; does not move cursors).")
