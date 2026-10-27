@@ -1316,10 +1316,16 @@ def _warn_cleared(path: Path, session_id: str) -> None:
     same file, but after /clear the new file only points back through a
     `session_id` field on its attachment lines. We do not stitch the two
     together; we say which session holds the rest so it can be imported.
+
+    A file agora forked itself also names the old session on those lines (it
+    keeps them as they are, #197); it is not a /clear, so the marker that says
+    we wrote it skips it (#199).
     """
     since = path.stat().st_ctime
     for other in path.parent.glob("*.jsonl"):
         if other == path or other.stat().st_mtime < since:
+            continue
+        if _launched_by_agora(other.stem, other):
             continue
         try:
             if session_id in other.read_text(encoding="utf-8", errors="replace"):
