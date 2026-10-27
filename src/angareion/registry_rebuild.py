@@ -32,7 +32,6 @@ from typing import Any, Callable, Protocol
 
 from angareion.registry import (
     AUTHORIZED_ASSOCIATIONS,
-    Action,
     InvalidAction,
     RegistryClient,
     RegistryError,

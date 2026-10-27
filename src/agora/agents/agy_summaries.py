@@ -23,7 +23,6 @@ import re
 import sqlite3
 import time
 from collections import Counter
-from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path

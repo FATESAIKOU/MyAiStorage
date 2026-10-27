@@ -15,7 +15,6 @@ from typing import Any, Callable, Sequence
 from ainame import is_group
 from angareion.backend import (
     BackendError,
-    BackendRef,
     ChannelBackend,
     ChannelNotFoundError,
     EntityResolver,

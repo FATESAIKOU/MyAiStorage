@@ -12,7 +12,6 @@ git runner and the clocks, so nothing here touches the network by itself.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import os
@@ -20,7 +19,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import Any, Callable, Iterator, Protocol, Sequence
+from typing import Any, Callable, Protocol, Sequence
 
 from angareion.backend import BackendRef, ChannelNotFoundError, Entity
 from angareion.config import CONFIG_PULL_INTERVAL_DEFAULT, ConfigError

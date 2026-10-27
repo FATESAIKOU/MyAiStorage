@@ -95,8 +95,8 @@ def _step4(segments: list[str], role_index: int) -> str:
     """Step 4: the team segment right of the role; it is always required."""
     if len(segments) <= role_index + 1:
         raise ValueError(
-            f"step 4 failed: the team segment is missing; it is always required "
-            f"(write '<project>-<role>-<team>', e.g. 'mylinuxpool-impl-w1-1')"
+            "step 4 failed: the team segment is missing; it is always required "
+            "(write '<project>-<role>-<team>', e.g. 'mylinuxpool-impl-w1-1')"
         )
     team = segments[role_index + 1]
     if not _TEAM_RE.fullmatch(team):

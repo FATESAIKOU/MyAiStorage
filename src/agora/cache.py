@@ -245,7 +245,6 @@ def _pull_agora(paths: store.Paths, drive: store.Drive, index: store.Index,
         store.forget_local(paths, ulid)
         _line(f"{ulid} 雲端沒有，本機的副本已刪")
         return
-    files = remote[ulid]
     if (paths.outbox / ulid).is_dir():
         # What is in the outbox is newer than anything on Drive: pulling would put
         # the older copy in the mirror and the session would go backwards (S2-7).
@@ -298,7 +297,7 @@ def push(paths: store.Paths, ids: list[str], agents: dict, *,
         # Anything asked for that appeared while we were sending goes in this same lock
         # (G1): `upload_batch` works on the whole outbox, and outside the lock that is
         # push and the background on the same outbox at once.
-        if late := [i for i in wanted if _arrived_late(i, agents, staged, paths)]:
+        if any(_arrived_late(i, agents, staged, paths) for i in wanted):
             left = sorted(set(left) | set(store.upload_batch(drive, paths)))
     if left:
         _line(f"outbox 還有 {len(left)} 筆沒上傳成功")
