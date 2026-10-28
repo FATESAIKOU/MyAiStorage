@@ -236,6 +236,26 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 - 沒有 filter 就列出全部。之後要加更複雜的比較時，再加運算子（例如 `>`、`<`）。
 - 全文 `~=` 用 FTS5 trigram，少於 3 個字時改用掃描（4.5）。
 - **每一行**（#90）：`agora:<ULID>  <對話日期>[（更新：YYYY-MM-DD）]  <agent 或 relation>  <摘要>  <標記>…`，標記是 `(使用中)`、`(未上傳)`、`(雲端沒有)`。清單**仍按對話日期新到舊**（顯示跟著排序走）；`agora.updated_at` 與對話日期不同時補「（更新：…）」，讓「很久以前對話、今天還在動」的 Session 不會看起來像舊的。「使用中」＝本機 `pending/<ULID>.json` 的鎖有人拿著（**只判斷這台機器**；別台機器上的接續這裡看不到，沒有共用的鎖可以查）；只是留下來的記錄不算。
+- **`--json`**（#301，MLP#502）：stdout 是**一個** JSON 陣列（`json.dumps(..., ensure_ascii=False)`），其他訊息與警告只走 stderr；空集合是 `[]`、exit 0。可以和 `--filter`、`--no-sync` 一起用；「同一個來源 Session 只印一行」的去重、排序、以及 Drive 連不上仍 exit 0（stderr 警告原樣）都與文字模式相同，輸出的 id 集合與文字模式逐筆一致。參數錯仍是 exit 2，沒有新增 exit code。**只有 search 吃 `--json`**：其他動作（show、import、edit、continue…）帶了 `--json` 回 exit 1（EXIT_INPUT）並說「--json 只有 search 吃」，在做任何事之前就停（同 `--add-tag`、`--agent-arg` 的守衛）；`migrate inventory --json` 是它自己的旗標，不受影響。欄位：
+
+  | 欄位 | 型別 | 內容 |
+  | --- | --- | --- |
+  | `id` | string | `agora:<ULID>` |
+  | `agent` | string \| null | `agora.source.agent`；merge 出來的**沒有 source**，是 `null` |
+  | `relation` | string \| null | `agora.relation`（例如 `import`、`continue`、`merge`） |
+  | `tags` | string[] | 標頭的 `tags` 原樣、同順序；沒有是 `[]` |
+  | `updated_at` | string \| null | `agora.updated_at` **原值**（RFC 3339，不截斷） |
+  | `conversation_date` | string \| null | 對話日期，`sort_date`：`agora.source.created_at` → `generated.at` → `agora.created_at` |
+  | `title`／`description` | string \| null | 標頭的 `title`／`description` |
+  | `locked` | bool | 本機 `pending/<ULID>.json` 的鎖有人拿著：與文字模式的 `(使用中)` 同一個判斷（**只判斷這台機器**） |
+  | `locked_by` | object \| null | `{"agent", "dir", "started_at"}`，拿鎖的那份 pending 記錄；沒人拿是 `null`。鎖有人拿、但 pending 記錄讀不出來時是 `{"agent": null, "dir": null, "started_at": null}`，`locked` 仍是 `true`（人在用，只是說不出是誰） |
+  | `in_outbox` | bool | 還在 outbox（與 `(未上傳)` 同） |
+  | `missing_in_cloud` | bool | Drive 沒有這筆（與 `(雲端沒有)` 同） |
+
+  ```console
+  $ agora search session --filter tags=ai:claude-work --json --no-sync
+  [{"id": "agora:01M60WT5NPK2FTZ73Y7Y3WANX9", "agent": "opencode", "relation": "import", "tags": ["ai:claude-work", "workdir:/Users/x/y"], "updated_at": "2026-10-20T09:00:00Z", "conversation_date": "2026-10-01T09:00:00Z", "title": "A 很早的對話，最近改過標頭", "description": "## user", "locked": false, "locked_by": null, "in_outbox": true, "missing_in_cloud": false}]
+  ```
 
 ### 5.2 import
 

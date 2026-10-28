@@ -2,7 +2,7 @@
 
     agora <action> <type> [session_id] [options]
 
-    agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync]
+    agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync] [--json]
     agora import   session --external-session-id <id> --agent opencode|claude [--header-file F] [--header K=V]...
     agora merge    session <id>, <id>, ... [--header-file F] [--header K=V]...
     agora continue session <id> --agent opencode|claude [--dir <dir>] [--fork] [--header-file F] [--header K=V]...
@@ -430,6 +430,7 @@ def cmd_search(args, paths: store.Paths) -> int:
     seen: dict[tuple, str] = {}
     said: set[tuple] = set()      # T7 F2: the same source gets at most one line
     outbox = store.waiting_ulids(paths)
+    rows = []
     for ulid, hdr, snippet in index.search(filters):
         agora = h.agora_of(hdr)
         source = agora.get("source") or {}
@@ -446,15 +447,51 @@ def cmd_search(args, paths: store.Paths) -> int:
                 print(f"[agora] {first} 與 agora:{ulid} 來自同一個來源 Session", file=sys.stderr)
             continue
         seen[key] = f"agora:{ulid}"
+        locked = store.continuing(paths, ulid)
+        in_outbox = ulid in outbox
+        missing = not index.cloud_has(ulid)     # T1 3.4: the row is here, Drive's copy is not
+        if args.json:
+            rows.append(_search_json_row(paths, ulid, hdr, locked=locked,
+                                         in_outbox=in_outbox, missing=missing))
+            continue
         date = _updated_cell(hdr)
-        mark = "  (使用中)" if store.continuing(paths, ulid) else ""
-        if ulid in outbox:
+        mark = "  (使用中)" if locked else ""
+        if in_outbox:
             mark += "  (未上傳)"
-        if not index.cloud_has(ulid):
-            mark += "  (雲端沒有)"      # T1 3.4: the row is here, Drive's copy is not
+        if missing:
+            mark += "  (雲端沒有)"
         text = snippet or str(hdr.get("title") or "")
         print(f"agora:{ulid}  {date}  {source.get('agent') or agora.get('relation')}  {text}{mark}")
+    if args.json:
+        # One document for the caller: notes and warnings have already gone to stderr.
+        print(json.dumps(rows, ensure_ascii=False))
     return 0
+
+
+def _search_json_row(paths: store.Paths, ulid: str, hdr: dict, *, locked: bool,
+                     in_outbox: bool, missing: bool) -> dict:
+    """One `--json` row (#301): the same session the text line would name, as fields.
+
+    `updated_at` is the header's own RFC 3339 value, not the date cell's `YYYY-MM-DD`;
+    `agent` is `agora.source.agent` and stays null for a merge, which has no source.
+    """
+    agora = h.agora_of(hdr)
+    details = store.continuing_details(paths, ulid) if locked else None
+    return {
+        "id": f"agora:{ulid}",
+        "agent": (agora.get("source") or {}).get("agent"),
+        "relation": agora.get("relation"),
+        "tags": hdr.get("tags") or [],
+        "updated_at": agora.get("updated_at"),
+        "conversation_date": store.sort_date(hdr),
+        "title": hdr.get("title"),
+        "description": hdr.get("description"),
+        "locked": locked,
+        "locked_by": ({key: details.get(key) for key in ("agent", "dir", "started_at")}
+                      if details is not None else None),
+        "in_outbox": in_outbox,
+        "missing_in_cloud": missing,
+    }
 
 
 def _updated_cell(header: dict) -> str:
@@ -3095,6 +3132,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="delete：連正在接續中的一起刪（要加 --yes；刪掉之後那個 agent 的寫回會另存成新的 Session）")
     p.add_argument("--raw", action="store_true", help="show：印出原始匯出")
     p.add_argument("--no-sync", action="store_true", help="search：不連 Drive，只查本機索引")
+    p.add_argument("--json", action="store_true",
+                   help="search：輸出一個 JSON 陣列（其他訊息只走 stderr；空結果是 []）")
     p.add_argument("--not-exist-delete", action="store_true",
                    help="pull：給的 id 雲端沒有時，刪掉本機的副本（agent 的 id 是刪它的全文快取）")
     p.add_argument("--not-exist-upload", action="store_true",
@@ -3165,6 +3204,11 @@ def main(argv: list[str] | None = None) -> int:
         # A flag nobody reads must not look like it worked (#153).
         print(f"[agora] {args.action} 不吃 --add-tag（只有 {'、'.join(ADD_TAG_ACTIONS)} 吃）；"
               f"要改 tags 請用 edit session <id> --add-tag，或 --header 'tags=[…]'", file=sys.stderr)
+        return EXIT_INPUT
+    if args.json and args.action != "search":
+        # #301: --json is search's output form; a flag nobody reads must not look like it worked
+        # (same rule as --add-tag, #153). Refused before anything runs.
+        print(f"[agora] {args.action} 不吃 --json（只有 search 吃）", file=sys.stderr)
         return EXIT_INPUT
     try:
         recover_pending(paths, notice_only=args.no_sync)
