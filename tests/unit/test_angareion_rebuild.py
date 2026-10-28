@@ -210,7 +210,7 @@ def test_pagination_keeps_early_registers():
             author_association=comment["author_association"],
             user_type=comment["user"]["type"],
         )
-    summary = Rebuilder(fake).run()
+    Rebuilder(fake).run()
 
     assert _channels(fake.files[CHANNELS_PATH]) == {
         "early": {"backend": "github-main", "issue": 1},

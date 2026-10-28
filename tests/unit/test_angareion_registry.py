@@ -37,7 +37,6 @@ class RecordingTransport:
 
     def request(self, method, url, headers=None, body=None, timeout=None):
         self.requests.append({"method": method, "url": url, "headers": headers or {}, "body": body})
-        key = (method, url.split("?")[0] if url.endswith("?") else url)
         if (method, url) in self.routes:
             return self.routes[(method, url)]
         for (r_method, r_prefix), response in self.routes.items():

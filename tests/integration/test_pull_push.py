@@ -149,7 +149,6 @@ def fetch_local_raw(env, agora_id: str):
 
 def test_pull_brings_the_raw_back(env):
     agora_id, _ = imported(env)
-    paths = env["paths"]
     hdr, local_raw = fetch_local_raw(env, agora_id)
     local_raw.unlink()                      # only the raw is gone; session.md stays
 
@@ -269,7 +268,6 @@ def test_not_exist_upload_puts_it_back_and_the_mark_clears(env):
     agora_id, _ = imported(env)
     ulid = agora_id.split(":", 1)[1]
     hdr, local_raw = fetch_local_raw(env, agora_id)     # both files go up (R7)
-    raw_name = store.raw_name(h.agora_of(hdr)["raw"])
     purge_on_drive(env, agora_id)
     resync(env)
     assert not store.Index(env["paths"]).cloud_has(ulid)

@@ -389,7 +389,7 @@ def test_the_final_round_rescues_even_with_nothing_new(env, capsys, monkeypatch)
     env.speak_rounds = 1
     env.sleep = 0.5
     _, a, _ = _import(capsys)
-    staged = _stage_spy(monkeypatch)
+    _stage_spy(monkeypatch)
     real_round = cli._periodic_write
     deleted = {"done": False}
 
@@ -992,7 +992,7 @@ def test_a_deletion_mid_run_moves_later_writes_to_the_rescue(env, capsys, monkey
     exactly one new session, and every write after the deletion goes there."""
     env.sleep = 2.6               # room for four rounds even with upload time between
     _, a, _ = _import(capsys)
-    staged = _stage_spy(monkeypatch)
+    _stage_spy(monkeypatch)
     real_round = cli._periodic_write
     rounds = {"n": 0}
 
@@ -1278,7 +1278,6 @@ def test_subprocess_mid_run_rescue_interleaving(claude_lab, capsys, monkeypatch,
     """
     monkeypatch.setenv("AGORA_UPLOAD", "inline")
     a = _import_claude(capsys)
-    ulid = a.split(":")[1]
     monkeypatch.delenv("AGORA_UPLOAD", raising=False)
 
     release = tmp_path / "deletion-done"
@@ -1427,7 +1426,7 @@ def test_an_offline_deletion_is_adopted_once_the_uploader_frees_it(env, capsys, 
     the line is back the uploader rescues once, and the following round adopts it."""
     env.sleep = 2.6
     _, a, _ = _import(capsys)
-    staged = _stage_spy(monkeypatch)
+    _stage_spy(monkeypatch)
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "lsjson")     # offline: no listing, no rescue
     real_round = cli._periodic_write
     rounds = {"n": 0}

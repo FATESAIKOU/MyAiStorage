@@ -382,7 +382,7 @@ def test_an_imported_session_is_visible_through_the_managed_service(lab):
     """5.2: the running managed service (isolated free port) sees a session that
     was imported with --standalone, and can answer in it. The real TUI stays on
     the manual list."""
-    state, paths = lab, lab["paths"]
+    state = lab
     before = _shared_port()
     env = {**os.environ, "PWD": str(state["proj"])}
 

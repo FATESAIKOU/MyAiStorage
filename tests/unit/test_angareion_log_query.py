@@ -266,7 +266,6 @@ def test_cursor_guard_sha256_empty_and_nonempty(two_env, capsys, monkeypatch):
     # empty case
     if cursor_file.exists():
         cursor_file.unlink()
-    before_empty = hashlib.sha256(cursor_file.read_bytes()).hexdigest() if cursor_file.exists() else None
 
     class RaisingCursorStore:
         def __init__(self, *a, **k):

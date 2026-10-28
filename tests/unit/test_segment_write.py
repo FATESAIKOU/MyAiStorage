@@ -697,7 +697,7 @@ def test_a_segment_name_outside_the_a1_pattern_is_not_a_chunked_manifest(env, na
     store.upload_batch(store.Drive(paths), paths)
     good_session_md = (_drive_folder(env, ulid) / "session.md").read_bytes()
     edit = _header("v2", ulid=ulid)
-    folder = store.stage(paths, edit, "## user\nv2\n", data_of(2, tag=3), update=True, kind="continue")
+    store.stage(paths, edit, "## user\nv2\n", data_of(2, tag=3), update=True, kind="continue")
     _tamper_last_segment_name(paths, ulid, name)
     tampered = h.agora_of(store.read_entry(paths.outbox / ulid))["raw"]
     assert store.raw_kind(tampered) == "legacy"
@@ -757,7 +757,7 @@ def test_a_header_only_update_purged_and_crashed_is_not_revived(env, tmp_path):
     folder = _drive_folder(env, ulid)
     assert (paths.state / "folder-ids" / f"{ulid}.json").is_file(), "the pre-send folder ID is on disk"
 
-    left = store.upload_batch(store.Drive(paths), paths)
+    store.upload_batch(store.Drive(paths), paths)
 
     assert not (folder / "session.md").exists(), "the purged session did not come back"
     new = [p.name for p in (env / "agora" / "sessions").iterdir() if p.name != ulid]
@@ -882,7 +882,7 @@ def test_confirmation_listing_that_loses_the_folder_does_not_revive_a_purged_ses
     monkeypatch.delenv("FAKE_RCLONE_OMIT")
     monkeypatch.delenv("FAKE_RCLONE_OMIT_FROM")
 
-    left = store.upload_batch(store.Drive(paths), paths)
+    store.upload_batch(store.Drive(paths), paths)
 
     assert not _drive_folder(env, ulid).exists(), "the purged session was not completed"
     new = [p.name for p in (env / "agora" / "sessions").iterdir()]

@@ -340,7 +340,7 @@ def test_write_one_uses_raw_md5_without_loading_raw(tmp_path, monkeypatch):
 
     paths = store.Paths.from_env()
     hdr = _header()
-    folder = store.stage(paths, hdr, "## user\nCSV\n", raw)
+    store.stage(paths, hdr, "## user\nCSV\n", raw)
     target_id = hdr["id"]
     record = {"agora_id": target_id, "agent": "claude", "agent_session_id": "s",
               "dir": str(tmp_path), "parent": {"id": target_id, "raw_md5": "0" * 32},

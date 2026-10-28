@@ -1587,7 +1587,6 @@ def test_editing_one_the_editor_kept_open_while_it_vanished(env, capsys, monkeyp
 def test_continue_and_edit_survive_a_drive_without_a_sessions_folder(env, capsys, monkeypatch):
     """F2: no sessions/ is "do not know", not a crash (and not a TypeError)."""
     _, a, _ = _import(capsys)
-    ulid = a.split(":")[1]
     from pathlib import Path as P
     shutil.rmtree(P(os.environ["FAKE_REMOTE"]) / "agora" / "sessions")
     # Either outcome is fine (the raw really is gone); what must not happen is the

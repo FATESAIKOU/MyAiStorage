@@ -580,7 +580,6 @@ def _run(capsys, *argv):
 
 
 def test_show_raw_streams_the_joined_file(env, capfdbinary):
-    paths = store.Paths.from_env()
     ulid, _, data = _put(env)
     code = cli.main(["show", "session", f"agora:{ulid}", "--raw"])
     assert code == 0

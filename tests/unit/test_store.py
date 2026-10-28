@@ -51,7 +51,7 @@ def T(keyword: str) -> list:
 
 
 def _save(paths, hdr, body="## user\n把 CSV 轉成 Markdown 表格\n", raw=b'{"x": 1}'):
-    folder = store.stage(paths, hdr, body, raw)
+    store.stage(paths, hdr, body, raw)
     store.upload_batch(store.Drive(paths), paths)
     return hdr["id"].split(":", 1)[1]
 
@@ -219,7 +219,7 @@ def test_unknown_ref_entity_is_still_indexed(remote):  # R7
     paths = store.Paths.from_env()
     hdr = _header()
     hdr["refs"] = ["future:thing"]
-    folder = store.stage(paths, hdr, "## user\nCSV\n", b"{}")
+    store.stage(paths, hdr, "## user\nCSV\n", b"{}")
     store.upload_batch(store.Drive(paths), paths)
     assert store.sync(paths).search(T("CSV"))
 

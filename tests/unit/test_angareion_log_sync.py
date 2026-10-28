@@ -114,7 +114,6 @@ def test_idempotent_upsert_and_integer_compare(cli_env):
     _seed(cli_env, "01AAAA00000000000000000000", 9, "2026-10-10T12:00:05Z", content="nine")
     _seed(cli_env, "01BBBB00000000000000000000", 10, "2026-10-10T12:00:06Z", content="ten")
     cache = LogCache(cli_env["state_dir"], IDENTITY)
-    ent = cli_env["store"].entity_for("general")
     # first sync via log
     import subprocess
     # use main
@@ -146,7 +145,6 @@ def test_304_does_not_change_cache(cli_env, monkeypatch):
     _seed(cli_env, "01AAAA00000000000000000000", 1, "2026-10-10T12:00:05Z")
     from angareion.cli import main as _main
     _main(["log", "--channel", "general", "--json"], backend=cli_env["backend"], store=cli_env["store"], registry=cli_env["registry"])
-    cache = LogCache(cli_env["state_dir"], IDENTITY)
     f = log_cache_path(cli_env["state_dir"], IDENTITY, "general")
     before = f.read_text()
     # monkeypatch enumerate_conditional to 304

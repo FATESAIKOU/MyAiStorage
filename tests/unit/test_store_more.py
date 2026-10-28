@@ -60,7 +60,7 @@ def T(keyword: str) -> list:
 
 
 def _save(paths, hdr, body="## user\n把 CSV 轉成 Markdown 表格\n", raw=b'{"x": 1}'):
-    folder = store.stage(paths, hdr, body, raw)
+    store.stage(paths, hdr, body, raw)
     store.upload_batch(store.Drive(paths), paths)
     return hdr["id"].split(":", 1)[1]
 
@@ -131,7 +131,7 @@ def test_missing_raw_not_indexed_until_added(remote, tmp_path):  # U-ST-04
 def test_session_md_upload_failure_leaves_only_segments(remote, tmp_path, monkeypatch):  # U-ST-07
     paths = store.Paths.from_env()
     hdr = _header()
-    folder = store.stage(paths, hdr, "## user\nCSV\n", b"{}")
+    store.stage(paths, hdr, "## user\nCSV\n", b"{}")
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "session.md")
     ulid = hdr["id"].split(":", 1)[1]
     assert store.upload_batch(store.Drive(paths), paths) == [ulid]
@@ -150,7 +150,7 @@ def test_merge_without_raw_is_indexed(remote, tmp_path):  # U-ST-18, N5
     paths = store.Paths.from_env()
     hdr = _header()
     hdr.pop("source", None)
-    folder = store.stage(paths, hdr, "## user\n合併結果表格\n", None)
+    store.stage(paths, hdr, "## user\n合併結果表格\n", None)
     store.upload_batch(store.Drive(paths), paths)
     assert "raw" not in h.agora_of(hdr)
     assert store.sync(machine2(tmp_path)).search(T("表格"))
@@ -404,7 +404,6 @@ def test_a_staged_session_the_index_cannot_read_is_not_marked_either(remote, mon
     _save(paths, _header("先讓 Drive 上有 sessions/"))
     capsys.readouterr()
     folder = store.stage(paths, _header(), "## user\n還沒上傳\n", None)
-    ulid = folder.name
     (folder / "session.md").write_text("壞掉的 session.md", encoding="utf-8")
     monkeypatch.setenv("FAKE_RCLONE_FAIL", "copyto")
 
