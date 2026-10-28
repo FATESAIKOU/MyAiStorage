@@ -1885,7 +1885,6 @@ def _wait_agent(proc, run: "_Run", agent: Agent, interval: float) -> bool:
         store._fault("after-periodic-write")
         if not said_writing and proc.poll() is not None:
             said_writing = True
-    return said_writing
 
 
 def _wait_target_settled(paths: store.Paths, run: "_Run", timeout: float = 15.0) -> None:
