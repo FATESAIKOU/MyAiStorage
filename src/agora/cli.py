@@ -2052,6 +2052,7 @@ def _load_for_launch(paths: store.Paths, state: dict) -> dict:
     headless = bool(state["headless"])
     headless_port = state.get("headless_port")
     harness_path = Path(state["harness_file"]) if state.get("harness_file") else None
+    agent_arg = list(state.get("agent_arg") or [])   # #204 PR1: only claude gets these
     fork_turns = _fork_turns(source_id, parent) if fork else []
     # ① what to load, ② the target adapter builds its own format, ③ one way to load it (design 5.4).
     own: bytes | None = None
@@ -2097,6 +2098,11 @@ def _load_for_launch(paths: store.Paths, state: dict) -> dict:
     # another agent's raw are new conversations and get new ids, as before.
     if in_place and getattr(agent, "keeps_session_id", False) is True and src.get("session_id"):
         start_kwargs["keep_id"] = src["session_id"]
+    # #204 PR1: only a non-empty list is handed on. With no arguments every adapter
+    # gets exactly the kwargs it always got - opencode and agy have no `extra_args`
+    # parameter, so an unconditional kwarg would be a TypeError (draft #204 §4 PR1).
+    if agent_arg:
+        start_kwargs["extra_args"] = agent_arg
     if harness_path is not None:
         if headless:
             launch = agent.start_native(raw, workdir, headless=True, headless_port=headless_port,
@@ -2165,6 +2171,10 @@ def cmd_continue(args, paths: store.Paths) -> int:
             raise InputError(AGY_READ_ONLY)
         if bool(getattr(args, "headless", False)):
             raise InputError(AGY_HEADLESS_LATER)
+    # #204 PR1: before the sync, the lock check, the pending record and any agent
+    # half - a refused pass-through must leave nothing behind. `agent_arg` is the
+    # list `main` already merged (`--agent-arg=` values, then the `--` tail).
+    _refuse_agent_args(agent.name, list(getattr(args, "agent_arg", []) or []))
     harness_path = None
     if getattr(args, "harness_file", None):
         harness_p = Path(args.harness_file)
@@ -2217,6 +2227,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
         "updates": updates, "add_tags": add_tags, "workdir": str(workdir),
         "headless": headless, "headless_port": headless_port,
         "harness_file": str(harness_path) if harness_path is not None else None,
+        "agent_arg": list(getattr(args, "agent_arg", []) or []),   # #204 PR1
     }
     payload = _start_child(paths, state)
     launch = Launch(argv=payload["launch"]["argv"], cwd=payload["launch"]["cwd"],
@@ -2755,6 +2766,118 @@ ACTIONS = {
 }
 
 
+#: What `--agent-arg`／`--` may never hand claude (#204 PR1), and why. This is one
+#: list on purpose: every entry is a flag that would make the argv disagree with
+#: the session agora loads, writes back and collects, and the reasons are what the
+#: refusal says. A whitelist was the other option and it would have to change
+#: whenever claude adds a flag (draft #204 §3.1-3).
+#:
+#: Spellings: a plain name is refused in `--flag`, `-f` and `--flag=value` form.
+#: Merged or value-joined single-dash tokens (`-cp`, `-rSESSIONID`) are NOT matched
+#: here - claude would split them its own way, which agora cannot prove - so every
+#: multi-character single-dash token is refused outright below (review W1).
+AGENT_ARG_DENIED: dict[str, str] = {
+    "--resume": "接續的 session id 由 agora 決定；換一個，collect 會讀到別的檔",
+    "-r": "同上（--resume 的短名）",
+    "--session-id": "session id 由 agora 決定；換一個，collect 會讀到別的檔",
+    "--fork-session": "會另開一個 session id，和這次載入的那個對不上",
+    "--worktree": "會換掉工作目錄（推論），session 檔會落在別的專案目錄，collect 讀不到",
+    "-w": "同上（--worktree 的短名）",
+    "--no-session-persistence": "不寫 session 檔（推論），collect 沒有東西可以讀",
+    "--from-pr": "會接上另一個 PR 的 session（推論），和這個 Session 對不上",
+    "--continue": "會接續使用者自己的上一個 session，不是這個 Session",
+    "-c": "同上（--continue 的短名）",
+    "-p": "headless 的串流由 agora 決定；拿掉或改動它，collect 讀不到對話",
+    "--print": "同上（-p 的長名）",
+    "--input-format": "headless 的串流格式由 agora 決定，改了它 collect 讀不到對話",
+    "--output-format": "headless 的串流格式由 agora 決定，改了它 collect 讀不到對話",
+    "--settings": "會蓋掉 agora 固定寫入的 {\"autoContinueAtUsageLimit\": false}（換把由呼叫方決定）",
+    "--append-system-prompt-file": "harness 由 --harness-file 交付；直接給會和 agora 自己加的旗標重複",
+    "--system-prompt-snapshot": "harness 由 --harness-file 交付；直接給會和 agora 自己加的旗標重複",
+}
+
+
+def _split_agent_args(argv: list[str]) -> tuple[list[str], list[str]]:
+    """Take the `--` tail off `continue`'s argv, before argparse sees it (#204 PR1).
+
+    `agora continue … -- <arg>…` is the user's own form (2026-10-24): everything
+    after the `--` goes to the agent unchanged, so the action grammar itself does
+    not move (draft #204 §3.1-2 (a)). Only `continue` gets the split; with any
+    other action (or a `--` before the action) the argv is left exactly as it was,
+    and argparse answers as it always did.
+
+    `--agent-arg` is the other way to say the same thing, `=` form only: a bare
+    `--agent-arg` would have argparse eat the next flag as its value, or fail on
+    it with argparse's own exit 2 - this says why instead (exit 1).
+    """
+    if not argv or argv[0] != "continue":
+        return argv, []
+    if "--" in argv:
+        cut = argv.index("--")
+        head, tail = argv[:cut], argv[cut + 1:]
+    else:
+        head, tail = argv, []
+    for token in head:
+        # `--agent-arg` itself, and argparse's unambiguous abbreviation of it
+        # (`--agent-ar`, `--agent-a`): both hand the next argument in as the value,
+        # or fail on it with argparse's own exit 2 - this says why instead (review
+        # N1). `--agent` is a real flag of its own and keeps its value.
+        if "=" in token or token == "--agent" or not token.startswith("--"):
+            continue
+        if "--agent-arg".startswith(token):
+            raise InputError(
+                "--agent-arg 只收完整名稱的 = 形式：寫成 --agent-arg=<參數>"
+                "（例如 --agent-arg=--effort）；--agent-ar 這類縮寫也一樣，"
+                "要以空白分隔的一整串轉傳，用 -- <參數>…")
+    return head, tail
+
+
+def _refuse_agent_args(agent: str, agent_args: list[str]) -> None:
+    """Refuse the pass-through arguments agora will not hand this agent (#204 PR1).
+
+    `agent_args` is the one list `main` built: the `--agent-arg=<arg>` values
+    followed by the `--` tail, in the order written. Called after `parse_args` (so
+    the answer is agora's own, exit 1) and before the sync, the lock check, a
+    pending record or anything else: a refused continue leaves no Drive pull, no
+    pending, no session file and no agent process behind.
+
+    - claude only: opencode's headless mode is `serve` and agy's continue takes no
+      flags at all, so passing arguments on would be silently wrong there.
+    - the `AGENT_ARG_DENIED` flags, in `--flag`, `-f` and `--flag=value` spelling.
+    - any multi-character single-dash token (`-cp`, `-pc`, `-rSESSIONID`): claude
+      may merge short flags or join a value to one (推論), and agora cannot prove
+      which, so it refuses the shape instead of guessing (review W1). One-character
+      short flags (`-x`) take the blacklist above.
+    - a bare value is claude's positional argument, which is a prompt it speaks at
+      startup (推論, unverified). Refused for now, conservatively, in both forms -
+      the value of a flag right before it (a bare `--flag value` pair) is not
+      (review W2).
+    """
+    if not agent_args:
+        return
+    if agent != "claude":
+        raise InputError(f"{agent} 不支援轉傳參數：只有 claude 會把 --agent-arg／-- 之後的參數"
+                         f"放進 argv（opencode 的 headless 是 serve，agy 的接續不帶旗標）")
+    for token in agent_args:
+        name = token.split("=", 1)[0]
+        if name in AGENT_ARG_DENIED:
+            raise InputError(f"{token} 不能轉給 claude：{AGENT_ARG_DENIED[name]}")
+        if token.startswith("-") and not token.startswith("--") and len(token) > 2:
+            raise InputError(
+                f"{token} 不支援合併的短旗標，請分開寫或用長旗標"
+                f"（-cp 這類合併、-r<id> 這類黏值，agora 無法確認 claude 會怎麼拆）")
+    for i, token in enumerate(agent_args):
+        if token.startswith("-"):
+            continue
+        previous = agent_args[i - 1] if i else None
+        if previous is not None and previous.startswith("-") and "=" not in previous:
+            continue      # the value of a bare `--flag value` pair
+        raise InputError(
+            f"轉傳的參數裡有 claude 的位置參數（開場就送出的 prompt，推論）："
+            f"現在先不轉傳 {token!r}；要用它請告訴 PM 這條要放行。"
+            f"多值旗標（例如 --add-dir a b）請改用 --flag=值 形式，每個值一個")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agora", description="找、合、接 coding agent 的 Session")
     p.add_argument("action", choices=list(ACTIONS))
@@ -2785,6 +2908,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="continue --headless：opencode server 要聽的埠（由呼叫方分配）")
     p.add_argument("--harness-file",
                    help="continue：啟動方在單一 agent 啟動時交付 harness（檔案要存在且可讀）")
+    p.add_argument("--agent-arg", action="append", default=[], metavar="ARG",
+                   help="continue：原樣放進 agent 的 argv（只收 = 形式，例如 --agent-arg=--effort）；"
+                        "claude 專用，其他 agent 收到會報錯；要轉傳一整串用 -- <參數>…")
     p.add_argument("--as-new", action="store_true",
                    help="import：遷移用——忽略同來源的舊格式 Session，重新匯入成新的（已有同來源的新格式就回它）；"
                         "舊的一個位元組都不動")
@@ -2838,9 +2964,25 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.setdefault("TEXTUAL_DISABLE_KITTY_KEY", "1")
         from agora import tui
         return tui.main(store.Paths.from_env())
+    # #204 PR1: `continue … -- <arg>…` is split off before argparse (the `migrate`
+    # dispatch above is the same before-parse seam); the two forms - `--agent-arg=`
+    # and the `--` tail - become one list, in the order they were written.
+    try:
+        argv, agent_arg_dash = _split_agent_args(list(argv))
+    except InputError as e:
+        print(f"[agora] {e}", file=sys.stderr)
+        return EXIT_INPUT
     args = build_parser().parse_args(argv)
+    args.agent_arg = [*args.agent_arg, *agent_arg_dash]
+    args.agent_arg_dash = agent_arg_dash
     if args.type != "session":
         print(f"[agora] {args.action} 的型態要寫 session，例如 agora {args.action} session", file=sys.stderr)
+        return EXIT_INPUT
+    if args.agent_arg and args.action != "continue":
+        # #204 PR1: only continue has anything to hand an agent; a flag nobody reads
+        # must not look like it worked (same rule as --add-tag, #153).
+        print(f"[agora] {args.action} 不吃 --agent-arg／-- 之後的參數（只有 continue 吃）",
+              file=sys.stderr)
         return EXIT_INPUT
     paths = store.Paths.from_env()
     if args.add_tag and args.action not in ADD_TAG_ACTIONS:
