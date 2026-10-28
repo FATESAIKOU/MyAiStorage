@@ -401,6 +401,37 @@ def test_the_fake_refuses_a_v1_payload_the_way_2x_does(fake, tmp_path, monkeypat
     assert both.returncode != 0 and "SchemaError" in both.stderr
 
 
+# --- the fake caught mid tool call, in v2's flat rows (#295) -----------------
+
+
+def test_the_fake_can_be_caught_mid_tool_call_in_a_v2_session(fake):
+    """`partial` on a v2 session: a tool row that has not finished - the call is
+    there, `executed` is False, its state says `running`, and there is no
+    `time.completed` - which is what a periodic write-back landing inside a tool
+    call has to survive (design「讀到一半不能寫壞」).
+
+    The v1 half of the same move is in test_fake_script.py; this is the flat shape
+    opencode 2.x writes, which reads that branch of the fake on its own.
+    """
+    seed(fake, "oc-v2-basic.json", "v2partial")
+    before = stored(fake, "v2partial")
+    wrapper = os.environ["AGORA_OPENCODE_CMD"]
+    proc = subprocess.run([wrapper, "--session", "v2partial"], capture_output=True,
+                          text=True,
+                          env={**os.environ, "FAKE_AGENT_SCRIPT": "partial,exit"})
+    assert proc.returncode == 0, proc.stderr
+    payload = stored(fake, "v2partial")
+    assert len(payload["messages"]) == len(before["messages"]) + 1
+    row = payload["messages"][-1]
+    assert row["type"] == "assistant"
+    assert "completed" not in row["time"]
+    part = row["content"][0]
+    assert part["type"] == "tool" and part["name"] == "bash"
+    assert part["executed"] is False
+    assert part["state"]["status"] == "running"
+    assert "completed" not in part["time"]          # the call has not finished either
+
+
 def test_a_v2_fork_appends_flat_rows_and_keeps_the_tool_calls(fake, workdir):
     """M1: the fork of a v2 Session is the flat rows plus two new ones - the
     tool call stays, the rest of the payload stays byte-for-byte, and the new

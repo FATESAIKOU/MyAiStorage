@@ -250,7 +250,7 @@ def mid_message(session_id: str) -> None:
             "model": {"id": os.environ.get("FAKE_OPENCODE_MODEL", "space-bunny-free"),
                       "providerID": "fakeup", "variant": "default"},
             "content": [{"type": "tool", "id": f"call_FAKEPART{base:04d}",
-                         "name": "bash", "executed": false,
+                         "name": "bash", "executed": False,
                          "state": {"status": "running",
                                    "input": {"command": "sleep 3600"}},
                          "time": {"created": now}}],
