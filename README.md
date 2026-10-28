@@ -103,6 +103,7 @@ agora search session --filter agent=claude --filter tags=csv
 agora search session --filter generated.by~=opencode
 agora search session                          # 沒有 filter＝列出全部
 agora search session --filter text~=CSV --no-sync   # 不連 Drive，只查本機索引
+agora search session --filter tags=ai:claude-work --json   # 機器可讀：一個 JSON 陣列（欄位見 docs/design.md 5.1）
 # 每行：agora id、對話日期、agent、標題或摘要；最後更新日與對話日期不同時補
 # 「（更新：YYYY-MM-DD）」（清單順序仍是對話日期，新到舊）。
 # 本機正在接續的標 (使用中)；只看得到這台機器的鎖，別台機器上的接續看不到。
