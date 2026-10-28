@@ -170,6 +170,16 @@ def _read_to_eof(fd: int) -> bytes:
         chunks.append(chunk)
 
 
+def grace() -> float:
+    """The grace this process was told to use (`AGORA_ORPHAN_GRACE`, default 10).
+
+    The reaper waits this long between TERM and KILL; `continue` uses the same
+    number as the limit for an agent it already asked to stop (#107), so one
+    setting moves both.
+    """
+    return _grace(None)
+
+
 def _grace(value: float | None) -> float:
     if value is not None:
         return value
