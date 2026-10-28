@@ -35,7 +35,7 @@ def guard():
 
 class Done(subprocess.CompletedProcess):
     def __init__(self, stdout="", stderr="", returncode=0):
-        super().__init__(argv := [], returncode=returncode, stdout=stdout, stderr=stderr)
+        super().__init__([], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 def test_a_failed_list_fails_the_test_instead_of_reporting_an_empty_set():

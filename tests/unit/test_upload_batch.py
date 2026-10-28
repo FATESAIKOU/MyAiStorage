@@ -831,7 +831,6 @@ def test_a_pass_sends_only_the_segments_the_entry_names(env, monkeypatch):
     store.stage(paths, hdr, "## user\n第一版\n", b'{"v": 1}')
     folder = store.stage(paths, hdr, "## user\n第二版\n", b'{"v": 2}')
     ulid = folder.name
-    named = _entry_raw(paths, ulid)
     assert len(list(folder.glob("raw-*"))) == 2, "the previous raw came along"
     batches = _record_batches(monkeypatch)
 
@@ -854,7 +853,6 @@ def test_a_stage_between_the_list_and_the_raw_copy_does_not_stop_the_batch(env, 
     paths = store.Paths.from_env()
     hdr = _header()
     folder = store.stage(paths, hdr, "## user\n第一版\n", b'{"v": 1}')
-    first_raw = _entry_raw(paths, folder.name)
     real_copy = store._copy_batch
     staged = {"done": False}
 
@@ -1225,7 +1223,7 @@ def test_no_batch_snapshot_is_left_behind(env, monkeypatch):
     """#130: the private copy of session.md lives under <state>/batch-<pid> and goes on
     the way out - after a good round, a failed one, and an exception."""
     paths = store.Paths.from_env()
-    ulid = _stage(paths, "第一版")
+    _stage(paths, "第一版")
     assert store.upload_batch(store.Drive(paths), paths) == []
     assert not list(paths.state.glob("batch-*"))
 

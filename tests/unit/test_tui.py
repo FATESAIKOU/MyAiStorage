@@ -4406,7 +4406,7 @@ def test_a_whole_conversation_that_cannot_be_read_does_not_stay_on_loading(monke
     assert tui.import_preview(broken, "s1", True, None) is None, "there is no whole conversation"
     assert tui.import_preview(broken, "s1").pinned == "讀不到這個 session"
 
-    real, boom = tui.import_preview, None
+    real = tui.import_preview
 
     def only_the_full_one(agent, session_id, full=False, paths=None, updated=None):
         if full:
@@ -4501,7 +4501,6 @@ def test_benchmark_3mb_real_format_search_and_n():
             await pilot.pause()
             await pilot.press("down")
             await pilot.pause(0.4)
-            pane = app.query_one("#right", tui.PreviewText)
             await _focus_pane(app, pilot)
             await pilot.pause()
 
