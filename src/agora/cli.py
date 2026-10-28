@@ -56,7 +56,8 @@ EXIT_AGENT_FAILED = 5  # `continue`'s agent child died (#76); stderr has `agora-
 #: (#76): 130 is Ctrl-C and 143 is SIGTERM in the shell convention; -2 (SIGINT)
 #: and -15 (SIGTERM) are the same deaths as negative returncodes. Anything else
 #: != 0 counts - including -9 (SIGKILL/OOM) and -11 - unless agora itself
-#: forwarded its own SIGTERM to the child (the headless gentle stop leaves 0).
+#: forwarded its own SIGTERM to the child (the gentle stop leaves 0, headless and
+#: interactive alike).
 AGENT_FAILED_IGNORED = (130, 143, -2, -15)
 DESCRIPTION_MAX = 80
 ACTOR = {"opencode": "opencode", "claude": "claude-code", "agy": "agy"}   # OKF actor prefix per agent
@@ -255,20 +256,26 @@ def _uploaded(paths: store.Paths, ulid: str) -> bool:
     could not start is a failure to report, not a quiet success (design「最後一次」P8).
     """
     from agora import background
-    state = background.start(paths)
+    # The uploader's own lines are not #107's, but this call is on `continue`'s closing
+    # path: an inline run (`AGORA_UPLOAD=inline`) would otherwise lose the terminal's
+    # EIO to the write-back that is already done. Only EIO/EPIPE are excused.
+    with store.terminal_may_be_gone():
+        state = background.start(paths)
     if state == background.STARTED:
         return True
     # Only what this call wrote counts: an entry that never uploads must not turn
     # someone else's successful import into a failure (review P6).
     if state == background.FINISHED and ulid not in store.outbox_ulids(paths):
         return True
-    print("[agora] 上傳失敗，已存入 outbox，之後的指令會自動再送", file=sys.stderr)
+    store.say("[agora] 上傳失敗，已存入 outbox，之後的指令會自動再送")
     return False
 
 
 def _emit(saved: tuple[str, bool], *, quiet: bool = False) -> int:
     if not quiet:                 # headless: stdout belongs to the agent (D6)
-        print(saved[0])
+        # A hung-up terminal must not turn the answer into exit 120 (#107 M1):
+        # the id is the whole reply, and `say_out` only costs the line.
+        store.say_out(saved[0])
     return 0 if saved[1] else EXIT_IN_OUTBOX
 
 
@@ -1248,7 +1255,7 @@ def _say_note(run: "_Run", note: str | None) -> None:
     """
     if not note:
         return
-    print(note, file=sys.stderr)
+    store.say(note)
     if run.first_note is None:
         run.first_note = note
 
@@ -1807,7 +1814,7 @@ def _periodic_write(run: "_Run", agent: Agent) -> None:
                 run.fingerprint = None
                 _repair_pending(run)
                 outcome = f"失敗（第 {run.failures} 次）：{e}"
-            print(f"[agora] 定期寫回：{outcome}", file=sys.stderr)
+            store.say(f"[agora] 定期寫回：{outcome}")
     except Exception:                # the log itself is broken: stay silent, keep going
         run.failures += 1
     finally:
@@ -1843,12 +1850,25 @@ def _forward_sigterm(child) -> bool:
     return False
 
 
+def _forward_stop(child, stop: "_GentleStop | None") -> bool:
+    """Forward the gentle stop and start its clock only when it really went out (#107 M3).
+
+    A SIGTERM that finds the agent already dead is not a gentle stop: its own exit
+    code stays the truth, and no deadline may be started for a process that is gone.
+    """
+    if not _forward_sigterm(child):
+        return False
+    if stop is not None:
+        stop.forwarded()
+    return True
+
+
 def _agent_failure(returncode: int | None, forwarded: bool) -> int | None:
     """The agent's own failure to report, or None when it is not one (#76).
 
     Any `returncode != 0` counts, except the goodbye codes (130/143 and their
     signal deaths -2/-15) and an ending this run caused itself by forwarding its
-    own SIGTERM to the child (the headless gentle stop leaves 0). The caller
+    own SIGTERM/SIGHUP to the child (the gentle stop leaves 0). The caller
     still writes back first - what the agent said before dying is not lost -
     then prints `agora-agent-failed rc=<code>` on stderr (#54's shape, negative
     codes as they are, e.g. rc=-9) and leaves with the fixed `EXIT_AGENT_FAILED`
@@ -1866,21 +1886,164 @@ def _agent_failure(returncode: int | None, forwarded: bool) -> int | None:
     return returncode
 
 
-def _wait_agent(proc, run: "_Run", agent: Agent, interval: float) -> bool:
+def _say_protocol(paths: store.Paths, line: str) -> None:
+    """The one fixed line a caller reads (`agora-agent-failed rc=…`) (#107 M2).
+
+    A hung-up terminal may take the line with it, but never quietly: the exit code
+    still says the same thing, and the line goes to `continue.log` so the failure
+    is on record somewhere. The log is best effort - a run must not fail because
+    the note could not be written.
+    """
+    if store.say(line):
+        return
+    try:
+        writer = _LogWriter(paths.state / CONTINUE_LOG, "stderr-lost")
+        try:
+            writer.write(f"{line}（stderr 已斷，改用這行留痕）\n")
+        finally:
+            writer.close()
+    except OSError:
+        pass
+
+
+class _GentleStop:
+    """The deadline that follows a forwarded SIGTERM/SIGHUP (#107).
+
+    The agent was told to stop. If it is still there after the reaper's grace
+    (`AGORA_ORPHAN_GRACE`, the same number as the reaper's TERM→KILL wait), then
+    waiting any longer is wrong: it is taken down and the last write-back goes
+    ahead anyway. Without a deadline an interactive `continue` could wait for an
+    agent that never leaves, which is the one thing this must not do.
+
+    Only a signal that really reached the agent starts the clock: a SIGTERM that
+    found the agent already gone is not a gentle stop.
+    """
+
+    def __init__(self) -> None:
+        self.deadline: float | None = None
+
+    def forwarded(self) -> None:
+        """A signal just reached the agent: it has the grace to leave."""
+        if self.deadline is None:
+            self.deadline = time.monotonic() + orphan_guard.grace()
+
+    def remaining(self) -> float | None:
+        """Seconds left before the agent is taken down; None when nobody asked."""
+        if self.deadline is None:
+            return None
+        return self.deadline - time.monotonic()
+
+    def overdue(self) -> bool:
+        return self.deadline is not None and self.remaining() <= 0.0
+
+    def take_down(self, proc) -> None:
+        """SIGKILL the agent and its direct children, then reap it - bounded.
+
+        `stop_orphan(..., 0.0)` is the reaper's own "no more waiting: KILL what is
+        left"; with grace 0 it sends one more SIGTERM and then SIGKILLs at once
+        (the handler's forward is what the agent already got, so that second TERM
+        is only a formality - it costs nothing and it keeps this one call to the
+        reaper's own code). `proc.kill()` is the floor under it for an agent the
+        pid check could not see. The reap is bounded too: this is the one place
+        that must not be able to hang.
+        """
+        pid = getattr(proc, "pid", None)
+        if pid is not None:
+            try:
+                orphan_guard.stop_orphan(pid, orphan_guard.start_time(pid), 0.0)
+            except Exception:      # noqa: BLE001 - a `ps` failure must not keep it alive
+                pass
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+#: How often a wait looks again when no signal has been forwarded (#107 H1).
+#: `Popen.wait` internally polls (up to 50 ms sleeps) and does not return early for
+#: a signal, so the wait has to come back on its own now and then to notice one.
+#: The grace is that period - except that it may be 0 ("KILL at once" for the
+#: stop deadline); a 0-second period is not a period, it is a spin (1.4M `wait`
+#: calls in 2 s, measured in review), so the no-signal period has a floor of 1 s.
+NO_SIGNAL_POLL_FLOOR = 1.0
+
+
+def _wait_limit(interval: float | None, stop: "_GentleStop | None") -> float | None:
+    """How long one wait may last: this slice, cut short by the stop deadline.
+
+    Two different numbers (#107 H1): the period of an *unsignalled* wait, and the
+    deadline a forwarded signal starts. The first is `max(grace, 1.0)`
+    (`NO_SIGNAL_POLL_FLOOR`): a SIGTERM can arrive while a wait is already running
+    and `Popen.wait` does not come back early for it, so the wait must look again -
+    but only `AGORA_ORPHAN_GRACE=0` callers get the floor, and never a 0-second
+    spin. The second is the grace itself, counted from the forward: the slice is
+    then capped by what is left, so the agent is taken down within the grace (and
+    with grace 0, at once - `wait(0)` returns TimeoutExpired and `overdue()` is
+    already true).
+
+    None means "until the agent ends" only when the caller asked for it
+    (`interval` is None and no stop is in play): `--sync-period 0` with no signal.
+    """
+    if stop is None or stop.remaining() is None:
+        cap = max(orphan_guard.grace(), NO_SIGNAL_POLL_FLOOR)
+    else:
+        cap = max(0.0, stop.remaining())
+    if interval is None:
+        return cap
+    return min(interval, cap)
+
+
+def _wait_until_gone(proc, stop: "_GentleStop | None" = None) -> None:
+    """Wait for the agent with no periodic write-back, inside any stop deadline.
+
+    Used by `--sync-period 0` and by the "never leave while the agent is alive"
+    path (design P9a). A forwarded SIGTERM still bounds the wait (#107): an agent
+    that ignores it is taken down instead of waited on forever.
+    """
+    while True:
+        try:
+            proc.wait(timeout=_wait_limit(None, stop))
+            return
+        except subprocess.TimeoutExpired:
+            if stop is not None and stop.overdue():
+                stop.take_down(proc)
+                return
+
+
+def _wait_agent(proc, run: "_Run", agent: Agent, interval: float,
+                stop: "_GentleStop | None" = None) -> bool:
     """Wait for the agent, writing back every `interval` seconds.
 
     Returns whether the agent ended while a round was still writing (design P7): the
     terminal is ours again at that point, so the caller says why it stays quiet a
     little longer. The loop never leaves while the agent is alive, and never kills
-    it: an exception here waits first (design P9a) - the caller does that part.
+    it - except that a forwarded SIGTERM/SIGHUP bounds the wait (#107): an agent
+    still there when the deadline passes is taken down, and the last write-back
+    still happens. A wait may end early (the deadline caps it, `_wait_limit`); only
+    a real round boundary writes back. Known limit (#107 L5): the deadline is
+    checked between waits, so a round that is already running - including an inline
+    upload in it - is not cut short by it. An exception here waits first (design
+    P9a) - the caller does that.
     """
     said_writing = False
+    due = time.monotonic() + interval
     while True:
         try:
-            proc.wait(timeout=interval)
+            proc.wait(timeout=_wait_limit(max(0.0, due - time.monotonic()), stop))
             return said_writing
         except subprocess.TimeoutExpired:
             pass
+        if stop is not None and stop.overdue():
+            stop.take_down(proc)
+            return said_writing
+        if time.monotonic() < due:
+            continue                 # the slice ended early, not the round
+        due = time.monotonic() + interval
         _periodic_write(run, agent)
         store._fault("after-periodic-write")
         if not said_writing and proc.poll() is not None:
@@ -2220,8 +2383,8 @@ def cmd_continue(args, paths: store.Paths) -> int:
     src_dir = src.get("dir") if src.get("dir") and Path(src["dir"]).is_dir() else None
     workdir = Path(args.dir or src_dir or os.getcwd()).expanduser().resolve()   # C5
     fallback = not args.dir and not src_dir
-    print(f"[agora] 工作目錄：{workdir}" + ("（來源沒有記錄目錄，用目前目錄；要換地方請加 --dir）" if fallback else ""),
-          file=sys.stderr)
+    store.say(f"[agora] 工作目錄：{workdir}"
+              + ("（來源沒有記錄目錄，用目前目錄；要換地方請加 --dir）" if fallback else ""))
     state = {
         "agent": agent.name, "source_id": source_id, "parent": parent, "fork": fork,
         "updates": updates, "add_tags": add_tags, "workdir": str(workdir),
@@ -2243,7 +2406,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
         fork_id, fork_md5 = payload["fork_id"], payload["fork_md5"]
         # The fork is saved already (in the child, which is where its bytes died);
         # M7: the id is out.
-        print(f"[agora] fork 已存成 {fork_id}", file=sys.stderr)
+        store.say(f"[agora] fork 已存成 {fork_id}")
         record = {
             "agora_id": fork_id, "agent": agent.name,     # B, not A: A is not touched
             "agent_session_id": launch.agent_session_id, "dir": launch.cwd,
@@ -2289,29 +2452,37 @@ def cmd_continue(args, paths: store.Paths) -> int:
     # lives even if agora itself is killed (C1).
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
     previous_term = None
+    previous_hup = None
     proc = None
     term_pending = False
     term_forwarded = False
+    stop = _GentleStop()
 
     def _term_child(child) -> None:
         nonlocal term_forwarded
-        if _forward_sigterm(child):
+        if _forward_stop(child, stop):
             term_forwarded = True
 
-    if headless:
-        # Gentle stop (design D6): SIGTERM forwards to the agent, then this
-        # process keeps waiting for it, writes the last conversation back,
-        # releases the lock and leaves 0. A default SIGTERM would kill agora
-        # before any of that. A SIGTERM that lands before Popen returns has no
-        # child to forward to yet: remember it and send it right after (L3).
-        def _forward_term(signum, frame):
-            nonlocal term_pending
-            if proc is None:
-                term_pending = True
-                return
-            _term_child(proc)
+    # Gentle stop (design D6): SIGTERM forwards to the agent, then this process
+    # keeps waiting for it, writes the last conversation back, releases the lock
+    # and leaves 0. A default SIGTERM would kill agora before any of that. A
+    # SIGTERM that lands before Popen returns has no child to forward to yet:
+    # remember it and send it right after (L3). #107: an interactive continue
+    # does the same, and a SIGHUP (the terminal was closed) is forwarded too -
+    # headless callers stop agora with SIGTERM, a person's terminal sends HUP, and
+    # only the interactive one has that case (its stderr is a terminal). The wait
+    # that follows is bounded by `AGORA_ORPHAN_GRACE`: an agent that ignores the
+    # signal is taken down there instead of being waited on forever.
+    def _forward_term(signum, frame):
+        nonlocal term_pending
+        if proc is None:
+            term_pending = True
+            return
+        _term_child(proc)
 
-        previous_term = signal.signal(signal.SIGTERM, _forward_term)
+    previous_term = signal.signal(signal.SIGTERM, _forward_term)
+    if not headless:
+        previous_hup = signal.signal(signal.SIGHUP, _forward_term)
     # The agent must not outlive a SIGKILLed agora (#229): a tiny reaper is
     # started right after the agent and holds the read end of a pipe whose
     # write end only this process has; EOF without the goodbye byte means this
@@ -2332,22 +2503,28 @@ def cmd_continue(args, paths: store.Paths) -> int:
                 term_pending = False
                 _term_child(proc)
             if interval is None:
-                proc.wait()           # --sync-period 0: just wait, only the final write-back
+                # --sync-period 0: just wait, only the final write-back - but a
+                # forwarded SIGTERM still has its limit (#107).
+                _wait_until_gone(proc, stop)
                 said_writing = False
             else:
                 try:
-                    said_writing = _wait_agent(proc, run, agent, interval)
+                    said_writing = _wait_agent(proc, run, agent, interval, stop)
                 except BaseException:
                     # Never leave while the agent is alive, and never kill it: wait first,
-                    # then let the exception go (design P9a).
-                    proc.wait()
+                    # then let the exception go (design P9a). A forwarded SIGTERM still
+                    # bounds that wait (#107), or an agent that ignores it would keep this
+                    # process here for good.
+                    _wait_until_gone(proc, stop)
                     raise
                 if said_writing:
-                    print("[agora] 正在寫回…", file=sys.stderr)
+                    store.say("[agora] 正在寫回…")
         finally:
             signal.signal(signal.SIGINT, previous)
             if previous_term is not None:
                 signal.signal(signal.SIGTERM, previous_term)
+            if previous_hup is not None:
+                signal.signal(signal.SIGHUP, previous_hup)
         agent_rc = proc.returncode if proc is not None else None
         failed = _agent_failure(agent_rc, term_forwarded)
 
@@ -2361,7 +2538,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
             """
             if failed is None:
                 return normal
-            print(f"agora-agent-failed rc={failed}", file=sys.stderr)
+            _say_protocol(paths, f"agora-agent-failed rc={failed}")
             return EXIT_AGENT_FAILED if normal == 0 else normal
 
         store._fault("before-finalize")
@@ -2371,17 +2548,16 @@ def cmd_continue(args, paths: store.Paths) -> int:
             # Minor3: the write-back itself blew up (main turns it into exit 2) -
             # the agent's death is still said out loud before the exception goes on.
             if failed is not None:
-                print(f"agora-agent-failed rc={failed}", file=sys.stderr)
+                _say_protocol(paths, f"agora-agent-failed rc={failed}")
             raise
         run.pending.unlink()          # the current path: a rescue may have renamed it
         lock.close()
         if run.first_note is not None and final_note is None:
             # The move happened mid-run; its explanation went to the log, so say it again
             # where the person will see it (design「最後一次」).
-            print(run.first_note, file=sys.stderr)
+            store.say(run.first_note)
         if run.failures:
-            print(f"[agora] 定期寫回失敗 {run.failures} 次，見 {paths.state / CONTINUE_LOG}",
-                  file=sys.stderr)
+            store.say(f"[agora] 定期寫回失敗 {run.failures} 次，見 {paths.state / CONTINUE_LOG}")
         if saved is None:
             # Nothing staged this call, but an entry may still be waiting from an earlier
             # round: kick the uploader and answer by it (design「最後一次」P8).
@@ -2391,17 +2567,17 @@ def cmd_continue(args, paths: store.Paths) -> int:
                 # `unsaved-launches` - B's source is this launch, so the import tab must keep
                 # comparing it (design「沒有新內容時」).
                 if not headless:
-                    print(target)
-                print(f"[agora] 沒有新內容；fork 已存成 {target}", file=sys.stderr)
+                    store.say_out(target)
+                store.say(f"[agora] 沒有新內容；fork 已存成 {target}")
                 return _finish(0 if (saved_fork[1] and ok) else EXIT_IN_OUTBOX)
             if not run.wrote:
                 # the agent still holds the copy agora loaded; the import tab leaves it out (review T5)
                 with open(paths.state / "unsaved-launches", "a", encoding="utf-8") as f:
                     f.write(f"{agent.name}:{launch.agent_session_id}\n")
-                print("[agora] 這次沒有新內容，沒有存", file=sys.stderr)
+                store.say("[agora] 這次沒有新內容，沒有存")
                 return _finish(0 if ok else EXIT_IN_OUTBOX)
             if not headless:
-                print(target)
+                store.say_out(target)
             return _finish(0 if ok else EXIT_IN_OUTBOX)
         if not fork:
             return _finish(_emit(saved, quiet=headless))

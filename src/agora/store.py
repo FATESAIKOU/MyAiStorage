@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import errno
 import fcntl
 import copy
 import hashlib
@@ -100,6 +101,117 @@ def _fault(point: str) -> None:
     """Crash on purpose at a named point (AGORA_TEST_FAULT), to test recovery."""
     if os.environ.get("AGORA_TEST_FAULT") == point:
         os._exit(137)
+
+
+#: What a terminal that went away leaves behind: EIO (the pty was hung up, SIGHUP)
+#: and EPIPE (the reader closed the pipe). Nothing else is swallowed (#107 M2).
+_GONE_ERRNOS = (errno.EIO, errno.EPIPE)
+
+
+def _say_on(stream_name: str, message: str, *, flush: bool = False) -> bool:
+    """One line on `stream_name`; says whether it was written (#107).
+
+    A SIGHUP closes the pty: the write raises EIO and the bytes the stream could not
+    write stay pending in it, so the interpreter leaves 120 at shutdown whatever this
+    run had decided. Only those two errnos count as「終端不見了」: the stream is pointed
+    at /dev/null (the rest of the run is silent, the exit code stays the run's own) and
+    the line is reported as not written. Any other OSError - ENOSPC, a non-blocking
+    stream's BlockingIOError - is a real failure and goes on to the caller.
+    """
+    stream = getattr(sys, stream_name)
+    try:
+        print(message, file=stream, flush=flush)
+        return True
+    except OSError as e:
+        if e.errno not in _GONE_ERRNOS:
+            raise
+        try:
+            setattr(sys, stream_name, open(os.devnull, "w", encoding="utf-8"))
+        except OSError:
+            pass
+        return False
+
+
+def say(message: str, *, flush: bool = False) -> bool:
+    """One stderr line a hung-up terminal may cost, never the work behind it (#107).
+
+    For the lines on `continue`'s closing path (the last write-back, the pending lock
+    being released, the agent-failure line): there the terminal may take the line,
+    never the work.
+    """
+    return _say_on("stderr", message, flush=flush)
+
+
+def say_out(message: str, *, flush: bool = False) -> bool:
+    """One stdout line with the same protection (#107 M1): the id is the answer."""
+    return _say_on("stdout", message, flush=flush)
+
+
+class _GoneTerminalText:
+    """A stdout/stderr stand-in for a stretch whose lines a hung-up terminal may cost.
+
+    `background.py` keeps its own bare prints (not #107's business), but when the
+    uploader runs in this process (`AGORA_UPLOAD=inline`) instead of detached, its
+    lines sit on `continue`'s closing path like the rest. Only EIO/EPIPE - the
+    terminal is gone - cost the line; every other error still reaches the caller.
+    A stream that failed once is `gone` for good: its pending bytes would blow up the
+    interpreter's shutdown flush and take the exit code with them (120).
+    """
+
+    def __init__(self, stream) -> None:
+        self._stream = stream
+        self.gone = False
+
+    def write(self, text: str):
+        if self.gone:
+            return len(text)
+        try:
+            return self._stream.write(text)
+        except OSError as e:
+            if e.errno not in _GONE_ERRNOS:
+                raise
+            self.gone = True
+        return len(text)
+
+    def flush(self) -> None:
+        if self.gone:
+            return
+        try:
+            self._stream.flush()
+        except OSError as e:
+            if e.errno not in _GONE_ERRNOS:
+                raise
+            self.gone = True
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _devnull():
+    """A quiet place to point a stream that just lost its terminal; None if it fails."""
+    try:
+        return open(os.devnull, "w", encoding="utf-8")
+    except OSError:
+        return None
+
+
+@contextlib.contextmanager
+def terminal_may_be_gone():
+    """Run a stretch whose own progress lines a hung-up terminal may cost (#107).
+
+    The streams are put back afterwards - unless one of them lost the terminal, in
+    which case it stays on /dev/null: a failed stream still holds the bytes it could
+    not write, and the interpreter's last flush of it would leave 120 behind whatever
+    this run decided.
+    """
+    out, err = _GoneTerminalText(sys.stdout), _GoneTerminalText(sys.stderr)
+    saved_out, saved_err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = out, err
+    try:
+        yield
+    finally:
+        sys.stdout = (_devnull() if out.gone else None) or saved_out
+        sys.stderr = (_devnull() if err.gone else None) or saved_err
 
 
 def warn(message: str) -> None:

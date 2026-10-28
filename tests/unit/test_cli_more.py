@@ -11,6 +11,8 @@ import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve
 
 import json
 import os
+import errno
+import pty
 import shutil
 import shutil
 import signal
@@ -174,14 +176,25 @@ AGENT_SCRIPT = textwrap.dedent("""
                     locked = True
         note(f"found={found} locked={locked}")
         append("ZZAGENT 續寫一句")
+    elif mode == "append-on-term":
+        import signal
+        note(f"pid={os.getpid()}")
+        seen = []
+        signal.signal(signal.SIGTERM, lambda *a: seen.append(1))
+        while not seen:                    # a turn that only ends when it is asked to
+            time.sleep(0.05)
+        time.sleep(0.5)                    # finishing that turn is not instant
+        append("ZZAGENT 收尾一句")
     else:
         append("ZZAGENT 續寫一句")
         note(f"pid={os.getpid()}")
-        if mode in ("append-sleep-ignore", "append-sleep"):
+        if mode in ("append-sleep-ignore", "append-sleep", "append-sleep-ignore-term"):
+            import signal
             if mode == "append-sleep-ignore":
-                import signal
                 signal.signal(signal.SIGINT, signal.SIG_IGN)
-            time.sleep(120)
+            elif mode == "append-sleep-ignore-term":
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)   # an agent that will not leave
+            time.sleep(float(os.environ.get("SCRIPT_SLEEP", "120")))
 """)
 
 
@@ -595,6 +608,459 @@ def test_concurrent_recovery_makes_one_session(env, capsys, tmp_path, claude_env
     hdr = store.Index(paths()).header(made[0])
     assert [p["id"] for p in hdr["agora"]["parents"]] == [parent]
     assert not list(paths().pending.glob("*.json"))
+
+
+# --- #107 the interactive gentle stop -------------------------------------------------
+
+def _ready(capsys, tmp_path, claude_env):
+    """A claude session imported, with its fixture laid out; (agora id, workdir)."""
+    work = tmp_path / "proj"
+    work.mkdir()
+    lay_fixture(claude_env["home"], work)
+    _, parent, err = run(capsys, "import", "session", "--external-session-id", CL_SID,
+                         "--agent", "claude")
+    assert parent.startswith("agora:"), err
+    return parent, work
+
+
+def _running(capsys, tmp_path, claude_env, monkeypatch, mode="append-sleep",
+             args=(), **extra):
+    """An interactive continue in a subprocess, its fake agent up and holding a turn."""
+    parent, work = _ready(capsys, tmp_path, claude_env)
+    monkeypatch.setenv("SCRIPT_MODE", mode)
+    monkeypatch.setenv("SCRIPT_MARKER", str(claude_env["marker"]))
+    proc = cli_child("continue", "session", parent, "--agent", "claude", "--dir", str(work),
+                     *args, extra_env=extra or None)
+    pid = int(wait_marker(claude_env["marker"]).split("pid=")[1].split()[0])
+    return parent, work, proc, pid
+
+
+def test_interactive_sigterm_writes_back_and_exits_0(env, capsys, tmp_path, claude_env,
+                                                      monkeypatch):
+    """#107 A: a plain (not --headless) continue is stopped gently, like the headless one.
+
+    SIGTERM forwards to the agent, the last conversation is written back, the lock is
+    released and agora leaves 0 - instead of dying on the default action with the
+    agent left to the reaper and the turn not on Drive.
+    """
+    parent, _, proc, pid = _running(capsys, tmp_path, claude_env, monkeypatch)
+    started = time.monotonic()
+    proc.send_signal(signal.SIGTERM)
+    out, err = proc.communicate(timeout=120)
+    assert proc.returncode == 0, err
+    # The agent sleeps 120s here: ending now (not when its sleep runs out) is the
+    # signal having reached it.
+    assert time.monotonic() - started < 60
+    wait_gone(pid)
+    assert not list(paths().pending.glob("*.json"))
+    code, shown, err = run(capsys, "show", "session", parent)
+    assert code == 0, err
+    assert "ZZAGENT 續寫一句" in shown          # what the agent said before the signal
+    assert out.strip().startswith("agora:")     # the interactive id still goes to stdout
+
+
+def test_interactive_sigterm_before_the_agent_starts_is_forwarded(env, capsys, tmp_path,
+                                                                  claude_env, monkeypatch):
+    """#107 L3: the handler is installed before Popen returns, for the interactive one too.
+
+    The probe fires SIGTERM in exactly that window (as the headless L3 test does): the
+    signal has no child yet, so it is remembered and sent to the fresh agent, and the
+    run still ends 0 with nothing left pending.
+    """
+    parent, work = _ready(capsys, tmp_path, claude_env)
+    monkeypatch.setenv("SCRIPT_MODE", "append-sleep")
+    monkeypatch.setenv("SCRIPT_SLEEP", "5")     # a missed forward ends the test in 5s, not 120
+    real_popen = subprocess.Popen
+    sent = {"done": False}
+
+    class EarlyTermPopen:
+        def __init__(self, *args, **kwargs):
+            handler = signal.getsignal(signal.SIGTERM)
+            if not sent["done"] and getattr(handler, "__name__", "") == "_forward_term":
+                sent["done"] = True
+                os.kill(os.getpid(), signal.SIGTERM)  # the race window: proc is None
+            self._proc = real_popen(*args, **kwargs)
+
+        def __enter__(self):
+            self._proc.__enter__()
+            return self._proc
+
+        def __exit__(self, *exc):
+            return self._proc.__exit__(*exc)
+
+        def __getattr__(self, name):
+            return getattr(self._proc, name)
+
+    monkeypatch.setattr(cli.subprocess, "Popen", EarlyTermPopen)
+    code = cli.main(["continue", "session", parent, "--agent", "claude",
+                     "--dir", str(work), "--sync-period", "0.005"])
+
+    assert sent["done"], "the probe never hit the window; it proved nothing"
+    assert code == 0, capsys.readouterr().err
+    assert not list(paths().pending.glob("*.json"))
+
+
+@pytest.mark.parametrize("sync", [None, "0"], ids=["sync-period-default", "sync-period-0"])
+def test_an_interactive_agent_that_ignores_term_is_killed_at_the_limit(
+    env, capsys, tmp_path, claude_env, monkeypatch, sync
+):
+    """#107 A, the limit: the wait cannot be forever - after `AGORA_ORPHAN_GRACE` it goes.
+
+    The agent ignores SIGTERM; agora waits the grace (the reaper's own number, shortened
+    here), takes the agent down, still writes the turn back and leaves 0. Without a limit
+    this hangs, and the test is red by `communicate(timeout=...)` - never a hang. Both
+    waits are covered: the periodic one and the `--sync-period 0` plain one.
+    """
+    extra = ("--sync-period", sync) if sync else ()
+    parent, _, proc, pid = _running(capsys, tmp_path, claude_env, monkeypatch,
+                                     mode="append-sleep-ignore-term", args=extra,
+                                     AGORA_ORPHAN_GRACE="0.3")
+    started = time.monotonic()
+    proc.send_signal(signal.SIGTERM)
+    try:
+        out, err = proc.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            out, err = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # The agent outlived agora and still holds the pipes: that is the whole
+            # point of this test failing.
+            err = "<the agent outlived agora and still holds the pipes>"
+        pytest.fail("agora kept waiting for an agent that ignores SIGTERM: "
+                    f"rc={proc.returncode} stderr={err!r}")
+    elapsed = time.monotonic() - started
+    assert proc.returncode == 0, err
+    assert elapsed < 60, f"the limit did not fire: {elapsed:.1f}s"
+    wait_gone(pid)
+    assert not list(paths().pending.glob("*.json"))
+    code, shown, err = run(capsys, "show", "session", parent)
+    assert code == 0, err
+    assert "ZZAGENT 續寫一句" in shown
+
+
+def test_an_interactive_close_lets_the_agent_finish_its_answer(env, capsys, tmp_path,
+                                                               claude_env, monkeypatch):
+    """#107: the grace is the agent's to use - it may finish the turn it was in.
+
+    The agent only writes its last turn when it is asked to stop; a limit of 0 (kill
+    at once) would lose exactly that, and is what this pins.
+    """
+    parent, _, proc, pid = _running(capsys, tmp_path, claude_env, monkeypatch,
+                                     mode="append-on-term", AGORA_ORPHAN_GRACE="2")
+    proc.send_signal(signal.SIGTERM)
+    out, err = proc.communicate(timeout=120)
+    assert proc.returncode == 0, err
+    wait_gone(pid)
+    code, shown, err = run(capsys, "show", "session", parent)
+    assert code == 0, err
+    assert "ZZAGENT 收尾一句" in shown
+
+
+def test_the_pending_lock_is_still_held_while_the_last_write_back_runs(
+    env, capsys, tmp_path, claude_env, monkeypatch
+):
+    """#107 (C1 unchanged): the record and its lock are released after the write-back.
+
+    Release them before it and a second continue may start writing the same jsonl -
+    the one thing the inherited lock is there to prevent.
+    """
+    parent, work = _ready(capsys, tmp_path, claude_env)
+    monkeypatch.setenv("SCRIPT_MODE", "append")
+    ulid = parent.split(":")[1]
+    real_final = cli._final_write
+    seen = {}
+
+    def probe(run, agent):
+        seen["pending"] = run.pending.exists()
+        seen["locked"] = store.continuing(paths(), ulid)
+        return real_final(run, agent)
+
+    monkeypatch.setattr(cli, "_final_write", probe)
+    code = cli.main(["continue", "session", parent, "--agent", "claude",
+                     "--dir", str(work)])
+    assert code == 0
+    assert seen == {"pending": True, "locked": True}
+    assert not list(paths().pending.glob("*.json"))
+
+
+def test_a_clean_interactive_close_reopens_with_the_same_claude_id(
+    env, capsys, tmp_path, claude_env, monkeypatch
+):
+    """#107: the gentle stop leaves a file the next continue can keep using.
+
+    A clean close writes the whole jsonl back, so the very next continue re-plans the
+    same Claude session id and stays quiet about it (the 「無法原樣沿用」 line is the
+    sign of a file that stopped half a line in).
+    """
+    parent, work, proc, pid = _running(capsys, tmp_path, claude_env, monkeypatch)
+    started = time.monotonic()
+    proc.send_signal(signal.SIGTERM)
+    out, err = proc.communicate(timeout=120)
+    assert proc.returncode == 0, err
+    assert time.monotonic() - started < 60
+    wait_gone(pid)
+
+    monkeypatch.setenv("SCRIPT_MODE", "append")   # this reopen ends by itself
+    code, reopened, err = run(capsys, "continue", "session", parent, "--agent", "claude",
+                              "--dir", str(work))
+    assert code == 0, err
+    assert reopened == parent
+    assert "無法原樣沿用" not in err
+
+
+def test_the_lock_is_free_as_soon_as_agora_exits(env, capsys, tmp_path, claude_env,
+                                                 monkeypatch):
+    """#107: the lock is released with the write-back, not at the reaper's grace.
+
+    `store.continuing()` right after agora left is False: the reopen that follows does
+    not hit exit 4 while it waits for an agent to die.
+    """
+    parent, _, proc, pid = _running(capsys, tmp_path, claude_env, monkeypatch)
+    assert store.continuing(paths(), parent.split(":")[1]) is True   # while it runs
+    started = time.monotonic()
+    proc.send_signal(signal.SIGTERM)
+    out, err = proc.communicate(timeout=120)
+    assert proc.returncode == 0, err
+    assert time.monotonic() - started < 60
+    wait_gone(pid)
+    assert store.continuing(paths(), parent.split(":")[1]) is False
+
+
+def test_a_hangup_with_a_dead_terminal_still_writes_back(env, capsys, tmp_path, claude_env,
+                                                          monkeypatch):
+    """#107 §5 + M1: a SIGHUP with the pty already closed is still a gentle stop.
+
+    Both streams are the same terminal, as in a real interactive run: the pty's master
+    is closed before the signal, so every further write to stdout *and* stderr is EIO -
+    which must not be what stops the write-back, and must not turn the exit code into
+    the interpreter's 120 either (the id on stdout is the answer of this run).
+    """
+    parent, work = _ready(capsys, tmp_path, claude_env)
+    monkeypatch.setenv("SCRIPT_MODE", "append-sleep")
+    monkeypatch.setenv("SCRIPT_MARKER", str(claude_env["marker"]))
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "agora.cli", "continue", "session", parent,
+         "--agent", "claude", "--dir", str(work)],
+        stdout=slave, stderr=slave, text=True,
+        env=dict(os.environ), start_new_session=True)
+    os.close(slave)                       # the child has its own copy
+    closed = False
+    try:
+        pid = int(wait_marker(claude_env["marker"]).split("pid=")[1].split()[0])
+        os.close(master)                 # the terminal is gone: stdout/stderr writes raise EIO
+        closed = True
+        proc.send_signal(signal.SIGHUP)
+        proc.communicate(timeout=120)
+        assert proc.returncode == 0, proc.returncode
+        wait_gone(pid)
+        assert not list(paths().pending.glob("*.json"))
+        code, shown, err = run(capsys, "show", "session", parent)
+        assert code == 0, err
+        assert "ZZAGENT 續寫一句" in shown
+    finally:
+        if not closed:
+            os.close(master)
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate(timeout=60)
+
+
+class _DeadTerminal:
+    """A stderr whose terminal was hung up: the next write raises EIO, as a pty does."""
+
+    def __init__(self) -> None:
+        self.dead = False
+        self.kept: list[str] = []
+
+    def write(self, text: str) -> None:
+        if self.dead:
+            raise OSError(5, "Input/output error")
+        self.kept.append(text)
+
+    def flush(self) -> None:
+        pass
+
+    def isatty(self) -> bool:
+        return False
+
+
+def test_a_dead_terminal_does_not_stop_the_write_back(env, capsys, tmp_path, claude_env,
+                                                      monkeypatch):
+    """#107 §5: the line said just before the last write-back may not be the last thing.
+
+    The agent ends while a round is still writing, so agora says 「正在寫回…」 first -
+    the one stderr write that used to sit between the signal and the write-back. With
+    the terminal hung up that write raises EIO; the write-back and the unlock still
+    have to happen.
+    """
+    parent, work = _ready(capsys, tmp_path, claude_env)
+    monkeypatch.setenv("SCRIPT_MODE", "append")
+    dead = _DeadTerminal()
+    real_err = sys.stderr
+    monkeypatch.setattr(sys, "stderr", dead)
+
+    def ends_during_the_round(proc, run, agent, interval, stop=None):
+        assert proc.wait(timeout=120) == 0
+        dead.dead = True        # the pty goes away right as the round ends
+        return True
+
+    monkeypatch.setattr(cli, "_wait_agent", ends_during_the_round)
+    code = cli.main(["continue", "session", parent, "--agent", "claude",
+                     "--dir", str(work)])
+    monkeypatch.setattr(sys, "stderr", real_err)
+
+    assert code == 0
+    assert not list(paths().pending.glob("*.json"))
+    code, shown, err = run(capsys, "show", "session", parent)
+    assert code == 0, err
+    assert "ZZAGENT 續寫一句" in shown
+
+
+def test_a_dead_terminal_does_not_take_the_id_with_it(env, capsys, tmp_path, claude_env,
+                                                       monkeypatch):
+    """#107 M1: the other closing-path print - `print(target)` - on a dead stdout too.
+
+    A fork whose final round found nothing new prints the id it lives under; that line
+    is on the same path as `_emit()` and may not raise EIO out of the run (it would leave
+    the interpreter's 120 as the exit code after the write-back and the unlock).
+    """
+    parent, work = _ready(capsys, tmp_path, claude_env)
+    monkeypatch.setenv("SCRIPT_MODE", "append")
+    dead = _DeadTerminal()
+    dead.dead = True                        # the terminal is gone before the id is printed
+    monkeypatch.setattr(sys, "stdout", dead)
+    # The final round found nothing new, which is the branch that prints `target` itself.
+    monkeypatch.setattr(cli, "_final_write", lambda run, agent: (None, parent, None))
+
+    code = cli.main(["continue", "session", parent, "--agent", "claude", "--dir", str(work),
+                     "--fork"])
+
+    assert code == 0
+    assert not list(paths().pending.glob("*.json"))
+
+
+def test_a_zero_grace_is_a_stop_deadline_not_a_zero_second_poll(env, monkeypatch):
+    """#107 H1: `AGORA_ORPHAN_GRACE=0` means "KILL at once", not "spin for the run".
+
+    The no-signal period and the stop deadline are two numbers: 0 is allowed for the
+    deadline (the agent already got its TERM) but a 0-second period is not a period -
+    every wait was `wait(timeout=0)` and returned `TimeoutExpired` at once, so the whole
+    run spun (1.4M calls / CPU 2.0 s in 2 s, measured in the review).
+    """
+    monkeypatch.setenv("AGORA_ORPHAN_GRACE", "0")
+    stop = cli._GentleStop()
+    assert stop.remaining() is None                   # nothing was forwarded yet
+    assert cli._wait_limit(None, stop) >= cli.NO_SIGNAL_POLL_FLOOR
+    assert cli._wait_limit(None, None) >= cli.NO_SIGNAL_POLL_FLOOR
+    assert cli._wait_limit(0.25, stop) == 0.25        # a shorter period is still honoured
+
+    calls = []
+    ends = time.monotonic() + 0.3
+
+    class SlowAgent:
+        returncode = None
+
+        def wait(self, timeout=None):
+            calls.append(timeout)
+            time.sleep(min(timeout or 0.0, 0.05))      # a real wait sleeps its timeout
+            if time.monotonic() >= ends:
+                self.returncode = 0
+                return 0
+            raise subprocess.TimeoutExpired("agent", timeout)
+
+        def poll(self):
+            return None
+
+    cli._wait_until_gone(SlowAgent(), stop)
+
+    assert all(c >= cli.NO_SIGNAL_POLL_FLOOR for c in calls), calls
+    assert len(calls) < 30, f"{len(calls)} waits in 0.3 s: the wait is spinning (grace=0)"
+
+
+def test_a_signal_that_finds_the_agent_gone_starts_no_stop_clock(env):
+    """#107 M3: only a signal that really reached the agent starts the limit.
+
+    The agent already ended (`poll()` not None): forwarding is a no-op, nothing was
+    asked to stop, so no deadline may start - a deadline there would take down or wait
+    on an agent that never got the signal, and the agent's own exit code is the truth.
+    """
+    stop = cli._GentleStop()
+
+    class Gone:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def send_signal(self, sig):
+            pytest.fail("a SIGTERM went to an agent that had already ended")
+
+    assert cli._forward_stop(Gone(), stop) is False
+    assert stop.deadline is None
+
+    sent = []
+
+    class Live:
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def send_signal(self, sig):
+            sent.append(sig)
+
+    assert cli._forward_stop(Live(), stop) is True
+    assert sent == [signal.SIGTERM]
+    assert stop.deadline is not None
+
+
+def test_only_a_hung_up_terminal_is_swallowed(env, monkeypatch):
+    """#107 M2: `say`/`say_out` take EIO/EPIPE, and nothing else - a real error still shows.
+
+    A temporary ENOSPC (or a non-blocking stream's BlockingIOError) is a failure the
+    caller has to see; swallowing it would also silence the rest of the run for good.
+    """
+    class Full:
+        def write(self, text):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        def flush(self):
+            pass
+
+    full = Full()
+    monkeypatch.setattr(sys, "stderr", full)
+    with pytest.raises(OSError) as e:
+        store.say("[agora] 一句")
+    assert e.value.errno == errno.ENOSPC
+    assert sys.stderr is full                  # not swapped for /dev/null
+
+    dead = _DeadTerminal()
+    dead.dead = True
+    monkeypatch.setattr(sys, "stderr", dead)
+    assert store.say("[agora] 一句") is False
+    assert sys.stderr is not dead              # this one is gone: the rest stays quiet
+
+    monkeypatch.setattr(sys, "stdout", dead)
+    assert store.say_out("agora:01K6TEST0000000000000000") is False
+
+
+def test_the_failure_line_is_not_lost_with_the_terminal(env, monkeypatch):
+    """#107 M2: `agora-agent-failed` is a protocol line - a dead stderr may move it,
+    never drop it without a trace (the exit code alone does not say which code it was).
+    """
+    p = paths()
+    p.state.mkdir(parents=True, exist_ok=True)
+    dead = _DeadTerminal()
+    dead.dead = True
+    monkeypatch.setattr(sys, "stderr", dead)
+
+    cli._say_protocol(p, "agora-agent-failed rc=9")
+
+    logged = (p.state / cli.CONTINUE_LOG).read_text(encoding="utf-8")
+    assert "agora-agent-failed rc=9" in logged
+    assert "stderr-lost" in logged
 
 
 # --- U-SHW -----------------------------------------------------------------------------
