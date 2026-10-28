@@ -1141,7 +1141,8 @@ class ClaudeAgent:
 
     def start_native(self, raw: bytes, workdir: Path, *, headless: bool = False,
                      headless_port: int | None = None,
-                     harness_file: Path | None = None, keep_id: str | None = None) -> Launch:
+                     harness_file: Path | None = None, keep_id: str | None = None,
+                     extra_args: list[str] | tuple[str, ...] = ()) -> Launch:
         """Load `raw` as a Claude session in `workdir` and build the `--resume` argv.
 
         `keep_id` is the Claude session id the Session already has. The cli passes it
@@ -1150,6 +1151,13 @@ class ClaudeAgent:
         same id and the lines come back as they were (#190, design 5.4). When the id
         cannot be used (a different file under it already), a new one is made and
         one line says so.
+
+        `extra_args` is what the caller asked to hand claude unchanged (#204 PR1,
+        `agora continue --agent-arg=…`／`-- …`). It goes on the end of the argv, after
+        every flag agora itself decided (headless, the fixed `--settings`, the
+        harness flags), in both the headless and the interactive shape. `cli` has
+        already refused the flags that would make the agent's own session disagree
+        with the one agora writes back (`AGENT_ARG_DENIED`).
         """
         main, aux = _unpack_raw(raw)
         workdir_str = str(workdir)
@@ -1196,6 +1204,9 @@ class ClaudeAgent:
         if harness_file is not None:
             argv.extend(["--append-system-prompt-file", str(harness_file.resolve()),
                          "--system-prompt-snapshot", "off"])
+        # #204 PR1: the caller's arguments go last, unchanged, after everything agora
+        # itself decided - in the headless and the interactive shape alike.
+        argv.extend(extra_args)
         return Launch(argv=argv, cwd=workdir_str, agent_session_id=new_id,
                       before_count=_count_messages(_parse_all(rewritten)))
 

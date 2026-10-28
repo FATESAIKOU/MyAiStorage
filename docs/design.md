@@ -205,7 +205,7 @@ agora <動作> <型態> [session_id] [選項]
 agora search   session [--filter KEY=VALUE | --filter KEY~=TEXT]... [--no-sync]
 agora import   session --external-session-id <id>[,<id>...] [--external-session-id <id>...] --agent opencode|claude|agy [--header-file F] [--header K=V]... [--add-tag T]... [--as-new]
 agora merge    session <id>, <id>, ... --agent opencode|claude [--header-file F] [--header K=V]...
-agora continue session <id> --agent opencode|claude [--dir <專案目錄>] [--fork] [--sync-period <分鐘>] [--headless [--headless-port <埠>]] [--harness-file <檔>] [--header-file F] [--header K=V]... [--add-tag T]...
+agora continue session <id> --agent opencode|claude [--dir <專案目錄>] [--fork] [--sync-period <分鐘>] [--headless [--headless-port <埠>]] [--harness-file <檔>] [--agent-arg=<參數>]... [--header-file F] [--header K=V]... [--add-tag T]... [-- <參數>...]
 agora delete   session <id>, <id>, ... --yes [--force]
 agora edit     session <id> [--header-file F] [--header K=V]... [--add-tag T]...
 agora show     session <id> [--raw]
@@ -221,6 +221,7 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
   - agy：`#26 PR2b` 的互動接續 `agy --conversation <id>`（不加任何其他旗標）；headless／fork 還沒接。agy 的 import／export 也是直接讀寫 db，不叫 CLI。
   這是正式介面，不是測試用的接縫：MyLinuxPool 的 sidecar 靠 `AGORA_CLAUDE_CMD=claude-real` 繞過 worker 上 PATH 的切換包裝；語意要維持（值照樣當第一個 argv、其餘參數不變）。
 - `--external-session-id`：只有 import 用，是 agent 自己的 session id，可以給多次或用逗號分隔（5.2）。
+- **轉傳參數（#204 PR1）**：`continue` 的 `--agent-arg=<參數>`（只收 `=` 形式與完整名稱，可重複；`--agent-ar`／`--agent-a` 這類縮寫（不帶 `=`）會被當成帶空白值的 `--agent-arg`，一律 exit 1 並說明；寫成 `--agent-a=值` 則照 argparse 的縮寫規則可用）與 `--` 之後的參數合成同一份清單，原樣接在 agora 自己的旗標之後放進 agent 的 argv（`--` 放最後，動作文法不變）。**目前只有 claude 吃**：opencode（headless 是 `serve`）與 agy（接續不帶旗標）收到就 exit 1，不是 TypeError，也不會先同步、看鎖、寫 pending 或開 agent。禁用的旗標（`--resume`／`-r`、`--session-id`、`--fork-session`、`--worktree`／`-w`、`--no-session-persistence`、`--from-pr`、`--continue`／`-c`、`-p`／`--print`、`--input-format`、`--output-format`、`--settings`、`--append-system-prompt-file`、`--system-prompt-snapshot`，含 `=` 形式）一律 exit 1：它們會讓 agent 的 session id、工作目錄、串流或設定和 agora 要寫回的那份對不上（清單在 `cli.py` 的 `AGENT_ARG_DENIED`，一個 const；`--worktree`／`-w`、`--no-session-persistence`、`--from-pr` 是推論，未用真 claude 驗）。**合併或黏值的短旗標**（`-pc`、`-cp`、`-r<id>` 這種以單 `-` 開頭、長度大於 2 的 token）不猜 claude 會怎麼拆（推論），一律 exit 1 並說明「請分開寫或用長旗標」；單字元的 `-x` 照上面的黑名單走。**裸值**（claude 的位置參數＝開場 prompt，推論）在 PR1 先擋，兩種形式（`--agent-arg=` 與 `--`）用同一個檢查、看的是合併後的整份清單：緊接在旗標後面的值算那個旗標的值（例如 `--agent-arg=--effort` 後面的 `--agent-arg=medium`），不算裸值；多值旗標（`--add-dir a b`）的第二個值仍會被擋，錯誤訊息會請人改用 `--flag=值` 形式、每個值一個。待本人確認要不要放行位置參數。
 - **一次處理多個**（2026-10-03 使用者決定）：import、delete、merge、pull、push 都吃 id 清單；逐一在 **stderr** 印一行 `k/N` 進度，**stdout 只放 agora id**（可以接管線）。被 Ctrl-C 中斷後重跑同一個指令會接著做：import 略過已匯入、delete 略過已刪、merge 沿用已寫好的要約、pull 略過已快取（5.2、5.3、5.6、5.10）。
 - `cache`／`sync` 拿掉了，改成 `pull`／`push`，而且**只吃給的 id**（5.10）。
 - 所有寫入指令的輸出第一欄都是 agora id。exit code：0 成功；1 做不到（找不到 id、沒有訊息、merge 少於兩個、delete 沒加 `--yes`、有子 Session、delete 有正在接續的而跳過——全部都被鎖住也是，訊息說明沒有刪除任何東西；背景上傳器起不來時仍是 3）；2 錯誤（包含要約失敗：agent 錯誤、逾時、空的回覆，這時不存檔）；3 已存進 outbox、還沒上傳；4 這個 Session 正在接續中（同一台機器的另一個 `continue`），stderr 在說明之前先印一行 `agora-locked <agora id>`（#54）；5 `continue` 的 agent 子行程死掉（`returncode != 0`，130／143／-2／-15、轉送過 SIGTERM 之後的結束除外），stderr 印一行 `agora-agent-failed rc=<原碼>`，寫回成功回 5、寫回失敗回 3（#76；舊行為是只看寫回結果，agent 死掉又沒新內容時回 0；第一版回 agent 原碼會與 1／2／3／4 撞碼，故改固定 5）。
@@ -307,6 +308,8 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 ### 5.4 continue（第 5 版：2026-10-02 使用者決定；merge 部分第 6 版改寫）
 
 **continue ＝ ① 取得需要的原始 session，② 交給目標 agent 的轉接器轉成它自己的格式載入。** 不論 opencode 或 Claude、不論接的是普通還是 merge 出來的 Session，畫面上一打開都看得到前文，行為相同。import 與 merge 不用考慮這件事。**agy 在 PR2b 只開放同 agent 的互動接續**：`agora continue <agy 匯入的 Session> --agent agy`（非 fork、非 headless）會還原對話 db、補上 summaries 列（見 5.2 的 agy 段），再以 `agy --conversation <id>` 開在同一個工作目錄。仍拒絕（`InputError`，exit 1，讀任何東西之前）：`--fork`、`--headless`、跨 agent 的兩個方向（來源 agy→claude／opencode、來源 claude／opencode→agy）、以及 merge 出來的來源接給 agy。`agy.py` 的 `native`／`append_native`／`summarize` 也還是拒絕 stub；fork／merge 在後續（#26）。
+
+**轉傳參數（#204 PR1）**：`agora continue … --agent-arg=<參數>`／`-- <參數>…` 的參數原樣接在 agora 自己的旗標之後（headless 的 `-p`／格式、固定的 `--settings`、`--harness-file` 那兩個）放進 claude 的 argv，互動與 headless 都一樣；沒帶參數時 argv 一個位元組都不變。`cli._load_for_launch` 只在清單非空時把 `extra_args` 交給 `start_native`，所以 opencode／agy 的呼叫不變；它們收到參數由 `cmd_continue` 在同步、鎖檢查、寫 pending、開 agent 之前就拒絕（exit 1）。禁用的旗標與理由集中在 `AGENT_ARG_DENIED`（見第 5 節「轉傳參數」那一條）：它們會讓 agent 的 session id、工作目錄、串流或設定和寫回的那份對不上；合併／黏值的短旗標與裸值的位置參數也一樣在這一關被拒（同第 5 節那條）。
 
 1. **取得原始 session（cli）**：
    - 普通 Session：它自己的 raw（`agora.raw`）。

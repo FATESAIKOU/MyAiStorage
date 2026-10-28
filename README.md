@@ -123,6 +123,12 @@ agora continue session agora:01K6… --agent opencode --fork
 # 啟動方交付 harness（單一 agent 生效，不改使用者層級檔案）
 agora continue session agora:01K6… --agent opencode --harness-file /path/to/harness.md
 
+# 把自己的參數原樣轉給 claude（只有 claude 吃；opencode／agy 收到會報錯）
+# --agent-arg 只收 = 形式；-- 之後的一整串原樣接在 agora 自己的旗標後面（-- 放最後）
+# 短旗標分開寫（-cp、-r<id> 這種合併／黏值會被拒）；多值旗標用 --flag=值，每個值一個
+agora continue session agora:01K8… --agent claude --agent-arg=--effort --agent-arg=medium
+agora continue session agora:01K8… --agent claude -- --permission-mode bypassPermissions --effort medium
+
 # 改標頭：給 --header／--header-file／--add-tag 就直接疊加；都不給就用 $EDITOR 打開
 # --add-tag 附加 tag（不覆蓋原有的、不重複，可重複給）；和 --header 併用時先套 --header 再附加
 # --add-tag 只有 import、continue、edit 吃，其他指令收到會報錯（exit 1）

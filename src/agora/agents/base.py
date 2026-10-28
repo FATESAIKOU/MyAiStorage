@@ -165,7 +165,8 @@ class Agent(Protocol):
 
     def start_native(self, raw: bytes, workdir: Path, *, headless: bool = False,
                      headless_port: int | None = None,
-                     harness_file: Path | None = None) -> Launch:
+                     harness_file: Path | None = None,
+                     extra_args: list[str] | tuple[str, ...] = ()) -> Launch:
         """Load raw (this agent's format) as a brand-new session and return how to open it.
 
         `headless` (sidecar's `agora continue --headless`) asks for the agent's
@@ -173,6 +174,12 @@ class Agent(Protocol):
         stream-json on stdio, opencode listens on `headless_port` after
         `opencode serve`. The caller owns stdio and the port; agora stays off
         stdout while the agent runs.
+
+        `extra_args` are the arguments the caller asked agora to hand the agent
+        unchanged (`agora continue --agent-arg=…`／`-- …`, #204 PR1). They go
+        after the adapter's own flags. Not every adapter has one: only claude
+        does today, and `cli` refuses the arguments before this call for the
+        others rather than passing a kwarg they do not take.
         """
 
     def collect(self, launch: Launch) -> Exported | None:

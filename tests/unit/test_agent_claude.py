@@ -698,6 +698,51 @@ def test_start_native_rewrites_ids_and_cwd(claude_env, tmp_path):
                for line in aux_file.read_text(encoding="utf-8").splitlines())
 
 
+def test_start_native_without_extra_args_keeps_the_argv_it_always_had(claude_env, tmp_path):
+    """#204 PR1 regression: a continue that hands claude nothing gets exactly the argv
+    it got before `--agent-arg` existed - interactive and headless, byte for byte.
+
+    (The two shapes are pinned whole rather than by `in`, so a moved or added flag is
+    a failure here and not a surprise in a sidecar's argv.)"""
+    workdir = (tmp_path / "proj").resolve()
+    workdir.mkdir()
+    raw = C.ADAPTER.export(SID).raw
+    wrapper = str(claude_env["wrapper"])
+
+    plain = C.ADAPTER.start_native(raw, workdir)
+    assert plain.argv == [wrapper, "--resume", plain.agent_session_id]
+
+    headless = C.ADAPTER.start_native(raw, workdir, headless=True)
+    assert headless.argv == [
+        wrapper, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+        "--verbose", "--resume", headless.agent_session_id,
+        "--settings", '{"autoContinueAtUsageLimit": false}']
+
+
+@pytest.mark.parametrize("headless", [False, True])
+def test_start_native_appends_extra_args_after_all_of_its_own_flags(
+        claude_env, tmp_path, headless):
+    """#204 PR1: the caller's arguments are the tail of the argv, after every flag
+    agora decided itself (headless's `-p`/formats, the fixed `--settings`, the
+    harness pair), unchanged and in the order given."""
+    workdir = (tmp_path / "proj").resolve()
+    workdir.mkdir()
+    raw = C.ADAPTER.export(SID).raw
+    harness = tmp_path / "harness.md"
+    harness.write_text("# harness\n", encoding="utf-8")
+    extra = ["--permission-mode", "bypassPermissions", "--effort", "medium"]
+
+    plain = C.ADAPTER.start_native(raw, workdir, headless=headless, harness_file=harness)
+    launch = C.ADAPTER.start_native(raw, workdir, headless=headless,
+                                    harness_file=harness, extra_args=extra)
+
+    assert launch.argv[-len(extra):] == extra
+    # Everything before the tail is the old argv with this run's own new id.
+    assert launch.argv[:-len(extra)] == [
+        launch.agent_session_id if a == plain.agent_session_id else a for a in plain.argv]
+    assert "--append-system-prompt-file" in launch.argv[:-len(extra)]
+
+
 def test_start_native_aux_partial_last_line(claude_env, tmp_path, capsys):
     sub = "subagents/agent-0123456789abcdef.jsonl"
     main = ['{"type": "user", "sessionId": "s", "message": "hi", "cwd": "/tmp/x"}']
