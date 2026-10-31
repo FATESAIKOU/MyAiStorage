@@ -208,9 +208,17 @@ def _with_user(hdr: dict, updates: dict, *, add_tags: "list[str] | tuple[str, ..
     return merged
 
 
+def _check_add_tags(tags: "list[str] | tuple[str, ...]") -> None:
+    """#303: an empty or whitespace-only --add-tag is a usage error (exit 1), never a
+    silent drop - `edit` with only `--add-tag ''` would otherwise fall into $EDITOR."""
+    for tag in tags:
+        if not tag or tag.isspace():
+            raise InputError("--add-tag 的值不能是空的")
+
+
 def _add_tags(hdr: dict, tags: "list[str] | tuple[str, ...]") -> None:
     """Append tags to `hdr["tags"]`, keeping existing ones and dropping duplicates."""
-    tags = [tag for tag in tags if tag]
+    _check_add_tags(tags)
     if not tags:
         return
     current = hdr.get("tags") or []
@@ -562,6 +570,7 @@ def cmd_import(args, paths: store.Paths) -> int:
     agent = load_agent(args.agent)
     updates = _updates(args)
     add_tags = list(getattr(args, "add_tag", []) or [])
+    _check_add_tags(add_tags)   # before the sync: one bad value refuses the whole command, not per id
     ids = [i.strip() for raw in args.external_session_id for i in raw.split(",") if i.strip()]
     if not ids:
         raise InputError("--external-session-id 沒有內容")
@@ -2414,6 +2423,7 @@ def cmd_continue(args, paths: store.Paths) -> int:
         harness_path = harness_p
     updates = _updates(args)
     add_tags = list(getattr(args, "add_tag", []) or [])
+    _check_add_tags(add_tags)   # #303: before the sync, the lock check, any agent half and the pending record
     headless = bool(getattr(args, "headless", False))
     headless_port = getattr(args, "headless_port", None)
     if headless_port is not None and not (0 < headless_port <= 65535):
@@ -2887,12 +2897,13 @@ def _remember_deleted(paths: store.Paths, ulid: str) -> None:
 
 def cmd_edit(args, paths: store.Paths) -> int:
     agora_id = _the_id(args)
+    add_tags = list(getattr(args, "add_tag", []) or [])
+    _check_add_tags(add_tags)   # #303: before the sync and the gone check, as in import and continue
     index = _sync_for(paths, [agora_id])
     _refuse_if_gone(paths, index, agora_id)
     old = _header_for(index, agora_id)
     body = _body_for(paths, agora_id)
     updates = _updates(args)
-    add_tags = list(getattr(args, "add_tag", []) or [])
     system = {k: old[k] for k in h.SYSTEM_KEYS if k in old}
     if updates or add_tags:
         # Not the editor: a script that says what to change must not end up waiting on `$EDITOR` (#153).

@@ -135,6 +135,7 @@ agora continue session agora:01K8… --agent claude -- --permission-mode bypassP
 # 改標頭：給 --header／--header-file／--add-tag 就直接疊加；都不給就用 $EDITOR 打開
 # --add-tag 附加 tag（不覆蓋原有的、不重複，可重複給）；和 --header 併用時先套 --header 再附加
 # --add-tag 只有 import、continue、edit 吃，其他指令收到會報錯（exit 1）
+# --add-tag 的值不能是空字串或只有空白，否則 exit 1，什麼都不做（不會開 $EDITOR）
 agora edit session agora:01K6… --header 'tags=[csv, 表格]' --header 'status=stable'
 agora edit session agora:01K6… --add-tag csv --add-tag 表格
 agora edit session agora:01K6…
