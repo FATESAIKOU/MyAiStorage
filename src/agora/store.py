@@ -2626,8 +2626,16 @@ class Index:
                 and any(p.get("id") == target
                         for p in h.agora_of(h.upgrade(json.loads(hdr))).get("parents") or [])]
 
-    def search(self, filters: list[tuple[tuple[str, ...], str, str]]) -> list[tuple[str, dict, str]]:
-        """[(ulid, header, snippet)] matching every filter, newest source first.
+    def search(self, filters: list[tuple[tuple[str, ...], str, str]],
+               *, sort: str = "date") -> list[tuple[str, dict, str]]:
+        """[(ulid, header, snippet)] matching every filter, newest first.
+
+        `sort="date"` (the default) orders by the conversation date, with the
+        header's `updated_at` and then the ULID as the quieter keys; `sort="updated"`
+        (#302) orders by `agora.updated_at` alone and lets the ULID break ties - the
+        header that was touched last comes first. That `updated_at` is "the header
+        last moved" (`edit --add-tag` refreshes it, DRAFT-205 M2), not the last
+        conversation activity.
 
         A ("text",) filter matches the reading version plus the header's text
         fields; the first one picks candidates through FTS5 (or a scan when
@@ -2655,8 +2663,13 @@ class Index:
             hdr = h.upgrade(json.loads(hdr_json))
             if all(t in body for t in texts[1:]) and all(_matches(hdr, *f) for f in others):
                 hits.append((ulid, hdr, _snippet(body, kw)))
-        hits.sort(key=lambda hit: (sort_date(hit[1]), str(h.agora_of(hit[1]).get("updated_at")), hit[0]),
-                  reverse=True)
+        if sort == "updated":
+            # #302: what the header touched last comes first; the ULID breaks a tie.
+            hits.sort(key=lambda hit: (str(h.agora_of(hit[1]).get("updated_at") or ""), hit[0]),
+                      reverse=True)
+        else:
+            hits.sort(key=lambda hit: (sort_date(hit[1]), str(h.agora_of(hit[1]).get("updated_at")), hit[0]),
+                      reverse=True)
         return hits
 
 

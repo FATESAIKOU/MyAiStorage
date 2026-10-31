@@ -236,6 +236,12 @@ agora push     session <id>, <id>, ... [--not-exist-upload]
 - 沒有 filter 就列出全部。之後要加更複雜的比較時，再加運算子（例如 `>`、`<`）。
 - 全文 `~=` 用 FTS5 trigram，少於 3 個字時改用掃描（4.5）。
 - **每一行**（#90）：`agora:<ULID>  <對話日期>[（更新：YYYY-MM-DD）]  <agent 或 relation>  <摘要>  <標記>…`，標記是 `(使用中)`、`(未上傳)`、`(雲端沒有)`。清單**仍按對話日期新到舊**（顯示跟著排序走）；`agora.updated_at` 與對話日期不同時補「（更新：…）」，讓「很久以前對話、今天還在動」的 Session 不會看起來像舊的。「使用中」＝本機 `pending/<ULID>.json` 的鎖有人拿著（**只判斷這台機器**；別台機器上的接續這裡看不到，沒有共用的鎖可以查）；只是留下來的記錄不算。
+- **`--sort date|updated`、`--limit N`**（#302）：
+  - `--sort date`（預設）＝上面的對話日期新到舊，輸出位元組不變。
+  - `--sort updated`：依 `agora.updated_at` 新到舊，同值以 ULID 新到舊。**語意**：`updated_at` 是「標頭最後被動過」的時間（`edit --add-tag` 會刷新它，DRAFT-205 M2），**不是對話最後活動**；對話日期在這個排序裡不參與。
+  - `--limit N`：排序與「同一來源 Session 只印一行」的去重**之後**取前 N 筆；被去重掉的那一筆不佔名額。文字與 `--json` 都適用，`--json` 的陣列長度也受限。
+  - N 必須是整數 ≥ 1：不是整數是 argparse 的 exit 2；0 與負數是 exit 1（EXIT_INPUT）。兩者都在做任何事之前檢查（含 sync）。沒有新增 exit code。
+  - **只有 search 吃 `--sort`／`--limit`**：其他動作（show、import、edit、continue…）帶了回 exit 1（EXIT_INPUT）並說「--sort／--limit 只有 search 吃」，在做任何事之前就停（同 `--json` 的守衛，#301）；`migrate` 自己的子指令不受影響。
 - **`--json`**（#301，MLP#502）：stdout 是**一個** JSON 陣列（`json.dumps(..., ensure_ascii=False)`），其他訊息與警告只走 stderr；空集合是 `[]`、exit 0。可以和 `--filter`、`--no-sync` 一起用；「同一個來源 Session 只印一行」的去重、排序、以及 Drive 連不上仍 exit 0（stderr 警告原樣）都與文字模式相同，輸出的 id 集合與文字模式逐筆一致。參數錯仍是 exit 2，沒有新增 exit code。**只有 search 吃 `--json`**：其他動作（show、import、edit、continue…）帶了 `--json` 回 exit 1（EXIT_INPUT）並說「--json 只有 search 吃」，在做任何事之前就停（同 `--add-tag`、`--agent-arg` 的守衛）；`migrate inventory --json` 是它自己的旗標，不受影響。欄位：
 
   | 欄位 | 型別 | 內容 |
