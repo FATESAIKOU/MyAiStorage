@@ -425,13 +425,15 @@ def _refuse_cross_agent_source(index: store.Index, ids: list[str],
 def cmd_search(args, paths: store.Paths) -> int:
     if args.ids:
         raise InputError("search 不接 session id；用 --filter，例如 --filter text~=表格")
+    limit = _limit_of(args)     # said before anything is touched, sync included (#302)
     filters = h.parse_filters(args.filter)
     index = store.Index(paths) if args.no_sync else store.sync(paths, throttle=True)
     seen: dict[tuple, str] = {}
     said: set[tuple] = set()      # T7 F2: the same source gets at most one line
     outbox = store.waiting_ulids(paths)
     rows = []
-    for ulid, hdr, snippet in index.search(filters):
+    kept = 0                      # rows emitted so far, both forms (#302 --limit)
+    for ulid, hdr, snippet in index.search(filters, sort=args.sort or "date"):
         agora = h.agora_of(hdr)
         source = agora.get("source") or {}
         key = (source.get("agent"), source.get("session_id"))
@@ -453,19 +455,39 @@ def cmd_search(args, paths: store.Paths) -> int:
         if args.json:
             rows.append(_search_json_row(paths, ulid, hdr, locked=locked,
                                          in_outbox=in_outbox, missing=missing))
-            continue
-        date = _updated_cell(hdr)
-        mark = "  (使用中)" if locked else ""
-        if in_outbox:
-            mark += "  (未上傳)"
-        if missing:
-            mark += "  (雲端沒有)"
-        text = snippet or str(hdr.get("title") or "")
-        print(f"agora:{ulid}  {date}  {source.get('agent') or agora.get('relation')}  {text}{mark}")
+        else:
+            date = _updated_cell(hdr)
+            mark = "  (使用中)" if locked else ""
+            if in_outbox:
+                mark += "  (未上傳)"
+            if missing:
+                mark += "  (雲端沒有)"
+            text = snippet or str(hdr.get("title") or "")
+            print(f"agora:{ulid}  {date}  {source.get('agent') or agora.get('relation')}  {text}{mark}")
+        kept += 1
+        if limit is not None and kept >= limit:
+            # --limit counts kept rows, both forms (#302): the dedupe above does not
+            # eat a slot, so the row after a held-back duplicate still comes through.
+            break
     if args.json:
         # One document for the caller: notes and warnings have already gone to stderr.
         print(json.dumps(rows, ensure_ascii=False))
     return 0
+
+
+def _limit_of(args) -> int | None:
+    """`--limit` turned into "how many rows to keep" (#302).
+
+    A value that is not a number is already argparse's exit 2 (same style as
+    `--headless-port`); zero and the negatives are refused here, in the
+    `--sync-period` style, before anything runs: exit 1 (EXIT_INPUT), not 0.
+    """
+    raw = getattr(args, "limit", None)
+    if raw is None:
+        return None
+    if raw < 1:
+        raise InputError(f"--limit 要給 1 以上的整數：{raw!r}")
+    return raw
 
 
 def _search_json_row(paths: store.Paths, ulid: str, hdr: dict, *, locked: bool,
@@ -3134,6 +3156,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-sync", action="store_true", help="search：不連 Drive，只查本機索引")
     p.add_argument("--json", action="store_true",
                    help="search：輸出一個 JSON 陣列（其他訊息只走 stderr；空結果是 []）")
+    p.add_argument("--sort", choices=["date", "updated"], default=None,
+                   help="search：date＝依對話日期新到舊（預設，與現在的行為相同、輸出位元組不變）；"
+                        "updated＝依 agora.updated_at 新到舊（標頭最後被動過的時間，第二鍵 ULID）")
+    p.add_argument("--limit", type=int, default=None,
+                   help="search：排序與去重之後取前 N 筆（整數 ≥ 1）")
     p.add_argument("--not-exist-delete", action="store_true",
                    help="pull：給的 id 雲端沒有時，刪掉本機的副本（agent 的 id 是刪它的全文快取）")
     p.add_argument("--not-exist-upload", action="store_true",
@@ -3209,6 +3236,10 @@ def main(argv: list[str] | None = None) -> int:
         # #301: --json is search's output form; a flag nobody reads must not look like it worked
         # (same rule as --add-tag, #153). Refused before anything runs.
         print(f"[agora] {args.action} 不吃 --json（只有 search 吃）", file=sys.stderr)
+        return EXIT_INPUT
+    if (args.sort is not None or args.limit is not None) and args.action != "search":
+        # #302: --sort／--limit are search's, same rule as --json above; refused before anything runs.
+        print(f"[agora] {args.action} 不吃 --sort／--limit（只有 search 吃）", file=sys.stderr)
         return EXIT_INPUT
     try:
         recover_pending(paths, notice_only=args.no_sync)
