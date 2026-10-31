@@ -86,6 +86,17 @@ BODY_SECTIONS = ("know", "do", "judge", "dont")
 #: the four body sections, each sentence at least once (not one section each -
 #: `不是權限` lives in `know`/`judge`, the rotation table only in `know`).
 PM_KEY_SENTENCES = ("不是權限", "照 PMO 的模型輪換表", "不指定頻道", "長時間的指令")
+#: What a `pm` harness of `v>=3` must say on top of the v1 list (#320, design
+#: §11.1 B.2): the architect gate (b and every c, PM does not go past the
+#: architect's interface), the two ticket markers (必經／免（理由）), and the
+#: transition clause for a project with no architect seat yet. Whole sentences,
+#: each at least once in know/do/judge/dont.
+PM_V3_KEY_SENTENCES = PM_KEY_SENTENCES + (
+    "PM 不越過架構師定介面。",
+    "工單寫明「架構師：必經」。",
+    "工單寫明「架構師：免（理由）」。",
+    "PMO 席位名單尚無該專案架構師時，照 v2 的方式做，在工單上註明「架構師：未開席」。",
+)
 #: The sentence every `pm` version must keep (judge or dont).
 REVIEW_BY_NON_AUTHOR = "審查一律非作者"
 
@@ -266,6 +277,7 @@ V1_REL = "atelier/worker-team/pm/v1.md"
 IMPL_REL = "atelier/worker-team/impl/v1.md"
 REV_REL = "atelier/worker-team/rev/v1.md"
 PMO_V2_REL = "atelier/pmo/pm/v2.md"
+PM_V3_REL = "atelier/worker-team/pm/v3.md"
 PMO_V3_REL = "atelier/pmo/pm/v3.md"
 ARCH_REL = "atelier/worker-team/arch/v1.md"
 
@@ -453,10 +465,15 @@ def findings_for(path: str, text: str) -> Findings:
         and version_match is not None and int(version_match.group(1)) >= 2
     pmo_version_3_or_later = team == "pmo" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 3
+    # worker-team's pm v3 (#320). `team == "worker-team"` keeps pmo/pm/v3 (also role
+    # pm, version 3) out of this list: it has its own PMO lists above.
+    pm_version_3_or_later = team == "worker-team" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) >= 3
     for applies, sentences, label in (
             (role == "pm" and is_v1_or_later, PM_KEY_SENTENCES, "v1 起的 pm"),
             (pmo_version_2_or_later, PMO_V2_KEY_SENTENCES, "v2 起的 pmo pm"),
             (pmo_version_3_or_later, PMO_V3_KEY_SENTENCES, "v3 起的 pmo pm"),
+            (pm_version_3_or_later, PM_V3_KEY_SENTENCES, "v3 起的 worker-team pm"),
             (role == "impl" and is_v1_or_later, IMPL_KEY_SENTENCES, "v1 起的 impl"),
             (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev"),
             (role == "arch" and is_v1_or_later, ARCH_KEY_SENTENCES, "v1 起的 arch")):
@@ -736,6 +753,7 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     + [(PMO_V2_REL, sentence, "關鍵句") for sentence in PMO_V2_KEY_SENTENCES]
     + [(PMO_V3_REL, sentence, "關鍵句") for sentence in PMO_V3_KEY_SENTENCES]
     + [(ARCH_REL, sentence, "關鍵句") for sentence in ARCH_KEY_SENTENCES]
+    + [(PM_V3_REL, sentence, "關鍵句") for sentence in PM_V3_KEY_SENTENCES]
 )
 
 
