@@ -173,6 +173,14 @@ PMO_V3_KEY_SENTENCES = (
     "收到 `[group-pending]` 就跑 `dispatch.py inbox group list`",
 )
 
+#: What the PMO `v4` (#313 PR-C, #321) must keep in its body: the full PMO v3
+#: list plus the peer architect boundary and the transition clause (M3).
+PMO_V4_KEY_SENTENCES = PMO_V3_KEY_SENTENCES + (
+    "不越過 PM 直接指揮隊員，也不越過架構師定介面。",
+    "PMO 席位名單尚無該專案架構師時，照 v3 的方式做，在工單上註明「架構師：未開席」。",
+    "你也不能決定的交本人。裁的時候不替架構師定介面。",
+)
+
 #: Content limits for `v>=1` (B-15/B-16): the body names capabilities, never the
 #: concrete tool, model, address or path of one environment. Deliberately NOT in
 #: the lists below - 一般詞 the rules themselves need (`session`, `輪換表`,
@@ -279,6 +287,7 @@ REV_REL = "atelier/worker-team/rev/v1.md"
 PMO_V2_REL = "atelier/pmo/pm/v2.md"
 PM_V3_REL = "atelier/worker-team/pm/v3.md"
 PMO_V3_REL = "atelier/pmo/pm/v3.md"
+PMO_V4_REL = "atelier/pmo/pm/v4.md"
 ARCH_REL = "atelier/worker-team/arch/v1.md"
 
 
@@ -469,11 +478,14 @@ def findings_for(path: str, text: str) -> Findings:
     # pm, version 3) out of this list: it has its own PMO lists above.
     pm_version_3_or_later = team == "worker-team" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 3
+    pmo_version_4_or_later = team == "pmo" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) >= 4
     for applies, sentences, label in (
             (role == "pm" and is_v1_or_later, PM_KEY_SENTENCES, "v1 起的 pm"),
             (pmo_version_2_or_later, PMO_V2_KEY_SENTENCES, "v2 起的 pmo pm"),
             (pmo_version_3_or_later, PMO_V3_KEY_SENTENCES, "v3 起的 pmo pm"),
             (pm_version_3_or_later, PM_V3_KEY_SENTENCES, "v3 起的 worker-team pm"),
+            (pmo_version_4_or_later, PMO_V4_KEY_SENTENCES, "v4 起的 pmo pm"),
             (role == "impl" and is_v1_or_later, IMPL_KEY_SENTENCES, "v1 起的 impl"),
             (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev"),
             (role == "arch" and is_v1_or_later, ARCH_KEY_SENTENCES, "v1 起的 arch")):
@@ -754,6 +766,7 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     + [(PMO_V3_REL, sentence, "關鍵句") for sentence in PMO_V3_KEY_SENTENCES]
     + [(ARCH_REL, sentence, "關鍵句") for sentence in ARCH_KEY_SENTENCES]
     + [(PM_V3_REL, sentence, "關鍵句") for sentence in PM_V3_KEY_SENTENCES]
+    + [(PMO_V4_REL, sentence, "關鍵句") for sentence in PMO_V4_KEY_SENTENCES]
 )
 
 
