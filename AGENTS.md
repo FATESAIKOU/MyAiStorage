@@ -38,3 +38,13 @@
 ### 測試資料
 
 - 假的 secret 不能符合掃描器的樣式（例如 `sk-`、`ghp_` 開頭）：在執行時把前綴拆開組字串，檔案裡不留完整樣式（範例：`tests/unit/test_credscan.py` 開頭的說明與 `"sk" + "-ant-" + rnd(40)`）。
+
+### 專案架構師可以 commit 的路徑
+
+專案架構師（見 `atelier/worker-team/arch/v1.md`）可以 commit／開 PR，但**只限下面三類路徑**，其他路徑一律不碰；這些 PR 由 PM merge。路徑以外的規矩（誰寫、誰核准、怎麼退回）在 harness，這裡只列路徑：
+
+- **設計文件**：`openspec/changes/<名>/`（proposal 與 specs delta 歸 PM 或 PM 派的作者；`design.md` 與 `tasks.md` 的 PR 切分歸架構師）。不走 openspec 的 c／d，設計文件放 `docs/design-notes/<單號>-<短名>.md`。
+- **架構總圖**：`docs/architecture/overview.md`（模組地圖、依賴方向、公開介面清單）。
+- **架構決策清單**：`docs/architecture/decisions.md`（已決與待決的架構決策與理由）。
+
+總圖與決策清單的改動，和引起它的設計文件放在同一個 PR。
