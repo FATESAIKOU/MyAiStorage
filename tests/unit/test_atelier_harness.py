@@ -129,6 +129,20 @@ PMO_V2_KEY_SENTENCES = (
     "秘書就是 PMO",
 )
 
+#: What the PMO `v3` (#308, the group-request rules of MyPMO pmo-group-requests
+#: design §6) and later must keep in its body, on top of the `v2` list above:
+#: the H1 annotation (group requests inside `secretary-pmo` are handled by the
+#: inbox script only - the PMO never runs the low-level channel/registry
+#: commands itself) and the H4 wake-up SOP (a `[group-pending]` signal means: list,
+#: review, then run or reject). Chosen so that deleting any one of the sentences
+#: turns the check red (a flipped meaning is not caught).
+PMO_V3_KEY_SENTENCES = (
+    "建群／封存請求由 `dispatch.py` 的 `inbox` 腳本處理",
+    "你不自己手跑建立／刪除頻道、改註冊簿、改頻道的 issue 本文的底層指令代做",
+    "只能用 `dispatch.py inbox group run|reject` 送出",
+    "收到 `[group-pending]` 就跑 `dispatch.py inbox group list`",
+)
+
 #: Content limits for `v>=1` (B-15/B-16): the body names capabilities, never the
 #: concrete tool, model, address or path of one environment. Deliberately NOT in
 #: the lists below - 一般詞 the rules themselves need (`session`, `輪換表`,
@@ -233,6 +247,7 @@ V1_REL = "atelier/worker-team/pm/v1.md"
 IMPL_REL = "atelier/worker-team/impl/v1.md"
 REV_REL = "atelier/worker-team/rev/v1.md"
 PMO_V2_REL = "atelier/pmo/pm/v2.md"
+PMO_V3_REL = "atelier/pmo/pm/v3.md"
 
 
 @dataclass
@@ -416,9 +431,12 @@ def findings_for(path: str, text: str) -> Findings:
     is_v1_or_later = version_match is not None and int(version_match.group(1)) >= 1
     pmo_version_2_or_later = team == "pmo" and role == "pm" \
         and version_match is not None and int(version_match.group(1)) >= 2
+    pmo_version_3_or_later = team == "pmo" and role == "pm" \
+        and version_match is not None and int(version_match.group(1)) >= 3
     for applies, sentences, label in (
             (role == "pm" and is_v1_or_later, PM_KEY_SENTENCES, "v1 起的 pm"),
             (pmo_version_2_or_later, PMO_V2_KEY_SENTENCES, "v2 起的 pmo pm"),
+            (pmo_version_3_or_later, PMO_V3_KEY_SENTENCES, "v3 起的 pmo pm"),
             (role == "impl" and is_v1_or_later, IMPL_KEY_SENTENCES, "v1 起的 impl"),
             (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev")):
         if not applies:
@@ -695,6 +713,7 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     + [(REV_REL, sentence, "關鍵句") for sentence in REV_KEY_SENTENCES]
     + [(REV_REL, REV_REVIEW_BY_NON_AUTHOR, "rev 職務要寫")]
     + [(PMO_V2_REL, sentence, "關鍵句") for sentence in PMO_V2_KEY_SENTENCES]
+    + [(PMO_V3_REL, sentence, "關鍵句") for sentence in PMO_V3_KEY_SENTENCES]
 )
 
 
