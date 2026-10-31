@@ -1363,6 +1363,13 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
     if exported is None:
         if not is_new:
             return None, target_id, note
+        if not hdr and not _lost_in_cloud(paths, run.target):
+            # Not indexed here, but Drive still has it: an uploader can send a rescue whose
+            # index row was never written (the window between `stage` and `remember`). Then
+            # `_write_target` sees no header and calls it gone, and the raw below would be
+            # empty - a crash for a session that is fine. Nothing new was said, so there is
+            # nothing to write: the session stays where it is.
+            return None, run.target, note
         # Nothing new was said, but the session it was in is gone: the work still has to
         # be kept somewhere alive (design「最後一次」P2).
         exported = Exported(session_id=record["agent_session_id"],
