@@ -2623,7 +2623,7 @@ class Index:
         target = f"agora:{ulid}"
         rows = self.db.execute("SELECT ulid, header FROM sessions")
         return [u for u, hdr in rows if self.cloud_has(u)
-                and any(p.get("id") == target
+                and any(isinstance(p, dict) and p.get("id") == target
                         for p in h.agora_of(h.upgrade(json.loads(hdr))).get("parents") or [])]
 
     def search(self, filters: list[tuple[tuple[str, ...], str, str]],
@@ -2808,7 +2808,7 @@ def _folder_files(remote: dict, ulid: str) -> dict:
 
 
 def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
-         kick: bool = True, warn=warn) -> Index:
+         kick: bool = True, strict: bool = False, warn=warn) -> Index:
     """Start the uploader if anything is waiting, then pull the session.md files whose md5 changed.
 
     `kick=False` is for a command that is about to take an entry out of the outbox
@@ -2840,6 +2840,8 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
         remote = drive.list_sessions()
     except StoreError as e:
         say(f"連不上 Drive，改查本機索引：{e}")
+        if strict:
+            raise
         return index
     if kick and (waiting := waiting_ulids(paths)):
         # L5 / review P5: "someone is uploading" while the lock is held; if nothing holds

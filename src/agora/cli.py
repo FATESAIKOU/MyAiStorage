@@ -1045,6 +1045,7 @@ class _Run:
         self.wrote = False            # anything staged at all, this whole run
         self.target = record["agora_id"]
         self.first_note: str | None = None    # the first move's explanation, for the summary
+        self.pending_kept: bool = False
         self.logger = None
 
 
@@ -1295,24 +1296,38 @@ def _write_target(paths: store.Paths, run: "_Run", *, check_drive: bool) -> tupl
     3. otherwise the work becomes a session of its own, pointing at the one that is
        gone - the conversation is the user's work and does not go away with it.
     """
-    index = store.Index(paths)
-    ulid = _ulid_of(run.target)
-    saved_as = _saved_as(index, run.record, ulid)
-    staged = _staged_as(paths, run.record, ulid)
-    if staged and (saved_as is None or staged[0] > saved_as):
-        return f"agora:{staged[0]}", staged[1], False
-    if saved_as and saved_as != ulid:
-        return f"agora:{saved_as}", index.header(saved_as) or {}, False
-    hdr = index.header(ulid)
-    gone = hdr is None or not index.cloud_has(ulid)
-    if not gone and check_drive:
-        # Two signals, either one enough: the marker (this machine already saw it) and
-        # Drive right now (F1). A header that is not here at all is the same story - it
-        # was deleted here, while the agent worked (F4) - and the work is not lost either.
-        gone = _lost_in_cloud(paths, run.target)
-    if not gone:
-        return run.target, hdr, False
-    return run.target, hdr or {}, True
+    def _resolve(synced: bool) -> tuple[str, dict, bool]:
+        index = store.Index(paths)
+        ulid = _ulid_of(run.target)
+        saved_as = _saved_as(index, run.record, ulid)
+        staged = _staged_as(paths, run.record, ulid)
+        if staged and (saved_as is None or staged[0] > saved_as):
+            return f"agora:{staged[0]}", staged[1], False
+        if saved_as and saved_as != ulid:
+            return f"agora:{saved_as}", index.header(saved_as) or {}, False
+        hdr = index.header(ulid)
+        gone = hdr is None or not index.cloud_has(ulid)
+        if not gone and check_drive:
+            # Two signals, either one enough: the marker (this machine already saw it) and
+            # Drive right now (F1). A header that is not here at all is the same story - it
+            # was deleted here, while the agent worked (F4) - and the work is not lost either.
+            gone = _lost_in_cloud(paths, run.target)
+        if not gone:
+            return run.target, hdr, False
+        if check_drive and not synced:
+            # F4: read whether this machine had already marked it gone *before* this sync, so a
+            # mark the failing sync itself just wrote is not taken as certain
+            marked_gone = hdr is not None and not index.cloud_has(ulid)
+            try:
+                store.sync(paths, kick=False, strict=True)
+            except store.StoreError:
+                if marked_gone:
+                    return run.target, hdr, True     # gone for certain (full listing + direct look): F4 / H1 rescue
+                return run.target, {}, False         # unknown: write nothing, keep the pending record
+            return _resolve(synced=True)
+        return run.target, hdr or {}, True
+
+    return _resolve(synced=False)
 
 
 def _say_note(run: "_Run", note: str | None) -> None:
@@ -1345,6 +1360,12 @@ class AdoptCollision(Exception):
         self.cause = cause
 
 
+def _keep_pending(run: "_Run", target_id: str, note: str | None) -> tuple[None, str, str | None]:
+    run.pending_kept = True
+    store.say("[agora] 寫回失敗：目標 Session 未入索引且無法確認；工作保留在 pending，下次補存會再試")
+    return None, target_id, note
+
+
 def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent: Agent, *,
                check_drive: bool) -> tuple[tuple[str, bool] | None, str, str | None]:
     """Write one version of the conversation back.
@@ -1354,6 +1375,7 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
     already written to the session they would go to (spec「沒有新內容不寫」) - unless the
     target is new, in which case even identical bytes still need a live session (P2).
     """
+    run.pending_kept = False
     record = run.record
     target_id, hdr, is_new = _write_target(paths, run, check_drive=check_drive)
     was = run.target
@@ -1365,8 +1387,11 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
             return None, target_id, note
         # Nothing new was said, but the session it was in is gone: the work still has to
         # be kept somewhere alive (design「最後一次」P2).
+        raw = _last_raw(paths, run)
+        if raw is None:
+            return None, run.target, note
         exported = Exported(session_id=record["agent_session_id"],
-                            raw=_last_raw(paths, run) or b"", title=record.get("title"))
+                            raw=raw, title=record.get("title"))
     md5 = exported.raw_md5 if exported.raw_md5 is not None else store.hashlib.md5(exported.raw).hexdigest()
     # Same bytes, same place, and the target did not just move: the stage is skipped.
     # A move always writes - the adopted session may hold an older copy than the last
@@ -1375,6 +1400,8 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
     # but writing here keeps the adopted copy current).
     if md5 == run.last_md5 and not is_new and not moved_here:
         return None, target_id, note
+    if not is_new and not hdr:
+        return _keep_pending(run, target_id, note)
     try:
         saved, create_note = _save_continue(paths, run, agent, exported, target_id=target_id,
                                             hdr=hdr, is_new=is_new)
@@ -1393,6 +1420,8 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
             return None, target_id, note
         if md5 == run.last_md5 and not is_new and not moved_here:
             return None, target_id, note
+        if not is_new and not hdr:
+            return _keep_pending(run, target_id, note)
         try:
             saved, create_note = _save_continue(paths, run, agent, exported, target_id=target_id,
                                                 hdr=hdr, is_new=is_new)
@@ -1425,6 +1454,8 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
     caller prints it where this round's own words go (the log file mid-run, the
     terminal at the end).
     """
+    if not is_new and not hdr:
+        raise ValueError("Cannot save continue without header when target is not new (not is_new and not hdr)")
     record = run.record
     body = reading_of(agent, exported)   # C1: the export already carried its turns over
     note = None
@@ -2201,7 +2232,8 @@ def recover_pending(paths: store.Paths, *, notice_only: bool = False) -> None:
             except Exception as e:   # a bug or outage while finishing: keep the record and retry (R4)
                 print(f"[agora] 補存 {path.stem} 失敗，下次再試：{e}", file=sys.stderr)
                 continue
-            run.pending.unlink(missing_ok=True)   # the current path: a rescue may have renamed it
+            if not run.pending_kept:
+                run.pending.unlink(missing_ok=True)   # the current path: a rescue may have renamed it
         if saved:
             print(f"[agora] 補存了中斷的接續：{saved[0]}", file=sys.stderr)
 
@@ -2619,7 +2651,8 @@ def cmd_continue(args, paths: store.Paths) -> int:
             if failed is not None:
                 _say_protocol(paths, f"agora-agent-failed rc={failed}")
             raise
-        run.pending.unlink()          # the current path: a rescue may have renamed it
+        if not run.pending_kept:
+            run.pending.unlink()          # the current path: a rescue may have renamed it
         lock.close()
         if run.first_note is not None and final_note is None:
             # The move happened mid-run; its explanation went to the log, so say it again
@@ -2627,6 +2660,12 @@ def cmd_continue(args, paths: store.Paths) -> int:
             store.say(run.first_note)
         if run.failures:
             store.say(f"[agora] 定期寫回失敗 {run.failures} 次，見 {paths.state / CONTINUE_LOG}")
+        if run.pending_kept:
+            if fork:
+                if not headless:
+                    store.say_out(target)
+                store.say(f"[agora] fork 已存成 {target}；這次的新內容保留在 pending，下次補存會再試")
+            return _finish(EXIT_ERROR)
         if saved is None:
             # Nothing staged this call, but an entry may still be waiting from an earlier
             # round: kick the uploader and answer by it (design「最後一次」P8).
