@@ -108,6 +108,25 @@ REV_KEY_SENTENCES = (
 #: The sentence every `rev` version must keep (judge or dont): the reviewer is
 #: never the author. `rev` writes it differently from `pm`'s「審查一律非作者」.
 REV_REVIEW_BY_NON_AUTHOR = "不審自己的作品"
+#: `arch` (worker-team 的架構師, design §9, #313/#319): the twelve sentences, each
+#: verbatim and whole (with its punctuation), read from the four body sections
+#: only. A short word such as `模組切割` would turn up in unrelated paragraphs, and
+#: rewording one character would then go red by accident; a whole sentence makes
+#: "deleted or reworded" and "red" line up (design L-A4).
+ARCH_KEY_SENTENCES = (
+    "你只產設計與介面，不寫實作。",
+    "你設計過的單，實作一律派給別人。",
+    "你是專案的架構師：一個專案一位，固定名，長期常駐。",
+    "接手時先讀交接檔的最新一節，舊畫面與舊 context 一律當過期。",
+    "退回後回到設計階段修，不直接改實作。",
+    "架構師不審自己的設計，設計經非作者審查才算數。",
+    "多張單同時要設計時，優先序由 PM 定，你不自行改順序。",
+    "模組切割、介面的形狀與 SOLID 由你判斷，語意、需求、行為與品質由 PM 判斷。",
+    "設計可以由你寫，也可以由別人寫、你核准；兩者都算經過你。",
+    "觸發的單，沒有你的「可以」，設計不派實作、實作不 merge（作者模式例外見下一句）。",
+    "跨單一致性的阻塞由你宣告，PM 不能用排序繞過。",
+    "作者模式例外：你親寫的設計，以非作者審查者照架構清單的「可以」加 PMO 向本人說明為核准；你對自己設計的「可以」不算數。",
+)
 
 #: What the PMO `v2` (#246, aligned to the handbook at 44ec9dc) and later must keep
 #: in its body: the merge rules incl. the transition clause, the first-line
@@ -248,6 +267,7 @@ IMPL_REL = "atelier/worker-team/impl/v1.md"
 REV_REL = "atelier/worker-team/rev/v1.md"
 PMO_V2_REL = "atelier/pmo/pm/v2.md"
 PMO_V3_REL = "atelier/pmo/pm/v3.md"
+ARCH_REL = "atelier/worker-team/arch/v1.md"
 
 
 @dataclass
@@ -438,7 +458,8 @@ def findings_for(path: str, text: str) -> Findings:
             (pmo_version_2_or_later, PMO_V2_KEY_SENTENCES, "v2 起的 pmo pm"),
             (pmo_version_3_or_later, PMO_V3_KEY_SENTENCES, "v3 起的 pmo pm"),
             (role == "impl" and is_v1_or_later, IMPL_KEY_SENTENCES, "v1 起的 impl"),
-            (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev")):
+            (role == "rev" and is_v1_or_later, REV_KEY_SENTENCES, "v1 起的 rev"),
+            (role == "arch" and is_v1_or_later, ARCH_KEY_SENTENCES, "v1 起的 arch")):
         if not applies:
             continue
         for sentence in sentences:
@@ -714,6 +735,7 @@ KEY_SENTENCE_CASES: list[tuple[str, str, str]] = (
     + [(REV_REL, REV_REVIEW_BY_NON_AUTHOR, "rev 職務要寫")]
     + [(PMO_V2_REL, sentence, "關鍵句") for sentence in PMO_V2_KEY_SENTENCES]
     + [(PMO_V3_REL, sentence, "關鍵句") for sentence in PMO_V3_KEY_SENTENCES]
+    + [(ARCH_REL, sentence, "關鍵句") for sentence in ARCH_KEY_SENTENCES]
 )
 
 
@@ -741,7 +763,7 @@ def test_a_missing_impl_or_rev_key_sentence_is_flagged(rel, sentence, expected, 
         f"格式檢查沒有抓到「{sentence}」被拿掉：{found.errors}"
 
 
-@pytest.mark.parametrize("rel", (IMPL_REL, REV_REL), ids=("impl", "rev"))
+@pytest.mark.parametrize("rel", (IMPL_REL, REV_REL, ARCH_REL), ids=("impl", "rev", "arch"))
 def test_the_impl_and_rev_harnesses_pass_the_format_check(rel):
     found = findings_for(rel, (REPO / rel).read_text(encoding="utf-8"))
     assert not found.errors, "\n".join(found.errors)

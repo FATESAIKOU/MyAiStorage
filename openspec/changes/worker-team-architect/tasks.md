@@ -23,7 +23,7 @@
 - [ ] A.1 新增 `atelier/worker-team/arch/v1.md`（內容＝design §10 草稿，定稿時只改措辭，**不改關鍵句**）。
 - [ ] A.2 `tests/unit/test_atelier_harness.py`：新增 `ARCH_KEY_SENTENCES`（design §9 的十二句**整句**，逐字，含作者模式例外句；檢查只讀 `_body()` 的四章，導言段不算）；併入 `findings_for` 的依版本迴圈（`role == "arch" and is_v1_or_later`）；併入 `KEY_SENTENCE_CASES`（每句刪掉要紅）。
 - [ ] A.3 `docs/atelier/harness.md:5`（現況句補 `arch/` 有 v1）與 `:19`（role 表補一句「worker-team 的架構師，每專案一位」）。
-- [ ] A.4 完成判準：格式檢查綠；`ARCH_KEY_SENTENCES` 的每一句刪掉都轉紅（貼其中三句的紅燈輸出）；`arch/v1.md` 的 `findings_for` 無 error；關鍵句以外的改壞（例如把 `models.floor` 改成寫死的模型名）轉紅。
+- [ ] A.4 完成判準：格式檢查綠；`ARCH_KEY_SENTENCES` 的每一句刪掉都轉紅（貼其中三句的紅燈輸出）；`arch/v1.md` 的 `findings_for` 無 error；關鍵句以外的改壞（例如在正文加入模型名或工具名）轉紅。（`models.floor` 本來就允許寫模型識別碼，不屬於「正文寫死」，不在此列；#319 審查更正。）
 - 拒絕條件：正文出現工具名、模型名（含 `Claude`、`Opus`）、其他專案名、`/Users/`、`~/` 必須紅。
 
 ### PR-B：worker-team PM 新版本 `pm/v3.md` ＋測試（c 級）
