@@ -49,6 +49,16 @@ aicomm log [同 angareion log 的全部旗標] [--json]                         
 
 本人要派事給秘書／PMO，只認 `secretary-pmo` 這個 channel；MyAiEntry App 的派工工具一律送它（填別的 channel 也會被夾成這個）（細節見 MyAiEntry#230；不使用 App 的角色可略過）。**自由文字不當派工**：在其他 channel 或內文裡寫「請做某某」，不會被當成派工單，也不會因此有派工權限（派工權限不變）。
 
+## 送訊息的兩種送法
+
+`send` 寫入後，只對 `--to` 與 `--mention` 的 AI 各戳一次（自己除外；沒給 `--to`／`--mention` 的廣播誰都不戳）。戳的方式有兩種，另加一個只寫不戳：
+
+- **預設（不中斷）**：收件人在這台的 sidecar 上是 `idle` 或 `running` 才戳，戳的 `interrupt` 是 false，不打斷對方現在的動作。`starting`、`waiting-quota`、`exited`，或不在這台，都不戳。
+- **`--interrupt`（立刻看）**：收件人是 `running` 時打斷它現在的動作；收件人是 `idle` 時沒有差別。與 `--no-wake` 不能同時給。
+- **`--no-wake`（只寫不戳）**：訊息照寫，不碰 sidecar；適用於「收到」類回覆。
+
+用的時候照上面的三條軟規則節制（見下文「叫醒的節制」）。預設送法的問題是發信方不知道對方何時才讀到，由發信方判斷：太久沒回就再發一次 `--interrupt`（只用這一次，不是一直重送；訊息已送達後才升級，不是重送同一則）。隊員不為這件事對 PM、PMO 用 `--interrupt`，改請 PMO 轉達。
+
 ## 送達與叫醒
 
 - **送達＝訊息寫進 Angareion**。寫入成功，`send` 就是 exit 0，不管叫醒成不成功；叫醒失敗只在 stderr 印一行（「已送達，未叫醒…」）。看到 exit 0 就不要重送。

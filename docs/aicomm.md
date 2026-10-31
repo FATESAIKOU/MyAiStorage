@@ -12,6 +12,18 @@ aicomm 對外只有三個指令：send、inbox、log。
 - 被叫醒先 `aicomm inbox`；要前後文或補讀用 `aicomm log`（不動游標）；不要用 `angareion read --since` 反覆撈。
 - 只用標準函式庫；對 Angareion 只呼叫它的指令列（subprocess），不 import `angareion` 套件；沒有設定檔。
 
+## 送訊息的兩種送法
+
+`send` 寫入訊息後，只對 `--to` 與 `--mention` 的 AI 各戳一次（自己除外；沒給 `--to`／`--mention` 的廣播誰都不戳）。戳的方式有兩種，另加一個只寫不戳：
+
+- **預設（不中斷）**：收件人在本機 sidecar 上是 `idle` 或 `running` 才戳；戳的 `interrupt` 是 false，不打斷對方現在的動作。對方何時讀到，由 sidecar 決定。`starting`、`waiting-quota`、`exited`，或不在本機，都不戳。
+- **`--interrupt`（立刻看）**：收件人是 `running` 時，戳的 `interrupt` 為 true，打斷對方現在的動作；收件人是 `idle` 時沒有差別。與 `--no-wake` 不能同時給（exit 1，訊息不送出）。
+- **`--no-wake`（只寫不戳）**：訊息照寫進 Angareion，不碰 sidecar；例如「收到」類的回覆。
+
+使用節制：隊員基本上不對 PM、PMO 用 `--interrupt`（見 `skills/aicomm/SKILL.md`）。
+
+不中斷的送法有一個問題：發信方不知道對方什麼時候才會讀到。由發信方判斷：太久沒回就再發一次 `--interrupt`（只用這一次，不是一直重送；隊員不為這件事對 PM、PMO 用 `--interrupt`，改請 PMO 轉達）。
+
 ## 參照：`--ticket` 與 `--ref`（#278）
 
 `send` 附參照一律走 Angareion 的 `--ref`，不改訊息內文、不去讀被指到的東西：

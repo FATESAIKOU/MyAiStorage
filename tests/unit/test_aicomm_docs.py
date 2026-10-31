@@ -214,3 +214,18 @@ def test_ref_without_an_equals_sign_is_written_down(path):
 def test_a_ref_example_is_a_link(path):
     text = path.read_text(encoding="utf-8")
     assert "--ref pr=https://github.com/" in text
+
+
+# --- #315: the two ways to send (不中斷／立刻看) written in one section ---
+
+
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_two_ways_to_send_are_written_down_in_one_section(path):
+    text = path.read_text(encoding="utf-8")
+    assert "送訊息的兩種送法" in text
+    assert "`--interrupt`（立刻看）" in text
+    assert "沒給 `--to`／`--mention` 的廣播誰都不戳" in text
+    assert "太久沒回就再發一次 `--interrupt`" in text
+    assert "`idle` 或 `running` 才戳" in text
+    assert "不能同時給" in text
+    assert "只用這一次" in text
