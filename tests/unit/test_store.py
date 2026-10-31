@@ -542,3 +542,128 @@ def test_rclone_never_inherits_the_terminal_and_never_asks_for_a_password(remote
     assert lines, "there was at least one rclone call"
     assert {line["stdin"] for line in lines} == {"/dev/null"}, lines
     assert all("--ask-password=false" in line["args"] for line in lines), lines
+
+
+def test_sync_strict_list_failure_raises(remote, monkeypatch):
+    """Drive listing failure raises StoreError when strict=True, but returns index when strict=False."""
+    paths = store.Paths.from_env()
+    monkeypatch.setenv("FAKE_RCLONE_FAIL", "lsjson")
+    # strict=False does not raise
+    idx = store.sync(paths, strict=False)
+    assert isinstance(idx, store.Index)
+    # strict=True raises StoreError
+    with pytest.raises(store.StoreError) as exc_info:
+        store.sync(paths, strict=True)
+    assert "rclone lsjson 失敗" in str(exc_info.value)
+
+
+def test_sync_strict_sessions_missing_does_not_raise(remote):
+    """sessions/ missing on Drive is an answer (Drive has no B), not an error.
+    strict=True does not raise and markers do not move."""
+    paths = store.Paths.from_env()
+    index = store.Index(paths)
+    dummy_ulid = h.new_ulid()
+    hdr = _header()
+    hdr["id"] = f"agora:{dummy_ulid}"
+    index.put(dummy_ulid, "md5dummy", hdr, "body")
+    assert index.cloud_has(dummy_ulid)
+
+    # remote / "agora" / "sessions" does not exist initially
+    idx = store.sync(paths, strict=True)
+    assert isinstance(idx, store.Index)
+    # markers do not move: dummy_ulid is still cloud_has=True
+    assert idx.cloud_has(dummy_ulid)
+    assert dummy_ulid not in idx.missing_in_cloud()
+
+
+def test_sync_strict_read_failure_does_not_raise(remote, monkeypatch):
+    """A session whose session.md cannot be read/downloaded is skipped,
+    and strict=True does NOT raise StoreError (strict only raises on list_sessions failure)."""
+    paths = store.Paths.from_env()
+    # First, stage and upload a valid session A so sessions/ exists
+    ulid = _save(paths, _header())
+    # Corrupt remote session.md by writing non-utf8 binary data
+    remote_session_md = remote / "agora" / "sessions" / ulid / "session.md"
+    remote_session_md.write_bytes(b"\xff\xfe\x00\x00invalid-utf8")
+    # Reset local mirror and index so sync must re-download/read it
+    local_mirror = paths.mirror / ulid
+    if local_mirror.exists():
+        import shutil
+        shutil.rmtree(local_mirror)
+    store.Index(paths).drop(ulid)
+
+    # strict=False does not raise
+    idx = store.sync(paths, strict=False)
+    assert isinstance(idx, store.Index)
+
+    # strict=True also does not raise: only a failed listing does
+    idx_strict = store.sync(paths, strict=True)
+    assert isinstance(idx_strict, store.Index)
+
+
+def test_sync_strict_preserves_side_effects_identically(remote, tmp_path, monkeypatch):
+    """strict only decides whether to raise an exception at the end; all actions
+    (indexing valid sessions, marking missing, writing state) occur identically."""
+    def make_paths(name):
+        root = tmp_path / name
+        p = store.Paths(config=root / "config", cache=root / "cache", state=root / "state")
+        p.config.mkdir(parents=True, exist_ok=True)
+        p.cache.mkdir(parents=True, exist_ok=True)
+        p.state.mkdir(parents=True, exist_ok=True)
+        return p
+
+    paths_default = store.Paths.from_env()
+    # Upload valid session A via paths_default so remote has it
+    ulid_a = _save(paths_default, _header(title="Valid Session A"))
+
+    # Add invalid session B on remote (corrupt utf-8 so download/read fails)
+    ulid_b = h.new_ulid()
+    folder_b = remote / "agora" / "sessions" / ulid_b
+    folder_b.mkdir(parents=True, exist_ok=True)
+    (folder_b / "session.md").write_bytes(b"\xff\xffbroken")
+
+    paths_false = make_paths("env_false")
+    paths_true = make_paths("env_true")
+
+    # Run sync with strict=False on paths_false (does not raise)
+    store.sync(paths_false, strict=False)
+
+    # Run sync with strict=True on paths_true (an unreadable session does not raise)
+    store.sync(paths_true, strict=True)
+
+    # Both environments should have identical local index, mirror, and state
+    index_false = store.Index(paths_false)
+    index_true = store.Index(paths_true)
+    assert index_false.header(ulid_a) == index_true.header(ulid_a)
+    assert index_false.header(ulid_b) is None
+    assert index_true.header(ulid_b) is None
+    assert (paths_false.mirror / ulid_a / "session.md").exists()
+    assert (paths_true.mirror / ulid_a / "session.md").exists()
+    assert (paths_false.state / "last-sync").exists()
+    assert (paths_true.state / "last-sync").exists()
+
+
+def test_index_children_ignores_malformed_string_parent(remote):
+    """store.Index.children ignores non-dict entries in parents instead of raising AttributeError."""
+    paths = store.Paths.from_env()
+    index = store.Index(paths)
+    parent_ulid = h.new_ulid()
+    child_ulid = h.new_ulid()
+    hdr = _header()
+    hdr["id"] = f"agora:{child_ulid}"
+    hdr["agora"]["parents"] = [f"agora:{parent_ulid}"]  # string instead of dict!
+    index.put(child_ulid, "md5dummy", hdr, "body")
+    assert index.cloud_has(child_ulid)
+
+    # Calling children on parent_ulid must not raise AttributeError and must not count child_ulid
+    children = index.children(parent_ulid)
+    assert children == []
+
+    # Valid dict parent is still counted
+    valid_child_ulid = h.new_ulid()
+    valid_hdr = _header()
+    valid_hdr["id"] = f"agora:{valid_child_ulid}"
+    valid_hdr["agora"]["parents"] = [{"id": f"agora:{parent_ulid}"}]
+    index.put(valid_child_ulid, "md5dummy2", valid_hdr, "body")
+    assert index.children(parent_ulid) == [valid_child_ulid]
+

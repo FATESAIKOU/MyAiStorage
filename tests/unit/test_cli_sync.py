@@ -886,12 +886,13 @@ def test_a_mint_that_fails_after_staging_is_adopted_next_round(env, capsys, monk
     a, ulid, agent, drive, hdr, body, raw, exported = _deleted_mid_run(capsys, "ZZ f3 第十二句")
 
     monkeypatch.setattr(cli, "_uploaded", lambda paths_, ulid_: True)
-    remembered = []
+    existing_outbox = set(p.name for p in paths().outbox.iterdir()) if paths().outbox.exists() else set()
+    collided = []
     real_remember = store.remember
 
     def collide_once(p, folder, *args, **kwargs):
-        remembered.append(folder.name)
-        if len(remembered) == 1:
+        if folder.name not in existing_outbox and not collided:
+            collided.append(folder.name)
             raise FileNotFoundError("collision after the mint's stage")
         return real_remember(p, folder, *args, **kwargs)
 
@@ -900,7 +901,7 @@ def test_a_mint_that_fails_after_staging_is_adopted_next_round(env, capsys, monk
               "agent_session_id": "ses_a", "parent": {"id": a}}
     with pytest.raises(FileNotFoundError):
         cli._write_one(paths(), cli._Run(paths(), record), exported, agent, check_drive=True)
-    minted = remembered[0]
+    minted = collided[0]
     assert minted != ulid
     assert (paths().outbox / minted).is_dir(), "the minted session stays staged, not lost"
 
@@ -1097,14 +1098,15 @@ def test_the_final_write_adopts_a_rescue_that_is_only_staged(claude_lab, capsys,
             monkeypatch.setattr(store, "remember", remember)
         b = done["b"]
         assert b and (paths().outbox / b).is_dir(), "the rescue has to be waiting in the outbox"
+        assert done["rescued"] and store.Index(paths()).header(done["b"]) is None, \
+            "nothing indexed it before the final write"
         release.touch()                                # staged for real: the agent may leave
 
     monkeypatch.setattr(cli, "_periodic_write", round_then_rescue_before_indexing)
     code, out, err = _continue_claude(capsys, claude_lab, a)
 
     b = f"agora:{done['b']}"
-    assert done["rescued"] and store.Index(paths()).header(done["b"]) is None, \
-        "nothing indexed it before the final write"
+    assert done["rescued"] and out == b, f"the final write adopted B: {out}"
     kept = sorted(p.name for p in on_drive(a).parent.iterdir())
     assert kept == [done["b"]], f"exactly one rescue exists: {kept}"
     assert code == 0, err
@@ -2188,3 +2190,301 @@ def test_periodic_write_detects_unuploaded_items_when_uploader_idle(env, capsys,
     cli._periodic_write(run_obj, agent)
     assert run_obj.failures >= 1
     assert "上傳未完成" in log_text()
+
+
+def test_sync_fails_when_hdr_present_and_cloud_has_false_rescues_under_f4(env, capsys, monkeypatch):
+    """hdr is present, cloud_has is False (local marker already confirmed
+    A is deleted). When sync fails (offline), local marker is a strong signal:
+    _write_target returns is_new=True, does not write back to A, and rescues into a new session."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+
+    real_sync = store.sync
+
+    def broken_sync(*args, **kwargs):
+        raise store.StoreError("Drive network error")
+
+    # 1. Unit level check
+    store.Index(paths()).mark_missing([ulid])
+    assert store.Index(paths()).header(ulid) is not None
+    assert store.Index(paths()).cloud_has(ulid) is False
+
+    monkeypatch.setattr(store, "sync", broken_sync)
+
+    run_obj = cli._Run(paths(), _record(a))
+    target, hdr, is_new = cli._write_target(paths(), run_obj, check_drive=True)
+    assert target == a
+    assert hdr == store.Index(paths()).header(ulid)
+    assert is_new is True, "must rescue because local marker already confirmed deletion"
+
+    agent = cli.load_agent("opencode")
+    agent.sessions["ses_a"].append("ZZ 發言")
+    exported = agent.export("ses_a")
+    saved, target_out, note = cli._write_one(paths(), run_obj, exported, agent, check_drive=True)
+    assert saved is not None and saved[0] != a, "must rescue to new session, not write back to deleted A"
+    assert run_obj.pending_kept is False
+    assert run_obj.wrote is True
+
+    # 2. Continue e2e level check: simulate deletion / cloud_has False arriving mid-run before final write
+    monkeypatch.setattr(store, "sync", real_sync)
+    # Clear cloud_missing so continue can start normally before the deletion is discovered mid-run
+    store.Index(paths()).mark_missing([])
+    assert store.Index(paths()).cloud_has(ulid) is True, "A must start alive before mid-run deletion"
+    env.sleep = 0.01
+    env.speak_rounds = 1
+    env.sessions["ses_a"].append("ZZ 更多新發言")
+
+    real_final_write = cli._final_write
+
+    def fake_final_write(run, ag):
+        store.Index(paths()).mark_missing([ulid])
+        monkeypatch.setattr(store, "sync", broken_sync)
+        return real_final_write(run, ag)
+
+    monkeypatch.setattr(cli, "_final_write", fake_final_write)
+
+    capsys.readouterr()
+    code, out, err = _continue(capsys, a, "--sync-period", "0")
+    # Rescued into new session: exit code 0
+    assert code == 0
+    assert "另存" in err
+    assert out != a
+    assert _extra_sessions(a) != []
+
+
+def test_sync_fails_when_hdr_present_and_cloud_has_true_does_not_mint_or_write_back(env, capsys, monkeypatch):
+    """hdr is present, cloud_has is True (no local marker that A is deleted),
+    Drive check finds A gone, but strict sync fails (StoreError).
+    Must not write back to A, must not mint B/C, keeps work in pending, exits 2."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+
+    # Unit level check:
+    assert store.Index(paths()).header(ulid) is not None
+    assert store.Index(paths()).cloud_has(ulid) is True
+
+    real_lost = cli._lost_in_cloud
+    real_sync = store.sync
+
+    monkeypatch.setattr(cli, "_lost_in_cloud", lambda paths_, target_: True)
+
+    def broken_sync(*args, **kwargs):
+        raise store.StoreError("Drive network error")
+
+    monkeypatch.setattr(store, "sync", broken_sync)
+
+    run_obj = cli._Run(paths(), _record(a))
+    target, hdr, is_new = cli._write_target(paths(), run_obj, check_drive=True)
+    assert target == a
+    assert hdr == {}
+    assert is_new is False
+
+    agent = cli.load_agent("opencode")
+    agent.sessions["ses_a"].append("ZZ 發言")
+    exported = agent.export("ses_a")
+    saved, target_out, note = cli._write_one(paths(), run_obj, exported, agent, check_drive=True)
+    assert saved is None, "must not write back to unverified A"
+    assert run_obj.pending_kept is True, "must keep work in pending"
+
+    # Continue level check:
+    monkeypatch.setattr(store, "sync", real_sync)
+    monkeypatch.setattr(cli, "_lost_in_cloud", real_lost)
+    env.sleep = 0.01
+    env.speak_rounds = 1
+    env.sessions["ses_a"].append("ZZ 更多新發言")
+
+    real_final_write = cli._final_write
+
+    def fake_final_write(run, ag):
+        monkeypatch.setattr(cli, "_lost_in_cloud", lambda paths_, target_: True)
+        monkeypatch.setattr(store, "sync", broken_sync)
+        return real_final_write(run, ag)
+
+    monkeypatch.setattr(cli, "_final_write", fake_final_write)
+
+    capsys.readouterr()
+    code, out, err = _continue(capsys, a, "--sync-period", "0")
+    assert code == cli.EXIT_ERROR == 2, f"code={code}, err={err}"
+    assert "寫回失敗：目標 Session 未入索引且無法確認" in err
+    assert _extra_sessions(a) == []
+    [pending_file] = list(paths().pending.glob("*.json"))
+    assert pending_file.exists()
+
+
+def test_write_target_reads_marked_gone_before_sync(env, capsys, monkeypatch):
+    """_write_target reads marked_gone before calling store.sync.
+    If A was not marked gone before sync, even if a failing sync moves markers,
+    _write_target treats it as unknown (returns empty hdr, is_new=False: keep pending)."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+
+    # Target A is locally present and cloud_has is True
+    assert store.Index(paths()).header(ulid) is not None
+    assert store.Index(paths()).cloud_has(ulid) is True
+
+    # Simulate Drive check finds A gone (_lost_in_cloud is True)
+    monkeypatch.setattr(cli, "_lost_in_cloud", lambda paths_, target_: True)
+
+    def buggy_sync(*args, **kwargs):
+        # Suppose a sync marks A as missing, but fails with StoreError
+        store.Index(paths()).mark_missing([ulid])
+        raise store.StoreError("Drive network error mid-sync")
+
+    monkeypatch.setattr(store, "sync", buggy_sync)
+
+    run_obj = cli._Run(paths(), _record(a))
+    target, hdr, is_new = cli._write_target(paths(), run_obj, check_drive=True)
+
+    # Because marked_gone was read before sync (when cloud_has was True),
+    # it must NOT treat A as already confirmed deleted, and must return empty hdr (keep pending)
+    assert is_new is False
+    assert hdr == {}
+    assert target == a
+
+
+def test_continue_fork_pending_kept_message(env, capsys, monkeypatch):
+    """cmd_continue with --fork when pending is kept.
+    Must not say '沒有新內容；fork 已存成 ...', but explain that fork was saved
+    and new content is kept in pending; exits EXIT_ERROR (2)."""
+    _, a, _ = _import(capsys)
+    env.sleep = 0.01
+    env.speak_rounds = 1
+    # Add new turns so the agent has new content
+    env.sessions["ses_a"].append("ZZ fork 後的新發言")
+
+    real_final_write = cli._final_write
+
+    def failing_final_write(run, agent):
+        # Simulate target fork session is lost/unindexed and sync fails (pending is kept)
+        monkeypatch.setattr(cli, "_lost_in_cloud", lambda *args, **kwargs: True)
+        def broken_sync(*args, **kwargs):
+            raise store.StoreError("network down")
+        monkeypatch.setattr(store, "sync", broken_sync)
+        return real_final_write(run, agent)
+
+    monkeypatch.setattr(cli, "_final_write", failing_final_write)
+
+    capsys.readouterr()
+    code, out, err = _continue(capsys, a, "--fork", "--sync-period", "0")
+
+    assert code == cli.EXIT_ERROR == 2, f"code={code}, err={err}"
+    assert "沒有新內容" not in err, "must not claim no new content when pending is kept"
+    assert "；這次的新內容保留在 pending，下次補存會再試" in err
+    [pending_file] = list(paths().pending.glob("*.json"))
+    assert pending_file.exists()
+
+
+def test_write_one_resets_pending_kept_signal_not_sticky(env, capsys, monkeypatch):
+    """Signal not sticky: periodic write-back sets pending_kept,
+    but final write-back succeeds -> pending is unlinked and continue exits 0."""
+    _, a, _ = _import(capsys)
+    env.speak_rounds = 1
+    env.sleep = 0.5
+    env.sessions["ses_a"].append("ZZ 定期與最終發言")
+
+    round_called = False
+
+    def mock_periodic(run, agent):
+        nonlocal round_called
+        round_called = True
+        run.pending_kept = True
+
+    monkeypatch.setattr(cli, "_periodic_write", mock_periodic)
+
+    capsys.readouterr()
+    code, out, err = _continue(capsys, a)
+
+    assert round_called is True, "periodic write must have been called"
+    assert code == 0, f"code={code}, err={err}"
+    assert not list(paths().pending.glob("*.json")), "pending file must be deleted when final write succeeds"
+
+
+def test_recover_pending_keeps_pending_when_sync_fails_and_target_is_unindexed(env, capsys, monkeypatch):
+    """When the target is unknown (rescue on Drive, unindexed, sync fails), recover_pending
+    does not delete the pending file."""
+    _, a, _ = _import(capsys)
+    b = _stage_rescue(a)
+    store.upload_batch(store.Drive(paths()), paths())
+    assert store.Index(paths()).header(b) is None
+
+    # Write a pending record pointing to agora:b
+    paths().pending.mkdir(parents=True, exist_ok=True)
+    record = _record(f"agora:{b}")
+    pending_path = paths().pending / f"pending-{b}.json"
+    pending_path.write_text(json.dumps(record), encoding="utf-8")
+
+    def broken_sync(*args, **kwargs):
+        raise store.StoreError("Drive network error")
+
+    monkeypatch.setattr(store, "sync", broken_sync)
+
+    cli.recover_pending(paths())
+
+    assert pending_path.exists(), "recover_pending must keep the pending file when the target is unknown"
+
+
+def test_continue_pending_kept_prints_first_note_and_failures(env, capsys, monkeypatch):
+    """When pending is kept, first_note and failures messages are still printed."""
+    _, a, _ = _import(capsys)
+    env.sleep = 0.01
+    env.speak_rounds = 1
+
+    real_final_write = cli._final_write
+
+    def broken_sync(*args, **kwargs):
+        raise store.StoreError("Drive network error")
+
+    def fake_final_write(run, agent):
+        b = _stage_rescue(a)
+        store.upload_batch(store.Drive(paths()), paths())
+        cli._follow(run, f"agora:{b}")
+        run.first_note = "[agora] 目標搬家通知測試"
+        run.failures = 3
+        monkeypatch.setattr(store, "sync", broken_sync)
+        return real_final_write(run, agent)
+
+    monkeypatch.setattr(cli, "_final_write", fake_final_write)
+
+    code, out, err = _continue(capsys, a, "--sync-period", "0")
+
+    assert code == cli.EXIT_ERROR == 2, f"code={code}, err={err}"
+    assert "[agora] 目標搬家通知測試" in err
+    assert "定期寫回失敗 3 次" in err
+    assert "寫回失敗" in err
+
+
+def test_final_write_sync_fails_via_fake_rclone_keeps_pending_and_exits_error(env, capsys, monkeypatch):
+    """The final write with a real failing fake rclone:
+    Drive sync fails with FAKE_RCLONE_FAIL=lsjson when resolving a target deleted on Drive
+    while local marker cloud_has is still True.
+    _write_target catches StoreError out of strict=True sync, does not write back to A,
+    does not mint a new session, keeps the work in pending, and continue exits 2."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+
+    env.sleep = 0.01
+    env.speak_rounds = 1
+    env.sessions["ses_a"].append("ZZ 發言在離線時")
+
+    real_final_write = cli._final_write
+    real_lost = cli._lost_in_cloud
+
+    def failing_final_write(run, ag):
+        shutil.rmtree(on_drive(a))
+        def lost_and_fail(paths_, target_):
+            res = real_lost(paths_, target_)
+            monkeypatch.setenv("FAKE_RCLONE_FAIL", "lsjson")
+            return res
+        monkeypatch.setattr(cli, "_lost_in_cloud", lost_and_fail)
+        return real_final_write(run, ag)
+
+    monkeypatch.setattr(cli, "_final_write", failing_final_write)
+
+    capsys.readouterr()
+    code, out, err = _continue(capsys, a, "--sync-period", "0")
+
+    assert code == cli.EXIT_ERROR == 2, f"code={code}, err={err}"
+    assert "寫回失敗：目標 Session 未入索引且無法確認" in err
+    assert _extra_sessions(a) == []
+    [pending_file] = list(paths().pending.glob("*.json"))
+    assert pending_file.exists()
