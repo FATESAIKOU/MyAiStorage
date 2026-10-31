@@ -922,7 +922,12 @@ def test_edit_with_header_keeps_raw_and_system_fields(env, capsys):
 def test_edit_in_editor(env, capsys, tmp_path, monkeypatch):
     _, sid, _ = _import(capsys)
     script = tmp_path / "ed.sh"
-    script.write_text("#!/bin/sh\nsed -i '' 's/^title: .*/title: 編輯器改的/' \"$1\"\n")
+    # No `sed -i`: its in-place syntax differs between BSD and GNU sed ('' would be
+    # parsed as the script/filename on GNU). Stream to a temp file and move back.
+    script.write_text(
+        "#!/bin/sh\n"
+        "sed 's/^title: .*/title: 編輯器改的/' \"$1\" > \"$1.tmp\" && mv -f \"$1.tmp\" \"$1\"\n"
+    )
     script.chmod(0o755)
     monkeypatch.setenv("EDITOR", str(script))
     code, out, _ = run(capsys, "edit", "session", sid)
