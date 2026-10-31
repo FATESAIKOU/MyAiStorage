@@ -548,7 +548,7 @@ class Drive:
             raise StoreError(f"Drive 根目錄有 {len(matches)} 個 {name}/，請先處理同名資料夾")
         folders[name] = matches[0]["ID"]
         self.paths.config.mkdir(parents=True, exist_ok=True)
-        self.settings_file.write_text(json.dumps(self.settings, indent=2))
+        write_atomic(self.settings_file, json.dumps(self.settings, indent=2))
         return folders[name]
 
     def list_sessions(self) -> dict[str, dict[str, str]] | None:
@@ -2942,7 +2942,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
         # A complete listing is the only one that may change what we remember (#119);
         # a failed or missing one leaves the file alone, like the cloud_missing marks.
         _write_unfinished(paths, still_unfinished)
-    stamp.write_text(str(now()))
+    write_atomic(stamp, str(now()))   # a throttled sync reads it while another one writes
     return index
 
 

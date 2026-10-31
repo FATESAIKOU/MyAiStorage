@@ -591,3 +591,47 @@ def test_index_pending_goes_on_after_an_error_that_is_not_the_lock(_env, monkeyp
     store.index_pending(p, idx, warn=lambda m: None)
     assert tried == ulids, "one bad session must not keep the others from being indexed"
     assert [m.name for m in pending.iterdir()] == [ulids[0]], "its marker stays for the next sync"
+
+
+def test_folder_id_writes_config_atomically_so_reader_never_sees_empty_file(_env, monkeypatch):
+    """folder_id must write config.json atomically using write_atomic; a concurrent reader must never see an empty file."""
+    p = store.Paths.from_env()
+    drive = store.Drive(p)
+
+    atomic_writes = []
+    real_write_atomic = store.write_atomic
+
+    def spy_write_atomic(path, text):
+        atomic_writes.append(path)
+        # Midway check: before os.replace, config.json must NOT exist on disk yet
+        assert not path.exists(), "config.json must not be created or truncated before atomic replace"
+        concurrent = store.Drive(p)
+        assert concurrent.settings == {}
+        return real_write_atomic(path, text)
+
+    monkeypatch.setattr(store, "write_atomic", spy_write_atomic)
+
+    drive.folder_id()
+    assert p.config / "config.json" in atomic_writes, "folder_id must use write_atomic to save config.json"
+    assert (p.config / "config.json").exists()
+
+
+def test_sync_writes_the_last_sync_stamp_atomically(_env, monkeypatch):
+    """A throttled sync reads `last-sync` (float(...)) while another process's sync writes
+    it: the write must replace the file whole, never truncate it to "" first."""
+    p = store.Paths.from_env()
+    stamp = p.state / "last-sync"
+    atomic_writes = []
+    real_write_atomic = store.write_atomic
+
+    def spy_write_atomic(path, text):
+        atomic_writes.append(path)
+        if path == stamp and path.exists():
+            float(path.read_text())    # what a concurrent throttled sync would read
+        return real_write_atomic(path, text)
+
+    monkeypatch.setattr(store, "write_atomic", spy_write_atomic)
+    store.sync(p, kick=False)
+    store.sync(p, kick=False)          # the second write replaces an existing stamp
+    assert atomic_writes.count(stamp) == 2, "sync must save last-sync with write_atomic"
+    float(stamp.read_text())
