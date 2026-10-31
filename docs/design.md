@@ -213,6 +213,7 @@ agora pull     session <id>, <id>, ... [--not-exist-delete]
 agora push     session <id>, <id>, ... [--not-exist-upload]
 ```
 
+- `--add-tag` 的值不能是空字串或只有空白：import、continue、edit 收到都是 exit 1（EXIT_INPUT），訊息「--add-tag 的值不能是空的」，什麼都不做（在同步、寫入、開 agent 之前就拒絕；不會因此開 `$EDITOR`）。
 - 位置參數固定是「動作、型態、session id」。型態目前只有 `session`。
 - `--agent`：import 時是「這是哪個 agent 的 session」，merge 時是「誰寫要約」，continue 時是「用哪個 agent 接」。不再有 `--format`。**agy 支援 import／讀取與同 agent 的互動接續（#26 PR2b）**：`merge`／`continue --fork`／`continue --headless` 帶 `--agent agy`、**跨 agent 的 continue**（來源 agy→claude／opencode，或來源 claude／opencode→agy）、或**來源是 agy 匯入的 Session 的 merge**，都在讀任何東西之前拒絕（exit 1，`InputError`）：fork／跨 agent／merge 說「agy 第一版只支援 import／讀取與同 agent 的互動接續；fork／headless／跨 agent／merge 為後續（#26）」或「跨 agent 的 continue 在後續（#26）」，headless 說「agy 的 headless 在後續」。轉接器本身的 `native`／`append_native`／`summarize` 仍是拒絕 stub。
 - **agent 執行檔**（#77）：預設從 PATH 找 `opencode`／`claude`／`agy`（`AGORA_AGY_CMD` 沿用同一條 `agent_cmd` 規則）；`AGORA_OPENCODE_CMD`／`AGORA_CLAUDE_CMD`／`AGORA_AGY_CMD` 可以換成指定的執行檔，值是執行檔路徑或 PATH 上的名稱。每個會跑 agent CLI 的地方都走它：
@@ -414,7 +415,7 @@ Claude 用過 `/clear` 時，照常存 `/clear` 之前的部分，並印出之�
 ### 5.7 edit
 
 - 只改標頭，不動 raw 與閱讀版；改完存成同一個 agora id 的新版本 session.md。
-- 有給 `--header`／`--header-file`／`--add-tag` 就照 3.5 疊加（#153）：`--add-tag` 附加到 `tags`，不覆蓋原有的、不重複；和 `--header` 併用時先套 `--header` 再附加；有給任何一個就**不開編輯器**。`--add-tag` 只有 `import`、`continue`、`edit` 吃，其他動作收到會報錯（exit 1）而不是悄悄忽略。**都沒給就用 `$EDITOR` 打開標頭的 YAML**，存檔關掉之後驗證並上傳，驗證不過就不存並印出原因。
+- 有給 `--header`／`--header-file`／`--add-tag` 就照 3.5 疊加（#153）：`--add-tag` 附加到 `tags`，不覆蓋原有的、不重複；和 `--header` 併用時先套 `--header` 再附加；有給任何一個就**不開編輯器**。`--add-tag` 只有 `import`、`continue`、`edit` 吃，其他動作收到會報錯（exit 1）而不是悄悄忽略；`--add-tag` 的值是空字串或只有空白，同樣 exit 1、什麼都不做（#303）。**都沒給就用 `$EDITOR` 打開標頭的 YAML**，存檔關掉之後驗證並上傳，驗證不過就不存並印出原因。
 - `id`、`agora` 區塊同樣不能改。`verified` 由本人在這裡加。
 
 ### 5.8 show
