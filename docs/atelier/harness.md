@@ -4,7 +4,7 @@ harness ＝ 一個職務一個版本的 UTF-8 Markdown 檔，放 `atelier/<team>
 
 **現況**：`atelier/worker-team/pm/` 有 `v0.md`（期 1 單人暫定）、`v1.md`（有隊員的 PM）與 `v2.md`（#200：c／d 由該 repo 的 PM 自己 merge、team PM 不 merge；環境不再寫死清單）；`impl/` 與 `rev/` 各有 `v1.md`（隊員專屬的實作與審查職務，`draft`）。**`v0` 已被 `v1`、`v1` 已被 `v2` 取代**——`atelier show atelier:worker-team-pm` 不給版本讀到 `v2`。`v0` 檔因為 append-only 不改（`status` 也不原地改），所以它不會自己標 `deprecated`（`v1` 同理）。
 
-`atelier/pmo/pm/` 有 `v1.md`（#226）與 `v2.md`（#246：對齊 MyPMO handbook `44ec9dc`——合併規矩含過渡條、PR／審查第一行慣例、秘書＝PMO 的叫人與派工）。**`v1` 已被 `v2` 取代**——`atelier show atelier:pmo-pm` 不給版本讀到 `v2`；`v1` 因為 append-only 不改，不會自己標 `deprecated`。
+`atelier/pmo/pm/` 有 `v1.md`（#226）、`v2.md`（#246：對齊 MyPMO handbook `44ec9dc`——合併規矩含過渡條、PR／審查第一行慣例、秘書＝PMO 的叫人與派工）與 `v3.md`（#308：`secretary-pmo` 的群請求只由 `dispatch.py inbox` 腳本處理（H1）、被叫醒收到 `[group-pending]` 先 `inbox group list` 再 `run`／`reject`（H4））。**`v1` 與 `v2` 已被 `v3` 取代**——`atelier show atelier:pmo-pm` 不給版本讀到 `v3`；舊版因為 append-only 不改，不會自己標 `deprecated`。
 
 ## frontmatter（檔的第一個區塊，YAML；OKF v0.2 對齊，不認得的欄位保留）
 
@@ -49,7 +49,7 @@ harness ＝ 一個職務一個版本的 UTF-8 Markdown 檔，放 `atelier/<team>
 - 清單放測試一處、不收**一般詞**（`session`／`輪換表`／`通道`／`CI`／`git`／`commit`／`repo`／`ssh`／`brief`……規矩的句子本身要用），也不收**本專案自己的元件名**（`atelier`／`github`／`agora`）。比對前先遮掉 `CLAUDE.md`／`AGENTS.md` 兩個檔名（`know` 的 MUST 句一定要寫它們，而 `CLAUDE.md` 含 `claude`）。誤殺就改清單，不要放寬原則。
 - `pm` 的 `v>=1` MUST 還寫到四個關鍵句——`不是權限`、`照 PMO 的模型輪換表`、`不指定頻道`、`長時間的指令`——**放在哪一段由 harness 自己安排**，只要 `know`＋`do`＋`judge`＋`dont` 合起來每一句至少出現一次。
 - `impl`／`rev` 的 `v>=1` 也各有自己的關鍵句清單（#135；清單在測試一處、規則同上：`know`＋`do`＋`judge`＋`dont` 合起來每句至少一次）；`rev` 的 `judge`／`dont` MUST 另有**「不審自己的作品」**。
-- `pmo` 的 `pm` 從 `v>=2` 起另有一份關鍵句清單（#246；在測試同一處）。
+- `pmo` 的 `pm` 從 `v>=2` 起另有一份關鍵句清單（#246），`v>=3` 起再加群請求的關鍵句（H1／H4；#308；都在測試同一處）。
 
 ## 怎麼載入（`v0` 與 `v1` 不同）
 
