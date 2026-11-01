@@ -98,7 +98,7 @@ from agora.continue_shell import (CONTINUE_LOG, RoundChildDead, StartChildDead, 
 
 ### 2.6 continue_shell 本身的寫法
 
-- 第一行用 `from __future__ import annotations`；`_Run` 只出現在字串型別註記裡，**不為了型別去 import cli**（連 `TYPE_CHECKING` 都不用；repo 沒有型別檢查器）。
+- 模組 docstring 之後的第一條 import 是 `from __future__ import annotations`（版面同 C-2）；`_Run` 只出現在字串型別註記裡，**不為了型別去 import cli**（連 `TYPE_CHECKING` 都不用；repo 沒有型別檢查器）。
 - import 只有：標準庫、`agora.header as h`、`agora.store`、`agora.errors.InputError`、`agora.agents.base` 的 `Agent, AgentError, env_seconds`。
 - 搬過來的函式本體逐字不變，只有 §4 列出的替換。模組 docstring 寫明職責和「不 import cli、round_child、start_child」這條規則。
 
@@ -135,7 +135,7 @@ from agora.continue_shell import (CONTINUE_LOG, RoundChildDead, StartChildDead, 
 - **C-5 cli 重新匯出**：§2.3 清單裡的 9 個名字，`getattr(cli, n) is getattr(continue_shell, n)`；其中的函式和類別（常數 `CONTINUE_LOG` 除外）另外斷言 `__module__ == "agora.continue_shell"`。並且 `cli.InputError is errors.InputError`、`errors.InputError.__module__ == "agora.errors"`。放在同一個測試檔。
 - **C-6 接縫仍有效**：既有的 `monkeypatch.setattr(cli, "_round_child"|"_start_child", ...)` 不改，所在的測試全綠。證明了 cli 內部是用裸名呼叫的。
 - **C-7 round_child 的名字保留**：`round_child.state_of is continue_shell.state_of`、`round_child.decode_fingerprint is continue_shell.decode_fingerprint`（同一個測試檔）。
-- **C-8 改名**：`continue_shell._kill_child_group` 存在；`cli` 和 `continue_shell` 都**沒有** `_kill_round_group` 這個屬性（同一個測試檔斷言 `not hasattr`）。舊名殘留由審查時跑 `grep -rn _kill_round_group src tests` 檢查：src 要零筆；tests 只准剩測試函式名 `test_kill_round_group_takes_a_grandchild_that_ignores_sigterm` 那一行。
+- **C-8 改名**：`continue_shell._kill_child_group` 存在；`cli` 和 `continue_shell` 都**沒有** `_kill_round_group` 這個屬性（同一個測試檔斷言 `not hasattr`）。舊名殘留由審查時跑 `grep -rn --include='*.py' _kill_round_group src tests` 檢查：src 要零筆；tests 只准剩測試函式名 `test_kill_round_group_takes_a_grandchild_that_ignores_sigterm` 那一行。
 - **C-9 行為不變**：全 unit 綠。測試的改動只限 §5 決定 1 列出的那幾行，加上新增的 test_continue_shell_deps.py；沒有任何斷言或期望值改變。
 - **C-10 文件**：本 note、`docs/architecture/overview.md`、`docs/architecture/decisions.md` 和程式在同一個 PR（overview／decisions 由架構師先 commit 在這個 branch 上）。
 
@@ -208,4 +208,12 @@ from agora.continue_shell import (CONTINUE_LOG, RoundChildDead, StartChildDead, 
 | 5 低：C-1 沒有可驗的斷言 | **已補**。C-1 加 ast 檢查（cli.py／round_child.py 頂層不得有搬移符號的定義）；C-5 加 `__module__` 斷言；「改壞要紅」加一條 |
 | 6 低：改名後的舊名殘留 | **已補**。§2.4 和 §5 決定 1 加上 test_continue_round_child.py:289 docstring 的改名；測試函式名當作唯一例外保留，寫進 C-8 的 grep 規則 |
 | 7 資訊：相容層的成本 | **記錄**。decisions 新增待決 P-8：日後把測試改讀 continue_shell，再刪 cli 的重新匯出和 round_child 的 `state_of` 重新匯出 |
+
+### 第 3 輪（同一位審查者，針對 1fb6116：「可以」，附 3 條 nit）
+
+| 發現 | 處理 |
+|---|---|
+| nit 1：C-8 的 grep 沒加 `--include='*.py'` | 已改 |
+| nit 2：§2.6 和 C-2 對檔頭順序的說法不同 | 已改：§2.6 寫成「docstring 之後的第一條 import」，和 C-2 一致 |
+| nit 3：P-8 沒講 cli 自用的 `CONTINUE_LOG` | 已在 decisions P-8 補上 |
 
