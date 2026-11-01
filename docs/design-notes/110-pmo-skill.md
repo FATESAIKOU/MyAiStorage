@@ -224,7 +224,7 @@ flowchart LR
 | `pmo poke ‹team› [--interrupt] --body -` | 一句話 | sidecar 的回應碼 | 0／2 |
 | `pmo status [‹team›] [--json]` | | 每個 team PM 的 state／exit／session，以及 PMO 自己排的 job | 0／2 |
 | `pmo close ‹team› [--timeout 秒]` | | 是否已關、刪了哪些 job | 0／2 |
-| `pmo inbox handoff-close ‹id›` | | 把一筆交接出去的群請求標成已結案，之後不再印 `[group-sweep-due]` | 0；1 查無 id |
+| `pmo inbox handoff-close ‹id›` | | 把一筆交接出去的群請求標成已結案，之後不再印 `[group-sweep-due]` | 0；1 查無 id；2 tick 狀態檔壞或寫不進去 |
 | `pmo watch --poke-only`（**只在 Q-8 選 (b) 時才有**） | （常駐；不讀信） | stderr 診斷；stdout 不印 | 由啟動方管理的常駐行程；收到 SIGTERM 結束為 0 |
 
 **送信前的身分守門**：所有會寄信的指令（ack、report、decision-send、send、reply），送之前檢查目前的身分（`ANGAREION_IDENTITY`）等於設定裡的 PMO 身分，不符就拒送（exit 2）。現行工具也有這道守門；公開版把身分改由設定給，守門照樣保留（C-3）。
@@ -257,9 +257,9 @@ flowchart LR
 | `[worker-action] ‹team› ‹動作›` | worker team 需要由過渡工具做的動作（看門狗要 poke、要比對 sidecar 狀態） | **新增**（Q-9） |
 | `[idle]` | 這一輪什麼都沒有 | **新增** |
 
-**tick 對 worker team 的邊界**（第一階段，D-8）：
+**tick 對 worker team 的邊界**（第一階段，D-8；頻率記在 §3.4 的 `tick.json`）：
 - **做**：team 訊息比對。worker team 的 PM 回「收到 ‹工單›」照樣寫 `ack_at`、印 `[ack]`（只動 team 狀態，不需要傳輸）；看門狗的到期判斷也照算。
-- **不做**：任何要碰 worker 上 sidecar 的事（`GET /agents`、poke、open、close）。到期或需要比對狀態時印 `[worker-action] ‹team› watchdog-poke`／`[worker-action] ‹team› poll`，由 PMO 用過渡工具做。
+- **不做**：任何要碰 worker 上 sidecar 的事（`GET /agents`、poke、open、close）。到期或需要比對狀態時印 `[worker-action] ‹team› watchdog-poke`／`[worker-action] ‹team› poll`，由 PMO 用過渡工具做。`poll` 對每個 worker team 最多每 10 分鐘印一次（`worker_poll.next_due_at`），不是每輪都印。
 
 ### 3.3 skill 依賴的介面（契約以各自的文件為準）
 
@@ -282,6 +282,14 @@ flowchart LR
   驗證規則照現行工具（AI 名用 ainame 驗、key、名字、channel 一致、不重複）。
 - **team 狀態**：照 MyPMO 現在 `pmo/state/README.md` 的欄位。**不認得的欄位原樣保留**（過渡期 worker team 的欄位由 MyPMO 寫，見 Q-9）。
 - **收件帳本**：`version`、`items`（以工作 ID 為 key）、`notified`；新增 `rebuilt_at`。
+- **tick 狀態**（`<狀態目錄>/tick.json`，tick 和 `handoff-close` 寫，監看程式只讀）：
+  - `version`；
+  - `last_tick_at`：tick 每輪結束時寫；
+  - `handoffs`：以群請求 id 為 key，值是 `handed_at`、`last_reminded_at`、`next_due_at`；`handoff-close` 刪掉該筆；
+  - `worker_poll`：以 worker team key 為 key，值是 `last_reported_at`、`next_due_at`。
+
+  寫入走同目錄暫存檔＋`os.replace`，並用 `tick.json.lock` 的 flock 包住「讀、改、寫」。**檔不存在**：tick 視為空的並建立；監看程式視為「還沒有 tick 跑過」（見 §3.5 首次啟動）。**檔壞掉**：tick 和 `handoff-close` 回 exit 2、印 `[要本人處理]`；監看程式在 stderr 記一行，不因為這份檔 poke，下一次再讀。
+- **監看程式狀態**（`<狀態目錄>/watch.json`，只有監看程式寫；只在 Q-8 選 (b) 時才有）：`version`、`last_poke_at`、`last_seen_agents`（上次 poke 時看到的本機 team PM 的 state／exit 摘要）、`poked_due`（已經為哪些到期項目 poke 過：交接 id 加 `next_due_at`、worker team 加 `next_due_at`、看門狗的 team 加派工時刻）。寫入方式同上（`watch.json.lock`）。檔不存在或壞掉：當作空的重建，**不會**因此補 poke 舊的到期項目以外的東西。
 - 位置：`PMO_SKILL_CONFIG`、`PMO_SKILL_STATE_DIR` 兩個環境變數（由環境說明提供）；沒設就拒絕執行（exit 2），**不猜預設路徑**。
 
 ### 3.5 `pmo watch --poke-only` 的規則（只在 Q-8 選 (b) 時才有）
@@ -289,8 +297,9 @@ flowchart LR
 - **不讀信**：只跑 `angareion wait`（目標是「寄給我的」，和 tick 的 `read` 同一個游標；`wait` 不動游標）。不用 `--mentioned`：tick 不推那個游標，`wait --mentioned` 會一直報有新信。
 - **去重**：`wait` 回 0 之後，只要 tick 還沒把游標往前推，下一次 `wait` 還會立刻回 0。所以監看程式記下「最後一次 poke 的時刻」，tick 每輪結束時在狀態目錄寫「最後一次 tick 的時刻」。**只有在上次 poke 之後 tick 已經跑過**，才因為 `wait` 回 0 再 poke；否則不 poke，改成等待（每 60 秒看一次 tick 有沒有跑）。
 - **補 poke 的上限**：如果 poke 之後 15 分鐘 tick 都沒跑（PMO 在忙、或 poke 掉了），再 poke 一次；之後每 15 分鐘最多一次。不用 `interrupt`。
-- **廣播**：「寄給我的」包含廣播。廣播本來就是 PMO 要看的信（tick 會印 `[msg]`），所以因廣播叫醒不算誤叫醒。唯一的例外是新身分第一次 `wait`：依 `docs/angareion.md`，第一次讀不會讀到「現在」之前的舊廣播，但第一次 `wait` 可能因此回 0。監看程式第一次啟動時先等 tick 跑過一次，再開始用 `wait` 的結果。
-- **agents 和看門狗**：每 60 秒 `GET /agents`。只有在「和上次 poke 時看到的狀態不同」或「看門狗到期」時才 poke；同一個變化只 poke 一次。
+- **廣播**：「寄給我的」包含廣播。廣播本來就是 PMO 要看的信（tick 會印 `[msg]`），所以因廣播叫醒不算誤叫醒。唯一的例外是新身分第一次 `wait`：依 `docs/angareion.md`，第一次讀不會讀到「現在」之前的舊廣播，但第一次 `wait` 可能因此回 0。監看程式啟動時若 `tick.json` 沒有 `last_tick_at`，**直接 poke 一次**，讓 tick 先跑一輪（把舊廣播讀掉）；之後才照「去重」的規則用 `wait` 的結果。
+- **agents 和看門狗**：每 60 秒對**本機** sidecar `GET /agents`（**跳過 worker team**，不碰 worker 的 sidecar）。只有在「和上次 poke 時看到的狀態不同」或「看門狗到期」時才 poke；同一個變化只 poke 一次。
+- **tick 狀態裡的到期項目**：每 60 秒讀 `tick.json`。`handoffs` 或 `worker_poll` 裡有任何一筆 `next_due_at` 已到、而且這個「id／team 加到期時刻」還沒 poke 過，就 poke 一次。tick 跑完會把那筆的 `next_due_at` 往後推（交接預設 10 分鐘、worker 比對預設 10 分鐘），所以每個到期點最多 poke 一次；`handoff-close` 之後那筆就消失，不再 poke。
 - **失敗**：`wait` 回 2 時退避（30 秒起、上限 10 分鐘），不 poke；sidecar 連不上時不 poke（tick 自己會報）。
 
 ## 4. 提議（待 Q 定案）
@@ -342,7 +351,7 @@ flowchart LR
 6. **T-4c 派工（三）**：`reply`、`poke`、`status`、`close`。
 7. **T-5 tick**：`pmo tick`（收信一輪、agents 比對、看門狗、no-candidate、waiting-quota、交接事件）；事件表的契約測試；「收到 → 看門狗不發」的測試。
 8. **T-6 說明**：`skills/pmo/SKILL.md`、環境說明範本（**只是範本，不改任何人正在用的環境說明**）；更新 overview／decisions。**PMO harness 的新版本不在這裡發**。
-9. **T-8 小監看程式**（**只在 Q-8 選 (b) 時才有**；在 T-7 之前）：`pmo watch --poke-only`，照 §3.5 的規則；測試要含「tick 沒跑就不重複 poke」「15 分鐘補 poke」「`wait` exit 2 退避」。
+9. **T-8 小監看程式**（**只在 Q-8 選 (b) 時才有**；編號是後來加的，**merge 順序在 T-7 之前**）：`pmo watch --poke-only`，照 §3.5 的規則；測試要含「tick 沒跑就不重複 poke」「15 分鐘補 poke」「`wait` exit 2 退避」「沒有 `last_tick_at` 時啟動就 poke 一次」「有未結案的交接 id 時每 10 分鐘 poke 一次、`handoff-close` 之後停」「worker 比對到期時 poke 一次」「`GET /agents` 不碰 worker team」。
 10. **T-7 切換**（PMO 自己的單；MyPMO 一側和本 repo 一側同步）：PMO harness 的新版本（能力段指向 `pmo`）、環境說明改用 `pmo`、停舊的 watch、開始用 `pmo tick`、MyPMO 依 Q-9 改成交接模式。三件事在同一個切換窗口做，避免「harness 叫 PMO 用 `pmo`，但設定還沒好」或「兩個讀者」。
 
 ## 6. 待本人決定的點
@@ -354,7 +363,7 @@ flowchart LR
 | Q-3 | worker team 的動作什麼時候搬 | (a) 第一階段不搬，交給過渡工具（Q-9）；(b) 一起搬，把 ssh／轉發埠做成第五個埠；(c) 等 MyLinuxPool 提供自己的 sidecar 存取方式再搬 | **(a)，之後走 (c)** |
 | Q-4 | 群請求什麼時候搬 | (a) 第一階段不搬（交接方式見 Q-9）；(b) 一起搬 | **(a)** |
 | Q-5 | 指令名和套件名 | (a) `pmo`（套件 `src/pmo`）；(b) `atelier pmo …`；(c) 其他名字 | **(a)**：atelier 指令目前只讀 harness，混進派工會變成兩種職責 |
-| Q-6 | #110 的層級 | 現在標 c；新增指令和套件屬於「功能組新增」，依工單規則可能是 b | 請本人定；若改 b，T-1～T-6 掛成子單 |
+| Q-6 | #110 的層級 | 現在標 c；新增指令和套件屬於「功能組新增」，依工單規則可能是 b | 請本人定；若改 b，T-1～T-6（以及 Q-8 選 (b) 時的 T-8）掛成子單，T-7 是 PMO 自己的切換單 |
 | Q-7 | 舊工具的去留 | (a) 切換後 MyPMO 的 dispatch.py 只留 worker 動作和群請求；(b) 改成轉呼叫 `pmo` 的薄殼；(c) 整支退役 | **(a)**，等 Q-3／Q-4 都搬完再退役 |
 | Q-8 | tick 由誰在什麼時候叫起來（PMO 現在已經由 sidecar 開，見 MyPMO 的 boot-pmo 說明；問題是「沒人寄信時」的定時工作怎麼觸發） | (a) sidecar 定時 poke job，每 N 分鐘一輪：N ≤ 10 分鐘（看門狗是 10 分鐘），一天至少 144 輪模型推理，大多是 `[idle]`；(b) 一個**不是 agent** 的小監看程式（`pmo watch --poke-only`，規則見 §3.5）：只用 `angareion wait`（不動游標，不算讀者）和 `GET /agents`，算好看門狗的到期時刻，**只在有事時** poke PMO，不叫醒時不花模型額度，由啟動方（Mac 環境）負責起停；(c) 照現在，PMO 自己在背景跑常駐監看（和「被 sidecar 管的不跑背景迴圈」的規則衝突） | **(b)**：只有有事才花額度，也維持「讀信只有 tick」；代價是多一個常駐行程，要由環境負責起停 |
 | Q-9 | tick 和過渡工具（MyPMO 的群請求、worker team 動作）怎麼交接 | (a) **id 交接**：tick 不處理、印 `[group-handoff] ‹id›`／`[worker-action] ‹team› ‹動作›`；MyPMO 的工具改成「給 id，用 `angareion log --around ‹id›` 取原信」（唯讀、不動游標）。**重試的觸發**：tick 在自己的狀態裡記下交接出去的 id（不讀 MyPMO 的帳本），每隔固定時間（預設 10 分鐘，最多每輪一次）印 `[group-sweep-due] ‹id…›`，PMO 看到就跑 MyPMO 的 sweep；MyPMO 報結案後，PMO 用 `pmo inbox handoff-close ‹id›` 停止提醒。（另一個做法是過渡工具自己排定時 job；我不建議，因為 job 的起停又多一套要管的東西。）team 狀態兩邊共用同一個目錄與 schema（不認得的欄位保留）。(b) tick 直接 import MyPMO 的群請求程式（違反「不依賴 MyPMO」）。(c) 先不切換：Q-3、Q-4 都搬完才做 T-7 | **(a)**：讀者仍然只有一個，MyPMO 只改入口；若本人不想在過渡期多一套交接，就選 (c)，代價是切換延後 |
@@ -384,7 +393,7 @@ flowchart LR
 3. **時序**：§2.1～2.3 是否涵蓋收件、去重、補發 ack、派工、team PM 的「收到」、回報、被叫醒、exit 2、限流、no candidate、waiting-quota、NEED_REOPEN？有沒有一條路會讓同一個身分出現兩個讀者？
 4. **介面**：§3.2 每個指令的輸入、輸出、結束碼是否完整、一致？§3.2.1 的事件表是否涵蓋現行工具的所有標籤？有沒有指令越過 D-7？
 5. **依賴方向**：skill 只透過四個埠碰外部，核心不碰外部？有沒有依賴 MyPMO 的程式？
-6. **搬移切分**：§5.1 的「原樣搬／重寫／不搬」是否和 MyPMO 的實際模組對得上？T-1～T-7 是否各自可以單獨 merge，而且 merge 後不會留下壞掉的中間狀態？
+6. **搬移切分**：§5.1 的「原樣搬／重寫／不搬」是否和 MyPMO 的實際模組對得上？T-1～T-8 是否各自可以單獨 merge，而且 merge 後不會留下壞掉的中間狀態？
 7. **待本人決定的點**：Q-1～Q-9 的選項是否互斥、完整？建議是否有理由？
 8. **public repo 的界線**：note 裡有沒有私人資訊，或不必要地指名其他專案的內部細節？
 
@@ -417,4 +426,13 @@ flowchart LR
 | N-3 `[group-pending]` 被改義 | 核實為真。交接改用新標籤 `[group-handoff]`；`[group-pending]`／`[group]` 留給 MyPMO 的帳本，tick 不印 |
 | N-4 worker team 在 tick 裡做到哪 | 核實為真：現行對所有 team 比對「收到」，worker 的 agents 比對要靠轉發。§3.2.1 後補「tick 對 worker team 的邊界」：做「收到」比對與看門狗到期判斷，不碰 sidecar，其餘印 `[worker-action]` |
 | N-5 修訂紀錄寫法過頭 | 同意。第 2 輪那一列改成精確說法 |
+
+### 第 4 輪（審查第 3 輪：R3-1～R3-4）
+
+| 發現 | 處理 |
+|---|---|
+| R3-1 選 Q-8 (b) 時，交接提醒和 worker 比對沒有叫醒來源 | 同意。§3.5 加「tick 狀態裡的到期項目」：監看程式每 60 秒讀 `tick.json`，交接或 worker 比對到期就 poke 一次；T-8 的測試加對應案例 |
+| R3-2 新的跨行程狀態沒進 schema | 同意。§3.4 加 `tick.json`（`last_tick_at`、`handoffs`、`worker_poll`）和 `watch.json` 的格式、檔名、原子寫入、flock、檔不存在與檔壞掉時的行為；`handoff-close` 補結束碼 2 |
+| R3-3 監看程式首次啟動可能永遠不 poke | 同意。改成沒有 `last_tick_at` 時啟動就 poke 一次；T-8 的測試加這一條 |
+| R3-4 worker 比對頻率、監看程式是否碰 worker、T-8 編號 | 同意。`poll` 每個 worker team 最多每 10 分鐘一次；監看程式的 `GET /agents` 跳過 worker team；T-8 註明 merge 順序在 T-7 之前，Q-6 和 §9 的範圍改成含 T-8 |
 
