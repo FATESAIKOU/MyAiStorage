@@ -2511,7 +2511,8 @@ def test_a_periodic_round_skips_when_the_target_is_not_indexed_here(env, capsys)
     assert _extra_sessions(a) == [], "the round minted a session beside the rescue"
     assert run_obj.last_md5 == "not-the-exported-md5", "the round's state did not stay put"
     assert run_obj.wrote is False, "the round claims a write happened"
-    assert run_obj.failures == 0 and "沒有新內容" in log_text(), "the round did not even happen"
+    assert run_obj.failures == 0, "the round counted as a failure"
+    assert "沒有新內容" in log_text(), "the round did not even happen"
 
     agent = cli.load_agent("opencode")
     exported = agent.export("ses_a")
