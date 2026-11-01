@@ -1294,7 +1294,10 @@ def _write_target(paths: store.Paths, run: "_Run", *, check_drive: bool) -> tupl
        for a session that is almost certainly still there (design P7). The last write
        and the recovery do ask, and skip nothing because the content did not change (P2).
     3. otherwise the work becomes a session of its own, pointing at the one that is
-       gone - the conversation is the user's work and does not go away with it.
+       gone - the conversation is the user's work and does not go away with it. With
+       no header at all on this machine and no listing in hand (the periodic round,
+       design P7), that read is uncertain - a rescue may just not be indexed here yet -
+       so the periodic round leaves the case to the last write instead of minting.
     """
     def _resolve(synced: bool) -> tuple[str, dict, bool]:
         index = store.Index(paths)
@@ -1314,6 +1317,11 @@ def _write_target(paths: store.Paths, run: "_Run", *, check_drive: bool) -> tupl
             gone = _lost_in_cloud(paths, run.target)
         if not gone:
             return run.target, hdr, False
+        if not check_drive and hdr is None:
+            # P7: periodic write never talks to Drive, so an unindexed target may be a rescue
+            # that is already on Drive but not yet synced locally. Skip writing this round
+            # and leave the decision to the next round or the final write (which syncs).
+            return run.target, {}, False
         if check_drive and not synced:
             # F4: read whether this machine had already marked it gone *before* this sync, so a
             # mark the failing sync itself just wrote is not taken as certain

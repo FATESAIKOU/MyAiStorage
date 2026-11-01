@@ -2488,3 +2488,54 @@ def test_final_write_sync_fails_via_fake_rclone_keeps_pending_and_exits_error(en
     assert _extra_sessions(a) == []
     [pending_file] = list(paths().pending.glob("*.json"))
     assert pending_file.exists()
+
+
+def test_a_periodic_round_skips_when_the_target_is_not_indexed_here(env, capsys):
+    """The periodic round never lists Drive (P7), so a target with no header on this
+    machine may be the uploader's rescue: pushed to Drive, out of the outbox, but only
+    awaiting the next sync to be indexed here. Minting a session of its own would file
+    the work beside a rescue the round cannot see - the round skips instead, and the
+    last write (which syncs first) moves the work into the rescue."""
+    _, a, _ = _import(capsys)
+    b = _stage_rescue(a)
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == [], "the rescue went up in one batch"
+    assert on_drive(f"agora:{b}").is_dir(), "B confirmed on Drive first"
+    assert store.Index(paths()).header(b) is None, "B is not indexed on this machine"
+    assert b not in store.outbox_ulids(paths()), "B is not waiting in the outbox either"
+
+    run_obj = cli._Run(paths(), _record(a), last_md5="not-the-exported-md5")
+    run_obj.target = f"agora:{b}"
+    cli._periodic_write(run_obj, cli.load_agent("opencode"))
+
+    assert _extra_sessions(a) == [], "the round minted a session beside the rescue"
+    assert run_obj.last_md5 == "not-the-exported-md5", "the round's state did not stay put"
+    assert run_obj.wrote is False, "the round claims a write happened"
+    assert run_obj.failures == 0, "the round counted as a failure"
+    assert "沒有新內容" in log_text(), "the round did not even happen"
+
+    agent = cli.load_agent("opencode")
+    exported = agent.export("ses_a")
+    saved, target, _note = cli._write_one(paths(), run_obj, exported, agent, check_drive=True)
+    assert run_obj.target == f"agora:{b}", "the last write did not land on the rescue"
+    assert saved is not None and target == f"agora:{b}", "the last write did not write"
+    assert "ZZ 第 1 次發言" in document_of(f"agora:{b}"), "the new words are not in B"
+
+
+def test_a_periodic_round_still_rescues_a_marked_deletion(env, capsys):
+    """The target's header is here and the marker already says Drive has no such
+    session (this machine itself confirmed the deletion): the round decides on its own
+    marks - minting a session of its own stays (F4), nothing new to wait for."""
+    _, a, _ = _import(capsys)
+    ulid = a.split(":")[1]
+    assert store.Index(paths()).header(ulid) is not None
+    store.Index(paths()).mark_missing([ulid])
+    assert store.Index(paths()).cloud_has(ulid) is False
+    run_obj = cli._Run(paths(), _record(a))
+
+    cli._periodic_write(run_obj, cli.load_agent("opencode"))
+
+    kept = _extra_sessions(a)
+    assert len(kept) == 1, f"the marked deletion still rescues: {[k['id'] for k in kept]}"
+    assert [p["id"] for p in h.agora_of(kept[0])["parents"]] == [a]
+    assert run_obj.wrote is True
