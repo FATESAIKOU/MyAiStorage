@@ -33,6 +33,7 @@ from pathlib import Path
 import pytest
 
 from agora import cli, store, round_child
+from agora import continue_shell
 from agora.agents.claude import encode_project_dir
 
 FAKE_RCLONE = Path(__file__).resolve().parent.parent / "fakes" / "fake_rclone.py"
@@ -286,7 +287,7 @@ def _wait_gone(pid: int, seconds: float = 15.0) -> bool:
 @pytest.mark.parametrize("leader_ignores_term", [False, True],
                          ids=["leader-exits-on-term", "leader-ignores-term-too"])
 def test_kill_round_group_takes_a_grandchild_that_ignores_sigterm(leader_ignores_term):
-    """The SIGKILL half of `_kill_round_group`, on a REAL group (#74's detection gap): a
+    """The SIGKILL half of `_kill_child_group`, on a REAL group (#74's detection gap): a
     wedged rclone/opencode grandchild that ignores SIGTERM must not outlive the round,
     whether or not the leader itself goes quietly on SIGTERM (since B1b-2 it does:
     `round_child` exits on SIGTERM - and a leader that is gone is no reason to leave
@@ -294,7 +295,7 @@ def test_kill_round_group_takes_a_grandchild_that_ignores_sigterm(leader_ignores
     proc, gpid = _group_with_a_grandchild_that_ignores_term(leader_ignores_term)
     try:
         assert _alive(gpid)
-        assert cli._kill_round_group(proc) is True
+        assert continue_shell._kill_child_group(proc) is True
         assert _wait_gone(gpid), "the grandchild that ignores SIGTERM survived the group kill"
         assert proc.poll() is not None
     finally:
@@ -885,7 +886,7 @@ def test_reap_group_call_order_when_group_not_dead(monkeypatch):
             calls.append(("wait", timeout))
             return -9
 
-    monkeypatch.setattr(cli, "_kill_round_group", lambda p: (calls.append("kill_group"), False)[1])
+    monkeypatch.setattr(continue_shell, "_kill_child_group", lambda p: (calls.append("kill_group"), False)[1])
 
     proc = _Proc()
     cli._reap_group(proc)
@@ -915,7 +916,7 @@ def test_reap_group_skips_kill_when_group_already_dead(monkeypatch):
             calls.append(("wait", timeout))
             return 0
 
-    monkeypatch.setattr(cli, "_kill_round_group", lambda p: (calls.append("kill_group"), True)[1])
+    monkeypatch.setattr(continue_shell, "_kill_child_group", lambda p: (calls.append("kill_group"), True)[1])
 
     proc = _Proc()
     cli._reap_group(proc)

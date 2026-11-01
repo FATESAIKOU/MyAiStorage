@@ -36,28 +36,7 @@ import sys
 from pathlib import Path
 
 from agora import cli, private_tmp, store
-
-
-def state_of(run) -> dict:
-    """The outer shell's `_Run`, minus everything big. `record` crosses whole
-    because the round only reads it (nothing on the round path writes it)."""
-    return {"record": run.record,
-            "last_md5": run.last_md5,
-            "fingerprint": run.fingerprint,
-            "collect_failed": run.collect_failed,
-            "target": run.target,
-            "wrote": run.wrote,
-            "first_note": run.first_note,
-            "pending": str(run.pending) if run.pending else None}
-
-
-def decode_fingerprint(fp):
-    """JSON turns every tuple into a list; `_collect_new` compares a stat MARK
-    against `run.fingerprint` with `==`, and a tuple never equals a list -
-    restore it or the skip check silently re-reads every session every round."""
-    if isinstance(fp, list):
-        return tuple(decode_fingerprint(x) for x in fp)
-    return fp
+from agora.continue_shell import decode_fingerprint, state_of
 
 
 def decode_run(state: dict, paths: store.Paths) -> cli._Run:
@@ -100,7 +79,7 @@ def run_round(run, agent) -> dict:
 def _exit_on_sigterm() -> None:
     """Turn SIGTERM into a normal interpreter exit (review 中3).
 
-    A round that times out or is cancelled gets SIGTERM from `_kill_round_group`; the
+    A round that times out or is cancelled gets SIGTERM from `_kill_child_group`; the
     default action kills the process at once and leaves the export's temp directory
     (the whole packed raw, private conversation bytes) behind in the temp dir. Raising
     SystemExit lets the finalizers run first; SIGKILL, the escalation after five

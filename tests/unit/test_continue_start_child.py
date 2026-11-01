@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from agora import cli, store
+from agora import continue_shell
 from agora.agents import claude
 from agora.agents.base import Launch
 from agora.agents.claude import encode_project_dir
@@ -173,7 +174,7 @@ def test_start_child_cancel_catches_base_exception_during_drain_and_kills_proc(m
             return -9
 
     monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **kw: _Stub())
-    monkeypatch.setattr(cli, "_kill_round_group", lambda p: True)
+    monkeypatch.setattr(continue_shell, "_kill_child_group", lambda p: True)
 
     with pytest.raises(KeyboardInterrupt) as exc:
         cli._start_child(paths(), _state("agora:01TEST00000000000000000000", {"id": "x"}, "/tmp"))
