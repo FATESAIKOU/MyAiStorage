@@ -61,6 +61,10 @@ from agora.agents.claude_raw import (FORMAT, PackedRaw, _AUX_SEP, _RAW_HEAD, _au
 
 **claude.py 內部一律用自己命名空間的裸名呼叫**（現況就是），所以 tests/unit/test_mem_golden.py:441 的 `monkeypatch.setattr(claude, "_unpack_raw", count_unpack)` 照樣有效。
 
+**claude.py 的 import 清理**：搬完後 claude.py 不再用到 `base64`、`codecs`、`io`（把四段拿掉後，對剩下的程式用 ast 算過），這三行 import 要刪。`Iterable` 留著，`_stream_raw` 的字串型別註記 `"Iterable[int] | bool"` 還在用它。
+
+**只為測試存在的重新匯出**：`FORMAT` 搬完後 claude.py 自己不再用，重新匯出只是為了 6 處測試讀 `C.FORMAT`。這是相容層，記為 decisions 的待決 P-10。
+
 **不重新匯出**：`_AUX_CHUNK`、`_read_chunks`、`_is_utf8`。claude.py 留下的程式不用它們。依 D-12，不留「替換了也沒效果」的名字。
 
 **已知會失效的接縫**（見 §5 的 PM 決定）：tests/unit/test_store_raw_copy.py 有 5 處 `monkeypatch.setattr(claude, "_is_utf8", ...)`（:450、:471、:492、:509、:543）和 4 處 `real = claude._is_utf8`（:442、:464、:485、:536）。它們要讓 `_iter_aux` 看到替身；搬家後，`_iter_aux` 是在 claude_raw 的全域名稱裡找 `_is_utf8`，替換對象必須改成 `claude_raw`。
@@ -80,7 +84,7 @@ from agora.agents.claude_raw import (FORMAT, PackedRaw, _AUX_SEP, _RAW_HEAD, _au
 
 ## 4. 給實作的介面契約
 
-- **C-1 搬移與殘留**：claude_raw.py 有 §2.2 表中的 11 個符號（`FORMAT`、`_AUX_CHUNK`、`_read_chunks`、`_is_utf8`、`_iter_aux`、`_aux_files`、`_pack_raw`、`_RAW_HEAD`、`_AUX_SEP`、`PackedRaw`、`_unpack_raw`）。新測試 `tests/unit/test_claude_raw_deps.py`（第一行 `import _guard`）用 ast 斷言 claude.py 頂層沒有這 11 個名字的 def／class／Assign／AnnAssign。
+- **C-1 搬移與殘留**（含 import 清理）：claude_raw.py 有 §2.2 表中的 11 個符號（`FORMAT`、`_AUX_CHUNK`、`_read_chunks`、`_is_utf8`、`_iter_aux`、`_aux_files`、`_pack_raw`、`_RAW_HEAD`、`_AUX_SEP`、`PackedRaw`、`_unpack_raw`）。新測試 `tests/unit/test_claude_raw_deps.py`（第一行 `import _guard`）用 ast 斷言 claude.py 頂層沒有這 11 個名字的 def／class／Assign／AnnAssign，也沒有 `import base64`／`import codecs`／`import io`。
 - **C-2 逐字搬移（按行範圍，審查者可重跑；不需要任何替換）**：
   ```sh
   git show 9584a9d:src/agora/agents/claude.py | sed -n '38p;267,354p;428,441p;459,514p' > /tmp/342-old.txt
@@ -95,7 +99,11 @@ from agora.agents.claude_raw import (FORMAT, PackedRaw, _AUX_SEP, _RAW_HEAD, _au
 - **C-4 依賴方向（執行期）**：在子行程裡跑 `import sys, agora.agents.claude_raw`，斷言 `agora.agents.claude`、`agora.store` 都不在 `sys.modules`。
 - **C-5 重新匯出**：§2.3 的 8 個名字，`getattr(claude, n) is getattr(claude_raw, n)`；其中的函式和類別（`PackedRaw`、`_aux_files`、`_iter_aux`、`_pack_raw`、`_unpack_raw`）另外斷言 `__module__ == "agora.agents.claude_raw"`。
 - **C-6 不重新匯出**：`not hasattr(claude, n)`，n 是 `_AUX_CHUNK`、`_read_chunks`、`_is_utf8`。
-- **C-7 接縫仍有效**：test_mem_golden.py:441 的 `setattr(claude, "_unpack_raw")` 不改、所在測試綠。
+- **C-7 接縫仍有效（正向斷言）**：test_mem_golden.py:441 的 `setattr(claude, "_unpack_raw")` 不改，所在測試保持綠。但那支期望呼叫 0 次，接縫失效也照樣會過，所以**另外**在 test_claude_raw_deps.py 加兩支正向測試：
+  - (a) `monkeypatch.setattr(claude, "_unpack_raw", spy)`（spy 計數後呼叫真的那個），再呼叫 `claude.ADAPTER.turns(claude_raw._pack_raw([], {}))`（ClaudeAgent.turns 在 :1075 用裸名 `_unpack_raw`），斷言 spy 被呼叫 1 次；
+  - (b) `monkeypatch.setattr(claude, "_pack_raw", spy)`，再呼叫 `claude.ADAPTER.native([])`（:1081），斷言 spy 被呼叫 1 次。
+
+  這兩支證明 claude.py 是透過自己命名空間的名字呼叫的。
 - **C-8 行為不變**：以下都綠、不改：
   - golden `test_the_new_export_is_head_bit_for_bit`（tests/unit/test_agent_claude_stream.py）；
   - #338 的兩支互比測試（同檔）；
@@ -108,6 +116,7 @@ from agora.agents.claude_raw import (FORMAT, PackedRaw, _AUX_SEP, _RAW_HEAD, _au
 - 在 claude_raw 任一函式內加 `from agora.agents import claude`（或 `from . import claude`）→ C-3 紅。
 - claude.py 留著舊的 `def _pack_raw`，import 寫在它後面 → C-1 紅（C-5 的 `is` 抓不到）。
 - claude.py 也重新匯出 `_is_utf8` → C-6 紅。
+- claude.py 改成 `claude_raw._unpack_raw(...)` 呼叫 → C-7 (a) 紅。
 - claude_raw 改了任何一個字元（例如 `_RAW_HEAD` 的組法、`_AUX_CHUNK` 的值）→ C-2 的 diff 紅；改到位元組的話，golden 和互比也紅。
 
 ## 5. 要 PM 決定的事
@@ -150,3 +159,15 @@ from agora.agents.claude_raw import (FORMAT, PackedRaw, _AUX_SEP, _RAW_HEAD, _au
 7. **測試策略**：C-3 用白名單（只准 `agora.agents.base`）而不是黑名單，是否恰當？C-4 同時斷言 store 不被載入，是否合理？
 8. **風險**：§7 對 test_mem_golden 計數的推論是否正確？還有沒有別的測試用 `__name__`、`__module__`、`sys._getframe`，或 claude 模組的屬性去辨認呼叫端？
 9. **PM 決定**（§5）：放寬的行是否最小？退路的描述是否正確？
+
+## 10. 修訂紀錄
+
+### 第 2 輪（審查：tickets/REPORT-342-design-rev.md，Sonnet，針對 f503957：「可以」，3 條低）
+
+| 發現 | 處理 |
+|---|---|
+| 低 1：C-7 效力偏弱（那支測試期望呼叫 0 次，接縫失效也照樣過） | 已補：C-7 加兩支正向測試（`turns` 走 `_unpack_raw`、`native` 走 `_pack_raw`，spy 要被呼叫 1 次）；「改壞要紅」加一條 |
+| 低 2：claude.py 殘留 `base64`／`codecs`／`io` 的 import；`FORMAT` 只供測試的重新匯出 | 已補：§2.3 寫明要刪這三行 import（`Iterable` 因字串註記保留），C-1 加斷言；`FORMAT` 記成 decisions P-10 |
+| 低 3：overview 的行數是約數 | 已校正成約 1230／約 180；C-9 規定 merge 前改成實際值 |
+| 資訊：private_tmp 和 base 之間既有的 lazy 循環 | 不用處理：overview 已記為已知的雙向依賴，不是這張單引入的 |
+
