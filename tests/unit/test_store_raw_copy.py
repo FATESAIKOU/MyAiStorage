@@ -340,7 +340,9 @@ def test_write_one_uses_raw_md5_without_loading_raw(tmp_path, monkeypatch):
 
     paths = store.Paths.from_env()
     hdr = _header()
-    store.stage(paths, hdr, "## user\nCSV\n", raw)
+    # Indexed like every real write (`_save` stages, then remembers): the periodic round
+    # skips a target this machine has no header for.
+    store.remember(paths, store.stage(paths, hdr, "## user\nCSV\n", raw))
     target_id = hdr["id"]
     record = {"agora_id": target_id, "agent": "claude", "agent_session_id": "s",
               "dir": str(tmp_path), "parent": {"id": target_id, "raw_md5": "0" * 32},
@@ -349,9 +351,10 @@ def test_write_one_uses_raw_md5_without_loading_raw(tmp_path, monkeypatch):
               "add_tags": [], "saved_md5": "0" * 32}
     run = cli._Run(paths, record)
 
-    saved, _where, _note = cli._write_one(paths, run, exported, ClaudeAgent(),
-                                          check_drive=False)
+    saved, where, _note = cli._write_one(paths, run, exported, ClaudeAgent(),
+                                         check_drive=False)
     assert saved is not None
+    assert where == target_id, "the write went beside the target instead of into it"
     assert not accesses, "_write_one loaded exported.raw instead of using raw_md5"
 
 
