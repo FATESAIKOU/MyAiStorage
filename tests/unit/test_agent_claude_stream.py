@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
+import base64
 import contextlib
 import hashlib
 import importlib.util
@@ -361,6 +362,90 @@ def test_the_new_export_is_head_bit_for_bit(case, reference_claude, tmp_path):
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
     assert _observe(C, path, sidecar, old=False) == _observe(reference_claude, path, sidecar, old=True)
+
+
+@pytest.mark.parametrize("case", CASES, ids=[case.name for case in CASES])
+def test_stream_raw_and_pack_raw_produce_identical_bytes(case, tmp_path):
+    """Parity check between _stream_raw and _pack_raw on the same session input.
+
+    Covers sidecar (aux), CJK content, and incomplete / broken trailing lines.
+    Cases where session parsing fails do not produce a raw export and are skipped.
+    """
+    path = tmp_path / "session.jsonl"
+    path.write_bytes(case.content)
+    sidecar = path.parent / "session"
+    for rel, data in case.sidecar:
+        dest = sidecar / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+
+    out_path = tmp_path / "streamed.raw"
+    try:
+        C._stream_raw(path, sidecar, out_path, label=path.name)
+    except (C.AgentError, AttributeError) as e:
+        pytest.skip(f"invalid session file does not produce raw export: {e!r}")
+
+    streamed = out_path.read_bytes()
+    main = list(C._iter_lines(path))
+    if main:
+        try:
+            json.loads(main[-1])
+        except json.JSONDecodeError:
+            main.pop()
+
+    aux = {}
+    if sidecar.is_dir():
+        for p in sorted(sidecar.rglob("*")):
+            if p.is_file():
+                rel = p.relative_to(sidecar).as_posix()
+                raw = p.read_bytes()
+                try:
+                    aux[rel] = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    aux[rel] = {"$base64": base64.b64encode(raw).decode("ascii")}
+
+    packed = C._pack_raw(main, aux)
+    assert streamed.startswith(HEAD_BYTES)
+    assert streamed == packed
+
+    unpacked_main, unpacked_aux = C._unpack_raw(streamed)
+    assert unpacked_main == main
+    assert unpacked_aux == aux
+
+
+def test_stream_and_pack_raw_parity_explicit_composite(tmp_path):
+    """Explicit parity check covering aux, CJK, and a truncated last line together."""
+    u1 = _user("ZZUSER 第一句繁體中文")
+    a1 = _assistant("ZZASSIST 這是包含日文「こんにちは」與韓文「안녕하세요」的回答")
+    truncated_tail = _half(_assistant("ZZASSIST 截斷的最後一行"))
+
+    path = tmp_path / "session.jsonl"
+    path.write_text("".join([u1, a1, truncated_tail]), encoding="utf-8")
+
+    sidecar = tmp_path / "session"
+    sidecar.mkdir()
+    (sidecar / "subagents").mkdir()
+    sub_line = _assistant("ZZSUB 子代理中文字串")
+    (sidecar / "subagents" / "sub.jsonl").write_text(sub_line, encoding="utf-8")
+    (sidecar / "binary.bin").write_bytes(b"\x00\xff\xfe\x01\x02\x03")
+
+    out_path = tmp_path / "out.raw"
+    C._stream_raw(path, sidecar, out_path, label=path.name)
+    streamed = out_path.read_bytes()
+
+    main = [u1.rstrip("\n"), a1.rstrip("\n")]
+    aux = {
+        "binary.bin": {"$base64": base64.b64encode(b"\x00\xff\xfe\x01\x02\x03").decode("ascii")},
+        "subagents/sub.jsonl": sub_line,
+    }
+
+    packed = C._pack_raw(main, aux)
+    assert streamed.startswith(HEAD_BYTES)
+    assert streamed == packed
+
+    unpacked_main, unpacked_aux = C._unpack_raw(streamed)
+    assert unpacked_main == main
+    assert unpacked_aux == aux
 
 
 def test_a_clear_switch_reads_only_the_named_file(reference_claude, tmp_path, monkeypatch):
