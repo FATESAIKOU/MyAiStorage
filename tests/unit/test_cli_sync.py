@@ -2539,3 +2539,24 @@ def test_a_periodic_round_still_rescues_a_marked_deletion(env, capsys):
     assert len(kept) == 1, f"the marked deletion still rescues: {[k['id'] for k in kept]}"
     assert [p["id"] for p in h.agora_of(kept[0])["parents"]] == [a]
     assert run_obj.wrote is True
+
+
+def test_periodic_round_skip_logs_target_not_indexed_without_failure(env, capsys):
+    """When a periodic round skips because the target is not indexed locally,
+    continue.log records the skip message and does not log write failure."""
+    _, a, _ = _import(capsys)
+    b = _stage_rescue(a)
+    drive = store.Drive(paths())
+    assert store.upload_batch(drive, paths()) == [], "the rescue went up in one batch"
+    assert on_drive(f"agora:{b}").is_dir(), "B confirmed on Drive first"
+    assert store.Index(paths()).header(b) is None, "B is not indexed on this machine"
+    assert b not in store.outbox_ulids(paths()), "B is not waiting in the outbox either"
+
+    run_obj = cli._Run(paths(), _record(a), last_md5="not-the-exported-md5")
+    run_obj.target = f"agora:{b}"
+    cli._periodic_write(run_obj, cli.load_agent("opencode"))
+
+    log = log_text()
+    assert "[agora] 目標 Session 還沒進本機索引，這一輪先不寫，交給最後一次寫回" in log
+    assert "寫回失敗" not in log
+

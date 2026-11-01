@@ -1368,9 +1368,12 @@ class AdoptCollision(Exception):
         self.cause = cause
 
 
-def _keep_pending(run: "_Run", target_id: str, note: str | None) -> tuple[None, str, str | None]:
+def _keep_pending(run: "_Run", target_id: str, note: str | None, *, periodic: bool = False) -> tuple[None, str, str | None]:
     run.pending_kept = True
-    store.say("[agora] 寫回失敗：目標 Session 未入索引且無法確認；工作保留在 pending，下次補存會再試")
+    if periodic:
+        store.say("[agora] 目標 Session 還沒進本機索引，這一輪先不寫，交給最後一次寫回")
+    else:
+        store.say("[agora] 寫回失敗：目標 Session 未入索引且無法確認；工作保留在 pending，下次補存會再試")
     return None, target_id, note
 
 
@@ -1409,7 +1412,7 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
     if md5 == run.last_md5 and not is_new and not moved_here:
         return None, target_id, note
     if not is_new and not hdr:
-        return _keep_pending(run, target_id, note)
+        return _keep_pending(run, target_id, note, periodic=not check_drive)
     try:
         saved, create_note = _save_continue(paths, run, agent, exported, target_id=target_id,
                                             hdr=hdr, is_new=is_new)
@@ -1429,7 +1432,7 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
         if md5 == run.last_md5 and not is_new and not moved_here:
             return None, target_id, note
         if not is_new and not hdr:
-            return _keep_pending(run, target_id, note)
+            return _keep_pending(run, target_id, note, periodic=not check_drive)
         try:
             saved, create_note = _save_continue(paths, run, agent, exported, target_id=target_id,
                                                 hdr=hdr, is_new=is_new)
