@@ -135,7 +135,7 @@ from agora.continue_shell import (CONTINUE_LOG, RoundChildDead, StartChildDead, 
 - **C-5 cli 重新匯出**：§2.3 清單裡的 9 個名字，`getattr(cli, n) is getattr(continue_shell, n)`；其中的函式和類別（常數 `CONTINUE_LOG` 除外）另外斷言 `__module__ == "agora.continue_shell"`。並且 `cli.InputError is errors.InputError`、`errors.InputError.__module__ == "agora.errors"`。放在同一個測試檔。
 - **C-6 接縫仍有效**：既有的 `monkeypatch.setattr(cli, "_round_child"|"_start_child", ...)` 不改，所在的測試全綠。證明了 cli 內部是用裸名呼叫的。
 - **C-7 round_child 的名字保留**：`round_child.state_of is continue_shell.state_of`、`round_child.decode_fingerprint is continue_shell.decode_fingerprint`（同一個測試檔）。
-- **C-8 改名**：`continue_shell._kill_child_group` 存在；`cli` 和 `continue_shell` 都**沒有** `_kill_round_group` 這個屬性（同一個測試檔斷言 `not hasattr`）。舊名殘留由審查時跑 `grep -rn --include='*.py' _kill_round_group src tests` 檢查：src 要零筆；tests 只准剩測試函式名 `test_kill_round_group_takes_a_grandchild_that_ignores_sigterm` 那一行。
+- **C-8 改名**：`continue_shell._kill_child_group` 存在；`cli` 和 `continue_shell` 都**沒有** `_kill_round_group` 這個屬性（同一個測試檔斷言 `not hasattr`）。舊名殘留由審查時跑 `grep -rn --include='*.py' _kill_round_group src tests` 檢查：src 要零筆；tests 只准剩兩種：測試函式名 `test_kill_round_group_takes_a_grandchild_that_ignores_sigterm` 那一行，以及 test_continue_shell_deps.py 裡斷言舊名不存在的字串（`STALE_CHECK_SYMBOLS`、`not hasattr(..., "_kill_round_group")`），因為後者就是守住 C-8 的檢查。
 - **C-9 行為不變**：全 unit 綠。測試的改動只限 §5 決定 1 列出的那幾行，加上新增的 test_continue_shell_deps.py；沒有任何斷言或期望值改變。
 - **C-10 文件**：本 note、`docs/architecture/overview.md`、`docs/architecture/decisions.md` 和程式在同一個 PR（overview／decisions 由架構師先 commit 在這個 branch 上）。
 
@@ -216,4 +216,11 @@ from agora.continue_shell import (CONTINUE_LOG, RoundChildDead, StartChildDead, 
 | nit 1：C-8 的 grep 沒加 `--include='*.py'` | 已改 |
 | nit 2：§2.6 和 C-2 對檔頭順序的說法不同 | 已改：§2.6 寫成「docstring 之後的第一條 import」，和 C-2 一致 |
 | nit 3：P-8 沒講 cli 自用的 `CONTINUE_LOG` | 已在 decisions P-8 補上 |
+
+### 實作審之後（REPORT-arch-341，針對 282b8cc）
+
+| 項目 | 處理 |
+|---|---|
+| PM 問：test_continue_shell_deps.py 自己提到舊名，算不算違反 C-8 | 判定符合意圖；C-8 補上第二個例外 |
+| overview／decisions 從「設計」改成「已實作」 | overview 改成 fc5fe98 的實際行數，依賴圖拿掉 cli 的 lazy round_child，Exported 補 #340 的方法；decisions D-10～D-12 標為已審，新增 D-13（#340） |
 

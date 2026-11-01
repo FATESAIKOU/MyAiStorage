@@ -15,9 +15,10 @@
 | D-7 | config.json 的寫入一律在 `config.json.lock`（放在 config 目錄）之內：進鎖、重讀、合併、`write_atomic`；`upload.lock` 只給上傳用，不拿來保護別的資源 | 同機並行時，第一次建 Drive 資料夾才不會建出同名資料夾、也不會互蓋；上傳器拿著 upload.lock 時會呼叫 `folder_id`，共用同一把鎖會自己卡死 | 架構師 | #330（design-notes/330-folder-id-race.md） |
 | D-8 | claude raw 的兩個 writer（`_pack_raw`、`_stream_raw`）不合併，由互比測試鎖住位元組相同；格式頭由 `FORMAT` 組出，測試另外保留一份字面值當 oracle | 串流 writer 要產 offset 和 digest，合併會把它拖回整份放在記憶體 | 架構師 | #338（121-A） |
 | D-9 | 子行程的逾時或取消收尾只有一份（`_reap_group`），取消路徑的 `catch=BaseException` 不能收窄 | 收尾要有界，而且取消時原本的例外要優先 | 架構師 | #339（121-B） |
-| D-10 | continue 的子行程協議外殼放在 `continue_shell`，它不 import cli、round_child、start_child；狀態編解碼（`state_of`、`decode_fingerprint`）也放在這裡，round_child 重新匯出 | 外殼和子行程共同依賴協議層，而不是彼此依賴 | 架構師（待非作者審） | #341（design-notes/121-continue-shell.md） |
-| D-11 | `InputError` 放在 `agora/errors.py`，cli 重新匯出 | 它是全 CLI 共用的概念，低層模組要用時不必 import cli | 架構師（待非作者審） | #341 |
-| D-12 | 模組搬家時，被測試當接縫替換的名字，用「cli 重新匯出，cli 內部用裸名呼叫」保住；**不留舊名 alias**（替換 alias 不會影響實際呼叫） | 不讓測試悄悄地沒有驗到東西 | 架構師（待非作者審） | #341 |
+| D-10 | continue 的子行程協議外殼放在 `continue_shell`，它不 import cli、round_child、start_child；狀態編解碼（`state_of`、`decode_fingerprint`）也放在這裡，round_child 重新匯出 | 外殼和子行程共同依賴協議層，而不是彼此依賴 | 架構師（Sonnet 審過 design note 與實作：REPORT-341-design-rev、rev-m1-11） | #341（design-notes/121-continue-shell.md） |
+| D-11 | `InputError` 放在 `agora/errors.py`，cli 重新匯出 | 它是全 CLI 共用的概念，低層模組要用時不必 import cli | 架構師（Sonnet 審過） | #341 |
+| D-12 | 模組搬家時，被測試當接縫替換的名字，用「cli 重新匯出，cli 內部用裸名呼叫」保住；**不留舊名 alias**（替換 alias 不會影響實際呼叫） | 不讓測試悄悄地沒有驗到東西 | 架構師（Sonnet 審過） | #341 |
+| D-13 | raw 載體的「有檔用檔、否則 bytes」只由 `Exported.raw_digest()`／`raw_source()` 回答，turns 的「有就用、否則解析」只由 `turns_of` 回答；呼叫方不再自己寫判斷梯子 | 收掉 cli 的四處重複梯子（121-C） | 架構師（PM 同意） | #340 |
 
 **流程上的已決**（本人／PMO，10-31～11-01）：每個專案一位常駐的架構師；核准者模式和作者模式並存，預設是核准者模式；衝突依問題種類裁決（形狀和一致性歸架構師，語意、需求、行為、品質歸 PM）；架構師可以 commit 設計路徑，由 PM merge（AGENTS.md）。
 
