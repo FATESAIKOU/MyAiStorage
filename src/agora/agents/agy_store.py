@@ -325,7 +325,7 @@ def pack_raw_file(path: Path, db: Path, trajectory_id: str | None,
             digest.update(piece)
             size += len(piece)
 
-        write(b'{"format": "agy-conversation/1", "agy_version": null, "trajectory_id": ')
+        write(b'{"format": ' + json.dumps(FORMAT).encode() + b', "agy_version": null, "trajectory_id": ')
         write(json.dumps(trajectory_id, ensure_ascii=False).encode("utf-8"))
         write(b', "scan_text": ')
         write(json.dumps(scan_text, ensure_ascii=False).encode("utf-8"))

@@ -474,7 +474,7 @@ def _pack_raw(main: list[str], aux: dict) -> bytes:
 
 
 #: The envelope's fixed bytes (design B.2); `_stream_raw` writes them as it reads.
-_RAW_HEAD = b'{"format": "claude-jsonl/1", "main": ['
+_RAW_HEAD = b'{"format": ' + json.dumps(FORMAT).encode() + b', "main": ['
 _AUX_SEP = b'], "aux": '
 
 
