@@ -140,7 +140,7 @@ from agora.agents.claude_raw import (FORMAT, PackedRaw, _AUX_SEP, _RAW_HEAD, _au
 - **低**：test_mem_golden.py 的 `json.loads@claude` 計數以呼叫端的 `__name__ == "agora.agents.claude"` 過濾。被計的 `json.loads` 在 `_stream_raw`（留在 claude.py），所以計數不變；搬走的 `_unpack_raw` 在那支測試裡本來就斷言為 0 次（而且是透過 claude 的接縫計數），也不受影響。推論，由 C-8 驗證。
 - **低**：tests/perf/measure_continue_mem.py:315-317 的 `PROBED` 用 `("agora.agents.claude", "_pack_raw")` 包 claude 模組屬性來量測。claude.py 內部是用裸名呼叫，包住重新匯出的名字仍然量得到（同 C-7 的道理），不用改。perf 腳本不在 unit 裡，只能靠推論。
 - **低**：`PackedRaw` 的 docstring 寫「they stay in the adapter」。搬到 claude_raw 仍然在 adapter 的 package 裡，說法還是對的，不改（逐字搬移）。
-- **未決（記到 decisions）**：claude.py 搬完約 1220 行，仍然偏大。真正的下一刀是「Claude session 解析」（turns／標題／noise／`_Facts`）和「adapter 本體」（找檔、啟動、還原）分開，屬於另一張單。
+- **未決（記到 decisions）**：claude.py 搬完約 1230 行，仍然偏大。真正的下一刀是「Claude session 解析」（turns／標題／noise／`_Facts`）和「adapter 本體」（找檔、啟動、還原）分開，屬於另一張單。
 
 ## 8. PR 切分
 
