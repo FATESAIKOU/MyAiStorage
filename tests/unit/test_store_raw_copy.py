@@ -29,6 +29,7 @@ from agora import cli, header as h
 from agora import store
 from agora.agents.base import Exported
 from agora.agents.claude import ClaudeAgent, encode_project_dir
+from agora.agents import claude_raw
 
 
 def _header(title="raw 複製") -> dict:
@@ -439,7 +440,7 @@ def test_iter_aux_ignores_growth_appended_after_is_utf8(tmp_path, monkeypatch):
     shutil.copytree(side, snap)
     expected = _old_aux(snap)
 
-    real = claude._is_utf8
+    real = claude_raw._is_utf8
 
     def patched(path, size):
         r = real(path, size)
@@ -447,7 +448,7 @@ def test_iter_aux_ignores_growth_appended_after_is_utf8(tmp_path, monkeypatch):
             fh.write(b"APPENDED-GROWTH")
         return r
 
-    monkeypatch.setattr(claude, "_is_utf8", patched)
+    monkeypatch.setattr(claude_raw, "_is_utf8", patched)
     out = b"".join(claude._iter_aux(side))
     assert out == expected
 
@@ -461,14 +462,14 @@ def test_iter_aux_raises_when_file_rewritten_non_utf8(tmp_path, monkeypatch):
     f = side / "t.txt"
     f.write_bytes(("中文" * 50).encode("utf-8"))
 
-    real = claude._is_utf8
+    real = claude_raw._is_utf8
 
     def patched(path, size):
         r = real(path, size)
         path.write_bytes(b"\xff" * size)
         return r
 
-    monkeypatch.setattr(claude, "_is_utf8", patched)
+    monkeypatch.setattr(claude_raw, "_is_utf8", patched)
     with pytest.raises(AgentError):
         b"".join(claude._iter_aux(side))
 
@@ -482,14 +483,14 @@ def test_iter_aux_raises_when_file_truncated(tmp_path, monkeypatch):
     f = side / "t.txt"
     f.write_bytes(("中文" * 50).encode("utf-8"))
 
-    real = claude._is_utf8
+    real = claude_raw._is_utf8
 
     def patched(path, size):
         r = real(path, size)
         path.write_bytes(path.read_bytes()[: size // 2])
         return r
 
-    monkeypatch.setattr(claude, "_is_utf8", patched)
+    monkeypatch.setattr(claude_raw, "_is_utf8", patched)
     with pytest.raises(AgentError):
         b"".join(claude._iter_aux(side))
 
@@ -506,7 +507,7 @@ def test_iter_aux_raises_when_text_truncated_mid_char(tmp_path, monkeypatch):
     f = side / "t.txt"
     f.write_bytes(("中" * 10).encode("utf-8"))
 
-    monkeypatch.setattr(claude, "_is_utf8", lambda path, size: True)
+    monkeypatch.setattr(claude_raw, "_is_utf8", lambda path, size: True)
 
     orig_stat = _Path.stat
 
@@ -533,13 +534,13 @@ def test_iter_aux_raises_when_base64_truncated(tmp_path, monkeypatch):
     f = side / "f.bin"
     f.write_bytes(b"\xff\xfe" * 200)
 
-    real = claude._is_utf8
+    real = claude_raw._is_utf8
 
     def patched(path, size):
         r = real(path, size)
         path.write_bytes(path.read_bytes()[: size // 2])
         return r
 
-    monkeypatch.setattr(claude, "_is_utf8", patched)
+    monkeypatch.setattr(claude_raw, "_is_utf8", patched)
     with pytest.raises(AgentError):
         b"".join(claude._iter_aux(side))
