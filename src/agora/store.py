@@ -500,6 +500,16 @@ def raw_orphan_grace() -> int:
     return _env_positive_int("AGORA_RAW_ORPHAN_GRACE", 3600)
 
 
+@contextlib.contextmanager
+def _config_lock(paths: Paths):
+    """Held around every read-merge-write of config.json (and the first-time folder
+    lookup it guards), so processes on this machine never race on it."""
+    paths.config.mkdir(parents=True, exist_ok=True)
+    with open(paths.config / "config.json.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 class Drive:
     """Thin wrapper over rclone. Never reads the token; rclone refreshes it."""
 
@@ -534,6 +544,9 @@ class Drive:
 
         IDs are kept per folder name, so a run with AGORA_FOLDER_NAME=agora-test
         never makes the next normal run write into the test folder.
+
+        Concurrent first-time creation across multiple machines is not coordinated;
+        if duplicate folders are created on Drive, manual resolution is required.
         """
         name = os.environ.get("AGORA_FOLDER_NAME", "agora")
         self.settings.pop("folder_id", None)       # old single-folder format (G1)
@@ -541,15 +554,29 @@ class Drive:
         folders = self.settings.setdefault("folders", {})
         if folders.get(name):
             return folders[name]
-        self._run("mkdir", f"gdrive:{name}", root=False)
-        entries = json.loads(self._run("lsjson", "gdrive:", "--dirs-only", root=False))
-        matches = [e for e in entries if e["Name"] == name]
-        if len(matches) != 1:
-            raise StoreError(f"Drive 根目錄有 {len(matches)} 個 {name}/，請先處理同名資料夾")
-        folders[name] = matches[0]["ID"]
-        self.paths.config.mkdir(parents=True, exist_ok=True)
-        write_atomic(self.settings_file, json.dumps(self.settings, indent=2))
-        return folders[name]
+
+        with _config_lock(self.paths):
+            disk_settings: dict = (
+                json.loads(self.settings_file.read_text())
+                if self.settings_file.exists()
+                else {}
+            )
+            disk_settings.pop("folder_id", None)
+            disk_settings.pop("folder_name", None)
+            disk_folders = disk_settings.setdefault("folders", {})
+            if disk_folders.get(name):
+                self.settings = disk_settings
+                return disk_folders[name]
+
+            self._run("mkdir", f"gdrive:{name}", root=False)
+            entries = json.loads(self._run("lsjson", "gdrive:", "--dirs-only", root=False))
+            matches = [e for e in entries if e["Name"] == name]
+            if len(matches) != 1:
+                raise StoreError(f"Drive 根目錄有 {len(matches)} 個 {name}/，請先處理同名資料夾")
+            disk_folders[name] = matches[0]["ID"]
+            self.settings = disk_settings
+            write_atomic(self.settings_file, json.dumps(self.settings, indent=2))
+            return disk_folders[name]
 
     def list_sessions(self) -> dict[str, dict[str, str]] | None:
         """{ulid: {file name: md5}} in one recursive listing; None if sessions/ is missing."""
