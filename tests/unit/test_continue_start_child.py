@@ -148,6 +148,41 @@ def test_a_cancelled_shell_kills_the_load_child_and_reraises(monkeypatch):
     assert len(calls) == 2 and calls[1] == 5, "the drain after the kill is bounded"
 
 
+def test_start_child_cancel_catches_base_exception_during_drain_and_kills_proc(monkeypatch):
+    """When a second KeyboardInterrupt arrives during post-cancel drain,
+    _start_child catches BaseException, finishes reap with proc.kill(),
+    and re-raises the original exception."""
+    calls = []
+    kills = []
+    waits = []
+
+    class _Stub:
+        pid = 4242
+
+        def communicate(self, input=None, timeout=None):
+            calls.append(timeout)
+            if len(calls) == 1:
+                raise KeyboardInterrupt("first cancel")
+            raise KeyboardInterrupt("second cancel")
+
+        def kill(self):
+            kills.append(True)
+
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            return -9
+
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **kw: _Stub())
+    monkeypatch.setattr(cli, "_kill_round_group", lambda p: True)
+
+    with pytest.raises(KeyboardInterrupt) as exc:
+        cli._start_child(paths(), _state("agora:01TEST00000000000000000000", {"id": "x"}, "/tmp"))
+
+    assert str(exc.value) == "first cancel"
+    assert len(kills) == 1, "proc.kill() must be called when drain raises BaseException"
+    assert 5 in waits, "wait after kill must be bounded"
+
+
 # --- a REAL child: success and a named failure -----------------------------------
 
 def test_the_real_child_does_the_load_and_answers_small(lab, capsys):
