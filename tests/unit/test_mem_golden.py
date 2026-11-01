@@ -23,6 +23,8 @@ import hashlib
 import io
 import json
 import os
+import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -56,7 +58,12 @@ GOLDEN_MD5_OUTBOX_RAW = "d245594ea2e89f733749fa1dc4252622"
 # Only the session.md constant moved, with the owner's sign-off (design L2, #109 R3b-1): the
 # header's `raw` block now carries `layout: chunks/1` and the segment manifest instead of
 # `file`. The two raw md5s above are the old ones, untouched.
-GOLDEN_MD5_SESSION_MD = "8f673efd2e8002117ff4886e91197c05"
+# #334: the header's `agora.source.host` is `socket.gethostname()` (cli._source), so the old
+# value named one machine and went red wherever (or whenever) the host name differed. The golden
+# run now pins the host to GOLDEN_HOST in this process and in the round child (pin_hostname), and
+# the value below is the pinned run's. Nothing else in the header or the raw changed.
+GOLDEN_MD5_SESSION_MD = "50e8bee480a5e918dd6b5077f6d0200e"
+GOLDEN_HOST = "golden-host"
 
 
 def _line(o: dict) -> str:
@@ -221,7 +228,28 @@ def golden_env(tmp_path, monkeypatch):
     monkeypatch.setenv("AGORA_UPLOAD", "inline")
     monkeypatch.setenv("AGORA_NOW", str(NOW))
     monkeypatch.setattr(h, "new_ulid", lambda now_ms=None: ULID)
+    pin_hostname(tmp_path, monkeypatch)
     return store.Paths.from_env()
+
+
+def pin_hostname(tmp_path: Path, monkeypatch) -> None:
+    """Pin `socket.gethostname()` (the header's `source.host`) here and in the round child.
+
+    The child is a fresh interpreter (`python -m agora.round_child`), so a patch in this
+    process does not reach it. A `sitecustomize.py` on PYTHONPATH - inherited by the child -
+    reads GOLDEN_HOSTNAME and pins the same name there, before anything else imports.
+    """
+    hostdir = tmp_path / "hostpin"
+    hostdir.mkdir()
+    (hostdir / "sitecustomize.py").write_text(
+        "import os, socket\n"
+        "_pinned = os.environ.get('GOLDEN_HOSTNAME')\n"
+        "if _pinned:\n"
+        "    socket.gethostname = lambda: _pinned\n", encoding="utf-8")
+    monkeypatch.setenv("GOLDEN_HOSTNAME", GOLDEN_HOST)
+    old = os.environ.get("PYTHONPATH")
+    monkeypatch.setenv("PYTHONPATH", str(hostdir) + (os.pathsep + old if old else ""))
+    monkeypatch.setattr(socket, "gethostname", lambda: GOLDEN_HOST)
 
 
 def _make_sessions() -> tuple[Path, Path, Path, int]:
@@ -421,3 +449,18 @@ def test_collect_parses_once(golden_env, monkeypatch):
     assert counts["_unpack_raw"] == 0, counts             # was 1: reading re-unpacked raw
     # line-level: the streaming read parses each non-blank line once (B1a)
     assert counts["json.loads@claude"] == n_lines, counts
+
+
+def test_the_pin_hides_the_machine_name_from_this_process_and_a_child(tmp_path, monkeypatch):
+    """#334: the golden host name is GOLDEN_HOST wherever the machine is called something else.
+
+    The machine name is set first (as on another Mac), then pin_hostname runs as golden_env
+    does. Both this process and a fresh interpreter (the round child's way of starting) must
+    answer GOLDEN_HOST. Without the pin the child answers the machine name and golden goes red.
+    """
+    monkeypatch.setattr(socket, "gethostname", lambda: "other-host.local")
+    pin_hostname(tmp_path, monkeypatch)
+    assert socket.gethostname() == GOLDEN_HOST
+    child = subprocess.run([sys.executable, "-c", "import socket; print(socket.gethostname())"],
+                           capture_output=True, text=True, check=True)
+    assert child.stdout.strip() == GOLDEN_HOST, child.stdout
