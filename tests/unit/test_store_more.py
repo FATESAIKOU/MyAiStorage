@@ -142,7 +142,7 @@ def test_session_md_upload_failure_leaves_only_segments(remote, tmp_path, monkey
 
 def test_duplicate_drive_folder_errors(remote, monkeypatch):  # U-ST-16
     monkeypatch.setenv("FAKE_RCLONE_DUP", "agora")
-    with pytest.raises(store.StoreError):
+    with pytest.raises(store.StoreError, match="請先處理同名資料夾"):
         store.Drive(store.Paths.from_env()).folder_id()
 
 
