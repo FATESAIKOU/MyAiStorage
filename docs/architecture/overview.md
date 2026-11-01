@@ -85,9 +85,9 @@ agents/agy_restore   → store, agents.agy_store, agents.agy_summaries, agents.a
 
 ## 規劃中（設計，未實作）
 
-### PMO skill（#110；`docs/design-notes/110-pmo-skill.md`）
+### PMO skill（#110；`docs/design-notes/110-pmo-skill.md`）— **提議，待本人定案**
 
-- **形狀**：新指令 `pmo`（暫名，套件 `src/pmo`，名稱待本人 Q-5）加上 `skills/pmo/SKILL.md`；PMO 的 harness 只寫能力。
-- **依賴方向**（設計）：`pmo` 核心只依賴 `ainame`，不碰外部；`pmo` 指令透過三個埠碰外部：Angareion（呼叫 `angareion` 指令的子行程）、sidecar（HTTP）、GitHub（呼叫 `gh` 的子行程，唯讀）。**不 import** `agora`、`atelier`、`aicomm`，也不依賴 MyPMO 的程式。
-- **公開介面**（設計）：`pmo tick`、`pmo inbox list|ack|report|rebuild`、`pmo check|send|open|reply|poke|status|close`；teams 設定、team 狀態、收件帳本的 schema（資料由環境變數指到本機）。
-- 實作分成 T-1～T-7；每個 PR 都要經架構師結構審。實作後再把這一節搬進上面的模組地圖和依賴圖。
+- **提議的形狀**：新指令（暫名 `pmo`，套件 `src/pmo`；名稱待 Q-5）加上 `skills/pmo/SKILL.md`；PMO 的 harness 只寫能力（待 Q-1）。
+- **提議的依賴方向**：核心只依賴 `ainame`，不碰外部。指令透過四個埠碰外部：Angareion（`angareion` 子行程）、aicomm（`aicomm send` 子行程）、sidecar（HTTP）、GitHub（`gh` 子行程，唯讀）。**不 import** `agora`、`atelier`、`aicomm`、`angareion` 的 Python 模組，也不依賴 MyPMO 的程式。
+- **提議的公開介面**：`pmo tick`、`pmo inbox read|list|ack|report|decision-send|rebuild`、`pmo check|send|open|reply|poke|status|close`；teams 設定、team 狀態、收件帳本的 schema（資料由環境變數指到本機）；tick 的事件標籤沿用現行工具。
+- 本人定案後才實作（T-1～T-7，每個 PR 都要經架構師結構審）；實作後再把這一節搬進上面的模組地圖和依賴圖。
