@@ -47,7 +47,7 @@ from agora.errors import InputError
 from agora.agents.agy import AGY_CROSS_AGENT, AGY_HEADLESS_LATER, AGY_READ_ONLY
 from agora.agents.opencode import CONFIG_CONTENT_ENV, merge_config_content
 from agora.agents.base import (NO_REPLY, Agent, AgentError, Exported, Launch, collect_increment, merge_turns,
-                               reading, reading_of, env_seconds)
+                               reading, reading_of, turns_of, env_seconds)
 
 AGENTS = ("opencode", "claude", "agy")
 TYPES = ("session",)
@@ -641,8 +641,8 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
     if increment is not None and increment.cursor is not None:
         plan = {"append_from": increment.append_from, "seal_upto": increment.seal_upto,
                 "cursor": increment.cursor, "cursor_ulid": existing[0] if existing else None}
-    new_md5 = exported.raw_md5 if exported.raw_md5 is not None else store.hashlib.md5(exported.raw).hexdigest()
-    raw_src = exported.raw_file if exported.raw_file is not None else exported.raw
+    new_md5 = exported.raw_digest()
+    raw_src = exported.raw_source()
     if existing:
         old = index.header(existing[0])
         if store.raw_kind(h.agora_of(old).get("raw")) != "chunks":
@@ -664,7 +664,7 @@ def _import_one(agent: Agent, external_id: str, updates: dict, paths: store.Path
             # so the old raw is only fetched when something actually changed (L-4).
             # The new export already carried its turns, so the reading version needs
             # no second parse (impl-mem B1b-2).
-            new_content = _content_turn_count(exported.turns if exported.turns is not None else agent.turns(exported.raw))
+            new_content = _content_turn_count(turns_of(agent, exported))
             if not unchanged:
                 try:
                     old_raw = store.fetch_raw(paths, store.Drive(paths), existing[0], old)
@@ -1402,7 +1402,7 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
             return None, run.target, note
         exported = Exported(session_id=record["agent_session_id"],
                             raw=raw, title=record.get("title"))
-    md5 = exported.raw_md5 if exported.raw_md5 is not None else store.hashlib.md5(exported.raw).hexdigest()
+    md5 = exported.raw_digest()
     # Same bytes, same place, and the target did not just move: the stage is skipped.
     # A move always writes - the adopted session may hold an older copy than the last
     # one staged, and skipping would leave it stale while the gone session's outbox
@@ -1557,7 +1557,7 @@ def _save_continue(paths: store.Paths, run: "_Run", agent: Agent, exported: Expo
         # `kind`: a continue is the one write that is a relation of its own, and if this
         # session is gone by the time it goes up the work is saved as a session of its own -
         # as a continue, not as whatever X was (review G2)
-        raw_src = exported.raw_file if exported.raw_file is not None else exported.raw
+        raw_src = exported.raw_source()
         saved = _save(paths, _with_user(hdr, record.get("header_updates") or {},
                                         add_tags=record.get("add_tags") or []), body,
                       raw_src, update=same_id, kind="continue", plan=_plan_of(run, exported))
