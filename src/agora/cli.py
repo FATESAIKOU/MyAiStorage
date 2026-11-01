@@ -1294,7 +1294,11 @@ def _write_target(paths: store.Paths, run: "_Run", *, check_drive: bool) -> tupl
        for a session that is almost certainly still there (design P7). The last write
        and the recovery do ask, and skip nothing because the content did not change (P2).
     3. otherwise the work becomes a session of its own, pointing at the one that is
-       gone - the conversation is the user's work and does not go away with it.
+       gone - the conversation is the user's work and does not go away with it. With
+       no header at all on this machine and no listing in hand (the periodic round,
+       design P7), that read is uncertain - a rescue may just not be indexed here yet -
+       so the periodic round leaves the case to the last write instead of minting
+       (see `_write_one`).
     """
     def _resolve(synced: bool) -> tuple[str, dict, bool]:
         index = store.Index(paths)
@@ -1378,6 +1382,13 @@ def _write_one(paths: store.Paths, run: "_Run", exported: Exported | None, agent
     run.pending_kept = False
     record = run.record
     target_id, hdr, is_new = _write_target(paths, run, check_drive=check_drive)
+    if check_drive is False and is_new and not hdr:
+        # The periodic round has no Drive listing (design P7): a target with no header
+        # on this machine may be the uploader's rescue, pushed but not listed here yet.
+        # Minting a session of its own would file the work beside a rescue the round
+        # cannot see, so this round skips, keeps the pending record, and leaves the
+        # decision to the next round and to the last write, which syncs first.
+        return None, target_id, None
     was = run.target
     note = _follow(run, target_id)
     _say_note(run, note)
