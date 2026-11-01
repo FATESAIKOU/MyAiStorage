@@ -8,6 +8,7 @@ anything; they read and write the agent's own files.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from dataclasses import dataclass, field
@@ -98,6 +99,22 @@ class Exported:
             self._raw = self.raw_file.read_bytes()
             return self._raw
         return b""
+
+    def raw_digest(self) -> str:
+        """MD5 hexdigest of the raw session content.
+
+        Returns `raw_md5` if present without loading `self.raw`; otherwise
+        computes the MD5 hexdigest of `self.raw`.
+        """
+        if self.raw_md5 is not None:
+            return self.raw_md5
+        return hashlib.md5(self.raw).hexdigest()
+
+    def raw_source(self) -> Path | bytes:
+        """Source of the raw session, preferring Path over in-memory bytes."""
+        if self.raw_file is not None:
+            return self.raw_file
+        return self.raw
 
 
 @dataclass
@@ -293,6 +310,17 @@ def reading(agent: "Agent", raw: bytes) -> str:
     return format_reading(agent.turns(raw))
 
 
+def turns_of(agent: "Agent", exported: Exported) -> Turns:
+    """The shared turns of an export, without parsing raw a second time.
+
+    Uses `exported.turns` if present on the export; otherwise parses
+    `agent.turns(exported.raw)`.
+    """
+    if exported.turns is not None:
+        return exported.turns
+    return agent.turns(exported.raw)
+
+
 def reading_of(agent: "Agent", exported: Exported) -> str:
     """The reading version of an export, without parsing raw a second time (impl-mem 2a C1).
 
@@ -303,6 +331,4 @@ def reading_of(agent: "Agent", exported: Exported) -> str:
     produce the same bytes for the same session; the flag only decides whether
     the parse happens twice.
     """
-    if exported.turns is not None:
-        return format_reading(exported.turns)
-    return reading(agent, exported.raw)
+    return format_reading(turns_of(agent, exported))
