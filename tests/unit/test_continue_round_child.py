@@ -866,3 +866,61 @@ def test_timeout_refused_group_kill_still_kills_the_child(monkeypatch):
         cli._round_child(paths(), run_obj, None)
     assert _DrainStub.kills == 1, "killpg was refused: the direct kill is mandatory"
     assert None not in _DrainStub.waits, _DrainStub.waits
+
+
+def test_reap_group_call_order_when_group_not_dead(monkeypatch):
+    """When the process group does not die cleanly, _reap_group records the
+    sequence: kill group -> drain pipes (timeout=5) -> proc.kill() -> proc.wait(timeout=5)."""
+    calls = []
+
+    class _Proc:
+        def communicate(self, timeout=None):
+            calls.append(("communicate", timeout))
+            return b"", b""
+
+        def kill(self):
+            calls.append("kill")
+
+        def wait(self, timeout=None):
+            calls.append(("wait", timeout))
+            return -9
+
+    monkeypatch.setattr(cli, "_kill_round_group", lambda p: (calls.append("kill_group"), False)[1])
+
+    proc = _Proc()
+    cli._reap_group(proc)
+
+    assert calls == [
+        "kill_group",
+        ("communicate", 5),
+        "kill",
+        ("wait", 5),
+    ]
+
+
+def test_reap_group_skips_kill_when_group_already_dead(monkeypatch):
+    """When the process group is already dead and drain succeeds, _reap_group does
+    not call proc.kill()."""
+    calls = []
+
+    class _Proc:
+        def communicate(self, timeout=None):
+            calls.append(("communicate", timeout))
+            return b"", b""
+
+        def kill(self):
+            calls.append("kill")
+
+        def wait(self, timeout=None):
+            calls.append(("wait", timeout))
+            return 0
+
+    monkeypatch.setattr(cli, "_kill_round_group", lambda p: (calls.append("kill_group"), True)[1])
+
+    proc = _Proc()
+    cli._reap_group(proc)
+
+    assert calls == [
+        "kill_group",
+        ("communicate", 5),
+    ]

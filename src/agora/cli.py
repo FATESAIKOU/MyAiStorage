@@ -1685,15 +1685,7 @@ def _round_child(paths: store.Paths, run: "_Run", agent: Agent, lock_fd: int | N
             out, _err = proc.communicate(json.dumps(round_child.state_of(run)).encode(),
                                          timeout=_round_timeout())
         except subprocess.TimeoutExpired:
-            group_dead = _kill_round_group(proc)
-            try:
-                proc.communicate(timeout=5)           # drain what the corpse left
-            except Exception:                         # refused kill or a live pipe:
-                group_dead = False                    # not finished cleaning up
-            if not group_dead:                        # bounded, whatever the corpse
-                with contextlib.suppress(Exception):  # does - the shell never
-                    proc.kill()                       # hangs on a dead round's pipes
-                    proc.wait(timeout=5)              # (review #4)
+            _reap_group(proc)
             raise RoundChildDead("子行程異常結束（逾時）")
     if proc.returncode != 0:
         raise RoundChildDead(f"子行程異常結束（rc={proc.returncode}）")
@@ -1738,6 +1730,29 @@ def _kill_round_group(proc) -> bool:
     return True
 
 
+def _reap_group(proc, *, catch: type[BaseException] = Exception) -> None:
+    """Kill a round or start child's process group and drain its pipes.
+
+    First terminates the group with _kill_round_group(proc), then boundedly
+    drains what the corpse left. If the group is still alive or drain fails,
+    forces proc.kill() and proc.wait(timeout=5). Suppresses exceptions matching
+    `catch` (defaults to Exception; callers dealing with cancellation pass
+    BaseException so secondary interrupts during cleanup do not leave orphans).
+
+    The invariant: cleanup is bounded - the shell never hangs on a dead child's
+    pipes - and on cancellation the original exception wins, which is why `catch`
+    must accept BaseException there; do not narrow it to Exception."""
+    group_dead = _kill_round_group(proc)
+    try:
+        proc.communicate(timeout=5)
+    except catch:
+        group_dead = False
+    if not group_dead:
+        with contextlib.suppress(catch):
+            proc.kill()
+            proc.wait(timeout=5)
+
+
 class StartChildDead(AgentError):
     """The startup load child did not come back with an answer the shell can use:
     killed, crashed, exited nonzero, or answered garbage. A failed continue, the
@@ -1764,31 +1779,13 @@ def _start_child(paths: store.Paths, state: dict) -> dict:
     try:
         out, _err = proc.communicate(json.dumps(state).encode(), timeout=_round_timeout())
     except subprocess.TimeoutExpired:
-        group_dead = _kill_round_group(proc)
-        try:
-            proc.communicate(timeout=5)               # drain what the corpse left
-        except Exception:                             # refused kill or a live pipe:
-            group_dead = False                        # not finished cleaning up
-        if not group_dead:                            # bounded, whatever the corpse
-            with contextlib.suppress(Exception):      # does - the shell never
-                proc.kill()                           # hangs on a dead child's pipes
-                proc.wait(timeout=5)
+        _reap_group(proc)
         raise StartChildDead("載入接續失敗：子行程逾時")
     except BaseException:
         # Ctrl-C (or anything else driving the shell out) while the load child is
         # still working: it leads its own session, so the terminal's SIGINT never
-        # reached it - kill the group here, then let the original exception go
-        # (impl-mem-start review 中1: a cancelled continue must not leave a load
-        # running, and a stop must not turn into an orphan).
-        group_dead = _kill_round_group(proc)
-        try:
-            proc.communicate(timeout=5)               # drain what the corpse left
-        except BaseException:                         # a second cancel, refused kill
-            group_dead = False                        # or a live pipe: keep going
-        if not group_dead:
-            with contextlib.suppress(BaseException):  # still bounded, and the
-                proc.kill()                           # original exception wins
-                proc.wait(timeout=5)
+        # reached it - kill the group here, then let the original exception go.
+        _reap_group(proc, catch=BaseException)
         raise
     if proc.returncode != 0:
         raise StartChildDead(f"載入接續失敗：子行程異常結束（rc={proc.returncode}）")
