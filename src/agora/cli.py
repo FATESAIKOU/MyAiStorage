@@ -2411,8 +2411,8 @@ def _load_for_launch(paths: store.Paths, state: dict) -> dict:
         fork_hdr = _with_user(_fork_after_launch(base, agent, exported), updates,
                               add_tags=add_tags)
         fork_id, fork_title = fork_hdr["id"], fork_hdr["title"]
-        fork_md5 = store.hashlib.md5(exported.raw).hexdigest()
-        saved_fork = _save(paths, fork_hdr, reading(agent, exported.raw), exported.raw)
+        fork_md5 = exported.raw_digest()
+        saved_fork = _save(paths, fork_hdr, reading_of(agent, exported), exported.raw_source())
     # Nothing below reads the loaded conversation - and below is the whole day -
     # so drop it before the answer goes back: the launch owns its own copy on
     # disk, the record keeps the md5s, and the rounds collect the agent's file
