@@ -19,7 +19,7 @@
 | D-11 | `InputError` 放在 `agora/errors.py`，cli 重新匯出 | 它是全 CLI 共用的概念，低層模組要用時不必 import cli | 架構師（Sonnet 審過） | #341 |
 | D-12 | 模組搬家時，被測試當接縫替換的名字，用「cli 重新匯出，cli 內部用裸名呼叫」保住；**不留舊名 alias**（替換 alias 不會影響實際呼叫） | 不讓測試悄悄地沒有驗到東西 | 架構師（Sonnet 審過） | #341 |
 | D-13 | raw 載體的「有檔用檔、否則 bytes」只由 `Exported.raw_digest()`／`raw_source()` 回答，turns 的「有就用、否則解析」只由 `turns_of` 回答；呼叫方不再自己寫判斷梯子 | 收掉 cli 的四處重複梯子（121-C） | 架構師（PM 同意） | #340 |
-| D-14 | claude raw 的封包格式（常數、writer、reader、aux 串流編碼、`PackedRaw`）放在 `agents/claude_raw`，它只依賴 `agents.base`；一趟式匯出 `_stream_raw` 和 `_Facts`／`_accumulate` 留在 claude.py，當作「解析加格式」的組合者 | `_stream_raw` 的折疊會用到整套閱讀版解析，搬過去會讓格式模組帶著解析；改成注入又不是純搬移 | 架構師（待非作者審） | #342（design-notes/121-claude-raw.md） |
+| D-14 | claude raw 的封包格式（常數、writer、reader、aux 串流編碼、`PackedRaw`）放在 `agents/claude_raw`，它只依賴 `agents.base`；一趟式匯出 `_stream_raw` 和 `_Facts`／`_accumulate` 留在 claude.py，當作「解析加格式」的組合者 | `_stream_raw` 的折疊會用到整套閱讀版解析，搬過去會讓格式模組帶著解析；改成注入又不是純搬移 | 架構師（Sonnet 審過 design note；實作 #342） | #342（design-notes/121-claude-raw.md） |
 
 **流程上的已決**（本人／PMO，10-31～11-01）：每個專案一位常駐的架構師；核准者模式和作者模式並存，預設是核准者模式；衝突依問題種類裁決（形狀和一致性歸架構師，語意、需求、行為、品質歸 PM）；架構師可以 commit 設計路徑，由 PM merge（AGENTS.md）。
 
@@ -33,7 +33,7 @@
 | P-4 | 要不要刪 `Exported.raw_size`（src 沒有讀者） | PM | #121 報告第 5 節 |
 | P-5 | fork 路徑讀整份 raw（`cli._load_for_launch` 的 fork 分支）要不要改用 `raw_file` | PM | PSTACK G 節；#121 報告 |
 | P-6 | start_child 錯誤回答的形狀，在寫的一邊和讀的一邊（`continue_shell._raise_child_error`）之間沒有共同常數 | 架構師（#341 之後） | design-notes/121-continue-shell.md §7 |
-| P-7 | `claude.py` 在 #342 之後仍約 1230 行：「Claude session 解析」（turns／標題／noise／`_Facts`）和「adapter 本體」（找檔、啟動、還原）要不要再切；`opencode.py` 1648 行的切割 | 架構師設計、PM 排程 | #121 報告；design-notes/121-claude-raw.md §7 |
+| P-7 | `claude.py` 在 #342 之後仍有 1222 行：「Claude session 解析」（turns／標題／noise／`_Facts`）和「adapter 本體」（找檔、啟動、還原）要不要再切；`opencode.py` 1648 行的切割 | 架構師設計、PM 排程 | #121 報告；design-notes/121-claude-raw.md §7 |
 | P-8 | #341 留下的相容層：cli 重新匯出 `RoundChildDead`、`StartChildDead`、`_reap_group`、`_round_timeout`、`_start_payload`、`CONTINUE_LOG`，round_child 重新匯出 `state_of`。日後把測試改讀 continue_shell，就可以刪掉；刪 `CONTINUE_LOG` 的重新匯出時，cli 自用的三處（`_LogWriter` 等）要一起改成 `continue_shell.CONTINUE_LOG`，或改由別處持有 | 架構師提、PM 排程 | REPORT-341-design-rev 發現 7 |
 | P-9 | 寫進 header 的 `source.host` 直接取 `socket.gethostname()`，沒有可覆寫的來源；golden 測試只能用 monkeypatch 加子行程的 sitecustomize 釘住。要不要給它一個可覆寫的來源（例如環境變數） | 架構師提、PM 排程（不急） | #334 審查的低項 |
 | P-10 | #342 留下的相容層：claude.py 重新匯出 `FORMAT`，claude.py 自己不用，只為了 6 處測試讀 `C.FORMAT`。日後把測試改讀 `claude_raw.FORMAT`，就可以刪掉 | 架構師提、PM 排程 | REPORT-342-design-rev 低 2 |

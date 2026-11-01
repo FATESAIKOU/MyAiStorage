@@ -3,7 +3,7 @@
 維護者：專案架構師。每一次改到模組切割、依賴方向或公開介面，都和引起它的設計文件放在同一個 PR 更新（AGENTS.md「專案架構師可以 commit 的路徑」）。
 
 - **範圍**：目前只收錄 `src/agora`。同一個 repo 裡的 `aicomm`、`ainame`、`angareion`、`atelier`（`pyproject.toml` 的 `[project.scripts]`）還沒收錄，之後再補。
-- **基準**：#341 的 branch fc5fe98（#341 實作加上 main 2c4877a，含 #340）。行數都是實數。
+- **基準**：#342 的 branch fe89ab6（#342 實作，加上 main f194fd7，含 #340、#341、#343）。行數都是實數。
 
 ## 模組地圖
 
@@ -24,8 +24,8 @@
 | `private_tmp.py` | 259 | agora 自己 state 底下的私有暫存目錄與殘留清掃 |
 | `credscan.py` | 221 | 匯入前的憑證樣式掃描（只報名稱和數量） |
 | `agents/base.py` | 334 | agent 介面（`Agent` Protocol、`Exported`、`Launch`、`AgentError`、`env_seconds`…） |
-| `agents/claude.py` | 1385（#342 後約 1230） | Claude Code adapter：找檔、session 解析（turns／標題／`_Facts`）、一趟式匯出 `_stream_raw`、啟動、還原 |
-| `agents/claude_raw.py`（#342 設計，未實作） | 約 180 | claude raw 封包格式：`FORMAT`、`_pack_raw`／`_unpack_raw`、`_RAW_HEAD`／`_AUX_SEP`、aux 串流編碼 `_iter_aux`、`_aux_files`、`PackedRaw` |
+| `agents/claude.py` | 1222 | Claude Code adapter：找檔、session 解析（turns／標題／`_Facts`）、一趟式匯出 `_stream_raw`、啟動、還原 |
+| `agents/claude_raw.py`（#342） | 185 | claude raw 封包格式：`FORMAT`、`_pack_raw`／`_unpack_raw`、`_RAW_HEAD`／`_AUX_SEP`、aux 串流編碼 `_iter_aux`、`_aux_files`、`PackedRaw` |
 | `agents/opencode.py` | 1648 | opencode adapter |
 | `agents/agy*.py` | 339＋363＋165＋582＋592 | agy adapter，分成 agy／agy_store／agy_wire／agy_restore／agy_summaries |
 
@@ -52,7 +52,7 @@ cli             → header, orphan_guard, private_tmp, store, agents.agy, agents
 round_child     → cli, private_tmp, store, continue_shell[#341]
 start_child     → cli, store
 agents/claude   → agents.base, private_tmp, store, agents.claude_raw[#342]；lazy: store
-agents/claude_raw → agents.base（只拿 AgentError）              [#342 設計；不得 import agents.claude、store]
+agents/claude_raw → agents.base（只拿 AgentError）              [#342；不得 import agents.claude、store]
 agents/opencode → agents.base, private_tmp, store；lazy: header
 agents/agy      → agents.base, agents.agy_wire, agents.agy_store, agents.agy_summaries, agents.agy_restore,
                   private_tmp, store

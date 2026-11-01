@@ -171,3 +171,10 @@ from agora.agents.claude_raw import (FORMAT, PackedRaw, _AUX_SEP, _RAW_HEAD, _au
 | 低 3：overview 的行數是約數 | 已校正成約 1230／約 180；C-9 規定 merge 前改成實際值 |
 | 資訊：private_tmp 和 base 之間既有的 lazy 循環 | 不用處理：overview 已記為已知的雙向依賴，不是這張單引入的 |
 
+### 實作審之後（REPORT-arch-342，針對 4f46513／fe89ab6）
+
+| 項目 | 處理 |
+|---|---|
+| C-1～C-9 | 全部符合；C-2 由架構師重跑，結果 VERBATIM-OK |
+| overview／decisions 從「設計」改成「已實作」 | overview 改成 fe89ab6 的實際行數（claude.py 1222、claude_raw 185），拿掉「未實作」；decisions D-14 標為已審，P-7 改成實際行數 |
+
