@@ -3,7 +3,7 @@
 維護者：專案架構師。每一次改到模組切割、依賴方向或公開介面，都和引起它的設計文件放在同一個 PR 更新（AGENTS.md「專案架構師可以 commit 的路徑」）。
 
 - **範圍**：目前只收錄 `src/agora`。同一個 repo 裡的 `aicomm`、`ainame`、`angareion`、`atelier`（`pyproject.toml` 的 `[project.scripts]`）還沒收錄，之後再補。
-- **基準**：main e57eaad，加上 #341 這張單的設計（`docs/design-notes/121-continue-shell.md`）。行數是 e57eaad 的實數；cli.py 標了 #341 之後的預估。
+- **基準**：origin/main a6c69f5（包含 e57eaad；行數兩者相同），加上 #341 這張單的設計（`docs/design-notes/121-continue-shell.md`）。行數是實數；cli.py 另外標了 #341 之後的預估。
 
 ## 模組地圖
 
@@ -30,29 +30,50 @@
 
 ## 依賴方向
 
-`A → B` 表示 A import B。以下是頂層 import，函式內的 lazy import 另外標「lazy」。都是 main e57eaad 實際 grep 的結果，#341 新增的部分已標出。
+`A → B` 表示 A import B。「lazy」是函式內的 import。下面是 origin/main a6c69f5（包含 e57eaad）**逐檔 grep 的完整結果**，頂層 import 和縮排的 lazy import 都算在內；只有標 `[#341]` 的是這張單的設計，還沒實作。
 
 ```
-header        ← （不 import agora）
-errors        ← （不 import agora）                                  [#341]
-agents/base   ← （不 import agora）
-store         → header
-continue_shell→ header, store, errors, agents/base                   [#341；不得 import cli／round_child／start_child]
-cli           → header, store, orphan_guard, private_tmp, agents/*, continue_shell[#341], errors[#341]
-                lazy: background, cache, migrate, tui, agents.claude, agents.agy_store
-round_child   → cli, continue_shell[#341], private_tmp, store
-start_child   → cli, store
-background    → store
-cache         → header, store, agents/base
-migrate       → header, store
-tui           → cache, header, store, agents.agy；lazy: cli（為了避開循環）
-agents/claude, agents/opencode, agents/agy → store（只用 normalize）
+header          → （無）
+errors          → （無）                                               [#341]
+orphan_guard    → （無）
+credscan        → （無）
+private_tmp     → （無）；lazy: agents.base（只為 AgentError）
+agents/base     → private_tmp
+store           → header；lazy: background（background 頂層 import store，所以這裡用 lazy）
+background      → store
+cache           → header, store, agents.base
+migrate         → header, store；lazy: agents.base, agents.claude, agents.agy_store, agents.opencode
+tui             → cache, header, store, agents.agy；lazy: agents.base, cli（為了避開循環）
+continue_shell  → header, store, errors, agents.base                   [#341；不得 import cli／round_child／start_child]
+cli             → header, orphan_guard, private_tmp, store, agents.agy, agents.opencode, agents.base,
+                  continue_shell[#341], errors[#341]
+                  lazy: background, cache, migrate, tui, agents.claude, agents.agy_store,
+                        round_child（#341 之後拿掉）
+round_child     → cli, private_tmp, store, continue_shell[#341]
+start_child     → cli, store
+agents/claude   → agents.base, private_tmp, store；lazy: store
+agents/opencode → agents.base, private_tmp, store；lazy: header
+agents/agy      → agents.base, agents.agy_wire, agents.agy_store, agents.agy_summaries, agents.agy_restore,
+                  private_tmp, store
+agents/agy_wire → agents.base
+agents/agy_store     → agents.agy_wire, agents.base, private_tmp
+agents/agy_summaries → agents.agy_store, agents.base, private_tmp
+agents/agy_restore   → store, agents.agy_store, agents.agy_summaries, agents.agy_wire, agents.base
 ```
+
+**已知的雙向**：
+- `agents/base ⇄ private_tmp`：base 頂層 import private_tmp，private_tmp 用 lazy import base 拿 `AgentError`。
+- `store ⇄ background`：store 用 lazy import background。
+
+兩者都靠一邊 lazy 避開 import 時的循環。
+
+**continue_shell 的傳遞依賴**（#341 之後）：header、store、errors、agents.base、private_tmp，執行時再加上 store lazy 的 background。不含 cli、round_child、start_child（由 #341 的 C-3／C-4 鎖住）。
 
 **規則**：
-1. 低層（header、errors、agents/base、store）不 import cli。
+1. 低層（header、errors、private_tmp、agents/base、store、background）不 import cli。
 2. 子行程本體（round_child、start_child）可以依賴 cli，因為它們在子行程裡跑 cli 的 round 或 load 本體。外殼（cli）和子行程共同依賴的協議，放在 continue_shell。
 3. `tui → cli` 只能 lazy。
+4. 新增雙向依賴時，要在這裡記一筆，並寫明哪一邊是 lazy。
 
 ## 公開介面清單（目前收錄的部分）
 

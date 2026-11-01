@@ -66,18 +66,18 @@ round_child／start_child 依賴 cli 是可以接受的：它們本來就是在�
 cli 加一段：
 
 ```python
-from agora.continue_shell import (CONTINUE_LOG, ROUND_TIMEOUT_SECONDS, ROUND_TIMEOUT_MAX_SECONDS,
-                                  RoundChildDead, StartChildDead, _apply_diff, _reap_group,
-                                  _round_child, _round_timeout, _start_child, _start_payload)
+from agora.continue_shell import (CONTINUE_LOG, RoundChildDead, StartChildDead, _apply_diff,
+                                  _reap_group, _round_child, _round_timeout, _start_child,
+                                  _start_payload)
 ```
 
-這份清單是兩個集合的聯集（main e57eaad 實際 grep 過）：
+這份清單共 9 個名字，是兩個集合的聯集（main e57eaad 實際 grep 過）：
 - cli 自己在區段外用到的：`_round_child`（:1897）、`_apply_diff`（:1900）、`_start_child`（:2504）、`CONTINUE_LOG`。
 - 測試或其他 src 透過 `cli.` 讀取的：`_start_child`（12 處）、`_round_child`（9 處）、`CONTINUE_LOG`（9 處）、`_apply_diff`（4 處）、`StartChildDead`（3 處）、`_reap_group`（2 處）、`RoundChildDead`（2 處）、`_round_timeout`（1 處）、`_start_payload`（1 處，tests/unit/_round_seam.py:30）。
 
 **cli 內部一律用自己命名空間裡的裸名呼叫**（`_round_child(...)`、`_start_child(...)`、`_apply_diff(...)`），不要寫成 `continue_shell._round_child(...)`。這樣 `monkeypatch.setattr(cli, "_round_child", ...)`（4 處）和 `setattr(cli, "_start_child", ...)`（10 處）替換的就是 cli 實際呼叫的那個名字，不用改。
 
-**不重新匯出**的名字：`_kill_child_group`、`_CHILD_ERRORS`、`_raise_child_error`、`ROUND_DIFF_KEYS`，以及舊名 `_kill_round_group`。cli 在區段外沒有用到它們（grep 確認過）。
+**不重新匯出**的名字：`_kill_child_group`、`_CHILD_ERRORS`、`_raise_child_error`、`ROUND_DIFF_KEYS`、`ROUND_TIMEOUT_SECONDS`、`ROUND_TIMEOUT_MAX_SECONDS`，以及舊名 `_kill_round_group`。cli 在區段外沒有用到它們，測試也沒有透過 `cli.` 讀它們（grep 確認過；兩個 `ROUND_TIMEOUT_*` 只出現在 cli.py:1633-1649，都在要搬的區段內，測試只用環境變數 `AGORA_ROUND_TIMEOUT`）。
 
 **已知會失效的接縫**（實作時要改，見 §5 的 PM 決定）：
 - `monkeypatch.setattr(cli, "_kill_round_group", ...)` 共 3 處：tests/unit/test_continue_round_child.py:888、:918，test_continue_start_child.py:176。它們要讓 `_reap_group`／`_start_child` 看到替身；搬家後，這兩個函式是在 continue_shell 的全域名稱裡找 `_kill_child_group`，替換 cli 的名字就沒有作用了。
@@ -88,7 +88,8 @@ from agora.continue_shell import (CONTINUE_LOG, ROUND_TIMEOUT_SECONDS, ROUND_TIM
 
 - 它從 #339 起也用來收 start child，名字裡的 round 已經不準了（#339 架構審的低項）。
 - 反正 3 處替換的對象一定要改，順便改名不會多出接縫的成本，只多 1 處直接呼叫（test_continue_round_child.py:297 `cli._kill_round_group(proc)`）。
-- 本體逐字不變，只改 `def` 那一行，以及 `_reap_group` 裡的一次呼叫和它 docstring 裡的一次提及。round_child.py:103 docstring 裡的名字跟著改。測試的函式名稱（例如 `test_kill_round_group_takes_...`）不用改。
+- 本體逐字不變，只改 `def` 那一行，以及 `_reap_group` 裡的一次呼叫和它 docstring 裡的一次提及。round_child.py:103 docstring 裡的名字跟著改，test_continue_round_child.py:289 測試 docstring 裡的 `` `_kill_round_group` `` 也跟著改（只改說明文字）。
+- 唯一保留舊名的地方是測試函式名 `test_kill_round_group_takes_a_grandchild_that_ignores_sigterm`（歷史名，改它會讓測試歷史和報告對不上）。C-8 的檢查把它列為唯一例外。
 
 ### 2.5 round_child／start_child 改了什麼
 
@@ -110,19 +111,31 @@ from agora.continue_shell import (CONTINUE_LOG, ROUND_TIMEOUT_SECONDS, ROUND_TIM
 
 ## 4. 給實作的介面契約
 
-- **C-1 新模組與搬移清單**：`src/agora/continue_shell.py` 含 §2.1 表中所有符號，cli.py／round_child.py 裡不再有它們的定義（重新匯出的 import 不算定義）。
-- **C-2 逐字搬移**：每個搬移符號在新檔裡的原始碼（含 docstring 和緊鄰的 `#:` 註解），和 main e57eaad 的舊原始碼，只允許以下差異：
-  - (a) `_kill_round_group` → `_kill_child_group`（def 行、`_reap_group` 的一處呼叫，以及它 docstring 裡的一處提及，cli.py:1698、:1736、:1745）；
-  - (b) 刪除 `_round_child`、`_apply_diff` 內的 `from agora import round_child` 各一行；
-  - (c) `round_child.state_of(` → `state_of(`、`round_child.decode_fingerprint(` → `decode_fingerprint(`。
+- **C-1 新模組與搬移清單**：`src/agora/continue_shell.py` 含 §2.1 表中所有符號，cli.py／round_child.py 裡不再有它們的定義（重新匯出的 import 不算定義）。驗法：test_continue_shell_deps.py 用 ast 解析 cli.py 和 round_child.py，斷言模組頂層沒有任何搬移符號的 `def`／`class`／賦值（`Assign` 或 `AnnAssign` 的目標）。這樣即使 import 寫在殘留的舊 def 後面、把名字蓋掉，也會紅。
+- **C-2 逐字搬移（按行範圍，審查者可重跑）**：
+  - `continue_shell.py` 的版面固定為：模組 docstring → `from __future__ import annotations` → import → 一行標記註解 `# --- moved verbatim (#341) ---` → 搬移區塊。搬移區塊依序是 cli.py@e57eaad 第 66 行（`CONTINUE_LOG`）、cli.py@e57eaad 第 1627-1855 行、round_child.py@e57eaad 第 41-60 行（`state_of`、`decode_fingerprint`），段與段之間只有空行。
+  - 只允許三種替換：(a) `_kill_round_group` → `_kill_child_group`（def 行、`_reap_group` 的一次呼叫、它 docstring 的一次提及）；(b) 刪掉兩行 `    from agora import round_child`（`_round_child`、`_apply_diff` 內）；(c) `round_child.state_of(` → `state_of(`、`round_child.decode_fingerprint(` → `decode_fingerprint(`。
+  - 驗法（實作者把輸出貼進 PR；審查者和 PM 在 PR 上自己重跑一次）：
+    ```sh
+    { git show e57eaad:src/agora/cli.py | sed -n '66p;1627,1855p'
+      git show e57eaad:src/agora/round_child.py | sed -n '41,60p'; } \
+      | sed -e 's/_kill_round_group/_kill_child_group/g' -e '/^    from agora import round_child$/d' \
+            -e 's/round_child\.state_of(/state_of(/' -e 's/round_child\.decode_fingerprint(/decode_fingerprint(/' > /tmp/341-old.txt
+    sed -n '/^# --- moved verbatim (#341) ---$/,$p' src/agora/continue_shell.py | sed 1d > /tmp/341-new.txt
+    diff -B /tmp/341-old.txt /tmp/341-new.txt && echo VERBATIM-OK
+    ```
+    `diff -B` 只忽略空行差異；行內註解（例如 cli.py:1634 行尾的 `# ... (#117)`）、符號順序、多出來的符號，都會出現在 diff 裡。輔助：`git diff --color-moved=zebra` 看搬移。
+- **C-3 依賴方向（靜態）**：新增測試 `tests/unit/test_continue_shell_deps.py`（第一行 `import _guard`），用 ast 掃 `src/agora/continue_shell.py` 的所有節點（`ast.walk`，包含函式內的），斷言：
+  - (i) `Import`／`ImportFrom` 沒有 `agora.cli`、`agora.round_child`、`agora.start_child`，`from agora import` 後面也不能出現 `cli`／`round_child`／`start_child`；
+  - (ii) 沒有相對匯入（`ImportFrom.level > 0`）；
+  - (iii) 沒有呼叫 `importlib.import_module`、`import_module`、`__import__`。
 
-  證明方式：實作者用 ast 取出新舊兩邊每個符號的原始碼片段（`ast.get_source_segment`，加上前置的 `#:` 註解），套用上面三種替換之後逐字比對，**把比對結果（每個符號 same／diff）貼進 PR 描述**。比對腳本不進 repo。
-- **C-3 依賴方向（靜態）**：新增測試 `tests/unit/test_continue_shell_deps.py`（第一行 `import _guard`），用 ast 掃 `src/agora/continue_shell.py` 的所有 `Import`／`ImportFrom`（包含函式內的），斷言沒有 `agora.cli`、`agora.round_child`、`agora.start_child`，`from agora import` 後面也不能出現 `cli`／`round_child`／`start_child`。errors.py 不能 import 任何 `agora` 模組，也一起斷言。
+  errors.py 也用同一個掃描，斷言完全不 import `agora`。
 - **C-4 依賴方向（執行期）**：同一個測試檔，用 `subprocess.run([sys.executable, "-c", "import sys, agora.continue_shell; print(sorted(m for m in sys.modules if m in ('agora.cli','agora.round_child','agora.start_child')))"])`，斷言輸出是 `[]`。
-- **C-5 cli 重新匯出**：§2.3 清單裡的 11 個名字，`getattr(cli, n) is getattr(continue_shell, n)`；並且 `cli.InputError is errors.InputError`。放在同一個測試檔。
+- **C-5 cli 重新匯出**：§2.3 清單裡的 9 個名字，`getattr(cli, n) is getattr(continue_shell, n)`；其中的函式和類別（常數 `CONTINUE_LOG` 除外）另外斷言 `__module__ == "agora.continue_shell"`。並且 `cli.InputError is errors.InputError`、`errors.InputError.__module__ == "agora.errors"`。放在同一個測試檔。
 - **C-6 接縫仍有效**：既有的 `monkeypatch.setattr(cli, "_round_child"|"_start_child", ...)` 不改，所在的測試全綠。證明了 cli 內部是用裸名呼叫的。
 - **C-7 round_child 的名字保留**：`round_child.state_of is continue_shell.state_of`、`round_child.decode_fingerprint is continue_shell.decode_fingerprint`（同一個測試檔）。
-- **C-8 改名**：`continue_shell._kill_child_group` 存在；`cli` 和 `continue_shell` 都**沒有** `_kill_round_group` 這個屬性（同一個測試檔斷言 `not hasattr`）。
+- **C-8 改名**：`continue_shell._kill_child_group` 存在；`cli` 和 `continue_shell` 都**沒有** `_kill_round_group` 這個屬性（同一個測試檔斷言 `not hasattr`）。舊名殘留由審查時跑 `grep -rn _kill_round_group src tests` 檢查：src 要零筆；tests 只准剩測試函式名 `test_kill_round_group_takes_a_grandchild_that_ignores_sigterm` 那一行。
 - **C-9 行為不變**：全 unit 綠。測試的改動只限 §5 決定 1 列出的那幾行，加上新增的 test_continue_shell_deps.py；沒有任何斷言或期望值改變。
 - **C-10 文件**：本 note、`docs/architecture/overview.md`、`docs/architecture/decisions.md` 和程式在同一個 PR（overview／decisions 由架構師先 commit 在這個 branch 上）。
 
@@ -130,6 +143,8 @@ from agora.continue_shell import (CONTINUE_LOG, ROUND_TIMEOUT_SECONDS, ROUND_TIM
 - 在 continue_shell 的任一函式內加 `from agora import cli` → C-3 紅（C-4 抓不到 lazy 的情況，所以兩支都要有）。
 - 在 cli 改成 `continue_shell._round_child(...)` 呼叫 → 既有的 `setattr(cli, "_round_child")` 測試會跑真的子行程（或紅）→ C-6 紅。
 - 在 cli 留 `_kill_round_group = _kill_child_group` → C-8 紅。
+- cli 留著舊的 `def _round_child`，import 寫在它後面 → C-1 的 ast 檢查紅（C-5 的 `is` 檢查抓不到）。
+- 在 continue_shell 寫 `from . import cli` 或 `importlib.import_module("agora.cli")` → C-3 (ii)／(iii) 紅。
 - 漏了重新匯出 `_start_payload` → `_round_seam` 紅。
 
 ## 5. 要 PM 決定的事
@@ -138,6 +153,7 @@ from agora.continue_shell import (CONTINUE_LOG, ROUND_TIMEOUT_SECONDS, ROUND_TIM
    - test_continue_round_child.py:297 `cli._kill_round_group(proc)` → `continue_shell._kill_child_group(proc)`；
    - :888、:918 `monkeypatch.setattr(cli, "_kill_round_group", ...)` → `monkeypatch.setattr(continue_shell, "_kill_child_group", ...)`；
    - test_continue_start_child.py:176 同上；
+   - test_continue_round_child.py:289 測試 docstring 裡的舊名改成新名（只改說明文字）；
    - 以上兩個檔各加一行 `from agora import continue_shell`。
 
    不放寬的話，只能把 `_kill_round_group` 和 `_reap_group` 留在 cli，continue_shell 再反過來 import cli，就違反了這張單的依賴方向。**建議放寬**。
@@ -178,3 +194,18 @@ from agora.continue_shell import (CONTINUE_LOG, ROUND_TIMEOUT_SECONDS, ROUND_TIM
 7. **測試策略**：C-3（靜態）加 C-4（執行期）兩支並存的理由是否成立？C-2 的逐字比對方法能不能抓到搬移時順手改字？
 8. **風險與未決**：有沒有漏掉的 import 時機、或接縫失效的情況？請 grep `setattr(cli,`、`cli\.` 對照搬移清單。
 9. **PM 決定**（§5）：放寬的測試行是否最小？還有沒有別的路，可以既不違反依賴方向、又完全不改測試？
+
+## 10. 修訂紀錄
+
+### 第 2 輪（審查：tickets/REPORT-341-design-rev.md，Sonnet，針對 76cc79c）
+
+| 發現 | 處理 |
+|---|---|
+| 1 中：重新匯出多了 `ROUND_TIMEOUT_SECONDS`、`ROUND_TIMEOUT_MAX_SECONDS` | **已修**。§2.3 的 import 和 C-5 改成 9 個名字；兩個常數移到「不重新匯出」，附 grep 依據 |
+| 2 中：overview 的依賴圖和 main 不符（base → private_tmp、store lazy background、private_tmp lazy base、claude 的頂層與 lazy、migrate、opencode、tui 的 lazy） | **已修**。overview 的依賴方向全部重新 grep（包含縮排的 lazy import），基準改成 a6c69f5；補上 continue_shell 的傳遞依賴（含 private_tmp），以及 base ⇄ private_tmp（一邊是 lazy）的說明 |
+| 3 低：C-2 的證明有縫、不能重跑 | **已補**。C-2 改成按行範圍比對、固定標記行、附可重跑的指令（`diff -B`），由審查者和 PM 在 PR 上自己重跑；行內註解、順序、多出的符號都比得出來 |
+| 4 低：C-3 擋不住相對或動態匯入 | **已補**。C-3 加 (ii) 不得有 `level > 0`、(iii) 不得呼叫 `import_module`／`__import__`；「改壞要紅」加一條 |
+| 5 低：C-1 沒有可驗的斷言 | **已補**。C-1 加 ast 檢查（cli.py／round_child.py 頂層不得有搬移符號的定義）；C-5 加 `__module__` 斷言；「改壞要紅」加一條 |
+| 6 低：改名後的舊名殘留 | **已補**。§2.4 和 §5 決定 1 加上 test_continue_round_child.py:289 docstring 的改名；測試函式名當作唯一例外保留，寫進 C-8 的 grep 規則 |
+| 7 資訊：相容層的成本 | **記錄**。decisions 新增待決 P-8：日後把測試改讀 continue_shell，再刪 cli 的重新匯出和 round_child 的 `state_of` 重新匯出 |
+

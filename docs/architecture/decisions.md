@@ -32,3 +32,4 @@
 | P-5 | fork 路徑讀整份 raw（`cli._load_for_launch` 的 fork 分支）要不要改用 `raw_file` | PM | PSTACK G 節；#121 報告 |
 | P-6 | start_child 錯誤回答的形狀，在寫的一邊和讀的一邊（`continue_shell._raise_child_error`）之間沒有共同常數 | 架構師（#341 之後） | design-notes/121-continue-shell.md §7 |
 | P-7 | `claude.py` 的 raw 格式和串流抽成 `claude_raw.py`（121-E）；`opencode.py` 1648 行的切割 | 架構師設計、PM 排程 | #121 報告 |
+| P-8 | #341 留下的相容層：cli 重新匯出 `RoundChildDead`、`StartChildDead`、`_reap_group`、`_round_timeout`、`_start_payload`、`CONTINUE_LOG`，round_child 重新匯出 `state_of`。日後把測試改讀 continue_shell，就可以刪掉 | 架構師提、PM 排程 | REPORT-341-design-rev 發現 7 |
