@@ -89,5 +89,5 @@ agents/agy_restore   → store, agents.agy_store, agents.agy_summaries, agents.a
 
 - **提議的形狀**：新指令（暫名 `pmo`，套件 `src/pmo`；名稱待 Q-5）加上 `skills/pmo/SKILL.md`；PMO 的 harness 只寫能力（待 Q-1）。
 - **提議的依賴方向**：核心只依賴 `ainame`，不碰外部。指令透過四個埠碰外部：Angareion（`angareion` 子行程）、aicomm（`aicomm send` 子行程）、sidecar（HTTP）、GitHub（`gh` 子行程，唯讀）。**不 import** `agora`、`atelier`、`aicomm`、`angareion` 的 Python 模組，也不依賴 MyPMO 的程式。
-- **提議的公開介面**：`pmo tick`、`pmo inbox read|list|ack|report|decision-send|rebuild`、`pmo check|send|open|reply|poke|status|close`；teams 設定、team 狀態、收件帳本的 schema（資料由環境變數指到本機）；tick 的事件標籤沿用現行工具。
+- **提議的公開介面**：`pmo tick`、`pmo inbox read|list|ack|report|decision-send|rebuild|handoff-close`、`pmo check|send|open|reply|poke|status|close`；只在 Q-8 選 (b) 時才有的 `pmo watch --poke-only`（常駐、不讀信，只叫醒 PMO）；teams 設定、team 狀態、收件帳本的 schema（資料由環境變數指到本機）；tick 的事件標籤沿用現行工具。
 - 本人定案後才實作（T-1～T-7，每個 PR 都要經架構師結構審）；實作後再把這一節搬進上面的模組地圖和依賴圖。

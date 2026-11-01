@@ -224,6 +224,8 @@ flowchart LR
 | `pmo poke ‹team› [--interrupt] --body -` | 一句話 | sidecar 的回應碼 | 0／2 |
 | `pmo status [‹team›] [--json]` | | 每個 team PM 的 state／exit／session，以及 PMO 自己排的 job | 0／2 |
 | `pmo close ‹team› [--timeout 秒]` | | 是否已關、刪了哪些 job | 0／2 |
+| `pmo inbox handoff-close ‹id›` | | 把一筆交接出去的群請求標成已結案，之後不再印 `[group-sweep-due]` | 0；1 查無 id |
+| `pmo watch --poke-only`（**只在 Q-8 選 (b) 時才有**） | （常駐；不讀信） | stderr 診斷；stdout 不印 | 由啟動方管理的常駐行程；收到 SIGTERM 結束為 0 |
 
 **送信前的身分守門**：所有會寄信的指令（ack、report、decision-send、send、reply），送之前檢查目前的身分（`ANGAREION_IDENTITY`）等於設定裡的 PMO 身分，不符就拒送（exit 2）。現行工具也有這道守門；公開版把身分改由設定給，守門照樣保留（C-3）。
 
@@ -243,7 +245,8 @@ flowchart LR
 | `[decision]` | 收到決定題的作答（只印，不當授權） | 有，沿用 |
 | `[msg]` | 寄給 PMO 的其他每一則信：第一行是欄位，後面接**全文** | 有，沿用（PMO 靠它看信，不必另外補讀） |
 | `[ack]` | team PM 回「收到 ‹工單›」，已寫 `ack_at` | 有，沿用 |
-| `[group-pending]`／`[group]` | 群請求：交給過渡工具（Q-9） | 有，沿用 |
+| `[group-handoff] ‹id›` | 群請求：tick 不處理，交給過渡工具（Q-9） | **新增**。`[group-pending]`／`[group]` 留給 MyPMO 群請求帳本的原意（等 PMO 審、逾時），tick 不印 |
+| `[group-sweep-due] ‹id…›` | 交接出去、還沒結案的群請求：提醒 PMO 跑過渡工具的 sweep（Q-9 (a)） | **新增** |
 | `[state]` | team PM 的 sidecar 狀態變化 | 有，沿用 |
 | `NEED_REOPEN ‹team› session=‹sid\|none›` | 應該在跑卻不見了 | 有，沿用 |
 | `[watchdog]` | 派工後 10 分鐘沒有「收到」：已 poke 一次；再 10 分鐘升級成 `[要本人處理]` | 有，沿用 |
@@ -251,8 +254,12 @@ flowchart LR
 | `[warn]` | 部分失敗 | 有，沿用 |
 | `[no-candidate]` | team PM 因 no candidate 結束 | **新增** |
 | `[waiting-quota]` | team PM 在等額度（只印一次） | **新增** |
-| `[worker-action] ‹team› ‹動作›` | worker team 需要由過渡工具做的動作（例如看門狗要 poke） | **新增**（Q-9） |
+| `[worker-action] ‹team› ‹動作›` | worker team 需要由過渡工具做的動作（看門狗要 poke、要比對 sidecar 狀態） | **新增**（Q-9） |
 | `[idle]` | 這一輪什麼都沒有 | **新增** |
+
+**tick 對 worker team 的邊界**（第一階段，D-8）：
+- **做**：team 訊息比對。worker team 的 PM 回「收到 ‹工單›」照樣寫 `ack_at`、印 `[ack]`（只動 team 狀態，不需要傳輸）；看門狗的到期判斷也照算。
+- **不做**：任何要碰 worker 上 sidecar 的事（`GET /agents`、poke、open、close）。到期或需要比對狀態時印 `[worker-action] ‹team› watchdog-poke`／`[worker-action] ‹team› poll`，由 PMO 用過渡工具做。
 
 ### 3.3 skill 依賴的介面（契約以各自的文件為準）
 
@@ -276,6 +283,15 @@ flowchart LR
 - **team 狀態**：照 MyPMO 現在 `pmo/state/README.md` 的欄位。**不認得的欄位原樣保留**（過渡期 worker team 的欄位由 MyPMO 寫，見 Q-9）。
 - **收件帳本**：`version`、`items`（以工作 ID 為 key）、`notified`；新增 `rebuilt_at`。
 - 位置：`PMO_SKILL_CONFIG`、`PMO_SKILL_STATE_DIR` 兩個環境變數（由環境說明提供）；沒設就拒絕執行（exit 2），**不猜預設路徑**。
+
+### 3.5 `pmo watch --poke-only` 的規則（只在 Q-8 選 (b) 時才有）
+
+- **不讀信**：只跑 `angareion wait`（目標是「寄給我的」，和 tick 的 `read` 同一個游標；`wait` 不動游標）。不用 `--mentioned`：tick 不推那個游標，`wait --mentioned` 會一直報有新信。
+- **去重**：`wait` 回 0 之後，只要 tick 還沒把游標往前推，下一次 `wait` 還會立刻回 0。所以監看程式記下「最後一次 poke 的時刻」，tick 每輪結束時在狀態目錄寫「最後一次 tick 的時刻」。**只有在上次 poke 之後 tick 已經跑過**，才因為 `wait` 回 0 再 poke；否則不 poke，改成等待（每 60 秒看一次 tick 有沒有跑）。
+- **補 poke 的上限**：如果 poke 之後 15 分鐘 tick 都沒跑（PMO 在忙、或 poke 掉了），再 poke 一次；之後每 15 分鐘最多一次。不用 `interrupt`。
+- **廣播**：「寄給我的」包含廣播。廣播本來就是 PMO 要看的信（tick 會印 `[msg]`），所以因廣播叫醒不算誤叫醒。唯一的例外是新身分第一次 `wait`：依 `docs/angareion.md`，第一次讀不會讀到「現在」之前的舊廣播，但第一次 `wait` 可能因此回 0。監看程式第一次啟動時先等 tick 跑過一次，再開始用 `wait` 的結果。
+- **agents 和看門狗**：每 60 秒 `GET /agents`。只有在「和上次 poke 時看到的狀態不同」或「看門狗到期」時才 poke；同一個變化只 poke 一次。
+- **失敗**：`wait` 回 2 時退避（30 秒起、上限 10 分鐘），不 poke；sidecar 連不上時不 poke（tick 自己會報）。
 
 ## 4. 提議（待 Q 定案）
 
@@ -326,7 +342,8 @@ flowchart LR
 6. **T-4c 派工（三）**：`reply`、`poke`、`status`、`close`。
 7. **T-5 tick**：`pmo tick`（收信一輪、agents 比對、看門狗、no-candidate、waiting-quota、交接事件）；事件表的契約測試；「收到 → 看門狗不發」的測試。
 8. **T-6 說明**：`skills/pmo/SKILL.md`、環境說明範本（**只是範本，不改任何人正在用的環境說明**）；更新 overview／decisions。**PMO harness 的新版本不在這裡發**。
-9. **T-7 切換**（PMO 自己的單；MyPMO 一側和本 repo 一側同步）：PMO harness 的新版本（能力段指向 `pmo`）、環境說明改用 `pmo`、停舊的 watch、開始用 `pmo tick`、MyPMO 依 Q-9 改成交接模式。三件事在同一個切換窗口做，避免「harness 叫 PMO 用 `pmo`，但設定還沒好」或「兩個讀者」。
+9. **T-8 小監看程式**（**只在 Q-8 選 (b) 時才有**；在 T-7 之前）：`pmo watch --poke-only`，照 §3.5 的規則；測試要含「tick 沒跑就不重複 poke」「15 分鐘補 poke」「`wait` exit 2 退避」。
+10. **T-7 切換**（PMO 自己的單；MyPMO 一側和本 repo 一側同步）：PMO harness 的新版本（能力段指向 `pmo`）、環境說明改用 `pmo`、停舊的 watch、開始用 `pmo tick`、MyPMO 依 Q-9 改成交接模式。三件事在同一個切換窗口做，避免「harness 叫 PMO 用 `pmo`，但設定還沒好」或「兩個讀者」。
 
 ## 6. 待本人決定的點
 
@@ -339,13 +356,13 @@ flowchart LR
 | Q-5 | 指令名和套件名 | (a) `pmo`（套件 `src/pmo`）；(b) `atelier pmo …`；(c) 其他名字 | **(a)**：atelier 指令目前只讀 harness，混進派工會變成兩種職責 |
 | Q-6 | #110 的層級 | 現在標 c；新增指令和套件屬於「功能組新增」，依工單規則可能是 b | 請本人定；若改 b，T-1～T-6 掛成子單 |
 | Q-7 | 舊工具的去留 | (a) 切換後 MyPMO 的 dispatch.py 只留 worker 動作和群請求；(b) 改成轉呼叫 `pmo` 的薄殼；(c) 整支退役 | **(a)**，等 Q-3／Q-4 都搬完再退役 |
-| Q-8 | tick 由誰在什麼時候叫起來（PMO 現在已經由 sidecar 開，見 MyPMO 的 boot-pmo 說明；問題是「沒人寄信時」的定時工作怎麼觸發） | (a) sidecar 定時 poke job，每 N 分鐘一輪：N ≤ 10 分鐘（看門狗是 10 分鐘），一天至少 144 輪模型推理，大多是 `[idle]`；(b) 一個**不是 agent** 的小監看程式（`pmo watch --poke-only`）：只用 `angareion wait`（不動游標，不算讀者）和 `GET /agents`，算好看門狗的到期時刻，**只在有事時** poke PMO，零模型額度，由啟動方（Mac 環境）和 sidecar 一起起；(c) 照現在，PMO 自己在背景跑常駐監看（和「被 sidecar 管的不跑背景迴圈」的規則衝突） | **(b)**：只有有事才花額度，也維持「讀信只有 tick」；代價是多一個常駐行程，要由環境負責起停 |
-| Q-9 | tick 和過渡工具（MyPMO 的群請求、worker team 動作）怎麼交接 | (a) **id 交接**：tick 不處理、印 `[group-pending] ‹id›`／`[worker-action] ‹team› ‹動作›`；MyPMO 的工具改成「給 id，用 `angareion log --around ‹id›` 取原信」（唯讀、不動游標），群請求的重試 sweep 由 PMO 在 tick 報有待辦時手動跑 MyPMO 的指令；team 狀態兩邊共用同一個目錄與 schema（不認得的欄位保留）。(b) tick 直接 import MyPMO 的群請求程式（違反「不依賴 MyPMO」）。(c) 先不切換：Q-3、Q-4 都搬完才做 T-7 | **(a)**：讀者仍然只有一個，MyPMO 只改入口；若本人不想在過渡期多一套交接，就選 (c)，代價是切換延後 |
+| Q-8 | tick 由誰在什麼時候叫起來（PMO 現在已經由 sidecar 開，見 MyPMO 的 boot-pmo 說明；問題是「沒人寄信時」的定時工作怎麼觸發） | (a) sidecar 定時 poke job，每 N 分鐘一輪：N ≤ 10 分鐘（看門狗是 10 分鐘），一天至少 144 輪模型推理，大多是 `[idle]`；(b) 一個**不是 agent** 的小監看程式（`pmo watch --poke-only`，規則見 §3.5）：只用 `angareion wait`（不動游標，不算讀者）和 `GET /agents`，算好看門狗的到期時刻，**只在有事時** poke PMO，不叫醒時不花模型額度，由啟動方（Mac 環境）負責起停；(c) 照現在，PMO 自己在背景跑常駐監看（和「被 sidecar 管的不跑背景迴圈」的規則衝突） | **(b)**：只有有事才花額度，也維持「讀信只有 tick」；代價是多一個常駐行程，要由環境負責起停 |
+| Q-9 | tick 和過渡工具（MyPMO 的群請求、worker team 動作）怎麼交接 | (a) **id 交接**：tick 不處理、印 `[group-handoff] ‹id›`／`[worker-action] ‹team› ‹動作›`；MyPMO 的工具改成「給 id，用 `angareion log --around ‹id›` 取原信」（唯讀、不動游標）。**重試的觸發**：tick 在自己的狀態裡記下交接出去的 id（不讀 MyPMO 的帳本），每隔固定時間（預設 10 分鐘，最多每輪一次）印 `[group-sweep-due] ‹id…›`，PMO 看到就跑 MyPMO 的 sweep；MyPMO 報結案後，PMO 用 `pmo inbox handoff-close ‹id›` 停止提醒。（另一個做法是過渡工具自己排定時 job；我不建議，因為 job 的起停又多一套要管的東西。）team 狀態兩邊共用同一個目錄與 schema（不認得的欄位保留）。(b) tick 直接 import MyPMO 的群請求程式（違反「不依賴 MyPMO」）。(c) 先不切換：Q-3、Q-4 都搬完才做 T-7 | **(a)**：讀者仍然只有一個，MyPMO 只改入口；若本人不想在過渡期多一套交接，就選 (c)，代價是切換延後 |
 
 ## 7. 風險
 
 - **兩個讀者**：切換期間，舊的 watch 和 `pmo tick` 若同時以 PMO 身分讀信，會互相吃掉訊息。T-7 必須先停舊的再開新的；SKILL.md 和 harness 要明寫「PMO 身分的讀信只走 `pmo tick`」。Q-8 (b) 的小監看程式只 `wait`，不讀。
-- **交接漏件**（Q-9 (a)）：MyPMO 若沒有在 T-7 改成「用 id 取原信」，群請求會停在 `[group-pending]`。T-7 的驗收要包含一筆群請求走完。
+- **交接漏件**（Q-9 (a)）：MyPMO 若沒有在 T-7 改成「用 id 取原信」，群請求會停在 `[group-pending]`。T-7 的驗收要包含兩筆群請求：一筆一次走完；一筆在推進途中失敗，靠 `[group-sweep-due]` 提醒、PMO 再跑 sweep 之後續完。
 - **帳本重建的邊界**：§1.2 列的不可重建欄位；過去沒帶 `in_reply_to` 的舊 ack 也重建不出來。T-3 要先從現在的帳本匯入一次。
 - **定時 job 失效**：sidecar 的 `close` 不會刪 job；`pmo status` 一併列出 PMO 自己的 job。
 - **公開與私人的界線**：schema、事件格式、測試假資料都在 public repo，假資料不得帶私人資訊（帳號、位址、額度）。
@@ -389,4 +406,15 @@ flowchart LR
 | L-2 身分守門沒寫 | 同意。§3.2 加送信前的身分守門；§3.4 的 schema 加 PMO 身分、秘書身分、派工 channel |
 | L-3 ainame 兩版不同 | 核實為真：現行派工工具用到一個「缺 team 段的提示」函式，本 repo 沒有。§5.1 和 T-1 寫明要補齊 |
 | L-4 未決寫成已決 | 同意。§4 改為「提議（待 Q 定案）」並加「對應的 Q」欄；overview、decisions 的措辭同步改成提議 |
-| 其他：圖上 exit 3 的分支、其他專案名 | §2.3 刪掉 exit 3 的分支；不指名其他專案，改稱「秘書側」 |
+| 其他：圖上 exit 3 的分支、其他專案名 | §2.3 刪掉 exit 3 的分支；審查點名的那個秘書側專案改稱「秘書側」（MyPMO、MyLinuxPool 在本 repo 公開文件已有先例，保留） |
+
+### 第 3 輪（審查第 2 輪：N-1～N-5）
+
+| 發現 | 處理 |
+|---|---|
+| N-1 群請求的重試 sweep 沒有觸發訊號 | 核實為真：現行每輪讀信前都先跑 sweep。Q-9 (a) 補上觸發：tick 記下交接出去的 id，定時印 `[group-sweep-due]`，PMO 用 `pmo inbox handoff-close` 結案；另一個做法（過渡工具自排 job）寫明不建議的理由；§7 的 T-7 驗收加「途中失敗再續」 |
+| N-2 小監看程式重複 poke、廣播、介面缺口 | 同意。新增 §3.5（去重靠「最後一次 tick 的時刻」、15 分鐘補 poke、廣播不算誤叫醒、首次啟動先等一次 tick、不用 `--mentioned` 的理由、失敗退避）；§3.2 加 `pmo watch --poke-only`；§5.2 加 T-8（只在 Q-8 選 (b) 時才有）；overview 介面清單同步 |
+| N-3 `[group-pending]` 被改義 | 核實為真。交接改用新標籤 `[group-handoff]`；`[group-pending]`／`[group]` 留給 MyPMO 的帳本，tick 不印 |
+| N-4 worker team 在 tick 裡做到哪 | 核實為真：現行對所有 team 比對「收到」，worker 的 agents 比對要靠轉發。§3.2.1 後補「tick 對 worker team 的邊界」：做「收到」比對與看門狗到期判斷，不碰 sidecar，其餘印 `[worker-action]` |
+| N-5 修訂紀錄寫法過頭 | 同意。第 2 輪那一列改成精確說法 |
+
