@@ -24,7 +24,8 @@
 | `private_tmp.py` | 259 | agora 自己 state 底下的私有暫存目錄與殘留清掃 |
 | `credscan.py` | 221 | 匯入前的憑證樣式掃描（只報名稱和數量） |
 | `agents/base.py` | 334 | agent 介面（`Agent` Protocol、`Exported`、`Launch`、`AgentError`、`env_seconds`…） |
-| `agents/claude.py` | 1385 | Claude Code adapter（含 raw 格式與串流，見 decisions 的待決 121-E） |
+| `agents/claude.py` | 1385（#342 後約 1220） | Claude Code adapter：找檔、session 解析（turns／標題／`_Facts`）、一趟式匯出 `_stream_raw`、啟動、還原 |
+| `agents/claude_raw.py`（#342 設計，未實作） | 約 175 | claude raw 封包格式：`FORMAT`、`_pack_raw`／`_unpack_raw`、`_RAW_HEAD`／`_AUX_SEP`、aux 串流編碼 `_iter_aux`、`_aux_files`、`PackedRaw` |
 | `agents/opencode.py` | 1648 | opencode adapter |
 | `agents/agy*.py` | 339＋363＋165＋582＋592 | agy adapter，分成 agy／agy_store／agy_wire／agy_restore／agy_summaries |
 
@@ -50,7 +51,8 @@ cli             → header, orphan_guard, private_tmp, store, agents.agy, agents
                   lazy: background, cache, migrate, tui, agents.claude, agents.agy_store
 round_child     → cli, private_tmp, store, continue_shell[#341]
 start_child     → cli, store
-agents/claude   → agents.base, private_tmp, store；lazy: store
+agents/claude   → agents.base, private_tmp, store, agents.claude_raw[#342]；lazy: store
+agents/claude_raw → agents.base（只拿 AgentError）              [#342 設計；不得 import agents.claude、store]
 agents/opencode → agents.base, private_tmp, store；lazy: header
 agents/agy      → agents.base, agents.agy_wire, agents.agy_store, agents.agy_summaries, agents.agy_restore,
                   private_tmp, store
