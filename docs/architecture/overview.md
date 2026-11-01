@@ -82,3 +82,12 @@ agents/agy_restore   → store, agents.agy_store, agents.agy_summaries, agents.a
 - **agent 介面**：`agents/base.py` 的 `Agent`（Protocol）：`export`、`turns`、`native`、`append_native`、`list_sessions`、`last_message`、`search_text`、`summarize`、`start_native`、`collect`；`Exported`（raw 的載體：`raw_file`／`raw_md5`／`raw_size`／`raw`，以及 `turns`；`raw_digest()`、`raw_source()` 統一「有檔用檔、否則 bytes」，#340）；模組函式 `turns_of`、`reading_of`、`reading`。
 - **store**：`Paths`、`StoreError`、`Drive`（`folder_id`、`list_sessions` …）、`Index`、`stage`、`remember`、`index_pending`、`upload_batch`、`push_outbox`、`kick_uploader`、`hold_upload_lock`、`sync`。不變式見 decisions D-1～D-7。
 - **continue 的子行程協議**（在 continue_shell）：stdin 送一份 JSON 狀態，stdout 回一份 JSON payload；round 的 payload 必含 `ROUND_DIFF_KEYS`；load 的錯誤用 `{"err": {"kind", "text"}}` 回報。
+
+## 規劃中（設計，未實作）
+
+### PMO skill（#110；`docs/design-notes/110-pmo-skill.md`）— **提議，待本人定案**
+
+- **提議的形狀**：新指令（暫名 `pmo`，套件 `src/pmo`；名稱待 Q-5）加上 `skills/pmo/SKILL.md`；PMO 的 harness 只寫能力（待 Q-1）。
+- **提議的依賴方向**：核心只依賴 `ainame`，不碰外部。指令透過四個埠碰外部：Angareion（`angareion` 子行程）、aicomm（`aicomm send` 子行程）、sidecar（HTTP）、GitHub（`gh` 子行程，唯讀）。**不 import** `agora`、`atelier`、`aicomm`、`angareion` 的 Python 模組，也不依賴 MyPMO 的程式。
+- **提議的公開介面**：`pmo tick`、`pmo inbox read|list|ack|report|decision-send|rebuild|handoff-close`、`pmo check|send|open|reply|poke|status|close`；只在 Q-8 選 (b) 時才有的 `pmo watch --poke-only`（常駐、不讀信，只叫醒 PMO）；teams 設定、team 狀態、收件帳本的 schema（資料由環境變數指到本機）；tick 的事件標籤沿用現行工具。
+- 本人定案後才實作（T-1～T-7，每個 PR 都要經架構師結構審）；實作後再把這一節搬進上面的模組地圖和依賴圖。

@@ -37,3 +37,4 @@
 | P-8 | #341 留下的相容層：cli 重新匯出 `RoundChildDead`、`StartChildDead`、`_reap_group`、`_round_timeout`、`_start_payload`、`CONTINUE_LOG`，round_child 重新匯出 `state_of`。日後把測試改讀 continue_shell，就可以刪掉；刪 `CONTINUE_LOG` 的重新匯出時，cli 自用的三處（`_LogWriter` 等）要一起改成 `continue_shell.CONTINUE_LOG`，或改由別處持有 | 架構師提、PM 排程 | REPORT-341-design-rev 發現 7 |
 | P-9 | 寫進 header 的 `source.host` 直接取 `socket.gethostname()`，沒有可覆寫的來源；golden 測試只能用 monkeypatch 加子行程的 sitecustomize 釘住。要不要給它一個可覆寫的來源（例如環境變數） | 架構師提、PM 排程（不急） | #334 審查的低項 |
 | P-10 | #342 留下的相容層：claude.py 重新匯出 `FORMAT`，claude.py 自己不用，只為了 6 處測試讀 `C.FORMAT`。日後把測試改讀 `claude_raw.FORMAT`，就可以刪掉 | 架構師提、PM 排程 | REPORT-342-design-rev 低 2 |
+| P-11 | PMO 的收件與派工搬成 Atelier 的 PMO skill（**目前只是提議**）：skill 的落點、收件帳本以 Angareion 為準並可部分重建、worker 動作和群請求的搬移時機、指令名、#110 的層級、舊工具的去留、tick 的觸發方式、tick 和過渡工具的交接（note Q-1～Q-9）。note 的 D-1～D-13 都是提議，本人定案後才搬進上面的已決 | 本人（經 PMO） | #110（design-notes/110-pmo-skill.md） |
