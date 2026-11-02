@@ -1,22 +1,27 @@
 # #110 設計筆記：PMO 的收件與派工搬成 Atelier 的 PMO skill
 
-- 作者：專案架構師 myaistorage-arch-m1-1。作者模式：由非作者（Sonnet）審過，再交 PMO 帶去給本人看。**只設計、以介面為主，不實作。**
+- 作者：專案架構師 myaistorage-arch-m1-1。作者模式：由非作者（Sonnet）審過，經 PMO 交本人定案。**只設計、以介面為主，不實作。**
 - 來由：本人 10-19 的方向（#110 工單）；本人同意先出設計（見 MyPMO#264）。
 - 基準：本 repo main f4afe89；MyPMO 的 `pmo/` 只讀，下文只描述它的**介面形狀**，不貼程式，也不寫它的設定內容。
 - 用詞：
   - 「PMO 工具」：現在 MyPMO 的 `pmo/dispatch.py`＋`pmo/inbox.py`（以及它們 import 的 `groups.py`、`ainame.py`）。
   - 「PMO skill」：本設計要做的東西。
   - 「秘書側」：本人透過秘書身分寄信、收回報的那一端（派工信、決定題、群請求的對方）。
-- **§4 的 D- 都是提議**，要等 §6 的 Q- 由本人定案後才成立。例外：Q-8 本人已定（2026-11-02，採 (a)），對應的 D-14 方向已定，細節仍照本 note 審。
+- **定案**：§6 的 Q-1～Q-9 本人已全部決定（2026-11-02～03；#110 留言、MyPMO 決定檔 PR #270），§4 的 D- 都是定案。MyAiStorage 的結構維持現狀（本設計只新增 `src/pmo` 與 `skills/pmo/`）。
 
-## 0. 先講結論（提議）
+## 0. 先講結論（定案）
 
-1. **PMO skill ＝一個指令（暫名 `pmo`，和 agora／angareion／atelier／aicomm 同一個 distribution）＋一份說明檔（`skills/pmo/SKILL.md`）**。Atelier 的 PMO harness（`atelier:pmo-pm`）只寫「需要收件、派工、團隊、監看這些能力」，由環境說明把能力對應到這個指令（D-1／Q-1）。
+1. **PMO skill ＝一個指令（`pmo`，套件 `src/pmo`，和 agora／angareion／atelier／aicomm 同一個 distribution）＋一份說明檔（`skills/pmo/SKILL.md`）**。Atelier 的 PMO harness（`atelier:pmo-pm`）只寫「需要收件、派工、團隊、監看這些能力」，由環境說明把能力對應到這個指令（D-1；Q-1 (a)、Q-5 (a)）。
 2. **設定和狀態的「資料」留在本機，「格式」公開在這裡**：teams 設定、team 狀態、收件帳本的 schema 由本 repo 定義和驗證；檔案由環境變數指到本機（D-4）。
 3. **收件帳本大部分可以從 Angareion 重建**：PMO 的機械 ack、叫人 ack、回報都帶 `in_reply_to`，所以收件項目的主要欄位能重建；`team`、急件叫醒紀錄、決定題重建不出來（§1.2；D-5／Q-2）。
 4. **「讀信」只有一個讀者：`pmo tick`**。它把讀到的每一則都交代清楚：自己處理的（秘書派工、team PM 的「收到」）、交給 PMO 看的（`[msg]` 全文）、交給過渡工具的（群請求、worker team 的動作）（D-6、D-13／Q-9）。
-5. **第一階段只搬本機 sidecar 的派工**。worker 的傳輸、群請求、挑模型、MyPMO 的工單維護工具先留在 MyPMO。和 MyPMO 的交接方式列為 Q-9（D-8～D-11）。
-6. **tick 怎麼被叫起來（Q-8，本人已定 (a)）**：有人用 aicomm 寄信給 PMO 時，寄件人立刻叫醒（現有行為）；沒人寄信時靠 PMO 自己排的 sidecar 定時 poke job。**要不要排、多久一次由 PMO 自己決定**，指令只提供開／調／停的介面 `pmo wake`（§3.6）。tick 每次被叫醒時，自己依 `tick.json` 與 team 狀態判斷哪些項目到期，不靠外部監看程式（D-14）。
+5. **第一階段只搬本機 sidecar 的派工**。worker 的傳輸、群請求、挑模型、MyPMO 的工單維護工具先留在 MyPMO；和 MyPMO 的交接採 id 交接（D-8～D-11、D-13；Q-3 (a)、Q-4、Q-9 (a)）。舊工具切換後只留 worker 動作和群請求，Q-3、Q-4 都搬完才退役（D-15；Q-7 (a)）。
+6. **tick 怎麼被叫起來（Q-8 (a)）**：有人用 aicomm 寄信給 PMO 時，寄件人立刻叫醒（現有行為）；沒人寄信時靠 PMO 自己排的 sidecar 定時 poke job。**要不要排、多久一次由 PMO 自己決定**，指令只提供開／調／停的介面 `pmo wake`（§3.6）。tick 每次被叫醒時，自己依 `tick.json` 與 team 狀態判斷哪些項目到期，不靠外部監看程式（D-14）。
+7. **第一階段不做的事**：
+   - **群請求不搬**（Q-4，本人定）：建群／封存請求的帳本、步驟機、重試 sweep 都留在 MyPMO；tick 只印 `[group-handoff]`／`[group-sweep-due]` 交接（Q-9 (a)），不解析、不推進群請求。
+   - worker team 的動作（ssh、轉發埠、worker 上的 sidecar）不搬，tick 只印 `[worker-action]`（Q-3 (a)）。
+   - 挑模型、MyPMO 的工單維護工具、boot-pmo 不搬（D-10、D-11）。
+   - 指令不自動建工單、派工、重開、換 provider（D-7）。
 
 ## 1. 實體圖
 
@@ -344,24 +349,27 @@ flowchart LR
 
 **`[idle]` 輪的成本**：每一次叫醒都是 PMO 模型的一輪推理（讀固定句 → 跑 `pmo tick` → 讀一行 `[idle]` → 結束）。一輪不大，但 tui 的對話會一直變長，次數多了會提早觸發壓縮；所以 SKILL.md 要寫明「看到 `[idle]` 就直接結束這一輪，不做其他工具呼叫」。額度用量 ≥70% 時，建議 PMO 把間隔拉長（照環境說明的額度規則）。
 
-## 4. 提議（待 Q 定案）
+## 4. 決定（定案）
 
-| # | 提議 | 理由 | 對應的 Q |
+本人 2026-11-02～03 定完 §6 的 Q-1～Q-9，下表全部是定案；對應的 Q 欄寫本人選的選項。
+
+| # | 決定 | 理由 | 對應的 Q |
 |---|---|---|---|
-| D-1 | skill ＝ `pmo` 指令（本 distribution）＋`skills/pmo/SKILL.md`；harness 只寫能力，環境說明對應到指令 | 沿用 angareion／aicomm 的「指令＋SKILL.md」先例，以及 harness v1 起「只寫能力」的規則 | Q-1、Q-5 |
+| D-1 | skill ＝ `pmo` 指令（本 distribution）＋`skills/pmo/SKILL.md`；harness 只寫能力，環境說明對應到指令 | 沿用 angareion／aicomm 的「指令＋SKILL.md」先例，以及 harness v1 起「只寫能力」的規則 | Q-1 (a)、Q-5 (a) |
 | D-2 | 核心（純函式）和外部的埠分開；測試用同名方法的假物件 | 現行工具已經這樣做，測試能原樣搬 | — |
 | D-3 | AI 名文法只用本 repo 的 `src/ainame` | 少一份副本；兩版的差異在 T-1 補齊（§5.1） | — |
 | D-4 | 設定和狀態的格式公開在本 repo，資料由環境變數指到本機；沒設就拒絕 | public repo 不放私人資料；不猜路徑 | — |
-| D-5 | 收件帳本以 Angareion 為準，本機是快取，可以 `rebuild`；`team` 和急件叫醒紀錄不可重建（§1.2） | 現在帳本是去重的單點 | Q-2 |
-| D-6 | 常駐的 watch 改成一輪的 `pmo tick`；`pmo tick` 是 PMO 身分唯一的讀信者 | sidecar 裡的 agent 不跑背景讀信迴圈；同一個身分只留一個讀者 | Q-8（已定） |
+| D-5 | 收件帳本以 Angareion 為準，本機是快取，可以 `rebuild`；`team` 和急件叫醒紀錄不可重建（§1.2） | 現在帳本是去重的單點 | Q-2 (a) |
+| D-6 | 常駐的 watch 改成一輪的 `pmo tick`；`pmo tick` 是 PMO 身分唯一的讀信者 | sidecar 裡的 agent 不跑背景讀信迴圈；同一個身分只留一個讀者 | Q-8 (a) |
 | D-7 | 指令只做機械步驟；建工單、派工、重開、換 provider 都由 PMO 判斷 | PMO harness 的職務分界 | — |
-| D-8 | 第一階段只支援本機 sidecar 的 team 的「動作」；worker team 的動作留在 MyPMO | worker 的傳輸和 MyLinuxPool 綁在一起 | Q-3 |
-| D-9 | 群請求第一階段留在 MyPMO；tick 把它分流出來交接 | 它和秘書側的介面逐字對齊、規模大，搬移風險高 | Q-4、Q-9 |
+| D-8 | 第一階段只支援本機 sidecar 的 team 的「動作」；worker team 的動作留在 MyPMO | worker 的傳輸和 MyLinuxPool 綁在一起 | Q-3 (a)（之後走 (c)） |
+| D-9 | 群請求第一階段留在 MyPMO；tick 把它分流出來交接 | 它和秘書側的介面逐字對齊、規模大，搬移風險高 | Q-4（第一階段不搬）、Q-9 (a) |
 | D-10 | 挑模型留在 MyPMO；`pmo open` 只收明寫的 provider／model 或 teams 設定的預設值 | 模型政策和外部挑選服務屬於私人設定 | — |
 | D-11 | MyPMO 的工單維護工具不搬 | 它們維護 MyPMO 自己的工單樹 | — |
 | D-12 | 印出去的字串一律過 `sanitize`；sidecar 回應只印已知欄位 | 沿用現行規則 | — |
-| D-13 | tick 讀到的每一則都要有去處：自己處理、`[msg]` 交給 PMO、或交給過渡工具；不得靜默丟掉 | 一個讀者推了游標，別人就看不到；交接必須明寫 | Q-9 |
-| D-14 | 叫醒＝寄件人立刻 poke（現有）＋PMO 自己排的 sidecar 定時 poke job；開／調／停走 `pmo wake`（§3.6），頻率由 PMO 決定，指令只給預設建議。到期判斷全在 tick 裡（`tick.json` 與 team 狀態），不設外部監看程式 | 本人 Q-8 選 (a)；把「什麼時候到期」留在唯一的讀者裡，叫醒來源只需要「叫」，不需要知道狀態 | Q-8（**本人已定**，2026-11-02） |
+| D-13 | tick 讀到的每一則都要有去處：自己處理、`[msg]` 交給 PMO、或交給過渡工具；不得靜默丟掉 | 一個讀者推了游標，別人就看不到；交接必須明寫 | Q-9 (a) |
+| D-14 | 叫醒＝寄件人立刻 poke（現有）＋PMO 自己排的 sidecar 定時 poke job；開／調／停走 `pmo wake`（§3.6），頻率由 PMO 決定，指令只給預設建議。到期判斷全在 tick 裡（`tick.json` 與 team 狀態），不設外部監看程式 | 本人 Q-8 選 (a)；把「什麼時候到期」留在唯一的讀者裡，叫醒來源只需要「叫」，不需要知道狀態 | Q-8 (a)（2026-11-02） |
+| D-15 | 切換（T-7）後，MyPMO 的 dispatch.py 只留 worker 動作和群請求，經 id 交接和 `pmo tick` 協作；Q-3、Q-4 都搬完才整支退役 | 第一階段不搬的部分仍要有人做；薄殼（轉呼叫 `pmo`）會多一層要維護的相容層 | Q-7 (a) |
 
 ## 5. 搬移切分
 
@@ -375,8 +383,8 @@ flowchart LR
 | 收件帳本的讀寫（原子寫入＋flock） | **原樣搬** | 加上 `rebuild`（新寫） |
 | 派工：`check`／`send`／`open`／`reply`／`poke`／`status`／`close` | **本機 sidecar 的路徑實質上是重寫**（現行工具裡 worker 和本機的分支交錯，抽出來等於重寫），測試照搬並改寫 | `reply` 經 aicomm（沿用 MyPMO#183） |
 | `watch` 常駐迴圈 | **重寫**成 `pmo tick` | 比對、看門狗的邏輯沿用；迴圈和退避拿掉 |
-| worker 傳輸（ssh、轉發埠、遠端標記） | **不搬**（第一階段） | 見 Q-3、Q-9 |
-| 群請求（含每輪的重試 sweep） | **不搬**（第一階段） | 誰驅動 sweep 見 Q-9 |
+| worker 傳輸（ssh、轉發埠、遠端標記） | **不搬**（第一階段） | Q-3 (a)；交接見 Q-9 (a) |
+| 群請求（含每輪的重試 sweep） | **不搬**（第一階段） | Q-4；sweep 由 PMO 看到 `[group-sweep-due]` 後跑（Q-9 (a)） |
 | 挑模型 | **不搬** | D-10 |
 | AI 名文法 | 改用本 repo 的 `src/ainame` | 現行工具用到一個本 repo 沒有的「缺 team 段的提示」函式；T-1 要在 `src/ainame` 補上（附測試向量）或在 pmo 內實作，並列出兩版其他差異 |
 | boot-pmo（開 PMO 的啟動程式） | **不搬** | 屬於 Mac 環境的啟動方 |
@@ -386,7 +394,9 @@ flowchart LR
 
 每個 PR 都要經架構師結構審。
 
-1. **T-1 骨架與 schema**：`src/pmo/`（套件名在 Q-5 定）、設定和狀態的 schema 與驗證（含 PMO 身分、秘書身分、派工 channel）、四個埠的介面和假物件、`sanitize`、ainame 的差異補齊。不含指令行為。
+**工單**（Q-6：#110 定為 b，2026-11-03）：T-1～T-6 各開一張 #110 的子單（sub-issue）；T-7 是 PMO 自己的切換單。#110 的 label 改成 `層級:b`、建子單，都**等本設計 PR merge 之後**再做（由 PM／PMO 依工單規則做；設計 PR 不動 label、不開單）。
+
+1. **T-1 骨架與 schema**：`src/pmo/`（Q-5 (a)）、設定和狀態的 schema 與驗證（含 PMO 身分、秘書身分、派工 channel）、四個埠的介面和假物件、`sanitize`、ainame 的差異補齊。不含指令行為。
 2. **T-2 收件核心**：樣板解析、分類、去重、補發 ack、急件、叫人、決定題、team 訊息比對、帳本讀寫；`pmo inbox read|list|ack|report|decision-send`。搬測試。**合併後可以用 `pmo inbox read` 驗**（不必等 tick）。
 3. **T-3 帳本重建**：`pmo inbox rebuild`（新寫）。先驗 `angareion log` 能涵蓋列舉和 `--thread`；測試「刪掉帳本 → 重建 → 補發的 ack 沿用重建出來的 issue／schedule、不重開工單」。
 4. **T-4a 派工（一）**：`check`、`send`。`send` 的 `[wake-hint]` 要測：`wake.every` 比 10m 長、或是 `null` 時印；10m 以下不印；`tick.json` 不存在時視為 `null`（`tick.json` 的 schema 在 T-1）。
@@ -396,19 +406,21 @@ flowchart LR
 8. **T-6 說明**：`skills/pmo/SKILL.md`、環境說明範本（**只是範本，不改任何人正在用的環境說明**）；更新 overview／decisions。**PMO harness 的新版本不在這裡發**。
 9. **T-7 切換**（PMO 自己的單；MyPMO 一側和本 repo 一側同步）：PMO harness 的新版本（能力段指向 `pmo`，含 §3.6 的開機步驟）、環境說明改用 `pmo`、停舊的 watch、開始用 `pmo tick`、PMO 用 `pmo wake set` 排定時叫醒（間隔由 PMO 定）、MyPMO 依 Q-9 改成交接模式。三件事在同一個切換窗口做，避免「harness 叫 PMO 用 `pmo`，但設定還沒好」或「兩個讀者」。
 
-## 6. 待本人決定的點
+## 6. 本人的決定（全部已定）
 
-| # | 問題 | 選項 | 建議 |
+選項保留供日後追溯（Q-6 的選項整理成 b／c 兩項）；「決定」欄是本人選的選項與日期（#110 留言；MyPMO 決定檔 PR #270）。
+
+| # | 問題 | 選項 | 決定 |
 |---|---|---|---|
-| Q-1 | 「Atelier 的 skill」落在哪裡 | (a) 指令＋`skills/pmo/SKILL.md`，harness 只寫能力；(b) Atelier 新增一種「skill」檔（`atelier/skills/<名>/v<N>.md`，版本不可變），由 `atelier show` 讀；(c) 寫進 PMO harness 本文 | **(a)**：已有先例、不用擴充 Atelier；(b) 等第二個 skill 出現時再評估 |
-| Q-2 | 收件帳本以哪邊為準 | (a) Angareion 為準、本機是快取、可重建（`team` 與急件叫醒紀錄除外）；(b) 照現在，本機帳本永久保留、不可刪 | **(a)**，接受「重建後 `team` 留空、急件可能多叫醒一次」 |
-| Q-3 | worker team 的動作什麼時候搬 | (a) 第一階段不搬，交給過渡工具（Q-9）；(b) 一起搬，把 ssh／轉發埠做成第五個埠；(c) 等 MyLinuxPool 提供自己的 sidecar 存取方式再搬 | **(a)，之後走 (c)** |
-| Q-4 | 群請求什麼時候搬 | (a) 第一階段不搬（交接方式見 Q-9）；(b) 一起搬 | **(a)** |
-| Q-5 | 指令名和套件名 | (a) `pmo`（套件 `src/pmo`）；(b) `atelier pmo …`；(c) 其他名字 | **(a)**：atelier 指令目前只讀 harness，混進派工會變成兩種職責 |
-| Q-6 | #110 的層級 | 現在標 c；新增指令和套件屬於「功能組新增」，依工單規則可能是 b | 請本人定；若改 b，T-1～T-6 掛成子單，T-7 是 PMO 自己的切換單 |
-| Q-7 | 舊工具的去留 | (a) 切換後 MyPMO 的 dispatch.py 只留 worker 動作和群請求；(b) 改成轉呼叫 `pmo` 的薄殼；(c) 整支退役 | **(a)**，等 Q-3／Q-4 都搬完再退役 |
-| Q-8 | tick 由誰在什麼時候叫起來（PMO 現在已經由 sidecar 開，見 MyPMO 的 boot-pmo 說明；問題是「沒人寄信時」的定時工作怎麼觸發） | (a) sidecar 定時 poke job；(b) 不是 agent 的小監看程式，只在有事時 poke；(c) PMO 自己在背景跑常駐監看 | **已定（本人 2026-11-02）：「基本上是 (a)」**。以 sidecar 定時 poke 為主；要不要叫、多久叫一次由 PMO 自己決定（設計只給介面 `pmo wake` 和預設建議，§3.6）；有人用 aicomm 叫 PMO 時立刻叫醒（現有行為）。(b)、(c) 不採；原本 (b) 的 `pmo watch`、`watch.json`、T-8 已刪。**請本人知悉**：`pmo wake set` 只收 2m～24h，這是工具設的邊界（防止把秒數誤寫成分鐘）；要更久就關掉（`pmo wake off`），只靠寄件人叫醒 |
-| Q-9 | tick 和過渡工具（MyPMO 的群請求、worker team 動作）怎麼交接 | (a) **id 交接**：tick 不處理、印 `[group-handoff] ‹id›`／`[worker-action] ‹team› ‹動作›`；MyPMO 的工具改成「給 id，用 `angareion log --around ‹id›` 取原信」（唯讀、不動游標）。**重試的觸發**：tick 在自己的狀態裡記下交接出去的 id（不讀 MyPMO 的帳本），每隔固定時間（預設 10 分鐘；在**下一次被叫醒的那一輪**判斷是否到期，最多每輪一次）印 `[group-sweep-due] ‹id…›`，PMO 看到就跑 MyPMO 的 sweep；MyPMO 報結案後，PMO 用 `pmo inbox handoff-close ‹id›` 停止提醒。（另一個做法是過渡工具自己排定時 job；我不建議，因為 job 的起停又多一套要管的東西。）team 狀態兩邊共用同一個目錄與 schema（不認得的欄位保留）。(b) tick 直接 import MyPMO 的群請求程式（違反「不依賴 MyPMO」）。(c) 先不切換：Q-3、Q-4 都搬完才做 T-7 | **(a)**：讀者仍然只有一個，MyPMO 只改入口；若本人不想在過渡期多一套交接，就選 (c)，代價是切換延後 |
+| Q-1 | 「Atelier 的 skill」落在哪裡 | (a) 指令＋`skills/pmo/SKILL.md`，harness 只寫能力；(b) Atelier 新增一種「skill」檔（`atelier/skills/<名>/v<N>.md`，版本不可變），由 `atelier show` 讀；(c) 寫進 PMO harness 本文 | **已定 (a)**（2026-11-03）。(b) 等第二個 skill 出現時再評估（D-1） |
+| Q-2 | 收件帳本以哪邊為準 | (a) Angareion 為準、本機是快取、可重建（`team` 與急件叫醒紀錄除外）；(b) 照現在，本機帳本永久保留、不可刪 | **已定 (a)**（2026-11-03），接受「重建後 `team` 留空、急件可能多叫醒一次」（D-5） |
+| Q-3 | worker team 的動作什麼時候搬 | (a) 第一階段不搬，交給過渡工具（Q-9）；(b) 一起搬，把 ssh／轉發埠做成第五個埠；(c) 等 MyLinuxPool 提供自己的 sidecar 存取方式再搬 | **已定 (a)**（2026-11-03），之後走 (c)（D-8） |
+| Q-4 | 群請求什麼時候搬 | (a) 第一階段不搬（交接方式見 Q-9）；(b) 一起搬 | **已定：第一階段不搬**（2026-11-03）。範圍見 §0 第 7 點（D-9） |
+| Q-5 | 指令名和套件名 | (a) `pmo`（套件 `src/pmo`）；(b) `atelier pmo …`；(c) 其他名字 | **已定 (a)**（2026-11-03）。atelier 指令維持只讀 harness，不混進派工（D-1） |
+| Q-6 | #110 的層級 | (b) 新增指令和套件屬於「功能組新增」；(c) 維持現在的 c | **已定 b**（2026-11-03），放在 MyAiStorage 的方向不變。T-1～T-6 掛成子單，T-7 是 PMO 的切換單；label 與子單等本設計 PR merge 後再做（§5.2） |
+| Q-7 | 舊工具的去留 | (a) 切換後 MyPMO 的 dispatch.py 只留 worker 動作和群請求；(b) 改成轉呼叫 `pmo` 的薄殼；(c) 整支退役 | **已定 (a)**（2026-11-03），等 Q-3／Q-4 都搬完再退役（D-15） |
+| Q-8 | tick 由誰在什麼時候叫起來（PMO 已經由 sidecar 開，見 MyPMO 的 boot-pmo 說明；問題是「沒人寄信時」的定時工作怎麼觸發） | (a) sidecar 定時 poke job；(b) 不是 agent 的小監看程式，只在有事時 poke；(c) PMO 自己在背景跑常駐監看 | **已定 (a)**（2026-11-02，本人：「基本上是 (a)」）。以 sidecar 定時 poke 為主；要不要叫、多久叫一次由 PMO 自己決定（介面 `pmo wake` 和預設建議，§3.6）；有人用 aicomm 叫 PMO 時立刻叫醒（現有行為）。(b)、(c) 不採。`pmo wake set` 只收 2m～24h，這是工具設的邊界（防止把秒數誤寫成分鐘）；要更久就 `pmo wake off`，只靠寄件人叫醒（D-14） |
+| Q-9 | tick 和過渡工具（MyPMO 的群請求、worker team 動作）怎麼交接 | (a) **id 交接**：tick 不處理、印 `[group-handoff] ‹id›`／`[worker-action] ‹team› ‹動作›`；MyPMO 的工具改成「給 id，用 `angareion log --around ‹id›` 取原信」（唯讀、不動游標）。重試的觸發：tick 在自己的狀態裡記下交接出去的 id（不讀 MyPMO 的帳本），每隔固定時間（預設 10 分鐘；在下一次被叫醒的那一輪判斷是否到期，最多每輪一次）印 `[group-sweep-due] ‹id…›`，PMO 看到就跑 MyPMO 的 sweep；MyPMO 報結案後，PMO 用 `pmo inbox handoff-close ‹id›` 停止提醒。team 狀態兩邊共用同一個目錄與 schema（不認得的欄位保留）。(b) tick 直接 import MyPMO 的群請求程式；(c) 先不切換：Q-3、Q-4 都搬完才做 T-7 | **已定 (a)**（2026-11-03）。讀者仍然只有一個，MyPMO 只改入口（D-13） |
 
 ## 7. 風險
 
@@ -442,8 +454,8 @@ flowchart LR
 3. **時序**：§2.1～2.3 是否涵蓋收件、去重、補發 ack、派工、team PM 的「收到」、回報、被叫醒、exit 2、限流、no candidate、waiting-quota、NEED_REOPEN？有沒有一條路會讓同一個身分出現兩個讀者？
 4. **介面**：§3.2 每個指令的輸入、輸出、結束碼是否完整、一致？§3.2.1 的事件表是否涵蓋現行工具的所有標籤？有沒有指令越過 D-7？
 5. **依賴方向**：skill 只透過四個埠碰外部，核心不碰外部？有沒有依賴 MyPMO 的程式？
-6. **搬移切分**：§5.1 的「原樣搬／重寫／不搬」是否和 MyPMO 的實際模組對得上？T-1～T-7 是否各自可以單獨 merge，而且 merge 後不會留下壞掉的中間狀態？
-7. **待本人決定的點**：Q-1～Q-9 的選項是否互斥、完整？建議是否有理由？
+6. **搬移切分**：§5.1 的「原樣搬／重寫／不搬」是否和 MyPMO 的實際模組對得上？T-1～T-7 是否各自可以單獨 merge，而且 merge 後不會留下壞掉的中間狀態？（T-1～T-6 是 #110 的子單，T-7 是 PMO 的切換單；Q-6）
+7. **本人的決定**：§6 的 Q-1～Q-9 是否都已反映到 §0、§4 的 D-、§5.2 的工單切分？
 8. **public repo 的界線**：note 裡有沒有私人資訊，或不必要地指名其他專案的內部細節？
 9. **叫醒（Q-8 (a)）**：§3.6 的 `pmo wake` 是否只做機械步驟、頻率完全留給 PMO？「到期才處理」是否不依賴叫醒來源（任何一輪都只處理到期的、處理完往後推、不補跑）？job 被 close、sidecar 重啟、PMO 換 id、PMO 卡在權限詢問這幾種情況，是否都有被看見的路？
 
@@ -525,3 +537,16 @@ Q-1～Q-7、Q-9 的選項與建議都沒改（Q-6 只拿掉 T-8 的括號）。
 | W6-1 `[wake-error]` 的去重沒有欄位可用，新舊兩種規則並存 | **真**：schema 只有 `error_reported_run`；§2.3 的圖、事件表、§3.6 表的前半還是「同一個 `last_run`」；失敗期間每次到點 `last_run` 都會前進（c411b02 `core.py`：先設 `last_run` 才執行），只比 `last_run` 會洗版 | 照審查建議：schema 改成 `error_reported`（job id → 碼）；規則統一為「碼和記錄的不同才印，`last_error` 變回 `null` 時清掉記錄」，不再提 `last_run`；§2.3 的圖、§3.2.1、§3.4、§3.6、T-5 一起改，T-5 加「清掉之後同一個碼再出現要再印」 |
 | N6-1 先打 HTTP 再寫，沒寫要在鎖內重讀 | 同意 | §3.4 明寫「拿鎖後重讀，再套上改動」；T-5 加「`wake set` 和 tick 交錯時，`wake.every` 是新值」 |
 | N6-2 「自己的 job」在 off／show 不一致 | 同意 | §3.6 把定義集中寫在一處（固定句等於目前的設定）；set、off、tick 只動或只看自己的 job，其他 job 只在 show 列出；寫明改固定句的順序；T-5 加「`wake off` 不刪句子不同的 job」 |
+
+### 第 8 輪（本人定案寫回：Q-1～Q-9 全部已定，2026-11-02～03）
+
+| 改動 | 位置 |
+|---|---|
+| Q 表改成「本人的決定（全部已定）」：「建議」欄改成「決定」，寫本人選的選項與日期；刪掉「若本人選…」「請本人定」之類的句子 | §6 |
+| Q-6 定 b：T-1～T-6 掛成 #110 的子單、T-7 是 PMO 的切換單；label 改 b 與建子單等本設計 PR merge 後再做 | §5.2 開頭、§6 Q-6、§9 第 6 條 |
+| Q-4（群請求第一階段不搬）寫進範圍與不做的事 | §0 第 7 點（新增）、§5.1 |
+| D- 由「提議」改成「定案」；「對應的 Q」欄寫選定的選項；新增 D-15（Q-7 (a)：舊工具只留 worker 動作和群請求） | 開頭、§0、§4 |
+| 交叉引用：T-1 套件名、§5.1 的 Q 引用、§9 第 7 條改成核對決定是否反映 | §5.1、§5.2、§9 |
+| overview 的「規劃中」一節改成定案；decisions 刪 P-11，note 的 D- 搬成已決 D-15～D-20 | `docs/architecture/overview.md`、`docs/architecture/decisions.md` |
+
+前面各輪的修訂紀錄保留原文（含當時「提議」「待本人」的措辭），不改。

@@ -20,6 +20,14 @@
 | D-12 | 模組搬家時，被測試當接縫替換的名字，用「cli 重新匯出，cli 內部用裸名呼叫」保住；**不留舊名 alias**（替換 alias 不會影響實際呼叫） | 不讓測試悄悄地沒有驗到東西 | 架構師（Sonnet 審過） | #341 |
 | D-13 | raw 載體的「有檔用檔、否則 bytes」只由 `Exported.raw_digest()`／`raw_source()` 回答，turns 的「有就用、否則解析」只由 `turns_of` 回答；呼叫方不再自己寫判斷梯子 | 收掉 cli 的四處重複梯子（121-C） | 架構師（PM 同意） | #340 |
 | D-14 | claude raw 的封包格式（常數、writer、reader、aux 串流編碼、`PackedRaw`）放在 `agents/claude_raw`，它只依賴 `agents.base`；一趟式匯出 `_stream_raw` 和 `_Facts`／`_accumulate` 留在 claude.py，當作「解析加格式」的組合者 | `_stream_raw` 的折疊會用到整套閱讀版解析，搬過去會讓格式模組帶著解析；改成注入又不是純搬移 | 架構師（Sonnet 審過 design note；實作 #342） | #342（design-notes/121-claude-raw.md） |
+| D-15 | PMO skill ＝ `pmo` 指令（套件 `src/pmo`，本 distribution）＋`skills/pmo/SKILL.md`；PMO harness 只寫能力，環境說明對應到指令 | 沿用 angareion／aicomm 的「指令＋SKILL.md」先例；atelier 指令維持只讀 harness | 本人（經 PMO；#110 留言、MyPMO 決定檔 PR #270），2026-11-03（Q-1 (a)、Q-5 (a)） | #110（design-notes/110-pmo-skill.md） note D-1 |
+| D-16 | `pmo` 的核心是純函式，只依賴 `ainame`；外部只經四個埠（Angareion、aicomm、sidecar、GitHub），不 import agora／atelier／aicomm／angareion 的模組，也不依賴 MyPMO 的程式；印出去的字串過 `sanitize` | 測試用同名方法的假物件取代埠；public repo 不洩漏內文與憑證 | 架構師（Sonnet 審過；本人定案） | #110（design-notes/110-pmo-skill.md） note D-2、D-3、D-12 |
+| D-17 | 設定與狀態的格式（teams 設定、team 狀態、收件帳本、`tick.json`）公開在本 repo，資料由 `PMO_SKILL_CONFIG`／`PMO_SKILL_STATE_DIR` 指到本機，沒設就拒絕；收件帳本以 Angareion 為準、本機是快取、可 `rebuild`（`team` 與急件叫醒紀錄不可重建） | public repo 不放私人資料；帳本不再是去重的單點 | 本人（經 PMO；#110 留言、MyPMO 決定檔 PR #270），2026-11-03（Q-2 (a)） | #110（design-notes/110-pmo-skill.md） note D-4、D-5 |
+| D-18 | `pmo tick` 是一輪、也是 PMO 身分唯一的讀信者；讀到的每一則都要有去處（自己處理、`[msg]` 交給 PMO、或交接給過渡工具）；指令只做機械步驟，建工單、派工、重開、換 provider 由 PMO 判斷 | 同一個身分只留一個讀者；職務分界 | 本人（經 PMO；#110 留言、MyPMO 決定檔 PR #270）（Q-9 (a)） | #110（design-notes/110-pmo-skill.md） note D-6、D-7、D-13 |
+| D-19 | 叫醒＝寄件人立刻 poke＋PMO 用 `pmo wake set\|off\|show` 自己排的 sidecar 定時 poke job（頻率由 PMO 定）；到期判斷全在 tick 裡，不設外部監看程式 | 叫醒來源只需要「叫」，到期狀態只在唯一的讀者裡 | 本人（經 PMO；#110 留言、MyPMO 決定檔 PR #270），2026-11-02（Q-8 (a)） | #110（design-notes/110-pmo-skill.md） note D-14、§3.6 |
+| D-20 | 第一階段只搬本機 sidecar 的派工；群請求、worker team 的動作、挑模型、MyPMO 的工單維護工具留在 MyPMO，和 tick 用 id 交接；切換後 MyPMO 的 dispatch.py 只留 worker 動作和群請求，兩者都搬完才退役 | 群請求和 worker 傳輸搬移風險高、和其他 repo 綁在一起；讀者仍只有一個 | 本人（經 PMO；#110 留言、MyPMO 決定檔 PR #270），2026-11-03（Q-3 (a)、Q-4 不搬、Q-7 (a)、Q-9 (a)） | #110（design-notes/110-pmo-skill.md） note D-8～D-11、D-15 |
+
+#110 的 note 有自己的 D- 編號，上表 D-15～D-20 的出處欄寫成「note D-x」。
 
 **流程上的已決**（本人／PMO，10-31～11-01）：每個專案一位常駐的架構師；核准者模式和作者模式並存，預設是核准者模式；衝突依問題種類裁決（形狀和一致性歸架構師，語意、需求、行為、品質歸 PM）；架構師可以 commit 設計路徑，由 PM merge（AGENTS.md）。
 
@@ -37,4 +45,3 @@
 | P-8 | #341 留下的相容層：cli 重新匯出 `RoundChildDead`、`StartChildDead`、`_reap_group`、`_round_timeout`、`_start_payload`、`CONTINUE_LOG`，round_child 重新匯出 `state_of`。日後把測試改讀 continue_shell，就可以刪掉；刪 `CONTINUE_LOG` 的重新匯出時，cli 自用的三處（`_LogWriter` 等）要一起改成 `continue_shell.CONTINUE_LOG`，或改由別處持有 | 架構師提、PM 排程 | REPORT-341-design-rev 發現 7 |
 | P-9 | 寫進 header 的 `source.host` 直接取 `socket.gethostname()`，沒有可覆寫的來源；golden 測試只能用 monkeypatch 加子行程的 sitecustomize 釘住。要不要給它一個可覆寫的來源（例如環境變數） | 架構師提、PM 排程（不急） | #334 審查的低項 |
 | P-10 | #342 留下的相容層：claude.py 重新匯出 `FORMAT`，claude.py 自己不用，只為了 6 處測試讀 `C.FORMAT`。日後把測試改讀 `claude_raw.FORMAT`，就可以刪掉 | 架構師提、PM 排程 | REPORT-342-design-rev 低 2 |
-| P-11 | PMO 的收件與派工搬成 Atelier 的 PMO skill（**目前只是提議**）：skill 的落點、收件帳本以 Angareion 為準並可部分重建、worker 動作和群請求的搬移時機、指令名、#110 的層級、舊工具的去留、tick 的觸發方式、tick 和過渡工具的交接（note Q-1～Q-9）。其中 Q-8（tick 的觸發）本人 2026-11-02 已定：採 sidecar 定時 poke job，要不要叫、多久叫由 PMO 用 `pmo wake` 自己決定，有人寄信時寄件人立刻叫醒（note D-14）。note 的其他 D- 都是提議，整份設計定案後才搬進上面的已決 | 本人（經 PMO） | #110（design-notes/110-pmo-skill.md） |
