@@ -1,5 +1,3 @@
-anthropic/claude-opus-5-5
-
 # #110 設計筆記：PMO 的收件與派工搬成 Atelier 的 PMO skill
 
 - 作者：專案架構師 myaistorage-arch-m1-1。作者模式：由非作者（Sonnet）審過，再交 PMO 帶去給本人看。**只設計、以介面為主，不實作。**
@@ -9,7 +7,7 @@ anthropic/claude-opus-5-5
   - 「PMO 工具」：現在 MyPMO 的 `pmo/dispatch.py`＋`pmo/inbox.py`（以及它們 import 的 `groups.py`、`ainame.py`）。
   - 「PMO skill」：本設計要做的東西。
   - 「秘書側」：本人透過秘書身分寄信、收回報的那一端（派工信、決定題、群請求的對方）。
-- **§4 的 D- 都是提議**，要等 §6 的 Q- 由本人定案後才成立。
+- **§4 的 D- 都是提議**，要等 §6 的 Q- 由本人定案後才成立。例外：Q-8 本人已定（2026-11-02，採 (a)），對應的 D-14 方向已定，細節仍照本 note 審。
 
 ## 0. 先講結論（提議）
 
@@ -18,6 +16,7 @@ anthropic/claude-opus-5-5
 3. **收件帳本大部分可以從 Angareion 重建**：PMO 的機械 ack、叫人 ack、回報都帶 `in_reply_to`，所以收件項目的主要欄位能重建；`team`、急件叫醒紀錄、決定題重建不出來（§1.2；D-5／Q-2）。
 4. **「讀信」只有一個讀者：`pmo tick`**。它把讀到的每一則都交代清楚：自己處理的（秘書派工、team PM 的「收到」）、交給 PMO 看的（`[msg]` 全文）、交給過渡工具的（群請求、worker team 的動作）（D-6、D-13／Q-9）。
 5. **第一階段只搬本機 sidecar 的派工**。worker 的傳輸、群請求、挑模型、MyPMO 的工單維護工具先留在 MyPMO。和 MyPMO 的交接方式列為 Q-9（D-8～D-11）。
+6. **tick 怎麼被叫起來（Q-8，本人已定 (a)）**：有人用 aicomm 寄信給 PMO 時，寄件人立刻叫醒（現有行為）；沒人寄信時靠 PMO 自己排的 sidecar 定時 poke job。**要不要排、多久一次由 PMO 自己決定**，指令只提供開／調／停的介面 `pmo wake`（§3.6）。tick 每次被叫醒時，自己依 `tick.json` 與 team 狀態判斷哪些項目到期，不靠外部監看程式（D-14）。
 
 ## 1. 實體圖
 
@@ -71,7 +70,7 @@ flowchart LR
 | team | 一個專案的一隊：PM 的 AI 名、channel、sidecar 位址、模式（互動版／生活模式） | **本機 teams 設定**（私人）；格式由本 repo 的 schema 定 | teams 設定檔 |
 | 派工單 | 一次派工：工單、指示信 id、後端時刻、`--since`、team PM 回「收到」的時刻（`ack_at`）、看門狗的時刻 | **本機 team 狀態** | team 狀態檔 |
 | agent 席位 | sidecar 上的一個 agent | **sidecar**（`GET /agents`） | team 狀態的 `state`／`exit` |
-| 定時叫醒 | sidecar 的 poke job | **sidecar**（`/jobs`） | 現在由 watch 常駐迴圈代替 |
+| 定時叫醒 | sidecar 的 poke job（PMO 用 `pmo wake` 自己開、調、停；§3.6） | **sidecar**（`/jobs`；只在記憶體，sidecar 重啟就消失）。PMO「想要的頻率」記在 `tick.json` 的 `wake`，用來發現 job 不見了 | 現在由 watch 常駐迴圈代替 |
 | 職務規矩 | PMO 的 harness | **Atelier** | （不變） |
 | 模型挑選 | 依角色、作者、額度挑 `(provider, model)` | 第一階段留在 MyPMO（D-10） | pick_model |
 | 群請求 | 秘書側寄來的建群／封存請求的帳本與步驟機 | 第一階段留在 MyPMO（D-9／Q-9） | groups |
@@ -138,22 +137,23 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant X as 寄件人（秘書／team PM）
-    participant WK as 叫醒來源（見 Q-8）
     participant SC as sidecar
     participant P as PMO
     participant K as pmo tick
-    X->>SC: POST /agents/‹PMO›/poke（寄件人叫醒）
-    WK->>SC: 定時或有事件時 poke（PMO 自己安排）
+    Note over P,SC: 事先：PMO 用 pmo wake set ‹every› 排定時 poke job（§3.6；要不要排、多久由 PMO 定）
+    X->>SC: aicomm send → POST /agents/‹PMO›/poke（寄件人立刻叫醒）
+    SC->>SC: 定時 poke job 到點（固定句，不中斷）
     SC->>P: 叫醒
     P->>K: pmo tick
-    K->>K: ① 收信一輪（含 team 訊息比對、寫 ack_at）<br/>② GET /agents 比對 team 狀態<br/>③ 看門狗（派工後 10 分鐘沒有「收到」）
-    K-->>P: 事件行；沒事就一行 [idle]
-    P->>P: 依事件處理；沒事就結束這一輪
+    K->>K: ① 收信一輪（含 team 訊息比對、寫 ack_at）<br/>② GET /agents 比對本機 team 狀態<br/>③ 到期判斷：看門狗、交接提醒、worker 比對<br/>④ GET /jobs 看自己的叫醒 job 還在不在
+    K-->>P: 事件行；沒事就一行 [idle]（附最早的到期時刻）
+    P->>P: 依事件處理；需要時用 pmo wake 調頻率；沒事就結束這一輪
 ```
 
 - `pmo tick` 是**一輪**：重複叫醒只會多跑一輪。同一批信不會讀兩次（`read` 推游標）；看門狗的 poke 只做一次（team 狀態記了時刻）。
+- **到期才處理**：tick 不知道、也不管自己是被誰叫醒的（寄件人、定時 job、PMO 自己手動跑）。每一輪都拿「現在」去比 team 狀態與 `tick.json` 裡記的時刻，只處理已經到期的項目，處理完把下一次到期時刻往後推（§3.4）。所以叫醒頻率只影響「到期之後多久才被看到」，不影響「會不會重複處理」。
+- **延遲的上限**：到期項目最晚在「到期時刻＋叫醒間隔」被看到（例：看門狗 10 分鐘、間隔 10 分鐘 → 最晚 20 分鐘）；寄件人叫醒的信不受間隔影響。PMO 關掉定時叫醒時，到期項目要等下一封信才會被看到。
 - 只有用 `--since` 補讀時同一則信會再出現；這時派工信照現行語意補發 ack（§1.2），叫人信和急件靠帳本去重。
-- 「定時」怎麼來，以及它的成本，見 Q-8。
 
 ### 2.3 失敗的分支
 
@@ -225,7 +225,9 @@ flowchart LR
 | `pmo status [‹team›] [--json]` | | 每個 team PM 的 state／exit／session，以及 PMO 自己排的 job | 0／2 |
 | `pmo close ‹team› [--timeout 秒]` | | 是否已關、刪了哪些 job | 0／2 |
 | `pmo inbox handoff-close ‹id›` | | 把一筆交接出去的群請求標成已結案，之後不再印 `[group-sweep-due]` | 0；1 查無 id；2 tick 狀態檔壞或寫不進去 |
-| `pmo watch --poke-only`（**只在 Q-8 選 (b) 時才有**） | （常駐；不讀信） | stderr 診斷；stdout 不印 | 由啟動方管理的常駐行程；收到 SIGTERM 結束為 0 |
+| `pmo wake set ‹every›` | 間隔（`5m`、`2h` 這類；規則見 §3.6） | `[wake] every=‹…› job=‹id› next=‹時刻›` | 0；1 間隔格式錯；2 PMO 不在 sidecar、sidecar 拒絕或連不上、tick 狀態檔壞 |
+| `pmo wake off` | （無） | `[wake] off`，以及刪掉的 job id | 0；2 同上 |
+| `pmo wake show [--json]` | （無） | 自己的叫醒 job（id、every、next_run_at、last_run、last_error 的碼）、`tick.json` 記的想要的頻率、`last_tick_at`、最早的到期時刻（唯讀） | 0；2 同上 |
 
 **送信前的身分守門**：所有會寄信的指令（ack、report、decision-send、send、reply），送之前檢查目前的身分（`ANGAREION_IDENTITY`）等於設定裡的 PMO 身分，不符就拒送（exit 2）。現行工具也有這道守門；公開版把身分改由設定給，守門照樣保留（C-3）。
 
@@ -255,11 +257,13 @@ flowchart LR
 | `[no-candidate]` | team PM 因 no candidate 結束 | **新增** |
 | `[waiting-quota]` | team PM 在等額度（只印一次） | **新增** |
 | `[worker-action] ‹team› ‹動作›` | worker team 需要由過渡工具做的動作（看門狗要 poke、要比對 sidecar 狀態） | **新增**（Q-9） |
-| `[idle]` | 這一輪什麼都沒有 | **新增** |
+| `[wake-missing] every=‹…›` | `tick.json` 記著想要定時叫醒，但 sidecar 上找不到自己的叫醒 job（sidecar 重啟過）。同一次消失只印一次 | **新增**（Q-8） |
+| `[wake-error] ‹job id› ‹碼›` | 自己的叫醒 job 的 `last_error` 不是空的（例：`agent_not_running`、`agent_awaiting_answer`）。同一個 `last_run` 只印一次 | **新增**（Q-8） |
+| `[idle] [next-due=‹時刻›]` | 這一輪什麼都沒有；有未到期的項目時附上最早的到期時刻，給 PMO 決定間隔用 | **新增** |
 
 **tick 對 worker team 的邊界**（第一階段，D-8；頻率記在 §3.4 的 `tick.json`）：
 - **做**：team 訊息比對。worker team 的 PM 回「收到 ‹工單›」照樣寫 `ack_at`、印 `[ack]`（只動 team 狀態，不需要傳輸）；看門狗的到期判斷也照算。
-- **不做**：任何要碰 worker 上 sidecar 的事（`GET /agents`、poke、open、close）。到期或需要比對狀態時印 `[worker-action] ‹team› watchdog-poke`／`[worker-action] ‹team› poll`，由 PMO 用過渡工具做。`poll` 對每個 worker team 最多每 10 分鐘印一次（`worker_poll.next_due_at`），不是每輪都印。
+- **不做**：任何要碰 worker 上 sidecar 的事（`GET /agents`、poke、open、close）。到期或需要比對狀態時印 `[worker-action] ‹team› watchdog-poke`／`[worker-action] ‹team› poll`，由 PMO 用過渡工具做。`poll` 只在**被叫醒的那一輪**判斷是否到期（`worker_poll.next_due_at`，預設間隔 10 分鐘），到期才印、印完往後推；不是每輪都印。
 
 ### 3.3 skill 依賴的介面（契約以各自的文件為準）
 
@@ -276,31 +280,62 @@ flowchart LR
 ### 3.4 公開的 schema（本 repo 定義，資料留在本機）
 
 - **teams 設定**：
-  - 全域：PMO 身分、秘書身分、派工 channel（現行工具裡寫死的三個常數，改由設定給）；
+  - 全域：PMO 身分、秘書身分、派工 channel（現行工具裡寫死的三個常數，改由設定給）；PMO 自己所在的 sidecar 位址（選填；沒有就表示 PMO 不在 sidecar，`pmo wake` 回 exit 2、tick 不查 `/jobs`）；叫醒固定句（選填，預設「定時叫醒：請跑 pmo tick」）；
   - 每個 team：key（`<專案>-<team 代號>`）、PM 的 AI 名、channel（`team-<專案>-<team 代號>`）、sidecar 位址或「worker」標記、`tui`／`life`／`retired` 三個布林、預設的 provider／model（選填）。
 
   驗證規則照現行工具（AI 名用 ainame 驗、key、名字、channel 一致、不重複）。
 - **team 狀態**：照 MyPMO 現在 `pmo/state/README.md` 的欄位。**不認得的欄位原樣保留**（過渡期 worker team 的欄位由 MyPMO 寫，見 Q-9）。
 - **收件帳本**：`version`、`items`（以工作 ID 為 key）、`notified`；新增 `rebuilt_at`。
-- **tick 狀態**（`<狀態目錄>/tick.json`，tick 和 `handoff-close` 寫，監看程式只讀）：
+- **tick 狀態**（`<狀態目錄>/tick.json`，由 tick、`handoff-close`、`pmo wake set|off` 寫）：
   - `version`；
-  - `last_tick_at`：tick 每輪結束時寫；
+  - `last_tick_at`：tick 每輪結束時寫。用途：`pmo wake show` 顯示它；tick 開始時若「現在 − `last_tick_at`」超過想要的間隔的 3 倍，印一行 `[warn] 上次 tick 在 ‹時刻›`（叫醒可能沒在運作）；
   - `handoffs`：以群請求 id 為 key，值是 `handed_at`、`last_reminded_at`、`next_due_at`；`handoff-close` 刪掉該筆；
-  - `worker_poll`：以 worker team key 為 key，值是 `last_reported_at`、`next_due_at`。
+  - `worker_poll`：以 worker team key 為 key，值是 `last_reported_at`、`next_due_at`；
+  - `wake`：`every`（PMO 想要的間隔；`null`＝PMO 選擇不排）、`set_at`、`missing_reported_at`、`error_reported_run`（上次已印 `[wake-error]` 的 `last_run`）。只有 `pmo wake set|off` 改 `every`；tick 只改兩個「已印過」的欄位。
 
-  寫入走同目錄暫存檔＋`os.replace`，並用 `tick.json.lock` 的 flock 包住「讀、改、寫」。**檔不存在**：tick 視為空的並建立；監看程式視為「還沒有 tick 跑過」（見 §3.5 首次啟動）。**檔壞掉**：tick 和 `handoff-close` 回 exit 2、印 `[要本人處理]`；監看程式在 stderr 記一行，不因為這份檔 poke，下一次再讀。
-- **監看程式狀態**（`<狀態目錄>/watch.json`，只有監看程式寫；只在 Q-8 選 (b) 時才有）：`version`、`last_poke_at`、`last_seen_agents`（上次 poke 時看到的本機 team PM 的 state／exit 摘要）、`poked_due`（已經為哪些到期項目 poke 過：交接 id 加 `next_due_at`、worker team 加 `next_due_at`、看門狗的 team 加派工時刻）。寫入方式同上（`watch.json.lock`）。檔不存在或壞掉：當作空的重建，**不會**因此補 poke 舊的到期項目以外的東西。
+  **到期項目的判斷全在 tick 裡**：看門狗看 team 狀態的派工時刻與 `ack_at`；交接提醒看 `handoffs.*.next_due_at`；worker 比對看 `worker_poll.*.next_due_at`。被叫醒的那一輪，`next_due_at` ≤ 現在的才處理，處理完把 `next_due_at` 設成「現在＋預設間隔」（交接與 worker 都是 10 分鐘；是從「這一輪」往後推，不補跑錯過的次數）。
+
+  寫入走同目錄暫存檔＋`os.replace`，並用 `tick.json.lock` 的 flock 包住「讀、改、寫」。**檔不存在**：視為空的並建立（`wake.every` 是 `null`，所以不會印 `[wake-missing]`）。**檔壞掉**：tick、`handoff-close`、`pmo wake` 回 exit 2、印 `[要本人處理]`。
 - 位置：`PMO_SKILL_CONFIG`、`PMO_SKILL_STATE_DIR` 兩個環境變數（由環境說明提供）；沒設就拒絕執行（exit 2），**不猜預設路徑**。
 
-### 3.5 `pmo watch --poke-only` 的規則（只在 Q-8 選 (b) 時才有）
+### 3.5 （第 5 輪刪除）
 
-- **不讀信**：只跑 `angareion wait`（目標是「寄給我的」，和 tick 的 `read` 同一個游標；`wait` 不動游標）。不用 `--mentioned`：tick 不推那個游標，`wait --mentioned` 會一直報有新信。
-- **去重**：`wait` 回 0 之後，只要 tick 還沒把游標往前推，下一次 `wait` 還會立刻回 0。所以監看程式記下「最後一次 poke 的時刻」，tick 每輪結束時在狀態目錄寫「最後一次 tick 的時刻」。**只有在上次 poke 之後 tick 已經跑過**，才因為 `wait` 回 0 再 poke；否則不 poke，改成等待（每 60 秒看一次 tick 有沒有跑）。
-- **補 poke 的上限**：如果 poke 之後 15 分鐘 tick 都沒跑（PMO 在忙、或 poke 掉了），再 poke 一次；之後每 15 分鐘最多一次。不用 `interrupt`。
-- **廣播**：「寄給我的」包含廣播。廣播本來就是 PMO 要看的信（tick 會印 `[msg]`），所以因廣播叫醒不算誤叫醒。唯一的例外是新身分第一次 `wait`：依 `docs/angareion.md`，第一次讀不會讀到「現在」之前的舊廣播，但第一次 `wait` 可能因此回 0。監看程式啟動時若 `tick.json` 沒有 `last_tick_at`，**直接 poke 一次**，讓 tick 先跑一輪（把舊廣播讀掉）；之後才照「去重」的規則用 `wait` 的結果。
-- **agents 和看門狗**：每 60 秒對**本機** sidecar `GET /agents`（**跳過 worker team**，不碰 worker 的 sidecar）。只有在「和上次 poke 時看到的狀態不同」或「看門狗到期」時才 poke；同一個變化只 poke 一次。
-- **tick 狀態裡的到期項目**：每 60 秒讀 `tick.json`。`handoffs` 或 `worker_poll` 裡有任何一筆 `next_due_at` 已到、而且這個「id／team 加到期時刻」還沒 poke 過，就 poke 一次。tick 跑完會把那筆的 `next_due_at` 往後推（交接預設 10 分鐘、worker 比對預設 10 分鐘），所以每個到期點最多 poke 一次；`handoff-close` 之後那筆就消失，不再 poke。
-- **失敗**：`wait` 回 2 時退避（30 秒起、上限 10 分鐘），不 poke；sidecar 連不上時不 poke（tick 自己會報）。
+原本的「`pmo watch --poke-only` 小監看程式」只在 Q-8 選 (b) 時才有；本人選了 (a)，整節連同 `watch.json`、T-8 一起刪掉。
+
+### 3.6 定時叫醒：`pmo wake`（Q-8 (a)）
+
+**分工**：要不要定時叫醒、多久一次，是 PMO 的判斷（本人 Q-8）；指令只做機械步驟（D-7）——把 PMO 選的間隔變成 sidecar 上**恰好一個**自己的 poke job，並在 tick 裡回報它是否還在。指令不自動調頻率、不自動重排。
+
+- **哪些 job 是「自己的」**：sidecar 的 job 沒有擁有者欄位，所以用內容認：`action` 是 `poke`、`args.text` 等於設定的叫醒固定句、`auto` 是 false。`args.id` 不拿來認（PMO 換了 agent id 時，舊 id 的 job 也要能被清掉）。別人排給 PMO、但句子不同的 job 一律不碰。
+- **`pmo wake set ‹every›`**：
+  1. 驗間隔：只收 `‹整數›m` 或 `‹整數›h`，範圍 2m～24h（擋掉誤寫成秒數；sidecar 本身接受的格式更寬）。
+  2. `GET /jobs`，找出自己的 job。若恰好一個、`every` 相同、`args.id` 是目前的 PMO 身分 → 不動 sidecar，只更新 `tick.json` 的 `wake`，印 `[wake]`。
+  3. 否則**先建後刪**：`POST /jobs`（`action: poke`、`args: {id: ‹PMO 身分›, text: ‹固定句›, interrupt: false}`、`every`，不帶 `until`），成功後 `DELETE /jobs/<id>` 刪掉其他自己的 job。先建後刪，中間不會有沒人叫醒的空窗；代價是短暫有兩個 job，最多多叫醒一次（多跑一輪 tick 無副作用）。刪除失敗印 `[warn]` 附 job id，exit 仍是 0。
+  4. 整個流程拿 `tick.json.lock`，兩個 `set` 同時跑不會留下兩個 job。
+- **`pmo wake off`**：刪掉所有自己的 job，`wake.every` 設成 `null`。之後 tick 不再印 `[wake-missing]`。
+- **`pmo wake show`**：唯讀，列出自己的 job 和 `tick.json` 的 `wake`、`last_tick_at`、最早的到期時刻；只印已知欄位（D-12）。
+- **固定句不帶任何內容**：不帶未讀數、不帶信的內容，也不帶位址或 token（和 sidecar 的 job 規則一致）。`interrupt` 一律是 false：定時叫醒不打斷 PMO 正在做的這一輪，sidecar 會排在這一輪之後。
+
+**tick 怎麼看 job 的健康**（PMO 在 sidecar 裡、而且 `wake.every` 不是 `null` 時，每輪 `GET /jobs` 一次）：
+
+| 看到的 | tick 印 | 為什麼 |
+|---|---|---|
+| 找不到自己的 job | `[wake-missing] every=‹…›`（記 `missing_reported_at`；job 再出現前不重印） | sidecar 的 job 只在記憶體，sidecar 重啟就沒了。PMO 看到後自己決定要不要 `pmo wake set` |
+| 自己的 job 的 `last_error` 不是空的 | `[wake-error] ‹job id› ‹碼›`（同一個 `last_run` 只印一次） | 例：PMO 被 close 過那段時間的 409 `agent_not_running`；PMO 在 AskUserQuestion 時的 409 `agent_awaiting_answer`。job 本身照排程繼續，不自動重試 |
+| 自己的 job 超過一個 | `[warn] 自己的叫醒 job 有 ‹n› 個` | 先建後刪中斷時會發生；PMO 再跑一次 `pmo wake set` 就收斂 |
+| `GET /jobs` 失敗 | `[warn]`；這一輪其他步驟照做 | 和 `GET /agents` 失敗同一套 |
+
+**PMO 的開機步驟**（寫進 SKILL.md；T-7 時寫進 PMO harness 的環境說明）：PMO 每次被開（新開、重開、sidecar 重啟後接回）先跑一次 `pmo tick`，再跑 `pmo wake show`；`tick.json` 想要定時叫醒但 job 不在時，由 PMO 決定要不要 `pmo wake set`。
+
+**預設建議頻率（建議，不是規定；PMO 依情況調）**：
+
+| 情況 | 建議 | 理由 |
+|---|---|---|
+| 有派工在等「收到」、有未結案的交接、或有 worker team 在跑 | **10m** | 看門狗是 10 分鐘，間隔 10 分鐘時最晚 20 分鐘看到；換成 5m 只快 5 分鐘，叫醒次數卻加倍（一天 288 輪 vs 144 輪） |
+| 什麼都沒在等（tick 只印 `[idle]`、沒有 `next-due`） | **30m～60m**，或 `pmo wake off` | 有信時寄件人會立刻叫醒，不受間隔影響；拉長只會延後發現「本機 team PM 的 sidecar 狀態變化」（#520 之後 sidecar 不發退出通知，這只能靠 tick 的 `GET /agents` 發現）。一天 48 或 24 輪 |
+| 剛派工、或剛看到 `[wake-missing]` | 依上面兩列重新判斷 | — |
+
+**`[idle]` 輪的成本**：每一次叫醒都是 PMO 模型的一輪推理（讀固定句 → 跑 `pmo tick` → 讀一行 `[idle]` → 結束）。一輪不大，但 tui 的對話會一直變長，次數多了會提早觸發壓縮；所以 SKILL.md 要寫明「看到 `[idle]` 就直接結束這一輪，不做其他工具呼叫」。額度用量 ≥70% 時，建議 PMO 把間隔拉長（照環境說明的額度規則）。
 
 ## 4. 提議（待 Q 定案）
 
@@ -311,7 +346,7 @@ flowchart LR
 | D-3 | AI 名文法只用本 repo 的 `src/ainame` | 少一份副本；兩版的差異在 T-1 補齊（§5.1） | — |
 | D-4 | 設定和狀態的格式公開在本 repo，資料由環境變數指到本機；沒設就拒絕 | public repo 不放私人資料；不猜路徑 | — |
 | D-5 | 收件帳本以 Angareion 為準，本機是快取，可以 `rebuild`；`team` 和急件叫醒紀錄不可重建（§1.2） | 現在帳本是去重的單點 | Q-2 |
-| D-6 | 常駐的 watch 改成一輪的 `pmo tick`；`pmo tick` 是 PMO 身分唯一的讀信者 | sidecar 裡的 agent 不跑背景讀信迴圈；同一個身分只留一個讀者 | Q-8 |
+| D-6 | 常駐的 watch 改成一輪的 `pmo tick`；`pmo tick` 是 PMO 身分唯一的讀信者 | sidecar 裡的 agent 不跑背景讀信迴圈；同一個身分只留一個讀者 | Q-8（已定） |
 | D-7 | 指令只做機械步驟；建工單、派工、重開、換 provider 都由 PMO 判斷 | PMO harness 的職務分界 | — |
 | D-8 | 第一階段只支援本機 sidecar 的 team 的「動作」；worker team 的動作留在 MyPMO | worker 的傳輸和 MyLinuxPool 綁在一起 | Q-3 |
 | D-9 | 群請求第一階段留在 MyPMO；tick 把它分流出來交接 | 它和秘書側的介面逐字對齊、規模大，搬移風險高 | Q-4、Q-9 |
@@ -319,6 +354,7 @@ flowchart LR
 | D-11 | MyPMO 的工單維護工具不搬 | 它們維護 MyPMO 自己的工單樹 | — |
 | D-12 | 印出去的字串一律過 `sanitize`；sidecar 回應只印已知欄位 | 沿用現行規則 | — |
 | D-13 | tick 讀到的每一則都要有去處：自己處理、`[msg]` 交給 PMO、或交給過渡工具；不得靜默丟掉 | 一個讀者推了游標，別人就看不到；交接必須明寫 | Q-9 |
+| D-14 | 叫醒＝寄件人立刻 poke（現有）＋PMO 自己排的 sidecar 定時 poke job；開／調／停走 `pmo wake`（§3.6），頻率由 PMO 決定，指令只給預設建議。到期判斷全在 tick 裡（`tick.json` 與 team 狀態），不設外部監看程式 | 本人 Q-8 選 (a)；把「什麼時候到期」留在唯一的讀者裡，叫醒來源只需要「叫」，不需要知道狀態 | Q-8（**本人已定**，2026-11-02） |
 
 ## 5. 搬移切分
 
@@ -349,10 +385,9 @@ flowchart LR
 4. **T-4a 派工（一）**：`check`、`send`。
 5. **T-4b 派工（二）**：`open`。
 6. **T-4c 派工（三）**：`reply`、`poke`、`status`、`close`。
-7. **T-5 tick**：`pmo tick`（收信一輪、agents 比對、看門狗、no-candidate、waiting-quota、交接事件）；事件表的契約測試；「收到 → 看門狗不發」的測試。
+7. **T-5 tick 與叫醒**：`pmo tick`（收信一輪、agents 比對、到期判斷〔看門狗、交接提醒、worker 比對〕、no-candidate、waiting-quota、交接事件、叫醒 job 健康）和 `pmo wake set|off|show`；事件表的契約測試；「收到 → 看門狗不發」的測試。到期與叫醒的測試要含：未到期不印、到期印一次並把 `next_due_at` 往後推、間隔很久才被叫醒也只印一次（不補跑）、`handoff-close` 之後不再印；`wake set` 同間隔不動 sidecar、改間隔先建後刪、只動固定句相同的 job（別人的 poke job 不碰）、兩個 `set` 同時跑只留一個；`wake off` 之後不印 `[wake-missing]`；job 不見時 `[wake-missing]` 只印一次；`last_error` 為 409 時 `[wake-error]` 同一個 `last_run` 只印一次；PMO 不在 sidecar 時 tick 不查 `/jobs`、`wake` 回 exit 2。sidecar 用假物件，不打真的 `/jobs`。
 8. **T-6 說明**：`skills/pmo/SKILL.md`、環境說明範本（**只是範本，不改任何人正在用的環境說明**）；更新 overview／decisions。**PMO harness 的新版本不在這裡發**。
-9. **T-8 小監看程式**（**只在 Q-8 選 (b) 時才有**；編號是後來加的，**merge 順序在 T-7 之前**）：`pmo watch --poke-only`，照 §3.5 的規則；測試要含「tick 沒跑就不重複 poke」「15 分鐘補 poke」「`wait` exit 2 退避」「沒有 `last_tick_at` 時啟動就 poke 一次」「有未結案的交接 id 時每 10 分鐘 poke 一次、`handoff-close` 之後停」「worker 比對到期時 poke 一次」「`GET /agents` 不碰 worker team」。
-10. **T-7 切換**（PMO 自己的單；MyPMO 一側和本 repo 一側同步）：PMO harness 的新版本（能力段指向 `pmo`）、環境說明改用 `pmo`、停舊的 watch、開始用 `pmo tick`、MyPMO 依 Q-9 改成交接模式。三件事在同一個切換窗口做，避免「harness 叫 PMO 用 `pmo`，但設定還沒好」或「兩個讀者」。
+9. **T-7 切換**（PMO 自己的單；MyPMO 一側和本 repo 一側同步）：PMO harness 的新版本（能力段指向 `pmo`，含 §3.6 的開機步驟）、環境說明改用 `pmo`、停舊的 watch、開始用 `pmo tick`、PMO 用 `pmo wake set` 排定時叫醒（間隔由 PMO 定）、MyPMO 依 Q-9 改成交接模式。三件事在同一個切換窗口做，避免「harness 叫 PMO 用 `pmo`，但設定還沒好」或「兩個讀者」。
 
 ## 6. 待本人決定的點
 
@@ -363,17 +398,23 @@ flowchart LR
 | Q-3 | worker team 的動作什麼時候搬 | (a) 第一階段不搬，交給過渡工具（Q-9）；(b) 一起搬，把 ssh／轉發埠做成第五個埠；(c) 等 MyLinuxPool 提供自己的 sidecar 存取方式再搬 | **(a)，之後走 (c)** |
 | Q-4 | 群請求什麼時候搬 | (a) 第一階段不搬（交接方式見 Q-9）；(b) 一起搬 | **(a)** |
 | Q-5 | 指令名和套件名 | (a) `pmo`（套件 `src/pmo`）；(b) `atelier pmo …`；(c) 其他名字 | **(a)**：atelier 指令目前只讀 harness，混進派工會變成兩種職責 |
-| Q-6 | #110 的層級 | 現在標 c；新增指令和套件屬於「功能組新增」，依工單規則可能是 b | 請本人定；若改 b，T-1～T-6（以及 Q-8 選 (b) 時的 T-8）掛成子單，T-7 是 PMO 自己的切換單 |
+| Q-6 | #110 的層級 | 現在標 c；新增指令和套件屬於「功能組新增」，依工單規則可能是 b | 請本人定；若改 b，T-1～T-6 掛成子單，T-7 是 PMO 自己的切換單 |
 | Q-7 | 舊工具的去留 | (a) 切換後 MyPMO 的 dispatch.py 只留 worker 動作和群請求；(b) 改成轉呼叫 `pmo` 的薄殼；(c) 整支退役 | **(a)**，等 Q-3／Q-4 都搬完再退役 |
-| Q-8 | tick 由誰在什麼時候叫起來（PMO 現在已經由 sidecar 開，見 MyPMO 的 boot-pmo 說明；問題是「沒人寄信時」的定時工作怎麼觸發） | (a) sidecar 定時 poke job，每 N 分鐘一輪：N ≤ 10 分鐘（看門狗是 10 分鐘），一天至少 144 輪模型推理，大多是 `[idle]`；(b) 一個**不是 agent** 的小監看程式（`pmo watch --poke-only`，規則見 §3.5）：只用 `angareion wait`（不動游標，不算讀者）和 `GET /agents`，算好看門狗的到期時刻，**只在有事時** poke PMO，不叫醒時不花模型額度，由啟動方（Mac 環境）負責起停；(c) 照現在，PMO 自己在背景跑常駐監看（和「被 sidecar 管的不跑背景迴圈」的規則衝突） | **(b)**：只有有事才花額度，也維持「讀信只有 tick」；代價是多一個常駐行程，要由環境負責起停 |
-| Q-9 | tick 和過渡工具（MyPMO 的群請求、worker team 動作）怎麼交接 | (a) **id 交接**：tick 不處理、印 `[group-handoff] ‹id›`／`[worker-action] ‹team› ‹動作›`；MyPMO 的工具改成「給 id，用 `angareion log --around ‹id›` 取原信」（唯讀、不動游標）。**重試的觸發**：tick 在自己的狀態裡記下交接出去的 id（不讀 MyPMO 的帳本），每隔固定時間（預設 10 分鐘，最多每輪一次）印 `[group-sweep-due] ‹id…›`，PMO 看到就跑 MyPMO 的 sweep；MyPMO 報結案後，PMO 用 `pmo inbox handoff-close ‹id›` 停止提醒。（另一個做法是過渡工具自己排定時 job；我不建議，因為 job 的起停又多一套要管的東西。）team 狀態兩邊共用同一個目錄與 schema（不認得的欄位保留）。(b) tick 直接 import MyPMO 的群請求程式（違反「不依賴 MyPMO」）。(c) 先不切換：Q-3、Q-4 都搬完才做 T-7 | **(a)**：讀者仍然只有一個，MyPMO 只改入口；若本人不想在過渡期多一套交接，就選 (c)，代價是切換延後 |
+| Q-8 | tick 由誰在什麼時候叫起來（PMO 現在已經由 sidecar 開，見 MyPMO 的 boot-pmo 說明；問題是「沒人寄信時」的定時工作怎麼觸發） | (a) sidecar 定時 poke job；(b) 不是 agent 的小監看程式，只在有事時 poke；(c) PMO 自己在背景跑常駐監看 | **已定（本人 2026-11-02）：「基本上是 (a)」**。以 sidecar 定時 poke 為主；要不要叫、多久叫一次由 PMO 自己決定（設計只給介面 `pmo wake` 和預設建議，§3.6）；有人用 aicomm 叫 PMO 時立刻叫醒（現有行為）。(b)、(c) 不採；原本 (b) 的 `pmo watch`、`watch.json`、T-8 已刪 |
+| Q-9 | tick 和過渡工具（MyPMO 的群請求、worker team 動作）怎麼交接 | (a) **id 交接**：tick 不處理、印 `[group-handoff] ‹id›`／`[worker-action] ‹team› ‹動作›`；MyPMO 的工具改成「給 id，用 `angareion log --around ‹id›` 取原信」（唯讀、不動游標）。**重試的觸發**：tick 在自己的狀態裡記下交接出去的 id（不讀 MyPMO 的帳本），每隔固定時間（預設 10 分鐘；在**下一次被叫醒的那一輪**判斷是否到期，最多每輪一次）印 `[group-sweep-due] ‹id…›`，PMO 看到就跑 MyPMO 的 sweep；MyPMO 報結案後，PMO 用 `pmo inbox handoff-close ‹id›` 停止提醒。（另一個做法是過渡工具自己排定時 job；我不建議，因為 job 的起停又多一套要管的東西。）team 狀態兩邊共用同一個目錄與 schema（不認得的欄位保留）。(b) tick 直接 import MyPMO 的群請求程式（違反「不依賴 MyPMO」）。(c) 先不切換：Q-3、Q-4 都搬完才做 T-7 | **(a)**：讀者仍然只有一個，MyPMO 只改入口；若本人不想在過渡期多一套交接，就選 (c)，代價是切換延後 |
 
 ## 7. 風險
 
-- **兩個讀者**：切換期間，舊的 watch 和 `pmo tick` 若同時以 PMO 身分讀信，會互相吃掉訊息。T-7 必須先停舊的再開新的；SKILL.md 和 harness 要明寫「PMO 身分的讀信只走 `pmo tick`」。Q-8 (b) 的小監看程式只 `wait`，不讀。
+- **兩個讀者**：切換期間，舊的 watch 和 `pmo tick` 若同時以 PMO 身分讀信，會互相吃掉訊息。T-7 必須先停舊的再開新的；SKILL.md 和 harness 要明寫「PMO 身分的讀信只走 `pmo tick`」。定時 poke job 只叫醒、不讀信，不算讀者。
 - **交接漏件**（Q-9 (a)）：MyPMO 若沒有在 T-7 改成「用 id 取原信」，群請求會停在 `[group-handoff]`，沒人去取。T-7 的驗收要包含兩筆群請求：一筆一次走完；一筆在推進途中失敗，靠 `[group-sweep-due]` 提醒、PMO 再跑 sweep 之後續完。
 - **帳本重建的邊界**：§1.2 列的不可重建欄位；過去沒帶 `in_reply_to` 的舊 ack 也重建不出來。T-3 要先從現在的帳本匯入一次。
-- **定時 job 失效**：sidecar 的 `close` 不會刪 job；`pmo status` 一併列出 PMO 自己的 job。
+- **定時 job 失效**（Q-8 (a)；依 sidecar 文件 §2.3）：
+  - **sidecar 重啟**：job 只在記憶體，重啟後消失；PMO 也會跟著被重開。靠 §3.6 的開機步驟和 `[wake-missing]` 發現，由 PMO 重排。PMO 沒被重開之前，沒有任何東西會叫醒它，只剩寄件人叫醒（本來也叫不醒一個不在的 PMO）。
+  - **PMO 被 close 再 open**（同一個 sidecar）：`close` 不刪 job，關著的那段時間每次到點都得到 409 `agent_not_running`，記在 `last_error`；以同一個 id 重開後照常叫醒，tick 印一次 `[wake-error]`（只是告知）。換了 id 重開時，舊 job 會一直 409；`pmo wake set` 依固定句認 job，會把它清掉。
+  - **PMO 不再開了**：job 會一直空打 409。關 PMO 的一方（PMO 自己退場、或本人）要先 `pmo wake off`；寫進 SKILL.md 的退場步驟。
+- **叫醒的副作用**：tui 的 poke 一律照送（sidecar #454），PMO 正卡在**權限詢問**時，定時 poke 的 Enter 會替人按下對話框的預設選項；正在 AskUserQuestion 時則是 409 `agent_awaiting_answer`、這次不送。間隔越短，碰上的機會越大；這是選短間隔的成本之一，指令不另外處理（要擋得在 sidecar 側，不在本設計範圍）。
+- **`[idle]` 輪的成本**：見 §3.6。PMO 若長時間不調頻率，最壞是一天 144 輪（10m）；這是 PMO 的判斷，不是指令的錯，`pmo wake show` 讓它看得到。
+- **到期延遲**：到期項目最晚在「到期＋間隔」才被看到；PMO 選 `pmo wake off` 時，要等下一封信。
 - **公開與私人的界線**：schema、事件格式、測試假資料都在 public repo，假資料不得帶私人資訊（帳號、位址、額度）。
 
 ## 8. 沒驗到的
@@ -381,7 +422,7 @@ flowchart LR
 - 沒有跑 MyPMO 的測試；對它的描述來自讀程式和文件（只讀）。
 - sidecar 的 `/jobs` 介面形狀以環境說明為準，沒有實際打過。
 - `angareion log` 能不能涵蓋重建所需的列舉與 `--thread`，沒有實測（T-3 要先驗）。
-- `angareion wait` 在 Q-8 (b) 的用法（不動游標、與 tick 的 `read` 並存）依 `docs/angareion.md` 的說明推論，沒有實測。
+- sidecar 的 `/jobs` 行為（只在記憶體、`close` 不刪、409 記在 `last_error`、`every` 停頓後只補一次、tui 正在提問時 poke 回 409）來自 MyLinuxPool `modules/sidecar/docs/sidecar.md`（c411b02 的 §2、§2.3）；沒有實際打過。sidecar 的 job 沒有擁有者欄位，「用固定句認自己的 job」是依這份文件的欄位清單推論。
 - Mermaid 沒有用渲染器驗證；方括號、角括號已避開（改用 ‹ ›）。
 
 ## 9. 審查清單（給非作者審查者；作者模式）
@@ -393,9 +434,10 @@ flowchart LR
 3. **時序**：§2.1～2.3 是否涵蓋收件、去重、補發 ack、派工、team PM 的「收到」、回報、被叫醒、exit 2、限流、no candidate、waiting-quota、NEED_REOPEN？有沒有一條路會讓同一個身分出現兩個讀者？
 4. **介面**：§3.2 每個指令的輸入、輸出、結束碼是否完整、一致？§3.2.1 的事件表是否涵蓋現行工具的所有標籤？有沒有指令越過 D-7？
 5. **依賴方向**：skill 只透過四個埠碰外部，核心不碰外部？有沒有依賴 MyPMO 的程式？
-6. **搬移切分**：§5.1 的「原樣搬／重寫／不搬」是否和 MyPMO 的實際模組對得上？T-1～T-8 是否各自可以單獨 merge，而且 merge 後不會留下壞掉的中間狀態？
+6. **搬移切分**：§5.1 的「原樣搬／重寫／不搬」是否和 MyPMO 的實際模組對得上？T-1～T-7 是否各自可以單獨 merge，而且 merge 後不會留下壞掉的中間狀態？
 7. **待本人決定的點**：Q-1～Q-9 的選項是否互斥、完整？建議是否有理由？
 8. **public repo 的界線**：note 裡有沒有私人資訊，或不必要地指名其他專案的內部細節？
+9. **叫醒（Q-8 (a)）**：§3.6 的 `pmo wake` 是否只做機械步驟、頻率完全留給 PMO？「到期才處理」是否不依賴叫醒來源（任何一輪都只處理到期的、處理完往後推、不補跑）？job 被 close、sidecar 重啟、PMO 換 id、PMO 卡在權限詢問這幾種情況，是否都有被看見的路？
 
 ## 10. 修訂紀錄
 
@@ -436,3 +478,19 @@ flowchart LR
 | R3-3 監看程式首次啟動可能永遠不 poke | 同意。改成沒有 `last_tick_at` 時啟動就 poke 一次；T-8 的測試加這一條 |
 | R3-4 worker 比對頻率、監看程式是否碰 worker、T-8 編號 | 同意。`poll` 每個 worker team 最多每 10 分鐘一次；監看程式的 `GET /agents` 跳過 worker team；T-8 註明 merge 順序在 T-7 之前，Q-6 和 §9 的範圍改成含 T-8 |
 
+
+### 第 5 輪（本人決定 Q-8：「基本上是 (a)」，2026-11-02）
+
+| 改動 | 位置 |
+|---|---|
+| Q-8 改成**已定 (a)**：以 sidecar 定時 poke 為主，要不要叫、多久叫由 PMO 決定；aicomm 寄信時寄件人立刻叫醒（現有）。(b)、(c) 不採 | §0 第 6 點、§6 Q-8、開頭的「D- 都是提議」加例外 |
+| 刪掉 (b) 的一切：`pmo watch --poke-only`、§3.5 的規則、`watch.json`、T-8，以及第 3、4 輪為它加的條文（R3-1 的「監看程式讀 `tick.json` 到期就 poke」、R3-3 的「首次啟動先 poke」、R3-4 的「監看程式跳過 worker team」、T-8 的 merge 順序） | §3.2、§3.4、§3.5（留標題說明已刪）、§5.2、Q-6、§9 |
+| R3-1～R3-4 重新整理：到期項目（看門狗、交接提醒、worker 比對）改成**tick 被叫醒的那一輪自己判斷**，到期才處理、處理完從這一輪往後推、不補跑；R3-2 的 `tick.json` 保留，拿掉「監看程式只讀」，加 `wake` 欄位與 `last_tick_at` 的新用途（間隔 3 倍沒跑就 `[warn]`）；R3-4 的「worker 比對每 10 分鐘最多一次」保留 | §2.2、§3.2.1、§3.4、Q-9 |
+| 新增 §3.6 `pmo wake set|off|show`：用固定句認自己的 job、先建後刪、拿 `tick.json.lock`；tick 每輪查 `/jobs`，印 `[wake-missing]`／`[wake-error]`；開機步驟；預設建議頻率（有事在等 10m、沒事 30m～60m 或關掉）與 `[idle]` 輪的成本 | §3.6、§3.2、§3.2.1、§3.4 的 teams 設定加 PMO 的 sidecar 位址與固定句 |
+| 新增 D-14（方向本人已定） | §4 |
+| 風險改寫：sidecar 重啟 job 消失、PMO close 後 409、換 id、不再開時要先 `wake off`、權限詢問時 poke 會按下預設選項、`[idle]` 成本、到期延遲 | §7 |
+| T-5 改成「tick 與叫醒」，測試同步；T-7 加「PMO 用 `pmo wake set` 排定時叫醒」與開機步驟 | §5.2 |
+| 沒驗到的：刪掉 `angareion wait` 那條；加 sidecar `/jobs` 的行為只依文件、job 沒有擁有者欄位 | §8 |
+| 第 1 輪起 note 第一行誤留了一行模型名，刪掉 | 開頭 |
+
+Q-1～Q-7、Q-9 的選項與建議都沒改（Q-6 只拿掉 T-8 的括號）。
