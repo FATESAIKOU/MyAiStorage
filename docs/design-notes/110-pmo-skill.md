@@ -241,7 +241,7 @@ flowchart LR
 
 **指示信的格式**：沿用 MyPMO `build_instruction` 的固定頭（工單號、標題、範圍、驗收、回報格式、派工時刻的說明）＋「工單本文（PMO 派工時從 GitHub 讀出）」＋正文，原樣見 #355 的實作；`life: true` 的 team 用生活模式的回報格式。現行的 M2 段落（開隊員的說明）不搬，那是環境說明的內容。超過 angareion 一則的上限就拒送（exit 1），不截斷。
 
-**`pmo close` 的 job 處理**：只刪 `auto` 為 true、`args.id` 是這個 team PM 的 job（sidecar 的自動重開 job；不刪的話，close 之後它到點會把 agent 開回來），而且先刪再 close。任何 poke job 都不刪：瞄準 team PM 的 poke job 是別人排的（§3.6「別人排的一律不碰」），PMO 自己的叫醒 job 瞄準的是 PMO，和 close 無關。`GET /jobs` 失敗時印 `[warn]`，照樣 close。agent 已 `exited` 時仍送 close（sidecar 的 close 是 idempotent，而且會刪掉 handoff）。**retired team**：`send`、`open`、`reply`、`poke` 拒絕（exit 1）；`check`、`status`、`close` 照常。
+**`pmo close` 的 job 處理**：只刪 `auto` 為 true、`args.id` 是這個 team PM 的 job（sidecar 的自動重開 job；不刪的話，close 之後它到點會把 agent 開回來），而且先刪再 close。任何 poke job 都不刪：瞄準 team PM 的 poke job 是別人排的（§3.6「別人排的一律不碰」），PMO 自己的叫醒 job 瞄準的是 PMO，和 close 無關。`GET /jobs` 失敗時印 `[warn]`，照樣 close。自動重開 job 刪不掉時也照樣 close，但回 exit 2（已知有一個 job 到點會把 agent 開回來，要 PMO 處理）；`GET /jobs` 本身失敗只印 `[warn]`，exit 不變。agent 已 `exited` 時仍送 close（sidecar 的 close 是 idempotent，而且會刪掉 handoff）。**retired team**：`send`、`open`、`reply`、`poke` 拒絕（exit 1）；`check`、`status`、`close` 照常。
 
 **送信前的身分守門**：所有會寄信的指令（ack、report、decision-send、send、reply），送之前檢查目前的身分（`ANGAREION_IDENTITY`）等於設定裡的 PMO 身分，不符就拒送（exit 2）。現行工具也有這道守門；公開版把身分改由設定給，守門照樣保留（C-3）。
 

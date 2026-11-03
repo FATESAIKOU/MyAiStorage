@@ -224,33 +224,118 @@ def test_sidecar_adapter_closes_an_agent(opener):
 
 
 def test_sidecar_adapter_reads_jobs_with_their_seconds(opener):
+    """真的 sidecar 回 `{"jobs": [...]}`（sidecar `http.py`／`GET /jobs` 文件）。"""
     opener.answer = (
         200,
         json.dumps(
-            [
-                {
-                    "id": "job-1",
-                    "action": "poke",
-                    "args": {"id": PMO_IDENTITY, "text": DEFAULT_WAKE_TEXT, "interrupt": False},
-                    "every": 600.0,
-                    "last_run": "2026-11-03T01:00:00Z",
-                    "last_error": "agent_not_running",
-                    "auto": False,
-                }
-            ]
+            {
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "action": "poke",
+                        "args": {
+                            "id": PMO_IDENTITY,
+                            "text": DEFAULT_WAKE_TEXT,
+                            "interrupt": False,
+                        },
+                        "every": 600.0,
+                        "at": None,
+                        "auto": False,
+                        "last_run": "2026-11-03T01:00:00Z",
+                        "last_error": "agent_not_running",
+                        "next_run_at": "2026-11-03T01:10:00Z",
+                    }
+                ]
+            }
         ).encode(),
     )
     (job,) = Sidecar(PMO_SIDECAR).list_jobs()
     assert job.job_id == "job-1"
     assert job.every == 600.0
+    assert job.at is None
     assert job.last_error == "agent_not_running"
-    assert job.extra == {"auto": False}  # 不認得的欄位留在 extra，不印
+    # 不認得的欄位留在 extra，不印（`auto` 由 `ops.is_auto_job` 讀）
+    assert job.extra == {"auto": False, "next_run_at": "2026-11-03T01:10:00Z"}
     (request,) = opener.requests
     assert request["url"] == f"{PMO_SIDECAR}/jobs"
 
 
-def test_sidecar_adapter_refuses_a_job_without_an_every(opener):
+def test_sidecar_adapter_reads_the_jobs_object_wrapper(opener):
+    """高-1：外層是物件（`{"jobs": []}`），不是陣列。"""
+    opener.answer = (200, json.dumps({"jobs": []}).encode())
+    assert Sidecar(PMO_SIDECAR).list_jobs() == []
+
+
+def test_sidecar_adapter_refuses_a_jobs_answer_whose_outer_is_not_an_object(opener):
+    """高-1：外層不是物件就丟 `SidecarError`（舊的陣列形狀不再收）。"""
     opener.answer = (200, json.dumps([{"id": "job-1", "action": "poke"}]).encode())
+    with pytest.raises(SidecarError, match="不是物件"):
+        Sidecar(PMO_SIDECAR).list_jobs()
+
+
+def test_sidecar_adapter_reads_an_at_job_without_an_every(opener):
+    """高-2：自動重開 job 是 `at` 型、`every: null`（sidecar.md）。"""
+    opener.answer = (
+        200,
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "job-auto",
+                        "action": "open",
+                        "args": {"id": TEAM_PM, "provider": "opencode", "model": "m"},
+                        "every": None,
+                        "at": "2026-11-03T02:00:00Z",
+                        "auto": True,
+                        "last_run": None,
+                        "last_error": None,
+                        "next_run_at": "2026-11-03T02:00:00Z",
+                    }
+                ]
+            }
+        ).encode(),
+    )
+    (job,) = Sidecar(PMO_SIDECAR).list_jobs()
+    assert (job.job_id, job.action) == ("job-auto", "open")
+    assert (job.every, job.at) == (None, "2026-11-03T02:00:00Z")
+    assert job.extra["auto"] is True
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # 低-1：sidecar 回的是物件，只存碼，`message` 不存（D-12）
+        ({"status": 409, "code": "agent_not_running", "message": "no agent here"}, "agent_not_running"),
+        ("agent_awaiting_answer", "agent_awaiting_answer"),  # 字串也容忍
+        (None, None),
+    ],
+)
+def test_sidecar_adapter_keeps_only_the_last_error_code(opener, value, expected):
+    opener.answer = (
+        200,
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "action": "poke",
+                        "args": {"id": PMO_IDENTITY, "text": DEFAULT_WAKE_TEXT},
+                        "every": 600.0,
+                        "last_error": value,
+                    }
+                ]
+            }
+        ).encode(),
+    )
+    (job,) = Sidecar(PMO_SIDECAR).list_jobs()
+    assert job.last_error == expected
+
+
+def test_sidecar_adapter_refuses_a_job_without_an_every(opener):
+    opener.answer = (
+        200,
+        json.dumps({"jobs": [{"id": "job-1", "action": "poke"}]}).encode(),
+    )
     with pytest.raises(SidecarError, match="every"):
         Sidecar(PMO_SIDECAR).list_jobs()
 

@@ -507,7 +507,7 @@ def cmd_status(ctx: Ctx, args: argparse.Namespace) -> int:
         else:
             for job in report.jobs:
                 ctx.emit(
-                    f"[status] job {job.job_id} every={job.every:g}s "
+                    f"[status] job {job.job_id} {_every_of(job)} "
                     f"last_run={job.last_run if job.last_run is not None else '-'} "
                     f"last_error={job.last_error or '-'}"
                 )
@@ -522,10 +522,17 @@ def cmd_status(ctx: Ctx, args: argparse.Namespace) -> int:
     return 2 if report.failures else 0
 
 
+def _every_of(job: JobRecord) -> str:
+    """`every=600s`, or `at=<時刻>` for a one-off job (`every` is `None`, #370 高-2)."""
+    if job.every is None:
+        return f"at={job.at or '-'}"
+    return f"every={job.every:g}s"
+
+
 def _job_fields(job: JobRecord, wake_text: str) -> str:
-    """One listed job: id, action, every, and whether its sentence is the fixed one."""
+    """One listed job: id, action, every (or at), and whether its sentence is the fixed one."""
     fixed = "是" if ops.has_fixed_sentence(job, wake_text) else "否"
-    return f"{job.job_id} action={job.action} every={job.every:g}s 固定句={fixed}"
+    return f"{job.job_id} action={job.action} {_every_of(job)} 固定句={fixed}"
 
 
 def cmd_close(ctx: Ctx, args: argparse.Namespace) -> int:

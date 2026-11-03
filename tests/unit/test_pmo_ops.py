@@ -51,6 +51,8 @@ from _pmo_env import (
 
 #: 假的 PMO sidecar 位址：測試只注入假物件，不會連上去。
 PMO_SIDECAR = "http://127.0.0.1:8499"
+#: 假的 team sidecar 位址（與 `_pmo_env.config_data()` 的 team 相同；#370 中-1 要同一台）。
+TEAM_SIDECAR = "http://127.0.0.1:8472"
 OTHER_TEAM_KEY = "demo2-w1"
 OTHER_TEAM_PM = "demo2-pm-w1"
 RETIRED_TEAM_KEY = "demo3-m1"
@@ -615,7 +617,7 @@ def test_status_keeps_reading_the_other_teams_when_one_sidecar_fails(pmo_env):
 
 
 def test_close_pokes_interrupts_then_closes_and_deletes_the_auto_jobs(pmo_env):
-    write_config(pmo_env, top={"pmo_sidecar": PMO_SIDECAR})
+    write_config(pmo_env, top={"pmo_sidecar": TEAM_SIDECAR})
     seed_team_state(pmo_env, ticket="demo#45")
     deps, _aicomm, sidecar = ops_deps()
     sidecar.add_agent(TEAM_PM, state="running", session="ses-1")
@@ -642,7 +644,7 @@ def test_close_pokes_interrupts_then_closes_and_deletes_the_auto_jobs(pmo_env):
 
 def test_close_deletes_only_the_auto_reopen_jobs_for_this_team_pm(pmo_env):
     """裁定 (d)：任何 poke job 都不刪（含固定句相同）；只刪 auto＋`args.id` 的 job。"""
-    write_config(pmo_env, top={"pmo_sidecar": PMO_SIDECAR})
+    write_config(pmo_env, top={"pmo_sidecar": TEAM_SIDECAR})
     deps, _aicomm, sidecar = ops_deps()
     sidecar.add_agent(TEAM_PM)
     add_auto_job(sidecar, "job-auto")

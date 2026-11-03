@@ -49,7 +49,9 @@ _SIDECAR_TIMEOUT = 10.0
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 #: The fields of a `GET /jobs` record the adapter reads; the rest stays in `extra`.
-_KNOWN_JOB = ("id", "action", "args", "every", "last_run", "last_error")
+#: `auto` deliberately stays in `extra`: `pmo.ops.is_auto_job` reads it from
+#: either the job field or `args`, and `to_dict` (D-12) does not print it.
+_KNOWN_JOB = ("id", "action", "args", "every", "at", "last_run", "last_error")
 
 
 def _run(
@@ -355,12 +357,17 @@ class Sidecar:
     # -- jobs --------------------------------------------------------------- #
 
     def list_jobs(self) -> list[JobRecord]:
-        """`GET /jobs`; `every` comes back in seconds (`600.0`, M5-1)."""
+        """`GET /jobs`; the answer is `{"jobs": [...]}` (sidecar `http.py`).
+
+        The sidecar wraps the list in an object (`http.py`:
+        `{"jobs": [job.to_dict() ...]}`, sidecar.md「`GET /jobs` →
+        `{"jobs": [ … ]}`」); an outer that is not an object, or a `jobs` that
+        is not an array, is the only shape refused here (#370 高-1). `every`
+        comes back in seconds (`600.0`), and an auto-reopen job is an `at` job
+        with `every: null` (#370 高-2).
+        """
         _status, body = self._call("GET", "/jobs")
-        try:
-            records = json.loads(body.decode("utf-8")) if body else []
-        except (ValueError, UnicodeDecodeError) as e:
-            raise SidecarError(detail=f"GET /jobs 的輸出不是 JSON（{type(e).__name__}）") from e
+        records = _json_object(body, "GET /jobs").get("jobs")
         if not isinstance(records, list):
             raise SidecarError(detail="GET /jobs 的輸出不是 job 陣列")
         return [_job_of(record) for record in records]
@@ -405,7 +412,15 @@ def _agent_of(record: dict, fallback_id: str) -> AgentRecord:
 
 
 def _job_of(record: object) -> JobRecord:
-    """One `GET /jobs` record → `JobRecord` (unknown fields stay in `extra`)."""
+    """One `GET /jobs` record → `JobRecord` (unknown fields stay in `extra`).
+
+    `every` is only converted when it is not `None`: an auto-reopen job is an
+    `at` job and its `every` is `null`, and `seconds_of(None)` would fail the
+    whole list — the one job `pmo close` must delete (#370 高-2). `last_error`
+    is the sidecar's `{"status", "code", "message"}` object (or `null`); only
+    the code is kept (D-12: no message text), and a plain string still reads
+    (#370 低-1).
+    """
     if not isinstance(record, dict):
         raise SidecarError(detail="GET /jobs 的每一筆都必須是物件")
     job_id = record.get("id")
@@ -415,17 +430,49 @@ def _job_of(record: object) -> JobRecord:
     if not isinstance(action, str) or not action:
         raise SidecarError(detail=f"job {job_id} 的記錄沒有 action")
     args = record.get("args")
-    try:
-        every = seconds_of(record.get("every"))
-    except SidecarError as e:
-        raise SidecarError(detail=f"job {job_id} 的 every 不合格式（{e}）") from e
-    last_error = record.get("last_error")
+    raw_every = record.get("every")
+    raw_at = record.get("at")
+    if raw_every is None:
+        if raw_at is None:
+            # A job with neither `every` nor `at` is not a schedule at all; an
+            # `at` job always names its one time (sidecar.md: `every` is null,
+            # `at` carries the time).
+            raise SidecarError(detail=f"job {job_id} 的 every 不合格式（沒有 every，也沒有 at）")
+        every: float | None = None
+    else:
+        try:
+            every = seconds_of(raw_every)
+        except SidecarError as e:
+            raise SidecarError(detail=f"job {job_id} 的 every 不合格式（{e}）") from e
     return JobRecord(
         job_id=job_id,
         action=action,
         args=dict(args) if isinstance(args, dict) else {},
         every=every,
         last_run=record.get("last_run"),
-        last_error=last_error if isinstance(last_error, str) else None,
+        last_error=_last_error_code(record.get("last_error")),
+        at=_at_of(raw_at),
         extra={key: value for key, value in record.items() if key not in _KNOWN_JOB},
     )
+
+
+def _last_error_code(value: object) -> str | None:
+    """The job's last error code only (#370 低-1; D-12 keeps the message out).
+
+    The sidecar sends `{"status": <HTTP 碼>, "code": "<碼>", "message": "…"}`
+    or `null`; an older or faked sidecar may send the code as a plain string,
+    which still reads. Anything else is no code.
+    """
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, dict):
+        code = value.get("code")
+        return code if isinstance(code, str) and code else None
+    return None
+
+
+def _at_of(value: object) -> str | None:
+    """The one-off job's `at` time, as the sidecar sent it (`null` otherwise)."""
+    if value is None:
+        return None
+    return value if isinstance(value, str) else str(value)

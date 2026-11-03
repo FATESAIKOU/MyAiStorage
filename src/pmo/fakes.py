@@ -253,16 +253,20 @@ class FakeSidecar:
         self.closed.append(agent_id)
         self.agents.pop(agent_id, None)
 
-    def add_job(self, job_id: str, *, every: object, text: str, agent_id: str,
+    def add_job(self, job_id: str, *, every: object = None, text: str = "", agent_id: str = "",
                 last_error: str | None = None, interrupt: bool = False,
-                action: str = "poke", last_run: object = None) -> JobRecord:
+                action: str = "poke", last_run: object = None, at: str | None = None,
+                auto: bool = False) -> JobRecord:
+        """Add one job; `every=None` makes it a one-off `at` job (#370 高-2)."""
         record = JobRecord(
             job_id=job_id,
             action=action,
             args={"id": agent_id, "text": text, "interrupt": interrupt},
-            every=seconds_of(every),
+            every=None if every is None else seconds_of(every),
             last_run=last_run,
             last_error=last_error,
+            at=at,
+            extra={"auto": True} if auto else {},
         )
         self.jobs[job_id] = record
         return record

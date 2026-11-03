@@ -134,8 +134,16 @@ def _sidecar(ctx: Ctx):
     return port
 
 
-def _local_team(team: Team) -> None:
-    """Refuse a worker team: its sidecar is on another machine (D-8, first phase)."""
+def _local_team(ctx: Ctx, team: Team) -> None:
+    """Refuse a team whose sidecar this PMO cannot reach (D-8, first phase).
+
+    First phase only operates the sidecar the PMO itself runs on: the port is
+    built from `cfg.pmo_sidecar` (the one address `pmo.cli` wires), so a team
+    whose own `sidecar` names another sidecar would be operated on the wrong
+    machine. Refuse instead of guessing (#370 中-1); picking the port by
+    address (`sidecar_for(address)`) is #356. With no `pmo_sidecar` the PMO is
+    not in a sidecar, and the local-team behavior stays as it was.
+    """
     if team.sidecar == "worker":
         raise SidecarError(
             detail=(
@@ -143,6 +151,8 @@ def _local_team(team: Team) -> None:
                 f"第一階段不搬（design D-8；見 §3.2.1 的 [worker-action]）"
             )
         )
+    if ctx.config.pmo_sidecar is not None and team.sidecar != ctx.config.pmo_sidecar:
+        raise SidecarError(detail="team 的 sidecar 不是 PMO 這台；第一階段只支援同一台")
 
 
 def _args_of(job: JobRecord) -> dict:
@@ -238,7 +248,7 @@ def poke(ctx: Ctx, *, team: Team, text: str, interrupt: bool = False) -> int:
     returned (a 204 stays 204); the port's contract is an `int`, so it is
     returned as is — no silent 200 for a port that answers with nothing.
     """
-    _local_team(team)
+    _local_team(ctx, team)
     return _sidecar(ctx).poke(team.pm, text=text, interrupt=interrupt)
 
 
@@ -419,7 +429,7 @@ def close(ctx: Ctx, *, team: Team, timeout: float = CLOSE_TIMEOUT_SECONDS) -> Cl
        still running in the background gets `close_requested_at` instead (待確認:
        the design names neither field's writer).
     """
-    _local_team(team)
+    _local_team(ctx, team)
     port = _sidecar(ctx)
 
     record: AgentRecord | None
@@ -549,15 +559,21 @@ def _record_close(
     the agent is already closed (or the close is on its way), and telling the
     caller「沒關」would be wrong. A new dispatch writes `closed: false` again
     (T-4a), so the flag is per dispatch.
+
+    The read-modify-write runs inside `teamstate.state_lock` (#370 中-2): the
+    same file's `ack_at` is written under the same lock by
+    `teammsg.process_team_messages`, and two writers outside one lock would
+    overwrite each other (the pattern #369 settled on for `send`／`inbox read`).
     """
     try:
-        st = teamstate.load_state(ctx.state_dir, team.key)
-        if close_requested_at:
-            st["close_requested_at"] = iso_utc(ctx.deps.now())
-        else:
-            st["closed"] = True
-            if state is not None:
-                st["state"] = state
-        teamstate.save_state(ctx.state_dir, team.key, st)
+        with teamstate.state_lock(ctx.state_dir, team.key):
+            st = teamstate.load_state(ctx.state_dir, team.key)
+            if close_requested_at:
+                st["close_requested_at"] = iso_utc(ctx.deps.now())
+            else:
+                st["closed"] = True
+                if state is not None:
+                    st["state"] = state
+            teamstate.save_state(ctx.state_dir, team.key, st)
     except (SchemaError, OSError) as error:
         ctx.log(f"[warn] team 狀態寫不進去（已關，但 closed 沒記）：{one_line(error)}")
