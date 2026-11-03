@@ -111,6 +111,32 @@ def optional_str(
     return value
 
 
+def optional_str_list(
+    data: Mapping[str, object], key: str, where: str
+) -> tuple[str, ...] | None:
+    """An optional array-of-strings field; absent (or null) falls back to None.
+
+    The team's `agent_args` is the shape this exists for (#356 裁定): an argv
+    tail handed to the sidecar, so every element must be a string (a number or
+    a nested array is a written-by-hand mistake, not something to coerce).
+    """
+    value = data.get(key, _MISSING)
+    if value is _MISSING or value is None:
+        return None
+    if not isinstance(value, list):
+        fail(where, f"the field {key!r} must be an array of strings, got {describe(value)}")
+    items: list[str] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            fail(
+                where,
+                f"the field {key!r} must be a string in every element; "
+                f"[{index}] is {describe(item)}",
+            )
+        items.append(item)
+    return tuple(items)
+
+
 def optional_dict(data: Mapping[str, object], key: str, where: str) -> Mapping[str, object]:
     """An optional object field; absent falls back to an empty object."""
     value = data.get(key, {})

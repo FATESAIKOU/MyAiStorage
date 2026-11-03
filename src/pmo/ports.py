@@ -65,6 +65,68 @@ class SidecarError(PortError):
         self.code = code
 
 
+class SidecarShapeError(SidecarError):
+    """The sidecar answered, but not in a shape this port reads (#356 低-1).
+
+    Kept apart from「連不上」: an unreachable sidecar has no `status` and its
+    detail is the connection failure, while this one came from a 2xx answer
+    whose body is not the expected shape. `pmo check` says the two differently,
+    so a sidecar that is up but talking an unreadable shape is never reported
+    as not answering.
+
+    `status` is the HTTP status the answer came with when the caller knows it
+    (`list_agents` tags it); a shape checked on a payload the caller already
+    owns (a `POST` answer) leaves it `None`.
+
+    `record` says which shape was wrong: `False` for the outer envelope (the
+    answer is not the `{"agents": [...]}` this port reads), `True` for one
+    record inside it (an element that is not an object, or one without
+    `id`／`state`). `pmo check` prints the two differently: only the outer one
+    is a version mismatch about the wrapper (#356 修正三 低-2).
+    """
+
+    def __init__(
+        self,
+        status: int | None = None,
+        code: str | None = None,
+        detail: str = "",
+        *,
+        record: bool = False,
+    ) -> None:
+        super().__init__(status=status, code=code, detail=detail)
+        self.record = record
+
+    def at_status(self, status: int) -> "SidecarShapeError":
+        """Tag the 2xx status the answer came with; the caller made the call."""
+        if self.status is None:
+            self.status = status
+        return self
+
+
+def sidecar_address(address: str) -> str:
+    """One sidecar address in the one form the code compares and looks up (#371).
+
+    A trailing `/` names the same machine (`http://h:8471/` is `http://h:8471`),
+    so it is stripped once here and nowhere else: the port lookup, `status`'s
+    per-address job cache and the「same machine as `pmo_sidecar`」comparison all
+    see the same string, and a shared sidecar is asked once.
+    """
+    return str(address).rstrip("/")
+
+
+def sidecar_code(error: "SidecarError") -> str:
+    """One known word for a sidecar failure (D-12: never the message text).
+
+    Used by `pmo.ops` and `pmo.dispatch` so the same refusal reads the same way
+    everywhere (`agent_not_running`, `HTTP 500`, 「連不上」).
+    """
+    if error.code:
+        return error.code
+    if error.status is not None:
+        return f"HTTP {error.status}"
+    return "連不上"
+
+
 @dataclass(frozen=True)
 class Message:
     """One Angareion message, as the core sees it (design §1.1).
@@ -116,12 +178,24 @@ def seconds_of(value: object) -> float:
 
 @dataclass(frozen=True)
 class AgentRecord:
-    """One agent seat, as `GET /agents[/<id>]` reports it."""
+    """One agent seat, as `GET /agents[/<id>]` reports it.
+
+    `attach` is the sidecar's `attach.local`: the whole command line for an
+    interactive team PM, verbatim (sidecar.md §2.1: 「呼叫端 MUST 原樣執行，
+    不得解析或拼接」). It is `None` for the `-p` and opencode agents (the
+    sidecar's `attach` is `null` there), and the `tmux` key beside it is not
+    read (it is a transitional alias the sidecar will remove; #356 裁定).
+
+    `input_unconfirmed_at` is the sidecar's「卡在 `starting`」marker: it stays
+    `None` until the agent's first input is confirmed.
+    """
 
     agent_id: str
     state: str
     exit: dict[str, object] | None = None  # e.g. {"reason": "no candidate..."}
     session: str | None = None
+    attach: str | None = None
+    input_unconfirmed_at: str | None = None
     extra: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
 
     def exit_reason(self) -> str | None:
@@ -137,6 +211,10 @@ class AgentRecord:
             known["exit"] = self.exit
         if self.session is not None:
             known["session"] = self.session
+        if self.attach is not None:
+            known["attach"] = self.attach
+        if self.input_unconfirmed_at is not None:
+            known["input_unconfirmed_at"] = self.input_unconfirmed_at
         return known
 
 
@@ -256,18 +334,28 @@ class SidecarPort(Protocol):
         self,
         *,
         agent_id: str,
+        agent: str,
         workdir: str,
-        provider: str,
-        model: str,
         input: str,
+        provider: str | None = None,
+        model: str | None = None,
+        tui: bool = False,
         session: str | None = None,
         fresh: bool = False,
+        agent_args: tuple[str, ...] | None = None,
     ) -> AgentRecord:
         """`POST /agents`; refusal or an unreachable sidecar raises `SidecarError`.
 
-        `session` continues a recorded conversation (`pmo open --session`), and
-        `fresh` asks for a new one (`--fresh`); both ride in the `POST` body
-        (design §3.2, T-4b).
+        `agent` is required by the sidecar and has no default there (`core.open`
+        refuses an empty one with 400), so it is required here too (#356 裁定).
+        `workdir` and `input` are the other two always-sent fields; everything
+        else rides in the body only when it applies: `tui` for an interactive
+        team PM, `session` to continue a recorded conversation
+        (`pmo open --session`), `fresh` for a new one (`--fresh`, tui only),
+        `provider`／`model` when the flags or the team name them (a `provider`
+        alone is legal; both absent lets the sidecar pick), and `agent_args` as
+        the argv tail (`agent_args_mode: "append"`). `subscription` is never
+        sent (design §3.2, T-4b).
         """
         ...
 

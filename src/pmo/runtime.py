@@ -25,7 +25,7 @@ from ainame import is_valid
 
 from .config import TeamsConfig
 from .errors import IdentityMismatch
-from .ports import AicommPort, AngareionPort, GitHubPort, SidecarPort
+from .ports import AicommPort, AngareionPort, GitHubPort, SidecarPort, sidecar_address
 from .sanitize import sanitize
 from .timeutil import real_now
 
@@ -65,16 +65,38 @@ class Deps:
     Each port may stay `None` when the deployment does not wire it; a command
     that needs one and finds `None` is not a bad backend, it is a missing
     wiring, and the refusal names it. T-2 wires `angareion` (`pmo inbox …`),
-    T-4a `github` (`pmo send`), and T-4c `aicomm` (`pmo reply`) plus `sidecar`
-    (`pmo poke`／`status`／`close`). `open` (T-4b) and the wake jobs (T-5) use
-    the same two ports.
+    T-4a `github` (`pmo send`), and T-4c `aicomm` (`pmo reply`) plus the sidecar
+    port (`pmo poke`／`status`／`close`).
+
+    The sidecar port is looked up **by address** (`sidecar_for(address)`), not
+    fixed to one machine: every team record names its own `sidecar`, and the
+    PMO's own wake jobs live on `pmo_sidecar`. The two can differ (a team on
+    another machine reachable over HTTP), so the port cannot be one instance
+    (#356; design §3.1). Addresses are put in one form first, so a trailing
+    `/` does not make one machine look like two (#371). `pmo.cli` wires the
+    factory to `adapters.Sidecar`; tests hand in a fake that answers per
+    address.
     """
 
     angareion: AngareionPort
     now: Callable[[], datetime] = real_now  # noqa: A003
     aicomm: AicommPort | None = None
-    sidecar: SidecarPort | None = None
+    sidecar_for: Callable[[str], SidecarPort] | None = None
     github: GitHubPort | None = None
+
+
+def sidecar_port(deps: Deps, address: str) -> SidecarPort | None:
+    """The sidecar port for one address, or `None` when none is wired.
+
+    The address is put in its one form first (`sidecar_address`, #371): the
+    cache and comparisons elsewhere use that same string, so `http://h:8471/`
+    and `http://h:8471` reach one port and one machine. The caller decides what
+    a missing port means (a refusal for the commands that need it, an honest
+    「沒有接上」for `pmo check`).
+    """
+    if deps.sidecar_for is None:
+        return None
+    return deps.sidecar_for(sidecar_address(address))
 
 
 @dataclass
