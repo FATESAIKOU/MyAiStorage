@@ -1,8 +1,9 @@
 """`pmo inbox rebuild` 的測試（#110 T-3；design §1.2、§3.2）。
 
 驗收（工單 #354）：刪掉帳本 → rebuild → 補發的 ack 沿用重建的 issue／schedule、
-不重開工單；team 欄留空並列出；負向：log 讀不到／格式不符時的行為。全部用
-假 angareion（`FakeAngareion` 的過濾變種）與暫存 state，不打真的後端。
+不重開工單；team 重建不出來（本機沒有值才留空並列出）；log 沒說的一律保留
+本機的值；負向：log 讀不到／格式不符時的行為。全部用假 angareion
+（`FakeAngareion` 的過濾變種）與暫存 state，不打真的後端。
 """
 
 from __future__ import annotations
@@ -299,9 +300,30 @@ def test_existing_item_keeps_the_fields_the_log_cannot_see(pmo_env):
     assert (item["issue"], item["schedule"]) == (ISSUE, "立即開工")
     assert (item["ack_at"], item["reported_at"], item["pr"]) == (ACK_TIME, REPORT_TIME, PR)
     assert item["status"] == "已完成"  # 不退回 scheduled（下一輪 read 才不會補發 ack）
-    # §1.2：team 仍重建不出來——留空並列出
-    assert item["team"] is None
-    assert f"[rebuild] team：1 筆重建不出來，已留空並列出：{ULID_1}" in out
+    # §1.2：team 重建不出來，但本機有值——留著，不列進「team 為空」的清單
+    assert item["team"] == "demo2-m1"
+    assert "team：0 筆重建不出來" in out
+
+
+def test_issue_comes_from_the_newer_of_the_ack_and_the_report(pmo_env):
+    """中（PM 裁定）：ack 與回報的工單不同時，取較新那封的值；反向亦然。"""
+    tmp = log_env(
+        pmo_env,
+        [letter_msg(), ack_msg(issue="demo#8"), report_msg(issue="demo#9")],
+    )
+    assert run_cli(["inbox", "rebuild"], tmp)[0] == 0  # 回報較新（12:30 > 10:20）
+    assert read_ledger(tmp)["items"][ULID_1]["issue"] == "demo#9"
+
+    later = log_env(
+        pmo_env,
+        [
+            letter_msg(),
+            ack_msg(issue="demo#8", received_at="2026-10-19T13:00:00Z"),
+            report_msg(issue="demo#9"),
+        ],
+    )
+    assert run_cli(["inbox", "rebuild"], later)[0] == 0  # ack 較新（13:00 > 12:30）
+    assert read_ledger(later)["items"][ULID_1]["issue"] == "demo#8"
 
 
 def test_existing_item_still_takes_the_values_the_log_does_see(pmo_env):
@@ -324,8 +346,8 @@ def test_existing_item_still_takes_the_values_the_log_does_see(pmo_env):
 # --------------------------------------------------------------------------- #
 
 
-def test_team_is_emptied_and_listed_only_for_the_items_rebuilt(pmo_env):
-    """team 重建不出來：重建到的項目留空並列出；log 沒到的舊項目原樣留著。"""
+def test_team_of_an_existing_item_is_kept_and_only_blank_ones_are_listed(pmo_env):
+    """team 重建不出來，但本機有值就留著；只列結果裡 team 為空的項目。"""
     from _pmo_env import seed_items, item_data as _item_data  # 局部引進，避免檔頭再列一串
     seed_items(pmo_env, [
         item_data(ULID_1, team="demo2-m1"),
@@ -338,14 +360,37 @@ def test_team_is_emptied_and_listed_only_for_the_items_rebuilt(pmo_env):
     assert f"[rebuild] 更新：{ULID_1}" in out
 
     state = read_ledger(tmp)
-    assert state["items"][ULID_1]["team"] is None
-    assert f"[rebuild] team：1 筆重建不出來，已留空並列出：{ULID_1}" in out
+    assert state["items"][ULID_1]["team"] == "demo2-m1"  # log 沒說的不洗掉
+    assert "team：0 筆重建不出來" in out
     old = state["items"][ULID_2]  # log 沒涵蓋到的舊項目不被這次重建動到
     assert old["team"] == "demo2-m1"
     assert old["issue"] == "demo#old"
 
 
-def test_notified_call_is_rebuilt_and_poke_is_reset(pmo_env):
+def test_rebuild_keeps_the_local_team_and_the_poke_account(pmo_env):
+    """高-1：不刪帳本時，log 沒有的 team 與 notified.poke 一律保留本機值。"""
+    from _pmo_env import seed_items  # 局部引進，避免檔頭再列一串
+
+    seed_items(pmo_env, [item_data(ULID_1, team="demo2-m1")])
+    seeded = read_ledger(pmo_env)
+    seeded["notified"] = {
+        "call": {"old-in": "2026-10-18T00:00:00Z"},
+        "poke": {"old-poke": "2026-10-18T00:00:00Z"},
+    }
+    ledger.save_state(pmo_env.state_dir, seeded)
+
+    tmp = log_env(pmo_env, [letter_msg(), ack_msg()])
+    rc, out, _ = run_cli(["inbox", "rebuild"], tmp)
+    assert rc == 0
+
+    state = read_ledger(tmp)
+    assert state["items"][ULID_1]["team"] == "demo2-m1"
+    assert state["notified"]["poke"] == {"old-poke": "2026-10-18T00:00:00Z"}
+    assert "team：0 筆重建不出來" in out
+    assert "notified.poke：1 筆保留" in out
+
+
+def test_notified_call_is_merged_and_poke_is_kept(pmo_env):
     seed_item(pmo_env)
     seed_ledger = read_ledger(pmo_env)
     seed_ledger["notified"] = {"call": {"old-in": "2026-10-18T00:00:00Z"}, "poke": {"old-poke": "2026-10-18T00:00:00Z"}}
@@ -356,10 +401,61 @@ def test_notified_call_is_rebuilt_and_poke_is_reset(pmo_env):
     assert rc == 0
 
     notified = read_ledger(tmp)["notified"]
-    assert notified["call"] == {CALL_MSG_ID: CALL_ACK_TIME}
-    assert notified["poke"] == {}  # §1.2：重建不出來
-    assert "notified.poke：1 筆未重建" in out
-    assert "叫人去重帳重建 1 筆" in out
+    # 既有 ∪ 重建：log 只回了這一封，窗口外的既有紀錄不能掉
+    assert notified["call"] == {
+        "old-in": "2026-10-18T00:00:00Z",
+        CALL_MSG_ID: CALL_ACK_TIME,
+    }
+    assert notified["poke"] == {"old-poke": "2026-10-18T00:00:00Z"}  # 重建不出來，留著
+    assert "notified.poke：1 筆保留" in out
+    assert "叫人去重帳共 2 筆" in out
+
+
+def test_call_account_never_shrinks_when_the_log_returns_only_part_of_it(pmo_env):
+    """高-1：不帶 --since 時 log 也可能只回一部分（後端 limit）；∪ 之後不減。"""
+    ledger.save_state(
+        pmo_env.state_dir,
+        {
+            "version": 1, "updated_at": None, "items": {},
+            "notified": {
+                "call": {"old-in": "2026-10-18T00:00:00Z"},
+                "poke": {},
+            },
+        },
+    )
+    tmp = log_env(pmo_env, [letter_msg(), call_ack_msg()])
+    rc, _, _ = run_cli(["inbox", "rebuild"], tmp)  # 沒有 --since
+    assert rc == 0
+    assert tmp.ang.log_calls and all(call["since"] is None for call in tmp.ang.log_calls)
+    assert read_ledger(tmp)["notified"]["call"] == {
+        "old-in": "2026-10-18T00:00:00Z",
+        CALL_MSG_ID: CALL_ACK_TIME,
+    }
+
+
+def test_call_account_is_trimmed_after_the_union(pmo_env):
+    """∪ 之後照 `mark_notified` 的帳修剪：只留最近 NOTIFIED_MAX 筆。"""
+    from datetime import datetime, timedelta, timezone  # 局部引進：只有這支要造時刻
+
+    base = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    old = {
+        f"old-{index:03d}": (base + timedelta(seconds=index)).isoformat().replace("+00:00", "Z")
+        for index in range(inbox.NOTIFIED_MAX)
+    }
+    ledger.save_state(
+        pmo_env.state_dir,
+        {"version": 1, "updated_at": None, "items": {},
+         "notified": {"call": old, "poke": {}}},
+    )
+    tmp = log_env(pmo_env, [letter_msg(), call_ack_msg()])
+    rc, _, _ = run_cli(["inbox", "rebuild"], tmp)
+    assert rc == 0
+
+    calls = read_ledger(tmp)["notified"]["call"]
+    assert len(calls) == inbox.NOTIFIED_MAX
+    assert calls[CALL_MSG_ID] == CALL_ACK_TIME  # 新的留著
+    assert "old-000" not in calls  # 最舊的被修剪
+    assert "old-001" in calls
 
 
 def test_call_ack_without_in_reply_to_still_falls_back_to_the_title_id(pmo_env):
@@ -452,6 +548,30 @@ def test_malformed_log_output_is_exit_2_and_leaves_the_ledger_alone(pmo_env, ang
     assert pmo_env.inbox_file().read_text(encoding="utf-8") == before  # 帳本原樣
 
 
+def test_angareion_usage_error_is_exit_1(pmo_env, angareion_exit):
+    """中（PM 選 (a)）：angareion 自己的用法錯（exit 1）回 1，不是 2。"""
+    angareion_exit.update(returncode=1, stderr="Error: unrecognized arguments")
+    seed_item(pmo_env, ULID_2, team="demo2-m1")
+    before = pmo_env.inbox_file().read_text(encoding="utf-8")
+    rc, out, err = run_cli(
+        ["inbox", "rebuild"], pmo_env, deps=Deps(angareion=Angareion())
+    )
+    assert (rc, out) == (1, "")
+    assert "exit 1" in err
+    assert "unrecognized arguments" in err
+    assert pmo_env.inbox_file().read_text(encoding="utf-8") == before  # 帳本原樣
+
+
+def test_a_backend_failure_is_still_exit_2(pmo_env, angareion_exit):
+    """其餘 `PortError`（angareion 的後端失敗 exit 2）照設計回 2。"""
+    angareion_exit.update(returncode=2, stderr="Error: backend down")
+    rc, out, err = run_cli(
+        ["inbox", "rebuild"], pmo_env, deps=Deps(angareion=Angareion())
+    )
+    assert (rc, out) == (2, "")
+    assert "exit 2" in err
+
+
 def test_a_damaged_ledger_fails_before_the_log(pmo_env):
     tmp = log_env(pmo_env, [letter_msg()])
     tmp.state_dir.mkdir(parents=True, exist_ok=True)
@@ -518,8 +638,24 @@ def test_report_placeholders_map_to_none():
 
 
 class _Proc:
-    def __init__(self, stdout: str = "[]", returncode: int = 0):
-        self.stdout, self.stderr, self.returncode = stdout, "", returncode
+    def __init__(self, stdout: str = "[]", returncode: int = 0, stderr: str = ""):
+        self.stdout, self.stderr, self.returncode = stdout, stderr, returncode
+
+
+@pytest.fixture
+def angareion_exit(monkeypatch):
+    """`angareion` 以指定的結束碼失敗（真 adapter，只換掉 `subprocess.run`）。"""
+    reply = {"stdout": "[]", "returncode": 0, "stderr": ""}
+
+    def _fake_run(args, **kwargs):
+        return _Proc(
+            stdout=reply["stdout"],
+            returncode=reply["returncode"],
+            stderr=reply["stderr"],
+        )
+
+    monkeypatch.setattr("pmo.adapters.subprocess.run", _fake_run)
+    return reply
 
 
 @pytest.fixture
@@ -590,3 +726,16 @@ def test_adapter_log_refuses_a_malformed_record(angareion_runs):
     reply["stdout"] = json.dumps(["just a string"])
     with pytest.raises(PortError, match="每一筆都必須是物件"):
         Angareion().log()
+
+
+def test_adapter_carries_the_exit_code_on_the_port_error(angareion_exit):
+    """中（PM 選 (a)）：`_run` 把子行程的結束碼放進 `PortError.returncode`。"""
+    angareion_exit.update(returncode=1, stderr="Error: unrecognized arguments")
+    with pytest.raises(PortError) as caught:
+        Angareion().log()
+    assert caught.value.returncode == 1
+    assert "exit 1" in str(caught.value)
+
+
+def test_a_port_error_without_a_process_has_no_returncode():
+    assert PortError("起不來").returncode is None

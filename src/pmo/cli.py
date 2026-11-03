@@ -281,20 +281,21 @@ def _cite(ids: list[str]) -> str:
 def cmd_inbox_rebuild(ctx: Ctx, args: argparse.Namespace) -> int:
     """由 angareion log 重建收件帳本（design §3.2 的 rebuild 列；#110 T-3）。
 
-    結束碼照設計的表：0 重建跑完（含 dry-run）；2 外部失敗——log 讀不到、
-    輸出不合格式（`PortError`）或帳本壞、寫不進去（`SchemaError`），帳本維持
-    原樣。stdout 是差異（重建幾筆、加／換了哪些、team 重建不出來的清單、
-    `notified.poke` 重建不出來的說明），身分守門不在這裡：重建不寄信。
+    結束碼照設計的表：0 重建跑完（含 dry-run）；1 angareion 自己的用法錯
+    （exit 1：旗面拼錯一類，修呼叫端）；2 其他外部失敗——log 讀不到、輸出不合
+    格式、後端失敗（其餘 `PortError`）或帳本壞、寫不進去（`SchemaError`），
+    帳本維持原樣。stdout 是差異（重建幾筆、加／換了哪些、team 為空而重建不出
+    來的清單、`notified.poke` 保留的說明），身分守門不在這裡：重建不寄信。
     """
     try:
         report = rebuild.rebuild(ctx, since=args.since, dry_run=args.dry_run)
     except PortError as error:
         ctx.log(f"[rebuild] 重建失敗：{inbox.one_line_for_event(error)}")
-        return 2
+        return 1 if error.returncode == 1 else 2
     ctx.emit(
         f"[rebuild] 重建 {len(report.added) + len(report.updated)} 筆"
         f"（新增 {len(report.added)}、更新 {len(report.updated)}），"
-        f"叫人去重帳重建 {report.call_notified} 筆"
+        f"叫人去重帳共 {report.call_notified} 筆（既有 ∪ 重建）"
     )
     ctx.emit(f"[rebuild] 新增：{_cite(sorted(report.added))}")
     ctx.emit(f"[rebuild] 更新：{_cite(sorted(report.updated))}")
@@ -303,8 +304,8 @@ def cmd_inbox_rebuild(ctx: Ctx, args: argparse.Namespace) -> int:
         f"{_cite(sorted(report.team_blank))}"
     )
     ctx.emit(
-        f"[rebuild] notified.poke：{report.poke_lost} 筆未重建（急件去重沒有寄信、"
-        f"無法重建；同一則急件可能再標一次 [poke]，只是多叫醒一次，無副作用）"
+        f"[rebuild] notified.poke：{report.poke_kept} 筆保留（急件去重只有本機有、"
+        f"log 重建不出來；照原樣留著，不會多叫醒）"
     )
     if args.dry_run:
         ctx.emit("[rebuild] [dry-run] 只算差異，帳本未寫")

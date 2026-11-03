@@ -8,9 +8,10 @@ D-5：收件帳本以 Angareion 為準，本機是快取，可以重建。重建
 - 叫人 ack（拿 `notified.call`）：`log --from <PMO> --grep <# 收到叫人：> 開頭`
   ——它的 `in_reply_to` 是被叫的來信 id、`received_at` 是 ack 的時刻。
 
-能重建／不能重建照 §1.2 的表：`team` 重建不出來（留空並由回報列出）；
-`notified.poke` 重建不出來（重建後同一則急件可能再標一次 `[poke]`，只是多
-叫醒一次，無副作用）。重建完在帳本上記 `rebuilt_at`（§3.4 新欄位）。
+能重建／不能重建照 §1.2 的表：`team` 重建不出來（本機沒有值時留空並由回報
+列出；本機有值就留著，見 `_keep_local`）；`notified.poke` 重建不出來（急件
+去重只有本機有，重建照原樣留著，不洗掉也不多叫醒一次）。重建完在帳本上記
+`rebuilt_at`（§3.4 新欄位）。
 
 語意照現行工具：同一個工作 ID 再次讀到時「補發 ack、沿用既有的工單與排程、
 不重開工單」——所以補發的 ack 要能沿用重建出來的 `issue`／`schedule`（§1.2
@@ -242,7 +243,28 @@ def collect_call_acks(messages: list, pmo_identity: str) -> dict[str, str]:
 
 
 #: 只能由 log 重建的欄位：log 回 None 代表「這次查不到」，不是「值沒了」。
-_LOG_ITEM_FIELDS = ("ack_at", "schedule", "issue", "status", "reported_at", "pr")
+#: `team` 也在這裡：§1.2 說它重建不出來，本機的值就是唯一的來源。
+_LOG_ITEM_FIELDS = ("ack_at", "schedule", "issue", "status", "reported_at", "pr", "team")
+
+
+def _newest_issue(ack: Mapping | None, report: Mapping | None) -> str | None:
+    """`issue` 取 ack 與回報之中**較新那封**的值（`ack_at`／`reported_at`）。
+
+    只有一封有值就用那一封（樣板的「評估排程中」／「無」已是 None）；同時刻
+    （含兩封都缺時刻）以回報為準——回報是結果，工單欄以結果為準。
+    """
+    candidates: list[tuple[str, str]] = []
+    if ack is not None and ack.get("issue") is not None:
+        candidates.append((str(ack.get("ack_at") or ""), str(ack["issue"])))
+    if report is not None and report.get("issue") is not None:
+        candidates.append((str(report.get("reported_at") or ""), str(report["issue"])))
+    if not candidates:
+        return None
+    best = candidates[0]
+    for candidate in candidates[1:]:
+        if _order_key(candidate[0]) >= _order_key(best[0]):
+            best = candidate
+    return best[1]
 
 
 def _item_of(letter: Mapping, ack: Mapping | None, report: Mapping | None) -> dict:
@@ -250,10 +272,11 @@ def _item_of(letter: Mapping, ack: Mapping | None, report: Mapping | None) -> di
 
     log 沒說的欄位留 None：更新既有項目時它代表「這次查不到，別洗掉本機的
     值」（`_keep_local`）；新增的項目再由 `merge_rebuild` 補 `status` 的預設值。
+    `issue` 是例外：它取 ack 與回報之中較新那封的值（`_newest_issue`）。
     """
     ack_at = ack["ack_at"] if ack else None
     schedule = ack["schedule"] if ack else None
-    issue = (ack["issue"] if ack else None) or (report["issue"] if report else None)
+    issue = _newest_issue(ack, report)
     status, reported_at, pr = None, None, None
     if report is not None:
         status = report["status"]
@@ -284,7 +307,8 @@ def _keep_local(existing: Mapping, rebuilt: Mapping) -> dict:
 
     後端的 log 有 limit，也可能根本沒有那封信（§1.2：過去沒帶 `in_reply_to`
     的舊 ack 重建不出來）。整筆重造會把本機的工單與排程洗成 None、狀態退回
-    `scheduled`，下一輪 read 同一張工作就會補發 ack 並可能重開工單。
+    `scheduled`，下一輪 read 同一張工作就會補發 ack 並可能重開工單。`team`
+    也走同一條規則：log 根本沒有這一欄（§1.2、D-17），本機的值是唯一來源。
     """
     merged = dict(rebuilt)
     for field in _LOG_ITEM_FIELDS:
@@ -307,17 +331,21 @@ def merge_rebuild(
     reports: Mapping[str, Mapping | None],
     call_acks: Mapping[str, str],
     now: datetime,
-    since: str | None = None,
 ) -> RebuildReport:
     """把重建結果**併**進帳本狀態（就地改 `state`）。
 
-    併、不整本換：「刪掉帳本 → rebuild」就是整本重來；不刪檔時，帳本裡 log
-    沒涵蓋到的既有項目留著（後端的 log 有 limit，沒看到的項目當還在快取裡）。
-    更新既有項目時同一條規則落到欄位：log 回 None 的欄位（issue／schedule／
-    ack_at／status／reported_at／pr）留舊值，只覆寫 log 有值的那幾個——否則
-    查不到舊 ack 的項目會被洗回 `scheduled`，下一輪 read 就補發 ack、可能重開
-    工單。`--since` 時同樣只把窗口內當成事實：叫人去重帳窗口外的既有紀錄留著，
-    否則重建會讓 PMO 對早就 ack 過的叫人再 ack 一次。
+    一條規則：**log 沒說的一律保留本機的值**。「刪掉帳本 → rebuild」當然是
+    整本重來；不刪檔時，帳本裡 log 沒涵蓋到的既有項目留著（後端的 log 有
+    limit，沒看到的項目當還在快取裡）。同一條規則落到欄位與去重帳：
+
+    - 項目欄位：log 回 None 的欄位（issue／schedule／ack_at／status／
+      reported_at／pr／team）留舊值，只覆寫 log 有值的那幾個——否則查不到舊
+      ack 的項目會被洗回 `scheduled`，下一輪 read 就補發 ack、可能重開工單。
+    - `notified.call`：一律「既有 ∪ 重建」再修剪。log 只回一部分（`--since`
+      窗口、後端 limit）時，窗口外的既有紀錄留著，否則重建會讓 PMO 對早就
+      ack 過的叫人再 ack 一次。
+    - `notified.poke`：急件去重沒有寄信、重建不出來（§1.2），照原樣留著；
+      洗掉只會讓同一則急件被多叫醒一次。
     """
     items: dict = state["items"]
     added: list[str] = []
@@ -332,30 +360,23 @@ def merge_rebuild(
             if rebuilt["status"] is None:  # 沒回報的新工作＝已收件排程中（照正路）
                 rebuilt["status"] = "scheduled"
             items[ulid] = rebuilt
-    # §1.2：team 重建不出來，重建到的每一筆都留空——不論原本有沒有值、是不是
-    # 這次才新增的（刪掉帳本重來時每一筆都是新的，PMO 照樣要知道它們沒有
-    # team），所以列出的就是這次重建到的全部項目。
-    team_blank = list(letters)
+    # §1.2：team 重建不出來。結果裡 team 還是空的才列出來（本機有值的已被
+    # `_keep_local` 留著，那些沒有東西要補）。
+    team_blank = [ulid for ulid in letters if not items[ulid].get("team")]
 
     notified = ledger.normalize_state(state)["notified"]
-    rebuilt_calls = _trim_calls(call_acks)
-    if since is None:
-        notified["call"] = rebuilt_calls  # 整段重建：log 就是全部
-    else:
-        merged_calls = dict(notified.get("call") or {})
-        merged_calls.update(rebuilt_calls)
-        notified["call"] = _trim_calls(merged_calls)
-    poke_lost = len(notified.get("poke", {}))
-    # §1.2：急件叫醒去重沒有寄信、重建不出來；留空並反映在回報上
-    #（後果是同一則急件可能再標一次 [poke]，只多叫醒一次，無副作用）。
-    notified["poke"] = {}
+    merged_calls = dict(notified.get("call") or {})
+    merged_calls.update(_trim_calls(call_acks))
+    notified["call"] = _trim_calls(merged_calls)
+    # §1.2：急件叫醒去重沒有寄信、重建不出來——保留本機的紀錄，只反映筆數。
+    poke_kept = len(notified.get("poke") or {})
     state["rebuilt_at"] = iso_utc(now)
     return RebuildReport(
         added=added,
         updated=updated,
         team_blank=team_blank,
         call_notified=len(notified["call"]),
-        poke_lost=poke_lost,
+        poke_kept=poke_kept,
     )
 
 
@@ -367,7 +388,7 @@ class RebuildReport:
     updated: list[str]
     team_blank: list[str]
     call_notified: int
-    poke_lost: int
+    poke_kept: int
 
 
 # --------------------------------------------------------------------------- #
@@ -411,7 +432,7 @@ def rebuild(ctx: Ctx, since: str | None = None, dry_run: bool = False) -> Rebuil
     now = ctx.deps.now()
     with ledger.state_lock(ctx.state_dir):
         state = ledger.load_state(ctx.state_dir)  # 鎖內重讀，不蓋掉並行的寫入
-        report = merge_rebuild(state, letters, acks, reports, call_acks, now, since=since)
+        report = merge_rebuild(state, letters, acks, reports, call_acks, now)
         if not dry_run:
             ledger.save_state(ctx.state_dir, state, now=now)
     return report

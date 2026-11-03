@@ -43,7 +43,10 @@ def _run(args: list[str], body: str | None = None) -> str:
     except OSError as e:
         raise PortError(f"{ANGAREION_COMMAND} 起不來：{e}") from e
     if proc.returncode != 0:
-        raise PortError(f"{ANGAREION_COMMAND} exit {proc.returncode}：{(proc.stderr or '').strip()}")
+        raise PortError(
+            f"{ANGAREION_COMMAND} exit {proc.returncode}：{(proc.stderr or '').strip()}",
+            returncode=proc.returncode,
+        )
     return (proc.stdout or "").strip()
 
 
