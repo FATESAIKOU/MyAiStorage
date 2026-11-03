@@ -32,6 +32,8 @@ from pmo.ports import AgentRecord, PortError, SidecarError, SidecarShapeError
 from pmo.runtime import Deps
 
 from _pmo_env import (
+    PMO_IDENTITY,
+    TEAM_CHANNEL,
     TEAM_KEY,
     TEAM_PM,
     PmoEnv,
@@ -60,6 +62,41 @@ TEAM_SIDECAR = "http://127.0.0.1:8472"
 NOW = datetime(2026, 10, 19, 10, 15, 0, tzinfo=timezone.utc)
 #: 假 secret：前綴在執行時才組起來（檔案裡不留完整樣式）。
 FAKE_SECRET = "sk" + "-ant-" + "x" * 40
+
+# --------------------------------------------------------------------------- #
+# 架構師 #373 結構審 §A-1 給的第一則輸入原樣（逐字；這張修正單要求「一字照
+# 原樣」，所以期望值也原樣寫在這裡，不從程式匯入）。非互動版是多行：每一行
+# 一條字串，用 `\n` 接回去。
+# --------------------------------------------------------------------------- #
+
+ARCH_FIRST_INPUT_LINES = (
+    "你是 team PM（{pm}）。照你的 harness 工作。指示在 Angareion：用",
+    "`angareion read --channel {channel} --since {since} --json` 讀，只處理工單號是 {ticket} 的那幾則，用訊息 id 去重。",
+    "讀到後先回一則「收到 {ticket}」。讀不到 channel（exit 1）或讀不到這張單的指示，就等 60 秒再試，最多 5 次，還是不行就回報 PMO 後停下來。",
+    "做完或有問題，用 `aicomm send --channel {channel} --to {pmo} --body -` 回報（{report_hint}）。",
+)
+ARCH_FIRST_INPUT = "\n".join(ARCH_FIRST_INPUT_LINES)
+
+#: 互動版：同一段話，一行（互動版經 tmux 貼上，多行會被拆成多則）。
+ARCH_FIRST_INPUT_TUI = (
+    "你是 team PM（{pm}）。照你的 harness 工作。指示在 Angareion：用 "
+    "`angareion read --channel {channel} --since {since} --json` 讀，只處理工單號是 {ticket} 的那幾則，用訊息 id 去重。"
+    "讀到後先回一則「收到 {ticket}」。讀不到 channel（exit 1）或讀不到這張單的指示，就等 60 秒再試，最多 5 次，還是不行就回報 PMO 後停下來。"
+    "做完或有問題，用 `aicomm send --channel {channel} --to {pmo} --body -` 回報（{report_hint}）。"
+)
+
+REPORT_HINT_PR = "PR 連結直接寫在 body"
+REPORT_HINT_LIFE = "產出位置寫在回報裡"
+
+#: 這幾支測試的 team 狀態與設定對應的填值（`ready_env` 種的那一份）。
+ARCH_FIELDS = {
+    "pm": TEAM_PM,
+    "channel": TEAM_CHANNEL,
+    "since": DISPATCHED_AT,
+    "ticket": TICKET,
+    "pmo": PMO_IDENTITY,
+    "report_hint": REPORT_HINT_PR,
+}
 
 
 def write_team_config(
@@ -194,19 +231,63 @@ def test_open_prints_state_and_attach_and_writes_the_team_state(pmo_env):
     assert state["dispatched_at"] == DISPATCHED_AT
 
 
-def test_the_first_input_carries_the_dispatched_at_as_since(pmo_env):
-    """§2.1／#356：第一則輸入要帶 team 狀態的 `dispatched_at`（send 寫的 --since）。"""
-    sidecar = ready_env(pmo_env)
+def test_the_first_input_is_the_architects_noninteractive_template(pmo_env):
+    """#373 結構審 §A-1：非互動版逐字照架構師的原樣（多行）。
+
+    一句一字都不能少：`--channel`（只讀這張單的頻道）、`--since`（team 狀態的
+    `dispatched_at`）與「先回一則『收到 ‹工單›』」（T-5 的看門狗靠它）。
+    """
+    sidecar = ready_env(pmo_env)  # tui: false
     deps, _factory = deps_with(sidecar)
     rc, _out, err = run_open(pmo_env, deps)
     assert (rc, err) == (0, "")
+
     first_input = sidecar.payloads[0]["input"]
+    assert first_input == ARCH_FIRST_INPUT.format(**ARCH_FIELDS)
+    # 模板本身就是架構師的原樣（不只是展開後碰巧一樣）。
+    assert open_module.OPEN_INPUT == ARCH_FIRST_INPUT
+    assert f"收到 {TICKET}" in first_input
+    assert f"--channel {TEAM_CHANNEL}" in first_input
     assert f"--since {DISPATCHED_AT}" in first_input
-    assert "Angareion" in first_input
-    assert first_input == open_module.input_for(DISPATCHED_AT)
-    # 互動版把第一則輸入當一行打進去：展開後不能有換行。
+    assert f"--to {PMO_IDENTITY}" in first_input
+    # 非互動版是多行（換行處照架構師給的那份）。
+    assert first_input.splitlines() == [
+        line.format(**ARCH_FIELDS) for line in ARCH_FIRST_INPUT_LINES
+    ]
+    assert first_input.count("\n") == len(ARCH_FIRST_INPUT_LINES) - 1
+
+
+def test_the_first_input_of_an_interactive_team_is_one_line(pmo_env):
+    """互動版是單行：展開後不能有換行，否則 tmux 會拆成好幾則。"""
+    sidecar = ready_env(pmo_env, overrides={"tui": True})
+    deps, _factory = deps_with(sidecar)
+    rc, _out, err = run_open(pmo_env, deps)
+    assert (rc, err) == (0, "")
+
+    first_input = sidecar.payloads[0]["input"]
+    assert first_input == ARCH_FIRST_INPUT_TUI.format(**ARCH_FIELDS)
+    assert open_module.OPEN_INPUT_TUI == ARCH_FIRST_INPUT_TUI
     assert "\n" not in first_input
-    assert "\n" not in open_module.OPEN_INPUT
+    assert f"收到 {TICKET}" in first_input
+    assert f"--channel {TEAM_CHANNEL}" in first_input
+    assert f"--since {DISPATCHED_AT}" in first_input
+    assert f"--to {PMO_IDENTITY}" in first_input
+
+
+def test_the_first_input_of_a_life_team_says_where_the_output_goes(pmo_env):
+    """`life: true` 的 team：`{report_hint}` 是「產出位置寫在回報裡」。"""
+    sidecar = ready_env(pmo_env, overrides={"life": True})
+    deps, _factory = deps_with(sidecar)
+    rc, _out, err = run_open(pmo_env, deps)
+    assert (rc, err) == (0, "")
+
+    first_input = sidecar.payloads[0]["input"]
+    expected = ARCH_FIRST_INPUT.format(
+        **{**ARCH_FIELDS, "report_hint": REPORT_HINT_LIFE}
+    )
+    assert first_input == expected
+    assert REPORT_HINT_LIFE in first_input
+    assert REPORT_HINT_PR not in first_input
 
 
 def test_open_sends_the_teams_agent(pmo_env):

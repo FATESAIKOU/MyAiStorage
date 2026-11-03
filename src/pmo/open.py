@@ -23,14 +23,17 @@ team, `fresh` only with `tui`, `session` only with `--session` (a new open
 leaves the key out entirely; `null` is a 400), and `subscription` is never
 sent.
 
-The first input only points the agent at Angareion
-(`docs/atelier/interface-summary.md`: 「input 只說去 Angareion 讀指示」), and it
-carries the dispatch's `--since`: the team state's `dispatched_at`, which
-`pmo send` wrote as the dispatch letter's back-end time minus 60 seconds. A
-fresh team PM reads the letter with `aicomm inbox`; if it is not there, the
-`--since` is how it asks again without moving the cursor (docs/angareion.md,
-docs/aicomm.md). The wording is fixed here because the design names no setting
-for it; #356's report lists it as 待確認.
+The first input is MyPMO's `build_first_input` shape with the opening's place
+(Mac／worker) taken out (#373 結構審 §A-1): it names the team channel, the
+`--since` (the team state's `dispatched_at`, which `pmo send` wrote as the
+dispatch letter's back-end time minus 60 seconds), the ticket to handle and the
+PMO to report to; it asks the team PM to answer「收到 ‹ticket›」first (T-5's
+watchdog reads that ack, `teammsg.is_ticket_ack`) and says what to do when the
+letter is not there. Two forms: one line for an interactive team (the first
+input is typed as a single line through tmux, so a newline would split it into
+several messages) and the architect's multi-line one for a non-interactive
+team. The `--since` is also how a team PM asks again without moving the cursor
+(docs/angareion.md, docs/aicomm.md).
 
 Provider／model follow D-10, relaxed by the ruling: the command only takes them
 from the flags or the team record and never picks a model itself. A `--model`
@@ -53,16 +56,46 @@ from .errors import SchemaError, UsageError
 from .ports import AgentRecord, SidecarError
 from .runtime import Ctx, one_line, sidecar_port
 
-__all__ = ["OPEN_INPUT", "OpenResult", "input_for", "open_agent"]
+__all__ = [
+    "OPEN_INPUT",
+    "OPEN_INPUT_TUI",
+    "OpenResult",
+    "input_for",
+    "open_agent",
+]
 
-#: The first input for a team PM that has just started (design §2.1).
-#: `{since}` is the dispatch's `--since` (`team state`'s `dispatched_at`).
-#: Kept to one line (no newline after `format`): the interactive agent's first
-#: input is typed as a single line, so the sentence must survive that.
+#: The first input for a non-interactive team PM (design §2.1). The line breaks
+#: are the architect's own (#373 結構審 §A-1).
+#: `{pm}` is the team PM's AI name, `{channel}` the team channel, `{since}` the
+#: dispatch's `--since` (`team state`'s `dispatched_at`), `{ticket}` the team
+#: state's `ticket`, `{pmo}` the settings' PMO identity and `{report_hint}` the
+#: one thing that differs by `team.life`.
 OPEN_INPUT = (
-    "指示在 Angareion：先 `aicomm inbox`；沒有看到派工就用 "
-    "`angareion read --since {since}` 補讀。照指示做事，完成後回報。"
+    "你是 team PM（{pm}）。照你的 harness 工作。指示在 Angareion：用\n"
+    "`angareion read --channel {channel} --since {since} --json` 讀，只處理工單號是"
+    " {ticket} 的那幾則，用訊息 id 去重。\n"
+    "讀到後先回一則「收到 {ticket}」。讀不到 channel（exit 1）或讀不到這張單的"
+    "指示，就等 60 秒再試，最多 5 次，還是不行就回報 PMO 後停下來。\n"
+    "做完或有問題，用 `aicomm send --channel {channel} --to {pmo} --body -` 回報"
+    "（{report_hint}）。"
 )
+
+#: The same input for an interactive team PM (`tui: true`), on one line: the
+#: interactive agent's first input is typed as a single line, so a newline would
+#: split it into several messages (#373 結構審 §A-1).
+OPEN_INPUT_TUI = (
+    "你是 team PM（{pm}）。照你的 harness 工作。指示在 Angareion：用 "
+    "`angareion read --channel {channel} --since {since} --json` 讀，只處理工單號是"
+    " {ticket} 的那幾則，用訊息 id 去重。讀到後先回一則「收到 {ticket}」。"
+    "讀不到 channel（exit 1）或讀不到這張單的指示，就等 60 秒再試，最多 5 次，"
+    "還是不行就回報 PMO 後停下來。做完或有問題，用"
+    " `aicomm send --channel {channel} --to {pmo} --body -` 回報（{report_hint}）。"
+)
+
+#: `{report_hint}`：一般 team 請把 PR 連結寫在回報的 body 裡…
+REPORT_HINT_PR = "PR 連結直接寫在 body"
+#: …生活模式（`life: true`）的 team 產出不在 repo，寫位置就好。
+REPORT_HINT_LIFE = "產出位置寫在回報裡"
 
 
 @dataclass(frozen=True)
@@ -85,9 +118,21 @@ class OpenResult:
     state_error: str | None = None
 
 
-def input_for(since: str) -> str:
-    """The first input, with the dispatch's `--since` in it."""
-    return OPEN_INPUT.format(since=since)
+def input_for(team: Team, since: str, ticket: str, pmo: str) -> str:
+    """The first input, with the team, the dispatch and the PMO filled in.
+
+    Interactive teams get the one-line form and non-interactive ones the
+    multi-line form (#373 結構審 §A-1); `{report_hint}` follows `team.life`.
+    """
+    template = OPEN_INPUT_TUI if team.tui else OPEN_INPUT
+    return template.format(
+        pm=team.pm,
+        channel=team.channel,
+        since=since,
+        ticket=ticket,
+        pmo=pmo,
+        report_hint=REPORT_HINT_LIFE if team.life else REPORT_HINT_PR,
+    )
 
 
 def _workdir_of(team: Team) -> str:
@@ -129,13 +174,15 @@ def _provider_and_model(
     return provider, model
 
 
-def _dispatch_of(ctx: Ctx, team: Team) -> str:
-    """The dispatch's `--since` from the team state (design §2.1、§3.2).
+def _dispatch_of(ctx: Ctx, team: Team) -> tuple[str, str]:
+    """The dispatch's `--since` and `ticket` from the team state (§2.1、§3.2).
 
     A team state without `ticket` means `pmo send` has not run: exit 1 and no
     sidecar call. A `ticket` without `dispatched_at` is a state that predates
     T-4a's field (or was written by hand); the first input cannot be built
-    without it, so it is the same「狀態不足」rather than a guessed time.
+    without it, so it is the same「狀態不足」rather than a guessed time. Both go
+    into the first input: the ticket is the one the team PM must handle (and
+    answer「收到 ‹ticket›」to) and the `--since` is where to read from.
     """
     try:
         state = teamstate.load_state(ctx.state_dir, team.key)
@@ -152,7 +199,7 @@ def _dispatch_of(ctx: Ctx, team: Team) -> str:
             f"狀態不足：team {team.key} 的狀態沒有 dispatched_at（pmo send 會寫）；"
             f"先重跑 pmo send，或修好 team 狀態"
         )
-    return since
+    return since, ticket
 
 
 def _write_state(ctx: Ctx, team: Team, record: AgentRecord) -> None:
@@ -217,7 +264,8 @@ def open_agent(
 
     workdir = _workdir_of(team)
     chosen_provider, chosen_model = _provider_and_model(team, provider, model)
-    since = _dispatch_of(ctx, team)
+    since, ticket = _dispatch_of(ctx, team)
+    first_input = input_for(team, since, ticket, ctx.config.pmo_identity)
 
     port = sidecar_port(ctx.deps, team.sidecar)
     if port is None:
@@ -226,7 +274,7 @@ def open_agent(
         agent_id=team.pm,
         agent=team.agent,
         workdir=workdir,
-        input=input_for(since),
+        input=first_input,
         provider=chosen_provider,
         model=chosen_model,
         tui=team.tui,
