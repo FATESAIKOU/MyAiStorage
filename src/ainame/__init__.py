@@ -19,6 +19,8 @@ only if all five steps below pass; `parse` reports which step failed.
 
 There are no exceptions to any of this. `@…` is a group address: it only
 arrives in phase 3, and `is_group` here only looks at the first character.
+`missing_team_hint` reports step 4's fact - the team segment is missing - in
+"did you mean" form, for a caller that shows a hint rather than a failure.
 """
 
 from __future__ import annotations
@@ -150,6 +152,14 @@ class Name:
             return f"{self.project}-{self.role}-{self.team}"
         return f"{self.project}-{self.role}-{self.team}-{self.seq}"
 
+    def team_key(self) -> str:
+        """The teams settings key this seat belongs to: `<project>-<team>`."""
+        return f"{self.project}-{self.team}"
+
+    def channel(self) -> str:
+        """The team's channel: `<project>-<team>` behind the `team-` prefix."""
+        return f"team-{self.team_key()}"
+
 
 def parse(name: object) -> Name:
     """Take an AI name apart; ValueError says which step failed."""
@@ -185,3 +195,34 @@ def format(project: str, role: str, team: str, seq: int | None = None) -> str:  
 def is_group(name: object) -> bool:
     """Whether the address is a group address (`@…`). Only phase 3 sends those."""
     return isinstance(name, str) and name.startswith("@")
+
+
+def missing_team_hint(name: object, team_code: str | None = None) -> str | None:
+    """A hint when the name reads as if its team segment were left out.
+
+    Step 4's message already says the team is missing; this is the same fact in
+    "did you mean" form, for a caller that shows it beside a form or a dispatch
+    line instead of raising (`#110` T-1, design §5.1: the PMO tool has this
+    hint and this repository did not).
+
+    `team_code` is the team the caller already knows (the team part of a teams
+    settings key); with it the example is the name that would fit that team.
+    Without it the example uses `m1`. Returns `None` for anything else: a legal
+    name, a name that already carries a segment after the team, a name that
+    fails an earlier step, or a value that is not a string - and for those the
+    `team_code` makes no difference.
+    """
+    try:
+        segments = _step1(name)
+        role_index = _step2(segments)
+    except ValueError:
+        return None
+    if segments[role_index + 1:]:
+        return None
+    stem = "-".join(segments)
+    team = team_code or "m1"
+    example = f"{stem}-{team}" if segments[role_index] in SINGLE_ROLES else f"{stem}-{team}-1"
+    return (
+        f"the AI name {name!r} has no team segment; write '<project>-<role>-<team>' "
+        f"(for example {example!r})"
+    )

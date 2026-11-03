@@ -20,7 +20,17 @@ import re
 
 import pytest
 
-from ainame import MAX_LEN, ROLES, SINGLE_ROLES, Name, format, is_group, is_valid, parse
+from ainame import (
+    MAX_LEN,
+    ROLES,
+    SINGLE_ROLES,
+    Name,
+    format,
+    is_group,
+    is_valid,
+    missing_team_hint,
+    parse,
+)
 
 VECTORS = Path(__file__).resolve().parent.parent / "vectors" / "ainame-vectors.json"
 
@@ -271,3 +281,63 @@ def _reason(name: object) -> str:
     with pytest.raises(ValueError) as caught:
         parse(name)
     return str(caught.value)
+
+
+def test_a_name_knows_its_team_key_and_channel():
+    """Architect 低-1: the "AI name → teams key／channel" knowledge lives in the grammar."""
+    parsed = parse("myaistorage-pm-m1")
+    assert parsed.team_key() == "myaistorage-m1"
+    assert parsed.channel() == "team-myaistorage-m1"
+    # A project that contains a role word still gives the project's own key.
+    parsed = parse("pm-tools-impl-m1-1")
+    assert parsed.team_key() == "pm-tools-m1"
+    assert parsed.channel() == "team-pm-tools-m1"
+
+
+def test_the_missing_team_hint_takes_the_team_code():
+    """Architect 中-5: the caller passes the team code it knows, and gets that name."""
+    hint = missing_team_hint("myaistorage-pm", team_code="m1")
+    assert hint is not None
+    assert "'myaistorage-pm-m1'" in hint
+    assert "'mylinuxpool-impl-w1-1'" in (missing_team_hint("mylinuxpool-impl", team_code="w1") or "")
+    # With no team code the example is the generic one, as before.
+    assert "'mypmo-pm-m1'" in (missing_team_hint("mypmo-pm") or "")
+    assert "'mypmo-pm-m1'" in (missing_team_hint("mypmo-pm", team_code=None) or "")
+    # The "no hint" cases do not depend on the team code.
+    for name in ("mypmo-pm-m1", "mylinuxpool-dev-m1", "MyPMO-pm", None):
+        assert missing_team_hint(name, team_code="m1") is None, name
+
+
+def test_the_missing_team_hint_names_the_form_and_an_example():
+    """`#110` T-1 (design §5.1): the hint the PMO tool has and this repo lacked."""
+    assert missing_team_hint("mypmo-pm") == (
+        "the AI name 'mypmo-pm' has no team segment; write '<project>-<role>-<team>' "
+        "(for example 'mypmo-pm-m1')"
+    )
+    assert "mylinuxpool-impl-m1-1" in (missing_team_hint("mylinuxpool-impl") or "")
+
+
+def test_the_missing_team_hint_is_only_for_a_missing_team():
+    for name in (
+        "mypmo-pm-m1",                    # a legal name
+        "mylinuxpool-impl-w1-1",
+        "mylinuxpool-impl-w1",            # a team, only the sequence is missing
+        "mylinuxpool-impl-workerpool-1",  # a team segment that is too long
+        "mylinuxpool-dev-m1",             # no role at all
+        "MyPMO-pm",                       # uppercase, step 1
+        "1mypmo-pm",                      # not starting with a letter
+        "",                               # empty
+        None,
+        3,
+        ["mypmo-pm"],
+    ):
+        assert missing_team_hint(name) is None, name
+
+
+def test_the_missing_team_hint_agrees_with_the_step_the_parser_reports():
+    """Whenever a hint is given, `parse` fails at step 4 and says so."""
+    for name in ("mypmo-pm", "mylinuxpool-impl", "mylinuxpool-impl-pm", "pm-tools-rev"):
+        hint = missing_team_hint(name)
+        assert hint is not None, name
+        assert "step 4" in _reason(name), name
+        assert "m1" in hint
