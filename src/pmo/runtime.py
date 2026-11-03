@@ -17,7 +17,7 @@ import os
 import re
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, TextIO
 
@@ -27,18 +27,10 @@ from .config import TeamsConfig
 from .errors import IdentityMismatch
 from .ports import AicommPort, AngareionPort, GitHubPort, SidecarPort
 from .sanitize import sanitize
+from .timeutil import real_now
 
 #: The environment variable naming the seat a command runs as.
 IDENTITY_ENV = "ANGAREION_IDENTITY"
-
-
-def iso_utc(dt: datetime) -> str:
-    """The one timestamp shape the events and the state files use."""
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def real_now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def effective_identity() -> str:

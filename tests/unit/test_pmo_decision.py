@@ -17,7 +17,7 @@ import re
 
 import pytest
 
-from pmo import inbox, ledger
+from pmo import decision, ledger
 from pmo.config import parse as parse_config
 
 import _pmo_env as E
@@ -107,7 +107,7 @@ def _items(env) -> dict:
 
 
 def test_build_decision_body_has_text_and_exactly_one_block():
-    body = inbox.build_decision_body("請看下面的問題，回覆時照題號作答。", QUESTIONS)
+    body = decision.build_decision_body("請看下面的問題，回覆時照題號作答。", QUESTIONS)
 
     assert body.startswith("請看下面的問題，回覆時照題號作答。")
     assert body.count("```pmo-decision") == 1
@@ -124,7 +124,7 @@ def test_build_decision_body_has_text_and_exactly_one_block():
 
 
 def test_build_decision_body_minimal_question():
-    body = inbox.build_decision_body("只有一題。", [{"id": "q1", "multiple": False, "options": [{"id": "a"}]}])
+    body = decision.build_decision_body("只有一題。", [{"id": "q1", "multiple": False, "options": [{"id": "a"}]}])
     payload = decision_payload(body)
     assert payload["questions"] == [
         {"id": "q1", "multiple": False, "options": [{"id": "a", "label": ""}]}
@@ -160,7 +160,7 @@ def test_build_decision_body_minimal_question():
 )
 def test_build_decision_body_rejects_non_compliant_questions(questions, match):
     with pytest.raises(ValueError, match=match):
-        inbox.build_decision_body("請作答。", questions)
+        decision.build_decision_body("請作答。", questions)
 
 
 @pytest.mark.parametrize(
@@ -174,7 +174,7 @@ def test_build_decision_body_rejects_non_compliant_questions(questions, match):
 )
 def test_build_decision_body_rejects_bad_text(text, match):
     with pytest.raises(ValueError, match=match):
-        inbox.build_decision_body(text, QUESTIONS)
+        decision.build_decision_body(text, QUESTIONS)
 
 
 # --------------------------------------------------------------------------- #
@@ -183,13 +183,13 @@ def test_build_decision_body_rejects_bad_text(text, match):
 
 
 def test_parse_decision_answer_single_choice():
-    parsed = inbox.parse_decision_answer(f"# 回答決定題：{ULID_1}\n- q1：a\n")
+    parsed = decision.parse_decision_answer(f"# 回答決定題：{ULID_1}\n- q1：a\n")
     assert parsed == {"decision_id": ULID_1, "answers": {"q1": ["a"]}, "note": None}
 
 
 def test_parse_decision_answer_multiple_choice_with_note():
     body = f"# 回答決定題：{ULID_1}\n- q1：a,b\n- q2：a\n- 說明：先做看與送那一半\n"
-    parsed = inbox.parse_decision_answer(body)
+    parsed = decision.parse_decision_answer(body)
     assert parsed is not None
     assert parsed["answers"] == {"q1": ["a", "b"], "q2": ["a"]}
     assert parsed["note"] == "先做看與送那一半"
@@ -197,13 +197,13 @@ def test_parse_decision_answer_multiple_choice_with_note():
 
 def test_parse_decision_answer_accepts_half_width_colons():
     body = f"# 回答決定題:{ULID_1}\n- q1:b\n- 說明:ok\n"
-    parsed = inbox.parse_decision_answer(body)
+    parsed = decision.parse_decision_answer(body)
     assert parsed == {"decision_id": ULID_1, "answers": {"q1": ["b"]}, "note": "ok"}
 
 
 def test_parse_decision_answer_ignores_blank_lines_and_crlf():
     body = f"\r\n# 回答決定題：{ULID_1}\r\n\r\n- q1：a\r\n\r\n"
-    parsed = inbox.parse_decision_answer(body)
+    parsed = decision.parse_decision_answer(body)
     assert parsed is not None
     assert parsed["answers"] == {"q1": ["a"]}
 
@@ -232,7 +232,7 @@ def test_parse_decision_answer_ignores_blank_lines_and_crlf():
     ],
 )
 def test_parse_decision_answer_rejects_non_compliant(body):
-    assert inbox.parse_decision_answer(body) is None
+    assert decision.parse_decision_answer(body) is None
 
 
 # --------------------------------------------------------------------------- #

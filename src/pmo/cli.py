@@ -19,7 +19,7 @@ import sys
 from typing import Optional
 
 from . import config as config_module
-from . import inbox, ledger, paths, sanitize
+from . import decision, inbox, ledger, paths, sanitize
 from .adapters import Angareion
 from .errors import (
     IdentityMismatch,
@@ -31,7 +31,8 @@ from .errors import (
 )
 from .ports import PortError
 from .round import read_round
-from .runtime import Ctx, Deps, assert_pmo_identity, iso_utc
+from .runtime import Ctx, Deps, assert_pmo_identity
+from .timeutil import iso_utc
 
 __all__ = ["build_parser", "main"]
 
@@ -254,11 +255,11 @@ def cmd_inbox_decision_send(ctx: Ctx, args: argparse.Namespace) -> int:
     if not str(raw).strip():
         raise UsageError("--body 是空的")
     try:
-        body = inbox.build_decision_send_body(raw)
+        body = decision.build_decision_send_body(raw)
     except ValueError as error:
         raise UsageError(str(error)) from error
     try:
-        res = inbox.send_decision(ctx, body)
+        res = decision.send_decision(ctx, body)
     except PortError as error:
         ctx.log(f"[warn] 發送決定題失敗：{inbox.one_line_for_event(error)}")
         return 2
