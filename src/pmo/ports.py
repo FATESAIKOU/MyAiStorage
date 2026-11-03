@@ -41,6 +41,16 @@ class PortError(RuntimeError):
         self.returncode = returncode
 
 
+class AicommTimeout(PortError):
+    """The `aicomm send` child timed out: the message may or may not be written.
+
+    aicomm writes first and wakes second, so a timeout is the one case where
+    the caller must say「送出結果不明，不要直接重送」instead of「送不出去」
+    (design §3.2 `pmo reply`; `SentButNotRecorded` is the other direction of
+    the same problem). The adapter raises it on `TimeoutExpired` only.
+    """
+
+
 class SidecarError(PortError):
     """The sidecar refused, is not reachable, or the thing is not there.
 
@@ -132,18 +142,25 @@ class AgentRecord:
 
 @dataclass(frozen=True)
 class JobRecord:
-    """One poke job, as `GET /jobs` reports it (`every` already in seconds)."""
+    """One job, as `GET /jobs` reports it (`every` already in seconds).
+
+    `every` is `None` for a one-off job: the sidecar's auto-reopen job is an
+    `at` job (sidecar.md: `every` is `null`, `at` names the one time it fires),
+    and those are exactly the ones `pmo close` deletes (#370 高-2). `at` keeps
+    that time as the sidecar sent it; it is `None` for an `every` job.
+    """
 
     job_id: str
     action: str
     args: dict[str, object]
-    every: float
+    every: float | None
     last_run: object = None
     last_error: str | None = None
+    at: str | None = None
     extra: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        known: dict[str, object] = {
             "id": self.job_id,
             "action": self.action,
             "args": dict(self.args),
@@ -151,6 +168,9 @@ class JobRecord:
             "last_run": self.last_run,
             "last_error": self.last_error,
         }
+        if self.at is not None:
+            known["at"] = self.at
+        return known
 
 
 @dataclass(frozen=True)
@@ -219,7 +239,10 @@ class AicommPort(Protocol):
 
 @runtime_checkable
 class SidecarPort(Protocol):
-    """The sidecar seam: agents and poke jobs over HTTP."""
+    """The sidecar seam: agents and poke jobs over HTTP.
+
+    #370 起 `poke` 回傳狀態碼（`int`），純放寬：不讀回傳值的呼叫端不受影響。
+    """
 
     def list_agents(self) -> list[AgentRecord]:
         """`GET /agents` (this machine's sidecar)."""
@@ -248,8 +271,13 @@ class SidecarPort(Protocol):
         """
         ...
 
-    def poke(self, agent_id: str, *, text: str, interrupt: bool = False) -> None:
-        """`POST /agents/<id>/poke`; unknown id raises `SidecarError`."""
+    def poke(self, agent_id: str, *, text: str, interrupt: bool = False) -> int:
+        """`POST /agents/<id>/poke`; returns the HTTP status it answered with.
+
+        Unknown id raises `SidecarError` (`agent_not_running`／
+        `agent_not_found`); the status is what `pmo poke` prints, so a 204 stays
+        a 204 rather than being reported as a 200.
+        """
         ...
 
     def close_agent(self, agent_id: str) -> None:

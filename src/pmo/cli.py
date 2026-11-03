@@ -1,5 +1,5 @@
 """The `pmo` command's front door (design §3.2; T-2's `inbox` half, T-3's
-rebuild, T-4a's `check`／`send`).
+rebuild, T-4a's `check`／`send`, T-4c's `reply`／`poke`／`status`／`close`).
 
 Arguments come from the environment only: `PMO_SKILL_CONFIG` names the teams
 settings, `PMO_SKILL_STATE_DIR` the state directory (§3.4; a missing one is a
@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from typing import Optional
 
 from . import config as config_module
-from . import decision, dispatch, inbox, ledger, paths, rebuild, sanitize
-from .adapters import Angareion, GitHub
+from . import decision, dispatch, inbox, ledger, ops, paths, rebuild, sanitize
+from .adapters import Aicomm, Angareion, GitHub, Sidecar
 from .errors import (
     IdentityMismatch,
     MissingEnvError,
@@ -30,7 +31,7 @@ from .errors import (
     SentButNotRecorded,
     UsageError,
 )
-from .ports import PortError
+from .ports import AicommTimeout, JobRecord, PortError, SidecarError
 from .round import read_round
 from .runtime import Ctx, Deps, assert_pmo_identity
 from .timeutil import iso_utc
@@ -94,6 +95,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp_send.add_argument("team", help="team 的 key（<專案>-<team 代號>）")
     sp_send.add_argument("ticket", help="工單，寫成 ‹owner/repo›#‹n›")
     sp_send.add_argument("--body", default=None, help="指示內文（'-' 代表由 stdin 讀入）")
+
+    sp_reply = sub.add_parser("reply", help="回話給 team PM（經 aicomm：寫入＋叫醒）")
+    sp_reply.add_argument("team", help="team 的 key（<專案>-<team 代號>）")
+    sp_reply.add_argument("--urgency", type=int, default=None, help="urgent 程度 0-9（同 angareion）")
+    sp_reply.add_argument("--body", default=None, help="回覆內文（'-' 代表由 stdin 讀入）")
+
+    sp_poke = sub.add_parser("poke", help="戳 team PM 的 agent 一下（sidecar 的 poke）")
+    sp_poke.add_argument("team", help="team 的 key（<專案>-<team 代號>）")
+    sp_poke.add_argument("--interrupt", action="store_true", help="打斷它正在做的那一輪")
+    sp_poke.add_argument("--body", default=None, help="要它看的一句話（'-' 代表由 stdin 讀入）")
+
+    sp_status = sub.add_parser("status", help="team PM 的 state／exit／session，以及 PMO 自己排的 job")
+    sp_status.add_argument("team", nargs="?", default=None, help="只查這個 team（不給＝全部）")
+    sp_status.add_argument("--json", action="store_true", help="以 JSON 印出")
+
+    sp_close = sub.add_parser("close", help="照 Close SOP 關掉 team 的 agent（先刪自動重開 job，其他 job 只列不動）")
+    sp_close.add_argument("team", help="team 的 key（<專案>-<team 代號>）")
+    sp_close.add_argument("--timeout", type=float, default=ops.CLOSE_TIMEOUT_SECONDS,
+                          help="等 exited 的秒數（預設 60）")
 
     return parser
 
@@ -409,11 +429,188 @@ def cmd_send(ctx: Ctx, args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# 指令：reply／poke／status／close（design §3.2、§5.2 T-4c）
+# --------------------------------------------------------------------------- #
+
+
+def cmd_reply(ctx: Ctx, args: argparse.Namespace) -> int:
+    """`pmo reply ‹team› [--urgency N] --body -`（design §3.2）。
+
+    會寄信，所以先過身分守門（送之前就拒）。結束碼照表：0 印訊息 id；2 沒寫
+    進去。aicomm 逾時是特例：信可能已經寫進去了，字樣明說「送出結果不明，不
+    要直接重送」，不印 id（不知道就算了，不編）。retired team 是 1：回話會
+    叫醒人，退役的 team 不再叫（#357 裁定 (d)）。
+    """
+    assert_pmo_identity(ctx.config)
+    team = ops.team_or_usage(ctx, args.team, refuses_retired=True)
+    if args.urgency is not None and not 0 <= args.urgency <= 9:
+        raise UsageError("--urgency 要在 0-9 之間")
+    body = _body_from(ctx, args.body)
+    try:
+        message_id = ops.reply(ctx, team=team, body=body, urgency=args.urgency)
+    except AicommTimeout as error:
+        ctx.log(
+            f"[warn] 送出結果不明，不要直接重送：{inbox.one_line_for_event(error)}"
+        )
+        return 2
+    except PortError as error:
+        ctx.log(f"[warn] 回覆送不出去：{inbox.one_line_for_event(error)}")
+        return 2
+    ctx.emit(f"[reply] 訊息已送出 id={message_id}")
+    return 0
+
+
+def cmd_poke(ctx: Ctx, args: argparse.Namespace) -> int:
+    """`pmo poke ‹team› [--interrupt] --body -`（design §3.2）：印 sidecar 的回應碼。
+
+    poke 不寄信，所以不過身分守門（design §3.2 的守門只列會寄信的指令）。
+    0 印 `[poke] ‹pm› ‹回應碼›`（sidecar 回 204 就印 204）；sidecar 拒絕或
+    連不上是 2，印它的狀態與錯誤碼（只印已知欄位，D-12）。retired team 是 1：
+    poke 會叫醒人，退役的 team 不再叫（#357 裁定 (d)）。
+    """
+    team = ops.team_or_usage(ctx, args.team, refuses_retired=True)
+    text = _body_from(ctx, args.body)
+    try:
+        code = ops.poke(ctx, team=team, text=text, interrupt=args.interrupt)
+    except SidecarError as error:
+        ctx.log(f"[warn] 戳「{team.pm}」沒成功：{inbox.one_line_for_event(error)}")
+        return 2
+    ctx.emit(f"[poke] {team.pm} {code}")
+    return 0
+
+
+def cmd_status(ctx: Ctx, args: argparse.Namespace) -> int:
+    """`pmo status [‹team›] [--json]`（design §3.2）：唯讀。
+
+    逐 team 印 state／exit／session，再印 PMO 自己排的 job；PMO 不在 sidecar
+    時不查 job（§3.4）。指名一個 team 時，另外列出瞄準這個 team PM 的 job
+    （id、action、every、句子是不是固定句），**只列不動**：這是裁定 (d) 末段
+    的建議，讓 PMO 自己決定要不要請排的人刪。讀不到 sidecar 是 2（其他 team
+    照印，§2.3 的部分失敗）。
+    """
+    report = ops.status(ctx, args.team)
+    if args.json:
+        ctx.emit(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        for team in report.teams:
+            line = (
+                f"[status] {team.key} pm={team.pm} state={team.state} "
+                f"exit={team.exit_reason or '-'} session={team.session or '-'}"
+            )
+            if team.note:
+                line += f"（{team.note}）"
+            ctx.emit(line)
+        if report.jobs_note is not None:
+            ctx.emit(f"[status] {report.jobs_note}")
+        elif not report.jobs:
+            ctx.emit("[status] 沒有 PMO 自己排的 job")
+        else:
+            for job in report.jobs:
+                ctx.emit(
+                    f"[status] job {job.job_id} {_every_of(job)} "
+                    f"last_run={job.last_run if job.last_run is not None else '-'} "
+                    f"last_error={job.last_error or '-'}"
+                )
+        if report.team_jobs:
+            ctx.emit(
+                f"[status] 瞄準 {report.teams[0].pm} 的 job（只列不動，不會刪）："
+            )
+            for job in report.team_jobs:
+                ctx.emit(f"[status]   {_job_fields(job, ctx.config.wake_text)}")
+    for failure in report.failures:
+        ctx.log(f"[warn] {failure}")
+    return 2 if report.failures else 0
+
+
+def _every_of(job: JobRecord) -> str:
+    """`every=600s`, or `at=<時刻>` for a one-off job (`every` is `None`, #370 高-2)."""
+    if job.every is None:
+        return f"at={job.at or '-'}"
+    return f"every={job.every:g}s"
+
+
+def _job_fields(job: JobRecord, wake_text: str) -> str:
+    """One listed job: id, action, every (or at), and whether its sentence is the fixed one."""
+    fixed = "是" if ops.has_fixed_sentence(job, wake_text) else "否"
+    return f"{job.job_id} action={job.action} {_every_of(job)} 固定句={fixed}"
+
+
+def cmd_close(ctx: Ctx, args: argparse.Namespace) -> int:
+    """`pmo close ‹team› [--timeout 秒]`（design §3.2；Close SOP 見 `pmo.ops.close`）。
+
+    0 回在「關掉了、或 close 還在背景進行、而且要刪的自動重開 job 都處理了」：
+    印是否已關、刪掉（或本來就不在）的自動重開 job，以及只列不動的「瞄準這個
+    agent 的非 auto job」。等不到 exited、或自動重開 job 刪不掉是 2（字樣分開
+    寫，不把「已關」講成沒關）；`GET /jobs` 本身失敗只是 `[warn]`，不改結束碼
+    （#357 裁定 (d)）。retired team 照常可關。
+    """
+    team = ops.team_or_usage(ctx, args.team)
+    if not math.isfinite(args.timeout) or args.timeout < 0:
+        raise UsageError("--timeout 要是 0 或正數")
+    try:
+        result = ops.close(ctx, team=team, timeout=args.timeout)
+    except SidecarError as error:
+        ctx.log(f"[warn] 關不掉「{team.pm}」：{inbox.one_line_for_event(error)}")
+        return 2
+
+    if result.already_gone:
+        ctx.emit(f"[close] {result.pm} 本來就不在 sidecar 上（已關）")
+    elif result.closed:
+        ctx.emit(f"[close] {result.pm} 已關（state={result.state}）")
+    elif result.close_in_progress:
+        ctx.emit(
+            f"[close] {result.pm} 的 close 已送出，還在背景進行（state={result.state}）；"
+            f"用 pmo status 確認"
+        )
+    else:
+        ctx.log(
+            f"[close] {result.pm} 等不到 exited（state={result.state}）；"
+            f"沒有重送 close（Close SOP）"
+        )
+    for job_id in result.deleted_jobs:
+        ctx.emit(f"[close] 刪掉自動重開 job：{job_id}")
+    for job_id in result.missing_jobs:
+        ctx.emit(f"[close] 自動重開 job {job_id} 已經不在（404）")
+    if (
+        not result.deleted_jobs
+        and not result.missing_jobs
+        and result.jobs_warn is None
+        and result.job_error is None
+    ):
+        # 讀不到或清不掉時不印這行：它會和 stderr 的「讀不到／清不掉」互相矛盾。
+        ctx.emit("[close] 沒有要刪的自動重開 job")
+    if result.other_jobs:
+        ctx.emit(f"[close] 瞄準 {result.pm} 的非 auto job（只列不動，要停請找排的人刪）：")
+        for job in result.other_jobs:
+            ctx.emit(f"[close]   {_job_fields(job, ctx.config.wake_text)}")
+    if result.jobs_warn is not None:
+        ctx.log(
+            f"[warn] job 讀不到（{result.jobs_warn}），照樣 close："
+            f"close 之後它到點可能又把 agent 開回來"
+        )
+    if result.job_error is not None:
+        ctx.log(
+            f"[warn] job 清不掉（{result.job_error}）："
+            f"close 之後它到點可能又把 agent 開回來"
+        )
+    ok = (result.closed or result.close_in_progress) and result.job_error is None
+    return 0 if ok else 2
+
+
+# --------------------------------------------------------------------------- #
 # 入口
 # --------------------------------------------------------------------------- #
 
 
-_HANDLERS = {"inbox": cmd_inbox, "check": cmd_check, "send": cmd_send}
+_HANDLERS = {
+    "inbox": cmd_inbox,
+    "check": cmd_check,
+    "send": cmd_send,
+    "reply": cmd_reply,
+    "poke": cmd_poke,
+    "status": cmd_status,
+    "close": cmd_close,
+}
 
 
 def main(
@@ -449,7 +646,15 @@ def main(
         print(sanitize.sanitize(f"[pmo] 設定讀不起來：{e}"), file=err, flush=True)
         return 2
 
-    deps = deps if deps is not None else Deps(angareion=Angareion(), github=GitHub())
+    deps = deps if deps is not None else Deps(
+        angareion=Angareion(),
+        aicomm=Aicomm(),
+        # T-4c: the sidecar calls go to the sidecar the PMO itself runs on
+        # (§3.4: no `pmo_sidecar` means the PMO is not in a sidecar, so the
+        # port stays `None` and the sidecar commands refuse).
+        sidecar=(Sidecar(cfg.pmo_sidecar) if cfg.pmo_sidecar else None),
+        github=GitHub(),
+    )
     ctx = Ctx(deps=deps, config=cfg, state_dir=state_dir, out=out, err=err, inp=inp)
     try:
         return _HANDLERS[args.cmd](ctx, args)

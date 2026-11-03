@@ -77,12 +77,12 @@ def test_a_consumer_of_the_aicomm_port_runs_against_the_fake():
 
 
 def test_a_consumer_of_the_sidecar_port_runs_against_the_fake():
-    def poke(port: SidecarPort, agent_id: str) -> None:
-        port.poke(agent_id, text="停下來，等指示", interrupt=True)
+    def poke(port: SidecarPort, agent_id: str) -> int:
+        return port.poke(agent_id, text="停下來，等指示", interrupt=True)
 
     fake = FakeSidecar()
     fake.add_agent("myaistorage-impl-m1-1")
-    poke(fake, "myaistorage-impl-m1-1")
+    assert poke(fake, "myaistorage-impl-m1-1") == 200  # the port answers with the status
     assert fake.pokes == [("myaistorage-impl-m1-1", "停下來，等指示", True)]
 
 
