@@ -230,16 +230,18 @@ flowchart LR
 | `pmo check ‹team›` | | 逐項 OK／FAIL：team 存在且沒有 retired、PM 名合法且角色是 pm、team 狀態與 `tick.json` 讀得起來、channel 讀得到（`log --channel --since 現在`，不動游標）、本機 sidecar 的 `GET /agents` 有回應（T-4b 起）；worker team 只印一行「由過渡工具負責」 | 0 全過；1 有 FAIL |
 | `pmo send ‹team› ‹repo#n› --body -` | 正文 | 指示信 id、後端時刻；`tick.json` 的 `wake.every` 比看門狗的 10 分鐘長、或是 `null` 時，多印一行 `[wake-hint] 看門狗 10m 後到期，目前叫醒 ‹every\|off\|unknown›`（`unknown`＝`tick.json` 讀不起來；這時 stderr 另印 `[warn]`，exit 仍是 0，因為信已送出）（只是提示，不改任何東西，D-7） | 0；1 用法、team 不存在、工單讀不到、組好的信超過上限、信（工單本文或正文）含憑證樣式（只說哪一段，不回顯）；2 外部失敗 |
 | `pmo open ‹team› [--session ‹agora:…›] [--fresh] [--provider P --model M]` | | agent 的 state 與 attach 指令 | 0；1 用法或狀態不足（沒先 send）；2 sidecar 拒絕或連不上（印錯誤碼） |
-| `pmo reply ‹team› [--urgency N] --body -` | 正文 | 訊息 id（經 aicomm：寫入＋叫醒） | 0；2 沒寫進去；aicomm 逾時時印「送出結果不明，不要直接重送」並回 2 |
-| `pmo poke ‹team› [--interrupt] --body -` | 一句話 | sidecar 的回應碼 | 0／2 |
+| `pmo reply ‹team› [--urgency N] --body -` | 正文 | 訊息 id（經 aicomm：寫入＋叫醒） | 0；1 用法、team 不存在或已退役；2 沒寫進去；aicomm 逾時時印「送出結果不明，不要直接重送」並回 2 |
+| `pmo poke ‹team› [--interrupt] --body -` | 一句話 | sidecar 的回應碼 | 0；1 用法、team 不存在或已退役；2 sidecar 拒絕或連不上 |
 | `pmo status [‹team›] [--json]` | | 每個 team PM 的 state／exit／session，以及 PMO 自己排的 job | 0／2 |
-| `pmo close ‹team› [--timeout 秒]` | | 是否已關、刪了哪些 job | 0／2 |
+| `pmo close ‹team› [--timeout 秒]` | | 是否已關；先刪掉的**自動重開 job**（sidecar 在 waiting-quota 時替這個 team PM 排的 `auto: true` job）；另外只列不動「瞄準這個 agent 的其他 job」 | 0（含 agent 本來就不在、close 還在背景進行）；2 sidecar 拒絕或連不上 |
 | `pmo inbox handoff-close ‹id›` | | 把一筆交接出去的群請求標成已結案，之後不再印 `[group-sweep-due]` | 0；1 查無 id；2 tick 狀態檔壞或寫不進去 |
 | `pmo wake set ‹every›` | 間隔（`5m`、`2h` 這類；規則見 §3.6） | `[wake] every=‹…› job=‹id› next=‹時刻›` | 0；1 間隔格式錯；2 PMO 不在 sidecar、sidecar 拒絕或連不上、tick 狀態檔壞 |
 | `pmo wake off` | （無） | `[wake] off`，以及刪掉的 job id | 0；2 同上 |
 | `pmo wake show [--json]` | （無） | 自己的叫醒 job（id、every、next_run_at、last_run、last_error 的碼）、`tick.json` 記的想要的頻率、`last_tick_at`、最早的到期時刻（唯讀） | 0；2 同上 |
 
 **指示信的格式**：沿用 MyPMO `build_instruction` 的固定頭（工單號、標題、範圍、驗收、回報格式、派工時刻的說明）＋「工單本文（PMO 派工時從 GitHub 讀出）」＋正文，原樣見 #355 的實作；`life: true` 的 team 用生活模式的回報格式。現行的 M2 段落（開隊員的說明）不搬，那是環境說明的內容。超過 angareion 一則的上限就拒送（exit 1），不截斷。
+
+**`pmo close` 的 job 處理**：只刪 `auto` 為 true、`args.id` 是這個 team PM 的 job（sidecar 的自動重開 job；不刪的話，close 之後它到點會把 agent 開回來），而且先刪再 close。任何 poke job 都不刪：瞄準 team PM 的 poke job 是別人排的（§3.6「別人排的一律不碰」），PMO 自己的叫醒 job 瞄準的是 PMO，和 close 無關。`GET /jobs` 失敗時印 `[warn]`，照樣 close。agent 已 `exited` 時仍送 close（sidecar 的 close 是 idempotent，而且會刪掉 handoff）。**retired team**：`send`、`open`、`reply`、`poke` 拒絕（exit 1）；`check`、`status`、`close` 照常。
 
 **送信前的身分守門**：所有會寄信的指令（ack、report、decision-send、send、reply），送之前檢查目前的身分（`ANGAREION_IDENTITY`）等於設定裡的 PMO 身分，不符就拒送（exit 2）。現行工具也有這道守門；公開版把身分改由設定給，守門照樣保留（C-3）。
 
@@ -319,7 +321,7 @@ flowchart LR
 
 **分工**：要不要定時叫醒、多久一次，是 PMO 的判斷（本人 Q-8）；指令只做機械步驟（D-7）——把 PMO 選的間隔變成 sidecar 上**恰好一個**自己的 poke job，並在 tick 裡回報它是否還在。指令不自動調頻率、不自動重排。
 
-- **哪些 job 是「自己的」（本節與 T-5 一律用這個定義）**：sidecar 的 job 沒有擁有者欄位，所以用內容認：`action` 是 `poke`、`args.text` **等於目前設定的**叫醒固定句、`auto` 是 false。`args.id` 不拿來認（PMO 換了 agent id 時，舊 id 的 job 也要能被清掉）。`wake set`、`wake off`、tick 的健康檢查都只動或只看「自己的」job；句子不同的 poke job（別人排的、或改固定句之前留下的）一律不碰，只在 `wake show` 列出。所以改固定句要照順序：先 `wake off`（用舊句子刪掉），再改設定，再 `wake set`。
+- **哪些 job 是「自己的」（本節與 T-5 一律用這個定義）**：sidecar 的 job 沒有擁有者欄位，所以用內容認：`action` 是 `poke`、`args.text` **等於目前設定的**叫醒固定句、`auto` 是 false。`args.id` 不拿來認（PMO 換了 agent id 時，舊 id 的 job 也要能被清掉）。`wake set`、`wake off`、tick 的健康檢查都只動或只看「自己的」job；句子不同的 poke job（別人排的、或改固定句之前留下的）一律不碰，只在 `wake show` 列出。所以改固定句要照順序：先 `wake off`（用舊句子刪掉），再改設定，再 `wake set`。 `pmo close ‹team›` 不動任何 poke job，包括自己的（見 §3.2 的「`pmo close` 的 job 處理」）。
 - **`pmo wake set ‹every›`**：
   1. 驗間隔：只收 `‹整數›m` 或 `‹整數›h`，範圍 2m～24h（擋掉誤寫成秒數；sidecar 本身接受的格式更寬）。這是工具替 PMO 設的邊界，Q-8 也註明了；要比 24 小時更久，就用 `pmo wake off`。
   2. `GET /jobs`，找出自己的 job。**`every` 一律換成秒數再比**：`POST` 時送的是字串（`10m`），`GET /jobs` 回的是秒數（`600.0`；MyLinuxPool c411b02 的 `jobs.py` 把 `every` 存成秒數、`to_dict` 原樣輸出，文件沒寫，見 §8）；比較時兩邊都轉成秒數，字串和數字兩種形狀都要收。若恰好一個、`every` 相同、`args.id` 是目前的 PMO 身分 → 不動 sidecar，只更新 `tick.json` 的 `wake`，印 `[wake]`。
@@ -433,7 +435,7 @@ flowchart LR
 - **帳本重建的邊界**：§1.2 列的不可重建欄位；過去沒帶 `in_reply_to` 的舊 ack 也重建不出來。T-3 要先從現在的帳本匯入一次。
 - **定時 job 失效**（Q-8 (a)；依 sidecar 文件 §2.3）：
   - **sidecar 重啟**：job 只在記憶體，重啟後消失；PMO 也會跟著被重開。靠 §3.6 的開機步驟和 `[wake-missing]` 發現，由 PMO 重排。PMO 沒被重開之前，沒有任何東西會叫醒它，只剩寄件人叫醒（本來也叫不醒一個不在的 PMO）。
-  - **PMO 被 close 再 open**（同一個 sidecar）：`close` 不刪 job，關著的那段時間每次到點都得到 409 `agent_not_running`，記在 `last_error`；以同一個 id 重開後照常叫醒，tick 印一次 `[wake-error]`（只是告知）。換了 id 重開時，舊 job 會一直 409；`pmo wake set` 依固定句認 job，會把它清掉。
+  - **PMO 被 close 再 open**（同一個 sidecar）：sidecar 的 `POST /agents/<PMO>/close` 不刪 job（sidecar #519；這是 sidecar 的行為，不是 `pmo close` 的規格），關著的那段時間每次到點都得到 409 `agent_not_running`，記在 `last_error`；以同一個 id 重開後照常叫醒，tick 印一次 `[wake-error]`（只是告知）。換了 id 重開時，舊 job 會一直 409；`pmo wake set` 依固定句認 job，會把它清掉。
   - **PMO 不再開了**：job 會一直空打 409。關 PMO 的一方（PMO 自己退場、或本人）要先 `pmo wake off`；寫進 SKILL.md 的退場步驟。
 - **叫醒的副作用**：tui 的 poke 一律照送（sidecar #454），PMO 正卡在**權限詢問**時，定時 poke 的 Enter 會替人按下對話框的預設選項；正在 AskUserQuestion 時則是 409 `agent_awaiting_answer`、這次不送。間隔越短，碰上的機會越大；這是選短間隔的成本之一，指令不另外處理（要擋得在 sidecar 側，不在本設計範圍）。
 - **`[idle]` 輪的成本**：見 §3.6。PMO 若長時間不調頻率，最壞是一天 144 輪（10m）；這是 PMO 的判斷，不是指令的錯，`pmo wake show` 讓它看得到。

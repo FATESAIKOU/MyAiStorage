@@ -41,6 +41,16 @@ class PortError(RuntimeError):
         self.returncode = returncode
 
 
+class AicommTimeout(PortError):
+    """The `aicomm send` child timed out: the message may or may not be written.
+
+    aicomm writes first and wakes second, so a timeout is the one case where
+    the caller must say「送出結果不明，不要直接重送」instead of「送不出去」
+    (design §3.2 `pmo reply`; `SentButNotRecorded` is the other direction of
+    the same problem). The adapter raises it on `TimeoutExpired` only.
+    """
+
+
 class SidecarError(PortError):
     """The sidecar refused, is not reachable, or the thing is not there.
 
@@ -248,8 +258,13 @@ class SidecarPort(Protocol):
         """
         ...
 
-    def poke(self, agent_id: str, *, text: str, interrupt: bool = False) -> None:
-        """`POST /agents/<id>/poke`; unknown id raises `SidecarError`."""
+    def poke(self, agent_id: str, *, text: str, interrupt: bool = False) -> int:
+        """`POST /agents/<id>/poke`; returns the HTTP status it answered with.
+
+        Unknown id raises `SidecarError` (`agent_not_running`／
+        `agent_not_found`); the status is what `pmo poke` prints, so a 204 stays
+        a 204 rather than being reported as a 200.
+        """
         ...
 
     def close_agent(self, agent_id: str) -> None:
