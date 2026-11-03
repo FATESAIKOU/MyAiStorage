@@ -43,7 +43,10 @@ def _run(args: list[str], body: str | None = None) -> str:
     except OSError as e:
         raise PortError(f"{ANGAREION_COMMAND} 起不來：{e}") from e
     if proc.returncode != 0:
-        raise PortError(f"{ANGAREION_COMMAND} exit {proc.returncode}：{(proc.stderr or '').strip()}")
+        raise PortError(
+            f"{ANGAREION_COMMAND} exit {proc.returncode}：{(proc.stderr or '').strip()}",
+            returncode=proc.returncode,
+        )
     return (proc.stdout or "").strip()
 
 
@@ -93,13 +96,41 @@ class Angareion:
         grep: str | None = None,
         since: str | None = None,
     ) -> list[Message]:
-        """`log` is rebuild's seam (T-3); until then it refuses, not guesses."""
-        raise NotImplementedError("angareion log 的接線是 T-3（帳本重建）的工作")
+        """`log` lists the past without moving the cursor (T-3, rebuild's seam).
+
+        Flags check `angareion log --help` (2026-11-03): `--channel` (repeatable),
+        `--from`, `--to`, `--thread`, `--grep`, `--since`, `--json` — the bits
+        rebuild needs (listing with `--channel --to`, the per-work threads with
+        `--from --thread`). The records are `read --json`'s shape, so they go
+        through the same record reader.
+        """
+        args: list[str] = [ANGAREION_COMMAND, "log"]
+        if channel is not None:
+            args += ["--channel", channel]
+        if sender is not None:
+            args += ["--from", sender]
+        if to is not None:
+            args += ["--to", to]
+        if thread is not None:
+            args += ["--thread", thread]
+        if grep is not None:
+            args += ["--grep", grep]
+        if since is not None:
+            args += ["--since", since]
+        args.append("--json")
+        out = _run(args)
+        try:
+            records = json.loads(out)
+        except json.JSONDecodeError as e:
+            raise PortError(f"angareion log 的輸出不是 JSON：{e}") from e
+        if not isinstance(records, list):
+            raise PortError("angareion log 的輸出不是訊息陣列")
+        return [_message_of(record, "angareion log") for record in records]
 
 
-def _message_of(record: object) -> Message:
+def _message_of(record: object, what: str = "angareion read") -> Message:
     if not isinstance(record, dict):
-        raise PortError("angareion read 的每一筆都必須是物件")
+        raise PortError(f"{what} 的每一筆都必須是物件")
     mentions = record.get("mentions")
     if isinstance(mentions, str):
         mentions = (mentions,)
@@ -124,4 +155,4 @@ def _message_of(record: object) -> Message:
             mentions=mentions,
         )
     except (TypeError, ValueError) as e:
-        raise PortError(f"angareion read 的訊息欄位不合格式：{e}") from e
+        raise PortError(f"{what} 的訊息欄位不合格式：{e}") from e

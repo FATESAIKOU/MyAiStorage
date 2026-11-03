@@ -89,10 +89,12 @@ flowchart LR
 | `id`、`title`、`level`、`sender`、`received_at` | 派工信本身（先用 `angareion log --channel <派工 channel> --to <PMO>` 列舉） | 能 |
 | `ack_at`、`schedule`、`issue` | PMO 的機械 ack（`log --from <PMO> --thread <工作 ID>`） | 能 |
 | `status`、`reported_at`、相關 PR | PMO 的回報（同上） | 能（回報樣板有狀態、相關工單、相關 PR） |
-| `team` | 回報樣板沒有這一欄 | **不能**，重建後留空並列出 |
-| `notified.call` | 叫人 ack 的 `in_reply_to` | 能 |
-| `notified.poke` | 沒有寄信 | **不能**；後果是重建後同一則急件可能再標一次 `[poke]`（只多叫醒一次，無副作用） |
+| `team` | 回報樣板沒有這一欄 | **不能**。本機帳本有值就保留；沒有值（例如帳本不見了）才留空並列出 |
+| `notified.call` | 叫人 ack 的 `in_reply_to` | 能；和本機既有的紀錄取聯集，再照 `NOTIFIED_MAX` 修剪（log 只回一部分時不會變少） |
+| `notified.poke` | 沒有寄信 | **不能**；rebuild 保留本機既有的紀錄。只有帳本不見了才會是空的，後果是同一則急件可能再標一次 `[poke]`（只多叫醒一次，無副作用） |
 | 決定題 | 不在帳本 | 不適用；需要時用 `log --from <PMO> --grep` 另查 |
+
+**併帳規則（T-3 定）**：rebuild 只增補或覆寫 log 有值的東西，**log 沒說的一律保留本機的值**：項目欄位（含 `team`）、`notified.call`、`notified.poke` 都照這一條。`issue` 取機械 ack 與回報之中較新的那一封。「刪掉帳本 → rebuild」時沒有本機值可保留，結果就是上表的「不能」各欄為空。
 
 **同一張派工再出現時補發 ack 是現行語意**：同一個工作 ID 再次讀到時，現行工具會「補發 ack、沿用既有的工單和排程、不重開工單」。這是給秘書側重送用的，不是 bug。重建的測試要驗的是「重建後不會**重開工單**、補發的 ack 沿用重建出來的 `issue`／`schedule`」，不是「不會再 ack」。
 
@@ -224,7 +226,7 @@ flowchart LR
 | `pmo inbox ack ‹工作 ID› [--issue ‹repo#n›] [--schedule 立即開工\|排入待開工佇列]` | | 送出的訊息 id | 0／1（查無工作 ID）／2（送不出去） |
 | `pmo inbox report ‹工作 ID› --status ‹狀態› [--issue …] [--pr …] --body -` | 摘要與後續 | 訊息 id | 0／1／2 |
 | `pmo inbox decision-send --body -` | 決定題的 JSON（題目、選項，最多 4 題） | `[decision] 已送出決定題 id=…` | 0；1 JSON 不合格式；2 送不出去 |
-| `pmo inbox rebuild [--since ‹時刻›] [--dry-run]` | | 重建的項目數、差異、重建不出來的欄位清單 | 0／2 |
+| `pmo inbox rebuild [--since ‹時刻›] [--dry-run]` | | 重建的項目數、差異、`team` 為空的項目清單、保留的 `notified.poke` 筆數 | 0；1 angareion 回用法錯（例如 `--since` 格式錯）；2 其他外部失敗、帳本壞或寫不進去 |
 | `pmo check ‹team›` | | 逐項 OK／FAIL | 0 全過；1 有 FAIL |
 | `pmo send ‹team› ‹repo#n› --body -` | 正文 | 指示信 id、後端時刻；`tick.json` 的 `wake.every` 比看門狗的 10 分鐘長、或是 `null` 時，多印一行 `[wake-hint] 看門狗 10m 後到期，目前叫醒 ‹every\|off›`（只是提示，不改任何東西，D-7） | 0；1 用法、team 不存在、工單讀不到；2 外部失敗 |
 | `pmo open ‹team› [--session ‹agora:…›] [--fresh] [--provider P --model M]` | | agent 的 state 與 attach 指令 | 0；1 用法或狀態不足（沒先 send）；2 sidecar 拒絕或連不上（印錯誤碼） |

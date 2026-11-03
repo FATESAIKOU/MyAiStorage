@@ -19,7 +19,7 @@ import sys
 from typing import Optional
 
 from . import config as config_module
-from . import decision, inbox, ledger, paths, sanitize
+from . import decision, inbox, ledger, paths, rebuild, sanitize
 from .adapters import Angareion
 from .errors import (
     IdentityMismatch,
@@ -82,6 +82,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp_ids = inbox_sub.add_parser("decision-send", help="送出一則決定題（urgency 8，走 Angareion）")
     sp_ids.add_argument("--body", default=None, help="JSON（text＋questions）；-＝由 stdin 讀入")
 
+    sp_irb = inbox_sub.add_parser("rebuild", help="從 angareion log 重建收件帳本（帳本以 Angareion 為準，本機是快取）")
+    sp_irb.add_argument("--since", default=None, help="只重建這個時刻（含）之後的信（遞給後端的 log）")
+    sp_irb.add_argument("--dry-run", action="store_true", help="只算差異，不寫帳本")
+
     return parser
 
 
@@ -102,6 +106,8 @@ def cmd_inbox(ctx: Ctx, args: argparse.Namespace) -> int:
         return cmd_inbox_report(ctx, args)
     if subcmd == "decision-send":
         return cmd_inbox_decision_send(ctx, args)
+    if subcmd == "rebuild":
+        return cmd_inbox_rebuild(ctx, args)
     raise UsageError(f"未知的 inbox 子指令：{subcmd}")
 
 
@@ -264,6 +270,45 @@ def cmd_inbox_decision_send(ctx: Ctx, args: argparse.Namespace) -> int:
         ctx.log(f"[warn] 發送決定題失敗：{inbox.one_line_for_event(error)}")
         return 2
     ctx.emit(f"[decision] 已送出決定題 id={res}")
+    return 0
+
+
+def _cite(ids: list[str]) -> str:
+    """id 清單的一行字；空的顯示「無」。"""
+    return "、".join(ids) if ids else "無"
+
+
+def cmd_inbox_rebuild(ctx: Ctx, args: argparse.Namespace) -> int:
+    """由 angareion log 重建收件帳本（design §3.2 的 rebuild 列；#110 T-3）。
+
+    結束碼照設計的表：0 重建跑完（含 dry-run）；1 angareion 自己的用法錯
+    （exit 1：旗面拼錯一類，修呼叫端）；2 其他外部失敗——log 讀不到、輸出不合
+    格式、後端失敗（其餘 `PortError`）或帳本壞、寫不進去（`SchemaError`），
+    帳本維持原樣。stdout 是差異（重建幾筆、加／換了哪些、team 為空而重建不出
+    來的清單、`notified.poke` 保留的說明），身分守門不在這裡：重建不寄信。
+    """
+    try:
+        report = rebuild.rebuild(ctx, since=args.since, dry_run=args.dry_run)
+    except PortError as error:
+        ctx.log(f"[rebuild] 重建失敗：{inbox.one_line_for_event(error)}")
+        return 1 if error.returncode == 1 else 2
+    ctx.emit(
+        f"[rebuild] 重建 {len(report.added) + len(report.updated)} 筆"
+        f"（新增 {len(report.added)}、更新 {len(report.updated)}），"
+        f"叫人去重帳共 {report.call_notified} 筆（既有 ∪ 重建）"
+    )
+    ctx.emit(f"[rebuild] 新增：{_cite(sorted(report.added))}")
+    ctx.emit(f"[rebuild] 更新：{_cite(sorted(report.updated))}")
+    ctx.emit(
+        f"[rebuild] team：{len(report.team_blank)} 筆重建不出來，已留空並列出："
+        f"{_cite(sorted(report.team_blank))}"
+    )
+    ctx.emit(
+        f"[rebuild] notified.poke：{report.poke_kept} 筆保留（急件去重只有本機有、"
+        f"log 重建不出來；照原樣留著，不會多叫醒）"
+    )
+    if args.dry_run:
+        ctx.emit("[rebuild] [dry-run] 只算差異，帳本未寫")
     return 0
 
 

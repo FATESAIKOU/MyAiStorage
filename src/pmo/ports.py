@@ -26,7 +26,19 @@ from typing import Protocol, runtime_checkable
 
 
 class PortError(RuntimeError):
-    """A port call failed for an external reason."""
+    """A port call failed for an external reason.
+
+    `returncode` is the child process's exit status when the port ran one
+    (the Angareion adapter fills it): the caller maps a usage error (1) and a
+    back-end failure (2) to different exit codes (design §3.2). A failure that
+    never reached a process (missing command, timeout, unreadable output)
+    leaves it `None`. Adding the field keeps every existing `PortError(...)`
+    call working.
+    """
+
+    def __init__(self, message: str, *, returncode: int | None = None) -> None:
+        super().__init__(message)
+        self.returncode = returncode
 
 
 class SidecarError(PortError):
