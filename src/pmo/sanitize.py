@@ -60,6 +60,17 @@ def sanitize(text: str, secrets: Iterable[str] = ()) -> str:
     return SECRET_FIELD.sub(lambda match: match.group(0).replace(match.group(1), REDACTED), text)
 
 
+def has_credential_shape(text: str) -> bool:
+    """Whether `text` carries a token-shaped run or a secret-field value.
+
+    The same two rules `sanitize` redacts with (`TOKEN_SHAPES` and
+    `SECRET_FIELD`, aligned with `agora.credscan`), used to refuse sending a
+    letter whose text would leak a credential into Angareion (#355 裁定 5).
+    Nothing is printed from `text`; the caller only names the section.
+    """
+    return any(pattern.search(text) for pattern in TOKEN_SHAPES) or SECRET_FIELD.search(text) is not None
+
+
 def known_fields_only(record: Mapping[str, object], known: Iterable[str]) -> dict[str, object]:
     """Only the known fields of a record reach the printer (D-12: e.g. sidecar).
 

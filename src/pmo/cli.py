@@ -1,4 +1,5 @@
-"""The `pmo` command's front door (design §3.2, T-2's `inbox` half).
+"""The `pmo` command's front door (design §3.2; T-2's `inbox` half, T-3's
+rebuild, T-4a's `check`／`send`).
 
 Arguments come from the environment only: `PMO_SKILL_CONFIG` names the teams
 settings, `PMO_SKILL_STATE_DIR` the state directory (§3.4; a missing one is a
@@ -8,7 +9,7 @@ refusal, never a guessed path). Exit codes are the table's: 0 the round ran
 round itself is `pmo.round.read_round` (tick shares it); its state files are
 pre-checked before the cursor moves, so a damaged one never costs a message,
 and a send that went out before a state failure says so instead of passing for
-「送不出去」(`SentButNotRecorded`).
+「送不出去」(`SentButNotRecorded`). `check`／`send` live in `pmo.dispatch`.
 """
 
 from __future__ import annotations
@@ -19,8 +20,8 @@ import sys
 from typing import Optional
 
 from . import config as config_module
-from . import decision, inbox, ledger, paths, rebuild, sanitize
-from .adapters import Angareion
+from . import decision, dispatch, inbox, ledger, paths, rebuild, sanitize
+from .adapters import Angareion, GitHub
 from .errors import (
     IdentityMismatch,
     MissingEnvError,
@@ -85,6 +86,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp_irb = inbox_sub.add_parser("rebuild", help="從 angareion log 重建收件帳本（帳本以 Angareion 為準，本機是快取）")
     sp_irb.add_argument("--since", default=None, help="只重建這個時刻（含）之後的信（遞給後端的 log）")
     sp_irb.add_argument("--dry-run", action="store_true", help="只算差異，不寫帳本")
+
+    sp_check = sub.add_parser("check", help="派工前的本機預檢：逐項印 OK／FAIL（有 FAIL 回 1）")
+    sp_check.add_argument("team", help="team 的 key（<專案>-<team 代號>）")
+
+    sp_send = sub.add_parser("send", help="把工單與指示送到 team 的 channel，並寫 team 狀態")
+    sp_send.add_argument("team", help="team 的 key（<專案>-<team 代號>）")
+    sp_send.add_argument("ticket", help="工單，寫成 ‹owner/repo›#‹n›")
+    sp_send.add_argument("--body", default=None, help="指示內文（'-' 代表由 stdin 讀入）")
 
     return parser
 
@@ -313,11 +322,98 @@ def cmd_inbox_rebuild(ctx: Ctx, args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# 指令：check／send（派工；design §3.2、§5.2 T-4a）
+# --------------------------------------------------------------------------- #
+
+
+def cmd_check(ctx: Ctx, args: argparse.Namespace) -> int:
+    """`pmo check ‹team›`：逐項 OK／FAIL；有 FAIL 就是 1（design §3.2）。
+
+    Worker team 的那一行是 `--  ‹項目›：‹說明›`（資訊列，不算 FAIL）。
+    """
+    items = dispatch.check(ctx, args.team)
+    for item in items:
+        if item.note:
+            ctx.emit(f"--  {item.name}：{item.detail}")
+        else:
+            ctx.emit(f"{'OK' if item.ok else 'FAIL'} {item.name}：{item.detail}")
+    return 0 if all(item.ok for item in items) else 1
+
+
+def _body_from(ctx: Ctx, value: Optional[str]) -> str:
+    """`--body -` reads stdin; a missing or empty body is a usage error."""
+    if value is None:
+        raise UsageError("要給 --body -（用 stdin）或 --body <文字>")
+    text = ctx.inp.read() if value == "-" else value
+    if not str(text).strip():
+        raise UsageError("--body 是空的")
+    return str(text)
+
+
+def cmd_send(ctx: Ctx, args: argparse.Namespace) -> int:
+    """`pmo send ‹team› ‹repo#n› --body -`（design §2.1、§3.2）。
+
+    結束碼照表：工單讀不到（GitHub 埠失敗）是 1；Angareion 送不出去是 2；
+    身分不符由 `assert_pmo_identity` 擋成 2（送信前的守門，送之前就拒）。
+    已送出但後端時刻讀不回或 team 狀態寫不進去時是 `SentButNotRecorded`
+    （exit 2），字樣明說「不要直接重送」。`[wake-hint]` 只是提示，不改任何
+    東西（D-7）。
+    """
+    assert_pmo_identity(ctx.config)
+    team = ctx.config.team(args.team)
+    if team is None:
+        raise UsageError(f"未知的 team：{args.team}")
+    if team.retired:
+        raise UsageError(f"team {team.key} 已退役（retired=true），不派工")
+    repo, number = dispatch.parse_ticket(args.ticket)
+    body = _body_from(ctx, args.body)
+    # D-12 的邊界：指示信會離開本機，憑證樣式的內容不送出去。判斷只用
+    # `pmo.sanitize` 的 TOKEN_SHAPES／secret-field 規則（#355 裁定 5）；錯誤
+    # 訊息只說哪一段，不回顯值。
+    if sanitize.has_credential_shape(body):
+        raise UsageError("正文含憑證樣式，拒送（請先移除再送）")
+    if ctx.deps.github is None:
+        raise UsageError("GitHub 埠沒有接上（pmo send 需要讀工單）")
+
+    try:
+        issue = ctx.deps.github.issue_view(repo, number)
+    except PortError as error:
+        ctx.log(f"[warn] 工單讀不到：{inbox.one_line_for_event(error)}")
+        return 1
+    if sanitize.has_credential_shape(issue.title):
+        # 標題也原樣進信（`- 標題：…` 與 `標題：…` 兩處），來源與本文相同，
+        # 所以同一道牆也要掃；訊息指出是「工單標題」那一段。
+        raise UsageError("工單標題含憑證樣式，拒送；請先改工單")
+    if sanitize.has_credential_shape(issue.body):
+        # 工單本文也會原樣進到信裡（公開 GitHub 上也可能有誤貼的憑證），
+        # 所以要指出是「工單本文」那一段：PMO 改正文沒有用。
+        raise UsageError("工單本文含憑證樣式，拒送；請先改工單")
+
+    try:
+        result = dispatch.send(
+            ctx,
+            team=team,
+            repo=repo,
+            number=number,
+            issue=issue,
+            instructions=body,
+        )
+    except PortError as error:
+        ctx.log(f"[warn] 指示信送不出去：{inbox.one_line_for_event(error)}")
+        return 2
+
+    ctx.emit(f"[send] 指示信已送出 id={result.message_id} 後端時刻={result.received_at}")
+    if result.wake_hint is not None:
+        ctx.emit(f"[wake-hint] 看門狗 10m 後到期，目前叫醒 {result.wake_hint}")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # 入口
 # --------------------------------------------------------------------------- #
 
 
-_HANDLERS = {"inbox": cmd_inbox}
+_HANDLERS = {"inbox": cmd_inbox, "check": cmd_check, "send": cmd_send}
 
 
 def main(
@@ -353,7 +449,7 @@ def main(
         print(sanitize.sanitize(f"[pmo] 設定讀不起來：{e}"), file=err, flush=True)
         return 2
 
-    deps = deps if deps is not None else Deps(angareion=Angareion())
+    deps = deps if deps is not None else Deps(angareion=Angareion(), github=GitHub())
     ctx = Ctx(deps=deps, config=cfg, state_dir=state_dir, out=out, err=err, inp=inp)
     try:
         return _HANDLERS[args.cmd](ctx, args)

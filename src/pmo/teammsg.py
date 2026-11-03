@@ -95,13 +95,16 @@ def process_team_messages(ctx: Ctx, messages: Iterable, seen: set | None = None)
             if team.pm != sender:
                 continue
             key = team.key
-            st = teamstate.load_state(ctx.state_dir, key)
-            ticket = str(st.get("ticket") or "")
-            if st.get("closed", True) or not ticket or st.get("ack_at"):
-                continue
-            if is_ticket_ack(content, ticket):
-                st["ack_at"] = iso_utc(ctx.deps.now())
-                st["updated_at"] = st["ack_at"]
-                teamstate.save_state(ctx.state_dir, key, st)
-                events.append(f"[ack] {team.pm} 回了「收到 {ticket}」")
+            # 讀、比對、寫都在同一把 team 鎖內，並在鎖內重讀：`pmo send` 的
+            # `_record_dispatch` 也可能正在改同一個檔（arch review 中-1）。
+            with teamstate.state_lock(ctx.state_dir, key):
+                st = teamstate.load_state(ctx.state_dir, key)
+                ticket = str(st.get("ticket") or "")
+                if st.get("closed", True) or not ticket or st.get("ack_at"):
+                    continue
+                if is_ticket_ack(content, ticket):
+                    st["ack_at"] = iso_utc(ctx.deps.now())
+                    st["updated_at"] = st["ack_at"]
+                    teamstate.save_state(ctx.state_dir, key, st)
+                    events.append(f"[ack] {team.pm} 回了「收到 {ticket}」")
     return events

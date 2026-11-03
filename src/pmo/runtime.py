@@ -62,9 +62,9 @@ def assert_pmo_identity(config: TeamsConfig) -> None:
 class Deps:
     """The four ports, plus the clock.
 
-    `aicomm`／`sidecar`／`github` stay `None` until their tickets wire them
-    (T-4a..T-5): a command that needs one and finds `None` is not a bad
-    backend, it is a command not implemented yet.
+    `aicomm`／`sidecar` stay `None` until their tickets wire them (T-4b..T-5):
+    a command that needs one and finds `None` is not a bad backend, it is a
+    command not implemented yet. T-4a wires `github` (`pmo send`).
     """
 
     angareion: AngareionPort

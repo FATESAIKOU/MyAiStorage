@@ -146,3 +146,55 @@ def test_a_file_that_is_not_an_object_is_refused():
     with pytest.raises(SchemaError) as caught:
         parse([{"state": "running"}])
     assert "not a JSON object" in str(caught.value)
+
+
+# --------------------------------------------------------------------------- #
+# 每個 team 一把鎖（arch review 中-1）：跨進程排他、同一行程可重入、依 key 分開
+# --------------------------------------------------------------------------- #
+
+
+def test_the_team_lock_is_reentrant_and_exclusive(tmp_path):
+    import fcntl
+    import os
+
+    from pmo import teamstate
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    lock = teamstate.lock_file(state_dir, "demo2-m1")
+    assert lock.name == "demo2-m1.json.lock"
+
+    # 同一線程可重入（`send` 與 tick 的 ack 比對都在鎖內呼叫 load／save）
+    with teamstate.state_lock(state_dir, "demo2-m1"):
+        with teamstate.state_lock(state_dir, "demo2-m1"):
+            pass
+
+    # 拿鎖期間別的 fd 拿不到（跨進程排他）
+    with teamstate.state_lock(state_dir, "demo2-m1"):
+        assert lock.exists()
+        fd = os.open(str(lock), os.O_RDWR)
+        try:
+            with pytest.raises((BlockingIOError, OSError)):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+
+    # 放掉之後拿得到
+    fd = os.open(str(lock), os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def test_the_team_lock_is_per_team_key(tmp_path):
+    """兩個 team 的鎖各自獨立：不能因為一個 team 在寫就鎖住另一個。"""
+    from pmo import teamstate
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    with teamstate.state_lock(state_dir, "demo2-m1"):
+        with teamstate.state_lock(state_dir, "demo3-m1"):
+            assert teamstate.lock_file(state_dir, "demo2-m1").exists()
+            assert teamstate.lock_file(state_dir, "demo3-m1").exists()

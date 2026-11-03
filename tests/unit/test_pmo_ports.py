@@ -115,10 +115,21 @@ def test_the_angareion_fake_records_what_was_sent():
 
 
 def test_the_angareion_fake_logs_calls_without_draining_the_queue():
+    # 假物件照真 CLI 的合約過濾（#355 高-1）：channel 對不上就撈不到。
     fake = FakeAngareion([_message()], logged=[_message("01JLOG")])
-    assert [message.message_id for message in fake.log(channel="dispatch-pmo", thread="01JWORK")] == ["01JLOG"]
+    assert [
+        message.message_id
+        for message in fake.log(channel="team-myaistorage-m1", since="2026-11-03T00:00:00Z")
+    ] == ["01JLOG"]
     assert fake.log_calls == [
-        {"channel": "dispatch-pmo", "sender": None, "to": None, "thread": "01JWORK", "grep": None, "since": None}
+        {
+            "channel": "team-myaistorage-m1",
+            "sender": None,
+            "to": None,
+            "thread": None,
+            "grep": None,
+            "since": "2026-11-03T00:00:00Z",
+        }
     ]
     assert len(fake.pending) == 1  # log is not a read
 

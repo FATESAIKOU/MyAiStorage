@@ -7,8 +7,10 @@ fakes (§3.1, §3.3), `sanitize` (D-12), the two environment paths (§3.4) and
 (`pmo.cli`), the state stores (`pmo.ledger`, `pmo.teamstate`), the round that
 `pmo tick` will share (`pmo.round`), the decision questions (`pmo.decision`),
 the timestamp shape (`pmo.timeutil`), and the Angareion adapter. T-3 added the
-ledger rebuild (`pmo inbox rebuild`, `pmo.rebuild`); `pmo tick` and the
-sending/team commands are later tickets (§5.2 T-4a..T-5).
+ledger rebuild (`pmo inbox rebuild`, `pmo.rebuild`); T-4a added the dispatch
+front half (`pmo check`／`pmo send`, `pmo.dispatch`, the GitHub adapter).
+`pmo tick` and the remaining sending/team commands are later tickets
+(§5.2 T-4b..T-5).
 """
 
 from __future__ import annotations
