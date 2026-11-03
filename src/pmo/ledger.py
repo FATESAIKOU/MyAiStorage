@@ -27,17 +27,13 @@ during the transition (Q-9).
 
 from __future__ import annotations
 
-import fcntl
 import json
-import os
-import threading
-from contextlib import contextmanager
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
 
-from . import _io, _jsonutil, sanitize
+from . import _io, _jsonutil, _lock, sanitize
 from ._jsonutil import fail, pick_extra
 from .timeutil import iso_utc
 
@@ -183,23 +179,6 @@ def save(path: Path, ledger: Ledger) -> None:
 # --------------------------------------------------------------------------- #
 
 
-class _LockEntry:
-    """One state directory's lock: the fd, its depth, and a re-entrant guard."""
-
-    __slots__ = ("fd", "depth", "guard")
-
-    def __init__(self) -> None:
-        self.fd: int | None = None
-        self.depth = 0
-        self.guard = threading.RLock()
-
-
-#: Locks are per state directory (arch review 中-1): the old module-level fd
-#: meant a second state directory in the same process was not locked at all.
-_locks: dict[Path, _LockEntry] = {}
-_locks_guard = threading.Lock()
-
-
 def state_file(state_dir: Path) -> Path:
     """The ledger file of one state directory."""
     return Path(state_dir) / STATE_FILE_NAME
@@ -210,32 +189,14 @@ def lock_file(state_dir: Path) -> Path:
     return state_file(state_dir).with_name(f"{STATE_FILE_NAME}.lock")
 
 
-@contextmanager
-def state_lock(state_dir: Path) -> Iterator[None]:
+def state_lock(state_dir: Path) -> AbstractContextManager[None]:
     """跨進程檔案鎖（fcntl.flock）＋進程內可重入鎖，綁在一個 state 目錄上。
 
     保護 `secretary-inbox.json` 的讀寫窗口，防止兩個行程（或 watch 與手動
     `inbox` 指令）並行時覆寫。同一行程對不同 state 目錄拿鎖各自獨立。
+    機制在 `pmo._lock.path_lock`（#358）：這裡只決定鎖檔路徑，是薄殼。
     """
-    path = lock_file(state_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _locks_guard:
-        entry = _locks.setdefault(path, _LockEntry())
-    with entry.guard:
-        if entry.depth == 0:
-            entry.fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o666)
-            fcntl.flock(entry.fd, fcntl.LOCK_EX)
-        entry.depth += 1
-        try:
-            yield
-        finally:
-            entry.depth -= 1
-            if entry.depth == 0 and entry.fd is not None:
-                fd, entry.fd = entry.fd, None
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                finally:
-                    os.close(fd)
+    return _lock.path_lock(lock_file(state_dir))
 
 
 def empty_state() -> dict:
