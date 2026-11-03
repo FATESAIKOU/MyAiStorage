@@ -26,6 +26,7 @@
 | D-18 | `pmo tick` 是一輪、也是 PMO 身分唯一的讀信者；讀到的每一則都要有去處（自己處理、`[msg]` 交給 PMO、或交接給過渡工具）；指令只做機械步驟，建工單、派工、重開、換 provider 由 PMO 判斷 | 同一個身分只留一個讀者；職務分界 | 本人（經 PMO；#110 留言、MyPMO 決定檔 PR #270），2026-11-03（Q-9 (a)） | #110（design-notes/110-pmo-skill.md） note D-6、D-7、D-13 |
 | D-19 | 叫醒＝寄件人立刻 poke＋PMO 用 `pmo wake set\|off\|show` 自己排的 sidecar 定時 poke job（頻率由 PMO 定）；到期判斷全在 tick 裡，不設外部監看程式 | 叫醒來源只需要「叫」，到期狀態只在唯一的讀者裡 | 本人（經 PMO；#110 留言、MyPMO 決定檔 PR #270），2026-11-02（Q-8 (a)） | #110（design-notes/110-pmo-skill.md） note D-14、§3.6 |
 | D-20 | 第一階段只搬本機 sidecar 的派工；群請求、worker team 的動作、挑模型、MyPMO 的工單維護工具留在 MyPMO，和 tick 用 id 交接；切換後 MyPMO 的 dispatch.py 只留 worker 動作和群請求 | 群請求和 worker 傳輸搬移風險高、和其他 repo 綁在一起；讀者仍只有一個。之後的搬移與退役時機是架構師的後續提議，本人沒有決定 | 本人（經 PMO；#110 留言、MyPMO 決定檔 PR #270），2026-11-03（Q-3 (a)、Q-4 不搬、Q-7 (a)、Q-9 (a)） | #110（design-notes/110-pmo-skill.md） note D-8～D-11、D-15 |
+| D-21 | sync 的大量下載（`need` ≥ `BULK_DOWNLOAD_MIN`）用一次列表式 `copy --include */session.md --fast-list --checksum` 下載到 mirror **外**的持久影子 `<cache>/download-staging`（`download-staging.lock` 排隊），只把 `changed` 裡、md5 等於這次列表的檔**複製**進 mirror（`os.replace`），影子保留供續傳；失敗時同樣先複製驗過的，其餘逐一 `copyto`；影子的清理只在列表完整時、非阻塞拿到鎖時做。門檻與並行度是模組常數，不開環境變數 | 逐檔解析路徑在冷快取時是 O(session 數 × 往返)（Mac 量到每份 0.64 秒），而 sidecar 的逾時會把一次做不完的下載整個丟掉；影子在 mirror 外，所以 G3／#119／垃圾桶佇列的不變式不受影響；正確性仍由 sync 之後的逐一 md5 核對兜底 | 架構師（核准者模式；作者 ollama-cloud/deepseek-v4.1-flash） | #364（design-notes/364-bulk-download.md §10） |
 
 #110 的 note 有自己的 D- 編號，上表 D-15～D-20 的出處欄寫成「note D-x」。
 
