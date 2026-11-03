@@ -239,11 +239,12 @@ class FakeSidecar:
         self.agents[agent_id] = record
         return record
 
-    def poke(self, agent_id: str, *, text: str, interrupt: bool = False) -> None:
+    def poke(self, agent_id: str, *, text: str, interrupt: bool = False) -> int:
         self._maybe_fail("poke")
         if agent_id not in self.agents:
             raise SidecarError(status=404, code="agent_not_running", detail=f"no agent {agent_id!r}")
         self.pokes.append((agent_id, text, interrupt))
+        return 200
 
     def close_agent(self, agent_id: str) -> None:
         self._maybe_fail("close_agent")
