@@ -48,6 +48,10 @@
       "backend": "aicompany-channel",
       "issue": 8
     },
+    "team-mylinuxpool-w2": {
+      "backend": "aicompany-channel",
+      "issue": 28
+    },
     "team-mypmo-m1": {
       "backend": "aicompany-channel",
       "issue": 22
