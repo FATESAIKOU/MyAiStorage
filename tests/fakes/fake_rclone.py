@@ -32,6 +32,22 @@ how big, and the mtime it carried (#169). `copy`/`copyto` keep the source file's
 (like rclone does), and `lsjson` reports it as `ModTime` (RFC 3339, UTC). A test sets a
 file's age with `os.utime` on the remote file or on the source before the copy.
 
+A `copy` whose *source* is the remote and has no `--files-from` is a download too: the
+whole source tree's files are copied to the local destination, honouring `--include`
+and `--exclude` (a `*` in a pattern does not cross `/`, as in rclone, so `*/session.md`
+matches only `session.md` one folder down). `--fast-list` is accepted and ignored;
+`--transfers N` / `--checkers N` are accepted and their values are not taken for
+paths. `--checksum` skips a destination file whose md5 is already the source's; without
+it the comparison is size and modtime, as rclone's default (#364). That download also
+writes copies.log, with only the files it really copied.
+FAKE_RCLONE_BULK_PARTIAL=<n> copies only the first n files and then exits 1, as a run
+that was killed halfway would leave things; the next run's `--checksum` picks up the
+rest (#364).
+
+Every `copy` without `--files-from` whose source is the remote used to fall through to
+the local->Drive branch below: nothing was copied and the call still exited 0. The
+remote->local branch is checked first, so a bulk download really moves bytes.
+
 FAKE_RCLONE_NO_DIR_ID=1: the recursive `lsjson` (the one without `--files-only`)
 returns directory entries without an `ID`, as if the Drive did not send it;
 FAKE_RCLONE_NO_DIR_ID=all drops the `ID` from `--dirs-only` listings too (#164).
@@ -65,6 +81,7 @@ the session.md copy (#155, 非阻擋 1).
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -231,6 +248,58 @@ def resolve(target):
     return root / target[len("gdrive:"):]
 
 
+#: Flags whose next word is a value, not a path (#364: `--transfers 16` must not be
+#: read as a source named "16").
+_VALUE_FLAGS = {
+    "--files-from", "--include", "--exclude", "--include-from", "--exclude-from",
+    "--filter", "--filter-from", "--transfers", "--checkers", "--max-size", "--min-size",
+    "--max-age", "--min-age", "--bwlimit", "--log-level", "--log-file", "--stats",
+    "--stats-unit", "--stats-file",
+}
+
+
+def positionals(params):
+    """The words that are not options - the source and destination of a command."""
+    out, i = [], 0
+    while i < len(params):
+        if params[i] in _VALUE_FLAGS:
+            i += 2
+            continue
+        if params[i].startswith("--"):
+            i += 1
+            continue
+        out.append(params[i])
+        i += 1
+    return out
+
+
+def matches(rel: str, pattern: str) -> bool:
+    """rclone's glob: `*` and `?` stay inside one path component (#364)."""
+    out, i = "", 0
+    while i < len(pattern):
+        if pattern[i:i + 2] == "**":
+            out += ".*"
+            i += 2
+            continue
+        char = pattern[i]
+        if char == "*":
+            out += "[^/]*"
+        elif char == "?":
+            out += "[^/]"
+        else:
+            out += re.escape(char)
+        i += 1
+    return re.match("^" + out + "$", rel) is not None
+
+
+def log_copies(src: Path, names: list[str]) -> None:
+    """One copies.log row for what a download really moved (#364)."""
+    with open(remote.parent / "copies.log", "a") as f:
+        f.write(json.dumps({"src": str(src), "files": [
+            {"name": rel, "size": (src / rel).stat().st_size,
+             "mtime": (src / rel).stat().st_mtime} for rel in names]}) + "\n")
+
+
 if cmd == "mkdir":
     make_dirs(resolve(params[0]))
 elif cmd == "lsjson":
@@ -335,6 +404,41 @@ elif cmd == "delete" and "--files-from" in params:
         while parent != dst and parent.is_dir() and not any(parent.iterdir()):
             parent.rmdir()
             parent = parent.parent
+elif (cmd == "copy" and len(positionals(params)) >= 2
+      and resolve(positionals(params)[0]) is not None):
+    # remote -> local, list-style (#364): the whole source tree, filtered by --include.
+    # Checked before the local -> remote branch: a download without --files-from used
+    # to fall through to it, copy nothing and still exit 0 (a false green).
+    pos = positionals(params)
+    src, dst = resolve(pos[0]), Path(pos[1])
+    included = [params[n + 1] for n, p in enumerate(params) if p == "--include"]
+    excluded = [params[n + 1] for n, p in enumerate(params) if p == "--exclude"]
+    checksum = "--checksum" in params
+    limit = int(os.environ.get("FAKE_RCLONE_BULK_PARTIAL") or 0)
+    copied = []
+    for path in sorted(src.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(src).as_posix()
+        if included and not any(matches(rel, pat) for pat in included):
+            continue
+        if any(matches(rel, pat) for pat in excluded):
+            continue
+        target = dst / rel
+        if target.is_file():
+            if checksum and (hashlib.md5(target.read_bytes()).hexdigest()
+                             == hashlib.md5(path.read_bytes()).hexdigest()):
+                continue          # --checksum: the shadow already has these bytes (#364)
+            if not checksum and (target.stat().st_size == path.stat().st_size
+                                 and int(target.stat().st_mtime) == int(path.stat().st_mtime)):
+                continue          # rclone's default comparison: size and modtime
+        if limit and len(copied) >= limit:
+            log_copies(src, copied)
+            fail(f"bulk copy stopped after {limit} files")
+        make_dirs(target.parent)
+        shutil.copy2(path, target)
+        copied.append(rel)
+    log_copies(src, copied)
 elif cmd == "copy":          # a local tree up to the remote, same names overwritten (agora sync)
     src, dst = Path(params[0]), resolve(params[1])
     excluded = [params[n + 1] for n, p in enumerate(params) if p == "--exclude"]

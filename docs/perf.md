@@ -76,7 +76,8 @@ Drive 上 `agora-test/sessions/` 最後 0 筆、自己那個 uuid 的 `projects/
 
 ## PM 的處理（2026-10-02）
 
-- **冷啟動改成一次批次下載（已做）**：sync 把所有要更新的 `session.md` 用一次 `rclone copy --files-from … --no-traverse` 抓下來，失敗才退回逐一下載。真的 Drive 上 3 個 Session 的冷啟動從約 13 秒（依上表推算）變成 5.8 秒；Session 越多差越多。
+- **冷啟動改成一次批次下載（已做）**：sync 把所有要更新的 `session.md` 用一次 `rclone copy --files-from … --no-traverse` 抓下來，失敗才退回逐一下載。真的 Drive 上 3 個 Session 的冷啟動從約 13 秒（依上表推算）變成 5.8 秒；Session 越多差越多。**2026-11-03（#364）起，要抓的檔達到 10 份時不再走這條**：`--no-traverse` 配 `--files-from` 對清單裡的每一份各要走一次路徑解析，worker 上實測 215 秒只拿到 144 KB；少於 10 份時仍是這一條。
+- **冷快取的下載改成列表式＋續傳（#364，已做）**：要抓的 `session.md` 達到 10 份（`BULK_DOWNLOAD_MIN`）時，改用一次 `rclone copy gdrive:sessions <cache>/download-staging --include '*/session.md' --fast-list --checksum --transfers 16 --checkers 16`，再把 md5 與這次列表相符的檔複製進 mirror（`os.replace` 落地）；影子跨輪保留，被砍掉的一輪下一輪只補缺的。Mac 量測（2026-11-03，5716 檔／1371 份 `session.md`／44 MB）：舊路徑每份約 0.64 秒，外推約 14.6 分鐘；列表式 142 秒（`--transfers 4` 時 245 秒），約 3.6～6.2 倍。
 - **寫入少一次往返（沒做，留給使用者決定）**：建議 1 會拿掉上傳後的 md5 確認，那是 outbox「確認 Drive 有了才移除」的保證（design 4.1），所以不拿掉。另一個做法是把 raw 與 session.md 用一次 `rclone copy --order-by name --transfers 1` 上傳（`raw-…` 排在 `session.md` 前面，順序仍然成立），可以省約 3.5 秒；但要改寫 fake 與幾個依賴 `copyto` 的測試，也要在真的 Drive 上確認順序，所以留到下一輪。
 
 ## 2026-10-21：一次 import 的呼叫清單（#119，改前／改後）

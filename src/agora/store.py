@@ -36,6 +36,15 @@ from pathlib import Path
 from agora import header as h
 
 SYNC_THROTTLE_S = 300
+#: #364: bulk downloads of changed session.md. At or above this many still-needed
+#: sessions, one list-style `copy --include "*/session.md"` beats one rclone run that
+#: resolves each path (`--files-from --no-traverse`, about 0.64 s a file in the
+#: measurement); the staging copy is a fixed cost of a listing plus local md5s, so 10
+#: (about 6 s) is where they cross. Only speed depends on it, never the result.
+BULK_DOWNLOAD_MIN = 10
+#: Parallelism of that one list-style run (142 s against 245 s at the default 4).
+BULK_TRANSFERS = 16
+BULK_CHECKERS = 16
 #: Bumped when the index's tables change: the index is a cache of the mirror, so
 #: a new shape is rebuilt from the mirror rather than migrated (design, T1 3.1).
 INDEX_VERSION = 2
@@ -81,6 +90,11 @@ class Paths:
     pending = property(lambda s: s.state / "pending")
     trash_queue = property(lambda s: s.state / "trash-queue")   # waiting for the Drive trash
     reading = property(lambda s: s.cache / "reading")   # agent sessions' full text (design 5.10)
+    #: #364: the resumable copy of Drive's session.md files, kept across runs. Under
+    #: `cache`, so `os.replace` into the mirror stays on one filesystem, and outside
+    #: `mirror` (`sessions/`), so `rebuild_from_mirror` can never read it.
+    staging = property(lambda s: s.cache / "download-staging")
+    staging_lock = property(lambda s: s.cache / "download-staging.lock")
 
 
 def now() -> float:
@@ -510,6 +524,29 @@ def _config_lock(paths: Paths):
         yield
 
 
+@contextlib.contextmanager
+def _staging_lock(paths: Paths, *, wait: bool = True):
+    """Held while a bulk download writes the staging copy (#364, C-12, C-15).
+
+    `wait=True` queues: the process ahead leaves a warm staging copy behind, so the one
+    that waits carries on from it. A process that dies drops the lock with its fd.
+    `wait=False` yields False when somebody else holds it - the trim's way: that process
+    is writing there right now and its listing may be newer than ours.
+    """
+    paths.cache.mkdir(parents=True, exist_ok=True)
+    with open(paths.staging_lock, "a") as lock:
+        if wait:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield True
+            return
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        yield True
+
+
 class Drive:
     """Thin wrapper over rclone. Never reads the token; rclone refreshes it."""
 
@@ -638,12 +675,52 @@ class Drive:
         local.parent.mkdir(parents=True, exist_ok=True)
         self._run("copyto", f"gdrive:sessions/{ulid}/{name}", str(local))
 
-    def download_many(self, ulids: list[str], mirror: Path) -> None:
-        """Fetch several session.md files in one rclone run instead of one call each."""
-        mirror.mkdir(parents=True, exist_ok=True)
-        _with_files_from(self, [f"{u}/session.md" for u in ulids], mirror,
-                         "copy", "gdrive:sessions", str(mirror), "--no-traverse")
+    def download_many(self, ulids: list[str], mirror: Path,
+                      md5s: dict[str, str]) -> None:
+        """Fetch several session.md files without one rclone call per file.
 
+        A few (`need` under BULK_DOWNLOAD_MIN) go through one `--files-from` run, as
+        before. Many go through one list-style `copy --include "*/session.md"` into
+        `paths.staging`, then only the files whose md5 equals the listing are copied
+        into the mirror (#364). The staging copy is kept: `--checksum` makes the next
+        run fetch only what is missing or changed there.
+
+        `md5s` is `{ulid: md5 of that session.md in this listing}` - the same value the
+        caller checks after the batch. It is required: a "no md5, old path" branch would
+        be a second way to do this (D-2).
+
+        A failed list-style run still publishes the staging files that are already
+        right, then raises: the caller says「批次下載失敗」and copies the rest one by
+        one (C-5′).
+
+        `mirror` is the destination of the few-files run only; the bulk path writes the
+        same `paths.mirror` through `_publish` (the design's signature, kept so the
+        caller's two ways stay one call).
+        """
+        if not ulids:
+            return                       # the caller already removed what the mirror has
+        if len(ulids) < BULK_DOWNLOAD_MIN:
+            mirror.mkdir(parents=True, exist_ok=True)
+            _with_files_from(self, [f"{u}/session.md" for u in ulids], mirror,
+                             "copy", "gdrive:sessions", str(mirror), "--no-traverse")
+            return
+        self.paths.staging.mkdir(parents=True, exist_ok=True)
+        with _staging_lock(self.paths):
+            try:
+                self._run("copy", "gdrive:sessions", str(self.paths.staging),
+                          "--include", "*/session.md", "--fast-list",
+                          "--checksum", "--transfers", str(BULK_TRANSFERS),
+                          "--checkers", str(BULK_CHECKERS))
+            except StoreError:
+                try:
+                    for ulid in ulids:       # C-5′: whatever the shadow already got right
+                        _publish(self.paths, ulid, md5s[ulid])
+                except StoreError:
+                    pass        # the download failed, and that is the error to report;
+                                # the per-file check will try each session again anyway
+                raise
+            for ulid in ulids:
+                _publish(self.paths, ulid, md5s[ulid])
 
     def download_segments(self, ulid: str, names: list[str], dest: Path) -> None:
         """Fetch several files of one session folder in one rclone run (`--files-from`)."""
@@ -1596,6 +1673,76 @@ def _recreated_by_us(drive: Drive, ulid: str, ours: set[str], say, blocked: list
            "orphans": "直接查沒有 session.md"}[state]
     say(f"確認檢查 {ulid}：資料夾 ID 變了，{why}，不能確認，不清資料夾，留到下一輪")
     return False
+
+
+def _need(paths: Paths, changed: list[str], remote: dict[str, dict[str, str]]) -> list[str]:
+    """The ones of `changed` the mirror does not already hold at the listed md5 (#364, C-14).
+
+    That is「`changed`」minus the round that died between copying into the mirror and
+    writing the index: those session.md files are already right, and downloading them
+    again is the work resuming is meant to save. Cheap: at most one read of the mirror.
+    """
+    out = []
+    for ulid in changed:
+        local = paths.mirror / ulid / "session.md"
+        if local.is_file() and md5_file(local) == remote[ulid]["session.md"]:
+            continue
+        out.append(ulid)
+    return out
+
+
+def _publish(paths: Paths, ulid: str, md5: str) -> bool:
+    """Copy staging/<ulid>/session.md into the mirror if it really is the listed file (#364).
+
+    The bytes are checked against the listing, not the modtime (Drive's is unreliable),
+    so a file the uploader changed mid-copy is not published; the per-file check in
+    `sync` then fetches it again. Written through `copy_atomic`, the module's one
+    atomic copy into the mirror - a reader sees the old file or the new one, never half
+    of either. The staging file stays put: that is what makes the next run resumable
+    (C-3′, C-7′).
+
+    A local failure (a full disk, an unreadable staging file) becomes a StoreError:
+    `sync` then takes its batch-failed path and fetches those sessions one by one,
+    instead of the whole command dying. The message is the OSError's own text, under
+    the wording `sync` already uses.
+    """
+    try:
+        src = paths.staging / ulid / "session.md"
+        if not src.is_file() or md5_file(src) != md5:
+            return False
+        dest = paths.mirror / ulid / "session.md"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        copy_atomic(src, dest)
+    except OSError as e:
+        raise StoreError(str(e)) from None
+    return True
+
+
+def _trim_staging(paths: Paths, remote: dict) -> None:
+    """Drop staging folders for sessions Drive no longer lists (#364, C-4′, C-15).
+
+    Only when the caller's listing came back whole (`sync`'s `if not missing:`, which
+    in the code means `list_sessions()` answered), the same rule the cloud_missing
+    marks follow. "Whole" is not a #152 check: a listing that silently dropped a live
+    folder still counts as whole here, and that folder's staging copy goes; the staging
+    copy is a cache, so the cost is one download next round and nothing else.
+
+    Non-blocking: if another process holds the lock, it is writing there right now and
+    may have a newer listing - leave this round alone rather than wait or report
+    anything.
+    """
+    if not paths.staging.is_dir():
+        return
+    with _staging_lock(paths, wait=False) as got:
+        if not got:
+            return
+        for child in paths.staging.iterdir():
+            if child.name in remote:
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)     # gone on Drive, and leftovers
+            else:
+                child.unlink(missing_ok=True)
 
 
 def _with_files_from(drive: Drive, names: list[str], where: Path, *args: str) -> None:
@@ -2910,9 +3057,13 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
             continue
         changed.append(u)
     if len(changed) > 1:
-        # One rclone run for all of them: each call costs seconds (docs/perf.md).
+        # One rclone run for all of them: each call costs seconds (docs/perf.md). The
+        # threshold is on `need`, not `changed`: what the mirror already holds is not
+        # downloaded again (#364, C-14).
+        need = _need(paths, changed, remote)
         try:
-            drive.download_many(changed, paths.mirror)
+            drive.download_many(need, paths.mirror,
+                                {u: remote[u]["session.md"] for u in need})
         except StoreError as e:
             say(f"批次下載失敗，改成逐一下載：{e}")
     for ulid in changed:
@@ -2953,6 +3104,7 @@ def sync(paths: Paths, drive: Drive | None = None, *, throttle: bool = False,
         # Not up yet and in flight are not "deleted on another machine".
         staged = waiting_ulids(paths)
         local = set(known) | set(index.known())
+        _trim_staging(paths, remote)      # same rule for the staging copy (#364, C-4′)
         # The listing is what Drive said on one call, and a bad day can drop a live folder from it
         # (#152). A marker steers the person to `--not-exist-upload` / `--not-exist-delete`, so a
         # session that is newly missing is asked about once, directly (#159): only "not there" marks
