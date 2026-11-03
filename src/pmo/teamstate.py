@@ -31,10 +31,11 @@ Nothing here is command behavior (T-1).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import _io, _jsonutil
+from . import _io, _jsonutil, sanitize
 from ._jsonutil import pick_extra
 
 WHERE = "team state"
@@ -123,3 +124,41 @@ def load(path: Path) -> TeamState:
 def save(path: Path, state: TeamState) -> None:
     """Write the canonical form of the state."""
     _io.write_json(path, state.to_dict())
+
+
+# --------------------------------------------------------------------------- #
+# 狀態檔的存取（路徑、讀、驗、原子寫）：只有這一處（arch review 中-1）
+# --------------------------------------------------------------------------- #
+
+
+def state_file(state_dir: Path, key: str) -> Path:
+    """One team's state file: `<state_dir>/<key>.json` (MyPMO's layout, Q-9)."""
+    return Path(state_dir) / f"{key}.json"
+
+
+def load_state(state_dir: Path, key: str) -> dict:
+    """Read and validate one team's state; a missing file is the empty one.
+
+    The schema is checked **always** now (arch review 中-1): a team state that
+    exists but does not match is damage, not an empty file — the watchdog reads
+    `ack_at` and `ticket` off it, and treating damage as empty would poke a
+    team that already answered.
+    """
+    path = state_file(state_dir, key)
+    if not path.exists():
+        return {}
+    data = _io.read_json(path)
+    parse(data)
+    return data
+
+
+def save_state(state_dir: Path, key: str, data: dict) -> None:
+    """Validate, redact (`sanitize` D-12) and atomically write one team state.
+
+    Unknown fields are written back as they are (Q-9: MyPMO's worker-team
+    fields pass through), and the keys are sorted the way MyPMO writes them, so
+    the shared file does not flip-flop between two shapes.
+    """
+    parse(json.loads(json.dumps(data)))
+    safe = sanitize.sanitize_fields(data)
+    _io.write_json(state_file(state_dir, key), safe, sort_keys=True)

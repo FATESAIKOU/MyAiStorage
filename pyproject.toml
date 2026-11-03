@@ -16,6 +16,7 @@ agora = "agora.cli:main"
 aicomm = "aicomm.cli:main"
 angareion = "angareion.cli:main"
 atelier = "atelier.cli:main"
+pmo = "pmo.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]

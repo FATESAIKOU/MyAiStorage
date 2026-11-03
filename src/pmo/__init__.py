@@ -1,11 +1,12 @@
-"""`pmo`: the PMO skill command package (`#110` T-1, design `#351`).
+"""`pmo`: the PMO skill command package (`#110`, design `#351`).
 
-T-1 is the skeleton only: the schemas and validation for the settings and
-state files (design notes `110-pmo-skill.md` §3.4), the four port interfaces
-and their fakes (§3.1, §3.3), `sanitize` (D-12) and the two environment paths
-(§3.4, `PMO_SKILL_CONFIG` / `PMO_SKILL_STATE_DIR`). It deliberately has no
-command behaviour yet: `pmo tick`／`inbox`／`send` are later tickets (§5.2
-T-2..T-5).
+T-1 built the skeleton: the schemas and validation for the settings and state
+files (design notes `110-pmo-skill.md` §3.4), the four port interfaces and their
+fakes (§3.1, §3.3), `sanitize` (D-12), the two environment paths (§3.4) and
+`_io`. T-2 added the inbox half: `pmo inbox read|list|ack|report|decision-send`
+(`pmo.cli`), the state stores (`pmo.ledger`, `pmo.teamstate`), the round that
+`pmo tick` will share (`pmo.round`), and the Angareion adapter. `pmo tick` and
+the sending/team commands are later tickets (§5.2 T-3..T-5).
 """
 
 from __future__ import annotations

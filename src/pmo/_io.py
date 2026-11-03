@@ -25,10 +25,19 @@ def read_json(path: Path) -> object:
     return data
 
 
-def write_json(path: Path, data: object) -> None:
-    """Write one JSON object atomically (temporary file in the same directory)."""
+def write_json(path: Path, data: object, *, sort_keys: bool = False) -> None:
+    """Write one JSON object atomically (temporary file in the same directory).
+
+    The temporary name carries the pid, so two writers of the same file cannot
+    write into one another's buffer; every pmo state file goes through this one
+    function (design §3.4: 同目錄暫存檔＋`os.replace`).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
-    temporary.write_text(text, encoding="utf-8")
-    os.replace(temporary, path)
+    temporary = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    text = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=sort_keys) + "\n"
+    try:
+        temporary.write_text(text, encoding="utf-8")
+        os.replace(temporary, path)
+    except OSError as error:
+        temporary.unlink(missing_ok=True)  # 失敗時不留半截的暫存檔
+        raise SchemaError(f"state 檔寫不起來 {path}：{error}") from error

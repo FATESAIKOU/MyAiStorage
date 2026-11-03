@@ -68,3 +68,21 @@ def known_fields_only(record: Mapping[str, object], known: Iterable[str]) -> dic
     """
     keep = set(known)
     return {key: value for key, value in record.items() if key in keep}
+
+
+def sanitize_fields(value: object) -> object:
+    """A copy of `value` with every string in it past `sanitize()` (D-12).
+
+    The state files carry message text verbatim (`title`, `spec`, `notes`, a
+    `[msg]` body), and the sidecar's `exit.reason` sits nested in a team state:
+    one recursive pass keeps both files free of credential-shaped runs before
+    they touch the disk. Both state stores (the inbox ledger and the team
+    state) call this, so there is one redaction rule, not two copies.
+    """
+    if isinstance(value, str):
+        return sanitize(value)
+    if isinstance(value, list):
+        return [sanitize_fields(item) for item in value]
+    if isinstance(value, dict):
+        return {key: sanitize_fields(item) for key, item in value.items()}
+    return value

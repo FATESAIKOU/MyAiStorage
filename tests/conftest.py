@@ -138,6 +138,11 @@ def isolated_home(tmp_path, monkeypatch, request):
     # reads, so drop it here along with the other inherited knobs. A test that needs
     # a seat sets it again with monkeypatch.setenv.
     monkeypatch.delenv("ANGAREION_IDENTITY", raising=False)
+    # The pmo settings and state live wherever PMO_SKILL_CONFIG / PMO_SKILL_STATE_DIR
+    # say (design §3.4); an outer shell that exports them would otherwise point a
+    # test at the person's real files. A test that needs them sets them again.
+    monkeypatch.delenv("PMO_SKILL_CONFIG", raising=False)
+    monkeypatch.delenv("PMO_SKILL_STATE_DIR", raising=False)
     # #242: the child process inherits os.environ (and --harness-file merges into
     # the inherited value), so an outer OPENCODE_CONFIG_CONTENT would leak into
     # every test; drop it here the same way. A test that needs it sets it again with monkeypatch.setenv.

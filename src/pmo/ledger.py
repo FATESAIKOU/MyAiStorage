@@ -27,13 +27,24 @@ during the transition (Q-9).
 
 from __future__ import annotations
 
+import fcntl
+import json
+import os
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 
-from . import _io, _jsonutil
+from . import _io, _jsonutil, sanitize
 from ._jsonutil import fail, pick_extra
+from .runtime import iso_utc
 
 WHERE = "inbox ledger"
+
+#: The file name MyPMO writes; both sides share it during the transition (Q-9).
+STATE_FILE_NAME = "secretary-inbox.json"
 
 _KNOWN = ("version", "items", "notified", "rebuilt_at")
 _KNOWN_ITEM = ("id", "title", "level", "sender", "received_at", "ack_at", "schedule", "issue", "status", "reported_at", "pr", "team")
@@ -164,3 +175,117 @@ def load(path: Path) -> Ledger:
 def save(path: Path, ledger: Ledger) -> None:
     """Write the canonical form of the ledger."""
     _io.write_json(path, ledger.to_dict())
+
+
+# --------------------------------------------------------------------------- #
+# 狀態檔的存取（路徑、讀〔含相容補齊〕、驗、鎖、原子寫）：只有這一處
+# （design §3.1「狀態儲存」；T-3／T-4a／T-5 都走這裡）
+# --------------------------------------------------------------------------- #
+
+
+class _LockEntry:
+    """One state directory's lock: the fd, its depth, and a re-entrant guard."""
+
+    __slots__ = ("fd", "depth", "guard")
+
+    def __init__(self) -> None:
+        self.fd: int | None = None
+        self.depth = 0
+        self.guard = threading.RLock()
+
+
+#: Locks are per state directory (arch review 中-1): the old module-level fd
+#: meant a second state directory in the same process was not locked at all.
+_locks: dict[Path, _LockEntry] = {}
+_locks_guard = threading.Lock()
+
+
+def state_file(state_dir: Path) -> Path:
+    """The ledger file of one state directory."""
+    return Path(state_dir) / STATE_FILE_NAME
+
+
+def lock_file(state_dir: Path) -> Path:
+    """The flock file next to it (the same name MyPMO uses)."""
+    return state_file(state_dir).with_name(f"{STATE_FILE_NAME}.lock")
+
+
+@contextmanager
+def state_lock(state_dir: Path) -> Iterator[None]:
+    """跨進程檔案鎖（fcntl.flock）＋進程內可重入鎖，綁在一個 state 目錄上。
+
+    保護 `secretary-inbox.json` 的讀寫窗口，防止兩個行程（或 watch 與手動
+    `inbox` 指令）並行時覆寫。同一行程對不同 state 目錄拿鎖各自獨立。
+    """
+    path = lock_file(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _locks_guard:
+        entry = _locks.setdefault(path, _LockEntry())
+    with entry.guard:
+        if entry.depth == 0:
+            entry.fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o666)
+            fcntl.flock(entry.fd, fcntl.LOCK_EX)
+        entry.depth += 1
+        try:
+            yield
+        finally:
+            entry.depth -= 1
+            if entry.depth == 0 and entry.fd is not None:
+                fd, entry.fd = entry.fd, None
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
+
+
+def empty_state() -> dict:
+    """The empty ledger: what a missing file means (nothing recorded yet)."""
+    return {"version": 1, "updated_at": None, "items": {}, "notified": {"call": {}, "poke": {}}}
+
+
+def normalize_state(data: dict) -> dict:
+    """Fill in the dedupe buckets a MyPMO ledger may not have written yet.
+
+    MyPMO only creates the bucket it touches (`_notified_bucket`), so a ledger
+    that has seen a叫人 but no急件 carries `notified.call` alone — and one that
+    has seen neither carries no `notified` at all. Both sides share the file
+    during the transition (Q-9), so the missing keys are added **in memory**
+    here and the file the other side owns is not rewritten. A `notified` of the
+    wrong shape is left as it is — `parse` then refuses it, because silently
+    resetting it would ack twice.
+    """
+    notified = data.setdefault("notified", {})
+    if isinstance(notified, dict):
+        notified.setdefault("call", {})
+        notified.setdefault("poke", {})
+    return data
+
+
+def load_state(state_dir: Path) -> dict:
+    """Read the ledger of one state directory; missing is empty, damaged raises.
+
+    The content is validated against this module's schema before it goes out,
+    so a state-file problem is caught before the cursor can move (design §3.2:
+    exit 2,這一輪什麼都沒做).
+    """
+    path = state_file(state_dir)
+    if not path.exists():
+        return empty_state()
+    data = _io.read_json(path)
+    normalize_state(data)
+    parse(data)
+    return data
+
+
+def save_state(state_dir: Path, data: dict, now: datetime | None = None) -> None:
+    """Validate, redact (`sanitize` D-12) and atomically write the ledger.
+
+    The write happens under the state directory's flock, after a schema check —
+    a state-file failure is a `SchemaError` (design §3.2: 寫不進去 → exit 2).
+    """
+    parse(json.loads(json.dumps(data)))  # 寫前先把關（深拷貝，防 caller 的別名）
+    dt = now if now is not None else datetime.now(timezone.utc)
+    data["updated_at"] = iso_utc(dt)
+    safe = sanitize.sanitize_fields(data)
+    with state_lock(state_dir):
+        _io.write_json(state_file(state_dir), safe)
