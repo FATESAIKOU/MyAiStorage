@@ -40,9 +40,6 @@ needs.
 待確認（the design does not spell these out; they are kept small and named in
 the #357 report）：
 
-- The sidecar port carries no address (T-1's shape), so every sidecar call goes
-  to the one sidecar `Deps.sidecar` points at. First phase only reaches the
-  local sidecar's teams (D-8); `worker` teams are refused rather than guessed.
 - The output wording of `status` and `close` is not in the table; the labels
   `[status]`／`[close]`／`[poke]`／`[reply]` are new and only carry known fields
   (D-12).
@@ -53,6 +50,11 @@ the #357 report）：
 - A close that is still running in the background writes `close_requested_at`
   instead of `closed: true`: the agent may still be `running`, so claiming it
   closed would be wrong, and the next `pmo status` is what tells the PMO.
+
+The sidecar port is looked up by address (`Deps.sidecar_for`): a team's
+operations use that team's `sidecar`, and the PMO's own wake jobs use
+`pmo_sidecar` (#356, design §3.1). First phase still refuses `worker` teams
+(D-8) instead of guessing how to reach another machine.
 """
 
 from __future__ import annotations
@@ -63,8 +65,15 @@ from dataclasses import dataclass, field
 from . import teamstate
 from .config import Team
 from .errors import SchemaError, UsageError
-from .ports import AgentRecord, JobRecord, PortError, SidecarError
-from .runtime import Ctx, one_line
+from .ports import (
+    AgentRecord,
+    JobRecord,
+    PortError,
+    SidecarError,
+    sidecar_address,
+    sidecar_code,
+)
+from .runtime import Ctx, one_line, sidecar_port
 from .timeutil import iso_utc
 
 __all__ = [
@@ -121,28 +130,28 @@ def team_or_usage(ctx: Ctx, key: str, *, refuses_retired: bool = False) -> Team:
     return team
 
 
-def _sidecar(ctx: Ctx):
-    """The sidecar port, or a refusal that reads like any other sidecar failure.
+def _sidecar(ctx: Ctx, address: str):
+    """The sidecar port for one address, or a refusal that reads like a failure.
 
-    `Deps.sidecar` stays `None` when the settings name no `pmo_sidecar` (§3.4:
-    「沒有就表示 PMO 不在 sidecar」), and the same refusal covers a fake-free
-    test run: the command needs a sidecar and there is none.
+    `Deps.sidecar_for` is `None` when the deployment wires no sidecar at all
+    (tests that do not need one), and the same refusal covers a `worker`
+    address, which is never reached (D-8). The refusal only names the wiring,
+    not the address (D-12 keeps the output to known fields; the address is a
+    setting, but there is nothing to gain from printing it twice).
     """
-    port = ctx.deps.sidecar
+    port = sidecar_port(ctx.deps, address)
     if port is None:
-        raise SidecarError(detail="sidecar 埠沒有接上（設定沒有 pmo_sidecar）")
+        raise SidecarError(detail="sidecar 埠沒有接上（Deps.sidecar_for）")
     return port
 
 
-def _local_team(ctx: Ctx, team: Team) -> None:
-    """Refuse a team whose sidecar this PMO cannot reach (D-8, first phase).
+def _local_team(team: Team) -> None:
+    """Refuse a `worker` team (D-8, first phase).
 
-    First phase only operates the sidecar the PMO itself runs on: the port is
-    built from `cfg.pmo_sidecar` (the one address `pmo.cli` wires), so a team
-    whose own `sidecar` names another sidecar would be operated on the wrong
-    machine. Refuse instead of guessing (#370 中-1); picking the port by
-    address (`sidecar_for(address)`) is #356. With no `pmo_sidecar` the PMO is
-    not in a sidecar, and the local-team behavior stays as it was.
+    The team's own `sidecar` address is used, not the PMO's `pmo_sidecar`
+    (#356): a local team on another machine reachable over HTTP is operated on
+    that machine. Only `worker` is refused — first phase does not carry the
+    worker transport (ssh, forwarded ports).
     """
     if team.sidecar == "worker":
         raise SidecarError(
@@ -151,8 +160,6 @@ def _local_team(ctx: Ctx, team: Team) -> None:
                 f"第一階段不搬（design D-8；見 §3.2.1 的 [worker-action]）"
             )
         )
-    if ctx.config.pmo_sidecar is not None and team.sidecar != ctx.config.pmo_sidecar:
-        raise SidecarError(detail="team 的 sidecar 不是 PMO 這台；第一階段只支援同一台")
 
 
 def _args_of(job: JobRecord) -> dict:
@@ -208,11 +215,7 @@ def auto_jobs_aimed_at(
 
 def _code_of(error: SidecarError) -> str:
     """One known word for a sidecar failure (D-12: no message text)."""
-    if error.code:
-        return error.code
-    if error.status is not None:
-        return f"HTTP {error.status}"
-    return "連不上"
+    return sidecar_code(error)
 
 
 # --------------------------------------------------------------------------- #
@@ -248,8 +251,8 @@ def poke(ctx: Ctx, *, team: Team, text: str, interrupt: bool = False) -> int:
     returned (a 204 stays 204); the port's contract is an `int`, so it is
     returned as is — no silent 200 for a port that answers with nothing.
     """
-    _local_team(ctx, team)
-    return _sidecar(ctx).poke(team.pm, text=text, interrupt=interrupt)
+    _local_team(team)
+    return _sidecar(ctx, team.sidecar).poke(team.pm, text=text, interrupt=interrupt)
 
 
 # --------------------------------------------------------------------------- #
@@ -259,19 +262,26 @@ def poke(ctx: Ctx, *, team: Team, text: str, interrupt: bool = False) -> int:
 
 @dataclass(frozen=True)
 class TeamStatus:
-    """One team PM's line of `pmo status`."""
+    """One team PM's line of `pmo status`.
+
+    `attach` is the sidecar's `attach.local` verbatim when the team PM is an
+    interactive one (`None` for `-p` and opencode seats); it is printed as it
+    came, never parsed (#356 裁定 §3).
+    """
 
     key: str
     pm: str
     state: str
     exit_reason: str | None = None
     session: str | None = None
+    attach: str | None = None
     note: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         known: dict[str, object] = {"key": self.key, "pm": self.pm, "state": self.state}
         known["exit"] = self.exit_reason
         known["session"] = self.session
+        known["attach"] = self.attach
         if self.note is not None:
             known["note"] = self.note
         return known
@@ -307,11 +317,18 @@ class StatusReport:
 def status(ctx: Ctx, key: str | None = None) -> StatusReport:
     """Read every team PM's state／exit／session and the PMO's own jobs.
 
-    A team whose PM is not on the sidecar is `state=absent` (that is the fact,
-    not a failure: the agent may simply not be open). A sidecar that refuses or
-    is unreachable is a failure (`failures`, exit 2), and the other teams are
-    still read — §2.3's「部分失敗」shape. Worker teams are not queried at all
-    (D-8): the tick's `[worker-action]` hand-off covers them.
+    Every team's seat is read on **that team's** sidecar (its `sidecar`
+    address); the PMO's own wake jobs are read on `pmo_sidecar`, and a named
+    team's aimed jobs on that team's sidecar — the two addresses may differ,
+    and each answer is cached for the call so a shared sidecar is asked once
+    (#356, design §3.1). Addresses are compared in one form (#371): a trailing
+    `/` names the same machine, so it is neither asked twice nor reported as
+    two failures. A team whose PM is not on the sidecar is
+    `state=absent` (that is the fact, not a failure: the agent may simply not
+    be open). A sidecar that refuses or is unreachable is a failure
+    (`failures`, exit 2), and the other teams are still read — §2.3's
+    「部分失敗」shape. Worker teams are not queried at all (D-8): the tick's
+    `[worker-action]` hand-off covers them.
     """
     teams = ctx.config.teams if key is None else (team_or_usage(ctx, key),)
     lines: list[TeamStatus] = []
@@ -328,8 +345,17 @@ def status(ctx: Ctx, key: str | None = None) -> StatusReport:
                 )
             )
             continue
+        port = sidecar_port(ctx.deps, team.sidecar)
+        if port is None:
+            failures.append(f"{team.key}：sidecar 埠沒有接上")
+            lines.append(
+                TeamStatus(
+                    key=team.key, pm=team.pm, state="unknown", note="sidecar 埠沒有接上"
+                )
+            )
+            continue
         try:
-            record = _sidecar(ctx).get_agent(team.pm)
+            record = port.get_agent(team.pm)
         except SidecarError as error:
             if error.status == 404:
                 lines.append(TeamStatus(key=team.key, pm=team.pm, state="absent"))
@@ -341,22 +367,53 @@ def status(ctx: Ctx, key: str | None = None) -> StatusReport:
             continue
         lines.append(_status_of(team, record))
 
+    # 每個位址只問一次：`pmo_sidecar` 和某個 team 的 sidecar 可能是同一台。
+    # 位址先正規化（`sidecar_address`，一處集中）：結尾多一個 `/` 是同一台，
+    # 不能因此問兩次、也不能把同一次失敗報成兩條（#371 低項）。
+    job_cache: dict[str, tuple[JobRecord, ...] | str] = {}
+
+    def jobs_at(address: str) -> tuple[JobRecord, ...] | str:
+        address = sidecar_address(address)
+        if address not in job_cache:
+            port = sidecar_port(ctx.deps, address)
+            if port is None:
+                job_cache[address] = "sidecar 埠沒有接上"
+            else:
+                try:
+                    job_cache[address] = tuple(port.list_jobs())
+                except SidecarError as error:
+                    job_cache[address] = _code_of(error)
+        return job_cache[address]
+
     jobs: tuple[JobRecord, ...] = ()
     team_jobs: tuple[JobRecord, ...] = ()
     jobs_note: str | None = None
+    own_failed = False
     if ctx.config.pmo_sidecar is None:
-        jobs_note = "PMO 不在 sidecar（設定沒有 pmo_sidecar），不查 job"
+        jobs_note = "PMO 不在 sidecar（設定沒有 pmo_sidecar），不查自己排的 job"
     else:
-        try:
-            listed = tuple(_sidecar(ctx).list_jobs())
-        except SidecarError as error:
-            failures.append(f"jobs：{_code_of(error)}")
-            jobs_note = f"job 讀不到：{_code_of(error)}"
+        own = jobs_at(ctx.config.pmo_sidecar)
+        if isinstance(own, str):
+            own_failed = True
+            failures.append(f"jobs：{own}")
+            jobs_note = f"自己排的 job 讀不到：{own}"
         else:
-            jobs = tuple(job for job in listed if is_own_job(job, ctx.config.wake_text))
-            if key is not None and teams[0].sidecar != "worker":
-                # 只列不動：瞄準這個 team PM 的 job（裁定 (d) 末段、#357 的建議）
-                team_jobs = jobs_aimed_at(listed, teams[0].pm)
+            jobs = tuple(job for job in own if is_own_job(job, ctx.config.wake_text))
+
+    if key is not None and teams[0].sidecar != "worker":
+        team = teams[0]
+        aimed = jobs_at(team.sidecar)
+        if isinstance(aimed, str):
+            # 同一個位址剛剛已經報過一次（自己的 job），不要重複。比對用正規化
+            # 後的位址：`…/` 與沒有斜線是同一台（#371 低項）。
+            same_as_pmo = ctx.config.pmo_sidecar is not None and (
+                sidecar_address(team.sidecar) == sidecar_address(ctx.config.pmo_sidecar)
+            )
+            if not (own_failed and same_as_pmo):
+                failures.append(f"{team.key} 的 job：{aimed}")
+        else:
+            # 只列不動：瞄準這個 team PM 的 job（裁定 (d) 末段、#357 的建議）
+            team_jobs = jobs_aimed_at(aimed, team.pm)
 
     return StatusReport(
         teams=tuple(lines),
@@ -374,6 +431,7 @@ def _status_of(team: Team, record: AgentRecord) -> TeamStatus:
         state=record.state,
         exit_reason=record.exit_reason(),
         session=record.session,
+        attach=record.attach,
     )
 
 
@@ -429,8 +487,8 @@ def close(ctx: Ctx, *, team: Team, timeout: float = CLOSE_TIMEOUT_SECONDS) -> Cl
        still running in the background gets `close_requested_at` instead (待確認:
        the design names neither field's writer).
     """
-    _local_team(ctx, team)
-    port = _sidecar(ctx)
+    _local_team(team)
+    port = _sidecar(ctx, team.sidecar)
 
     record: AgentRecord | None
     try:

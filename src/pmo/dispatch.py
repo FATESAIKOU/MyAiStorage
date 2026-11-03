@@ -2,9 +2,10 @@
 
 The design's table gives the two rows and the `[wake-hint]` rule; the item
 list of `check` and the fixed head of the指示信 are the #355 rulings
-(REPORT-arch-355-rulings). `check` looks at the settings, the two state files
-and the team's channel (through the Angareion port's read-only `log`); the
-sidecar item waits for #356. `send`'s letter keeps MyPMO's `build_instruction`
+(REPORT-arch-355-rulings). `check` looks at the settings, the two state files,
+the team's channel (through the Angareion port's read-only `log`) and the
+team's sidecar (`GET /agents`, #356). `send`'s letter keeps MyPMO's
+`build_instruction`
 head (ticket, title, scope, acceptance, how to report, the dispatch-time note),
 so the team PMs read the same shape they already know; the M2 section is not
 carried (it is environment-note content).
@@ -29,8 +30,14 @@ from ainame import parse as parse_name
 from . import teamstate, tickstate
 from .config import Team
 from .errors import SchemaError, SentButNotRecorded, UsageError
-from .ports import IssueData, PortError, seconds_of
-from .runtime import Ctx, one_line
+from .ports import (
+    IssueData,
+    PortError,
+    SidecarError,
+    SidecarShapeError,
+    seconds_of,
+)
+from .runtime import Ctx, one_line, sidecar_port
 from .timeutil import iso_utc
 
 __all__ = [
@@ -203,9 +210,23 @@ def check(ctx: Ctx, key: str) -> list[CheckItem]:
     is a legal AI name whose role is `pm`; the team state file (if any) reads;
     `tick.json` (if any) reads; the team's channel is readable through the
     read-only `log --channel --since now` (exit 1 means「還沒落地或名字錯」,
-    anything else is a back-end failure). A worker team gets one informational
-    line instead of the sidecar item: the worker side is the transition tool's
-    job (D-8). The sidecar item itself is #356's.
+    anything else is a back-end failure); the team's sidecar answers
+    `GET /agents` (#356, the #355 ruling's sixth item). A worker team gets one
+    informational line instead of the sidecar item: the worker side is the
+    transition tool's job (D-8).
+
+    The sidecar item only runs for a local team, on **that team's** address
+    (design §3.1). When the deployment wires no sidecar port at all
+    (`Deps.sidecar_for is None`) the item FAILs and says it cannot be checked:
+    the design's check exists to catch「sidecar 沒在跑」before work starts, and
+    a check that silently skips it would pass a broken machine. The design
+    does not name that case; #356's report lists it as 待確認.
+
+    An answer that arrived (2xx) but is not a shape the port reads is its own
+    FAIL,「回應形狀不符」, not「連不上」(#356 裁定 §3): the first says the
+    sidecar is up and talking a shape this build does not know — the two
+    versions disagree — while「連不上」says it did not answer at all; only the
+    second is a machine to restart.
     """
     team = ctx.config.team(key)
     if team is None:
@@ -270,7 +291,63 @@ def check(ctx: Ctx, key: str) -> list[CheckItem]:
                 note=True,
             )
         )
+    else:
+        port = sidecar_port(ctx.deps, team.sidecar)
+        if port is None:
+            items.append(
+                CheckItem("sidecar", False, "sidecar 埠沒有接上，查不到 GET /agents")
+            )
+        else:
+            try:
+                port.list_agents()
+            except SidecarShapeError as error:
+                # 2xx but an unreadable shape: the sidecar is up, so it is not
+                #「連不上」— it is the two versions disagreeing (#356 裁定 §3).
+                items.append(CheckItem("sidecar", False, _unreadable_answer(error)))
+            except SidecarError as error:
+                items.append(CheckItem("sidecar", False, _sidecar_failure(error, team.sidecar)))
+            else:
+                items.append(
+                    CheckItem("sidecar", True, f"sidecar 有回應（GET /agents，{team.sidecar}）")
+                )
     return items
+
+
+def _sidecar_failure(error: SidecarError, address: str) -> str:
+    """`FAIL sidecar` line for a sidecar that did not answer with a 2xx (#356 裁定 §3).
+
+    Two shapes, two repairs: no status at all is「連不上」and names the address
+    to look at; a non-2xx is the sidecar answering with a refusal, so the number
+    and the machine code are what to read. Never the response body's text
+    (D-12).
+    """
+    if error.status is None:
+        return f"sidecar 連不上（{address}）"
+    if error.code:
+        return f"sidecar 回 HTTP {error.status} {error.code}"
+    return f"sidecar 回 HTTP {error.status}"
+
+
+def _unreadable_answer(error: SidecarShapeError) -> str:
+    """`FAIL sidecar` line for a 2xx answer whose shape is not the one we read.
+
+    The sidecar answered; the shape is not `{"agents": [...]}`. This is the
+    version-mismatch case, not a dead machine, so the line says which shape was
+    expected and points at the versions (#356 裁定 §3).
+
+    A record inside a correct envelope (`error.record`) is a different repair:
+    the wrapper was right, so claiming the outer expected shape would be wrong —
+    name the record's own problem instead (#356 修正三 低-2).
+    """
+    if error.record:
+        return (
+            f"sidecar 有回應，但某筆 agent 記錄缺 id／state（{error}）；"
+            "可能是 sidecar 與 pmo 的版本不一致"
+        )
+    return (
+        "sidecar 有回應，但回應形狀不符（預期 `{\"agents\": [...]}`）；"
+        "可能是 sidecar 與 pmo 的版本不一致"
+    )
 
 
 def _backend_time(

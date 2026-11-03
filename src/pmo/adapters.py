@@ -6,8 +6,8 @@ the backend prints; `read` runs `angareion read --json [--since]` and turns
 the records into `pmo.ports.Message`s. T-4a wires GitHub: `gh issue view <n>
 --repo <owner/repo> --json title,body`, read-only. T-4c wires aicomm (`pmo
 reply`; write plus wake) and the sidecar HTTP calls `pmo poke`／`status`／
-`close` need. The remaining sidecar calls (`open_agent`, `create_job`, …)
-come with T-4b and T-5 so the two tickets do not edit the same methods.
+`close` need; T-4b adds `GET /agents` (`pmo check`) and `POST /agents`
+(`pmo open`). The remaining sidecar call (`create_job`) comes with T-5.
 """
 
 from __future__ import annotations
@@ -26,7 +26,9 @@ from .ports import (
     Message,
     PortError,
     SidecarError,
+    SidecarShapeError,
     seconds_of,
+    sidecar_address,
 )
 
 __all__ = ["Aicomm", "Angareion", "GitHub", "Sidecar"]
@@ -52,6 +54,12 @@ _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 #: `auto` deliberately stays in `extra`: `pmo.ops.is_auto_job` reads it from
 #: either the job field or `args`, and `to_dict` (D-12) does not print it.
 _KNOWN_JOB = ("id", "action", "args", "every", "at", "last_run", "last_error")
+
+#: The fields of one agent record the adapter reads; the rest stays in `extra`.
+#: `attach` and `input_unconfirmed_at` are read into their own fields (#356 裁定:
+#: `attach.local` is what `pmo open`／`status` print; `input_unconfirmed_at` is
+#: how「卡在 starting」is told apart from a normal start).
+_KNOWN_AGENT = ("id", "agent_id", "state", "exit", "session", "attach", "input_unconfirmed_at")
 
 
 def _run(
@@ -269,13 +277,14 @@ class GitHub:
 
 
 class Sidecar:
-    """The sidecar seam over HTTP (`pmo poke`／`status`／`close`, design §3.3).
+    """The sidecar seam over HTTP (`pmo poke`／`status`／`close`／`open`, design §3.3).
 
-    One instance points at one sidecar (`<http(s) address>`), the way the port
-    is shaped in T-1: no call carries an address. The calls T-4c needs are
-    `GET /agents/<id>`, `POST /agents/<id>/poke`, `POST /agents/<id>/close`,
-    `GET /jobs` and `DELETE /jobs/<id>`; `POST /agents` and `POST /jobs` come
-    with T-4b／T-5.
+    One instance points at one sidecar (`<http(s) address>`); `Deps.sidecar_for`
+    builds one per address, because a team's `sidecar` and the PMO's
+    `pmo_sidecar` need not be the same machine (#356, design §3.1). The calls
+    are `GET /agents`, `GET /agents/<id>`, `POST /agents`,
+    `POST /agents/<id>/poke`, `POST /agents/<id>/close`, `GET /jobs` and
+    `DELETE /jobs/<id>`; `POST /jobs` comes with T-5.
 
     Errors keep only known fields (D-12): the HTTP status and the body's
     `code` (`workdir_not_found`, `agent_not_running`, …). The body's message
@@ -283,7 +292,7 @@ class Sidecar:
     """
 
     def __init__(self, base: str, *, timeout: float = _SIDECAR_TIMEOUT) -> None:
-        self.base = str(base).rstrip("/")
+        self.base = sidecar_address(base)
         self.timeout = timeout
 
     # -- HTTP --------------------------------------------------------------- #
@@ -331,11 +340,74 @@ class Sidecar:
 
     # -- agents ------------------------------------------------------------- #
 
+    def list_agents(self) -> list[AgentRecord]:
+        """`GET /agents`: every seat on this sidecar.
+
+        The answer is `{"agents": [ … ]}` and nothing else (sidecar.md §2.2;
+        #356 裁定 §3). An outer that is not an object, or an `agents` that is
+        not an array, is a `SidecarShapeError` tagged with the 2xx status it came
+        with, so `pmo check` can say「回應形狀不符」instead of「沒有回應」—
+        the sidecar is up, the two versions just talk different shapes.
+        """
+        status, body = self._call("GET", "/agents")
+        try:
+            return _agents_of(body)
+        except SidecarShapeError as error:
+            raise error.at_status(status) from None
+
     def get_agent(self, agent_id: str) -> AgentRecord:
         """`GET /agents/<id>`; a 404 is `SidecarError(code='agent_not_found')`."""
         quoted = urllib.parse.quote(agent_id, safe="")
         _status, body = self._call("GET", f"/agents/{quoted}")
         return _agent_of(_json_object(body, "GET /agents/<id>"), agent_id)
+
+    def open_agent(
+        self,
+        *,
+        agent_id: str,
+        agent: str,
+        workdir: str,
+        input: str,
+        provider: str | None = None,
+        model: str | None = None,
+        tui: bool = False,
+        session: str | None = None,
+        fresh: bool = False,
+        agent_args: tuple[str, ...] | None = None,
+    ) -> AgentRecord:
+        """`POST /agents` with the ruling's request shape (#356 裁定 §2).
+
+        Always sent: `id`, `agent`, `workdir`, `input`. Sent only when they
+        apply: `tui` (interactive), `fresh` (tui only), `session` (`--session`;
+        the whole key is left out on a new open — `null` is a 400), `provider`
+        and `model` (a `provider` alone is legal; both absent lets the sidecar
+        pick), and `agent_args` with `agent_args_mode: "append"`. `subscription`
+        is never sent: it is only for pinning one seat, which this phase does
+        not do. The answer is one agent record, read with the same known fields
+        as `GET /agents/<id>`; success is the sidecar's `201`, which `_call`'s
+        2xx check already accepts.
+        """
+        payload: dict[str, object] = {
+            "id": agent_id,
+            "agent": agent,
+            "workdir": workdir,
+            "input": input,
+        }
+        if tui:
+            payload["tui"] = True
+        if fresh:
+            payload["fresh"] = True
+        if session is not None:
+            payload["session"] = session
+        if provider is not None:
+            payload["provider"] = provider
+        if model is not None:
+            payload["model"] = model
+        if agent_args:
+            payload["agent_args"] = list(agent_args)
+            payload["agent_args_mode"] = "append"
+        _status, body = self._call("POST", "/agents", payload)
+        return _agent_of(_json_object(body, "POST /agents"), agent_id)
 
     def poke(self, agent_id: str, *, text: str, interrupt: bool = False) -> int:
         """`POST /agents/<id>/poke` with `{"text", "interrupt"}` (design §3.6).
@@ -369,7 +441,7 @@ class Sidecar:
         _status, body = self._call("GET", "/jobs")
         records = _json_object(body, "GET /jobs").get("jobs")
         if not isinstance(records, list):
-            raise SidecarError(detail="GET /jobs 的輸出不是 job 陣列")
+            raise SidecarShapeError(detail="GET /jobs 的輸出不是 job 陣列")
         return [_job_of(record) for record in records]
 
     def delete_job(self, job_id: str) -> bool:
@@ -387,27 +459,66 @@ def _json_object(body: bytes, what: str) -> dict:
     try:
         record = json.loads(body.decode("utf-8")) if body else None
     except (ValueError, UnicodeDecodeError) as e:
-        raise SidecarError(detail=f"{what} 的輸出不是 JSON（{type(e).__name__}）") from e
+        raise SidecarShapeError(detail=f"{what} 的輸出不是 JSON（{type(e).__name__}）") from e
     if not isinstance(record, dict):
-        raise SidecarError(detail=f"{what} 的輸出不是物件")
+        raise SidecarShapeError(detail=f"{what} 的輸出不是物件")
     return record
+
+
+def _agents_of(body: bytes) -> list[AgentRecord]:
+    """`GET /agents`'s answer (`{"agents": [...]}`) → the agent records.
+
+    The wrapper is the sidecar's own (sidecar.md §2.2), so anything else — a
+    bare array, a different key — is the shape error `pmo check` reports as a
+    version mismatch (#356 裁定 §3).
+    """
+    records = _json_object(body, "GET /agents").get("agents")
+    if not isinstance(records, list):
+        raise SidecarShapeError(detail="GET /agents 的輸出不是 agent 陣列")
+    agents: list[AgentRecord] = []
+    for item in records:
+        if not isinstance(item, dict):
+            raise SidecarShapeError(
+                detail="GET /agents 的每一筆 agent 記錄都必須是物件", record=True
+            )
+        agents.append(_agent_of(item, ""))
+    return agents
+
+
+def _attach_local_of(value: object) -> str | None:
+    """`attach.local` as the sidecar sent it; `null` (or no `local`) is `None`.
+
+    Only `local` is read: `tmux` is a transitional alias the sidecar will drop,
+    and the caller MUST run the line verbatim rather than parse it (sidecar.md
+    §2.1, #356 裁定 §3).
+    """
+    if not isinstance(value, dict):
+        return None
+    local = value.get("local")
+    return local if isinstance(local, str) else None
 
 
 def _agent_of(record: dict, fallback_id: str) -> AgentRecord:
     """One `GET /agents/<id>` record → `AgentRecord`, known fields only."""
+    if not isinstance(record, dict):
+        raise SidecarShapeError(detail="agent 記錄不是物件", record=True)
     agent_id = record.get("id", record.get("agent_id", fallback_id))
     state = record.get("state")
     if not isinstance(agent_id, str) or not agent_id:
-        raise SidecarError(detail="agent 記錄沒有 id")
+        raise SidecarShapeError(detail="agent 記錄沒有 id", record=True)
     if not isinstance(state, str) or not state:
-        raise SidecarError(detail=f"agent {agent_id} 的記錄沒有 state")
+        raise SidecarShapeError(detail=f"agent {agent_id} 的記錄沒有 state", record=True)
     raw_exit = record.get("exit")
     raw_session = record.get("session")
+    raw_unconfirmed = record.get("input_unconfirmed_at")
     return AgentRecord(
         agent_id=agent_id,
         state=state,
         exit=dict(raw_exit) if isinstance(raw_exit, dict) else None,
         session=raw_session if isinstance(raw_session, str) else None,
+        attach=_attach_local_of(record.get("attach")),
+        input_unconfirmed_at=raw_unconfirmed if isinstance(raw_unconfirmed, str) else None,
+        extra={key: value for key, value in record.items() if key not in _KNOWN_AGENT},
     )
 
 
@@ -422,13 +533,13 @@ def _job_of(record: object) -> JobRecord:
     (#370 低-1).
     """
     if not isinstance(record, dict):
-        raise SidecarError(detail="GET /jobs 的每一筆都必須是物件")
+        raise SidecarShapeError(detail="GET /jobs 的每一筆都必須是物件")
     job_id = record.get("id")
     action = record.get("action")
     if not isinstance(job_id, str) or not job_id:
-        raise SidecarError(detail="job 記錄沒有 id")
+        raise SidecarShapeError(detail="job 記錄沒有 id")
     if not isinstance(action, str) or not action:
-        raise SidecarError(detail=f"job {job_id} 的記錄沒有 action")
+        raise SidecarShapeError(detail=f"job {job_id} 的記錄沒有 action")
     args = record.get("args")
     raw_every = record.get("every")
     raw_at = record.get("at")
@@ -437,13 +548,13 @@ def _job_of(record: object) -> JobRecord:
             # A job with neither `every` nor `at` is not a schedule at all; an
             # `at` job always names its one time (sidecar.md: `every` is null,
             # `at` carries the time).
-            raise SidecarError(detail=f"job {job_id} 的 every 不合格式（沒有 every，也沒有 at）")
+            raise SidecarShapeError(detail=f"job {job_id} 的 every 不合格式（沒有 every，也沒有 at）")
         every: float | None = None
     else:
         try:
             every = seconds_of(raw_every)
         except SidecarError as e:
-            raise SidecarError(detail=f"job {job_id} 的 every 不合格式（{e}）") from e
+            raise SidecarShapeError(detail=f"job {job_id} 的 every 不合格式（{e}）") from e
     return JobRecord(
         job_id=job_id,
         action=action,

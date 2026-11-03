@@ -182,6 +182,9 @@ class FakeSidecar:
         self.pokes: list[tuple[str, str, bool]] = []
         #: (agent id, session, fresh) for every `open_agent` call (design §3.2).
         self.opened_sessions: list[tuple[str, str | None, bool]] = []
+        #: The full request every `open_agent` call was given, as the real
+        #: sidecar would read it (tests can check the shape, #356 裁定 §2).
+        self.opened_payloads: list[dict[str, object]] = []
         self.closed: list[str] = []
         self.deleted_jobs: list[str] = []
         self.errors: dict[str, PortError] = {}
@@ -194,8 +197,17 @@ class FakeSidecar:
             raise error
 
     def add_agent(self, agent_id: str, state: str = "running", session: str | None = "s1",
-                  exit: dict[str, object] | None = None) -> AgentRecord:
-        record = AgentRecord(agent_id=agent_id, state=state, exit=exit, session=session)
+                  exit: dict[str, object] | None = None,
+                  attach: str | None = None,
+                  input_unconfirmed_at: str | None = None) -> AgentRecord:
+        record = AgentRecord(
+            agent_id=agent_id,
+            state=state,
+            exit=exit,
+            session=session,
+            attach=attach,
+            input_unconfirmed_at=input_unconfirmed_at,
+        )
         self.agents[agent_id] = record
         return record
 
@@ -214,16 +226,47 @@ class FakeSidecar:
         self,
         *,
         agent_id: str,
+        agent: str,
         workdir: str,
-        provider: str,
-        model: str,
         input: str,
+        provider: str | None = None,
+        model: str | None = None,
+        tui: bool = False,
         session: str | None = None,
         fresh: bool = False,
+        agent_args: tuple[str, ...] | None = None,
     ) -> AgentRecord:
         self._maybe_fail("open_agent")
         self._agent_next += 1
         self.opened_sessions.append((agent_id, session, fresh))
+        self.opened_payloads.append(
+            {
+                "id": agent_id,
+                "agent": agent,
+                "workdir": workdir,
+                "input": input,
+                "provider": provider,
+                "model": model,
+                "tui": tui,
+                "session": session,
+                "fresh": fresh,
+                "agent_args": agent_args,
+            }
+        )
+        record = AgentRecord(
+            agent_id=agent_id,
+            state="starting",
+            session=session,
+            extra={
+                "workdir": workdir,
+                "provider": provider,
+                "model": model,
+                "input": input,
+                "fresh": fresh,
+            },
+        )
+        self.agents[agent_id] = record
+        return record
         record = AgentRecord(
             agent_id=agent_id,
             state="starting",
@@ -289,6 +332,35 @@ class FakeSidecar:
         existed = job_id in self.jobs
         self.jobs.pop(job_id, None)
         return existed
+
+
+class FakeSidecars:
+    """A `Deps.sidecar_for` over several fake sidecars.
+
+    The real port is looked up by address (#356): a team's `sidecar` and the
+    PMO's `pmo_sidecar` may name different machines. `default` answers every
+    address the mapping does not name, which is the shape most tests want (one
+    fake for everything); `addresses` records what was looked up so a test can
+    tell a routed call from a wrong one.
+    """
+
+    def __init__(
+        self,
+        by_address: dict[str, FakeSidecar] | None = None,
+        *,
+        default: FakeSidecar | None = None,
+    ) -> None:
+        self.by_address = dict(by_address or {})
+        self.default = default
+        self.addresses: list[str] = []
+
+    def __call__(self, address: str) -> FakeSidecar:
+        self.addresses.append(address)
+        if address in self.by_address:
+            return self.by_address[address]
+        if self.default is not None:
+            return self.default
+        raise AssertionError(f"no fake sidecar for {address!r}")
 
 
 class FakeGithub:

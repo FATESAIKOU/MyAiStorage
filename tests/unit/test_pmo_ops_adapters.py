@@ -24,7 +24,14 @@ import pytest
 from pmo import ops
 from pmo.adapters import Aicomm, Sidecar
 from pmo.config import DEFAULT_WAKE_TEXT
-from pmo.ports import AgentRecord, AicommTimeout, JobRecord, PortError, SidecarError
+from pmo.ports import (
+    AgentRecord,
+    AicommTimeout,
+    JobRecord,
+    PortError,
+    SidecarError,
+    SidecarShapeError,
+)
 
 from _pmo_env import PMO_IDENTITY, TEAM_CHANNEL, TEAM_PM
 from test_pmo_ops import BODY, PMO_SIDECAR, POKE_TEXT
@@ -199,6 +206,92 @@ def test_sidecar_adapter_says_when_it_cannot_connect(monkeypatch):
     monkeypatch.setattr("pmo.adapters._OPENER", _Opener())
     with pytest.raises(SidecarError, match="連不上"):
         Sidecar(PMO_SIDECAR).get_agent(TEAM_PM)
+
+
+def test_sidecar_adapter_marks_an_answer_whose_shape_it_cannot_read(opener):
+    """低-1（#356）：2xx 但形狀不認得是 `SidecarShapeError`，不是「連不上」。
+
+    `{"items": [...]}` 是這一版不認的外層（形狀容錯不擴大猜測）：錯誤要帶著
+    回應的 HTTP 狀態，`pmo check` 才能把「有回應、看不懂」與「連不上」分開。
+    """
+    opener.answer = (200, json.dumps({"items": []}).encode())
+    with pytest.raises(SidecarShapeError) as caught:
+        Sidecar(PMO_SIDECAR).list_agents()
+    assert caught.value.status == 200
+    assert "不是 agent 陣列" in str(caught.value)
+    assert "連不上" not in str(caught.value)
+
+
+def test_sidecar_adapter_reads_the_agents_wrapper(opener):
+    """#356 裁定 §3：`GET /agents` 的外層就是 `{"agents": [...]}`，沒有別的形狀。"""
+    opener.answer = (
+        200,
+        json.dumps(
+            {"agents": [{"id": TEAM_PM, "state": "running", "session": "ses-1"}]}
+        ).encode(),
+    )
+    (record,) = Sidecar(PMO_SIDECAR).list_agents()
+    assert (record.agent_id, record.state, record.session) == (TEAM_PM, "running", "ses-1")
+
+
+def test_sidecar_adapter_refuses_a_bare_array(opener):
+    """上一輪收的裸陣列不再收：那是「形狀不符」，交給 check 報版本不一致。"""
+    opener.answer = (200, json.dumps([{"id": TEAM_PM, "state": "running"}]).encode())
+    with pytest.raises(SidecarShapeError) as caught:
+        Sidecar(PMO_SIDECAR).list_agents()
+    assert caught.value.status == 200
+
+
+@pytest.mark.parametrize("element", ["x", None, [1]])
+def test_sidecar_adapter_refuses_a_non_object_agent_record(opener, element):
+    """中-2（#356 修正三）：`agents` 陣列內的非物件是形狀錯誤，不是 `AttributeError`。"""
+    opener.answer = (200, json.dumps({"agents": [element]}).encode())
+    with pytest.raises(SidecarShapeError) as caught:
+        Sidecar(PMO_SIDECAR).list_agents()
+    assert caught.value.status == 200
+    assert caught.value.record is True
+    assert "物件" in str(caught.value)
+
+
+def test_sidecar_adapter_marks_a_record_without_state_as_a_record_shape_error(opener):
+    """低-2（#356 修正三）：外層對了、單筆記錄缺欄位 → 記錄層的形狀錯誤。"""
+    opener.answer = (200, json.dumps({"agents": [{"id": TEAM_PM}]}).encode())
+    with pytest.raises(SidecarShapeError) as caught:
+        Sidecar(PMO_SIDECAR).list_agents()
+    assert caught.value.status == 200
+    assert caught.value.record is True
+    assert "state" in str(caught.value)
+
+
+def test_sidecar_adapter_reads_attach_local_and_not_tmux(opener):
+    """#356 裁定 §3：只讀 `attach.local`（原樣），`tmux` 是過渡別名不讀。"""
+    opener.answer = (
+        200,
+        json.dumps(
+            {
+                "id": TEAM_PM,
+                "state": "running",
+                "attach": {
+                    "local": "tmux attach -t demo",
+                    "ssh": "ssh demo 'tmux attach -t demo'",
+                    "tmux": "SHOULD-NOT-BE-READ",
+                },
+                "input_unconfirmed_at": "2026-11-03T10:00:00Z",
+            }
+        ).encode(),
+    )
+    record = Sidecar(PMO_SIDECAR).get_agent(TEAM_PM)
+    assert record.attach == "tmux attach -t demo"
+    assert record.input_unconfirmed_at == "2026-11-03T10:00:00Z"
+    assert "SHOULD-NOT-BE-READ" not in json.dumps(record.to_dict())
+
+
+def test_sidecar_adapter_reads_a_null_attach_as_none(opener):
+    """非互動版（`-p`、opencode）的 `attach` 是 `null`；印的時候說「沒有 attach」。"""
+    opener.answer = (200, json.dumps({"id": TEAM_PM, "state": "running", "attach": None}).encode())
+    record = Sidecar(PMO_SIDECAR).get_agent(TEAM_PM)
+    assert record.attach is None
+    assert "attach" not in record.to_dict()
 
 
 def test_sidecar_adapter_pokes_with_the_sop_payload(opener):

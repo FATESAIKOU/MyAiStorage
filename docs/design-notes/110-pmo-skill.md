@@ -127,7 +127,7 @@ sequenceDiagram
     K->>A: log --channel ‹team channel› --since（拿指示信的後端時刻；唯讀，不是讀者）
     K->>K: 寫 team 狀態（ticket、message_id、received_at）
     P->>K: pmo open ‹team›
-    K->>SC: POST /agents（id、workdir、provider、model、input）
+    K->>SC: POST /agents（id、agent、workdir、input；tui／fresh／session／provider／model／agent_args 視情況）
     SC->>M: 起 agent
     M->>A: 回「收到 ‹工單›」，叫醒 PMO
     P->>K: pmo tick
@@ -214,6 +214,8 @@ flowchart LR
 
 **埠**：指令只透過四個埠碰外部（Angareion、aicomm、sidecar、GitHub）。每個埠是一個小介面，測試用同名方法的假物件取代（沿用 PMO 工具現在 `Deps` 的接縫作法）。核心不碰外部。
 
+**sidecar 埠依位址取得**：`sidecar_for(address)` 回傳那個位址的 sidecar 埠；team 的操作用 team 設定的 `sidecar`，PMO 自己的叫醒 job 用 `pmo_sidecar`。同一個位址可以由同一個埠服務（同一台時只問一次），兩者不同時也不會打到錯的機器。
+
 ### 3.2 `pmo` 指令（skill 的公開介面）
 
 所有內文一律走 stdin（`--body -`）；stdout 是給 PMO 讀的事件行，第一個 token 是方括號標籤；stderr 是診斷。
@@ -229,7 +231,7 @@ flowchart LR
 | `pmo inbox rebuild [--since ‹時刻›] [--dry-run]` | | 重建的項目數、差異、`team` 為空的項目清單、保留的 `notified.poke` 筆數 | 0；1 angareion 回用法錯（例如 `--since` 格式錯）；2 其他外部失敗、帳本壞或寫不進去 |
 | `pmo check ‹team›` | | 逐項 OK／FAIL：team 存在且沒有 retired、PM 名合法且角色是 pm、team 狀態與 `tick.json` 讀得起來、channel 讀得到（`log --channel --since 現在`，不動游標）、本機 sidecar 的 `GET /agents` 有回應（T-4b 起）；worker team 只印一行「由過渡工具負責」 | 0 全過；1 有 FAIL |
 | `pmo send ‹team› ‹repo#n› --body -` | 正文 | 指示信 id、後端時刻；`tick.json` 的 `wake.every` 比看門狗的 10 分鐘長、或是 `null` 時，多印一行 `[wake-hint] 看門狗 10m 後到期，目前叫醒 ‹every\|off\|unknown›`（`unknown`＝`tick.json` 讀不起來；這時 stderr 另印 `[warn]`，exit 仍是 0，因為信已送出）（只是提示，不改任何東西，D-7） | 0；1 用法、team 不存在、工單讀不到、組好的信超過上限、信（工單本文或正文）含憑證樣式（只說哪一段，不回顯）；2 外部失敗 |
-| `pmo open ‹team› [--session ‹agora:…›] [--fresh] [--provider P --model M]` | | agent 的 state 與 attach 指令 | 0；1 用法或狀態不足（沒先 send）；2 sidecar 拒絕或連不上（印錯誤碼） |
+| `pmo open ‹team› [--session ‹agora:…›] [--fresh] [--provider P --model M]` | | agent 的 state；互動版另印 `attach.local`（原樣，可直接貼上執行） | 0；1 用法或狀態不足（沒先 send、team 沒有 `workdir`、已退役）；2 sidecar 拒絕或連不上（印錯誤碼） |
 | `pmo reply ‹team› [--urgency N] --body -` | 正文 | 訊息 id（經 aicomm：寫入＋叫醒） | 0；1 用法、team 不存在或已退役；2 沒寫進去；aicomm 逾時時印「送出結果不明，不要直接重送」並回 2 |
 | `pmo poke ‹team› [--interrupt] --body -` | 一句話 | sidecar 的回應碼 | 0；1 用法、team 不存在或已退役；2 sidecar 拒絕或連不上 |
 | `pmo status [‹team›] [--json]` | | 每個 team PM 的 state／exit／session，以及 PMO 自己排的 job | 0／2 |
@@ -240,6 +242,8 @@ flowchart LR
 | `pmo wake show [--json]` | （無） | 自己的叫醒 job（id、every、next_run_at、last_run、last_error 的碼）、`tick.json` 記的想要的頻率、`last_tick_at`、最早的到期時刻（唯讀） | 0；2 同上 |
 
 **指示信的格式**：沿用 MyPMO `build_instruction` 的固定頭（工單號、標題、範圍、驗收、回報格式、派工時刻的說明）＋「工單本文（PMO 派工時從 GitHub 讀出）」＋正文，原樣見 #355 的實作；`life: true` 的 team 用生活模式的回報格式。現行的 M2 段落（開隊員的說明）不搬，那是環境說明的內容。超過 angareion 一則的上限就拒送（exit 1），不截斷。
+
+**`pmo open` 的請求**：`POST /agents` 一定帶 `id`（team PM 的 AI 名）、`agent`（teams 設定的 `agent`，預設 `claude-code`；sidecar 必填，缺了 400）、`workdir`（teams 設定的 `workdir`，sidecar 必填）、`input`（第一則輸入）；互動版帶 `tui: true`（只配 `claude-code`），`--fresh` 只配互動版；`--session` 才帶 `session`（新開時省略整個鍵，互動版不帶）；`--provider/--model` 優先，其次 teams 設定的 `provider`／`model`，都沒有就省略（sidecar 依政策挑）；teams 設定有 `agent_args` 時以 `agent_args_mode: "append"` 帶上。**不帶 `subscription`**（只給 `subscription` 是舊形狀，Gateway 回 400；釘住某一把不在第一階段）。成功是 201 與 agent 物件。
 
 **`pmo close` 的 job 處理**：只刪 `auto` 為 true、`args.id` 是這個 team PM 的 job（sidecar 的自動重開 job；不刪的話，close 之後它到點會把 agent 開回來），而且先刪再 close。任何 poke job 都不刪：瞄準 team PM 的 poke job 是別人排的（§3.6「別人排的一律不碰」），PMO 自己的叫醒 job 瞄準的是 PMO，和 close 無關。`GET /jobs` 失敗時印 `[warn]`，照樣 close。自動重開 job 刪不掉時也照樣 close，但回 exit 2（已知有一個 job 到點會把 agent 開回來，要 PMO 處理）；`GET /jobs` 本身失敗只印 `[warn]`，exit 不變。agent 已 `exited` 時仍送 close（sidecar 的 close 是 idempotent，而且會刪掉 handoff）。**retired team**：`send`、`open`、`reply`、`poke` 拒絕（exit 1）；`check`、`status`、`close` 照常。
 
@@ -286,7 +290,7 @@ flowchart LR
 |---|---|---|
 | Angareion | `send --channel --to --in-reply-to --urgency --ref --body -`（stdout＝訊息 id）；`read --json [--since]`（含 `received_at`）；`log --channel --from --to --thread --grep --since --json`（重建用）；結束碼 0／2／3 | `docs/angareion.md` |
 | aicomm | `send --channel --to [--ticket] [--urgency] --body -`（寫入＋叫醒）；結束碼與逾時的語意照文件 | `docs/aicomm.md` |
-| sidecar HTTP | `GET /agents`、`GET /agents/<id>`、`POST /agents`、`POST /agents/<id>/poke`、`POST /agents/<id>/close`、`GET /jobs`、`POST /jobs`、`DELETE /jobs/<id>` | sidecar 的文件（MyLinuxPool） |
+| sidecar HTTP | `GET /agents`（`{"agents": [...]}`）、`GET /agents/<id>`（agent 物件）、`POST /agents`（201＋agent 物件）、`POST /agents/<id>/poke`、`POST /agents/<id>/close`、`GET /jobs`（`{"jobs": [...]}`）、`POST /jobs`、`DELETE /jobs/<id>`；agent 物件的 `attach` 只有互動版有值，用 `attach.local` | sidecar 的文件（MyLinuxPool） |
 | GitHub | `gh issue view <n> --repo <owner/repo> --json title,body`（唯讀） | gh |
 | ainame | `parse`／`is_valid`，加上 T-1 要補的「缺 team 段的提示」（見 §5.1） | `src/ainame/__init__.py` |
 
@@ -296,7 +300,7 @@ flowchart LR
 
 - **teams 設定**：
   - 全域：PMO 身分、秘書身分、派工 channel（現行工具裡寫死的三個常數，改由設定給）；PMO 自己所在的 sidecar 位址（選填；沒有就表示 PMO 不在 sidecar，`pmo wake` 回 exit 2、tick 不查 `/jobs`）；叫醒固定句（選填，預設「定時叫醒：請跑 pmo tick」）；
-  - 每個 team：key（`<專案>-<team 代號>`）、PM 的 AI 名、channel（`team-<專案>-<team 代號>`）、sidecar 位址或「worker」標記、`tui`／`life`／`retired` 三個布林、預設的 provider／model（選填）。
+  - 每個 team：key（`<專案>-<team 代號>`）、PM 的 AI 名、channel（`team-<專案>-<team 代號>`）、sidecar 位址或「worker」標記、`tui`／`life`／`retired` 三個布林、`agent`（選填，`claude-code`／`opencode`，預設 `claude-code`；`tui` 時必須是 `claude-code`）、`workdir`（`pmo open` 用，絕對路徑）、`agent_args`（選填，字串陣列，以 append 帶給 sidecar）、預設的 provider／model（選填；`model` 需要 `provider`，`provider` 可以單獨給）。
 
   驗證規則照現行工具（AI 名用 ainame 驗、key、名字、channel 一致、不重複）。
 - **team 狀態**：照 MyPMO 現在 `pmo/state/README.md` 的欄位。**不認得的欄位原樣保留**（過渡期 worker team 的欄位由 MyPMO 寫，見 Q-9）。寫入照 §3.4 的原子寫入；讀改寫用每個 team 一把的 `<key>.json.lock`（flock，綁 state 目錄），`send` 與 tick 的「收到」比對都在鎖內重讀再改。

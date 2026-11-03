@@ -143,8 +143,15 @@ def test_wrong_top_level_fields_are_refused(changes, expect_in_message):
         ({"tui": "yes"}, "boolean"),
         ({"life": 1}, "boolean"),
         ({"retired": None}, "boolean"),
-        ({"provider": "opencode"}, "go together"),
         ({"model": "glm"}, "go together"),
+        ({"agent": "agy"}, "must be one of"),
+        ({"agent": ""}, "must be one of"),
+        ({"agent": 7}, "must be a string"),
+        ({"agent": "opencode"}, "tui"),  # the first team is tui: true
+        ({"workdir": "relative/path"}, "absolute path"),
+        ({"workdir": ""}, "absolute path"),
+        ({"agent_args": "nope"}, "array of strings"),
+        ({"agent_args": ["--effort", 3]}, "a string in every element"),
         ({"key": "myaistorage"}, "'<project>-<team code>'"),
         ({"key": "MyProject-m1"}, "slug"),
         ({"key": "mypmo-impl-m1"}, "do not agree"),
@@ -171,6 +178,60 @@ def test_a_channel_prefix_that_lyingly_matches_the_key_is_refused():
     with pytest.raises(SchemaError) as caught:
         parse(data)
     assert "must be 'team-myaistorage-m1'" in str(caught.value)
+
+
+def test_a_team_reads_the_agent_workdir_and_agent_args_fields():
+    """#356 裁定 §2：teams 設定新增三個正式欄位（不再是 unknown extra）。"""
+    data = _config()
+    team = data["teams"][1]
+    assert isinstance(team, dict)
+    team.update(
+        {
+            "agent": "opencode",
+            "workdir": "/home/worker/work/demo/wt/7",
+            "agent_args": ["--effort", "high"],
+        }
+    )
+    config = parse(data)
+    second = config.teams[1]
+    assert second.agent == "opencode"
+    assert second.workdir == "/home/worker/work/demo/wt/7"
+    assert second.agent_args == ("--effort", "high")
+    assert second.extra == {"extras": {"anything": 1}}  # 其他未知欄位照樣保留
+    assert config.to_dict()["teams"][1]["agent"] == "opencode"
+    assert config.to_dict()["teams"][1]["workdir"] == "/home/worker/work/demo/wt/7"
+    assert config.to_dict()["teams"][1]["agent_args"] == ["--effort", "high"]
+
+
+def test_the_agent_defaults_to_claude_code():
+    """#356 裁定 §2：`agent` 選填，預設 `claude-code`（現行工具的寫法）。"""
+    first = parse(_config()).teams[0]
+    assert first.agent == "claude-code"
+    # 預設值不寫回：原樣 round trip（同一個意思）。
+    assert "agent" not in parse(_config()).to_dict()["teams"][0]
+    assert "workdir" not in parse(_config()).to_dict()["teams"][0]
+    assert "agent_args" not in parse(_config()).to_dict()["teams"][0]
+
+
+def test_a_provider_may_stand_alone_but_a_model_may_not():
+    """#356 裁定 §2：放寬成「model 需要 provider，provider 可以單獨給」。"""
+    data = _config()
+    team = data["teams"][1]
+    assert isinstance(team, dict)
+    team["provider"] = "ollama-cloud"
+    second = parse(data).teams[1]
+    assert (second.provider, second.model) == ("ollama-cloud", None)
+    assert second.to_dict()["provider"] == "ollama-cloud"
+    assert "model" not in second.to_dict()
+
+
+def test_an_interactive_team_may_keep_the_claude_code_agent():
+    """`tui: true` 配 `agent: claude-code`（明寫或預設）都合法。"""
+    data = _config()
+    team = data["teams"][0]
+    assert isinstance(team, dict)
+    team["agent"] = "claude-code"
+    assert parse(data).teams[0].agent == "claude-code"
 
 
 def test_repeated_keys_names_and_channels_are_refused():

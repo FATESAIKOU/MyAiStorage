@@ -23,7 +23,10 @@ Team record:
       "channel": "team-<project>-<team code>",
       "sidecar": "<http(s) address>" | "worker",
       "tui": <bool>, "life": <bool>, "retired": <bool>,
-      "provider": "<…>", "model": "<…>"        optional, as a pair
+      "agent": "claude-code" | "opencode",     optional; default "claude-code"
+      "workdir": "<absolute path>",            optional; `pmo open` needs it
+      "agent_args": ["…", …],                  optional; sent as an appended argv tail
+      "provider": "<…>", "model": "<…>"        optional; `model` needs `provider`
     }
 
 Validation (design §3.4 “驗證規則照現行工具：AI 名用 ainame 驗、key、名字、
@@ -31,6 +34,15 @@ channel 一致、不重複”): AI names via `ainame`; the channel is `team-` pl
 key; the key and the PM name agree (`key` is the PM name without its role);
 keys, PM names and channels do not repeat; the dispatch channel is not any
 team channel. Unknown fields are preserved.
+
+The three fields #356's architect ruling added come from the sidecar's own
+required shape: `agent` (the sidecar refuses a `POST /agents` without one, and
+`tui: true` only works with `claude-code`), `workdir` (also required there; this
+settings file is where `pmo open` gets it), and `agent_args` (the argv tail the
+current tool sends as `agent_args_mode: "append"`). They are validated here, at
+load, so a wrong setting fails before any sidecar call. `provider` may stand
+alone: the sidecar's matrix has「`provider` given, `model` omitted」as a legal
+new shape, and only a bare `model` has nothing to hang on.
 """
 
 from __future__ import annotations
@@ -49,12 +61,35 @@ WHERE = "teams settings"
 #: The poke job's fixed sentence when the settings do not name one.
 DEFAULT_WAKE_TEXT = "定時叫醒：請跑 pmo tick"
 
+#: The agent kind a team uses when the settings do not name one (#356 裁定).
+#: The sidecar requires `agent` on every `POST /agents`; the current tool
+#: always writes `claude-code`, so that is the default.
+DEFAULT_AGENT = "claude-code"
+
+#: The agent kinds a team PM may be (sidecar.md §2.2: 「`claude-code` 或
+#: `opencode`（沒有對應 driver 的種類回 400）」; `agy` is the worker-side one,
+#: which a team PM never is).
+AGENT_KINDS = ("claude-code", "opencode")
+
 # A channel name and a team key share the name grammar's outer rules: lowercase
 # letters, digits and '-', not empty, no '-' at either end, no '--'.
 _SLUG_RE = re.compile(r"[a-z0-9-]+")
 
 _KNOWN = ("version", "pmo_identity", "secretary_identity", "dispatch_channel", "pmo_sidecar", "wake_text", "teams")
-_KNOWN_TEAM = ("key", "pm", "channel", "sidecar", "tui", "life", "retired", "provider", "model")
+_KNOWN_TEAM = (
+    "key",
+    "pm",
+    "channel",
+    "sidecar",
+    "tui",
+    "life",
+    "retired",
+    "agent",
+    "workdir",
+    "agent_args",
+    "provider",
+    "model",
+)
 
 
 def _check_slug(value: str, where: str, label: str) -> None:
@@ -96,12 +131,15 @@ class Team:
     tui: bool
     life: bool
     retired: bool
+    agent: str = DEFAULT_AGENT
+    workdir: str | None = None
+    agent_args: tuple[str, ...] | None = None
     provider: str | None = None
     model: str | None = None
     extra: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
 
     def to_dict(self) -> dict[str, object]:
-        known = {
+        known: dict[str, object] = {
             "key": self.key,
             "pm": self.pm,
             "channel": self.channel,
@@ -110,8 +148,17 @@ class Team:
             "life": self.life,
             "retired": self.retired,
         }
+        # The default agent is left out: a file that never named one keeps its
+        # exact shape through a save (the default is the same meaning).
+        if self.agent != DEFAULT_AGENT:
+            known["agent"] = self.agent
+        if self.workdir is not None:
+            known["workdir"] = self.workdir
+        if self.agent_args is not None:
+            known["agent_args"] = list(self.agent_args)
         if self.provider is not None:
             known["provider"] = self.provider
+        if self.model is not None:
             known["model"] = self.model
         known.update(self.extra)
         return known
@@ -165,10 +212,37 @@ def _parse_team(raw: object, where: str) -> Team:
     tui = _jsonutil.check_bool(raw, "tui", where)
     life = _jsonutil.check_bool(raw, "life", where)
     retired = _jsonutil.check_bool(raw, "retired", where)
+    agent = _jsonutil.optional_str(raw, "agent", where, default=DEFAULT_AGENT)
+    assert agent is not None  # the default above is a string
+    if agent not in AGENT_KINDS:
+        fail(
+            where,
+            f"the field 'agent' must be one of "
+            + "、".join(repr(kind) for kind in AGENT_KINDS)
+            + f" ({describe(agent)}); the sidecar has no driver for anything else",
+        )
+    if tui and agent != "claude-code":
+        # sidecar.md §2.2: `tui: true` only works with `claude-code`; anything
+        # else is a 400 from the sidecar, so it is refused here, at load (#356).
+        fail(
+            where,
+            f"the field 'agent' is {agent!r} but 'tui' is true; the sidecar only "
+            f"supports 'claude-code' for an interactive (tui) agent",
+        )
+    workdir = _jsonutil.optional_str(raw, "workdir", where)
+    if workdir is not None and not workdir.startswith("/"):
+        # The sidecar takes an absolute path; `pmo` does not build it and does
+        # not check that it exists (that is the sidecar's 400 workdir_not_found).
+        fail(where, f"the field 'workdir' must be an absolute path ({describe(workdir)})")
+    agent_args = _jsonutil.optional_str_list(raw, "agent_args", where)
     provider = _jsonutil.optional_str(raw, "provider", where)
     model = _jsonutil.optional_str(raw, "model", where)
-    if (provider is None) != (model is None):
-        fail(where, "the fields 'provider' and 'model' go together; give both or neither")
+    if model is not None and provider is None:
+        fail(
+            where,
+            "the field 'model' needs 'provider' ('provider' and 'model' go together; "
+            "'provider' may stand alone)",
+        )
     if provider is not None and not provider.strip():
         fail(where, "the field 'provider' is empty")
     if model is not None and not model.strip():
@@ -196,6 +270,9 @@ def _parse_team(raw: object, where: str) -> Team:
         tui=tui,
         life=life,
         retired=retired,
+        agent=agent,
+        workdir=workdir,
+        agent_args=agent_args,
         provider=provider,
         model=model,
         extra=pick_extra(raw, _KNOWN_TEAM),

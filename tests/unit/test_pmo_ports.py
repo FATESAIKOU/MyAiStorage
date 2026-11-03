@@ -195,8 +195,8 @@ def test_the_sidecar_fake_closes_an_agent_and_forgets_it():
 
 def test_the_sidecar_fake_opens_an_agent():
     fake = FakeSidecar()
-    record = fake.open_agent(agent_id="myaistorage-impl-m1-1", workdir="/tmp/w", provider="opencode",
-                             model="glm", input="read BRIEF.md")
+    record = fake.open_agent(agent_id="myaistorage-impl-m1-1", agent="opencode", workdir="/tmp/w",
+                             provider="opencode", model="glm", input="read BRIEF.md")
     assert record.state == "starting"
     assert fake.get_agent("myaistorage-impl-m1-1") == record
 
@@ -204,8 +204,8 @@ def test_the_sidecar_fake_opens_an_agent():
 def test_the_sidecar_fake_records_session_and_fresh():
     """Architect 中-4: `pmo open` passes `--session`／`--fresh` through the port."""
     fake = FakeSidecar()
-    fake.open_agent(agent_id="a1", workdir="/tmp/w", provider="opencode", model="glm", input="i",
-                    session="agora:ses-1", fresh=True)
+    fake.open_agent(agent_id="a1", agent="claude-code", workdir="/tmp/w", provider="opencode",
+                    model="glm", input="i", session="agora:ses-1", fresh=True)
     assert fake.opened_sessions == [("a1", "agora:ses-1", True)]
     record = fake.get_agent("a1")
     assert record.session == "agora:ses-1"
@@ -213,8 +213,32 @@ def test_the_sidecar_fake_records_session_and_fresh():
 
 def test_the_sidecar_fake_defaults_to_no_session_and_not_fresh():
     fake = FakeSidecar()
-    fake.open_agent(agent_id="a1", workdir="/tmp/w", provider="opencode", model="glm", input="i")
+    fake.open_agent(agent_id="a1", agent="claude-code", workdir="/tmp/w", provider="opencode",
+                    model="glm", input="i")
     assert fake.opened_sessions == [("a1", None, False)]
+
+
+def test_the_sidecar_fake_records_the_whole_open_request():
+    """#356 裁定 §2：假 sidecar 也把送出去的整個請求記下來（形狀測試用）。"""
+    fake = FakeSidecar()
+    fake.open_agent(
+        agent_id="a1", agent="opencode", workdir="/tmp/w", input="i",
+        provider="ollama-cloud", model=None, tui=True, agent_args=("--effort", "high"),
+    )
+    (payload,) = fake.opened_payloads
+    assert payload == {
+        "id": "a1",
+        "agent": "opencode",
+        "workdir": "/tmp/w",
+        "input": "i",
+        "provider": "ollama-cloud",
+        "model": None,
+        "tui": True,
+        "session": None,
+        "fresh": False,
+        "agent_args": ("--effort", "high"),
+    }
+    assert "subscription" not in payload
 
 
 def test_the_sidecar_fake_reports_job_every_in_seconds():
@@ -246,7 +270,7 @@ def test_every_sidecar_call_can_be_made_to_fail(method):
         "list_agents": lambda: fake.list_agents(),
         "get_agent": lambda: fake.get_agent("myaistorage-pm-m1"),
         "open_agent": lambda: fake.open_agent(
-            agent_id="a", workdir="/tmp/w", provider="p", model="m", input="i"
+            agent_id="a", agent="claude-code", workdir="/tmp/w", provider="p", model="m", input="i"
         ),
         "poke": lambda: fake.poke("myaistorage-pm-m1", text="x"),
         "close_agent": lambda: fake.close_agent("myaistorage-pm-m1"),

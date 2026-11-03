@@ -1,5 +1,6 @@
 """The `pmo` command's front door (design §3.2; T-2's `inbox` half, T-3's
-rebuild, T-4a's `check`／`send`, T-4c's `reply`／`poke`／`status`／`close`).
+rebuild, T-4a's `check`／`send`, T-4b's `open`, T-4c's
+`reply`／`poke`／`status`／`close`).
 
 Arguments come from the environment only: `PMO_SKILL_CONFIG` names the teams
 settings, `PMO_SKILL_STATE_DIR` the state directory (§3.4; a missing one is a
@@ -22,6 +23,7 @@ from typing import Optional
 
 from . import config as config_module
 from . import decision, dispatch, inbox, ledger, ops, paths, rebuild, sanitize
+from . import open as open_module
 from .adapters import Aicomm, Angareion, GitHub, Sidecar
 from .errors import (
     IdentityMismatch,
@@ -31,7 +33,7 @@ from .errors import (
     SentButNotRecorded,
     UsageError,
 )
-from .ports import AicommTimeout, JobRecord, PortError, SidecarError
+from .ports import AicommTimeout, JobRecord, PortError, SidecarError, SidecarShapeError
 from .round import read_round
 from .runtime import Ctx, Deps, assert_pmo_identity
 from .timeutil import iso_utc
@@ -95,6 +97,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp_send.add_argument("team", help="team 的 key（<專案>-<team 代號>）")
     sp_send.add_argument("ticket", help="工單，寫成 ‹owner/repo›#‹n›")
     sp_send.add_argument("--body", default=None, help="指示內文（'-' 代表由 stdin 讀入）")
+
+    sp_open = sub.add_parser("open", help="在 team 的 sidecar 上開 team PM（第一則輸入帶派工的 --since）")
+    sp_open.add_argument("team", help="team 的 key（<專案>-<team 代號>）")
+    sp_open.add_argument("--session", default=None, help="接回既有的 session（agora:…）")
+    sp_open.add_argument("--fresh", action="store_true", help="開一個新的 session")
+    sp_open.add_argument("--provider", default=None, help="provider（旗標優先；可以單獨給）")
+    sp_open.add_argument("--model", default=None, help="model（要與 --provider 一起給）")
 
     sp_reply = sub.add_parser("reply", help="回話給 team PM（經 aicomm：寫入＋叫醒）")
     sp_reply.add_argument("team", help="team 的 key（<專案>-<team 代號>）")
@@ -429,6 +438,85 @@ def cmd_send(ctx: Ctx, args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# 指令：open（派工的第二半；design §3.2、§5.2 T-4b）
+# --------------------------------------------------------------------------- #
+
+
+def _log_sidecar_failure(ctx: Ctx, error: SidecarError) -> None:
+    """Print what is known about a sidecar refusal or an unreachable sidecar.
+
+    §2.3：400 印錯誤碼、不重試；409 印錯誤碼交 PMO 判斷；連不上印
+    `[要本人處理]`。All are exit 2. The text is the adapter's known-field
+    string (`SidecarError.detail` is only ever the code), never the raw
+    response body (D-12).
+    """
+    if error.status is None:
+        ctx.log(f"[要本人處理] sidecar 不可用：{inbox.one_line_for_event(error)}")
+    elif error.status == 400:
+        ctx.log(
+            f"[warn] sidecar 參數錯（400）：{inbox.one_line_for_event(error)}；不重試"
+        )
+    elif error.status == 409:
+        ctx.log(f"[warn] sidecar 拒絕（409）：{inbox.one_line_for_event(error)}")
+    else:
+        ctx.log(
+            f"[warn] sidecar 回應 {error.status}：{inbox.one_line_for_event(error)}"
+        )
+
+
+def cmd_open(ctx: Ctx, args: argparse.Namespace) -> int:
+    """`pmo open ‹team› [--session …] [--fresh] [--provider P --model M]`（§3.2）。
+
+    結束碼照表：0 印 agent 的 state 與 attach（互動版印 sidecar 給的
+    `attach.local` 原樣；非互動版印「（非互動版，沒有 attach）」）；1 用法或狀態
+    不足（沒先 `pmo send`、team 已退役、worker team、設定沒有 workdir、只有
+    `--model`、互動版帶 `--session`、非互動版帶 `--fresh`）；2 sidecar 拒絕或
+    連不上（只印已知欄位，D-12）。agent 已開但 team 狀態寫不進去時仍印 state 與
+    attach（它已經起來了），再回 2 並說「已開、沒記錄」，不要讓人重開。
+    """
+    team = ops.team_or_usage(ctx, args.team)
+    try:
+        result = open_module.open_agent(
+            ctx,
+            team=team,
+            session=args.session,
+            fresh=args.fresh,
+            provider=args.provider,
+            model=args.model,
+        )
+    except SidecarShapeError as error:
+        # `POST /agents` answered 2xx but in a shape this port cannot read: the
+        # agent may already be open, so this is not「sidecar 不可用」and must not
+        # invite a straight reopen (the same worry as `state_error`).
+        ctx.log(
+            "[warn] sidecar 回應形狀不符；POST 若是 2xx 則 agent 可能已開，"
+            "請先 `pmo status ‹team›` 確認，不要直接重開："
+            f"{inbox.one_line_for_event(error)}"
+        )
+        return 2
+    except SidecarError as error:
+        _log_sidecar_failure(ctx, error)
+        return 2
+    except PortError as error:
+        # Got an answer, but not one the port can read: still a sidecar
+        # problem (not a retry-worthy「sidecar 不可用」).
+        ctx.log(f"[warn] sidecar 回應不合預期：{inbox.one_line_for_event(error)}")
+        return 2
+
+    ctx.emit(
+        f"[open] team={result.team_key} id={result.agent_id} "
+        f"state={result.state} attach={result.attach or '（非互動版，沒有 attach）'}"
+    )
+    if result.state_error is not None:
+        ctx.log(
+            f"[warn] agent 已開（id={result.agent_id}），team 狀態寫不進去："
+            f"{result.state_error}"
+        )
+        return 2
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # 指令：reply／poke／status／close（design §3.2、§5.2 T-4c）
 # --------------------------------------------------------------------------- #
 
@@ -495,7 +583,8 @@ def cmd_status(ctx: Ctx, args: argparse.Namespace) -> int:
         for team in report.teams:
             line = (
                 f"[status] {team.key} pm={team.pm} state={team.state} "
-                f"exit={team.exit_reason or '-'} session={team.session or '-'}"
+                f"exit={team.exit_reason or '-'} session={team.session or '-'} "
+                f"attach={team.attach or '-'}"
             )
             if team.note:
                 line += f"（{team.note}）"
@@ -606,6 +695,7 @@ _HANDLERS = {
     "inbox": cmd_inbox,
     "check": cmd_check,
     "send": cmd_send,
+    "open": cmd_open,
     "reply": cmd_reply,
     "poke": cmd_poke,
     "status": cmd_status,
@@ -649,10 +739,10 @@ def main(
     deps = deps if deps is not None else Deps(
         angareion=Angareion(),
         aicomm=Aicomm(),
-        # T-4c: the sidecar calls go to the sidecar the PMO itself runs on
-        # (§3.4: no `pmo_sidecar` means the PMO is not in a sidecar, so the
-        # port stays `None` and the sidecar commands refuse).
-        sidecar=(Sidecar(cfg.pmo_sidecar) if cfg.pmo_sidecar else None),
+        # The sidecar port is looked up per address (#356, design §3.1): a
+        # team's operations use the team's `sidecar`, the PMO's own wake jobs
+        # use `pmo_sidecar`. `adapters.Sidecar` is the factory.
+        sidecar_for=Sidecar,
         github=GitHub(),
     )
     ctx = Ctx(deps=deps, config=cfg, state_dir=state_dir, out=out, err=err, inp=inp)

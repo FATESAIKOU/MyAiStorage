@@ -16,9 +16,9 @@ from datetime import datetime, timezone
 import pytest
 
 from pmo import dispatch
-from pmo.adapters import GitHub
-from pmo.fakes import FakeGithub
-from pmo.ports import Message, PortError
+from pmo.adapters import GitHub, Sidecar
+from pmo.fakes import FakeGithub, FakeSidecar, FakeSidecars
+from pmo.ports import Message, PortError, SidecarError
 from pmo.runtime import Deps
 
 import _pmo_env as E
@@ -688,7 +688,11 @@ def test_backend_time_read_failure_says_sent_and_not_to_resend(pmo_env):
 
 
 def test_check_passes_with_no_state_files_yet(pmo_env):
-    deps = Deps(angareion=pmo_env.ang, now=lambda: NOW)
+    deps = Deps(
+        angareion=pmo_env.ang,
+        sidecar_for=lambda _address: FakeSidecar(),
+        now=lambda: NOW,
+    )
     rc, out, err = run_cli(["check", TEAM_KEY], pmo_env, deps=deps)
     assert (rc, err) == (0, "")
     lines = out.splitlines()
@@ -697,6 +701,7 @@ def test_check_passes_with_no_state_files_yet(pmo_env):
     assert lines[2] == "OK state：team 狀態檔讀得起來（尚未派工）"
     assert lines[3] == "OK tick：tick.json 不存在（叫醒視為 off）"
     assert lines[4] == f"OK channel：channel 讀得到（{TEAM_CHANNEL}）"
+    assert lines[5].startswith("OK sidecar：sidecar 有回應（GET /agents，")
     # channel 檢查是唯讀的 `log --channel --since 現在`（不動游標）
     assert pmo_env.ang.log_calls == [
         {
@@ -711,10 +716,143 @@ def test_check_passes_with_no_state_files_yet(pmo_env):
     assert pmo_env.ang.read_calls == []
 
 
+def test_check_queries_the_sidecar_at_the_teams_address(pmo_env):
+    """#356：sidecar 的 `GET /agents` 打到 team.sidecar，不是 pmo_sidecar。"""
+    port = FakeSidecar("http://127.0.0.1:8472")
+    factory = FakeSidecars(default=port)
+    deps = Deps(angareion=pmo_env.ang, sidecar_for=factory, now=lambda: NOW)
+    rc, _out, _err = run_cli(["check", TEAM_KEY], pmo_env, deps=deps)
+    assert rc == 0
+    assert factory.addresses == ["http://127.0.0.1:8472"]
+
+
+def test_check_reports_a_sidecar_that_does_not_answer(pmo_env):
+    """sidecar 沒回應是 FAIL（`GET /agents` 失敗），不是略過（#355 裁定 1 第 6 項）。
+
+    #356 裁定 §3：回了非 2xx 的字樣是「sidecar 回 HTTP ‹碼› ‹code›」。
+    """
+    port = FakeSidecar()
+    port.errors["list_agents"] = SidecarError(status=503, code="sidecar_busy")
+    deps = Deps(angareion=pmo_env.ang, sidecar_for=lambda _address: port, now=lambda: NOW)
+    rc, out, _err = run_cli(["check", TEAM_KEY], pmo_env, deps=deps)
+    assert rc == 1
+    assert "FAIL sidecar：sidecar 回 HTTP 503 sidecar_busy" in out
+
+
+def test_check_says_the_sidecar_is_unreachable_with_its_address(pmo_env):
+    """#356 裁定 §3：連不上（沒有 HTTP 狀態）另一種字樣，並指出是哪個位址。"""
+    port = FakeSidecar()
+    port.errors["list_agents"] = SidecarError(detail="sidecar 連不上（ConnectionRefusedError）")
+    deps = Deps(angareion=pmo_env.ang, sidecar_for=lambda _address: port, now=lambda: NOW)
+    rc, out, _err = run_cli(["check", TEAM_KEY], pmo_env, deps=deps)
+    assert rc == 1
+    assert "FAIL sidecar：sidecar 連不上（http://127.0.0.1:8472）" in out
+    assert "HTTP" not in out
+
+
+class _Answer:
+    """`urllib` 的回應替身：只帶 `status` 與 `read()`（真的 adapter 只讀這兩個）。"""
+
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> "_Answer":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+
+def test_check_separates_an_unreadable_answer_from_a_silent_sidecar(pmo_env, monkeypatch):
+    """#356 裁定 §3：2xx 但形狀不符 —— 第 3 種字樣（版本不一致），不是「連不上」。
+
+    不算 OK（`check` 的目的還是要抓到它），也不報成「連不上」：那是兩件事，
+    只有後者代表機器沒在跑。
+    """
+
+    class _Opener:
+        @staticmethod
+        def open(request, timeout=None):
+            return _Answer(200, b'{"items": []}')
+
+    monkeypatch.setattr("pmo.adapters._OPENER", _Opener())
+    deps = Deps(angareion=pmo_env.ang, sidecar_for=Sidecar, now=lambda: NOW)
+
+    rc, out, err = run_cli(["check", TEAM_KEY], pmo_env, deps=deps)
+
+    assert rc == 1, (out, err)
+    assert (
+        "FAIL sidecar：sidecar 有回應，但回應形狀不符（預期 `{\"agents\": [...]}`）；"
+        "可能是 sidecar 與 pmo 的版本不一致"
+    ) in out
+    assert "OK sidecar" not in out
+    assert "連不上" not in out
+
+
+def test_check_reports_a_bad_agent_record_without_claiming_the_outer_shape(pmo_env, monkeypatch):
+    """低-2（#356 修正三）：外層形狀是對的、單筆記錄壞掉時，不要宣稱外層預期。
+
+    中-2（#356 修正三）：`{"agents": [非物件]}` 也要走這條（形狀不符），
+    不能讓 `pmo check` 崩潰。
+    """
+
+    class _Opener:
+        @staticmethod
+        def open(request, timeout=None):
+            return _Answer(200, b'{"agents": ["x"]}')
+
+    monkeypatch.setattr("pmo.adapters._OPENER", _Opener())
+    deps = Deps(angareion=pmo_env.ang, sidecar_for=Sidecar, now=lambda: NOW)
+
+    rc, out, err = run_cli(["check", TEAM_KEY], pmo_env, deps=deps)
+
+    assert rc == 1, (out, err)
+    assert "FAIL sidecar：sidecar 有回應，但某筆 agent 記錄缺 id／state" in out
+    assert '預期 `{"agents": [...]}`' not in out
+    assert "連不上" not in out
+    assert "AttributeError" not in out + err
+
+
+def test_check_reports_a_missing_state_as_a_record_problem(pmo_env, monkeypatch):
+    """低-2（#356 修正三）：單筆記錄沒有 `state` 也要指出記錄本身，不是外層。"""
+
+    class _Opener:
+        @staticmethod
+        def open(request, timeout=None):
+            return _Answer(200, b'{"agents": [{"id": "demo2-pm-m1"}]}')
+
+    monkeypatch.setattr("pmo.adapters._OPENER", _Opener())
+    deps = Deps(angareion=pmo_env.ang, sidecar_for=Sidecar, now=lambda: NOW)
+
+    rc, out, _err = run_cli(["check", TEAM_KEY], pmo_env, deps=deps)
+
+    assert rc == 1
+    assert "某筆 agent 記錄缺 id／state" in out
+    assert "state" in out
+    assert '預期 `{"agents": [...]}`' not in out
+
+
+def test_check_without_a_sidecar_port_is_a_fail(pmo_env):
+    """沒有接 sidecar 埠時明說查不到（design 沒寫這一格；#356 報告列待確認）。"""
+    deps = Deps(angareion=pmo_env.ang, now=lambda: NOW)
+    rc, out, _err = run_cli(["check", TEAM_KEY], pmo_env, deps=deps)
+    assert rc == 1
+    assert "FAIL sidecar：sidecar 埠沒有接上，查不到 GET /agents" in out
+
+
 def test_check_reports_the_existing_ticket_and_the_wake_interval(pmo_env):
     seed_team_state(pmo_env, ticket=TICKET)
     write_tick(pmo_env, "30m")
-    rc, out, _err = run_cli(["check", TEAM_KEY], pmo_env)
+    deps = Deps(
+        angareion=pmo_env.ang,
+        sidecar_for=lambda _address: FakeSidecar(),
+        now=lambda: NOW,
+    )
+    rc, out, _err = run_cli(["check", TEAM_KEY], pmo_env, deps=deps)
     assert rc == 0
     assert f"OK state：team 狀態檔讀得起來（ticket={TICKET}）" in out
     assert "OK tick：tick.json 讀得起來（叫醒 30m）" in out
@@ -785,7 +923,12 @@ def test_check_a_worker_team_prints_the_transition_line_and_passes(pmo_env):
 
 
 def test_check_a_local_team_has_no_worker_line(pmo_env):
-    rc, out, _err = run_cli(["check", TEAM_KEY], pmo_env)
+    deps = Deps(
+        angareion=pmo_env.ang,
+        sidecar_for=lambda _address: FakeSidecar(),
+        now=lambda: NOW,
+    )
+    rc, out, _err = run_cli(["check", TEAM_KEY], pmo_env, deps=deps)
     assert rc == 0
     assert "worker team" not in out
 

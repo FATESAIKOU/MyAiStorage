@@ -175,13 +175,13 @@ class StuckCloseSidecar(RecordingSidecar):
 
 
 def ops_deps(*, sidecar=None, aicomm=None, port: bool = True):
-    """假 aicomm＋假 sidecar＋固定時鐘；回 `(deps, aicomm, sidecar)`。"""
+    """假 aicomm＋假 sidecar（依位址）＋固定時鐘；回 `(deps, aicomm, sidecar)`。"""
     aicomm = aicomm if aicomm is not None else FakeAicomm()
     sidecar = sidecar if sidecar is not None else FakeSidecar()
     deps = Deps(
         angareion=E.FakeAngareion(),
         aicomm=aicomm,
-        sidecar=sidecar if port else None,
+        sidecar_for=(lambda _address: sidecar) if port else None,
         now=lambda: NOW,
     )
     return deps, aicomm, sidecar
@@ -311,7 +311,7 @@ def test_reply_aicomm_timeout_says_the_result_is_unknown(pmo_env):
 
 
 def test_reply_without_the_aicomm_port_is_exit_2(pmo_env):
-    deps = Deps(angareion=E.FakeAngareion(), sidecar=FakeSidecar(), now=lambda: NOW)
+    deps = Deps(angareion=E.FakeAngareion(), sidecar_for=lambda _address: FakeSidecar(), now=lambda: NOW)
     rc, out, err = run_cli(
         ["reply", TEAM_KEY, "--body", "-"], pmo_env, deps=deps, stdin_text=BODY
     )
@@ -487,9 +487,18 @@ def test_status_prints_one_teams_state_exit_and_session(pmo_env):
     rc, out, err = run_cli(["status", TEAM_KEY], pmo_env, deps=deps)
     assert (rc, err) == (0, "")
     assert out.splitlines()[0] == (
-        f"[status] {TEAM_KEY} pm={TEAM_PM} state=running exit=- session=ses-1"
+        f"[status] {TEAM_KEY} pm={TEAM_PM} state=running exit=- session=ses-1 attach=-"
     )
     assert "PMO 不在 sidecar" in out  # 沒有 pmo_sidecar 時不查 job（§3.4）
+
+
+def test_status_prints_the_attach_local_of_an_interactive_seat(pmo_env):
+    """#356 裁定 §3：`status` 也印 `attach.local`（原樣，不解析）。"""
+    deps, _aicomm, sidecar = ops_deps()
+    sidecar.add_agent(TEAM_PM, state="running", session="ses-1", attach="tmux attach -t demo")
+    rc, out, err = run_cli(["status", TEAM_KEY], pmo_env, deps=deps)
+    assert (rc, err) == (0, "")
+    assert "attach=tmux attach -t demo" in out
 
 
 def test_status_shows_the_exit_reason(pmo_env):
@@ -521,7 +530,7 @@ def test_status_lists_every_team_and_marks_the_worker_one(pmo_env):
     rc, out, err = run_cli(["status"], pmo_env, deps=deps)
     assert (rc, err) == (0, "")
     lines = out.splitlines()
-    assert f"[status] {TEAM_KEY} pm={TEAM_PM} state=idle exit=- session=s2" in lines
+    assert f"[status] {TEAM_KEY} pm={TEAM_PM} state=idle exit=- session=s2 attach=-" in lines
     worker_line = next(line for line in lines if line.startswith(f"[status] {OTHER_TEAM_KEY} "))
     assert "state=worker" in worker_line and "D-8" in worker_line
 
@@ -543,7 +552,14 @@ def test_status_json_holds_the_same_known_fields(pmo_env):
     assert (rc, err) == (0, "")
     data = json.loads(out)
     assert data["teams"] == [
-        {"key": TEAM_KEY, "pm": TEAM_PM, "state": "running", "exit": None, "session": "ses-1"}
+        {
+            "key": TEAM_KEY,
+            "pm": TEAM_PM,
+            "state": "running",
+            "exit": None,
+            "session": "ses-1",
+            "attach": None,
+        }
     ]
     (job,) = data["jobs"]
     assert job["id"] == "job-1"
@@ -591,11 +607,11 @@ def test_status_json_carries_the_named_teams_jobs(pmo_env):
     assert (job["id"], job["action"], job["every"]) == ("job-team", "poke", 600.0)
 
 
-def test_status_without_a_pmo_sidecar_does_not_query_jobs(pmo_env):
-    """§3.4：沒有 pmo_sidecar＝PMO 不在 sidecar，不查 /jobs。"""
+def test_status_without_a_pmo_sidecar_does_not_query_its_own_jobs(pmo_env):
+    """§3.4：沒有 pmo_sidecar＝PMO 不在 sidecar，不查自己排的 job（/jobs）。"""
     deps, _aicomm, sidecar = ops_deps()
     sidecar.errors["list_jobs"] = SidecarError(status=500, detail="must not be called")
-    rc, out, err = run_cli(["status", TEAM_KEY], pmo_env, deps=deps)
+    rc, out, err = run_cli(["status"], pmo_env, deps=deps)
     assert (rc, err) == (0, "")
     assert "PMO 不在 sidecar" in out
 
