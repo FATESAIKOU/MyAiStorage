@@ -14,7 +14,14 @@ import string
 
 import pytest
 
-from pmo.sanitize import REDACTED, SECRET_FIELD, TOKEN_SHAPES, known_fields_only, sanitize
+from pmo.sanitize import (
+    REDACTED,
+    SECRET_FIELD,
+    TOKEN_SHAPES,
+    has_credential_shape,
+    known_fields_only,
+    sanitize,
+)
 
 _RUN = string.ascii_letters + string.digits + "_-"
 
@@ -57,6 +64,23 @@ def test_a_password_shaped_pair_keeps_its_key_and_hides_the_value():
     value = _run(12)
     assert sanitize(f"password: {value}") == f"password: {REDACTED}"
     assert sanitize(f'"client_secret": "{value}"') == f'"client_secret": "{REDACTED}"'
+
+
+def test_a_secret_field_value_is_a_credential_shape():
+    """`password: …` 這類形狀也算憑證樣式（#355 裁定 5 的 SECRET_FIELD 路徑）。"""
+    value = _run(12)
+    assert has_credential_shape(f"password: {value}")
+    assert has_credential_shape(f'"client_secret": "{value}"')
+
+
+def test_normal_text_is_not_a_credential_shape():
+    for line in (
+        "[idle] [next-due=2026-11-03T01:10:00Z]",
+        "[msg] from=myaistorage-secretary-m1 text=請看工單 #352",
+        "passwordless login is allowed",
+        "[msg] text=no secret here",
+    ):
+        assert not has_credential_shape(line), line
 
 
 def test_normal_event_lines_are_kept():

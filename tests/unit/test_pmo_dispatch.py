@@ -51,23 +51,25 @@ NOW = datetime(2026, 10, 19, 10, 15, 0, tzinfo=timezone.utc)
 
 #: 假 secret：前綴在執行時才組起來（檔案裡不留完整樣式）。
 FAKE_SECRET = "sk" + "-ant-" + "x" * 40
+#: 假密碼值（secret-field 形狀）：同樣在執行時組起來。
+FAKE_PASSWORD_VALUE = "pw" + "y" * 10
 
 
 class DispatchAngareion(E.FakeAngareion):
-    """`send` 把剛送出的信放回 `pending`，讓 `read --since` 讀得到它。
+    """`send` 把剛送出的信放回 `logged`，讓 `log --channel` 撈得到它。
 
-    真的後端就是這樣：送出的信立刻在自己的 channel 上（`read --since` 不動
-    游標）。回一個假造的後端時刻，測試才驗得到 team 狀態的 `received_at`。
+    真的後端就是這樣：送出的信立刻在自己的 channel 上，`log --channel`
+    看得到、也不動游標（#355 高-1：讀回後端時刻走 log，不走 read）。回一個
+    假造的後端時刻，測試才驗得到 team 狀態的 `received_at`。
     """
 
     def __init__(self, *args, received_at: str = BACKEND_TIME, **kwargs):
         super().__init__(*args, **kwargs)
         self.received_at = received_at
-        self.read_since: list = []
 
     def send(self, **kwargs):  # type: ignore[override]
         message_id = super().send(**kwargs)
-        self.pending.append(
+        self.logged.append(
             Message(
                 message_id=message_id,
                 channel=kwargs["channel"],
@@ -81,29 +83,24 @@ class DispatchAngareion(E.FakeAngareion):
         )
         return message_id
 
-    def read(self, *, since=None):  # type: ignore[override]
-        self.read_since.append(since)
-        return super().read(since=since)
-
 
 class NoReadBackAngareion(DispatchAngareion):
-    """`read --since` 找不到剛送出的信（模擬後端還沒寫進去）。"""
+    """`log --channel --since` 找不到剛送出的信（模擬後端還沒寫進去）。"""
 
-    def read(self, *, since=None):  # type: ignore[override]
-        self.read_since.append(since)
-        return []
+    def send(self, **kwargs):  # type: ignore[override]
+        return E.FakeAngareion.send(self, **kwargs)  # 不把信放進 logged
 
 
 class BrokenReadBackAngareion(DispatchAngareion):
-    """`read --since` 失敗（後端／網路）；信已經送出去了。"""
+    """`log --channel --since` 失敗（後端／網路）；信已經送出去了。"""
 
-    def read(self, *, since=None):  # type: ignore[override]
-        self.read_since.append(since)
-        raise PortError("backend down")
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.errors["log"] = PortError("backend down")
 
 
 class DecoyFirstAngareion(DispatchAngareion):
-    """`read --since` 的回看窗口裡還有別人的信：目標在第二位。
+    """`log --channel --since` 的回看窗口裡還有別人的信：目標在第二位。
 
     真的後端只保證「在這段時間裡」，不保證指示信是第一封；`_backend_time`
     因此要用 message_id 挑。這裡先回一封別人的信，再回剛送出的指示信。
@@ -120,9 +117,31 @@ class DecoyFirstAngareion(DispatchAngareion):
             body="窗口裡另一封信（不是指示信）",
         )
 
+    def send(self, **kwargs):  # type: ignore[override]
+        message_id = super().send(**kwargs)
+        self.logged.insert(0, self.decoy)
+        return message_id
+
+
+class AddressedAngareion(DispatchAngareion):
+    """`read` 照 angareion 的「寄給我的」過濾，`log --channel` 照頻道過濾。
+
+    指示信的 `to` 是 team PM，不在 PMO 的「寄給我的」裡：不帶 `--channel`
+    的 `read` 讀不到它（#355 高-1 的實機情況），所以讀回後端時刻只能用
+    `log --channel`。
+    """
+
     def read(self, *, since=None):  # type: ignore[override]
-        recent = super().read(since=since)
-        return [self.decoy, *recent]
+        self.read_calls.append(since)
+        self._maybe_fail("read")
+        mine = [
+            message
+            for message in self.pending
+            if message.to in (None, PMO_IDENTITY)
+            or (message.mentions is not None and PMO_IDENTITY in message.mentions)
+        ]
+        self.pending = [message for message in self.pending if message not in mine]
+        return mine
 
 
 def write_tick(env: PmoEnv, every: str | None = "10m") -> None:
@@ -185,35 +204,60 @@ def test_send_writes_the_letter_and_the_team_state(pmo_env):
     assert (rc, err) == (0, "")
     (sent,) = ang.sent
     assert (sent.channel, sent.to, sent.urgency) == (TEAM_CHANNEL, TEAM_PM, 5)
-    assert sent.body.startswith(f"# 派工：{TICKET} {ISSUE_TITLE}\n")
-    assert f"- 工單：{TICKET}" in sent.body
-    assert f"- 派工者：{PMO_IDENTITY}" in sent.body
-    assert f"## 工單內容\n{ISSUE_BODY}" in sent.body
-    assert f"## 指示\n{INSTRUCTIONS}" in sent.body
+    # 固定頭照 MyPMO `build_instruction`（#355 裁定 2）：工單號、標題、範圍、
+    # 驗收、回報格式、派工時刻，然後才是工單本文與正文。
+    assert sent.body.startswith(f"## {TICKET} 派工指示\n\n")
+    assert f"- 工單號：{TICKET}" in sent.body
+    assert f"- 標題：{ISSUE_TITLE}" in sent.body
+    assert "- 範圍：見下方指示本文的「範圍」一節" in sent.body
+    assert "- 驗收：見下方指示本文的「驗收」一節" in sent.body
+    assert "做到哪、半成品在哪、測試實際輸出、剩下的問題、要本人決定的事附建議；" in sent.body
+    assert (
+        f"  PR 連結直接寫在 body，用 `aicomm send --channel {TEAM_CHANNEL} "
+        f"--to {PMO_IDENTITY} --body -`；" in sent.body
+    )
+    assert "  要本人決定的急件用 `--urgency 8` 以上。" in sent.body
+    assert "- 派工時刻：2026-10-19T10:15:00Z（本機時間，僅供對照；" in sent.body
+    assert "## 工單本文（PMO 派工時從 GitHub 讀出）\n\n" in sent.body
+    assert f"標題：{ISSUE_TITLE}\n\n{ISSUE_BODY}" in sent.body
+    assert sent.body.endswith(f"---\n\n{INSTRUCTIONS}\n")
+    assert "# 派工：" not in sent.body  # 舊的自訂格式不再用
 
     assert f"[send] 指示信已送出 id={sent.message_id} 後端時刻={BACKEND_TIME}" in out
     assert "[wake-hint]" not in out  # 預設 10m：不提示
 
     state = team_state(pmo_env)
     assert state["agent"] == TEAM_PM
+    assert state["team"] == TEAM_KEY  # #355 裁定 3
     assert state["ticket"] == TICKET  # team PM 的「收到 ‹工單›」要對得上
     assert state["message_id"] == sent.message_id
     assert state["received_at"] == BACKEND_TIME
+    assert state["dispatched_at"] == "2026-10-19T10:15:00Z"  # received_at 往前 60 秒
+    assert state["updated_at"] == "2026-10-19T10:15:00Z"  # 寫入時刻
     assert state["closed"] is False
     assert state["ack_at"] is None
 
-    # `read --since` 回看 60 秒，而且不動游標（沒有不帶 --since 的 read）
-    assert ang.read_since == ["2026-10-19T10:14:00Z"]
-    assert ang.read_calls == ["2026-10-19T10:14:00Z"]
+    # 讀回後端時刻走唯讀的 `log --channel`，回看 60 秒、不動游標
+    assert ang.log_calls == [
+        {
+            "channel": TEAM_CHANNEL,
+            "sender": None,
+            "to": None,
+            "thread": None,
+            "grep": None,
+            "since": "2026-10-19T10:14:00Z",
+        }
+    ]
+    assert ang.read_calls == []  # 不走 read（PMO 的讀信只走 tick）
     assert github.calls == [(REPO, NUMBER)]
 
 
 def test_backend_time_is_picked_by_id_not_by_position(pmo_env):
     """回看窗口有別的信、指示信不在第一位時，取的是指示信的後端時刻。
 
-    `_backend_time` 的 docstring：`read --since` 的回看窗口可能夾著別人的
-    信，所以用 message_id 挑，不用位置。挑錯會把別人信的 `received_at` 寫進
-    team 狀態，而那是看門狗的計時起點。
+    `_backend_time` 的 docstring：`log --channel --since` 的回看窗口可能夾著
+    別人的信，所以用 message_id 挑，不用位置。挑錯會把別人信的 `received_at`
+    寫進 team 狀態，而那是看門狗的計時起點。
     """
     ang = DecoyFirstAngareion()
     github = FakeGithub()
@@ -231,7 +275,8 @@ def test_backend_time_is_picked_by_id_not_by_position(pmo_env):
     state = team_state(pmo_env)
     assert state["message_id"] == sent.message_id
     assert state["received_at"] == BACKEND_TIME  # 指示信的，不是窗口第一封的
-    assert ang.read_calls == ["2026-10-19T10:14:00Z"]
+    assert ang.read_calls == []
+    assert ang.log_calls[0]["since"] == "2026-10-19T10:14:00Z"
 
 
 def test_send_keeps_unknown_state_fields_and_clears_the_old_watchdog(pmo_env):
@@ -256,7 +301,53 @@ def test_send_keeps_unknown_state_fields_and_clears_the_old_watchdog(pmo_env):
     assert state["ack_poke_at"] is None
     assert state["ack_escalated_at"] is None
     assert state["worker_only_field"] == "keep-me"  # Q-9：不認得的欄位原樣保留
-    assert state["dispatched_at"] == "2026-10-19T10:00:00Z"  # 原有的值不動
+    # #355 裁定 3：新的派工把 dispatched_at 換成這一封的（received_at 往前 60 秒），
+    # 不再是舊派工留下的值。
+    assert state["dispatched_at"] == "2026-10-19T10:15:00Z"
+
+
+def test_record_dispatch_reads_and_writes_inside_the_team_lock(pmo_env, monkeypatch):
+    """`_record_dispatch` 的讀、改、寫都在 team 鎖內（arch review 中-1）。"""
+    import fcntl
+    import os
+
+    from pmo import teamstate as teamstate_module
+
+    ang, _github, deps = dispatch_deps(pmo_env)
+
+    def lock_held(state_dir, key):
+        fd = os.open(str(teamstate_module.lock_file(state_dir, key)), os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            return True
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(fd)
+
+    checked: list[tuple[str, bool]] = []
+    real_load = teamstate_module.load_state
+    real_save = teamstate_module.save_state
+
+    def load_checked(state_dir, key):
+        checked.append(("load", lock_held(state_dir, key)))
+        return real_load(state_dir, key)
+
+    def save_checked(state_dir, key, data):
+        checked.append(("save", lock_held(state_dir, key)))
+        return real_save(state_dir, key, data)
+
+    monkeypatch.setattr(teamstate_module, "load_state", load_checked)
+    monkeypatch.setattr(teamstate_module, "save_state", save_checked)
+
+    rc, _out, err = run_send(pmo_env, deps)
+
+    assert (rc, err) == (0, "")
+    assert ang.sent  # 有真的跑過
+    assert {what for what, _held in checked} == {"load", "save"}
+    assert all(held for _what, held in checked)
 
 
 # --------------------------------------------------------------------------- #
@@ -296,15 +387,17 @@ def test_wake_hint_is_silent_at_or_below_ten_minutes(pmo_env, every):
 
 
 def test_a_damaged_tick_json_does_not_stop_the_dispatch(pmo_env):
-    """design §3.4 的壞檔 exit 2 只點名 tick／handoff-close／pmo wake。"""
+    """信已送出：壞檔只 warn、exit 0，叫醒印 `unknown` 不印 `off`（#355 裁定 4）。"""
     _ang, _github, deps = dispatch_deps(pmo_env, tick=False)
     pmo_env.state_dir.mkdir(parents=True, exist_ok=True)
     (pmo_env.state_dir / "tick.json").write_text("{ not json", encoding="utf-8")
     rc, out, err = run_send(pmo_env, deps)
     assert (rc) == 0
     assert "[send] 指示信已送出" in out
-    assert "[wake-hint] 看門狗 10m 後到期，目前叫醒 off" in out
-    assert "tick.json 讀不起來" in err
+    assert "[wake-hint] 看門狗 10m 後到期，目前叫醒 unknown（tick.json 讀不起來）" in out
+    assert "叫醒 off" not in out
+    assert "[warn] tick.json 讀不起來：" in err
+    assert "視為叫醒 off" not in err
 
 
 # --------------------------------------------------------------------------- #
@@ -355,7 +448,164 @@ def test_body_with_a_credential_shape_is_refused(pmo_env):
     assert rc == 1
     assert ang.sent == []
     assert FAKE_SECRET not in out and FAKE_SECRET not in err
-    assert "憑證樣式" in err
+    assert "正文含憑證樣式" in err
+
+
+def test_issue_body_with_a_credential_shape_is_refused(pmo_env):
+    """工單本文也會原樣進信裡，所以要掃；訊息指出是「工單本文」那一段。"""
+    ang = DispatchAngareion()
+    github = FakeGithub()
+    github.add_issue(
+        REPO, NUMBER, title=ISSUE_TITLE, body=f"貼錯的金鑰：{FAKE_SECRET}"
+    )
+    write_tick(pmo_env)
+    deps = Deps(angareion=ang, github=github, now=lambda: NOW)
+
+    rc, out, err = run_send(pmo_env, deps)
+
+    assert rc == 1
+    assert ang.sent == []
+    assert not pmo_env.team_file().exists()
+    assert FAKE_SECRET not in out and FAKE_SECRET not in err
+    assert "工單本文含憑證樣式，拒送；請先改工單" in err
+    assert github.calls == [(REPO, NUMBER)]  # 讀過工單才掃得到本文
+
+
+def test_issue_title_with_a_credential_shape_is_refused(pmo_env):
+    """工單標題也原樣進信（兩處），所以要掃；訊息指出是「工單標題」那一段。"""
+    ang = DispatchAngareion()
+    github = FakeGithub()
+    github.add_issue(
+        REPO, NUMBER, title=f"順手貼到標題：{FAKE_SECRET}", body=ISSUE_BODY
+    )
+    write_tick(pmo_env)
+    deps = Deps(angareion=ang, github=github, now=lambda: NOW)
+
+    rc, out, err = run_send(pmo_env, deps)
+
+    assert rc == 1
+    assert ang.sent == []
+    assert not pmo_env.team_file().exists()
+    assert FAKE_SECRET not in out and FAKE_SECRET not in err
+    assert "工單標題含憑證樣式，拒送；請先改工單" in err
+
+
+def test_body_with_a_secret_field_shape_is_refused(pmo_env):
+    """`password: …` 這類形狀也要拒送，不只 TOKEN_SHAPES（#355 裁定 5）。"""
+    ang, _github, deps = dispatch_deps(pmo_env)
+    body = f"連線設定：password: {FAKE_PASSWORD_VALUE}"
+    rc, out, err = run_send(pmo_env, deps, body="-", stdin_text=body)
+
+    assert rc == 1
+    assert ang.sent == []
+    assert FAKE_PASSWORD_VALUE not in out and FAKE_PASSWORD_VALUE not in err
+    assert "正文含憑證樣式" in err
+
+
+def test_issue_body_with_a_secret_field_shape_is_refused(pmo_env):
+    """工單本文的 secret-field 形狀也拒送；訊息指出是「工單本文」那一段。"""
+    ang = DispatchAngareion()
+    github = FakeGithub()
+    github.add_issue(
+        REPO, NUMBER, title=ISSUE_TITLE, body=f"貼錯的設定：password: {FAKE_PASSWORD_VALUE}"
+    )
+    write_tick(pmo_env)
+    deps = Deps(angareion=ang, github=github, now=lambda: NOW)
+
+    rc, out, err = run_send(pmo_env, deps)
+
+    assert rc == 1
+    assert ang.sent == []
+    assert not pmo_env.team_file().exists()
+    assert FAKE_PASSWORD_VALUE not in out and FAKE_PASSWORD_VALUE not in err
+    assert "工單本文含憑證樣式，拒送；請先改工單" in err
+    assert github.calls == [(REPO, NUMBER)]
+
+
+def test_a_letter_over_the_limit_is_refused_without_truncating(pmo_env):
+    """組好的信超過 65536 字元就拒送，訊息寫明工單本文多長（#355 裁定 2）。"""
+    long_body = "x" * (dispatch.MAX_LETTER_CHARS + 1000)
+    ang = DispatchAngareion()
+    github = FakeGithub()
+    github.add_issue(REPO, NUMBER, title=ISSUE_TITLE, body=long_body)
+    write_tick(pmo_env)
+    deps = Deps(angareion=ang, github=github, now=lambda: NOW)
+
+    rc, out, err = run_send(pmo_env, deps)
+
+    assert rc == 1
+    assert ang.sent == []
+    assert not pmo_env.team_file().exists()
+    assert str(dispatch.MAX_LETTER_CHARS) in err
+    assert f"工單本文 {len(long_body)} 字元" in err
+    assert "不截斷" in err
+
+
+def test_backend_time_is_read_with_log_on_the_team_channel(pmo_env):
+    """`read`（寄給我的）讀不到寄給 team PM 的信；`log --channel` 讀得到。
+
+    #355 高-1：指示信的 `to` 是 team PM，所以不帶 `--channel` 的 `read`
+    在實機上永遠找不到它；讀回後端時刻只能走唯讀的 `log --channel`。
+    """
+    ang = AddressedAngareion()
+    github = FakeGithub()
+    github.add_issue(REPO, NUMBER, title=ISSUE_TITLE, body=ISSUE_BODY)
+    deps = Deps(angareion=ang, github=github, now=lambda: NOW)
+
+    rc, out, err = run_send(pmo_env, deps)
+
+    assert (rc, err) == (0, "")
+    (sent,) = ang.sent
+    assert sent.to == TEAM_PM
+    # 這次 send 沒有用 read 讀回任何東西
+    assert ang.read_calls == []
+    # log 限定 team channel、回看 60 秒
+    assert ang.log_calls == [
+        {
+            "channel": TEAM_CHANNEL,
+            "sender": None,
+            "to": None,
+            "thread": None,
+            "grep": None,
+            "since": "2026-10-19T10:14:00Z",
+        }
+    ]
+    # 反過來驗：同一個 fake 的 read（「寄給我的」）讀不到那封信
+    assert ang.read(since="2026-10-19T10:14:00Z") == []
+    # 而 log --channel 讀得到
+    assert [
+        message.message_id
+        for message in ang.log(channel=TEAM_CHANNEL, since="2026-10-19T10:14:00Z")
+    ] == [sent.message_id]
+
+
+def test_a_bad_backend_time_is_sent_but_not_recorded(pmo_env):
+    """後端回的時刻看不懂時算不出 dispatched_at：exit 2、帶 id、不要重送。"""
+    ang = DispatchAngareion(received_at="not-a-time")
+    github = FakeGithub()
+    github.add_issue(REPO, NUMBER, title=ISSUE_TITLE, body=ISSUE_BODY)
+    deps = Deps(angareion=ang, github=github, now=lambda: NOW)
+
+    rc, out, err = run_send(pmo_env, deps)
+
+    assert rc == 2
+    assert out == ""
+    assert "已送出" in err and "不要直接重送" in err
+    assert ang.sent[0].message_id in err
+    assert not pmo_env.team_file().exists()
+
+
+def test_a_life_team_gets_the_life_reporting_lines(pmo_env):
+    rewrite_team_config(pmo_env, life=True)
+    ang, _github, deps = dispatch_deps(pmo_env)
+    rc, _out, err = run_send(pmo_env, deps)
+
+    assert (rc, err) == (0, "")
+    body = ang.sent[0].body
+    assert "做到哪、產出位置（工作目錄／檔案路徑）、驗證輸出（若有）、剩下的問題、" in body
+    assert "回報用 `aicomm send --channel " in body
+    assert "PR 連結直接寫在 body" not in body
+    assert "`--urgency 8` 以上" in body
 
 
 def test_an_unreadable_issue_is_exit_1_and_sends_nothing(pmo_env):
@@ -438,13 +688,27 @@ def test_backend_time_read_failure_says_sent_and_not_to_resend(pmo_env):
 
 
 def test_check_passes_with_no_state_files_yet(pmo_env):
-    rc, out, err = run_cli(["check", TEAM_KEY], pmo_env)
+    deps = Deps(angareion=pmo_env.ang, now=lambda: NOW)
+    rc, out, err = run_cli(["check", TEAM_KEY], pmo_env, deps=deps)
     assert (rc, err) == (0, "")
     lines = out.splitlines()
-    assert lines[0] == f"OK team：設定裡有 team「{TEAM_KEY}」"
-    assert lines[1] == "OK retired：未退役"
+    assert lines[0] == f"OK team：設定裡有 team「{TEAM_KEY}」，未退役"
+    assert lines[1] == f"OK pm：PM 名合法且角色是 pm（{TEAM_PM}）"
     assert lines[2] == "OK state：team 狀態檔讀得起來（尚未派工）"
     assert lines[3] == "OK tick：tick.json 不存在（叫醒視為 off）"
+    assert lines[4] == f"OK channel：channel 讀得到（{TEAM_CHANNEL}）"
+    # channel 檢查是唯讀的 `log --channel --since 現在`（不動游標）
+    assert pmo_env.ang.log_calls == [
+        {
+            "channel": TEAM_CHANNEL,
+            "sender": None,
+            "to": None,
+            "thread": None,
+            "grep": None,
+            "since": "2026-10-19T10:15:00Z",
+        }
+    ]
+    assert pmo_env.ang.read_calls == []
 
 
 def test_check_reports_the_existing_ticket_and_the_wake_interval(pmo_env):
@@ -466,7 +730,15 @@ def test_check_retired_team_is_a_fail(pmo_env):
     rewrite_team_config(pmo_env, retired=True)
     rc, out, _err = run_cli(["check", TEAM_KEY], pmo_env)
     assert rc == 1
-    assert "FAIL retired：已退役（retired=true）" in out
+    assert f"FAIL team：設定裡有 team「{TEAM_KEY}」，已退役（retired=true）" in out
+
+
+def test_check_a_pm_name_whose_role_is_not_pm_is_a_fail(pmo_env):
+    """PM 名合法但角色不是 pm：設定載入不會擋（key／channel 仍一致），check 要擋。"""
+    rewrite_team_config(pmo_env, pm="demo2-impl-m1-1")
+    rc, out, _err = run_cli(["check", TEAM_KEY], pmo_env)
+    assert rc == 1
+    assert "FAIL pm：PM 名的角色是 impl，不是 pm（demo2-impl-m1-1）" in out
 
 
 def test_check_reports_a_damaged_team_state(pmo_env):
@@ -483,6 +755,39 @@ def test_check_reports_a_damaged_tick_state(pmo_env):
     rc, out, err = run_cli(["check", TEAM_KEY], pmo_env)
     assert (rc, err) == (1, "")
     assert "FAIL tick：tick.json 讀不起來" in out
+
+
+def test_check_channel_not_readable_is_a_fail(pmo_env):
+    """angareion 回 exit 1（channel 名字錯／還沒落地）是一種 FAIL。"""
+    pmo_env.ang.errors["log"] = PortError("no such channel", returncode=1)
+    rc, out, err = run_cli(["check", TEAM_KEY], pmo_env)
+    assert (rc, err) == (1, "")
+    assert "FAIL channel：channel 讀不到（還沒落地或名字錯）" in out
+
+
+@pytest.mark.parametrize("returncode", [2, None])
+def test_check_a_backend_error_on_the_channel_is_a_fail(pmo_env, returncode):
+    """其他非 0（含沒有結束碼的失敗）是「後端錯誤」，不是名字錯。"""
+    pmo_env.ang.errors["log"] = PortError("backend down", returncode=returncode)
+    rc, out, err = run_cli(["check", TEAM_KEY], pmo_env)
+    assert (rc, err) == (1, "")
+    assert "FAIL channel：後端錯誤：backend down" in out
+
+
+def test_check_a_worker_team_prints_the_transition_line_and_passes(pmo_env):
+    """worker team 的 sidecar 檢查由過渡工具負責：印一行資訊列，不算 FAIL（D-8）。"""
+    rewrite_team_config(pmo_env, sidecar="worker")
+    rc, out, err = run_cli(["check", TEAM_KEY], pmo_env)
+    assert (rc, err) == (0, "")
+    assert out.splitlines()[-1] == (
+        "--  worker team：worker 側的檢查由過渡工具負責（D-8）"
+    )
+
+
+def test_check_a_local_team_has_no_worker_line(pmo_env):
+    rc, out, _err = run_cli(["check", TEAM_KEY], pmo_env)
+    assert rc == 0
+    assert "worker team" not in out
 
 
 # --------------------------------------------------------------------------- #

@@ -203,3 +203,62 @@ def test_inbox_read_prints_full_team_message(pmo_env):
     for content_line in FULL_CONTENT.split("\n")[1:]:
         assert f"  {content_line}" in lines  # 續行原樣、兩個空白縮排
     assert "…" not in out
+
+
+# --------------------------------------------------------------------------- #
+# 兩個寫入者交錯（arch review 中-1）：`send` 記派工與這裡的 ack 不互相蓋掉
+# --------------------------------------------------------------------------- #
+
+
+def test_interleaved_writers_do_not_drop_the_ack(pmo_env, monkeypatch):
+    """`process_team_messages` 在鎖內重讀再寫：另一個寫入者交錯時不蓋掉 ack_at。
+
+    重現審查說的窗口：一個寫入者已讀、還沒寫時，另一個寫入者（`send` 的
+    `_record_dispatch`）也來讀改寫。鎖生效時後者會等前者、再讀到 ack_at；
+    沒有鎖時後者讀到舊的 state，會把 ack_at 蓋掉。
+    """
+    import threading
+
+    seed_team_state(pmo_env, ticket=TICKET)
+    ctx = _ctx(pmo_env)
+
+    started = threading.Event()
+    release = threading.Event()
+    other_done = threading.Event()
+    real_save = teamstate.save_state
+
+    def slow_save(state_dir, key, data):
+        # 讓第一個寫入者停在「已讀、還沒寫」的窗口
+        if not started.is_set():
+            started.set()
+            release.wait(5.0)
+        return real_save(state_dir, key, data)
+
+    monkeypatch.setattr(teamstate, "save_state", slow_save)
+
+    msg = _msg("01JRACE000000000000000001", f"收到 {TICKET}")
+
+    def ack_writer():
+        teammsg.process_team_messages(ctx, [msg])
+
+    def other_writer():
+        with teamstate.state_lock(pmo_env.state_dir, TEAM_KEY):
+            st = teamstate.load_state(pmo_env.state_dir, TEAM_KEY)
+            st["worker_note"] = "kept"
+            teamstate.save_state(pmo_env.state_dir, TEAM_KEY, st)
+        other_done.set()
+
+    first = threading.Thread(target=ack_writer)
+    first.start()
+    assert started.wait(5.0)  # 第一個寫入者已讀、卡在寫之前
+    second = threading.Thread(target=other_writer)
+    second.start()
+    other_done.wait(0.3)  # 有鎖時第二個還拿不到鎖，這裡會逾時
+    release.set()
+    first.join(5.0)
+    second.join(5.0)
+
+    assert not first.is_alive() and not second.is_alive()
+    state = _team_state(pmo_env)
+    assert state["ack_at"]  # ack 沒被後寫的蓋掉
+    assert state["worker_note"] == "kept"  # 後寫的也沒被先寫的蓋掉

@@ -327,10 +327,16 @@ def cmd_inbox_rebuild(ctx: Ctx, args: argparse.Namespace) -> int:
 
 
 def cmd_check(ctx: Ctx, args: argparse.Namespace) -> int:
-    """`pmo check ‹team›`：逐項 OK／FAIL；有 FAIL 就是 1（design §3.2）。"""
+    """`pmo check ‹team›`：逐項 OK／FAIL；有 FAIL 就是 1（design §3.2）。
+
+    Worker team 的那一行是 `--  ‹項目›：‹說明›`（資訊列，不算 FAIL）。
+    """
     items = dispatch.check(ctx, args.team)
     for item in items:
-        ctx.emit(f"{'OK' if item.ok else 'FAIL'} {item.name}：{item.detail}")
+        if item.note:
+            ctx.emit(f"--  {item.name}：{item.detail}")
+        else:
+            ctx.emit(f"{'OK' if item.ok else 'FAIL'} {item.name}：{item.detail}")
     return 0 if all(item.ok for item in items) else 1
 
 
@@ -361,10 +367,11 @@ def cmd_send(ctx: Ctx, args: argparse.Namespace) -> int:
         raise UsageError(f"team {team.key} 已退役（retired=true），不派工")
     repo, number = dispatch.parse_ticket(args.ticket)
     body = _body_from(ctx, args.body)
-    if sanitize.sanitize(body) != body:
-        # D-12 的邊界：指示信會離開本機，憑證樣式的內容不送出去；
-        # 錯誤訊息不重用內文，免得把疑似憑證印出來。
-        raise UsageError("指示內文含憑證樣式的內容，拒送（請先移除再送）")
+    # D-12 的邊界：指示信會離開本機，憑證樣式的內容不送出去。判斷只用
+    # `pmo.sanitize` 的 TOKEN_SHAPES／secret-field 規則（#355 裁定 5）；錯誤
+    # 訊息只說哪一段，不回顯值。
+    if sanitize.has_credential_shape(body):
+        raise UsageError("正文含憑證樣式，拒送（請先移除再送）")
     if ctx.deps.github is None:
         raise UsageError("GitHub 埠沒有接上（pmo send 需要讀工單）")
 
@@ -373,6 +380,14 @@ def cmd_send(ctx: Ctx, args: argparse.Namespace) -> int:
     except PortError as error:
         ctx.log(f"[warn] 工單讀不到：{inbox.one_line_for_event(error)}")
         return 1
+    if sanitize.has_credential_shape(issue.title):
+        # 標題也原樣進信（`- 標題：…` 與 `標題：…` 兩處），來源與本文相同，
+        # 所以同一道牆也要掃；訊息指出是「工單標題」那一段。
+        raise UsageError("工單標題含憑證樣式，拒送；請先改工單")
+    if sanitize.has_credential_shape(issue.body):
+        # 工單本文也會原樣進到信裡（公開 GitHub 上也可能有誤貼的憑證），
+        # 所以要指出是「工單本文」那一段：PMO 改正文沒有用。
+        raise UsageError("工單本文含憑證樣式，拒送；請先改工單")
 
     try:
         result = dispatch.send(

@@ -124,7 +124,7 @@ sequenceDiagram
     P->>K: pmo send ‹team› ‹repo#n› --body -
     K->>G: gh issue view（標題、本文）
     K->>A: send 指示信（team channel，固定頭＋正文）
-    K->>A: read --since（拿指示信的後端時刻）
+    K->>A: log --channel ‹team channel› --since（拿指示信的後端時刻；唯讀，不是讀者）
     K->>K: 寫 team 狀態（ticket、message_id、received_at）
     P->>K: pmo open ‹team›
     K->>SC: POST /agents（id、workdir、provider、model、input）
@@ -227,8 +227,8 @@ flowchart LR
 | `pmo inbox report ‹工作 ID› --status ‹狀態› [--issue …] [--pr …] --body -` | 摘要與後續 | 訊息 id | 0／1／2 |
 | `pmo inbox decision-send --body -` | 決定題的 JSON（題目、選項，最多 4 題） | `[decision] 已送出決定題 id=…` | 0；1 JSON 不合格式；2 送不出去 |
 | `pmo inbox rebuild [--since ‹時刻›] [--dry-run]` | | 重建的項目數、差異、`team` 為空的項目清單、保留的 `notified.poke` 筆數 | 0；1 angareion 回用法錯（例如 `--since` 格式錯）；2 其他外部失敗、帳本壞或寫不進去 |
-| `pmo check ‹team›` | | 逐項 OK／FAIL | 0 全過；1 有 FAIL |
-| `pmo send ‹team› ‹repo#n› --body -` | 正文 | 指示信 id、後端時刻；`tick.json` 的 `wake.every` 比看門狗的 10 分鐘長、或是 `null` 時，多印一行 `[wake-hint] 看門狗 10m 後到期，目前叫醒 ‹every\|off›`（只是提示，不改任何東西，D-7） | 0；1 用法、team 不存在、工單讀不到；2 外部失敗 |
+| `pmo check ‹team›` | | 逐項 OK／FAIL：team 存在且沒有 retired、PM 名合法且角色是 pm、team 狀態與 `tick.json` 讀得起來、channel 讀得到（`log --channel --since 現在`，不動游標）、本機 sidecar 的 `GET /agents` 有回應（T-4b 起）；worker team 只印一行「由過渡工具負責」 | 0 全過；1 有 FAIL |
+| `pmo send ‹team› ‹repo#n› --body -` | 正文 | 指示信 id、後端時刻；`tick.json` 的 `wake.every` 比看門狗的 10 分鐘長、或是 `null` 時，多印一行 `[wake-hint] 看門狗 10m 後到期，目前叫醒 ‹every\|off\|unknown›`（`unknown`＝`tick.json` 讀不起來；這時 stderr 另印 `[warn]`，exit 仍是 0，因為信已送出）（只是提示，不改任何東西，D-7） | 0；1 用法、team 不存在、工單讀不到、組好的信超過上限、信（工單本文或正文）含憑證樣式（只說哪一段，不回顯）；2 外部失敗 |
 | `pmo open ‹team› [--session ‹agora:…›] [--fresh] [--provider P --model M]` | | agent 的 state 與 attach 指令 | 0；1 用法或狀態不足（沒先 send）；2 sidecar 拒絕或連不上（印錯誤碼） |
 | `pmo reply ‹team› [--urgency N] --body -` | 正文 | 訊息 id（經 aicomm：寫入＋叫醒） | 0；2 沒寫進去；aicomm 逾時時印「送出結果不明，不要直接重送」並回 2 |
 | `pmo poke ‹team› [--interrupt] --body -` | 一句話 | sidecar 的回應碼 | 0／2 |
@@ -238,6 +238,8 @@ flowchart LR
 | `pmo wake set ‹every›` | 間隔（`5m`、`2h` 這類；規則見 §3.6） | `[wake] every=‹…› job=‹id› next=‹時刻›` | 0；1 間隔格式錯；2 PMO 不在 sidecar、sidecar 拒絕或連不上、tick 狀態檔壞 |
 | `pmo wake off` | （無） | `[wake] off`，以及刪掉的 job id | 0；2 同上 |
 | `pmo wake show [--json]` | （無） | 自己的叫醒 job（id、every、next_run_at、last_run、last_error 的碼）、`tick.json` 記的想要的頻率、`last_tick_at`、最早的到期時刻（唯讀） | 0；2 同上 |
+
+**指示信的格式**：沿用 MyPMO `build_instruction` 的固定頭（工單號、標題、範圍、驗收、回報格式、派工時刻的說明）＋「工單本文（PMO 派工時從 GitHub 讀出）」＋正文，原樣見 #355 的實作；`life: true` 的 team 用生活模式的回報格式。現行的 M2 段落（開隊員的說明）不搬，那是環境說明的內容。超過 angareion 一則的上限就拒送（exit 1），不截斷。
 
 **送信前的身分守門**：所有會寄信的指令（ack、report、decision-send、send、reply），送之前檢查目前的身分（`ANGAREION_IDENTITY`）等於設定裡的 PMO 身分，不符就拒送（exit 2）。現行工具也有這道守門；公開版把身分改由設定給，守門照樣保留（C-3）。
 
@@ -269,7 +271,7 @@ flowchart LR
 | `[worker-action] ‹team› ‹動作›` | worker team 需要由過渡工具做的動作（看門狗要 poke、要比對 sidecar 狀態） | **新增**（Q-9） |
 | `[wake-missing] every=‹…›` | `tick.json` 記著想要定時叫醒，但 sidecar 上找不到自己的叫醒 job（sidecar 重啟過）。同一次消失只印一次 | **新增**（Q-8） |
 | `[wake-error] ‹job id› ‹碼›` | 自己的叫醒 job 的 `last_error` 不是空的（例：`agent_not_running`、`agent_awaiting_answer`）。碼和 `wake.error_reported` 記的不同才印（含沒有記錄）；`last_error` 變回 `null` 時清掉記錄（§3.6） | **新增**（Q-8） |
-| `[wake-hint] 看門狗 10m 後到期，目前叫醒 ‹every\|off›` | **由 `pmo send` 印，不是 tick**：叫醒間隔比看門狗長或沒開（M5-3） | **新增**（Q-8） |
+| `[wake-hint] 看門狗 10m 後到期，目前叫醒 ‹every\|off\|unknown›` | **由 `pmo send` 印，不是 tick**：叫醒間隔比看門狗長或沒開（M5-3） | **新增**（Q-8） |
 | `[idle] [next-due=‹時刻›]` | 這一輪什麼都沒有；有未到期的項目時附上最早的到期時刻，給 PMO 決定間隔用 | **新增** |
 
 **tick 對 worker team 的邊界**（第一階段，D-8；頻率記在 §3.4 的 `tick.json`）：
@@ -295,7 +297,7 @@ flowchart LR
   - 每個 team：key（`<專案>-<team 代號>`）、PM 的 AI 名、channel（`team-<專案>-<team 代號>`）、sidecar 位址或「worker」標記、`tui`／`life`／`retired` 三個布林、預設的 provider／model（選填）。
 
   驗證規則照現行工具（AI 名用 ainame 驗、key、名字、channel 一致、不重複）。
-- **team 狀態**：照 MyPMO 現在 `pmo/state/README.md` 的欄位。**不認得的欄位原樣保留**（過渡期 worker team 的欄位由 MyPMO 寫，見 Q-9）。
+- **team 狀態**：照 MyPMO 現在 `pmo/state/README.md` 的欄位。**不認得的欄位原樣保留**（過渡期 worker team 的欄位由 MyPMO 寫，見 Q-9）。寫入照 §3.4 的原子寫入；讀改寫用每個 team 一把的 `<key>.json.lock`（flock，綁 state 目錄），`send` 與 tick 的「收到」比對都在鎖內重讀再改。
 - **收件帳本**：`version`、`items`（以工作 ID 為 key）、`notified`；新增 `rebuilt_at`。
 - **tick 狀態**（`<狀態目錄>/tick.json`，由 tick、`handoff-close`、`pmo wake set|off` 寫）：
   - `version`；
@@ -401,7 +403,7 @@ flowchart LR
 1. **T-1 骨架與 schema**：`src/pmo/`（Q-5 (a)）、設定和狀態的 schema 與驗證（含 PMO 身分、秘書身分、派工 channel）、四個埠的介面和假物件、`sanitize`、ainame 的差異補齊。不含指令行為。
 2. **T-2 收件核心**：樣板解析、分類、去重、補發 ack、急件、叫人、決定題、team 訊息比對、帳本讀寫；`pmo inbox read|list|ack|report|decision-send`。搬測試。**合併後可以用 `pmo inbox read` 驗**（不必等 tick）。
 3. **T-3 帳本重建**：`pmo inbox rebuild`（新寫）。先驗 `angareion log` 能涵蓋列舉和 `--thread`；測試「刪掉帳本 → 重建 → 補發的 ack 沿用重建出來的 issue／schedule、不重開工單」。
-4. **T-4a 派工（一）**：`check`、`send`。`send` 的 `[wake-hint]` 要測：`wake.every` 比 10m 長、或是 `null` 時印；10m 以下不印；`tick.json` 不存在時視為 `null`（`tick.json` 的 schema 在 T-1）。
+4. **T-4a 派工（一）**：`check`、`send`。`send` 的 `[wake-hint]` 要測：`wake.every` 比 10m 長、或是 `null` 時印；10m 以下不印；`tick.json` 不存在時視為 `null`（`tick.json` 的 schema 在 T-1）；`tick.json` 壞掉時印 `unknown`、stderr 印 `[warn]`、exit 0。
 5. **T-4b 派工（二）**：`open`。
 6. **T-4c 派工（三）**：`reply`、`poke`、`status`、`close`。
 7. **T-5 tick 與叫醒**：`pmo tick`（收信一輪、agents 比對、到期判斷〔看門狗、交接提醒、worker 比對〕、no-candidate、waiting-quota、交接事件、叫醒 job 健康）和 `pmo wake set|off|show`；事件表的契約測試；「收到 → 看門狗不發」的測試。到期與叫醒的測試要含：未到期不印、到期印一次並把 `next_due_at` 往後推、間隔很久才被叫醒也只印一次（不補跑）、`handoff-close` 之後不再印；`wake set` 同間隔不動 sidecar、改間隔先建後刪、只動固定句相同的 job（別人的 poke job 不碰）、兩個 `set` 同時跑只留一個；`wake off` 之後不印 `[wake-missing]`；job 不見時 `[wake-missing]` 只印一次；PMO 不在 sidecar 時 tick 不查 `/jobs`、`wake` 回 exit 2；假 sidecar 的 `GET /jobs` 要照實作回**秒數**（`600.0`），驗證 `wake set 10m` 不會動 sidecar（M5-1）；`[wake-error]` 的去重：失敗期間 `last_run` 一直前進、碼相同時只印一次；碼改變時再印；`last_error` 變回 `null` 時清掉記錄，之後同一個碼再出現要再印（M5-2、W6-1）；假 sidecar 卡住期間跑 `wake set`，tick 跑完後 `wake.every` 仍是新值（鎖內重讀，N6-1）；`wake off` 不刪句子不同的 job（N6-2）；`wake.every` 是 `null`、sidecar 上卻有自己的 job 時，`[warn]` 只印一次；`wake.every` 是 `null` 時不做「3 倍間隔」警告；`tick.json.lock` 不會在 HTTP 期間被拿著（假 sidecar 卡住時 tick 照跑，`set` 等 `wake.lock` 逾時回 exit 2）；只列不刪句子不同的 poke job。sidecar 用假物件，不打真的 `/jobs`。

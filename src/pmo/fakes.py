@@ -103,11 +103,32 @@ class FakeAngareion:
         grep: str | None = None,
         since: str | None = None,
     ) -> list[Message]:
+        """List `logged` the way `angareion log` filters (channel／target／since…).
+
+        The real `log` narrows its answer by every flag; a fake that returned
+        everything would hide a caller that forgot `--channel` (#355 高-1).
+        `thread` matches `in_reply_to`, `since` is an inclusive lower bound.
+        """
         self.log_calls.append(
             {"channel": channel, "sender": sender, "to": to, "thread": thread, "grep": grep, "since": since}
         )
         self._maybe_fail("log")
-        return list(self.logged)
+        found: list[Message] = []
+        for message in self.logged:
+            if channel is not None and message.channel != channel:
+                continue
+            if sender is not None and message.sender != sender:
+                continue
+            if to is not None and message.to != to:
+                continue
+            if thread is not None and message.in_reply_to != thread:
+                continue
+            if grep is not None and grep.lower() not in message.body.lower():
+                continue
+            if since is not None and (message.received_at or "") < since:
+                continue
+            found.append(message)
+        return found
 
 
 class FakeAicomm:

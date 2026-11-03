@@ -31,9 +31,14 @@ Nothing here is command behavior (T-1).
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterator
 
 from . import _io, _jsonutil, sanitize
 from ._jsonutil import pick_extra
@@ -157,8 +162,66 @@ def save_state(state_dir: Path, key: str, data: dict) -> None:
 
     Unknown fields are written back as they are (Q-9: MyPMO's worker-team
     fields pass through), and the keys are sorted the way MyPMO writes them, so
-    the shared file does not flip-flop between two shapes.
+    the shared file does not flip-flop between two shapes. `save_state` itself
+    does not lock: the read-modify-write callers take `state_lock` around their
+    load and save (arch review 中-1).
     """
     parse(json.loads(json.dumps(data)))
     safe = sanitize.sanitize_fields(data)
     _io.write_json(state_file(state_dir, key), safe, sort_keys=True)
+
+
+# --------------------------------------------------------------------------- #
+# 每一 team 一把鎖（arch review 中-1）：`send` 與 tick 的「收到」比對都在鎖內
+# 重讀再改，寫法照 `ledger.state_lock`（綁 state 目錄，不用全域 fd）
+# --------------------------------------------------------------------------- #
+
+
+class _LockEntry:
+    """One team lock: the fd, its depth, and a re-entrant guard."""
+
+    __slots__ = ("fd", "depth", "guard")
+
+    def __init__(self) -> None:
+        self.fd: int | None = None
+        self.depth = 0
+        self.guard = threading.RLock()
+
+
+#: Locks are per lock file (state directory + team key).
+_locks: dict[Path, _LockEntry] = {}
+_locks_guard = threading.Lock()
+
+
+def lock_file(state_dir: Path, key: str) -> Path:
+    """The flock file next to one team's state file: `<key>.json.lock`."""
+    return state_file(state_dir, key).with_name(f"{key}.json.lock")
+
+
+@contextmanager
+def state_lock(state_dir: Path, key: str) -> Iterator[None]:
+    """跨進程檔案鎖（fcntl.flock）＋進程內可重入鎖，綁在一個 team 的狀態檔上。
+
+    保護 `<key>.json` 的讀改寫窗口：`dispatch._record_dispatch` 與
+    `teammsg.process_team_messages` 都在鎖內重讀再改，兩個寫入者交錯時不會
+    互相蓋掉（arch review 中-1）。同一行程對不同的 team key 拿鎖各自獨立。
+    """
+    path = lock_file(state_dir, key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _locks_guard:
+        entry = _locks.setdefault(path, _LockEntry())
+    with entry.guard:
+        if entry.depth == 0:
+            entry.fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o666)
+            fcntl.flock(entry.fd, fcntl.LOCK_EX)
+        entry.depth += 1
+        try:
+            yield
+        finally:
+            entry.depth -= 1
+            if entry.depth == 0 and entry.fd is not None:
+                fd, entry.fd = entry.fd, None
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(fd)
