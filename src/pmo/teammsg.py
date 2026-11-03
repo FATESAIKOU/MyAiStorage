@@ -16,7 +16,8 @@ import re
 from typing import Iterable, Mapping
 
 from . import inbox, teamstate
-from .runtime import Ctx, iso_utc
+from .runtime import Ctx
+from .timeutil import iso_utc
 
 __all__ = [
     "format_msg_event",

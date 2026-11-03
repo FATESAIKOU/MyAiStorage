@@ -39,7 +39,7 @@ from typing import Iterator
 
 from . import _io, _jsonutil, sanitize
 from ._jsonutil import fail, pick_extra
-from .runtime import iso_utc
+from .timeutil import iso_utc
 
 WHERE = "inbox ledger"
 

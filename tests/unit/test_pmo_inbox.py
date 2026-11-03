@@ -751,6 +751,50 @@ def test_inbox_secretary_stage_error_lists_ids_and_sends_nothing(pmo_env, monkey
     assert pmo_env.sends() == []
 
 
+def test_inbox_secretary_stage_failure_still_runs_the_team_stage(pmo_env, monkeypatch):
+    """#362：秘書階段失敗後團隊訊息階段仍要跑完，事件留下、失敗行只列秘書階段的信。"""
+    seed_team_state(pmo_env, ticket="demo#45")
+    team_msg = {
+        "id": "01JMIXED00000000000000002",
+        "from": E.TEAM_PM,
+        "channel": E.TEAM_CHANNEL,
+        "urgency": 5,
+        "received_at": "2026-10-19T10:16:00Z",
+        "content": "收到 demo#45",
+    }
+    real_load = ledger.load_state
+    calls = {"n": 0}
+
+    def flaky_load(state_dir):
+        calls["n"] += 1
+        if calls["n"] >= 2:  # 第一次是預檢，之後是 process_messages 鎖內那次
+            raise SchemaError("模擬 process 階段的 state 損毀")
+        return real_load(state_dir)
+
+    monkeypatch.setattr(ledger, "load_state", flaky_load)
+
+    rc, out, err = run_cli(
+        ["inbox", "read"], pmo_env, msgs=[E.secretary_msg(), team_msg]
+    )
+    assert rc == 0, (out, err)
+
+    # 失敗行只列秘書階段那一則（團隊階段沒有失敗）
+    handoff = [line for line in out.splitlines() if line.startswith("[要本人處理]")]
+    assert len(handoff) == 1
+    assert "秘書階段處理來信時出錯" in handoff[0]
+    assert ULID_1 in handoff[0]
+    assert team_msg["id"] not in handoff[0]
+
+    # 秘書階段失敗不影響團隊訊息階段：`[msg]` 與「收到」ack 都照樣處理
+    assert team_msg["id"] in out
+    assert "[msg]" in out
+    assert "回了「收到 demo#45」" in out
+    assert teamstate.load_state(pmo_env.state_dir, E.TEAM_KEY)["ack_at"] is not None
+
+    # 秘書階段沒有送出任何信
+    assert pmo_env.sends() == []
+
+
 def test_inbox_team_stage_error_keeps_the_secretary_events(pmo_env, monkeypatch):
     """M-1：團隊訊息階段出錯時，秘書階段**已完成**的動作與事件要留下來，
     錯誤訊息只列團隊階段未處理的那一則（不能把已 ack 的信說成「未處理」）。"""
@@ -862,6 +906,98 @@ def test_group_request_from_other_channel_stays_a_call(pmo_env):
     body = CREATE_BODY.format(ulid=ULID_1)
     msg = inbox.as_dict(E.secretary_msg(channel=E.OTHER_CHANNEL, content=body))
     msg["to"] = PMO_IDENTITY
+    assert inbox.is_group_request(msg, _cfg()) is False
+
+    rc, out, _ = run_cli(["inbox", "read"], pmo_env, msgs=[msg])
+    assert rc == 0
+    assert "[group-handoff]" not in out
+    assert "叫人" in out
+    assert len(pmo_env.sends()) == 1
+
+
+@pytest.mark.parametrize(
+    "first_line",
+    [
+        pytest.param("# 建群請求：grp-demo", id="create"),
+        pytest.param("# 封存請求：grp-demo", id="archive"),
+    ],
+)
+def test_group_request_requires_the_pmo_in_the_to_field(pmo_env, first_line):
+    """`to` 沒點名 PMO 的不是群請求（分流條件與 MyPMO `classify_group_request` 一致）。"""
+    msg = inbox.as_dict(E.secretary_msg(content=f"{first_line}\n\n- 工作 ID：{ULID_1}\n"))
+    msg["to"] = E.OTHER_PM
+    assert inbox.is_group_request(msg, _cfg()) is False
+
+    rc, out, _ = run_cli(["inbox", "read"], pmo_env, msgs=[msg])
+    assert rc == 0
+    assert "[group-handoff]" not in out
+    assert pmo_env.sends() == []
+
+
+@pytest.mark.parametrize(
+    "first_line",
+    [
+        pytest.param("# 建群請求：grp-demo", id="create"),
+        pytest.param("# 封存請求：grp-demo", id="archive"),
+    ],
+)
+def test_group_request_requires_the_secretary_as_sender(pmo_env, first_line):
+    """寄件人不是秘書的不是群請求（即使首行吻合、頻道與 `to` 都對）。"""
+    msg = inbox.as_dict(
+        E.secretary_msg(sender=E.TEAM_PM, content=f"{first_line}\n\n- 工作 ID：{ULID_1}\n")
+    )
+    assert inbox.is_group_request(msg, _cfg()) is False
+
+    rc, out, _ = run_cli(["inbox", "read"], pmo_env, msgs=[msg])
+    assert rc == 0
+    assert "[group-handoff]" not in out
+    assert pmo_env.sends() == []
+
+
+@pytest.mark.parametrize(
+    "first_line",
+    [
+        pytest.param("[create] grp-demo", id="create"),
+        pytest.param("[archive] grp-demo", id="archive"),
+    ],
+)
+def test_bracket_group_request_with_a_name_is_handed_off(pmo_env, first_line):
+    """`[create] <名稱>`／`[archive] <名稱>` 這種寫法照樣分流（收緊後仍要認）。"""
+    body = f"{first_line}\n\n- 工作 ID：{ULID_1}\n"
+    rc, out, _ = run_cli(
+        ["inbox", "read"], pmo_env, msgs=[inbox.as_dict(E.secretary_msg(content=body))]
+    )
+    assert rc == 0
+    assert f"[group-handoff] {ULID_1}" in out
+    assert pmo_env.sends() == []
+
+
+def test_bracket_group_name_rejects_a_dot(pmo_env):
+    """MyPMO 的群名只收 `[A-Za-z0-9_-]`：`[create] grp.demo` 不當群請求（#362b 低-1）。"""
+    body = f"[create] grp.demo\n\n- 工作 ID：{ULID_1}\n"
+    msg = inbox.as_dict(E.secretary_msg(content=body))
+    assert inbox.is_group_request(msg, _cfg()) is False
+
+    rc, out, _ = run_cli(["inbox", "read"], pmo_env, msgs=[msg])
+    assert rc == 0
+    assert "[group-handoff]" not in out
+    assert "叫人" in out
+    assert len(pmo_env.sends()) == 1
+
+
+@pytest.mark.parametrize(
+    "first_line",
+    [
+        pytest.param("[create] 這其實是一般叫人", id="create-arbitrary-tail"),
+        pytest.param("[archive] 這其實是一般叫人", id="archive-arbitrary-tail"),
+        pytest.param("[create] two words", id="create-multi-word"),
+    ],
+)
+def test_bracket_group_request_with_arbitrary_tail_stays_a_call(pmo_env, first_line):
+    """`[create]`／`[archive]` 的尾字收緊成單一名稱：任意尾句不再被吞成群請求。"""
+    body = f"{first_line}\n\n- 工作 ID：{ULID_1}\n"
+    msg = inbox.as_dict(E.secretary_msg(content=body))
+    assert inbox.is_group_request(msg, _cfg()) is False
 
     rc, out, _ = run_cli(["inbox", "read"], pmo_env, msgs=[msg])
     assert rc == 0
