@@ -45,7 +45,12 @@ class SidecarError(PortError):
 
 @dataclass(frozen=True)
 class Message:
-    """One Angareion message, as the core sees it (design §1.1)."""
+    """One Angareion message, as the core sees it (design §1.1).
+
+    `mentions` is the "提及" part of the叫人 definition (design §1.1: 寄給或
+    提及 PMO); Angareion's `read --json` carries it and the叫人 check needs
+    it, so it rides on the record. The fake messages carry the same field.
+    """
 
     message_id: str
     channel: str
@@ -55,6 +60,7 @@ class Message:
     body: str
     urgency: int | None = None
     in_reply_to: str | None = None
+    mentions: tuple[str, ...] | None = None
 
 
 _SECONDS_RE = re.compile(r"([0-9]+)([smh]?)")

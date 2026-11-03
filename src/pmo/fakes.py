@@ -40,7 +40,12 @@ class SentMessage:
 
 
 class FakeAngareion:
-    """A channel with a queue: `read` drains it, `send` appends to `sent`."""
+    """A channel with a queue: `read` drains it, `send` appends to `sent`.
+
+    `errors` maps a method name to the exception that calling that method
+    should raise, the way the real backend refuses or is rate-limited (design
+    §2.3 的 angareion 分支；the same injection point FakeSidecar has).
+    """
 
     def __init__(self, messages: list[Message] | None = None, logged: list[Message] | None = None) -> None:
         self.pending: list[Message] = list(messages or [])
@@ -48,7 +53,13 @@ class FakeAngareion:
         self.sent: list[SentMessage] = []
         self.read_calls: list[str | None] = []
         self.log_calls: list[dict[str, str | None]] = []
+        self.errors: dict[str, PortError] = {}
         self._next = 0
+
+    def _maybe_fail(self, method: str) -> None:
+        error = self.errors.get(method)
+        if error is not None:
+            raise error
 
     def send(
         self,
@@ -60,6 +71,7 @@ class FakeAngareion:
         urgency: int | None = None,
         ref: str | None = None,
     ) -> str:
+        self._maybe_fail("send")
         self._next += 1
         message_id = f"{FAKE_ID_PREFIX}{self._next:03d}"
         self.sent.append(
@@ -77,6 +89,7 @@ class FakeAngareion:
 
     def read(self, *, since: str | None = None) -> list[Message]:
         self.read_calls.append(since)
+        self._maybe_fail("read")
         delivering, self.pending = self.pending, []
         return delivering
 
@@ -93,6 +106,7 @@ class FakeAngareion:
         self.log_calls.append(
             {"channel": channel, "sender": sender, "to": to, "thread": thread, "grep": grep, "since": since}
         )
+        self._maybe_fail("log")
         return list(self.logged)
 
 
