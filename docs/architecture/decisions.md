@@ -46,3 +46,19 @@
 | P-8 | #341 留下的相容層：cli 重新匯出 `RoundChildDead`、`StartChildDead`、`_reap_group`、`_round_timeout`、`_start_payload`、`CONTINUE_LOG`，round_child 重新匯出 `state_of`。日後把測試改讀 continue_shell，就可以刪掉；刪 `CONTINUE_LOG` 的重新匯出時，cli 自用的三處（`_LogWriter` 等）要一起改成 `continue_shell.CONTINUE_LOG`，或改由別處持有 | 架構師提、PM 排程 | REPORT-341-design-rev 發現 7 |
 | P-9 | 寫進 header 的 `source.host` 直接取 `socket.gethostname()`，沒有可覆寫的來源；golden 測試只能用 monkeypatch 加子行程的 sitecustomize 釘住。要不要給它一個可覆寫的來源（例如環境變數） | 架構師提、PM 排程（不急） | #334 審查的低項 |
 | P-10 | #342 留下的相容層：claude.py 重新匯出 `FORMAT`，claude.py 自己不用，只為了 6 處測試讀 `C.FORMAT`。日後把測試改讀 `claude_raw.FORMAT`，就可以刪掉 | 架構師提、PM 排程 | REPORT-342-design-rev 低 2 |
+| P-11 | `store.py`（約 3300 行，#364 之後）要不要切：Drive 包裝（rclone）／mirror 與 sync（含 #364 的影子）／上傳器（`upload_batch` 一族）／index。和 P-7 同一類 | 架構師設計、PM 排程 | #364 實作審 低-3 |
+| P-12 | `pmo tick` 只以 sidecar `state` 的變化決定要不要印：兩次 tick 之間 agent「結束 → 被重開 → 又結束」時看不到第二次結束。可以比 agent 物件的 `started_at` 補上 | 架構師提、PM 排程 | #375 結構審 §2(1) |
+| P-13 | `pmo` 的 `tick.json` 壞掉、`handoffs` 等只存在本機：PMO 換機器時要不要搬、怎麼搬（T-7 切換前要定） | PM／PMO | #110 T-7 |
+
+## 交接（2026-11-04：專案架構師由 Mac 的常駐席位改為按需、開在 worker）
+
+接手的架構師先讀這一節，再讀上面的已決／待決。審查與裁定的全文在團隊目錄的報告檔（不進 repo）；這裡只列**還沒落地、會影響後續工作的判斷**。
+
+- **#110 PMO skill（T-1～T-5 已陸續 merge；T-5 在進行）**：
+  - T5-3（PR #376）：結構審「可以 merge」。`tick.py` 的 `parse_ts as _parse_ts` 別名不要留，直接用 `timeutil.parse_ts`。T5-4 rebase 時**不要再加 `parse_utc`**：一個時間格式只有一個解析函式。
+  - T5-4（`pmo wake set|off|show`、tick 的 job 健康）：(1) `POST /jobs` 回 201＋完整 job 物件，`DELETE` 回 204 無 body，照這個嚴格解析；2xx 但 body 讀不懂時，改用一次 `GET /jobs` 找剛建的 job（設計 §3.6 第 3 步已寫進本 PR）。(2) `wake show` 的最早到期也算看門狗，和 tick 的 `[idle] next-due` 用同一個純函式，放在新模組 `pmo/due.py`（wake 不 import tick），tick 改用它、行為不變。(3) `_job_of` 遇到「沒有 `every` 也沒有 `at`」照樣收（`every=None, at=None`），不要讓整份清單失敗，也不要跳過那一筆；只有沒有 id／action、或 `every` 格式壞掉才失敗（#371 審查）。(4) 只要設定了 `pmo_sidecar`，tick 每輪就 `GET /jobs` 一次：`wake.every` 不是 null 時做健康檢查，是 null 時只做孤兒檢查；§3.6「tick 怎麼看 job 的健康」那一句的條件要同步改。
+  - T-6（#359，SKILL.md）要寫：不要同時跑兩個 tick；`rebuild` 時不要同時跑 tick；PMO 退場前先 `pmo wake off`；改叫醒固定句之前先 `wake off`；`[state]` 行的字樣和 MyPMO 現行不同（標籤相同、內容不同），切換時對一下 PMO harness。
+  - T-7（切換）要做：MyPMO 的 `teams.yml`（YAML）轉成 `pmo` 的 JSON 設定（含 `agent`／`workdir`／`agent_args`）；MyPMO `dispatch.py` 切換後只留 worker 動作與群請求（D-20）；待決 P-13。
+- **#364（agora 冷快取下載）**：已 merge。design note 的兩處措辭（假 rclone 的 needle、「列表完整」的意思）在本 PR 修正。
+- **#368（跨機叫醒的 aicomm 側）**：主設計是 MyLinuxPool PR #677（`pool-peer`），aicomm 側的介面已講定，寫在 `docs/design-notes/368-aicomm-wake.md`（本 PR 新增）。等 #677 核准再實作。
+- **pmo 的通則**（審查時反覆用到，後續單照用）：狀態檔的讀寫只在各自的 schema 模組（`ledger`／`teamstate`／`tickstate`）；鎖只用 `pmo/_lock.path_lock`，被定時叫醒的 tick 不做無上限的等待；sidecar 的回應照實際形狀解析（`{"agents": [...]}`、`{"jobs": [...]}`、POST 201＋物件、DELETE 204），假物件也照真形狀；`send` 一類「已送出、沒記錄」的情況回 2，並寫明「不要直接重送」；`pmo` 的公開介面是指令，模組不留別名。

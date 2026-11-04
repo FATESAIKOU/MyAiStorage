@@ -223,7 +223,7 @@ flowchart LR
 | 指令 | 輸入 | 輸出（stdout） | 結束碼 |
 |---|---|---|---|
 | `pmo tick` | （無） | 見 §3.2.1 的事件表；全部沒事時一行 `[idle]` | 0 這一輪跑完（包含「部分失敗、已印 [warn]」）；1 用法錯；2 身分不符、設定或狀態檔壞（這一輪什麼都沒做，不推游標），或 `tick.json` 的鎖等不到（§3.4；其他步驟已做完，只有 `tick.json` 沒寫，下一輪再寫） |
-| `pmo inbox read` | （無） | 只做 tick 的「收信一輪」（不比對 agents、不跑看門狗） | 同 tick；給 T-2 階段與救援用 |
+| `pmo inbox read` | （無） | 只做 tick 的「收信一輪」（不比對 agents、不跑看門狗）；沒有新信時印現行的 `[inbox] 沒有新信件`，不印 `[idle]`（`[idle]` 只由 tick 印） | 結束碼的意義同 tick（事件行不同）；給 T-2 階段與救援用 |
 | `pmo inbox list [--json]` | | 收件項目一覽（唯讀） | 0／2 |
 | `pmo inbox ack ‹工作 ID› [--issue ‹repo#n›] [--schedule 立即開工\|排入待開工佇列]` | | 送出的訊息 id | 0／1（查無工作 ID）／2（送不出去） |
 | `pmo inbox report ‹工作 ID› --status ‹狀態› [--issue …] [--pr …] --body -` | 摘要與後續 | 訊息 id | 0／1／2 |
@@ -239,7 +239,7 @@ flowchart LR
 | `pmo inbox handoff-close ‹id›` | | 把一筆交接出去的群請求標成已結案，之後不再印 `[group-sweep-due]` | 0；1 查無 id；2 tick 狀態檔壞或寫不進去（含鎖等不到） |
 | `pmo wake set ‹every›` | 間隔（`5m`、`2h` 這類；規則見 §3.6） | `[wake] every=‹…› job=‹id› next=‹時刻›` | 0；1 間隔格式錯；2 PMO 不在 sidecar、sidecar 拒絕或連不上、tick 狀態檔壞 |
 | `pmo wake off` | （無） | `[wake] off`，以及刪掉的 job id | 0；2 同上 |
-| `pmo wake show [--json]` | （無） | 自己的叫醒 job（id、every、next_run_at、last_run、last_error 的碼）、`tick.json` 記的想要的頻率、`last_tick_at`、最早的到期時刻（唯讀） | 0；2 同上 |
+| `pmo wake show [--json]` | （無） | 自己的叫醒 job（id、every、next_run_at、last_run、last_error 的碼）、`tick.json` 記的想要的頻率、`last_tick_at`、最早的到期時刻（看門狗、交接提醒、worker 比對，和 tick 的 `[idle] [next-due=…]` 同一個算法；唯讀，不打 HTTP） | 0；2 同上 |
 
 **指示信的格式**：沿用 MyPMO `build_instruction` 的固定頭（工單號、標題、範圍、驗收、回報格式、派工時刻的說明）＋「工單本文（PMO 派工時從 GitHub 讀出）」＋正文，原樣見 #355 的實作；`life: true` 的 team 用生活模式的回報格式。現行的 M2 段落（開隊員的說明）不搬，那是環境說明的內容。超過 angareion 一則的上限就拒送（exit 1），不截斷。
 
@@ -329,10 +329,10 @@ flowchart LR
 - **`pmo wake set ‹every›`**：
   1. 驗間隔：只收 `‹整數›m` 或 `‹整數›h`，範圍 2m～24h（擋掉誤寫成秒數；sidecar 本身接受的格式更寬）。這是工具替 PMO 設的邊界，Q-8 也註明了；要比 24 小時更久，就用 `pmo wake off`。
   2. `GET /jobs`，找出自己的 job。**`every` 一律換成秒數再比**：`POST` 時送的是字串（`10m`），`GET /jobs` 回的是秒數（`600.0`；MyLinuxPool c411b02 的 `jobs.py` 把 `every` 存成秒數、`to_dict` 原樣輸出，文件沒寫，見 §8）；比較時兩邊都轉成秒數，字串和數字兩種形狀都要收。若恰好一個、`every` 相同、`args.id` 是目前的 PMO 身分 → 不動 sidecar，只更新 `tick.json` 的 `wake`，印 `[wake]`。
-  3. 否則**先建後刪**：`POST /jobs`（`action: poke`、`args: {id: ‹PMO 身分›, text: ‹固定句›, interrupt: false}`、`every`，不帶 `until`），成功後 `DELETE /jobs/<id>` 刪掉其他自己的 job。先建後刪，中間不會有沒人叫醒的空窗；代價是短暫有兩個 job，最多多叫醒一次（多跑一輪 tick 無副作用）。刪除失敗印 `[warn]` 附 job id，exit 仍是 0。
+  3. 否則**先建後刪**：`POST /jobs`（`action: poke`、`args: {id: ‹PMO 身分›, text: ‹固定句›, interrupt: false}`、`every`，不帶 `until`），成功後 `DELETE /jobs/<id>` 刪掉其他自己的 job。先建後刪，中間不會有沒人叫醒的空窗；代價是短暫有兩個 job，最多多叫醒一次（多跑一輪 tick 無副作用）。刪除失敗印 `[warn]` 附 job id，exit 仍是 0。`POST /jobs` 成功是 201 加完整的 job 物件（和 `GET /jobs` 的每一筆同欄位），`DELETE /jobs/<id>` 成功是 204、沒有 body（404 `job_not_found` 視為已經不在）。若 `POST` 回 2xx 但 body 讀不懂，不當成失敗：再 `GET /jobs` 一次，找出 `POST` 之前沒有、而且是自己的、`every` 相同的那一筆，照常往下刪與寫；找不到就什麼都不刪、不寫 `wake.every`，印 `[warn]` 回 exit 2（下一輪 tick 會看到「自己的 job 超過一個」，再 `wake set` 一次就收斂）。
   4. 整個流程拿另一把 `wake.lock`（不是 `tick.json.lock`）：兩個 `set`／`off` 同時跑時會排隊，不會留下兩個 job。tick 不拿這把鎖，所以 `set` 卡在 HTTP 時 tick 照跑。每個 HTTP 呼叫逾時 10 秒；等 `wake.lock` 最多 30 秒，等不到回 exit 2。最後才用 `tick.json.lock` 短暫寫入 `wake`。
 - **`pmo wake off`**：刪掉所有自己的 job，`wake.every` 設成 `null`。之後 tick 不再印 `[wake-missing]`。
-- **`pmo wake show`**：唯讀，列出自己的 job 和 `tick.json` 的 `wake`、`last_tick_at`、最早的到期時刻；另外**只列不動**「`args.id` 是 PMO 身分、但句子和目前固定句不同」的 poke job（例如改過固定句之後留下的舊 job，或本人自己排的），讓 PMO 判斷要不要請排的人刪。只印已知欄位（D-12）。SKILL.md 要寫：改固定句之前先 `pmo wake off`。
+- **`pmo wake show`**：唯讀，列出自己的 job 和 `tick.json` 的 `wake`、`last_tick_at`、最早的到期時刻（含看門狗：讀每個本機 team 的狀態，和 tick 用同一個計算〔`pmo/due.py` 的純函式，tick 與 wake 共用，wake 不 import tick〕，給 PMO 選間隔用）；另外**只列不動**「`args.id` 是 PMO 身分、但句子和目前固定句不同」的 poke job（例如改過固定句之後留下的舊 job，或本人自己排的），讓 PMO 判斷要不要請排的人刪。只印已知欄位（D-12）。SKILL.md 要寫：改固定句之前先 `pmo wake off`。
 - **固定句不帶任何內容**：不帶未讀數、不帶信的內容，也不帶位址或 token（和 sidecar 的 job 規則一致）。`interrupt` 一律是 false：定時叫醒不打斷 PMO 正在做的這一輪，sidecar 會排在這一輪之後。
 
 **tick 怎麼看 job 的健康**（PMO 在 sidecar 裡、而且 `wake.every` 不是 `null` 時，每輪 `GET /jobs` 一次）：
