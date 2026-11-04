@@ -164,7 +164,7 @@ def _publish(paths: Paths, ulid: str, md5: str) -> bool:
 
 ### 3.8 影子的清理（C-4′）
 
-- **只在列表完整時**清（`missing` 為 False，即 `Drive.list_sessions` 真的回來了）：遠端已經沒有的 ulid，從影子刪掉（`shutil.rmtree(paths.staging / name, ignore_errors=True)`）。和 Q4「標記只在列表完整時才動」是同一個條件、同一個理由。
+- **只在列表完整時**清（`missing` 為 False，即 `Drive.list_sessions` 真的回來了）。這裡的「完整」只表示列表有回來，不表示通過了 #152 的檢查：整份列表靜默少一個資料夾時，那一輪會把它的影子刪掉；影子是快取，後果只是下一次大量下載多抓一份，mirror、index、標記都不受影響，所以不對孤兒做 `_really_gone`（#364 實作審 §7.2）。遠端已經沒有的 ulid，從影子刪掉（`shutil.rmtree(paths.staging / name, ignore_errors=True)`）。和 Q4「標記只在列表完整時才動」是同一個條件、同一個理由。
 - 放在 `sync` 的 `if not missing:` 分支（那一段已經有 `mark_missing` 的候選），新增一個私有函式 `_trim_staging(paths, remote)`。**不**放進 `download_many`：它拿不到 `missing`，而且清理不是下載。
 - 成本：一次 `iterdir`，可忽略。清單以外的殘檔（被砍掉時留下的 `.tmp`、空資料夾）順手清掉。
 
@@ -259,7 +259,7 @@ else:                           列表式（持鎖）→ 逐個 _publish（只�
 6. **`copies.log`**：列表式那一次也寫一筆，形狀沿用現有的 `{"src": …, "files": [{"name", "size", "mtime"}…]}`，但 **`files` 只記實際複製的檔**（`--files-from` 那條照舊記「清單上的名字」，既有測試靠它）。`test_cache.py` 的 `copied_since` 會把 `ulid/session.md` 取成 `session.md`，兩條路都吃得到。
 7. **`FAKE_RCLONE_FAIL`**：needle 用 `--include` 就能命中列表式那一次（照現行比對方式即可，不用改）。
 8. **部分複製旋鈕（C-11 需要）**：例如 `FAKE_RCLONE_BULK_PARTIAL=<n>`：只複製前 n 份到目的地，然後以 rc=1 結束（模擬被砍掉或途中失敗）。下一輪不帶這個變數時，`--checksum` 會跳過已複製的，`copies.log` 只剩缺的那些。
-9. `FAKE_RCLONE_CLEAN_AFTER` 的 needle 也用 `--include`：在列表式 copy 之後換掉某一份的內容，讓影子裡是舊/新版本，驗 C-6。
+9. `FAKE_RCLONE_CLEAN_AFTER` 的 needle 用 **`lsjson`**（不是 `--include`）：在 agora 列表之後、列表式 copy 之前換掉某一份的內容，讓影子拿到的位元組和列表的 md5 不同，驗 C-6。`--include` 當 needle 做不出這個情境：換檔發生在命中的呼叫**做完之後**，影子已經拿到列表那一版（#364 實作審 §7.1，架構師接受）。
 
 ### 5.2 測試清單（契約 → 測試）
 
