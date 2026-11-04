@@ -6,7 +6,7 @@ AI 之間的溝通指令（工單 MyAiStorage#212；設計在 `openspec/changes/
 
 aicomm 對外只有三個指令：send、inbox、log。
 
-- `aicomm send`：用 `angareion send` 寫入訊息（這就是「送達」），成功後對 `--to` 與 `--mention` 的 AI 各判斷一次要不要在本機 sidecar 上叫醒。
+- `aicomm send`：用 `angareion send` 寫入訊息（這就是「送達」），成功後對 `--to` 與 `--mention` 的 AI 各判斷一次要不要叫醒（先問本機 sidecar，查不到再經 `pool-peer` 找 pool 裡的其他機器）。
 - `aicomm inbox`：用 `angareion read`（要等時先 `angareion wait`）讀寄給自己的信；固定不帶 `--channel`。
 - `aicomm log`：薄包 `angareion log`，同參數原樣轉發；使用者沒給 `--to`／`--mentioned` 時預設補 `--to me`；不叫醒任何人、不碰 sidecar；唯讀查詢，不動游標。
 - 被叫醒先 `aicomm inbox`；要前後文或補讀用 `aicomm log`（不動游標）；不要用 `angareion read --since` 反覆撈。
@@ -36,14 +36,23 @@ aicomm 對外只有三個指令：send、inbox、log。
   wake: <agent> unknown <原因碼>[ <說明>]
   ```
 
-  `woken` 是叫醒了；`not-woken` 是確定沒戳到、或對方明確拒絕；`unknown` 是**可能已經戳到**（例如戳逾時）——看到 `unknown` 不要重送。跨機的 `peer:<port>` 那一種還沒提供（#368）；在那之前本機查不到就是一行的 `not-woken`。
-- 叫醒是盡力而為：只有收件人在本機 sidecar 上、而且狀態是 `idle` 或 `running` 才戳；不在本機、`starting`、`waiting-quota`、`exited` 都不戳（訊息還是在 Angareion，對方之後 `inbox` 一定讀得到）。跨機的叫醒後援還沒提供（#368）；目前沒有它，不在本機的收件人一律是 `wake: <agent> not-woken peer-unavailable`。
+  `woken` 是叫醒了；`not-woken` 是確定沒戳到、或對方明確拒絕；`unknown` 是**可能已經戳到**（例如戳逾時）——看到 `unknown` 不要重送。跨機叫醒成功時是 `woken peer:<port>`，`<port>` 是那一台 sidecar 的埠號（見「對 `pool-peer` 的依賴面」）。
+- 叫醒是盡力而為：收件人在本機 sidecar 上是 `idle` 或 `running` 才戳；不在本機時經 `pool-peer` 找 pool 裡的其他機器，找到的那幾台也照同一個條件戳（訊息還是在 Angareion，對方之後 `inbox` 一定讀得到）。`starting`、`waiting-quota`、`exited` 都不戳。查不到人（本機 404、連不上或查詢逾時）時的行為見「叫醒的順序」。
 - `--require-wake`：任何一位是 `not-woken` 或 `unknown` 就回 **exit 4**——訊息已送達，**不要重送**；全部叫醒、或沒有人要叫醒（廣播、只寄給自己）回 0。與 `--no-wake` 不能同時給（exit 1，而且在寫進 Angareion 之前就拒絕）。
 - 原因碼（與 `src/aicomm/cli.py` 的常數一致；新增要改設計文件並同步這裡）：
   - `not-woken` 的原因碼：`not-found`、`peer-unavailable`、`lookup-incomplete`、`peer-port-out-of-range`、`peer-bad-answer`、`bad-answer`、`bad-name`、`agent-not-running`、`awaiting-answer`、`state-<state>`、`http-<碼>`
   - `unknown` 的原因碼：`poke-timeout`、`poke-error`、`peer-bad-answer`、`internal-error`
-  - 其中 `not-found`、`lookup-incomplete`、`peer-port-out-of-range` 與 `peer-bad-answer` 要等跨機後援（#368）才會出現；在那之前，不在本機的收件人一律是 `peer-unavailable`。
+  - 其中 `not-found`、`lookup-incomplete`、`peer-port-out-of-range` 與 `peer-bad-answer` 是跨機後援（`pool-peer`）才有的；`peer-unavailable` 是 `pool-peer` 用不了：沒裝或起不來、`find` 回 2（查不了），或找到的那一台 `call` 回 2（連不到）。`state` 不是一個 token 時，本機是 `bad-answer`、別台是 `peer-bad-answer`。
 - 連送兩則會戳兩次，沒有去重；自己不會戳自己（見「自己是誰」）。
+
+## 叫醒的順序（本機優先，查不到才跨機）
+
+1. **先問本機 sidecar**（`GET /agents/<id>`，逾時 3 秒）。回 200 就照本機的結果處理：`idle`／`running` 才戳，其他 state 是 `not-woken state-<state>`，回應看不懂是 `not-woken bad-answer`，其他 HTTP 碼是 `not-woken http-<碼>`。這些都**不再查別台**。
+2. **只有本機回 404、連不上或查詢逾時**，才用 MyLinuxPool 的 `pool-peer` 找 pool 裡的其他機器（見下節）。這時還沒戳任何人，所以不會重複戳。
+3. 本機戳過之後（不論成功、逾時或連線出錯）都**不再查別台**——可能已經戳到了。
+4. 收件人的名字以 `-` 開頭時不交給 `pool-peer`（會被讀成選項），直接是 `not-woken bad-name`。
+
+跨機找到的每一台各自判斷：`agent.state` 不是 `idle`／`running` → `not-woken state-<state>`；埠不在 5200–5399 → `not-woken peer-port-out-of-range`，**不呼叫 `call`**；其他都戳，能戳的每一台都戳。同一個收件人在好幾台的結果合併成一行：只要有一台回 200 就是 `woken peer:<port>[,<port>…]`（列成功的埠，由小到大；至少一台成功的戳帶 interrupt 才加 ` interrupt`），否則有一台 `unknown` 就是 `unknown`，都不是就是 `not-woken`（原因碼取埠由小到大的第一個）。不論哪一種都**不重送**。
 
 ## 參照：`--ticket` 與 `--ref`（#278）
 
@@ -85,6 +94,21 @@ aicomm 只對 sidecar 發兩種請求，位址固定為 sidecar 文件的預設 
 - 回應不符預期（非 JSON、沒有字串的 `state`、不認得的 HTTP 狀態）一律當叫醒失敗、不戳，訊息已送達的結果不變。
 - 戳逾時不重送（重送可能變兩份），stderr 是 `wake: <agent> unknown poke-timeout`；其他連線錯誤是 `unknown poke-error`（請求可能已經送出，分不出來）。
 - sidecar 若改了這些形狀，aicomm 要跟著改；對照以這張表為準。
+
+## 對 `pool-peer` 的依賴面（跨機叫醒，#368）
+
+本機查不到人時，aicomm 只用 MyLinuxPool 的 `pool-peer` 兩個用法（一律 argv 呼叫，不經 shell）：
+
+| 用法 | 用途 | 讀什麼 |
+|---|---|---|
+| `pool-peer find <id> --json --timeout 10` | 這個 AI 在 pool 裡哪幾台 sidecar 上 | 結束碼與 JSON 陣列；每一筆只讀 `port`（整數，不是 bool）與 `agent.state`（字串） |
+| `pool-peer call <port> POST /agents/<id>/poke --timeout 5` | 叫醒那一台 | 結束碼；rc 0 時 stdout 第一行是 HTTP 狀態碼，之後是 body（與本機戳同一張判讀表） |
+
+- 埠段 **5200–5399**（含）。aicomm 先在這一側擋掉其他埠（`not-woken peer-port-out-of-range`），不會把它和「連不到」（`call` rc 2）混在一起。
+- 結束碼：`find` 0＝至少找到一台、1＝每一台都確定沒有、2＝查不了（設定或 Gateway）、3＝找到 0 台但有的台查不到；`call` 0＝有回應（不論 HTTP 碼）、2＝連不到、3＝逾時（結果未知）。約定外的結束碼都是 `peer-bad-answer`。
+- aicomm 對子行程另外多等 2 秒（`--timeout` 加 2）當上限，超過就自己收掉子行程：`find` 是 `not-woken lookup-incomplete`、`call` 是 `unknown poke-timeout`。
+- `peer:<port>` 是 pool 內 sidecar 的**埠號，不是機器位址**；`wake:` 行的 `<說明>` 只放原因碼（而且只有一行），`pool-peer` 的 stdout／stderr 不會被轉印進去。
+- 執行檔：環境變數 `AICOMM_POOL_PEER`（只給測試與手動用）優先，沒設就從 PATH 找 `pool-peer`；找不到或不能執行是 `not-woken peer-unavailable`。這個變數不是 sidecar 位址，也不是使用者可設定的叫醒位址；能打哪些 port 由 `pool-peer` 與上面的埠段決定。
 
 ## 位址覆寫（只給測試與手動）
 

@@ -208,6 +208,10 @@ rc 0 時 stdout MUST 被當成 JSON 陣列解析；不是 JSON 陣列 MUST 是 `
 ### Requirement: `find` 找到的每一台怎麼戳
 對每一筆合格的項目：`agent.state` 不是 `idle`／`running` 時 MUST 是 `not-woken state-<state>`；`port` 不在 5200–5399（含）時 MUST 是 `not-woken peer-port-out-of-range`，且 MUST NOT 呼叫 `call`（在 aicomm 這邊先擋，才不會和「連不到」都變成 rc 2 而分不出來）；其他就戳，好幾台都可以戳時 MUST 全部戳。每一台的 `interrupt` MUST 各自判斷：只有那一台是 `running` 且呼叫端帶 `--interrupt` 才是 true。
 
+#### Scenario: 別台回的 state 不是一個 token
+- **WHEN** `find` 回一台 port 5201、`agent.state` 是 `"idle\nwake: x woken local"`
+- **THEN** 不呼叫 `call`，stderr 只有一行 `wake: <agent> not-woken peer-bad-answer`
+
 #### Scenario: 埠超出範圍
 - **WHEN** `find` 回一個 port 5100 或 5400
 - **THEN** 不呼叫 `call`；stderr 是 `wake: <agent> not-woken peer-port-out-of-range`

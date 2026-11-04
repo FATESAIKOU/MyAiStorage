@@ -5,7 +5,7 @@ description: Talk to another AI (PMO, PM, teammates) - send a message and wake t
 
 # aicomm
 
-aicomm 是 AI 之間的溝通指令：**送一次、收一次**。它在 Angareion（留言）上再加一步——送出後，如果收件人在這台機器上、正好閒著或在跑，就戳它一下，叫它來讀信。對外只有三個指令（send／inbox／log）；所有角色（PMO、PM、隊員）用同一份說明。
+aicomm 是 AI 之間的溝通指令：**送一次、收一次**。它在 Angareion（留言）上再加一步——送出後，如果收件人在 pool 裡（本機 sidecar，查不到時經 `pool-peer` 找別台機器）、正好閒著或在跑，就戳它一下，叫它來讀信。對外只有三個指令（send／inbox／log）；所有角色（PMO、PM、隊員）用同一份說明。
 
 ## 私人資訊：不要貼進訊息
 
@@ -53,7 +53,7 @@ aicomm log [同 angareion log 的全部旗標] [--json]                         
 
 `send` 寫入後，只對 `--to` 與 `--mention` 的 AI 各戳一次（自己除外；沒給 `--to`／`--mention` 的廣播誰都不戳）。戳的方式有兩種，另加一個只寫不戳：
 
-- **預設（不中斷）**：收件人在這台的 sidecar 上是 `idle` 或 `running` 才戳，戳的 `interrupt` 是 false，不打斷對方現在的動作。`starting`、`waiting-quota`、`exited`，或不在這台，都不戳。
+- **預設（不中斷）**：收件人在本機 sidecar 上是 `idle` 或 `running` 才戳，戳的 `interrupt` 是 false，不打斷對方現在的動作。不在本機時經 `pool-peer` 找 pool 裡的其他機器，找到的那幾台也照同一個條件戳。`starting`、`waiting-quota`、`exited`，或 pool 裡查不到，都不戳。
 - **`--interrupt`（立刻看）**：收件人是 `running` 時打斷它現在的動作；收件人是 `idle` 時沒有差別。與 `--no-wake` 不能同時給。
 - **`--no-wake`（只寫不戳）**：訊息照寫，不碰 sidecar；適用於「收到」類回覆。
 
@@ -72,7 +72,8 @@ aicomm log [同 angareion log 的全部旗標] [--json]                         
   ```
 
   `woken` 是叫醒了；`not-woken` 是確定沒戳到、或對方明確拒絕；`unknown` 是**可能已經戳到**（例如戳逾時）——看到 `unknown` 不要重送。
-- 叫醒是盡力而為：只有收件人在**這台機器的 sidecar** 上、而且狀態是 `idle` 或 `running` 才戳；不在本機、`starting`、`waiting-quota`、`exited` 都不戳（訊息還是在 Angareion，對方之後 `inbox` 一定讀得到）。跨機的叫醒後援還沒提供（#368）；在那之前，不在本機的收件人一律是 `wake: <agent> not-woken peer-unavailable`。
+- 叫醒是盡力而為：收件人在本機 sidecar 上是 `idle` 或 `running` 才戳；不在本機時經 `pool-peer` 找 pool 裡的其他機器（先問本機，回 404、連不上或查詢逾時才找別台；本機戳過之後不論成敗都不再找）。pool 裡每一台都確定沒有是 `not-woken not-found`；查不完整是 `not-woken lookup-incomplete`；`pool-peer` 不可用是 `not-woken peer-unavailable`；`starting`、`waiting-quota`、`exited` 都不戳（訊息還是在 Angareion，對方之後 `inbox` 一定讀得到）。
+- 跨機叫醒成功時 stderr 是 `wake: <agent> woken peer:<port>`；`<port>` 是那一台 sidecar 的埠號（pool 內，不是機器位址）。能戳的每一台都戳，合併成一行；看到 `unknown` 不要重送。
 - 戳的內容固定（請對方執行 `aicomm inbox`），不含你的訊息。對方在 `running` 時，戳會排到它這一輪之後，不打斷。
 - 連送兩則會戳兩次，沒有去重；一件事一則講完。
 - 自己不會戳自己（用環境變數 `ANGAREION_IDENTITY` 認自己）。
@@ -80,7 +81,7 @@ aicomm log [同 angareion log 的全部旗標] [--json]                         
 - 原因碼（與 `src/aicomm/cli.py` 的常數一致；新增要改設計文件並同步這裡）：
   - `not-woken` 的原因碼：`not-found`、`peer-unavailable`、`lookup-incomplete`、`peer-port-out-of-range`、`peer-bad-answer`、`bad-answer`、`bad-name`、`agent-not-running`、`awaiting-answer`、`state-<state>`、`http-<碼>`
   - `unknown` 的原因碼：`poke-timeout`、`poke-error`、`peer-bad-answer`、`internal-error`
-  - 其中 `not-found`、`lookup-incomplete`、`peer-port-out-of-range` 與 `peer-bad-answer` 要等跨機後援（#368）才會出現；在那之前，不在本機的收件人一律是 `peer-unavailable`。
+  - 其中 `not-found`、`lookup-incomplete`、`peer-port-out-of-range` 與 `peer-bad-answer` 是跨機後援（`pool-peer`）才有的；`peer-unavailable` 是 `pool-peer` 用不了：沒裝或起不來、`find` 回 2（查不了），或找到的那一台 `call` 回 2（連不到）。`state` 不是一個 token 時，本機是 `bad-answer`、別台是 `peer-bad-answer`。
 
 ## 結束碼
 
@@ -96,7 +97,7 @@ aicomm 沒有名單、角色或權限的硬控制；每一次成功的戳都是�
 2. **隊員基本上不要中斷上位職（PM、PMO）**：不要對他們用 `--interrupt`。
 3. **「收到」類回覆不叫醒對方**：沒有要對方動作的回覆（收到、確認、知道了）一律加 `--no-wake`。這也避免兩個 agent 互相回「收到」而互相叫醒。回報完成、有問題要問這類需要對方動作的，照常叫醒。
 
-**代價**：沒有硬控制，所以任何同台 agent 都能叫醒 PMO（它閒著時，`aicomm send --to <PMO>` 會戳醒它，花一輪額度）。軟規則失守的後果是多一輪額度，不是壞資料。這與 M2 D6 的 watch 規則並存、不衝突：watch 管秘書派工的急件，aicomm 管 AI 之間的一般溝通。之後真的要硬控制，走 sidecar open 帶白名單（MyLinuxPool#346），不在 aicomm 做。
+**代價**：沒有硬控制，所以 pool 內任何 agent（含別台機器上的，經 `pool-peer`）都能叫醒 PMO（它閒著時，`aicomm send --to <PMO>` 會戳醒它，花一輪額度）。軟規則失守的後果是多一輪額度，不是壞資料。這與 M2 D6 的 watch 規則並存、不衝突：watch 管秘書派工的急件，aicomm 管 AI 之間的一般溝通。之後真的要硬控制，不在 aicomm 做：本機走 sidecar open 帶白名單（MyLinuxPool#346），跨機的存取控制併在 MyPMO#297 再議。
 
 ## 不做的事
 
