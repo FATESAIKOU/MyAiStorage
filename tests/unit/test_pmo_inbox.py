@@ -15,7 +15,7 @@ from io import StringIO
 
 import pytest
 
-from pmo import inbox, ledger, teamstate
+from pmo import cli, inbox, ledger, teamstate
 from pmo.config import parse as parse_config
 from pmo.errors import IdentityMismatch, SchemaError, UsageError
 from pmo.ports import PortError
@@ -1259,6 +1259,42 @@ def test_write_inbox_state_sanitizes_secret_like_text(pmo_env):
     read_back = ledger.load_state(pmo_env.state_dir)
     assert read_back["items"][ULID_1]["id"] == ULID_1
     assert read_back["items"][ULID_1]["status"] == "scheduled"
+
+
+# --------------------------------------------------------------------------- #
+# #383：`pmo --help` 的 inbox 摘要要列出全部子命令
+# --------------------------------------------------------------------------- #
+
+
+def _subparsers_action(parser: object):
+    """`parser._subparsers` 是位置參數群組；action 在它的 `_group_actions` 裡。"""
+    for action in parser._subparsers._group_actions:  # type: ignore[attr-defined]
+        if hasattr(action, "choices"):
+            return action
+    raise AssertionError("找不到 add_subparsers() 的 action")
+
+
+def _subparser_help(parser: object, name: str) -> str:
+    """取父層 `add_parser(name, help=…)` 存下的摘要字串。"""
+    for choice in _subparsers_action(parser)._choices_actions:
+        if choice.dest == name:
+            return choice.help
+    raise AssertionError(f"找不到 {name} 子命令的摘要")
+
+
+def test_inbox_help_summary_lists_every_registered_subcommand():
+    """摘要漏一個子命令就紅：名字從實際註冊的 parser 取，不另外抄清單。"""
+    parser = cli.build_parser()
+    inbox_parser = _subparsers_action(parser).choices["inbox"]
+    registered = list(_subparsers_action(inbox_parser).choices)
+    summary = _subparser_help(parser, "inbox")
+
+    missing = [name for name in registered if name not in summary]
+    assert missing == [], f"inbox 摘要漏了：{missing}；摘要＝{summary!r}"
+
+    # 順序照註冊順序（#383）
+    positions = [summary.index(name) for name in registered]
+    assert positions == sorted(positions)
 
 
 def test_write_ledger_wraps_disk_error_as_schema_error(pmo_env, monkeypatch):

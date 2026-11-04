@@ -67,7 +67,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="pmo", description="PMO 工具（#110；design §3.2）")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sp_inbox = sub.add_parser("inbox", help="PMO 收件匣：read / list / ack / report / decision-send")
+    sp_inbox = sub.add_parser(
+        "inbox",
+        help="PMO 收件匣：read / list / ack / report / decision-send / rebuild / handoff-close",
+    )
     inbox_sub = sp_inbox.add_subparsers(dest="inbox_cmd", required=True)
 
     inbox_sub.add_parser("read", help="拉取新信、解析、去重並回覆 ack（不比對 agents、不跑看門狗）")
