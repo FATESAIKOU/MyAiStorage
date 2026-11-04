@@ -52,7 +52,7 @@ from .ports import (
     sidecar_code,
 )
 from .runtime import Ctx, assert_pmo_identity, one_line, sidecar_port
-from .timeutil import iso_utc, parse_ts as _parse_ts
+from .timeutil import iso_utc, parse_ts
 
 __all__ = ["Step", "TickRun", "tick", "tick_steps"]
 
@@ -192,7 +192,7 @@ def _warn_if_stale(run: TickRun) -> None:
     only types it as a string).
     """
     every = run.snapshot.wake.every
-    last = _parse_ts(run.snapshot.last_tick_at)
+    last = parse_ts(run.snapshot.last_tick_at)
     if every is None or last is None:
         return
     try:
@@ -256,11 +256,11 @@ def _earliest_due(run: TickRun) -> datetime | None:
     moments = list(run.due)
     state = run.after if run.after is not None else run.snapshot
     for entry in state.handoffs.values():
-        moment = _parse_ts(entry.next_due_at)
+        moment = parse_ts(entry.next_due_at)
         if moment is not None:
             moments.append(moment)
     for poll in state.worker_poll.values():
-        moment = _parse_ts(poll.next_due_at)
+        moment = parse_ts(poll.next_due_at)
         if moment is not None:
             moments.append(moment)
     return min(moments) if moments else None
@@ -591,10 +591,10 @@ def _watchdog_for(run: TickRun, team: Team) -> None:
     if not _should_be_running(st) or st.get("ack_at"):
         return
     ticket = str(st.get("ticket") or "").strip()
-    base = _parse_ts(st.get("received_at") or st.get("dispatched_at"))
+    base = parse_ts(st.get("received_at") or st.get("dispatched_at"))
     if base is None:
         return
-    poke_at = _parse_ts(st.get("ack_poke_at"))
+    poke_at = parse_ts(st.get("ack_poke_at"))
     if poke_at is None:
         deadline = base + timedelta(seconds=WATCHDOG_SECONDS)
         if run.now < deadline:
@@ -651,7 +651,7 @@ def step_worker_poll(run: TickRun) -> None:
         if not _should_be_running(st):
             continue
         entry = run.snapshot.worker_poll.get(team.key)
-        due = _parse_ts(entry.next_due_at) if entry is not None else None
+        due = parse_ts(entry.next_due_at) if entry is not None else None
         if due is not None and run.now < due:
             run.due.append(due)
             continue
