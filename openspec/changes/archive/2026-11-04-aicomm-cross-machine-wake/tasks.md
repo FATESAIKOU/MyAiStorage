@@ -8,7 +8,7 @@
 - [x] 0.4 `docs/design-notes/368-aicomm-wake.md`：縮成一段指向本 change 的短 note（保留抬頭、單號、一個指向 design 的句子），不留重複內文。完成判準：檔案裡沒有第 2 節以後的行為條文。
 - [x] 0.5 `docs/architecture/decisions.md`：已決表 D-23 之後加 D-24（用架構師給的原樣列）；交接節的 #368 那行改成「介面照 #677 D5 加 #696 擴充；PMO 11-04 指示開工。PR-2 merge 前，要確認擴充已經在 MLP 定案。」
 - [x] 0.6 `openspec validate aicomm-cross-machine-wake` 通過（非 strict）。
-- [ ] 0.7 交付：PM 收 PR-0，`狀態:進行中` 之後開 PR-1。
+- [x] 0.7 交付：PM 收 PR-0，`狀態:進行中` 之後開 PR-1。
 
 完成判準（本張）：0.1～0.6 都完成；`git diff --stat` 只動上面三個路徑（加 change 目錄）；沒有 commit／push（由 PM 做）。
 
@@ -60,45 +60,45 @@
 
 範圍：`src/aicomm/cli.py`（`_wake_one`／`_wake_one_inner`／`_cmd_send`／旗標與原因碼常數）、`tests/unit/test_aicomm_send.py`（既有的中文斷言改成新格式）、`tests/unit/test_aicomm_docs.py`、`docs/aicomm.md`、`skills/aicomm/SKILL.md`。**不碰 `pool-peer`**；本機 404 時是 `not-woken peer-unavailable`（還沒有後援可查）。
 
-- [ ] 2.1 本機結果改成 `wake:` 格式：`woken local[ interrupt]`、`not-woken <原因碼>`、`unknown <原因碼>`；`_wake_one` 的兜底改成 `unknown internal-error`；原因碼做成常數。
+- [x] 2.1 本機結果改成 `wake:` 格式：`woken local[ interrupt]`、`not-woken <原因碼>`、`unknown <原因碼>`；`_wake_one` 的兜底改成 `unknown internal-error`；原因碼做成常數。
   - 完成判準：C-1～C-3、C-16、C-18（只有 local）、C-20、C-22、C-24～C-26、C-31～C-33、C-37 綠；`tests/unit/test_aicomm_send.py:129、:315、:392、:402、:414、:427、:532` 的舊斷言已換。
-- [ ] 2.2 `--require-wake`：有任何 `not-woken`／`unknown` 回 4；沒人要叫醒回 0；與 `--no-wake` 同給 exit 1，且在寫進 Angareion 之前拒絕。
+- [x] 2.2 `--require-wake`：有任何 `not-woken`／`unknown` 回 4；沒人要叫醒回 0；與 `--no-wake` 同給 exit 1，且在寫進 Angareion 之前拒絕。
   - 完成判準：C-19 綠；拒絕路徑沒有任何 `angareion send` 與 sidecar 請求。
-- [ ] 2.3 `docs/aicomm.md`「送達與叫醒」「結束碼」與 `skills/aicomm/SKILL.md` 同兩段改寫：exit 0 只代表已送達、看 stderr 的 `wake:` 行、exit 4 不要重送、原因碼清單。
+- [x] 2.3 `docs/aicomm.md`「送達與叫醒」「結束碼」與 `skills/aicomm/SKILL.md` 同兩段改寫：exit 0 只代表已送達、看 stderr 的 `wake:` 行、exit 4 不要重送、原因碼清單。
   - 完成判準：C-23 綠（文件與 cli 常數一致）。
-- [ ] 2.4 全 unit 與基線一致；fixture 的護欄不變（`foreign_requests() == []`）。
+- [x] 2.4 全 unit 與基線一致；fixture 的護欄不變（`foreign_requests() == []`）。
 - blocked by：PR-0（spec delta 要先進；PM 若決定讓 delta 跟這張一起進，則不 blocked）。
 
 ## 3. PR-2：跨機後援（c 級）
 
 範圍：`src/aicomm/cli.py`（`AICOMM_POOL_PEER`、`find`／`call` 的 argv 與解析、埠段 5200–5399、子行程逾時）、`tests/unit/_aicomm_fakes.py`（假 `pool-peer`）、`tests/unit/test_aicomm_send.py`、`docs/aicomm.md`（依賴表加 `pool-peer` 的兩個用法與 5200–5399）。
 
-- [ ] 3.1 本機 404／連不上／GET 逾時才 `find`；本機 200（含其他 state）與其他 HTTP 碼不查別台；本機 poke 逾時不查別台。
+- [x] 3.1 本機 404／連不上／GET 逾時才 `find`；本機 200（含其他 state）與其他 HTTP 碼不查別台；本機 poke 逾時不查別台。
   - 完成判準：C-15、C-16 綠；本機成功時 fixture 收尾 assert 沒有 `pool-peer` 呼叫。
-- [ ] 3.2 `find`：argv `find <id> --json --timeout 10`；rc 0／1／2／3／其他與陣列解析照 spec；丟格式不對的項目、同 port 只留一筆（第一筆）；一筆合格的都沒有 → `peer-bad-answer`。
+- [x] 3.2 `find`：argv `find <id> --json --timeout 10`；rc 0／1／2／3／其他與陣列解析照 spec；丟格式不對的項目、同 port 只留一筆（第一筆）；一筆合格的都沒有 → `peer-bad-answer`。
   - 完成判準：C-4～C-7、C-11、C-34 綠。
-- [ ] 3.3 每一台：`state` 非 `idle`／`running` → `state-<state>`；port 不在 5200–5399 → `peer-port-out-of-range` 且不 `call`；可戳的每一台都戳。
+- [x] 3.3 每一台：`state` 非 `idle`／`running` → `state-<state>`；port 不在 5200–5399 → `peer-port-out-of-range` 且不 `call`；可戳的每一台都戳。
   - 完成判準：C-9、C-10、C-27 綠。
-- [ ] 3.4 `call`：argv `call <port> POST /agents/<quoted-id>/poke --timeout 5`、stdin 是固定句＋`interrupt`；200／409（`code` 或 `error`，兩個都認）／其他碼／第一行看不懂／rc 2／rc 3 照 spec；不重送。
+- [x] 3.4 `call`：argv `call <port> POST /agents/<quoted-id>/poke --timeout 5`、stdin 是固定句＋`interrupt`；200／409（`code` 或 `error`，兩個都認）／其他碼／第一行看不懂／rc 2／rc 3 照 spec；不重送。
   - 完成判準：C-8、C-12～C-14、C-28、C-35、C-36 綠。
-- [ ] 3.5 子行程上限：`--timeout` 加 2 秒，自己收掉子行程；`find` → `lookup-incomplete`、`call` → `poke-timeout`。
+- [x] 3.5 子行程上限：`--timeout` 加 2 秒，自己收掉子行程；`find` → `lookup-incomplete`、`call` → `poke-timeout`。
   - 完成判準：C-17 綠。
-- [ ] 3.6 假 `pool-peer` 與護欄：`AICOMM_POOL_PEER` 預設指到 `/nonexistent/pool-peer`；fixture 收尾 assert 只收到 `find <id> --json --timeout 10` 與 `call <port> POST /agents/<id>/poke --timeout 5`。
+- [x] 3.6 假 `pool-peer` 與護欄：`AICOMM_POOL_PEER` 預設指到 `/nonexistent/pool-peer`；fixture 收尾 assert 只收到 `find <id> --json --timeout 10` 與 `call <port> POST /agents/<id>/poke --timeout 5`。
   - 完成判準：C-18（含 peer）綠；`--no-wake`／廣播／名字以 `-` 開頭時沒有 `pool-peer` 呼叫（C-21、C-22）。
-- [ ] 3.7 `skills/aicomm/SKILL.md` 的代價段改成「pool 內任何 agent（含別台機器上的，經 `pool-peer`）都能叫醒 PMO」，硬控制改寫成「本機走 MyLinuxPool#346；跨機併在 MyPMO#297」。
+- [x] 3.7 `skills/aicomm/SKILL.md` 的代價段改成「pool 內任何 agent（含別台機器上的，經 `pool-peer`）都能叫醒 PMO」，硬控制改寫成「本機走 MyLinuxPool#346；跨機併在 MyPMO#297」。
   - 完成判準：C-29 綠；`grep -n 同台 skills/aicomm/SKILL.md docs/aicomm.md` 沒有講叫醒範圍的殘句。
-- [ ] 3.8 N3 的護欄（對應「歸檔前檢查」的 A.2～A.4）：測試 assert 缺 `=` 被拒時沒有 `pool-peer` 呼叫、`aicomm log` 沒有 `pool-peer` 呼叫；`docs/aicomm.md` 寫明「`peer:<port>` 是 pool 內 sidecar 的埠號，不是機器位址」，且 `wake:` 行的 `<說明>` 不轉印 `pool-peer` 的 stderr。
+- [x] 3.8 N3 的護欄（對應「歸檔前檢查」的 A.2～A.4）：測試 assert 缺 `=` 被拒時沒有 `pool-peer` 呼叫、`aicomm log` 沒有 `pool-peer` 呼叫；`docs/aicomm.md` 寫明「`peer:<port>` 是 pool 內 sidecar 的埠號，不是機器位址」，且 `wake:` 行的 `<說明>` 不轉印 `pool-peer` 的 stderr。
   - 完成判準：這三項在 PR-2 的測試與文件裡找得到（A.2～A.4 的「確認 PR-2 有…」）。
 - blocked by：PR-1。D5 擴充：PMO 2026-11-04 回覆 #696 已 merge、架構師留言即定稿（來源是 PMO 轉述）；PR-2 merge 前仍看一眼 #677 design 是否已寫入。有出入就以 MLP 的文字為準，回來改 `design.md` 第 2、3 節。
 
 ## 歸檔前檢查（PM 收尾時，archive／sync 主 spec 之前）
 
-- [ ] A.1 主 spec 的 Purpose 段改成：「AI 之間溝通的指令 `aicomm`：`send` 寫進 Angareion，收件人若是 pool 裡（本機 sidecar，查不到時經 `pool-peer` 找別台）閒置或執行中的 agent 就順便戳一下，結果寫成 stderr 的 `wake:` 行；`inbox` 讀寄給自己的信。叫醒的判斷只放在這一層，Angareion、sidecar 與 `pool-peer` 各自只守自己的介面（設計見 `openspec/changes/archive/2026-10-25-comm-skill/` 與 `openspec/changes/archive/<日期>-aicomm-cross-machine-wake/`，MyAiStorage#212、#368）。」
-- [ ] A.2 「其他參照 `--ref`」：條文不改（`--require-wake` 不影響叫誰）；確認 PR-2 有測試 assert 缺 `=` 被拒時沒有 `pool-peer` 呼叫。
-- [ ] A.3 「log 薄包 angareion log…」：條文不改；確認 PR-2 有測試 assert `aicomm log` 沒有 `pool-peer` 呼叫。
-- [ ] A.4 「不改 Angareion 與 sidecar，不攜帶私人資訊」：條文不改（`peer:<port>` 不是機器位址）；確認 `docs/aicomm.md` 有一句「`peer:<port>` 是 pool 內 sidecar 的埠號，不是機器位址」，且 `wake:` 行的 `<說明>` 不轉印 `pool-peer` 的 stderr。
-- [ ] A.5 歸檔後對主 spec 跑標題逐字比對：MODIFIED 的標題都在、ADDED 的標題都不重複；`grep -n 同台 openspec/specs/comm-skill/spec.md` 沒有講叫醒範圍的殘句。
-- [ ] A.6 scenario 標題「閒置的同台 agent」仍是「同台」：這一條不能在 delta 改名——`openspec validate`（1.14.3）會報 `MODIFIED "叫醒的對象與條件" omits scenario(s) the current spec still has: "閒置的同台 agent"`，`archive` 也會拒絕（MODIFIED 取代整個區塊，改標題等於刪掉既有 scenario）。要改就由 PM 在歸檔後直接改主 spec 的這一條標題（本 change 的 delta 不動），或等 openspec 支援 scenario 改名再另開單；`grep -n 同台` 在主 spec 會命中這一個標題。
+- [x] A.1 主 spec 的 Purpose 段改成：「AI 之間溝通的指令 `aicomm`：`send` 寫進 Angareion，收件人若是 pool 裡（本機 sidecar，查不到時經 `pool-peer` 找別台）閒置或執行中的 agent 就順便戳一下，結果寫成 stderr 的 `wake:` 行；`inbox` 讀寄給自己的信。叫醒的判斷只放在這一層，Angareion、sidecar 與 `pool-peer` 各自只守自己的介面（設計見 `openspec/changes/archive/2026-10-25-comm-skill/` 與 `openspec/changes/archive/<日期>-aicomm-cross-machine-wake/`，MyAiStorage#212、#368）。」
+- [x] A.2 「其他參照 `--ref`」：條文不改（`--require-wake` 不影響叫誰）；確認 PR-2 有測試 assert 缺 `=` 被拒時沒有 `pool-peer` 呼叫。
+- [x] A.3 「log 薄包 angareion log…」：條文不改；確認 PR-2 有測試 assert `aicomm log` 沒有 `pool-peer` 呼叫。
+- [x] A.4 「不改 Angareion 與 sidecar，不攜帶私人資訊」：條文不改（`peer:<port>` 不是機器位址）；確認 `docs/aicomm.md` 有一句「`peer:<port>` 是 pool 內 sidecar 的埠號，不是機器位址」，且 `wake:` 行的 `<說明>` 不轉印 `pool-peer` 的 stderr。
+- [x] A.5 歸檔後對主 spec 跑標題逐字比對：MODIFIED 的標題都在、ADDED 的標題都不重複；`grep -n 同台 openspec/specs/comm-skill/spec.md` 沒有講叫醒範圍的殘句。
+- [x] A.6 scenario 標題「閒置的同台 agent」仍是「同台」：這一條不能在 delta 改名——`openspec validate`（1.14.3）會報 `MODIFIED "叫醒的對象與條件" omits scenario(s) the current spec still has: "閒置的同台 agent"`，`archive` 也會拒絕（MODIFIED 取代整個區塊，改標題等於刪掉既有 scenario）。要改就由 PM 在歸檔後直接改主 spec 的這一條標題（本 change 的 delta 不動），或等 openspec 支援 scenario 改名再另開單；`grep -n 同台` 在主 spec 會命中這一個標題。
 
 ## 4. 驗收（不是 PR）
 
