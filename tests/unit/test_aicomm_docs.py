@@ -229,3 +229,48 @@ def test_two_ways_to_send_are_written_down_in_one_section(path):
     assert "`idle` 或 `running` 才戳" in text
     assert "不能同時給" in text
     assert "只用這一次" in text
+
+
+# --- #368 PR-1: exit 0 only means delivered; the `wake:` line says who was woken ----------
+
+
+def _documented_reason_codes(text: str) -> tuple[set[str], set[str]]:
+    """The reason codes a doc lists, as cli spells them (`state-<state>` -> `state-`)."""
+    def codes(label: str) -> set[str]:
+        (line,) = [l.strip() for l in text.splitlines() if l.strip().startswith(f"- `{label}` 的原因碼：")]
+        found = set(re.findall(r"`([^`]+)`", line)) - {label}
+        return {code.split("<")[0] for code in found}
+
+    return codes("not-woken"), codes("unknown")
+
+
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_c23_both_files_say_exit_0_only_means_delivered(path):
+    text = path.read_text(encoding="utf-8")
+    assert "exit 0 只代表已送達" in text
+    assert "`wake:` 行" in text
+    assert "exit 4" in text and "不要重送" in text
+
+
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_c23_the_documented_reason_codes_are_the_cli_constants(path):
+    from aicomm import cli
+
+    not_woken, unknown = _documented_reason_codes(path.read_text(encoding="utf-8"))
+    assert not_woken == set(cli.NOT_WOKEN_CODES)
+    assert unknown == set(cli.UNKNOWN_CODES)
+
+
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_c18_the_wake_line_grammar_is_written_down(path):
+    text = path.read_text(encoding="utf-8")
+    for form in ("wake: <agent> woken local",
+                 "wake: <agent> not-woken <原因碼>",
+                 "wake: <agent> unknown <原因碼>"):
+        assert form in text
+    assert "每個收件人" in text and "一行" in text
+
+
+def test_c19_the_skill_usage_line_lists_require_wake():
+    usage = _skill().split("```bash")[1].split("```")[0]
+    assert "--require-wake" in usage

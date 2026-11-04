@@ -10,6 +10,7 @@ HTTP endpoints (look up one agent, poke one agent), nothing else.
 from __future__ import annotations
 
 import argparse
+import http.client
 import ipaddress
 import json
 import math
@@ -21,7 +22,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
 from aicomm import __version__
 
@@ -29,6 +30,8 @@ EXIT_OK = 0
 EXIT_USAGE = 1
 EXIT_BACKEND = 2
 EXIT_TIMEOUT = 3
+# `--require-wake`: the message is delivered, but somebody was not woken. Never resend.
+EXIT_NOT_WOKEN = 4
 
 # The sidecar's documented default address. Not configurable; `AICOMM_SIDECAR` exists for
 # tests and manual runs only (a sidecar-opened agent never sees it).
@@ -41,7 +44,57 @@ POKE_TIMEOUT = 5.0
 # The poke carries this and nothing else: never the sender, the body, a ticket or an id.
 WAKE_TEXT = "有新訊息：請執行 aicomm inbox。"
 
+# The reason codes of the `wake:` line (design of MyAiStorage#368 §3.7). The docs list
+# exactly these two groups; `state-` and `http-` are prefixes (`state-<state>`,
+# `http-<code>`). A new code means changing the design first, then these and the docs.
+REASON_NOT_FOUND = "not-found"
+REASON_PEER_UNAVAILABLE = "peer-unavailable"
+REASON_LOOKUP_INCOMPLETE = "lookup-incomplete"
+REASON_PEER_PORT_OUT_OF_RANGE = "peer-port-out-of-range"
+REASON_PEER_BAD_ANSWER = "peer-bad-answer"
+REASON_BAD_ANSWER = "bad-answer"
+REASON_BAD_NAME = "bad-name"
+REASON_AGENT_NOT_RUNNING = "agent-not-running"
+REASON_AWAITING_ANSWER = "awaiting-answer"
+REASON_STATE = "state-"  # `state-<state>`
+REASON_HTTP = "http-"    # `http-<code>`
+REASON_POKE_TIMEOUT = "poke-timeout"
+REASON_POKE_ERROR = "poke-error"
+REASON_INTERNAL_ERROR = "internal-error"
+
+# `not-woken`: nobody was poked, or the one that was poked said no. `unknown`: the request
+# may have reached somebody - never resend, the message is already delivered.
+NOT_WOKEN_CODES = frozenset({
+    REASON_NOT_FOUND,
+    REASON_PEER_UNAVAILABLE,
+    REASON_LOOKUP_INCOMPLETE,
+    REASON_PEER_PORT_OUT_OF_RANGE,
+    REASON_PEER_BAD_ANSWER,
+    REASON_BAD_ANSWER,
+    REASON_BAD_NAME,
+    REASON_AGENT_NOT_RUNNING,
+    REASON_AWAITING_ANSWER,
+    REASON_STATE,
+    REASON_HTTP,
+})
+UNKNOWN_CODES = frozenset({
+    REASON_POKE_TIMEOUT,
+    REASON_POKE_ERROR,
+    REASON_PEER_BAD_ANSWER,
+    REASON_INTERNAL_ERROR,
+})
+
+# The three kinds of a `wake:` line, and the woken code of the local sidecar. A woken code
+# is `local` or `peer:<port>[,<port>…]`; the peer form has no producer before #368 PR-2.
+WAKE_WOKEN = "woken"
+WAKE_NOT_WOKEN = "not-woken"
+WAKE_UNKNOWN = "unknown"
+WAKE_LOCAL = "local"
+
 TICKET_RE = re.compile(r"^[A-Za-z0-9._-]+#[0-9]+$")
+# One recipient gets exactly one `wake:` line, so a reason code is one token: a `state`
+# with a blank or a newline cannot be spelled as `state-<state>` and is a `bad-answer`.
+STATE_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+")
 WAKEABLE_STATES = ("idle", "running")
 
 
@@ -104,6 +157,8 @@ def _build_parser() -> argparse.ArgumentParser:
     group.add_argument("--no-wake", action="store_true", help="Do not poke anybody.")
     group.add_argument("--interrupt", action="store_true",
                        help="Interrupt a running recipient instead of queueing the poke after its turn.")
+    p_send.add_argument("--require-wake", action="store_true",
+                        help="Exit 4 when a recipient was not woken (the message is still delivered; do not resend).")
 
     p_inbox = sub.add_parser(
         "inbox",
@@ -163,54 +218,158 @@ def _request(method: str, url: str, payload: dict | None, timeout: float) -> tup
         with _OPENER.open(request, timeout=timeout) as response:
             return response.status, response.read()
     except urllib.error.HTTPError as e:
-        return e.code, b""
+        # The body of an error answer carries the reason (409 says why); a body that cannot
+        # be read is simply an empty one.
+        try:
+            return e.code, e.read()
+        except Exception:  # noqa: BLE001 - an unreadable error body is an empty body
+            return e.code, b""
 
 
-def _wake_one(base: str, name: str, interrupt: bool) -> str:
-    """Wake one recipient; returns one stderr line and never raises.
+class _Wake(NamedTuple):
+    """One recipient's result: the kind, the reason code (or the wake target), and the name.
+
+    `code` is `local` or `peer:<port>[,<port>…]` when woken, and a reason code otherwise.
+    `line` is the only place that spells the one stderr line; PR-2 merges several peer
+    answers from `kind` and `code`, never by parsing that line.
+    """
+
+    kind: str
+    code: str
+    name: str
+    interrupt: bool = False
+
+    @property
+    def woken(self) -> bool:
+        return self.kind == WAKE_WOKEN
+
+    @property
+    def line(self) -> str:
+        suffix = " interrupt" if self.woken and self.interrupt else ""
+        return f"wake: {self.name} {self.kind} {self.code}{suffix}"
+
+
+def _woken(name: str, interrupt: bool, code: str = WAKE_LOCAL) -> _Wake:
+    return _Wake(WAKE_WOKEN, code, name, interrupt)
+
+
+def _not_woken(name: str, code: str) -> _Wake:
+    return _Wake(WAKE_NOT_WOKEN, code, name)
+
+
+def _unknown(name: str, code: str) -> _Wake:
+    return _Wake(WAKE_UNKNOWN, code, name)
+
+
+def _agent_state(body: bytes) -> str | None:
+    """The `state` of a `GET /agents/<id>` answer; None when the answer cannot be read."""
+    try:
+        answer = json.loads(body)
+    except ValueError:
+        return None
+    state = answer.get("state") if isinstance(answer, dict) else None
+    return state if isinstance(state, str) else None
+
+
+def _refusal_code(body: bytes) -> str:
+    """Why a poke got 409: `agent-not-running`, `awaiting-answer`, or plain `http-409`.
+
+    The error code is the body's `code`, else its `error`; anything else (unreadable body,
+    neither field a string, a code we do not know) is just the HTTP status.
+    """
+    try:
+        answer = json.loads(body)
+    except ValueError:
+        answer = None
+    for field in ("code", "error"):
+        value = answer.get(field) if isinstance(answer, dict) else None
+        if isinstance(value, str):
+            if value == "agent_not_running":
+                return REASON_AGENT_NOT_RUNNING
+            if value == "agent_awaiting_answer":
+                return REASON_AWAITING_ANSWER
+            break
+    return f"{REASON_HTTP}409"
+
+
+def _poke_answer(status: int, body: bytes) -> tuple[str, str]:
+    """Read a poke answer as `(kind, code)` - the table the local poke and `pool-peer call` share.
+
+    200 is `woken local`; 409 carries its reason in the body (`_refusal_code`); anything
+    else is `http-<status>`. Only this table is shared: the transport-level outcomes (a
+    timeout, a broken connection, `call`'s rc) stay with each side's caller.
+    """
+    if status == 200:
+        return WAKE_WOKEN, WAKE_LOCAL
+    if status == 409:
+        return WAKE_NOT_WOKEN, _refusal_code(body)
+    return WAKE_NOT_WOKEN, f"{REASON_HTTP}{status}"
+
+
+def _wake_elsewhere(name: str, interrupt: bool) -> _Wake:
+    """The peer fallback would run here: `pool-peer find` plus `call` (PR-2 of #368).
+
+    PR-1 has no peer fallback, which is the same result as "no `pool-peer` on this
+    machine": the recipient is not on this sidecar and nobody else was asked, so it is
+    `not-woken peer-unavailable`. PR-2 replaces this body; its call sites (404, lookup
+    timeout, sidecar unreachable) and `interrupt` stay as they are.
+    """
+    return _not_woken(name, REASON_PEER_UNAVAILABLE)
+
+
+def _wake_one(base: str, name: str, interrupt: bool) -> _Wake:
+    """Wake one recipient; returns one result and never raises.
 
     The message is already delivered when this runs, so whatever goes wrong here (a half
     answer, a reset connection, anything unforeseen) is only "delivered, not woken".
     """
     try:
         return _wake_one_inner(base, name, interrupt)
-    except Exception as e:  # noqa: BLE001 - best-effort edge: nothing may undo a delivery
-        return f"已送達，未叫醒 {name}：{type(e).__name__}（{e}）"
+    except Exception:  # noqa: BLE001 - best-effort edge: nothing may undo a delivery
+        # Nobody knows whether a poke went out, so this is `unknown`, not `not-woken`.
+        return _unknown(name, REASON_INTERNAL_ERROR)
 
 
-def _wake_one_inner(base: str, name: str, interrupt: bool) -> str:
-    """Look up one agent, poke it when it is idle or running."""
+def _wake_one_inner(base: str, name: str, interrupt: bool) -> _Wake:
+    """Look up one agent on the local sidecar and poke it when it is idle or running."""
     quoted = urllib.parse.quote(name, safe="")
-    failed = f"已送達，未叫醒 {name}："
     try:
         status, body = _request("GET", f"{base}/agents/{quoted}", None, GET_TIMEOUT)
-    except (OSError, urllib.error.URLError) as e:
-        return failed + ("查詢逾時" if _is_timeout(e) else f"連不上本機 sidecar（{e}）")
+    except http.client.HTTPException:  # the answer was unreadable; nobody was poked yet
+        return _not_woken(name, REASON_BAD_ANSWER)
+    except (OSError, urllib.error.URLError):
+        # Not on this sidecar as far as we can tell (404 below, no sidecar, or no answer in
+        # time). Only the peer fallback may look further, and it has not poked anybody.
+        return _wake_elsewhere(name, interrupt)
     if status == 404:
-        return f"{name}：不在本機，不戳"
+        return _wake_elsewhere(name, interrupt)
     if status != 200:
-        return failed + f"查詢回 HTTP {status}"
-    try:
-        state = json.loads(body).get("state")
-    except (ValueError, AttributeError):
-        state = None
-    if not isinstance(state, str):
-        return failed + "查詢的回應看不懂"
+        return _not_woken(name, f"{REASON_HTTP}{status}")
+    state = _agent_state(body)
+    if state is None:
+        return _not_woken(name, REASON_BAD_ANSWER)
     if state not in WAKEABLE_STATES:
-        return f"{name}：{state}，略過"
+        if not STATE_TOKEN_RE.fullmatch(state):
+            return _not_woken(name, REASON_BAD_ANSWER)
+        return _not_woken(name, f"{REASON_STATE}{state}")
     payload = {"text": WAKE_TEXT, "interrupt": bool(interrupt and state == "running")}
     try:
-        status, _ = _request("POST", f"{base}/agents/{quoted}/poke", payload, POKE_TIMEOUT)
+        status, body = _request("POST", f"{base}/agents/{quoted}/poke", payload, POKE_TIMEOUT)
+    except http.client.HTTPException:  # the request may have reached the sidecar
+        return _unknown(name, REASON_POKE_ERROR)
     except (OSError, urllib.error.URLError) as e:
-        if _is_timeout(e):
-            return f"{name}：叫醒結果未知（戳逾時，不重送）"
-        return failed + f"戳失敗（{e}）"
-    if status != 200:
-        return failed + f"戳回 HTTP {status}"
-    return f"已叫醒 {name}（{state}{'，打斷' if payload['interrupt'] else ''}）"
+        # The request may have been sent and then lost: `unknown`, never "not woken".
+        return _unknown(name, REASON_POKE_TIMEOUT if _is_timeout(e) else REASON_POKE_ERROR)
+    kind, code = _poke_answer(status, body)
+    if kind == WAKE_WOKEN:
+        return _woken(name, payload["interrupt"], code)
+    return _Wake(kind, code, name)
 
 
 def _cmd_send(args: argparse.Namespace) -> int:
+    if args.require_wake and args.no_wake:
+        # Refused before anything is written: no `angareion send`, no sidecar request.
+        raise UsageError("--require-wake 與 --no-wake 不能同時給")
     if args.ticket is not None and not TICKET_RE.fullmatch(args.ticket):
         raise UsageError(f"--ticket 要是 <repo>#<n>：{args.ticket!r}")
     # angareion refuses a ref without "="; refuse it here too, before anything is written.
@@ -256,9 +415,12 @@ def _cmd_send(args: argparse.Namespace) -> int:
     if code != 0:
         return code
 
+    missed = False
     for name in candidates if wake else []:
-        sys.stderr.write(_wake_one(base, name, args.interrupt) + "\n")
-    return EXIT_OK
+        result = _wake_one(base, name, args.interrupt)
+        sys.stderr.write(result.line + "\n")
+        missed = missed or not result.woken
+    return EXIT_NOT_WOKEN if (args.require_wake and missed) else EXIT_OK
 
 
 EMPTY_INBOX_HINT = (

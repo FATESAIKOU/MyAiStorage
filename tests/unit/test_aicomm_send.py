@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
+import http.client
 import json
+import re
 import socket
 
 import pytest
@@ -126,7 +128,7 @@ def test_sidecar_down_still_exits_0_and_says_delivered_not_woken(world, monkeypa
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
     assert r.out.splitlines()[0] == FAKE_ID
-    assert "已送達" in r.err and "未叫醒" in r.err
+    assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
 
 
 def test_a_missing_angareion_executable_is_a_config_error(world, monkeypatch, capsys):
@@ -305,14 +307,14 @@ def test_other_states_are_not_poked(world, monkeypatch, capsys, state):
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
     assert world.sidecar.pokes() == []
-    assert state in r.err
+    assert r.err == f"wake: demo-pm-t1 not-woken state-{state}\n"
 
 
 def test_an_agent_on_another_machine_is_not_poked_and_that_is_normal(world, monkeypatch, capsys):
     r = send(world, monkeypatch, capsys)  # the fake sidecar does not know the agent -> 404
     assert r.code == 0
     assert world.sidecar.pokes() == []
-    assert "不在本機" in r.err
+    assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
     assert r.out.splitlines()[0] == FAKE_ID
 
 
@@ -389,7 +391,7 @@ def test_a_poke_timeout_is_not_retried_and_does_not_change_the_exit_code(world, 
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
     assert len(world.sidecar.pokes()) == 1
-    assert "叫醒結果未知" in r.err
+    assert r.err == "wake: demo-pm-t1 unknown poke-timeout\n"
 
 
 @pytest.mark.parametrize("status", [409, 503, 500])
@@ -399,7 +401,7 @@ def test_a_refused_poke_is_not_retried_and_the_exit_code_stays_0(world, monkeypa
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
     assert len(world.sidecar.pokes()) == 1
-    assert "未叫醒" in r.err and str(status) in r.err
+    assert r.err == f"wake: demo-pm-t1 not-woken http-{status}\n"
 
 
 def test_a_lookup_timeout_means_no_poke(world, monkeypatch, capsys):
@@ -411,7 +413,7 @@ def test_a_lookup_timeout_means_no_poke(world, monkeypatch, capsys):
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
     assert world.sidecar.pokes() == []
-    assert "未叫醒" in r.err
+    assert r.err == "wake: demo-pm-t1 not-woken peer-unavailable\n"
 
 
 @pytest.mark.parametrize(
@@ -424,7 +426,7 @@ def test_a_broken_lookup_answer_means_no_poke_and_exit_0(world, monkeypatch, cap
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
     assert world.sidecar.pokes() == []
-    assert "未叫醒" in r.err
+    assert r.err == "wake: demo-pm-t1 not-woken bad-answer\n"
     assert r.out.splitlines()[0] == FAKE_ID
 
 
@@ -433,6 +435,7 @@ def test_an_unexpected_lookup_status_means_no_poke(world, monkeypatch, capsys):
     r = send(world, monkeypatch, capsys)
     assert r.code == 0
     assert world.sidecar.pokes() == []
+    assert r.err == "wake: demo-pm-t1 not-woken http-500\n"
 
 
 def test_the_sidecar_only_sees_lookups_and_pokes(world, monkeypatch, capsys):
@@ -528,8 +531,10 @@ def test_a_broken_sidecar_answer_never_undoes_a_delivered_message(world, monkeyp
     assert r.code == 0
     assert r.out.splitlines()[0] == FAKE_ID
     assert "Traceback" not in r.err
-    for name in ("demo-pm-t1", "demo-arch-t1"):
-        assert f"未叫醒 {name}" in r.err
+    lines = [l for l in r.err.splitlines() if l.startswith("wake: ")]
+    assert {l.split(" ")[1] for l in lines} == {"demo-pm-t1", "demo-arch-t1"}
+    for line in lines:  # an unreadable lookup answer, or a poke gone wrong: never a resend
+        assert line.endswith(("not-woken bad-answer", "unknown poke-error")), line
     # the second recipient was still judged after the first one broke
     assert raw.connections == connections
 
@@ -598,3 +603,308 @@ def test_an_http_proxy_in_the_environment_is_never_used_for_the_sidecar(world, m
         importlib.reload(cli)
     assert r.code == 0
     assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+
+
+# --- #368 PR-1: the `wake:` lines and `--require-wake` --------------------------------------
+# C-n refers to the contract list in the `aicomm-cross-machine-wake` change (tasks.md §1).
+# PR-1 implements the local path only: a recipient that is not on this sidecar has no peer
+# fallback yet, so it is `not-woken peer-unavailable` (PR-2 adds `pool-peer`).
+
+WAKE_LINE_RE = re.compile(
+    r"^wake: \S+ (woken (local|peer:\d+(,\d+)*)( interrupt)?|not-woken \S+( .*)?|unknown \S+( .*)?)$"
+)
+
+
+def test_c1_an_idle_local_agent_is_woken_locally_and_nobody_else_is_asked(world, monkeypatch, capsys):
+    agent(world, state="idle")
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 woken local\n"
+    assert [q["path"] for q in world.sidecar.requests] == ["/agents/demo-pm-t1", "/agents/demo-pm-t1/poke"]
+
+
+def test_c2_a_running_agent_poked_with_interrupt_says_so(world, monkeypatch, capsys):
+    agent(world, state="running")
+    r = send(world, monkeypatch, capsys, "--interrupt")
+    assert r.err == "wake: demo-pm-t1 woken local interrupt\n"
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": True}]
+
+
+def test_c3_a_local_agent_in_another_state_is_not_woken(world, monkeypatch, capsys):
+    agent(world, state="exited")
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 not-woken state-exited\n"
+    assert world.sidecar.pokes() == []
+
+
+@pytest.mark.parametrize("state", [
+    "idle\nwake: demo-pm-t1 woken local",
+    "idle with a blank",
+    "exited ",
+    "",
+    "閒置",
+], ids=["newline", "blank", "trailing-blank", "empty", "non-ascii"])
+def test_l1_a_state_that_is_not_one_token_is_bad_answer_on_one_line(world, monkeypatch, capsys, state):
+    # One recipient gets exactly one `wake:` line, so `state-<state>` must stay one token: a
+    # state that is not `[A-Za-z0-9_-]+` cannot be spelled there and is `bad-answer` instead.
+    world.sidecar.raw["demo-pm-t1"] = (200, json.dumps({"state": state}).encode("utf-8"))
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 not-woken bad-answer\n"
+    assert world.sidecar.pokes() == []
+
+
+def test_c16_a_local_poke_timeout_is_unknown_and_is_not_retried(world, monkeypatch, capsys):
+    from aicomm import cli
+
+    agent(world)
+    monkeypatch.setattr(cli, "POKE_TIMEOUT", 0.3)
+    world.sidecar.poke_delay = 2.0
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 unknown poke-timeout\n"
+    assert len(world.sidecar.pokes()) == 1
+
+
+def test_c18_exactly_one_wake_line_per_recipient_in_the_wake_grammar(world, monkeypatch, capsys):
+    agent(world, "demo-pm-t1", state="idle")
+    agent(world, "demo-arch-t1", state="running")
+    agent(world, "demo-rev-t1-1", state="exited")
+    world.sidecar.raw["demo-gone-t1"] = (500, b"{}")
+    r = send(world, monkeypatch, capsys, "--mention", "demo-arch-t1", "--interrupt",
+             "--mention", "demo-rev-t1-1", "--mention", "demo-gone-t1")
+    lines = [line for line in r.err.splitlines() if line.startswith("wake: ")]
+    assert len(lines) == len(r.err.splitlines()) == 4
+    # The order is the one the addresses were given in: `--to` first, then `--mention` in
+    # order (`candidates` in `_cmd_send`), the same order `angareion send` gets them in.
+    assert [line.split(" ")[1] for line in lines] == [
+        "demo-pm-t1", "demo-arch-t1", "demo-rev-t1-1", "demo-gone-t1",
+    ]
+    for line in lines:
+        assert WAKE_LINE_RE.match(line), line
+
+
+def test_c19_require_wake_is_0_when_everybody_is_woken(world, monkeypatch, capsys):
+    agent(world)
+    r = send(world, monkeypatch, capsys, "--require-wake")
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 woken local\n"
+
+
+def test_c19_require_wake_is_4_when_somebody_is_not_woken(world, monkeypatch, capsys):
+    agent(world, state="exited")
+    r = send(world, monkeypatch, capsys, "--require-wake")
+    assert r.code == 4
+    assert r.err == "wake: demo-pm-t1 not-woken state-exited\n"
+    # the message went in before the wake was tried: exit 4 means do not resend
+    assert r.out.splitlines()[0] == FAKE_ID and len(world.calls()) == 1
+
+
+def test_c19_require_wake_is_4_when_a_result_is_unknown(world, monkeypatch, capsys):
+    from aicomm import cli
+
+    agent(world)
+    monkeypatch.setattr(cli, "POKE_TIMEOUT", 0.3)
+    world.sidecar.poke_delay = 2.0
+    r = send(world, monkeypatch, capsys, "--require-wake")
+    assert r.code == 4
+    assert r.out.splitlines()[0] == FAKE_ID
+
+
+def test_c19_require_wake_is_4_when_the_first_of_two_recipients_is_not_woken(world, monkeypatch, capsys):
+    # "any of them": the answer must not depend on which recipient happens to be the last one.
+    agent(world, "demo-pm-t1", state="exited")
+    agent(world, "demo-arch-t1", state="idle")
+    r = send(world, monkeypatch, capsys, "--require-wake", "--mention", "demo-arch-t1")
+    assert r.code == 4
+    assert r.err == (
+        "wake: demo-pm-t1 not-woken state-exited\n"
+        "wake: demo-arch-t1 woken local\n"
+    )
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+    assert r.out.splitlines()[0] == FAKE_ID and len(world.calls()) == 1
+
+
+def test_c19_require_wake_is_4_when_the_second_of_two_recipients_is_not_woken(world, monkeypatch, capsys):
+    agent(world, "demo-pm-t1", state="idle")
+    agent(world, "demo-arch-t1", state="exited")
+    r = send(world, monkeypatch, capsys, "--require-wake", "--mention", "demo-arch-t1")
+    assert r.code == 4
+    assert r.err == (
+        "wake: demo-pm-t1 woken local\n"
+        "wake: demo-arch-t1 not-woken state-exited\n"
+    )
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}]
+    assert r.out.splitlines()[0] == FAKE_ID and len(world.calls()) == 1
+
+
+def test_c19_require_wake_is_0_when_both_recipients_are_woken(world, monkeypatch, capsys):
+    agent(world, "demo-pm-t1", state="idle")
+    agent(world, "demo-arch-t1", state="idle")
+    r = send(world, monkeypatch, capsys, "--require-wake", "--mention", "demo-arch-t1")
+    assert r.code == 0
+    assert r.err == (
+        "wake: demo-pm-t1 woken local\n"
+        "wake: demo-arch-t1 woken local\n"
+    )
+    assert world.sidecar.pokes() == [{"text": WAKE_TEXT, "interrupt": False}] * 2
+    assert r.out.splitlines()[0] == FAKE_ID and len(world.calls()) == 1
+
+
+def test_c19_require_wake_is_0_when_nobody_is_to_be_woken(world, monkeypatch, capsys):
+    broadcast = send(world, monkeypatch, capsys, "--require-wake", to=None)
+    myself = send(world, monkeypatch, capsys, "--require-wake", to=world.sender)
+    assert (broadcast.code, myself.code) == (0, 0)
+    assert world.sidecar.requests == []
+
+
+def test_c19_require_wake_with_no_wake_is_refused_before_anything_is_written(world, monkeypatch, capsys):
+    agent(world)
+    r = send(world, monkeypatch, capsys, "--require-wake", "--no-wake")
+    assert r.code == 1
+    assert r.err.strip()
+    assert world.calls() == [] and world.sidecar.requests == []
+
+
+@pytest.mark.parametrize("code", ["1", "2"])
+def test_c20_a_failed_write_keeps_its_exit_code_and_touches_nothing(world, monkeypatch, capsys, code):
+    agent(world)
+    world.setenv("FAKE_ANG_SEND_EXIT", code)
+    r = send(world, monkeypatch, capsys, "--require-wake")
+    assert r.code == int(code)
+    assert len(world.calls()) == 1
+    assert world.sidecar.requests == []
+
+
+@pytest.mark.parametrize("extra,to", [(("--no-wake",), "demo-pm-t1"), ((), None)], ids=["no-wake", "broadcast"])
+def test_c22_nobody_is_looked_up_and_the_message_is_written_once(world, monkeypatch, capsys, extra, to):
+    agent(world)
+    r = send(world, monkeypatch, capsys, *extra, to=to)
+    assert r.code == 0
+    assert r.err == ""
+    assert world.sidecar.requests == []
+    assert len(world.calls()) == 1
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [b"not json", b"[]", b'"idle"', b"{}", b'{"state": 3}', b'{"state": null}', b'{"id": "x"}'],
+    ids=["text", "list", "string", "no-state", "int-state", "null-state", "other-field"],
+)
+def test_c24_a_local_answer_that_cannot_be_read_is_bad_answer(world, monkeypatch, capsys, answer):
+    world.sidecar.raw["demo-pm-t1"] = (200, answer)
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 not-woken bad-answer\n"
+    assert world.sidecar.pokes() == []
+
+
+@pytest.mark.parametrize("body,code", [
+    (b'{"code": "agent_awaiting_answer"}', "awaiting-answer"),
+    (b'{"error": "agent_awaiting_answer"}', "awaiting-answer"),
+    (b'{"code": "agent_not_running"}', "agent-not-running"),
+    (b'{"error": "agent_not_running"}', "agent-not-running"),
+    (b'{"code": "something_else"}', "http-409"),
+    (b'{"code": 7, "error": "agent_not_running"}', "agent-not-running"),
+], ids=["code-awaiting", "error-awaiting", "code-not-running", "error-not-running",
+        "unknown-code", "code-not-a-string"])
+def test_c25_a_local_409_is_read_for_its_reason_and_poked_once(world, monkeypatch, capsys, body, code):
+    agent(world)
+    world.sidecar.poke_status = 409
+    world.sidecar.poke_body = body
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == f"wake: demo-pm-t1 not-woken {code}\n"
+    assert len(world.sidecar.pokes()) == 1
+
+
+def _broken_poke(error: BaseException):
+    """A `_request` that answers the lookup for real and fails every poke with `error`."""
+    from aicomm import cli
+
+    original = cli._request
+
+    def request(method, url, payload, timeout):
+        if method == "POST":
+            raise error
+        return original(method, url, payload, timeout)
+
+    return request
+
+
+def test_c26_a_local_poke_whose_connection_is_reset_is_unknown_poke_error(world, monkeypatch, capsys):
+    agent(world)
+    monkeypatch.setattr("aicomm.cli._request", _broken_poke(ConnectionResetError("reset by peer")))
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 unknown poke-error\n"
+    assert world.sidecar.pokes() == []
+    assert [q["method"] for q in world.sidecar.requests] == ["GET"]
+
+
+def test_c31_a_local_lookup_whose_http_layer_cannot_be_read_is_bad_answer(world, monkeypatch, capsys):
+    agent(world)
+
+    def broken(method, url, payload, timeout):
+        raise http.client.BadStatusLine("garbage")
+
+    monkeypatch.setattr("aicomm.cli._request", broken)
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 not-woken bad-answer\n"
+    assert world.sidecar.pokes() == []
+
+
+@pytest.mark.parametrize("body", [b"not json", b"[]", b"{}", b'{"code": 5}', b'{"code": null, "error": 7}',
+                                 b'{"code": null}'],
+                         ids=["text", "list", "empty", "int-code", "two-non-strings", "null-code"])
+def test_c32_a_409_without_a_usable_error_code_is_http_409(world, monkeypatch, capsys, body):
+    agent(world)
+    world.sidecar.poke_status = 409
+    world.sidecar.poke_body = body
+    r = send(world, monkeypatch, capsys)
+    assert r.err == "wake: demo-pm-t1 not-woken http-409\n"
+    assert len(world.sidecar.pokes()) == 1
+
+
+@pytest.mark.parametrize("status", [201, 204])
+def test_c33_another_2xx_is_reported_as_http_code(world, monkeypatch, capsys, status):
+    agent(world)
+    world.sidecar.poke_status = status
+    r = send(world, monkeypatch, capsys)
+    assert r.err == f"wake: demo-pm-t1 not-woken http-{status}\n"
+    assert len(world.sidecar.pokes()) == 1
+
+
+def test_c37_a_local_poke_that_is_refused_is_unknown_poke_error(world, monkeypatch, capsys):
+    agent(world)
+    monkeypatch.setattr("aicomm.cli._request", _broken_poke(ConnectionRefusedError("refused")))
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 unknown poke-error\n"
+    assert world.sidecar.pokes() == []
+    assert [q["method"] for q in world.sidecar.requests] == ["GET"]
+
+
+def test_c30_the_reason_code_constants_are_exactly_the_spec_list():
+    from aicomm import cli
+
+    assert cli.NOT_WOKEN_CODES == {
+        "not-found", "peer-unavailable", "lookup-incomplete", "peer-port-out-of-range",
+        "peer-bad-answer", "bad-answer", "bad-name", "agent-not-running", "awaiting-answer",
+        "state-", "http-",   # prefixes: `state-<state>`, `http-<code>`
+    }
+    assert cli.UNKNOWN_CODES == {"poke-timeout", "poke-error", "peer-bad-answer", "internal-error"}
+
+
+def test_an_unexpected_error_in_the_wake_path_is_unknown_internal_error(world, monkeypatch, capsys):
+    agent(world)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("aicomm.cli._wake_one_inner", boom)
+    r = send(world, monkeypatch, capsys)
+    assert r.code == 0
+    assert r.err == "wake: demo-pm-t1 unknown internal-error\n"
