@@ -42,8 +42,22 @@ def test_skill_states_the_three_soft_rules():
 def test_skill_points_hard_control_at_sidecar_open_not_at_aicomm_and_states_the_cost():
     text = _skill()
     assert "sidecar open" in text and "白名單" in text and "MyLinuxPool#346" in text
-    assert "任何同台 agent 都能叫醒 PMO" in text
+    assert "MyPMO#297" in text  # the cross-machine half is decided there, not in aicomm
+    assert "pool 內任何 agent（含別台機器上的" in text and "都能叫醒 PMO" in text
     assert "M2 D6" in text
+
+
+def test_c29_the_skill_says_the_cost_covers_the_whole_pool():
+    # #368 PR-2: a recipient on another machine can be woken too, so "同台" is no longer true.
+    text = _skill()
+    assert "同台" not in text
+    assert "pool 內任何 agent（含別台機器上的，經 `pool-peer`）都能叫醒 PMO" in text
+
+
+def test_c29_the_skill_says_the_cross_machine_access_control_is_elsewhere():
+    text = _skill()
+    assert "本機走 sidecar open 帶白名單（MyLinuxPool#346）" in text
+    assert "跨機的存取控制併在 MyPMO#297 再議" in text
 
 
 def test_skill_explains_delivery_exit_codes_and_the_idle_wait():
@@ -274,3 +288,40 @@ def test_c18_the_wake_line_grammar_is_written_down(path):
 def test_c19_the_skill_usage_line_lists_require_wake():
     usage = _skill().split("```bash")[1].split("```")[0]
     assert "--require-wake" in usage
+
+
+# --- #368 PR-2: the cross-machine fallback (`pool-peer`) is written down -------------------
+
+
+@pytest.mark.parametrize("path", [SKILL, DOCS], ids=["skill", "docs"])
+def test_the_transitional_no_peer_fallback_sentences_are_gone(path):
+    text = path.read_text(encoding="utf-8")
+    assert "還沒提供" not in text
+    assert "要等跨機後援" not in text
+    assert "peer:<port> 那一種還沒提供" not in text
+
+
+def test_docs_record_the_pool_peer_usages_and_the_port_range():
+    text = DOCS.read_text(encoding="utf-8")
+    for needle in ("pool-peer find <id> --json --timeout 10",
+                   "pool-peer call <port> POST /agents/<id>/poke --timeout 5",
+                   "5200", "5399", "AICOMM_POOL_PEER", "peer:<port>", "argv"):
+        assert needle in text
+
+
+def test_a4_the_docs_say_a_peer_port_is_not_a_machine_address():
+    # A.4: `peer:<port>` names a sidecar port inside the pool, never a machine.
+    text = DOCS.read_text(encoding="utf-8")
+    assert "`peer:<port>` 是 pool 內 sidecar 的**埠號，不是機器位址**" in text
+
+
+def test_a4_the_docs_say_the_wake_line_does_not_relay_pool_peer_output():
+    text = DOCS.read_text(encoding="utf-8")
+    assert "`pool-peer` 的 stdout／stderr 不會被轉印進去" in text
+
+
+def test_the_docs_describe_the_order_local_first_then_the_pool():
+    for path in (SKILL, DOCS):
+        text = path.read_text(encoding="utf-8")
+        assert "先問本機" in text or "先本機" in text
+        assert "pool-peer" in text

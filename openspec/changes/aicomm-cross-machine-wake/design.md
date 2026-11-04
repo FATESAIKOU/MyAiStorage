@@ -30,7 +30,7 @@ aicomm 只用 `find --json` 和 `call … POST /agents/<id>/poke`。`find` 的�
 
 ## 3. aicomm 的行為（實作歸 #368）
 
-1. **順序**：先問本機 sidecar（照現況）。只有本機回 404、本機 sidecar 連不上，或 GET 逾時（這時還沒戳，不會重複），才執行 `pool-peer find <to> --json --timeout 10`。本機回 200 就照本機結果處理（戳、`state-<state>`，或回應看不懂時 `not-woken bad-answer`），不再查別台。本機回其他 HTTP 碼也一樣，就是 `not-woken http-<碼>`，不查別台。「看不懂」＝ body 不是 JSON 物件、`state` 不是字串，或 HTTP 層讀不懂（`http.client.HTTPException`）；這時還沒戳任何人，所以是 `not-woken`。本機的戳怎麼判讀見第 5 點，本機戳之後無論結果如何都不查別台。
+1. **順序**：先問本機 sidecar（照現況）。只有本機回 404、本機 sidecar 連不上，或 GET 逾時（這時還沒戳，不會重複），才執行 `pool-peer find <to> --json --timeout 10`。本機回 200 就照本機結果處理（戳、`state-<state>`，或回應看不懂時 `not-woken bad-answer`），不再查別台。本機回其他 HTTP 碼也一樣，就是 `not-woken http-<碼>`，不查別台。「看不懂」＝ body 不是 JSON 物件、`state` 不是字串、`state` 不是 `idle`／`running` 又不是一個 token（規則同第 4 點），或 HTTP 層讀不懂（`http.client.HTTPException`）；這時還沒戳任何人，所以是 `not-woken`。本機的戳怎麼判讀見第 5 點，本機戳之後無論結果如何都不查別台。
 2. **找 pool-peer**：有設環境變數 `AICOMM_POOL_PEER` 就用它（只給測試和手動用；sidecar 開的 agent 的環境是白名單，拿不到這個變數）；沒設就從 PATH 找 `pool-peer`。找不到或不能執行，就是 `not-woken peer-unavailable`，不算錯。一律用 argv 呼叫，不經 shell。名字以 `-` 開頭的收件人不交給 `pool-peer`，直接 `not-woken bad-name`。
 3. **讀 `find`**：
    - rc 0：解析陣列，丟掉格式不對的項目，同一個 port 只留一筆。每一筆照第 4 點處理。如果一筆合格的都沒有，就是 `not-woken peer-bad-answer`。rc 0 時其他台可能還沒查到，aicomm 不另外標示：既然已經找到人，只回報找到的那幾台的結果。
@@ -38,7 +38,7 @@ aicomm 只用 `find --json` 和 `call … POST /agents/<id>/poke`。`find` 的�
    - rc 2、執行失敗（OSError）→ `not-woken peer-unavailable`。
    - rc 3，或 aicomm 自己的子行程逾時（`--timeout` 加 2 秒）→ `not-woken lookup-incomplete`。這是「不知道對方在不在」，但 aicomm **確定沒有戳任何人**，所以狀態是 `not-woken`，不是 `unknown`。
    - 其他 rc，或 rc 0 但 stdout 不是 JSON 陣列 → `not-woken peer-bad-answer`。
-4. **每一台怎麼處理**：`agent.state` 不是 `idle`／`running` 的 → `state-<state>`。port 不在 5200–5399 → `peer-port-out-of-range`，**不呼叫 `call`**（在 aicomm 這邊先擋，這樣這個情況不會和「連不到」都變成 rc 2 而分不出來）。其他的就戳：`pool-peer call <port> POST /agents/<quoted-id>/poke --timeout 5`，stdin 放和本機一樣的 body（固定句＋`interrupt`；只有對方是 `running` 且呼叫端帶 `--interrupt` 時 `interrupt` 才是真）。好幾台都可以戳時全部戳。
+4. **每一台怎麼處理**：`agent.state` 不是 `idle`／`running` 的 → `state-<state>`；但 `<state>` 要是一個 token（只含 `A-Z a-z 0-9 _ -`，至少一個字元），不是的話（含空白、換行、其他字元或空字串）拼不成一個原因碼，改成 `not-woken peer-bad-answer`（這時還沒戳）。這樣別台 sidecar 回的 `state` 不能讓 stderr 多出一行或多出一個欄位（§3.7「每個收件人剛好一行」）。port 不在 5200–5399 → `peer-port-out-of-range`，**不呼叫 `call`**（在 aicomm 這邊先擋，這樣這個情況不會和「連不到」都變成 rc 2 而分不出來）。其他的就戳：`pool-peer call <port> POST /agents/<quoted-id>/poke --timeout 5`，stdin 放和本機一樣的 body（固定句＋`interrupt`；只有對方是 `running` 且呼叫端帶 `--interrupt` 時 `interrupt` 才是真）。好幾台都可以戳時全部戳。
 5. **讀戳的結果（本機與跨機共用一張表）**：
    - **戳的 HTTP 回應**（本機是 sidecar 的回應；跨機是 `call` rc 0 時 stdout 的第一行與其後的 body）：200 → 這台叫醒了。409：body 的錯誤碼（JSON 物件的 `code`，沒有就 `error`，要是字串）是 `agent_not_running` → `not-woken agent-not-running`，是 `agent_awaiting_answer` → `not-woken awaiting-answer`，其他、沒有或 body 看不懂 → `not-woken http-409`。其他任何碼（含 200 以外的 2xx）→ `not-woken http-<碼>`。本機讀 409 的 body 時，`HTTPError` 的 body 要讀出來（讀不到當空的）。
    - **本機的傳輸結果**：逾時 → `unknown poke-timeout`。其他連線錯誤（`OSError`／`URLError`，含連線被拒、被重置）或 HTTP 層讀不懂（`http.client.HTTPException`）→ `unknown poke-error`：請求可能已經送出，aicomm 分不出來，所以不說 `not-woken`。

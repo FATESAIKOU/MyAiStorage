@@ -1,10 +1,12 @@
 """aicomm: send a message to another AI (and wake it), read what was sent to me.
 
 Two commands only. `send` writes the message with the `angareion` command - that is the
-delivery - and then, as a best effort, pokes the recipient on the local sidecar. `inbox`
-reads the messages addressed to me with `angareion read`/`wait`. Standard library only;
-aicomm talks to Angareion through its command line and to the sidecar through two of its
-HTTP endpoints (look up one agent, poke one agent), nothing else.
+delivery - and then, as a best effort, pokes the recipient on the local sidecar; a
+recipient that is not on this machine is looked up on the others through MyLinuxPool's
+`pool-peer` command (`find`, then `call <port> POST /agents/<id>/poke`). `inbox` reads the
+messages addressed to me with `angareion read`/`wait`. Standard library only; aicomm talks
+to Angareion and to `pool-peer` through their command lines and to the sidecar through two
+of its HTTP endpoints (look up one agent, poke one agent), nothing else.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import json
 import math
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -40,6 +43,20 @@ SIDECAR_ENV = "AICOMM_SIDECAR"
 
 GET_TIMEOUT = 3.0
 POKE_TIMEOUT = 5.0
+
+# The peer fallback (design of MyAiStorage#368 §2, §3.8). `pool-peer` is MyLinuxPool's
+# command for reaching the sidecar of another machine in the pool: `find` asks every
+# machine, `call <port>` makes one HTTP request there. Both take their own `--timeout`;
+# aicomm waits a little longer and then kills the child itself.
+POOL_PEER_ENV = "AICOMM_POOL_PEER"
+POOL_PEER_COMMAND = "pool-peer"
+PEER_FIND_TIMEOUT = 10
+PEER_CALL_TIMEOUT = 5
+PEER_CHILD_GRACE = 2
+# The ports a pool sidecar listens on. aicomm rejects anything else before calling, so
+# "out of range" does not turn into `pool-peer`'s rc 2 ("cannot connect") and stay hidden.
+PEER_PORT_MIN = 5200
+PEER_PORT_MAX = 5399
 
 # The poke carries this and nothing else: never the sender, the body, a ticket or an id.
 WAKE_TEXT = "有新訊息：請執行 aicomm inbox。"
@@ -85,7 +102,7 @@ UNKNOWN_CODES = frozenset({
 })
 
 # The three kinds of a `wake:` line, and the woken code of the local sidecar. A woken code
-# is `local` or `peer:<port>[,<port>…]`; the peer form has no producer before #368 PR-2.
+# is `local` or `peer:<port>[,<port>…]` (the ports of the sidecars on other machines).
 WAKE_WOKEN = "woken"
 WAKE_NOT_WOKEN = "not-woken"
 WAKE_UNKNOWN = "unknown"
@@ -230,8 +247,8 @@ class _Wake(NamedTuple):
     """One recipient's result: the kind, the reason code (or the wake target), and the name.
 
     `code` is `local` or `peer:<port>[,<port>…]` when woken, and a reason code otherwise.
-    `line` is the only place that spells the one stderr line; PR-2 merges several peer
-    answers from `kind` and `code`, never by parsing that line.
+    `line` is the only place that spells the one stderr line; the peer fallback merges
+    several machines' answers from `kind`, `code` and `interrupt`, never by parsing it.
     """
 
     kind: str
@@ -306,15 +323,174 @@ def _poke_answer(status: int, body: bytes) -> tuple[str, str]:
     return WAKE_NOT_WOKEN, f"{REASON_HTTP}{status}"
 
 
-def _wake_elsewhere(name: str, interrupt: bool) -> _Wake:
-    """The peer fallback would run here: `pool-peer find` plus `call` (PR-2 of #368).
+def _peer_executable() -> str | None:
+    """The `pool-peer` to run: the test hook first, else the one on PATH; None if neither."""
+    return os.environ.get(POOL_PEER_ENV) or shutil.which(POOL_PEER_COMMAND)
 
-    PR-1 has no peer fallback, which is the same result as "no `pool-peer` on this
-    machine": the recipient is not on this sidecar and nobody else was asked, so it is
-    `not-woken peer-unavailable`. PR-2 replaces this body; its call sites (404, lookup
-    timeout, sidecar unreachable) and `interrupt` stay as they are.
+
+def _peer_child_limit(seconds: int) -> float:
+    """How long aicomm waits for one `pool-peer` run: what it gave, plus a grace."""
+    return seconds + PEER_CHILD_GRACE
+
+
+def _run_pool_peer(executable: str, args: list[str], stdin_text: str, limit: float):
+    """Run one `pool-peer` argv - never a shell - and return the finished process.
+
+    `errors="replace"`: an answer in bytes that are not UTF-8 is an answer aicomm cannot
+    read, and an unreadable one is classified by the ordinary paths (`find` →
+    `peer-bad-answer`, `call` → `peer-bad-answer`), never an internal error.
     """
-    return _not_woken(name, REASON_PEER_UNAVAILABLE)
+    return subprocess.run(
+        [executable, *args],
+        input=stdin_text, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=limit,
+    )
+
+
+def _parse_peers(stdout: str) -> list[tuple[int, str]] | None:
+    """The machines `pool-peer find` reported, or None when the answer cannot be read.
+
+    Each usable item is a sidecar `port` (an integer, and not a bool) and the `agent.state`
+    of that machine. Anything else is dropped; the first item of a port wins. An empty
+    result means the answer named nobody usable, which is as unreadable as a broken one.
+    """
+    try:
+        answer = json.loads(stdout)
+    except ValueError:
+        return None
+    if not isinstance(answer, list):
+        return None
+    peers: list[tuple[int, str]] = []
+    seen: set[int] = set()
+    for item in answer:
+        if not isinstance(item, dict):
+            continue
+        port = item.get("port")
+        if isinstance(port, bool) or not isinstance(port, int):
+            continue
+        agent = item.get("agent")
+        state = agent.get("state") if isinstance(agent, dict) else None
+        if not isinstance(state, str):
+            continue
+        if port in seen:
+            continue
+        seen.add(port)
+        peers.append((port, state))
+    return peers or None
+
+
+def _lookup_peers(executable: str, name: str) -> tuple[str | None, list[tuple[int, str]]]:
+    """`pool-peer find <name> --json`; returns (reason code, []) or (None, the machines)."""
+    args = ["find", name, "--json", "--timeout", str(PEER_FIND_TIMEOUT)]
+    try:
+        proc = _run_pool_peer(executable, args, "", _peer_child_limit(PEER_FIND_TIMEOUT))
+    except subprocess.TimeoutExpired:  # nobody was poked: this is "not woken", not "unknown"
+        return REASON_LOOKUP_INCOMPLETE, []
+    except OSError:  # the child never started
+        return REASON_PEER_UNAVAILABLE, []
+    if proc.returncode == 0:
+        peers = _parse_peers(proc.stdout)
+        if peers is None:
+            return REASON_PEER_BAD_ANSWER, []
+        return None, peers
+    if proc.returncode == 1:
+        return REASON_NOT_FOUND, []
+    if proc.returncode == 2:
+        return REASON_PEER_UNAVAILABLE, []
+    if proc.returncode == 3:
+        return REASON_LOOKUP_INCOMPLETE, []
+    return REASON_PEER_BAD_ANSWER, []  # an rc outside the contract
+
+
+def _call_answer(stdout: str) -> tuple[int | None, bytes]:
+    """Read `pool-peer call`'s stdout: the whole first line is the HTTP status, then the body.
+
+    None means the first line is not an HTTP status at all - the peer answered something,
+    so the poke may have gone through.
+    """
+    first, _, rest = stdout.partition("\n")
+    # The whole first line, not its first token: `200 OK` is not a status line (design §2).
+    head = first.strip()
+    if not re.fullmatch(r"[0-9]{3}", head):
+        return None, b""
+    status = int(head)
+    if not 100 <= status <= 599:
+        return None, b""
+    return status, rest.encode("utf-8")
+
+
+def _poke_peer(executable: str, name: str, port: int, state: str, interrupt: bool) -> _Wake:
+    """Poke one machine's sidecar through `pool-peer call`, with the local poke's body."""
+    payload = {"text": WAKE_TEXT, "interrupt": bool(interrupt and state == "running")}
+    quoted = urllib.parse.quote(name, safe="")
+    args = ["call", str(port), "POST", f"/agents/{quoted}/poke", "--timeout", str(PEER_CALL_TIMEOUT)]
+    try:
+        proc = _run_pool_peer(executable, args, json.dumps(payload), _peer_child_limit(PEER_CALL_TIMEOUT))
+    except subprocess.TimeoutExpired:  # the request may have arrived: never resend
+        return _unknown(name, REASON_POKE_TIMEOUT)
+    except OSError:  # the child never started
+        return _not_woken(name, REASON_PEER_UNAVAILABLE)
+    if proc.returncode == 2:
+        return _not_woken(name, REASON_PEER_UNAVAILABLE)
+    if proc.returncode == 3:
+        return _unknown(name, REASON_POKE_TIMEOUT)
+    if proc.returncode != 0:  # `pool-peer` did not answer as agreed: was it sent?
+        return _unknown(name, REASON_PEER_BAD_ANSWER)
+    status, body = _call_answer(proc.stdout)
+    if status is None:
+        return _unknown(name, REASON_PEER_BAD_ANSWER)
+    kind, code = _poke_answer(status, body)  # the same table as the local poke
+    if kind == WAKE_WOKEN:
+        return _woken(name, payload["interrupt"], f"peer:{port}")
+    return _Wake(kind, code, name)
+
+
+def _merge_peers(name: str, answers: list[tuple[int, _Wake]]) -> _Wake:
+    """One recipient on several machines becomes one result (design of #368 §3.7).
+
+    Any 200 is `woken` (the successful ports, in order); otherwise any `unknown` wins;
+    otherwise `not-woken`. A reason code comes from the lowest port that has one.
+    """
+    ordered = sorted(answers, key=lambda pair: pair[0])
+    if not ordered:  # cannot happen with a parsed answer; keep one line per recipient anyway
+        return _not_woken(name, REASON_PEER_BAD_ANSWER)
+    woken = [(port, answer) for port, answer in ordered if answer.woken]
+    if woken:
+        ports = ",".join(str(port) for port, _ in woken)
+        return _woken(name, any(answer.interrupt for _, answer in woken), f"peer:{ports}")
+    for _, answer in ordered:
+        if answer.kind == WAKE_UNKNOWN:
+            return _unknown(name, answer.code)
+    return _not_woken(name, ordered[0][1].code)
+
+
+def _wake_elsewhere(name: str, interrupt: bool) -> _Wake:
+    """Look on the other machines through `pool-peer` and poke every sidecar that can take it.
+
+    Runs only when the local sidecar said 404, could not be reached, or did not answer in
+    time - nobody was poked yet, so every outcome here is about the peers alone. The
+    peer's own output is never relayed: only a reason code reaches the `wake:` line.
+    """
+    if name.startswith("-"):
+        # The name would be read as an option by `pool-peer`: refuse before handing it over.
+        return _not_woken(name, REASON_BAD_NAME)
+    executable = _peer_executable()
+    if executable is None:
+        return _not_woken(name, REASON_PEER_UNAVAILABLE)
+    reason, peers = _lookup_peers(executable, name)
+    if reason is not None:
+        return _not_woken(name, reason)
+    answers: list[tuple[int, _Wake]] = []
+    for port, state in peers:
+        if state not in WAKEABLE_STATES:
+            # `state-<state>` must stay one token on the one line this recipient gets.
+            code = f"{REASON_STATE}{state}" if STATE_TOKEN_RE.fullmatch(state) else REASON_PEER_BAD_ANSWER
+            answers.append((port, _not_woken(name, code)))
+        elif not PEER_PORT_MIN <= port <= PEER_PORT_MAX:
+            answers.append((port, _not_woken(name, REASON_PEER_PORT_OUT_OF_RANGE)))
+        else:
+            answers.append((port, _poke_peer(executable, name, port, state, interrupt)))
+    return _merge_peers(name, answers)
 
 
 def _wake_one(base: str, name: str, interrupt: bool) -> _Wake:
