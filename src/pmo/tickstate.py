@@ -244,6 +244,12 @@ def tick_path(state_dir: Path) -> Path:
     return Path(state_dir) / STATE_FILE_NAME
 
 
+def lock_path(path: Path) -> Path:
+    """The flock file next to one tick state file (design §3.4)."""
+    path = Path(path)
+    return path.with_name(f"{path.name}.lock")
+
+
 def commit(
     path: Path,
     *,
@@ -266,7 +272,7 @@ def commit(
     before anything is written.
     """
     path = Path(path)
-    lock = path.with_name(f"{path.name}.lock")
+    lock = lock_path(path)
     with _lock.path_lock(lock, timeout=timeout):
         state = load_or_empty(path)
         for write in writes:

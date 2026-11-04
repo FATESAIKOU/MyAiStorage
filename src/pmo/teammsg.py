@@ -16,6 +16,7 @@ import re
 from typing import Iterable, Mapping
 
 from . import inbox, teamstate
+from ._lock import LockTimeout
 from .runtime import Ctx
 from .timeutil import iso_utc
 
@@ -65,14 +66,30 @@ def is_ticket_ack(content: str, ticket: str) -> bool:
     return re.search(re.escape(str(ticket)) + r"(?!\d)", text) is not None
 
 
-def process_team_messages(ctx: Ctx, messages: Iterable, seen: set | None = None) -> list[str]:
+def process_team_messages(
+    ctx: Ctx,
+    messages: Iterable,
+    seen: set | None = None,
+    *,
+    lock_timeout: float | None = None,
+    lock_skipped: set[str] | None = None,
+) -> list[str]:
     """處理非秘書常規團隊訊息（比對 ack、產生事件字串）。
 
     Msgs the dispatch round already claimed (the secretary's work messages on
     the dispatch channel) are skipped, not printed twice; everything else —
     team PM chatter, other channels — is the PMO's to read (D-13).
+
+    `lock_timeout` is tick's (#358 T5-3): when given, a team whose state lock
+    cannot be got within it gets one `[warn]` and is skipped for the rest of
+    the round (later messages from it do not wait on the lock again). The
+    default `None` keeps `pmo inbox read` waiting as before.
+    `lock_skipped` is tick's round-level set: a team already listed there is
+    skipped without touching the lock (a later step already reported it), and
+    here a timeout adds the team so the later steps skip it too.
     """
     events: list[str] = []
+    skipped = lock_skipped if lock_skipped is not None else set()
     for raw in messages:
         msg = raw if isinstance(raw, dict) else inbox.as_dict(raw)
         msg_id = str(msg.get("id") or "")
@@ -95,16 +112,24 @@ def process_team_messages(ctx: Ctx, messages: Iterable, seen: set | None = None)
             if team.pm != sender:
                 continue
             key = team.key
+            if key in skipped:
+                continue
             # 讀、比對、寫都在同一把 team 鎖內，並在鎖內重讀：`pmo send` 的
             # `_record_dispatch` 也可能正在改同一個檔（arch review 中-1）。
-            with teamstate.state_lock(ctx.state_dir, key):
-                st = teamstate.load_state(ctx.state_dir, key)
-                ticket = str(st.get("ticket") or "")
-                if st.get("closed", True) or not ticket or st.get("ack_at"):
-                    continue
-                if is_ticket_ack(content, ticket):
-                    st["ack_at"] = iso_utc(ctx.deps.now())
-                    st["updated_at"] = st["ack_at"]
-                    teamstate.save_state(ctx.state_dir, key, st)
-                    events.append(f"[ack] {team.pm} 回了「收到 {ticket}」")
+            try:
+                with teamstate.state_lock(ctx.state_dir, key, timeout=lock_timeout):
+                    st = teamstate.load_state(ctx.state_dir, key)
+                    ticket = str(st.get("ticket") or "")
+                    if st.get("closed", True) or not ticket or st.get("ack_at"):
+                        continue
+                    if is_ticket_ack(content, ticket):
+                        st["ack_at"] = iso_utc(ctx.deps.now())
+                        st["updated_at"] = st["ack_at"]
+                        teamstate.save_state(ctx.state_dir, key, st)
+                        events.append(f"[ack] {team.pm} 回了「收到 {ticket}」")
+            except LockTimeout:
+                # tick 這一輪跳過它，其他 team 照做（#358 T5-3）；同一輪之後
+                # 來自同一個 team 的信也不再等鎖。
+                skipped.add(key)
+                ctx.log(teamstate.lock_timeout_warning(key, lock_timeout))
     return events

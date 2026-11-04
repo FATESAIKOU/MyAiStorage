@@ -27,6 +27,10 @@ them with `GET /agents/<pm>` and writes them back, and `pmo open` records the
 session the sidecar returned (#373 低-1: `NEED_REOPEN … session=…` reads it).
 A file that never had them reads `None` and is not given them (Q-9).
 
+`state` is the sidecar's state, or tick's own mark `absent` (tick writes it
+when `GET /agents/<pm>` answers 404; #358 T5-3). `absent` is not a sidecar
+state: 它表示「tick 看不到這個 agent」，下一次查得到時會被 sidecar 的回答蓋掉。
+
 `version` is optional here and nowhere else: MyPMO's team state files carry no
 `version`, and this file has to read them unchanged (architect review 中-1).
 A missing `version` reads as 1 and is not written back, so the file does not
@@ -194,12 +198,26 @@ def lock_file(state_dir: Path, key: str) -> Path:
     return state_file(state_dir, key).with_name(f"{key}.json.lock")
 
 
-def state_lock(state_dir: Path, key: str) -> AbstractContextManager[None]:
+def state_lock(
+    state_dir: Path, key: str, *, timeout: float | None = None
+) -> AbstractContextManager[None]:
     """跨進程檔案鎖（fcntl.flock）＋進程內可重入鎖，綁在一個 team 的狀態檔上。
 
     保護 `<key>.json` 的讀改寫窗口：`dispatch._record_dispatch` 與
     `teammsg.process_team_messages` 都在鎖內重讀再改，兩個寫入者交錯時不會
     互相蓋掉（arch review 中-1）。同一行程對不同的 team key 拿鎖各自獨立。
     機制在 `pmo._lock.path_lock`（#358）：這裡只決定鎖檔路徑，是薄殼。
+
+    `timeout=None`（既有呼叫的預設）阻塞到取得；tick 給秒數，等不到丟
+    `_lock.LockTimeout`，由步驟接住、`[warn]` 跳過該 team（#358 T5-3）。
     """
-    return _lock.path_lock(lock_file(state_dir, key))
+    return _lock.path_lock(lock_file(state_dir, key), timeout=timeout)
+
+
+def lock_timeout_warning(key: str, timeout: float) -> str:
+    """One `[warn]` line for a team lock tick could not get (skips that team).
+
+    The wording is the architect's (2026-11-04 T5-3): 等不到就明說幾秒、這
+    一輪跳過哪個 team，而不是讓 `LockTimeout` 變成 traceback。
+    """
+    return f"[warn] {key} 的狀態鎖等不到（{timeout:g} 秒），這一輪跳過它"

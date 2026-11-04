@@ -100,7 +100,13 @@ def _stage_error(stage: str, ids: list[str], error: Exception) -> str:
     )
 
 
-def read_round(ctx: Ctx, *, handoffs: list[str] | None = None) -> list[str]:
+def read_round(
+    ctx: Ctx,
+    *,
+    handoffs: list[str] | None = None,
+    team_lock_timeout: float | None = None,
+    lock_skipped: set[str] | None = None,
+) -> list[str]:
     """One inbox round: 身分守門 → 預檢 → 讀信 → 秘書階段 → 團隊訊息階段。
 
     Returns the event lines; raises `SchemaError` when a state file is damaged
@@ -110,6 +116,10 @@ def read_round(ctx: Ctx, *, handoffs: list[str] | None = None) -> list[str]:
     `handoffs` is passed through to `inbox.process_messages`: tick hands in its
     collection list so T5-3 can record the group requests without parsing the
     event text. `None` (every existing caller) keeps the old behaviour.
+    `team_lock_timeout` is tick's team-lock wait (#358 T5-3): the team-message
+    stage then skips a team whose lock it cannot get, with a `[warn]`; `None`
+    keeps `pmo inbox read` waiting as before. `lock_skipped` is tick's
+    round-level set of teams already skipped, shared with the later steps.
     """
     assert_pmo_identity(ctx.config)
     precheck(ctx)
@@ -121,7 +131,15 @@ def read_round(ctx: Ctx, *, handoffs: list[str] | None = None) -> list[str]:
     except (SchemaError, PortError, OSError) as error:
         events.append(_stage_error(SECRETARY_STAGE, secretary_candidates(ctx, messages), error))
     try:
-        events.extend(teammsg.process_team_messages(ctx, messages, seen=None))
+        events.extend(
+            teammsg.process_team_messages(
+                ctx,
+                messages,
+                seen=None,
+                lock_timeout=team_lock_timeout,
+                lock_skipped=lock_skipped,
+            )
+        )
     except (SchemaError, PortError, OSError) as error:
         events.append(_stage_error(TEAM_STAGE, team_candidates(ctx, messages), error))
     return events

@@ -36,11 +36,12 @@ state is read, while a step's failure is not a reason to exit 2.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from functools import partial
 from typing import Callable, Iterable
 
-from . import inbox, round as round_module, teammsg, teamstate, tickstate
+from . import handoff, inbox, round as round_module, teammsg, teamstate, tickstate
+from ._lock import LockTimeout
 from .config import Team
 from .errors import SchemaError
 from .ports import (
@@ -51,7 +52,7 @@ from .ports import (
     sidecar_code,
 )
 from .runtime import Ctx, assert_pmo_identity, one_line, sidecar_port
-from .timeutil import iso_utc
+from .timeutil import iso_utc, parse_ts
 
 __all__ = ["Step", "TickRun", "tick", "tick_steps"]
 
@@ -64,6 +65,11 @@ WORKER_POLL_SECONDS = 10 * 60.0
 
 #: How long `commit` waits for `tick.json.lock` (design §3.4: 最多 10 秒).
 LOCK_TIMEOUT_SECONDS = 10.0
+
+#: How long tick waits for one team's state lock (design §3.4, architect
+#: 2026-11-04 T5-3: 「tick 拿 team 鎖最多等 10 秒，逾時 `[warn]` 跳過該 team」).
+#: The lock is only taken around a local read-modify-write, never around HTTP.
+TEAM_LOCK_TIMEOUT_SECONDS = 10.0
 
 #: 「現在 − `last_tick_at`」超過想要間隔的幾倍就警告 (design §3.4).
 STALE_FACTOR = 3
@@ -79,28 +85,6 @@ WATCHDOG_POKE_TEXT = (
 
 #: The two step names that read as sentences in a failure line.
 READ_STEP = "收信"
-
-
-def _parse_ts(value: object) -> datetime | None:
-    """One state timestamp as an aware datetime; unreadable ones are `None`.
-
-    The files hold `iso_utc`'s shape (`…Z`), but MyPMO also writes them, so a
-    plain `+00:00` is read the same way; a value without a zone is taken as
-    UTC. An unreadable value is not damage (the schema only types it as a
-    string): the step that needs the moment just does not act on it.
-    """
-    if not isinstance(value, str) or not value.strip():
-        return None
-    text = value.strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        moment = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return moment
 
 
 def _should_be_running(st: dict) -> bool:
@@ -133,6 +117,9 @@ class TickRun:
     writes: list[tickstate.Mutation] = field(default_factory=list)
     due: list[datetime] = field(default_factory=list)
     handoffs_seen: list[str] = field(default_factory=list)
+    #: Teams whose state lock could not be got this round: one `[warn]` each,
+    #: and the later steps skip them (#358 T5-3).
+    lock_skipped: set[str] = field(default_factory=set)
     after: tickstate.TickState | None = None
     #: Per round cache of `GET /agents/<pm>`: one answer per (address, pm).
     agent_cache: dict[tuple[str, str], "AgentRecord | SidecarError"] = field(
@@ -205,7 +192,7 @@ def _warn_if_stale(run: TickRun) -> None:
     only types it as a string).
     """
     every = run.snapshot.wake.every
-    last = _parse_ts(run.snapshot.last_tick_at)
+    last = parse_ts(run.snapshot.last_tick_at)
     if every is None or last is None:
         return
     try:
@@ -269,11 +256,11 @@ def _earliest_due(run: TickRun) -> datetime | None:
     moments = list(run.due)
     state = run.after if run.after is not None else run.snapshot
     for entry in state.handoffs.values():
-        moment = _parse_ts(entry.next_due_at)
+        moment = parse_ts(entry.next_due_at)
         if moment is not None:
             moments.append(moment)
     for poll in state.worker_poll.values():
-        moment = _parse_ts(poll.next_due_at)
+        moment = parse_ts(poll.next_due_at)
         if moment is not None:
             moments.append(moment)
     return min(moments) if moments else None
@@ -292,7 +279,12 @@ def step_read_round(run: TickRun) -> None:
     is the back end failing before/at the read: `_run_step` prints `[warn]`
     and the round's agent comparison still runs (§2.3).
     """
-    events = round_module.read_round(run.ctx, handoffs=run.handoffs_seen)
+    events = round_module.read_round(
+        run.ctx,
+        handoffs=run.handoffs_seen,
+        team_lock_timeout=TEAM_LOCK_TIMEOUT_SECONDS,
+        lock_skipped=run.lock_skipped,
+    )
     run.events.extend(events)
 
 
@@ -381,9 +373,10 @@ def _absent_events(team: Team, st: dict) -> list[str]:
     """The 404 branch: `NEED_REOPEN` while the team should be running (ruling 10).
 
     The recorded `state` must already be something else:「同一個 team 恢復之前
-    不重印」. An interactive team gets `tui=true` (the current tool's line; it
-    takes no `--session`), a `-p` team the session to resume (`none` when the
-    state never recorded one).
+    不重印」. `state="absent"` is tick's own mark for this 404 — it is not a
+    sidecar state, and the next successful lookup overwrites it. An interactive
+    team gets `tui=true` (the current tool's line; it takes no `--session`), a
+    `-p` team the session to resume (`none` when the state never recorded one).
     """
     old = st.get("state")
     if old == "absent":
@@ -408,7 +401,9 @@ def _write_team_state(run: TickRun, team: Team, fields: dict) -> None:
     every field already holds the value (the round would otherwise rewrite the
     file each time for no reason).
     """
-    with teamstate.state_lock(run.ctx.state_dir, team.key):
+    with teamstate.state_lock(
+        run.ctx.state_dir, team.key, timeout=TEAM_LOCK_TIMEOUT_SECONDS
+    ):
         st = teamstate.load_state(run.ctx.state_dir, team.key)
         if all(st.get(key) == value for key, value in fields.items()):
             return
@@ -432,33 +427,65 @@ def _record_agent(run: TickRun, team: Team, record: AgentRecord) -> None:
     _write_team_state(run, team, fields)
 
 
+def _note_lock_timeout(run: TickRun, team: Team) -> None:
+    """One team's single `[warn]` for a state lock it could not get this round.
+
+    The team goes into `run.lock_skipped`, so the later steps do not wait on the
+    same lock again and do not print the same line: 「這一輪跳過它」(architect
+    2026-11-04 T5-3).
+    """
+    if team.key in run.lock_skipped:
+        return
+    run.lock_skipped.add(team.key)
+    run.ctx.log(teamstate.lock_timeout_warning(team.key, TEAM_LOCK_TIMEOUT_SECONDS))
+
+
 def step_agents(run: TickRun) -> None:
     """Compare every local team PM's seat with the team state (②; §2.3).
 
     A sidecar failure is a `[warn]` and the other teams are still compared
     (§2.3's「部分失敗」); a 404 is the absent branch. The answer is only
     printed when it differs from the state, then written back, so the next
-    round is quiet (ruling 1).
+    round is quiet (ruling 1). A team whose state lock cannot be got within
+    `TEAM_LOCK_TIMEOUT_SECONDS` gets a `[warn]` and is skipped this round
+    (architect 2026-11-04 T5-3); the next team still runs.
     """
     for team in _each_local_team(run):
-        # `_precheck` already read every team state; damage appearing now is
-        # the `[要本人處理]` shape `_run_step` gives a `SchemaError`.
-        st = teamstate.load_state(run.ctx.state_dir, team.key)
-        answer = _agent_of(run, team)
-        if isinstance(answer, SidecarError):
-            if answer.status == 404:
-                events = _absent_events(team, st)
-                run.events.extend(events)
-                if events:
-                    # Recording `absent` is what stops the line from repeating
-                    # (ruling 1); a team that was never seen and is not
-                    # supposed to be running gets no event and no file.
-                    _write_team_state(run, team, {"state": "absent"})
-            else:
-                run.ctx.log(f"[warn] {team.key}：{sidecar_code(answer)}")
+        if team.key in run.lock_skipped:
             continue
-        run.events.extend(_state_events(team, answer, st))
-        _record_agent(run, team, answer)
+        try:
+            events = _compare_agent(run, team)
+        except LockTimeout:
+            _note_lock_timeout(run, team)
+            continue
+        run.events.extend(events)
+
+
+def _compare_agent(run: TickRun, team: Team) -> list[str]:
+    """One team's ② comparison; writes are done before the events are returned.
+
+    Returning the lines only after the write means a team skipped by a lock
+    timeout does not print a `[state]` line it could not record (the next round
+    would print it again).
+    """
+    # `_precheck` already read every team state; damage appearing now is
+    # the `[要本人處理]` shape `_run_step` gives a `SchemaError`.
+    st = teamstate.load_state(run.ctx.state_dir, team.key)
+    answer = _agent_of(run, team)
+    if isinstance(answer, SidecarError):
+        if answer.status == 404:
+            events = _absent_events(team, st)
+            if events:
+                # Recording `absent` is what stops the line from repeating
+                # (ruling 1); a team that was never seen and is not supposed
+                # to be running gets no event and no file.
+                _write_team_state(run, team, {"state": "absent"})
+            return events
+        run.ctx.log(f"[warn] {team.key}：{sidecar_code(answer)}")
+        return []
+    events = _state_events(team, answer, st)
+    _record_agent(run, team, answer)
+    return events
 
 
 # --------------------------------------------------------------------------- #
@@ -474,7 +501,9 @@ def _claim(run: TickRun, team: Team, field_name: str) -> bool:
     cannot both win, so only one pokes. A lost claim returns `False` and the
     loser stays quiet.
     """
-    with teamstate.state_lock(run.ctx.state_dir, team.key):
+    with teamstate.state_lock(
+        run.ctx.state_dir, team.key, timeout=TEAM_LOCK_TIMEOUT_SECONDS
+    ):
         st = teamstate.load_state(run.ctx.state_dir, team.key)
         if st.get(field_name) is not None:
             return False
@@ -543,38 +572,50 @@ def step_watchdog(run: TickRun) -> None:
     2); a state with neither is not enough to act on. `ack_at` ends it. When
     the run has been suspended for longer than the interval both marks are
     still made at most once each (the claims), never a burst: the poke first,
-    the escalation once its own deadline (poke + 10 minutes) has passed.
+    the escalation once its own deadline (poke + 10 minutes) has passed. A team
+    whose state lock cannot be got within `TEAM_LOCK_TIMEOUT_SECONDS` gets a
+    `[warn]` and is skipped this round (architect 2026-11-04 T5-3).
     """
     for team in teammsg.active_teams(run.ctx.config):
-        st = teamstate.load_state(run.ctx.state_dir, team.key)
-        if not _should_be_running(st) or st.get("ack_at"):
+        if team.key in run.lock_skipped:
             continue
-        ticket = str(st.get("ticket") or "").strip()
-        base = _parse_ts(st.get("received_at") or st.get("dispatched_at"))
-        if base is None:
-            continue
-        poke_at = _parse_ts(st.get("ack_poke_at"))
-        if poke_at is None:
-            deadline = base + timedelta(seconds=WATCHDOG_SECONDS)
-            if run.now < deadline:
-                run.due.append(deadline)
-                continue
-            if _claim(run, team, "ack_poke_at"):
-                _poke(run, team, st, ticket, base)
-            # Whether this round won the claim or lost it to a parallel tick,
-            # the escalation is 10 minutes after that poke.
-            escalate_due = run.now + timedelta(seconds=WATCHDOG_SECONDS)
-            if st.get("ack_escalated_at") is None:
-                run.due.append(escalate_due)
-            continue
-        if st.get("ack_escalated_at"):
-            continue
-        escalate_due = poke_at + timedelta(seconds=WATCHDOG_SECONDS)
-        if run.now < escalate_due:
+        try:
+            _watchdog_for(run, team)
+        except LockTimeout:
+            _note_lock_timeout(run, team)
+
+
+def _watchdog_for(run: TickRun, team: Team) -> None:
+    """One team's ③ decision and its (claimed) poke or escalation."""
+    st = teamstate.load_state(run.ctx.state_dir, team.key)
+    if not _should_be_running(st) or st.get("ack_at"):
+        return
+    ticket = str(st.get("ticket") or "").strip()
+    base = parse_ts(st.get("received_at") or st.get("dispatched_at"))
+    if base is None:
+        return
+    poke_at = parse_ts(st.get("ack_poke_at"))
+    if poke_at is None:
+        deadline = base + timedelta(seconds=WATCHDOG_SECONDS)
+        if run.now < deadline:
+            run.due.append(deadline)
+            return
+        if _claim(run, team, "ack_poke_at"):
+            _poke(run, team, st, ticket, base)
+        # Whether this round won the claim or lost it to a parallel tick,
+        # the escalation is 10 minutes after that poke.
+        escalate_due = run.now + timedelta(seconds=WATCHDOG_SECONDS)
+        if st.get("ack_escalated_at") is None:
             run.due.append(escalate_due)
-            continue
-        if _claim(run, team, "ack_escalated_at"):
-            _escalate(run, team, ticket)
+        return
+    if st.get("ack_escalated_at"):
+        return
+    escalate_due = poke_at + timedelta(seconds=WATCHDOG_SECONDS)
+    if run.now < escalate_due:
+        run.due.append(escalate_due)
+        return
+    if _claim(run, team, "ack_escalated_at"):
+        _escalate(run, team, ticket)
 
 
 def _with_poll(state: tickstate.TickState, *, key: str, now: datetime) -> tickstate.TickState:
@@ -610,12 +651,27 @@ def step_worker_poll(run: TickRun) -> None:
         if not _should_be_running(st):
             continue
         entry = run.snapshot.worker_poll.get(team.key)
-        due = _parse_ts(entry.next_due_at) if entry is not None else None
+        due = parse_ts(entry.next_due_at) if entry is not None else None
         if due is not None and run.now < due:
             run.due.append(due)
             continue
         run.events.append(f"[worker-action] {team.key} poll")
         run.writes.append(partial(_with_poll, key=team.key, now=run.now))
+
+
+# --------------------------------------------------------------------------- #
+# 交接出去的群請求（插槽 A／B；#358 T5-3、design §3.2.1／§3.4）
+# --------------------------------------------------------------------------- #
+
+
+def step_handoffs(run: TickRun) -> None:
+    """插槽 A：把這一輪讀到的群請求 id 記進 `handoffs`（Q-9 (a)）。"""
+    handoff.record(run)
+
+
+def step_group_sweep_due(run: TickRun) -> None:
+    """插槽 B：到期的交接提醒 `[group-sweep-due]`（design §3.2.1）。"""
+    handoff.sweep(run)
 
 
 # --------------------------------------------------------------------------- #
@@ -649,8 +705,10 @@ tick_steps: tuple[Step, ...] = (
     Step("agents", step_agents),
     Step("watchdog", step_watchdog),
     Step("worker_poll", step_worker_poll),
-    # ← T5-3 插槽 A：① 之後記 handoffs（讀 run.handoffs_seen）
-    # ← T5-3 插槽 B：[group-sweep-due]（到期才印、往後推）
+    # 插槽 A：① 之後記 handoffs（讀 run.handoffs_seen）
+    Step("handoffs", step_handoffs),
+    # 插槽 B：[group-sweep-due]（到期才印、往後推）
+    Step("group_sweep", step_group_sweep_due),
     # ← T5-4 插槽：job 健康（GET /jobs，只碰 pmo_sidecar）
     Step("commit", step_commit, fatal=True),
 )

@@ -22,7 +22,7 @@ import sys
 from typing import Optional
 
 from . import config as config_module
-from . import decision, dispatch, inbox, ledger, ops, paths, rebuild, sanitize, tick
+from . import decision, dispatch, handoff, inbox, ledger, ops, paths, rebuild, sanitize, tick
 from . import open as open_module
 from ._lock import LockTimeout
 from .adapters import Aicomm, Angareion, GitHub, Sidecar
@@ -91,6 +91,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp_irb.add_argument("--since", default=None, help="只重建這個時刻（含）之後的信（遞給後端的 log）")
     sp_irb.add_argument("--dry-run", action="store_true", help="只算差異，不寫帳本")
 
+    sp_ihc = inbox_sub.add_parser(
+        "handoff-close",
+        help="結案一筆交接出去的群請求（之後不再印 [group-sweep-due]）",
+    )
+    sp_ihc.add_argument("handoff_id", help="群請求的 id（angareion 訊息 id）")
+
     sp_check = sub.add_parser("check", help="派工前的本機預檢：逐項印 OK／FAIL（有 FAIL 回 1）")
     sp_check.add_argument("team", help="team 的 key（<專案>-<team 代號>）")
 
@@ -149,6 +155,8 @@ def cmd_inbox(ctx: Ctx, args: argparse.Namespace) -> int:
         return cmd_inbox_decision_send(ctx, args)
     if subcmd == "rebuild":
         return cmd_inbox_rebuild(ctx, args)
+    if subcmd == "handoff-close":
+        return cmd_inbox_handoff_close(ctx, args)
     raise UsageError(f"未知的 inbox 子指令：{subcmd}")
 
 
@@ -350,6 +358,33 @@ def cmd_inbox_rebuild(ctx: Ctx, args: argparse.Namespace) -> int:
     )
     if args.dry_run:
         ctx.emit("[rebuild] [dry-run] 只算差異，帳本未寫")
+    return 0
+
+
+def cmd_inbox_handoff_close(ctx: Ctx, args: argparse.Namespace) -> int:
+    """`pmo inbox handoff-close ‹id›`：結案一筆交接出去的群請求（design §3.2）。
+
+    刪掉 `tick.json` 的 `handoffs[id]`，之後 tick 不再為它印
+    `[group-sweep-due]`。結束碼照表：0 已刪；1 查無 id（沿用 `UsageError`，
+    和 `inbox ack` 查無工作 ID 同一個形狀）；2 `tick.json` 壞、寫不進去或
+    `tick.json.lock` 等不到（含等不到時 `[warn]`，設計 §3.4）。讀改寫在
+    `handoff.close`（鎖內重讀再改）。
+    """
+    handoff_id = str(args.handoff_id).strip()
+    try:
+        found = handoff.close(ctx.state_dir, handoff_id)
+    except LockTimeout:
+        ctx.log("[warn] tick.json 的鎖等不到（10 秒），沒有結案，下一輪再試")
+        return 2
+    except SchemaError as error:
+        ctx.emit(f"[要本人處理] {inbox.one_line_for_event(error)}")
+        return 2
+    except OSError as error:
+        ctx.emit(f"[要本人處理] tick 狀態寫不進去：{inbox.one_line_for_event(error)}")
+        return 2
+    if not found:
+        raise UsageError(f"tick 狀態裡沒有這個交接 id：{handoff_id}")
+    ctx.emit(f"[handoff-close] {handoff_id} 已結案，之後不再印 [group-sweep-due]")
     return 0
 
 
@@ -709,7 +744,9 @@ def cmd_tick(ctx: Ctx, _args: argparse.Namespace | None = None) -> int:
         )
         return 2
     except SchemaError as error:
-        ctx.log(f"[要本人處理] {inbox.one_line_for_event(error)}")
+        # `[要本人處理]` is an event line (§3.2.1), so it goes to stdout; a
+        # damaged state file is exactly what the design lists there.
+        ctx.emit(f"[要本人處理] {inbox.one_line_for_event(error)}")
         return 2
     return 0
 
