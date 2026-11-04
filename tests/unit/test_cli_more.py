@@ -178,22 +178,23 @@ AGENT_SCRIPT = textwrap.dedent("""
         append("ZZAGENT 續寫一句")
     elif mode == "append-on-term":
         import signal
-        note(f"pid={os.getpid()}")
         seen = []
         signal.signal(signal.SIGTERM, lambda *a: seen.append(1))
+        note(f"pid={os.getpid()}")         # #372: the trap is in place before saying so
         while not seen:                    # a turn that only ends when it is asked to
             time.sleep(0.05)
         time.sleep(0.5)                    # finishing that turn is not instant
         append("ZZAGENT 收尾一句")
     else:
         append("ZZAGENT 續寫一句")
-        note(f"pid={os.getpid()}")
         if mode in ("append-sleep-ignore", "append-sleep", "append-sleep-ignore-term"):
             import signal
             if mode == "append-sleep-ignore":
                 signal.signal(signal.SIGINT, signal.SIG_IGN)
             elif mode == "append-sleep-ignore-term":
                 signal.signal(signal.SIGTERM, signal.SIG_IGN)   # an agent that will not leave
+        note(f"pid={os.getpid()}")         # #372: the pid means "ready to be signalled"
+        if mode in ("append-sleep-ignore", "append-sleep", "append-sleep-ignore-term"):
             time.sleep(float(os.environ.get("SCRIPT_SLEEP", "120")))
 """)
 
@@ -224,13 +225,29 @@ def lay_fixture(home: Path, workdir: Path, sid: str = CL_SID) -> Path:
     return subdir / f"{sid}.jsonl"
 
 
-def wait_marker(marker: Path, timeout: float = 60.0) -> str:
-    end = time.time() + timeout
-    while time.time() < end:
-        if marker.exists() and marker.read_text():
-            return marker.read_text()
-        time.sleep(0.5)
-    raise TimeoutError(f"agent did not start: {marker}")
+# #372: a subprocess agent on a loaded machine may take a while to come up. This is a
+# failure cap for a wedged run, not a timing window: the wait below is a condition poll,
+# so a busy machine just polls a little longer instead of failing at a fixed 60s.
+AGENT_START_LIMIT = 180.0
+
+
+def wait_marker(marker: Path, timeout: float = AGENT_START_LIMIT) -> str:
+    """Wait until the agent has said `pid=...`, i.e. until it is ready to be signalled.
+
+    AGENT_SCRIPT writes that line only after its signal traps are installed, so the
+    caller may signal the moment this returns (#372: no window between "started" and
+    "ignores SIGTERM").
+    """
+    end = time.monotonic() + timeout
+    while True:
+        if marker.exists():
+            text = marker.read_text()
+            if "pid=" in text:
+                return text
+        if time.monotonic() >= end:
+            break
+        time.sleep(0.05)
+    raise TimeoutError(f"agent did not start within {timeout:.0f}s: {marker}")
 
 
 def wait_gone(pid: int, timeout: float = 30.0) -> None:
