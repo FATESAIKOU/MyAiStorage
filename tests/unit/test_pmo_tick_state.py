@@ -21,19 +21,26 @@ import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve
 import json
 import threading
 
+import pytest
+
 from pmo import _lock
+from pmo import teamstate
 from pmo import tick as tick_module
 from pmo.fakes import FakeAngareion, FakeSidecar, FakeSidecars
 from pmo.runtime import Deps
 
 from _pmo_env import (
     NOW,
+    TEAM_KEY,
     TEAM_PM,
     PmoEnv,
+    config_data,
     fixed_now,
     pmo_env,
+    read_team_state,
     read_tick_state,
     run_cli,
+    seed_team_state,
     seed_tick_state,
 )
 
@@ -211,3 +218,116 @@ def test_a_lock_timeout_is_a_warn_and_exit_two(pmo_env, monkeypatch):
         "[warn] tick.json 的鎖等不到（10 秒），這一輪的 tick.json 沒寫，下一輪再寫\n"
     )
     assert read_tick_state(pmo_env)["last_tick_at"] == "2026-10-19T09:00:00Z"
+
+
+# --------------------------------------------------------------------------- #
+# team 鎖逾時（#358 T5-3；架構師 2026-11-04）
+# --------------------------------------------------------------------------- #
+
+SECOND_SIDECAR = "http://127.0.0.1:8473"
+SECOND_KEY = "demo3-m1"
+SECOND_PM = "demo3-pm-m1"
+
+
+def add_second_team(env: PmoEnv) -> None:
+    """設定裡再加一個本機 team（`demo3-m1`），另一台假 sidecar。"""
+    data = config_data()
+    data["teams"].append(
+        {
+            "key": SECOND_KEY,
+            "pm": SECOND_PM,
+            "channel": f"team-{SECOND_KEY}",
+            "sidecar": SECOND_SIDECAR,
+            "tui": False,
+            "life": False,
+            "retired": False,
+        }
+    )
+    env.config_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def seed_second_state(env: PmoEnv) -> None:
+    """第二個 team 的狀態檔：已派工、沒有 `state`（這一輪會變化）。"""
+    env.state_dir.mkdir(parents=True, exist_ok=True)
+    (env.state_dir / f"{SECOND_KEY}.json").write_text(
+        json.dumps(
+            {
+                "agent": SECOND_PM,
+                "ticket": TICKET,
+                "closed": False,
+                "ack_at": "2026-10-19T10:01:00Z",
+                "session": "s1",
+                "dispatched_at": "2026-10-19T10:00:00Z",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_the_team_lock_wait_is_ten_seconds():
+    """tick 拿 team 鎖的預設上限是 10 秒（設計 §3.4）。"""
+    assert tick_module.TEAM_LOCK_TIMEOUT_SECONDS == 10.0
+
+
+def test_a_team_lock_timeout_warns_and_skips_that_team(pmo_env, monkeypatch):
+    """一個 team 的鎖等不到：`[warn]` 跳過它，另一個 team 照做、exit 0。"""
+    add_second_team(pmo_env)
+    seed_team_state(pmo_env, ticket=TICKET)
+    seed_second_state(pmo_env)
+    first = FakeSidecar()
+    first.add_agent(TEAM_PM, state="running")
+    second = FakeSidecar()
+    second.add_agent(SECOND_PM, state="running")
+    factory = FakeSidecars(
+        {"http://127.0.0.1:8472": first, SECOND_SIDECAR: second}
+    )
+    deps = Deps(angareion=FakeAngareion(), sidecar_for=factory, now=fixed_now(NOW))
+    monkeypatch.setattr(tick_module, "TEAM_LOCK_TIMEOUT_SECONDS", 0.2)
+
+    ready, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with teamstate.state_lock(pmo_env.state_dir, TEAM_KEY):
+            ready.set()
+            release.wait(15)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    try:
+        assert ready.wait(10)
+        rc, out, err = run_tick(pmo_env, deps)
+    finally:
+        release.set()
+        thread.join(timeout=10)
+
+    assert rc == 0
+    assert out == f"[state] {SECOND_KEY} -→running\n"
+    assert err == (
+        f"[warn] {TEAM_KEY} 的狀態鎖等不到（0.2 秒），這一輪跳過它\n"
+    )
+    # 被跳過的 team 沒有被寫回（下一輪再比對）。
+    assert "state" not in read_team_state(pmo_env)
+
+
+def test_state_lock_timeout_raises_when_another_holder_has_it(pmo_env):
+    """`teamstate.state_lock(..., timeout=)` 等不到就丟 `LockTimeout`（T5-3 的參數）。"""
+    ready, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with teamstate.state_lock(pmo_env.state_dir, TEAM_KEY):
+            ready.set()
+            release.wait(15)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    try:
+        assert ready.wait(10)
+        with pytest.raises(_lock.LockTimeout):
+            with teamstate.state_lock(
+                pmo_env.state_dir, TEAM_KEY, timeout=0.05
+            ):
+                pass
+    finally:
+        release.set()
+        thread.join(timeout=10)

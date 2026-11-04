@@ -8,7 +8,9 @@
 - poke 送不到 → stdout 的 `[要本人處理]`，`ack_poke_at` 仍記著（第 3 條）；
 - 兩個 tick 並行只 poke 一次（第 9 條：先佔再 poke）；
 - worker team 不 poke，只印 `[worker-action] ‹team› watchdog-poke`；
-- worker team 的 `[worker-action] poll` 到期印一次並把 `next_due_at` 往後推。
+- worker team 的 `[worker-action] poll` 到期印一次並把 `next_due_at` 往後推；
+- team 鎖逾時（T5-3）：agents 步驟拿得到鎖、看門狗自己「先佔」時才被別的行程占住
+  → `[warn]` 跳過該 team、不 poke、exit 0（不是 traceback），其他 team 照做。
 
 全部用假 sidecar 與暫存 state；不連真的 sidecar。
 """
@@ -20,9 +22,11 @@ import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve
 import io
 import json
 import threading
+from contextlib import contextmanager
 from datetime import timedelta
 
 from pmo import config as config_module
+from pmo import teamstate
 from pmo import tick as tick_module
 from pmo.fakes import FakeAngareion, FakeSidecar, FakeSidecars
 from pmo.ports import SidecarError
@@ -396,3 +400,157 @@ def test_the_next_due_is_the_earliest_of_the_watchdog_handoff_and_poll(pmo_env):
     rc, out, err = run_tick(pmo_env, deps)
     assert (rc, err) == (0, "")
     assert out == "[idle] [next-due=2026-10-19T10:17:00Z]\n"
+
+
+# --------------------------------------------------------------------------- #
+# team 鎖逾時（#358 T5-3）：看門狗的 claim 等不到鎖就跳過該 team
+# --------------------------------------------------------------------------- #
+
+
+def test_a_team_lock_timeout_skips_the_watchdog_for_that_team(pmo_env, monkeypatch):
+    """看門狗要先佔 `ack_poke_at`：鎖等不到 → `[warn]`、不 poke、exit 0。"""
+    seed_dispatch(pmo_env, state="running", session="s1")
+    sidecar = FakeSidecar()
+    sidecar.add_agent(TEAM_PM, state="running")
+    deps, sidecar = make_deps(sidecar)
+    monkeypatch.setattr(tick_module, "TEAM_LOCK_TIMEOUT_SECONDS", 0.2)
+
+    ready, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with teamstate.state_lock(pmo_env.state_dir, TEAM_KEY):
+            ready.set()
+            release.wait(15)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    try:
+        assert ready.wait(10)
+        rc, out, err = run_tick(pmo_env, deps)
+    finally:
+        release.set()
+        thread.join(timeout=10)
+
+    assert rc == 0
+    assert out == "[idle]\n"
+    assert sidecar.pokes == []
+    assert err == (
+        f"[warn] {TEAM_KEY} 的狀態鎖等不到（0.2 秒），這一輪跳過它\n"
+    )
+    assert read_team_state(pmo_env).get("ack_poke_at") is None
+
+
+#: 第二個本機 team（與 `demo2-m1` 共用同一個假 sidecar）。
+SECOND_KEY = "demo3-m1"
+SECOND_PM = "demo3-pm-m1"
+
+
+def add_second_team(env: PmoEnv) -> None:
+    """設定裡再加一個本機 team，看「其他 team 照做」用。"""
+    data = config_data()
+    data["teams"].append(
+        {
+            "key": SECOND_KEY,
+            "pm": SECOND_PM,
+            "channel": f"team-{SECOND_KEY}",
+            "sidecar": data["teams"][0]["sidecar"],
+            "tui": False,
+            "life": False,
+            "retired": False,
+        }
+    )
+    env.config_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+@contextmanager
+def lock_held_elsewhere(env: PmoEnv, key: str):
+    """另一個執行緒占著該 team 的鎖（模擬別的行程），離開區塊時放掉。"""
+    ready, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with teamstate.state_lock(env.state_dir, key):
+            ready.set()
+            release.wait(20)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    try:
+        assert ready.wait(10), "the lock holder did not start"
+        yield
+    finally:
+        release.set()
+        thread.join(timeout=10)
+
+
+def block_claim_with_a_busy_lock(
+    env: PmoEnv, monkeypatch, key: str = TEAM_KEY
+) -> list[tuple[str, str]]:
+    """只在 `_claim`（看門狗先佔）被呼叫時才占鎖，回傳 claim 的呼叫紀錄。
+
+    agents 步驟本來就會拿同一個 team 鎖；在那裡占鎖只會讓 team 先進
+    `run.lock_skipped`，看門狗根本走不到自己的 `try`（審查 M-1）。所以占鎖的
+    執行緒要在 `_claim` 裡面才起。
+    """
+    real_claim = tick_module._claim
+    calls: list[tuple[str, str]] = []
+
+    def claim(run, team, field_name: str) -> bool:
+        calls.append((team.key, field_name))
+        if team.key != key:
+            return real_claim(run, team, field_name)
+        with lock_held_elsewhere(env, key):
+            return real_claim(run, team, field_name)
+
+    monkeypatch.setattr(tick_module, "_claim", claim)
+    return calls
+
+
+def test_the_watchdog_catches_its_own_lock_timeout(pmo_env, monkeypatch):
+    """看門狗的 `_claim` 等不到鎖：自己的 `except LockTimeout` 接住，不冒 traceback。
+
+    與上一支的差別是**這裡 agents 步驟拿得到鎖**（鎖是在 `_claim` 當下才被占
+    住的），所以 `step_watchdog` 真的走到自己的 `try`；把那個 `except` 拿掉時
+    這一支會紅。
+    """
+    seed_dispatch(pmo_env, state="running", session="s1")
+    sidecar = FakeSidecar()
+    sidecar.add_agent(TEAM_PM, state="running")
+    deps, sidecar = make_deps(sidecar)
+    monkeypatch.setattr(tick_module, "TEAM_LOCK_TIMEOUT_SECONDS", 0.2)
+    calls = block_claim_with_a_busy_lock(pmo_env, monkeypatch)
+
+    rc, out, err = run_tick(pmo_env, deps)
+
+    # 證明真的走到 claim（不是像上一支那樣被 agents 步驟先跳過）。
+    assert calls == [(TEAM_KEY, "ack_poke_at")]
+    assert rc == 0
+    assert out == "[idle]\n"
+    assert err == (
+        f"[warn] {TEAM_KEY} 的狀態鎖等不到（0.2 秒），這一輪跳過它\n"
+    )
+    assert sidecar.pokes == []
+    assert read_team_state(pmo_env).get("ack_poke_at") is None
+
+
+def test_a_watchdog_lock_timeout_leaves_the_other_team_running(pmo_env, monkeypatch):
+    """被鎖擋住的 team 跳過，其他 team 的看門狗照樣 poke、exit 0（不是 traceback）。"""
+    add_second_team(pmo_env)
+    seed_dispatch(pmo_env)
+    seed_dispatch(pmo_env, key=SECOND_KEY)
+    sidecar = FakeSidecar()
+    sidecar.add_agent(TEAM_PM, state="running")
+    sidecar.add_agent(SECOND_PM, state="running")
+    deps, sidecar = make_deps(sidecar)
+    monkeypatch.setattr(tick_module, "TEAM_LOCK_TIMEOUT_SECONDS", 0.2)
+    block_claim_with_a_busy_lock(pmo_env, monkeypatch)
+
+    rc, out, err = run_tick(pmo_env, deps)
+
+    assert rc == 0
+    assert out == f"[watchdog] {SECOND_PM} 派工 10 分鐘沒有「收到」→ poke 一次（200）\n"
+    assert err == (
+        f"[warn] {TEAM_KEY} 的狀態鎖等不到（0.2 秒），這一輪跳過它\n"
+    )
+    assert [pm for pm, _text, _interrupt in sidecar.pokes] == [SECOND_PM]
+    assert read_team_state(pmo_env).get("ack_poke_at") is None
+    assert read_team_state(pmo_env, SECOND_KEY)["ack_poke_at"] == "2026-10-19T10:15:00Z"

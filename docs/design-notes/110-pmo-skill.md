@@ -236,7 +236,7 @@ flowchart LR
 | `pmo poke ‹team› [--interrupt] --body -` | 一句話 | sidecar 的回應碼 | 0；1 用法、team 不存在或已退役；2 sidecar 拒絕或連不上 |
 | `pmo status [‹team›] [--json]` | | 每個 team PM 的 state／exit／session，以及 PMO 自己排的 job | 0／2 |
 | `pmo close ‹team› [--timeout 秒]` | | 是否已關；先刪掉的**自動重開 job**（sidecar 在 waiting-quota 時替這個 team PM 排的 `auto: true` job）；另外只列不動「瞄準這個 agent 的其他 job」 | 0（含 agent 本來就不在、close 還在背景進行）；2 sidecar 拒絕或連不上 |
-| `pmo inbox handoff-close ‹id›` | | 把一筆交接出去的群請求標成已結案，之後不再印 `[group-sweep-due]` | 0；1 查無 id；2 tick 狀態檔壞或寫不進去 |
+| `pmo inbox handoff-close ‹id›` | | 把一筆交接出去的群請求標成已結案，之後不再印 `[group-sweep-due]` | 0；1 查無 id；2 tick 狀態檔壞或寫不進去（含鎖等不到） |
 | `pmo wake set ‹every›` | 間隔（`5m`、`2h` 這類；規則見 §3.6） | `[wake] every=‹…› job=‹id› next=‹時刻›` | 0；1 間隔格式錯；2 PMO 不在 sidecar、sidecar 拒絕或連不上、tick 狀態檔壞 |
 | `pmo wake off` | （無） | `[wake] off`，以及刪掉的 job id | 0；2 同上 |
 | `pmo wake show [--json]` | （無） | 自己的叫醒 job（id、every、next_run_at、last_run、last_error 的碼）、`tick.json` 記的想要的頻率、`last_tick_at`、最早的到期時刻（唯讀） | 0；2 同上 |
@@ -303,7 +303,7 @@ flowchart LR
   - 每個 team：key（`<專案>-<team 代號>`）、PM 的 AI 名、channel（`team-<專案>-<team 代號>`）、sidecar 位址或「worker」標記、`tui`／`life`／`retired` 三個布林、`agent`（選填，`claude-code`／`opencode`，預設 `claude-code`；`tui` 時必須是 `claude-code`）、`workdir`（`pmo open` 用，絕對路徑）、`agent_args`（選填，字串陣列，以 append 帶給 sidecar）、預設的 provider／model（選填；`model` 需要 `provider`，`provider` 可以單獨給）。
 
   驗證規則照現行工具（AI 名用 ainame 驗、key、名字、channel 一致、不重複）。
-- **team 狀態**：照 MyPMO 現在 `pmo/state/README.md` 的欄位。**不認得的欄位原樣保留**（過渡期 worker team 的欄位由 MyPMO 寫，見 Q-9）。寫入照 §3.4 的原子寫入；讀改寫用每個 team 一把的 `<key>.json.lock`（flock，綁 state 目錄），`send` 與 tick 的「收到」比對都在鎖內重讀再改。
+- **team 狀態**：照 MyPMO 現在 `pmo/state/README.md` 的欄位。**不認得的欄位原樣保留**（過渡期 worker team 的欄位由 MyPMO 寫，見 Q-9）。寫入照 §3.4 的原子寫入；讀改寫用每個 team 一把的 `<key>.json.lock`（flock，綁 state 目錄），`send` 與 tick 的「收到」比對都在鎖內重讀再改。tick 拿 team 鎖最多等 10 秒，逾時 `[warn]` 跳過該 team（下一輪再比對）。
 - **收件帳本**：`version`、`items`（以工作 ID 為 key）、`notified`；新增 `rebuilt_at`。
 - **tick 狀態**（`<狀態目錄>/tick.json`，由 tick、`handoff-close`、`pmo wake set|off` 寫）：
   - `version`；

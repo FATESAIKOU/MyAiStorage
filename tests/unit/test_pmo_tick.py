@@ -19,8 +19,10 @@ from __future__ import annotations
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401
 
 import json
+import threading
 
 from pmo.fakes import FakeAngareion, FakeSidecar, FakeSidecars
+from pmo import teamstate
 from pmo import tick as tick_module
 from pmo.ports import Message, PortError, SidecarError
 from pmo.runtime import Deps
@@ -207,9 +209,14 @@ def test_a_group_handoff_id_reaches_the_rounds_handoffs_list(pmo_env, monkeypatc
     original_new_run = tick_module._new_run
     runs: list = []
 
-    def spy(ctx, *, handoffs=None):
+    def spy(ctx, *, handoffs=None, team_lock_timeout=None, lock_skipped=None):
         handed.append(handoffs)
-        return original(ctx, handoffs=handoffs)
+        return original(
+            ctx,
+            handoffs=handoffs,
+            team_lock_timeout=team_lock_timeout,
+            lock_skipped=lock_skipped,
+        )
 
     def spy_new_run(ctx):
         run = original_new_run(ctx)
@@ -452,27 +459,27 @@ def test_one_teams_sidecar_failure_is_a_warn_and_the_others_run(pmo_env):
 
 
 def test_a_bad_team_state_exits_two_without_reading(pmo_env):
-    """壞 team 狀態 → exit 2、`[要本人處理]`，`angareion read` 沒被呼叫。"""
+    """壞 team 狀態 → exit 2、`[要本人處理]`（stdout），`angareion read` 沒被呼叫。"""
     pmo_env.state_dir.mkdir(parents=True, exist_ok=True)
     pmo_env.team_file().write_text("{ not json", encoding="utf-8")
     deps, sidecar, _factory = make_deps()
 
     rc, out, err = run_tick(pmo_env, deps)
-    assert (rc, out) == (2, "")
-    assert err.startswith("[要本人處理] ")
+    assert (rc, err) == (2, "")
+    assert out.startswith("[要本人處理] ")
     assert deps.angareion.read_calls == []
     assert sidecar.agent_reads == []
 
 
 def test_a_bad_tick_state_exits_two_without_reading(pmo_env):
-    """壞 `tick.json` → exit 2、`[要本人處理]`，游標不動。"""
+    """壞 `tick.json` → exit 2、`[要本人處理]`（stdout），游標不動。"""
     seed_tick_state(pmo_env)
     (pmo_env.state_dir / "tick.json").write_text("{ not json", encoding="utf-8")
     deps, _sidecar, _factory = make_deps()
 
     rc, out, err = run_tick(pmo_env, deps)
-    assert (rc, out) == (2, "")
-    assert err.startswith("[要本人處理] ")
+    assert (rc, err) == (2, "")
+    assert out.startswith("[要本人處理] ")
     assert deps.angareion.read_calls == []
 
 
@@ -525,3 +532,47 @@ def test_a_read_failure_is_a_warn_and_the_agents_are_still_compared(pmo_env):
     assert err == "[warn] angareion read：PortError: back end is down\n"
     assert out == f"[state] {TEAM_KEY} -→running\n"
     assert ang.read_calls == [None]
+
+
+def test_a_team_lock_timeout_in_the_read_round_skips_the_ack(pmo_env, monkeypatch):
+    """收信階段拿不到 team 鎖：`[warn]` 跳過該 team、不寫 `ack_at`、exit 0。"""
+    seed_team_state(
+        pmo_env,
+        ticket=TICKET,
+        state="running",
+        session="s1",
+        dispatched_at="2026-10-19T10:14:00Z",
+    )
+    sidecar = FakeSidecar()
+    sidecar.add_agent(TEAM_PM, state="running")
+    messages = [
+        a_message(ULID_3, sender=TEAM_PM, channel=TEAM_CHANNEL, body=f"收到 {TICKET}")
+    ]
+    deps, _sidecar, _factory = make_deps(
+        sidecar, ang=FakeAngareion(messages)
+    )
+    monkeypatch.setattr(tick_module, "TEAM_LOCK_TIMEOUT_SECONDS", 0.2)
+
+    ready, release = threading.Event(), threading.Event()
+
+    def holder() -> None:
+        with teamstate.state_lock(pmo_env.state_dir, TEAM_KEY):
+            ready.set()
+            release.wait(15)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    try:
+        assert ready.wait(10)
+        rc, out, err = run_tick(pmo_env, deps)
+    finally:
+        release.set()
+        thread.join(timeout=10)
+
+    assert rc == 0
+    assert "[msg]" in out
+    assert "[ack]" not in out
+    assert err == (
+        f"[warn] {TEAM_KEY} 的狀態鎖等不到（0.2 秒），這一輪跳過它\n"
+    )
+    assert read_team_state(pmo_env)["ack_at"] is None
