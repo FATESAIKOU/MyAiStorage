@@ -228,10 +228,10 @@ def parse(data: object) -> TickState:
 
 def load_or_empty(path: Path) -> TickState:
     """Read the tick state; a missing file counts as empty, a bad file raises."""
-    try:
-        return parse(_io.read_json(path))
-    except FileNotFoundError:
+    # read_json turns an unreadable file (missing included) into a SchemaError
+    if not path.exists():
         return empty()
+    return parse(_io.read_json(path))
 
 
 def save(path: Path, state: TickState) -> None:

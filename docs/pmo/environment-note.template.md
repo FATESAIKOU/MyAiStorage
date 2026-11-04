@@ -29,7 +29,7 @@ export PMO_SKILL_CONFIG=/path/to/pmo-teams.json    # teams 設定檔
 export PMO_SKILL_STATE_DIR=/path/to/pmo-state      # 狀態目錄（team 狀態、收件帳本、tick.json）
 ```
 
-**已知缺口**：`PMO_SKILL_CONFIG` 指到**不存在的檔案**目前是 Python traceback＋exit 1；遇到時照 traceback 停下回報、**不要重試**。內容不是合法 JSON 才是 `[pmo] 設定讀不起來：…`＋exit 2。
+`PMO_SKILL_CONFIG` 指到不存在的檔案、不是檔案（例如目錄）、讀不起來或內容不是合法 JSON，都是 `[pmo] 設定讀不起來：…`＋exit 2。
 
 設定檔是 JSON（格式由本 repo 定義、`pmo` 載入時驗證；未知欄位會原樣保留）：
 
@@ -62,7 +62,7 @@ export PMO_SKILL_STATE_DIR=/path/to/pmo-state      # 狀態目錄（team 狀態�
 - `pmo_identity`／`secretary_identity` 是 AI 名；`dispatch_channel` 是秘書派工用的 channel，**不能等於任何 team 的 channel**。
 - `pmo_sidecar` 是 PMO 自己所在的 sidecar（選填；沒有就代表 PMO 不在 sidecar，`pmo wake` 會 exit 2、tick 不查 `/jobs`）。`wake_text` 是定時叫醒的固定句（選填，預設見上）。
 - 每個 team：`key`（`<專案>-<team 代號>`）、`pm`（AI 名）、`channel`（`team-<專案>-<team 代號>`）三者要一致；`sidecar` 是位址或 `"worker"`；`tui`／`life`／`retired` 是布林；`agent`（`claude-code`／`opencode`，預設 `claude-code`，`tui: true` 只能配 `claude-code`）、`workdir`（絕對路徑，sidecar 開 agent 必填）、`agent_args`（選填，字串陣列）由 `pmo open` 帶給 sidecar；`provider`／`model` 是預設值（`model` 要配 `provider`）。
-- 狀態目錄由 `pmo` 自己寫（team 狀態、收件帳本、`tick.json`）；**不要手改**。狀態檔壞（`SchemaError`）時，`pmo tick` 與 `pmo inbox handoff-close` 會回 exit 2 並在 stdout 印 `[要本人處理]`；其他指令遇到壞檔也是 exit 2，印在 stderr 的是 `[pmo] …`（`pmo wake` 例外：stderr 印 `[要本人處理] …`）。身分不符、設定讀不起來同樣是 exit 2、stderr `[pmo] …`；**例外**是 `PMO_SKILL_CONFIG` 指到不存在的檔案——目前是 traceback＋exit 1（見上面「設定：位置與 schema」）。
+- 狀態目錄由 `pmo` 自己寫（team 狀態、收件帳本、`tick.json`）；**不要手改**。狀態檔壞（`SchemaError`）時，`pmo tick` 與 `pmo inbox handoff-close` 會回 exit 2 並在 stdout 印 `[要本人處理]`；其他指令遇到壞檔也是 exit 2，印在 stderr 的是 `[pmo] …`（`pmo wake` 例外：stderr 印 `[要本人處理] …`）。身分不符、設定讀不起來同樣是 exit 2、stderr `[pmo] …`（含 `PMO_SKILL_CONFIG` 指到不存在的檔案）。
 
 ## 開機步驟（每次被開、重開、sidecar 重啟後接回）
 

@@ -101,9 +101,11 @@ def test_save_creates_the_directory_and_load_reads_it_back(tmp_path):
     assert load(path) == ledger
 
 
-def test_a_missing_file_is_a_file_error_not_a_schema_error(tmp_path):
-    with pytest.raises(FileNotFoundError):
+def test_a_missing_file_is_a_schema_error(tmp_path):
+    """#381: `read_json` 把讀不起來（含不存在）當成壞檔，不是 `FileNotFoundError`。"""
+    with pytest.raises(SchemaError) as caught:
         load(tmp_path / "nowhere.json")
+    assert "cannot be read" in str(caught.value)
 
 
 def test_invalid_json_is_refused(tmp_path):
