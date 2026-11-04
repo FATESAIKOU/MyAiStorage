@@ -27,6 +27,8 @@
 | D-19 | 叫醒＝寄件人立刻 poke＋PMO 用 `pmo wake set\|off\|show` 自己排的 sidecar 定時 poke job（頻率由 PMO 定）；到期判斷全在 tick 裡，不設外部監看程式 | 叫醒來源只需要「叫」，到期狀態只在唯一的讀者裡 | 本人（經 PMO；#110 留言、MyPMO 決定檔 PR #270），2026-11-02（Q-8 (a)） | #110（design-notes/110-pmo-skill.md） note D-14、§3.6 |
 | D-20 | 第一階段只搬本機 sidecar 的派工；群請求、worker team 的動作、挑模型、MyPMO 的工單維護工具留在 MyPMO，和 tick 用 id 交接；切換後 MyPMO 的 dispatch.py 只留 worker 動作和群請求 | 群請求和 worker 傳輸搬移風險高、和其他 repo 綁在一起；讀者仍只有一個。之後的搬移與退役時機是架構師的後續提議，本人沒有決定 | 本人（經 PMO；#110 留言、MyPMO 決定檔 PR #270），2026-11-03（Q-3 (a)、Q-4 不搬、Q-7 (a)、Q-9 (a)） | #110（design-notes/110-pmo-skill.md） note D-8～D-11、D-15 |
 | D-21 | sync 的大量下載（`need` ≥ `BULK_DOWNLOAD_MIN`）用一次列表式 `copy --include */session.md --fast-list --checksum` 下載到 mirror **外**的持久影子 `<cache>/download-staging`（`download-staging.lock` 排隊），只把 `changed` 裡、md5 等於這次列表的檔**複製**進 mirror（`os.replace`），影子保留供續傳；失敗時同樣先複製驗過的，其餘逐一 `copyto`；影子的清理只在列表完整時、非阻塞拿到鎖時做。門檻與並行度是模組常數，不開環境變數 | 逐檔解析路徑在冷快取時是 O(session 數 × 往返)（Mac 量到每份 0.64 秒），而 sidecar 的逾時會把一次做不完的下載整個丟掉；影子在 mirror 外，所以 G3／#119／垃圾桶佇列的不變式不受影響；正確性仍由 sync 之後的逐一 md5 核對兜底 | 架構師（核准者模式；作者 ollama-cloud/deepseek-v4.1-flash） | #364（design-notes/364-bulk-download.md §10） |
+| D-22 | `pmo` 的 tick 步驟由各功能模組持有（`handoff.record`／`sweep`、`wake.step_job_health`），tick 只依序掛 `Step`；這些模組只在 `TYPE_CHECKING` 下 import `tick`（為了 `TickRun`），執行期沒有模組 import tick。tick 與 `pmo wake show` 共用的到期計算放在純模組 `pmo/due.py`（只依賴 `timeutil`），兩邊不各寫一份 | 後加的步驟不改 tick 骨架；`[idle] [next-due]` 與 `wake show` 的答案不會分岔；守衛是子行程檢查 `sys.modules` 的測試 | 架構師（#358 T5-2 切分、T5-4 裁定；Sonnet 審過） | #358（design-notes/110-pmo-skill.md §3.6） |
+| D-23 | sidecar 的寫入呼叫回 2xx 但 body 讀不懂時，不當成失敗：埠丟專用的 `JobCreatedUnreadable`（帶狀態碼），呼叫方用一次 `GET /jobs` 找回剛建的那一筆（POST 之前沒有、自己的、`every` 相同）；找不到就不刪、不寫、exit 2 | 建立在回應寫出之前就已完成，丟成失敗會讓重試多建一個；退路只在 sidecar 改版時用到，成本是一次 GET | 架構師（#358 T5-4 裁定；Sonnet 審過） | #358（design-notes/110-pmo-skill.md §3.6 第 3 步） |
 
 #110 的 note 有自己的 D- 編號，上表 D-15～D-20 的出處欄寫成「note D-x」。
 
@@ -49,6 +51,7 @@
 | P-11 | `store.py`（約 3300 行，#364 之後）要不要切：Drive 包裝（rclone）／mirror 與 sync（含 #364 的影子）／上傳器（`upload_batch` 一族）／index。和 P-7 同一類 | 架構師設計、PM 排程 | #364 實作審 低-3 |
 | P-12 | `pmo tick` 只以 sidecar `state` 的變化決定要不要印：兩次 tick 之間 agent「結束 → 被重開 → 又結束」時看不到第二次結束。可以比 agent 物件的 `started_at` 補上 | 架構師提、PM 排程 | #375 結構審 §2(1) |
 | P-13 | `pmo` 的 `tick.json` 壞掉、`handoffs` 等只存在本機：PMO 換機器時要不要搬、怎麼搬（T-7 切換前要定） | PM／PMO | #110 T-7 |
+| P-14 | `tick.json` 在 `tickstate.commit` 以外有兩處自己做鎖內 read-modify-write（`handoff` 的關閉、`wake._write_wake`）。要不要在 `tickstate` 加一個通用的 `update(path, mutate, *, timeout)`（`commit` 改成它加上 `last_tick_at`），讓狀態檔的鎖與讀寫只在 schema 模組 | 架構師提、PM 排程（不急） | #358 T5-4 結構審 低-3 |
 
 ## 交接（2026-11-04：專案架構師由 Mac 的常駐席位改為按需、開在 worker）
 
@@ -56,7 +59,7 @@
 
 - **#110 PMO skill（T-1～T-5 已陸續 merge；T-5 在進行）**：
   - T5-3（PR #376）：結構審「可以 merge」。`tick.py` 的 `parse_ts as _parse_ts` 別名不要留，直接用 `timeutil.parse_ts`。T5-4 rebase 時**不要再加 `parse_utc`**：一個時間格式只有一個解析函式。
-  - T5-4（`pmo wake set|off|show`、tick 的 job 健康）：(1) `POST /jobs` 回 201＋完整 job 物件，`DELETE` 回 204 無 body，照這個嚴格解析；2xx 但 body 讀不懂時，改用一次 `GET /jobs` 找剛建的 job（設計 §3.6 第 3 步已寫進本 PR）。(2) `wake show` 的最早到期也算看門狗，和 tick 的 `[idle] next-due` 用同一個純函式，放在新模組 `pmo/due.py`（wake 不 import tick），tick 改用它、行為不變。(3) `_job_of` 遇到「沒有 `every` 也沒有 `at`」照樣收（`every=None, at=None`），不要讓整份清單失敗，也不要跳過那一筆；只有沒有 id／action、或 `every` 格式壞掉才失敗（#371 審查）。(4) 只要設定了 `pmo_sidecar`，tick 每輪就 `GET /jobs` 一次：`wake.every` 不是 null 時做健康檢查，是 null 時只做孤兒檢查；§3.6「tick 怎麼看 job 的健康」那一句的條件要同步改。
+  - T5-4（PR：branch pmo-wake-358d）：結構審「可以」。(1)～(4) 的裁定已落實（見 D-22、D-23）；收尾時 tick 的 `_should_be_running` 轉呼叫與 wake 的 `LockTimeout` 重新匯出不要留，`_write_wake` 用 `tickstate.lock_path`。
   - T-6（#359，SKILL.md）要寫：不要同時跑兩個 tick；`rebuild` 時不要同時跑 tick；PMO 退場前先 `pmo wake off`；改叫醒固定句之前先 `wake off`；`[state]` 行的字樣和 MyPMO 現行不同（標籤相同、內容不同），切換時對一下 PMO harness。
   - T-7（切換）要做：MyPMO 的 `teams.yml`（YAML）轉成 `pmo` 的 JSON 設定（含 `agent`／`workdir`／`agent_args`）；MyPMO `dispatch.py` 切換後只留 worker 動作與群請求（D-20）；待決 P-13。
 - **#364（agora 冷快取下載）**：已 merge。design note 的兩處措辭（假 rclone 的 needle、「列表完整」的意思）在本 PR 修正。

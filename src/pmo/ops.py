@@ -83,6 +83,7 @@ __all__ = [
     "StatusReport",
     "TeamStatus",
     "close",
+    "every_text",
     "has_fixed_sentence",
     "is_auto_job",
     "is_own_job",
@@ -197,6 +198,18 @@ def is_own_job(job: JobRecord, wake_text: str) -> bool:
 def job_targets_agent(job: JobRecord, agent_id: str) -> bool:
     """Whether the job pokes `agent_id` (`args.id`)."""
     return _args_of(job).get("id") == agent_id
+
+
+def every_text(job: JobRecord) -> str:
+    """`every=600s`, or `at=‹時刻›` for a one-off job (`every` is `None`, #370 高-2).
+
+    One spelling for every place a job is printed (`pmo status`, `pmo close`,
+    `pmo wake show`, tick's orphan warning), so a job reads the same way
+    wherever the PMO meets it.
+    """
+    if job.every is None:
+        return f"at={job.at or '-'}"
+    return f"every={job.every:g}s"
 
 
 def jobs_aimed_at(jobs: list[JobRecord] | tuple[JobRecord, ...], agent_id: str) -> tuple[JobRecord, ...]:

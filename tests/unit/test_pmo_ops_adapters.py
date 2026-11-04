@@ -27,6 +27,7 @@ from pmo.config import DEFAULT_WAKE_TEXT
 from pmo.ports import (
     AgentRecord,
     AicommTimeout,
+    JobCreatedUnreadable,
     JobRecord,
     PortError,
     SidecarError,
@@ -424,13 +425,93 @@ def test_sidecar_adapter_keeps_only_the_last_error_code(opener, value, expected)
     assert job.last_error == expected
 
 
-def test_sidecar_adapter_refuses_a_job_without_an_every(opener):
+def test_sidecar_adapter_accepts_a_job_without_an_every_or_at(opener):
+    """#371：沒有 `every` 也沒有 `at` 的 job 照收（`every`／`at` 都是 None）。
+
+    以前整份 `GET /jobs` 會因此被拒，連 `pmo close` 要刪的自動重開 job 都讀不到；
+    現在只有沒有 `id`／`action` 或 `every` 壞掉才失敗（見下面三支）。
+    """
     opener.answer = (
         200,
         json.dumps({"jobs": [{"id": "job-1", "action": "poke"}]}).encode(),
     )
+    (job,) = Sidecar(PMO_SIDECAR).list_jobs()
+    assert (job.job_id, job.action) == ("job-1", "poke")
+    assert (job.every, job.at) == (None, None)
+
+
+def test_sidecar_adapter_refuses_a_job_whose_every_is_broken(opener):
+    """`every` 有值但不是時長（字串也不是數字）→ 整份清單拒絕（#371）。"""
+    opener.answer = (
+        200,
+        json.dumps({"jobs": [{"id": "job-1", "action": "poke", "every": "soon"}]}).encode(),
+    )
     with pytest.raises(SidecarError, match="every"):
         Sidecar(PMO_SIDECAR).list_jobs()
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"action": "poke", "every": 600.0},  # 沒有 id
+        {"id": "job-1", "every": 600.0},  # 沒有 action
+    ],
+)
+def test_sidecar_adapter_refuses_a_job_without_an_id_or_action(opener, record):
+    opener.answer = (200, json.dumps({"jobs": [record]}).encode())
+    with pytest.raises(SidecarError):
+        Sidecar(PMO_SIDECAR).list_jobs()
+
+
+def test_sidecar_adapter_creates_the_designs_poke_job(opener):
+    """`POST /jobs` 的 body 照 §3.6：action／args／every，不帶 `until`。"""
+    opener.answer = (
+        201,
+        json.dumps(
+            {
+                "id": "job-9",
+                "action": "poke",
+                "args": {"id": PMO_IDENTITY, "text": DEFAULT_WAKE_TEXT, "interrupt": False},
+                "every": 600.0,
+                "next_run_at": "2026-11-03T02:10:00Z",
+            }
+        ).encode(),
+    )
+    job = Sidecar(PMO_SIDECAR).create_job(
+        every="10m", agent_id=PMO_IDENTITY, text=DEFAULT_WAKE_TEXT
+    )
+    assert (job.job_id, job.every) == ("job-9", 600.0)
+    (request,) = opener.requests
+    assert (request["url"], request["method"]) == (f"{PMO_SIDECAR}/jobs", "POST")
+    body = json.loads(request["data"])
+    assert body == {
+        "action": "poke",
+        "args": {"id": PMO_IDENTITY, "text": DEFAULT_WAKE_TEXT, "interrupt": False},
+        "every": "10m",
+    }
+    assert "until" not in body
+
+
+@pytest.mark.parametrize(
+    ("body", "detail"),
+    [(b"", "不是物件"), (b"{not json", "不是 JSON")],
+    ids=["empty-body", "unreadable-body"],
+)
+def test_sidecar_adapter_reports_a_created_job_whose_201_body_is_unreadable(
+    opener, body, detail
+):
+    """201 但 body 讀不懂：`JobCreatedUnreadable`（帶 201），不是建立失敗。
+
+    sidecar 先 create、再寫回應，所以 job 已經在了；`wake set` 靠這個型別的
+    狀態碼決定再 `GET /jobs` 找回它（裁定第 1 節）。
+    """
+    opener.answer = (201, body)
+    with pytest.raises(JobCreatedUnreadable) as caught:
+        Sidecar(PMO_SIDECAR).create_job(
+            every="10m", agent_id=PMO_IDENTITY, text=DEFAULT_WAKE_TEXT
+        )
+    assert caught.value.status == 201
+    assert detail in str(caught.value)
 
 
 def test_sidecar_adapter_refuses_a_jobs_answer_that_is_not_a_list(opener):

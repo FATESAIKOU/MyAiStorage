@@ -24,6 +24,7 @@ from typing import Optional
 from . import config as config_module
 from . import decision, dispatch, handoff, inbox, ledger, ops, paths, rebuild, sanitize, tick
 from . import open as open_module
+from . import wake as wake_module
 from ._lock import LockTimeout
 from .adapters import Aicomm, Angareion, GitHub, Sidecar
 from .errors import (
@@ -34,7 +35,14 @@ from .errors import (
     SentButNotRecorded,
     UsageError,
 )
-from .ports import AicommTimeout, JobRecord, PortError, SidecarError, SidecarShapeError
+from .ports import (
+    AicommTimeout,
+    JobCreatedUnreadable,
+    JobRecord,
+    PortError,
+    SidecarError,
+    SidecarShapeError,
+)
 from .round import read_round
 from .runtime import Ctx, Deps, assert_pmo_identity
 from .timeutil import iso_utc
@@ -131,7 +139,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp_close.add_argument("--timeout", type=float, default=ops.CLOSE_TIMEOUT_SECONDS,
                           help="等 exited 的秒數（預設 60）")
 
-    sub.add_parser("tick", help="跑一輪 PMO 的監看（收信、比對 agents、看門狗、worker 交接）")
+    sub.add_parser("tick", help="跑一輪 PMO 的監看（收信、比對 agents、看門狗、worker 交接、叫醒健康）")
+
+    sp_wake = sub.add_parser("wake", help="自己的定時叫醒 job：set / off / show（設計 §3.6）")
+    wake_sub = sp_wake.add_subparsers(dest="wake_cmd", required=True)
+    sp_wset = wake_sub.add_parser("set", help="把叫醒間隔設成 sidecar 上恰好一個自己的 poke job")
+    sp_wset.add_argument("every", help="間隔，寫成 ‹整數›m 或 ‹整數›h（2m～24h，例：10m、2h）")
+    wake_sub.add_parser("off", help="刪掉自己的叫醒 job，tick.json 的 wake.every 設成 null")
+    sp_wshow = wake_sub.add_parser("show", help="唯讀：自己的叫醒 job、想要的頻率、最早的到期時刻")
+    sp_wshow.add_argument("--json", action="store_true", help="以 JSON 印出")
 
     return parser
 
@@ -634,7 +650,7 @@ def cmd_status(ctx: Ctx, args: argparse.Namespace) -> int:
         else:
             for job in report.jobs:
                 ctx.emit(
-                    f"[status] job {job.job_id} {_every_of(job)} "
+                    f"[status] job {job.job_id} {ops.every_text(job)} "
                     f"last_run={job.last_run if job.last_run is not None else '-'} "
                     f"last_error={job.last_error or '-'}"
                 )
@@ -649,17 +665,10 @@ def cmd_status(ctx: Ctx, args: argparse.Namespace) -> int:
     return 2 if report.failures else 0
 
 
-def _every_of(job: JobRecord) -> str:
-    """`every=600s`, or `at=<時刻>` for a one-off job (`every` is `None`, #370 高-2)."""
-    if job.every is None:
-        return f"at={job.at or '-'}"
-    return f"every={job.every:g}s"
-
-
 def _job_fields(job: JobRecord, wake_text: str) -> str:
     """One listed job: id, action, every (or at), and whether its sentence is the fixed one."""
     fixed = "是" if ops.has_fixed_sentence(job, wake_text) else "否"
-    return f"{job.job_id} action={job.action} {_every_of(job)} 固定句={fixed}"
+    return f"{job.job_id} action={job.action} {ops.every_text(job)} 固定句={fixed}"
 
 
 def cmd_close(ctx: Ctx, args: argparse.Namespace) -> int:
@@ -752,6 +761,99 @@ def cmd_tick(ctx: Ctx, _args: argparse.Namespace | None = None) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# 指令：wake（自己的定時叫醒；design §3.6、§3.4；#358 T5-4）
+# --------------------------------------------------------------------------- #
+
+
+def _next_of(job: JobRecord) -> str:
+    """The job's `next_run_at`, or `-` when the sidecar did not send one."""
+    return wake_module.next_run_at(job) or "-"
+
+
+def _job_line(job: JobRecord) -> str:
+    """One job, known fields only (id、every／at、next、last_run、last_error 的碼)."""
+    return (
+        f"{job.job_id} {ops.every_text(job)} next={_next_of(job)} "
+        f"last_run={job.last_run if job.last_run is not None else '-'} "
+        f"last_error={job.last_error or '-'}"
+    )
+
+
+def cmd_wake(ctx: Ctx, args: argparse.Namespace) -> int:
+    """`pmo wake set|off|show`（design §3.6、§3.2 的結束碼表）。
+
+    0 完成（`set` 刪不掉舊 job 時只印 `[warn]`，照設計不改碼；`off` 刪不掉是
+    sidecar 拒絕，回 2）；1 間隔格式錯（`parse_every`）；2 PMO 不在 sidecar、
+    sidecar 拒絕或連不上、`tick.json` 壞（`[要本人處理]`）、等不到鎖，以及
+    `POST /jobs` 回 2xx 但回應讀不懂又找不到剛建的 job（退路用完）。
+    `show` 只讀：自己的叫醒 job 與「瞄準 PMO、句子不同」的 job 都只印不刪。
+    """
+    subcmd = getattr(args, "wake_cmd", None)
+    try:
+        if subcmd == "set":
+            result = wake_module.set_interval(ctx, args.every)
+            for warning in result.warnings:
+                ctx.log(f"[warn] {warning}")
+            ctx.emit(
+                f"[wake] every={result.every} job={result.job.job_id} "
+                f"next={_next_of(result.job)}"
+            )
+            return 0
+        if subcmd == "off":
+            off = wake_module.turn_off(ctx)
+            ctx.emit("[wake] off")
+            for job_id in off.deleted:
+                ctx.emit(f"[wake] 刪掉自己的叫醒 job：{job_id}")
+            if not off.deleted and not off.warnings:
+                ctx.emit("[wake] 沒有自己的叫醒 job")
+            for warning in off.warnings:
+                ctx.log(f"[warn] {warning}")
+            return 2 if off.warnings else 0
+        if subcmd == "show":
+            report = wake_module.show(ctx)
+            if args.json:
+                ctx.emit(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+                return 0
+            ctx.emit(
+                f"[wake] every={report.every or 'off'} set_at={report.set_at or '-'} "
+                f"last_tick_at={report.last_tick_at or '-'} "
+                f"next-due={report.next_due_at or '-'}"
+            )
+            if not report.jobs:
+                ctx.emit("[wake] sidecar 上沒有自己的叫醒 job")
+            for job in report.jobs:
+                ctx.emit(f"[wake] job {_job_line(job)}")
+            if report.other_jobs:
+                ctx.emit(
+                    f"[wake] 瞄準 {ctx.config.pmo_identity} 的其他 poke job"
+                    f"（句子不同，只列不動）："
+                )
+                for job in report.other_jobs:
+                    ctx.emit(f"[wake]   {_job_line(job)}")
+            return 0
+    except LockTimeout:
+        ctx.log(
+            "[warn] pmo wake 等不到鎖（wake.lock 最多 30 秒、tick.json.lock 最多 10 秒），"
+            "沒有寫 tick.json"
+        )
+        return 2
+    except SchemaError as error:
+        ctx.log(f"[要本人處理] {inbox.one_line_for_event(error)}")
+        return 2
+    except JobCreatedUnreadable as error:
+        code = error.status if error.status is not None else "?"
+        ctx.log(
+            f"[warn] POST /jobs 回 {code}，但回應讀不懂，"
+            "找不到剛建的 job；請跑 pmo wake show 確認"
+        )
+        return 2
+    except SidecarError as error:
+        ctx.log(f"[warn] pmo wake 失敗：{inbox.one_line_for_event(error)}")
+        return 2
+    raise UsageError(f"未知的 wake 子指令：{subcmd}")
+
+
+# --------------------------------------------------------------------------- #
 # 入口
 # --------------------------------------------------------------------------- #
 
@@ -766,6 +868,7 @@ _HANDLERS = {
     "status": cmd_status,
     "close": cmd_close,
     "tick": cmd_tick,
+    "wake": cmd_wake,
 }
 
 

@@ -14,6 +14,7 @@ from typing import Callable
 from .ports import (
     AgentRecord,
     IssueData,
+    JobCreatedUnreadable,
     JobRecord,
     Message,
     PortError,
@@ -195,6 +196,11 @@ class FakeSidecar:
         self.closed: list[str] = []
         self.deleted_jobs: list[str] = []
         self.errors: dict[str, PortError] = {}
+        #: When set, `create_job` still adds the job (as the real sidecar does
+        #: before writing its answer) but then reports the 201 as unreadable:
+        #: the `JobCreatedUnreadable` shape `wake set`'s `GET /jobs` retreat
+        #: must recover from. The value is the detail text.
+        self.create_job_unreadable: str | None = None
         #: Called with each method's name before it does anything (#358 T5-2).
         self.on_call: Callable[[str], None] | None = None
         #: The agent ids `get_agent` was asked for, in order.
@@ -338,6 +344,8 @@ class FakeSidecar:
         record = self.add_job(
             f"job-{self._job_next}", every=every, text=text, agent_id=agent_id, interrupt=interrupt
         )
+        if self.create_job_unreadable is not None:
+            raise JobCreatedUnreadable(status=201, detail=self.create_job_unreadable)
         return record
 
     def delete_job(self, job_id: str) -> bool:
