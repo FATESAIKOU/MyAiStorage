@@ -150,6 +150,14 @@ def isolated_home(tmp_path, monkeypatch, request):
     # opencode finds its database through XDG_* too; never let a unit test reach it (OC11).
     for var in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "CLAUDE_CONFIG_DIR"):
         monkeypatch.delenv(var, raising=False)
+    # #366: fixtures build throwaway repos and push to refs/heads/main in them. A
+    # worker's /etc/gitconfig sets core.hooksPath to hooks that refuse that push, so
+    # keep every git a test starts off the machine's system and user config. The
+    # variables ride along in the inherited environment to every subprocess, and on a
+    # developer machine without such hooks they change nothing (the temporary HOME
+    # already hides ~/.gitconfig). Tests that need identity pass it per command.
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     if "integration" not in request.keywords:
         # Unit tests want Drive to have the session by the time the command returns,
         # so uploads run in the foreground instead of in a background process

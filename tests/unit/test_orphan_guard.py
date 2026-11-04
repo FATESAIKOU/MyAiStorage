@@ -133,7 +133,10 @@ def _stop(proc: subprocess.Popen | None) -> None:
 
 
 def _pids_matching(marker: str) -> list[int]:
-    out = subprocess.run(["ps", "-eo", "pid=,command="], capture_output=True, text=True,
+    # `-ww`: procps truncates an `-o` column to the output width (80 under pytest,
+    # which hands its children COLUMNS=80), and the marker sits at the end of the
+    # agent's command line.
+    out = subprocess.run(["ps", "-eww", "-o", "pid=,command="], capture_output=True, text=True,
                          timeout=10)
     pids = []
     for line in out.stdout.splitlines():
