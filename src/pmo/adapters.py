@@ -7,7 +7,7 @@ the records into `pmo.ports.Message`s. T-4a wires GitHub: `gh issue view <n>
 --repo <owner/repo> --json title,body`, read-only. T-4c wires aicomm (`pmo
 reply`; write plus wake) and the sidecar HTTP calls `pmo poke`／`status`／
 `close` need; T-4b adds `GET /agents` (`pmo check`) and `POST /agents`
-(`pmo open`). The remaining sidecar call (`create_job`) comes with T-5.
+(`pmo open`); T5-4 adds `POST /jobs` (`pmo wake set`, the design's 先建後刪).
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from .ports import (
     AgentRecord,
     AicommTimeout,
     IssueData,
+    JobCreatedUnreadable,
     JobRecord,
     Message,
     PortError,
@@ -293,8 +294,8 @@ class Sidecar:
     builds one per address, because a team's `sidecar` and the PMO's
     `pmo_sidecar` need not be the same machine (#356, design §3.1). The calls
     are `GET /agents`, `GET /agents/<id>`, `POST /agents`,
-    `POST /agents/<id>/poke`, `POST /agents/<id>/close`, `GET /jobs` and
-    `DELETE /jobs/<id>`; `POST /jobs` comes with T-5.
+    `POST /agents/<id>/poke`, `POST /agents/<id>/close`, `GET /jobs`,
+    `POST /jobs` and `DELETE /jobs/<id>`.
 
     Errors keep only known fields (D-12): the HTTP status and the body's
     `code` (`workdir_not_found`, `agent_not_running`, …). The body's message
@@ -454,6 +455,36 @@ class Sidecar:
             raise SidecarShapeError(detail="GET /jobs 的輸出不是 job 陣列")
         return [_job_of(record) for record in records]
 
+    def create_job(
+        self, *, every: str, agent_id: str, text: str, interrupt: bool = False
+    ) -> JobRecord:
+        """`POST /jobs`: one `poke` job with the design's request shape (§3.6).
+
+        The body is exactly `{"action": "poke", "args": {"id", "text",
+        "interrupt"}, "every"}`: no `until` (the job repeats until the PMO
+        stops it), and `interrupt` is always false so the wake never cuts the
+        round the PMO is in. The sidecar answers `201` with the job record
+        (`job.to_dict()`, the same fields as one `GET /jobs` entry), read with
+        the same known fields. A 2xx whose body does not read as that record
+        is `JobCreatedUnreadable`, not `SidecarShapeError`: the job was created
+        before the answer was written, so `wake set` must look it up rather
+        than report a failed create (裁定第 1 節).
+        """
+        payload: dict[str, object] = {
+            "action": "poke",
+            "args": {
+                "id": agent_id,
+                "text": text,
+                "interrupt": bool(interrupt),
+            },
+            "every": every,
+        }
+        status, body = self._call("POST", "/jobs", payload)
+        try:
+            return _job_of(_json_object(body, "POST /jobs"))
+        except SidecarShapeError as error:
+            raise JobCreatedUnreadable(status=status, detail=str(error)) from None
+
     def delete_job(self, job_id: str) -> bool:
         """`DELETE /jobs/<id>`; reports whether such a job existed."""
         quoted = urllib.parse.quote(job_id, safe="")
@@ -539,9 +570,12 @@ def _job_of(record: object) -> JobRecord:
 
     `every` is only converted when it is not `None`: an auto-reopen job is an
     `at` job and its `every` is `null`, and `seconds_of(None)` would fail the
-    whole list — the one job `pmo close` must delete (#370 高-2). `last_error`
-    is the sidecar's `{"status", "code", "message"}` object (or `null`); only
-    the code is kept (D-12: no message text), and a plain string still reads
+    whole list — the one job `pmo close` must delete (#370 高-2). A record with
+    neither `every` nor `at` is accepted as `every=None, at=None` (#371: the
+    list is not refused because one schedule shape is unknown); only a missing
+    `id`／`action` or an `every` that is not a duration fails. `last_error` is
+    the sidecar's `{"status", "code", "message"}` object (or `null`); only the
+    code is kept (D-12: no message text), and a plain string still reads
     (#370 低-1).
     """
     if not isinstance(record, dict):
@@ -556,11 +590,10 @@ def _job_of(record: object) -> JobRecord:
     raw_every = record.get("every")
     raw_at = record.get("at")
     if raw_every is None:
-        if raw_at is None:
-            # A job with neither `every` nor `at` is not a schedule at all; an
-            # `at` job always names its one time (sidecar.md: `every` is null,
-            # `at` carries the time).
-            raise SidecarShapeError(detail=f"job {job_id} 的 every 不合格式（沒有 every，也沒有 at）")
+        # A job with neither `every` nor `at` is still a job (#371): refusing it
+        # would make one unreadable schedule fail the whole `GET /jobs` list
+        # (`pmo close`, `pmo status` and tick's wake check all read it). Both
+        # fields stay `None`; only a broken `every` fails below.
         every: float | None = None
     else:
         try:

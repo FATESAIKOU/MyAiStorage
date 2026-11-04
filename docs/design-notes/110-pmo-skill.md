@@ -329,13 +329,15 @@ flowchart LR
 - **`pmo wake set ‹every›`**：
   1. 驗間隔：只收 `‹整數›m` 或 `‹整數›h`，範圍 2m～24h（擋掉誤寫成秒數；sidecar 本身接受的格式更寬）。這是工具替 PMO 設的邊界，Q-8 也註明了；要比 24 小時更久，就用 `pmo wake off`。
   2. `GET /jobs`，找出自己的 job。**`every` 一律換成秒數再比**：`POST` 時送的是字串（`10m`），`GET /jobs` 回的是秒數（`600.0`；MyLinuxPool c411b02 的 `jobs.py` 把 `every` 存成秒數、`to_dict` 原樣輸出，文件沒寫，見 §8）；比較時兩邊都轉成秒數，字串和數字兩種形狀都要收。若恰好一個、`every` 相同、`args.id` 是目前的 PMO 身分 → 不動 sidecar，只更新 `tick.json` 的 `wake`，印 `[wake]`。
-  3. 否則**先建後刪**：`POST /jobs`（`action: poke`、`args: {id: ‹PMO 身分›, text: ‹固定句›, interrupt: false}`、`every`，不帶 `until`），成功後 `DELETE /jobs/<id>` 刪掉其他自己的 job。先建後刪，中間不會有沒人叫醒的空窗；代價是短暫有兩個 job，最多多叫醒一次（多跑一輪 tick 無副作用）。刪除失敗印 `[warn]` 附 job id，exit 仍是 0。`POST /jobs` 成功是 201 加完整的 job 物件（和 `GET /jobs` 的每一筆同欄位），`DELETE /jobs/<id>` 成功是 204、沒有 body（404 `job_not_found` 視為已經不在）。若 `POST` 回 2xx 但 body 讀不懂，不當成失敗：再 `GET /jobs` 一次，找出 `POST` 之前沒有、而且是自己的、`every` 相同的那一筆，照常往下刪與寫；找不到就什麼都不刪、不寫 `wake.every`，印 `[warn]` 回 exit 2（下一輪 tick 會看到「自己的 job 超過一個」，再 `wake set` 一次就收斂）。
+  3. 否則**先建後刪**：`POST /jobs`（`action: poke`、`args: {id: ‹PMO 身分›, text: ‹固定句›, interrupt: false}`、`every`，不帶 `until`），成功後 `DELETE /jobs/<id>` 刪掉其他自己的 job。先建後刪，中間不會有沒人叫醒的空窗；代價是短暫有兩個 job，最多多叫醒一次（多跑一輪 tick 無副作用）。刪除失敗印 `[warn]` 附 job id，exit 仍是 0。
+
+     `POST /jobs` 成功是 201 加完整的 job 物件（和 `GET /jobs` 的每一筆同欄位），`DELETE /jobs/<id>` 成功是 204、沒有 body（404 `job_not_found` 視為已經不在）。若 `POST` 回 2xx 但 body 讀不懂，不當成失敗：再 `GET /jobs` 一次，找出 `POST` 之前沒有、而且是自己的、`every` 相同的那一筆，照常往下刪與寫；找不到就什麼都不刪、不寫 `wake.every`，印 `[warn]` 回 exit 2（下一輪 tick 會看到「自己的 job 超過一個」，再 `wake set` 一次就收斂）。
   4. 整個流程拿另一把 `wake.lock`（不是 `tick.json.lock`）：兩個 `set`／`off` 同時跑時會排隊，不會留下兩個 job。tick 不拿這把鎖，所以 `set` 卡在 HTTP 時 tick 照跑。每個 HTTP 呼叫逾時 10 秒；等 `wake.lock` 最多 30 秒，等不到回 exit 2。最後才用 `tick.json.lock` 短暫寫入 `wake`。
 - **`pmo wake off`**：刪掉所有自己的 job，`wake.every` 設成 `null`。之後 tick 不再印 `[wake-missing]`。
 - **`pmo wake show`**：唯讀，列出自己的 job 和 `tick.json` 的 `wake`、`last_tick_at`、最早的到期時刻（含看門狗：讀每個本機 team 的狀態，和 tick 用同一個計算〔`pmo/due.py` 的純函式，tick 與 wake 共用，wake 不 import tick〕，給 PMO 選間隔用）；另外**只列不動**「`args.id` 是 PMO 身分、但句子和目前固定句不同」的 poke job（例如改過固定句之後留下的舊 job，或本人自己排的），讓 PMO 判斷要不要請排的人刪。只印已知欄位（D-12）。SKILL.md 要寫：改固定句之前先 `pmo wake off`。
 - **固定句不帶任何內容**：不帶未讀數、不帶信的內容，也不帶位址或 token（和 sidecar 的 job 規則一致）。`interrupt` 一律是 false：定時叫醒不打斷 PMO 正在做的這一輪，sidecar 會排在這一輪之後。
 
-**tick 怎麼看 job 的健康**（PMO 在 sidecar 裡、而且 `wake.every` 不是 `null` 時，每輪 `GET /jobs` 一次）：
+**tick 怎麼看 job 的健康**（只要設定了 `pmo_sidecar`，每輪 `GET /jobs` 一次；`wake.every` 不是 `null` 時做健康檢查，是 `null` 時只做孤兒檢查）：
 
 | 看到的 | tick 印 | 為什麼 |
 |---|---|---|

@@ -18,8 +18,9 @@ from types import SimpleNamespace
 import pytest
 
 from pmo import cli, ledger
-from pmo.fakes import FakeAngareion
-from pmo.ports import Message, PortError
+from pmo.config import DEFAULT_WAKE_TEXT
+from pmo.fakes import FakeAngareion, FakeSidecar, FakeSidecars
+from pmo.ports import JobRecord, Message, PortError
 from pmo.runtime import Deps
 
 #: 假的 PMO／秘書身分與頻道（都是合法 AI 名與 slug；不含任何真環境的值）。
@@ -281,3 +282,92 @@ def read_tick_state(env: PmoEnv) -> dict:
 
 def read_team_state(env: PmoEnv, key: str = TEAM_KEY) -> dict:
     return _json.loads((env.state_dir / f"{key}.json").read_text(encoding="utf-8"))
+
+
+# --------------------------------------------------------------------------- #
+# wake（#358 T5-4）：假 sidecar 的 job、`pmo wake` 的設定與時鐘
+# --------------------------------------------------------------------------- #
+
+#: 假的 PMO sidecar 位址（與 team 的 8472 不同一台；全是假埠）。
+PMO_SIDECAR = "http://127.0.0.1:8499"
+WAKE_JOB = "job-own"
+OTHER_TEXT = "別人排的一句話"
+TICKET = "demo#45"
+
+
+def set_config(env: PmoEnv, *, pmo_sidecar: str | None = PMO_SIDECAR) -> None:
+    """寫一份假設定；預設把 PMO 放進 sidecar（`pmo_sidecar`）。"""
+    data = config_data()
+    if pmo_sidecar is not None:
+        data["pmo_sidecar"] = pmo_sidecar
+    env.config_path.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def make_deps(sidecar: FakeSidecar | None = None):
+    """假 sidecar（每個位址都回同一個）＋假 angareion＋固定時鐘。"""
+    sidecar = sidecar if sidecar is not None else FakeSidecar()
+    deps = Deps(
+        angareion=FakeAngareion(),
+        sidecar_for=FakeSidecars({}, default=sidecar),
+        now=fixed_now(NOW),
+    )
+    return deps, sidecar
+
+
+def put_job(
+    sidecar: FakeSidecar,
+    job_id: str = WAKE_JOB,
+    *,
+    every: object = 600.0,
+    text: str = DEFAULT_WAKE_TEXT,
+    agent_id: str = PMO_IDENTITY,
+    action: str = "poke",
+    last_run: object = None,
+    last_error: str | None = None,
+    auto: bool = False,
+    at: str | None = None,
+    next_run_at: str | None = None,
+) -> JobRecord:
+    """一個 sidecar job，形狀照 `GET /jobs`（`every` 是秒數；`auto` 是欄位）。"""
+    extra: dict = {}
+    if auto:
+        extra["auto"] = True
+    if next_run_at is not None:
+        extra["next_run_at"] = next_run_at
+    job = JobRecord(
+        job_id=job_id,
+        action=action,
+        args={"id": agent_id, "text": text, "interrupt": False},
+        every=None if every is None else (every if isinstance(every, str) else float(every)),
+        last_run=last_run,
+        last_error=last_error,
+        at=at,
+        extra=extra,
+    )
+    sidecar.jobs[job_id] = job
+    return job
+
+
+def own_jobs(sidecar: FakeSidecar) -> list[JobRecord]:
+    """這個測試裡「自己的」job（句子是固定句、不是 auto）——測試端的獨立算法。"""
+    return [
+        job
+        for job in sidecar.jobs.values()
+        if job.action == "poke"
+        and job.args.get("text") == DEFAULT_WAKE_TEXT
+        and not job.extra.get("auto")
+    ]
+
+
+def run_wake(env: PmoEnv, deps: Deps, *argv: str):
+    return run_cli(["wake", *argv], env, deps=deps)
+
+
+def run_tick(env: PmoEnv, deps: Deps):
+    return run_cli(["tick"], env, deps=deps)
+
+
+def record_calls(sidecar: FakeSidecar) -> list[str]:
+    calls: list[str] = []
+    sidecar.on_call = calls.append
+    return calls

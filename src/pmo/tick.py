@@ -41,8 +41,10 @@ from functools import partial
 from typing import Callable, Iterable
 
 from . import handoff, inbox, round as round_module, teammsg, teamstate, tickstate
+from . import wake as wake_module
 from ._lock import LockTimeout
 from .config import Team
+from .due import WATCHDOG_SECONDS, earliest_due, should_be_running, watchdog_deadline
 from .errors import SchemaError
 from .ports import (
     AgentRecord,
@@ -55,10 +57,6 @@ from .runtime import Ctx, assert_pmo_identity, one_line, sidecar_port
 from .timeutil import iso_utc, parse_ts
 
 __all__ = ["Step", "TickRun", "tick", "tick_steps"]
-
-#: The watchdog's interval (design §3.6: 看門狗 10 分鐘): the first poke 10
-#: minutes after the dispatch, the escalation 10 minutes after the poke.
-WATCHDOG_SECONDS = 10 * 60.0
 
 #: The worker-team hand-off's interval (design §3.2.1: `poll` 預設間隔 10 分鐘).
 WORKER_POLL_SECONDS = 10 * 60.0
@@ -85,15 +83,6 @@ WATCHDOG_POKE_TEXT = (
 
 #: The two step names that read as sentences in a failure line.
 READ_STEP = "收信"
-
-
-def _should_be_running(st: dict) -> bool:
-    """The design's「應該在跑」: not closed, and a dispatch is recorded.
-
-    `ack_at` may or may not be set (ruling 10: a team PM that ends after its
-    「收到」 and before the work is done still needs a person).
-    """
-    return st.get("closed") is not True and bool(str(st.get("ticket") or "").strip())
 
 
 def _reopen_at(record: AgentRecord) -> str | None:
@@ -237,10 +226,10 @@ def _emit_idle(run: TickRun) -> None:
     """`[idle]` when nothing went to stdout, with the next due moment (⑤).
 
     Only stdout events count: a round whose only output was `[warn]` on stderr
-    is still idle (§2.2, ruling 6). The moment is the earliest of the
-    watchdogs' deadlines (`run.due`), the hand-offs and the worker polls
-    (`run.after`, the committed state) — T5-3's new fields are picked up
-    without changing this function.
+    is still idle (§2.2, ruling 6). The moment is `pmo.due.earliest_due` over
+    this round's committed `tick.json`, every active team's state and the
+    moments the steps already put in `run.due` — the same function `pmo wake
+    show` calls, so the two never disagree (裁定第 2 節).
     """
     if run.events:
         return
@@ -252,17 +241,22 @@ def _emit_idle(run: TickRun) -> None:
 
 
 def _earliest_due(run: TickRun) -> datetime | None:
-    """The earliest moment something in this round becomes due, if any."""
-    moments = list(run.due)
+    """The earliest moment something in this round becomes due, if any.
+
+    A team whose state lock could not be got is left out (`run.lock_skipped`,
+    T5-3): this round skipped it, so its watchdog is not a moment this round
+    will act on and `[idle]` does not name it.
+    """
+    moments: list[datetime] = list(run.due)
     state = run.after if run.after is not None else run.snapshot
-    for entry in state.handoffs.values():
-        moment = parse_ts(entry.next_due_at)
-        if moment is not None:
-            moments.append(moment)
-    for poll in state.worker_poll.values():
-        moment = parse_ts(poll.next_due_at)
-        if moment is not None:
-            moments.append(moment)
+    team_states = [
+        teamstate.load_state(run.ctx.state_dir, team.key)
+        for team in teammsg.active_teams(run.ctx.config)
+        if team.key not in run.lock_skipped
+    ]
+    moment = earliest_due(state, team_states, run.now)
+    if moment is not None:
+        moments.append(moment)
     return min(moments) if moments else None
 
 
@@ -354,7 +348,7 @@ def _state_events(team: Team, record: AgentRecord, st: dict) -> list[str]:
             return [f"[no-candidate] {team.key} {provider}"]
         if st.get("close_requested_at"):
             return [_state_line(team, old, new)]
-        if _should_be_running(st):
+        if should_be_running(st):
             return [
                 f"[要本人處理] {team.pm} 結束（exit={reason or '-'}）；要不要重開由本人決定"
             ]
@@ -381,7 +375,7 @@ def _absent_events(team: Team, st: dict) -> list[str]:
     old = st.get("state")
     if old == "absent":
         return []
-    if _should_be_running(st):
+    if should_be_running(st):
         if team.tui:
             return [f"NEED_REOPEN {team.key} tui=true"]
         session = str(st.get("session") or "none")
@@ -572,9 +566,13 @@ def step_watchdog(run: TickRun) -> None:
     2); a state with neither is not enough to act on. `ack_at` ends it. When
     the run has been suspended for longer than the interval both marks are
     still made at most once each (the claims), never a burst: the poke first,
-    the escalation once its own deadline (poke + 10 minutes) has passed. A team
-    whose state lock cannot be got within `TEAM_LOCK_TIMEOUT_SECONDS` gets a
-    `[warn]` and is skipped this round (architect 2026-11-04 T5-3).
+    the escalation once its own deadline (poke + 10 minutes) has passed.
+
+    Which moment is due comes from `pmo.due.watchdog_deadline`, the same
+    function `pmo wake show` uses; whether this round's action is the poke or
+    the escalation is still read off the state's own marks. A team whose state
+    lock cannot be got within `TEAM_LOCK_TIMEOUT_SECONDS` gets a `[warn]` and is
+    skipped this round (architect 2026-11-04 T5-3).
     """
     for team in teammsg.active_teams(run.ctx.config):
         if team.key in run.lock_skipped:
@@ -588,31 +586,23 @@ def step_watchdog(run: TickRun) -> None:
 def _watchdog_for(run: TickRun, team: Team) -> None:
     """One team's ③ decision and its (claimed) poke or escalation."""
     st = teamstate.load_state(run.ctx.state_dir, team.key)
-    if not _should_be_running(st) or st.get("ack_at"):
+    deadline = watchdog_deadline(st, run.now)
+    if deadline is None:
+        return
+    if run.now < deadline:
+        run.due.append(deadline)
         return
     ticket = str(st.get("ticket") or "").strip()
-    base = parse_ts(st.get("received_at") or st.get("dispatched_at"))
-    if base is None:
-        return
-    poke_at = parse_ts(st.get("ack_poke_at"))
-    if poke_at is None:
-        deadline = base + timedelta(seconds=WATCHDOG_SECONDS)
-        if run.now < deadline:
-            run.due.append(deadline)
+    if parse_ts(st.get("ack_poke_at")) is None:
+        base = parse_ts(st.get("received_at") or st.get("dispatched_at"))
+        if base is None:  # watchdog_deadline already refused this state
             return
         if _claim(run, team, "ack_poke_at"):
             _poke(run, team, st, ticket, base)
         # Whether this round won the claim or lost it to a parallel tick,
         # the escalation is 10 minutes after that poke.
-        escalate_due = run.now + timedelta(seconds=WATCHDOG_SECONDS)
         if st.get("ack_escalated_at") is None:
-            run.due.append(escalate_due)
-        return
-    if st.get("ack_escalated_at"):
-        return
-    escalate_due = poke_at + timedelta(seconds=WATCHDOG_SECONDS)
-    if run.now < escalate_due:
-        run.due.append(escalate_due)
+            run.due.append(run.now + timedelta(seconds=WATCHDOG_SECONDS))
         return
     if _claim(run, team, "ack_escalated_at"):
         _escalate(run, team, ticket)
@@ -648,7 +638,7 @@ def step_worker_poll(run: TickRun) -> None:
         if team.sidecar != "worker":
             continue
         st = teamstate.load_state(run.ctx.state_dir, team.key)
-        if not _should_be_running(st):
+        if not should_be_running(st):
             continue
         entry = run.snapshot.worker_poll.get(team.key)
         due = parse_ts(entry.next_due_at) if entry is not None else None
@@ -709,6 +699,6 @@ tick_steps: tuple[Step, ...] = (
     Step("handoffs", step_handoffs),
     # 插槽 B：[group-sweep-due]（到期才印、往後推）
     Step("group_sweep", step_group_sweep_due),
-    # ← T5-4 插槽：job 健康（GET /jobs，只碰 pmo_sidecar）
+    Step("wake", wake_module.step_job_health, warn=wake_module.jobs_warn),
     Step("commit", step_commit, fatal=True),
 )

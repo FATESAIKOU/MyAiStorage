@@ -103,6 +103,20 @@ class SidecarShapeError(SidecarError):
         return self
 
 
+class JobCreatedUnreadable(SidecarError):
+    """`POST /jobs` answered 2xx, but the body is not the job object (#358 T5-4).
+
+    The sidecar creates the job **before** it writes the answer
+    (`core.add_job(...)` then `return 201, job.to_dict()`), so a 2xx whose body
+    this port cannot read still means the job probably exists. `pmo wake set`
+    therefore does not treat it as a failed create: it looks the new job up
+    once with `GET /jobs` (裁定第 1 節的退路) and finishes the normal flow.
+    `status` is that 2xx code. When the lookup cannot find the job either, the
+    same error escapes `set_interval` and the CLI prints the「請跑 pmo wake
+    show 確認」line as exit 2.
+    """
+
+
 def sidecar_address(address: str) -> str:
     """One sidecar address in the one form the code compares and looks up (#371).
 
