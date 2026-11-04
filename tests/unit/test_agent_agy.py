@@ -14,6 +14,7 @@ import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve
 
 import base64
 import builtins
+import hashlib
 import importlib.util
 import json
 import os
@@ -362,15 +363,25 @@ def test_export_twice_has_the_same_md5_and_keeps_the_db_whole(agy_home):
                                "workspace_uris": '["file:///tmp/agy-fixture-ws"]'}])
     first = agy.ADAPTER.export(session_id)
     second = agy.ADAPTER.export(session_id)
-    # Recorded on the R1 base (985afd7), before the export changed: agy's raw
-    # is streamed either way and may not move by one byte (design B.2, I.6).
-    assert first.raw_md5 == "108d73ecc1164623e98bb30c08c5ad76"
     assert first.raw_md5 == second.raw_md5
     assert first.raw_size == second.raw_size
     assert first.raw_file is not None and second.raw_file != first.raw_file
 
     raw = first.raw_file.read_bytes()
     document = json.loads(raw)
+    # The R1 wire format, byte for byte (design B.2, I.6), assembled here from the
+    # fixture instead of pinned as one whole-raw md5: the raw carries the snapshot
+    # db in db_b64, and SQLite stamps the writing library's own version into the db
+    # header (bytes 96-99), so a whole-raw md5 only holds within one SQLite build.
+    db_path = agy_home / "conversations" / f"{session_id}.db"
+    expected = (b'{"format": "agy-conversation/1", "agy_version": null, "trajectory_id": '
+                + json.dumps(meta["trajectory_id"], ensure_ascii=False).encode("utf-8")
+                + b', "scan_text": '
+                + json.dumps(agy_store.scan_text(db_path), ensure_ascii=False).encode("utf-8")
+                + b', "db_b64": "' + base64.b64encode(db_path.read_bytes()) + b'"}')
+    assert raw == expected
+    assert first.raw_md5 == hashlib.md5(expected).hexdigest()
+    assert first.raw_size == len(expected)
     assert document["format"] == "agy-conversation/1"
     assert document["agy_version"] is None
     assert document["trajectory_id"] == meta["trajectory_id"]

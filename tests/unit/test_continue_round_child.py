@@ -134,8 +134,10 @@ def _record(agora_id, sid, workdir, agent="claude"):
 def _ps_table() -> list[tuple[int, int, str]]:
     """[(pid, ppid, command)] of every process on the machine. `-ax` matters: an orphaned
     grandchild has no controlling terminal and plain `ps` would not list it - the blind scan would
-    make every absence-check trivially true."""
-    out = subprocess.run(["ps", "-ax", "-o", "pid=,ppid=,command="], capture_output=True, text=True).stdout
+    make every absence-check trivially true. `-ww` matters too: procps truncates an `-o` column to
+    the output width (80 under pytest, which hands its children COLUMNS=80), and a cut-off
+    command line hides the `-m agora.round_child` that identifies a round child."""
+    out = subprocess.run(["ps", "-ax", "-ww", "-o", "pid=,ppid=,command="], capture_output=True, text=True).stdout
     table = []
     for line in out.splitlines():
         parts = line.split(None, 2)
