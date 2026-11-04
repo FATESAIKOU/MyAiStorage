@@ -24,6 +24,27 @@ aicomm 對外只有三個指令：send、inbox、log。
 
 不中斷的送法有一個問題：發信方不知道對方什麼時候才會讀到。由發信方判斷：太久沒回就再發一次 `--interrupt`（只用這一次，不是一直重送；隊員不為這件事對 PM、PMO 用 `--interrupt`，改請 PMO 轉達）。
 
+## 送達與叫醒
+
+- **送達＝訊息寫進 Angareion**。寫入成功，叫醒的結果就只寫在 stderr，不改變結束碼（`--require-wake` 除外，見下）：**exit 0 只代表已送達**。stdout 第一行還是訊息 id。
+- 叫醒的結果每個收件人剛好一行，本機與跨機共用同一個格式（`<說明>` 只有一行）：
+
+  ```
+  wake: <agent> woken local[ interrupt]
+  wake: <agent> woken peer:<port>[,<port>…][ interrupt]
+  wake: <agent> not-woken <原因碼>[ <說明>]
+  wake: <agent> unknown <原因碼>[ <說明>]
+  ```
+
+  `woken` 是叫醒了；`not-woken` 是確定沒戳到、或對方明確拒絕；`unknown` 是**可能已經戳到**（例如戳逾時）——看到 `unknown` 不要重送。跨機的 `peer:<port>` 那一種還沒提供（#368）；在那之前本機查不到就是一行的 `not-woken`。
+- 叫醒是盡力而為：只有收件人在本機 sidecar 上、而且狀態是 `idle` 或 `running` 才戳；不在本機、`starting`、`waiting-quota`、`exited` 都不戳（訊息還是在 Angareion，對方之後 `inbox` 一定讀得到）。跨機的叫醒後援還沒提供（#368）；目前沒有它，不在本機的收件人一律是 `wake: <agent> not-woken peer-unavailable`。
+- `--require-wake`：任何一位是 `not-woken` 或 `unknown` 就回 **exit 4**——訊息已送達，**不要重送**；全部叫醒、或沒有人要叫醒（廣播、只寄給自己）回 0。與 `--no-wake` 不能同時給（exit 1，而且在寫進 Angareion 之前就拒絕）。
+- 原因碼（與 `src/aicomm/cli.py` 的常數一致；新增要改設計文件並同步這裡）：
+  - `not-woken` 的原因碼：`not-found`、`peer-unavailable`、`lookup-incomplete`、`peer-port-out-of-range`、`peer-bad-answer`、`bad-answer`、`bad-name`、`agent-not-running`、`awaiting-answer`、`state-<state>`、`http-<碼>`
+  - `unknown` 的原因碼：`poke-timeout`、`poke-error`、`peer-bad-answer`、`internal-error`
+  - 其中 `not-found`、`lookup-incomplete`、`peer-port-out-of-range` 與 `peer-bad-answer` 要等跨機後援（#368）才會出現；在那之前，不在本機的收件人一律是 `peer-unavailable`。
+- 連送兩則會戳兩次，沒有去重；自己不會戳自己（見「自己是誰」）。
+
 ## 參照：`--ticket` 與 `--ref`（#278）
 
 `send` 附參照一律走 Angareion 的 `--ref`，不改訊息內文、不去讀被指到的東西：
@@ -62,7 +83,7 @@ aicomm 只對 sidecar 發兩種請求，位址固定為 sidecar 文件的預設 
 - `state` 是 `idle` 或 `running` 才戳；`starting`、`waiting-quota`、`exited` 不戳。不看 tui 或 headless，不讀 `attach`。
 - `interrupt` 預設 false；給了 `--interrupt` 且對方 `running` 才是 true（對 `idle` 的戳本來就不打斷）。
 - 回應不符預期（非 JSON、沒有字串的 `state`、不認得的 HTTP 狀態）一律當叫醒失敗、不戳，訊息已送達的結果不變。
-- 戳逾時不重送（重送可能變兩份），stderr 印「叫醒結果未知」。
+- 戳逾時不重送（重送可能變兩份），stderr 是 `wake: <agent> unknown poke-timeout`；其他連線錯誤是 `unknown poke-error`（請求可能已經送出，分不出來）。
 - sidecar 若改了這些形狀，aicomm 要跟著改；對照以這張表為準。
 
 ## 位址覆寫（只給測試與手動）
@@ -78,7 +99,7 @@ aicomm 只對 sidecar 發兩種請求，位址固定為 sidecar 文件的預設 
 
 ## 結束碼
 
-見 `skills/aicomm/SKILL.md`。`send` 的 exit 0 只代表訊息已寫進 Angareion。
+見 `skills/aicomm/SKILL.md`。`send` 的 **exit 0 只代表已送達**：訊息已寫進 Angareion，叫醒失敗不改變結束碼；叫醒結果看 stderr 的 `wake:` 行。帶 `--require-wake` 時，有人沒叫醒或結果未知最多回 exit 4，也仍代表訊息已送達（**不要重送**）。
 
 ## 版本
 

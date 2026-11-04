@@ -73,14 +73,15 @@ class FakeSidecar:
 
     `agents[name] = {"state": ..., ...}` is served as 200 JSON; a name that is not there
     is 404. `raw[name] = (status, bytes)` overrides the GET answer verbatim (broken JSON).
-    `poke_status` / `poke_delay` shape the poke answer. Everything it receives is in
-    `requests` as `{"method", "path", "body"}`.
+    `poke_status` / `poke_body` / `poke_delay` shape the poke answer. Everything it
+    receives is in `requests` as `{"method", "path", "body"}`.
     """
 
     def __init__(self) -> None:
         self.agents: dict[str, dict] = {}
         self.raw: dict[str, tuple[int, bytes]] = {}
         self.poke_status = 200
+        self.poke_body = b"{}"
         self.poke_delay = 0.0
         self.get_delay = 0.0
         self.requests: list[dict] = []
@@ -121,7 +122,7 @@ class FakeSidecar:
                     sidecar._release.wait(sidecar.poke_delay)
                 if not re.fullmatch(r"/agents/[^/]+/poke", self.path):
                     return self._reply(400, b"{}")
-                self._reply(sidecar.poke_status, b"{}")
+                self._reply(sidecar.poke_status, sidecar.poke_body)
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
