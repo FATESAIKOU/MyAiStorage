@@ -58,8 +58,18 @@ _KNOWN_JOB = ("id", "action", "args", "every", "at", "last_run", "last_error")
 #: The fields of one agent record the adapter reads; the rest stays in `extra`.
 #: `attach` and `input_unconfirmed_at` are read into their own fields (#356 裁定:
 #: `attach.local` is what `pmo open`／`status` print; `input_unconfirmed_at` is
-#: how「卡在 starting」is told apart from a normal start).
-_KNOWN_AGENT = ("id", "agent_id", "state", "exit", "session", "attach", "input_unconfirmed_at")
+#: how「卡在 starting」is told apart from a normal start). `provider` is the
+#: provider the seat is actually using, which `[no-candidate]` prints (#358).
+_KNOWN_AGENT = (
+    "id",
+    "agent_id",
+    "state",
+    "exit",
+    "session",
+    "provider",
+    "attach",
+    "input_unconfirmed_at",
+)
 
 
 def _run(
@@ -510,12 +520,14 @@ def _agent_of(record: dict, fallback_id: str) -> AgentRecord:
         raise SidecarShapeError(detail=f"agent {agent_id} 的記錄沒有 state", record=True)
     raw_exit = record.get("exit")
     raw_session = record.get("session")
+    raw_provider = record.get("provider")
     raw_unconfirmed = record.get("input_unconfirmed_at")
     return AgentRecord(
         agent_id=agent_id,
         state=state,
         exit=dict(raw_exit) if isinstance(raw_exit, dict) else None,
         session=raw_session if isinstance(raw_session, str) else None,
+        provider=raw_provider if isinstance(raw_provider, str) else None,
         attach=_attach_local_of(record.get("attach")),
         input_unconfirmed_at=raw_unconfirmed if isinstance(raw_unconfirmed, str) else None,
         extra={key: value for key, value in record.items() if key not in _KNOWN_AGENT},

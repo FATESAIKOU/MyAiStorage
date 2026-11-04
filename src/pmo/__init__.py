@@ -9,8 +9,9 @@ fakes (§3.1, §3.3), `sanitize` (D-12), the two environment paths (§3.4) and
 the timestamp shape (`pmo.timeutil`), and the Angareion adapter. T-3 added the
 ledger rebuild (`pmo inbox rebuild`, `pmo.rebuild`); T-4a added the dispatch
 front half (`pmo check`／`pmo send`, `pmo.dispatch`, the GitHub adapter).
-`pmo tick` and the remaining sending/team commands are later tickets
-(§5.2 T-4b..T-5).
+T-5's first half added the one-round `pmo tick` (`pmo.tick`, #358): the inbox
+round, the `GET /agents` comparison, the watchdog and the worker-team
+hand-offs; `pmo wake` is the rest of T-5 (§5.2 T-5).
 """
 
 from __future__ import annotations

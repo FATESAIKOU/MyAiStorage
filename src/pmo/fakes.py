@@ -9,6 +9,7 @@ sidecar).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 from .ports import (
     AgentRecord,
@@ -173,6 +174,12 @@ class FakeSidecar:
     `errors` maps a method name to the `SidecarError` (or any exception) that
     calling that method should raise — the way the real HTTP calls refuse or
     time out (design §2.3 的 sidecar 分支).
+
+    `on_call` is a hook every method calls first, with the method's name: a
+    test can block here (the「sidecar 卡在 `GET /agents`」shape) or observe that
+    `tick.json.lock` is not held while tick is out on HTTP (#358 T5-2).
+    `agent_reads` records every agent id `get_agent` was asked for, so a test
+    can assert a worker team was never looked up（D-8）.
     """
 
     def __init__(self, addresses: str = "http://sidecar.local") -> None:
@@ -188,8 +195,17 @@ class FakeSidecar:
         self.closed: list[str] = []
         self.deleted_jobs: list[str] = []
         self.errors: dict[str, PortError] = {}
+        #: Called with each method's name before it does anything (#358 T5-2).
+        self.on_call: Callable[[str], None] | None = None
+        #: The agent ids `get_agent` was asked for, in order.
+        self.agent_reads: list[str] = []
         self._agent_next = 0
         self._job_next = 0
+
+    def _call(self, method: str) -> None:
+        """Run the test hook, if any (before the injected failure)."""
+        if self.on_call is not None:
+            self.on_call(method)
 
     def _maybe_fail(self, method: str) -> None:
         error = self.errors.get(method)
@@ -199,23 +215,30 @@ class FakeSidecar:
     def add_agent(self, agent_id: str, state: str = "running", session: str | None = "s1",
                   exit: dict[str, object] | None = None,
                   attach: str | None = None,
-                  input_unconfirmed_at: str | None = None) -> AgentRecord:
+                  input_unconfirmed_at: str | None = None,
+                  provider: str | None = None,
+                  extra: dict[str, object] | None = None) -> AgentRecord:
         record = AgentRecord(
             agent_id=agent_id,
             state=state,
             exit=exit,
             session=session,
+            provider=provider,
             attach=attach,
             input_unconfirmed_at=input_unconfirmed_at,
+            extra=dict(extra or {}),
         )
         self.agents[agent_id] = record
         return record
 
     def list_agents(self) -> list[AgentRecord]:
+        self._call("list_agents")
         self._maybe_fail("list_agents")
         return list(self.agents.values())
 
     def get_agent(self, agent_id: str) -> AgentRecord:
+        self._call("get_agent")
+        self.agent_reads.append(agent_id)
         self._maybe_fail("get_agent")
         try:
             return self.agents[agent_id]
@@ -236,6 +259,7 @@ class FakeSidecar:
         fresh: bool = False,
         agent_args: tuple[str, ...] | None = None,
     ) -> AgentRecord:
+        self._call("open_agent")
         self._maybe_fail("open_agent")
         self._agent_next += 1
         self.opened_sessions.append((agent_id, session, fresh))
@@ -257,23 +281,9 @@ class FakeSidecar:
             agent_id=agent_id,
             state="starting",
             session=session,
+            provider=provider,
             extra={
                 "workdir": workdir,
-                "provider": provider,
-                "model": model,
-                "input": input,
-                "fresh": fresh,
-            },
-        )
-        self.agents[agent_id] = record
-        return record
-        record = AgentRecord(
-            agent_id=agent_id,
-            state="starting",
-            session=session,
-            extra={
-                "workdir": workdir,
-                "provider": provider,
                 "model": model,
                 "input": input,
                 "fresh": fresh,
@@ -283,6 +293,7 @@ class FakeSidecar:
         return record
 
     def poke(self, agent_id: str, *, text: str, interrupt: bool = False) -> int:
+        self._call("poke")
         self._maybe_fail("poke")
         if agent_id not in self.agents:
             raise SidecarError(status=404, code="agent_not_running", detail=f"no agent {agent_id!r}")
@@ -290,6 +301,7 @@ class FakeSidecar:
         return 200
 
     def close_agent(self, agent_id: str) -> None:
+        self._call("close_agent")
         self._maybe_fail("close_agent")
         if agent_id not in self.agents:
             raise SidecarError(status=404, code="agent_not_found", detail=f"no agent {agent_id!r}")
@@ -315,10 +327,12 @@ class FakeSidecar:
         return record
 
     def list_jobs(self) -> list[JobRecord]:
+        self._call("list_jobs")
         self._maybe_fail("list_jobs")
         return list(self.jobs.values())
 
     def create_job(self, *, every: str, agent_id: str, text: str, interrupt: bool = False) -> JobRecord:
+        self._call("create_job")
         self._maybe_fail("create_job")
         self._job_next += 1
         record = self.add_job(
@@ -327,6 +341,7 @@ class FakeSidecar:
         return record
 
     def delete_job(self, job_id: str) -> bool:
+        self._call("delete_job")
         self._maybe_fail("delete_job")
         self.deleted_jobs.append(job_id)
         existed = job_id in self.jobs

@@ -11,6 +11,7 @@ preserved as it is.
       "agent": "<the team PM's AI name>",
       "state": "<sidecar state>",
       "exit": {...} | null,
+      "session": "<the agent's session id>" | null,
       "ticket": "repo#n …",
       "message_id": "<the dispatch (指示信) message id>",
       "dispatched_at": "<the --since time of the first input>",
@@ -18,7 +19,13 @@ preserved as it is.
       "ack_at": "<time>" | null,          the team PM's 「收到」
       "ack_poke_at": "<time>" | null,     the watchdog's first poke
       "ack_escalated_at": "<time>" | null, the watchdog's escalation to the person
+      "reopen_at": "<time>" | null        the sidecar's auto-reopen time (waiting-quota)
     }
+
+`session` and `reopen_at` are typed here for tick (#358 T5-2): tick compares
+them with `GET /agents/<pm>` and writes them back, and `pmo open` records the
+session the sidecar returned (#373 低-1: `NEED_REOPEN … session=…` reads it).
+A file that never had them reads `None` and is not given them (Q-9).
 
 `version` is optional here and nowhere else: MyPMO's team state files carry no
 `version`, and this file has to read them unchanged (architect review 中-1).
@@ -46,6 +53,7 @@ _KNOWN = (
     "agent",
     "state",
     "exit",
+    "session",
     "ticket",
     "message_id",
     "dispatched_at",
@@ -53,6 +61,7 @@ _KNOWN = (
     "ack_at",
     "ack_poke_at",
     "ack_escalated_at",
+    "reopen_at",
 )
 
 
@@ -63,6 +72,7 @@ class TeamState:
     agent: str | None = None
     state: str | None = None
     exit: dict[str, object] | None = None
+    session: str | None = None
     ticket: str | None = None
     message_id: str | None = None
     dispatched_at: str | None = None
@@ -70,6 +80,7 @@ class TeamState:
     ack_at: str | None = None
     ack_poke_at: str | None = None
     ack_escalated_at: str | None = None
+    reopen_at: str | None = None
     version: int | None = None
     extra: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
 
@@ -81,6 +92,7 @@ class TeamState:
             ("agent", self.agent),
             ("state", self.state),
             ("exit", self.exit),
+            ("session", self.session),
             ("ticket", self.ticket),
             ("message_id", self.message_id),
             ("dispatched_at", self.dispatched_at),
@@ -88,6 +100,7 @@ class TeamState:
             ("ack_at", self.ack_at),
             ("ack_poke_at", self.ack_poke_at),
             ("ack_escalated_at", self.ack_escalated_at),
+            ("reopen_at", self.reopen_at),
         ):
             if value is not None:
                 known[key] = value
@@ -106,6 +119,7 @@ def parse(data: object) -> TeamState:
         agent=_jsonutil.optional_str(data, "agent", WHERE),
         state=_jsonutil.optional_str(data, "state", WHERE),
         exit=None if raw_exit is None else dict(raw_exit),
+        session=_jsonutil.optional_str_or_none(data, "session", WHERE),
         ticket=_jsonutil.optional_str(data, "ticket", WHERE),
         message_id=_jsonutil.optional_str(data, "message_id", WHERE),
         dispatched_at=_jsonutil.optional_str(data, "dispatched_at", WHERE),
@@ -113,6 +127,7 @@ def parse(data: object) -> TeamState:
         ack_at=_jsonutil.optional_str_or_none(data, "ack_at", WHERE),
         ack_poke_at=_jsonutil.optional_str_or_none(data, "ack_poke_at", WHERE),
         ack_escalated_at=_jsonutil.optional_str_or_none(data, "ack_escalated_at", WHERE),
+        reopen_at=_jsonutil.optional_str_or_none(data, "reopen_at", WHERE),
         extra=pick_extra(data, _KNOWN),
     )
 

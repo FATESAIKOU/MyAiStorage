@@ -23,7 +23,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from ainame import parse as parse_name
 
@@ -50,7 +49,6 @@ __all__ = [
     "hint_for",
     "parse_ticket",
     "send",
-    "tick_path",
 ]
 
 #: 看門狗的間隔（design §3.6：看門狗 10 分鐘）。`[wake-hint]` 只在
@@ -99,11 +97,6 @@ class SendResult:
     message_id: str
     received_at: str
     wake_hint: str | None
-
-
-def tick_path(state_dir: Path) -> Path:
-    """The tick state file in this state directory (design §3.4)."""
-    return Path(state_dir) / tickstate.STATE_FILE_NAME
 
 
 def parse_ticket(text: str) -> tuple[str, int]:
@@ -196,7 +189,7 @@ def _wake_every(ctx: Ctx) -> tuple[str | None, bool]:
     stdout 的叫醒值印 `unknown`（#355 裁定 4）。
     """
     try:
-        state = tickstate.load_or_empty(tick_path(ctx.state_dir))
+        state = tickstate.load_or_empty(tickstate.tick_path(ctx.state_dir))
     except (SchemaError, OSError) as error:
         ctx.log(f"[warn] tick.json 讀不起來：{one_line(error)}")
         return None, True
@@ -256,7 +249,7 @@ def check(ctx: Ctx, key: str) -> list[CheckItem]:
         )
         items.append(CheckItem("state", True, detail))
 
-    path = tick_path(ctx.state_dir)
+    path = tickstate.tick_path(ctx.state_dir)
     try:
         tick = tickstate.load_or_empty(path)
     except (SchemaError, OSError) as error:

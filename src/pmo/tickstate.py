@@ -34,11 +34,19 @@ are `pmo wake set`'s (T-5), not the file's.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
+from typing import Callable, Sequence
 
-from . import _io, _jsonutil
+from . import _io, _jsonutil, _lock
 from ._jsonutil import describe, fail, pick_extra
+from .timeutil import iso_utc
+
+#: One change to the tick state: `TickState → TickState`. Tick accumulates these
+#: on the state it read **outside** the lock and `commit` applies them to a
+#: re-read one, inside `tick.json.lock` (design §3.4; #358 T5-2).
+Mutation = Callable[["TickState"], "TickState"]
 
 WHERE = "tick state"
 
@@ -229,3 +237,40 @@ def load_or_empty(path: Path) -> TickState:
 def save(path: Path, state: TickState) -> None:
     """Write the canonical form of the tick state (same-directory replace)."""
     _io.write_json(path, state.to_dict())
+
+
+def tick_path(state_dir: Path) -> Path:
+    """The tick state file in this state directory (design §3.4)."""
+    return Path(state_dir) / STATE_FILE_NAME
+
+
+def commit(
+    path: Path,
+    *,
+    now: datetime,
+    writes: Sequence[Mutation],
+    timeout: float = 10.0,
+) -> TickState:
+    """Apply this round's `writes` to a re-read `tick.json` (design §3.4).
+
+    The whole read-modify-write runs inside `tick.json.lock` and **no HTTP call
+    happens here**: tick finishes `GET /agents`／`poke` first, then commits, so
+    a `wake set|off` that ran while the HTTP calls were out is not overwritten
+    by the snapshot tick read at the start (the file is re-read inside the
+    lock). The lock is the shared `_lock.path_lock` (#358); waiting longer than
+    `timeout` raises `_lock.LockTimeout`, and the caller prints `[warn]` and
+    exits 2 (§3.4: 下一輪再寫).
+
+    `writes` are applied in order on the re-read state, then `last_tick_at` is
+    set to `now`. A missing file is created; a bad one raises `SchemaError`
+    before anything is written.
+    """
+    path = Path(path)
+    lock = path.with_name(f"{path.name}.lock")
+    with _lock.path_lock(lock, timeout=timeout):
+        state = load_or_empty(path)
+        for write in writes:
+            state = write(state)
+        state = replace(state, last_tick_at=iso_utc(now))
+        save(path, state)
+        return state

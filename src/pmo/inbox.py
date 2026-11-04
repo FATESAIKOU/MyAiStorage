@@ -538,12 +538,18 @@ def send_report(
 # --------------------------------------------------------------------------- #
 
 
-def process_messages(ctx: Ctx, messages: Iterable) -> list[str]:
+def process_messages(
+    ctx: Ctx, messages: Iterable, *, handoffs: list[str] | None = None
+) -> list[str]:
     """處理訊息陣列中的秘書工作，回傳產生的事件字串清單。
 
     叫人 ack 與 [poke] 依來信 id 記在收件匣狀態檔（`notified.call`／`notified.poke`），
     游標遺失或 `--since` 補讀讓同一則再出現時，不會再回第二次機械 ack、也不會再標一次
     叫醒。送失敗的不記，下一輪重試。帳本一律在鎖內重新讀取（不用呼叫端手上的那份）。
+
+    `handoffs` 是 tick（#358 T5-3）的收集清單：給了就把這批 `[group-handoff]`
+    的訊息 id 依序放進去，呼叫端不必反解析事件字串。預設 `None` 時行為與
+    既有呼叫端完全不變。
     """
     events: list[str] = []
     dirty = False
@@ -573,6 +579,8 @@ def process_messages(ctx: Ctx, messages: Iterable) -> list[str]:
             # 不記成已處理，只印一行交接（Q-9 (a)；完整交接機制是 #358）
             if is_group_request(msg, ctx.config):
                 events.append(f"[group-handoff] {msg_id}")
+                if handoffs is not None:
+                    handoffs.append(msg_id)
                 continue
             if is_call(msg, ctx.config):
                 # 叫人只回答：機械 ack 只回秘書身分，不建單、不進收件匣、不派工

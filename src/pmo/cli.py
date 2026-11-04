@@ -22,8 +22,9 @@ import sys
 from typing import Optional
 
 from . import config as config_module
-from . import decision, dispatch, inbox, ledger, ops, paths, rebuild, sanitize
+from . import decision, dispatch, inbox, ledger, ops, paths, rebuild, sanitize, tick
 from . import open as open_module
+from ._lock import LockTimeout
 from .adapters import Aicomm, Angareion, GitHub, Sidecar
 from .errors import (
     IdentityMismatch,
@@ -123,6 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp_close.add_argument("team", help="team 的 key（<專案>-<team 代號>）")
     sp_close.add_argument("--timeout", type=float, default=ops.CLOSE_TIMEOUT_SECONDS,
                           help="等 exited 的秒數（預設 60）")
+
+    sub.add_parser("tick", help="跑一輪 PMO 的監看（收信、比對 agents、看門狗、worker 交接）")
 
     return parser
 
@@ -687,6 +690,31 @@ def cmd_close(ctx: Ctx, args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# 指令：tick（一輪；design §2.2、§3.2.1、§3.4；#358 T5-2）
+# --------------------------------------------------------------------------- #
+
+
+def cmd_tick(ctx: Ctx, _args: argparse.Namespace | None = None) -> int:
+    """`pmo tick`：跑一輪並把設計表的失敗對到結束碼（§3.2、§3.4）。
+
+    0＝這一輪跑完（含部分失敗；步驟內部的 `PortError` 已印 `[warn]`，裁定
+    S-2）；1 由 argparse 回；2＝壞檔（`[要本人處理]`，什麼都沒做）或
+    `tick.json` 的鎖等不到（其他步驟已做完，只有 tick.json 沒寫）。
+    """
+    try:
+        tick.tick(ctx)
+    except LockTimeout:
+        ctx.log(
+            "[warn] tick.json 的鎖等不到（10 秒），這一輪的 tick.json 沒寫，下一輪再寫"
+        )
+        return 2
+    except SchemaError as error:
+        ctx.log(f"[要本人處理] {inbox.one_line_for_event(error)}")
+        return 2
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # 入口
 # --------------------------------------------------------------------------- #
 
@@ -700,6 +728,7 @@ _HANDLERS = {
     "poke": cmd_poke,
     "status": cmd_status,
     "close": cmd_close,
+    "tick": cmd_tick,
 }
 
 

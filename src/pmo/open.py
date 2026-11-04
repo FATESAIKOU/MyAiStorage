@@ -203,11 +203,14 @@ def _dispatch_of(ctx: Ctx, team: Team) -> tuple[str, str]:
 
 
 def _write_state(ctx: Ctx, team: Team, record: AgentRecord) -> None:
-    """Record the just-opened agent's `state`／`exit` in the team state (§2.3).
+    """Record the just-opened agent's `state`／`exit`／`session` in the team state (§2.3).
 
     待確認: the design says「成功 → 寫 team 狀態」without naming the fields.
-    Only the two the team-state schema already has are written (`state`,
-    `exit`); the dispatch fields and unknown fields stay as they are (Q-9).
+    Only the ones the team-state schema already has are written (`state`,
+    `exit`, and `session` when the sidecar answered one); the dispatch fields
+    and unknown fields stay as they are (Q-9). `session` is what tick's
+    `NEED_REOPEN … session=…` reads later (#373 低-1); a `None` answer does not
+    erase a recorded session.
 
     The read-modify-write runs inside `teamstate.state_lock` and re-reads the
     state there, so it cannot overwrite the「收到」`pmo inbox read` writes at
@@ -217,6 +220,8 @@ def _write_state(ctx: Ctx, team: Team, record: AgentRecord) -> None:
         state = teamstate.load_state(ctx.state_dir, team.key)
         state["state"] = record.state
         state["exit"] = record.exit
+        if record.session is not None:
+            state["session"] = record.session
         teamstate.save_state(ctx.state_dir, team.key, state)
 
 

@@ -11,6 +11,7 @@ import json as _json
 import sys as _s, pathlib as _p; _s.path.insert(0, str(_p.Path(__file__).resolve().parent.parent)); import _guard  # noqa: E402,F401  (T8: these helpers need isolation)
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from io import StringIO
 from types import SimpleNamespace
 
@@ -229,3 +230,54 @@ def seed_team_state(env: PmoEnv, ticket: str = "demo#45", **extra) -> None:
 
 def a_port_error(message: str = "network failure") -> PortError:
     return PortError(message)
+
+
+# --------------------------------------------------------------------------- #
+# tick（#358 T5-2）：假時鐘、tick.json 種子
+# --------------------------------------------------------------------------- #
+
+#: The one "now" the tick tests use; the state files are seeded around it.
+NOW = datetime(2026, 10, 19, 10, 15, 0, tzinfo=timezone.utc)
+
+
+def fixed_now(moment: datetime = NOW):
+    """A `Deps.now` that always answers the same moment (the tick tests' clock)."""
+    return lambda: moment
+
+
+def tick_file(env: PmoEnv):
+    return env.state_dir / "tick.json"
+
+
+def seed_tick_state(env: PmoEnv, **fields: object) -> None:
+    """Write a `tick.json` (the schema's defaults, then `fields` on top).
+
+    Only the fields a test names are changed; `wake.every` stays `null` (the
+    PMO chose not to schedule), so a tick with a plain seed is a quiet one.
+    """
+    state: dict = {
+        "version": 1,
+        "last_tick_at": None,
+        "handoffs": {},
+        "worker_poll": {},
+        "wake": {
+            "every": None,
+            "set_at": None,
+            "missing_reported_at": None,
+            "error_reported": {},
+            "orphan_reported_at": None,
+        },
+    }
+    state.update(fields)
+    env.state_dir.mkdir(parents=True, exist_ok=True)
+    tick_file(env).write_text(
+        _json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def read_tick_state(env: PmoEnv) -> dict:
+    return _json.loads(tick_file(env).read_text(encoding="utf-8"))
+
+
+def read_team_state(env: PmoEnv, key: str = TEAM_KEY) -> dict:
+    return _json.loads((env.state_dir / f"{key}.json").read_text(encoding="utf-8"))
