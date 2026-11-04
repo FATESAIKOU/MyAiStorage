@@ -188,12 +188,17 @@ class AgentRecord:
 
     `input_unconfirmed_at` is the sidecar's「卡在 `starting`」marker: it stays
     `None` until the agent's first input is confirmed.
+
+    `provider` is the provider the sidecar says the seat is actually using
+    (§2.1); `[no-candidate]` prefers it over the team settings' default (#358
+    T5-2, ruling 5).
     """
 
     agent_id: str
     state: str
     exit: dict[str, object] | None = None  # e.g. {"reason": "no candidate..."}
     session: str | None = None
+    provider: str | None = None
     attach: str | None = None
     input_unconfirmed_at: str | None = None
     extra: dict[str, object] = field(default_factory=dict, repr=False, compare=False)
@@ -211,6 +216,8 @@ class AgentRecord:
             known["exit"] = self.exit
         if self.session is not None:
             known["session"] = self.session
+        if self.provider is not None:
+            known["provider"] = self.provider
         if self.attach is not None:
             known["attach"] = self.attach
         if self.input_unconfirmed_at is not None:

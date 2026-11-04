@@ -222,7 +222,7 @@ flowchart LR
 
 | 指令 | 輸入 | 輸出（stdout） | 結束碼 |
 |---|---|---|---|
-| `pmo tick` | （無） | 見 §3.2.1 的事件表；全部沒事時一行 `[idle]` | 0 這一輪跑完（包含「部分失敗、已印 [warn]」）；1 用法錯；2 設定或狀態檔壞（這一輪什麼都沒做，不推游標） |
+| `pmo tick` | （無） | 見 §3.2.1 的事件表；全部沒事時一行 `[idle]` | 0 這一輪跑完（包含「部分失敗、已印 [warn]」）；1 用法錯；2 身分不符、設定或狀態檔壞（這一輪什麼都沒做，不推游標），或 `tick.json` 的鎖等不到（§3.4；其他步驟已做完，只有 `tick.json` 沒寫，下一輪再寫） |
 | `pmo inbox read` | （無） | 只做 tick 的「收信一輪」（不比對 agents、不跑看門狗） | 同 tick；給 T-2 階段與救援用 |
 | `pmo inbox list [--json]` | | 收件項目一覽（唯讀） | 0／2 |
 | `pmo inbox ack ‹工作 ID› [--issue ‹repo#n›] [--schedule 立即開工\|排入待開工佇列]` | | 送出的訊息 id | 0／1（查無工作 ID）／2（送不出去） |
@@ -268,9 +268,9 @@ flowchart LR
 | `[group-handoff] ‹id›` | 群請求：tick 不處理，交給過渡工具（Q-9） | **新增**。`[group-pending]`／`[group]` 留給 MyPMO 群請求帳本的原意（等 PMO 審、逾時），tick 不印 |
 | `[group-sweep-due] ‹id…›` | 交接出去、還沒結案的群請求：提醒 PMO 跑過渡工具的 sweep（Q-9 (a)） | **新增** |
 | `[state]` | team PM 的 sidecar 狀態變化 | 有，沿用 |
-| `NEED_REOPEN ‹team› session=‹sid\|none›` | 應該在跑卻不見了 | 有，沿用 |
-| `[watchdog]` | 派工後 10 分鐘沒有「收到」：已 poke 一次；再 10 分鐘升級成 `[要本人處理]` | 有，沿用 |
-| `[要本人處理]` | 需要本人的狀況（狀態檔壞、sidecar 不可用、看門狗升級、本批未處理） | 有，沿用 |
+| `NEED_REOPEN ‹team› session=‹sid\|none›`（互動版：`NEED_REOPEN ‹team› tui=true`） | 應該在跑（`closed` 不是 true、有 `ticket`）卻不在 sidecar 上；恢復之前不重印 | 有，沿用 |
+| `[watchdog]` | 派工（`received_at`，沒有就 `dispatched_at`）後 10 分鐘沒有「收到」：先在 team 鎖內記下 `ack_poke_at`，再 poke 一次（兩個 tick 並行也只 poke 一次）；再 10 分鐘升級成 `[要本人處理]` | 有，沿用 |
+| `[要本人處理]` | 需要本人的狀況（狀態檔壞、sidecar 不可用、看門狗升級或 poke 送不到、本批未處理、team PM 非預期結束〔不是 no candidate、也不是 PMO 自己 close 的〕、全部冷卻而且沒有自動重開） | 有，沿用 |
 | `[warn]` | 部分失敗 | 有，沿用 |
 | `[no-candidate]` | team PM 因 no candidate 結束 | **新增** |
 | `[waiting-quota]` | team PM 在等額度（只印一次） | **新增** |

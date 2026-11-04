@@ -383,6 +383,27 @@ def test_open_flags_override_the_team_defaults(pmo_env):
     )
 
 
+def test_open_writes_the_session_back_for_need_reopen(pmo_env):
+    """`open` 把 sidecar 回的 `session` 寫回 team 狀態（#373 低-1、#358 第 11 條）。"""
+    sidecar = ready_env(pmo_env)
+    sidecar.reply_session = SESSION
+    deps, _factory = deps_with(sidecar)
+    rc, _out, err = run_open(pmo_env, deps)
+    assert (rc, err) == (0, "")
+    assert team_state(pmo_env)["session"] == SESSION
+
+
+def test_open_does_not_erase_a_recorded_session(pmo_env):
+    """sidecar 沒回 `session`（None）時不蓋掉既有值。"""
+    sidecar = ready_env(pmo_env)
+    sidecar.reply_session = None
+    seed_team_state(pmo_env, ticket=TICKET, dispatched_at=DISPATCHED_AT, session=SESSION)
+    deps, _factory = deps_with(sidecar)
+    rc, _out, err = run_open(pmo_env, deps)
+    assert (rc, err) == (0, "")
+    assert team_state(pmo_env)["session"] == SESSION
+
+
 def test_open_writes_the_state_under_the_team_lock(pmo_env, monkeypatch):
     """寫回 `state`／`exit` 在 `teamstate.state_lock` 內重讀再改（#369 的形狀）。"""
     ready_env(pmo_env)

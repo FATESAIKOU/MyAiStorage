@@ -201,6 +201,17 @@ def test_the_sidecar_fake_opens_an_agent():
     assert fake.get_agent("myaistorage-impl-m1-1") == record
 
 
+def test_the_sidecar_fake_reports_the_provider_as_a_field():
+    """低-3：與真 adapter 一樣把 `provider` 放成欄位，不放進 `extra`。"""
+    fake = FakeSidecar()
+    record = fake.open_agent(
+        agent_id="a1", agent="opencode", workdir="/tmp/w", input="i",
+        provider="ollama-cloud", model="glm",
+    )
+    assert record.provider == "ollama-cloud"
+    assert "provider" not in record.extra
+
+
 def test_the_sidecar_fake_records_session_and_fresh():
     """Architect 中-4: `pmo open` passes `--session`／`--fresh` through the port."""
     fake = FakeSidecar()

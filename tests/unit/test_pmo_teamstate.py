@@ -79,10 +79,12 @@ def test_the_exit_object_and_the_ack_times_may_be_null():
 
 
 def test_unknown_fields_are_preserved_and_round_trip():
+    # `session` 自 #358 T5-2（裁定第 11 條）起是已定型別的欄位，不再是 unknown；
+    # 其餘不認得的欄位照舊原樣保留（Q-9）。
     data = _state(version=1, session="agora:ses-1", closed=True, worker_note={"by": "mypmo"})
     state = parse(data)
+    assert state.session == "agora:ses-1"
     assert state.extra == {
-        "session": "agora:ses-1",
         "closed": True,
         "worker_note": {"by": "mypmo"},
     }
