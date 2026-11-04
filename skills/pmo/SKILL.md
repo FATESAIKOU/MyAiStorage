@@ -9,7 +9,7 @@ description: The PMO's inbox and dispatch tool. `pmo tick` reads mail for the PM
 
 - 指令只做機械步驟：**不建工單、不派工、不重開、不換 provider**；要不要做、做哪一個，是 PMO 的判斷。
 - stdout 是事件行（第一個 token 是方括號標籤），stderr 是診斷。**錯誤字樣不含 token、金鑰或訊息內文**；事件行只有 `[msg]` 印來信全文，另外 `[decision]` 印作答與說明（對方寫的內文）、`[secretary]` 印工作標題——**貼進回報或日誌前自己先看過**。
-- `pmo` 的設定與狀態都由環境變數指到本機：`PMO_SKILL_CONFIG`（teams 設定檔）、`PMO_SKILL_STATE_DIR`（狀態目錄）。**沒設就拒絕執行（exit 2），不會猜預設路徑**。**已知缺口**：`PMO_SKILL_CONFIG` 指到**不存在的檔案**目前是 Python traceback＋exit 1；遇到時照 traceback 停下回報、**不要重試**。內容不是合法 JSON 才是 `[pmo] 設定讀不起來：…`＋exit 2。
+- `pmo` 的設定與狀態都由環境變數指到本機：`PMO_SKILL_CONFIG`（teams 設定檔）、`PMO_SKILL_STATE_DIR`（狀態目錄）。**沒設就拒絕執行（exit 2），不會猜預設路徑**。設定檔**不存在或讀不起來**（權限、是目錄…）都是 `[pmo] 設定讀不起來：…`＋exit 2；內容不是合法 JSON 也一樣。
 
 > `pmo wake set|off|show` 與 `pmo tick` 的叫醒 job 健康（`[wake-missing]`／`[wake-error]`）都在這一版；`pmo --help` 的子指令沒有 `wake` 就是版本太舊，先換成含它的版本，不要照這份文件假裝叫醒已經排好。
 
@@ -63,7 +63,7 @@ PMO 身分讀信**只有一個讀者**：`pmo tick`。`angareion read`／`aicomm
 跑一輪就結束，**不是常駐迴圈**。每一次叫醒都跑一輪；每輪只處理「已經到期」的項目，處理完把下一次到期時刻往後推，不補跑錯過的次數。
 
 - 全部沒事時 stdout 只有一行 `[idle]`（有未到期項目時是 `[idle] [next-due=‹時刻›]`）。**看到 `[idle]` 就結束這一輪，不要再做其他工具呼叫**；這一輪的成本就是一次模型推理，不要讓它膨脹。沒有 `[idle]` 就代表 stdout 有事件（見事件表），要看過再結束。
-- 結束碼：**0** 這一輪跑完（含部分失敗，失敗已印 `[warn]`）；**1** 用法錯；**2** 身分不符、設定讀不起來（stderr `[pmo] …`），或狀態檔壞（`SchemaError`：`pmo tick` 與 `pmo inbox handoff-close` 在 stdout 印 `[要本人處理]`，其他指令在 stderr 印 `[pmo] …`，只有 `pmo wake` 也在 stderr 但印 `[要本人處理] …`）——都是這一輪什麼都沒做、游標沒動；`tick.json` 的鎖等不到也是 2（其他步驟已做完，只有 `tick.json` 沒寫，下一輪再寫）。連不上 sidecar 時只有 `pmo open` 印 stderr `[要本人處理] sidecar 不可用：…`；`poke`／`status`／`close` 連不上是 stderr `[warn] …`，一樣 exit 2（`reply` 走 aicomm，不經 sidecar）。`PMO_SKILL_CONFIG` 指到不存在的檔案是已知缺口（traceback＋exit 1，見上面設定那條）。
+- 結束碼：**0** 這一輪跑完（含部分失敗，失敗已印 `[warn]`）；**1** 用法錯；**2** 身分不符、設定讀不起來（stderr `[pmo] …`），或狀態檔壞（`SchemaError`：`pmo tick` 與 `pmo inbox handoff-close` 在 stdout 印 `[要本人處理]`，其他指令在 stderr 印 `[pmo] …`，只有 `pmo wake` 也在 stderr 但印 `[要本人處理] …`）——都是這一輪什麼都沒做、游標沒動；`tick.json` 的鎖等不到也是 2（其他步驟已做完，只有 `tick.json` 沒寫，下一輪再寫）。連不上 sidecar 時只有 `pmo open` 印 stderr `[要本人處理] sidecar 不可用：…`；`poke`／`status`／`close` 連不上是 stderr `[warn] …`，一樣 exit 2（`reply` 走 aicomm，不經 sidecar）。設定檔不存在或讀不起來同上是 2（`[pmo] 設定讀不起來：…`）。
 - **只有 stderr 的 `[warn]`** 不影響 `[idle]`：那是部分失敗，下一輪會再試，不要因為它重跑同一輪。**stdout 上任何一行都代表這輪不是 idle**，連 `[secretary] [warn] …`、`[warn] 發送叫人 ack 失敗 …` 也一樣（`tick` 的 `_emit_idle` 只在這一輪 stdout 什麼事件都沒有時才印 `[idle]`）。
 
 ### 事件表：看到什麼、做什麼
@@ -157,8 +157,8 @@ PMO 身分讀信**只有一個讀者**：`pmo tick`。`angareion read`／`aicomm
 **結束碼**（每個指令的細節見上；這裡是通則）：
 
 - **0**：成功／這一輪跑完。包含「部分失敗、已印 `[warn]`」。
-- **1**：用法錯（旗標拼錯、缺必填、格式錯）、查無 id／team、team 已退役、工單讀不到、指示信超過上限、內容含憑證樣式。`pmo check` 有 FAIL 也是 1（不是用法錯，但同樣是「還沒準備好」）。`PMO_SKILL_CONFIG` 指到**不存在的檔案**是已知缺口：traceback＋exit 1，見上面「`pmo` 的設定與狀態都由環境變數指到本機」那條。
-- **2**：設定或狀態檔壞、身分不符、外部失敗（Angareion／aicomm／sidecar／GitHub 後端）、鎖等不到、`SentButNotRecorded`。**看到 2 不要反射性重送**：字樣會說明是「送不出去」還是「已送出、帳本沒更新」。
+- **1**：用法錯（旗標拼錯、缺必填、格式錯）、查無 id／team、team 已退役、工單讀不到、指示信超過上限、內容含憑證樣式。`pmo check` 有 FAIL 也是 1（不是用法錯，但同樣是「還沒準備好」）。
+- **2**：設定或狀態檔壞（含設定檔**不存在或讀不起來**：`[pmo] 設定讀不起來：…`）、身分不符、外部失敗（Angareion／aicomm／sidecar／GitHub 後端）、鎖等不到、`SentButNotRecorded`。**看到 2 不要反射性重送**：字樣會說明是「送不出去」還是「已送出、帳本沒更新」。
 
 **幾個會讓人做錯的地方**：
 

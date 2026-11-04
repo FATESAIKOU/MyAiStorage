@@ -15,9 +15,19 @@ from .errors import SchemaError
 
 
 def read_json(path: Path) -> object:
-    """Read one JSON file; invalid JSON is a bad file, i.e. a SchemaError."""
+    """Read one JSON file; it not being readable or not being JSON is a SchemaError.
+
+    A missing file, a directory in its place or a permission error is the same
+    kind of bad state file as broken JSON (design §3.2: exit 2, 這一輪什麼都
+    沒做). A caller that treats a missing file as the empty state checks
+    `path.exists()` itself before calling here.
+    """
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise SchemaError(f"{path}: cannot be read ({error.strerror or error})") from error
+    try:
+        data = json.loads(text)
     except json.JSONDecodeError as error:
         raise SchemaError(f"{path}: not valid JSON ({error.msg} at line {error.lineno})") from error
     if not isinstance(data, dict):
