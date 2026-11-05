@@ -25,6 +25,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import NamedTuple, Sequence
 
 from aicomm import __version__
@@ -324,8 +325,22 @@ def _poke_answer(status: int, body: bytes) -> tuple[str, str]:
 
 
 def _peer_executable() -> str | None:
-    """The `pool-peer` to run: the test hook first, else the one on PATH; None if neither."""
-    return os.environ.get(POOL_PEER_ENV) or shutil.which(POOL_PEER_COMMAND)
+    """The `pool-peer` to run: the test hook, else the one on PATH (#392), else a worker
+    install that left it out of PATH (`~/.mylinuxpool/bin/pool-peer`). None if none.
+
+    The bindir fallback counts only when the file exists and is executable - a file
+    without the exec bit is as absent as one that is not there.
+    """
+    hook = os.environ.get(POOL_PEER_ENV)
+    if hook:
+        return hook
+    on_path = shutil.which(POOL_PEER_COMMAND)
+    if on_path:
+        return on_path
+    in_bin = Path.home() / ".mylinuxpool" / "bin" / POOL_PEER_COMMAND
+    if in_bin.is_file() and os.access(in_bin, os.X_OK):
+        return str(in_bin)
+    return None
 
 
 def _peer_child_limit(seconds: int) -> float:
